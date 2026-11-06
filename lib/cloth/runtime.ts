@@ -157,10 +157,12 @@ export class ClothRuntime {
         }catch(error){this.restore(checkpoint);throw error;}
     }
     /** prepareNonFluidPredictor with the predictor on the GPU owner (the
-     * Float64 nonFluidClothPredictor stays its oracle); without a GPU owner
-     * the cloth runs on the CPU throughout, and so does its predictor. */
+     * Float64 nonFluidClothPredictor stays its oracle). A runtime without a
+     * device is the CPU owner throughout, predictor included; a GPU owner
+     * without the predictor (the Gauss-Seidel sweep) fails explicitly. */
     async prepareNonFluidPredictorAsync(dt_s:number,options:ClothStepOptions={}):Promise<Float64Array> {
-        if(!(this.gpu instanceof GPUClothNewton))return this.prepareNonFluidPredictor(dt_s,options);
+        if(!this.gpu)return this.prepareNonFluidPredictor(dt_s,options);
+        if(!(this.gpu instanceof GPUClothNewton))throw new Error('The GPU Gauss-Seidel cloth owner has no GPU predictor: wet cloth steps on the GPU Newton-PCG owner');
         if(this.stepping||this.staged||this.pendingImpulse)throw new Error('Cloth predictor requires an unstaged accepted step');
         if(!(dt_s>0&&Number.isFinite(dt_s)))throw new Error('Invalid cloth predictor timestep');
         const checkpoint=this.checkpoint(),previousFields=this.motion.fields;

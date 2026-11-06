@@ -54,11 +54,18 @@ const ALPHAS = 8;
 // Armijo backtracking: LINE_PASSES gated passes of ALPHAS halvings each, the
 // Float64 solve's 40 (a pass runs only while no earlier step size was accepted).
 const LINE_PASSES = 5;
+const MAX_UNITS = 48;
+/** One workgroup runs the whole CG loop up to this size (launches dominate below it). */
+const FUSED_CG_MAX_VERTICES = 4096;
+/** Workgroups of the per-contact A p pass (grid-strided over the live contacts). */
+const CONTACT_FORCE_GROUPS = 1024;
+/** Up to this size the direction lives in workgroup memory (16 B a vertex of the 32 KiB). */
+const SHARED_CG_MAX_VERTICES = 1024, SHARED_CG_PER_THREAD = SHARED_CG_MAX_VERTICES / WG;
 // A solve at the Newton cap continues from its iterate for this many more caps.
 const NEWTON_RESUMES = 3;
 // Control words (atomic u32).
 const C_MEASURE = 0, C_ACTIVE = 1, C_CGACTIVE = 2, C_CGCOUNT = 3, C_NEWTON = 4, C_STATUS = 5, C_STOPAFTER = 6, C_USEZ0 = 7, C_UNIT = 8, C_LAST = 9,
-  C_NEWTONMIN = 10, C_NEWTON_TOTAL = 11, C_LINEAR = 12, C_CGMAX = 13, C_SEARCH = 14, C_LOG = 16, LOG_UNITS = 16, C_WORDS = CONTACT_CONTROL_WORDS;
+  C_NEWTONMIN = 10, C_NEWTON_TOTAL = 11, C_LINEAR = 12, C_CGMAX = 13, C_SEARCH = 14, C_WORKED = 15, C_LOG = 16, LOG_UNITS = 16, C_WORDS = CONTACT_CONTROL_WORDS;
 const S_CONVERGED = 1, S_LINE = 2, S_NONFINITE = 4, S_CAP = 8, S_SINGULAR = 16;
 const KIND_TRI = 0, KIND_HINGE = 1, KIND_SEG = 2, KIND_JOINT = 3, NONE = 0xffffffff;
 
@@ -85,11 +92,17 @@ const PARAM_FIELDS = [
   'joints', 'rods', 'iJoint', 'iRod', 'iSegJoint', 'dTwist', 'dJoint', 'wT', 'wT2', 'eJoint', 'pJoint', 'pTwist',
   // Old strains from rest: per-step displacements, static Float64 rest frames.
   'dDisp', 'dTriRest', 'dSegRest',
+  // Workgroups (and partial slots) of the contact line search: one for a small mesh's fused unit.
+  'lineGroups',
+  // Per-contact Hessian coefficients (one Newton linearization) and the contact term of A p (one CG iteration).
+  'kfCoef', 'kfForce',
+  // Hinge old edges: static Float64 rest edges, and per step rest + displacement (3 per hinge).
+  'dHingeRest', 'eHingeEdge',
 ] as const;
 const FLOAT_FIELDS = ['dt', 'tolerance', 'contactDelta', 'frictionEpsilon', 'cellSize'] as const;
 type ParamName = typeof PARAM_FIELDS[number];
 
-export const clothNewtonWGSL = /* wgsl */ `
+const clothNewtonKernels = /* wgsl */ `
 // Read at run time: a NaN or infinite literal is a const-expression error.
 var<private> NAN_BITS:u32=0x7fc00000u;
 var<private> INF_BITS:u32=0x7f800000u;
@@ -186,17 +199,26 @@ fn bilinear(a:vec3f,b:vec3f,nu:f32)->f32{return a.x*b.x+a.y*b.y+nu*(a.x*b.y+a.y*
 fn hingeIds(h:u32)->vec4u{return vec4u(I[p.iHinge+4u*h],I[p.iHinge+4u*h+1u],I[p.iHinge+4u*h+2u],I[p.iHinge+4u*h+3u]);}
 fn bendingPhi(angle:f32,mode:f32)->vec3f{if(mode==1.){let t=tan(angle*.5);return vec3f(2.*t,1.+t*t,t*(1.+t*t));}if(mode==2.){return vec3f(sin(angle*.5),.5*cos(angle*.5),-.25*sin(angle*.5));}return vec3f(angle,1,0);}
 fn dihedral(e:vec3f,u:vec3f,w:vec3f)->f32{let n=normalize(cross(e,u));let m=normalize(cross(w,e));return atan2(dot(normalize(e),cross(n,m)),dot(n,m));}
+// Old edges as the Float64 rest edge plus the displacement since rest, stored once a
+// step: an edge evaluated in a Newton iterate or a line search is then a loaded old
+// edge plus an increment difference. Built from the hi/lo frame positions, the compiler
+// reassociates (hi_b-hi_a)+(lo_b-lo_a)+(x_b-x_a) and every evaluation rounds at the
+// frame-relative position scale (1.5e-8 m at 0.13 m), a residual floor above 1e-8 m.
+fn hingeOldEdge(h:u32,k:u32)->vec3f{return E[p.eHingeEdge+3u*h+k].xyz;}
 @compute @workgroup_size(${WG}) fn prepHinge(@builtin(global_invocation_id) g:vec3u){
  let h=g.x;if(h>=p.hinges){return;}let id=hingeIds(h);let s=D[p.dHinge+h];let mode=mat(u32(s.z),2u).x;
- let angle=dihedral(oldEdge(id.x,id.y),oldEdge(id.x,id.z),oldEdge(id.x,id.w));
+ let da=restDisplacement(id.x);
+ let e=D[p.dHingeRest+3u*h].xyz+(restDisplacement(id.y)-da);let u=D[p.dHingeRest+3u*h+1u].xyz+(restDisplacement(id.z)-da);let w=D[p.dHingeRest+3u*h+2u].xyz+(restDisplacement(id.w)-da);
+ E[p.eHingeEdge+3u*h]=vec4f(e,0);E[p.eHingeEdge+3u*h+1u]=vec4f(u,0);E[p.eHingeEdge+3u*h+2u]=vec4f(w,0);
+ let angle=dihedral(e,u,w);
  E[p.eHingeOld+h]=vec4f(bendingPhi(angle,mode).x,bendingPhi(s.x,mode).x,angle,0);
 }
 struct HingeAt{e:vec3f,u:vec3f,w:vec3f}
-fn hingeEdges(id:vec4u,xa:vec3f,xb:vec3f,xc:vec3f,xd:vec3f)->HingeAt{return HingeAt(oldEdge(id.x,id.y)+(xb-xa),oldEdge(id.x,id.z)+(xc-xa),oldEdge(id.x,id.w)+(xd-xa));}
+fn hingeEdges(h:u32,xa:vec3f,xb:vec3f,xc:vec3f,xd:vec3f)->HingeAt{return HingeAt(hingeOldEdge(h,0u)+(xb-xa),hingeOldEdge(h,1u)+(xc-xa),hingeOldEdge(h,2u)+(xd-xa));}
 struct HingeMaterial{k:f32,gamma:f32,mode:f32}
 fn hingeMaterial(h:u32,id:vec4u)->HingeMaterial{let s=D[p.dHinge+h];let m=u32(s.z);return HingeMaterial(mat(m,0u).y*fractionScale(m,.5*(lo(id.x).w+lo(id.y).w))*s.y,mat(m,1u).z/p.dt,mat(m,2u).x);}
 @compute @workgroup_size(${WG}) fn elemHinge(@builtin(global_invocation_id) g:vec3u){
- let h=g.x;if(h>=p.hinges||done()){return;}let id=hingeIds(h);let at=hingeEdges(id,xv(id.x),xv(id.y),xv(id.z),xv(id.w));let mm=hingeMaterial(h,id);
+ let h=g.x;if(h>=p.hinges||done()){return;}let id=hingeIds(h);let at=hingeEdges(h,xv(id.x),xv(id.y),xv(id.z),xv(id.w));let mm=hingeMaterial(h,id);
  let e=at.e;let u=at.u;let w=at.w;let rawN=cross(e,u);let rawM=cross(w,e);let sn=length(rawN);let sm=length(rawM);let n=rawN/sn;let m=rawM/sm;
  let l=length(e);let t=e/l;let product=cross(n,m);let x=dot(n,m);let y=dot(t,product);let den=x*x+y*y;let angle=atan2(y,x);
  let phi=bendingPhi(angle,mm.mode);let old=E[p.eHingeOld+h];let strain=phi.x-old.y+mm.gamma*(phi.x-old.x);
@@ -226,16 +248,18 @@ fn segMaterial(s:u32,id:vec2u,oldLength:f32)->SegMaterial{
  return SegMaterial(mat(m,0u).z*fractionScale(m,f)/d.x,gamma,d.x);
 }
 @compute @workgroup_size(${WG}) fn prepSeg(@builtin(global_invocation_id) g:vec3u){
- let s=g.x;if(s>=p.segments){return;}let id=segIds(s);let e=oldEdge(id.x,id.y);let l=length(e);
+ let s=g.x;if(s>=p.segments){return;}let id=segIds(s);
  // l-L=(|r+d|^2-L^2)/(l+L) with |r|=L in Float64: the stretch keeps the precision of d.
- let r=D[p.dSegRest+s].xyz;let d=restDisplacement(id.y)-restDisplacement(id.x);let rest=D[p.dSeg+s].x;
- E[p.eSegOld+s]=vec4f(l,(2.*dot(r,d)+dot(d,d))/(l+rest),0,0);
+ // The old edge r+d is stored: evaluations add increments to it (see hingeOldEdge).
+ let r=D[p.dSegRest+s].xyz;let d=restDisplacement(id.y)-restDisplacement(id.x);let rest=D[p.dSeg+s].x;let e=r+d;let l=length(e);
+ E[p.eSegOld+2u*s]=vec4f(l,(2.*dot(r,d)+dot(d,d))/(l+rest),0,0);E[p.eSegOld+2u*s+1u]=vec4f(e,0);
 }
+fn segOldEdge(s:u32)->vec3f{return E[p.eSegOld+2u*s+1u].xyz;}
 // Length l and its increment l-l_old from the increment.
-fn segLength(id:vec2u,delta:vec3f,oldLength:f32)->vec4f{let e0=oldEdge(id.x,id.y);let e=e0+delta;let l=length(e);return vec4f(e,(2.*dot(e0,delta)+dot(delta,delta))/(l+oldLength));}
+fn segLength(s:u32,delta:vec3f,oldLength:f32)->vec4f{let e0=segOldEdge(s);let e=e0+delta;let l=length(e);return vec4f(e,(2.*dot(e0,delta)+dot(delta,delta))/(l+oldLength));}
 @compute @workgroup_size(${WG}) fn elemSeg(@builtin(global_invocation_id) g:vec3u){
- let s=g.x;if(s>=p.segments||done()){return;}let id=segIds(s);let oldLength=E[p.eSegOld+s].x;let mm=segMaterial(s,id,oldLength);
- let q=segLength(id,xv(id.y)-xv(id.x),oldLength);let l=oldLength+q.w;let strain=E[p.eSegOld+s].y+q.w+mm.gamma*q.w;
+ let s=g.x;if(s>=p.segments||done()){return;}let id=segIds(s);let oldLength=E[p.eSegOld+2u*s].x;let mm=segMaterial(s,id,oldLength);
+ let q=segLength(s,xv(id.y)-xv(id.x),oldLength);let l=oldLength+q.w;let strain=E[p.eSegOld+2u*s].y+q.w+mm.gamma*q.w;
  E[p.eSeg+2u*s]=vec4f(q.xyz,l);E[p.eSeg+2u*s+1u]=vec4f(mm.factor,mm.gamma,strain,0);
 }
 
@@ -343,6 +367,8 @@ fn elasticGradient(i:u32)->array<vec3f,2>{
  if(l!=0u){return;}
  let unit=atomicAdd(&C[${C_UNIT}],1u);let status=atomicLoad(&C[${C_STATUS}]);
  if(status!=0u){atomicStore(&C[${C_ACTIVE}],0u);atomicStore(&C[${C_CGACTIVE}],0u);return;}
+ // Units of this solve through the last one that had work (sizes the next submissions).
+ atomicStore(&C[${C_WORKED}],unit+1u);
  let measure=bitcast<f32>(atomicLoad(&C[${C_MEASURE}]));atomicStore(&C[${C_MEASURE}],0u);
  atomicStore(&C[${C_LAST}],bitcast<u32>(measure));if(unit<${LOG_UNITS}u){atomicStore(&C[${C_LOG}u+4u*unit],bitcast<u32>(measure));}
  var next=0u;
@@ -389,10 +415,30 @@ fn elasticGradient(i:u32)->array<vec3f,2>{
 // ---- block-Jacobi preconditioned CG on H s = -g
 // The contacts' diagonal 3x3 block at vertex i (symmetric). It enters the
 // preconditioner only: the matvec gathers the whole contact term itself.
+// The contacts' Hessian coefficients at this Newton iterate: x is fixed through
+// the CG and the line search, so they are computed once per contact, not at every
+// incidence of every matvec.
+@compute @workgroup_size(${WG}) fn contactCoef(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
+ if(p.contactMode==0u||!isActive()){return;}
+ let count=min(contactCount(),p.kMax);
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){KF[p.kfCoef+c]=vec4f(contactCoefficients(contactAt(c)),0,0);}
+}
+// The contact term of A p, once per contact: f = a n (n.s) + b (s - n (n.s)) with
+// s = sum_j w_j p_j; the matvec gathers w_i f at each of the contact's vertices.
+fn contactForceAt(c:u32){
+ let n=KF[4u*c].xyz;let w=KF[4u*c+3u];let j=p.kuCV+4u*c;let cf=KF[p.kfCoef+c].xy;var s=vec3f(0);
+ for(var q=0u;q<4u;q++){if(w[q]!=0.){s+=w[q]*W[p.wP+KU[j+q]].xyz;}}
+ let sn=dot(n,s);KF[p.kfForce+c]=vec4f(cf.x*sn*n+cf.y*(s-sn*n),0);
+}
+@compute @workgroup_size(${WG}) fn cgContact(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(num_workgroups) ng:vec3u){
+ if(uniformWord(l,${C_CGACTIVE}u)==0u||p.contactMode==0u){return;}
+ let count=min(contactCount(),p.kMax);
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){contactForceAt(c);}
+}
 fn contactBlock(i:u32)->mat3x3f{
  var M=mat3x3f(vec3f(0),vec3f(0),vec3f(0));
  if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-  let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=contactCoefficients(c);let nn=outer(c.n,c.n);
+  let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=KF[p.kfCoef+(e>>2u)].xy;let nn=outer(c.n,c.n);
   M+=w*w*(cf.x*nn+cf.y*(mat3x3f(vec3f(1,0,0),vec3f(0,1,0),vec3f(0,0,1))-nn));
  }}
  return M;
@@ -423,44 +469,124 @@ fn applyPre(i:u32,v:vec3f)->vec3f{return vec3f(dot(W[p.wPre+3u*i].xyz,v),dot(W[p
  let rz=sums[0].x;let forcing=S(2u).y;W[p.wScal]=vec4f(rz,forcing*forcing*rz,0,0);W[p.wScal+2u]=vec4f(rz,forcing,0,0);
  atomicStore(&C[${C_CGCOUNT}],0u);atomicStore(&C[${C_STOPAFTER}],0u);atomicStore(&C[${C_USEZ0}],0u);atomicStore(&C[${C_CGACTIVE}],select(0u,1u,rz>0.));
 }
-@compute @workgroup_size(${WG}) fn cgMatvec(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
- let i=g.x;var pq=0.;
- if(i<p.n){
+// q = A p at vertex i; returns p.q there.
+fn matvecAt(i:u32)->f32{
   var y=vec3f(0);
   if(!isFixed(i)){for(var b=I[p.iRow+i];b<I[p.iRow+i+1u];b++){let v=W[p.wP+I[p.iCol+b]].xyz;y+=vec3f(dot(E[p.eA+3u*b].xyz,v),dot(E[p.eA+3u*b+1u].xyz,v),dot(E[p.eA+3u*b+2u].xyz,v));}
-   // Contacts couple vertices outside the block pattern: gathered matrix-free.
+   // Contacts couple vertices outside the block pattern: matrix-free, each contact's
+   // term of A p computed once (cgContact) and gathered here by weight.
    if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-    let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=contactCoefficients(c);let s=contactSum(c,2u);let sn=dot(c.n,s);
-    y+=w*(cf.x*sn*c.n+cf.y*(s-sn*c.n));
+    let e=KU[p.kvList+k];let c=e>>2u;y+=KF[4u*c+3u][e&3u]*KF[p.kfForce+c].xyz;
    }}
   }
-  W[p.wQ+i]=vec4f(y,0);pq=dot(W[p.wP+i].xyz,y);
- }
+  W[p.wQ+i]=vec4f(y,0);return dot(W[p.wP+i].xyz,y);
+}
+fn alphaFinish(curvature:f32){
+ var s0=S(0u);
+ if(!(curvature>0.)){if(atomicLoad(&C[${C_CGCOUNT}])==0u){s0.z=1.;atomicStore(&C[${C_STOPAFTER}],1u);}else{atomicStore(&C[${C_CGACTIVE}],0u);}}
+ else{s0.z=s0.x/curvature;}
+ W[p.wScal]=s0;
+}
+fn updateAt(i:u32)->f32{let alpha=S(0u).z;W[p.wS+i]=vec4f(W[p.wS+i].xyz+alpha*W[p.wP+i].xyz,0);let r=W[p.wR+i].xyz-alpha*W[p.wQ+i].xyz;let z=applyPre(i,r);W[p.wR+i]=vec4f(r,0);W[p.wZ+i]=vec4f(z,0);return dot(r,z);}
+fn betaFinish(next:f32){
+ var s0=S(0u);s0.w=next/s0.x;s0.x=next;W[p.wScal]=s0;
+ let count=atomicAdd(&C[${C_CGCOUNT}],1u)+1u;
+ if(atomicLoad(&C[${C_STOPAFTER}])!=0u||!(next>s0.y)||!(next>0.)||count>=p.cgCap){atomicStore(&C[${C_CGACTIVE}],0u);}
+}
+fn directionAt(i:u32){W[p.wP+i]=vec4f(W[p.wZ+i].xyz+S(0u).w*W[p.wP+i].xyz,0);}
+@compute @workgroup_size(${WG}) fn cgMatvec(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
+ if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
+ let i=g.x;var pq=0.;if(i<p.n){pq=matvecAt(i);}
  red[l]=vec4f(pq,0,0,0);writePartial(0u,wg.x,l,1u);
 }
 @compute @workgroup_size(${WG}) fn finishAlpha(@builtin(local_invocation_index) l:u32){
  if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
  let sums=sumPartials(l,0u,p.wgV,1u);if(l!=0u){return;}
- let curvature=sums[0].x;var s0=S(0u);
- if(!(curvature>0.)){if(atomicLoad(&C[${C_CGCOUNT}])==0u){s0.z=1.;atomicStore(&C[${C_STOPAFTER}],1u);}else{atomicStore(&C[${C_CGACTIVE}],0u);}}
- else{s0.z=s0.x/curvature;}
- W[p.wScal]=s0;
+ alphaFinish(sums[0].x);
 }
 @compute @workgroup_size(${WG}) fn cgUpdate(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
  if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
- let i=g.x;var rz=0.;
- if(i<p.n){let alpha=S(0u).z;W[p.wS+i]=vec4f(W[p.wS+i].xyz+alpha*W[p.wP+i].xyz,0);let r=W[p.wR+i].xyz-alpha*W[p.wQ+i].xyz;let z=applyPre(i,r);W[p.wR+i]=vec4f(r,0);W[p.wZ+i]=vec4f(z,0);rz=dot(r,z);}
+ let i=g.x;var rz=0.;if(i<p.n){rz=updateAt(i);}
  red[l]=vec4f(rz,0,0,0);writePartial(0u,wg.x,l,1u);
 }
 @compute @workgroup_size(${WG}) fn finishBeta(@builtin(local_invocation_index) l:u32){
  if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
  let sums=sumPartials(l,0u,p.wgV,1u);if(l!=0u){return;}
- var s0=S(0u);let next=sums[0].x;s0.w=next/s0.x;s0.x=next;W[p.wScal]=s0;
- let count=atomicAdd(&C[${C_CGCOUNT}],1u)+1u;
- if(atomicLoad(&C[${C_STOPAFTER}])!=0u||!(next>s0.y)||!(next>0.)||count>=p.cgCap){atomicStore(&C[${C_CGACTIVE}],0u);}
+ betaFinish(sums[0].x);
 }
-@compute @workgroup_size(${WG}) fn cgDirection(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i>=p.n||!cgActive()){return;}W[p.wP+i]=vec4f(W[p.wZ+i].xyz+S(0u).w*W[p.wP+i].xyz,0);}
+@compute @workgroup_size(${WG}) fn cgDirection(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i>=p.n||!cgActive()){return;}directionAt(i);}
+// The whole CG loop in one workgroup (small meshes): the five dispatches of an
+// iteration become barrier-separated phases; the same control words gate it.
+@compute @workgroup_size(${WG}) fn cgFused(@builtin(local_invocation_index) l:u32){
+ for(var k=0u;k<p.cgCap;k++){
+  if(uniformWord(l,${C_CGACTIVE}u)==0u){break;}
+  if(p.contactMode!=0u){let count=min(contactCount(),p.kMax);for(var c=l;c<count;c+=${WG}u){contactForceAt(c);}storageBarrier();}
+  var pq=0.;for(var i=l;i<p.n;i+=${WG}u){pq+=matvecAt(i);}
+  red[l]=vec4f(pq,0,0,0);reduce4(l,1u);
+  if(l==0u){alphaFinish(red[0].x);}
+  storageBarrier();
+  if(uniformWord(l,${C_CGACTIVE}u)==0u){break;}
+  var rz=0.;for(var i=l;i<p.n;i+=${WG}u){rz+=updateAt(i);}
+  red[l]=vec4f(rz,0,0,0);reduce4(l,1u);
+  if(l==0u){betaFinish(red[0].x);}
+  storageBarrier();
+  if(uniformWord(l,${C_CGACTIVE}u)==0u){break;}
+  for(var i=l;i<p.n;i+=${WG}u){directionAt(i);}
+  storageBarrier();
+ }
+}
+// The same loop with the CG direction and scalars resident in the workgroup and
+// each thread's residual, preconditioned residual and A p in registers: no device
+// atomics or storage barriers inside the loop (n <= SHARED_CG_MAX_VERTICES). The
+// loop is latency-bound (one workgroup), so each reduction is two barriers, a
+// two-level sum (eight threads of eight, then thread 0 of the eight: WG = 64), and one
+// uniform load of the new scalars, not a six-level tree.
+var<workgroup> pw:array<vec4f,${SHARED_CG_MAX_VERTICES}>;
+struct SharedCG{s:vec4f,count:u32,stop:u32,on:u32}
+var<workgroup> cg:SharedCG;
+fn sharedContactP(c:Contact)->vec3f{var s=vec3f(0);for(var j=0u;j<4u;j++){let w=c.w[j];if(w!=0.){s+=w*pw[c.v[j]].xyz;}}return s;}
+fn sharedMatvecAt(i:u32)->vec3f{
+  var y=vec3f(0);
+  if(!isFixed(i)){for(var b=I[p.iRow+i];b<I[p.iRow+i+1u];b++){let v=pw[I[p.iCol+b]].xyz;y+=vec3f(dot(E[p.eA+3u*b].xyz,v),dot(E[p.eA+3u*b+1u].xyz,v),dot(E[p.eA+3u*b+2u].xyz,v));}
+   if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
+    let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=KF[p.kfCoef+(e>>2u)].xy;let s=sharedContactP(c);let sn=dot(c.n,s);
+    y+=w*(cf.x*sn*c.n+cf.y*(s-sn*c.n));
+   }}
+  }
+  return y;
+}
+fn partial8(l:u32){if(l<8u){var a=0.;var b=0.;for(var j=0u;j<8u;j+=2u){a+=red[8u*l+j].x;b+=red[8u*l+j+1u].x;}red[${WG}u+l].x=a+b;}workgroupBarrier();}
+fn sum8()->f32{var a=0.;var b=0.;for(var j=0u;j<8u;j+=2u){a+=red[${WG}u+j].x;b+=red[${WG}u+j+1u].x;}return a+b;}
+@compute @workgroup_size(${WG}) fn cgShared(@builtin(local_invocation_index) l:u32){
+ if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
+ var r:array<vec3f,${SHARED_CG_PER_THREAD}>;var z:array<vec3f,${SHARED_CG_PER_THREAD}>;var q:array<vec3f,${SHARED_CG_PER_THREAD}>;
+ for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}pw[i]=W[p.wP+i];r[j]=W[p.wR+i].xyz;z[j]=W[p.wZ+i].xyz;}
+ if(l==0u){cg=SharedCG(S(0u),atomicLoad(&C[${C_CGCOUNT}]),atomicLoad(&C[${C_STOPAFTER}]),1u);}
+ var state=workgroupUniformLoad(&cg);
+ for(var k=0u;k<p.cgCap;k++){
+  if(state.on==0u){break;}
+  var pq=0.;
+  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}let y=sharedMatvecAt(i);q[j]=y;pq+=dot(pw[i].xyz,y);}
+  red[l]=vec4f(pq,0,0,0);workgroupBarrier();partial8(l);
+  // alphaFinish on the workgroup copies.
+  if(l==0u){let curvature=sum8();if(!(curvature>0.)){if(cg.count==0u){cg.s.z=1.;cg.stop=1u;}else{cg.on=0u;}}else{cg.s.z=cg.s.x/curvature;}}
+  state=workgroupUniformLoad(&cg);
+  if(state.on==0u){break;}
+  let alpha=state.s.z;var rz=0.;
+  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}
+   W[p.wS+i]=vec4f(W[p.wS+i].xyz+alpha*pw[i].xyz,0);let ri=r[j]-alpha*q[j];let zi=applyPre(i,ri);r[j]=ri;z[j]=zi;rz+=dot(ri,zi);}
+  red[l]=vec4f(rz,0,0,0);workgroupBarrier();partial8(l);
+  // betaFinish on the workgroup copies.
+  if(l==0u){let next=sum8();cg.s.w=next/cg.s.x;cg.s.x=next;cg.count++;if(cg.stop!=0u||!(next>cg.s.y)||!(next>0.)||cg.count>=p.cgCap){cg.on=0u;}}
+  state=workgroupUniformLoad(&cg);
+  if(state.on==0u){break;}
+  let beta=state.s.w;
+  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}pw[i]=vec4f(z[j]+beta*pw[i].xyz,0);}
+  workgroupBarrier();
+ }
+ for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}W[p.wP+i]=pw[i];W[p.wR+i]=vec4f(r[j],0);W[p.wZ+i]=vec4f(z[j],0);W[p.wQ+i]=vec4f(q[j],0);}
+ if(l==0u){W[p.wScal]=state.s;atomicStore(&C[${C_CGCOUNT}],state.count);atomicStore(&C[${C_STOPAFTER}],state.stop);atomicStore(&C[${C_CGACTIVE}],state.on);}
+}
 
 // ---- descent check and line search
 @compute @workgroup_size(${WG}) fn slope(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
@@ -504,7 +630,7 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  let h=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(h<p.hinges){
   let id=hingeIds(h);let mm=hingeMaterial(h,id);let old=E[p.eHingeOld+h];
-  let xa=xv(id.x);let xb=xv(id.y);let xc=xv(id.z);let xd=xv(id.w);let at=hingeEdges(id,xa,xb,xc,xd);let angle=dihedral(at.e,at.u,at.w);let phi=bendingPhi(angle,mm.mode);
+  let xa=xv(id.x);let xb=xv(id.y);let xc=xv(id.z);let xd=xv(id.w);let at=hingeEdges(h,xa,xb,xc,xd);let angle=dihedral(at.e,at.u,at.w);let phi=bendingPhi(angle,mm.mode);
   let elastic=phi.x-old.y;let viscous=phi.x-old.x;
   let da=dir(id.x);let db=dir(id.y);let dc=dir(id.z);let dd=dir(id.w);
   for(var k=0u;k<${ALPHAS}u;k++){
@@ -521,8 +647,8 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  if(!uniformSearch(l)){return;}
  let s=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(s<p.segments){
-  let id=segIds(s);let oldLength=E[p.eSegOld+s].x;let mm=segMaterial(s,id,oldLength);let delta=xv(id.y)-xv(id.x);let q=segLength(id,delta,oldLength);let l0=oldLength+q.w;
-  let dd=dir(id.y)-dir(id.x);let elastic=E[p.eSegOld+s].y+q.w;
+  let id=segIds(s);let oldLength=E[p.eSegOld+2u*s].x;let mm=segMaterial(s,id,oldLength);let delta=xv(id.y)-xv(id.x);let q=segLength(s,delta,oldLength);let l0=oldLength+q.w;
+  let dd=dir(id.y)-dir(id.x);let elastic=E[p.eSegOld+2u*s].y+q.w;
   for(var k=0u;k<${ALPHAS}u;k++){
    let a=alphaOf(k);let e1=q.xyz+a*dd;let change=(2.*a*dot(q.xyz,dd)+a*a*dot(dd,dd))/(length(e1)+l0);
    let ee=change*(2.*elastic+change);let vv=mm.gamma*change*(2.*q.w+change);de[k]=.5*mm.factor*(ee+vv);
@@ -552,8 +678,13 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
 @compute @workgroup_size(${WG}) fn lineContact(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
  if(!uniformSearch(l)){return;}
  var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
- let count=min(contactCount(),p.kMax);
- for(var k0=g.x;k0<count;k0+=p.contactGroups*${WG}u){
+ // Over vertices and their key-ordered lists, each contact at its first listed vertex:
+ // a fixed summation order (slot order follows thread scheduling). A contact with no
+ // free vertex does not move along the direction, so it adds no change.
+ if(p.contactMode==0u){storeLine(l,de,noise);writePartial(p.pContact,wg.x,l,4u);return;}
+ for(var i=g.x;i<p.n;i+=p.lineGroups*${WG}u){for(var q=KU[p.kvStart+i];q<KU[p.kvStart+i+1u];q++){
+  let e=KU[p.kvList+q];let k0=e>>2u;var owner=true;for(var j=0u;j<(e&3u);j++){if(!isFixed(KU[p.kuCV+4u*k0+j])){owner=false;}}
+  if(!owner){continue;}
   let c=contactAt(k0);let sx=contactSum(c,0u);let sd=contactSum(c,1u);let m=contactM(c,sx);let dn=dot(c.n,sd);
   let slip=tangent(c.n,sx)-c.t;let td=tangent(c.n,sd);let y0=length(slip);
   for(var k=0u;k<${ALPHAS}u;k++){
@@ -561,7 +692,7 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
    if(c.mu>0.){let f=fF0Change(y0,length(slip+a*td),2.*a*dot(slip,td)+a*a*dot(td,td));change+=c.mu*f;}
    de[k]+=change.x;noise[k]+=32.*EPS*change.y;
   }
- }
+ }}
  storeLine(l,de,noise);writePartial(p.pContact,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn finishLine(@builtin(local_invocation_index) l:u32){
@@ -625,7 +756,7 @@ fn jFrame(s:u32,e:J3,cs:vec2f)->JFrame{
 // Float64 energy is infinite (degenerate edge or reversed tangents).
 struct JointEval{k0:J1,k1:J1,k2:J1,k3:J1,r:J1,ok:bool}
 fn jointEval(j:u32,id:vec4u,xa:vec3f,xb:vec3f,xc:vec3f,da:vec3f,db:vec3f,dc:vec3f,ca:vec2f,cb:vec2f)->JointEval{
- let ea=J3(oldEdge(id.x,id.y)+(xb-xa),db-da,vec3f(0));let eb=J3(oldEdge(id.y,id.z)+(xc-xb),dc-db,vec3f(0));
+ let ea=J3(segOldEdge(id.w)+(xb-xa),db-da,vec3f(0));let eb=J3(segOldEdge(id.w+1u)+(xc-xb),dc-db,vec3f(0));
  let A=jFrame(id.w,ea,ca);let B=jFrame(id.w+1u,eb,cb);let c=jDot(A.t,B.t);
  let kb=jScaleC(jScale3(jCross(A.t,B.t),jRecip(J1(1.+c.v,c.d,c.dd))),2.);
  let moved=jTransport(A.d,A.t,B.t);let raw=jAtan2(jDot(B.t,jCross(moved,B.d)),jDot(moved,B.d));
@@ -730,8 +861,73 @@ fn twistCoupling(s:u32)->f32{let j=I[p.iSegJoint+2u*s+1u];if(j==0xffffffffu||!tw
 ${clothContactWGSL(WG, S_CONVERGED, {C_STATUS, C_NEWTON, C_ACTIVE, C_CGACTIVE, C_NEWTONMIN}, MAXIMUM_CONTACT_ITERATIONS)}
 `;
 
+// Small meshes (n <= SHARED_CG_MAX_VERTICES) run in one workgroup: each kernel
+// below becomes a body run over its virtual workgroups in sequence (the same
+// partial slots, so the same reductions), barrier-separated. A launch here is
+// latency-bound, so a contact round, the step's first detection, and the unit
+// before and after its CG are one launch each rather than ~75 per unit. The
+// virtual workgroup counts are encodeUnit's, encodeRound's and the first submission's.
+const SMALL_BODIES = ['elemTri', 'elemHinge', 'elemSeg', 'elemJoint', 'gradient', 'twistGradient', 'finishMeasure', 'assemble', 'contactCoef', 'cgInit', 'finishInit',
+  'twistSolve', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineJoint', 'lineTwist', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply',
+  'initX', 'prepTri', 'prepHinge', 'prepSeg', 'detectBegin', 'tableClear', 'roundBegin', 'updateMultipliers', 'relinearize', 'roundDecide', 'penalties',
+  'listCount', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders'] as const;
+function withSmallMeshKernels(source: string): string {
+  // The fused kernels' value of each builtin a body takes (v: the virtual workgroup;
+  // a strided kernel runs as one workgroup that strides over everything).
+  const value: Record<string, string> = {global_invocation_id: `vec3u(v*${WG}u+l,0u,0u)`, local_invocation_index: 'l', workgroup_id: 'vec3u(v,0u,0u)', num_workgroups: 'vec3u(1u,1u,1u)'};
+  let out = source, wrappers = '';
+  const calls: Record<string, string> = {};
+  for (const name of SMALL_BODIES) {
+    const sizes = [`${WG}`, '1'].filter(size => out.includes(`@compute @workgroup_size(${size}) fn ${name}(`));
+    if (sizes.length !== 1) throw new Error(`Cloth Newton kernel ${name} is not a single ${WG}-wide or serial entry point`);
+    const head = `@compute @workgroup_size(${sizes[0]}) fn ${name}(`, at = out.indexOf(head);
+    if (out.indexOf(head, at + 1) >= 0) throw new Error(`Cloth Newton kernel ${name} is defined twice`);
+    const close = out.indexOf('){', at + head.length);
+    if (close < 0) throw new Error(`Cloth Newton kernel ${name} has no body`);
+    const list = out.slice(at + head.length, close).trim(), params = (list ? list.split(',') : []).map(entry => {
+      const match = /^@builtin\((\w+)\) (\w+):(\w+)$/.exec(entry.trim());
+      if (!match || !value[match[1]!]) throw new Error(`Cloth Newton kernel ${name}: unsupported parameter ${entry}`);
+      return {builtin: match[1]!, name: match[2]!, type: match[3]!};
+    });
+    out = out.slice(0, at) + `fn ${name}Body(${params.map(q => `${q.name}:${q.type}`).join(',')}){` + out.slice(close + 2);
+    wrappers += `${head}${params.map(q => `@builtin(${q.builtin}) ${q.name}:${q.type}`).join(',')}){${name}Body(${params.map(q => q.name).join(',')});}\n`;
+    const call = `${name}Body(${params.map(q => value[q.builtin]).join(',')})`;
+    calls[name] = sizes[0] === '1' ? `if(l==0u){${call};}` : `${call};`;
+  }
+  const sync = 'workgroupBarrier();storageBarrier();';
+  const phase = (name: string, count: string) => ` for(var v=0u;v<(${count}+${WG - 1}u)/${WG}u;v++){${calls[name]}}${sync}\n`;
+  const once = (name: string) => ` {let v=0u;${calls[name]}}${sync}\n`;
+  const twists = 'select(0u,p.segments,p.joints>0u)';
+  const line = ['lineTri:p.triangles', 'lineHinge:p.hinges', 'lineSeg:p.segments', 'lineJoint:p.joints', `lineTwist:${twists}`, 'lineVertex:p.n', 'linePair:p.pairs'].map(e => {const [k, c] = e.split(':'); return phase(k!, c!);}).join('')
+    + ` for(var v=0u;v<p.lineGroups;v++){${calls.lineContact}}${sync}\n` + once('finishLine');
+  const detection = ` if(p.selfCollision!=0u){\n${once('gridClear')}${phase('gridFaces', 'p.triangles')}${phase('gridEdges', 'p.edges')}${phase('detectFaces', 'p.n')}${phase('detectEdges', 'p.edges')} }\n`
+    + ` if(p.colliders>0u){\n${once('detectColliders')} }\n`;
+  const afterDetection = once('penalties') + once('listCount') + ` listScanSmall(l);${sync}\n` + once('listFill') + phase('listReset', 'p.n');
+  const kernel = (name: string, body: string) => `@compute @workgroup_size(${WG}) fn ${name}(@builtin(local_invocation_index) l:u32){\n${body}}\n`;
+  return out + wrappers + `
+// The per-vertex list offsets of listScan1-3 in one workgroup: each thread a run of vertices.
+var<workgroup> scanSmall:array<u32,${WG}>;
+fn listScanSmall(l:u32){
+ if(uniformWord(l,${CONTACT_CONTROL.K_ADDED}u)==0u){return;}
+ let per=(p.n+${WG - 1}u)/${WG}u;var total=0u;
+ for(var j=0u;j<per;j++){let i=l*per+j;if(i<p.n){let value=atomicExchange(&KA[p.aCount+i],0u);KU[p.kvStart+i]=total;total+=value;}}
+ scanSmall[l]=total;workgroupBarrier();
+ if(l==0u){var sum=0u;for(var j=0u;j<${WG}u;j++){let t=scanSmall[j];scanSmall[j]=sum;sum+=t;}KU[p.kvStart+p.n]=sum;}
+ workgroupBarrier();
+ let offset=scanSmall[l];for(var j=0u;j<per;j++){let i=l*per+j;if(i<p.n){KU[p.kvStart+i]+=offset;}}
+}
+` + kernel('unitSmall', phase('elemTri', 'p.triangles') + phase('elemHinge', 'p.hinges') + phase('elemSeg', 'p.segments') + phase('elemJoint', '3u*p.joints')
+    + phase('gradient', 'p.n') + phase('twistGradient', twists) + once('finishMeasure') + phase('assemble', 'p.blocks') + once('contactCoef') + phase('cgInit', 'p.n') + once('finishInit'))
+    + kernel('unitSmallB', phase('twistSolve', 'p.rods') + phase('slope', 'p.n') + once('finishSlope')
+    + Array.from({length: LINE_PASSES}, () => ` if(uniformWord(l,${C_SEARCH}u)!=0u){\n${line} }\n`).join('') + phase('apply', 'p.n'))
+    + kernel('roundSmall', once('roundBegin') + once('updateMultipliers') + once('relinearize') + detection + once('roundDecide') + afterDetection)
+    + kernel('firstSmall', phase('initX', 'p.n') + phase('prepTri', 'p.triangles') + phase('prepHinge', 'p.hinges') + phase('prepSeg', 'p.segments')
+    + once('detectBegin') + once('tableClear') + detection + afterDetection);
+}
+export const clothNewtonWGSL = withSmallMeshKernels(clothNewtonKernels);
+
 const ENTRY_POINTS = ['prepTri', 'prepHinge', 'prepSeg', 'initX', 'zeroX', 'predictVelocity', 'elemTri', 'elemHinge', 'elemSeg', 'elemJoint', 'twistGradient', 'twistSolve', 'lineJoint', 'lineTwist', 'gradient', 'finishMeasure', 'assemble', 'cgInit', 'finishInit',
-  'cgMatvec', 'finishAlpha', 'cgUpdate', 'finishBeta', 'cgDirection', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply',
+  'unitSmall', 'unitSmallB', 'roundSmall', 'firstSmall', 'cgShared', 'cgFused', 'contactCoef', 'cgContact', 'cgMatvec', 'finishAlpha', 'cgUpdate', 'finishBeta', 'cgDirection', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply',
   'tableClear', 'rememberMultipliers', 'roundBegin', 'detectBegin', 'updateMultipliers', 'relinearize', 'roundDecide', 'penalties',
   'listCount', 'listScan1', 'listScan2', 'listScan3', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders'] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
@@ -777,7 +973,7 @@ export interface GPUClothContact {
 interface ContactLayout {
   kMax: number; tableSlots: number; gridBuckets: number; gridEntries: number;
   kuCV: number; kuMeta: number; kvStart: number; kvList: number; uBlocks: number; uEntry: number; uTabVal: number; kuWords: number;
-  aTable: number; aHeads: number; aCount: number; kaWords: number; kfFaceBox: number; kfEdgeBox: number; kfWords: number;
+  aTable: number; aHeads: number; aCount: number; kaWords: number; kfCoef: number; kfForce: number; kfFaceBox: number; kfEdgeBox: number; kfWords: number;
 }
 const pow2 = (x: number) => 2 ** Math.ceil(Math.log2(Math.max(1, x)));
 const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_NONFINITE, 'a nonfinite contact residual']];
@@ -831,6 +1027,10 @@ export class GPUClothNewton {
   private layout?: GPUBindGroupLayout;
   private bindings?: GPUBindGroup;
   private cgCap = 64;
+  /** Newton units per submission: one more than the last solve needed, so a
+   * step usually submits once and reads back once; units after convergence
+   * early-exit on the device. */
+  private units = 2;
   private readonly segmentRods: Int32Array;
   /** DER joints (rod, local joint index) and the segments of jointed rods (twist solved on the GPU). */
   private readonly joints: {rod: number; local: number}[] = [];
@@ -880,7 +1080,7 @@ export class GPUClothNewton {
     // Static float data after the per-step vertex block: materials, triangles, hinges, segments;
     // then the per-step segment twist and joint blocks.
     const materials = topology.materials, M = materials.length;
-    const dMaterial = 4 * n, dTri = dMaterial + 3 * M, dHinge = dTri + 2 * T, dSeg = dHinge + H, dTwist = dSeg + S, dJoint = dTwist + 4 * S, dDisp = dJoint + 4 * J, dTriRest = dDisp + n, dSegRest = dTriRest + 2 * T, dTotal = dSegRest + S;
+    const dMaterial = 4 * n, dTri = dMaterial + 3 * M, dHinge = dTri + 2 * T, dSeg = dHinge + H, dTwist = dSeg + S, dJoint = dTwist + 4 * S, dDisp = dJoint + 4 * J, dTriRest = dDisp + n, dSegRest = dTriRest + 2 * T, dHingeRest = dSegRest + S, dTotal = dHingeRest + 3 * H;
     const staticD = new Float32Array(4 * dTotal);
     materials.forEach((m, k) => {
       const a = m.rodRadius_m, b = m.rodRadiusB_m ?? a;
@@ -899,7 +1099,12 @@ export class GPUClothNewton {
         staticD[4 * (dTriRest + 2 * t + 1) + k] = face.rv[0] * rest[3 * a + k]! + face.rv[1] * rest[3 * b + k]! + face.rv[2] * rest[3 * c + k]!;
       }
     });
-    topology.hinges.forEach((hinge, h) => staticD.set([hinge.restAngle_rad, hinge.shapeFactor, topology.triangles[hinge.faces[0]]!.material, 0], 4 * (dHinge + h)));
+    topology.hinges.forEach((hinge, h) => {
+      staticD.set([hinge.restAngle_rad, hinge.shapeFactor, topology.triangles[hinge.faces[0]]!.material, 0], 4 * (dHinge + h));
+      // Rest edges a->b, a->c, a->d differenced in Float64 (see hingeOldEdge).
+      const rest = topology.data.restPositions_m, [a, b, c, d] = hinge.vertices;
+      [b, c, d].forEach((v, k) => {for (let q = 0; q < 3; q++) staticD[4 * (dHingeRest + 3 * h + k) + q] = rest[3 * v! + q]! - rest[3 * a! + q]!;});
+    });
     const segA = new Uint32Array(S), segB = new Uint32Array(S);
     this.segmentRods = new Int32Array(S);
     topology.rods.forEach((rod, r) => {for (let j = 0; j < rod.restLengths_m.length; j++) {const s = rod.segmentOffset + j; segA[s] = rod.vertices[j]!; segB[s] = rod.vertices[j + 1]!; this.segmentRods[s] = r; staticD.set([rod.restLengths_m[j]!, rod.material, 0, 0], 4 * (dSeg + s));
@@ -941,13 +1146,13 @@ export class GPUClothNewton {
     const wgV = Math.ceil(n / WG), pTri = wgV, pHinge = pTri + Math.ceil(T / WG), pSeg = pHinge + Math.ceil(H / WG), pJoint = pSeg + Math.ceil(S / WG), pTwist = pJoint + Math.ceil(J / WG), pPair = pTwist + (J ? Math.ceil(S / WG) : 0);
     // Read-write twist (per segment): (increment, gradient, step, d2E), (pivot, diagonal).
     const wX = 0, wG = n, wR = 2 * n, wZ = 3 * n, wZ0 = 4 * n, wP = 5 * n, wQ = 6 * n, wS = 7 * n, wPre = 8 * n, wK = 11 * n, wT = 12 * n, wT2 = wT + S, wScal = wT2 + S, wPart = wScal + 4;
-    const eTri = 0, eHinge = 4 * T, eSeg = eHinge + 9 * H, eTriOld = eSeg + 2 * S, eHingeOld = eTriOld + 3 * T, eSegOld = eHingeOld + H, eJoint = eSegOld + S, eA = eJoint + 9 * J, eTotal = eA + 3 * blocks;
+    const eTri = 0, eHinge = 4 * T, eSeg = eHinge + 9 * H, eTriOld = eSeg + 2 * S, eHingeOld = eTriOld + 3 * T, eSegOld = eHingeOld + H, eHingeEdge = eSegOld + 2 * S, eJoint = eHingeEdge + 3 * H, eA = eJoint + 9 * J, eTotal = eA + 3 * blocks;
     this.offsets = Object.fromEntries(PARAM_FIELDS.map(name => [name, 0])) as Record<ParamName, number>;
     Object.assign(this.offsets, {
       n, triangles: T, hinges: H, segments: S, blocks, dMaterial, dTri, dHinge, dSeg, pTri, pHinge, pSeg, pPair, wgV,
       iTri, iHinge, iSeg, iRow, iCol, iBlockRow, iContribStart, iContrib, iVStart, iVList, iDiag,
       wX, wG, wR, wZ, wZ0, wP, wQ, wS, wPre, wPart, wScal, wK, eTri, eHinge, eSeg, eTriOld, eHingeOld, eSegOld, eA,
-      joints: J, rods: rodWords.length / 2, iJoint, iRod, iSegJoint, dTwist, dJoint, wT, wT2, eJoint, pJoint, pTwist, dDisp, dTriRest, dSegRest,
+      joints: J, rods: rodWords.length / 2, iJoint, iRod, iSegJoint, dTwist, dJoint, wT, wT2, eJoint, pJoint, pTwist, dDisp, dTriRest, dSegRest, dHingeRest, eHingeEdge,
     });
     if (device.limits.maxStorageBuffersPerShaderStage < 10) throw new Error(`GPU cloth Newton needs 10 storage buffers per stage; the device allows ${device.limits.maxStorageBuffersPerShaderStage}`);
     this.storageLimit = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
@@ -1072,8 +1277,8 @@ export class GPUClothNewton {
     const tableSlots = Math.max(pow2(tableFactor * kMax), held?.tableSlots ?? 0), gridBuckets = pow2(Math.max(1024, T + edges));
     const kuCV = 0, kuMeta = 4 * kMax, kvStart = 8 * kMax, kvList = kvStart + n + 1, uBlocks = kvList + 4 * kMax, uEntry = uBlocks + Math.ceil(n / SCAN_WG) + 1, uTabVal = uEntry + 2 * gridEntries, kuWords = uTabVal + 2 * tableSlots;
     const aTable = 0, aHeads = 4 * tableSlots, aCount = aHeads + 2 * gridBuckets, kaWords = aCount + n;
-    const kfFaceBox = 4 * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfWords = kfEdgeBox + 2 * edges;
-    const layout = {kMax, tableSlots, gridBuckets, gridEntries, kuCV, kuMeta, kvStart, kvList, uBlocks, uEntry, uTabVal, kuWords, aTable, aHeads, aCount, kaWords, kfFaceBox, kfEdgeBox, kfWords};
+    const kfCoef = 4 * kMax, kfForce = 5 * kMax, kfFaceBox = 6 * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfWords = kfEdgeBox + 2 * edges;
+    const layout = {kMax, tableSlots, gridBuckets, gridEntries, kuCV, kuMeta, kvStart, kvList, uBlocks, uEntry, uTabVal, kuWords, aTable, aHeads, aCount, kaWords, kfCoef, kfForce, kfFaceBox, kfEdgeBox, kfWords};
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.KF = this.replace(this.KF, 'Cloth contact floats', 16 * kfWords, storage);
     this.KU = this.replace(this.KU, 'Cloth contact words', 4 * kuWords, storage);
@@ -1138,19 +1343,26 @@ export class GPUClothNewton {
   private encodeUnit(pass: GPUComputePassEncoder, cgCap: number, pairs: number): void {
     const o = this.offsets, n = this.n, groups = (count: number) => Math.ceil(count / WG);
     const run = (entry: EntryPoint, count: number) => {if (count > 0) {pass.setPipeline(this.pipelines![entry]); pass.dispatchWorkgroups(count);}};
+    // Small meshes: the whole unit in one workgroup (one launch).
+    if (this.small) {run('unitSmall', 1); run('cgShared', 1); run('unitSmallB', 1); return;}
     const J = o.joints, twists = J ? o.segments : 0;
     run('elemTri', groups(o.triangles)); run('elemHinge', groups(o.hinges)); run('elemSeg', groups(o.segments)); run('elemJoint', groups(3 * J));
     run('gradient', groups(n)); run('twistGradient', groups(twists)); run('finishMeasure', 1);
-    run('assemble', groups(this.blocks)); run('cgInit', groups(n)); run('finishInit', 1);
-    for (let k = 0; k < cgCap; k++) {run('cgMatvec', groups(n)); run('finishAlpha', 1); run('cgUpdate', groups(n)); run('finishBeta', 1); run('cgDirection', groups(n));}
+    run('assemble', groups(this.blocks)); run('contactCoef', this.contactGroups); run('cgInit', groups(n)); run('finishInit', 1);
+    // Small meshes run the CG loop in one workgroup: 1 dispatch, not 5 per iteration.
+    if (n <= FUSED_CG_MAX_VERTICES) run('cgFused', 1);
+    else for (let k = 0; k < cgCap; k++) {run('cgContact', CONTACT_FORCE_GROUPS); run('cgMatvec', groups(n)); run('finishAlpha', 1); run('cgUpdate', groups(n)); run('finishBeta', 1); run('cgDirection', groups(n));}
     run('twistSolve', groups(o.rods));
     run('slope', groups(n)); run('finishSlope', 1);
     for (let pass = 0; pass < LINE_PASSES; pass++) {
-      run('lineTri', groups(o.triangles)); run('lineHinge', groups(o.hinges)); run('lineSeg', groups(o.segments)); run('lineJoint', groups(J)); run('lineTwist', groups(twists)); run('lineVertex', groups(n)); run('linePair', groups(pairs)); run('lineContact', this.contactGroups);
+      run('lineTri', groups(o.triangles)); run('lineHinge', groups(o.hinges)); run('lineSeg', groups(o.segments)); run('lineJoint', groups(J)); run('lineTwist', groups(twists)); run('lineVertex', groups(n)); run('linePair', groups(pairs)); run('lineContact', this.lineGroups);
       run('finishLine', 1);
     }
     run('apply', groups(n));
   }
+  /** One workgroup runs each unit, contact round and first detection (see withSmallMeshKernels). */
+  private get small(): boolean {return this.n <= SHARED_CG_MAX_VERTICES;}
+  private get lineGroups(): number {return this.small ? 1 : this.contactGroups;}
   private run(pass: GPUComputePassEncoder, entry: EntryPoint, count: number): void {if (count > 0) {pass.setPipeline(this.pipelines![entry]); pass.dispatchWorkgroups(count);}}
   private strided(count: number): number {return Math.max(1, Math.min(4096, Math.ceil(count / WG)));}
   /** Swept-primitive grid and narrowphase (each kernel gates on K_DETECT). */
@@ -1170,6 +1382,7 @@ export class GPUClothNewton {
     this.run(pass, 'listFill', this.contactGroups); this.run(pass, 'listReset', Math.ceil(this.n / WG));
   }
   private encodeRound(pass: GPUComputePassEncoder): void {
+    if (this.small) {this.run(pass, 'roundSmall', 1); return;}
     this.run(pass, 'roundBegin', 1); this.run(pass, 'updateMultipliers', this.contactGroups); this.run(pass, 'relinearize', this.contactGroups);
     this.encodeDetection(pass);
     this.run(pass, 'roundDecide', 1);
@@ -1268,6 +1481,26 @@ export class GPUClothNewton {
     // remains a descent method when the depth truncates CG).
     const cgUsed = control[C_CGMAX]!;
     this.cgCap = cgUsed >= this.cgCap ? Math.min(2048, 2 * this.cgCap) : Math.max(16, Math.min(this.cgCap, 8 * Math.ceil(1.5 * cgUsed / 8)));
+  }
+  /** The control words and the iterate of a submission, mapped together
+   * (one wait): the iterate is discarded unless the solve stopped. */
+  private async readSolve(stiffness: boolean): Promise<{control: Uint32Array<ArrayBuffer>; increments: Float32Array; twist?: Float32Array; stiffness?: Float32Array}> {
+    const twist = this.joints.length > 0, maps = [this.statusRead, this.positionRead, ...(twist ? [this.twistRead] : []), ...(stiffness ? [this.stiffnessRead] : [])];
+    await Promise.all(maps.map(b => b.mapAsync(GPUMapMode.READ)));
+    const copy = (b: GPUBuffer) => b.getMappedRange().slice(0);
+    const result = {control: new Uint32Array(copy(this.statusRead)), increments: new Float32Array(copy(this.positionRead)),
+      ...(twist ? {twist: new Float32Array(copy(this.twistRead))} : {}), ...(stiffness ? {stiffness: new Float32Array(copy(this.stiffnessRead))} : {})};
+    for (const b of maps) b.unmap();
+    return result;
+  }
+  /** Units for the next solve's submissions: this solve's working units (the
+   * contact path's round decision runs in one more), with one to spare. An
+   * idle unit costs early-exit launches; a short submission costs a readback.
+   * That holds for the one-workgroup small-mesh unit (three launches); a large
+   * mesh's unit encodes six launches per CG iteration up to cgCap (up to 2048),
+   * so its idle units cost more than a readback and it keeps two per submission. */
+  private nextUnits(control: Uint32Array, contact: boolean): void {
+    this.units = this.small ? Math.max(2, Math.min(MAX_UNITS, control[C_WORKED]! + (contact ? 1 : 0) + 1)) : 2;
   }
   private async readIncrements(): Promise<Float32Array> {
     await this.positionRead.mapAsync(GPUMapMode.READ);
@@ -1439,12 +1672,12 @@ export class GPUClothNewton {
     const n = this.n, o = this.offsets, pairOffsets = this.uploadPairs(pairs, old);
     this.prepareGPUContact(settings.colliders, settings.selfCollision);
     const layout = this.contactLayout!, pairGroups = Math.ceil(pairs.length / WG);
-    this.writeParams({...this.offsets, ...pairOffsets, ...this.contactParams(), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.contactGroups,
+    this.writeParams({...this.offsets, ...pairOffsets, ...this.contactParams(), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.lineGroups,
       cgCap: this.cgCap, newtonCap: settings.newtonCap, dt: settings.dt, tolerance: settings.tolerance, contactDelta: settings.tolerance, frictionEpsilon: settings.frictionEpsilon,
-      contactMode: 1, contactGroups: this.contactGroups, colliders: this.colliderCount, selfCollision: settings.selfCollision ? 1 : 0});
+      contactMode: 1, contactGroups: this.contactGroups, lineGroups: this.lineGroups, colliders: this.colliderCount, selfCollision: settings.selfCollision ? 1 : 0});
     this.device.queue.writeBuffer(this.W, 16 * o.wScal, new Float32Array(16));
-    const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = 2;
-    let submissions = 0, resumes = 0, control = new Uint32Array(C_WORDS);
+    const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = this.units;
+    let submissions = 0, resumes = 0, control = new Uint32Array(C_WORDS), read: Awaited<ReturnType<GPUClothNewton['readSolve']>> | undefined;
     const K = CONTACT_CONTROL;
     for (;;) {
       const encoder = this.device.createCommandEncoder({label: 'Cloth Newton-PCG with GPU contact'});
@@ -1452,34 +1685,36 @@ export class GPUClothNewton {
       const pass = encoder.beginComputePass({label: 'Cloth Newton iterations and contact rounds'});
       pass.setBindGroup(0, this.bindings!);
       for (let k = 0; k < unitsPerSubmission; k++) {
-        if (!submissions && !k) {
+        if (!submissions && !k && this.small) this.run(pass, 'firstSmall', 1);
+        else if (!submissions && !k) {
           for (const [entry, count] of [['initX', n], ['prepTri', o.triangles], ['prepHinge', o.hinges], ['prepSeg', o.segments]] as const) this.run(pass, entry, groups(count));
           this.run(pass, 'detectBegin', 1); this.run(pass, 'tableClear', this.strided(2 * layout.tableSlots));
           this.encodeDetection(pass); this.encodeAfterDetection(pass);
         } else this.encodeRound(pass);
         this.encodeUnit(pass, this.cgCap, pairs.length);
       }
+      // Gated on the device: it runs only once the contact rounds succeeded.
+      this.run(pass, 'rememberMultipliers', this.contactGroups);
       pass.end();
       encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
+      encoder.copyBufferToBuffer(this.W, 16 * o.wX, this.positionRead, 0, 16 * n);
+      if (o.joints) encoder.copyBufferToBuffer(this.W, 16 * o.wT, this.twistRead, 0, 16 * o.segments);
       this.device.queue.submit([encoder.finish()]);
       submissions++;
-      control = await this.readControl();
+      read = await this.readSolve(false);
+      control = read.control;
       const status = control[C_STATUS]!;
       if (status === S_CAP && !control[K.K_ERROR] && !control[K.K_DONE] && resumes < NEWTON_RESUMES) {resumes++; this.resume(); continue;}
       if (control[K.K_ERROR] || control[K.K_DONE] || (status && status !== S_CONVERGED)) break;
     }
     const success = control[K.K_DONE] !== 0 && !control[K.K_ERROR] && control[C_STATUS] === S_CONVERGED;
-    const encoder = this.device.createCommandEncoder({label: 'Cloth Newton result'});
-    if (success) {const pass = encoder.beginComputePass(); pass.setBindGroup(0, this.bindings!); this.run(pass, 'rememberMultipliers', this.contactGroups); pass.end();}
-    encoder.copyBufferToBuffer(this.W, 16 * o.wX, this.positionRead, 0, 16 * n);
-    if (o.joints) encoder.copyBufferToBuffer(this.W, 16 * o.wT, this.twistRead, 0, 16 * o.segments);
-    this.device.queue.submit([encoder.finish()]);
-    const increments = await this.readIncrements(), twist = await this.readTwist();
+    const {increments, twist} = read!;
+    this.nextUnits(control, true);
     // The table now holds this step's multipliers; the next step reads it as the previous one.
     if (success) {this.tableCur = 1 - this.tableCur; this.prevValid = true;} else this.prevValid = false;
     this.adaptCG(control);
     const measure = new Float32Array(Uint32Array.of(control[C_LAST]!).buffer)[0]!;
-    return {converged: success, status: control[C_STATUS]!, measure, newton: control[C_NEWTON_TOTAL]!, linear: control[C_LINEAR]!, submissions: submissions + 1, resumes, increments, twist, control};
+    return {converged: success, status: control[C_STATUS]!, measure, newton: control[C_NEWTON_TOTAL]!, linear: control[C_LINEAR]!, submissions, resumes, increments, twist, control};
   }
 
   /** One GPU Newton-PCG solve of the current potential (no contact, or the
@@ -1491,12 +1726,12 @@ export class GPUClothNewton {
     const n = this.n, o = this.offsets, pairOffsets = this.uploadPairs(pairs, old);
     if (contacts) this.uploadContacts(contacts, old);
     const pairGroups = Math.ceil(pairs.length / WG);
-    this.writeParams({...this.offsets, ...pairOffsets, ...(contacts ? this.contactParams() : {}), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.contactGroups,
+    this.writeParams({...this.offsets, ...pairOffsets, ...(contacts ? this.contactParams() : {}), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.lineGroups,
       cgCap: this.cgCap, newtonCap: settings.newtonCap, dt: settings.dt, tolerance: settings.tolerance, contactDelta: settings.tolerance, frictionEpsilon: settings.frictionEpsilon,
-      contactMode: contacts ? 2 : 0, uploadedContacts: contacts?.length ?? 0, contactGroups: this.contactGroups});
+      contactMode: contacts ? 2 : 0, uploadedContacts: contacts?.length ?? 0, contactGroups: this.contactGroups, lineGroups: this.lineGroups});
     this.device.queue.writeBuffer(this.W, 16 * o.wScal, new Float32Array(16));
-    const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = 2;
-    let submissions = 0, status = 0, resumes = 0, control = new Uint32Array(C_WORDS);
+    const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = this.units;
+    let submissions = 0, status = 0, resumes = 0, control = new Uint32Array(C_WORDS), read: Awaited<ReturnType<GPUClothNewton['readSolve']>> | undefined;
     while (true) {
       const encoder = this.device.createCommandEncoder({label: 'Cloth Newton-PCG'});
       // Fresh control words, with the Newton minimum of a resumed solve.
@@ -1512,18 +1747,18 @@ export class GPUClothNewton {
       if (settings.readStiffness) encoder.copyBufferToBuffer(this.W, 16 * o.wK, this.stiffnessRead, 0, 16 * n);
       this.device.queue.submit([encoder.finish()]);
       submissions++;
-      control = await this.readControl();
+      read = await this.readSolve(settings.readStiffness);
+      control = read.control;
       status = control[C_STATUS]!;
       if (status === S_CAP && resumes < NEWTON_RESUMES) {resumes++; this.resume(); continue;}
       if (status) break;
     }
     this.adaptCG(control);
+    this.nextUnits(control, false);
     const measure = new Float32Array(Uint32Array.of(control[C_LAST]!).buffer)[0]!;
-    const increments = await this.readIncrements(), twist = await this.readTwist();
+    const {increments, twist} = read!;
     if (settings.readStiffness) {
-      await this.stiffnessRead.mapAsync(GPUMapMode.READ);
-      const k = new Float32Array(this.stiffnessRead.getMappedRange().slice(0));
-      this.stiffnessRead.unmap();
+      const k = read!.stiffness!;
       const stiffness = this.stiffness ??= new Float64Array(3 * n);
       for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) stiffness[3 * i + a] = k[4 * i + a]!;
     }

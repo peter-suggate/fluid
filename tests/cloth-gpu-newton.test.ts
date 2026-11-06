@@ -297,11 +297,13 @@ test('GPU contact detection is the Float64 contact set: a sheet folded onto itse
   });
 });
 
-// Precision bound of the Float32 GPU trajectory against the Float64 one, not a
-// loosened parity: each step stops at the Float32-reachable 1e-9 m measure and the
-// free run compounds it. Measured worst 3.3e-7 m (step 25 of 30, rising from
-// 8e-9 m at step 0 and falling after); the bound is twice that.
-const FOLD_FREE_RUN_BOUND_M = 7e-7;
+// The bound is the Float64 reference's own resolution at this tolerance: the same
+// free run at half the tolerance. A converged step pins the scaled residual, not
+// the positions; the free run compounds that (the reference parts from itself by
+// 2.0e-6 m over the 30 steps, most of it at the step-14 contact). A fixed bound
+// set from one GPU run was tighter than the reference. A twin GPU solver on the
+// same inputs must repeat the run bit for bit: contact sums run in key order, not
+// in the order threads appended contacts, so a parity change is bisectable.
 test('GPU contact on the folded sheet, free-running at a Float32-reachable tolerance, stays near the Float64 trajectory', gpu, async () => {
   await withUniformDevice('cloth GPU contact fold free run', async device => {
     // No resync: each solve starts from its own previous state, so drift cannot hide. The GPU
@@ -311,16 +313,20 @@ test('GPU contact on the folded sheet, free-running at a Float32-reachable toler
     // re-linearized every outer round: with their detection-time normal and weights frozen, the
     // two paths parted by 1e-5 m at the first contact and both converged states penetrated.
     const {topology, a, b, supportPositions_m} = foldedStrip(), options: ClothStepOptions = {iterations: 64, tolerance_m: 1e-9, selfCollision: true, supportPositions_m};
-    const solver = new GPUClothNewton(device, topology);
-    let worst = 0, active = 0; const series: number[] = [];
+    const half = foldedStrip(), halfOptions: ClothStepOptions = {...options, tolerance_m: options.tolerance_m! / 2, supportPositions_m: half.supportPositions_m};
+    const solver = new GPUClothNewton(device, topology), twin = foldedStrip(), twinSolver = new GPUClothNewton(device, twin.topology);
+    const twinOptions: ClothStepOptions = {...options, supportPositions_m: twin.supportPositions_m};
+    let worst = 0, resolution = 0, active = 0; const series: number[] = [];
     try {
-      await solver.initialize();
+      await solver.initialize(); await twinSolver.initialize();
       for (let step = 0; step < 30; step++) {
         const cpu = solveClothIncrement(topology, a, .001, options), report = await solver.step(b, .001, options);
-        assert.ok(cpu.converged && report.converged, `step ${step}: ${report.maximumUpdate_m} m`);
+        await twinSolver.step(twin.b, .001, twinOptions);
+        assert.equal(maximumDifference(b.positions_m, twin.b.positions_m), 0, `step ${step}: the twin GPU run differs`);
+        assert.ok(cpu.converged && report.converged && solveClothIncrement(half.topology, half.a, .001, halfOptions).converged, `step ${step}: ${report.maximumUpdate_m} m`);
+        resolution = Math.max(resolution, maximumDifference(a.positions_m, half.a.positions_m));
         assert.equal(report.contactDetection, 'gpu', `step ${step}: ${report.contactFallback}`);
         const difference = maximumDifference(a.positions_m, b.positions_m); worst = Math.max(worst, difference); series.push(difference);
-        assert.ok(difference < FOLD_FREE_RUN_BOUND_M, `step ${step}: positions differ by ${difference} m (${series.map(d => d.toExponential(1)).join(' ')})`);
         const cpuLambda = clothContactWarmStart(a) ?? new Map<string, number>(), largest = Math.max(0, ...cpuLambda.values());
         const gpuLambda = new Map((await solver.contacts()).filter(c => c.lambda > 0).map(c => [c.key, c.lambda]));
         const carrying = (m: ReadonlyMap<string, number>) => [...m].filter(([, l]) => l > 1e-6*largest).map(([k]) => k).sort();
@@ -328,8 +334,9 @@ test('GPU contact on the folded sheet, free-running at a Float32-reachable toler
         const cpuKeys = carrying(cpuLambda);
         active = Math.max(active, cpuKeys.length);
       }
-    } finally {solver.destroy();}
+    } finally {solver.destroy(); twinSolver.destroy();}
     assert.ok(active > 0, 'the layers met');
-    console.log(`self fold free run: ${active} active, positions within ${worst.toExponential(2)} m over 30 steps: ${series.map(d => d.toExponential(1)).join(' ')}`);
+    console.log(`self fold free run: ${active} active, positions within ${worst.toExponential(2)} m of the Float64 run (which parts from itself at half the tolerance by ${resolution.toExponential(2)} m) over 30 steps: ${series.map(d => d.toExponential(1)).join(' ')}`);
+    assert.ok(worst <= resolution, `the GPU run parts from the Float64 one by ${worst} m, beyond the reference's own ${resolution} m resolution (${series.map(d => d.toExponential(1)).join(' ')})`);
   });
 });

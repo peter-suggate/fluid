@@ -271,6 +271,9 @@ fn tableClaim(t:u32,k0:u32,k1:u32)->u32{
 }
 fn held(k0:u32,k1:u32)->bool{return tableFind(p.tableCur,k0,k1)!=NONE;}
 fn addContact(k0:u32,k1:u32,v:vec4u,w:vec4f,n:vec3f,g0:f32,obstacle:vec3f,mu:f32,radius:f32,collider:u32){
+ // A full pool fails before claiming a key: claims past capacity would fill the
+ // table (2 kMax slots), and every later claim would then probe all of it.
+ if(atomicLoad(&C[${K.K_COUNT}u])>=p.kMax){atomicOr(&C[${K.K_ERROR}u],${E_CAPACITY}u);return;}
  let slot=tableClaim(p.tableCur,k0,k1);if(slot==NONE){return;}
  let c=atomicAdd(&C[${K.K_COUNT}u],1u);if(c>=p.kMax){atomicOr(&C[${K.K_ERROR}u],${E_CAPACITY}u);return;}
  var lambda=0.;
@@ -287,6 +290,8 @@ fn addContact(k0:u32,k1:u32,v:vec4u,w:vec4f,n:vec3f,g0:f32,obstacle:vec3f,mu:f32
 }
 // After the step: each held pair's multiplier, for the next step's warm start.
 @compute @workgroup_size(${WG}) fn rememberMultipliers(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
+ // Only after the contact rounds succeeded (encoded in every submission).
+ if(atomicLoad(&C[${K.K_DONE}u])==0u||atomicLoad(&C[${K.K_ERROR}u])!=0u||atomicLoad(&C[${C.C_STATUS}u])!=${S_CONVERGED}u){return;}
  let count=min(contactCount(),p.kMax);for(var c=g.x;c<count;c+=ng.x*${WG}u){KU[p.uTabVal+p.tableSlots*p.tableCur+KU[p.kuMeta+4u*c+3u]]=bitcast<u32>(max(0.,KF[4u*c+1u].w));}
 }
 
@@ -494,9 +499,19 @@ fn scanLocal(l:u32,value:u32)->u32{
  let count=min(contactCount(),p.kMax);
  for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<pairVertices(c);j++){let v=k.v[j];if(!isFixed(v)){KU[p.kvList+KU[p.kvStart+v]+atomicAdd(&KA[p.aCount+v],1u)]=(c<<2u)|j;}}}
 }
+// Each vertex's list in the order of its contacts' keys (unique in a pass) and slots, not
+// the order threads appended them: the per-vertex contact sums (gradient, preconditioner,
+// matvec gather) and the line search's owner sums then repeat bit for bit.
+fn incidenceBefore(a:u32,b:u32)->bool{
+ let ca=p.kuMeta+4u*(a>>2u);let cb=p.kuMeta+4u*(b>>2u);
+ if(KU[ca]!=KU[cb]){return KU[ca]<KU[cb];}if(KU[ca+1u]!=KU[cb+1u]){return KU[ca+1u]<KU[cb+1u];}return (a&3u)<(b&3u);
+}
 @compute @workgroup_size(${WG}) fn listReset(@builtin(global_invocation_id) g:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
- let i=g.x;if(i<p.n){atomicStore(&KA[p.aCount+i],0u);}
+ let i=g.x;if(i>=p.n){return;}
+ atomicStore(&KA[p.aCount+i],0u);
+ let s=KU[p.kvStart+i];let t=KU[p.kvStart+i+1u];
+ for(var k=s+1u;k<t;k++){let e=KU[p.kvList+k];var j=k;while(j>s&&incidenceBefore(e,KU[p.kvList+j-1u])){KU[p.kvList+j]=KU[p.kvList+j-1u];j--;}KU[p.kvList+j]=e;}
 }
 
 // ---- broadphase: a hash grid of swept faces and edges, each entry once per bucket
