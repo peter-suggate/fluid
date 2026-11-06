@@ -8,7 +8,7 @@ import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
 import { sampleSolidWorld, solidWorldForScene } from "./solid-world";
 import { quaternionInverseRotate } from "./rigid-body";
 import { sceneShape } from "./scene-shape";
-import type { InitialLiquidBox, SceneDescription } from "./model";
+import type { InitialLiquidBox, SceneDescription, Vec3 } from "./model";
 import { sceneFluidBoxScene, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "./scene-lattice-dimensions";
 
 /** Construction-only analytic samples, in metres, on shared lattice vertices.
@@ -429,13 +429,24 @@ function initialLiquidCellExtents(scene: SceneDescription, dimensions: readonly 
     const at = [cell(0, seed.x), cell(1, seed.y), cell(2, seed.z)].map((v, a) => Math.floor(Math.min(dimensions[a]!-1, Math.max(0, Math.floor(v)))/INITIAL_FLUID_BRICK_SIZE)*INITIAL_FLUID_BRICK_SIZE);
     add(at, at.map(v => v+INITIAL_FLUID_BRICK_SIZE));
   }
+  for (const b of initialLiquidVolumeBounds_m(scene)) metres(b.min_m, b.max_m);
+  return out;
+}
+
+/**
+ * World-space bounds of the analytic initial liquid: authored volumes and the
+ * source's initial SDF fields. The far-air margin check and the authored
+ * finest-cell refinement over a source scene's liquid read the same boxes.
+ */
+export function initialLiquidVolumeBounds_m(scene: SceneDescription): { min_m: Vec3; max_m: Vec3 }[] {
+  const out: { min_m: Vec3; max_m: Vec3 }[] = [];
   for (const v of sceneInitialLiquidVolumes(scene)) {
-    if (v.shape === "box") { metres(v.min_m, v.max_m); continue; }
+    if (v.shape === "box") { out.push({ min_m: v.min_m, max_m: v.max_m }); continue; }
     const r = v.shape === "torus" ? v.radius_m+v.tubeRadius_m : v.radius_m, o = v.center_m;
     const half = v.shape === "torus" ? { x: r, y: v.tubeRadius_m, z: r } : v.shape === "cylinder" ? { x: r, y: r, z: v.halfHeight_m } : { x: r, y: r, z: r };
-    metres({ x: o.x-half.x, y: o.y-half.y, z: o.z-half.z }, { x: o.x+half.x, y: o.y+half.y, z: o.z+half.z });
+    out.push({ min_m: { x: o.x-half.x, y: o.y-half.y, z: o.z-half.z }, max_m: { x: o.x+half.x, y: o.y+half.y, z: o.z+half.z } });
   }
-  for (const b of sourceInitialBounds(scene)) metres({x:b.min[0],y:b.min[1],z:b.min[2]}, {x:b.max[0],y:b.max[1],z:b.max[2]});
+  for (const b of sourceInitialBounds(scene)) out.push({ min_m: {x:b.min[0],y:b.min[1],z:b.min[2]}, max_m: {x:b.max[0],y:b.max[1],z:b.max[2]} });
   return out;
 }
 

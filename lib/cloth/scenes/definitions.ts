@@ -11,7 +11,8 @@ import type { ClothVector } from '../types';
 import type { WetClothSourceDefinition } from '../source-types';
 import { sourceClothDocument, wetClothSource, wetClothWaterSources,wetClothVariantSources } from './sources';
 import {wetClothVariantTopology} from './variants';
-import { FREE_SPACE_SEED_MARGIN_CELLS } from '../../core/initial-liquid-lattice';
+import { FREE_SPACE_SEED_MARGIN_CELLS, initialLiquidVolumeBounds_m } from '../../core/initial-liquid-lattice';
+import { OCTREE_REFINEMENT_REGION_CAPACITY } from '../../core/refinement-regions';
 
 /** Page pools authored from a measured peak (no runtime growth). The free-space
  * default (100 blocks) is exhausted at commit 1 by pore-test-mid's falling
@@ -22,6 +23,32 @@ import { FREE_SPACE_SEED_MARGIN_CELLS } from '../../core/initial-liquid-lattice'
 const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-source-pore-test-mid': 128};
 
 const vec = (v: ClothVector): Vec3 => ({x: v[0], y: v[1], z: v[2]});
+
+/** libWetCloth resolves its liquid at h everywhere. The source's initial
+ * liquid and emitters are authored at the finest cell, padded by the 4h
+ * narrow band, merged (least added volume first) to at most half the region
+ * capacity so editing keeps slots. */
+const SOURCE_LIQUID_REFINEMENT_PAD_CELLS = 4;
+const SOURCE_LIQUID_REFINEMENT_REGIONS = OCTREE_REFINEMENT_REGION_CAPACITY / 2;
+type Box = {min_m: Vec3; max_m: Vec3};
+function sourceLiquidRefinementBoxes(boxes: readonly Box[], pad_m: number): Box[] {
+  const axes = ['x', 'y', 'z'] as const;
+  const union = (a: Box, b: Box): Box => ({min_m: vecOf(k => Math.min(a.min_m[k], b.min_m[k])), max_m: vecOf(k => Math.max(a.max_m[k], b.max_m[k]))});
+  const volume = (b: Box) => axes.reduce((v, k) => v * Math.max(0, b.max_m[k] - b.min_m[k]), 1);
+  const vecOf = (f: (k: 'x' | 'y' | 'z') => number): Vec3 => ({x: f('x'), y: f('y'), z: f('z')});
+  const out = boxes.filter(b => axes.every(k => b.min_m[k] < b.max_m[k]))
+    .map(b => ({min_m: vecOf(k => b.min_m[k] - pad_m), max_m: vecOf(k => b.max_m[k] + pad_m)}));
+  const overlaps = (a: Box, b: Box) => axes.every(k => a.min_m[k] <= b.max_m[k] && b.min_m[k] <= a.max_m[k]);
+  for (;;) {
+    let best: [number, number, number] | undefined;
+    for (let i = 0; i < out.length; i++) for (let j = i + 1; j < out.length; j++) {
+      const cost = overlaps(out[i]!, out[j]!) ? -Infinity : volume(union(out[i]!, out[j]!)) - volume(out[i]!) - volume(out[j]!);
+      if (!best || cost < best[2]) best = [i, j, cost];
+    }
+    if (!best || (out.length <= SOURCE_LIQUID_REFINEMENT_REGIONS && best[2] !== -Infinity)) return out;
+    out[best[0]] = union(out[best[0]]!, out[best[1]]!); out.splice(best[1], 1);
+  }
+}
 const plus = (a: ClothVector, b: ClothVector): ClothVector => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 
 /** Admission requirements, consumed by runtime gates. Importing a reference
@@ -121,6 +148,11 @@ export function buildWetClothSourceScene(id: string): SceneDescription {
   if (pending) requiredCapabilities.push('source-sdf-emission');
   if (initialSdfFieldIndices.length) requiredCapabilities.push('source-initial-sdf');
   scene.wetClothSource = {...scene.wetClothSource, initialSdfFieldIndices, requiredCapabilities};
+  const emitters = [...new Set(allEvents.map(e => e.fieldIndex))].filter(i => !initialDone.has(i)).map(i => sourceFieldBounds(scene.wetClothSource!.fields, i));
+  const liquid = sourceLiquidRefinementBoxes([...initialLiquidVolumeBounds_m(scene),
+    ...emitters.map(b => ({min_m: vec(b.min), max_m: vec(b.max)}))], SOURCE_LIQUID_REFINEMENT_PAD_CELLS * source.cellSize_m);
+  if (liquid.length) scene.fluid.refinementRegions = liquid.map((b, k) => ({id: `source-liquid-${k}`, ...b,
+    rule: 'minimum-cell-size' as const, minimumCellSize_cells: 1, maximumCellSize_cells: 1}));
   const built=withStaticSourceSolids(scene),moving=sourceMovingSolidBodies(built.wetClothSource!,scene.cloth?.[0]?.materials[0]?.friction??0);
   if(!moving.length)return built;
   const groups=new Set(built.wetClothSource!.scripts.map(s=>s.group));
