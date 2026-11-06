@@ -1112,3 +1112,43 @@ nor Neumann (a dangling row) or more than one:
   of that overshoot onto the fluid rows beside the wall.
 - Per the judge's rule, no fix has been fitted. Candidate 3 is reported as
   ruled out.
+
+### Round 10: the coarse link between the pressure centres does not move the slow rows
+
+**The rule.** This is the general form, not the Galerkin shortcut. In
+pRebase, a level-1 link out of an aggregate is the series sum of three
+parts, between the two aggregates' pressure centres along the face normal:
+- the face's own coefficient c;
+- half a cell of open link, 0.5/u, behind each side whose child has an
+  active link to its second layer along that axis.
+
+It is stored as g/P_SCALE, the way seamCoarse stores its link, so that
+rCouple and rDiag are left unchanged. Under the same rule, a fixed-zero face
+out of the aggregate takes rFixed only when that second layer exists, and
+the face's own c otherwise. The rule reduces as it should:
+- two full aggregates with c = u give u/2, which is P_SCALE c;
+- two one-layer aggregates give c, the Galerkin weight;
+- the fixed-face form reduces to rFixed.
+
+It costs one extra kinds load per outward active band link.
+
+**Measured on seep, 60 steps, with the nb2 classifier.** Frames 21-40; the
+"dangling" class is a fluid row whose half face crosses the aggregate
+boundary to a dangling inside row.
+
+| after cycle | dangling class, before | dangling class, with the rule | other rows, before | other rows, with the rule |
+|---|---|---|---|---|
+| 0 | 25.1 | 25.1 | 105 | 93.3 |
+| 1 | 3.42 | 4.03 | 2.26 | 2.32 |
+| 2 | 0.651 | 1.10 | 0.218 | 0.362 |
+| 3 | 0.064 | 0.089 | 0.035 | 0.037 |
+
+Cycles over frames 21-60 were 144 before and 144 with the rule. The
+dangling class's contraction did not move toward the other rows' (it was
+6x then 4x a cycle, against 7x then 5x before), and cycle 2 got worse for
+every class.
+
+**Reading.** The jump from the halved link on the dangling aggregate does
+not set the slow rows' rate. Per the judge's rule, I am reporting and
+stopping without stacking knobs. Nothing has landed: the rule exists only
+in the scratch tree, under FLUID_SERIES.
