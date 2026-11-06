@@ -1706,6 +1706,8 @@ export class GPUClothNewton {
         const errors = solve.control[CONTACT_CONTROL.K_ERROR]!;
         contactAttempts = attempt + 1;
         if (!errors) break;
+        // A crossing is a failed step, never re-solved on the CPU.
+        if (errors & E_CROSSED) throw new Error(`Cloth GPU contact: ${describeErrors(errors)}`);
         if (errors & ~GROWABLE || attempt >= 3) {fallback = `GPU detection: ${describeErrors(errors)}`; solve = undefined; break;}
         // Too small for this contact set: grow from what the GPU counted, and redo the step.
         const c = solve.control, layout = this.contactLayout!;

@@ -4,8 +4,10 @@ import { DEFAULT_CLOTH_MATERIAL } from '../lib/cloth/material';
 import { createClothState, prepareClothTopology, type PreparedClothTopology } from '../lib/cloth/topology';
 import { clothElasticEnergy } from '../lib/cloth/dynamics';
 import { solveClothIncrement } from '../lib/cloth/nonlinear-solve';
-import { inSolveContactUnsupported } from '../lib/cloth/contact-constraints';
-import type { ClothCollider } from '../lib/cloth/contact';
+import { ClothContactSet, inSolveContactUnsupported } from '../lib/cloth/contact-constraints';
+import { sourceClothColliders } from '../lib/cloth/source-contact';
+import type { WetClothSourceField } from '../lib/cloth/source-types';
+import { sampleClothCollider, type ClothCollider } from '../lib/cloth/contact';
 import type { ClothState, ClothTopologyData } from '../lib/cloth/types';
 
 /** n x n sheets of spacing h; each sheet is [origin, fixed mask]. */
@@ -84,4 +86,50 @@ test('elliptical rods keep the sequential contact projection and say so; round r
 test('an unknown collider kind fails explicitly in the in-solve contact path', () => {
   const topology = prepareClothTopology(sheets(3, .01, [[0, 1, 0], 0]), [DEFAULT_CLOTH_MATERIAL]);
   assert.throws(() => solveClothIncrement(topology, createClothState(topology), .001, {colliders: [{kind: 'torus'} as unknown as ClothCollider]}), /Unsupported cloth collider/);
+});
+
+/** The dam-break tank of libWetCloth's drag scene (assets/drag): a rounded box
+ * cavity 2.88 cm deep in z, its walls at |z| = 1.44 cm and medial plane z = 0. */
+const thinCavity: WetClothSourceField = {index: 0, kind: 'box', usage: 'solid', group: 2, inside: true, sampled: false, root: true,
+  center_m: [0, .19728, 0], axis: [0, 1, 0], angle_rad: 0, halfExtents_m: [.144, .144, .0072], roundingRadius_m: .0072, sourceAttributes: {}};
+/** An n x n sheet in the plane z = z0, spacing h, its corner at (x0, y0). */
+function wallSheet(n: number, h: number, x0: number, y0: number, z0: number): ClothTopologyData {
+  const restPositions_m: number[] = [], triangles: number[] = [];
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) restPositions_m.push(x0 + i*h, y0 + j*h, z0);
+  for (let j = 0; j + 1 < n; j++) for (let i = 0; i + 1 < n; i++) {const a = j*n + i, b = a + 1, c = a + n, d = c + 1; triangles.push(a, b, c, b, d, c);}
+  return {restPositions_m, triangles, rodOffsets: [0], rodIndices: [], fixed: restPositions_m.filter((_, k) => k % 3 === 0).map(() => 0)};
+}
+
+test('a thin cavity\'s medial plane is no crossing: a sheet leaving one wall past it keeps its contact', () => {
+  // The sheet touches the +z wall and leaves it at 2 m/s, ending the step 5.8 mm past the medial
+  // plane. Its contacts were detected against the +z wall, and the nearest wall at the end is -z:
+  // the nearest normal turns over with the path in free space all the way.
+  const r = .5*DEFAULT_CLOTH_MATERIAL.thickness_m, z0 = .0144 - r, dt = .01, speed = 2;
+  const topology = prepareClothTopology(wallSheet(3, .002, .05, .15, z0), [DEFAULT_CLOTH_MATERIAL]), state = createClothState(topology);
+  for (let i = 0; i < topology.vertexCount; i++) state.velocities_m_s[3*i + 2] = -speed;
+  const [cavity] = sourceClothColliders([thinCavity], [thinCavity], dt);
+  const report = solveClothIncrement(topology, state, dt, {iterations: 64, tolerance_m: 1e-9, colliders: [cavity!], gravity_m_s2: [0, 0, 0]});
+  assert.ok(report.converged);
+  assert.equal(report.contactModel, 'in-solve');
+  for (let i = 0; i < topology.vertexCount; i++) {
+    const z = state.positions_m[3*i + 2]!;
+    // Free flight: nothing touched, so the rigid translation is the whole motion.
+    assert.ok(Math.abs(z - (z0 - speed*dt)) < 1e-9, `vertex ${i} at z ${z}`);
+    assert.ok(z < 0 && sampleClothCollider(cavity!, [state.positions_m[3*i]!, state.positions_m[3*i + 1]!, z]).distance_m > r);
+  }
+});
+
+test('the same cavity with the cloth driven into its wall fails explicitly, as does a crossing of a thin plate', () => {
+  const r = .5*DEFAULT_CLOTH_MATERIAL.thickness_m, z0 = .0144 - r, dt = .001;
+  const topology = prepareClothTopology(wallSheet(3, .002, .05, .15, z0), [DEFAULT_CLOTH_MATERIAL]), old = Float64Array.from(topology.data.restPositions_m);
+  const [cavity] = sourceClothColliders([thinCavity], [thinCavity], dt), set = new ClothContactSet(topology, old, dt, [cavity!], false, 1e-9);
+  assert.equal(set.detect(old), topology.vertexCount, 'each vertex touches the +z wall');
+  // 3 mm into the wall: the nearest normal has not turned, but the path entered the solid.
+  assert.throws(() => set.relinearize(old.map((v, k) => k % 3 === 2 ? .0174 : v)), /Cloth vertex 0 crossed collider 0 within the step/);
+  // Through a thin plate the nearest normal does turn; the path is what fails it.
+  const plate: ClothCollider = {kind: 'box', minimum_m: [-1, -1e-4, -1], maximum_m: [1, 1e-4, 1]};
+  const sheet = prepareClothTopology(sheets(2, .002, [[0, 1e-4 + r, 0], 0]), [DEFAULT_CLOTH_MATERIAL]), above = Float64Array.from(sheet.data.restPositions_m);
+  const through = new ClothContactSet(sheet, above, dt, [plate], false, 1e-9);
+  assert.equal(through.detect(above), sheet.vertexCount);
+  assert.throws(() => through.relinearize(above.map((v, k) => k % 3 === 1 ? -.003 : v)), /Cloth vertex 0 crossed collider 0 within the step/);
 });

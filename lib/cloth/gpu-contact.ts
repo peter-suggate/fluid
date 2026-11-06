@@ -485,6 +485,19 @@ fn relinearizeSelf(c:u32){
  KF[4u*c]=vec4f(n,dot(n,w.y*q1+w.z*q2+w.w*q3)-distance);KF[4u*c+3u]=w;
  let pen=distance-dot(n,delta);maxf(${K.K_PEN}u,pen);maxf(${K.K_REPPEN}u,pen);
 }
+// The crossing test (pathEntersCollider): whether vertex i's path through the step, the collider
+// swept with it, enters the solid. Not the nearest normal turning over: past a cavity's medial
+// plane the nearest wall is the opposite one, the path in free space. Unresolved counts as entering.
+fn pathEntersSolid(i:u32,ci:u32,tolerance:f32)->bool{
+ let b=cHeader(ci);let speed=(length(xv(i))+p.dt*ksf(b+5u))*ksf(b+6u);var time=0.;
+ for(var it=0u;it<256u;it++){
+  let distance=colliderDistance(ci,sweptPoint(i,time),(1.-time)*p.dt);
+  if(distance<=tolerance){return true;}
+  if(time>=1.||speed==0.){return false;}
+  time=advance(time,max(1e-9,.9*distance/speed));
+ }
+ return true;
+}
 @compute @workgroup_size(${WG}) fn relinearize(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(!roundOn()){return;}
  let count=atomicLoad(&C[${K.K_BASE}u]);
@@ -492,8 +505,8 @@ fn relinearizeSelf(c:u32){
   let ci=KU[p.kuMeta+4u*c+2u];let kind=KU[p.kuMeta+4u*c]>>28u;
   if(ci==NONE){if(kind<=2u){relinearizeSelf(c);}else{relinearizeRodSelf(c);}continue;}
   if(kind==3u){relinearizeRodSegment(c,ci);continue;}
-  let i=KU[p.kuCV+4u*c];let s=colliderSample(ci,sweptPoint(i,1.),0.);let old=KF[4u*c];let radius=KF[4u*c+2u].w;
-  if(!(dot(s.n,old.xyz)>0.)){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
+  let i=KU[p.kuCV+4u*c];let s=colliderSample(ci,sweptPoint(i,1.),0.);let radius=KF[4u*c+2u].w;
+  if(pathEntersSolid(i,ci,max(1e-10,radius*1e-6))){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
   let obstacle=cv3(cHeader(ci)+2u)*p.dt;
   KF[4u*c]=vec4f(s.n,(s.d-radius)-dot(s.n,xv(i)));KF[4u*c+1u]=vec4f(obstacle-dot(obstacle,s.n)*s.n,KF[4u*c+1u].w);
   maxf(${K.K_PEN}u,radius-s.d);maxf(${K.K_REPPEN}u,radius-s.d);
@@ -810,9 +823,20 @@ fn capsuleSphere(s:u32,ci:u32,time:f32,beforeEnd:f32)->CapsuleSample{
  var n=perpendicular(e);if(l>1e-14){n=delta/l;}
  return CapsuleSample(((l-segR(s))-ksf(b+14u))-ksf(b+15u),n,t);
 }
+// The crossing test for segment s's centreline against sphere ci (segmentEntersCollider).
+fn segmentEntersSphere(s:u32,ci:u32,tolerance:f32)->bool{
+ let b=cHeader(ci);let id=segIds(s);let speed=(max(length(xv(id.x)),length(xv(id.y)))+p.dt*ksf(b+5u))*ksf(b+6u);var time=0.;
+ for(var it=0u;it<256u;it++){
+  let distance=capsuleSphere(s,ci,time,(1.-time)*p.dt).d+segR(s);
+  if(distance<=tolerance){return true;}
+  if(time>=1.||speed==0.){return false;}
+  time=advance(time,max(1e-9,.9*distance/speed));
+ }
+ return true;
+}
 fn relinearizeRodSegment(c:u32,ci:u32){
- let s=KU[p.kuMeta+4u*c]&0x0FFFFFFFu;let q=capsuleSphere(s,ci,1.,0.);let old=KF[4u*c].xyz;
- if(!(dot(q.n,old)>0.)){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
+ let s=KU[p.kuMeta+4u*c]&0x0FFFFFFFu;let q=capsuleSphere(s,ci,1.,0.);
+ if(segmentEntersSphere(s,ci,max(1e-10,segR(s)*1e-6))){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
  let id=segIds(s);let w=vec4f(1.-q.t,q.t,0,0);let obstacle=cv3(cHeader(ci)+2u)*p.dt;
  KF[4u*c]=vec4f(q.n,q.d-dot(q.n,w.x*xv(id.x)+w.y*xv(id.y)));KF[4u*c+1u]=vec4f(obstacle-dot(obstacle,q.n)*q.n,KF[4u*c+1u].w);KF[4u*c+3u]=w;
  rodLinearize(c);maxf(${K.K_PEN}u,-q.d);maxf(${K.K_REPPEN}u,-q.d);

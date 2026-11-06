@@ -144,6 +144,37 @@ function colliderVelocity(collider: ClothCollider, point: ClothVector): ClothVec
 const colliderDistance = (c: ClothCollider, p: ClothVector, beforeEnd_s: number) => c.kind === 'sampled' && c.distanceAt ? c.distanceAt(p, beforeEnd_s) : sampleClothCollider(c, p, beforeEnd_s).distance_m;
 const lerp3 = (a: ClothVector, b: ClothVector, t: number): [number, number, number] => [a[0] + t*(b[0] - a[0]), a[1] + t*(b[1] - a[1]), a[2] + t*(b[2] - a[2])];
 const add3 = (a: ClothVector, b: ClothVector): ClothVector => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+/** The most a collider's distance can change over the step for a point that
+ * travels the given length (the CCD's step bound). */
+function sweepBound(c: ClothCollider, travel: number, dt: number): number {
+  const rotation = c.kind === 'rigid' ? Math.hypot(c.body.angularVelocity_rad_s.x, c.body.angularVelocity_rad_s.y, c.body.angularVelocity_rad_s.z)*sceneShape(c.body.description.shape).boundingRadius_m(c.body.description.dimensions_m) : 0;
+  return (travel + dt*(c.kind === 'sampled' ? c.maximumSpeed_m_s : norm3(c.velocity_m_s ?? [0, 0, 0]) + rotation))*(c.kind === 'sampled' ? (c.spatialLipschitz ?? 2) : 1);
+}
+/** Conservative advancement of a step's sweep: whether the distance from the
+ * solid reaches the tolerance. Each sample gives the distance and a lower
+ * bound to advance on; an unresolved march counts as entering. */
+function sweepEnters(at: (time: number) => {readonly distance: number; readonly bound: number}, speed: number, tolerance: number): boolean {
+  for (let iteration = 0, time = 0; iteration < 256; iteration++) {
+    const {distance, bound} = at(time);
+    if (distance <= tolerance) return true;
+    if (time >= 1 || speed === 0) return false;
+    if (!(bound > 0)) return true;
+    time = Math.min(1, time + Math.max(1e-9, .9*bound/speed));
+  }
+  return true;
+}
+/** The crossing test: whether a point's path through the step, start to end
+ * with the collider swept alongside, enters the solid (distance <= 0 at the
+ * tolerance). Unlike the nearest surface's normal, it does not turn over at a
+ * cavity's medial plane, where the nearest wall becomes the opposite one. */
+export function pathEntersCollider(c: ClothCollider, start: ClothVector, end: ClothVector, dt: number, tolerance: number): boolean {
+  return sweepEnters(time => {const distance = colliderDistance(c, lerp3(start, end, time), (1 - time)*dt); return {distance, bound: distance};}, sweepBound(c, norm3(sub3(end, start)), dt), tolerance);
+}
+/** The same test for a rod segment's centreline, start [a, b] to end [a, b]. */
+function segmentEntersCollider(c: ClothCollider, oa: ClothVector, ob: ClothVector, na: ClothVector, nb: ClothVector, dt: number, tolerance: number): boolean {
+  const reach = Math.max(norm3(sub3(na, oa)), norm3(sub3(nb, ob)));
+  return sweepEnters(time => {const q = sampleClippedRodCollider({a: lerp3(oa, na, time), b: lerp3(ob, nb, time), radius_m: 0, planes: []}, c, (1 - time)*dt, sampleClothCollider); return {distance: q.distance_m, bound: q.lowerBound_m};}, sweepBound(c, reach, dt), tolerance);
+}
 
 export interface ShellEdge {readonly vertices: readonly [number, number]; readonly r: number; readonly min: number[]; readonly max: number[]; restLocalFaces?: Set<number>}
 interface ShellCache {faceBounds: Float64Array; faceTree?: ClothContactBVH; edges: ShellEdge[]; edgeBounds: Float64Array; edgeTree?: ClothContactBVH; vertexLocalFaces: Map<number, Set<number>>}
@@ -270,8 +301,7 @@ export class ClothContactSet {
       for (let ci = 0; ci < colliders.length; ci++) {
         const collider = colliders[ci]!, key = `c:${i}:${ci}`;
         if (this.byKey.has(key)) continue;
-        const rotationSpeed = collider.kind === 'rigid' ? Math.hypot(collider.body.angularVelocity_rad_s.x, collider.body.angularVelocity_rad_s.y, collider.body.angularVelocity_rad_s.z)*sceneShape(collider.body.description.shape).boundingRadius_m(collider.body.description.dimensions_m) : 0;
-        const speed = (norm3(delta) + dt*(collider.kind === 'sampled' ? collider.maximumSpeed_m_s : norm3(collider.velocity_m_s ?? [0, 0, 0]) + rotationSpeed))*(collider.kind === 'sampled' ? (collider.spatialLipschitz ?? 2) : 1);
+        const speed = sweepBound(collider, norm3(delta), dt);
         const tolerance = Math.max(1e-10, r*1e-6);
         let time = 0, hit = false, clear = false, hitNormal: ClothVector = [0, 1, 0], hitDistance = 0;
         for (let iteration = 0; iteration < 80; iteration++) {
@@ -312,8 +342,7 @@ export class ClothContactSet {
       for (let ci = 0; ci < colliders.length; ci++) {
         const collider = colliders[ci]!, key = `rc:${segment}:${ci}`;
         if (this.byKey.has(key)) continue;
-        const rotationSpeed = collider.kind === 'rigid' ? Math.hypot(collider.body.angularVelocity_rad_s.x, collider.body.angularVelocity_rad_s.y, collider.body.angularVelocity_rad_s.z)*sceneShape(collider.body.description.shape).boundingRadius_m(collider.body.description.dimensions_m) : 0;
-        const travel = (reach + dt*(collider.kind === 'sampled' ? collider.maximumSpeed_m_s : norm3(collider.velocity_m_s ?? [0, 0, 0]) + rotationSpeed))*(collider.kind === 'sampled' ? (collider.spatialLipschitz ?? 2) : 1);
+        const travel = sweepBound(collider, reach, dt);
         const tolerance = Math.max(1e-10, r*1e-6);
         let time = 0, hit: ReturnType<typeof sampleClippedRodCollider> | undefined;
         for (let iteration = 0; iteration < 160; iteration++) {
@@ -495,7 +524,9 @@ export class ClothContactSet {
       if (c.rod) {penetration = Math.max(penetration, this.relinearizeRod(c, x)); continue;}
       if (c.kind === 'self') {penetration = Math.max(penetration, this.relinearizeSelf(c, x)); continue;}
       const i = c.vertices[0]!, p = point3(x, i), collider = this.colliders[c.colliderIndex]!, sample = sampleClothCollider(collider, p, 0);
-      if (!(dot3(sample.normal, c.normal) > 0)) throw new Error(`Cloth vertex ${i} crossed collider ${c.colliderIndex} within the step`);
+      // Crossed when the step's path enters the solid. Not when the nearest normal turns: past a
+      // cavity's medial plane that is the opposite wall, with the path in free space throughout.
+      if (pathEntersCollider(collider, point3(this.old, i), p, this.dt, Math.max(1e-10, c.radius*1e-6))) throw new Error(`Cloth vertex ${i} crossed collider ${c.colliderIndex} within the step`);
       c.normal = [sample.normal[0], sample.normal[1], sample.normal[2]];
       c.offset = dot3(sample.normal, p) - (sample.distance_m - c.radius);
       c.obstacle = scale3(colliderVelocity(collider, p), this.dt);
@@ -532,7 +563,9 @@ export class ClothContactSet {
       const collider = this.colliders[c.colliderIndex]!;
       const sample = g.shape === 'point-collider' ? (() => {const s = sampleClothCollider(collider, q[0]!, 0); return {distance_m: s.distance_m - c.radius, normal: s.normal, point: sub3(q[0]!, scale3(s.normal, c.radius))};})() : sampleClippedRodCollider({a: q[0]!, b: q[1]!, radius_m: c.radius, planes: []}, collider, 0, sampleClothCollider);
       if (!apply) return -sample.distance_m;
-      if (!(dot3(sample.normal, c.normal) > 0)) throw new Error(`Cloth rod contact ${c.key} crossed collider ${c.colliderIndex} within the step`);
+      // Crossed when the step's path (the rod vertex, or the segment's centreline) enters the solid.
+      const [a, b] = [c.vertices[0]!, c.vertices[g.shape === 'segment-collider' ? 1 : 0]!], tolerance = Math.max(1e-10, c.radius*1e-6);
+      if (g.shape === 'point-collider' ? pathEntersCollider(collider, point3(this.old, a), q[0]!, this.dt, tolerance) : segmentEntersCollider(collider, point3(this.old, a), point3(this.old, b), q[0]!, q[1]!, this.dt, tolerance)) throw new Error(`Cloth rod contact ${c.key} crossed collider ${c.colliderIndex} within the step`);
       if (g.shape === 'segment-collider') {const t = closestPointSegment(add3(sample.point, scale3(sample.normal, c.radius)), q[0]!, q[1]!).t; c.weights[0] = 1 - t; c.weights[1] = t;}
       const centre = lerp3(q[0]!, q[g.shape === 'segment-collider' ? 1 : 0]!, g.shape === 'segment-collider' ? c.weights[1]! : 0);
       c.normal = [sample.normal[0], sample.normal[1], sample.normal[2]];
