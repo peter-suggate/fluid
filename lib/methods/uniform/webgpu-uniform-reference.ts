@@ -911,7 +911,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const bedSlopeSlots = uniformBedSlopeBakeCapacity([nx, ny, nz], uniformBedSlopePartialColumns(this.solidMask.words, [nx, ny, nz], address.boxPage.map(p => 32 * p) as [number, number, number]));
     this.solidBedSlopeBaseWord = solidScratch.bedSlopeBaseWord;
     this.solidBedSlopeWords = solidScratch.bedSlopeWords;
-    const boundaryField = this.voxelCollision ? undefined : proceduralSolidField(scene), boundaryImage = boundaryField?.pack();
+    // The sampler keys bricks by world cell (umBoundaryRecord: lattice cell
+    // plus 32 x the frame page), where the box's cells sit at its window page
+    // (boxPage, as the mask places them); the field's bricks are box cells.
+    const boundaryField = this.voxelCollision ? undefined : proceduralSolidField(scene), boundaryImage = boundaryField?.pack(this.boundaryBrickOffset());
     if (boundaryField && (boundaryField.source.dimensions.some((v,a)=>v!==this.containerCells[a])
       || boundaryField.source.cellSize_m.some((v,a)=>Math.abs(v-[scene.container.width_m/this.containerCells[0],scene.container.height_m/this.containerCells[1],scene.container.depth_m/this.containerCells[2]][a]!)>1e-9)))
       throw new Error("Procedural boundary lattice changed; regenerate the procedural solid at this resolution");
@@ -1572,6 +1575,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * demote would write (uniformBulkStartRecords), on the address that stores
    * every page the residency does. The vertex phi on that address is the
    * upload's (initializeVolumeAndTerrain): it holds a D page's own vertices. */
+  /** The procedural boundary's brick-key offset: 4 bricks a box page (eight-cell bricks, 32-cell pages). */
+  private boundaryBrickOffset():[number,number,number]{const [x,y,z]=this.address.boxPage;return [4*x!,4*y!,4*z!];}
   /** V2d: the start's BULK16 pages within the closure reach of the liquid's
    * surface at build, v T_hold plus the closure margin (uniformBulkStartShell). */
   private bulkStartShell(bulk:readonly (readonly [number,number,number])[],cells:readonly number[]):number{
@@ -3770,7 +3775,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Reject the combined geometry transaction before moving cloth ownership
     // or source clocks. A refused solid edit leaves accepted cloth untouched.
     if ((scene.solidBoundary?.collision === "voxels") !== this.voxelCollision) throw new Error("Procedural collision changed; reset the scene to apply it");
-    const boundaryImage = this.voxelCollision ? undefined : proceduralSolidField(scene)?.pack();
+    const boundaryImage = this.voxelCollision ? undefined : proceduralSolidField(scene)?.pack(this.boundaryBrickOffset());
     if ((boundaryImage?.length ?? 0) > this.solidBoundaryCapacity) throw new Error("Procedural boundary capacity changed; reset the scene to apply it");
     this.sculptCollision.validate(this.sculptWords(scene));
     packRigidBodyCutAtlas(scene.rigidBodies,GPU_RIGID_BODY_CAPACITY);

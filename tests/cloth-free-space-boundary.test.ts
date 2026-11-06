@@ -8,7 +8,9 @@ import { advanceRigidBodies, initializeRigidBody } from '../lib/core/rigid-body'
 import { uniformPagePoolLayout } from '../lib/methods/uniform/uniform-page-pool';
 import { uniformLatticeAddress } from '../lib/methods/uniform/uniform-lattice-address';
 import { uniformWindowDerivedWords, uniformWindowWorldWGSL } from '../lib/methods/uniform/uniform-window-address';
-import { withUniformDevice } from './helpers/uniform-geometric';
+import { createUniformSolver, readUniformFields, withUniformDevice } from './helpers/uniform-geometric';
+import { bakeProceduralSolid, proceduralSolidField } from '../lib/core/procedural-solid';
+import { fluidLatticeVertexPhi } from '../lib/core/initial-liquid-lattice';
 
 function scene() {
   const s = cloneScene(defaultScene);
@@ -69,5 +71,45 @@ ${uniformWindowWorldWGSL(i => `data[32u*record+${i}]`, 'probe')}
       assert.deepEqual([...new Uint32Array(read.getMappedRange())], [0,1,1,1,1,1, 0,1,1,1,0,1, 0,1,0,0,0,0, 0,0,0,0,0,0]);
       read.unmap();
     } finally {input.destroy(); output.destroy(); read.destroy();}
+  });
+});
+
+// Free space places the box at a window page (sceneFluidBoxPage), and the GPU
+// sampler keys procedural bricks by world cell: the bricks are uploaded at that
+// page. Keyed at the box's own cells the sampler found no brick, every cut
+// cell fell back to the half-solid voxel mask, and a wet-cloth source's seed
+// lost 3% of its liquid (dam_break_nonlinear_drag_small: 18739 cells of 19255).
+test('free space GPU seed reads its procedural walls at the box page: a cavity seeds its open volume', {skip: !process.env.WEBGPU_NODE_MODULE}, async () => {
+  const s = cloneScene(defaultScene), n = 48, h = .01, r = 6;
+  s.container = {width_m: n*h, height_m: n*h, depth_m: n*h, top: 'open', fillFraction: 0, fluidWallMode: 'free-slip', boundary: 'free-space', vessel: 'none'};
+  s.voxelDomain = {finestCellSize_m: h, brickSize_cells: 8}; s.rigidBodies = []; s.scenery = undefined;
+  Object.assign(s, bakeProceduralSolid([n, n, n], [h, h, h], ([x, y, z]) => r-Math.hypot(x-24, y-24, z-24)));
+  s.fluid = {...s.fluid, initialCondition: 'tank-fill', initialLiquidVolumes: [{shape: 'sphere', center_m: {x: 0, y: 24*h, z: 0}, radius_m: r*h}]};
+  assert.ok(sceneFluidBoxPage(s).some(v => v > 0));
+  const field = proceduralSolidField(s)!, phi = fluidLatticeVertexPhi(s), K = 8;
+  await withUniformDevice('free-space procedural seed', async device => {
+    const solver = await createUniformSolver(device, s);
+    try {
+      // The lattice is whole pages; the box (and its field) its first n cells an axis.
+      const f = await readUniformFields(device, solver), {nx, ny} = solver.info, X = nx+1;
+      assert.equal(phi.length, (nx+1)*(ny+1)*(solver.info.nz+1));
+      let gpu = 0, expected = 0, worst = 0;
+      for (const v of f.density) gpu += v;
+      for (let z = 0; z < n; z++) for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+        const density = f.density[x+nx*(y+ny*z)]!, open = field.open([x, y, z]);
+        if (open === undefined) continue;
+        let wet = 0;
+        for (let i = 0; i < K**3; i++) {
+          const q = [(i%K+.5)/K, (Math.floor(i/K)%K+.5)/K, (Math.floor(i/K/K)+.5)/K]; let v = 0;
+          for (let m = 0; m < 8; m++) { const e = [m&1, (m>>1)&1, m>>2]; v += phi[x+e[0]!+X*(y+e[1]!+(ny+1)*(z+e[2]!))]!*e.reduce((w, t, a) => w*(t ? q[a]! : 1-q[a]!), 1); }
+          if (v < 0) wet++;
+        }
+        const cell = open*wet/K**3; expected += cell; worst = Math.max(worst, Math.abs(density-cell));
+      }
+      const exact = 4/3*Math.PI*r**3;
+      assert.ok(worst < .05, `cut-cell seed density differs from open x fill by ${worst}`);
+      assert.ok(Math.abs(gpu-expected) < .005*expected, `GPU seed ${gpu} cells, open x fill ${expected}`);
+      assert.ok(Math.abs(gpu-exact) < .03*exact, `GPU seed ${gpu} cells of the cavity's ${exact}`);
+    } finally { solver.destroy(); }
   });
 });

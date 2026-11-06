@@ -1,5 +1,5 @@
 import { sourceInitialBounds } from '../cloth/source-initial';
-import { proceduralSolidField } from "./procedural-solid";
+import { proceduralSolidField, sampleSolidNodes } from "./procedural-solid";
 import { initialHeightFieldHeight } from "./initial-height-field";
 import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
   initialLiquidVolumesSignedDistance, baseInitialLiquidFractionAtCell, damBreakBoxContains, initialLiquidFractionAtCell, sceneDamBreakBox,
@@ -30,7 +30,67 @@ export function initialLiquidVertexPhi(scene: SceneDescription, dimensions: read
     const i = x+(nx+1)*(y+(ny+1)*outputZ);
     phi[i] = buried[i] ? empty : sample(x, y, sliceZ ?? outputZ, outputZ);
   }
+  if (sliceZ === undefined) {
+    const X = nx+1, Y = ny+1;
+    const walls = proceduralWallContinuation(scene, dimensions, (x, y, z) => phi[x+X*(y+Y*z)]!, (x, y, z) => buried[x+X*(y+Y*z)] === 1);
+    for (const [i, value] of walls) phi[i] = value;
+  }
   return phi;
+}
+
+/**
+ * The t=0 phi continues through a procedural solid's wall as it does through
+ * a body's contact face (initial-liquid-contact.test.ts; Batty, Bertails and
+ * Bridson 2007): a cut cell measures its open fraction times phi's fill, so
+ * an unburied vertex inside the sampled solid takes the liquid side's value,
+ * not the analytic shape's there. An authored liquid bounded by the wall's own
+ * surface (a source CSG intersected with its container) would otherwise read
+ * air on the wall's side of every cut cell and count the cell's solid part
+ * twice. The value is phi's trilinear sample one cell past the wall along the
+ * field's normal, over the corners on the open side (field >= 0), from the
+ * analytic phi (`phiAt`, the vertices `buriedAt` names excluded): constant
+ * extension along the normal. The continued values by vertex index
+ * (x + (nx+1)(y + (ny+1)z) on `dimensions`), from the uncontinued phi.
+ */
+export function proceduralWallContinuation(scene: SceneDescription, dimensions: readonly [number, number, number],
+  phiAt: (x: number, y: number, z: number) => number, buriedAt: (x: number, y: number, z: number) => boolean): Map<number, number> {
+  const continued = new Map<number, number>(), field = proceduralSolidField(scene);
+  if (!field) return continued;
+  const [nx, ny, nz] = dimensions, X = nx+1, Y = ny+1;
+  // The field at a vertex: a shared node of its incident cells' bricks.
+  const node = (x: number, y: number, z: number) => {
+    for (let k = 0; k < 8; k++) {
+      const cell: [number, number, number] = [x-(k&1), y-((k>>1)&1), z-((k>>2)&1)];
+      if (cell.some((v, a) => v < 0 || v >= dimensions[a]!)) continue;
+      const b = field.at(cell);
+      if (b) return sampleSolidNodes(b.values, [x-(cell[0]>>3)*8, y-(cell[1]>>3)*8, z-(cell[2]>>3)*8]);
+    }
+    return undefined;
+  };
+  // Only a brick's nodes can lie inside a cut: a solid brick's are buried or on its face.
+  const seen = new Set<number>();
+  for (const brick of field.source.bricks) for (let n = 0; n < 729; n++) {
+    const x = brick.origin[0]+n%9, y = brick.origin[1]+Math.floor(n/9)%9, z = brick.origin[2]+Math.floor(n/81);
+    if (x > nx || y > ny || z > nz) continue;
+    const i = x+X*(y+Y*z);
+    if (seen.has(i)) continue; seen.add(i);
+    const s = node(x, y, z);
+    if (!s || !(s[3] < 0) || buriedAt(x, y, z)) continue;
+    const g = Math.hypot(s[0], s[1], s[2]);
+    if (!(g > 1e-12)) continue;
+    const reach = -s[3]/g+1, q = [x+reach*s[0]/g, y+reach*s[1]/g, z+reach*s[2]/g];
+    const c = q.map((v, a) => Math.min(dimensions[a]!-1, Math.max(0, Math.floor(v))));
+    let sum = 0, weight = 0;
+    for (let k = 0; k < 8; k++) {
+      const v = [c[0]!+(k&1), c[1]!+((k>>1)&1), c[2]!+((k>>2)&1)] as const;
+      if (buriedAt(v[0], v[1], v[2]) || (node(v[0], v[1], v[2])?.[3] ?? 0) < 0) continue;
+      const w = [0, 1, 2].reduce((m, a) => m*((k>>a)&1 ? q[a]!-c[a]! : 1-(q[a]!-c[a]!)), 1);
+      if (w <= 0) continue;
+      sum += w*phiAt(v[0], v[1], v[2]); weight += w;
+    }
+    if (weight > 1e-6) continued.set(i, sum/weight);
+  }
+  return continued;
 }
 
 /** initialLiquidVertexPhi at a vertex no solid buries: x, y, z its lattice
@@ -631,7 +691,10 @@ export function fluidLatticePagedVertexPhi(scene: SceneDescription, edge: number
     return true;
   };
   const sample = vertexPhiSampler(scene, cells, boxUnionVertexPhi(scene, cells, closed, undefined, true));
-  const inner = (x: number, y: number, z: number) => Math.fround(buried(x, y, z) ? empty : sample(x, y, z, z));
+  const analytic = (x: number, y: number, z: number) => Math.fround(buried(x, y, z) ? empty : sample(x, y, z, z));
+  // Continued through procedural walls as initialLiquidVertexPhi is (proceduralWallContinuation).
+  const walls = proceduralWallContinuation(scene, cells, analytic, buried);
+  const inner = (x: number, y: number, z: number) => Math.fround(walls.get(x+(cx+1)*(y+(cy+1)*z)) ?? analytic(x, y, z));
   const same = nx === cx && ny === cy && nz === cz, cellHeight = c.height_m/cy, rows = c.top === "open" ? ny : cy;
   const pages: [number, number, number] = [Math.ceil(nx/edge), Math.ceil(ny/edge), Math.ceil(nz/edge)], [px, py, pz] = pages, n = edge+1;
   const at = new Map<number, Float32Array>();

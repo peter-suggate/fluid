@@ -162,14 +162,18 @@ export class ProceduralSolidField {
   }
   sample(p: V3) { const b = this.at(p); return b ? sampleSolidNodes(b.values, b.local) : undefined; }
   open(c: V3) { const b = this.at(c); return b ? solidNodesOpen(b.values, b.local.map(v => v + 0.5) as unknown as V3, [1, 1, 1]) : undefined; }
-  /** Relative pointers so the image can be appended to the existing solid buffer. */
-  pack(): Uint32Array<ArrayBuffer> {
+  /** Relative pointers so the image can be appended to the existing solid buffer.
+   * brickOffset: added to every brick key, for a reader that addresses bricks
+   * in a frame whose origin is not the field's lattice origin (a solver whose
+   * box sits at a window page: its world cell is the lattice cell plus 32 x
+   * that page, and its brick 4 x that page further). */
+  pack(brickOffset: V3 = [0, 0, 0]): Uint32Array<ArrayBuffer> {
     let slots = 1; while (slots < 2 * this.bricks.size) slots *= 2;
     const stride = PROCEDURAL_SOLID_RECORD_WORDS, image = new Uint32Array(4 + slots * 4 + this.bricks.size * stride), floats = new Float32Array(image.buffer);
     image[0] = slots - 1; let record = 4 + slots * 4;
     const minimum=[Infinity,Infinity,Infinity],maximum=[-Infinity,-Infinity,-Infinity];
     for (const [key, b] of this.bricks) {
-      const [x, y, z] = key.split(",").map(Number) as [number, number, number];
+      const [x, y, z] = key.split(",").map((v, a) => Number(v) + brickOffset[a]!) as [number, number, number];
       [x,y,z].forEach((v,a)=>{minimum[a]=Math.min(minimum[a]!,v);maximum[a]=Math.max(maximum[a]!,v+1);});
       let slot = hash(x, y, z) & (slots - 1);
       while (image[4 + slot * 4 + 3]) slot = (slot + 1) & (slots - 1);

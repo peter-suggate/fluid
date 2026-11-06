@@ -3,7 +3,7 @@ import test from "node:test";
 import { bakeProceduralSolid, ProceduralSolidField, proceduralSolidField, proceduralSolidKey, rebaseProceduralSolid, sampleSolidNodes, solidPlaneOpen, validateProceduralSolid } from "../lib/core/procedural-solid";
 import { nbflipDomain } from "../lib/core/nbflip-paper-scenes";
 import { sceneWithSolidStroke } from "../lib/core/solid-world";
-import { initialLiquidCellVolumes } from "../lib/core/initial-liquid-lattice";
+import { initialLiquidCellVolumes, initialLiquidVertexPhi } from "../lib/core/initial-liquid-lattice";
 
 const dimensions = [16, 16, 16] as const, h = 0.02;
 const plane = bakeProceduralSolid(dimensions, [h,h,h], ([x,y,z]) => y - 8 + x/16 + z/32);
@@ -61,6 +61,28 @@ test("initial liquid capacity uses the same surface as pressure instead of closi
   const s=scene(); s.fluid.initialLiquidVolumes=[{shape:"box",min_m:{x:-.16,y:0,z:-.16},max_m:{x:.16,y:.32,z:.16}}];
   const volume=initialLiquidCellVolumes(s,dimensions).volume;
   close(volume[8+16*7]!,0.546875);
+});
+
+// The fluid measures a cut cell as its open fraction times phi's fill, so the
+// seed phi continues through the wall (initial-liquid-contact.test.ts). A
+// liquid bounded by the wall's own surface (a source CSG intersected with its
+// container) read air inside the wall and lost its cut cells' solid part twice:
+// this cavity measured 624 cells of its 697 that way.
+test("liquid bounded by a procedural wall continues through it: cut cells measure their open part", () => {
+  const r=5.5,s=nbflipDomain("procedural-cavity",dimensions,h,60,0,dimensions,1/60);
+  Object.assign(s,bakeProceduralSolid(dimensions,[h,h,h],([x,y,z])=>r-Math.hypot(x-8,y-8,z-8)));
+  s.fluid.initialCondition="tank-fill";s.fluid.initialLiquidVolumes=[{shape:"sphere",center_m:{x:0,y:8*h,z:0},radius_m:r*h}];
+  const phi=initialLiquidVertexPhi(s,dimensions),field=proceduralSolidField(s)!,X=17,K=8;
+  let measured=0;
+  for(let z=0;z<16;z++)for(let y=0;y<16;y++)for(let x=0;x<16;x++){
+    const open=field.open([x,y,z])!;if(!(open>0))continue;let wet=0;
+    for(let i=0;i<K**3;i++){const q=[(i%K+.5)/K,(Math.floor(i/K)%K+.5)/K,(Math.floor(i/K/K)+.5)/K];let v=0;
+      for(let m=0;m<8;m++){const e=[m&1,(m>>1)&1,m>>2];v+=phi[x+e[0]!+X*(y+e[1]!+X*(z+e[2]!))]!*e.reduce((w,t,a)=>w*(t?q[a]!:1-q[a]!),1);}
+      if(v<0)wet++;}
+    measured+=open*wet/K**3;
+  }
+  const exact=4/3*Math.PI*r**3;
+  assert.ok(Math.abs(measured-exact)<.03*exact,`cavity measures ${measured} cells of ${exact}`);
 });
 
 test("plane integration handles anisotropic boxes, face areas and opposite sides", () => {
