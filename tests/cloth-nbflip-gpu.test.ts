@@ -146,12 +146,12 @@ for(const clothY of [.175,.4])test(`moving rounded clamp preserves aperture-norm
    assert.ok(Math.abs(fiber-state.solidVolume_m3.reduce((a,b)=>a+b,0))<1e-15,'hard aperture must not erase invariant fiber volume');
    for(let v=0;v<state.dryMass_kg.length;v++)assert.ok(Math.abs(clothCellWeights(fields,state.positions_m.subarray(3*v,3*v+3)).reduce((sum,c)=>sum+c.weight,0)-1)<1e-12);
    if(clothY===.175){
-    clampCoupling=new UniformClothGridCoupling(fields.device,fields);await clampCoupling.initialize();clampCoupling.prepare({...step,identity:{...step.identity,tick:1,time_s:.001}});
+    clampCoupling=new UniformClothGridCoupling(fields.device,fields);await clampCoupling.initialize();clampCoupling.prepare({...step,currentHardGeometry:true,identity:{...step.identity,tick:1,time_s:.001}});
     frame.setPhysicsPlugins([{id:clampCoupling.id,encodeSupport:e=>clampCoupling!.encodeSupport(e),encodeForces:(e,dt)=>clampCoupling!.encodeForces(e,dt),encodeAfterProjection:e=>clampCoupling!.encodeAfterProjection(e)}]);
    }
    frame.requestNarrowBandVolumeProbe();assert.ok(solver.advanceTo(.002,moving));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);
    if(clampCoupling){
-    await clampCoupling.finish();const stencil=prepareUniformClothStencil(fields,step),pairBuffer=(clampCoupling as unknown as {buffers:GPUBuffer[]}).buffers.find(b=>b.label==='Cloth pair impulses')!;
+    await clampCoupling.finish();const stencil=prepareUniformClothStencil(fields,step),pairBuffer=clampCoupling.pairImpulses!;
     const pairs=await readMixedBuffer(device,pairBuffer);let closedLinks=0;
     stencil.coordinates.forEach((p,i)=>{
      const faceY=fields.origin_m[1]+(p[1]+1)*fields.cellSize_m[1],x=fields.origin_m[0]+(p[0]+.5)*fields.cellSize_m[0],z=fields.origin_m[2]+(p[2]+.5)*fields.cellSize_m[2];
@@ -166,7 +166,7 @@ for(const clothY of [.175,.4])test(`moving rounded clamp preserves aperture-norm
    await observe(2);
    const held=moving.map(body=>({...body,linearVelocity_m_s:{x:0,y:0,z:0}}));
    for(let tick=3;tick<=6;tick++){
-    if(clampCoupling)clampCoupling.prepare({...step,physics:{solveSolid:false},identity:{...step.identity,tick:tick-1,time_s:(tick-1)*.001}});
+    if(clampCoupling)clampCoupling.prepare({...step,currentHardGeometry:true,physics:{solveSolid:false},identity:{...step.identity,tick:tick-1,time_s:(tick-1)*.001}});
     frame.requestNarrowBandVolumeProbe();assert.ok(solver.advanceTo(tick*.001,held));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);if(clampCoupling)await clampCoupling.finish();await observe(tick);
    }
    for(const sample of history)assert.ok(Math.abs(sample.phiVolume-initialLedger)<cellVolume*.01,`step ${sample.step}: native phi volume ${sample.phiVolume} disagrees with paired ledger ${initialLedger}; history=${JSON.stringify(history)}`);

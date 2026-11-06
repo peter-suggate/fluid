@@ -1313,7 +1313,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // Collider poses for this step are already published: resample the
       // hard aperture basis only when hard geometry can actually move.
       let mark=clothPhase();
-      if(bodies.length||this.scene.rigidBodies.length||(this.scene.wetClothSource?.scripts.length??0)>0)await this.clothWaterExchanges[i]!.refreshApertures(step);
+      const currentHardGeometry=bodies.length>0||this.scene.rigidBodies.length>0||(this.scene.wetClothSource?.scripts.length??0)>0;
+      if(currentHardGeometry)await this.clothWaterExchanges[i]!.refreshApertures(step);
       mark=clothPhase('apertures',mark);
       if(this.disposed)throw new Error('Cloth fluid preparation was disposed');
       const cohesionPairs=await this.prepareClothCohesionPairs(runtime,this.clothWaterExchanges[i]!,bodies);pairs.push([...cohesionPairs]);
@@ -1321,7 +1322,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const g=this.scene.fluid.gravity_m_s2;
       const solidPredictorVelocity_m_s=await runtime.prepareNonFluidPredictorAsync(dt_s,{gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
       mark=clothPhase('predictor',mark);
-      this.clothCouplings[i]!.prepare({...step,solidPredictorVelocity_m_s});
+      this.clothCouplings[i]!.prepare({...step,solidPredictorVelocity_m_s,currentHardGeometry});
       clothPhase('couplingPrepare',mark);
     }
   }
