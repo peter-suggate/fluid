@@ -296,3 +296,71 @@ re-reduction of existing traces and runs, plus one `--cpu-prof` run
   - So when Lane S's block-local launches cut the GPU side, the CPU
     bound falls with the dispatch count, at about 11 µs per removed
     dispatch.
+
+## Round 5: halo fusion outside pressure — measured, not built
+
+All runs are one each, 60 steps, `--every=60 --pipelined`, from clean
+`git archive HEAD` (d4769214) exports. The metric is steadyMedian_ms.
+
+### Extension hierarchy: knockouts
+
+Env-gated scratch knockout in the hierarchy encode, 8x8x4 drop=2:
+
+| variant | launches removed | steady median ms | delta |
+| --- | --- | --- | --- |
+| base | 0 | 14.18 | |
+| fuse: restrict 16h/32h and prolong 16h/8h skipped (what halo fusion of the block-local restrict and the 1-cell-halo prolong would remove) | 4 | 14.07 | -0.10 |
+| all: the whole hierarchy (restrict x3, sweep x3, prolong x3) skipped | 9 | 13.41 | -0.77 |
+
+- "all" is not a clean bound. With the levels left unwritten, the physics
+  changes downstream (drift flips sign).
+- The fusable part is about 0.10 ms. That is the same as the run-to-run
+  noise and below the 0.3 ms bar.
+- The three 32h sweeps are cross-block: each reads the 26 neighbour blocks'
+  previous sweep. Fusing them needs a 3-block halo, which means recomputing
+  the restrict over 7^3 blocks. Not pursued.
+
+### Slab sort: 24 launches to 3, built, then reverted
+
+slabSortDense merged each dense cell (over 256 records) inside the one
+workgroup that finds its start, with workgroup barriers between widths. It
+replaced the 22 slabSortMerge launches.
+
+- The GPU regression passed: records, links and bins were bit-identical to
+  the per-width reference path, with dense cells present.
+- Types were clean and unit tests passed, apart from the known foreign
+  failure.
+
+| scene | HEAD | slabSortDense | delta |
+| --- | --- | --- | --- |
+| drop=2 | 14.18 | 14.07 | -0.11 |
+| rest | 2.88 | 2.90 | +0.01 |
+| drop=8 | 17.47 (p95 18.49) | 18.29 (p95 20.87) | +0.82 |
+| seep 300 | 30.40 | 29.24 | -1.16 (live particles 105878 vs 98168: the trajectories diverged, not comparable) |
+| letters 120 | 51.10 | 50.70 | -0.40 |
+
+- At drop=2 no cell is dense. All 22 merges early-exit, so the 0.11 ms they
+  cost is pure launch cost: **about 5 us per chained, empty launch**.
+- At drop=8, dense cells exist, and one workgroup serialises log2(count)
+  global-memory merge rounds per cell. Each round is a binary search over
+  full records. The old per-width launches spread every round over 1024
+  workgroups. slabSort's comment already says why it leaves dense cells to
+  dispatch-wide rounds ("one brick cannot serialize them").
+- Splitting a dense cell into aligned tiles merged in parallel would still
+  need log2(capacity / tile) global rounds. That is about 11 launches, or
+  0.05 ms. The patch is kept in scratch and is not committed.
+
+### Consequence for the remaining families
+
+At about 5 us per chained launch, the planned fusions save roughly:
+
+| family | launches | saving |
+| --- | --- | --- |
+| advect | 15 to 4 | ~0.05 ms |
+| redistance | 14 to 5 | ~0.05 ms |
+| momentum and P2G | 15 to 5 | ~0.05 ms |
+| the whole 475-dispatch frame | | ~2.4 ms of launch cost in total |
+
+Each family is below the 0.3 ms bar and inside the single-run noise. The
+step's time is in the work of a few stages, not in the launch count, so
+none of them were built.
