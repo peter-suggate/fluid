@@ -1175,3 +1175,53 @@ every class.
 not set the slow rows' rate. Per the judge's rule, I am reporting and
 stopping without stacking knobs. Nothing has landed: the rule exists only
 in the scratch tree, under FLUID_SERIES.
+
+## Round 11, step 1-2: the block-local critical path on drop=2 (estimate fails the gate, not built)
+
+**Measurements.** All are from a clean export of d438a6d8, on 8x8x4.
+- The dispatch graph is a scratch recorder of one advance, at step 29, in
+  check mode. rest has 140 dispatches; drop=2 has 432, at a RAW dependency
+  depth of 307.
+- The Metal System Trace is one capture of drop=2 with
+  tools/profile-probe-xctrace.ts: 30 steps, pipelined, 27 advances reduced.
+  - Per advance, the wall median is 13.90 ms (mean 14.79) and GPU busy is
+    13.47 ms.
+  - The three shared-schedule kicks take 9.61 ms. Gaps of 2 us or more
+    total 1.75 ms on average, 1.50 ms of it in 0.7 gaps over 50 us: the
+    known late-submit stall.
+  - The traced probe's steadyMedian was 12.95 ms.
+- As in round 6, the trace cannot split a shared kick by stage. Per-stage
+  GPU time below therefore comes from round 4's kernel timer, which has a
+  65.5 us quantum.
+
+**Excess dispatches over rest, by stage.** Each row gives the excess over
+rest, the workgroups per launch, whether the stage's dependency is
+block-local, and the boundaries one workgroup per block could remove.
+
+| stage | excess | workgroups a launch | block-local? | removable, generous |
+|---|---|---|---|---|
+| pressure arena (150 against 104: one more Krylov step and V-cycle) | 46 | 235 | no. Each band sweep, residual and restrict reads the neighbour tiles' previous step; the coarse levels are the same; Krylov reduces globally | 24 at most, only with halo-overlapped fine smoothing (redundant work); the coarse tail is bounded under 1 ms (round 7) |
+| NB-FLIP slabSortMerge | 22 | 1024 | yes, if a long cell's merge fits one workgroup | 20 |
+| frame plan (seed, dilate0-2 x2, local speed, tile error) | 16 | 384 | no. Each dilation reads the neighbour's previous one | 4 |
+| mixed surface advect | 15 | 1228 | partly | 11 |
+| layout builder | 11 | 187 (scan chain) | global scan | 10 |
+| ownership census | 10 | 263 | partly | 7 |
+| extension (paired 8, hierarchy 9, publish 4) | 21 | 256-1028 | sweeps read the neighbour's sweep | 14 |
+| remap, momentum, resolve, forces, geometry and the rest | 151 | | mostly neighbour stencils | 7 |
+| **total** | **292** | | | **about 97** |
+
+**Estimate.**
+- **Removable chains:** about 97 dependent boundaries at about 5 us each
+  (round 4's empty-launch microbenchmark of 4.6-5.2 us; round 6's drain
+  share of about 14% of kick time) is **about 0.5 ms**. At 10 us a
+  boundary it would be about 1.0 ms.
+- **Ceilings:** removing every one of the 292 excess boundaries would save
+  1.46 ms, and every one of the frame's 432 would save 2.16 ms. Both are
+  under the 3 ms gate.
+- **Why:** the 11 ms gap is about 85% in-kernel latency. Kernels are
+  resident at 9-12% occupancy and run dependent-load chains on few items
+  (rounds 4 and 6). Removing launch boundaries does not shorten that, and
+  this frame has no long block-local run: its longest is the 22-pass slab
+  sort.
+
+**Per the gate:** the estimate is under 3 ms, so nothing was built.
