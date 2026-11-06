@@ -769,3 +769,96 @@ the extension's two slot arrays and the two old-payload halves (det3).
 - The extension is outside my files (uniform-mixed-extension.ts) and is
   for routing. nbFinish's mid-pass atomicLoad was not reached as a cause:
   records match through step 9.
+
+**Addendum.** The seed budget does not bind on drop=2, so 2a17b693
+changes no drop=2 result. The binding case is exercised only by its
+regression test (tests/nbflip-seed-rank.test.ts).
+
+## Round 10 (2026-11-07): which extension dispatch diverges (half round, nothing landed)
+
+**Method.**
+- Scratch tree only. Every extension pass is wrapped so that after each
+  dispatch the pass ends, the whole slot buffer (both arrays), the held
+  values and the work words are copied, and the pass starts again with
+  the same pipeline and bindings.
+- At chosen points in the frame, the simulation velocity (its h texture
+  and its 4h base), phase, departure and both negative-wall buffers are
+  copied as well.
+- drop=2, two runs in one process, step 9. Run 1's copy is compared word
+  for word with run 0's at the same point.
+- Step 9 encodes one swept extension, the tail's pair:
+  - marks: 2 dispatches;
+  - seed: 3 dispatches;
+  - one sweep: 3 dispatches;
+  - then finishPair: restriction, hierarchy and publication.
+
+**Result: no extension dispatch diverges on identical inputs.**
+- At the tail's entry, the slot array the sweep finalises (array 1), the
+  held values and the work words match between runs.
+- The first dispatch, the h-tier seed, already writes a few words of
+  array 1 that differ. Example: -0.0106668836 against -0.0106668901.
+- The seed copies the physical velocity at source faces
+  (umSeedState / umPhysical) and reads no neighbour slot. Its input
+  differs: in the same runs the simulation velocity's 4h base differs in
+  27 to 275 words, about 1e-7 to 6e-5 relative, before the extension
+  starts.
+- Every later dispatch (sweep, restriction, hierarchy, publish) only
+  carries those differences forward.
+
+**Where the velocity first differs (step 9, 4h base words differing).**
+
+| point in the frame | base words |
+| --- | --- |
+| retainPair, before forces | 0 |
+| after forces | 0 |
+| after the transfer to pressure and the warm start | 0 |
+| after band.encodeSolve | 0 |
+| after projection "project" | 0 |
+| after split.transfer.encodeToSimulation | 150 |
+| after band.encodeProject | 471 |
+| tail extension entry | 275 (another run) |
+
+- The simulation velocity is unchanged until encodeToSimulation copies
+  the projected field back from pressure ownership. So the projected
+  field already differs in pressure ownership, or the transfer itself
+  differs.
+  - The size, about 1e-5 relative, looks like a solve iterate, not the
+    rounding of a copy.
+  - Neither was split further inside the half-round cap.
+- The pressure solve (uniform-pressure-arena.ts and the band) is Lane S's.
+- The next probe would compare the pressure-ownership velocity and
+  pressure after band.encodeSolve and after "project". That finds whether
+  the solve or the transfer is the source.
+
+**Mechanisms checked against the four candidates.**
+- **Unordered write:** none observed in the extension. With identical
+  inputs, each dispatch would give identical outputs; no float atomics
+  exist.
+- **Stale scratch or the unused payload half:** the stage scratch's
+  array 0 holds another stage's words at every checkpoint:
+  - small integers at stride 5, which is momentum's trace list
+    (UniformMixedMomentum traceScratch shares the stage scratch);
+  - they differ between runs because that list is filled in atomicAdd
+    order.
+
+  No extension dispatch's output depends on them: array 1 and the held
+  values match at entry, and the seed's differing words match the
+  velocity input. This is not a stale read: the regional retain is
+  invalidated before those writers run (invalidateRetained after the
+  head), and the held tail seeds its halo regions.
+- **Halo moves in place:** they did not appear. Sweep outputs differ only
+  where seeded inputs already differ.
+- **Job list in fill order:** the work words match between runs.
+- Raw h-texture and phase words also differ between runs, from about
+  4,000 up to 389,376 words, with values such as 0 against -8 or 1e-8.
+  They change from run to run even at retainPair, so they are dead texels
+  of the slotted textures, not live values. They were not used as
+  evidence.
+
+**Conclusion.**
+- The velocity extension is deterministic given its inputs. Nothing to
+  fix there.
+- The step-9 divergence on drop=2 enters at the pressure-to-simulation
+  handoff (after the projection, at encodeToSimulation) and is routed to
+  Lane S.
+- The determinism thread closes here.
