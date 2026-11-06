@@ -21,6 +21,7 @@
  * geometry options do not apply, and --stats-only is implied.
  * --pure builds the pure BULK16 rest tank instead (lib/core/bulk-rest-tank-scene.ts):
  * --px/--py/--pz=N liquid pages a side (default 8/8/4); --height/--width/--depth are ignored.
+ * --drop=N (with --pure) adds a falling cube of N cells a side over the tank's -x/-z corner.
  * --pipelined keeps up to the solver's receipt ring of frames in flight, as the
  * app does: a step's ms is then the admission period, not advance + fence.
  * --kernels=<step> times every dispatch from that step on (tools/gpu-kernel-timer.ts;
@@ -70,6 +71,16 @@ const scene = sceneId !== undefined
   : sceneDocumentAtLattice(definition, { cellSize_m: cell }).scene;
 if (sceneId !== undefined && !process.argv.includes("--stats-only")) process.argv.push("--stats-only");
 assert.ok(!(pure && closed), "--pure has no throat to close");
+// --drop=N (with --pure): a cube of liquid N cells a side released 8 cells
+// above the still surface over the tank's -x/-z corner (16 cells in from
+// both walls): a local disturbance whose cost should scale with its size.
+if (option("drop") !== undefined) {
+  assert.ok(pure, "--drop needs --pure");
+  const n = Number(option("drop")); assert.ok(Number.isSafeInteger(n) && n >= 1, "--drop must be a positive integer");
+  const box = scene.fluid.initialLiquidVolumes![0]! as { min_m: { x: number; y: number; z: number }; max_m: { x: number; y: number; z: number } };
+  const x = box.min_m.x + 16 * cell, z = box.min_m.z + 16 * cell, y = box.max_m.y + 8 * cell;
+  scene.fluid.initialLiquidVolumes!.push({ shape: "box", min_m: { x, y, z }, max_m: { x: x + n * cell, y: y + n * cell, z: z + n * cell } });
+}
 if (closed) {
   // The rest gate: the throat and its mouths filled, the passage's wetted
   // start dropped (it would sit inside the wall).
