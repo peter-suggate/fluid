@@ -1,5 +1,6 @@
 import {cohesionPairValue, type ClothCohesionPair} from './cohesion';
-import {bendingPhi, finishClothMechanicalStep, hingeCoordinateDerivatives, hingeEnergy, membraneCoordinateDerivatives, membraneEnergy, rodEnergy, rodStretchCoordinateDerivatives, triangleStrain, type ClothStepOptions, type ClothStepReport} from './dynamics';
+import {ClothContactSet, clothContactWarmStart, inSolveContactUnsupported, MAXIMUM_CONTACT_ITERATIONS, rememberClothContactMultipliers} from './contact-constraints';
+import {beginClothMechanicalFinish, bendingPhi, completeClothMechanicalFinish, extendClothStepReport, finishClothMechanicalStep, hingeCoordinateDerivatives, hingeEnergy, membraneCoordinateDerivatives, membraneEnergy, rodEnergy, rodStretchCoordinateDerivatives, triangleStrain, type ClothStepOptions, type ClothStepReport} from './dynamics';
 import {bendingRigidity, membraneModulus, rodRigidity, rodSegmentInertia_kg_m2} from './material';
 import {hingeAngle, type PreparedClothTopology} from './topology';
 import type {ClothState} from './types';
@@ -26,6 +27,10 @@ import type {ClothState} from './types';
 export interface ClothNewtonReport extends ClothStepReport {
   readonly newtonIterations: number;
   readonly linearIterations: number;
+  /** 'in-solve': contacts were constraints of this minimization; otherwise the
+   * sequential post-projection ran (rods or a dynamic rigid collider). */
+  readonly contactModel: 'in-solve' | 'post-projection';
+  readonly contactIterations?: number;
 }
 
 interface BlockPattern {
@@ -35,6 +40,7 @@ interface BlockPattern {
 }
 
 const patternCache = new WeakMap<PreparedClothTopology, BlockPattern>();
+/** Contact multipliers of the previous step, by pair key: a warm start only. */
 
 function blockPattern(topology: PreparedClothTopology, cohesion: readonly ClothCohesionPair[]): BlockPattern {
   const cached = cohesion.length ? undefined : patternCache.get(topology);
@@ -132,6 +138,10 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
   const free = Uint8Array.from({length: n}, (_, i) => (topology.kinematicFixed[i] ?? 0) & 1 ? 0 : 1);
   const bendingVertex = Uint8Array.from({length: n}, (_, i) => topology.incidentRods[i]!.some(r => topology.rods[r]!.vertices.length > 2) ? 1 : 0);
   const inertia = Float64Array.from(mass, m => m/(dt*dt));
+  // Contact inside the minimization (lib/cloth/contact-constraints.ts) unless
+  // the step has rods or a dynamic rigid collider (sequential projection).
+  const colliders = options.colliders ?? [], selfCollision = options.selfCollision ?? false;
+  const contactSet = (colliders.length || selfCollision) && !inSolveContactUnsupported(topology, colliders) ? new ClothContactSet(topology, old, dt, colliders, selfCollision, options.tolerance_m ?? 1e-9, clothContactWarmStart(state)) : undefined;
   const twistEnergy = (s: number) => {
     const r = twistRod[s]!, j = twistLocal[s]!;
     return .5*topology.attachmentTwist_N_m[s]!*(twist[s]! - state.attachmentTwistTarget_rad[s]!)**2 + rodEnergy(topology, state, r, undefined, old, oldTwist, dt, j) + .5*twistInertia[s]!/(dt*dt)*(twist[s]! - oldTwist[s]! - dt*state.angularVelocity_rad_s[s]!)**2;
@@ -145,14 +155,17 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
     for (let h = 0; h < topology.hinges.length; h++) energy += hingeEnergy(topology, state, h, old, dt);
     for (let r = 0; r < topology.rods.length; r++) energy += rodEnergy(topology, state, r, undefined, old, oldTwist, dt);
     for (let s = 0; s < S; s++) if (twistFree[s]) energy += .5*topology.attachmentTwist_N_m[s]!*(twist[s]! - state.attachmentTwistTarget_rad[s]!)**2 + .5*twistInertia[s]!/(dt*dt)*(twist[s]! - oldTwist[s]! - dt*state.angularVelocity_rad_s[s]!)**2;
+    if (contactSet) energy += contactSet.energy(x);
     return energy;
   };
 
   // Gradient, the coordinate solver's own diagonal, and the bending diagonal
   // the Hessian model needs (rod bending has no assembled block).
   const gradient = new Float64Array(3*n), rodDiagonal = new Float64Array(3*n), twistGradient = new Float64Array(S), twistDiagonal = new Float64Array(S), twistSecond = new Float64Array(S);
+  const contactGradient = new Float64Array(contactSet ? 3*n : 0), contactDiagonal = new Float64Array(contactSet ? 3*n : 0), coordinateStiffness = new Float64Array(3*n);
   const evaluate = (): number => {
     let measure = 0;
+    if (contactSet) {contactGradient.fill(0); contactDiagonal.fill(0); contactSet.accumulate(x, contactGradient, contactDiagonal);}
     for (let i = 0; i < n; i++) {
       if (!free[i]) {gradient[3*i] = gradient[3*i+1] = gradient[3*i+2] = 0; continue;}
       const h = Math.max(1e-9, Math.cbrt(state.restControlVolume_m3[i]!)*1e-4);
@@ -169,6 +182,8 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
           g += (plus - minus)/(2*h); stiffness += second; rodDiagonal[k] = Math.max(0, second);
         }
         for (const j of incidentCohesion[i]!) {const d = cohesionPairValue(cohesive[j]!, x, i, axis); g += d.gradient_N; stiffness += d.diagonal_N_m;}
+        coordinateStiffness[k] = stiffness;
+        if (contactSet) {g += contactGradient[k]!; stiffness += contactDiagonal[k]!;}
         if (!Number.isFinite(g)) throw new Error(`Cloth topology degenerated at vertex ${i}`);
         gradient[k] = g;
         measure = Math.max(measure, Math.abs(g/Math.max(inertia[i]!, stiffness)));
@@ -187,7 +202,7 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
 
   const pattern = blockPattern(topology, cohesive), values = new Float64Array(9*pattern.columns.length), preconditioner = new Float64Array(9*n);
   const addBlock = (i: number, j: number, block: ArrayLike<number>, scale = 1) => {const b = 9*blockIndex(pattern, i, j); for (let q = 0; q < 9; q++) values[b + q]! += scale*block[q]!;};
-  const block = new Float64Array(9), angleGradient = new Float64Array(12);
+  const block = new Float64Array(9), angleGradient = new Float64Array(12), contactBlocks = new Float64Array(contactSet ? 9*n : 0);
   // The positive-semidefinite Hessian model. (The true Hessian, indefinite
   // where the sheet is compressed or folded, was measured as a first attempt
   // per iteration with this as fallback: no fewer iterations, slower steps.)
@@ -254,7 +269,20 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
       for (let p = 0; p < 3; p++) for (let q = 0; q < 3; q++) block[3*p + q] = pair.force_N/distance*((p === q ? 1 : 0) - delta[p]!*delta[q]!/(distance*distance));
       for (const [i, wi] of weight) for (const [j, wj] of weight) addBlock(i, j, block, wi*wj);
     }
-    for (let i = 0; i < n; i++) if (free[i] && !invert3(values, 9*pattern.diagonal[i]!, preconditioner, 9*i)) throw new Error(`Singular cloth Newton block at vertex ${i}`);
+    factor();
+  };
+  const factor = () => {
+    if (contactSet?.constraints.length) {
+      // Block Jacobi of the full model: the elastic diagonal blocks plus each
+      // vertex's own contact block (the contact operator stays matrix-free).
+      contactBlocks.fill(0); contactSet.addDiagonalBlocks(contactBlocks);
+      for (let i = 0; i < n; i++) {
+        if (!free[i]) continue;
+        const b = 9*pattern.diagonal[i]!;
+        for (let q = 0; q < 9; q++) contactBlocks[9*i + q]! += values[b + q]!;
+        if (!invert3(contactBlocks, 9*i, preconditioner, 9*i)) throw new Error(`Singular cloth Newton block at vertex ${i}`);
+      }
+    } else for (let i = 0; i < n; i++) if (free[i] && !invert3(values, 9*pattern.diagonal[i]!, preconditioner, 9*i)) throw new Error(`Singular cloth Newton block at vertex ${i}`);
   };
 
   const multiply = (input: Float64Array, output: Float64Array) => {
@@ -266,6 +294,7 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
       }
       output[3*i] = y0; output[3*i+1] = y1; output[3*i+2] = y2;
     }
+    contactSet?.multiply(input, output);
   };
   const precondition = (input: Float64Array, output: Float64Array) => {
     for (let i = 0; i < n; i++) {
@@ -360,14 +389,44 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
     x.set(startX); twist.set(startTwist);
     return false;
   };
-  let measure = evaluate(), newton = 0, linear = 0, previousNorm = Infinity;
-  while (measure >= tolerance && newton < maximumNewton) {
-    newton++;
-    const norm = Math.sqrt(dot(gradient, gradient) + dot(twistGradient, twistGradient));
-    const forcing = Math.min(.1, Math.max(1e-6, Number.isFinite(previousNorm) ? norm/previousNorm : .1));
-    previousNorm = norm;
-    if (!iterate(forcing)) break;
-    measure = evaluate();
+  let newton = 0, linear = 0;
+  // Newton on the current potential (options.iterations caps each solve).
+  // After a multiplier update at least one step is taken: the measure scales
+  // a contact's force change by every stiffness at its vertices, so a change
+  // the KKT residual still sees can hide below the gradient tolerance.
+  const minimize = (minimum = 0): number => {
+    let measure = evaluate(), previousNorm = Infinity;
+    for (let inner = 0; (measure >= tolerance || inner < minimum) && inner < maximumNewton; inner++) {
+      newton++;
+      const norm = Math.sqrt(dot(gradient, gradient) + dot(twistGradient, twistGradient));
+      const forcing = Math.min(.1, Math.max(1e-6, Number.isFinite(previousNorm) ? norm/previousNorm : .1));
+      previousNorm = norm;
+      if (!iterate(forcing)) break;
+      measure = evaluate();
+    }
+    return measure;
+  };
+  // Contacts of the inertial trajectory enter the first solve.
+  if (contactSet) {evaluate(); if (contactSet.detect(x)) contactSet.assignPenalties(coordinateStiffness);}
+  let measure = minimize();
+  if (!contactSet) return extendClothStepReport(finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, {iterations: newton, converged: measure < tolerance, maximumUpdate_m: measure}), {newtonIterations: newton, linearIterations: linear, contactModel: 'post-projection' as const});
+  // Augmented-Lagrangian outer iterations: multipliers, collider tangent
+  // planes, re-detection; then re-solve until the KKT residual, the true
+  // collider penetration and the friction lag are all below tolerance.
+  let outer = 0, contactResidual = 0, previous = Infinity;
+  for (;; outer++) {
+    const {kkt_m, friction_m} = contactSet.updateMultipliers(x), penetration = contactSet.relinearize(x), added = contactSet.detect(x);
+    contactResidual = Math.max(kkt_m, friction_m, penetration);
+    if (!added && contactResidual < tolerance) break;
+    if (outer >= MAXIMUM_CONTACT_ITERATIONS) break;
+    contactSet.assignPenalties(coordinateStiffness);
+    if (!added && contactResidual > .25*previous) contactSet.stiffen(x, tolerance);
+    previous = contactResidual;
+    contactSet.lagFriction();
+    measure = minimize(1);
   }
-  return {...finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, {iterations: newton, converged: measure < tolerance, maximumUpdate_m: measure}), newtonIterations: newton, linearIterations: linear};
+  const converged = measure < tolerance && contactResidual < tolerance;
+  rememberClothContactMultipliers(state, contactSet);
+  const cohesionReactions = beginClothMechanicalFinish(state, old, oldTwist, dt, options);
+  return extendClothStepReport(completeClothMechanicalFinish(topology, state, old, oldTwist, dt, options, {iterations: newton, converged, maximumUpdate_m: Math.max(measure, contactResidual)}, cohesionReactions, contactSet.report(x, outer + 1, contactResidual)), {newtonIterations: newton, linearIterations: linear, contactModel: 'in-solve' as const, contactIterations: outer + 1});
 }

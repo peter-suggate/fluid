@@ -328,12 +328,27 @@ export function stepCloth(topology: PreparedClothTopology, state: ClothState, dt
 /** Shared acceptance path for Float64 and GPU solvers: physical velocities,
  * CCD/reactions, reference-frame transport and conserved material volume. */
 export function finishClothMechanicalStep(topology: PreparedClothTopology, state: ClothState, old: Float64Array, oldTwist: Float64Array, dt:number, options:ClothStepOptions, solve: Pick<ClothStepReport,"iterations"|"converged"|"maximumUpdate_m">):ClothStepReport {
-  const x = state.positions_m, n = topology.vertexCount;
-  const mass = Float64Array.from(state.dryMass_kg, (m,i)=>m+topology.materials[topology.vertexMaterial[i]!]!.waterDensity_kg_m3*state.waterVolume_m3[i]!);
+  const cohesionReactions = beginClothMechanicalFinish(state, old, oldTwist, dt, options);
+  return completeClothMechanicalFinish(topology, state, old, oldTwist, dt, options, solve, cohesionReactions, resolveClothContacts(topology, state, old, dt, options.colliders ?? [], options.selfCollision ?? false));
+}
+/** First half of the acceptance path: physical velocities and cohesion
+ * reactions of the solved state. Contact (CPU reference or GPU) follows. */
+export function beginClothMechanicalFinish(state: ClothState, old: Float64Array, oldTwist: Float64Array, dt: number, options: ClothStepOptions): ReturnType<typeof cohesionSolidReactions> {
+  const x = state.positions_m;
   for (let k = 0; k < x.length; k++) state.velocities_m_s[k] = (x[k]! - old[k]!) / dt;
   for (let s = 0; s < state.twist_rad.length; s++) state.angularVelocity_rad_s[s] = (state.twist_rad[s]! - oldTwist[s]!) / dt;
-  const cohesionReactions=cohesionSolidReactions(options.cohesionPairs??[],x,dt);
-  let contacts = resolveClothContacts(topology, state, old, dt, options.colliders ?? [], options.selfCollision ?? false);
+  return cohesionSolidReactions(options.cohesionPairs ?? [], x, dt);
+}
+/** Copy a step report with more fields, keeping lazy (getter) fields lazy. */
+export function extendClothStepReport<T extends object, U extends object>(report: T, extra: U): T & U {
+  return Object.defineProperties(Object.defineProperties({}, Object.getOwnPropertyDescriptors(report)), Object.getOwnPropertyDescriptors(extra)) as T & U;
+}
+/** Second half: reactions, rod frames, control volumes and the report. The
+ * elastic energy is diagnostics, evaluated on first read from a snapshot. */
+export function completeClothMechanicalFinish(topology: PreparedClothTopology, state: ClothState, old: Float64Array, oldTwist: Float64Array, dt:number, options:ClothStepOptions, solve: Pick<ClothStepReport,"iterations"|"converged"|"maximumUpdate_m">, cohesionReactions: ReturnType<typeof cohesionSolidReactions>, contactReport: ClothContactReport):ClothStepReport {
+  const x = state.positions_m, n = topology.vertexCount;
+  const mass = Float64Array.from(state.dryMass_kg, (m,i)=>m+topology.materials[topology.vertexMaterial[i]!]!.waterDensity_kg_m3*state.waterVolume_m3[i]!);
+  let contacts = contactReport;
   if(cohesionReactions.some(r=>r.bodyId)){
     const reactions=new Map(contacts.reactions.map(r=>[r.bodyId,{...r,linearImpulse_N_s:[...r.linearImpulse_N_s] as [number,number,number],angularImpulse_N_m_s:[...r.angularImpulse_N_m_s] as [number,number,number]}]));
     for(const r of cohesionReactions)if(r.bodyId){const current=reactions.get(r.bodyId)??{bodyId:r.bodyId,linearImpulse_N_s:[0,0,0] as [number,number,number],angularImpulse_N_m_s:[0,0,0] as [number,number,number]};for(let a=0;a<3;a++){current.linearImpulse_N_s[a]!+=r.linearImpulse_N_s[a]!;current.angularImpulse_N_m_s[a]!+=r.angularImpulse_N_m_s[a]!;}reactions.set(r.bodyId,current);}
@@ -351,5 +366,8 @@ export function finishClothMechanicalStep(topology: PreparedClothTopology, state
   let kinetic = 0;
   for (let i = 0; i < n; i++) kinetic += .5 * mass[i]! * dot3(point3(state.velocities_m_s, i), point3(state.velocities_m_s, i));
   if (!x.every(Number.isFinite) || !state.velocities_m_s.every(Number.isFinite)) throw new Error("Nonfinite cloth mechanical state");
-  return { ...solve, cohesionReactions, cohesionEnergy_J:(options.cohesionPairs??[]).reduce((sum,pair)=>sum+cohesionPairValue(pair,state.positions_m).energy_J,0), elasticEnergy_J: clothElasticEnergy(topology, state), kineticEnergy_J: kinetic, contacts };
+  const snapshot: ClothState = {...state, positions_m: x.slice(), solidFraction: state.solidFraction.slice(), twist_rad: state.twist_rad.slice(), rodReferenceTwist_rad: state.rodReferenceTwist_rad.slice(), rodDirectors: state.rodDirectors.slice(), rodTangents: state.rodTangents.slice(), attachmentTwistTarget_rad: state.attachmentTwistTarget_rad.slice()};
+  let elastic: number | undefined;
+  const report = { ...solve, cohesionReactions, cohesionEnergy_J:(options.cohesionPairs??[]).reduce((sum,pair)=>sum+cohesionPairValue(pair,state.positions_m).energy_J,0), kineticEnergy_J: kinetic, contacts } as Omit<ClothStepReport, 'elasticEnergy_J'>;
+  return Object.defineProperty(report, 'elasticEnergy_J', {enumerable: true, get: () => elastic ??= clothElasticEnergy(topology, snapshot)}) as ClothStepReport;
 }

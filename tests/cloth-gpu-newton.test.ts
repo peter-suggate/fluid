@@ -89,3 +89,54 @@ test('GPU Newton-PCG converges a stiff plastic sheet and a soft-fixed, cohesive,
     } finally {pairSolver.destroy();}
   });
 });
+
+test('GPU in-solve contact matches the Float64 solve: a sheet draped on a sphere', gpu, async () => {
+  await withUniformDevice('cloth GPU Newton sphere contact', async device => {
+    const topology = prepareClothTopology(sheet(7, .01), [DEFAULT_CLOTH_MATERIAL]), a = createClothState(topology), b = createClothState(topology), solver = new GPUClothNewton(device, topology);
+    const sphere = {kind: 'sphere' as const, center_m: [.03, .978, .03] as const, radius_m: .02}, radius = .5*DEFAULT_CLOTH_MATERIAL.thickness_m;
+    try {
+      await solver.initialize();
+      let contacts = 0;
+      for (let step = 0; step < 50; step++) {
+        const options = {iterations: 64, tolerance_m: 1e-8, colliders: [sphere]}, old = b.positions_m.slice();
+        const cpu = solveClothIncrement(topology, a, .001, options), g = await solver.step(b, .001, options);
+        assert.ok(cpu.converged && g.converged, `step ${step}: ${g.maximumUpdate_m} m`);
+        assert.equal(g.contactModel, 'in-solve');
+        assert.equal(g.refinementIterations, 0, `step ${step} needed the CPU refinement`);
+        contacts = Math.max(contacts, g.contacts.contacts);
+        assert.ok(maximumDifference(a.positions_m, b.positions_m) < 1e-6, `step ${step}: positions differ by ${maximumDifference(a.positions_m, b.positions_m)} m`);
+        for (let i = 0; i < topology.vertexCount; i++) {
+          assert.ok(Math.hypot(...[0, 1, 2].map(k => b.positions_m[3*i + k]! - sphere.center_m[k]!)) - sphere.radius_m >= radius - 1e-7, `step ${step}: vertex ${i} penetrates`);
+          for (let k = 0; k < 3; k++) assert.ok(Math.abs(b.velocities_m_s[3*i + k]! - (b.positions_m[3*i + k]! - old[3*i + k]!)/.001) < 1e-9, 'velocity is that of the final positions');
+        }
+      }
+      assert.ok(contacts > 0, 'the sheet reached the sphere');
+    } finally {solver.destroy();}
+  });
+});
+
+test('GPU in-solve self contact matches the Float64 solve: a sheet falling on a fixed sheet', gpu, async () => {
+  await withUniformDevice('cloth GPU Newton self contact', async device => {
+    const h = .005, lower = sheet(5, h), upper = sheet(5, h, 1.002);
+    const data: ClothTopologyData = {
+      restPositions_m: [...lower.restPositions_m, ...upper.restPositions_m.map((v, k) => v + (k % 3 === 0 ? .4*h : k % 3 === 2 ? .3*h : 0))],
+      triangles: [...lower.triangles, ...upper.triangles.map(v => v + 25)], rodOffsets: [0], rodIndices: [], fixed: [...Array(25).fill(1), ...Array(25).fill(0)],
+    };
+    const topology = prepareClothTopology(data, [DEFAULT_CLOTH_MATERIAL]), a = createClothState(topology), b = createClothState(topology), solver = new GPUClothNewton(device, topology);
+    try {
+      await solver.initialize();
+      let selfContacts = 0;
+      for (let step = 0; step < 40; step++) {
+        const options = {iterations: 64, tolerance_m: 1e-8, selfCollision: true};
+        const cpu = solveClothIncrement(topology, a, .001, options), g = await solver.step(b, .001, options);
+        assert.ok(cpu.converged && g.converged, `step ${step}: ${g.maximumUpdate_m} m`);
+        assert.equal(g.contactModel, 'in-solve');
+        assert.equal(g.refinementIterations, 0, `step ${step} needed the CPU refinement`);
+        selfContacts = Math.max(selfContacts, g.contacts.selfContacts);
+        assert.ok(maximumDifference(a.positions_m, b.positions_m) < 1e-6, `step ${step}: positions differ by ${maximumDifference(a.positions_m, b.positions_m)} m`);
+        for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) assert.ok(b.positions_m[3*(25 + 5*j + i) + 1]! > 1 + DEFAULT_CLOTH_MATERIAL.thickness_m - 1e-7, `step ${step}: the upper sheet crossed`);
+      }
+      assert.ok(selfContacts > 0, 'the sheets met');
+    } finally {solver.destroy();}
+  });
+});

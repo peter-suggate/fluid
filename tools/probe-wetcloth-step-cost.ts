@@ -32,17 +32,17 @@ const measure = async (device?: GPUDevice) => {
     sourceOffset_m: scene.wetClothSource?.sourceOffset_m, nonlinearSolver: solver});
   if (device) await runtime.initializeGPU(device);
   const g = scene.fluid.gravity_m_s2, colliders = [...clothContainerColliders(scene), ...clothSceneStaticColliders(scene)];
-  const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number; solve: number; finish: number; submissions: number}[] = [];
+  const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number; solve: number; finish: number; contact: number; solves: number; submissions: number}[] = [];
   for (let i = 0; i < steps; i++) {
     const t0 = performance.now();
     let report;
     try {
-      report = await runtime.stepAsync(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z], ...(option('iterations') ? {iterations: Number(option('iterations'))} : {})}) as {iterations: number; gpuIterations?: number; refinementIterations?: number; linearIterations?: number; solve_ms?: number; finish_ms?: number; submissions?: number};
+      report = await runtime.stepAsync(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z], ...(option('iterations') ? {iterations: Number(option('iterations'))} : {})}) as {iterations: number; gpuIterations?: number; refinementIterations?: number; linearIterations?: number; solve_ms?: number; finish_ms?: number; contact_ms?: number; gpuSolves?: number; submissions?: number};
     } catch (error) {
       console.log(JSON.stringify({id, failedAtStep: i, error: String(error).slice(0, 160)}));
       break;
     }
-    rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0, solve: report.solve_ms ?? NaN, finish: report.finish_ms ?? NaN, submissions: report.submissions ?? NaN});
+    rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0, solve: report.solve_ms ?? NaN, finish: report.finish_ms ?? NaN, contact: report.contact_ms ?? NaN, solves: report.gpuSolves ?? NaN, submissions: report.submissions ?? NaN});
   }
   const mean = (f: (r: typeof rows[0]) => number, from = 0) => rows.slice(from).reduce((s, r) => s + f(r), 0) / Math.max(1, rows.length - from);
   const refined = rows.filter(r => r.cpu > 0);
@@ -55,8 +55,10 @@ const measure = async (device?: GPUDevice) => {
   console.log(JSON.stringify({id, dt_s: dt, steps, vertices: document.geometry.kind === 'inline' ? document.geometry.data.restPositions_m.length / 3 : undefined,
     solver, vertexCount: runtime.prepared.vertexCount, meanStep_ms: +mean(r => r.ms, 5).toFixed(2), maxStep_ms: +Math.max(...rows.map(r => r.ms)).toFixed(2),
     meanGpuIterations: +mean(r => r.gpu).toFixed(1), meanLinearIterations: +mean(r => r.linear).toFixed(1),
-    // GPU Newton only: solve (upload, submissions, readbacks) vs Float64 finish (contact, refinement).
-    meanSolve_ms: +mean(r => r.solve, 5).toFixed(2), meanFinish_ms: +mean(r => r.finish, 5).toFixed(2), meanSubmissions: +mean(r => r.submissions).toFixed(1),
+    // GPU Newton only: solve (upload, submissions, readbacks), CPU contact work
+    // between solves (detection, multipliers), Float64 finish (report, refinement).
+    meanSolve_ms: +mean(r => r.solve, 5).toFixed(2), meanContact_ms: +mean(r => r.contact, 5).toFixed(2), meanFinish_ms: +mean(r => r.finish, 5).toFixed(2),
+    meanGpuSolves: +mean(r => r.solves).toFixed(2), meanSubmissions: +mean(r => r.submissions).toFixed(1),
     refinedSteps: refined.length, meanRefinementIterations: +(refined.reduce((s, r) => s + r.cpu, 0) / Math.max(1, refined.length)).toFixed(1),
     meanRefinedStep_ms: +(refined.reduce((s, r) => s + r.ms, 0) / Math.max(1, refined.length)).toFixed(2),
     meanUnrefinedStep_ms: +(rows.filter(r => !r.cpu).reduce((s, r) => s + r.ms, 0) / Math.max(1, rows.length - refined.length)).toFixed(2),

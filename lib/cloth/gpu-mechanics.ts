@@ -1,6 +1,6 @@
 import type { GPUInitializationTask } from '../core/gpu-initialization';
 import { bendingRigidity, membraneModulus, rodRigidity, rodSegmentInertia_kg_m2 } from './material';
-import { finishClothMechanicalStep, type ClothStepOptions, type ClothStepReport } from './dynamics';
+import { extendClothStepReport, finishClothMechanicalStep, type ClothStepOptions, type ClothStepReport } from './dynamics';
 import { solveClothIncrement } from './nonlinear-solve';
 import { point3, type PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
@@ -318,9 +318,9 @@ export class GPUClothMechanics {
             const initialGuess={positions_m:state.positions_m.slice(),twist_rad:state.twist_rad.slice()};
             state.positions_m.set(old);state.twist_rad.set(oldTwist);
             const refined=solveClothIncrement(topology,state,dt,options,initialGuess);
-            return {...refined,iterations:iterations+refined.iterations,gpuIterations:iterations,refinementIterations:refined.iterations};
+            return extendClothStepReport(refined,{iterations:iterations+refined.iterations,gpuIterations:iterations,refinementIterations:refined.iterations});
         }
-        return {...finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, { iterations, converged: maximumUpdate < tolerance, maximumUpdate_m: maximumUpdate }),gpuIterations:iterations,refinementIterations:0};
+        return extendClothStepReport(finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, { iterations, converged: maximumUpdate < tolerance, maximumUpdate_m: maximumUpdate }),{gpuIterations:iterations,refinementIterations:0});
     }
     destroy() { for (const buffer of this.buffers)
         buffer.destroy(); }
