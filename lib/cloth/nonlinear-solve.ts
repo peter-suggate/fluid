@@ -139,9 +139,10 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
   const bendingVertex = Uint8Array.from({length: n}, (_, i) => topology.incidentRods[i]!.some(r => topology.rods[r]!.vertices.length > 2) ? 1 : 0);
   const inertia = Float64Array.from(mass, m => m/(dt*dt));
   // Contact inside the minimization (lib/cloth/contact-constraints.ts) unless
-  // the step has rods or a dynamic rigid collider (sequential projection).
+  // the step has a dynamic rigid collider, clipped or elliptical rods, or rods
+  // outside the oracle (sequential projection). Rod friction rolls the live twist.
   const colliders = options.colliders ?? [], selfCollision = options.selfCollision ?? false;
-  const contactSet = (colliders.length || selfCollision) && !inSolveContactUnsupported(topology, colliders) ? new ClothContactSet(topology, old, dt, colliders, selfCollision, options.tolerance_m ?? 1e-9, clothContactWarmStart(state)) : undefined;
+  const contactSet = (colliders.length || selfCollision) && !inSolveContactUnsupported(topology, colliders) && (!topology.rods.length || options.rodContactOracle) ? new ClothContactSet(topology, old, dt, colliders, selfCollision, options.tolerance_m ?? 1e-9, clothContactWarmStart(state), {current: twist, old: oldTwist}) : undefined;
   const twistEnergy = (s: number) => {
     const r = twistRod[s]!, j = twistLocal[s]!;
     return .5*topology.attachmentTwist_N_m[s]!*(twist[s]! - state.attachmentTwistTarget_rad[s]!)**2 + rodEnergy(topology, state, r, undefined, old, oldTwist, dt, j) + .5*twistInertia[s]!/(dt*dt)*(twist[s]! - oldTwist[s]! - dt*state.angularVelocity_rad_s[s]!)**2;
@@ -163,9 +164,10 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
   // the Hessian model needs (rod bending has no assembled block).
   const gradient = new Float64Array(3*n), rodDiagonal = new Float64Array(3*n), twistGradient = new Float64Array(S), twistDiagonal = new Float64Array(S), twistSecond = new Float64Array(S);
   const contactGradient = new Float64Array(contactSet ? 3*n : 0), contactDiagonal = new Float64Array(contactSet ? 3*n : 0), coordinateStiffness = new Float64Array(3*n);
+  const contactTwistGradient = new Float64Array(contactSet ? S : 0), contactTwistDiagonal = new Float64Array(contactSet ? S : 0);
   const evaluate = (): number => {
     let measure = 0;
-    if (contactSet) {contactGradient.fill(0); contactDiagonal.fill(0); contactSet.accumulate(x, contactGradient, contactDiagonal);}
+    if (contactSet) {contactGradient.fill(0); contactDiagonal.fill(0); contactTwistGradient.fill(0); contactTwistDiagonal.fill(0); contactSet.accumulate(x, contactGradient, contactDiagonal, contactTwistGradient, contactTwistDiagonal);}
     for (let i = 0; i < n; i++) {
       if (!free[i]) {gradient[3*i] = gradient[3*i+1] = gradient[3*i+2] = 0; continue;}
       const h = Math.max(1e-9, Math.cbrt(state.restControlVolume_m3[i]!)*1e-4);
@@ -192,9 +194,11 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
     for (let s = 0; s < S; s++) {
       if (!twistFree[s]) {twistGradient[s] = 0; twistDiagonal[s] = 1; continue;}
       const theta = twist[s]!, h = 1e-5, e = twistEnergy(s); twist[s] = theta + h; const ep = twistEnergy(s); twist[s] = theta - h; const em = twistEnergy(s); twist[s] = theta;
-      const g = (ep - em)/(2*h), diagonal = Math.max(twistInertia[s]!/(dt*dt), (ep + em - 2*e)/(h*h));
+      // Rod contact friction on the twist (its rolling) enters analytically.
+      const second = (ep + em - 2*e)/(h*h) + (contactSet ? contactTwistDiagonal[s]! : 0);
+      const g = (ep - em)/(2*h) + (contactSet ? contactTwistGradient[s]! : 0), diagonal = Math.max(twistInertia[s]!/(dt*dt), second);
       if (!Number.isFinite(g) || !Number.isFinite(diagonal)) throw new Error(`Cloth rod twist degenerated at segment ${s}`);
-      twistGradient[s] = g; twistDiagonal[s] = diagonal; twistSecond[s] = (ep + em - 2*e)/(h*h);
+      twistGradient[s] = g; twistDiagonal[s] = diagonal; twistSecond[s] = second;
       measure = Math.max(measure, Math.abs(g/diagonal)*twistRadius[s]!);
     }
     return measure;

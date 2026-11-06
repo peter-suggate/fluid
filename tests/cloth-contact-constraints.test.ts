@@ -4,6 +4,7 @@ import { DEFAULT_CLOTH_MATERIAL } from '../lib/cloth/material';
 import { createClothState, prepareClothTopology, type PreparedClothTopology } from '../lib/cloth/topology';
 import { clothElasticEnergy } from '../lib/cloth/dynamics';
 import { solveClothIncrement } from '../lib/cloth/nonlinear-solve';
+import { inSolveContactUnsupported } from '../lib/cloth/contact-constraints';
 import type { ClothCollider } from '../lib/cloth/contact';
 import type { ClothState, ClothTopologyData } from '../lib/cloth/types';
 
@@ -68,12 +69,16 @@ test('in-solve self contact stops a falling sheet on a fixed sheet at the shell 
   assert.ok(lowest < 1 + thickness + 1e-5, `upper sheet rests at y = ${lowest}, not on the lower sheet`);
 });
 
-test('rods keep the sequential contact projection and say so', () => {
+test('elliptical rods keep the sequential contact projection and say so; round rods are in-solve only in the oracle', () => {
   const n = 5, restPositions_m: number[] = [];
   for (let i = 0; i < n; i++) restPositions_m.push(i*.005, .001, 0);
-  const topology = prepareClothTopology({restPositions_m, triangles: [], rodOffsets: [0, n], rodIndices: [...Array(n).keys()], fixed: Array(n).fill(0)}, [DEFAULT_CLOTH_MATERIAL]);
-  const report = solveClothIncrement(topology, createClothState(topology), .001, {iterations: 64, tolerance_m: 1e-9, colliders: [{kind: 'plane', normal: [0, 1, 0], offset_m: 0}]});
-  assert.equal(report.contactModel, 'post-projection');
+  const data = {restPositions_m, triangles: [], rodOffsets: [0, n], rodIndices: [...Array(n).keys()], fixed: Array(n).fill(0)}, colliders: ClothCollider[] = [{kind: 'plane', normal: [0, 1, 0], offset_m: 0}];
+  const elliptical = prepareClothTopology(data, [{...DEFAULT_CLOTH_MATERIAL, rodRadiusB_m: 2*DEFAULT_CLOTH_MATERIAL.rodRadius_m}]);
+  assert.match(inSolveContactUnsupported(elliptical, colliders)!, /elliptical/);
+  assert.equal(solveClothIncrement(elliptical, createClothState(elliptical), .001, {iterations: 64, tolerance_m: 1e-9, colliders}).contactModel, 'post-projection');
+  const round = prepareClothTopology(data, [DEFAULT_CLOTH_MATERIAL]);
+  assert.equal(solveClothIncrement(round, createClothState(round), .001, {iterations: 64, tolerance_m: 1e-9, colliders}).contactModel, 'post-projection');
+  assert.equal(solveClothIncrement(round, createClothState(round), .001, {iterations: 64, tolerance_m: 1e-9, colliders, rodContactOracle: true}).contactModel, 'in-solve');
 });
 
 test('an unknown collider kind fails explicitly in the in-solve contact path', () => {

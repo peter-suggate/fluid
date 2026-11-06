@@ -194,7 +194,7 @@ export class ClothRuntime {
         if(this.document.physics?.solveSolid===false)return;
         if (this.gpu)
             return;
-        const solver = this.options.nonlinearSolver !== 'gauss-seidel' && gpuClothNewtonSupported(this.prepared) ? new GPUClothNewton(device, this.prepared) : new GPUClothMechanics(device, this.prepared);
+        const solver = this.options.nonlinearSolver !== 'gauss-seidel' && gpuClothNewtonSupported(this.prepared) ? new GPUClothNewton(device, this.prepared, {contactCapacity: this.document.physics?.contactCapacity, contactGridEntries: this.document.physics?.contactGridEntries}) : new GPUClothMechanics(device, this.prepared);
         try {
             await solver.initialize();
             this.gpu = solver;

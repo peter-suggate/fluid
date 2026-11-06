@@ -35,6 +35,7 @@ export const clothStaticColliderRecords = new WeakMap<ClothCollider, ClothStatic
 export function gpuContactUnsupported(topology: PreparedClothTopology, colliders: readonly ClothCollider[]): string | undefined {
   const base = inSolveContactUnsupported(topology, colliders);
   if (base) return base;
+  if (topology.rods.length) return 'rod contact inside the solve is on the Float64 CPU path only';
   for (const c of colliders) {
     if (c.bodyId) return `collider reactions for body ${c.bodyId} are summed on the CPU`;
     if (c.kind === 'rigid') return 'rigid colliders are sampled on the CPU';

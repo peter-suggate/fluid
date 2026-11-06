@@ -43,6 +43,7 @@ const measure = async (device?: GPUDevice) => {
   // --cpu-detect: GPU solve with the Float64 contact set detecting between solves.
   const gpuSolver = (runtime as unknown as {gpu?: {contactDetection?: 'auto' | 'cpu'; detectContacts?: (state: unknown, dt: number, options: unknown) => Promise<{contacts: unknown[]; detect_ms: number; errors: number}>}}).gpu;
   if (gpuSolver && process.argv.includes('--cpu-detect')) gpuSolver.contactDetection = 'cpu';
+  const peakContacts = {pairs: 0, step: -1, gridEntries: 0, gridStep: -1}, poolGrowth: {step: number; attempts: number; growth?: string[]}[] = [];
   const detection: Record<string, number> = {}, fallbacks = new Set<string>(), refineStatus: Record<number, number> = {};
   const g = scene.fluid.gravity_m_s2, colliders = [...clothContainerColliders(scene), ...clothSceneStaticColliders(scene)];
   const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number; solve: number; finish: number; contact: number; solves: number; submissions: number; outer: number}[] = [];
@@ -58,6 +59,12 @@ const measure = async (device?: GPUDevice) => {
     rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0, solve: report.solve_ms ?? NaN, finish: report.finish_ms ?? NaN, contact: report.contact_ms ?? NaN, solves: report.gpuSolves ?? NaN, submissions: report.submissions ?? NaN, outer: report.contactIterations ?? 0});
     if (report.contactDetection) detection[report.contactDetection] = (detection[report.contactDetection] ?? 0) + 1;
     if (report.contactFallback) fallbacks.add(report.contactFallback);
+    // The contact pool's measured peak (authored per scene as physics.contactCapacity) and any growth redo.
+    const pairs = (report as {contactPool?: number}).contactPool ?? 0, attempts = (report as {contactAttempts?: number}).contactAttempts ?? 1;
+    if (pairs > peakContacts.pairs) {peakContacts.pairs = pairs; peakContacts.step = i;}
+    const entries = (report as {contactGridFill?: number}).contactGridFill ?? 0;
+    if (entries > peakContacts.gridEntries) {peakContacts.gridEntries = entries; peakContacts.gridStep = i;}
+    if (attempts > 1) poolGrowth.push({step: i, attempts, growth: (report as {contactGrowth?: string[]}).contactGrowth});
     if (report.refinementIterations) refineStatus[report.gpuStatus ?? -1] = (refineStatus[report.gpuStatus ?? -1] ?? 0) + 1;
   }
   const mean = (f: (r: typeof rows[0]) => number, from = 0) => rows.slice(from).reduce((s, r) => s + f(r), 0) / Math.max(1, rows.length - from);
@@ -78,7 +85,7 @@ const measure = async (device?: GPUDevice) => {
     refinedSteps: refined.length, meanRefinementIterations: +(refined.reduce((s, r) => s + r.cpu, 0) / Math.max(1, refined.length)).toFixed(1),
     meanRefinedStep_ms: +(refined.reduce((s, r) => s + r.ms, 0) / Math.max(1, refined.length)).toFixed(2),
     meanUnrefinedStep_ms: +(rows.filter(r => !r.cpu).reduce((s, r) => s + r.ms, 0) / Math.max(1, rows.length - refined.length)).toFixed(2),
-    meanContactIterations: +mean(r => r.outer).toFixed(2), detection, fallbacks: [...fallbacks], refinedByGpuStatus: refineStatus, ...await detectionCost(),
+    meanContactIterations: +mean(r => r.outer).toFixed(2), peakContacts, contactCapacity: document.physics?.contactCapacity ?? null, contactGridEntries: document.physics?.contactGridEntries ?? null, poolGrowth, detection, fallbacks: [...fallbacks], refinedByGpuStatus: refineStatus, ...await detectionCost(),
     simSecondsPerWallSecond: +(dt / (mean(r => r.ms, 5) / 1000)).toFixed(4)}));
   // One GPU detection pass at the final state (the first detection of a step; each outer round repeats it).
   async function detectionCost(): Promise<object> {

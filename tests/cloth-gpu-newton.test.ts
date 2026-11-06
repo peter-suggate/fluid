@@ -28,11 +28,41 @@ function acceptedInFloat64(topology: PreparedClothTopology, before: ClothState, 
   return check.maximumUpdate_m;
 }
 
-test('rod joints are explicitly outside the GPU Newton solve', () => {
-  const data: ClothTopologyData = {restPositions_m: [0, 0, 0, .01, 0, 0, .02, 0, 0], triangles: [], rodOffsets: [0, 3], rodIndices: [0, 1, 2], fixed: [3, 0, 0]};
-  const topology = prepareClothTopology(data, [DEFAULT_CLOTH_MATERIAL]);
-  assert.equal(gpuClothNewtonSupported(topology), false);
-  assert.throws(() => new GPUClothNewton(undefined as unknown as GPUDevice, topology), /rod joints/);
+/** A cantilever (position and twist clamped at its root) and a free-ended
+ * helix (rest curvature and rest twist, spun about its axis), both DER rods. */
+function rods(): ClothTopologyData {
+  const restPositions_m: number[] = [], fixed: number[] = [];
+  for (let i = 0; i < 10; i++) {restPositions_m.push(.01*i, 1, 0); fixed.push(i === 0 ? 3 : 0);}
+  for (let i = 0; i < 12; i++) {restPositions_m.push(.1 + .01*Math.cos(.6*i), 1 + .003*i, .01*Math.sin(.6*i)); fixed.push(i === 0 ? 1 : 0);}
+  return {restPositions_m, triangles: [], rodOffsets: [0, 10, 22], rodIndices: Array.from({length: 22}, (_, i) => i), fixed};
+}
+
+test('DER rod joints are inside the GPU Newton solve', () => {
+  assert.equal(gpuClothNewtonSupported(prepareClothTopology(rods(), [{...DEFAULT_CLOTH_MATERIAL, rodRadius_m: .0005}])), true);
+});
+
+test('GPU Newton-PCG reaches the Float64 Newton minimizer on DER rods: bending, twist and their coupling', gpu, async () => {
+  await withUniformDevice('cloth GPU Newton rods', async device => {
+    const topology = prepareClothTopology(rods(), [{...DEFAULT_CLOTH_MATERIAL, rodRadius_m: .0005}]), a = createClothState(topology), b = createClothState(topology), solver = new GPUClothNewton(device, topology);
+    for (const state of [a, b]) for (let s = 9; s < topology.segmentCount; s++) state.angularVelocity_rad_s[s] = 40;
+    try {
+      await solver.initialize();
+      let twist = 0, positions = 0;
+      for (let step = 0; step < 12; step++) {
+        const options = {iterations: 64, tolerance_m: 1e-8}, before = structuredClone(b);
+        const cpu = solveClothIncrement(topology, a, .001, options), g = await solver.step(b, .001, options);
+        assert.ok(cpu.converged && g.converged, `step ${step}: ${g.maximumUpdate_m}`);
+        assert.equal(g.refinementIterations, 0, `step ${step} needed the CPU refinement (GPU status ${g.gpuStatus})`);
+        acceptedInFloat64(topology, before, b, .001, options);
+        positions = Math.max(positions, maximumDifference(a.positions_m, b.positions_m)); twist = Math.max(twist, maximumDifference(a.twist_rad, b.twist_rad));
+        assert.ok(maximumDifference(a.positions_m, b.positions_m) < 1e-6, `step ${step}: positions differ by ${maximumDifference(a.positions_m, b.positions_m)} m`);
+        assert.ok(maximumDifference(a.twist_rad, b.twist_rad) < 1e-4, `step ${step}: twist differs by ${maximumDifference(a.twist_rad, b.twist_rad)} rad`);
+      }
+      console.log(`rods: positions within ${positions.toExponential(2)} m, twist within ${twist.toExponential(2)} rad`);
+      assert.ok(b.positions_m[3*9 + 1]! < 1 - 1e-4, 'the cantilever bends under gravity');
+      assert.ok(Math.abs(b.twist_rad[12]!) > 1e-3, 'the helix twists');
+    } finally {solver.destroy();}
+  });
 });
 
 test('GPU Newton-PCG reaches the Float64 Newton minimizer on a falling sheet', gpu, async () => {

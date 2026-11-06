@@ -116,7 +116,7 @@ function rodFrame(rod: ClothRod, segment: number, state: ClothState, positions =
   return { length, tangent, director, m1, m2: cross3(tangent, m1) };
 }
 
-function rodJoint(rod: ClothRod, j: number, state: ClothState, positions = state.positions_m, twists = state.twist_rad) {
+export function rodJoint(rod: ClothRod, j: number, state: ClothState, positions = state.positions_m, twists = state.twist_rad) {
   const a = rodFrame(rod, j - 1, state, positions, twists), b = rodFrame(rod, j, state, positions, twists);
   if (!a || !b || 1 + dot3(a.tangent, b.tangent) < 1e-10) return undefined;
   const kb = scale3(cross3(a.tangent, b.tangent), 2 / (1 + dot3(a.tangent, b.tangent)));
@@ -186,6 +186,10 @@ export function clothElasticEnergy(topology: PreparedClothTopology, state: Cloth
 }
 
 export interface ClothStepOptions {
+  /** Float64 test oracle only: round rods take part in solveClothIncrement's
+   * in-solve contact (the model the GPU rod contact must match). The runtime
+   * never sets it; without it rod steps keep the post-projection. */
+  readonly rodContactOracle?: boolean;
   /** Accepted native-liquid-gated source capillary bridges. */
   readonly cohesionPairs?:readonly ClothCohesionPair[];
   readonly gravity_m_s2?: ClothVector;

@@ -22,6 +22,16 @@ import { OCTREE_REFINEMENT_REGION_CAPACITY } from '../../core/refinement-regions
  * transients between those samples. */
 const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-source-pore-test-mid': 128};
 
+/** GPU Newton contact pools (pairs) authored from a measured peak, so the
+ * pool never grows mid-run (growth redoes the step: a hitch, reported as
+ * contactAttempts). Measured with tools/probe-wetcloth-step-cost.ts
+ * (peakContacts, poolGrowth) in a run that reaches contact.
+ * pore-test-mid: grid entries only. Its swept-bounds grid overflowed at step 0
+ * (645298 > the 642012 default) and peaked at 815278 (step 80) over 1500 steps
+ * (0.3 s, through the ball's impact at 0.12 s); it never formed a contact pair in that
+ * window, so the pair capacity keeps its default. 2^20 = peak + 29% margin. */
+const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, {contactCapacity?: number; contactGridEntries?: number}>> = {'wetcloth-source-pore-test-mid': {contactGridEntries: 1 << 20}};
+
 const vec = (v: ClothVector): Vec3 => ({x: v[0], y: v[1], z: v[2]});
 
 /** libWetCloth resolves its liquid at h everywhere. The source's initial
@@ -117,7 +127,8 @@ export function buildWetClothSourceScene(id: string): SceneDescription {
   scene.nominalResolution = {length_m: source.cellSize_m};
   if (source.counts.vertices) {
     const cloth = sourceClothDocument(id);
-    scene.cloth = [{...cloth, geometry: {kind: 'inline', data: {...data,
+    const contactPool = WET_CLOTH_CONTACT_POOL[source.id];
+    scene.cloth = [{...cloth, ...(contactPool ? {physics: {...cloth.physics, ...contactPool}} : {}), geometry: {kind: 'inline', data: {...data,
       restPositions_m: data.restPositions_m.map((v, i) => v + offset[i % 3]!) }},
       scripts: cloth.scripts?.map(s => ({...s, ...(s.origin_m ? {origin_m: plus(s.origin_m, offset)} : {})}))}];
   } else scene.cloth = [];
