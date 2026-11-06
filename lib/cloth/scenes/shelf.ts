@@ -26,7 +26,7 @@ const ORDER = [
   'splash-plastic-medium', 'splash-yarn-medium', 'fuzzy-cloth', 'tighten-towel', 'splash-cloth-large',
 ].map(name => `wetcloth-source-${name}`);
 
-const VARIANTS = ['wetcloth-paper-figure10b-25um', 'wetcloth-paper-figure10j-90deg', 'wetcloth-exploratory-ring-material-packing'];
+const VARIANTS = ['wetcloth-paper-figure10b-25um', 'wetcloth-paper-figure10j-90deg', 'wetcloth-exploratory-ring-material-packing', 'wetcloth-source-capillary-suction-upstream-dx'];
 
 const titleCase = (name: string) => name.replace(/\b\w/g, c => c.toUpperCase());
 const sourceWet = (source: WetClothSourceDefinition) => source.fields.some(f => f.usage === 'source');
@@ -70,6 +70,13 @@ function statusFor(source: WetClothSourceDefinition): string {
     : `${imported}. Dry mechanics run; the trajectory is not yet compared with the paper.`;
 }
 
+/** The released input, and any authored dx and dt that replace its own (the source's discretization field). */
+export function wetClothShelfAttribution(source: WetClothSourceDefinition): string {
+  const d = source.discretization, cm = (m: number) => +(m * 100).toPrecision(6), ms = (s: number) => +(s * 1000).toPrecision(6);
+  const deviation = d ? ` · dx ${cm(d.cellSize_m)} cm, dt ${ms(d.dt_s)} ms (released ${cm(d.sourceCellSize_m)} cm, ${ms(d.sourceDt_s)} ms)` : '';
+  return `libWetCloth ${source.source.commit.slice(0, 7)} · ${source.source.path}${deviation}`;
+}
+
 function shelfDefinition(source: WetClothSourceDefinition): SceneDefinition {
   return defineScene({
     id: source.id,
@@ -87,7 +94,7 @@ function shelfDefinition(source: WetClothSourceDefinition): SceneDefinition {
     prepare: () => prepareWetClothSource(source.id),
     prepared: () => wetClothSourcePrepared(source.id),
     cameraForDocument: wetClothShelfCamera,
-    attribution: {label: `libWetCloth ${source.source.commit.slice(0, 7)} · ${source.source.path}`, url: source.source.url},
+    attribution: {label: wetClothShelfAttribution(source), url: source.source.url},
     status: statusFor(source),
   });
 }

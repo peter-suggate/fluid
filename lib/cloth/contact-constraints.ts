@@ -73,7 +73,7 @@ export interface ClothContactConstraint {
  * rotation (endpoint couple, material twist) moves that point tangentially.
  * sign is +1 for the pair's first feature, -1 for its second. */
 interface RodContactSide {readonly segment: number; readonly a: number; readonly b: number; readonly sign: 1 | -1; readonly radius: number; tau: ClothVector}
-type RodContactShape = 'point-collider' | 'segment-collider' | 'point-face' | 'segment-face' | 'point-segment' | 'segment-segment';
+export type RodContactShape = 'point-collider' | 'segment-collider' | 'point-face' | 'segment-face' | 'point-segment' | 'segment-segment';
 export interface RodContactGeometry {
   readonly shape: RodContactShape;
   /** c.vertices holds the first feature's `first` vertices, then the second
@@ -104,7 +104,7 @@ const perpendicular = (e: ClothVector): ClothVector => {const f = cross3(e, Math
  * feature's, then the second's): the pair's weights, the separation from the
  * second to the first, a normal for a zero separation, and whether the
  * closest points lie where this shape (not a vertex or edge pair) owns them. */
-function rodSelfClosest(shape: RodContactShape, q: readonly ClothVector[]): {weights: number[]; delta: ClothVector; fallback: ClothVector; owned: boolean} {
+export function rodSelfClosest(shape: RodContactShape, q: readonly ClothVector[]): {weights: number[]; delta: ClothVector; fallback: ClothVector; owned: boolean} {
   if (shape === 'point-face') {const c = closestTrianglePoint(q[0]!, q[1]!, q[2]!, q[3]!); return {weights: [1, -c.weights[0], -c.weights[1], -c.weights[2]], delta: sub3(q[0]!, c.point), fallback: cross3(sub3(q[2]!, q[1]!), sub3(q[3]!, q[1]!)), owned: true};}
   if (shape === 'segment-face') {const c = closestSegmentTriangle(q[0]!, q[1]!, q[2]!, q[3]!, q[4]!); return {weights: [1 - c.s, c.s, -c.weights[0], -c.weights[1], -c.weights[2]], delta: sub3(c.pa, c.pb), fallback: cross3(sub3(q[3]!, q[2]!), sub3(q[4]!, q[2]!)), owned: c.s > ROD_INTERIOR && c.s < 1 - ROD_INTERIOR && c.weights.every(w => w > ROD_INTERIOR)};}
   if (shape === 'point-segment') {const c = closestPointSegment(q[0]!, q[1]!, q[2]!); return {weights: [1, -(1 - c.t), -c.t], delta: sub3(q[0]!, c.point), fallback: perpendicular(sub3(q[2]!, q[1]!)), owned: true};}
@@ -671,11 +671,13 @@ export class ClothContactSet {
     const d = this.delta;
     return m <= -d ? 0 : m < d ? c.rho*(m + d)/(2*d) : c.rho;
   }
-  /** output += (sum_k rho_k a_k a_k^T + friction tangent terms) input. */
-  multiply(input: ArrayLike<number>, output: Float64Array): void {
+  /** output += (sum_k rho_k a_k a_k^T + friction tangent terms) input. With
+   * twistOffset, input and output also carry the rod twist from that index,
+   * and rod friction couples it to the positions (the rolling slip). */
+  multiply(input: ArrayLike<number>, output: Float64Array, twistOffset = -1): void {
     for (const c of this.constraints) {
       if (!c.normalCoefficient && !c.frictionCoefficient) continue;
-      if (c.rod) {this.multiplyRod(c, input, output); continue;}
+      if (c.rod) {this.multiplyRod(c, input, output, twistOffset); continue;}
       const s = [0, 0, 0];
       for (let j = 0; j < c.vertices.length; j++) {const v = c.vertices[j]!, w = c.weights[j]!; if (this.free[v]) for (let a = 0; a < 3; a++) s[a]! += w*input[3*v + a]!;}
       const sn = s[0]!*c.normal[0] + s[1]!*c.normal[1] + s[2]!*c.normal[2];
@@ -684,8 +686,8 @@ export class ClothContactSet {
     }
   }
   /** Rod pair: normal rows by the weights, friction rows by the slip Jacobian. */
-  private multiplyRod(c: ClothContactConstraint, input: ArrayLike<number>, output: Float64Array): void {
-    const J = c.rod!.jacobian, n = c.normal, s = [0, 0, 0];
+  private multiplyRod(c: ClothContactConstraint, input: ArrayLike<number>, output: Float64Array, twistOffset: number): void {
+    const J = c.rod!.jacobian, n = c.normal, s = [0, 0, 0], sides = twistOffset >= 0 && c.frictionCoefficient ? c.rod!.sides.filter(side => this.twistFree[side.segment]) : [];
     let sn = 0;
     for (let j = 0; j < c.vertices.length; j++) {
       const v = c.vertices[j]!; if (!this.free[v]) continue;
@@ -693,7 +695,10 @@ export class ClothContactSet {
       sn += c.weights[j]!*(n[0]*i0 + n[1]*i1 + n[2]*i2);
       for (let p = 0; p < 3; p++) s[p]! += J[9*j + 3*p]!*i0 + J[9*j + 3*p + 1]!*i1 + J[9*j + 3*p + 2]!*i2;
     }
+    // The rolling slip of a twist change (rodSlip's turn) enters only the friction rows.
+    for (const side of sides) {const turn = side.sign*input[twistOffset + side.segment]!; for (let p = 0; p < 3; p++) s[p]! += turn*side.tau[p]!;}
     const st = s[0]!*n[0] + s[1]!*n[1] + s[2]!*n[2], t = [0, 1, 2].map(p => c.frictionCoefficient*(s[p]! - st*n[p]!));
+    for (const side of sides) output[twistOffset + side.segment]! += side.sign*(side.tau[0]*t[0]! + side.tau[1]*t[1]! + side.tau[2]*t[2]!);
     for (let j = 0; j < c.vertices.length; j++) {
       const v = c.vertices[j]!; if (!this.free[v]) continue;
       for (let a = 0; a < 3; a++) output[3*v + a]! += c.weights[j]!*c.normalCoefficient*sn*n[a]! + J[9*j + a]!*t[0]! + J[9*j + 3 + a]!*t[1]! + J[9*j + 6 + a]!*t[2]!;

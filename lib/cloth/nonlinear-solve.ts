@@ -298,7 +298,16 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
       }
       output[3*i] = y0; output[3*i+1] = y1; output[3*i+2] = y2;
     }
-    contactSet?.multiply(input, output);
+    if (coupled) {
+      // The twist rows: the rod energy's tridiagonal model plus (through the
+      // contact operator) the rolling friction that couples them to the positions.
+      for (let s = 0; s < S; s++) {
+        const k = 3*n + s;
+        if (!twistFree[s]) {output[k] = 0; continue;}
+        output[k] = (twistDiagonal[s]! - contactTwistDiagonal[s]!)*input[k]! + (s > 0 ? twistCoupling[s - 1]!*input[k - 1]! : 0) + (s + 1 < S ? twistCoupling[s]!*input[k + 1]! : 0);
+      }
+      contactSet!.multiply(input, output, 3*n);
+    } else contactSet?.multiply(input, output);
   };
   const precondition = (input: Float64Array, output: Float64Array) => {
     for (let i = 0; i < n; i++) {
@@ -306,15 +315,21 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
       if (!free[i]) {output[3*i] = output[3*i+1] = output[3*i+2] = 0; continue;}
       output[3*i] = preconditioner[o]!*v0 + preconditioner[o+1]!*v1 + preconditioner[o+2]!*v2; output[3*i+1] = preconditioner[o+3]!*v0 + preconditioner[o+4]!*v1 + preconditioner[o+5]!*v2; output[3*i+2] = preconditioner[o+6]!*v0 + preconditioner[o+7]!*v1 + preconditioner[o+8]!*v2;
     }
+    if (coupled && input.length > 3*n) for (let s = 0; s < S; s++) output[3*n + s] = twistFree[s] ? input[3*n + s]!/twistDiagonal[s]! : 0;
   };
   const dot = (a: Float64Array, b: Float64Array) => {let s = 0; for (let k = 0; k < a.length; k++) s += a[k]!*b[k]!; return s;};
-  const step = new Float64Array(3*n), residual = new Float64Array(3*n), search = new Float64Array(3*n), product = new Float64Array(3*n), preconditioned = new Float64Array(3*n), twistStep = new Float64Array(S);
+  // With rod contact the twist joins the CG unknowns (after the 3n positions):
+  // friction rolls the rod, coupling its twist to the positions so stiffly that
+  // stepping the two as separate blocks converges at a linear rate.
+  const coupled = !!contactSet && S > 0, unknowns = 3*n + (coupled ? S : 0);
+  const step = new Float64Array(unknowns), residual = new Float64Array(unknowns), search = new Float64Array(unknowns), product = new Float64Array(unknowns), preconditioned = new Float64Array(unknowns), twistStep = new Float64Array(S);
   const maximumLinear = Math.max(50, 10*n);
   // Preconditioned CG on H p = -g; Eisenstat-Walker forcing keeps early
   // Newton steps cheap and the final ones accurate.
   const solveLinear = (forcing: number): number => {
     step.fill(0);
     for (let k = 0; k < 3*n; k++) residual[k] = -gradient[k]!;
+    if (coupled) {computeTwistCoupling(); for (let s = 0; s < S; s++) residual[3*n + s] = twistFree[s] ? -twistGradient[s]! : 0;}
     precondition(residual, preconditioned); search.set(preconditioned);
     let rz = dot(residual, preconditioned);
     const stop = forcing*forcing*rz;
@@ -324,12 +339,13 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
       const curvature = dot(search, product);
       if (!(curvature > 0)) {if (performed === 0) step.set(search); break;}
       const alpha = rz/curvature;
-      for (let k = 0; k < 3*n; k++) {step[k]! += alpha*search[k]!; residual[k]! -= alpha*product[k]!;}
+      for (let k = 0; k < unknowns; k++) {step[k]! += alpha*search[k]!; residual[k]! -= alpha*product[k]!;}
       precondition(residual, preconditioned);
       const next = dot(residual, preconditioned), beta = next/rz; rz = next;
-      for (let k = 0; k < 3*n; k++) search[k] = preconditioned[k]! + beta*search[k]!;
+      for (let k = 0; k < unknowns; k++) search[k] = preconditioned[k]! + beta*search[k]!;
     }
-    solveTwist();
+    if (coupled) for (let s = 0; s < S; s++) twistStep[s] = step[3*n + s]!;
+    else solveTwist();
     return performed;
   };
 
@@ -339,19 +355,26 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
   // solved directly. A diagonal-only twist step overshoots this Laplacian-like
   // coupling by up to 2x and stalls Newton at a linear rate.
   const twistCoupling = new Float64Array(S), pivot = new Float64Array(S);
-  const solveTwist = () => {
-    twistStep.fill(0);
+  // The mixed central difference of each joint (zero across rods and held twist).
+  const computeTwistCoupling = () => {
+    twistCoupling.fill(0);
     for (const rod of topology.rods) {
       const count = rod.restLengths_m.length, base = rod.segmentOffset;
       for (let j = 0; j + 1 < count; j++) {
         const s = base + j;
-        twistCoupling[s] = 0;
         if (!twistFree[s] || !twistFree[s + 1]) continue;
         const h = 1e-4, a = twist[s]!, b = twist[s + 1]!, E = () => rodEnergy(topology, state, twistRod[s]!, undefined, old, oldTwist, dt, j);
         twist[s] = a + h; twist[s + 1] = b + h; const pp = E(); twist[s + 1] = b - h; const pm = E();
         twist[s] = a - h; const mm = E(); twist[s + 1] = b + h; const mp = E(); twist[s] = a; twist[s + 1] = b;
         twistCoupling[s] = (pp - pm - mp + mm)/(4*h*h);
       }
+    }
+  };
+  const solveTwist = () => {
+    twistStep.fill(0);
+    computeTwistCoupling();
+    for (const rod of topology.rods) {
+      const count = rod.restLengths_m.length, base = rod.segmentOffset;
       // Thomas elimination; a nonpositive pivot (twist locally unstable)
       // leaves that rod on the diagonal step.
       let positive = true;

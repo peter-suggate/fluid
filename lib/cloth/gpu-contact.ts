@@ -1,5 +1,5 @@
 import {ClothContactBVH} from './contact-bvh';
-import {clothLocalShellEdges, clothShellCache, clothVertexContactRadius, clothVertexLocalFaces, inSolveContactUnsupported} from './contact-constraints';
+import {clothLocalShellEdges, clothShellCache, clothVertexContactRadius, clothVertexLocalFaces, inSolveContactUnsupported, rodSelfClosest, type RodContactShape} from './contact-constraints';
 import type {ClothCollider} from './contact';
 import type {PreparedClothTopology} from './topology';
 import type {ClothVector} from './types';
@@ -35,7 +35,9 @@ export const clothStaticColliderRecords = new WeakMap<ClothCollider, ClothStatic
 export function gpuContactUnsupported(topology: PreparedClothTopology, colliders: readonly ClothCollider[]): string | undefined {
   const base = inSolveContactUnsupported(topology, colliders);
   if (base) return base;
-  if (topology.rods.length) return 'rod contact inside the solve is on the Float64 CPU path only';
+  // Rod segment interiors meet planes and spheres in closed form here; a box or
+  // sampled solid needs the capsule's convex distance, not on the GPU yet.
+  if (topology.rods.length && colliders.some(c => c.kind === 'box' || c.kind === 'sampled')) return 'rod segments against box and sampled colliders are not on the GPU';
   for (const c of colliders) {
     if (c.bodyId) return `collider reactions for body ${c.bodyId} are summed on the CPU`;
     if (c.kind === 'rigid') return 'rigid colliders are sampled on the CPU';
@@ -54,7 +56,8 @@ export interface ClothContactStatic {
   readonly words: Uint32Array<ArrayBuffer>;
   readonly edges: number;
   readonly cellSize: number;
-  readonly offsets: {sVInfo: number; sRingStart: number; sRingList: number; sFrStart: number; sFrList: number; sLvStart: number; sLvList: number; sEdge: number; sE3Start: number; sE3List: number; sFaceR: number};
+  readonly offsets: {sVInfo: number; sRingStart: number; sRingList: number; sFrStart: number; sFrList: number; sLvStart: number; sLvList: number; sEdge: number; sE3Start: number; sE3List: number; sFaceR: number;
+    sSegInfo: number; sNbStart: number; sNbList: number; sRpXStart: number; sRpXList: number; sRsXStart: number; sRsXList: number};
 }
 const statics = new WeakMap<PreparedClothTopology, ClothContactStatic>();
 const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
@@ -66,6 +69,52 @@ function csr(rows: readonly (readonly number[])[]): {start: Uint32Array; list: U
   const list = new Uint32Array(start[rows.length]!);
   rows.forEach((r, i) => list.set(r, start[i]!));
   return {start, list};
+}
+
+/** Rod contact statics of ClothContactSet (lib/cloth/contact-constraints.ts):
+ * each vertex's owning segment (the one it starts, or its rod's last; NONE off
+ * rods), per segment (radius, rod friction), each vertex's rod neighbours, and
+ * the same-rod pairs overlapping in the rest shape (one continuous yarn, never
+ * a contact): per vertex the segments of its rod within ri + r of it, per
+ * segment the later segments of its rod within the two radii. */
+function rodContactStatic(topology: PreparedClothTopology): {owner: Uint32Array; segInfo: Uint32Array; neighbours: ReturnType<typeof csr>; pointExcluded: ReturnType<typeof csr>; segmentExcluded: ReturnType<typeof csr>} {
+  const n = topology.vertexCount, S = topology.segmentCount, rest = topology.data.restPositions_m, NONE = 0xffffffff;
+  const owner = new Uint32Array(n).fill(NONE), segInfo = new Uint32Array(2 * S), segRod = new Int32Array(S), segA = new Uint32Array(S), segB = new Uint32Array(S), radius = new Float64Array(S);
+  const neighbours: number[][] = Array.from({length: n}, () => []);
+  topology.rods.forEach((rod, r) => {
+    const count = rod.restLengths_m.length, m = topology.materials[rod.material]!;
+    for (let j = 0; j < count; j++) {
+      const a = rod.vertices[j]!, b = rod.vertices[j + 1]!, s = rod.segmentOffset + j;
+      segRod[s] = r; segA[s] = a; segB[s] = b; radius[s] = m.rodRadius_m;
+      segInfo[2 * s] = bits(m.rodRadius_m); segInfo[2 * s + 1] = bits(m.friction);
+      for (const [v, w] of [[a, b], [b, a]] as const) if (!neighbours[v]!.includes(w)) neighbours[v]!.push(w);
+    }
+    for (let k = 0; k < rod.vertices.length; k++) if (owner[rod.vertices[k]!] === NONE) owner[rod.vertices[k]!] = rod.segmentOffset + Math.min(k, count - 1);
+  });
+  const point = (i: number): ClothVector => [rest[3*i]!, rest[3*i + 1]!, rest[3*i + 2]!];
+  const gap = (shape: RodContactShape, ids: readonly number[]) => {const d = rodSelfClosest(shape, ids.map(point)).delta; return Math.hypot(d[0], d[1], d[2]);};
+  const points: number[][] = Array.from({length: n}, () => []), segments: number[][] = Array.from({length: S}, () => []);
+  if (S) {
+    let reach = 0;
+    for (let i = 0; i < n; i++) if (owner[i] !== NONE) reach = Math.max(reach, clothVertexContactRadius(topology, i));
+    for (let s = 0; s < S; s++) reach = Math.max(reach, radius[s]!);
+    const bounds = new Float64Array(6 * S);
+    for (let s = 0; s < S; s++) for (let a = 0; a < 3; a++) {const x = rest[3*segA[s]! + a]!, y = rest[3*segB[s]! + a]!; bounds[6*s + a] = Math.min(x, y) - 2 * reach - 1e-9; bounds[6*s + 3 + a] = Math.max(x, y) + 2 * reach + 1e-9;}
+    const tree = new ClothContactBVH(bounds);
+    for (let i = 0; i < n; i++) {
+      if (owner[i] === NONE) continue;
+      const q = point(i), ri = clothVertexContactRadius(topology, i);
+      for (const s of tree.query(q, q)) if (segRod[s] === segRod[owner[i]!] && gap('point-segment', [i, segA[s]!, segB[s]!]) <= ri + radius[s]! + 1e-12) points[i]!.push(s);
+      points[i]!.sort((a, b) => a - b);
+    }
+    for (let s = 0; s < S; s++) {
+      for (const u of tree.query(Array.from(bounds.subarray(6*s, 6*s + 3)), Array.from(bounds.subarray(6*s + 3, 6*s + 6)))) {
+        if (u > s && segRod[u] === segRod[s] && gap('segment-segment', [segA[s]!, segB[s]!, segA[u]!, segB[u]!]) <= radius[s]! + radius[u]! + 1e-12) segments[s]!.push(u);
+      }
+      segments[s]!.sort((a, b) => a - b);
+    }
+  }
+  return {owner, segInfo, neighbours: csr(neighbours), pointExcluded: csr(points), segmentExcluded: csr(segments)};
 }
 
 export function clothContactStatic(topology: PreparedClothTopology): ClothContactStatic {
@@ -108,17 +157,20 @@ export function clothContactStatic(topology: PreparedClothTopology): ClothContac
     }
   }
   const rings = csr(ring), frs = csr(faceRes), lvs = csr(vertexRes), e3s = csr(e3);
+  const rod = rodContactStatic(topology);
   const parts: Uint32Array[] = [];
   const vInfo = new Uint32Array(4 * n);
   for (let i = 0; i < n; i++) {
     const m = topology.materials[topology.vertexMaterial[i]!]!;
-    vInfo.set([bits(clothVertexContactRadius(topology, i)), bits(m.friction), topology.incidentTriangles[i]!.length ? 1 : 0, 0], 4 * i);
+    vInfo.set([bits(clothVertexContactRadius(topology, i)), bits(m.friction), topology.incidentTriangles[i]!.length ? 1 : 0, rod.owner[i]!], 4 * i);
   }
   const edgeWords = new Uint32Array(4 * E);
   edges.forEach((e, k) => edgeWords.set([e.vertices[0], e.vertices[1], bits(e.r), 0], 4 * k));
   const faceR = Uint32Array.from(topology.triangles, f => bits(.5 * topology.materials[f.material]!.thickness_m));
-  const names = ['sVInfo', 'sRingStart', 'sRingList', 'sFrStart', 'sFrList', 'sLvStart', 'sLvList', 'sEdge', 'sE3Start', 'sE3List', 'sFaceR'] as const;
-  parts.push(vInfo, rings.start, rings.list, frs.start, frs.list, lvs.start, lvs.list, edgeWords, e3s.start, e3s.list, faceR);
+  const names = ['sVInfo', 'sRingStart', 'sRingList', 'sFrStart', 'sFrList', 'sLvStart', 'sLvList', 'sEdge', 'sE3Start', 'sE3List', 'sFaceR',
+    'sSegInfo', 'sNbStart', 'sNbList', 'sRpXStart', 'sRpXList', 'sRsXStart', 'sRsXList'] as const;
+  parts.push(vInfo, rings.start, rings.list, frs.start, frs.list, lvs.start, lvs.list, edgeWords, e3s.start, e3s.list, faceR,
+    rod.segInfo, rod.neighbours.start, rod.neighbours.list, rod.pointExcluded.start, rod.pointExcluded.list, rod.segmentExcluded.start, rod.segmentExcluded.list);
   const offsets = {} as Record<typeof names[number], number>;
   let total = 0;
   parts.forEach((part, k) => {offsets[names[k]!] = total; total += part.length;});
@@ -131,6 +183,8 @@ export function clothContactStatic(topology: PreparedClothTopology): ClothContac
     const ids = topology.triangles[t]!.vertices;
     for (let a = 0; a < 3; a++) {const c = ids.map(v => rest[3*v + a]!); extent = Math.max(extent, Math.max(...c) - Math.min(...c));}
   }
+  // Rod segments are swept primitives of the same grid.
+  for (const r of topology.rods) for (let j = 0; j + 1 < r.vertices.length; j++) for (let a = 0; a < 3; a++) extent = Math.max(extent, Math.abs(rest[3*r.vertices[j + 1]! + a]! - rest[3*r.vertices[j]! + a]!));
   const cellSize = 2 * (extent + 4 * radius) || 1e-2;
   const result = {words, edges: E, cellSize, offsets};
   statics.set(topology, result);
@@ -229,7 +283,7 @@ export const CONTACT_CONTROL = {
   R_ACTIVE: 107, R_CONTINUE: 108, R_STIFFEN: 109, K_CONTACTS: 110, K_SELF: 111, K_REPPEN: 112, K_SOLVES: 113, K_ADDED: 114, K_DETECT: 115,
 } as const;
 export const CONTACT_CONTROL_WORDS = 120;
-export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64;
+export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64, E_UNSUPPORTED = 128;
 /** Cells one primitive may cover before detection reports it (it is not dropped). */
 export const CELL_CAP = 512;
 export const SCAN_WG = 256;
@@ -243,6 +297,11 @@ fn ksf(k:u32)->f32{return bitcast<f32>(I[k]);}
 fn kRadius(i:u32)->f32{return ksf(p.sVInfo+4u*i);}
 fn kFriction(i:u32)->f32{return ksf(p.sVInfo+4u*i+1u);}
 fn kShell(i:u32)->bool{return I[p.sVInfo+4u*i+2u]!=0u;}
+// Rod statics: a vertex's owning segment (NONE off rods); a rod vertex is a sphere of its rod (not on the shell).
+fn kOwner(i:u32)->u32{return I[p.sVInfo+4u*i+3u];}
+fn rodVertex(i:u32)->bool{return kOwner(i)!=NONE&&!kShell(i);}
+fn segR(s:u32)->f32{return ksf(p.sSegInfo+2u*s);}
+fn segFriction(s:u32)->f32{return ksf(p.sSegInfo+2u*s+1u);}
 fn contactCount()->u32{if(p.contactMode==2u){return p.uploadedContacts;}return atomicLoad(&C[${K.K_COUNT}u]);}
 fn roundOn()->bool{return atomicLoad(&C[${K.R_ACTIVE}u])!=0u;}
 fn maxf(word:u32,v:f32){if(v>0.){atomicMax(&C[word],bitcast<u32>(v));}else if(!(v<=0.)){atomicOr(&C[${K.K_ERROR}u],${E_NONFINITE}u);}}
@@ -270,18 +329,30 @@ fn tableClaim(t:u32,k0:u32,k1:u32)->u32{
  atomicOr(&C[${K.K_ERROR}u],${E_TABLE}u);return NONE;
 }
 fn held(k0:u32,k1:u32)->bool{return tableFind(p.tableCur,k0,k1)!=NONE;}
-fn addContact(k0:u32,k1:u32,v:vec4u,w:vec4f,n:vec3f,g0:f32,obstacle:vec3f,mu:f32,radius:f32,collider:u32){
+// A new pair's slot (NONE if its key is held or the pool is full), with its key, collider and warm-start multiplier written.
+fn claimContact(k0:u32,k1:u32,collider:u32)->u32{
  // A full pool fails before claiming a key: claims past capacity would fill the
  // table (2 kMax slots), and every later claim would then probe all of it.
- if(atomicLoad(&C[${K.K_COUNT}u])>=p.kMax){atomicOr(&C[${K.K_ERROR}u],${E_CAPACITY}u);return;}
- let slot=tableClaim(p.tableCur,k0,k1);if(slot==NONE){return;}
- let c=atomicAdd(&C[${K.K_COUNT}u],1u);if(c>=p.kMax){atomicOr(&C[${K.K_ERROR}u],${E_CAPACITY}u);return;}
+ if(atomicLoad(&C[${K.K_COUNT}u])>=p.kMax){atomicOr(&C[${K.K_ERROR}u],${E_CAPACITY}u);return NONE;}
+ let slot=tableClaim(p.tableCur,k0,k1);if(slot==NONE){return NONE;}
+ let c=atomicAdd(&C[${K.K_COUNT}u],1u);if(c>=p.kMax){atomicOr(&C[${K.K_ERROR}u],${E_CAPACITY}u);return NONE;}
+ KU[p.kuMeta+4u*c]=k0;KU[p.kuMeta+4u*c+1u]=k1;KU[p.kuMeta+4u*c+2u]=collider;KU[p.kuMeta+4u*c+3u]=slot;
+ return c;
+}
+fn warmLambda(k0:u32,k1:u32)->f32{
  var lambda=0.;
  if(p.prevValid!=0u){let t=1u-p.tableCur;let ps=tableFind(t,k0,k1);if(ps!=NONE){lambda=bitcast<f32>(KU[p.uTabVal+p.tableSlots*t+ps]);}}
+ return lambda;
+}
+fn writeContact(c:u32,lambda:f32,v:vec4u,w:vec4f,n:vec3f,g0:f32,obstacle:vec3f,mu:f32,radius:f32){
  let tangentObstacle=obstacle-dot(obstacle,n)*n;
  KF[4u*c]=vec4f(n,g0);KF[4u*c+1u]=vec4f(tangentObstacle,lambda);KF[4u*c+2u]=vec4f(0.,lambda,mu,radius);KF[4u*c+3u]=w;
  KU[p.kuCV+4u*c]=v.x;KU[p.kuCV+4u*c+1u]=v.y;KU[p.kuCV+4u*c+2u]=v.z;KU[p.kuCV+4u*c+3u]=v.w;
- KU[p.kuMeta+4u*c]=k0;KU[p.kuMeta+4u*c+1u]=k1;KU[p.kuMeta+4u*c+2u]=collider;KU[p.kuMeta+4u*c+3u]=slot;
+}
+fn addContact(k0:u32,k1:u32,v:vec4u,w:vec4f,n:vec3f,g0:f32,obstacle:vec3f,mu:f32,radius:f32,collider:u32){
+ let c=claimContact(k0,k1,collider);if(c==NONE){return;}
+ writeContact(c,warmLambda(k0,k1),v,w,n,g0,obstacle,mu,radius);
+ if(p.rodContact!=0u){KU[p.kuRod+4u*c+3u]=0u;}
  atomicAdd(&C[${K.K_ADDED}u],1u);
 }
 @compute @workgroup_size(${WG}) fn tableClear(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
@@ -401,12 +472,12 @@ fn relinearizeSelf(c:u32){
  let q1=oldEdge(v.x,v.y);let q2=oldEdge(v.x,v.z);let q3=oldEdge(v.x,v.w);
  let x0=xv(v.x);let x1=q1+xv(v.y);let x2=q2+xv(v.z);let x3=q3+xv(v.w);
  var delta:vec3f;var fallback:vec3f;var w:vec4f;var distance:f32;
- if((k0>>30u)==1u){
+ if((k0>>28u)==1u){
   let closest=closestTriangle(x0,x1,x2,x3);delta=x0-closest.point;fallback=cross(x2-x1,x3-x1);w=vec4f(1.,-closest.w.x,-closest.w.y,-closest.w.z);
   distance=kRadius(v.x)+ksf(p.sFaceR+k1);
  }else{
   let closest=closestSegments(x0,x1,x2,x3);delta=closest.a-closest.b;fallback=cross(x1-x0,x3-x2);w=vec4f(1.-closest.s,closest.s,-(1.-closest.t),-closest.t);
-  distance=ksf(p.sEdge+4u*(k0&0x3FFFFFFFu)+2u)+ksf(p.sEdge+4u*k1+2u);
+  distance=ksf(p.sEdge+4u*(k0&0x0FFFFFFFu)+2u)+ksf(p.sEdge+4u*k1+2u);
  }
  let old=KF[4u*c].xyz;let length0=length(delta);let f=length(fallback);
  var n=old;if(length0>1e-12){n=delta/length0;}else if(f>1e-12){n=fallback/f;}
@@ -418,12 +489,16 @@ fn relinearizeSelf(c:u32){
  if(!roundOn()){return;}
  let count=atomicLoad(&C[${K.K_BASE}u]);
  for(var c=g.x;c<count;c+=ng.x*${WG}u){
-  let ci=KU[p.kuMeta+4u*c+2u];if(ci==NONE){relinearizeSelf(c);continue;}
+  let ci=KU[p.kuMeta+4u*c+2u];let kind=KU[p.kuMeta+4u*c]>>28u;
+  if(ci==NONE){if(kind<=2u){relinearizeSelf(c);}else{relinearizeRodSelf(c);}continue;}
+  if(kind==3u){relinearizeRodSegment(c,ci);continue;}
   let i=KU[p.kuCV+4u*c];let s=colliderSample(ci,sweptPoint(i,1.),0.);let old=KF[4u*c];let radius=KF[4u*c+2u].w;
   if(!(dot(s.n,old.xyz)>0.)){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
   let obstacle=cv3(cHeader(ci)+2u)*p.dt;
   KF[4u*c]=vec4f(s.n,(s.d-radius)-dot(s.n,xv(i)));KF[4u*c+1u]=vec4f(obstacle-dot(obstacle,s.n)*s.n,KF[4u*c+1u].w);
   maxf(${K.K_PEN}u,radius-s.d);maxf(${K.K_REPPEN}u,radius-s.d);
+  // A rod vertex's sphere: its rolling Jacobian at the new normal.
+  if(p.rodContact!=0u&&KU[p.kuRod+4u*c+3u]!=0u){rodLinearize(c);}
  }
 }
 @compute @workgroup_size(1) fn roundDecide(){
@@ -451,7 +526,7 @@ fn relinearizeSelf(c:u32){
   var r=KF[4u*c+2u];let k=contactAt(c);
   if(r.x==0.){
    var compliance=0.;
-   for(var j=0u;j<4u;j++){let w=k.w[j];let v=k.v[j];if(w==0.||isFixed(v)){continue;}var s=vec3f(pred(v).w+attach(v).w);if(p.stiffnessValid!=0u||atomicLoad(&C[${K.K_OUTER}u])>0u){s=W[p.wK+v].xyz;}compliance+=w*w/dot(k.n*k.n,s);}
+   for(var j=0u;j<5u;j++){let w=slotW(k,j);let v=slotV(k,j);if(w==0.||isFixed(v)){continue;}var s=vec3f(pred(v).w+attach(v).w);if(p.stiffnessValid!=0u||atomicLoad(&C[${K.K_OUTER}u])>0u){s=W[p.wK+v].xyz;}compliance+=w*w/dot(k.n*k.n,s);}
    if(!(compliance>0.&&compliance<3e38)){atomicOr(&C[${K.K_ERROR}u],${E_STIFFNESS}u);}
    r.x=10./compliance;
   }else if(stiffen){let gap=k.g0+dot(k.n,contactSum(k,0u));if(abs(min(gap,k.lambda/r.x))>p.tolerance){r.x*=10.;}}
@@ -461,12 +536,18 @@ fn relinearizeSelf(c:u32){
 }
 
 // ---- per-vertex contact lists (CSR over free vertices with nonzero weight)
-// A self pair lists all four vertices (its re-linearized weights may move off zero); a collider pair its one.
-fn pairVertices(c:u32)->u32{return select(1u,4u,KU[p.kuMeta+4u*c+2u]==NONE);}
+// A self pair lists all four vertices (its re-linearized weights may move off zero); a collider pair its one;
+// a rod pair every slot (its rolling endpoints move it through the slip Jacobian), and the rows
+// p.n + segment of its sides' free twists (entries 5 + side).
+fn pairVertices(c:u32,k:Contact)->u32{if(k.rodm!=0u){return k.rodm&7u;}return select(1u,4u,KU[p.kuMeta+4u*c+2u]==NONE);}
+fn twistRow(c:u32,k:Contact,side:u32)->u32{if(k.rodm==0u){return NONE;}let s=KU[p.kuRod+4u*c+1u+side];if(s==NONE||!twistFree(s)){return NONE;}return p.n+s;}
 @compute @workgroup_size(${WG}) fn listCount(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
  let count=min(contactCount(),p.kMax);
- for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<pairVertices(c);j++){if(!isFixed(k.v[j])){atomicAdd(&KA[p.aCount+k.v[j]],1u);}}}
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){
+  let k=contactAt(c);for(var j=0u;j<pairVertices(c,k);j++){let v=slotV(k,j);if(!isFixed(v)){atomicAdd(&KA[p.aCount+v],1u);}}
+  for(var side=0u;side<2u;side++){let row=twistRow(c,k,side);if(row!=NONE){atomicAdd(&KA[p.aCount+row],1u);}}
+ }
 }
 var<workgroup> scanBuffer:array<u32,${SCAN_WG}>;
 fn scanLocal(l:u32,value:u32)->u32{
@@ -476,39 +557,42 @@ fn scanLocal(l:u32,value:u32)->u32{
 }
 @compute @workgroup_size(${SCAN_WG}) fn listScan1(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
  if(uniformWord(l,${K.K_ADDED}u)==0u){return;}
- let i=g.x;var value=0u;if(i<p.n){value=atomicExchange(&KA[p.aCount+i],0u);}
- let inclusive=scanLocal(l,value);if(i<p.n){KU[p.kvStart+i]=inclusive-value;}
+ let i=g.x;var value=0u;if(i<p.listRows){value=atomicExchange(&KA[p.aCount+i],0u);}
+ let inclusive=scanLocal(l,value);if(i<p.listRows){KU[p.kvStart+i]=inclusive-value;}
  if(l==${SCAN_WG - 1}u){KU[p.uBlocks+wg.x]=inclusive;}
 }
 @compute @workgroup_size(${SCAN_WG}) fn listScan2(@builtin(local_invocation_index) l:u32){
  if(uniformWord(l,${K.K_ADDED}u)==0u){return;}
- let blocks=(p.n+${SCAN_WG - 1}u)/${SCAN_WG}u;var carry=0u;
+ let blocks=(p.listRows+${SCAN_WG - 1}u)/${SCAN_WG}u;var carry=0u;
  for(var b0=0u;b0<blocks;b0+=${SCAN_WG}u){
   var value=0u;if(b0+l<blocks){value=KU[p.uBlocks+b0+l];}
   let inclusive=scanLocal(l,value);if(b0+l<blocks){KU[p.uBlocks+b0+l]=carry+inclusive-value;}
   carry+=workgroupUniformLoad(&scanBuffer[${SCAN_WG - 1}u]);
  }
- if(l==0u){KU[p.kvStart+p.n]=carry;}
+ if(l==0u){KU[p.kvStart+p.listRows]=carry;}
 }
 @compute @workgroup_size(${SCAN_WG}) fn listScan3(@builtin(global_invocation_id) g:vec3u,@builtin(workgroup_id) wg:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
- let i=g.x;if(i<p.n){KU[p.kvStart+i]+=KU[p.uBlocks+wg.x];}
+ let i=g.x;if(i<p.listRows){KU[p.kvStart+i]+=KU[p.uBlocks+wg.x];}
 }
 @compute @workgroup_size(${WG}) fn listFill(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
  let count=min(contactCount(),p.kMax);
- for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<pairVertices(c);j++){let v=k.v[j];if(!isFixed(v)){KU[p.kvList+KU[p.kvStart+v]+atomicAdd(&KA[p.aCount+v],1u)]=(c<<2u)|j;}}}
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){
+  let k=contactAt(c);for(var j=0u;j<pairVertices(c,k);j++){let v=slotV(k,j);if(!isFixed(v)){KU[p.kvList+KU[p.kvStart+v]+atomicAdd(&KA[p.aCount+v],1u)]=(c<<3u)|j;}}
+  for(var side=0u;side<2u;side++){let row=twistRow(c,k,side);if(row!=NONE){KU[p.kvList+KU[p.kvStart+row]+atomicAdd(&KA[p.aCount+row],1u)]=(c<<3u)|(5u+side);}}
+ }
 }
 // Each vertex's list in the order of its contacts' keys (unique in a pass) and slots, not
 // the order threads appended them: the per-vertex contact sums (gradient, preconditioner,
 // matvec gather) and the line search's owner sums then repeat bit for bit.
 fn incidenceBefore(a:u32,b:u32)->bool{
- let ca=p.kuMeta+4u*(a>>2u);let cb=p.kuMeta+4u*(b>>2u);
- if(KU[ca]!=KU[cb]){return KU[ca]<KU[cb];}if(KU[ca+1u]!=KU[cb+1u]){return KU[ca+1u]<KU[cb+1u];}return (a&3u)<(b&3u);
+ let ca=p.kuMeta+4u*(a>>3u);let cb=p.kuMeta+4u*(b>>3u);
+ if(KU[ca]!=KU[cb]){return KU[ca]<KU[cb];}if(KU[ca+1u]!=KU[cb+1u]){return KU[ca+1u]<KU[cb+1u];}return (a&7u)<(b&7u);
 }
 @compute @workgroup_size(${WG}) fn listReset(@builtin(global_invocation_id) g:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
- let i=g.x;if(i>=p.n){return;}
+ let i=g.x;if(i>=p.listRows){return;}
  atomicStore(&KA[p.aCount+i],0u);
  let s=KU[p.kvStart+i];let t=KU[p.kvStart+i+1u];
  for(var k=s+1u;k<t;k++){let e=KU[p.kvList+k];var j=k;while(j>s&&incidenceBefore(e,KU[p.kvList+j-1u])){KU[p.kvList+j]=KU[p.kvList+j-1u];j--;}KU[p.kvList+j]=e;}
@@ -530,7 +614,7 @@ fn insertEntry(grid:u32,prim:u32,a:vec3i,b:vec3i){
 fn padBox(lo:vec3f,hi:vec3f,r:f32)->array<vec3f,2>{let pad=r+1e-6*(abs(lo)+abs(hi))+1e-9;return array<vec3f,2>(lo-pad,hi+pad);}
 @compute @workgroup_size(${WG}) fn gridClear(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
- for(var b=g.x;b<2u*p.gridBuckets;b+=ng.x*${WG}u){atomicStore(&KA[p.aHeads+b],0u);}
+ let grids=select(2u,3u,p.rodContact!=0u);for(var b=g.x;b<grids*p.gridBuckets;b+=ng.x*${WG}u){atomicStore(&KA[p.aHeads+b],0u);}
 }
 @compute @workgroup_size(${WG}) fn gridFaces(@builtin(global_invocation_id) g:vec3u){
  let f=g.x;if(f>=p.triangles||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
@@ -579,7 +663,7 @@ fn closestSegments(a:vec3f,b:vec3f,c:vec3f,d:vec3f)->Segments{
 fn vertexFace(i:u32,f:u32){
  let id=triIds(f);
  if(inRing(i,id.x)||inRing(i,id.y)||inRing(i,id.z)||inList(p.sFrStart,p.sFrList,i,f)){return;}
- let k0=(1u<<30u)|i;if(held(k0,f)){return;}
+ let k0=(1u<<28u)|i;if(held(k0,f)){return;}
  if(isFixed(i)&&isFixed(id.x)&&isFixed(id.y)&&isFixed(id.z)){return;}
  let q0=oldEdge(i,id.x);let q1=oldEdge(i,id.y);let q2=oldEdge(i,id.z);let ui=xv(i);let ua=xv(id.x);let ub=xv(id.y);let uc=xv(id.z);
  let distance=kRadius(i)+ksf(p.sFaceR+f);let bound=length(ui)+max(length(ua),max(length(ub),length(uc)));
@@ -614,7 +698,7 @@ fn edgeEdge(ai:u32,bi:u32){
  if(ea.x==eb.x||ea.x==eb.y||ea.y==eb.x||ea.y==eb.y){return;}
  for(var j=0u;j<2u;j++){let v=ea[j];for(var m=0u;m<2u;m++){let w=eb[m];if(inRing(v,w)||inList(p.sLvStart,p.sLvList,v,w)){return;}}}
  if(inList(p.sE3Start,p.sE3List,ai,bi)){return;}
- let k0=(2u<<30u)|ai;if(held(k0,bi)){return;}
+ let k0=(2u<<28u)|ai;if(held(k0,bi)){return;}
  if(isFixed(ea.x)&&isFixed(ea.y)&&isFixed(eb.x)&&isFixed(eb.y)){return;}
  let ids=vec4u(ea,eb);let s0=vec3f(0);let s1=oldEdge(ea.x,ea.y);let s2=oldEdge(ea.x,eb.x);let s3=oldEdge(ea.x,eb.y);
  let u0=xv(ids.x);let u1=xv(ids.y);let u2=xv(ids.z);let u3=xv(ids.w);
@@ -654,7 +738,8 @@ fn edgeEdge(ai:u32,bi:u32){
  if(atomicLoad(&C[${K.K_DETECT}u])==0u||p.colliders==0u){return;}
  for(var t=g.x;t<p.n*p.colliders;t+=ng.x*${WG}u){
   let i=t%p.n;let ci=t/p.n;
-  if(isFixed(i)||!kShell(i)||held(i,ci)){continue;}
+  let rod=p.rodContact!=0u&&rodVertex(i);
+  if(isFixed(i)||(!kShell(i)&&!rod)||held(i,ci)){continue;}
   let b=cHeader(ci);let r=kRadius(i);let u=xv(i);let velocity=cv3(b+2u);
   let speed=(length(u)+p.dt*ksf(b+5u))*ksf(b+6u);let tolerance=max(1e-10,r*1e-6);
   var time=0.;var hit=false;var clear=false;var hitNormal=vec3f(0,1,0);var hitDistance=0.;
@@ -671,7 +756,254 @@ fn edgeEdge(ai:u32,bi:u32){
   var normal=end.n;var g0=(end.d-r)-dot(end.n,u);
   if(hit){normal=hitNormal;g0=hitDistance-dot(normal,time*u+velocity*((1.-time)*p.dt));}
   var mu=ksf(b+1u);if(mu<0.){mu=kFriction(i);}
+  if(rod){var ids:array<u32,5>;var w:array<f32,5>;ids[0]=i;w[0]=1.;addRodContact(i,ci,ids,w,1u,vec2u(kOwner(i),NONE),normal,g0,velocity*p.dt,mu,r,ci,0.);continue;}
   addContact(i,ci,vec4u(i,0u,0u,0u),vec4f(1,0,0,0),normal,g0,velocity*p.dt,mu,r,ci);
+ }
+}
+
+// ---- rod pairs of ClothContactSet (round, uncut rods): KU[kuRod+4c..] = (fifth vertex, side
+// segments 0 and 1 (NONE: no side), rodm), rodm = slots | side0 a<<3 | side0 b<<6 | side1 a<<9 |
+// side1 b<<12 | 1<<31 (the slots of each side's endpoints); KF[kfRod+3c..] = (t0, r0/L0), (t1, r1/L1),
+// (w4, r0, r1, thickness). Keys k0 = kind<<28 | first feature: 0 c: (rod vertex sphere, collider),
+// 3 rc: (segment, collider), 4 rv: (rod vertex, face), 5 rq: (rod vertex, shell edge),
+// 6 rp: (vertex, segment), 7 rf: (segment, face), 8 rx: (segment, shell edge), 9 rs: (segment, later segment).
+// Each side's unit tangent and r/L at x (linearizeRolling): the slip Jacobian's endpoint couple.
+fn rodLinearize(c:u32){
+ for(var side=0u;side<2u;side++){
+  let s=KU[p.kuRod+4u*c+1u+side];if(s==NONE){KF[p.kfRod+3u*c+side]=vec4f(0);continue;}
+  let id=segIds(s);let e=segOldEdge(s)+(xv(id.y)-xv(id.x));let l=length(e);
+  if(!(l>0.&&l<3e38)){atomicOr(&C[${K.K_ERROR}u],${E_NONFINITE}u);KF[p.kfRod+3u*c+side]=vec4f(0);continue;}
+  KF[p.kfRod+3u*c+side]=vec4f(e/l,segR(s)/l);
+ }
+}
+// addRod: the sides' endpoints join the vertices (weight zero) where absent; the pair needs a free vertex of nonzero weight.
+fn addRodContact(k0:u32,k1:u32,idsIn:array<u32,5>,wIn:array<f32,5>,count:u32,sides:vec2u,n:vec3f,g0:f32,obstacle:vec3f,mu:f32,radius:f32,collider:u32,thickness:f32){
+ var ids=idsIn;var w=wIn;var slots=count;var rodm=0x80000000u;
+ for(var side=0u;side<2u;side++){
+  let s=sides[side];if(s==NONE){continue;}
+  let id=segIds(s);
+  for(var end=0u;end<2u;end++){
+   let v=id[end];var at=NONE;for(var j=0u;j<slots;j++){if(ids[j]==v){at=j;}}
+   if(at==NONE){at=slots;ids[slots]=v;w[slots]=0.;slots++;}
+   rodm|=at<<(3u+6u*side+3u*end);
+  }
+ }
+ rodm|=slots;if(sides.y!=NONE){rodm|=1u<<15u;}
+ var free=false;for(var j=0u;j<slots;j++){if(!isFixed(ids[j])&&w[j]!=0.){free=true;}}
+ if(!free){return;}
+ let c=claimContact(k0,k1,collider);if(c==NONE){return;}
+ writeContact(c,warmLambda(k0,k1),vec4u(ids[0],ids[1],ids[2],ids[3]),vec4f(w[0],w[1],w[2],w[3]),n,g0,obstacle,mu,radius);
+ KU[p.kuRod+4u*c]=ids[4];KU[p.kuRod+4u*c+1u]=sides.x;KU[p.kuRod+4u*c+2u]=sides.y;KU[p.kuRod+4u*c+3u]=rodm;
+ var r=vec2f(0);if(sides.x!=NONE){r.x=segR(sides.x);}if(sides.y!=NONE){r.y=segR(sides.y);}
+ KF[p.kfRod+3u*c+2u]=vec4f(w[4],r,thickness);
+ rodLinearize(c);
+ atomicAdd(&C[${K.K_ADDED}u],1u);
+}
+// The capsule of segment s against sphere collider ci at sweep time t (sampleClippedRodCollider,
+// uncut round rod): distance, normal from the sphere, and the closest centreline parameter.
+struct CapsuleSample{d:f32,n:vec3f,t:f32}
+fn capsuleSphere(s:u32,ci:u32,time:f32,beforeEnd:f32)->CapsuleSample{
+ let b=cHeader(ci);let id=segIds(s);let a=shifted(sweptPoint(id.x,time),cv3(b+2u)*beforeEnd);
+ let rel=(a.h-cv3(b+8u))+(a.l-cv3(b+11u));let e=segOldEdge(s)+time*(xv(id.y)-xv(id.x));
+ let ee=dot(e,e);var t=0.;if(ee>0.){t=clamp(-dot(rel,e)/ee,0.,1.);}
+ let delta=rel+t*e;let l=length(delta);
+ var n=perpendicular(e);if(l>1e-14){n=delta/l;}
+ return CapsuleSample(((l-segR(s))-ksf(b+14u))-ksf(b+15u),n,t);
+}
+fn relinearizeRodSegment(c:u32,ci:u32){
+ let s=KU[p.kuMeta+4u*c]&0x0FFFFFFFu;let q=capsuleSphere(s,ci,1.,0.);let old=KF[4u*c].xyz;
+ if(!(dot(q.n,old)>0.)){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
+ let id=segIds(s);let w=vec4f(1.-q.t,q.t,0,0);let obstacle=cv3(cHeader(ci)+2u)*p.dt;
+ KF[4u*c]=vec4f(q.n,q.d-dot(q.n,w.x*xv(id.x)+w.y*xv(id.y)));KF[4u*c+1u]=vec4f(obstacle-dot(obstacle,q.n)*q.n,KF[4u*c+1u].w);KF[4u*c+3u]=w;
+ rodLinearize(c);maxf(${K.K_PEN}u,-q.d);maxf(${K.K_REPPEN}u,-q.d);
+}
+// Segment interiors against colliders (detectRodColliders): conservative advancement on the capsule
+// distance, kept where the closest centreline point is inside the segment.
+@compute @workgroup_size(${WG}) fn detectRodColliders(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
+ if(atomicLoad(&C[${K.K_DETECT}u])==0u||p.colliders==0u||p.rodContact==0u){return;}
+ for(var t=g.x;t<p.segments*p.colliders;t+=ng.x*${WG}u){
+  let s=t%p.segments;let ci=t/p.segments;let id=segIds(s);
+  if(isFixed(id.x)&&isFixed(id.y)){continue;}
+  let k0=(3u<<28u)|s;if(held(k0,ci)){continue;}
+  let b=cHeader(ci);let kind=I[b];
+  // A plane's closest capsule point is its support, at an endpoint: never interior (the rod-vertex sphere's pair).
+  if(kind==${KIND_PLANE}u){continue;}
+  if(kind!=${KIND_SPHERE}u){atomicOr(&C[${K.K_ERROR}u],${E_UNSUPPORTED}u);continue;}
+  let r=segR(s);let ua=xv(id.x);let ub=xv(id.y);let travel=(max(length(ua),length(ub))+p.dt*ksf(b+5u))*ksf(b+6u);let tolerance=max(1e-10,r*1e-6);
+  var time=0.;var hit=false;var q=CapsuleSample(0.,vec3f(0,1,0),0.);
+  for(var it=0u;it<160u;it++){
+   q=capsuleSphere(s,ci,time,(1.-time)*p.dt);
+   if(q.d<=tolerance){hit=true;break;}
+   if(it==0u&&q.d-travel>tolerance){break;}
+   if(time>=1.||travel==0.){break;}
+   time=advance(time,max(1e-9,.9*q.d/travel));
+  }
+  if(!hit||!interior(q.t)){continue;}
+  let velocity=cv3(b+2u);let w0=1.-q.t;let w1=q.t;
+  let g0=q.d-dot(q.n,time*(w0*ua+w1*ub)+velocity*((1.-time)*p.dt));
+  var mu=ksf(b+1u);if(mu<0.){mu=segFriction(s);}
+  var ids:array<u32,5>;var w:array<f32,5>;ids[0]=id.x;ids[1]=id.y;w[0]=w0;w[1]=w1;
+  addRodContact(k0,ci,ids,w,2u,vec2u(s,NONE),q.n,g0,velocity*p.dt,mu,r,ci,0.);
+ }
+}
+
+// rodSelfClosest: shapes 0 point-face, 1 segment-face, 2 point-segment, 3 segment-segment (points
+// of the first feature, then the second); weights, separation second -> first, normal fallback,
+// and whether this shape owns its closest points (not a vertex or edge pair).
+fn interior(x:f32)->bool{return x>1e-6&&x<1.-1e-6;}
+fn closestPointSegment(q:vec3f,a:vec3f,b:vec3f)->f32{let e=b-a;let ee=dot(e,e);if(ee>1e-30){return clamp(dot(q-a,e)/ee,0.,1.);}return 0.;}
+fn perpendicular(e:vec3f)->vec3f{let f=cross(e,select(vec3f(0,1,0),vec3f(1,0,0),abs(e.x)<.8*length(e)));let l=length(f);if(l>0.){return f/l;}return vec3f(0,1,0);}
+struct SegTri{s:f32,w:vec3f,pa:vec3f,pb:vec3f}
+fn closestSegTri(a:vec3f,b:vec3f,x:vec3f,y:vec3f,z:vec3f)->SegTri{
+ let nrm=cross(y-x,z-x);let da=dot(a-x,nrm);let db=dot(b-x,nrm);
+ // A crossing segment: distance zero at its plane crossing (inside the triangle to Float32 roundoff).
+ if(da*db<=0.&&abs(da-db)>1e-30){let s=da/(da-db);let pp=mix(a,b,s);let q=closestTriangle(pp,x,y,z);if(length(pp-q.point)<=8.*1.1920929e-7*(length(pp)+length(q.point))+1e-12){return SegTri(s,q.w,pp,q.point);}}
+ var best=SegTri(0.,vec3f(1,0,0),a,x);var distance=3e38;
+ for(var e=0u;e<2u;e++){let pp=select(a,b,e==1u);let q=closestTriangle(pp,x,y,z);let d=length(pp-q.point);if(d<distance){distance=d;best=SegTri(f32(e),q.w,pp,q.point);}}
+ var corners=array<vec3f,3>(x,y,z);
+ for(var i=0u;i<3u;i++){let q=closestSegments(a,b,corners[i],corners[(i+1u)%3u]);var w=vec3f(0);w[i]=1.-q.t;w[(i+1u)%3u]=q.t;let d=length(q.a-q.b);if(d<distance){distance=d;best=SegTri(q.s,w,q.a,q.b);}}
+ return best;
+}
+struct RodClosest{w:array<f32,5>,delta:vec3f,fallback:vec3f,owned:bool}
+fn rodClosest(shape:u32,q:array<vec3f,5>)->RodClosest{
+ var r:RodClosest;
+ if(shape==0u){let c=closestTriangle(q[0],q[1],q[2],q[3]);r.w[0]=1.;r.w[1]=-c.w.x;r.w[2]=-c.w.y;r.w[3]=-c.w.z;r.delta=q[0]-c.point;r.fallback=cross(q[2]-q[1],q[3]-q[1]);r.owned=true;}
+ else if(shape==1u){let c=closestSegTri(q[0],q[1],q[2],q[3],q[4]);r.w[0]=1.-c.s;r.w[1]=c.s;r.w[2]=-c.w.x;r.w[3]=-c.w.y;r.w[4]=-c.w.z;r.delta=c.pa-c.pb;r.fallback=cross(q[3]-q[2],q[4]-q[2]);r.owned=interior(c.s)&&all(c.w>vec3f(1e-6));}
+ else if(shape==2u){let t=closestPointSegment(q[0],q[1],q[2]);r.w[0]=1.;r.w[1]=-(1.-t);r.w[2]=-t;r.delta=q[0]-mix(q[1],q[2],t);r.fallback=perpendicular(q[2]-q[1]);r.owned=true;}
+ else{let c=closestSegments(q[0],q[1],q[2],q[3]);r.w[0]=1.-c.s;r.w[1]=c.s;r.w[2]=-(1.-c.t);r.w[3]=-c.t;r.delta=c.a-c.b;r.fallback=cross(q[1]-q[0],q[3]-q[2]);r.owned=interior(c.s)&&interior(c.t);}
+ return r;
+}
+fn unitNormal(delta:vec3f,fallback:vec3f)->vec3f{let l=length(delta);let f=length(fallback);if(l>1e-12){return delta/l;}if(f>1e-12){return fallback/f;}return vec3f(0,1,0);}
+fn rodShape(kind:u32)->u32{if(kind==4u){return 0u;}if(kind==7u){return 1u;}if(kind>=8u){return 3u;}return 2u;}
+fn rodFeatureVertices(kind:u32)->u32{if(kind==4u||kind>=8u){return 4u;}if(kind==7u){return 5u;}return 3u;}
+// sweepRodPair: conservative advancement from the old positions to x (relative to the first vertex's old position).
+struct RodHit{found:bool,w:array<f32,5>,n:vec3f}
+fn rodSweep(shape:u32,ids:array<u32,5>,count:u32,first:u32,thickness:f32)->RodHit{
+ var start:array<vec3f,5>;var u:array<vec3f,5>;var a=0.;var b=0.;
+ for(var j=0u;j<count;j++){if(j>0u){start[j]=oldEdge(ids[0],ids[j]);}u[j]=xv(ids[j]);let m=length(u[j]);if(j<first){a=max(a,m);}else{b=max(b,m);}}
+ let travel=a+b;var time=0.;var hit:RodHit;
+ for(var it=0u;it<100u;it++){
+  var q:array<vec3f,5>;for(var j=0u;j<count;j++){q[j]=start[j]+time*u[j];}
+  let c=rodClosest(shape,q);let gap=length(c.delta);
+  if(gap<=thickness+1e-9){if(c.owned){hit.found=true;hit.w=c.w;hit.n=unitNormal(c.delta,c.fallback);}return hit;}
+  if(time>=1.||travel==0.){return hit;}
+  time=advance(time,max(1e-10,.9*(gap-thickness)/travel));
+ }
+ return hit;
+}
+fn rodPair(k0:u32,k1:u32,ids:array<u32,5>,thickness:f32,radius:f32,sides:vec2u){
+ if(held(k0,k1)){return;}
+ let kind=k0>>28u;let count=rodFeatureVertices(kind);let first=select(1u,2u,kind>=7u);
+ var fixed=true;for(var j=0u;j<count;j++){if(!isFixed(ids[j])){fixed=false;}}
+ if(fixed){return;}
+ let hit=rodSweep(rodShape(kind),ids,count,first,thickness);if(!hit.found){return;}
+ var g0=-thickness;var mu=kFriction(ids[0]);
+ for(var j=1u;j<count;j++){g0+=hit.w[j]*dot(hit.n,oldEdge(ids[0],ids[j]));mu=min(mu,kFriction(ids[j]));}
+ addRodContact(k0,k1,ids,hit.w,count,sides,hit.n,g0,vec3f(0),mu,radius,NONE,thickness);
+}
+fn relinearizeRodSelf(c:u32){
+ let kind=KU[p.kuMeta+4u*c]>>28u;let k=contactAt(c);let count=rodFeatureVertices(kind);
+ var q:array<vec3f,5>;var e:array<vec3f,5>;
+ for(var j=0u;j<count;j++){let v=slotV(k,j);if(j>0u){e[j]=oldEdge(k.v.x,v);}q[j]=e[j]+xv(v);}
+ let r=rodClosest(rodShape(kind),q);let thickness=KF[p.kfRod+3u*c+2u].w;let old=k.n;
+ var n=unitNormal(r.delta,r.fallback);if(length(r.delta)<=1e-12&&length(r.fallback)<=1e-12){n=old;}
+ if(dot(n,old)<0.){n=-n;}
+ var g0=-thickness;for(var j=1u;j<count;j++){g0+=r.w[j]*dot(n,e[j]);}
+ KF[4u*c]=vec4f(n,g0);KF[4u*c+3u]=vec4f(r.w[0],r.w[1],r.w[2],r.w[3]);if(count==5u){KF[p.kfRod+3u*c+2u].x=r.w[4];}
+ rodLinearize(c);
+ let pen=thickness-dot(n,r.delta);maxf(${K.K_PEN}u,pen);maxf(${K.K_REPPEN}u,pen);
+}
+// touches(near, [v]) with near = i and its rod neighbours (a vertex's ring holds the vertex itself).
+fn touchesNear(i:u32,v:u32)->bool{
+ if(inRing(i,v)){return true;}
+ for(var k=I[p.sNbStart+i];k<I[p.sNbStart+i+1u];k++){if(inRing(I[p.sNbList+k],v)){return true;}}
+ return false;
+}
+fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
+@compute @workgroup_size(${WG}) fn gridSegments(@builtin(global_invocation_id) g:vec3u){
+ let s=g.x;if(s>=p.segments||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
+ let id=segIds(s);let a0=approx(sweptPoint(id.x,0.));let a1=approx(sweptPoint(id.x,1.));let b0=approx(sweptPoint(id.y,0.));let b1=approx(sweptPoint(id.y,1.));
+ let box=padBox(min(min(a0,a1),min(b0,b1)),max(max(a0,a1),max(b0,b1)),segR(s));KF[p.kfSegBox+2u*s]=vec4f(box[0],0);KF[p.kfSegBox+2u*s+1u]=vec4f(box[1],0);
+ insertEntry(2u,s,cellOf(box[0]),cellOf(box[1]));
+}
+// Rod vertex spheres against faces (rv) and shell edges (rq); rod and shell vertices against segments (rp).
+@compute @workgroup_size(${WG}) fn detectRodPoints(@builtin(global_invocation_id) g:vec3u){
+ let i=g.x;if(i>=p.n||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
+ let rod=rodVertex(i);if(!rod&&!kShell(i)){return;}
+ let ri=kRadius(i);let box=padBox(min(approx(sweptPoint(i,0.)),approx(sweptPoint(i,1.))),max(approx(sweptPoint(i,0.)),approx(sweptPoint(i,1.))),ri);
+ let ca=cellOf(box[0]);let cb=cellOf(box[1]);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){atomicOr(&C[${K.K_ERROR}u],${E_CELLS}u);return;}
+ for(var k=0u;k<count;k++){
+  let cell=cellAt(ca,cb,k);let bucket=bucketOf(cell);
+  if(rod){
+   var e=atomicLoad(&KA[p.aHeads+bucket]);
+   while(e!=0u){
+    let f=KU[p.uEntry+2u*(e-1u)];e=KU[p.uEntry+2u*(e-1u)+1u];
+    let f0=KF[p.kfFaceBox+2u*f].xyz;let f1=KF[p.kfFaceBox+2u*f+1u].xyz;
+    if(!overlaps(box[0],box[1],f0,f1)||any(max(ca,cellOf(f0))!=cell)){continue;}
+    let id=triIds(f);if(touchesNear(i,id.x)||touchesNear(i,id.y)||touchesNear(i,id.z)){continue;}
+    var ids:array<u32,5>;ids[0]=i;ids[1]=id.x;ids[2]=id.y;ids[3]=id.z;
+    rodPair((4u<<28u)|i,f,ids,ri+ksf(p.sFaceR+f),ri,vec2u(kOwner(i),NONE));
+   }
+   var q=atomicLoad(&KA[p.aHeads+p.gridBuckets+bucket]);
+   while(q!=0u){
+    let ed=KU[p.uEntry+2u*(q-1u)];q=KU[p.uEntry+2u*(q-1u)+1u];
+    let e0=KF[p.kfEdgeBox+2u*ed].xyz;let e1=KF[p.kfEdgeBox+2u*ed+1u].xyz;
+    if(!overlaps(box[0],box[1],e0,e1)||any(max(ca,cellOf(e0))!=cell)){continue;}
+    let id=edgeIds(ed);if(touchesNear(i,id.x)||touchesNear(i,id.y)){continue;}
+    var ids:array<u32,5>;ids[0]=i;ids[1]=id.x;ids[2]=id.y;
+    rodPair((5u<<28u)|i,ed,ids,ri+edgeR(ed),ri,vec2u(kOwner(i),NONE));
+   }
+  }
+  var h=atomicLoad(&KA[p.aHeads+2u*p.gridBuckets+bucket]);
+  while(h!=0u){
+   let s=KU[p.uEntry+2u*(h-1u)];h=KU[p.uEntry+2u*(h-1u)+1u];
+   let s0=KF[p.kfSegBox+2u*s].xyz;let s1=KF[p.kfSegBox+2u*s+1u].xyz;
+   if(!overlaps(box[0],box[1],s0,s1)||any(max(ca,cellOf(s0))!=cell)){continue;}
+   let id=segIds(s);if(id.x==i||id.y==i){continue;}
+   if(!rod&&(inRing(i,id.x)||inRing(i,id.y))){continue;}
+   if(inList(p.sRpXStart,p.sRpXList,i,s)){continue;}
+   var ids:array<u32,5>;ids[0]=i;ids[1]=id.x;ids[2]=id.y;
+   rodPair((6u<<28u)|i,s,ids,ri+segR(s),ri,select(vec2u(s,NONE),vec2u(kOwner(i),s),rod));
+  }
+ }
+}
+// Segment interiors against faces (rf), shell edges (rx) and later segments (rs).
+@compute @workgroup_size(${WG}) fn detectRodSegments(@builtin(global_invocation_id) g:vec3u){
+ let s=g.x;if(s>=p.segments||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
+ let id=segIds(s);let r=segR(s);let b0=KF[p.kfSegBox+2u*s].xyz;let b1=KF[p.kfSegBox+2u*s+1u].xyz;
+ let ca=cellOf(b0);let cb=cellOf(b1);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){return;}
+ for(var k=0u;k<count;k++){
+  let cell=cellAt(ca,cb,k);let bucket=bucketOf(cell);
+  var e=atomicLoad(&KA[p.aHeads+bucket]);
+  while(e!=0u){
+   let f=KU[p.uEntry+2u*(e-1u)];e=KU[p.uEntry+2u*(e-1u)+1u];
+   let f0=KF[p.kfFaceBox+2u*f].xyz;let f1=KF[p.kfFaceBox+2u*f+1u].xyz;
+   if(!overlaps(b0,b1,f0,f1)||any(max(ca,cellOf(f0))!=cell)){continue;}
+   let t=triIds(f);var touch=false;for(var j=0u;j<3u;j++){if(inRing(id.x,t[j])||inRing(id.y,t[j])){touch=true;}}
+   if(touch){continue;}
+   var ids:array<u32,5>;ids[0]=id.x;ids[1]=id.y;ids[2]=t.x;ids[3]=t.y;ids[4]=t.z;
+   rodPair((7u<<28u)|s,f,ids,r+ksf(p.sFaceR+f),r,vec2u(s,NONE));
+  }
+  var q=atomicLoad(&KA[p.aHeads+p.gridBuckets+bucket]);
+  while(q!=0u){
+   let ed=KU[p.uEntry+2u*(q-1u)];q=KU[p.uEntry+2u*(q-1u)+1u];
+   let e0=KF[p.kfEdgeBox+2u*ed].xyz;let e1=KF[p.kfEdgeBox+2u*ed+1u].xyz;
+   if(!overlaps(b0,b1,e0,e1)||any(max(ca,cellOf(e0))!=cell)){continue;}
+   let t=edgeIds(ed);if(inRing(id.x,t.x)||inRing(id.y,t.x)||inRing(id.x,t.y)||inRing(id.y,t.y)){continue;}
+   var ids:array<u32,5>;ids[0]=id.x;ids[1]=id.y;ids[2]=t.x;ids[3]=t.y;
+   rodPair((8u<<28u)|s,ed,ids,r+edgeR(ed),r,vec2u(s,NONE));
+  }
+  var h=atomicLoad(&KA[p.aHeads+2u*p.gridBuckets+bucket]);
+  while(h!=0u){
+   let u=KU[p.uEntry+2u*(h-1u)];h=KU[p.uEntry+2u*(h-1u)+1u];
+   if(u<=s){continue;}
+   let u0=KF[p.kfSegBox+2u*u].xyz;let u1=KF[p.kfSegBox+2u*u+1u].xyz;
+   if(!overlaps(b0,b1,u0,u1)||any(max(ca,cellOf(u0))!=cell)){continue;}
+   let t=segIds(u);if(inRing(id.x,t.x)||inRing(id.y,t.x)||inRing(id.x,t.y)||inRing(id.y,t.y)){continue;}
+   if(inList(p.sRsXStart,p.sRsXList,s,u)){continue;}
+   var ids:array<u32,5>;ids[0]=id.x;ids[1]=id.y;ids[2]=t.x;ids[3]=t.y;
+   rodPair((9u<<28u)|s,u,ids,r+segR(u),r,vec2u(s,u));
+  }
  }
 }
 `;

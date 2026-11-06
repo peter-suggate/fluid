@@ -32,6 +32,13 @@ test('the wet-cloth shelf is one study shelf, small fixtures first, each card at
     assert.match(card.status!, /not reproduced/);
     assert.ok(card.prepare && card.prepared);
   }
+  // capillary_suction runs at an authored dx and dt; its card says so, and the
+  // released discretization is offered beside it as an exploratory variant.
+  const card = (id: string) => shelf.cards.find(c => c.id === id)!;
+  assert.match(card('wetcloth-source-capillary-suction').attribution!.label, /capillary_suction\.xml · dx 0\.072 cm, dt 0\.25 ms \(released 0\.288 cm, 1 ms\)$/);
+  assert.match(card('wetcloth-source-capillary-suction-upstream-dx').attribution!.label, /capillary_suction\.xml$/);
+  assert.match(card('wetcloth-source-capillary-suction-upstream-dx').status!, /Exploratory input, not reproduced/);
+  assert.match(card('wetcloth-source-simple-cloth').attribution!.label, /simple_cloth\.xml$/);
 });
 
 test('an unloaded wet-cloth scene refuses to build and never blocks synchronous preset reads', () => {

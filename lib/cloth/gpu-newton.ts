@@ -1,7 +1,7 @@
 import { beginClothMechanicalFinish, completeClothMechanicalFinish, extendClothStepReport, finishClothMechanicalStep, rodJoint, type ClothStepOptions, type ClothStepReport } from './dynamics';
 import { ClothContactSet, clothContactWarmStart, FRICTION_SLIP_SPEED_M_S, inSolveContactUnsupported, MAXIMUM_CONTACT_ITERATIONS, rememberClothContactMultipliers, type ClothContactConstraint } from './contact-constraints';
 import { rodRigidity, rodSegmentInertia_kg_m2 } from './material';
-import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_STIFFNESS, E_TABLE, SCAN_WG, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
+import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_STIFFNESS, E_TABLE, E_UNSUPPORTED, SCAN_WG, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
 import type { ClothCollider, ClothContactReport } from './contact';
 import type { PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
@@ -98,6 +98,8 @@ const PARAM_FIELDS = [
   'kfCoef', 'kfForce',
   // Hinge old edges: static Float64 rest edges, and per step rest + displacement (3 per hinge).
   'dHingeRest', 'eHingeEdge',
+  // Rod contact (round, uncut rods; lib/cloth/gpu-contact.ts): per-contact records, list rows n + segments, rod statics.
+  'rodContact', 'kuRod', 'kfRod', 'kfRodForce', 'kfSegBox', 'listRows', 'sSegInfo', 'sNbStart', 'sNbList', 'sRpXStart', 'sRpXList', 'sRsXStart', 'sRsXList',
 ] as const;
 const FLOAT_FIELDS = ['dt', 'tolerance', 'contactDelta', 'frictionEpsilon', 'cellSize'] as const;
 type ParamName = typeof PARAM_FIELDS[number];
@@ -270,11 +272,69 @@ fn pairDelta(k:u32,useDir:bool)->vec3f{var d=vec3f(0);if(!useDir){d=vec3f(Q[4u*k
 // P_t(sum w u) - P_t(obstacle), smoothed augmented-Lagrangian penalty of
 // m = lambda/rho - g and lagged smoothed friction mu lambda_f f0(|slip|).
 // KF[4c..]=(n,g0),(P_t obstacle,lambda),(rho,lambda_f,mu,radius),(w0..w3);
-// KU[kuCV+4c..] vertices; free vertices' lists KU[kvStart+i..] -> KU[kvList+k]=c<<2|j.
-struct Contact{n:vec3f,g0:f32,t:vec3f,lambda:f32,rho:f32,mu:f32,w:vec4f,v:vec4u}
-fn contactAt(c:u32)->Contact{let a=KF[4u*c];let t=KF[4u*c+1u];let r=KF[4u*c+2u];let j=p.kuCV+4u*c;return Contact(a.xyz,a.w,t.xyz,t.w,r.x,r.z*r.y,KF[4u*c+3u],vec4u(KU[j],KU[j+1u],KU[j+2u],KU[j+3u]));}
+// KU[kuCV+4c..] vertices; free vertices' lists KU[kvStart+i..] -> KU[kvList+k]=c<<3|j.
+// Rod pairs (p.rodContact, lib/cloth/gpu-contact.ts) add a fifth slot (KU[kuRod+4c], KF[kfRod+3c+2].x)
+// and rodm = KU[kuRod+4c+3] (0 off rods): slots, the sides' endpoint slots, bit 15 a second side.
+struct Contact{n:vec3f,g0:f32,t:vec3f,lambda:f32,rho:f32,mu:f32,w:vec4f,v:vec4u,v4:u32,w4:f32,rodm:u32}
+fn contactAt(c:u32)->Contact{
+ let a=KF[4u*c];let t=KF[4u*c+1u];let r=KF[4u*c+2u];let j=p.kuCV+4u*c;var rodm=0u;var v4=0u;var w4=0.;
+ if(p.rodContact!=0u){rodm=KU[p.kuRod+4u*c+3u];if(rodm!=0u){v4=KU[p.kuRod+4u*c];w4=KF[p.kfRod+3u*c+2u].x;}}
+ return Contact(a.xyz,a.w,t.xyz,t.w,r.x,r.z*r.y,KF[4u*c+3u],vec4u(KU[j],KU[j+1u],KU[j+2u],KU[j+3u]),v4,w4,rodm);
+}
+fn slotV(c:Contact,j:u32)->u32{if(j<4u){return c.v[j];}return c.v4;}
+fn slotW(c:Contact,j:u32)->f32{if(j<4u){return c.w[j];}return c.w4;}
 // sum_j w_j of increments (0), search direction (1) or CG direction (2).
-fn contactSum(c:Contact,which:u32)->vec3f{var s=vec3f(0);for(var j=0u;j<4u;j++){let w=c.w[j];if(w!=0.){let v=c.v[j];if(which==0u){s+=w*xv(v);}else if(which==1u){s+=w*dir(v);}else{s+=w*W[p.wP+v].xyz;}}}return s;}
+fn contactSum(c:Contact,which:u32)->vec3f{var s=vec3f(0);for(var j=0u;j<5u;j++){let w=slotW(c,j);if(w!=0.){let v=slotV(c,j);if(which==0u){s+=w*xv(v);}else if(which==1u){s+=w*dir(v);}else{s+=w*W[p.wP+v].xyz;}}}return s;}
+// A rod pair's slip Jacobian (linearizeRolling of ClothContactSet): J_j = w_j I + sum over its
+// sides of (+C at the side's b slot, -C at its a slot), C = (r/L)(t n^T - (t.n) I) (n^T C = 0, so
+// J_j^T n = w_j n), and each side's twist rolls the material point by -r theta (t x n).
+// KF[kfRod+3c..] = (t0, r0/L0), (t1, r1/L1), (w4, r0, r1, thickness); segments KU[kuRod+4c+1..2].
+struct RodGeom{t0:vec4f,t1:vec4f,r:vec2f,two:bool,a:vec2u,b:vec2u}
+fn rodAt(c:u32,k:Contact)->RodGeom{
+ let m=k.rodm;
+ return RodGeom(KF[p.kfRod+3u*c],KF[p.kfRod+3u*c+1u],KF[p.kfRod+3u*c+2u].yz,((m>>15u)&1u)!=0u,vec2u((m>>3u)&7u,(m>>9u)&7u),vec2u((m>>6u)&7u,(m>>12u)&7u));
+}
+fn rodC(n:vec3f,t:vec4f)->mat3x3f{let tn=dot(t.xyz,n);return t.w*(outer(t.xyz,n)-mat3x3f(vec3f(tn,0,0),vec3f(0,tn,0),vec3f(0,0,tn)));}
+fn rodCv(n:vec3f,t:vec4f,v:vec3f)->vec3f{return t.w*(t.xyz*dot(n,v)-dot(t.xyz,n)*v);}
+// C^T v: a side's share of J^T at its b slot (minus at a).
+fn rodCt(n:vec3f,t:vec4f,v:vec3f)->vec3f{return t.w*(n*dot(t.xyz,v)-dot(t.xyz,n)*v);}
+fn rodJ(c:Contact,g:RodGeom,j:u32)->mat3x3f{
+ let w=slotW(c,j);var M=mat3x3f(vec3f(w,0,0),vec3f(0,w,0),vec3f(0,0,w));
+ if(j==g.b.x){M+=rodC(c.n,g.t0);}if(j==g.a.x){M-=rodC(c.n,g.t0);}
+ if(g.two){if(j==g.b.y){M+=rodC(c.n,g.t1);}if(j==g.a.y){M-=rodC(c.n,g.t1);}}
+ return M;
+}
+fn rodRole(rodm:u32,j:u32,side:u32)->f32{
+ if(side==1u&&((rodm>>15u)&1u)==0u){return 0.;}
+ let a=(rodm>>(3u+6u*side))&7u;let b=(rodm>>(6u+6u*side))&7u;return select(0.,1.,j==b)-select(0.,1.,j==a);
+}
+// Slot motions: increments (0), search direction (1), CG direction (2).
+fn rodSlotU(c:Contact,which:u32)->array<vec3f,5>{
+ var u:array<vec3f,5>;
+ for(var j=0u;j<(c.rodm&7u);j++){let v=slotV(c,j);if(which==0u){u[j]=xv(v);}else if(which==1u){u[j]=dir(v);}else{u[j]=W[p.wP+v].xyz;}}
+ return u;
+}
+// The sides' twist: the increment (0), the twist step (1) or the CG direction's twist rows (2).
+fn rodTwist(ci:u32,which:u32)->vec2f{
+ var t=vec2f(0);if(which==2u&&!twistCG()){return t;}
+ for(var side=0u;side<2u;side++){let s=KU[p.kuRod+4u*ci+1u+side];if(s!=NONE){if(which==2u){t[side]=W[p.wP+p.n+s].x;}else{t[side]=select(W[p.wT+s].x,W[p.wT+s].z,which==1u);}}}
+ return t;
+}
+// With rod contact the twist joins the CG (rows n+s after the vertices): friction
+// rolls the rod, coupling twist and positions too stiffly for separate block steps.
+fn twistCG()->bool{return p.contactMode!=0u&&p.rodContact!=0u;}
+// sum_j J_j u_j plus the twist roll (before the tangent projection).
+fn rodMove(c:Contact,g:RodGeom,uIn:array<vec3f,5>,twist:vec2f)->vec3f{
+ var u=uIn;var s=vec3f(0);for(var j=0u;j<(c.rodm&7u);j++){s+=slotW(c,j)*u[j];}
+ s+=rodCv(c.n,g.t0,u[g.b.x]-u[g.a.x])-g.r.x*twist.x*cross(g.t0.xyz,c.n);
+ if(g.two){s+=rodCv(c.n,g.t1,u[g.b.y]-u[g.a.y])-g.r.y*twist.y*cross(g.t1.xyz,c.n);}
+ return s;
+}
+// The slip at the iterate: P_t(sum J u + roll) - P_t(obstacle) for a rod pair, else P_t(sum w u) - P_t(obstacle).
+fn contactSlip(ci:u32,c:Contact,sx:vec3f)->vec3f{
+ if(c.rodm!=0u){return tangent(c.n,rodMove(c,rodAt(ci,c),rodSlotU(c,0u),rodTwist(ci,0u)))-c.t;}
+ return tangent(c.n,sx)-c.t;
+}
 fn contactM(c:Contact,sx:vec3f)->f32{return c.lambda/c.rho-(c.g0+dot(c.n,sx));}
 fn tangent(n:vec3f,v:vec3f)->vec3f{return v-dot(n,v)*n;}
 fn cForce(m:f32,rho:f32)->f32{let d=p.contactDelta;if(m<=-d){return 0.;}if(m<d){return rho*(m+d)*(m+d)/(4.*d);}return rho*m;}
@@ -298,7 +358,7 @@ fn fF0Change(y0:f32,y1:f32,q:f32)->vec2f{
  let a=fF0(y1);let b=fF0(y0);return vec2f(a-b,abs(a)+abs(b));
 }
 // Normal and tangential Hessian coefficients at the current iterate.
-fn contactCoefficients(c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.mu>0.){f=c.mu*fF1(length(tangent(c.n,sx)-c.t));}return vec2f(cCurv(contactM(c,sx),c.rho),f);}
+fn contactCoefficients(ci:u32,c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.mu>0.){f=c.mu*fF1(length(contactSlip(ci,c,sx)));}return vec2f(cCurv(contactM(c,sx),c.rho),f);}
 
 @compute @workgroup_size(${WG}) fn initX(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i<p.segments){W[p.wT+i]=vec4f(select(0.,segT(i,2u).w,twistFree(i)),0,0,1);W[p.wT2+i]=vec4f(1,1,0,0);}if(i>=p.n){return;}if(isFixed(i)){W[p.wX+i]=vec4f(attach(i).xyz,0);}else{W[p.wX+i]=vec4f(pred(i).xyz,0);}}
 
@@ -349,9 +409,14 @@ fn elasticGradient(i:u32)->array<vec3f,2>{
    // Coordinate stiffness without contact: sizes the penalties of new contacts.
    W[p.wK+i]=vec4f(diag,0);
    if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-    let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let sx=contactSum(c,0u);let m=contactM(c,sx);
+    let e=KU[p.kvList+k];let ci=e>>3u;let j=e&7u;let c=contactAt(ci);let w=slotW(c,j);let sx=contactSum(c,0u);let m=contactM(c,sx);
     gr-=w*cForce(m,c.rho)*c.n;diag+=w*w*cCurv(m,c.rho)*c.n*c.n;
-    if(c.mu>0.){let slip=tangent(c.n,sx)-c.t;let f=c.mu*fF1(length(slip));gr+=w*f*slip;diag+=w*w*f*(vec3f(1)-c.n*c.n);}
+    if(c.mu>0.){
+     let slip=contactSlip(ci,c,sx);let f=c.mu*fF1(length(slip));
+     // A rod pair: J_j^T slip, and the diagonal of J_j^T P_t J_j = J_j^T J_j - w^2 n n^T.
+     if(c.rodm!=0u){let M=rodJ(c,rodAt(ci,c),j);let MM=transpose(M)*M;gr+=f*(transpose(M)*slip);diag+=f*(vec3f(MM[0].x,MM[1].y,MM[2].z)-w*w*c.n*c.n);}
+     else{gr+=w*f*slip;diag+=w*w*f*(vec3f(1)-c.n*c.n);}
+    }
    }}
    W[p.wG+i]=vec4f(gr,0);
    let r=abs(gr)/max(vec3f(pr.w),diag);let measure=max(r.x,max(r.y,r.z));
@@ -421,11 +486,19 @@ fn elasticGradient(i:u32)->array<vec3f,2>{
 @compute @workgroup_size(${WG}) fn contactCoef(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(p.contactMode==0u||!isActive()){return;}
  let count=min(contactCount(),p.kMax);
- for(var c=g.x;c<count;c+=ng.x*${WG}u){KF[p.kfCoef+c]=vec4f(contactCoefficients(contactAt(c)),0,0);}
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){KF[p.kfCoef+c]=vec4f(contactCoefficients(c,contactAt(c)),0,0);}
 }
 // The contact term of A p, once per contact: f = a n (n.s) + b (s - n (n.s)) with
 // s = sum_j w_j p_j; the matvec gathers w_i f at each of the contact's vertices.
+// A rod pair: s = sum_j J_j p_j (n.s = n.sum w p), F = a n (n.s) + b P_t s gathered by
+// weight, and each side's C^T b P_t s (KF[kfRodForce+2c+side]) gathered by its endpoint roles.
 fn contactForceAt(c:u32){
+ if(p.rodContact!=0u){let k=contactAt(c);if(k.rodm!=0u){
+  let g=rodAt(c,k);let cf=KF[p.kfCoef+c].xy;let s=rodMove(k,g,rodSlotU(k,2u),rodTwist(c,2u));let sn=dot(k.n,s);let ft=cf.y*(s-sn*k.n);
+  KF[p.kfForce+c]=vec4f(cf.x*sn*k.n+ft,0);KF[p.kfRodForce+2u*c]=vec4f(rodCt(k.n,g.t0,ft),0);
+  var second=vec3f(0);if(g.two){second=rodCt(k.n,g.t1,ft);}KF[p.kfRodForce+2u*c+1u]=vec4f(second,0);
+  return;
+ }}
  let n=KF[4u*c].xyz;let w=KF[4u*c+3u];let j=p.kuCV+4u*c;let cf=KF[p.kfCoef+c].xy;var s=vec3f(0);
  for(var q=0u;q<4u;q++){if(w[q]!=0.){s+=w[q]*W[p.wP+KU[j+q]].xyz;}}
  let sn=dot(n,s);KF[p.kfForce+c]=vec4f(cf.x*sn*n+cf.y*(s-sn*n),0);
@@ -438,7 +511,8 @@ fn contactForceAt(c:u32){
 fn contactBlock(i:u32)->mat3x3f{
  var M=mat3x3f(vec3f(0),vec3f(0),vec3f(0));
  if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-  let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=KF[p.kfCoef+(e>>2u)].xy;let nn=outer(c.n,c.n);
+  let e=KU[p.kvList+k];let ci=e>>3u;let c=contactAt(ci);let w=slotW(c,e&7u);let cf=KF[p.kfCoef+ci].xy;let nn=outer(c.n,c.n);
+  if(c.rodm!=0u){let J=rodJ(c,rodAt(ci,c),e&7u);M+=w*w*(cf.x-cf.y)*nn+cf.y*(transpose(J)*J);continue;}
   M+=w*w*(cf.x*nn+cf.y*(mat3x3f(vec3f(1,0,0),vec3f(0,1,0),vec3f(0,0,1))-nn));
  }}
  return M;
@@ -460,6 +534,7 @@ fn applyPre(i:u32,v:vec3f)->vec3f{return vec3f(dot(W[p.wPre+3u*i].xyz,v),dot(W[p
    let r=-W[p.wG+i].xyz;let z=applyPre(i,r);W[p.wR+i]=vec4f(r,0);W[p.wZ+i]=vec4f(z,0);W[p.wZ0+i]=vec4f(z,0);W[p.wP+i]=vec4f(z,0);W[p.wS+i]=vec4f(0);rz=dot(r,z);
   }
  }
+ if(i<p.segments&&twistCG()){rz+=twistInitAt(i);}
  red[l]=vec4f(rz,0,0,0);writePartial(0u,wg.x,l,1u);
 }
 @compute @workgroup_size(${WG}) fn finishInit(@builtin(local_invocation_index) l:u32){
@@ -469,6 +544,38 @@ fn applyPre(i:u32,v:vec3f)->vec3f{return vec3f(dot(W[p.wPre+3u*i].xyz,v),dot(W[p
  let rz=sums[0].x;let forcing=S(2u).y;W[p.wScal]=vec4f(rz,forcing*forcing*rz,0,0);W[p.wScal+2u]=vec4f(rz,forcing,0,0);
  atomicStore(&C[${C_CGCOUNT}],0u);atomicStore(&C[${C_STOPAFTER}],0u);atomicStore(&C[${C_USEZ0}],0u);atomicStore(&C[${C_CGACTIVE}],select(0u,1u,rz>0.));
 }
+// Twist row s (CG unknown n+s): Jacobi on the model diagonal; held twist rows stay zero.
+fn twistPre(s:u32)->f32{if(!twistFree(s)){return 0.;}return 1./W[p.wT2+s].y;}
+fn twistInitAt(s:u32)->f32{
+ let k=p.n+s;let r=select(0.,-W[p.wT+s].y,twistFree(s));let z=twistPre(s)*r;
+ W[p.wR+k]=vec4f(r,0,0,0);W[p.wZ+k]=vec4f(z,0,0,0);W[p.wZ0+k]=vec4f(z,0,0,0);W[p.wP+k]=vec4f(z,0,0,0);W[p.wS+k]=vec4f(0);return r*z;
+}
+// The twist row of A p: the rod's tridiagonal model plus each pair side's rolling
+// friction, -r (t x n).f P_t s (the friction part of cgContact's force).
+fn twistAp(s:u32,pt:f32,below:f32,above:f32)->f32{
+ if(!twistFree(s)){return 0.;}
+ var y=W[p.wT2+s].z*pt;if(s>0u){y+=twistCoupling(s-1u)*below;}if(s+1u<p.segments){y+=twistCoupling(s)*above;}
+ return y;
+}
+fn twistSide(ci:u32,c:Contact,side:u32,ft:vec3f)->f32{
+ let g=rodAt(ci,c);var t=g.t0.xyz;var r=g.r.x;if(side==1u){t=g.t1.xyz;r=g.r.y;}
+ return -r*dot(cross(t,c.n),ft);
+}
+fn twistMatvecAt(s:u32)->f32{
+ let k=p.n+s;if(!twistFree(s)){W[p.wQ+k]=vec4f(0);return 0.;}
+ var below=0.;var above=0.;if(s>0u){below=W[p.wP+k-1u].x;}if(s+1u<p.segments){above=W[p.wP+k+1u].x;}
+ var y=twistAp(s,W[p.wP+k].x,below,above);
+ for(var e=KU[p.kvStart+k];e<KU[p.kvStart+k+1u];e++){
+  let entry=KU[p.kvList+e];let ci=entry>>3u;let c=contactAt(ci);let F=KF[p.kfForce+ci].xyz;
+  y+=twistSide(ci,c,(entry&7u)-5u,F-dot(F,c.n)*c.n);
+ }
+ W[p.wQ+k]=vec4f(y,0,0,0);return W[p.wP+k].x*y;
+}
+fn twistUpdateAt(s:u32)->f32{
+ let k=p.n+s;let alpha=S(0u).z;W[p.wS+k]=vec4f(W[p.wS+k].x+alpha*W[p.wP+k].x,0,0,0);
+ let r=W[p.wR+k].x-alpha*W[p.wQ+k].x;let z=twistPre(s)*r;W[p.wR+k]=vec4f(r,0,0,0);W[p.wZ+k]=vec4f(z,0,0,0);return r*z;
+}
+fn twistDirectionAt(s:u32){let k=p.n+s;W[p.wP+k]=vec4f(W[p.wZ+k].x+S(0u).w*W[p.wP+k].x,0,0,0);}
 // q = A p at vertex i; returns p.q there.
 fn matvecAt(i:u32)->f32{
   var y=vec3f(0);
@@ -476,7 +583,9 @@ fn matvecAt(i:u32)->f32{
    // Contacts couple vertices outside the block pattern: matrix-free, each contact's
    // term of A p computed once (cgContact) and gathered here by weight.
    if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-    let e=KU[p.kvList+k];let c=e>>2u;y+=KF[4u*c+3u][e&3u]*KF[p.kfForce+c].xyz;
+    let e=KU[p.kvList+k];let c=e>>3u;let j=e&7u;var w=0.;if(j<4u){w=KF[4u*c+3u][j];}else{w=KF[p.kfRod+3u*c+2u].x;}
+    y+=w*KF[p.kfForce+c].xyz;
+    if(p.rodContact!=0u){let m=KU[p.kuRod+4u*c+3u];if(m!=0u){y+=rodRole(m,j,0u)*KF[p.kfRodForce+2u*c].xyz+rodRole(m,j,1u)*KF[p.kfRodForce+2u*c+1u].xyz;}}
    }}
   }
   W[p.wQ+i]=vec4f(y,0);return dot(W[p.wP+i].xyz,y);
@@ -496,7 +605,7 @@ fn betaFinish(next:f32){
 fn directionAt(i:u32){W[p.wP+i]=vec4f(W[p.wZ+i].xyz+S(0u).w*W[p.wP+i].xyz,0);}
 @compute @workgroup_size(${WG}) fn cgMatvec(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
  if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
- let i=g.x;var pq=0.;if(i<p.n){pq=matvecAt(i);}
+ let i=g.x;var pq=0.;if(i<p.n){pq=matvecAt(i);}if(i<p.segments&&twistCG()){pq+=twistMatvecAt(i);}
  red[l]=vec4f(pq,0,0,0);writePartial(0u,wg.x,l,1u);
 }
 @compute @workgroup_size(${WG}) fn finishAlpha(@builtin(local_invocation_index) l:u32){
@@ -506,7 +615,7 @@ fn directionAt(i:u32){W[p.wP+i]=vec4f(W[p.wZ+i].xyz+S(0u).w*W[p.wP+i].xyz,0);}
 }
 @compute @workgroup_size(${WG}) fn cgUpdate(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
  if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
- let i=g.x;var rz=0.;if(i<p.n){rz=updateAt(i);}
+ let i=g.x;var rz=0.;if(i<p.n){rz=updateAt(i);}if(i<p.segments&&twistCG()){rz+=twistUpdateAt(i);}
  red[l]=vec4f(rz,0,0,0);writePartial(0u,wg.x,l,1u);
 }
 @compute @workgroup_size(${WG}) fn finishBeta(@builtin(local_invocation_index) l:u32){
@@ -514,24 +623,24 @@ fn directionAt(i:u32){W[p.wP+i]=vec4f(W[p.wZ+i].xyz+S(0u).w*W[p.wP+i].xyz,0);}
  let sums=sumPartials(l,0u,p.wgV,1u);if(l!=0u){return;}
  betaFinish(sums[0].x);
 }
-@compute @workgroup_size(${WG}) fn cgDirection(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i>=p.n||!cgActive()){return;}directionAt(i);}
+@compute @workgroup_size(${WG}) fn cgDirection(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i>=p.n||!cgActive()){return;}directionAt(i);if(i<p.segments&&twistCG()){twistDirectionAt(i);}}
 // The whole CG loop in one workgroup (small meshes): the five dispatches of an
 // iteration become barrier-separated phases; the same control words gate it.
 @compute @workgroup_size(${WG}) fn cgFused(@builtin(local_invocation_index) l:u32){
  for(var k=0u;k<p.cgCap;k++){
   if(uniformWord(l,${C_CGACTIVE}u)==0u){break;}
   if(p.contactMode!=0u){let count=min(contactCount(),p.kMax);for(var c=l;c<count;c+=${WG}u){contactForceAt(c);}storageBarrier();}
-  var pq=0.;for(var i=l;i<p.n;i+=${WG}u){pq+=matvecAt(i);}
+  var pq=0.;for(var i=l;i<p.n;i+=${WG}u){pq+=matvecAt(i);if(i<p.segments&&twistCG()){pq+=twistMatvecAt(i);}}
   red[l]=vec4f(pq,0,0,0);reduce4(l,1u);
   if(l==0u){alphaFinish(red[0].x);}
   storageBarrier();
   if(uniformWord(l,${C_CGACTIVE}u)==0u){break;}
-  var rz=0.;for(var i=l;i<p.n;i+=${WG}u){rz+=updateAt(i);}
+  var rz=0.;for(var i=l;i<p.n;i+=${WG}u){rz+=updateAt(i);if(i<p.segments&&twistCG()){rz+=twistUpdateAt(i);}}
   red[l]=vec4f(rz,0,0,0);reduce4(l,1u);
   if(l==0u){betaFinish(red[0].x);}
   storageBarrier();
   if(uniformWord(l,${C_CGACTIVE}u)==0u){break;}
-  for(var i=l;i<p.n;i+=${WG}u){directionAt(i);}
+  for(var i=l;i<p.n;i+=${WG}u){directionAt(i);if(i<p.segments&&twistCG()){twistDirectionAt(i);}}
   storageBarrier();
  }
 }
@@ -544,29 +653,58 @@ fn directionAt(i:u32){W[p.wP+i]=vec4f(W[p.wZ+i].xyz+S(0u).w*W[p.wP+i].xyz,0);}
 var<workgroup> pw:array<vec4f,${SHARED_CG_MAX_VERTICES}>;
 struct SharedCG{s:vec4f,count:u32,stop:u32,on:u32}
 var<workgroup> cg:SharedCG;
-fn sharedContactP(c:Contact)->vec3f{var s=vec3f(0);for(var j=0u;j<4u;j++){let w=c.w[j];if(w!=0.){s+=w*pw[c.v[j]].xyz;}}return s;}
+fn sharedContactP(c:Contact)->vec3f{var s=vec3f(0);for(var j=0u;j<5u;j++){let w=slotW(c,j);if(w!=0.){s+=w*pw[slotV(c,j)].xyz;}}return s;}
 fn sharedMatvecAt(i:u32)->vec3f{
   var y=vec3f(0);
   if(!isFixed(i)){for(var b=I[p.iRow+i];b<I[p.iRow+i+1u];b++){let v=pw[I[p.iCol+b]].xyz;y+=vec3f(dot(E[p.eA+3u*b].xyz,v),dot(E[p.eA+3u*b+1u].xyz,v),dot(E[p.eA+3u*b+2u].xyz,v));}
    if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-    let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=KF[p.kfCoef+(e>>2u)].xy;let s=sharedContactP(c);let sn=dot(c.n,s);
+    let e=KU[p.kvList+k];let ci=e>>3u;let c=contactAt(ci);let w=slotW(c,e&7u);let cf=KF[p.kfCoef+ci].xy;
+    if(c.rodm!=0u){
+     var u:array<vec3f,5>;for(var q=0u;q<(c.rodm&7u);q++){u[q]=pw[slotV(c,q)].xyz;}
+     let g=rodAt(ci,c);let s=rodMove(c,g,u,sharedTwistP(ci));let sn=dot(c.n,s);let ft=cf.y*(s-sn*c.n);
+     y+=w*cf.x*sn*c.n+transpose(rodJ(c,g,e&7u))*ft;continue;
+    }
+    let s=sharedContactP(c);let sn=dot(c.n,s);
     y+=w*(cf.x*sn*c.n+cf.y*(s-sn*c.n));
    }}
   }
   return y;
 }
+// The CG direction's twist rows of a rod pair's sides (workgroup copy: .w of the segment's index).
+fn sharedTwistP(ci:u32)->vec2f{
+ var t=vec2f(0);if(!twistCG()){return t;}
+ for(var side=0u;side<2u;side++){let s=KU[p.kuRod+4u*ci+1u+side];if(s!=NONE){t[side]=pw[s].w;}}
+ return t;
+}
+fn sharedTwistMatvecAt(s:u32)->f32{
+ let k=p.n+s;if(!twistFree(s)){return 0.;}
+ var below=0.;var above=0.;if(s>0u){below=pw[s-1u].w;}if(s+1u<p.segments){above=pw[s+1u].w;}
+ var y=twistAp(s,pw[s].w,below,above);
+ for(var e=KU[p.kvStart+k];e<KU[p.kvStart+k+1u];e++){
+  let entry=KU[p.kvList+e];let ci=entry>>3u;let c=contactAt(ci);let cf=KF[p.kfCoef+ci].xy;
+  var u:array<vec3f,5>;for(var q=0u;q<(c.rodm&7u);q++){u[q]=pw[slotV(c,q)].xyz;}
+  let sv=rodMove(c,rodAt(ci,c),u,sharedTwistP(ci));
+  y+=twistSide(ci,c,(entry&7u)-5u,cf.y*(sv-dot(sv,c.n)*c.n));
+ }
+ return y;
+}
 fn partial8(l:u32){if(l<8u){var a=0.;var b=0.;for(var j=0u;j<8u;j+=2u){a+=red[8u*l+j].x;b+=red[8u*l+j+1u].x;}red[${WG}u+l].x=a+b;}workgroupBarrier();}
 fn sum8()->f32{var a=0.;var b=0.;for(var j=0u;j<8u;j+=2u){a+=red[${WG}u+j].x;b+=red[${WG}u+j+1u].x;}return a+b;}
 @compute @workgroup_size(${WG}) fn cgShared(@builtin(local_invocation_index) l:u32){
  if(uniformWord(l,${C_CGACTIVE}u)==0u){return;}
- var r:array<vec3f,${SHARED_CG_PER_THREAD}>;var z:array<vec3f,${SHARED_CG_PER_THREAD}>;var q:array<vec3f,${SHARED_CG_PER_THREAD}>;
- for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}pw[i]=W[p.wP+i];r[j]=W[p.wR+i].xyz;z[j]=W[p.wZ+i].xyz;}
+ // Twist row n+i (i < segments < n) rides in .w of vertex i's p, r, z and q: no extra registers.
+ var r:array<vec4f,${SHARED_CG_PER_THREAD}>;var z:array<vec4f,${SHARED_CG_PER_THREAD}>;var q:array<vec4f,${SHARED_CG_PER_THREAD}>;let tw=twistCG();
+ for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}
+  var pi=vec4f(W[p.wP+i].xyz,0);var ri=vec4f(W[p.wR+i].xyz,0);var zi=vec4f(W[p.wZ+i].xyz,0);
+  if(tw&&i<p.segments){let k=p.n+i;pi.w=W[p.wP+k].x;ri.w=W[p.wR+k].x;zi.w=W[p.wZ+k].x;}
+  pw[i]=pi;r[j]=ri;z[j]=zi;}
  if(l==0u){cg=SharedCG(S(0u),atomicLoad(&C[${C_CGCOUNT}]),atomicLoad(&C[${C_STOPAFTER}]),1u);}
  var state=workgroupUniformLoad(&cg);
  for(var k=0u;k<p.cgCap;k++){
   if(state.on==0u){break;}
   var pq=0.;
-  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}let y=sharedMatvecAt(i);q[j]=y;pq+=dot(pw[i].xyz,y);}
+  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}var y=vec4f(sharedMatvecAt(i),0);
+   if(tw&&i<p.segments){y.w=sharedTwistMatvecAt(i);}q[j]=y;pq+=dot(pw[i],y);}
   red[l]=vec4f(pq,0,0,0);workgroupBarrier();partial8(l);
   // alphaFinish on the workgroup copies.
   if(l==0u){let curvature=sum8();if(!(curvature>0.)){if(cg.count==0u){cg.s.z=1.;cg.stop=1u;}else{cg.on=0u;}}else{cg.s.z=cg.s.x/curvature;}}
@@ -574,17 +712,21 @@ fn sum8()->f32{var a=0.;var b=0.;for(var j=0u;j<8u;j+=2u){a+=red[${WG}u+j].x;b+=
   if(state.on==0u){break;}
   let alpha=state.s.z;var rz=0.;
   for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}
-   W[p.wS+i]=vec4f(W[p.wS+i].xyz+alpha*pw[i].xyz,0);let ri=r[j]-alpha*q[j];let zi=applyPre(i,ri);r[j]=ri;z[j]=zi;rz+=dot(ri,zi);}
+   W[p.wS+i]=vec4f(W[p.wS+i].xyz+alpha*pw[i].xyz,0);let ri=r[j]-alpha*q[j];var zi=vec4f(applyPre(i,ri.xyz),0);
+   if(tw&&i<p.segments){let k=p.n+i;W[p.wS+k]=vec4f(W[p.wS+k].x+alpha*pw[i].w,0,0,0);zi.w=twistPre(i)*ri.w;}
+   r[j]=ri;z[j]=zi;rz+=dot(ri,zi);}
   red[l]=vec4f(rz,0,0,0);workgroupBarrier();partial8(l);
   // betaFinish on the workgroup copies.
   if(l==0u){let next=sum8();cg.s.w=next/cg.s.x;cg.s.x=next;cg.count++;if(cg.stop!=0u||!(next>cg.s.y)||!(next>0.)||cg.count>=p.cgCap){cg.on=0u;}}
   state=workgroupUniformLoad(&cg);
   if(state.on==0u){break;}
   let beta=state.s.w;
-  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}pw[i]=vec4f(z[j]+beta*pw[i].xyz,0);}
+  for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}pw[i]=z[j]+beta*pw[i];}
   workgroupBarrier();
  }
- for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}W[p.wP+i]=pw[i];W[p.wR+i]=vec4f(r[j],0);W[p.wZ+i]=vec4f(z[j],0);W[p.wQ+i]=vec4f(q[j],0);}
+ for(var j=0u;j<${SHARED_CG_PER_THREAD}u;j++){let i=l+j*${WG}u;if(i>=p.n){break;}
+  W[p.wP+i]=vec4f(pw[i].xyz,0);W[p.wR+i]=vec4f(r[j].xyz,0);W[p.wZ+i]=vec4f(z[j].xyz,0);W[p.wQ+i]=vec4f(q[j].xyz,0);
+  if(tw&&i<p.segments){let k=p.n+i;W[p.wP+k]=vec4f(pw[i].w,0,0,0);W[p.wR+k]=vec4f(r[j].w,0,0,0);W[p.wZ+k]=vec4f(z[j].w,0,0,0);W[p.wQ+k]=vec4f(q[j].w,0,0,0);}}
  if(l==0u){W[p.wScal]=state.s;atomicStore(&C[${C_CGCOUNT}],state.count);atomicStore(&C[${C_STOPAFTER}],state.stop);atomicStore(&C[${C_CGACTIVE}],state.on);}
 }
 
@@ -683,10 +825,11 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  // free vertex does not move along the direction, so it adds no change.
  if(p.contactMode==0u){storeLine(l,de,noise);writePartial(p.pContact,wg.x,l,4u);return;}
  for(var i=g.x;i<p.n;i+=p.lineGroups*${WG}u){for(var q=KU[p.kvStart+i];q<KU[p.kvStart+i+1u];q++){
-  let e=KU[p.kvList+q];let k0=e>>2u;var owner=true;for(var j=0u;j<(e&3u);j++){if(!isFixed(KU[p.kuCV+4u*k0+j])){owner=false;}}
+  let e=KU[p.kvList+q];let k0=e>>3u;let c=contactAt(k0);var owner=true;for(var j=0u;j<(e&7u);j++){if(!isFixed(slotV(c,j))){owner=false;}}
   if(!owner){continue;}
-  let c=contactAt(k0);let sx=contactSum(c,0u);let sd=contactSum(c,1u);let m=contactM(c,sx);let dn=dot(c.n,sd);
-  let slip=tangent(c.n,sx)-c.t;let td=tangent(c.n,sd);let y0=length(slip);
+  let sx=contactSum(c,0u);let sd=contactSum(c,1u);let m=contactM(c,sx);let dn=dot(c.n,sd);
+  let slip=contactSlip(k0,c,sx);var td=tangent(c.n,sd);let y0=length(slip);
+  if(c.rodm!=0u){td=tangent(c.n,rodMove(c,rodAt(k0,c),rodSlotU(c,1u),rodTwist(k0,1u)));}
   for(var k=0u;k<${ALPHAS}u;k++){
    let a=alphaOf(k);var change=cPenChange(m,-a*dn,c.rho);
    if(c.mu>0.){let f=fF0Change(y0,length(slip+a*td),2.*a*dot(slip,td)+a*a*dot(td,td));change+=c.mu*f;}
@@ -799,9 +942,19 @@ fn jointTwistIncrement(j:u32,id:vec4u)->f32{return W[p.wT+id.w+1u].x-W[p.wT+id.w
  let a=segT(s,2u);let t=W[p.wT+s];var gr=a.x*(t.x-a.w)+a.y*(a.z+t.x);var h=a.x+a.y;
  let asSecond=I[p.iSegJoint+2u*s];if(asSecond!=0xffffffffu){let e=E[p.eJoint+9u*asSecond+6u];gr+=e.y;h+=e.w;}
  let asFirst=I[p.iSegJoint+2u*s+1u];if(asFirst!=0xffffffffu){let e=E[p.eJoint+9u*asFirst+6u];gr+=e.x;h+=e.z;}
+ // Rod contact friction on the twist (its rolling): -f r (t x n).slip and f r^2 |t x n|^2 per pair side.
+ var hc=0.;
+ if(p.contactMode!=0u&&p.rodContact!=0u){for(var k=KU[p.kvStart+p.n+s];k<KU[p.kvStart+p.n+s+1u];k++){
+  let e=KU[p.kvList+k];let ci=e>>3u;let side=(e&7u)-5u;let c=contactAt(ci);if(!(c.mu>0.)){continue;}
+  let slip=contactSlip(ci,c,contactSum(c,0u));let f=c.mu*fF1(length(slip));let g=rodAt(ci,c);
+  var t=g.t0.xyz;var r=g.r.x;if(side==1u){t=g.t1.xyz;r=g.r.y;}let tn=cross(t,c.n);
+  gr-=f*r*dot(tn,slip);hc+=f*r*r*dot(tn,tn);
+ }}
+ h+=hc;
  let diagonal=max(a.x,h);let measure=abs(gr/diagonal)*f.y;
  if(measure>=0.&&abs(measure)<3e38){atomicMax(&C[${C_MEASURE}],bitcast<u32>(measure));}else{atomicOr(&C[${C_STATUS}],${S_NONFINITE}u);}
- W[p.wT+s]=vec4f(t.x,gr,t.z,h);W[p.wT2+s]=vec4f(W[p.wT2+s].x,diagonal,0,0);
+ // The CG's twist row: the model diagonal less the contact curvature (the contact operator adds that).
+ W[p.wT+s]=vec4f(t.x,gr,t.z,h);W[p.wT2+s]=vec4f(W[p.wT2+s].x,diagonal,diagonal-hc,0);
 }
 // Twist couples to its rod neighbours through their shared joint: a
 // tridiagonal Hessian per rod (exact second derivatives, coupling
@@ -812,6 +965,8 @@ fn twistCoupling(s:u32)->f32{let j=I[p.iSegJoint+2u*s+1u];if(j==0xffffffffu||!tw
 @compute @workgroup_size(${WG}) fn twistSolve(@builtin(global_invocation_id) g:vec3u){
  let r=g.x;if(r>=p.rods||!isActive()){return;}
  let base=I[p.iRod+2u*r];let count=I[p.iRod+2u*r+1u];var positive=true;
+ // With rod contact the CG solved the twist with the positions.
+ if(twistCG()){for(var j=0u;j<count;j++){let s=base+j;W[p.wT+s].z=select(0.,W[p.wS+p.n+s].x,twistFree(s));}return;}
  for(var j=0u;j<count&&positive;j++){
   let s=base+j;if(!twistFree(s)){W[p.wT2+s].x=1.;W[p.wT+s].z=0.;continue;}
   var coupling=0.;var previous=1.;var carried=0.;
@@ -870,7 +1025,8 @@ ${clothContactWGSL(WG, S_CONVERGED, {C_STATUS, C_NEWTON, C_ACTIVE, C_CGACTIVE, C
 const SMALL_BODIES = ['elemTri', 'elemHinge', 'elemSeg', 'elemJoint', 'gradient', 'twistGradient', 'finishMeasure', 'assemble', 'contactCoef', 'cgInit', 'finishInit',
   'twistSolve', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineJoint', 'lineTwist', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply',
   'initX', 'prepTri', 'prepHinge', 'prepSeg', 'detectBegin', 'tableClear', 'roundBegin', 'updateMultipliers', 'relinearize', 'roundDecide', 'penalties',
-  'listCount', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders'] as const;
+  'listCount', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders',
+  'gridSegments', 'detectRodPoints', 'detectRodSegments', 'detectRodColliders'] as const;
 function withSmallMeshKernels(source: string): string {
   // The fused kernels' value of each builtin a body takes (v: the virtual workgroup;
   // a strided kernel runs as one workgroup that strides over everything).
@@ -897,24 +1053,28 @@ function withSmallMeshKernels(source: string): string {
   const sync = 'workgroupBarrier();storageBarrier();';
   const phase = (name: string, count: string) => ` for(var v=0u;v<(${count}+${WG - 1}u)/${WG}u;v++){${calls[name]}}${sync}\n`;
   const once = (name: string) => ` {let v=0u;${calls[name]}}${sync}\n`;
-  const twists = 'select(0u,p.segments,p.joints>0u)';
+  // Every free segment's twist is an unknown (jointless rods included, as the Float64 solve).
+  const twists = 'p.segments';
   const line = ['lineTri:p.triangles', 'lineHinge:p.hinges', 'lineSeg:p.segments', 'lineJoint:p.joints', `lineTwist:${twists}`, 'lineVertex:p.n', 'linePair:p.pairs'].map(e => {const [k, c] = e.split(':'); return phase(k!, c!);}).join('')
     + ` for(var v=0u;v<p.lineGroups;v++){${calls.lineContact}}${sync}\n` + once('finishLine');
-  const detection = ` if(p.selfCollision!=0u){\n${once('gridClear')}${phase('gridFaces', 'p.triangles')}${phase('gridEdges', 'p.edges')}${phase('detectFaces', 'p.n')}${phase('detectEdges', 'p.edges')} }\n`
-    + ` if(p.colliders>0u){\n${once('detectColliders')} }\n`;
-  const afterDetection = once('penalties') + once('listCount') + ` listScanSmall(l);${sync}\n` + once('listFill') + phase('listReset', 'p.n');
+  const detection = ` if(p.selfCollision!=0u){\n${once('gridClear')}${phase('gridFaces', 'p.triangles')}${phase('gridEdges', 'p.edges')}`
+    + ` if(p.rodContact!=0u){\n${phase('gridSegments', 'p.segments')} }\n${phase('detectFaces', 'p.n')}${phase('detectEdges', 'p.edges')}`
+    + ` if(p.rodContact!=0u){\n${phase('detectRodPoints', 'p.n')}${phase('detectRodSegments', 'p.segments')} }\n }\n`
+    + ` if(p.colliders>0u){\n${once('detectColliders')} if(p.rodContact!=0u){\n${once('detectRodColliders')} }\n }\n`;
+  const afterDetection = once('penalties') + once('listCount') + ` listScanSmall(l);${sync}\n` + once('listFill') + phase('listReset', 'p.listRows');
   const kernel = (name: string, body: string) => `@compute @workgroup_size(${WG}) fn ${name}(@builtin(local_invocation_index) l:u32){\n${body}}\n`;
   return out + wrappers + `
-// The per-vertex list offsets of listScan1-3 in one workgroup: each thread a run of vertices.
+// The per-row list offsets of listScan1-3 in one workgroup: each thread a run of rows
+// (vertices, then rod segments' twist).
 var<workgroup> scanSmall:array<u32,${WG}>;
 fn listScanSmall(l:u32){
  if(uniformWord(l,${CONTACT_CONTROL.K_ADDED}u)==0u){return;}
- let per=(p.n+${WG - 1}u)/${WG}u;var total=0u;
- for(var j=0u;j<per;j++){let i=l*per+j;if(i<p.n){let value=atomicExchange(&KA[p.aCount+i],0u);KU[p.kvStart+i]=total;total+=value;}}
+ let rows=p.listRows;let per=(rows+${WG - 1}u)/${WG}u;var total=0u;
+ for(var j=0u;j<per;j++){let i=l*per+j;if(i<rows){let value=atomicExchange(&KA[p.aCount+i],0u);KU[p.kvStart+i]=total;total+=value;}}
  scanSmall[l]=total;workgroupBarrier();
- if(l==0u){var sum=0u;for(var j=0u;j<${WG}u;j++){let t=scanSmall[j];scanSmall[j]=sum;sum+=t;}KU[p.kvStart+p.n]=sum;}
+ if(l==0u){var sum=0u;for(var j=0u;j<${WG}u;j++){let t=scanSmall[j];scanSmall[j]=sum;sum+=t;}KU[p.kvStart+rows]=sum;}
  workgroupBarrier();
- let offset=scanSmall[l];for(var j=0u;j<per;j++){let i=l*per+j;if(i<p.n){KU[p.kvStart+i]+=offset;}}
+ let offset=scanSmall[l];for(var j=0u;j<per;j++){let i=l*per+j;if(i<rows){KU[p.kvStart+i]+=offset;}}
 }
 ` + kernel('unitSmall', phase('elemTri', 'p.triangles') + phase('elemHinge', 'p.hinges') + phase('elemSeg', 'p.segments') + phase('elemJoint', '3u*p.joints')
     + phase('gradient', 'p.n') + phase('twistGradient', twists) + once('finishMeasure') + phase('assemble', 'p.blocks') + once('contactCoef') + phase('cgInit', 'p.n') + once('finishInit'))
@@ -929,7 +1089,8 @@ export const clothNewtonWGSL = withSmallMeshKernels(clothNewtonKernels);
 const ENTRY_POINTS = ['prepTri', 'prepHinge', 'prepSeg', 'initX', 'zeroX', 'predictVelocity', 'elemTri', 'elemHinge', 'elemSeg', 'elemJoint', 'twistGradient', 'twistSolve', 'lineJoint', 'lineTwist', 'gradient', 'finishMeasure', 'assemble', 'cgInit', 'finishInit',
   'unitSmall', 'unitSmallB', 'roundSmall', 'firstSmall', 'cgShared', 'cgFused', 'contactCoef', 'cgContact', 'cgMatvec', 'finishAlpha', 'cgUpdate', 'finishBeta', 'cgDirection', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply',
   'tableClear', 'rememberMultipliers', 'roundBegin', 'detectBegin', 'updateMultipliers', 'relinearize', 'roundDecide', 'penalties',
-  'listCount', 'listScan1', 'listScan2', 'listScan3', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders'] as const;
+  'listCount', 'listScan1', 'listScan2', 'listScan3', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders',
+  'gridSegments', 'detectRodPoints', 'detectRodSegments', 'detectRodColliders'] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
 
 export interface GPUClothNewtonReport extends ClothStepReport {
@@ -974,9 +1135,10 @@ interface ContactLayout {
   kMax: number; tableSlots: number; gridBuckets: number; gridEntries: number;
   kuCV: number; kuMeta: number; kvStart: number; kvList: number; uBlocks: number; uEntry: number; uTabVal: number; kuWords: number;
   aTable: number; aHeads: number; aCount: number; kaWords: number; kfCoef: number; kfForce: number; kfFaceBox: number; kfEdgeBox: number; kfWords: number;
+  kuRod: number; kfRod: number; kfRodForce: number; kfSegBox: number; listRows: number;
 }
 const pow2 = (x: number) => 2 ** Math.ceil(Math.log2(Math.max(1, x)));
-const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_NONFINITE, 'a nonfinite contact residual']];
+const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_NONFINITE, 'a nonfinite contact residual'], [E_UNSUPPORTED, 'a rod segment against a collider kind without GPU rod contact']];
 const describeErrors = (bits: number) => errorNames.filter(([b]) => bits & b).map(([, name]) => name).join(', ');
 const GROWABLE = E_CAPACITY | E_GRID | E_TABLE;
 const statusNames: [number, string][] = [[S_CONVERGED, 'inner solve converged'], [S_LINE, 'line search found no decrease'], [S_NONFINITE, 'nonfinite gradient'], [S_CAP, 'Newton cap'], [S_SINGULAR, 'singular block']];
@@ -1032,9 +1194,8 @@ export class GPUClothNewton {
    * early-exit on the device. */
   private units = 2;
   private readonly segmentRods: Int32Array;
-  /** DER joints (rod, local joint index) and the segments of jointed rods (twist solved on the GPU). */
+  /** DER joints (rod, local joint index); every rod segment's twist is solved on the GPU. */
   private readonly joints: {rod: number; local: number}[] = [];
-  private readonly jointedSegment: Uint8Array;
   private readonly twistRead: GPUBuffer;
   private readonly storageLimit: number;
   /** Line-search partials and grid-stride width of the contact kernels. */
@@ -1063,11 +1224,9 @@ export class GPUClothNewton {
     // DER joints of rods with three or more vertices: (a, b, c, first segment);
     // each segment's joint as the second segment, then as the first.
     const jointWords: number[] = [], rodWords: number[] = [], segJoint = new Uint32Array(Math.max(4, 2 * S)).fill(NONE);
-    this.jointedSegment = new Uint8Array(S);
     topology.rods.forEach((rod, r) => {
-      if (rod.vertices.length < 3) return;
+      // Every rod's twist (a jointless rod's couples only to its inertia, attachment and contact).
       rodWords.push(rod.segmentOffset, rod.restLengths_m.length);
-      this.jointedSegment.fill(1, rod.segmentOffset, rod.segmentOffset + rod.restLengths_m.length);
       for (let j = 1; j < rod.restLengths_m.length; j++) {
         const k = this.joints.length, s0 = rod.segmentOffset + j - 1;
         jointWords.push(rod.vertices[j - 1]!, rod.vertices[j]!, rod.vertices[j + 1]!, s0);
@@ -1143,9 +1302,10 @@ export class GPUClothNewton {
     const indices = new Uint32Array(Math.max(4, total)); parts.forEach((part, k) => indices.set(part, at[k]!));
     const [iTri, iHinge, iSeg, iRow, iCol, iBlockRow, iContribStart, iContrib, iVStart, iVList, iDiag, iJoint, iRod, iSegJoint] = at as [number, number, number, number, number, number, number, number, number, number, number, number, number, number];
     // Read-write vectors (vec4): x g r z z0 p q s pre(3) scalars(4) partials.
-    const wgV = Math.ceil(n / WG), pTri = wgV, pHinge = pTri + Math.ceil(T / WG), pSeg = pHinge + Math.ceil(H / WG), pJoint = pSeg + Math.ceil(S / WG), pTwist = pJoint + Math.ceil(J / WG), pPair = pTwist + (J ? Math.ceil(S / WG) : 0);
+    const wgV = Math.ceil(n / WG), pTri = wgV, pHinge = pTri + Math.ceil(T / WG), pSeg = pHinge + Math.ceil(H / WG), pJoint = pSeg + Math.ceil(S / WG), pTwist = pJoint + Math.ceil(J / WG), pPair = pTwist + Math.ceil(S / WG);
     // Read-write twist (per segment): (increment, gradient, step, d2E), (pivot, diagonal).
-    const wX = 0, wG = n, wR = 2 * n, wZ = 3 * n, wZ0 = 4 * n, wP = 5 * n, wQ = 6 * n, wS = 7 * n, wPre = 8 * n, wK = 11 * n, wT = 12 * n, wT2 = wT + S, wScal = wT2 + S, wPart = wScal + 4;
+    // The CG vectors r z z0 p q s carry n vertex rows then S twist rows (rod contact couples them).
+    const N = n + S, wX = 0, wG = n, wR = 2 * n, wZ = wR + N, wZ0 = wZ + N, wP = wZ0 + N, wQ = wP + N, wS = wQ + N, wPre = wS + N, wK = wPre + 3 * n, wT = wK + n, wT2 = wT + S, wScal = wT2 + S, wPart = wScal + 4;
     const eTri = 0, eHinge = 4 * T, eSeg = eHinge + 9 * H, eTriOld = eSeg + 2 * S, eHingeOld = eTriOld + 3 * T, eSegOld = eHingeOld + H, eHingeEdge = eSegOld + 2 * S, eJoint = eHingeEdge + 3 * H, eA = eJoint + 9 * J, eTotal = eA + 3 * blocks;
     this.offsets = Object.fromEntries(PARAM_FIELDS.map(name => [name, 0])) as Record<ParamName, number>;
     Object.assign(this.offsets, {
@@ -1271,14 +1431,17 @@ export class GPUClothNewton {
   /** Contact buffers for kMax constraints (and the detection grid and key table). */
   private ensureContactCapacity(kMax: number, gridEntries = 0, tableFactor = 2): ContactLayout {
     const held = this.contactLayout, T = this.offsets.triangles, edges = this.contactStatic?.edges ?? 0, n = this.n;
-    if (held && held.kMax >= kMax && held.gridEntries >= gridEntries && held.tableSlots >= tableFactor * held.kMax && held.kfEdgeBox + 2 * edges <= held.kfWords) return held;
+    // Rods: a rod record per pair (5 slots and 2 twist rows a pair), list rows n + segments, a segment grid.
+    const S = this.topology.rods.length ? this.offsets.segments : 0, rod = S > 0, rows = n + S;
+    if (held && held.kMax >= kMax && held.gridEntries >= gridEntries && held.tableSlots >= tableFactor * held.kMax && held.kfSegBox + 2 * S <= held.kfWords) return held;
     kMax = Math.max(kMax, held?.kMax ?? 0, 4096);
-    gridEntries = Math.max(gridEntries, held?.gridEntries ?? 0, 4 * (T + edges), 1024);
-    const tableSlots = Math.max(pow2(tableFactor * kMax), held?.tableSlots ?? 0), gridBuckets = pow2(Math.max(1024, T + edges));
-    const kuCV = 0, kuMeta = 4 * kMax, kvStart = 8 * kMax, kvList = kvStart + n + 1, uBlocks = kvList + 4 * kMax, uEntry = uBlocks + Math.ceil(n / SCAN_WG) + 1, uTabVal = uEntry + 2 * gridEntries, kuWords = uTabVal + 2 * tableSlots;
-    const aTable = 0, aHeads = 4 * tableSlots, aCount = aHeads + 2 * gridBuckets, kaWords = aCount + n;
-    const kfCoef = 4 * kMax, kfForce = 5 * kMax, kfFaceBox = 6 * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfWords = kfEdgeBox + 2 * edges;
-    const layout = {kMax, tableSlots, gridBuckets, gridEntries, kuCV, kuMeta, kvStart, kvList, uBlocks, uEntry, uTabVal, kuWords, aTable, aHeads, aCount, kaWords, kfCoef, kfForce, kfFaceBox, kfEdgeBox, kfWords};
+    gridEntries = Math.max(gridEntries, held?.gridEntries ?? 0, 4 * (T + edges + S), 1024);
+    const tableSlots = Math.max(pow2(tableFactor * kMax), held?.tableSlots ?? 0), gridBuckets = pow2(Math.max(1024, T + edges + S));
+    const kuCV = 0, kuMeta = 4 * kMax, kuRod = 8 * kMax, kvStart = (rod ? 12 : 8) * kMax, kvList = kvStart + rows + 1, uBlocks = kvList + (rod ? 7 : 4) * kMax, uEntry = uBlocks + Math.ceil(rows / SCAN_WG) + 1, uTabVal = uEntry + 2 * gridEntries, kuWords = uTabVal + 2 * tableSlots;
+    const aTable = 0, aHeads = 4 * tableSlots, aCount = aHeads + (rod ? 3 : 2) * gridBuckets, kaWords = aCount + rows;
+    const kfCoef = 4 * kMax, kfForce = 5 * kMax, kfRod = 6 * kMax, kfRodForce = 9 * kMax, kfFaceBox = (rod ? 11 : 6) * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfSegBox = kfEdgeBox + 2 * edges, kfWords = kfSegBox + 2 * S;
+    const layout = {kMax, tableSlots, gridBuckets, gridEntries, kuCV, kuMeta, kvStart, kvList, uBlocks, uEntry, uTabVal, kuWords, aTable, aHeads, aCount, kaWords, kfCoef, kfForce, kfFaceBox, kfEdgeBox, kfWords,
+      kuRod, kfRod, kfRodForce, kfSegBox, listRows: rows};
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.KF = this.replace(this.KF, 'Cloth contact floats', 16 * kfWords, storage);
     this.KU = this.replace(this.KU, 'Cloth contact words', 4 * kuWords, storage);
@@ -1318,6 +1481,7 @@ export class GPUClothNewton {
     const n = this.n, K = contacts.length, layout = this.ensureContactCapacity(K);
     const kf = new Float32Array(Math.max(4, 16 * K)), cv = new Uint32Array(Math.max(4, 4 * K)), start = new Uint32Array(n + 1);
     for (const c of contacts) {
+      if (c.rod) throw new Error(`Cloth rod contact ${c.key} is detected on the GPU only (the uploaded layout has no rolling Jacobian)`);
       if (c.vertices.length > 4 || c.vertices.length !== c.weights.length) throw new Error(`Cloth contact ${c.key} has more than four vertices`);
       for (const v of c.vertices) if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) start[v + 1]!++;
     }
@@ -1330,7 +1494,7 @@ export class GPUClothNewton {
       c.vertices.forEach((v, j) => {
         g0 += c.weights[j]! * (nn[0]*old[3*v]! + nn[1]*old[3*v + 1]! + nn[2]*old[3*v + 2]!);
         cv[4*k + j] = v; kf[16*k + 12 + j] = c.weights[j]!;
-        if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) list[fill[v]!++] = k << 2 | j;
+        if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) list[fill[v]!++] = k << 3 | j;
       });
       kf.set([nn[0], nn[1], nn[2], g0, o[0] - on*nn[0], o[1] - on*nn[1], o[2] - on*nn[2], c.lambda, c.rho, c.frictionLambda, c.friction, c.radius], 16*k);
     });
@@ -1345,7 +1509,7 @@ export class GPUClothNewton {
     const run = (entry: EntryPoint, count: number) => {if (count > 0) {pass.setPipeline(this.pipelines![entry]); pass.dispatchWorkgroups(count);}};
     // Small meshes: the whole unit in one workgroup (one launch).
     if (this.small) {run('unitSmall', 1); run('cgShared', 1); run('unitSmallB', 1); return;}
-    const J = o.joints, twists = J ? o.segments : 0;
+    const J = o.joints, twists = o.segments;
     run('elemTri', groups(o.triangles)); run('elemHinge', groups(o.hinges)); run('elemSeg', groups(o.segments)); run('elemJoint', groups(3 * J));
     run('gradient', groups(n)); run('twistGradient', groups(twists)); run('finishMeasure', 1);
     run('assemble', groups(this.blocks)); run('contactCoef', this.contactGroups); run('cgInit', groups(n)); run('finishInit', 1);
@@ -1368,18 +1532,21 @@ export class GPUClothNewton {
   /** Swept-primitive grid and narrowphase (each kernel gates on K_DETECT). */
   private encodeDetection(pass: GPUComputePassEncoder): void {
     const o = this.offsets, layout = this.contactLayout!, edges = this.contactStatic!.edges, groups = (count: number) => Math.ceil(count / WG), self = this.selfCollision;
+    const rods = this.topology.rods.length ? o.segments : 0;
     if (self) {
-      this.run(pass, 'gridClear', this.strided(2 * layout.gridBuckets)); this.run(pass, 'gridFaces', groups(o.triangles)); this.run(pass, 'gridEdges', groups(edges));
+      this.run(pass, 'gridClear', this.strided((rods ? 3 : 2) * layout.gridBuckets)); this.run(pass, 'gridFaces', groups(o.triangles)); this.run(pass, 'gridEdges', groups(edges)); this.run(pass, 'gridSegments', groups(rods));
       this.run(pass, 'detectFaces', groups(this.n)); this.run(pass, 'detectEdges', groups(edges));
+      if (rods) {this.run(pass, 'detectRodPoints', groups(this.n)); this.run(pass, 'detectRodSegments', groups(rods));}
     }
     if (this.colliderCount) this.run(pass, 'detectColliders', this.strided(this.n * this.colliderCount));
+    if (this.colliderCount && rods) this.run(pass, 'detectRodColliders', this.strided(rods * this.colliderCount));
   }
   /** Penalties of new pairs, friction lag, and the per-vertex lists when pairs were added. */
   private encodeAfterDetection(pass: GPUComputePassEncoder): void {
-    const scanGroups = Math.ceil(this.n / SCAN_WG);
+    const rows = this.contactLayout!.listRows, scanGroups = Math.ceil(rows / SCAN_WG);
     this.run(pass, 'penalties', this.contactGroups);
     this.run(pass, 'listCount', this.contactGroups); this.run(pass, 'listScan1', scanGroups); this.run(pass, 'listScan2', 1); this.run(pass, 'listScan3', scanGroups);
-    this.run(pass, 'listFill', this.contactGroups); this.run(pass, 'listReset', Math.ceil(this.n / WG));
+    this.run(pass, 'listFill', this.contactGroups); this.run(pass, 'listReset', Math.ceil(rows / WG));
   }
   private encodeRound(pass: GPUComputePassEncoder): void {
     if (this.small) {this.run(pass, 'roundSmall', 1); return;}
@@ -1419,16 +1586,15 @@ export class GPUClothNewton {
     this.writeWords(this.D, displacement, 4 * this.offsets.dDisp);
     return {old, predicted, vertex};
   }
-  /** Jointed rods' twist and DER joint data of this step, in Float64 then
+  /** Rod twist (every segment) and DER joint data of this step, in Float64 then
    * rounded: frames, cos/sin of the accepted twist (increments are solved),
    * old curvature and twist, and the twist offsets relative to the wrapped
    * prior reference twist. */
   private uploadRodBlock(state: ClothState, dt: number): void {
-    const J = this.joints.length;
-    if (!J) return;
-    const topology = this.topology, S = topology.segmentCount, data = new Float32Array(16 * (S + J)), wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+    const J = this.joints.length, topology = this.topology, S = topology.segmentCount;
+    if (!S) return;
+    const data = new Float32Array(16 * (S + J)), wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
     for (let s = 0; s < S; s++) {
-      if (!this.jointedSegment[s]) continue;
       const r = this.segmentRods[s]!, rod = topology.rods[r]!, j = s - rod.segmentOffset, m = topology.materials[rod.material]!, a = rod.vertices[j]!, b = rod.vertices[j + 1]!;
       const free = ((topology.kinematicFixed[a] ?? 0) | (topology.kinematicFixed[b] ?? 0)) & 2 ? 0 : 1, theta = state.twist_rad[s]!, inertia = rodSegmentInertia_kg_m2(topology, state, r, j) / (dt * dt);
       data.set([state.rodDirectors[3 * s]!, state.rodDirectors[3 * s + 1]!, state.rodDirectors[3 * s + 2]!, Math.cos(theta), state.rodTangents[3 * s]!, state.rodTangents[3 * s + 1]!, state.rodTangents[3 * s + 2]!, Math.sin(theta),
@@ -1446,7 +1612,7 @@ export class GPUClothNewton {
     this.writeWords(this.D, data, 4 * this.offsets.dTwist);
   }
   private async readTwist(): Promise<Float32Array | undefined> {
-    if (!this.joints.length) return undefined;
+    if (!this.offsets.segments) return undefined;
     await this.twistRead.mapAsync(GPUMapMode.READ);
     const twist = new Float32Array(this.twistRead.getMappedRange().slice(0));
     this.twistRead.unmap();
@@ -1485,7 +1651,7 @@ export class GPUClothNewton {
   /** The control words and the iterate of a submission, mapped together
    * (one wait): the iterate is discarded unless the solve stopped. */
   private async readSolve(stiffness: boolean): Promise<{control: Uint32Array<ArrayBuffer>; increments: Float32Array; twist?: Float32Array; stiffness?: Float32Array}> {
-    const twist = this.joints.length > 0, maps = [this.statusRead, this.positionRead, ...(twist ? [this.twistRead] : []), ...(stiffness ? [this.stiffnessRead] : [])];
+    const twist = this.offsets.segments > 0, maps = [this.statusRead, this.positionRead, ...(twist ? [this.twistRead] : []), ...(stiffness ? [this.stiffnessRead] : [])];
     await Promise.all(maps.map(b => b.mapAsync(GPUMapMode.READ)));
     const copy = (b: GPUBuffer) => b.getMappedRange().slice(0);
     const result = {control: new Uint32Array(copy(this.statusRead)), increments: new Float32Array(copy(this.positionRead)),
@@ -1522,9 +1688,10 @@ export class GPUClothNewton {
     // Contact inside the minimization, as the CPU solve. GPU detection keeps
     // the outer iterations on the GPU; otherwise the Float64 set detects, and
     // its multipliers, tangent planes and detection update between GPU solves.
-    // Rod contact inside the solve is Float64 CPU only so far (its rolling
-    // friction is not in these kernels): rod steps keep the post-projection.
-    const inSolve = (colliders.length > 0 || selfCollision) && !inSolveContactUnsupported(topology, colliders) && !topology.rods.length;
+    // Rod contact (rolling friction included) is detected and solved on the GPU
+    // only; rods whose contact the GPU does not cover keep the post-projection.
+    const rods = topology.rods.length > 0;
+    const inSolve = (colliders.length > 0 || selfCollision) && !inSolveContactUnsupported(topology, colliders) && (!rods || (this.contactDetection !== 'cpu' && !gpuContactUnsupported(topology, colliders)));
     let fallback = inSolve ? (this.contactDetection === 'cpu' ? 'CPU detection requested' : gpuContactUnsupported(topology, colliders)) : undefined;
     const x = predicted.slice();
     const positions = (increments: Float32Array) => {for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) x[3 * i + a] = old[3 * i + a]! + increments[4 * i + a]!;};
@@ -1554,6 +1721,7 @@ export class GPUClothNewton {
         solve = {...solve, converged: solve.converged && c[CONTACT_CONTROL.K_DONE]! !== 0 && contactResidual < tolerance};
       }
     }
+    if (rods && inSolve && fallback) throw new Error(`GPU cloth rod contact failed (no CPU detection for rods): ${fallback}`);
     const contactSet = inSolve && fallback ? new ClothContactSet(topology, old, dt, colliders, selfCollision, tolerance, clothContactWarmStart(state)) : undefined;
     if (!solve) {
       if (contactSet) {
@@ -1592,15 +1760,8 @@ export class GPUClothNewton {
     this.stiffnessValid = true; this.lastControl = solve.control;
     const converged = solve.converged, solved = performance.now(), solve_ms = solved - started - contact_ms;
     state.positions_m.set(x);
-    for (let s = 0; s < state.twist_rad.length; s++) {
-      // Jointed rods: the GPU's twist increments.
-      if (this.jointedSegment[s]) {state.twist_rad[s] = oldTwist[s]! + solve.twist![4 * s]!; continue;}
-      // Jointless rod twist couples to nothing but its inertia and attachment.
-      const r = this.segmentRods[s]!, rod = topology.rods[r]!, j = s - rod.segmentOffset, a = rod.vertices[j]!, b = rod.vertices[j + 1]!;
-      if (((topology.kinematicFixed[a] ?? 0) | (topology.kinematicFixed[b] ?? 0)) & 2) {state.twist_rad[s] = oldTwist[s]!; continue;}
-      const inertia = rodSegmentInertia_kg_m2(topology, state, r, j) / (dt * dt), spring = topology.attachmentTwist_N_m[s]!;
-      state.twist_rad[s] = (inertia * (oldTwist[s]! + dt * state.angularVelocity_rad_s[s]!) + spring * state.attachmentTwistTarget_rad[s]!) / (inertia + spring);
-    }
+    // The GPU's twist increments (zero where the twist is held).
+    for (let s = 0; s < state.twist_rad.length; s++) state.twist_rad[s] = oldTwist[s]! + solve.twist![4 * s]!;
     const contactDetection = !inSolve ? 'none' as const : fallback ? 'cpu' as const : 'gpu' as const;
     const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms, contactDetection, gpuStatus: solve.status, gpuResumes: resumes, ...(contactAttempts ? {contactPool, contactGridFill} : {}), ...(contactAttempts > 1 ? {contactAttempts, contactGrowth} : {}), ...(fallback && inSolve ? {contactFallback: fallback} : {})};
     if (!converged) {
@@ -1674,14 +1835,14 @@ export class GPUClothNewton {
     const layout = this.contactLayout!, pairGroups = Math.ceil(pairs.length / WG);
     this.writeParams({...this.offsets, ...pairOffsets, ...this.contactParams(), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.lineGroups,
       cgCap: this.cgCap, newtonCap: settings.newtonCap, dt: settings.dt, tolerance: settings.tolerance, contactDelta: settings.tolerance, frictionEpsilon: settings.frictionEpsilon,
-      contactMode: 1, contactGroups: this.contactGroups, lineGroups: this.lineGroups, colliders: this.colliderCount, selfCollision: settings.selfCollision ? 1 : 0});
+      contactMode: 1, contactGroups: this.contactGroups, lineGroups: this.lineGroups, colliders: this.colliderCount, selfCollision: settings.selfCollision ? 1 : 0, rodContact: this.topology.rods.length ? 1 : 0});
     this.device.queue.writeBuffer(this.W, 16 * o.wScal, new Float32Array(16));
     const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = this.units;
     let submissions = 0, resumes = 0, control = new Uint32Array(C_WORDS), read: Awaited<ReturnType<GPUClothNewton['readSolve']>> | undefined;
     const K = CONTACT_CONTROL;
     for (;;) {
       const encoder = this.device.createCommandEncoder({label: 'Cloth Newton-PCG with GPU contact'});
-      if (!submissions) {encoder.clearBuffer(this.C); encoder.clearBuffer(this.KU, 4 * layout.kvStart, 4 * (n + 1));}
+      if (!submissions) {encoder.clearBuffer(this.C); encoder.clearBuffer(this.KU, 4 * layout.kvStart, 4 * (layout.listRows + 1));}
       const pass = encoder.beginComputePass({label: 'Cloth Newton iterations and contact rounds'});
       pass.setBindGroup(0, this.bindings!);
       for (let k = 0; k < unitsPerSubmission; k++) {
@@ -1698,7 +1859,7 @@ export class GPUClothNewton {
       pass.end();
       encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
       encoder.copyBufferToBuffer(this.W, 16 * o.wX, this.positionRead, 0, 16 * n);
-      if (o.joints) encoder.copyBufferToBuffer(this.W, 16 * o.wT, this.twistRead, 0, 16 * o.segments);
+      if (o.segments) encoder.copyBufferToBuffer(this.W, 16 * o.wT, this.twistRead, 0, 16 * o.segments);
       this.device.queue.submit([encoder.finish()]);
       submissions++;
       read = await this.readSolve(false);
@@ -1743,7 +1904,7 @@ export class GPUClothNewton {
       pass.end();
       encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
       encoder.copyBufferToBuffer(this.W, 16 * o.wX, this.positionRead, 0, 16 * n);
-      if (o.joints) encoder.copyBufferToBuffer(this.W, 16 * o.wT, this.twistRead, 0, 16 * o.segments);
+      if (o.segments) encoder.copyBufferToBuffer(this.W, 16 * o.wT, this.twistRead, 0, 16 * o.segments);
       if (settings.readStiffness) encoder.copyBufferToBuffer(this.W, 16 * o.wK, this.stiffnessRead, 0, 16 * n);
       this.device.queue.submit([encoder.finish()]);
       submissions++;
@@ -1773,14 +1934,15 @@ export class GPUClothNewton {
     const colliders = options.colliders ?? [], unsupported = gpuContactUnsupported(this.topology, colliders);
     if (unsupported) throw new Error(`GPU cloth contact: ${unsupported}`);
     this.uploadVertexBlock(state, dt, options);
+    this.uploadRodBlock(state, dt);
     this.prepareGPUContact(colliders, options.selfCollision ?? false);
     const n = this.n, layout = this.contactLayout!;
-    this.writeParams({...this.offsets, ...this.contactParams(), contactMode: 1, contactGroups: this.contactGroups, colliders: this.colliderCount, selfCollision: this.selfCollision ? 1 : 0,
+    this.writeParams({...this.offsets, ...this.contactParams(), contactMode: 1, contactGroups: this.contactGroups, colliders: this.colliderCount, selfCollision: this.selfCollision ? 1 : 0, rodContact: this.topology.rods.length ? 1 : 0,
       dt, tolerance: options.tolerance_m ?? 1e-8, contactDelta: options.tolerance_m ?? 1e-8, frictionEpsilon: FRICTION_SLIP_SPEED_M_S * dt, newtonCap: 1, cgCap: 1});
     const begun = performance.now(), encoder = this.device.createCommandEncoder({label: 'Cloth contact detection'});
-    encoder.clearBuffer(this.C); encoder.clearBuffer(this.KU, 4 * layout.kvStart, 4 * (n + 1));
+    encoder.clearBuffer(this.C); encoder.clearBuffer(this.KU, 4 * layout.kvStart, 4 * (layout.listRows + 1));
     const pass = encoder.beginComputePass(); pass.setBindGroup(0, this.bindings!);
-    this.run(pass, 'initX', Math.ceil(n / WG)); this.run(pass, 'detectBegin', 1); this.run(pass, 'tableClear', this.strided(2 * layout.tableSlots));
+    this.run(pass, 'initX', Math.ceil(Math.max(n, this.offsets.segments) / WG)); this.run(pass, 'prepSeg', Math.ceil(this.offsets.segments / WG)); this.run(pass, 'detectBegin', 1); this.run(pass, 'tableClear', this.strided(2 * layout.tableSlots));
     this.encodeDetection(pass); this.encodeAfterDetection(pass);
     pass.end();
     encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
@@ -1798,19 +1960,26 @@ export class GPUClothNewton {
   }
   private async readContactSet(count: number): Promise<GPUClothContact[]> {
     if (!count) return [];
-    const layout = this.contactLayout!, floats = this.device.createBuffer({size: 64 * count, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ}), words = this.device.createBuffer({size: 32 * count, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
+    const layout = this.contactLayout!, rod = this.topology.rods.length > 0;
+    const floats = this.device.createBuffer({size: 64 * count + (rod ? 48 * count : 0), usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ}), words = this.device.createBuffer({size: (rod ? 48 : 32) * count, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
     try {
       const encoder = this.device.createCommandEncoder();
       encoder.copyBufferToBuffer(this.KF, 0, floats, 0, 64 * count);
       encoder.copyBufferToBuffer(this.KU, 4 * layout.kuCV, words, 0, 16 * count);
       encoder.copyBufferToBuffer(this.KU, 4 * layout.kuMeta, words, 16 * count, 16 * count);
+      if (rod) {encoder.copyBufferToBuffer(this.KF, 16 * layout.kfRod, floats, 64 * count, 48 * count); encoder.copyBufferToBuffer(this.KU, 4 * layout.kuRod, words, 32 * count, 16 * count);}
       this.device.queue.submit([encoder.finish()]);
       await Promise.all([floats.mapAsync(GPUMapMode.READ), words.mapAsync(GPUMapMode.READ)]);
       const f = new Float32Array(floats.getMappedRange().slice(0)), u = new Uint32Array(words.getMappedRange().slice(0));
+      // Keys of ClothContactSet: kind << 28 | first feature (lib/cloth/gpu-contact.ts).
+      const prefixes = ['c', 'v', 'e', 'rc', 'rv', 'rq', 'rp', 'rf', 'rx', 'rs'];
       return Array.from({length: count}, (_, c) => {
-        const k0 = u[4 * count + 4 * c]!, k1 = u[4 * count + 4 * c + 1]!, kind = k0 >>> 30, a = k0 & 0x3fffffff;
-        const key = kind === 0 ? `c:${a}:${k1}` : kind === 1 ? `v:${a}:${k1}` : `e:${a}:${k1}`, size = kind === 0 ? 1 : 4;
-        return {key, vertices: Array.from(u.subarray(4 * c, 4 * c + size)), weights: Array.from(f.subarray(16 * c + 12, 16 * c + 12 + size)), normal: [f[16 * c]!, f[16 * c + 1]!, f[16 * c + 2]!] as const,
+        const k0 = u[4 * count + 4 * c]!, k1 = u[4 * count + 4 * c + 1]!, kind = k0 >>> 28, a = k0 & 0x0fffffff, prefix = prefixes[kind];
+        if (!prefix) throw new Error(`GPU cloth contact ${c} has unknown kind ${kind}`);
+        const rodm = rod ? u[8 * count + 4 * c + 3]! : 0, size = rodm ? rodm & 7 : kind === 0 ? 1 : 4;
+        const vertices = Array.from(u.subarray(4 * c, 4 * c + Math.min(4, size))), weights = Array.from(f.subarray(16 * c + 12, 16 * c + 12 + Math.min(4, size)));
+        if (size === 5) {vertices.push(u[8 * count + 4 * c]!); weights.push(f[16 * count + 12 * c + 8]!);}
+        return {key: `${prefix}:${a}:${k1}`, vertices, weights, normal: [f[16 * c]!, f[16 * c + 1]!, f[16 * c + 2]!] as const,
           lambda: f[16 * c + 7]!, rho: f[16 * c + 8]!, frictionLambda: f[16 * c + 9]!};
       });
     } finally {floats.destroy(); words.destroy();}

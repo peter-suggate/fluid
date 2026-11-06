@@ -112,3 +112,25 @@ test('a rod finer than its radius has no self contact with its own rest neighbou
   assert.equal(report.contacts.selfContacts, 0);
   assert.ok(r > .001);
 });
+
+test('a rod rolling as it strikes a pinned sheet converges quadratically: its twist and positions are one CG system', () => {
+  // Friction ties the twist to the positions through the rolling slip; stepped
+  // as separate blocks (the twist after the position CG) this impact took 258
+  // Newton iterations at 1e-8 m, and 128 without converging at 1e-7 m the step after.
+  const n = 6, hs = .02, restPositions_m: number[] = [], triangles: number[] = [], fixed: number[] = [];
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {restPositions_m.push(i*hs, 0, j*hs); fixed.push(1);}
+  for (let j = 0; j + 1 < n; j++) for (let i = 0; i + 1 < n; i++) {const q = j*n + i; triangles.push(q, q + n, q + 1, q + 1, q + n, q + n + 1);}
+  const r = .002, rodStart = n*n, count = 9, friction = Math.tan(10*Math.PI/180);
+  for (let k = 0; k < count; k++) {restPositions_m.push(.013 + .0095*k, r + .0035, .017 + .0071*k); fixed.push(0);}
+  const data: ClothTopologyData = {restPositions_m, triangles, triangleMaterials: Array(triangles.length/3).fill(0), rodOffsets: [0, count], rodIndices: Array.from({length: count}, (_, k) => rodStart + k), rodMaterials: [1], fixed};
+  const topology = prepareClothTopology(data, [{...DEFAULT_CLOTH_MATERIAL, thickness_m: .001, friction}, material({friction})]), state = createClothState(topology);
+  for (let k = 0; k < count; k++) state.velocities_m_s[3*(rodStart + k) + 1] = -2;
+  let newton = 0;
+  for (let step = 0; step < 4; step++) {
+    const report = solveClothIncrement(topology, state, .001, {iterations: 64, tolerance_m: 1e-8, selfCollision: true, rodContactOracle: true});
+    assert.ok(report.converged && report.contactModel === 'in-solve', `step ${step}: residual ${report.maximumUpdate_m} m`);
+    newton += report.iterations;
+  }
+  for (let k = 0; k < count; k++) assert.ok(state.positions_m[3*(rodStart + k) + 1]! > r + .0005 - 1e-6, `rod vertex ${k} at y = ${state.positions_m[3*(rodStart + k) + 1]}`);
+  assert.ok(newton < 100, `${newton} Newton iterations over the impact`);
+});

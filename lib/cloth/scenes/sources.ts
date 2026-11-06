@@ -15,14 +15,14 @@ if (sources.size !== catalog.scenes.length) throw new Error('Duplicate wet-cloth
 export const wetClothVariantSources:readonly WetClothSourceDefinition[]=wetClothSourceVariants.map(variant=>{
  const base=sources.get(variant.sourceId);if(!base)throw new Error('Unknown variant released source');return applyWetClothSourceVariant(base,variant);
 });
-/** The released dx and dt of each refined source. Resolvable by id, not yet
- * on the validation shelf. */
+/** The released dx and dt of each refined source (exploratory variants on the
+ * validation shelf). */
 export const wetClothUpstreamDiscretizationSources:readonly WetClothSourceDefinition[]=wetClothUpstreamDiscretizationVariants.map(variant=>applyWetClothSourceVariant(sources.get(variant.sourceId)!,variant));
 for(const variant of [...wetClothVariantSources,...wetClothUpstreamDiscretizationSources]){if(sources.has(variant.id))throw new Error('Duplicate source variant identity');sources.set(variant.id,variant);}
 
 /** These are imported inputs, not certification that the simulations match. */
 export const wetClothWaterSources: readonly WetClothSourceDefinition[] = released;
-export const wetClothValidationSources:readonly WetClothSourceDefinition[]=[...wetClothWaterSources,...wetClothVariantSources];
+export const wetClothValidationSources:readonly WetClothSourceDefinition[]=[...wetClothWaterSources,...wetClothVariantSources,...wetClothUpstreamDiscretizationSources];
 export const WETCLOTH_UPSTREAM_COMMIT = catalog.upstreamCommit;
 
 export function wetClothSource(id: string): WetClothSourceDefinition {
