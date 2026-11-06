@@ -845,3 +845,76 @@ up to 50%. A single-run difference below about 1 ms is therefore not
 resolved. The estimate from cycles is that 5 band sweeps save about 0.35
 cycles a frame, minus 7 more band launches (16 us each, net): about 0.5 ms.
 That is under the 1 ms gate, and nothing has landed.
+
+## Round 9: the seam block and the coarse free-surface operator (not landed)
+
+**What was tried.** Two changes, each behind a knob in a dev tree. The
+patch is `seam-block-surface-series.patch` in the agent scratchpad.
+
+- **Seam block (pNativeRelax, same launch).** Each native 4h seam row
+  relaxes together with the h cells on its seam faces. Only cells that
+  qualify join: active, exactly one seam face, no wall, no inside clamp.
+  - The row solves exactly against those cells' Schur complement, then
+    writes them from its new value. No new launch.
+  - It is race-free because a joining cell belongs to exactly one native
+    row.
+- **Coarse free-surface operator (pRebase, level 1).** A fixed-zero face
+  that leaves an aggregate is a free-surface ghost/open face, or a band
+  link to an inactive row.
+  - The aggregate's centre lies half a cell further from that boundary
+    than its child's centre. So the Dirichlet coefficient becomes the two
+    resistances in series: `c*u/(u+0.5c)`, with u the unit coefficient.
+  - This is the rediscretised 2h Dirichlet term. The Galerkin sum `c`
+    over-weights it by `(theta+0.5)/theta`, which is 2x at theta = 0.5.
+    The interior links are already rediscretised by coarseScale 0.5.
+  - This is the inconsistency the round-8 coarseScale test could not see,
+    because coarseScale scales the links and not the Dirichlet terms.
+  - Scaling all of `part - outward` instead (FLUID_SURFACE_SCALE 0.5) also
+    scaled the BULK16 links that gCoarseChild leaves in the diagonal. It
+    flipped the BULK16 rows (largest flip 3.95).
+- **A level-2 version** (the child's excess `d - sum k`, one more cell in
+  series, applied at pDownA only) gains a little more.
+
+**Cycles** (check mode, one run each). Drop=2 counts frames 21-60; m1 is the
+geomean of the residual after cycle 1:
+
+| variant | drop=2 cycles | m1 | seep 300 cycles/frame | letters 120 cycles/frame |
+|---|---|---|---|---|
+| HEAD | 75 | 0.078 | 3.58 | 2.98 |
+| seam block | 78 | 0.082 | | |
+| surface series (L1) | 60 | 0.062 | | |
+| both | **57 (-24%)** | **0.047** | 3.56 (-0.5%) | 2.90 (-2.7%) |
+| both + L2 series | 55 | 0.049 | 143 vs 144 (60-step trace) | |
+
+- **Drop=2 with both changes.** After cycle 1 every class is at or below
+  0.041: band seam 0.064 -> 0.026, surface 0.070 -> 0.026, native seam
+  0.047 -> 0.041.
+  - BULK16 flips over 1/3 occur in 1 frame of 40 (largest 0.49).
+  - tests/pressure-tail-red-black.test.ts still passes with both knobs on.
+  - Drift is unchanged on all three scenes.
+- **Seep and letters do not move.** A class split on seep separates band
+  rows with a below-unit band face (solid apertures) from the surface rows.
+  After cycle 1:
+  - aperture rows are largest in 18 of 40 frames (3.5x target), walls in
+    10 (1.8x), surface in 6 (2.1x, 173 rows);
+  - seep starts each frame at about 100x target and runs 3-4 cycles at
+    rho1 0.05 and rho2 0.13;
+  - letters runs 4 cycles in 69-78 of 120 frames.
+
+  The seep and letters cycles are therefore set by the solid-aperture
+  and wall rows, not by the seam or the surface operator.
+
+**Timing.** Drop=2, pipelined, steadyMedian, one run each: HEAD 14.51 ms,
+both changes 14.41 ms. That is within single-run noise (live particles
+8.9k vs 9.9k).
+
+**Verdict.** Acceptance needs at least 20% fewer cycles on two scenes; this
+reaches only drop=2. Not landed. The regression test
+(tests/pressure-seam-cycle.test.ts in the patch) asserts the drop=2 cycle-1
+geomean <= 0.05 on an 8x4x4 tank. It was not committed with nothing to
+guard.
+
+**Next.** The seep and letters limit is the aperture (below-unit) band
+faces and the wall rows. Two questions to answer there:
+- how the level-1 aggregate weights a partly open face;
+- whether the fine smoother's wall active-set handles it.
