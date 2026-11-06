@@ -39,6 +39,14 @@ export function initialLiquidVertexPhi(scene: SceneDescription, dimensions: read
 function vertexPhiSampler(scene: SceneDescription, dimensions: readonly [number, number, number], boxes: ((x: number, y: number, z: number) => number) | undefined): (x: number, y: number, z: number, outputZ: number) => number {
   const [nx, ny, nz] = dimensions;
   const c = scene.container, empty = Math.max(c.width_m,c.height_m,c.depth_m), height = scene.fluid.initialHeightField;
+  // Free space has no walls: the box bounds the initial liquid, so its faces
+  // are free surfaces (the liquid is the fill intersected with the box), not
+  // walls the fill continues past.
+  const free = c.boundary === "free-space", half = [c.width_m/2, c.height_m/2, c.depth_m/2];
+  const outsideBox = (p: {x: number; y: number; z: number}) => {
+    const q = [Math.abs(p.x)-half[0]!, Math.abs(p.y-half[1]!)-half[1]!, Math.abs(p.z)-half[2]!];
+    return Math.hypot(Math.max(q[0]!,0), Math.max(q[1]!,0), Math.max(q[2]!,0)) + Math.min(Math.max(q[0]!,q[1]!,q[2]!),0);
+  };
   return (x, y, z, outputZ) => {
     const point = { x: (x/nx-0.5)*c.width_m, y: y/ny*c.height_m, z: (z/nz-0.5)*c.depth_m };
     let base = height ? point.y-initialHeightFieldHeight(height, point.x, point.z)
@@ -47,8 +55,9 @@ function vertexPhiSampler(scene: SceneDescription, dimensions: readonly [number,
     const brick = initialFluidBrickSignedDistanceAtNode(scene,x,y,z,dimensions);
     if (brick !== undefined) base = scene.fluid.initialBrickSeedsAdditive ? Math.min(base,brick) : brick;
     const inside = boxes ? boxes(x, y, outputZ) : Infinity;
-    const value = scene.systems?.fluid === false ? empty
+    const liquid = scene.systems?.fluid === false ? empty
       : Math.min(base,inside <= 0 ? inside : initialLiquidVolumesSignedDistance(scene,point) ?? empty);
+    const value = free ? Math.max(liquid, outsideBox(point)) : liquid;
     return Number.isFinite(value) ? value : empty;
   };
 }
@@ -354,12 +363,52 @@ function cellVolumeSampler(scene: SceneDescription, dimensions: readonly [number
  * covers the rounding of each face.
  */
 export function initialLiquidCellBounds(scene: SceneDescription, dimensions: readonly [number, number, number]): [number[], number[]][] | undefined {
-  const [nx, ny, nz] = dimensions, c = scene.container, out: [number[], number[]][] = [];
-  const cell = (axis: number, metres: number) => [(metres/c.width_m+0.5)*nx, metres/c.height_m*ny, (metres/c.depth_m+0.5)*nz][axis]!;
-  const add = (low: number[], high: number[]) => {
+  const extents = initialLiquidCellExtents(scene, dimensions);
+  if (!extents) return undefined;
+  const out: [number[], number[]][] = [];
+  for (const [low, high] of extents) {
     const lo = low.map(v => Math.max(0, Math.floor(v)-1)), hi = high.map((v, a) => Math.min(dimensions[a]!, Math.floor(v)+2));
     if (lo.every((v, a) => v < hi[a]!)) out.push([lo, hi]);
-  };
+  }
+  return out.every(([lo, hi]) => lo.concat(hi).every(Number.isFinite)) ? out : undefined;
+}
+/** Far air at least this many finest cells from liquid: the AIR value a page
+ * the census claims takes (UniformPageInitialise's near, 16 hmax). */
+export const FREE_SPACE_SEED_MARGIN_CELLS = 16;
+/**
+ * A free-space scene's seed stores the box's pages alone (LatticePages, the
+ * uploads and the host censuses address box pages), and every page beyond
+ * the box is far air, at least FREE_SPACE_SEED_MARGIN_CELLS h from liquid,
+ * until the first census claims it. Initial liquid nearer a box face than
+ * that breaks the certificate: the claimed pages hold far air where the
+ * liquid's distance is smaller, the band measure's open-axis slopes read
+ * them, the liquid measures about a tenth empty and volume control drives
+ * a divergence. Such a scene is refused here, with the face and distance.
+ * dimensions: the container's cells (initialLiquidCellBounds' frame);
+ * lattice: the window's, which adds cells past the container's high faces.
+ */
+export function assertFreeSpaceSeedMargin(scene: SceneDescription, dimensions: readonly [number, number, number], lattice: readonly [number, number, number] = dimensions): void {
+  if (scene.container.boundary !== "free-space") return;
+  const c = scene.container, size = [c.width_m, c.height_m, c.depth_m], h = size.map((v, a) => v/dimensions[a]!);
+  const margin_m = FREE_SPACE_SEED_MARGIN_CELLS*Math.max(...h), extents = initialLiquidCellExtents(scene, dimensions);
+  if (!extents) throw new Error(`Free-space scene ${scene.sceneId ?? "(unnamed)"}: the initial liquid's extent is not finite, so its margin to the seed window cannot be certified`);
+  for (const [low, high] of extents) {
+    if (!low.every((v, a) => v < high[a]!)) continue;
+    for (let a = 0; a < 3; a++) for (const [gap, face] of [[low[a]!*h[a]!, "low"], [(lattice[a]!-high[a]!)*h[a]!, "high"]] as const) {
+      // Compared in micro-cells: metres-to-cells rounding must not refuse a
+      // window authored at exactly the margin.
+      if (Math.round(gap/margin_m*FREE_SPACE_SEED_MARGIN_CELLS*1e6) >= FREE_SPACE_SEED_MARGIN_CELLS*1e6) continue;
+      throw new Error(`Free-space scene ${scene.sceneId ?? "(unnamed)"}: initial liquid lies ${gap.toFixed(4)} m from the seed window's ${face} ${"xyz"[a]} face, inside the ${margin_m.toFixed(4)} m (${FREE_SPACE_SEED_MARGIN_CELLS} h) far-air margin. `
+        + `The seed stores the window's pages alone, and the pages beyond it are far air (at least ${FREE_SPACE_SEED_MARGIN_CELLS} h) until the first census claims them, so liquid nearer the window measures part-empty and loses volume. Enlarge the container (the seed window) or move the liquid inward.`);
+    }
+  }
+}
+/** initialLiquidCellBounds' sources before rounding: [low, high) in lattice
+ * cells, unclamped (a box past the lattice keeps its extent). */
+function initialLiquidCellExtents(scene: SceneDescription, dimensions: readonly [number, number, number]): [number[], number[]][] | undefined {
+  const [nx, ny, nz] = dimensions, c = scene.container, out: [number[], number[]][] = [];
+  const cell = (axis: number, metres: number) => [(metres/c.width_m+0.5)*nx, metres/c.height_m*ny, (metres/c.depth_m+0.5)*nz][axis]!;
+  const add = (low: number[], high: number[]) => { out.push([low, high]); };
   const metres = (min: { x: number; y: number; z: number }, max: { x: number; y: number; z: number }) =>
     add([cell(0, min.x), cell(1, min.y), cell(2, min.z)], [cell(0, max.x), cell(1, max.y), cell(2, max.z)]);
   const seeds = scene.fluid.initialBrickSeeds_m;
@@ -387,7 +436,7 @@ export function initialLiquidCellBounds(scene: SceneDescription, dimensions: rea
     metres({ x: o.x-half.x, y: o.y-half.y, z: o.z-half.z }, { x: o.x+half.x, y: o.y+half.y, z: o.z+half.z });
   }
   for (const b of sourceInitialBounds(scene)) metres({x:b.min[0],y:b.min[1],z:b.min[2]}, {x:b.max[0],y:b.max[1],z:b.max[2]});
-  return out.every(([lo, hi]) => lo.concat(hi).every(Number.isFinite)) ? out : undefined;
+  return out;
 }
 
 /**

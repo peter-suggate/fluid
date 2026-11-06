@@ -279,9 +279,11 @@ fn umRigidPlateExactFraction(candidates:u32,center:vec3f,size:vec3f,rayAxis:u32,
   fraction=(sign(y.y)*umRimClippedChord(abs(y.y),x,z,e,r)-sign(y.x)*umRimClippedChord(abs(y.x),x,z,e,r))/(size.x*size.y*size.z);
  }else{
   // The face plane's section: a rounded rectangle (normal along the plate's
-  // y) or a stadium of radius sqrt(r^2-w^2) (normal along x or z).
+  // y) or a stadium of radius sqrt(r^2-w^2) (normal along x or z). The
+  // plate is a closed set (as the corner certificate and rigidShapeInside):
+  // a face plane lying on its flat top, |c|=r, sections the full rectangle.
   let c=llo[fixedLocal];var area=0.0;
-  if(fixedLocal==1u){if(abs(c)<r){area=umRimRegion(x,z,e,sqrt(r*r-c*c),r,false);}}
+  if(fixedLocal==1u){if(abs(c)<=r){area=umRimRegion(x,z,e,sqrt(r*r-c*c),r,false);}}
   else if(fixedLocal==0u){let w=max(0.0,abs(c)-e.x);if(w<r){let rw=sqrt(r*r-w*w);area=umRimRegion(y,z,vec2f(0.0,e.y),rw,rw,false);}}
   else{let w=max(0.0,abs(c)-e.y);if(w<r){let rw=sqrt(r*r-w*w);area=umRimRegion(x,y,vec2f(e.x,0.0),rw,rw,false);}}
   fraction=area/(size[rayAxis]*size[axes.x]);

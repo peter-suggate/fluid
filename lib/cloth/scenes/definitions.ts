@@ -11,6 +11,7 @@ import type { ClothVector } from '../types';
 import type { WetClothSourceDefinition } from '../source-types';
 import { sourceClothDocument, wetClothSource, wetClothWaterSources,wetClothVariantSources } from './sources';
 import {wetClothVariantTopology} from './variants';
+import { FREE_SPACE_SEED_MARGIN_CELLS } from '../../core/initial-liquid-lattice';
 
 /** Page pools authored from a measured peak (no runtime growth). The free-space
  * default (100 blocks) is exhausted at commit 1 by pore-test-mid's falling
@@ -63,7 +64,9 @@ export function buildWetClothSourceScene(id: string): SceneDescription {
     const bounds = sourceFieldBounds(source.fields, f.index); include(bounds.min); include(bounds.max);
   }
   if (!Number.isFinite(min[0]!)) throw new Error(`Source ${id} has no finite geometry`);
-  const margin = 8 * source.cellSize_m;
+  // Free space seeds the window's pages alone: initial liquid keeps the
+  // far-air margin from every window face (assertFreeSpaceSeedMargin).
+  const margin = FREE_SPACE_SEED_MARGIN_CELLS * source.cellSize_m;
   const offset: ClothVector = [(-(max[0]! + min[0]!) / 2) || 0, margin - min[1]!, (-(max[2]! + min[2]!) / 2) || 0];
   const dimensions = max.map((v, i) => Math.ceil((v - min[i]! + 2 * margin) / (32 * source.cellSize_m)) * 32 * source.cellSize_m);
   const scene = structuredClone(defaultScene);

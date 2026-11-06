@@ -65,7 +65,7 @@ import {
 } from "./uniform-volume.wgsl";
 import { createUniformReferenceComputeShader, uniformT0Groups } from "./webgpu-uniform-reference.wgsl";
 import { uniformInitialLiquidVelocityPages, uniformLatticeFarPhi, uniformLatticePagedPhi, uniformLatticePagedVolume } from "./uniform-volume-initial";
-import type { LatticePages } from "../../core/initial-liquid-lattice";
+import { assertFreeSpaceSeedMargin, type LatticePages } from "../../core/initial-liquid-lattice";
 import { averageInflowStrength, createInflowGridBoundary, integratedInflowVolume, type InflowGridBoundary } from "../../core/inflow-boundary";
 import { inflowStrength as inflowStrengthAt } from "../../core/initial-fluid";
 import type { InitialLiquidSphere, SceneDescription, ScheduledLiquidDrop } from "../../core/model";
@@ -767,6 +767,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Refuse a lattice past the page window before the residency's host
     // passes over every cell (100 s at 2048 cells an axis).
     uniformLatticeWindowBox([nx, ny, nz]);
+    // Free space seeds the box's pages alone: initial liquid within the far-air margin of a box face is refused.
+    assertFreeSpaceSeedMargin(scene, cells, [nx, ny, nz]);
     // The stored set at build (uniformPagePoolResidency): under the census of the Dynamic policy only the sources' pages are pinned.
     // The box's place in the window: its origin, but in an open world (container.walls "none").
     const boxPage = sceneFluidBoxPage(scene);

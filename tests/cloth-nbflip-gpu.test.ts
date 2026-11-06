@@ -123,7 +123,11 @@ for(const clothY of [.175,.4])test(`moving rounded clamp preserves aperture-norm
    const physicalVolume=async()=>{const measured=await readUniformFields(device,solver);return measured.density.reduce((a,b)=>a+b,0)*fields.cellSize_m.reduce((a,b)=>a*b,1);};
    console.log(JSON.stringify({clampY:clothY,phase:'before-motion',ledger:initialLedger,physical:await physicalVolume(),mirror:Array.from(mirror.slice(0,16))}));
    const beforeWeights=clothCellWeights(fields,state.positions_m.subarray(0,3));
-   const motion_m=clothY===.4?.015:.01,nextY=clothY-.04+motion_m;
+   // Submerged, 11 mm: the faces at y=0.15 within |x|,|z|<0.09 then lie
+   // strictly inside the moved plate. At 10 mm their outer corners touch its
+   // rim exactly (sqrt(2)*0.01 = sqrt(r^2-0.005^2)), where f32 rounding alone
+   // decides closure.
+   const motion_m=clothY===.4?.015:.011,nextY=clothY-.04+motion_m;
    const moving=bodies.map(body=>({...body,position_m:{...body.position_m,y:nextY},linearVelocity_m_s:{x:0,y:motion_m/.001,z:0}}));
    fields.device.queue.writeBuffer(solid.bodySource,4,new Float32Array([nextY]));
    fields.device.queue.writeBuffer(solid.bodySource,12*4,new Float32Array([0,motion_m/.001,0]));

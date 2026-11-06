@@ -18,11 +18,26 @@ function scene():SceneDescription {
  initialVelocities_m_s:[.2,0,0,.2,0,0,.2,0,0,.2,0,0],triangles:[0,2,1,1,2,3],rodOffsets:[0],rodIndices:[]}}}];
  return s;
 }
+/** The tank's water and cloth as a free-space scene. Free space seeds the
+ * window's pages alone, so the liquid keeps the far-air margin
+ * (FREE_SPACE_SEED_MARGIN_CELLS) from every window face: the same block,
+ * cloth and depth, centred in a 0.64 m window, all raised 0.16 m, with the
+ * block and cloth refined to h. */
+function freeSpaceScene(s:SceneDescription):SceneDescription{
+ const lift=.16;
+ s.container={...s.container,width_m:.64,height_m:.64,depth_m:.64,fillFraction:0,boundary:'free-space'};
+ s.fluid={...s.fluid,initialLiquidVolumes:[{shape:'box',min_m:{x:-.16,y:lift,z:-.16},max_m:{x:.16,y:lift+.24,z:.16}}]};
+ // The block and its cloth on h owners: the cloth coupling's support needs
+ // them, and a sharp block on the 4h band alone measures percents low.
+ s.fluid.refinementRegions=[{id:'free-space-block',min_m:{x:-.2,y:lift-.04,z:-.2},max_m:{x:.2,y:lift+.28,z:.2},rule:'minimum-cell-size',minimumCellSize_cells:1,maximumCellSize_cells:1}];
+ s.cloth=s.cloth?.map(c=>c.geometry.kind==='inline'?{...c,geometry:{...c.geometry,data:{...c.geometry.data,restPositions_m:c.geometry.data.restPositions_m.map((v,k)=>k%3===1?v+lift:v)}}}:c);
+ return s;
+}
 
 test('production NB-FLIP completes reciprocal immersed cloth frames in tank and free-space windows',{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice('cloth actual NB-FLIP runtime',async device=>{
   for(const freeSpace of [false,true]){
-  const s=scene();if(freeSpace)s.container.boundary='free-space';
+  const s=freeSpace?freeSpaceScene(scene()):scene();
   const solver=await createUniformSolver(device,s);
   try{
    const initial=solver.clothSurfaces[0]!;assert.ok(initial);assert.equal(initial.tick,0);
@@ -59,7 +74,7 @@ test('production NB-FLIP completes reciprocal immersed cloth frames in tank and 
 
 for(const absorb of [false,true])test(`production coupled cloth and free liquid share variable-step free fall ${absorb?'while absorbing':'without absorption'}`,{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice('actual cloth and NB-FLIP free fall',async device=>{
-  let s=scene();s.container.boundary='free-space';s.fluid.gravity_m_s2={x:0,y:-9.80665,z:0};
+  let s=freeSpaceScene(scene());s.fluid.gravity_m_s2={x:0,y:-9.80665,z:0};
   const document=s.cloth![0]!,data=document.geometry.kind==='inline'?document.geometry.data:undefined;assert.ok(data);
   s.cloth=[{...document,physics:{absorption:absorb,captureRate:100},geometry:{kind:'inline',data:{...data,initialVelocities_m_s:Array(data.restPositions_m.length).fill(0)}}}];
   const solver=await createUniformSolver(device,s);
@@ -185,7 +200,7 @@ test('cloth startup uses the ordinary native frame without a staggered initializ
 
 test('accepted cloth momentum changes only by actual native impulses during transient drag',{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice('actual transient cloth momentum clock',async device=>{
-  let s=scene();s.container.boundary='free-space';s.cloth=s.cloth!.map(d=>({...d,physics:{absorption:false}}));const solver=await createUniformSolver(device,s);
+  let s=freeSpaceScene(scene());s.cloth=s.cloth!.map(d=>({...d,physics:{absorption:false}}));const solver=await createUniformSolver(device,s);
   const host=solver as unknown as {clothRuntimes:{state:{dryMass_kg:Float64Array;velocities_m_s:Float64Array}}[];clothCouplings:{finish():Promise<{impulse_Ns:ArrayLike<number>}>}[]};
   const state=host.clothRuntimes[0]!.state,mass=state.dryMass_kg.slice(),coupling=host.clothCouplings[0]!,finish=coupling.finish.bind(coupling);let impulse:ArrayLike<number>|undefined;
   coupling.finish=async()=>{const receipt=await finish();impulse=Float64Array.from(receipt.impulse_Ns);return receipt;};

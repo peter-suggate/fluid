@@ -45,7 +45,9 @@ test('rounded-plate cell and face coverage is exact at the rim, without quadratu
    {shape:'rounded-plate',dimensions_m:{x:.09,y:.015,z:.07},position_m:{x:.001,y:.1353,z:-.002},orientation:identity},
    {shape:'rounded-plate',dimensions_m:{x:.0045,y:.0005,z:.02974},position_m:{x:.0012,y:.0007,z:.0003},orientation:identity},
    {shape:'rounded-plate',dimensions_m:{x:.03,y:.006,z:.02},position_m:{x:-.002,y:.003,z:.0041},orientation:quarter,cuts:[{center_m:{x:.025,y:0,z:0},halfExtents_m:{x:.004,y:.01,z:.01},orientation:identity}]},
-   {shape:'rounded-plate',dimensions_m:{x:.03,y:.006,z:.02},position_m:{x:.0003,y:-.0011,z:.002},orientation:identity,fluidBoundary:'interior'}];
+   {shape:'rounded-plate',dimensions_m:{x:.03,y:.006,z:.02},position_m:{x:.0003,y:-.0011,z:.002},orientation:identity,fluidBoundary:'interior'},
+   // Dyadic, so a face plane lies exactly on the flat top or bottom in f32.
+   {shape:'rounded-plate',dimensions_m:{x:.0625,y:.015625,z:.0625},position_m:{x:.5,y:.125,z:0},orientation:identity}];
   const bodyValues=new Float32Array(bodies.length*12);bodies.forEach((b,i)=>bodyValues.set([b.position_m.x,b.position_m.y,b.position_m.z,b.fluidBoundary==='interior'?-sceneShapeCode(b.shape)-1:sceneShapeCode(b.shape),b.orientation.w,b.orientation.x,b.orientation.y,b.orientation.z,b.dimensions_m.x,b.dimensions_m.y,b.dimensions_m.z,1],i*12));
   const bodyBuffer=device.createBuffer({size:bodyValues.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(bodyBuffer,0,bodyValues);
   const cutValues=packRigidBodyCutAtlas(bodies),cuts=device.createTexture({size:[RIGID_BODY_CUT_ATLAS_WIDTH,1],format:'rgba32float',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});device.queue.writeTexture({texture:cuts},cutValues,{bytesPerRow:16*RIGID_BODY_CUT_ATLAS_WIDTH},[RIGID_BODY_CUT_ATLAS_WIDTH,1]);
@@ -56,6 +58,9 @@ test('rounded-plate cell and face coverage is exact at the rim, without quadratu
    for(let k=0;k<16;k++){const c=[0,1,2].map(a=>[b.position_m.x,b.position_m.y,b.position_m.z][a]!+(2*random()-1)*(reach[a]!+.6*h[a]!)*(k<12?1:.5)) as [number,number,number];
     const ray=k%3,transverse=(ray+1+(k>>2)%2)%3;queries.push({body,c,h,ray,transverse,dims:k%2?1:2});}}
   for(const dims of [1,2] as const)for(const c of [[.011,.1353,-.012],[.2,.1353,0]] as [number,number,number][])queries.push({body:0,c,h:[.01,.0085,.012],ray:dims===2?1:2,transverse:0,dims});
+  // The plate is a closed set: a face plane on its flat top (or bottom)
+  // sections the whole rectangle, half of each of these faces.
+  for(const y of [.140625,.109375])for(const ray of [0,2])queries.push({body:4,c:[.5625,y,.03125],h:[.0625,.0625,.0625],ray,transverse:2-ray,dims:1});
   const values=new Float32Array(queries.length*12);queries.forEach((q,i)=>values.set([...q.c,1<<q.body,...q.h,q.dims,q.ray,q.transverse,0,0],12*i));
   const input=device.createBuffer({size:values.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(input,0,values);
   const output=device.createBuffer({size:8*queries.length,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC}),read=device.createBuffer({size:8*queries.length,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
