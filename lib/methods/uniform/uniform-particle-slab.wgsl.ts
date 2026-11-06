@@ -178,9 +178,12 @@ fn nbScratchCap(slot:u32,serial:u32)->u32{
 // One workgroup, before the move: the scratch slabs in slot order (slabs
 // past the limit stop the run, state[3] = 6, and are cut to fit), and the
 // move's jobs: NB_MOVE_CHUNK-record chunks of the input entries. A job
-// stages its brick's context once (nbWinStage): over 256 records that
-// costs a lane a tile per four records a lane.
-const NB_MOVE_CHUNK:u32=256u;
+// stages its brick's context once (nbWinStage), and each lane traces one
+// record of the chunk at a time: a 256-record job walked four records a
+// lane in turn, and with the move at about a tenth occupancy that chain
+// was the launch's critical path (drop=2 move 0.41 -> 0.25 ms, drop=8
+// 0.95 -> 0.68 ms at a 64-record job: one record a lane).
+const NB_MOVE_CHUNK:u32=64u;
 @compute @workgroup_size(256) fn slabAllocate(@builtin(local_invocation_index) lane:u32){
  let slots=ubCount();let serial=atomicLoad(&state[17u]);
  let span=(slots+255u)/256u;let first=lane*span;let end=min(slots,first+span);
