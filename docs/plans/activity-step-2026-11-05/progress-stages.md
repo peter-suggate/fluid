@@ -351,3 +351,78 @@ pressure arena and mixture, uniform-mixed-frame and the solid record. The
 particle and tier changes on seep and letters are physics, not timing noise.
 The rest tank's +0.6 ms, at an unchanged dispatch count, could partly be the
 machine's state.
+
+## Round 4, item 2: the ~10 ms switched-on cost is not capacity-sized
+
+Tree: 0dd7c9b3 + 30e038c8's fix. 8x8x4 drop=2, 60 steps, timing mode.
+
+### Capacity halved
+
+| run | median ms | late-half ms | pool blocks | particle capacity | binSlots | slotCapacity | memory |
+|---|---|---|---|---|---|---|---|
+| full | 16.14 | 16.49 | 832 | 3.39M | 53.4k | 127 | 3.15 GB |
+| reduced (`--pool=416`, bricks 780, 2 per fine cell) | 15.38 | 15.28 | 414 | 0.85M | 6.2k | 95 | 1.57 GB |
+| 8x8x4 rest | 4.03 | | | | | | |
+
+The bricks can't be halved further: the coarse start's 6171 h tiles need
+about 772. Cutting pool, particle and slot capacity by half to 8x changes
+the step by 0.76 ms out of the 12.1 ms jump over rest. drop=2 particle
+counts also spread 6-10k run to run, so that 0.76 ms is an upper bound. The
+capacity hypothesis is rejected. A kernel-timer A/B of the two was dropped:
+0.76 ms spread over stages sits near the timer's 65.5 us quantum.
+
+### Where the jump goes (kernel timer, `--kernels=40`, fk-d2)
+
+Kernel-timer sum is 17.7 ms against a 15.15 ms median, because of the 65.5 us
+quantum. Stages that dispatch nothing at rest hold 241 launches and 9.64 ms
+of timer time, 40 us a launch. Stages that also run at rest hold 201
+launches and 8.06 ms; pressure is 3.58 ms of that and belongs to Lane P.
+
+The live items are 379 coarse, 128 W and 5 H tiles, 113 fine, 9.7k
+particles, 100 bricks and 8 slots.
+
+| stage (switched on only) | launches | workgroups | timer ms | us/launch | worst kernel | loops over |
+|---|---|---|---|---|---|---|
+| mixed extension | 20 | 11856 | 0.95 | 47 | pair_sweepSeams 0.32 | launch counts of listed seam jobs |
+| dynamic ownership census | 9 | 2446 | 0.73 | 81 | classifyCoarse 0.28 | coarse tiles (umCounts.y), replay or classify |
+| mixed surface advect | 9 | 12288 | 0.66 | 74 | advectWalls 0.12 | 1089 lanes per wall face of resident blocks |
+| NB advectParticles | 3 | 3072 | 0.61 | 205 | advectParticlesDeferred 0.53 | slab jobs of live particles |
+| mixed remap | 9 | 8448 | 0.44 | 49 | remapFaces 0.18 | listed jobs |
+| geometric fill | 7 | 13952 | 0.44 | 62 | geometryRegional 0.32 | region list |
+| surface advect deferred | 6 | 6144 | 0.43 | 72 | advectDeferred 0.18 | not checked |
+| NB coarse retirement | 3 | 3072 | 0.37 | 122 | depthCoarse 0.29 | listed coarse corners |
+| NB transfer | 7 | 7168 | 0.37 | 52 | transferSeams 0.12 | one group per band seam tile |
+| NB canonical metric and publication | 3 | 3072 | 0.35 | 118 | arenaPublishCanonical 0.17 | arena slots in use |
+| body forces | 4 | 4096 | 0.34 | 84 | forcesRegularCoarse 0.15 | not checked |
+| NB surface reconstruction | 7 | 7168 | 0.33 | 47 | couple 0.10 | listed coarse entries |
+| local speed certificate | 8 | 2574 | 0.32 | 40 | localSpeed 0.19 | the owners its launch covers |
+| phi resolve | 5 | 8192 | 0.27 | 53 | resolve 0.21 | not checked |
+| layout build | 11 | 2064 | 0.26 | 24 | scan 0.05 | UM_BLOCKS x categories in one group: capacity, but 0.05 ms |
+| NB particle sort | 24 | 24576 | 0.22 | 9 | slabSortMerge 0.12 | live slabs |
+| 41 more stages | 123 | | 2.55 | 21 | | |
+
+No stage carries more than a tenth of the jump. Every loop checked runs over
+live or resident tiles, owners, lists or particles, not pool capacity. The one capacity loop found, the layout scan, costs 0.05 ms. The serial
+single-group stages are small: layout build is 0.26 ms over 11 launches.
+The NB particle sort's 24 near-empty launches cost 9 us each. So a launch
+with no work is cheap, and the 40-120 us stages are doing real work on
+few items: chains of dependent loads (owner -> topology -> page -> field)
+per lane.
+
+A chain microbenchmark (dependent random loads through a 16 MB buffer, 100
+launches) backs that:
+
+| dependent loads a lane | width 1-16 | width 256 |
+|---|---|---|
+| 0 | 4.6-5.2 us | 5 us |
+| 16 | 15-28 us | |
+| 64 | 18 us | 105 us |
+
+The NB grid knockout to 64 workgroups confirms that workgroup count is not
+the cost: 267k down to 206k workgroups a step, 16.14 against 16.59 ms.
+
+What would halve it is structural, not a loop bound: fewer stages
+in a non-quiet frame, or shorter per-item dependency chains in the
+40-120 us stages (census, surface advect, body forces, coarse retirement,
+canonical publication). No capacity-loop fix was made, since none has a
+measurable share.
