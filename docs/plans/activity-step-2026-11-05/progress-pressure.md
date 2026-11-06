@@ -619,3 +619,74 @@ ownership tile words and the receipts.
   started. Making it proportional would need stable per-tile owner slots
   in place of dense ranks: an addressing change across every
   owner-indexed buffer, not a bookkeeping change.
+
+## Round 8 (2026-11-07): seeding determinism
+
+**Fix (7f8d76c1).**
+- seedCandidate salted each seed's jitter with `slot+1+count`. The slot
+  came from seedCells' atomicAdd fill order, so every run seeded
+  different sites.
+- The jitter is now `nbSeedJitter(cell, site index, frame)`
+  (narrowBandSeedJitterWGSL). The frame index is params.live.z, written
+  once per move.
+- The initial band keeps salt 0, and the jittered sampling itself is
+  unchanged.
+- Regression: tests/nbflip-seed-order.test.ts (GPU).
+  - A shuffled seed list gives bit-identical sites.
+  - The next frame moves more than 99% of the sites.
+  - The old slot salt does depend on order.
+  - seedCandidate's only salt is params.live.z.
+
+**Reproducibility (two runs in one process, HEAD export, before and after
+the fix).**
+
+| scene | step | before | after |
+| --- | --- | --- | --- |
+| drop=2 | 2-8 | identical | identical |
+| drop=2 | 9 | counts 641 vs 639, records differ | counts equal, records differ |
+| drop=2 | 10 | counts 5343 vs 5319, fields differ | counts and fields equal |
+| drop=2 | 12 | — | fields differ |
+| drop=2 | 15 / 30 | — | counts 8263/8168, 8194/8162; fine tiles 96/88 at 30 |
+| dam break | 5 | 826 vs 823 h tiles (round 6) | 823 tiles; counts 38669 vs 38679, fields differ |
+| dam break | 30 | — | 1310 vs 1314 tiles; counts 65449 vs 65570 |
+
+**Remaining source: the seed-budget clip.**
+- The step-9 dumps hold the same 641 records in each run. 99 cells are
+  identical and none hold the same count with different records, but
+  195 cells differ in count: whole deep cells (four seeds) are present
+  in one run and absent in the other.
+- nbSeedAppend's records rule (`atomicAdd(&state[NB_SLAB_SEEDS_WORD])`
+  against seedBudget) keeps overlap reseeds in atomicAdd order. Once the
+  budget binds, which cells are kept depends on launch order.
+- Making it reproducible needs the budget to be granted in a canonical
+  order. One way: a prefix rank of the candidates by cell key before the
+  append, which also needs the seed list itself ordered. That was not
+  built this round.
+- Other order-dependent appends were not separately isolated, because the
+  clip already explains step 9:
+  - the slab-versus-spill choice in nbMoveAppend and nbSeedAppend
+    (contents are re-sorted canonically, so placement alone should not
+    change results);
+  - nbFinish's mid-pass `atomicLoad(&bins[cell])` (foreign hunk).
+
+**Gates (fixed tree, one run each).**
+
+| run | steady median | drift | baseline (round 6) |
+| --- | --- | --- | --- |
+| drop=2 | 14.17 ms | 3.7e-6 | 14.08 ms, 4.9e-7 |
+| seep 300 | 29.60 ms | 2.8e-4 | 29.35 ms, 4.1e-4 |
+| letters 120 | 51.92 ms | -0.0089 | 47.76 ms, -0.0090 |
+
+- The letters steady median rose, but its 20-step window medians match
+  round 6: 14.1/17.2/41.8/61.1/76.0/84.2 ms against
+  13.2/16.7/38.5/60.7/76.3/86.8 ms.
+- The difference sits in the ramp (steps 40-60). The scene itself has
+  shifted since round 6: HEAD today also ends at 585 fine tiles, against
+  546 then.
+- A same-day HEAD letters run was contended (load average 9, late-half
+  median 146 ms against the usual 76 ms) and is not usable as a baseline.
+  It was not repeated.
+
+**Symmetry test:** the step-6 reflected error is 0.0394 m. That is
+unchanged, as expected: a coordinate hash is not mirror-symmetric. The
+test and its bound were not changed.
