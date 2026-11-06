@@ -119,3 +119,69 @@ arena hunks or the shared GPU); the landed arm still removes about 2.5 ms.
 - Open: pDown3's per-page 16h pre-step is still block Jacobi; the remaining
   cycled rest frames come from native interior rows near the 1e-6 floor;
   the solve is not bit-reproducible run to run, so only paired runs compare.
+
+## Round 3
+
+### Letters after 1058cc0b: noise, plus pUp4's 0.13 ms
+
+One 120-step letters run each under the kernel timer (from step 40),
+a44ed3aa (Jacobi) against a44ed3aa + 1058cc0b (clean exports):
+- pUp4 0.277 -> 0.408 ms (+0.13: the four extra colour passes a frame).
+  Every other kernel moves by 0.06 or less; total kernel time +0.65.
+- Cycles: frames 30-120 have the same pattern, and the last 60 frames run
+  233 cycles in both arms. The red-black arm has 12 more, all in frames
+  1-15 (falling letters, 20 ms frames), as alternating 1/0 frames. The
+  unpipelined trace (frames 1-4, diagnostics) runs 0 cycles in both, with
+  the same residuals. So the alternation is the pipelined run's, not
+  reproducible frame by frame.
+- So the +2.8 ms wall median was mostly noise. The median sits between the
+  cheap early frames and the 76 ms late ones, and moves with any early
+  change. The late halves agree (76.47 against 77.84 untimed).
+
+### Plan step 3 (pressure work over the residual's support): knockout, not built
+
+At drop=2, the larger tank runs more cycles, but not much more per cycle.
+Unpipelined trace, frames 40-60: 27 cycles on 8x8x4, 34 on 16x8x4. Both sit
+near the 0.05 target after cycle 1. The native rows' initial residual is
+4e-4..2e-3 everywhere (25-100x under the target); only the band near the
+drop is above it.
+
+Knockout (scratch, env-gated, a44ed3aa + 1058cc0b, 16x8x4 drop=2):
+- Every per-cycle kernel walks compacted lists, built by one
+  single-workgroup pass a frame: level 2 pages and BULK16 slots with page
+  x < 8 (the 8x8x4 tank's half). Covered: pDownB, pDown2..4, pTail, pUp4,
+  pUp3, pBulkLift, pUpB, pNativeRelax, pResidual2 per cycle, and the Krylov
+  apply/bound/step.
+- Fixed grids, no indirect launch.
+- The kick, kStart, pDownB@0's bake and the final measure keep the full
+  lists. Inactive pages hold their pressure: their level 2 correction and
+  tail X/Y are zeroed, so they are Dirichlet data for the active half.
+- The first try kept stale state on the frozen half (the kick's
+  corrections) and diverged; zeroing fixed that.
+
+| 16x8x4 drop=2, one run each | median ms | under the kernel timer: median / arena solve kernels | cycles 40-60 (trace) | drift at 60 |
+| --- | --- | --- | --- | --- |
+| all pages (KO 999) | 20.62 | 20.36 / 6.00 | 34 | 1.9e-7 |
+| far half frozen (KO 8) | 21.14 | 20.87 / 5.04 | 24 | 9.0e-5 |
+| 8x8x4 (reference) | | 15.64 / 3.80 | 27 | |
+
+- The knockout removed 0.96 ms of arena kernel time (pUp4 0.69 -> 0.44,
+  pDown2 0.44 -> 0.27, pUp3 0.35 -> 0.23, pTail 0.78 -> 0.69: most at the
+  8x8x4 values) and 10 cycles of 34. The step did not get faster. So at
+  this size the arena's per-cycle kernels are not what sets the
+  pipelined frame time; the kernel timer's sum over-attributes the tank
+  gap to them.
+- It is also not correct as a rule. The drop raises the level across the
+  tank, so a frozen region's residual grows each frame (2.9e-6 -> 3e-3 in
+  60), and drift rose 90x. A per-row max under a fraction of the target is
+  the wrong certificate for a large still region. It would have to bound
+  the region's summed divergence and wake the region, so it would wake
+  often.
+- Not built: below the 0.3 ms bar on wall time, and it loses volume.
+- Open: the 8x8x4 -> 16x8x4 wall gap needs a wall-time attribution
+  (xctrace/gpu-frame-profile: CPU encode, the critical path), not
+  per-dispatch timer sums. The root projection (one 1.28 ms dispatch at
+  16x8x4, +0.55 over 8x8x4) is the one pressure kernel big enough to
+  matter. Its COLD faces compute the full row only for the freeze's
+  correction accumulate (Lane S's certificate), so trimming it is a change
+  to that protocol.
