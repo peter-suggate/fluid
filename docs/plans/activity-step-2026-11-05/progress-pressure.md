@@ -690,3 +690,82 @@ the fix).**
 **Symmetry test:** the step-6 reflected error is 0.0394 m. That is
 unchanged, as expected: a coordinate hash is not mirror-symmetric. The
 test and its bound were not changed.
+
+## Round 9 (2026-11-07): canonical seed budget, then the next source
+
+**Correction to round 8.**
+- det2 read only the first 1.5 × count + 1024 particle slots, with count
+  taken before the step's seeds. Seeds land past the sorted records in
+  append order, so the slots it saw held a launch-order-dependent subset
+  of them.
+- The step-9 "different deep cells" and the attribution to the seed-budget
+  clip were that artifact. Reading the whole bank, **HEAD against HEAD is
+  identical at step 9** on drop=2 (record multiset b8bb7807 in both runs;
+  only buffer order differs). The seed list itself (1083 entries) also
+  matches between runs.
+
+**Canonical seed budget (2a17b693).**
+- nbSeedAppend no longer refuses overlap reseeds in atomicAdd order. The
+  seed batch ranks the overlap candidates instead:
+  - seedRank@level counts candidates by a radix digit of the rank key: the
+    cell key XOR a frame mask, a bijection, so the deferred cells change
+    from frame to frame instead of always being the same.
+  - seedCut@level finds the digit where the count passes the room left.
+  - seed admits candidates below the cut key, then by site index inside
+    the cut cell.
+- Scratch is the seam list, which nothing holds during the seed batch.
+  narrowBandSeedRankShape sizes the digits to it (3 levels of 7-10 bits)
+  and throws when an address is too small.
+- Where every list entry's eight sites fit (state[1] + seeds + 8 × list
+  ≤ budget), the rank passes return at once.
+- Regression: tests/nbflip-seed-rank.test.ts (GPU).
+  - A shuffled seed list admits identical sites under a binding budget.
+  - Those sites are exactly the first `room` by (key, site), against a CPU
+    reference.
+  - None are admitted with no room, all when the budget does not bind.
+  - The frame mask moves the cut.
+- Cost: d2 14.47 ms against HEAD 14.37 ms the same morning (+0.10 ms,
+  load average 4-11). Without the idle bound it was 14.77 ms (+0.40 ms).
+- Gates were measured before the idle bound, with ranking every frame:
+  seep 300 30.03 ms, drift 2.8e-4; letters 120 52.06 ms, drift -0.0092.
+  Letters' window medians match rounds 6 and 8.
+
+**Reproducibility now (full-bank det2, two runs in one process).**
+
+| scene | first difference | what differs |
+| --- | --- | --- |
+| drop=2 | step 10 | before.xyz only (words 8-10, the swept FLIP delta); positions, velocities, pressure, density and phi identical |
+| drop=2 | step 11 | positions follow |
+| drop=2, flipDelta "extended" | step 9 | before.xyz again |
+| dam break | step 2 | records and extension states |
+
+**The next source: the velocity extension.** I compared, between runs,
+the extension's two slot arrays and the two old-payload halves (det3).
+- **drop=2, step 9:** 20 words of slot array 1 (final current states)
+  differ at about 1e-7 relative, for example -0.0127338199 against
+  -0.0127338180. The step-9 pressure and record multiset are identical,
+  so this is the first physics-value difference.
+- **drop=2, step 10:** it reaches before.xyz (ndFaceDelta: current minus
+  old payload), and positions follow at step 11.
+- **dam break, step 2:** about 190k slot-array-1 words and about 50k
+  old-payload words differ at ULP level.
+- **Bookkeeping words:** slot array 0 differs from step 8 on drop=2, but
+  only in small-integer words at stride 5 (flags, masks or list words).
+  Not attributed; possibly stale scratch.
+- **Inactive halves:** the old-payload companion lives in particle bank A
+  (extensionScratch). Its inactive half differs grossly between runs,
+  presumably because it holds records in append order while unused.
+  Not attributed.
+- **Mechanism: not yet isolated.**
+  - The sweeps read stateIn and write stateOut (Jacobi). The seed pass
+    writes both arrays without reading neighbours. No float atomics exist
+    in lib/methods/uniform.
+  - Candidates: the halo moves (ueHaloMove, an in-place copy between the
+    arrays in seed jobs), regional retain and dirty marking, and list-built
+    sweep jobs.
+- **Cost to find:** a per-dispatch readback of stateIn and stateOut through
+  the extension encode at drop step 9, about half a round. The cost to fix
+  depends on what that finds.
+- The extension is outside my files (uniform-mixed-extension.ts) and is
+  for routing. nbFinish's mid-pass atomicLoad was not reached as a cause:
+  records match through step 9.
