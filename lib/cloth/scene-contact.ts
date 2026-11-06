@@ -1,5 +1,6 @@
 import type { SceneDescription } from '../core/model';
 import type { ClothCollider } from './contact';
+import { clothStaticColliderRecords } from './gpu-contact';
 
 /** The analytic container boundary shared by wet and dry mechanical hosts. */
 export function clothContainerColliders(scene:SceneDescription):ClothCollider[]{
@@ -97,5 +98,7 @@ export function clothSceneStaticColliders(scene:SceneDescription):readonly Cloth
   if(!gradient){const epsilon=h*1e-4;gradient=[0,1,2].map(a=>{const left=[...p] as [number,number,number],right=[...p] as [number,number,number];left[a]-=epsilon;right[a]+=epsilon;return (distance(right)-distance(left))/(2*epsilon);});}
   const length=Math.hypot(...gradient);return {distance_m:value,normal:length>1e-12?gradient.map(v=>v/length) as unknown as ClothVector:[0,1,0]};
  }};
+ // The same records, for GPU detection (lib/cloth/gpu-contact.ts).
+ clothStaticColliderRecords.set(collider,{h,records,cuts:cuts.length});
  const result=[collider];staticColliders.set(scene,result);return result;
 }

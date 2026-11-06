@@ -12,6 +12,8 @@ import {clothContainerColliders, clothSceneStaticColliders} from '../lib/cloth/s
 import {composeClothFeatures} from '../lib/cloth/definition';
 import {withUniformDevice} from '../tests/helpers/uniform-geometric';
 import {sceneWithSolidStroke} from '../lib/core/solid-world';
+import {ClothContactSet} from '../lib/cloth/contact-constraints';
+import type {ClothStepOptions} from '../lib/cloth/dynamics';
 import '../lib/methods';
 
 const option = (key: string) => process.argv.find(v => v.startsWith(`--${key}=`))?.slice(key.length + 3);
@@ -31,18 +33,25 @@ const measure = async (device?: GPUDevice) => {
     sourceFields: scene.wetClothSource?.fields, excludedSourceColliderIndices: scene.wetClothSource?.bakedSolidFieldIndices,
     sourceOffset_m: scene.wetClothSource?.sourceOffset_m, nonlinearSolver: solver});
   if (device) await runtime.initializeGPU(device);
+  // --cpu-detect: GPU solve with the Float64 contact set detecting between solves.
+  const gpuSolver = (runtime as unknown as {gpu?: {contactDetection?: 'auto' | 'cpu'; detectContacts?: (state: unknown, dt: number, options: unknown) => Promise<{contacts: unknown[]; detect_ms: number; errors: number}>}}).gpu;
+  if (gpuSolver && process.argv.includes('--cpu-detect')) gpuSolver.contactDetection = 'cpu';
+  const detection: Record<string, number> = {}, fallbacks = new Set<string>(), refineStatus: Record<number, number> = {};
   const g = scene.fluid.gravity_m_s2, colliders = [...clothContainerColliders(scene), ...clothSceneStaticColliders(scene)];
-  const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number; solve: number; finish: number; contact: number; solves: number; submissions: number}[] = [];
+  const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number; solve: number; finish: number; contact: number; solves: number; submissions: number; outer: number}[] = [];
   for (let i = 0; i < steps; i++) {
     const t0 = performance.now();
     let report;
     try {
-      report = await runtime.stepAsync(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z], ...(option('iterations') ? {iterations: Number(option('iterations'))} : {})}) as {iterations: number; gpuIterations?: number; refinementIterations?: number; linearIterations?: number; solve_ms?: number; finish_ms?: number; contact_ms?: number; gpuSolves?: number; submissions?: number};
+      report = await runtime.stepAsync(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z], ...(option('iterations') ? {iterations: Number(option('iterations'))} : {})}) as {iterations: number; gpuIterations?: number; refinementIterations?: number; linearIterations?: number; solve_ms?: number; finish_ms?: number; contact_ms?: number; gpuSolves?: number; submissions?: number; contactIterations?: number; contactDetection?: string; contactFallback?: string; gpuStatus?: number};
     } catch (error) {
       console.log(JSON.stringify({id, failedAtStep: i, error: String(error).slice(0, 160)}));
       break;
     }
-    rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0, solve: report.solve_ms ?? NaN, finish: report.finish_ms ?? NaN, contact: report.contact_ms ?? NaN, solves: report.gpuSolves ?? NaN, submissions: report.submissions ?? NaN});
+    rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0, solve: report.solve_ms ?? NaN, finish: report.finish_ms ?? NaN, contact: report.contact_ms ?? NaN, solves: report.gpuSolves ?? NaN, submissions: report.submissions ?? NaN, outer: report.contactIterations ?? 0});
+    if (report.contactDetection) detection[report.contactDetection] = (detection[report.contactDetection] ?? 0) + 1;
+    if (report.contactFallback) fallbacks.add(report.contactFallback);
+    if (report.refinementIterations) refineStatus[report.gpuStatus ?? -1] = (refineStatus[report.gpuStatus ?? -1] ?? 0) + 1;
   }
   const mean = (f: (r: typeof rows[0]) => number, from = 0) => rows.slice(from).reduce((s, r) => s + f(r), 0) / Math.max(1, rows.length - from);
   const refined = rows.filter(r => r.cpu > 0);
@@ -62,6 +71,25 @@ const measure = async (device?: GPUDevice) => {
     refinedSteps: refined.length, meanRefinementIterations: +(refined.reduce((s, r) => s + r.cpu, 0) / Math.max(1, refined.length)).toFixed(1),
     meanRefinedStep_ms: +(refined.reduce((s, r) => s + r.ms, 0) / Math.max(1, refined.length)).toFixed(2),
     meanUnrefinedStep_ms: +(rows.filter(r => !r.cpu).reduce((s, r) => s + r.ms, 0) / Math.max(1, rows.length - refined.length)).toFixed(2),
+    meanContactIterations: +mean(r => r.outer).toFixed(2), detection, fallbacks: [...fallbacks], refinedByGpuStatus: refineStatus, ...await detectionCost(),
     simSecondsPerWallSecond: +(dt / (mean(r => r.ms, 5) / 1000)).toFixed(4)}));
+  // One GPU detection pass at the final state (the first detection of a step; each outer round repeats it).
+  async function detectionCost(): Promise<object> {
+    if (!gpuSolver?.detectContacts || gpuSolver.contactDetection === 'cpu' || !detection.gpu) return {};
+    const options = (runtime as unknown as {prepareStep(dt: number, c: unknown, o: unknown): unknown}).prepareStep(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z]}), times: number[] = [];
+    let keys: string[] = [], errors = 0;
+    for (let k = 0; k < 3; k++) {const r = await gpuSolver.detectContacts(runtime.state, dt, options); times.push(r.detect_ms); keys = (r.contacts as {key: string}[]).map(c => c.key); errors = r.errors;}
+    // The Float64 set's first detection at the same prediction, for parity.
+    const o = options as ClothStepOptions, state = runtime.state, top = runtime.prepared, x = state.positions_m.slice(), target = o.supportPositions_m ?? top.data.restPositions_m, gravity = o.gravity_m_s2 ?? [0, -9.81, 0];
+    for (let i = 0; i < top.vertexCount; i++) {
+      const mass = state.dryMass_kg[i]! + state.waterVolume_m3[i]!*top.materials[top.vertexMaterial[i]!]!.waterDensity_kg_m3;
+      for (let a = 0; a < 3; a++) {const k = 3*i + a; x[k] = (top.kinematicFixed[i] ?? 0) & 1 ? target[k]! : x[k]! + dt*state.velocities_m_s[k]! + dt*dt*(gravity[a]! + (o.externalForces_N?.[k] ?? 0)/mass);}
+    }
+    const t0 = performance.now(), reference = new ClothContactSet(top, state.positions_m.slice(), dt, o.colliders ?? [], o.selfCollision ?? false, o.tolerance_m ?? 1e-8);
+    reference.detect(x);
+    const cpuDetect_ms = performance.now() - t0, cpuKeys = new Set(reference.constraints.map(c => c.key)), gpuKeys = new Set(keys);
+    return {detect_ms: +times.sort((a, b) => a - b)[1]!.toFixed(2), cpuDetect_ms: +cpuDetect_ms.toFixed(1), detectedPairs: keys.length, detectErrors: errors,
+      onlyGpu: keys.filter(k => !cpuKeys.has(k)).slice(0, 8), onlyCpu: [...cpuKeys].filter(k => !gpuKeys.has(k)).slice(0, 8), cpuPairs: cpuKeys.size};
+  }
 };
 if (cpu) await measure(); else await withUniformDevice('wetcloth step cost', measure);

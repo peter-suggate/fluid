@@ -233,7 +233,7 @@ const restFaceAdjacency=new WeakMap<PreparedClothTopology,readonly number[][]>()
  * only its connected rest patch inside the feature's collision support. A
  * nearby disconnected layer remains a collision candidate. This is independent
  * of mesh spacing and never shrinks the authored physical thickness. */
-function connectedRestFaces(topology:PreparedClothTopology,seeds:readonly number[],radius:number,distance:(triangle:readonly ClothVector[])=>number):Set<number>{
+export function connectedRestFaces(topology:PreparedClothTopology,seeds:readonly number[],radius:number,distance:(triangle:readonly ClothVector[])=>number):Set<number>{
  let adjacency=restFaceAdjacency.get(topology);if(!adjacency){const rows:number[][]=Array.from({length:topology.triangles.length},()=>[]);for(const hinge of topology.hinges){rows[hinge.faces[0]]!.push(hinge.faces[1]);rows[hinge.faces[1]]!.push(hinge.faces[0]);}adjacency=rows;restFaceAdjacency.set(topology,rows);}
  const visited=new Set<number>(),local=new Set<number>(),pending=[...seeds];
  for(let cursor=0;cursor<pending.length;cursor++){const f=pending[cursor]!;if(visited.has(f))continue;visited.add(f);const face=topology.triangles[f]!,support=radius+.5*topology.materials[face.material]!.thickness_m;
@@ -241,7 +241,7 @@ function connectedRestFaces(topology:PreparedClothTopology,seeds:readonly number
   local.add(f);for(const neighbor of adjacency[f]!)if(!visited.has(neighbor))pending.push(neighbor);
  }return local;
 }
-function restSegmentTriangleDistance(a:ClothVector,b:ClothVector,triangle:readonly ClothVector[]):number{
+export function restSegmentTriangleDistance(a:ClothVector,b:ClothVector,triangle:readonly ClothVector[]):number{
  const [x,y,z]=triangle as readonly[ClothVector,ClothVector,ClothVector],normal=cross3(sub3(y,x),sub3(z,x)),da=dot3(sub3(a,x),normal),db=dot3(sub3(b,x),normal);
  if(da*db<=0&&Math.abs(da-db)>1e-30){const p=lerp3(a,b,da/(da-db));if(norm3(sub3(p,closestTrianglePoint(p,x,y,z).point))<1e-12)return 0;}
  let best=Math.min(norm3(sub3(a,closestTrianglePoint(a,x,y,z).point)),norm3(sub3(b,closestTrianglePoint(b,x,y,z).point)));

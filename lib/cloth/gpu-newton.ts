@@ -1,7 +1,9 @@
 import { beginClothMechanicalFinish, completeClothMechanicalFinish, extendClothStepReport, finishClothMechanicalStep, type ClothStepOptions, type ClothStepReport } from './dynamics';
-import { ClothContactSet, clothContactWarmStart, inSolveContactUnsupported, MAXIMUM_CONTACT_ITERATIONS, rememberClothContactMultipliers, type ClothContactConstraint } from './contact-constraints';
+import { ClothContactSet, clothContactWarmStart, FRICTION_SLIP_SPEED_M_S, inSolveContactUnsupported, MAXIMUM_CONTACT_ITERATIONS, rememberClothContactMultipliers, type ClothContactConstraint } from './contact-constraints';
 import { rodSegmentInertia_kg_m2 } from './material';
 import { solveClothIncrement } from './nonlinear-solve';
+import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_STIFFNESS, E_TABLE, SCAN_WG, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
+import type { ClothCollider, ClothContactReport } from './contact';
 import type { PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
 
@@ -44,8 +46,12 @@ import type { ClothState } from './types';
 
 const WG = 64;
 const ALPHAS = 8;
+// Armijo backtracking: LINE_PASSES gated passes of ALPHAS halvings each, the
+// Float64 solve's 40 (a pass runs only while no earlier step size was accepted).
+const LINE_PASSES = 5;
 // Control words (atomic u32).
-const C_MEASURE = 0, C_ACTIVE = 1, C_CGACTIVE = 2, C_CGCOUNT = 3, C_NEWTON = 4, C_STATUS = 5, C_STOPAFTER = 6, C_USEZ0 = 7, C_UNIT = 8, C_LAST = 9, C_LOG = 16, LOG_UNITS = 16, C_WORDS = C_LOG + 4 * LOG_UNITS;
+const C_MEASURE = 0, C_ACTIVE = 1, C_CGACTIVE = 2, C_CGCOUNT = 3, C_NEWTON = 4, C_STATUS = 5, C_STOPAFTER = 6, C_USEZ0 = 7, C_UNIT = 8, C_LAST = 9,
+  C_NEWTONMIN = 10, C_NEWTON_TOTAL = 11, C_LINEAR = 12, C_CGMAX = 13, C_SEARCH = 14, C_LOG = 16, LOG_UNITS = 16, C_WORDS = CONTACT_CONTROL_WORDS;
 const S_CONVERGED = 1, S_LINE = 2, S_NONFINITE = 4, S_CAP = 8, S_SINGULAR = 16;
 const KIND_TRI = 0, KIND_HINGE = 1, KIND_SEG = 2;
 
@@ -60,10 +66,15 @@ const PARAM_FIELDS = [
   'iCol', 'iBlockRow', 'iContribStart', 'iContrib', 'iVStart', 'iVList', 'iDiag', 'qiPairStart',
   'wX', 'wG', 'wR', 'wZ', 'wZ0', 'wP', 'wQ', 'wS',
   'wPre', 'wPart', 'wScal', 'qiVStart', 'eTri', 'eHinge', 'eSeg', 'eTriOld',
-  'eHingeOld', 'eSegOld', 'eA', 'qiVList', 'qVW', 'qiPairVertex', 'newtonMin', 'contacts',
-  'qC', 'qiC', 'qiCVStart', 'qiCVList', 'pContact', 'wK', 'pad0', 'pad1',
+  'eHingeOld', 'eSegOld', 'eA', 'qiVList', 'qVW', 'qiPairVertex', 'pContact', 'wK',
+  // Contacts (lib/cloth/gpu-contact.ts): mode 0 none, 1 GPU detection, 2 uploaded from the CPU set.
+  'contactMode', 'uploadedContacts', 'contactGroups', 'kMax', 'kuCV', 'kuMeta', 'kvStart', 'kvList',
+  'uBlocks', 'uEntry', 'uTabVal', 'aTable', 'aHeads', 'aCount', 'tableSlots', 'tableCur',
+  'prevValid', 'stiffnessValid', 'gridBuckets', 'gridEntries', 'kfFaceBox', 'kfEdgeBox', 'sVInfo', 'sRingStart',
+  'sRingList', 'sFrStart', 'sFrList', 'sLvStart', 'sLvList', 'sEdge', 'sE3Start', 'sE3List',
+  'sFaceR', 'sCollider', 'colliders', 'selfCollision', 'edges',
 ] as const;
-const FLOAT_FIELDS = ['dt', 'tolerance', 'contactDelta', 'frictionEpsilon'] as const;
+const FLOAT_FIELDS = ['dt', 'tolerance', 'contactDelta', 'frictionEpsilon', 'cellSize'] as const;
 type ParamName = typeof PARAM_FIELDS[number];
 
 export const clothNewtonWGSL = /* wgsl */ `
@@ -76,6 +87,9 @@ struct Params { ${PARAM_FIELDS.map(f => `${f}:u32`).join(', ')}, ${FLOAT_FIELDS.
 @group(0) @binding(5) var<storage,read> Q:array<f32>;
 @group(0) @binding(6) var<storage,read> QI:array<u32>;
 @group(0) @binding(7) var<uniform> p:Params;
+@group(0) @binding(8) var<storage,read_write> KF:array<vec4f>;
+@group(0) @binding(9) var<storage,read_write> KU:array<u32>;
+@group(0) @binding(10) var<storage,read_write> KA:array<atomic<u32>>;
 const EPS:f32=1.1920929e-7;
 var<workgroup> red:array<vec4f,${4 * WG}>;
 var<workgroup> flagWord:u32;
@@ -206,11 +220,10 @@ fn pairDelta(k:u32,useDir:bool)->vec3f{var d=vec3f(0);if(!useDir){d=vec3f(Q[4u*k
 // ---- contacts of lib/cloth/contact-constraints.ts: g = g0 + n.sum w u, slip =
 // P_t(sum w u) - P_t(obstacle), smoothed augmented-Lagrangian penalty of
 // m = lambda/rho - g and lagged smoothed friction mu lambda_f f0(|slip|).
-// Q[qC+16c..]=(n,g0),(P_t obstacle,lambda),(rho,mu lambda_f,0,0),(w0..w3);
-// QI[qiC+4c..] vertices; free vertices' lists QI[qiCVStart+i..] -> QI[qiCVList+k]=c<<2|j.
+// KF[4c..]=(n,g0),(P_t obstacle,lambda),(rho,lambda_f,mu,radius),(w0..w3);
+// KU[kuCV+4c..] vertices; free vertices' lists KU[kvStart+i..] -> KU[kvList+k]=c<<2|j.
 struct Contact{n:vec3f,g0:f32,t:vec3f,lambda:f32,rho:f32,mu:f32,w:vec4f,v:vec4u}
-fn q4(b:u32)->vec4f{return vec4f(Q[b],Q[b+1u],Q[b+2u],Q[b+3u]);}
-fn contactAt(c:u32)->Contact{let b=p.qC+16u*c;let a=q4(b);let t=q4(b+4u);let r=q4(b+8u);let j=p.qiC+4u*c;return Contact(a.xyz,a.w,t.xyz,t.w,r.x,r.y,q4(b+12u),vec4u(QI[j],QI[j+1u],QI[j+2u],QI[j+3u]));}
+fn contactAt(c:u32)->Contact{let a=KF[4u*c];let t=KF[4u*c+1u];let r=KF[4u*c+2u];let j=p.kuCV+4u*c;return Contact(a.xyz,a.w,t.xyz,t.w,r.x,r.z*r.y,KF[4u*c+3u],vec4u(KU[j],KU[j+1u],KU[j+2u],KU[j+3u]));}
 // sum_j w_j of increments (0), search direction (1) or CG direction (2).
 fn contactSum(c:Contact,which:u32)->vec3f{var s=vec3f(0);for(var j=0u;j<4u;j++){let w=c.w[j];if(w!=0.){let v=c.v[j];if(which==0u){s+=w*xv(v);}else if(which==1u){s+=w*dir(v);}else{s+=w*W[p.wP+v].xyz;}}}return s;}
 fn contactM(c:Contact,sx:vec3f)->f32{return c.lambda/c.rho-(c.g0+dot(c.n,sx));}
@@ -267,8 +280,8 @@ fn contactCoefficients(c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.m
    }
    // Coordinate stiffness without contact: sizes the penalties of new contacts.
    W[p.wK+i]=vec4f(diag,0);
-   if(p.contacts>0u){for(var k=QI[p.qiCVStart+i];k<QI[p.qiCVStart+i+1u];k++){
-    let e=QI[p.qiCVList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let sx=contactSum(c,0u);let m=contactM(c,sx);
+   if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
+    let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let sx=contactSum(c,0u);let m=contactM(c,sx);
     gr-=w*cForce(m,c.rho)*c.n;diag+=w*w*cCurv(m,c.rho)*c.n*c.n;
     if(c.mu>0.){let slip=tangent(c.n,sx)-c.t;let f=c.mu*fF1(length(slip));gr+=w*f*slip;diag+=w*w*f*(vec3f(1)-c.n*c.n);}
    }}
@@ -289,9 +302,9 @@ fn contactCoefficients(c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.m
  let measure=bitcast<f32>(atomicLoad(&C[${C_MEASURE}]));atomicStore(&C[${C_MEASURE}],0u);
  atomicStore(&C[${C_LAST}],bitcast<u32>(measure));if(unit<${LOG_UNITS}u){atomicStore(&C[${C_LOG}u+4u*unit],bitcast<u32>(measure));}
  var next=0u;
- if(measure<p.tolerance&&atomicLoad(&C[${C_NEWTON}])>=p.newtonMin){next=${S_CONVERGED}u;}else if(atomicLoad(&C[${C_NEWTON}])>=p.newtonCap){next=${S_CAP}u;}
+ if(measure<p.tolerance&&atomicLoad(&C[${C_NEWTON}])>=atomicLoad(&C[${C_NEWTONMIN}])){next=${S_CONVERGED}u;}else if(atomicLoad(&C[${C_NEWTON}])>=p.newtonCap){next=${S_CAP}u;}
  if(next!=0u){atomicOr(&C[${C_STATUS}],next);atomicStore(&C[${C_ACTIVE}],0u);atomicStore(&C[${C_CGACTIVE}],0u);return;}
- atomicAdd(&C[${C_NEWTON}],1u);atomicStore(&C[${C_ACTIVE}],1u);
+ atomicAdd(&C[${C_NEWTON}],1u);atomicAdd(&C[${C_NEWTON_TOTAL}],1u);atomicStore(&C[${C_ACTIVE}],1u);
  let gn2=sums[0].x;let previous=S(1u).y;var forcing=.1;if(previous>0.){forcing=min(.1,max(1e-6,sqrt(gn2/previous)));}
  W[p.wScal+1u]=vec4f(gn2,gn2,0,0);W[p.wScal+2u]=vec4f(0,forcing,0,0);
 }
@@ -330,8 +343,8 @@ fn contactCoefficients(c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.m
 // preconditioner only: the matvec gathers the whole contact term itself.
 fn contactBlock(i:u32)->mat3x3f{
  var M=mat3x3f(vec3f(0),vec3f(0),vec3f(0));
- if(p.contacts>0u){for(var k=QI[p.qiCVStart+i];k<QI[p.qiCVStart+i+1u];k++){
-  let e=QI[p.qiCVList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=contactCoefficients(c);let nn=outer(c.n,c.n);
+ if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
+  let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=contactCoefficients(c);let nn=outer(c.n,c.n);
   M+=w*w*(cf.x*nn+cf.y*(mat3x3f(vec3f(1,0,0),vec3f(0,1,0),vec3f(0,0,1))-nn));
  }}
  return M;
@@ -369,8 +382,8 @@ fn applyPre(i:u32,v:vec3f)->vec3f{return vec3f(dot(W[p.wPre+3u*i].xyz,v),dot(W[p
   var y=vec3f(0);
   if(!isFixed(i)){for(var b=I[p.iRow+i];b<I[p.iRow+i+1u];b++){let v=W[p.wP+I[p.iCol+b]].xyz;y+=vec3f(dot(E[p.eA+3u*b].xyz,v),dot(E[p.eA+3u*b+1u].xyz,v),dot(E[p.eA+3u*b+2u].xyz,v));}
    // Contacts couple vertices outside the block pattern: gathered matrix-free.
-   if(p.contacts>0u){for(var k=QI[p.qiCVStart+i];k<QI[p.qiCVStart+i+1u];k++){
-    let e=QI[p.qiCVList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=contactCoefficients(c);let s=contactSum(c,2u);let sn=dot(c.n,s);
+   if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
+    let e=KU[p.kvList+k];let c=contactAt(e>>2u);let w=c.w[e&3u];let cf=contactCoefficients(c);let s=contactSum(c,2u);let sn=dot(c.n,s);
     y+=w*(cf.x*sn*c.n+cf.y*(s-sn*c.n));
    }}
   }
@@ -413,13 +426,17 @@ fn applyPre(i:u32,v:vec3f)->vec3f{return vec3f(dot(W[p.wPre+3u*i].xyz,v),dot(W[p
  var s1=S(1u);s1.z=sums[0].x;
  // Roundoff in CG: the preconditioned gradient is always a descent direction.
  if(!(s1.z<0.)){atomicStore(&C[${C_USEZ0}],1u);s1.z=-S(2u).x;}
- W[p.wScal+1u]=s1;
- let unit=atomicLoad(&C[${C_UNIT}])-1u;if(unit<${LOG_UNITS}u){atomicStore(&C[${C_LOG}u+4u*unit+2u],atomicLoad(&C[${C_CGCOUNT}])|(atomicLoad(&C[${C_USEZ0}])<<31u));}
+ W[p.wScal+1u]=s1;atomicStore(&C[${C_SEARCH}],1u);
+ let cg=atomicLoad(&C[${C_CGCOUNT}]);atomicAdd(&C[${C_LINEAR}],cg);atomicMax(&C[${C_CGMAX}],cg);
+ let unit=atomicLoad(&C[${C_UNIT}])-1u;if(unit<${LOG_UNITS}u){atomicStore(&C[${C_LOG}u+4u*unit+2u],cg|(atomicLoad(&C[${C_USEZ0}])<<31u));}
 }
-fn alphaOf(k:u32)->f32{return exp2(-f32(k));}
+var<private> alphaBase:u32;
+// The search pass every thread agrees on (0: no search in progress); sets the pass's first halving.
+fn uniformSearch(l:u32)->bool{let stage=uniformWord(l,${C_SEARCH}u);alphaBase=${ALPHAS}u*(max(stage,1u)-1u);return stage!=0u;}
+fn alphaOf(k:u32)->f32{return exp2(-f32(k+alphaBase));}
 fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=vec4f(de[0],de[1],de[2],de[3]);red[${WG}u+l]=vec4f(de[4],de[5],de[6],de[7]);red[${2 * WG}u+l]=vec4f(noise[0],noise[1],noise[2],noise[3]);red[${3 * WG}u+l]=vec4f(noise[4],noise[5],noise[6],noise[7]);}
 @compute @workgroup_size(${WG}) fn lineTri(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(!uniformActive(l)){return;}
+ if(!uniformSearch(l)){return;}
  let t=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(t<p.triangles){
   let id=triIds(t);let s=triStrain(t,id,xv(id.x),xv(id.y),xv(id.z));let m=triMaterial(t,id);
@@ -435,7 +452,7 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  storeLine(l,de,noise);writePartial(p.pTri,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn lineHinge(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(!uniformActive(l)){return;}
+ if(!uniformSearch(l)){return;}
  let h=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(h<p.hinges){
   let id=hingeIds(h);let mm=hingeMaterial(h,id);let old=E[p.eHingeOld+h];
@@ -453,7 +470,7 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  storeLine(l,de,noise);writePartial(p.pHinge,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn lineSeg(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(!uniformActive(l)){return;}
+ if(!uniformSearch(l)){return;}
  let s=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(s<p.segments){
   let id=segIds(s);let oldLength=E[p.eSegOld+s].x;let mm=segMaterial(s,id,oldLength);let delta=xv(id.y)-xv(id.x);let q=segLength(id,delta,oldLength);let l0=oldLength+q.w;
@@ -467,7 +484,7 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  storeLine(l,de,noise);writePartial(p.pSeg,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn lineVertex(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(!uniformActive(l)){return;}
+ if(!uniformSearch(l)){return;}
  let i=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(i<p.n&&!isFixed(i)){
   let x=xv(i);let pr=pred(i);let at=attach(i);let d=dir(i);let dd=dot(d,d);let inertial=dot(x-pr.xyz,d);let spring=dot(x-at.xyz,d);
@@ -476,7 +493,7 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  storeLine(l,de,noise);writePartial(0u,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn linePair(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(!uniformActive(l)){return;}
+ if(!uniformSearch(l)){return;}
  let k0=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
  if(k0<p.pairs){
   let delta=pairDelta(k0,false);let d=pairDelta(k0,true);let length0=length(delta);let F=Q[4u*k0+3u];
@@ -485,61 +502,103 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  storeLine(l,de,noise);writePartial(p.pPair,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn lineContact(@builtin(global_invocation_id) g:vec3u,@builtin(local_invocation_index) l:u32,@builtin(workgroup_id) wg:vec3u){
- if(!uniformActive(l)){return;}
- let k0=g.x;var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
- if(k0<p.contacts){
+ if(!uniformSearch(l)){return;}
+ var de:array<f32,${ALPHAS}>;var noise:array<f32,${ALPHAS}>;
+ let count=min(contactCount(),p.kMax);
+ for(var k0=g.x;k0<count;k0+=p.contactGroups*${WG}u){
   let c=contactAt(k0);let sx=contactSum(c,0u);let sd=contactSum(c,1u);let m=contactM(c,sx);let dn=dot(c.n,sd);
   let slip=tangent(c.n,sx)-c.t;let td=tangent(c.n,sd);let y0=length(slip);
   for(var k=0u;k<${ALPHAS}u;k++){
    let a=alphaOf(k);var change=cPenChange(m,-a*dn,c.rho);
    if(c.mu>0.){let f=fF0Change(y0,length(slip+a*td),2.*a*dot(slip,td)+a*a*dot(td,td));change+=c.mu*f;}
-   de[k]=change.x;noise[k]=32.*EPS*change.y;
+   de[k]+=change.x;noise[k]+=32.*EPS*change.y;
   }
  }
  storeLine(l,de,noise);writePartial(p.pContact,wg.x,l,4u);
 }
 @compute @workgroup_size(${WG}) fn finishLine(@builtin(local_invocation_index) l:u32){
- if(!uniformActive(l)){return;}
+ if(!uniformSearch(l)){return;}
  var sums=sumPartials(l,0u,p.partTotal,4u);if(l!=0u){return;}
  let slope=S(1u).z;var chosen=0.;
  for(var k=0u;k<${ALPHAS}u;k++){
   let a=alphaOf(k);let change=sums[k/4u][k%4u];let noise=sums[2u+k/4u][k%4u];
   if(abs(change)<3e38&&change<=1e-4*a*slope+noise){chosen=a;break;}
  }
+ let stage=atomicLoad(&C[${C_SEARCH}]);
+ if(chosen==0.&&stage<${LINE_PASSES}u){atomicStore(&C[${C_SEARCH}],stage+1u);return;}
+ atomicStore(&C[${C_SEARCH}],0u);
  var s1=S(1u);s1.w=chosen;W[p.wScal+1u]=s1;
  let unit=atomicLoad(&C[${C_UNIT}])-1u;if(unit<${LOG_UNITS}u){atomicStore(&C[${C_LOG}u+4u*unit+1u],bitcast<u32>(chosen));}
  if(chosen==0.){atomicOr(&C[${C_STATUS}],${S_LINE}u);atomicStore(&C[${C_ACTIVE}],0u);}
 }
 @compute @workgroup_size(${WG}) fn apply(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i>=p.n||!isActive()){return;}W[p.wX+i]=vec4f(xv(i)+S(1u).w*dir(i),0);}
+${clothContactWGSL(WG, S_CONVERGED, {C_STATUS, C_NEWTON, C_ACTIVE, C_CGACTIVE, C_NEWTONMIN}, MAXIMUM_CONTACT_ITERATIONS)}
 `;
 
 const ENTRY_POINTS = ['prepTri', 'prepHinge', 'prepSeg', 'initX', 'elemTri', 'elemHinge', 'elemSeg', 'gradient', 'finishMeasure', 'assemble', 'cgInit', 'finishInit',
-  'cgMatvec', 'finishAlpha', 'cgUpdate', 'finishBeta', 'cgDirection', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply'] as const;
+  'cgMatvec', 'finishAlpha', 'cgUpdate', 'finishBeta', 'cgDirection', 'slope', 'finishSlope', 'lineTri', 'lineHinge', 'lineSeg', 'lineVertex', 'linePair', 'lineContact', 'finishLine', 'apply',
+  'tableClear', 'rememberMultipliers', 'roundBegin', 'detectBegin', 'updateMultipliers', 'relinearize', 'roundDecide', 'penalties',
+  'listCount', 'listScan1', 'listScan2', 'listScan3', 'listFill', 'listReset', 'gridClear', 'gridFaces', 'gridEdges', 'detectFaces', 'detectEdges', 'detectColliders'] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
 
 export interface GPUClothNewtonReport extends ClothStepReport {
   readonly newtonIterations: number;
   readonly linearIterations: number;
   readonly submissions: number;
-  /** Wall time of the GPU solve (upload, submissions, readbacks) and of the
-   * step's Float64 finish (contact, CPU refinement when needed). */
+  /** Wall time of the GPU solve (upload, submissions, readbacks; with GPU
+   * detection this includes every contact round) and of the step's Float64
+   * finish (CPU refinement when needed). */
   readonly solve_ms: number;
   readonly finish_ms: number;
-  /** CPU contact work between GPU solves: detection, multipliers, tangent planes. */
+  /** CPU contact work between GPU solves (CPU detection only). */
   readonly contact_ms: number;
   /** GPU solves this step: one, plus one per contact (outer) iteration. */
   readonly gpuSolves: number;
   readonly contactModel: 'in-solve' | 'post-projection';
   readonly contactIterations?: number;
+  /** Where in-solve contacts were detected, and why not on the GPU. */
+  readonly contactDetection: 'gpu' | 'cpu' | 'none';
+  readonly contactFallback?: string;
+  /** The last GPU solve's status bits (converged 1, line search 2, nonfinite 4, Newton cap 8, singular 16). */
+  readonly gpuStatus: number;
 }
 
+/** One constraint of the GPU contact set (tests and diagnostics). */
+export interface GPUClothContact {
+  readonly key: string; readonly vertices: readonly number[]; readonly weights: readonly number[];
+  readonly normal: readonly [number, number, number]; readonly lambda: number; readonly frictionLambda: number; readonly rho: number;
+}
+
+interface ContactLayout {
+  kMax: number; tableSlots: number; gridBuckets: number; gridEntries: number;
+  kuCV: number; kuMeta: number; kvStart: number; kvList: number; uBlocks: number; uEntry: number; uTabVal: number; kuWords: number;
+  aTable: number; aHeads: number; aCount: number; kaWords: number; kfFaceBox: number; kfEdgeBox: number; kfWords: number;
+}
+const pow2 = (x: number) => 2 ** Math.ceil(Math.log2(Math.max(1, x)));
+const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_NONFINITE, 'a nonfinite contact residual']];
+const describeErrors = (bits: number) => errorNames.filter(([b]) => bits & b).map(([, name]) => name).join(', ');
+const GROWABLE = E_CAPACITY | E_GRID | E_TABLE;
+type Pairs = NonNullable<ClothStepOptions['cohesionPairs']>;
+interface SolveResult {converged: boolean; status: number; measure: number; newton: number; linear: number; submissions: number; increments: Float32Array; control: Uint32Array<ArrayBuffer>}
+
 export class GPUClothNewton {
+  /** 'auto' detects on the GPU whenever the colliders allow it; 'cpu' keeps
+   * the Float64 ClothContactSet (uploaded each outer iteration). */
+  contactDetection: 'auto' | 'cpu' = 'auto';
+  /** Diagnostics: the last solve's control words. */
+  lastControl?: Uint32Array;
+  /** Per Newton iteration of the last solve (first 16): convergence measure, chosen step, CG iterations. */
+  lastIterations(): {measure: number; alpha: number; cg: number; preconditionedGradient: boolean}[] {
+    const c = this.lastControl; if (!c) return [];
+    const f = (w: number) => new Float32Array(Uint32Array.of(w).buffer)[0]!;
+    return Array.from({length: Math.min(c[C_UNIT]!, LOG_UNITS)}, (_, k) => ({measure: f(c[C_LOG + 4*k]!), alpha: f(c[C_LOG + 4*k + 1]!), cg: c[C_LOG + 4*k + 2]! & 0x7fffffff, preconditionedGradient: (c[C_LOG + 4*k + 2]! >>> 31) === 1}));
+  }
   private readonly buffers: GPUBuffer[] = [];
   private readonly n: number;
   private readonly blocks: number;
   private readonly offsets: Record<ParamName, number>;
   private readonly D: GPUBuffer;
-  private readonly I: GPUBuffer;
+  private I: GPUBuffer;
   private W: GPUBuffer;
   private readonly E: GPUBuffer;
   private readonly C: GPUBuffer;
@@ -551,9 +610,15 @@ export class GPUClothNewton {
   private stiffness?: Float64Array;
   private Q: GPUBuffer;
   private QI: GPUBuffer;
+  private KF: GPUBuffer;
+  private KU: GPUBuffer;
+  private KA: GPUBuffer;
+  /** Topology words; contact statics and packed colliders follow them in I. */
+  private readonly indexWords: Uint32Array<ArrayBuffer>;
+  private indexCapacity: number;
   private qCapacity = 0;
   private qiCapacity = 0;
-  private groupCapacity = 0;
+  private groupCapacity: number;
   private uploaded = -1;
   private pipelines?: Record<EntryPoint, GPUComputePipeline>;
   private layout?: GPUBindGroupLayout;
@@ -561,6 +626,20 @@ export class GPUClothNewton {
   private cgCap = 64;
   private readonly segmentRods: Int32Array;
   private readonly storageLimit: number;
+  /** Line-search partials and grid-stride width of the contact kernels. */
+  private readonly contactGroups = 256;
+  private contactLayout?: ContactLayout;
+  private contactStatic?: ClothContactStatic;
+  /** Fixed frame of the hi/lo split, so contact geometry and the key table
+   * persist across steps (set at the first step). */
+  private frame?: [number, number, number];
+  private staticWritten = false;
+  private colliderSignature?: string;
+  private colliderCount = 0;
+  private tableCur = 0;
+  private prevValid = false;
+  /** W's coordinate stiffness holds a gradient evaluation of this buffer. */
+  private stiffnessValid = false;
 
   constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology) {
     if (!gpuClothNewtonSupported(topology)) throw new Error('GPU cloth Newton supports shells and two-vertex rods only; rod joints need the coordinate solver');
@@ -617,19 +696,20 @@ export class GPUClothNewton {
     const wgV = Math.ceil(n / WG), pTri = wgV, pHinge = pTri + Math.ceil(T / WG), pSeg = pHinge + Math.ceil(H / WG), pPair = pSeg + Math.ceil(S / WG);
     const wX = 0, wG = n, wR = 2 * n, wZ = 3 * n, wZ0 = 4 * n, wP = 5 * n, wQ = 6 * n, wS = 7 * n, wPre = 8 * n, wK = 11 * n, wScal = 12 * n, wPart = wScal + 4;
     const eTri = 0, eHinge = 4 * T, eSeg = eHinge + 9 * H, eTriOld = eSeg + 2 * S, eHingeOld = eTriOld + 3 * T, eSegOld = eHingeOld + H, eA = eSegOld + S, eTotal = eA + 3 * blocks;
-    this.offsets = {
-      n, triangles: T, hinges: H, segments: S, pairs: 0, blocks, cgCap: 0, newtonCap: 0,
-      dVertex: 0, dMaterial, dTri, dHinge, dSeg, partTotal: 0, pTri, pHinge, pSeg, pPair, wgV, qW: 0,
-      iTri, iHinge, iSeg, iRow, iCol, iBlockRow, iContribStart, iContrib, iVStart, iVList, iDiag, qiPairStart: 0,
-      wX, wG, wR, wZ, wZ0, wP, wQ, wS, wPre, wPart, wScal, qiVStart: 0, eTri, eHinge, eSeg, eTriOld,
-      eHingeOld, eSegOld, eA, qiVList: 0, qVW: 0, qiPairVertex: 0, newtonMin: 0, contacts: 0,
-      qC: 0, qiC: 0, qiCVStart: 0, qiCVList: 0, pContact: 0, wK, pad0: 0, pad1: 0,
-    };
+    this.offsets = Object.fromEntries(PARAM_FIELDS.map(name => [name, 0])) as Record<ParamName, number>;
+    Object.assign(this.offsets, {
+      n, triangles: T, hinges: H, segments: S, blocks, dMaterial, dTri, dHinge, dSeg, pTri, pHinge, pSeg, pPair, wgV,
+      iTri, iHinge, iSeg, iRow, iCol, iBlockRow, iContribStart, iContrib, iVStart, iVList, iDiag,
+      wX, wG, wR, wZ, wZ0, wP, wQ, wS, wPre, wPart, wScal, wK, eTri, eHinge, eSeg, eTriOld, eHingeOld, eSegOld, eA,
+    });
+    if (device.limits.maxStorageBuffersPerShaderStage < 10) throw new Error(`GPU cloth Newton needs 10 storage buffers per stage; the device allows ${device.limits.maxStorageBuffersPerShaderStage}`);
     this.storageLimit = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    this.groupCapacity = this.contactGroups;
     this.D = this.make('Cloth Newton per-step and static data', staticD.byteLength, storage);
+    this.indexWords = indices; this.indexCapacity = indices.length;
     this.I = this.make('Cloth Newton topology and block pattern', indices.byteLength, storage);
-    this.W = this.make('Cloth Newton vectors and reductions', this.wBytes(0), storage);
+    this.W = this.make('Cloth Newton vectors and reductions', this.wBytes(this.groupCapacity), storage);
     this.E = this.make('Cloth Newton element states and Hessian blocks', 16 * eTotal, storage);
     this.C = this.make('Cloth Newton control', 4 * C_WORDS, storage);
     this.params = this.make('Cloth Newton parameters', 4 * (PARAM_FIELDS.length + FLOAT_FIELDS.length), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
@@ -638,6 +718,9 @@ export class GPUClothNewton {
     this.stiffnessRead = this.make('Cloth Newton coordinate stiffness readback', 16 * n, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     this.Q = this.make('Cloth Newton cohesion pairs', 16, storage);
     this.QI = this.make('Cloth Newton cohesion indices', 16, storage);
+    this.KF = this.make('Cloth contact floats', 16, storage);
+    this.KU = this.make('Cloth contact words', 16, storage);
+    this.KA = this.make('Cloth contact atomics', 16, storage);
     this.writeWords(this.I, indices);
     this.writeWords(this.D, staticD);
   }
@@ -662,7 +745,7 @@ export class GPUClothNewton {
     const module = this.device.createShaderModule({label: 'Cloth Newton-PCG', code: clothNewtonWGSL});
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === 'error');
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('\n'));
-    this.layout = this.device.createBindGroupLayout({label: 'Cloth Newton', entries: Array.from({length: 8}, (_, binding) => ({binding, visibility: GPUShaderStage.COMPUTE,
+    this.layout = this.device.createBindGroupLayout({label: 'Cloth Newton', entries: Array.from({length: 11}, (_, binding) => ({binding, visibility: GPUShaderStage.COMPUTE,
       buffer: {type: binding === 7 ? 'uniform' as const : [0, 1, 5, 6].includes(binding) ? 'read-only-storage' as const : 'storage' as const}}))});
     const layout = this.device.createPipelineLayout({bindGroupLayouts: [this.layout]});
     const pipelines = await Promise.all(ENTRY_POINTS.map(entryPoint => this.device.createComputePipelineAsync({label: `Cloth Newton ${entryPoint}`, layout, compute: {module, entryPoint}})));
@@ -670,11 +753,11 @@ export class GPUClothNewton {
     this.bind();
   }
   private bind(): void {
-    this.bindings = this.device.createBindGroup({label: 'Cloth Newton', layout: this.layout!, entries: [this.D, this.I, this.W, this.E, this.C, this.Q, this.QI, this.params].map((buffer, binding) => ({binding, resource: {buffer}}))});
+    this.bindings = this.device.createBindGroup({label: 'Cloth Newton', layout: this.layout!, entries: [this.D, this.I, this.W, this.E, this.C, this.Q, this.QI, this.params, this.KF, this.KU, this.KA].map((buffer, binding) => ({binding, resource: {buffer}}))});
   }
 
-  /** Cohesion pairs and contact constraints of this solve, packed in Q/QI. */
-  private uploadPairs(pairs: NonNullable<ClothStepOptions['cohesionPairs']>, old: Float64Array, contacts: readonly ClothContactConstraint[] = []): {qW: number; qVW: number; qiPairStart: number; qiPairVertex: number; qiVStart: number; qiVList: number; qC: number; qiC: number; qiCVStart: number; qiCVList: number} {
+  /** Cohesion pairs of this step, packed in Q/QI. */
+  private uploadPairs(pairs: Pairs, old: Float64Array): {qW: number; qVW: number; qiPairStart: number; qiPairVertex: number; qiVStart: number; qiVList: number} {
     const n = this.n, P = pairs.length, entries = pairs.reduce((s, pair) => s + pair.vertices.length, 0);
     // Each pair's distinct vertices with merged weights, then a vertex-major CSR.
     const pairVertex = new Uint32Array(entries), pairWeight = new Float64Array(entries), distinctStart = new Uint32Array(P + 1), perVertex = new Uint32Array(n + 1);
@@ -687,21 +770,12 @@ export class GPUClothNewton {
       distinctStart[k + 1] = distinct;
     });
     for (let i = 0; i < n; i++) perVertex[i + 1]! += perVertex[i]!;
-    const incidentCount = distinct, K = contacts.length;
-    // Contacts: 16 floats and 4 vertex words each, then their free vertices' lists.
-    const contactStart = new Uint32Array(n + 1);
-    for (const c of contacts) {
-      if (c.vertices.length > 4 || c.vertices.length !== c.weights.length) throw new Error(`Cloth contact ${c.key} has more than four vertices`);
-      for (const v of c.vertices) if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) contactStart[v + 1]!++;
-    }
-    for (let i = 0; i < n; i++) contactStart[i + 1]! += contactStart[i]!;
-    const contactEntries = contactStart[n]!;
-    if (K >= 1 << 30) throw new Error('GPU cloth Newton contact count exceeds 30 bits');
-    const qW = 4 * P, qVW = qW + entries, qC = qVW + incidentCount, qFloats = qC + 16 * K;
-    const qiPairStart = 0, qiPairVertex = P + 1, qiVStart = qiPairVertex + entries, qiVList = qiVStart + n + 1, qiC = qiVList + incidentCount, qiCVStart = qiC + 4 * K, qiCVList = qiCVStart + n + 1, qiWords = qiCVList + contactEntries;
-    const offsets = {qW, qVW, qiPairStart, qiPairVertex, qiVStart, qiVList, qC, qiC, qiCVStart, qiCVList};
+    const incidentCount = distinct;
+    const qW = 4 * P, qVW = qW + entries, qFloats = qVW + incidentCount;
+    const qiPairStart = 0, qiPairVertex = P + 1, qiVStart = qiPairVertex + entries, qiVList = qiVStart + n + 1, qiWords = qiVList + incidentCount;
+    const offsets = {qW, qVW, qiPairStart, qiPairVertex, qiVStart, qiVList};
     // An empty set over an already empty upload changes nothing on the GPU.
-    if (!P && !K && this.uploaded === 0) return offsets;
+    if (!P && this.uploaded === 0) return offsets;
     const q = new Float32Array(Math.max(4, qFloats)), qi = new Uint32Array(Math.max(4, qiWords));
     let at = 0;
     pairs.forEach((pair, k) => {
@@ -717,20 +791,6 @@ export class GPUClothNewton {
     qi.set(perVertex, qiVStart);
     const fill = perVertex.slice(0, n);
     for (let k = 0; k < P; k++) for (let d = distinctStart[k]!; d < distinctStart[k + 1]!; d++) {const v = pairVertex[d]!, slot = fill[v]!++; qi[qiVList + slot] = k; q[qVW + slot] = pairWeight[d]!;}
-    // g0 = n . sum w old - offset and P_t(obstacle) in Float64; increments in Float32 on the GPU.
-    qi.set(contactStart, qiCVStart);
-    const contactFill = contactStart.slice(0, n);
-    contacts.forEach((c, k) => {
-      const nn = c.normal, o = c.obstacle, on = o[0]*nn[0] + o[1]*nn[1] + o[2]*nn[2];
-      let g0 = -c.offset;
-      c.vertices.forEach((v, j) => {
-        g0 += c.weights[j]! * (nn[0]*old[3*v]! + nn[1]*old[3*v + 1]! + nn[2]*old[3*v + 2]!);
-        qi[qiC + 4*k + j] = v; q[qC + 16*k + 12 + j] = c.weights[j]!;
-        if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) qi[qiCVList + contactFill[v]!++] = k << 2 | j;
-      });
-      const mu = c.friction > 0 && c.frictionLambda > 0 ? c.friction * c.frictionLambda : 0;
-      q.set([nn[0], nn[1], nn[2], g0, o[0] - on*nn[0], o[1] - on*nn[1], o[2] - on*nn[2], c.lambda, c.rho, mu], qC + 16*k);
-    });
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
     // Pairs vary per step; their lists and partials grow geometrically.
     let rebind = false;
@@ -741,20 +801,93 @@ export class GPUClothNewton {
       this.QI = this.replace(this.QI, 'Cloth Newton cohesion indices', this.qiCapacity, storage);
       rebind = true;
     }
-    const varyingGroups = Math.ceil(P / WG) + Math.ceil(K / WG);
+    const varyingGroups = Math.ceil(P / WG) + this.contactGroups;
     if (varyingGroups > this.groupCapacity) {
       this.groupCapacity = Math.max(2 * this.groupCapacity, varyingGroups);
       this.W = this.replace(this.W, 'Cloth Newton vectors and reductions', this.wBytes(this.groupCapacity), storage | GPUBufferUsage.COPY_SRC);
+      this.stiffnessValid = false;
       rebind = true;
     }
     if (rebind) this.bind();
     this.writeWords(this.Q, q);
     this.writeWords(this.QI, qi);
-    this.uploaded = P + K;
+    this.uploaded = P;
     return offsets;
   }
 
-  private encodeUnit(pass: GPUComputePassEncoder, cgCap: number, pairs: number, contacts: number): void {
+  /** Contact buffers for kMax constraints (and the detection grid and key table). */
+  private ensureContactCapacity(kMax: number, gridEntries = 0, tableFactor = 2): ContactLayout {
+    const held = this.contactLayout, T = this.offsets.triangles, edges = this.contactStatic?.edges ?? 0, n = this.n;
+    if (held && held.kMax >= kMax && held.gridEntries >= gridEntries && held.tableSlots >= tableFactor * held.kMax && held.kfEdgeBox + 2 * edges <= held.kfWords) return held;
+    kMax = Math.max(kMax, held?.kMax ?? 0, 4096);
+    gridEntries = Math.max(gridEntries, held?.gridEntries ?? 0, 4 * (T + edges), 1024);
+    const tableSlots = Math.max(pow2(tableFactor * kMax), held?.tableSlots ?? 0), gridBuckets = pow2(Math.max(1024, T + edges));
+    const kuCV = 0, kuMeta = 4 * kMax, kvStart = 8 * kMax, kvList = kvStart + n + 1, uBlocks = kvList + 4 * kMax, uEntry = uBlocks + Math.ceil(n / SCAN_WG) + 1, uTabVal = uEntry + 2 * gridEntries, kuWords = uTabVal + 2 * tableSlots;
+    const aTable = 0, aHeads = 4 * tableSlots, aCount = aHeads + 2 * gridBuckets, kaWords = aCount + n;
+    const kfFaceBox = 4 * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfWords = kfEdgeBox + 2 * edges;
+    const layout = {kMax, tableSlots, gridBuckets, gridEntries, kuCV, kuMeta, kvStart, kvList, uBlocks, uEntry, uTabVal, kuWords, aTable, aHeads, aCount, kaWords, kfFaceBox, kfEdgeBox, kfWords};
+    const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    this.KF = this.replace(this.KF, 'Cloth contact floats', 16 * kfWords, storage);
+    this.KU = this.replace(this.KU, 'Cloth contact words', 4 * kuWords, storage);
+    this.KA = this.replace(this.KA, 'Cloth contact atomics', 4 * kaWords, storage);
+    // New buffers are zero: an empty key table and grid, zero list counts.
+    this.prevValid = false;
+    this.contactLayout = layout;
+    this.bind();
+    return layout;
+  }
+
+  /** Rest-mesh exclusions and the colliders in the fixed frame, after the
+   * topology words in I (the device allows ten storage buffers per stage). */
+  private uploadContactStatic(colliders: readonly ClothCollider[]): void {
+    const statics = this.contactStatic ??= clothContactStatic(this.topology);
+    const signature = colliders.map(c => c.kind === 'sampled' ? `sampled#${this.colliderId(c)}` : JSON.stringify(c)).join('|');
+    if (signature === this.colliderSignature) return;
+    const base = this.indexWords.length, packed = packClothColliders(colliders, this.frame!, base + statics.words.length), total = base + statics.words.length + packed.length;
+    if (total > this.indexCapacity) {
+      this.indexCapacity = Math.max(total, base + 2 * (this.indexCapacity - base));
+      this.I = this.replace(this.I, 'Cloth Newton topology, block pattern and contact statics', 4 * this.indexCapacity, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
+      this.writeWords(this.I, this.indexWords);
+      this.staticWritten = false;
+      this.bind();
+    }
+    if (!this.staticWritten) {this.writeWords(this.I, statics.words, base); this.staticWritten = true;}
+    if (packed.length) this.writeWords(this.I, packed, base + statics.words.length);
+    this.colliderSignature = signature;
+    this.colliderCount = colliders.length;
+  }
+  private readonly colliderIds = new WeakMap<object, number>();
+  private nextColliderId = 0;
+  private colliderId(c: object): number {let id = this.colliderIds.get(c); if (id === undefined) {id = this.nextColliderId++; this.colliderIds.set(c, id);} return id;}
+
+  /** The Float64 contact set of this solve in the KF/KU layout (CPU detection). */
+  private uploadContacts(contacts: readonly ClothContactConstraint[], old: Float64Array): void {
+    const n = this.n, K = contacts.length, layout = this.ensureContactCapacity(K);
+    const kf = new Float32Array(Math.max(4, 16 * K)), cv = new Uint32Array(Math.max(4, 4 * K)), start = new Uint32Array(n + 1);
+    for (const c of contacts) {
+      if (c.vertices.length > 4 || c.vertices.length !== c.weights.length) throw new Error(`Cloth contact ${c.key} has more than four vertices`);
+      for (const v of c.vertices) if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) start[v + 1]!++;
+    }
+    for (let i = 0; i < n; i++) start[i + 1]! += start[i]!;
+    const list = new Uint32Array(Math.max(4, start[n]!)), fill = start.slice(0, n);
+    // g0 = n . sum w old - offset and P_t(obstacle) in Float64; increments in Float32 on the GPU.
+    contacts.forEach((c, k) => {
+      const nn = c.normal, o = c.obstacle, on = o[0]*nn[0] + o[1]*nn[1] + o[2]*nn[2];
+      let g0 = -c.offset;
+      c.vertices.forEach((v, j) => {
+        g0 += c.weights[j]! * (nn[0]*old[3*v]! + nn[1]*old[3*v + 1]! + nn[2]*old[3*v + 2]!);
+        cv[4*k + j] = v; kf[16*k + 12 + j] = c.weights[j]!;
+        if (!((this.topology.kinematicFixed[v] ?? 0) & 1)) list[fill[v]!++] = k << 2 | j;
+      });
+      kf.set([nn[0], nn[1], nn[2], g0, o[0] - on*nn[0], o[1] - on*nn[1], o[2] - on*nn[2], c.lambda, c.rho, c.frictionLambda, c.friction, c.radius], 16*k);
+    });
+    this.writeWords(this.KF, kf, 0, 0, 16 * K);
+    this.writeWords(this.KU, cv, layout.kuCV, 0, 4 * K);
+    this.writeWords(this.KU, start, layout.kvStart);
+    this.writeWords(this.KU, list, layout.kvList, 0, start[n]!);
+  }
+
+  private encodeUnit(pass: GPUComputePassEncoder, cgCap: number, pairs: number): void {
     const o = this.offsets, n = this.n, groups = (count: number) => Math.ceil(count / WG);
     const run = (entry: EntryPoint, count: number) => {if (count > 0) {pass.setPipeline(this.pipelines![entry]); pass.dispatchWorkgroups(count);}};
     run('elemTri', groups(o.triangles)); run('elemHinge', groups(o.hinges)); run('elemSeg', groups(o.segments));
@@ -762,18 +895,48 @@ export class GPUClothNewton {
     run('assemble', groups(this.blocks)); run('cgInit', groups(n)); run('finishInit', 1);
     for (let k = 0; k < cgCap; k++) {run('cgMatvec', groups(n)); run('finishAlpha', 1); run('cgUpdate', groups(n)); run('finishBeta', 1); run('cgDirection', groups(n));}
     run('slope', groups(n)); run('finishSlope', 1);
-    run('lineTri', groups(o.triangles)); run('lineHinge', groups(o.hinges)); run('lineSeg', groups(o.segments)); run('lineVertex', groups(n)); run('linePair', groups(pairs)); run('lineContact', groups(contacts));
-    run('finishLine', 1); run('apply', groups(n));
+    for (let pass = 0; pass < LINE_PASSES; pass++) {
+      run('lineTri', groups(o.triangles)); run('lineHinge', groups(o.hinges)); run('lineSeg', groups(o.segments)); run('lineVertex', groups(n)); run('linePair', groups(pairs)); run('lineContact', this.contactGroups);
+      run('finishLine', 1);
+    }
+    run('apply', groups(n));
   }
+  private run(pass: GPUComputePassEncoder, entry: EntryPoint, count: number): void {if (count > 0) {pass.setPipeline(this.pipelines![entry]); pass.dispatchWorkgroups(count);}}
+  private strided(count: number): number {return Math.max(1, Math.min(4096, Math.ceil(count / WG)));}
+  /** Swept-primitive grid and narrowphase (each kernel gates on K_DETECT). */
+  private encodeDetection(pass: GPUComputePassEncoder): void {
+    const o = this.offsets, layout = this.contactLayout!, edges = this.contactStatic!.edges, groups = (count: number) => Math.ceil(count / WG), self = this.selfCollision;
+    if (self) {
+      this.run(pass, 'gridClear', this.strided(2 * layout.gridBuckets)); this.run(pass, 'gridFaces', groups(o.triangles)); this.run(pass, 'gridEdges', groups(edges));
+      this.run(pass, 'detectFaces', groups(this.n)); this.run(pass, 'detectEdges', groups(edges));
+    }
+    if (this.colliderCount) this.run(pass, 'detectColliders', this.strided(this.n * this.colliderCount));
+  }
+  /** Penalties of new pairs, friction lag, and the per-vertex lists when pairs were added. */
+  private encodeAfterDetection(pass: GPUComputePassEncoder): void {
+    const scanGroups = Math.ceil(this.n / SCAN_WG);
+    this.run(pass, 'penalties', this.contactGroups);
+    this.run(pass, 'listCount', this.contactGroups); this.run(pass, 'listScan1', scanGroups); this.run(pass, 'listScan2', 1); this.run(pass, 'listScan3', scanGroups);
+    this.run(pass, 'listFill', this.contactGroups); this.run(pass, 'listReset', Math.ceil(this.n / WG));
+  }
+  private encodeRound(pass: GPUComputePassEncoder): void {
+    this.run(pass, 'roundBegin', 1); this.run(pass, 'updateMultipliers', this.contactGroups); this.run(pass, 'relinearize', this.contactGroups);
+    this.encodeDetection(pass);
+    this.run(pass, 'roundDecide', 1);
+    this.encodeAfterDetection(pass);
+  }
+  private selfCollision = false;
 
-  async step(state: ClothState, dt: number, options: ClothStepOptions = {}): Promise<GPUClothNewtonReport> {
-    if (!this.pipelines || !this.bindings) throw new Error('Initialize GPU cloth Newton before stepping');
-    if (!(dt > 0 && Number.isFinite(dt))) throw new Error('Invalid cloth GPU timestep');
-    const started = performance.now(), topology = this.topology, n = this.n, old = state.positions_m.slice(), oldTwist = state.twist_rad.slice();
+  /** Predicted increments, attachment targets and the hi/lo old positions in the fixed frame. */
+  private uploadVertexBlock(state: ClothState, dt: number, options: ClothStepOptions): {old: Float64Array; predicted: Float64Array; vertex: Float32Array} {
+    const topology = this.topology, n = this.n, old = state.positions_m.slice();
     const gravity = options.gravity_m_s2 ?? [0, -9.81, 0], target = options.supportPositions_m ?? topology.data.restPositions_m;
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < old.length; i++) {const a = i % 3; if (old[i]! < lo[a]!) lo[a] = old[i]!; if (old[i]! > hi[a]!) hi[a] = old[i]!;}
-    const origin = lo.map((v, a) => (v + hi[a]!) / 2), vertex = new Float32Array(16 * n), predicted = new Float64Array(3 * n);
+    if (!this.frame) {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < old.length; i++) {const a = i % 3; if (old[i]! < lo[a]!) lo[a] = old[i]!; if (old[i]! > hi[a]!) hi[a] = old[i]!;}
+      this.frame = lo.map((v, a) => Math.fround((v + hi[a]!) / 2)) as [number, number, number];
+    }
+    const origin = this.frame, vertex = new Float32Array(16 * n), predicted = new Float64Array(3 * n);
     for (let i = 0; i < n; i++) {
       const mass = state.dryMass_kg[i]! + state.waterVolume_m3[i]! * topology.materials[topology.vertexMaterial[i]!]!.waterDensity_kg_m3, fixed = (topology.kinematicFixed[i] ?? 0) & 1;
       if (!(mass > 0 && Number.isFinite(mass))) throw new Error(`Invalid cloth vertex mass ${i}`);
@@ -786,45 +949,115 @@ export class GPUClothNewton {
       vertex[o + 3] = mass / (dt * dt); vertex[o + 7] = topology.attachmentTranslation_N_m[i]!; vertex[o + 11] = fixed; vertex[o + 15] = state.solidFraction[i]!;
     }
     this.writeWords(this.D, vertex);
+    return {old, predicted, vertex};
+  }
+  private writeParams(values: Record<string, number>): void {
+    const words = new ArrayBuffer(4 * (PARAM_FIELDS.length + FLOAT_FIELDS.length)), u = new Uint32Array(words), f = new Float32Array(words);
+    PARAM_FIELDS.forEach((name, k) => {u[k] = values[name] ?? 0;});
+    FLOAT_FIELDS.forEach((name, k) => {f[PARAM_FIELDS.length + k] = values[name] ?? 0;});
+    this.device.queue.writeBuffer(this.params, 0, words);
+  }
+  private contactParams(): Record<string, number> {
+    const layout = this.contactLayout, statics = this.contactStatic;
+    if (!layout) return {};
+    const base = this.indexWords.length, shifted = statics ? Object.fromEntries(Object.entries(statics.offsets).map(([k, v]) => [k, base + v])) : {};
+    return {...layout, ...(statics ? {...shifted, edges: statics.edges, cellSize: statics.cellSize, sCollider: base + statics.words.length} : {}), tableCur: this.tableCur, prevValid: this.prevValid ? 1 : 0, stiffnessValid: this.stiffnessValid ? 1 : 0};
+  }
+  private async readControl(): Promise<Uint32Array<ArrayBuffer>> {
+    await this.statusRead.mapAsync(GPUMapMode.READ);
+    const control = new Uint32Array(this.statusRead.getMappedRange().slice(0));
+    this.statusRead.unmap();
+    return control;
+  }
+  private adaptCG(control: Uint32Array): void {
+    // Adapt the encoded CG depth to what the last solve used (inexact Newton
+    // remains a descent method when the depth truncates CG).
+    const cgUsed = control[C_CGMAX]!;
+    this.cgCap = cgUsed >= this.cgCap ? Math.min(2048, 2 * this.cgCap) : Math.max(16, Math.min(this.cgCap, 8 * Math.ceil(1.5 * cgUsed / 8)));
+  }
+  private async readIncrements(): Promise<Float32Array> {
+    await this.positionRead.mapAsync(GPUMapMode.READ);
+    const increments = new Float32Array(this.positionRead.getMappedRange().slice(0));
+    this.positionRead.unmap();
+    return increments;
+  }
+
+  async step(state: ClothState, dt: number, options: ClothStepOptions = {}): Promise<GPUClothNewtonReport> {
+    if (!this.pipelines || !this.bindings) throw new Error('Initialize GPU cloth Newton before stepping');
+    if (!(dt > 0 && Number.isFinite(dt))) throw new Error('Invalid cloth GPU timestep');
+    const started = performance.now(), topology = this.topology, n = this.n, oldTwist = state.twist_rad.slice();
+    const {old, predicted, vertex} = this.uploadVertexBlock(state, dt, options);
+    const target = options.supportPositions_m ?? topology.data.restPositions_m;
     const pairs = options.cohesionPairs ?? [], newtonCap = options.iterations ?? 64, tolerance = options.tolerance_m ?? 1e-8;
     if (!Number.isInteger(newtonCap) || newtonCap < 1) throw new Error('Cloth iterations must be a positive integer');
-    // Contact inside the minimization, as the CPU solve: detected contacts are
-    // augmented-Lagrangian terms of the GPU potential, and the multipliers,
-    // collider tangent planes and detection update in Float64 between solves.
     const colliders = options.colliders ?? [], selfCollision = options.selfCollision ?? false;
-    const contactSet = (colliders.length || selfCollision) && !inSolveContactUnsupported(topology, colliders) ? new ClothContactSet(topology, old, dt, colliders, selfCollision, tolerance, clothContactWarmStart(state)) : undefined;
+    // Contact inside the minimization, as the CPU solve. GPU detection keeps
+    // the outer iterations on the GPU; otherwise the Float64 set detects, and
+    // its multipliers, tangent planes and detection update between GPU solves.
+    const inSolve = (colliders.length > 0 || selfCollision) && !inSolveContactUnsupported(topology, colliders);
+    let fallback = inSolve ? (this.contactDetection === 'cpu' ? 'CPU detection requested' : gpuContactUnsupported(topology, colliders)) : undefined;
     const x = predicted.slice();
-    let contact_ms = 0;
-    if (contactSet) {
-      const begun = performance.now();
-      for (let i = 0; i < n; i++) if ((topology.kinematicFixed[i] ?? 0) & 1) for (let a = 0; a < 3; a++) x[3 * i + a] = target[3 * i + a]!;
-      if (contactSet.detect(x)) contactSet.assignPenalties(this.stiffness ?? this.inertialStiffness(vertex));
-      contact_ms += performance.now() - begun;
-    }
-    let solve = await this.solveOnce(pairs, old, contactSet?.constraints ?? [], {first: true, newtonMin: 0, newtonCap, tolerance, dt, readStiffness: !!contactSet, frictionEpsilon: contactSet?.epsilon ?? 0});
-    let {newton, linear, submissions} = solve, solves = 1;
     const positions = (increments: Float32Array) => {for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) x[3 * i + a] = old[3 * i + a]! + increments[4 * i + a]!;};
-    positions(solve.increments);
-    let outer = 0, contactResidual = 0, previous = Infinity;
-    if (contactSet && solve.converged) for (;; outer++) {
-      const begun = performance.now();
-      const {kkt_m, friction_m} = contactSet.updateMultipliers(x), penetration = contactSet.relinearize(x), added = contactSet.detect(x);
-      contactResidual = Math.max(kkt_m, friction_m, penetration);
-      const done = (!added && contactResidual < tolerance) || outer >= MAXIMUM_CONTACT_ITERATIONS;
-      if (!done) {
-        contactSet.assignPenalties(this.stiffness!);
-        if (!added && contactResidual > .25 * previous) contactSet.stiffen(x, tolerance);
-        previous = contactResidual;
-        contactSet.lagFriction();
+    let solve: SolveResult | undefined, contact_ms = 0, solves = 1, outer = 0, contactResidual = 0, contactReport: ClothContactReport | undefined;
+    let newton = 0, linear = 0, submissions = 0;
+    if (inSolve && !fallback) {
+      const frictionEpsilon = FRICTION_SLIP_SPEED_M_S * dt;
+      for (let attempt = 0; ; attempt++) {
+        solve = await this.solveWithGPUContact(pairs, old, {newtonCap, tolerance, dt, frictionEpsilon, colliders, selfCollision});
+        newton += solve.newton; linear += solve.linear; submissions += solve.submissions;
+        const errors = solve.control[CONTACT_CONTROL.K_ERROR]!;
+        if (!errors) break;
+        if (errors & ~GROWABLE || attempt >= 3) {fallback = `GPU detection: ${describeErrors(errors)}`; solve = undefined; break;}
+        // Too small for this contact set: grow from what the GPU counted, and redo the step.
+        const c = solve.control, layout = this.contactLayout!;
+        this.ensureContactCapacity(errors & E_CAPACITY ? pow2(1.5 * Math.max(c[CONTACT_CONTROL.K_COUNT]!, 2 * layout.kMax)) : layout.kMax,
+          errors & E_GRID ? pow2(1.5 * Math.max(c[CONTACT_CONTROL.K_ENTRIES]!, 2 * layout.gridEntries)) : layout.gridEntries, errors & E_TABLE ? 4 : 2);
       }
-      contact_ms += performance.now() - begun;
-      if (done) break;
-      solve = await this.solveOnce(pairs, old, contactSet.constraints, {first: false, newtonMin: 1, newtonCap, tolerance, dt, readStiffness: true, frictionEpsilon: contactSet.epsilon});
-      newton += solve.newton; linear += solve.linear; submissions += solve.submissions; solves++;
-      positions(solve.increments);
-      if (!solve.converged) break;
+      if (solve) {
+        positions(solve.increments);
+        const c = solve.control, f = (word: number) => new Float32Array(Uint32Array.of(c[word]!).buffer)[0]!;
+        outer = c[CONTACT_CONTROL.K_OUTER]!; solves = 1 + c[CONTACT_CONTROL.K_SOLVES]!; contactResidual = f(CONTACT_CONTROL.K_RESID);
+        contactReport = {iterations: outer + 1, residual_m: contactResidual, contacts: c[CONTACT_CONTROL.K_CONTACTS]!, selfContacts: c[CONTACT_CONTROL.K_SELF]!, maximumPenetration_m: f(CONTACT_CONTROL.K_REPPEN), reactions: []};
+        solve = {...solve, converged: solve.converged && c[CONTACT_CONTROL.K_DONE]! !== 0 && contactResidual < tolerance};
+      }
     }
-    const converged = solve.converged && (!contactSet || contactResidual < tolerance), solved = performance.now(), solve_ms = solved - started - contact_ms;
+    const contactSet = inSolve && fallback ? new ClothContactSet(topology, old, dt, colliders, selfCollision, tolerance, clothContactWarmStart(state)) : undefined;
+    if (!solve) {
+      if (contactSet) {
+        const begun = performance.now();
+        for (let i = 0; i < n; i++) if ((topology.kinematicFixed[i] ?? 0) & 1) for (let a = 0; a < 3; a++) x[3 * i + a] = target[3 * i + a]!;
+        if (contactSet.detect(x)) contactSet.assignPenalties(this.stiffness ?? this.inertialStiffness(vertex));
+        contact_ms += performance.now() - begun;
+      }
+      solve = await this.solveOnce(pairs, old, contactSet?.constraints, {first: true, newtonMin: 0, newtonCap, tolerance, dt, readStiffness: !!contactSet, frictionEpsilon: contactSet?.epsilon ?? 0});
+      newton += solve.newton; linear += solve.linear; submissions += solve.submissions;
+      positions(solve.increments);
+      let previous = Infinity;
+      if (contactSet && solve.converged) for (;; outer++) {
+        const begun = performance.now();
+        const {kkt_m, friction_m} = contactSet.updateMultipliers(x), penetration = contactSet.relinearize(x), added = contactSet.detect(x);
+        contactResidual = Math.max(kkt_m, friction_m, penetration);
+        const done = (!added && contactResidual < tolerance) || outer >= MAXIMUM_CONTACT_ITERATIONS;
+        if (!done) {
+          contactSet.assignPenalties(this.stiffness!);
+          if (!added && contactResidual > .25 * previous) contactSet.stiffen(x, tolerance);
+          previous = contactResidual;
+          contactSet.lagFriction();
+        }
+        contact_ms += performance.now() - begun;
+        if (done) break;
+        solve = await this.solveOnce(pairs, old, contactSet.constraints, {first: false, newtonMin: 1, newtonCap, tolerance, dt, readStiffness: true, frictionEpsilon: contactSet.epsilon});
+        newton += solve.newton; linear += solve.linear; submissions += solve.submissions; solves++;
+        positions(solve.increments);
+        if (!solve.converged) break;
+      }
+      if (contactSet) {
+        solve = {...solve, converged: solve.converged && contactResidual < tolerance};
+        if (solve.converged) contactReport = contactSet.report(x, outer + 1, contactResidual);
+      }
+    }
+    this.stiffnessValid = true; this.lastControl = solve.control;
+    const converged = solve.converged, solved = performance.now(), solve_ms = solved - started - contact_ms;
     state.positions_m.set(x);
     // Jointless rod twist couples to nothing but its inertia and attachment.
     for (let s = 0; s < state.twist_rad.length; s++) {
@@ -833,7 +1066,8 @@ export class GPUClothNewton {
       const inertia = rodSegmentInertia_kg_m2(topology, state, r, j) / (dt * dt), spring = topology.attachmentTwist_N_m[s]!;
       state.twist_rad[s] = (inertia * (oldTwist[s]! + dt * state.angularVelocity_rad_s[s]!) + spring * state.attachmentTwistTarget_rad[s]!) / (inertia + spring);
     }
-    const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms};
+    const contactDetection = !inSolve ? 'none' as const : fallback ? 'cpu' as const : 'gpu' as const;
+    const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms, contactDetection, gpuStatus: solve.status, ...(fallback && inSolve ? {contactFallback: fallback} : {})};
     if (!converged) {
       // Float32 stalled (line search, cap), broke, or the contact iterations
       // did not settle: the Float64 Newton solve (with its own in-solve
@@ -844,13 +1078,13 @@ export class GPUClothNewton {
       const refined = solveClothIncrement(topology, state, dt, options, initialGuess);
       return extendClothStepReport(refined, {...extra, iterations: newton + refined.iterations, gpuIterations: newton, refinementIterations: refined.iterations, newtonIterations: newton + refined.newtonIterations, linearIterations: linear + refined.linearIterations, finish_ms: performance.now() - solved});
     }
-    if (!contactSet) {
+    if (!inSolve) {
       const finished = finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, {iterations: newton, converged, maximumUpdate_m: solve.measure});
       return extendClothStepReport(finished, {...extra, gpuIterations: newton, refinementIterations: 0, newtonIterations: newton, linearIterations: linear, contactModel: 'post-projection' as const, finish_ms: performance.now() - solved});
     }
-    rememberClothContactMultipliers(state, contactSet);
+    if (contactSet) rememberClothContactMultipliers(state, contactSet);
     const cohesionReactions = beginClothMechanicalFinish(state, old, oldTwist, dt, options);
-    const finished = completeClothMechanicalFinish(topology, state, old, oldTwist, dt, options, {iterations: newton, converged, maximumUpdate_m: Math.max(solve.measure, contactResidual)}, cohesionReactions, contactSet.report(x, outer + 1, contactResidual));
+    const finished = completeClothMechanicalFinish(topology, state, old, oldTwist, dt, options, {iterations: newton, converged, maximumUpdate_m: Math.max(solve.measure, contactResidual)}, cohesionReactions, contactReport!);
     return extendClothStepReport(finished, {...extra, gpuIterations: newton, refinementIterations: 0, newtonIterations: newton, linearIterations: linear, contactModel: 'in-solve' as const, contactIterations: outer + 1, finish_ms: performance.now() - solved});
   }
 
@@ -862,51 +1096,99 @@ export class GPUClothNewton {
     return k;
   }
 
-  /** One GPU Newton-PCG solve of the current potential. The first solve of a
-   * step starts from the prediction; later ones resume from the GPU iterate
-   * after a contact update and take at least newtonMin steps. */
-  private async solveOnce(pairs: NonNullable<ClothStepOptions['cohesionPairs']>, old: Float64Array, contacts: readonly ClothContactConstraint[],
-    settings: {first: boolean; newtonMin: number; newtonCap: number; tolerance: number; dt: number; readStiffness: boolean; frictionEpsilon: number}): Promise<{converged: boolean; status: number; measure: number; newton: number; linear: number; submissions: number; increments: Float32Array}> {
-    const n = this.n, o = this.offsets, pairOffsets = this.uploadPairs(pairs, old, contacts);
-    const pairGroups = Math.ceil(pairs.length / WG), contactGroups = Math.ceil(contacts.length / WG);
-    const values: Record<string, number> = {...this.offsets, ...pairOffsets, pairs: pairs.length, contacts: contacts.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + contactGroups,
-      cgCap: this.cgCap, newtonCap: settings.newtonCap, newtonMin: settings.newtonMin, dt: settings.dt, tolerance: settings.tolerance, contactDelta: settings.tolerance, frictionEpsilon: settings.frictionEpsilon};
-    const words = new ArrayBuffer(4 * (PARAM_FIELDS.length + FLOAT_FIELDS.length)), u = new Uint32Array(words), f = new Float32Array(words);
-    PARAM_FIELDS.forEach((name, k) => {u[k] = values[name] ?? 0;});
-    FLOAT_FIELDS.forEach((name, k) => {f[PARAM_FIELDS.length + k] = values[name] ?? 0;});
-    this.device.queue.writeBuffer(this.params, 0, words);
+  private prepareGPUContact(colliders: readonly ClothCollider[], selfCollision: boolean): void {
+    this.contactStatic ??= clothContactStatic(this.topology);
+    this.ensureContactCapacity(Math.max(4096, 2 * this.n));
+    this.uploadContactStatic(colliders);
+    this.selfCollision = selfCollision;
+  }
+
+  /** The whole step with GPU detection: the first detection at the
+   * prediction, then inner solves and outer rounds (multipliers, tangent
+   * planes, re-detection, penalties) in the same submissions until the
+   * contact residual settles. Reads back the control words only, then the
+   * increments once. */
+  private async solveWithGPUContact(pairs: Pairs, old: Float64Array, settings: {newtonCap: number; tolerance: number; dt: number; frictionEpsilon: number; colliders: readonly ClothCollider[]; selfCollision: boolean}): Promise<SolveResult> {
+    const n = this.n, o = this.offsets, pairOffsets = this.uploadPairs(pairs, old);
+    this.prepareGPUContact(settings.colliders, settings.selfCollision);
+    const layout = this.contactLayout!, pairGroups = Math.ceil(pairs.length / WG);
+    this.writeParams({...this.offsets, ...pairOffsets, ...this.contactParams(), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.contactGroups,
+      cgCap: this.cgCap, newtonCap: settings.newtonCap, dt: settings.dt, tolerance: settings.tolerance, contactDelta: settings.tolerance, frictionEpsilon: settings.frictionEpsilon,
+      contactMode: 1, contactGroups: this.contactGroups, colliders: this.colliderCount, selfCollision: settings.selfCollision ? 1 : 0});
+    this.device.queue.writeBuffer(this.W, 16 * o.wScal, new Float32Array(16));
+    const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = 2;
+    let submissions = 0, control = new Uint32Array(C_WORDS);
+    const K = CONTACT_CONTROL;
+    for (;;) {
+      const encoder = this.device.createCommandEncoder({label: 'Cloth Newton-PCG with GPU contact'});
+      if (!submissions) {encoder.clearBuffer(this.C); encoder.clearBuffer(this.KU, 4 * layout.kvStart, 4 * (n + 1));}
+      const pass = encoder.beginComputePass({label: 'Cloth Newton iterations and contact rounds'});
+      pass.setBindGroup(0, this.bindings!);
+      for (let k = 0; k < unitsPerSubmission; k++) {
+        if (!submissions && !k) {
+          for (const [entry, count] of [['initX', n], ['prepTri', o.triangles], ['prepHinge', o.hinges], ['prepSeg', o.segments]] as const) this.run(pass, entry, groups(count));
+          this.run(pass, 'detectBegin', 1); this.run(pass, 'tableClear', this.strided(2 * layout.tableSlots));
+          this.encodeDetection(pass); this.encodeAfterDetection(pass);
+        } else this.encodeRound(pass);
+        this.encodeUnit(pass, this.cgCap, pairs.length);
+      }
+      pass.end();
+      encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
+      this.device.queue.submit([encoder.finish()]);
+      submissions++;
+      control = await this.readControl();
+      const status = control[C_STATUS]!;
+      if (control[K.K_ERROR] || control[K.K_DONE] || (status && status !== S_CONVERGED)) break;
+    }
+    const success = control[K.K_DONE] !== 0 && !control[K.K_ERROR] && control[C_STATUS] === S_CONVERGED;
+    const encoder = this.device.createCommandEncoder({label: 'Cloth Newton result'});
+    if (success) {const pass = encoder.beginComputePass(); pass.setBindGroup(0, this.bindings!); this.run(pass, 'rememberMultipliers', this.contactGroups); pass.end();}
+    encoder.copyBufferToBuffer(this.W, 16 * o.wX, this.positionRead, 0, 16 * n);
+    this.device.queue.submit([encoder.finish()]);
+    const increments = await this.readIncrements();
+    // The table now holds this step's multipliers; the next step reads it as the previous one.
+    if (success) {this.tableCur = 1 - this.tableCur; this.prevValid = true;} else this.prevValid = false;
+    this.adaptCG(control);
+    const measure = new Float32Array(Uint32Array.of(control[C_LAST]!).buffer)[0]!;
+    return {converged: success, status: control[C_STATUS]!, measure, newton: control[C_NEWTON_TOTAL]!, linear: control[C_LINEAR]!, submissions: submissions + 1, increments, control};
+  }
+
+  /** One GPU Newton-PCG solve of the current potential (no contact, or the
+   * CPU-detected set). The first solve of a step starts from the prediction;
+   * later ones resume from the GPU iterate after a contact update and take at
+   * least newtonMin steps. */
+  private async solveOnce(pairs: Pairs, old: Float64Array, contacts: readonly ClothContactConstraint[] | undefined,
+    settings: {first: boolean; newtonMin: number; newtonCap: number; tolerance: number; dt: number; readStiffness: boolean; frictionEpsilon: number}): Promise<SolveResult> {
+    const n = this.n, o = this.offsets, pairOffsets = this.uploadPairs(pairs, old);
+    if (contacts) this.uploadContacts(contacts, old);
+    const pairGroups = Math.ceil(pairs.length / WG);
+    this.writeParams({...this.offsets, ...pairOffsets, ...(contacts ? this.contactParams() : {}), pairs: pairs.length, pContact: o.pPair + pairGroups, partTotal: o.pPair + pairGroups + this.contactGroups,
+      cgCap: this.cgCap, newtonCap: settings.newtonCap, dt: settings.dt, tolerance: settings.tolerance, contactDelta: settings.tolerance, frictionEpsilon: settings.frictionEpsilon,
+      contactMode: contacts ? 2 : 0, uploadedContacts: contacts?.length ?? 0, contactGroups: this.contactGroups});
     this.device.queue.writeBuffer(this.W, 16 * o.wScal, new Float32Array(16));
     const groups = (count: number) => Math.ceil(count / WG), unitsPerSubmission = 2;
     let submissions = 0, status = 0, control = new Uint32Array(C_WORDS);
     while (true) {
       const encoder = this.device.createCommandEncoder({label: 'Cloth Newton-PCG'});
-      if (!submissions) encoder.clearBuffer(this.C);
+      // Fresh control words, with the Newton minimum of a resumed solve.
+      if (!submissions) {const words = new Uint32Array(C_WORDS); words[C_NEWTONMIN] = settings.newtonMin; this.device.queue.writeBuffer(this.C, 0, words);}
       const pass = encoder.beginComputePass({label: 'Cloth Newton iterations'});
       pass.setBindGroup(0, this.bindings!);
-      if (!submissions && settings.first) for (const [entry, count] of [['initX', n], ['prepTri', o.triangles], ['prepHinge', o.hinges], ['prepSeg', o.segments]] as const) if (count) {pass.setPipeline(this.pipelines![entry]); pass.dispatchWorkgroups(groups(count));}
-      for (let k = 0; k < unitsPerSubmission; k++) this.encodeUnit(pass, this.cgCap, pairs.length, contacts.length);
+      if (!submissions && settings.first) for (const [entry, count] of [['initX', n], ['prepTri', o.triangles], ['prepHinge', o.hinges], ['prepSeg', o.segments]] as const) this.run(pass, entry, groups(count));
+      for (let k = 0; k < unitsPerSubmission; k++) this.encodeUnit(pass, this.cgCap, pairs.length);
       pass.end();
       encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
       encoder.copyBufferToBuffer(this.W, 16 * o.wX, this.positionRead, 0, 16 * n);
       if (settings.readStiffness) encoder.copyBufferToBuffer(this.W, 16 * o.wK, this.stiffnessRead, 0, 16 * n);
       this.device.queue.submit([encoder.finish()]);
       submissions++;
-      await this.statusRead.mapAsync(GPUMapMode.READ);
-      control = new Uint32Array(this.statusRead.getMappedRange().slice(0));
-      this.statusRead.unmap();
+      control = await this.readControl();
       status = control[C_STATUS]!;
       if (status) break;
     }
-    const units = Math.min(control[C_UNIT]!, LOG_UNITS), newton = control[C_NEWTON]!;
+    this.adaptCG(control);
     const measure = new Float32Array(Uint32Array.of(control[C_LAST]!).buffer)[0]!;
-    let linear = 0, cgUsed = 0;
-    for (let k = 0; k < units; k++) {const cg = control[C_LOG + 4 * k + 2]! & 0x7fffffff; linear += cg; cgUsed = Math.max(cgUsed, cg);}
-    // Adapt the encoded CG depth to what the last solve used (inexact Newton
-    // remains a descent method when the depth truncates CG).
-    this.cgCap = cgUsed >= this.cgCap ? Math.min(2048, 2 * this.cgCap) : Math.max(16, Math.min(this.cgCap, 8 * Math.ceil(1.5 * cgUsed / 8)));
-    await this.positionRead.mapAsync(GPUMapMode.READ);
-    const increments = new Float32Array(this.positionRead.getMappedRange().slice(0));
-    this.positionRead.unmap();
+    const increments = await this.readIncrements();
     if (settings.readStiffness) {
       await this.stiffnessRead.mapAsync(GPUMapMode.READ);
       const k = new Float32Array(this.stiffnessRead.getMappedRange().slice(0));
@@ -914,7 +1196,58 @@ export class GPUClothNewton {
       const stiffness = this.stiffness ??= new Float64Array(3 * n);
       for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) stiffness[3 * i + a] = k[4 * i + a]!;
     }
-    return {converged: (status & S_CONVERGED) !== 0, status, measure, newton, linear, submissions, increments};
+    return {converged: (status & S_CONVERGED) !== 0, status, measure, newton: control[C_NEWTON]!, linear: control[C_LINEAR]!, submissions, increments, control};
+  }
+
+  /** Diagnostics: the GPU's first detection of a step from `state` (at the
+   * prediction), without solving. The table and multipliers of the previous
+   * step are left intact. */
+  async detectContacts(state: ClothState, dt: number, options: ClothStepOptions = {}): Promise<{contacts: GPUClothContact[]; detect_ms: number; errors: number}> {
+    if (!this.pipelines || !this.bindings) throw new Error('Initialize GPU cloth Newton before detecting');
+    const colliders = options.colliders ?? [], unsupported = gpuContactUnsupported(this.topology, colliders);
+    if (unsupported) throw new Error(`GPU cloth contact: ${unsupported}`);
+    this.uploadVertexBlock(state, dt, options);
+    this.prepareGPUContact(colliders, options.selfCollision ?? false);
+    const n = this.n, layout = this.contactLayout!;
+    this.writeParams({...this.offsets, ...this.contactParams(), contactMode: 1, contactGroups: this.contactGroups, colliders: this.colliderCount, selfCollision: this.selfCollision ? 1 : 0,
+      dt, tolerance: options.tolerance_m ?? 1e-8, contactDelta: options.tolerance_m ?? 1e-8, frictionEpsilon: FRICTION_SLIP_SPEED_M_S * dt, newtonCap: 1, cgCap: 1});
+    const begun = performance.now(), encoder = this.device.createCommandEncoder({label: 'Cloth contact detection'});
+    encoder.clearBuffer(this.C); encoder.clearBuffer(this.KU, 4 * layout.kvStart, 4 * (n + 1));
+    const pass = encoder.beginComputePass(); pass.setBindGroup(0, this.bindings!);
+    this.run(pass, 'initX', Math.ceil(n / WG)); this.run(pass, 'detectBegin', 1); this.run(pass, 'tableClear', this.strided(2 * layout.tableSlots));
+    this.encodeDetection(pass); this.encodeAfterDetection(pass);
+    pass.end();
+    encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
+    this.device.queue.submit([encoder.finish()]);
+    const control = await this.readControl(), detect_ms = performance.now() - begun;
+    return {contacts: await this.readContactSet(Math.min(control[CONTACT_CONTROL.K_COUNT]!, layout.kMax)), detect_ms, errors: control[CONTACT_CONTROL.K_ERROR]!};
+  }
+  /** Diagnostics: the GPU contact set after the last step (or detection). */
+  async contacts(): Promise<GPUClothContact[]> {
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.C, 0, this.statusRead, 0, 4 * C_WORDS);
+    this.device.queue.submit([encoder.finish()]);
+    const control = await this.readControl();
+    return this.readContactSet(Math.min(control[CONTACT_CONTROL.K_COUNT]!, this.contactLayout?.kMax ?? 0));
+  }
+  private async readContactSet(count: number): Promise<GPUClothContact[]> {
+    if (!count) return [];
+    const layout = this.contactLayout!, floats = this.device.createBuffer({size: 64 * count, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ}), words = this.device.createBuffer({size: 32 * count, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.KF, 0, floats, 0, 64 * count);
+      encoder.copyBufferToBuffer(this.KU, 4 * layout.kuCV, words, 0, 16 * count);
+      encoder.copyBufferToBuffer(this.KU, 4 * layout.kuMeta, words, 16 * count, 16 * count);
+      this.device.queue.submit([encoder.finish()]);
+      await Promise.all([floats.mapAsync(GPUMapMode.READ), words.mapAsync(GPUMapMode.READ)]);
+      const f = new Float32Array(floats.getMappedRange().slice(0)), u = new Uint32Array(words.getMappedRange().slice(0));
+      return Array.from({length: count}, (_, c) => {
+        const k0 = u[4 * count + 4 * c]!, k1 = u[4 * count + 4 * c + 1]!, kind = k0 >>> 30, a = k0 & 0x3fffffff;
+        const key = kind === 0 ? `c:${a}:${k1}` : kind === 1 ? `v:${a}:${k1}` : `e:${a}:${k1}`, size = kind === 0 ? 1 : 4;
+        return {key, vertices: Array.from(u.subarray(4 * c, 4 * c + size)), weights: Array.from(f.subarray(16 * c + 12, 16 * c + 12 + size)), normal: [f[16 * c]!, f[16 * c + 1]!, f[16 * c + 2]!] as const,
+          lambda: f[16 * c + 7]!, rho: f[16 * c + 8]!, frictionLambda: f[16 * c + 9]!};
+      });
+    } finally {floats.destroy(); words.destroy();}
   }
 
   destroy(): void {for (const buffer of this.buffers) buffer.destroy();}

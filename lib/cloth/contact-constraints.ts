@@ -1,4 +1,4 @@
-import {closestSegmentPoints, closestTrianglePoint, sampleClothCollider, type ClothCollider, type ClothContactReport, type ClothReaction} from './contact';
+import {closestSegmentPoints, closestTrianglePoint, connectedRestFaces, restSegmentTriangleDistance, sampleClothCollider, type ClothCollider, type ClothContactReport, type ClothReaction} from './contact';
 import {ClothContactBVH} from './contact-bvh';
 import {cross3, dot3, norm3, point3, scale3, sub3, type PreparedClothTopology} from './topology';
 import type {ClothVector} from './types';
@@ -81,37 +81,43 @@ function colliderVelocity(collider: ClothCollider, point: ClothVector): ClothVec
 const colliderDistance = (c: ClothCollider, p: ClothVector, beforeEnd_s: number) => c.kind === 'sampled' && c.distanceAt ? c.distanceAt(p, beforeEnd_s) : sampleClothCollider(c, p, beforeEnd_s).distance_m;
 const lerp3 = (a: ClothVector, b: ClothVector, t: number): [number, number, number] => [a[0] + t*(b[0] - a[0]), a[1] + t*(b[1] - a[1]), a[2] + t*(b[2] - a[2])];
 
-// The two rest-patch helpers below are resolveClothContacts' own (contact.ts
-// does not export them): a thick shell excludes only its connected rest patch
-// inside the feature's collision support.
-const restFaceAdjacency = new WeakMap<PreparedClothTopology, readonly number[][]>();
-function connectedRestFaces(topology: PreparedClothTopology, seeds: readonly number[], radius: number, distance: (triangle: readonly ClothVector[]) => number): Set<number> {
-  let adjacency = restFaceAdjacency.get(topology);
-  if (!adjacency) {const rows: number[][] = Array.from({length: topology.triangles.length}, () => []); for (const hinge of topology.hinges) {rows[hinge.faces[0]]!.push(hinge.faces[1]); rows[hinge.faces[1]]!.push(hinge.faces[0]);} adjacency = rows; restFaceAdjacency.set(topology, rows);}
-  const visited = new Set<number>(), local = new Set<number>(), pending = [...seeds];
-  for (let cursor = 0; cursor < pending.length; cursor++) {
-    const f = pending[cursor]!; if (visited.has(f)) continue; visited.add(f);
-    const face = topology.triangles[f]!, support = radius + .5*topology.materials[face.material]!.thickness_m;
-    if (distance(face.vertices.map(v => point3(topology.data.restPositions_m, v))) > support + 1e-12) continue;
-    local.add(f); for (const neighbor of adjacency[f]!) if (!visited.has(neighbor)) pending.push(neighbor);
-  }
-  return local;
-}
-function restSegmentTriangleDistance(a: ClothVector, b: ClothVector, triangle: readonly ClothVector[]): number {
-  const [x, y, z] = triangle as readonly [ClothVector, ClothVector, ClothVector], normal = cross3(sub3(y, x), sub3(z, x)), da = dot3(sub3(a, x), normal), db = dot3(sub3(b, x), normal);
-  if (da*db <= 0 && Math.abs(da - db) > 1e-30) {const p = lerp3(a, b, da/(da - db)); if (norm3(sub3(p, closestTrianglePoint(p, x, y, z).point)) < 1e-12) return 0;}
-  let best = Math.min(norm3(sub3(a, closestTrianglePoint(a, x, y, z).point)), norm3(sub3(b, closestTrianglePoint(b, x, y, z).point)));
-  for (let i = 0; i < 3; i++) {const q = closestSegmentPoints(a, b, triangle[i]!, triangle[(i + 1) % 3]!); best = Math.min(best, norm3(sub3(q.a, q.b)));}
-  return best;
-}
-
-interface ShellEdge {readonly vertices: readonly [number, number]; readonly r: number; readonly min: number[]; readonly max: number[]; restLocalFaces?: Set<number>}
+export interface ShellEdge {readonly vertices: readonly [number, number]; readonly r: number; readonly min: number[]; readonly max: number[]; restLocalFaces?: Set<number>}
 interface ShellCache {faceBounds: Float64Array; faceTree?: ClothContactBVH; edges: ShellEdge[]; edgeBounds: Float64Array; edgeTree?: ClothContactBVH; vertexLocalFaces: Map<number, Set<number>>}
 const shellCaches = new WeakMap<PreparedClothTopology, ShellCache>();
 
-function vertexRadius(topology: PreparedClothTopology, i: number): number {
+/** Collision radius of a cloth vertex: half the shell thickness, or the rod radius. */
+export function clothVertexContactRadius(topology: PreparedClothTopology, i: number): number {
   const m = topology.materials[topology.vertexMaterial[i]!]!;
   return topology.incidentTriangles[i]!.length ? .5*m.thickness_m : Math.max(m.rodRadius_m, m.rodRadiusB_m ?? m.rodRadius_m);
+}
+const vertexRadius = clothVertexContactRadius;
+/** The shell's edges and per-vertex rest exclusion patches, in the order and
+ * orientation the self-contact keys and weights use. */
+export function clothShellCache(topology: PreparedClothTopology): ShellCache {
+  let cache = shellCaches.get(topology);
+  if (!cache) {
+    const edgeMap = new Map<string, readonly [number, number]>();
+    for (const f of topology.triangles) for (let j = 0; j < 3; j++) {const a = f.vertices[j]!, b = f.vertices[(j + 1) % 3]!; edgeMap.set(`${Math.min(a, b)}:${Math.max(a, b)}`, [a, b]);}
+    const edges = [...edgeMap.values()].map(vertices => ({vertices, r: Math.max(...vertices.map(v => vertexRadius(topology, v))), min: [0, 0, 0], max: [0, 0, 0]}));
+    cache = {faceBounds: new Float64Array(6*topology.triangles.length), edges, edgeBounds: new Float64Array(6*edges.length), vertexLocalFaces: new Map()};
+    shellCaches.set(topology, cache);
+  }
+  return cache;
+}
+/** Faces a vertex never contacts: its connected rest patch within its support. */
+export function clothVertexLocalFaces(topology: PreparedClothTopology, i: number): Set<number> {
+  const cache = clothShellCache(topology);
+  let local = cache.vertexLocalFaces.get(i);
+  if (!local) {const p = point3(topology.data.restPositions_m, i); local = connectedRestFaces(topology, topology.incidentTriangles[i]!, vertexRadius(topology, i), t => norm3(sub3(p, closestTrianglePoint(p, t[0]!, t[1]!, t[2]!).point))); cache.vertexLocalFaces.set(i, local);}
+  return local;
+}
+/** resolveClothContacts' edge-edge rest exclusion (ea is the lower index). */
+export function clothLocalShellEdges(topology: PreparedClothTopology, ea: ShellEdge, eb: ShellEdge): boolean {
+  if (ea.vertices.some(v => eb.vertices.some(w => topology.incidentTriangles[w]!.some(f => clothVertexLocalFaces(topology, v).has(f))))) return true;
+  const rest = topology.data.restPositions_m, ra = ea.vertices.map(v => point3(rest, v)), rb = eb.vertices.map(v => point3(rest, v)), nearest = closestSegmentPoints(ra[0]!, ra[1]!, rb[0]!, rb[1]!);
+  if (norm3(sub3(nearest.a, nearest.b)) > ea.r + eb.r + 1e-12) return false;
+  ea.restLocalFaces ??= connectedRestFaces(topology, ea.vertices.flatMap(v => topology.incidentTriangles[v]!), ea.r, t => restSegmentTriangleDistance(ra[0]!, ra[1]!, t));
+  return eb.vertices.some(v => topology.incidentTriangles[v]!.some(f => ea.restLocalFaces!.has(f)));
 }
 
 export class ClothContactSet {
@@ -173,26 +179,8 @@ export class ClothContactSet {
     return added;
   }
 
-  private shellCache(): ShellCache {
-    const {topology} = this;
-    let cache = shellCaches.get(topology);
-    if (!cache) {
-      const edgeMap = new Map<string, readonly [number, number]>();
-      for (const f of topology.triangles) for (let j = 0; j < 3; j++) {const a = f.vertices[j]!, b = f.vertices[(j + 1) % 3]!; edgeMap.set(`${Math.min(a, b)}:${Math.max(a, b)}`, [a, b]);}
-      const edges = [...edgeMap.values()].map(vertices => ({vertices, r: Math.max(...vertices.map(v => vertexRadius(topology, v))), min: [0, 0, 0], max: [0, 0, 0]}));
-      cache = {faceBounds: new Float64Array(6*topology.triangles.length), edges, edgeBounds: new Float64Array(6*edges.length), vertexLocalFaces: new Map()};
-      shellCaches.set(topology, cache);
-    }
-    return cache;
-  }
-  private localFaces(cache: ShellCache, i: number): Set<number> {
-    let local = cache.vertexLocalFaces.get(i);
-    if (!local) {const p = point3(this.topology.data.restPositions_m, i); local = connectedRestFaces(this.topology, this.topology.incidentTriangles[i]!, vertexRadius(this.topology, i), t => norm3(sub3(p, closestTrianglePoint(p, t[0]!, t[1]!, t[2]!).point))); cache.vertexLocalFaces.set(i, local);}
-    return local;
-  }
-
   private detectSelf(x: ArrayLike<number>): number {
-    const {topology, old} = this, cache = this.shellCache();
+    const {topology, old} = this, cache = clothShellCache(topology);
     let added = 0;
     for (let f = 0; f < topology.triangles.length; f++) {
       const face = topology.triangles[f]!, r = .5*topology.materials[face.material]!.thickness_m;
@@ -210,7 +198,7 @@ export class ClothContactSet {
       const min = [0, 1, 2].map(a => Math.min(p0[a]!, p1[a]!) - ri), max = [0, 1, 2].map(a => Math.max(p0[a]!, p1[a]!) + ri);
       for (const faceIndex of cache.faceTree.query(min, max)) {
         const face = topology.triangles[faceIndex]!, ids = face.vertices, key = `v:${i}:${faceIndex}`;
-        if (this.byKey.has(key) || shares(i, ids) || this.localFaces(cache, i).has(faceIndex)) continue;
+        if (this.byKey.has(key) || shares(i, ids) || clothVertexLocalFaces(topology, i).has(faceIndex)) continue;
         const triangleOld = ids.map(v => point3(old, v)), triangleNew = ids.map(v => point3(x, v)), distance = ri + .5*topology.materials[face.material]!.thickness_m;
         if ([0, 1, 2].some(a => Math.max(p0[a]!, p1[a]!) + distance < Math.min(...triangleOld.map(q => q[a]!), ...triangleNew.map(q => q[a]!)) || Math.min(p0[a]!, p1[a]!) - distance > Math.max(...triangleOld.map(q => q[a]!), ...triangleNew.map(q => q[a]!)))) continue;
         const bound = norm3(sub3(p1, p0)) + Math.max(...triangleOld.map((q, j) => norm3(sub3(triangleNew[j]!, q))));
@@ -238,20 +226,12 @@ export class ClothContactSet {
       cache.edgeBounds.set(edge.min, 6*e); cache.edgeBounds.set(edge.max, 6*e + 3);
     }
     if (cache.edgeTree) cache.edgeTree.refit(); else cache.edgeTree = new ClothContactBVH(cache.edgeBounds);
-    const rest = topology.data.restPositions_m;
-    const localShellEdges = (ea: ShellEdge, eb: ShellEdge) => {
-      if (ea.vertices.some(v => eb.vertices.some(w => topology.incidentTriangles[w]!.some(f => this.localFaces(cache, v).has(f))))) return true;
-      const ra = ea.vertices.map(v => point3(rest, v)), rb = eb.vertices.map(v => point3(rest, v)), nearest = closestSegmentPoints(ra[0]!, ra[1]!, rb[0]!, rb[1]!);
-      if (norm3(sub3(nearest.a, nearest.b)) > ea.r + eb.r + 1e-12) return false;
-      ea.restLocalFaces ??= connectedRestFaces(topology, ea.vertices.flatMap(v => topology.incidentTriangles[v]!), ea.r, t => restSegmentTriangleDistance(ra[0]!, ra[1]!, t));
-      return eb.vertices.some(v => topology.incidentTriangles[v]!.some(f => ea.restLocalFaces!.has(f)));
-    };
     for (let ai = 0; ai < edges.length; ai++) for (const bi of cache.edgeTree.query(edges[ai]!.min, edges[ai]!.max)) {
       if (bi <= ai) continue;
       const ea = edges[ai]!, eb = edges[bi]!, ids = [...ea.vertices, ...eb.vertices], key = `e:${ai}:${bi}`;
       if (this.byKey.has(key) || new Set(ids).size < 4) continue;
       if (ea.vertices.some(p => eb.vertices.some(q => topology.incidentTriangles[p]!.some(f => topology.triangles[f]!.vertices.includes(q))))) continue;
-      if (localShellEdges(ea, eb)) continue;
+      if (clothLocalShellEdges(topology, ea, eb)) continue;
       const start = ids.map(i => point3(old, i)), next = ids.map(i => point3(x, i)), thickness = ea.r + eb.r;
       const travel = Math.max(norm3(sub3(next[0]!, start[0]!)), norm3(sub3(next[1]!, start[1]!))) + Math.max(norm3(sub3(next[2]!, start[2]!)), norm3(sub3(next[3]!, start[3]!)));
       let time = 0, found = false, normal: ClothVector = [0, 1, 0], s = 0, t = 0;
