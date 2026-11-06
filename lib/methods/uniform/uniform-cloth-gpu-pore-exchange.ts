@@ -5,6 +5,7 @@ import type { UniformClothGridFields } from './uniform-cloth-grid-coupling';
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline } from './uniform-detail-fields';
 import { UniformGPURadixSort, UniformGPUScan, type UniformGPUOrderingKernels } from './uniform-gpu-radix-sort';
 import { uniformMixedSolidWGSL } from './uniform-mixed-solid.wgsl';
+import { uniformCompensatedSumWGSL } from './uniform-compensated-sum.wgsl';
 import { NB_VOLUME_COMPENSATION_FLOAT } from './uniform-mixed-surface-volume';
 import { uniformMixedTopologyWGSL } from './uniform-mixed-topology.wgsl';
 
@@ -119,6 +120,7 @@ const exchangeCode = (V: number) => {
   const s = clothExchangeSections(V);
   return /* wgsl */`
 ${params}
+${uniformCompensatedSumWGSL}
 @group(0) @binding(0) var<uniform> params:Params;
 // Two vec4 a vertex: (base cell, material) bits, (cell fraction, sub-quantum water).
 @group(0) @binding(1) var<storage,read> cells:array<vec4f>;
@@ -291,8 +293,8 @@ fn cellStart(j:u32)->bool{return j==0u||sortKeys[j]!=sortKeys[j-1u];}
  if(solid+bound>=1.0){fail(${CLOTH_EXCHANGE_STATUS.fillsCell}u,sortValues[j]/8u);}
  capacity[1u+2u*cell]=bitcast<vec4f>(vec4i(p,0));capacity[2u+2u*cell]=vec4f(solid,bound,0.0,0.0);
 }
-// The paired budget commit (released minus captured quanta), with the same
-// compensated low word as source emission.
+// The paired budget commit (released minus captured quanta), into the NB
+// budget's compensated (high, low) pair as source emission commits.
 @compute @workgroup_size(1) fn commitBudget(){
  let capturedLo=atomicLoad(&status[2]);let capturedHi=atomicLoad(&status[3]);let releasedLo=atomicLoad(&status[4]);let releasedHi=atomicLoad(&status[5]);
  var lo=releasedLo-capturedLo;var hi=releasedHi-capturedHi-select(0u,1u,releasedLo<capturedLo);
@@ -302,15 +304,9 @@ fn cellStart(j:u32)->bool{return j==0u||sortKeys[j]!=sortKeys[j-1u];}
  if(negative){lo=~lo+1u;hi=~hi+select(0u,1u,lo==0u);}
  let magnitude=f32(hi)*4294967296.0+f32(lo);
  let delta=select(magnitude,-magnitude,negative)*q()/cellVolume();
- // Split delta at the high word's ulp so the high-word add is exact and the
- // remainder goes to the compensation word. Fast math folds the two-sum form
- // (old-(old+delta))+delta to zero even through a storage readback; round()
- // is opaque to it.
- let old=budget[0];
- let exponent=max((bitcast<u32>(abs(old)+abs(delta))>>23u)&0xffu,24u);
- let ulp=bitcast<f32>((exponent-23u)<<23u);
- let exact=round(delta/ulp)*ulp;let sum=old+exact;
- budget[0]=max(0.0,sum);budget[${NB_VOLUME_COMPENSATION_FLOAT}]+=(delta-exact)+min(sum,0.0);budget[3]=0.0;
+ // A clamp at zero leaves the pair's sum unchanged: high's deficit goes to low.
+ var next=umCompensatedAdd(vec2f(budget[0],budget[${NB_VOLUME_COMPENSATION_FLOAT}]),delta);if(next.x<0.0){next=vec2f(0.0,next.y+next.x);}
+ budget[0]=next.x;budget[${NB_VOLUME_COMPENSATION_FLOAT}]=next.y;budget[3]=0.0;
 }`;
 };
 
