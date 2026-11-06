@@ -918,3 +918,66 @@ guard.
 faces and the wall rows. Two questions to answer there:
 - how the level-1 aggregate weights a partly open face;
 - whether the fine smoother's wall active-set handles it.
+
+### Round 9 landing: a05b6782 (surface-operator fix alone)
+
+- **The change.** pRebase bakes `rFixed(c) = c*u/(u+0.5c)` for every
+  fixed-zero face that leaves a level-1 aggregate. The seam block is left
+  out.
+- **Regression test.** tests/pressure-seam-cycle.test.ts runs an 8x4x4 tank
+  with a 2-cell drop for 40 steps and takes the cycle-1 geomean over frames
+  21-40:
+  - HEAD 0.122 (frames 21-30 in a 30-step run: 0.167);
+  - with the fix 0.080 (0.107);
+  - asserted <= 0.1.
+- **Gates.** One run each:
+
+  | scene | steadyMedian HEAD | with fix | drift |
+  |---|---|---|---|
+  | seep 300 | 30.04 ms | 29.36 ms | 2.1e-4 / 1.6e-4 |
+  | letters 120 | 54.62 ms | 50.95 ms | -9.09e-3 / -9.05e-3 |
+
+  - tests/pressure-tail-red-black.test.ts passes.
+  - check:types is clean.
+  - test:unit has one failure in the main checkout, reservoir-particle-cost
+    "merge cap". It passes in a clean HEAD export both with and without the
+    fix, so it comes from uncommitted hunks in the shared checkout.
+
+## Round 10: the seep's slow rows (in progress)
+
+**Per-cycle class breakdown on seep.** Check-mode trace, 60 steps, frames
+21-60, geomean largest residual / rows past target. "Aperture" means band
+rows with a below-unit band face.
+
+| measure | walls | surface | aperture | seam (band) | largest in |
+|---|---|---|---|---|---|
+| cycle 0 (start) | 81 / 374 | 69 / 1005 | 28 / 112 | | walls 22 of 40 frames |
+| cycle 1 | 1.8 | 2.1 | 3.5 | | aperture 18 of 40 |
+| cycle 2 | 0.07 | 0.15 | 0.67 / 34 | 0.11 | aperture 28 of 40 |
+| cycle 3 | | | 0.07 / 10 | 0.02 | aperture 31 of 40 |
+
+- Walls and the surface contract about 30x a cycle. The aperture rows
+  contract only 5-10x a cycle (0.12, 0.19, 0.10), and a few dozen of them
+  hold the stop for cycles 3-4.
+
+**Ruled out:**
+- **Operator-dependent prolongation** (pProlong0's far-parent weight scaled
+  by the opening of the face toward it, a closed face none): 144 cycles vs
+  144.
+- **Aggregates straddling the wall:** the wall is 16 cells thick on 16-cell
+  boundaries, and the 2x2 throat is aligned to one level-1 column.
+- **Level-1 aperture links:** these are consistent with rediscretisation,
+  since coarseScale times the summed open area gives the 2h conductance.
+- **Wall faces:** these are removed from the level-1 diagonal (Neumann)
+  unless clamped.
+
+**Open candidates:**
+- Inner fixed-zero faces (a child whose sibling is air) still enter the
+  aggregate at their Galerkin weight. A huge 1/theta at a shut face then
+  suppresses the whole aggregate's correction.
+- rFixed's half-cell resistance ignores the face's aperture (`u`, not
+  `u*volume`).
+- The inside-solid rows' clamp, which no coarse level sees.
+
+The next step is to locate the slow aperture rows: throat walls, mouth, or
+reservoir wall face.
