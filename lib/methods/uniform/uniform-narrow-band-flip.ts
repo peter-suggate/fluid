@@ -238,6 +238,86 @@ export const NARROW_BAND_RETIRE_WORDS=12;
  * m_j/(m_i+m_j)(r_i+r_j-l) < r_i+r_j with r = cbrt(m)/4: so under twice the
  * heaviest sample's radius, cbrt(8)/2 = 1 cell under crowdedCells "merge"
  * (NB_MASS_MAX 8), half a cell with unit samples. */
+export interface NarrowBandSeedRank{readonly bits:number;readonly levels:number;readonly keyBits:number}
+/** The seed budget's radix shape: levels digits of bits each cover the
+ * cell keys (< cells), and their histograms and three control words fit
+ * the seam list (one word a tile), which nothing holds during the seed batch. */
+export function narrowBandSeedRankShape(cells:number,tiles:number):NarrowBandSeedRank{
+ const keyBits=Math.max(1,Math.ceil(Math.log2(cells)));
+ if(keyBits>30)throw new Error(`Narrow-band FLIP: ${cells} cell keys exceed the seed list's 30-bit key`);
+ for(let bits=10;bits>=1;bits--){const levels=Math.ceil(keyBits/bits);if(levels*(1<<bits)+3<=tiles)return {bits,levels,keyBits};}
+ throw new Error(`Narrow-band FLIP: ${tiles} tile keys cannot hold the seed rank's histograms`);
+}
+/** Overlap reseeds past the seed budget are not refused in launch order.
+ * Each candidate's rank key is its cell key XOR a frame mask (a bijection,
+ * so the order is canonical while the deferred cells change from frame to
+ * frame). The budget admits the first candidates by key, then by site index
+ * in the cut cell (nbSeedAdmitted). seedRank@level counts the candidates
+ * whose key matches the cut's prefix by their next digit; seedCut@level
+ * finds the digit where the count passes the room left. It reads the seed
+ * list (seedCells), seedCandidate, the sorted records' count (state[1]) and
+ * the step's seeds so far (the source seeds). */
+export function narrowBandSeedRankWGSL(rank:NarrowBandSeedRank,budget:number):string{
+ const {bits,levels,keyBits}=rank;
+ return /* wgsl */`
+const NB_SEED_RANK:u32=NB_BAND_SEAM;const NB_SEED_BITS:u32=${bits}u;const NB_SEED_LEVELS:u32=${levels}u;const NB_SEED_BUCKETS:u32=${1<<bits}u;
+// The cut's key prefix, the room left inside it, and whether the budget binds.
+const NB_SEED_CONTROL:u32=NB_SEED_RANK+NB_SEED_LEVELS*NB_SEED_BUCKETS;
+override nbSeedLevel:u32=0u;
+var<workgroup> nbSeedSums:array<u32,64>;
+var<workgroup> nbSeedKept:array<u32,64>;
+// The records' rule: sorted records and this step's source seeds count first.
+fn nbSeedRoom()->u32{let used=atomicLoad(&state[1])+atomicLoad(&state[${NB_SLAB_SEEDS_WORD}u]);return select(0u,${budget}u-used,used<${budget}u);}
+// No rank is needed where every list entry's eight sites fit (most frames).
+fn nbSeedRankIdle()->bool{return 8u*min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))<=nbSeedRoom();}
+// An overlap candidate's rank key (one for the eight lanes of its entry), or NB_NO_BIN.
+fn nbSeedRankKey(group:vec3u,lane:u32)->u32{
+ let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))){return NB_NO_BIN;}
+ let entry=links[nbSeedList()+slot];if((entry&0x80000000u)!=0u){return NB_NO_BIN;}
+ var h=params.live.z*0x9e3779b9u;h^=h>>16u;h*=0x7feb352du;h^=h>>15u;
+ return ((entry&0x3fffffffu)^h)&${((2**keyBits)-1)>>>0}u;
+}
+@compute @workgroup_size(64) fn seedRank(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+ let key=nbSeedRankKey(group,lane);if(key==NB_NO_BIN){return;}
+ if(select(nbSeedRankIdle(),atomicLoad(&bins[NB_SEED_CONTROL+2u])==0u,nbSeedLevel>0u)){return;}
+ let shift=(NB_SEED_LEVELS-1u-nbSeedLevel)*NB_SEED_BITS;
+ if(((key>>shift)>>NB_SEED_BITS)!=atomicLoad(&bins[NB_SEED_CONTROL])){return;}
+ if(seedCandidate(group,lane,false,false).position.x<0.0){return;}
+ atomicAdd(&bins[NB_SEED_RANK+nbSeedLevel*NB_SEED_BUCKETS+((key>>shift)&(NB_SEED_BUCKETS-1u))],1u);
+}
+@compute @workgroup_size(64) fn seedCut(@builtin(local_invocation_index) lane:u32){
+ let hist=NB_SEED_RANK+nbSeedLevel*NB_SEED_BUCKETS;let per=(NB_SEED_BUCKETS+63u)/64u;
+ var s=0u;for(var i=lane*per;i<min(lane*per+per,NB_SEED_BUCKETS);i++){s+=atomicLoad(&bins[hist+i]);}
+ nbSeedSums[lane]=s;workgroupBarrier();
+ if(lane!=0u){return;}
+ var room=0u;
+ if(nbSeedLevel==0u){
+  if(nbSeedRankIdle()){return;}
+  room=nbSeedRoom();
+  var total=0u;for(var g=0u;g<64u;g++){total+=nbSeedSums[g];}
+  if(total<=room){return;}
+  atomicStore(&bins[NB_SEED_CONTROL+2u],1u);
+ }else{
+  if(atomicLoad(&bins[NB_SEED_CONTROL+2u])==0u){return;}
+  room=atomicLoad(&bins[NB_SEED_CONTROL+1u]);
+ }
+ var below=0u;var g=0u;
+ for(;g<63u;g++){if(below+nbSeedSums[g]>room){break;}below+=nbSeedSums[g];}
+ var d=g*per;
+ for(;d<NB_SEED_BUCKETS-1u;d++){let n=atomicLoad(&bins[hist+d]);if(below+n>room){break;}below+=n;}
+ atomicStore(&bins[NB_SEED_CONTROL],(atomicLoad(&bins[NB_SEED_CONTROL])<<NB_SEED_BITS)|d);
+ atomicStore(&bins[NB_SEED_CONTROL+1u],room-below);
+}
+// Admitted: below the cut key, or in the cut cell within the room by site index.
+fn nbSeedAdmitted(key:u32,lane:u32)->bool{
+ if(atomicLoad(&bins[NB_SEED_CONTROL+2u])==0u){return true;}
+ let cut=atomicLoad(&bins[NB_SEED_CONTROL]);
+ if(key!=cut){return key<cut;}
+ var before=0u;for(var k=lane&~7u;k<lane;k++){before+=nbSeedKept[k];}
+ return before<atomicLoad(&bins[NB_SEED_CONTROL+1u]);
+}
+`;
+}
 /** A seed's jitter in its eighth of the cell: a hash of the cell, the site
  * (its sample index in the cell) and the salt alone. The reseed's salt is the
  * frame index (params.live.z), so a frame's sites follow from its data, not
@@ -1683,7 +1763,7 @@ fn nbSeedList()->u32{return NB_LINKS+4u*arrayLength(&particles);}
  // Bit 31 a source cell, bit 30 a graded band's deep cell (nbSeedTarget 4).
  links[nbSeedList()+slot]=umCellAt(c)|select(0u,0x80000000u,nbSourceCell(c))|select(0u,0x40000000u,nbSeedTarget(depth)==4u);
 }
-fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
+fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool,counting:bool)->Particle{
  var empty=Particle();empty.position.x=-1.0;
  let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))){return empty;}
  let entry=links[nbSeedList()+slot];if(((entry&0x80000000u)!=0u)!=sourcePass){return empty;}
@@ -1699,7 +1779,7 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
  nbSeedSalt=params.live.z;
  let site=seedSite(c,select(j,array<u32,4>(0u,3u,5u,6u)[j&3u],deep),false,activated);if(site.x<0.0){return empty;}
  ${narrowBandRetireCounting.splitX>=0?`// Diagnostic: seeds at x >= splitX: activated, above the floor band (y 8 past the box), interior, outer.
- if(f32(c.x)>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+select(select(select(3u,2u,site.w<= -1.0),1u,c.y>=${(narrowBandRetireCounting.splitY+8)}u),0u,activated)],1u);}`:""}
+ if(counting&&f32(c.x)>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+select(select(select(3u,2u,site.w<= -1.0),1u,c.y>=${(narrowBandRetireCounting.splitY+8)}u),0u,activated)],1u);}`:""}
  let heat=nbTargetHeat(vec3f(c)+0.5);
  // A cell's liquid is eight units: a graded deep cell's four samples carry
  // two each (crowdedCells "merge" holds the mass), so the union's bound
@@ -1718,10 +1798,16 @@ fn storeSeedCandidate(p:Particle,mandatory:bool){
  if(p.position.x>=0.0){${narrowBandRetireCounting.on&&narrowBandRetireCounting.splitX>=0?`if(p.position.x>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+7}u],u32(nbParticleMass(p)));}`:""}_=nbSeedAppend(s,mandatory);}
 }
 @compute @workgroup_size(64) fn seedSources(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- storeSeedCandidate(seedCandidate(group,lane,true),true);
+ storeSeedCandidate(seedCandidate(group,lane,true,true),true);
 }
+${this.seedRankWGSL()}
 @compute @workgroup_size(64) fn seed(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- storeSeedCandidate(seedCandidate(group,lane,false),false);
+ let p=seedCandidate(group,lane,false,true);
+ ${this.seedRank?`// A budget the overlap reseeds overrun keeps the first in rank order
+ // (nbSeedAdmitted); a deferred cell is short again next step.
+ nbSeedKept[lane]=select(0u,1u,p.position.x>=0.0);workgroupBarrier();
+ if(p.position.x>=0.0&&!nbSeedAdmitted(nbSeedRankKey(group,lane),lane)){atomicAdd(&state[2],1u);return;}`:""}
+ storeSeedCandidate(p,false);
 }
 
 @compute @workgroup_size(64) fn countInitial(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
@@ -1852,16 +1938,16 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   // prepared (the move's G2P and seeds sample them too); snapshot fills its own from the field it
   // sample (stageTaps). The other stages read their own fresh 4h cache and
   // resolve fine seam taps in place.
-  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),narrowBandNearestEntries,"(atomicLoad(&bins[NB_BAND+1u])+3u)/4u"),["surfaceSplat"],"atomicLoad(&bins[NB_BAND+3u])"),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["seed","seedSources"],"(atomicLoad(&bins[NB_BAND+3u])+7u)/8u"),["transferProperties"],"umCounts.x"),["transfer"],subgroups?"select(16u*umCounts.x,0u,nbTransferFits())":"select(8u*umCounts.x,0u,nbTransferFits())"),["transferOwners"],"select((umCounts.y+63u)/64u,umActiveRegionCount(),umActiveCoarse)"),["transferSeams"],"atomicLoad(&bins[NB_BAND+3u])"),["coupleFine"],"umCounts.x"),["seedCells"],"atomicLoad(&bins[NB_BAND+1u])")}));
+  const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),narrowBandNearestEntries,"(atomicLoad(&bins[NB_BAND+1u])+3u)/4u"),["surfaceSplat"],"atomicLoad(&bins[NB_BAND+3u])"),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["seed","seedSources",...(this.seedRank?["seedRank"]:[])],"(atomicLoad(&bins[NB_BAND+3u])+7u)/8u"),["transferProperties"],"umCounts.x"),["transfer"],subgroups?"select(16u*umCounts.x,0u,nbTransferFits())":"select(8u*umCounts.x,0u,nbTransferFits())"),["transferOwners"],"select((umCounts.y+63u)/64u,umActiveRegionCount(),umActiveCoarse)"),["transferSeams"],"atomicLoad(&bins[NB_BAND+3u])"),["coupleFine"],"umCounts.x"),["seedCells"],"atomicLoad(&bins[NB_BAND+1u])")}));
   for(const module of modules){
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare",...particleSlabSortEntries(this.capacity),"surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources","countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
+  await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare",...particleSlabSortEntries(this.capacity),"surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
-   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources","separationPrepass"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="slabSortMerge"?{nbCanonicalWidth:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources","seedRank","seedCut","separationPrepass"].includes(entryPoint)?1:0]!;
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="slabSortMerge"?{nbCanonicalWidth:Number(name.split("@")[1])}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.deltaResources){
@@ -1913,7 +1999,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    retireListed:this.compile(["coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    clearAir:this.compile(["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"],undefined,"retire empty air"),
    // The step's seeds, into the current slabs' holes at the transfer's head.
-   seed:this.compile(["seedCells","seedSources","seed"],"advectParticles","seed"),
+   seed:this.compile(["seedCells","seedSources",...this.seedRankEntries,"seed"],"advectParticles","seed"),
   };
   // The mask view requires the solid tile record. Other solvers keep the
   // baseline chain, which also remains available for metric-only work.
@@ -1926,6 +2012,11 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   const listedSearch=search.filter(n=>n!=="depthNearestX").map(n=>n==="depthReuseSelect"?"depthReuseSelect@withX":n);
   this.crossingSearches.set(this.batches.searchReconstruct,this.compile(listedSearch.map(n=>n==="depthTiles"||n==="depthSeeds"?`${n}@cold`:n),"reconstruct","crossing search"));
  }
+ /** The seed budget's canonical admission (narrowBandSeedRankWGSL). */
+ private get seedRank():NarrowBandSeedRank|undefined{return this.seedBudget?narrowBandSeedRankShape(this.cells,this.tiles):undefined;}
+ private seedRankWGSL():string{const rank=this.seedRank;return rank?narrowBandSeedRankWGSL(rank,this.seedBudget):"";}
+ /** The seed batch's rank steps: seedRank@level and seedCut@level. */
+ private get seedRankEntries():string[]{const rank=this.seedRank;return rank?Array.from({length:rank.levels},(_,l)=>[`seedRank@${l}`,`seedCut@${l}`]).flat():[];}
  private compile(entries:readonly string[],groupName:string|undefined,label:string):NarrowBandBatch{
   return {pass:{label:`Narrow-band FLIP ${label}`},steps:entries.map(name=>{
    const selected=this.pipelines.get(name),entry=name.split("@")[0]!;if(!selected)throw new Error(`Narrow-band FLIP ${name} is not initialized`);
@@ -1934,7 +2025,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
     // In-place redistance reads its own canonical texel: coarse vertices
     // always read the base home, including those outside the resident h ring.
     base:entry==="redistanceCoarse"||entry==="airClearCoarse",pipeline:uniformDetailPick(this.solid.select(selected)),
-    launch:["depthTiles","depthPlanSeed","depthPlanExpand","depthReuseSnapshot","depthReuseSelect","airPlanSeeds","airPlanPropagate"].includes(entry)?NB_LAUNCH.regions:entry==="transfer"?NB_LAUNCH.counted:entry==="slabAllocate"||entry==="slabPlace"?NB_LAUNCH.one
+    launch:["depthTiles","depthPlanSeed","depthPlanExpand","depthReuseSnapshot","depthReuseSelect","airPlanSeeds","airPlanPropagate"].includes(entry)?NB_LAUNCH.regions:entry==="transfer"?NB_LAUNCH.counted:entry==="slabAllocate"||entry==="slabPlace"||entry==="seedCut"?NB_LAUNCH.one
      :entry==="advectParticles"||entry==="snapshot"?NB_LAUNCH.particles:NB_LAUNCH.grid,
    };
   })};
@@ -2059,7 +2150,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   // The step's seeds (none in a quiet frame) join the holes past the
   // sorted runs against this step's band, phi and counts, sampling the
   // field the move sampled (storeSeedCandidate). Their candidate count is NB_BAND+3.
-  if(!this.quiet){encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);this.run(encoder,this.compiled.seed);}
+  if(!this.quiet){encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);const rank=this.seedRank;if(rank)encoder.clearBuffer(this.bins,4*(this.bandWord+4+6*this.tiles),4*(rank.levels*(1<<rank.bits)+3));this.run(encoder,this.compiled.seed);}
   // The seam list's length (NB_BAND+3), which transferOwners counts.
   encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);
   this.run(encoder,this.compiled.transfer);

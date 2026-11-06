@@ -118,11 +118,10 @@ fn nbMoveAppend(p:Particle){
 // reserve (the next move takes it first; nothing reads it before). Only a
 // full reserve clips an overlap reseed. Whether the seed was kept.
 fn nbSeedAppend(p:Particle,mandatory:bool)->bool{
- ${seedBudget?`// The records' rule: an overlap reseed past it is deferred (its cell is
- // short again next step); a source's or the initial band's seed counts
- // and is never deferred.
- let seeds=atomicAdd(&state[${NB_SLAB_SEEDS_WORD}u],1u);
- if(!mandatory&&atomicLoad(&state[1])+seeds>=${seedBudget}u){atomicAdd(&state[2],1u);return false;}`:""}
+ ${seedBudget?`// The records' rule counts every seed. The overlap reseeds it admits were
+ // chosen before (nbSeedAdmitted: a rank, not this append's order); a
+ // source's or the initial band's seed counts and is never deferred.
+ atomicAdd(&state[${NB_SLAB_SEEDS_WORD}u],1u);`:""}
  let id=ubBrickAt(vec3i(floor(p.position.xyz)));
  if(nbSlabCurrent(id)){
   let k=atomicAdd(&state[nbSlab(id,7u)],1u);
