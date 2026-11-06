@@ -426,3 +426,72 @@ in a non-quiet frame, or shorter per-item dependency chains in the
 40-120 us stages (census, surface advect, body forces, coarse retirement,
 canonical publication). No capacity-loop fix was made, since none has a
 measurable share.
+
+## Round 5, step 1 tested before building: address depth is not the bound
+
+The resolved per-frame address table only pays if the switched-on stages
+are bound by the owner -> topology -> page -> field load chain. Three
+probes measured that before anything was built. The tree is HEAD 438e657f;
+the scene is 8x8x4 drop=2, 60 steps, timing mode with `--kernels=40`.
+Every run is one run.
+
+| run | what changes | median ms | timer sum | switched-on timer ms |
+|---|---|---|---|---|
+| k5-base | HEAD | 16.02 | 19.05 | 9.82 |
+| k5-deep | every page-table lookup gets one extra dependent load | 16.07 | 18.47 | 10.03 |
+| k5-plan | the existing workgroup address plan (`umLoadAddressPlan`) on all 12 candidates | 15.86 | 17.10 | |
+| k5-cq8 | classifyCoarse takes 8 coarse tiles a workgroup, not 64 | 15.12 | 18.60 | |
+
+How the deep run works: in `PageTableWord`, the flat-window word `r` feeds a
+second load, `buffer[table+(r&1023)]`. That value is masked by a runtime
+zero (`arrayLength(&buffer)==0`), so the result is unchanged but waits for
+the load. It deepens every page lookup in every kernel by one level.
+Results are the same and only the latency changes.
+
+- **Deeper chains cost little.** One extra level on every page lookup
+  moves the switched-on stages by +2% (9.82 -> 10.03 ms) and the step by
+  +0.05 ms.
+  - The most sensitive kernels are classifyCoarse (+0.075 ms, 1.26x),
+    arenaPublishCanonical (+0.044, 1.23x) and dilate (+0.066, 1.17x).
+  - geometryRegional (1.02x), forcesRegularCoarse (0.97x), localSpeed and
+    advectDeferred (1.02-1.07x) barely move.
+  - A table that removes one or two levels can save the same few percent.
+    It cannot take a third off the jump.
+- **The existing staged plan is neutral.** It reads the 27 neighbour page
+  words and vertex homes from workgroup memory. On the 12 candidate
+  kernels the change is noise:
+
+  | kernel | base ms | plan ms |
+  |---|---|---|
+  | forcesRegularCoarse | 0.193 | 0.237 |
+  | forces | 0.094 | 0.112 |
+  | momentumStep | 0.122 | 0.109 |
+  | project | 0.758 | 0.736 |
+  | advectFine | 0.131 | 0.122 |
+  | transferProperties | 0.066 | 0.091 |
+
+  The summed change is about +0.08 ms. This matches the plan's own note that
+  it regressed the splash workload.
+- **Serial loops inside the census group are not the cost.**
+  classifyCoarse's queued error and depth loops run per group. Spreading
+  them over 8x more groups made the kernel 0.28 -> 0.67 ms, so the
+  per-group reset, barriers and census flush cost more than the serial
+  loops saved.
+- **A chain microbenchmark gives the cost per load.** A dependent random load
+  costs about 110 ns at 64 KB, 240 ns at 1 MB and 210-400 ns at 16 MB
+  (marginal, 64 -> 256 loads a lane, 8 or 64 workgroups). Even 256
+  dependent loads a lane cost 40-100 us. A 40-120 us stage would need
+  hundreds of dependent loads per lane, and the deep run shows page lookups
+  are not most of them.
+
+Step 2's per-tile threadgroup working set is not built either. Its own
+premise was that step 1 works, and the deep run shows that removing
+address levels does not reduce stage latency.
+
+What these probes leave open is where a 40-120 us stage's time does go.
+Candidates are low occupancy (a few workgroups on 32 cores), long per-lane
+instruction streams, barriers, and global atomics or census flushes.
+Telling them apart needs per-stage occupancy and limiter counters
+(tools/profile-mini-dam-xctrace.ts with `--counters --isolate-pass-labels`).
+Pointed at this frame, that is a long exclusive run, so it is left for the
+judge to schedule.
