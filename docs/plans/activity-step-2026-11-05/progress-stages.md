@@ -495,3 +495,126 @@ Telling them apart needs per-stage occupancy and limiter counters
 (tools/profile-mini-dam-xctrace.ts with `--counters --isolate-pass-labels`).
 Pointed at this frame, that is a long exclusive run, so it is left for the
 judge to schedule.
+
+## Round 6 (2026-11-06): profiled from outside the process
+
+The new tools/profile-probe-xctrace.ts (05dd8ee7) recorded two runs with
+Metal System Trace: 8x8x4 rest and 8x8x4 drop=2, each 60 steps, pipelined.
+These are the skill's clean regime: no counters, no in-process probes,
+never `--window`, and intervals joined to the encoder list by encoder-id.
+The traced probes ran at a median of 3.50 and 16.29 ms (untraced: 4.0 and
+16.1). An advance runs from one anchor encoder to the next; 57 advances of
+each run were reduced.
+
+| per advance | rest | drop=2 |
+|---|---|---|
+| wall, median (mean) | 3.22 (3.76) ms | 15.76 (18.46) ms |
+| GPU busy, median (mean) | 3.05 (3.58) ms | 15.28 (14.86) ms |
+| idle gaps of 2 us or more | 7.1, 0.18 ms | 9.0, 3.61 ms mean; about 0.5 ms in the median advance |
+| GPU intervals (Metal kicks) | 7 | 9 |
+| CPU encode work (Dawn-poll spin excluded) | 2.60 ms | 7.72 ms |
+| of which Dawn/Tint, JS/V8, Metal driver | 1.18, 1.16, 0.19 | 4.25, 2.18, 1.07 |
+| CPU spin in Atomics.load (Dawn event polling) | 1.60 ms | 2.79 ms |
+| dispatches (f1 counter, untraced) | — | 442 (389 direct, 53 indirect) |
+
+**Largest GPU tasks.** These are medians per advance. The Metal kick is the
+finest unit with a GPU timestamp, and there are only five non-trivial kicks
+per advance. Every remaining kick is a blit of 0.012 ms or less.
+
+| drop=2 kick | ms | rest kick | ms |
+|---|---|---|---|
+| shared frame schedule, 3rd kick | 7.05 | [25 passes] compute copy .. pressure .. live block copy | 2.78 |
+| shared frame schedule, 1st kick | 2.65 | [3p] compute copy .. region dynamics classify | 0.13 |
+| [35p] mixed all-4h solid record .. mixed remap adopt | 2.00 | [7p] mixed all-4h solid record .. live block copy | 0.12 |
+| [24p] mixed remap publish .. shared frame schedule | 1.91 | compute copy | 0.007 |
+| shared frame schedule, 2nd kick | 1.65 | blits | < 0.005 |
+
+The trace cannot name the stages inside the "Uniform shared frame schedule"
+kicks. The sealed regional schedule puts every stage into one WebGPU pass
+(uniform-compute-blit.ts), so 11.35 ms of drop=2 is three kicks of serial
+dispatches. Metal System Trace has no per-dispatch timestamps, and the
+shader timeline stays empty unless counters run.
+
+**Verdict: real GPU work, latency-limited. Not CPU-bound, and not
+gap-bound between kicks.**
+
+- **GPU busy time is the wall time.** In the median drop=2 advance the GPU is
+  busy for 15.28 of 15.76 ms. The 12.2 ms jump over rest is all busy time,
+  in the switched-on kicks that rest does not run.
+- **The CPU is not the bound yet.** Encode work is 7.7 ms per advance, under
+  the GPU's 15.3, and in pipelined mode it overlaps the GPU. It costs about
+  17 us of host time per dispatch (Dawn validation and tracking, NAPI, AGX
+  encode), against 2.6 ms at rest. Once the GPU side halves, it becomes the
+  bound.
+- **Gaps between kicks are small.** There are about 8 encoder switches per
+  advance at about 45 us each, which is about 0.5 ms.
+  - One side defect sits on top. In 15 of 57 drop=2 advances, one gap of
+    2-33 ms appears just before the next advance's first submission.
+  - In those gaps the CPU submits late, yet the main thread is mostly off
+    the CPU: 58 ms of running samples across 190 ms of gaps. So it is
+    blocked, not spinning or encoding.
+  - That causes the mean-over-median excess (18.5 against 15.8 ms) and the
+    untraced p95 of about 30 ms.
+  - Finding the blocking call needs a thread-state (System Trace) capture.
+    It is parked; it is not the 12 ms.
+- **One counter capture tells drain from work inside the kicks.** The
+  capture was taken because the frame-structure trace cannot split a kick.
+  - Setup: Blank template with Metal Application, GPU and Metal GPU
+    Counters. It attached after construction to a probe held at a scratch
+    pre-advance gate, then released all 60 drop=2 advances inside the
+    window (median 16.43 ms under capture).
+  - A first ungated attach, taken during construction, caught none of the
+    advances. Metal pipeline creation under the counter instrument took
+    about 4 min.
+  - Results for uncontended kicks:
+
+  | kick | ms/adv | occupancy | placement | ALU | read / write GB/s | top limiters |
+  |---|---|---|---|---|---|---|
+  | shared schedule, 3rd | 6.04 | 12.1% | 1.12x | 7.7% | 5.0 / 3.4 | ALU 8, LLC 8, MMU 3 |
+  | shared schedule, 1st | 2.14 | 11.3% | 1.02x | 10.2% | 3.3 / 4.6 | ALU 12, LLC 8 |
+  | [35p] solid record .. remap adopt | 1.81 | 9.2% | 1.03x | 9.5% | 4.6 / 2.8 | ALU 11, LLC 6 |
+  | [24p] remap publish .. | 1.77 | 10.9% | 1.02x | 11.0% | 4.3 / 4.6 | ALU 12, LLC 10, MMU 8 |
+  | shared schedule, 2nd | 1.56 | 9.0% | 1.04x | 7.7% | 3.8 / 5.3 | LLC 10, ALU 8 |
+
+  - How occupancy samples spread over kick time: under 0.5% for 7.7% of
+    the time and 0.5-2% for 6.0%. Between 5% and 40% for 71%.
+  - So the barrier and drain between the ~440 serial dispatches is at most
+    about 14% of kick time. That matches the ~4 us dependent-launch floor
+    measured in uniform-compute-blit.ts (442 x 4 us = 1.8 ms).
+  - The remaining ~85% is kernels that are resident but stalled. About an
+    eighth of the machine's slots are filled, spread evenly over the four
+    partitions, with ALU near 10%. Bandwidth is 1-2% of peak, and no
+    limiter is above 12%.
+  - Each dispatch has too little parallel work in flight to hide its own
+    latency. Dispatches run one after another, so those latencies add up
+    along a chain of about 440.
+
+**Matching structural fix.**
+
+The cost is serial latency per dependent dispatch. It is not bandwidth,
+ALU or capacity, and no stage is over a tenth (round 4). The fix therefore
+has to change how many dependent steps the switched-on frame takes and how
+much independent work each step carries. Tuning any one kernel will not
+do it. It must also cut dispatch count, because host encode at about
+17 us per dispatch binds next.
+
+- **Default proposal: run the switched-on frame as a block-local pipeline.**
+  - One workgroup per active block runs that block's whole stage chain, with
+    workgroup barriers and its working set in threadgroup memory.
+  - The places where a block needs a neighbour's result from the same
+    frame become the only global dispatch boundaries. Examples: remap
+    publication, the pressure solve, and the face exchange before projection.
+  - This replaces ~440 dispatches with a few tens. Different blocks' latency
+    chains then overlap on the GPU instead of being serialised by global
+    barriers.
+- **Smaller step if that is too wide: dispatch by dependency level.**
+  - Stages with no data dependency between them go into one dispatch,
+    selected by workgroup id, so they fill each other's idle slots.
+  - The schedule's existing stage list is the dependency graph to level.
+    That gives the expected win before any kernel is rewritten: the depth
+    of the leveled graph against the current 442.
+
+Counters taken: one capture, the gated one above. A per-stage split inside
+the kicks would need the shader timeline in launch mode. Under counters,
+construction alone is about 4 min, so it was not taken. The dependency
+leveling gives the stage-level answer offline.
