@@ -1058,3 +1058,57 @@ the seep wall's (or the throat's) voxel faces, coupled at V = 0.5 to clamped
 inside-solid rows. That is candidate 3. The next measurement is the
 neighbour's kinds across the half face (active? inside?). It needs no
 coordinates.
+
+### Round 10, candidate 3 measured: the neighbour is inside the solid but free
+
+The classifier now reads the neighbour across a row's first half-open band
+face (c/u in [0.45, 0.55)) through pNear0 in pRestrict0, so it uses no
+positions. Seep ran for 60 steps; the figures are from frames 21-60, as a
+geometric mean of the largest residual per class, then the number of rows
+past target per frame.
+
+**Run nb1 (does the neighbour clamp?).** The classes are for rows outside
+the solid, by their neighbour across the half face:
+- c1: inside, active, at its bound (x + base <= 0);
+- c2: inside, active, free;
+- c3: inside, inactive;
+- c4 and c5: not inside;
+- c6: the row is itself inside;
+- c0: every other row.
+
+| after cycle | c0 | c1 | c2 | c6 | c2 sets the max |
+|---|---|---|---|---|---|
+| 0 | 81.9 / 1410 | 11.1 / 9 | 27.4 / 112 | 3.64 / 107 | 14 of 40 |
+| 1 | 2.01 / 308 | 0.575 / 5 | 3.45 / 85 | 0.373 / 52 | 26 of 40 |
+| 2 | 0.222 / 159 | 0.052 / 3 | 0.645 / 44 | 0.070 / 16 | 33 of 40 |
+| 3 | 0.033 / 68 | 0.020 / 2 | 0.069 / 20 | 0.008 / 5 | 34 of 40 |
+
+Inside rows whose clamp state (P_CORRECT) changed: 4.4, 0.7 and 0.5 a frame
+after cycles 1-3.
+
+**Run nb2 (is the neighbour dangling?).** Rows with an inside, active and
+free neighbour are split by whether the half face lies inside the level-1
+aggregate, and whether the neighbour has one face that is neither closed
+nor Neumann (a dangling row) or more than one:
+
+| after cycle | c0 | out of aggregate, dangling | out of aggregate, more than one face | inside the aggregate |
+|---|---|---|---|---|
+| 0 | 105 / 1445 | 25.1 / 102 | 7.16 / 170 | none |
+| 1 | 2.26 / 305 | 3.42 / 79 | 1.11 / 12 | none |
+| 2 | 0.218 / 155 | 0.651 / 39 | 0.258 / 4 | none |
+| 3 | 0.035 / 66 | 0.064 / 18 | 0.024 / 1 | none |
+
+**Reading.**
+- **Candidate 3 is not the cause.** The slow rows' neighbour is an inside,
+  active row, but its clamp is not active and barely toggles.
+- **Every half face crosses the level-1 aggregate boundary.** The wall and
+  throat planes lie at even cells.
+- **The neighbour is a dangling row.** Its only open link is the half face.
+  Its aggregate holds only such rows, so the coarse cell couples only
+  outward. Under P_SCALE that cell's diagonal and coupling are both half
+  the Galerkin sum. Its coarse jump against the fluid aggregate is then
+  twice the fine row's (r/c). Its transmitted flux stays exact.
+- **Hypothesis, not tested:** the trilinear pProlong0 then spreads a quarter
+  of that overshoot onto the fluid rows beside the wall.
+- Per the judge's rule, no fix has been fitted. Candidate 3 is reported as
+  ruled out.
