@@ -35,7 +35,7 @@ import { rebaseClothRuntime, editedSourceFields } from "../../cloth/rebase";
 import { clothContainerColliders, clothSceneStaticColliders } from "../../cloth/scene-contact";
 import { composeClothFeatures, narrowBandClothGridFeature, clothPorousCouplingFeature, clothLocalWaterExchangeFeature, clothPorousTransportFeature, clothWetCohesionFeature } from "../../cloth/definition";
 import type { ClothSurfacePublication } from "../../cloth/types";
-import { UniformClothGridCoupling } from "./uniform-cloth-grid-coupling";
+import { UniformClothGridCoupling, type UniformClothGridFields } from "./uniform-cloth-grid-coupling";
 import { UniformClothWaterExchange } from "./uniform-cloth-water-exchange";
 import { UniformSourceResidentTermination } from "./uniform-source-resident-termination";
 import { UniformSourceWater } from "./uniform-source-water";
@@ -43,6 +43,8 @@ import { SourceMotionRuntime, sourceFieldBounds } from "../../cloth/source-motio
 import { SourceEmissionScheduler } from "../../cloth/source-fields";
 import { sourceWaterOperations, sourceTerminationBoundaryBounds } from "../../cloth/source-water";
 import { ClothGPUPoreTransport, clothPoreTopology } from "../../cloth/gpu-pore-transport";
+import { UniformClothGPUPoreExchange } from "./uniform-cloth-gpu-pore-exchange";
+import { UniformGPUOrderingKernels } from "./uniform-gpu-radix-sort";
 import { prepareClothCohesion, resolveClothCohesion, type ClothCohesionPair } from "../../cloth/cohesion";
 import { clothSceneSolidSamples } from "../../cloth/solid-samples";
 import { wetClothSource } from "../../cloth/scenes/sources";
@@ -1184,16 +1186,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private clothRuntimes: ClothRuntime[] = [];
   private clothCouplings: UniformClothGridCoupling[] = [];
   private clothWaterExchanges: UniformClothWaterExchange[] = [];
-  /** GPU manifold pore transport, one a runtime topology (advanceClothPoreTransport is its test oracle). */
-  private clothPoreTransports = new Map<ClothRuntime, { prepared: unknown; transport: ClothGPUPoreTransport }>();
-  private async clothPoreTransport(runtime: ClothRuntime): Promise<ClothGPUPoreTransport> {
-    for (const [key, entry] of this.clothPoreTransports) if (!this.clothRuntimes.includes(key) || (key === runtime && entry.prepared !== runtime.prepared)) { entry.transport.destroy(); this.clothPoreTransports.delete(key); }
+  /** GPU pore exchange and manifold transport, one a runtime topology and fields (the
+   * water exchange's sample/capture/release/commit and advanceClothPoreTransport are their test oracles). */
+  private clothPoreTransports = new Map<ClothRuntime, { prepared: unknown; fields: unknown; transport: ClothGPUPoreTransport; exchange: UniformClothGPUPoreExchange }>();
+  private clothOrderingKernels?: Promise<UniformGPUOrderingKernels>;
+  private async clothPoreExchange(runtime: ClothRuntime, fields: UniformClothGridFields): Promise<UniformClothGPUPoreExchange> {
+    for (const [key, entry] of this.clothPoreTransports) if (!this.clothRuntimes.includes(key) || (key === runtime && (entry.prepared !== runtime.prepared || entry.fields !== fields))) { entry.exchange.destroy(); entry.transport.destroy(); this.clothPoreTransports.delete(key); }
     let entry = this.clothPoreTransports.get(runtime);
     if (!entry) {
       const transport = new ClothGPUPoreTransport(this.device, clothPoreTopology(runtime.prepared.data, runtime.document.materials, runtime.prepared.vertexCount), runtime.state.restControlVolume_m3);
-      await transport.initialize(); entry = { prepared: runtime.prepared, transport }; this.clothPoreTransports.set(runtime, entry);
+      await transport.initialize();
+      this.clothOrderingKernels ??= UniformGPUOrderingKernels.create(this.device);
+      const exchange = new UniformClothGPUPoreExchange(fields, transport, await this.clothOrderingKernels); await exchange.initialize();
+      entry = { prepared: runtime.prepared, fields, transport, exchange }; this.clothPoreTransports.set(runtime, entry);
     }
-    return entry.transport;
+    return entry.exchange;
   }
   private clothWaterPublications: readonly ClothWaterLedger[] = [];
   private sourceWater?: UniformSourceWater;
@@ -1360,24 +1367,19 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         reactions.push(...report.contacts.reactions);
         // Lie split at the accepted FLIP field: capture before release prevents
         // freshly squeezed water from being recaptured in the same substep.
-        // Both transactions alter native phi, its volume budget and momentum.
-        const step={state:runtime.state,data:runtime.prepared.data,kinematicFixed:runtime.prepared.kinematicFixed,materials:runtime.document.materials,physics:runtime.document.physics,identity:runtime.identity,dt_s};
         // One native sample at the accepted material positions serves the
-        // aperture basis, capture reservoir, seepage and momentum exchange.
-        const sample=await water.sampleSupport(runtime.state.positions_m);
-        mark=clothPhase('supportSample',mark);
-        const captured=water.captureFromSample(step,sample,runtime.prepared.vertexMaterial);
-        mark=clothPhase('capture',mark);
+        // aperture basis, capture reservoir, seepage and momentum exchange;
+        // sample, capture, manifold transport, release, the capacity table and
+        // the paired budget commit run on the GPU in one submit and one readback.
         const solidAcceleration=Float64Array.from(runtime.state.velocities_m_s,(v,k)=>(v-beforeVelocity[k]!)/dt_s);
-        const poreTransport=await this.clothPoreTransport(runtime);
+        const poreExchange=await this.clothPoreExchange(runtime,water.fields);
         mark=clothPhase('poreTransportSetup',mark);
-        const pore=await poreTransport.advance({positions_m:runtime.state.positions_m,velocities_m_s:runtime.state.velocities_m_s,controlVolume_m3:runtime.state.controlVolume_m3,solidVolume_m3:runtime.state.solidVolume_m3,solidFraction:runtime.state.solidFraction,dryMass_kg:runtime.state.dryMass_kg,waterVolume_m3:runtime.state.waterVolume_m3,
-          fixed:runtime.prepared.kinematicFixed,materials:runtime.document.materials,physics:runtime.document.physics,dt_s,gravity_m_s2:[g.x,g.y,g.z],pressureAcceleration_m_s2:exchange.fluidPressureAcceleration_m_s2,solidAcceleration_m_s2:solidAcceleration});
-        if(pore){runtime.state.waterVolume_m3.set(pore.waterVolume_m3);runtime.state.velocities_m_s.set(pore.velocities_m_s);if(pore.gpu_ms!==undefined)clothPhase('poreTransportGpu',0,pore.gpu_ms);}
-        mark=clothPhase('poreTransport',mark);
-        const released=water.releaseFromSample(step,sample);
-        waterLedgers.push(water.commitPoreWater(step,released.reduce((a,b)=>a+b,0)-captured.reduce((a,b)=>a+b,0)));
-        mark=clothPhase('releaseCommit',mark);
+        const pore=await poreExchange.step({positions_m:runtime.state.positions_m,velocities_m_s:runtime.state.velocities_m_s,controlVolume_m3:runtime.state.controlVolume_m3,solidVolume_m3:runtime.state.solidVolume_m3,solidFraction:runtime.state.solidFraction,dryMass_kg:runtime.state.dryMass_kg,waterVolume_m3:runtime.state.waterVolume_m3,
+          fixed:runtime.prepared.kinematicFixed,materials:runtime.document.materials,physics:runtime.document.physics,dt_s,gravity_m_s2:[g.x,g.y,g.z],pressureAcceleration_m_s2:exchange.fluidPressureAcceleration_m_s2,solidAcceleration_m_s2:solidAcceleration,identity:runtime.identity,vertexMaterial:runtime.prepared.vertexMaterial});
+        runtime.state.waterVolume_m3.set(pore.waterVolume_m3);runtime.state.velocities_m_s.set(pore.velocities_m_s);
+        if(pore.gpu_ms!==undefined)clothPhase('poreExchangeGpu',0,pore.gpu_ms);
+        waterLedgers.push(pore.ledger);
+        mark=clothPhase('poreExchange',mark);
 
       }
       if (!this.scene.interaction?.entities.length) await this.rigidSystem.applyExternalImpulses(reactions);
@@ -3895,7 +3897,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (this.disposed) return;
     this.disposed = true;
     for (const exchange of this.clothWaterExchanges) exchange.destroy();
-    for (const entry of this.clothPoreTransports.values()) entry.transport.destroy();
+    for (const entry of this.clothPoreTransports.values()) { entry.exchange.destroy(); entry.transport.destroy(); }
     this.clothPoreTransports.clear();
     this.clothWaterExchanges=[];
     for (const coupling of this.clothCouplings) coupling.destroy();

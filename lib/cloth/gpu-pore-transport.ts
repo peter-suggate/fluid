@@ -22,8 +22,9 @@ const STATUS_MESSAGES: readonly [number, string][] = [
 
 /** Full rest control volume spans 2^26 quanta: 32x headroom to int32. */
 export const PORE_QUANTUM_BITS = 26;
-export const MATERIAL_FLOATS = 8;
-const GAUSS_VEC4 = 8, TERM_VEC4 = 2;
+/** Floats a material in clothPoreMaterialTable. */
+export const CLOTH_PORE_MATERIAL_FLOATS = 8;
+const MATERIAL_FLOATS = CLOTH_PORE_MATERIAL_FLOATS, GAUSS_VEC4 = 8, TERM_VEC4 = 2;
 
 export function clothPoreQuantum(restControlVolume_m3: ArrayLike<number>): number {
   let largest = 0; for (let i = 0; i < restControlVolume_m3.length; i++) largest = Math.max(largest, restControlVolume_m3[i]!);
