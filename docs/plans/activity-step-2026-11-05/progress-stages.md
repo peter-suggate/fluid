@@ -776,3 +776,72 @@ It replaces pDown4, pTail and pUp4. It compiles and converges (drift
 **Conclusion.** The resident coarse solve is bounded below 1 ms of drop=2's
 ~13 ms, and it buys no cycles. The 2 ms target is not reachable through the
 coarse levels.
+
+## Round 8, fine-level contraction on drop=2 (2026-11-06)
+
+**Setup.** Unpipelined traces (`probe-tank-pressure-trace --drop=2
+--diagnostics`, 8x8x4, 60 steps), clean exports of d4769214. The tables
+summarise the residual after cycle 1 (diagnostics row 1) over frames 21-60.
+Each entry is the class's largest residual (geomean over frames) and its mean
+count of rows past the 0.05 target.
+
+**Row classes** (pDiagClass, pDiagNative):
+- band: 1 seam, 2 wall, 7 free surface (an open or ghost face, or a non-unit
+  band face);
+- native 4h: 4 interior, 5 seam, 6 wall.
+
+| variant | cycles | m1 | c7 surface | c1 band seam | c5 native seam | c4 native | argmax (frames) |
+|---|---|---|---|---|---|---|---|
+| HEAD (3 band sweeps, 1 native) | 75 | 0.078 | 0.070/36 | 0.064/20 | 0.047/2.6 | 0.043/2.1 | 7:23 5:10 1:6 |
+| band sweeps 2 | 83 | 0.110 | 0.108/130 | 0.076/20 | 0.033/1.9 | 0.030/1.6 | 7:36 |
+| band sweeps 5 | 57 | 0.052 | 0.023/0.6 | 0.032/1.6 | 0.048/3.3 | 0.038/2.3 | 5:29 1:9 |
+| band sweeps 8 | 55 | 0.045 | 0.008/0 | 0.022/0.9 | 0.042/1.9 | 0.032/1.0 | 5:33 |
+| native sweeps 2 | 80 | 0.104 | 0.103/141 | 0.087/64 | 0.018/0.2 | 0.022/0.6 | 7:38 |
+| band 5, native 2 | 69 | 0.067 | 0.049/27 | 0.065/38 | 0.024/0.6 | 0.028/1.3 | 1:32 |
+| global red-black band sweep (halo red rows) | 83 | 0.081 | 0.063/26 | 0.064/21 | 0.058/4.2 | 0.047/3.1 | 5:16 1:13 7:10 |
+| natives between band sweeps (2 + native + 1) | 83 | 0.097 | 0.082/66 | 0.072/27 | 0.065/5.7 | 0.049/4.0 | 7:25 5:15 |
+| natives before band sweeps, band 5 | 61 | 0.055 | 0.031/3 | 0.025/1.4 | 0.053/3.0 | 0.028/1.0 | 5:34 |
+| coarseScale 0.4 | 78 | 0.085 | 0.078/80 | 0.071/40 | 0.047/2.4 | 0.042/1.9 | 7:32 |
+| coarseScale 0.65 | 79 | 0.092 | 0.086/115 | 0.078/52 | 0.043/2.0 | 0.037/1.2 | 7:32 |
+
+**Findings.**
+- **Which rows hold the residual:** above the target after one cycle are
+  the band's free-surface rows (class 7), then the band and native seam
+  rows. The 2h, BULK16 and wall classes stay under it.
+- **The tile-block smoother is not the cause:** the band sweep is red-black
+  inside a 4h tile and block Jacobi across tiles. A global red-black band
+  sweep (each black row recomputes its cross-tile red neighbours from plane
+  pSrc, deterministic in one launch) leaves class 7 at 0.063.
+- **No flip at the fine levels, partly unmeasured:** there is no
+  sign-flipping mode like the 16h one before 1058cc0b, because the global
+  sweep would have removed it. The diagnostics record no per-row sign ratio
+  for band rows, so a flip there is not directly measured. BULK16 rows
+  still flip by more than 1/3 after cycle 1 in 1-8 frames of 40 on drop=2
+  (largest 0.5-1.2), but they are never the largest residual.
+- **The coarse operator does not move the surface rows:** coarseScale 0.4
+  or 0.65 leaves class 7 where it is, and so did a near-exact 8h solve
+  (round 7). Only fine smoothing reduces the free-surface rows: 5 band
+  sweeps take them from 0.070 to 0.023.
+- **The next limit is the h/4h seam:** band and native seam rows trade off.
+  - More native sweeps lower class 5 (0.047 to 0.018) but raise the band
+    surface and seam rows.
+  - More band sweeps leave class 5 at 0.042-0.053.
+  - Reordering (natives first, or between the band sweeps) does not
+    remove it.
+  - The native 4h row's seam couples to 16 h cells, and the alternating
+    smoothers leave the interface's residual on whichever side ran first.
+    That interface operator is what limits a one-cycle solve.
+
+**Timing.** Pipelined, steadyMedian, one run each:
+
+| band sweeps | steadyMedian ms | live particles at step 60 |
+|---|---|---|
+| 3 (HEAD) | 14.32 | 8198 |
+| 4 | 13.34 | 5748 |
+| 5 | 14.08 | 8584 |
+
+The scene state diverges between variants: live particles at step 60 vary by
+up to 50%. A single-run difference below about 1 ms is therefore not
+resolved. The estimate from cycles is that 5 band sweeps save about 0.35
+cycles a frame, minus 7 more band launches (16 us each, net): about 0.5 ms.
+That is under the 1 ms gate, and nothing has landed.
