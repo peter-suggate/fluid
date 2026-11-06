@@ -72,3 +72,50 @@ run each (`--steps=60` tank/drop, seep 300, letters 120).
   tank. Not built.
 - Any further launch gating must avoid indirect dispatch (Dawn's validation
   dispatch per call) or show a net gain on the drop.
+
+## Round 2: the 16h up leg red-black over pages
+
+- The frame map is not an extrapolation: the warm start is the presented
+  pressure, the projection leaves r(n) in the velocity and gravity adds the
+  same G each frame, so init(n+1) = r(n) + G - A p(n) and G - A p(n) =
+  r(n) - r(n-1). Any warm-started inexact projection does this; the fix is
+  a cycle that does not flip sign.
+- The flip was pUp4 (the 16h post-smoothing): each page swept its rows against
+  its neighbours' rows from before their own sweep (block Jacobi), with half
+  of a 16h row's couplings leaving its page. Landed: the last of the three
+  tail cycles runs pUp4 as two colour passes by page parity (colour 1 reads
+  its face and corner neighbours' result: block Gauss-Seidel). The first two
+  stay one Jacobi pass. Two Jacobi passes square the flip, so they keep a
+  nonnegative spectrum, and the last pass's Gauss-Seidel damps them. One
+  extra dependent pass per V-cycle.
+- Trace (16x8x8 rest, unpipelined, last-only): the largest first-cycle sign
+  flip falls from 0.47-0.67 (about 5000 rows) to at most 0.16 (50 rows, one
+  frame); 5 of 12 frames run 0 cycles; drift 0. A damped block Jacobi (weight
+  0.5, one pass) left flips at 0.95 and the pipelined tank at 7.69 ms:
+  dropped.
+- tests/pressure-tail-red-black.test.ts (8x4x4 rest tank, diagnostics): the
+  largest flip stays under 1/3. With the one-pass Jacobi it fails at 0.54.
+
+Arms on ca39ca77 (one run each, paired, same export):
+
+| arm | tank 16x8x8 | drop=2 | drop=8 / drift | seep / drift | letters / drift |
+| --- | --- | --- | --- | --- | --- |
+| Jacobi | 8.07 (late 8.03; 3 of 50 frames at 0 cycles) | 17.61 | 24.44 / -6.9e-5 | 32.45 / +2.96e-4 | 54.45 (late 77.84) / -8.86e-3 |
+| red-black, every tail cycle | 5.80 (late 5.04; 30 of 50) | 18.42 | 23.62 / -6.1e-5 | 32.07 / +2.34e-4 | 58.00 (late 83.43) / -9.32e-3 |
+| red-black, every cycle, half launches | 6.44 (late 5.61) | 18.41 | 23.36 / -5.5e-5 | 31.48 / +4.22e-4 | 55.36 (late 79.17) / -9.04e-3 |
+| **red-black, last tail cycle (landed)** | **5.67** (late 5.67) | **17.27** | **21.54** / -5.1e-5 | **31.57** / +4.1e-4 | 57.25 (late 76.47) / -9.01e-3 |
+
+On HEAD a44ed3aa (clean export, paired): tank 9.57 -> 7.10, drop=2 20.11 ->
+19.91. HEAD's own tank is slower than ca39ca77's 8.07 (the cloth commit's
+arena hunks or the shared GPU); the landed arm still removes about 2.5 ms.
+
+- A 0-cycle tank frame runs 4.9-5.3 ms, a cycled one 8.0-8.9.
+- Every-cycle red-black costs letters 12 dependent passes a frame: under the
+  kernel timer pUp4 rose 0.29 -> 0.65 ms. Half launches (two pages a
+  workgroup) were no cheaper (0.74). Last-only adds 4 passes. Letters' wall
+  median is noisy (control and Jacobi, same code, 55.02 / 54.45), and its late
+  half improves.
+- Drift is within 3% everywhere: seep +4.1e-4, letters -0.90% (Jacobi -0.89%).
+- Open: pDown3's per-page 16h pre-step is still block Jacobi; the remaining
+  cycled rest frames come from native interior rows near the 1e-6 floor;
+  the solve is not bit-reproducible run to run, so only paired runs compare.

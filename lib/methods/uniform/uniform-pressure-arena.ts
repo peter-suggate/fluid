@@ -2923,9 +2923,19 @@ fn sRow(block:u32,at:u32,d:f32)->f32{
 }`,
    // 16h up (a page a group): the 32h correction prolonged into the page's
    // 16h rows and their ring (two deep: the neighbours' rows plus their own
-   // prolonged correction), the rows' sweeps against the ring, into Y.
+   // prolonged correction), the rows' sweeps against the ring, into Y. The
+   // page tail's pages take it red-black (pColour, by page parity): a colour
+   // 1 page's ring across a face (or corner) is its colour 0 neighbour's
+   // result, so the pages' update is block Gauss-Seidel (pColour 2 is the
+   // plain one-pass block Jacobi). As block Jacobi
+   // (every page against its neighbours' rows before their sweeps), half a
+   // 16h row's couplings leave its page and the page-checkerboard mode
+   // flips sign: the BULK16 rows' first cycle left them at -0.47..-0.67 of
+   // their start, past the -1/3 the warm-started frames hold.
    up4:header()+poolWGSL+tail+/* wgsl */`
 override pTailY:bool=false;
+override pColour:u32=2u;
+fn uColour(block:u32)->u32{${BP?"if((block&BA)!=0u){let page=bsPage(block&0x7fffffffu);return u32(page.x+page.y+page.z)&1u;}":""}let page=umBlockPage(block);return (page.x+page.y+page.z)&1u;}
 var<workgroup> vX:array<f32,216>;
 var<workgroup> uN:u32;
 fn vBox(g:vec3i)->u32{let q=vec3u(g+2);return q.x+6u*(q.y+6u*q.z);}
@@ -2936,13 +2946,15 @@ var<workgroup> uM:u32;
  let n=workgroupUniformLoad(&uN);let n2=workgroupUniformLoad(&uM);
  for(var e=group.x;e<n;e+=groups.x){
   let slot=tItem(e,n2);
-  if(lane==0u){uN=u32(tPageLive(slot));}
+  if(lane==0u){uN=u32(tPageLive(slot)&&(pColour==2u||uColour(slot)==pColour));}
   if(workgroupUniformLoad(&uN)==0u){continue;}
   if(lane<216u){
    let g=vec3i(vec3u(lane%6u,(lane/6u)%6u,lane/36u))-2;let at=tAt(slot,4u,g);var x=0.0;
-   if(at!=UB_NONE_ID&&tF(PT_D,at)>0.0){
+   let G=g>>vec3u(1u);
+   if(at!=UB_NONE_ID&&tF(PT_D,at)>0.0&&pColour==1u&&((abs(G.x)+abs(G.y)+abs(G.z))&1)==1){x=tF(PT_Y,at);}
+   else if(at!=UB_NONE_ID&&tF(PT_D,at)>0.0){
     x=tF(PT_X,at);
-    let G=g>>vec3u(1u);let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
+    let o=select(vec3i(-1),vec3i(1),(g&vec3i(1))==vec3i(1));var sum=0.0;var total=0.0;
     for(var i=0u;i<8u;i++){
      let dd=vec3i(vec3u(i&1u,(i>>1u)&1u,i>>2u));let q=G+dd*o;if(any(abs(q)>vec3i(1))){continue;}
      let m=tAt(slot,5u,q);if(m!=UB_NONE_ID&&tF(PT_D,m)>0.0){sum+=uWeight(dd)*tF(select(PT_X,PT_Y,pTailY),m);total+=uWeight(dd);}
@@ -3648,7 +3660,8 @@ fn sProlong6(g:vec3i)->f32{
    ...Object.fromEntries(["kStart","kApplyT","kApplyN","kApplyNB","kBound","kStep"].map(k=>[k,[["0",{kPlane:0}],["1",{kPlane:1}]] as Variant[]])),
    kReduce:Array.from({length:schedule.cycles-1},(_,k)=>[`@${k+1}`,{kCycle:k+1}] as Variant),
    pDownA:[["",{}],["@0",{pBake:1}]],pBulkRows:[["",{}],["P",{pResolve:1}]],pInit:[["",{}],["P",{pPicard:1}]],pRebase:[["",{}],["K",{pStash:1}],["P",{pStash:2}],["C",{pCorrection:1}]],pDownB:[["",{}],["@0",{pBake:1}]],pDown3:[["",{}],["Y",{pSrcY:1}]],pUp3:[["",{}],["Y",{pSrcY:1}]],
-   ...(W?{sGroup7:[["",{}],["C",{sList:0}]] as Variant[],pUp4:[["",{}],["S",{pTailY:1}]] as Variant[]}:{}),
+   pUp4:W?[["",{}],["S",{pTailY:1}]]:[["",{}],["@0",{pColour:0}],["@1",{pColour:1}]],
+   ...(W?{sGroup7:[["",{}],["C",{sList:0}]] as Variant[]}:{}),
   };
   this.verdict=await this.verdictPipeline();
   if(this.launch)this.launcher=await this.launchPipeline();
@@ -3845,8 +3858,11 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
      this.dispatch(pass,"sTail7",1);this.dispatch(pass,"sUp7",groups7);this.dispatch(pass,"sUp6",items);this.dispatch(pass,"pUp4S",pages);
     }else{
      // The page tail, never with the super-block tail (the constructor's
-     // invariant): its staged index shares sUp6's 32h Y word.
-     this.dispatch(pass,"pDown4",items);this.dispatch(pass,"pTail",1);this.dispatch(pass,"pUp4",items);
+     // invariant): its staged index shares sUp6's 32h Y word. The last
+     // tail cycle's up leg goes red-black (two passes); the others stay one
+     // block Jacobi pass, which the Gauss-Seidel pass after them damps.
+     this.dispatch(pass,"pDown4",items);this.dispatch(pass,"pTail",1);
+     if(m===s.tailCycles-1){this.dispatch(pass,"pUp4@0",items);this.dispatch(pass,"pUp4@1",items);}else this.dispatch(pass,"pUp4",items);
     }
     this.dispatch(pass,"pUp3"+y,either);
    }
