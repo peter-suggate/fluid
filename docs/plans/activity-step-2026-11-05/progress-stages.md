@@ -1021,3 +1021,40 @@ centre. That is a geometry question as well as a solver one.
 
 **Next measurement:** read these rows' six face kinds and coefficients, and
 whether the z = -1 neighbour is an active inside row.
+
+### Round 10 correction: the position bins above are invalid
+
+The position-based bins in "where the slow aperture rows are" are wrong.
+- **What happened:** the classifier computed a band row's cell as
+  `ubaOrigin(ubaBrick(slot)) + local`. In the cycle-measure modules (restrict
+  and residual) that does not give lattice coordinates. Every band row came
+  out at z > 65 in a 64-deep box, although the box origin is (0,0,0)
+  (address.boxPage and pool.box.origin, read from the solver).
+- **Why it looked like signal:** every x, y and z split put all aperture
+  rows in the same bin. The bins shared class slots with the native classes
+  4, 5 and 6, which made the splits look informative.
+- **Withdrawn:** downstream, side-wall layer, the z = 0 tangential-face
+  aperture, and the solid being half a cell thick.
+
+**What still holds.** These tests use no coordinates:
+- the slow rows are band rows whose first below-unit band face has c/u in
+  [0.45, 0.55);
+- that face is normal to x or y, not z.
+
+**The geometry convention, from umPressureFaceV:**
+- A face between a voxel cell and an open cell is `0.5*(open + open)`. That
+  is 0.5 against a full voxel: the CM11a dual-cell V, documented as "a wall
+  page is voxels: its face holds half the open fraction of the cell this
+  side of it".
+- A face neither of whose cells is a voxel is 1.0. umSolidFaceClear applies
+  when the tile is clear; otherwise it is the dual unit box's open fraction.
+
+So a tangential face beside a voxel wall is fully open. A half-open band
+face means the row's neighbour across that face is a voxel cell: a band row
+inside the solid, since liquid phi continues through walls.
+
+**Inference, not yet measured:** the slow rows are probably the rows beside
+the seep wall's (or the throat's) voxel faces, coupled at V = 0.5 to clamped
+inside-solid rows. That is candidate 3. The next measurement is the
+neighbour's kinds across the half face (active? inside?). It needs no
+coordinates.
