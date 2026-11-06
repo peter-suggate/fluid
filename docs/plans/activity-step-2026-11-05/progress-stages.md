@@ -943,7 +943,30 @@ faces and the wall rows. Two questions to answer there:
     "merge cap". It passes in a clean HEAD export both with and without the
     fix, so it comes from uncommitted hunks in the shared checkout.
 
-## Round 10: the seep's slow rows (in progress)
+## Round 10: the seep's slow rows (parked)
+
+**Parked (2026-11-07).** After three rounds on seep convergence, cycles stay
+at 144 over frames 21-60 before and after every change tried.
+- **Known:** the rows that set seep's 3-4 cycles a frame are fluid rows
+  beside a voxel face of the wall or throat. Their neighbour across the face,
+  at the CM11a dual-cell weight V = 0.5, is an inside-solid band row. That
+  row is active and free (not at its clamp, and it barely toggles), and
+  dangling: the half face is its only open link. The face always crosses a
+  level-1 aggregate boundary, because the wall planes lie at even cells.
+  These rows contract only 5-10x a cycle, against about 46x for the other
+  rows on the first cycle.
+- **Ruled out:**
+  - a representation bug: the 0.5 is the documented CM11a weight, and
+    tangential faces beside a wall are fully open;
+  - candidate 3, clamped rows hidden from the coarse levels: pRebaseC
+    already rebakes level 1 from the clamp flags every cycle, and the
+    neighbours are free;
+  - operator-dependent prolongation;
+  - P_SCALE misapplied to the dangling aggregates: the derived link between
+    pressure centres left the contraction unmoved.
+- **Remaining:** candidates 1 and 2 (the inner fixed-zero weight, and
+  rFixed's aperture) were not reached. Only the surface operator fix,
+  a05b6782, landed.
 
 **Per-cycle class breakdown on seep.** Check-mode trace, 60 steps, frames
 21-60, geomean largest residual / rows past target. "Aperture" means band
