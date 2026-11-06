@@ -284,3 +284,70 @@ regions) lives in the loops of the kernels named above. Those loops would
 have to stride the active-region list instead of every coarse tile or
 page. Round 1's knockout of two of them (census decide, the extension's
 coarse sweep) gained nothing measurable, so each is worth <= 0.16 ms.
+
+## Round 4, item 1: NB-FLIP grid kernels stride by their launch (30e038c8)
+
+The round-3 knockout result (every NB grid launch at 64 changed the physics)
+had a static cause, so no bisect was needed. Sixteen NB-FLIP kernels looped
+over their items with a stride of `65536u`, which is 64 lanes x the fixed
+1024-workgroup grid:
+- activity, activitySpread, countInitial, seedInitial, diagnoseBefore;
+- depthLists, surfaceCells;
+- coarseCorners, couple, coarseBuilds, depthCoarse, redistanceCoarse;
+- airSeeds, airSpread0-2, airGate, airClearCoarse.
+
+At 1024 they cover every item, so no live scene dropped work. At a
+narrower grid they skipped every item past their own lanes. Every other
+NB grid entry already strides by `num_workgroups` or is certified
+(uniformMixedCertifiedEntriesWGSL; surfaceClear is certified in
+narrow-band-surface itself). The region launches loop, and the counted
+launch is indirect. The only literal-width dispatch in lib is the NB grid.
+
+The fix strides those sixteen by `64 x num_workgroups`. At 1024 this is the
+same stride, so nothing changes in any scene today.
+
+`tests/nbflip-launch-width.test.ts` has two checks:
+- a source scan: no NB file strides by a literal grid;
+- a GPU dam break whose NB-FLIP direct launches are capped at 3 workgroups
+  must match full width within 2% in samples and within 0.5 in band centre.
+
+| tree | full-width samples | 3 workgroups | result |
+|---|---|---|---|
+| HEAD 0dd7c9b3 | 8170 | 6266 | fails |
+| with the fix | within 2% | | passes |
+
+Knockout again, the NB grid at 64 on 8x8x4 drop=2 (60 steps):
+
+| run | tiers C/W/H at 60 | particles | drift |
+|---|---|---|---|
+| grid 1024 | 370/138/4 | 7.9k | -4.3e-7 |
+| grid 64, fixed | 372/135/5 | 9.7k | -6.2e-8 |
+| grid 64, before (16x8x4, round 3) | 977/43/4 | 2.6k | -3.1e-7 |
+
+drop=2 particle counts spread 6-10k run to run, so 9.7k is inside it.
+
+Cross-scene gates on the fix. Tree: 0dd7c9b3 + the fix. That holds the
+same NB files as 30e038c8 and none of the wet-cloth working-tree hunks.
+
+| run | median ms | drift | particles | notes |
+|---|---|---|---|---|
+| seep 300, fix | 38.08 | +0.022% | 102.6k | 421+69 dispatches |
+| seep 300, 0dd7c9b3 without the fix | 38.06 | +0.030% | 100.6k | 421+69 |
+| seep 300, cd6b085f (round 1 baseline) | 29.43 | -0.064% | 70.3k | 421+69 |
+| letters 120, fix | 63.37 | -0.916% | 993k | H 486, fine 8128 |
+| letters 120, cd6b085f | 50.87 | -0.950% | 882k | H 390, fine 7690 |
+| 8x8x4 rest, fix | 4.03 | 0 | 0 | 114+37, as 739271cb's 3.42 |
+| 8x8x4 drop=2, fix | 16.14 | -4.3e-7 | 7.9k | 739271cb: 13.72 |
+
+The fix is neutral: seep 38.08 against 38.06 without it.
+
+Main itself has moved between cd6b085f/739271cb and 0dd7c9b3, by
++8.6 ms on seep (+46% particles, drift from -0.064% to +0.03%), +12.5 ms on
+letters (+111k particles, +96 H regions), and +0.6 ms on the rest tank
+with identical dispatches and workgroups. Not bisected here. Since
+739271cb the only code commits are the three wet-cloth checkpoints
+(8f09bd9f, a44ed3aa, 0dd7c9b3). They touch webgpu-uniform-reference.ts, the
+pressure arena and mixture, uniform-mixed-frame and the solid record. The
+particle and tier changes on seep and letters are physics, not timing noise.
+The rest tank's +0.6 ms, at an unchanged dispatch count, could partly be the
+machine's state.
