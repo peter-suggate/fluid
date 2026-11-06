@@ -27,16 +27,19 @@ export const wetClothSourceVariants:readonly WetClothSourceVariant[]=[{
 
 export function applyWetClothSourceVariant(base:WetClothSourceDefinition,variant:WetClothSourceVariant):WetClothSourceDefinition{
  if(base.id!==variant.sourceId||base.variant)throw new Error('Invalid released source for variant');
- const liquid={...base.liquid},settings={...base.sourceSettings.liquid};
+ const liquid={...base.liquid},settings={...base.sourceSettings.liquid};let cellSize_m=base.cellSize_m,dt_s=base.dt_s;
  for(const change of variant.overrides){
   const close=(actual:unknown)=>{if(typeof actual!=='number'||Math.abs(actual-change.sourceValue)>1e-12*Math.max(1,Math.abs(change.sourceValue)))throw new Error(`Variant source value mismatch ${change.path}`);};
   if(change.path==='liquid.fiberDiameter_m'){close(liquid.fiberDiameter_m);liquid.fiberDiameter_m=change.value;settings.yarnDiameter=change.value*100;}
   else if(change.path==='liquid.surfaceTension_N_m'){close(liquid.surfaceTension_N_m);liquid.surfaceTension_N_m=change.value;settings.surfTensionCoeff=change.value*1000;}
   else if(change.path==='liquid.contactAngle_rad'){close(liquid.contactAngle_rad);liquid.contactAngle_rad=change.value;settings.restContactAngle=change.value;}
   else if(change.path==='sourceSettings.liquid.initNonuniformFraction'){close(settings.initNonuniformFraction);settings.initNonuniformFraction=change.value;}
+  else if(change.path==='cellSize_m'){close(cellSize_m);cellSize_m=change.value;}
+  else if(change.path==='dt_s'){close(dt_s);dt_s=change.value;}
   else if(change.path!=='geometry.solidFraction')throw new Error(`Unsupported source variant override ${change.path}`);
  }
- return {...base,id:variant.id,name:variant.label,variant,liquid,sourceSettings:{...base.sourceSettings,liquid:settings},reproductionStatus:variant.kind==='paper-corrected'?'paper-corrected-unverified':'exploratory-unverified',
+ const {discretization:_,...released}=base;
+ return {...(cellSize_m===base.cellSize_m&&dt_s===base.dt_s?base:released),cellSize_m,dt_s,id:variant.id,name:variant.label,variant,liquid,sourceSettings:{...base.sourceSettings,liquid:settings},reproductionStatus:variant.kind==='paper-corrected'?'paper-corrected-unverified':'exploratory-unverified',
   auditNotes:[...base.auditNotes,`${variant.kind}: ${variant.reason}`]};
 }
 

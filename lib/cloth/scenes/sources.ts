@@ -4,18 +4,24 @@ import type { WetClothSourceCatalog, WetClothSourceDefinition } from '../source-
 import {SourceEmissionScheduler} from '../source-fields';
 import {applyWetClothSourceVariant,wetClothSourceVariants,wetClothVariantTopology} from './variants';
 import {cachedClothTopology} from '../source-assets';
+import {applyWetClothSourceDiscretization,wetClothUpstreamDiscretizationVariants} from './discretization';
 
 const catalog = catalogData as unknown as WetClothSourceCatalog;
 if (catalog.schemaVersion !== 1 || catalog.runtimeUnits !== 'SI' || catalog.scenes.length !== 36) throw new Error('Unsupported wet-cloth source catalog');
-const sources = new Map(catalog.scenes.map(source => [source.id, source]));
+// Released inputs at their authored discretization (scenes/discretization.ts).
+const released = catalog.scenes.map(applyWetClothSourceDiscretization);
+const sources = new Map(released.map(source => [source.id, source]));
 if (sources.size !== catalog.scenes.length) throw new Error('Duplicate wet-cloth source identity');
 export const wetClothVariantSources:readonly WetClothSourceDefinition[]=wetClothSourceVariants.map(variant=>{
  const base=sources.get(variant.sourceId);if(!base)throw new Error('Unknown variant released source');return applyWetClothSourceVariant(base,variant);
 });
-for(const variant of wetClothVariantSources){if(sources.has(variant.id))throw new Error('Duplicate source variant identity');sources.set(variant.id,variant);}
+/** The released dx and dt of each refined source. Resolvable by id, not yet
+ * on the validation shelf. */
+export const wetClothUpstreamDiscretizationSources:readonly WetClothSourceDefinition[]=wetClothUpstreamDiscretizationVariants.map(variant=>applyWetClothSourceVariant(sources.get(variant.sourceId)!,variant));
+for(const variant of [...wetClothVariantSources,...wetClothUpstreamDiscretizationSources]){if(sources.has(variant.id))throw new Error('Duplicate source variant identity');sources.set(variant.id,variant);}
 
 /** These are imported inputs, not certification that the simulations match. */
-export const wetClothWaterSources: readonly WetClothSourceDefinition[] = catalog.scenes;
+export const wetClothWaterSources: readonly WetClothSourceDefinition[] = released;
 export const wetClothValidationSources:readonly WetClothSourceDefinition[]=[...wetClothWaterSources,...wetClothVariantSources];
 export const WETCLOTH_UPSTREAM_COMMIT = catalog.upstreamCommit;
 

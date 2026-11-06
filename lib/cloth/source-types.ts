@@ -69,9 +69,20 @@ export interface WetClothSourceMaterial {
   readonly sourceSettings: Readonly<Record<string, number | string>>;
 }
 
+/** An authored dx and dt replacing a released XML's (scenes/discretization.ts). */
+export interface WetClothSourceDiscretization {
+ readonly sourceCellSize_m:number;
+ readonly sourceDt_s:number;
+ readonly cellSize_m:number;
+ readonly dt_s:number;
+ readonly reason:string;
+ readonly evidence:readonly string[];
+}
+
 export interface WetClothSourceDefinition {
   readonly id: string;
   readonly variant?:WetClothSourceVariant;
+  readonly discretization?:WetClothSourceDiscretization;
   readonly name: string;
   readonly family: string;
   readonly source: { readonly commit: string; readonly path: string; readonly url: string; readonly sha256: string };

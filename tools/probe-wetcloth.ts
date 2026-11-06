@@ -2,7 +2,8 @@
  * --audit imports every water fixture without running physics.
  * --scene=wetcloth-source-... [--steps=N] [--every=N] [--out=PATH]
  * --dt-scale=.5|.25 labels a timestep-convergence experiment; default1
- * retains the released timestep and every run retains the original h.
+ * retains the scene's authored timestep and every run retains its authored h
+ * (the released XML's, or scenes/discretization.ts where that refines it).
  * --probe-incomplete permits diagnostic runs whose missing features are
  * recorded in the report. Such a run is never certified as a reproduction.
  * Run GPU probes through tools/gpu/fluid-gpu-run.sh check|timing.
@@ -45,7 +46,8 @@ if(process.argv.includes('--audit')){
  await save();console.log(out);
 }else{
  const id=option('scene');assert.ok(id,'Supply --audit or --scene=SOURCE_ID');
- const profile=wetClothValidationDefinitions.find(s=>s.id===id)!.methodProfile!;
+ // A discretization variant (wetClothUpstreamDiscretizationSources) runs its released source's profile.
+ const profile=(wetClothValidationDefinitions.find(s=>s.id===id)??wetClothValidationDefinitions.find(s=>s.id===wetClothSource(id).variant?.sourceId))!.methodProfile!;
  const source=wetClothSource(id);await prepareWetClothSource(id,request);const scene=buildWetClothSourceScene(id);
  const dtScale=Number(option('dt-scale')??1);assert.ok([1,.5,.25].includes(dtScale),'Use dt-scale1,.5 or.25');
  const dt=source.dt_s*dtScale;scene.numerics={...scene.numerics,fixedDt_s:dt,maxDt_s:dt};
