@@ -3575,9 +3575,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * Non-cloth and source-only fluid scenes retain the native half-kick. */
   private async advanceClothFluidFrame(frame:UniformMixedFrame,p:UniformMixedFrameParameters,dt:number,bodies:UniformMixedFrameBodies|undefined,roster:readonly RigidBodyState[]=[]):Promise<UniformMixedFrameReceipt>{
     try{
+      // Cloth: no half-kick; the first integer-clock frame establishes the hydrostatic warm start.
+      const unkicked=!this.mixedKicked&&this.clothRuntimes.length>0;
       if(!this.mixedKicked){if(this.clothRuntimes.length)this.mixedKicked=true;else await this.kickMixedFrame(frame,p,dt,!!bodies);}
       await this.prepareClothFluidStep(dt,roster);
-      const receipt=frame.advance(p,this.mixedFrameTrace(),this.mixedGpuLayout&&(this.detail.policy==="dynamic"||this.mixedLive),bodies);
+      const extend=this.mixedGpuLayout&&(this.detail.policy==="dynamic"||this.mixedLive);
+      const receipt=unkicked?frame.advanceFirstUnkicked(p,this.mixedFrameTrace(),extend,bodies):frame.advance(p,this.mixedFrameTrace(),extend,bodies);
       this.readMixedRelayout();return await receipt;
     }catch(error){
       this.mixedRelayoutRead=undefined;

@@ -1017,6 +1017,23 @@ export class UniformMixedFrame {
   if(!(lead>0))throw new Error("The projected kick leads by a positive time");
   return this.advance({...p,dt:lead,viscosity:0,surfaceTension:0,fullPressureEnvelope:true,pressureTolerance:Math.min(uniformMixedPressureTarget(p),UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE)},undefined,false,bodies?{}:undefined,p.dt);
  }
+ /** A host that keeps both phases on the integer clock (cloth exchange) has
+  * no half-kick, so its first ordinary frame starts from a zero pressure.
+  * That frame establishes the hydrostatic warm start instead: converged on
+  * the full envelope to the kick's tolerance, not the loose per-frame
+  * stopping rule (a 10x relative reduction left a resting tank's first
+  * projection ~4% short of g dt). Like the kick it has no last frame, so
+  * its solve is the kick's (encodeSolve's kick: seam heads start at none and
+  * it re-solves from its own pressure); an ordinary start reads the seam
+  * heads of a frame that never ran, which left a resting tank's neutral
+  * sheet at 0.965 g. Everything else is the ordinary frame. */
+ advanceFirstUnkicked(p:UniformMixedFrameParameters,trace?:UniformMixedFrameTrace,extendTail=false,bodies?:UniformMixedFrameBodies):Promise<UniformMixedFrameReceipt>{
+  this.solveWithoutHistory=true;
+  try{return this.advance({...p,fullPressureEnvelope:true,pressureTolerance:Math.min(uniformMixedPressureTarget(p),UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE)},trace,extendTail,bodies);}
+  finally{this.solveWithoutHistory=false;}
+ }
+ /** Set while advanceFirstUnkicked encodes (advance encodes synchronously). */
+ private solveWithoutHistory=false;
  /** extendTail: extend this frame's final velocity for the next frame
   * head's census (and reuse it there when the key still matches).
   * Encodes and submits synchronously; the promise is the frame's receipt,
@@ -1289,7 +1306,7 @@ export class UniformMixedFrame {
    trace?.phase(encoder,A.pressureSetup);
    // The 16h bulk members of this frame (the band's slot map, the root's warm start), then their faces after the solve.
    this.bulk?.encodeSelect(encoder);
-   this.band.encodeSolve(encoder,kick>0);
+   this.band.encodeSolve(encoder,kick>0||this.solveWithoutHistory);
    trace?.phase(encoder,A.pressureVCycles);
    if(this.bulkGroup)this.projection.encodeBulk(encoder,this.bulkGroup);
    this.projection.encode(encoder,"project",split.projectionGroup);

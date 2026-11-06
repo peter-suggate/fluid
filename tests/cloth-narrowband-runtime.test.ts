@@ -175,8 +175,12 @@ test('a rejected native impulse receipt rolls back the staged cloth step',async(
 test('cloth startup uses the ordinary native frame without a staggered initialization kick',async()=>{
  const {WebGPUUniformReferenceSolver}=await import('../lib/methods/uniform/webgpu-uniform-reference');const events:string[]=[];
  const host=Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype),{clothRuntimes:[{}],mixedKicked:false,async prepareClothFluidStep(){events.push('prepare');},async kickMixedFrame(){throw new Error('unpaired half-kick');},mixedFrameTrace(){},readMixedRelayout(){events.push('read');}}) as {advanceClothFluidFrame(frame:unknown,p:unknown,dt:number,bodies:undefined):Promise<unknown>;mixedKicked:boolean};
- Object.defineProperty(host,'mixedGpuLayout',{value:false});const receipt={accepted:true};const result=await host.advanceClothFluidFrame({advance(){events.push('actual-native-frame');return Promise.resolve(receipt);}}, {},.001,undefined);
- assert.equal(result,receipt);assert.equal(host.mixedKicked,true);assert.deepEqual(events,['prepare','actual-native-frame','read']);
+ Object.defineProperty(host,'mixedGpuLayout',{value:false});const receipt={accepted:true};
+ // The first integer-clock frame is the ordinary frame converged to the kick tolerance (hydrostatic warm start); later frames are ordinary.
+ const frame={advance(){events.push('actual-native-frame');return Promise.resolve(receipt);},advanceFirstUnkicked(){events.push('first-native-frame');return Promise.resolve(receipt);}};
+ const result=await host.advanceClothFluidFrame(frame,{},.001,undefined);
+ assert.equal(result,receipt);assert.equal(host.mixedKicked,true);assert.deepEqual(events,['prepare','first-native-frame','read']);
+ events.length=0;assert.equal(await host.advanceClothFluidFrame(frame,{},.001,undefined),receipt);assert.deepEqual(events,['prepare','actual-native-frame','read']);
 });
 
 test('accepted cloth momentum changes only by actual native impulses during transient drag',{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
