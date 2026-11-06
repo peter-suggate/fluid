@@ -4,6 +4,7 @@ import { uniformMixedTopologyWGSL } from './uniform-mixed-topology.wgsl';
 import { uniformMixedSolidWGSL } from './uniform-mixed-solid.wgsl';
 import { levelSetFillWGSL } from '../../core/level-set-fill.wgsl';
 import { NB_VOLUME_COMPENSATION_FLOAT } from './uniform-mixed-surface-volume';
+import { uniformCompensatedSumWGSL } from './uniform-compensated-sum.wgsl';
 import { sourceFieldDistance } from '../../cloth/source-fields';
 import { sourceWaterBounds, type SourceWaterOperation } from '../../cloth/source-water';
 import type { SourceBounds } from '../../cloth/source-motion';
@@ -51,7 +52,7 @@ export class UniformSourceWater {
  if(umKeyStored(tile)){rhPromote(umPageOfTile(tile));}
 }`});
   this.supportPipeline=await d.createComputePipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[f.ownership.bindLayout,this.supportLayout]}),compute:{module:support,entryPoint:'wake'}});
-  const sourceCode=uniformMixedTopologyWGSL(f.ownership.capacity,0)+uniformMixedSolidWGSL(solid?2:undefined,solid?.coarse?.count)+levelSetFillWGSL+/* wgsl */`
+  const sourceCode=uniformMixedTopologyWGSL(f.ownership.capacity,0)+uniformMixedSolidWGSL(solid?2:undefined,solid?.coarse?.count)+levelSetFillWGSL+uniformCompensatedSumWGSL+/* wgsl */`
 struct Params {counts:vec4u,velocity:vec4f,scale:vec4f}
 @group(1) @binding(0) var<storage,read> input:array<vec4u>;
 @group(1) @binding(1) var<storage,read_write> work:array<vec4f>;
@@ -105,11 +106,10 @@ override reduceStride:u32=1u;
 @compute @workgroup_size(1) fn commitBudget(){
  if(umSupport[UM_RESIDENCY+1u]!=0u){return;}
  if(budget[1]!=1.0){umSupport[UM_RESIDENCY+1u]=1u;return;}
- let delta=work[params.counts.x].x;let old=budget[0];budget[0]=old+delta;
  // Retain the existing compensated remainder, including pore transfers.
- // The error term is evaluated after the rounded high word storage write.
- budget[${NB_VOLUME_COMPENSATION_FLOAT}]+= (old-budget[0])+delta;
- let physical=delta*params.scale.y;let previous=ledger[0];ledger[0]=previous+physical;ledger[1]+=(previous-ledger[0])+physical;
+ let delta=work[params.counts.x].x;let next=umCompensatedAdd(vec2f(budget[0],budget[${NB_VOLUME_COMPENSATION_FLOAT}]),delta);
+ budget[0]=next.x;budget[${NB_VOLUME_COMPENSATION_FLOAT}]=next.y;
+ let physical=umCompensatedAdd(vec2f(ledger[0],ledger[1]),delta*params.scale.y);ledger[0]=physical.x;ledger[1]=physical.y;
  budget[3]=0.0;
 }
 `;
@@ -151,7 +151,7 @@ override reduceStride:u32=1u;
    faces.forEach((p,i)=>{const at=4*(vertices.length+3*cells.length+2*i);signed.set(p,at);input[at+4]=cellMap.get(key(p))!;for(let a=0;a<3;a++){const q=[...p] as P;q[a]!++;input[at+5+a]=cellMap.get(key(q))??0xffffffff;}});
    const buffers:GPUBuffer[]=[],allocate=(size:number,usage:GPUBufferUsageFlags,data?:ArrayBufferView)=>{const buffer=f.device.createBuffer({label:'Wet cloth source support',size:Math.max(16,size),usage});buffers.push(buffer);if(data)f.device.queue.writeBuffer(buffer,0,data.buffer as ArrayBuffer,data.byteOffset,data.byteLength);return buffer;};
    const params=new ArrayBuffer(48),counts=new Uint32Array(params),numbers=new Float32Array(params);counts.set([vertices.length,cells.length,faces.length,op.kind==='emit'?0:1]);numbers.set([...op.velocity_m_s,0,2*minH,h[0]*h[1]*h[2],0,0],4);
-   const inputs=allocate(input.byteLength,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST,input),work=allocate(16*(vertices.length+cells.length+faces.length),GPUBufferUsage.STORAGE),uniform=allocate(48,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST,new Uint8Array(params));
+   const inputs=allocate(input.byteLength,GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST,input),work=allocate(16*(vertices.length+cells.length+faces.length),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC),uniform=allocate(48,GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST,new Uint8Array(params));
    const sharedEntries:GPUBindGroupEntry[]=[{binding:0,resource:{buffer:inputs}},{binding:1,resource:{buffer:work}},{binding:2,resource:{buffer:f.waterBudget}},{binding:3,resource:{buffer:uniform}},{binding:8,resource:{buffer:this.externalLedger}}];
    const groups={
     compute:uniformDetailGroup(f.device,{layout:this.layouts.compute,entries:sharedEntries}),

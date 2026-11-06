@@ -7,6 +7,7 @@ import {uniformMixedVertexSamplingWGSL} from './uniform-mixed-vertex-sampling.wg
 import {uniformMixedSolidWGSL} from './uniform-mixed-solid.wgsl';
 import {levelSetFillWGSL} from '../../core/level-set-fill.wgsl';
 import {NB_VOLUME_COMPENSATION_FLOAT} from './uniform-mixed-surface-volume';
+import {uniformCompensatedSumWGSL} from './uniform-compensated-sum.wgsl';
 import type {SourceBounds} from '../../cloth/source-motion';
 import {sourceTerminationBoundaryBounds} from '../../cloth/source-water';
 import type {WetClothSourceField} from '../../cloth/source-types';
@@ -38,7 +39,7 @@ export class UniformSourceResidentTermination {
  get supportBounds():readonly SourceBounds[]{return this.bounds;}
  async initialize():Promise<void>{
   await this.particles.initialize();const f=this.fields,d=f.device,solid=f.solid;
-  const module=uniformDetailModule(d,{label:'Resident source termination',code:uniformMixedTopologyWGSL(f.ownership.capacity,0)+uniformMixedSolidWGSL(solid?2:undefined,solid?.coarse?.count)+levelSetFillWGSL+f.heat.promoteWGSL(1,6,7)+/* wgsl */`
+  const module=uniformDetailModule(d,{label:'Resident source termination',code:uniformMixedTopologyWGSL(f.ownership.capacity,0)+uniformMixedSolidWGSL(solid?2:undefined,solid?.coarse?.count)+levelSetFillWGSL+f.heat.promoteWGSL(1,6,7)+uniformCompensatedSumWGSL+/* wgsl */`
 struct Box {center:vec4f,extents:vec4f,rotation:vec4f}
 struct Params {origin:vec4f,h:vec4f,counts:vec4u}
 @group(1) @binding(0) var<storage,read> boxes:array<Box>;
@@ -97,8 +98,8 @@ override stride:u32=1u;
  for(var job=gid.x;job<(params.counts.y+2u*stride-1u)/(2u*stride);job+=64u*groups.x){let i=2u*stride*job;let j=i+stride;if(j<params.counts.y){work[i]+=work[j];}}
 }
 @compute @workgroup_size(1) fn commit(){
- if(budget[1]!=1.0){umSupport[UM_RESIDENCY+1u]=1u;return;}let delta=work[0];let old=budget[0];budget[0]=old+delta;budget[${NB_VOLUME_COMPENSATION_FLOAT}]+=(old-budget[0])+delta;budget[3]=0.0;
- let physical=delta*params.h.x*params.h.y*params.h.z;let before=ledger[0];ledger[0]=before+physical;ledger[1]+=(before-ledger[0])+physical;
+ if(budget[1]!=1.0){umSupport[UM_RESIDENCY+1u]=1u;return;}let delta=work[0];let next=umCompensatedAdd(vec2f(budget[0],budget[${NB_VOLUME_COMPENSATION_FLOAT}]),delta);budget[0]=next.x;budget[${NB_VOLUME_COMPENSATION_FLOAT}]=next.y;budget[3]=0.0;
+ let physical=umCompensatedAdd(vec2f(ledger[0],ledger[1]),delta*params.h.x*params.h.y*params.h.z);ledger[0]=physical.x;ledger[1]=physical.y;
 }
 `});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==='error');if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join('\n'));

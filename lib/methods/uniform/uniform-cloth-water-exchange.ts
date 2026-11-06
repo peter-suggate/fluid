@@ -8,6 +8,7 @@ import { uniformMixedTopologyWGSL } from './uniform-mixed-topology.wgsl';
 import { uniformMixedSolidWGSL } from './uniform-mixed-solid.wgsl';
 import { clothPorousCapacityOf, clothCellWeights,clothMacCaptureReservoir, setClothHardApertures, setClothHardAperturesByKey, clothCellKey, prepareClothPorousCapacity, publishClothPorousCapacity, releaseClothPorousCapacity } from './uniform-porous-capacity';
 import { NB_VOLUME_COMPENSATION_FLOAT } from './uniform-mixed-surface-volume';
+import { uniformCompensatedSumWGSL } from './uniform-compensated-sum.wgsl';
 import { writeBufferChunked } from './uniform-chunked-upload';
 import {uniformMixedVertexSamplingSource} from './uniform-mixed-vertex-sampling.wgsl';
 import {UNIFORM_DETAIL_4H_LOAD} from '../../core/uniform-detail-abi';
@@ -102,10 +103,11 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
 }`});
   {
    const layout=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:'uniform'}}]});
-   this.budgetPipeline=await d.createComputePipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{entryPoint:'addBudget',module:d.createShaderModule({label:'Cloth pore water budget delta',code:/* wgsl */`
+   this.budgetPipeline=await d.createComputePipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{entryPoint:'addBudget',module:d.createShaderModule({label:'Cloth pore water budget delta',code:uniformCompensatedSumWGSL+/* wgsl */`
 @group(0) @binding(0) var<storage,read_write> budget:array<f32>;
 @group(0) @binding(1) var<uniform> delta:vec4f;
-@compute @workgroup_size(1) fn addBudget(){let old=budget[0];let next=max(0.0,old+delta.x);budget[0]=next;budget[${NB_VOLUME_COMPENSATION_FLOAT}]+=(old-next)+delta.x;budget[3]=0.0;}`})}});
+// A clamp at zero leaves the pair's sum unchanged: high's deficit goes to low.
+@compute @workgroup_size(1) fn addBudget(){var next=umCompensatedAdd(vec2f(budget[0],budget[${NB_VOLUME_COMPENSATION_FLOAT}]),delta.x);if(next.x<0.0){next=vec2f(0.0,next.y+next.x);}budget[0]=next.x;budget[${NB_VOLUME_COMPENSATION_FLOAT}]=next.y;budget[3]=0.0;}`})}});
    this.budgetParams=d.createBuffer({label:'Cloth pore water budget delta',size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
    this.budgetGroup=d.createBindGroup({layout,entries:[{binding:0,resource:{buffer:this.fields.waterBudget}},{binding:1,resource:{buffer:this.budgetParams}}]});
   }
