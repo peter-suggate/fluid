@@ -40,7 +40,11 @@ test('production NB-FLIP completes reciprocal immersed cloth frames in tank and 
    assert.ok(solver.advanceTo(.0002));await solver.awaitFrameCompletion();assert.equal(solver.clothSurfaces[0]!.tick,2);
    const stats=await solver.readStats(),bound=Array.from(solver.clothSurfaces[0]!.waterVolume_m3).reduce((a,b)=>a+b,0);
    const initialWater=(initialBudget[0]!+initialBudget[9]!)*.01**3;
-   assert.ok(Math.abs(stats.narrowBandTargetVolume_cells!*.01**3+bound-initialWater)<1e-9,'accepted free and bound water must retain the physical initial budget');
+   // The free target is one f32 GPU scalar (~24576 cells, ulp 2^-9 cells =
+   // 1.95e-9 m^3); each accepted exchange rounds it once. 1e-9 m^3 was half
+   // an ulp, below what the stored ledger can represent. Allow 4 ulps.
+   const targetUlp_m3=2**(Math.floor(Math.log2(initialBudget[0]!+initialBudget[9]!))-23)*.01**3;
+   assert.ok(Math.abs(stats.narrowBandTargetVolume_cells!*.01**3+bound-initialWater)<4*targetUlp_m3,'accepted free and bound water must retain the physical initial budget');
    if(freeSpace)assert.ok(stats.uniformMixedFineCapacity!>512,'physical support and the FLIP particle band need independent owner capacity');
   }catch(error){
    const host=solver as unknown as {mixedRegionTable():Uint32Array};

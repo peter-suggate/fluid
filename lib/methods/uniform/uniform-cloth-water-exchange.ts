@@ -57,6 +57,9 @@ export class UniformClothWaterExchange {
  let i=gid.x;if(i>=arrayLength(&sites)){return;}let site=sites[i];let p=site.xyz-32*umFramePage();
  if(site.w==0){result[i]=vec4f(/*c*/textureLoad(phi,p,0).x,0,0,0);return;}
  if(site.w==2){result[i]=/*c*/textureLoad(velocity,p,0);return;}
+ // A cell beyond the world box's walls is solid: closed (aperture 0), not an
+ // unowned liquid cell. Its dual-face mass is zero; no water is stored there.
+ if(umWorldSolid((p>>vec3u(5u))+umFramePage())){result[i]=vec4f(0,0,0,0);return;}
  let tile=512u*umBlockOf(p>>vec3u(5u))+umTileLocal(vec3u(p>>vec3u(2u)));
  if(!umKeyStored(tile)){result[i]=vec4f(0,0,0,2);return;}
  if(umTileWidth(tile)!=1u){result[i]=vec4f(0,0,0,1);return;}
@@ -240,7 +243,7 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
    let requested=requests.reduce((a,b)=>a+b,0);if(!capacityOnly&&!requested)return empty;
    const previous=clothPorousCapacityOf(this.fields.porousCapacity);
    if(!previous)throw new Error('Cloth capacity must be installed before the initial free-water census');
-   const hardOpen=cells.map((_,i)=>{if(values[4*(vertices.length+i)+3]===3)throw new Error('Local cloth water hard-geometry integration did not converge');if(values[4*(vertices.length+i)+3])throw new Error('Local cloth water exchange requires h ownership throughout its derivative support');return values[4*(vertices.length+i)]!;});
+   const hardOpen=cells.map((_,i)=>{if(values[4*(vertices.length+i)+3]===3)throw new Error('Local cloth water hard-geometry integration did not converge');const flag=values[4*(vertices.length+i)+3];if(flag)throw new Error(`Local cloth water exchange requires h ownership throughout its derivative support: cell ${cells[i]!.p} (world ${cells[i]!.p.map((x,a)=>(this.fields.origin_m[a]!+(x+.5)*h[a]!).toFixed(4))}) ${flag===1?'has a coarse owner':'has no stored tile'}`);return values[4*(vertices.length+i)]!;});
    setClothHardApertures(this.fields,new Map(cells.map((cell,i)=>[key(cell.p),hardOpen[i]!])));
    // A prescribed hard-body step changes the admissible interpolation basis.
    // Include that basis change in the native hard-domain transition, not as

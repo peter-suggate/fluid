@@ -215,7 +215,8 @@ fn umRigidIntegratedFraction(candidates:u32,center:vec3f,size:vec3f,rayAxis:u32,
   let axis=u32(split.x);var lower=span;var upper=span;lower[axis+2u]=split.y;upper[axis]=split.y;
   spans[count]=upper;depths[count]=depth+1u;spans[count+1u]=lower;depths[count+1u]=depth+1u;count+=2u;
  }
- if(error>umRigidQuadratureTolerance){umRigidCoverageFailure=vec2u(2u,bitcast<u32>(error));}
+ // Keep a resource-limit cause (1) visible; 2 is a converged-budget overrun.
+ if(error>umRigidQuadratureTolerance&&umRigidCoverageFailure.x==0u){umRigidCoverageFailure=vec2u(2u,bitcast<u32>(error));}
  return clamp(value,0.0,1.0);
 }
 `;

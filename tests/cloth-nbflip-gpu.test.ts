@@ -24,7 +24,13 @@ test('actual NB-FLIP forced MAC exchange is reciprocal below the particle band',
   const lattice=frame.ownership.capacity.lattice;
   const fields=frame.clothCouplingFields([lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z],lattice.cellSize_m);
   const coupling=new UniformClothGridCoupling(fields.device,fields);
-  const data={restPositions_m:[-.05,.175,-.05,.05,.175,-.05,0,.175,.05],initialVelocities_m_s:[1,0,0,1,0,0,1,0,0],triangles:[0,1,2],rodOffsets:[0],rodIndices:[]};
+  // The local water exchange needs h owners on its whole derivative support
+  // (MAC capture reservoir, its cell vertices and their dual-face neighbours:
+  // three cells past each vertex cell). At +-.05 that support reached x=-.225,
+  // outside the authored h region [-.2,.2] (a coarse 4h owner). +-.02 keeps it
+  // (and the later +1 mm displacement) inside the h tiles, while the 4h owners
+  // the phi query needs remain beyond.
+  const data={restPositions_m:[-.02,.175,-.02,.02,.175,-.02,0,.175,.02],initialVelocities_m_s:[1,0,0,1,0,0,1,0,0],triangles:[0,1,2],rodOffsets:[0],rodIndices:[]};
   const state=createClothState(prepareClothTopology(data,[DEFAULT_CLOTH_MATERIAL]));
   try {
    await coupling.initialize();

@@ -12,6 +12,14 @@ import type { WetClothSourceDefinition } from '../source-types';
 import { sourceClothDocument, wetClothSource, wetClothWaterSources,wetClothVariantSources } from './sources';
 import {wetClothVariantTopology} from './variants';
 
+/** Page pools authored from a measured peak (no runtime growth). The free-space
+ * default (100 blocks) is exhausted at commit 1 by pore-test-mid's falling
+ * ball: measured with 200 blocks, commit 1 held 105 (72 resident including 45
+ * claimed, plus 33 retired seed pages in their hold); samples every 50 steps
+ * through impact (0.12 s) peaked at 84 resident. 128 = peak + 22% margin for
+ * transients between those samples. */
+const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-source-pore-test-mid': 128};
+
 const vec = (v: ClothVector): Vec3 => ({x: v[0], y: v[1], z: v[2]});
 const plus = (a: ClothVector, b: ClothVector): ClothVector => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 
@@ -89,6 +97,8 @@ export function buildWetClothSourceScene(id: string): SceneDescription {
     fields: source.fields.map(f => ({...f, ...(f.center_m ? {center_m: plus(f.center_m, offset)} : {})})),
     scripts: source.scripts.map(s => ({...s, ...(s.origin_m ? {origin_m: plus(s.origin_m, offset)} : {})}))};
   const initial = sourceInitialLiquid(scene.wetClothSource.fields, scene.wetClothSource.scripts);
+  const poolBlocks = WET_CLOTH_PAGE_POOL_BLOCKS[source.id];
+  if (poolBlocks) scene.fluid.pagePool = {blocks: poolBlocks};
   if (initial.volumes.length) {
     scene.fluid.initialLiquidVolumes = initial.volumes;
     scene.fluid.initialVelocity_m_s = initial.velocity_m_s;
