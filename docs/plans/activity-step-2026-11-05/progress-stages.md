@@ -1225,3 +1225,231 @@ block-local, and the boundaries one workgroup per block could remove.
   sort.
 
 **Per the gate:** the estimate is under 3 ms, so nothing was built.
+
+## Round 12: per-dispatch GPU time on drop=2 against rest (measurement only, nothing built)
+
+**Method.**
+- **Tool:** tools/gpu-kernel-timer.ts in timing mode, through
+  fluid-gpu-run.sh. It ends the pass after every dispatch and puts a
+  timestamp pair around each one, so each in-dispatch duration is taken on
+  its own and the gaps between passes don't count.
+- **Raw timestamps:** Dawn quantizes timestamps to 65.5 us by default. The
+  probe passes `disable-dawn-features=timestamp_quantization` (env
+  FLUID_TS_RAW, scratch only) to get raw values.
+- **Runs:** 8x8x4, `--pure --steps=30`, one capture for drop=2 and one for
+  rest. The table averages steps 29 and 30.
+- **Not usable for this:** xctrace can't split the shared-schedule kicks by
+  dispatch (round 11).
+- **Data:**
+  - round12-kernels.tsv: every kernel with stage, entry, launches,
+    workgroups, us and excess;
+  - round12-dispatches-{drop2,rest}-step30.tsv: every dispatch in
+    submission order.
+
+**Totals.**
+- drop=2: 15.44 and 15.63 ms over 432 and 445 dispatches.
+- rest: 2.57 and 3.09 ms over 140 and 153 dispatches.
+- Excess: about 12.7 ms. The timer's own run was slower (steady median
+  15.87 ms) because of the extra pass gaps; only the in-dispatch time is
+  used.
+- Live work at drop=2: tiers [425, 83, 4], fine 123, particles 10266,
+  bricks 115, band tiles 59.
+
+**The curve is flat.**
+- 261 kernels have positive excess. The top 33 make 50% of it and the
+  top 93 make 80%.
+- At dispatch level (drop=2 step 30), 78 of 445 dispatches make 50% of the
+  GPU time and 204 make 80%.
+- The top 10 kernels are about 3.5 ms (27%).
+
+**By family (excess, ms).**
+
+| family | ms |
+|---|---|
+| pressure arena | 3.71 |
+| NB-FLIP | 2.84 |
+| census | 0.75 |
+| extension | 0.56 |
+| surface advect | 0.50 |
+| remap | 0.41 |
+| surface advect deferred | 0.41 |
+| extension hierarchy | 0.37 |
+| geometric fill | 0.30 |
+| layout | 0.26 |
+| local speed | 0.26 |
+| resolve | 0.24 |
+| forces | 0.21 |
+| momentum | 0.18 |
+
+**Pressure by level (drop=2 against rest, us).**
+
+| level | drop=2 | launches | rest |
+|---|---|---|---|
+| coarse tail (pDown3, pDown4, pTail, pUp4, pUp3) | 1781 | 48 | 366 |
+| fine (pRelax, pNativeRelax, pResidual2, pRestrict0, pRebase, pProlong0) | 1072 | 44 | 241 |
+| levels 1-2 (pDownA/R/B, pDown2, pBulkLift, pUpB/A) | 790 | 21 | 157 |
+| Krylov | 427 | 11 | 77 |
+
+- drop=2 runs 1.5x the rest frame's cycle launches (pTail 9/6, pRelax
+  18/12, pUp4 12/8).
+- Each launch is also 3-9x slower:
+
+  | kernel | drop=2 us/launch | rest us/launch |
+  |---|---|---|
+  | pTail | 75 | 8 |
+  | pUp4 | 38 | 12 |
+  | pRelax | 21 | 7 |
+  | pNativeRelax | 29 | 6 |
+  | pDown2 | 84 | 17 |
+
+  The latency grows with the live rows, at low occupancy.
+
+**Top 22 by excess (us; launches drop=2/rest; us a launch at drop=2; workgroups).**
+
+| # | stage : entry | excess | launches | us/launch | workgroups |
+|---|---|---|---|---|---|
+| 1 | pressure : pTail | 627 | 9/6 | 75 | 1 |
+| 2 | surface advect deferred : advectDeferred | 383 | 5/0 | 77 | 1024 |
+| 3 | pressure : pUp4 | 361 | 12/8 | 38 | indirect (page) |
+| 4 | extension : pair_sweepSeams | 318 | 2/0 | 159 | 1024-1063 |
+| 5 | pressure : pRelax | 299 | 18/12 | 21 | 512 |
+| 6 | pressure : pNativeRelax | 294 | 12/8 | 29 | 80 |
+| 7 | census : classifyCoarse | 293 | 1/0 | 293 | 256 |
+| 8 | NB-FLIP : advectParticlesDeferred | 236 | 1/0 | 236 | 1024 |
+| 9 | NB-FLIP : depthCoarse | 228 | 1/0 | 228 | 1024 |
+| 10 | remap : remapFaces | 224 | 4/0 | 56 | 1024 |
+| 11 | pressure : pDown2 | 219 | 3/2 | 84 | indirect |
+| 12 | geometric fill : geometryRegional | 210 | 2/0 | 105 | 256-4096 |
+| 13 | pressure : pDown3 | 208 | 9/6 | 32 | indirect |
+| 14 | phi resolve : resolve | 197 | 4/0 | 49 | 1024 |
+| 15 | pressure : kApplyNB | 165 | 2/1 | 90 | 328 |
+| 16 | pressure : pDownB | 156 | 3/2 | 59 | 80 |
+| 17 | extension hierarchy : mixedSweepBlocks | 156 | 3/0 | 52 | 256 |
+| 18 | local speed : localSpeed | 142 | 1/0 | 142 | 1024 |
+| 19 | extension hierarchy : mixedProlongUnknownVelocity | 141 | 3/0 | 47 | 256 |
+| 20 | pressure : pUp3 | 136 | 9/6 | 24 | indirect |
+| 21 | NB-FLIP : arenaDistance | 133 | 1/0 | 133 | 1024 |
+| 22 | NB-FLIP : slabSortMerge | 133 | 22/0 | 6 | 1024 |
+
+**Top 10: why each takes its time, from the WGSL.**
+
+1. **pTail** (uniform-pressure-arena.ts, pTail).
+   - One workgroup of lanesTail lanes, sized at least as large as the
+     tail's block capacity, so every row is in a register.
+   - TAIL_SWEEPS = 32 sweeps x 2 colours, with a workgroupBarrier after
+     each colour: **64 serialized steps**. Each step reads 6
+     workgroup-memory neighbours and does one divide.
+   - That is about 1.1 us a step on one core, which is pure serial
+     latency.
+   - The rest frame's launches average 8 us, so they hold far fewer rows
+     or return converged. This was not checked per launch.
+2. **advectDeferred** (uniform-mixed-surface.ts).
+   - Five twin launches each grid-stride over the **whole** deferred list
+     (near and deep entries), and each skips the words that aren't its
+     own (by code or umRegularFine).
+   - Per vertex the chain is: umEarlyFarAdvected, then umCheapAdvected,
+     then umVertexFoot, then umEulerAdvected, then the dependent trace.
+     That is 4 dependent sampling stages before the trace.
+   - The list scan is paid 5 times.
+3. **pUp4.**
+   - One page a workgroup. Each of the 216 lanes does tAt(slot,4,g), then
+     **up to 8 serial tAt(slot,5,q) parent lookups**, each a dependent
+     page-table load followed by a value load: a chain of about 10
+     dependent global loads.
+   - Then schedule.sweeps (3) x 2 colours with only 8 lanes active and a
+     barrier per colour: 6 more serialized steps.
+4. **pair_sweepSeams** (uniform-mixed-extension.ts).
+   - ueSweepKind 1 runs ueSweepSeamFine: 3 patches a lane through
+     ueExtend, which loops over 6 neighbours, each a ueCompiledNeighbor
+     search (a dependent lookup).
+   - Kind 2 runs the regular coarse packs and then the coarse seam packs,
+     serially in the same lane.
+5. **pRelax.**
+   - Two band tiles a workgroup, 2 colours with a storageBarrier.
+   - pRelaxRow reads 6 faces. A seam face goes through
+     nAcross, then nAt (a page-table lookup), then qF: 3 dependent loads.
+   - A wall row then runs **4 active-set passes** over its wall faces,
+     each with pLift loads.
+   - 18 launches x 21 us.
+6. **pNativeRelax.**
+   - 80 workgroups grid-stride over the level-2 blocks, with a barrier per
+     block.
+   - A seam face loops **16 serial fine-row reads**: pool[P_KINDS], then
+     pF(P_C), then pF(plane).
+   - With several seam faces that is 32-96 dependent loads on one lane,
+     plus the same 4-pass wall loop.
+7. **classifyCoarse** (uniform-mixed-dynamic.ts).
+   - One lane a 4h tile (about 425 tiles over 256 x 64 lanes).
+   - umClassifyOwner runs serially per lane: umLoadCorner8, then
+     umOwnerAt, then **3 axes x 2 signs x up to 16 umFace parts**, each
+     part a texture load. That is up to 96 serial loads.
+   - Only umResolutionError (8 lanes) and umDepthSample (64 lanes) are
+     spread across lanes.
+   - 3 barriers per batch of 64.
+8. **advectParticlesDeferred** (NB-FLIP).
+   - One lane a deferred particle over 10266 particles. The
+     sampleVelocity trace is a dependent sample chain.
+   - The same shape as nbMove's nbAdvect: per job, an nbSlabJob binary
+     search, then nbWinStage, then 27 brick lookups before the first
+     record.
+9. **depthCoarse** (uniform-narrow-band-redistance.wgsl.ts).
+   - One lane a build. nbBuildDistance is nbSurfaceDistance plus a
+     gradient trace of **up to 5 dependent iterations**. Each iteration is
+     umCellOpen, then nbPhiGradient, then umSlideStart/nbPointNear, then
+     nbCellNear.
+   - Then nbBoundCoarseMetric: 7 umSampleVertex calls and 8 umCellOpen.
+10. **remapFaces** (uniform-mixed-remap.ts).
+    - One 192-lane workgroup a listed tile, grid-strided, with 4
+      workgroup barriers per tile and another between tiles.
+    - At about 56 us a launch, the per-tile barrier steps dominate.
+
+**Proposals, not built, with estimates.**
+
+1. **The coarse tail's serial sweeps (pTail).**
+   - **Change:** replace the 64-step red-black loop with a shorter solve.
+     The options are fewer sweeps, or a Chebyshev/CG tail in the same
+     workgroup, whose few reductions cost fewer barriers than 32 sweeps.
+   - **Estimate:** 32 to 8 sweeps is about 55 us x 9 launches, so
+     **about 0.5 ms** on drop=2 (rest about unchanged).
+   - **Risk:** round 7 showed that a looser tail (tailCycles 1) cost 14
+     cycles, so this may give back cycles.
+   - **Gates:**
+     - pressure cycles a frame on drop=2, seep, letters and dam unchanged
+       within noise;
+     - seep and letters drift within 3%;
+     - steady median on drop=2 and rest not slower;
+     - types and unit green.
+2. **Parallel parent and neighbour staging in pUp4, pUp3, pDown3 and
+   pDown2.**
+   - **Change:** a page's 27 neighbour pages and the parent lookups that
+     each lane now chains serially (up to 8 tAt calls) are fetched once
+     per page by 27 lanes into workgroup memory, behind one barrier. Each
+     lane then reads workgroup memory. This shortens the chain from about
+     10 dependent global loads to about 3.
+   - **Estimate:** these four make 1.07 ms at drop=2, and about half of it
+     is the lookup chain, so **about 0.3-0.5 ms**.
+   - **Gates:**
+     - corrections and Y bitwise identical to the current path on a
+       recorded frame (regression test);
+     - cycles unchanged;
+     - drift and steady median as above.
+3. **Spread classifyCoarse's face-part loop across lanes.**
+   - **Change:** one lane per (axis, sign, part) instead of 96 serial
+     parts per lane. This is the remap kernel's "footprint loops side by
+     side" layout.
+   - **Estimate:** 293 us to about 60 us, so **about 0.23 ms**.
+   - **Gates:**
+     - census output (owners, codes, counts) bitwise identical on a
+       recorded frame;
+     - drift;
+     - steady median.
+
+**Runner-up:** advectDeferred's five list scans could be bucketed by code
+once, so each twin scans only its own entries. If the scan dominates, this
+is about 0.25 ms. That wasn't measured.
+
+**Summary.**
+- The three proposals together are **about 1.0-1.2 ms of 12.7 ms**. The
+  rest of the excess is spread across 250 kernels, none over 0.63 ms.
+- The pressure arena is the largest family (3.7 ms). Proposals 1 and 2
+  are in Lane P's file, so they need coordinating.

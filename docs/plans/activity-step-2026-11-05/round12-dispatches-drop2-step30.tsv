@@ -1,0 +1,447 @@
+# Round 12: every dispatch of 8x8x4 drop=2 step 30 in submission order, raw GPU timestamps, pass per dispatch.
+index	us	work	label
+0	45.04	6672x1x1	Uniform mixed all-4h solid record / :bodyMask
+1	36.75	256x1x1	Uniform region work heat / :heat
+2	22.21	64x1x1	Uniform region work heat / :spread
+3	19.58	64x1x1	Uniform region work heat / :deep
+4	5.75	64x1x1	Uniform region work heat / Uniform region work heat publish:publish
+5	86.08	1024x1x1	Uniform dynamic ownership census / :classify
+6	297.91	256x1x1	Uniform dynamic ownership census / :classifyCoarse
+7	50.83	256x1x1	Uniform dynamic ownership census / :importance
+8	8.62	256x1x1	Uniform dynamic ownership census / :interfaceBits
+9	51.21	14x1x1	Uniform dynamic ownership census / :interfaceBlocks
+10	15.29	256x1x1	Uniform dynamic ownership census / :boundCubes
+11	107.00	256x1x1	Uniform dynamic ownership census / :decide
+12	77.46	64x1x1	Uniform dynamic ownership census / :pageSeed
+13	54.83	64x1x1	Uniform dynamic ownership census / :pageRequest
+14	5.92	1x1x1	BULK16 reclaim quarantine / :begin
+15	4.75	1x1x1	Uniform BULK16 page transfer / Uniform BULK16 decide:btDecideAsked
+16	10.62	64x1x1	Uniform BULK16 page transfer / Uniform BULK16 decide:btDecidePages
+17	8.17	64x1x1	Uniform BULK16 page transfer / Uniform BULK16 demote:btDemotePages
+18	7.29	14x1x1	Uniform page pool commit / Uniform page pool upHost:upHost
+19	12.92	1x1x1	Uniform page pool commit / Uniform page pool upWindow:upWindow
+20	6.08	13x1x1	Uniform page pool commit / Uniform page pool upClaimSuper:upClaimSuper
+21	5.92	13x1x1	Uniform page pool commit / Uniform page pool upClaim:upClaim
+22	15.42	1x1x1	Uniform page pool commit / Uniform page pool upSlots:upSlots
+23	21.29	1x1x1	Uniform page pool commit / Uniform page pool upSuperSlots:upSuperSlots
+24	18.67	64x64x1	Uniform page pool commit / Uniform page pool upFlat:upFlat
+25	19.33	14x1x1	Uniform page pool commit / Uniform page pool upPublish:upPublish
+26	8.21	1x1x1	Uniform BULK16 page transfer / Uniform BULK16 map:btMapPromoted
+27	5.33	64x1x1	Uniform BULK16 page transfer / Uniform BULK16 seed:btSeedPromoted
+28	92.75	256x1x1	Uniform dynamic ownership residency / :pageMark
+29	9.12	1x1x1	Uniform dynamic ownership residency / :pageCompact
+30	33.12	14x1x1	Uniform block neighbours / Uniform block neighbours bnRows:bnRows
+31	15.12	1x1x1	Uniform block neighbours / Uniform block neighbours bnWalls:bnWalls
+32	33.25	14x1x1	Uniform block neighbours / Uniform block neighbours bnRows:bnRows
+33	15.04	1x1x1	Uniform block neighbours / Uniform block neighbours bnWalls:bnWalls
+34	5.75	1024x1x1	Uniform page initialise / Uniform page initialise 0:piFields
+35	5.46	1024x1x1	Uniform page initialise / Uniform page initialise 1:piFields
+36	5.21	1024x1x1	Uniform page initialise / Uniform page initialise 2:piFields
+37	5.96	1024x1x1	Uniform page initialise / Uniform page initialise 3:piFields
+38	5.08	32x1x1	Uniform page tile words / Uniform page tile words:piTileWords
+39	5.42	32x1x1	Narrow-band FLIP page words / :nbInitBlocks
+40	5.42	32x1x1	Uniform 16h work evidence page claims / :initialize
+41	5.17	32x1x1	Uniform dynamic ownership page words / Uniform dynamic ownership page words:censusInitBlocks
+42	5.25	256x1x1	Uniform mixed solid record of claimed blocks / :slotsReclaimNew
+43	19.33	4096x1x1	Uniform mixed solid record of claimed blocks / :buildNew
+44	10.50	4096x1x1	Uniform mixed solid record of claimed blocks / :cutsNew
+45	6.71	256x1x1	Uniform mixed solid record of claimed blocks / :surfaceClearNew
+46	11.92	64x1x1	Uniform BULK16 page transfer / Uniform BULK16 promote:btPromotePages
+47	6.33	64x1x1	Uniform BULK16 page transfer / Uniform BULK16 cells:btPromoteCells
+48	5.25	64x1x1	Uniform BULK16 page transfer / Uniform BULK16 liquid:btPromoteLiquid
+49	8.42	1x1x1	BULK16 publish live slots / :finish
+50	12.17	1024x1x1	Narrow-band FLIP activity / Narrow-band FLIP activity:activity
+51	24.62	1024x1x1	Narrow-band FLIP activity / Narrow-band FLIP activitySpread:activitySpread
+52	17.04	256x1x1	Uniform mixed layout build / :widths
+53	6.50	256x1x1	Uniform mixed layout build / :tileKeys
+54	8.33	1x1x1	Uniform mixed layout build / :slotCut
+55	8.12	14x1x1	Uniform mixed layout build / :slotClaim
+56	15.62	256x1x1	Uniform mixed layout build / :settle
+57	42.12	256x1x1	Uniform mixed layout build / :classify
+58	45.33	256x1x1	Uniform mixed layout build / :mirror
+59	35.83	256x1x1	Uniform mixed layout build / :dilate
+60	50.42	1x1x1	Uniform mixed layout build / :scan
+61	20.29	256x1x1	Uniform mixed layout build / :scatter
+62	10.96	256x1x1	Uniform mixed layout build / :verifyWords
+63	11.58	6672x1x1	Uniform detail h slot claim / Uniform detail h slots mark:mark
+64	5.17	14x1x1	Uniform detail h slot claim / Uniform detail h slots claim:claim
+65	5.00	32x1x1	Uniform detail h slot init / Uniform detail h slot init 0:init
+66	5.04	32x1x1	Uniform detail h slot init / Uniform detail h slot init 1:init
+67	5.08	32x1x1	Uniform detail h slot init / Uniform detail h slot init 2:init
+68	32.62	256x1x1	Uniform detail ring enter / Uniform detail ring enter 0:enter
+69	16.38	256x1x1	Uniform detail ring enter / Uniform detail ring enter 1:enter
+70	19.00	256x1x1	Uniform detail ring enter / Uniform detail ring enter 2:enter
+71	24.58	256x1x1	Uniform mixed remap / :markListed
+72	65.25	1024x1x1	Uniform mixed remap / :remapFaces{umSolidFree=1}
+73	25.46	1024x1x1	Uniform mixed remap / :remapFaces{umSolidTwinned=1}
+74	75.17	1024x1x1	Uniform mixed remap / :remapCells
+75	8.92	1024x1x1	Uniform mixed remap / :planeList
+76	39.50	1024x1x1	Uniform mixed remap / :planeSums
+77	39.04	1024x1x1	Uniform mixed remap / :planeFinish
+78	61.25	1024x1x1	Uniform mixed remap / :remapFaces{umSolidFree=1}
+79	24.96	1024x1x1	Uniform mixed remap / :remapFaces{umSolidTwinned=1}
+80	15.75	256x1x1	Uniform mixed remap adopt / Uniform mixed remap adopt:adopt
+81	35.87	1024x1x1	Uniform mixed remap publish / :copyFaces
+82	33.92	1024x1x1	Uniform mixed remap publish / :copyFaces
+83	12.12	64x1x1	Uniform mixed phi twins / :twins
+84	11.50	64x1x1	Uniform mixed phi twins / :twins
+85	45.42	4096x1x1	Uniform mixed phi resolve / :resolveListed
+86	9.21	256x1x1	Uniform16h remap producer revisions / :publish
+87	18.04	64x1x1	Uniform region work heat / :deep
+88	5.75	64x1x1	Uniform region work heat / Uniform region work heat publish:publish
+89	8.00	105x1x1	Uniform cold freeze / Uniform cold freeze head:head
+90	4.75	14x1x1	Uniform detail h slot release / Uniform detail h slots release:release
+91	6.83	256x1x1	Uniform mixed solid simulation widths / :widthsListed
+92	9.92	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+93	38.62	1024x1x1	Uniform shared frame plan / :seed
+94	13.16	256x1x1	Uniform shared frame plan / :dilate0
+95	12.38	256x1x1	Uniform shared frame plan / :dilate1
+96	14.21	256x1x1	Uniform shared frame plan / :dilate2
+97	8.12	256x1x1	Uniform mixed geometric fill / :compactChanged
+98	41.29	4096x1x1	Uniform mixed geometric fill / :geometryChanged
+99	5.88	128x1x1	Uniform mixed geometric fill / :normalTags
+100	15.67	1024x1x1	Uniform mixed geometric fill / :mirror
+101	16.29	105x1x1	NB-FLIP surface pressure authority / :stamp
+102	17.92	105x1x1	NB-FLIP surface pressure authority / :stampHeld
+103	58.62	1024x1x1	NB-FLIP surface pressure authority / :surfaceHeld
+104	149.87	1024x1x1	Uniform local speed certificate / :localSpeed
+105	25.25	256x1x1	Uniform local speed certificate / :tileError
+106	15.42	256x1x1	Uniform local speed certificate / :spread0
+107	14.67	256x1x1	Uniform local speed certificate / :spread1
+108	14.42	256x1x1	Uniform local speed certificate / :spread2
+109	8.58	256x1x1	Uniform local speed certificate / :coarseBits
+110	18.29	14x1x1	Uniform local speed certificate / :coarseBlocks
+111	15.00	256x1x1	Uniform local speed certificate / :certify
+112	16.42	105x1x1	Uniform shared regional frame plan / :seed
+113	14.96	256x1x1	Uniform shared regional frame plan / :expand
+114	97.08	256x1x1	Uniform mixed 4h sampling cache / :cache
+115	28.71	1024x1x1	Uniform mixed hanging fine taps / :unitVelocityTaps
+116	42.08	256x1x1	Uniform mixed hanging fine taps / :markUnitHalo
+117	88.37	256x35x1	Uniform mixed hanging fine taps / :fillUnitHalo
+118	7.33	1024x1x1	Narrow-band FLIP particle slabs / Narrow-band FLIP slabMark:slabMark
+119	15.79	1024x1x1	Narrow-band FLIP particle slabs / Narrow-band FLIP brickTableList:brickTableList
+120	12.79	1x1x1	Narrow-band FLIP particle slabs / Narrow-band FLIP slabAllocate:slabAllocate
+121	78.83	1024x1x1	Narrow-band FLIP advectParticles / Narrow-band FLIP separationPrepass:separationPrepass
+122	246.04	1024x1x1	Narrow-band FLIP advectParticles / Narrow-band FLIP advectParticlesDeferred:advectParticlesDeferred
+123	22.04	1024x1x1	Narrow-band FLIP advectParticles / Narrow-band FLIP advectWalk:advectWalk
+124	9.71	1x1x1	Narrow-band FLIP particle placement / Narrow-band FLIP slabPlace:slabPlace
+125	6.12	1024x1x1	Narrow-band FLIP particle placement / Narrow-band FLIP slabOverflow:slabOverflow
+126	6.42	1024x1x1	Narrow-band FLIP particle placement / Narrow-band FLIP slabPrepare:slabPrepare
+127	87.58	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSort:slabSort
+128	5.71	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+129	5.79	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+130	5.75	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+131	5.87	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+132	5.75	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+133	6.04	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+134	6.00	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+135	5.79	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+136	5.96	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+137	5.83	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+138	6.12	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+139	6.04	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+140	6.08	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+141	5.58	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+142	5.79	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+143	6.04	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+144	5.88	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+145	6.00	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+146	5.71	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+147	6.08	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+148	6.04	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+149	5.96	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortMerge:slabSortMerge
+150	9.04	1024x1x1	Narrow-band FLIP particle sort / Narrow-band FLIP slabSortFinish:slabSortFinish
+151	33.75	1024x1x1	Uniform mixed surface advect / :wallReach
+152	31.75	1024x1x1	Uniform mixed surface advect / :advectOwners{umRegularFine=1}
+153	74.83	1024x1x1	Uniform mixed surface advect / :advectFine{umFastSurface=1}
+154	35.12	1024x1x1	Uniform mixed surface advect / :advectTrace{umFastSurface=1}
+155	54.37	1024x1x1	Uniform mixed surface advect / :advectFinish
+156	93.71	1024x1x1	Uniform mixed surface advect / :advectCubic{umSolidFree=1}
+157	22.50	1024x1x1	Uniform mixed surface advect / :advectCubic{umCubicSolidList=1}
+158	74.46	1024x1x1	Uniform mixed surface advect / :advect{umMergedTiles=1,umMergedCoarse=1,umMergedPack=8}
+159	81.92	4096x1x1	Uniform mixed surface advect / :advectWalls
+160	179.91	1024x1x1	Uniform mixed surface advect deferred / :advectDeferred{umMergedTiles=1,umFastSurface=1,umSolidFree=1}
+161	133.62	1024x1x1	Uniform mixed surface advect deferred / :advectDeferred{umMergedTiles=1,umCubicDeferred=1,umSolidFree=1}
+162	23.25	1024x1x1	Uniform mixed surface advect deferred / :advectDeferred{umMergedTiles=1,umCubicDeferred=1,umSolidTwinned=1}
+163	22.54	1024x1x1	Uniform mixed surface advect deferred / :advectCubicDeferred{umMergedTiles=1}
+164	22.75	1024x1x1	Uniform mixed surface advect deferred / :advectDeferred{umRegularFine=1,umSolidFree=1}
+165	22.83	1024x1x1	Uniform mixed surface advect deferred / :advectDeferred{umRegularFine=1,umSolidTwinned=1}
+166	51.12	1024x1x1	Uniform mixed phi resolve / :resolve
+167	19.33	1024x1x1	Narrow-band FLIP crossing search / Narrow-band FLIP depthPlanSeed:depthPlanSeed
+168	32.29	1024x1x1	Narrow-band FLIP crossing search / Narrow-band FLIP depthPlanExpand:depthPlanExpand
+169	42.96	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP coarseCorners:coarseCorners
+170	25.21	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP surfaceClear:surfaceClear
+171	9.75	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP surfaceSplatPlan:surfaceSplatPlan
+172	40.17	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP surfaceSplatOccupied:surfaceSplatOccupied
+173	83.83	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP coupleFine:coupleFine{umSolidFree=1}
+174	22.83	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP coupleFine:coupleFine{umSolidTwinned=1}
+175	67.92	1024x1x1	Narrow-band FLIP surface reconstruction / Narrow-band FLIP couple:couple
+176	53.96	1024x1x1	Uniform mixed phi resolve / :resolve
+177	47.75	1024x1x1	Narrow-band FLIP regional air update / Narrow-band FLIP airPlanSeeds:airPlanSeeds
+178	89.00	1024x1x1	Narrow-band FLIP regional air update / Narrow-band FLIP airPlanPropagate:airPlanPropagate
+179	40.17	1024x1x1	Uniform mixed phi resolve / :resolve
+180	49.42	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP arenaMark:arenaMark
+181	15.58	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP brickTableList:brickTableList
+182	8.25	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP brickTableRecord:brickTableRecord
+183	27.37	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP arenaGather:arenaGather
+184	27.88	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP arenaCross:arenaCross
+185	7.38	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP depthLists:depthLists
+186	50.12	1024x1x1	Narrow-band FLIP surface arena search / Narrow-band FLIP arenaNearest:arenaNearest
+187	17.54	1024x1x1	Narrow-band FLIP coarse retirement / Narrow-band FLIP coarseBuilds:coarseBuilds
+188	201.54	1024x1x1	Narrow-band FLIP coarse retirement / Narrow-band FLIP depthCoarse:depthCoarse
+189	47.58	1024x1x1	Narrow-band FLIP coarse retirement / Narrow-band FLIP redistanceCoarse:redistanceCoarse
+190	30.12	1024x1x1	Narrow-band FLIP surface canonical view / Narrow-band FLIP arenaGather:arenaGather
+191	47.46	1024x1x1	Narrow-band FLIP surface canonical far metric / Narrow-band FLIP arenaFar:arenaFar
+192	127.37	1024x1x1	Narrow-band FLIP surface canonical metric and publication / Narrow-band FLIP arenaDistance:arenaDistance
+193	113.50	1024x1x1	Narrow-band FLIP surface canonical metric and publication / Narrow-band FLIP arenaPublishCanonical:arenaPublishCanonical
+194	48.04	1024x1x1	Narrow-band FLIP surface canonical metric and publication / Narrow-band FLIP arenaPublishFinish:arenaPublishFinish
+195	52.62	1024x1x1	Uniform mixed phi resolve / :resolve
+196	8.50	256x1x1	Uniform mixed global surface volume / :clearBand
+197	54.75	1024x1x1	Uniform mixed global surface volume / :seed
+198	47.75	1024x1x1	Uniform mixed global surface volume / :dilate
+199	47.88	1024x1x1	Uniform mixed global surface volume / :dilate
+200	46.50	1024x1x1	Uniform mixed global surface volume / :dilate
+201	46.17	1024x1x1	Uniform mixed global surface volume / :dilate
+202	22.91	1024x1x1	Uniform mixed global surface volume / :grow
+203	21.96	1024x1x1	Uniform mixed global surface volume / :measureGrow
+204	254.54	1024x1x1	Uniform mixed global surface volume / :metric
+205	18.42	1024x1x1	Uniform mixed global surface volume / :resolveScale
+206	56.33	1024x1x1	Uniform mixed global surface volume / :measure
+207	8.04	16x1x1	Uniform mixed global surface volume / :reduce
+208	8.88	1x1x1	Uniform mixed global surface volume / :solve
+209	157.46	256x1x1	Uniform mixed geometric fill / :geometryRegional
+210	49.12	4096x1x1	Uniform mixed geometric fill / :geometryRegional
+211	13.54	4096x1x1	Uniform mixed geometric fill / :mirrorRegional
+212	36.75	64x1x1	Uniform mixed momentum tiers / :decide
+213	62.41	256x1x1	Uniform mixed momentum tiers / :momentumAffineFit
+214	23.83	256x1x1	Uniform mixed momentum tiers / :momentumAffineResidual
+215	9.12	64x1x1	Uniform mixed momentum tiers / :affine
+216	21.79	1024x1x1	Uniform mixed momentum / :momentumRegularStep{umRegularFine=1}
+217	33.33	1024x1x1	Uniform mixed momentum / :momentumFine
+218	26.50	1024x1x1	Uniform mixed momentum / :momentumTrace
+219	101.33	1024x1x1	Uniform mixed momentum / :momentumStep{umMergedTiles=1,umMergedCoarse=1}
+220	37.58	1024x1x1	Uniform shared frame plan / :seed
+221	13.62	256x1x1	Uniform shared frame plan / :dilate0
+222	15.29	256x1x1	Uniform shared frame plan / :dilate1
+223	14.58	256x1x1	Uniform shared frame plan / :dilate2
+224	17.79	105x1x1	NB-FLIP surface pressure authority / :stamp
+225	18.04	105x1x1	NB-FLIP surface pressure authority / :stampHeld
+226	65.54	1024x1x1	NB-FLIP surface pressure authority / :surfaceHeld
+227	54.38	1024x1x1	Narrow-band FLIP seed / Narrow-band FLIP seedCells:seedCells
+228	27.25	1024x1x1	Narrow-band FLIP seed / Narrow-band FLIP seedSources:seedSources
+229	43.83	1024x1x1	Narrow-band FLIP seed / Narrow-band FLIP seed:seed
+230	11.29	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transferClear:transferClear
+231	62.08	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transferDeposit:transferDeposit
+232	45.87	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transferRefine:transferRefine
+233	68.58	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transferProperties:transferProperties
+234	23.54	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transfer:transfer
+235	25.21	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transferOwners:transferOwners
+236	109.75	1024x1x1	Narrow-band FLIP transfer / Narrow-band FLIP transferSeams:transferSeams
+237	17.04	1024x1x1	Uniform mixed extension retain / :retainFine
+238	35.96	1024x1x1	Uniform mixed extension retain / :retainCoarse
+239	11.08	256x1x1	Uniform region dynamics classify / :regionKey
+240	37.50	64x1x1	Uniform region dynamics classify / :regionDecide
+241	43.04	1024x1x1	Uniform mixed body forces / :forcesFine{umSolidFree=1}
+242	22.71	1024x1x1	Uniform mixed body forces / :forcesFine{umSolidTwinned=1}
+243	88.00	1024x1x1	Uniform mixed body forces / :forcesRegularCoarse
+244	59.00	1024x1x1	Uniform mixed body forces / :forces{umMergedTiles=1}
+245	53.75	1024x1x1	Uniform mixed transfer to pressure / :toPressureCoarse
+246	31.25	1024x1x1	Uniform mixed transfer to pressure / :toPressureFine
+247	39.83	256x1x1	Uniform pressure root owners / Uniform pressure root owners roKeys:roKeys
+248	15.96	105x1x1	NB-FLIP surface pressure authority / :stamp
+249	17.87	105x1x1	NB-FLIP surface pressure authority / :stampHeld
+250	86.79	1024x1x1	NB-FLIP surface pressure authority / :cutRegions
+251	22.54	1024x1x1	NB-FLIP surface pressure authority / :absent
+252	12.96	1024x1x1	NB-FLIP surface pressure authority / :surface
+253	104.25	1024x1x1	NB-FLIP surface pressure authority / :wetRegions
+254	11.54	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+255	7.08	256x1x1	Uniform pressure arena unmark / :pUnmark
+256	18.33	256x1x1	Uniform pressure arena marks and rows / :pClear2
+257	12.08	1024x1x1	Uniform pressure arena marks and rows / :pMark
+258	17.46	256x1x1	Uniform pressure arena marks and rows / :ubaUpdate
+259	8.83	64x1x1	Uniform pressure arena marks and rows / :ubaLists
+260	7.38	2x1x1	Uniform pressure arena marks and rows / :ubaLevel1
+261	11.87	138x1x1	Uniform pressure arena marks and rows / :ubaRecord
+262	85.46	1024x1x1	Uniform pressure arena marks and rows / :pRows
+263	22.50	1024x1x1	Uniform pressure arena marks and rows / :pRowsG
+264	10.54	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+265	130.37	1024x1x1	Uniform mixed pressure rhs / :buildRhs
+266	111.04	256x1x1	Uniform bulk tier selection / :bulkSelect
+267	63.00	indirect	Uniform bulk tier selection / :bulkPromote
+268	5.33	1x1x1	Uniform pressure arena solve / Uniform pressure arena BULK16 launches:pLaunch
+269	35.58	1024x1x1	Uniform pressure arena solve / :pInit
+270	145.50	80x1x1	Uniform pressure arena solve / :pNative
+271	146.33	indirect	Uniform pressure arena solve / :pBulkRows
+272	30.54	1024x1x1	Uniform pressure arena solve / :pRebase
+273	24.37	512x1x1	Uniform pressure arena solve / :pRelax
+274	24.38	512x1x1	Uniform pressure arena solve / :pRelax
+275	23.17	512x1x1	Uniform pressure arena solve / :pRelax
+276	35.21	80x1x1	Uniform pressure arena solve / :pNativeRelax
+277	31.92	80x1x1	Uniform pressure arena solve / :pNativeRelax
+278	41.67	indirect	Uniform pressure arena solve / :pResidual2
+279	16.41	1024x1x1	Uniform pressure arena solve / :pRestrict0
+280	24.08	1024x1x1	Uniform pressure arena solve / :pRebase
+281	34.00	80x1x1	Uniform pressure arena solve / :pNativeOperator
+282	38.67	16x1x1	Uniform pressure arena solve / :pDownA
+283	13.75	16x1x1	Uniform pressure arena solve / :pDownR
+284	82.71	80x1x1	Uniform pressure arena solve / :pDownB
+285	112.87	indirect	Uniform pressure arena solve / :pDown2
+286	39.12	indirect	Uniform pressure arena solve / :pDown3
+287	18.92	indirect	Uniform pressure arena solve / :pDown4
+288	88.37	1x1x1	Uniform pressure arena solve / :pTail
+289	48.67	indirect	Uniform pressure arena solve / :pUp4
+290	26.87	indirect	Uniform pressure arena solve / :pUp3
+291	38.71	indirect	Uniform pressure arena solve / :pDown3
+292	18.04	indirect	Uniform pressure arena solve / :pDown4
+293	85.96	1x1x1	Uniform pressure arena solve / :pTail
+294	46.96	indirect	Uniform pressure arena solve / :pUp4
+295	26.96	indirect	Uniform pressure arena solve / :pUp3
+296	36.54	indirect	Uniform pressure arena solve / :pDown3
+297	18.00	indirect	Uniform pressure arena solve / :pDown4
+298	85.67	1x1x1	Uniform pressure arena solve / :pTail
+299	50.54	indirect	Uniform pressure arena solve / :pUp4
+300	49.50	indirect	Uniform pressure arena solve / :pUp4
+301	25.67	indirect	Uniform pressure arena solve / :pUp3
+302	13.92	indirect	Uniform pressure arena solve / :pBulkLift
+303	52.21	indirect	Uniform pressure arena solve / :pUpB
+304	24.96	16x1x1	Uniform pressure arena solve / :pUpA
+305	11.62	1024x1x1	Uniform pressure arena solve / :pProlong0
+306	32.71	80x1x1	Uniform pressure arena solve / :pNativeRelax
+307	31.62	80x1x1	Uniform pressure arena solve / :pNativeRelax
+308	23.50	512x1x1	Uniform pressure arena solve / :pRelax
+309	23.46	512x1x1	Uniform pressure arena solve / :pRelax
+310	23.25	512x1x1	Uniform pressure arena solve / :pRelax
+311	60.46	248x1x1	Uniform pressure arena solve / :kStart
+312	23.12	512x1x1	Uniform pressure arena solve / :pRelax
+313	23.54	512x1x1	Uniform pressure arena solve / :pRelax
+314	23.75	512x1x1	Uniform pressure arena solve / :pRelax
+315	32.75	80x1x1	Uniform pressure arena solve / :pNativeRelax
+316	31.08	80x1x1	Uniform pressure arena solve / :pNativeRelax
+317	43.29	indirect	Uniform pressure arena solve / :pResidual2
+318	16.08	1024x1x1	Uniform pressure arena solve / :pRestrict0
+319	22.08	1024x1x1	Uniform pressure arena solve / :pRebase
+320	32.62	80x1x1	Uniform pressure arena solve / :pNativeOperator
+321	34.62	16x1x1	Uniform pressure arena solve / :pDownA
+322	13.29	16x1x1	Uniform pressure arena solve / :pDownR
+323	75.96	80x1x1	Uniform pressure arena solve / :pDownB
+324	112.25	indirect	Uniform pressure arena solve / :pDown2
+325	37.29	indirect	Uniform pressure arena solve / :pDown3
+326	17.58	indirect	Uniform pressure arena solve / :pDown4
+327	86.00	1x1x1	Uniform pressure arena solve / :pTail
+328	48.04	indirect	Uniform pressure arena solve / :pUp4
+329	27.12	indirect	Uniform pressure arena solve / :pUp3
+330	37.38	indirect	Uniform pressure arena solve / :pDown3
+331	17.96	indirect	Uniform pressure arena solve / :pDown4
+332	86.71	1x1x1	Uniform pressure arena solve / :pTail
+333	48.71	indirect	Uniform pressure arena solve / :pUp4
+334	26.96	indirect	Uniform pressure arena solve / :pUp3
+335	37.83	indirect	Uniform pressure arena solve / :pDown3
+336	18.29	indirect	Uniform pressure arena solve / :pDown4
+337	85.71	1x1x1	Uniform pressure arena solve / :pTail
+338	49.46	indirect	Uniform pressure arena solve / :pUp4
+339	48.96	indirect	Uniform pressure arena solve / :pUp4
+340	26.88	indirect	Uniform pressure arena solve / :pUp3
+341	13.08	indirect	Uniform pressure arena solve / :pBulkLift
+342	53.12	indirect	Uniform pressure arena solve / :pUpB
+343	22.12	16x1x1	Uniform pressure arena solve / :pUpA
+344	10.67	1024x1x1	Uniform pressure arena solve / :pProlong0
+345	32.08	80x1x1	Uniform pressure arena solve / :pNativeRelax
+346	31.25	80x1x1	Uniform pressure arena solve / :pNativeRelax
+347	24.58	512x1x1	Uniform pressure arena solve / :pRelax
+348	25.38	512x1x1	Uniform pressure arena solve / :pRelax
+349	23.88	512x1x1	Uniform pressure arena solve / :pRelax
+350	43.42	1024x1x1	Uniform pressure arena solve / :kApplyT
+351	149.96	328x1x1	Uniform pressure arena solve / :kApplyNB
+352	48.33	1x1x1	Uniform pressure arena solve / :kReduce
+353	15.29	248x1x1	Uniform pressure arena solve / :kBound
+354	24.42	248x1x1	Uniform pressure arena solve / :kStep
+355	23.96	512x1x1	Uniform pressure arena solve / :pRelax
+356	23.75	512x1x1	Uniform pressure arena solve / :pRelax
+357	23.71	512x1x1	Uniform pressure arena solve / :pRelax
+358	32.54	80x1x1	Uniform pressure arena solve / :pNativeRelax
+359	31.25	80x1x1	Uniform pressure arena solve / :pNativeRelax
+360	45.58	indirect	Uniform pressure arena solve / :pResidual2
+361	17.83	1024x1x1	Uniform pressure arena solve / :pRestrict0
+362	22.04	1024x1x1	Uniform pressure arena solve / :pRebase
+363	6.75	80x1x1	Uniform pressure arena solve / :pNativeOperator
+364	10.54	16x1x1	Uniform pressure arena solve / :pDownA
+365	6.29	16x1x1	Uniform pressure arena solve / :pDownR
+366	14.96	80x1x1	Uniform pressure arena solve / :pDownB
+367	24.58	indirect	Uniform pressure arena solve / :pDown2
+368	16.92	indirect	Uniform pressure arena solve / :pDown3
+369	10.21	indirect	Uniform pressure arena solve / :pDown4
+370	51.46	1x1x1	Uniform pressure arena solve / :pTail
+371	15.42	indirect	Uniform pressure arena solve / :pUp4
+372	17.96	indirect	Uniform pressure arena solve / :pUp3
+373	16.38	indirect	Uniform pressure arena solve / :pDown3
+374	10.21	indirect	Uniform pressure arena solve / :pDown4
+375	52.08	1x1x1	Uniform pressure arena solve / :pTail
+376	15.08	indirect	Uniform pressure arena solve / :pUp4
+377	18.42	indirect	Uniform pressure arena solve / :pUp3
+378	17.17	indirect	Uniform pressure arena solve / :pDown3
+379	10.04	indirect	Uniform pressure arena solve / :pDown4
+380	51.92	1x1x1	Uniform pressure arena solve / :pTail
+381	15.29	indirect	Uniform pressure arena solve / :pUp4
+382	15.08	indirect	Uniform pressure arena solve / :pUp4
+383	18.21	indirect	Uniform pressure arena solve / :pUp3
+384	9.71	indirect	Uniform pressure arena solve / :pBulkLift
+385	27.46	indirect	Uniform pressure arena solve / :pUpB
+386	10.67	16x1x1	Uniform pressure arena solve / :pUpA
+387	7.62	1024x1x1	Uniform pressure arena solve / :pProlong0
+388	6.88	80x1x1	Uniform pressure arena solve / :pNativeRelax
+389	6.71	80x1x1	Uniform pressure arena solve / :pNativeRelax
+390	8.96	512x1x1	Uniform pressure arena solve / :pRelax
+391	9.29	512x1x1	Uniform pressure arena solve / :pRelax
+392	8.79	512x1x1	Uniform pressure arena solve / :pRelax
+393	15.83	1024x1x1	Uniform pressure arena solve / :kApplyT
+394	28.42	328x1x1	Uniform pressure arena solve / :kApplyNB
+395	6.58	1x1x1	Uniform pressure arena solve / :kReduce
+396	13.54	248x1x1	Uniform pressure arena solve / :kBound
+397	17.83	248x1x1	Uniform pressure arena solve / :kStep
+398	26.75	indirect	Uniform pressure arena solve / :pResidual2
+399	16.21	1024x1x1	Uniform pressure arena solve / :pFinal
+400	10.38	80x1x1	Uniform pressure arena solve / :pWrite
+401	19.04	indirect	Uniform pressure arena solve / :pBulkProject
+402	9.42	indirect	Uniform pressure arena solve / :pBulkCommit
+403	9.33	1x1x1	Uniform pressure arena verdict / Uniform pressure arena verdict:pVerdict
+404	26.54	1024x1x1	Uniform mixed pressure bulk faces / :bulkFaces
+405	378.58	1024x1x1	Uniform mixed pressure project / :project
+406	22.79	256x1x1	Uniform cold freeze / :accumulate
+407	76.92	1024x1x1	Uniform mixed transfer to simulation / :toSimulationCoarse
+408	19.33	1024x1x1	Uniform mixed transfer to simulation / :toSimulationFine
+409	51.58	1024x1x1	Uniform pressure arena projection / :pCopyNative
+410	81.21	1024x1x1	Uniform pressure arena projection / :pProjectNative
+411	17.42	1024x1x1	Uniform pressure arena projection / :pCopy
+412	65.00	1024x1x1	Uniform pressure arena projection / :pProject
+413	6.33	2x1x1	Uniform pressure arena projection / :ubaRelease
+414	61.79	64x1x1	Uniform region dynamics publish / :publishBegin
+415	19.17	256x1x1	Uniform region dynamics publish / :publishPressure
+416	7.58	256x1x1	Uniform region dynamics publish / :rememberPressure
+417	14.46	256x1x1	Uniform mixed extension regions / :stampRegions
+418	64.29	105x1x1	Uniform mixed extension regions / :classifyRegions
+419	9.46	1024x1x1	Uniform mixed extension / :pair_seed{umRegularTiles=1,umRegularFine=1}
+420	74.46	1024x1x1	Uniform mixed extension / :pair_seedList{umRegularTiles=1,umRegularFine=0}
+421	31.42	1024x1x1	Uniform mixed extension / :pair_seedSeams
+422	8.54	1024x1x1	Uniform mixed extension / :pair_sweep{umRegularTiles=1,umRegularFine=1}
+423	84.17	1024x1x1	Uniform mixed extension / :pair_sweepSeams
+424	231.75	1058x1x1	Uniform mixed extension / :pair_sweepSeams
+425	9.04	256x1x1	Fluid particle display energy / Fluid particle display energy:capture
+426	46.83	4096x1x1	Narrow-band FLIP snapshot / :recordDelta
+427	44.67	256x1x1	Uniform mixed extension / :restrictBand
+428	7.04	64x1x1	Uniform mixed extension / Uniform mixed extension held blocks:blocksList
+429	28.62	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy restrict (gate 1):mixedRestrictKnownVelocity
+430	21.46	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy restrict (gate 1):mixedRestrictKnownVelocity
+431	24.00	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy restrict (gate 1):mixedRestrictKnownVelocity
+432	61.58	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy block sweep (gate 1):mixedSweepBlocks
+433	49.96	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy block sweep (gate 1):mixedSweepBlocks
+434	46.54	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy block sweep (gate 1):mixedSweepBlocks
+435	22.08	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy prolong (gate 1):mixedProlongUnknownVelocity
+436	24.33	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy prolong (gate 1):mixedProlongUnknownVelocity
+437	95.37	256x1x1	Uniform mixed extension / Uniform mixed extension hierarchy prolong (gate 1):mixedProlongUnknownVelocity
+438	10.12	1024x1x1	Uniform mixed extension / :publishFine{umRegularTiles=1,umRegularFine=1}
+439	24.38	1024x1x1	Uniform mixed extension / :publishList{umRegularTiles=1,umRegularFine=0}
+440	38.54	1024x1x1	Uniform mixed extension / :publishSeams
+441	12.08	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+442	9.71	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+443	10.17	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+444	10.96	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy

@@ -1,0 +1,155 @@
+# Round 12: every dispatch of 8x8x4 rest step 30 in submission order, raw GPU timestamps, pass per dispatch.
+index	us	work	label
+0	34.58	1296x1x1	Uniform mixed all-4h solid record / :bodyMask
+1	40.96	256x1x1	Uniform region work heat / :heat
+2	25.62	21x1x1	Uniform region work heat / :spread
+3	18.96	21x1x1	Uniform region work heat / :deep
+4	5.67	21x1x1	Uniform region work heat / Uniform region work heat publish:publish
+5	7.12	21x1x1	Uniform cold freeze / Uniform cold freeze head:head
+6	10.33	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+7	10.46	256x1x1	Uniform mixed global surface volume / :clearBand
+8	53.25	1024x1x1	Uniform mixed global surface volume / :seed
+9	42.96	1024x1x1	Uniform mixed global surface volume / :dilate
+10	43.46	1024x1x1	Uniform mixed global surface volume / :dilate
+11	40.96	1024x1x1	Uniform mixed global surface volume / :dilate
+12	41.83	1024x1x1	Uniform mixed global surface volume / :dilate
+13	22.79	1024x1x1	Uniform mixed global surface volume / :grow
+14	22.62	1024x1x1	Uniform mixed global surface volume / :measureGrow
+15	168.08	1024x1x1	Uniform mixed global surface volume / :metric
+16	7.38	1024x1x1	Uniform mixed global surface volume / :resolveScale
+17	42.41	1024x1x1	Uniform mixed global surface volume / :measure
+18	7.96	16x1x1	Uniform mixed global surface volume / :reduce
+19	9.12	1x1x1	Uniform mixed global surface volume / :solve
+20	13.54	21x1x1	NB-FLIP surface pressure authority / :stamp
+21	16.75	21x1x1	NB-FLIP surface pressure authority / :stampHeld
+22	31.08	1024x1x1	NB-FLIP surface pressure authority / :surfaceHeld
+23	11.33	256x1x1	Uniform region dynamics classify / :regionKey
+24	37.50	21x1x1	Uniform region dynamics classify / :regionDecide
+25	15.79	1024x1x1	Uniform mixed transfer to pressure / :toPressureCoarse
+26	15.46	1024x1x1	Uniform mixed transfer to pressure / :toPressureFine
+27	39.54	256x1x1	Uniform pressure root owners / Uniform pressure root owners roKeys:roKeys
+28	12.54	21x1x1	NB-FLIP surface pressure authority / :stamp
+29	16.67	21x1x1	NB-FLIP surface pressure authority / :stampHeld
+30	14.71	1024x1x1	NB-FLIP surface pressure authority / :cutRegions
+31	10.08	1024x1x1	NB-FLIP surface pressure authority / :absent
+32	10.08	1024x1x1	NB-FLIP surface pressure authority / :surface
+33	29.00	1024x1x1	NB-FLIP surface pressure authority / :wetRegions
+34	11.67	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+35	5.88	256x1x1	Uniform pressure arena unmark / :pUnmark
+36	13.75	256x1x1	Uniform pressure arena marks and rows / :pClear2
+37	16.04	256x1x1	Uniform pressure arena marks and rows / :ubaUpdate
+38	6.46	64x1x1	Uniform pressure arena marks and rows / :ubaLists
+39	5.21	2x1x1	Uniform pressure arena marks and rows / :ubaLevel1
+40	9.04	138x1x1	Uniform pressure arena marks and rows / :ubaRecord
+41	9.71	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+42	134.45	1024x1x1	Uniform mixed pressure rhs / :buildRhs
+43	112.25	256x1x1	Uniform bulk tier selection / :bulkSelect
+44	61.96	indirect	Uniform bulk tier selection / :bulkPromote
+45	4.83	1x1x1	Uniform pressure arena solve / Uniform pressure arena BULK16 launches:pLaunch
+46	11.54	1024x1x1	Uniform pressure arena solve / :pInit
+47	50.29	80x1x1	Uniform pressure arena solve / :pNative
+48	147.41	indirect	Uniform pressure arena solve / :pBulkRows
+49	9.42	1024x1x1	Uniform pressure arena solve / :pRebase
+50	6.88	512x1x1	Uniform pressure arena solve / :pRelax
+51	7.29	512x1x1	Uniform pressure arena solve / :pRelax
+52	7.17	512x1x1	Uniform pressure arena solve / :pRelax
+53	6.50	80x1x1	Uniform pressure arena solve / :pNativeRelax
+54	6.37	80x1x1	Uniform pressure arena solve / :pNativeRelax
+55	14.21	indirect	Uniform pressure arena solve / :pResidual2
+56	8.46	1024x1x1	Uniform pressure arena solve / :pRestrict0
+57	8.29	1024x1x1	Uniform pressure arena solve / :pRebase
+58	6.67	80x1x1	Uniform pressure arena solve / :pNativeOperator
+59	8.50	16x1x1	Uniform pressure arena solve / :pDownA
+60	6.42	16x1x1	Uniform pressure arena solve / :pDownR
+61	11.00	80x1x1	Uniform pressure arena solve / :pDownB
+62	17.25	indirect	Uniform pressure arena solve / :pDown2
+63	13.29	indirect	Uniform pressure arena solve / :pDown3
+64	10.08	indirect	Uniform pressure arena solve / :pDown4
+65	8.96	1x1x1	Uniform pressure arena solve / :pTail
+66	12.75	indirect	Uniform pressure arena solve / :pUp4
+67	13.79	indirect	Uniform pressure arena solve / :pUp3
+68	12.79	indirect	Uniform pressure arena solve / :pDown3
+69	10.08	indirect	Uniform pressure arena solve / :pDown4
+70	8.29	1x1x1	Uniform pressure arena solve / :pTail
+71	12.08	indirect	Uniform pressure arena solve / :pUp4
+72	14.00	indirect	Uniform pressure arena solve / :pUp3
+73	12.79	indirect	Uniform pressure arena solve / :pDown3
+74	10.12	indirect	Uniform pressure arena solve / :pDown4
+75	8.38	1x1x1	Uniform pressure arena solve / :pTail
+76	12.71	indirect	Uniform pressure arena solve / :pUp4
+77	11.79	indirect	Uniform pressure arena solve / :pUp4
+78	13.12	indirect	Uniform pressure arena solve / :pUp3
+79	9.87	indirect	Uniform pressure arena solve / :pBulkLift
+80	19.08	indirect	Uniform pressure arena solve / :pUpB
+81	8.08	16x1x1	Uniform pressure arena solve / :pUpA
+82	7.33	1024x1x1	Uniform pressure arena solve / :pProlong0
+83	6.62	80x1x1	Uniform pressure arena solve / :pNativeRelax
+84	6.50	80x1x1	Uniform pressure arena solve / :pNativeRelax
+85	7.12	512x1x1	Uniform pressure arena solve / :pRelax
+86	7.17	512x1x1	Uniform pressure arena solve / :pRelax
+87	7.25	512x1x1	Uniform pressure arena solve / :pRelax
+88	15.62	248x1x1	Uniform pressure arena solve / :kStart
+89	7.42	512x1x1	Uniform pressure arena solve / :pRelax
+90	7.42	512x1x1	Uniform pressure arena solve / :pRelax
+91	7.12	512x1x1	Uniform pressure arena solve / :pRelax
+92	6.29	80x1x1	Uniform pressure arena solve / :pNativeRelax
+93	6.42	80x1x1	Uniform pressure arena solve / :pNativeRelax
+94	15.83	indirect	Uniform pressure arena solve / :pResidual2
+95	8.54	1024x1x1	Uniform pressure arena solve / :pRestrict0
+96	8.25	1024x1x1	Uniform pressure arena solve / :pRebase
+97	6.58	80x1x1	Uniform pressure arena solve / :pNativeOperator
+98	8.29	16x1x1	Uniform pressure arena solve / :pDownA
+99	6.04	16x1x1	Uniform pressure arena solve / :pDownR
+100	11.00	80x1x1	Uniform pressure arena solve / :pDownB
+101	16.50	indirect	Uniform pressure arena solve / :pDown2
+102	12.66	indirect	Uniform pressure arena solve / :pDown3
+103	10.12	indirect	Uniform pressure arena solve / :pDown4
+104	8.46	1x1x1	Uniform pressure arena solve / :pTail
+105	12.50	indirect	Uniform pressure arena solve / :pUp4
+106	13.54	indirect	Uniform pressure arena solve / :pUp3
+107	12.46	indirect	Uniform pressure arena solve / :pDown3
+108	10.50	indirect	Uniform pressure arena solve / :pDown4
+109	8.46	1x1x1	Uniform pressure arena solve / :pTail
+110	11.88	indirect	Uniform pressure arena solve / :pUp4
+111	13.50	indirect	Uniform pressure arena solve / :pUp3
+112	12.71	indirect	Uniform pressure arena solve / :pDown3
+113	10.12	indirect	Uniform pressure arena solve / :pDown4
+114	8.00	1x1x1	Uniform pressure arena solve / :pTail
+115	12.17	indirect	Uniform pressure arena solve / :pUp4
+116	11.83	indirect	Uniform pressure arena solve / :pUp4
+117	13.71	indirect	Uniform pressure arena solve / :pUp3
+118	9.21	indirect	Uniform pressure arena solve / :pBulkLift
+119	17.87	indirect	Uniform pressure arena solve / :pUpB
+120	7.92	16x1x1	Uniform pressure arena solve / :pUpA
+121	7.29	1024x1x1	Uniform pressure arena solve / :pProlong0
+122	6.21	80x1x1	Uniform pressure arena solve / :pNativeRelax
+123	6.37	80x1x1	Uniform pressure arena solve / :pNativeRelax
+124	7.25	512x1x1	Uniform pressure arena solve / :pRelax
+125	7.12	512x1x1	Uniform pressure arena solve / :pRelax
+126	7.29	512x1x1	Uniform pressure arena solve / :pRelax
+127	11.46	1024x1x1	Uniform pressure arena solve / :kApplyT
+128	14.58	328x1x1	Uniform pressure arena solve / :kApplyNB
+129	6.88	1x1x1	Uniform pressure arena solve / :kReduce
+130	13.08	248x1x1	Uniform pressure arena solve / :kBound
+131	14.42	248x1x1	Uniform pressure arena solve / :kStep
+132	17.00	indirect	Uniform pressure arena solve / :pResidual2
+133	9.62	1024x1x1	Uniform pressure arena solve / :pFinal
+134	10.38	80x1x1	Uniform pressure arena solve / :pWrite
+135	19.83	indirect	Uniform pressure arena solve / :pBulkProject
+136	9.87	indirect	Uniform pressure arena solve / :pBulkCommit
+137	9.17	1x1x1	Uniform pressure arena verdict / Uniform pressure arena verdict:pVerdict
+138	26.46	1024x1x1	Uniform mixed pressure bulk faces / :bulkFaces
+139	369.41	1024x1x1	Uniform mixed pressure project / :project
+140	22.58	256x1x1	Uniform cold freeze / :accumulate
+141	22.92	1024x1x1	Uniform pressure arena projection / :pCopyNative
+142	12.88	1024x1x1	Uniform pressure arena projection / :pProjectNative
+143	7.25	1024x1x1	Uniform pressure arena projection / :pCopy
+144	22.83	1024x1x1	Uniform pressure arena projection / :pProject
+145	4.71	2x1x1	Uniform pressure arena projection / :ubaRelease
+146	93.91	21x1x1	Uniform region dynamics publish / :publishBegin
+147	18.58	256x1x1	Uniform region dynamics publish / :publishPressure
+148	7.42	256x1x1	Uniform region dynamics publish / :rememberPressure
+149	10.29	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+150	9.38	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+151	9.29	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
+152	9.88	256x1x1	Uniform live block copy / Uniform live copy: warm start:copy
