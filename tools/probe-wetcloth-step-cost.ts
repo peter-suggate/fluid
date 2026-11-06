@@ -131,7 +131,7 @@ const synthetic = async (device: GPUDevice, kind: string) => {
   state.positions_m.set(start);
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) state.velocities_m_s[3*(j*n + i) + 1] = velocity(i, j);
   const options: ClothStepOptions = {iterations: 64, tolerance_m: 1e-8, selfCollision: kind === 'fold', colliders, supportPositions_m: Float64Array.from(start)};
-  const solver = new GPUClothNewton(device, topology, {contactCapacity: Number(option('contact-capacity') ?? 0)}), rows: {ms: number; newton: number; refine: number; outer: number; contacts: number; solve: number; finish: number; detection: string; fallback?: string; status: number; attempts: number}[] = [];
+  const solver = new GPUClothNewton(device, topology, {contactCapacity: option('contact-capacity') === undefined ? undefined : Number(option('contact-capacity'))}), rows: {ms: number; newton: number; refine: number; outer: number; contacts: number; solve: number; finish: number; detection: string; fallback?: string; status: number; attempts: number}[] = [];
   try {
     await solver.initialize();
     for (let i = 0; i < steps; i++) {

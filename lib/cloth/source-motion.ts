@@ -99,8 +99,10 @@ export class SourceMotionRuntime {
     }
   }
   checkpoint(): SourceMotionCheckpoint {
-    return structuredClone({positions: this.supportPositions_m, velocities: this.supportVelocities_m_s,
-      fields: this.fields, poses: [...this.poses], increments: [...this.increments], time_s: this.nextTime});
+    // The support arrays are flat numbers: slice copies them (structuredClone
+    // serializes element by element, ~9 ms per array on a 32k-vertex cloth).
+    return {positions: this.supportPositions_m.slice(), velocities: this.supportVelocities_m_s.slice(),
+      ...structuredClone({fields: this.fields, poses: [...this.poses], increments: [...this.increments]}), time_s: this.nextTime};
   }
   restore(snapshot: SourceMotionCheckpoint): void {
     if (snapshot.positions.length !== this.supportPositions_m.length || snapshot.velocities.length !== this.supportVelocities_m_s.length) throw new Error('Incompatible source motion checkpoint');

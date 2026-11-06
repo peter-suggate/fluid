@@ -30,9 +30,10 @@ import { composeClothFeatures } from './definition';
  *   pore_test_mid (32400)                 824  | 1132   (26 + 788)
  *   tighten_towel (47072, 22272 rods)   33530 Newton   (53 + 33448)
  *   splash_cloth_large (159201)          5840 Newton   (43 + 5646)
- * Above ~1k vertices the finish, chiefly the CPU contact sweep, dominates. */
-export const CLOTH_CPU_SOLVE_MAX_VERTICES=256;
-export function clothSolvesOnGPU(runtime:ClothRuntime):boolean{return runtime.prepared.vertexCount>CLOTH_CPU_SOLVE_MAX_VERTICES;}
+ * Above ~1k vertices the finish, chiefly the CPU contact sweep, dominates.
+ * Every cloth solves on the GPU, however small: the Float64 CPU solve is the
+ * test oracle, not a runtime owner. */
+export function clothSolvesOnGPU(_runtime:ClothRuntime):boolean{return true;}
 
 /** Attach the same mechanical plugin to a dry scene owner. No fluid fields
  * are allocated or advanced. A dynamic rigid contact needs an external

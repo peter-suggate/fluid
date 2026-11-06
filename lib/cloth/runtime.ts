@@ -156,6 +156,22 @@ export class ClothRuntime {
             this.staged={dt_s,checkpoint,previousFields};return velocity;
         }catch(error){this.restore(checkpoint);throw error;}
     }
+    /** prepareNonFluidPredictor with the predictor on the GPU owner (the
+     * Float64 nonFluidClothPredictor stays its oracle); without a GPU owner
+     * the cloth runs on the CPU throughout, and so does its predictor. */
+    async prepareNonFluidPredictorAsync(dt_s:number,options:ClothStepOptions={}):Promise<Float64Array> {
+        if(!(this.gpu instanceof GPUClothNewton))return this.prepareNonFluidPredictor(dt_s,options);
+        if(this.stepping||this.staged||this.pendingImpulse)throw new Error('Cloth predictor requires an unstaged accepted step');
+        if(!(dt_s>0&&Number.isFinite(dt_s)))throw new Error('Invalid cloth predictor timestep');
+        const checkpoint=this.checkpoint(),previousFields=this.motion.fields;
+        this.stepping=true;
+        try{
+            this.advanceSupports(dt_s);
+            const velocity=this.document.physics?.solveSolid===false?new Float64Array(this.state.velocities_m_s.length):await this.gpu.predictVelocity(this.state,dt_s,{...this.options.mechanics,...options,supportPositions_m:options.supportPositions_m??this.motion.supportPositions_m});
+            this.staged={dt_s,checkpoint,previousFields};return velocity;
+        }catch(error){this.restore(checkpoint);throw error;}
+        finally{this.stepping=false;}
+    }
     private advanceSupports(dt_s:number):void {
         this.motion.step(dt_s, this.state.time_s);
         // Source soft fixed bits drive finite spring targets. Twist uses the

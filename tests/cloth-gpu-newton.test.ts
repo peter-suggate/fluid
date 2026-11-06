@@ -6,7 +6,7 @@ import {createClothState, prepareClothTopology} from '../lib/cloth/topology';
 import {solveClothIncrement} from '../lib/cloth/nonlinear-solve';
 import type {ClothMaterial, ClothState, ClothTopologyData} from '../lib/cloth/types';
 import type {PreparedClothTopology} from '../lib/cloth/topology';
-import type {ClothStepOptions} from '../lib/cloth/dynamics';
+import {nonFluidClothPredictor, type ClothStepOptions} from '../lib/cloth/dynamics';
 import {withUniformDevice} from './helpers/uniform-geometric';
 import {ClothContactSet, clothContactWarmStart} from '../lib/cloth/contact-constraints';
 import type {ClothCollider} from '../lib/cloth/contact';
@@ -119,6 +119,34 @@ test('GPU Newton-PCG converges a stiff plastic sheet and a soft-fixed, cohesive,
       }
       assert.ok(d.positions_m[3*offset + 16]! < 1.02, 'cohesion pulls the upper sheet toward the lower one');
     } finally {pairSolver.destroy();}
+  });
+});
+
+test('the GPU explicit predictor is the Float64 nonFluidClothPredictor: shell, cohesion, attachments, rod stretch and DER joints', gpu, async () => {
+  await withUniformDevice('cloth GPU predictor', async device => {
+    const base = sheet(4, .01), second = sheet(4, .01, 1.02), offset = 16;
+    const mixed: ClothTopologyData = {
+      restPositions_m: [...base.restPositions_m, ...second.restPositions_m, 0, .99, 0],
+      triangles: [...base.triangles, ...second.triangles.map(v => v + offset)],
+      rodOffsets: [0, 2], rodIndices: [0, 32], fixed: [...base.fixed!, ...second.fixed!.map(() => 0), 0],
+    };
+    const pair = {vertices: [5, 6, 9, offset + 5, offset + 6, offset + 9], weights: [1/3, 1/3, 1/3, -1/3, -1/3, -1/3], force_N: 1e-4, startElement: 0, endElement: 1};
+    for (const [name, data, extra] of [['mixed', mixed, {cohesionPairs: [pair]}], ['DER rods', rods(), {}]] as const) {
+      const topology = prepareClothTopology(data, [{...DEFAULT_CLOTH_MATERIAL, rodRadius_m: .0005}]), state = createClothState(topology), solver = new GPUClothNewton(device, topology);
+      for (let s = 0; s < topology.segmentCount; s++) state.angularVelocity_rad_s[s] = 40;
+      try {
+        await solver.initialize();
+        // Deform with the Float64 solve so every elastic term is loaded; supports pull the pinned corners away.
+        const support = Float64Array.from(topology.data.restPositions_m, (v, k) => v + (k % 3 === 0 ? .002 : 0));
+        for (let step = 0; step < 5; step++) assert.ok(solveClothIncrement(topology, state, .001, {iterations: 64, tolerance_m: 1e-10, ...extra}).converged);
+        const options: ClothStepOptions = {gravity_m_s2: [0, -9.81, 0], supportPositions_m: support, externalForces_N: Float64Array.from({length: 3 * topology.vertexCount}, (_, k) => 1e-5 * Math.sin(k)), ...extra};
+        const before = structuredClone(state), cpu = nonFluidClothPredictor(topology, state, .001, options), g = await solver.predictVelocity(state, .001, options);
+        assert.deepEqual(state, before, `${name}: the predictor leaves the state unchanged`);
+        const scale = Math.max(...cpu.map(Math.abs)), error = maximumDifference(cpu, g);
+        assert.ok(scale > 1e-3, `${name}: loaded (${scale} m/s)`);
+        assert.ok(error < 1e-6 * scale, `${name}: GPU predictor ${error} m/s from Float64 (scale ${scale} m/s)`);
+      } finally {solver.destroy();}
+    }
   });
 });
 
@@ -269,29 +297,32 @@ test('GPU contact detection is the Float64 contact set: a sheet folded onto itse
   });
 });
 
-test('GPU contact on the folded sheet, free-running at a 1e-12 m tolerance, stays within 1e-8 m of the Float64 trajectory', gpu, async () => {
+// Precision bound of the Float32 GPU trajectory against the Float64 one, not a
+// loosened parity: each step stops at the Float32-reachable 1e-9 m measure and the
+// free run compounds it. Measured worst 3.3e-7 m (step 25 of 30, rising from
+// 8e-9 m at step 0 and falling after); the bound is twice that.
+const FOLD_FREE_RUN_BOUND_M = 7e-7;
+test('GPU contact on the folded sheet, free-running at a Float32-reachable tolerance, stays near the Float64 trajectory', gpu, async () => {
   await withUniformDevice('cloth GPU contact fold free run', async device => {
-    // No resync: each solve starts from its own previous state, so drift cannot hide. At a
-    // 1e-10 m tolerance the contact-free trajectories already part by 1.06e-8 m at step 7 (the
-    // tolerance bounds the scaled residual, not the position error), hence 1e-12 m. Float32
-    // alone stops near 1e-9 m; the Float64 refinement finishes each step from the GPU iterate,
-    // so this also holds only because self pairs are re-linearized every outer round: with
-    // their detection-time normal and weights frozen, the two paths parted by 1e-5 m at the
-    // first contact and both converged states penetrated.
-    const {topology, a, b, supportPositions_m} = foldedStrip(), options: ClothStepOptions = {iterations: 64, tolerance_m: 1e-12, selfCollision: true, supportPositions_m};
+    // No resync: each solve starts from its own previous state, so drift cannot hide. The GPU
+    // solve is Float32 throughout (no CPU refinement): it stalls near a 4e-10 m measure, so both
+    // run at 1e-9 m. The tolerance bounds the scaled residual, not the position error (at 1e-10 m
+    // the contact-free Float64 trajectories part by 1.06e-8 m at step 7). Self pairs must be
+    // re-linearized every outer round: with their detection-time normal and weights frozen, the
+    // two paths parted by 1e-5 m at the first contact and both converged states penetrated.
+    const {topology, a, b, supportPositions_m} = foldedStrip(), options: ClothStepOptions = {iterations: 64, tolerance_m: 1e-9, selfCollision: true, supportPositions_m};
     const solver = new GPUClothNewton(device, topology);
-    let worst = 0, active = 0;
+    let worst = 0, active = 0; const series: number[] = [];
     try {
       await solver.initialize();
       for (let step = 0; step < 30; step++) {
         const cpu = solveClothIncrement(topology, a, .001, options), report = await solver.step(b, .001, options);
         assert.ok(cpu.converged && report.converged, `step ${step}: ${report.maximumUpdate_m} m`);
         assert.equal(report.contactDetection, 'gpu', `step ${step}: ${report.contactFallback}`);
-        const difference = maximumDifference(a.positions_m, b.positions_m); worst = Math.max(worst, difference);
-        assert.ok(difference < 1e-8, `step ${step}: positions differ by ${difference} m`);
-        // A refined step's multipliers are the Float64 refinement's (kept with the state, as the CPU's are).
+        const difference = maximumDifference(a.positions_m, b.positions_m); worst = Math.max(worst, difference); series.push(difference);
+        assert.ok(difference < FOLD_FREE_RUN_BOUND_M, `step ${step}: positions differ by ${difference} m (${series.map(d => d.toExponential(1)).join(' ')})`);
         const cpuLambda = clothContactWarmStart(a) ?? new Map<string, number>(), largest = Math.max(0, ...cpuLambda.values());
-        const gpuLambda = report.refinementIterations ? clothContactWarmStart(b) ?? new Map<string, number>() : new Map((await solver.contacts()).filter(c => c.lambda > 0).map(c => [c.key, c.lambda]));
+        const gpuLambda = new Map((await solver.contacts()).filter(c => c.lambda > 0).map(c => [c.key, c.lambda]));
         const carrying = (m: ReadonlyMap<string, number>) => [...m].filter(([, l]) => l > 1e-6*largest).map(([k]) => k).sort();
         assert.deepEqual(carrying(gpuLambda), carrying(cpuLambda), `step ${step}: the pairs carrying force differ: cpu ${JSON.stringify([...cpuLambda])} gpu ${JSON.stringify([...gpuLambda])}`);
         const cpuKeys = carrying(cpuLambda);
@@ -299,6 +330,6 @@ test('GPU contact on the folded sheet, free-running at a 1e-12 m tolerance, stay
       }
     } finally {solver.destroy();}
     assert.ok(active > 0, 'the layers met');
-    console.log(`self fold free run: ${active} active, positions within ${worst.toExponential(2)} m over 30 steps`);
+    console.log(`self fold free run: ${active} active, positions within ${worst.toExponential(2)} m over 30 steps: ${series.map(d => d.toExponential(1)).join(' ')}`);
   });
 });

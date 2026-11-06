@@ -1319,7 +1319,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const cohesionPairs=await this.prepareClothCohesionPairs(runtime,this.clothWaterExchanges[i]!,bodies);pairs.push([...cohesionPairs]);
       mark=clothPhase('cohesion',mark);
       const g=this.scene.fluid.gravity_m_s2;
-      const solidPredictorVelocity_m_s=runtime.prepareNonFluidPredictor(dt_s,{gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
+      const solidPredictorVelocity_m_s=await runtime.prepareNonFluidPredictorAsync(dt_s,{gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
       mark=clothPhase('predictor',mark);
       this.clothCouplings[i]!.prepare({...step,solidPredictorVelocity_m_s});
       clothPhase('couplingPrepare',mark);

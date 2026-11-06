@@ -1,7 +1,6 @@
 import type { GPUInitializationTask } from '../core/gpu-initialization';
 import { bendingRigidity, membraneModulus, rodRigidity, rodSegmentInertia_kg_m2 } from './material';
 import { extendClothStepReport, finishClothMechanicalStep, type ClothStepOptions, type ClothStepReport } from './dynamics';
-import { solveClothIncrement } from './nonlinear-solve';
 import { point3, type PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
 /** GPU stores increments, not absolute updated positions. Small physical dt
@@ -219,6 +218,8 @@ export class GPUClothMechanics {
             throw new Error('Initialize cloth GPU mechanics before stepping');
         if (!(dt > 0 && Number.isFinite(dt)))
             throw new Error('Invalid cloth GPU timestep');
+        if (options.cohesionPairs?.length)
+            throw new Error('The GPU Gauss-Seidel sweep has no cohesion energy: cohesive cloth steps on the GPU Newton-PCG owner');
         const topology = this.topology, n = topology.vertexCount, old = state.positions_m.slice(), oldTwist = state.twist_rad.slice(), positions = new Float32Array(n * 4), previous = new Float32Array(n * 4), prediction = new Float32Array(n * 4), data = new Float32Array(this.bases[3]! + this.joints.length * 16 + n * 7 + topology.segmentCount * 2), angles = new Float32Array(topology.segmentCount * 4), parameters = new ArrayBuffer(this.colors.length * 256), pf = new Float32Array(parameters), pu = new Uint32Array(parameters);
         const gravity = options.gravity_m_s2 ?? [0, -9.81, 0], target = options.supportPositions_m ?? topology.data.initialPositions_m ?? topology.data.restPositions_m;
         const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
@@ -309,16 +310,10 @@ export class GPUClothMechanics {
                 readback.unmap();
             readback.destroy();
         }
-        if(maximumUpdate>=tolerance||(options.cohesionPairs?.length??0)>0){
-            // Float32 constitutive cancellation can stall a stiff small mesh.
-            // Refine the GPU candidate against the identical Float64 energy,
-            // retaining the original inertial target and previous-step strain,
-            // with the global Newton-PCG solve (refinementIterations counts
-            // Newton iterations).
-            const initialGuess={positions_m:state.positions_m.slice(),twist_rad:state.twist_rad.slice()};
+        if(maximumUpdate>=tolerance){
+            // No Float64 CPU refinement: the sweep's failure is the step's.
             state.positions_m.set(old);state.twist_rad.set(oldTwist);
-            const refined=solveClothIncrement(topology,state,dt,options,initialGuess);
-            return extendClothStepReport(refined,{iterations:iterations+refined.iterations,gpuIterations:iterations,refinementIterations:refined.iterations});
+            throw new Error(`GPU Gauss-Seidel cloth sweep did not converge (${maximumUpdate} m after ${iterations} sweeps, tolerance ${tolerance} m)`);
         }
         return extendClothStepReport(finishClothMechanicalStep(topology, state, old, oldTwist, dt, options, { iterations, converged: maximumUpdate < tolerance, maximumUpdate_m: maximumUpdate }),{gpuIterations:iterations,refinementIterations:0});
     }
