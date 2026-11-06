@@ -388,11 +388,31 @@ fn contactGap(c:u32)->f32{let k=contactAt(c);return k.g0+dot(k.n,contactSum(k,0u
   if(next>0.){if(KU[p.kuMeta+4u*c+2u]==NONE){atomicAdd(&C[${K.K_SELF}u],1u);}else{atomicAdd(&C[${K.K_CONTACTS}u],1u);}}
  }
 }
+// The reference's self re-linearization: closest points at the current positions
+// (relative to the first vertex's old position), the normal kept on the side of detection.
+fn relinearizeSelf(c:u32){
+ let k0=KU[p.kuMeta+4u*c];let k1=KU[p.kuMeta+4u*c+1u];let j=p.kuCV+4u*c;let v=vec4u(KU[j],KU[j+1u],KU[j+2u],KU[j+3u]);
+ let q1=oldEdge(v.x,v.y);let q2=oldEdge(v.x,v.z);let q3=oldEdge(v.x,v.w);
+ let x0=xv(v.x);let x1=q1+xv(v.y);let x2=q2+xv(v.z);let x3=q3+xv(v.w);
+ var delta:vec3f;var fallback:vec3f;var w:vec4f;var distance:f32;
+ if((k0>>30u)==1u){
+  let closest=closestTriangle(x0,x1,x2,x3);delta=x0-closest.point;fallback=cross(x2-x1,x3-x1);w=vec4f(1.,-closest.w.x,-closest.w.y,-closest.w.z);
+  distance=kRadius(v.x)+ksf(p.sFaceR+k1);
+ }else{
+  let closest=closestSegments(x0,x1,x2,x3);delta=closest.a-closest.b;fallback=cross(x1-x0,x3-x2);w=vec4f(1.-closest.s,closest.s,-(1.-closest.t),-closest.t);
+  distance=ksf(p.sEdge+4u*(k0&0x3FFFFFFFu)+2u)+ksf(p.sEdge+4u*k1+2u);
+ }
+ let old=KF[4u*c].xyz;let length0=length(delta);let f=length(fallback);
+ var n=old;if(length0>1e-12){n=delta/length0;}else if(f>1e-12){n=fallback/f;}
+ if(dot(n,old)<0.){n=-n;}
+ KF[4u*c]=vec4f(n,dot(n,w.y*q1+w.z*q2+w.w*q3)-distance);KF[4u*c+3u]=w;
+ let pen=distance-dot(n,delta);maxf(${K.K_PEN}u,pen);maxf(${K.K_REPPEN}u,pen);
+}
 @compute @workgroup_size(${WG}) fn relinearize(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(!roundOn()){return;}
  let count=atomicLoad(&C[${K.K_BASE}u]);
  for(var c=g.x;c<count;c+=ng.x*${WG}u){
-  let ci=KU[p.kuMeta+4u*c+2u];if(ci==NONE){continue;}
+  let ci=KU[p.kuMeta+4u*c+2u];if(ci==NONE){relinearizeSelf(c);continue;}
   let i=KU[p.kuCV+4u*c];let s=colliderSample(ci,sweptPoint(i,1.),0.);let old=KF[4u*c];let radius=KF[4u*c+2u].w;
   if(!(dot(s.n,old.xyz)>0.)){atomicOr(&C[${K.K_ERROR}u],${E_CROSSED}u);}
   let obstacle=cv3(cHeader(ci)+2u)*p.dt;
@@ -435,10 +455,12 @@ fn contactGap(c:u32)->f32{let k=contactAt(c);return k.g0+dot(k.n,contactSum(k,0u
 }
 
 // ---- per-vertex contact lists (CSR over free vertices with nonzero weight)
+// A self pair lists all four vertices (its re-linearized weights may move off zero); a collider pair its one.
+fn pairVertices(c:u32)->u32{return select(1u,4u,KU[p.kuMeta+4u*c+2u]==NONE);}
 @compute @workgroup_size(${WG}) fn listCount(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
  let count=min(contactCount(),p.kMax);
- for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<4u;j++){if(k.w[j]!=0.&&!isFixed(k.v[j])){atomicAdd(&KA[p.aCount+k.v[j]],1u);}}}
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<pairVertices(c);j++){if(!isFixed(k.v[j])){atomicAdd(&KA[p.aCount+k.v[j]],1u);}}}
 }
 var<workgroup> scanBuffer:array<u32,${SCAN_WG}>;
 fn scanLocal(l:u32,value:u32)->u32{
@@ -469,7 +491,7 @@ fn scanLocal(l:u32,value:u32)->u32{
 @compute @workgroup_size(${WG}) fn listFill(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}
  let count=min(contactCount(),p.kMax);
- for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<4u;j++){let v=k.v[j];if(k.w[j]!=0.&&!isFixed(v)){KU[p.kvList+KU[p.kvStart+v]+atomicAdd(&KA[p.aCount+v],1u)]=(c<<2u)|j;}}}
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){let k=contactAt(c);for(var j=0u;j<pairVertices(c);j++){let v=k.v[j];if(!isFixed(v)){KU[p.kvList+KU[p.kvStart+v]+atomicAdd(&KA[p.aCount+v],1u)]=(c<<2u)|j;}}}
 }
 @compute @workgroup_size(${WG}) fn listReset(@builtin(global_invocation_id) g:vec3u){
  if(atomicLoad(&C[${K.K_ADDED}u])==0u){return;}

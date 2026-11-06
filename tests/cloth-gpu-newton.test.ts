@@ -239,18 +239,15 @@ test('GPU contact detection is the Float64 contact set: a sheet folded onto itse
   });
 });
 
-// Open (todo): the trajectories agree to 6e-10 m through step 12, then part by 1.0e-5 m at the
-// first contact (step 13). The GPU path stops at the Float32 floor and the Float64 refinement
-// restarts its contact set from the GPU iterate; self contacts keep the normal and weights of
-// their detection (ClothContactSet.relinearize updates collider contacts only), so the converged
-// state depends on where the pair was detected. The Float64 solve from the prediction ends with
-// e:93:228 at a fresh gap of -1.8e-6 m; from the GPU iterate, v:0:89 at -1.6e-7 m.
-test('GPU contact on the folded sheet, free-running at a 1e-12 m tolerance, stays within 1e-8 m of the Float64 trajectory', {...gpu, todo: 'self contacts are not relinearized: the converged state depends on the detection point'}, async () => {
+test('GPU contact on the folded sheet, free-running at a 1e-12 m tolerance, stays within 1e-8 m of the Float64 trajectory', gpu, async () => {
   await withUniformDevice('cloth GPU contact fold free run', async device => {
     // No resync: each solve starts from its own previous state, so drift cannot hide. At a
     // 1e-10 m tolerance the contact-free trajectories already part by 1.06e-8 m at step 7 (the
     // tolerance bounds the scaled residual, not the position error), hence 1e-12 m. Float32
-    // alone stops near 1e-9 m; the Float64 refinement finishes each step.
+    // alone stops near 1e-9 m; the Float64 refinement finishes each step from the GPU iterate,
+    // so this also holds only because self pairs are re-linearized every outer round: with
+    // their detection-time normal and weights frozen, the two paths parted by 1e-5 m at the
+    // first contact and both converged states penetrated.
     const {topology, a, b, supportPositions_m} = foldedStrip(), options: ClothStepOptions = {iterations: 64, tolerance_m: 1e-12, selfCollision: true, supportPositions_m};
     const solver = new GPUClothNewton(device, topology);
     let worst = 0, active = 0;
@@ -262,8 +259,12 @@ test('GPU contact on the folded sheet, free-running at a 1e-12 m tolerance, stay
         assert.equal(report.contactDetection, 'gpu', `step ${step}: ${report.contactFallback}`);
         const difference = maximumDifference(a.positions_m, b.positions_m); worst = Math.max(worst, difference);
         assert.ok(difference < 1e-8, `step ${step}: positions differ by ${difference} m`);
-        const cpuKeys = [...(clothContactWarmStart(a) ?? new Map()).keys()].sort(), gpuKeys = (await solver.contacts()).filter(c => c.lambda > 0).map(c => c.key).sort();
-        assert.deepEqual(gpuKeys, cpuKeys, `step ${step}: the pairs carrying force differ`);
+        // A refined step's multipliers are the Float64 refinement's (kept with the state, as the CPU's are).
+        const cpuLambda = clothContactWarmStart(a) ?? new Map<string, number>(), largest = Math.max(0, ...cpuLambda.values());
+        const gpuLambda = report.refinementIterations ? clothContactWarmStart(b) ?? new Map<string, number>() : new Map((await solver.contacts()).filter(c => c.lambda > 0).map(c => [c.key, c.lambda]));
+        const carrying = (m: ReadonlyMap<string, number>) => [...m].filter(([, l]) => l > 1e-6*largest).map(([k]) => k).sort();
+        assert.deepEqual(carrying(gpuLambda), carrying(cpuLambda), `step ${step}: the pairs carrying force differ: cpu ${JSON.stringify([...cpuLambda])} gpu ${JSON.stringify([...gpuLambda])}`);
+        const cpuKeys = carrying(cpuLambda);
         active = Math.max(active, cpuKeys.length);
       }
     } finally {solver.destroy();}

@@ -559,6 +559,8 @@ export interface GPUClothNewtonReport extends ClothStepReport {
   /** Where in-solve contacts were detected, and why not on the GPU. */
   readonly contactDetection: 'gpu' | 'cpu' | 'none';
   readonly contactFallback?: string;
+  /** GPU contact solves this step took (more than 1: the pool grew and the step was redone). */
+  readonly contactAttempts?: number;
   /** The last GPU solve's status bits (converged 1, line search 2, nonfinite 4, Newton cap 8, singular 16). */
   readonly gpuStatus: number;
 }
@@ -641,7 +643,9 @@ export class GPUClothNewton {
   /** W's coordinate stiffness holds a gradient evaluation of this buffer. */
   private stiffnessValid = false;
 
-  constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology) {
+  /** contactCapacity: the contact pool authored from a scene's measured peak (pairs), so the
+   * GPU never grows it mid-run; growth (and its redo of the step) remains the fallback. */
+  constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology, private readonly authored: {contactCapacity?: number} = {}) {
     if (!gpuClothNewtonSupported(topology)) throw new Error('GPU cloth Newton supports shells and two-vertex rods only; rod joints need the coordinate solver');
     const n = this.n = topology.vertexCount, T = topology.triangles.length, H = topology.hinges.length, S = topology.segmentCount;
     if (Math.max(n, T, H, S) >= 1 << 24) throw new Error('GPU cloth Newton element index exceeds 24 bits');
@@ -999,13 +1003,14 @@ export class GPUClothNewton {
     const x = predicted.slice();
     const positions = (increments: Float32Array) => {for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) x[3 * i + a] = old[3 * i + a]! + increments[4 * i + a]!;};
     let solve: SolveResult | undefined, contact_ms = 0, solves = 1, outer = 0, contactResidual = 0, contactReport: ClothContactReport | undefined;
-    let newton = 0, linear = 0, submissions = 0;
+    let newton = 0, linear = 0, submissions = 0, contactAttempts = 0;
     if (inSolve && !fallback) {
       const frictionEpsilon = FRICTION_SLIP_SPEED_M_S * dt;
       for (let attempt = 0; ; attempt++) {
         solve = await this.solveWithGPUContact(pairs, old, {newtonCap, tolerance, dt, frictionEpsilon, colliders, selfCollision});
         newton += solve.newton; linear += solve.linear; submissions += solve.submissions;
         const errors = solve.control[CONTACT_CONTROL.K_ERROR]!;
+        contactAttempts = attempt + 1;
         if (!errors) break;
         if (errors & ~GROWABLE || attempt >= 3) {fallback = `GPU detection: ${describeErrors(errors)}`; solve = undefined; break;}
         // Too small for this contact set: grow from what the GPU counted, and redo the step.
@@ -1067,7 +1072,7 @@ export class GPUClothNewton {
       state.twist_rad[s] = (inertia * (oldTwist[s]! + dt * state.angularVelocity_rad_s[s]!) + spring * state.attachmentTwistTarget_rad[s]!) / (inertia + spring);
     }
     const contactDetection = !inSolve ? 'none' as const : fallback ? 'cpu' as const : 'gpu' as const;
-    const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms, contactDetection, gpuStatus: solve.status, ...(fallback && inSolve ? {contactFallback: fallback} : {})};
+    const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms, contactDetection, gpuStatus: solve.status, ...(contactAttempts > 1 ? {contactAttempts} : {}), ...(fallback && inSolve ? {contactFallback: fallback} : {})};
     if (!converged) {
       // Float32 stalled (line search, cap), broke, or the contact iterations
       // did not settle: the Float64 Newton solve (with its own in-solve
@@ -1098,7 +1103,7 @@ export class GPUClothNewton {
 
   private prepareGPUContact(colliders: readonly ClothCollider[], selfCollision: boolean): void {
     this.contactStatic ??= clothContactStatic(this.topology);
-    this.ensureContactCapacity(Math.max(4096, 2 * this.n));
+    this.ensureContactCapacity(Math.max(4096, 2 * this.n, this.authored.contactCapacity ?? 0));
     this.uploadContactStatic(colliders);
     this.selfCollision = selfCollision;
   }

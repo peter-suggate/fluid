@@ -14,10 +14,12 @@ import {sceneShape} from '../core/scene-shape';
  * added to the incremental potential, with lambda_k <- max(0, lambda_k - rho_k g_k)
  * after each inner solve. Every constraint is linear in the positions,
  *   g_k = n_k . sum_j w_kj x_j - b_k,
- * with n and w frozen where the CCD found the impact (self contact: vertex
- * minus face point; edge-edge: the two closest points), or, for colliders, the
- * collider's tangent plane re-linearized at the current end-of-step position
- * every outer iteration (sequential linearization of phi(x) - r >= 0).
+ * with n and w first taken where the CCD found the impact (self contact: vertex
+ * minus face point; edge-edge: the two closest points; colliders: the tangent
+ * plane), then re-linearized at the current end-of-step positions every outer
+ * iteration (sequential linearization of the true distance minus thickness >= 0):
+ * colliders take the tangent plane there, self pairs the closest points there,
+ * the normal kept on the side the pair was detected from.
  * Coulomb friction is the lagged smoothed form of Li et al. 2020 (IPC): with the
  * normal force lambda and tangent plane of the previous outer iteration,
  *   mu lambda f0(|P_t (sum_j w_kj (x_j - x_j^old) - d_obstacle)|),
@@ -25,7 +27,7 @@ import {sceneShape} from '../core/scene-shape';
  * Outer iterations re-detect from the old to the current end positions and stop
  * when no new pair appears and, in metres, every KKT residual
  * |min(g, lambda/rho)| (penetration, or force acting across a gap), every true
- * collider penetration and every lagged-friction residual
+ * penetration (collider or self) and every lagged-friction residual
  * mu |lambda - lambda_friction|/rho is below the solver tolerance. (The inner
  * solve fixes g only to that tolerance, so lambda is known to rho times it.) Velocity is then (x - x_old)/dt of these
  * positions, so nothing is projected after the solve.
@@ -37,7 +39,7 @@ export interface ClothContactConstraint {
   readonly key: string;
   readonly kind: 'collider' | 'self';
   readonly vertices: readonly number[];
-  readonly weights: readonly number[];
+  weights: number[];
   normal: [number, number, number];
   offset: number;
   readonly colliderIndex: number;
@@ -254,12 +256,13 @@ export class ClothContactSet {
     return added;
   }
 
-  /** Collider tangent planes re-linearized at x (end-of-step pose). Returns
-   * the largest true collider penetration r - phi(x) found. */
+  /** Every pair re-linearized at x (end-of-step pose): collider tangent planes,
+   * and the closest points of self pairs with their normal kept on the side of
+   * detection. Returns the largest true penetration (thickness minus distance). */
   relinearize(x: ArrayLike<number>): number {
     let penetration = 0;
     for (const c of this.constraints) {
-      if (c.kind !== 'collider') continue;
+      if (c.kind === 'self') {penetration = Math.max(penetration, this.relinearizeSelf(c, x)); continue;}
       const i = c.vertices[0]!, p = point3(x, i), collider = this.colliders[c.colliderIndex]!, sample = sampleClothCollider(collider, p, 0);
       if (!(dot3(sample.normal, c.normal) > 0)) throw new Error(`Cloth vertex ${i} crossed collider ${c.colliderIndex} within the step`);
       c.normal = [sample.normal[0], sample.normal[1], sample.normal[2]];
@@ -268,6 +271,25 @@ export class ClothContactSet {
       penetration = Math.max(penetration, c.radius - sample.distance_m);
     }
     return penetration;
+  }
+
+  private relinearizeSelf(c: ClothContactConstraint, x: ArrayLike<number>): number {
+    const [p, a, b, d] = c.vertices.map(v => point3(x, v)) as unknown as [ClothVector, ClothVector, ClothVector, ClothVector];
+    let delta: ClothVector, fallback: ClothVector;
+    if (c.key.startsWith('v:')) {
+      const closest = closestTrianglePoint(p, a, b, d);
+      delta = sub3(p, closest.point); fallback = cross3(sub3(b, a), sub3(d, a));
+      c.weights = [1, -closest.weights[0], -closest.weights[1], -closest.weights[2]];
+    } else {
+      const closest = closestSegmentPoints(p, a, b, d);
+      delta = sub3(closest.a, closest.b); fallback = cross3(sub3(a, p), sub3(d, b));
+      c.weights = [1 - closest.s, closest.s, -(1 - closest.t), -closest.t];
+    }
+    const length = norm3(delta), f = norm3(fallback);
+    let normal = length > 1e-12 ? scale3(delta, 1/length) : f > 1e-12 ? scale3(fallback, 1/f) : c.normal;
+    if (dot3(normal, c.normal) < 0) normal = scale3(normal, -1);
+    c.normal = [normal[0], normal[1], normal[2]];
+    return c.offset - dot3(normal, delta);
   }
 
   gap(c: ClothContactConstraint, x: ArrayLike<number>): number {
