@@ -710,3 +710,69 @@ dispatches, and the next are 7, 6, 5, 4 and 4.
 - **Total for the design:** 475 dispatches down to about 300 launches (half
   of the 175 removed come from pressure). At the measured ~25-35 us a
   launch, that is about 4-6 ms of drop=2's 15.3.
+
+## Round 7 option 1, knockout before the build (2026-11-06)
+
+The coordinator asked for a timing bound before the full restructure. The
+bound comes from removing the coarse launches on drop=2. All runs are 8x8x4
+`--pure --drop=2`, 60 steps, from a clean export of d4769214.
+
+**Fixed-cycle timing.** The knockout tree forces 2 V-cycles every frame
+(`bMet` false, so no early exit). Every variant then encodes and runs the
+same outer work.
+
+| variant (2 forced cycles) | steadyMedian ms | step-60 residual |
+|---|---|---|
+| tailCycles 3 (HEAD) | 13.14 | 0.038 |
+| tailCycles 1 | 12.53 | 0.032 |
+| tailCycles 5 | 13.63 | (p95 noisy) |
+
+- One 8h tail cycle (pDown3, pDown4, pTail, pUp4, pUp3: 5-6 launches) costs
+  0.15-0.25 ms a frame at 2 outer cycles. That is 75-120 us of wall time
+  for each tail cycle in each V-cycle.
+- The whole tail (3 cycles) is therefore about 0.5-0.75 ms a frame at 2
+  cycles, and less at drop=2's real ~1.8.
+- Levels 1 and 2 (pDownA, pDownR, pDownB, pDown2, pBulkLift, pUpB, pUpA: 7
+  launches a cycle) add at most about 0.3-0.4 ms by the same per-launch
+  scale.
+- **Bound:** removing every coarse launch is worth under about 1.1 ms. The
+  resident tail can remove only part of that, so the bound for the
+  restructure is under 1 ms.
+- A direct knockout (tail or all coarse levels skipped) diverged within
+  about 15 frames: drift -0.4 to -0.5 by step 60, and the band grew. Its
+  medians (18.2 and 17.2 ms) measure the exploded scene, not the solve.
+
+**Cycles per frame do not follow the coarse solve's accuracy.** These are
+unpipelined traces (`probe-tank-pressure-trace --drop=2`); the counts are
+for frames 21-60.
+
+| variant | cycles | m1 (history[1] geomean) |
+|---|---|---|
+| HEAD | 71 | 0.073 |
+| tailCycles 1 | 85 | 0.174 |
+| tailCycles 5 | 60 | 0.055 |
+| tailCycles 9, every up4 red-black | 78 | 0.085 |
+| tailCycles 15, red-black, 96 32h sweeps | 74 | 0.079 |
+| resident 16h+32h (prototype) | 79 | 0.088 |
+
+- A near-exact 8h solve (9 or 15 convergent tail cycles) does not lower the
+  frame's cycles. The count is noisy, roughly +/-10, because m1 sits on the
+  0.05 target.
+- tailCycles 1 saves 0.6 ms at fixed cycles, but costs 14 cycles (+20%), so
+  it is a net loss.
+
+**Resident prototype (not landed).** pResident is one workgroup (1024
+lanes):
+- the 16h rows sweep red-black over the whole pool, with their iterate in
+  the pool's Y;
+- the 32h rows solve in workgroup memory (20 bytes a page, at most 1280
+  pages);
+- pDown3 becomes residual-only.
+
+It replaces pDown4, pTail and pUp4. It compiles and converges (drift
+-6e-7), but runs 79 cycles. The kernel timer's per-dispatch resolution is
+65.5 us, so it cannot rank these sub-tick kernels.
+
+**Conclusion.** The resident coarse solve is bounded below 1 ms of drop=2's
+~13 ms, and it buys no cycles. The 2 ms target is not reachable through the
+coarse levels.
