@@ -515,3 +515,107 @@ loads in the WGSL, and the knockout that bounds the loop.
   823 h tiles at step 5).
 - tests/uniform-nbflip-symmetry fails at clean HEAD at step 6 (reflected
   surface error 0.039 m), before the repeatability check is reached.
+
+## Round 7 (2026-11-06)
+
+### 1. Symmetry test bisect
+
+The symmetry test (`tests/uniform-nbflip-symmetry.test.ts`) was run once
+per commit, each on a clean `git archive` export.
+
+**Earlier history (docs/plans/nbflip-handoff-2026-10-28.md).**
+- 853470a0 is the last pass.
+- 24d05d06 is the first bad commit. It fails at step 21 (3.97e-3 m).
+- 049221ca moves the failure to step 5/6 (about 2e-4 m), through the
+  extension at the h tiles beside the z walls.
+
+**The 2e-4 to 0.04 m jump.** The commits the coordinator named all date
+from 11-06, after the jump, so none of them is the first bad commit.
+
+| commit | step-6 reflected error (m) |
+| --- | --- |
+| bfc5ce24 | 2.03e-4 |
+| 5996d9ce | 2.03e-4 |
+| **3500c506** | **0.0377** (first bad) |
+| 7cfed3c1 | 0.0399 |
+| 6ff91af5 | 0.0396 |
+| HEAD | 0.0395 |
+
+**Cause.** 3500c506 replaced the fixed quarter-cell seed sites with
+jittered sub-cell sampling (`nbJitter` in uniform-narrow-band-flip.ts).
+- The jitter is a hash of the absolute cell coordinate, so a cell and its
+  mirror image get different seed positions. The seeds are not
+  mirror-symmetric.
+- The salt is `slot+1+count`, and `slot` comes from `atomicAdd` order in
+  seedCells. Seed positions therefore change from run to run, which also
+  explains the nondeterminism at HEAD found in round 6.
+
+**Knockout.** HEAD with `nbJitter` returning 0.5 (the centre of each
+eighth) gives a step-6 error of **2.1e-5 m**. That is 1900 times smaller,
+and only the older extension asymmetry remains. NB-FLIP seeding is not a
+Lane P file, so it is sent for routing.
+- A salt from frame-ordered data instead of the slot would fix the run-to-run
+  nondeterminism.
+- Mirror-exact jitter would not be general, so the test's 1e-6 bound
+  needs a decision from the owner.
+
+### 2. wetRegions on a region list
+
+**What was built.**
+- stampHeld sets bit 2 of word 12 when any of a region's 27 neighbours
+  changed.
+- A new single-workgroup `regionLists` pass compacts the changed regions
+  and the near regions, in ascending order, after the stamps.
+- cutRegions and wetRegions stride those lists, not UM_PAGES.
+
+A focused GPU test passed: over the first 4 steps of the ladder, both
+lists match the flag words exactly. Checks and test:unit also passed.
+
+**Result on drop=2, kernel ms (one run):**
+
+| stage | before | after |
+| --- | --- | --- |
+| wetRegions | 0.125 | 0.115 |
+| cutRegions | 0.084 | 0.078 |
+| regionLists (new) | — | 0.025 |
+
+- The net change is about zero. The capacity scan was never the cost;
+  the work in the near regions is.
+- regionLists and stamp still stride every capacity page, so the change
+  does not make the stamps scale with the live regions either.
+- **Not committed.** The patch is kept in scratch
+  (r7/region-lists.patch).
+
+### 3. Bookkeeping segment: does the topology change each frame?
+
+**Measurement.** drop=2, frames 3-60, with a per-step readback of the
+ownership tile words and the receipts.
+
+| measure | result |
+| --- | --- |
+| frames with no tile width change | 14 of 58 (24%) |
+| tiles changing width on the other frames | mean 5.5, max 35 (of 32768 tiles, about 110 h) |
+| remap jobs a frame | mean 16 |
+| page pool claims and retires | none in any frame |
+| tiles whose owner base shifts, when any width changes | median 32,733 of 32,768 |
+
+- **Owner bases shift almost everywhere.** Owner indexing is a dense
+  prefix rank, so one width change shifts the owner base of nearly every
+  later tile. The layout, slot and remap outputs are therefore not equal
+  to the previous frame's for the unchanged part, even though fewer than
+  0.1% of tiles changed.
+
+**Bound.**
+- The segment's kernel time is 2.67 ms over 111 timed dispatches (about
+  2.1 ms net of isolation).
+- Of that, the census decision (about 0.75 ms) and the particle sort
+  (about 0.23 ms) must run every frame.
+- Holding outputs on unchanged frames applies to 24% of frames: about
+  0.3 ms on the mean and nothing on the steady median.
+- The stages that depend only on page claims (block neighbours, the
+  claimed-block solid record, the live copies) run every frame although
+  nothing is claimed, but they total about 0.2 ms.
+- The bound is below 1.5 ms, so no "proportional to change" design was
+  started. Making it proportional would need stable per-tile owner slots
+  in place of dense ranks: an addressing change across every
+  owner-indexed buffer, not a bookkeeping change.
