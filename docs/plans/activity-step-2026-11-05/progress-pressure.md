@@ -364,3 +364,154 @@ At about 5 us per chained launch, the planned fusions save roughly:
 Each family is below the 0.3 ms bar and inside the single-run noise. The
 step's time is in the work of a few stages, not in the launch count, so
 none of them were built.
+
+## Round 6: per-stage critical paths outside pressure
+
+Durations come from the in-process kernel timer (`--kernels=40`), which
+isolates every dispatch in its own timestamped pass, so it is the
+in-process form of a per-label isolated trace. Means are used because the
+timestamps are quantised at about 65.6 us. "Net" takes off 5 us per
+dispatch, the isolation cost.
+
+Source runs: HEAD d4769214, 8x8x4 drop=2, 60 steps, kernels from step 40.
+At step 60 that frame held 5266 particles, 76 h tiles and tiers
+[384,124,4]. Dispatch counts come from a scratch build of the timer that
+counts labels.
+
+### Top 20 non-pressure stages
+
+Sum 10.71 ms (9.23 ms net).
+
+| stage | ms | dispatches | net ms |
+| --- | --- | --- | --- |
+| advectParticlesDeferred (move) | 0.406 | 1 | 0.401 |
+| project | 0.390 | 1 | 0.385 |
+| pair_sweepSeams | 0.300 | 2 | 0.290 |
+| classifyCoarse | 0.275 | 1 | 0.270 |
+| depthCoarse | 0.234 | 1 | 0.229 |
+| geometryRegional | 0.222 | 2 | 0.212 |
+| phi resolve | 0.212 | 4 | 0.192 |
+| metric (global surface volume) | 0.197 | 1 | 0.192 |
+| advectDeferred (fast) | 0.172 | 1 | 0.167 |
+| remapFaces | 0.156 | 2 | 0.146 |
+| advectDeferred (cubic) | 0.137 | 1 | 0.132 |
+| buildRhs | 0.131 | 1 | 0.126 |
+| localSpeed | 0.131 | 1 | 0.126 |
+| mixedSweepBlocks | 0.140 | 3 | 0.125 |
+| surfaceHeld | 0.131 | 2 | 0.121 |
+| wetRegions | 0.122 | 1 | 0.117 |
+| arenaDistance | 0.119 | 1 | 0.114 |
+| surface volume dilate | 0.131 | 4 | 0.111 |
+| transferSeams | 0.115 | 1 | 0.110 |
+| mixedProlongUnknownVelocity | 0.125 | 3 | 0.110 |
+
+### Pressure arena stages for Lane S
+
+Every arena stage, ranked by net duration. All times and counts come
+from one run, so cycle counts match: tree q at drop=2, with 12235
+particles, 128 h tiles and tiers [355,151,6], 2 cycles, all band. The sum
+is 5.23 ms (4.41 ms net). HEAD's lighter 5266-particle frame sums to
+4.00 ms. The coarse levels are a small part of the total.
+
+| stage | ms | dispatches | net ms |
+| --- | --- | --- | --- |
+| pTail | 0.777 | 10 | 0.727 |
+| pUp4 | 0.484 | 13.3 | 0.417 |
+| pRelax | 0.418 | 20 | 0.318 |
+| pDown3 | 0.331 | 10 | 0.281 |
+| pDown2 | 0.268 | 3.3 | 0.252 |
+| pNativeRelax | 0.296 | 13.3 | 0.230 |
+| kApplyNB | 0.200 | 2.3 | 0.188 |
+| pDownB | 0.197 | 3.3 | 0.180 |
+| pUp3 | 0.228 | 10 | 0.178 |
+| pUpB | 0.159 | 3.3 | 0.142 |
+| pBulkRows | 0.147 | 1 | 0.142 |
+| pResidual2 | 0.150 | 4.3 | 0.128 |
+| pNative | 0.131 | 1 | 0.126 |
+| pDownA | 0.119 | 3.3 | 0.102 |
+| pRows | 0.100 | 1 | 0.095 |
+| pDown4 | 0.140 | 10 | 0.090 |
+| pRebase | 0.106 | 4.3 | 0.084 |
+| kReduce | 0.075 | 2.3 | 0.063 |
+| pProjectNative | 0.066 | 1 | 0.061 |
+| pProject | 0.059 | 1 | 0.054 |
+| pNativeOperator, kStart, kApplyT, pRestrict0 | | | 0.05 each |
+| the other 24 labels | | | under 0.05 each |
+
+### Explanations of the top stages
+
+Each entry gives the launch, the per-lane serial loop and its dependent
+loads in the WGSL, and the knockout that bounds the loop.
+
+- **advectParticlesDeferred** (the move).
+  - Launch: a slab job of NB_MOVE_CHUNK records, plus 64-entry flat jobs.
+  - Per-lane loop: with 256-record chunks each lane walked 4 records in
+    turn, each a Heun 3-stage field trace of tens of dependent loads.
+  - **Fixed:** 64-record jobs. The move fell 0.41 -> 0.25-0.27 ms at
+    drop=2 and 0.95 -> 0.68 ms at drop=8. Committed d77c509b.
+- **project**.
+  - Launch: residentAll, a lane per owner, 1024-group grid. A 4h seam
+    owner's lane walks up to 16 patches x 3 axes.
+  - Knockout: forcing seam owners to one patch only went 0.390 -> 0.365.
+  - A spread version (scan of patch counts, items over the group's lanes,
+    one evaluate site) measured 0.61 ms. **Not kept.**
+  - The time is the owner count times the evaluate cost, not a seam lane.
+- **pair_sweepSeams**.
+  - Launch: a group per seam h tile, about 76 groups, one wave.
+  - Per-lane loop: each lane runs 3 serial ueExtend calls of 6 neighbour
+    answers each.
+  - Knockout: one axis instead of three only went 0.300 -> 0.259.
+    **Not the critical path.**
+- **classifyCoarse**.
+  - Launch: 384 4h tiles over 6 groups of 64 tiles. Lanes share the
+    queued depth samples of their job's crossing tiles.
+  - Smaller jobs (8 to 64 tiles, a group per 8) went 0.275 -> 0.293.
+    **No gain; reverted.**
+- **depthCoarse**.
+  - Per-lane loop: a lane per build entry runs a 5-iteration gradient
+    trace, then 7 vertex samples of the bound metric.
+  - Knockout: no trace iterations went 0.234 -> 0.150. Bound 0.08 ms,
+    so not built.
+- **metric**.
+  - Per-lane loop: a lane per owner. A measured 4h owner walks 8 corners,
+    each with authority, 8 umOwnerAt and a 6-load slope.
+  - Knockout: 4h owners take one corner, 0.197 -> 0.066. Bound 0.13 ms.
+  - A corner queue shared over the group (bit-identical by construction)
+    measured 0.46 ms. **Not kept:** the atomics, shared memory and the
+    indirect corner loop cost more than the walk.
+- **geometryRegional**.
+  - Launch: 4h jobs of 64 tiles, about 2 groups.
+  - Per lane: a 4h lane runs gcEvaluate (plane, same-sign test or tetra
+    fill). The h tiles' cut terms are already spread a lane per cell.
+  - No serial list left to spread.
+- **phi resolve**.
+  - Launch: a 125-lane group per seam tile, 4 launches. Each lane resolves
+    one vertex from the staged 27-vertex lattice.
+  - No serial loop.
+- **mixedSweepBlocks**.
+  - Launch: one workgroup has work for about 64 blocks.
+  - Per-lane loop: a 27-neighbour serial loop.
+  - It is 0.125 ms over 3 launches. Not built.
+- **wetRegions**.
+  - Launch: strides every capacity page (UM_PAGES) over a grid of
+    min(1024, pages) groups, with 2 to 3 barriers per region, absent
+    regions included.
+  - Its cost scales with capacity, not with the live regions. A candidate
+    for a resident-page list, not yet measured.
+
+### Result and what it says
+
+- Only the move chunk was a true lane-serial critical path.
+- The other loops bound at 0.03-0.13 ms each, all under the 0.3 ms bar.
+- Spreading two of them across the group made each slower.
+- These stages behave as throughput-bound at their register-limited
+  occupancy: owners times per-owner cost. Single long lanes are not what
+  bounds them.
+- drop=2 gains 0.10-0.16 ms in total, short of the 1.5 ms target. The
+  move fix pays more where particles are dense: seep -1.05 ms, letters
+  -3.3 ms.
+- Not verifiable bit for bit: drop=2 and the trough dam are not
+  deterministic run to run even at HEAD (HEAD against HEAD: 826 against
+  823 h tiles at step 5).
+- tests/uniform-nbflip-symmetry fails at clean HEAD at step 6 (reflected
+  surface error 0.039 m), before the repeatability check is reached.
