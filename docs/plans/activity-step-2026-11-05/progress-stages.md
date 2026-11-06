@@ -618,3 +618,95 @@ Counters taken: one capture, the gated one above. A per-stage split inside
 the kicks would need the shader timeline in launch mode. Under counters,
 construction alone is about 4 min, so it was not taken. The dependency
 leveling gives the stage-level answer offline.
+
+## Round 7, step 0: the switched-on frame's stage graph (design input)
+
+**Method.** The scratch recorder hooks the native WebGPU prototypes,
+underneath the compute blit's shared pass.
+- For one advance it logs every dispatch: pipeline, entry point,
+  workgroups and the bound buffer ranges. It also logs each logical copy
+  and clear.
+- Each binding is split into reads and writes by what the entry point's
+  reachable WGSL does with it: assignments, atomics, and `&` passed to a
+  function.
+- The command stream is then levelled. A command sits one level above the
+  latest earlier command it conflicts with.
+- Two run recordings were taken through `fluid-gpu-run.sh check`, at
+  advance 29 of 8x8x4 rest and of 8x8x4 drop=2.
+- Scratch tools: `tools/scratch-gpu-graph-recorder.ts` and
+  `tools/scratch-stage-graph.ts` in the dev7 export.
+
+**(a) Dependency depth.** Bindings count as whole ranges, so these depths
+are upper bounds.
+
+| advance | dispatches | copies + clears | depth, all hazards | depth, RAW only |
+|---|---|---|---|---|
+| rest | 140 | 31 | 119 | 116 |
+| drop=2 | 475 | 105 | 390 | 350 |
+
+Even with every write-after-read and write-after-write hazard renamed
+away, dependency leveling removes at most 26% of the launches. The frame
+is a real chain. Merging independent stages into one dispatch cannot
+deliver the win.
+
+**Where the 475 drop=2 dispatches sit.** Command buffers in submission
+order:
+
+| submission | dispatches | content |
+|---|---|---|
+| 0 | 151 | census, page pool, BULK16, layout build, h slots, remap, frame plan, particle bins and slab sort (22 merge passes) |
+| 1 | 45 | surface advect, phi resolve, depth/air plans, the redistance arena |
+| 2 | 36 | geometry, momentum, P2G transfer, forces |
+| 3 | 243 | ownership transfer, authority, then the pressure arena: 193 dispatches, against 104 at rest; then projection, publish, extension |
+
+The 3rd shared-schedule kick (7.05 ms) is submission 3, or submissions 2
+and 3 together if the hardware coalesced them.
+- About 80% of submission 3 is the pressure arena multigrid.
+- drop=2 runs 4 Krylov iterations, each with a V-cycle whose three coarse
+  levels repeat three times: (down3, down4, tail, up4, up3) x3. Rest
+  runs 2.
+- At rest the arena's 104 dispatches take about 2.6 ms, so at drop=2
+  pressure costs about 5-5.5 ms of the 7.05.
+
+**(b) Global boundaries.** Each dispatch is classified by stage role.
+WGSL was spot-checked; it was not proven per kernel.
+
+| class | dispatches | |
+|---|---|---|
+| pressure multigrid: smoothers, residuals, restrict/prolong, coarse levels | 161 | neighbour stencil at every level |
+| pressure Krylov: reductions, verdict, final | 18 | global reductions |
+| pressure setup and tables | 15 | |
+| global allocation, scan, sort or claim | 92 | census, page pool, BULK16, layout builder, slots, regional plan, particle bins and sort |
+| neighbour stencil, gather or scatter outside pressure | 121 | advect, resolve/twins, remap faces, dilate/spread, redistance arena, momentum, P2G deposit, forces, buildRhs/project, extension sweeps |
+| pointwise per block | 68 | authority stamps, ownership transfers, page/slot init, region dynamics, live copies, publishes |
+
+Almost every physics stage reads a neighbour block's output from the same
+frame. The pointwise stages form 23 separate runs; the longest is 12
+dispatches, and the next are 7, 6, 5, 4 and 4.
+
+**(c) What one-workgroup-per-block chains can and cannot reach.**
+
+- **Pointwise runs only:** 68 dispatches become 23 launches. That removes
+  45 launches. These are short kernels, so the gain is below about 1 ms.
+- **Stencil chains:** the one-pass design must use halo-overlapped tiling.
+  Each workgroup computes k chained stencil steps on its block plus a halo
+  of width k, all in threadgroup memory. That replaces k global boundaries
+  with one, at the cost of redundant halo work. Candidates and expected
+  launches:
+  - **Pressure (Lane P's files).**
+    - A workgroup-resident coarse solve replaces the 15 coarse-level
+      launches in each V-cycle with 1: 60 down to 4.
+    - Halo-fused fine smoothing replaces each relax x3 and nativeRelax x2
+      group with 1: about 24 fewer.
+    - Krylov reductions stay global.
+    - Expected: 193 down to about 110.
+  - **Extension hierarchy:** restrict/sweep/prolong x3 and the paired
+    sweeps, 18 down to about 4.
+  - **Surface advect:** 15 down to about 4.
+  - **Redistance arena:** about 14 down to about 5.
+  - **Momentum, then P2G:** 15 down to about 5.
+  - **Particle slab sort:** each long cell is merged inside one workgroup,
+    so 24 launches become 2.
+- **Total for the design:** 475 dispatches down to about 300 launches (half
+  of the 175 removed come from pressure). At the measured ~25-35 us a
+  launch, that is about 4-6 ms of drop=2's 15.3.
