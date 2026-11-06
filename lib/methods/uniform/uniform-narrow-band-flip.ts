@@ -238,6 +238,18 @@ export const NARROW_BAND_RETIRE_WORDS=12;
  * m_j/(m_i+m_j)(r_i+r_j-l) < r_i+r_j with r = cbrt(m)/4: so under twice the
  * heaviest sample's radius, cbrt(8)/2 = 1 cell under crowdedCells "merge"
  * (NB_MASS_MAX 8), half a cell with unit samples. */
+/** A seed's jitter in its eighth of the cell: a hash of the cell, the site
+ * (its sample index in the cell) and the salt alone. The reseed's salt is the
+ * frame index (params.live.z), so a frame's sites follow from its data, not
+ * from the order its seed list was filled in. */
+export const narrowBandSeedJitterWGSL=/* wgsl */`
+fn nbSeedJitter(c:vec3u,k:u32,salt:u32)->vec3f{
+ var h=(c.x*73856093u)^(c.y*19349663u)^(c.z*83492791u)^(k*2654435761u)^(salt*0x9e3779b9u);
+ var r=vec3f(0.0);
+ for(var a=0u;a<3u;a++){h^=h>>16u;h*=0x7feb352du;h^=h>>15u;h*=0x846ca68bu;h^=h>>16u;r[a]=f32(h&0xffffffu)/16777216.0;}
+ return r;
+}
+`;
 export function narrowBandSeparationReach(separation:"off"|"pairs",merge:boolean):number{
  return separation==="pairs"?0.5*Math.cbrt(merge?8:1):0;
 }
@@ -445,6 +457,8 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly activityWords=this.stepWords.subarray(8,12);
  // params.live.y: live.x is the state's live word, copied in by the GPU.
  private readonly sparseWords=new Uint32Array(1);
+ /** params.live.z: the frames moved, the reseed's salt (narrowBandSeedJitterWGSL). */
+ private readonly seedFrameWords=new Uint32Array(1);
  /** params.gravity: the step's gravity vector (m/s^2), the ballistic kick. */
  private readonly gravityWords=new Float32Array(4);
  private readonly receiptBits=new Uint32Array(2);
@@ -1581,16 +1595,13 @@ ${this.separationPrepass?`// sampleSeparation "pairs", ahead of the move: each r
 `:""}
 // Jittered sub-cell sampling (Zhu and Bridson 2005; Bridson 2008): a seed
 // lies anywhere in its eighth of the cell, hashed from the cell, the site and
-// the seeding salt. Seeds stay where they are made: projecting the outer
-// sites to one depth stacked the two sites along the normal onto one point,
-// coincident pairs the transport carried and separation then pushed apart.
+// the seeding salt (narrowBandSeedJitterWGSL). Seeds stay where they are
+// made: projecting the outer sites to one depth stacked the two sites along
+// the normal onto one point, coincident pairs the transport carried and
+// separation then pushed apart.
 var<private> nbSeedSalt:u32=0u;
-fn nbJitter(c:vec3u,k:u32)->vec3f{
- var h=(c.x*73856093u)^(c.y*19349663u)^(c.z*83492791u)^(k*2654435761u)^(nbSeedSalt*0x9e3779b9u);
- var r=vec3f(0.0);
- for(var a=0u;a<3u;a++){h^=h>>16u;h*=0x7feb352du;h^=h>>15u;h*=0x846ca68bu;h^=h>>16u;r[a]=f32(h&0xffffffu)/16777216.0;}
- return r;
-}
+${narrowBandSeedJitterWGSL}
+fn nbJitter(c:vec3u,k:u32)->vec3f{return nbSeedJitter(c,k,nbSeedSalt);}
 ${this.outerSeeding==="uncovered"?`// No sample in cell c or the 26 around it (outerSeeding "uncovered").
 fn nbUncovered(c:vec3u)->bool{
  for(var k=0u;k<27u;k++){
@@ -1682,9 +1693,10 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool)->Particle{
  // cell's mass, not its record count, once samples carry mass.
  if(nbCellMass(c)+f32(j-n0)*select(1.0,2.0,deep)>=8.0){return empty;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
- // Each step's seed list salts its sites, so a cell reseeded again does not
- // reuse them.
- nbSeedSalt=slot+1u+atomicLoad(&bins[NB_BAND+3u]);
+ // Each frame salts its sites (the frame index, params.live.z), so a cell
+ // reseeded again does not reuse them; nothing of the list's fill order
+ // (the slot) or its count enters a site.
+ nbSeedSalt=params.live.z;
  let site=seedSite(c,select(j,array<u32,4>(0u,3u,5u,6u)[j&3u],deep),false,activated);if(site.x<0.0){return empty;}
  ${narrowBandRetireCounting.splitX>=0?`// Diagnostic: seeds at x >= splitX: activated, above the floor band (y 8 past the box), interior, outer.
  if(f32(c.x)>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+select(select(select(3u,2u,site.w<= -1.0),1u,c.y>=${(narrowBandRetireCounting.splitY+8)}u),0u,activated)],1u);}`:""}
@@ -1961,6 +1973,8 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   const b=this.compiled;
   this.crossingCanPlan=false;this.crossingIsPlanned=false;this.framePlan?.invalidateDomain(this);
   this.writeStep(dt,+openTop);
+  // params.live.z: the reseed's salt, this move's frame index (from 1).
+  this.seedFrameWords[0]=this.seedFrameWords[0]!+1;this.device.queue.writeBuffer(this.params,56,this.seedFrameWords);
   {const g=this.gravityWords;g[0]=gravity[0];g[1]=gravity[1];g[2]=gravity[2];this.device.queue.writeBuffer(this.params,64,g);}
   // Words 4 to 10 are the step's (10: advect's slow samples) and 23 (its walk list); word 11, the arrival fatal's page, stays.
   encoder.clearBuffer(this.state,16,28);encoder.clearBuffer(this.state,4*23,4);
