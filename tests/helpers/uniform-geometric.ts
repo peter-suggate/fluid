@@ -24,7 +24,10 @@ export async function withUniformDevice(label:string,run:(device:GPUDevice)=>Pro
  let device:GPUDevice|undefined;
  try{
   const dawn=await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);Object.assign(globalThis,dawn.globals);
-  const adapter=await createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`,...dawnOptions]).requestAdapter();assert.ok(adapter);
+  // FLUID_WEBGPU_DAWN_FEATURES (comma separated) enables Dawn toggles, as the
+  // xctrace profilers pass use_user_defined_labels_in_backend.
+  const toggles=(process.env.FLUID_WEBGPU_DAWN_FEATURES??"").split(",").filter(Boolean);
+  const adapter=await createProcessRetainedDawnGPU(dawn,[`backend=${process.env.FLUID_WEBGPU_BACKEND??"metal"}`,...dawnOptions,...(toggles.length?[`enable-dawn-features=${toggles.join(",")}`]:[])]).requestAdapter();assert.ok(adapter);
   // float32-filterable as the product requests it (fluidExecutionDeviceFeatures):
   // NB-FLIP momentum's default texture32 sampler needs it.
   device=managedGPUDevice(await adapter.requestDevice({requiredFeatures:[...new Set<GPUFeatureName>([...features,"float32-filterable"])].filter(f=>adapter.features.has(f)),requiredLimits:requiredFluidDeviceLimits(adapter.limits)}),{requireWorkerRealm:false});
