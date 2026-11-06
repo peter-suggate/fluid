@@ -110,7 +110,7 @@ export async function readUniformSolidFractions(device:GPUDevice,solver:WebGPUUn
  const dispatchY=Math.ceil(groups/dispatchX);
  const solid=(solver as unknown as {mixedFrame:{solid:UniformMixedSolid}}).mixedFrame.solid;
  const module=device.createShaderModule({code:`const UM_D=vec3u(${nx}u,${ny}u,${nz}u);
-${uniformMixedSolidWGSL(0,undefined,false)}
+${uniformMixedSolidWGSL(0,undefined,false,false,solid.features)}
 @group(1) @binding(0) var<storage,read_write> result:array<f32>;
 @compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) gid:vec3u){let i=gid.x+${dispatchX*64}u*gid.y;if(i>=arrayLength(&result)){return;}let p=vec3i(vec3u(i%UM_D.x,(i/UM_D.x)%UM_D.y,i/(UM_D.x*UM_D.y)));result[i]=${open?"umCellOpen(p)":"1.0-umCellOpen(p)"};}`});
  const resultLayout=device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
