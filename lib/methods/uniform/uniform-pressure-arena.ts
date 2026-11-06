@@ -2226,6 +2226,11 @@ fn rDiag(A:vec3u)->f32{
  for(var k=0u;k<8u;k++){let i=rChild(A,k);s+=rPart[i];for(var axis=0u;axis<3u;axis++){outward+=rCross[64u*axis+i];}}
  return pAggregateDiagonal(s,outward,P_SCALE);
 }
+// A fixed-zero face out of the aggregate (a free surface, or a link to a row
+// outside the solve): the aggregate's centre lies half a cell further from
+// it than its child's, so its coefficient is the two in series, the 2h
+// rediscretisation (the children's sum weighs it (theta+0.5)/theta over).
+fn rFixed(c:f32,axis:u32)->f32{let u=params.solve[1u+axis];return c*u/(u+0.5*c);}
 fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if(((k>>axis)&1u)==(f&1u)){s+=rCross[64u*axis+rChild(A,k)];}}return P_SCALE*s;}
 @compute @workgroup_size(${TILE_WG}) fn pRebase(${lanes}){
  if(lane==0u){pN=pTileCount();atomicStore(&worst,0u);atomicStore(&tileWorst,0u);}
@@ -2247,6 +2252,7 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
       let m=pNear(at,p,f);if(!pCorrection){w[side]=c;d[side]=pF(P_BASE,m)-own;}
       // Level 1: a coupling to an active row, inside the aggregate or out of it.
       if(pActive(pool[P_KINDS+m])&&(!pCorrection||(pool[P_KINDS+m]&P_CORRECT)!=0u)){if(side==(lb[axis]&1u)){cross[axis]=c;}else{part-=c;}}
+      else if(side==(lb[axis]&1u)){part-=c-rFixed(c,axis);}
      }
      else if(kind==K_SEAM){
       // A seam: the native row's start; out of the aggregate (a tile face)
@@ -2254,7 +2260,7 @@ fn rCouple(A:vec3u,f:u32)->f32{var s=0.0;let axis=f/2u;for(var k=0u;k<8u;k++){if
       let m=nAcross(p,f);if(!pCorrection){w[side]=c;d[side]=qF(PN_B,m)+bSeamHead(at,f)-own;}let sc=seamCoarse(c);
       if((poolB[PN_M+m]&N_ACTIVE)!=0u&&(!pCorrection||(poolB[PN_M+m]&N_CORRECT)!=0u)){part+=sc.x;cross[axis]=sc.y;}
      }
-     else if(kind==K_GHOST||kind==K_OPEN){open+=c;}
+     else if(kind==K_GHOST||kind==K_OPEN){open+=c;if(side==(lb[axis]&1u)){part-=c-rFixed(c,axis);}}
      else if(kind==K_WALL){if(!pCorrection||pF(P_X,at)+pLift(at,f)>=-own){walls+=c;}lifted+=c*max(pLift(at,f),-own);}
     }
     sums[axis]=w.x*(d.x+d.y)+(w.y-w.x)*d.y;
