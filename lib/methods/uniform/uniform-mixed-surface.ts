@@ -15,7 +15,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl";
-import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidPipeline, uniformMixedSolidLibraryWGSL, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformFaceTileSlots, uniformKeyGroups, type UniformLatticeAddress } from "./uniform-lattice-address";
 import { UNIFORM_REGION_HEAT_DEEP_WORD, uniformRegionTierWGSL } from "./uniform-region-heat";
 
@@ -445,7 +445,7 @@ fn umSurfaceTrace(p:vec3f)->vec3f{
  }
  return q;
 }
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}
 ${this.solid?/* wgsl */`${uniformMixedVertexBuriedWGSL}
 ${uniformSolidPointOpenWGSL}
 ${uniformSolidSlideStartWGSL}

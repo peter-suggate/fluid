@@ -231,9 +231,26 @@ fn bodyRegionSwept(region:u32)->u32{return ${name}[region]&0xffu;}
 fn bodyRegionPose(region:u32)->u32{return (${name}[region]>>8u)&0xffu;}
 `;}
 
+/** Plugin geometry the solid library compiles in. `porous`: cloth's
+ * material capacity (binding 6) in the free-water capacity
+ * (umFreeCellCapacity) and the pressure arena's mixture faces. `plates`:
+ * rounded-plate bodies' exact coverage integration and their local box cuts
+ * (binding 7). A scene without them compiles the plain water path: its
+ * stages never sample either table, and installing one fails. */
+export interface UniformMixedSolidFeatures{readonly porous:boolean;readonly plates:boolean}
+/** Every feature: standalone tests and the cloth plugins' own modules. */
+export const UNIFORM_MIXED_SOLID_ALL_FEATURES:UniformMixedSolidFeatures=Object.freeze({porous:true,plates:true});
+/** What a scene's content needs: porous capacity and mixture faces only with
+ * cloth, a wet-cloth source or a declared porous system, plate integration only with a rounded plate
+ * (the only shape that takes local cuts). */
+export function uniformMixedSolidSceneFeatures(scene:{readonly systems?:{readonly porous?:boolean};readonly cloth?:readonly unknown[];readonly wetClothSource?:unknown;readonly rigidBodies:readonly Pick<RigidBodyDescription,"shape"|"cuts">[]}):UniformMixedSolidFeatures{
+ return {porous:scene.systems?.porous===true||(scene.cloth?.length??0)>0||scene.wetClothSource!==undefined,plates:scene.rigidBodies.some(b=>b.shape==="rounded-plate"||(b.cuts?.length??0)>0)};
+}
 export interface UniformMixedSolidResources {
  /** Shared native failure fence. Standalone solid tests get their own record. */
  frameStatus?:GPUBuffer;
+ /** The plugin geometry compiled in (uniformMixedSolidSceneFeatures); every feature when omitted. */
+ features?:UniformMixedSolidFeatures;
  analyticTerrain?:GPUBuffer;
  params:GPUBuffer;
  /** SolidOccupancyMask's image: the page directory, the tile cut map (a
@@ -307,6 +324,8 @@ const NEW_BLOCK_GRID=8;
 const ceilDiv=(jobs:number,per:number):number=>{const up=jobs+per-1;return (up-up%per)/per;};
 
 export class UniformMixedSolid {
+ /** The plugin geometry this frame's stages compile in (uniformMixedSolidLibraryWGSL). */
+ readonly features:UniformMixedSolidFeatures;
  readonly integrationStatus:GPUBuffer;
  private readonly ownsIntegrationStatus:boolean;
  readonly surfaceBoundary:LevelSetSolidBoundarySource;
@@ -370,6 +389,7 @@ export class UniformMixedSolid {
  /** pool: the page pool whose commits claim this frame's blocks; the record
   * of each claimed block is then built by encodeNewBlocks. */
  constructor(private readonly device:GPUDevice,resources:UniformMixedSolidResources,private readonly coarseLayout?:UniformMixedLayout,pool?:UniformMixedSolidPool){
+  this.features=resources.features??UNIFORM_MIXED_SOLID_ALL_FEATURES;
   this.ownsIntegrationStatus=!resources.frameStatus;
   this.integrationStatus=resources.frameStatus??device.createBuffer({label:'Standalone solid integration status',size:4*UNIFORM_MIXED_STATUS_WORDS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   if(resources.params.size<272||resources.terrain.format!=="r32float")throw new Error("Mixed solids require the native parameter block and terrain heightfield");
@@ -444,6 +464,7 @@ export class UniformMixedSolid {
   * Supplied textures belong to the physics plugin and must live until its GPU fence. */
  get porousCapacity():GPUTexture{return this.capacityTexture;}
  setPorousCapacity(texture?:GPUTexture):void{
+  if(texture&&!this.features.porous)throw new Error("Porous capacity: this scene's solid library was compiled without porous material (no cloth or wet-cloth source at construction)");
   const next=texture??this.emptyPorousCapacity;if(next===this.capacityTexture)return;
   if(next.format!=="rgba32float")throw new Error("Porous capacity requires an rgba32float sparse table");
   this.capacityTexture=next;this.currentGeometryGroupValue=undefined;const entries=this.solidResources();
@@ -454,6 +475,7 @@ export class UniformMixedSolid {
  /** Updates the same local cut list used by shared publication. The existing
   * solid rebuild invalidation is required because a cut changes apertures. */
  setBodyCuts(bodies:readonly RigidBodyDescription[]):boolean{
+  if(!this.features.plates){const plate=bodies.find(b=>b.shape==="rounded-plate"||(b.cuts?.length??0)>0);if(plate)throw new Error(`Rigid body ${plate.id}: rounded plates and body cuts need the plate integration, which this scene's solid library was compiled without (no rounded plate at construction)`);}
   const key=JSON.stringify(bodies.map(b=>[b.id,b.cuts??[]]));if(key===this.bodyCutsKey)return false;
   const values=packRigidBodyCutAtlas(bodies,GPU_RIGID_BODY_CAPACITY);
   this.device.queue.writeTexture({texture:this.bodyCuts},values,{bytesPerRow:2048*16},[2048,1]);this.bodyCutsKey=key;this.full=true;return true;
@@ -484,7 +506,7 @@ export class UniformMixedSolid {
   const dispatchX=this.device.limits.maxComputeWorkgroupsPerDimension;
   const pool=this.pool,pooled=this.slots<layout.tiles.length;
   const module=this.device.createShaderModule({label:"Uniform mixed all-4h solid record",code:/* wgsl */`
-${uniformMixedSolidWGSL(0,undefined,false,true)}
+${uniformMixedSolidWGSL(0,undefined,false,true,this.features)}
 ${uniformMixedFrameStatusWGSL(1,6,'read_write')}
 fn umAcceptRigidCoverage(){
  if(umRigidCoverageFailure.x!=0u){umLatchFailure(${UNIFORM_MIXED_FAILURE.solidIntegration}u,umRigidCoverageFailure.x,umRigidCoverageFailure.y);}
@@ -1243,6 +1265,12 @@ ${uniformMixedChangedTilesWGSL(layout.tiles.length,0,2)}
  destroy():void{this.bodyCuts.destroy();this.emptyPorousCapacity.destroy();this.coarse?.record.destroy();this.slotState?.destroy();this.bodyMask?.destroy();this.bodies.destroy();this.builtBodies?.destroy();if(this.ownsAnalyticTerrain)this.analyticTerrain.destroy();if(this.ownsIntegrationStatus)this.integrationStatus.destroy();}
 }
 
+/** A stage's solid library at `group`, compiled with the frame solid's
+ * features (the no-solid stubs without one). */
+export function uniformMixedSolidLibraryWGSL(solid:UniformMixedSolid|undefined,group:number):string{
+ return solid?uniformMixedSolidWGSL(group,solid.coarse?.count,true,false,solid.features):uniformMixedSolidWGSL();
+}
+
 /** Build a stage pipeline during setup; all solid reads use the scene uniform. */
 export function uniformMixedSolidPipeline(_solid:UniformMixedSolid|undefined,create:(constants:Record<string,number>)=>Promise<GPUComputePipeline>,_options?:{solidsOnly?:boolean;entry?:string}):Promise<GPUComputePipeline>{
  return create({});
@@ -1282,7 +1310,9 @@ fn umVertexBuried(p:vec3i)->bool{
  * the helpers from the tile cut map where no solid is near: one word instead
  * of the voxel, terrain and body samples. `writable` binds the mask image
  * read_write, for the record builder's own group. */
-export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false,porous=true,currentBodiesStorage=false):string{
+export function uniformMixedSolidWGSL(group?:number,coarse?:number,gated=true,writable=false,features:UniformMixedSolidFeatures|boolean=UNIFORM_MIXED_SOLID_ALL_FEATURES,currentBodiesStorage=false):string{
+ // A bare boolean is the porous table alone (the plate code as before).
+ const {porous,plates}=typeof features==="boolean"?{porous:features,plates:true}:features;
  if(group===undefined)return /* wgsl */ `
 var<private> umRigidCoverageFailure:vec2u;
 fn umPorousFractions(p:vec3i)->vec2f{return vec2f(0);}
@@ -1342,7 +1372,11 @@ fn umFreeTileCapacity(t:u32)->f32{
  if(bitcast<u32>(umPorousWord(0u).x)==0u){return umTileOpen(t);}
  return umFreeTileCapacityAt(vec3i(umTileCoord(t)));
 }
-`:""}
+`:`// No porous material: free capacity is the hard aperture.
+fn umFreeCellCapacity(p:vec3i)->f32{return umCellOpen(p);}
+fn umFreeTileCapacity(t:u32)->f32{return umTileOpen(t);}
+fn umFreeTileCapacityAt(p:vec3i)->f32{return umTileOpenAt(p);}
+`}
 struct UMSolidParams {
  dimsDt:vec4f,cellGravity:vec4f,frame:vec4f,physical:vec4f,boundary:vec4f,
  inflowA:vec4f,inflowB:vec4f,inflowC:vec4f,tuning:vec4f,drop:vec4f,dropExtent:vec4f,
@@ -1661,7 +1695,7 @@ fn umSolidFaceClear(id:vec3i,neighbor:vec3i,axis:u32)->bool{return umSolidTileCl
 // interior has an unbounded solid exterior and cannot take that rejection.
 ${sceneShapeWgsl()}
 ${fluidRigidBoundaryWGSL}
-${solidBoxCutWGSL}
+${plates?`${solidBoxCutWGSL}
 @group(${group}) @binding(7) var umSolidBodyCuts:texture_2d<f32>;
 fn umApplyBodyCuts(i:u32,local:vec3f,distance:f32)->f32{
  let header=textureLoad(umSolidBodyCuts,vec2i(i32(i),0),0);var result=distance;
@@ -1671,6 +1705,9 @@ fn umApplyBodyCuts(i:u32,local:vec3f,distance:f32)->f32{
   result=max(result,-solidBoxCutDistance(local,center,extent,q));
  }return result;
 }
+`:`// No rounded plate: no body carries a cut.
+fn umApplyBodyCuts(i:u32,local:vec3f,distance:f32)->f32{return distance;}
+`}
 fn umBodyCount()->u32{if(!umSolidEnabled()){return 0u;}return min(u32(max(round(umSolidParams.boundary.z),0.0)),${GPU_RIGID_BODY_CAPACITY}u);}
 fn umBodyRegionOfTile(t:u32)->u32{return 8u*(t>>9u)+((t>>2u)&1u)+2u*((t>>5u)&1u)+4u*((t>>8u)&1u);}
 // Any present body's bounding sphere within margin of a world point: every
@@ -1694,8 +1731,9 @@ fn umAnyBodyNear(world:vec3f,margin:f32)->bool{
 fn umQuatRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn umBodyLocal(i:u32,world:vec3f)->vec3f{let b=umSolidBodies[i];return umQuatRotate(vec4f(b.orientation.x,-b.orientation.yzw),world-b.positionShape.xyz);}
 fn umBodyNear(i:u32,world:vec3f,margin:f32)->bool{let b=umSolidBodies[i];return b.positionShape.w<0.0||distance(world,b.positionShape.xyz)<=b.dimensions.w+margin;}
-fn umInsideBody(i:u32,world:vec3f)->bool{if(!umBodyNear(i,world,0.0)){return false;}let b=umSolidBodies[i];if(textureLoad(umSolidBodyCuts,vec2i(i32(i),0),0).y==0.0){return fluidRigidInside(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}return umBodyDistance(i,world)<=0.0;}
-fn umBodyDistance(i:u32,world:vec3f)->f32{let b=umSolidBodies[i];let local=umBodyLocal(i,world);return umApplyBodyCuts(i,local,fluidRigidDistance(i32(round(b.positionShape.w)),b.dimensions.xyz,local));}
+${plates?`fn umInsideBody(i:u32,world:vec3f)->bool{if(!umBodyNear(i,world,0.0)){return false;}let b=umSolidBodies[i];if(textureLoad(umSolidBodyCuts,vec2i(i32(i),0),0).y==0.0){return fluidRigidInside(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}return umBodyDistance(i,world)<=0.0;}
+fn umBodyDistance(i:u32,world:vec3f)->f32{let b=umSolidBodies[i];let local=umBodyLocal(i,world);return umApplyBodyCuts(i,local,fluidRigidDistance(i32(round(b.positionShape.w)),b.dimensions.xyz,local));}`:`fn umInsideBody(i:u32,world:vec3f)->bool{let b=umSolidBodies[i];return umBodyNear(i,world,0.0)&&fluidRigidInside(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}
+fn umBodyDistance(i:u32,world:vec3f)->f32{let b=umSolidBodies[i];return fluidRigidDistance(i32(round(b.positionShape.w)),b.dimensions.xyz,umBodyLocal(i,world));}`}
 fn umBodyVelocity(i:u32,world:vec3f)->vec3f{let b=umSolidBodies[i];return b.linearVelocity.xyz+cross(b.angularVelocity.xyz,world-b.positionShape.xyz);}
 // rigidBodyIndexAt: the first body containing the point, -1 for none.
 fn umBodyAt(world:vec3f)->i32{
@@ -1713,7 +1751,7 @@ fn umBodyAtCandidates(world:vec3f,candidates:u32)->i32{
 }
 // umBodyAt of a point of h cell p: its tile's candidates (umBodyTileMask).
 fn umBodyAtCell(p:vec3i,world:vec3f)->i32{${writable?"return umBodyAt(world);":"return umBodyAtCandidates(world,umBodyCellMask(p));"}}
-${uniformRigidCoverageSource(writable?"umSolidQueryBodies":undefined)}
+${uniformRigidCoverageSource(writable?"umSolidQueryBodies":undefined,plates)}
 // cellOpenFraction.
 fn umCellOpenGeometry(p:vec3i)->f32{
  if(!umSolidEnabled()){return select(0.0,1.0,umSolidValid(p));}
@@ -1870,12 +1908,12 @@ fn umFaceOpen(id:vec3i,axis:u32,candidates:u32,staticClear:bool)->f32{
  if(!umSolidEnabled()){return 1.0;}
  let world=umSolidFaceWorld(id,axis);let h=umSolidParams.cellGravity.xyz;
  let tangentA=(axis+1u)%3u;let tangentB=(axis+2u)%3u;var solid=0.0;
- if(umRigidHasPlate(candidates)){
+ ${plates?`if(umRigidHasPlate(candidates)){
   if(staticClear){let rayAxis=umRigidIntegrationAxis(candidates,axis);let transverse=3u-axis-rayAxis;return 1.0-umRigidIntegratedFraction(candidates,world,h,rayAxis,vec2u(transverse,axis),1u);}
   // Partially occupied sampled terrain must share a geometric union before
   // admitting this integration. Explicitly fail instead of hiding overlap.
   umRigidCoverageFailure=vec2u(3u,bitcast<u32>(1.0));
- }
+ }`:""}
 
  // Exact clearance certificate: the samples lie within 0.35 of the face's
  // tangential diagonal of its centre and shape distances are 1-Lipschitz

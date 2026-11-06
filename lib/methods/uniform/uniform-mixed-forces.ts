@@ -8,7 +8,7 @@ import { uniformMixedSolidHoldWGSL } from "./uniform-mixed-walls.wgsl";
 import { uniformMixedFaceAddressWGSL, uniformMixedFaceDispatchWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedPressureReconstructionSource } from "./uniform-mixed-pressure-reconstruction.wgsl";
-import { uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidPipeline, uniformMixedSolidLibraryWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDynamics } from "./uniform-mixed-region-dynamics";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
@@ -166,7 +166,7 @@ const UM_FORCE_REUSE:u32=${UNIFORM_FORCE_MODE.reuse}u;const UM_FORCE_NORMALS_EXA
 ${uniformMixedFaceAddressWGSL}
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 ${uniformMixedVertexSamplingSource("",false)}
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}
 // An owner with no capacity at its own width (an h cell's open fraction, a 4h
 // owner's tile's): its centre phi is not state, so it has no occupancy step
 // to weigh a capillary force with and no normal to lend a curvature.

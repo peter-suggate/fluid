@@ -31,7 +31,7 @@ import { uniformMixedFaceAddressWGSL } from "./uniform-mixed-face-dispatch.wgsl"
 import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-sampling.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
-import { uniformMixedSolidWGSL, uniformMixedSolidPipeline, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidLibraryWGSL, uniformMixedSolidPipeline, uniformMixedVertexBuriedWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { UniformMixedMomentumCache, type UniformMixedHangingTaps } from "./uniform-mixed-momentum-cache";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformPagePoolWGSL, type UniformPagePoolLayout } from "./uniform-page-pool";
@@ -865,7 +865,7 @@ fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(velocity,anchor,0)[axis]"};
 }
 ${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined,unitTaps&&!slots?"unitHalo":undefined)}
-${uniformMixedSolidWGSL(2,this.solid.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}
 ${uniformMixedVertexBuriedWGSL}
 ${narrowBandTerrainContactSource("nbMoveBodyAt(q)")}
 ${narrowBandRigidContactSource("nbMoveBodyMask(point)")}

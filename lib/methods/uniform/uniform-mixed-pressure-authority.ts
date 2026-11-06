@@ -10,7 +10,7 @@ import { uniformMixedPressureLiquidWGSL } from "./uniform-mixed-pressure-surface
 import { uniformMixedPressureBoundaryIndexWGSL, uniformMixedPressureBoundaryLoop, uniformMixedPressureStorage } from "./uniform-mixed-pressure-boundary.wgsl";
 import type { UniformMixedLayout } from "./uniform-mixed-layout";
 import { UNIFORM_REGION_HEAT_EPOCH_WORD } from "./uniform-region-heat";
-import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidLibraryWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 
 export interface UniformMixedPressureAuthorityFields {
  centerPhi:GPUTexture;volume:GPUTexture;targetFill:GPUTexture;
@@ -260,7 +260,7 @@ export class UniformMixedPressureAuthority {
 struct UMAuthorityParams{x:f32,y:f32,z:f32,w:f32,support:vec4i}
 @group(1) @binding(7) var<uniform> params:UMAuthorityParams;
 ${uniformVolumeCorrectionWGSL}
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}
 const UM_HMIN=${Math.min(...this.ownership.capacity.lattice.cellSize_m)};
 // An owner's own texel. A 4h owner's is its tile origin: the base blocks.
 fn umOwnerCenterPhi(o:UMOwner)->f32{let at=vec3i(umOrigin(o));if(o.width==4u){return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(centerPhi,at,0).x;}return textureLoad(centerPhi,at,0).x;}
@@ -285,7 +285,7 @@ fn umPressurePhiCell(p:vec3i)->f32{
  return select(0.5*UM_HMIN,sum/max(weight,1e-9),weight>0.0);
 }
 // What an owner can hold: its open fraction (an h cell's, a 4h owner's tile's).
-fn umCapacity(o:UMOwner)->f32{${this.coarse?"if(bitcast<u32>(umPorousWord(0u).x)==0u){return umSolidCoarse(o.index).x;}return umFreeTileCapacityAt(vec3i(umOrigin(o))/4);":"if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);"}}
+fn umCapacity(o:UMOwner)->f32{${!this.solid?.features.porous?(this.coarse?"return umSolidCoarse(o.index).x;":"if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);"):this.coarse?"if(bitcast<u32>(umPorousWord(0u).x)==0u){return umSolidCoarse(o.index).x;}return umFreeTileCapacityAt(vec3i(umOrigin(o))/4);":"if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);"}}
 // umPressureLiquid on this authority's phi: the rows' liquid owners.
 fn umAuthorityLiquid(o:UMOwner,distance:f32)->bool{return ${uniformMixedPressureLiquidWGSL("distance","f32(o.width)*UM_HMIN")};}
 // A closed owner continues its neighbours' phi in the pressure rows but owns

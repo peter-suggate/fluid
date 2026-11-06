@@ -6,7 +6,7 @@ import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import {UNIFORM_MIXED_COUNTED,UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING,uniformMixedCountedEntriesWGSL,uniformMixedPageCount,uniformMixedResidencyWord,uniformMixedTopologyWGSL} from "./uniform-mixed-topology.wgsl";
 import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.wgsl";
 import {uniformMixedFaceAddressWGSL} from "./uniform-mixed-face-dispatch.wgsl";
-import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
+import {uniformMixedSolidPipeline,uniformMixedSolidLibraryWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {uniformVolumeTargetWGSL} from "./uniform-volume.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
@@ -445,7 +445,7 @@ function uniformMixedOwnershipTransferWGSL(layout:UniformMixedLayout,solid?:Unif
  // A +face patch's V: the record's where it holds it (umPatchFaceV).
  const patchV=(tile:string,id:string,axis:string)=>solid?.coarse?`umPatchFaceV(${tile},${id},${axis})`:`umPressureFaceV(${id},${axis})`;
  return uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(layout,0)+uniformMixedFaceAddressWGSL+/* wgsl */`
-${solid?uniformMixedSolidWGSL(2,solid.coarse?.count):""}
+${solid?uniformMixedSolidLibraryWGSL(solid,2):""}
 @group(1) @binding(0) var volume:texture_3d<f32>;
 @group(1) @binding(1) var velocity:texture_3d<f32>;
 @group(1) @binding(2) var<storage,read> negative:array<f32>;
@@ -740,7 +740,7 @@ fn listedFlags(tile:u32)->u32{
 }
 `;
  if(part==="faces")return topology+/* wgsl */`
-${solid?uniformMixedSolidWGSL(3,solid.coarse?.count):uniformMixedSolidWGSL()}
+${uniformMixedSolidLibraryWGSL(solid,3)}
 @group(2) @binding(1) var velocity:texture_3d<f32>;
 @group(2) @binding(3) var<storage,read> negative:array<f32>;
 @group(2) @binding(5) var output:texture_storage_3d<rgba32float,write>;
@@ -1043,7 +1043,7 @@ fn copyTileFaces(group:vec3u,lane:u32){
  const vertexSampling=uniformMixedVertexSamplingSource("",false);
  const old=(s:string)=>s.replace(/\b(?:um[A-Z]\w*|UM_\w+|UMOwner|UMFace)\b/g,n=>"old"+n);
  return topology+/* wgsl */`
-${solid?uniformMixedSolidWGSL(3,solid.coarse?.count):uniformMixedSolidWGSL()}
+${uniformMixedSolidLibraryWGSL(solid,3)}
 @group(2) @binding(0) var volume:texture_storage_3d<r32float,read_write>;
 @group(2) @binding(1) var phi:texture_storage_3d<r32float,read_write>;
 @group(2) @binding(2) var<storage,read_write> worklist:array<atomic<u32>>;

@@ -114,7 +114,7 @@ import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } fr
 import { SOLID_MASK_EMPTY, SOLID_MASK_FULL, SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { BULK_REACH_PAGE_REGIONS, bulkReachCapacity, bulkReachKey, bulkReachTable, uniformBulkRegionReach } from "./uniform-bulk-reach";
 import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-world";
-import { uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
+import { uniformMixedSolidSceneFeatures, uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
 import { narrowBandParticleCellCap, narrowBandSparseNeighbours, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
 /** Opt-in host phase timing for wet-cloth probes: a probe installs
@@ -1815,7 +1815,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
       pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
-      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.size,paramsWritten:()=>this.paramsWritten,slots:solidSlots},
+      solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.size,paramsWritten:()=>this.paramsWritten,slots:solidSlots,features:uniformMixedSolidSceneFeatures(this.scene)},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
     },this.address.openTop);
     this.mixedFrame.solid!.setBodyCuts(this.scene.rigidBodies);
@@ -3733,6 +3733,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** Validate both the occupancy lattice and the sparse GPU cut-page budget. */
   validateLiveSolidEdit(scene: SceneDescription): void {
     packRigidBodyCutAtlas(scene.rigidBodies,GPU_RIGID_BODY_CAPACITY);
+    if (this.mixedFrame?.solid && !this.mixedFrame.solid.features.plates && uniformMixedSolidSceneFeatures(scene).plates) throw new Error("This edit adds a rounded plate or body cut, whose coverage integration this scene was compiled without; reset the scene to apply it.");
     this.sculptCollision.validate(this.sculptWords(scene));
     if (proceduralSolidKey(scene.solidBoundary) !== proceduralSolidKey(this.scene.solidBoundary)) throw new Error("Procedural surface changed; reset the scene to rebuild its boundary");
     const [nx, ny, nz] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);

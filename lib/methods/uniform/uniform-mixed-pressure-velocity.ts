@@ -184,7 +184,7 @@ ${uniformMixedPressureSurfaceSource(this.coarse?`
  let low=select(b.index,a.index,delta[axis]>0);let base=${uniformMixedPressureStorage(ownership.layout).count}u;
  if(arrayLength(&rootTopology)>base+low){let theta=rootTopology[base+low][axis];if(theta>0.0){return theta;}}
 ` : "")}
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined)}
+${uniformMixedSolidWGSL(this.solid?2:undefined,this.coarse?this.solid!.coarse!.count:undefined,true,false,this.solid?.features)}
 // The kind of the cell across a face from its owner. Where nothing is stored
 // there, UM_SOLID is a wall, with a slot of its own (umBoundaryIndex);
 // UM_BULK16 (liquid, no 4h row) has that slot too, the arena's pWrite

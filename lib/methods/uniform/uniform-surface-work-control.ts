@@ -2,7 +2,7 @@ import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, unifo
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
-import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidLibraryWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformPagePoolWGSL, type UniformPagePool } from "./uniform-page-pool";
 import { uniformPageInitBlocksWGSL, uniformPageInitGroups } from "./uniform-page-initialise";
 import { UNIFORM_SURFACE_SUPPORT_WORDS } from "./uniform-surface-transport.wgsl";
@@ -159,7 +159,7 @@ var<workgroup> wcRegionalRegion:u32;
 fn wcRegionCount(channel:u32,lane:u32)->u32{if(lane==0u){wcRegionalCount=regionalCount(channel);}return workgroupUniformLoad(&wcRegionalCount);}
 fn wcRegionAt(channel:u32,slot:u32,lane:u32)->u32{workgroupBarrier();if(lane==0u){wcRegionalRegion=regionalAt(channel,slot);}return workgroupUniformLoad(&wcRegionalRegion);}
 ${this.heat?uniformRegionHeatWGSL(1,3,this.heat.regions):"const UM_TIER_COLD:u32=0u;fn umRegionTier(region:u32)->u32{return 2u;}"}
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}
 override wcForce:bool=false;
 override wcMetadataOnly:bool=false;
 override wcSurface:bool=false;

@@ -9,7 +9,7 @@ import {uniformMixedVertexSamplingSource} from "./uniform-mixed-vertex-sampling.
 import {levelSetFillWGSL} from "../../core/level-set-fill.wgsl";
 import {UNIFORM_LIVE_KEY_GROUPS} from "./uniform-live-lists";
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
-import {uniformMixedSolidPipeline,uniformMixedSolidWGSL,uniformMixedVertexBuriedWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
+import {uniformMixedSolidPipeline,uniformMixedSolidLibraryWGSL,uniformMixedVertexBuriedWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 
 /** NB-FLIP's scalar volume budget: the liquid's filled volume measured on a
  * native four-cell band, and the global normal shift that would restore the
@@ -179,9 +179,9 @@ fn umScaleLoadVertex8(p:vec3u,s:u32)->array<f32,8>{
 }
 ${sourceScale}
 ${levelSetFillWGSL}
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}${this.solid?uniformMixedVertexBuriedWGSL:""}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}${this.solid?uniformMixedVertexBuriedWGSL:""}
 // What an owner can hold: its open fraction (an h cell's, a 4h owner's tile's).
-fn umCapacity(o:UMOwner)->f32{if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);}
+fn umCapacity(o:UMOwner)->f32{${this.solid?.features.porous?"if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);":"if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);"}}
 // A cut 4h owner's filled volume in h cells: the tetrahedral fill of each h
 // cell of its tile under the owner's trilinear field, times the cell's open
 // fraction.

@@ -164,7 +164,7 @@ export class UniformMixedBodies {
 @group(1) @binding(3) var<storage,read_write> bodyTiles:array<atomic<u32>>;
 @group(1) @binding(4) var<uniform> bodyHorizon:vec4f;
 ${this.pool?uniformLiveListsWGSL(1,6,this.pool.layout):""}
-${uniformMixedSolidWGSL(2)}
+${uniformMixedSolidWGSL(2,undefined,true,false,this.solid.features)}
 // Air rows publish zero; closed cells have no physical pressure traction.
 fn umBodyPressure(p:vec3i)->f32{
  let tile=umTileKey(p>>vec3u(2u));let slot=bitcast<u32>(bodyPressure[${this.fields.pressure().word}u+tile]);

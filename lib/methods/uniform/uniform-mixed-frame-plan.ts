@@ -1,4 +1,4 @@
-import {uniformMixedSolidWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
+import {uniformMixedSolidLibraryWGSL,type UniformMixedSolid} from "./uniform-mixed-solid.wgsl";
 import {uniformTileFineDefectWGSL,uniformTileSurfaceRateWGSL} from "./uniform-tile-update-error";
 import { RESIDENCY_STAGES } from "./uniform-local-residency";
 import { uniformFramePlanSpreadWGSL } from "./uniform-frame-plan-spread";
@@ -106,7 +106,7 @@ ${uniformRegionHeatWGSL(3,9,this.ownership.capacity.tiles/64)}
 // The pool's live lists: the per-tile entries stride its resident blocks (a
 // free tile key writes nothing).
 ${uniformLiveListsWGSL(2,6,this.pool.layout)}
-${uniformMixedSolidWGSL(this.solid?3:undefined,this.solid?.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,3)}
 // umSupport and speeds hold a word per tile KEY: a lane indexes them by its
 // own tile's key, and a neighbour's word by umTileKey of the neighbour's
 // coordinate, skipped where umKeyStored refuses it. coarse holds the 4h tile

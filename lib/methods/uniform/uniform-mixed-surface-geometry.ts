@@ -6,7 +6,7 @@ import { uniformMixedVertexSamplingSource } from "./uniform-mixed-vertex-samplin
 import { uniformVolumeTargetWGSL } from "./uniform-volume.wgsl";
 import { uniformSurfacePlaneWGSL } from "./uniform-surface-plane.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
-import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
+import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSolidLibraryWGSL, type UniformMixedSolid } from "./uniform-mixed-solid.wgsl";
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 import { UNIFORM_LIVE_KEY_GROUPS } from "./uniform-live-lists";
 import type { UniformSurfaceWorkControl } from "./uniform-surface-work-control";
@@ -172,7 +172,7 @@ fn uvCorner(k:u32)->vec3i{return vec3i(umCorner(k,2u));}
 fn d4Sum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
 ${uniformVolumeTargetWGSL(true,true)}
 ${uniformSurfacePlaneWGSL}
-${uniformMixedSolidWGSL(this.solid?2:undefined,this.solid?.coarse?.count)}
+${uniformMixedSolidLibraryWGSL(this.solid,2)}
 // The pressure variant's h tile job: each lane's cell's term of the tile's
 // all-4h owner's F_Omega (a cut tile's 64 terms on its origin lane alone were
 // the launch's serial depth). gcSharedFill adds them in cell order.

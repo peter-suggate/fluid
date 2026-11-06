@@ -16,6 +16,8 @@ import {initializeRigidBodies} from '../lib/core/rigid-body';
 test('actual NB-FLIP forced MAC exchange is reciprocal below the particle band', {skip:!process.env.WEBGPU_NODE_MODULE}, async()=>{
  await withUniformDevice('cloth NB-FLIP exchange',async device=>{
   const scene=createRigidCouplingOracleScene('rigid-hydrostatic');scene.rigidBodies=[];
+  // The cloth plugins attach to this frame without a cloth document.
+  scene.systems={...scene.systems,porous:true};
   scene.fluid.density_kg_m3=1000;
   scene.numerics.fixedDt_s=scene.numerics.maxDt_s=.001;
   scene.fluid.refinementRegions=[{id:'cloth-stencil',min_m:{x:-.2,y:.05,z:-.2},max_m:{x:.2,y:.3,z:.2},rule:'minimum-cell-size',minimumCellSize_cells:1,maximumCellSize_cells:1}];
@@ -106,6 +108,7 @@ test('actual NB-FLIP forced MAC exchange is reciprocal below the particle band',
 for(const clothY of [.175,.4])test(`moving rounded clamp preserves aperture-normalized fiber and the paired water ledger ${clothY===.4?'at the interface':'when submerged'}`,{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice('cloth actual moving clamp apertures',async device=>{
   const scene=createRigidCouplingOracleScene('rigid-hydrostatic');scene.fluid.gravity_m_s2={x:0,y:0,z:0};
+  scene.systems={...scene.systems,porous:true};
   scene.numerics.fixedDt_s=scene.numerics.maxDt_s=.001;
   scene.rigidBodies=[{...scene.rigidBodies[0]!,id:'moving-clamp',shape:'rounded-plate',dimensions_m:{x:.09,y:.015,z:.09},position_m:{x:0,y:clothY-.04,z:0},kinematic:true}];
   scene.fluid.refinementRegions=[{id:'clamp-material-support',min_m:{x:-.25,y:0,z:-.25},max_m:{x:.25,y:clothY+.15,z:.25},rule:'minimum-cell-size',minimumCellSize_cells:1,maximumCellSize_cells:1}];
