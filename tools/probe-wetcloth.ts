@@ -115,5 +115,7 @@ if(process.argv.includes('--audit')){
    report.completedSteps=steps;report.elapsed_ms=performance.now()-started;
   }catch(error){report.failure=String(error);if(error&&typeof error==='object'&&'localPoreDiagnostic' in error){const file=out+'.water-failure.json';await writeFile(file,JSON.stringify(error.localPoreDiagnostic));report.localPoreDiagnostic=file;}throw error;}
   finally{await save();solver?.destroy();}
- });
+ // The product's execution features (fluidExecutionDeviceFeatures); the
+ // helper keeps only those the adapter has.
+ },['timestamp-query','shader-f16','subgroups','texture-formats-tier1']);
 }

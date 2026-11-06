@@ -57,7 +57,7 @@ function solveMass(capacity:Float64Array,rhs:Float64Array,edges:EdgeArrays,initi
  return {x,iterations,residual};
 }
 
-export interface PoreFlowStep {state:ClothState;data:ClothTopologyData;kinematicFixed?:ArrayLike<number>;materials:readonly ClothMaterial[];dt_s:number;gravity_m_s2:ClothVector;/** Outer fluid timestep used by the released source nonlinear drag predictor. */manifoldPredictorDt_s?:number;physics?:ClothPhysicsOptions;pressureAcceleration_m_s2?:ArrayLike<number>;solidAcceleration_m_s2?:ArrayLike<number>}
+export interface PoreFlowStep {state:ClothState;data:ClothTopologyData;kinematicFixed?:ArrayLike<number>;materials:readonly ClothMaterial[];dt_s:number;gravity_m_s2:ClothVector;/** Outer fluid timestep used by the released source nonlinear drag predictor. */manifoldPredictorDt_s?:number;physics?:ClothPhysicsOptions;pressureAcceleration_m_s2?:ArrayLike<number>;solidAcceleration_m_s2?:ArrayLike<number>;/** Parity output: accepted volume a->b of each edge (key a*n+b, a<b), summed over substeps. */edgeFlux_m3?:Map<number,number>}
 export interface PoreFlowResult {readonly iterations:number;readonly movedVolume_m3:number;readonly limitedVolume_m3:number;readonly volumeError_m3:number;readonly supportReaction_Ns:ClothVector}
 
 /** Source LinearizedImplicitEuler.cpp2668: full vector force / fluid mass,
@@ -264,6 +264,7 @@ function solveManifoldSubstep(step:PoreFlowStep,plan:ManifoldPlan,rho:number,pre
   for(let k=0;k<E;k++){const a=plan.edgeA[k]!,b=plan.edgeB[k]!,donor=flux[k]!>=0?a:b,limited=flux[k]!*(outgoing[donor]!>old[donor]!?Math.max(0,old[donor]!/outgoing[donor]!):1);limitedVolume_m3+=Math.abs(flux[k]!-limited);flux[k]=limited;water[a]!-=limited;water[b]!+=limited;}
   if(water.some(v=>v< -1e-13*Math.max(1e-30,total)))throw new Error('Paired manifold positivity limiter failed');
  }
+ if(step.edgeFlux_m3)for(let k=0;k<E;k++){const key=plan.edgeA[k]!*n+plan.edgeB[k]!;step.edgeFlux_m3.set(key,(step.edgeFlux_m3.get(key)??0)+flux[k]!);}
  const tolerance=1e-9*Math.max(total,1e-30);
  if(water.some(v=>!Number.isFinite(v)||v< -tolerance))throw new Error('Pore flow produced invalid water');
  // Roundoff repair is component-local and bounded by the solved residual.
