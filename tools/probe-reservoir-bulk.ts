@@ -444,7 +444,12 @@ const kernelMedians_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, qua
 // Means too: a frame's kernel time is their sum, which medians of skewed labels understate.
 const kernelMeans_ms = Object.fromEntries([...kernels].map(([k, v]) => [k, v.reduce((s, x) => s + x, 0) / v.length] as const).sort((a, b) => b[1] - a[1]));
 const late = stepMs.slice(Math.floor(stepMs.length / 2));
-const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95) };
+// The steady advances: past the first two (pipeline compilation, warm-up)
+// and, when pipelined, apart from report steps, which drain the receipt ring
+// (a wait for the frames in flight). p95_ms of 60 steps is the third
+// largest, so it reads those, not a stall.
+const steady = stepMs.filter((_, i) => i >= 2 && !(pipelined && ((i + 1) % every === 0 || i + 1 === steps)));
+const timing = { median_ms: quantile(stepMs, 0.5), p95_ms: quantile(stepMs, 0.95), lateHalfMedian_ms: quantile(late, 0.5), lateHalfP95_ms: quantile(late, 0.95), steadyMedian_ms: quantile(steady, 0.5), steadyP95_ms: quantile(steady, 0.95), steadyMax_ms: Math.max(...steady) };
 console.log(JSON.stringify(timing));
 writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), cell, pure: pure ? pages : undefined, height, width, depth, boxWidth, steps, closed, liquid, memory, values, water: option("water") ?? "scene", timing, stepMs, kernelMedians_ms, kernelMeans_ms, dispatchesByLabel, rows }, null, 2) + "\n");
 console.log(JSON.stringify({ out }));

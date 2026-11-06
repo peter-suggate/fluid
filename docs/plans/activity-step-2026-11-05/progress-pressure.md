@@ -185,3 +185,114 @@ Knockout (scratch, env-gated, a44ed3aa + 1058cc0b, 16x8x4 drop=2):
   matter. Its COLD faces compute the full row only for the freeze's
   correction accumulate (Lane S's certificate), so trimming it is a change
   to that protocol.
+
+## Round 4: host side (late-submit stall, CPU encode)
+
+8x8x4 drop=2, pipelined, HEAD 0401fd1d exports. Two GPU runs: one System
+Trace capture (timing) and one call-count run (check). The rest is
+re-reduction of existing traces and runs, plus one `--cpu-prof` run
+(check).
+
+### 1. Late-submit stall: none outside the x6/d2 recording
+
+- **System Trace capture.**
+  - Setup: System Trace template plus Metal Application and GPU. The
+    recording attaches at step 4 and lasts 6 s, which covers steps 4-60.
+    Pass labels were on, as in x6.
+  - The GPU was busy for 748.6 of the 813 ms span (92%).
+  - Main thread over that span: Running 783.5 ms, Blocked 14.4,
+    Interrupted 6.1, Preempted 4.9, Runnable 3.7.
+  - GPU idle gaps over 1 ms: 3 in 56 advances.
+    - 36 ms at the first advance after the attach pause, with the main
+      thread Running (JIT, then the first submit).
+    - 3.5 ms just after it.
+    - 2.5 ms at the final drain.
+  - None is a blocked main thread. The longest Blocked interval inside any
+    gap was 0.67 ms.
+  - The probe's own steps in that run: median 13.6 ms, late-half p95
+    14.6.
+- **Untraced runs of the same command do not stall.** The step-time
+  quantiles exclude steps 1-2 and the report step:
+
+  | run | probe p95_ms | steady median | steady p95 | steady max |
+  | --- | --- | --- | --- | --- |
+  | f1-d2 (untraced) | 31.8 | 16.0 | 17.3 | 17.5 |
+  | fk-d2 (untraced) | 23.0 | 14.6 | 17.7 | 20.7 |
+  | k5-base (untraced) | 30.2 | 15.7 | 18.5 | 21.7 |
+  | t8-d2 (untraced) | 24.4 | 13.6 | 14.7 | 17.3 |
+  | x6-d2g (traced, counters) | 24.7 | 16.4 | 17.5 | 18.1 |
+  | x6-d2 (traced, Metal System Trace) | 47.8 | 15.8 | 39.6 | 47.8 |
+
+  - Only x6-d2's recording has the 2-33 ms gaps.
+  - In that trace, the main thread drops out of the samples in the middle
+    of Metal encoding. Stacks either side of the holes show
+    `__kdebug_trace64 < IOGPUDeviceTraceObjectLabel < -[IOGPUMetalCommandEncoder setLabel:]`,
+    `IOGPUMetalCommandBufferStorageAllocResourceAtIndex` and
+    `MakeDebugName`. That is the recording's own overhead, not a wait
+    in the solver.
+- **The "untraced p95 of about 30 ms" is the probe's quantile, not a stall.**
+  - p95 of 60 steps is the third-largest step.
+  - The three largest steps are step 1 (compile, 0.2-0.6 s), step 2
+    (25-170 ms), and step 60. Step 60 is the report step, which drains
+    the receipt ring (about 30 ms).
+  - The probe now also reports `steadyMedian_ms`, `steadyP95_ms` and
+    `steadyMax_ms`. These exclude steps 1-2 and, when pipelined, the
+    report steps.
+- **Same check elsewhere.**
+  - Seep 300: steady p95 41.0 against a median of 38.0.
+  - Rest: p95 8.5-10 against a median of 3.4-4.0. That is warm-up in
+    steps 3-7 (6-13 ms), not gaps.
+  - Letters 120: p95 104.6 against a median of 63.4. Its frames grow
+    steadily as the letters spread (16 -> 109 ms), with no spikes.
+- **Nothing to fix.**
+  - A blocked mapAsync or onSubmittedWorkDone would show as Blocked.
+    Instead the main thread waits on the receipt ring by spinning in the
+    paced Dawn poll (Atomics.load, Running).
+  - Untraced, steady p95 is already within 1.5-3 ms of the median.
+
+### 2. CPU encode: no per-frame creation; the remainder is per dispatch
+
+- **Per-advance WebGPU calls** were counted by a device proxy in steps
+  30-39 (scratch only).
+  - Creation calls: none. That covers createBindGroup, createBuffer,
+    createTexture, createComputePipeline, createShaderModule and
+    createBindGroupLayout.
+  - 4 createCommandEncoder, 4 submit.
+  - 443 setPipeline, 386 dispatchWorkgroups + 63 indirect, 304
+    setBindGroup (including the shared pass's slot resets).
+  - 97 logical passes, which run inside a few native shared passes.
+  - 53 clearBuffer + 52 copyBufferToBuffer, mostly turned into compute
+    launches. 33 writeBuffer.
+- **Tint is not on the per-frame path.**
+  - No main-thread sample in x6/d2's steady window (230.35-231.38 s)
+    has a tint frame.
+  - The "dawn/tint" bucket in profile-probe-xctrace is every stack inside
+    dawn.node.
+- **Main-thread time per advance** (x6/d2 samples, steady window):
+
+  | family | ms/advance |
+  | --- | --- |
+  | Dawn poll spin (waiting) | 2.30 |
+  | Dawn -> Metal encode at submit (CommandBuffer::Fill/Encode, AGX) | 1.41 |
+  | JS encode logic | 1.20 |
+  | NAPI/interop wrappers (Unwrap, InstanceOf, Wrappers::For) | 1.06 |
+  | Dawn sync-scope usage tracking (AddDispatchSyncScope) | 0.78 |
+  | Dawn validation | 0.17 |
+  | V8 compile/IC | 0.14 |
+  | Dawn command recording | 0.12 |
+
+  - About 4.9 ms of the main thread's work is encoding. That is about 11
+    µs per dispatch, setPipeline and setBindGroup included.
+  - The `--cpu-prof` run agrees on the split. Profiled, queue.submit
+    takes 2.3 ms/advance, the shared pass's dispatchWorkgroups 2.2 ms,
+    and pressure-arena dispatch 0.77 ms. No pure-JS function takes
+    more than 0.35 ms self.
+- **No host-side change clears the 0.3 ms bar now.**
+  - The wall time is GPU busy time (15.3 of 15.8 ms), and encode overlaps
+    it under pipelining.
+  - The per-dispatch remainder sits in Dawn and dawn.node internals (NAPI
+    unwrap, sync-scope tracking, Metal encode). Only fewer dispatches and
+    bindings move it.
+  - So when Lane S's block-local launches cut the GPU side, the CPU
+    bound falls with the dispatch count, at about 11 µs per removed
+    dispatch.
