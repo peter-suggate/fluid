@@ -297,9 +297,16 @@ export function packClothColliders(colliders: readonly ClothCollider[], frame: C
 export const CONTACT_CONTROL = {
   K_COUNT: 96, K_BASE: 97, K_ENTRIES: 98, K_ERROR: 99, K_DONE: 100, K_OUTER: 101, K_KKT: 102, K_FR: 103, K_PEN: 104, K_PREV: 105, K_RESID: 106,
   R_ACTIVE: 107, R_CONTINUE: 108, R_STIFFEN: 109, K_CONTACTS: 110, K_SELF: 111, K_REPPEN: 112, K_SOLVES: 113, K_ADDED: 114, K_DETECT: 115,
+  // The first primitive whose swept box breaks the two-cells-per-axis grid bound: (grid << 30) | (primitive + 1), and its widest box extent (f32 bits).
+  K_SPAN: 116, K_SPAN_EXTENT: 117,
 } as const;
 export const CONTACT_CONTROL_WORDS = 120;
-export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64, E_UNSUPPORTED = 128;
+export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64, E_UNSUPPORTED = 128, E_SPAN = 1024;
+/** physics.contactGridEntries authored as this: 8 (triangles + edges + segments)
+ * grid entries, valid while every swept, padded primitive box is narrower than
+ * the grid cell on each axis (at most 2 cells, so at most 8 entries); detection
+ * checks that premise and a box that breaks it fails the step (E_SPAN). */
+export const CONTACT_GRID_CELL_BOUND = 'two-cells-per-axis';
 /** Cells one primitive may cover before detection reports it (it is not dropped). */
 export const CELL_CAP = 512;
 export const SCAN_WG = 256;
@@ -469,6 +476,7 @@ fn colliderSample(ci:u32,q0:P2,beforeEnd:f32)->Sample{
 @compute @workgroup_size(1) fn detectBegin(){
  let on=p.contactMode==1u;atomicStore(&C[${K.K_DETECT}u],select(0u,1u,on));atomicStore(&C[${K.R_CONTINUE}u],select(0u,1u,on));
  atomicStore(&C[${K.K_COUNT}u],0u);atomicStore(&C[${K.K_BASE}u],0u);atomicStore(&C[${K.K_ENTRIES}u],0u);atomicStore(&C[${K.K_ADDED}u],0u);
+ atomicStore(&C[${K.K_SPAN}u],0u);atomicStore(&C[${K.K_SPAN_EXTENT}u],0u);
 }
 fn contactGap(c:u32)->f32{let k=contactAt(c);return k.g0+dot(k.n,contactSum(k,0u));}
 @compute @workgroup_size(${WG}) fn updateMultipliers(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
@@ -640,6 +648,12 @@ fn insertEntry(grid:u32,prim:u32,a:vec3i,b:vec3i){
   KU[p.uEntry+2u*e]=prim;KU[p.uEntry+2u*e+1u]=atomicExchange(&KA[p.aHeads+grid*p.gridBuckets+bucket],e+1u);
  }
 }
+// The two-cells-per-axis grid bound's premise: a box at least the cell wide on an axis fails the step, naming the first such primitive.
+fn insertBox(grid:u32,prim:u32,box:array<vec3f,2>){
+ if(p.gridSpanCheck!=0u){let w=box[1]-box[0];let m=max(w.x,max(w.y,w.z));if(!(m<p.cellSize)){atomicOr(&C[${K.K_ERROR}u],${E_SPAN}u);
+  loop{let r=atomicCompareExchangeWeak(&C[${K.K_SPAN}u],0u,(grid<<30u)|(prim+1u));if(r.exchanged){atomicStore(&C[${K.K_SPAN_EXTENT}u],bitcast<u32>(m));break;}if(r.old_value!=0u){break;}}}}
+ insertEntry(grid,prim,cellOf(box[0]),cellOf(box[1]));
+}
 fn padBox(lo:vec3f,hi:vec3f,r:f32)->array<vec3f,2>{let pad=r+1e-6*(abs(lo)+abs(hi))+1e-9;return array<vec3f,2>(lo-pad,hi+pad);}
 @compute @workgroup_size(${WG}) fn gridClear(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
@@ -650,14 +664,14 @@ fn padBox(lo:vec3f,hi:vec3f,r:f32)->array<vec3f,2>{let pad=r+1e-6*(abs(lo)+abs(h
  let id=triIds(f);var loB=min(approx(sweptPoint(id.x,0.)),approx(sweptPoint(id.x,1.)));var hiB=max(approx(sweptPoint(id.x,0.)),approx(sweptPoint(id.x,1.)));
  for(var j=1u;j<3u;j++){let v=id[j];loB=min(loB,min(approx(sweptPoint(v,0.)),approx(sweptPoint(v,1.))));hiB=max(hiB,max(approx(sweptPoint(v,0.)),approx(sweptPoint(v,1.))));}
  let box=padBox(loB,hiB,ksf(p.sFaceR+f));KF[p.kfFaceBox+2u*f]=vec4f(box[0],0);KF[p.kfFaceBox+2u*f+1u]=vec4f(box[1],0);
- insertEntry(0u,f,cellOf(box[0]),cellOf(box[1]));
+ insertBox(0u,f,box);
 }
 fn edgeIds(e:u32)->vec2u{return vec2u(I[p.sEdge+4u*e],I[p.sEdge+4u*e+1u]);}
 @compute @workgroup_size(${WG}) fn gridEdges(@builtin(global_invocation_id) g:vec3u){
  let e=g.x;if(e>=p.edges||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
  let id=edgeIds(e);let a0=approx(sweptPoint(id.x,0.));let a1=approx(sweptPoint(id.x,1.));let b0=approx(sweptPoint(id.y,0.));let b1=approx(sweptPoint(id.y,1.));
  let box=padBox(min(min(a0,a1),min(b0,b1)),max(max(a0,a1),max(b0,b1)),ksf(p.sEdge+4u*e+2u));KF[p.kfEdgeBox+2u*e]=vec4f(box[0],0);KF[p.kfEdgeBox+2u*e+1u]=vec4f(box[1],0);
- insertEntry(1u,e,cellOf(box[0]),cellOf(box[1]));
+ insertBox(1u,e,box);
 }
 fn overlaps(a0:vec3f,a1:vec3f,b0:vec3f,b1:vec3f)->bool{return all(a0<=b1)&&all(b0<=a1);}
 fn inList(start:u32,list:u32,row:u32,value:u32)->bool{for(var k=I[start+row];k<I[start+row+1u];k++){if(I[list+k]==value){return true;}}return false;}
@@ -967,7 +981,7 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
  let s=g.x;if(s>=p.segments||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
  let id=segIds(s);let a0=approx(sweptPoint(id.x,0.));let a1=approx(sweptPoint(id.x,1.));let b0=approx(sweptPoint(id.y,0.));let b1=approx(sweptPoint(id.y,1.));
  let box=padBox(min(min(a0,a1),min(b0,b1)),max(max(a0,a1),max(b0,b1)),segR(s));KF[p.kfSegBox+2u*s]=vec4f(box[0],0);KF[p.kfSegBox+2u*s+1u]=vec4f(box[1],0);
- insertEntry(2u,s,cellOf(box[0]),cellOf(box[1]));
+ insertBox(2u,s,box);
 }
 // Rod vertex spheres against faces (rv) and shell edges (rq); rod and shell vertices against segments (rp).
 @compute @workgroup_size(${WG}) fn detectRodPoints(@builtin(global_invocation_id) g:vec3u){

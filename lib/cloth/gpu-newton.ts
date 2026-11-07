@@ -1,7 +1,7 @@
 import { beginClothMechanicalFinish, completeClothMechanicalFinish, extendClothStepReport, finishClothMechanicalStep, rodJoint, type ClothStepOptions, type ClothStepReport } from './dynamics';
 import { ClothContactSet, clothContactWarmStart, FRICTION_SLIP_SPEED_M_S, inSolveContactUnsupported, MAXIMUM_CONTACT_ITERATIONS, rememberClothContactMultipliers, type ClothContactConstraint } from './contact-constraints';
 import { rodRigidity, rodSegmentInertia_kg_m2 } from './material';
-import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_STIFFNESS, E_TABLE, E_UNSUPPORTED, SCAN_WG, clothContactCPURemnant, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
+import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, CONTACT_GRID_CELL_BOUND, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_SPAN, E_STIFFNESS, E_TABLE, E_UNSUPPORTED, SCAN_WG, clothContactCPURemnant, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
 import type { ClothCollider, ClothContactReport } from './contact';
 import type { PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
@@ -87,7 +87,7 @@ const PARAM_FIELDS = [
   'uBlocks', 'uEntry', 'uTabVal', 'aTable', 'aHeads', 'aCount', 'tableSlots', 'tableCur',
   'prevValid', 'stiffnessValid', 'gridBuckets', 'gridEntries', 'kfFaceBox', 'kfEdgeBox', 'sVInfo', 'sRingStart',
   'sRingList', 'sFrStart', 'sFrList', 'sLvStart', 'sLvList', 'sEdge', 'sE3Start', 'sE3List',
-  'sFaceR', 'sCollider', 'colliders', 'selfCollision', 'edges',
+  'sFaceR', 'sCollider', 'colliders', 'selfCollision', 'edges', 'gridSpanCheck',
   // DER rod joints and segment twist.
   'joints', 'rods', 'iJoint', 'iRod', 'iSegJoint', 'dTwist', 'dJoint', 'wT', 'wT2', 'eJoint', 'pJoint', 'pTwist',
   // Old strains from rest: per-step displacements, static Float64 rest frames.
@@ -1149,7 +1149,7 @@ interface ContactLayout {
   kuRod: number; kfRod: number; kfRodForce: number; kfRodArm: number; kfSegBox: number; listRows: number;
 }
 const pow2 = (x: number) => 2 ** Math.ceil(Math.log2(Math.max(1, x)));
-const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_NONFINITE, 'a nonfinite contact residual'], [E_UNSUPPORTED, 'a rod segment against a collider kind without GPU rod contact']];
+const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_SPAN, 'a swept primitive box at least the grid cell wide (the two-cells-per-axis grid bound)'], [E_NONFINITE, 'a nonfinite contact residual'], [E_UNSUPPORTED, 'a rod segment against a collider kind without GPU rod contact']];
 const describeErrors = (bits: number) => errorNames.filter(([b]) => bits & b).map(([, name]) => name).join(', ');
 const statusNames: [number, string][] = [[S_CONVERGED, 'inner solve converged'], [S_LINE, 'line search found no decrease'], [S_NONFINITE, 'nonfinite gradient'], [S_CAP, 'Newton cap'], [S_SINGULAR, 'singular block']];
 const describeStatus = (bits: number) => statusNames.filter(([b]) => bits & b).map(([, name]) => name).join(', ') || 'no status';
@@ -1219,12 +1219,15 @@ export class GPUClothNewton {
   private prevValid = false;
   /** W's coordinate stiffness holds a gradient evaluation of this buffer. */
   private stiffnessValid = false;
+  /** The grid holds 8 (T + E + S) entries and detection checks the bound's premise (CONTACT_GRID_CELL_BOUND). */
+  private readonly gridCellBound: boolean;
 
   /** contactCapacity (pairs) and contactGridEntries (swept-primitive grid
    * entries): the contact pool authored from a scene's measured peak. It never
    * grows at run time: a step that fills it fails with the measured counts. */
-  constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology, private readonly authored: {contactCapacity?: number; contactGridEntries?: number} = {}) {
-    for (const [name, value] of Object.entries(authored)) if (value !== undefined && !(Number.isSafeInteger(value) && value > 0)) throw new Error(`Invalid authored cloth ${name} ${value}`);
+  constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology, private readonly authored: {contactCapacity?: number; contactGridEntries?: number | typeof CONTACT_GRID_CELL_BOUND} = {}) {
+    for (const [name, value] of Object.entries(authored)) if (value !== undefined && !(name === 'contactGridEntries' && value === CONTACT_GRID_CELL_BOUND) && !(Number.isSafeInteger(value) && (value as number) > 0)) throw new Error(`Invalid authored cloth ${name} ${value}`);
+    this.gridCellBound = authored.contactGridEntries === CONTACT_GRID_CELL_BOUND;
     if (!gpuClothNewtonSupported(topology)) throw new Error('GPU cloth Newton: a rod has fewer than two vertices or mismatched rest lengths');
     const n = this.n = topology.vertexCount, T = topology.triangles.length, H = topology.hinges.length, S = topology.segmentCount;
     // DER joints of rods with three or more vertices: (a, b, c, first segment);
@@ -1441,7 +1444,7 @@ export class GPUClothNewton {
     const S = this.topology.rods.length ? this.offsets.segments : 0, rod = S > 0, rows = n + S;
     if (held && held.kMax >= kMax && held.gridEntries >= gridEntries && held.tableSlots >= tableFactor * held.kMax && held.kfSegBox + 2 * S <= held.kfWords) return held;
     kMax = Math.max(kMax, held?.kMax ?? 0, 4096);
-    gridEntries = Math.max(gridEntries, held?.gridEntries ?? 0, 4 * (T + edges + S), 1024);
+    gridEntries = Math.max(gridEntries, held?.gridEntries ?? 0, (this.gridCellBound ? 8 : 4) * (T + edges + S), 1024);
     const tableSlots = Math.max(pow2(tableFactor * kMax), held?.tableSlots ?? 0), gridBuckets = pow2(Math.max(1024, T + edges + S));
     const kuCV = 0, kuMeta = 4 * kMax, kuRod = 8 * kMax, kvStart = (rod ? 12 : 8) * kMax, kvList = kvStart + rows + 1, uBlocks = kvList + (rod ? 7 : 4) * kMax, uEntry = uBlocks + Math.ceil(rows / SCAN_WG) + 1, uTabVal = uEntry + 2 * gridEntries, kuWords = uTabVal + 2 * tableSlots;
     const aTable = 0, aHeads = 4 * tableSlots, aCount = aHeads + (rod ? 3 : 2) * gridBuckets, kaWords = aCount + rows;
@@ -1630,11 +1633,17 @@ export class GPUClothNewton {
     FLOAT_FIELDS.forEach((name, k) => {f[PARAM_FIELDS.length + k] = values[name] ?? 0;});
     this.device.queue.writeBuffer(this.params, 0, words);
   }
+  /** The first primitive that broke the two-cells-per-axis grid bound, its box extent and the cell. */
+  private describeSpan(c: Uint32Array): string {
+    const word = c[CONTACT_CONTROL.K_SPAN]!, extent = new Float32Array(Uint32Array.of(c[CONTACT_CONTROL.K_SPAN_EXTENT]!).buffer)[0]!;
+    if (!word) return '; the offending primitive was not recorded';
+    return `; ${['triangle', 'edge', 'rod segment', 'primitive'][word >>> 30]} ${(word & 0x3fffffff) - 1} has a swept box ${extent} m wide against the ${this.contactStatic?.cellSize} m cell`;
+  }
   private contactParams(): Record<string, number> {
     const layout = this.contactLayout, statics = this.contactStatic;
     if (!layout) return {};
     const base = this.indexWords.length, shifted = statics ? Object.fromEntries(Object.entries(statics.offsets).map(([k, v]) => [k, base + v])) : {};
-    return {...layout, ...(statics ? {...shifted, edges: statics.edges, cellSize: statics.cellSize, sCollider: base + statics.words.length} : {}), tableCur: this.tableCur, prevValid: this.prevValid ? 1 : 0, stiffnessValid: this.stiffnessValid ? 1 : 0};
+    return {...layout, ...(statics ? {...shifted, edges: statics.edges, cellSize: statics.cellSize, sCollider: base + statics.words.length} : {}), tableCur: this.tableCur, gridSpanCheck: this.gridCellBound ? 1 : 0, prevValid: this.prevValid ? 1 : 0, stiffnessValid: this.stiffnessValid ? 1 : 0};
   }
   /** Continue a solve stopped at the Newton cap: the next unit measures the
    * GPU iterate and steps on with a fresh cap (the totals keep counting). */
@@ -1714,7 +1723,7 @@ export class GPUClothNewton {
       // stiffen, a nonfinite iterate, or a pool the step filled (no growth, no
       // CPU re-solve).
       const c = solve.control, errors = c[CONTACT_CONTROL.K_ERROR]!, layout = this.contactLayout!;
-      if (errors) throw new Error(`Cloth GPU contact: ${describeErrors(errors)} (${c[CONTACT_CONTROL.K_COUNT]!} pairs against the authored ${layout.kMax}, ${c[CONTACT_CONTROL.K_ENTRIES]!} grid entries against ${layout.gridEntries}, a ${layout.tableSlots}-slot key table)`);
+      if (errors) throw new Error(`Cloth GPU contact: ${describeErrors(errors)} (${c[CONTACT_CONTROL.K_COUNT]!} pairs against the authored ${layout.kMax}, ${c[CONTACT_CONTROL.K_ENTRIES]!} grid entries against ${layout.gridEntries}, a ${layout.tableSlots}-slot key table)${errors & E_SPAN ? this.describeSpan(c) : ''}`);
       if (solve) {
         positions(solve.increments);
         const c = solve.control, f = (word: number) => new Float32Array(Uint32Array.of(c[word]!).buffer)[0]!;
@@ -1820,7 +1829,7 @@ export class GPUClothNewton {
 
   private prepareGPUContact(colliders: readonly ClothCollider[], selfCollision: boolean): void {
     this.contactStatic ??= clothContactStatic(this.topology);
-    this.ensureContactCapacity(Math.max(4096, 2 * this.n, this.authored.contactCapacity ?? 0), this.authored.contactGridEntries ?? 0);
+    this.ensureContactCapacity(Math.max(4096, 2 * this.n, this.authored.contactCapacity ?? 0), this.gridCellBound ? 0 : this.authored.contactGridEntries as number | undefined ?? 0);
     this.uploadContactStatic(colliders);
     this.selfCollision = selfCollision;
   }

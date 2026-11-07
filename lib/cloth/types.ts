@@ -108,8 +108,11 @@ export interface ClothPhysicsOptions {
   /** GPU Newton contact pool (pairs), authored from the scene's measured peak.
    * It never grows at run time: a step that fills it fails with the counts. */
   readonly contactCapacity?:number;
-  /** Its swept-primitive grid entries, authored the same way. */
-  readonly contactGridEntries?:number;
+  /** Its swept-primitive grid entries, authored the same way, or the bound
+   * 'two-cells-per-axis': 8 (triangles + edges + segments) entries, valid while
+   * every swept, padded primitive box is narrower than the grid cell on each
+   * axis; detection checks that and a box that is not fails the step, naming it. */
+  readonly contactGridEntries?:number|'two-cells-per-axis';
 }
 
 export interface ClothDocument {

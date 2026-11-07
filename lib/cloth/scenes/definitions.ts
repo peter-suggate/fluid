@@ -7,7 +7,7 @@ import { sourceInitialLiquid } from './initial-liquid';
 import { SourceEmissionScheduler } from '../source-fields';
 import { withStaticSourceSolids } from '../source-static-solids';
 import { loadSourceMesh, SPOT_SOURCE_ASSET } from '../source-mesh';
-import type { ClothVector } from '../types';
+import type { ClothPhysicsOptions, ClothVector } from '../types';
 import type { WetClothSourceDefinition } from '../source-types';
 import { sourceClothDocument, wetClothSource, wetClothWaterSources,wetClothVariantSources } from './sources';
 import {wetClothVariantTopology} from './variants';
@@ -28,16 +28,35 @@ const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-
  * (peakContacts) or the step report's contactPool and contactGridFill, in a run
  * that reaches contact. A source without an entry gets the defaults: max(4096,
  * 2 vertices) pairs and 4 (triangles + edges + segments) grid entries.
- * pore-test-mid: grid entries only. Its swept-bounds grid overflowed at step 0
- * (645298 > the 642012 default) and peaked at 815278 (step 80) over 1500 steps
- * (0.3 s, through the ball's impact at 0.12 s); it never formed a contact pair in that
- * window, so the pair capacity keeps its default. 2^20 = peak + 29% margin.
  * dam-break-nonlinear-drag-small: grid entries only. Its swept-bounds grid
  * overflowed the 29224 default at step 1 (30421) and peaked at 33272 (step 13)
  * over 300 steps; no contact pair formed, so the pair capacity keeps its
  * default. Peak x 1.25 = 41590, rounded up to a power of two: 2^16 = peak + 97%. */
-const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, {contactCapacity?: number; contactGridEntries?: number}>> = {
-  'wetcloth-source-pore-test-mid': {contactGridEntries: 1 << 20},
+/** pore-test (all eight variants share one cloth, T 64052, E 96451, S 0, and
+ * differ only in liquid settings): grid entries only, from the geometric bound
+ * 'two-cells-per-axis' (CONTACT_GRID_CELL_BOUND, gpu-contact.ts) rather than a measured peak. A primitive inserts one
+ * entry per distinct cell its swept, padded box touches. The cell is
+ * 2 (largest rest primitive extent + 4 r) and the pad is r, so while each box's
+ * deformed extent plus one step's travel stays below 2 extent + 6 r on every
+ * axis it touches at most 2 cells per axis: at most 2^3 = 8 entries per
+ * primitive, 8 (T + E + S) = 1284024 here, sized by the solver from the
+ * topology. Detection checks that premise on every box and a box at least the
+ * cell wide fails the step, naming the primitive, its extent and the cell; an
+ * overflow fails with the fill against the capacity. The fill grows with no
+ * contact pair because a step's swept box spans its travel: as the falling
+ * cloth speeds up and deforms more boxes straddle a cell face (4.02 entries per
+ * primitive at step 0, 4.73 at step 60, 5.08 at pore-test-mid's 1500-step peak
+ * of 815278 at step 80, through the ball's impact). */
+const PORE_TEST_GRID = {contactGridEntries: 'two-cells-per-axis'} as const;
+const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, Pick<ClothPhysicsOptions, 'contactCapacity' | 'contactGridEntries'>>> = {
+  'wetcloth-source-pore-test-fd-high': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-fd-low': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-ft-high': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-ft-low': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-high': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-low': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-mid': PORE_TEST_GRID,
+  'wetcloth-source-pore-test-zero': PORE_TEST_GRID,
   'wetcloth-source-dam-break-nonlinear-drag-small': {contactGridEntries: 1 << 16},
 };
 
