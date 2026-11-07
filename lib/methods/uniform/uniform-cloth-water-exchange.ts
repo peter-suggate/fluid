@@ -146,8 +146,12 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
 
  /** Native free-liquid level set at physical positions, used for the
   * source cohesion bridge gate. This samples the actual accepted NB-FLIP
-  * surface; bound saturation is never substituted for free-liquid evidence. */
- async sampleLiquidPhi(positions_m:ArrayLike<number>):Promise<Float64Array>{
+  * surface; bound saturation is never substituted for free-liquid evidence.
+  * A point with no accepted resident liquid owner throws by default (the
+  * cohesion bridge requires an owner); {unowned:'nan'} reads it as NaN, since
+  * no liquid is accepted there. Invalid points throw in both modes. */
+ async sampleLiquidPhi(positions_m:ArrayLike<number>,options:{readonly unowned?:'throw'|'nan'}={}):Promise<Float64Array>{
+  const unownedNaN=options.unowned==='nan';if(options.unowned!==undefined&&options.unowned!=='throw'&&!unownedNaN)throw new Error(`Unknown unowned liquid-phi mode ${String(options.unowned)}`);
   if(this.disposed||this.busy||!this.phiQueryPipeline)throw new Error('Liquid phi sampling requires an idle initialized adapter');
   if(positions_m.length%3||Array.from(positions_m).some(x=>!Number.isFinite(x)))throw new Error('Invalid liquid-phi sample points');
   if(!positions_m.length)return new Float64Array();
@@ -162,7 +166,7 @@ ${uniformMixedVertexSamplingSource('',true,undefined,'umLoadCorner')}
   try{
    writeBufferChunked(d.queue,input,0,records);const group=uniformDetailGroup(d,{layout:this.phiQueryLayout,entries:[{binding:0,resource:{buffer:input}},{binding:1,resource:{buffer:output}},{binding:2,resource:this.fields.phi}]});
    const e=d.createCommandEncoder(),pass=e.beginComputePass({label:'Cloth accepted mixed-resolution liquid samples'});pass.setPipeline(this.phiQueryPipeline);pass.setBindGroup(0,this.fields.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.dispatchWorkgroups(Math.ceil(count/64));pass.end();e.copyBufferToBuffer(output,0,read,0,16*count);d.queue.submit([e.finish()]);await read.mapAsync(GPUMapMode.READ);const values=new Float32Array(read.getMappedRange());
-   return Float64Array.from({length:count},(_,i)=>{if(values[4*i+3]||!Number.isFinite(values[4*i]!))throw new Error(`Cohesion bridge has no accepted resident liquid owner at query ${i}`);return values[4*i]!;});
+   return Float64Array.from({length:count},(_,i)=>{if(values[4*i+3]||!Number.isFinite(values[4*i]!)){if(unownedNaN)return NaN;throw new Error(`Cohesion bridge has no accepted resident liquid owner at query ${i}`);}return values[4*i]!;});
   }finally{if(read.mapState==='mapped')read.unmap();input.destroy();output.destroy();read.destroy();this.busy=false;if(this.disposed)releaseClothPorousCapacity(this.fields);}
  }
 

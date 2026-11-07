@@ -82,6 +82,11 @@ test('actual NB-FLIP forced MAC exchange is reciprocal below the particle band',
    assert.deepEqual([...seen].sort(),[1,4],'query fixture must contain actual fine and coarse accepted owners');
    const queried=await exchange.sampleLiquidPhi(queries);queried.forEach((value,i)=>assert.ok(Math.abs(value-expected[i]!)<Math.min(...fields.cellSize_m)*1e-5,`native mixed phi query ${i}: ${value} versus ${expected[i]}`));
    await assert.rejects(()=>exchange.sampleLiquidPhi([-3,-3,-3]),/no accepted resident liquid owner/);
+   const mixedQueries=[...queries.slice(0,3),-3,-3,-3,...queries.slice(3)],mixed=await exchange.sampleLiquidPhi(mixedQueries,{unowned:'nan'});
+   assert.equal(mixed.length,queried.length+1);assert.ok(Number.isNaN(mixed[1]),'an unowned point reads NaN in the opt-in mode');
+   [mixed[0],...mixed.slice(2)].forEach((value,i)=>assert.equal(value,queried[i],`opt-in owned query ${i} must equal the default path value`));
+   await assert.rejects(()=>exchange.sampleLiquidPhi([0,Number.NaN,0],{unowned:'nan'}),/Invalid liquid-phi sample points/);
+   await assert.rejects(()=>exchange.sampleLiquidPhi([1e30,0,0],{unowned:'nan'}),/outside the native coordinate range/);
    const beforeBudget=await readMixedBuffer(device,fields.waterBudget),cellVolume=fields.cellSize_m.reduce((a,b)=>a*b,1);
    const waterStep={...step,identity:{...step.identity,tick:1,time_s:.001}};
    const capturePhi=async()=>{const e=fields.device.createCommandEncoder(),read=uniformDetailField(fields.phi)!.storage.capture(e,fields.phi);fields.device.queue.submit([e.finish()]);return read();};

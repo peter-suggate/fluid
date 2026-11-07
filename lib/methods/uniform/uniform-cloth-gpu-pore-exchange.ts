@@ -1,4 +1,5 @@
 import type { ClothWaterLedger } from '../../cloth/definition';
+import { GPUSubmissionStamp } from '../../core/gpu-submission-stamp';
 import type { ClothFrameIdentity } from '../../cloth/types';
 import { CLOTH_PORE_MATERIAL_FLOATS, ClothGPUPoreTransport, clothPoreMaterialTable, clothTimestampInterval_ms, type ClothPoreGPUResult, type ClothPoreGPUStep } from '../../cloth/gpu-pore-transport';
 import type { UniformClothGridFields } from './uniform-cloth-grid-coupling';
@@ -40,7 +41,8 @@ const STATUS_MESSAGES: readonly [number, string][] = [
   [CLOTH_EXCHANGE_STATUS.quantum, 'Captured pore water exceeds the int32 quantum range'],
   [CLOTH_EXCHANGE_STATUS.permeability, 'Fiber permeability fit is not positive at this solid fraction'],
 ];
-const SLOTS = 32, STATUS_BYTES = 32, ALIGN = 64;
+// Status word 6 carries the submission stamp commitBudget, the last kernel, copies from params.stamp.
+const SLOTS = 32, STATUS_BYTES = 32, ALIGN = 64, STAMP_WORD = 6, PARAMS_BYTES = 80;
 const pad = (words: number) => Math.ceil(Math.max(1, words) / ALIGN) * ALIGN;
 /** The capture support offsets, z-, y-, x-major. */
 const SLOT_OFFSETS: readonly [number, number, number][] = (() => {
@@ -63,6 +65,7 @@ struct Params {
  dims:vec4u,    // key frame dims xyz, hash mask
  scalars:vec4f, // water quantum, cell volume, smallest cell edge, dt
  flags:vec4f,   // capture-rate multiplier, water density, absorption, solveSolid
+ stamp:vec4u,   // x: this submission's stamp (lib/core/gpu-submission-stamp.ts)
 };
 const SLOT=array<vec3i,${SLOTS}>(${SLOT_OFFSETS.map(o => `vec3i(${o.join(',')})`).join(',')});
 const SLOT_OF=array<u32,64>(${SLOT_OF.map(s => `${s}u`).join(',')});
@@ -296,6 +299,7 @@ fn cellStart(j:u32)->bool{return j==0u||sortKeys[j]!=sortKeys[j-1u];}
 // The paired budget commit (released minus captured quanta), into the NB
 // budget's compensated (high, low) pair as source emission commits.
 @compute @workgroup_size(1) fn commitBudget(){
+ atomicStore(&status[${STAMP_WORD}],params.stamp.x);
  let capturedLo=atomicLoad(&status[2]);let capturedHi=atomicLoad(&status[3]);let releasedLo=atomicLoad(&status[4]);let releasedHi=atomicLoad(&status[5]);
  var lo=releasedLo-capturedLo;var hi=releasedHi-capturedHi-select(0u,1u,releasedLo<capturedLo);
  if(lo==0u&&hi==0u){return;}
@@ -351,13 +355,14 @@ export class UniformClothGPUPoreExchange {
   private samplePipeline?: GPUComputePipeline; private sampleGroup?: GPUBindGroup;
   private readonly pipelines = new Map<Kernel, GPUComputePipeline>();
   private readonly groups = new Map<Kernel, GPUBindGroup>();
+  private readonly stamp = new GPUSubmissionStamp('Cloth GPU pore exchange');
   private busy = false; private disposed = false;
   constructor(readonly fields: UniformClothGridFields, readonly transport: ClothGPUPoreTransport, kernels: UniformGPUOrderingKernels) {
     const d = this.device = fields.device, V = transport.topology.V, sections = clothExchangeSections(V);
     if (!fields.solid) throw new Error('Cloth GPU pore exchange needs the porous solid library');
     const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (label: string, bytes: number) => { const b = d.createBuffer({ label: `Cloth GPU pore exchange ${label}`, size: Math.max(16, Math.ceil(bytes / 16) * 16), usage }); this.owned.push(b); return b; };
-    this.params = d.createBuffer({ label: 'Cloth GPU pore exchange parameters', size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); this.owned.push(this.params);
+    this.params = d.createBuffer({ label: 'Cloth GPU pore exchange parameters', size: PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); this.owned.push(this.params);
     this.cells = make('vertex cells', 32 * V); this.samples = make('support samples', 32 * SLOTS * V); this.work = make('work', 4 * sections.words);
     // Load at most one half: every support cell of every vertex distinct.
     this.hashEntries = 2 ** Math.ceil(Math.log2(Math.max(64, 2 * SLOTS * V)));
@@ -422,11 +427,12 @@ export class UniformClothGPUPoreExchange {
     }
     const dims = lo.map((l, a) => hi[a]! - l + 1);
     if (dims[0]! * dims[1]! * dims[2]! >= 2 ** 32 - 1) throw new Error('Cloth support spans more cells than a 32-bit key frame addresses');
-    const header = new ArrayBuffer(64), hu = new Uint32Array(header), hi32 = new Int32Array(header), hf = new Float32Array(header);
+    const header = new ArrayBuffer(PARAMS_BYTES), hu = new Uint32Array(header), hi32 = new Int32Array(header), hf = new Float32Array(header);
     const rate = step.physics?.captureRate ?? 1, rho = step.materials[0]!.waterDensity_kg_m3;
     if (!Number.isFinite(rate) || rate < 0) throw new Error('Invalid cloth capture-rate multiplier');
     hi32.set([lo[0]!, lo[1]!, lo[2]!, V], 0); hu.set([dims[0]!, dims[1]!, dims[2]!, this.hashEntries - 1], 4);
     hf.set([q, h[0]! * h[1]! * h[2]!, Math.min(...h), step.dt_s, rate, rho, step.physics?.absorption === false ? 0 : 1, step.physics?.solveSolid === false ? 0 : 1], 8);
+    const stamp = this.stamp.next(); hu[16] = stamp;
     d.queue.writeBuffer(this.params, 0, header); d.queue.writeBuffer(this.cells, 0, records);
     d.queue.writeBuffer(this.materials, 0, clothPoreMaterialTable(step.materials, step.physics));
     const e = d.createCommandEncoder({ label: 'Cloth GPU pore exchange' }), ts = this.timestamps;
@@ -453,6 +459,8 @@ export class UniformClothGPUPoreExchange {
       await this.readback.mapAsync(GPUMapMode.READ);
       const data = this.readback.getMappedRange().slice(0); this.readback.unmap();
       const status = new Uint32Array(data, 0, 8);
+      // An aborted or skipped submission leaves an earlier stamp (or zero): no word of it is a result.
+      this.stamp.check(status[STAMP_WORD]!, stamp);
       for (const [bit, message] of STATUS_MESSAGES) if (status[0]! & bit) throw new Error(`Cloth GPU pore exchange: ${message} (vertex ${0xffffffff - status[1]!})`);
       const transport = this.transport.parseResult(data, STATUS_BYTES, staged);
       const captured = (status[2]! + 2 ** 32 * status[3]!) * q, released = (status[4]! + 2 ** 32 * status[5]!) * q, freeDelta_m3 = released - captured;

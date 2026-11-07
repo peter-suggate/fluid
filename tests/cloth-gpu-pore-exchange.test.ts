@@ -108,6 +108,18 @@ for (const [label, physics] of [
         assert.ok(Math.abs(rows[5 * i + 4]! - cell.boundFraction) <= BOUND * cell.boundFraction + 1e-9, `bound fraction ${i}`);
       });
       assert.equal(fields.porousCapacity, gpu.capacityTexture, 'NB-FLIP reads the GPU partition');
+      // A submission that never runs (Metal aborts are silent) leaves the previous
+      // stamp in the readback: the exchange refuses it and publishes nothing.
+      const queue = device.queue, submit = queue.submit, dropped = () => undefined;
+      (queue as unknown as { submit: () => undefined }).submit = dropped;
+      assert.equal(device.queue.submit, dropped, 'the fixture drops the next queue submission');
+      try {
+        await assert.rejects(() => gpu!.step({ positions_m: s.positions_m, velocities_m_s: s.velocities_m_s, controlVolume_m3: s.controlVolume_m3, solidVolume_m3: s.solidVolume_m3, solidFraction: s.solidFraction,
+          dryMass_kg: s.dryMass_kg, waterVolume_m3: s.waterVolume_m3, fixed: f.fixed, materials: f.materials, physics, dt_s: dt, gravity_m_s2: gravity,
+          pressureAcceleration_m_s2: f.pressure, solidAcceleration_m_s2: f.solid, identity: { ...identity, tick: 2 }, vertexMaterial: f.prepared.vertexMaterial }),
+          /^Error: Cloth GPU pore exchange: stale GPU readback \(stamp 1, expected 2\)$/);
+      } finally { queue.submit = submit; }
+      assert.equal(fields.porousCapacity, gpu.capacityTexture, 'a refused readback leaves the published partition in place');
     } finally { gpu?.destroy(); transport.destroy(); cpu.destroy(); solver.destroy(); }
   });
 });

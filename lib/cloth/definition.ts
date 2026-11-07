@@ -12,7 +12,7 @@ export const CLOTH_FLUID_IMPULSE_PORT = publicationPort<ClothImpulsePublication>
 /** A ledger is a paired committed-volume publication, not a capture request.
  * Transport cannot be composed until an actual free-water adapter provides it. */
 export interface ClothWaterLedger { readonly generation:number; readonly tick:number; readonly freeDelta_m3:number; readonly boundDelta_m3:number; readonly externalDelta_m3:number }
-export interface ClothLiquidSampler {sampleLiquidPhi(positions_m:ArrayLike<number>):Promise<Float64Array>;readFreeWaterVolume():Promise<number>}
+export interface ClothLiquidSampler {sampleLiquidPhi(positions_m:ArrayLike<number>,options?:{readonly unowned?:'throw'|'nan'}):Promise<Float64Array>;readFreeWaterVolume():Promise<number>}
 export const CLOTH_LIQUID_SAMPLE_PORT=publicationPort<ClothLiquidSampler>({id:"fluid.cloth-liquid-sampler",representation:"native-nbflip-liquid-sampler-v1",lifetime:"generation",unit:"SI"});
 export const CLOTH_WATER_LEDGER_PORT = publicationPort<ClothWaterLedger>({ id: "cloth.water-ledger", representation: "paired-water-ledger-v1", lifetime: "frame", unit: "m3" });
 
