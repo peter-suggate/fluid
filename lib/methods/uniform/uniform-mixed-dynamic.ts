@@ -260,6 +260,11 @@ export interface UniformMixedDynamicCensus {
  * only. Reads back one bit per tile. */
 export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
  readonly label="Uniform dynamic ownership page words";
+ /** Set while a classifier initializes: it also compiles serialCoarse, the
+  * spread layout's regression reference (classifyCoarse's velocity bounds
+  * one owner a lane, in series). The frame never launches it. */
+ static serialCoarseBounds=false;
+ private serialCoarse?:GPUComputePipeline;
  readonly allocatedBytes:number;
  private readonly work:GPUBuffer;
  /** By block: every block's velocity-bound cubes (UNIFORM_BOUND_CUBE_WORDS a
@@ -956,9 +961,12 @@ fn umDepthSample(tile:u32,i:u32)->vec2u{
 // Interface: an owner whose corner phi changes sign. V/phi disagreement
 // without one is counted, not refined: 4h V error is at or below fine on the
 // same cells (plan, same-cell A/B).
-fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
+// bounds: the owner's extended face velocity bounds here, in this lane
+// (classifyCoarse spreads a 4h owner's faces over the workgroup instead).
+// Returns whether the owner has open cells (is classified at all).
+fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>,bounds:bool)->bool{
  let open=umCensusOpenCells(tile);
- if(all(open==vec2u(0u))||(width==1u&&(open[lane/32u]&(1u<<(lane%32u)))==0u)){return;}
+ if(all(open==vec2u(0u))||(width==1u&&(open[lane/32u]&(1u<<(lane%32u)))==0u)){return false;}
  let surfaceAuthority=(policy.shaping.x&32768u)!=0u;
  let side=4u/width;
  let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
@@ -979,8 +987,9 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
  // Signed bounds of the extended face velocities the next trace samples.
  // An h owner's faces are single patches anchored at its origin (+) and one
  // cell below it (-), whatever the neighbour (umFace).
- var owner=UMOwner();if(width!=1u){owner=umOwnerAt(vec3i(origin));}
+ var owner=UMOwner();if(bounds&&width!=1u){owner=umOwnerAt(vec3i(origin));}
  for(var axis=0u;axis<3u;axis++){
+  if(!bounds){break;}
   var low=3.0e38;var high=-3.0e38;
   for(var sign=-1;sign<=1;sign+=2){
    var count=1u;var anchor=vec3i(origin);if(sign<0){anchor[axis]-=1;}
@@ -1026,6 +1035,7 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
    if(!surfaceAuthority&&inside==8u&&v<=policy.step.w){atomicAdd(&census[3],1u);}
   }
  }
+ return true;
 }
 fn umFinishTile(tile:u32,width:u32,c:TileClass){
  let crossing=(c.flags&2u)!=0u;
@@ -1126,7 +1136,7 @@ fn umReplayTile(tile:u32){
   if(umTilePresent(n)&&umTileWidth(umTileAt(vec3u(n)))!=1u){atomicOr(&tileWide,1u<<lane);}
  }
  {
-  var c=umEmptyClass();umClassifyOwner(tile,width,lane,&c);
+  var c=umEmptyClass();_=umClassifyOwner(tile,width,lane,&c,true);
   for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}
   for(var k=0u;k<6u;k++){atomicMin(&tileGap[k],c.gap[k]);atomicMin(&tileReach[k],c.reach[k]);}
   atomicOr(&mixedTile,c.flags);
@@ -1169,9 +1179,32 @@ var<workgroup> cqDeep:array<u32,64>;
 var<workgroup> cqWorst:array<atomic<u32>,64>;
 var<workgroup> cqCurve:array<atomic<u32>,64>;
 var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
+// Velocity bounds: a 4h owner has 6 (axis, sign) faces of one patch, or of
+// sixteen h patches beside h tiles: up to 96 texture loads, which one lane
+// took in series. Each lane instead takes (owner, axis, sign) items, loading
+// a one-patch face at once and queueing a 16-part face (its first patch's
+// anchor; lane and axis), whose parts every lane then shares. The bounds
+// are minima and maxima of order keys: the serial loop's values in any order.
+// umCoarseSerialBounds: the serial loop (the regression's reference).
+override umCoarseSerialBounds:bool=false;
+var<workgroup> cqOwner:array<UMOwner,64>;
+var<workgroup> cqBounded:array<u32,64>;
+var<workgroup> cqLow:array<array<atomic<u32>,3>,64>;
+var<workgroup> cqHigh:array<array<atomic<u32>,3>,64>;
+var<workgroup> cqParts:atomic<u32>;
+var<workgroup> cqPart:array<vec4i,384>;
+fn cqBound(owner:u32,axis:u32,anchor:vec3i,widePatch:bool){
+ if(umFaceLow(anchor,axis)){return;}
+ var u=0.0;if(widePatch){u=${UNIFORM_DETAIL_4H_LOAD}textureLoad(velocity,anchor,0)[axis];}else{u=textureLoad(velocity,anchor,0)[axis];}
+ // A non-finite speed bounds nothing: saturate both ends.
+ let finite=abs(u)<=3.0e38;
+ atomicMin(&cqLow[owner][axis],orderKey(select(-3.0e38,u,finite)));atomicMax(&cqHigh[owner][axis],orderKey(select(3.0e38,u,finite)));
+}
 @compute @workgroup_size(64) fn classifyCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var first=64u*group.x;first<umCounts.y;first+=64u*groups.x){
- if(lane==0u){resetGroupCensus();atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);}
+ if(lane==0u){resetGroupCensus();atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);atomicStore(&cqParts,0u);}
+ for(var a=0u;a<3u;a++){atomicStore(&cqLow[lane][a],orderKey(3.0e38));atomicStore(&cqHigh[lane][a],orderKey(-3.0e38));}
+ cqBounded[lane]=0u;
  atomicStore(&cqWorst[lane],0u);atomicStore(&cqCurve[lane],0u);atomicStore(&cqDeepest[lane][0],0u);atomicStore(&cqDeepest[lane][1],0u);
  workgroupBarrier();
  let index=first+lane;
@@ -1180,12 +1213,20 @@ var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
   tile=umTopology[UM_TILES+umCounts.x+index];cqTile[lane]=tile;
   if(ccValid(tile)){umReplayTile(tile);}
   else{
-   classified=true;umClassifyOwner(tile,4u,0u,&c);
+   classified=true;
+   if(umClassifyOwner(tile,4u,0u,&c,umCoarseSerialBounds)&&!umCoarseSerialBounds){cqBounded[lane]=1u;cqOwner[lane]=umOwnerAt(vec3i(umTileCoord(tile)*4u));}
    if((c.flags&2u)!=0u&&policy.step.y>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
    if((c.flags&2u)!=0u&&thinWanted()){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;}
   }
  }
  workgroupBarrier();
+ for(var j=lane;j<6u*64u;j+=64u){
+  let owner=j/6u;if(cqBounded[owner]==0u){continue;}
+  let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
+  let face=umFaceFirst(cqOwner[owner],axis,sign);
+  if(face.count==1u){cqBound(owner,axis,face.anchor,face.width==4u);}
+  else{cqPart[atomicAdd(&cqParts,1u)]=vec4i(face.anchor,i32(owner|(axis<<8u)|(face.count<<16u)));}
+ }
  let errors=atomicLoad(&cqErrors);
  for(var j=lane;j<8u*errors;j+=64u){
   let owner=cqError[j/8u];coarseCurve=0.0;
@@ -1198,7 +1239,18 @@ var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
   atomicMax(&cqDeepest[owner][0],d.x);atomicMax(&cqDeepest[owner][1],d.y);
  }
  workgroupBarrier();
+ // A queued face's parts: h patches stepping from its first anchor (umFacePatch).
+ let parts=atomicLoad(&cqParts);
+ for(var j=lane;j<16u*parts;j+=64u){
+  let item=cqPart[j/16u];let word=u32(item.w);let part=j%16u;
+  if(part>=(word>>16u)){continue;}
+  let axis=(word>>8u)&3u;var anchor=item.xyz;
+  anchor[(axis+1u)%3u]+=i32(part%4u);anchor[(axis+2u)%3u]+=i32(part/4u);
+  cqBound(word&255u,axis,anchor,false);
+ }
+ workgroupBarrier();
  if(classified){
+  if(cqBounded[lane]!=0u){for(var a=0u;a<3u;a++){c.low[a]=min(c.low[a],atomicLoad(&cqLow[lane][a]));c.high[a]=max(c.high[a],atomicLoad(&cqHigh[lane][a]));}}
   if((c.flags&2u)!=0u&&policy.step.y>0.0){
    var error=bitcast<f32>(atomicLoad(&cqWorst[lane]));coarseCurve=bitcast<f32>(atomicLoad(&cqCurve[lane]));
    // A moving curve or corner (umCurveError), halved like the corners'
@@ -1836,6 +1888,7 @@ fn compactPage(i:u32)->u32{return 8u*ulResidentBlock(i>>3u)+(i&7u);}
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
   await Promise.all(["classify","classifyCoarse","importance","interfaceBits","interfaceBlocks","boundCubes","decide","solidActive","solidPromote","pageSeed","pageMark","pageCompact",...NARROW_BAND_BUDGET_ENTRIES].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
+  if(UniformMixedDynamicClassifier.serialCoarseBounds)this.serialCoarse=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"classifyCoarse",constants:{umDispatchX:this.ownership.dispatchX,umCoarseSerialBounds:1}}});
   await this.initializeRequest();
  }
  /** The page request: a module of its own beside the census's, which binds

@@ -862,3 +862,95 @@ regression test (tests/nbflip-seed-rank.test.ts).
   handoff (after the projection, at encodeToSimulation) and is routed to
   Lane S.
 - The determinism thread closes here.
+
+## Round 11
+
+The census, the deferred advection list and the GPU budget sums, from
+Lane S's round 12 per-dispatch timing. The per-dispatch times are the
+drop=2 kernel timer at steps 29 and 30 (`--kernels=29`, FLUID_TS_RAW), one
+run per tree. Each timer run's median kernel is within 1% of HEAD's.
+
+**classifyCoarse: the face loop is spread across lanes.**
+- **Before.** One lane a 4h tile ran umClassifyOwner's 3 axes x 2 signs x
+  up to 16 face parts in series.
+- **Now.**
+  - After the first barrier, each lane takes (owner, axis, sign) items. It
+    loads a one-patch face at once, and queues a sixteen-part seam face.
+  - After the second barrier, every lane takes queued parts.
+  - Bounds are atomic minima and maxima of order keys, so the order does
+    not matter.
+  - The serial loop stays behind an override (umCoarseSerialBounds) as the
+    regression's reference. It is compiled only when
+    UniformMixedDynamicClassifier.serialCoarseBounds is set.
+- **Regression.** tests/census-coarse-bounds.test.ts runs the dam-break
+  trough from a census start, with h tiles beside 4h ones, for steps 1-3.
+  Both pipelines launch from the same saved census and bounds buffers. The
+  census words, bound cubes and tile records match bit for bit.
+- **Per dispatch.** 276 / 269 us before, 236 / 239 us after: -35 us
+  (13%), not the estimated -230 us.
+  - About 425 coarse tiles fill about seven workgroups. The kernel's time
+    is one group's critical path:
+    - reset;
+    - classify with corner8;
+    - the error loop (umResolutionError) and the depth loop
+      (umDepthSample);
+    - three barriers;
+    - the census flush.
+  - The face loads were only part of that path.
+  - Lane S already found that spreading over more groups costs more in
+    resets and flushes than it saves.
+- **Whole-frame and cross-scene gates.** One pipelined run per tree, HEAD
+  (a56bedd4 tools) against the spread:
+
+  | scene | HEAD steady ms | spread steady ms | HEAD drift | spread drift |
+  |---|---|---|---|---|
+  | drop=2, 60 | 13.85 | not measured cleanly, see below | 3.3e-6 | 3.3e-6 |
+  | rest, 60 | 2.80 | 2.74 | 0 | 0 |
+  | seep, 300 | 29.87 | 28.53 | 4.11e-4 | 3.87e-4 |
+  | letters, 120 | 52.27 | 52.61 | -8.91e-3 | -8.96e-3 |
+
+  - The spread's drop=2 run was contaminated: 15.23 ms, with p95 41 ms
+    against 19 ms and a max of 52 ms.
+  - Two retries hours later gave empty frames: tiers 0, drift -1, all 127
+    slots taken.
+  - A HEAD-tree retry gave the same empty frames, so that was the shared
+    GPU's state, not the change.
+  - On drop=2, the timer's summed GPU time per step matches HEAD within 1%
+    (15.03 / 15.45 ms against 14.94 / 15.37 ms).
+
+**advectDeferred: the list scan does not dominate. Not built.**
+- Measured with two extra scan-only launches: the code check, then
+  `continue`.
+- They cost 6.0 / 6.5 us (merged) and 6.2 / 6.5 us (regular).
+- The four light twins cost 22-23 us each, and the general merged twin
+  111 / 124 us.
+- Partitioning by code could save at most the skipped part of each scan:
+  about 25 us over the five launches. That is below the bar, so it was not
+  built.
+
+**GPU budget sums: the compensation words now move (fdb0ec32).**
+- Metal fast math folds the two-sum `low += (old - high) + delta` to 0.
+- A split through round() also folds: the reassociated
+  `(h + d) - (H + D)` cancels.
+- umCompensatedAdd splits high, low and delta from their bits instead.
+  - The rounded parts sum exactly into high.
+  - The half-ulp remainders form low, which stays under 1.5 ulps.
+- It is used at:
+  - source water (budget and ledger);
+  - resident termination (budget and ledger);
+  - the cloth exchange's addBudget.
+- tests/compensated-sum-gpu.test.ts, 2000 separate dispatches per case:
+
+  | case | two-sum error (low) | helper error |
+  |---|---|---|
+  | 0.01-scale deltas onto 3e5 | 10.1 (0) | 1.5e-8 |
+  | up across 2^24 | 936 (0) | 1.5e-6 |
+  | mixed signs down across 2^20 | 1.34 (0) | 4.7e-9 |
+  | small budget | 4.3e-9 (0) | 4.3e-17 |
+
+- Source water, 24 emit/terminate commits onto a 2048-cell budget:
+  - HEAD's pair is off by 1.22e-4 cells, with low at 0;
+  - with the helper, budget and ledger equal the Float64 sum of the GPU's
+    reduced deltas exactly.
+- The wet-cloth lane's GPU pore exchange (uniform-cloth-gpu-pore-exchange.ts)
+  moved its own round() split onto the same helper in b921cf06.
