@@ -617,3 +617,31 @@ test("device loss clears every cached resource and drains an active native call"
   await Promise.all([pending, manager.whenIdle()]);
   assert.equal(manager.snapshot().active, 0);
 });
+
+test("every owner of a cached shader module gets its compilation info, though the browser answers once per module", async () => {
+  // Chrome answers getCompilationInfo() once per module: a call made after an
+  // earlier one resolved never settles. The cloth grid coupling and the pore
+  // exchange both build ordering kernels from the same cached modules, and the
+  // second check held every wet-cloth scene's first browser advance.
+  let nativeCalls = 0;
+  const raw = fakeGPU().device as unknown as { createShaderModule: (descriptor: GPUShaderModuleDescriptor) => unknown };
+  raw.createShaderModule = descriptor => {
+    let answered = false;
+    return { label: descriptor.label, getCompilationInfo: () => {
+      nativeCalls += 1;
+      if (answered) return new Promise<GPUCompilationInfo>(() => {});
+      return Promise.resolve({ messages: [] } as unknown as GPUCompilationInfo).finally(() => { answered = true; });
+    } };
+  };
+  const device = managedGPUDevice(raw as unknown as GPUDevice, { requireWorkerRealm: false });
+  const settles = (module: GPUShaderModule) => Promise.race([
+    module.getCompilationInfo().then(info => info.messages.length),
+    new Promise<string>(resolve => setTimeout(() => resolve("never settled"), 200)),
+  ]);
+  const first = device.createShaderModule({ label: "GPU exclusive scan", code: "scan" });
+  assert.equal(await settles(first), 0);
+  const second = device.createShaderModule({ label: "GPU exclusive scan", code: "scan" });
+  assert.equal(second, first, "the manager shares the module");
+  assert.equal(await settles(second), 0);
+  assert.equal(nativeCalls, 1);
+});

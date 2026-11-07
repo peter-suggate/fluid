@@ -338,6 +338,7 @@ export class GPUCompilationManager implements GPUCompilationService {
     const cached = this.modules.get(key);
     if (cached) { this.moduleHits++; return cached; }
     const module = this.#device.createShaderModule(saved);
+    shareCompilationInfo(module);
     this.modules.set(key, module);
     return module;
   }
@@ -736,6 +737,27 @@ export class GPUCompilationManager implements GPUCompilationService {
       try { listener(snapshot); } catch { /* Diagnostics must never break compilation. */ }
     }
   }
+}
+
+/**
+ * The module cache hands one GPUShaderModule to every owner whose descriptor
+ * matches, and each owner checks it with `getCompilationInfo()`. Chrome
+ * answers that once per module: a call made after an earlier call resolved
+ * never settles (Chrome 156; Dawn in node answers every call). A later owner
+ * of a cached module then waits forever without an error — the cloth pore
+ * exchange's ordering kernels, built at the first wet-cloth step from the
+ * modules the grid coupling's ordering kernels created and checked at build,
+ * held every wet-cloth scene's first advance. A module's compilation messages
+ * are fixed when it is created, so every caller shares the first answer.
+ */
+function shareCompilationInfo(module: GPUShaderModule): void {
+  const native = (module as Partial<GPUShaderModule>).getCompilationInfo;
+  if (typeof native !== "function") return;
+  let info: Promise<GPUCompilationInfo> | undefined;
+  Object.defineProperty(module, "getCompilationInfo", {
+    configurable: true,
+    value: () => info ??= native.call(module),
+  });
 }
 
 const managerByDevice = new WeakMap<GPUDevice, GPUCompilationManager>();
