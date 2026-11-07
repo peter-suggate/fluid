@@ -9,6 +9,12 @@
 # Fairness: a check or gate that has waited AGED seconds stops yielding to queued timing runs,
 # and a new timing run holds off (without queueing) while any such aged waiter exists.
 # A timing command still only starts once it holds all 3 slots, so timing stays exclusive.
+# Every command runs under fluid-gpu-guard.sh inside its slot: a GPU canary first (rc 76 when
+# the GPU executes nothing), then a system-log check for Metal command-buffer aborts in the
+# command's process tree (rc 77: Dawn reports none of them, so the results are invalid),
+# and the GPU memory in use at start and at peak.
+# Admission: a timing run is alone on the GPU; checks and gates run up to 3 at once, and each
+# command may itself start several GPU processes (node --test runs test files in parallel).
 set -u
 D=${FLUID_GPU_LOCK_DIR:-/private/tmp/claude-501}
 mkdir -p "$D"
@@ -17,6 +23,7 @@ PENDING=$D/fluid-gpu-timing.pending
 GATE=$D/fluid-gpu-gate.pending
 CHECKWAIT=$D/fluid-gpu-check.waiting
 AGED=600
+GUARD=$(cd "$(dirname "$0")" && pwd)/fluid-gpu-guard.sh
 mode=${1:?check|timing}; shift
 # Metal shader cache, one directory per slot (lib/harness/metal-shader-cache.ts).
 # A process reads and writes only the lowest-numbered shard of its directory that
@@ -65,7 +72,7 @@ case "$mode" in
     # Exclusive lock first, then drain the three check slots.
     cache=$(slot_cache 1); [ -n "$cache" ] && export FLUID_METAL_SHADER_CACHE="$cache"
     exec lockf -k "$LOCK" lockf -k "$D/fluid-gpu-check-1.lock" lockf -k "$D/fluid-gpu-check-2.lock" lockf -k "$D/fluid-gpu-check-3.lock" \
-      /bin/bash -c 'rm -f "$0"; exec "$@"' "$PENDING.$$" "$@"
+      /bin/bash -c 'rm -f "$0"; exec "$@"' "$PENDING.$$" "$GUARD" "$@"
     ;;
   check|gate)
     # gate: a merge-gate check, ahead of ordinary checks on slots 1-2.
@@ -90,7 +97,7 @@ case "$mode" in
         # is never free while one runs; plain fluid-gpu.lock holders are not waited for.
         # fd 3 keeps the command's stderr; lockf's own "already locked" goes to /dev/null.
         cache=$(slot_cache "$i")
-        FLUID_METAL_SHADER_CACHE=${cache:-${FLUID_METAL_SHADER_CACHE:-}} lockf -k -t 0 "$D/fluid-gpu-check-$i.lock" /bin/bash -c '"$@" 2>&3; rc=$?; [ $rc -eq 75 ] && rc=1; exit $rc' -- "$@" 3>&2 2>/dev/null
+        FLUID_METAL_SHADER_CACHE=${cache:-${FLUID_METAL_SHADER_CACHE:-}} lockf -k -t 0 "$D/fluid-gpu-check-$i.lock" /bin/bash -c '"$@" 2>&3; rc=$?; [ $rc -eq 75 ] && rc=1; exit $rc' -- "$GUARD" "$@" 3>&2 2>/dev/null
         rc=$?
         [ $rc -ne 75 ] && exit $rc
         [ "$mode" = check ] && touch "$CHECKWAIT.$$"
