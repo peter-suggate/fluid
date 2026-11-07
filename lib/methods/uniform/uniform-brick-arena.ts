@@ -399,7 +399,7 @@ ${pools.map((pool,k)=>`fn ubaLoad${k||""}(base:u32,slot:u32,i:u32)->f32{return b
 fn ubaStore${k||""}(base:u32,slot:u32,i:u32,value:f32){${pool}[base+UBA_STRIDE*slot+i]=bitcast<u32>(value);}`).join("\n")}
 `;}
  /** A channel's base expression: a two-bank channel's bank picks by the table's bank word (bank 0 current, 1 the other). */
- private baseExpression(name:string,level:UniformArenaLevel,component=0,bank:0|1=0):string{
+ baseExpression(name:string,level:UniformArenaLevel,component=0,bank:0|1=0):string{
   const j=this.bankWords.get(name),key=name.toUpperCase();this.base(name,level,component,0);
   if(j===undefined){if(bank!==0){throw new Error(`Brick arena: ${name} has one bank`);}return `UBA_${key}_L${level}_${component}_0`;}
   return `select(UBA_${key}_L${level}_${component}_0,UBA_${key}_L${level}_${component}_1,(ubaBank(${j}u)^${bank}u)!=0u)`;
