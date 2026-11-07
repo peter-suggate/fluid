@@ -22,43 +22,25 @@ import { OCTREE_REFINEMENT_REGION_CAPACITY } from '../../core/refinement-regions
  * transients between those samples. */
 const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-source-pore-test-mid': 128};
 
-/** GPU Newton contact pools (pairs and swept-primitive grid entries) authored
- * from a measured peak: nothing grows at run time, and a step that fills a pool
- * fails with the measured counts. Measured with tools/probe-wetcloth-step-cost.ts
- * (peakContacts) or the step report's contactPool and contactGridFill, in a run
- * that reaches contact. A source without an entry gets the defaults: max(4096,
- * 2 vertices) pairs and 4 (triangles + edges + segments) grid entries.
- * dam-break-nonlinear-drag-small: grid entries only. Its swept-bounds grid
- * overflowed the 29224 default at step 1 (30421) and peaked at 33272 (step 13)
- * over 300 steps; no contact pair formed, so the pair capacity keeps its
- * default. Peak x 1.25 = 41590, rounded up to a power of two: 2^16 = peak + 97%. */
-/** pore-test (all eight variants share one cloth, T 64052, E 96451, S 0, and
- * differ only in liquid settings): grid entries only, from the geometric bound
- * 'two-cells-per-axis' (CONTACT_GRID_CELL_BOUND, gpu-contact.ts) rather than a measured peak. A primitive inserts one
- * entry per distinct cell its swept, padded box touches. The cell is
- * 2 (largest rest primitive extent + 4 r) and the pad is r, so while each box's
- * deformed extent plus one step's travel stays below 2 extent + 6 r on every
- * axis it touches at most 2 cells per axis: at most 2^3 = 8 entries per
- * primitive, 8 (T + E + S) = 1284024 here, sized by the solver from the
- * topology. Detection checks that premise on every box and a box at least the
- * cell wide fails the step, naming the primitive, its extent and the cell; an
+/** GPU Newton contact pools. Nothing grows at run time.
+ * Pairs: max(4096, 2 vertices) unless a source authors contactCapacity from a
+ * measured peak (tools/probe-wetcloth-step-cost.ts peakContacts, or the step
+ * report's contactPool).
+ * Swept-primitive grid entries: every source uses the geometric bound
+ * 'two-cells-per-axis' (CONTACT_GRID_CELL_BOUND, gpu-contact.ts), the solver's
+ * default, rather than a measured peak. A primitive inserts one entry per
+ * distinct cell its swept, padded box touches. The cell is 2 (largest rest
+ * primitive extent + 4 r) and the pad is r, so while each box's deformed extent
+ * plus one step's travel stays below 2 extent + 6 r on every axis it touches at
+ * most 2 cells per axis: at most 2^3 = 8 entries, 8 (T + E + S) in all.
+ * Detection checks that premise on every box: a box at least the cell wide
+ * fails the step, naming the primitive, its extent and the cell, and an
  * overflow fails with the fill against the capacity. The fill grows with no
- * contact pair because a step's swept box spans its travel: as the falling
- * cloth speeds up and deforms more boxes straddle a cell face (4.02 entries per
- * primitive at step 0, 4.73 at step 60, 5.08 at pore-test-mid's 1500-step peak
- * of 815278 at step 80, through the ball's impact). */
-const PORE_TEST_GRID = {contactGridEntries: 'two-cells-per-axis'} as const;
-const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, Pick<ClothPhysicsOptions, 'contactCapacity' | 'contactGridEntries'>>> = {
-  'wetcloth-source-pore-test-fd-high': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-fd-low': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-ft-high': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-ft-low': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-high': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-low': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-mid': PORE_TEST_GRID,
-  'wetcloth-source-pore-test-zero': PORE_TEST_GRID,
-  'wetcloth-source-dam-break-nonlinear-drag-small': {contactGridEntries: 1 << 16},
-};
+ * contact pair because a step's swept box spans its travel (pore-test: 4.02
+ * entries per primitive at step 0, 4.73 at step 60, 5.08 at pore-test-mid's
+ * 1500-step peak through the ball's impact; splash-cloth-medium overflowed the
+ * former 4 (T + E + S) default at its first step, 837368 > 785664). */
+const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, Pick<ClothPhysicsOptions, 'contactCapacity' | 'contactGridEntries'>>> = {};
 
 const vec = (v: ClothVector): Vec3 => ({x: v[0], y: v[1], z: v[2]});
 

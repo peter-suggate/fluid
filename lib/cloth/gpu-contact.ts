@@ -302,7 +302,7 @@ export const CONTACT_CONTROL = {
 } as const;
 export const CONTACT_CONTROL_WORDS = 120;
 export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64, E_UNSUPPORTED = 128, E_SPAN = 1024;
-/** physics.contactGridEntries authored as this: 8 (triangles + edges + segments)
+/** physics.contactGridEntries authored as this, or unset (the default): 8 (triangles + edges + segments)
  * grid entries, valid while every swept, padded primitive box is narrower than
  * the grid cell on each axis (at most 2 cells, so at most 8 entries); detection
  * checks that premise and a box that breaks it fails the step (E_SPAN). */

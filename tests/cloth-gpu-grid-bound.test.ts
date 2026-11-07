@@ -22,7 +22,7 @@ test('An unknown authored contact grid bound fails explicitly', () => {
   assert.throws(() => new GPUClothNewton({} as GPUDevice, topology, {contactGridEntries: 'three-cells-per-axis' as never}), /Invalid authored cloth contactGridEntries three-cells-per-axis/);
 });
 
-test('The two-cells-per-axis grid bound holds 8 entries a primitive and fails a box as wide as the cell, naming it', gpu, async () => {
+test('The two-cells-per-axis grid bound (the default) holds 8 entries a primitive and fails a box as wide as the cell, naming it', gpu, async () => {
   await withUniformDevice('cloth grid bound', async device => {
     const topology = prepareClothTopology(sheet(), [DEFAULT_CLOTH_MATERIAL]), statics = clothContactStatic(topology);
     const primitives = topology.triangles.length + statics.edges;
@@ -37,7 +37,8 @@ test('The two-cells-per-axis grid bound holds 8 entries a primitive and fails a 
       }
     } finally {solver.destroy();}
     // One vertex travels 30 mm in the step, more than the 11.44 mm cell: the premise fails, and the step names it.
-    const fast = new GPUClothNewton(device, topology, {contactGridEntries: 'two-cells-per-axis'}), moving = createClothState(topology);
+    // No authored grid size: the bound is the default, so its premise is checked here too.
+    const fast = new GPUClothNewton(device, topology), moving = createClothState(topology);
     moving.velocities_m_s[3*12 + 1] = -30;
     try {
       await fast.initialize();

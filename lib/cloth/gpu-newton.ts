@@ -1219,15 +1219,17 @@ export class GPUClothNewton {
   private prevValid = false;
   /** W's coordinate stiffness holds a gradient evaluation of this buffer. */
   private stiffnessValid = false;
-  /** The grid holds 8 (T + E + S) entries and detection checks the bound's premise (CONTACT_GRID_CELL_BOUND). */
+  /** The grid holds 8 (T + E + S) entries and detection checks the bound's premise (CONTACT_GRID_CELL_BOUND): the default unless a scene authors a measured grid size. */
   private readonly gridCellBound: boolean;
 
   /** contactCapacity (pairs) and contactGridEntries (swept-primitive grid
-   * entries): the contact pool authored from a scene's measured peak. It never
-   * grows at run time: a step that fills it fails with the measured counts. */
+   * entries): the contact pool. Pairs default to max(4096, 2 vertices) and the
+   * grid to the checked two-cells-per-axis bound unless the scene authors a
+   * measured peak. It never grows at run time: a step that fills it fails with
+   * the measured counts. */
   constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology, private readonly authored: {contactCapacity?: number; contactGridEntries?: number | typeof CONTACT_GRID_CELL_BOUND} = {}) {
     for (const [name, value] of Object.entries(authored)) if (value !== undefined && !(name === 'contactGridEntries' && value === CONTACT_GRID_CELL_BOUND) && !(Number.isSafeInteger(value) && (value as number) > 0)) throw new Error(`Invalid authored cloth ${name} ${value}`);
-    this.gridCellBound = authored.contactGridEntries === CONTACT_GRID_CELL_BOUND;
+    this.gridCellBound = authored.contactGridEntries === undefined || authored.contactGridEntries === CONTACT_GRID_CELL_BOUND;
     if (!gpuClothNewtonSupported(topology)) throw new Error('GPU cloth Newton: a rod has fewer than two vertices or mismatched rest lengths');
     const n = this.n = topology.vertexCount, T = topology.triangles.length, H = topology.hinges.length, S = topology.segmentCount;
     // DER joints of rods with three or more vertices: (a, b, c, first segment);
