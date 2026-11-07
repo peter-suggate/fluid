@@ -40,10 +40,8 @@ const measure = async (device?: GPUDevice) => {
     sourceFields: scene.wetClothSource?.fields, excludedSourceColliderIndices: scene.wetClothSource?.bakedSolidFieldIndices,
     sourceOffset_m: scene.wetClothSource?.sourceOffset_m, nonlinearSolver: solver});
   if (device) await runtime.initializeGPU(device);
-  // --cpu-detect: GPU solve with the Float64 contact set detecting between solves.
-  const gpuSolver = (runtime as unknown as {gpu?: {contactDetection?: 'auto' | 'cpu'; detectContacts?: (state: unknown, dt: number, options: unknown) => Promise<{contacts: unknown[]; detect_ms: number; errors: number}>}}).gpu;
-  if (gpuSolver && process.argv.includes('--cpu-detect')) gpuSolver.contactDetection = 'cpu';
-  const peakContacts = {pairs: 0, step: -1, gridEntries: 0, gridStep: -1}, poolGrowth: {step: number; attempts: number; growth?: string[]}[] = [];
+  const gpuSolver = (runtime as unknown as {gpu?: {detectContacts?: (state: unknown, dt: number, options: unknown) => Promise<{contacts: unknown[]; detect_ms: number; errors: number}>}}).gpu;
+  const peakContacts = {pairs: 0, step: -1, gridEntries: 0, gridStep: -1};
   const detection: Record<string, number> = {}, fallbacks = new Set<string>(), refineStatus: Record<number, number> = {};
   const g = scene.fluid.gravity_m_s2, colliders = [...clothContainerColliders(scene), ...clothSceneStaticColliders(scene)];
   const dt = scene.numerics.maxDt_s, rows: {ms: number; gpu: number; cpu: number; linear: number; solve: number; finish: number; contact: number; solves: number; submissions: number; outer: number}[] = [];
@@ -59,12 +57,11 @@ const measure = async (device?: GPUDevice) => {
     rows.push({ms: performance.now() - t0, gpu: report.gpuIterations ?? 0, cpu: device ? report.refinementIterations ?? 0 : report.iterations, linear: report.linearIterations ?? 0, solve: report.solve_ms ?? NaN, finish: report.finish_ms ?? NaN, contact: report.contact_ms ?? NaN, solves: report.gpuSolves ?? NaN, submissions: report.submissions ?? NaN, outer: report.contactIterations ?? 0});
     if (report.contactDetection) detection[report.contactDetection] = (detection[report.contactDetection] ?? 0) + 1;
     if (report.contactFallback) fallbacks.add(report.contactFallback);
-    // The contact pool's measured peak (authored per scene as physics.contactCapacity) and any growth redo.
-    const pairs = (report as {contactPool?: number}).contactPool ?? 0, attempts = (report as {contactAttempts?: number}).contactAttempts ?? 1;
+    // The contact pool's measured peak (authored per scene as physics.contactCapacity); a full pool fails the step.
+    const pairs = (report as {contactPool?: number}).contactPool ?? 0;
     if (pairs > peakContacts.pairs) {peakContacts.pairs = pairs; peakContacts.step = i;}
     const entries = (report as {contactGridFill?: number}).contactGridFill ?? 0;
     if (entries > peakContacts.gridEntries) {peakContacts.gridEntries = entries; peakContacts.gridStep = i;}
-    if (attempts > 1) poolGrowth.push({step: i, attempts, growth: (report as {contactGrowth?: string[]}).contactGrowth});
     if (report.refinementIterations) refineStatus[report.gpuStatus ?? -1] = (refineStatus[report.gpuStatus ?? -1] ?? 0) + 1;
   }
   const mean = (f: (r: typeof rows[0]) => number, from = 0) => rows.slice(from).reduce((s, r) => s + f(r), 0) / Math.max(1, rows.length - from);
@@ -85,11 +82,11 @@ const measure = async (device?: GPUDevice) => {
     refinedSteps: refined.length, meanRefinementIterations: +(refined.reduce((s, r) => s + r.cpu, 0) / Math.max(1, refined.length)).toFixed(1),
     meanRefinedStep_ms: +(refined.reduce((s, r) => s + r.ms, 0) / Math.max(1, refined.length)).toFixed(2),
     meanUnrefinedStep_ms: +(rows.filter(r => !r.cpu).reduce((s, r) => s + r.ms, 0) / Math.max(1, rows.length - refined.length)).toFixed(2),
-    meanContactIterations: +mean(r => r.outer).toFixed(2), peakContacts, contactCapacity: document.physics?.contactCapacity ?? null, contactGridEntries: document.physics?.contactGridEntries ?? null, poolGrowth, detection, fallbacks: [...fallbacks], refinedByGpuStatus: refineStatus, ...await detectionCost(),
+    meanContactIterations: +mean(r => r.outer).toFixed(2), peakContacts, contactCapacity: document.physics?.contactCapacity ?? null, contactGridEntries: document.physics?.contactGridEntries ?? null, detection, fallbacks: [...fallbacks], refinedByGpuStatus: refineStatus, ...await detectionCost(),
     simSecondsPerWallSecond: +(dt / (mean(r => r.ms, 5) / 1000)).toFixed(4)}));
   // One GPU detection pass at the final state (the first detection of a step; each outer round repeats it).
   async function detectionCost(): Promise<object> {
-    if (!gpuSolver?.detectContacts || gpuSolver.contactDetection === 'cpu' || !detection.gpu) return {};
+    if (!gpuSolver?.detectContacts || !detection.gpu) return {};
     const options = (runtime as unknown as {prepareStep(dt: number, c: unknown, o: unknown): unknown}).prepareStep(dt, colliders, {gravity_m_s2: [g.x, g.y, g.z]}), times: number[] = [];
     let keys: string[] = [], errors = 0;
     for (let k = 0; k < 3; k++) {const r = await gpuSolver.detectContacts(runtime.state, dt, options); times.push(r.detect_ms); keys = (r.contacts as {key: string}[]).map(c => c.key); errors = r.errors;}
@@ -131,12 +128,12 @@ const synthetic = async (device: GPUDevice, kind: string) => {
   state.positions_m.set(start);
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) state.velocities_m_s[3*(j*n + i) + 1] = velocity(i, j);
   const options: ClothStepOptions = {iterations: 64, tolerance_m: 1e-8, selfCollision: kind === 'fold', colliders, supportPositions_m: Float64Array.from(start)};
-  const solver = new GPUClothNewton(device, topology, {contactCapacity: option('contact-capacity') === undefined ? undefined : Number(option('contact-capacity'))}), rows: {ms: number; newton: number; refine: number; outer: number; contacts: number; solve: number; finish: number; detection: string; fallback?: string; status: number; attempts: number}[] = [];
+  const solver = new GPUClothNewton(device, topology, {contactCapacity: option('contact-capacity') === undefined ? undefined : Number(option('contact-capacity'))}), rows: {ms: number; newton: number; refine: number; outer: number; contacts: number; solve: number; finish: number; detection: string; fallback?: string; status: number}[] = [];
   try {
     await solver.initialize();
     for (let i = 0; i < steps; i++) {
-      const t0 = performance.now(), r = await solver.step(state, dt, options) as unknown as {gpuIterations: number; refinementIterations: number; contactIterations?: number; contacts?: {contacts: number; selfContacts: number}; solve_ms: number; finish_ms: number; contactDetection: string; contactFallback?: string; gpuStatus: number; contactAttempts?: number};
-      rows.push({ms: performance.now() - t0, newton: r.gpuIterations, refine: r.refinementIterations, outer: r.contactIterations ?? 0, contacts: (r.contacts?.contacts ?? 0) + (r.contacts?.selfContacts ?? 0), solve: r.solve_ms, finish: r.finish_ms, detection: r.contactDetection, fallback: r.contactFallback, status: r.gpuStatus, attempts: r.contactAttempts ?? 1});
+      const t0 = performance.now(), r = await solver.step(state, dt, options) as unknown as {gpuIterations: number; refinementIterations: number; contactIterations?: number; contacts?: {contacts: number; selfContacts: number}; solve_ms: number; finish_ms: number; contactDetection: string; contactFallback?: string; gpuStatus: number};
+      rows.push({ms: performance.now() - t0, newton: r.gpuIterations, refine: r.refinementIterations, outer: r.contactIterations ?? 0, contacts: (r.contacts?.contacts ?? 0) + (r.contacts?.selfContacts ?? 0), solve: r.solve_ms, finish: r.finish_ms, detection: r.contactDetection, fallback: r.contactFallback, status: r.gpuStatus});
     }
   } finally {solver.destroy();}
   const tail = rows.slice(5), mean = (f: (r: typeof rows[0]) => number, from = tail) => +(from.reduce((s, r) => s + f(r), 0)/Math.max(1, from.length)).toFixed(2);
@@ -145,7 +142,7 @@ const synthetic = async (device: GPUDevice, kind: string) => {
     meanSolve_ms: mean(r => r.solve), meanFinish_ms: mean(r => r.finish), meanNewton: mean(r => r.newton), meanOuter: mean(r => r.outer), contactSteps: contact.length,
     meanContactStep_ms: mean(r => r.ms, contact), meanContactNewton: mean(r => r.newton, contact), meanContactOuter: mean(r => r.outer, contact), maxContacts: Math.max(...rows.map(r => r.contacts)),
     refinedSteps: rows.filter(r => r.refine > 0).length, meanRefinement: mean(r => r.refine, rows.filter(r => r.refine > 0)), detection: count(r => r.detection), fallbacks: count(r => r.fallback),
-    refinedByGpuStatus: count(r => r.refine > 0 ? String(r.status) : undefined), redoneSteps: rows.map((r, k) => [k, r.attempts]).filter(([, attempts]) => attempts! > 1), perStep: rows.map(r => [+r.ms.toFixed(1), r.newton, r.outer, r.contacts, r.refine])}));
+    refinedByGpuStatus: count(r => r.refine > 0 ? String(r.status) : undefined), perStep: rows.map(r => [+r.ms.toFixed(1), r.newton, r.outer, r.contacts, r.refine])}));
 };
 if (option('synthetic')) await withUniformDevice('wetcloth synthetic contact', device => synthetic(device, option('synthetic')!));
 else if (cpu) await measure(); else await withUniformDevice('wetcloth step cost', measure);

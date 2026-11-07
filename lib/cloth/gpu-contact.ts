@@ -1,5 +1,5 @@
 import {ClothContactBVH} from './contact-bvh';
-import {clothLocalShellEdges, clothShellCache, clothVertexContactRadius, clothVertexLocalFaces, inSolveContactUnsupported, rodSelfClosest, type RodContactShape} from './contact-constraints';
+import {clothLocalShellEdges, clothRodCut, clothShellCache, clothVertexContactRadius, clothVertexLocalFaces, inSolveContactUnsupported, rodSelfClosest, type RodContactShape} from './contact-constraints';
 import type {ClothCollider} from './contact';
 import type {PreparedClothTopology} from './topology';
 import type {ClothVector} from './types';
@@ -31,10 +31,25 @@ export interface ClothStaticColliderRecords {
 /** Static baked colliders register their records here (scene-contact.ts). */
 export const clothStaticColliderRecords = new WeakMap<ClothCollider, ClothStaticColliderRecords>();
 
+/** The last CPU remnant of cloth contact, or undefined when the GPU Newton
+ * detects and solves this topology's contact against these colliders in the
+ * solve. It names what the GPU does not cover yet: elliptical rods and clipped
+ * rod caps, rod segments against box and sampled solids (these rods keep the
+ * sequential post-projection), and rigid bodies, moving sampled solids and
+ * box-subtraction cuts (the Float64 ClothContactSet detects between GPU solves).
+ * Nothing else reaches the CPU: a GPU contact error fails the step. The plan
+ * (docs/plans/wetcloth-implementation-2026-11-05.md) removes this predicate in
+ * the commit that puts those cases in the GPU Newton. */
+export function clothContactCPURemnant(topology: PreparedClothTopology, colliders: readonly ClothCollider[]): string | undefined {
+  return gpuContactUnsupported(topology, colliders);
+}
+
 /** Why a collider set needs the CPU detection path, or undefined. */
 export function gpuContactUnsupported(topology: PreparedClothTopology, colliders: readonly ClothCollider[]): string | undefined {
   const base = inSolveContactUnsupported(topology, colliders);
   if (base) return base;
+  for (const rod of topology.rods) {const m = topology.materials[rod.material]!; if ((m.rodRadiusB_m ?? m.rodRadius_m) !== m.rodRadius_m) return 'elliptical rod contact is not on the GPU';}
+  for (let r = 0; r < topology.rods.length; r++) if (clothRodCut(topology, r)) return 'clipped rod caps are not on the GPU';
   // Rod segment interiors meet planes and spheres in closed form here; a box or
   // sampled solid needs the capsule's convex distance, not on the GPU yet.
   if (topology.rods.length && colliders.some(c => c.kind === 'box' || c.kind === 'sampled')) return 'rod segments against box and sampled colliders are not on the GPU';
@@ -780,10 +795,13 @@ fn edgeEdge(ai:u32,bi:u32){
 // (w4, r0, r1, thickness). Keys k0 = kind<<28 | first feature: 0 c: (rod vertex sphere, collider),
 // 3 rc: (segment, collider), 4 rv: (rod vertex, face), 5 rq: (rod vertex, shell edge),
 // 6 rp: (vertex, segment), 7 rf: (segment, face), 8 rx: (segment, shell edge), 9 rs: (segment, later segment).
-// Each side's unit tangent and r/L at x (linearizeRolling): the slip Jacobian's endpoint couple.
+// Each side's unit tangent and r/L at x (linearizeRolling): the slip Jacobian's endpoint couple,
+// and its arm over r with the twist row (KF[kfRodArm+2c+side]): a round section's arm is r n, its
+// twist row zero (the contact's normal KF[4c] is current when this runs).
 fn rodLinearize(c:u32){
+ let n=KF[4u*c].xyz;
  for(var side=0u;side<2u;side++){
-  let s=KU[p.kuRod+4u*c+1u+side];if(s==NONE){KF[p.kfRod+3u*c+side]=vec4f(0);continue;}
+  let s=KU[p.kuRod+4u*c+1u+side];KF[p.kfRodArm+2u*c+side]=vec4f(n,0);if(s==NONE){KF[p.kfRod+3u*c+side]=vec4f(0);continue;}
   let id=segIds(s);let e=segOldEdge(s)+(xv(id.y)-xv(id.x));let l=length(e);
   if(!(l>0.&&l<3e38)){atomicOr(&C[${K.K_ERROR}u],${E_NONFINITE}u);KF[p.kfRod+3u*c+side]=vec4f(0);continue;}
   KF[p.kfRod+3u*c+side]=vec4f(e/l,segR(s)/l);

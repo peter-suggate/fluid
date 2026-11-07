@@ -558,8 +558,22 @@ export interface ClothPoreGPUResult {
    * sub-quantum remainder it held, which stays in place: exactly conserved. */
   readonly waterVolume_m3: Float64Array; readonly velocities_m_s: Float64Array;
   readonly iterations: number; readonly picardIterations: number; readonly movedVolume_m3: number; readonly limitedVolume_m3: number; readonly supportReaction_Ns: ClothVector;
-  /** Device time of the transport pass (timestamp-query), when the device has the feature. */
+  /** Device time of the transport pass; only with the `timing` option. */
   readonly gpu_ms?: number;
+}
+export interface ClothGPUPoreTransportOptions {
+  /**
+   * Profiling only: timestamp writes around the transport pass of `advance()`,
+   * reported as `gpu_ms`. Production construction carries none.
+   * Hazard: on M1 Max (2026-11-07) timestamp attachments, in a submit that
+   * also runs the manifold transport, aborted the command buffer with a Metal
+   * out-of-memory error (kIOGPUCommandBufferCallbackErrorOutOfMemory). Even an
+   * empty end-of-pass timestamp pass after the transport did it, and without
+   * them the same submit ran. Dawn reports none of this, and the GPU runner's
+   * guard exits 77. A profiler that opts in must treat a failed readback or
+   * rc 77 as "timing unavailable", never as a result.
+   */
+  readonly timing?: boolean;
 }
 
 const STATUS_BYTES = 32, EDGE_ARRAYS = 9, WORK_VECTORS = 53, CUMULATIVE_ARRAY = 7;
@@ -582,7 +596,10 @@ export class ClothGPUPoreTransport {
   private pipelines?: Record<'planVertices' | 'planGauss' | 'planTerms' | 'transport', GPUComputePipeline>;
   private group?: GPUBindGroup;
   private busy = false;
-  constructor(private readonly device: GPUDevice, readonly topology: ClothPoreTopology, restControlVolume_m3: ArrayLike<number>) {
+  constructor(private readonly device: GPUDevice, readonly topology: ClothPoreTopology, restControlVolume_m3: ArrayLike<number>, options: ClothGPUPoreTransportOptions = {}) {
+    // Before any allocation: a refused construction leaves nothing behind.
+    if (options.timing !== undefined && typeof options.timing !== 'boolean') throw new Error('Cloth GPU pore transport timing must be a boolean');
+    if (options.timing && !device.features.has('timestamp-query')) throw new Error('Cloth GPU pore transport timing needs the timestamp-query feature');
     this.quantum_m3 = clothPoreQuantum(restControlVolume_m3);
     this.subgroups = device.features.has('subgroups') && ((device as GPUDevice & { adapterInfo?: { subgroupMinSize?: number } }).adapterInfo?.subgroupMinSize ?? 0) >= 32;
     const t = topology, usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -596,7 +613,7 @@ export class ClothGPUPoreTransport {
     const VS = Math.ceil(Math.max(1, t.V) / 64) * 64, ES = Math.ceil(Math.max(1, t.E) / 64) * 64;
     this.work = make('work', 4 * (WORK_VECTORS * VS + EDGE_ARRAYS * ES + 2 * Math.max(1, t.G)));
     this.readback = device.createBuffer({ label: 'Cloth GPU pore readback', size: STATUS_BYTES + 20 * t.V + 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }); this.buffers.push(this.readback);
-    if (device.features.has('timestamp-query')) {
+    if (options.timing) {
       const resolve = device.createBuffer({ label: 'Cloth GPU pore timestamps', size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }); this.buffers.push(resolve);
       this.timestamps = { set: device.createQuerySet({ label: 'Cloth GPU pore timestamps', type: 'timestamp', count: 2 }), resolve };
     }

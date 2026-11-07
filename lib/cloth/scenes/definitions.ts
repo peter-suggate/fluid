@@ -22,15 +22,24 @@ import { OCTREE_REFINEMENT_REGION_CAPACITY } from '../../core/refinement-regions
  * transients between those samples. */
 const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-source-pore-test-mid': 128};
 
-/** GPU Newton contact pools (pairs) authored from a measured peak, so the
- * pool never grows mid-run (growth redoes the step: a hitch, reported as
- * contactAttempts). Measured with tools/probe-wetcloth-step-cost.ts
- * (peakContacts, poolGrowth) in a run that reaches contact.
+/** GPU Newton contact pools (pairs and swept-primitive grid entries) authored
+ * from a measured peak: nothing grows at run time, and a step that fills a pool
+ * fails with the measured counts. Measured with tools/probe-wetcloth-step-cost.ts
+ * (peakContacts) or the step report's contactPool and contactGridFill, in a run
+ * that reaches contact. A source without an entry gets the defaults: max(4096,
+ * 2 vertices) pairs and 4 (triangles + edges + segments) grid entries.
  * pore-test-mid: grid entries only. Its swept-bounds grid overflowed at step 0
  * (645298 > the 642012 default) and peaked at 815278 (step 80) over 1500 steps
  * (0.3 s, through the ball's impact at 0.12 s); it never formed a contact pair in that
- * window, so the pair capacity keeps its default. 2^20 = peak + 29% margin. */
-const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, {contactCapacity?: number; contactGridEntries?: number}>> = {'wetcloth-source-pore-test-mid': {contactGridEntries: 1 << 20}};
+ * window, so the pair capacity keeps its default. 2^20 = peak + 29% margin.
+ * dam-break-nonlinear-drag-small: grid entries only. Its swept-bounds grid
+ * overflowed the 29224 default at step 1 (30421) and peaked at 33272 (step 13)
+ * over 300 steps; no contact pair formed, so the pair capacity keeps its
+ * default. Peak x 1.25 = 41590, rounded up to a power of two: 2^16 = peak + 97%. */
+const WET_CLOTH_CONTACT_POOL: Readonly<Record<string, {contactCapacity?: number; contactGridEntries?: number}>> = {
+  'wetcloth-source-pore-test-mid': {contactGridEntries: 1 << 20},
+  'wetcloth-source-dam-break-nonlinear-drag-small': {contactGridEntries: 1 << 16},
+};
 
 const vec = (v: ClothVector): Vec3 => ({x: v[0], y: v[1], z: v[2]});
 

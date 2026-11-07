@@ -105,9 +105,8 @@ export interface ClothPhysicsOptions {
   readonly captureRate?:number;
   readonly absorption?:boolean;
   readonly solveSolid?:boolean;
-  /** GPU Newton contact pool (pairs), authored from the scene's measured peak
-   * so the pool never grows mid-run (growth, and its redo of the step, stays a
-   * reported fallback: GPUClothNewtonReport.contactAttempts). */
+  /** GPU Newton contact pool (pairs), authored from the scene's measured peak.
+   * It never grows at run time: a step that fills it fails with the counts. */
   readonly contactCapacity?:number;
   /** Its swept-primitive grid entries, authored the same way. */
   readonly contactGridEntries?:number;

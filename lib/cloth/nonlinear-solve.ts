@@ -139,10 +139,12 @@ export function solveClothIncrement(topology: PreparedClothTopology, state: Clot
   const bendingVertex = Uint8Array.from({length: n}, (_, i) => topology.incidentRods[i]!.some(r => topology.rods[r]!.vertices.length > 2) ? 1 : 0);
   const inertia = Float64Array.from(mass, m => m/(dt*dt));
   // Contact inside the minimization (lib/cloth/contact-constraints.ts) unless
-  // the step has a dynamic rigid collider, clipped or elliptical rods, or rods
-  // outside the oracle (sequential projection). Rod friction rolls the live twist.
+  // the step has a dynamic rigid collider, clipped rod caps, elliptical rods
+  // against a sampled or rigid solid, or rods outside the oracle (sequential
+  // projection). Rod friction rolls the live twist; elliptical sections turn
+  // with the step's frames.
   const colliders = options.colliders ?? [], selfCollision = options.selfCollision ?? false;
-  const contactSet = (colliders.length || selfCollision) && !inSolveContactUnsupported(topology, colliders) && (!topology.rods.length || options.rodContactOracle) ? new ClothContactSet(topology, old, dt, colliders, selfCollision, options.tolerance_m ?? 1e-9, clothContactWarmStart(state), {current: twist, old: oldTwist}) : undefined;
+  const contactSet = (colliders.length || selfCollision) && !inSolveContactUnsupported(topology, colliders) && (!topology.rods.length || options.rodContactOracle) ? new ClothContactSet(topology, old, dt, colliders, selfCollision, options.tolerance_m ?? 1e-9, clothContactWarmStart(state), {current: twist, old: oldTwist, directors: state.rodDirectors, tangents: state.rodTangents}) : undefined;
   const twistEnergy = (s: number) => {
     const r = twistRod[s]!, j = twistLocal[s]!;
     return .5*topology.attachmentTwist_N_m[s]!*(twist[s]! - state.attachmentTwistTarget_rad[s]!)**2 + rodEnergy(topology, state, r, undefined, old, oldTwist, dt, j) + .5*twistInertia[s]!/(dt*dt)*(twist[s]! - oldTwist[s]! - dt*state.angularVelocity_rad_s[s]!)**2;

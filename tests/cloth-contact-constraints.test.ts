@@ -5,6 +5,9 @@ import { createClothState, prepareClothTopology, type PreparedClothTopology } fr
 import { clothElasticEnergy } from '../lib/cloth/dynamics';
 import { solveClothIncrement } from '../lib/cloth/nonlinear-solve';
 import { ClothContactSet, inSolveContactUnsupported } from '../lib/cloth/contact-constraints';
+import { gpuContactUnsupported } from '../lib/cloth/gpu-contact';
+import { clothRodCapsuleGeometry } from '../lib/cloth/rod-geometry';
+import { supportClippedRod } from '../lib/cloth/rod-convex';
 import { sourceClothColliders } from '../lib/cloth/source-contact';
 import type { WetClothSourceField } from '../lib/cloth/source-types';
 import { sampleClothCollider, type ClothCollider } from '../lib/cloth/contact';
@@ -71,16 +74,81 @@ test('in-solve self contact stops a falling sheet on a fixed sheet at the shell 
   assert.ok(lowest < 1 + thickness + 1e-5, `upper sheet rests at y = ${lowest}, not on the lower sheet`);
 });
 
-test('elliptical rods keep the sequential contact projection and say so; round rods are in-solve only in the oracle', () => {
+test('elliptical rods are in-solve in the oracle, but not against sampled solids; round rods are in-solve only in the oracle', () => {
   const n = 5, restPositions_m: number[] = [];
   for (let i = 0; i < n; i++) restPositions_m.push(i*.005, .001, 0);
   const data = {restPositions_m, triangles: [], rodOffsets: [0, n], rodIndices: [...Array(n).keys()], fixed: Array(n).fill(0)}, colliders: ClothCollider[] = [{kind: 'plane', normal: [0, 1, 0], offset_m: 0}];
   const elliptical = prepareClothTopology(data, [{...DEFAULT_CLOTH_MATERIAL, rodRadiusB_m: 2*DEFAULT_CLOTH_MATERIAL.rodRadius_m}]);
-  assert.match(inSolveContactUnsupported(elliptical, colliders)!, /elliptical/);
+  assert.equal(inSolveContactUnsupported(elliptical, colliders), undefined);
   assert.equal(solveClothIncrement(elliptical, createClothState(elliptical), .001, {iterations: 64, tolerance_m: 1e-9, colliders}).contactModel, 'post-projection');
+  assert.equal(solveClothIncrement(elliptical, createClothState(elliptical), .001, {iterations: 64, tolerance_m: 1e-9, colliders, rodContactOracle: true}).contactModel, 'in-solve');
+  const sampled = {kind: 'sampled', maximumSpeed_m_s: 0, velocityAt: () => [0, 0, 0], sample: () => ({distance_m: 1, normal: [0, 1, 0]})} as unknown as ClothCollider;
+  assert.match(inSolveContactUnsupported(elliptical, [sampled])!, /elliptical rods against sampled/);
   const round = prepareClothTopology(data, [DEFAULT_CLOTH_MATERIAL]);
+  assert.equal(inSolveContactUnsupported(round, [sampled]), undefined);
   assert.equal(solveClothIncrement(round, createClothState(round), .001, {iterations: 64, tolerance_m: 1e-9, colliders}).contactModel, 'post-projection');
   assert.equal(solveClothIncrement(round, createClothState(round), .001, {iterations: 64, tolerance_m: 1e-9, colliders, rodContactOracle: true}).contactModel, 'in-solve');
+});
+
+/** A free rod (radii A = r, B = 2r for an elliptical section: the director
+ * starts vertical, so twist 0 stands on A), stepped in-solve with the oracle;
+ * returns the state and the most self contacts. The oracle's Newton model has
+ * only the diagonal of rod bending, which dominates a light yarn's inertia,
+ * so a rolling or sliding rod converges linearly: 1e-8 m within 200 iterations. */
+const ROD_R = DEFAULT_CLOTH_MATERIAL.rodRadius_m;
+function settleRod(points: readonly number[], options: {radiusB?: number; twist?: number; fixed?: readonly number[]; triangles?: readonly number[]; rodOffsets?: readonly number[]; rodIndices?: readonly number[]; colliders?: ClothCollider[]; selfCollision?: boolean; steps: number;
+  /** Per-rod material-frame cut normals (d1, d2, t; zero: uncut). */
+  startClip?: readonly number[]; endClip?: readonly number[]}) {
+  const count = points.length/3, rodIndices = options.rodIndices ?? [...Array(count).keys()], rodOffsets = options.rodOffsets ?? [0, rodIndices.length];
+  const data: ClothTopologyData = {restPositions_m: [...points], triangles: [...(options.triangles ?? [])], rodOffsets: [...rodOffsets], rodIndices: [...rodIndices], fixed: [...(options.fixed ?? Array(count).fill(0))], initialTwist_rad: Array(rodIndices.length - rodOffsets.length + 1).fill(options.twist ?? 0),
+    ...(options.startClip ? {rodStartClipNormals: [...options.startClip]} : {}), ...(options.endClip ? {rodEndClipNormals: [...options.endClip]} : {})};
+  const topology = prepareClothTopology(data, [{...DEFAULT_CLOTH_MATERIAL, rodRadiusB_m: options.radiusB ?? ROD_R}]), state = createClothState(topology);
+  let selfContacts = 0, newton = 0;
+  for (let step = 0; step < options.steps; step++) {
+    const report = solveClothIncrement(topology, state, .001, {iterations: 200, tolerance_m: 1e-8, colliders: options.colliders, selfCollision: options.selfCollision, rodContactOracle: true});
+    assert.ok(report.converged, `step ${step}: ${report.maximumUpdate_m} m`);
+    assert.equal(report.contactModel, 'in-solve');
+    selfContacts = Math.max(selfContacts, report.contacts.selfContacts);
+    newton += report.newtonIterations;
+  }
+  return {state, selfContacts, topology, newton};
+}
+const lowestY = (state: ClothState, vertices: readonly number[]) => Math.min(...vertices.map(i => state.positions_m[3*i + 1]!));
+
+test('an elliptical rod rolls onto its minor radius on a plane, a box and a fixed sheet', () => {
+  const rod = (y: number, z = 0) => [-.0020, y, z, .0003, y, z, .0026, y, z];
+  // A plane and a box top at y = 1 cm: the convex distance agrees with the closed form.
+  for (const colliders of [[{kind: 'plane', normal: [0, 1, 0], offset_m: .01}], [{kind: 'box', minimum_m: [-.02, -.01, -.02], maximum_m: [.02, .01, .02]}]] as ClothCollider[][]) {
+    const {state} = settleRod(rod(.01 + 4*ROD_R), {radiusB: 2*ROD_R, twist: Math.PI/4, colliders, steps: 200});
+    assert.ok(Math.abs(lowestY(state, [0, 1, 2]) - .01 - ROD_R) < 3e-8, `${colliders[0]!.kind}: rests at ${(lowestY(state, [0, 1, 2]) - .01)/ROD_R} r`);
+    assert.ok(Math.abs(state.twist_rad[0]!) < 2e-3, `${colliders[0]!.kind}: twist ${state.twist_rad[0]}`);
+  }
+  // A fixed sheet of shell thickness h: the caps and interiors meet its faces.
+  const m = 6, s = .002, sheet: number[] = [], triangles: number[] = [];
+  for (let j = 0; j < m; j++) for (let i = 0; i < m; i++) sheet.push((i - 2.5)*s, 0, (j - 2.5)*s);
+  for (let j = 0; j + 1 < m; j++) for (let i = 0; i + 1 < m; i++) {const a = j*m + i; triangles.push(a, a + m, a + 1, a + 1, a + m, a + m + 1);}
+  const v0 = m*m, {state, selfContacts} = settleRod([...sheet, ...rod(6*ROD_R, .0007)], {radiusB: 2*ROD_R, twist: Math.PI/4, fixed: [...Array(v0).fill(1), 0, 0, 0], triangles, rodIndices: [v0, v0 + 1, v0 + 2], selfCollision: true, steps: 200});
+  assert.ok(selfContacts > 0, 'the rod met the sheet');
+  assert.ok(Math.abs(lowestY(state, [v0, v0 + 1, v0 + 2]) - .5*DEFAULT_CLOTH_MATERIAL.thickness_m - ROD_R) < 3e-8, `sheet: rests at ${lowestY(state, [v0, v0 + 1, v0 + 2])}`);
+  assert.ok(Math.abs(state.twist_rad[0]!) < 2e-3, `sheet: twist ${state.twist_rad[0]}`);
+});
+
+test('crossing elliptical segments rest at their vertical radii, and a cap on a sphere at its axial radius', () => {
+  // A fixed rod along x and a free single segment along z dropped on its interior.
+  const lower = [-.003, 0, 0, -.001, 0, 0, .001, 0, 0, .003, 0, 0], {state, selfContacts} = settleRod([...lower, 0, 4*ROD_R, -.002, 0, 4*ROD_R, .002], {radiusB: 2*ROD_R, fixed: [1, 1, 1, 1, 0, 0], rodOffsets: [0, 4, 6], selfCollision: true, steps: 60});
+  assert.ok(selfContacts > 0, 'the segments met');
+  const middle = (state.positions_m[13]! + state.positions_m[16]!)/2;
+  assert.ok(Math.abs(middle - 2*ROD_R) < 3e-8, `upper segment rests at ${middle/ROD_R} r`);
+  // An upright rod falls end first on a sphere: the cap's axial radius is sqrt(AB).
+  const upright = settleRod([0, .01 + 3*ROD_R, 0, 0, .012 + 3*ROD_R, 0, 0, .014 + 3*ROD_R, 0], {radiusB: 2*ROD_R, colliders: [{kind: 'sphere', center_m: [0, 0, 0], radius_m: .01}], steps: 60}).state;
+  assert.ok(Math.abs(upright.positions_m[1]! - .01 - Math.SQRT2*ROD_R) < 3e-8, `cap rests at ${(upright.positions_m[1]! - .01)/ROD_R} r`);
+});
+
+test('a round rod segment lying on a box face rests on its radius', () => {
+  // Its interior meets the box by the convex distance; a sampled lower bound
+  // degenerates for a segment parallel to the face.
+  const {state} = settleRod([-.002, .01 + 4*ROD_R, 0, 0, .01 + 4*ROD_R, 0, .002, .01 + 4*ROD_R, 0], {colliders: [{kind: 'box', minimum_m: [-.02, -.01, -.02], maximum_m: [.02, .01, .02]}], steps: 60});
+  assert.ok(Math.abs(lowestY(state, [0, 1, 2]) - .01 - ROD_R) < 3e-8, `rests at ${(lowestY(state, [0, 1, 2]) - .01)/ROD_R} r`);
 });
 
 test('an unknown collider kind fails explicitly in the in-solve contact path', () => {
@@ -132,4 +200,62 @@ test('the same cavity with the cloth driven into its wall fails explicitly, as d
   const through = new ClothContactSet(sheet, above, dt, [plate], false, 1e-9);
   assert.equal(through.detect(above), sheet.vertexCount);
   assert.throws(() => through.relinearize(above.map((v, k) => k % 3 === 1 ? -.003 : v)), /Cloth vertex 0 crossed collider 0 within the step/);
+});
+
+/** The lowest point of a rod's segment as rendering and picking clip it. */
+function renderedLowest(topology: PreparedClothTopology, state: ClothState, rod: number, segment: number): number {
+  const shape = clothRodCapsuleGeometry(topology, topology.data, state.positions_m, rod, segment, {rodTwist_rad: state.twist_rad, rodDirectors: state.rodDirectors, rodTangents: state.rodTangents});
+  return supportClippedRod(shape, [0, -1, 0])[1];
+}
+
+test('a straight-cut rod end stands flush on a plane, a box and a sphere, round or elliptical', () => {
+  // An upright rod cut square at its foot (start plane normal -t): its face, not a cap, meets the solid at y = 1 cm.
+  const upright = [0, .01 + ROD_R, 0, 0, .012 + ROD_R, 0, 0, .014 + ROD_R, 0];
+  const solids: ClothCollider[] = [{kind: 'plane', normal: [0, 1, 0], offset_m: .01}, {kind: 'box', minimum_m: [-.02, -.01, -.02], maximum_m: [.02, .01, .02]}, {kind: 'sphere', center_m: [0, 0, 0], radius_m: .01}];
+  for (const radiusB of [ROD_R, 2*ROD_R]) {
+    let onPlane = 0;
+    for (const solid of solids) {
+      const {state, topology, newton} = settleRod(upright, {radiusB, colliders: [solid], startClip: [0, 0, -1], steps: 60});
+      assert.ok(Math.abs(state.positions_m[1]! - .01) < 3e-8, `${solid.kind}, B ${radiusB/ROD_R} r: the cut foot rests at ${(state.positions_m[1]! - .01)/ROD_R} r`);
+      assert.ok(Math.abs(renderedLowest(topology, state, 0, 0) - .01) < 3e-8, `${solid.kind}: the rendered foot at ${renderedLowest(topology, state, 0, 0)}`);
+      // A face flush on a box face is the plane's contact (one support point), not GJK's
+      // arbitrary closest pair on two parallel faces: the same Newton work as on the plane.
+      if (solid.kind === 'plane') onPlane = newton;
+      else assert.ok(newton <= 1.1*onPlane, `${solid.kind}, B ${radiusB/ROD_R} r: ${newton} Newton iterations, ${onPlane} on the plane`);
+    }
+  }
+});
+
+test('a cut rod face stands on another cut face as on a plane', () => {
+  // A fixed upright rod cut square at its top, and a free one cut square at its foot dropped on it, centred or off centre.
+  for (const radiusB of [ROD_R, 2*ROD_R]) for (const dx of [0, 1e-4]) {
+    const points = [0, 0, 0, 0, .002, 0, dx, .0022, 0, dx, .0042, 0, dx, .0062, 0];
+    const {state, selfContacts, newton} = settleRod(points, {radiusB, fixed: [1, 1, 0, 0, 0], rodOffsets: [0, 2, 5], selfCollision: true, startClip: [0, 0, 0, 0, 0, -1], endClip: [0, 0, 1, 0, 0, 0], steps: 60});
+    const plane = settleRod(points.slice(6).map((v, i) => i % 3 === 1 ? v + .008 : v), {radiusB, colliders: [{kind: 'plane', normal: [0, 1, 0], offset_m: .01}], startClip: [0, 0, -1], steps: 60});
+    assert.ok(selfContacts > 0, 'the faces met');
+    assert.ok(Math.abs(state.positions_m[7]! - .002) < 3e-8, `B ${radiusB/ROD_R} r, dx ${dx}: the foot rests at ${(state.positions_m[7]! - .002)/ROD_R} r`);
+    assert.ok(Math.abs(state.positions_m[12]! - dx) < 1e-9, `B ${radiusB/ROD_R} r, dx ${dx}: the top sways ${state.positions_m[12]! - dx} m`);
+    assert.ok(newton <= 1.1*plane.newton, `B ${radiusB/ROD_R} r, dx ${dx}: ${newton} Newton iterations, ${plane.newton} on a plane`);
+  }
+});
+
+test('a cut face rests on another rod, and an oblique cut tips onto its rim as rendering clips it', () => {
+  // A fixed rod along x and an upright cut rod dropped on it: the face is tangent to the tube (one radius, not two).
+  const lower = [-.003, 0, 0, -.001, 0, 0, .001, 0, 0, .003, 0, 0], upper = [0, ROD_R + 1e-4, 0, 0, ROD_R + .0021, 0, 0, ROD_R + .0041, 0];
+  const {state, selfContacts} = settleRod([...lower, ...upper], {fixed: [1, 1, 1, 1, 0, 0, 0], rodOffsets: [0, 4, 7], selfCollision: true, startClip: [0, 0, 0, 0, 0, -1], steps: 60});
+  assert.ok(selfContacts > 0, 'the rods met');
+  assert.ok(Math.abs(state.positions_m[13]! - ROD_R) < 3e-8, `the cut foot rests at ${state.positions_m[13]!/ROD_R} r`);
+  // Cut 40 degrees from square in the d1-t plane: the rim's low point lands first and the rod tips on it, never into the plane.
+  const angle = 40*Math.PI/180, plane: ClothCollider = {kind: 'plane', normal: [0, 1, 0], offset_m: .01};
+  const {state: tipped, topology} = settleRod([0, .01 + 2*ROD_R, 0, 0, .012 + 2*ROD_R, 0, 0, .014 + 2*ROD_R, 0], {colliders: [plane], startClip: [Math.sin(angle), 0, -Math.cos(angle)], steps: 40});
+  assert.ok(Math.abs(renderedLowest(topology, tipped, 0, 0) - .01) < 3e-8, `the rim rests at ${(renderedLowest(topology, tipped, 0, 0) - .01)/ROD_R} r`);
+  assert.ok(tipped.positions_m[1]! > .01 + 1e-5, `the cut foot's centre stays above the plane: ${(tipped.positions_m[1]! - .01)/ROD_R} r`);
+});
+
+test('a cut end is not on the GPU, and a cut rod against a sampled solid keeps the sequential projection', () => {
+  const data: ClothTopologyData = {restPositions_m: [0, 0, 0, .002, 0, 0], triangles: [], rodOffsets: [0, 2], rodIndices: [0, 1], fixed: [0, 0], rodEndClipNormals: [0, 0, 1]};
+  const topology = prepareClothTopology(data, [DEFAULT_CLOTH_MATERIAL]);
+  assert.equal(inSolveContactUnsupported(topology, [{kind: 'plane', normal: [0, 1, 0], offset_m: 0}]), undefined);
+  assert.match(inSolveContactUnsupported(topology, [{kind: 'sampled'} as unknown as ClothCollider])!, /clipped rod end caps against sampled/);
+  assert.match(gpuContactUnsupported(topology, [{kind: 'plane', normal: [0, 1, 0], offset_m: 0}])!, /clipped rod caps are not on the GPU/);
 });

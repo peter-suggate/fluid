@@ -54,6 +54,8 @@ for (const [label, physics, dt] of [
     await withUniformDevice('gpu pore transport', async device => {
       const f = fixture(7), s = f.state, gpu = new ClothGPUPoreTransport(device, clothPoreTopology(f.data, f.materials, f.V), s.restControlVolume_m3);
       await gpu.initialize();
+      // Timing is profiling only (ClothGPUPoreTransportOptions.timing): an opt-in without the feature fails explicitly.
+      if (!device.features.has('timestamp-query')) assert.throws(() => new ClothGPUPoreTransport(device, gpu.topology, s.restControlVolume_m3, { timing: true }), /timestamp-query/);
       if (features.length && device.features.has('subgroups')) assert.ok(gpu.subgroups, 'subgroup reductions on a 32-lane device');
       const q = clothPoreQuantum(s.restControlVolume_m3), gravity = [.3, -9.80665, .1] as const;
       // Both start from the same whole-quantum inventory.
@@ -62,6 +64,7 @@ for (const [label, physics, dt] of [
       const result = await gpu.advance({ positions_m: s.positions_m, velocities_m_s: s.velocities_m_s, controlVolume_m3: s.controlVolume_m3, solidVolume_m3: s.solidVolume_m3, solidFraction: s.solidFraction, dryMass_kg: s.dryMass_kg,
         waterVolume_m3: s.waterVolume_m3, fixed: f.fixed, materials: f.materials, physics, dt_s: dt, gravity_m_s2: gravity, pressureAcceleration_m_s2: f.pressure, solidAcceleration_m_s2: f.solid });
       assert.ok(result, 'wet cloth transports');
+      assert.equal(result.gpu_ms, undefined, 'a production transport carries no timestamp writes');
       const fluxes = new Map<number, number>();
       const oracle = advanceClothPoreTransport({ state: s, data: f.data, materials: f.materials, physics, dt_s: dt, gravity_m_s2: gravity, pressureAcceleration_m_s2: f.pressure, solidAcceleration_m_s2: f.solid, edgeFlux_m3: fluxes });
       // Exact conservation in whole quanta; never negative.

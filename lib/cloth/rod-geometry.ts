@@ -48,13 +48,26 @@ export function clothRodMaterialFrame(data: ClothTopologyData, positions: ArrayL
 /** Exact through-cut cylinder ends. Extend into the removed region before
  * clipping so an oblique plane does not round away untouched tube material. */
 export function clothRodCapsuleGeometry(document: Pick<ClothDocument, 'materials'>, data: ClothTopologyData, positions: ArrayLike<number>, rod: number, segment: number, publication?: ClothRodFramePublication): ClothRodCapsuleGeometry {
-    const frame = clothRodMaterialFrame(data, positions, rod, segment, publication), material=document.materials[data.rodMaterials?.[rod] ?? 0]!,radius = material.rodRadius_m,radiusB=material.rodRadiusB_m??radius, planes: ClothRodClipPlane[] = [];
+    const frame = clothRodMaterialFrame(data, positions, rod, segment, publication), material=document.materials[data.rodMaterials?.[rod] ?? 0]!;
+    const clip = clothRodSegmentClipNormals(data, rod, segment);
+    return clothRodClippedCapsule(frame, material.rodRadius_m, material.rodRadiusB_m ?? material.rodRadius_m, clip.start, clip.end);
+}
+/** A segment's material-frame end-plane normals (d1, d2, t components): the
+ * rod's start plane on its first segment, its end plane on its last, each
+ * undefined where that end is uncut. */
+export function clothRodSegmentClipNormals(data: ClothTopologyData, rod: number, segment: number): {start?: ClothVector; end?: ClothVector} {
+    const last = data.rodOffsets[rod + 1]! - data.rodOffsets[rod]! - 2, pick = (normals: readonly number[] | undefined, on: boolean) => {if (!normals || !on) return undefined; const local = point3(normals, rod); return norm3(local) === 0 ? undefined : local;};
+    return {start: pick(data.rodStartClipNormals, segment === 0), end: pick(data.rodEndClipNormals, segment === last)};
+}
+/** The clipped volume of a segment from its ends and material frame (t from a
+ * to b, d1, d2) and its local end-plane normals: the ellipsoid-swept segment,
+ * extended past each cut end into the removed region, intersected with each
+ * end's half-space through that end vertex. */
+export function clothRodClippedCapsule(frame: {readonly a: ClothVector; readonly b: ClothVector; readonly t: ClothVector; readonly d1: ClothVector; readonly d2: ClothVector}, radius: number, radiusB: number, start?: ClothVector, end?: ClothVector): ClothRodCapsuleGeometry {
+    const planes: ClothRodClipPlane[] = [];
     let a = frame.a, b = frame.b;
-    for (const [isStart, normals] of [[true, data.rodStartClipNormals], [false, data.rodEndClipNormals]] as const) {
-        if (!normals || (isStart ? segment !== 0 : segment !== data.rodOffsets[rod + 1]! - data.rodOffsets[rod]! - 2))
-            continue;
-        const local = point3(normals, rod);
-        if (norm3(local) === 0)
+    for (const [isStart, local] of [[true, start], [false, end]] as const) {
+        if (!local)
             continue;
         const normal: ClothVector = [local[0] * frame.d1[0] + local[1] * frame.d2[0] + local[2] * frame.t[0], local[0] * frame.d1[1] + local[1] * frame.d2[1] + local[2] * frame.t[1], local[0] * frame.d1[2] + local[1] * frame.d2[2] + local[2] * frame.t[2]], axial = dot3(normal, frame.t), anchor = isStart ? frame.a : frame.b;
         if ((isStart ? -axial : axial) < 1e-8)

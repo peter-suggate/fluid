@@ -1,7 +1,7 @@
 import { beginClothMechanicalFinish, completeClothMechanicalFinish, extendClothStepReport, finishClothMechanicalStep, rodJoint, type ClothStepOptions, type ClothStepReport } from './dynamics';
 import { ClothContactSet, clothContactWarmStart, FRICTION_SLIP_SPEED_M_S, inSolveContactUnsupported, MAXIMUM_CONTACT_ITERATIONS, rememberClothContactMultipliers, type ClothContactConstraint } from './contact-constraints';
 import { rodRigidity, rodSegmentInertia_kg_m2 } from './material';
-import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_STIFFNESS, E_TABLE, E_UNSUPPORTED, SCAN_WG, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
+import { CONTACT_CONTROL, CONTACT_CONTROL_WORDS, E_CAPACITY, E_CELLS, E_CROSSED, E_GRID, E_NONFINITE, E_STIFFNESS, E_TABLE, E_UNSUPPORTED, SCAN_WG, clothContactCPURemnant, clothContactStatic, clothContactWGSL, gpuContactUnsupported, packClothColliders, type ClothContactStatic } from './gpu-contact';
 import type { ClothCollider, ClothContactReport } from './contact';
 import type { PreparedClothTopology } from './topology';
 import type { ClothState } from './types';
@@ -99,7 +99,7 @@ const PARAM_FIELDS = [
   // Hinge old edges: static Float64 rest edges, and per step rest + displacement (3 per hinge).
   'dHingeRest', 'eHingeEdge',
   // Rod contact (round, uncut rods; lib/cloth/gpu-contact.ts): per-contact records, list rows n + segments, rod statics.
-  'rodContact', 'kuRod', 'kfRod', 'kfRodForce', 'kfSegBox', 'listRows', 'sSegInfo', 'sNbStart', 'sNbList', 'sRpXStart', 'sRpXList', 'sRsXStart', 'sRsXList',
+  'rodContact', 'kuRod', 'kfRod', 'kfRodForce', 'kfRodArm', 'kfSegBox', 'listRows', 'sSegInfo', 'sNbStart', 'sNbList', 'sRpXStart', 'sRpXList', 'sRsXStart', 'sRsXList',
 ] as const;
 const FLOAT_FIELDS = ['dt', 'tolerance', 'contactDelta', 'frictionEpsilon', 'cellSize'] as const;
 type ParamName = typeof PARAM_FIELDS[number];
@@ -285,25 +285,31 @@ fn slotV(c:Contact,j:u32)->u32{if(j<4u){return c.v[j];}return c.v4;}
 fn slotW(c:Contact,j:u32)->f32{if(j<4u){return c.w[j];}return c.w4;}
 // sum_j w_j of increments (0), search direction (1) or CG direction (2).
 fn contactSum(c:Contact,which:u32)->vec3f{var s=vec3f(0);for(var j=0u;j<5u;j++){let w=slotW(c,j);if(w!=0.){let v=slotV(c,j);if(which==0u){s+=w*xv(v);}else if(which==1u){s+=w*dir(v);}else{s+=w*W[p.wP+v].xyz;}}}return s;}
-// A rod pair's slip Jacobian (linearizeRolling of ClothContactSet): J_j = w_j I + sum over its
-// sides of (+C at the side's b slot, -C at its a slot), C = (r/L)(t n^T - (t.n) I) (n^T C = 0, so
-// J_j^T n = w_j n), and each side's twist rolls the material point by -r theta (t x n).
-// KF[kfRod+3c..] = (t0, r0/L0), (t1, r1/L1), (w4, r0, r1, thickness); segments KU[kuRod+4c+1..2].
-struct RodGeom{t0:vec4f,t1:vec4f,r:vec2f,two:bool,a:vec2u,b:vec2u}
+// A rod pair's material-point Jacobian (linearizeRolling of ClothContactSet): J_j = w_j I + sum
+// over its sides of (+C at the side's b slot, -C at its a slot), C = (r/L)(t m^T - (t.m) I) with m
+// the side's arm over r (the section's support in n over r: n itself for a round section), and
+// each side's twist rolls the material point by -r theta (t x m). The gap's linear part is
+// n.(sum J u + roll): rows J_j^T n (w_j n for a round section, n^T C = 0) and the twist rows
+// -r n.(t x m) (zero for a round section).
+// KF[kfRod+3c..] = (t0, r0/L0), (t1, r1/L1), (w4, r0, r1, thickness); KF[kfRodArm+2c..] = (m0, twist
+// row 0), (m1, twist row 1); segments KU[kuRod+4c+1..2].
+struct RodGeom{t0:vec4f,t1:vec4f,r:vec2f,two:bool,a:vec2u,b:vec2u,m0:vec4f,m1:vec4f}
 fn rodAt(c:u32,k:Contact)->RodGeom{
  let m=k.rodm;
- return RodGeom(KF[p.kfRod+3u*c],KF[p.kfRod+3u*c+1u],KF[p.kfRod+3u*c+2u].yz,((m>>15u)&1u)!=0u,vec2u((m>>3u)&7u,(m>>9u)&7u),vec2u((m>>6u)&7u,(m>>12u)&7u));
+ return RodGeom(KF[p.kfRod+3u*c],KF[p.kfRod+3u*c+1u],KF[p.kfRod+3u*c+2u].yz,((m>>15u)&1u)!=0u,vec2u((m>>3u)&7u,(m>>9u)&7u),vec2u((m>>6u)&7u,(m>>12u)&7u),KF[p.kfRodArm+2u*c],KF[p.kfRodArm+2u*c+1u]);
 }
-fn rodC(n:vec3f,t:vec4f)->mat3x3f{let tn=dot(t.xyz,n);return t.w*(outer(t.xyz,n)-mat3x3f(vec3f(tn,0,0),vec3f(0,tn,0),vec3f(0,0,tn)));}
-fn rodCv(n:vec3f,t:vec4f,v:vec3f)->vec3f{return t.w*(t.xyz*dot(n,v)-dot(t.xyz,n)*v);}
+fn rodC(m:vec3f,t:vec4f)->mat3x3f{let tm=dot(t.xyz,m);return t.w*(outer(t.xyz,m)-mat3x3f(vec3f(tm,0,0),vec3f(0,tm,0),vec3f(0,0,tm)));}
+fn rodCv(m:vec3f,t:vec4f,v:vec3f)->vec3f{return t.w*(t.xyz*dot(m,v)-dot(t.xyz,m)*v);}
 // C^T v: a side's share of J^T at its b slot (minus at a).
-fn rodCt(n:vec3f,t:vec4f,v:vec3f)->vec3f{return t.w*(n*dot(t.xyz,v)-dot(t.xyz,n)*v);}
+fn rodCt(m:vec3f,t:vec4f,v:vec3f)->vec3f{return t.w*(m*dot(t.xyz,v)-dot(t.xyz,m)*v);}
 fn rodJ(c:Contact,g:RodGeom,j:u32)->mat3x3f{
  let w=slotW(c,j);var M=mat3x3f(vec3f(w,0,0),vec3f(0,w,0),vec3f(0,0,w));
- if(j==g.b.x){M+=rodC(c.n,g.t0);}if(j==g.a.x){M-=rodC(c.n,g.t0);}
- if(g.two){if(j==g.b.y){M+=rodC(c.n,g.t1);}if(j==g.a.y){M-=rodC(c.n,g.t1);}}
+ if(j==g.b.x){M+=rodC(g.m0.xyz,g.t0);}if(j==g.a.x){M-=rodC(g.m0.xyz,g.t0);}
+ if(g.two){if(j==g.b.y){M+=rodC(g.m1.xyz,g.t1);}if(j==g.a.y){M-=rodC(g.m1.xyz,g.t1);}}
  return M;
 }
+// A side's roll per unit twist, -r (t x m): its twist row is n.roll.
+fn rodRoll(g:RodGeom,side:u32)->vec3f{if(side==1u){return -g.r.y*cross(g.t1.xyz,g.m1.xyz);}return -g.r.x*cross(g.t0.xyz,g.m0.xyz);}
 fn rodRole(rodm:u32,j:u32,side:u32)->f32{
  if(side==1u&&((rodm>>15u)&1u)==0u){return 0.;}
  let a=(rodm>>(3u+6u*side))&7u;let b=(rodm>>(6u+6u*side))&7u;return select(0.,1.,j==b)-select(0.,1.,j==a);
@@ -326,8 +332,8 @@ fn twistCG()->bool{return p.contactMode!=0u&&p.rodContact!=0u;}
 // sum_j J_j u_j plus the twist roll (before the tangent projection).
 fn rodMove(c:Contact,g:RodGeom,uIn:array<vec3f,5>,twist:vec2f)->vec3f{
  var u=uIn;var s=vec3f(0);for(var j=0u;j<(c.rodm&7u);j++){s+=slotW(c,j)*u[j];}
- s+=rodCv(c.n,g.t0,u[g.b.x]-u[g.a.x])-g.r.x*twist.x*cross(g.t0.xyz,c.n);
- if(g.two){s+=rodCv(c.n,g.t1,u[g.b.y]-u[g.a.y])-g.r.y*twist.y*cross(g.t1.xyz,c.n);}
+ s+=rodCv(g.m0.xyz,g.t0,u[g.b.x]-u[g.a.x])+twist.x*rodRoll(g,0u);
+ if(g.two){s+=rodCv(g.m1.xyz,g.t1,u[g.b.y]-u[g.a.y])+twist.y*rodRoll(g,1u);}
  return s;
 }
 // The slip at the iterate: P_t(sum J u + roll) - P_t(obstacle) for a rod pair, else P_t(sum w u) - P_t(obstacle).
@@ -336,6 +342,8 @@ fn contactSlip(ci:u32,c:Contact,sx:vec3f)->vec3f{
  return tangent(c.n,sx)-c.t;
 }
 fn contactM(c:Contact,sx:vec3f)->f32{return c.lambda/c.rho-(c.g0+dot(c.n,sx));}
+// The gap's motion sum at the iterate: sum w u, or for a rod pair sum J u plus the roll (n.this is the gap's linear part).
+fn contactMotion(ci:u32,c:Contact,sx:vec3f)->vec3f{if(c.rodm!=0u){return rodMove(c,rodAt(ci,c),rodSlotU(c,0u),rodTwist(ci,0u));}return sx;}
 fn tangent(n:vec3f,v:vec3f)->vec3f{return v-dot(n,v)*n;}
 fn cForce(m:f32,rho:f32)->f32{let d=p.contactDelta;if(m<=-d){return 0.;}if(m<d){return rho*(m+d)*(m+d)/(4.*d);}return rho*m;}
 fn cCurv(m:f32,rho:f32)->f32{let d=p.contactDelta;if(m<=-d){return 0.;}if(m<d){return rho*(m+d)/(2.*d);}return rho;}
@@ -358,7 +366,7 @@ fn fF0Change(y0:f32,y1:f32,q:f32)->vec2f{
  let a=fF0(y1);let b=fF0(y0);return vec2f(a-b,abs(a)+abs(b));
 }
 // Normal and tangential Hessian coefficients at the current iterate.
-fn contactCoefficients(ci:u32,c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.mu>0.){f=c.mu*fF1(length(contactSlip(ci,c,sx)));}return vec2f(cCurv(contactM(c,sx),c.rho),f);}
+fn contactCoefficients(ci:u32,c:Contact)->vec2f{let sx=contactSum(c,0u);var f=0.;if(c.mu>0.){f=c.mu*fF1(length(contactSlip(ci,c,sx)));}return vec2f(cCurv(contactM(c,contactMotion(ci,c,sx)),c.rho),f);}
 
 @compute @workgroup_size(${WG}) fn initX(@builtin(global_invocation_id) g:vec3u){let i=g.x;if(i<p.segments){W[p.wT+i]=vec4f(select(0.,segT(i,2u).w,twistFree(i)),0,0,1);W[p.wT2+i]=vec4f(1,1,0,0);}if(i>=p.n){return;}if(isFixed(i)){W[p.wX+i]=vec4f(attach(i).xyz,0);}else{W[p.wX+i]=vec4f(pred(i).xyz,0);}}
 
@@ -409,12 +417,15 @@ fn elasticGradient(i:u32)->array<vec3f,2>{
    // Coordinate stiffness without contact: sizes the penalties of new contacts.
    W[p.wK+i]=vec4f(diag,0);
    if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
-    let e=KU[p.kvList+k];let ci=e>>3u;let j=e&7u;let c=contactAt(ci);let w=slotW(c,j);let sx=contactSum(c,0u);let m=contactM(c,sx);
-    gr-=w*cForce(m,c.rho)*c.n;diag+=w*w*cCurv(m,c.rho)*c.n*c.n;
+    let e=KU[p.kvList+k];let ci=e>>3u;let j=e&7u;let c=contactAt(ci);let w=slotW(c,j);let sx=contactSum(c,0u);let m=contactM(c,contactMotion(ci,c,sx));
+    // The gap row: w n, or J_j^T n for a rod pair.
+    var M=mat3x3f(vec3f(w,0,0),vec3f(0,w,0),vec3f(0,0,w));if(c.rodm!=0u){M=rodJ(c,rodAt(ci,c),j);}
+    let row=transpose(M)*c.n;
+    gr-=cForce(m,c.rho)*row;diag+=cCurv(m,c.rho)*row*row;
     if(c.mu>0.){
      let slip=contactSlip(ci,c,sx);let f=c.mu*fF1(length(slip));
-     // A rod pair: J_j^T slip, and the diagonal of J_j^T P_t J_j = J_j^T J_j - w^2 n n^T.
-     if(c.rodm!=0u){let M=rodJ(c,rodAt(ci,c),j);let MM=transpose(M)*M;gr+=f*(transpose(M)*slip);diag+=f*(vec3f(MM[0].x,MM[1].y,MM[2].z)-w*w*c.n*c.n);}
+     // A rod pair: J_j^T slip, and the diagonal of J_j^T P_t J_j = J_j^T J_j - (J_j^T n)(J_j^T n)^T.
+     if(c.rodm!=0u){let MM=transpose(M)*M;gr+=f*(transpose(M)*slip);diag+=f*(vec3f(MM[0].x,MM[1].y,MM[2].z)-row*row);}
      else{gr+=w*f*slip;diag+=w*w*f*(vec3f(1)-c.n*c.n);}
     }
    }}
@@ -486,17 +497,19 @@ fn elasticGradient(i:u32)->array<vec3f,2>{
 @compute @workgroup_size(${WG}) fn contactCoef(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(p.contactMode==0u||!isActive()){return;}
  let count=min(contactCount(),p.kMax);
- for(var c=g.x;c<count;c+=ng.x*${WG}u){KF[p.kfCoef+c]=vec4f(contactCoefficients(c,contactAt(c)),0,0);}
+ for(var c=g.x;c<count;c+=ng.x*${WG}u){
+  let k=contactAt(c);KF[p.kfCoef+c]=vec4f(contactCoefficients(c,k),0,0);
+ }
 }
 // The contact term of A p, once per contact: f = a n (n.s) + b (s - n (n.s)) with
 // s = sum_j w_j p_j; the matvec gathers w_i f at each of the contact's vertices.
-// A rod pair: s = sum_j J_j p_j (n.s = n.sum w p), F = a n (n.s) + b P_t s gathered by
-// weight, and each side's C^T b P_t s (KF[kfRodForce+2c+side]) gathered by its endpoint roles.
+// A rod pair: s = sum_j J_j p_j plus the roll, F = a n (n.s) + b P_t s gathered by
+// weight, and each side's C^T F (KF[kfRodForce+2c+side]) gathered by its endpoint roles.
 fn contactForceAt(c:u32){
  if(p.rodContact!=0u){let k=contactAt(c);if(k.rodm!=0u){
-  let g=rodAt(c,k);let cf=KF[p.kfCoef+c].xy;let s=rodMove(k,g,rodSlotU(k,2u),rodTwist(c,2u));let sn=dot(k.n,s);let ft=cf.y*(s-sn*k.n);
-  KF[p.kfForce+c]=vec4f(cf.x*sn*k.n+ft,0);KF[p.kfRodForce+2u*c]=vec4f(rodCt(k.n,g.t0,ft),0);
-  var second=vec3f(0);if(g.two){second=rodCt(k.n,g.t1,ft);}KF[p.kfRodForce+2u*c+1u]=vec4f(second,0);
+  let g=rodAt(c,k);let cf=KF[p.kfCoef+c].xy;let s=rodMove(k,g,rodSlotU(k,2u),rodTwist(c,2u));let sn=dot(k.n,s);let F=cf.x*sn*k.n+cf.y*(s-sn*k.n);
+  KF[p.kfForce+c]=vec4f(F,0);KF[p.kfRodForce+2u*c]=vec4f(rodCt(g.m0.xyz,g.t0,F),0);
+  var second=vec3f(0);if(g.two){second=rodCt(g.m1.xyz,g.t1,F);}KF[p.kfRodForce+2u*c+1u]=vec4f(second,0);
   return;
  }}
  let n=KF[4u*c].xyz;let w=KF[4u*c+3u];let j=p.kuCV+4u*c;let cf=KF[p.kfCoef+c].xy;var s=vec3f(0);
@@ -512,7 +525,7 @@ fn contactBlock(i:u32)->mat3x3f{
  var M=mat3x3f(vec3f(0),vec3f(0),vec3f(0));
  if(p.contactMode!=0u){for(var k=KU[p.kvStart+i];k<KU[p.kvStart+i+1u];k++){
   let e=KU[p.kvList+k];let ci=e>>3u;let c=contactAt(ci);let w=slotW(c,e&7u);let cf=KF[p.kfCoef+ci].xy;let nn=outer(c.n,c.n);
-  if(c.rodm!=0u){let J=rodJ(c,rodAt(ci,c),e&7u);M+=w*w*(cf.x-cf.y)*nn+cf.y*(transpose(J)*J);continue;}
+  if(c.rodm!=0u){let J=rodJ(c,rodAt(ci,c),e&7u);let row=transpose(J)*c.n;M+=(cf.x-cf.y)*outer(row,row)+cf.y*(transpose(J)*J);continue;}
   M+=w*w*(cf.x*nn+cf.y*(mat3x3f(vec3f(1,0,0),vec3f(0,1,0),vec3f(0,0,1))-nn));
  }}
  return M;
@@ -550,24 +563,21 @@ fn twistInitAt(s:u32)->f32{
  let k=p.n+s;let r=select(0.,-W[p.wT+s].y,twistFree(s));let z=twistPre(s)*r;
  W[p.wR+k]=vec4f(r,0,0,0);W[p.wZ+k]=vec4f(z,0,0,0);W[p.wZ0+k]=vec4f(z,0,0,0);W[p.wP+k]=vec4f(z,0,0,0);W[p.wS+k]=vec4f(0);return r*z;
 }
-// The twist row of A p: the rod's tridiagonal model plus each pair side's rolling
-// friction, -r (t x n).f P_t s (the friction part of cgContact's force).
+// The twist row of A p: the rod's tridiagonal model plus each pair side's roll
+// against cgContact's force, -r (t x m).F (for a round section its friction part).
 fn twistAp(s:u32,pt:f32,below:f32,above:f32)->f32{
  if(!twistFree(s)){return 0.;}
  var y=W[p.wT2+s].z*pt;if(s>0u){y+=twistCoupling(s-1u)*below;}if(s+1u<p.segments){y+=twistCoupling(s)*above;}
  return y;
 }
-fn twistSide(ci:u32,c:Contact,side:u32,ft:vec3f)->f32{
- let g=rodAt(ci,c);var t=g.t0.xyz;var r=g.r.x;if(side==1u){t=g.t1.xyz;r=g.r.y;}
- return -r*dot(cross(t,c.n),ft);
-}
+fn twistSide(ci:u32,c:Contact,side:u32,F:vec3f)->f32{return dot(rodRoll(rodAt(ci,c),side),F);}
 fn twistMatvecAt(s:u32)->f32{
  let k=p.n+s;if(!twistFree(s)){W[p.wQ+k]=vec4f(0);return 0.;}
  var below=0.;var above=0.;if(s>0u){below=W[p.wP+k-1u].x;}if(s+1u<p.segments){above=W[p.wP+k+1u].x;}
  var y=twistAp(s,W[p.wP+k].x,below,above);
  for(var e=KU[p.kvStart+k];e<KU[p.kvStart+k+1u];e++){
   let entry=KU[p.kvList+e];let ci=entry>>3u;let c=contactAt(ci);let F=KF[p.kfForce+ci].xyz;
-  y+=twistSide(ci,c,(entry&7u)-5u,F-dot(F,c.n)*c.n);
+  y+=twistSide(ci,c,(entry&7u)-5u,F);
  }
  W[p.wQ+k]=vec4f(y,0,0,0);return W[p.wP+k].x*y;
 }
@@ -661,8 +671,8 @@ fn sharedMatvecAt(i:u32)->vec3f{
     let e=KU[p.kvList+k];let ci=e>>3u;let c=contactAt(ci);let w=slotW(c,e&7u);let cf=KF[p.kfCoef+ci].xy;
     if(c.rodm!=0u){
      var u:array<vec3f,5>;for(var q=0u;q<(c.rodm&7u);q++){u[q]=pw[slotV(c,q)].xyz;}
-     let g=rodAt(ci,c);let s=rodMove(c,g,u,sharedTwistP(ci));let sn=dot(c.n,s);let ft=cf.y*(s-sn*c.n);
-     y+=w*cf.x*sn*c.n+transpose(rodJ(c,g,e&7u))*ft;continue;
+     let g=rodAt(ci,c);let s=rodMove(c,g,u,sharedTwistP(ci));let sn=dot(c.n,s);
+     y+=transpose(rodJ(c,g,e&7u))*(cf.x*sn*c.n+cf.y*(s-sn*c.n));continue;
     }
     let s=sharedContactP(c);let sn=dot(c.n,s);
     y+=w*(cf.x*sn*c.n+cf.y*(s-sn*c.n));
@@ -683,8 +693,8 @@ fn sharedTwistMatvecAt(s:u32)->f32{
  for(var e=KU[p.kvStart+k];e<KU[p.kvStart+k+1u];e++){
   let entry=KU[p.kvList+e];let ci=entry>>3u;let c=contactAt(ci);let cf=KF[p.kfCoef+ci].xy;
   var u:array<vec3f,5>;for(var q=0u;q<(c.rodm&7u);q++){u[q]=pw[slotV(c,q)].xyz;}
-  let sv=rodMove(c,rodAt(ci,c),u,sharedTwistP(ci));
-  y+=twistSide(ci,c,(entry&7u)-5u,cf.y*(sv-dot(sv,c.n)*c.n));
+  let sv=rodMove(c,rodAt(ci,c),u,sharedTwistP(ci));let sn=dot(sv,c.n);
+  y+=twistSide(ci,c,(entry&7u)-5u,cf.x*sn*c.n+cf.y*(sv-sn*c.n));
  }
  return y;
 }
@@ -827,9 +837,9 @@ fn storeLine(l:u32,de:array<f32,${ALPHAS}>,noise:array<f32,${ALPHAS}>){red[l]=ve
  for(var i=g.x;i<p.n;i+=p.lineGroups*${WG}u){for(var q=KU[p.kvStart+i];q<KU[p.kvStart+i+1u];q++){
   let e=KU[p.kvList+q];let k0=e>>3u;let c=contactAt(k0);var owner=true;for(var j=0u;j<(e&7u);j++){if(!isFixed(slotV(c,j))){owner=false;}}
   if(!owner){continue;}
-  let sx=contactSum(c,0u);let sd=contactSum(c,1u);let m=contactM(c,sx);let dn=dot(c.n,sd);
-  let slip=contactSlip(k0,c,sx);var td=tangent(c.n,sd);let y0=length(slip);
-  if(c.rodm!=0u){td=tangent(c.n,rodMove(c,rodAt(k0,c),rodSlotU(c,1u),rodTwist(k0,1u)));}
+  let sx=contactSum(c,0u);var sd=contactSum(c,1u);let m=contactM(c,contactMotion(k0,c,sx));
+  if(c.rodm!=0u){sd=rodMove(c,rodAt(k0,c),rodSlotU(c,1u),rodTwist(k0,1u));}
+  let dn=dot(c.n,sd);let slip=contactSlip(k0,c,sx);let td=tangent(c.n,sd);let y0=length(slip);
   for(var k=0u;k<${ALPHAS}u;k++){
    let a=alphaOf(k);var change=cPenChange(m,-a*dn,c.rho);
    if(c.mu>0.){let f=fF0Change(y0,length(slip+a*td),2.*a*dot(slip,td)+a*a*dot(td,td));change+=c.mu*f;}
@@ -942,13 +952,17 @@ fn jointTwistIncrement(j:u32,id:vec4u)->f32{return W[p.wT+id.w+1u].x-W[p.wT+id.w
  let a=segT(s,2u);let t=W[p.wT+s];var gr=a.x*(t.x-a.w)+a.y*(a.z+t.x);var h=a.x+a.y;
  let asSecond=I[p.iSegJoint+2u*s];if(asSecond!=0xffffffffu){let e=E[p.eJoint+9u*asSecond+6u];gr+=e.y;h+=e.w;}
  let asFirst=I[p.iSegJoint+2u*s+1u];if(asFirst!=0xffffffffu){let e=E[p.eJoint+9u*asFirst+6u];gr+=e.x;h+=e.z;}
- // Rod contact friction on the twist (its rolling): -f r (t x n).slip and f r^2 |t x n|^2 per pair side.
+ // Rod contact on the twist, per pair side of roll v = -r (t x m): the normal force's torque
+ // -F_n (n.v) with curvature a (n.v)^2 (an elliptical section's, zero for a round one), and the
+ // rolling friction f v.slip with f |P_t v|^2.
  var hc=0.;
  if(p.contactMode!=0u&&p.rodContact!=0u){for(var k=KU[p.kvStart+p.n+s];k<KU[p.kvStart+p.n+s+1u];k++){
-  let e=KU[p.kvList+k];let ci=e>>3u;let side=(e&7u)-5u;let c=contactAt(ci);if(!(c.mu>0.)){continue;}
-  let slip=contactSlip(ci,c,contactSum(c,0u));let f=c.mu*fF1(length(slip));let g=rodAt(ci,c);
-  var t=g.t0.xyz;var r=g.r.x;if(side==1u){t=g.t1.xyz;r=g.r.y;}let tn=cross(t,c.n);
-  gr-=f*r*dot(tn,slip);hc+=f*r*r*dot(tn,tn);
+  let e=KU[p.kvList+k];let ci=e>>3u;let side=(e&7u)-5u;let c=contactAt(ci);let g=rodAt(ci,c);
+  let v=rodRoll(g,side);let vn=dot(v,c.n);let sx=contactSum(c,0u);
+  if(vn!=0.){let m=contactM(c,contactMotion(ci,c,sx));gr-=cForce(m,c.rho)*vn;hc+=cCurv(m,c.rho)*vn*vn;}
+  if(!(c.mu>0.)){continue;}
+  let slip=contactSlip(ci,c,sx);let f=c.mu*fF1(length(slip));
+  gr+=f*dot(v,slip);hc+=f*(dot(v,v)-vn*vn);
  }}
  h+=hc;
  let diagonal=max(a.x,h);let measure=abs(gr/diagonal)*f.y;
@@ -1108,17 +1122,14 @@ export interface GPUClothNewtonReport extends ClothStepReport {
   readonly gpuSolves: number;
   readonly contactModel: 'in-solve' | 'post-projection';
   readonly contactIterations?: number;
-  /** Where in-solve contacts were detected, and why not on the GPU. */
+  /** Where in-solve contacts were detected, and (contactFallback) the CPU
+   * remnant's reason when not on the GPU (clothContactCPURemnant). */
   readonly contactDetection: 'gpu' | 'cpu' | 'none';
   readonly contactFallback?: string;
-  /** GPU contact solves this step took (more than 1: the pool grew and the step was redone). */
-  readonly contactAttempts?: number;
   /** GPU detection: pairs held in the contact pool at the end of the step (its peak authors physics.contactCapacity). */
   readonly contactPool?: number;
   /** Swept-primitive grid entries of the step's last detection (its peak authors physics.contactGridEntries). */
   readonly contactGridFill?: number;
-  /** Why each redone attempt grew the pool (what the GPU counted against the held capacity). */
-  readonly contactGrowth?: readonly string[];
   /** The last GPU solve's status bits (converged 1, line search 2, nonfinite 4, Newton cap 8, singular 16). */
   readonly gpuStatus: number;
   /** Times a solve this step reached the Newton cap and resumed on the GPU from its iterate. */
@@ -1135,21 +1146,17 @@ interface ContactLayout {
   kMax: number; tableSlots: number; gridBuckets: number; gridEntries: number;
   kuCV: number; kuMeta: number; kvStart: number; kvList: number; uBlocks: number; uEntry: number; uTabVal: number; kuWords: number;
   aTable: number; aHeads: number; aCount: number; kaWords: number; kfCoef: number; kfForce: number; kfFaceBox: number; kfEdgeBox: number; kfWords: number;
-  kuRod: number; kfRod: number; kfRodForce: number; kfSegBox: number; listRows: number;
+  kuRod: number; kfRod: number; kfRodForce: number; kfRodArm: number; kfSegBox: number; listRows: number;
 }
 const pow2 = (x: number) => 2 ** Math.ceil(Math.log2(Math.max(1, x)));
 const errorNames: [number, string][] = [[E_CAPACITY, 'contact capacity'], [E_GRID, 'grid entries'], [E_CROSSED, 'a vertex crossed a collider within the step'], [E_STIFFNESS, 'a contact without free stiffness'], [E_TABLE, 'key table'], [E_CELLS, 'a swept primitive covers more than the grid cell cap'], [E_NONFINITE, 'a nonfinite contact residual'], [E_UNSUPPORTED, 'a rod segment against a collider kind without GPU rod contact']];
 const describeErrors = (bits: number) => errorNames.filter(([b]) => bits & b).map(([, name]) => name).join(', ');
-const GROWABLE = E_CAPACITY | E_GRID | E_TABLE;
 const statusNames: [number, string][] = [[S_CONVERGED, 'inner solve converged'], [S_LINE, 'line search found no decrease'], [S_NONFINITE, 'nonfinite gradient'], [S_CAP, 'Newton cap'], [S_SINGULAR, 'singular block']];
 const describeStatus = (bits: number) => statusNames.filter(([b]) => bits & b).map(([, name]) => name).join(', ') || 'no status';
 type Pairs = NonNullable<ClothStepOptions['cohesionPairs']>;
 interface SolveResult {converged: boolean; status: number; measure: number; newton: number; linear: number; submissions: number; resumes: number; increments: Float32Array; twist?: Float32Array; control: Uint32Array<ArrayBuffer>}
 
 export class GPUClothNewton {
-  /** 'auto' detects on the GPU whenever the colliders allow it; 'cpu' keeps
-   * the Float64 ClothContactSet (uploaded each outer iteration). */
-  contactDetection: 'auto' | 'cpu' = 'auto';
   /** Diagnostics: the last solve's control words. */
   lastControl?: Uint32Array;
   /** Per Newton iteration of the last solve (first 16): convergence measure, chosen step, CG iterations. */
@@ -1214,9 +1221,8 @@ export class GPUClothNewton {
   private stiffnessValid = false;
 
   /** contactCapacity (pairs) and contactGridEntries (swept-primitive grid
-   * entries): the contact pool authored from a scene's measured peak, so the
-   * GPU never grows it mid-run; growth (and its redo of the step) remains the
-   * reported fallback. */
+   * entries): the contact pool authored from a scene's measured peak. It never
+   * grows at run time: a step that fills it fails with the measured counts. */
   constructor(private readonly device: GPUDevice, readonly topology: PreparedClothTopology, private readonly authored: {contactCapacity?: number; contactGridEntries?: number} = {}) {
     for (const [name, value] of Object.entries(authored)) if (value !== undefined && !(Number.isSafeInteger(value) && value > 0)) throw new Error(`Invalid authored cloth ${name} ${value}`);
     if (!gpuClothNewtonSupported(topology)) throw new Error('GPU cloth Newton: a rod has fewer than two vertices or mismatched rest lengths');
@@ -1439,9 +1445,9 @@ export class GPUClothNewton {
     const tableSlots = Math.max(pow2(tableFactor * kMax), held?.tableSlots ?? 0), gridBuckets = pow2(Math.max(1024, T + edges + S));
     const kuCV = 0, kuMeta = 4 * kMax, kuRod = 8 * kMax, kvStart = (rod ? 12 : 8) * kMax, kvList = kvStart + rows + 1, uBlocks = kvList + (rod ? 7 : 4) * kMax, uEntry = uBlocks + Math.ceil(rows / SCAN_WG) + 1, uTabVal = uEntry + 2 * gridEntries, kuWords = uTabVal + 2 * tableSlots;
     const aTable = 0, aHeads = 4 * tableSlots, aCount = aHeads + (rod ? 3 : 2) * gridBuckets, kaWords = aCount + rows;
-    const kfCoef = 4 * kMax, kfForce = 5 * kMax, kfRod = 6 * kMax, kfRodForce = 9 * kMax, kfFaceBox = (rod ? 11 : 6) * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfSegBox = kfEdgeBox + 2 * edges, kfWords = kfSegBox + 2 * S;
+    const kfCoef = 4 * kMax, kfForce = 5 * kMax, kfRod = 6 * kMax, kfRodForce = 9 * kMax, kfRodArm = 11 * kMax, kfFaceBox = (rod ? 13 : 6) * kMax, kfEdgeBox = kfFaceBox + 2 * T, kfSegBox = kfEdgeBox + 2 * edges, kfWords = kfSegBox + 2 * S;
     const layout = {kMax, tableSlots, gridBuckets, gridEntries, kuCV, kuMeta, kvStart, kvList, uBlocks, uEntry, uTabVal, kuWords, aTable, aHeads, aCount, kaWords, kfCoef, kfForce, kfFaceBox, kfEdgeBox, kfWords,
-      kuRod, kfRod, kfRodForce, kfSegBox, listRows: rows};
+      kuRod, kfRod, kfRodForce, kfRodArm, kfSegBox, listRows: rows};
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     this.KF = this.replace(this.KF, 'Cloth contact floats', 16 * kfWords, storage);
     this.KU = this.replace(this.KU, 'Cloth contact words', 4 * kuWords, storage);
@@ -1685,36 +1691,30 @@ export class GPUClothNewton {
     const pairs = options.cohesionPairs ?? [], newtonCap = options.iterations ?? 64, tolerance = options.tolerance_m ?? 1e-8;
     if (!Number.isInteger(newtonCap) || newtonCap < 1) throw new Error('Cloth iterations must be a positive integer');
     const colliders = options.colliders ?? [], selfCollision = options.selfCollision ?? false;
-    // Contact inside the minimization, as the CPU solve. GPU detection keeps
-    // the outer iterations on the GPU; otherwise the Float64 set detects, and
-    // its multipliers, tangent planes and detection update between GPU solves.
-    // Rod contact (rolling friction included) is detected and solved on the GPU
-    // only; rods whose contact the GPU does not cover keep the post-projection.
-    const rods = topology.rods.length > 0;
-    const inSolve = (colliders.length > 0 || selfCollision) && !inSolveContactUnsupported(topology, colliders) && (!rods || (this.contactDetection !== 'cpu' && !gpuContactUnsupported(topology, colliders)));
-    let fallback = inSolve ? (this.contactDetection === 'cpu' ? 'CPU detection requested' : gpuContactUnsupported(topology, colliders)) : undefined;
+    // Contact inside the minimization, detected and solved on the GPU: the
+    // outer iterations stay on the device, and any contact error fails the
+    // step, a full pool included (the pool is authored per scene from its
+    // measured peak and never grows at run time). Only the CPU remnant
+    // (clothContactCPURemnant) leaves the GPU: there rods keep the
+    // post-projection and other cloth the Float64 set, which detects and
+    // updates multipliers between GPU solves.
+    const rods = topology.rods.length > 0, contact = colliders.length > 0 || selfCollision;
+    const remnant = contact ? clothContactCPURemnant(topology, colliders) : undefined;
+    const inSolve = contact && !inSolveContactUnsupported(topology, colliders) && !(rods && remnant);
+    const fallback = inSolve ? remnant : undefined;
     const x = predicted.slice();
     const positions = (increments: Float32Array) => {for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) x[3 * i + a] = old[3 * i + a]! + increments[4 * i + a]!;};
     let solve: SolveResult | undefined, contact_ms = 0, solves = 1, outer = 0, contactResidual = 0, contactReport: ClothContactReport | undefined;
-    let newton = 0, linear = 0, submissions = 0, resumes = 0, contactAttempts = 0, contactPool = 0, contactGridFill = 0;
-    const contactGrowth: string[] = [];
+    let newton = 0, linear = 0, submissions = 0, resumes = 0, contactPool = 0, contactGridFill = 0;
     if (inSolve && !fallback) {
       const frictionEpsilon = FRICTION_SLIP_SPEED_M_S * dt;
-      for (let attempt = 0; ; attempt++) {
-        solve = await this.solveWithGPUContact(pairs, old, {newtonCap, tolerance, dt, frictionEpsilon, colliders, selfCollision});
-        newton += solve.newton; linear += solve.linear; submissions += solve.submissions; resumes += solve.resumes;
-        const errors = solve.control[CONTACT_CONTROL.K_ERROR]!;
-        contactAttempts = attempt + 1;
-        if (!errors) break;
-        // A crossing is a failed step, never re-solved on the CPU.
-        if (errors & E_CROSSED) throw new Error(`Cloth GPU contact: ${describeErrors(errors)}`);
-        if (errors & ~GROWABLE || attempt >= 3) {fallback = `GPU detection: ${describeErrors(errors)}`; solve = undefined; break;}
-        // Too small for this contact set: grow from what the GPU counted, and redo the step.
-        const c = solve.control, layout = this.contactLayout!;
-        contactGrowth.push(`${describeErrors(errors)}: ${c[CONTACT_CONTROL.K_COUNT]!} pairs of ${layout.kMax}, ${c[CONTACT_CONTROL.K_ENTRIES]!} grid entries of ${layout.gridEntries}`);
-        this.ensureContactCapacity(errors & E_CAPACITY ? pow2(1.5 * Math.max(c[CONTACT_CONTROL.K_COUNT]!, 2 * layout.kMax)) : layout.kMax,
-          errors & E_GRID ? pow2(1.5 * Math.max(c[CONTACT_CONTROL.K_ENTRIES]!, 2 * layout.gridEntries)) : layout.gridEntries, errors & E_TABLE ? 4 : 2);
-      }
+      solve = await this.solveWithGPUContact(pairs, old, {newtonCap, tolerance, dt, frictionEpsilon, colliders, selfCollision});
+      newton += solve.newton; linear += solve.linear; submissions += solve.submissions; resumes += solve.resumes;
+      // Any contact error fails the step: a crossing, a contact the solve cannot
+      // stiffen, a nonfinite iterate, or a pool the step filled (no growth, no
+      // CPU re-solve).
+      const c = solve.control, errors = c[CONTACT_CONTROL.K_ERROR]!, layout = this.contactLayout!;
+      if (errors) throw new Error(`Cloth GPU contact: ${describeErrors(errors)} (${c[CONTACT_CONTROL.K_COUNT]!} pairs against the authored ${layout.kMax}, ${c[CONTACT_CONTROL.K_ENTRIES]!} grid entries against ${layout.gridEntries}, a ${layout.tableSlots}-slot key table)`);
       if (solve) {
         positions(solve.increments);
         const c = solve.control, f = (word: number) => new Float32Array(Uint32Array.of(c[word]!).buffer)[0]!;
@@ -1723,7 +1723,6 @@ export class GPUClothNewton {
         solve = {...solve, converged: solve.converged && c[CONTACT_CONTROL.K_DONE]! !== 0 && contactResidual < tolerance};
       }
     }
-    if (rods && inSolve && fallback) throw new Error(`GPU cloth rod contact failed (no CPU detection for rods): ${fallback}`);
     const contactSet = inSolve && fallback ? new ClothContactSet(topology, old, dt, colliders, selfCollision, tolerance, clothContactWarmStart(state)) : undefined;
     if (!solve) {
       if (contactSet) {
@@ -1765,7 +1764,7 @@ export class GPUClothNewton {
     // The GPU's twist increments (zero where the twist is held).
     for (let s = 0; s < state.twist_rad.length; s++) state.twist_rad[s] = oldTwist[s]! + solve.twist![4 * s]!;
     const contactDetection = !inSolve ? 'none' as const : fallback ? 'cpu' as const : 'gpu' as const;
-    const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms, contactDetection, gpuStatus: solve.status, gpuResumes: resumes, ...(contactAttempts ? {contactPool, contactGridFill} : {}), ...(contactAttempts > 1 ? {contactAttempts, contactGrowth} : {}), ...(fallback && inSolve ? {contactFallback: fallback} : {})};
+    const extra = {gpuSolves: solves, contact_ms, submissions, solve_ms, contactDetection, gpuStatus: solve.status, gpuResumes: resumes, ...(inSolve && !fallback ? {contactPool, contactGridFill} : {}), ...(fallback && inSolve ? {contactFallback: fallback} : {})};
     if (!converged) {
       // The GPU solve stalled (line search, or the cap after its resumes),
       // broke, or the contact iterations did not settle. The step fails with
