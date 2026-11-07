@@ -17,6 +17,7 @@ import { uniformDetailCapacityRule } from "./uniform-detail-policy";
 import { uniformWindowFixedFrame } from "./uniform-window-address";
 import { uniformMixedPressureRootBytes } from "./uniform-mixed-pressure-memory";
 import { assertUniformMixedOptions, type UniformMixedOptionalFeatures } from "./uniform-mixed-options";
+import { NB_VOLUME_CAPTURE_PHI_FLOAT } from "./uniform-mixed-surface-volume";
 import { assertUniformMixedSolidPromotion, createUniformMixedLayout, createUniformMixedLayoutFromWidths, uniformMixedLayoutWidths, uniformMixedSolidEdit, uniformMixedSolidTiles, uniformMixedSolidTilesAfterEdit, uniformThinWallTiles, type UniformMixedLayout } from "./uniform-mixed-layout";
 import { uniformFineBrickCapacity } from "./uniform-fine-brick-store";
 import { uniformCensusCrossingTiles, uniformCensusInexactSolidTiles, uniformCensusSeedTiles, uniformCensusSurfacePages, uniformCensusWetTiles, uniformPagePoolRule, uniformPagePoolRuleReach, uniformParticleCensusBand, uniformParticleRecordRule } from "./uniform-particle-census";
@@ -3699,29 +3700,34 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const frame=this.mixedFrame,totals=this.mixedDiagnostics!.totals,budget=frame.narrowBandVolumeBudget;
       const encoder=this.device.createCommandEncoder();this.mixedDiagnostics!.encode(encoder);
       stats.encode(encoder,(e,staging)=>{
-        // Words 0-5 the diagnostics' totals, 24-25 the carries of represented and fill.
+        // Words 0-5 the diagnostics' totals, 10-19 the budget's first ten
+        // floats, 24-25 the carries of represented and fill, 26 the budget's
+        // phi measure at capture.
         e.copyBufferToBuffer(totals,0,staging,0,24);e.copyBufferToBuffer(totals,24,staging,96,8);
         e.copyBufferToBuffer(this.params,32,staging,80,12);
         e.copyBufferToBuffer(frame.ownership.support,frame.ownership.capacity.tiles*16,staging,24,16);
-        if(budget)e.copyBufferToBuffer(budget,0,staging,40,40);
+        if(budget){e.copyBufferToBuffer(budget,0,staging,40,40);e.copyBufferToBuffer(budget,4*NB_VOLUME_CAPTURE_PHI_FLOAT,staging,104,4);}
       });
       try{this.device.queue.submit([encoder.finish()]);}catch(error){stats.discard();throw error;}
       if(budget)frame.requestNarrowBandVolumeProbe();
-      const words=await stats.read(bytes=>new Uint32Array(bytes,0,26).slice());
+      const words=await stats.read(bytes=>new Uint32Array(bytes,0,27).slice());
       if(!words||this.disposed)return this.executionInfo;
       const represented=(words[0]!+4294967296*words[24]!)/2048,fill=(words[3]!+4294967296*words[25]!)/2048;
       // The liquid's volume is the budget's measurement of phi, from the
-      // last step that took it (this read requests the next). The V
+      // last step that took it (this read requests the next); the capture
+      // takes the first, so every captured row is in phi's measure. The V
       // texture is the pressure fill: an uncut, non-planar owner's is an
       // eight-probe vote, an eighth of the owner per probe, so on a 4h
-      // surface its sum strays from phi's volume by percents.
+      // surface its sum strays from phi's volume by percents. The target is
+      // the occupancy capture: the capture gap is phi's measure less it, on
+      // the same surface, so a drift reads against it explicitly.
       let measured:number|undefined;
-      if(budget){const b=new Float32Array(words.buffer,40,10),target=b[0]!+b[9]!;if(b[1]!>0){if(b[4]!>0)measured=b[4]!;Object.assign(this.executionInfo,{
+      if(budget){const b=new Float32Array(words.buffer,40,10),target=b[0]!+b[9]!,capturePhi=new Float32Array(words.buffer)[26]!;if(b[1]!>0){measured=b[4]!;Object.assign(this.executionInfo,{
         narrowBandVolumeControlRate_per_s:this.narrowBandVolumeControlSeconds>0?b[8]:0,
         narrowBandTargetVolume_cells:target,narrowBandOutflowVolume_cells:b[2],
         narrowBandVolumeShift_cells:b[3]!/Math.min(...frame.ownership.capacity.lattice.cellSize_m),
-        narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],
-        narrowBandVolumeBudgetDrift:((measured??fill)-target)/Math.max(1,target),
+        narrowBandVolumeBeforeCorrection_cells:b[4],narrowBandInitialVolume_cells:b[5],narrowBandCaptureMeasureGap_cells:capturePhi-b[5]!,
+        narrowBandVolumeBudgetDrift:(measured-target)/Math.max(1,target),
       });}}
       const volume=measured??fill,reference=Math.max(1,this.referenceVolumeCells);
       Object.assign(this.executionInfo,{representedVolumeCellSum:represented,volumeCellSum:volume,

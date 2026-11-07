@@ -198,6 +198,9 @@ export interface GPUEulerianInfo {
   narrowBandVolumeShift_cells?:number;
   narrowBandVolumeBeforeCorrection_cells?:number;
   narrowBandInitialVolume_cells?:number;
+  /** Phi's measure of the captured surface less the occupancy capture (the
+   * target's measure), in h cells: the offset a budget drift starts from. */
+  narrowBandCaptureMeasureGap_cells?:number;
   narrowBandVolumeBudgetDrift?:number;
   /** The divergence volume control asked of the liquid at the last gauge, in 1/s. */
   narrowBandVolumeControlRate_per_s?:number;

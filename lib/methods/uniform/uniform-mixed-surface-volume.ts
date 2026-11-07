@@ -40,11 +40,12 @@ import {uniformMixedSolidPipeline,uniformMixedSolidLibraryWGSL,uniformMixedVerte
  * sets the sticky closure bit (a fatal at the next census).
  *
  * bind()'s volume is the measured geometry output: read once at
- * initialization, then a 36-byte budget owns the target. The band spans four
+ * initialization, then a 44-byte budget owns the target. The band spans four
  * h cells and the shift is bounded by 4h, including large timesteps; the
  * required shift is the budget's diagnostic. */
-/** Floats of the NB scalar volume budget, and where its control rate sits. */
-export const NB_VOLUME_BUDGET_FLOATS=10,NB_VOLUME_RATE_FLOAT=8,NB_VOLUME_COMPENSATION_FLOAT=9;
+/** Floats of the NB scalar volume budget, where its control rate sits, and
+ * the phi measure of the captured surface (the target is its occupancy). */
+export const NB_VOLUME_BUDGET_FLOATS=11,NB_VOLUME_RATE_FLOAT=8,NB_VOLUME_COMPENSATION_FLOAT=9,NB_VOLUME_CAPTURE_PHI_FLOAT=10;
 /** The most volume control may ask of the liquid, in 1/s: the long dam break
  * at 1/30 s loses its volume at about 1/s where its front lands. */
 const NB_VOLUME_RATE_LIMIT=4;
@@ -60,7 +61,8 @@ const VOLUME_PASS:GPUComputePassDescriptor={label:"Uniform mixed global surface 
 export class UniformMixedSurfaceVolume {
  /** NB budget: target, initialized, reserved outflow tally, last normal shift,
   * volume before correction, initial volume, last measured volume, target,
-  * then the gauge's volume control rate in 1/s and the compensated source remainder. */
+  * then the gauge's volume control rate in 1/s, the compensated source
+  * remainder, and phi's measure of the captured surface. */
  readonly budget:GPUBuffer;
  private readonly budgetParams:GPUBuffer;
  /** beginStep's parameter words: dt, added cells, open top, control rate. */
@@ -123,7 +125,7 @@ override parity:u32=0u;
 // A BULK16 slot's open regions are deep, fully open liquid (16h
 // membership): 16^3 h cells each; a closed region is static solid.
 ${this.bulkPages?`@group(1) @binding(7) var<storage,read> svBulk:array<u32>;\nfn svBulkVolume()->f32{return 4096.0*f32(svBulk[${BULK16_STATUS.openRegions}u]);}`:"fn svBulkVolume()->f32{return 0.0;}"}
-override captureBudget:bool=false;override gaugeBudget:bool=false;
+override captureBudget:bool=false;override gaugeBudget:bool=false;override measureCapture:bool=false;
 fn umLoadVertex(p:vec3u)->f32{return textureLoad(phi,vec3i(p),0).x;}
 // A tile corner, and below a 4h owner's own texel (its tile origin): the
 // base blocks (UNIFORM_DETAIL_4H_LOAD).
@@ -501,6 +503,9 @@ var<workgroup> svReduceJobs:u32;
  if(l==0u&&scratch[(SV_S+3u)]==0.0){
   let filled=sums[0].x;
   if(captureBudget){budget[0]=filled;budget[1]=1.0;budget[5]=filled;scratch[(SV_S+3u)]=1.0;return;}
+  // The captured surface in phi's measure, the one every later probe takes:
+  // the target stays the occupancy capture, and the two sit side by side.
+  if(measureCapture){budget[4]=filled;budget[${NB_VOLUME_CAPTURE_PHI_FLOAT}u]=filled;scratch[(SV_S+3u)]=1.0;return;}
   if(scratch[SV_S]==0.0){budget[4]=filled;}
   budget[6]=filled;budget[7]=budget[0];
   let desired=budget[0];let shift=scratch[SV_S];let step=scratch[(SV_S+4u)];
@@ -538,7 +543,7 @@ var<workgroup> svReduceJobs:u32;
   const create=(key:string,entryPoint:string,extra:Record<string,number>={})=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{...constants,...extra,...s}}})).then(p=>{this.pipelines.set(key,p);});
   await Promise.all([
    ...["clearBand","reduce","solve"].map(entry=>create(entry,entry)),
-   create("capture","solve",{captureBudget:1}),create("gauge","solve",{gaugeBudget:1}),create("measureInitial","measureInitial",resident),create("updateBudget","updateBudget"),
+   create("capture","solve",{captureBudget:1}),create("measureCapture","solve",{measureCapture:1}),create("gauge","solve",{gaugeBudget:1}),create("measureInitial","measureInitial",resident),create("updateBudget","updateBudget"),
    ...["seed","metric","measure"].map(entry=>create(entry,entry,resident)),
    create("resolveScale","resolveScale",{umCountedJobs:UNIFORM_MIXED_COUNTED.fused}),
    create("dilate0","dilate",{parity:0,...resident}),create("dilate1","dilate",{parity:1,...resident}),
@@ -547,20 +552,23 @@ var<workgroup> svReduceJobs:u32;
  }
  /** Measures the volume and the shift that would restore the budget; phi is
   * left alone. rounds: secant Newton rounds (measure,
-  * reduce, solve); a converged solve skips the rest's work. */
+  * reduce, solve); a converged solve skips the rest's work. A capture takes
+  * the target from occupancy, then phi's measure of the same surface with
+  * no shift (budget[4] and NB_VOLUME_CAPTURE_PHI_FLOAT). */
  encode(encoder:GPUCommandEncoder,group:UniformDetailGroup,rounds=2,capture:boolean|"gauge"=false):void{
   if(!Number.isInteger(rounds)||rounds<1)throw new Error(`Mixed surface constraint needs a positive whole round count, not ${rounds}`);
-  if(this.pipelines.size!==15)throw new Error("Mixed surface constraint is not initialized");
+  if(this.pipelines.size!==16)throw new Error("Mixed surface constraint is not initialized");
   const pass=encoder.beginComputePass(VOLUME_PASS);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-  if(capture){this.run(pass,"clearBand");this.run(pass,"measureInitial");this.run(pass,"reduce");this.run(pass,capture==="gauge"?"gauge":"capture");pass.end();return;}
+  if(capture){this.run(pass,"clearBand");this.run(pass,"measureInitial");this.run(pass,"reduce");this.run(pass,capture==="gauge"?"gauge":"capture");if(capture==="gauge"){pass.end();return;}}
   this.run(pass,"clearBand");this.run(pass,"seed");for(let i=0;i<4;i++)this.run(pass,i%2?"dilate1":"dilate0");this.run(pass,"grow");this.run(pass,"measureGrow");this.run(pass,"metric");this.run(pass,"resolveScale");
-  for(let i=0;i<rounds;i++){this.run(pass,"measure");this.run(pass,"reduce");this.run(pass,"solve");}
+  if(capture){this.run(pass,"measure");this.run(pass,"reduce");this.run(pass,"measureCapture");}
+  else for(let i=0;i<rounds;i++){this.run(pass,"measure");this.run(pass,"reduce");this.run(pass,"solve");}
   pass.end();
  }
  /** One entry's launch in encode()'s pass. */
  private run(pass:GPUComputePassEncoder,entry:string):void{
   const own=this.pipelines.get(entry)!;const pipeline=uniformDetailPick(this.solid?.select(own)??own);pass.setPipeline(pipeline);
-  if(entry==="solve"||entry==="capture"||entry==="gauge")pass.dispatchWorkgroups(1);
+  if(entry==="solve"||entry==="capture"||entry==="measureCapture"||entry==="gauge")pass.dispatchWorkgroups(1);
   // reduce: a workgroup 64 measure partials (svJobs, the residentAll jobs).
   else if(entry==="reduce")this.ownership.dispatchBuffered(pass,pipeline,"residentAll",Math.min(REDUCE_GRID,this.chunks),64);
   else if(entry==="resolveScale")this.ownership.dispatchFusedCounted(pass,pipeline);
