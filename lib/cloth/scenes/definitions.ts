@@ -29,14 +29,15 @@ const WET_CLOTH_PAGE_POOL_BLOCKS: Readonly<Record<string, number>> = {'wetcloth-
  * Swept-primitive grid entries: every source uses the geometric bound
  * 'two-cells-per-axis' (CONTACT_GRID_CELL_BOUND, gpu-contact.ts), the solver's
  * default, rather than a measured peak. A primitive inserts one entry per
- * distinct cell its swept, padded box touches. The cell is 2 (largest rest
- * primitive extent + 4 r) and the pad is r, so while each box's deformed extent
- * plus one step's travel stays below 2 extent + 6 r on every axis it touches at
- * most 2 cells per axis: at most 2^3 = 8 entries, 8 (T + E + S) in all.
- * Detection checks that premise on every box: a box at least the cell wide
- * fails the step, naming the primitive, its extent and the cell, and an
- * overflow fails with the fill against the capacity. The fill grows with no
- * contact pair because a step's swept box spans its travel (pore-test: 4.02
+ * distinct cell its swept, padded box touches. Each detection's cell is the
+ * rest cell, 2 (largest rest primitive extent + 4 r), or, when a stretched or
+ * fast primitive's box is wider, that detection's widest box times
+ * 1 + GRID_CELL_EPS. Every box is then narrower than the cell on each axis and
+ * touches at most 2 cells per axis: at most 2^3 = 8 entries, 8 (T + E + S) in
+ * all, whatever the step's deformation and travel. A nonfinite box fails the
+ * step, naming the primitive, and an overflow fails with the fill against the
+ * capacity. The fill grows with no contact pair because a step's swept box
+ * spans its travel (pore-test: 4.02
  * entries per primitive at step 0, 4.73 at step 60, 5.08 at pore-test-mid's
  * 1500-step peak through the ball's impact; splash-cloth-medium overflowed the
  * former 4 (T + E + S) default at its first step, 837368 > 785664). */

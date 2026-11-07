@@ -71,6 +71,7 @@ export function gpuContactUnsupported(topology: PreparedClothTopology, colliders
 export interface ClothContactStatic {
   readonly words: Uint32Array<ArrayBuffer>;
   readonly edges: number;
+  /** The rest grid cell, the floor of each detection's cell (gridCell grows it to the widest swept box). */
   readonly cellSize: number;
   readonly offsets: {sVInfo: number; sRingStart: number; sRingList: number; sFrStart: number; sFrList: number; sLvStart: number; sLvList: number; sEdge: number; sE3Start: number; sE3List: number; sFaceR: number;
     sSegInfo: number; sNbStart: number; sNbList: number; sRpXStart: number; sRpXList: number; sRsXStart: number; sRsXList: number};
@@ -192,7 +193,8 @@ export function clothContactStatic(topology: PreparedClothTopology): ClothContac
   parts.forEach((part, k) => {offsets[names[k]!] = total; total += part.length;});
   const words = new Uint32Array(Math.max(4, total));
   parts.forEach((part, k) => words.set(part, offsets[names[k]!]));
-  // Grid cell: twice the largest rest face extent with its contact support.
+  // Rest grid cell: twice the largest rest face extent with its contact support. A detection
+  // whose swept boxes are wider (a stretched or fast primitive) widens its own cell past this.
   let extent = 0, radius = 0;
   for (let i = 0; i < n; i++) radius = Math.max(radius, clothVertexContactRadius(topology, i));
   for (let t = 0; t < T; t++) {
@@ -297,16 +299,25 @@ export function packClothColliders(colliders: readonly ClothCollider[], frame: C
 export const CONTACT_CONTROL = {
   K_COUNT: 96, K_BASE: 97, K_ENTRIES: 98, K_ERROR: 99, K_DONE: 100, K_OUTER: 101, K_KKT: 102, K_FR: 103, K_PEN: 104, K_PREV: 105, K_RESID: 106,
   R_ACTIVE: 107, R_CONTINUE: 108, R_STIFFEN: 109, K_CONTACTS: 110, K_SELF: 111, K_REPPEN: 112, K_SOLVES: 113, K_ADDED: 114, K_DETECT: 115,
-  // The first primitive whose swept box breaks the two-cells-per-axis grid bound: (grid << 30) | (primitive + 1), and its widest box extent (f32 bits).
-  K_SPAN: 116, K_SPAN_EXTENT: 117,
+  // This detection's widest swept, padded primitive box extent on any axis (f32 bits, atomicMax), which sets its grid cell (gridCell),
+  // and the first primitive whose box is not finite: (grid << 30) | (primitive + 1).
+  K_BOX_WIDTH: 116, K_BOX_NONFINITE: 117,
 } as const;
 export const CONTACT_CONTROL_WORDS = 120;
-export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64, E_UNSUPPORTED = 128, E_SPAN = 1024;
+export const E_CAPACITY = 1, E_GRID = 2, E_CROSSED = 4, E_STIFFNESS = 8, E_TABLE = 16, E_CELLS = 32, E_NONFINITE = 64, E_UNSUPPORTED = 128, E_BOX_NONFINITE = 1024;
 /** physics.contactGridEntries authored as this, or unset (the default): 8 (triangles + edges + segments)
- * grid entries, valid while every swept, padded primitive box is narrower than
- * the grid cell on each axis (at most 2 cells, so at most 8 entries); detection
- * checks that premise and a box that breaks it fails the step (E_SPAN). */
+ * grid entries. Each detection sizes its grid cell from its own boxes (gridCell:
+ * the rest cell, or the widest swept, padded primitive box times 1 + GRID_CELL_EPS
+ * when that is wider), so every box is narrower than the cell on each axis,
+ * touches at most 2 cells per axis and inserts at most 8 entries. A box that is
+ * not finite has no cell and fails the step, naming it (E_BOX_NONFINITE). */
 export const CONTACT_GRID_CELL_BOUND = 'two-cells-per-axis';
+/** The margin of a grown cell over the widest box. It covers the f32 rounding of
+ * floor(x / cell) at the box's two ends (a relative quotient error of about
+ * |x| / cell * 2^-23), so a box narrower than the cell spans 2 cells, for
+ * coordinates up to about 10^4 cells from the origin; past that a 3-cell span
+ * overflows the 8-entry pool, which fails the step with its fill (E_GRID). */
+export const GRID_CELL_EPS = 2 ** -10;
 /** Cells one primitive may cover before detection reports it (it is not dropped). */
 export const CELL_CAP = 512;
 export const SCAN_WG = 256;
@@ -469,14 +480,14 @@ fn colliderSample(ci:u32,q0:P2,beforeEnd:f32)->Sample{
  let begin=atomicLoad(&C[${C.C_STATUS}u])==${S_CONVERGED}u&&atomicLoad(&C[${K.K_DONE}u])==0u&&atomicLoad(&C[${K.K_ERROR}u])==0u&&p.contactMode==1u;
  atomicStore(&C[${K.R_ACTIVE}u],select(0u,1u,begin));atomicStore(&C[${K.R_CONTINUE}u],0u);atomicStore(&C[${K.K_ADDED}u],0u);atomicStore(&C[${K.K_DETECT}u],select(0u,1u,begin));
  if(!begin){return;}
- atomicStore(&C[${K.K_BASE}u],atomicLoad(&C[${K.K_COUNT}u]));atomicStore(&C[${K.K_ENTRIES}u],0u);
+ atomicStore(&C[${K.K_BASE}u],atomicLoad(&C[${K.K_COUNT}u]));atomicStore(&C[${K.K_ENTRIES}u],0u);atomicStore(&C[${K.K_BOX_WIDTH}u],0u);
  atomicStore(&C[${K.K_KKT}u],0u);atomicStore(&C[${K.K_FR}u],0u);atomicStore(&C[${K.K_PEN}u],0u);atomicStore(&C[${K.K_REPPEN}u],0u);atomicStore(&C[${K.K_CONTACTS}u],0u);atomicStore(&C[${K.K_SELF}u],0u);
 }
 // The first detection of a step, at the prediction.
 @compute @workgroup_size(1) fn detectBegin(){
  let on=p.contactMode==1u;atomicStore(&C[${K.K_DETECT}u],select(0u,1u,on));atomicStore(&C[${K.R_CONTINUE}u],select(0u,1u,on));
  atomicStore(&C[${K.K_COUNT}u],0u);atomicStore(&C[${K.K_BASE}u],0u);atomicStore(&C[${K.K_ENTRIES}u],0u);atomicStore(&C[${K.K_ADDED}u],0u);
- atomicStore(&C[${K.K_SPAN}u],0u);atomicStore(&C[${K.K_SPAN_EXTENT}u],0u);
+ atomicStore(&C[${K.K_BOX_WIDTH}u],0u);atomicStore(&C[${K.K_BOX_NONFINITE}u],0u);
 }
 fn contactGap(c:u32)->f32{let k=contactAt(c);return k.g0+dot(k.n,contactSum(k,0u));}
 @compute @workgroup_size(${WG}) fn updateMultipliers(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
@@ -636,7 +647,9 @@ fn incidenceBefore(a:u32,b:u32)->bool{
 }
 
 // ---- broadphase: a hash grid of swept faces and edges, each entry once per bucket
-fn cellOf(x:vec3f)->vec3i{return vec3i(floor(x/p.cellSize));}
+// This detection's cell: the rest cell, or wider than every box the box passes measured (K_BOX_WIDTH).
+fn gridCell()->f32{return max(p.cellSize,bitcast<f32>(atomicLoad(&C[${K.K_BOX_WIDTH}u]))*${1 + GRID_CELL_EPS});}
+fn cellOf(x:vec3f,cell:f32)->vec3i{return vec3i(floor(x/cell));}
 fn bucketOf(c:vec3i)->u32{let u=bitcast<vec3u>(c);return ((u.x*73856093u)^(u.y*19349663u)^(u.z*83492791u))&(p.gridBuckets-1u);}
 fn cellCount(a:vec3i,b:vec3i)->u32{let d=vec3u(b-a)+vec3u(1);if(any(b<a)){return 0u;}if(d.x>${CELL_CAP}u||d.y>${CELL_CAP}u||d.z>${CELL_CAP}u){return ${CELL_CAP + 1}u;}return d.x*d.y*d.z;}
 fn cellAt(a:vec3i,b:vec3i,k:u32)->vec3i{let d=vec3u(b-a)+vec3u(1);return a+vec3i(vec3u(k%d.x,(k/d.x)%d.y,k/(d.x*d.y)));}
@@ -648,30 +661,45 @@ fn insertEntry(grid:u32,prim:u32,a:vec3i,b:vec3i){
   KU[p.uEntry+2u*e]=prim;KU[p.uEntry+2u*e+1u]=atomicExchange(&KA[p.aHeads+grid*p.gridBuckets+bucket],e+1u);
  }
 }
-// The two-cells-per-axis grid bound's premise: a box at least the cell wide on an axis fails the step, naming the first such primitive.
-fn insertBox(grid:u32,prim:u32,box:array<vec3f,2>){
- if(p.gridSpanCheck!=0u){let w=box[1]-box[0];let m=max(w.x,max(w.y,w.z));if(!(m<p.cellSize)){atomicOr(&C[${K.K_ERROR}u],${E_SPAN}u);
-  loop{let r=atomicCompareExchangeWeak(&C[${K.K_SPAN}u],0u,(grid<<30u)|(prim+1u));if(r.exchanged){atomicStore(&C[${K.K_SPAN_EXTENT}u],bitcast<u32>(m));break;}if(r.old_value!=0u){break;}}}}
- insertEntry(grid,prim,cellOf(box[0]),cellOf(box[1]));
+// A box pass stores each primitive's box and widens this detection's cell to hold it (positive f32 bits order as u32);
+// a box that is not finite fails the step, naming the first such primitive.
+fn measureBox(grid:u32,prim:u32,box:array<vec3f,2>){
+ let w=box[1]-box[0];let m=max(w.x,max(w.y,w.z));
+ if(m<=3.4e38){if(m>0.){atomicMax(&C[${K.K_BOX_WIDTH}u],bitcast<u32>(m));}return;}
+ atomicOr(&C[${K.K_ERROR}u],${E_BOX_NONFINITE}u);
+ loop{let r=atomicCompareExchangeWeak(&C[${K.K_BOX_NONFINITE}u],0u,(grid<<30u)|(prim+1u));if(r.exchanged||r.old_value!=0u){break;}}
+}
+// An insert pass, after every box pass: the stored box's cells, in this detection's cell.
+fn insertBox(grid:u32,prim:u32,lo:vec4f,hi:vec4f){
+ if(atomicLoad(&C[${K.K_BOX_NONFINITE}u])!=0u){return;}
+ let cell=gridCell();insertEntry(grid,prim,cellOf(lo.xyz,cell),cellOf(hi.xyz,cell));
 }
 fn padBox(lo:vec3f,hi:vec3f,r:f32)->array<vec3f,2>{let pad=r+1e-6*(abs(lo)+abs(hi))+1e-9;return array<vec3f,2>(lo-pad,hi+pad);}
 @compute @workgroup_size(${WG}) fn gridClear(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) ng:vec3u){
  if(atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
  let grids=select(2u,3u,p.rodContact!=0u);for(var b=g.x;b<grids*p.gridBuckets;b+=ng.x*${WG}u){atomicStore(&KA[p.aHeads+b],0u);}
 }
-@compute @workgroup_size(${WG}) fn gridFaces(@builtin(global_invocation_id) g:vec3u){
+@compute @workgroup_size(${WG}) fn boxFaces(@builtin(global_invocation_id) g:vec3u){
  let f=g.x;if(f>=p.triangles||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
  let id=triIds(f);var loB=min(approx(sweptPoint(id.x,0.)),approx(sweptPoint(id.x,1.)));var hiB=max(approx(sweptPoint(id.x,0.)),approx(sweptPoint(id.x,1.)));
  for(var j=1u;j<3u;j++){let v=id[j];loB=min(loB,min(approx(sweptPoint(v,0.)),approx(sweptPoint(v,1.))));hiB=max(hiB,max(approx(sweptPoint(v,0.)),approx(sweptPoint(v,1.))));}
  let box=padBox(loB,hiB,ksf(p.sFaceR+f));KF[p.kfFaceBox+2u*f]=vec4f(box[0],0);KF[p.kfFaceBox+2u*f+1u]=vec4f(box[1],0);
- insertBox(0u,f,box);
+ measureBox(0u,f,box);
+}
+@compute @workgroup_size(${WG}) fn gridFaces(@builtin(global_invocation_id) g:vec3u){
+ let f=g.x;if(f>=p.triangles||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
+ insertBox(0u,f,KF[p.kfFaceBox+2u*f],KF[p.kfFaceBox+2u*f+1u]);
 }
 fn edgeIds(e:u32)->vec2u{return vec2u(I[p.sEdge+4u*e],I[p.sEdge+4u*e+1u]);}
-@compute @workgroup_size(${WG}) fn gridEdges(@builtin(global_invocation_id) g:vec3u){
+@compute @workgroup_size(${WG}) fn boxEdges(@builtin(global_invocation_id) g:vec3u){
  let e=g.x;if(e>=p.edges||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
  let id=edgeIds(e);let a0=approx(sweptPoint(id.x,0.));let a1=approx(sweptPoint(id.x,1.));let b0=approx(sweptPoint(id.y,0.));let b1=approx(sweptPoint(id.y,1.));
  let box=padBox(min(min(a0,a1),min(b0,b1)),max(max(a0,a1),max(b0,b1)),ksf(p.sEdge+4u*e+2u));KF[p.kfEdgeBox+2u*e]=vec4f(box[0],0);KF[p.kfEdgeBox+2u*e+1u]=vec4f(box[1],0);
- insertBox(1u,e,box);
+ measureBox(1u,e,box);
+}
+@compute @workgroup_size(${WG}) fn gridEdges(@builtin(global_invocation_id) g:vec3u){
+ let e=g.x;if(e>=p.edges||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
+ insertBox(1u,e,KF[p.kfEdgeBox+2u*e],KF[p.kfEdgeBox+2u*e+1u]);
 }
 fn overlaps(a0:vec3f,a1:vec3f,b0:vec3f,b1:vec3f)->bool{return all(a0<=b1)&&all(b0<=a1);}
 fn inList(start:u32,list:u32,row:u32,value:u32)->bool{for(var k=I[start+row];k<I[start+row+1u];k++){if(I[list+k]==value){return true;}}return false;}
@@ -725,13 +753,13 @@ fn vertexFace(i:u32,f:u32){
 @compute @workgroup_size(${WG}) fn detectFaces(@builtin(global_invocation_id) g:vec3u){
  let i=g.x;if(i>=p.n||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||!kShell(i)){return;}
  let box=padBox(min(approx(sweptPoint(i,0.)),approx(sweptPoint(i,1.))),max(approx(sweptPoint(i,0.)),approx(sweptPoint(i,1.))),kRadius(i));
- let ca=cellOf(box[0]);let cb=cellOf(box[1]);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){atomicOr(&C[${K.K_ERROR}u],${E_CELLS}u);return;}
+ let gc=gridCell();let ca=cellOf(box[0],gc);let cb=cellOf(box[1],gc);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){atomicOr(&C[${K.K_ERROR}u],${E_CELLS}u);return;}
  for(var k=0u;k<count;k++){
   let cell=cellAt(ca,cb,k);var e=atomicLoad(&KA[p.aHeads+bucketOf(cell)]);
   while(e!=0u){
    let f=KU[p.uEntry+2u*(e-1u)];e=KU[p.uEntry+2u*(e-1u)+1u];
    let f0=KF[p.kfFaceBox+2u*f].xyz;let f1=KF[p.kfFaceBox+2u*f+1u].xyz;
-   if(!overlaps(box[0],box[1],f0,f1)||any(max(ca,cellOf(f0))!=cell)){continue;}
+   if(!overlaps(box[0],box[1],f0,f1)||any(max(ca,cellOf(f0,gc))!=cell)){continue;}
    vertexFace(i,f);
   }
  }
@@ -765,14 +793,14 @@ fn edgeEdge(ai:u32,bi:u32){
 @compute @workgroup_size(${WG}) fn detectEdges(@builtin(global_invocation_id) g:vec3u){
  let ai=g.x;if(ai>=p.edges||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u){return;}
  let b0=KF[p.kfEdgeBox+2u*ai].xyz;let b1=KF[p.kfEdgeBox+2u*ai+1u].xyz;
- let ca=cellOf(b0);let cb=cellOf(b1);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){return;}
+ let gc=gridCell();let ca=cellOf(b0,gc);let cb=cellOf(b1,gc);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){return;}
  for(var k=0u;k<count;k++){
   let cell=cellAt(ca,cb,k);var e=atomicLoad(&KA[p.aHeads+p.gridBuckets+bucketOf(cell)]);
   while(e!=0u){
    let bi=KU[p.uEntry+2u*(e-1u)];e=KU[p.uEntry+2u*(e-1u)+1u];
    if(bi<=ai){continue;}
    let e0=KF[p.kfEdgeBox+2u*bi].xyz;let e1=KF[p.kfEdgeBox+2u*bi+1u].xyz;
-   if(!overlaps(b0,b1,e0,e1)||any(max(ca,cellOf(e0))!=cell)){continue;}
+   if(!overlaps(b0,b1,e0,e1)||any(max(ca,cellOf(e0,gc))!=cell)){continue;}
    edgeEdge(ai,bi);
   }
  }
@@ -977,18 +1005,22 @@ fn touchesNear(i:u32,v:u32)->bool{
  return false;
 }
 fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
-@compute @workgroup_size(${WG}) fn gridSegments(@builtin(global_invocation_id) g:vec3u){
+@compute @workgroup_size(${WG}) fn boxSegments(@builtin(global_invocation_id) g:vec3u){
  let s=g.x;if(s>=p.segments||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
  let id=segIds(s);let a0=approx(sweptPoint(id.x,0.));let a1=approx(sweptPoint(id.x,1.));let b0=approx(sweptPoint(id.y,0.));let b1=approx(sweptPoint(id.y,1.));
  let box=padBox(min(min(a0,a1),min(b0,b1)),max(max(a0,a1),max(b0,b1)),segR(s));KF[p.kfSegBox+2u*s]=vec4f(box[0],0);KF[p.kfSegBox+2u*s+1u]=vec4f(box[1],0);
- insertBox(2u,s,box);
+ measureBox(2u,s,box);
+}
+@compute @workgroup_size(${WG}) fn gridSegments(@builtin(global_invocation_id) g:vec3u){
+ let s=g.x;if(s>=p.segments||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
+ insertBox(2u,s,KF[p.kfSegBox+2u*s],KF[p.kfSegBox+2u*s+1u]);
 }
 // Rod vertex spheres against faces (rv) and shell edges (rq); rod and shell vertices against segments (rp).
 @compute @workgroup_size(${WG}) fn detectRodPoints(@builtin(global_invocation_id) g:vec3u){
  let i=g.x;if(i>=p.n||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
  let rod=rodVertex(i);if(!rod&&!kShell(i)){return;}
  let ri=kRadius(i);let box=padBox(min(approx(sweptPoint(i,0.)),approx(sweptPoint(i,1.))),max(approx(sweptPoint(i,0.)),approx(sweptPoint(i,1.))),ri);
- let ca=cellOf(box[0]);let cb=cellOf(box[1]);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){atomicOr(&C[${K.K_ERROR}u],${E_CELLS}u);return;}
+ let gc=gridCell();let ca=cellOf(box[0],gc);let cb=cellOf(box[1],gc);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){atomicOr(&C[${K.K_ERROR}u],${E_CELLS}u);return;}
  for(var k=0u;k<count;k++){
   let cell=cellAt(ca,cb,k);let bucket=bucketOf(cell);
   if(rod){
@@ -996,7 +1028,7 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
    while(e!=0u){
     let f=KU[p.uEntry+2u*(e-1u)];e=KU[p.uEntry+2u*(e-1u)+1u];
     let f0=KF[p.kfFaceBox+2u*f].xyz;let f1=KF[p.kfFaceBox+2u*f+1u].xyz;
-    if(!overlaps(box[0],box[1],f0,f1)||any(max(ca,cellOf(f0))!=cell)){continue;}
+    if(!overlaps(box[0],box[1],f0,f1)||any(max(ca,cellOf(f0,gc))!=cell)){continue;}
     let id=triIds(f);if(touchesNear(i,id.x)||touchesNear(i,id.y)||touchesNear(i,id.z)){continue;}
     var ids:array<u32,5>;ids[0]=i;ids[1]=id.x;ids[2]=id.y;ids[3]=id.z;
     rodPair((4u<<28u)|i,f,ids,ri+ksf(p.sFaceR+f),ri,vec2u(kOwner(i),NONE));
@@ -1005,7 +1037,7 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
    while(q!=0u){
     let ed=KU[p.uEntry+2u*(q-1u)];q=KU[p.uEntry+2u*(q-1u)+1u];
     let e0=KF[p.kfEdgeBox+2u*ed].xyz;let e1=KF[p.kfEdgeBox+2u*ed+1u].xyz;
-    if(!overlaps(box[0],box[1],e0,e1)||any(max(ca,cellOf(e0))!=cell)){continue;}
+    if(!overlaps(box[0],box[1],e0,e1)||any(max(ca,cellOf(e0,gc))!=cell)){continue;}
     let id=edgeIds(ed);if(touchesNear(i,id.x)||touchesNear(i,id.y)){continue;}
     var ids:array<u32,5>;ids[0]=i;ids[1]=id.x;ids[2]=id.y;
     rodPair((5u<<28u)|i,ed,ids,ri+edgeR(ed),ri,vec2u(kOwner(i),NONE));
@@ -1015,7 +1047,7 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
   while(h!=0u){
    let s=KU[p.uEntry+2u*(h-1u)];h=KU[p.uEntry+2u*(h-1u)+1u];
    let s0=KF[p.kfSegBox+2u*s].xyz;let s1=KF[p.kfSegBox+2u*s+1u].xyz;
-   if(!overlaps(box[0],box[1],s0,s1)||any(max(ca,cellOf(s0))!=cell)){continue;}
+   if(!overlaps(box[0],box[1],s0,s1)||any(max(ca,cellOf(s0,gc))!=cell)){continue;}
    let id=segIds(s);if(id.x==i||id.y==i){continue;}
    if(!rod&&(inRing(i,id.x)||inRing(i,id.y))){continue;}
    if(inList(p.sRpXStart,p.sRpXList,i,s)){continue;}
@@ -1028,14 +1060,14 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
 @compute @workgroup_size(${WG}) fn detectRodSegments(@builtin(global_invocation_id) g:vec3u){
  let s=g.x;if(s>=p.segments||atomicLoad(&C[${K.K_DETECT}u])==0u||p.selfCollision==0u||p.rodContact==0u){return;}
  let id=segIds(s);let r=segR(s);let b0=KF[p.kfSegBox+2u*s].xyz;let b1=KF[p.kfSegBox+2u*s+1u].xyz;
- let ca=cellOf(b0);let cb=cellOf(b1);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){return;}
+ let gc=gridCell();let ca=cellOf(b0,gc);let cb=cellOf(b1,gc);let count=cellCount(ca,cb);if(count>${CELL_CAP}u){return;}
  for(var k=0u;k<count;k++){
   let cell=cellAt(ca,cb,k);let bucket=bucketOf(cell);
   var e=atomicLoad(&KA[p.aHeads+bucket]);
   while(e!=0u){
    let f=KU[p.uEntry+2u*(e-1u)];e=KU[p.uEntry+2u*(e-1u)+1u];
    let f0=KF[p.kfFaceBox+2u*f].xyz;let f1=KF[p.kfFaceBox+2u*f+1u].xyz;
-   if(!overlaps(b0,b1,f0,f1)||any(max(ca,cellOf(f0))!=cell)){continue;}
+   if(!overlaps(b0,b1,f0,f1)||any(max(ca,cellOf(f0,gc))!=cell)){continue;}
    let t=triIds(f);var touch=false;for(var j=0u;j<3u;j++){if(inRing(id.x,t[j])||inRing(id.y,t[j])){touch=true;}}
    if(touch){continue;}
    var ids:array<u32,5>;ids[0]=id.x;ids[1]=id.y;ids[2]=t.x;ids[3]=t.y;ids[4]=t.z;
@@ -1045,7 +1077,7 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
   while(q!=0u){
    let ed=KU[p.uEntry+2u*(q-1u)];q=KU[p.uEntry+2u*(q-1u)+1u];
    let e0=KF[p.kfEdgeBox+2u*ed].xyz;let e1=KF[p.kfEdgeBox+2u*ed+1u].xyz;
-   if(!overlaps(b0,b1,e0,e1)||any(max(ca,cellOf(e0))!=cell)){continue;}
+   if(!overlaps(b0,b1,e0,e1)||any(max(ca,cellOf(e0,gc))!=cell)){continue;}
    let t=edgeIds(ed);if(inRing(id.x,t.x)||inRing(id.y,t.x)||inRing(id.x,t.y)||inRing(id.y,t.y)){continue;}
    var ids:array<u32,5>;ids[0]=id.x;ids[1]=id.y;ids[2]=t.x;ids[3]=t.y;
    rodPair((8u<<28u)|s,ed,ids,r+edgeR(ed),r,vec2u(s,NONE));
@@ -1055,7 +1087,7 @@ fn edgeR(e:u32)->f32{return ksf(p.sEdge+4u*e+2u);}
    let u=KU[p.uEntry+2u*(h-1u)];h=KU[p.uEntry+2u*(h-1u)+1u];
    if(u<=s){continue;}
    let u0=KF[p.kfSegBox+2u*u].xyz;let u1=KF[p.kfSegBox+2u*u+1u].xyz;
-   if(!overlaps(b0,b1,u0,u1)||any(max(ca,cellOf(u0))!=cell)){continue;}
+   if(!overlaps(b0,b1,u0,u1)||any(max(ca,cellOf(u0,gc))!=cell)){continue;}
    let t=segIds(u);if(inRing(id.x,t.x)||inRing(id.y,t.x)||inRing(id.x,t.y)||inRing(id.y,t.y)){continue;}
    if(inList(p.sRsXStart,p.sRsXList,s,u)){continue;}
    var ids:array<u32,5>;ids[0]=id.x;ids[1]=id.y;ids[2]=t.x;ids[3]=t.y;

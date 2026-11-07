@@ -110,9 +110,10 @@ export interface ClothPhysicsOptions {
   readonly contactCapacity?:number;
   /** Its swept-primitive grid entries: a measured peak, or the bound
    * 'two-cells-per-axis' (the default when unset): 8 (triangles + edges +
-   * segments) entries, valid while every swept, padded primitive box is
-   * narrower than the grid cell on each axis; detection checks that and a box
-   * that is not fails the step, naming it. */
+   * segments) entries. Each detection widens its grid cell past its widest
+   * swept, padded primitive box, so every box touches at most 2 cells per axis
+   * however far the cloth stretches or moves in the step; a nonfinite box
+   * fails the step, naming it. */
   readonly contactGridEntries?:number|'two-cells-per-axis';
 }
 
