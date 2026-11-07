@@ -90,3 +90,56 @@ test('cloth contact shares sampled static zero surface, normals, edits and seria
  }
  const c=clothSceneStaticColliders(cut)[0]!;if(c.kind==='sampled')assert.ok(c.distanceLowerBound!([-.005,.12,-.005],[.005,.2,.005],0)>0,'cut interval is certified open');
  });
+
+test('brick-culled static source bake is the dense bake, patch for patch, with fewer exact samples', async () => {
+ const {bakeProceduralSolid}=await import('../lib/core/procedural-solid');
+ const {staticSourceBrickCull,sourceFieldUsesMesh}=await import('../lib/cloth/source-static-solids');
+ const h=.01,dims=[48,40,56] as const,base={group:0,sampled:true,root:true,axis:[0,1,0] as [number,number,number],angle_rad:0,sourceAttributes:{}};
+ // Container (inside box), a rotated rounded box and a sphere-box intersection
+ // whose zero sets cross brick faces, edges and corners.
+ const fields=[{...base,index:0,kind:'box' as const,usage:'solid' as const,inside:true,center_m:[0,.2,0] as [number,number,number],halfExtents_m:[.2,.16,.24] as [number,number,number],roundingRadius_m:0},
+  {...base,index:1,kind:'box' as const,usage:'solid' as const,inside:false,center_m:[.05,.15,-.04] as [number,number,number],halfExtents_m:[.06,.03,.05] as [number,number,number],roundingRadius_m:.01,axis:[1,1,0] as [number,number,number],angle_rad:.7},
+  {...base,index:2,kind:'sphere' as const,usage:'solid' as const,inside:false,root:false,center_m:[-.1,.1,.1] as [number,number,number],radius_m:.07},
+  {...base,index:3,kind:'box' as const,usage:'solid' as const,inside:false,root:false,center_m:[-.1,.06,.1] as [number,number,number],halfExtents_m:[.1,.04,.1] as [number,number,number],roundingRadius_m:0},
+  {...base,index:4,kind:'intersect' as const,usage:'solid' as const,inside:false,children:[2,3]}];
+ const roots=[0,1,4],origin=[-dims[0]*h/2,0,-dims[2]*h/2];let exactCalls=0;
+ const exact=(p:readonly number[])=>{exactCalls++;const w=[origin[0]!+p[0]!*h,origin[1]!+p[1]!*h,origin[2]!+p[2]!*h] as [number,number,number];return Math.min(...roots.map(i=>sourceFieldDistance(fields as never,i,w)))/h;};
+ const dense=bakeProceduralSolid(dims,[h,h,h],exact),denseCalls=exactCalls;exactCalls=0;
+ const culled=bakeProceduralSolid(dims,[h,h,h],staticSourceBrickCull(dims,exact,1));
+ assert.deepEqual(culled,dense);
+ assert.ok(dense.solidBoundary.bricks.length>20&&dense.solidVoxels.some(p=>!('solidFraction' in p)),'test spans cut, fill and empty bricks');
+ assert.ok(exactCalls<.9*denseCalls,`culled exact samples ${exactCalls} of ${denseCalls}`);
+ // A mesh distance is trilinear over a grid, not certified 1-Lipschitz: no cull.
+ assert.equal(sourceFieldUsesMesh(fields as never,4),false);
+ assert.equal(sourceFieldUsesMesh([...fields,{...base,index:5,kind:'file',usage:'solid',inside:false},{...base,index:6,kind:'intersect',usage:'solid',inside:false,children:[0,5]}] as never,6),true);
+ assert.equal(staticSourceBrickCull(dims,exact,Infinity),exact);
+ assert.throws(()=>staticSourceBrickCull(dims,exact,.5),/Lipschitz/);
+});
+
+test('paged seed phi continues through procedural walls vertex by vertex exactly as the whole-lattice map does', async () => {
+ const {bakeProceduralSolid}=await import('../lib/core/procedural-solid');
+ const {fluidLatticeVertexPhi,fluidLatticePagedVertexPhi,proceduralWallContinuation,proceduralWallContinuationAt,initialLiquidVertexPhi}=await import('../lib/core/initial-liquid-lattice');
+ const s=cloneScene(defaultScene),n=48,h=.01,r=6;
+ s.container={width_m:n*h,height_m:n*h,depth_m:n*h,top:'open',fillFraction:0,fluidWallMode:'free-slip',boundary:'free-space',vessel:'none'};
+ s.voxelDomain={finestCellSize_m:h,brickSize_cells:8};s.rigidBodies=[];s.scenery=undefined;
+ // A cavity whose liquid is bounded by the wall's own surface: the case continuation exists for.
+ Object.assign(s,bakeProceduralSolid([n,n,n],[h,h,h],([x,y,z])=>r-Math.hypot(x-24,y-24.5,z-23.7)));
+ s.fluid={...s.fluid,initialCondition:'tank-fill',initialLiquidVolumes:[{shape:'sphere',center_m:{x:0,y:24.5*h,z:-.3*h},radius_m:r*h}]};
+ const dims=[n,n,n] as const,dense=initialLiquidVertexPhi(s,dims),X=n+1;
+ let reads=0;const phiAt=(x:number,y:number,z:number)=>{reads++;return dense[x+X*(y+X*z)]!;},buriedAt=()=>false;
+ const map=proceduralWallContinuation(s,dims,phiAt,buriedAt),at=proceduralWallContinuationAt(s,dims,phiAt,buriedAt)!;
+ assert.ok(map.size>100,`continued ${map.size} wall vertices`);
+ for(let z=0;z<=n;z++)for(let y=0;y<=n;y++)for(let x=0;x<=n;x++)assert.equal(at(x,y,z),map.get(x+X*(y+X*z)));
+ reads=0;at(0,0,0);assert.equal(reads,0,'a vertex outside every cut reads no phi');
+ // Paged phi on every page and on a sparse subset matches the dense path where stored.
+ const whole=fluidLatticeVertexPhi(s),info=fluidLatticePagedVertexPhi(s,16,()=>true),sparse=fluidLatticePagedVertexPhi(s,16,(x,y,z)=>(x+y+z)%2===0);
+ const [nx,ny]=info.cells;
+ for(const pages of [info,sparse])for(const [key,page] of pages.at){
+  const [px,py]=pages.pages,o=[key%px,Math.floor(key/px)%py,Math.floor(key/(px*py))].map(v=>16*v);
+  for(let k=0;k<17;k++)for(let j=0;j<17;j++)for(let i=0;i<17;i++){
+   const x=o[0]!+i,y=o[1]!+j,z=o[2]!+k;if(x>nx||y>ny||z>pages.cells[2])continue;
+   assert.equal(page[i+17*(j+17*k)],whole[x+(nx+1)*(y+(ny+1)*z)]);
+  }
+ }
+ assert.ok(sparse.at.size<info.at.size);
+});

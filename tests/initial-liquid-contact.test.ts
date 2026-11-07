@@ -38,3 +38,21 @@ test("liquid authored to a sealed vessel's off-grid walls measures its authored 
   assert.equal(filled, 32*28*32);
   assert.equal(cutOpen, 0);
 });
+
+// An empty tank-fill (fillFraction 0) holds no liquid, so it bounds no pages:
+// it once added a [0, nx] x [0, 2) x [0, nz] floor slab, and the paged volume
+// sampled every floor page of a source scene whose liquid is one emitter.
+test("an empty tank-fill adds no initial liquid extent; a filled one bounds its depth", async () => {
+  const { initialLiquidCellBounds, fluidLatticePagedCellVolumes } = await import("../lib/core/initial-liquid-lattice");
+  const { cloneScene, defaultScene } = await import("../lib/core/model");
+  const scene = cloneScene(defaultScene), n = 32, h = .01;
+  scene.container = { ...scene.container, width_m: n*h, height_m: n*h, depth_m: n*h, fillFraction: 0, boundary: "walls" as never };
+  scene.voxelDomain = { finestCellSize_m: h, brickSize_cells: 8 }; scene.rigidBodies = []; scene.solidVoxels = [];
+  scene.fluid = { ...scene.fluid, initialCondition: "tank-fill", initialBrickSeeds_m: undefined, initialHeightField: undefined, initialLiquidVolumes: [] };
+  assert.deepEqual(initialLiquidCellBounds(scene, [n, n, n]), []);
+  assert.equal(fluidLatticePagedCellVolumes(scene, 16).volume.at.size, 0);
+  scene.fluid.initialLiquidVolumes = [{ shape: "sphere", center_m: { x: 0, y: .16, z: 0 }, radius_m: .03 }];
+  assert.deepEqual(initialLiquidCellBounds(scene, [n, n, n]), [[[12, 12, 12], [21, 21, 21]]]);
+  scene.fluid.initialLiquidVolumes = []; scene.container.fillFraction = .25;
+  assert.deepEqual(initialLiquidCellBounds(scene, [n, n, n]), [[[0, 0, 0], [n, 10, n]]]);
+});
