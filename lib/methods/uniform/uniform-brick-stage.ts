@@ -69,6 +69,9 @@ export interface UbaStageChannel{
  fine?:string;
  weight?:string;
  outside?:string;
+ /** Another channel of this call whose window array this one reuses (the
+  * same halo): a pass staging one field after another pays one window. */
+ window?:string;
 }
 export interface UbaStageOptions{
  level:UbaStageLevel;
@@ -142,7 +145,12 @@ export function ubaStageWGSL(arena:UniformBrickArena,kernel:string,options:UbaSt
   if(ch.seam==="prolong"&&level!==0)throw new Error(`ubaStage ${K}/${ch.name}: prolong stages h values (level 0)`);
   if(ch.seam==="restrict"&&level!==2)throw new Error(`ubaStage ${K}/${ch.name}: restrict stages 4h values (level 2)`);
   if(ch.layout==="face"&&ch.axis===undefined)throw new Error(`ubaStage ${K}/${ch.name}: a face channel names its axis`);
-  words+=(8+2*ch.halo)**3;
+  if(ch.window!==undefined){
+   const owner=channels.find(o=>o.name===ch.window);
+   if(!owner||owner===ch||owner.window!==undefined||owner.halo!==ch.halo)throw new Error(`ubaStage ${K}/${ch.name}: window ${ch.window} is not an earlier own-window channel of halo ${ch.halo}`);
+   if(channels.indexOf(owner)>channels.indexOf(ch))throw new Error(`ubaStage ${K}/${ch.name}: window ${ch.window} comes later`);
+  }
+  else words+=(8+2*ch.halo)**3;
  }
  if(words+128>UBA_STAGE_WORDS)throw new Error(`ubaStage ${K}: ${words} window words past the ${UBA_STAGE_WORDS}-word threadgroup budget (march z-slabs, or stage fewer channels a stage)`);
  const fineOwned=options.fineOwned??`ubaFineOwned_${K}`;
@@ -178,7 +186,7 @@ fn ubaFineOwned_${K}(c:vec3i)->bool{
  return ((ubaRecordWord(s,28u)>>(t.x|(t.y<<1u)|(t.z<<2u)))&1u)!=0u;
 }`);
  for(const ch of channels){
-  const e=8+2*ch.halo,e3=e**3,W=`ubaW_${K}_${ch.name}`;
+  const e=8+2*ch.halo,e3=e**3,W=`ubaW_${K}_${ch.window??ch.name}`;
   let core:string;
   if(typeof ch.core==="string")core=`${ch.core}(w,ubaB_${K}[n],l)`;
   else{const pool=arena.poolOf(ch.core.pool)||"";core=`ubaLoad${pool}(${arena.baseExpression(ch.core.pool,level,ch.core.component??0,ch.core.bank??0)},w,l.x+8u*(l.y+8u*l.z))`;}
@@ -194,7 +202,7 @@ fn ubaFineOwned_${K}(c:vec3i)->bool{
   else if(${fineOwned}(p)){v=${seam};}
   else{v=${core};}`;
   lines.push(/* wgsl */`
-var<workgroup> ${W}:array<f32,${e3}>;
+${ch.window?"":`var<workgroup> ${W}:array<f32,${e3}>;`}
 const UBA_HALO_${K}_${ch.name}:i32=${ch.halo};
 fn ubaAt_${K}_${ch.name}(c:vec3i)->u32{let q=vec3u(c+vec3i(${ch.halo}));return q.x+${e}u*(q.y+${e}u*q.z);}
 fn ubaGet_${K}_${ch.name}(c:vec3i)->f32{return ${W}[ubaAt_${K}_${ch.name}(c)];}

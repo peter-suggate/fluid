@@ -55,6 +55,8 @@ Regression: `tests/uniform-brick-stage.test.ts`.
 | letters 120 | 57.7 ms (88.9) | -0.0092 | 995k particles |
 | rest 16x8x4 (60, pipelined) | 4.11 ms (15.9) | 0 | steady median 3.80 |
 | drop=2 16x8x4 (60, pipelined) | 16.50 ms (26.5) | -6e-8 | steady median 16.42 |
+| rest 8x8x4 (60, pipelined) | 2.94 ms (11.6) | 0 | |
+| drop=2 8x8x4 (60, pipelined) | 13.58 ms (18.9) | | |
 
 ## Decisions
 
@@ -64,9 +66,49 @@ Regression: `tests/uniform-brick-stage.test.ts`.
   - The h pass stages with halo 2 (prolonged 4h neighbours), sweeps in threadgroup memory, and publishes the canonical scratch.
   - Cited methods: Zhao fast sweeping (2005); Adalsteinsson & Sethian (1999) for the extension velocity; Bridson (2015), §4 for extrapolation.
 
+## ubaExtend (B4's extension core)
+
+`lib/methods/uniform/uniform-brick-extension.ts`, `ubaExtendWGSL(arena, K, {level, workgroup, sweeps, spacing, reach, components, write})`.
+- **Per component:** it stages the value window and the seed distance window with halo = sweeps. It runs `sweeps` Jacobi sweeps of today's `ueCombine` in threadgroup memory: the Godunov upwind root, the band cut-off at `reach` cells, and the upwind-weighted extension value. It hands each core face's (value, distance) to `write`.
+- **Domain:** a seed distance of 0 marks a source, 1e20 an unreached face, and −1 (`UBA_BLOCKED`) a face outside the domain. A blocked face is never swept and is never an upwind neighbour. It is the default outside the stored pages. Seam faces are swept like any other face.
+- **Exactness:** sweep s computes the window inset by s+1. The core therefore equals that many global Jacobi sweeps, which is today's slot-array result on uniform-width regions, with no seam jobs.
+- **Memory:** 4 windows of (8+2·sweeps)³ words, reused across components. At sweeps=2 that is 6912 words plus the record.
+- **Channel sharing:** `ubaStage` gained `window` (a channel reuses an earlier channel's array) so a kernel can stage one field after another.
+- **Regression:** the third test in `tests/uniform-brick-stage.test.ts` compares each brick's core against two global Jacobi sweeps over the live faces, on anisotropic spacing.
+
+## B4 integration plan (not landed)
+
+**What blocks it:** no production level-0 arena exists outside pressure.
+- The frame has no slot space for its h bricks. `UniformFineBrickStore` (the design's one store) is built only by its test, and pressure's arena is pressure's.
+- B1 (Lane T) needs the same frame store, for its inboxes. It should be built once and shared: whichever lane wires it first owns it, and the other adopts it.
+
+**Wiring the extension, once the frame store exists:**
+1. **Level 2 pass** (pages, 4h spacing).
+   - Seeds: `umSource`, the closed and low walls (the negative buffer).
+   - Restrict seams wherever the 4h cell is h-owned.
+   - It writes the 4h extended state at the base-block texels, the canonical format today's consumers read.
+2. **Level 0 pass** (h bricks).
+   - The core fn reads `f.velocity` through the resolver: the brick's texel origin is umFineSlot(block)<<5 plus 8 times its local index.
+   - Prolong seams take the level 2 result (value and distance).
+   - It writes `velocityScratch` and `negativeScratch`.
+3. **Far faces** (past the 4h band): the design's lagged fixed point (§5 risk 1). They keep last frame's extended value.
+   - This replaces the hierarchy pyramid. Its restrict, sweep and prolong (`webgpu-uniform-velocity-extrapolation*`) cost about 0.37 ms of round 12's excess.
+4. **Paired FLIP delta:**
+   - The old field runs the same kernel on `f.departure` into an old-extended texture.
+   - `recordDelta` (`uniform-narrow-band-flip.ts`) reads the two textures instead of the companion slot arrays.
+   - That file carries a peer's hunks, so the change lands as a patch through safe-commit.
+5. **COLD regions:** a brick whose 16h region is COLD exits at once (the heat tiers). The held, regional and replay machinery has no counterpart. A fused pass is cheap enough to recompute.
+6. **Deleted in the same commit:**
+   - `uniform-mixed-extension.ts`, `-pair.wgsl.ts`, `-slots.wgsl.ts` and `uniform-compiled-extension.wgsl.ts`;
+   - the hierarchy, where it has no other user;
+   - the frame's retainPair/preparePair/finishPair/finishSnapshot branches and the reusableExtension/bodyExtension bookkeeping.
+
 ## Milestones
 
 1. ubaStage. Generator, `baseExpression` made public, GPU regression.
    - No frame path changes, so the scene gates are the baseline rows above.
    - `npm run check:types` passes. `npm run test:unit` reports 1 failure, `reservoir-particle-cost.test.ts`, "merge cap protects neither the outer layer nor mass-saturated deep runs".
    - That test passes at clean HEAD. It fails only with the peer's uncommitted NB-FLIP merge hunks in `uniform-narrow-band-flip.ts`, so it is not this lane's.
+   - Commit f1da3003.
+2. ubaExtend, the fused extension core, with its regression. The stage window sharing landed with it.
+   - Nothing in the frame uses it yet, so the scene gates are the baseline rows.
