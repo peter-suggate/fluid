@@ -112,6 +112,27 @@ The B4 and T rows are regex groups of stage labels, so they are approximate.
    - the hierarchy, where it has no other user;
    - the frame's retainPair/preparePair/finishPair/finishSnapshot branches and the reusableExtension/bodyExtension bookkeeping.
 
+## B4 inventory (what the one commit must cover)
+
+These are the old extension's semantics, which the fused passes must keep. They are read from `uniform-mixed-extension.ts`.
+- **Sweep gate:** a face sweeps only where its owner tile's support has bit 1 (`umTileSupport(tile) & 2`) and it is not a closed wall (`umClosedWall`). Seed distance 0 is kept.
+- **Seeds:** `umSource(face, owner)`, the phase > 0.5 of the owner or its across neighbour. A low face (`umFaceLow`) reads the negative buffer at `umLowFaceIndex`.
+- **Cut-off:** root > 2·width·min(h) keeps the old value. Unreached faces take `umFarValue`, the trilinear value of known 4h cells from the pyramid (`webgpu-uniform-velocity-extrapolation*`). Under the B4 plan these hold last frame's value instead.
+- **Outputs:** `velocityScratch`, which is canonical (h faces, plus 4h at the base-block texels), and `negativeScratch`. velocityScratch has readers in `webgpu-uniform-reference.ts`, `uniform-bulk-page-transfer.ts`, `uniform-cold-freeze.ts`, `uniform-detail-fields.ts`, the frame and NB-FLIP.
+- **Modes the frame drives:**
+  - plain `encode`, which is full, or regional when `same` holds (bodies only);
+  - the census reuse (`reusableExtension`, `bodyExtension`);
+  - the idle skip (`extensionIdle`);
+  - the paired sequence `retainPair → preparePair → recordDelta → finishPair`, or `finishSnapshot → snapshot → finishPair`, chosen by NB-FLIP's flipDelta: "swept" is the default and "extended" the option;
+  - `regularBulk` (direct restriction);
+  - COLD freeze (`capacity.coldRegions`).
+- **Other importers to move or delete:**
+  - `uniform-mixed-momentum-cache.ts` imports `uniformMixedExtensionSnapshotWGSL` from `-slots.wgsl.ts`;
+  - `uniform-velocity-extrapolation-twin.ts` documents umFarValue;
+  - `tools/probe-uniform-extension-pyramid.ts` and `tools/probe-paired-extension.ts`;
+  - the pyramid (`prepareMixedContinuation`) is also referenced by `webgpu-uniform-reference.ts` and `webgpu-uniform-pressure-multigrid.ts`, so it is deleted only after those are checked.
+- **Stage scratch:** the extension's slot arrays are the stage scratch's prefix (`useSlots`, the scratch sizing in the frame at about line 696), and NB-FLIP's particle banks are sized by `extensionCompanionBytes`. Both size rules change with B4.
+
 ## Milestones
 
 1. ubaStage. Generator, `baseExpression` made public, GPU regression.
