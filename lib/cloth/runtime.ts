@@ -5,6 +5,7 @@ import { SourceMotionRuntime, type SourceMotionCheckpoint } from "./source-motio
 import { sourceClothColliders } from "./source-contact";
 import { GPUClothMechanics } from "./gpu-mechanics";
 import { GPUClothNewton, gpuClothNewtonSupported } from "./gpu-newton";
+import { gpuContactUnsupported, ROD_BOX_SAMPLED_UNSUPPORTED } from "./gpu-contact";
 import { solveClothIncrement } from "./nonlinear-solve";
 import type { WetClothSourceField } from "./source-types";
 import type { ClothDocument, ClothFrameIdentity, ClothState, ClothSurfacePublication, ClothTopologyData, ClothVector } from "./types";
@@ -208,10 +209,26 @@ export class ClothRuntime {
         for(let i=0;i<this.prepared.vertexCount;i++)if((this.prepared.kinematicFixed[i]??0)&1)for(let a=0;a<3;a++)this.state.positions_m[3*i+a]=target[3*i+a]!;
         return finishClothMechanicalStep(this.prepared,this.state,old,twist,dt,{...options,cohesionPairs:[],colliders:[],selfCollision:false},{iterations:0,converged:true,maximumUpdate_m:0});
     }
-    async initializeGPU(device: GPUDevice): Promise<void> {
+    /** Why this cloth's contact cannot run on the GPU, or undefined: its self
+     * contact (on unless the mechanics turn it off), its moving source solids,
+     * the baked static solid (excludedSourceColliderIndices, which the host
+     * adds as a static sampled collider) and the host's `colliders`. */
+    gpuContactUnsupported(colliders: readonly ClothCollider[] = []): string | undefined {
+        const fields = this.motion.fields, all = [...colliders, ...sourceClothColliders(fields, fields, 1, this.excludedSourceColliderIndices)];
+        const baked = this.excludedSourceColliderIndices.length > 0;
+        if (!all.length && !baked && this.options.mechanics?.selfCollision === false) return undefined;
+        const newton = this.options.nonlinearSolver !== 'gauss-seidel' && gpuClothNewtonSupported(this.prepared);
+        if (!newton) return 'the GPU Gauss-Seidel sweep has no contact';
+        return gpuContactUnsupported(this.prepared, all) ?? (baked && this.prepared.rods.length ? ROD_BOX_SAMPLED_UNSUPPORTED : undefined);
+    }
+    /** Builds the GPU owner. A cloth whose contact the GPU does not cover fails
+     * here, explicitly: nothing steps it on the CPU. */
+    async initializeGPU(device: GPUDevice, colliders: readonly ClothCollider[] = []): Promise<void> {
         if(this.document.physics?.solveSolid===false)return;
         if (this.gpu)
             return;
+        const unsupported = this.gpuContactUnsupported(colliders);
+        if (unsupported) throw new Error(`Cloth ${this.document.id} cannot run on the GPU: ${unsupported}`);
         const solver = this.options.nonlinearSolver !== 'gauss-seidel' && gpuClothNewtonSupported(this.prepared) ? new GPUClothNewton(device, this.prepared, {contactCapacity: this.document.physics?.contactCapacity, contactGridEntries: this.document.physics?.contactGridEntries}) : new GPUClothMechanics(device, this.prepared);
         try {
             await solver.initialize();

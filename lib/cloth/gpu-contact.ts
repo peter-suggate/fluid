@@ -44,6 +44,7 @@ export function clothContactCPURemnant(topology: PreparedClothTopology, collider
   return gpuContactUnsupported(topology, colliders);
 }
 
+export const ROD_BOX_SAMPLED_UNSUPPORTED = 'rod segments against box and sampled colliders are not on the GPU';
 /** Why a collider set needs the CPU detection path, or undefined. */
 export function gpuContactUnsupported(topology: PreparedClothTopology, colliders: readonly ClothCollider[]): string | undefined {
   const base = inSolveContactUnsupported(topology, colliders);
@@ -52,7 +53,7 @@ export function gpuContactUnsupported(topology: PreparedClothTopology, colliders
   for (let r = 0; r < topology.rods.length; r++) if (clothRodCut(topology, r)) return 'clipped rod caps are not on the GPU';
   // Rod segment interiors meet planes and spheres in closed form here; a box or
   // sampled solid needs the capsule's convex distance, not on the GPU yet.
-  if (topology.rods.length && colliders.some(c => c.kind === 'box' || c.kind === 'sampled')) return 'rod segments against box and sampled colliders are not on the GPU';
+  if (topology.rods.length && colliders.some(c => c.kind === 'box' || c.kind === 'sampled')) return ROD_BOX_SAMPLED_UNSUPPORTED;
   for (const c of colliders) {
     if (c.bodyId) return `collider reactions for body ${c.bodyId} are summed on the CPU`;
     if (c.kind === 'rigid') return 'rigid colliders are sampled on the CPU';

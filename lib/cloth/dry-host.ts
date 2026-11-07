@@ -46,10 +46,13 @@ export async function withDryClothPhysics(base:GPUSolverInstance,device:GPUDevic
  let scene=initial,last=0,pending:Promise<void>|undefined,stepping=false,generation=0,failure:Error|undefined,disposed=false;
  const options=(s:SceneDescription)=>({sourceFields:s.wetClothSource?.fields,excludedSourceColliderIndices:s.wetClothSource?.bakedSolidFieldIndices,sourceOffset_m:s.wetClothSource?.sourceOffset_m,nonlinearSolver:'newton-pcg' as const});
  let runtimes:ClothRuntime[]=[];
+ // Contact with a rigid body sums its reaction on the CPU: such a scene fails to build.
+ if(initial.rigidBodies.length)throw new Error('Dry cloth contact with rigid bodies is not on the GPU: their reactions are summed on the CPU');
+ const sceneColliders=(s:SceneDescription)=>[...clothContainerColliders(s),...clothSceneStaticColliders(s)];
  try {
   for(const document of initial.cloth){
    const runtime=new ClothRuntime(document,await loadClothTopology(document.geometry),options(initial));
-   runtimes.push(runtime);if(clothSolvesOnGPU(runtime))await runtime.initializeGPU(device);
+   runtimes.push(runtime);if(clothSolvesOnGPU(runtime))await runtime.initializeGPU(device,sceneColliders(initial));
   }
  }catch(error){runtimes.forEach(r=>r.dispose());throw error;}
  let surfaces=runtimes.map(r=>r.publish());
@@ -67,7 +70,7 @@ export async function withDryClothPhysics(base:GPUSolverInstance,device:GPUDevic
    });
    runtimes.forEach(r=>r.dispose());runtimes=replacements;surfaces=runtimes.map(r=>r.publish());
    const current=++generation;
-   pending=Promise.all(runtimes.filter(clothSolvesOnGPU).map(r=>r.initializeGPU(device))).then(()=>{},failed).finally(()=>{if(generation===current)pending=undefined;});
+   pending=Promise.all(runtimes.filter(clothSolvesOnGPU).map(r=>r.initializeGPU(device,sceneColliders(next)))).then(()=>{},failed).finally(()=>{if(generation===current)pending=undefined;});
   } else if(next.wetClothSource!==scene.wetClothSource) {
    for(const runtime of runtimes){runtime.setExcludedSourceColliderIndices(next.wetClothSource?.bakedSolidFieldIndices??[]);runtime.motion.restore({...runtime.motion.checkpoint(),fields:editedSourceFields(runtime,next.wetClothSource?.fields??[])});}
   }

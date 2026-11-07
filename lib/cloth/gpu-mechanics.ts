@@ -220,6 +220,8 @@ export class GPUClothMechanics {
             throw new Error('Invalid cloth GPU timestep');
         if (options.cohesionPairs?.length)
             throw new Error('The GPU Gauss-Seidel sweep has no cohesion energy: cohesive cloth steps on the GPU Newton-PCG owner');
+        if (options.colliders?.length || options.selfCollision)
+            throw new Error('The GPU Gauss-Seidel sweep has no contact: cloth in contact steps on the GPU Newton-PCG owner');
         const topology = this.topology, n = topology.vertexCount, old = state.positions_m.slice(), oldTwist = state.twist_rad.slice(), positions = new Float32Array(n * 4), previous = new Float32Array(n * 4), prediction = new Float32Array(n * 4), data = new Float32Array(this.bases[3]! + this.joints.length * 16 + n * 7 + topology.segmentCount * 2), angles = new Float32Array(topology.segmentCount * 4), parameters = new ArrayBuffer(this.colors.length * 256), pf = new Float32Array(parameters), pu = new Uint32Array(parameters);
         const gravity = options.gravity_m_s2 ?? [0, -9.81, 0], target = options.supportPositions_m ?? topology.data.initialPositions_m ?? topology.data.restPositions_m;
         const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
