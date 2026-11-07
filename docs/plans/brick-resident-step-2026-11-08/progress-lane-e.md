@@ -58,6 +58,17 @@ Regression: `tests/uniform-brick-stage.test.ts`.
 | rest 8x8x4 (60, pipelined) | 2.94 ms (11.6) | 0 | |
 | drop=2 8x8x4 (60, pipelined) | 13.58 ms (18.9) | | |
 
+Non-pressure excess for 8x8x4 drop=2 against rest. Source: Lane T's base run at 334745cb, 32 steps, `--kernels=29`, `lane-t/excess.py`.
+
+| scope | excess |
+|---|---|
+| all non-pressure | **8.87 ms** (drop 15.60, rest 3.53; pressure 5.63 / 2.43) |
+| extension, hierarchy, snapshot, recordDelta (B4) | 1.14 ms |
+| plan tail, certificate, heat, dynamics publish (B4) | 0.80 ms |
+| census, layout, remap, residency, fill, hanging, 4h cache, tiers, transfer (T) | 2.35 ms |
+
+The B4 and T rows are regex groups of stage labels, so they are approximate.
+
 ## Decisions
 
 - **ubaStage is a module of its own, beside `UniformBrickArena.stageWGSL`.** That older helper (used only by the pressure arena's level 2 octant passes) stages seams through a caller fn. It is pressure-side, so it is left alone. ubaStage adds the h↔4h rules, a level 2 restrict path and a per-kernel budget check.
@@ -112,3 +123,12 @@ Regression: `tests/uniform-brick-stage.test.ts`.
    - Commit f1da3003.
 2. ubaExtend, the fused extension core, with its regression. The stage window sharing landed with it.
    - Nothing in the frame uses it yet, so the scene gates are the baseline rows.
+   - Commit d78a265f.
+
+## Status, stopped at the shared frame store
+
+- ubaExtend is wired into nothing, so the excess is still 8.87 ms. B4 and T both need a production level-0 brick slot space for the frame's h tiles. None exists outside pressure.
+- B1 (Lane T, the design's step 0 go/no-go) needs the same store for its inboxes.
+- Two lanes building two stores would be a dual path. Which lane builds the shared frame store (`UniformFineBrickStore` on the frame's ownership) is therefore a coordination decision. Its owner should settle it before B4 is wired.
+- Once it exists, the B4 integration plan above lands as one commit. The T piece follows: the census as a reduction, with ubaUpdate run only on frames whose marks changed.
+
