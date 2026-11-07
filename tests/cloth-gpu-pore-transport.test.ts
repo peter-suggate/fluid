@@ -91,3 +91,54 @@ for (const [label, physics, dt] of [
     }, features);
   });
 }
+
+// Round-off magnitudes: a transverse velocity near 1e-22 (a momentum
+// right-hand side near 1e-25 on that axis, about 0.1 on the others) and a
+// nearly dry cloth (saturations near 1e-5). The raw systems' BiCGSTAB inner
+// products square below f32's range: rho flushed to zero at iteration 0
+// (the free-fall-with-absorption breakdown). Solved at unit scale, each axis
+// and the dry mass solve keep the unit system's backward error: errors stay
+// at the 2^-12 bound of their own axis or saturation scale, plus the
+// half-quantum flux rounding each substep.
+for (const variant of ['transverse momentum at round-off scale', 'nearly dry cloth'] as const) for (const features of [['subgroups'], []] as GPUFeatureName[][]) {
+  test(`GPU pore transport matches the f64 oracle at round-off magnitudes: ${variant}, ${features.length ? 'subgroup' : 'workgroup'} reductions`, { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+    await withUniformDevice('gpu pore transport round-off scale', async device => {
+      const f = fixture(7), s = f.state, random = lcg(11), physics: ClothPhysicsOptions = { nonlinearDrag: false, manifoldSubsteps: 8 }, dt = .01, substeps = 8;
+      const gpu = new ClothGPUPoreTransport(device, clothPoreTopology(f.data, f.materials, f.V), s.restControlVolume_m3);
+      await gpu.initialize();
+      const q = clothPoreQuantum(s.restControlVolume_m3), gravity = [0, -9.80665, 0] as const;
+      for (let v = 0; v < f.V; v++) {
+        if (variant === 'nearly dry cloth') s.waterVolume_m3[v]! *= 1e-5;
+        else s.velocities_m_s[3 * v] = 1e-22 * (random() - .5);
+        s.waterVolume_m3[v] = Math.round(s.waterVolume_m3[v]! / q) * q;
+      }
+      const initial = s.waterVolume_m3.reduce((a, b) => a + b, 0);
+      assert.ok(initial > 1000 * q, 'the dry fixture still holds water to move');
+      const result = await gpu.advance({ positions_m: s.positions_m, velocities_m_s: s.velocities_m_s, controlVolume_m3: s.controlVolume_m3, solidVolume_m3: s.solidVolume_m3, solidFraction: s.solidFraction, dryMass_kg: s.dryMass_kg,
+        waterVolume_m3: s.waterVolume_m3, fixed: f.fixed, materials: f.materials, physics, dt_s: dt, gravity_m_s2: gravity, pressureAcceleration_m_s2: f.pressure, solidAcceleration_m_s2: f.solid });
+      assert.ok(result, 'wet cloth transports');
+      const fluxes = new Map<number, number>();
+      const oracle = advanceClothPoreTransport({ state: s, data: f.data, materials: f.materials, physics, dt_s: dt, gravity_m_s2: gravity, pressureAcceleration_m_s2: f.pressure, solidAcceleration_m_s2: f.solid, edgeFlux_m3: fluxes });
+      assert.ok(oracle.movedVolume_m3 > 0, 'the fixture moves water');
+      const slots = gpu.topology.slots, degree = new Uint32Array(f.V);
+      for (let e = 0; e < gpu.topology.E; e++) { degree[slots[2 * e]!]!++; degree[slots[2 * e + 1]!]!++; }
+      let total = 0; for (let v = 0; v < f.V; v++) { assert.ok(result.waterVolume_m3[v]! >= 0); total += result.waterVolume_m3[v]!; }
+      assert.equal(total / q, Math.round(initial / q), 'GPU pore water is conserved to the quantum');
+      let wet = 0; for (let v = 0; v < f.V; v++) { const c = s.controlVolume_m3[v]! - s.solidVolume_m3[v]!; if (c > 0) wet = Math.max(wet, s.waterVolume_m3[v]! / c); }
+      for (let v = 0; v < f.V; v++) {
+        const c = Math.max(0, s.controlVolume_m3[v]! - s.solidVolume_m3[v]!);
+        const error = Math.abs(result.waterVolume_m3[v]! - s.waterVolume_m3[v]!);
+        assert.ok(error <= BOUND * wet * c + substeps * degree[v]! * q / 2, `vertex ${v}: water ${error} at saturation scale ${wet}`);
+      }
+      const gpuFlux = await gpu.readEdgeFluxes();
+      let fluxScale = 0, fluxError = 0; for (const x of fluxes.values()) fluxScale = Math.max(fluxScale, Math.abs(x));
+      for (let e = 0; e < gpu.topology.E; e++) fluxError = Math.max(fluxError, Math.abs(gpuFlux[e]! - (fluxes.get(slots[2 * e]! * f.V + slots[2 * e + 1]!) ?? 0)));
+      assert.ok(fluxError <= BOUND * fluxScale + substeps * q / 2, `edge flux ${fluxError / fluxScale}`);
+      const speed = [0, 0, 0], velocityError = [0, 0, 0];
+      for (let k = 0; k < 3 * f.V; k++) { speed[k % 3] = Math.max(speed[k % 3]!, Math.abs(s.velocities_m_s[k]!)); velocityError[k % 3] = Math.max(velocityError[k % 3]!, Math.abs(result.velocities_m_s[k]! - s.velocities_m_s[k]!)); }
+      console.log(`${variant}: wet ${wet.toExponential(2)} initial ${(initial / q).toFixed(0)} quanta, flux ${(fluxError / fluxScale).toExponential(2)}, axis speeds ${speed.map(x => x.toExponential(2))}, velocity errors ${velocityError.map((x, a) => (x / speed[a]!).toExponential(2))}`);
+      for (let a = 0; a < 3; a++) assert.ok(velocityError[a]! <= BOUND * speed[a]!, `axis ${'xyz'[a]}: velocity ${velocityError[a]! / speed[a]!} of its own scale ${speed[a]}`);
+      gpu.destroy();
+    }, features);
+  });
+}

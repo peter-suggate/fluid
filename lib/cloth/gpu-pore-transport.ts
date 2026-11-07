@@ -277,9 +277,23 @@ fn apply(lid:u32,mode:u32,dst:u32,src:u32,ab:u32,ba:u32){
  }
  sync();
 }
+// The unit scale of a system whose larger magnitude of |b| and ||A|| |x0| is
+// m: 2^-e with m 2^-e in [1/2,1), and its inverse. A zero (closed) or
+// non-finite m keeps 1; e stays where both powers are normal f32.
+fn krylovScale(m:f32)->vec2f{
+ var e=0;if(m>0.0&&m<3.4e38){e=clamp(frexp(m).exp,-126,126);}
+ return vec2f(ldexp(1.0,-e),ldexp(1.0,e));
+}
+fn unscaleX(lid:u32,inv:f32){for(var i=lid;i<V();i+=WG){setVec(X,i,inv*vec(X,i));}sync();}
 // Jacobi-preconditioned BiCGSTAB on the (power-of-two scaled) system in X,
 // B. Stops at the normwise backward error ||r|| <= 16u (||b|| + ||A|| ||x||):
 // below it f32 cannot resolve the residual. Returns the iterations.
+// It solves the unit-scaled system 2^-e (b, x0) (krylovScale) and returns x
+// at the caller's scale. At round-off magnitudes (a transverse free-fall
+// momentum near 1e-25, a nearly dry cloth) the inner products of the raw
+// system square below f32's range: rho and t.t flushed to zero, a breakdown
+// at iteration 0. The power of two is exact, A is unchanged, and the
+// backward error, so the stopping rule, is invariant under it.
 const KRYLOV_TOLERANCE=16.0*5.9604645e-8;const KRYLOV_BUDGET=2000u;
 fn solve(lid:u32,mode:u32,ab:u32,ba:u32)->u32{
  var rowMax=vec4f(0.0);
@@ -289,12 +303,15 @@ fn solve(lid:u32,mode:u32,ab:u32,ba:u32)->u32{
    for(var j=words[O_VERT_START+i];j<words[O_VERT_START+i+1u];j++){let entry=words[O_VERT_SLOTS+j];let e=entry&0x7fffffffu;
     diag+=select(edge(ab,e),edge(ba,e),(entry>>31u)!=0u);row+=abs(edge(ab,e))+abs(edge(ba,e));}
   }
-  setVec(DIAG,i,diag);rowMax=max(rowMax,vec4f(row,abs(vec(B,i)),0.0,0.0));
+  setVec(DIAG,i,diag);rowMax=max(rowMax,vec4f(row,abs(vec(B,i)),abs(vec(X,i)),0.0));
  }
- sync();let scale=max4(lid,rowMax);let normA=scale.x;let normB=scale.y;
+ sync();let scale=max4(lid,rowMax);let normA=scale.x;
+ let unit=krylovScale(max(scale.y,normA*scale.z));let normB=unit.x*scale.y;
+ for(var i=lid;i<V();i+=WG){setVec(X,i,unit.x*vec(X,i));}
+ sync();
  apply(lid,mode,VV,X,ab,ba);
  var m=vec4f(0.0);
- for(var i=lid;i<V();i+=WG){let r=vec(B,i)-vec(VV,i);setVec(RR,i,r);setVec(HAT,i,r);setVec(P,i,0.0);setVec(VV,i,0.0);m=max(m,vec4f(abs(r),abs(vec(X,i)),0.0,0.0));}
+ for(var i=lid;i<V();i+=WG){let r=unit.x*vec(B,i)-vec(VV,i);setVec(RR,i,r);setVec(HAT,i,r);setVec(P,i,0.0);setVec(VV,i,0.0);m=max(m,vec4f(abs(r),abs(vec(X,i)),0.0,0.0));}
  sync();m=max4(lid,m);
  var residual=m.x;var tolerance=KRYLOV_TOLERANCE*(normB+normA*m.y);
  var rhoOld=1.0;var alpha=1.0;var omega=1.0;var iterations=0u;
@@ -302,13 +319,13 @@ fn solve(lid:u32,mode:u32,ab:u32,ba:u32)->u32{
   if(residual<=tolerance||iterations>=KRYLOV_BUDGET){break;}
   var local=0.0;for(var i=lid;i<V();i+=WG){local+=vec(HAT,i)*vec(RR,i);}
   let rho=sum4(lid,vec4f(local,0.0,0.0,0.0)).x;
-  if(!(abs(rho)>0.0)||!(abs(rho)<3.0e38)){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(!(abs(rho)>0.0)||!(abs(rho)<3.0e38)){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleX(lid,unit.y);return iterations;}
   let beta=(rho/rhoOld)*(alpha/omega);
   for(var i=lid;i<V();i+=WG){let p=vec(RR,i)+beta*(vec(P,i)-omega*vec(VV,i));setVec(P,i,p);setVec(Y,i,p/vec(DIAG,i));}
   sync();apply(lid,mode,VV,Y,ab,ba);
   local=0.0;for(var i=lid;i<V();i+=WG){local+=vec(HAT,i)*vec(VV,i);}
   let divisor=sum4(lid,vec4f(local,0.0,0.0,0.0)).x;
-  if(divisor==0.0){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(divisor==0.0){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleX(lid,unit.y);return iterations;}
   alpha=rho/divisor;
   var sm=0.0;for(var i=lid;i<V();i+=WG){let s=vec(RR,i)-alpha*vec(VV,i);setVec(SS,i,s);setVec(Z,i,s/vec(DIAG,i));sm=max(sm,abs(s));}
   sync();let sNorm=max4(lid,vec4f(sm,0.0,0.0,0.0)).x;
@@ -316,15 +333,15 @@ fn solve(lid:u32,mode:u32,ab:u32,ba:u32)->u32{
   apply(lid,mode,TT,Z,ab,ba);
   var dots=vec4f(0.0);for(var i=lid;i<V();i+=WG){let t=vec(TT,i);dots+=vec4f(t*t,t*vec(SS,i),0.0,0.0);}
   dots=sum4(lid,dots);
-  if(dots.x==0.0){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
-  omega=dots.y/dots.x;if(omega==0.0||!(abs(omega)<3.0e38)){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(dots.x==0.0){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleX(lid,unit.y);return iterations;}
+  omega=dots.y/dots.x;if(omega==0.0||!(abs(omega)<3.0e38)){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleX(lid,unit.y);return iterations;}
   m=vec4f(0.0);
   for(var i=lid;i<V();i+=WG){let x=vec(X,i)+alpha*vec(Y,i)+omega*vec(Z,i);setVec(X,i,x);let r=vec(SS,i)-omega*vec(TT,i);setVec(RR,i,r);m=max(m,vec4f(abs(r),abs(x),0.0,0.0));}
   sync();m=max4(lid,m);residual=m.x;tolerance=KRYLOV_TOLERANCE*(normB+normA*m.y);
   rhoOld=rho;iterations++;
  }
  if(!(residual<=tolerance)&&lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}
- return iterations;
+ unscaleX(lid,unit.y);return iterations;
 }
 
 fn get3(k:u32,i:u32)->vec3f{return vec3f(vec(k,i),vec(k+1u,i),vec(k+2u,i));}
@@ -343,23 +360,30 @@ fn apply3(lid:u32,dst:u32,src:u32){
  }
  sync();
 }
+fn unscaleMX(lid:u32,inv:vec3f){for(var i=lid;i<V();i+=WG){set3(MX,i,inv*get3(MX,i));}sync();}
 // Jacobi BiCGSTAB on the three momentum systems together (one matrix, three
 // right-hand sides): every reduction and barrier serves all three. Each axis
 // keeps its own scalars and stops at its own normwise backward error.
 fn solve3(lid:u32)->u32{
- var rowMax=vec4f(0.0);
+ var rowMax=vec4f(0.0);var xmax=vec3f(0.0);
  for(var i=lid;i<V();i+=WG){
   var diag=1.0;var row=1.0;
   if(!fixedVertex(i)){diag=vec(CAP,i);row=abs(diag);
    for(var j=words[O_VERT_START+i];j<words[O_VERT_START+i+1u];j++){let entry=words[O_VERT_SLOTS+j];let e=entry&0x7fffffffu;
     diag+=select(edge(MAB,e),edge(MBA,e),(entry>>31u)!=0u);row+=abs(edge(MAB,e))+abs(edge(MBA,e));}
   }
-  setVec(DIAG,i,diag);rowMax=max(rowMax,vec4f(row,abs(get3(MB,i))));
+  setVec(DIAG,i,diag);rowMax=max(rowMax,vec4f(row,abs(get3(MB,i))));xmax=max(xmax,abs(get3(MX,i)));
  }
- sync();let scale=max4(lid,rowMax);let normA=scale.x;let normB=scale.yzw;
+ sync();let scale=max4(lid,rowMax);let normA=scale.x;
+ // Each axis solves its own unit-scaled system (krylovScale, as solve).
+ let m0=max(scale.yzw,normA*max4(lid,vec4f(xmax,0.0)).xyz);
+ let ux=krylovScale(m0.x);let uy=krylovScale(m0.y);let uz=krylovScale(m0.z);
+ let unit=vec3f(ux.x,uy.x,uz.x);let restore=vec3f(ux.y,uy.y,uz.y);let normB=unit*scale.yzw;
+ for(var i=lid;i<V();i+=WG){set3(MX,i,unit*get3(MX,i));}
+ sync();
  apply3(lid,MVV,MX);
  var rm=vec3f(0.0);var xm=vec3f(0.0);
- for(var i=lid;i<V();i+=WG){let r=get3(MB,i)-get3(MVV,i);set3(MR,i,r);set3(MHAT,i,r);set3(MP,i,vec3f(0.0));set3(MVV,i,vec3f(0.0));rm=max(rm,abs(r));xm=max(xm,abs(get3(MX,i)));}
+ for(var i=lid;i<V();i+=WG){let r=unit*get3(MB,i)-get3(MVV,i);set3(MR,i,r);set3(MHAT,i,r);set3(MP,i,vec3f(0.0));set3(MVV,i,vec3f(0.0));rm=max(rm,abs(r));xm=max(xm,abs(get3(MX,i)));}
  sync();var residual=max4(lid,vec4f(rm,0.0)).xyz;var tolerance=KRYLOV_TOLERANCE*(normB+normA*max4(lid,vec4f(xm,0.0)).xyz);
  var rhoOld=vec3f(1.0);var alpha=vec3f(1.0);var omega=vec3f(1.0);var iterations=0u;
  loop{
@@ -367,14 +391,14 @@ fn solve3(lid:u32)->u32{
   if(!any(open)||iterations>=KRYLOV_BUDGET){break;}
   var local=vec3f(0.0);for(var i=lid;i<V();i+=WG){local+=get3(MHAT,i)*get3(MR,i);}
   let rho=sum4(lid,vec4f(local,0.0)).xyz;
-  if(any(open&(!(abs(rho)>vec3f(0.0))|!(abs(rho)<vec3f(3.0e38))))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(any(open&(!(abs(rho)>vec3f(0.0))|!(abs(rho)<vec3f(3.0e38))))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleMX(lid,restore);return iterations;}
   let on=select(vec3f(0.0),vec3f(1.0),open);
   let beta=select(vec3f(0.0),(rho/rhoOld)*(alpha/omega),open);
   for(var i=lid;i<V();i+=WG){let p=get3(MR,i)+beta*(get3(MP,i)-omega*get3(MVV,i));set3(MP,i,p);set3(MY,i,on*p/vec(DIAG,i));}
   sync();apply3(lid,MVV,MY);
   local=vec3f(0.0);for(var i=lid;i<V();i+=WG){local+=get3(MHAT,i)*get3(MVV,i);}
   let divisor=sum4(lid,vec4f(local,0.0)).xyz;
-  if(any(open&(divisor==vec3f(0.0)))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(any(open&(divisor==vec3f(0.0)))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleMX(lid,restore);return iterations;}
   alpha=select(vec3f(0.0),rho/divisor,open);
   var sm=vec3f(0.0);for(var i=lid;i<V();i+=WG){let s=get3(MR,i)-alpha*get3(MVV,i);set3(MS,i,s);sm=max(sm,abs(s));}
   sync();let sNorm=max4(lid,vec4f(sm,0.0)).xyz;
@@ -384,9 +408,9 @@ fn solve3(lid:u32)->u32{
   sync();apply3(lid,MT,MZ);
   var tt=vec3f(0.0);var ts=vec3f(0.0);for(var i=lid;i<V();i+=WG){let t=get3(MT,i);tt+=t*t;ts+=t*get3(MS,i);}
   tt=sum4(lid,vec4f(tt,0.0)).xyz;ts=sum4(lid,vec4f(ts,0.0)).xyz;
-  if(any(full&(tt==vec3f(0.0)))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(any(full&(tt==vec3f(0.0)))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleMX(lid,restore);return iterations;}
   let nextOmega=select(vec3f(0.0),ts/tt,full);
-  if(any(full&((nextOmega==vec3f(0.0))|!(abs(nextOmega)<vec3f(3.0e38))))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}return iterations;}
+  if(any(full&((nextOmega==vec3f(0.0))|!(abs(nextOmega)<vec3f(3.0e38))))){if(lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}unscaleMX(lid,restore);return iterations;}
   rm=vec3f(0.0);xm=vec3f(0.0);
   for(var i=lid;i<V();i+=WG){
    let x=get3(MX,i)+alpha*get3(MY,i)+nextOmega*get3(MZ,i);set3(MX,i,x);
@@ -399,7 +423,7 @@ fn solve3(lid:u32)->u32{
   rhoOld=select(rhoOld,rho,open);omega=select(omega,nextOmega,full);iterations++;
  }
  if(any(residual>tolerance)&&lid==0u){fail(${PORE_GPU_STATUS.krylov}u);}
- return iterations;
+ unscaleMX(lid,restore);return iterations;
 }
 
 // Saturation-dependent edges at GUESS (Eq. 18): mobility (1-psi) eps_L / C
