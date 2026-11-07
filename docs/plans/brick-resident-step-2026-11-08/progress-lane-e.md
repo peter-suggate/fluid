@@ -89,9 +89,7 @@ The B4 and T rows are regex groups of stage labels, so they are approximate.
 
 ## B4 integration plan (not landed)
 
-**What blocks it:** no production level-0 arena exists outside pressure.
-- The frame has no slot space for its h bricks. `UniformFineBrickStore` (the design's one store) is built only by its test, and pressure's arena is pressure's.
-- B1 (Lane T) needs the same frame store, for its inboxes. It should be built once and shared: whichever lane wires it first owns it, and the other adopts it.
+**Slot space:** the frame brick store (below). The coordinator decided that Lane E builds it and that Lane T adopts it.
 
 **Wiring the extension, once the frame store exists:**
 1. **Level 2 pass** (pages, 4h spacing).
@@ -124,11 +122,34 @@ The B4 and T rows are regex groups of stage labels, so they are approximate.
 2. ubaExtend, the fused extension core, with its regression. The stage window sharing landed with it.
    - Nothing in the frame uses it yet, so the scene gates are the baseline rows.
    - Commit d78a265f.
+3. The frame brick store (`UniformFrameBricks`) with its GPU regression, which passes. Nothing in the frame constructs it yet, so the scene gates are the baseline rows.
+   - `npm run check:types` passes. `npm run test:unit` fails only the same peer test as milestone 1.
 
-## Status, stopped at the shared frame store
+## Frame brick store interface (for Lane T)
 
-- ubaExtend is wired into nothing, so the excess is still 8.87 ms. B4 and T both need a production level-0 brick slot space for the frame's h tiles. None exists outside pressure.
-- B1 (Lane T, the design's step 0 go/no-go) needs the same store for its inboxes.
-- Two lanes building two stores would be a dual path. Which lane builds the shared frame store (`UniformFineBrickStore` on the frame's ownership) is therefore a coordination decision. Its owner should settle it before B4 is wired.
-- Once it exists, the B4 integration plan above lands as one commit. The T piece follows: the census as a reduction, with ubaUpdate run only on frames whose marks changed.
+`lib/methods/uniform/uniform-frame-bricks.ts`, `new UniformFrameBricks(device, ownership, {capacity?, channels?})`, then `await initialize()`.
+- **What it is:** a `UniformFineBrickStore` on the frame's ownership. Its arena is the step's level-0 slot space and records. It owns the table buffer (`table`), and no other buffer until a channel is given.
+- **Marks:** a brick (8³ h cells, id 64·block + local) is marked `UNIFORM_ARENA_CLASS.fine` where it holds an h tile of the ownership's h list (`umTopology[UM_TILES + j]`, j < `umCounts.x`). Fine is not a core bit, so there is no dilation. A neighbour brick that is not live stages through ubaStage's seam rule.
+- **Persistence:** a brick keeps its slot, record and channel values while it stays marked. Only enter and leave churn runs: `ubaUpdate`, `ubaLists`, `ubaLevel1`, `ubaRecord`, then `ubaRelease`.
+- **Record word 28:** the brick's h-owned tiles (`ufbOwnedTiles(id)`, bit x|y<<1|z<<2 of its 2³ tiles). A 4h tile inside a live brick is a seam. Word 29 is the brick id.
+- **Capacity:** authored, never grown. An h tile lies in exactly one brick, so the ownership's h tile ceiling (`capacity.fineTiles`, the scene's authored peak) bounds the live bricks. That ceiling is the default (`uniformFrameBrickCapacity`: at least 256, at most the lattice's bricks). An empty free stack sets the fatal word (`fatalOffset`). The frame's diagnostics must throw on it.
+- **Per step:**
+  - `encodeUpdate(encoder)` runs after the frame's topology is final: the step clear, the mark, then the table entries.
+  - `encodeRelease(encoder)` runs after the last reader of leaving bricks (a churn scatter, if any).
+- **Fused passes:**
+  - Bind `table` as `array<atomic<u32>>` and include `tableWGSL(name)` after the ownership topology (`uniformMixedTopologyWGSL(capacity, group)`) and `uniformStageListsWGSL`.
+  - Then call `ubaStageWGSL(store.arena, K, {level: 0, ...})` or `ubaExtendWGSL`.
+  - Live bricks: `UBA_LIVE`, with count `UBA_LIVE_COUNT`. Held pages: the level-2 list.
+- **Channels:** they move into the store's pool (the `channels` option, `store.moduleWGSL`) only where a fused pass reads them in slots. Elsewhere a core fn loads the paged texture by lattice coordinate (`textureLoad(velocity, origin + l, 0)` under `uniformDetailModule`). The detail rewrite resolves the page, so a fused pass needs no resolver.
+- **Regression:** `tests/uniform-frame-bricks.test.ts`, on a 64³ lattice with two h boxes whose corners split bricks. It checks:
+  - live bricks equal the h tiles' bricks, with their tile masks and keys;
+  - a second frame has no churn and the same slots;
+  - removing a box leaves exactly its bricks, while the others keep their slots;
+  - restoring the box reuses the released slots;
+  - the fatal word stays 0.
+- **Not yet in the frame:** the store is constructed by its first consumer (B4's extension), so no step runs a table nobody reads. Lane T's B2 adopts the same instance, through a frame accessor added with B4.
 
+## Status
+
+- The frame brick store landed (above). B4 is next: the wiring plan above, with the store as its slot space.
+- ubaExtend is wired into nothing yet, so the excess is still 8.87 ms.
