@@ -954,3 +954,77 @@ run per tree. Each timer run's median kernel is within 1% of HEAD's.
     reduced deltas exactly.
 - The wet-cloth lane's GPU pore exchange (uniform-cloth-gpu-pore-exchange.ts)
   moved its own round() split onto the same helper in b921cf06.
+
+## Round 12 (2026-11-07): GPU loop guards (patches built, not landed)
+
+Two patches, judged and accepted. Both wait on the GPU gates below.
+
+**B1, stage-scratch window guard** (r15/stage-scratch-guard.patch):
+- Each stage-scratch consumer's encode asserts that the frame is in its
+  phase window.
+- Out-of-frame callers evict first:
+  - tools/measure-pool-volume.ts, and through it
+    tools/benchmark-pool-settling.ts and tools/investigate-pool-work.ts;
+  - the surface tests.
+
+**B2, bounded loops** (r16/loop-guard.patch; loop-guard-on-b1.patch if B1
+lands first). There are three classes of guard. Each one reports through an
+existing failure word, and the host throws at the next receipt naming the
+kernel and the class.
+
+1. **Characteristic traces.**
+   - The segmented departure and umUnitTrace now loop a fixed number of
+     times: 2·segments passes, and 2·segments+1 for the unit trace. A valid
+     trace takes at most that many, so the cap never binds on valid input.
+   - Each pass tests sample/h for NaN or Inf by its exponent bits. Metal's
+     relaxed math (see the note below) cannot fold that test.
+   - Faults go to momentum claims word 5, 5 bits per kernel, and reach the
+     frame receipt as "Mixed momentum failure: <kernel>: <class>".
+2. **Grid-stride readers.**
+   - Claimed launches check their job count against 2·tiles+pages.
+   - NB-FLIP move and separation check against the particle capacity.
+   - Faults use the NB state word 3 codes 13 and 15.
+   - The shared count accessors return 0 on a count over storage. The frame
+     then throws from listCountViolation:
+     - fine+coarse, seam and regular-4h counts ≤ tiles;
+     - resident pages ≤ pages;
+     - pool resident+pending ≤ blocks.
+3. **Chord walks.**
+   - umSlideWalk and umEmbeddedAir test end−p for NaN or Inf.
+   - Faults use NB state word 3 codes 11/14 (slide walk, surface or
+     particle) and 12 (embedded air).
+
+No values are clamped. Valid runs should be bit-identical. That is still to
+be shown on the GPU.
+
+**Dawn math mode.**
+- The webgpu 0.6.0 dawn.node binary emits `#pragma METAL fp
+  math_mode(safe|relaxed)`.
+- Relaxed math may reassociate, which is how round 11's two-sum folded, but
+  it keeps NaN and Inf.
+
+**Known gaps, accepted for now:**
+1. If a count is over storage only briefly and valid again by receipt time,
+   the reader runs nothing for that pass and nothing reports it.
+2. Planned list counts (umSupport[4n+…]) are covered only through the
+   claimed-launch cap.
+3. A chord-walk end that is huge but finite is not bounded. Only nonfinite
+   ends are checked.
+4. Cloth linked-list walks are not covered; they belong to the wet-cloth lane.
+
+**Gate order:**
+1. B1:
+   - item-2 capture test;
+   - surface GPU tests;
+   - one wet-cloth scene;
+   - probe identity check;
+   - head-hook throw demo.
+2. B2:
+   - drop=2 and dam recorded frames bit-identical;
+   - momentum-trace µs per dispatch;
+   - seep 300 / letters 120 drift and step time.
+3. The B1+B2 tree once on seep 300, to confirm that no failure fires on
+   valid input.
+4. tests/loop-guard-corrupt-input.test.ts, one case at a time
+   (FLUID_LOOP_GUARD_CASE=segmented|unit|claimed|tiers|walk), checking the
+   guard's rc after each.
