@@ -48,10 +48,13 @@ function fixture(seed: number) {
 // 2^-12 saturation bound (tests/cloth-gpu-pore-transport.test.ts).
 const BOUND = 2 ** -12;
 
-for (const [label, physics] of [
-  ['nonlinear drag, 12 substeps', { nonlinearDrag: true, manifoldSubsteps: 12, manifoldDragFloorReferenceVolume_m3: 1e-6 }],
-  ['no transport, rest solid fraction', { manifoldTransport: false, varyingSolidFraction: false }],
-] as [string, ClothPhysicsOptions][]) test(`GPU pore exchange matches the f64 oracles at a real NB-FLIP surface: ${label}`, { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+// Timing is profiling only (ClothGPUPoreExchangeOptions.timing): the
+// production construction carries no timestamp writes and reports no gpu_ms.
+for (const [label, physics, timing] of [
+  ['nonlinear drag, 12 substeps', { nonlinearDrag: true, manifoldSubsteps: 12, manifoldDragFloorReferenceVolume_m3: 1e-6 }, true],
+  ['no transport, rest solid fraction', { manifoldTransport: false, varyingSolidFraction: false }, true],
+  ['nonlinear drag, 12 substeps, production construction (no timing)', { nonlinearDrag: true, manifoldSubsteps: 12, manifoldDragFloorReferenceVolume_m3: 1e-6 }, false],
+] as [string, ClothPhysicsOptions, boolean][]) test(`GPU pore exchange matches the f64 oracles at a real NB-FLIP surface: ${label}`, { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice('gpu pore exchange', async device => {
     const scene = createRigidCouplingOracleScene('rigid-hydrostatic'); scene.rigidBodies = [];
     scene.systems = { ...scene.systems, porous: true };
@@ -67,7 +70,7 @@ for (const [label, physics] of [
     try {
       await cpu.initialize(); await cpu.initializeCapacity({ state: f.state }); await frame.initializePhysicalWaterBudget();
       assert.ok(solver.advanceTo(.001, [])); await solver.awaitFrameCompletion(); assert.equal(solver.info.simulationPipelineError, undefined);
-      await transport.initialize(); gpu = new UniformClothGPUPoreExchange(fields, transport, await UniformGPUOrderingKernels.create(device)); await gpu.initialize();
+      await transport.initialize(); gpu = new UniformClothGPUPoreExchange(fields, transport, await UniformGPUOrderingKernels.create(device), timing ? { timing } : {}); await gpu.initialize();
       // The oracle chain of finishClothStep, on a copy.
       const o = clone(f.state), step = { state: o, data: f.data, kinematicFixed: f.fixed, materials: f.materials, physics, identity, dt_s: dt };
       const sample = await cpu.sampleSupport(o.positions_m), beforeCapture = o.velocities_m_s.slice();
@@ -97,6 +100,8 @@ for (const [label, physics] of [
         for (let a = 0; a < 3; a++) { speed = Math.max(speed, Math.abs(o.velocities_m_s[3 * v + a]!)); velocity = Math.max(velocity, Math.abs(result.velocities_m_s[3 * v + a]! - o.velocities_m_s[3 * v + a]!)); }
       }
       console.log(`# ${label}: captured ${result.captured_m3.toExponential(4)}/${captured.toExponential(4)} released ${result.released_m3.toExponential(4)}/${released.toExponential(4)} water ${water.toExponential(2)} velocity ${(velocity / speed).toExponential(2)} cells ${table.cells.length} gpu ${result.gpu_ms?.toFixed(3)} ms`);
+      if (timing) assert.ok(Number.isFinite(result.gpu_ms) && result.gpu_ms! >= 0, `opt-in timing reports the device interval (${result.gpu_ms})`);
+      else assert.equal(result.gpu_ms, undefined, 'a production exchange reports no device timing');
       assert.ok(water <= BOUND, `saturation ${water}`);
       assert.ok(velocity <= BOUND * speed, `velocity ${velocity / speed}`);
       // The published partition: the oracle's cells, in its order.
@@ -121,5 +126,6 @@ for (const [label, physics] of [
       } finally { queue.submit = submit; }
       assert.equal(fields.porousCapacity, gpu.capacityTexture, 'a refused readback leaves the published partition in place');
     } finally { gpu?.destroy(); transport.destroy(); cpu.destroy(); solver.destroy(); }
-  });
+    // Every case runs where production does, on a device with timestamp-query.
+  }, ['timestamp-query']);
 });

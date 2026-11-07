@@ -336,8 +336,23 @@ export interface ClothGPUPoreExchangeResult {
   readonly captured_m3: number; readonly released_m3: number;
   readonly ledger: ClothWaterLedger;
   readonly transport?: ClothPoreGPUResult;
-  /** Device time from the support sample to the budget commit (timestamp-query). */
+  /** Device time from the support sample to the budget commit; only with the `timing` option. */
   readonly gpu_ms?: number;
+}
+export interface ClothGPUPoreExchangeOptions {
+  /**
+   * Profiling only: timestamp writes around the submit (support sample to
+   * budget commit), reported as `gpu_ms`. Production submits carry none.
+   * Hazard: on M1 Max (2026-11-07) these attachments, in a submit that also
+   * runs the manifold transport, aborted the command buffer with a Metal
+   * out-of-memory error (kIOGPUCommandBufferCallbackErrorOutOfMemory). Even an
+   * empty end-of-pass timestamp pass after the transport did it, and without
+   * them the same submit ran. Dawn reports none of this. The submission stamp
+   * refuses the stale readback, and the GPU runner's guard exits 77. A profiler
+   * that opts in must treat a stale stamp or rc 77 as "timing unavailable",
+   * never as a result.
+   */
+  readonly timing?: boolean;
 }
 
 /** One cloth's GPU pore exchange, sharing the transport's water and velocity buffers. */
@@ -357,7 +372,7 @@ export class UniformClothGPUPoreExchange {
   private readonly groups = new Map<Kernel, GPUBindGroup>();
   private readonly stamp = new GPUSubmissionStamp('Cloth GPU pore exchange');
   private busy = false; private disposed = false;
-  constructor(readonly fields: UniformClothGridFields, readonly transport: ClothGPUPoreTransport, kernels: UniformGPUOrderingKernels) {
+  constructor(readonly fields: UniformClothGridFields, readonly transport: ClothGPUPoreTransport, kernels: UniformGPUOrderingKernels, options: ClothGPUPoreExchangeOptions = {}) {
     const d = this.device = fields.device, V = transport.topology.V, sections = clothExchangeSections(V);
     if (!fields.solid) throw new Error('Cloth GPU pore exchange needs the porous solid library');
     const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
@@ -375,7 +390,9 @@ export class UniformClothGPUPoreExchange {
     this.readback = d.createBuffer({ label: 'Cloth GPU pore exchange readback', size: STATUS_BYTES + transport.resultBytes + 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }); this.owned.push(this.readback);
     this.sort = new UniformGPURadixSort(kernels, 8 * V, 32, this.counts, 'Cloth capacity sort');
     this.scans = [new UniformGPUScan(kernels, this.work, 8 * V, 4 * sections.positions), new UniformGPUScan(kernels, this.work, 8 * V, 4 * sections.starts)];
-    if (d.features.has('timestamp-query')) {
+    if (options.timing !== undefined && typeof options.timing !== 'boolean') throw new Error('Cloth GPU pore exchange timing must be a boolean');
+    if (options.timing && !d.features.has('timestamp-query')) throw new Error('Cloth GPU pore exchange timing needs the timestamp-query feature');
+    if (options.timing) {
       const resolve = d.createBuffer({ label: 'Cloth GPU pore exchange timestamps', size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }); this.owned.push(resolve);
       this.timestamps = { set: d.createQuerySet({ label: 'Cloth GPU pore exchange timestamps', type: 'timestamp', count: 2 }), resolve };
     }
