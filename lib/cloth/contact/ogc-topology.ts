@@ -1,0 +1,125 @@
+/**
+ * Setup- and edit-time topology the OGC detector reads (CPU, Float-free).
+ *
+ * One u32 buffer, so each detection kernel binds it once:
+ *   tris      T x 4   v0, v1, v2, material (the solver's triangles, copied)
+ *   edges     E x 4   v0, v1, face0, face1 (NONE for a boundary edge)
+ *   triEdges  T x 4   edge ids of (t0,t1), (t1,t2), (t2,t0); w bit k = t is face0 of edge k
+ *   vtOff     N + 1   CSR offsets of each vertex's faces
+ *   vtList    3T      faces around each vertex
+ *   veOff     N + 1   CSR offsets of each vertex's edges
+ *   veList    2E      edges around each vertex
+ *
+ * Unknown or non-manifold input fails here, explicitly.
+ */
+
+export const OGC_NONE = 0xffffffff;
+
+export interface OgcMeshTopology {
+  vertexCount: number;
+  /** Triangles, vec4<u32> per face: v0, v1, v2, material. */
+  triangles: Uint32Array;
+  /** Edges, vec4<u32> per edge: v0, v1, face0, face1. */
+  edges: Uint32Array;
+}
+
+export interface OgcTopologyLayout {
+  vertexCount: number;
+  triangleCount: number;
+  edgeCount: number;
+  trisOffset: number;
+  edgesOffset: number;
+  triEdgesOffset: number;
+  vtOffOffset: number;
+  vtListOffset: number;
+  veOffOffset: number;
+  veListOffset: number;
+  words: number;
+  /** Mean rest edge length at build time (metres), for the grid cell floor. */
+  meanEdgeLength: number;
+  maxEdgeLength: number;
+}
+
+export interface OgcTopology { layout: OgcTopologyLayout; words: Uint32Array }
+
+/** Build per-scene topology; `positions` (vec4 per vertex) give the edge-length statistics. */
+export function buildOgcTopology(mesh: OgcMeshTopology, positions: Float32Array): OgcTopology {
+  const N = mesh.vertexCount, T = mesh.triangles.length / 4, E = mesh.edges.length / 4;
+  if (!Number.isInteger(T) || !Number.isInteger(E)) throw new Error("OGC topology: triangles and edges must be vec4<u32> arrays");
+  if (positions.length < 4 * N) throw new Error("OGC topology: positions must hold vec4<f32> per vertex");
+  if (T >= 1 << 28 || E >= 1 << 28) throw new Error("OGC topology: contact entries pack face and edge ids in 28 bits");
+  const edgeKey = (a: number, b: number) => a < b ? a * N + b : b * N + a;
+  const edgeOf = new Map<number, number>();
+  for (let e = 0; e < E; e++) {
+    const a = mesh.edges[4 * e], b = mesh.edges[4 * e + 1], f0 = mesh.edges[4 * e + 2], f1 = mesh.edges[4 * e + 3];
+    if (a >= N || b >= N || a === b) throw new Error(`OGC topology: edge ${e} has invalid vertices`);
+    if (f0 >= T || (f1 !== OGC_NONE && (f1 >= T || f1 === f0))) throw new Error(`OGC topology: edge ${e} has invalid faces`);
+    const key = edgeKey(a, b);
+    if (edgeOf.has(key)) throw new Error(`OGC topology: duplicate edge ${a}-${b}`);
+    edgeOf.set(key, e);
+  }
+  const triEdges = new Uint32Array(4 * T), seen = new Uint8Array(E);
+  for (let t = 0; t < T; t++) {
+    let mask = 0;
+    for (let k = 0; k < 3; k++) {
+      const a = mesh.triangles[4 * t + k], b = mesh.triangles[4 * t + (k + 1) % 3];
+      if (a >= N || a === b) throw new Error(`OGC topology: triangle ${t} has invalid vertices`);
+      const e = edgeOf.get(edgeKey(a, b));
+      if (e === undefined) throw new Error(`OGC topology: triangle ${t} edge ${a}-${b} missing from the edge table`);
+      const f0 = mesh.edges[4 * e + 2], f1 = mesh.edges[4 * e + 3];
+      if (f0 !== t && f1 !== t) throw new Error(`OGC topology: edge ${e} does not list triangle ${t}`);
+      triEdges[4 * t + k] = e;
+      if (f0 === t) mask |= 1 << k;
+      seen[e]++;
+    }
+    triEdges[4 * t + 3] = mask;
+  }
+  for (let e = 0; e < E; e++) {
+    const want = mesh.edges[4 * e + 3] === OGC_NONE ? 1 : 2;
+    if (seen[e] !== want) throw new Error(`OGC topology: edge ${e} is used by ${seen[e]} triangles, its table lists ${want}`);
+  }
+  const vtCount = new Uint32Array(N + 1), veCount = new Uint32Array(N + 1);
+  for (let t = 0; t < T; t++) for (let k = 0; k < 3; k++) vtCount[mesh.triangles[4 * t + k] + 1]++;
+  for (let e = 0; e < E; e++) { veCount[mesh.edges[4 * e] + 1]++; veCount[mesh.edges[4 * e + 1] + 1]++; }
+  for (let v = 0; v < N; v++) { vtCount[v + 1] += vtCount[v]; veCount[v + 1] += veCount[v]; }
+  const vtList = new Uint32Array(3 * T), veList = new Uint32Array(2 * E);
+  const vtFill = vtCount.slice(0, N), veFill = veCount.slice(0, N);
+  for (let t = 0; t < T; t++) for (let k = 0; k < 3; k++) { const v = mesh.triangles[4 * t + k]; vtList[vtFill[v]++] = t; }
+  for (let e = 0; e < E; e++) for (let k = 0; k < 2; k++) { const v = mesh.edges[4 * e + k]; veList[veFill[v]++] = e; }
+  let sum = 0, max = 0;
+  for (let e = 0; e < E; e++) {
+    const a = mesh.edges[4 * e], b = mesh.edges[4 * e + 1];
+    const l = Math.hypot(positions[4 * a] - positions[4 * b], positions[4 * a + 1] - positions[4 * b + 1], positions[4 * a + 2] - positions[4 * b + 2]);
+    sum += l; max = Math.max(max, l);
+  }
+  const layout: OgcTopologyLayout = {
+    vertexCount: N, triangleCount: T, edgeCount: E,
+    trisOffset: 0, edgesOffset: 4 * T, triEdgesOffset: 4 * T + 4 * E,
+    vtOffOffset: 8 * T + 4 * E, vtListOffset: 8 * T + 4 * E + N + 1,
+    veOffOffset: 11 * T + 4 * E + N + 1, veListOffset: 11 * T + 4 * E + 2 * N + 2,
+    words: 11 * T + 6 * E + 2 * N + 2,
+    meanEdgeLength: E ? sum / E : 0, maxEdgeLength: max,
+  };
+  const words = new Uint32Array(Math.ceil(layout.words / 4) * 4);
+  words.set(mesh.triangles.subarray(0, 4 * T), layout.trisOffset);
+  words.set(mesh.edges.subarray(0, 4 * E), layout.edgesOffset);
+  words.set(triEdges, layout.triEdgesOffset);
+  words.set(vtCount, layout.vtOffOffset);
+  words.set(vtList, layout.vtListOffset);
+  words.set(veCount, layout.veOffOffset);
+  words.set(veList, layout.veListOffset);
+  return { layout, words };
+}
+
+/** Edge table (vec4: v0 < v1, face0, face1) from vec4 triangles, for scenes that author faces only. */
+export function buildOgcEdges(triangles: Uint32Array): Uint32Array {
+  const T = triangles.length / 4, map = new Map<string, number>(), out: number[] = [];
+  for (let t = 0; t < T; t++) for (let k = 0; k < 3; k++) {
+    const a = triangles[4 * t + k], b = triangles[4 * t + (k + 1) % 3], lo = Math.min(a, b), hi = Math.max(a, b), key = `${lo},${hi}`;
+    const e = map.get(key);
+    if (e === undefined) { map.set(key, out.length / 4); out.push(lo, hi, t, OGC_NONE); }
+    else if (out[4 * e + 3] !== OGC_NONE) throw new Error(`OGC edges: edge ${lo}-${hi} has more than two faces`);
+    else out[4 * e + 3] = t;
+  }
+  return Uint32Array.from(out);
+}
