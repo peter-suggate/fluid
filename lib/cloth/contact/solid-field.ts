@@ -42,6 +42,22 @@ export const SOLID_RECORD_WORDS = SOLID_MU_WORD + 4 * Math.ceil(NODES / 16);
 /** Friction coefficients are stored per node to 0.01, from 0 to 2.55. */
 export const SOLID_MU_SCALE = 100;
 
+/** The smallest f32 at or above x: the image stores L_max as f32, and a bound must not round down. */
+export function f32Up(x: number): number {
+  const f = Math.fround(x);
+  if (f >= x || !Number.isFinite(f)) return f;
+  const b = new Float32Array([f]), u = new Uint32Array(b.buffer);
+  u[0]! += f >= 0 ? 1 : -1;
+  return b[0]!;
+}
+
+/**
+ * The bound on L_max for a lattice-sampled 1-Lipschitz solid: sqrt(3), rounded
+ * up to f32 as the image stores it. A field whose node differences reach one
+ * cell on all three axes of a cell (a lattice box's corner) has exactly this L_max.
+ */
+export const SOLID_LIPSCHITZ_BOUND = f32Up(Math.sqrt(3));
+
 export type ClothSolidPart =
   /** Any 1-Lipschitz signed distance whose solid lies inside [lo, hi]. */
   | { readonly kind: "sdf"; sdf(p: V3): number; readonly lo: V3; readonly hi: V3; readonly mu: number }
@@ -76,7 +92,7 @@ export interface ClothSolidField {
   /** Bricks per axis over the authored box. */
   dims: V3;
   bricks: Map<string, ClothSolidBrick>;
-  /** Largest per-brick L. */
+  /** Largest per-brick L, rounded up to f32 (the image's word 7 exactly). */
   maxLipschitz: number;
   /** The GPU image. */
   words: Uint32Array<ArrayBuffer>;
@@ -112,8 +128,15 @@ export function cellGradientRange(values: ArrayLike<number>, c: V3): { lo: [numb
   return { lo, hi };
 }
 
-function brickLipschitz(values: Float32Array, cell: number): number {
-  // Per cell and axis, the largest |difference| along the cell's four a-edges (cellGradientRange).
+/**
+ * The brick's L: per cell and axis, the largest |difference| along the cell's four
+ * a-edges (cellGradientRange). Measured on the source's own node values, before the
+ * image rounds them to f32: that rounding perturbs each node by at most half an f32
+ * ulp of its value, the same precision every f32 operation on the field has, and is
+ * not a gradient of the solid (it would put a lattice box's corner a few ulps over
+ * sqrt(3)). A 1-Lipschitz source therefore measures at most sqrt(3).
+ */
+function brickLipschitz(values: ArrayLike<number>, cell: number): number {
   const stride = [1, N, N * N];
   let L2 = 0;
   for (let z = 0; z < SOLID_BRICK_CELLS; z++) for (let y = 0; y < SOLID_BRICK_CELLS; y++) for (let x = 0; x < SOLID_BRICK_CELLS; x++) {
@@ -264,7 +287,7 @@ function buildBrick(parts: readonly Part[], cell: number, band: number, origin: 
   // node; with band >= sqrt(3) h it changes no cell that holds surface.
   const near = parts.filter(p => Math.hypot(...[0, 1, 2].map(a => Math.max(0, p.lo[a]! - bhi[a]!, blo[a]! - p.hi[a]!))) <= band);
   if (!near.length) return undefined;
-  const values = new Float32Array(NODES).fill(Infinity), own = new Uint8Array(NODES);
+  const union = new Float64Array(NODES).fill(Infinity), own = new Uint8Array(NODES);
   const pv = near.map(() => new Float32Array(NODES));
   const p: [number, number, number] = [0, 0, 0];
   let lo = Infinity;
@@ -275,8 +298,8 @@ function buildBrick(parts: readonly Part[], cell: number, band: number, origin: 
       const v = part.sdf(p);
       if (!Number.isFinite(v)) throw new RangeError("Cloth solid distance must be finite");
       out[i] = v;
-      if (out[i]! < values[i]!) { values[i] = out[i]!; own[i] = k; }
-      if (k === near.length - 1) lo = Math.min(lo, values[i]!);
+      if (v < union[i]!) { union[i] = v; own[i] = k; }
+      if (k === near.length - 1) lo = Math.min(lo, union[i]!);
     }
   }
   if (lo > band) return undefined;
@@ -285,7 +308,7 @@ function buildBrick(parts: readonly Part[], cell: number, band: number, origin: 
   near.forEach((part, k) => { if (part.kind === "sdf") checkResolved(part.sdf, cell, at, pv[k]!); });
   const mu = new Uint8Array(NODES);
   for (let i = 0; i < NODES; i++) mu[i] = Math.round(near[own[i]!]!.mu * SOLID_MU_SCALE);
-  return { brick: b, values, mu, lipschitz: brickLipschitz(values, cell) };
+  return { brick: b, values: Float32Array.from(union), mu, lipschitz: brickLipschitz(union, cell) };
 }
 
 function pack(field: Omit<ClothSolidField, "words">): Uint32Array<ArrayBuffer> {
@@ -332,9 +355,10 @@ export function buildClothSolidField(src: ClothSolidSource): ClothSolidField {
 }
 
 function finish(f: Omit<ClothSolidField, "words">): ClothSolidField {
-  let maxLipschitz = 0;
-  for (const b of f.bricks.values()) maxLipschitz = Math.max(maxLipschitz, b.lipschitz);
-  const out = { ...f, maxLipschitz };
+  let L = 0;
+  for (const b of f.bricks.values()) L = Math.max(L, b.lipschitz);
+  // Rounded up to the f32 the image stores, so the detector's band rule and the GPU read one value.
+  const out = { ...f, maxLipschitz: f32Up(L) };
   return { ...out, words: pack(out) };
 }
 

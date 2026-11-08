@@ -22,7 +22,7 @@ import { sceneCellSizes_m, sceneLatticeDimensions, solidVoxelShellForScene } fro
 import { SOLID_PATCH_BOX_KIND } from "../../core/solid-patch/kind";
 import { solidVoxelPatchesKey, type SolidWorldVoxelPatch } from "../../core/solid-world";
 import { bridson2002ClothSceneSolids } from "../scenes/bridson-2002/contact-solids";
-import type { ClothSolidPart, ClothSolidSource, V3 } from "./solid-field";
+import { SOLID_LIPSCHITZ_BOUND, type ClothSolidPart, type ClothSolidSource, type V3 } from "./solid-field";
 
 /**
  * Friction of the container shell. The container is the fluid's vessel; no
@@ -45,9 +45,13 @@ const SHELL_ONLY: ClothSceneSolidAuthoring = {
   },
 };
 
-/** The band a detector needs: r + 1.5 L rqMax with L at its bound sqrt(3) for a lattice-sampled 1-Lipschitz solid. */
+/**
+ * The band a detector needs: r + 1.5 L rqMax with L at its bound for a
+ * lattice-sampled 1-Lipschitz solid, sqrt(3) rounded up to f32
+ * (SOLID_LIPSCHITZ_BOUND), the same expression the detector's band rule evaluates.
+ */
 export function clothSolidBand(r_m: number, rqMax_m: number): number {
-  return r_m + 1.5 * Math.sqrt(3) * rqMax_m;
+  return r_m + 1.5 * SOLID_LIPSCHITZ_BOUND * rqMax_m;
 }
 
 export interface ClothSceneSolidOptions {

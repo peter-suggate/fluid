@@ -4,7 +4,7 @@ import { createEmptyScene } from '../lib/core/empty-scene';
 import type { SceneDescription } from '../lib/core/model';
 import { VOXEL_MATERIAL_IDS } from '../lib/core/voxel-scene';
 import { CLOTH_CONTAINER_SHELL_FRICTION, clothSolidBand, clothSolidSourceForScene, sceneLatticeOrigin_m } from '../lib/cloth/contact/scene-solids';
-import { SOLID_BRICK_CELLS, buildClothSolidField, sampleClothSolidField, type ClothSolidSource, type V3 } from '../lib/cloth/contact/solid-field';
+import { SOLID_BRICK_CELLS, SOLID_LIPSCHITZ_BOUND, buildClothSolidField, f32Up, sampleClothSolidField, type ClothSolidSource, type V3 } from '../lib/cloth/contact/solid-field';
 import { bridson2002Curtain, bridson2002RotatingSphere, bridson2002Tablecloth, bridsonSolidPose, type Bridson2002Scene } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription, bridson2002SceneLayout } from '../lib/cloth/scenes/bridson-2002/scene-description';
 
@@ -108,7 +108,22 @@ test('Scene solids: solid edits, foreign boxes and unknown kinds fail explicitly
   assert.ok(shell.parts!.length >= 5 && shell.parts!.every(p => p.kind === 'lattice-box' && p.mu === CLOTH_CONTAINER_SHELL_FRICTION));
   assert.throws(() => clothSolidSourceForScene({ ...empty, solidVoxels: [...empty.solidVoxels,
     { operation: 'fill', minimum: [0, 0, 0], maximumExclusive: [8, 1, 8], materialId: VOXEL_MATERIAL_IDS.terrain }] }, { band_m: BAND }), /no authored cloth friction/);
-  assert.ok(Math.abs(clothSolidBand(1e-3, 0.02) - (1e-3 + 1.5 * Math.sqrt(3) * 0.02)) < 1e-15);
+});
+
+test('Scene solids band: sqrt(3) rounded up to f32 is the bound a shell meets exactly, and the detector rule passes at clothSolidBand', () => {
+  // The bound is the f32 at or above sqrt(3), the next f32 below it is under sqrt(3).
+  const below = new Float32Array([SOLID_LIPSCHITZ_BOUND]); new Uint32Array(below.buffer)[0]! -= 1;
+  assert.ok(Math.fround(SOLID_LIPSCHITZ_BOUND) === SOLID_LIPSCHITZ_BOUND && SOLID_LIPSCHITZ_BOUND > Math.sqrt(3) && below[0]! < Math.sqrt(3));
+  assert.equal(f32Up(1.5), 1.5); assert.ok(f32Up(-Math.sqrt(3)) >= -Math.sqrt(3) && f32Up(-Math.sqrt(3)) === Math.fround(-Math.sqrt(3)));
+  assert.equal(clothSolidBand(1e-3, 0.02), 1e-3 + 1.5 * SOLID_LIPSCHITZ_BOUND * 0.02);
+  // A container shell alone: its corner cells reach L = sqrt(3), measured on the source's
+  // values (their f32 images are a few ulps over) and stored rounded up, as word 7 holds it.
+  const r = 5e-3, rqMax = 0.04, band = clothSolidBand(r, rqMax);
+  const field = buildClothSolidField(clothSolidSourceForScene(createEmptyScene({ sceneId: 'cloth-empty' }), { band_m: band }));
+  assert.equal(field.maxLipschitz, SOLID_LIPSCHITZ_BOUND);
+  assert.equal(new Float32Array(field.words.buffer)[7], field.maxLipschitz);
+  // OgcDetector.setSolidField's band rule, on the same values.
+  assert.ok(field.band >= r + 1.5 * field.maxLipschitz * rqMax);
 });
 
 test('Scene solids in the cloth frame: the same field, translated', () => {
