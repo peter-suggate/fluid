@@ -611,8 +611,9 @@ export class UniformMixedFrame {
    particleHeat:{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.activityHeatWord},coldFreeze:this.freeze,holdRises:capacity.coldFrameSkip!=="off",tiering:this.nearSettled.regionTiering,surfaceWarm:this.nearSettled.coldSurface!=="budget",surfaceStill:this.nearSettled.coldSurface==="still"});
   // Retain the projected h velocity detail: restricting all momentum to 4h
   // removes the long-dam toe even when total liquid volume is conserved.
-  // Its tiers follow the region heat (UniformMixedMomentumTiers).
-  this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,true,f.sourceParams,this.freeze,sampler,"shared",this.nearSettled.momentumTrace);
+  // One claimed launch: a COLD region's faces retain (region heat), every
+  // other non-frozen face takes the exact unit trace.
+  this.momentum=new UniformMixedMomentum(device,o,this.heat.tiers,true,f.sourceParams,this.freeze,sampler,this.nearSettled.momentumTrace);
   this.forces=new UniformMixedForces(device,o,true,f.sourceParams,solid,true,true,true,true,true,this.dynamics,this.freeze);
   this.stageBandTiles=this.bandTilesAt(o.capacity.fineTiles,capacity.liquidBand);
   this.stageScratch=buffer("Uniform mixed stage scratch",this.stageBytesAt(o.capacity.fineTiles),GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST);this.bindStage();
@@ -694,7 +695,7 @@ export class UniformMixedFrame {
   // The extension's slots are its prefix: they hold from the tail's
   // extension to the next head's, when no other consumer runs (useSlots).
   return Math.ceil(Math.max(this.extension.slotBufferBytesAt(fineTiles),this.surface.scratchBytes,
-   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedMomentum.traceBytesAt(fineTiles),UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
+   this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
  }
  /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
@@ -705,8 +706,7 @@ export class UniformMixedFrame {
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   // The retained extension slots expire before surface transport. Surface and
   // volume finish before momentum; forces and the next extension run after it.
-  // Its trace list can use this same arena without changing admission capacity.
-  this.momentumGroup=this.momentum.bind({traceScratch:stage,unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),
+  this.momentumGroup=this.momentum.bind({unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),
    unitHaloHalf:this.momentum.sampler==="texture16"?this.hanging.halfHaloOf(this.hanging.unitVelocity):undefined,
    extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,
    output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,coarseExtended:this.coarseCache});

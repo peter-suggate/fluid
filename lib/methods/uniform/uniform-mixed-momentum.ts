@@ -2,6 +2,7 @@ import { UNIFORM_MOMENTUM_TRACE_SEGMENTS, uniformCachedMomentumSamplingWGSL, typ
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
+import { uniformRegionHeatWGSL } from "./uniform-region-heat";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
 import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
@@ -10,7 +11,6 @@ import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-so
 import { uniformVelocityDepartureWGSL, uniformVelocitySegmentedDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformTileContextSidesWGSL } from "./uniform-tile-context";
-import { UNIFORM_MOMENTUM_TIER, UNIFORM_MOMENTUM_TIER_PASS, UNIFORM_MOMENTUM_FIT_GRID, UniformMixedMomentumTiers, uniformMomentumTierWGSL } from "./uniform-mixed-momentum-tiers";
 
 export interface UniformMixedMomentumFields {
   extended: GPUTexture;
@@ -23,7 +23,7 @@ export interface UniformMixedMomentumFields {
   negative: GPUBuffer;
   output: GPUTexture;
   outputNegative: GPUBuffer;
-  /** UniformMixedHangingTaps.unitVelocity of `extended`; with hanging taps only. */
+  /** UniformMixedHangingTaps.unitVelocity of `extended`. */
   unitVelocity?: GPUTexture;
   /** Its halo (UniformMixedHangingTaps.haloOf), filled with it. */
   unitHalo?: GPUTexture;
@@ -34,43 +34,20 @@ export interface UniformMixedMomentumFields {
    * layout matches the other mixed stages' parameter blocks, and fixed
    * limits must be UNIFORM_MIXED_MOMENTUM_LIMITS. */
   params: GPUBuffer;
-  /** Exclusive scratch for this momentum stage; required with shared storage.
-   * No value survives momentumTrace. The caller retains buffer ownership. */
-  traceScratch?: GPUBufferBinding;
 }
 
 const MOMENTUM_PASS: GPUComputePassDescriptor = { label: "Uniform mixed momentum" };
 
-/** Claim word of momentumFine's trace list count (the claims buffer is
- * cleared each frame; words 0..2 are the claimed launches'). */
-const TRACE_COUNT_WORD=3;
 /** Claim word counting, this frame, the substep traces cut at
  * UNIFORM_MOMENTUM_TRACE_SEGMENTS (umTraceCapped): a diagnostic that should
  * stay zero, since so long a travel is past the residency closure's cap. */
 export const UNIFORM_MOMENTUM_TRACE_CAPPED_WORD=4;
-/** Bytes of a trace list entry (UMTraceEntry). */
-const TRACE_ENTRY_BYTES=20;
-
-/** Bind only the admitted trace range; a reservation must replace insufficient
- * scratch before any frame can dispatch. This borrows without taking ownership. */
-export function uniformMomentumTraceBinding(fineTiles:number,scratch:GPUBufferBinding|undefined):GPUBufferBinding {
-  const bytes=TRACE_ENTRY_BYTES*Math.max(1,64*fineTiles);
-  const offset=scratch?.offset??0;
-  if(!scratch||offset<0||offset+bytes>scratch.buffer.size||(scratch.size??scratch.buffer.size-offset)<bytes)
-    throw new Error("Mixed momentum requires a trace entry for every admitted h owner");
-  return {...scratch,size:bytes};
-}
-
-
-/** Momentum through the unit sampler (uniformCachedMomentumSamplingWGSL),
- * the h tiles of the general list in two lean launches. momentumFine, a
- * workgroup a tile and a face a lane, resolves the tile's context once (its
- * six sides, cold states, tier and the liveness of its cells and the cells
- * across its positive faces) and makes umUnitMomentum's tests from it: a
- * face that needs no trace is final there, and a cell with none stores its
- * texel. A cell with a traced face is listed with its partial values;
- * momentumTrace strides that list, a lane a component, from one umUnitTrace
- * call site, and stores the texel. The merged seam and regular 4h jobs
+/** Momentum through the unit sampler (uniformCachedMomentumSamplingWGSL).
+ * An h tile job, a face a lane, resolves the tile's context once (its six
+ * sides, cold states and the liveness of its cells and the cells across its
+ * positive faces) and makes umUnitMomentum's tests from it; a face that
+ * needs a trace takes it at once, from one umUnitTrace call site, and the
+ * job stores its cells' texels. The merged seam and regular 4h jobs
  * evaluate umUnitMomentum. Every sample stays in the sampler (the unit halo
  * holds the low-wall taps), so no face is deferred. */
 const uniformMixedMomentumUnitWGSL = (sampler: UniformMomentumSampler, trace: UniformMomentumTrace) => uniformCachedMomentumSamplingWGSL(sampler, trace) + uniformTileContextSidesWGSL + /* wgsl */ `
@@ -85,34 +62,22 @@ fn umUnitMomentumValue(owner:UMOwner,face:UMFace)->f32 {
  if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
  if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
  if(umDropFace(face)){return 0.0;}
- if(umMomentumAffine(owner)){return umAffineMomentum(owner,face);}
  return umUnitTrace(umFaceCenter(face),face.axis,momentum.hDt.w,momentum.hDt.xyz);
 }
-// A listed cell of momentumFine: its three positive components (final, or
-// a traced face's thawing term), its tile and cell | traced bits << 6
-// (positive faces 0..2, low faces 3..5; a traced low face's thawing term is
-// in its boundary entry already).
-struct UMTraceEntry {u:f32,v:f32,w:f32,tile:u32,info:u32}
-@group(1) @binding(25) var<storage,read_write> umTraceList:array<UMTraceEntry>;
-const UM_TRACE_COUNT:u32=${TRACE_COUNT_WORD}u;
 var<workgroup> umUnitComponents:array<f32,192>;
-var<workgroup> umFineTraced:array<u32,192>;
-// The tile context: each side's region cold state (6: the tile's own), the
-// region's tier, and the liveness (umPredictionCellLive) of the tile's 64
-// cells, then of the 16 cells across each positive side (axis a at
-// 64 + 16 a + l[a+1] + 4 l[a+2]).
+// The tile context: each side's region cold state (6: the tile's own) and
+// the liveness (umPredictionCellLive) of the tile's 64 cells, then of the 16
+// cells across each positive side (axis a at 64 + 16 a + l[a+1] + 4 l[a+2]).
 var<workgroup> umFineCold:array<u32,7>;
-var<workgroup> umFineTier:u32;
+// The tile's region is COLD (umMomentumRetained).
+var<workgroup> umFineRetained:u32;
 var<workgroup> umFineLive:array<u32,112>;
-var<workgroup> umFineListed:atomic<u32>;
-var<workgroup> umFineBase:u32;
 fn umLoadFineTile(t:u32,lane:u32){
  if(lane<6u){
   utcLoadSide(t,lane);let side=utcSides[lane];
   umFineCold[lane]=select(0u,umColdState(umPageOfTile(side.key)),side.width!=0u);
  }
- if(lane==6u){let region=umPageOfTile(t);umFineCold[6]=umColdState(region);umFineTier=umTiers[region];}
- if(lane==7u){atomicStore(&umFineListed,0u);}
+ if(lane==6u){let region=umPageOfTile(t);umFineCold[6]=umColdState(region);umFineRetained=u32(umRegionTier(region)==UM_TIER_COLD);}
  workgroupBarrier();
  if(umCullAir&&lane<112u){
   // Lanes 0..63 the tile's cells; 64.. the cells across the positive sides.
@@ -134,10 +99,9 @@ fn umFineOriginal(face:UMFace,low:bool)->f32 {
  if(low){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
  return textureLoad(physical,face.anchor,0)[face.axis];
 }
-// umUnitMomentum's tests for a face of the h owner cell (first cell origin)
-// from the tile context: x the face's value, or for a traced face (y 1) the
-// thawing term the trace adds to. Only an open low face is a negative one.
-fn umFineClassify(owner:UMOwner,origin:vec3i,cell:u32,axis:u32,sign:i32)->vec2f {
+// umUnitMomentum for a face of the h owner cell (first cell origin) from
+// the tile context. Only an open low face is a negative one.
+fn umFineMomentum(owner:UMOwner,origin:vec3i,cell:u32,axis:u32,sign:i32)->f32 {
  var probe=origin;probe[axis]+=sign;
  let inside=all((probe>>vec3u(2u))==(origin>>vec3u(2u)));
  let s=2u*axis+u32(sign>0);
@@ -145,88 +109,69 @@ fn umFineClassify(owner:UMOwner,origin:vec3i,cell:u32,axis:u32,sign:i32)->vec2f 
  let wall=!inside&&utcSides[s].kind>=UM_SOLID;let low=wall&&sign<0;
  var anchor=origin;if(sign<0){anchor[axis]-=1;}
  let face=UMFace(UMOwner(),anchor,1u,1u,axis,sign);
- // umFaceFreeze: x frozen, y the thawing term (the owner's, else the neighbour's).
+ // umFaceFreeze: frozen, else the thawing term (the owner's, else the neighbour's).
  var thaw=0.0;
  if(UM_COLD_FREEZE){
   let own=umFineCold[6];var other=own;var region=umPageOfTile(owner.tile);
   if(!inside&&utcSides[s].width!=0u){other=umFineCold[s];}
-  if(own==1u||own==2u||other==1u||other==2u){return vec2f(umFineOriginal(face,low),0.0);}
+  if(own==1u||own==2u||other==1u||other==2u){return umFineOriginal(face,low);}
   if(own==3u||other==3u){
    if(own!=3u){region=umPageOfTile(utcSides[s].key);}
    thaw=umColdTermOf(region,axis);
   }
  }
  // umRetainedFace.
- if(umFineTier==${UNIFORM_MOMENTUM_TIER.retain}u){
-  if(low){return vec2f(umFineOriginal(face,true)+thaw,0.0);}
-  if(umDropFace(face)&&!wall){return vec2f(thaw,0.0);}
-  return vec2f(textureLoad(extended,anchor,0)[axis]+thaw,0.0);
+ if(umFineRetained!=0u){
+  if(low){return umFineOriginal(face,true)+thaw;}
+  if(umDropFace(face)&&!wall){return thaw;}
+  return textureLoad(extended,anchor,0)[axis]+thaw;
  }
  if(umCullAir){
   let l=umCorner(cell,4u);var near=0u;
   if(inside){near=umFineLive[u32(i32(cell)+sign*i32(vec3u(1u,4u,16u)[axis]))];}
   else if(sign>0){near=umFineLive[64u+16u*axis+l[(axis+1u)%3u]+4u*l[(axis+2u)%3u]];}
-  if(umFineLive[cell]==0u&&near==0u){return vec2f(thaw,0.0);}
+  if(umFineLive[cell]==0u&&near==0u){return thaw;}
  }
- if(wall){return vec2f(umFineOriginal(face,low)+thaw,0.0);}
- if(umDropFace(face)){return vec2f(thaw,0.0);}
- if(umFineTier==${UNIFORM_MOMENTUM_TIER.affine}u){return vec2f(umAffineMomentum(owner,face)+thaw,0.0);}
- return vec2f(thaw,1.0);
+ if(wall){return umFineOriginal(face,low)+thaw;}
+ if(umDropFace(face)){return thaw;}
+ var center=vec3f(origin)+vec3f(0.5);center[axis]=f32(origin[axis]+select(0,1,sign>0));
+ return umUnitTrace(center,axis,momentum.hDt.w,momentum.hDt.xyz)+thaw;
 }
-// One h tile of the general list per job, one face per lane (as
-// uniformMixedFaceTileDispatchWGSL's width-1 jobs).
-@compute @workgroup_size(192) fn momentumFine(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+// h tile job: the tile at h list index job, one face a lane.
+fn umFineJob(job:u32,lane:u32){
  let cell=lane%64u;let axis=lane/64u;
- let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
- umLoadFineTile(owner.tile,lane);
+ let t=umTopology[UM_TILES+job];let owner=UMOwner(t,cell,1u,(umTopology[t]&0x3fffffffu)+cell);
+ umLoadFineTile(t,lane);
  let origin=utcOrigin+vec3i(umCorner(cell,4u));
- var value=0.0;var traced=0u;
+ var value=0.0;
  // A frozen owner's texels and low walls hold (UniformColdFreeze).
- let live=owner.width!=0u&&umFineCold[6]!=1u&&umFineCold[6]!=2u;
+ let live=umFineCold[6]!=1u&&umFineCold[6]!=2u;
  if(live){
-  // The low boundary face where it is open (nothing stored below), then the positive one.
+  // The low boundary face where it is open (nothing stored below), then the
+  // positive one: one umFineMomentum site.
   let low=(origin[axis]&31)==0&&utcSides[2u*axis].width==0u;
   for(var sign=select(1,-1,low);sign<=1;sign+=2){
-   let v=umFineClassify(owner,origin,cell,axis,sign);let bit=u32(v.y!=0.0)<<(axis+select(0u,3u,sign<0));
-   if(sign<0){boundary[umLowFaceIndex(vec3u(origin),axis)]=v.x;}else{value=v.x;}
-   traced|=bit;
+   let v=umFineMomentum(owner,origin,cell,axis,sign);
+   if(sign<0){boundary[umLowFaceIndex(vec3u(origin),axis)]=v;}else{value=v;}
   }
  }
- umUnitComponents[lane]=value;umFineTraced[lane]=traced;workgroupBarrier();
- var bits=0u;var slot=0u;
- let components=vec3f(umUnitComponents[cell],umUnitComponents[cell+64u],umUnitComponents[cell+128u]);
- if(lane<64u&&live){
-  bits=umFineTraced[cell]|umFineTraced[cell+64u]|umFineTraced[cell+128u];
-  if(bits==0u){textureStore(output,origin,vec4f(components,0));}else{slot=atomicAdd(&umFineListed,1u);}
- }
- workgroupBarrier();
- if(lane==0u){umFineBase=atomicAdd(&umClaims[UM_TRACE_COUNT],atomicLoad(&umFineListed));}
- workgroupBarrier();
- if(bits!=0u){umTraceList[umFineBase+slot]=UMTraceEntry(components.x,components.y,components.z,owner.tile,cell|(bits<<6u));}
+ umUnitComponents[lane]=value;workgroupBarrier();
+ if(lane<64u&&live){textureStore(output,origin,vec4f(umUnitComponents[cell],umUnitComponents[cell+64u],umUnitComponents[cell+128u],0));}
 }
-var<workgroup> umTraceCount:u32;
-// momentumFine's listed cells, 64 a workgroup and a component a lane over a
-// fixed grid: each traced face adds its trace to its partial value.
-@compute @workgroup_size(192) fn momentumTrace(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){umTraceCount=atomicLoad(&umClaims[UM_TRACE_COUNT]);}
- let count=workgroupUniformLoad(&umTraceCount);
- let slot=lane%64u;let axis=lane/64u;
- for(var first=64u*group.x;first<count;first+=64u*groups.x){
-  let listed=first+slot<count;var value=0.0;var origin=vec3i(0);
-  if(listed){
-   let entry=umTraceList[first+slot];let bits=entry.info>>6u;
-   origin=vec3i(umTileCoord(entry.tile)*4u+umCorner(entry.info&63u,4u));
-   value=vec3f(entry.u,entry.v,entry.w)[axis];
-   // One umUnitTrace site: the low face where it is traced, then the positive one.
-   for(var sign=select(1,-1,(bits&(8u<<axis))!=0u);sign<=1;sign+=2){
-    if(sign>0&&(bits&(1u<<axis))==0u){break;}
-    var center=vec3f(origin)+vec3f(0.5);center[axis]=f32(origin[axis]+select(0,1,sign>0));
-    let t=umUnitTrace(center,axis,momentum.hDt.w,momentum.hDt.xyz);
-    if(sign<0){let k=umLowFaceIndex(vec3u(origin),axis);boundary[k]+=t;}else{value+=t;}
-   }
-  }
-  umUnitComponents[lane]=value;workgroupBarrier();
-  if(lane<64u&&listed){textureStore(output,origin,vec4f(umUnitComponents[slot],umUnitComponents[slot+64u],umUnitComponents[slot+128u],0));}
+// One launch: a fixed grid whose workgroups claim jobs from umClaims[0]
+// (zeroed each frame): every h tile (the h list), then the merged seam and
+// regular 4h jobs (momentumStep's, umCertifiedJobCount).
+var<workgroup> umMomentumJobs:u32;
+var<workgroup> umMomentumFine:u32;
+var<workgroup> umMomentumClaim:u32;
+@compute @workgroup_size(192) fn advectMomentum(@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){umMomentumFine=umCounts.x;umMomentumJobs=umCounts.x+umCertifiedJobCount();}
+ let fine=workgroupUniformLoad(&umMomentumFine);let jobs=workgroupUniformLoad(&umMomentumJobs);
+ loop{
+  if(lane==0u){umMomentumClaim=atomicAdd(&umClaims[0],1u);}
+  let job=workgroupUniformLoad(&umMomentumClaim);
+  if(job>=jobs){break;}
+  if(job<fine){umFineJob(job,lane);}else{momentumStepJob(vec3u(job-fine,0u,0u),lane);}
   workgroupBarrier();
  }
 }
@@ -239,77 +184,51 @@ export const UNIFORM_MIXED_MOMENTUM_LIMITS = 32 | (16 << 8);
 export class UniformMixedMomentum {
   readonly allocatedBytes: number;
   private readonly resources: GPUBindGroupLayout;
-  /** Per-region retain/affine/full decisions, made ahead of the launches. */
-  readonly tiers: UniformMixedMomentumTiers;
-  private tierGroup?: GPUBindGroup;
-  /** Job counters of the claimed launches (regular 0, unit 1, merged 2),
-   * then the trace list's count (TRACE_COUNT_WORD). */
+  /** The launch's job counter (word 0), then the capped-trace count
+   * (UNIFORM_MOMENTUM_TRACE_CAPPED_WORD). */
   readonly claims: GPUBuffer;
-  /** momentumFine's listed cells (hanging taps only): an entry per h owner
-   * at the h-tile capacity, so it never overflows. */
-  private readonly traceList?: GPUBuffer;
-  /** momentumTrace's fixed grid. */
-  private readonly traceGrid: number;
-  private tracePipeline?:GPUComputePipeline;
   /** The texture samplers' linear filter (texture32, texture16). */
   private readonly filter?: GPUSampler;
   private pipeline?: GPUComputePipeline;
-  private regularPipeline?:GPUComputePipeline;
-  private generalPipeline?:GPUComputePipeline;
-  private fitPipeline?:GPUComputePipeline;
-  private residualPipeline?:GPUComputePipeline;
   constructor(private readonly device: GPUDevice, readonly ownership: UniformMixedOwnership,
-    /** heat: the frame's region work tiers (UniformRegionHeat.tiers). */
-    heat: GPUBuffer, private readonly cullAir = false, private readonly hanging = false, private readonly sourceParams?: GPUBuffer,
+    /** heat: the frame's region work tiers (UniformRegionHeat.tiers). A COLD region's faces retain. */
+    private readonly heat: GPUBuffer,
+    private readonly cullAir = false, private readonly sourceParams?: GPUBuffer,
     /** COLD freeze: frozen owners hold, frozen faces keep their value. */
     private readonly freeze?: UniformColdFreeze,
-    /** The unit sampler's interpolation (hanging taps only): texture32
-     * requires float32-filterable. */
+    /** The unit sampler's interpolation: texture32 requires float32-filterable. */
     readonly sampler: UniformMomentumSampler = "software",
-    private readonly traceStorage: "owned" | "shared" = "owned",
-    /** The unit trace's characteristic (UniformMomentumTrace; hanging taps only). */
+    /** The unit trace's characteristic (UniformMomentumTrace). */
     readonly trace: UniformMomentumTrace = "midpoint") {
     // Far-air regular 4h owners (uniformMixedFarAirWGSL) are culled to zero,
-    // so the merged launch skips them; forces supplies that zero itself.
+    // so the merged jobs skip them; forces supplies that zero itself.
     if(sourceParams&&!cullAir)throw new Error("Mixed momentum far-air skipping requires prediction culling");
-    if(sampler!=="software"&&!hanging)throw new Error("Mixed momentum texture sampling reads the hanging taps' halo");
     if(sampler==="texture32"&&!device.features.has("float32-filterable"))throw new Error("Mixed momentum texture32 sampling requires float32-filterable");
     const filtered=sampler==="software"?[]:[22,...(sampler==="texture32"?[24]:[])];
     this.resources = uniformDetailBindLayout(device,{ entries: [
       ...[0, 1, 2, 3].map(binding => ({ binding, visibility: GPUShaderStage.COMPUTE,
         texture: { sampleType: "unfilterable-float" as const, viewDimension: "3d" as const } })),
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 9, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
       { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-      ...[12,15,...(hanging?[16,18]:[])].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
+      ...[12,15,16,18].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
       { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ...(sourceParams?[{binding:17,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform" as const}}]:[]),
-      { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
-      { binding: 20, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ...(freeze?[{binding:21,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
       ...filtered.map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"float" as const,viewDimension:"3d" as const}})),
       ...(filtered.length?[{binding:23,visibility:GPUShaderStage.COMPUTE,sampler:{type:"filtering" as const}}]:[]),
-      ...(hanging?[{binding:25,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
     ] },filtered);
     if(filtered.length)this.filter=device.createSampler({label:"Uniform mixed momentum filter",magFilter:"linear",minFilter:"linear",addressModeU:"clamp-to-edge",addressModeV:"clamp-to-edge",addressModeW:"clamp-to-edge"});
-    this.tiers=new UniformMixedMomentumTiers(device,ownership,heat);
     this.claims=device.createBuffer({label:"Uniform mixed momentum job claims",size:4*UNIFORM_MIXED_CLAIM_WORDS,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
-    this.traceGrid=Math.max(1,Math.min(1024,ownership.capacity.fineTiles));
-    if(hanging&&traceStorage==="owned")this.traceList=device.createBuffer({label:"Uniform mixed momentum trace list",size:UniformMixedMomentum.traceBytesAt(ownership.capacity.fineTiles),usage:GPUBufferUsage.STORAGE});
-    this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS+this.tiers.allocatedBytes+(this.traceList?.size??0);
+    this.allocatedBytes=4*UNIFORM_MIXED_CLAIM_WORDS;
   }
-  static traceBytesAt(fineTiles:number):number{return TRACE_ENTRY_BYTES*Math.max(1,64*fineTiles);}
   bind(fields: UniformMixedMomentumFields): UniformDetailGroup {
-    let trace:GPUBufferBinding|undefined;
-    if(this.hanging){
-      trace=uniformMomentumTraceBinding(this.ownership.capacity.fineTiles,
-        this.traceStorage==="shared"?fields.traceScratch:{buffer:this.traceList!});
-    }
     if(this.cullAir&&!fields.centerPhi)throw new Error("Prediction culling requires current center phi");
-    if(this.hanging!==(fields.unitVelocity!==undefined)||this.hanging!==(fields.unitHalo!==undefined))throw new Error("Mixed momentum hanging taps require their unit velocity texture and its halo");
+    if(!fields.unitVelocity||!fields.unitHalo)throw new Error("Mixed momentum traces through the hanging taps: it requires their unit velocity texture and its halo");
     if((this.sampler==="texture16")!==(fields.unitHaloHalf!==undefined)||(fields.unitHaloHalf&&fields.unitHaloHalf.format!=="rgba16float"))throw new Error("Mixed momentum texture16 sampling requires the halo's rgba16float copy");
-    const filtered=this.sampler==="texture32"?[{binding:22,resource:fields.unitHalo!},{binding:24,resource:fields.coarseExtended}]
+    const filtered=this.sampler==="texture32"?[{binding:22,resource:fields.unitHalo},{binding:24,resource:fields.coarseExtended}]
       :this.sampler==="texture16"?[{binding:22,resource:fields.unitHaloHalf!}]:[];
     const textures = [fields.extended, fields.physical, fields.phase, fields.volume];
     const address = this.ownership.capacity.address;
@@ -322,7 +241,6 @@ export class UniformMixedMomentum {
     if (textures.includes(fields.output) || fields.negative === fields.outputNegative) throw new Error("Mixed momentum output must be disjoint from its inputs");
     for (const buffer of [fields.negative, fields.outputNegative])
       if (buffer.size < 4 * address.lowFaceKeys) throw new Error("Mixed momentum requires complete negative boundary planes");
-    this.tierGroup=this.tiers.bind(fields.params);
     return uniformDetailGroup(this.device,{ layout: this.resources, entries: [
       ...textures.map((texture, binding) => ({ binding, resource: texture })),
       { binding: 6, resource: { buffer: fields.negative } },
@@ -330,17 +248,14 @@ export class UniformMixedMomentum {
       { binding: 11, resource: { buffer: fields.params, size: 32 } },
       {binding:15,resource:fields.centerPhi??fields.volume},
       {binding:12,resource:fields.coarseExtended},
-      ...(fields.unitVelocity&&fields.unitHalo?[{binding:16,resource:fields.unitVelocity},{binding:18,resource:fields.unitHalo}]:[]),
-      {binding:13,resource:{buffer:this.claims}},
+      {binding:16,resource:fields.unitVelocity},{binding:18,resource:fields.unitHalo},
+      {binding:13,resource:{buffer:this.claims}},{binding:19,resource:{buffer:this.heat}},
       ...(this.sourceParams?[{binding:17,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}}]:[]),
-      {binding:19,resource:{buffer:this.tiers.record}},{binding:20,resource:{buffer:this.tiers.models}},
       ...(this.freeze?[{binding:21,resource:this.freeze.regions.createView()}]:[]),
       ...filtered,...(this.filter?[{binding:23,resource:this.filter}]:[]),
-      ...(trace?[{binding:25,resource:trace}]:[]),
     ] });
   }
   async initialize(): Promise<void> {
-    await this.tiers.initialize();
     const module = uniformDetailModule(this.device,{specializeWorldGeometry:true, label: "Uniform mixed momentum", code: uniformMixedClaimedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity, 0) + /* wgsl */ `
 @group(1) @binding(0) var extended:texture_3d<f32>;
 @group(1) @binding(1) var physical:texture_3d<f32>;
@@ -354,13 +269,14 @@ struct UMMomentumParams {hDt:vec4f,flags:vec4u}
 @group(1) @binding(12) var coarseExtended:texture_3d<f32>;
 @group(1) @binding(15) var centerPhi:texture_3d<f32>;
 @group(1) @binding(13) var<storage,read_write> umClaims:array<atomic<u32>>;
-${this.hanging?"@group(1) @binding(16) var unitVelocity:texture_3d<f32>;\n@group(1) @binding(18) var unitHalo:texture_3d<f32>;":""}
+@group(1) @binding(16) var unitVelocity:texture_3d<f32>;
+@group(1) @binding(18) var unitHalo:texture_3d<f32>;
 ${this.sampler!=="software"?"@group(1) @binding(22) var unitHaloFiltered:texture_3d<f32>;\n@group(1) @binding(23) var umMomentumSampler:sampler;":""}
 ${this.sampler==="texture32"?"@group(1) @binding(24) var coarseFiltered:texture_3d<f32>;":""}
-${uniformMomentumTierWGSL(19,20,this.trace)}
 ${this.trace==="substep"?`const UM_TRACE_CAPPED:u32=${UNIFORM_MOMENTUM_TRACE_CAPPED_WORD}u;
 fn umTraceCapped(){atomicAdd(&umClaims[UM_TRACE_CAPPED],1u);}`:""}
 ${UniformColdFreeze.wgsl(this.freeze,1,21)}
+${uniformRegionHeatWGSL(1,19,this.ownership.capacity.tiles/64)}
 // A frozen owner (UniformColdFreeze): its texels and low walls hold.
 fn umOwnerFrozen(owner:UMOwner)->bool{return owner.width!=0u&&umFrozenRegion(umPageOfTile(owner.tile));}
 // x: 1 for a frozen face (an incident cell frozen), y: a thawing region's
@@ -379,16 +295,10 @@ ${uniformMixedFaceAddressWGSL}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32 {
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}return textureLoad(extended,anchor,0)[axis];
 }
-${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",this.hanging?2:undefined,this.hanging?"unitVelocity":undefined,undefined,this.hanging?"unitHalo":undefined)}
+${uniformMixedVelocitySamplingSource(false,"coarseExtended","extended",2,"unitVelocity",undefined,"unitHalo")}
 // A departure stops at a wall, a face with a SOLID page across it, and
 // nowhere else: it runs on into an AIR page.
 fn umClampMomentum(p:vec3f)->vec3f {return umPointHeld(p);}
-${this.trace==="midpoint"?`fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f)->vec3f {
-${uniformVelocityDepartureWGSL("umSampleVelocity", "umClampMomentum")}
-}`:`// momentumTrace "substep": segments of at most the face's own cell (reach).
-fn umMomentumDeparture(position:vec3f,dt:f32,h:vec3f,reach:f32)->vec3f {
-${uniformVelocitySegmentedDepartureWGSL(at=>`umSampleVelocity(${at})`,p=>`umClampMomentum(${p})`,"reach",`${UNIFORM_MOMENTUM_TRACE_SEGMENTS}u`,"umTraceCapped();")}
-}`}
 fn umOriginalMomentum(face:UMFace)->f32 {
  if(umFaceLow(face.anchor,face.axis)){return negative[umLowFaceIndex(umLowFaceAbove(face.anchor,face.axis),face.axis)];}
  // A 4h-wide patch's anchor is canonical: the base block where the h store
@@ -396,8 +306,11 @@ fn umOriginalMomentum(face:UMFace)->f32 {
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(physical,face.anchor,0)[face.axis];}
  return textureLoad(physical,face.anchor,0)[face.axis];
 }
-// A retained region's face (UniformMixedMomentumTiers): its own extended
-// value, within the region's bound of the trace it skips.
+// A COLD region retains (UNIFORM_REGION_HEAT_BUDGET_H): the heat holds its
+// displacement within budget over the frames it stays COLD, and triggers on
+// bodies, sources, identity and unknown evidence. Its faces take this frame's
+// extended value, which the last projection corrected, and skip the trace.
+fn umMomentumRetained(owner:UMOwner)->bool{return umRegionTier(umPageOfTile(owner.tile))==UM_TIER_COLD;}
 fn umRetainedMomentum(face:UMFace)->f32 {
  if(face.width==4u){return ${UNIFORM_DETAIL_RING_4H_LOAD}textureLoad(extended,face.anchor,0)[face.axis];}
  return textureLoad(extended,face.anchor,0)[face.axis];
@@ -415,9 +328,6 @@ fn umRetainedFace(face:UMFace)->f32 {
 }
 fn umClosedPositive(face:UMFace)->bool {
  return umAcrossKind(face.anchor,face.axis,1)>=UM_SOLID;
-}
-fn umAdvectedMomentum(face:UMFace,dt:f32)->f32 {
- return umSampleVelocityComponent(umMomentumDeparture(umFaceCenter(face),dt,momentum.hDt.xyz${this.trace==="substep"?",f32(face.width)":""}),face.axis);
 }
 // An exterior neighbor is not a pressure row. If the incident interior owner
 // is empty too, projection writes zero and no RHS can read this prediction.
@@ -437,95 +347,26 @@ fn umDropFace(face:UMFace)->bool {
  let h=umSourceParams.cellGravity.xyz;let reach=f32(face.width)*max(h.x,max(h.y,h.z));
  return umSourcedropDistance(umSourcetraceWorld(umFaceCenter(face)),reach)<reach;`:"return false;"}
 }
-// A frozen face (UniformColdFreeze) keeps its frozen value; a thawing one
-// folds its region's term in once.
-fn umMomentum(owner:UMOwner,face:UMFace)->f32 {
- let freeze=umFaceFreeze(owner,face);if(freeze.x!=0.0){return umOriginalMomentum(face);}
- return umMomentumValue(owner,face)+freeze.y;
-}
-fn umMomentumValue(owner:UMOwner,face:UMFace)->f32 {
- if(umMomentumRetained(owner)){return umRetainedFace(face);}
- if(umCullAir&&!umPredictionCellLive(owner)&&!umPredictionCellLive(face.neighbor)){return 0.0;}
- // Every closed wall carries its projected velocity; the projection's
- // contact inequality alone releases it. A positive wall that also took an
- // advected away-velocity (min) released where its negative mirror could
- // not, so a D4-symmetric flow drifted off its symmetry at the walls.
- if(umFaceLow(face.anchor,face.axis)||umClosedPositive(face)){return umOriginalMomentum(face);}
- if(umDropFace(face)){return 0.0;}
- if(umMomentumAffine(owner)){return umAffineMomentum(owner,face);}
- return umAdvectedMomentum(face,momentum.hDt.w);
-}
-// A certified unit stencil has one MAC patch per face. Keep its geometry
-// constant through the characteristic sampler; generic neighbour widths would
-// otherwise make the face position and wall logic dynamically sized.
-fn umRegularMomentumFace(owner:UMOwner,axis:u32,sign:i32)->UMFace {
- let origin=vec3i(umOrigin(owner));var probe=origin;probe[axis]+=sign;
- var anchor=origin;if(sign<0){anchor[axis]-=1;}
- return UMFace(umOwnerAt(probe),anchor,1u,1u,axis,sign);
-}
-// Each lane traces one component. The tile shares only the final packed
-// store; each invocation evaluates only one characteristic. No additional
-// persistent field is needed.
-var<workgroup> umMomentumComponents:array<f32,192>;
-@compute @workgroup_size(192) fn momentumRegularStep(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- let cell=lane%64u;let axis=lane/64u;
- let owner=umOwner(vec3u(group.x*64u+cell,group.y,0));
- umLoadAddressPlan(owner.tile>>9u,lane);
- var value=0.0;
- let live=owner.width!=0u&&!umOwnerFrozen(owner);
- if(live){
-  let origin=umOrigin(owner);
-  // One umMomentum site: the low boundary face where it is open, then the positive one.
-  let low=umLowOpen(vec3i(origin))[axis];
-  for(var sign=select(1,-1,low);sign<=1;sign+=2){
-   let v=umMomentum(owner,umRegularMomentumFace(owner,axis,sign));
-   if(sign<0){boundary[umLowFaceIndex(origin,axis)]=v;}else{value=v;}
-  }
- }
- umMomentumComponents[lane]=value;workgroupBarrier();
- if(lane<64u&&live){textureStore(output,vec3i(umOrigin(owner)),vec4f(umMomentumComponents[cell],umMomentumComponents[cell+64u],umMomentumComponents[cell+128u],0));}
-}
-${uniformMixedFaceTileDispatchWGSL("momentumStep", this.hanging?"umUnitMomentum(owner,face)":"umMomentum(owner,face)",undefined,this.sourceParams?"umFarAirOwner":undefined,"umOwnerFrozen")}
-${this.hanging?uniformMixedMomentumUnitWGSL(this.sampler,this.trace):""}
-`, ["momentumRegularStep", "momentumStep",...(this.hanging?["momentumFine"]:[])], "umClaims") });
+${uniformMixedFaceTileDispatchWGSL("momentumStep","umUnitMomentum(owner,face)",undefined,this.sourceParams?"umFarAirOwner":undefined,"umOwnerFrozen")}
+${uniformMixedMomentumUnitWGSL(this.sampler,this.trace)}
+`, ["momentumStep"], "umClaims") });
     const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
     if (errors.length) throw new Error(errors.map(m => `${m.lineNum}: ${m.message}`).join("\n"));
-    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, ...(this.hanging ? [this.ownership.hangingLayout] : [])] });
-    const compile=(entryPoint:string,constants:Record<string,number>)=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir,...constants}}});
-    // The general h list has launches of its own (as the surface stages):
-    // with the hanging tap cache, the unit kernel; merged jobs hold seam and
-    // regular 4h only, through the unit sampler too.
-    [this.pipeline,this.regularPipeline,this.generalPipeline]=await Promise.all([
-      // Deep-COLD owners are frozen (no writes): enumerate the active regions only.
-      compile("momentumStep",{umMergedTiles:1,umMergedCoarse:1,umCertifiedJobs:3,umClaimWord:2,umActiveCoarse:+(UNIFORM_COLD_FREEZE&&!!this.freeze)}),
-      compile("momentumRegularStep",{umCellWidth:1,umPlannedFine:1,umRegularFine:1,umCertifiedJobs:1,umClaimWord:0}),
-      this.hanging?compile("momentumFine",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1})
-        :compile("momentumStep",{umCellWidth:1,umPlannedFine:2,umCertifiedJobs:1,umClaimWord:1}),
-    ]);
-    [this.fitPipeline,this.residualPipeline,this.tracePipeline]=await Promise.all([compile("momentumAffineFit",{}),compile("momentumAffineResidual",{}),
-      ...(this.hanging?[compile("momentumTrace",{})]:[])]);
+    const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.ownership.bindLayout, this.resources, this.ownership.hangingLayout] });
+    // One launch: the h list's tiles, then the merged seam and regular 4h
+    // jobs. Deep-COLD owners are frozen (no writes): the 4h jobs enumerate
+    // the active regions only.
+    this.pipeline=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"advectMomentum",constants:{umDispatchX:this.ownership.dispatchX,umCullAir:+this.cullAir,
+      umMergedTiles:1,umMergedCoarse:1,umCertifiedJobs:3,umActiveCoarse:+(UNIFORM_COLD_FREEZE&&!!this.freeze)}}});
   }
-  destroy():void{this.claims.destroy();this.traceList?.destroy();this.tiers.destroy();}
+  destroy():void{this.claims.destroy();}
   encode(encoder: GPUCommandEncoder, group: UniformDetailGroup): void {
     if (!this.pipeline) throw new Error("Mixed momentum is not initialized");
     encoder.clearBuffer(this.claims);
-    if(!this.tierGroup)throw new Error("Mixed momentum is not bound");
-    const tiers=encoder.beginComputePass(UNIFORM_MOMENTUM_TIER_PASS);
-    this.tiers.encodeDecide(tiers,this.tierGroup);
-    tiers.setBindGroup(0, this.ownership.bindGroup); tiers.setBindGroup(1,group.group); if (this.hanging) tiers.setBindGroup(2, this.ownership.hangingGroup);
-    // The affine models of the regions the budget refused to retain: a
-    // workgroup a region, a fixed grid striding the held regions (umHeldPage).
-    tiers.setPipeline(this.fitPipeline!);tiers.dispatchWorkgroups(UNIFORM_MOMENTUM_FIT_GRID);
-    tiers.setPipeline(this.residualPipeline!);tiers.dispatchWorkgroups(UNIFORM_MOMENTUM_FIT_GRID);
-    this.tiers.encodeAffine(tiers,this.tierGroup);
-    tiers.end();
     const pass = encoder.beginComputePass(MOMENTUM_PASS);
-    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); if (this.hanging) pass.setBindGroup(2, this.ownership.hangingGroup);
-    // Buffered direct grids: GPU claims consume the complete current queues.
-    const grid=Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles);
-    this.ownership.dispatchBuffered(pass,this.regularPipeline!,"fine",grid);this.ownership.dispatchBuffered(pass,this.generalPipeline!,"fine",grid);
-    if(this.tracePipeline){pass.setPipeline(this.tracePipeline);pass.dispatchWorkgroups(this.traceGrid);}
-    this.ownership.dispatchBuffered(pass,this.pipeline,"coarseMerged",grid);
+    pass.setBindGroup(0, this.ownership.bindGroup); pass.setBindGroup(1,group.group); pass.setBindGroup(2, this.ownership.hangingGroup);
+    // A fixed grid: its claim loop consumes the complete current queues.
+    this.ownership.dispatchBuffered(pass,this.pipeline,"merged",Math.min(UNIFORM_MIXED_CLAIMED_GRID,this.ownership.capacity.tiles));
     pass.end();
   }
 }

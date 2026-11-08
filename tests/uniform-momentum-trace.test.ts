@@ -3,7 +3,6 @@ import test from "node:test";
 import { UNIFORM_MOMENTUM_TRACE_SEGMENTS, uniformCachedMomentumSamplingWGSL } from "../lib/methods/uniform/uniform-cached-momentum.wgsl";
 import { uniformNearSettled } from "../lib/methods/uniform/uniform-near-settled";
 import { narrowBandFlipValues } from "../lib/methods/uniform/uniform-narrow-band-method";
-import { uniformMomentumTierWGSL } from "../lib/methods/uniform/uniform-mixed-momentum-tiers";
 import { uniformVelocityDepartureWGSL, uniformVelocitySegmentedDepartureWGSL } from "../lib/methods/uniform/uniform-velocity-departure.wgsl";
 
 const traceOf = (source: string) => {
@@ -63,9 +62,4 @@ test("the segmented departure (4h, regular and affine faces) travels at most rea
     at=C(position-select(0.5,1.0,stage==1u)*sampled*dt/h);
   }
   return at;`);
-  assert.doesNotMatch(uniformMomentumTierWGSL(19, 20), /umAffineDeparture|umTraceCapped/);
-  const affine = uniformMomentumTierWGSL(19, 20, "substep");
-  assert.match(affine, /fn umAffineDeparture\(region:u32,position:vec3f,dt:f32,h:vec3f,reach:f32\)->vec3f\{/);
-  assert.match(affine, /let cells=umAffineAt\(region,at\)\/h;/);
-  assert.match(affine, /f32\(face\.width\)\)\)\[face\.axis\]/, "an affine face's segment is its own cell");
 });
