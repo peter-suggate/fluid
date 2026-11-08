@@ -6,6 +6,7 @@
  * hot tiles each one triggers alone.
  * node --import tsx tools/probe-nbflip-calm-seeding.ts [--scene=coarse-surface-standing-wave-live]
  *   [--steps=60] [--every=10] [--values={...}] [--pool=cell,length,width,wavelength,amplitude] [--flat]
+ *   [--first [--after=STEP]]: dump the first shape-triggered tiles (at or after STEP), then stop
  * Run through tools/gpu/fluid-gpu-run.sh check. */
 import { resolve } from "node:path";
 import "../lib/methods";
@@ -98,7 +99,7 @@ await withUniformDevice("calm seeding probe", async device => {
     // cells) beside the surface its 4h corners carry, then stop.
     if (process.argv.includes("--tiles")) console.log(JSON.stringify({ step, shaped: shaped.slice(0, 80) }));
     const dumpAt = new Set((option("dump") ?? "").split(",").filter(Boolean).map(Number));
-    if ((first && (triggered.shape ?? 0) > 0) || dumpAt.has(step)) {
+    if ((first && step >= Number(option("after") ?? 0) && (triggered.shape ?? 0) > 0) || dumpAt.has(step)) {
       const fields = await readUniformFields(device, solver), address = await readUniformLiveAddress(device, solver);
       const [nx, ny] = [dims[0]!, dims[1]!], raw = (x: number, y: number, z: number) => fields.phi[x + (nx + 1) * (y + (ny + 1) * z)]!;
       const crossing = (value: (y: number) => number, y0: number, y1: number) => { for (let y = y0; y < y1; y++) { const a = value(y), b = value(y + 1); if ((a < 0) !== (b < 0)) return +(y + a / (a - b)).toFixed(3); } return NaN; };

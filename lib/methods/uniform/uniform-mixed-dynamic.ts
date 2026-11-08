@@ -815,12 +815,78 @@ fn umPlaneBuriedCorners(origin:vec3u,lane:u32,open:vec2u,c:ptr<function,array<f3
 // when coarsened (Gauss-Bonnet), whatever its radius.
 // Measured on the smoothed surface (umStageSmoothTile). Called by every lane
 // of the workgroup: it stages through workgroup memory.
+// A retiring h tile's 4h corners take metric magnitudes before handoff
+// (depthCoarse: the distance to the band's zero set, signs kept, bounded by
+// the zeros on the corner's lattice edges), so that is the lattice the
+// census measures against. Until then a corner beside a 4h owner is an
+// advected sample: beside a 4h air tile a calm surface's corner 1.7 h up
+// held 1.3 h (Figure 4 settled to 0.2 h waves, its air side compressed to
+// 0.8 h a cell), and the chord to the corner 2.4 h down stood 0.24 h above
+// the h surface, a volume error 4h would never have: 33-45 of the 64
+// crossing tiles over the tolerance for 20 s, and 15k particles. The
+// metric here is the plane's: up each of the corner's tile edges to the
+// first zero of the h samples (s cells), times the normal's component
+// along it there. Exact on any plane, it does not depend on where the
+// tile ends (the nearest of the tile's own crossings did: a drop's corner
+// beside the tile's edge took the distance to a crossing across the tile,
+// and splash held 3.5x the particles). No zero on a corner's edges, or a
+// buried corner (umPlaneBuriedCorners), keeps the value it has.
+var<workgroup> umCornerMetric:array<atomic<u32>,8>;
+const UM_NO_METRIC:u32=0x7f7fffffu;
+fn umRawAt(v:vec3i)->f32{return umTileRaw[v.x+5*v.y+25*v.z];}
+fn umMetricCorners(lane:u32,open:vec2u,c:ptr<function,array<f32,8>>){
+ if(lane<8u){atomicStore(&umCornerMetric[lane],UM_NO_METRIC);}
+ workgroupBarrier();
+ if(lane<24u){
+  let k=lane/3u;let a=lane%3u;let corner=vec3i(4u*umCorner(k,2u));
+  // Inward along a, and inward along the other two axes for the tangent.
+  let inward=select(vec3i(1),vec3i(-1),corner==vec3i(4));
+  var step=vec3i(0);step[a]=inward[a];
+  for(var j=0;j<4;j++){
+   let v=corner+j*step;let n=v+step;let low=vec3u(min(v,n));
+   if(!umCensusEdgeOpen(open,low,a)){break;}
+   let u=umRawAt(v);let w=umRawAt(n);
+   if((u<0.0)==(w<0.0)){continue;}
+   let f=u/(u-w);
+   var g=vec3f(0.0);g[a]=w-u;
+   for(var b=0u;b<3u;b++){
+    if(b==a){continue;}
+    // A buried tap holds a marker: no tangent on that axis.
+    var t=vec3i(0);t[b]=inward[b];let p=v+t;let q=n+t;
+    if(umTileBuried[p.x+5*p.y+25*p.z]!=0u||umTileBuried[q.x+5*q.y+25*q.z]!=0u){continue;}
+    g[b]=f32(inward[b])*mix(umRawAt(p)-u,umRawAt(q)-w,f);
+   }
+   let along=abs(g[a])/max(length(g),1e-20);
+   atomicMin(&umCornerMetric[k],bitcast<u32>((f32(j)+f)*along));
+   break;
+  }
+ }
+ workgroupBarrier();
+ for(var k=0u;k<8u;k++){
+  let v=4u*umCorner(k,2u);let m=atomicLoad(&umCornerMetric[k]);
+  if(m!=UM_NO_METRIC&&umTileBuried[v.x+5u*v.y+25u*v.z]==0u&&(*c)[k]!=0.0){(*c)[k]=sign((*c)[k])*bitcast<f32>(m)*UM_H;}
+ }
+}
+// The distance in h from the corners' trilinear surface of the crossing a
+// fraction f along edge a from tile vertex v (per tile width, 4h, so the
+// distance is 4 |phi| / |gradient|).
+fn umCornerDistance(v:vec3u,a:u32,f:f32,low:vec4f,high:vec4f,dx:vec4f)->f32{
+ var t=vec3f(v)*0.25;t[a]+=0.25*f;
+ let x0=mix(low,high,t.x);
+ let y0=mix(vec2f(x0.x,x0.z),vec2f(x0.y,x0.w),t.y);
+ let gx=mix(vec2f(dx.x,dx.z),vec2f(dx.y,dx.w),t.y);
+ let gradient=vec3f(mix(gx.x,gx.y,t.z),mix(x0.y-x0.x,x0.w-x0.z,t.z),y0.y-y0.x);
+ return 4.0*mix(y0.x,y0.y,t.z)/max(length(gradient),4.0e-3*UM_H);
+}
 fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
  let origin=umTileCoord(tile)*4u;let open=umCensusOpenCells(tile);
  umStageSmoothTile(origin,lane,open);
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  c=umLoadCorner8(origin,4u);
  if(any(open!=vec2u(0xffffffffu))){umPlaneBuriedCorners(origin,lane,open,&c);}
+ // The corner laplacian reads the lattice's neighbouring corners as they
+ // stand: its centre stands with them.
+ let held=c;umMetricCorners(lane,open,&c);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
   let v=umCorner(i,5u);let value=umTileSmooth[i];
@@ -837,7 +903,7 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
   // A tile corner: no h stencil fits, so its curvature is the 4h lattice's
   // there, as a 4h tile measures its own (umResolutionError).
   if(all(v%4u==vec3u(0u))){
-   let k=v/4u;let centre=c[k.x+2u*k.y+4u*k.z];
+   let k=v/4u;let centre=held[k.x+2u*k.y+4u*k.z];
    if(abs(centre)<=2.0*UM_H){
     var lap=0.0;
     for(var a=0u;a<3u;a++){
@@ -852,16 +918,21 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
   }
   for(var a=0u;a<3u;a++){
    if(v[a]>=4u||!umCensusEdgeOpen(open,v,a)){continue;}
-   var n=v;n[a]+=1u;let next=umSmoothAt(n);
-   if((value<0.0)==(next<0.0)){continue;}
-   var t=vec3f(v)*0.25;t[a]+=0.25*value/(value-next);
-   let x0=mix(low,high,t.x);
-   let y0=mix(vec2f(x0.x,x0.z),vec2f(x0.y,x0.w),t.y);
-   let gx=mix(vec2f(dx.x,dx.z),vec2f(dx.y,dx.w),t.y);
-   // Per tile width (4h), so the distance in h is 4 |phi| / |gradient|.
-   let gradient=vec3f(mix(gx.x,gx.y,t.z),mix(x0.y-x0.x,x0.w-x0.z,t.z),y0.y-y0.x);
-   let d=4.0*mix(y0.x,y0.y,t.z)/max(length(gradient),4.0e-3*UM_H);
-   worst=max(worst,abs(d));along+=d;crossings++;
+   var n=v;n[a]+=1u;
+   // The worst displacement over the filtered surface, the mean over the
+   // raw one. The mean already averages the samples' roughness away, and
+   // the filter is no restriction of a mean: across the surface the
+   // particle union is a min of sphere distances, convex, so the pass
+   // raises phi and moves the zero toward the liquid, 0.15-0.35 h below the
+   // raw corners (Figure 4 settled to 0.2 h waves: 33-45 of its 64 crossing
+   // tiles over the volume tolerance for 20 s, 15k particles that the union
+   // they made kept there). The raw crossings are the field the corners are.
+   let next=umSmoothAt(n);
+   if((value<0.0)!=(next<0.0)){
+    let d=umCornerDistance(v,a,value/(value-next),low,high,dx);worst=max(worst,abs(d));
+   }
+   let raw=umTileRaw[v.x+5u*v.y+25u*v.z];let rawNext=umTileRaw[n.x+5u*n.y+25u*n.z];
+   if((raw<0.0)!=(rawNext<0.0)){along+=umCornerDistance(v,a,raw/(raw-rawNext),low,high,dx);crossings++;}
   }
  }
  if(crossings!=0u){atomicAdd(&tileSigned,i32(clamp(along,-1.0e5,1.0e5)*1024.0));atomicAdd(&tileCrossings,crossings);}
