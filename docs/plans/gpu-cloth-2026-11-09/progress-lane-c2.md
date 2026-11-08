@@ -517,3 +517,83 @@ Per-pass GPU timestamps come from `profileRound` in the gates: one mandatory rou
 
   **Bridson table (cloth between a moving body and the floor):** the carried prediction a_v crosses the floor. The static-solid stop (w /= f) then shortens it, and pairs with cloth below conflict and redo held. A held vertex pressed by an advancing body has no feasible motion. Such a frame must fail explicitly (status `solidConflict`), not be cut.
 - **(6) M5: not done this round.** The tests of solid-surface samples against cloth faces and edges, and the intersection counter for cloth against solid, are still to do. Detection speed came first under ruling (2).
+
+## 2026-11-09 MILESTONE: the scene contact adapter (priority 1)
+
+`lib/cloth/contact/scene-solids.ts` turns a scene's solid world into a `ClothSolidSource` on the scene's own voxel lattice. The field's nodes are the nodes the scene renders, hit-tests and edits on (new `ClothSolidSource.origin`). Every authored patch is accounted for, or the build throws:
+
+- **Box fills** become `lattice-box` parts, exact under the trilinear field:
+  - the container shell, at μ = `CLOTH_CONTAINER_SHELL_FRICTION` = 0, since no scene authors cloth friction for the vessel;
+  - the ground slab, at the scene's ground μ.
+- **Procedural bake patches** (`solidBoundary`) are covered by the analytic solids the author sampled them from, as `sdf` parts with each solid's μ. The build re-evaluates every stored boundary node against those parts and throws on any mismatch, so the contact surface is the visible surface.
+- **Any other patch** throws `cannot follow solid patch i (op kind) yet`. That covers a clear, a paint, a round or sculpted kind, and a voxel block from an edit. Cloth contact does not follow solid edits yet. It must not silently disagree with the visible solid.
+- **Unknown cases fail explicitly:**
+  - an unknown Bridson id;
+  - a box fill that no authored solid owns;
+  - a spherical container;
+  - a non-cubic lattice.
+- **Field box:** the container lattice. Cloth that leaves it raises `OGC_ST_SOLID_BOUNDS`.
+
+Per-scene authoring is a static table keyed by scene id prefix. Bridson's is `lib/cloth/scenes/bridson-2002/contact-solids.ts`:
+- the ground is matched to its fill box;
+- legs, frustum, the curtain ball and the spinning sphere are `sdf` parts at their t = 0 pose. Each is held until its pending time; M6 covers the motion after that.
+- A solid that moves from t = 0 (the tablecloth sphere) has no part. The cloth system already halts before it reaches the cloth.
+
+Measured on the CPU at setup, for the full container field:
+
+| scene | band | source build (incl. node proof) | field build | bricks | image |
+|---|---|---|---|---|---|
+| curtain | 0.06 m | 54 ms | 1.2 s | 10,426 | 38.7 MB |
+| curtain | 0.13 m | 43 ms | 1.6 s | 17,298 | 64.4 MB |
+| rotating sphere | 0.06 m | 162 ms | 2.5 s | 6,910 | 25.6 MB |
+| rotating sphere | 0.13 m | 155 ms | 2.8 s | 10,997 | 40.8 MB |
+| tablecloth | 0.06 m | 170 ms | 3.4 s | 14,720 | 54.5 MB |
+| tablecloth | 0.13 m | 168 ms | 4.0 s | 26,460 | 98.0 MB |
+
+- About 60% of the bricks are the shell's walls and ceiling, which the Bridson cloth never reaches.
+- The fix, if memory matters: an affine-brick record (one plane, a few words) for bricks whose nodes all come from one lattice-box face. That is a GPU format change, and it is parked: frame time is unaffected.
+
+Tests: `tests/cloth-contact-scene-solids.test.ts`, 5 of 5 pass.
+- part lists and μ for all three scenes;
+- the field's φ, normal and μ at the ground and above each held solid;
+- the contact field equals the visible procedural brick values node for node at a tablecloth leg (> 2000 nodes);
+- explicit failures: clear, a foreign box, a round kind, a tampered boundary, an unknown id, and a box fill in a scene with no authoring;
+- the cloth-frame translation.
+
+## 2026-11-09 COORDINATION (C2 → C1): attach the scene's solids in `ClothSystem.build`
+
+The interface is fixed:
+
+```ts
+import { clothSolidBand, clothSolidSourceForScene } from "./contact/scene-solids";
+import { buildClothSolidField } from "./contact/solid-field";
+import { OgcContactDetector } from "./contact/ogc-detector";
+
+// Once per solid world: key it by solidVoxelPatchesKey(scene.solidVoxels) and the boundary. Not per cloth rebuild:
+// it is 1.2-3.4 s of CPU at band 0.06 m (see the table above), so build it off the frame.
+const band = clothSolidBand(config.r, config.rqMax);   // r + 1.5 sqrt(3) rqMax
+const field = buildClothSolidField(clothSolidSourceForScene(this.scene, { band_m: band, frameOrigin_m: origin }));
+// `origin` is the solver's origin_m: the source comes back in the cloth frame.
+
+// ogcMesh = { vertexCount, triangles: Uint32Array of (v0, v1, v2, faceMaterial) per face, edges: topology.edges };
+// restLocal = vec4 per vertex of restPositions_m - origin (as meshOf in tests/cloth-contact-gates.test.ts, which has origin 0).
+const det = await OgcContactDetector.create(device, ogcMesh, restLocal, {
+  ...config, prediction: "guess", solidCapacityWords: field.words.length,
+});
+const solver = await ClothGPUSolver.create(device, model, { ...,
+  contact: det.solverContact(CLOTH_BINDING.contact), hooks: det.stepHooks });
+det.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart });
+det.setSolidField(field);
+// Per frame: det.encodeFrameBegin(pass) before the frame's solver.encodeStep(pass).
+// The status word (det counters) is the explicit-failure channel: map OGC_STATUS bits to a halt, as for pendingSolids.
+```
+
+- **Config:** the gates' values are a start: r = 1.5e-3, kc 100, μ 0.2, εv 1e-2, rqBase 3e-3, rqMax 0.04, envelopeScale 2.5, contactCapacity 128, gridCapacity 32(N+T+E), bucketCount 2^18, roundCap 4.
+- **pairCapacity** is 840 N in the gates. At the curtain's 38,100 vertices that is the dominant buffer, and that is what priority 3 attacks. Author it from a measured peak once priority 3 lands.
+- **A defect in `scene-description.ts` (C1's file), please fix.**
+  - `bridson2002SceneDescription` appends the procedural patches after the shell that `createEmptyScene` put there. It then sets `solidBoundary` with `patchCount`/`patchesKey` for the patches alone.
+  - `proceduralSolidField(scene)` checks the prefix `solidVoxels.slice(0, patchCount)`, so it is `undefined` for all three Bridson scenes (measured).
+  - As a result, the visible legs, frustum and balls are drawn and collided from the voxel blocks, not the smooth field.
+  - Fix: prepend the patches (`[...patches, ...shell, ...fills]`), or set `patchCount: shell.length + patches.length` and `patchesKey: solidVoxelPatchesKey(scene.solidVoxels.slice(0, that))`, as `rebaseProceduralSolid` does.
+  - The adapter accepts either layout: it finds the baked run at offset 0 or right after the shell.
+- `ClothSystem`'s status text in `lib/core/scenes.ts` ("Not yet: cloth-solid contact (lane C2), so the cloth passes through the solids") can go once this is attached.

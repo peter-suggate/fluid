@@ -61,6 +61,9 @@ export interface ClothSolidSource {
   /** Node spacing (m) and the surface band (m) within which bricks are kept. */
   cell: number;
   band: number;
+  /** Position of lattice node (0, 0, 0), at or below lo on every axis: a scene's own voxel lattice, so the
+   * field's nodes are the scene's. Default floor(lo / 8 cell) 8 cell. */
+  origin?: V3;
 }
 
 export interface ClothSolidBrick { brick: V3; values: Float32Array; mu: Uint8Array; lipschitz: number }
@@ -313,12 +316,15 @@ export function buildClothSolidField(src: ClothSolidSource): ClothSolidField {
   const { cell, band } = src;
   if (!(cell > 0 && band > 0 && src.lo.every((v, a) => v < src.hi[a]!))) throw new RangeError("Cloth solid field needs cell > 0, band > 0 and a non-empty box");
   const span = SOLID_BRICK_CELLS * cell;
-  const origin = src.lo.map(v => Math.floor(v / span) * span) as unknown as V3;
+  const origin = src.origin ?? src.lo.map(v => Math.floor(v / span) * span) as unknown as V3;
+  if (!origin.every((v, a) => Number.isFinite(v) && v <= src.lo[a]!)) throw new RangeError("Cloth solid field origin must lie at or below lo");
   const dims = src.hi.map((v, a) => Math.ceil((v - origin[a]!) / span)) as unknown as V3;
   if (dims.some(c => c > 1 << 20)) throw new RangeError("Cloth solid field box is too large for its cell");
   const parts = partsOf(src, origin);
   const bricks = new Map<string, ClothSolidBrick>();
-  for (let bz = 0; bz < dims[2]; bz++) for (let by = 0; by < dims[1]; by++) for (let bx = 0; bx < dims[0]; bx++) {
+  // The bricks over [lo, hi]; with an explicit origin below lo, the bricks under lo stay empty.
+  const b0 = src.lo.map((v, a) => Math.max(0, Math.floor((v - origin[a]!) / span)));
+  for (let bz = b0[2]!; bz < dims[2]; bz++) for (let by = b0[1]!; by < dims[1]; by++) for (let bx = b0[0]!; bx < dims[0]; bx++) {
     const b = buildBrick(parts, cell, band, origin, [bx, by, bz]);
     if (b) bricks.set(`${bx},${by},${bz}`, b);
   }
