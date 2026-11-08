@@ -98,7 +98,6 @@ import type {
   MethodParamValues,
 } from "../../core/method-contract";
 import { WebGPURigidBodySystem } from "../../core/webgpu-rigid-body";
-import { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
 import {
   UNIFORM_PRESSURE_RESIDUAL_TOLERANCE,
   WebGPUUniformPressureMultigrid,
@@ -600,7 +599,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly terrainTexture: GPUTexture;
   private readonly transportA: GPUTexture;
   private readonly transportB: GPUTexture;
-  private readonly velocityExtrapolator: WebGPUUniformVelocityExtrapolator;
   private readonly pressureMultigrid: WebGPUUniformPressureMultigrid;
   // Origin(3), capacity(3), mode(1).
   private readonly params: GPUBuffer;
@@ -955,9 +953,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const nativeBindings = new Set([0,1,2,3,4,5,12,13,14,16,20,21,24,25,31,32]);
     this.shaderSource = this.fieldPages.shader(source,fixedFields,true,nativeBindings);
     this.conditioningScratch = device.createBuffer({ label: "Uniform reference compatibility scratch", size: this.scratchArena.conditioningBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(device, this.address, this.params);
-    // Without a ceil(n/4) hierarchy level there is no 4h field to sample.
-    if (!this.velocityExtrapolator.coarseVelocityTableAvailable) this.twoLevelTileCount = 0;
+    // Without whole 4h tiles on every axis there is no 4h field to sample.
+    if (!this.address.cells.every(value => value % 4 === 0 || value === 1)) this.twoLevelTileCount = 0;
     if (this.twoLevelTileCount === 0) this.twoLevelVelocity = false;
     // Sixteen wavefronts cover the complete 26-neighbour dependency diameter of the two-cell accurate band.
     this.extrapolationActiveFrontPassCeiling = Math.min(Math.max(nx, ny, nz), 16);
@@ -1112,7 +1109,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         + textureBytes(this.pressureA,4) + textureBytes(this.pressureB,4) + textureBytes(this.heightA,8) + textureBytes(this.heightB,8) + textureBytes(this.terrainTexture,4)
         + this.scratchArena.byteLength + this.scratchArena.conditioningBytes + this.pressureMultigrid.allocatedBytes + (8 * address.vertexKeys + 12)
         + this.pages.size + this.activeScratch.size + this.params.size + this.reductions.size + this.rigidExchange.size
-        + this.velocityExtrapolator.scratchBytes + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
+        + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: false,
@@ -1841,7 +1838,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       velocity:this.velocityA,velocityScratch:this.velocityB,departure:this.velocityD,
       negative:this.boundaryVelocityA,negativeScratch:this.boundaryVelocityB,negativeDeparture:this.boundaryVelocityD,
       phi:this.vertexPhiField,phiScratch:this.vertexPhiScratch,phase:this.surfaceA,centerPhi:this.surfaceB,target:this.gammaB,correction:this.gammaA,
-      pressure:this.pressureMultigrid.prepareMixedContinuation(),extension:this.velocityExtrapolator.prepareMixedContinuation(),sourceParams:this.params,
+      pressure:this.pressureMultigrid.prepareMixedContinuation(),sourceParams:this.params,
       // Live edits and rigid bodies share the pipelines built at setup.
       solid:{params:this.params,scratch:this.activeScratch,terrain:this.terrainTexture,analyticTerrain:this.openWorldTerrain?.sampleParams,bodies:this.rigidSystem.stateBuffer,coupledTiles:promotion.coupled.size,paramsWritten:()=>this.paramsWritten,slots:solidSlots,features:uniformMixedSolidSceneFeatures(this.scene)},
       pressureGeometry,detail,pages:{buffer:this.pages,offset:0},residency:this.pageResidency,
@@ -2807,13 +2804,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     tasks.push({ id: pipelineReadyId, phase: "solver-pipelines", label: "Publish uniform reference programs", dependencies: ids, run: () => {
       this.pipelines = compiled as UniformReferencePipelines;
     } });
-    const extrapolationReadyId = "uniform.extrapolation.pipelines";
-    tasks.push({
-      id: extrapolationReadyId,
-      phase: "solver-pipelines",
-      label: "Compile paper Sec. 3.3 extrapolation programs",
-      run: () => this.velocityExtrapolator.initialize(signal),
-    });
     const multigridReadyId = "uniform.pressure.multigrid";
     tasks.push({
       id: multigridReadyId,
@@ -2821,7 +2811,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       label: "Publish the uniform pipeline's facts",
       run: () => { this.publishUniformPipelineFacts(); },
     });
-    tasks.push({ id: "uniform.surface.initial", phase: "upload", label: "Reconstruct smooth t=0 surface", dependencies: [pipelineReadyId, extrapolationReadyId, multigridReadyId], run: () => { this.executionInfo.allocatedBytes += this.fieldPages.allocationOverheadBytes; if (!packed) this.encodeInitialPresentationSurface(); } });
+    tasks.push({ id: "uniform.surface.initial", phase: "upload", label: "Reconstruct smooth t=0 surface", dependencies: [pipelineReadyId, multigridReadyId], run: () => { this.executionInfo.allocatedBytes += this.fieldPages.allocationOverheadBytes; if (!packed) this.encodeInitialPresentationSurface(); } });
     tasks.push({ id: "uniform.warmup", phase: "warmup", label: "Fence uniform t=0 uploads", dependencies: ["uniform.surface.initial"], run: async () => { await this.device.queue.onSubmittedWorkDone(); } });
     return tasks;
   }
@@ -3288,8 +3278,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const multigridPasses = { setup: 0, "full-cycle": 0, "v-cycle": 0, finish: 0 };
     this.executionInfo.uniformPipelineFacts = {
       extrapolationFrontSweeps: this.extensionSweeps,
-      extrapolationHierarchyLevels: this.velocityExtrapolator.hierarchyLevelCount,
-      // The hierarchy encodes into the mixed extension's pass.
+      // The frame's brick extension: a 4h level, then h (UniformFrameExtension).
+      extrapolationHierarchyLevels: 2,
       extrapolationPassesPerInvocation: 0,
       multigridLevels: this.pressureMultigrid.levelCount,
       multigridPasses,
@@ -3966,7 +3956,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.symmetryStageAuditNegativeBoundaryVelocity?.destroy();
     this.symmetryStageAuditBetaBuffer?.destroy();
     this.macCormackAuditBinding.destroy();
-    this.velocityExtrapolator.destroy();
     this.pressureMultigrid.destroy();
     this.params.destroy();
     this.reductions.destroy();this.mixedDiagnostics?.destroy();

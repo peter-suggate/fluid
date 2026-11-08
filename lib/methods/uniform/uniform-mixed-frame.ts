@@ -23,9 +23,9 @@ import {UNIFORM_RESIDENCY_PAGE_REACH} from "./uniform-mixed-residency";
 import type {UniformMixedLayout} from "./uniform-mixed-layout";
 import type {UniformScratchArena} from "./uniform-scratch-arena";
 import type {WebGPUUniformPressureMultigrid} from "./webgpu-uniform-pressure-multigrid";
-import type {WebGPUUniformVelocityExtrapolator} from "./webgpu-uniform-velocity-extrapolation";
 import {UNIFORM_WORK_RECEIPT_WORDS,UniformMixedOwnership,type UniformMixedGenerationBuffers} from "./uniform-mixed-ownership";
-import {UniformMixedExtension,extensionCompanionBytes} from "./uniform-mixed-extension";
+import {UniformFrameBricks} from "./uniform-frame-bricks";
+import {UniformFrameExtension,type UniformFrameExtensionGroup} from "./uniform-frame-extension";
 import {UniformMixedHangingTaps, UniformMixedMomentumCache} from "./uniform-mixed-momentum-cache";
 import {uniformCoarseCacheExtent} from "./uniform-coarse-velocity-cache";
 import {UniformMixedSurface} from "./uniform-mixed-surface";
@@ -76,7 +76,6 @@ export interface UniformMixedFrameFields {
  phi:GPUTexture;phiScratch:GPUTexture;
  phase:GPUTexture;centerPhi:GPUTexture;target:GPUTexture;correction:GPUTexture;
  pressure:ReturnType<WebGPUUniformPressureMultigrid["prepareMixedContinuation"]>;
- extension:ReturnType<WebGPUUniformVelocityExtrapolator["prepareMixedContinuation"]>;
  sourceParams:GPUBuffer;
  /** Voxel/terrain/vessel solids and rigid bodies: live voxel edits arrive
   * through editSolids(), bodies through advance(). The host must keep every
@@ -385,7 +384,10 @@ export class UniformMixedFrame {
   * corner, published after the last phi write a presentation can follow. */
  private readonly coarsePhi:UniformCoarseVertexPhi;
  get coarseVertexPhi():GPUTexture{return this.coarsePhi.texture;}
- private readonly extension:UniformMixedExtension;
+ /** The frame brick store: the h tiles' bricks (8³ h cells) on the frame's
+  * ownership, updated before each fused brick stage reads it. */
+ readonly bricks:UniformFrameBricks;
+ private readonly extension:UniformFrameExtension;
  private readonly cache:UniformMixedMomentumCache;
  private readonly hanging:UniformMixedHangingTaps;
  private readonly hangingGroup:UniformDetailGroup;
@@ -405,9 +407,12 @@ export class UniformMixedFrame {
  /** rho g h of the advance under way: a promote's hydrostatic pressure step a cell (Pa). */
  private readonly bulkGradient:[number,number,number]=[0,0,0];
  private readonly bulkGroup?:UniformDetailGroup;
- private extensionGroups!:readonly [UniformDetailGroup,UniformDetailGroup];
- private flipSnapshotExtensionGroups?:readonly [UniformDetailGroup,UniformDetailGroup];
- private pairedExtensionGroups=new Map<GPUBuffer,{retain:readonly [UniformDetailGroup,UniformDetailGroup];current:readonly [UniformDetailGroup,UniformDetailGroup];old:readonly [UniformDetailGroup,UniformDetailGroup];snapshots:readonly ReturnType<UniformNarrowBandFlip["bindSnapshotSlots"]>[];deltas:readonly UniformDetailGroup[]}>();
+ /** The extension of the stored field into velocityScratch; and FLIP's old
+  * field: the transferred field's band extension into departure (old: only
+  * the supported band's faces), which recordDelta reads against the tail's
+  * extension. */
+ private extensionGroup!:UniformFrameExtensionGroup;
+ private flipOldExtensionGroup!:UniformFrameExtensionGroup;
  private readonly cacheGroup:UniformDetailGroup;
  private surfaceGroup!:UniformDetailGroup;
  private surfaceVolumeGroup!:UniformDetailGroup;
@@ -485,7 +490,7 @@ export class UniformMixedFrame {
  private allocatedTotal:number|undefined=undefined;
  get allocatedBytes():number{
   if(this.allocatedTotal!==undefined)return this.allocatedTotal;
-  let bytes=this.geometry.allocatedBytes+this.surfaceWorkControl.allocatedBytes+(this.narrowBandFlip.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+this.phiResolve.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.ownership.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.pagePool.allocatedBytes+this.dynamics.allocatedBytes+this.heat.allocatedBytes+(this.freeze?.allocatedBytes??0)+this.extension.allocatedBytes+this.momentum.allocatedBytes+this.split.authority.allocatedBytes+(this.bulk?.allocatedBytes??0)+(this.bulkPages?.allocatedBytes??0)+(this.bulkTransfer?.allocatedBytes??0);
+  let bytes=this.geometry.allocatedBytes+this.surfaceWorkControl.allocatedBytes+(this.narrowBandFlip.allocatedBytes??0)+(this.surfaceVolume?.allocatedBytes??0)+this.coarsePhi.allocatedBytes+this.surfaceBand.allocatedBytes+this.band.allocatedBytes+this.plan.allocatedBytes+this.phiResolve.allocatedBytes+(this.solid?.allocatedBytes??0)+this.surface.allocatedBytes+this.hanging.allocatedBytes+this.ownership.allocatedBytes+this.remap.allocatedBytes+this.split.transfer.allocatedBytes+this.pagePool.allocatedBytes+this.dynamics.allocatedBytes+this.heat.allocatedBytes+(this.freeze?.allocatedBytes??0)+this.bricks.allocatedBytes+this.extension.allocatedBytes+this.momentum.allocatedBytes+this.split.authority.allocatedBytes+(this.bulk?.allocatedBytes??0)+(this.bulkPages?.allocatedBytes??0)+(this.bulkTransfer?.allocatedBytes??0);
   for(let i=0;i<this.levels.length;i++){const o=this.levels[i]!.ownership;if(o!==this.ownership)bytes+=o.allocatedBytes;}
   for(let i=0;i<this.owned.length;i++){const r=this.owned[i]!;bytes+="size" in r?r.size:r.width*r.height*r.depthOrArrayLayers*16;}
   if(this.phase!=="uninit")this.allocatedTotal=bytes;
@@ -541,9 +546,8 @@ export class UniformMixedFrame {
     band:new Float32Array([...h,0,0,0,0,Math.min(...h),0,inverse(h[0]),inverse(h[1]),inverse(h[2])]),bandNative:new Float32Array(1),bandGravity:new Float32Array(4),support:new Int32Array(4)};}
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
-  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.flipDelta==="swept",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
-   // A budget's banks still hold the extension's paired companion at every reservation (bindStage).
-   capacity.particles&&{...capacity.particles,bankBytes:extensionCompanionBytes(o.capacity.address,this.fineCeiling)},this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells,this.nearSettled.sampleSeparation,this.nearSettled.innerReseed,this.nearSettled.activationSeeding);
+  this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
+   capacity.particles,this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells,this.nearSettled.sampleSeparation,this.nearSettled.innerReseed,this.nearSettled.activationSeeding);
   this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
@@ -585,9 +589,9 @@ export class UniformMixedFrame {
   this.blockNeighbours=new UniformBlockNeighbours(device,layout.address.blocks,[o.pageMirror,p.pageMirror]);
   this.frameOwnerships.push(o);for(const level of this.levels)if(!this.frameOwnerships.includes(level.ownership))this.frameOwnerships.push(level.ownership);
   if(f.detail){f.detail.attach(o);f.detail.attach(p);}
-  // The h near-surface extension carries the advancing level-set toe.
-  // A regular-only hierarchy previously lost long-dam toe motion.
-  this.extension=new UniformMixedExtension(device,o,f.extension,false,true,capacity.coldRegions!=="fine");
+  // The h near-surface extension carries the advancing level-set toe: 4h
+  // then h on the frame brick store (UniformFrameExtension).
+  this.bricks=new UniformFrameBricks(device,o);this.extension=new UniformFrameExtension(device,o,this.bricks);
   const cacheFields={coarseExtended:caches[0]!};
   this.cacheGroup=this.cache.bind({extended:f.velocityScratch,negative:f.negativeScratch,...cacheFields});
   // Surface and momentum share hanging taps of velocityScratch: nothing
@@ -597,7 +601,7 @@ export class UniformMixedFrame {
   this.surfaceWorkControl=new UniformSurfaceWorkControl(device,o,f.phi,solid,this.pagePool,this.heat);
   this.narrowBandFlip.attachFramePlan(this.surfaceWorkControl.framePlan);
   this.narrowBandFlip.attachSurfaceRevisions(this.surfaceWorkControl.revisions,()=>this.surfaceWorkControl.generation);
-  this.narrowBandFlip.attachHeat(this.heat.tiers);this.extension.attachHeat(this.heat.tiers,solid?.coarse?solid.bodyRegions.buffer:undefined);
+  this.narrowBandFlip.attachHeat(this.heat.tiers);
   this.surface=new UniformMixedSurface(device,o,f.sourceParams,solid,{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.airGateWord,heatWord:this.narrowBandFlip.surfaceHeatWord},this.surfaceWorkControl,this.nearSettled.warmResolution==="4h",this.nearSettled.traceSubsteps,this.nearSettled.wallTrace,this.nearSettled.surfaceVelocitySampler==="texture32"&&device.features.has("float32-filterable")?"texture32":"software",this.nearSettled.surfaceTraceSubsteps==="off",UNIFORM_COLD_FREEZE&&capacity.coldRegions!=="fine",this.fineCeiling);
   this.surfaceVolume=new UniformMixedSurfaceVolume(device,o,solid,bulkPages);
   // The full launch after surface volume also writes split pressure's all-4h geometry.
@@ -607,7 +611,7 @@ export class UniformMixedFrame {
   // velocity): h sites in the unit texture, 4h sites in the coarse cache.
   this.dynamics=new UniformMixedRegionDynamics(device,o,{pool:this.pagePool,forceParams:this.params.forces,pressure:root.pressure,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,heat:this.heat.tiers,normalDirty:this.geometry.curvatureDirty});
   this.freeze=capacity.coldRegions==="fine"?undefined:new UniformColdFreeze(device,o,this.heat);
-  this.narrowBandFlip.attachFreeze(this.freeze);
+  this.narrowBandFlip.attachFreeze(this.freeze);this.extension.attachFreeze(this.freeze);
   this.heat.attach({dynamics:this.dynamics.record,updateErrors:this.plan.updateErrors,bodyRegions:solid?.coarse?solid.bodyRegions:undefined,sourceParams:f.sourceParams,
    particleHeat:{buffer:this.narrowBandFlip.airGateBuffer,word:this.narrowBandFlip.activityHeatWord},coldFreeze:this.freeze,holdRises:capacity.coldFrameSkip!=="off",tiering:this.nearSettled.regionTiering,surfaceWarm:this.nearSettled.coldSurface!=="budget",surfaceStill:this.nearSettled.coldSurface==="still"});
   // Retain the projected h velocity detail: restricting all momentum to 4h
@@ -693,17 +697,14 @@ export class UniformMixedFrame {
   * each of which checks the buffer against its own need when it binds. */
  private stageBytesAt(fineTiles:number):number{
   const n=this.ownership.capacity.tiles;
-  // The extension's slots are its prefix: they hold from the tail's
-  // extension to the next head's, when no other consumer runs (useSlots).
-  return Math.ceil(Math.max(this.extension.slotBufferBytesAt(fineTiles),this.surface.scratchBytes,
+  return Math.ceil(Math.max(this.surface.scratchBytes,
    this.surfaceVolume?.scratchBytesAt(fineTiles)??0,UniformMixedForces.normalBytes(63*fineTiles+n))/256)*256;
  }
  /** Every group over the stage scratch (reserveFine binds them again). */
  private bindStage():void{
-  // Share taps only when the paired path fits at every possible reservation.
-  // Otherwise a later fallback snapshots before viscosity's last tap read.
-  const shareUnit=this.extension.supportsPair&&this.narrowBandFlip.particles.every(b=>b.size>=this.extension.companionBytesAt(this.fineCeiling));
-  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging,sharedStageUnit:shareUnit?this.hanging.unitVelocity:undefined});
+  // FLIP's own stage taps: its old-field snapshot runs before forces,
+  // whose viscosity still reads the frame's unit taps.
+  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   // The retained extension slots expire before surface transport. Surface and
   // volume finish before momentum; forces and the next extension run after it.
@@ -711,27 +712,8 @@ export class UniformMixedFrame {
    unitHaloHalf:this.momentum.sampler==="texture16"?this.hanging.halfHaloOf(this.hanging.unitVelocity):undefined,
    extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,
    output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,coarseExtended:this.coarseCache});
-  this.extension.useSlots(this.stageScratch);
-  this.extensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension,gate:this.narrowBandFlip.liveGate});
-  this.flipSnapshotExtensionGroups=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension});
-  // The expired particle source bank holds the second scalar payload. A
-  // capacity too small for both epochs retains the original two extensions.
-  this.pairedExtensionGroups.clear();
-  for(const scratch of this.narrowBandFlip.particles){
-   if(!this.extension.supportsPair||scratch.size<this.extension.companionBytesAt(this.ownership.capacity.fineTiles))continue;
-   const companion={scratch,physical:f.departure,negative:f.negativeDeparture};
-   const common={phase:f.phase,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension,companion,gate:this.narrowBandFlip.liveGate};
-   this.pairedExtensionGroups.set(scratch,{
-    retain:this.extension.bind({...common,physical:f.velocity,negative:f.negativeDeparture}),
-    current:this.extension.bind({...common,physical:f.velocity,negative:f.negative}),
-    old:this.extension.bind({...common,physical:f.departure,negative:f.negativeDeparture,snapshot:this.narrowBandFlip.snapshotUnitVelocity}),
-    // flipDelta "swept": an epoch's final current states beside its old payload.
-    snapshots:this.narrowBandFlip.sweptDelta?[]:this.extension.companionBindings(scratch).map(slots=>this.narrowBandFlip.bindSnapshotSlots(slots)),
-    deltas:this.narrowBandFlip.sweptDelta?this.extension.companionBindings(scratch).map((old,epoch)=>this.narrowBandFlip.bindDeltaSlots(this.extension.finalSlots(epoch),old)):[],
-   });
-  }
-  // The swept delta has no unpaired form: G2P reads before.xyz as the delta.
-  if(this.narrowBandFlip.sweptDelta&&!this.pairedExtensionGroups.has(this.narrowBandFlip.extensionScratch))throw new Error("NB-FLIP flipDelta \"swept\" needs the paired extension (this device or capacity has none): choose \"extended\"");
+  this.extensionGroup=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension});
+  this.flipOldExtensionGroup=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.departure,outputNegative:f.negativeScratch,params:this.params.extension,old:true});
   this.surfaceGroup=this.surface.bind({narrowBandState:this.narrowBandFlip.state,unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),velocity:f.velocityScratch,coarseVelocity:this.coarseCache,negative:f.negativeScratch,params:this.params.surface,evidence:stage,phi:f.phi,outputPhi:f.phiScratch});
   if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,stage);
   // NB-FLIP's transfer leaves the advected field in the stored velocity (a
@@ -832,7 +814,7 @@ export class UniformMixedFrame {
   const tileWords=new UniformPageTileWords(this.device,this.pagePool,[uniformPageTopology(this.ownership)]);
   const pageInitialise=this.pageInitialise=new UniformPageInitialise(this.device,this.pagePool,this.fields.detail!,{near:16*Math.max(...this.ownership.capacity.lattice.cellSize_m),
    lowFaces:[{buffer:this.fields.negative},{buffer:this.fields.negativeScratch},{buffer:this.fields.negativeDeparture},{buffer:this.extensionWalls}],owners:[tileWords,this.narrowBandFlip,this.surfaceWorkControl,...this.pageOwners]});
-  await settleGPUInitialization([...Object.values(this.liveCopies),this.blit,this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk,this.bulkPages,this.bulkTransfer]
+  await settleGPUInitialization([...Object.values(this.liveCopies),this.blit,this.solid,this.plan,this.remap,this.phiResolve,this.coarsePhi,this.bricks,this.extension,this.cache,this.hanging,this.surfaceWorkControl,this.surface,this.surfaceVolume,this.geometry,this.momentum,this.forces,this.dynamics,this.heat,this.authority,this.projection,this.split.transfer,this.split.authority,this.surfaceBand,this.band,this.narrowBandFlip,this.bulk,this.bulkPages,this.bulkTransfer]
    .map(stage=>stage?.initialize()).concat(this.freeze?.initialize(this.status),this.fields.detail?.prepare(this.ownership,this.pagePool),this.pagePool.initialize([this.ownership.pageMirror,root.pageMirror,this.fields.pages],this.fields.sourceParams),tileWords.initialize(),pageInitialise.initialize(),this.rootOwners.initialize(),this.blockNeighbours.initialize()));
   if(this.phase==="uninit")this.phase="ready";
  }
@@ -852,6 +834,10 @@ export class UniformMixedFrame {
  /** A body frame's head found the last extension reusable but for the
   * bodies: its extension rebuilds only the regions they reached. */
  private bodyExtension=false;
+ /** The frame brick store's table holds the ownership's h tiles as they
+  * stand. An adopt (encodeRelayoutHead) and the host changes that reach
+  * "bricks" clear it; encodeBricks updates once and sets it. */
+ private bricksCurrent=false;
  /** A host change between frames: every cache UNIFORM_MIXED_REACHES maps it
   * to. epoch: a census's work epoch (the last frame before its first build). */
  invalidate(change:UniformMixedHostChange,epoch=this.frameIndex):void{
@@ -876,6 +862,7 @@ export class UniformMixedFrame {
    case "ownershipWork":this.ownership.forgetWork();return;
    case "residency":this.pressureOwnership.observeResidency();return;
    case "remapWork":this.remap.forgetWork();return;
+   case "bricks":this.bricksCurrent=false;return;
   }
  }
  /** A live voxel edit rewrote the host's solid mask: rebuild the all-4h
@@ -913,18 +900,38 @@ export class UniformMixedFrame {
   * The dynamic census bounds departures from it between frames. */
  encodeExtension(encoder:GPUCommandEncoder):void{
   if(this.phase!=="ready"||!this.keyed)throw new Error("Mixed extension needs a completed advance");
-  this.encodeExtensionOf(encoder,this.key.supportPolicy,this.key.extensionSweeps);
+  this.encodeExtensionOf(encoder,this.key.supportPolicy);
  }
  /** phase=false: this advance's simulation authority already wrote phase
   * on this layout and nothing has written volume, centre phi, the target or
   * solids since (the split's all-4h authority writes no phase). */
- private encodeExtensionOf(encoder:GPUCommandEncoder,policy:UniformMixedFrameParameters["supportPolicy"],sweeps:number|undefined,phase=true):void{
+ private encodeExtensionOf(encoder:GPUCommandEncoder,policy:UniformMixedFrameParameters["supportPolicy"],phase=true):void{
   this.plan.encode(encoder,policy);
   // Phase only: the advance's authority rewrites phi before its readers
   // (band rows and RHS form the volume correction themselves).
   if(phase)this.authority.encode(encoder,this.authorityGroup,false);
-  this.extension.encode(encoder,this.extensionGroups,sweeps??2);
+  this.encodeVelocityExtension(encoder,this.extensionGroup);
   this.reusableExtension=true;
+ }
+ /** The velocity extension (UniformFrameExtension): both fused passes (4h,
+  * then h) on the brick table of the ownership as it stands. Its reach is
+  * fixed by the design (two sweeps a level), so extensionSweeps no longer
+  * sets it. Every warm brick is recomputed and the frozen (COLD) regions are
+  * held, so there is nothing to retain or invalidate between encodes.
+  * seeded: an extension of this advance, on the same table, phase and
+  * freeze, already wrote its flags, h seeds and headers (the tail after the
+  * old field's); a table update in between voids that. */
+ private encodeVelocityExtension(encoder:GPUCommandEncoder,group:UniformFrameExtensionGroup,seeded=false):void{
+  const updated=!this.bricksCurrent;this.encodeBricks(encoder);this.extension.encode(encoder,group,seeded&&!updated);
+ }
+ /** The brick table on the ownership as it stands, unless it already holds
+  * it (bricksCurrent): the update, then the leaving bricks' slots back on
+  * the free stack. No pass carries a leaving brick's slot across an update
+  * (the extension reads live bricks within its own pass), so the release
+  * follows at once. A census step runs it once, after the adopt. */
+ private encodeBricks(encoder:GPUCommandEncoder):void{
+  if(this.bricksCurrent)return;
+  this.bricks.encodeUpdate(encoder);this.bricks.encodeRelease(encoder);this.bricksCurrent=true;
  }
  /** p's words into every stage's parameters, and p's key into the frame's.
   * True: that key is the last write's. dt and gravity are the caller's
@@ -1161,16 +1168,10 @@ export class UniformMixedFrame {
     // its readers; band rows and RHS form the volume correction themselves.
     if(phase){if(bodiesOnly)this.authority.encodeBodies(encoder,this.authorityGroup);else this.authority.encode(encoder,this.authorityGroup,false);}
     trace?.phase(encoder,V.support);
-    // Regional wherever the layout holds: the work tiers name the regions
-    // whose inputs moved since the tail's swept encode (a full one otherwise).
-    if(!reuse&&!this.extensionIdle){this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,false,same);trace?.phase(encoder,V.extension);}
+    if(!reuse&&!this.extensionIdle){this.encodeVelocityExtension(encoder,this.extensionGroup);trace?.phase(encoder,V.extension);}
    }
    }
-   // The stage scratch's other consumers start here: the extension's slots
-   // are dead until the tail seeds them (UniformMixedExtension.useSlots).
-   this.extension.invalidateRetained();
    // A kick moves no liquid: no trace, transport, surface volume or 4h base.
-   let pairedExtension:ReturnType<typeof this.pairedExtensionGroups.get>;
    if(!kick){
    // An idle advance (UniformNarrowBandFlip.idle) holds the certificate's
    // inputs: the extension (extensionIdle), the plan's support, ownership and
@@ -1200,7 +1201,7 @@ export class UniformMixedFrame {
      for(const cache of ["cold","heldAuthority","splitAuthority","extension","geometry"] as const)this.reach(cache,this.frameIndex);
      this.plan.encode(encoder,p.supportPolicy,true);this.encodeGeometry(encoder);
      this.authority.encode(encoder,this.authorityGroup,false);
-     this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,false,false);
+     this.encodeVelocityExtension(encoder,this.extensionGroup);
      this.plan.encodeCertificate(encoder,dt);this.cache.encode(encoder,this.cacheGroup);
      if(this.ownership.capacity.fineTiles>0)this.hanging.encode(encoder,this.hangingGroup);
     }
@@ -1267,17 +1268,10 @@ export class UniformMixedFrame {
    if(!kick){
     // G2P must compare the same extrapolation of valid fluid faces on both
     // sides of pressure. Raw air-face clearing is not a physical FLIP delta.
-    pairedExtension=this.pairedExtensionGroups.get(this.narrowBandFlip.extensionScratch);
+    // The old field: its band extension into departure (momentum, its last
+    // reader, has run), held there to the tail's recordDelta.
     // An idle frozen advance encodes no extension (extensionIdle).
-    if(this.extensionIdle){/* nothing to extend or retain */}
-    else if(pairedExtension){
-     // Keep only P2G's canonical scalar faces in the expired particle bank
-     // while forces and pressure replace velocity. Topology stays fixed.
-     this.extension.retainPair(encoder,pairedExtension.retain);
-    }else{
-     this.extension.encode(encoder,this.flipSnapshotExtensionGroups!,p.extensionSweeps??2);
-     this.narrowBandFlip.snapshot(encoder);
-    }
+    if(!this.extensionIdle)this.encodeVelocityExtension(encoder,this.flipOldExtensionGroup);
    }
    // An idle frozen advance holds phi (no geometry change, so no capillary cache is dirty) and every owner is frozen: the forces write nothing.
    this.dynamics.encodeClassify(encoder);if(!this.extensionIdle)this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0);
@@ -1335,24 +1329,16 @@ export class UniformMixedFrame {
    // The projected field is final here: each region's change since the last frame.
    this.dynamics.encodePublish(encoder);
    if(!kick){
-    // An idle frozen advance encodes no extension (extensionIdle).
-    if(this.extensionIdle){/* nothing to extend or retain */}
-    else if(pairedExtension){
-     // Phase, topology and wall geometry are unchanged across pressure.
-     // The old hierarchy finishes
-     // into snapshot slots/taps; the current hierarchy then reuses its geometry.
-     this.extension.preparePair(encoder,pairedExtension.current,p.extensionSweeps??2);
-     if(this.narrowBandFlip.sweptDelta){
-      // The delta straight from the final slots; the current hierarchy
-      // prolongs (no old hierarchy ran to replay).
-      this.narrowBandFlip.recordDelta(encoder,pairedExtension.deltas[(p.extensionSweeps??2)%2]!);
-      this.extension.finishPair(encoder,this.extensionGroups,p.extensionSweeps??2,false,false);
-     }else{
-      this.extension.finishSnapshot(encoder,pairedExtension.old,p.extensionSweeps??2);
-      this.narrowBandFlip.snapshot(encoder,pairedExtension.snapshots[(p.extensionSweeps??2)%2]!);
-      this.extension.finishPair(encoder,this.extensionGroups,p.extensionSweeps??2,false);
-     }
-    }else this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,true);
+    // The projected field's extension: the next move's G2P and the next
+    // head's census and advection read it. Against the old field in
+    // departure it is each sample's FLIP delta (recordDelta). An idle
+    // frozen advance encodes none (extensionIdle).
+    // The old field's extension above (the same conditions) seeded it:
+    // pressure changes no seed. With bodies or physics plugins the split's
+    // authority and the solids may change within the advance (a seeded tail
+    // overflowed the submerged-sphere regression's particle pool), so those
+    // advances seed afresh.
+    if(!this.extensionIdle){this.encodeVelocityExtension(encoder,this.extensionGroup,!bodies&&this.physicsPlugins.length===0);this.narrowBandFlip.recordDelta(encoder);}
    }
    const root=this.levels[0]!,rootPressure=root.pressure,rootPhi=root.phi!;
    // Present the live all-4h words only: level 0 keeps the simulation
@@ -1391,7 +1377,7 @@ export class UniformMixedFrame {
     // post-pressure extension stand (the certificate takes its speed from it).
     this.plan.encodeTail(encoder,p.supportPolicy);this.reusableExtension=true;
     trace?.phase(encoder,V.extension);
-   }else if(extendTail){this.encodeExtensionOf(encoder,p.supportPolicy,p.extensionSweeps,bodies!==undefined);trace?.phase(encoder,V.extension);}
+   }else if(extendTail){this.encodeExtensionOf(encoder,p.supportPolicy,bodies!==undefined);trace?.phase(encoder,V.extension);}
    trace?.submit(encoder,this.fields.negative);this.submit(encoder);trace?.submitted();
    slot.frame=frame;slot.encoded=this.band.schedule.cycles;slot.kick=kick>0;slot.target=this.pressureTarget;slot.unchecked=true;
    return this.check(slot);
@@ -1677,7 +1663,7 @@ export class UniformMixedFrame {
   * encoder: the fields' AIR image and the per-key owners' (page initialise),
   * then the solid record over it. */
  encodeNewBlocks(encoder:GPUCommandEncoder):void{
-  this.pageInitialise!.encode(encoder);this.extension.invalidateRetained();
+  this.pageInitialise!.encode(encoder);
   // A claimed block may now hold a ring tile's vertex: its h slot before any store there.
   this.fields.detail?.encodeBlocks(encoder);
   this.solid?.encodeNewBlocks(encoder,this.ownership.presentation);
@@ -1695,7 +1681,7 @@ export class UniformMixedFrame {
    // The plan reads no solid: after bodies alone, the last plan's support holds.
    if(!regional)this.plan.encode(encoder,p.supportPolicy,true);if(!this.geometryCurrent)this.encodeGeometry(encoder);
    if(phase){if(bodiesOnly)this.authority.encodeBodies(encoder,this.authorityGroup);else this.authority.encode(encoder,this.authorityGroup,false);}
-   if(!this.extensionIdle){this.extension.encode(encoder,this.extensionGroups,p.extensionSweeps??2,false,regional);trace?.phase(encoder,V.extension);}
+   if(!this.extensionIdle){this.encodeVelocityExtension(encoder,this.extensionGroup);trace?.phase(encoder,V.extension);}
   }
   // The tiles as the frame starts, for the grid layer's relayout marks.
   if(this.layoutViews)this.recordStageView(encoder,this.ownership.presentation.buffer,this.ownership.presentation.offset??0,"previous");
@@ -1704,6 +1690,8 @@ export class UniformMixedFrame {
   // Detail storage admits the generation's patches ahead of the remap.
   this.fields.detail?.encodeAdmit(encoder,relayout.generation.topology);
   this.remap.applyGpu(encoder,relayout.generation,relayout.receipt,true,this.relayoutAdopted);
+  // The adopted generation is this step's ownership: the brick table follows it once.
+  this.bricksCurrent=false;this.encodeBricks(encoder);
   // A block the commit promoted into holds its phi in the base alone: the
   // h copies of its canonical vertices (an h tile's beside it) are the
   // claim's AIR image until stored to both homes, ahead of the resolve
@@ -1741,5 +1729,5 @@ export class UniformMixedFrame {
   if(this.coarsePhi.adopted)return;
   const e=this.device.createCommandEncoder({label:"Uniform publish 4h vertex phi base"});this.coarsePhi.encode(e);this.device.queue.submit([e.finish()]);
  }
- destroy():void{for(const c of Object.values(this.liveCopies))c.destroy();this.blit.destroy();this.surfaceWorkControl.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.freeze?.destroy();this.bulk?.destroy();this.bulkPages?.destroy();this.bulkTransfer?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
+ destroy():void{for(const c of Object.values(this.liveCopies))c.destroy();this.blit.destroy();this.surfaceWorkControl.destroy();this.surfaceVolume?.destroy();this.narrowBandFlip.destroy();this.coarsePhi.destroy();this.solid?.destroy();this.surfaceBand.destroy();this.band.destroy();this.plan.destroy();this.phiResolve.destroy();this.surface.destroy();this.geometry.destroy();this.momentum.destroy();this.hanging.destroy();this.remap.destroy();this.ownership.destroy();this.pageInitialise?.destroy();this.pagePool.destroy();this.split.transfer.destroy();this.extension.destroy();this.bricks.destroy();this.freeze?.destroy();this.bulk?.destroy();this.bulkPages?.destroy();this.bulkTransfer?.destroy();for(const l of this.levels)if(l.ownership!==this.ownership)l.ownership.destroy();for(const r of this.owned)r.destroy();}
 }

@@ -53,11 +53,6 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   from the last step's arena search (its reach bits and nearest-crossing
  *   bank), shortened by the spread reach of this step's travel, and runs no
  *   crossing search on the advected phi; "search" searches the advected phi.
- * - flipDelta: "swept" records each sample's FLIP delta at the tail from the
- *   paired extension's final slots (the current minus the old payload where
- *   the sweeps reached), with no old-field publication or snapshot;
- *   "extended" publishes the old field and samples it, and G2P subtracts
- *   that sample from the next step's PIC.
  * - particleBandDepth: cells below the surface the particle band reaches
  *   (seeding fills it, the move retires samples past it); 2 to 4.
  * - particleDensity: "uniform" seeds eight sites a cell through the band;
@@ -125,7 +120,7 @@ import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cac
  *   where no sample lies within a cell (with outerSeeding "uncovered"); "band"
  *   seeds every newly heated cell under its count, over the samples it holds.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly flipDelta:"swept"|"extended";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge";readonly sampleSeparation:"off"|"pairs";readonly innerReseed:"sites"|"cells";readonly activationSeeding:"band"|"uncovered"}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge";readonly sampleSeparation:"off"|"pairs";readonly innerReseed:"sites"|"cells";readonly activationSeeding:"band"|"uncovered"}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>({
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -146,7 +141,6 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  surfaceTraceSubsteps:values.surfaceTraceSubsteps==="legacy"?"legacy":"off",
  redistanceSearch:values.redistanceSearch==="fresh"?"fresh":"shared",
  crossingGuard:values.crossingGuard==="search"?"search":"previous",
- flipDelta:values.flipDelta==="extended"?"extended":"swept",
  momentumSampler:values.momentumSampler==="software"||values.momentumSampler==="texture16"?values.momentumSampler:"texture32",
  momentumTrace:values.momentumTrace==="midpoint"?"midpoint":"substep",
  particleBandDepth:typeof values.particleBandDepth==="number"&&Number.isFinite(values.particleBandDepth)?Math.min(4,Math.max(2,values.particleBandDepth)):3,

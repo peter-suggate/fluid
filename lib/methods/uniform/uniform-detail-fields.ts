@@ -1151,6 +1151,8 @@ const CLASS_BY_NAME:Record<string,UniformDetailClass>={
  copied:"face",bodyVelocity:"face",topology:"face",topologyOut:"face",
  phi:"vertex",outputPhi:"vertex",vertexPhi:"vertex",bodyPhi:"vertex",
  unitVelocity:"atlas",unitVelocityOut:"atlas",
+ // The frame extension's second binding of its velocity, read by h-store texel.
+ physicalTexels:"atlas",
 };
 const RAW_NAMES=new Set(["coarse","coarseOut","coarseExtended","coarseVelocity","origins","originsOut","surfacePhi","surfaceOpen","unitHalo","unitHaloOut","unitHaloFiltered","coarseFiltered","unitHaloHalfOut"]);
 function classify(name:string,type:string):UniformDetailClass|undefined{

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTRIES,UniformBrickArena} from "../lib/methods/uniform/uniform-brick-arena";
 import {UBA_STAGE_WORDS,ubaStageWGSL,type UbaStageChannel} from "../lib/methods/uniform/uniform-brick-stage";
-import {ubaExtendWGSL} from "../lib/methods/uniform/uniform-brick-extension";
 import {withUniformDevice} from "./helpers/uniform-geometric";
 
 // A 4x2x2 page box in the 64³ page window; page (1,0,1) AIR, the rest stored, block = page index + 1.
@@ -172,12 +171,7 @@ test("ubaStage: the generator checks its budget, halos and rules",()=>{
  assert.throws(()=>ubaStageWGSL(arena,"k",{level:0,workgroup:64,channels:[{name:"a",layout:"face",halo:1,core:{pool:"q"},seam:"prolong",coarse:"c"}]}),/axis/);
  assert.throws(()=>ubaStageWGSL(arena,"k",{level:0,workgroup:64,channels:[0,1].map(i=>({name:`a${i}`,layout:"cell" as const,halo:4,core:{pool:"q"},seam:"prolong" as const,coarse:"c"}))}),/budget/);
  assert.ok(2*(8+2*2)**3+128<=UBA_STAGE_WORDS);
- const component=(axis:0|1|2)=>({axis,value:{core:{pool:"q"},seam:"prolong" as const,coarse:"c"},seed:{core:{pool:"q"},seam:"prolong" as const,coarse:"c"}});
- const extend=(sweeps:number,axes:(0|1|2)[])=>ubaExtendWGSL(arena,"x",{level:0,workgroup:64,sweeps,spacing:"vec3f(1.0)",reach:2,write:"w",components:axes.map(component)});
- assert.throws(()=>extend(5,[0]),/sweeps/);
- assert.throws(()=>extend(2,[0,0]),/distinct/);
  assert.throws(()=>ubaStageWGSL(arena,"k",{level:0,workgroup:64,channels:[{name:"a",layout:"cell",halo:1,core:{pool:"q"},seam:"prolong",coarse:"c"},{name:"b",layout:"cell",halo:2,core:{pool:"q"},seam:"prolong",coarse:"c",window:"a"}]}),/window/);
- assert.match(extend(2,[0,1,2]),/fn ubaExtend_x\(/);
 });
 
 test("ubaStage: windows hold cores through the record, prolonged and restricted seams, and the outside kind",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
@@ -224,93 +218,5 @@ test("ubaStage: windows hold cores through the record, prolonged and restricted 
    }
   }
   assert.ok(restricted>0,"some 4h cells restrict from h");
- });
-});
-
-// ubaExtend: two Jacobi sweeps in each brick's window against two global sweeps over the live faces.
-const isSource=(p:readonly number[])=>((p[0]!*7+p[1]!*3+p[2]!*5)%23+23)%23===0;
-const SPACING=[1,1.25,0.75],UNREACHED=1e20;
-function combine(old:[number,number],lo:[number,number][],hi:[number,number][]):[number,number]{
- const minima=[0,1,2].map(a=>Math.min(lo[a]![1],hi[a]![1])),order=[0,1,2].sort((a,b)=>minima[a]!-minima[b]!);
- const sorted=order.map(a=>minima[a]!),lengths=order.map(a=>SPACING[a]!);
- if(sorted[0]!>=0.5*UNREACHED)return old;
- let root=sorted[0]!+lengths[0]!;
- for(let count=2;count<=3;count++){
-  if(sorted[count-1]!>=0.5*UNREACHED||root<=sorted[count-1]!)break;
-  let a=0,b=0,c=-1;for(let i=0;i<count;i++){const w=1/(lengths[i]!*lengths[i]!);a+=w;b+=sorted[i]!*w;c+=sorted[i]!*sorted[i]!*w;}
-  root=(b+Math.sqrt(Math.max(b*b-a*c,0)))/a;
- }
- const cut=2*Math.min(...SPACING);if(root>cut||root>old[1])return old;
- const epsilon=Math.max(root,cut)*1.1920929e-7;let weighted=0,total=0;
- for(let a=0;a<3;a++){
-  if(minima[a]!>=root-epsilon)continue;let value=0,count=0;
-  if(Math.abs(lo[a]![1]-minima[a]!)<=epsilon){value+=lo[a]![0];count++;}
-  if(Math.abs(hi[a]![1]-minima[a]!)<=epsilon){value+=hi[a]![0];count++;}
-  const weight=(root-minima[a]!)/(SPACING[a]!*SPACING[a]!);weighted+=weight*value/Math.max(count,1);total+=weight;
- }
- return [total>0?weighted/total:0,root];
-}
-const EXTEND_SHIM=[0,1,2].map(a=>/* wgsl */`
-fn extValue${a}(w:u32,base:u32,l:vec3u)->f32{return fineValue(vec3i(ubaOrigin(base))+vec3i(l))+${100*a}.0;}`).join("")+/* wgsl */`
-fn isSource(p:vec3i)->bool{return ((p.x*7+p.y*3+p.z*5)%23+23)%23==0;}
-fn extSeed(w:u32,base:u32,l:vec3u)->f32{return select(${UNREACHED.toExponential()},0.0,isSource(vec3i(ubaOrigin(base))+vec3i(l)));}
-fn extSeamValue(p:vec3i,w:u32)->f32{return 0.0;}
-fn extSeamSeed(p:vec3i,w:u32)->f32{return ${UNREACHED.toExponential()};}
-var<private> extOut:u32;
-fn extWrite(c:vec3i,axis:u32,state:vec2f){let k=extOut+2u*(512u*axis+u32(c.x)+8u*(u32(c.y)+8u*u32(c.z)));outWords[k]=state.x;outWords[k+1u]=state.y;}
-var<workgroup> extCount:u32;
-@compute @workgroup_size(64) fn extend(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){extCount=ubaCount(UBA_LIVE_COUNT);}
- let n=workgroupUniformLoad(&extCount);
- for(var e=group.x;e<n;e+=8u){extOut=3072u*e;ubaExtend_x(atomicLoad(&table[UBA_LIVE+e]),lane);}
-}
-`;
-
-test("ubaExtend: each brick's window sweeps equal global Jacobi sweeps over the live faces",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
- const at=(x:number,y:number,z:number)=>brickId([x,y,z]);
- const live:number[]=[];
- for(const x of [0,8,16,24,32,40])for(const y of [0,8])live.push(at(x,y,0));
- live.push(at(8,16,0),at(0,0,8),at(16,8,8),at(40,32,0),at(40,0,24),at(40,8,24));
- const sweeps=2;
- await withUniformDevice("brick extension",async device=>{
-  const arena=new UniformBrickArena({blocks:BLOCKS,channels:[{name:"q",levels:[0,2],layout:"cell"}],lists:[{name:"fine",any:UNIFORM_ARENA_CLASS.fine}]});
-  const extend=ubaExtendWGSL(arena,"x",{level:0,workgroup:64,sweeps,spacing:`vec3f(${SPACING.map(v=>v.toFixed(2)).join(",")})`,reach:2,write:"extWrite",resolve:"resolveBrick",
-   components:[0,1,2].map(a=>({axis:a as 0|1|2,value:{core:`extValue${a}`,seam:{fn:"extSeamValue"}},seed:{core:"extSeed",seam:{fn:"extSeamSeed"}}}))});
-  const {words,values}=await runArena(device,arena,SHIM+arena.tableWGSL("table","0u")+arena.poolWGSL(["pool"])+extend+EXTEND_SHIM,live,["extend"],3072*live.length);
-  assert.equal(words[0],0,"no fatal");
-  const l=arena.tableLayout,liveCount=words[18+2]!;assert.equal(liveCount,live.length);
-  const liveSet=new Set(live),key=(p:readonly number[])=>p.join(",");
-  let reached=0,swept=0;
-  for(let a=0;a<3;a++){
-   // The global state over every live brick's window: a live face its
-   // seed, a seam face unreached (value 0), outside the stored pages blocked.
-   const initial=(p:readonly number[]):[number,number]=>{
-    const id=brickId(p);if(id<0)return [0,-1];
-    if(!liveSet.has(id))return [0,UNREACHED];
-    return [Math.fround(fineValue(p)+100*a),isSource(p)?0:UNREACHED];
-   };
-   let state=new Map<string,[number,number]>();
-   for(const id of live){const o=brickOrigin(id);for(let z=-sweeps;z<8+sweeps;z++)for(let y=-sweeps;y<8+sweeps;y++)for(let x=-sweeps;x<8+sweeps;x++){const p=[o[0]!+x,o[1]!+y,o[2]!+z];state.set(key(p),initial(p));}}
-   const get=(p:readonly number[]):[number,number]=>{const v=state.get(key(p))??initial(p);return v[1]<0?[0,UNREACHED]:v;};
-   for(let s=0;s<sweeps;s++){
-    const next=new Map<string,[number,number]>();
-    for(const [k,old] of state){
-     const p=k.split(",").map(Number);
-     if(!(old[1]>0)){next.set(k,old);continue;}
-     const lo=[0,1,2].map(b=>{const q=p.slice();q[b]!--;return get(q);}),hi=[0,1,2].map(b=>{const q=p.slice();q[b]!++;return get(q);});
-     next.set(k,combine(old,lo,hi));
-    }
-    state=next;
-   }
-   for(let e=0;e<liveCount;e++){
-    const id=words[l.brick+words[l.live+e]!]!;assert.ok(liveSet.has(id));const o=brickOrigin(id);
-    for(let k=0;k<512;k++){
-     const p=[o[0]!+(k&7),o[1]!+((k>>3)&7),o[2]!+(k>>6)],want=get(p),at=3072*e+2*(512*a+k),got=[values[at]!,values[at+1]!];
-     if(want[1]<0.5*UNREACHED){reached++;if(want[1]>0)swept++;}
-     assert.ok(Math.abs(got[1]-want[1])<=1e-5*Math.max(1,want[1])&&Math.abs(got[0]-want[0])<=1e-4*Math.max(1,Math.abs(want[0])),`axis ${a} brick ${id} face ${p}: ${got} against ${want}`);
-    }
-   }
-  }
-  assert.ok(swept>1000&&reached>swept,`${swept} swept of ${reached} reached faces`);
  });
 });

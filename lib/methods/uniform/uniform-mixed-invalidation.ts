@@ -18,23 +18,26 @@ export type UniformMixedHostChange="solids"|"fluid"|"values"|"scene"|"bodies"|"l
  * extension: the census extension's reuse. geometry: the simulation target
  * and centre phi's currency. solidRecord: the all-4h solid record.
  * solidWidths: the cut widths. workEpoch, bandWork, bandCycles, ownershipWork,
- * residency, remapWork: the lagged work evidence launch widths size from. */
+ * residency, remapWork: the lagged work evidence launch widths size from.
+ * bricks: the frame brick store's table over the ownership's h tiles (the
+ * frame updates it on the GPU after each adopt; a host change of tiles
+ * reaches it here). */
 export type UniformMixedCache="cold"|"workControl"|"dynamics"|"heat"|"heldAuthority"|"splitAuthority"|"extension"|"geometry"|"solidRecord"|"solidWidths"
- |"workEpoch"|"bandWork"|"bandCycles"|"ownershipWork"|"residency"|"remapWork";
+ |"workEpoch"|"bandWork"|"bandCycles"|"ownershipWork"|"residency"|"remapWork"|"bricks";
 
 /** What a write of phi, volume or parameters stales: everything retained over the fluid. */
 const FLUID:readonly UniformMixedCache[]=["cold","heat","heldAuthority","splitAuthority","extension","geometry"];
 /** The one map from host changes to the caches they stale, in reach order. */
 export const UNIFORM_MIXED_REACHES:{readonly [change in UniformMixedHostChange]:readonly UniformMixedCache[]}={
- solids:["workControl","dynamics","solidRecord","solidWidths",...FLUID],
+ solids:["workControl","dynamics","solidRecord","solidWidths","bricks",...FLUID],
  fluid:FLUID,
  values:FLUID,
- scene:FLUID,
+ scene:[...FLUID,"bricks"],
  // A body frame's head rebuilds the record, heat and held authority for the swept tiles itself (noteBodies).
  bodies:["cold","splitAuthority","extension","geometry"],
- layout:["workControl","dynamics","solidWidths",...FLUID],
- capacity:["cold"],
- relayout:["cold"],
+ layout:["workControl","dynamics","solidWidths","bricks",...FLUID],
+ capacity:["cold","bricks"],
+ relayout:["cold","bricks"],
  // workEpoch first: the others size from receipts after it.
  census:["workEpoch","bandWork","bandCycles","ownershipWork","residency","remapWork"],
  coarsePhi:["workControl","dynamics"],

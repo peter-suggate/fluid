@@ -36,7 +36,7 @@ export async function installChurningStageTrace(device: GPUDevice, solver: any) 
   await hook(frame,'encodeParticleMomentum','P2G',frame.fields.velocity);
   await hook(frame.forces,'encode','forces',frame.fields.velocityScratch);
   await hook(frame.band,'encodeProject','pressure',frame.fields.velocity);
-  await hook(frame.extension,'finishPair','extension',frame.fields.velocity);
+  await hook(frame.extension,'encode','extension',frame.fields.velocity);
   return {
     reset(){device.queue.writeBuffer(result,0,new Uint32Array(64));},
     async read(){const values=await readMixedBuffer(device,result);return Object.fromEntries(labels.map((label,i)=>[label,values[i]]));},

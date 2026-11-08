@@ -126,7 +126,7 @@ await withUniformDevice("churning instability", async device => {
       const frame=(solver as any).mixedFrame;
       if(fence==="all")frame.surfaceWorkControl.framePlan.coalescePasses=false;
       else{
-        const target:Record<string,[any,string]>={move:[frame.narrowBandFlip,"move"],momentum:[frame,"encodeParticleMomentum"],forces:[frame.forces,"encode"],pressure:[frame.band,"encodeProject"],extension:[frame.extension,"finishPair"]};
+        const target:Record<string,[any,string]>={move:[frame.narrowBandFlip,"move"],momentum:[frame,"encodeParticleMomentum"],forces:[frame.forces,"encode"],pressure:[frame.band,"encodeProject"],extension:[frame.extension,"encode"]};
         const [object,method]=target[fence]!;const original=object[method].bind(object);
         object[method]=(encoder:GPUCommandEncoder,...args:any[])=>{const result=original(encoder,...args);frame.blit.finishStage(encoder);return result;};
       }

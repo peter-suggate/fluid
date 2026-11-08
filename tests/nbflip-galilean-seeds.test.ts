@@ -6,12 +6,13 @@ import type {UniformNarrowBandFlip} from "../lib/methods/uniform/uniform-narrow-
 
 // A block translating in zero gravity at (0.75, 0.75, 0) m/s keeps that
 // velocity: FLIP's delta is zero for a uniform field. The initial band's
-// seeds (seedCell's emit) once skipped the nbSeedFirst mark, so flipDelta
-// "swept" read their before.xyz (their velocity) as a delta and G2P doubled
-// it: every sample at 1.46 m/s after one step, the block 15.7 h off in 20.
-test("NB-FLIP seeds keep a translating block's velocity (swept delta)",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
+// seeds (seedCell's emit) once skipped the nbSeedFirst mark, so a FLIP delta
+// recorded at the tail read their before.xyz (their velocity) as a delta and
+// G2P doubled it: every sample at 1.46 m/s after one step, the block 15.7 h
+// off in 20.
+test("NB-FLIP seeds keep a translating block's velocity (FLIP delta)",{skip:!process.env.WEBGPU_NODE_MODULE},async()=>{
  await withUniformDevice("NB-FLIP Galilean seeds",async device=>{
-  const solver=await createUniformSolver(device,createNbflipAnalyticScene("translation"),{particleTransfer:"flip",flipDelta:"swept"});
+  const solver=await createUniformSolver(device,createNbflipAnalyticScene("translation"),{particleTransfer:"flip"});
   try{
    const flip=(solver as unknown as {mixedFrame:{narrowBandFlip:UniformNarrowBandFlip}}).mixedFrame.narrowBandFlip;
    for(let frame=1;frame<=4;frame++)await advanceUniform(solver,frame*NBFLIP_ANALYTIC_DT_S);

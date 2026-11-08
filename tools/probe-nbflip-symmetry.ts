@@ -98,31 +98,6 @@ fn umAdvected(p:vec3f,width:u32,foot:UMFoot)->f32{
     });return result;
    };
   }
-  if(option('extension-slots')==='true'){
-   let serial=0;
-   for(const key of ['encode','finishPair']){
-    const original=f.extension[key].bind(f.extension);
-    f.extension[key]=(encoder:GPUCommandEncoder,...args:any[])=>{
-     const result=original(encoder,...args),extension=f.extension;
-     const read=device.createBuffer({size:2*extension.slotArray,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-     encoder.copyBufferToBuffer(extension.slots,0,read,0,read.size);
-     const label=`${run}-${step}-${serial++}-${key}`;
-     pendingBuffers.push(async()=>{await read.mapAsync(GPUMapMode.READ);writeFileSync(`${out}/${label}-slots.bin`,new Uint8Array(read.getMappedRange()));read.unmap();read.destroy();});
-     const address=f.ownership.capacity.address;
-     writeFileSync(`${out}/extension-layout.json`,JSON.stringify({slotArray:extension.slotArray,tiles:address.tileKeys,blocks:address.blocks,lowFaceKeys:address.lowFaceKeys},null,2));
-     for(const name of ['input','output','inputOrigins','outputOrigins']){
-      const texture=f.extension.hierarchy[name] as GPUTexture;
-      const row=Math.ceil(texture.width*16/256)*256;
-      const target=device.createBuffer({size:row*texture.height*texture.depthOrArrayLayers,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-      encoder.copyTextureToBuffer({texture},{buffer:target,bytesPerRow:row,rowsPerImage:texture.height},{width:texture.width,height:texture.height,depthOrArrayLayers:texture.depthOrArrayLayers});
-      writeFileSync(`${out}/${label}-${name}.json`,JSON.stringify({width:texture.width,height:texture.height,depth:texture.depthOrArrayLayers,row}));
-      pendingBuffers.push(async()=>{await target.mapAsync(GPUMapMode.READ);writeFileSync(`${out}/${label}-${name}.bin`,new Uint8Array(target.getMappedRange()));target.unmap();target.destroy();});
-     }
-     capture(encoder,`${label}-phase`,f.fields.phase);
-     return result;
-    };
-   }
-  }
   hook(nb,'bootstrap','pre-seed-phi',()=>f.fields.phi,true);
   if(option('capture-extended')==='true'||(option('capture-extended')==='alternate'&&run%2))hook(f.surface,'encode','extended-velocity',()=>f.fields.velocityScratch,true);
   if(option('capture-unit')==='true')hook(f.surface,'encode','unit-velocity',()=>f.hanging.unitVelocity,true);

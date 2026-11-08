@@ -79,6 +79,8 @@ The B4 and T rows are regex groups of stage labels, so they are approximate.
 
 ## ubaExtend (B4's extension core)
 
+> Superseded in B4 round 4: `uniform-brick-extension.ts` and its regression are deleted. The frame extension's per-block windows (`uniform-frame-extension.ts`) replace it; see "B4 round 4" below.
+
 `lib/methods/uniform/uniform-brick-extension.ts`, `ubaExtendWGSL(arena, K, {level, workgroup, sweeps, spacing, reach, components, write})`.
 - **Per component:** it stages the value window and the seed distance window with halo = sweeps. It runs `sweeps` Jacobi sweeps of today's `ueCombine` in threadgroup memory: the Godunov upwind root, the band cut-off at `reach` cells, and the upwind-weighted extension value. It hands each core face's (value, distance) to `write`.
 - **Domain:** a seed distance of 0 marks a source, 1e20 an unreached face, and −1 (`UBA_BLOCKED`) a face outside the domain. A blocked face is never swept and is never an upwind neighbour. It is the default outside the stored pages. Seam faces are swept like any other face.
@@ -279,3 +281,239 @@ That is about 3.2 of the 8.7 ms.
 3. **Fuse the plan tail, certificate, heat and publish into one pass over the live list.** Expected −0.3 to −0.5 ms of the 0.80.
 4. **T (remap and NB transfer) only on change frames.** Expected about −0.2 ms at drop=2, where most frames change topology, and up to −0.7 ms on settled scenes.
 5. **One `encodeUpdate` of the frame bricks a step,** once the head topology is final. Expected −0.08 ms.
+
+## Phase 2 (2026-11-08): B4 re-landed with the publish fix
+
+The B4 patch is re-applied to the main tree, with the following changes. Nothing has been GPU-timed yet: the combined gate round will measure it.
+
+**C. ufx4 (`uniform-frame-extension.ts`):**
+- **Publication:** each page's 512 cells are visited once, not its 32768 texels. A 4h tile writes its three anchors (origin + 3e_a). On an axis whose +neighbour is an h tile, it also writes that plane's 16 subface texels. These are the texels the slot extension wrote (publishList's regular branch and publishSeams' uePublishCoarse).
+- **Unsupported pages:** a page none of whose tiles has the extension support bit holds only sources and blocked faces (ufxSeed4). No sweep changes them: a source's root never beats 0, and a blocked face is never swept. Its coarse state is its seeds, written without staging the halo window. The result is identical to the full pass. Deep-liquid and far-air pages take this path; the plan sets support only on the surface band plus one tile.
+- **Launch:** one workgroup per held page (the pool's blocks) and one per live brick (the store's slots). A group past the count exits at once, as before. The launches are no longer 64 and 256 groups striding the lists.
+
+**What else scaled with held pages** (by code reading):
+- **The publish loop** (fixed above).
+- **ufx4 staged a 12³ halo window for every held page,** including deep-bulk ones, with about 7 loads per face per axis. The skip above removes it where no tile is supported.
+- **The frame runs the extension up to three times a step:** at the head when the census extension isn't reusable, on the departure field, and post-pressure. Each run ran the bricks update and release too; that is now once a step.
+- **The coarse and result buffers** are pool- and slot-sized (authored), not domain-sized.
+
+**The NB-FLIP snapshot's +0.21 ms** (attributed from the c3 kdrop run's kernels):
+- **The cost:** B4 removed the paired extension's companion slots, so the old field is no longer read from slots (HEAD's `finishSnapshot` then `snapshot(slots)`, or s23's `recordDelta` at 0.046 ms). `narrowBandFlip.snapshot(encoder)` now runs the general path:
+  - a 4h sampling cache of velocityScratch, `cache`: 0.098 ms;
+  - the unit-tap builder: `markUnitHalo` 0.033, `fillUnitHalo` 0.082 and `unitVelocityTaps` 0.016 ms;
+  - then the per-sample `sampleVelocity`, `snapshot`: 0.033 ms.
+- **The fix, not done:** a brick-native FLIP delta. The departure extension's ufxH would keep each h face's old extended value in its slot (the result buffer is per slot already). The post-pressure ufxH would then write current minus old, and G2P would read that delta through the same taps it samples u with, so no snapshot pass runs. This touches NB-FLIP's G2P, which carries a peer's hunks, so it is left for agreement with Lane T.
+
+**Bricks update once a step (`uniform-mixed-frame.ts`, `uniform-mixed-invalidation.ts`):**
+- `encodeBricks` runs `encodeUpdate` then `encodeRelease`, and only when `bricksCurrent` is false.
+- `encodeRelayoutHead` clears the flag right after `remap.applyGpu` and updates once.
+- A new invalidation cache, `"bricks"`, is reached by solids, scene, layout, capacity and relayout, so a host change of tiles also refreshes the table.
+- encodeVelocityExtension no longer updates the table.
+
+**G. Remap and NB transfer only on change frames** (moot, by code reading):
+- `UniformMixedRemap.applyGpu` already strides the GPU worklist of the generation's dilated changed tiles (markListed). An unchanged generation lists no tile, and every launch exits. Its drop=2 time is real change work. The host can't know the count, and needs no host gate.
+- "NB transfer" is P2G (transferDeposit, transferRefine, transferProperties, transferSeams, transfer). It runs every step because particles move every step. It is B3, Lane T's, not a topology stage.
+
+**E and F, not implemented, with the reasons from the code:**
+- **E (census as a reduction):** umClassifyOwner reads three kinds of evidence per owner:
+  - 8 phi corners and the volume. That is B2's evidence, from a brick surface pass that does not exist yet (Lane T);
+  - the extended face velocities, its 6 faces plus seam parts. B4 could reduce these per tile in ufx4 and ufxH: each tile's +plane (lo, hi) per axis, with the census combining its own and its −neighbour's. But on a regular 4h owner that is 6 of classifyCoarse's roughly 96 loads. The rest are phi corners, `umResolutionError` (8 per error tile) and `umDepthSample` (64 per deep tile), all phi evidence. So about −0.02 ms, not worth coupling the census to the extension;
+  - for decide, importance, interfaceBlocks, boundCubes, pageSeed and pageRequest: neighbour tiles' classes. They become brick-local only as staged windows over tile classes in T.
+  - classifyCoarse already replays unchanged tiles (`ccValid`, then `umReplayTile`).
+- **F (one pass for the plan tail, certificate, heat and publish):**
+  - the plan (seed, dilate0-2) gates the extension (support bit 2), and the certificate reads the extension's output. They are a chain with grid-wide data between links, so one pass over the live list cannot hold them;
+  - the tail plan is already a no-op unless the ownership or policy changed (`encodeTail`);
+  - the certificate's localSpeed (with the fine defect and surface rate) is B1's in the design, Lane T's;
+  - the certificate cannot move to the tail either: on a census step it must read the adopted generation (its certify lists are per h tile), which exists only after the head's relayout;
+  - the remaining fusible part is region heat and dynamics publish, about 0.15 ms.
+
+## Phase 3 (2026-11-08): the extension's work follows the band
+
+**The combined gate (HEAD + E + T + C):**
+
+| Scene | ufx4 (ms) | ufxH (ms) | B4 total (ms) | Old extension family (ms) |
+|---|---|---|---|---|
+| drop | 3.54 | 0.64 | 4.18 | 0.97 |
+| seep | 10.22 | 4.00 | 14.22 | 1.64 |
+
+The cost scales with the scene, not with activity. The phase-2 publish fix was not the mechanism.
+
+**The mechanism** (by code reading):
+- **ufx4 restricted on the fly, per window cell and per channel:**
+  - ubaStage called `ufxValue4` and `ufxSeed4` for every one of the 12³ = 1728 window cells, for each of 6 channels (value and seed, 3 axes). That is 10368 calls a page, 81 a lane.
+  - On a face that touches an h tile, each call ran 16 subfaces. Each subface tested `ufxSource`: two `ufxPhase`, each a full `ufxTile` (two `umPageWord` lookups and a block word) plus a texture load.
+  - So a face cost about 150 loads for its value and 130 for its seed, and the same face was restricted again in each of the 27 windows that contain it.
+  - That came to about 1.4 M loads a page, or 11 k serial loads a lane, which fits the measured 39 µs a page at drop.
+  - It scales with the h tiles of the held pages. That is the scene's refined volume (seep's 1229 h floor tiles), not the band.
+- **ufxH swept every live brick:** staging, 2 sweeps × 3 components, and publication for every brick of the h ownership, deep liquid included. Its seed staging ran `ufxSeed` (about 20 loads) for each of 1728 × 3 window faces. It scales with the h tile count.
+- **Rest** (+0.3 ms on rest16, by code reading): the old extension replayed held regions at rest, while B4 recomputed everything on every encode. The bricks update runs once a step on top of that.
+
+**The fix (`uniform-frame-extension.ts`):**
+- **ufxF:** one workgroup a held page flags it when any of its 512 tiles has the support bit (one load a tile).
+- **ufxR:** a thread a face of each active page (flagged, or next to a flagged page), with launch (pages, 12). It restricts once, into the coarse buffer's seed half. Both tiles are looked up once a face, so a subface costs a velocity load and two phase loads.
+- **ufx4:** stages each window face with one load from the seed half.
+  - It sweeps only flagged pages.
+  - An active page that isn't flagged copies its seeds as its state.
+  - Every other page publishes its own texels. There each face is a source or blocked, which no sweep changes.
+- **ufxRH:** a thread per tile row (4 cells) of a live brick in an active page. It packs the h seeds, 2 bits a face, after the results (128 words a slot). Each tile is looked up once a row.
+- **ufxH:** sweeps only a brick with a supported h tile; the others publish their own. Each brick looks up its 8 tiles once, not 512 cells.
+- **Regression:** the extension GPU regression gives the same counts as phase 2: 13214 sources, 22385 h and 268 4h faces extended, 0 of 3275 stale, 0 out of range.
+- **Memory:** the result buffer is 6.5 KiB a slot and the coarse buffer 24 KiB a block.
+
+**Letters +0.27 GiB** (B4 alone; +0.32 GiB combined), by code reading:
+- **The extension's buffers, about 80 MiB.** The result buffer is sized by the brick capacity, which is 64 × blocks = 12288 slots: fineTiles defaults to the pool's tiles, so the cap is the lattice's brick count. That is against a measured peak of 8020 h tiles.
+- **NB-FLIP's own stage unit taps, about 0.2 GiB:** a face atlas plus a 35³ halo a fine slot (`createTaps`). At HEAD it shared `hanging.unitVelocity` through the paired extension (`sharedStageUnit`), which B4 removed. The FLIP-delta proposal removes these taps and the snapshot kernels together.
+
+### B4 round 3: work proportional to the band, and the tail-recorded FLIP delta
+
+The B4-alone gate (seep 33.0 ms and 1.28 GiB against HEAD's 30.5 and 1.17; letters 65.3 and 2.26 against 52.6 and 1.98) put ufxH 2.687 + ufx4 1.442 = 4.59 ms at seep, against the old extension's 1.77, and the snapshot family at 0.655 against 0.197.
+
+**Attribution (code reading):**
+- **Both extensions published the whole live volume.** The departure extension (for the snapshot) and the tail extension each swept the band and republished every warm and frozen texel into velocityScratch, so the step paid two volume publications.
+- **Frozen (COLD) regions were recomputed.** The old extension replayed them. B4 swept and republished them on every encode, though no stage changes them: the freeze holds their faces in velocity and velocityScratch.
+- **Warm non-band volume has to be republished once a step.** Forces, projection and transfer overwrite velocityScratch there. An rgba32float face field has no read-write storage binding, so in-place publication of only the band's faces is not possible. The one remaining volume publication is the tail's.
+- **The snapshot** (its 4h cache, the stage unit taps and halo, the kernel) cost 0.46 ms at seep. Its own taps were about 0.2 GiB at letters.
+
+**Changes:**
+- **Frozen regions are held** (`attachFreeze`, freeze regions at binding 7):
+  - ufxF flags no tile of a frozen region;
+  - ufx4 publishes no cell of a frozen octant (and skips a page that is frozen throughout);
+  - ufxH neither sweeps nor publishes a brick of a frozen region.
+  - The frozen set is the freeze's own (umFrozenRegion), fixed at encodeHead for the frame.
+- **The old field** (`UniformFrameExtensionFields.old`) is the departure extension, now written into departure. Momentum, its last reader, has run, and departure rests until the next momentum.
+  - It publishes only swept pages and bricks: the supported band.
+  - It copies no low faces.
+  - It writes no sentinel. The next step's transfer reads departure faces that momentum did not write, and an earlier UFX_NONE version leaked 3e38 into velocity at 1124 faces of the translation scene within two steps.
+  - Both extensions keep an unreached face's own value, as the snapshot did.
+- **recordDelta** (NB-FLIP, after the tail extension):
+  - A workgroup an occupied tile stages its 3³ tiles' flags (live, supported outside a frozen region, h) and the 540 MAC stencil faces as tail minus old.
+  - A 4h face is the canonical texel or, against an h tile, the subface texel.
+  - Samples interpolate the known faces, renormalised. COLD tiles, slab seeds and spill take NB_DELTA_NONE on every axis.
+  - G2P takes `v + d` per known axis, else PIC.
+  - displayMotion captures display energy before before.xyz becomes the delta.
+  - The census's travel inputs (transferRefine) still read the move's accepted velocity, because G2P rewrites before.xyz before the transfer.
+- **Deleted:** the snapshot kernel, nbSampleCold, the snapshot batch, cache group and stage group, the stage unit taps (`createTaps`, about 0.2 GiB at letters), and NB_SNAPSHOT_PASS.
+- **Result buffer** (from the previous round): 0.5 KiB a slot (h seeds packed at 2 bits), so 6.3 MB at 12288 slots instead of 81.8 MB. The h results stay in threadgroup memory.
+
+**Expected (by code reading, to be gated):**
+- **Seep:** one volume publication instead of two, the band sweeps, and no frozen-region work. The snapshot's 0.46 ms becomes one recordDelta pass over the occupied tiles.
+- **Letters memory:** minus the stage taps (about 0.2 GiB) and minus about 75 MB of extension result buffer.
+
+**Checks:**
+- **Extension GPU regression:**
+  - 13214 sources, 22385 h and 268 4h faces extended, 0 out of range, 0 of 22623 distinguishable faces stale.
+  - The test now runs the extension twice, over a departure prior and then over a stored-field prior, and counts a face stale where the two outputs differ. The departure is no longer a poison, because it now holds an extension.
+- **NB-FLIP Galilean seeds:** passes (0.75 m/s kept).
+- **Types:** check:types is clean.
+- **test:unit:** 1783 pass. The one failure (`reservoir-particle-cost`, the merge-cap shader string) is the peer's uncommitted NB_CELL_MASS hunk, not lane E's.
+
+### B4 round 4: one workgroup a block, an axis at a time
+
+The round-3 gate (HEAD e357848c + B4: seep 32.9 against 30.8 ms, letters 61.6 against 54.5, drop16 17.9 against 15.63) put the extension at 15.33 ms at letters (ufxH 10.88, ufx4 2.62, recordDelta 0.92) against the old extension's 4.65, 4.72 at seep against 1.77, and 2.23 at drop against 1.11.
+
+**The mechanism, by counters** (gpu-frame-profile, letters frames 113 to 122, split dispatches, before: `fluid-scratch/lane-e/prof-split`):
+- **ufxH, 11.22 ms a frame (two calls):**
+  - Occupancy is 8.3%, the threadgroup-memory limit: four 12³ windows plus a stash, 31.6 KB per 128-lane workgroup, fit two workgroups a core, 256 of 3072 threads.
+  - ALU 21%, F32 0.99%, LLC 10%, read 3.6 GB/s, write 2.9 GB/s, TLB miss 20%.
+  - It was integer- and latency-bound: neither bandwidth nor float work. The counters do not report registers or spills.
+- **The chain:** each brick ran three components in series, each doing stage, two sweeps and a write, about 18 barriers. Every texel load was a page-table walk.
+- **Work at step 112:**
+  - 1576 live bricks, all swept (every h tile of letters is in the band);
+  - 2.75M core cells and 885k seam cells staged, three prolongs each.
+- **First fix, tile octants** (eight 256-lane workgroups a brick, all three axes in an 8³ window):
+  - ufxH fell to 8.26 ms a frame and occupancy rose to 18.6% (`prof-after`).
+  - It staged 2.3 times the cells and repeated the record and its dependent loads eight times a brick.
+  - Its ablation per call: the skeleton about 1.1 ms, staging about 1.5, sweeps about 1.0.
+
+**The design:**
+- **One workgroup a block for both passes,** a lane a cell, 512 lanes:
+  - an h brick for ufxH, a held 4h page for ufx4;
+  - one 12³ window an axis (`ufxBV`/`ufxBD`, 13.8 KB), staged an axis at a time;
+  - two Jacobi sweeps, the first over the 10³ inset, the second the block's own cells: still exactly two global sweeps.
+- **Loaded once, not per octant or axis:**
+  - ufxH stages the 4h state of the brick's 5³ 4h cells per axis once (`ufxP4`), so a seam's prolongation reads threadgroup memory, not the coarse buffer and the page table;
+  - core texels and seed words load once and stay in registers across the three axes.
+- **The brick header:** ufxRH writes each live slot's header (mode, origin, and the 27-neighbour record with packed h-store texels). ufxH loads it in one round, with no tile-flag or frozen-region walk and no record chase.
+- **The tail extension is seeded:**
+  - the old field's extension of the same advance wrote the flags, the h seeds and the headers;
+  - pressure changes no phase, topology or freeze;
+  - so the tail runs only the restriction, the sweeps and publication (`encode(..., seeded)`, from `encodeVelocityExtension`), voided by a table update in between.
+  - Advances with bodies or physics plugins seed afresh: the split's authority and the solids can change within the advance. Seeded, the submerged-sphere regression (`uniform-body-contact-refinement`) overflowed its particle pool at frame 66 (52224 records); it passes unseeded and on HEAD.
+- **ufx4 publication:** each lane writes its cell's anchors; the page's seam cells are compacted into a list and shared out over the workgroup.
+- **Scalar combine:** ufxCombine has no indexed arrays. The sweep helpers are generated (`sweep()`), with the six neighbours as fixed strides.
+- **Fixed launch grid:** every launch strides its live count over UNIFORM_LIVE_GROUP_GROUPS (256), not the capacity. 12288 empty 512-lane workgroups had cost 0.42 ms a call at letters and 0.11 at seep.
+
+**Timestamps, per call** (`fluid-scratch/lane-e/r4/probe-ufxh2.ts`, 10 dispatches a pass, 5 interleaved rounds, medians):
+
+| | ufxH | ufx4 | ufxR | ufxRH | ufxF |
+|---|---|---|---|---|---|
+| letters, step 112 (1628 bricks) | 1.135 | 0.265 | 0.208 | 0.198 | 0.006 |
+| seep, step 60 (331 bricks) | 0.250 | 0.124 | 0.091 | 0.055 | 0.006 |
+
+- **Letters ufxH ablation:** with no sweeps 0.70, no seam prolong 0.94, no finish prolong 1.07, no store 1.06, skeleton 0.07.
+- **Estimated frame extension** (the old call in full, plus the tail's ufxR + ufx4 + ufxH):
+  - letters 3.42 ms + recordDelta 0.93, against the old extension's 4.65 including the snapshot;
+  - seep 0.99 ms + recordDelta, against 1.77.
+- **Correctness:** bit-identical to the round-3 brick kernels (a copy of them in the scratch probe) on dam-break with an h box, steps 3 and 10, both modes: 0 texels differ.
+
+**After, by counters** (`fluid-scratch/lane-e/prof-r5`, letters frames 113 to 122):
+
+| kernel | ms a frame | occupancy | ALU | F32 | LLC | read GB/s | TLB miss |
+|---|---|---|---|---|---|---|---|
+| ufxH | 2.357 (11.22 before) | 16.1% | 37.3% | 3.4% | 8.2% | 7.1 | 56.6% |
+| ufx4 | 0.501 (3.04) | 18.6% | 24.2% | 0.6% | 15.4% | 16.4 | 30.6% |
+| ufxR | 0.508 (0.50) | 22.1% | 33.9% | 0.3% | 37.0% | 65.1 | 38.8% |
+| ufxRH | 0.205 (0.35) | 26.1% | 70.8% | | | 8.9 | 20.9% |
+| recordDelta | 0.918 (0.93) | 26.2% | 48.6% | 2.6% | 28.1% | 34.3 | 43.5% |
+
+- **Extension total:** 3.57 ms a frame, 4.49 with recordDelta, against 16.04 + 0.93 before and the old extension's 4.65.
+- **ufxH occupancy:** 16% is about one 512-lane workgroup a core. Threadgroup memory (about 17 KB) would allow three, so registers are now the likely limit; the counters do not report them.
+- **What is left:**
+  - ufxH's sweeps (0.43 ms of 1.135 a call) and seam staging (0.2);
+  - ufxR's restriction, a read-bound pass at 65 GB/s;
+  - recordDelta's 540 rewritten face loads a tile, each a page walk.
+
+**The frame-level questions:**
+- **Can the old-field extension reuse the tail's work?** Partly, and that part is done: the tail reuses the old call's flags, seeds and headers.
+  - Given the distances, the extension is linear in the values, so ext(C) − ext(O) = ext(C − O). One two-channel tail could replace the old call and write the delta directly.
+  - What blocks it: the raw old field does not survive to the tail. Departure holds the pre-force velocity and must still hold it for the next step's transfer, and one dispatch cannot read and write it.
+  - So it needs one more face field (the old field kept to the tail), or departure redesigned. That would save the old call's ufxR + ufx4 + ufxH (about 1.6 ms at letters) and fold recordDelta's face subtraction into publication. It is not done here: it is a proposal for the next round.
+- **recordDelta (0.92 ms at letters):** it is not a subtraction pass. It runs per occupied tile: 540 faces, each two rewritten loads (page walks), then a per-particle interpolation. Fusing it into ufxH does not fit, because ufxH is per brick and recordDelta is per tile and per particle. The two-channel tail above is the route. It is unchanged: it lives in the peer-shared `uniform-narrow-band-flip.ts`.
+
+**Checks:**
+- **GPU regressions:** frame extension, NB-FLIP Galilean seeds, brick stage and the submerged-sphere body regression pass on HEAD + this patch.
+- **GPU test files compared with a clean HEAD archive:** these fail on HEAD too and are not this patch's:
+  - churning spatula, cloth clamp, pressure-seam-cycle, super-tail-bulk16;
+  - body contact's "static and body contact", body query reuse's "face candidate reuse".
+  - The DER cloth, grid overlay and merge-cap failures are unrelated.
+- **Types:** check:types is clean.
+- **test:unit:** 1783 pass. The one failure (`reservoir-particle-cost`, the merge cap) is the peer's NB_CELL_MASS hunk.
+- **Deleted:** `uniform-brick-extension.ts` and its brick-stage regression, superseded by the per-block windows.
+
+**The gate** (HEAD e357848c + B4 round 4, coordinator's run):
+
+| job | B4 r4 | HEAD |
+|---|---|---|
+| seep 300 | 30.2 ms, p95 32.5, drift 0.0004, 1.16 GiB | 30.8, drift 0.0002, 1.17 |
+| letters 120 | 54.8 ms, p95 81.2, drift −0.0083, 1.97 GiB | 54.5, p95 81.3, drift −0.0091, 1.98 |
+| drop16 | 14.39 ms | 15.63 |
+| rest16 | 3.57 ms | 3.53 |
+
+- **Extension kernels, B4 against HEAD's old extension plus its snapshot or delta record:** drop 0.61 against 1.15 ms (means), seep 1.38 against 1.77, letters 4.52 against 4.78 (medians).
+- **check:** all pass except the known work-control test.
+
+**Next steps:**
+- **The two-channel tail** (see the frame-level questions above). Keep the transferred field to the tail in one more face field, or redesign departure, so that one tail extension carries both the current and old channels and writes FLIP's delta as it publishes. That removes the old call (its ufxR + ufx4 + ufxH, about 1.6 ms at letters) and recordDelta's face subtraction.
+- **recordDelta, 0.92 ms a frame at letters:** 540 faces a tile, each two rewritten loads (page walks), then a per-particle interpolation. It is the largest extension-side cost left, and the two-channel tail is the route to removing it.
+- **Follow-up, phi resolve at letters: 2.425 against HEAD's 1.966 ms, in rounds 3 and 4 alike.** B4 does not write phi resolve's direct inputs: the phi field, the ownership's seam lists, the narrow band's gate word. Its held launch also reads the region heat tiers: it skips a seam tile whose 27-tile neighbourhood is COLD.
+  - The deleted extension honoured heat. It held a COLD region at 16h and restored its held values, and it published the old FLIP payload only within one region of a non-COLD one, so G2P took no FLIP delta at COLD samples.
+  - The B4 extension sweeps and publishes every live band brick, and recordDelta records a delta at every one. If those deltas wake particles or raise heat in regions that were COLD, phi resolve holds fewer tiles.
+  - This is unconfirmed. To check it, compare at letters step 112, HEAD against B4: the heat diagnostics' COLD/WARM/HOT counts, the phi resolve held-word count, and the per-call phi resolve time.
+  - If confirmed, the fix is to make the B4 extension honour COLD the way the deleted one did: skip a COLD brick's sweep and keep its published values (the freeze is already honoured), and limit the old payload to within one region of a non-COLD one.
+
+## COORDINATION
+
+- **Frame (`uniform-mixed-frame.ts`), Lane E's hunks:**
+  - the B4 rewire: encodeVelocityExtension, encodeExtensionOf, the old-field departure extension (`flipOldExtensionGroup`, into departure), `extension.attachFreeze`, `narrowBandFlip.recordDelta` after the tail extension, and the paired-extension removal;
+  - `bricksCurrent`, `encodeBricks`, the `"bricks"` reach case, and the update after `remap.applyGpu` in encodeRelayoutHead.
+- **Lane T** owns the store's widening (particle bricks, level-2 pages), on hold with D's fused launch over the compile constraint. The particle move's jobs come from the particle slab table, so nothing reads leaving slots and the release stays beside the update in `encodeBricks`. If the widening resumes, Lane T's edits go beside that call as exact-string edits, announced first.

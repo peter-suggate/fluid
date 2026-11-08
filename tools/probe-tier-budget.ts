@@ -843,7 +843,6 @@ var<workgroup> sums:array<atomic<u32>,16>;
     hook(m.band, "encodeProject", "band/velocity", "velocity", "velocity");
     hook(m.band, "encodeProject", "band/scratch", "velocity", "velocityScratch");
     hook(m.extension, "encode", "extension/scratch", "velocity", "velocityScratch");
-    hook(m.extension, "finishPair", "finishPair/scratch", "velocity", "velocityScratch");
   }
   // --ledger=A-B: over steps A..B, the GPU probe's liquid (mL: right, left,
   // total) after each phi stage, its change summed by the stage that made it
@@ -1067,7 +1066,7 @@ var<workgroup> sums:array<atomic<u32>,16>;
     // side) over cells whose six neighbours the start phi also calls liquid:
     // by zone the largest, the count over 1/s, and the worst cells.
     for (const { name, field } of fields) {
-      if (!name.startsWith("band/") && !name.startsWith("finishPair/") && !name.startsWith("project/")) continue;
+      if (!name.startsWith("band/") && !name.startsWith("extension/") && !name.startsWith("project/")) continue;
       // A face beside a wall cell (the dividing wall less its square hole) carries nothing: the solver leaves closed faces' values unweighted.
       const side = wall.side ?? 1, solidCell = (x: number, y: number, z: number) => x >= wall.low && x < wall.high && !(y >= wall.holeY && y < wall.holeY + side && z >= wall.holeZ && z < wall.holeZ + side);
       const at = (x: number, y: number, z: number, a: number) => { const n = [x, y, z]; n[a]!--; return solidCell(x, y, z) || solidCell(n[0]!, n[1]!, n[2]!) ? 0 : field[4 * (x + g.nx * (y + g.ny * z)) + a]!; };

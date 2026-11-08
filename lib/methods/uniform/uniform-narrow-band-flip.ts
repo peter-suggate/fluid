@@ -6,7 +6,6 @@ import { narrowBandSparseWGSL } from "./uniform-narrow-band-sparse.wgsl";
 import { narrowBandAirWGSL, NARROW_BAND_AIR_CHANGED_WORD, NARROW_BAND_AIR_GATE_PLANE, NARROW_BAND_AIR_WORDS_PER_TILE } from "./uniform-narrow-band-air.wgsl";
 import { narrowBandParticleStride, narrowBandParticleWGSL, narrowBandApicMomentWGSL, type NarrowBandTransfer } from "./uniform-narrow-band-apic.wgsl";
 import { PARTICLE_RESIDENCY_WORDS } from "./uniform-local-residency";
-import { uniformMixedExtensionSnapshotWGSL } from "./uniform-mixed-extension-slots.wgsl";
 import { narrowBandActivityTriggerWGSL, narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
 import {narrowBandReuseLayout,narrowBandReuseWGSL,type NarrowBandReuseLayout} from "./uniform-narrow-band-reuse.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
@@ -91,43 +90,49 @@ interface NarrowBandBatches{
  readonly activity:NarrowBandBatch;readonly searchReconstruct:NarrowBandBatch;
  readonly arenaSearch:NarrowBandBatch;readonly arenaSearchCoarse:NarrowBandBatch;readonly arenaMetric:NarrowBandBatch;readonly arenaMetricDerived:NarrowBandBatch;readonly arenaStore:NarrowBandBatch;
  readonly diagnose:NarrowBandBatch;readonly reconstruct:NarrowBandBatch;readonly reconstructCoarse:NarrowBandBatch;readonly transfer:NarrowBandBatch;
- readonly snapshot:NarrowBandBatch;readonly retire:NarrowBandBatch;readonly retireListed:NarrowBandBatch;
+ readonly retire:NarrowBandBatch;readonly retireListed:NarrowBandBatch;
  readonly seed:NarrowBandBatch;readonly clearAir:NarrowBandBatch;
 }
-const NB_SNAPSHOT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP snapshot"};
-/** The swept FLIP delta (flipDelta "swept"), in the slot module beside the
- * old payload's slots (17): the paired extension's final current states at
- * 19. A workgroup an occupied tile, like the deposit: the 3³ tiles' words,
- * then the 540 faces of the tile's samples' MAC stencils (per axis 5 anchors
- * along, 6 across: offsets -1..3 and -1..4), each the current minus the old
- * payload where the sweeps reached it, else none. Each sample interpolates
+/** The FLIP delta (recordDelta), in its own module beside the stage
+ * source: the tail's extension (velocity, binding 8: velocityScratch) minus
+ * the departure's (binding 17: the departure field, UniformFrameExtension's
+ * old field). A workgroup an occupied tile, like the deposit: the 3³ tiles'
+ * flags, then the 540 faces of the tile's samples' MAC stencils (per axis 5
+ * anchors along, 6 across: offsets -1..3 and -1..4), each the current minus
+ * the old value where the old field holds it, else none. Each sample interpolates
  * the faces that have a value, renormalised; an axis with none (and every
  * sample the record does not reach: a COLD tile's, a seed's, a spilled one's)
- * takes NB_DELTA_NONE, which G2P reads as PIC on that axis. */
+ * takes NB_DELTA_NONE, which G2P reads as PIC on that axis.
+ *
+ * A face is known where the old field holds it: on a tile with the support
+ * bit outside a frozen region (umFrozenRegion: this frame's held set, which
+ * neither extension writes). There a 4h tile's face lies on its
+ * +planes: the canonical texel, or against an h tile the subface's own
+ * (the texels both extensions publish). Low faces are the negative
+ * buffers': none. */
 const NB_DELTA_RECORD_WGSL=/* wgsl */`
-@group(1) @binding(19) var<storage,read> nbCurrentSlots:array<vec2f>;
+@group(1) @binding(17) var departure:texture_3d<f32>;
 const NB_DELTA_NONE:f32=3e38;const ND_LANES:u32=128u;
 var<workgroup> ndJobs:u32;
 var<workgroup> ndTile:u32;
 var<workgroup> ndCold:u32;
-var<workgroup> ndWords:array<u32,27>;
+// A window tile: 1 live, 2 known (the support bit, not held), 4 an h tile.
 var<workgroup> ndFlags:array<u32,27>;
 var<workgroup> ndDelta:array<f32,540>;
 // A face of the window: the anchor's offset from the tile origin.
 fn ndOffset(s:u32)->vec3i{let axis=s/180u;let k=s%180u;var o=vec3i(0);o[axis]=i32(k%5u)-1;o[(axis+1u)%3u]=i32((k/5u)%6u)-1;o[(axis+2u)%3u]=i32(k/30u)-1;return o;}
-// The current minus the old payload at a positive face, as ueSnapshotFace
-// resolves its slot; none where the anchor's tile is unsupported, at a low
-// face, or where the sweeps left the current state unreached.
+fn ndWindow(origin:vec3i,cell:vec3i)->u32{let r=vec3u((cell>>vec3u(2u))-(origin>>vec3u(2u))+1);return r.x+3u*r.y+9u*r.z;}
 fn ndFaceDelta(origin:vec3i,s:u32)->f32{
- let axis=s/180u;let anchor=origin+ndOffset(s);
- let r=vec3u((anchor>>vec3u(2u))-(origin>>vec3u(2u))+1);let n=r.x+3u*r.y+9u*r.z;
- if((ndFlags[n]&2u)==0u||umFaceLow(anchor,axis)){return NB_DELTA_NONE;}
- let word=ndWords[n];var slot=UE_NONE;
- if((word&0x80000000u)!=0u){slot=ueUnitSlotIn(word,0u,vec3u(anchor&vec3i(3)),axis);}
- else{let face=umPositiveFaceAtAnchor(umOwnerAt(anchor),axis,anchor);if(face.width!=0u){slot=umSlot(anchor,axis,face.width);}}
- if(slot==UE_NONE){return NB_DELTA_NONE;}
- let current=nbCurrentSlots[slot];
- return select(NB_DELTA_NONE,current.x-ueSnapshotSlots[slot],current.y<5e19);
+ let axis=s/180u;let anchor=origin+ndOffset(s);let flags=ndFlags[ndWindow(origin,anchor)];
+ if((flags&2u)==0u||umFaceLow(anchor,axis)){return NB_DELTA_NONE;}
+ var q=anchor;
+ if((flags&4u)==0u){
+  if((anchor[axis]&3)!=3){return NB_DELTA_NONE;}
+  var e=vec3i(0);e[axis]=1;
+  // Offsets reach 4 along the axis: the cell across lies in the window.
+  if((ndFlags[ndWindow(origin,anchor+e)]&5u)!=5u){q=4*(anchor>>vec3u(2u))+3*e;}
+ }
+ return textureLoad(velocity,q,0)[axis]-textureLoad(departure,q,0)[axis];
 }
 // A sample's delta, p relative to the tile origin.
 fn ndSample(p:vec3f)->vec3f{
@@ -154,13 +159,14 @@ fn ndSample(p:vec3f)->vec3f{
   let tile=workgroupUniformLoad(&ndTile);let cold=workgroupUniformLoad(&ndCold)!=0u;
   if(!umTileLive(tile)){continue;}
   let bin=nbBinTile(tile);let start=links[bin];let end=links[bin+63u]+atomicLoad(&bins[bin+63u]);
-  // A COLD tile's samples take no delta; one its region thaws by G2P takes PIC.
-  if(cold){for(var i=start+lane;i<end;i+=ND_LANES){particles[i].before.x=NB_DELTA_NONE;}continue;}
+  // A COLD tile's samples take no delta on any axis; one its region thaws by G2P takes PIC.
+  if(cold){for(var i=start+lane;i<end;i+=ND_LANES){particles[i].before=vec4f(vec3f(NB_DELTA_NONE),particles[i].before.w);}continue;}
   let origin=vec3i(4u*umTileCoord(tile));
   if(lane<27u){
    let key=umTileKey((origin>>vec3u(2u))+vec3i(i32(lane%3u),i32((lane/3u)%3u),i32(lane/9u))-1);
-   var word=0u;var flags=0u;if(umKeyStored(key)){word=umTopology[key];flags=1u|select(0u,2u,(umTileSupport(key)&2u)!=0u);}
-   ndWords[lane]=word;ndFlags[lane]=flags;
+   var flags=0u;
+   if(umKeyStored(key)&&umTileLive(key)){flags=1u|select(0u,2u,(umTileSupport(key)&2u)!=0u&&!umFrozenRegion(umPageOfTile(key)))|select(0u,4u,umTileWidth(key)==1u);}
+   ndFlags[lane]=flags;
   }
   workgroupBarrier();
   for(var s=lane;s<540u;s+=ND_LANES){ndDelta[s]=ndFaceDelta(origin,s);}
@@ -180,10 +186,11 @@ fn ndSample(p:vec3f)->vec3f{
    let id=atomicLoad(&state[NB_SLAB_OUT+job]);let filed=atomicLoad(&state[nbSlab(id,11u)]);
    first=atomicLoad(&state[nbSlab(id,5u)])+filed;n=nbSlabCount(id)-min(filed,nbSlabCount(id));
   }
-  for(var k=lane;k<n;k+=ND_LANES){particles[first+k].before.x=NB_DELTA_NONE;}
+  for(var k=lane;k<n;k+=ND_LANES){particles[first+k].before=vec4f(vec3f(NB_DELTA_NONE),particles[first+k].before.w);}
  }
 }
 `;
+const NB_DELTA_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP delta"};
 const NB_INIT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP page words"};
 
 /** Ferstl et al. 2016: persistent samples in a band under the surface carry
@@ -200,10 +207,6 @@ const NB_INIT_PASS:GPUComputePassDescriptor={label:"Narrow-band FLIP page words"
  * gravity directly, and couples again with that momentum once supported.
  * nbParticleAge measures continuous low density in seconds, independently of
  * activity heat and transfer state; sorting and compaction carry it along. */
-export interface UniformNarrowBandSlotSnapshot {
- readonly cache:UniformDetailGroup;readonly taps:UniformDetailGroup;
- readonly particles:readonly [UniformDetailGroup,UniformDetailGroup];
-}
 export interface NarrowBandSurfaceRevisions{readonly buffer:GPUBuffer;readonly liveOffset:number;readonly scratchOffset:number;readonly regions:number}
 /** The particles' h capacity (scene fluid.tiers): every particle buffer is
  * sized by fineTiles h tiles of 64 cells at perFineCell samples a cell, not
@@ -359,15 +362,17 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private get apic():boolean{return this.transferMode==="apic";}
  readonly particles:readonly [GPUBuffer,GPUBuffer];
  readonly state:GPUBuffer;
- private readonly displayMotion?:GPUFluidParticleMotion;
  /** The current frame's live sample count (state word 0 after move()'s
   * commit) as a uniform's first word: the particle consumers after the move
-  * (transfer, snapshot, extension retain and old-epoch snapshot)
+  * (transfer, extension retain and recordDelta)
   * exit at once on zero. A GPU copy each move, never a host count. The same
   * word is params word 12 for this module's own kernels. */
  readonly liveGate:GPUBuffer;
+ /** The display's motion energy (particleSource.motionEnergy), captured
+  * at recordDelta while before.xyz still holds the accepted grid velocity. */
+ private readonly displayMotion:GPUFluidParticleMotion;
  private readonly baseAllocatedBytes:number;
- get allocatedBytes():number{return this.baseAllocatedBytes+(this.displayMotion?.energy.size??0);}
+ get allocatedBytes():number{return this.baseAllocatedBytes+this.displayMotion.energy.size;}
  /** A word per tile key from word `offset` of the buffer: non-zero where a sample's support reached at its last move (slabSort). */
  get particleTiles():{buffer:GPUBuffer;offset:number;allocation:GPUBuffer}{return {buffer:this.bins,offset:this.countWords+this.tiles,allocation:this.particleAllocation};}
  /** Particle occupancy and signed travel for the census: transferRefine writes them, refine copies them here. */
@@ -407,7 +412,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get particleSource():GPUFluidParticleSource{
   const h=this.ownership.capacity.lattice.cellSize_m;
   return {buffer:this.activeParticles,strideFloats:this.particleStride,capacity:this.capacity,positionScale_m:[h[0]!,h[1]!,h[2]!],
-   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},motionEnergy:this.displayMotion?.energy,
+   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},motionEnergy:this.displayMotion.energy,
    grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,ballisticSignBit:!this.apic,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
@@ -611,13 +616,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  attachUpdateErrors(buffer:GPUBuffer):void{this.updateErrors=buffer;}
  private readonly coarseVelocity:GPUTexture;
  private cacheGroups:Record<string,UniformDetailGroup>={};
- private slotSnapshotResources?:GPUBindGroupLayout;
- private slotSnapshotPipeline?:GPUComputePipeline;
- private deltaResources?:GPUBindGroupLayout;
+ private deltaResources:GPUBindGroupLayout;
  private deltaPipeline?:GPUComputePipeline;
- private snapshotInput?:{raw:GPUTexture;negative:GPUBuffer};
- get snapshotUnitVelocity():GPUTexture{if(!this.stageTaps)throw new Error("FLIP is not bound");return this.stageTaps.unit;}
- private stageTaps?:{builder:UniformMixedHangingTaps;group:UniformDetailGroup;unit:GPUTexture};
+ private deltaGroup?:UniformDetailGroup;
  private initPipeline?:GPUComputePipeline;
  private initGroup?:GPUBindGroup;
  /** pool: the page pool whose commits claim this lattice's blocks (its state buffer and layout); without one no block is ever claimed. */
@@ -628,11 +629,6 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    * no reconstruct crossing search; the spread reach is copied into the
    * candidate list's words for it (measureBand). */
   readonly previousCrossings=false,
-  /** FLIP's delta from the paired extension's sweeps (flipDelta "swept"):
-   * the tail records each sample's current minus old payload into
-   * before.xyz (recordDelta) and G2P adds it to the sample's velocity; no
-   * old-field snapshot is published or sampled. */
-  readonly sweptDelta=false,
   /** particleBandDepth: cells below the surface the particle band reaches.
    * Seeding fills it and the move retires samples past it. */
   readonly bandDepth=4,
@@ -711,7 +707,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.particles=[buffer("particles A",bankBytes),buffer("particles B",bankBytes)];
   // The receipt, then the slab records (uniform-particle-slab.wgsl).
   this.state=buffer("receipt, particle frame and brick slabs",4*particleSlabWords(address.blocks));
-  if(sweptDelta)this.displayMotion=new GPUFluidParticleMotion(device,this.activeParticles,this.state,this.particleStride,this.capacity);
+  this.displayMotion=new GPUFluidParticleMotion(device,this.activeParticles,this.state,this.particleStride,this.capacity);
   this.spill=particleSlabSpill(this.capacity);
   // After the air planes: the occupied tile list (occupiedWord).
   this.occupiedWord=this.countWords+cells+vertices+address.tileKeys*(9+NARROW_BAND_ACTIVITY_WORDS_PER_TILE+NARROW_BAND_AIR_WORDS_PER_TILE)+4;
@@ -754,20 +750,20 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   const size=uniformCoarseCacheExtent(address);
   this.coarseVelocity=device.createTexture({label:"Narrow-band FLIP stage sampling cache",size,dimension:"3d",format:"rgba32float",usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.STORAGE_BINDING});
   this.baseAllocatedBytes=[...this.particles,this.state,this.bins,this.next,this.params,this.liveGate,this.particleAllocation,this.reuseControls].reduce((n,b)=>n+b.size,0)+size.reduce((n,v)=>n*v,16);
-  if(device.limits.maxStorageBuffersPerShaderStage>=8&&sweptDelta)this.deltaResources=uniformDetailBindLayout(device,{entries:[
-   ...[1,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
-   ...[17,19].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
-   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-  ]});
-  if(device.limits.maxStorageBuffersPerShaderStage>=9&&!sweptDelta)this.slotSnapshotResources=uniformDetailBindLayout(device,{entries:[
-   ...[1,2,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
-   ...[5,17].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}})),
-   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-   ...[8,10,11].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
-  ]});
   this.resources=this.resourceLayout(false);
+  this.deltaResources=this.deltaLayout(false);
  }
  /** The stage resources; with the freeze, its region snapshot at binding 18. */
+ /** recordDelta's: the samples (1) and their bins (2, 3, 4), the params (6),
+  * the tail's extension (8), the departure's (17); with the freeze, its regions (18). */
+ private deltaLayout(freeze:boolean):GPUBindGroupLayout{
+  return uniformDetailBindLayout(this.device,{entries:[
+   ...(freeze?[{binding:18,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
+   ...[1,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
+   {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
+   ...[8,17].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
+  ]});
+ }
  private resourceLayout(freeze:boolean):GPUBindGroupLayout{
   return uniformDetailBindLayout(this.device,{entries:[
    ...(freeze?[{binding:18,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
@@ -795,7 +791,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * transfer write) and holds its phi (reconstruction, air, redistance), so
   * the whole sample and surface machinery leaves its retained state exactly
   * as its launches would: move, reconstruct, clearAir, retire, redistance,
-  * transfer, snapshot and refine are not encoded. activity is: its
+  * transfer, recordDelta and refine are not encoded. activity is: its
   * plane is the region heat's particle evidence, which ends an idle run. */
  private quiet=false;
  private particleGroups=NARROW_BAND_PARTICLE_GRID;
@@ -814,24 +810,21 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  attachFreeze(freeze:UniformColdFreeze|undefined):void{
   if(Object.keys(this.groups).length||this.freeze)throw new Error("Narrow-band FLIP: the freeze attaches once, before bind");
   this.freeze=UNIFORM_COLD_FREEZE?freeze:undefined;
-  if(this.freeze)this.resources=this.resourceLayout(true);
+  if(this.freeze){this.resources=this.resourceLayout(true);this.deltaResources=this.deltaLayout(true);}
  }
- bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps;sharedStageUnit?:GPUTexture}):void{
-  const f=fields;this.snapshotInput={raw:f.departure,negative:f.negativeDeparture};
-  // Snapshot samples velocityScratch after it is rewritten.
-  // Its unit taps are filled first, against this stage's own 4h cache and
-  // into the stage tap texture, so a seam tap is one load there as it is
-  // in advection. Viscosity requires separate taps on the unpaired path.
+ bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps}):void{
+  const f=fields;
   // The transfer writes the stored velocity: momentum was its last reader,
   // and the pressure split rewrites every face of it after the forces.
-  // The paired-extension path snapshots after forces, so its old frame taps
-  // are dead and can also hold the snapshot taps. The unpaired path
-  // snapshots before forces and needs separate storage.
-  // One texture for the solver's life: a detail field is created before the
-  // first layout, and the frame binds its stages again when capacity grows.
-  const unit=this.stageTaps?.unit??f.sharedStageUnit??f.hanging.createTaps("Narrow-band FLIP stage unit taps");
-  this.stageTaps={builder:f.hanging,unit,group:f.hanging.bind({extended:f.velocityScratch,negative:f.negativeScratch,coarse:this.coarseVelocity},unit)};
-  for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["transfer",f.departure,f.negativeDeparture,f.velocity],["snapshot",f.velocityScratch,f.negativeScratch,f.departure],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure]] as const){
+  // recordDelta reads the tail's extension (velocityScratch) against the
+  // departure's (departure: UniformFrameExtension's old field), both
+  // resting from the tail extension to the next momentum.
+  this.deltaGroup=uniformDetailGroup(this.device,{layout:this.deltaResources,entries:[
+   {binding:1,resource:{buffer:this.activeParticles,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
+   {binding:6,resource:{buffer:this.params}},{binding:8,resource:f.velocityScratch},{binding:17,resource:f.departure},
+   ...(this.freeze?[{binding:18,resource:this.freeze.regions.createView()}]:[]),
+  ]});
+  for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["transfer",f.departure,f.negativeDeparture,f.velocity],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure]] as const){
    this.cacheGroups[name]=this.cache.bind({extended:velocity,negative,coarseExtended:this.coarseVelocity});
    this.groups[name]=[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.resources,entries:[
     // Binding 0 spans the bank when it holds the shared deposit (depositScratch aliases it; no shader reads source's length).
@@ -840,53 +833,15 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
     {binding:5,resource:{buffer:negative}},{binding:6,resource:{buffer:this.params}},
     {binding:7,resource:name==="reconstruct"||name==="redistanceStore"?f.phiScratch:f.phi},{binding:8,resource:velocity},{binding:9,resource:output},
     {binding:10,resource:name==="advectParticles"?f.coarseExtended:this.coarseVelocity},
-    {binding:11,resource:name==="snapshot"?unit:f.unitExtended},{binding:12,resource:f.hanging.haloOf(name==="snapshot"?unit:f.unitExtended)},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
+    {binding:11,resource:f.unitExtended},{binding:12,resource:f.hanging.haloOf(f.unitExtended)},{binding:14,resource:name==="reconstruct"||name==="redistanceStore"?f.phi:f.phiScratch},
     {binding:15,resource:f.phase},
     {binding:16,resource:{buffer:this.sourceParams,size:UNIFORM_PARAMS_BYTES}},
     ...(this.freeze?[{binding:18,resource:this.freeze.regions.createView()}]:[]),
    ]})) as [UniformDetailGroup,UniformDetailGroup];
   }
  }
- get supportsSweptDelta():boolean{return this.deltaResources!==undefined;}
- /** Bind one epoch of the paired extension's final slots: the current
-  * payload's states (value, distance) and the old scalar payload. */
- bindDeltaSlots(current:GPUBufferBinding,old:GPUBufferBinding):UniformDetailGroup{
-  if(!this.deltaResources)throw new Error("Swept FLIP delta is not available");
-  return uniformDetailGroup(this.device,{layout:this.deltaResources,entries:[
-   {binding:1,resource:{buffer:this.activeParticles,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
-   {binding:6,resource:{buffer:this.params}},{binding:17,resource:old},{binding:19,resource:current},
-  ]});
- }
- /** The swept delta into before.xyz: a workgroup an occupied tile stages its
-  * samples' face window once (current minus old payload where the sweeps
-  * reached), then interpolates it at each sample. */
- recordDelta(encoder:GPUCommandEncoder,group:UniformDetailGroup):void{
-  if(this.idleNow)return;
-  if(!this.deltaPipeline)throw new Error("Swept FLIP delta is not initialized");
-  // The move/seeds still carry their accepted grid velocity here. Preserve
-  // its display energy before before.xyz becomes a delta (or sentinel).
-  this.displayMotion?.capture(encoder);
-  // recordDelta and the next move's G2P read the same tiers (nbSampleCold).
-  this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_SNAPSHOT_PASS);
-  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);pass.setPipeline(uniformDetailPick(this.deltaPipeline));
-  pass.dispatchWorkgroups(Math.min(4096,this.tiles));pass.end();
- }
- /** Bind the completed old scalar epoch; both particle parities share its values. */
- bindSnapshotSlots(slots:GPUBufferBinding):UniformNarrowBandSlotSnapshot{
-  if(!this.slotSnapshotResources||!this.snapshotInput||!this.stageTaps)throw new Error("Slot snapshot is not available");
-  const f=this.snapshotInput,unit=this.stageTaps.unit;
-  return {
-   cache:this.cache.bind({extended:f.raw,negative:f.negative,coarseExtended:this.coarseVelocity,slots,gate:this.liveGate}),
-   taps:this.stageTaps.builder.bind({extended:f.raw,negative:f.negative,coarse:this.coarseVelocity,slots,gate:this.liveGate},unit),
-   particles:[0,1].map(parity=>uniformDetailGroup(this.device,{layout:this.slotSnapshotResources!,entries:[
-    {binding:1,resource:{buffer:this.particles[1-parity]!,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:4,resource:{buffer:this.state}},
-    {binding:5,resource:{buffer:f.negative}},{binding:6,resource:{buffer:this.params}},
-    {binding:8,resource:f.raw},{binding:10,resource:this.coarseVelocity},{binding:11,resource:unit},{binding:17,resource:slots},
-   ]})) as [UniformDetailGroup,UniformDetailGroup],
-  };
- }
  async initialize():Promise<void>{
-  await this.displayMotion?.initialize();
+  await this.displayMotion.initialize();
   const subgroups=this.device.features.has("subgroups")&&(this.device.adapterInfo.subgroupMinSize??0)>=32;
   await this.cache.initialize();
   if(this.pool){
@@ -900,7 +855,7 @@ ${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+k
    this.initGroup=this.device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:{buffer:this.bins}}]});
    this.initPipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[layout]}),compute:{module,entryPoint:"nbInitBlocks"}});
   }
-  const sourceCode=(unitTaps:boolean,slots=false,delta=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
+  const sourceCode=(unitTaps:boolean,delta=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 const nbSparseBins:bool=true;
 const NB_PREVIOUS_CROSSINGS:bool=${this.previousCrossings};
 ${narrowBandParticleWGSL(this.apic,this.crowdedCells==="merge")}
@@ -923,7 +878,7 @@ fn nbParticlesLive()->bool{return params.live.x!=0u;}
 @group(1) @binding(9) var output:texture_storage_3d<rgba32float,write>;
 @group(1) @binding(10) var coarseVelocity:texture_3d<f32>;
 @group(1) @binding(11) var unitVelocity:texture_3d<f32>;
-${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
+${unitTaps?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 const NB_ARENA:u32=${this.arenaWord}u;
 const NB_ARENA_WINDOWS:u32=${this.arenaWindows}u;
 // The particle cell bins: a cell's count at bins[nbBinCell(cell)] and its
@@ -940,7 +895,7 @@ fn nbBinCell(cell:u32)->u32{return cell;}
 fn nbBinCount(cell:u32)->u32{return atomicLoad(&bins[cell]);}`}
 @group(1) @binding(14) var outputPhi:texture_storage_3d<r32float,read_write>;
 @group(1) @binding(15) var phase:texture_3d<f32>;
-${slots?UniformColdFreeze.wgsl(undefined,1,18):UniformColdFreeze.wgsl(this.freeze,1,18)}
+${UniformColdFreeze.wgsl(this.freeze,1,18)}
 ${this.updateErrors?`// Packed certificate copy: reuse the bins binding (the full FLIP layout is at its buffer limit).
 const NB_UPDATE_ERRORS:u32=${this.activityWord+7*this.tiles}u;
 // The tile's deformation: its velocity change across one tile, m/s.
@@ -990,13 +945,12 @@ fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,ve
 fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{return udLoad8_phi(vec3i(p),s);}
 fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
 ${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
-${slots?uniformMixedExtensionSnapshotWGSL(1,17):""}
 ${delta?NB_DELTA_RECORD_WGSL:""}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}
- return ${slots?"ueSnapshotFace(anchor,axis)":"textureLoad(velocity,anchor,0)[axis]"};
+ return textureLoad(velocity,anchor,0)[axis];
 }
-${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,slots?"ueSnapshotUnit":undefined,unitTaps&&!slots?"unitHalo":undefined)}
+${uniformMixedVelocitySamplingSource(false,"coarseVelocity","velocity",undefined,unitTaps?"unitVelocity":undefined,undefined,unitTaps?"unitHalo":undefined)}
 ${uniformMixedSolidLibraryWGSL(this.solid,2)}
 ${uniformMixedVertexBuriedWGSL}
 ${narrowBandTerrainContactSource("nbMoveBodyAt(q)")}
@@ -1008,7 +962,7 @@ fn nbMoveSample(p:vec3f)->vec3f{return sampleVelocity(p);}
 ${this.apic?/* wgsl */`
 // Extend the velocity at domain walls without changing the quadratic moments.
 // Interior solid values come from the same extrapolated field as FLIP.
-${unitTaps&&!slots?`// A particle of a unit tile reads its taps at plain offsets from its page's
+${unitTaps?`// A particle of a unit tile reads its taps at plain offsets from its page's
 // halo block (every tap is then in a unit or a slotted tile, whose halo
 // texel is umVelocityTap1's value: channel w); a tap the halo does not hold
 // repeats the sample through umVelocityTap1.
@@ -1017,13 +971,13 @@ var<private> nbApicValid:bool=true;`:""}
 fn nbApicTap(index:vec3i,axis:u32)->f32{
  var low=vec3i(umHold.lo);low[axis]-=1;
  let held=clamp(index,low,vec3i(umHold.hi)-1);
- ${unitTaps&&!slots?"if(nbApicHome.w>=0){let t=textureLoad(unitHalo,held+nbApicHome.xyz,0);nbApicValid=nbApicValid&&t.w>0.0;return t[axis];}":""}
+ ${unitTaps?"if(nbApicHome.w>=0){let t=textureLoad(unitHalo,held+nbApicHome.xyz,0);nbApicValid=nbApicValid&&t.w>0.0;return t[axis];}":""}
  return umVelocityTap1(held,axis);
 }
 ${narrowBandApicMomentWGSL}
 fn nbApicSample(p:Particle)->Particle{
  umHold=umPointBounds(p.position.xyz,8.0);
- ${unitTaps&&!slots?`let s=umSampleTileHeld(p.position.xyz);nbApicHome=select(vec4i(-1),umUnitHaloHome(s),umTileWidth(s.key)==1u);
+ ${unitTaps?`let s=umSampleTileHeld(p.position.xyz);nbApicHome=select(vec4i(-1),umUnitHaloHome(s),umTileWidth(s.key)==1u);
  // One row call site: a row is umVelocityTap1's single caller.
  var rows:array<vec4f,3>;
  for(var attempt=0u;attempt<2u;attempt++){
@@ -1076,7 +1030,7 @@ const NB_MASS_MAX:f32=8.0;
 fn nbCellCap(depth:f32)->u32{return select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);}
 // Rank r of a crowded run gathers ranks r+cap, r+2cap, ... (low, high: the
 // first and the run's end; stride: the cap) as one sample of their summed
-// mass at their mass-weighted position, velocity and snapshot (a swept
+// mass at their mass-weighted position, velocity and FLIP delta (a
 // delta absent on an axis for any is absent for the merged one), the most
 // heat and the least age. A sample whose mass would pass NB_MASS_MAX is not
 // gathered: it stays live, holding the cell over its cap (nbMergeAbsorbed,
@@ -1215,7 +1169,7 @@ fn nbHullUncut()->bool{
 const NB_WIN_FINE:u32=1u;const NB_WIN_STORED:u32=2u;const NB_WIN_UNCUT:u32=4u;const NB_WIN_COLD:u32=8u;const NB_WIN_REACH:u32=16u;
 var<workgroup> nbWinFlags:array<u32,64>;
 var<workgroup> nbWinHeat:array<f32,64>;
-${unitTaps&&!slots?"var<workgroup> nbWinHome:array<vec4i,64>;":""}
+${unitTaps?"var<workgroup> nbWinHome:array<vec4i,64>;":""}
 var<private> nbWinLo:vec3i;
 var<private> nbWinOn:bool=false;
 fn nbWinIndex(t:vec3i)->u32{let l=t-nbWinLo;if(!nbWinOn||any(l<vec3i(0))||any(l>vec3i(3))){return 64u;}return u32(l.x+4*l.y+16*l.z);}
@@ -1223,7 +1177,7 @@ ${narrowBandBodyWindowWGSL}
 ${narrowBandClearWalkWGSL}
 fn nbWinStage(lane:u32){
  let t=nbWinLo+vec3i(umCorner(lane,4u));let at=umTileAt(vec3u(t));let key=umTileKey(t);var flags=0u;
- ${unitTaps&&!slots?"if(umCachedFineTile(at)){flags|=NB_WIN_FINE;}nbWinHome[lane]=umUnitHaloHome(UMSampleTile(vec3f(0.0),t,at));":""}
+ ${unitTaps?"if(umCachedFineTile(at)){flags|=NB_WIN_FINE;}nbWinHome[lane]=umUnitHaloHome(UMSampleTile(vec3f(0.0),t,at));":""}
  if(umKeyStored(key)){
   flags|=NB_WIN_STORED;
   ${this.solid.coarse?"if(all(umSolidOpenCells(key)==vec2u(0xffffffffu))&&all(umSolidFieldCut(key)==vec2u(0u))){flags|=NB_WIN_UNCUT;}":""}
@@ -1233,7 +1187,7 @@ fn nbWinStage(lane:u32){
  flags|=nbBodyTileMask(t)<<8u;
  nbWinFlags[lane]=flags;nbWinHeat[lane]=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+at]));
 }
-// nbTargetHeat, nbSampleCold and the depth's reach, through the window.
+// nbTargetHeat, the move's COLD test and the depth's reach, through the window.
 fn nbMoveHeat(p:vec3f)->f32{let t=vec3u(p/4.0);let w=nbWinIndex(vec3i(t));if(w<64u){return nbWinHeat[w];}return bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+umTileAt(t)]));}
 ${this.heatExpiry==="held"?`// The census found the surface of q's tile thin (UNIFORM_STAGE_IMPORTANCE triggered thin).
 fn nbTileThin(q:vec3f)->bool{let t=vec3u(q/4.0);let key=umTileAt(t);if(!umKeyStored(key)){return false;}return ((atomicLoad(&bins[NB_ACTIVITY_SCORES+2u*key+1u])>>17u)&1u)!=0u;}
@@ -1248,8 +1202,9 @@ struct NbMoved{p:Particle,status:u32}
 // The move is the step's whole particle stage, one pass a record (i its
 // current-bank index):
 // - G2P: the last step's end, against the field that step projected (the
-//   head's extension of it, which the trace samples too) and the snapshot
-//   the tail took before its pressure (before.xyz); a sample's depth,
+//   head's extension of it, which the trace samples too) and the FLIP delta
+//   the tail recorded (before.xyz: its extension minus the departure's,
+//   NB_DELTA_NONE an axis without, which takes PIC); a sample's depth,
 //   isolation age and erasure heat.
 // - Retirement: deep or sparse-expired samples are not appended. In the
 //   deep overlap, apply the runtime particle cap to each existing cell run.
@@ -1373,7 +1328,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
    // G2P.
    var v=p.velocity.xyz;
    if(mode!=1.0){
-    ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbMoveCold(q)){"+(this.sweptDelta?"let d=p.before.xyz;flip=select(pic,v+d,abs(d)<vec3f(1e30));":"flip+=pic-p.before.xyz;")+"}v=select(mix(pic,flip,params.settings.x),pic,first);"}
+    ${this.apic?"p=nbApicSample(p);v=p.velocity.xyz;":"var flip=v;if(!nbMoveCold(q)){let d=p.before.xyz;flip=select(pic,v+d,abs(d)<vec3f(1e30));}v=select(mix(pic,flip,params.settings.x),pic,first);"}
    }else{
     ${this.apic?"p.cx=vec4f(0);p.cy=vec4f(0);p.cz=vec4f(0);":""}
     v+=params.gravity.xyz*dt;
@@ -1529,7 +1484,7 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   ${this.crowdedCells==="merge"?`// crowdedCells "merge": a merged sample that ends shallow (under a cell
   // deep) or in a cell its run left under half the cap splits in two a
   // quarter cell apart along a direction hashed from its position, about its
-  // centroid, each half with its velocity and snapshot: the film it spreads
+  // centroid, each half with its velocity and FLIP delta: the film it spreads
   // into gets back the coverage its mass stands for. The second half
   // appends to its brick's slab (nbMoveAppend). Halves that would leave the
   // storage or enter a solid stay merged this step.
@@ -1684,9 +1639,9 @@ fn seedCell(c:vec3u,emit:bool){
  // slabs that follow hold the whole initial band.
  for(var k=0u;k<seedCount;k++){
   // An emitted seed is a seed too (nbSeedFirst): its first G2P takes the
-  // grid's velocity. Unmarked, flipDelta "swept" read its before.xyz (its
-  // velocity, the travel the residency prediction needs) as a delta and
-  // doubled it: translation 0.75 -> 1.46 m/s in one step.
+  // grid's velocity. Unmarked, a tail-recorded FLIP delta once read its
+  // before.xyz (its velocity, the travel the residency prediction needs) as
+  // a delta and doubled it: translation 0.75 -> 1.46 m/s in one step.
   if(emit){var s=nbWithMass(nbSeedParticle(seeds[k],heat),f32(8u/nbSeedTarget(d)));${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleRestate(s,nbSeedFirst(),0.0);"}nbMoveAppend(s);continue;}
   let id=ubBrickAt(vec3i(floor(seeds[k].xyz)));
   if(id!=UB_NONE){atomicAdd(&state[nbSlab(id,10u)],1u);ubMark(id,UB_PARTICLES_CORE);}
@@ -1868,18 +1823,6 @@ var<workgroup> nbSeam:array<vec2f,64>;
  if(writer){value.w=textureLoad(velocity,anchor,0).w;textureStore(output,anchor,value);}
 }
 
-// A COLD region's samples take no FLIP delta (nbAdvect's G2P), so the old payload
-// is published only around non-COLD regions (UniformMixedExtension state 3)
-// and sampled only by their samples.
-fn nbSampleCold(q:vec3f)->bool{return nbTileCold(umTileKey(vec3i(floor(q))>>vec3u(2u)));}
-@compute @workgroup_size(64) fn snapshot(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- let n=nbExtent();
- for(var i=gid.x;i<n;i+=64u*groups.x){
-  if(!nbLive(particles[i])||nbSampleCold(particles[i].position.xyz)){continue;}
-  let mode=nbParticleMode(particles[i]);var v=vec3f(0);if(mode!=1.0){v=sampleVelocity(particles[i].position.xyz);}
-  particles[i].before=vec4f(v,particles[i].before.w);
- }
-}
 // A lane reduces its own samples and touches the shared receipt once.
 @compute @workgroup_size(64) fn diagnoseBefore(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
  var outside=0.0;
@@ -1893,33 +1836,27 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
 
 `,[]);
   // Advection borrows the exact extended-field unit taps Uniform already
-  // prepared (the move's G2P and seeds sample them too); snapshot fills its own from the field it
-  // sample (stageTaps). The other stages read their own fresh 4h cache and
+  // prepared (the move's G2P and seeds sample them too). The other stages read their own fresh 4h cache and
   // resolve fine seam taps in place.
   const modules=[false,true].map(unitTaps=>uniformDetailModule(this.device,{specializeWorldGeometry:true,label:`Uniform narrow-band FLIP ${unitTaps?"extended":"stage"}`,code:uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(uniformMixedCertifiedEntriesWGSL(sourceCode(unitTaps),narrowBandNearestEntries,"(atomicLoad(&bins[NB_BAND+1u])+3u)/4u"),["surfaceSplat"],"atomicLoad(&bins[NB_BAND+3u])"),["depthSeeds"],"atomicLoad(&bins[NB_BAND])"),["seed","seedSources",...(this.seedRank?["seedRank"]:[])],"(atomicLoad(&bins[NB_BAND+3u])+7u)/8u"),["transferProperties"],"umCounts.x"),["transfer"],subgroups?"select(16u*umCounts.x,0u,nbTransferFits())":"select(8u*umCounts.x,0u,nbTransferFits())"),["transferOwners"],"select((umCounts.y+63u)/64u,umActiveRegionCount(),umActiveCoarse)"),["transferSeams"],"atomicLoad(&bins[NB_BAND+3u])"),["coupleFine"],"umCounts.x"),["seedCells"],"atomicLoad(&bins[NB_BAND+1u])")}));
   for(const module of modules){
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
+  if(!this.apic){
+   const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Narrow-band FLIP delta record",code:sourceCode(false,true)});
+   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
+   this.deltaPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.deltaResources]}),compute:{module,entryPoint:"recordDelta"}});
+  }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all(["activity","activitySpread","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
+  await Promise.all(["activity","activitySpread","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
-   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","seed","seedSources","seedRank","seedCut"].includes(entryPoint)?1:0]!;
+   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","seed","seedSources","seedRank","seedCut"].includes(entryPoint)?1:0]!;
    if(this.omittedPipelines.has(name))return;
    const compile=()=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    if(NB_BACKGROUND_PIPELINES.has(name)){this.background.add(name,compile);return;}
    this.pipelines.set(name,await compile());
   }));
-  if(this.deltaResources){
-   const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Narrow-band FLIP delta record",code:sourceCode(true,true,true)});
-   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-   this.deltaPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.deltaResources]}),compute:{module,entryPoint:"recordDelta"}});
-  }
-  if(this.slotSnapshotResources){
-   const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Narrow-band FLIP slot snapshot",code:sourceCode(true,true)});
-   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
-   this.slotSnapshotPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.slotSnapshotResources]}),compute:{module,entryPoint:"snapshot"}});
-  }
   this.airFused=this.compile(["airPlanSeeds@fused","airPlanPropagate@fused"],undefined,"regional air update");
   this.airPlanned=this.compile(["airPlanSeeds","airPlanPropagate","airClearFine","airClearCoarse@planned"],undefined,"retire empty air");
   this.crossingDomain=this.compile(["depthPlanSeed","depthPlanExpand"],"surface","shared frame crossing domain");
@@ -1953,7 +1890,6 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    // mixed and all-4h modes; nothing samples a cache. The general gather
    // (transfer) serves the layouts the deposit's words do not fit.
    transfer:this.compile([...(this.sharedDeposit?["transferClear"]:[]),"transferDeposit","transferRefine","transferProperties","transfer","transferOwners","transferSeams"],"transfer","transfer"),
-   snapshot:this.compile(["snapshot"],undefined,"snapshot"),
    retire:this.compile(["coarseBuilds","depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
    // A retirement whose step built no coarse list (a standalone call) lists the corners itself.
    retireListed:this.compile(["coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse"],undefined,"coarse retirement"),
@@ -1992,7 +1928,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
     // always read the base home, including those outside the resident h ring.
     base:entry==="redistanceCoarse"||entry==="airClearCoarse",pipeline:uniformDetailPick(this.solid.select(selected)),
     launch:["depthTiles","depthPlanSeed","depthPlanExpand","depthReuseSnapshot","depthReuseSelect","airPlanSeeds","airPlanPropagate"].includes(entry)?NB_LAUNCH.regions:entry==="transfer"?NB_LAUNCH.counted:entry==="slabAllocate"||entry==="slabPlace"||entry==="seedCut"?NB_LAUNCH.one
-     :entry==="advectParticles"||entry==="snapshot"?NB_LAUNCH.particles:NB_LAUNCH.grid,
+     :entry==="advectParticles"?NB_LAUNCH.particles:NB_LAUNCH.grid,
    };
   });
  }
@@ -2040,7 +1976,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   encoder.clearBuffer(this.state,16,28);
   this.bootstrap(encoder);
   // G2P reads the samples' depth from the last step's band (its tiers
-  // too: the snapshot's, so a COLD sample takes no delta from either).
+  // too: recordDelta's, so a COLD sample takes no delta from either).
   if(!this.bandCurrent){this.arenaSearch(encoder);this.run(encoder,b.arenaMetric);}this.bandCurrent=false;
   encoder.clearBuffer(this.bins,(this.activityWord+5*this.tiles)*4,2*this.tiles*4);
   // The slabs are sized from the last move's, the samples move into them
@@ -2124,19 +2060,21 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);
   this.run(encoder,this.compiled.transfer);
  }
- snapshot(encoder:GPUCommandEncoder,slots?:UniformNarrowBandSlotSnapshot):void{
-  if(this.idleNow)return;
-  // snapshot and the next move's G2P read the same tiers (nbSampleCold):
-  // the move syncs none unless its band is stale.
-  this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_SNAPSHOT_PASS);
-  this.cache.encode(encoder,slots?.cache??this.cacheGroups.snapshot!,pass);
-  if(slots&&this.ownership.capacity.fineTiles>0)this.stageTaps!.builder.encode(encoder,slots.taps,pass);else if(!slots)this.encodeStageTaps(encoder,pass);
-  if(slots){
-   if(!this.slotSnapshotPipeline)throw new Error("Slot snapshot is not initialized");
-   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,slots.particles[this.parity]!.group);pass.setPipeline(uniformDetailPick(this.slotSnapshotPipeline));pass.dispatchWorkgroups(this.particleGroups);
-  }else this.run(encoder,this.compiled.snapshot,pass);pass.end();
+ /** The FLIP delta into before.xyz, after the tail extension: a workgroup
+  * an occupied tile stages its samples' face window once (the tail's
+  * extension minus the departure's, where both hold the face), then
+  * interpolates it at each sample. APIC's G2P reads no delta. */
+ recordDelta(encoder:GPUCommandEncoder):void{
+  if(this.idleNow||this.apic)return;
+  if(!this.deltaPipeline||!this.deltaGroup)throw new Error("Narrow-band FLIP delta is not initialized");
+  // The move/seeds still carry their accepted grid velocity here. Preserve
+  // its display energy before before.xyz becomes a delta (or sentinel).
+  this.displayMotion.capture(encoder);
+  // recordDelta and the next move's G2P read the same tiers (nbMoveCold).
+  this.syncTiers(encoder);const pass=encoder.beginComputePass(NB_DELTA_PASS);
+  pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.deltaGroup.group);pass.setPipeline(uniformDetailPick(this.deltaPipeline));
+  pass.dispatchWorkgroups(Math.min(4096,this.tiles));pass.end();
  }
- private encodeStageTaps(encoder:GPUCommandEncoder,shared?:GPUComputePassEncoder):void{if(this.stageTaps&&this.ownership.capacity.fineTiles>0)this.stageTaps.builder.encode(encoder,this.stageTaps.group,shared);}
  /** Adaptive retirement can move a hanging zero when it normalizes coarse
   * corner magnitudes. Store those corners first, from the arena search's
   * metric, so the redistance is the end-step one. The hanging texels it
@@ -2243,5 +2181,5 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    :words[3]===10?`surface arena bricks (${words[11]}) exceed the arena's ${this.arenaWindows} windows`
    :`unknown particle fatal ${words[3]}`}${budget}`);
  }
- destroy():void{this.displayMotion?.destroy();this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
+ destroy():void{this.displayMotion.destroy();this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
 }

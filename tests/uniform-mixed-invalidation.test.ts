@@ -5,7 +5,7 @@ import { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
 import { UNIFORM_MIXED_REACHES, type UniformMixedCache, type UniformMixedHostChange } from "../lib/methods/uniform/uniform-mixed-invalidation";
 
 const CACHES: readonly UniformMixedCache[] = ["cold", "workControl", "dynamics", "heat", "heldAuthority", "splitAuthority", "extension", "geometry",
-  "solidRecord", "solidWidths", "workEpoch", "bandWork", "bandCycles", "ownershipWork", "residency", "remapWork"];
+  "solidRecord", "solidWidths", "workEpoch", "bandWork", "bandCycles", "ownershipWork", "residency", "remapWork", "bricks"];
 
 test("every mixed frame cache is reached by at least one host change", () => {
   const reached = new Set(Object.values(UNIFORM_MIXED_REACHES).flat());

@@ -4,7 +4,6 @@ import {BULK16_PAGE,BULK16_PAGE_WORDS,BULK16_PHI_TEXELS,BULK16_TAIL_CHANNELS,bul
 import {BULK16_STATUS,bulk16Failure,bulk16LifecycleWGSL,bulk16LiveWGSL,bulk16SlotCapacity,UniformBulkPages} from "../lib/methods/uniform/uniform-bulk-pages";
 import {uniformLatticeAddress,uniformPageKind,uniformPageWord,uniformPageBlock,uniformBlockStored,UNIFORM_KIND,UNIFORM_NEAR_SPAN,UNIFORM_PAGE_TABLE_WORDS,uniformBlockHeld,uniformBlockNeighbourLayout,uniformBlockNeighbourWords,uniformNearFrom} from "../lib/methods/uniform/uniform-lattice-address";
 import {UniformBlockNeighbours} from "../lib/methods/uniform/uniform-block-neighbours";
-import {uniformExtrapolationClosedFace} from "../lib/methods/uniform/uniform-velocity-extrapolation-twin";
 import {narrowBandNear} from "../lib/methods/uniform/uniform-narrow-band-near.wgsl";
 import {createUniformMixedLayoutFromWidths} from "../lib/methods/uniform/uniform-mixed-layout";
 import {UniformMixedOwnership} from "../lib/methods/uniform/uniform-mixed-ownership";
@@ -281,11 +280,6 @@ test("BULK16 page: every host neighbour twin holds at it and lists its faces as 
  assert.deepEqual(uniformBlockHeld(words,high,[-1,0,0],[false,false,false]),[true,false,false]);
  assert.deepEqual(uniformNearFrom(words,low,[0,0,0],UNIFORM_NEAR_SPAN.cell,[33,5,6],[0,0,0]),[31,5,6]);
  assert.deepEqual(uniformNearFrom(words,high,[2,0,0],UNIFORM_NEAR_SPAN.tile,[15,2,3],[0,0,0]),[16,2,3]);
- const pool={table:address.seed.tail,records:address.seed.blocks,rows:words};
- assert.equal(uniformExtrapolationClosedFace(pool,low,[7,1,2],0,8),true);
- assert.equal(uniformExtrapolationClosedFace(pool,low,[1,7,2],1,8),true,"the box's own wall");
- assert.equal(uniformExtrapolationClosedFace(pool,high,[7,1,2],0,8),true,"the box's own wall");
- assert.equal(uniformExtrapolationClosedFace(pool,low,[6,1,2],0,8),false);
  assert.deepEqual(narrowBandNear(address.seed.tail,words,blocks,UNIFORM_NEAR_SPAN.cell,[20,5,6],[33,5,6],[0,0,0]),[31,5,6]);
 });
 
