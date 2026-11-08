@@ -27,6 +27,8 @@ import { buildClothSolverModel, clothOracleStep, createClothOracleState } from '
 import { sceneWithClothStroke } from '../lib/cloth/scene-edit';
 import { publishSceneClothSurfaces } from '../lib/cloth/scene-geometry';
 import { CLOTH_SCENE_STEP_S, ClothSystem, withClothSystem } from '../lib/cloth/system';
+import { buildClothSceneField, clothContactFieldKey, clothContactRadius } from '../lib/cloth/scene-contact';
+import { proceduralSolidField } from '../lib/core/procedural-solid';
 import type { ClothDocument, ClothMaterial } from '../lib/cloth/types';
 import { bridson2002Curtain, bridson2002RotatingSphere, bridson2002Tablecloth, BRIDSON_2002_SCENES } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription, bridson2002SceneLayout, bridsonSolidMotionStart } from '../lib/cloth/scenes/bridson-2002/scene-description';
@@ -102,6 +104,32 @@ test('the shared nearest-surface query hits the ground and the ball, and a solid
   assert.equal(visibleToolSurface(loaded, side)?.point.x, after.point.x);
 });
 
+test("each Bridson bake leads solidVoxels, so the visible held solids come from the smooth procedural field", () => {
+  for (const make of BRIDSON_2002_SCENES) {
+    const scene = make().id === 'bridson-2002-curtain' ? curtain() : bridson2002SceneDescription(make());
+    const field = proceduralSolidField(scene);
+    assert.ok(field, `${scene.sceneId}: the procedural boundary matches its patch prefix`);
+    assert.equal(proceduralSolidField(sceneDocument(findSceneDefinition(scene.sceneId)!)) !== undefined, true, `${scene.sceneId} as the catalog opens it`);
+  }
+});
+
+test('cloth contact settings: self friction is validated and carried; a solid world contact cannot see fails explicitly', () => {
+  const document = curtain().cloth![0]!;
+  assert.equal(document.solver?.selfFriction, 0.3);
+  for (const bad of [-0.1, NaN, Infinity])
+    assert.ok(validateClothDocument({ ...document, solver: { ...document.solver, selfFriction: bad } }).some(e => e.includes('self friction')));
+  assert.equal(clothContactRadius(document), 1e-3);
+  assert.throws(() => clothContactRadius({ ...document, materials: [{ ...document.materials[0]!, thickness_m: 0 }] }), /material thickness/);
+  const empty = createEmptyScene({ sceneId: 'cloth-contact-test' }), origin = [0, 1, 0] as const;
+  const field = buildClothSceneField(empty, origin, 1e-3);
+  assert.ok(field.bricks.size > 0, 'the container shell is a solid');
+  assert.notEqual(clothContactFieldKey(empty, origin, 1e-3), clothContactFieldKey(empty, [0, 1.5, 0], 1e-3));
+  assert.throws(() => buildClothSceneField({ ...empty, terrain: { baseHeight_m: 0.1, features: [] } as unknown as SceneDescription['terrain'] }, origin, 1e-3), /terrain/);
+  assert.throws(() => buildClothSceneField({ ...empty, rigidBodies: [{ id: 'b' } as SceneDescription['rigidBodies'][number]] }, origin, 1e-3), /rigid bodies/);
+  const carved = sceneWithSolidStroke(empty, [{ operation: 'clear', affectsScenery: true, minimum: [10, 0, 10], maximumExclusive: [20, 4, 20] }]);
+  assert.throws(() => buildClothSceneField(carved, origin, 1e-3), /Cloth contact cannot follow solid patch/);
+});
+
 test('pending solids are validated', () => {
   const document = curtain().cloth![0]!;
   assert.deepEqual(validateClothDocument(document), []);
@@ -172,7 +200,9 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   for (let k = 0; k < 6; k++) clothOracleStep(model, oracle, { dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: [0, scene.fluid.gravity_m_s2.y, 0], integrator: 'bdf2', iterations: 12, chebyshevRho: 0 });
   let worst = 0;
   for (let i = 0; i < oracle.x.length; i++) worst = Math.max(worst, Math.abs(oracle.x[i]! - surface.positions_m[i]!));
-  assert.ok(worst < 1e-4, `scene cloth vs oracle after 6 ticks: ${worst} m`);
+  // The scene runs with OGC contact; with nothing in reach its truncation still bounds each
+  // iteration's move, so the K = 12 iterate sits ~1.2e-4 m from the contact-free oracle's.
+  assert.ok(worst < 3e-4, `scene cloth vs oracle after 6 ticks: ${worst} m`);
   assert.ok(surface.positions_m[3 * 36 + 1]! < 0.9 - 0.01, 'the free sheet fell');
   // Picking reads the mirrored pose through the shared path.
   publishSceneClothSurfaces(scene, solver.clothSurfaces!);
@@ -202,7 +232,7 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   solver.destroy();
 }));
 
-test('capture runs a 150 x 150 Bridson sheet on the scene clock: free fall until contact exists', { skip: !gpu }, async () => withDevice(async device => {
+test('capture runs a 150 x 150 Bridson sheet on the scene clock with contact: free fall above the floor', { skip: !gpu }, async () => withDevice(async device => {
   const scene = bridson2002SceneDescription(bridson2002Tablecloth(), { bake: false });
   const cloth = await ClothSystem.create(device, cloneScene(scene));
   const t0 = performance.now();
@@ -219,5 +249,32 @@ test('capture runs a 150 x 150 Bridson sheet on the scene clock: free fall until
   const t1 = performance.now();
   await cloth.capture([18 * CLOTH_SCENE_STEP_S]);
   console.log(`tablecloth ${rest.length / 3} vertices, K=64: first 6 ticks ${ms.toFixed(0)} ms, next 12 ticks ${((performance.now() - t1) / 12).toFixed(1)} ms per tick (fenced each tick)`);
+  cloth.destroy();
+}));
+
+test('the rotating-sphere sheet lands on the held sphere through scene contact: no vertex inside, no failing status', { skip: !gpu }, async () => withDevice(async device => {
+  const source = bridson2002RotatingSphere(), scene = bridson2002SceneDescription(source), t = bridson2002SceneLayout(source).translation_m;
+  const t0 = performance.now();
+  const cloth = await ClothSystem.create(device, cloneScene(scene), { statusInterval: 1 });
+  const setup = performance.now() - t0, ticks = Number(process.env.CLOTH_CONTACT_TICKS ?? 20);
+  const t1 = performance.now();
+  const [frame] = await cloth.capture([ticks * CLOTH_SCENE_STEP_S]);
+  const ms = (performance.now() - t1) / ticks;
+  const counters = await cloth.contactFor(scene.cloth![0]!.id)!.readCounters();
+  assert.equal(cloth.failure, undefined, cloth.failure?.message);
+  const x = frame![0]!.positions_m, centre = [t.x, 0.3 + t.y, t.z], R = 0.25;
+  let inside = Infinity, top = -Infinity;
+  for (let i = 0; i < x.length; i += 3) {
+    const d = Math.hypot(x[i]! - centre[0]!, x[i + 1]! - centre[1]!, x[i + 2]! - centre[2]!);
+    inside = Math.min(inside, d);
+    if (Math.hypot(x[i]! - centre[0]!, x[i + 2]! - centre[2]!) < 0.02) top = Math.max(top, x[i + 1]!);
+  }
+  const N = x.length / 3;
+  console.log(`rotating sphere ${N} vertices with contact: setup ${setup.toFixed(0)} ms, ${ms.toFixed(1)} ms per tick over ${ticks} ticks (fenced each tick); `
+    + `closest vertex ${(inside - R).toFixed(4)} m off the sphere, cap top ${(top - centre[1]! - R).toFixed(4)} m; status ${counters.status}, `
+    + `solid contacts ${counters.solidContacts}, peak pair slots ${(counters.peakPairSlots / N).toFixed(0)}N, peak grid ${counters.peakGrid}, peak contacts ${counters.peakContacts}`);
+  // Free fall from 1 cm above the top reaches the sphere in ~3 ticks: the cap rests on it, nothing passes inside.
+  assert.ok(inside > R - 2e-3, `a vertex is ${R - inside} m inside the sphere`);
+  assert.ok(top > centre[1]! + R - 2e-3 && top < centre[1]! + R + 0.012, `cap at ${top - centre[1]! - R} m above the sphere top`);
   cloth.destroy();
 }));

@@ -11,10 +11,15 @@
  * The renderer draws the solver's buffers in place. The pose is read back
  * only when something asks for it (`readPose`: a press that picks, an edit,
  * a capture), never on the step cadence; every few steps only the 4-byte
- * status word is copied back, so a non-finite step halts the scene. A
- * non-finite status word, a pending solid
- * (`ClothDocument.pendingSolids`) or a document the system cannot run halts
- * the scene with an explicit `SimulationFailure`.
+ * status words (the solver's and the contact detector's) are copied back,
+ * so a non-finite step or a contact failure halts the scene. A failing status
+ * word, a pending solid (`ClothDocument.pendingSolids`), a solid world contact
+ * cannot follow or a document the system cannot run halts the scene with an
+ * explicit `SimulationFailure`.
+ *
+ * Every document runs with lane C2's OGC contact (`scene-contact.ts`): self
+ * contact and the scene's solids, as one static field per solid world and
+ * cloth frame, built at setup and on solid edits, never in a step.
  *
  * An edited document (a cut, an undo) is rebuilt in place of the live one,
  * from the pose and solver state the edit carries; the clock waits for it.
@@ -24,9 +29,12 @@ import type { SceneDescription } from '../core/model';
 import type { SimulationFailure } from '../core/simulation-failure';
 import { clothDocumentsKey } from './content-stamp';
 import { ClothGPUSolver } from './gpu-solver';
-import { CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
+import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
+import { OgcContactDetector } from './contact/ogc-detector';
+import type { ClothSolidField } from './contact/solid-field';
 import { buildClothSolverModel } from './oracle';
 import type { ClothRenderSource } from './render';
+import { CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothSceneField, clothContactFieldKey, clothContactRadius, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
 import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from './topology';
 import type { ClothDocument, ClothSolverStateData, ClothSurfacePublication, ClothVector } from './types';
@@ -42,17 +50,17 @@ const DEFAULT_ITERATIONS = 64;
 let systemGenerations = 0, renderRevisions = 0;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
-/** Asynchronous copy of the status word and, on request, positions and velocities; one map in flight. */
+/** Asynchronous copy of the status words and, on request, positions and velocities; one map in flight. */
 class PoseMirror {
   private readonly staging: GPUBuffer;
   private readonly statusStaging: GPUBuffer;
   private readonly span: number;
   busy = false;
   statusBusy = false;
-  constructor(device: GPUDevice, private readonly solver: ClothGPUSolver, label: string) {
+  constructor(device: GPUDevice, private readonly solver: ClothGPUSolver, label: string, private readonly contact?: OgcContactDetector) {
     this.span = align(16 * Math.max(solver.N, 1), 256);
     this.staging = device.createBuffer({ label: `${label} pose mirror`, size: 2 * this.span + 4 * CLOTH_STATUS_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    this.statusStaging = device.createBuffer({ label: `${label} status mirror`, size: 4 * CLOTH_STATUS_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statusStaging = device.createBuffer({ label: `${label} status mirror`, size: 4 * CLOTH_STATUS_WORDS + 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   }
   encode(encoder: GPUCommandEncoder): boolean {
     if (this.busy) return false;
@@ -66,6 +74,7 @@ class PoseMirror {
   encodeStatus(encoder: GPUCommandEncoder): boolean {
     if (this.statusBusy) return false;
     encoder.copyBufferToBuffer(this.solver.status, 0, this.statusStaging, 0, 4 * CLOTH_STATUS_WORDS);
+    if (this.contact) encoder.copyBufferToBuffer(this.contact.counters, CLOTH_CONTACT_STATUS_OFFSET, this.statusStaging, 4 * CLOTH_STATUS_WORDS, 4);
     this.statusBusy = true;
     return true;
   }
@@ -80,13 +89,13 @@ class PoseMirror {
       return out;
     } finally { this.busy = false; }
   }
-  /** After the encoder holding `encodeStatus` is submitted. */
-  async readStatus(): Promise<number> {
+  /** After the encoder holding `encodeStatus` is submitted: the solver's status word and the detector's (0 without contact). */
+  async readStatus(): Promise<{ solver: number; contact: number }> {
     try {
       await this.statusStaging.mapAsync(GPUMapMode.READ);
-      const word = new Uint32Array(this.statusStaging.getMappedRange(0, 4))[0]!;
+      const words = new Uint32Array(this.statusStaging.getMappedRange().slice(0));
       this.statusStaging.unmap();
-      return word;
+      return { solver: words[0]!, contact: this.contact ? words[CLOTH_STATUS_WORDS]! : 0 };
     } finally { this.statusBusy = false; }
   }
   destroy(): void { this.staging.destroy(); this.statusStaging.destroy(); }
@@ -97,6 +106,10 @@ interface Entry {
   readonly key: string;
   readonly solver: ClothGPUSolver;
   readonly mirror: PoseMirror;
+  /** The contact detector and the static field it holds (`fieldKey` names the solid world and frame it was built for). */
+  readonly contact: OgcContactDetector;
+  field: ClothSolidField;
+  fieldKey: string;
   readonly origin: ClothVector;
   readonly revision: number;
   readonly topologyRevision: number;
@@ -121,10 +134,14 @@ export class ClothSystem {
   private readonly building = new Map<string, { key: string; ready: Promise<void> }>();
   private readonly statusInterval: number;
   private poseRead?: Promise<void>;
+  /** A solid edit's field rebuild; the clock waits for it. */
+  private solidUpdate?: Promise<void>;
+  private solidVoxels: SceneDescription['solidVoxels'];
   private destroyed = false;
 
   private constructor(private readonly device: GPUDevice, private scene: SceneDescription, private readonly options: ClothSystemOptions) {
     this.statusInterval = options.statusInterval ?? CLOTH_STATUS_INTERVAL_STEPS;
+    this.solidVoxels = scene.solidVoxels;
   }
 
   static async create(device: GPUDevice, scene: SceneDescription, options: ClothSystemOptions = {}): Promise<ClothSystem> {
@@ -141,7 +158,7 @@ export class ClothSystem {
     return Number.isFinite(t) ? t : 0;
   }
   /** A document is being rebuilt after an edit; the clock waits for it. */
-  get pending(): boolean { return this.building.size > 0; }
+  get pending(): boolean { return this.building.size > 0 || !!this.solidUpdate; }
 
   /** The poses `readPose` last accepted, for picking, cuts and history; a document being rebuilt is left out. */
   get surfaces(): ClothSurfacePublication[] {
@@ -155,11 +172,20 @@ export class ClothSystem {
 
   /** The live solver of a document (harnesses and diagnostics). */
   solverFor(documentId: string): ClothGPUSolver | undefined { return this.entries.get(documentId)?.solver; }
+  /** The live contact detector of a document (harnesses and diagnostics). */
+  contactFor(documentId: string): OgcContactDetector | undefined { return this.entries.get(documentId)?.contact; }
 
   private entryTime(e: Entry): number { return e.solver.startTime_s + e.steps * CLOTH_SCENE_STEP_S; }
   private tick(e: Entry): number { return Math.round(this.entryTime(e) / CLOTH_SCENE_STEP_S); }
 
-  private async build(document: ClothDocument, topologyRevision: number): Promise<Entry> {
+  /** The field for a frame: a live entry's when it matches (a cut keeps its frame), else built now (seconds of CPU for a large scene). */
+  private fieldFor(origin: ClothVector, r: number): { field: ClothSolidField; fieldKey: string } {
+    const fieldKey = clothContactFieldKey(this.scene, origin, r);
+    for (const e of this.entries.values()) if (e.fieldKey === fieldKey) return { field: e.field, fieldKey };
+    return { field: buildClothSceneField(this.scene, origin, r), fieldKey };
+  }
+
+  private async build(document: ClothDocument, topologyRevision: number, frame?: ClothVector): Promise<Entry> {
     const settings = document.solver ?? {};
     if (settings.tier === 'B') throw new Error(`Cloth document '${document.id}' asks for the Tier B patch solve, which is not installed yet (lane C1, M3)`);
     if (document.geometry.kind !== 'inline') throw new Error(`Cloth document '${document.id}' has an unsupported geometry kind`);
@@ -167,15 +193,24 @@ export class ClothSystem {
     const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)), document.scripts ?? []);
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     data.restPositions_m.forEach((v, i) => { lo[i % 3] = Math.min(lo[i % 3]!, v); hi[i % 3] = Math.max(hi[i % 3]!, v); });
-    const origin = [0, 1, 2].map(a => (lo[a]! + hi[a]!) / 2) as unknown as ClothVector;
-    const g = this.scene.fluid.gravity_m_s2, label = `${this.options.label ?? 'Cloth'} ${document.id}`;
-    const solver = await ClothGPUSolver.create(this.device, model, {
-      origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: [g.x, g.y, g.z],
-      integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? DEFAULT_ITERATIONS, chebyshevRho: settings.chebyshevRho ?? 0,
-      positions_m: data.initialPositions_m, velocities_m_s: data.initialVelocities_m_s, solverState: data.solverState, label,
-    });
+    // A rebuilt document keeps its frame, so its contact field is reused.
+    const origin = frame ?? [0, 1, 2].map(a => (lo[a]! + hi[a]!) / 2) as unknown as ClothVector;
+    const g = this.scene.fluid.gravity_m_s2, gravity: [number, number, number] = [g.x, g.y, g.z], label = `${this.options.label ?? 'Cloth'} ${document.id}`;
+    const { field, fieldKey } = this.fieldFor(origin, clothContactRadius(document));
+    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity);
+    let solver: ClothGPUSolver;
+    try {
+      solver = await ClothGPUSolver.create(this.device, model, {
+        origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity,
+        integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? DEFAULT_ITERATIONS, chebyshevRho: settings.chebyshevRho ?? 0,
+        positions_m: data.initialPositions_m, velocities_m_s: data.initialVelocities_m_s, solverState: data.solverState, label,
+        contact: contact.solverContact(CLOTH_BINDING.contact), hooks: contact.stepHooks,
+      });
+      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart });
+      contact.setSolidField(field);
+    } catch (error) { contact.destroy(); throw error; }
     const positions = Float64Array.from(data.initialPositions_m ?? data.restPositions_m);
-    const entry: Entry = { document, key: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label), origin,
+    const entry: Entry = { document, key: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, contact), contact, field, fieldKey, origin,
       revision: ++renderRevisions, topologyRevision, steps: 0, sinceStatus: 0,
       publication: { documentId: document.id, topology: data, positions_m: positions,
         ...(data.initialVelocities_m_s ? { velocities_m_s: Float64Array.from(data.initialVelocities_m_s) } : {}),
@@ -203,7 +238,11 @@ export class ClothSystem {
         owed = Math.floor((blocker.start_s - this.entryTime(e)) / CLOTH_SCENE_STEP_S + 1e-9);
         if (owed <= 0) { this.fail('cloth-pending-solid', `moving cloth solid '${blocker.id}' requires C2 M6`, 'ClothSystem.stepTo', e, [blocker.start_s]); return false; }
       }
-      e.solver.encodeSteps(encoder, owed);
+      // One pass per frame: the detector's frame statistics restart, then the steps (its hooks run inside each).
+      const pass = encoder.beginComputePass({ label: 'Cloth step' });
+      e.contact.encodeFrameBegin(pass);
+      for (let s = 0; s < owed; s++) e.solver.encodeStep(pass);
+      pass.end();
       e.steps += owed; e.sinceStatus += owed; stepped = true;
       if (e.sinceStatus >= this.statusInterval && e.mirror.encodeStatus(encoder)) { e.sinceStatus = 0; watched.push(e); }
     }
@@ -217,7 +256,9 @@ export class ClothSystem {
     let status;
     try { status = await e.mirror.readStatus(); } catch { return; } // device lost or destroyed
     if (this.destroyed || this.entries.get(e.document.id) !== e) return;
-    if (status & CLOTH_STATUS.nonFinite) this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(status).join('; '), 'finishStep', e, [status]);
+    if (status.solver & CLOTH_STATUS.nonFinite) this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(status.solver).join('; '), 'finishStep', e, [status.solver]);
+    if (status.contact & CLOTH_CONTACT_FAILING)
+      this.fail('cloth-contact', `contact failed: ${OgcContactDetector.describeStatus(status.contact & CLOTH_CONTACT_FAILING).join('; ')}`, 'OgcContactDetector', e, [status.contact]);
   }
 
   /**
@@ -279,11 +320,12 @@ export class ClothSystem {
    */
   adopt(scene: SceneDescription): void {
     this.scene = scene;
+    if (scene.solidVoxels !== this.solidVoxels) { this.solidVoxels = scene.solidVoxels; this.followSolids(); }
     for (const document of scene.cloth ?? []) {
       const live = this.entries.get(document.id), key = clothDocumentsKey([document]);
       if (this.building.get(document.id)?.key === key || (!this.building.has(document.id) && live?.key === key)) continue;
       const topologyRevision = Math.max(sceneClothSurface(scene, document.id)?.topologyRevision ?? 0, live ? live.topologyRevision + 1 : 0);
-      const ready = this.build(document, topologyRevision).then(entry => {
+      const ready = this.build(document, topologyRevision, live?.origin).then(entry => {
         if (this.destroyed || this.building.get(document.id)?.key !== key) { this.retire(entry); return; }
         const old = this.entries.get(document.id);
         this.entries.set(document.id, entry); this.building.delete(document.id);
@@ -299,12 +341,35 @@ export class ClothSystem {
     }
   }
 
+  /**
+   * A solid edit: rebuild each live document's field from the edited solid
+   * world (after this call returns, off the step path) and upload it. A solid
+   * contact cannot follow yet halts the scene; the clock waits meanwhile.
+   */
+  private followSolids(): void {
+    const update: Promise<void> = Promise.resolve().then(() => {
+      for (const e of this.entries.values()) {
+        if (this.destroyed || this.failure) return;
+        const key = clothContactFieldKey(this.scene, e.origin, clothContactRadius(e.document));
+        if (key === e.fieldKey) continue;
+        try {
+          const field = buildClothSceneField(this.scene, e.origin, clothContactRadius(e.document));
+          e.contact.setSolidField(field);
+          e.field = field; e.fieldKey = key;
+        } catch (error) { this.fail('cloth-solid-edit', error instanceof Error ? error.message : String(error), 'ClothSystem.adopt', e, []); return; }
+      }
+    }).finally(() => { if (this.solidUpdate === update) this.solidUpdate = undefined; });
+    this.solidUpdate = update;
+  }
+
   /** Resolves when every rebuild started by `adopt` has landed. */
-  async settled(): Promise<void> { while (this.building.size) await Promise.all([...this.building.values()].map(b => b.ready)); }
+  async settled(): Promise<void> {
+    while (this.building.size || this.solidUpdate) await Promise.all([...this.building.values()].map(b => b.ready).concat(this.solidUpdate ?? []));
+  }
 
   private retire(e: Entry): void {
     // The renderer rebinds before its next draw; work already submitted finishes first.
-    void this.device.queue.onSubmittedWorkDone().then(() => { e.solver.destroy(); e.mirror.destroy(); }, () => undefined);
+    void this.device.queue.onSubmittedWorkDone().then(() => { e.solver.destroy(); e.mirror.destroy(); e.contact.destroy(); }, () => undefined);
   }
 
   /**
@@ -332,7 +397,7 @@ export class ClothSystem {
 
   destroy(): void {
     this.destroyed = true;
-    for (const e of this.entries.values()) { e.solver.destroy(); e.mirror.destroy(); }
+    for (const e of this.entries.values()) { e.solver.destroy(); e.mirror.destroy(); e.contact.destroy(); }
     this.entries.clear(); this.building.clear();
   }
 }

@@ -100,6 +100,8 @@ export interface ClothSolverSettings {
   readonly iterations?: number;
   /** Chebyshev spectral radius estimate in [0, 1); 0 disables acceleration. */
   readonly chebyshevRho?: number;
+  /** Coulomb friction of cloth on cloth (self contact); omitted means frictionless. */
+  readonly selfFriction?: number;
   readonly tier?: ClothSolverTier;
   /** Tier B: target owned vertices per patch. */
   readonly patchVertices?: number;

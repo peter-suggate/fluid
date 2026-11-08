@@ -107,8 +107,8 @@ function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
     preview: () => bridson2002SceneDescription(make(), { bake: false }),
     cameraForDocument: bridson2002Camera,
     attribution: { label: "Bridson, Fedkiw & Anderson, SIGGRAPH 2002", url: "https://graphics.stanford.edu/papers/cloth-sig02/" },
-    status: `Tier A GPU cloth, K = ${source.cloth.solver?.iterations ?? 64}. Not yet: cloth-solid contact (lane C2), so the cloth passes through the solids;`
-      + ` the ${source.sheet.columns}\u00d7${source.sheet.rows} sheet diverges at this K until the patch-resident solve (C1 M3);`
+    status: `Tier A GPU cloth, K = ${source.cloth.solver?.iterations ?? 64}, with OGC self and solid contact (lane C2). Not yet:`
+      + ` the ${source.sheet.columns}\u00d7${source.sheet.rows} sheet diverges at this K until the two-level coarse correction lands (C1);`
       + (halts ? ` halts at ${halts}.` : " no moving solids."),
   });
 }

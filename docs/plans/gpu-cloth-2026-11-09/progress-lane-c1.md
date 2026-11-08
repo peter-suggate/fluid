@@ -484,3 +484,45 @@ Root causes, in order of size:
   2. Precompute the damping rate offsets per element once per step (rate = Tᵀ(F − F̂)), which removes the x̂ reads.
   3. Pack each face's and hinge's records together (AoS) for line utilisation and TLB.
   4. Shorten the dependent-load chain: colour slot → star record holding element and vertex ids.
+
+## 2026-11-09 RULING (4): scene contact wired (C2's adapter in `ClothSystem`)
+
+Every scene document now runs with C2's OGC detector: self contact plus the scene's solid world. There is no contact-free path in the system.
+
+- **`lib/cloth/scene-contact.ts` (new).**
+  - `CLOTH_SCENE_CONTACT` holds the authored values. They are C2's gate values: kc 100, εv 1e-2, rqBase 3e-3, rqMax 0.04, s 2.5, contacts 128, grid 32 (N+T+E), buckets 2^18, round cap 4, pair slots 840 N. 840 N covers the gates' measured peaks of 809 N and 776 N.
+  - r is the thickest material (`thickness_m`); it must lie in (0, rqBase).
+  - μ comes from the new `ClothSolverSettings.selfFriction`. It is validated, and the Bridson documents carry the paper's 0.3.
+  - Solid sample capacity is the field's exact sample count.
+  - Failing bits are contactOverflow | gridOverflow | pairOverflow | nonFinite | solidPenetration | solidBounds, as in the M2 gates. roundCap, envelopeCap and uncertifiedPair are reported, not halted on.
+  - Terrain or rigid bodies in a cloth scene fail explicitly, because contact does not see them. A patch the adapter cannot follow also fails explicitly.
+- **`ClothSystem.build`** follows this order:
+  1. build the field (once per solid world and cloth frame);
+  2. create the detector;
+  3. create the solver with `contact` and `hooks`;
+  4. call `bind`, then `setSolidField`.
+  - A rebuilt (cut) document keeps its frame, so it reuses the live field.
+- **`stepTo`:** each document gets one compute pass: `encodeFrameBegin`, then the owed `encodeStep`s.
+- **Status channel:** the status mirror copies the detector's status word beside the solver's. That is 4 bytes, and never the pose. A failing bit halts with `cloth-contact`.
+- **`adopt`** follows a solid edit: it rebuilds the field after the call returns and uploads it with `setSolidField`, and the clock waits. If the adapter cannot follow the edit, the scene halts with `cloth-solid-edit`.
+- **C2's defect fixed:** `bridson2002SceneDescription` now puts the procedural bake's patches first. `proceduralSolidField` is defined for all three scenes, both as built and as the catalog opens them, and there is a regression for it.
+- **Card status updated:** contact is on. The text now names the two-level correction as the fix for the 150² divergence.
+
+GPU results (runner, rc 0, peak GPU memory 2.26 GB):
+
+| run | setup | ms per tick (fenced each tick) | result |
+|---|---|---|---|
+| rotating sphere, 22,500 vertices, K = 64, 20 ticks | 5.2 s (field, samples, compile) | **501** | lands on the held sphere. Closest vertex 0.3 mm off it; cap 0.1 mm above the top. Status 12 (roundCap, envelopeCap: reported). 3386 solid contacts; peak pairs 254 N of 840 N; peak grid 1.82 M of 4.29 M; peak contacts 14 of 128 |
+| tablecloth, shell only, free fall, 18 ticks | — | **824** | free fall, as before |
+| dry 8×8 sheet beside the oracle | — | — | 1.2e-4 m from the contact-free oracle at K = 12. Truncation bounds each iteration's move; the tolerance is now 3e-4 m |
+
+The solver alone runs at 5.0–5.2 ms per step on these sheets. **Contact at K = 64 costs about 100× the solve.** The hooks run after every colour and every iteration, which is 320 truncations and 64 decides per step. That cost is C2's to attack. The K reduction that the two-level correction should allow also cuts it in proportion.
+
+Notes for C2:
+- `clothSolidBand` uses √3 exactly, but the bricks' f32 `maxLipschitz` rounds to 1.7320512. With that band, `setSolidField` rejects even a bare container shell (band 0.10442305 m against 0.10442307 m needed). `clothContactBand` adds 1e-4 relative on L.
+- HEAD e426a6bb's `clothSolidSamples` (κ_min = 3r/e²) ran more than 15 minutes of CPU on the 8×8 test sheet (r = 5e-4, e = 0.057) in an empty scene. Your uncommitted turn-floor version builds the same field in 55 ms, so the GPU system tests need it to land.
+
+Tests:
+- `tests/cloth-system.test.ts`: the bake-leads regression; contact settings and explicit failures (self-friction validation, thickness, terrain, rigid bodies, carved solid); the rotating-sphere contact test on the GPU.
+- check:types is clean.
+- test:unit has 2 foreign failures: `cloth-contact-solid` (C2, in progress) and `reservoir-particle-cost` (lanes T/E).

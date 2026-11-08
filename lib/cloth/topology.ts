@@ -117,6 +117,7 @@ export function validateClothDocument(document: ClothDocument): string[] {
     if (solver.tier !== undefined && solver.tier !== "A" && solver.tier !== "B") errors.push(`Unsupported cloth solver tier ${String(solver.tier)}`);
     if (solver.iterations !== undefined && !(Number.isInteger(solver.iterations) && solver.iterations >= 1)) errors.push("Cloth iterations must be a positive integer");
     if (solver.chebyshevRho !== undefined && !(solver.chebyshevRho >= 0 && solver.chebyshevRho < 1)) errors.push("Cloth Chebyshev rho must lie in [0, 1)");
+    if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
   }
   return errors;
 }

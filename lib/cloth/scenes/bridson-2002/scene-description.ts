@@ -170,7 +170,8 @@ export function bridson2002SceneDescription(source: Bridson2002Scene, options: {
   scene.numerics = { ...scene.numerics, fixedDt_s: source.step_s, maxDt_s: source.step_s };
   if (options.bake !== false) {
     const solids = bakeHeldSolids(source, layout);
-    scene.solidVoxels = [...scene.solidVoxels, ...solids.solidVoxels];
+    // The procedural bake's patches lead: its boundary covers the prefix solidVoxels.slice(0, patchCount).
+    scene.solidVoxels = [...solids.solidVoxels, ...scene.solidVoxels];
     if (solids.solidBoundary) scene.solidBoundary = solids.solidBoundary;
   }
   const data = source.cloth.geometry.data, rest = data.restPositions_m.map((v, i) => v + [t.x, t.y, t.z][i % 3]!);
