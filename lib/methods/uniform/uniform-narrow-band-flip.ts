@@ -20,7 +20,7 @@ import { narrowBandTerrainContactSource, narrowBandRigidContactSource } from "./
 import { narrowBandBodyWindowWGSL } from "./uniform-particle-body-window.wgsl";
 import { narrowBandClearWalkWGSL } from "./uniform-particle-clear-walk.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
-import { NB_SLAB_SEEDS_WORD, NB_SLAB_SORT_MAX_WORD, particleSlabSortEntries, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
+import { NB_SLAB_SEEDS_WORD, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { particleBrickDepositWGSL } from "./uniform-particle-brick.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
@@ -1132,7 +1132,7 @@ fn markSurfaceTiles(position:vec3f,heat:f32){
   atomicMax(&bins[NB_ACTIVITY_THETA+tile],bitcast<u32>(max(heat,0.0)));
  }}}
 }
-${particleSlabWGSL(this.capacity-this.spill,this.spill,this.apic,this.binSlots,this.seedBudget)}
+${particleSlabWGSL(this.capacity-this.spill,this.spill,this.binSlots,this.seedBudget)}
 override nbAdvectScalarCollision:bool=false;
 // With a static solid in the scene the fast launch (umSolidFree) still
 // advects a sample whose trace has no closed cell and no cell the
@@ -1944,10 +1944,10 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare",...particleSlabSortEntries(this.capacity),"surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
+  await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources","seedRank","seedCut","separationPrepass"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="slabSortMerge"?{nbCanonicalWidth:Number(name.split("@")[1])}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    this.pipelines.set(name,p);
   }));
   if(this.deltaResources){
@@ -1973,7 +1973,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    // bricks, and SORT files every slab by cell into the current bank.
    allocate:this.compile(["slabMark","brickTableList","slabAllocate"],"advectParticles","particle slabs"),
    sortPrepare:this.compile(["slabPlace","slabOverflow","slabPrepare"],"advectParticles","particle placement"),
-   sort:this.compile(particleSlabSortEntries(this.capacity),"advectParticles","particle sort"),
+   sort:this.compile(["slabSort"],"advectParticles","particle sort"),
    countInitial:this.compile(["countInitial","brickTableList","slabAllocate"],"bootstrap","countInitial"),seedInitial:this.compile(["seedInitial"],"bootstrap","seedInitial"),
    activity:this.compile(["activity","activitySpread"],"bootstrap","activity"),
    searchReconstruct:this.compile(search.map(n=>n==="depthTiles"||n==="depthSeeds"?`${n}@cold`:n),"reconstruct","crossing search"),
@@ -2105,7 +2105,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
  /** SORT: the last epoch's occupied tiles are cleared, then the list. */
  private sort(encoder:GPUCommandEncoder):void{
   const b=this.compiled;
-  this.run(encoder,b.sortPrepare);encoder.clearBuffer(this.bins,4*this.occupiedWord,4);encoder.clearBuffer(this.state,4*NB_SLAB_SORT_MAX_WORD,4);this.run(encoder,b.sort);
+  this.run(encoder,b.sortPrepare);encoder.clearBuffer(this.bins,4*this.occupiedWord,4);this.run(encoder,b.sort);
  }
  /** Called only for enabled automatic refinement. Explicit Requested/Full
   * layouts keep their authored semantics; particle lifetime is independent. */

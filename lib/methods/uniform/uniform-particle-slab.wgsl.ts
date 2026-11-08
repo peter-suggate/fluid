@@ -1,5 +1,3 @@
-import { particleCanonicalWGSL } from "./uniform-particle-canonical.wgsl";
-
 /** NB-FLIP particle brick slabs (docs/plans/particle-brick-slabs-2026-10-19.md).
  *
  * Every brick the move lists in the shared brick table (uniform-brick-table.ts)
@@ -32,8 +30,7 @@ import { particleCanonicalWGSL } from "./uniform-particle-canonical.wgsl";
  *   records (word 15 is the air pass's change gate); [22] the move's slab
  *   jobs (NB_MOVE_CHUNK-record chunks of the input entries); [23] the walk list's
  *   records (the fast launch's samples whose trace box a solid cuts).
- *   [25] the current sort's maximum dense cell population, zero if none.
- * - From NB_SLAB_RECORD, 12 words a brick id: [0] scratch base, [1] scratch
+ * * - From NB_SLAB_RECORD, 12 words a brick id: [0] scratch base, [1] scratch
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
  *   slabPlace: the appends), [3] stamp (the serial of the move that sized
  *   it), [4] overflow, [5] current base, [6] current cap, [7] current
@@ -43,17 +40,9 @@ import { particleCanonicalWGSL } from "./uniform-particle-canonical.wgsl";
  *   base, count, first job.
  * - From NB_SLAB_OUT, one word a slab: its brick id, in slot order. */
 export const NB_SLAB_HEADER_WORDS=48;
-/** Maximum cell population for the current sort; reset before slabSort. */
-export const NB_SLAB_SORT_MAX_WORD=25;
 /** The step's seeds (cleared with the move's live count): a records budget
  * defers an overlap reseed once the live records and the seeds reach it. */
 export const NB_SLAB_SEEDS_WORD=26;
-/** Dispatch boundaries synchronize dense-cell merge rounds across workgroups. */
-export function particleSlabSortEntries(capacity:number):string[]{
- const entries=["slabSort"];
- for(let width=1;width<capacity;width*=2)entries.push(`slabSortMerge@${width}`);
- return [...entries,"slabSortFinish"];
-}
 /** Receipt-buffer words for a lattice of `blocks` blocks. */
 export function particleSlabWords(blocks:number):number{return NB_SLAB_HEADER_WORDS+17*64*blocks;}
 /** Minimum tail headroom: slab sizing leaves this much of each bank free. */
@@ -61,8 +50,7 @@ export function particleSlabSpill(capacity:number):number{return Math.max(4096,M
 /** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills.
  * binSlots: the cell bins' brick slots (nbBinTile), the sort's slab slots;
  * 0 keys them by cell key. */
-export function particleSlabWGSL(limit:number,spill:number,apic=false,binSlots=0,seedBudget=0):string{return /* wgsl */`
-${particleCanonicalWGSL(apic)}
+export function particleSlabWGSL(limit:number,spill:number,binSlots=0,seedBudget=0):string{return /* wgsl */`
 const NB_SLAB_LIMIT:u32=${limit}u;
 const NB_PARTICLE_CAPACITY:u32=${limit+spill}u;
 const NB_SLAB_MIN:u32=32u;
@@ -258,13 +246,15 @@ fn nbCurrentCap(id:u32)->vec2u{
   if(lane==0u){atomicStore(&bins[NB_COVERAGE+tile],0u);}
  }
 }
-// SORT: a workgroup a slab. Counts its records (the scratch slab's appends,
-// then its overflow run) by cell (512 cells: the brick's tile, then the
+// SORT: a workgroup a slab, a counting sort by cell (Bridson 2015, 5.3's
+// particle binning). Counts its records (the scratch slab's appends, then
+// its overflow run) by cell (512 cells: the brick's tile, then the
 // tile-local cell), scans, and files every record into its cell's run of
-// the current slab; writes the compact positions, cell starts and counts,
-// the coverage and occupied list, and the support marks (a 4³-tile window:
-// a cell's samples reach the tiles of its half of its tile and the one
-// beyond); dead-marks the holes.
+// the current slab with its compact position; writes the cell starts and
+// counts, the coverage and occupied list, and the support marks (a 4³-tile
+// window: a cell's samples reach the tiles of its half of its tile and the
+// one beyond); dead-marks the holes. A cell's records keep their append
+// order: no reader depends on order within a cell.
 var<workgroup> nbSortCount:array<atomic<u32>,512>;
 var<workgroup> nbSortStart:array<u32,512>;
 var<workgroup> nbSortHeat:array<atomic<u32>,512>;
@@ -276,8 +266,6 @@ var<workgroup> nbSortStray:atomic<u32>;
 // id, scratch base, appends, overflow index base; current base, count, cap.
 var<workgroup> nbSortJob:array<vec4u,2>;
 var<workgroup> nbSortJobs:u32;
-var<workgroup> nbSortMax:atomic<u32>;
-var<workgroup> nbSortRounds:u32;
 fn nbSortCell(q:vec3f,origin:vec3i)->u32{
  let c=clamp(vec3i(floor(q))-origin,vec3i(0),vec3i(7));let t=vec3u(c>>vec3u(2u));let l=vec3u(c&vec3i(3));
  return 64u*(t.x|(t.y<<1u)|(t.z<<2u))+(l.x|(l.y<<2u)|(l.z<<4u));
@@ -291,6 +279,11 @@ fn nbSortStrays(q:vec3f,origin:vec3i,lc:u32)->bool{
  let lo=vec3i(floor((q-2.0)/4.0));let hi=vec3i(floor((q+2.0)/4.0));
  return any(lo!=rl)||any(hi!=rh);
 }
+// A filed record's compact position: what the cell-run readers stride.
+fn nbCompact(at:u32,position:vec4f){
+ let bits=bitcast<vec4u>(position);let c=NB_LINKS+4u*at;
+ links[c]=bits.x;links[c+1u]=bits.y;links[c+2u]=bits.z;links[c+3u]=bits.w;
+}
 fn nbSortInput(job:vec4u,k:u32)->u32{
  if(k<job.z){return job.y+k;}
  return links[nbOverflowIndex(job.w+k-job.z)];
@@ -303,7 +296,7 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
    let id=atomicLoad(&state[NB_SLAB_OUT+j]);
    nbSortJob[0]=vec4u(id,atomicLoad(&state[nbSlab(id,0u)]),atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,9u)]));
    nbSortJob[1]=vec4u(atomicLoad(&state[nbSlab(id,5u)]),atomicLoad(&state[nbSlab(id,7u)]),atomicLoad(&state[nbSlab(id,6u)]),0u);
-   atomicStore(&nbSortStray,0u);atomicStore(&nbSortMax,0u);${binSlots?"atomicStore(&bins[NB_SLOT_MAP+id],j);":""}
+   atomicStore(&nbSortStray,0u);${binSlots?"atomicStore(&bins[NB_SLOT_MAP+id],j);":""}
   }
   for(var k=lane;k<512u;k+=256u){atomicStore(&nbSortCount[k],0u);atomicStore(&nbSortHeat[k],0u);}
   if(lane<64u){atomicStore(&nbSortWindow[lane],0u);}
@@ -331,41 +324,18 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   // Cell starts and counts; the counts become the fill cursors.
   for(var k=lane;k<512u;k+=256u){
    let key=${binSlots?"512u*j+k":"64u*nbSortTile(id,origin,k>>6u)+(k&63u)"};
-   let count=atomicExchange(&nbSortCount[k],0u);atomicMax(&nbSortMax,count);
+   let count=atomicExchange(&nbSortCount[k],0u);
    links[key]=base+nbSortStart[k];atomicStore(&bins[key],count);
   }
   workgroupBarrier();
-  // Scatter source indices into cell runs. The first two compact-position
-  // words are index banks; the other two retain cell bounds across rounds.
+  // File each record into its cell's run, with its compact position.
   for(var k=lane;k<n;k+=256u){
-   let i=nbSortInput(input,k);let q=source[i].position.xyz;let lc=nbSortCell(q,origin);
+   let p=source[nbSortInput(input,k)];let lc=nbSortCell(p.position.xyz,origin);
    let at=base+nbSortStart[lc]+atomicAdd(&nbSortCount[lc],1u);
-   links[NB_LINKS+4u*at]=i;
-   links[NB_LINKS+4u*at+2u]=base+nbSortStart[lc];
+   particles[at]=p;nbCompact(at,p.position);
   }
-  for(var k=n+lane;k<output.z;k+=256u){particles[base+k]=nbDead();links[NB_LINKS+4u*(base+k)+3u]=0u;}
-  if(lane==0u){nbSortRounds=atomicLoad(&nbSortMax);atomicMax(&state[${NB_SLAB_SORT_MAX_WORD}u],select(0u,nbSortRounds,nbSortRounds>256u));}
-  let maximum=workgroupUniformLoad(&nbSortRounds);var bank=0u;
-  storageBarrier();workgroupBarrier();
-  for(var k=lane;k<n;k+=256u){
-   let at=base+k;let lc=nbSortCell(source[links[NB_LINKS+4u*at]].position.xyz,origin);
-   links[NB_LINKS+4u*at+3u]=atomicLoad(&nbSortCount[lc]);
-  }
-  storageBarrier();workgroupBarrier();
-  // Small cells stay local. Dense cells leave their original indices in
-  // bank zero for dispatch-wide rounds; one brick cannot serialize them.
-  for(var width=1u;width<min(maximum,256u);width*=2u){
-   for(var k=lane;k<n;k+=256u){
-    let at=base+k;let c=NB_LINKS+4u*at;let count=links[c+3u];
-    if(count<=256u){nbCanonicalMerge(at,links[c+2u],count,width,bank);}
-   }
-   storageBarrier();workgroupBarrier();bank^=1u;
-  }
-  for(var k=lane;k<n;k+=256u){
-   let at=base+k;let c=NB_LINKS+4u*at;
-   if(links[c+3u]<=256u){particles[at]=source[links[c+bank]];links[c+3u]=0u;}
-  }
-  storageBarrier();workgroupBarrier();
+  for(var k=n+lane;k<output.z;k+=256u){let dead=nbDead();particles[base+k]=dead;nbCompact(base+k,dead.position);}
+  workgroupBarrier();
   // Tiles: coverage, the occupied list and their own heat.
   if(lane<8u){
    let first=64u*lane;let population=nbSortStart[first+63u]+atomicLoad(&nbSortCount[first+63u])-nbSortStart[first];
@@ -393,32 +363,12 @@ fn nbSortInput(job:vec4u,k:u32)->u32{
   // A sample whose support leaves its cell's reach marks its own tiles.
   if(workgroupUniformLoad(&nbSortStray)!=0u){
    for(var k=lane;k<n;k+=256u){
-    let c=NB_LINKS+4u*(base+k);let p=source[links[c+select(bank,0u,links[c+3u]>256u)]].position;
+    let p=source[nbSortInput(input,k)].position;
     if(nbSortStrays(p.xyz,origin,nbSortCell(p.xyz,origin))){markSurfaceTiles(p.xyz,max(0.0,p.w));}
    }
   }
   if(lane==0u){atomicAdd(&state[1],n);atomicStore(&state[nbSlab(id,11u)],n);}
   workgroupBarrier();
- }
-}
-// Metadata occupies the future compact-position stream until finish. Each
-// round reads one index bank and writes the other; dispatch boundaries give
-// device-wide visibility. Short/completed cells need no further copies.
-override nbCanonicalWidth:u32=1u;
-@compute @workgroup_size(256) fn slabSortMerge(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(nbCanonicalWidth>=atomicLoad(&state[${NB_SLAB_SORT_MAX_WORD}u])){return;}
- let bank=firstLeadingBit(nbCanonicalWidth)&1u;
- for(var at=gid.x;at<nbExtent();at+=256u*groups.x){
-  let c=NB_LINKS+4u*at;let count=links[c+3u];
-  if(count>256u&&count>nbCanonicalWidth){nbCanonicalMerge(at,links[c+2u],count,nbCanonicalWidth,bank);}
- }
-}
-@compute @workgroup_size(256) fn slabSortFinish(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- for(var at=gid.x;at<nbExtent();at+=256u*groups.x){
-  let c=NB_LINKS+4u*at;let count=links[c+3u];
-  if(count>256u){let bank=(firstLeadingBit(count-1u)+1u)&1u;particles[at]=source[links[c+bank]];}
-  let bits=bitcast<vec4u>(particles[at].position);
-  links[c]=bits.x;links[c+1u]=bits.y;links[c+2u]=bits.z;links[c+3u]=bits.w;
  }
 }
 `;}

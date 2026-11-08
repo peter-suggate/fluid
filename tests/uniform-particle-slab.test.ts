@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { NB_SLAB_HEADER_WORDS, NB_SLAB_SORT_MAX_WORD, particleSlabSortEntries, particleSlabWGSL, particleSlabWords } from "../lib/methods/uniform/uniform-particle-slab.wgsl";
+import { NB_SLAB_HEADER_WORDS, particleSlabWGSL, particleSlabWords } from "../lib/methods/uniform/uniform-particle-slab.wgsl";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
 test("particle slabs conserve overflow and seeds beyond the reserved tail across moves", {skip:!process.env.WEBGPU_NODE_MODULE}, async()=>{
@@ -38,7 +38,7 @@ fn sample(i:u32,brick:u32)->Particle{
 @compute @workgroup_size(64) fn moveFront(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x<1024u){nbMoveAppend(sample(gid.x,1u));}
 }
-// One dense run plus short runs in the same brick share all merge rounds.
+// One dense run plus short runs in the same brick.
 // The other two slabs are empty; a single sort group reuses its state for all.
 @compute @workgroup_size(64) fn denseFront(@builtin(global_invocation_id) gid:vec3u){
  if(gid.x<5336u){
@@ -68,15 +68,14 @@ fn sample(i:u32,brick:u32)->Particle{
   assert.deepEqual((await module.getCompilationInfo()).messages.filter(m=>m.type==="error").map(m=>m.message),[]);
   const layout=device.createBindGroupLayout({entries:Array.from({length:5},(_,binding)=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}))});
   const pipelineLayout=device.createPipelineLayout({bindGroupLayouts:[layout]});
-  const names=["slabAllocate","moveFront","denseFront","slabPlace","slabOverflow",...particleSlabSortEntries(capacity),"seedFront","slabMark","moveAgain","fillTail","mandatoryOverflow"];
-  const pipelines=new Map(await Promise.all(names.map(async name=>[name,await device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:name.split("@")[0],...(name.startsWith("slabSortMerge@")?{constants:{nbCanonicalWidth:Number(name.split("@")[1])}}:{})}})] as const)));
+  const names=["slabAllocate","moveFront","denseFront","slabPlace","slabOverflow","slabSort","seedFront","slabMark","moveAgain","fillTail","mandatoryOverflow"];
+  const pipelines=new Map(await Promise.all(names.map(async name=>[name,await device.createComputePipelineAsync({layout:pipelineLayout,compute:{module,entryPoint:name}})] as const)));
   const buffers=[4*particleSlabWords(1),48*capacity,48*capacity,4*(cells+7*capacity),4*36000].map(size=>device.createBuffer({size,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST}));
   const group=device.createBindGroup({layout,entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
   const read=device.createBuffer({size:Math.max(...buffers.map(b=>b.size)),usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-  const sort=(groups:number):[string,number][]=>particleSlabSortEntries(capacity).map(name=>[name,name==="slabSort"?groups:7]);
+  const sort=(groups:number):[string,number][]=>[["slabSort",groups]];
   const run=(entries:[string,number][])=>{
    const e=device.createCommandEncoder();
-   e.clearBuffer(buffers[0]!,4*NB_SLAB_SORT_MAX_WORD,4);
    const pass=e.beginComputePass();pass.setBindGroup(0,group);
    for(const [name,groups] of entries){pass.setPipeline(pipelines.get(name)!);pass.dispatchWorkgroups(groups);}
    pass.end();device.queue.submit([e.finish()]);
@@ -115,8 +114,8 @@ fn sample(i:u32,brick:u32)->Particle{
    const denseCell=64*2; // brick 1's tile zero, local cell zero
    assert.equal(denseBins[denseCell],5319);
    const first=denseLinks[denseCell]!;
-   for(let k=0;k<5319;k++)assert.deepEqual([...denseLinks.slice(cells+4*(first+k),cells+4*(first+k)+4)],[...denseData.slice(12*(first+k),12*(first+k)+4)],"compact position published after dense rounds");
-   for(let k=0;k<5319;k++)assert.equal(denseFloats[12*(first+k)+4],k,"dense cell is canonically ordered, with no lost IDs");
+   for(let k=0;k<5319;k++)assert.deepEqual([...denseLinks.slice(cells+4*(first+k),cells+4*(first+k)+4)],[...denseData.slice(12*(first+k),12*(first+k)+4)],"compact position published with the dense run");
+   assert.deepEqual(Array.from({length:5319},(_,k)=>denseFloats[12*(first+k)+4]!).sort((a,b)=>a-b),Array.from({length:5319},(_,k)=>k),"the dense cell holds its records, with no lost IDs");
    const ids:number[]=[];
    for(let i=0;i<receipt[0]!;i++)if(denseFloats[12*i+3]!>0)ids.push(denseFloats[12*i+4]!);
    assert.deepEqual(ids.sort((a,b)=>a-b),Array.from({length:5336},(_,i)=>i),"dense and short runs all survive");
