@@ -137,7 +137,7 @@ That return is the caption's "another ball". The video agrees: only one ball is 
 | Spin pose | θ = −π/4·(t − 0.75) | assumption | PhysBAM sets `From_Rotation_Vector(time*ω)`, which jumps the pose at 0.75 s. That jump is invisible on a sphere, so we keep the pose continuous with the same velocity |
 | Frustum | square, base 0.40 m, top 0.20 m, height 0.24 m (±25%) | video | The black frustum in `cloth1.avi` and Fig 2; the text never mentions it. Measured from perspective against the 0.5 m sphere |
 | Frustum place | base on the ground at (−0.65, 0, 0.65), axis-aligned | physbam, assumption | `cut_pyramid` at (−0.65, 0.05, 0.65). The model is unpublished, so its base on the ground and its axis alignment are assumptions |
-| Frustum footing | 2 cm below the ground | assumption | It stands on the ground. Its side faces run on 2 cells into the ground slab, so the union has no coincident face. Without the footing, the 67° base corner is below what the 1 cm lattice holds, and C2's field build refuses it. The visible shape is unchanged |
+| Frustum base | on the ground, y = 0 | video | It sits on the ground as in the paper; its base face coincides with the ground's top face. The 67° base corner is above the 35° edge C2's 1 cm contact field holds at any lattice phase, so the field build accepts it (`tests/cloth-bridson-2002.test.ts`) |
 | Frustum μ | 0.1 | physbam | `Add_Rigid_Body("cut_pyramid",.1,.1)` |
 | Duration | 8.875 s | video | 213 frames at 24 fps. PhysBAM's own `last_frame` is 20 s |
 

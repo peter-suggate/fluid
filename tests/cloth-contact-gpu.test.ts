@@ -19,7 +19,8 @@ import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
-  motionPenetrates, norm, planarTruncate, rng, sheet, sub, vertexForceHessian,
+  motionPenetrates, norm, planarTruncate, rng, sheet, sub, vertexForceHessian, add,
+  bruteForcePredictedPairs, predictedConflict, predictedTruncate,
   type DatPair, type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
 
@@ -82,9 +83,11 @@ function topologyOf(mesh: OracleMesh) {
   return { triangles, edges, oracle: { ...mesh, edges: oracleEdges } };
 }
 
+/** Planar-DAT alone (every prediction held), as the oracle's planarTruncate; the predicted tests opt in. */
 const baseConfig = (N: number): OgcContactConfig => ({
   r: 2e-3, kc: 1e5, mu: 0.3, epsV: 1e-2, dt: 1 / 60, gravity: [0, 0, -9.81],
   rqBase: 3e-3, rqMax: 2e-2, envelopeScale: 1.5, contactCapacity: 96, pairCapacity: 512 * N, gridCapacity: 64 * N, bucketCount: 4096, roundCap: 2,
+  prediction: "none",
 });
 
 /** The round's DAT pairs as the oracle's, keyed "v|t" / "e|f" (e < f), with the stored plane. */
@@ -239,7 +242,8 @@ test("GPU DAT division pairs: every pair within the larger envelope, once, with 
     for (const seed of [3, 11]) {
       const mesh = stackScene(seed), N = mesh.x.length, R = rng(seed + 200);
       const vel: V3[] = mesh.x.map(() => [(R() - 0.5) * 0.8, (R() - 0.5) * 0.8, (R() - 0.5) * 0.8]);
-      const config: OgcContactConfig = { ...baseConfig(N), rqMax: 4e-2 };
+      // Cells stay at the mean edge length, so 4 cm envelopes reach many cells each.
+      const config: OgcContactConfig = { ...baseConfig(N), rqMax: 4e-2, gridCapacity: 2048 * N };
       const { det, oracle } = await detect(device, mesh, vel, config);
       const rq = vel.map(v => envelope(config, v));
       const ref = bruteForceDatPairs(oracle, rq, 2e-6);
@@ -345,6 +349,100 @@ test("GPU Planar-DAT truncation matches the oracle and keeps large motions penet
     const again = toV3(new Float32Array(await readBuffer(device, positions)), N);
     for (let v = 0; v < N; v++) assert.ok(norm(sub(again[v], X[v])) <= norm(sub(got[v], X[v])) * (1 + 1e-6) + 1e-9, `monotone at ${v}`);
     assert.equal(motionPenetrates(oracle, X, again), false);
+    det.destroy();
+  });
+});
+
+/** Three sheets 4 mm apart, out of contact (r = 1 mm), lightly jittered. */
+function spacedStack(seed: number): OracleMesh {
+  const R = rng(seed), h = 0.01;
+  const layers = [0, 4e-3, 8e-3].map((z, i) => {
+    const s = sheet(7, 7, h, [i * 0.0031, i * 0.0023, z]);
+    return { ...s, x: s.x.map(p => [p[0] + (R() - 0.5) * 1e-3, p[1] + (R() - 0.5) * 1e-3, p[2] + (R() - 0.5) * 4e-4] as V3) };
+  });
+  const m = merge(...layers);
+  return { ...m, x: f32(m.x) };
+}
+
+/**
+ * Two steps: the first from X - w, so that its predicted end is X and the second
+ * measures no residual (r_q = rqBase); the second's mandatory round is checked.
+ */
+async function detectPredicted(device: GPUDevice, mesh: OracleMesh, vel: V3[], config: OgcContactConfig) {
+  const { triangles, edges, oracle } = topologyOf(mesh);
+  const W0 = vel.map(v => [0, 1, 2].map(k => v[k] * config.dt + config.gravity[k] * config.dt ** 2) as V3);
+  const positions = storage(device, vec4s(f32(mesh.x.map((x, i) => sub(x, W0[i]))))), velocities = storage(device, vec4s(vel));
+  const det = await OgcContactDetector.create(device, { vertexCount: mesh.x.length, triangles, edges }, vec4s(mesh.x), config, { positions, velocities });
+  await runPass(device, pass => { det.encodeStepBegin(pass); det.encodeDetection(pass); });
+  device.queue.writeBuffer(positions, 0, vec4s(mesh.x));
+  await runPass(device, pass => { det.encodeFrameBegin(pass); det.encodeStepBegin(pass); det.encodeDetection(pass); });
+  const pred = new Float32Array(await readBuffer(device, det.pred));
+  const W = Array.from({ length: mesh.x.length }, (_, v) => [pred[4 * v], pred[4 * v + 1], pred[4 * v + 2]] as V3);
+  return { det, positions, oracle, W };
+}
+
+test("GPU predicted-motion DAT: pairs, translating planes and the truncated residual match the Float64 oracle", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const mesh = spacedStack(17), N = mesh.x.length, R = rng(18);
+    // Falling and drifting together at about 1 m/s, each vertex a little differently.
+    const vel = mesh.x.map(() => [0.3 + (R() - 0.5) * 0.06, -0.2 + (R() - 0.5) * 0.06, -0.9 + (R() - 0.5) * 0.06] as V3);
+    // The first step has no residual measured yet: its envelopes cover the whole ~16 mm, and pair everything.
+    const config: OgcContactConfig = { ...baseConfig(N), r: 1e-3, rqBase: 1.5e-3, envelopeScale: 2.5, prediction: "inertial", rqMax: 5e-2, pairCapacity: 1024 * N, gridCapacity: 2048 * N };
+    const { det, positions, oracle, W } = await detectPredicted(device, mesh, vel, config);
+    const c0 = await det.readCounters();
+    assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
+    assert.equal(c0.held, 0, "nothing is held"); assert.equal(c0.redos, 0);
+    W.forEach((w, v) => assert.ok(norm(sub(w, [vel[v][0] * config.dt, vel[v][1] * config.dt, vel[v][2] * config.dt + config.gravity[2] * config.dt ** 2])) < 1e-8, `prediction ${v}`));
+    const xdet = new Float32Array(await readBuffer(device, det.det));
+    const rq = mesh.x.map(() => config.rqBase);
+    for (let v = 0; v < N; v++) assert.ok(Math.abs(xdet[4 * v + 3] - 0.45 * config.rqBase) < 1e-9, "the residual envelope is rqBase");
+    const ref = bruteForcePredictedPairs(oracle, rq, W, 2e-6);
+    // The frame's peak: the first step's all-pairs round is the detector-lifetime peak.
+    const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c0.framePeakPairSlots, oracle);
+    const strict = (keys: Iterable<string>) => [...keys].filter(k => !ref.ambiguous.has(k)).sort();
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "vertex-triangle pairs");
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "ee").map(g => g.key)), strict(ref.ee), "edge-edge pairs");
+    // Absolute envelopes would pair the layers 4 mm apart; the co-moving predictions pair far fewer.
+    const absolute = bruteForceDatPairs(oracle, mesh.x.map((_, v) => Math.min(config.rqMax, config.r + 2.5 * norm(W[v]))), 0).pairs.length;
+    assert.ok(got.length < 0.25 * absolute, `${got.length} predicted pairs vs ${absolute} absolute`);
+    assert.ok(got.every(g => !predictedConflict(g.pair, oracle.x, W, 1e-6)));
+    // Residuals drive the layers into each other by several gaps.
+    const X = oracle.x, res = X.map(p => [(R() - 0.5) * 2e-3, (R() - 0.5) * 2e-3, (p[2] < 2e-3 ? 1 : p[2] > 6e-3 ? -1 : (R() < 0.5 ? 1 : -1)) * R() * 6e-3] as V3);
+    const Xnew = f32(X.map((x, v) => add(add(x, W[v]), res[v])));
+    assert.ok(motionPenetrates(oracle, X, Xnew), "the raw motion penetrates");
+    device.queue.writeBuffer(positions, 0, vec4s(Xnew));
+    await runPass(device, pass => { det.encodeTruncate(pass); det.encodeDecide(pass); });
+    const out = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    const oracleOut = predictedTruncate(X, Xnew, W, got.map(g => g.pair), rq.map(q => 0.45 * q), 0.9, 1e-6);
+    for (let v = 0; v < N; v++) assert.ok(norm(sub(out[v], oracleOut.x[v])) <= 2e-7 + 2e-4 * norm(res[v]), `vertex ${v}: ${out[v]} vs ${oracleOut.x[v]}`);
+    assert.equal(motionPenetrates(oracle, X, out), false, "the truncated motion is penetration-free");
+    const kept = out.reduce((s, p, v) => s + dot(sub(p, X[v]), W[v]) / dot(W[v], W[v]), 0) / N;
+    assert.ok(kept > 0.9, `vertices keep their predictions (${kept})`);
+    det.destroy();
+  });
+});
+
+test("GPU predicted-motion DAT: crossing predictions redo the round held, which is Planar-DAT", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const mesh = spacedStack(23), N = mesh.x.length;
+    // The top sheet is predicted 7 mm down at the others, which stay.
+    const vel = mesh.x.map(p => [0, 0, p[2] > 6e-3 ? (-7e-3 + 9.81 / 3600) * 60 : 9.81 / 60] as V3);
+    const config: OgcContactConfig = { ...baseConfig(N), r: 1e-3, rqBase: 1.5e-3, envelopeScale: 2.5, prediction: "inertial", rqMax: 4e-2, gridCapacity: 2048 * N };
+    const { det, oracle, W } = await detectPredicted(device, mesh, vel, config);
+    const c = await det.readCounters();
+    assert.equal(c.status & ~OGC_STATUS.envelopeCap, 0, `status ${OgcContactDetector.describeStatus(c.status)}`);
+    assert.equal(c.redos, 1, "the round is redone"); assert.ok(c.conflicts > 0);
+    assert.ok(W.every(w => norm(w) === 0), "the redone round holds every prediction");
+    const rq = vel.map(v => envelope(config, v));
+    const ref = bruteForceDatPairs(oracle, rq, 2e-6);
+    const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c.framePeakPairSlots, oracle);
+    const strict = (keys: Iterable<string>) => [...keys].filter(k => !ref.ambiguous.has(k)).sort();
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "held round: vertex-triangle pairs");
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "ee").map(g => g.key)), strict(ref.ee), "held round: edge-edge pairs");
+    // The conflict's vertices stay held into the next step.
+    const held = new Uint32Array(await readBuffer(device, det.work));
+    const off = 7 * N + det.T + det.E;
+    assert.ok(Array.from(held.subarray(off, off + N)).some(f => f & 1), "conflicting vertices are flagged");
     det.destroy();
   });
 });
@@ -464,14 +562,23 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     const work = new Float32Array(await readBuffer(device, det.work));
     const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
     const solidOff = 3 * N + det.T + det.E;
-    const bounds = mesh.x.map((x, v) => solidBallBound(field, x, xdet[4 * v + 3], config.r));
-    let near = 0;
+    // The ball holds the round's whole reach, |w| + r_q / 2 (w = 0 here); the cap is 0.45 r_q.
+    const bounds = mesh.x.map((x, v) => solidBallBound(field, x, xdet[4 * v + 3] / 0.9, config.r));
+    // A ball whose box ends on a cell face (x0 + rho = 0.01 here) reads one more cell row in float32 or not.
+    const ambiguous = new Set(mesh.x.flatMap((x, v) => {
+      const rb = xdet[4 * v + 3] / 0.9, lo = solidBallBound(field, x, rb * (1 - 1e-5), config.r), hi = solidBallBound(field, x, rb * (1 + 1e-5), config.r);
+      return lo.J !== hi.J || lo.far !== hi.far ? [v] : [];
+    }));
+    let near = 0, entries = 0;
     for (let v = 0; v < N; v++) {
       const b = bounds[v], rho = xdet[4 * v + 3];
       const solid = lists[v].filter(e => e.y === 0x70000000);
       assert.ok(solid.length <= 1);
+      entries += solid.length;
       const margin = Math.min(b.phi0, field.band) - field.maxLipschitz * rho - config.r;
       if (Math.abs(margin) < 1e-6) continue;
+      // A ball whose box ends on a cell face (x0 + rho = 0.01 here) reads one more cell row in float32 or not.
+      if (ambiguous.has(v)) continue;
       assert.equal(solid.length, b.far ? 0 : 1, `vertex ${v} solid entry (far ${b.far}, margin ${margin})`);
       const q = [0, 1, 2, 3].map(k => work[solidOff + 4 * v + k]);
       if (b.far) { assert.deepEqual(q, [0, 0, 0, 0]); continue; }
@@ -483,7 +590,7 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
       const lr = (b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0) * sampleClothSolidField(field, mesh.x[v]).mu;
       assert.ok(Math.abs(lambda - lr) <= 2e-3 * Math.max(1, lr), `vertex ${v} lambda ${lambda} vs ${lr}`);
     }
-    assert.ok(near > 40 && c0.solidContacts === near, `${near} near-solid vertices, counter ${c0.solidContacts}`);
+    assert.ok(near > 30 && c0.solidContacts === entries, `${near} checked near-solid vertices, ${entries} entries, counter ${c0.solidContacts}`);
 
     // The vertex block at positions nudged within the solid-safe ball, with friction from a shifted step start.
     const X = f32(mesh.x.map((p, v) => { const h = 0.3 * Math.min(xdet[4 * v + 3], bounds[v].phi0); return [p[0] + (R() - 0.5) * h, p[1] + (R() - 0.5) * h, p[2] + (R() - 0.5) * h] as V3; }));
@@ -521,13 +628,13 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     for (let v = 0; v < N; v++) {
       const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
       if (norm(sub(ref, planar.x[v])) > 1e-9) cut++;
-      assert.ok(norm(sub(got[v], ref)) <= 2e-7 + 2e-4 * norm(sub(Xnew[v], X0[v])), `vertex ${v}: ${got[v]} vs ${ref}`);
+      if (!ambiguous.has(v)) assert.ok(norm(sub(got[v], ref)) <= 2e-7 + 2e-4 * norm(sub(Xnew[v], X0[v])), `vertex ${v}: ${got[v]} vs ${ref}`);
       const phi = sampleClothSolidField(field, got[v]).phi;
       assert.ok(phi >= (bounds[v].far ? config.r : 0.1 * bounds[v].phi0) * (1 - 1e-3), `vertex ${v} phi ${phi} after truncation`);
     }
     assert.equal(motionPenetrates(oracle, X0, got), false);
     const c1 = await det.readCounters();
-    assert.ok(cut > 20 && Math.abs(c1.solidCut - cut) <= 2, `solid cut ${c1.solidCut} vs ${cut}`);
+    assert.ok(cut > 20 && Math.abs(c1.solidCut - cut) <= 2 + ambiguous.size, `solid cut ${c1.solidCut} vs ${cut} (${ambiguous.size} on a cell face)`);
     det.destroy();
   });
 });

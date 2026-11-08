@@ -485,6 +485,111 @@ export function planarTruncate(X: V3[], Xnew: V3[], pairs: DatPair[], cap: numbe
   return { x, tv };
 }
 
+// ------------------------------------------------------------------ predicted-motion DAT (option c)
+
+/**
+ * Predicted-motion DAT. Each vertex carries a prediction w_v for the round (the
+ * inertial v dt + g dt^2, or 0 for a held vertex) and moves X + w_v + delta_v
+ * with |delta_v| <= cap_v. Division planes keep their normal and translate:
+ * placed at X between the two sides at the start, and between the predicted
+ * positions X + w at the end, so a vertex on its side at both ends of its
+ * straight path stays on it (both are linear in time).
+ */
+const sweptBox = (P: V3[], W: V3[], e: number) => {
+  const lo: V3 = [Infinity, Infinity, Infinity], hi: V3 = [-Infinity, -Infinity, -Infinity];
+  P.forEach((p, i) => { for (const q of [p, add(p, W[i])]) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], q[k] - e); hi[k] = Math.max(hi[k], q[k] + e); } });
+  return { lo, hi };
+};
+const boxesMeet = (a: { lo: V3; hi: V3 }, b: { lo: V3; hi: V3 }) => [0, 1, 2].every(k => a.lo[k] <= b.hi[k] && b.lo[k] <= a.hi[k]);
+/** The largest difference of two primitives' predictions, vertex by vertex. */
+export const predictionSpread = (W: V3[], a: number[], b: number[]) => Math.max(...a.flatMap(i => b.map(j => norm(sub(W[i], W[j])))));
+
+/**
+ * Every non-adjacent pair whose swept boxes (X to X + w, grown by the envelope)
+ * meet and whose distance at X is at most the larger envelope plus the pair's
+ * prediction spread. Any other pair stays apart over the round: its relative
+ * motion is at most the spread plus the two caps.
+ */
+export function bruteForcePredictedPairs(mesh: OracleMesh, rq: number[], W: V3[], margin = 1e-6) {
+  const X = mesh.x, vt = new Set<string>(), ee = new Set<string>(), ambiguous = new Set<string>();
+  const pairs: DatPair[] = [];
+  for (let v = 0; v < X.length; v++) for (let t = 0; t < mesh.tris.length; t++) {
+    const tri = mesh.tris[t];
+    if (tri.includes(v)) continue;
+    if (!boxesMeet(sweptBox([X[v]], [W[v]], rq[v]), sweptBox(tri.map(i => X[i]), tri.map(i => W[i]), faceEnvelope(rq, tri)))) continue;
+    const { bary } = closestPointTriangle(X[v], X[tri[0]], X[tri[1]], X[tri[2]]);
+    const cp = add(add(scale(X[tri[0]], bary[0]), scale(X[tri[1]], bary[1])), scale(X[tri[2]], bary[2]));
+    const d = norm(sub(X[v], cp)), thr = Math.max(rq[v], faceEnvelope(rq, tri)) + predictionSpread(W, [v], tri);
+    if (Math.abs(d - thr) < margin) ambiguous.add(`${v}|${t}`);
+    if (d <= thr) { vt.add(`${v}|${t}`); pairs.push({ kind: "vt", ids: [v, tri[0], tri[1], tri[2]], nA: 1 }); }
+  }
+  for (let e = 0; e < mesh.edges.length; e++) for (let f = e + 1; f < mesh.edges.length; f++) {
+    const [a0, a1] = mesh.edges[e], [b0, b1] = mesh.edges[f];
+    if (a0 === b0 || a0 === b1 || a1 === b0 || a1 === b1) continue;
+    const ea = Math.max(rq[a0], rq[a1]), eb = Math.max(rq[b0], rq[b1]);
+    if (!boxesMeet(sweptBox([X[a0], X[a1]], [W[a0], W[a1]], ea), sweptBox([X[b0], X[b1]], [W[b0], W[b1]], eb))) continue;
+    const d = closestSegmentSegment(X[a0], X[a1], X[b0], X[b1]).d;
+    const thr = Math.max(ea, eb) + predictionSpread(W, [a0, a1], [b0, b1]);
+    if (Math.abs(d - thr) < margin) ambiguous.add(`${e}|${f}`);
+    if (d <= thr) { ee.add(`${e}|${f}`); pairs.push({ kind: "ee", ids: [a0, a1, b0, b1], nA: 2 }); }
+  }
+  return { vt, ee, ambiguous, pairs };
+}
+
+/**
+ * A pair the round cannot divide: no separating plane at X while some vertex
+ * is predicted to move, or predicted positions X + w that cross (or close to
+ * within 2 sepEps) along the pair's plane normal. A round with a conflict is
+ * redone with every prediction held at 0, which is Planar-DAT itself.
+ */
+export function predictedConflict(p: DatPair, X: V3[], W: V3[], sepEps: number): boolean {
+  if (p.ids.every(i => norm(W[i]) === 0)) return false;
+  const sep = datSeparator(p, X, sepEps);
+  if (!sep) return true;
+  const Y = p.ids.map(i => add(X[i], W[i]));
+  const g1 = supportGap(sep.n, Y.slice(0, p.nA), Y.slice(p.nA));
+  return g1 < 2 * sepEps && g1 < sep.gap;
+}
+
+/**
+ * Predicted-motion Planar-DAT: each pair's plane is placed among the predicted
+ * positions X + w, each side's share of the predicted gap proportional to its
+ * own largest residual approach; each vertex's residual delta = x - X - w is
+ * scaled by its smallest ratio, then capped at cap[v]. With W = 0 this is
+ * planarTruncate.
+ */
+export function predictedTruncate(X: V3[], Xnew: V3[], W: V3[], pairs: DatPair[], cap: number[], gammaR: number, sepEps: number): { x: V3[]; tv: number[] } {
+  const tv = X.map(() => 1);
+  const res = Xnew.map((x, i) => sub(sub(x, X[i]), W[i]));
+  for (const p of pairs) {
+    const sep = datSeparator(p, X, sepEps);
+    if (!sep) { for (const i of p.ids) tv[i] = 0; continue; }
+    const { n } = sep;
+    const proj = p.ids.map(i => dot(n, add(X[i], W[i]))), dn = p.ids.map(i => dot(n, res[i]));
+    let supA = Infinity, supB = -Infinity, apA = 0, apB = 0;
+    p.ids.forEach((_, k) => { if (k < p.nA) { supA = Math.min(supA, proj[k]); apA = Math.max(apA, -dn[k]); } else { supB = Math.max(supB, proj[k]); apB = Math.max(apB, dn[k]); } });
+    const gap = supA - supB;
+    let lam = 0.5;
+    if (gap >= 2 * sepEps) {
+      if (apA + apB > 0) lam = apB / (apA + apB);
+      const mf = Math.max(0.05, sepEps / gap);
+      lam = Math.min(1 - mf, Math.max(mf, lam));
+    }
+    const plane = supB + lam * gap;
+    p.ids.forEach((i, k) => {
+      const a = k < p.nA, s0 = (a ? proj[k] - plane : plane - proj[k]) - sepEps;
+      tv[i] = Math.min(tv[i], datRatio(s0, s0 + (a ? dn[k] : -dn[k]), gammaR));
+    });
+  }
+  const x = X.map((x0, i) => {
+    let d = scale(res[i], tv[i]);
+    const l = norm(d);
+    if (l > cap[i]) d = scale(d, cap[i] / l);
+    return add(add(x0, W[i]), d);
+  });
+  return { x, tv };
+}
+
 /** Isotropic DAT (OGC): |dX_v| <= b_v. */
 export function isotropicTruncate(X: V3[], Xnew: V3[], bound: number[]): V3[] {
   return X.map((x0, i) => { let d = sub(Xnew[i], x0); const l = norm(d); if (l > bound[i]) d = scale(d, bound[i] / l); return add(x0, d); });

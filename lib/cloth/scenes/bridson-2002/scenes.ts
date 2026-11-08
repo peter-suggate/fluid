@@ -138,8 +138,7 @@ export function bridson2002RotatingSphere(): Bridson2002Scene {
   const sphere: BridsonSolid = { id: "sphere", friction: SPHERE.sphereFriction.value, shape: { kind: "sphere", radius_m: SPHERE.sphereRadius.value },
     motion: { kind: "pose-track", track: track(keys) } };
   const frustum: BridsonSolid = { id: "frustum", friction: SPHERE.frustumFriction.value,
-    shape: { kind: "square-frustum", base_m: SPHERE.frustumBase.value, top_m: SPHERE.frustumTop.value, height_m: SPHERE.frustumHeight.value,
-      footing_m: SPHERE.frustumFooting.value },
+    shape: { kind: "square-frustum", base_m: SPHERE.frustumBase.value, top_m: SPHERE.frustumTop.value, height_m: SPHERE.frustumHeight.value },
     motion: { kind: "static", position_m: v3(SPHERE.frustumX.value, 0, SPHERE.frustumZ.value) } };
   const k = (f: number, expect: string, reference = `video/frames_cloth1/f${String(f).padStart(3, "0")}.png`) =>
     ({ time_s: frame(f), videoFrame: f, reference, expect });

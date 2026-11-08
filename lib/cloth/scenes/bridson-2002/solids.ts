@@ -15,11 +15,10 @@ export type BridsonSolidShape =
   /** Box centred on the body origin (the ground slab). */
   | { readonly kind: "box"; readonly halfExtents_m: Vec3 }
   | { readonly kind: "sphere"; readonly radius_m: number }
-  /** Square frustum, base on body y = 0, axis +y. `footing_m` continues the
-   * side faces that far below y = 0, buried in whatever it stands on, so the
-   * union has no coincident faces and no acute base corner for the lattice
-   * to lose; the visible shape is unchanged. */
-  | { readonly kind: "square-frustum"; readonly base_m: number; readonly top_m: number; readonly height_m: number; readonly footing_m?: number }
+  /** Square frustum, base on body y = 0, axis +y. Standing on the ground its
+   * base face coincides with the ground's top face; the union keeps the 67
+   * degree base corner, which the cloth contact field resolves at 1 cm. */
+  | { readonly kind: "square-frustum"; readonly base_m: number; readonly top_m: number; readonly height_m: number }
   /** Square post, base on body y = 0, its four top edges bevelled at 45 degrees. */
   | { readonly kind: "chamfered-post"; readonly width_m: number; readonly height_m: number; readonly chamfer_m: number };
 
@@ -56,7 +55,7 @@ export function bridsonShapeDistance(shape: BridsonSolidShape, p: Vec3): number 
     case "square-frustum": {
       const k = (shape.base_m - shape.top_m) / (2 * shape.height_m), n = Math.hypot(1, k);
       const side = (u: number) => (Math.abs(u) + k * p.y - shape.base_m / 2) / n;
-      return Math.max(-p.y - (shape.footing_m ?? 0), p.y - shape.height_m, side(p.x), side(p.z));
+      return Math.max(-p.y, p.y - shape.height_m, side(p.x), side(p.z));
     }
     case "chamfered-post": {
       const h = shape.width_m / 2, top = shape.height_m, c = shape.chamfer_m;
@@ -73,8 +72,7 @@ export function bridsonShapeReach(shape: BridsonSolidShape): number {
     case "box": return Math.hypot(shape.halfExtents_m.x, shape.halfExtents_m.y, shape.halfExtents_m.z);
     case "sphere": return shape.radius_m;
     case "square-frustum": {
-      const f = shape.footing_m ?? 0, base = shape.base_m + f * (shape.base_m - shape.top_m) / shape.height_m;
-      return Math.hypot(base / SQRT2, Math.max(shape.height_m, f));
+      return Math.hypot(shape.base_m / SQRT2, shape.height_m);
     }
     case "chamfered-post": return Math.hypot(shape.width_m / SQRT2, shape.height_m);
     default: return unknownKind(shape, "solid shape");
@@ -87,8 +85,7 @@ export function bridsonShapeBox(shape: BridsonSolidShape): { halfX: number; half
     case "box": return { halfX: shape.halfExtents_m.x, halfZ: shape.halfExtents_m.z, yMin: -shape.halfExtents_m.y, yMax: shape.halfExtents_m.y };
     case "sphere": return { halfX: shape.radius_m, halfZ: shape.radius_m, yMin: -shape.radius_m, yMax: shape.radius_m };
     case "square-frustum": {
-      const f = shape.footing_m ?? 0, half = (shape.base_m + f * (shape.base_m - shape.top_m) / shape.height_m) / 2;
-      return { halfX: half, halfZ: half, yMin: -f, yMax: shape.height_m };
+      return { halfX: shape.base_m / 2, halfZ: shape.base_m / 2, yMin: 0, yMax: shape.height_m };
     }
     case "chamfered-post": return { halfX: shape.width_m / 2, halfZ: shape.width_m / 2, yMin: 0, yMax: shape.height_m };
     default: return unknownKind(shape, "solid shape");

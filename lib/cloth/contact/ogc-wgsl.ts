@@ -30,9 +30,17 @@ export const OGC_COUNTER = {
   pairSlots: 23, peakPairSlots: 24, frameDatPairs: 25, frameCapped: 26, frameUncertified: 27, framePeakPairSlots: 28,
   /** Vertices with a static-solid entry over the frame's rounds, and the truncations the solid bound made. */
   frameSolidContacts: 29, frameSolidCut: 30,
+  /**
+   * Predicted-motion DAT: the round's conflicting pairs (consumed by the redo
+   * decision), the flag that holds every prediction for a redone round, and per
+   * frame the conflicts, the redone rounds and the held vertices of mandatory rounds.
+   */
+  conflicts: 31, forceHeld: 32, frameConflicts: 33, frameRedos: 34, frameHeld: 35,
+  /** The round's (r_q / rqMax)^3 summed in units of 1 / 1024 (the cell kernel's cubic mean; consumed by it). */
+  envelopeSum: 36,
 } as const;
-export const OGC_COUNTER_WORDS = 32;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30];
+export const OGC_COUNTER_WORDS = 40;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35];
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -92,6 +100,12 @@ const OGC_F_UNCERTIFIED = ${OGC_COUNTER.frameUncertified}u;
 const OGC_F_PEAK_PAIR_SLOTS = ${OGC_COUNTER.framePeakPairSlots}u;
 const OGC_F_SOLID_CONTACTS = ${OGC_COUNTER.frameSolidContacts}u;
 const OGC_F_SOLID_CUT = ${OGC_COUNTER.frameSolidCut}u;
+const OGC_CONFLICTS = ${OGC_COUNTER.conflicts}u;
+const OGC_FORCE_HELD = ${OGC_COUNTER.forceHeld}u;
+const OGC_F_CONFLICTS = ${OGC_COUNTER.frameConflicts}u;
+const OGC_F_REDOS = ${OGC_COUNTER.frameRedos}u;
+const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;
+const OGC_ENVELOPE_SUM = ${OGC_COUNTER.envelopeSum}u;
 const OGC_ST_SOLID_PENETRATION = ${OGC_STATUS.solidPenetration}u;
 const OGC_ST_SOLID_BOUNDS = ${OGC_STATUS.solidBounds}u;
 const OGC_ST_PAIR_OVERFLOW = ${OGC_STATUS.pairOverflow}u;

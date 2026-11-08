@@ -15,19 +15,26 @@
  * truncation cuts the accumulated dX, and a detection round commits it (DAT
  * Alg. 3). Truncation is Planar-DAT by default, or OGC's isotropic bound.
  *
- * Each vertex's query radius is its velocity envelope
- *   r_q,v = clamp(max(rqBase, r + s |v dt + g dt^2|), rqMax).
- * A division pair is recorded whenever the two primitives are within the larger
- * of their envelopes (a face's or edge's envelope is its vertices' widest), and
- * every vertex's displacement is capped at 0.5 gamma_r r_q,v, so two unpaired
- * primitives close by at most gamma_r max(r_q,a, r_q,b), less than their distance.
+ * Predicted-motion DAT (the default; `prediction: "none"` is Planar-DAT alone):
+ * a free vertex is predicted to move w_v = v dt + g dt^2 over the step (or the
+ * solver's initial guess minus x_t, `prediction: "guess"`), and its
+ * query radius covers only the residual,
+ *   r_q,v = clamp(max(rqBase, r + s rho_v), rqMax),
+ * rho_v the last step's deviation from its own prediction. A vertex in contact,
+ * truncated or in a conflict (in this step or the last) is held: w_v = 0 and
+ * r_q,v = clamp(max(rqBase, r + s |w_v|), rqMax). A division pair is
+ * recorded whenever the swept boxes meet and the primitives are within the larger
+ * envelope (a face's or edge's is its vertices' widest) plus their prediction
+ * spread; every vertex's residual is capped at 0.5 gamma_r r_q,v, so two unpaired
+ * primitives close by less than their distance. Planes translate with the
+ * predictions; a round whose predictions cross is redone with every one held.
  * Capacities are authored per scene; overflow, a round cap or an envelope cap
  * set the status word (OGC_STATUS), which the frame's owner reads off the step path.
  */
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_WGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
@@ -72,7 +79,28 @@ export interface OgcContactConfig {
   roundCap: number;
   /** Words reserved for the static solid field image (solid-field.ts); 0 or absent: the cloth sees no solid. */
   solidCapacityWords?: number;
+  /**
+   * Predicted-motion DAT, predicting v dt + g dt^2 ("inertial", the default) or the
+   * solver's initial guess x_guess - x_t ("guess": needs `stepStart`, with the guess
+   * in `positions` when the mandatory round runs), or Planar-DAT with every
+   * prediction held ("none").
+   */
+  prediction?: OgcPrediction;
+  /** The broad-phase cell's floor (m); default the larger of the mean edge length and rqBase. */
+  cellSize?: number;
+  /**
+   * The round's cell above the floor: its largest envelope ("largest", the default)
+   * or its cubic-mean envelope ("cubicMean"). Every primitive goes into every cell
+   * its box touches either way; on the M1 Max the per-cell cost of a query outweighs
+   * the candidates a larger cell adds (twist gate: 11 ms vs 44 ms a round).
+   */
+  cellRule?: OgcCellRule;
 }
+
+export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2 } as const;
+export const OGC_CELL_RULE = { largest: 0, cubicMean: 1 } as const;
+export type OgcCellRule = keyof typeof OGC_CELL_RULE;
+export type OgcPrediction = keyof typeof OGC_PREDICTION;
 
 export interface OgcSolverInputs {
   /** vec4<f32> per vertex, cloth-local metres (w is the solver's). */
@@ -112,6 +140,10 @@ export interface OgcFrameCounters {
   /** Vertices with a static-solid entry over the frame's rounds, and truncations the solid bound made. */
   solidContacts: number;
   solidCut: number;
+  /** Conflicting pairs, rounds redone held, and held vertices summed over the frame's mandatory rounds. */
+  conflicts: number;
+  redos: number;
+  held: number;
   roundCapHits: number;
   peakContacts: number;
   peakGrid: number;
@@ -123,6 +155,8 @@ interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindi
 
 const WG = 64;
 const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, insert: 6, query: 7, bound: 8 } as const;
+/** The detection round's kernels in dispatch order (for profiling). */
+export const OGC_ROUND_KERNELS = Object.keys(DISPATCH) as (keyof typeof DISPATCH)[];
 const FLOAT32_EPS = 2 ** -23;
 
 export class OgcContactDetector {
@@ -131,12 +165,15 @@ export class OgcContactDetector {
   readonly params: GPUBuffer; readonly topo: GPUBuffer;
   /** x_det (xyz) and b_v (w), vec4<f32> per vertex. */
   readonly det: GPUBuffer;
+  /** Predictions w_v (vec4 per vertex), then each vertex's predicted step end and residual estimate. */
+  readonly pred: GPUBuffer;
   readonly work: GPUBuffer; readonly counts: GPUBuffer; readonly grid: GPUBuffer;
   /** Header, per-vertex counts and contact entries (see ogc-wgsl.ts). */
   readonly contacts: GPUBuffer;
   /** DAT division pairs, two vec4<u32> each (see ogc-detector-wgsl.ts). */
   readonly pairs: GPUBuffer;
   readonly mode: OgcTruncationMode;
+  readonly prediction: OgcPrediction;
   readonly counters: GPUBuffer; readonly args: GPUBuffer;
   /** The planes dispatch's indirect args, written by the round's bound pass. */
   readonly planesArgs: GPUBuffer;
@@ -163,6 +200,13 @@ export class OgcContactDetector {
     const mode = config.truncation ?? "planar";
     if (!(mode in OGC_TRUNCATION)) throw new Error(`OGC: unknown truncation "${String(mode)}"`);
     this.mode = mode;
+    const prediction = config.prediction ?? "inertial";
+    if (!(prediction in OGC_PREDICTION)) throw new Error(`OGC: unknown prediction "${String(prediction)}"`);
+    this.prediction = prediction;
+    const cellRule = config.cellRule ?? "largest";
+    if (!(cellRule in OGC_CELL_RULE)) throw new Error(`OGC: unknown cell rule "${String(cellRule)}"`);
+    const cell = config.cellSize ?? Math.max(L.meanEdgeLength, config.rqBase);
+    if (!(cell > 0)) throw new Error("OGC: cellSize must be positive");
     const gammaR = config.gammaR ?? 0.9;
     if (!(gammaR > 0 && gammaR < 1)) throw new Error("OGC: gamma_r must lie in (0, 1)");
     const sepEps = config.separationEps ?? Math.max(1e-6, 4 * FLOAT32_EPS * coordinateScale);
@@ -173,11 +217,14 @@ export class OgcContactDetector {
     this.params = mk("params", 4 * OGC_PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.topo = mk("topology", 4 * topology.words.length);
     this.det = mk("x_det", 16 * N);
-    this.work = mk("work", 4 * (7 * N + T + E));
+    this.pred = mk("predictions", 32 * N);
+    this.work = mk("work", 4 * (8 * N + T + E));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
-    const entriesOff = Math.ceil((sums3Off + 1) / 2) * 2;
-    this.grid = mk("grid", 4 * (entriesOff + 2 * config.gridCapacity));
+    // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
+    const entriesOff = Math.ceil((sums3Off + 1) / 8) * 8;
+    if (4 * (entriesOff + 8 * config.gridCapacity) > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: gridCapacity exceeds one storage binding");
+    this.grid = mk("grid", 4 * (entriesOff + 8 * config.gridCapacity));
     const countsBase = 3, entriesBase = 3 + Math.ceil(N / 4);
     const solidWords = config.solidCapacityWords ?? 0;
     if (!(Number.isSafeInteger(solidWords) && solidWords >= 0)) throw new Error("OGC: solidCapacityWords must be a whole number");
@@ -195,7 +242,7 @@ export class OgcContactDetector {
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
     w[P.exceedThreshold] = Math.max(1, Math.ceil(gammaE * N));
     f[P.r] = config.r; f[P.rqBase] = config.rqBase; f[P.rqMax] = config.rqMax; f[P.envScale] = config.envelopeScale;
-    f[P.gammaP] = gammaP; f[P.cellFloor] = Math.max(L.meanEdgeLength, config.rqBase); f[P.dt] = config.dt;
+    f[P.gammaP] = gammaP; f[P.cellFloor] = cell; f[P.dt] = config.dt;
     f[P.intersectCell] = Math.max(L.meanEdgeLength, 1e-6);
     f.set(config.gravity, P.gravity);
     w[P.trisOff] = L.trisOffset; w[P.edgesOff] = L.edgesOffset; w[P.triEdgesOff] = L.triEdgesOffset;
@@ -210,7 +257,12 @@ export class OgcContactDetector {
     w[P.mode] = OGC_TRUNCATION[mode]; f[P.gammaR] = gammaR; w[P.pairCap] = config.pairCapacity;
     w[P.tvOff] = 2 * N + T + E; f[P.sepEps] = sepEps;
     w[P.solidBase] = this.solidBase; w[P.solidOff] = 3 * N + T + E;
+    w[P.heldOff] = 7 * N + T + E; w[P.predict] = OGC_PREDICTION[prediction]; w[P.cellRule] = OGC_CELL_RULE[cellRule];
     device.queue.writeBuffer(this.params, 0, w);
+    // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
+    const pred0 = new Float32Array(8 * N);
+    for (let v = 0; v < N; v++) pred0[4 * (N + v) + 3] = -1;
+    writeBufferChunked(device.queue, this.pred, 0, pred0);
     writeBufferChunked(device.queue, this.topo, 0, topology.words);
     const hdr = new Uint32Array(12), hf = new Float32Array(hdr.buffer);
     hdr[0] = N; hdr[1] = config.contactCapacity; hdr[2] = countsBase; hdr[3] = entriesBase;
@@ -285,20 +337,21 @@ export class OgcContactDetector {
 
   private async compile() {
     const specs: [string, string, number[], Record<number, "positions">?][] = [
-      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13]],
+      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13, 14]],
       ["cell", OGC_CELL_WGSL, [0, 9]],
-      ["count", ogcGridCountWGSL(false), [0, 1, 4, 5, 6, 9]],
+      ["count", ogcGridCountWGSL(false), [0, 1, 4, 5, 6, 9, 14]],
       ["scan1", ogcScanWGSL(1), [0, 6, 7]],
       ["scan2", ogcScanWGSL(2), [0, 7]],
       ["scan3", ogcScanWGSL(3), [0, 7]],
-      ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 5, 6, 7, 9]],
-      ["query", OGC_QUERY_WGSL, [0, 1, 4, 5, 7, 8, 9, 11]],
+      ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 5, 6, 7, 9, 14]],
+      ["query", OGC_QUERY_WGSL, [0, 1, 4, 5, 7, 8, 9, 11, 14]],
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 9, 10]],
       ["decide", OGC_DECIDE_WGSL, [0, 9, 10]],
+      ["redo", OGC_REDO_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
-      ["planes", OGC_PLANES_WGSL, [0, 2, 4, 5, 9, 11]],
-      ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 9]],
+      ["planes", OGC_PLANES_WGSL, [0, 2, 4, 5, 9, 11, 14]],
+      ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 9, 14]],
       // Intersection counting reads the solver's current positions where detection reads x_det.
       ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
       ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],
@@ -314,12 +367,13 @@ export class OgcContactDetector {
   /** Attach the solver's positions and step-start velocities (once, at setup). */
   bind(inputs: OgcSolverInputs) {
     if (this.inputs) throw new Error("OGC: the detector is already bound to a solver");
+    if (this.prediction === "guess" && !inputs.stepStart) throw new Error('OGC: prediction "guess" needs the solver\'s stepStart (x_t) with the guess in positions');
     this.inputs = inputs;
     const res = (b: GPUBuffer | GPUBufferBinding): GPUBufferBinding => ("buffer" in b ? b : { buffer: b });
     const all: Record<number, GPUBufferBinding> = {
       0: res(this.params), 1: res(this.topo), 2: res(inputs.positions), 3: res(inputs.velocities), 4: res(this.det), 5: res(this.work),
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
-      13: res(inputs.stepStart ?? inputs.positions),
+      13: res(inputs.stepStart ?? inputs.positions), 14: res(this.pred),
     };
     for (const [name, k] of this.kernels) {
       k.bindGroup = this.device.createBindGroup({
@@ -348,9 +402,25 @@ export class OgcContactDetector {
   encodeFrameBegin(pass: GPUComputePassEncoder) { this.run(pass, "frameBegin", 1); }
   /** Start of a step: arm the mandatory detection round. */
   encodeStepBegin(pass: GPUComputePassEncoder) { this.run(pass, "stepBegin", 1); }
-  /** One detection round, dispatched indirectly: zero workgroups unless armed. */
+  /**
+   * One detection round, dispatched indirectly: zero workgroups unless armed;
+   * then the redo decision, and the round again with every prediction held
+   * (zero workgroups unless the first had a conflict).
+   */
   encodeDetection(pass: GPUComputePassEncoder) {
-    for (const name of Object.keys(DISPATCH) as (keyof typeof DISPATCH)[]) this.runIndirect(pass, name);
+    for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
+    this.run(pass, "redo", 1);
+    for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
+  }
+  /** One kernel of a detection round, indirectly, or the redo decision (profiling only). */
+  encodeRoundKernel(pass: GPUComputePassEncoder, name: keyof typeof DISPATCH | "redo") {
+    if (name === "redo") this.run(pass, "redo", 1); else this.runIndirect(pass, name);
+  }
+  /** The truncation's two kernels, one at a time (profiling only). */
+  encodeTruncateKernel(pass: GPUComputePassEncoder, name: "planes" | "apply") {
+    if (name === "apply") { this.run(pass, "apply", Math.ceil(this.N / WG)); return; }
+    const k = this.kernel("planes");
+    pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
   }
   /** Between iterations: count the iteration's truncations and arm a round when gamma_e N were truncated. */
   encodeDecide(pass: GPUComputePassEncoder) { this.run(pass, "decide", 1); }
@@ -387,6 +457,7 @@ export class OgcContactDetector {
       datPairs: u[C.frameDatPairs], framePeakPairSlots: u[C.framePeakPairSlots], peakPairSlots: u[C.peakPairSlots],
       capped: u[C.frameCapped], uncertified: u[C.frameUncertified],
       solidContacts: u[C.frameSolidContacts], solidCut: u[C.frameSolidCut],
+      conflicts: u[C.frameConflicts], redos: u[C.frameRedos], held: u[C.frameHeld],
       peakGrid: u[C.peakGrid], intersections: u[C.intersections], cell: fl[C.cell],
     };
   }
@@ -397,6 +468,6 @@ export class OgcContactDetector {
   }
 
   destroy() {
-    for (const buffer of [this.params, this.topo, this.det, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs]) buffer.destroy();
+    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs]) buffer.destroy();
   }
 }

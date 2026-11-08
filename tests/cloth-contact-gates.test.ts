@@ -29,7 +29,7 @@ import type { ClothAttachmentScript, ClothMaterial, ClothTopologyData } from "..
 import { buildClothSolverModel, type ClothSolverModel } from "../lib/cloth/oracle";
 import { ClothGPUSolver } from "../lib/cloth/gpu-solver";
 import { CLOTH_BINDING, CLOTH_STATE } from "../lib/cloth/gpu-solver-wgsl";
-import { OgcContactDetector, type OgcContactConfig, type OgcFrameCounters } from "../lib/cloth/contact/ogc-detector";
+import { OGC_ROUND_KERNELS, OgcContactDetector, type OgcContactConfig, type OgcCellRule, type OgcFrameCounters, type OgcPrediction } from "../lib/cloth/contact/ogc-detector";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import { trianglesIntersect, type V3 } from "./cloth-contact-oracle";
@@ -39,14 +39,15 @@ const want = (name: string) => !!process.env.WEBGPU_NODE_MODULE && (gates.has(na
 const STEPS = Number(process.env.CLOTH_GATE_STEPS ?? 60);
 const TIMED_STEPS = 30;
 /** DAT pair slots per vertex, authored per scene from the measured peak. */
-const PAIRS_PER_VERTEX = Number(process.env.CLOTH_GATE_PAIRS ?? 480);
+const PAIRS_PER_VERTEX = Number(process.env.CLOTH_GATE_PAIRS ?? 840);
 
 async function withDevice(run: (device: GPUDevice) => Promise<void>) {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
   Object.assign(globalThis, dawn.globals);
   const adapter = await createProcessRetainedDawnGPU(dawn, [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
   assert.ok(adapter);
-  const device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+  const device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+    requiredFeatures: adapter.features.has("timestamp-query") ? ["timestamp-query"] : [] });
   const errors: string[] = [];
   device.addEventListener("uncapturederror", (e: Event) => { e.preventDefault(); const m = (e as GPUUncapturedErrorEvent).error.message; if (!errors.length) console.error(m); errors.push(m); });
   try { await run(device); await device.queue.onSubmittedWorkDone(); assert.deepEqual(errors, []); }
@@ -63,6 +64,52 @@ const g: [number, number, number] = [0, -9.81, 0];
  */
 const ENVELOPE_S = Number(process.env.CLOTH_GATE_S ?? 2.5);
 const DT = 1 / 60, ITERATIONS = 20, KC = Number(process.env.CLOTH_GATE_KC ?? 100);
+/**
+ * CLOTH_GATE_PREDICT: guess (default; the solver's initial guess), inertial, or
+ * none (Planar-DAT with every prediction held, the detector before predicted
+ * motion). CLOTH_GATE_CELL (m): the broad-phase cell's floor; CLOTH_GATE_CELL_RULE:
+ * largest (default) or cubicMean.
+ */
+const PREDICTION = (process.env.CLOTH_GATE_PREDICT ?? "guess") as OgcPrediction;
+const CELL = process.env.CLOTH_GATE_CELL ? Number(process.env.CLOTH_GATE_CELL) : undefined;
+const CELL_RULE = (process.env.CLOTH_GATE_CELL_RULE ?? "largest") as OgcCellRule;
+const knobs = { prediction: PREDICTION, cellRule: CELL_RULE, ...(CELL ? { cellSize: CELL } : {}) };
+
+/**
+ * One mandatory round at the current state, each kernel in its own timestamped
+ * pass (median of 5): the detection's per-pass breakdown. It re-runs a step's
+ * round and truncation without the solver, so it runs after the gate's checks.
+ */
+async function profileRound(device: GPUDevice, det: OgcContactDetector): Promise<string> {
+  if (!device.features.has("timestamp-query")) return "no timestamp-query";
+  const names = [...OGC_ROUND_KERNELS.map(n => `${n}`), "redo", ...OGC_ROUND_KERNELS.map(n => `held ${n}`), "planes", "apply"];
+  const set = device.createQuerySet({ type: "timestamp", count: 2 * names.length });
+  const resolve = device.createBuffer({ size: 16 * names.length, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+  const read = device.createBuffer({ size: 16 * names.length, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  const runs: number[][] = [];
+  for (let rep = 0; rep < 5; rep++) {
+    const enc = device.createCommandEncoder();
+    let p = enc.beginComputePass(); det.encodeStepBegin(p); p.end();
+    names.forEach((n, i) => {
+      const pass = enc.beginComputePass({ timestampWrites: { querySet: set, beginningOfPassWriteIndex: 2 * i, endOfPassWriteIndex: 2 * i + 1 } });
+      if (n === "planes" || n === "apply") det.encodeTruncateKernel(pass, n);
+      else det.encodeRoundKernel(pass, n.replace("held ", "") as (typeof OGC_ROUND_KERNELS)[number] | "redo");
+      pass.end();
+    });
+    enc.resolveQuerySet(set, 0, 2 * names.length, resolve, 0);
+    enc.copyBufferToBuffer(resolve, 0, read, 0, 16 * names.length);
+    device.queue.submit([enc.finish()]);
+    await read.mapAsync(GPUMapMode.READ);
+    const t = new BigUint64Array(read.getMappedRange().slice(0));
+    read.unmap();
+    runs.push(names.map((_, i) => Number(t[2 * i + 1]! - t[2 * i]!) * 1e-6));
+  }
+  set.destroy(); resolve.destroy(); read.destroy();
+  const med = names.map((_, i) => runs.map(r => r[i]!).sort((a, b) => a - b)[2]!);
+  const total = med.reduce((a, b) => a + b, 0);
+  return `round ${total.toFixed(3)} ms: ` + names.map((n, i) => `${n} ${med[i]!.toFixed(3)}`).filter((_, i) => med[i]! >= 0.005).join(", ");
+}
+
 /** Status bits that fail a gate (the round and envelope caps are reported, not failed). */
 const FAILING = OGC_STATUS.contactOverflow | OGC_STATUS.gridOverflow | OGC_STATUS.pairOverflow | OGC_STATUS.nonFinite | OGC_STATUS.solidPenetration | OGC_STATUS.solidBounds;
 
@@ -166,7 +213,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
         if (field) minPhi = Math.min(minPhi, sampleClothSolidField(field, [x[3 * v]!, y, x[3 * v + 2]!]).phi);
       }
       log(`${name} debug step ${s}: y [${ylo.toFixed(4)}, ${yhi.toFixed(4)}], non-finite ${bad}, min phi ${minPhi.toExponential(3)}, status [${OgcContactDetector.describeStatus(c.status)}], `
-        + `rounds ${c.detections}, truncated ${c.truncated}, vf ${c.vfPairs} ee ${c.eePairs} dat ${c.datPairs} peakSlots ${c.framePeakPairSlots}, solid ${c.solidContacts}, envelope ${c.peakEnvelope.toExponential(2)}, cell ${c.cell.toExponential(2)}, candidates ${c.candidates}`);
+        + `rounds ${c.detections}, truncated ${c.truncated}, vf ${c.vfPairs} ee ${c.eePairs} dat ${c.datPairs} peakSlots ${c.framePeakPairSlots}, solid ${c.solidContacts}, envelope ${c.peakEnvelope.toExponential(2)}, cell ${c.cell.toExponential(2)}, candidates ${c.candidates}, held ${c.held} conflicts ${c.conflicts} redos ${c.redos} capped ${c.capped} uncertified ${c.uncertified} envCap ${c.envelopeCapHits}`);
     }
     if (c.intersections) {
       const x = await solver.readPositions(), cpu = cpuIntersections(x, m.topology.faces, 0.02);
@@ -197,14 +244,25 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
     const c = fr.c;
     log(`${name} step ${fr.step}: rounds ${c.detections} (re ${c.redetections}), truncated/N ${(c.truncated / N).toFixed(3)} (max ${(c.truncatedMax / N).toFixed(3)}), `
       + `pairs/N vf ${(c.vfPairs / N).toFixed(2)} ee ${(c.eePairs / N).toFixed(2)} dat ${(c.datPairs / N).toFixed(2)}, solid ${c.solidContacts} cut ${c.solidCut}, `
-      + `capped ${c.capped}, uncertified ${c.uncertified}, envelope ${c.peakEnvelope.toExponential(2)}, residual ${residual.get(fr.step)?.toExponential(2) ?? "-"}`);
+      + `capped ${c.capped}, uncertified ${c.uncertified}, envelope ${c.peakEnvelope.toExponential(2)}, candidates/N ${(c.candidates / N).toFixed(1)}, `
+      + `held/N ${(c.held / N).toFixed(3)} conflicts ${c.conflicts} redos ${c.redos}, residual ${residual.get(fr.step)?.toExponential(2) ?? "-"}`);
   }
-  log(`${name} [kc ${config.kc}, s ${config.envelopeScale}, truncate per ${process.env.CLOTH_GATE_TRUNCATE ?? "colour"}] summary (${N} vertices, ${STEPS} steps): rounds/step ${(sum(c => c.detections) / STEPS).toFixed(2)}, round-cap steps ${sum(c => c.roundCapHits)}, `
+  log(`${name} [kc ${config.kc}, s ${config.envelopeScale}, prediction ${config.prediction ?? "inertial"}, cell ${cT.cell.toExponential(2)}, truncate per ${process.env.CLOTH_GATE_TRUNCATE ?? "colour"}] summary (${N} vertices, ${STEPS} steps): `
+    + `rounds/step ${(sum(c => c.detections) / STEPS).toFixed(2)}, round-cap steps ${sum(c => c.roundCapHits)}, redone steps ${sum(c => c.redos)}, `
+    + `candidates/N per step ${(sum(c => c.candidates) / STEPS / N).toFixed(1)}, dat pairs/N per step ${(sum(c => c.datPairs) / STEPS / N).toFixed(2)}, `
     + `envelope-cap hits ${sum(c => c.envelopeCapHits)}, peak contacts/vertex ${cT.peakContacts}/${config.contactCapacity}, `
     + `peak pair slots ${cT.peakPairSlots}/${config.pairCapacity} (${(cT.peakPairSlots / N).toFixed(1)}N), peak grid ${cT.peakGrid}/${config.gridCapacity}, `
     + `max truncated/N ${(max(c => c.truncated) / N).toFixed(3)}, status [${OgcContactDetector.describeStatus(cT.status).join(", ")}], `
     + `${ms.toFixed(2)} ms/step over ${TIMED_STEPS} steps (diagnostics and intersection count included)`);
+  log(`${name} profile: ${await profileRound(device, det)}`);
   solver.destroy(); det.destroy();
+  // The same solver without contact, timed alike from the authored pose: the step's non-contact floor.
+  const bare = await ClothGPUSolver.create(device, m, { origin_m: [0, 0, 0], dt_s: DT, gravity_m_s2: g, integrator: "bdf2", iterations: ITERATIONS, chebyshevRho: 0, diagnostics: true, label: `${name} bare` });
+  const bareRun = (count: number) => { const enc = device.createCommandEncoder(), pass = enc.beginComputePass(); for (let s = 0; s < count; s++) bare.encodeStep(pass); pass.end(); device.queue.submit([enc.finish()]); };
+  bareRun(1); await device.queue.onSubmittedWorkDone();
+  const tb = performance.now(); bareRun(TIMED_STEPS); await device.queue.onSubmittedWorkDone();
+  log(`${name} solver alone: ${((performance.now() - tb) / TIMED_STEPS).toFixed(2)} ms/step (no contact, no intersection count)`);
+  bare.destroy();
 }
 
 // ---------------------------------------------------------------- drop
@@ -235,6 +293,7 @@ function dropConfig(N: number, T: number, E: number, solidWords: number, variant
     r: R_C, kc: KC, mu: 0.2, epsV: 1e-2, dt: DT, gravity: g,
     rqBase: variant.adaptive ? 3e-3 : 1e-2, rqMax: RQ_MAX, envelopeScale: variant.adaptive ? ENVELOPE_S : 0, truncation: variant.truncation,
     contactCapacity: 128, pairCapacity: PAIRS_PER_VERTEX * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 18, roundCap: 4, solidCapacityWords: solidWords,
+    ...knobs,
   };
 }
 
@@ -271,6 +330,7 @@ test("gate: a twisted sheet (OGC Fig. 12) stays free of intersections", { skip: 
   const config: OgcContactConfig = {
     r: 1.5e-3, kc: KC, mu: 0.2, epsV: 1e-2, dt: DT, gravity: g, rqBase: 3e-3, rqMax: 0.04, envelopeScale: ENVELOPE_S,
     contactCapacity: 128, pairCapacity: PAIRS_PER_VERTEX * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 18, roundCap: 4,
+    ...knobs,
   };
   await runGate(device, "twist", m, config, undefined, s => t.diagnostic(s));
 }));

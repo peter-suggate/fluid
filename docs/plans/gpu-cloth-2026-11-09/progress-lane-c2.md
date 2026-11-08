@@ -411,3 +411,109 @@ I am not implementing (c) before review.
   - The intersection counter does not yet test cloth faces against solid surfaces.
 - **The scene adapter:** solidVoxels and procedural bricks into `parts`, using exact box-union distance for voxels.
 - **Gates still to run:** sphere drape, sharp box, and a cut under resting cloth.
+
+## 2026-11-09 MILESTONE: predicted-motion DAT (ruling c), the oracle proof, and the detection breakdown
+
+### What is implemented
+
+- **Prediction.** Each vertex has a prediction w_v for the round. `prediction` selects it:
+  - `"guess"`: the solver's own initial guess minus x_t. Pins get their scripted motion, and resting cloth gets about 0 through C1's adaptive gravity. The gates use this; it needs `stepStart`, and `bind` throws without it.
+  - `"inertial"`: v·dt + g·dt². This is the default, for the standalone tests.
+  - `"none"`: Planar-DAT, with every prediction held.
+
+  The BDF1 inertial prediction is wrong for C1's BDF2. Its free-fall step is about 1.67 g dt², not v dt + g dt². That error alone capped most vertices of the twist.
+- **Envelope.** A free vertex covers only its residual, r_q = clamp(max(rqBase, r + s·ρ), rqMax).
+  - ρ is last step's deviation, |x_t − ŷ_prev|; on the first step ρ = |w|.
+  - Its residual δ = x − X − w is truncated by the planes and then capped at 0.45 r_q. s = 2.5, above 2.22.
+- **Planes** keep the normal found at X and translate along the predictions: they are placed among X + w.
+- **A pair is recorded** when its swept boxes conv(X, X+w) ± r_q meet and d ≤ max r_q + spread. The spread is the largest |w_i − w_j| across the two sides.
+- **Held vertices** get w = 0 and the Planar-DAT envelope r + s·|w|. A vertex is held when any of these holds:
+  - it was in contact, truncated or in a conflict in this step or the last;
+  - its prediction saves less than half its motion (2ρ > |w|);
+  - it is in a redone round, in isotropic mode, or under `"none"`.
+- **Conflicts.** A pair is a conflict when some w ≠ 0 and either X has no separating plane, or X + w closes below 2·sepEps (and below the gap at X).
+  - On a conflict, the redo kernel reruns the whole round at once with every prediction held, before any truncation. That round is Planar-DAT, which is proven.
+  - The conflicting vertices stay held into the next step.
+  - This is what stops cloth squeezed between converging layers from getting contradictory cuts.
+- **Static solid.** The solid cut is relative to w: room = 1 − f(w), with f(d) = j|d| − q·d.
+  - Prep stops a prediction at the solid (w /= f when f > 1) and limits |w| ≤ ½(rqMax − r_q), so the field's band still covers the round.
+
+### Proof (Float64 oracle, `tests/cloth-contact-oracle.test.ts`)
+
+Three new tests:
+- **A pair with different predictions.** Vertex–triangle and edge–edge pairs whose vertices have different inertial predictions stay divided over the whole step. Checked with CCD and 2048 samples.
+- **Random rounds with per-vertex layer drifts.** The truncated motion is penetration-free. Every unpaired pair is out of reach, or its swept boxes are apart.
+- **Co-moving layers.** These pair at under 10% of the absolute-envelope count, and their vertices move whole. Crossing predictions are conflicts; held predictions never are.
+
+Positions are linear in t, so a vertex on its side of a translating plane at both ends of the step stays on it throughout.
+
+GPU against the oracle (`tests/cloth-contact-gpu.test.ts`, 11 of 11 pass), two new tests:
+- **Predicted pairs, translating planes and truncated residuals** match `predictedTruncate`.
+- **Crossing predictions** redo the round held, and that round's pairs equal Planar-DAT's.
+
+### Detection speed (ruling 2): measured, and the cell ruling reversed by data
+
+Per-pass GPU timestamps come from `profileRound` in the gates: one mandatory round at the end state, each kernel in its own pass, median of 5.
+
+**Query is 97–99% of a round in every configuration.** Prep, cell, count, scans, insert, bound and planes are each at or below the timestamp floor of about 0.07 ms. The exception is the planes pass of the big Planar-DAT pair sets, at 0.5–0.7 ms.
+
+**Cell size (60 steps, guess prediction, query ms per round):**
+
+| Cell | drop | twist |
+|---|---|---|
+| Cubic mean (about 1 cm) | 11.9 | 44.1 |
+| 4 cm | 10.5 | 11.3 |
+| 6 cm | 12.5 | 13.0 |
+| 10 cm | 16.1 | 14.7 |
+| Largest envelope, the old rule (kept) | 10.2 | 9.8 |
+
+- Cells sized from the typical or cubic-mean radius, with multi-cell insertion, are slower.
+- A query's cost is per cell visited: three scan reads for each bucket bound, plus scanning hash-colliding entries. That outweighs the candidates a larger cell adds; candidates/N per step is the same at every cell size.
+- The default stays at the largest envelope. `cellRule: "cubicMean"` stays in for re-measurement, and `cellSize` is the floor.
+
+**Grid entries carry the face's round box** (8 words: face, key, lo, hi). A query no longer re-derives it with 12 scattered loads.
+
+**Before and after (60 steps, s 2.5, kc 100, truncation per colour, 20 iterations):**
+
+| | drop, HEAD 144e248d | drop, `"none"` now | drop, `"guess"` now | twist, HEAD | twist, `"none"` now | twist, `"guess"` now |
+|---|---|---|---|---|---|---|
+| ms per step (timed 30) | 301 | 272 | **115** | 321 | 307 | **209** |
+| Solver alone, ms per step | — | 27 | 28 | — | 12.6 | 13.5 |
+| Query ms per round (end state) | — | 51.3 | **10.2** | — | 40.2 | **9.8** |
+| Rounds per step | 2.18 | 2.12 | 3.28 | 3.88 | 3.87 | 5.83 |
+| Steps redone held | — | 0 | 52 | — | 0 | 54 |
+| Candidates/N per step | — | 7605 | 4767 | — | 8159 | 9183 |
+| DAT pairs/N per step | — | 705 | 420 | — | 1083 | 1464 |
+| Peak pair slots | 1300N | 1287N | **809N** | 950N | 950N | 776N |
+| Intersections, vertices in solid | 0, 0 | 0, 0 | 0, 0 | 0 | 0 | 0 |
+
+- **Per-vertex counts** at drop step 0: 5.5 pairs and 680 candidates. During the pile-up (step 10), the guess run has 1378 pairs and 8409 candidates; it settles to 85–130 pairs and 1600–2300 candidates.
+- Twist step 0 has 81 pairs and 716 candidates. Its peak is 1786 pairs and 10858 candidates (step 30).
+
+### What did not work, honestly
+
+- **Twist rounds rose from 3.9 to 5.8 per step**, with round-cap hits in 846 of the step's rounds.
+  - The twist's strain-limited sheet stops abruptly as it goes taut, so its deviation from any inertial predictor is about its whole motion, about 15 mm per step.
+  - Its residual then grows faster than the 1.125 ρ_prev the cap allows, and the residual (5e5 to 3e7) was already pathological at HEAD (5e5).
+  - The step time still fell (321 to 209 ms), because a round got 4× cheaper.
+- **The held redo runs on about 90% of steps** in both gates. It is a full extra round, about 10 ms: new vertices keep closing on held ones as the pile grows.
+  - Cheaper alternatives are unsound. Rescaling w after the query changes the spreads of pairs that were not recorded.
+  - A partial re-query of only the changed vertices' neighbourhoods would cut it. That is the next speed item.
+- **Remaining step cost in the drop:** 115 ms − 28 ms solver ≈ 87 ms of contact. About 4.2 rounds × 10 ms is detection; the rest is per-colour truncation (planes plus apply, 20 iterations × colours).
+  - Truncating per iteration (`CLOTH_GATE_TRUNCATE=iteration`) is C1's hook choice. It earlier measured 10% less.
+- **The 4 ms target is not in reach on this path.** The solver alone is 13–28 ms per step at 10K vertices and 20 iterations.
+
+## 2026-11-09 STATUS: rulings 3 to 6
+
+- **(5) Bridson frustum: done.**
+  - The footing is removed, and the frustum's base sits on the ground at y = 0 as in the paper.
+  - `tests/cloth-bridson-2002.test.ts` now asserts `doesNotThrow` on the contact field build. The frustum's 67° base corner is above the 35° edge that the 1 cm field holds.
+  - `bridson2002-scenes.md` is updated, and 10 of 10 pass.
+- **(4) Box3D: noted.** No per-frame pose readback. Two-way coupling waits for the review of one-way M6.
+- **(3) M6 one-way moving solids: not implemented this round.** Predicted DAT is the precondition and has now landed. Steps 1–2 below then need only the per-body table and w_v = a_v (prep) as new mechanism; the redo resolves the squeeze. Steps:
+  1. Body-frame images behind a pose table; per-frame pose and twist upload with no readback.
+  2. In prep, a vertex within reach of a body gets w_v = a_v = R₁R₀ᵀ(x₀ − c₀) + c₁ − x₀. Its solid cut is relative to a_v, which the static path already does with room = 1 − f(w).
+  3. Friction relative to the surface velocity.
+
+  **Bridson table (cloth between a moving body and the floor):** the carried prediction a_v crosses the floor. The static-solid stop (w /= f) then shortens it, and pairs with cloth below conflict and redo held. A held vertex pressed by an advancing body has no feasible motion. Such a frame must fail explicitly (status `solidConflict`), not be cut.
+- **(6) M5: not done this round.** The tests of solid-surface samples against cloth faces and edges, and the intersection counter for cloth against solid, are still to do. Detection speed came first under ruling (2).
