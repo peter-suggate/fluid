@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildClothSolidField, rebuildClothSolidField, sampleClothSolidField, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
 import {
   add, boxSdf, dot, norm, rng, scale, solidBallBound, solidContact, solidTruncate, sphereSdf, sub,
   type ContactParams, type V3,
@@ -59,6 +59,32 @@ test("solid field: a feature thinner than a cell fails at authoring", () => {
   // Sharp corners off the node lattice are rounded by the interpolant, not refused.
   const resolved = boxSdf([0.0113, 0.0071, 0.0101], [0.0413, 0.0301, 0.0201]);
   assert.doesNotThrow(() => buildClothSolidField({ ...source(resolved), lo: [-0.02, -0.02, -0.02], hi: [0.12, 0.12, 0.04] }));
+});
+
+/** A convex wedge of opening theta whose apex line runs along z through an off-lattice point, at a tilt in xy. */
+function wedgeSdf(theta: number, phase: number, tilt: number) {
+  const h = 0.01, ax = [0.0537 + phase * h, 0.0412 + 0.37 * phase * h], c = Math.cos(tilt), s = Math.sin(tilt);
+  const m = [[Math.sin(theta / 2), Math.cos(theta / 2)], [Math.sin(theta / 2), -Math.cos(theta / 2)]].map(([x, y]) => [x * c - y * s, x * s + y * c]);
+  return (p: readonly number[]) => {
+    const dx = p[0] - ax[0], dy = p[1] - ax[1];
+    return Math.max(dx * m[0][0] + dy * m[0][1], dx * m[1][0] + dy * m[1][1]);
+  };
+}
+
+test("solid field resolution rule: convex edges of 35 degrees pass at every lattice phase, 20 degrees fail; a 67 degree cone rim passes", () => {
+  const build = (sdf: (p: readonly number[]) => number) => buildClothSolidField({ sdf, lo: [-0.05, -0.05, -0.02], hi: [0.15, 0.13, 0.05], cell: 0.01, band: 0.03 });
+  for (const phase of [0, 0.25, 0.5, 0.75]) for (const tilt of [0, 0.3, 0.7, 1.1]) {
+    assert.doesNotThrow(() => build(wedgeSdf(35 * Math.PI / 180, phase, tilt)), `35 degrees at phase ${phase}, tilt ${tilt}`);
+    assert.throws(() => build(wedgeSdf(20 * Math.PI / 180, phase, tilt)), /convex edges sharper than 35 degrees/, `20 degrees at phase ${phase}, tilt ${tilt}`);
+  }
+  // A frustum standing free: base disk radius 0.06 m, 67 degrees between base and side.
+  const k = Math.tan(67 * Math.PI / 180), base = 0.003, top = 0.06, R = 0.06, cx = 0.0513, cz = 0.0137;
+  const n = [k / Math.hypot(1, k), 1 / Math.hypot(1, k)];
+  const frustum = (p: readonly number[]) => {
+    const rho = Math.hypot(p[0] - cx, p[2] - cz), y = p[1] - base;
+    return Math.max(-y, y - top, (rho - R) * n[0] + y * n[1]);
+  };
+  assert.doesNotThrow(() => buildClothSolidField({ sdf: frustum, lo: [-0.03, -0.03, -0.07], hi: [0.13, 0.1, 0.1], cell: 0.01, band: 0.03 }));
 });
 
 test("solid field: a local rebuild after a cut equals a full build of the cut solid", () => {
@@ -130,8 +156,32 @@ test("vertex-solid energy: force is -dE/dx, the Hessian is the PSD Gauss-Newton 
   }
   assert.ok(active > 40, `${active} active`);
   assert.equal(solidContact(field, [0.05, 0.04, 0.02], [0.05, 0.04, 0.02], 0, p).e, Infinity);
-  // Friction opposes the slide from the step start and vanishes along the normal.
-  const x: V3 = [0.05, 0.04, 0.03 + 1e-3], fr = solidContact(field, add(x, [1e-3, 0, 0]), x, 10, { ...p, mu: 0.5 });
-  const nf = solidContact(field, add(x, [1e-3, 0, 0]), x, 10, p);
+  // Friction (the entry's mu lambda) opposes the slide from the step start and vanishes along the normal.
+  const x: V3 = [0.05, 0.04, 0.03 + 1e-3], fr = solidContact(field, add(x, [1e-3, 0, 0]), x, 0.5 * 10, p);
+  const nf = solidContact(field, add(x, [1e-3, 0, 0]), x, 0, p);
   assert.ok(fr.f[0] - nf.f[0] < -4.9 && Math.abs(fr.f[2] - nf.f[2]) < 1e-9);
+});
+
+test("solid field parts: a lattice-box floor and an sdf ball match the single-sdf build, carry their own friction, and build fast", () => {
+  const cell = 0.01, floorLo: V3 = [-1.4, -0.1, -1.4], floorHi: V3 = [1.4, 0, 1.4], ball = sphereSdf([0.3, 0.3, -0.2], 0.25), floor = boxSdf(floorLo, floorHi);
+  const parts: ClothSolidPart[] = [
+    { kind: "lattice-box", lo: floorLo, hi: floorHi, mu: 0.3 },
+    { kind: "sdf", sdf: p => ball(p), lo: [0.05, 0.05, -0.45], hi: [0.55, 0.55, 0.05], mu: 1 },
+  ];
+  const box = { lo: [-1.44, -0.16, -1.44] as V3, hi: [1.44, 0.6, 1.44] as V3, cell, band: 0.06 };
+  const t0 = performance.now(), split = buildClothSolidField({ ...box, parts }), ms = performance.now() - t0;
+  const whole = buildClothSolidField({ ...box, sdf: p => Math.min(floor(p), ball(p)), mu: 0 });
+  assert.deepEqual([...split.bricks.keys()].sort(), [...whole.bricks.keys()].sort());
+  for (const [k, b] of whole.bricks) {
+    const v = split.bricks.get(k)!.values;
+    for (let i = 0; i < v.length; i++) if (b.values[i]! <= 0.06) assert.equal(v[i], b.values[i], `brick ${k} node ${i}`);
+  }
+  assert.equal(sampleClothSolidField(split, [-1, 0.004, 1]).mu, 0.3);
+  assert.equal(sampleClothSolidField(split, [0.3, 0.554, -0.2]).mu, 1);
+  assert.equal(sampleClothSolidField(whole, [0.3, 0.554, -0.2]).mu, 0);
+  console.log(`# 2.8 m floor + 0.25 m ball at 1 cm: ${split.bricks.size} bricks in ${ms.toFixed(0)} ms`);
+  assert.ok(ms < 3000, `build ${ms} ms`);
+  assert.throws(() => buildClothSolidField({ ...box, parts: [{ kind: "lattice-box", lo: [0, 0.003, 0], hi: [0.1, 0.1, 0.1], mu: 0 }] }), /node planes/);
+  assert.throws(() => buildClothSolidField({ ...box, parts: [{ kind: "mesh", lo: [0, 0, 0], hi: [1, 1, 1], mu: 0 } as unknown as ClothSolidPart] }), /Unknown cloth solid part kind/);
+  assert.throws(() => buildClothSolidField({ ...box, parts: [{ ...parts[1]!, mu: 3 } as ClothSolidPart] }), /friction/);
 });

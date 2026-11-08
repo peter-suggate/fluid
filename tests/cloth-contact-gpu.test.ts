@@ -433,7 +433,10 @@ test("GPU envelope cap and contact-list overflow fail explicitly through the sta
 
 const solidBox = boxSdf([0.02, 0.02, 0], [0.08, 0.06, 0.03]), solidBall = sphereSdf([0.11, 0.05, 0], 0.025);
 const solidField = (band = 0.06) => buildClothSolidField({
-  sdf: p => Math.min(solidBox(p), solidBall(p)), lo: [-0.02, -0.02, -0.03], hi: [0.18, 0.12, 0.1], cell: 0.005, band });
+  parts: [
+    { kind: "sdf", sdf: p => solidBox(p), lo: [0.02, 0.02, 0], hi: [0.08, 0.06, 0.03], mu: 0.3 },
+    { kind: "sdf", sdf: p => solidBall(p), lo: [0.085, 0.025, -0.025], hi: [0.135, 0.075, 0.025], mu: 0.5 },
+  ], lo: [-0.02, -0.02, -0.03], hi: [0.18, 0.12, 0.1], cell: 0.005, band });
 
 /** A sheet over the box's top and the sphere, 0.5-4.5 mm above the box. */
 function solidSheet(seed: number): OracleMesh {
@@ -477,7 +480,7 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
       const qs = Math.max(...qr.map(Math.abs));
       for (let k = 0; k < 4; k++) assert.ok(Math.abs(q[k] - qr[k]) <= 2e-3 * qs, `vertex ${v} q/j[${k}] ${q[k]} vs ${qr[k]}`);
       const lambda = new Float32Array(new Uint32Array([solid[0].z]).buffer)[0];
-      const lr = b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0;
+      const lr = (b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0) * sampleClothSolidField(field, mesh.x[v]).mu;
       assert.ok(Math.abs(lambda - lr) <= 2e-3 * Math.max(1, lr), `vertex ${v} lambda ${lambda} vs ${lr}`);
     }
     assert.ok(near > 40 && c0.solidContacts === near, `${near} near-solid vertices, counter ${c0.solidContacts}`);

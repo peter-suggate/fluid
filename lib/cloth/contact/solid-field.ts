@@ -19,7 +19,15 @@
  *   header  [0] slots - 1  [1] brick count  [2] cell (f32)  [3] band (f32)
  *           [4..6] origin (f32)  [7] L_max (f32)  [8..10] bricks per axis  [11] 0
  *   slots   (bx, by, bz, record word offset from base); an empty slot has w = OGC_NONE
- *   records 729 node values (f32), x fastest, padded to 732 words
+ *   records 729 node values (f32), x fastest, padded to 732 words, then the
+ *           node friction coefficients, one byte per node (mu * 100), four per word
+ *
+ * A source is one signed distance or a union of parts, each with its own
+ * friction coefficient. A part is evaluated only for bricks within band of its
+ * box, and only its own surface is checked for resolution; a "lattice-box"
+ * part, a box whose faces lie on node planes, is exact under the trilinear
+ * interpolant and needs no check (scene floors and slabs). A node takes the
+ * friction of the part nearest it.
  */
 import { OGC_NONE } from "./ogc-topology";
 
@@ -28,11 +36,25 @@ export type V3 = readonly [number, number, number];
 export const SOLID_BRICK_CELLS = 8;
 const N = SOLID_BRICK_CELLS + 1, NODES = N ** 3;
 export const SOLID_HEADER_WORDS = 12;
-export const SOLID_RECORD_WORDS = 4 * Math.ceil(NODES / 4);
+/** Word offset of the friction bytes in a record. */
+export const SOLID_MU_WORD = 4 * Math.ceil(NODES / 4);
+export const SOLID_RECORD_WORDS = SOLID_MU_WORD + 4 * Math.ceil(NODES / 16);
+/** Friction coefficients are stored per node to 0.01, from 0 to 2.55. */
+export const SOLID_MU_SCALE = 100;
+
+export type ClothSolidPart =
+  /** Any 1-Lipschitz signed distance whose solid lies inside [lo, hi]. */
+  | { readonly kind: "sdf"; sdf(p: V3): number; readonly lo: V3; readonly hi: V3; readonly mu: number }
+  /** A box with every face on a node plane of the field's lattice. */
+  | { readonly kind: "lattice-box"; readonly lo: V3; readonly hi: V3; readonly mu: number };
 
 export interface ClothSolidSource {
-  /** Signed distance (m) at a cloth-local point, negative inside; any 1-Lipschitz function with the solid's zero set. */
-  sdf(p: V3): number;
+  /** Signed distance (m) at a cloth-local point, negative inside; any 1-Lipschitz function with the solid's zero set. Exclusive with parts. */
+  sdf?(p: V3): number;
+  /** Friction coefficient of the `sdf` solid (default 0: frictionless). */
+  mu?: number;
+  /** The solid as a union of parts. */
+  parts?: readonly ClothSolidPart[];
   /** Cloth-local box the cloth can reach; bricks are built over it and the cloth must stay inside it. */
   lo: V3;
   hi: V3;
@@ -41,7 +63,7 @@ export interface ClothSolidSource {
   band: number;
 }
 
-export interface ClothSolidBrick { brick: V3; values: Float32Array; lipschitz: number }
+export interface ClothSolidBrick { brick: V3; values: Float32Array; mu: Uint8Array; lipschitz: number }
 
 export interface ClothSolidField {
   cell: number;
@@ -88,33 +110,54 @@ export function cellGradientRange(values: ArrayLike<number>, c: V3): { lo: [numb
 }
 
 function brickLipschitz(values: Float32Array, cell: number): number {
-  let L = 0;
+  // Per cell and axis, the largest |difference| along the cell's four a-edges (cellGradientRange).
+  const stride = [1, N, N * N];
+  let L2 = 0;
   for (let z = 0; z < SOLID_BRICK_CELLS; z++) for (let y = 0; y < SOLID_BRICK_CELLS; y++) for (let x = 0; x < SOLID_BRICK_CELLS; x++) {
-    const { lo, hi } = cellGradientRange(values, [x, y, z]);
-    L = Math.max(L, Math.hypot(...lo.map((l, a) => Math.max(-l, hi[a]!))) / cell);
+    const base = nodeIndex(x, y, z);
+    let s2 = 0;
+    for (let a = 0; a < 3; a++) {
+      const da = stride[a]!, du = stride[(a + 1) % 3]!, dv = stride[(a + 2) % 3]!;
+      let m = 0;
+      for (let k = 0; k < 4; k++) {
+        const i = base + (k & 1) * du + (k >> 1) * dv;
+        m = Math.max(m, Math.abs(values[i + da]! - values[i]!));
+      }
+      s2 += m * m;
+    }
+    L2 = Math.max(L2, s2);
   }
-  return L;
+  return Math.sqrt(L2) / cell;
 }
 
 /**
  * Refuse a solid the lattice does not resolve. For a 1-Lipschitz source, a
  * node with |phi| >= sqrt(3) h proves its whole cell one-signed (the cell lies
  * in that node's one-signed ball), so only cells with every |node| below that
- * are sampled, at h / 8. Where source and interpolant disagree in sign, the
- * interpolant has rounded a sharp corner or lost a feature: an ascent of |phi|
- * from the sample tells them apart. A corner belongs to a part at least a cell
- * thick and reaches depth h / 2 within two cells; a plate, rod or slot thinner
- * than about 0.9 h never does, and fails authoring.
+ * are sampled, at h / 8; an octree over each cell skips the probes of
+ * sub-boxes where source and interpolant are provably of one, equal sign.
+ *
+ * Where they disagree, the interpolant has rounded a sharp edge or corner, or
+ * lost a feature. The rule (SOLID_RESOLUTION): a disagreeing probe is accepted
+ * when a point at least DEPTH h deep on its side of the surface lies within
+ * REACH h of it, joined to it by a straight segment that stays on that side.
+ * So plates, rods and slots thinner than 2 DEPTH h = 0.9 h always fail, and a
+ * part at least a cell thick passes wherever the interpolant rounds it; a
+ * convex wedge (edge) passes from 35 degrees at every lattice phase and
+ * orientation, and one of 20 degrees or less fails (measured in
+ * tests/cloth-contact-solid; 25 to 30 degrees depends on the phase).
  */
 const PROBE = 8;
-function thinAt(src: ClothSolidSource, p: V3): boolean {
-  const { cell } = src, step = cell / 8, e = cell * 1e-4;
+export const SOLID_RESOLUTION = { depth: 0.45, reach: 2 } as const;
+type Sdf = (p: V3) => number;
+function thinAt(sdf: Sdf, cell: number, p: V3): boolean {
+  const src = { sdf };
+  const step = cell / 8, e = cell * 1e-4, deep = SOLID_RESOLUTION.depth * cell;
   const sign = Math.sign(src.sdf(p));
-  let x = [...p], best = 0;
+  // Fast path: ascend |phi| along its gradient.
+  let x = [...p];
   for (let i = 0; i <= 16; i++) {
-    const d = sign * src.sdf(x as unknown as V3);
-    best = Math.max(best, d);
-    if (best >= 0.45 * cell) return false;
+    if (sign * src.sdf(x as unknown as V3) >= deep) return false;
     const g = [0, 1, 2].map(a => {
       const u = [...x], w = [...x]; u[a]! += e; w[a]! -= e;
       return sign * (src.sdf(u as unknown as V3) - src.sdf(w as unknown as V3)) / (2 * e);
@@ -123,37 +166,123 @@ function thinAt(src: ClothSolidSource, p: V3): boolean {
     if (!(gl > 0)) break;
     x = x.map((v, a) => v + step * g[a]! / gl);
   }
+  // The ascent zigzags in acute wedges: search the ball of radius REACH h at h / 4.
+  const R = SOLID_RESOLUTION.reach * cell, q = cell / 4, n = Math.round(R / q);
+  for (let k = -n; k <= n; k++) for (let j = -n; j <= n; j++) for (let i = -n; i <= n; i++) {
+    const d: V3 = [i * q, j * q, k * q], len = Math.hypot(...d);
+    if (len > R) continue;
+    const t: V3 = [p[0] + d[0], p[1] + d[1], p[2] + d[2]];
+    if (sign * src.sdf(t) < deep) continue;
+    let inside = true;
+    for (let s = 1, m = Math.ceil(len / step); s < m && inside; s++) inside = sign * src.sdf([p[0] + d[0] * s / m, p[1] + d[1] * s / m, p[2] + d[2] * s / m]) > 0;
+    if (inside) return false;
+  }
   return true;
 }
-function checkResolved(src: ClothSolidSource, at: (q: V3) => V3, values: Float32Array) {
-  const { cell } = src, reach = Math.sqrt(3) * cell;
+function checkResolved(sdf: Sdf, cell: number, at: (q: V3) => V3, values: ArrayLike<number>) {
+  const src = { sdf };
+  const reach = Math.sqrt(3) * cell, n = new Float64Array(8);
+  // The interpolant at fraction f of the current cell (nodes n).
+  const lerp = (fx: number, fy: number, fz: number) => {
+    const a = n[0]! + fx * (n[1]! - n[0]!), b = n[2]! + fx * (n[3]! - n[2]!), c = n[4]! + fx * (n[5]! - n[4]!), d = n[6]! + fx * (n[7]! - n[6]!);
+    const u = a + fy * (b - a), w = c + fy * (d - c);
+    return u + fz * (w - u);
+  };
+  // Octree over the cell down to the h / 8 probes. A box is cleared when the
+  // source is one-signed on it (|sdf(centre)| >= half-diagonal, 1-Lipschitz) and
+  // the interpolant, multilinear so extreme at the box corners, has that same
+  // sign on all of it: no probe in it can disagree. Leaves are the probes.
+  const visit = (x: number, y: number, z: number, f: V3, s: number) => {
+    const q: V3 = [x + f[0] + 0.5 * s, y + f[1] + 0.5 * s, z + f[2] + 0.5 * s], p = at(q), exact = src.sdf(p);
+    if (s <= 1 / PROBE) {
+      if (exact * lerp(f[0] + 0.5 * s, f[1] + 0.5 * s, f[2] + 0.5 * s) < 0 && thinAt(sdf, cell, p))
+        throw new RangeError(`Cloth solid has a feature thinner than its ${cell} m cell near (${p.map(v => v.toFixed(4)).join(", ")}): `
+          + `no point ${SOLID_RESOLUTION.depth} cells deep within ${SOLID_RESOLUTION.reach} cells (plates, rods and slots under ${2 * SOLID_RESOLUTION.depth} cells, convex edges sharper than 35 degrees may fail, under 20 always do)`);
+      return;
+    }
+    if (Math.abs(exact) >= 0.5 * Math.sqrt(3) * s * cell) {
+      let agree = true;
+      for (let k = 0; k < 8 && agree; k++) agree = exact * lerp(f[0] + s * (k & 1), f[1] + s * ((k >> 1) & 1), f[2] + s * (k >> 2)) >= 0;
+      if (agree) return;
+    }
+    const h = 0.5 * s;
+    for (let k = 0; k < 8; k++) visit(x, y, z, [f[0] + h * (k & 1), f[1] + h * ((k >> 1) & 1), f[2] + h * (k >> 2)], h);
+  };
   for (let z = 0; z < SOLID_BRICK_CELLS; z++) for (let y = 0; y < SOLID_BRICK_CELLS; y++) for (let x = 0; x < SOLID_BRICK_CELLS; x++) {
     let far = false;
-    for (let k = 0; k < 8 && !far; k++) far = Math.abs(values[nodeIndex(x + (k & 1), y + ((k >> 1) & 1), z + (k >> 2))]!) >= reach;
-    if (far) continue;
-    for (let k = 0; k < PROBE ** 3; k++) {
-      const q: V3 = [x + ((k % PROBE) + 0.5) / PROBE, y + ((Math.floor(k / PROBE) % PROBE) + 0.5) / PROBE, z + (Math.floor(k / PROBE ** 2) + 0.5) / PROBE];
-      const p = at(q), exact = src.sdf(p), interp = trilinear(values, q)[3];
-      if (exact * interp < 0 && thinAt(src, p))
-        throw new RangeError(`Cloth solid has a feature thinner than its ${cell} m cell near (${p.map(v => v.toFixed(4)).join(", ")})`);
+    for (let k = 0; k < 8; k++) {
+      n[k] = values[nodeIndex(x + (k & 1), y + ((k >> 1) & 1), z + (k >> 2))]!;
+      far ||= Math.abs(n[k]!) >= reach;
     }
+    if (!far) visit(x, y, z, [0, 0, 0], 1);
   }
 }
 
-/** Build one brick from the source, or undefined when it is further than band from all solid. Throws on unresolved features. */
-function buildBrick(src: ClothSolidSource, origin: V3, b: V3): ClothSolidBrick | undefined {
+interface Part { kind: "sdf" | "lattice-box"; sdf: Sdf; lo: V3; hi: V3; mu: number }
+const boxSdf = (lo: V3, hi: V3): Sdf => p => {
+  let out = 0, ins = -Infinity;
+  for (let a = 0; a < 3; a++) {
+    const q = Math.max(lo[a]! - p[a]!, p[a]! - hi[a]!);
+    out += Math.max(q, 0) ** 2; ins = Math.max(ins, q);
+  }
+  return Math.sqrt(out) + Math.min(ins, 0);
+};
+/** The source's parts, validated against the lattice; unknown kinds fail. */
+function partsOf(src: ClothSolidSource, origin: V3): Part[] {
   const { cell, band } = src;
+  if (!(band >= Math.sqrt(3) * cell)) throw new RangeError(`Cloth solid band ${band} m must be at least sqrt(3) cells`);
+  const checkMu = (mu: number) => {
+    if (!(mu >= 0 && mu <= 255 / SOLID_MU_SCALE)) throw new RangeError(`Cloth solid friction ${mu} must lie in [0, ${255 / SOLID_MU_SCALE}]`);
+    return mu;
+  };
+  if (src.parts && src.sdf) throw new RangeError("Cloth solid source gives both sdf and parts");
+  if (!src.parts) {
+    if (!src.sdf) throw new RangeError("Cloth solid source needs sdf or parts");
+    const sdf = src.sdf.bind(src);
+    return [{ kind: "sdf", sdf, lo: [-Infinity, -Infinity, -Infinity], hi: [Infinity, Infinity, Infinity], mu: checkMu(src.mu ?? 0) }];
+  }
+  return src.parts.map(part => {
+    if (!part.lo.every((v, a) => v <= part.hi[a]!)) throw new RangeError("Cloth solid part needs lo <= hi");
+    if (part.kind === "sdf") return { kind: part.kind, sdf: part.sdf.bind(part), lo: part.lo, hi: part.hi, mu: checkMu(part.mu) };
+    if (part.kind === "lattice-box") {
+      for (const v of [...part.lo.map((x, a) => (x - origin[a]!) / cell), ...part.hi.map((x, a) => (x - origin[a]!) / cell)])
+        if (Math.abs(v - Math.round(v)) > 1e-6) throw new RangeError(`Cloth solid lattice-box faces must lie on node planes of the ${cell} m lattice`);
+      return { kind: part.kind, sdf: boxSdf(part.lo, part.hi), lo: part.lo, hi: part.hi, mu: checkMu(part.mu) };
+    }
+    throw new RangeError(`Unknown cloth solid part kind "${(part as { kind: string }).kind}"`);
+  });
+}
+
+/** Build one brick from the parts, or undefined when it is further than band from all solid. Throws on unresolved features. */
+function buildBrick(parts: readonly Part[], cell: number, band: number, origin: V3, b: V3): ClothSolidBrick | undefined {
   const at = (q: V3): V3 => [origin[0] + (b[0] * SOLID_BRICK_CELLS + q[0]) * cell, origin[1] + (b[1] * SOLID_BRICK_CELLS + q[1]) * cell, origin[2] + (b[2] * SOLID_BRICK_CELLS + q[2]) * cell];
-  const values = new Float32Array(NODES);
+  const blo = at([0, 0, 0]), bhi = at([SOLID_BRICK_CELLS, SOLID_BRICK_CELLS, SOLID_BRICK_CELLS]);
+  // A part whose box is further than band from the brick is further than band at every
+  // node; with band >= sqrt(3) h it changes no cell that holds surface.
+  const near = parts.filter(p => Math.hypot(...[0, 1, 2].map(a => Math.max(0, p.lo[a]! - bhi[a]!, blo[a]! - p.hi[a]!))) <= band);
+  if (!near.length) return undefined;
+  const values = new Float32Array(NODES).fill(Infinity), own = new Uint8Array(NODES);
+  const pv = near.map(() => new Float32Array(NODES));
+  const p: [number, number, number] = [0, 0, 0];
   let lo = Infinity;
-  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
-    const v = src.sdf(at([x, y, z]));
-    if (!Number.isFinite(v)) throw new RangeError("Cloth solid distance must be finite");
-    values[nodeIndex(x, y, z)] = v; lo = Math.min(lo, v);
+  for (let k = 0; k < near.length; k++) {
+    const part = near[k]!, out = pv[k]!;
+    for (let z = 0, i = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++, i++) {
+      p[0] = blo[0] + x * cell; p[1] = blo[1] + y * cell; p[2] = blo[2] + z * cell;
+      const v = part.sdf(p);
+      if (!Number.isFinite(v)) throw new RangeError("Cloth solid distance must be finite");
+      out[i] = v;
+      if (out[i]! < values[i]!) { values[i] = out[i]!; own[i] = k; }
+      if (k === near.length - 1) lo = Math.min(lo, values[i]!);
+    }
   }
   if (lo > band) return undefined;
-  checkResolved(src, at, values);
-  return { brick: b, values, lipschitz: brickLipschitz(values, cell) };
+  // Each part's own surface: the union's interpolant lies at or below every part's, so
+  // what a part keeps the union keeps.
+  near.forEach((part, k) => { if (part.kind === "sdf") checkResolved(part.sdf, cell, at, pv[k]!); });
+  const mu = new Uint8Array(NODES);
+  for (let i = 0; i < NODES; i++) mu[i] = Math.round(near[own[i]!]!.mu * SOLID_MU_SCALE);
+  return { brick: b, values, mu, lipschitz: brickLipschitz(values, cell) };
 }
 
 function pack(field: Omit<ClothSolidField, "words">): Uint32Array<ArrayBuffer> {
@@ -172,6 +301,9 @@ function pack(field: Omit<ClothSolidField, "words">): Uint32Array<ArrayBuffer> {
     while (words[SOLID_HEADER_WORDS + 4 * s + 3] !== OGC_NONE) s = (s + 1) & (slots - 1);
     words.set([b.brick[0], b.brick[1], b.brick[2], record], SOLID_HEADER_WORDS + 4 * s);
     f.set(b.values, record);
+    const m = new Uint8Array(4 * (SOLID_RECORD_WORDS - SOLID_MU_WORD));
+    m.set(b.mu);
+    words.set(new Uint32Array(m.buffer), record + SOLID_MU_WORD);
     record += SOLID_RECORD_WORDS;
   }
   return words;
@@ -184,9 +316,10 @@ export function buildClothSolidField(src: ClothSolidSource): ClothSolidField {
   const origin = src.lo.map(v => Math.floor(v / span) * span) as unknown as V3;
   const dims = src.hi.map((v, a) => Math.ceil((v - origin[a]!) / span)) as unknown as V3;
   if (dims.some(c => c > 1 << 20)) throw new RangeError("Cloth solid field box is too large for its cell");
+  const parts = partsOf(src, origin);
   const bricks = new Map<string, ClothSolidBrick>();
   for (let bz = 0; bz < dims[2]; bz++) for (let by = 0; by < dims[1]; by++) for (let bx = 0; bx < dims[0]; bx++) {
-    const b = buildBrick(src, origin, [bx, by, bz]);
+    const b = buildBrick(parts, cell, band, origin, [bx, by, bz]);
     if (b) bricks.set(`${bx},${by},${bz}`, b);
   }
   return finish({ cell, band, origin, dims, bricks, maxLipschitz: 0 });
@@ -209,20 +342,22 @@ export function rebuildClothSolidField(field: ClothSolidField, src: ClothSolidSo
   const span = SOLID_BRICK_CELLS * field.cell;
   const b0 = lo.map((v, a) => Math.max(0, Math.floor((v - field.band - field.origin[a]!) / span)));
   const b1 = hi.map((v, a) => Math.min(field.dims[a]! - 1, Math.floor((v + field.band - field.origin[a]!) / span)));
+  const parts = partsOf(src, field.origin);
   const bricks = new Map(field.bricks);
   for (let bz = b0[2]!; bz <= b1[2]!; bz++) for (let by = b0[1]!; by <= b1[1]!; by++) for (let bx = b0[0]!; bx <= b1[0]!; bx++) {
-    const key = `${bx},${by},${bz}`, b = buildBrick(src, field.origin, [bx, by, bz]);
+    const key = `${bx},${by},${bz}`, b = buildBrick(parts, field.cell, field.band, field.origin, [bx, by, bz]);
     if (b) bricks.set(key, b); else bricks.delete(key);
   }
   return finish({ cell: field.cell, band: field.band, origin: field.origin, dims: field.dims, bricks, maxLipschitz: 0 });
 }
 
-/** The field at a cloth-local point: phi (m), its gradient, and whether a stored brick holds the point (else phi reads band). */
-export function sampleClothSolidField(field: ClothSolidField, p: V3): { phi: number; grad: V3; stored: boolean } {
+/** The field at a cloth-local point: phi (m), its gradient, the nearest node's friction, and whether a stored brick holds the point (else phi reads band). */
+export function sampleClothSolidField(field: ClothSolidField, p: V3): { phi: number; grad: V3; mu: number; stored: boolean } {
   const q = p.map((v, a) => (v - field.origin[a]!) / field.cell);
   const b = q.map(v => Math.floor(v / SOLID_BRICK_CELLS));
   const brick = field.bricks.get(b.join(","));
-  if (!brick) return { phi: field.band, grad: [0, 0, 0], stored: false };
-  const s = trilinear(brick.values, q.map((v, a) => v - b[a]! * SOLID_BRICK_CELLS) as unknown as V3);
-  return { phi: s[3], grad: [s[0] / field.cell, s[1] / field.cell, s[2] / field.cell], stored: true };
+  if (!brick) return { phi: field.band, grad: [0, 0, 0], mu: 0, stored: false };
+  const l = q.map((v, a) => v - b[a]! * SOLID_BRICK_CELLS) as unknown as V3, s = trilinear(brick.values, l);
+  const n = l.map(v => Math.min(SOLID_BRICK_CELLS, Math.max(0, Math.round(v))));
+  return { phi: s[3], grad: [s[0] / field.cell, s[1] / field.cell, s[2] / field.cell], mu: brick.mu[nodeIndex(n[0]!, n[1]!, n[2]!)]! / SOLID_MU_SCALE, stored: true };
 }

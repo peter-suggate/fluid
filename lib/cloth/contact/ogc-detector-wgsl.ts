@@ -77,6 +77,7 @@ const DECL: Record<number, string> = {
   10: "@group(0) @binding(10) var<storage, read_write> args: array<u32>;",
   11: "@group(0) @binding(11) var<storage, read_write> pairs: array<vec4<u32>>;",
   12: "@group(0) @binding(12) var<storage, read_write> planesArgs: array<u32>;",
+  13: "@group(0) @binding(13) var<storage, read> xt: array<vec4<f32>>;",
 };
 /** Truncation writes the solver's positions. */
 const DECL_POS_RW = "@group(0) @binding(2) var<storage, read_write> pos: array<vec4<f32>>;";
@@ -130,15 +131,19 @@ fn invCell() -> f32 { ${intersect ? "return 1.0 / P.intersectCell;" : "return bi
 
 // ------------------------------------------------------------------ prep, cell, frame and step control
 
-export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9]) + /* wgsl */`
+export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13]) + /* wgsl */`
 var<workgroup> wgMaxEnv: atomic<u32>;
 var<workgroup> wgCap: atomic<u32>;
 var<workgroup> wgBad: atomic<u32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let v = gid.x;
+  // The step's mandatory round detects at the step start x_t (the solver has already
+  // placed its initial guess, which the round's truncation then cuts); a re-detection
+  // round commits the current, truncated iterate.
+  let mandatory = atomicLoad(&counters[OGC_ROUNDS]) == 0u;
   if (v < P.N) {
-    let x = pos[v].xyz;
+    let x = select(pos[v].xyz, xt[v].xyz, mandatory);
     // The inertial displacement over the step bounds how far the vertex can travel before the next round.
     let disp = length(vel[v].xyz * P.dt + P.gravity.xyz * (P.dt * P.dt));
     var env = max(P.rqBase, P.r + P.envScale * disp);
@@ -251,9 +256,10 @@ fn ratio(s0: f32, s1: f32) -> f32 {
 fn lower(v: u32, t: f32) { if (t < 1.0) { atomicMin(&work[P.tvOff + v], bitcast<u32>(t)); } }
 var<workgroup> wgUncert: atomic<u32>;
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-  let i = gid.x;
-  if (i < min(atomicLoad(&counters[OGC_PAIR_SLOTS]), P.pairCap)) {
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(num_workgroups) nwg: vec3<u32>) {
+  // Grid-stride: a round's slots can exceed 65535 workgroups of 64.
+  let slots = min(atomicLoad(&counters[OGC_PAIR_SLOTS]), P.pairCap);
+  for (var i = gid.x; i < slots; i += 64u * nwg.x) {
     let raw = pairs[2u * i];
     if (raw.x != OGC_NONE) {
       let pl = bitcast<vec4<f32>>(pairs[2u * i + 1u]);
@@ -688,7 +694,8 @@ fn solidRound(v: u32, x0: vec3<f32>, rho: f32) {
     } else {
       let s = 1.0 / (P.gammaR * sb.phi0);
       qj = vec4<f32>(sb.g0 * s, sb.J * s);
-      let lambda = select(0.0, -ogcActivation(sb.phi0, P.r, P.kc).y * length(sb.g0), sb.phi0 < P.r);
+      // mu lambda: the solid's own friction at x_det times the lagged normal force.
+      let lambda = select(0.0, -ogcActivation(sb.phi0, P.r, P.kc).y * length(sb.g0), sb.phi0 < P.r) * ogcSolidMu(h, x0);
       let slot = atomicAdd(&contacts[P.countsOff + v], 1u);
       if (slot < P.contactCap) {
         let b = P.entriesBase + 4u * (v * P.contactCap + slot);
@@ -710,7 +717,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let slots = atomicLoad(&counters[OGC_PAIR_SLOTS]);
     atomicMax(&counters[OGC_PEAK_PAIR_SLOTS], slots);
     atomicMax(&counters[OGC_F_PEAK_PAIR_SLOTS], slots);
-    planesArgs[0] = select(0u, (min(slots, P.pairCap) + 63u) / 64u, planar); planesArgs[1] = 1u; planesArgs[2] = 1u;
+    planesArgs[0] = select(0u, min((min(slots, P.pairCap) + 63u) / 64u, 65535u), planar); planesArgs[1] = 1u; planesArgs[2] = 1u;
   }
   if (v < P.N) {
     var cap = 0.5 * P.gammaR * dminAt(P.envOff + v);
@@ -748,21 +755,52 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * above their rounding.
  */
 export const OGC_INTERSECT_WGSL = header([0, 1, 4, 7, 9]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(true) + /* wgsl */`
-fn orient(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> f32 { return dot(b - a, cross(c - a, d - a)); }
-fn segTri(p: vec3<f32>, q: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> bool {
-  let o1 = orient(a, b, c, p); let o2 = orient(a, b, c, q);
-  if (o1 == 0.0 && o2 == 0.0) { return false; }
-  if (o1 * o2 > 0.0) { return false; }
-  let s1 = orient(p, q, a, b); let s2 = orient(p, q, b, c); let s3 = orient(p, q, c, a);
-  return (s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0);
+// Orientation with its forward error bound: f32 differences of f32 inputs are exact to
+// a relative 2^-24, so |error| <= 16 u perm with perm the permanent of the differences.
+fn orient(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> vec2<f32> {
+  let ba = b - a; let ca = c - a; let da = d - a;
+  let o = dot(ba, cross(ca, da));
+  let perm = dot(abs(ba), abs(ca.yzx * da.zxy) + abs(ca.zxy * da.yzx));
+  return vec2<f32>(o, 9.5367e-7 * perm);
 }
+fn certain(o: vec2<f32>) -> bool { return abs(o.x) > o.y; }
+// 0: no crossing, 1: the segment crosses the triangle, 2: undecided in f32.
+fn segTri(p: vec3<f32>, q: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> u32 {
+  let o1 = orient(a, b, c, p); let o2 = orient(a, b, c, q);
+  if (certain(o1) && certain(o2) && o1.x * o2.x > 0.0) { return 0u; }
+  let s1 = orient(p, q, a, b); let s2 = orient(p, q, b, c); let s3 = orient(p, q, c, a);
+  let sure = certain(o1) && certain(o2) && certain(s1) && certain(s2) && certain(s3);
+  if (sure) { return select(0u, 1u, (s1.x > 0.0 && s2.x > 0.0 && s3.x > 0.0) || (s1.x < 0.0 && s2.x < 0.0 && s3.x < 0.0)); }
+  // Undecided signs: only a crossing whose signs could all agree needs the distance test.
+  let pos = (s1.x >= -s1.y) && (s2.x >= -s2.y) && (s3.x >= -s3.y);
+  let neg = (s1.x <= s1.y) && (s2.x <= s2.y) && (s3.x <= s3.y);
+  return select(0u, 2u, pos || neg);
+}
+fn triDistance(A: array<vec3<f32>, 3>, B: array<vec3<f32>, 3>) -> f32 {
+  var d = 3.4e38;
+  for (var k = 0u; k < 3u; k++) {
+    let ca = ogcClosestTriangle(A[k], B[0], B[1], B[2]).bary;
+    d = min(d, length(A[k] - (ca.x * B[0] + ca.y * B[1] + ca.z * B[2])));
+    let cb = ogcClosestTriangle(B[k], A[0], A[1], A[2]).bary;
+    d = min(d, length(B[k] - (cb.x * A[0] + cb.y * A[1] + cb.z * A[2])));
+    for (var l = 0u; l < 3u; l++) { d = min(d, ogcSegmentSegment(A[k], A[(k + 1u) % 3u], B[l], B[(l + 1u) % 3u]).z); }
+  }
+  return d;
+}
+// Exact where the f32 signs are certain; an undecided (near-degenerate) pair intersects
+// only if the triangles lie within the f32 resolution of their coordinates of each other.
 fn triTri(Av: array<vec3<f32>, 3>, Bv: array<vec3<f32>, 3>) -> bool {
   var A = Av; var B = Bv;
+  var undecided = false;
+  var scale = 0.0;
   for (var k = 0u; k < 3u; k++) {
-    if (segTri(A[k], A[(k + 1u) % 3u], B[0], B[1], B[2])) { return true; }
-    if (segTri(B[k], B[(k + 1u) % 3u], A[0], A[1], A[2])) { return true; }
+    let ra = segTri(A[k], A[(k + 1u) % 3u], B[0], B[1], B[2]);
+    let rb = segTri(B[k], B[(k + 1u) % 3u], A[0], A[1], A[2]);
+    if (ra == 1u || rb == 1u) { return true; }
+    undecided = undecided || ra == 2u || rb == 2u;
+    scale = max(scale, max(max(abs(A[k].x), abs(A[k].y)), max(max(abs(A[k].z), abs(B[k].x)), max(abs(B[k].y), abs(B[k].z)))));
   }
-  return false;
+  return undecided && triDistance(A, B) <= 7.6294e-6 * scale;
 }
 var<workgroup> wgHits: atomic<u32>;
 @compute @workgroup_size(64)

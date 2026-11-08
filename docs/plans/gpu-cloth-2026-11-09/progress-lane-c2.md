@@ -257,3 +257,109 @@ The tests check a 0.3h plate (throws), a 0.3h slot (throws), and an off-lattice 
 - solid-surface point and edge samples against cloth faces and edges (sharp-edge poke-through);
 - the scene solid-world adapter;
 - the gates (sphere drape, sharp box, cut under resting cloth) through C1's solver, once C1's M1 lands in git.
+
+## 2026-11-09 MILESTONE: M2 integrated in C1's Tier A solver; both gates pass the safety checks
+
+The harness is `tests/cloth-contact-gates.test.ts`. It runs only on the GPU and only when asked: `CLOTH_CONTACT_GATES=drop,twist|all`, plus `CLOTH_GATE_STEPS` (default 60).
+
+- **Wiring:**
+  - `OgcContactDetector.create` (no inputs);
+  - `ClothGPUSolver.create({contact: det.solverContact(CLOTH_BINDING.contact), hooks: det.stepHooks})`;
+  - `det.bind({positions, velocities, stepStart})`;
+  - `setSolidField`.
+- C1's line search already includes `ogcVertexContactEnergy`.
+- Each frame is checked for: GPU intersection count 0, no failing status bit, and no vertex inside the solid (checked every 10 steps on the CPU). One timed batch of 30 steps follows the gate.
+
+**Gate results.** Both use kc 100, s 2.5, truncation per colour and 20 iterations.
+
+| | drop | twist |
+|---|---|---|
+| Scene | 10 × 31² sheets, each turned 7° from the last, onto a voxel pedestal on a floor slab | 100² sheet (OGC Fig. 12); edges turn ±π/2 rad/s and move together 0.1 m/s |
+| Vertices | 9610 | 10000 |
+| Steps | 60 | 60 |
+| Intersections | 0 every frame | 0 every frame |
+| Vertices inside solid | 0 | none (no solid) |
+| Rounds per step | 2.18 | 3.88 |
+| Pair slots, peak | 1300N | 950N |
+| Contacts per vertex, peak | 74 of 128 | 47 of 128 |
+| Envelope-cap hits | 8 | 43912 |
+| Residual, end | about 10 | 5e5 |
+| Time per step | 301 ms | 321 ms |
+
+**Twist residual.** The large twist residual comes from truncation: about 7000 cap truncations per iteration, and a truncated iterate is not a stationary point. The twist without contact (`CLOTH_GATE_NO_CONTACT=1`) self-intersects at step 15, so contact is needed.
+
+**Fixes made while gating:**
+1. **The mandatory round now detects at x_t.** C1's frame kernel writes its initial guess into `positions` before `afterFrame`. Detecting there treated the guess as safe, and the drop went 4 mm into the pedestal at step 2.
+   - The mandatory round now reads `stepStart` (C1's x_t segment).
+   - A re-detection still reads `positions`.
+   - `OGC_ROUNDS == 0` selects which.
+2. **The planes dispatch exceeded 65535 workgroups beyond 4.19M pair slots,** and those pairs were never truncated: 276 real intersections in the drop at s 2.5.
+   - The planes pass is now grid-stride, with its indirect count clamped to 65535.
+3. **The GPU intersection counter gave f32 false positives** on near-coplanar non-adjacent faces of a flat sheet (GPU counted 15, Float64 counted 0).
+   - Orientations now carry a forward error bound, 16u times the permanent.
+   - A pair whose signs are undecided counts only if its triangle distance is within 128u times its coordinate scale.
+   - The harness re-checks any GPU hit with a Float64 count.
+
+**Sensitivity of the drop at s 1.5, 30 steps:**
+
+| kc | Truncation | Residual | Rounds per step | Time per step |
+|---|---|---|---|---|
+| 1e4 | per colour | 6e2 to 1.6e3 | 4.5, at the round cap | 307 ms |
+| 1e2 | per colour | 60 to 140 | 2.2 | 228 ms |
+| 1e2 | per iteration | 30 | 2.2 | 206 ms |
+
+Truncation is not the main cost; detection rounds and pairs are. kc 100 holds ten layers at under 1e-4 r per vertex, so kc 1e4 bought nothing but conditioning trouble.
+
+## 2026-11-09 DECISION NEEDED: the envelope factor and the pair count at speed
+
+The evidence:
+- **s must exceed 2/γ_r = 2.22.** A round lets a vertex move 0.5 γ_r r_q = 0.45 (r + s·d) of its inertial displacement d.
+  - At the decided s ≈ 1.5 that is 0.675 d + 0.45 r, so every vertex in free flight is capped every step. In the twist at s 1.5, 19553 caps fell in step 0.
+  - The gates now run at s 2.5.
+- **Pairs scale as (s·|v|·dt / ℓ)², even when everything moves together.** A DAT plane is fixed for the step, and the envelope is absolute. So ten layers in free fall, and neighbouring faces of one sheet, pair up as soon as s·|v|·dt exceeds the edge length.
+  - The drop at s 2.5 peaks at 1300N pair slots, which is 12.5M slots and 400 MB.
+  - Time per step is 300 ms for 10K vertices, mostly detection.
+
+Options:
+1. **(a) Keep the absolute envelope at s 2.5.** Author pair slots of about 1300N from the measured peak, and accept about 300 ms per step at 10K vertices.
+2. **(b) Use s 1.5 and accept extra rounds.** The vertex cap then lags free fall.
+3. **(c) Use predicted-motion DAT (my recommendation).** Cap each vertex relative to its inertial prediction w_v = v·dt + g·dt², so that |dX − w_v| ≤ c_v. Record a pair when d < c_a + c_b + |w_a − w_b|.
+   - The plane of a pair moves with the pair's mean prediction. The constraint stays linear at the endpoint, with offset c + n·w̄, so the DAT argument carries over unchanged.
+   - Co-moving primitives (falling layers, a sheet's own neighbours) then pair only within r_q base, and pair counts fall to the at-rest level of about 5N.
+   - The cost is about one vec4 per vertex and one per pair.
+
+I am not implementing (c) before review.
+
+## 2026-11-09 COORDINATION (C2 → C1)
+
+- Please add `get stepStart(): GPUBufferBinding` (segment `CLOTH_STATE.xt`). The harness builds it from `solver.state` and `solver.tables.stride` for now.
+- The detector now binds it at prep binding 13. A detector bound without `stepStart` reads `positions`, which is right only when they hold x_t, as in the standalone tests.
+
+## 2026-11-09 COORDINATION (C2 → coordinator, Lane S): answers to the 2026-11-09 requests
+
+**(2) Per-solid friction.**
+- The field's records now carry a byte per node, μ × 100 over 0 to 2.55, taken from the part nearest the node.
+- The bound pass writes μλ into the solid entry: μ comes from the node nearest x_det, λ is the lagged normal force.
+- The vertex block uses that product directly.
+- Cloth-on-cloth uses `OgcContactConfig.mu`, which is separate.
+- A field given by a single `sdf` takes `mu` (default 0, frictionless).
+- Lane S: give each solid its own part with its μ.
+
+**(3) Field build time.**
+- The thin-feature probes are now an octree. A sub-box is cleared when the source is one-signed on it (the 1-Lipschitz ball) and the multilinear interpolant agrees at its corners.
+- `ClothSolidSource.parts` builds a union:
+  - `{kind:"sdf", sdf, lo, hi, mu}` is evaluated only for bricks within band of its box, and only its own surface is checked;
+  - `{kind:"lattice-box", lo, hi, mu}` must have faces on node planes. The interpolant is exact on it, so it is never checked, which suits floors and slabs. A misaligned lattice-box throws, and so does an unknown kind.
+  - band ≥ √3 cells is required.
+- Measured: a 2.8 m square floor (lattice-box) plus a 0.25 m ball (sdf) at 1 cm with a 6 cm band builds 4259 bricks in **405 ms**. The same solid as one sdf takes 6 s, and 25 to 40 s before the octree.
+- The drop pedestal, with 1980 bricks at 5 mm, builds in 86 ms.
+- What it does not refuse: a gap between two parts that the lattice closes. The solid only grows there, never shrinks; only fidelity is lost.
+
+**(4) The resolution rule, now explicit (`SOLID_RESOLUTION`).**
+- Where source and interpolant disagree, the probe is accepted if some point at least 0.45 cells deep on its own side lies within 2 cells of it, joined by a straight same-side segment. The gradient ascent stays as the fast path; the ball search catches the zigzag in acute wedges.
+- Plates, rods and slots under 0.9 cells always fail.
+- Convex edges: measured over 4 lattice phases × 4 orientations, 35° and above passes everywhere, and 20° and below fails everywhere. 25° to 30° depends on the phase.
+- The error message states the rule. A test sits at the thresholds, together with a free-standing 67° frustum rim, which passes.
+- **Lane S: this flips your assertion** at `tests/cloth-bridson-2002.test.ts:166`. The bare frustum, with footing 0, is now accepted. The footing can go, and the assertion should become a `doesNotThrow`. That test is the one red in the unit suite that comes from C2's change.
+
+**(1) Moving solids.** Noted: body-frame voxel bakes of `RigidBodyDescription` shapes, posed by RigidPoseTrack, with surface velocity from the twist. This is M6 step 1, next.

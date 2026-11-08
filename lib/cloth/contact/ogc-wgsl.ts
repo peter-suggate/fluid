@@ -16,7 +16,7 @@
  * Contact buffer header (vec4<u32>): [0] (N, list capacity, counts base, entries base),
  * [1] (r, k_c, mu, eps_v dt) as f32, [2] (solid image word offset, 0 when none, 0, 0).
  */
-import { SOLID_HEADER_WORDS } from "./solid-field";
+import { SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WORD } from "./solid-field";
 
 
 /** Counter word indices (atomic<u32>) shared by the TS host and the WGSL. */
@@ -227,6 +227,18 @@ fn ogcSolidSample(h: OgcSolidHeader, p: vec3<f32>) -> OgcSolidSample {
   return OgcSolidSample(phi, g / h.cell, true);
 }
 
+// The friction coefficient of the node nearest p (0 outside the stored bricks).
+fn ogcSolidMu(h: OgcSolidHeader, p: vec3<f32>) -> f32 {
+  let q = (p - h.origin) / h.cell;
+  let bq = floor(q * 0.125);
+  let rec = ogcSolidBrick(h, vec3<i32>(bq));
+  if (rec == OGC_NONE) { return 0.0; }
+  let n = vec3<u32>(clamp(floor(q - 8.0 * bq + 0.5), vec3<f32>(0.0), vec3<f32>(8.0)));
+  let i = n.x + 9u * (n.y + 9u * n.z);
+  let w = ogcSolidWord(rec + ${SOLID_MU_WORD}u + (i >> 2u));
+  return f32((w >> (8u * (i & 3u))) & 255u) * ${(1 / SOLID_MU_SCALE).toFixed(6)};
+}
+
 // Over the ball |d| <= rho around x0: phi(x0 + d) >= phi0 + g0.d - J |d|, with g0 the
 // gradient at x0 and J the largest deviation of the gradient from g0 over the cells
 // the ball's box touches (per axis, d phi / d x_a over a cell spans its four a-edge
@@ -310,15 +322,15 @@ fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   out.f = -act.y * g;
   out.h = act.z * mat3x3<f32>(g * g.x, g * g.y, g * g.z);
   out.e = act.x;
-  let mu = params.z;
-  if (mu > 0.0) {
+  // The entry carries mu lambda, mu the solid's own coefficient at x_det.
+  let ml = bitcast<f32>(ent.z);
+  if (ml > 0.0) {
     let gl = length(g);
     let n = select(vec3<f32>(0.0), g / gl, gl > 1e-30);
     let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
     let dx = xv - ogcXt(v);
     let u = dx - n * dot(n, dx);
     let un = length(u);
-    let ml = mu * bitcast<f32>(ent.z);
     let fy = ogcFrictionF1OverY(un, params.w);
     out.f -= (ml * fy) * u;
     out.h += (ml * fy) * (mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) - nn);
@@ -371,11 +383,11 @@ fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   var out = OgcPairEval(-act.y * wr * n, (wr * wr * act.z) * nn, act.x);
   let mu = params.z;
   if (mu > 0.0) {
+    let ml = mu * bitcast<f32>(ent.z);
     var dx = vec3<f32>(0.0);
     for (var i = 0u; i < 4u; i++) { dx += w[i] * (X[i] - ogcXt(ids[i])); }
     let u = dx - n * dot(n, dx);
     let un = length(u);
-    let ml = mu * bitcast<f32>(ent.z);
     let fy = ogcFrictionF1OverY(un, params.w);
     out.f -= (ml * wr * fy) * u;
     out.h += (ml * wr * wr * fy) * (mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) - nn);

@@ -5,7 +5,7 @@
  * DAT division pairs, the broad-phase hash grid, the truncation and the step's
  * re-detection decision. Per step, all on the GPU and with no readback:
  *
- *   encodeStepBegin + encodeDetection        mandatory round at x = x_t
+ *   encodeStepBegin + encodeDetection        mandatory round at x = x_t (stepStart)
  *   (solver initial guess) encodeTruncate
  *   per colour sweep: solver (ogcAccumulateVertexContact), encodeTruncate
  *   per iteration:    encodeDecide + encodeDetection   indirect: zero workgroups
@@ -79,6 +79,12 @@ export interface OgcSolverInputs {
   positions: GPUBuffer | GPUBufferBinding;
   /** vec4<f32> per vertex, m/s: the step's start velocity, for the envelope. */
   velocities: GPUBuffer | GPUBufferBinding;
+  /**
+   * vec4<f32> per vertex, cloth-local metres: the step start x_t, where the
+   * mandatory round detects (the solver's initial guess is already in
+   * `positions` by then). Absent: `positions` holds x_t when the round runs.
+   */
+  stepStart?: GPUBuffer | GPUBufferBinding;
 }
 
 export interface OgcFrameCounters {
@@ -279,7 +285,7 @@ export class OgcContactDetector {
 
   private async compile() {
     const specs: [string, string, number[], Record<number, "positions">?][] = [
-      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9]],
+      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13]],
       ["cell", OGC_CELL_WGSL, [0, 9]],
       ["count", ogcGridCountWGSL(false), [0, 1, 4, 5, 6, 9]],
       ["scan1", ogcScanWGSL(1), [0, 6, 7]],
@@ -313,6 +319,7 @@ export class OgcContactDetector {
     const all: Record<number, GPUBufferBinding> = {
       0: res(this.params), 1: res(this.topo), 2: res(inputs.positions), 3: res(inputs.velocities), 4: res(this.det), 5: res(this.work),
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
+      13: res(inputs.stepStart ?? inputs.positions),
     };
     for (const [name, k] of this.kernels) {
       k.bindGroup = this.device.createBindGroup({

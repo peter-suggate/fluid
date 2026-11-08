@@ -539,10 +539,13 @@ import {
 } from "../lib/cloth/contact/solid-field";
 
 /** Exact signed distances of the test solids. */
-export const boxSdf = (lo: V3, hi: V3) => (p: readonly number[]) => {
-  const c = [0, 1, 2].map(a => (lo[a] + hi[a]) / 2), h = [0, 1, 2].map(a => (hi[a] - lo[a]) / 2);
-  const q = [0, 1, 2].map(a => Math.abs(p[a] - c[a]) - h[a]);
-  return Math.hypot(...q.map(v => Math.max(v, 0))) + Math.min(Math.max(q[0], q[1], q[2]), 0);
+export const boxSdf = (lo: V3, hi: V3) => {
+  const cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2, cz = (lo[2] + hi[2]) / 2, hx = (hi[0] - lo[0]) / 2, hy = (hi[1] - lo[1]) / 2, hz = (hi[2] - lo[2]) / 2;
+  return (p: readonly number[]) => {
+    const qx = Math.abs(p[0] - cx) - hx, qy = Math.abs(p[1] - cy) - hy, qz = Math.abs(p[2] - cz) - hz;
+    const ox = Math.max(qx, 0), oy = Math.max(qy, 0), oz = Math.max(qz, 0);
+    return Math.sqrt(ox * ox + oy * oy + oz * oz) + Math.min(Math.max(qx, qy, qz), 0);
+  };
 };
 export const sphereSdf = (c: V3, R: number) => (p: readonly number[]) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]) - R;
 
@@ -574,17 +577,17 @@ export function solidTruncate(b: OracleSolidBound, d: V3, gammaR: number): V3 {
   return den > 1 ? scale(d, 1 / den) : d;
 }
 
-/** The solid entry's energy, force and Gauss-Newton Hessian at x (ogcSolidEval), lagged normal force lambda. */
+/** The solid entry's energy, force and Gauss-Newton Hessian at x (ogcSolidEval); the entry carries mu lambda (the solid's friction times the lagged normal force). */
 export function solidContact(field: ClothSolidField, x: V3, xt: V3, lambda: number, p: ContactParams): { e: number; f: V3; H: number[][] } {
   const s = sampleClothSolidField(field, x);
   if (!(s.phi > 0)) return { e: Infinity, f: [0, 0, 0], H: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] };
   const [g0, g1, g2] = activation(s.phi, p.r, p.k), g = s.grad as V3;
   let e = g0, f = scale(g, -g1);
   const H = [0, 1, 2].map(i => [0, 1, 2].map(k => g2 * g[i] * g[k]));
-  if (p.mu > 0) {
+  if (lambda > 0) {
     const gl = norm(g), n: V3 = gl > 1e-30 ? scale(g, 1 / gl) : [0, 0, 0];
     const dx = sub(x, xt), u = sub(dx, scale(n, dot(n, dx))), un = norm(u), eps = p.epsV * p.dt;
-    const ml = p.mu * lambda, fy = frictionF1OverY(un, eps);
+    const ml = lambda, fy = frictionF1OverY(un, eps);
     f = sub(f, scale(u, ml * fy));
     for (let i = 0; i < 3; i++) for (let k = 0; k < 3; k++) H[i][k] += ml * fy * ((i === k ? 1 : 0) - n[i] * n[k]);
     e += ml * frictionF0(un, eps);
