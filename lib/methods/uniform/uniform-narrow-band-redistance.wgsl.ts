@@ -224,6 +224,12 @@ fn nbBoundCoarseMetric(p:vec3u){
  for(var a=0u;a<7u;a++){
   var q=vec3i(p);if(a>0u){q[(a-1u)>>1u]+=select(4,-4,((a-1u)&1u)!=0u);}
   if(any(q<vec3i(0))){continue;}
+  // A buried neighbour holds a far marker, not a distance sample: a sign
+  // change into it says nothing about where a surface lies. Interpolating
+  // one placed a zero 0.6 h inside the liquid above a one-cell tank floor
+  // the first step a row coarsened (Figure 4: -5.6 h became -0.6 h, then a
+  // phantom surface that kept shape and thin heat, and particles, forever).
+  if(a>0u&&nbVertexClosed(q)){continue;}
   let n=umSampleVertex(vec3f(q))/h;
   if(a==0u){v=n;}else if(v*n<0.0){
    let t=abs(v)/(abs(v)+abs(n));

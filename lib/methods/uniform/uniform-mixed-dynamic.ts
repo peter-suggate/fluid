@@ -677,25 +677,105 @@ ${UNIFORM_LEVEL_SET_CURVATURE_WGSL.replace("fn umLevelSetCurvature(","fn umSmoot
 // still score several h. Along an axis on which the vertex lies on the tile
 // boundary the pass does not reach outside the tile, so it is tangential:
 // the same on both sides of a shared face. A tile with a static wall
-// (umCensusOpenCells) keeps its raw values: buried vertices hold air markers.
+// (umCensusOpenCells) filters over its unburied vertices alone, in mirror
+// pairs (a buried one holds an air marker, and keeps it). Left raw, a cut
+// tile measured the union's spheres, and every tile of a resting pool's
+// waterline ring beside a tank wall kept its heat and particles.
+var<workgroup> umTileBuried:array<u32,125>;
 fn umStageSmoothTile(origin:vec3u,lane:u32,open:vec2u){
- for(var i=lane;i<125u;i+=64u){umTileRaw[i]=umLoadFine(origin+umCorner(i,5u));}
+ let cut=any(open!=vec2u(0xffffffffu));
+ for(var i=lane;i<125u;i+=64u){
+  let p=origin+umCorner(i,5u);umTileRaw[i]=umLoadFine(p);
+  umTileBuried[i]=select(0u,1u,cut&&umCensusVertexBuried(vec3i(p)));
+ }
  workgroupBarrier();
- let filtered=all(open==vec2u(0xffffffffu));
  for(var i=lane;i<125u;i+=64u){
   let v=umCorner(i,5u);var value=umTileRaw[i];
-  if(filtered){
+  if(umTileBuried[i]==0u){
    let r=select(vec3u(0u),vec3u(1u),(v>vec3u(0u))&(v<vec3u(4u)));
    var sum=0.0;var weight=0.0;
    for(var z=v.z-r.z;z<=v.z+r.z;z++){for(var y=v.y-r.y;y<=v.y+r.y;y++){for(var x=v.x-r.x;x<=v.x+r.x;x++){
+    // A buried tap goes with its mirror: the pass stays centred, exact on a linear field.
+    let at=x+5u*y+25u*z;let m=2u*v-vec3u(x,y,z);if(umTileBuried[at]!=0u||umTileBuried[m.x+5u*m.y+25u*m.z]!=0u){continue;}
     let w=select(1.0,2.0,x==v.x)*select(1.0,2.0,y==v.y)*select(1.0,2.0,z==v.z);
-    sum+=w*umTileRaw[x+5u*y+25u*z];weight+=w;
+    sum+=w*umTileRaw[at];weight+=w;
    }}}
    value=sum/weight;
   }
   umTileSmooth[i]=value;
  }
  workgroupBarrier();
+}
+// A closed cell: by a stored tile's census mask, or on a closed page (a
+// SOLID page or the window's edge, as the gap walk reads them). An AIR
+// page's cell is open, so a corner beside one keeps its value.
+fn umCensusCellClosed(cell:vec3i)->bool{
+ let tc=cell>>vec3u(2u);let t=umTileKey(tc);
+ if(umKeyStored(t)){return !umCensusCellOpen(umCensusOpenCells(t),cell-4*tc);}
+ let w=select(UM_SOLID_WORD,umPageWord(tc>>vec3u(3u)),all(tc==umWindowTile(tc)));
+ return w!=0u&&!umBlockStored(w);
+}
+// No incident cell open (umVertexBuried): an air marker, not a sample.
+fn umCensusVertexBuried(p:vec3i)->bool{
+ for(var k=0u;k<8u;k++){if(!umCensusCellClosed(p-vec3i(1)+vec3i(umCorner(k,2u)))){return false;}}
+ return true;
+}
+// A cut h tile's buried 4h corners, as coarsening writes them. Its corner
+// there holds an air marker, and a 4h owner reads the plane its crossing
+// cells continue into the solid instead (the remap's planeSums, from the
+// vertices of the open cells that cross the surface). The displacement
+// against the marker saturated every wall tile of a pool at rest beside a
+// tank wall one cell thick (Figure 4: the 28 tiles of its waterline ring,
+// 12-14k particles on a still surface). The fit here takes the h tile's own
+// crossing cells, so it is that plane wherever the surface is one.
+var<workgroup> umBuriedWord:atomic<u32>;
+var<workgroup> umBuriedMask:u32;
+var<workgroup> umPlaneA:array<vec4f,64>;
+var<workgroup> umPlaneB:array<vec4f,64>;
+var<workgroup> umPlaneC:array<vec4f,64>;
+var<workgroup> umPlaneD:array<vec4f,64>;
+fn umPlaneBuriedCorners(origin:vec3u,lane:u32,open:vec2u,c:ptr<function,array<f32,8>>){
+ if(lane==0u){atomicStore(&umBuriedWord,0u);}
+ workgroupBarrier();
+ if(lane<8u&&umCensusVertexBuried(vec3i(origin+4u*umCorner(lane,2u)))){atomicOr(&umBuriedWord,1u<<lane);}
+ workgroupBarrier();
+ if(lane==0u){umBuriedMask=atomicLoad(&umBuriedWord);}
+ let buried=workgroupUniformLoad(&umBuriedMask);
+ if(buried==0u){return;}
+ // A lane a cell: the vertices of an open cell are its own samples (none is
+// buried), smoothed as the displacement reads them.
+ let cell=umCorner(lane,4u);var a=vec4f(0.0);var b=vec4f(0.0);var e=vec4f(0.0);var m=vec4f(0.0);
+ if(umCensusCellOpen(open,vec3i(cell))){
+  var below=false;var above=false;
+  for(var k=0u;k<8u;k++){let q=cell+umCorner(k,2u);if(umTileSmooth[q.x+5u*q.y+25u*q.z]<0.0){below=true;}else{above=true;}}
+  if(below&&above){
+   for(var k=0u;k<8u;k++){
+    let q=cell+umCorner(k,2u);let v=umTileSmooth[q.x+5u*q.y+25u*q.z];let r=vec3f(q);
+    a+=vec4f(r,1.0);b+=vec4f(r*r,v);e+=vec4f(r.xxy*r.yzz,0.0);m+=vec4f(r*v,0.0);
+   }
+  }
+ }
+ umPlaneA[lane]=a;umPlaneB[lane]=b;umPlaneC[lane]=e;umPlaneD[lane]=m;
+ for(var stride=32u;stride>0u;stride>>=1u){
+  workgroupBarrier();
+  if(lane<stride){let o=lane+stride;umPlaneA[lane]+=umPlaneA[o];umPlaneB[lane]+=umPlaneB[o];umPlaneC[lane]+=umPlaneC[o];umPlaneD[lane]+=umPlaneD[o];}
+ }
+ workgroupBarrier();
+ let A=umPlaneA[0];let B=umPlaneB[0];let C=umPlaneC[0];let D=umPlaneD[0];
+ // Every lane has read the sums before the next tile's stage overwrites them.
+ workgroupBarrier();
+ if(A.w==0.0){return;}
+ // planeSolve's centred least squares, its shift refined once.
+ let mean=A.xyz/A.w;let level=B.w/A.w;
+ let diagonal=B.xyz-mean*A.xyz;let cross3=C.xyz-mean.xxy*A.yzz;let moment=D.xyz-mean*B.w;
+ let shift=1e-6*max(diagonal.x+diagonal.y+diagonal.z,1.0);
+ let c0=vec3f(diagonal.x+shift,cross3.x,cross3.y);let c1=vec3f(cross3.x,diagonal.y+shift,cross3.z);let c2=vec3f(cross3.y,cross3.z,diagonal.z+shift);
+ let det=dot(c0,cross(c1,c2));var slope=vec3f(0.0);
+ for(var fit=0u;fit<2u;fit++){
+  let rest=moment-vec3f(dot(vec3f(diagonal.x,cross3.x,cross3.y),slope),dot(vec3f(cross3.x,diagonal.y,cross3.z),slope),dot(vec3f(cross3.y,cross3.z,diagonal.z),slope));
+  slope+=vec3f(dot(rest,cross(c1,c2)),dot(c0,cross(rest,c2)),dot(c0,cross(c1,rest)))/det;
+ }
+ for(var k=0u;k<8u;k++){if((buried&(1u<<k))!=0u){(*c)[k]=level+dot(slope,vec3f(4u*umCorner(k,2u))-mean);}}
 }
 // How far an h tile's surface moves when its eight 4h corners carry it, in
 // h: at every zero crossing of an h edge, the corners' trilinear phi over
@@ -712,6 +792,7 @@ fn umSurfaceDisplacement(tile:u32,lane:u32)->f32{
  umStageSmoothTile(origin,lane,open);
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  c=umLoadCorner8(origin,4u);
+ if(any(open!=vec2u(0xffffffffu))){umPlaneBuriedCorners(origin,lane,open,&c);}
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
   let v=umCorner(i,5u);let value=umTileSmooth[i];
