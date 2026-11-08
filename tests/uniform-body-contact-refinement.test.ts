@@ -13,7 +13,7 @@ test("static and body contact retain wet or predicted contact detail, but dry co
     try {
       const module = device.createShaderModule({ code: `
 @group(0) @binding(0) var<storage,read_write> output:array<u32>;
-const UM_TILES=1u;const UM_SOLID=2u;
+const UM_TILES=1u;const UM_SOLID=2u;const UM_BULK16=3u;
 var<private> solidRecord:array<vec4f,100>;
 fn umTileCoord(t:u32)->vec3u{return vec3u(0);}
 fn umTileKey(p:vec3i)->u32{return 0u;}

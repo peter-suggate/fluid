@@ -154,13 +154,30 @@ fn nbSlabPrefix(lane:u32,total:vec2u)->vec2u{
  let before=nbSlabScan[lane]-total;workgroupBarrier();return before;
 }
 var<workgroup> nbSlabTotal:vec2u;
+// A slab's slack is headroom, not records: where the demands and their
+// slack pass the pool (NB_SLAB_LIMIT), every slab keeps its demand and the
+// same share of its slack, the slack the pool still holds (sums: the
+// demands and the slacks). Records past a slab's room overflow to the spill
+// reserve, and seeds past it are refused there (an overlap reseed deferred),
+// so a pool that holds its records runs on; only demands past it stop the
+// run (state[3] = 6). A submerged sphere's 46k samples sized 52224 slab
+// records with a quarter more for each of its bricks, and stopped there
+// with the pool holding them (2026-11-09).
+fn nbSlabSlack(slack:u32,sums:vec2u)->u32{
+ if(sums.x+sums.y<=NB_SLAB_LIMIT){return slack;}
+ let room=NB_SLAB_LIMIT-min(sums.x,NB_SLAB_LIMIT);
+ return min(slack,u32(floor(f32(slack)*(f32(room)/f32(sums.y)))));
+}
+// The grand total of the lanes' last scan (read before the next scan writes it).
+fn nbSlabSums()->vec2u{let sums=nbSlabScan[255];workgroupBarrier();return sums;}
 // The scratch slab of a listed brick: last move's count (or its initial
-// demand) and a quarter more, at least NB_SLAB_MIN.
-fn nbScratchCap(slot:u32,serial:u32)->u32{
+// demand), and its slack: a quarter more, at least NB_SLAB_MIN.
+fn nbScratchDemand(slot:u32,serial:u32)->vec2u{
  let id=ubBrick(slot);var n=atomicLoad(&state[nbSlab(id,10u)]);
  if(atomicLoad(&state[nbSlab(id,3u)])==serial){n+=nbSlabCount(id);}
- return n+max(NB_SLAB_MIN,n/4u);
+ return vec2u(n,max(NB_SLAB_MIN,n/4u));
 }
+fn nbScratchCap(slot:u32,serial:u32,sums:vec2u)->u32{let d=nbScratchDemand(slot,serial);return d.x+nbSlabSlack(d.y,sums);}
 // One workgroup, before the move: the scratch slabs in slot order (slabs
 // past the limit stop the run, state[3] = 6, and are cut to fit), and the
 // move's jobs: NB_MOVE_CHUNK-record chunks of the input entries. A job
@@ -173,13 +190,16 @@ const NB_MOVE_CHUNK:u32=64u;
 @compute @workgroup_size(256) fn slabAllocate(@builtin(local_invocation_index) lane:u32){
  let slots=ubCount();let serial=atomicLoad(&state[17u]);
  let span=(slots+255u)/256u;let first=lane*span;let end=min(slots,first+span);
- var total=0u;for(var s=first;s<end;s++){total+=nbScratchCap(s,serial);}
+ var demand=vec2u(0u);for(var s=first;s<end;s++){demand+=nbScratchDemand(s,serial);}
+ _=nbSlabPrefix(lane,demand);let sums=nbSlabSums();
+ var total=0u;for(var s=first;s<end;s++){total+=nbScratchCap(s,serial,sums);}
  // A lane sizes and writes only its own slots: the count it reads again is
  // its slot's last-move words, which it has not yet replaced.
  var base=nbSlabPrefix(lane,vec2u(total,0u)).x;
+ if(sums.x>NB_SLAB_LIMIT){atomicStore(&state[3],6u);}
  for(var s=first;s<end;s++){
-  let id=ubBrick(s);var cap=nbScratchCap(s,serial);
-  if(base+cap>NB_SLAB_LIMIT){atomicStore(&state[3],6u);cap=select(0u,NB_SLAB_LIMIT-base,base<NB_SLAB_LIMIT);}
+  let id=ubBrick(s);var cap=nbScratchCap(s,serial,sums);
+  if(base+cap>NB_SLAB_LIMIT){cap=select(0u,NB_SLAB_LIMIT-base,base<NB_SLAB_LIMIT);}
   atomicStore(&state[nbSlab(id,0u)],base);atomicStore(&state[nbSlab(id,1u)],cap);atomicStore(&state[nbSlab(id,2u)],0u);
   atomicStore(&state[nbSlab(id,3u)],serial+1u);atomicStore(&state[nbSlab(id,4u)],0u);atomicStore(&state[nbSlab(id,10u)],0u);
   atomicStore(&state[NB_SLAB_OUT+s],id);base+=cap;
@@ -197,22 +217,28 @@ const NB_MOVE_CHUNK:u32=64u;
  }
 }
 // One workgroup, after the move: the current slabs from the exact counts
-// (appends and overflow) and the seeds' slack, and the overflow index runs.
-// Slabs past the limit stop the run (state[3] = 6).
-fn nbCurrentCap(id:u32)->vec2u{
- let n=min(atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,1u)]));let over=atomicLoad(&state[nbSlab(id,4u)]);
- let count=n+over;
- return vec2u(count+max(NB_SLAB_SEED_MIN,count/8u)+atomicLoad(&state[nbSlab(id,8u)]),over);
+// (appends and overflow) and the seeds' slack (nbSlabSlack), and the
+// overflow index runs. Counts past the limit stop the run (state[3] = 6).
+// A slab's count (its demand) and its seeds' slack.
+fn nbCurrentDemand(id:u32)->vec2u{
+ let n=min(atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,1u)]));let count=n+atomicLoad(&state[nbSlab(id,4u)]);
+ return vec2u(count,max(NB_SLAB_SEED_MIN,count/8u)+atomicLoad(&state[nbSlab(id,8u)]));
 }
+// Its cap and overflow.
+fn nbCurrentCap(id:u32,sums:vec2u)->vec2u{let d=nbCurrentDemand(id);return vec2u(d.x+nbSlabSlack(d.y,sums),atomicLoad(&state[nbSlab(id,4u)]));}
 @compute @workgroup_size(256) fn slabPlace(@builtin(local_invocation_index) lane:u32){
  let slots=min(atomicLoad(&state[20u]),UB_BRICKS);
  let span=(slots+255u)/256u;let first=lane*span;let end=min(slots,first+span);
- var total=vec2u(0u);for(var s=first;s<end;s++){total+=nbCurrentCap(atomicLoad(&state[NB_SLAB_OUT+s]));}
+ var demand=vec2u(0u);for(var s=first;s<end;s++){demand+=nbCurrentDemand(atomicLoad(&state[NB_SLAB_OUT+s]));}
+ _=nbSlabPrefix(lane,demand);let sums=nbSlabSums();
+ var total=vec2u(0u);for(var s=first;s<end;s++){total+=nbCurrentCap(atomicLoad(&state[NB_SLAB_OUT+s]),sums);}
  var at=nbSlabPrefix(lane,total);
+ if(sums.x>NB_SLAB_LIMIT){atomicStore(&state[3],6u);}
  for(var s=first;s<end;s++){
-  let id=atomicLoad(&state[NB_SLAB_OUT+s]);let size=nbCurrentCap(id);
+  let id=atomicLoad(&state[NB_SLAB_OUT+s]);let size=nbCurrentCap(id,sums);
   let n=min(atomicLoad(&state[nbSlab(id,2u)]),atomicLoad(&state[nbSlab(id,1u)]));var cap=size.x;
-  if(at.x+cap>NB_SLAB_LIMIT||at.y+size.y>NB_PARTICLE_CAPACITY){atomicStore(&state[3],6u);cap=select(0u,NB_SLAB_LIMIT-at.x,at.x<NB_SLAB_LIMIT);}
+  if(at.y+size.y>NB_PARTICLE_CAPACITY){atomicStore(&state[3],6u);}
+  if(at.x+cap>NB_SLAB_LIMIT){cap=select(0u,NB_SLAB_LIMIT-at.x,at.x<NB_SLAB_LIMIT);}
   atomicStore(&state[nbSlab(id,2u)],n);atomicStore(&state[nbSlab(id,1u)],0u);
   atomicStore(&state[nbSlab(id,5u)],at.x);atomicStore(&state[nbSlab(id,6u)],cap);atomicStore(&state[nbSlab(id,7u)],min(n+size.y,cap));
   atomicStore(&state[nbSlab(id,8u)],0u);atomicStore(&state[nbSlab(id,9u)],at.y);
