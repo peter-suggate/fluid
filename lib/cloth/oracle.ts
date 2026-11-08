@@ -264,6 +264,15 @@ export function createClothOracleState(model: ClothSolverModel, x: ArrayLike<num
     previousStep_s: 0, time_s: 0, pinDuals: new Float64Array(4 * n), edgeDuals: new Float64Array(2 * model.topology.edgeCount) };
 }
 
+/**
+ * Starting iterate of the step's K iterations: VBD's 'adaptive' guess (default, Chen et al. 2024 section 3.7), the
+ * PBD-like 'inertial' target y, or 'previous' x^ (step start plus the BDF2 history term). 'previous' is stable for
+ * any K (each sweep lowers the incremental potential from G(x^)) but lags free fall; the extrapolating guesses keep
+ * free fall exact but grow when K cannot propagate support across a stiff sheet (progress-lane-c1.md, 2026-11-09).
+ */
+export type ClothInitialGuess = 'previous' | 'adaptive' | 'inertial';
+export const CLOTH_INITIAL_GUESS: Record<ClothInitialGuess, number> = { previous: 0, adaptive: 1, inertial: 2 };
+
 export interface ClothStepOptions {
   readonly dt_s: number;
   readonly gravity_m_s2: ClothVector;
@@ -272,6 +281,8 @@ export interface ClothStepOptions {
   readonly chebyshevRho: number;
   /** Rounding unit of the line search's error bound (default: f64). Comparing with the f32 GPU solver passes 2^-23. */
   readonly lineSearchEpsilon?: number;
+  /** Default 'adaptive'. */
+  readonly initialGuess?: ClothInitialGuess;
 }
 
 /** The per-step quantities every vertex update reads. */
@@ -471,7 +482,8 @@ export function clothStepFrame(model: ClothSolverModel, state: ClothOracleState,
       const xh = state.x[3 * v + c]! + (bdf2 ? state.dxPrev[3 * v + c]! / 3 : 0);
       const vh = bdf2 ? (4 * vel[c]! - vp[c]!) / 3 : vel[c]!;
       xHat[3 * v + c] = xh; y[3 * v + c] = xh + hEff * vh + hEff * hEff * g[c]!;
-      init[3 * v + c] = xh + hEff * vh + hEff * hEff * coef * g[c]!;
+      const guess = options.initialGuess ?? 'adaptive';
+      init[3 * v + c] = guess === 'previous' ? xh : guess === 'inertial' ? y[3 * v + c]! : xh + hEff * vh + hEff * hEff * coef * g[c]!;
     }
     const group = model.topology.groups[v]!;
     if (group > 0) {

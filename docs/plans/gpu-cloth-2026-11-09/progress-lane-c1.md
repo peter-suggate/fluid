@@ -179,3 +179,49 @@ This is quadratic and convex in x, the same objective for all K iterations, and 
 - K = 48: 6.0e-2, 3.8e-2, 3.9e-2, 1.7e-2.
 
 The GPU uses the same form. A frameElements pass stores f0 and f1 with (D11, D22) per face, and ∇θ × 4 per hinge, in `state` (damped scenes only).
+
+## 2026-11-09 MILESTONE M1 landed (0a8d147b): Tier A GPU solver, plus the K sweep
+
+**Per-step agreement.** One GPU step matches the Float64 oracle to < 1e-6 m (6×6, K = 1 and 4, all three initial guesses). The match holds at 8² to 64², where the first-step difference is ≤ 8e-6 m. A 20-step scripted BDF2 run with strain limit, damping and ρ = 0.9 at K = 48 tracks the oracle within 1.6e-4 m. Its ring residual is 3.8e-2 on the GPU against 2.0e-2 on the oracle. Unconverged trajectories differ by AVBD clamp branches; f32 vs f64 is not the cause.
+
+**K sweep.** Ring data only, no timing. Setup: a 1 m sheet with 2 single-vertex corner pins, released flat, undamped, strain limit 2 %, dt 1/60, 60 steps, ρ = 0. Columns:
+- residual is the final ‖∇G‖ / ‖Σmg‖;
+- strain is the maximum over the run;
+- energy lost is the share of the released swing energy lost over 1 s.
+
+16² (256 vertices, 7 colours):
+
+| guess | K | residual | strain | energy lost |
+|---|---|---|---|---|
+| adaptive, BDF2 | 8 | 4.3 | 4.9 % | |
+| adaptive, BDF2 | 16 | 4.7 | 2.2 % | 9.8 % |
+| adaptive, BDF2 | 32 | 0.23 | 2.2 % | |
+| adaptive, BDF2 | 48 | 0.22 | 2.1 % | 9.9 % |
+| adaptive, BDF2 | 96 | 0.03 | 2.0 % | |
+| adaptive, BDF2 | 192 | 0.018 | 2.0 % | 6.4 % |
+| adaptive, implicit Euler | 48 | 0.61 | 2.5 % | 43.9 % |
+| adaptive, implicit Euler | 192 | | | 42.2 % |
+
+So BDF2 keeps 90 % of the swing in 1 s at 1/60, and implicit Euler keeps 56 %. The oracle 8×8 test shows the same direction: implicit Euler 64.8 % lost, BDF2 37.5 %.
+
+64² (4096 vertices). **With the plan's adaptive init, Tier A diverges below K ≈ 192:**
+
+| guess | K | strain | residual |
+|---|---|---|---|
+| adaptive | 8 | 149 % | 6e4 |
+| adaptive | 16 | 83 % | 3e4 |
+| adaptive | 32 | 21 % | 1.7e4 |
+| adaptive | 48 | 76 % | 2e3 |
+| adaptive | 96 | 66 % | 47 |
+| adaptive | 192 | 2.2 % | 3.6 (median 20) |
+
+With ρ = 0.9 it diverges faster: 1e4 % strain at K = 16. The Float64 oracle reproduces this step for step: 8.1 % at step 10 and 13.1 % at step 20 on both. So it is the algorithm, not the GPU.
+
+- **Cause.** Gauss-Seidel moves support about K rings per step: at K = 16, 0.25 m per step. The membrane wave crosses the sheet in about 1.3 steps (c = √(k/ρ) ≈ 45 m/s), and h²k/m ≈ 2200 per vertex. The extrapolating guess keeps the unsupported bulk falling, and the stretched band near the pins compounds from step to step.
+- **Pin size is not the cause.** 3×3 corner pins behave the same: 15.8 % at step 29, K = 16. A vertical hang is no better.
+- **'previous' (x̂) is bounded for every K.** At 64² the strain is 2.0–2.8 % and the residual 2–5. But it lags free fall, which is VBD §3.7 option (a). At 16² it loses 86–92 % of the swing at K ≤ 48, and the exact free-fall test fails. It is **not** a usable default.
+- **A global energy safeguard does not help.** Choosing the guess with the lower G picks adaptive almost always, because the problem is local.
+
+**Change:** `initialGuess` ('adaptive' default | 'previous' | 'inertial') on both the oracle and the GPU. Unknown values throw. All three are GPU = oracle tested.
+
+**Consequence:** 64² and up need Tier B's patch-resident inner iterations, which propagate support across a 32×32 patch per outer iteration, or more K. Integration demos above about 32² wait on M3. I am starting M3 now.

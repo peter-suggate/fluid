@@ -60,16 +60,16 @@ function maxDifference(a: ArrayLike<number>, b: ArrayLike<number>): number {
   return worst;
 }
 
-test('one GPU step matches the oracle', { skip: !gpu }, async () => withDevice(async device => {
+test('one GPU step matches the oracle, for every initial guess', { skip: !gpu }, async () => withDevice(async device => {
   const model = setup(6), start = perturbed(model, 4e-3);
-  for (const iterations of [1, 4]) {
-    const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations, chebyshevRho: 0 };
+  for (const [iterations, initialGuess] of [[1, 'adaptive'], [4, 'adaptive'], [4, 'previous'], [4, 'inertial']] as const) {
+    const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations, chebyshevRho: 0, initialGuess };
     const solver = await ClothGPUSolver.create(device, model, { ...options, origin_m: origin, positions_m: start });
     const oracle = createClothOracleState(model, start);
     clothOracleStep(model, oracle, options);
     solver.step();
     const d = maxDifference(await solver.readPositions(), oracle.x);
-    assert.ok(d < 1e-6, `K=${iterations}: GPU vs oracle ${d} m`);
+    assert.ok(d < 1e-6, `K=${iterations} ${initialGuess}: GPU vs oracle ${d} m`);
     solver.destroy();
   }
 }));

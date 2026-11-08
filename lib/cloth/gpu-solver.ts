@@ -24,7 +24,7 @@
  */
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothSolverStateData, ClothVector } from './types';
-import { clothChebyshevOmega, type ClothSolverModel } from './oracle';
+import { CLOTH_INITIAL_GUESS, clothChebyshevOmega, type ClothInitialGuess, type ClothSolverModel } from './oracle';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
   CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
@@ -63,6 +63,8 @@ export interface ClothGPUSolverOptions {
   readonly integrator: ClothIntegrator;
   readonly iterations: number;
   readonly chebyshevRho: number;
+  /** Default 'adaptive' (see ClothInitialGuess). */
+  readonly initialGuess?: ClothInitialGuess;
   /** Most iterations `setIterations` may ask for (dispatch records are authored once); default `iterations`. */
   readonly maxIterations?: number;
   /** World positions and velocities at the start (default: rest, zero). */
@@ -128,7 +130,7 @@ const PARAM_WORDS = 44;
 const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
-export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho'>, time_s = 0): ClothGPUTables {
+export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho' | 'initialGuess'>, time_s = 0): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, H = t.hingeCount, M = model.materials.length, S = model.scripts.length;
   const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
   for (let v = 0; v < N; v++) byColour[model.colours[v]!]!.push(v);
@@ -182,7 +184,9 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const params = new Uint32Array(PARAM_WORDS), paramsF = new Float32Array(params.buffer);
   params.set([N, T, E, H, ...topoBase, 0, 0, ...restBase, S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups,
     stride, edgeDualRecord, partialRecord, clockRecord, dampFaceRecord, dampHingeRecord, damped ? 1 : 0, 0]);
-  paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, 0, 0], PARAM_GRAVITY);
+  const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'adaptive'];
+  if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
+  paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, guess, 0], PARAM_GRAVITY);
   return { topo, rest, trianglesWord: topoBase[8]!, edgesWord: topoBase[9]!, colourRanges, params, strainLimited, damped, stride, edgeDualRecord,
     dampFaceRecord, dampHingeRecord, partialRecord, clockRecord, stateRecords };
 }

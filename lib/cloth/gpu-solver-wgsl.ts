@@ -47,7 +47,7 @@ struct Params {
   state0: vec4u, // segment stride, edge duals, partials, clock
   state1: vec4u, // damping tangent: faces (2 records), hinges (3 records), damped flag
   gravity: vec4f, // xyz, dt
-  misc: vec4f,   // clock origin (s), Chebyshev rho
+  misc: vec4f,   // clock origin (s), Chebyshev rho, initial guess (0 previous, 1 adaptive, 2 inertial)
 }
 struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration), (omega)
 
@@ -402,7 +402,8 @@ fn adaptiveGravity(a: vec3f, g: vec3f) -> f32 {
   state[seg(S_XT, v)] = vec4f(x, 0.0);
   state[seg(S_XHAT, v)] = vec4f(xh, 0.0);
   state[seg(S_Y, v)] = vec4f(xh + h * vh + h * h * g, 0.0);
-  var init = xh + h * vh + h * h * coef * g;
+  var init = xh;
+  if (P.misc.z == 1.0) { init = xh + h * vh + h * h * coef * g; } else if (P.misc.z == 2.0) { init = xh + h * vh + h * h * g; }
   let group = vertexGroup(v);
   if (group > 0u) {
     let anchor = rest[P.rest1.y + v].xyz; let t0 = stepTime();
