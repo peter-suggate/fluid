@@ -13,6 +13,8 @@ import { UNIFORM_FORCE_MODE, uniformRegionForceWGSL, type UniformMixedRegionDyna
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { UNIFORM_LIVE_LANE_GROUPS } from "./uniform-live-lists";
 import { uniformStageListsWGSL } from "./uniform-stage-lists";
+import { GPUBackgroundPipelines } from "../../core/gpu-background-pipelines";
+const FORCES_CAPILLARITY=["cacheCurvature","cacheNormals","forceSlopes"] as const,FORCES_CAPILLARITY_RETAINED=[...FORCES_CAPILLARITY,"curvatureRegions"] as const,FORCES_NONE:readonly string[]=[];
 
 export const UNIFORM_NORMAL_ANCHOR_ERROR=0.01;
 export const UNIFORM_CAPILLARY_DISPLACEMENT_ERROR_H=0.0001;
@@ -64,11 +66,15 @@ function patched(source:string,anchor:string,replacement:string):string{
 export class UniformMixedForces {
   readonly allocatedBytes = 0;
   private pipeline?: GPUComputePipeline;
-  private normalPipeline?: GPUComputePipeline;
-  private curvaturePipeline?: GPUComputePipeline;
-  /** forceSlopes: seam 4h owners' capillary slopes into the normal scratch. */
-  private slopePipeline?: GPUComputePipeline;
-  private curvatureRegionsPipeline?:GPUComputePipeline;
+  /** The capillarity cache's pipelines (cachedCurvature): background priority. */
+  private readonly background=new GPUBackgroundPipelines();
+  /** undefined when every pipeline an advance with or without capillarity
+   * binds is compiled; otherwise their promise, raised to critical priority.
+   * An advance awaits it before its first queue write. */
+  pipelinesPending(capillarity:boolean):Promise<void>|undefined{
+    const background=this.background;if(background.allReady)return undefined;
+    return background.require(capillarity&&this.cachedCurvature?this.retainedNormals?FORCES_CAPILLARITY_RETAINED:FORCES_CAPILLARITY:FORCES_NONE);
+  }
   private readonly pendingByGroup=new WeakMap<UniformDetailGroup,GPUBuffer>();
   private regularFinePipeline?: GPUComputePipeline;
   /** forcesFine compiled solid-free (umSolidFree), launched beside the general one. */
@@ -515,11 +521,15 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner
     // so their serial per-tile latencies overlap; seam 4h tiles pack four
     // per job (fusedQuad). Every launch is GPU-counted: a regular tier that
     // rides the fused launch counts zero jobs in its own (skipFused gate).
+    // Capillarity's cache runs only in a step with surface tension: its
+    // pipelines compile at background priority, and an advance with tension
+    // waits for them (pipelinesPending). Awaiting them in turn put the
+    // forces themselves behind the whole frame's queue.
     if(this.cachedCurvature){
-      this.curvaturePipeline=await compile("cacheCurvature",{umCountedJobs:UNIFORM_MIXED_COUNTED.all});
-      if(this.retainedNormals)this.curvatureRegionsPipeline=await compile("curvatureRegions",{});
-      this.normalPipeline=await compile("cacheNormals",{umCountedJobs:UNIFORM_MIXED_COUNTED.all});
-      this.slopePipeline=await compile("forceSlopes",{umCountedJobs:UNIFORM_MIXED_COUNTED.hanging});
+      this.background.add("cacheCurvature",()=>compile("cacheCurvature",{umCountedJobs:UNIFORM_MIXED_COUNTED.all}));
+      if(this.retainedNormals)this.background.add("curvatureRegions",()=>compile("curvatureRegions",{}));
+      this.background.add("cacheNormals",()=>compile("cacheNormals",{umCountedJobs:UNIFORM_MIXED_COUNTED.all}));
+      this.background.add("forceSlopes",()=>compile("forceSlopes",{umCountedJobs:UNIFORM_MIXED_COUNTED.hanging}));
     }
     const skipFused=UNIFORM_MIXED_FUSED_GATE.skipFused;
     [this.pipeline,this.regularFinePipeline,this.regularCoarsePipeline,this.regularFineFreePipeline]=await Promise.all([
@@ -534,11 +544,12 @@ ${patched(uniformMixedFaceTileDispatchWGSL("forces","umForcedVelocityFused(owner
     if(capillarity&&this.retainedNormals){const pending=this.pendingByGroup.get(group);if(pending)encoder.clearBuffer(pending,16*(this.ownership.capacity.tiles/64),4);}
     const pass=encoder.beginComputePass(FORCES_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-    if(capillarity&&this.curvaturePipeline){
-      this.ownership.dispatchAllCounted(pass,this.variant(this.normalPipeline!));
-      if(this.curvatureRegionsPipeline){pass.setPipeline(this.variant(this.curvatureRegionsPipeline));pass.dispatchWorkgroups(UNIFORM_LIVE_LANE_GROUPS);}
-      this.ownership.dispatchAllCounted(pass,this.variant(this.curvaturePipeline));
-      this.ownership.dispatchBuffered(pass,this.variant(this.slopePipeline!),"seamCoarse",this.ownership.capacity.tiles,64);
+    if(capillarity&&this.cachedCurvature){
+      const background=this.background;
+      this.ownership.dispatchAllCounted(pass,this.variant(background.get("cacheNormals")));
+      if(this.retainedNormals){pass.setPipeline(this.variant(background.get("curvatureRegions")));pass.dispatchWorkgroups(UNIFORM_LIVE_LANE_GROUPS);}
+      this.ownership.dispatchAllCounted(pass,this.variant(background.get("cacheCurvature")));
+      this.ownership.dispatchBuffered(pass,this.variant(background.get("forceSlopes")),"seamCoarse",this.ownership.capacity.tiles,64);
     }
     const general=this.pipeline,fine=this.regularFinePipeline!,coarse=this.regularCoarsePipeline!;
     if(this.regularFineFreePipeline)this.ownership.dispatchCounted(pass,this.variant(this.regularFineFreePipeline),this.ownership.capacity.fineTiles,"fine");

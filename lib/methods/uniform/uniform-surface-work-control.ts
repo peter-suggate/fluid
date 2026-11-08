@@ -1,3 +1,4 @@
+import { GPUBackgroundPipelines } from "../../core/gpu-background-pipelines";
 import { uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
@@ -87,6 +88,34 @@ export class UniformSurfaceWorkControl {
   private readonly layout:GPUBindGroupLayout;
   private readonly groups:UniformDetailGroup[];
   private readonly pipelines=new Map<string,GPUComputePipeline>();
+  /** The stage pipelines the flags at initialize did not bind. */
+  private readonly background=new GPUBackgroundPipelines();
+  /** Every stage pipeline encode may bind under the current flags, forced or
+   * not, listed or not (encode and encodeRegionalGeometry select among them). */
+  private bindablePipelines():string[]{
+    const stats=this.collectGeometryStats,on=this.enabled;
+    const names=[stats?"geometryRegionalStats":"geometryRegional","select"];
+    if(this.geometrySnapshots)names.push("scan","force",!on?"geometryDisabled":stats?"geometryStats":"geometry");
+    else names.push("metadata","metadataForce",!on?"geometryCurrentDisabled":stats?"geometryCurrentStats":"geometryCurrent");
+    if(this.surfaceEvidence)names.push("selectSurfaceListed","selectSurfaceForce","selectSurface","modelScanListed","modelScan","surfaceListed",on?"surface":"surfaceDisabled");
+    return names;
+  }
+  /** undefined when every pipeline the current flags may bind is compiled;
+   * otherwise their promise, raised to critical priority. An advance awaits
+   * it before its first queue write. */
+  pipelinesPending():Promise<void>|undefined{
+    const background=this.background;if(background.allReady)return undefined;
+    return background.require(this.bindablePipelines().filter(name=>background.has(name)));
+  }
+  /** Every stage pipeline compiled, background ones raised to critical: for
+   * a caller that encodes this owner directly under changing flags. */
+  async compiled():Promise<void>{await this.background.require(this.backgroundNames);}
+  private readonly backgroundNames:string[]=[];
+  private pipeline(name:string):GPUComputePipeline{
+    const pipeline=this.pipelines.get(name);if(pipeline)return pipeline;
+    if(this.background.has(name))return this.background.get(name);
+    throw new Error(`Uniform 16h work control ${name} is not initialized`);
+  }
   private readonly forced=[true,true];
   private readonly grids:readonly [number,number];
   private readonly supportGrids:readonly [number,number];
@@ -147,7 +176,10 @@ export class UniformSurfaceWorkControl {
   get geometryRefreshRequired():boolean{return this.forced[1]||!this.enabled;}
   invalidateGeometry():void{this.forced[1]=true;}
   async initialize():Promise<void>{
-    await this.framePlan.initialize();
+    // Every pipeline here is requested before any is awaited: each await in
+    // turn put the next request behind the whole frame's queue, and this
+    // owner's chain was the last to finish a cold build.
+    const plan=this.framePlan.initialize();void plan.catch(()=>undefined);
     const module=uniformDetailModule(this.device,{label:"Uniform 16h surface work control",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
 @group(1) @binding(0) var phi:texture_3d<f32>;
 @group(1) @binding(1) var<storage,read_write> wc:array<atomic<u32>>;
@@ -531,14 +563,23 @@ fn wcSupportContains(code:u32,offset:i32)->bool{
 `});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.layout,...(this.solid?[this.solid.tileLayout]:[])]});
-    for(const [name,entryPoint,constants] of [
+    // The pipelines the current flags bind are awaited; the rest (other
+    // diagnostic flags, surface evidence) compile at background priority and
+    // an advance that may bind one waits for it (pipelinesPending).
+    const bindable=new Set(this.bindablePipelines());
+    const stages=Promise.all(([
+
       ["metadata","metadata",{}],["metadataForce","metadata",{wcForce:1}],["geometryCurrent","finish",{wcMetadataOnly:1}],["geometryCurrentStats","finish",{wcMetadataOnly:1,wcGeometryStats:1}],["geometryCurrentDisabled","finish",{wcMetadataOnly:1,wcEnabled:0}],
       ["select","selectRegions",{}],["selectSurface","selectSurface",{wcSurface:1}],["selectSurfaceForce","selectSurface",{wcSurface:1,wcForce:1}],["scan","scan",{}],["force","scan",{wcForce:1}],["modelScan","surfaceScan",{wcSurface:1}],["surface","summaries",{wcSurface:1}],["surfaceDisabled","summaries",{wcSurface:1,wcEnabled:0}],["geometry","finish",{}],["geometryStats","finish",{wcGeometryStats:1}],["geometryDisabled","finish",{wcEnabled:0}],
-    ] as const)this.pipelines.set(name,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:entryPoint==="summaries"||entryPoint==="selectSurface"?this.supportGrids[0]:name==="modelScan"?this.surfaceGrids[0]:this.grids[0],...constants}}}));
-    for(const [name,entryPoint] of [["selectSurfaceListed","selectSurface"],["modelScanListed","surfaceScan"],["surfaceListed","summaries"]]){
-      this.pipelines.set(name!,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:entryPoint!,constants:{wcSurface:1,regionalListed:1}}}));
-    }
-    for(const stats of [false,true])this.pipelines.set(stats?"geometryRegionalStats":"geometryRegional",await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"geometryRegional",constants:{regionalListed:1,wcGeometryStats:+stats}}}));
+    ] as const).map(([name,entryPoint,constants]):[string,string,Record<string,number>]=>[name,entryPoint,{umDispatchX:entryPoint==="summaries"||entryPoint==="selectSurface"?this.supportGrids[0]:name==="modelScan"?this.surfaceGrids[0]:this.grids[0],...constants}])
+     .concat([["selectSurfaceListed","selectSurface"],["modelScanListed","surfaceScan"],["surfaceListed","summaries"]].map(([name,entryPoint]):[string,string,Record<string,number>]=>[name!,entryPoint!,{wcSurface:1,regionalListed:1}]))
+     .concat([false,true].map((stats):[string,string,Record<string,number>]=>[stats?"geometryRegionalStats":"geometryRegional","geometryRegional",{regionalListed:1,wcGeometryStats:+stats}]))
+     .map(async([name,entryPoint,constants])=>{
+      const compile=()=>uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants}});
+      if(!bindable.has(name)){this.background.add(name,compile);this.backgroundNames.push(name);return;}
+      this.pipelines.set(name,await compile());
+     }));
+    void stages.catch(()=>undefined);
     const remap=this.device.createShaderModule({label:"Uniform16h remap producer revisions",code:uniformMixedTopologyWGSL(this.ownership.capacity,0)+`
 @group(1) @binding(0) var<storage,read> changes:array<u32>;
 @group(1) @binding(1) var<storage,read_write> surface:array<atomic<u32>>;
@@ -565,9 +606,8 @@ var<workgroup> changed:atomic<u32>;
  }
 }`});
     this.remapLayout=this.device.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},...(this.heat?[1,2,3,4]:[1,2]).map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),...(this.pool?[{binding:5,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}]:[])]});
-    this.remapPipeline=await this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.remapLayout]}),compute:{module:remap,entryPoint:"publish",constants:{umDispatchX:this.supportGrids[0]}}});
-    if(this.pool){
-      const init=this.device.createShaderModule({label:"Uniform 16h work evidence page claims",code:`
+    const remapPipeline=this.device.createComputePipelineAsync({layout:this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.remapLayout]}),compute:{module:remap,entryPoint:"publish",constants:{umDispatchX:this.supportGrids[0]}}});
+    const initModule=this.pool&&this.device.createShaderModule({label:"Uniform 16h work evidence page claims",code:`
 ${uniformPagePoolWGSL(this.pool.layout,0,0)}
 @group(0) @binding(1) var<storage,read_write> geometry:array<atomic<u32>>;
 @group(0) @binding(2) var<storage,read_write> surface:array<atomic<u32>>;
@@ -584,8 +624,10 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
   }
  }}}
 }`)}`});
-      this.initPipeline=await this.device.createComputePipelineAsync({layout:"auto",compute:{module:init,entryPoint:"initialize"}});
-      this.initGroup=this.device.createBindGroup({layout:this.initPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:{buffer:this.geometry}},{binding:2,resource:{buffer:this.surface}},...(this.heat?[{binding:3,resource:{buffer:this.heat.tiers}},{binding:4,resource:{buffer:this.heat.state}}]:[])]});
+    const pool=this.pool,init=initModule&&this.device.createComputePipelineAsync({layout:"auto",compute:{module:initModule,entryPoint:"initialize"}});
+    [this.remapPipeline,this.initPipeline]=await Promise.all([remapPipeline,init,stages,plan]);
+    if(pool&&this.initPipeline){
+      this.initGroup=this.device.createBindGroup({layout:this.initPipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:pool.state}},{binding:1,resource:{buffer:this.geometry}},{binding:2,resource:{buffer:this.surface}},...(this.heat?[{binding:3,resource:{buffer:this.heat.tiers}},{binding:4,resource:{buffer:this.heat.state}}]:[])]});
     }
   }
   /** Publish a builder remap immediately after remap/resolve, before any
@@ -610,7 +652,7 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
   encodeRegionalGeometry(pass:GPUComputePassEncoder):void{
     if(!this.regionalGeometryReady)throw new Error("Regional geometry needs a sealed frame plan and retained snapshots");
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[1]!.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(this.collectGeometryStats?"geometryRegionalStats":"geometryRegional")!));pass.dispatchWorkgroups(this.framePlan.groups);
+    pass.setPipeline(uniformDetailPick(this.pipeline(this.collectGeometryStats?"geometryRegionalStats":"geometryRegional")));pass.dispatchWorkgroups(this.framePlan.groups);
   }
   encode(encoder:GPUCommandEncoder,stage:"surface"|"geometry"):void{
     if(stage==="geometry"&&this.regionalGeometryReady){
@@ -629,12 +671,12 @@ if(local<8u){let home=2*upPageOf(block)+vec3i(i32(local&1u),i32((local>>1u)&1u),
 
     const pass=encoder.beginComputePass({label:`Uniform 16h ${stage} work control`});
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.groups[bank]!.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(stage==="surface"?(listed?"selectSurfaceListed":force?"selectSurfaceForce":"selectSurface"):"select")!));if(stage==="surface"){if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else pass.dispatchWorkgroups(...this.supportGrids);}else pass.dispatchWorkgroups(Math.ceil(this.cacheRegions/64));
+    pass.setPipeline(uniformDetailPick(this.pipeline(stage==="surface"?(listed?"selectSurfaceListed":force?"selectSurfaceForce":"selectSurface"):"select")));if(stage==="surface"){if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else pass.dispatchWorkgroups(...this.supportGrids);}else pass.dispatchWorkgroups(Math.ceil(this.cacheRegions/64));
     const metadataOnly=stage==="geometry"&&!this.geometrySnapshots;
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(stage==="surface"?(listed?"modelScanListed":"modelScan"):metadataOnly?(force?"metadataForce":"metadata"):(force?"force":"scan"))!));
+    pass.setPipeline(uniformDetailPick(this.pipeline(stage==="surface"?(listed?"modelScanListed":"modelScan"):metadataOnly?(force?"metadataForce":"metadata"):(force?"force":"scan"))));
     if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else if(metadataOnly)pass.dispatchWorkgroups(this.cacheRegions);else pass.dispatchWorkgroups(...(stage==="surface"?this.surfaceGrids:this.grids));
     const finish=metadataOnly?(!this.enabled?"geometryCurrentDisabled":this.collectGeometryStats?"geometryCurrentStats":"geometryCurrent"):!this.enabled?`${stage}Disabled`:stage==="geometry"&&this.collectGeometryStats?"geometryStats":stage;
-    pass.setPipeline(uniformDetailPick(this.pipelines.get(listed?"surfaceListed":finish)!));if(stage==="surface"){if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else pass.dispatchWorkgroups(...this.supportGrids);}else pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();this.forced[bank]=false;
+    pass.setPipeline(uniformDetailPick(this.pipeline(listed?"surfaceListed":finish)));if(stage==="surface"){if(listed)pass.dispatchWorkgroups(this.framePlan.groups);else pass.dispatchWorkgroups(...this.supportGrids);}else pass.dispatchWorkgroups(Math.ceil(this.regions/64));pass.end();this.forced[bank]=false;
     if(stage==="geometry"){this.solid?.consumeBodyEvidence(encoder);}
   }
   destroy():void{this.framePlan.destroy();this.surface.destroy();this.geometry.destroy();}

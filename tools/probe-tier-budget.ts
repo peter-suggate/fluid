@@ -59,7 +59,7 @@ import type { SceneDescription } from "../lib/core/model";
 import { sceneDocument, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { sceneLatticeDimensions } from "../lib/core/scene-lattice-dimensions";
 import { getSceneDefinition } from "../lib/core/scenes";
-import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
+import { managedGPUDevice, whenGPUCompilationIdle } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { UNIFORM_DETAIL_4H_LOAD, UNIFORM_DETAIL_CANONICAL_LOAD } from "../lib/core/uniform-detail-abi";
 import { levelSetFillWGSL } from "../lib/core/level-set-fill.wgsl";
@@ -308,7 +308,11 @@ async function construct(scene: SceneDescription) {
   const base = new Map<string, number>(); for (const r of memory.snapshot().resources) base.set(r.label, (base.get(r.label) ?? 0) + r.bytes);
   const start = performance.now();
   const solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver;
-  return { solver, base, construction_ms: performance.now() - start };
+  const construction_ms = performance.now() - start;
+  // Construction returns with background compiles running (pipelines only
+  // some frames bind): the timed steps start once every compile has settled.
+  await whenGPUCompilationIdle();
+  return { solver, base, construction_ms, compileIdle_ms: performance.now() - start };
 }
 async function destroy(c: Awaited<ReturnType<typeof construct>>) { c.solver.destroy(); await device.queue.onSubmittedWorkDone(); }
 function geometry(scene: SceneDescription) {
@@ -323,7 +327,7 @@ if (classify) {
   for (const { tag, scene } of configs) {
     const c = await construct(scene); geo[tag] = geometry(scene);
     const snap = since(c.base), m = new Map<string, number>(); for (const r of snap.resources) m.set(labelKey(r.label), (m.get(labelKey(r.label)) ?? 0) + r.bytes);
-    snaps[tag] = m; console.log(JSON.stringify({ phase: "constructed", tag, ...geo[tag], bytes: snap.bytes, construction_ms: c.construction_ms }));
+    snaps[tag] = m; console.log(JSON.stringify({ phase: "constructed", tag, ...geo[tag], bytes: snap.bytes, construction_ms: c.construction_ms, compileIdle_ms: c.compileIdle_ms }));
     assert.deepEqual(errors, []); await destroy(c);
   }
   const labels = [...new Set(Object.values(snaps).flatMap(m => [...m.keys()]))].sort();
@@ -367,7 +371,7 @@ try {
   const { solver } = c, base = c.base;
   const constructionMemory = since(base);
   const allocated=allocation.snapshot();
-  const construction = { requestedPeakBytes:allocated.peakBytes, construction_ms: c.construction_ms, allocatedBytes: constructionMemory.bytes, byClass: bytesByClass(constructionMemory, g.pool ?? 0, g.boxCells),
+  const construction = { requestedPeakBytes:allocated.peakBytes, construction_ms: c.construction_ms, compileIdle_ms: c.compileIdle_ms, allocatedBytes: constructionMemory.bytes, byClass: bytesByClass(constructionMemory, g.pool ?? 0, g.boxCells),
     grid: [solver.info.nx, solver.info.ny, solver.info.nz] };
   writeFileSync(`${out}/${name}-construction-memory.json`, JSON.stringify({ ...construction, resources: constructionMemory.resources }, null, 2) + "\n");
   console.log(JSON.stringify({ phase: "constructed", ...construction }));

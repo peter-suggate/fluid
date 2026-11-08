@@ -57,6 +57,7 @@ import {UNIFORM_MIXED_REACHES,type UniformMixedCache,type UniformMixedHostChange
 import {UNIFORM_PAGE_POOL_STATUS,UniformPagePool,uniformPagePoolFatalMessage,type UniformPagePoolMirror,type UniformPagePoolResidency} from "./uniform-page-pool";
 import {UniformPageInitialise,UniformPageTileWords,uniformPageTopology,type UniformPageInitBlocks} from "./uniform-page-initialise";
 import {UNIFORM_STAGE_GRID_HEADER_WORDS,UNIFORM_STAGE_VIEWS,uniformStageBandWords,uniformStageGridHeader,uniformStageGridWords,uniformStageViewWord} from "./uniform-stage-grids";
+import {joinPendingPipelines} from "../../core/gpu-background-pipelines";
 import {uniformNearSettled,type UniformNearSettled} from "./uniform-near-settled";
 
 export interface UniformMixedFrameTrace {
@@ -1032,6 +1033,17 @@ export class UniformMixedFrame {
   try{return this.advance({...p,fullPressureEnvelope:true,pressureTolerance:Math.min(uniformMixedPressureTarget(p),UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE)},trace,extendTail,bodies);}
   finally{this.solveWithoutHistory=false;}
  }
+ /** undefined when every pipeline an advance with this surface tension may
+  * bind is compiled. Otherwise a promise that resolves once they are (raised
+  * to critical priority), or rejects with a failed compile. Owners compile
+  * the pipelines only some configurations or frames bind at background
+  * priority (GPUBackgroundPipelines) and do not await them at initialize;
+  * the host awaits this before an advance's first queue write, and advance
+  * refuses to encode while it is pending. No allocation once compiled. */
+ pipelinesPending(surfaceTension:number):Promise<void>|undefined{
+  const surface=this.narrowBandFlip.pipelinesPending(),control=this.surfaceWorkControl.pipelinesPending(),geometry=this.geometry.pipelinesPending(),forces=this.forces.pipelinesPending(surfaceTension>0);
+  return surface||control||geometry||forces?joinPendingPipelines(surface,control,geometry,forces):undefined;
+ }
  /** Set while advanceFirstUnkicked encodes (advance encodes synchronously). */
  private solveWithoutHistory=false;
  /** extendTail: extend this frame's final velocity for the next frame
@@ -1048,6 +1060,10 @@ export class UniformMixedFrame {
    :this.phase!=="ready"?`Unified frame is not ready for an advance (${this.phase})`
    :!slot?`Uniform mixed frame has ${this.receipts.length} unchecked receipts; the host must check one before encoding frame ${this.frameIndex+1}`:undefined;
   if(refusal!==undefined||!slot){trace?.abort();throw new Error(refusal);}
+  // Before the advance's first queue write: a host that did not await
+  // pipelinesPending is refused here, never part way through the encode.
+  const compiling=this.pipelinesPending(p.surfaceTension);
+  if(compiling){void compiling.catch(()=>undefined);trace?.abort();throw new Error(`Uniform mixed frame ${this.frameIndex+1}: pipelines this advance may bind are still compiling; the host awaits pipelinesPending before advancing`);}
   if(trace){const measured=trace;trace={...measured,phase:(encoder,phase)=>{this.blit.finishStage(encoder);measured.phase(encoder,phase);}};}
   const readback=slot.readback;
   this.phase="encoding";const frame=kick?this.frameIndex:++this.frameIndex;

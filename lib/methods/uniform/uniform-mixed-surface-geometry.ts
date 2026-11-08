@@ -10,6 +10,8 @@ import { UNIFORM_BODY_GEOMETRY_REACH, uniformMixedSolidPipeline, uniformMixedSol
 import { uniformMixedChangedTilesWGSL } from "./uniform-mixed-layout-builder";
 import { UNIFORM_LIVE_KEY_GROUPS } from "./uniform-live-lists";
 import type { UniformSurfaceWorkControl } from "./uniform-surface-work-control";
+import { GPUBackgroundPipelines } from "../../core/gpu-background-pipelines";
+const GEOMETRY_CHANGED_PLAIN=["geometryChanged"] as const,GEOMETRY_NONE:readonly string[]=[];
 
 /** Workgroups of the changed-tile geometry launch at most (grid-stride). */
 const CHANGED_GRID=4096;
@@ -400,17 +402,21 @@ var<workgroup> gcBodyRegion:u32;
     const create=(entryPoint:string,constants:Record<string,number>={},pipelineLayout=layout)=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{layout:pipelineLayout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...constants,...s}}}),{entry:entryPoint});
     const all={umCountedJobs:UNIFORM_MIXED_COUNTED.all};
     const twinned:Record<string,number>=this.solid?{umSolidTwinned:1}:{};
+    // Every pipeline is requested before any is awaited: a chain of awaits
+    // put each request behind the whole frame's queue, and this owner's
+    // chain was the last to finish a cold build.
+    const requests:Promise<void>[]=[];
+    const request=<T>(compiling:Promise<T>,store:(value:T)=>void)=>{const stored=compiling.then(store);void stored.catch(()=>undefined);requests.push(stored);};
     if(this.workControl){
       // Every full controlled launch keeps both output families coherent;
       // the normal variants are unreachable and need no driver compilation.
-      this.regionalPipeline=await create("geometryRegional",{geometryPressure:1});
-      this.regionalMaintenancePipeline=await create("geometryRegional",{geometryPressure:1,geometryRegionalMaintenance:1});
-      this.pressurePipeline=await create("geometry",{...all,geometryPressure:1,...twinned});
-      this.pipeline=this.pressurePipeline;
-      if(this.solid){const free=await create("geometry",{...all,geometryPressure:1,umSolidFree:1});this.freePipelines=[free,free];}
+      request(create("geometryRegional",{geometryPressure:1}),p=>{this.regionalPipeline=p;});
+      request(create("geometryRegional",{geometryPressure:1,geometryRegionalMaintenance:1}),p=>{this.regionalMaintenancePipeline=p;});
+      request(create("geometry",{...all,geometryPressure:1,...twinned}),p=>{this.pressurePipeline=p;this.pipeline=p;});
+      if(this.solid)request(create("geometry",{...all,geometryPressure:1,umSolidFree:1}),free=>{this.freePipelines=[free,free];});
     }else{
-      [this.pipeline,this.pressurePipeline]=await Promise.all([create("geometry",{...all,...twinned}),create("geometry",{...all,geometryPressure:1,...twinned})]);
-      if(this.solid)this.freePipelines=await Promise.all([create("geometry",{...all,umSolidFree:1}),create("geometry",{...all,geometryPressure:1,umSolidFree:1})]);
+      request(Promise.all([create("geometry",{...all,...twinned}),create("geometry",{...all,geometryPressure:1,...twinned})]),([general,pressure])=>{this.pipeline=general;this.pressurePipeline=pressure;});
+      if(this.solid)request(Promise.all([create("geometry",{...all,umSolidFree:1}),create("geometry",{...all,geometryPressure:1,umSolidFree:1})]),free=>{this.freePipelines=free;});
     }
     // Every live owner's texel, as a launch above wrote it.
     const mirror=uniformDetailModule(this.device,{label:"Uniform mixed geometric fill mirror",code:uniformMixedCountedEntriesWGSL(uniformMixedTopologyWGSL(this.ownership.capacity,0)+/* wgsl */`
@@ -445,14 +451,31 @@ ${this.workControl?`@group(1) @binding(3) var<storage,read> mirrorPlan:array<u32
 }`,["mirror"])});
     const mirrorErrors=(await mirror.getCompilationInfo()).messages.filter(m=>m.type==="error");if(mirrorErrors.length)throw new Error(mirrorErrors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const mirrorLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.mirrorResources]});
-    this.mirrorPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}});
-    if(this.workControl)this.mirrorRegionalPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirrorRegional"}});
-    if(this.solid)this.mirrorListedPipeline=await uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirrorListed",constants:{umDispatchX:this.ownership.dispatchX}}});
-    if(this.workControl){this.normalCandidatesPipeline=await create("normalCandidates",{},layout);this.normalTagsPipeline=await create("normalTags",{},layout);}
+    request(uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirror",constants:{umDispatchX:this.ownership.dispatchX,...all}}}),p=>{this.mirrorPipeline=p;});
+    if(this.workControl)request(uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirrorRegional"}}),p=>{this.mirrorRegionalPipeline=p;});
+    if(this.solid)request(uniformDetailPipeline(this.device,this.ownership,{layout:mirrorLayout,compute:{module:mirror,entryPoint:"mirrorListed",constants:{umDispatchX:this.ownership.dispatchX}}}),p=>{this.mirrorListedPipeline=p;});
+    if(this.workControl){request(create("normalCandidates",{},layout),p=>{this.normalCandidatesPipeline=p;});request(create("normalTags",{},layout),p=>{this.normalTagsPipeline=p;});}
     // The changed launch follows a GPU relayout's changed tiles (Dynamic).
-    this.changedPipelines.push(...await Promise.all([create("compactChanged",{},listed),create("geometryChanged",{},layout)]));
-    if(this.workControl)this.changedMaintenancePipeline=await create("geometryChanged",{geometryChangedMaintenance:1},layout);
-    if(this.solid)this.bodiesPipeline=await create("compactBodies",{},layout);
+    // Under work control it runs the maintenance form unless the regional
+    // setup is ablated (a diagnostic): the plain form compiles at background
+    // priority, and an advance under that ablation waits for it.
+    request(create("compactChanged",{},listed),p=>{this.changedPipelines[0]=p;});
+    if(this.workControl){
+      this.background.add("geometryChanged",()=>create("geometryChanged",{},layout));
+      request(create("geometryChanged",{geometryChangedMaintenance:1},layout),p=>{this.changedMaintenancePipeline=p;});
+    }else request(create("geometryChanged",{},layout),p=>{this.changedPipelines[1]=p;});
+    if(this.solid)request(create("compactBodies",{},layout),p=>{this.bodiesPipeline=p;});
+    await Promise.all(requests);
+  }
+  private readonly background=new GPUBackgroundPipelines();
+  /** The plain changed launch: compiled with the owner, or at background priority under work control. */
+  private get changedPipeline():GPUComputePipeline{return this.changedPipelines[1]??this.background.get("geometryChanged");}
+  /** undefined when every pipeline an advance may bind under the current
+   * flags is compiled; otherwise their promise, raised to critical priority.
+   * An advance awaits it before its first queue write. */
+  pipelinesPending():Promise<void>|undefined{
+    const background=this.background;if(background.allReady)return undefined;
+    return background.require(this.workControl&&!this.workControl.regionalGeometrySetup?GEOMETRY_CHANGED_PLAIN:GEOMETRY_NONE);
   }
   /** pressure: also write the all-4h pressure geometry (a full launch).
    * changed: the changed tiles (UniformMixedGenerationBuffers.changes) of the
@@ -483,7 +506,7 @@ ${this.workControl?`@group(1) @binding(3) var<storage,read> mirrorPlan:array<u32
     }
     const pass=encoder.beginComputePass(GEOMETRY_PASS);if(sharedSetup)this.workControl!.encodeRegionalGeometry(pass);pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,group.group);if(this.solid)pass.setBindGroup(2,this.solid.tileGroup);
     if(options.changed){
-      const compact=this.changedPipelines[0]!,changed=changedMaintenance?this.changedMaintenancePipeline!:this.changedPipelines[1]!,tiles=this.ownership.capacity.tiles;
+      const compact=this.changedPipelines[0]!,changed=changedMaintenance?this.changedMaintenancePipeline!:this.changedPipeline,tiles=this.ownership.capacity.tiles;
       pass.setBindGroup(this.solid?3:2,this.listGroup!.group.group);
       pass.setPipeline(this.variant(compact));pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,ceilDiv(tiles,64)));
       pass.setPipeline(this.variant(changed));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
@@ -491,7 +514,7 @@ ${this.workControl?`@group(1) @binding(3) var<storage,read> mirrorPlan:array<u32
     else if(options.bodies){
       const tiles=this.ownership.capacity.tiles;
       pass.setPipeline(this.variant(this.bodiesPipeline!));pass.dispatchWorkgroups(Math.min(BODY_REGION_GRID,tiles/64));
-      pass.setPipeline(this.variant(changedMaintenance?this.changedMaintenancePipeline!:this.changedPipelines[1]!));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
+      pass.setPipeline(this.variant(changedMaintenance?this.changedMaintenancePipeline!:this.changedPipeline));pass.dispatchWorkgroups(Math.min(CHANGED_GRID,tiles));
     }
     else if(regional){pass.setPipeline(this.variant(sharedSetup?this.regionalMaintenancePipeline!:this.regionalPipeline!));pass.dispatchWorkgroups(Math.min(REGIONAL_GRID,this.ownership.capacity.tiles));}
     else{

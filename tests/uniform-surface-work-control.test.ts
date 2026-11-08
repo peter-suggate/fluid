@@ -48,6 +48,8 @@ test("production 16h current models and retained geometry handle coverage, colli
   const phi=storage.createField("work evidence fixture","vertex","r32float");
   const pool=new UniformPagePool(device,{table:16,blocks:address.blocks,idleSteps:2});
   const control=new UniformSurfaceWorkControl(device,ownership,phi,undefined,pool);
+  // The surface model evidence is off by default (22d0bc3c): this test reads its models.
+  control.surfaceEvidence=true;
   const texture=storage.physical(phi);
   let fixtureRevision=1;
   // These fixture writers change phi alone: publish producer revisions,
@@ -59,7 +61,7 @@ test("production 16h current models and retained geometry handle coverage, colli
    return words(device,stage==="surface"?control.surface:control.geometry,control.snapshotOffset);
   };
   try{
-   await control.initialize();fill(1);
+   await control.initialize();await control.compiled();fill(1);
    device.queue.writeBuffer(ownership.regionVelocity,0,new Uint32Array(6*control.regions).fill(0x80000000));
    const first=await capture(),r=control.regions;
    assert.equal(control.cacheRegions,512);assert.ok(control.geometry.size<18*1024*1024);
@@ -256,8 +258,10 @@ test("current slope evidence encloses native trilinear derivatives through resol
   const layout=createUniformMixedLayout({dimensions,cellSize_m:[1,1,1],origin_m:{x:0,y:0,z:0}},[],4,forced,address);
   const ownership=new UniformMixedOwnership(device,layout,true,layout.fineTiles.length),storage=new UniformDetailStorage(device,address);storage.attach(ownership);
   const phi=storage.createField("native edge phi","vertex","r32float"),control=new UniformSurfaceWorkControl(device,ownership,phi),resolve=new UniformMixedPhiResolve(device,ownership),resolved=resolve.bind(phi);
+  // The surface model evidence is off by default (22d0bc3c): this test reads its slopes.
+  control.surfaceEvidence=true;
   try{
-   await Promise.all([control.initialize(),resolve.initialize()]);
+   await Promise.all([control.initialize(),resolve.initialize()]);await control.compiled();
    const resources=uniformDetailBindLayout(device,{entries:[{binding:0,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float",viewDimension:"3d"}}]});
    const module=uniformDetailModule(device,{code:uniformMixedTopologyWGSL(ownership.capacity,0)+`
 @group(1) @binding(0) var outputPhi:texture_storage_3d<r32float,write>;

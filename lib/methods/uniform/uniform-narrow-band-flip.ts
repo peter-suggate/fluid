@@ -15,6 +15,7 @@ import { uniformStageListsWGSL } from "./uniform-stage-lists";
 import { narrowBandArenaWGSL, narrowBandArenaCanonicalWGSL } from "./uniform-surface-brick-arena.wgsl";
 import { UNIFORM_BRICK_TABLE_ENTRIES, uniformBrickTableClear, uniformBrickTableWGSL, uniformBrickTableWords } from "./uniform-brick-table";
 import { narrowBandNearestEntries, narrowBandNearestControlEntries } from "./uniform-narrow-band-nearest.wgsl";
+import { GPUBackgroundPipelines, joinPendingPipelines } from "../../core/gpu-background-pipelines";
 import { narrowBandNearWGSL } from "./uniform-narrow-band-near.wgsl";
 import { narrowBandTerrainContactSource, narrowBandRigidContactSource } from "./uniform-particle-contact.wgsl";
 import { narrowBandBodyWindowWGSL } from "./uniform-particle-body-window.wgsl";
@@ -68,11 +69,23 @@ const NB_LAUNCH={grid:0,counted:1,one:3,particles:4,regions:5} as const;
  * 128 held each ~21 of 2744 regions in series (airPlanSeeds and
  * airPlanPropagate 0.2 ms each in an all-4h frame). */
 const NB_REGION_GROUPS=1024;
+// Pipelines an advance binds only on some frames, compiled at background
+// priority (pipelinesPending says which this advance may bind). Unplanned
+// crossings clear air through clearAir; planned but unfused ones through
+// airPlanned; diagnoseBefore runs only for a reader measuring traces.
+const NB_UNPLANNED_AIR=["airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse"] as const;
+const NB_PLANNED_AIR=["airPlanSeeds","airPlanPropagate","airClearFine","airClearCoarse@planned"] as const;
+const NB_DIAGNOSE=["diagnoseBefore"] as const;
+const NB_BACKGROUND_PIPELINES=new Set<string>([...NB_UNPLANNED_AIR,...NB_PLANNED_AIR,...NB_DIAGNOSE]);
+const NB_NO_BACKGROUND:readonly string[]=[];
 /** One launch of a batch, resolved once at initialization: its bind groups
  * by name (bind() replaces the groups), its pipeline and its launch. */
 interface NarrowBandStep{readonly groups:string;readonly base:boolean;readonly pipeline:GPUComputePipeline;readonly launch:number}
-/** A pass's launches. A frame replays them; it builds no list or label. */
-interface NarrowBandBatch{readonly pass:GPUComputePassDescriptor;readonly steps:readonly NarrowBandStep[]}
+/** A pass's launches. A frame replays them; it builds no list or label.
+ * deferred: its steps wait on background pipelines and resolve at the first
+ * run (the advance awaited them: pipelinesPending). unavailable: a pipeline
+ * it names is not compiled in this configuration, and running it throws. */
+interface NarrowBandBatch{readonly pass:GPUComputePassDescriptor;steps:readonly NarrowBandStep[];deferred?:{readonly entries:readonly string[];readonly groupName:string|undefined};readonly unavailable?:string}
 interface NarrowBandBatches{
  readonly advect:NarrowBandBatch;readonly allocate:NarrowBandBatch;readonly sortPrepare:NarrowBandBatch;readonly sort:NarrowBandBatch;readonly countInitial:NarrowBandBatch;readonly seedInitial:NarrowBandBatch;
  readonly activity:NarrowBandBatch;readonly searchReconstruct:NarrowBandBatch;
@@ -420,6 +433,38 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  private readonly crossingSearches=new Map<NarrowBandBatch,NarrowBandBatch>();
  private airPlanned?:NarrowBandBatch;
  private airFused?:NarrowBandBatch;
+ /** The stage pipelines compiled at background priority (NB_BACKGROUND_PIPELINES). */
+ private readonly background=new GPUBackgroundPipelines();
+ /** undefined when every background pipeline this advance may bind is
+  * compiled; otherwise their promise, raised to critical priority. The
+  * frame's host awaits it before the advance's first queue write. Which air
+  * batch clearAir runs follows host flags alone: a frame that runs the
+  * stages encodes the shared plan before reconstruct, so its crossings are
+  * planned exactly when the plan and the planned search are enabled. */
+ pipelinesPending():Promise<void>|undefined{
+  const background=this.background;if(background.allReady)return undefined;
+  const plan=this.framePlan,planned=this.regionalCrossingPlanEnabled&&plan!==undefined&&plan.enabled;
+  const air=!planned?NB_UNPLANNED_AIR:plan!.scheduleStages&&plan!.fuseAirClear?NB_NO_BACKGROUND:NB_PLANNED_AIR;
+  return joinPendingPipelines(background.require(air),this.measureTraces?background.require(NB_DIAGNOSE):undefined);
+ }
+ /** Stage pipelines no batch of this configuration runs, fixed at
+  * construction: never compiled. A batch naming one is unavailable and
+  * throws if it runs. */
+ private omitted?:ReadonlySet<string>;
+ private get omittedPipelines():ReadonlySet<string>{
+  return this.omitted??=new Set<string>([
+   // Every crossing search takes the @cold forms of these.
+   "depthTiles","depthSeeds",
+   // Reconstruction splats one way: by the plan's occupied list, or cell by cell.
+   ...(this.fusedSurface?["surfaceCells","surfaceSplat"]:["surfaceSplatPlan","surfaceSplatOccupied"]),
+   // Under previous crossings measureBand runs no search: only the plan's domain launches.
+   ...(this.previousCrossings?["depthTiles@cold","depthSeeds@cold",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX"]:[]),
+   // The canonical surface publishes h vertices itself whenever there are
+   // h tiles; with none, redistance stores nothing and its metric is never
+   // the derived one (retireSearched is set only by an h-tile retire).
+   ...(this.solid.coarse?["arenaStore","arenaGather@derived"]:[]),
+  ]);
+ }
  private crossingIsPlanned=false;
  private crossingPlanSerial=-1;
  private readonly encodeCrossingDomain=(encoder:GPUCommandEncoder):void=>{
@@ -1947,8 +1992,10 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
    const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources","seedRank","seedCut","separationPrepass"].includes(entryPoint)?1:0]!;
-   const p=await uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
-   this.pipelines.set(name,p);
+   if(this.omittedPipelines.has(name))return;
+   const compile=()=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
+   if(NB_BACKGROUND_PIPELINES.has(name)){this.background.add(name,compile);return;}
+   this.pipelines.set(name,await compile());
   }));
   if(this.deltaResources){
    const module=uniformDetailModule(this.device,{specializeWorldGeometry:true,label:"Narrow-band FLIP delta record",code:sourceCode(true,true,true)});
@@ -2018,8 +2065,14 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
  /** The seed batch's rank steps: seedRank@level and seedCut@level. */
  private get seedRankEntries():string[]{const rank=this.seedRank;return rank?Array.from({length:rank.levels},(_,l)=>[`seedRank@${l}`,`seedCut@${l}`]).flat():[];}
  private compile(entries:readonly string[],groupName:string|undefined,label:string):NarrowBandBatch{
-  return {pass:{label:`Narrow-band FLIP ${label}`},steps:entries.map(name=>{
-   const selected=this.pipelines.get(name),entry=name.split("@")[0]!;if(!selected)throw new Error(`Narrow-band FLIP ${name} is not initialized`);
+  const pass={label:`Narrow-band FLIP ${label}`},omitted=entries.find(name=>this.omittedPipelines.has(name));
+  if(omitted!==undefined)return {pass,steps:[],unavailable:`${omitted} is not compiled: no stage of this configuration binds it`};
+  if(entries.some(name=>this.background.has(name)))return {pass,steps:[],deferred:{entries,groupName}};
+  return {pass,steps:this.steps(entries,groupName)};
+ }
+ private steps(entries:readonly string[],groupName:string|undefined):NarrowBandStep[]{
+  return entries.map(name=>{
+   const selected=this.pipelines.get(name)??(this.background.has(name)?this.background.get(name):undefined),entry=name.split("@")[0]!;if(!selected)throw new Error(`Narrow-band FLIP ${name} is not initialized`);
    return {
     groups:groupName??((entry.startsWith("airClear")||name==="airPlanPropagate@fused")?"redistanceStore":entry.startsWith("air")?"surface":entry.startsWith("redistance")?"redistanceStore":entry.startsWith("coarse")?"surface":entry==="surfaceCells"||entry==="surfaceSplat"||entry==="diagnoseBefore"||entry.startsWith("depth")?"surface":entry.startsWith("transfer")?"transfer":entry==="couple"||entry==="coupleFine"?"surface":entry),
     // In-place redistance reads its own canonical texel: coarse vertices
@@ -2028,10 +2081,13 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
     launch:["depthTiles","depthPlanSeed","depthPlanExpand","depthReuseSnapshot","depthReuseSelect","airPlanSeeds","airPlanPropagate"].includes(entry)?NB_LAUNCH.regions:entry==="transfer"?NB_LAUNCH.counted:entry==="slabAllocate"||entry==="slabPlace"||entry==="seedCut"?NB_LAUNCH.one
      :entry==="advectParticles"||entry==="snapshot"?NB_LAUNCH.particles:NB_LAUNCH.grid,
    };
-  })};
+  });
  }
  private get compiled():NarrowBandBatches{if(!this.batches)throw new Error("Narrow-band FLIP is not initialized");return this.batches;}
  private run(encoder:GPUCommandEncoder,batch:NarrowBandBatch,shared?:GPUComputePassEncoder):void{
+  // The advance awaited these (pipelinesPending): get throws if it did not.
+  if(batch.deferred){batch.steps=this.steps(batch.deferred.entries,batch.deferred.groupName);batch.deferred=undefined;}
+  if(batch.unavailable)throw new Error(`${batch.pass.label}: ${batch.unavailable}`);
   const pass=shared??encoder.beginComputePass(batch.pass);
   pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(2,this.solid.tileGroup);
   let bound:GPUBindGroup|undefined;

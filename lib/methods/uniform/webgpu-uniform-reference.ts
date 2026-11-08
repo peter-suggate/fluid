@@ -104,7 +104,7 @@ import {
   WebGPUUniformPressureMultigrid,
 } from "./webgpu-uniform-pressure-multigrid";
 import { UNIFORM_PRESSURE_ARENA_SCHEDULE } from "./uniform-pressure-arena";
-import { gpuCompilationManagerFor } from "../../core/gpu-compilation-manager";
+import { gpuCompilationManagerFor, holdGPUBackgroundCompilation } from "../../core/gpu-compilation-manager";
 import {
   GPUStageTimestampRecorder,
 } from "../../core/performance-trace";
@@ -1157,6 +1157,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     device = scope.device;
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
     let solver: WebGPUUniformReferenceSolver | undefined;
+    // Owners request the pipelines only some frames bind at background
+    // priority: none takes a driver slot until every construction request
+    // has, and the first frames wait for any they need (advanceTo).
+    const releaseBackground = holdGPUBackgroundCompilation();
     try {
       if(scene.cloth?.length)await Promise.all(scene.cloth.map(document=>loadClothTopology(document.geometry)));
       await runner.run([{ id: "uniform.allocate", phase: "allocation", label: "Allocate uniform reference resources", run: () => {
@@ -1180,7 +1184,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       scope.rollback();
       solver?.destroy();
       throw error;
-    }
+    } finally { releaseBackground(); }
   }
 
   private mixedFrame?: UniformMixedFrame;
@@ -3338,6 +3342,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * deferred edit is draining the pipeline. Each frame adopts its own
    * layout at its head, so no census gates admission. */
   get framePending(): boolean {
+    return this.mixedPipelineAdmission !== undefined || this.mixedHostBusy;
+  }
+  private get mixedHostBusy(): boolean {
     return this.clothInitialization !== undefined || (this.mixedFrameInFlight && (this.rigidSystem.nativeMotorContacts || this.clothRuntimes.length > 0 || this.sourceWater!==undefined))
       || this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
       || (this.mixedFrameInFlight && this.deferredFrameEdit);
@@ -3356,6 +3363,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   get deferredFramePublication(): boolean { return this.rigidSystem.nativeMotorContacts || this.clothRuntimes.length > 0 || this.sourceWater!==undefined; }
   get presentationPending(): boolean { return this.pressureFrameFailure !== undefined || (this.mixedFrameInFlight && this.deferredFramePublication); }
   async awaitFrameCompletion(): Promise<void> {
+    await this.mixedPipelineAdmission;
     await this.clothInitialization;
     await this.mixedFrameChain;
     if (this.pressureFrameFailure) throw this.pressureFrameFailure;
@@ -3365,6 +3373,27 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Presentation already awaited this frame. A second queue-wide fence here
     // includes newer presentations and holds their predecessor's throughput slot.
     await (completion ?? this.awaitFrameCompletion());
+  }
+
+  /** A step advanceTo admitted while pipelines it may bind compiled. */
+  private mixedPipelineAdmission?: Promise<void>;
+  /** The admitted step, once its pipelines are compiled: exactly the advance
+   * it would have been. Frames submitted before it keep running meanwhile,
+   * and edits deferred behind them apply as they settle, so it first waits
+   * for the host to be free, as the host's own next call would have. */
+  private async admitAfterPipelines(compiling: Promise<void>, time_s: number, bodies: RigidBodyState[]): Promise<void> {
+    try {
+      await compiling;
+      while (this.mixedHostBusy && !this.disposed && !this.pressureFrameFailure) {
+        const fence = this.clothInitialization ?? this.mixedFrameChain;
+        await fence;
+        // No frame was admitted since: settled frames leave the host free.
+        if (fence === this.mixedFrameChain && this.mixedHostBusy && !this.pressureFrameFailure) throw new Error("The fluid host stayed busy after its submitted frames settled");
+      }
+    } catch (error) { this.failMixedFrame(error); }
+    finally { this.mixedPipelineAdmission = undefined; }
+    if (this.disposed || this.pressureFrameFailure) return;
+    if (!this.advanceTo(time_s, bodies)) this.failMixedFrame(new Error(`An admitted fluid step to ${time_s} s was refused once its pipelines compiled`));
   }
 
   private externalStepPending = false;
@@ -3429,6 +3458,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (!planGPUAdvanceInto(advance, time_s, stepStart_s, fixedStep_s ?? this.scene.numerics.maxDt_s)) return false;
     if(!this.mixedFrame) throw new Error("Narrow-band FLIP advances only through the mixed-ownership frame");
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
+    // Before the advance's first queue write: pipelines it may bind that are
+    // still compiling at background priority (raised to critical now). The
+    // step is admitted and waits; framePending holds the host meanwhile.
+    const compiling = this.mixedFrame.pipelinesPending(this.scene.fluid.surfaceTension_N_m);
+    if (compiling) { this.mixedPipelineAdmission = this.admitAfterPipelines(compiling, time_s, structuredClone(bodies)); return true; }
     const dt = advance.dt_s, stepEnd_s = advance.nextTime_s;
     try { this.prepareClothStep(dt); }
     catch(error) { this.failMixedFrame(error); return true; }

@@ -71,6 +71,12 @@ export interface GPUCompilationRequestOptions {
   readonly signal?: AbortSignal;
 }
 
+/** A requestGPUCompilationAt result: what the scope returned, and a way to raise its requests' priority. */
+export interface GPUCompilationScopedRequest<T> {
+  readonly result: T;
+  raise(priority: GPUCompilationPriority): void;
+}
+
 export interface GPUCompilationProgress {
   readonly key: string;
   readonly label: string;
@@ -321,6 +327,7 @@ export class GPUCompilationManager implements GPUCompilationService {
       throw new Error("GPUCompilationManager must be created in a worker realm");
     }
     this.#device = device;
+    realmManagers.add(new WeakRef(this));
     const maximumConcurrentBundles = options.maximumConcurrentBundles ?? 1;
     if (!Number.isSafeInteger(maximumConcurrentBundles)
       || maximumConcurrentBundles < 1 || maximumConcurrentBundles > 4) {
@@ -363,6 +370,19 @@ export class GPUCompilationManager implements GPUCompilationService {
     const layout = this.#device.createPipelineLayout(saved);
     this.pipelineLayouts.set(key, layout);
     return layout;
+  }
+
+  /** A background hold was released: start what it kept queued (holdGPUBackgroundCompilation). */
+  resumeBackground(): void {
+    this.schedulePump();
+    this.emit();
+  }
+
+  private heldBackgroundJobs(): number {
+    if (backgroundHolds === 0) return 0;
+    let held = 0;
+    for (const job of this.queue) if (job.priority === "background") held++;
+    return held;
   }
 
   compileComputePipeline(
@@ -454,7 +474,7 @@ export class GPUCompilationManager implements GPUCompilationService {
       }),
       ...(this.progress ? { progress: this.progress } : {}),
       ...(this.batchStarted_ms !== undefined ? { batch: Object.freeze({ completed: this.batchSettled,
-        total: this.batchSettled + this.active + this.queue.length, startedAt_ms: this.batchStarted_ms }) } : {}),
+        total: this.batchSettled + this.active + this.queue.length - this.heldBackgroundJobs(), startedAt_ms: this.batchStarted_ms }) } : {}),
       ...(this.invalidationReason ? { invalidationReason: this.invalidationReason } : {}),
     });
   }
@@ -535,6 +555,8 @@ export class GPUCompilationManager implements GPUCompilationService {
   private pump(): void {
     if (this.invalidationReason) return;
     while (this.active < this.maximumConcurrentBundles && this.queue.length > 0) {
+      // The queue is in priority order: a held background job waits with every one behind it.
+      if (backgroundHolds > 0 && this.queue[0]!.priority === "background") { heldManagers.add(this); break; }
       const job = this.queue.shift()!;
       job.started = true;
       this.active += 1;
@@ -609,12 +631,12 @@ export class GPUCompilationManager implements GPUCompilationService {
     let job = this.pipelineJobs.get(key);
     if (job) {
       this.inFlightHits++;
-      this.promote(job, options.priority ?? "visible");
+      this.promote(job, options.priority ?? compilationScope?.priority ?? "visible");
     } else {
       let resolve!: (pipeline: Pipeline) => void;
       let reject!: (error: unknown) => void;
       const promise = new Promise<Pipeline>((accept, fail) => { resolve = accept; reject = fail; });
-      job = { kind, sequence: this.sequence++, priority: options.priority ?? "visible", key,
+      job = { kind, sequence: this.sequence++, priority: options.priority ?? compilationScope?.priority ?? "visible", key,
         label: saved.label ?? `${kind} pipeline`, descriptor: saved, promise,
         consumers: 0, started: false, resolve, reject };
       this.pipelineJobs.set(key, job);
@@ -627,6 +649,9 @@ export class GPUCompilationManager implements GPUCompilationService {
       this.schedulePump();
     }
     bundle?.jobs.add(job);
+    const scoped = job;
+    // A raise can lift a job past a background hold with a slot free: pump.
+    compilationScope?.raises.push((raised) => { if (!scoped.started) { this.promote(scoped, raised); this.schedulePump(); } });
     const result = this.consume(job, options.signal) as Promise<T>;
     this.emit();
     return result;
@@ -853,6 +878,75 @@ export function managedGPUDevice(
   managedDeviceByRawDevice.set(rawDevice, managed);
   managedDeviceByRawDevice.set(managed, managed);
   return managed;
+}
+
+/**
+ * The realm's compilation scope and background hold. Both are realm-wide, not
+ * per manager: a device seen through a wrapper (a tool's Proxy) reaches its
+ * manager without the wrapper being registered, and pipeline requests are
+ * issued synchronously, so the scope open when a request reaches any manager
+ * is the one that made it.
+ */
+let compilationScope: { readonly priority: GPUCompilationPriority; readonly raises: ((priority: GPUCompilationPriority) => void)[] } | undefined;
+let backgroundHolds = 0;
+/** Managers whose pump stopped at a held background job: resumed on release. */
+const heldManagers = new Set<GPUCompilationManager>();
+/** Every manager in the realm (whenGPUCompilationIdle). */
+const realmManagers = new Set<WeakRef<GPUCompilationManager>>();
+
+/**
+ * Resolves once every manager in the realm has nothing queued, compiling or
+ * in flight. Construction returns with background compiles still running (the
+ * pipelines only some frames bind): a timing probe awaits this before its
+ * timed steps, so compile contention stays out of the step times. Like the
+ * scope, it reaches managers through any device wrapper.
+ */
+export async function whenGPUCompilationIdle(): Promise<void> {
+  const waits: Promise<void>[] = [];
+  for (const ref of realmManagers) {
+    const manager = ref.deref();
+    if (manager) waits.push(manager.whenIdle()); else realmManagers.delete(ref);
+  }
+  await Promise.all(waits);
+}
+
+/**
+ * Run `compile` with every pipeline request it makes synchronously (before
+ * its first await) at `priority` unless the request names its own. The
+ * result carries `raise`, which promotes those requests that have not
+ * started: a frame that comes to need a background pipeline raises it to
+ * critical and waits. Without a manager (a raw device in a test) `compile`
+ * runs as it would and raising does nothing.
+ */
+export function requestGPUCompilationAt<T>(priority: GPUCompilationPriority, compile: () => T): GPUCompilationScopedRequest<T> {
+  const outer = compilationScope, raises: ((priority: GPUCompilationPriority) => void)[] = [];
+  compilationScope = { priority, raises };
+  let result: T;
+  try { result = compile(); }
+  finally { compilationScope = outer; }
+  outer?.raises.push(...raises);
+  return { result, raise: (raised) => { for (const raise of raises) raise(raised); } };
+}
+
+/**
+ * Keep every manager's background jobs queued until the returned release
+ * runs. Construction holds them so that each critical request it issues,
+ * however late, starts before any background compile takes a driver slot. A
+ * raised job is no longer background and starts in its turn. Release is
+ * idempotent.
+ */
+export function holdGPUBackgroundCompilation(): () => void {
+  backgroundHolds++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    backgroundHolds--;
+    if (backgroundHolds > 0) return;
+    const held = [...heldManagers];
+    heldManagers.clear();
+    for (const manager of held) manager.resumeBackground();
+  };
 }
 
 export function invalidateGPUCompilationManager(

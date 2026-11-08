@@ -11,7 +11,12 @@
  * WGSL is hashed, so two runs show whether the source is deterministic. After
  * construction the solver advances --steps fixed steps and the density,
  * pressure and phi fields are hashed: equal hashes between two builds mean
- * the same simulation output. Every host upload (queue.writeBuffer and
+ * the same simulation output. Construction returns with background compiles
+ * still running (pipelines only some frames bind), so the build reports three
+ * spans from the start of construction: to construction's return, to the
+ * first frame's readiness (every pipeline the first advance may bind
+ * compiled: what advanceTo waits for), and to compile idle (every compile
+ * settled). The steps run after compile idle. Every host upload (queue.writeBuffer and
  * writeTexture) during construction is hashed too, in order and by label:
  * the gate of a host-side change that must build the same fields. --dump
  * writes each module's WGSL (<dir>/<sha>.wgsl) and every compute pipeline's
@@ -22,7 +27,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
+import { managedGPUDevice, whenGPUCompilationIdle } from "../lib/core/gpu-compilation-manager";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { sceneDocument, sceneDocumentAtLattice } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
@@ -31,6 +36,7 @@ import { configureMetalShaderCache } from "../lib/harness/metal-shader-cache";
 import { createProcessRetainedDawnGPU, nodeDawnOptions } from "../lib/harness/node-dawn-provider";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu-uniform-reference";
+import type { UniformMixedFrame } from "../lib/methods/uniform/uniform-mixed-frame";
 import { readUniformFields } from "../tests/helpers/uniform-geometric";
 
 const options = process.argv.slice(2);
@@ -181,9 +187,23 @@ const progress = setInterval(() => console.log(JSON.stringify({ phase: "construc
 const solver = await method.createSolverAsync!(device, scene, quality, values, undefined,
   snapshot => { tasks.push({ at: now(), taskId: snapshot.taskId ?? snapshot.label, phase: snapshot.phase, label: snapshot.label }); }) as WebGPUUniformReferenceSolver;
 constructEnd = now(); clearInterval(progress); uploading = false;
-const { summary } = summarize(constructStart, constructEnd);
+const { summary: constructed } = summarize(constructStart, constructEnd);
 const host = uploadSummary();
-console.log(JSON.stringify({ phase: "constructed", ...summary, uploadBytes: host.uploadBytes, uploadHash: host.uploadHash }));
+console.log(JSON.stringify({ phase: "constructed", ...constructed, uploadBytes: host.uploadBytes, uploadHash: host.uploadHash }));
+// The first frame's readiness: the pipelines the first advance may bind,
+// raised to critical as its advanceTo raises them. Then every compile.
+phase = "background";
+const frame = (solver as unknown as { mixedFrame?: UniformMixedFrame }).mixedFrame;
+assert.ok(frame, `${sceneId} built no mixed frame`);
+await frame.pipelinesPending(scene.fluid.surfaceTension_N_m);
+const firstFrameReady = now();
+await whenGPUCompilationIdle();
+const compileIdle = now();
+const settled = summarize(constructStart, compileIdle).summary;
+const summary = { ...constructed, toFirstFrameReady_ms: firstFrameReady - constructStart, toCompileIdle_ms: compileIdle - constructStart,
+  afterConstruction: { pipelines: settled.pipelines - constructed.pipelines + constructed.pipelinesPending, pipelineBusy_ms: settled.pipelineBusy_ms - constructed.pipelineBusy_ms } };
+console.log(JSON.stringify({ phase: "ready", construction_ms: summary.construction_ms, toFirstFrameReady_ms: summary.toFirstFrameReady_ms,
+  toCompileIdle_ms: summary.toCompileIdle_ms, afterConstruction: summary.afterConstruction }));
 
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 const digest = (a: ArrayBufferView) => createHash("sha256").update(new Uint8Array(a.buffer, a.byteOffset, a.byteLength)).digest("hex").slice(0, 16);
@@ -215,5 +235,6 @@ const usage = { byPhase: Object.fromEntries([...pipelines.reduce((m, p) => {
 console.log(JSON.stringify({ phase: "usage", ...usage }));
 if (report) writeFileSync(report, JSON.stringify({ summary, step_ms, usage, hashes, uploads: host, modules,
   pipelines: pipelines.map(p => ({ ...p, ms: p.end - p.start })).sort((a, b) => b.ms - a.ms) }, null, 2) + "\n");
-console.log(JSON.stringify({ phase: "done", construction_ms: summary.construction_ms, step_ms, total_ms: now() }));
+console.log(JSON.stringify({ phase: "done", construction_ms: summary.construction_ms, toFirstFrameReady_ms: summary.toFirstFrameReady_ms,
+  toCompileIdle_ms: summary.toCompileIdle_ms, step_ms, total_ms: now() }));
 process.exit(0);

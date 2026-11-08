@@ -100,6 +100,10 @@ export class UniformMixedSurface {
    * dispatch, launched first: it retires the entries it evaluates. The
    * regular dispatch has no halo homes (umUnitHaloHome), so no fast twin. */
   private fastDeferredPipeline?:GPUComputePipeline;
+  /** The staged general advect (umStagedAdvect) after advectDeferred's
+   * general twins and advectOwners: per dispatch (merged, regular h) the
+   * trace and walk, the cell and cubic, then the wall and air tail. */
+  private readonly stagedPipelines:GPUComputePipeline[][]=[];
   /** advectCubic over the solid-aware cubic list (umCubicSolidList). */
   private cubicSolidPipeline?:GPUComputePipeline;
   /** advectCubicDeferred: the merged twins' listed cubics, launched after them. */
@@ -213,8 +217,9 @@ export class UniformMixedSurface {
   }
   /** The deferred binding: count words, deferredEntries words (the deferred
    * list), five words per cubic entry (advectCubic), eight per trace entry
-   * (advectTrace). */
-  private get deferredBytes():number{return 32+4*this.deferredEntries+20*this.cubicEntries+32*this.traceEntries;}
+   * (advectTrace), twelve per staged entry (umStagedAdvect: each canonical
+   * vertex is staged at most once, so deferredEntries of them). */
+  private get deferredBytes():number{return 32+4*this.deferredEntries+20*this.cubicEntries+32*this.traceEntries+48*this.deferredEntries;}
   bind(f: UniformMixedSurfaceFields): UniformDetailGroup {
     const a=this.address;
     for(const [i,t] of [f.phi,f.outputPhi,f.velocity,f.coarseVelocity].entries()){
@@ -225,10 +230,9 @@ export class UniformMixedSurface {
     if(f.phi===f.outputPhi)throw new Error("Mixed surface outputs overlap inputs");
     // The solid closed and clear tile words.
     const evidenceBytes=this.solid?8*this.ownership.capacity.tiles:0;
-    // The deferred advect list follows, a separate binding: its count, the
-    // cubic list's count, advectDeferred's cubic count (umCubicDeferred,
-    // reusing the cubic list's words), an unused word, then at most one word per
-    // lattice vertex, then the cubic list (deferredBytes).
+    // The deferred advect list follows, a separate binding: eight count
+    // words (UMDeferred.header), then at most one word per lattice vertex,
+    // the cubic list, the trace list and the staged list (deferredBytes).
     const deferredOffset=Math.ceil(((f.evidence.offset??0)+evidenceBytes)/256)*256,deferredBytes=this.deferredBytes;
     if((f.evidence.size??f.evidence.buffer.size-(f.evidence.offset??0))<deferredOffset-(f.evidence.offset??0)+deferredBytes)throw new Error("Mixed surface evidence scratch is too small");
     const group=uniformDetailGroup(this.device,{layout:this.resources,entries:[
@@ -1456,6 +1460,42 @@ fn umListTrace(vertex:vec3u,width:u32){
  deferred.data[b+4u]=bitcast<u32>(foot.shift.x);deferred.data[b+5u]=bitcast<u32>(foot.shift.y);deferred.data[b+6u]=bitcast<u32>(foot.shift.z);
  deferred.data[b+7u]=bitcast<u32>(foot.smoothing);
 }
+// The staged general advect (umStagedAdvect): umAdvected past the foot, in
+// three launches over a staged list, each kernel only its own part.
+// advectDeferred's general twins and advectOwners stage a vertex once its
+// foot is found and the Euler transport has declined it; then
+// advectStagedTrace traces and walks it, advectStagedCell samples the cell
+// at the walk's end and takes the cubic, and advectStagedTail applies the
+// wall contact, the embedded air, the released walls and the source, and
+// stores. Compiled whole, the general kernel's back end took 80 s and held
+// 64 threads a group: its parts are small kernels apart.
+// An entry is twelve words at UM_STAGE_BASE+12n: 0 the vertex word
+// (umQueueVertex's), 1 the flags (UM_STAGE_*), 2..4 the foot, then the walk's
+// end q, then (word 2) the value, 5 the smoothing, then the moved smoothing,
+// 6..8 the foot's shift, then the trace's end, 9..11 the trace's travel
+// (umLastTravel). The merged dispatch stages from the list's start
+// (header[6]), the regular h one from its end (header[7]): each canonical
+// vertex is staged at most once, so both together hold at most
+// deferredEntries.
+override umStagedAdvect:bool=false;
+const UM_STAGE_ENTRIES=${this.deferredEntries}u;
+const UM_STAGE_BASE=${this.deferredEntries+5*this.cubicEntries+8*this.traceEntries}u;
+const UM_STAGE_HIT=1u;
+const UM_STAGE_WALL=2u;
+const UM_STAGE_CUBIC=4u;
+const UM_STAGE_LISTED=8u;
+fn umStageRecord(n:u32)->u32{return UM_STAGE_BASE+12u*select(n,UM_STAGE_ENTRIES-1u-n,umRegularFine);}
+fn umStageCount()->u32{return min(atomicLoad(&deferred.header[select(6u,7u,umRegularFine)]),UM_STAGE_ENTRIES);}
+fn umStageVertex(vertex:vec3u,width:u32,foot:UMFoot){
+ let b=umStageRecord(atomicAdd(&deferred.header[select(6u,7u,umRegularFine)],1u));
+ deferred.data[b]=umVertexAt(vertex)|(select(firstTrailingBit(width),3u,umRegularFine)<<30u);deferred.data[b+1u]=0u;
+ deferred.data[b+2u]=bitcast<u32>(foot.foot.x);deferred.data[b+3u]=bitcast<u32>(foot.foot.y);deferred.data[b+4u]=bitcast<u32>(foot.foot.z);
+ deferred.data[b+5u]=bitcast<u32>(foot.smoothing);
+ deferred.data[b+6u]=bitcast<u32>(foot.shift.x);deferred.data[b+7u]=bitcast<u32>(foot.shift.y);deferred.data[b+8u]=bitcast<u32>(foot.shift.z);
+}
+fn umStageCoord(word:u32)->vec4u{let code=word>>30u;return vec4u(umVertexCoord(word&0x3fffffffu),select(1u<<code,1u,code==3u));}
+fn umStagedVec3(b:u32)->vec3f{return bitcast<vec3f>(vec3u(deferred.data[b],deferred.data[b+1u],deferred.data[b+2u]));}
+fn umStoreVec3(b:u32,v:vec3f){deferred.data[b]=bitcast<u32>(v.x);deferred.data[b+1u]=bitcast<u32>(v.y);deferred.data[b+2u]=bitcast<u32>(v.z);}
 fn umAdvectStore(vertex:vec3u,width:u32){
  umLocalSolidAdmission=false;umTraceSeedValid=false;
  umFullCubic=false;umFullIdentity=false;
@@ -1486,30 +1526,22 @@ fn umAdvectStore(vertex:vec3u,width:u32){
  // lanes (most of them far or deep air) would idle behind the few traces.
  // A solid-free fine launch keeps only locally certified current-open
  // full transport; every other globally solid-present vertex is listed.
- let p=vec3f(vertex);var defer=umDeferTraced;var value=0.0;
+ let p=vec3f(vertex);var defer=umDeferTraced;
  ${this.solid?"let reachProof=umSolidFree&&umSolidPresent()&&!umLocalSolidAdmission;defer=defer||(reachProof&&!umReachAdmission);umReachLo=p;umReachHi=p;":""}
  ${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+20}u],1u);}`:""}
  ${this.solid?/* wgsl */`// Off a clear tile a vertex can be buried: it keeps its value, umAdvected's
  // first exit.
  if(!umSolidClear(vec3i(p))&&umBuried(p)){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return;}
  ${this.solid.coarse?"if(reachProof&&umReachAdmission&&umReachBuried(vec3i(vertex))){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width));return;}":""}
- // A hit is evaluated by advectDeferred. Its first-pass phi and source
- // samples are discarded.
- var smoothing=0.0;
- {if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);
- let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}umStoreSurface(vertex,width,euler.x);return;}smoothing=foot.smoothing;if(reachProof&&abs(foot.center)<2.0*f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z))){umReachInclude(p-vec3f(2.0));umReachInclude(p+vec3f(2.0));}let walk=umWalk(p,umVertexTrace(foot));defer=walk.hit||umSlow;let q=walk.q;if(!defer){`:`var smoothing=0.0;{if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);
- let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){umStoreSurface(vertex,width,euler.x);return;}smoothing=foot.smoothing;let q=umVertexTrace(foot);defer=umSlow;if(!defer){`}
-  let cell=umVertexCell(q);value=cell.value;smoothing=umMovedSmoothing(smoothing,p,q,width);
-  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
-  ${this.solid?"if(reachProof&&!umReachSolidClear(params.flags.y!=0u&&abs(value)<2.0*h&&umCubicAt(vertex,width),abs(foot.center)<2.0*h,vec3i(vertex))){defer=true;}else ":""}if(params.flags.y!=0u&&abs(value)<2.0*h&&umCubicAt(vertex,width)){
-   umFullCubic=true;value=umCubicPhi(q,cell);
-  }
-  defer=defer||umReleasedMayChange(p,value);
-  value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+ `:""}
+ // The foot and the Euler transport here; past them the vertex is staged
+ // (umStagedAdvect: advectStagedTrace, advectStagedCell, advectStagedTail
+ // finish it as umAdvected). Only advectOwners reaches this point: advectFine
+ // lists its traces (umSplitTrace) and advect defers (umDeferTraced).
+ if(!defer){umSlow=false;let foot=umVertexFoot(vertex,width);
+  let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){${this.workControl?`if(umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}umStoreSurface(vertex,width,euler.x);return;}
+  umStageVertex(vertex,width,foot);return;
  }
- }}
- ${this.workControl?`if(!defer&&umLocalSolidAdmission&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}
- if(!defer){umRecordRegion(vertex,select(3u,4u,umFullCubic));umStoreSurface(vertex,width,value+smoothing);return;}
  // Each canonical vertex is stored once: the list holds at most every vertex.
  // A word is the vertex key (umVertexAt) below a two-bit code: log2 of the
  // width (0, 2) off the regular-h dispatch, 3 on it. All ones is no word.
@@ -1558,6 +1590,12 @@ fn umAdvectStore(vertex:vec3u,width:u32){
   ${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+20}u],1u);}`:""}
   umFullCubic=false;umFullIdentity=false;umSlow=false;let foot=umVertexFoot(vertex,width);
   let euler=umEulerAdvected(vertex,width,foot);if(euler.y>0.0){if(umFastSurface){deferred.data[i]=0xffffffffu;}${this.workControl?`if(localSolidTwin&&params.flags.z!=0u){atomicAdd(&umClaims[${this.counterWord+21}u],1u);}`:""}umStoreSurface(vertex,width,euler.x);continue;}
+  // The general twins stage the rest (umStagedAdvect), past umAdvected's
+  // first exit: a buried vertex keeps its value.
+  if(umStagedAdvect){
+   ${this.solid?"if(!umSolidClear(vec3i(vertex))&&umBuried(vec3f(vertex))){umRecordRegion(vertex,0u);umStoreSurface(vertex,width,umLatticeLoad(vec3i(vertex),width)+foot.smoothing);continue;}":""}
+   umStageVertex(vertex,width,foot);continue;
+  }
   umSlow=false;umCubicQueued=false;let value=umAdvected(vec3f(vertex),width,foot);
   if(umCubicQueued){continue;}
   // The fast twin leaves a vertex with a slow sample to the general launch
@@ -1642,7 +1680,7 @@ ${uniformSolidSampleClosedWGSL}
 const UM_WALL_REACH:u32=${UNIFORM_MIXED_CLAIM_WORDS}u;
 const UM_WALL_TILE_REACH:u32=${SURFACE_CLAIM_WORDS}u;
 @compute @workgroup_size(64) fn wallReach(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);atomicStore(&deferred.header[3],0u);atomicStore(&deferred.header[4],0u);atomicStore(&deferred.header[5],0u);}
+ if(group.x==0u&&lane==0u){atomicStore(&deferred.header[0],0u);atomicStore(&deferred.header[1],0u);atomicStore(&deferred.header[2],0u);atomicStore(&deferred.header[3],0u);atomicStore(&deferred.header[4],0u);atomicStore(&deferred.header[5],0u);atomicStore(&deferred.header[6],0u);atomicStore(&deferred.header[7],0u);}
  let h=params.hDt.xyz;let dt=params.hDt.w;let faces=umWallFaceCount();
  for(var i=group.x;i<faces;i+=groups.x){
   let face=umWallFace(i);let f=face%6u;let axis=f>>1u;let upper=(f&1u)!=0u;let inward=select(1.0,-1.0,upper);
@@ -1739,6 +1777,63 @@ override umCubicSolidList:bool=false;
   var value=umReleasedWalls(p,umCubicPhi(q,umVertexCell(q)));
   value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
   umRecordRegion(vertex,4u);umStoreSurface(vertex,width,value+smoothing);
+ }
+}
+// umStagedAdvect's trace: each staged foot traced (umVertexTrace; a wall
+// vertex in one step under "clip", as umAdvected sets umOneStep) and its end
+// walked against solids. Over the foot it stores the walk's end, over the
+// smoothing the moved smoothing, over the shift the trace's end, then its
+// travel, and the hit and wall flags.
+@compute @workgroup_size(64) fn advectStagedTrace(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let count=umStageCount();
+ for(var n=gid.x;n<count;n+=64u*groups.x){
+  let b=umStageRecord(n);let at=umStageCoord(deferred.data[b]);let vertex=at.xyz;let width=at.w;let p=vec3f(vertex);
+  let foot=UMFoot(umStagedVec3(b+2u),umStagedVec3(b+6u),bitcast<f32>(deferred.data[b+5u]),0.0);
+  let wall=umSurfaceWallVertex(vertex);umOneStep=UM_WALL_CLIP&&wall;umSlow=false;umTraceSeedValid=false;
+  let end=umVertexTrace(foot);
+  ${this.solid?"let walk=umWalk(p,end);let q=walk.q;let hit=walk.hit;":"let q=end;let hit=false;"}
+  deferred.data[b+1u]=select(0u,UM_STAGE_HIT,hit)|select(0u,UM_STAGE_WALL,wall);
+  umStoreVec3(b+2u,q);deferred.data[b+5u]=bitcast<u32>(umMovedSmoothing(foot.smoothing,p,q,width));
+  umStoreVec3(b+6u,end);umStoreVec3(b+9u,umLastTravel);
+ }
+}
+// umStagedAdvect's cell: the value at the walk's end and, where umCubicAt
+// takes it, the cubic, stored over the end. Compiled with umCubicDeferred
+// (the merged dispatch), a cubic whose only continuation is the released
+// walls (no hit, off every wall) is listed for advectCubicDeferred instead,
+// as umAdvected lists it; past that list's bound it is taken here.
+@compute @workgroup_size(64) fn advectStagedCell(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ let count=umStageCount();
+ for(var n=gid.x;n<count;n+=64u*groups.x){
+  let b=umStageRecord(n);let word=deferred.data[b];let at=umStageCoord(word);let vertex=at.xyz;let width=at.w;
+  var flags=deferred.data[b+1u];let q=umStagedVec3(b+2u);
+  let cell=umVertexCell(q);var value=cell.value;
+  let h=f32(width)*min(params.hDt.x,min(params.hDt.y,params.hDt.z));
+  if(params.flags.y!=0u&&abs(value)<2.0*h&&umCubicAt(vertex,width)){
+   if(umCubicDeferred&&(flags&(UM_STAGE_HIT|UM_STAGE_WALL))==0u){
+    let j=atomicAdd(&deferred.header[2],1u);
+    if(j<UM_CUBIC_ENTRIES){let c=UM_CUBIC_BASE+5u*j;deferred.data[c]=word;umStoreVec3(c+1u,q);deferred.data[c+4u]=deferred.data[b+5u];deferred.data[b+1u]=flags|UM_STAGE_LISTED;continue;}
+   }
+   flags|=UM_STAGE_CUBIC;value=umCubicPhi(q,cell);
+  }
+  deferred.data[b+1u]=flags;deferred.data[b+2u]=bitcast<u32>(value);
+ }
+}
+// umStagedAdvect's tail: umAdvected's continuations of the cell's value,
+// the wall contact (from the trace's travel), the embedded air at a hit
+// (from the trace's end) and the released walls, then the source; stored
+// with the moved smoothing.
+@compute @workgroup_size(64) fn advectStagedTail(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ umStagePlaneReach(lane);
+ let count=umStageCount();
+ for(var n=gid.x;n<count;n+=64u*groups.x){
+  let b=umStageRecord(n);let flags=deferred.data[b+1u];if((flags&UM_STAGE_LISTED)!=0u){continue;}
+  let at=umStageCoord(deferred.data[b]);let vertex=at.xyz;let width=at.w;let p=vec3f(vertex);
+  var value=bitcast<f32>(deferred.data[b+2u]);let smoothing=bitcast<f32>(deferred.data[b+5u]);
+  umLastTravel=umStagedVec3(b+9u);umOneStep=UM_WALL_CLIP&&(flags&UM_STAGE_WALL)!=0u;umTraceSeedValid=false;
+  ${this.solid?"value=umWallContact(p,value,width);if((flags&UM_STAGE_HIT)!=0u){value=umEmbeddedAir(p,umStagedVec3(b+6u),value);}value=umReleasedWalls(p,value);":"value=umReleasedWalls(p,umWallContact(p,value,width));"}
+  value=${this.sourceParams?"umSourceuvSourcePhi(p,value)":"value"};
+  umRecordRegion(vertex,select(3u,4u,(flags&UM_STAGE_CUBIC)!=0u));umStoreSurface(vertex,width,value+smoothing);
  }
 }
 // umSplitTrace's trace launch: each listed foot traced, its end stored over
@@ -1882,7 +1977,12 @@ override umCubicSolidList:bool=false;
       keyed("advectFinish",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE}),
       keyed("advectCubic",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE,...free}),
       compile("advectCubic",{umCellWidth:1,...UNIFORM_DETAIL_H_STORE,umCubicSolidList:1}).then(cubic=>{this.cubicSolidPipeline=cubic;}),
-      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umCubicDeferred:1,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
+      // The general twins foot their entries and stage the rest
+      // (umStagedAdvect): the trace and walk, the cell and cubic, and the
+      // tail, a launch each per dispatch, with no solid twin gate (advectOwners
+      // stages into the regular list whether or not a solid is present).
+      Promise.all([compile("advectWalls",{}),compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umStagedAdvect:1,...twinned}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,umStagedAdvect:1,...twinned})]).then(deferred=>{this.deferredPipelines.push(...deferred);}),
+      ...[{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS},{...regular,...UNIFORM_DETAIL_H_STORE}].map((dispatch,i)=>Promise.all([compile("advectStagedTrace",dispatch),compile("advectStagedCell",{...dispatch,...(i===0?{umCubicDeferred:1}:{})}),compile("advectStagedTail",dispatch)]).then(stages=>{this.stagedPipelines[i]=stages;})),
       ...(this.solid?[Promise.all([compile("advectDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS,umCubicDeferred:1,...free}),compile("advectDeferred",{...regular,...UNIFORM_DETAIL_H_STORE,...free})]).then(twins=>{this.freeDeferredPipelines.push(...twins);})]:[]),
       // The merged twins' listed cubics: one launch for both (no twin gate).
       compile("advectCubicDeferred",{umMergedTiles:1,...UNIFORM_DETAIL_MERGED_SLOTS}).then(cubic=>{this.cubicDeferredPipeline=cubic;}),
@@ -1930,6 +2030,9 @@ override umCubicSolidList:bool=false;
       if(i===1&&this.fastDeferredPipeline){deferred.setPipeline(this.variant(this.fastDeferredPipeline));deferred.dispatchWorkgroups(this.deferredGrid);}
       const twin=this.freeDeferredPipelines[i-1];if(twin){deferred.setPipeline(this.variant(twin));deferred.dispatchWorkgroups(this.deferredGrid);}
       deferred.setPipeline(this.variant(this.deferredPipelines[i]!));deferred.dispatchWorkgroups(this.deferredGrid);
+      // This dispatch's staged entries: its general twin's and, regular h,
+      // advectOwners' (the surface pass).
+      for(const stage of this.stagedPipelines[i-1]!){deferred.setPipeline(this.variant(stage));deferred.dispatchWorkgroups(this.deferredGrid);}
       if(i===1&&this.cubicDeferredPipeline){deferred.setPipeline(this.variant(this.cubicDeferredPipeline));deferred.dispatchWorkgroups(this.cubicGrid);}
     }
     deferred.end();

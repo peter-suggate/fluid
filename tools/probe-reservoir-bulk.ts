@@ -39,6 +39,7 @@ import { gpuKernelTimer } from "./gpu-kernel-timer";
 import { gpuDispatchCounter } from "./gpu-dispatch-counter";
 import { widenSceneBox } from "./scene-box-widen";
 import { readInitializationCensus } from "../lib/core/gpu-initialization";
+import { whenGPUCompilationIdle } from "../lib/core/gpu-compilation-manager";
 import { paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { sceneDocument, sceneDocumentAtLattice } from "../lib/core/scene-definition";
@@ -122,6 +123,9 @@ await withUniformDevice("reservoir bulk probe", async raw => {
   const built_t0 = performance.now();
   const solver = await createUniformSolver(device, scene, { ...(sceneId !== undefined ? getSceneDefinition(sceneId) : definition).methodProfile?.overrides, ...values });
   const built = allocation.snapshot(), built_ms = performance.now() - built_t0;
+  // Construction returns with background compiles running (pipelines only
+  // some frames bind): the timed steps start once every compile has settled.
+  await whenGPUCompilationIdle(); const compileIdle_ms = performance.now() - built_t0;
   // A census start's BULK16 pages and the host's time for them (V2c).
   const bulkStart = (solver as unknown as { bulkStartInfo?: Record<string, number> }).bulkStartInfo;
   // A census or 4h start's t=0 h tiles and the pages that hold them (one h slot each), against the slots by rule.
@@ -132,7 +136,7 @@ await withUniformDevice("reservoir bulk probe", async raw => {
     tasks_ms: census.reduce((n, e) => n + e.elapsed_ms, 0),
     byPhase: Object.fromEntries(census.reduce((m, e) => m.set(e.phase, (m.get(e.phase) ?? 0) + e.elapsed_ms), new Map<string, number>())),
     slowest: [...census].sort((a, b) => b.elapsed_ms - a.elapsed_ms).slice(0, 15).map(e => [e.taskId, e.elapsed_ms]) } : undefined;
-  memory = { construction: { ms: built_ms, stages, bulkStart, bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
+  memory = { construction: { ms: built_ms, compileIdle_ms, stages, bulkStart, bytes: built.liveBytes, peak: built.peakBytes, seed, byClass: byClass(built), resources: built.resources.map(r => [r.label, r.count, r.bytes]) } };
   const frame = (solver as unknown as { mixedFrame: UniformMixedFrame }).mixedFrame;
   const { nx, ny, nz } = solver.info;
   // The middle wall's +x face: on the scene's own cells, whatever --box-width.
