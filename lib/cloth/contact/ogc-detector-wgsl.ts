@@ -8,6 +8,8 @@
  *   6 grid counts (atomic)    7 grid: scan levels|entries 8 contacts (atomic)
  *   9 counters (atomic)       10 indirect args            11 DAT division pairs
  *   12 planes indirect args (apart from 10: the bound pass is itself dispatched from 10)
+ * work also holds, per vertex at solidOff, the static solid's truncation terms (q.xyz, j)
+ * of the round; the solid image itself sits in the contact buffer at word solidBase.
  *
  * One detection round is nine indirect dispatches:
  *   prep (N)  cell (1)  insert-count (T)  scan x3  insert (T)  query (N + E)  bound (N)
@@ -23,7 +25,7 @@
  *   plane  (n.xyz, certified support gap) as f32 bits; n points from the second primitive
  *          to the first; a gap <= 0 marks a pair with no separating plane
  */
-import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL } from "./ogc-wgsl";
+import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_SOLID_WGSL } from "./ogc-wgsl";
 
 export const OGC_PARAM_WORDS = 64;
 /** Indirect-args slots, three u32 each, in dispatch order. */
@@ -47,7 +49,7 @@ struct OgcParams {
   envOff: u32, wgN: u32, wgT: u32, wgNE: u32,
   wgS1: u32, wgS2: u32, kc: f32, mode: u32,
   gammaR: f32, pairCap: u32, tvOff: u32, sepEps: f32,
-  p0: u32, p1: u32, p2: u32, p3: u32,
+  solidBase: u32, solidOff: u32, p2: u32, p3: u32,
 }
 `;
 
@@ -58,7 +60,7 @@ export const OGC_PARAM = {
   gravity: 16, trisOff: 20, edgesOff: 21, triEdgesOff: 22, vtOffOff: 23, vtListOff: 24, veOffOff: 25, veListOff: 26, B1: 27,
   local1Off: 28, sums1Off: 29, local2Off: 30, sums2Off: 31, local3Off: 32, sums3Off: 33, entriesOff: 34, B2: 35,
   countsOff: 36, entriesBase: 37, dminTOff: 38, dminEOff: 39, envOff: 40, wgN: 41, wgT: 42, wgNE: 43, wgS1: 44, wgS2: 45, kc: 46,
-  mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51,
+  mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -303,10 +305,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * which is 0.5 gamma_r r_q,v in planar mode (every primitive beyond a vertex's pairs is
  * further than the larger envelope) and OGC's b_v in isotropic mode. Each truncated
  * vertex counts towards the re-detection decision; tv is left at 1 for the next pass.
+ * A static solid then cuts dX by its affine lower bound of phi (see the bound pass).
  */
 export const OGC_APPLY_WGSL = header([0, 2, 4, 5, 9], true) + /* wgsl */`
 var<workgroup> wgCount: atomic<u32>;
 var<workgroup> wgCapped: atomic<u32>;
+var<workgroup> wgSolidCut: atomic<u32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let v = gid.x;
@@ -318,6 +322,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     var cut = tv < 1.0;
     let l = length(delta);
     if (l > det.w) { delta *= det.w / l; cut = true; atomicAdd(&wgCapped, 1u); }
+    if (P.solidBase != 0u) {
+      // The static solid: phi(x_det + t dX) >= (1 - gamma_r) phi0 for t <= 1 / (j |dX| - q.dX).
+      let b = P.solidOff + 4u * v;
+      let qj = bitcast<vec4<f32>>(vec4<u32>(atomicLoad(&work[b]), atomicLoad(&work[b + 1u]), atomicLoad(&work[b + 2u]), atomicLoad(&work[b + 3u])));
+      let den = qj.w * length(delta) - dot(qj.xyz, delta);
+      if (den > 1.0) { delta /= den; cut = true; atomicAdd(&wgSolidCut, 1u); }
+    }
     if (cut) { pos[v] = vec4<f32>(det.xyz + delta, p.w); atomicAdd(&wgCount, 1u); }
   }
   workgroupBarrier();
@@ -326,6 +337,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (c != 0u) { atomicAdd(&counters[OGC_EXCEED], c); }
     let k = atomicLoad(&wgCapped);
     if (k != 0u) { atomicAdd(&counters[OGC_F_CAPPED], k); }
+    let sc = atomicLoad(&wgSolidCut);
+    if (sc != 0u) { atomicAdd(&counters[OGC_F_SOLID_CUT], sc); }
   }
 }
 `;
@@ -644,12 +657,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * The per-vertex displacement cap in x_det.w. Isotropic: OGC's
  * b_v = gamma_p min(d_min,v, d^T_min,v, d^E_min,v), each clipped at the vertex's own
  * query radius (eqs. 21-26). Planar: 0.5 gamma_r r_q,v (DAT Alg. 2, line 10). Thread 0
- * sizes the planes dispatch from the round's pair slots.
+ * sizes the planes dispatch from the round's pair slots. With a static solid, each
+ * vertex also gets its solid truncation terms and, near the solid, its solid entry.
  */
 export const OGC_BOUND_WGSL = header([0, 1, 4, 5, 8, 9, 12]) + /* wgsl */`
+fn ogcSolidBase() -> u32 { return P.solidBase; }
+fn ogcSolidWord(i: u32) -> u32 { return atomicLoad(&contacts[i]); }
+` + OGC_SOLID_WGSL + /* wgsl */`
 var<workgroup> wgSum: atomic<u32>;
 var<workgroup> wgMax: atomic<u32>;
+var<workgroup> wgSolid: atomic<u32>;
 fn dminAt(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&work[i])); }
+fn putWork4(i: u32, q: vec4<f32>) {
+  atomicStore(&work[i], bitcast<u32>(q.x)); atomicStore(&work[i + 1u], bitcast<u32>(q.y));
+  atomicStore(&work[i + 2u], bitcast<u32>(q.z)); atomicStore(&work[i + 3u], bitcast<u32>(q.w));
+}
+// The static solid at x_det: the truncation terms (q, j) = (g0, J) / (gamma_r phi0), so
+// that apply's t = 1 / max(1, j |dX| - q.dX) keeps phi >= (1 - gamma_r) phi0 over the
+// whole truncated motion, and a solid entry for the vertex when the ball can reach r.
+fn solidRound(v: u32, x0: vec3<f32>, rho: f32) {
+  let h = ogcSolidHeader();
+  let rel = (x0 - h.origin) / (8.0 * h.cell);
+  if (any(rel < vec3<f32>(0.0)) || any(rel >= vec3<f32>(h.dims))) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_BOUNDS); }
+  let sb = ogcSolidBallBound(h, x0, rho, P.r);
+  var qj = vec4<f32>(0.0);
+  if (!sb.far) {
+    if (!(sb.phi0 > 0.0)) {
+      qj.w = 3.0e38;
+      atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_PENETRATION);
+    } else {
+      let s = 1.0 / (P.gammaR * sb.phi0);
+      qj = vec4<f32>(sb.g0 * s, sb.J * s);
+      let lambda = select(0.0, -ogcActivation(sb.phi0, P.r, P.kc).y * length(sb.g0), sb.phi0 < P.r);
+      let slot = atomicAdd(&contacts[P.countsOff + v], 1u);
+      if (slot < P.contactCap) {
+        let b = P.entriesBase + 4u * (v * P.contactCap + slot);
+        atomicStore(&contacts[b], v); atomicStore(&contacts[b + 1u], OGC_SOLID_Y);
+        atomicStore(&contacts[b + 2u], bitcast<u32>(lambda)); atomicStore(&contacts[b + 3u], 0u);
+      } else {
+        atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_CONTACT_OVERFLOW);
+      }
+      atomicAdd(&wgSolid, 1u);
+    }
+  }
+  putWork4(P.solidOff + 4u * v, qj);
+}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let v = gid.x;
@@ -670,6 +722,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     }
     let x = xdet[v];
     xdet[v] = vec4<f32>(x.xyz, cap);
+    if (P.solidBase != 0u) { solidRound(v, x.xyz, cap); }
     let c = atomicLoad(&contacts[P.countsOff + v]);
     atomicAdd(&wgSum, min(c, P.contactCap));
     atomicMax(&wgMax, c);
@@ -680,6 +733,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let m = atomicLoad(&wgMax);
     atomicMax(&counters[OGC_F_PAIR_MAX], m);
     atomicMax(&counters[OGC_PEAK_CONTACTS], m);
+    let sc = atomicLoad(&wgSolid);
+    if (sc != 0u) { atomicAdd(&counters[OGC_F_SOLID_CONTACTS], sc); }
   }
 }
 `;

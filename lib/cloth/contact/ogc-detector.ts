@@ -35,6 +35,8 @@ import {
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
+import { SOLID_HEADER_WORDS, type ClothSolidField } from "./solid-field";
+import { OGC_NONE } from "./ogc-topology";
 
 export interface OgcContactConfig {
   /** Offset radius: the physical cloth thickness (m). */
@@ -68,13 +70,15 @@ export interface OgcContactConfig {
   bucketCount: number;
   /** Re-detection rounds allowed per step after the mandatory one. */
   roundCap: number;
+  /** Words reserved for the static solid field image (solid-field.ts); 0 or absent: the cloth sees no solid. */
+  solidCapacityWords?: number;
 }
 
 export interface OgcSolverInputs {
   /** vec4<f32> per vertex, cloth-local metres (w is the solver's). */
-  positions: GPUBuffer;
+  positions: GPUBuffer | GPUBufferBinding;
   /** vec4<f32> per vertex, m/s: the step's start velocity, for the envelope. */
-  velocities: GPUBuffer;
+  velocities: GPUBuffer | GPUBufferBinding;
 }
 
 export interface OgcFrameCounters {
@@ -99,6 +103,9 @@ export interface OgcFrameCounters {
   /** Vertices cut by the 0.5 gamma_r r_q,v cap (or b_v), and pairs held for want of a separating plane. */
   capped: number;
   uncertified: number;
+  /** Vertices with a static-solid entry over the frame's rounds, and truncations the solid bound made. */
+  solidContacts: number;
+  solidCut: number;
   roundCapHits: number;
   peakContacts: number;
   peakGrid: number;
@@ -106,7 +113,7 @@ export interface OgcFrameCounters {
   cell: number;
 }
 
-interface Kernel { pipeline: GPUComputePipeline; bindGroup: GPUBindGroup }
+interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
 
 const WG = 64;
 const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, insert: 6, query: 7, bound: 8 } as const;
@@ -130,7 +137,9 @@ export class OgcContactDetector {
   private kernels = new Map<string, Kernel>();
   private readonly paramWords = new Uint32Array(OGC_PARAM_WORDS);
 
-  private constructor(private readonly device: GPUDevice, topology: OgcTopology, readonly config: OgcContactConfig, private readonly inputs: OgcSolverInputs, coordinateScale: number) {
+  private inputs?: OgcSolverInputs;
+
+  private constructor(private readonly device: GPUDevice, topology: OgcTopology, readonly config: OgcContactConfig, coordinateScale: number) {
     const L = topology.layout;
     this.topology = topology;
     this.N = L.vertexCount; this.T = L.triangleCount; this.E = L.edgeCount;
@@ -158,13 +167,19 @@ export class OgcContactDetector {
     this.params = mk("params", 4 * OGC_PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.topo = mk("topology", 4 * topology.words.length);
     this.det = mk("x_det", 16 * N);
-    this.work = mk("work", 4 * (3 * N + T + E));
+    this.work = mk("work", 4 * (7 * N + T + E));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     const entriesOff = Math.ceil((sums3Off + 1) / 2) * 2;
     this.grid = mk("grid", 4 * (entriesOff + 2 * config.gridCapacity));
-    const countsBase = 2, entriesBase = 2 + Math.ceil(N / 4);
-    this.contacts = mk("contacts", 16 * (entriesBase + N * config.contactCapacity));
+    const countsBase = 3, entriesBase = 3 + Math.ceil(N / 4);
+    const solidWords = config.solidCapacityWords ?? 0;
+    if (!(Number.isSafeInteger(solidWords) && solidWords >= 0)) throw new Error("OGC: solidCapacityWords must be a whole number");
+    if (solidWords > 0 && solidWords < SOLID_HEADER_WORDS + 4) throw new Error("OGC: solidCapacityWords cannot hold an empty solid image");
+    this.solidBase = solidWords > 0 ? 4 * (entriesBase + N * config.contactCapacity) : 0;
+    this.solidCapacityWords = solidWords;
+    this.contacts = mk("contacts", 16 * (entriesBase + N * config.contactCapacity) + 4 * solidWords);
+    if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
     this.args = mk("args", 4 * OGC_ARGS_WORDS, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
@@ -188,20 +203,52 @@ export class OgcContactDetector {
     w[P.wgS1] = B1; w[P.wgS2] = B2; f[P.kc] = config.kc;
     w[P.mode] = OGC_TRUNCATION[mode]; f[P.gammaR] = gammaR; w[P.pairCap] = config.pairCapacity;
     w[P.tvOff] = 2 * N + T + E; f[P.sepEps] = sepEps;
+    w[P.solidBase] = this.solidBase; w[P.solidOff] = 3 * N + T + E;
     device.queue.writeBuffer(this.params, 0, w);
     writeBufferChunked(device.queue, this.topo, 0, topology.words);
-    const hdr = new Uint32Array(8), hf = new Float32Array(hdr.buffer);
+    const hdr = new Uint32Array(12), hf = new Float32Array(hdr.buffer);
     hdr[0] = N; hdr[1] = config.contactCapacity; hdr[2] = countsBase; hdr[3] = entriesBase;
     hf[4] = config.r; hf[5] = config.kc; hf[6] = config.mu; hf[7] = config.epsV * config.dt;
+    hdr[8] = this.solidBase;
     device.queue.writeBuffer(this.contacts, 0, hdr);
+    if (this.solidBase) {
+      // No solid until one is set: one empty slot, no bricks, an unbounded band.
+      const empty = new Uint32Array(SOLID_HEADER_WORDS + 4), ef = new Float32Array(empty.buffer);
+      ef[2] = 1; ef[3] = 3.0e38; empty[SOLID_HEADER_WORDS + 3] = OGC_NONE;
+      device.queue.writeBuffer(this.contacts, 4 * this.solidBase, empty);
+    }
   }
 
-  /** Build the detector and compile its kernels (asynchronously, outside any constructor). */
-  static async create(device: GPUDevice, mesh: OgcMeshTopology, restPositions: Float32Array, config: OgcContactConfig, inputs: OgcSolverInputs): Promise<OgcContactDetector> {
+  /** Word offset of the solid image in the contact buffer (0: no solid) and its authored capacity. */
+  readonly solidBase: number;
+  readonly solidCapacityWords: number;
+
+  /**
+   * Upload the static solid field (setup and solid edits only; never in a step
+   * path). Refuses an image beyond the authored capacity, and a band too thin
+   * for the envelope: every missing brick must lie further than
+   * r + 1.5 L_max rqMax from where a vertex's round can reach.
+   */
+  setSolidField(field: ClothSolidField) {
+    if (!this.solidBase) throw new Error("OGC: the detector was built without solidCapacityWords");
+    if (field.words.length > this.solidCapacityWords)
+      throw new Error(`OGC: the solid field needs ${field.words.length} words, the scene authored ${this.solidCapacityWords}`);
+    const need = this.config.r + 1.5 * field.maxLipschitz * this.config.rqMax;
+    if (!(field.band >= need)) throw new Error(`OGC: the solid field's band ${field.band} m is below r + 1.5 L_max rqMax = ${need} m`);
+    writeBufferChunked(this.device.queue, this.contacts, 4 * this.solidBase, field.words);
+  }
+
+  /**
+   * Build the detector and compile its kernels (asynchronously, outside any
+   * constructor). Without inputs, `bind` attaches the solver's buffers later:
+   * the solver itself is built around `solverBuffer`.
+   */
+  static async create(device: GPUDevice, mesh: OgcMeshTopology, restPositions: Float32Array, config: OgcContactConfig, inputs?: OgcSolverInputs): Promise<OgcContactDetector> {
     let scale = 1;
     for (const c of restPositions) scale = Math.max(scale, Math.abs(c));
-    const d = new OgcContactDetector(device, buildOgcTopology(mesh, restPositions), config, inputs, scale);
+    const d = new OgcContactDetector(device, buildOgcTopology(mesh, restPositions), config, scale);
     await d.compile();
+    if (inputs) d.bind(inputs);
     return d;
   }
 
@@ -210,13 +257,28 @@ export class OgcContactDetector {
 
   static vertexBlockWGSL(group: number, binding: number): string { return ogcVertexBlockWGSL({ group, binding }); }
 
-  private async compile() {
-    const b = (binding: number, buffer: GPUBuffer): GPUBindGroupEntry => ({ binding, resource: { buffer } });
-    const all: Record<number, GPUBuffer> = {
-      0: this.params, 1: this.topo, 2: this.inputs.positions, 3: this.inputs.velocities, 4: this.det, 5: this.work,
-      6: this.counts, 7: this.grid, 8: this.contacts, 9: this.counters, 10: this.args, 11: this.pairs, 12: this.planesArgs,
+  /** What the cloth solver's vertex kernel takes: the block at (group 0, binding) and the buffer it reads. */
+  solverContact(binding: number): { wgsl: string; buffer: GPUBuffer } {
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding }), buffer: this.contacts };
+  }
+
+  /**
+   * The step hooks for one implicit step of the cloth solver (its ClothStepHooks):
+   * the mandatory round and a truncation of the initial guess after the step
+   * frame, a truncation after every colour sweep, and after every iteration a
+   * truncation of the iteration's last moves, the decision and the (indirect,
+   * usually empty) re-detection round.
+   */
+  get stepHooks() {
+    return {
+      afterFrame: (pass: GPUComputePassEncoder) => { this.encodeStepBegin(pass); this.encodeDetection(pass); this.encodeTruncate(pass); },
+      afterColour: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); },
+      afterIteration: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); this.encodeDecide(pass); this.encodeDetection(pass); },
     };
-    const specs: [string, string, number[], Record<number, GPUBuffer>?][] = [
+  }
+
+  private async compile() {
+    const specs: [string, string, number[], Record<number, "positions">?][] = [
       ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9]],
       ["cell", OGC_CELL_WGSL, [0, 9]],
       ["count", ogcGridCountWGSL(false), [0, 1, 4, 5, 6, 9]],
@@ -232,27 +294,46 @@ export class OgcContactDetector {
       ["planes", OGC_PLANES_WGSL, [0, 2, 4, 5, 9, 11]],
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 9]],
       // Intersection counting reads the solver's current positions where detection reads x_det.
-      ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: this.inputs.positions }],
-      ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: this.inputs.positions }],
-      ["xTest", OGC_INTERSECT_WGSL, [0, 1, 4, 7, 9], { 4: this.inputs.positions }],
+      ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
+      ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],
+      ["xTest", OGC_INTERSECT_WGSL, [0, 1, 4, 7, 9], { 4: "positions" }],
     ];
     await Promise.all(specs.map(async ([name, code, bindings, override]) => {
       const module = this.device.createShaderModule({ label: `ogc ${name}`, code });
       const pipeline = await this.device.createComputePipelineAsync({ label: `ogc ${name}`, layout: "auto", compute: { module, entryPoint: "main" } });
-      const bindGroup = this.device.createBindGroup({
-        label: `ogc ${name}`, layout: pipeline.getBindGroupLayout(0),
-        entries: bindings.map(i => b(i, override?.[i] ?? all[i])),
-      });
-      this.kernels.set(name, { pipeline, bindGroup });
+      this.kernels.set(name, { pipeline, bindings, override });
     }));
   }
 
-  private run(pass: GPUComputePassEncoder, name: string, workgroups: number) {
+  /** Attach the solver's positions and step-start velocities (once, at setup). */
+  bind(inputs: OgcSolverInputs) {
+    if (this.inputs) throw new Error("OGC: the detector is already bound to a solver");
+    this.inputs = inputs;
+    const res = (b: GPUBuffer | GPUBufferBinding): GPUBufferBinding => ("buffer" in b ? b : { buffer: b });
+    const all: Record<number, GPUBufferBinding> = {
+      0: res(this.params), 1: res(this.topo), 2: res(inputs.positions), 3: res(inputs.velocities), 4: res(this.det), 5: res(this.work),
+      6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
+    };
+    for (const [name, k] of this.kernels) {
+      k.bindGroup = this.device.createBindGroup({
+        label: `ogc ${name}`, layout: k.pipeline.getBindGroupLayout(0),
+        entries: k.bindings.map(i => ({ binding: i, resource: k.override?.[i] === "positions" ? all[2]! : all[i]! })),
+      });
+    }
+  }
+
+  private kernel(name: string): Kernel & { bindGroup: GPUBindGroup } {
     const k = this.kernels.get(name)!;
+    if (!k.bindGroup) throw new Error("OGC: bind the solver's buffers before encoding");
+    return k as Kernel & { bindGroup: GPUBindGroup };
+  }
+
+  private run(pass: GPUComputePassEncoder, name: string, workgroups: number) {
+    const k = this.kernel(name);
     pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroups(workgroups);
   }
   private runIndirect(pass: GPUComputePassEncoder, name: keyof typeof DISPATCH) {
-    const k = this.kernels.get(name)!;
+    const k = this.kernel(name);
     pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.args, 12 * DISPATCH[name]);
   }
 
@@ -268,7 +349,7 @@ export class OgcContactDetector {
   encodeDecide(pass: GPUComputePassEncoder) { this.run(pass, "decide", 1); }
   /** Truncate the accumulated displacement x - x_det of every vertex: division planes (indirect), then apply. */
   encodeTruncate(pass: GPUComputePassEncoder) {
-    const k = this.kernels.get("planes")!;
+    const k = this.kernel("planes");
     pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
     this.run(pass, "apply", Math.ceil(this.N / WG));
   }
@@ -298,6 +379,7 @@ export class OgcContactDetector {
       peakEnvelope: fl[C.framePeakEnvelope], roundCapHits: u[C.frameRoundCapHits], peakContacts: u[C.peakContacts],
       datPairs: u[C.frameDatPairs], framePeakPairSlots: u[C.framePeakPairSlots], peakPairSlots: u[C.peakPairSlots],
       capped: u[C.frameCapped], uncertified: u[C.frameUncertified],
+      solidContacts: u[C.frameSolidContacts], solidCut: u[C.frameSolidCut],
       peakGrid: u[C.peakGrid], intersections: u[C.intersections], cell: fl[C.cell],
     };
   }

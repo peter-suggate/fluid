@@ -531,3 +531,63 @@ export function motionPenetrates(mesh: OracleMesh, X0: V3[], X1: V3[], samples =
   }
   return false;
 }
+
+// ------------------------------------------------------------------ static solid field (Float64)
+
+import {
+  SOLID_BRICK_CELLS, cellGradientRange, sampleClothSolidField, type ClothSolidField,
+} from "../lib/cloth/contact/solid-field";
+
+/** Exact signed distances of the test solids. */
+export const boxSdf = (lo: V3, hi: V3) => (p: readonly number[]) => {
+  const c = [0, 1, 2].map(a => (lo[a] + hi[a]) / 2), h = [0, 1, 2].map(a => (hi[a] - lo[a]) / 2);
+  const q = [0, 1, 2].map(a => Math.abs(p[a] - c[a]) - h[a]);
+  return Math.hypot(...q.map(v => Math.max(v, 0))) + Math.min(Math.max(q[0], q[1], q[2]), 0);
+};
+export const sphereSdf = (c: V3, R: number) => (p: readonly number[]) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]) - R;
+
+export interface OracleSolidBound { far: boolean; phi0: number; g0: V3; J: number; stored: boolean }
+
+/** The GPU's ball bound (ogcSolidBallBound) in Float64 on the field's node values. */
+export function solidBallBound(field: ClothSolidField, x0: V3, rho: number, r: number): OracleSolidBound {
+  const s = sampleClothSolidField(field, x0);
+  const out: OracleSolidBound = { far: true, phi0: s.phi, g0: [...s.grad] as V3, J: 0, stored: s.stored };
+  if (Math.min(s.phi, field.band) - field.maxLipschitz * rho >= r) return out;
+  const cellOf = (p: V3) => p.map((v, a) => Math.floor((v - field.origin[a]) / field.cell));
+  const c0 = cellOf(sub(x0, [rho, rho, rho])), c1 = cellOf(add(x0, [rho, rho, rho]));
+  let J = 0;
+  for (let cz = c0[2]; cz <= c1[2]; cz++) for (let cy = c0[1]; cy <= c1[1]; cy++) for (let cx = c0[0]; cx <= c1[0]; cx++) {
+    const c = [cx, cy, cz], b = c.map(v => Math.floor(v / SOLID_BRICK_CELLS));
+    const brick = field.bricks.get(b.join(","));
+    if (!brick) return out;
+    const { lo, hi } = cellGradientRange(brick.values, c.map((v, a) => v - SOLID_BRICK_CELLS * b[a]) as V3);
+    J = Math.max(J, Math.hypot(...[0, 1, 2].map(a => Math.max(Math.abs(hi[a] / field.cell - s.grad[a]), Math.abs(s.grad[a] - lo[a] / field.cell)))));
+  }
+  return { ...out, far: false, J };
+}
+
+/** Apply's solid factor: the displacement d from x_det scaled by 1 / max(1, j|d| - q.d). */
+export function solidTruncate(b: OracleSolidBound, d: V3, gammaR: number): V3 {
+  if (b.far) return d;
+  if (!(b.phi0 > 0)) return [0, 0, 0];
+  const s = 1 / (gammaR * b.phi0), den = b.J * s * norm(d) - s * dot(b.g0, d);
+  return den > 1 ? scale(d, 1 / den) : d;
+}
+
+/** The solid entry's energy, force and Gauss-Newton Hessian at x (ogcSolidEval), lagged normal force lambda. */
+export function solidContact(field: ClothSolidField, x: V3, xt: V3, lambda: number, p: ContactParams): { e: number; f: V3; H: number[][] } {
+  const s = sampleClothSolidField(field, x);
+  if (!(s.phi > 0)) return { e: Infinity, f: [0, 0, 0], H: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] };
+  const [g0, g1, g2] = activation(s.phi, p.r, p.k), g = s.grad as V3;
+  let e = g0, f = scale(g, -g1);
+  const H = [0, 1, 2].map(i => [0, 1, 2].map(k => g2 * g[i] * g[k]));
+  if (p.mu > 0) {
+    const gl = norm(g), n: V3 = gl > 1e-30 ? scale(g, 1 / gl) : [0, 0, 0];
+    const dx = sub(x, xt), u = sub(dx, scale(n, dot(n, dx))), un = norm(u), eps = p.epsV * p.dt;
+    const ml = p.mu * lambda, fy = frictionF1OverY(un, eps);
+    f = sub(f, scale(u, ml * fy));
+    for (let i = 0; i < 3; i++) for (let k = 0; k < 3; k++) H[i][k] += ml * fy * ((i === k ? 1 : 0) - n[i] * n[k]);
+    e += ml * frictionF0(un, eps);
+  }
+  return { e, f, H };
+}

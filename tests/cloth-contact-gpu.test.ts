@@ -4,7 +4,8 @@
  * pair), d_min terms and bounds with velocity envelopes, the DAT division
  * pairs (every pair within the larger envelope), the per-vertex force, Hessian
  * and energy, Planar-DAT and isotropic truncation with the GPU-side
- * re-detection decision, and the triangle-triangle intersection counter.
+ * re-detection decision, the triangle-triangle intersection counter, and the
+ * static solid field's entries, truncation terms and vertex block.
  * Skips without WEBGPU_NODE_MODULE.
  */
 import assert from "node:assert/strict";
@@ -15,8 +16,9 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { OgcContactDetector, type OgcContactConfig } from "../lib/cloth/contact/ogc-detector";
 import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
+import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import {
-  activation, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
+  activation, boxSdf, solidBallBound, solidContact, solidTruncate, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, sheet, sub, vertexForceHessian,
   type DatPair, type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
@@ -131,6 +133,41 @@ function asOracleContact(e: Entry, mesh: OracleMesh): OracleContact {
   return { kind: "vf", ids: [e.x, tri[0], tri[1], tri[2]], feature: (e.y >>> 28) & 7, s: 0, t: 0, lambda };
 }
 
+/** Run the vertex contact block at the current positions: per vertex (f, e), (H[0], count), H[1], H[2]. */
+async function evalVertexBlock(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, Xt: V3[], N: number): Promise<Float32Array> {
+  const xt = storage(device, vec4s(Xt));
+  const L = det.topology.layout;
+  const out = device.createBuffer({ size: 64 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> Xt: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> topo: array<u32>;
+@group(0) @binding(3) var<storage, read_write> outBuf: array<vec4<f32>>;
+fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return Xt[i].xyz; }
+fn ogcTri(t: u32) -> vec3<u32> { let b = ${L.trisOffset}u + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = ${L.edgesOffset}u + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
+${OgcContactDetector.vertexBlockWGSL(0, 4)}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= ${N}u) { return; }
+  var f = vec3<f32>(0.0); var H = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  ogcAccumulateVertexContact(v, ogcX(v), &f, &H);
+  let e = ogcVertexContactEnergy(v, ogcX(v));
+  outBuf[4u * v] = vec4<f32>(f, e);
+  outBuf[4u * v + 1u] = vec4<f32>(H[0], f32(ogcContactCount(v)));
+  outBuf[4u * v + 2u] = vec4<f32>(H[1], 0.0);
+  outBuf[4u * v + 3u] = vec4<f32>(H[2], 0.0);
+}`;
+  const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [positions, xt, det.topo, out, det.solverBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+  const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
+  device.queue.submit([enc.finish()]);
+  return new Float32Array(await readBuffer(device, out));
+}
+
 async function detect(device: GPUDevice, mesh: OracleMesh, vel: V3[], config: OgcContactConfig) {
   const { triangles, edges, oracle } = topologyOf(mesh);
   const positions = storage(device, vec4s(mesh.x)), velocities = storage(device, vec4s(vel));
@@ -242,37 +279,7 @@ test("GPU vertex contact block: force, Hessian and energy against the oracle", {
     const X = f32(mesh.x.map((p, v) => { const b = xdet[4 * v + 3] * 0.9; return [p[0] + (R() - 0.5) * b, p[1] + (R() - 0.5) * b, p[2] + (R() - 0.5) * b] as V3; }));
     const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 2e-4, p[1] + (R() - 0.5) * 2e-4, p[2]] as V3));
     device.queue.writeBuffer(positions, 0, vec4s(X));
-    const xt = storage(device, vec4s(Xt));
-    const L = det.topology.layout;
-    const out = device.createBuffer({ size: 64 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const code = /* wgsl */`
-@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> Xt: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> topo: array<u32>;
-@group(0) @binding(3) var<storage, read_write> outBuf: array<vec4<f32>>;
-fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
-fn ogcXt(i: u32) -> vec3<f32> { return Xt[i].xyz; }
-fn ogcTri(t: u32) -> vec3<u32> { let b = ${L.trisOffset}u + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
-fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = ${L.edgesOffset}u + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
-${OgcContactDetector.vertexBlockWGSL(0, 4)}
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let v = gid.x;
-  if (v >= ${N}u) { return; }
-  var f = vec3<f32>(0.0); var H = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-  ogcAccumulateVertexContact(v, ogcX(v), &f, &H);
-  let e = ogcVertexContactEnergy(v, ogcX(v));
-  outBuf[4u * v] = vec4<f32>(f, e);
-  outBuf[4u * v + 1u] = vec4<f32>(H[0], f32(ogcContactCount(v)));
-  outBuf[4u * v + 2u] = vec4<f32>(H[1], 0.0);
-  outBuf[4u * v + 3u] = vec4<f32>(H[2], 0.0);
-}`;
-    const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-    const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [positions, xt, det.topo, out, det.solverBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })) });
-    const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
-    pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
-    device.queue.submit([enc.finish()]);
-    const res = new Float32Array(await readBuffer(device, out));
+    const res = await evalVertexBlock(device, det, positions, Xt, N);
     const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
     const P = { r: config.r, k: config.kc, mu: config.mu, epsV: config.epsV, dt: config.dt };
     let active = 0;
@@ -418,6 +425,128 @@ test("GPU envelope cap and contact-list overflow fail explicitly through the sta
     c = await det.readCounters();
     assert.ok(c.status & OGC_STATUS.pairOverflow);
     assert.ok(c.peakPairSlots > 16, "the measured pair peak is reported");
+    det.destroy();
+  });
+});
+
+// ------------------------------------------------------------------ static solid field
+
+const solidBox = boxSdf([0.02, 0.02, 0], [0.08, 0.06, 0.03]), solidBall = sphereSdf([0.11, 0.05, 0], 0.025);
+const solidField = (band = 0.06) => buildClothSolidField({
+  sdf: p => Math.min(solidBox(p), solidBall(p)), lo: [-0.02, -0.02, -0.03], hi: [0.18, 0.12, 0.1], cell: 0.005, band });
+
+/** A sheet over the box's top and the sphere, 0.5-4.5 mm above the box. */
+function solidSheet(seed: number): OracleMesh {
+  const R = rng(seed), s = sheet(15, 10, 0.01, [0.003, 0.004, 0]);
+  return { ...s, x: f32(s.x.map(p => [p[0], p[1], 0.0305 + 0.004 * R()] as V3)) };
+}
+
+async function detectWithSolid(device: GPUDevice, mesh: OracleMesh, vel: V3[], config: OgcContactConfig, field: ClothSolidField) {
+  const { triangles, edges, oracle } = topologyOf(mesh);
+  const positions = storage(device, vec4s(mesh.x)), velocities = storage(device, vec4s(vel));
+  const det = await OgcContactDetector.create(device, { vertexCount: mesh.x.length, triangles, edges }, vec4s(mesh.x), config, { positions, velocities });
+  det.setSolidField(field);
+  await runPass(device, pass => { det.encodeFrameBegin(pass); det.encodeStepBegin(pass); det.encodeDetection(pass); });
+  return { det, positions, oracle };
+}
+
+test("GPU static solid: entries, truncation terms, the vertex block and the truncated motion against the oracle", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const field = solidField(), mesh = solidSheet(21), N = mesh.x.length, R = rng(22);
+    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.012, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64 };
+    const { det, positions, oracle } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
+    const c0 = await det.readCounters();
+    assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
+    const xdet = new Float32Array(await readBuffer(device, det.det));
+    const work = new Float32Array(await readBuffer(device, det.work));
+    const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
+    const solidOff = 3 * N + det.T + det.E;
+    const bounds = mesh.x.map((x, v) => solidBallBound(field, x, xdet[4 * v + 3], config.r));
+    let near = 0;
+    for (let v = 0; v < N; v++) {
+      const b = bounds[v], rho = xdet[4 * v + 3];
+      const solid = lists[v].filter(e => e.y === 0x70000000);
+      assert.ok(solid.length <= 1);
+      const margin = Math.min(b.phi0, field.band) - field.maxLipschitz * rho - config.r;
+      if (Math.abs(margin) < 1e-6) continue;
+      assert.equal(solid.length, b.far ? 0 : 1, `vertex ${v} solid entry (far ${b.far}, margin ${margin})`);
+      const q = [0, 1, 2, 3].map(k => work[solidOff + 4 * v + k]);
+      if (b.far) { assert.deepEqual(q, [0, 0, 0, 0]); continue; }
+      near++;
+      const s = 1 / (0.9 * b.phi0), qr = [b.g0[0] * s, b.g0[1] * s, b.g0[2] * s, b.J * s];
+      const qs = Math.max(...qr.map(Math.abs));
+      for (let k = 0; k < 4; k++) assert.ok(Math.abs(q[k] - qr[k]) <= 2e-3 * qs, `vertex ${v} q/j[${k}] ${q[k]} vs ${qr[k]}`);
+      const lambda = new Float32Array(new Uint32Array([solid[0].z]).buffer)[0];
+      const lr = b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0;
+      assert.ok(Math.abs(lambda - lr) <= 2e-3 * Math.max(1, lr), `vertex ${v} lambda ${lambda} vs ${lr}`);
+    }
+    assert.ok(near > 40 && c0.solidContacts === near, `${near} near-solid vertices, counter ${c0.solidContacts}`);
+
+    // The vertex block at positions nudged within the solid-safe ball, with friction from a shifted step start.
+    const X = f32(mesh.x.map((p, v) => { const h = 0.3 * Math.min(xdet[4 * v + 3], bounds[v].phi0); return [p[0] + (R() - 0.5) * h, p[1] + (R() - 0.5) * h, p[2] + (R() - 0.5) * h] as V3; }));
+    const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 2e-4, p[1] + (R() - 0.5) * 2e-4, p[2]] as V3));
+    device.queue.writeBuffer(positions, 0, vec4s(X));
+    const res = await evalVertexBlock(device, det, positions, Xt, N);
+    const P = { r: config.r, k: config.kc, mu: config.mu, epsV: config.epsV, dt: config.dt };
+    for (let v = 0; v < N; v++) {
+      let f: V3 = [0, 0, 0], e = 0;
+      const H = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      for (const ent of lists[v]) {
+        const lambda = new Float32Array(new Uint32Array([ent.z]).buffer)[0];
+        let q: { f: V3; H: number[][] }, en: number;
+        if (ent.y === 0x70000000) { const sc = solidContact(field, X[v], Xt[v], lambda, P); q = sc; en = sc.e; }
+        else { const c = asOracleContact(ent, oracle); q = vertexForceHessian(c, X, Xt, P, c.ids.indexOf(v)); en = contactEnergy(c, X, Xt, P); }
+        f = [f[0] + q.f[0], f[1] + q.f[1], f[2] + q.f[2]]; e += en;
+        for (let i = 0; i < 3; i++) for (let k = 0; k < 3; k++) H[i][k] += q.H[i][k];
+      }
+      const fs = Math.max(1, Math.hypot(...f)), hs = Math.max(1, ...H.flat().map(Math.abs));
+      for (let k = 0; k < 3; k++) assert.ok(Math.abs(res[16 * v + k] - f[k]) <= 2e-3 * fs, `vertex ${v} f[${k}] ${res[16 * v + k]} vs ${f[k]}`);
+      assert.ok(Math.abs(res[16 * v + 3] - e) <= 2e-3 * Math.max(1e-6, Math.abs(e)) + 1e-9, `vertex ${v} energy ${res[16 * v + 3]} vs ${e}`);
+      for (let col = 0; col < 3; col++) for (let row = 0; row < 3; row++)
+        assert.ok(Math.abs(res[16 * v + 4 * (col + 1) + row] - H[row][col]) <= 2e-3 * hs, `vertex ${v} H`);
+    }
+
+    // The step's motion drives the sheet down into the box and the sphere and slides it.
+    const X0 = f32(mesh.x);
+    const Xnew = f32(X0.map(p => [p[0] + (R() - 0.5) * 8e-3, p[1] + (R() - 0.5) * 8e-3, p[2] - 6e-3 * R()] as V3));
+    const pairs = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c0.peakPairSlots, oracle).map(g => g.pair);
+    device.queue.writeBuffer(positions, 0, vec4s(Xnew));
+    await runPass(device, pass => det.encodeTruncate(pass));
+    const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    const planar = planarTruncate(X0, Xnew, pairs, mesh.x.map((_, v) => xdet[4 * v + 3]), 0.9, 1e-6);
+    let cut = 0;
+    for (let v = 0; v < N; v++) {
+      const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
+      if (norm(sub(ref, planar.x[v])) > 1e-9) cut++;
+      assert.ok(norm(sub(got[v], ref)) <= 2e-7 + 2e-4 * norm(sub(Xnew[v], X0[v])), `vertex ${v}: ${got[v]} vs ${ref}`);
+      const phi = sampleClothSolidField(field, got[v]).phi;
+      assert.ok(phi >= (bounds[v].far ? config.r : 0.1 * bounds[v].phi0) * (1 - 1e-3), `vertex ${v} phi ${phi} after truncation`);
+    }
+    assert.equal(motionPenetrates(oracle, X0, got), false);
+    const c1 = await det.readCounters();
+    assert.ok(cut > 20 && Math.abs(c1.solidCut - cut) <= 2, `solid cut ${c1.solidCut} vs ${cut}`);
+    det.destroy();
+  });
+});
+
+test("GPU static solid fails explicitly: a vertex inside it is held, one outside the field's box is reported, a thin band and an over-capacity image are refused", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const field = solidField(), mesh = solidSheet(23), N = mesh.x.length;
+    const inside = 37, outside = 0;
+    mesh.x[inside] = [0.05, 0.04, 0.025];
+    mesh.x[outside] = [-0.05, 0.004, 0.0305];
+    const config: OgcContactConfig = { ...baseConfig(N), solidCapacityWords: field.words.length };
+    const { det, positions } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
+    const c = await det.readCounters();
+    assert.ok(c.status & OGC_STATUS.solidPenetration, "inside");
+    assert.ok(c.status & OGC_STATUS.solidBounds, "outside the box");
+    const moved = mesh.x.map(p => [p[0] + 1e-3, p[1], p[2]] as V3);
+    device.queue.writeBuffer(positions, 0, vec4s(moved));
+    await runPass(device, pass => det.encodeTruncate(pass));
+    const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    assert.deepEqual(got[inside], mesh.x[inside].map(Math.fround), "the penetrating vertex holds");
+    assert.throws(() => det.setSolidField(solidField(0.03)), /band/);
+    assert.throws(() => det.setSolidField(buildClothSolidField({ sdf: p => Math.min(solidBox(p), solidBall(p), boxSdf([0.2, 0, 0], [0.35, 0.1, 0.05])(p)), lo: [-0.02, -0.02, -0.03], hi: [0.38, 0.12, 0.1], cell: 0.005, band: 0.06 })), /authored/);
     det.destroy();
   });
 });

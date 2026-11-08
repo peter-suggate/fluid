@@ -9,9 +9,15 @@
  *                 z = lagged normal force magnitude (f32 bits), w = 0
  *   edge-edge     x = own edge e, y = other edge | 1 << 31,
  *                 z = lagged normal force magnitude, w = pack2x16unorm(s, t)
- * Feature: vertex k (0..2), edge (t[k], t[k+1]) (3..5), face interior (6).
+ *   vertex-solid  x = v, y = OGC_SOLID_Y (feature 7, no face), z = lagged normal force, w = 0
+ * Feature: vertex k (0..2), edge (t[k], t[k+1]) (3..5), face interior (6), static solid (7).
  * Every entry is self-describing, so the gather never chases a second list.
+ *
+ * Contact buffer header (vec4<u32>): [0] (N, list capacity, counts base, entries base),
+ * [1] (r, k_c, mu, eps_v dt) as f32, [2] (solid image word offset, 0 when none, 0, 0).
  */
+import { SOLID_HEADER_WORDS } from "./solid-field";
+
 
 /** Counter word indices (atomic<u32>) shared by the TS host and the WGSL. */
 export const OGC_COUNTER = {
@@ -22,9 +28,11 @@ export const OGC_COUNTER = {
   frameVfPairs: 21, frameEePairs: 22,
   /** DAT division pairs: slots reserved this round, their persistent peak, and per-frame stats. */
   pairSlots: 23, peakPairSlots: 24, frameDatPairs: 25, frameCapped: 26, frameUncertified: 27, framePeakPairSlots: 28,
+  /** Vertices with a static-solid entry over the frame's rounds, and the truncations the solid bound made. */
+  frameSolidContacts: 29, frameSolidCut: 30,
 } as const;
 export const OGC_COUNTER_WORDS = 32;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30];
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -42,6 +50,10 @@ export const OGC_STATUS = {
   pairOverflow: 32,
   /** A pair within the envelope had no strictly separating plane; its four vertices were held. */
   uncertifiedPair: 64,
+  /** A vertex was at or inside the static solid's surface at detection; it was held. */
+  solidPenetration: 128,
+  /** A vertex left the box the solid field covers, where the solid is not seen. */
+  solidBounds: 256,
 } as const;
 
 /** Truncation schemes: Planar-DAT (Chen, Hsu, Ayman, Macklin 2026) and the isotropic OGC bound. */
@@ -78,6 +90,10 @@ const OGC_F_DAT_PAIRS = ${OGC_COUNTER.frameDatPairs}u;
 const OGC_F_CAPPED = ${OGC_COUNTER.frameCapped}u;
 const OGC_F_UNCERTIFIED = ${OGC_COUNTER.frameUncertified}u;
 const OGC_F_PEAK_PAIR_SLOTS = ${OGC_COUNTER.framePeakPairSlots}u;
+const OGC_F_SOLID_CONTACTS = ${OGC_COUNTER.frameSolidContacts}u;
+const OGC_F_SOLID_CUT = ${OGC_COUNTER.frameSolidCut}u;
+const OGC_ST_SOLID_PENETRATION = ${OGC_STATUS.solidPenetration}u;
+const OGC_ST_SOLID_BOUNDS = ${OGC_STATUS.solidBounds}u;
 const OGC_ST_PAIR_OVERFLOW = ${OGC_STATUS.pairOverflow}u;
 const OGC_ST_UNCERTIFIED = ${OGC_STATUS.uncertifiedPair}u;
 const OGC_PLANAR = ${OGC_TRUNCATION.planar}u;
@@ -153,6 +169,105 @@ fn ogcFrictionF1OverY(y: f32, eps: f32) -> f32 {
 }
 `;
 
+/**
+ * The static solid field (solid-field.ts) as the GPU reads it. The host defines
+ *   fn ogcSolidBase() -> u32          word offset of the image (0: no solid)
+ *   fn ogcSolidWord(i: u32) -> u32    word i of the buffer holding it
+ */
+export const OGC_SOLID_WGSL = /* wgsl */`
+const OGC_SOLID_FEATURE = 7u;
+const OGC_SOLID_Y = 0x70000000u;
+const OGC_SOLID_HEADER_WORDS = ${SOLID_HEADER_WORDS}u;
+struct OgcSolidHeader { mask: u32, cell: f32, band: f32, lmax: f32, origin: vec3<f32>, dims: vec3<u32> }
+fn ogcSolidHeader() -> OgcSolidHeader {
+  let b = ogcSolidBase();
+  let w = vec4<u32>(ogcSolidWord(b), ogcSolidWord(b + 2u), ogcSolidWord(b + 3u), ogcSolidWord(b + 7u));
+  return OgcSolidHeader(w.x, bitcast<f32>(w.y), bitcast<f32>(w.z), bitcast<f32>(w.w),
+    bitcast<vec3<f32>>(vec3<u32>(ogcSolidWord(b + 4u), ogcSolidWord(b + 5u), ogcSolidWord(b + 6u))),
+    vec3<u32>(ogcSolidWord(b + 8u), ogcSolidWord(b + 9u), ogcSolidWord(b + 10u)));
+}
+// Absolute word offset of brick b's nodes, or OGC_NONE. The table is at most half full.
+fn ogcSolidBrick(h: OgcSolidHeader, b: vec3<i32>) -> u32 {
+  if (any(b < vec3<i32>(0)) || any(vec3<u32>(b) >= h.dims)) { return OGC_NONE; }
+  let u = vec3<u32>(b);
+  let base = ogcSolidBase();
+  var s = ((u.x * 73856093u) ^ (u.y * 19349663u) ^ (u.z * 83492791u)) & h.mask;
+  loop {
+    let at = base + OGC_SOLID_HEADER_WORDS + 4u * s;
+    let rec = ogcSolidWord(at + 3u);
+    if (rec == OGC_NONE) { return OGC_NONE; }
+    if (ogcSolidWord(at) == u.x && ogcSolidWord(at + 1u) == u.y && ogcSolidWord(at + 2u) == u.z) { return base + rec; }
+    s = (s + 1u) & h.mask;
+  }
+}
+fn ogcSolidNode(rec: u32, i: vec3<u32>) -> f32 { return bitcast<f32>(ogcSolidWord(rec + i.x + 9u * (i.y + 9u * i.z))); }
+fn ogcSolidCellOf(h: OgcSolidHeader, p: vec3<f32>) -> vec3<i32> { return vec3<i32>(floor((p - h.origin) / h.cell)); }
+
+struct OgcSolidSample { phi: f32, grad: vec3<f32>, stored: bool }
+// Trilinear phi (m) and its gradient; a point in no stored brick reads band (the field exceeds it there).
+fn ogcSolidSample(h: OgcSolidHeader, p: vec3<f32>) -> OgcSolidSample {
+  let q = (p - h.origin) / h.cell;
+  let bq = floor(q * 0.125);
+  let rec = ogcSolidBrick(h, vec3<i32>(bq));
+  if (rec == OGC_NONE) { return OgcSolidSample(h.band, vec3<f32>(0.0), false); }
+  let l = q - 8.0 * bq;
+  let c = clamp(floor(l), vec3<f32>(0.0), vec3<f32>(7.0));
+  let f = l - c;
+  let ci = vec3<u32>(c);
+  var phi = 0.0;
+  var g = vec3<f32>(0.0);
+  for (var k = 0u; k < 8u; k++) {
+    let b = vec3<u32>(k & 1u, (k >> 1u) & 1u, k >> 2u);
+    let bf = vec3<f32>(b);
+    let w = mix(1.0 - f, f, bf);
+    let v = ogcSolidNode(rec, ci + b);
+    phi += v * w.x * w.y * w.z;
+    g += v * (2.0 * bf - 1.0) * vec3<f32>(w.y * w.z, w.x * w.z, w.x * w.y);
+  }
+  return OgcSolidSample(phi, g / h.cell, true);
+}
+
+// Over the ball |d| <= rho around x0: phi(x0 + d) >= phi0 + g0.d - J |d|, with g0 the
+// gradient at x0 and J the largest deviation of the gradient from g0 over the cells
+// the ball's box touches (per axis, d phi / d x_a over a cell spans its four a-edge
+// differences). far: the whole ball lies further than r from the solid and is free of
+// it: either min(phi0, band) - L_max rho >= r, or the box touches a missing brick, where
+// phi > band; the upload requires band >= r + 1.5 L_max rqMax with rho <= rqMax / 2.
+struct OgcSolidBound { far: bool, phi0: f32, g0: vec3<f32>, J: f32 }
+fn ogcSolidBallBound(h: OgcSolidHeader, x0: vec3<f32>, rho: f32, r: f32) -> OgcSolidBound {
+  let s = ogcSolidSample(h, x0);
+  var out = OgcSolidBound(true, s.phi, s.grad, 0.0);
+  if (min(s.phi, h.band) - h.lmax * rho >= r) { return out; }
+  let c0 = ogcSolidCellOf(h, x0 - vec3<f32>(rho));
+  let c1 = ogcSolidCellOf(h, x0 + vec3<f32>(rho));
+  var lastBrick = vec3<i32>(-2147483647);
+  var rec = OGC_NONE;
+  var J = 0.0;
+  let inv = 1.0 / h.cell;
+  for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+    let c = vec3<i32>(cx, cy, cz);
+    let b = c >> vec3<u32>(3u);
+    if (any(b != lastBrick)) { lastBrick = b; rec = ogcSolidBrick(h, b); }
+    if (rec == OGC_NONE) { return out; }
+    let l = vec3<u32>(c - 8 * b);
+    var n: array<f32, 8>;
+    for (var k = 0u; k < 8u; k++) { n[k] = ogcSolidNode(rec, l + vec3<u32>(k & 1u, (k >> 1u) & 1u, k >> 2u)); }
+    // a-edges: corner pairs (k, k | bit a) over the four k without bit a.
+    var lo = vec3<f32>(3.4e38); var hi = vec3<f32>(-3.4e38);
+    for (var k = 0u; k < 8u; k++) {
+      if ((k & 1u) == 0u) { let d = n[k | 1u] - n[k]; lo.x = min(lo.x, d); hi.x = max(hi.x, d); }
+      if ((k & 2u) == 0u) { let d = n[k | 2u] - n[k]; lo.y = min(lo.y, d); hi.y = max(hi.y, d); }
+      if ((k & 4u) == 0u) { let d = n[k | 4u] - n[k]; lo.z = min(lo.z, d); hi.z = max(hi.z, d); }
+    }
+    let dev = max(abs(hi * inv - s.grad), abs(s.grad - lo * inv));
+    J = max(J, length(dev));
+  } } }
+  out.far = false;
+  out.J = J;
+  return out;
+}
+`;
+
 export interface OgcVertexBlockOptions {
   /** Bind group the solver kernel puts the contact buffer in. */
   group: number;
@@ -177,11 +292,44 @@ export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
   return /* wgsl */`
 ${OGC_COMMON_WGSL}
 @group(${group}) @binding(${binding}) var<storage, read> ogcContacts: array<vec4<u32>>;
+fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
+fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
+${OGC_SOLID_WGSL}
 
 struct OgcPairEval { f: vec3<f32>, h: mat3x3<f32>, e: f32 }
 
+// Vertex v against the static solid field at xv: the activation on phi with the
+// Gauss-Newton Hessian g'' grad phi grad phi^T, and lagged friction against the
+// fixed solid. phi <= 0 lies outside the barrier's domain: infinite energy.
+fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
+  let s = ogcSolidSample(ogcSolidHeader(), xv);
+  var out = OgcPairEval(vec3<f32>(0.0), mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)), 0.0);
+  if (!(s.phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); return out; }
+  let act = ogcActivation(s.phi, params.x, params.y);
+  let g = s.grad;
+  out.f = -act.y * g;
+  out.h = act.z * mat3x3<f32>(g * g.x, g * g.y, g * g.z);
+  out.e = act.x;
+  let mu = params.z;
+  if (mu > 0.0) {
+    let gl = length(g);
+    let n = select(vec3<f32>(0.0), g / gl, gl > 1e-30);
+    let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
+    let dx = xv - ogcXt(v);
+    let u = dx - n * dot(n, dx);
+    let un = length(u);
+    let ml = mu * bitcast<f32>(ent.z);
+    let fy = ogcFrictionF1OverY(un, params.w);
+    out.f -= (ml * fy) * u;
+    out.h += (ml * fy) * (mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) - nn);
+    out.e += ml * ogcFrictionF0(un, params.w);
+  }
+  return out;
+}
+
 // One contact entry evaluated for vertex v placed at xv.
 fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
+  if (ent.y == OGC_SOLID_Y) { return ogcSolidEval(v, xv, ent, params); }
   var ids: vec4<u32>;
   var w = vec4<f32>(0.0);
   var X: array<vec3<f32>, 4>;

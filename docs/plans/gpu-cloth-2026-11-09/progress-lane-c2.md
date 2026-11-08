@@ -173,3 +173,87 @@ Implemented from the paper (§3.3, Alg. 2–3, §5.1) and checked against Newton
   - twisting cloth, about 10K vertices;
   - 10-layer drop;
   - planar vs isotropic, and fixed vs adaptive envelope.
+
+## 2026-11-09 COORDINATION (C2 → C1): binding the detector to the solver
+
+Read C1's INTERFACE (Tier A layout, contact at `CLOTH_BINDING.contact` = 7). Nothing in C1's files needs to change. On C2's side:
+
+- **Two-phase build.** The solver needs `detector.solverBuffer` at `create`, and the detector needs `solver.positions` and `solver.velocities`, so neither can be built first. `OgcContactDetector.create(device, mesh, restLocal, config)` now compiles without solver buffers, and `detector.bind({ positions: solver.positions, velocities: solver.velocities })` attaches them once. Inputs may be a `GPUBuffer` or a `GPUBufferBinding`. Passing inputs to `create` still works.
+- **`detector.solverContact(CLOTH_BINDING.contact)`** returns `{ wgsl, buffer }` for `ClothGPUSolverOptions.contact`.
+- **`detector.stepHooks`** is the `ClothStepHooks` object:
+  - `afterFrame`: stepBegin, detection, truncate;
+  - `afterColour`: truncate;
+  - `afterIteration`: truncate, decide, indirect detection.
+- **Contact header.** It gained a third vec4: `[2].x` is the solid image's word offset (0 means no solid). The counts base moved to 3. C1's hand-built empty buffer `(0, 0, 2, 2)` still reads as no contacts and no solid, because its third vec4 is zero.
+- **Energy domain.** A vertex-solid entry returns `+inf` energy for a trial position at or inside the solid surface (φ ≤ 0), with zero force and Hessian there. The Armijo test then rejects the trial. The iterate itself never gets there, because truncation keeps φ ≥ (1−γ_r)·φ₀.
+
+## 2026-11-09 DECISION: static voxel solid, as implemented (M5 part 1)
+
+**Energy: activation on φ, not φ − r.** `g(φ; r)` from the cloth's own activation:
+- the barrier sits at the solid surface;
+- repulsion starts at φ = r;
+- resting cloth settles at a φ inside (0, r), as cloth-on-cloth settles at a d inside (0, r).
+
+With φ − r as the gap, the barrier would sit r off the surface, and the plan's bound γ_p(φ(x_det) − r)/L_b would be ≤ 0 for every resting vertex: it would freeze them.
+
+The energy terms:
+- force −g′∇φ;
+- Gauss–Newton Hessian g″∇φ∇φᵀ, which is PSD (the g′∇²φ term is dropped);
+- IPC lagged friction against the fixed solid. λ = −g′(φ(x_det))·|∇φ| is stored in the entry. The tangent is taken at the current ∇φ, as the cloth-cloth path takes its current normal.
+
+**Truncation: an affine lower bound of φ instead of the isotropic φ/L_b ball.**
+- **The bound.** At detection, for each vertex with ball radius ρ = its cap x_det.w (≤ rqMax/2), the bound pass takes g₀ = ∇φ(x_det) and J = the largest deviation |∇φ − g₀| over the cells the ball's box touches. Per axis, ∂φ/∂x_a over a trilinear cell spans exactly its four a-edge differences. Integrating along the segment gives, for |d| ≤ ρ, φ(x_det + d) ≥ φ₀ + g₀·d − J|d|.
+- **Apply.** dX ← dX / max(1, j|dX| − q·dX), with q = g₀/(γ_r φ₀) and j = J/(γ_r φ₀) stored per vertex at detection. The guarantee is φ ≥ (1−γ_r)·φ₀ along the whole truncated motion. The ratio is linear in t, so it is exact, not iterated.
+- **Why not the ball.** On a flat face J = 0, so sliding is untouched and an approach keeps (1−γ_r) of the gap, like Planar-DAT. At sharp box edges and corners J grows, and the cut approaches the isotropic ball, which is what a corner needs. The isotropic ball φ₀/L_max would have cut a resting 0.4r slide to under a tenth (unit test). L_b is still computed per brick at upload; the image carries L_max for the far test.
+- **The far test**, which decides whether a vertex gets no entry and no cut:
+  - min(φ₀, band) − L_max·ρ ≥ r; or
+  - the ball's box touches a missing brick, where φ > band.
+  
+  Both are sound because `setSolidField` refuses a band below r + 1.5·L_max·rqMax.
+- **Penetration at detection.** A vertex at or inside the surface when detection runs (φ₀ ≤ 0, for example after an edit adds solid on top of it) is held, and raises `solidPenetration`.
+- **Leaving the field.** A vertex outside the field's authored box raises `solidBounds`. The field only sees solid inside its box.
+
+**Field: a cloth-local derived image, not the scene's GPU solid buffer.**
+- `solid-field.ts` builds 8³-cell bricks of 9³ node distances in cloth-local metres from any 1-Lipschitz source. The bricks kept are those within `band` of the surface, inside an authored box.
+- The image is appended to the contact buffer, so C1's kernel keeps a single contact binding (the M1 Max allows 10 storage buffers per stage).
+- Solid edits rebuild only the bricks within band of the edit (`rebuildClothSolidField`, CPU at edit time) and re-upload.
+- The scene's own GPU solid image does not fit directly. Its procedural bricks carry validity masks and arbitrary implicit units, and its pages carry ±½-cell sign distances (box regions write −128/+0x7fff Q8). It is not a distance field the bound can use.
+- Still to do in M5: the adapter from a scene's solid world (pages, regions, procedural bricks) to this source.
+
+**Thin features fail at authoring.** Only cells the surface can cross are sampled: every node |φ| < √3h. A 1-Lipschitz node beyond that proves the cell one-signed. Sampling is at h/8. Where the source and the interpolant disagree in sign, an ascent of |φ| from the sample separates a rounded sharp corner from a lost feature:
+- a corner belongs to a part at least a cell thick, and reaches depth 0.45h within two cells;
+- a plate, rod or slot thinner than about 0.9h never does, and the build throws.
+
+The tests check a 0.3h plate (throws), a 0.3h slot (throws), and an off-lattice sharp box (accepted).
+
+## 2026-11-09 MILESTONE: M5 part 1, static solid field, vertex-solid contact and truncation (standalone)
+
+**Files:**
+- `lib/cloth/contact/solid-field.ts`: build, local rebuild, Lipschitz, the thin-feature check, and the CPU sampler.
+- `lib/cloth/contact/ogc-wgsl.ts`: `OGC_SOLID_WGSL` (sampler and ball bound), and `ogcSolidEval` in the vertex block.
+- `lib/cloth/contact/ogc-detector-wgsl.ts`: solid round in the bound pass, and the solid factor in apply.
+- `lib/cloth/contact/ogc-detector.ts`: `solidCapacityWords`, `setSolidField`, `bind`, `solverContact`, `stepHooks`, and the counters `solidContacts` and `solidCut`.
+
+**Tests:**
+- `tests/cloth-contact-solid.test.ts`: 6 CPU tests.
+  - Band and sparsity; L_max ≤ √3; missing bricks lie beyond band; exact on node-aligned faces.
+  - Thin plate and slot refused; an off-lattice corner accepted.
+  - A local rebuild after a cut equals a full rebuild.
+  - **The ball-bound certificate against dense sampling** at sharp box edges, corners and a sphere: 300 balls × 120 samples.
+  - **The truncation keeps φ ≥ (1−γ_r)·φ₀ along the whole motion** (65 samples per motion). A flat-face slide of 10× the gap is untouched, and an approach keeps exactly (1−γ_r)·φ₀.
+  - FD force of the vertex-solid energy; PSD Hessian; +inf inside; friction direction.
+- `tests/cloth-contact-gpu.test.ts`: 2 new GPU tests, 9 in total.
+  - Solid entries (presence, λ) and the truncation terms (q, j) against the oracle per vertex.
+  - The vertex block with solid and friction against the oracle.
+  - **A motion driving a sheet 0–6 mm into a sharp box and a sphere while sliding 8 mm:** GPU equals oracle (Planar-DAT, then cap, then solid), φ ≥ 0.1·φ₀ for every vertex, and no self-penetration.
+  - The penetration hold; `solidPenetration` and `solidBounds`; refusal of a thin band and of an over-capacity image.
+
+**Evidence:**
+- `npm run check:types`: green.
+- GPU runner: 9/9, exit 0.
+- `npm run test:unit`: 1630 pass, 1 fail, the same pre-existing `reservoir-particle-cost` "merge cap…" test.
+
+**Next in M5:**
+- solid-surface point and edge samples against cloth faces and edges (sharp-edge poke-through);
+- the scene solid-world adapter;
+- the gates (sphere drape, sharp box, cut under resting cloth) through C1's solver, once C1's M1 lands in git.
