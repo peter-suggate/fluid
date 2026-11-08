@@ -83,6 +83,8 @@ export const SPHERE = {
   frustumBase: P(0.4, "m", "video", "black frustum in cloth1.avi and Fig 2 (not in the paper text); +-25% from perspective"),
   frustumTop: P(0.2, "m", "video", "frustum top square, +-25%"),
   frustumHeight: P(0.24, "m", "video", "frustum height, +-25%"),
+  frustumFooting: P(0.02, "m", "assumption",
+    "it stands on the ground: its side faces continue 2 cells into the ground slab, so the union has no coincident face or 67 degree base corner below the lattice's reach; the visible shape is unchanged"),
   frustumX: P(-0.65, "m", "physbam", "test 13 cut_pyramid frame t = (-0.65, 0.05, 0.65)"),
   frustumZ: P(0.65, "m", "physbam", "test 13 cut_pyramid frame t.z = 0.65"),
   frustumFriction: P(0.1, "1", "physbam", "test 13: cut_pyramid friction 0.1"),

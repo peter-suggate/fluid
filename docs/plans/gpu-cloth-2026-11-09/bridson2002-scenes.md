@@ -137,6 +137,7 @@ That return is the caption's "another ball". The video agrees: only one ball is 
 | Spin pose | θ = −π/4·(t − 0.75) | assumption | PhysBAM sets `From_Rotation_Vector(time*ω)`, which jumps the pose at 0.75 s. That jump is invisible on a sphere, so we keep the pose continuous with the same velocity |
 | Frustum | square, base 0.40 m, top 0.20 m, height 0.24 m (±25%) | video | The black frustum in `cloth1.avi` and Fig 2; the text never mentions it. Measured from perspective against the 0.5 m sphere |
 | Frustum place | base on the ground at (−0.65, 0, 0.65), axis-aligned | physbam, assumption | `cut_pyramid` at (−0.65, 0.05, 0.65). The model is unpublished, so its base on the ground and its axis alignment are assumptions |
+| Frustum footing | 2 cm below the ground | assumption | It stands on the ground. Its side faces run on 2 cells into the ground slab, so the union has no coincident face. Without the footing, the 67° base corner is below what the 1 cm lattice holds, and C2's field build refuses it. The visible shape is unchanged |
 | Frustum μ | 0.1 | physbam | `Add_Rigid_Body("cut_pyramid",.1,.1)` |
 | Duration | 8.875 s | video | 213 frames at 24 fps. PhysBAM's own `last_frame` is 20 s |
 
@@ -195,6 +196,16 @@ Every solid is a voxel solid; there are no analytic colliders. Each shape (box, 
   - spheres: 0.1 mm.
   - All are below half a cell.
 
+**Cloth contact field** (C2's `buildClothSolidField`, M5 part 1). `bridsonClothSolidSource(solids, t, box, cell, band)` gives the union of a scene's solids at scene time t. Built at 1 cm with a 6 cm band, CPU:
+
+| Scene | Bricks | Size | Time |
+|---|---|---|---|
+| Curtain at t = 0 | 1852 | 5.5 MB | 6 s |
+| Sphere at t = 0 | 3062 | 9.1 MB | 25 s |
+| Table at t = 0 | 1944 | 5.8 MB | 40 s |
+
+All three pass its thin-feature check. Almost all of the time goes on sampling the check at h/8 near the surface.
+
 **Bake cost.**
 - The four legs bake in 1.4 s.
 - The whole table, including a 3.8 × 2.8 m ground slab, takes 45 s on the CPU, almost all of it on the ground's partial bricks. At registration the ground should therefore be the scene's own voxel floor (y = 0). The slab stays in the data for the cloth contact field, which builds bricks from node values alone.
@@ -219,4 +230,9 @@ Every solid is a voxel solid; there are no analytic colliders. Each shape (box, 
 
 | Scene | Moment | Reference | Capture | Verdict |
 |---|---|---|---|---|
-| — | — | — | none yet | Blocked on voxel-solid contact (M5), moving voxel solids (M6) and cloth documents running in scenes (C1) |
+| — | — | — | none yet | Blocked on three things:<br>• M5's static field wired into C1's solver (C2's next gate);<br>• moving voxel solids (M6);<br>• cloth documents running in scenes (C1). |
+
+**Ready as the first captures once M5 runs through C1's solver.** Each scene starts with a static stretch, so these moments need only static solids:
+- **Curtain, t ≤ 2 s:** the ball holds still. Compare the drape at f12 and at f48 (Fig 1a).
+- **Sphere, t ≤ 0.75 s:** before the spin. Compare at f12.
+- **Table, until about 3.5 s:** the sphere is still far above. Compare the settled drape at video f0 (t = 2 s) with `video/full_t00.png`.

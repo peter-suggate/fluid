@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { sampleSolidNodes, validateProceduralSolid } from '../lib/core/procedural-solid';
 import { sampleRigidPoseTrack } from '../lib/core/prescribed-rigid-motion';
+import { buildClothSolidField } from '../lib/cloth/contact/solid-field';
 import { prepareClothTopology, validateClothDocument } from '../lib/cloth/topology';
 import {
   BRIDSON_2002_FIGURE_4, BRIDSON_2002_PARAMETERS, BRIDSON_2002_SCENES, BRIDSON_2002_STEP_S, BRIDSON_2002_VIDEO_FRAME_RATE, CLOTH, CURTAIN, SPHERE, TABLE, VOXEL,
   assertBridsonSolidResolved, bakeBridsonStaticSolids, bridson2002Curtain, bridson2002RotatingSphere, bridson2002Tablecloth,
-  bridsonLatticeSurfaceError, bridsonShapeDistance, bridsonSolidDistance, bridsonSolidPose, bridsonStaticLattice, herringBoneSheet,
+  bridsonClothSolidSource, bridsonLatticeSurfaceError, bridsonShapeDistance, bridsonSolidDistance, bridsonSolidPose, bridsonStaticLattice, herringBoneSheet,
   type BridsonSolid, type BridsonSolidShape, type Bridson2002Scene,
 } from '../lib/cloth/scenes/bridson-2002';
 
@@ -87,7 +88,8 @@ test('Bridson 2002 geometry matches its provenance', () => {
   const s = solid(sphere, 'sphere'), f = solid(sphere, 'frustum');
   near(positions(sphere)[0]!, -0.95, 1e-12, 'sheet centred'); near(positions(sphere)[1]! - (0.3 + 0.25), 0.01, 1e-12, 'sheet gap');
   near(bridsonSolidPose(s, 0).position_m.y - 0.25, 0.05, 1e-12, 'sphere clearance');
-  near(bridsonSolidDistance(f, { x: -0.65, y: 0, z: 0.65 }), 0, 1e-12, 'frustum base on the ground');
+  near(bridsonSolidDistance(f, { x: -0.65 + 0.2, y: 0, z: 0.65 }), 0, 1e-12, 'frustum 0.40 m wide where it meets the ground');
+  near(bridsonSolidDistance(f, { x: -0.65, y: -0.02, z: 0.65 }), 0, 1e-12, 'its footing stays inside the ground slab');
   near(bridsonSolidDistance(f, { x: -0.65, y: 0.24, z: 0.65 }), 0, 1e-12, 'frustum height');
   assert.deepEqual([s.friction, f.friction, solid(sphere, 'ground').friction], [1, 0.1, 0.1]);
   // Fig 3: square table of four 0.75 m posts, 0.48 m apart; the cloth starts 1 cm above them, its corners overhanging.
@@ -151,6 +153,21 @@ test('Bridson 2002 static solids bake into the shared voxel solid', () => {
   };
   near(phi(0.24, 0.75 - 0.005, 0.24)!, -0.005, 0.5 * h, 'inside the top');
   near(phi(0.24, 0.75 + 0.005, 0.24)!, 0.005, 0.5 * h, 'above the top');
+});
+
+test('Bridson 2002 solids pass the cloth contact field build, footing and all', () => {
+  // C2's field refuses a feature the 1 cm lattice loses. The frustum stands on the ground through a buried footing;
+  // without it the coincident base face leaves a 67 degree corner the lattice cannot hold.
+  const frustum = solid(sphere, 'frustum'), ground = solid(sphere, 'ground');
+  const box = { lo: [-0.92, -0.08, 0.38] as const, hi: [-0.38, 0.3, 0.92] as const };
+  const field = buildClothSolidField(bridsonClothSolidSource([ground, frustum], 0, box, sphere.voxelCell_m, 0.06));
+  assert.ok(field.bricks.size > 0 && field.maxLipschitz <= Math.sqrt(3) + 1e-6);
+  const bare = { ...frustum, shape: { ...frustum.shape, footing_m: 0 } } as BridsonSolid;
+  assert.throws(() => buildClothSolidField(bridsonClothSolidSource([ground, bare], 0, box, sphere.voxelCell_m, 0.06)), /thinner than its 0.01 m cell/);
+  // A bevelled leg on the ground, and the curtain's dome while its track holds it still.
+  const leg = solid(table, 'leg-0'), c = bridsonSolidPose(leg, 0).position_m;
+  buildClothSolidField(bridsonClothSolidSource([solid(table, 'ground'), leg], 0, { lo: [c.x - 0.1, -0.08, c.z - 0.1], hi: [c.x + 0.1, 0.8, c.z + 0.1] }, table.voxelCell_m, 0.06));
+  buildClothSolidField(bridsonClothSolidSource(curtain.solids, 1.5, { lo: [-0.3, -0.08, 0.2], hi: [0.3, 0.3, 0.8] }, curtain.voxelCell_m, 0.06));
 });
 
 test('Bridson 2002 motion scripts keep the published timings', () => {

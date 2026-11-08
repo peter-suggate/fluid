@@ -15,8 +15,11 @@ export type BridsonSolidShape =
   /** Box centred on the body origin (the ground slab). */
   | { readonly kind: "box"; readonly halfExtents_m: Vec3 }
   | { readonly kind: "sphere"; readonly radius_m: number }
-  /** Square frustum, base on body y = 0, axis +y. */
-  | { readonly kind: "square-frustum"; readonly base_m: number; readonly top_m: number; readonly height_m: number }
+  /** Square frustum, base on body y = 0, axis +y. `footing_m` continues the
+   * side faces that far below y = 0, buried in whatever it stands on, so the
+   * union has no coincident faces and no acute base corner for the lattice
+   * to lose; the visible shape is unchanged. */
+  | { readonly kind: "square-frustum"; readonly base_m: number; readonly top_m: number; readonly height_m: number; readonly footing_m?: number }
   /** Square post, base on body y = 0, its four top edges bevelled at 45 degrees. */
   | { readonly kind: "chamfered-post"; readonly width_m: number; readonly height_m: number; readonly chamfer_m: number };
 
@@ -53,7 +56,7 @@ export function bridsonShapeDistance(shape: BridsonSolidShape, p: Vec3): number 
     case "square-frustum": {
       const k = (shape.base_m - shape.top_m) / (2 * shape.height_m), n = Math.hypot(1, k);
       const side = (u: number) => (Math.abs(u) + k * p.y - shape.base_m / 2) / n;
-      return Math.max(-p.y, p.y - shape.height_m, side(p.x), side(p.z));
+      return Math.max(-p.y - (shape.footing_m ?? 0), p.y - shape.height_m, side(p.x), side(p.z));
     }
     case "chamfered-post": {
       const h = shape.width_m / 2, top = shape.height_m, c = shape.chamfer_m;
@@ -69,7 +72,10 @@ export function bridsonShapeReach(shape: BridsonSolidShape): number {
   switch (shape.kind) {
     case "box": return Math.hypot(shape.halfExtents_m.x, shape.halfExtents_m.y, shape.halfExtents_m.z);
     case "sphere": return shape.radius_m;
-    case "square-frustum": return Math.hypot(shape.base_m / SQRT2, shape.height_m);
+    case "square-frustum": {
+      const f = shape.footing_m ?? 0, base = shape.base_m + f * (shape.base_m - shape.top_m) / shape.height_m;
+      return Math.hypot(base / SQRT2, Math.max(shape.height_m, f));
+    }
     case "chamfered-post": return Math.hypot(shape.width_m / SQRT2, shape.height_m);
     default: return unknownKind(shape, "solid shape");
   }
@@ -80,7 +86,10 @@ export function bridsonShapeBox(shape: BridsonSolidShape): { halfX: number; half
   switch (shape.kind) {
     case "box": return { halfX: shape.halfExtents_m.x, halfZ: shape.halfExtents_m.z, yMin: -shape.halfExtents_m.y, yMax: shape.halfExtents_m.y };
     case "sphere": return { halfX: shape.radius_m, halfZ: shape.radius_m, yMin: -shape.radius_m, yMax: shape.radius_m };
-    case "square-frustum": return { halfX: shape.base_m / 2, halfZ: shape.base_m / 2, yMin: 0, yMax: shape.height_m };
+    case "square-frustum": {
+      const f = shape.footing_m ?? 0, half = (shape.base_m + f * (shape.base_m - shape.top_m) / shape.height_m) / 2;
+      return { halfX: half, halfZ: half, yMin: -f, yMax: shape.height_m };
+    }
     case "chamfered-post": return { halfX: shape.width_m / 2, halfZ: shape.width_m / 2, yMin: 0, yMax: shape.height_m };
     default: return unknownKind(shape, "solid shape");
   }
@@ -192,4 +201,28 @@ export function bakeBridsonStaticSolids(solids: readonly BridsonSolid[], lattice
 /** Rotation about +y by angle (rad). */
 export function yawQuaternion(angle_rad: number): Quaternion {
   return { w: Math.cos(angle_rad / 2), x: 0, y: Math.sin(angle_rad / 2), z: 0 };
+}
+
+/**
+ * The scene's solids at one scene time as a cloth contact source: the union
+ * of every solid, moving ones posed at `time_s`. Structurally a
+ * `ClothSolidSource` (lib/cloth/contact/solid-field.ts) in world metres; a
+ * moving solid is static over any interval its track holds still (the
+ * curtain ball before 2 s, the spinning sphere before 0.75 s).
+ */
+export function bridsonClothSolidSource(solids: readonly BridsonSolid[], time_s: number, box: { lo: readonly [number, number, number]; hi: readonly [number, number, number] },
+  cell_m: number, band_m: number) {
+  const posed = solids.map(s => {
+    const pose = bridsonSolidPose(s, time_s), q = pose.orientation;
+    return { shape: s.shape, c: pose.position_m, q, rotated: Math.abs(q.w) < 1 - 1e-15 };
+  });
+  const sdf = (p: readonly [number, number, number]) => {
+    let d = Infinity;
+    for (const { shape, c, q, rotated } of posed) {
+      const offset = { x: p[0] - c.x, y: p[1] - c.y, z: p[2] - c.z };
+      d = Math.min(d, bridsonShapeDistance(shape, rotated ? quaternionInverseRotate(q, offset) : offset));
+    }
+    return d;
+  };
+  return { sdf, lo: box.lo, hi: box.hi, cell: cell_m, band: band_m };
 }

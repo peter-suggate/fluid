@@ -99,3 +99,27 @@ The scenes need these APIs:
 ## 2026-11-09 COORDINATION → coordinator: how a scene declares a moving voxel solid
 
 `RigidBodyDescription` shapes are analytic (`sphere`, `box`, …), and the lane rule forbids analytic colliders. The scenes need a way to declare a moving voxel solid in the scene model: a voxel shape or baked field, plus a `poseTrack`. Until that exists, the moving solids live only in the Lane S scene data.
+
+## 2026-11-09 MILESTONE: scene solids pass C2's cloth contact field build
+
+`bridsonClothSolidSource` gives the union of a scene's solids at one scene time, as a `ClothSolidSource`. All three scenes build through `buildClothSolidField` at 1 cm with a 6 cm band:
+
+| Scene | Bricks | Size | Build time |
+|---|---|---|---|
+| Curtain | 1852 | 5.5 MB | 6 s |
+| Sphere | 3062 | 9.1 MB | 25 s |
+| Table | 1944 | 5.8 MB | 40 s |
+
+The thin-feature check refused the frustum's base corner, where the base face and the side faces meet at 67°. The frustum now continues 2 cm into the ground, so the visible shape is unchanged. A test pins that the version without the footing is refused.
+
+Static stretches ready as the first captures:
+- curtain, t ≤ 2 s;
+- sphere, t ≤ 0.75 s;
+- table pre-roll, about 3.5 s.
+
+## 2026-11-09 COORDINATION → C2: field build time and acute corners
+
+1. **`buildClothSolidField` is slow.** It takes 25–40 s on the CPU for a 2.8 m-square floor plus scenery at 1 cm, and almost all of that is the h/8 thin-feature sampling.
+   - That is too slow for scene load or for an edit that rebuilds everything.
+   - Suggestion: skip cells whose 8 nodes, together with the source's own gradient, prove the cell affine, as a flat floor is.
+2. **Acute convex corners are refused.** Any convex corner sharper than about 70° is refused, even one on a part much thicker than a cell (here, the frustum base). Lane S works around it in the geometry, with a buried footing. Say if that is the intended contract, so it can be written into the scene authoring notes.
