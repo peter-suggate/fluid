@@ -237,6 +237,44 @@ export function clothVertexNeighbours(t: PreparedClothTopology): {offsets: Uint3
 /** Greedy vertex colouring (setup time). `previous` keeps the colours of
  * vertices outside `touched`; only touched vertices are recoloured, each
  * taking the smallest colour none of its neighbours holds. */
+/**
+ * Greedy colouring can leave a last colour class of a handful of vertices (the Bridson 150 x 150 tablecloth: five
+ * classes of ~4600 and one single vertex), and every class costs one dependent dispatch per iteration. Empty a small last class
+ * by Kempe-chain interchanges: for a member v and colours (a, b) below it, swap a and b on the a/b component holding
+ * v's a-neighbours; when that component holds none of v's b-neighbours, colour a becomes free at v. The colouring
+ * stays proper throughout, and is left unchanged when a member cannot be moved within a bounded component.
+ */
+/** Largest a/b component an interchange may recolour: a mesh-wide chain would reshuffle whole classes and lose the
+ *  index locality of each colour's vertex list (measured: +12 % per colour pass on the 150 x 150 tablecloth). */
+const KEMPE_COMPONENT_LIMIT = 256;
+function emptyLastColour(neighbours: {offsets: Uint32Array; values: Uint32Array}, colour: Uint32Array): boolean {
+  const n = colour.length;
+  let last = 0; for (let v = 0; v < n; v++) last = Math.max(last, colour[v]!);
+  const members: number[] = []; for (let v = 0; v < n; v++) if (colour[v] === last) members.push(v);
+  if (last === 0 || members.length > n / (8 * (last + 1))) return false;
+  const saved = Uint32Array.from(colour), mark = new Int32Array(n).fill(-1);
+  let stamp = 0;
+  const neighboursOf = (v: number) => neighbours.values.subarray(neighbours.offsets[v]!, neighbours.offsets[v + 1]!);
+  for (const v of members) {
+    let moved = false;
+    for (let a = 0; a < last && !moved; a++) for (let b = 0; b < last && !moved; b++) {
+      if (a === b) continue;
+      const id = stamp++, stack: number[] = [];
+      for (const u of neighboursOf(v)) if (colour[u] === a && mark[u] !== id) { mark[u] = id; stack.push(u); }
+      const component: number[] = [];
+      while (stack.length && component.length <= KEMPE_COMPONENT_LIMIT) {
+        const u = stack.pop()!; component.push(u);
+        for (const w of neighboursOf(u)) if (w !== v && mark[w] !== id && (colour[w] === a || colour[w] === b)) { mark[w] = id; stack.push(w); }
+      }
+      if (component.length > KEMPE_COMPONENT_LIMIT || neighboursOf(v).some(u => colour[u] === b && mark[u] === id)) continue;
+      for (const u of component) colour[u] = colour[u] === a ? b : a;
+      colour[v] = a; moved = true;
+    }
+    if (!moved) { colour.set(saved); return false; }
+  }
+  return true;
+}
+
 export function colourClothVertices(neighbours: {offsets: Uint32Array; values: Uint32Array}, previous?: Uint32Array, touched?: ReadonlySet<number>): Uint32Array {
   const n = neighbours.offsets.length - 1, NONE = 0xffffffff, colour = new Uint32Array(n).fill(NONE);
   if (previous && touched) for (let v = 0; v < n; v++) if (!touched.has(v)) colour[v] = previous[v]!;
@@ -248,6 +286,7 @@ export function colourClothVertices(neighbours: {offsets: Uint32Array; values: U
     let c = 0; while (used[c]) c++;
     colour[v] = c;
   }
+  if (!previous) while (emptyLastColour(neighbours, colour));
   // A kept colour that now conflicts (an edit joined two vertices) is a bug in the caller's touched set.
   for (let v = 0; v < n; v++) for (let j = neighbours.offsets[v]!; j < neighbours.offsets[v + 1]!; j++)
     if (colour[neighbours.values[j]!] === colour[v]) throw new Error(`Cloth colouring conflict at vertex ${v}`);

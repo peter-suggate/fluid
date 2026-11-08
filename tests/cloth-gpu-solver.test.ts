@@ -74,6 +74,21 @@ test('one GPU step matches the oracle, for every initial guess', { skip: !gpu },
   }
 }));
 
+test('every lanes-per-vertex layout of the colour solve matches the oracle; invalid layouts fail', { skip: !gpu }, async () => withDevice(async device => {
+  const model = setup(7), start = perturbed(model, 4e-3);
+  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 4, chebyshevRho: 0, initialGuess: 'adaptive' };
+  const oracle = createClothOracleState(model, start);
+  for (let s = 0; s < 3; s++) clothOracleStep(model, oracle, options);
+  for (const vertexLanes of [1, 2, 4, 8, 32]) {
+    const solver = await ClothGPUSolver.create(device, model, { ...options, origin_m: origin, positions_m: start, vertexLanes });
+    solver.step(3);
+    const d = maxDifference(await solver.readPositions(), oracle.x);
+    assert.ok(d < 2e-6, `${vertexLanes} lanes per vertex: GPU vs oracle ${d} m`);
+    solver.destroy();
+  }
+  await assert.rejects(ClothGPUSolver.create(device, model, { ...options, origin_m: origin, vertexLanes: 3 }), /power of two/);
+}));
+
 test('a scripted BDF2 run with strain limits and Chebyshev tracks the oracle; the ring reports its residual', { skip: !gpu }, async t => withDevice(async device => {
   const scripts: ClothAttachmentScript[] = [{ kind: 'translate', group: 1, start_s: 0, end_s: 0.2, vector: [0.05, 0.02, 0], easing: 'cosine' }];
   const model = setup(8, scripts), start = perturbed(model, 4e-3);

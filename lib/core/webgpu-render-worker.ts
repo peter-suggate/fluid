@@ -91,7 +91,22 @@ setInterval(() => {
   post({ type: "load", sample: { thread: threadLoad.meter.sample(now_ms), ...(gpu ? { gpu } : {}) } });
 }, LOAD_SAMPLE_INTERVAL_MS);
 
+/** The cloth surfaces of the held document, and whether they differ from the ones last sent. */
+let sentClothKey = "";
+function clothSurfacesOf(document: SceneDescription) {
+  return (document.cloth ?? []).flatMap(d => { const surface = sceneClothSurface(document, d.id); return surface ? [surface] : []; });
+}
+function changedClothSurfaces(revision: number) {
+  const surfaces = clothSurfacesOf(renderScene!.document);
+  const key = `${revision}|${surfaces.map(s => `${s.documentId}:${s.generation}:${s.topologyRevision}:${s.tick}`).join(",")}`;
+  if (key === sentClothKey) return undefined;
+  sentClothKey = key;
+  return surfaces;
+}
+
 function snapshot(runtime: FluidLabRenderer, sceneRevision?: number): WebGPURenderWorkerSnapshot {
+  // Cloth poses change only when one is read back (a press or an edit asked), so a frame carries them only then.
+  const clothSurfaces = renderScene && renderScene.revision === sceneRevision ? changedClothSurfaces(sceneRevision) : undefined;
   return {
     presentationRevision: runtime.presentationRevision,
     presentationResolution: runtime.presentationResolution,
@@ -105,9 +120,7 @@ function snapshot(runtime: FluidLabRenderer, sceneRevision?: number): WebGPURend
     rigidBodyPoses: runtime.rigidBodyPoses,
     rigidBodyPoseRevision: runtime.rigidBodyPoseRevision,
     ...(renderScene && renderScene.revision === sceneRevision ? {clothSceneRevision: sceneRevision,
-      clothSurfaces: (renderScene.document.cloth ?? []).flatMap(d => {
-        const surface = sceneClothSurface(renderScene!.document, d.id); return surface ? [surface] : [];
-      })} : {}),
+      ...(clothSurfaces ? { clothSurfaces } : {})} : {}),
   };
 }
 
@@ -286,6 +299,14 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
   }
   else if (message.type === "inject-liquid-ball") {
     post({ type: "inject-result", requestId: message.requestId, taken: runtime.injectLiquidBall(message.ball) });
+  }
+  else if (message.type === "read-cloth-pose") {
+    void runtime.readClothPose()
+      .then(() => {
+        const held = renderScene;
+        post({ type: "cloth-pose-read", requestId: message.requestId, ...(held ? { sceneRevision: held.revision, clothSurfaces: clothSurfacesOf(held.document) } : {}) });
+      })
+      .catch((error) => failure(message.requestId, error));
   }
   else if (message.type === "pick-rigid-body") {
     void runtime.pickRigidBody(...message.args)

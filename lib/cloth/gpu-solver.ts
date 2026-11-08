@@ -27,7 +27,7 @@ import type { ClothIntegrator, ClothSolverStateData, ClothVector } from './types
 import { CLOTH_INITIAL_GUESS, clothChebyshevOmega, type ClothInitialGuess, type ClothSolverModel } from './oracle';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
-  CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
+  CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_VERTEX_LANES, CLOTH_WIDE_WORKGROUP, CLOTH_WORKGROUP, clothSolverWGSL,
 } from './gpu-solver-wgsl';
 
 /** Storage buffers per stage the solver binds; C2's contact block adds one. */
@@ -73,6 +73,9 @@ export interface ClothGPUSolverOptions {
   readonly solverState?: ClothSolverStateData;
   /** Write the diagnostics slot of every step (residual, strain, energies). */
   readonly diagnostics?: boolean;
+  /** Threads per vertex of the colour solve: a power of two up to CLOTH_WIDE_WORKGROUP (solveColourWide, default
+   *  CLOTH_VERTEX_LANES), or 1 for the serial solveColour (one thread walks the whole star). */
+  readonly vertexLanes?: number;
   readonly contact?: ClothSolverContact;
   readonly hooks?: ClothStepHooks;
   readonly label?: string;
@@ -194,8 +197,8 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     dampFaceRecord, dampHingeRecord, partialRecord, clockRecord, stateRecords };
 }
 
-type Kernel = 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep';
-const KERNELS: readonly Kernel[] = ['beginStep', 'frameElements', 'frame', 'solveColour', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
+type Kernel = 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep';
+const KERNELS: readonly Kernel[] = ['beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
 
 export class ClothGPUSolver {
   readonly N: number; readonly T: number; readonly E: number;
@@ -287,15 +290,15 @@ export class ClothGPUSolver {
     const entries: GPUBindGroupLayoutEntry[] = [
       { binding: B.params, visibility: C, buffer: { type: 'uniform' } },
       { binding: B.dispatch, visibility: C, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 32 } },
-      storage(B.positions), storage(B.state), storage(B.status), storage(B.topo, true), storage(B.rest, true)];
+      storage(B.positions), storage(B.state), storage(B.status), storage(B.topo, true), storage(B.rest, true), storage(B.topo4, true)];
     if (this.options.contact) entries.push(storage(B.contact, true));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
-      buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest),
+      buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
       ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : [])] });
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl }) });
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, ...(this.options.vertexLanes && this.options.vertexLanes > 1 ? { vertexLanes: this.options.vertexLanes } : {}) }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const built = await Promise.all(KERNELS.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(KERNELS.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
@@ -305,7 +308,9 @@ export class ClothGPUSolver {
     if (workgroups <= 0) return;
     pass.setPipeline(this.pipelines[name]);
     pass.setBindGroup(0, this.bindGroup, [CLOTH_DISPATCH_STRIDE * record]);
-    pass.dispatchWorkgroups(workgroups);
+    // One workgroup per vertex can exceed a dimension's limit; the kernel folds (x, y) back into one index.
+    const x = Math.min(workgroups, this.device.limits.maxComputeWorkgroupsPerDimension);
+    pass.dispatchWorkgroups(x, Math.ceil(workgroups / x));
   }
   private threads(n: number): number { return Math.ceil(n / CLOTH_WORKGROUP); }
 
@@ -319,7 +324,9 @@ export class ClothGPUSolver {
     for (let it = 1; it <= this.iterations; it++) {
       const base = (it - 1) * (C + 1);
       for (let c = 0; c < C; c++) {
-        this.run(pass, 'solveColour', this.threads(this.tables.colourRanges[c]![1]), base + c);
+        const count = this.tables.colourRanges[c]![1];
+        if (this.options.vertexLanes === 1) this.run(pass, 'solveColour', this.threads(count), base + c);
+        else this.run(pass, 'solveColourWide', Math.ceil(count * (this.options.vertexLanes ?? CLOTH_VERTEX_LANES) / CLOTH_WIDE_WORKGROUP), base + c);
         this.hooks.afterColour?.(pass, it, c);
       }
       this.run(pass, 'postIteration', this.threads(this.N), base + C);

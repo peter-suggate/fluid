@@ -146,7 +146,7 @@ function dryBase(staged: SceneDescription[]): GPUSolverInstance {
 
 test('a dry scene steps its cloth one tick per advance, tracks the oracle, and halts at a pending solid', { skip: !gpu }, async () => withDevice(async device => {
   const scene = sheetScene(10 / 60), staged: SceneDescription[] = [];
-  const cloth = await ClothSystem.create(device, scene, { mirrorInterval: 1 });
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 });
   const solver = withClothSystem(dryBase(staged), cloth, false);
   // Optional members follow the base instance.
   assert.equal('applySceneUniforms' in solver, false);
@@ -160,7 +160,10 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
     assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true);
     assert.ok(Math.abs(solver.info.submittedTime_s! - k * CLOTH_SCENE_STEP_S) < 1e-12);
   }
-  await cloth.mirrorNow();
+  // Stepping never reads the pose back; a press or an edit asks for it.
+  assert.equal(solver.clothSurfaces![0]!.tick, 0);
+  assert.equal(typeof solver.readClothPose, 'function');
+  await Promise.all([solver.readClothPose!(), solver.readClothPose!()]);
   const surface = solver.clothSurfaces![0]!;
   assert.equal(surface.tick, 6);
   const document = scene.cloth![0]!, topology = prepareClothTopology(document.geometry.data, document.materials);

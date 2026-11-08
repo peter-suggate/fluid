@@ -860,6 +860,8 @@ export class FluidLabRenderer {
   private svoDryScenePipeline?: SparseVoxelDrySceneRenderer;
   private clothSurfaceRenderer?: ClothSurfaceRenderer;
   private clothPresentationKey = "";
+  /** The render document the cloth pose was last published into. */
+  private clothPublicationScene?: SceneDescription;
   private rigidCutRenderAtlas?:RigidCutRenderAtlas;
   private svoDrySceneSource?: SparseVoxelSceneRenderSource;
   private svoDrySceneData?: SparseVoxelDrySceneData;
@@ -1434,6 +1436,19 @@ export class FluidLabRenderer {
     if(!fluid?.pickRigidBody||!this.lifecycle.open)return undefined;
     const picked=await fluid.pickRigidBody(origin,direction);
     return this.gpuFluid===fluid&&this.gpuFluidGeneration===generation?picked:undefined;
+  }
+
+  /**
+   * Read the cloth pose back now and publish it into the drawn document: a
+   * press that picks, or an edit, asks for it. The pose is never read back on
+   * the step cadence.
+   */
+  async readClothPose(): Promise<void> {
+    const fluid = this.gpuFluid, scene = this.clothPublicationScene;
+    if (!fluid?.readClothPose || !this.lifecycle.open) return;
+    await fluid.readClothPose();
+    const surfaces = fluid.clothSurfaces ?? [];
+    if (this.gpuFluid === fluid && scene && surfaces.length) publishSceneClothSurfaces(scene, surfaces);
   }
 
   /* ----------------------------------------------------------------------- */
@@ -3167,6 +3182,7 @@ export class FluidLabRenderer {
     const clothSources = this.gpuFluid?.clothRenderSources ?? [];
     if (this.clothSurfaceRenderer) this.clothSurfaceRenderer.setSources(clothSources);
     if (clothSurfaces.length) publishSceneClothSurfaces(scene, clothSurfaces);
+    this.clothPublicationScene = scene;
     // Cloth is drawn over the dry target; a still-view reuse of that target
     // must not keep the previous pose (it smeared a falling cloth into a band).
     const clothPresentationKey = clothSources.map((s) => `${s.document.id}:${s.revision}:${s.tick}`).join("|");

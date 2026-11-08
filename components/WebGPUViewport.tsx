@@ -170,6 +170,23 @@ export interface WebGPUViewportProps {
   readonly paneId?: PaneId;
 }
 
+/**
+ * A pointer event handled after its dispatch (a press held for the cloth
+ * pose): React clears `currentTarget` once dispatch ends, so the replay keeps
+ * the canvas, and a capture request for a pointer released meanwhile is moot.
+ */
+function replayedPointerEvent(event: React.PointerEvent<HTMLCanvasElement>): React.PointerEvent<HTMLCanvasElement> {
+  const canvas = event.currentTarget;
+  const target = new Proxy(canvas, {
+    get(element, property) {
+      if (property === "setPointerCapture") return (id: number) => { try { element.setPointerCapture(id); } catch { /* released meanwhile */ } };
+      const value = Reflect.get(element, property, element);
+      return typeof value === "function" ? value.bind(element) : value;
+    },
+  });
+  return Object.create(event, { currentTarget: { value: target } }) as React.PointerEvent<HTMLCanvasElement>;
+}
+
 export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps = {}) {
   // This pane's realm. Every store this component reads or writes is reached
   // through it, so a second pane authors and reports its own experiment.
@@ -1665,7 +1682,36 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   const focusChip = focusLockAxes && !heldHandle && viewportMode === "interact"
     && (voxelToolId !== undefined || armedGesture === "fluid-ball" || armedGesture === "body-drag") ? focusLockAxes : undefined;
 
+  // Cloth is picked against its pose as of the press. That pose is read back
+  // only when something asks (a press here, or an edit), never on the step
+  // cadence, so a primary press in a cloth scene waits for the read, and the
+  // gesture's moves and release are held behind it and replayed in order.
+  const clothPoseHold = useRef<{ pointerId: number; queue: (() => void)[] } | null>(null);
+  const clothPoseReplaying = useRef(false);
+  const heldForClothPose = (event: React.PointerEvent<HTMLCanvasElement>, handle: (event: React.PointerEvent<HTMLCanvasElement>) => unknown): boolean => {
+    const hold = clothPoseHold.current;
+    if (!hold || hold.pointerId !== event.pointerId) return false;
+    const replay = replayedPointerEvent(event);
+    hold.queue.push(() => { void handle(replay); });
+    return true;
+  };
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (heldForClothPose(event, pointerDown)) return;
+    const renderer = rendererRef.current;
+    if (!clothPoseReplaying.current && renderer && event.button === 0 && !event.shiftKey
+      && session.ui.getState().viewportMode === "interact" && session.scene.getState().scene.cloth?.length) {
+      const hold = { pointerId: event.pointerId, queue: [] as (() => void)[] }, replay = replayedPointerEvent(event);
+      clothPoseHold.current = hold;
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* the release is still delivered here */ }
+      void renderer.readClothPose().catch(() => undefined).finally(() => {
+        if (clothPoseHold.current !== hold) return;
+        clothPoseHold.current = null;
+        clothPoseReplaying.current = true;
+        try { void pointerDown(replay); } finally { clothPoseReplaying.current = false; }
+        for (const run of hold.queue) run();
+      });
+      return;
+    }
     // An armed sculpt tool answers first: it takes the press — the secondary
     // button included, which abandons its stroke and then puts it away — or
     // hands it to the camera — Shift, the middle button, a held Space, or a
@@ -1896,6 +1942,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     setPointer({ id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" });
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (heldForClothPose(event, pointerMove)) return;
     if (!pointerRef.current && voxelGesture.move(event)) {
       const ui = session.ui.getState();
       // A tool's idle ghost does not hide what object the pointer is over.
@@ -2123,6 +2170,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       : orbitAbout(current, gesture.pivot_m, dx, dy));
   };
   const pointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (heldForClothPose(event, pointerUp)) return;
     if (voxelGesture.up(event)) return;
     // Ahead of the pointer-id guard below: a pin gesture is tracked separately,
     // so it must resolve even on the releases the pointer machine ignores.

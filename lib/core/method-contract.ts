@@ -196,9 +196,10 @@ export interface InjectedLiquidBall {
 /** Minimal interface the renderer needs from a GPU solver. */
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
-  /** Accepted cloth pose mirrored for picking, editing and history (read
-   * asynchronously off the step path). */
+  /** The cloth pose `readClothPose` last read back, for picking, editing and history. */
   readonly clothSurfaces?: readonly ClothSurfacePublication[];
+  /** Read the cloth pose back now (a press that picks, or an edit); never on the step cadence. */
+  readClothPose?(): Promise<void>;
   /** The cloth solver's GPU geometry, drawn in place. */
   readonly clothRenderSources?: readonly import('../cloth/render').ClothRenderSource[];
   /** Physical frame of the fluid lattice when it extends beyond the tank. */

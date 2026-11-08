@@ -8,9 +8,11 @@
  * a fluid solver the cloth follows the fluid's submitted time, stepping
  * whole ticks to catch up (at most `CLOTH_CATCH_UP_STEPS` per advance).
  *
- * The renderer draws the solver's buffers in place. Picking, cuts and history
- * read an accepted pose that an asynchronous mirror copies back every few
- * steps, never on the step path. A non-finite status word, a pending solid
+ * The renderer draws the solver's buffers in place. The pose is read back
+ * only when something asks for it (`readPose`: a press that picks, an edit,
+ * a capture), never on the step cadence; every few steps only the 4-byte
+ * status word is copied back, so a non-finite step halts the scene. A
+ * non-finite status word, a pending solid
  * (`ClothDocument.pendingSolids`) or a document the system cannot run halts
  * the scene with an explicit `SimulationFailure`.
  *
@@ -33,21 +35,24 @@ import type { ClothDocument, ClothSolverStateData, ClothSurfacePublication, Clot
 export const CLOTH_SCENE_STEP_S = 1 / 60;
 /** Most steps a lagging document takes in one advance beside a fluid solver. */
 export const CLOTH_CATCH_UP_STEPS = 4;
-/** Steps between pose mirrors (picking, cuts and history read the mirror). */
-export const CLOTH_MIRROR_INTERVAL_STEPS = 4;
+/** Steps between status-word reads (the non-finite watchdog; never the pose). */
+export const CLOTH_STATUS_INTERVAL_STEPS = 4;
 const DEFAULT_ITERATIONS = 64;
 
 let systemGenerations = 0, renderRevisions = 0;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
-/** Asynchronous copy of positions, velocities and the status word; one map in flight. */
+/** Asynchronous copy of the status word and, on request, positions and velocities; one map in flight. */
 class PoseMirror {
   private readonly staging: GPUBuffer;
+  private readonly statusStaging: GPUBuffer;
   private readonly span: number;
   busy = false;
+  statusBusy = false;
   constructor(device: GPUDevice, private readonly solver: ClothGPUSolver, label: string) {
     this.span = align(16 * Math.max(solver.N, 1), 256);
     this.staging = device.createBuffer({ label: `${label} pose mirror`, size: 2 * this.span + 4 * CLOTH_STATUS_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statusStaging = device.createBuffer({ label: `${label} status mirror`, size: 4 * CLOTH_STATUS_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   }
   encode(encoder: GPUCommandEncoder): boolean {
     if (this.busy) return false;
@@ -56,6 +61,12 @@ class PoseMirror {
     encoder.copyBufferToBuffer(v.buffer, v.offset ?? 0, this.staging, this.span, bytes);
     encoder.copyBufferToBuffer(s.status, 0, this.staging, 2 * this.span, 4 * CLOTH_STATUS_WORDS);
     this.busy = true;
+    return true;
+  }
+  encodeStatus(encoder: GPUCommandEncoder): boolean {
+    if (this.statusBusy) return false;
+    encoder.copyBufferToBuffer(this.solver.status, 0, this.statusStaging, 0, 4 * CLOTH_STATUS_WORDS);
+    this.statusBusy = true;
     return true;
   }
   /** After the encoder holding `encode` is submitted. */
@@ -69,7 +80,16 @@ class PoseMirror {
       return out;
     } finally { this.busy = false; }
   }
-  destroy(): void { this.staging.destroy(); }
+  /** After the encoder holding `encodeStatus` is submitted. */
+  async readStatus(): Promise<number> {
+    try {
+      await this.statusStaging.mapAsync(GPUMapMode.READ);
+      const word = new Uint32Array(this.statusStaging.getMappedRange(0, 4))[0]!;
+      this.statusStaging.unmap();
+      return word;
+    } finally { this.statusBusy = false; }
+  }
+  destroy(): void { this.staging.destroy(); this.statusStaging.destroy(); }
 }
 
 interface Entry {
@@ -81,7 +101,7 @@ interface Entry {
   readonly revision: number;
   readonly topologyRevision: number;
   steps: number;
-  sinceMirror: number;
+  sinceStatus: number;
   publication: ClothSurfacePublication;
   inflight?: Promise<void>;
   /** Zero BDF2 history and duals, shared by every mirrored publication (see `restartState`). */
@@ -90,8 +110,8 @@ interface Entry {
 
 export interface ClothSystemOptions {
   readonly label?: string;
-  /** Steps between pose mirrors; default `CLOTH_MIRROR_INTERVAL_STEPS`. */
-  readonly mirrorInterval?: number;
+  /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
+  readonly statusInterval?: number;
 }
 
 export class ClothSystem {
@@ -99,11 +119,12 @@ export class ClothSystem {
   failure?: SimulationFailure;
   private readonly entries = new Map<string, Entry>();
   private readonly building = new Map<string, { key: string; ready: Promise<void> }>();
-  private readonly mirrorInterval: number;
+  private readonly statusInterval: number;
+  private poseRead?: Promise<void>;
   private destroyed = false;
 
   private constructor(private readonly device: GPUDevice, private scene: SceneDescription, private readonly options: ClothSystemOptions) {
-    this.mirrorInterval = options.mirrorInterval ?? CLOTH_MIRROR_INTERVAL_STEPS;
+    this.statusInterval = options.statusInterval ?? CLOTH_STATUS_INTERVAL_STEPS;
   }
 
   static async create(device: GPUDevice, scene: SceneDescription, options: ClothSystemOptions = {}): Promise<ClothSystem> {
@@ -122,7 +143,7 @@ export class ClothSystem {
   /** A document is being rebuilt after an edit; the clock waits for it. */
   get pending(): boolean { return this.building.size > 0; }
 
-  /** Accepted poses for picking, cuts and history; a document being rebuilt is left out. */
+  /** The poses `readPose` last accepted, for picking, cuts and history; a document being rebuilt is left out. */
   get surfaces(): ClothSurfacePublication[] {
     return [...this.entries.values()].filter(e => !this.building.has(e.document.id)).map(e => e.publication);
   }
@@ -155,7 +176,7 @@ export class ClothSystem {
     });
     const positions = Float64Array.from(data.initialPositions_m ?? data.restPositions_m);
     const entry: Entry = { document, key: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label), origin,
-      revision: ++renderRevisions, topologyRevision, steps: 0, sinceMirror: 0,
+      revision: ++renderRevisions, topologyRevision, steps: 0, sinceStatus: 0,
       publication: { documentId: document.id, topology: data, positions_m: positions,
         ...(data.initialVelocities_m_s ? { velocities_m_s: Float64Array.from(data.initialVelocities_m_s) } : {}),
         ...(data.solverState ? { solverState: data.solverState } : {}),
@@ -171,7 +192,7 @@ export class ClothSystem {
    */
   stepTo(target_s: number, maxSteps = 1): boolean {
     if (this.failure || this.destroyed || this.pending) return false;
-    const encoder = this.device.createCommandEncoder({ label: 'Cloth system step' }), mirrored: Entry[] = [];
+    const encoder = this.device.createCommandEncoder({ label: 'Cloth system step' }), watched: Entry[] = [];
     let stepped = false;
     for (const e of this.entries.values()) {
       let owed = Math.min(maxSteps, Math.floor((target_s - this.entryTime(e)) / CLOTH_SCENE_STEP_S + 0.5));
@@ -183,21 +204,36 @@ export class ClothSystem {
         if (owed <= 0) { this.fail('cloth-pending-solid', `moving cloth solid '${blocker.id}' requires C2 M6`, 'ClothSystem.stepTo', e, [blocker.start_s]); return false; }
       }
       e.solver.encodeSteps(encoder, owed);
-      e.steps += owed; e.sinceMirror += owed; stepped = true;
-      if (e.sinceMirror >= this.mirrorInterval && e.mirror.encode(encoder)) { e.sinceMirror = 0; mirrored.push(e); }
+      e.steps += owed; e.sinceStatus += owed; stepped = true;
+      if (e.sinceStatus >= this.statusInterval && e.mirror.encodeStatus(encoder)) { e.sinceStatus = 0; watched.push(e); }
     }
     if (!stepped) return false;
     this.device.queue.submit([encoder.finish()]);
-    for (const e of mirrored) e.inflight = this.receive(e, this.entryTime(e));
+    for (const e of watched) void this.watch(e);
     return true;
   }
 
-  /** Mirror every document now (harness and capture). */
-  async mirrorNow(): Promise<void> {
-    await Promise.all([...this.entries.values()].map(e => e.inflight));
-    const encoder = this.device.createCommandEncoder({ label: 'Cloth mirror' }), entries = [...this.entries.values()].filter(e => e.mirror.encode(encoder));
-    this.device.queue.submit([encoder.finish()]);
-    await Promise.all(entries.map(e => (e.inflight = this.receive(e, this.entryTime(e)))));
+  private async watch(e: Entry): Promise<void> {
+    let status;
+    try { status = await e.mirror.readStatus(); } catch { return; } // device lost or destroyed
+    if (this.destroyed || this.entries.get(e.document.id) !== e) return;
+    if (status & CLOTH_STATUS.nonFinite) this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(status).join('; '), 'finishStep', e, [status]);
+  }
+
+  /**
+   * Read every document's pose back now and publish it: what a press that
+   * picks, an edit or a capture asks for. Concurrent requests share one read.
+   */
+  readPose(): Promise<void> {
+    if (this.poseRead) return this.poseRead;
+    const read = (async () => {
+      await Promise.all([...this.entries.values()].map(e => e.inflight));
+      if (this.destroyed) return;
+      const encoder = this.device.createCommandEncoder({ label: 'Cloth pose read' }), entries = [...this.entries.values()].filter(e => e.mirror.encode(encoder));
+      this.device.queue.submit([encoder.finish()]);
+      await Promise.all(entries.map(e => (e.inflight = this.receive(e, this.entryTime(e)))));
+    })().finally(() => { if (this.poseRead === read) this.poseRead = undefined; });
+    return (this.poseRead = read);
   }
 
   /**
@@ -287,7 +323,7 @@ export class ClothSystem {
         if (!this.stepTo(this.time_s + CLOTH_SCENE_STEP_S)) break;
         await this.device.queue.onSubmittedWorkDone();
       }
-      await this.mirrorNow();
+      await this.readPose();
       if (this.failure) throw new Error(`Cloth capture halted at ${this.failure.time_s ?? 0} s: ${this.failure.message}`);
       frames.push(this.surfaces);
     }
@@ -301,7 +337,7 @@ export class ClothSystem {
   }
 }
 
-const OVERRIDDEN = new Set<PropertyKey>(['advanceTo', 'clothSurfaces', 'clothRenderSources', 'destroy', 'stageSceneUpdate', 'applySceneUniforms', 'reseed']);
+const OVERRIDDEN = new Set<PropertyKey>(['advanceTo', 'clothSurfaces', 'clothRenderSources', 'readClothPose', 'destroy', 'stageSceneUpdate', 'applySceneUniforms', 'reseed']);
 
 /**
  * The scene solver with the cloth system composed onto it. Everything the
@@ -330,6 +366,7 @@ export function withClothSystem(base: GPUSolverInstance, cloth: ClothSystem, flu
     },
     get clothSurfaces() { latch(); return cloth.surfaces; },
     get clothRenderSources() { return cloth.renderSources; },
+    readClothPose: () => cloth.readPose().then(latch),
     destroy() { cloth.destroy(); base.destroy(); },
   };
   if (base.stageSceneUpdate) overrides.stageSceneUpdate = (scene: SceneDescription) => { cloth.adopt(scene); base.stageSceneUpdate!(scene); };

@@ -341,3 +341,146 @@ Tier A at K = 16 reached 83 %.
   - Until it exists, the cards say the cloth passes through the solids.
   - The hook point is `ClothSystem.build` in `lib/cloth/system.ts`. I'll wire it once the adapter's interface lands.
 - **M6.** The gates are `ClothDocument.pendingSolids`. When M6 lands, a moving solid should be removed from `pendingSolids` and supplied as a posed body instead.
+
+## 2026-11-09 RULING (0) DONE: the pose is read back only on a pick or an edit
+
+- `ClothSystem` no longer reads the pose back on the step cadence. Every `CLOTH_STATUS_INTERVAL_STEPS` (4) steps it copies only the 4-byte status word, the non-finite watchdog, which fails the system explicitly with `cloth-non-finite`.
+- New `readClothPose()` on the method contract. The system coalesces concurrent requests into one 'Cloth pose read' submit.
+  - The renderer, worker and client carry it as a `read-cloth-pose` request. Cloth surfaces are published to the scene only when the pose actually changed.
+  - The viewport holds a cloth-scene press (button 0, interact mode, no shift) until the pose arrives, then replays the press and any queued moves. Picking and cutting therefore see the current pose.
+  - Edits and history (`capture`) read the pose on demand.
+- `tests/cloth-system.test.ts`: six ticks leave the published tick at 0, so no readback happens on step. Two concurrent `readClothPose()` calls resolve.
+
+## 2026-11-09 RESULT (1): what diverges, with the oracle
+
+The question was which of Chebyshev, the adaptive init or the AVBD warm start causes the divergence. The setup: 64² pinned sheet, K=8, BDF2, 2 % limit, 30 steps, Float64 oracle (`fluid-scratch/cloth-c1/diverge.ts`).
+
+- H = KE + PE + elastic.
+- G is the step's incremental potential, which VBD minimises.
+
+| variant | Hmax / H0 | H-growth steps | G non-monotone steps | strain at step 29 |
+|---|---|---|---|---|
+| base (adaptive, AVBD pins, ρ = 0) | 1.89 (Hmax 3.70) | 23/30 | — | 62 % |
+| hard pins (no AVBD pin duals) | 8.2 | 27 | **0** | 198 % |
+| hard pins, no limit | 8.0 | 27 | 0 | 185 % |
+| AVBD duals reset every step (no warm start) | 4.7 | 27 | 30 | 210 % |
+| implicit Euler instead of BDF2 | 2.9 | 25 | 6 | 76 % |
+| inertial init | 3.0 | 27 | 11 | 89 % |
+| **previous-position init** | **1.00** | **0** | 0 | 2.3 % |
+| K = 32, hard pins | 2.5 | 24 | 0 | 128 % |
+
+- **Chebyshev is off (ρ = 0)** in every run, so it is not the cause.
+- **The AVBD warm start is not the cause either.** Resetting the duals still diverges, and hard pins without any duals diverge while G decreases monotonically in every iteration of every step.
+  - So the per-vertex Newton step with backtracking does what the ruling says: G never rises.
+  - But a G that falls monotonically within each step does not stop H from growing across steps.
+- **The cause is the extrapolating initial guess (adaptive or inertial) combined with the solver's limited reach.** K sweeps move support only about K rings.
+  - The unconverged far field keeps the extrapolated momentum. v = (x − x̂)/h then turns that residual into kinetic energy.
+  - The previous-position guess does not grow, because it has no extrapolated momentum to keep. But it is wrong in free fall: it over-damps.
+- **Conclusion: this is the propagation problem, not a robustness bug in the local solve.** The fix is long-range support, item (3).
+  - Measured on the oracle at both sizes, the two-level correction removes the growth (next entry).
+  - The GPU regression "no energy growth at 150², K = 8" will be the GPU two-level correction's acceptance test. It is not in the tree yet.
+
+## 2026-11-09 RESULT (3): long-range support, measured in the Float64 oracle
+
+Setup: K = 8, 30 steps, adaptive init, 2 % limit (`fluid-scratch/cloth-c1/longrange.ts`). The coarse variants add one coarse correction per outer iteration (Galerkin PᵀHP assembled at the step's initial guess, exact dense solve, global line search on G), then one fine sweep.
+
+| method | 64²: max strain, Hmax/H0 | 150²: max strain, Hmax/H0 | coarse dof |
+|---|---|---|---|
+| plain VBD | 62 %, 1.89 | **436 %, 16.4** | — |
+| previous-position init | 2.3 %, 1.00 | 0.2 %, 1.00 (over-damped, wrong free fall) | — |
+| (a) two-level, bilinear 8×8 | 2.9 %, 1.017 | **4.3 %, 1.000** | 192 |
+| (a) two-level, bilinear 16×16 | 2.9 %, 1.000 | **3.5 %, 1.000** | 768 |
+| (b) aggregation (HPBD-like), 8² blocks / 10² blocks | 3.7 %, 1.000 | 6.1 %, 1.000 (10² blocks: 225 aggregates) | 192 / 675 |
+| (b) aggregation, 19² blocks (8×8 aggregates) | — | 5.7 %, 1.137 | 192 |
+| (c) long-range attachments (AVBD inequality at the geodesic rest distance to each pin) | 7.9 %, 1.031 | — | 0 |
+| (c) + bilinear 8×8 | 2.9 %, 1.044 | — | 192 |
+| reference K = 192 | 2.1 %, 1.000 | — | — |
+
+- **Pick: (a), the two-level Galerkin correction with bilinear prolongation from an 8×8 coarse lattice.**
+  - At 150² it takes the strain from 436 % to 4.3 % and keeps H ≤ H0.
+  - Its 192-dof coarse system costs a 192³/3 ≈ 2.4 MFLOP factorisation per step and a 74 KFLOP solve per iteration.
+  - 16×16 buys only 0.8 points of strain for 4× the dof (64× the factorisation).
+  - Aggregation at the same coarse size (19² blocks) is worse, at 5.7 % strain, and lets H grow by 14 %.
+  - LRA alone leaves 7.9 % and helps only pinned cloth.
+- Planned GPU form, all on the GPU with no float atomics:
+  1. **Assemble once per step, at the initial guess.**
+     - An element pass computes the full analytic element Hessian blocks:
+       - membrane: H_ij = A (J_i D J_jᵀ + σ_ij I);
+       - hinge: Gauss–Newton k g_i g_jᵀ, the same as the vertex block now;
+       - damping: in the same form;
+       - edges: (k − f/l) nnᵀ + (f/l) I.
+     - Contributions go per fine vertex into its 3×3 coarse-node neighbourhood.
+     - One workgroup per coarse node pair then does a fixed-order reduction.
+  2. **Factorise** the 192-dof system in one workgroup, Cholesky in workgroup memory.
+  3. **Each outer iteration:**
+     - restrict the gradient (one vertex pass and a per-node reduction);
+     - coarse solve;
+     - prolong;
+     - global line search on G (one element-energy pass plus a reduction);
+     - then the colour sweeps.
+- **Answer to "does softening the membrane help?"** No. The hard limit carries the same propagation problem.
+  - Membrane divided by 10 (h²k/m ≈ 220) with the 2 % AVBD limit: strain 52 % at step 29, H bounded (Hmax = H0).
+  - Divided by 100 (≈ 22): 58 %, H bounded.
+  - Without the limit, the softened sheet simply stretches: 258 % at ÷10, 430 % at ÷100, H growing 2.3× and 1.4×.
+  - So softening removes the energy growth only by moving the stiffness into the AVBD limit. The limit is then violated by 25–30× at K = 8, because it has to propagate as far as the membrane did.
+  - The 10 % limit gives 72.7 % (entry above).
+
+## 2026-11-09 MEASUREMENT (2): where a colour pass goes, and 5.4× off the per-iteration cost
+
+Setup: Bridson tablecloth 150² (22.5K vertices), K = 8, 20 steps, timing mode.
+
+**Per-dispatch GPU time.** Each dispatch was timestamped in its own pass (`fluid-scratch/cloth-c1/prof/passes.mts`).
+- Dawn merges all passes of one encoder into one Metal encoder, so xctrace alone cannot split them.
+- Timestamps here are quantised to about 6.5 µs.
+
+**xctrace with counters** (`prof/profile.mts --counters`, through the runner) on the original serial kernel (one thread per vertex):
+- 20.5 ms/step;
+- colour passes 0.53 ms each × 40 per step = 99 % of the step;
+- occupancy 3.7 %, ALU 6.8 %;
+- LLC limiter 49.5 %, buffer-read limiter 35 %, read bandwidth 48 GB/s (≈ 1 GB/step), MMU limiter 15 %.
+
+Root causes, in order of size:
+
+1. **Every Jacobi/PSD projection and every hinge array spilled to stack memory.**
+   - `projectPSD` used dynamically indexed `array<f32, 9>`, and the hinge code used `array<vec3f, 4>` with `x[k] = xv`. Metal puts dynamically indexed private arrays in device stack memory, which was most of the 1 GB/step of traffic.
+   - Fixes:
+     - the membrane PSD projection became exact and closed-form (the block's range lies in span(F₀, F₁): a 2×2 eigenproblem in that plane, with the normal eigenvalue σ < 0 clamped to 0);
+     - the hinge, damping and frame code select by vertex slot instead of indexing.
+   - Read bandwidth fell from 48 to 16 GB/s.
+2. **The line search failed on f32 rounding, not on ascent.**
+   - Histogram of accepted trials: 54 % at α = 1, then 29 % at α = 1/64 and 6 % at 1/128. Mean 3.65 energy evaluations per update.
+   - E(x + d) − E(x) was formed as the difference of two nearly equal f32 energies whose rounding exceeds 4 ε Σ|terms| when strains are near ε.
+   - The Float64 oracle shows these vertices are converged: |g| ≈ 1e-16, E ≈ 1e-33.
+   - Fix: the Armijo test now uses an exact difference-form ΔE.
+     - Strain, rate and residual increments are linear or quadratic in d.
+     - The rounding floor is first order in the base quantities.
+     - Contact (C2's energy) is still a plain difference.
+   - Mathematically this is the same test. Measured afterwards: 100 % accepted at α = 1, 1.00 trials.
+3. **One 32-lane workgroup per vertex diverged on element kind**: faces, hinges and edges in one SIMD group ran one after another.
+   - Replaced with `vertexLanes` lanes per vertex (default 2; 16 vertices per 32-lane workgroup). Every lane walks faces, then hinges, then edges, so the whole SIMD group runs the same element kind at the same time.
+   - Per-colour times (µs, interleaved): lanes 1 → 140, 2 → 100, 4 → 106, 8 → 123, 16 → 140, 32 → 220. The old serial kernel took 172 after fixes 1 and 2.
+4. **Greedy colouring left a one-vertex sixth colour.** It cost 35 µs × 8 dispatches per step for one vertex.
+   - Bounded Kempe-chain interchanges (component ≤ 256) now empty a small last class. The tablecloth has 5 classes.
+   - A mesh-wide chain also empties it, but reshuffles classes and cost +12 % per pass.
+   - Step: 5.6–5.8 ms → 5.0–5.2 ms, interleaved.
+
+**Result** (all GPU tests pass against the oracle, including the new lanes-per-vertex parity test):
+
+| | step (K = 8) | colour pass | trials per update |
+|---|---|---|---|
+| before | 22.5 ms | 530–545 µs | 3.65 |
+| after | **5.0–5.2 ms** | **~100 µs** (4700 vertices) | 1.00 |
+
+- After the fixes the colour pass reads at 107 GB/s, with these counters:
+  - buffer-read limiter 62 %;
+  - LLC limiter 48 %;
+  - MMU limiter 39 % (TLB miss rate 3.4 %);
+  - ALU 14 %;
+  - occupancy 11 % (a colour has 9.4K threads at 2 lanes, about 10 % of the machine).
+- Splitting it: the system pass costs about 72 µs and the single line-search trial about 37 µs (with the line search skipped as a probe: 72 µs at 4 lanes).
+- Removing all damping reads (40 % of the requested bytes) saves only 10–15 %. Each colour pass touches about half of every element record: about 12 MB per pass at 107 GB/s.
+- **Still 3.3× off the 30 µs target.** Next, in order:
+  1. Keep the system pass's per-element base values (F₀, F₁, hinge angle, edge length) in registers, with fixed per-lane slots sized from the mesh's maximum valence. The trial then needs no reloads, about −1/3.
+  2. Precompute the damping rate offsets per element once per step (rate = Tᵀ(F − F̂)), which removes the x̂ reads.
+  3. Pack each face's and hinge's records together (AoS) for line utilisation and TLB.
+  4. Shorten the dependent-load chain: colour slot → star record holding element and vertex ids.

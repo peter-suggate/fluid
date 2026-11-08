@@ -44,7 +44,7 @@ export interface WebGPURenderWorkerSnapshot {
   /** Poses the drawn frame used, in roster order. See FluidLabRenderer. */
   rigidBodyPoses: FluidLabRenderer["rigidBodyPoses"];
   rigidBodyPoseRevision: number;
-  /** Accepted geometry from the displayed worker frame, mirrored for editor queries. */
+  /** Accepted geometry from the displayed worker frame, mirrored for editor queries; absent when unchanged since the last frame. */
   clothSceneRevision?: number;
   clothSurfaces?: readonly ClothSurfacePublication[];
 }
@@ -118,6 +118,8 @@ export type WebGPURenderWorkerRequest =
   | { type: "edit-fluid"; requestId: number; edit: LiveFluidEdit }
   | { type: "inject-liquid-ball"; requestId: number; ball: InjectedLiquidBall }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
+  /** Read the cloth pose back now: a press that picks, or an edit, asked for it. */
+  | { type: "read-cloth-pose"; requestId: number }
   | { type: "shutdown"; requestId: number };
 
 export type WebGPURenderWorkerResponse =
@@ -137,6 +139,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "simulation-running-set"; requestId: number; submittedTime_s: number | undefined }
   | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
   | { type: "pick-result"; requestId: number; result: PickResult }
+  | { type: "cloth-pose-read"; requestId: number; sceneRevision?: number; clothSurfaces?: readonly ClothSurfacePublication[] }
   | { type: "solid-edit-validated"; requestId: number }
   /** `staged` is whether the display now shows the proposal; false leaves it on the resident document. */
   | { type: "solid-edit-previewed"; previewId: number; staged: boolean }
@@ -442,6 +445,11 @@ export class WebGPURenderWorkerClient {
     return this.request<PickResult>({ type: "pick-rigid-body", requestId: this.nextRequestId(), args });
   }
 
+  /** Read the cloth pose back and publish it for the editor's queries; resolves once it is published. */
+  readClothPose(): Promise<void> {
+    return this.request<void>({ type: "read-cloth-pose", requestId: this.nextRequestId() });
+  }
+
   shutdown(): Promise<void> {
     if (this.stopping) return this.stopping;
     if (this.publishedRenderDocument) clearSceneClothSurfaces(this.publishedRenderDocument);
@@ -642,6 +650,11 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "initialized" || message.type === "shutdown-complete" || message.type === "solid-edit-validated") this.settle(message.requestId);
     else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);
+    else if (message.type === "cloth-pose-read") {
+      if (this.publishedRenderDocument && message.sceneRevision === this.publishedRenderSceneRevision && message.clothSurfaces?.length)
+        publishSceneClothSurfaces(this.publishedRenderDocument, message.clothSurfaces);
+      this.settle(message.requestId);
+    }
     else if (message.type === "interaction-fluid-result") this.settle(message.requestId, message.result);
     else if (message.type === "fluid-edit-result") this.settle(message.requestId, message.result);
     else if (message.type === "inject-result") this.settle(message.requestId, message.taken);
@@ -665,8 +678,9 @@ export class WebGPURenderWorkerClient {
       this.snapshot = message.snapshot;
       if (this.publishedRenderDocument && message.snapshot.clothSceneRevision === this.publishedRenderSceneRevision) {
         publishSceneRigidSurfaces(this.publishedRenderDocument,message.snapshot.rigidBodyPoses);
-        if (message.snapshot.clothSurfaces?.length) publishSceneClothSurfaces(this.publishedRenderDocument, message.snapshot.clothSurfaces);
-        else clearSceneClothSurfaces(this.publishedRenderDocument);
+        const cloth = message.snapshot.clothSurfaces;
+        if (cloth?.length) publishSceneClothSurfaces(this.publishedRenderDocument, cloth);
+        else if (cloth) clearSceneClothSurfaces(this.publishedRenderDocument);
       }
       this.completedMetrics = message.metrics;
       this.frameInFlight = false;
