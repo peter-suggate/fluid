@@ -183,7 +183,7 @@ ${sourceScale}
 ${levelSetFillWGSL}
 ${uniformMixedSolidLibraryWGSL(this.solid,2)}${this.solid?uniformMixedVertexBuriedWGSL:""}
 // What an owner can hold: its open fraction (an h cell's, a 4h owner's tile's).
-fn umCapacity(o:UMOwner)->f32{${this.solid?.features.porous?"if(o.width==1u){return umFreeCellCapacity(vec3i(umOrigin(o)));}return umFreeTileCapacity(o.tile);":"if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);"}}
+fn umCapacity(o:UMOwner)->f32{if(!umSolidEnabled()){return 1.0;}if(o.width==1u){return umCellOpen(vec3i(umOrigin(o)));}return umTileOpen(o.tile);}
 // A cut 4h owner's filled volume in h cells: the tetrahedral fill of each h
 // cell of its tile under the owner's trilinear field, times the cell's open
 // fraction.

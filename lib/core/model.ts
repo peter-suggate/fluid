@@ -18,8 +18,6 @@ import { WATER_ROUGHNESS_MIN } from "./webgpu-lighting";
 import type { InteractionDocument } from "../interaction/contracts";
 import { interactionCatalog } from "../interaction/installed";
 import type { ClothDocument } from "../cloth/types";
-import type { WetClothSourceProgram } from "../cloth/source-types";
-import { validateWetClothSourceProgram } from "../cloth/source-validation";
 import { validateClothDocument } from "../cloth/topology";
 
 export type { BackdropDescription } from "./backdrop";
@@ -137,10 +135,8 @@ export function rigidBodyHasVisibleFixedPose(body: RigidBodyDescription): boolea
 
 export interface SceneDescription {
   schemaVersion: "2.0.0";
-  /** Deformable physical surfaces, resolved by the cloth domain plugins. */
+  /** Triangle cloth sheets, stepped on the GPU by the cloth system (lib/cloth). */
   cloth?: readonly ClothDocument[];
-  /** Exact source fields, emission and support/solid scripts for water-fabric fixtures. */
-  wetClothSource?: WetClothSourceProgram;
   /** Optional versioned interactive content; omitted legacy scenes retain their behavior. */
   interaction?: InteractionDocument;
   sceneId: string;
@@ -148,11 +144,6 @@ export interface SceneDescription {
   systems?: {
     /** False builds the authored render world without fluid transport/authority. */
     fluid?: boolean;
-    /** True compiles porous material coupling (cloth's capacity table and
-     * pressure mixture faces) into the fluid frame for physics plugins
-     * attached without a cloth document. Cloth documents and a wet-cloth
-     * source imply it; omitted, plain water compiles none of it. */
-    porous?: boolean;
   };
   /** Visible environment is part of the unified scene representation, not merely a backdrop. */
   environment?: EnvironmentId;
@@ -673,10 +664,6 @@ export function validateScene(scene: SceneDescription): string[] {
       }
     }
   }
-  if (scene.wetClothSource !== undefined) {
-    try { errors.push(...validateWetClothSourceProgram(scene.wetClothSource)); }
-    catch (error) { errors.push(`Wet-cloth source: ${error instanceof Error ? error.message : String(error)}`); }
-  }
   if (scene.renderProfile !== undefined) errors.push(...sceneRenderProfileErrors(scene.renderProfile));
   if (scene.interaction !== undefined) {
     try { interactionCatalog.inspectDocument(scene.interaction); }
@@ -691,8 +678,6 @@ export function validateScene(scene: SceneDescription): string[] {
   if (scene.schemaVersion !== "2.0.0") errors.push("Unsupported schema version");
   if (!scene.sceneId?.trim()) errors.push("Scene ID is required");
   if (scene.systems?.fluid !== undefined && typeof scene.systems.fluid !== "boolean") errors.push("Scene fluid-system flag must be boolean");
-  if (scene.systems?.porous !== undefined && typeof scene.systems.porous !== "boolean") errors.push("Scene porous-system flag must be boolean");
-  if (scene.systems?.porous === false && ((scene.cloth?.length ?? 0) > 0 || scene.wetClothSource !== undefined)) errors.push("Scene porous-system flag cannot be false with cloth or a wet-cloth source");
   const lighting = scene.lighting;
   if (lighting?.directional?.direction) {
     const direction = lighting.directional.direction;

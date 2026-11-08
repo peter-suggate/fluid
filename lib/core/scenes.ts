@@ -60,7 +60,6 @@ import { TOKYO_RAIN_ID, createTokyoRainScene, tokyoRainCamera } from "./tokyo-ra
 import { ATLANTIC_LIGHTHOUSE_ID, createAtlanticLighthouseScene, atlanticLighthouseCamera } from "./atlantic-lighthouse-scene";
 import { BEACH_SCENE_ID, createBeachScene, beachCamera } from "./beach-scene";
 import { createUniformTroughScene, UNIFORM_TROUGH_CAMERA } from "./uniform-trough-scenes";
-import { wetClothShelfDefinitions } from "../cloth/scenes/shelf";
 import { createReservoirSeepScene, RESERVOIR_SEEP_CAMERA, RESERVOIR_SEEP_ID } from "./reservoir-seep-scene";
 import { BULK_REST_TANK_CAMERA, BULK_REST_TANK_ID, createBulkRestTankScene } from "./bulk-rest-tank-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
@@ -2626,9 +2625,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createMidairCornerDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
-  // Imported libWetCloth inputs. Their builds read a checksummed source asset,
-  // so each declares `prepare`; see SceneDefinition.prepare.
-  ...wetClothShelfDefinitions,
 ]);
 
 export function getSceneDefinition(id: string): SceneDefinition {

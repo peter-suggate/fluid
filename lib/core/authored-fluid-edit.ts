@@ -1,4 +1,3 @@
-import { sourceInitialLiquidKey } from '../cloth/source-initial';
 import type { InitialLiquidBox, InitialLiquidVolume, SceneDescription } from "./model";
 import { initialFluidLayout } from "./initial-fluid-layout";
 
@@ -7,7 +6,7 @@ export function authoredFluidGeometryKey(scene: SceneDescription): string {
   const f = scene.fluid;
   return JSON.stringify([scene.container.fillFraction, f.initialCondition,
     f.initialDamBreakDimensions_m, f.initialDamBreakOrigin_m, f.initialBrickSeeds_m,
-    f.initialBrickSeedsAdditive, f.initialLiquidVolumes]) + sourceInitialLiquidKey(scene);
+    f.initialBrickSeedsAdditive, f.initialLiquidVolumes]);
 }
 
 /** Resolve every editor storage form to world-space primitives, without rasterizing cells. */

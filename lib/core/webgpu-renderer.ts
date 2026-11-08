@@ -1,8 +1,7 @@
 import { ROUNDED_PLATE_RENDER_TAG } from "./rigid-cut-render";
 import {publishSceneRigidSurfaces} from './rigid-surface';
 import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
-import { clothSceneContentStamp } from "../cloth/content-stamp";
-import { clothDocumentsKey } from "../cloth/document-key";
+import { clothDocumentsKey } from "../cloth/content-stamp";
 import { RuntimeLifecycle } from "./runtime-lifecycle";
 import { StagedReadback } from "./staged-readback";
 import { rigidControlOwnerId } from "./rigid-motor";
@@ -67,7 +66,6 @@ import { canConsumeSparseVoxelLighting, sparseVoxelDrySceneContractFailure, Spar
 import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program";
 import { ClothSurfaceRenderer } from "../cloth/render";
 import {RigidCutRenderAtlas} from './rigid-cut-render';
-import { withDryClothPhysics } from "../cloth/dry-host";
 import { publishSceneClothSurfaces } from "../cloth/scene-geometry";
 import { svoRenderScenePublication, type SvoRenderScenePublication } from "../svo/features/scene-publication/svo-render-scene-publication";
 import {
@@ -476,7 +474,6 @@ export function structuralMethodValues(config: SimulationRunConfig): MethodParam
 /** Renderer-only worlds are method-independent; fluid worlds require a GPU solver factory. */
 export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: string): boolean {
   const method = getMethod(methodId);
-  if (scene.cloth?.length && planSceneRuntime(scene).fluidSolver && methodId !== "uniform-narrow-band-flip") return false;
   return !planSceneRuntime(scene).fluidSolver || Boolean(method.createSolver || method.createSolverAsync);
 }
 
@@ -656,7 +653,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${solidVoxelPatchesKey(scene.solidVoxels)}:${clothDocumentsKey(scene.cloth)}:${clothSceneContentStamp({wetClothSource:scene.wetClothSource})}`;
+  return `${authoredFluidGeometryKey(scene)}:${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.x}:${scene.fluid.gravity_m_s2.y}:${scene.fluid.gravity_m_s2.z}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}:${solidVoxelPatchesKey(scene.solidVoxels)}:${clothDocumentsKey(scene.cloth)}`;
 }
 
 /**
@@ -2088,15 +2085,14 @@ export class FluidLabRenderer {
           environmentPlanarRefinementExemption: config.values.svoEnvironmentPlanarRefinementExemption === true,
           backdropRefinedRings: typeof config.values.svoBackdropRefinedRings === "number" ? config.values.svoBackdropRefinedRings : undefined,
         });
-        solver=await withDryClothPhysics(solver,device,scene);
       } else {
-        if (scene.cloth?.length && config.methodId !== "uniform-narrow-band-flip") throw new Error("Liquid–cloth coupling requires the narrowband FLIP method");
         if (scene.fluid.scheduledDrops && !takesScheduledDrops(method.id))
           throw new Error(`${method.label} cannot add liquid on a schedule; this scene's timed drops need a Uniform method`);
         solver=await (method.createSolverAsync
           ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
           : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0)));
       }
+      if (scene.cloth?.length) throw new Error("Cloth scenes need the GPU cloth system, which is not yet installed");
       if (presentationMode === "fluid-only" || solver.sparseVoxelSceneSource) return {solver};
       try {
         const refinement=config.values.svoEnvironmentBrickRefinementLevels;
@@ -3166,11 +3162,12 @@ export class FluidLabRenderer {
     }
     let svoEncoded = false;
     const clothSurfaces = this.gpuFluid?.clothSurfaces ?? [];
-    if (this.clothSurfaceRenderer) this.clothSurfaceRenderer.setSurfaces(scene.cloth ?? [], clothSurfaces);
+    const clothSources = this.gpuFluid?.clothRenderSources ?? [];
+    if (this.clothSurfaceRenderer) this.clothSurfaceRenderer.setSources(clothSources);
     if (clothSurfaces.length) publishSceneClothSurfaces(scene, clothSurfaces);
     // Cloth is drawn over the dry target; a still-view reuse of that target
     // must not keep the previous pose (it smeared a falling cloth into a band).
-    const clothPresentationKey = clothSurfaces.map((s) => `${s.documentId}:${s.generation}:${s.topologyRevision}:${s.tick}`).join("|");
+    const clothPresentationKey = clothSources.map((s) => `${s.document.id}:${s.revision}:${s.tick}`).join("|");
     if (clothPresentationKey !== this.clothPresentationKey) {
       this.clothPresentationKey = clothPresentationKey;
       this.svoDryScenePipeline?.invalidateStillFrame();

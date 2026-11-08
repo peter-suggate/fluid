@@ -1,20 +1,18 @@
-import type { ClothDocument, ClothTopologyData, ClothVector } from './types';
-import { createClothState, prepareClothTopology, dot3, point3 } from './topology';
-import {clipRodThroughBox} from './rod-cut';
-import {clothRodMaterialFrame,clothRodCapsuleGeometry} from './rod-geometry';
+import type { ClothDocument, ClothSolverStateData, ClothTopologyData, ClothVector } from './types';
+import { clothCanonicalEdgeKeys, dot3 } from './topology';
 
 export interface ClothCutBox { readonly minimum_m:ClothVector; readonly maximum_m:ClothVector }
+/** A new vertex is a barycentric blend of old vertices (a kept vertex is itself). */
 export interface ClothVertexOrigin { readonly vertices:readonly number[]; readonly weights:readonly number[] }
 export interface ClothShellCut {
   readonly document:ClothDocument;
   readonly topology:ClothTopologyData;
   readonly positions_m:Float64Array;
-  /** Interpolate fields from the old state; extensive fields require new control volumes. */
   readonly vertexOrigins:readonly ClothVertexOrigin[];
+  /** Faces of the result not copied verbatim from the source (split or re-fanned). */
+  readonly touchedVertices:ReadonlySet<number>;
   readonly removedArea_m2:number;
-  readonly removedRodLength_m:number;
   readonly changed:boolean;
-  readonly removedWaterVolume_m3:number;
 }
 type Vertex={p:ClothVector;weights:Map<number,number>};
 const crossArea=(a:ClothVector,b:ClothVector,c:ClothVector)=>Math.hypot(
@@ -48,10 +46,7 @@ function conformingPieces(pieces:readonly Vertex[][]):Vertex[][]{
     return [a,...on.sort((x,y)=>x.t-y.t).map(o=>o.v)];
   }));
 }
-/** The piece over distinct mesh vertices. Several planes meeting near one
- * point leave split points the vertex key merges; a piece that then encloses
- * no area (it doubles back over one line) is dropped, and its neighbours,
- * which share those vertices, still meet. */
+/** The piece over distinct mesh vertices; a piece that encloses no area is dropped. */
 function distinctPiece(piece:readonly Vertex[],index:(v:Vertex)=>number):Vertex[]{
   const ids=piece.map(index),kept=piece.filter((_,j)=>ids[j]!==ids[(j+1)%ids.length]);
   if(new Set(kept.map(v=>index(v))).size<3)return [];
@@ -63,8 +58,7 @@ function distinctPiece(piece:readonly Vertex[],index:(v:Vertex)=>number):Vertex[
   }
   return Math.hypot(...area)/2>1e-9*perimeter*perimeter?kept:[];
 }
-/** A convex piece as triangles. With points standing on its sides a fan from
- * a corner would pass straight along them, so it fans from its centroid. */
+/** A convex piece as triangles; with points on its sides it fans from its centroid. */
 function convexTriangles(polygon:readonly Vertex[]):[Vertex,Vertex,Vertex][]{
   const n=polygon.length,collinear=polygon.some((b,j)=>crossArea(polygon[(j+n-1)%n]!.p,b.p,polygon[(j+1)%n]!.p)<1e-20);
   if(!collinear||n<=3)return Array.from({length:Math.max(0,n-2)},(_,j)=>[polygon[0]!,polygon[j+1]!,polygon[j+2]!]);
@@ -75,18 +69,14 @@ function convexTriangles(polygon:readonly Vertex[]):[Vertex,Vertex,Vertex][]{
 }
 /** Inside is n·x <= offset. A rounded sculpt shape is the intersection of these. */
 export interface ClothCutHalfSpace { readonly normal:ClothVector; readonly offset_m:number }
-/** A corner within a millionth of the piece's size of the plane lies on it.
- * Cut planes come from Float32 cell coordinates, so a plane through an
- * authored vertex misses it by ~1e-10 m; splitting there would emit a vertex
- * 1e-10 m from the corner, a zero-length edge and a zero-area triangle whose
- * stiffness no solver can resolve. An on-plane corner belongs to both sides. */
+/** A corner within a millionth of the piece's size of the plane lies on it
+ * (planes come from Float32 cell coordinates); it belongs to both sides. */
 const ON_PLANE_RELATIVE=1e-6;
 function split(poly:Vertex[],distance:(p:ClothVector)=>number):[Vertex[],Vertex[]] {
   const inside:Vertex[]=[],outside:Vertex[]=[];
   let size=0;
   for(let i=0;i<poly.length;i++){const a=poly[i]!.p,b=poly[(i+1)%poly.length]!.p;size=Math.max(size,Math.hypot(b[0]-a[0],b[1]-a[1],b[2]-a[2]));}
   const distances=poly.map(v=>{const d=distance(v.p);return Math.abs(d)<=ON_PLANE_RELATIVE*size?0:d;});
-  // Wholly on one side (a piece lying in the plane counts as inside).
   if(distances.every(d=>d<=0))return [[...poly],[]];
   if(distances.every(d=>d>=0))return [[],[...poly]];
   for(let i=0;i<poly.length;i++){
@@ -104,17 +94,42 @@ function split(poly:Vertex[],distance:(p:ClothVector)=>number):[Vertex[],Vertex[
   return [inside,outside];
 }
 
-/** Exact polygon clipping in the currently deformed surface. Rest shape, UVs
- * and materials are interpolated in source coordinates, never voxelized.
- * Through-section rod cuts retain material frames and clipped end planes.
- * Grazing partial-section cuts explicitly require the analytic CSG extension. */
+/** Remap saved solver state through a topology edit. Kept vertices keep
+ * their state; split vertices blend it; a new edge starts cold (zero dual,
+ * zero stiffness: AVBD warm-starts it from k_start). */
+export function remapClothSolverState(state:ClothSolverStateData,old:{readonly triangles:ArrayLike<number>;readonly groups?:ArrayLike<number>},next:{readonly triangles:ArrayLike<number>;readonly groups?:ArrayLike<number>},origins:readonly ClothVertexOrigin[]):ClothSolverStateData{
+  const oldN=state.previousVelocities_m_s.length/3,newN=origins.length;
+  const blend=(field:readonly number[])=>origins.flatMap(o=>[0,1,2].map(a=>o.vertices.reduce((s,v,k)=>s+o.weights[k]!*field[3*v+a]!,0)));
+  const single=origins.map(o=>o.vertices.length===1&&Math.abs(o.weights[0]!-1)<1e-12?o.vertices[0]!:-1);
+  const oldPinSlot=new Map<number,number>();let slots=0;
+  for(let v=0;v<oldN;v++)if((old.groups?.[v]??0)>0)oldPinSlot.set(v,slots++);
+  if(state.pinDuals.length!==4*slots)throw new Error('Cloth pin duals do not match the pinned vertices');
+  const pinDuals:number[]=[];
+  for(let v=0;v<newN;v++)if((next.groups?.[v]??0)>0){
+    const slot=single[v]!>=0?oldPinSlot.get(single[v]!):undefined;
+    pinDuals.push(...(slot!==undefined?state.pinDuals.slice(4*slot,4*slot+4):[0,0,0,0]));
+  }
+  const oldKeys=clothCanonicalEdgeKeys(old.triangles,oldN),oldEdge=new Map(oldKeys.map((k,e)=>[k,e]));
+  if(state.edgeDuals.length!==2*oldKeys.length)throw new Error('Cloth edge duals do not match the edge table');
+  const edgeDuals:number[]=[];
+  for(const key of clothCanonicalEdgeKeys(next.triangles,newN)){
+    const a=single[Math.floor(key/newN)]!,b=single[key%newN]!;
+    const e=a>=0&&b>=0?oldEdge.get(Math.min(a,b)*oldN+Math.max(a,b)):undefined;
+    edgeDuals.push(...(e!==undefined?state.edgeDuals.slice(2*e,2*e+2):[0,0]));
+  }
+  return {previousVelocities_m_s:blend(state.previousVelocities_m_s),previousDisplacements_m:blend(state.previousDisplacements_m),previousStep_s:state.previousStep_s,pinDuals,edgeDuals};
+}
+
+/** Exact polygon clipping in the currently deformed surface. Rest shape, UVs,
+ * velocities and solver state are interpolated in source coordinates, never
+ * voxelized; faces outside the cut are copied byte for byte. */
 export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,positions:ArrayLike<number>,box:ClothCutBox,halfSpaces:readonly ClothCutHalfSpace[]=[]):ClothShellCut {
   if(![...box.minimum_m,...box.maximum_m].every(Number.isFinite)||box.minimum_m.some((v,a)=>v>=box.maximum_m[a]!))throw new Error('Cloth cut box must have finite positive extents');
   if(!halfSpaces.every(h=>h.normal.every(Number.isFinite)&&Number.isFinite(h.offset_m)&&Math.abs(Math.hypot(...h.normal)-1)<1e-9))throw new Error('Cloth cut half-spaces need unit normals and finite offsets');
   if(positions.length!==data.restPositions_m.length)throw new Error('Cloth cut requires current geometry');
   const rest=[...data.restPositions_m],current=Array.from(positions),origins:ClothVertexOrigin[]=Array.from({length:rest.length/3},(_,i)=>({vertices:[i],weights:[1]}));
   const ids=new Map(origins.map((_,i)=>[`${i}:1`,i]));
-  const triangles:number[]=[],triangleMaterials:number[]=[],triangleIds:number[]=[];
+  const triangles:number[]=[],triangleMaterials:number[]=[],triangleIds:number[]=[],touchedFaces:number[]=[];
   let removedArea=0,nextId=0;
   for(const id of data.triangleIds??[])nextId=Math.max(nextId,id+1);
   nextId=Math.max(nextId,data.triangles.length/3);
@@ -128,18 +143,10 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
   };
   for(let f=0;f<data.triangles.length/3;f++){
     const vertices=data.triangles.slice(3*f,3*f+3),poly:Vertex[]=vertices.map(i=>({p:p3(positions,i),weights:new Map([[i,1]])}));
-    // The shell is a solid of its material's thickness about this mid-surface,
-    // as a yarn is a capsule of its radius: a mid-surface point goes when its
-    // through-thickness fibre (the normal segment of half-length h/2) meets the
-    // cut. Each box plane moves out by that segment's support, h/2 |n.m|, so a
-    // sheet lying on a cut box's face is cut by either neighbouring cell rather
-    // than by neither, and planes across the sheet do not move at all. A
-    // rounded cut's planes stay put: h/2 is far inside their polytope
-    // tolerance (an eighth of a cell), and a sheet tangent to a quadric loses
-    // no area.
+    // The shell is a solid of its thickness about this mid-surface: each box
+    // plane moves out by the through-thickness fibre's support, h/2 |n.m|.
     const half=(document.materials[data.triangleMaterials?.[f]??0]?.thickness_m??0)/2,normal=faceNormal(poly[0]!.p,poly[1]!.p,poly[2]!.p);
     const lower=box.minimum_m.map((v,a)=>v-half*Math.abs(normal[a]!)),upper=box.maximum_m.map((v,a)=>v+half*Math.abs(normal[a]!));
-    // Preserve untouched faces byte-for-byte, including their authored identity.
     const disjoint=[0,1,2].some(a=>poly.every(v=>v.p[a]!<=lower[a]!)||poly.every(v=>v.p[a]!>=upper[a]!));
     if(disjoint){triangles.push(...vertices);triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(data.triangleIds?.[f]??f);continue;}
     let remaining=poly;const kept:Vertex[][]=[];
@@ -150,61 +157,30 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
       if(remaining.length<3)break;
       const [inside,outside]=split(remaining,p=>dot3(h.normal,p)-h.offset_m);if(outside.length>=3)kept.push(outside);remaining=inside;
     }
-    // A face split but not removed is still re-fanned: its edge points are
-    // shared with the neighbour that was cut, so the mesh stays conforming.
     if(remaining.length>=3)for(let j=1;j<remaining.length-1;j++)removedArea+=crossArea(remaining[0]!.p,remaining[j]!.p,remaining[j+1]!.p);
     for(const polygon of conformingPieces(kept).map(piece=>distinctPiece(piece,index)))for(const [a,b,c] of convexTriangles(polygon)){
       if(crossArea(a.p,b.p,c.p)<1e-20)continue;
-      // Planes meeting near one point leave split points the weight key merges.
       const ia=index(a),ib=index(b),ic=index(c);if(ia===ib||ib===ic||ic===ia)continue;
+      touchedFaces.push(triangles.length/3);
       triangles.push(ia,ib,ic);triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(nextId++);
     }
   }
-  const sourceTopology=prepareClothTopology(data,document.materials),rodOffsets=[0],rodIndices:number[]=[],rodMaterials:number[]=[],rodIds:number[]=[],startNormals:number[]=[],endNormals:number[]=[],segmentOrigins:{rodId:number;segment:number}[]=[],twist:number[]=[],referenceTwist:number[]=[],attachmentTwist:number[]=[],angular:number[]=[],directors:number[]=[],tangents:number[]=[],restDirectors:number[]=[];
-  let removedRodLength=0,rodChanged=false,nextRodId=Math.max(0,...(data.rodIds??Array.from({length:data.rodOffsets.length-1},(_,i)=>i)))+1;
-  const interpolateVertex=(a:number,b:number,t:number)=>t<=1e-12?a:t>=1-1e-12?b:index({p:[0,1,2].map(k=>positions[3*a+k]!*(1-t)+positions[3*b+k]!*t) as unknown as ClothVector,weights:new Map([[a,1-t],[b,t]])});
-  for(let r=0;r<data.rodOffsets.length-1;r++){
-    const first=data.rodOffsets[r]!,last=data.rodOffsets[r+1]!-1,sourceId=data.rodIds?.[r]??r,radius=document.materials[data.rodMaterials?.[r]??0]!.rodRadius_m;let pieceCount=0;
-    let piece:{vertices:number[];segments:number[];start:ClothVector;end?:ClothVector}|undefined;
-    const finish=()=>{if(!piece||piece.vertices.length<2){piece=undefined;return;}rodIndices.push(...piece.vertices);rodOffsets.push(rodIndices.length);rodMaterials.push(data.rodMaterials?.[r]??0);rodIds.push(pieceCount++===0?sourceId:nextRodId++);startNormals.push(...piece.start);endNormals.push(...(piece.end??[0,0,0]));for(const j of piece.segments){const local=j-first,global=j-r,frame=clothRodMaterialFrame(data,positions,r,local),theta=data.initialTwist_rad?.[global]??0,c=Math.cos(theta),sin=Math.sin(theta);segmentOrigins.push({rodId:sourceId,segment:local});twist.push(theta);referenceTwist.push(j===piece.segments[0]?0:data.initialReferenceTwist_rad?.[global]??0);attachmentTwist.push(data.initialAttachmentTwist_rad?.[global]??0);angular.push(data.initialAngularVelocity_rad_s?.[global]??0);directors.push(...frame.d1.map((v,k)=>c*v-sin*frame.d2[k]!));tangents.push(...frame.t);restDirectors.push(...point3(sourceTopology.rods[r]!.restDirectors,local));}piece=undefined;};
-    for(let j=first;j<last;j++){
-      const a=data.rodIndices[j]!,b=data.rodIndices[j+1]!,pa=p3(positions,a),pb=p3(positions,b),parts=clipRodThroughBox(pa,pb,radius,box,clothRodCapsuleGeometry(document,data,positions,r,j-first)),frame=clothRodMaterialFrame(data,positions,r,j-first);
-      if(halfSpaces.length&&(parts.length!==1||parts[0]!.start!==0||parts[0]!.end!==1))throw new Error('Rounded yarn cuts require analytic section CSG; refusing a bounding-box substitute');
-      const localNormal=(normal:ClothVector):ClothVector=>[dot3(normal,frame.d1),dot3(normal,frame.d2),dot3(normal,frame.t)];
-      removedRodLength+=Math.hypot(pb[0]-pa[0],pb[1]-pa[1],pb[2]-pa[2])*(1-parts.reduce((sum,p)=>sum+p.end-p.start,0));
-      if(parts.length!==1||parts[0]?.start!==0||parts[0]?.end!==1||parts[0]?.startNormal||parts[0]?.endNormal)rodChanged=true;
-      if(!parts.length){finish();continue;}
-      for(const part of parts){const ia=interpolateVertex(a,b,part.start),ib=interpolateVertex(a,b,part.end),start=part.startNormal?localNormal(part.startNormal):j===first&&part.start===0&&data.rodStartClipNormals?point3(data.rodStartClipNormals,r):[0,0,0] as ClothVector,end=part.endNormal?localNormal(part.endNormal):j===last-1&&part.end===1&&data.rodEndClipNormals?point3(data.rodEndClipNormals,r):undefined;
-        if(piece&&(piece.vertices.at(-1)!==ia||piece.end||part.startNormal))finish();
-        if(!piece)piece={vertices:[ia],segments:[],start};piece.vertices.push(ib);piece.segments.push(j);piece.end=end;
-        if(part.endNormal)finish();
-      }
-    }
-    finish();
-  }
-  const interpolate=(field:readonly number[]|undefined,width=1)=>field?origins.flatMap(o=>Array.from({length:width},(_,a)=>o.vertices.reduce((s,v,k)=>s+o.weights[k]!*field[width*v+a]!,0))):undefined;
-  const expanded:ClothTopologyData={...data,restPositions_m:rest,triangles,triangleMaterials,triangleIds,rodOffsets,rodIndices,rodMaterials,rodIds,rodStartClipNormals:startNormals,rodEndClipNormals:endNormals,rodSegmentOrigins:segmentOrigins,initialTwist_rad:twist,initialReferenceTwist_rad:referenceTwist,initialAngularVelocity_rad_s:angular,initialRodDirectors:directors,initialRodTangents:tangents,restRodDirectors:restDirectors,
-    initialSupportPositions_m:interpolate(data.initialSupportPositions_m,3),initialAttachmentTwist_rad:attachmentTwist,
-    initialVelocities_m_s:interpolate(data.initialVelocities_m_s,3),uv:interpolate(data.uv,2),solidFraction:interpolate(data.solidFraction),
-    fixed:data.fixed?origins.map(o=>o.vertices.reduce((mask,v)=>mask&data.fixed![v]!,3)):undefined,
-    groups:data.groups?origins.map(o=>o.vertices.every(v=>data.groups![v]===data.groups![o.vertices[0]!])?data.groups![o.vertices[0]!]!:0):undefined,
-    // A node's extensive water quantity cannot be barycentrically copied.
-    // The caller must remap water density onto the new physical control volume.
-    initialWaterVolume_m3:undefined};
-  const used=[...new Set([...triangles,...rodIndices])].sort((a,b)=>a-b),remap=new Map(used.map((v,i)=>[v,i]));
+  const used=[...new Set(triangles)].sort((a,b)=>a-b),remap=new Map(used.map((v,i)=>[v,i]));
   if(!used.length)throw new Error('Cut removes the entire cloth; use the explicit object deletion transaction');
-  const compact=(field:readonly number[]|undefined,width=1)=>field?used.flatMap(v=>field.slice(width*v,width*(v+1))):undefined;
-  let topology:ClothTopologyData={...expanded,restPositions_m:compact(rest,3)!,triangles:triangles.map(v=>remap.get(v)!),rodIndices:rodIndices.map(v=>remap.get(v)!),
-    initialPositions_m:compact(current,3)!,initialSupportPositions_m:compact(expanded.initialSupportPositions_m,3),initialVelocities_m_s:compact(expanded.initialVelocities_m_s,3),uv:compact(expanded.uv,2),fixed:compact(expanded.fixed),groups:compact(expanded.groups),solidFraction:compact(expanded.solidFraction)};
   const keptOrigins=used.map(v=>origins[v]!);
-  let removedWater=0;
-  if(data.initialWaterVolume_m3){
-    const old=createClothState(prepareClothTopology(data,document.materials)),next=createClothState(prepareClothTopology(topology,document.materials));
-    const water=keptOrigins.map((o,i)=>next.restControlVolume_m3[i]!*o.vertices.reduce((sum,v,k)=>sum+o.weights[k]!*old.waterVolume_m3[v]!/old.restControlVolume_m3[v]!,0));
-    removedWater=old.waterVolume_m3.reduce((a,b)=>a+b,0)-water.reduce((a,b)=>a+b,0);
-    topology={...topology,initialWaterVolume_m3:water};
-  }
-  return {document:{...document,geometry:{kind:'inline',data:topology}},topology,positions_m:new Float64Array(compact(current,3)!),vertexOrigins:keptOrigins,removedArea_m2:removedArea,removedRodLength_m:removedRodLength,changed:removedArea>0||rodChanged,removedWaterVolume_m3:removedWater};
+  const blend=(field:readonly number[]|undefined,width:number)=>field?keptOrigins.flatMap(o=>Array.from({length:width},(_,a)=>o.vertices.reduce((s,v,k)=>s+o.weights[k]!*field[width*v+a]!,0))):undefined;
+  const compact=(field:readonly number[],width:number)=>used.flatMap(v=>field.slice(width*v,width*(v+1)));
+  // A blended vertex keeps a group only when every origin shares it.
+  const groups=data.groups?keptOrigins.map(o=>o.vertices.every(v=>data.groups![v]===data.groups![o.vertices[0]!])?data.groups![o.vertices[0]!]!:0):undefined;
+  const newTriangles=triangles.map(v=>remap.get(v)!);
+  const touched=new Set<number>();
+  for(const f of touchedFaces)for(let k=0;k<3;k++)touched.add(newTriangles[3*f+k]!);
+  keptOrigins.forEach((o,i)=>{if(o.vertices.length!==1)touched.add(i);});
+  const positionsOut=compact(current,3);
+  const topology:ClothTopologyData={...data,restPositions_m:compact(rest,3),triangles:newTriangles,triangleMaterials,triangleIds,
+    initialPositions_m:positionsOut,initialVelocities_m_s:blend(data.initialVelocities_m_s,3),uv:blend(data.uv,2),groups,
+    solverState:data.solverState?remapClothSolverState(data.solverState,data,{triangles:newTriangles,groups},keptOrigins):undefined};
+  return {document:{...document,geometry:{kind:'inline',data:topology}},topology,positions_m:new Float64Array(positionsOut),vertexOrigins:keptOrigins,touchedVertices:touched,removedArea_m2:removedArea,changed:removedArea>0};
 }
 
 /** `box` bounds the cut; a rounded kind also carries the half-spaces of its

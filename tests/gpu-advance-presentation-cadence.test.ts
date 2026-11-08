@@ -225,7 +225,6 @@ test("NB-FLIP receipt backpressure does not defer an already-submitted image or 
   // fields; only admission of a further advance must wait for a receipt.
   const solver = Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype), {
     mixedFrame: {}, mixedFramesInFlight: UNIFORM_MIXED_RECEIPT_RING,
-    clothRuntimes: [],
     rigidSystem: { nativeMotorContacts: false },
     executionInfo: { submittedTime_s: 2 * DT, completedTime_s: 0 },
     awaitFrameCompletion: () => { throw new Error("must not drain submitted frames for presentation"); },
@@ -260,15 +259,4 @@ test("native motor contacts hold admission and presentation until the corrected 
   assert.equal(solver.presentationPending, false);
   assert.equal(completedFrameAwaitsPresentation(solver, 0), true, "the completed native frame must be drawn before advancing again");
   assert.equal(completedFrameAwaitsPresentation(solver, DT), false);
-});
-
-test('cloth transport holds presentation until its coupled surface is accepted',()=>{
- const solver=Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype),{
-  mixedFrame:{},mixedFramesInFlight:1,rigidSystem:{nativeMotorContacts:false},clothRuntimes:[{}],
-  executionInfo:{submittedTime_s:DT,completedTime_s:0},
- }) as WebGPUUniformReferenceSolver;
- assert.equal(solver.framePending,true);assert.equal(solver.presentationPending,true);
- Object.assign(solver,{mixedFramesInFlight:0,executionInfo:{submittedTime_s:DT,completedTime_s:DT}});
- assert.equal(solver.framePending,false);assert.equal(solver.presentationPending,false);
- assert.equal(completedFrameAwaitsPresentation(solver,0),true);
 });

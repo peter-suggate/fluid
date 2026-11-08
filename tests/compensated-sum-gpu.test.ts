@@ -1,13 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {createRigidCouplingOracleScene} from '../lib/core/scenes';
 import {uniformCompensatedSumWGSL} from '../lib/methods/uniform/uniform-compensated-sum.wgsl';
-import {UniformSourceWater} from '../lib/methods/uniform/uniform-source-water';
-import {NB_VOLUME_COMPENSATION_FLOAT} from '../lib/methods/uniform/uniform-mixed-surface-volume';
-import type {UniformMixedFrame} from '../lib/methods/uniform/uniform-mixed-frame';
-import type {WetClothSourceField} from '../lib/cloth/source-types';
 import {readMixedBuffer} from './helpers/uniform-mixed-native-fields';
-import {createUniformSolver,withUniformDevice} from './helpers/uniform-geometric';
+import {withUniformDevice} from './helpers/uniform-geometric';
 
 // Budgets and ledgers accumulate many small f32 deltas onto a large total in a
 // (high, low) pair. The two-sum form `low += (old - high) + delta` folds to 0
@@ -61,38 +56,5 @@ test('umCompensatedAdd keeps the pair at the Float64 sum of many small deltas on
    assert.ok(error<=bound,`${c.name}: pair ${high}+${low} versus Float64 ${exact}`);
    assert.ok(Math.abs(low)<=2*ulp,`${c.name}: high ${high} carries the sum, low ${low}`);
   }
- });
-});
-
-test('source water commits its budget and ledger at the Float64 sum of its GPU deltas',gpu,async t=>{
- await withUniformDevice('source water compensated budget',async device=>{
-  const scene=createRigidCouplingOracleScene('rigid-hydrostatic');scene.rigidBodies=[];scene.fluid.gravity_m_s2={x:0,y:0,z:0};scene.numerics.fixedDt_s=scene.numerics.maxDt_s=.001;
-  scene.fluid.refinementRegions=[{id:'source-support',min_m:{x:-.35,y:.1,z:-.35},max_m:{x:.35,y:.8,z:.35},rule:'minimum-cell-size',minimumCellSize_cells:1,maximumCellSize_cells:1}];
-  const solver=await createUniformSolver(device,scene),frame=(solver as unknown as {mixedFrame:UniformMixedFrame}).mixedFrame,l=frame.ownership.capacity.lattice;
-  const fields=frame.clothCouplingFields([l.origin_m.x,l.origin_m.y,l.origin_m.z],l.cellSize_m),plugin=new UniformSourceWater(fields);
-  const cellVolume=Math.fround(l.cellSize_m.reduce((a,b)=>a*b,1));
-  try{
-   await plugin.initialize();assert.ok(solver.advanceTo(.001,[]));await solver.awaitFrameCompletion();assert.equal(solver.info.simulationPipelineError,undefined);
-   const budget0=await readMixedBuffer(device,fields.waterBudget),ledger0=await readMixedBuffer(device,plugin.externalLedger);
-   let budget=budget0[0]!+budget0[NB_VOLUME_COMPENSATION_FLOAT]!,ledger=ledger0[0]!+ledger0[1]!,moved=0;
-   // A sphere emitted then terminated at a run of centres: each commit adds a
-   // fractional cell count onto the tank's whole budget.
-   for(let i=0;i<12;i++){
-    const source:WetClothSourceField={index:0,kind:'sphere',usage:'source',group:0,inside:false,sampled:true,root:true,center_m:[-.2+.035*i,.55,.01*i],radius_m:.05+.002*i,sourceAttributes:{}};
-    for(const kind of ['emit','terminate'] as const){
-     plugin.prepare([source],[{fieldIndex:0,kind,velocity_m_s:[0,0,0]}]);
-     const batch=(plugin as unknown as {batches:{buffers:GPUBuffer[];vertices:number}[]}).batches[0]!;
-     const e=device.createCommandEncoder();plugin.encodeSupport(e);plugin.encode(e);device.queue.submit([e.finish()]);await device.queue.onSubmittedWorkDone();
-     const delta=(await readMixedBuffer(device,batch.buffers[1]!))[4*batch.vertices]!;
-     budget+=delta;ledger+=Math.fround(delta*cellVolume);if(delta!==0)moved++;
-    }
-   }
-   const after=await readMixedBuffer(device,fields.waterBudget),afterLedger=await readMixedBuffer(device,plugin.externalLedger);
-   const pair=after[0]!+after[NB_VOLUME_COMPENSATION_FLOAT]!,ledgerPair=afterLedger[0]!+afterLedger[1]!;
-   t.diagnostic(`${moved} non-zero commits onto budget ${budget0[0]} cells: pair error ${(pair-budget).toExponential(2)} cells (low ${after[NB_VOLUME_COMPENSATION_FLOAT]}), ledger error ${(ledgerPair-ledger).toExponential(2)} m^3 (low ${afterLedger[1]})`);
-   assert.ok(moved>=12,'the commits move the budget');
-   assert.ok(Math.abs(pair-budget)<=24*2**-22*ulpAt(budget),`budget pair ${pair} versus Float64 ${budget}`);
-   assert.ok(Math.abs(ledgerPair-ledger)<=24*2**-22*ulpAt(ledger),`ledger pair ${ledgerPair} versus Float64 ${ledger}`);
-  }finally{plugin.destroy();solver.destroy();}
  });
 });

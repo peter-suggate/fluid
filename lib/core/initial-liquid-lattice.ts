@@ -1,4 +1,3 @@
-import { sourceInitialBounds } from '../cloth/source-initial';
 import { proceduralSolidField, sampleSolidNodes } from "./procedural-solid";
 import { initialHeightFieldHeight } from "./initial-height-field";
 import { damBreakSignedDistanceAtNode, initialFluidBrickSignedDistanceAtNode,
@@ -530,7 +529,6 @@ export function initialLiquidVolumeBounds_m(scene: SceneDescription): { min_m: V
     const half = v.shape === "torus" ? { x: r, y: v.tubeRadius_m, z: r } : v.shape === "cylinder" ? { x: r, y: r, z: v.halfHeight_m } : { x: r, y: r, z: r };
     out.push({ min_m: { x: o.x-half.x, y: o.y-half.y, z: o.z-half.z }, max_m: { x: o.x+half.x, y: o.y+half.y, z: o.z+half.z } });
   }
-  for (const b of sourceInitialBounds(scene)) out.push({ min_m: {x:b.min[0],y:b.min[1],z:b.min[2]}, max_m: {x:b.max[0],y:b.max[1],z:b.max[2]} });
   return out;
 }
 

@@ -1,4 +1,3 @@
-import { sourceInitialSignedDistance } from '../cloth/source-initial';
 import type { InitialLiquidVolume, SceneDescription, Vec3 } from "./model";
 import { initialHeightFieldFractionAtCell } from "./initial-height-field";
 
@@ -137,7 +136,7 @@ export function sceneInitialLiquidVolumes(scene: SceneDescription): readonly Ini
 }
 
 export function sceneHasInitialLiquidVolumes(scene: SceneDescription): boolean {
-  return sceneInitialLiquidVolumes(scene).length > 0 || !!scene.wetClothSource?.initialSdfFieldIndices?.length;
+  return sceneInitialLiquidVolumes(scene).length > 0;
 }
 
 function normalizedNormal(normal: Vec3): Vec3 {
@@ -204,9 +203,8 @@ export function initialLiquidVolumesSignedDistance(
   point: Vec3,
 ): number | undefined {
   const volumes = sceneInitialLiquidVolumes(scene);
-  const source = sourceInitialSignedDistance(scene,point);
-  if (volumes.length === 0 && source === undefined) return undefined;
-  let nearest = source ?? Infinity;
+  if (volumes.length === 0) return undefined;
+  let nearest = Infinity;
   for (const volume of volumes) nearest = Math.min(nearest, initialLiquidVolumeSignedDistance(volume, point));
   return nearest;
 }
@@ -220,14 +218,14 @@ export function initialLiquidVolumeContainsCell(
   dimensions: readonly [number, number, number],
 ): boolean {
   const volumes = sceneInitialLiquidVolumes(scene);
-  if (volumes.length === 0 && !scene.wetClothSource?.initialSdfFieldIndices?.length) return false;
+  if (volumes.length === 0) return false;
   const c = scene.container;
   const point = {
     x: -0.5 * c.width_m + (x + 0.5) * c.width_m / dimensions[0],
     y: (y + 0.5) * c.height_m / dimensions[1],
     z: -0.5 * c.depth_m + (z + 0.5) * c.depth_m / dimensions[2],
   };
-  return (sourceInitialSignedDistance(scene,point) ?? Infinity) <= 0 || volumes.some((volume) => initialLiquidVolumeContainsPoint(volume, point));
+  return volumes.some((volume) => initialLiquidVolumeContainsPoint(volume, point));
 }
 
 /**
@@ -252,7 +250,7 @@ export function initialLiquidFractionAtCell(
       : Number(brick);
   if (resolvedBase >= 1) return 1;
   const volumes = sceneInitialLiquidVolumes(scene);
-  if (volumes.length === 0 && !scene.wetClothSource?.initialSdfFieldIndices?.length) return resolvedBase;
+  if (volumes.length === 0) return resolvedBase;
   const c = scene.container;
   const h = [c.width_m / dimensions[0], c.height_m / dimensions[1], c.depth_m / dimensions[2]] as const;
   const center = {
@@ -266,7 +264,7 @@ export function initialLiquidFractionAtCell(
     point.x = center.x + ((corner & 1) ? 0.4 : -0.4) * h[0];
     point.y = center.y + ((corner & 2) ? 0.4 : -0.4) * h[1];
     point.z = center.z + ((corner & 4) ? 0.4 : -0.4) * h[2];
-    if ((sourceInitialSignedDistance(scene,point) ?? Infinity) <= 0 || volumes.some(volume => initialLiquidVolumeContainsPoint(volume,point))) wetSamples += 1;
+    if (volumes.some(volume => initialLiquidVolumeContainsPoint(volume,point))) wetSamples += 1;
   }
   return Math.max(resolvedBase, wetSamples / 8);
 }

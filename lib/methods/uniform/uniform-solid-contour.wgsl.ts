@@ -4,7 +4,7 @@ import {uniformMixedSolidWGSL} from "./uniform-mixed-solid.wgsl";
  * solver's voxel/procedural, terrain and body samplers; never reconstruct a
  * wall from a pressure owner's continued liquid phi. Bindings 18..22 and 24 belong
  * to the level-set consumer's solidBoundary resources. */
-export const uniformSolidContourWGSL = uniformMixedSolidWGSL(0,undefined,false,false,false)
+export const uniformSolidContourWGSL = uniformMixedSolidWGSL(0,undefined,false,false)
  .replace(/@group\(0\) @binding\((\d+)\)/g,(_,binding:string)=>`@group(0) @binding(${({0:18,1:19,2:20,4:21,5:22,7:24} as Record<string,number>)[binding]})`)
  + /* wgsl */ `
 fn surfaceHasSolids()->bool{

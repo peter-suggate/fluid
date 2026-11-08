@@ -1,5 +1,4 @@
 import {packRigidBodyCutAtlas} from '../../core/solid-cuts';
-import {sourceMovingSolidPoses,sourceRepresentedSolidIndices} from '../../cloth/source-moving-solids';
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { WebgpuSculptSubstrate } from "../../svo/features/scene-publication/webgpu-sculpt-substrate";
 import { SCULPT_ARENA_WORDS } from "../../svo/features/scene-publication/svo-sculpt-substrate";
@@ -28,28 +27,6 @@ import { UniformDetailPlanner, UniformDetailRequestTiles, uniformDetailTileBound
 import type { UniformWorkEdit } from "./uniform-buffered-work";
 import type { SolverDetailFocus, SolverDetailInput } from "../../core/solver-detail";
 import { UniformMixedLayoutBuilder, UNIFORM_MIXED_RELAYOUT_RECEIPT, uniformMixedRegionTable, type UniformMixedRegion } from "./uniform-mixed-layout-builder";
-import { ClothRuntime } from "../../cloth/runtime";
-import { clothCollidersForRigidBodies, type ClothCollider, type ClothReaction } from "../../cloth/contact";
-import { cachedClothTopology, loadClothTopology } from "../../cloth/source-assets";
-import { clothDocumentsKey } from "../../cloth/document-key";
-import { rebaseClothRuntime, editedSourceFields } from "../../cloth/rebase";
-import { clothContainerColliders, clothSceneStaticColliders } from "../../cloth/scene-contact";
-import { composeClothFeatures, narrowBandClothGridFeature, clothPorousCouplingFeature, clothLocalWaterExchangeFeature, clothPorousTransportFeature, clothWetCohesionFeature } from "../../cloth/definition";
-import type { ClothSurfacePublication } from "../../cloth/types";
-import { UniformClothGridCoupling, type UniformClothGridFields } from "./uniform-cloth-grid-coupling";
-import { UniformClothWaterExchange } from "./uniform-cloth-water-exchange";
-import { UniformSourceResidentTermination } from "./uniform-source-resident-termination";
-import { UniformSourceWater } from "./uniform-source-water";
-import { SourceMotionRuntime, sourceFieldBounds } from "../../cloth/source-motion";
-import { SourceEmissionScheduler } from "../../cloth/source-fields";
-import { sourceWaterOperations, sourceTerminationBoundaryBounds } from "../../cloth/source-water";
-import { ClothGPUPoreTransport, clothPoreTopology } from "../../cloth/gpu-pore-transport";
-import { UniformClothGPUPoreExchange } from "./uniform-cloth-gpu-pore-exchange";
-import { UniformGPUOrderingKernels } from "./uniform-gpu-radix-sort";
-import { prepareClothCohesion, resolveClothCohesion, type ClothCohesionPair } from "../../cloth/cohesion";
-import { clothSceneSolidSamples } from "../../cloth/solid-samples";
-import { wetClothSource } from "../../cloth/scenes/sources";
-import type { ClothWaterLedger } from "../../cloth/definition";
 import { UniformMixedDynamicClassifier, UNIFORM_MIXED_DYNAMIC_FULL_TOLERANCE, uniformMixedTileWord, uniformMixedUp, type UniformMixedDynamicPolicy } from "./uniform-mixed-dynamic";
 import { fluidRegionLattice, refinementRegionLattice } from "../../core/refinement-regions";
 import { UniformScratchArena } from "./uniform-scratch-arena";
@@ -119,12 +96,6 @@ import { sampleSolidWorld, solidWorldForFluidLattice } from "../../core/solid-wo
 import { uniformMixedSolidSceneFeatures, uniformSolidMaskPages, uniformSolidScratchLayout } from "./uniform-mixed-solid.wgsl";
 import { uniformNearSettled, type UniformNearSettled } from "./uniform-near-settled";
 import { narrowBandParticleCellCap, narrowBandSparseNeighbours, narrowBandSurfaceAdvectionSettings } from "./uniform-narrow-band-controls";
-/** Opt-in host phase timing for wet-cloth probes: a probe installs
- * globalThis.fluidClothPhaseTimes; without it this is a no-op. */
-function clothPhase(name?:string,since=0,count?:number):number{
-  const sink=(globalThis as {fluidClothPhaseTimes?:Record<string,number>}).fluidClothPhaseTimes;if(!sink)return 0;
-  const now=performance.now();if(name)sink[name]=(sink[name]??0)+(count??now-since);return now;
-}
 import { UNIFORM_DETAIL_TWIN_BINDING, UniformDetailStorage, uniformDetailDenseShader, uniformDetailField, type UniformDetailClass } from "./uniform-detail-fields";
 
 
@@ -268,18 +239,6 @@ export function uniformPageSources(scene: SceneDescription, plug: InflowGridBoun
   if (inflow && plug) {
     const o = plug.outletCenter_m, d = plug.direction, reach = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z) * step_s + UNIFORM_SOURCE_PLUG_OVERLAP_CELLS * Math.min(...frame.size_m.map((size, k) => size / frame.cells[k]!));
     sources.push(box([o.x, o.y, o.z], [o.x + reach * d.x, o.y + reach * d.y, o.z + reach * d.z], inflow.radius_m));
-  }
-  // Structural stencils also require resident pages in dry air. A surface
-  // census alone cannot seed cloth awaiting an incoming liquid source.
-  for(const document of scene.cloth??[]){
-    const data=cachedClothTopology(document.geometry);
-    if(!data)throw new Error('Load cloth topology before planning native source pages');
-    const positions=data.initialPositions_m??data.restPositions_m,low=[Infinity,Infinity,Infinity],high=[-Infinity,-Infinity,-Infinity];
-    for(let i=0;i<positions.length;i++){
-      const axis=i%3,p=positions[i]!,q=p+step_s*(data.initialVelocities_m_s?.[i]??0);
-      low[axis]=Math.min(low[axis]!,p,q);high[axis]=Math.max(high[axis]!,p,q);
-    }
-    if(positions.length)sources.push(box(low,high,8*Math.max(...frame.cellSize_m)));
   }
   return sources;
 }
@@ -1159,12 +1118,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // has, and the first frames wait for any they need (advanceTo).
     const releaseBackground = holdGPUBackgroundCompilation();
     try {
-      if(scene.cloth?.length)await Promise.all(scene.cloth.map(document=>loadClothTopology(document.geometry)));
       await runner.run([{ id: "uniform.allocate", phase: "allocation", label: "Allocate uniform reference resources", run: () => {
         solver = new WebGPUUniformReferenceSolver(device, scene, quality, onRigidLoads, { ...options, deferPipelineCompilation: true });
       } }]);
       await runner.run(solver!.initializationTasks(signal));
-      if (scene.cloth?.length) await runner.run([{ id: "uniform.cloth.documents", phase: "allocation", label: "Load cloth mechanics and shared geometry", run: () => solver!.initializeClothDocuments() }]);
       await runner.run([{id:"uniform.mixed",phase:"solver-pipelines",label:"Compiling simulation shaders",run:async(_signal,report)=>{
         // The mixed frame enqueues its pipelines as it discovers them, so the
         // count is the compiler's batch — settled out of known — not a total
@@ -1173,7 +1130,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           if(snapshot.batch&&!signal.aborted)report?.("Compiling simulation shaders",0,
             {completed:snapshot.batch.completed,total:snapshot.batch.total,unit:"pipelines"});
         });
-        try { await solver!.initializeMixedFrame(); await solver!.initializeClothCoupling(); } finally { unsubscribe(); }
+        try { await solver!.initializeMixedFrame(); } finally { unsubscribe(); }
       }}]);
       scope.commit();
       return solver!;
@@ -1185,214 +1142,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }
 
   private mixedFrame?: UniformMixedFrame;
-  private clothRuntimes: ClothRuntime[] = [];
-  private clothCouplings: UniformClothGridCoupling[] = [];
-  private clothWaterExchanges: UniformClothWaterExchange[] = [];
-  /** GPU pore exchange and manifold transport, one a runtime topology and fields (the
-   * water exchange's sample/capture/release/commit and advanceClothPoreTransport are their test oracles). */
-  private clothPoreTransports = new Map<ClothRuntime, { prepared: unknown; fields: unknown; transport: ClothGPUPoreTransport; exchange: UniformClothGPUPoreExchange }>();
-  private clothOrderingKernels?: Promise<UniformGPUOrderingKernels>;
-  private async clothPoreExchange(runtime: ClothRuntime, fields: UniformClothGridFields): Promise<UniformClothGPUPoreExchange> {
-    for (const [key, entry] of this.clothPoreTransports) if (!this.clothRuntimes.includes(key) || (key === runtime && (entry.prepared !== runtime.prepared || entry.fields !== fields))) { entry.exchange.destroy(); entry.transport.destroy(); this.clothPoreTransports.delete(key); }
-    let entry = this.clothPoreTransports.get(runtime);
-    if (!entry) {
-      const transport = new ClothGPUPoreTransport(this.device, clothPoreTopology(runtime.prepared.data, runtime.document.materials, runtime.prepared.vertexCount), runtime.state.restControlVolume_m3);
-      await transport.initialize();
-      this.clothOrderingKernels ??= UniformGPUOrderingKernels.create(this.device);
-      const exchange = new UniformClothGPUPoreExchange(fields, transport, await this.clothOrderingKernels); await exchange.initialize();
-      entry = { prepared: runtime.prepared, fields, transport, exchange }; this.clothPoreTransports.set(runtime, entry);
-    }
-    return entry.exchange;
-  }
-  private clothWaterPublications: readonly ClothWaterLedger[] = [];
-  private sourceWater?: UniformSourceWater;
-  private sourceTermination?: UniformSourceResidentTermination;
-  private sourceMotion?: SourceMotionRuntime;
-  private sourceSchedule?: SourceEmissionScheduler;
-  private sourceExternalVolume_m3=0;
-  get clothWaterLedgers(): readonly ClothWaterLedger[] { return this.clothWaterPublications; }
-  private clothPublications: readonly ClothSurfacePublication[] = [];
-  private clothRegionKey = "";
-  private clothInitialization?: Promise<void>;
-  private clothRigidReactions: readonly ClothReaction[] = [];
-  private clothStepCheckpoints?:ReturnType<ClothRuntime['checkpoint']>[];
-  private clothStepCohesion:readonly ClothCohesionPair[][]=[];
-  /** Cloth scenes use integer-time velocity coupling with native drift-before-force FLIP. */
-  get clothVelocityClock():"accepted-step"|undefined{return this.clothRuntimes.length?"accepted-step":undefined;}
-  get clothSurfaces(): readonly ClothSurfacePublication[] { return this.clothPublications; }
-  private async initializeClothDocuments(): Promise<void> {
-    for (const document of this.scene.cloth ?? []) {
-      const runtime = new ClothRuntime(document, await loadClothTopology(document.geometry), {
-        sourceFields: this.scene.wetClothSource?.fields,
-        excludedSourceColliderIndices: sourceRepresentedSolidIndices(this.scene.wetClothSource),
-        sourceOffset_m: this.scene.wetClothSource?.sourceOffset_m,
-      });
-      this.clothRuntimes.push(runtime);
-      await runtime.initializeGPU(this.device);
-    }
-    this.clothPublications = this.clothRuntimes.map(runtime => runtime.publish());
-  }
-  private async initializeClothCoupling(): Promise<void> {
-    if (!this.clothRuntimes.length && !this.scene.wetClothSource) return;
-    if (this.narrowBandTransfer !== "flip") throw new Error("Liquid–cloth scenes require FLIP particle transfer");
-    if (this.clothRuntimes.length > 1) throw new Error("Cloth pressure coupling currently requires one shared topology document");
-    composeClothFeatures([narrowBandClothGridFeature, clothPorousCouplingFeature, clothLocalWaterExchangeFeature, clothPorousTransportFeature,clothWetCohesionFeature]);
-    this.mixedFrame!.solid!.setBodyCuts(this.scene.rigidBodies);
-    const fields = this.mixedFrame!.clothCouplingFields(this.frame.origin_m, this.frame.cellSize_m);
-    this.clothCouplings = this.clothRuntimes.map(() => new UniformClothGridCoupling(fields.device, fields));
-    this.clothWaterExchanges = this.clothRuntimes.map(() => new UniformClothWaterExchange(fields));
-    await Promise.all(this.clothCouplings.map(coupling => coupling.initialize()));
-    await Promise.all(this.clothWaterExchanges.map(exchange => exchange.initialize()));
-    for(let i=0;i<this.clothRuntimes.length;i++){
-      const runtime=this.clothRuntimes[i]!;
-      await this.clothWaterExchanges[i]!.initializeCapacity({state:runtime.state});
-    }
-    if(this.clothRuntimes.length){
-      this.referenceVolumeCells=await this.mixedFrame!.initializePhysicalWaterBudget();
-      this.executionInfo.referenceLiquidVolume_cells=this.referenceVolumeCells;
-    }
-    const plugins:import('./uniform-mixed-frame').UniformMixedFramePhysicsPlugin[]=this.clothCouplings.map((coupling, i) => ({
-      id: `${coupling.id}:${this.clothRuntimes[i]!.document.id}`,
-      encodeSupport: encoder => coupling.encodeSupport(encoder),
-      encodeForces: (encoder, dt) => coupling.encodeForces(encoder, dt),
-      encodeAfterProjection: encoder => coupling.encodeAfterProjection(encoder),
-    }));
-    const program=this.scene.wetClothSource;
-    if(program){
-      this.sourceWater=new UniformSourceWater(fields);await this.sourceWater.initialize();
-      if(program.fields.some(f=>f.root&&f.usage==='terminator')){
-        if(this.narrowBandNearSettled.bulkTier!=='off')throw new Error('Source termination currently requires bulkTier:off (native h/4h); BULK16 retirement is not yet implemented');
-        this.sourceTermination=new UniformSourceResidentTermination(fields,this.mixedFrame!.narrowBandFlip);await this.sourceTermination.initialize();
-      }
-      const scripts=program.scripts.map(s=>({kind:s.kind,group:s.group,start_s:s.start_s,end_s:s.end_s,vector:s.kind==='translate'?s.displacement_m!:s.axis!,
-        angle_rad:s.angle_rad,origin_m:s.origin_m,global:s.global,easing:s.easing,easeIn_s:s.easeStart_s,easeOut_s:s.easeEnd_s}));
-      this.sourceMotion=new SourceMotionRuntime(scripts,{restPositions_m:[],triangles:[],rodOffsets:[0],rodIndices:[]},program.fields,program.sourceOffset_m);
-      this.sourceSchedule=new SourceEmissionScheduler(program.fields);
-      plugins.push({id:this.sourceWater.id,encodeSupport:encoder=>this.sourceWater!.encodeSupport(encoder),
-        encodeSources:encoder=>{const emitted=this.sourceWater!.encode(encoder),terminated=this.sourceTermination?.encode(encoder)??false;return emitted||terminated;},encodeForces:()=>{}});
-    }
-    this.mixedFrame!.setPhysicsPlugins(plugins);
-  }
-  private prepareClothStep(dt_s: number): void {
-    if (!this.clothRuntimes.length && !this.sourceWater) return;
-    if(this.sourceWater){
-      const program=this.scene.wetClothSource!,motion=this.sourceMotion!;
-      motion.step(dt_s,this.lastTime);
-      const events=this.sourceSchedule!.advance(this.lastTime,this.lastTime+dt_s);
-      this.sourceWater.prepare(motion.fields,sourceWaterOperations(program,events).filter(operation=>operation.kind==='emit'));
-      this.sourceTermination?.prepare(motion.fields);
-    }
-    // Moving cloth owns fine support even in submerged particle-free regions.
-    // This refines the production Eulerian grid; FLIP particles retain their
-    // normal narrow-band admission policy.
-    const table = this.mixedRegionTable(), key = Array.from(table).join(',');
-    if (key !== this.clothRegionKey) {
-      this.mixedBuilder!.setRegions(table); this.mixedDynamic!.setRegions(table);
-      // Ask the native page owner for the predicted physical footprint. The
-      // preceding frame's halo covers preparation; this frame's normal head
-      // claims/initializes newly reached pages before applying cloth forces.
-      const pins=new Map(this.pageResidency.pins.map(p=>[`${p.x},${p.y},${p.z}`,p]));
-      for(const box of this.physicsFineTileBoxes()){
-        const lo=box.min.map(t=>Math.floor(t/8)),hi=box.max.map(t=>Math.floor((t-1)/8));
-        for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++){
-          if(uniformPageWord(this.address,x,y,z)===0xffffffff)continue;
-          const p={x:x+this.address.boxPage[0],y:y+this.address.boxPage[1],z:z+this.address.boxPage[2]};pins.set(`${p.x},${p.y},${p.z}`,p);
-        }
-      }
-      this.mixedFrame!.pagePool.pin([...pins.values()]);
-      this.clothRegionKey = key; this.staleMixed(); this.mixedFrame!.cold.trigger();
-    }
-  }
-  /** The roster and native parameters already contain this step's collider
-   * poses. Sample their apertures before constructing the shared material
-   * partition and its adjoint force stencil. Deferred publication keeps the
-   * preceding accepted frame visible throughout this asynchronous fence. */
-  private async prepareClothCohesionPairs(runtime:ClothRuntime,water:UniformClothWaterExchange,bodies:readonly RigidBodyState[]):Promise<readonly ClothCohesionPair[]>{
-    const source=this.scene.wetClothSource?wetClothSource(this.scene.wetClothSource.sourceId):undefined;
-    const liquid=source?.sourceSettings.liquid,h=this.frame.cellSize_m[0];
-    // Disabled source cohesion needs no free-liquid evidence: skip both fences.
-    if(Number(liquid?.cohesion??1)===0||Number(liquid?.cohesionCoeff??.002)===0||(Number(liquid?.softCohesion??1)===0&&Number(liquid?.solidCohesion??1)===0))return [];
-    const bridges=prepareClothCohesion(runtime.prepared,runtime.state,{cellSize_m:h,
-      bucketSize_m:h*Number(source?.sourceSettings.bucket.numcells??5),bucketOrigin_m:this.frame.origin_m,
-      // The native free-water budget is the nonempty-free-phase guard even
-      // where deep NB-FLIP liquid intentionally contains no particles.
-      freeParticleCount:(await water.readFreeWaterVolume())>0?1:0,
-      enabled:Number(liquid?.cohesion??1)!==0,softCohesion:Number(liquid?.softCohesion??1)!==0,
-      solidCohesion:Number(liquid?.solidCohesion??1)!==0,
-      solidSamples:Number(liquid?.cohesion??1)!==0&&Number(liquid?.solidCohesion??1)!==0?clothSceneSolidSamples(this.scene,bodies):undefined,
-      coefficient:Number(liquid?.cohesionCoeff??.002)});
-    return resolveClothCohesion(bridges,await water.sampleLiquidPhi(bridges.samplePositions_m));
-  }
-  private async prepareClothFluidStep(dt_s:number,bodies:readonly RigidBodyState[]=[]):Promise<void>{
-    this.clothStepCheckpoints=this.clothRuntimes.map(runtime=>runtime.checkpoint());
-    const pairs:ClothCohesionPair[][]=[];this.clothStepCohesion=pairs;
-    for(let i=0;i<this.clothRuntimes.length;i++){
-      if(this.disposed)throw new Error('Cloth fluid preparation was disposed');
-      const runtime=this.clothRuntimes[i]!,step={state:runtime.state,data:runtime.prepared.data,kinematicFixed:runtime.prepared.kinematicFixed,
-        materials:runtime.document.materials,physics:runtime.document.physics,identity:runtime.identity,dt_s};
-      // Collider poses for this step are already published: resample the
-      // hard aperture basis only when hard geometry can actually move.
-      let mark=clothPhase();
-      const currentHardGeometry=bodies.length>0||this.scene.rigidBodies.length>0||(this.scene.wetClothSource?.scripts.length??0)>0;
-      if(currentHardGeometry)await this.clothWaterExchanges[i]!.refreshApertures(step);
-      mark=clothPhase('apertures',mark);
-      if(this.disposed)throw new Error('Cloth fluid preparation was disposed');
-      const cohesionPairs=await this.prepareClothCohesionPairs(runtime,this.clothWaterExchanges[i]!,bodies);pairs.push([...cohesionPairs]);
-      mark=clothPhase('cohesion',mark);
-      const g=this.scene.fluid.gravity_m_s2;
-      const solidPredictorVelocity_m_s=await runtime.prepareNonFluidPredictorAsync(dt_s,{gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
-      mark=clothPhase('predictor',mark);
-      this.clothCouplings[i]!.prepare({...step,solidPredictorVelocity_m_s,currentHardGeometry});
-      clothPhase('couplingPrepare',mark);
-    }
-  }
-  private async finishClothStep(dt_s: number, bodies: readonly RigidBodyState[]): Promise<void> {
-    if (!this.clothRuntimes.length) return;
-    const checkpoints = this.clothStepCheckpoints??this.clothRuntimes.map(runtime => runtime.checkpoint());
-    try {
-    let mark=clothPhase();
-    const exchanges = await Promise.all(this.clothCouplings.map(coupling => coupling.finish()));
-    mark=clothPhase('couplingFinish',mark);
-    const states = await this.rigidSystem.readStates(bodies);
-    const colliders: ClothCollider[] = [...clothCollidersForRigidBodies(states),...clothContainerColliders(this.scene),...clothSceneStaticColliders(this.scene)];
-    const reactions: ClothReaction[] = [];
-    const waterLedgers: ClothWaterLedger[] = [];
-      for (let i=0;i<this.clothRuntimes.length;i++) {
-        const runtime = this.clothRuntimes[i]!, exchange = exchanges[i]!,water=this.clothWaterExchanges[i]!;
-        const cohesionPairs=this.clothStepCohesion[i]??[];
-        const beforeVelocity=runtime.state.velocities_m_s.slice();
-        runtime.acceptFluidImpulse(exchange.impulse_Ns, exchange);
-        const g = this.scene.fluid.gravity_m_s2;
-        mark=clothPhase('colliders',mark);
-        const report = await runtime.stepAsync(dt_s, colliders, {gravity_m_s2:[g.x,g.y,g.z],cohesionPairs});
-        mark=clothPhase('mechanics',mark);clothPhase('mechanicsIterations',0,report.iterations);clothPhase('mechanicsRefinementIterations',0,(report as {refinementIterations?:number}).refinementIterations??0);
-        reactions.push(...report.contacts.reactions);
-        // Lie split at the accepted FLIP field: capture before release prevents
-        // freshly squeezed water from being recaptured in the same substep.
-        // One native sample at the accepted material positions serves the
-        // aperture basis, capture reservoir, seepage and momentum exchange;
-        // sample, capture, manifold transport, release, the capacity table and
-        // the paired budget commit run on the GPU in one submit and one readback.
-        const solidAcceleration=Float64Array.from(runtime.state.velocities_m_s,(v,k)=>(v-beforeVelocity[k]!)/dt_s);
-        const poreExchange=await this.clothPoreExchange(runtime,water.fields);
-        mark=clothPhase('poreTransportSetup',mark);
-        const pore=await poreExchange.step({positions_m:runtime.state.positions_m,velocities_m_s:runtime.state.velocities_m_s,controlVolume_m3:runtime.state.controlVolume_m3,solidVolume_m3:runtime.state.solidVolume_m3,solidFraction:runtime.state.solidFraction,dryMass_kg:runtime.state.dryMass_kg,waterVolume_m3:runtime.state.waterVolume_m3,
-          fixed:runtime.prepared.kinematicFixed,materials:runtime.document.materials,physics:runtime.document.physics,dt_s,gravity_m_s2:[g.x,g.y,g.z],pressureAcceleration_m_s2:exchange.fluidPressureAcceleration_m_s2,solidAcceleration_m_s2:solidAcceleration,identity:runtime.identity,vertexMaterial:runtime.prepared.vertexMaterial});
-        runtime.state.waterVolume_m3.set(pore.waterVolume_m3);runtime.state.velocities_m_s.set(pore.velocities_m_s);
-        if(pore.gpu_ms!==undefined)clothPhase('poreExchangeGpu',0,pore.gpu_ms);
-        waterLedgers.push(pore.ledger);
-        mark=clothPhase('poreExchange',mark);
-
-      }
-      if (!this.scene.interaction?.entities.length) await this.rigidSystem.applyExternalImpulses(reactions);
-      this.clothRigidReactions = reactions;
-      this.clothWaterPublications = waterLedgers;
-      this.referenceVolumeCells += waterLedgers.reduce((sum,row)=>sum+row.freeDelta_m3,0)/(this.frame.cellSize_m[0]*this.frame.cellSize_m[1]*this.frame.cellSize_m[2]);
-      this.executionInfo.referenceLiquidVolume_cells = this.referenceVolumeCells;
-      this.clothPublications = this.clothRuntimes.map(runtime => runtime.publish());
-    } catch (error) { this.clothRuntimes.forEach((runtime,i) => runtime.restore(checkpoints[i]!));throw error; }
-    finally{this.clothStepCheckpoints=undefined;this.clothStepCohesion=[];}
-  }
   private spatialPerformance?: UniformSpatialPerformance;
   private spatialAdvanceStart = 0;
   setSpatialPerformanceEnabled(enabled: boolean, diagnostic = false): void {
@@ -1517,7 +1266,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
    * where its criteria ask (its solid contact is liquid-conditional), as it
    * coarsens the h start; the t=0 uploads reach the 4h tiles restricted. */
   private dynamicSeed():UniformMixedLayout{
-    const fine=this.thinWallSeed()??new Set<number>();this.addPhysicsSeedTiles(fine);
+    const fine=this.thinWallSeed()??new Set<number>();
     return createUniformMixedLayout(fluidRegionLattice(this.scene),this.scene.fluid.refinementRegions??[],4,fine,this.address);
   }
   /** Dynamic's census start (fluid.tiers.start "census"): a 4h background
@@ -1546,7 +1295,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const tiles=a.tiles as [number,number,number];
       const solid=this.solidVoxelsEmpty&&!sceneHasTerrain(this.scene)?undefined:uniformCensusInexactSolidTiles(tiles,this.mixedSolidPromotion().coupled,open);
       const seeded=uniformCensusSeedTiles(volume,uniformCensusCrossingTiles(phi,tiles,open),tiles,solid,bodies);
-      this.addPhysicsSeedTiles(seeded);return seeded;
+      return seeded;
     })();
   }
   private censusSeedTiles?:Set<number>;
@@ -1576,7 +1325,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const t=uniformDetailTileBounds(lattice,{min:region.min_m,max:region.max_m});
       if(t)boxes.push({min:[...t.min],max:t.max.map(v=>v-1)});
     }
-    for(const box of this.physicsFineTileBoxes())boxes.push({min:[...box.min],max:box.max.map(v=>v-1)});
     // A scheduled drop brings its own surface after t=0 (the pool and particle
     // rules count it too: uniformParticleCensusBand): its bounds at release.
     for(const {volume:drop} of this.scene.fluid.scheduledDrops??[]){
@@ -1802,17 +1550,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The rule's sources besides the band: the bodies' balls and the h-only authored regions (slotRuleSources).
     // An authored figure (fluid.tiers.fineBlocks, from a measured peak) takes the rule's place and keeps its path.
     const authoredSlots=uniformFineBlocks(tiers);
-    const physicalSlots=this.physicsFineSlotNeed();
     const slotRule=coarseStart&&authoredSlots!==undefined
-      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,physicalSlots,authoredSlots==="auto"?Math.max(Math.ceil(UNIFORM_FINE_SLOT_RING_GROWTH*physicalSlots),uniformFineSlotRule(this.slotRingPages(pageDims),uniformFineSlotSourcePages(pageDims,this.slotRuleSources()))):authoredSlots):undefined;
+      ?uniformFineSlotCapacity(this.address.blocks,this.address.blockGrid,0,authoredSlots==="auto"?uniformFineSlotRule(this.slotRingPages(pageDims),uniformFineSlotSourcePages(pageDims,this.slotRuleSources())):authoredSlots):undefined;
     const band=slotRule!==undefined&&tiers?.bricks===undefined?uniformParticleCensusBand(this.scene,Math.ceil(this.narrowBandNearSettled.particleBandDepth),(this.initialVolume??=uniformLatticePagedVolume(this.scene,UNIFORM_PAGE_POOL_EDGE)).volume,this.bulkStartDeep):undefined;
     const bandCeiling=band?this.fineCeilingRule(slotRule!,seed?.fineTiles.length,band.sourceTiles??0):seed?8*uniformFineBrickCapacity(this.address.blocks,Math.ceil(seed.fineTiles.length/8),tiers):tiles;
-    // A t=0 surface census does not bound independent physical stencils.
-    // Reserve their owners in addition to the slots' ordinary FLIP band
-    // allowance. This allocates capacity; only the native census chooses h
-    // tiles. Otherwise new particle reach can evict submerged cloth on frame2.
-    const physicalCeiling=physicalSlots&&slotRule!==undefined?this.physicsFineTileBoxes().reduce((sum,b)=>sum+b.min.reduce((n,v,a)=>n*(b.max[a]!-v),1),0)+uniformFineTileCeiling(slotRule):0;
-    const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:Math.max(bandCeiling,physicalCeiling));
+    const fineCeiling=Math.min(tiles,tiers?.bricks!==undefined?8*tiers.bricks:bandCeiling);
     // fluid.tiers: the particles' h capacity; unset (and an h start), the pool sizes them.
     const records=band?uniformParticleRecordRule(band.cells):undefined;
     const particles=tiers?.bricks!==undefined||tiers?.particlesPerFineCell!==undefined||coarseStart?{fineTiles:fineCeiling,perFineCell:tiers?.particlesPerFineCell??4,records}:undefined;
@@ -2636,59 +2378,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     for(const t of [...tiles].sort((i,j)=>i-j)){uniformBoxTileCoord(a,t,p);words.push(uniformMixedTileWord(p[0],p[1],p[2]));}
     return words;
   }
-  /** Cloth needs real h owners even far below the FLIP particle band. Its
-   * initial footprint participates in admission and slot sizing, not only
-   * the next census's desired widths. */
-  private physicsFineTileBoxes():{min:readonly [number,number,number];max:readonly [number,number,number]}[]{
-    const lattice=fluidRegionLattice(this.scene),boxes:{min:readonly [number,number,number];max:readonly [number,number,number]}[]=[];
-    const bounds=(min:readonly number[],max:readonly number[])=>{
-      if(this.scene.container.boundary!=='free-space'&&this.scene.container.walls!=='none')return uniformDetailTileBounds(lattice,{min:{x:min[0]!,y:min[1]!,z:min[2]!},max:{x:max[0]!,y:max[1]!,z:max[2]!}});
-      const origin=[lattice.origin_m.x,lattice.origin_m.y,lattice.origin_m.z];
-      return {min:min.map((p,a)=>Math.floor((p-origin[a]!)/(4*lattice.cellSize_m[a]!))) as [number,number,number],max:max.map((p,a)=>Math.ceil((p-origin[a]!)/(4*lattice.cellSize_m[a]!))) as [number,number,number]};
-    };
-    const states=this.clothRuntimes.length?this.clothRuntimes.map(runtime=>runtime.state):(this.scene.cloth??[]).map(document=>{
-      const data=cachedClothTopology(document.geometry);if(!data)throw new Error("Cloth topology must be loaded before fluid support allocation");
-      return {positions_m:data.initialPositions_m??data.restPositions_m,velocities_m_s:data.initialVelocities_m_s};
-    });
-    for (const state of states) {
-      const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
-      const dt=this.scene.numerics.maxDt_s;
-      for(let i=0;i<state.positions_m.length;i++){
-        const a=i%3,p=state.positions_m[i]!,next=p+dt*(state.velocities_m_s?.[i]??0);
-        lo[a]=Math.min(lo[a]!,p,next);hi[a]=Math.max(hi[a]!,p,next);
-      }
-      const margin=8*Math.max(...this.frame.cellSize_m);
-      const box=bounds(lo.map(v=>v-margin),hi.map(v=>v+margin));
-      if(box)boxes.push(box);
-    }
-    for(const bounds of sourceTerminationBoundaryBounds(this.sourceMotion?.fields??this.scene.wetClothSource?.fields??[],this.frame.cellSize_m)){
-      const box=uniformDetailTileBounds(lattice,{min:{x:bounds.min[0],y:bounds.min[1],z:bounds.min[2]},max:{x:bounds.max[0],y:bounds.max[1],z:bounds.max[2]}});
-      if(box)boxes.push(box);
-    }
-    return boxes;
-  }
-  private addPhysicsSeedTiles(tiles:Set<number>):void{
-    const a=this.address;
-    for(const box of this.physicsFineTileBoxes())for(let z=box.min[2];z<box.max[2];z++)for(let y=box.min[1];y<box.max[1];y++)for(let x=box.min[0];x<box.max[0];x++){
-      if(uniformTileInBox(a,x,y,z))tiles.add(uniformBoxTileIndex(a,x,y,z));
-    }
-  }
-  /** Physical stencils cannot be demoted to fit a surface-band heuristic.
-   * Count their complete detail rings, including claimable pages outside the
-   * authored box. The ordinary slot rule clips to that box, which undercounts
-   * centered free-space scenes even while all cloth vertices remain inside it. */
-  private physicsFineSlotNeed():number{
-    const pages=new Set<string>();
-    for(const box of this.physicsFineTileBoxes()){
-      const lo=box.min.map(t=>Math.floor((4*t-13)/32));
-      const hi=box.max.map(t=>Math.floor((4*(t-1)+15)/32));
-      for(let z=lo[2]!;z<=hi[2]!;z++)for(let y=lo[1]!;y<=hi[1]!;y++)for(let x=lo[0]!;x<=hi[0]!;x++){
-        if(uniformPageWord(this.address,x,y,z)!==0xffffffff)pages.add(`${x},${y},${z}`);
-      }
-    }
-    if(pages.size>this.address.blocks-2)throw new Error(`Cloth physical support needs ${pages.size} pages, beyond the native pool capacity ${this.address.blocks-2}`);
-    return pages.size;
-  }
   /** The scene's Fine and Coarse regions as the builder's and the census's region table. */
   private mixedRegionTable():Uint32Array<ArrayBuffer>{
     const lattice=fluidRegionLattice(this.scene),regions:UniformMixedRegion[]=[];
@@ -2696,14 +2385,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const tier=uniformRegionDetailTier(r),box=uniformDetailTileBounds(lattice,{min:r.min_m,max:r.max_m});
       if(box&&(tier==="fine"||tier==="coarse"))regions.push({min:box.min,max:box.max,kind:tier});
     }
-    for(const box of this.physicsFineTileBoxes())regions.push({...box,kind:"fine"});
-    for(const bounds of this.sourceWater?.supportBounds??[]){
-      const box=uniformDetailTileBounds(lattice,{min:{x:bounds.min[0],y:bounds.min[1],z:bounds.min[2]},max:{x:bounds.max[0],y:bounds.max[1],z:bounds.max[2]}});
-      if(box)regions.push({min:box.min,max:box.max,kind:'fine'});
-    }
     // Translate signed box-relative coordinates before validation/packing.
-    // A free cloth may leave its authored envelope without wrapping uints or
-    // silently clipping its mandatory stencil from the physical region.
     return uniformMixedRegionTable(regions.map(r=>({...r,
       min:r.min.map((v,a)=>v+8*this.address.boxPage[a]!) as [number,number,number],
       max:r.max.map((v,a)=>v+8*this.address.boxPage[a]!) as [number,number,number],
@@ -3336,7 +3018,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.mixedPipelineAdmission !== undefined || this.mixedHostBusy;
   }
   private get mixedHostBusy(): boolean {
-    return this.clothInitialization !== undefined || (this.mixedFrameInFlight && (this.rigidSystem.nativeMotorContacts || this.clothRuntimes.length > 0 || this.sourceWater!==undefined))
+    return (this.mixedFrameInFlight && this.rigidSystem.nativeMotorContacts)
       || this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
       || (this.mixedFrameInFlight && this.deferredFrameEdit);
   }
@@ -3351,11 +3033,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   // Treating a full ring as deferred publication drains both frames before
   // submitting the second image and repeatedly starves the GPU pipeline.
   // Native motor contacts split submission: publish the corrected poses first.
-  get deferredFramePublication(): boolean { return this.rigidSystem.nativeMotorContacts || this.clothRuntimes.length > 0 || this.sourceWater!==undefined; }
+  get deferredFramePublication(): boolean { return this.rigidSystem.nativeMotorContacts; }
   get presentationPending(): boolean { return this.pressureFrameFailure !== undefined || (this.mixedFrameInFlight && this.deferredFramePublication); }
   async awaitFrameCompletion(): Promise<void> {
     await this.mixedPipelineAdmission;
-    await this.clothInitialization;
     await this.mixedFrameChain;
     if (this.pressureFrameFailure) throw this.pressureFrameFailure;
     await this.device.queue.onSubmittedWorkDone();
@@ -3376,7 +3057,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     try {
       await compiling;
       while (this.mixedHostBusy && !this.disposed && !this.pressureFrameFailure) {
-        const fence = this.clothInitialization ?? this.mixedFrameChain;
+        const fence = this.mixedFrameChain;
         await fence;
         // No frame was admitted since: settled frames leave the host free.
         if (fence === this.mixedFrameChain && this.mixedHostBusy && !this.pressureFrameFailure) throw new Error("The fluid host stayed busy after its submitted frames settled");
@@ -3407,13 +3088,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const values = new Int32Array(staging.getMappedRange());
       return request.bodies.map((body, index) => {
         const base = index * 12, weight = values[base + 11] / 65536;
-        const contact = this.clothRigidReactions.filter(r => r.bodyId === body.description.id);
-        const linear = [0,0,0], angular = [0,0,0];
-        for (const reaction of contact) for(let a=0;a<3;a++) {linear[a]! += reaction.linearImpulse_N_s[a]!; angular[a]! += reaction.angularImpulse_N_m_s[a]!;}
         return { generation: request.generation, tick: request.tick, solidRevision: request.solidRevision,
           bodyId: body.description.id, bodyGeneration: request.bodyGenerations?.[body.description.id] ?? request.generation,
-          linearImpulse_N_s: { x: values[base] * 1e-6 + linear[0]!, y: values[base+1] * 1e-6 + linear[1]!, z: values[base+2] * 1e-6 + linear[2]! },
-          angularImpulse_N_m_s: { x: values[base+3] * 1e-6 + angular[0]!, y: values[base+4] * 1e-6 + angular[1]!, z: values[base+5] * 1e-6 + angular[2]! },
+          linearImpulse_N_s: { x: values[base] * 1e-6, y: values[base+1] * 1e-6, z: values[base+2] * 1e-6 },
+          angularImpulse_N_m_s: { x: values[base+3] * 1e-6, y: values[base+4] * 1e-6, z: values[base+5] * 1e-6 },
           displacedVolume_m3: Math.max(0, values[base+6] / 65536 * this.mixedStepCellVolume),
           fluidVelocity_m_s: { x: weight > 0 ? values[base+7] * 1e-4 / weight : 0, y: weight > 0 ? values[base+8] * 1e-4 / weight : 0, z: weight > 0 ? values[base+9] * 1e-4 / weight : 0 },
           policy: "pressure-traction" as const };
@@ -3455,8 +3133,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const compiling = this.mixedFrame.pipelinesPending(this.scene.fluid.surfaceTension_N_m);
     if (compiling) { this.mixedPipelineAdmission = this.admitAfterPipelines(compiling, time_s, structuredClone(bodies)); return true; }
     const dt = advance.dt_s, stepEnd_s = advance.nextTime_s;
-    try { this.prepareClothStep(dt); }
-    catch(error) { this.failMixedFrame(error); return true; }
     this.lastTime = stepEnd_s;
     this.executionInfo.submittedTime_s = stepEnd_s;
     // Submitted state can be drawn immediately; the simulation clock remains
@@ -3469,8 +3145,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const roster = this.advanceRoster, rostered = Math.min(GPU_RIGID_BODY_CAPACITY, bodies.length);
     for (let i = 0; i < rostered; i++) roster[i] = bodies[i]!;
     if (roster.length !== rostered) roster.length = rostered;
-    const commanded=this.sourceMotion&&this.scene.wetClothSource?sourceMovingSolidPoses(this.scene.wetClothSource,this.sourceMotion.fields,roster):roster;
-    const activeBodies = this.scene.interaction?.entities.length ? commanded : this.prescribedSolidMotion.sample(commanded, dt, stepEnd_s);
+    const activeBodies = this.scene.interaction?.entities.length ? roster : this.prescribedSolidMotion.sample(roster, dt, stepEnd_s);
     this.mixedFrame.solid!.setBodyCuts(activeBodies.map(b=>b.description));
     this.rigidSystem.syncBodies(activeBodies);
     const c = this.scene.container;
@@ -3572,13 +3247,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         // kick is encoded ahead of the first frame with a frame's head (its
         // census, where one is due), so that frame's census bounds the
         // kicked field. Its receipt holds a ring slot until it is checked.
-        if(this.clothRuntimes.length){
-          receipt=this.advanceClothFluidFrame(frame,p,dt,frameBodies,activeBodies);
-        }else{
-          if(!this.mixedKicked)kick=this.kickMixedFrame(frame,p,dt,!!frameBodies);
-          receipt=frame.advance(p,this.mixedFrameTrace(),this.mixedGpuLayout&&(this.detail.policy==="dynamic"||this.mixedLive),frameBodies);
-          if(kick)receipt=Promise.all([receipt,kick]).then(([frame])=>frame);
-        }
+        if(!this.mixedKicked)kick=this.kickMixedFrame(frame,p,dt,!!frameBodies);
+        receipt=frame.advance(p,this.mixedFrameTrace(),this.mixedGpuLayout&&(this.detail.policy==="dynamic"||this.mixedLive),frameBodies);
+        if(kick)receipt=Promise.all([receipt,kick]).then(([frame])=>frame);
       }catch(error){kick?.catch(()=>undefined);this.mixedRelayoutRead=undefined;this.failMixedFrame(error);return true;}
       this.readMixedRelayout();
       this.mixedFramesInFlight++;
@@ -3591,18 +3262,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           const publish = this.device.createCommandEncoder({ label: "Native contact solid publication" });
           this.mixedFrame!.solid!.encodeBodies(publish); this.device.queue.submit([publish.finish()]);
         }
-        return result;
-      });
-      if (this.clothRuntimes.length) receipt = receipt.then(async result => {
-        await this.finishClothStep(dt, activeBodies);
-        return result;
-      });
-      if(this.sourceWater)receipt=receipt.then(async result=>{
-        const ledger=await this.sourceWater!.readLedger(),removed=await this.sourceTermination?.readLedger();
-        const external=ledger.externalVolume_m3+(removed?.externalVolume_m3??0),change=external-this.sourceExternalVolume_m3;
-        this.sourceExternalVolume_m3=external;
-        this.referenceVolumeCells+=change/(this.frame.cellSize_m[0]*this.frame.cellSize_m[1]*this.frame.cellSize_m[2]);
-        this.executionInfo.referenceLiquidVolume_cells=this.referenceVolumeCells;
         return result;
       });
       const handled=receipt.then(completion.accepted,completion.failed);
@@ -3619,27 +3278,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     throw new Error("Narrow-band FLIP requires its mixed ownership frame");
   }
 
-  /** Cloth and water exchange momentum at the same accepted integer time.
-   * The actual native FLIP frame retains drift-before-force ordering; cloth
-   * mechanics uses implicit drift. This is a first-order partitioned scheme,
-   * with no startup half-kick or unpaired temporal momentum extrapolation.
-   * Non-cloth and source-only fluid scenes retain the native half-kick. */
-  private async advanceClothFluidFrame(frame:UniformMixedFrame,p:UniformMixedFrameParameters,dt:number,bodies:UniformMixedFrameBodies|undefined,roster:readonly RigidBodyState[]=[]):Promise<UniformMixedFrameReceipt>{
-    try{
-      // Cloth: no half-kick; the first integer-clock frame establishes the hydrostatic warm start.
-      const unkicked=!this.mixedKicked&&this.clothRuntimes.length>0;
-      if(!this.mixedKicked){if(this.clothRuntimes.length)this.mixedKicked=true;else await this.kickMixedFrame(frame,p,dt,!!bodies);}
-      await this.prepareClothFluidStep(dt,roster);
-      const extend=this.mixedGpuLayout&&(this.detail.policy==="dynamic"||this.mixedLive);
-      const receipt=unkicked?frame.advanceFirstUnkicked(p,this.mixedFrameTrace(),extend,bodies):frame.advance(p,this.mixedFrameTrace(),extend,bodies);
-      this.readMixedRelayout();return await receipt;
-    }catch(error){
-      this.mixedRelayoutRead=undefined;
-      const checkpoints=this.clothStepCheckpoints;
-      if(checkpoints)this.clothRuntimes.forEach((runtime,i)=>runtime.restore(checkpoints[i]!));
-      this.clothStepCheckpoints=undefined;this.clothStepCohesion=[];throw error;
-    }
-  }
   /** The first frame's half kick (apart from advanceTo: this closure would cost every advance a context). */
   private kickMixedFrame(frame:UniformMixedFrame,p:UniformMixedFrameParameters,dt:number,bodies:boolean):Promise<unknown>{
     this.mixedKicked=true;const k=frame.kick(p,dt/2,bodies);this.readMixedRelayout();this.mixedFramesInFlight++;
@@ -3821,33 +3459,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
     this.appliedRuntimeValues = undefined;
     if (this.mixedFrameInFlight) { this.deferredFrameScene = scene; return; }
-    // Reject the combined geometry transaction before moving cloth ownership
-    // or source clocks. A refused solid edit leaves accepted cloth untouched.
+    // Reject the combined geometry transaction before changing any state.
     if ((scene.solidBoundary?.collision === "voxels") !== this.voxelCollision) throw new Error("Procedural collision changed; reset the scene to apply it");
     const boundaryImage = this.voxelCollision ? undefined : proceduralSolidField(scene)?.pack(this.boundaryBrickOffset());
     if ((boundaryImage?.length ?? 0) > this.solidBoundaryCapacity) throw new Error("Procedural boundary capacity changed; reset the scene to apply it");
     this.sculptCollision.validate(this.sculptWords(scene));
     packRigidBodyCutAtlas(scene.rigidBodies,GPU_RIGID_BODY_CAPACITY);
-    if(this.sourceMotion&&scene.wetClothSource!==this.scene.wetClothSource){
-      if(JSON.stringify(scene.wetClothSource?.scripts)!==JSON.stringify(this.scene.wetClothSource?.scripts))throw new Error('Source motion program changed; rebuild its timeline');
-      const moving=new Set(scene.wetClothSource?.scripts.map(s=>s.group)),old=new Map(this.sourceMotion.fields.map(f=>[f.index,f]));
-      this.sourceMotion.restore({...this.sourceMotion.checkpoint(),fields:(scene.wetClothSource?.fields??[]).map(f=>moving.has(f.group)?old.get(f.index)??f:f)});
-    }
-    if (clothDocumentsKey(scene.cloth) !== clothDocumentsKey(this.scene.cloth)) {
-      const documents=scene.cloth??[];
-      if(documents.length!==this.clothRuntimes.length||documents.some((d,i)=>d.id!==this.clothRuntimes[i]!.document.id))throw new Error("Cloth roster changed; rebuild its physics plugins");
-      const next=documents.map((document,i)=>{
-        const data=cachedClothTopology(document.geometry);
-        if(!data)throw new Error("Cloth edit asset must be loaded before publication");
-        return rebaseClothRuntime(this.clothRuntimes[i]!,document,data,{sourceFields:scene.wetClothSource?.fields,excludedSourceColliderIndices:sourceRepresentedSolidIndices(scene.wetClothSource),sourceOffset_m:scene.wetClothSource?.sourceOffset_m});
-      });
-      const previous=this.clothRuntimes;
-      this.clothRuntimes=next;this.clothPublications=next.map(runtime=>runtime.publish());this.clothRegionKey="";
-      previous.forEach(runtime=>runtime.dispose());
-      this.clothInitialization=Promise.all(next.map(runtime=>runtime.initializeGPU(this.device))).then(()=>{},error=>{this.failMixedFrame(error);}).finally(()=>{this.clothInitialization=undefined;});
-    } else if(scene.wetClothSource!==this.scene.wetClothSource) {
-      for(const runtime of this.clothRuntimes){runtime.setExcludedSourceColliderIndices(sourceRepresentedSolidIndices(scene.wetClothSource));runtime.motion.restore({...runtime.motion.checkpoint(),fields:editedSourceFields(runtime,scene.wetClothSource?.fields??[])});}
-    }
     this.mixedFrame?.solid?.setBodyCuts(scene.rigidBodies);
     this.mixedFrame?.invalidate("scene");
     const boundaryChanged = scene.solidBoundary !== undefined || this.scene.solidBoundary !== undefined;
@@ -3927,14 +3544,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.spatialPerformance?.destroy();
     if (this.disposed) return;
     this.disposed = true;
-    for (const exchange of this.clothWaterExchanges) exchange.destroy();
-    for (const entry of this.clothPoreTransports.values()) { entry.exchange.destroy(); entry.transport.destroy(); }
-    this.clothPoreTransports.clear();
-    this.clothWaterExchanges=[];
-    for (const coupling of this.clothCouplings) coupling.destroy();
-    this.sourceWater?.destroy();this.sourceTermination?.destroy();
-    for (const runtime of this.clothRuntimes) runtime.dispose();
-    this.clothCouplings = []; this.clothPublications = []; this.clothRuntimes = [];
     this.sculptCollision?.destroy();
     this.mixedFrame?.destroy();this.mixedPressureGeometry?.target.destroy();this.mixedPressureGeometry?.centerPhi.destroy();
     this.detailStorage?.destroy();

@@ -83,34 +83,6 @@ export interface GPURigidBodyPose {
   orientation: Quaternion;
 }
 
-export interface GPURigidExternalImpulse {
-  readonly bodyId: string;
-  readonly linearImpulse_N_s: readonly [number, number, number];
-  readonly angularImpulse_N_m_s: readonly [number, number, number];
-}
-
-/** Apply physical SI impulses to the resident record format. Mass/inertia
- * lanes are density-normalized; angular momentum lanes already use SI. */
-export function applyGPURigidExternalImpulses(values: Float32Array, bodyIds: readonly string[], impulses: readonly GPURigidExternalImpulse[], fluidDensity_kg_m3: number): number[] {
-  if (!(fluidDensity_kg_m3 > 0 && Number.isFinite(fluidDensity_kg_m3))) throw new Error("Invalid rigid impulse density");
-  if (values.length < bodyIds.length * GPU_RIGID_STATE_FLOATS) throw new Error("Incomplete rigid state records");
-  for (const impulse of impulses) {
-    if (!bodyIds.includes(impulse.bodyId)) throw new Error(`Unknown rigid impulse body ${impulse.bodyId}`);
-    if (![...impulse.linearImpulse_N_s, ...impulse.angularImpulse_N_m_s].every(Number.isFinite)) throw new Error("Nonfinite rigid external impulse");
-  }
-  const changed = new Set<number>();
-  for (const impulse of impulses) {
-    const i = bodyIds.indexOf(impulse.bodyId), at = i * GPU_RIGID_STATE_FLOATS;
-    if (values[at + 30] !== GPU_RIGID_MOTION_LANES.dynamic) continue;
-    for (let a = 0; a < 3; a++) { values[at + 12 + a]! += impulse.linearImpulse_N_s[a]! * values[at + 20]! / fluidDensity_kg_m3; values[at + 24 + a]! += impulse.angularImpulse_N_m_s[a]!; }
-    const q = {w: values[at + 8]!, x: values[at + 9]!, y: values[at + 10]!, z: values[at + 11]!};
-    const local = quaternionInverseRotate(q, {x: values[at + 24]!, y: values[at + 25]!, z: values[at + 26]!});
-    const angular = quaternionRotate(q, {x: local.x * values[at + 21]! / fluidDensity_kg_m3, y: local.y * values[at + 22]! / fluidDensity_kg_m3, z: local.z * values[at + 23]! / fluidDensity_kg_m3});
-    values.set([angular.x, angular.y, angular.z], at + 16); changed.add(i);
-  }
-  return [...changed];
-}
-
 /**
  * The compact SolidWorld occupancy projection consumed by moving-body contact.
  *
@@ -1074,50 +1046,6 @@ export class WebGPURigidBodySystem {
       return decodeGPURigidBodyPoses(new Float32Array(readback.getMappedRange()), this.bodyCount);
     } catch { return undefined; }
     finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
-  }
-
-  private async readStateRecords(): Promise<Float32Array<ArrayBuffer>> {
-    if (this.disposed) throw new Error("Rigid system disposed");
-    const readback = this.device.createBuffer({label: "Coupled rigid state readback", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ});
-    try {
-      const encoder = this.device.createCommandEncoder({label: "Read accepted rigid state for cloth contact"});
-      encoder.copyBufferToBuffer(this.stateBuffer, 0, readback, 0, GPU_RIGID_STATE_BYTES); this.device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(GPUMapMode.READ);
-      if (this.disposed) throw new Error("Rigid system disposed during contact readback");
-      return new Float32Array(readback.getMappedRange().slice(0));
-    } finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
-  }
-
-  /** Explicit coupling barrier: callers await this before cloth CCD so neither
-   * stale host poses nor authored velocities enter the contact solve. */
-  async readStates(roster: readonly RigidBodyState[]): Promise<RigidBodyState[]> {
-    await this.finishNativeStep();
-    if (!this.bodyCount) return [];
-    const ids = [...this.bodyIds], values = await this.readStateRecords();
-    if (ids.some((id, i) => this.bodyIds[i] !== id) || ids.length !== this.bodyIds.length) throw new Error("Rigid roster changed during contact readback");
-    return ids.map((id, i) => {
-      const source = roster.find(body => body.description.id === id);
-      if (!source) throw new Error(`Rigid contact roster missing ${id}`);
-      const at = i * GPU_RIGID_STATE_FLOATS, vector = (offset: number): Vec3 => ({x: values[at + offset]!, y: values[at + offset + 1]!, z: values[at + offset + 2]!});
-      return {...source, position_m: vector(0), orientation: {w: values[at + 8]!, x: values[at + 9]!, y: values[at + 10]!, z: values[at + 11]!},
-        linearVelocity_m_s: vector(12), angularVelocity_rad_s: vector(16), angularMomentum_kg_m2_s: vector(24), held: values[at + 30] === GPU_RIGID_MOTION_LANES.held};
-    });
-  }
-
-  /** Contact kicks alter only momentum/velocity; the next native Box3D step
-   * imports these exact lanes through its existing velocity handoff. */
-  async applyExternalImpulses(impulses: readonly GPURigidExternalImpulse[]): Promise<void> {
-    if (!impulses.length) return;
-    await this.finishNativeStep();
-    const ids = [...this.bodyIds], values = await this.readStateRecords();
-    if (ids.some((id, i) => this.bodyIds[i] !== id) || ids.length !== this.bodyIds.length) throw new Error("Rigid roster changed during impulse handoff");
-    const changed = applyGPURigidExternalImpulses(values, ids, impulses, this.scene.fluid.density_kg_m3);
-    for (const i of changed) {
-      const at = i * GPU_RIGID_STATE_FLOATS;
-      this.device.queue.writeBuffer(this.stateBuffer, (at + 12) * 4, values, at + 12, 3);
-      this.device.queue.writeBuffer(this.stateBuffer, (at + 16) * 4, values, at + 16, 3);
-      this.device.queue.writeBuffer(this.stateBuffer, (at + 24) * 4, values, at + 24, 3);
-    }
   }
 
   /** A bounded, user-triggered readback used only to begin mouse interaction. */

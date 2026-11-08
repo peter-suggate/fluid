@@ -1,157 +1,115 @@
-/** SI contracts shared by the cloth host, authoring, import and fluid plugins. */
+/** SI contracts of the triangle cloth: authoring, editing, the GPU solver and
+ * its publications. Positions are world metres in documents and
+ * publications; the GPU solver works in a cloth-local frame (see
+ * `ClothFrame`). */
 export type ClothVector = readonly [number, number, number];
 
+/** Orthotropic StVK membrane, discrete-shell bending, Rayleigh damping.
+ * Stiffnesses are per unit rest area (modulus x thickness), so a material
+ * is independent of mesh resolution. Warp is the material u axis, weft v. */
 export interface ClothMaterial {
   readonly id: string;
-  /** Intrinsic fiber density, before multiplication by solidFraction. */
-  readonly density_kg_m3: number;
-  readonly youngModulus_Pa: number;
-  readonly poissonRatio: number;
-  /** Full shell thickness. Independent of the microstructure fiber diameter. */
+  readonly arealDensity_kg_m2: number;
+  /** Membrane tensile stiffness along warp and weft (Young's modulus x thickness). */
+  readonly stretchWarp_N_m: number;
+  readonly stretchWeft_N_m: number;
+  /** In-plane shear stiffness (shear modulus x thickness). */
+  readonly shear_N_m: number;
+  /** Warp-weft Poisson coupling, |nu| < sqrt(weft/warp) keeps the law convex. */
+  readonly poisson: number;
+  /** Ratio of compressive to tensile fibre stiffness in (0, 1]: a woven
+   * sheet buckles instead of carrying in-plane compression. */
+  readonly compressionRatio: number;
+  /** Discrete-shell bending stiffness (N m), per unit hinge length. */
+  readonly bending_N_m: number;
+  /** Stiffness-proportional Rayleigh coefficient (s): f = -(k_d/h) H (x - x^).  */
+  readonly damping_s: number;
+  /** Physical thickness, used by cuts and (lane C2) the contact offset. */
   readonly thickness_m: number;
-  readonly rodRadius_m: number;
-  /** Second material-axis radius; omitted means circular. */
-  readonly rodRadiusB_m?: number;
-  readonly solidFraction: number;
-  readonly solidFractionExponent: number;
-  readonly fiberDiameter_m: number;
-  readonly contactAngle_rad: number;
-  readonly surfaceTension_N_m: number;
-  readonly waterDensity_kg_m3: number;
-  readonly waterViscosity_Pa_s: number;
-  readonly friction: number;
-  /** Kelvin-Voigt relaxation time: viscous modulus / elastic modulus. */
-  readonly mechanicalDamping_s: number;
-  /** Source finite attachment multiplier; undefined retains authored kinematic pins. */
-  readonly attachmentMultiplier?: number;
-  /** Per-mode relaxation times; omitted values retain mechanicalDamping_s. */
-  readonly membraneDamping_s?: number;
-  readonly bendingDamping_s?: number;
-  readonly rodStretchDamping_s?: number;
-  readonly rodBendingDamping_s?: number;
-  readonly rodTwistDamping_s?: number;
-  readonly bendingMode?: "theta" | "tan-half" | "sin-half";
+  /** Optional AVBD hard strain limit per edge, |e| <= (1 + strainLimit) L. */
+  readonly strainLimit?: number;
   readonly baseColor?: ClothVector;
 }
 
-/** Shared vertices allow pile roots and woven yarns to remain attached. */
-export interface ClothTopologyData {
-  readonly restPositions_m: readonly number[];
-  /** Saved deformed pose after an edit; constitutive rest shape remains above. */
-  readonly initialPositions_m?: readonly number[];
-  readonly initialSupportPositions_m?: readonly number[];
-  readonly initialAttachmentTwist_rad?: readonly number[];
-  readonly initialVelocities_m_s?: readonly number[];
-  readonly triangles: readonly number[];
-  readonly triangleMaterials?: readonly number[];
-  readonly triangleIds?: readonly number[];
-  readonly uv?: readonly number[];
-  /** CSR offsets, including terminal offset; [0] when there are no rods. */
-  readonly rodOffsets: readonly number[];
-  readonly rodIndices: readonly number[];
-  readonly rodMaterials?: readonly number[];
-  readonly rodIds?: readonly number[];
-  /** Cut-plane outward normals in the rod material frame (d1,d2,tangent).
-   * Zero triples mean an original rounded end. */
-  readonly rodStartClipNormals?: readonly number[];
-  readonly rodEndClipNormals?: readonly number[];
-  /** Accepted material-frame state, persisted when editing a live rod. */
-  readonly initialTwist_rad?: readonly number[];
-  readonly initialReferenceTwist_rad?: readonly number[];
-  readonly initialAngularVelocity_rad_s?: readonly number[];
-  readonly initialRodDirectors?: readonly number[];
-  readonly initialRodTangents?: readonly number[];
-  readonly restRodDirectors?: readonly number[];
-  /** Immediate pre-edit rod identity and segment for material-frame remap. */
-  readonly rodSegmentOrigins?: readonly {readonly rodId:number;readonly segment:number}[];
-  /** Per vertex: bit 1 fixes translation, bit 2 fixes twist. */
-  readonly fixed?: readonly number[];
-  readonly groups?: readonly number[];
-  readonly solidFraction?: readonly number[];
-  readonly initialWaterVolume_m3?: readonly number[];
+/** Saved solver state beside a pose: enough to continue a run exactly. */
+export interface ClothSolverStateData {
+  /** Velocity of the previous step (adaptive initialization, BDF2). */
+  readonly previousVelocities_m_s: readonly number[];
+  /** Displacement of the previous step, x_t - x_{t-1} (BDF2). */
+  readonly previousDisplacements_m: readonly number[];
+  /** Length of the previous step, s; 0 before the first step. */
+  readonly previousStep_s: number;
+  /** Warm-started AVBD duals, one (lambda xyz, k) per pinned vertex in vertex order. */
+  readonly pinDuals: readonly number[];
+  /** One (lambda, k) per edge of the canonical edge list (`prepareClothTopology`). */
+  readonly edgeDuals: readonly number[];
+  /** Chebyshev skip flags are per step and are not saved. */
 }
 
-export type ClothGeometryReference =
-  | { readonly kind: "inline"; readonly data: ClothTopologyData }
-  | { readonly kind: "asset"; readonly url: string; readonly sha256: string; readonly vertexCount: number };
+export interface ClothTopologyData {
+  /** Constitutive rest shape, world metres. */
+  readonly restPositions_m: readonly number[];
+  /** Current pose after an edit or snapshot; omitted means the rest shape. */
+  readonly initialPositions_m?: readonly number[];
+  readonly initialVelocities_m_s?: readonly number[];
+  readonly solverState?: ClothSolverStateData;
+  readonly triangles: readonly number[];
+  readonly triangleMaterials?: readonly number[];
+  /** Stable authored identity of each face, carried through cuts. */
+  readonly triangleIds?: readonly number[];
+  /** Material (warp, weft) coordinates per vertex, metres. Omitted: each
+   * face's own rest frame with warp along the projected world x axis. */
+  readonly uv?: readonly number[];
+  /** Per vertex attachment group; 0 is free cloth, g > 0 is a hard AVBD pin
+   * following the scripts of group g. */
+  readonly groups?: readonly number[];
+}
 
-/** Prescribed supports only; free cloth motion is always computed by mechanics. */
-export interface ClothSupportScript {
-  readonly kind: "translate" | "rotate";
+export type ClothGeometryReference = { readonly kind: "inline"; readonly data: ClothTopologyData };
+
+/** Prescribed attachment motion. Every script of a group composes in order:
+ * rotate, then translate/oscillate offsets. */
+export interface ClothAttachmentScript {
+  readonly kind: "translate" | "rotate" | "oscillate";
   readonly group: number;
   readonly start_s: number;
   readonly end_s: number;
-  /** Total displacement for translate, unit axis for rotate. */
+  /** translate: total displacement; rotate: unit axis; oscillate: amplitude vector. */
   readonly vector: ClothVector;
   readonly angle_rad?: number;
   readonly origin_m?: ClothVector;
-  readonly global?: boolean;
-  readonly easing?: "cubic" | "cosine";
-  readonly easeIn_s?: number;
-  readonly easeOut_s?: number;
+  readonly period_s?: number;
+  readonly easing?: "linear" | "cosine";
 }
 
-export interface ClothPhysicsOptions {
-  readonly nonlinearDrag?:boolean;
-  readonly dragExponent?:number;
-  readonly pressureOnSolid?:boolean;
-  readonly varyingSolidFraction?:boolean;
-  readonly porePressure?:boolean;
-  readonly manifoldTransport?:boolean;
-  readonly pressureOnManifold?:boolean;
-  readonly manifoldSubsteps?:number;
-  /** Source CGS discretization floor: one cm³, expressed explicitly in SI. */
-  readonly manifoldDragFloorReferenceVolume_m3?:number;
-  readonly captureRate?:number;
-  readonly absorption?:boolean;
-  readonly solveSolid?:boolean;
-  /** GPU Newton contact pool (pairs), authored from the scene's measured peak.
-   * It never grows at run time: a step that fills it fails with the counts. */
-  readonly contactCapacity?:number;
-  /** Its swept-primitive grid entries: a measured peak, or the bound
-   * 'two-cells-per-axis' (the default when unset): 8 (triangles + edges +
-   * segments) entries. Each detection widens its grid cell past its widest
-   * swept, padded primitive box, so every box touches at most 2 cells per axis
-   * however far the cloth stretches or moves in the step; a nonfinite box
-   * fails the step, naming it. */
-  readonly contactGridEntries?:number|'two-cells-per-axis';
+export type ClothIntegrator = "implicit-euler" | "bdf2";
+export type ClothSolverTier = "A" | "B";
+
+/** Per-scene solver authoring. The cloth takes exactly one implicit step per
+ * advance, at the frame/fluid dt: there is no substepping of any kind, and
+ * the iteration count K is the only budget. */
+export interface ClothSolverSettings {
+  /** BDF2 by default: implicit Euler visibly damps a swing at 1/60 s. */
+  readonly integrator?: ClothIntegrator;
+  /** VBD iterations per step (K). */
+  readonly iterations?: number;
+  /** Chebyshev spectral radius estimate in [0, 1); 0 disables acceleration. */
+  readonly chebyshevRho?: number;
+  readonly tier?: ClothSolverTier;
+  /** Tier B: target owned vertices per patch. */
+  readonly patchVertices?: number;
+  /** Tier B: iterations per patch-resident dispatch; partitions alternate
+   * between dispatches, so K / this is the number of halo exchanges. */
+  readonly patchIterations?: number;
 }
 
 export interface ClothDocument {
-  readonly schemaVersion: "1.0.0";
+  readonly schemaVersion: "2.0.0";
   readonly id: string;
   readonly geometry: ClothGeometryReference;
   readonly materials: readonly ClothMaterial[];
-  /** Source preview palette is distinct from the paper's Houdini materials. */
-  readonly appearance?: "material" | "source-preview";
-  readonly physics?:ClothPhysicsOptions;
-  readonly scripts?: readonly ClothSupportScript[];
-  readonly source?: { readonly url: string; readonly sha256: string; readonly configuration: "source" | "paper-corrected" | "interactive";
-    /** Original preview palette also counts initial free/solid sample groups. */
-    readonly previewParticleGroupCount?:number };
-}
-
-export interface ClothState {
-  readonly positions_m: Float64Array;
-  readonly velocities_m_s: Float64Array;
-  readonly dryMass_kg: Float64Array;
-  readonly waterVolume_m3: Float64Array;
-  readonly restControlVolume_m3: Float64Array;
-  /** Conserved intrinsic fiber volume, independent of geometric deformation. */
-  readonly solidVolume_m3: Float64Array;
-  readonly controlVolume_m3: Float64Array;
-  readonly solidFraction: Float64Array;
-  /** One material angle and angular velocity per rod segment. */
-  readonly twist_rad: Float64Array;
-  readonly rodReferenceTwist_rad: Float64Array;
-  readonly attachmentTwistTarget_rad: Float64Array;
-  readonly angularVelocity_rad_s: Float64Array;
-  /** Untwisted reference directors and accepted unit tangents, xyz per segment. */
-  readonly rodDirectors: Float64Array;
-  readonly rodTangents: Float64Array;
-  time_s: number;
-  generation: number;
-  topologyRevision: number;
+  readonly scripts?: readonly ClothAttachmentScript[];
+  readonly solver?: ClothSolverSettings;
 }
 
 export interface ClothFrameIdentity {
@@ -161,20 +119,12 @@ export interface ClothFrameIdentity {
   readonly time_s: number;
 }
 
+/** The accepted surface every consumer (render, picking, cuts, history)
+ * reads. Positions are world metres. */
 export interface ClothSurfacePublication extends ClothFrameIdentity {
   readonly documentId: string;
   readonly topology: ClothTopologyData;
   readonly positions_m: Float32Array | Float64Array;
-  readonly supportPositions_m?: Float64Array;
-  readonly attachmentTwistTarget_rad?: Float64Array;
-  readonly rodReferenceTwist_rad?: Float64Array;
   readonly velocities_m_s?: Float32Array | Float64Array;
-  readonly waterVolume_m3: Float32Array | Float64Array;
-  readonly controlVolume_m3?: Float32Array | Float64Array;
-  readonly solidFraction?: Float32Array | Float64Array;
-  readonly saturation?: Float32Array;
-  readonly rodTwist_rad?: Float64Array;
-  readonly rodAngularVelocity_rad_s?: Float64Array;
-  readonly rodDirectors?: Float64Array;
-  readonly rodTangents?: Float64Array;
+  readonly solverState?: ClothSolverStateData;
 }
