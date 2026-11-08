@@ -363,3 +363,51 @@ I am not implementing (c) before review.
 - **Lane S: this flips your assertion** at `tests/cloth-bridson-2002.test.ts:166`. The bare frustum, with footing 0, is now accepted. The footing can go, and the assertion should become a `doesNotThrow`. That test is the one red in the unit suite that comes from C2's change.
 
 **(1) Moving solids.** Noted: body-frame voxel bakes of `RigidBodyDescription` shapes, posed by RigidPoseTrack, with surface velocity from the twist. This is M6 step 1, next.
+
+## 2026-11-09 DECISION NEEDED: M6 moving solids, design (one-way, then two-way)
+
+### One-way design (step 1)
+
+**Data.**
+- Each moving solid is a `RigidBodyDescription` with prescribed motion (RigidPoseTrack or `prescribed-rigid-motion`).
+- Its own shape, including cuts, is baked once in the body frame into a `ClothSolidField` image, using `parts` with the solid's μ. A bake is redone only when that body is cut.
+- Images sit after the static image in the contact buffer's solid region, behind a table of K entries: image word offset, plus pose slots.
+- Per frame, the frame owner writes each body's poses (c₀, R₀) at the step start and (c₁, R₁) at the step end, plus its twist (v, ω), with one `writeBuffer`. That is an input upload, like C1's attachment time. No readback, and no CPU stage in the step.
+
+**Contact.**
+- φ_b(x) = φ_body(R₁ᵀ(x − c₁)), with gradient R₁ ∇φ_body.
+- Energy and Hessian are as for the static entry.
+- Friction acts on the slip relative to the surface: u = (x − x_t) − (v + ω × (x − c₁))·dt, projected tangentially. The Fig. 2 spinning sphere with μ = 1 needs exactly this term.
+- The entry stores (v, image b, μλ).
+
+**Truncation.**
+- Relative to the body, a vertex's linear path runs from y₀ = R₀ᵀ(x₀ − c₀) to y₁ = R₁ᵀ(x₀ + dX − c₁).
+- The ball bound around y₀ is the static one, unchanged.
+- The cut must interpolate towards the displacement that carries the vertex with the body, a_v = R₁y₀ + c₁ − x₀, not towards 0. Holding still is unsafe when the body advances.
+  - So dX ← a_v + t(dX − a_v), with t from the bound on R₁ᵀ(dX − a_v).
+- The envelope must also cover the body's own motion of the point: r_q,v ≥ r + s·|a_v| for vertices within reach of a body.
+
+**Why this is a decision.** Every other cut (DAT planes, the 0.5 γ_r r_q cap, the static solid) interpolates towards dX = 0.
+- A vertex pushed by a body while it is paired with cloth or a static solid across the push gets contradictory cuts. Cloth pressed between a moving sphere and a table is the Bridson table scene.
+- Sequential cuts cannot satisfy both, and holding is unsafe.
+- Predicted-motion DAT (option (c) above) removes the conflict. Take the vertex's prediction w_v as a_v when a body carries it, and as the inertial prediction otherwise. Every cut is then relative to w_v, and planes move with the pair's mean prediction.
+- So the two decisions are one: with (c), M6 one-way is the per-image table above plus w_v = a_v. Without (c), M6 can only flag the conflict (a failing status `solidConflict`), and a scene that presses cloth against anything with a moving body is refused.
+
+### Two-way design (AVBD 6-DOF blocks; not implemented, for review)
+
+- Each dynamic rigid is one AVBD block: a 6×6 Newton solve per iteration, coloured after the cloth colours. The cloth-body contacts couple a body to every cloth vertex in its entries.
+- **Body solve.**
+  - Inertia: the body's mass and inertia about the inertial target.
+  - Contacts: for each entry (v, b), a force −λ_c n at the contact point p = R₁y_v + c₁, with lever arm p − c₁, as an AVBD hard constraint with dual λ_c and stiffness ramp. That is the same activation energy, with the cloth vertex frozen in the body's block, plus friction from the slip.
+  - The accumulation is a GPU reduction over the body's entries: a per-body list built in the bound pass, with u32 atomics on fixed-point partial sums, or a segmented scan by body. WGSL has no float atomics.
+  - The solve is one thread per body.
+- **Cloth solve.** Unchanged, with the body's current iterate pose. Truncation is relative to the body's iterate motion, which is (c) again.
+- **Box3D.** In `lib/interaction/adapters/box3d/world.ts`, bodies touched by cloth are integrated by the cloth step for that frame, and their pose and twist go back to Box3D on the GPU→CPU frame boundary the scene already has. Otherwise this is CPU control flow: a Box3D sync is a frame-level exchange, not a step stage, and it needs the coordinator's ruling.
+
+### Remaining M5 work
+
+- **Solid-surface point and edge samples against cloth faces and edges.** These are vertex-facet and edge-edge entries plus DAT pairs, with the static samples binned per brick.
+  - Without them, a sharp voxel edge or corner can poke through a cloth face between its vertices. Vertex contact keeps vertices out, not faces.
+  - The intersection counter does not yet test cloth faces against solid surfaces.
+- **The scene adapter:** solidVoxels and procedural bricks into `parts`, using exact box-union distance for voxels.
+- **Gates still to run:** sphere drape, sharp box, and a cut under resting cloth.
