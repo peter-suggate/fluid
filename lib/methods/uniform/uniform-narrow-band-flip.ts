@@ -20,7 +20,7 @@ import { narrowBandTerrainContactSource, narrowBandRigidContactSource } from "./
 import { narrowBandBodyWindowWGSL } from "./uniform-particle-body-window.wgsl";
 import { narrowBandClearWalkWGSL } from "./uniform-particle-clear-walk.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
-import { NB_SLAB_SEEDS_WORD, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
+import { NB_MOVE_TICKET_WORD, NB_SLAB_SEEDS_WORD, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
 import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { particleBrickDepositWGSL } from "./uniform-particle-brick.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
@@ -923,10 +923,17 @@ fn nbThaw(cell:vec3u)->vec3f{return vec3f(umThawFaceTerm(vec3i(cell),0u,1u),umTh
 // The samples [x,y) of cells a to b, two cells of one x row of one tile.
 // A tile that holds no storage has no samples: the run is empty.
 fn nbCellLocal(c:vec3i)->u32{let l=vec3u(c)&vec3u(3u);return l.x|(l.y<<2u)|(l.z<<4u);}
+// The move's window holds a tile's first bin (nbWinBin: NB_NO_BIN where
+// no run is), the page, coverage and slot reads below.
 fn nbRun(a:vec3i,b:vec3i)->vec2u{
- let tile=umTileKey(a>>vec3u(2u));if(!umKeyStored(tile)){return vec2u(0);}
- if(atomicLoad(&bins[NB_COVERAGE+tile])==0u){return vec2u(0);}
- let bin=nbBinTile(tile);let last=bin+nbCellLocal(b);return vec2u(links[bin+nbCellLocal(a)],links[last]+atomicLoad(&bins[last]));}
+ var bin:u32;let w=nbWinIndex(a>>vec3u(2u));
+ if(w<64u){bin=nbWinBin[w];if(bin==NB_NO_BIN){return vec2u(0);}}
+ else{
+  let tile=umTileKey(a>>vec3u(2u));if(!umKeyStored(tile)){return vec2u(0);}
+  if(atomicLoad(&bins[NB_COVERAGE+tile])==0u){return vec2u(0);}
+  bin=nbBinTile(tile);
+ }
+ let last=bin+nbCellLocal(b);return vec2u(links[bin+nbCellLocal(a)],links[last]+atomicLoad(&bins[last]));}
 fn nbCellRun(c:vec3i)->vec2u{return nbRun(c,c);}
 // Position and motion remain compact streams for the neighbor gathers.
 // Reconstruction reads position.w's heat to restrict erasure to its nearest
@@ -967,7 +974,21 @@ ${narrowBandRigidContactSource("nbMoveBodyMask(point)")}
 ${uniformMixedSourceWGSL(16)}
 // Every particle uses the same compiled general interpolant.
 fn sampleVelocity(p:vec3f)->vec3f{return umSampleVelocity(p);}
-fn nbMoveSample(p:vec3f)->vec3f{return sampleVelocity(p);}
+// The move's sample: umSampleVelocity's value, whose fine tile reads its
+// class and halo home from the job's window (staged once a job) in place of
+// the page walk, tile word and halo lookups per sample.
+fn nbMoveSample(p:vec3f)->vec3f{
+ ${unitTaps?`umHold=umPointBounds(p,8.0);let q=clamp(p,umHold.lo,umHold.hi);let tile=umBoundedCell(q,umHold)>>vec3u(2u);
+ let w=nbWinIndex(tile);var s=UMSampleTile(q,tile,0u);var fine=false;var weights=1.0;
+ if(w<64u&&!umRegularFine&&(nbWinFlags[w]&NB_WIN_FINE)!=0u){fine=true;umUnitHome=nbWinHome[w];}
+ else{
+  s.key=umTileAt(vec3u(tile));fine=!umRegularFine&&umCachedFineTile(s.key);umUnitHome=umUnitHaloHome(s);
+  if(!fine){weights=umVelocitySamplingWeightsAt(s);}
+ }
+ var v=vec3f(0.0);
+ for(var a=0u;a<3u;a++){v[a]=umSampleVelocityAxis(p,s,fine,weights,a);}
+ return v;`:"return sampleVelocity(p);"}
+}
 ${this.apic?/* wgsl */`
 // Extend the velocity at domain walls without changing the quadratic moments.
 // Interior solid values come from the same extrapolated field as FLIP.
@@ -1172,12 +1193,14 @@ fn nbHullUncut()->bool{
 // (the brick's 2³ tiles and a tile around them), a lane a tile, with what
 // the move's per-sample lookups read through the page table: the sampler's
 // tile class and halo home, the hull proof, the depth's reach, the target
-// heat and G2P's cold tier. A sample's tile inside the window reads them
-// from workgroup memory; outside it, or in a flat job, from the device.
+// heat, G2P's cold tier and the cell runs' first bin. A sample's tile
+// inside the window reads them from workgroup memory; outside it, or in a
+// flat job, from the device.
 // Both are the same functions of the same tile.
 const NB_WIN_FINE:u32=1u;const NB_WIN_STORED:u32=2u;const NB_WIN_UNCUT:u32=4u;const NB_WIN_COLD:u32=8u;const NB_WIN_REACH:u32=16u;
 var<workgroup> nbWinFlags:array<u32,64>;
 var<workgroup> nbWinHeat:array<f32,64>;
+var<workgroup> nbWinBin:array<u32,64>;
 ${unitTaps?"var<workgroup> nbWinHome:array<vec4i,64>;":""}
 var<private> nbWinLo:vec3i;
 var<private> nbWinOn:bool=false;
@@ -1187,14 +1210,16 @@ ${narrowBandClearWalkWGSL}
 fn nbWinStage(lane:u32){
  let t=nbWinLo+vec3i(umCorner(lane,4u));let at=umTileAt(vec3u(t));let key=umTileKey(t);var flags=0u;
  ${unitTaps?"if(umCachedFineTile(at)){flags|=NB_WIN_FINE;}nbWinHome[lane]=umUnitHaloHome(UMSampleTile(vec3f(0.0),t,at));":""}
+ var bin=NB_NO_BIN;
  if(umKeyStored(key)){
   flags|=NB_WIN_STORED;
+  if(atomicLoad(&bins[NB_COVERAGE+key])!=0u){bin=nbBinTile(key);}
   ${this.solid.coarse?"if(all(umSolidOpenCells(key)==vec2u(0xffffffffu))&&all(umSolidFieldCut(key)==vec2u(0u))){flags|=NB_WIN_UNCUT;}":""}
  }
  if(nbTileCold(key)){flags|=NB_WIN_COLD;}
  if((atomicLoad(&bins[NB_BAND_REACH+at])&1u)!=0u){flags|=NB_WIN_REACH;}
  flags|=nbBodyTileMask(t)<<8u;
- nbWinFlags[lane]=flags;nbWinHeat[lane]=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+at]));
+ nbWinFlags[lane]=flags;nbWinBin[lane]=bin;nbWinHeat[lane]=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+at]));
 }
 // nbTargetHeat, the move's COLD test and the depth's reach, through the window.
 fn nbMoveHeat(p:vec3f)->f32{let t=vec3u(p/4.0);let w=nbWinIndex(vec3i(t));if(w<64u){return nbWinHeat[w];}return bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+umTileAt(t)]));}
@@ -1204,7 +1229,7 @@ fn nbTileThin(q:vec3f)->bool{let t=vec3u(q/4.0);let key=umTileAt(t);if(!umKeySto
 fn nbMoveDepth(p:vec3f)->f32{
  let t=vec3u(p)/4u;let w=nbWinIndex(vec3i(t));var reached:bool;
  if(w<64u){reached=(nbWinFlags[w]&NB_WIN_REACH)!=0u;}else{reached=(atomicLoad(&bins[NB_BAND_REACH+umTileAt(t)])&1u)!=0u;}
- return particleDepthIn(p,reached);
+ return particleDepthMoveIn(p,reached);
 }
 // A moved record: status 0 live, 1 retired (or past a fatal).
 struct NbMoved{p:Particle,status:u32}
@@ -1239,6 +1264,9 @@ ${this.sampleSeparation==="pairs"?`// sampleSeparation "pairs": Sato et al. 2018
 // sample: they hold every sample within half a cell along each axis, the
 // reach of two unit samples. A merged (deep) sample's wider reach is gathered
 // as far as those cells go. Positions are read alone, a mass only in reach.
+// (SORT's compact stream is no cheaper here: links is a u32 array, so its
+// position is three loads against the record's one; a letters move issued
+// 75% more buffer loads through it, 2026-11-09.)
 // The pairs are solved together as one Jacobi pass with constraint averaging
 // (Macklin et al. 2014, Section 4.2): the sample moves by the mean of its
 // pair corrections, so a pile-up of n overlapping samples does not push it n
@@ -1274,11 +1302,17 @@ fn nbSeparation(i:u32,q:vec3f,m:f32)->vec3f{
 // the normal part moved the surface itself, outward seven times as far as
 // inward in a dam's run-up (docs/plans/bulk16-plan-2026-10-28.md, M4b), a
 // volume source the union kept. The projection never lengthens d, so
-// NARROW_BAND_SEPARATION_REACH still bounds it.
+// NARROW_BAND_SEPARATION_REACH still bounds it. The centre and the six
+// quarter-cell offsets are read at one nbMoveDepth site (Metal inlines each
+// call of it: seven copies spilled the move a further 32 bytes, 2026-11-09).
 fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
- if(nbMoveDepth(q)<= -1.0){return d;}
- let a=vec3f(0.25,0.0,0.0);
- let g=vec3f(nbMoveDepth(q+a.xyz)-nbMoveDepth(q-a.xyz),nbMoveDepth(q+a.yxz)-nbMoveDepth(q-a.yxz),nbMoveDepth(q+a.yzx)-nbMoveDepth(q-a.yzx));
+ var g=vec3f(0.0);
+ for(var k=0u;k<7u;k++){
+  var x=q;let axis=(k-1u)>>1u;let up=((k-1u)&1u)==0u;
+  if(k>0u){x[axis]+=select(-0.25,0.25,up);}
+  let depth=nbMoveDepth(x);
+  if(k==0u){if(depth<= -1.0){return d;}}else{g[axis]+=select(-depth,depth,up);}
+ }
  let l=length(g);if(!(l>1e-6)){return d;}
  let n=g/l;return d-dot(d,n)*n;
 }
@@ -1514,7 +1548,13 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   }
   `:""}return NbMoved(p,0u);
 }
-// The move: a workgroup a job of the row (NARROW_BAND_PARTICLE_GRID). A job
+// The move: each workgroup of the row (NARROW_BAND_PARTICLE_GRID) takes
+// its next job from the ticket (NB_MOVE_TICKET_WORD) until none is left, the
+// spill reserve's flat jobs first: their samples read the device for what a
+// slab job's window holds. A row striding the jobs in turn left a launch's
+// last groups three or four jobs behind the rest: a letters move (960k
+// samples) held its occupancy ceiling to its last 2-3 ms and then fell
+// away to nothing (counter capture, 2026-11-09). A job
 // is NB_MOVE_CHUNK records of an input slab (last move's current slabs: a dense brick
 // is many jobs, so no workgroup serializes one) or 64 entries of the flat lane (the spill reserve).
 // Every record goes through the one nbAdvect site (Metal inlines every
@@ -1525,6 +1565,7 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
 // the current bank, which the move does not write: the move is one launch.
 var<workgroup> nbMoveJobs:vec4u;
 var<workgroup> nbMoveJob:vec4u;
+var<workgroup> nbMoveTicket:u32;
 var<workgroup> nbMoveCount:array<atomic<u32>,27>;
 var<workgroup> nbMoveBase:array<u32,27>;
 // A neighbour brick's id, slab start and cap (cap 0: no slab this move).
@@ -1565,10 +1606,13 @@ fn nbMove(group:u32,groups:u32,lane:u32){
   nbMoveJobs=vec4u(entries,(flat+63u)/64u,flat,0u);
  }
  let jobs=workgroupUniformLoad(&nbMoveJobs);
- for(var j=group;j<jobs.x+jobs.y;j+=groups){
+ loop{
+  if(lane==0u){nbMoveTicket=atomicAdd(&state[${NB_MOVE_TICKET_WORD}u],1u);}
+  let t=workgroupUniformLoad(&nbMoveTicket);
+  if(t>=jobs.x+jobs.y){break;}
   if(lane==0u){
-   if(j<jobs.x){nbMoveJob=nbSlabJob(j);}
-   else{let k=64u*(j-jobs.x);nbMoveJob=vec4u(1u,k,min(64u,jobs.z-k),0u);}
+   if(t>=jobs.y){nbMoveJob=nbSlabJob(t-jobs.y);}
+   else{let k=64u*t;nbMoveJob=vec4u(1u,k,min(64u,jobs.z-k),0u);}
   }
   let job=workgroupUniformLoad(&nbMoveJob);
   nbWinOn=job.x==0u;nbWinLo=(vec3i(ubBrickOrigin(job.w))>>vec3u(2u))-1;
@@ -1994,7 +2038,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   encoder.clearBuffer(this.state,4,8);encoder.clearBuffer(this.state,4*NB_SLAB_SEEDS_WORD,4);
   encoder.clearBuffer(this.bins,4*this.countWords+this.tiles*4,this.tiles*4);
   this.clearBrickTable(encoder);this.run(encoder,b.allocate);
-  this.run(encoder,b.advect);
+  encoder.clearBuffer(this.state,4*NB_MOVE_TICKET_WORD,4);this.run(encoder,b.advect);
   this.sort(encoder);this.crossingCanPlan=true;
   // The count every particle consumer after the move gates on (liveGate).
   encoder.copyBufferToBuffer(this.state,0,this.params,48,4);encoder.copyBufferToBuffer(this.state,0,this.liveGate,0,4);

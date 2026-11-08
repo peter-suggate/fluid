@@ -598,3 +598,262 @@ Against the B1 family's 2.18 ms at baseline and 1.68 ms after S3. The median is 
 4. Speed, certificate and resolve.
 
 Each stage deletes its old launch in the same commit. The slot space is Lane E's `UniformFrameBricks` (26c969e4), widened to the particle bricks and the level-2 pages.
+
+## 2026-11-09: the letters particle move (advectParticlesDeferred)
+
+The scene is letters (nbflip-figure-8-letters, dt 1/24, balanced, about 960k particles). The move takes 16.5-16.7 ms per step.
+
+### Counters
+
+One capture covered frames 101-160 and 22 move windows of 15-19 ms. It was reduced by `fluid-scratch/lane-t/tools/advect-counters.mts`.
+
+| Counter | Value |
+|---|---|
+| Compute occupancy | flat at 12.5%, a hard ceiling |
+| ALU | 21% |
+| F32 | 3.8% |
+| LLC | 27% |
+| Buffer read | 6.6% |
+| Buffer write | 2.8% |
+| Texture sample | 2.6% |
+| Threadgroup memory | about 0.1% |
+| MMU | 8% |
+| TLB miss rate | about 18% |
+| DRAM read / write | 21 / 6 GB/s |
+
+- **No limiter.** The kernel is latency-bound at a register-capped occupancy.
+- **A 2-3.5 ms tail.** Each move ends with occupancy falling away. This is load imbalance from the static round-robin job stride.
+- **Per-particle cost.** It is 17 ns per particle in letters against 29 ns in seep, so the cost scales with particles and is not a fixed floor.
+
+### Occupancy probe
+
+The probe compiles only. It dumps the MSL from Dawn, strips the 64-thread cap and reads Metal's `maxTotalThreadsPerThreadgroup`.
+
+- **Whole kernel: 384 threads.** That is 384/3072 = 12.5% occupancy, which matches the counter.
+- **nbAdvect stubbed out: 1024.**
+- **No single section is to blame.** These sections each limit the kernel on their own:
+
+| Section alone | Threads |
+|---|---|
+| One velocity sample | 448 |
+| Phi depth | 576 |
+| gridSupported | 768 (384 together with the loop skeleton) |
+| nbParticleBlocked | 704 |
+| Sparse age | 832 |
+| Separation | 768 |
+| Merge prefix | 512 |
+| Bare Heun skeleton | 576 |
+
+- **umSolidFree and a rolled axis loop do not help.**
+- **Consequence:** raising occupancy would take register work across the whole kernel. This batch instead removes dependent load chains and the tail.
+
+### Changes
+
+All four changes are exact: they do not change any result.
+
+- **A. Ticketed jobs.** Each workgroup takes its next job from `state[NB_MOVE_TICKET_WORD=23]`, which the host clears before the move. The flat spill jobs come first. This removes the end-of-move imbalance tail.
+- **B. Window bins for cell runs.** The window stages each tile's first bin in `nbWinBin`. nbRun then skips the page-key, stored, coverage and slot reads: 2 dependent hops per run, 8 runs a separation plus sparse age.
+- **C. Window fast path for the move sample.** In a fine tile, nbMoveSample reads the tile class and halo home from the window (`nbWinFlags`/`nbWinHome`), skipping the page walk, tile word and halo lookups for each of the 3 Heun samples. The value is umSampleVelocity's own interpolant through the same umSampleVelocityAxis call. This is not the separate path that e4041e9a removed.
+- **D (reverted). Separation reads the compact stream.** It read positions from SORT's stream at 16 bytes a sample. Because `links` is `array<u32>`, each candidate cost three loads against the record's single vec4 load. Buffer load utilisation rose from 5.4% to 9.5%, which cancelled the locality gain.
+
+Probe after the changes: still 384 threads, so occupancy did not fall. The slab GPU test passes. The census, slab and NB-FLIP unit tests pass.
+
+### Measurement
+
+My earlier main-checkout capture is not a fair baseline. That checkout held a peer's uncommitted NB_CELL_MASS retirement: 798k particles at frame 128, against 1.037M on clean HEAD. My after capture there is not fair either, because Lane E's WIP did not compile. The coordinator's 16.5 ms letters figure is unaffected. It came from a clean `git archive` tree (combined/h3-tree) at steps 116-119 with about 960k particles. The 1.04M here is a later frame.
+
+So both runs were taken from trees built by `git archive 83e48800` into scratch (`fluid-scratch/lane-t/tree-head` and `tree`). Each is one counter run with the same gated window. Frame 128 had 1,036,693 particles on HEAD and 1,036,201 with the patch. The 31 move intervals pair index by index.
+
+**Move time.** These numbers are for A+B+C+D.
+
+| Frames | HEAD (ms) | Patch (ms) |
+|---|---|---|
+| All 31, mean | 28.31 | 28.54 |
+| First 10 | 34.0 | 36.6 |
+| Last 15 | 24.6 | 23.0 |
+
+The result is neutral overall: early frames are slower and late frames faster. Each figure is a single run.
+
+**Counters, HEAD → patch.**
+
+| Counter | HEAD | Patch |
+|---|---|---|
+| End-of-move occupancy tail | about 12 bins | mostly gone; holds 12.5% to the last few bins |
+| TLB miss rate | 18-20% | 4.5% |
+| Read bandwidth | 18 GB/s | 13 GB/s |
+| Buffer load utilisation | 5.4% | 9.5% (the D cause) |
+| ALU | 25% | 26-31% |
+
+**What is untimed.** A+B+C without D has had no GPU timing yet. The combined gate measures it.
+
+## 2026-11-09: slab pool overflow (submerged sphere, HEAD 83e48800)
+
+**Symptom.** `uniform-body-contact-refinement`'s submerged prescribed sphere stopped at frame 66 with "particle slabs exceed the pool: 52224 records sized of 52224". The live count peaked at about 45-46k (Lane E, `fluid-scratch/lane-e/r7`).
+
+**Cause.**
+- slabAllocate and slabPlace sized each brick's slab as its count plus slack:
+  - scratch slabs: a quarter, at least 32;
+  - current slabs: an eighth, at least 16, plus last move's refused seeds.
+- The run stopped (state[3] = 6) when the slab sums passed NB_SLAB_LIMIT = capacity − spill reserve.
+- With many small bricks, the per-brick minimums made the slack alone about 6-7k records. The pool held every live record, but the run still went fatal.
+- Seed deferral was correct: refused seeds go to the spill reserve, where optional seeds are clipped (state[2]) and reseeded later. The fatal check fired before deferral could act.
+
+**Fix** (`uniform-particle-slab.wgsl.ts`, landed as 99dd6d64 together with the test's `UM_BULK16` stub):
+- Slack is headroom, not records. Each pass first scans the demands and the slacks (`nbSlabPrefix` then `nbSlabSums`).
+- Where demand plus slack passes the limit, every slab keeps its demand and the same share of its slack (`nbSlabSlack`). Its floor is `room / total slack`.
+- Only demand past the limit stops the run, as does the overflow index passing capacity.
+- Records past a slab's room overflow to the spill reserve, and seeds past it are refused there. Both paths already existed.
+
+The limits stay separate: the spill reserve is the move's overflow tail, and folding it into the slabs would remove what absorbs a slab's overflow.
+
+**Check** (clean tree: 83e48800 + lane-t.patch):
+- The submerged sphere passes: step 120 displaced 0.00304 m³ with 0.712 Ns upward impulse, step 240 0.00281 m³ with 0.652 Ns.
+- The slab test passes.
+- The file's first test, "static and body contact retain wet or predicted contact detail", failed on 83e48800 as well. Its WGSL stub lacked `UM_BULK16` ("unresolved value 'UM_BULK16'", line 70). 99dd6d64 adds the stub, and all 3 tests pass on HEAD + the fix alone, with 1784/1784 unit tests.
+
+## 2026-11-09: the move's register ceiling (compile-only probe)
+
+**Tools.**
+- `tools/spill.sh` gives the kernel's threads plus its compiler spill bytes, read from the trace's `graphics-compiler-spill-events`.
+- A run sometimes logs no spill event and then reads low (0 or 32 B), so spill figures are repeated before they count.
+- `tools/callgraph.py` counts each function's inlined copies from the entry point.
+
+**Where the cap comes from.** These are the threads each section allows with nbAdvect cut down to it, inside the nbMove driver only:
+
+| Section alone | Threads |
+|---|---|
+| Nothing (record in, record out) | 1024 |
+| Bare Heun skeleton (every section stubbed) | 576 |
+| One velocity sample | 448; 576 without the mixed-width tap path (`umVelocityTap1`'s nested `umSampleVelocity4`) |
+| One depth | 576; with the skeleton, 384 (448 with `bandPhi` stubbed) |
+| One rigid contact | 512 |
+| nbFinish | 384 |
+| nbFinish without the solid walk and the split | 1024 |
+| nbFinish, walk only | 384 |
+| nbFinish, procedural/terrain/rigid contacts only | 384 |
+| nbFinish, `umCellOpen` only | 448 |
+
+- With the skeleton and one section real, the sample, depth, rigid contact and finish each reach 384, the floor, on their own.
+- Inlining: nbMoveDepth had 10 copies (merge 1, G2P 1, surface shift 7, finish split 1), each expanding to about 250k characters of WGSL, mostly `bandPhi`'s vertex sample. That is 80% of the kernel's inlined text.
+
+**Changes** (both exact):
+- particleDepthIn takes each key as it weighs its vertex, in one rolled loop, with no `keys` array.
+- nbSurfaceShift reads its centre and six offsets at one nbMoveDepth site.
+- Result for the move: 384 threads, spill 464 -> 352 B (repeated). Depth change alone: 416 B.
+- seedCells drops 640 -> 576 threads. Keeping the single-block branch unrolled made both kernels worse (move spill 384 B).
+- unit 1784/1784.
+
+**Why 512 needs a different shape.**
+- Four sections each reach the cap alone: the solid walk, the sample, the depth and the rigid contact. The skeleton by itself sits at 576.
+- So no set of local edits brings the whole kernel to 512. Getting there takes:
+  1. moving the rare paths into a second launch over a compacted list: the solid walk (taken only where the hull is not proven uncut), body contact, the mixed-width tap path and the unreached-depth `bandPhi`;
+  2. splitting the move's common path so the sample and the depth do not share one kernel's live state.
+
+## 2026-11-09: the rare-path launch (option 1), measured and not landed
+
+**What was built.** This lives in `rare-split.diff` in the lane's scratch directory, not in lane-t.patch.
+- The step's move (`advectParticlesDeferred`) runs a hot body, nbAdvectHot. It defers a record to a compacted list (`nbDefer`; state word 27 counts, the list follows the slab words, list overflow is fatal 12) at the point it would take any of these paths:
+  - the unreached-depth `bandPhi`;
+  - the general mixed-width tap (`umVelocityTap1`);
+  - a body's candidate tile (checked before the trace, at the contact's own point);
+  - the solid walk (hull not proven uncut);
+  - the merged sample's split.
+- A second launch in the same pass (`advectParticlesRare`) then moves each deferred record through the full body from its record, appending as a flat job does.
+- `--rare` on probe-tier-budget prints the last move's deferred records against the live ones.
+
+**Probe** (letters capture, compile only):
+
+| Kernel | Threads | Spill | Inlined WGSL | Cold compile |
+|---|---|---|---|---|
+| lane-t.patch move (baseline) | 384 | 352 B | 1.63M chars | 3.2 s |
+| hot move | 384 | 192 B (176 to 256 across variants) | 0.32M chars | 1.6 s |
+| rare launch | 384 | not measured | 1.64M chars | 2.8 s |
+
+- The cold compile was measured with a perturbed literal so Metal's cache cannot answer.
+- The literal `hot` folds: the stubbed-cold variant reads the same threads.
+
+**Why the hot body stays at 384** (variants of the hot body, every other section stubbed):
+- The bare skeleton is 576, but only once the body-mask check is hoisted before the trace. An early return inside the trace loop alone costs it 64 threads (512).
+- Skeleton plus one real velocity sample: 384, whichever path is left. Halo only, coarse 4h only (rolled or unrolled), and the fine paths deferred all read 384.
+- Skeleton plus one depth: 384, even with only the single-block key path.
+- A kernel that does nothing but one `nbMoveSampleHot` (or one depth, or one surface shift) in the nbMove frame reads 512.
+- So no kernel that samples the field through the shared sampler reaches 576 in this frame. A stage-per-launch split (one Heun stage a kernel) would cap at 512 too.
+
+**Rare fraction** (60-step check runs, one each):
+- Letters: 3.3%, 7.7% and 4.7% at steps 20, 40 and 60.
+- Seep: 51%, 73% and 56% of live records at steps 20, 40 and 60. Nearly all of them are the solid walk (2840/2855, 6932/7940, 8071/8362); the rest are unreached depth (969 and 148 at steps 40 and 60) and splits (15 to 143).
+- At seep the walk is the common path, not a rare one. Most records would run the hot body and then the full body again.
+
+**Conclusion.**
+- Not landed. It doesn't lift occupancy (384 -> 384), and at seep more than half of the records would run twice.
+- The cap is the shared sampler's and the depth's register cost on top of the move's live state, not the rare paths.
+- The levers left are:
+  - a move-specific sampler and depth with far less live state per call;
+  - a smaller per-record live state across the trace: the record's 12 words, the hull, k1/pic/end/x.
+
+## 2026-11-09: live state and move-specific fields (levers 1 and 2), the stop rule
+
+**Method.** Compile-only probes of the lane-t.patch move: `advectParticlesDeferred` in the letters capture, baseline 384 threads with 352 B spilled.
+- `tools/tgp.py` rewrites nbAdvect and nbFinish to hold the record in a per-lane workgroup slot instead of registers. It uses `let p=&nbLaneP[lane]`, with every use reading through the pointer. Dawn accepts the pointer member access.
+- `tools/bound.sh` swaps in a best case for lever 2:
+  - a sampler that reads only the window's staged halo (`nbWinHome`; 3 axes x 8 taps, no page walk, no 4h blend);
+  - a depth that reads only the single-block key run (`umVertexRun`, 8 taps).
+- Every figure below is a single probe.
+
+**Lever 1 alone** (record in workgroup memory, everything else real): 384, spill 352 -> 304 B.
+
+**Both levers at their best, from the skeleton up** (every section not named is stubbed):
+
+| Kernel | Threads |
+|---|---|
+| Skeleton (all sections stubbed), record in workgroup memory | 576 |
+| ... plus the slim sample and slim depth | 448 |
+| ... and no hull (`nbHullInclude` / `nbHullUncut` stubbed) | 512 |
+| that 512 kernel plus the real merge prefix | 512 |
+| plus the real surface shift (7 slim depths) | 512 |
+| plus the real endpoint clamp, gridSupported and umPointKind | 512 |
+| plus the real nbParticleBlocked | 448 |
+| plus the real nbSeparation | 448 |
+| plus the real window lookups (age, heat, cold, thin) | 448 |
+| plus the real rigid contact | 384 |
+| plus the real nbFinish (solid walk, contacts, split; record in workgroup memory) | 384 |
+| Whole move, slim sample and depth, finish stubbed | 384 |
+| Whole move, slim sample and depth, record in workgroup memory | 384 |
+
+**Register map.**
+- Kernels that don't fit:
+  - Even the best case only reaches 512 with no hull and with the blocked test, separation, window lookups, rigid contact and finish all stubbed.
+  - The finish (the solid walk with its contacts) and the rigid contact each reach 384 on their own, whatever the trace holds.
+  - nbParticleBlocked, nbSeparation and the window lookups each cost a bucket (512 -> 448).
+- Inside the trace, the live state costs about one bucket each:
+  - the record's 12 words: about 64 threads (448 -> 512 needs the hull gone as well);
+  - the hull: 6 floats.
+- Neither lever gets the whole move to 512, so per the stop rule nothing lands.
+- What would still change the cap:
+  - moving the finish's walk out of the move kernel. At seep the walk is the common path (51-73% of records), so this means a launch over the records, not a rare list;
+  - an occupancy-independent design for the walk's contacts.
+
+## 2026-11-09: the depth rewrite is the move's own
+
+The combined gate (HEAD+E+T against 99dd6d64, letters steps 116-119) moved three kernels:
+- the move was 0.66 ms faster;
+- NB-FLIP seed was 0.39 ms slower;
+- NB-FLIP transfer was 0.26 ms slower.
+
+The rolled key loop went into the shared particleDepthIn, which seeding and transfer also call.
+
+**Probe** (compile-only threads on e68655c3: E only, E + T without the depth change, E + T, E + T with the move's own depth):
+
+| Entry | E | E+T no depth | E+T | E+T, move's own depth |
+|---|---|---|---|---|
+| seedCells | 640 | 640 | 576 | 640 |
+| seedRank | 640 | 640 | 576 | 640 |
+| seedInitial, transfer | 384 | 384 | 384 | 384 |
+| transferDeposit, transferSeams, seed, seedSources | 512 | 512 | 512 | 512 |
+| advectParticlesDeferred | 384 | 384 | 384 | 384 |
+
+- Only particleDepthIn reaches seed and transfer. nbSurfaceShift and A+B+C are move-only: the "no depth" column equals E.
+- The fix: particleDepthIn is HEAD's again, and the rolled loop is `particleDepthMoveIn`, which only nbMoveDepth calls. The value is the same: same keys, same weights, same order of the sum.
+- Spill, same columns without the "no depth" one (E / E+T / move's own depth): seedInitial 64/80/64 B; the rest are unchanged at 48-64 B.
+- The move: 480/352/352 B. The move's own depth keeps its whole cut.
+- Transfer's threads and spill are the same in all four trees. Its gate rise is not a register cost; the move's own depth puts its code back as it was on HEAD in any case.

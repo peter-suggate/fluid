@@ -28,7 +28,8 @@
  *   [17] the move serial; [18] the scratch extent; [19] the input entries;
  *   [20] the output entries (slabs); [21] the current spill reserve's
  *   records (word 15 is the air pass's change gate); [22] the move's slab
- *   jobs (NB_MOVE_CHUNK-record chunks of the input entries).
+ *   jobs (NB_MOVE_CHUNK-record chunks of the input entries); [23] the
+ *   move's next job (NB_MOVE_TICKET_WORD, cleared before each move).
  * * - From NB_SLAB_RECORD, 12 words a brick id: [0] scratch base, [1] scratch
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
  *   slabPlace: the appends), [3] stamp (the serial of the move that sized
@@ -42,6 +43,9 @@ export const NB_SLAB_HEADER_WORDS=48;
 /** The step's seeds (cleared with the move's live count): a records budget
  * defers an overlap reseed once the live records and the seeds reach it. */
 export const NB_SLAB_SEEDS_WORD=26;
+/** The move's job ticket: each workgroup takes its next job from it (the
+ * host clears it before the move). */
+export const NB_MOVE_TICKET_WORD=23;
 /** Receipt-buffer words for a lattice of `blocks` blocks. */
 export function particleSlabWords(blocks:number):number{return NB_SLAB_HEADER_WORDS+17*64*blocks;}
 /** Minimum tail headroom: slab sizing leaves this much of each bank free. */
