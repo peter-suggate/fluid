@@ -10,7 +10,8 @@
  * env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/probe-pipeline-compile.ts
  *   --dump=<dir> [--module=<regex>] [--entry=<regex>] [--limit=N] [--source=<sha>:<file.wgsl>] [--parallel=N]
  * --source replaces the dumped WGSL of module <sha> with <file.wgsl> (an edited copy).
- * --parallel keeps N compiles in flight (default 1) and also reports the wall. */
+ * --parallel keeps N compiles in flight (default 1) and also reports the wall.
+ * --clone gives every pipeline a shader module of its own (the same source). */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,9 +22,10 @@ import { createProcessRetainedDawnGPU, nodeDawnOptions } from "../lib/harness/no
 
 const options = process.argv.slice(2);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
-for (const a of options) assert.ok(/^--(?:dump|module|entry|limit|source|parallel)=.+$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^--(?:dump|module|entry|limit|source|parallel)=.+$/.test(a) || a === "--clone", `Unknown option: ${a}`);
 const dump = resolve(option("dump") ?? assert.fail("--dump=<dir> is required"));
 const moduleFilter = new RegExp(option("module") ?? ""), entryFilter = new RegExp(option("entry") ?? "");
+const clone = options.includes("--clone");
 const limit = Number(option("limit") ?? Infinity), parallel = Number(option("parallel") ?? 1);
 const sources = new Map(options.filter(a => a.startsWith("--source=")).map(a => { const [sha, file] = a.slice(9).split(":"); return [sha!, file!]; }));
 process.env.FLUID_METAL_SHADER_CACHE ??= mkdtempSync(join(tmpdir(), "fluid-compile-probe-"));
@@ -42,12 +44,13 @@ device.addEventListener("uncapturederror", e => console.error(e.error.message));
 console.log(JSON.stringify({ dump, cache: process.env.FLUID_METAL_SHADER_CACHE, pipelines: chosen.length, of: all.length }));
 
 const modules = new Map<string, GPUShaderModule>();
-for (const p of chosen) {
-  if (modules.has(p.sha!)) continue;
+const moduleKey = (p: Dumped, i: number) => clone ? `${p.sha}#${i}` : p.sha!;
+for (const [i, p] of chosen.entries()) {
+  if (modules.has(moduleKey(p, i))) continue;
   const code = readFileSync(sources.get(p.sha!) ?? join(dump, `${p.sha}.wgsl`), "utf8");
   const module = device.createShaderModule({ code, label: p.module });
   for (const m of (await module.getCompilationInfo()).messages) if (m.type === "error") console.log(`${m.lineNum}: ${m.message}`);
-  modules.set(p.sha!, module);
+  modules.set(moduleKey(p, i), module);
 }
 let total = 0, next = 0;
 const wallStart = performance.now();
@@ -55,7 +58,7 @@ const compileNext = async (): Promise<void> => {
   for (let i = next++; i < chosen.length; i = next++) {
     const p = chosen[i]!, start = performance.now();
     try {
-      await device.createComputePipelineAsync({ layout: "auto", compute: { module: modules.get(p.sha!)!, entryPoint: p.entryPoint!, constants: p.constants } });
+      await device.createComputePipelineAsync({ layout: "auto", compute: { module: modules.get(moduleKey(p, i))!, entryPoint: p.entryPoint!, constants: p.constants } });
       const ms = performance.now() - start; total += ms;
       console.log(JSON.stringify({ module: p.module, entryPoint: p.entryPoint, ms: Math.round(ms), constants: p.constants }));
     } catch (error) {

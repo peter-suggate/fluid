@@ -56,7 +56,9 @@ const raw: GPUDevice = await adapter.requestDevice({ requiredFeatures: [...(["su
 const device_ms = now();
 
 interface Module { label?: string; bytes: number; sha: string; ms: number }
-interface Pipeline { kind: "compute" | "render"; label?: string; module?: string; entryPoint?: string; start: number; end: number }
+interface Pipeline { kind: "compute" | "render"; label?: string; module?: string; entryPoint?: string; start: number; end: number;
+  /** The phase that first bound it in a pass: "construction", or the step that did. */
+  firstUse?: string; uses?: number }
 const modules: Module[] = [], pipelines: Pipeline[] = [];
 const moduleLabel = new WeakMap<GPUShaderModule, string>();
 const shader = raw.createShaderModule.bind(raw), computeAsync = raw.createComputePipelineAsync.bind(raw), renderAsync = raw.createRenderPipelineAsync.bind(raw);
@@ -71,10 +73,22 @@ raw.createShaderModule = descriptor => {
   if (dump) writeFileSync(resolve(dump, `${sha}.wgsl`), descriptor.code);
   return module;
 };
+/** Which pipelines a frame binds: each pipeline's first setPipeline, by
+ * phase (construction, then each step), and how many times it was bound. */
+let phase = "construction";
+const recordOf = new WeakMap<object, Pipeline>();
 const timed = <T>(entry: Omit<Pipeline, "start" | "end">, promise: () => Promise<T>) => {
   const record: Pipeline = { ...entry, start: now(), end: Number.NaN }; pipelines.push(record);
-  return promise().finally(() => { record.end = now(); });
+  return promise().then(pipeline => { recordOf.set(pipeline as object, record); return pipeline; }).finally(() => { record.end = now(); });
 };
+for (const encoder of [dawn.globals.GPUComputePassEncoder, dawn.globals.GPURenderPassEncoder]) {
+  const setPipeline = encoder.prototype.setPipeline;
+  encoder.prototype.setPipeline = function (this: unknown, pipeline: object) {
+    const record = recordOf.get(pipeline);
+    if (record) { record.firstUse ??= phase; record.uses = (record.uses ?? 0) + 1; }
+    return setPipeline.call(this, pipeline);
+  };
+}
 raw.createComputePipelineAsync = descriptor => (dump && dumped.push({ module: moduleLabel.get(descriptor.compute.module), sha: moduleSha.get(descriptor.compute.module),
   entryPoint: descriptor.compute.entryPoint, constants: descriptor.compute.constants as Record<string, number> | undefined }), timed({ kind: "compute", label: descriptor.label, module: moduleLabel.get(descriptor.compute.module), entryPoint: descriptor.compute.entryPoint },
   () => computeAsync(descriptor)));
@@ -167,7 +181,7 @@ const progress = setInterval(() => console.log(JSON.stringify({ phase: "construc
 const solver = await method.createSolverAsync!(device, scene, quality, values, undefined,
   snapshot => { tasks.push({ at: now(), taskId: snapshot.taskId ?? snapshot.label, phase: snapshot.phase, label: snapshot.label }); }) as WebGPUUniformReferenceSolver;
 constructEnd = now(); clearInterval(progress); uploading = false;
-const { summary, durations: pipelineDurations } = summarize(constructStart, constructEnd);
+const { summary } = summarize(constructStart, constructEnd);
 const host = uploadSummary();
 console.log(JSON.stringify({ phase: "constructed", ...summary, uploadBytes: host.uploadBytes, uploadHash: host.uploadHash }));
 
@@ -179,9 +193,11 @@ const sample = async (step: number) => {
   hashes.push({ step: String(step), density: digest(f.density), pressure: digest(f.pressure), phi: digest(f.phi), tiles: digest(f.tiles) });
   console.log(JSON.stringify({ phase: "fields", ...hashes.at(-1) }));
 };
+phase = "sample";
 await sample(0);
 const stepStart = now();
 for (let step = 1; step <= steps; step++) {
+  phase = String(step);
   assert.ok(solver.advanceTo(step * dt, []), `advance to step ${step}`);
   await solver.awaitFrameCompletion();
   assert.equal(solver.info.simulationPipelineError, undefined);
@@ -191,6 +207,13 @@ if (steps) await sample(steps);
 solver.destroy(); await raw.queue.onSubmittedWorkDone();
 assert.deepEqual(errors, []);
 if (dump) writeFileSync(resolve(dump, "pipelines.json"), JSON.stringify(dumped, null, 1) + "\n");
-if (report) writeFileSync(report, JSON.stringify({ summary, step_ms, hashes, uploads: host, modules, pipelines: pipelineDurations }, null, 2) + "\n");
+// Each pipeline's first binding, by phase, and the compile time of the ones never bound.
+const usage = { byPhase: Object.fromEntries([...pipelines.reduce((m, p) => {
+  const u = m.get(p.firstUse ?? "never") ?? { pipelines: 0, compile_ms: 0 };
+  u.pipelines++; u.compile_ms = Math.round(u.compile_ms + p.end - p.start); return m.set(p.firstUse ?? "never", u);
+}, new Map<string, { pipelines: number; compile_ms: number }>())]) };
+console.log(JSON.stringify({ phase: "usage", ...usage }));
+if (report) writeFileSync(report, JSON.stringify({ summary, step_ms, usage, hashes, uploads: host, modules,
+  pipelines: pipelines.map(p => ({ ...p, ms: p.end - p.start })).sort((a, b) => b.ms - a.ms) }, null, 2) + "\n");
 console.log(JSON.stringify({ phase: "done", construction_ms: summary.construction_ms, step_ms, total_ms: now() }));
 process.exit(0);
