@@ -40,7 +40,58 @@ Cross-scene baseline (Lane E, HEAD 334745cb):
 | rest 16x8x4 | 4.11 ms | 0 |
 | drop=2 16x8x4 | 16.50 ms | -6e-8 |
 
-## B1 steps (not yet committed)
+## Landed (2026-11-08)
+
+- **S3, the particle sort: 1cbebf88.** A counting sort per brick, landed alone without S1. The cross-scene table is in the commit message.
+- **S2, momentum: 8822b2d8.** One claimed launch with the COLD retain.
+  - Cold compile: advectMomentum 1.1 s, slabSort 0.2 s.
+  - HEAD+S2 against the S3 commit:
+
+| scene | before | after |
+|---|---|---|
+| seep | 31.6 ms | 31.0 ms |
+| letters | 58.0 ms | 54.0 ms |
+| rest16 | 3.79 ms | 3.28 ms |
+| drop16 | 16.47 ms | 15.69 ms |
+
+  - Drift stays in band.
+- **S1, surface advect: withdrawn.** It took 640 s to compile cold. umAdvected's solid body is superlinear under Metal's inlining (see Lane C's progress). S1 comes back on Lane C's structure, held to 5 s or less per pipeline.
+
+## Momentum attribution at seep (HEAD+S2, steps 196-199)
+
+These were measurement-only launches, run before the real one and overwritten by it, so the simulation is unchanged.
+
+| part | ms |
+|---|---|
+| whole launch | 1.18 |
+| 4h jobs | 0.26 |
+| h tiles | 0.72 |
+| of which: tile context (claim, sides, liveness) | 0.07 |
+| of which: traces | 0.59 |
+| trace, sample addressing removed (tile home, texture fetch only) | 0.46 |
+| trace, wall bounds removed | 0.66 |
+
+The trace is a latency chain of dependent global loads and filtered fetches, each sample depending on the last. It is not ALU.
+
+The first window (m1: a per-tile 8³ window, each texel staged per tile-home, with per-tap validity and umPointBounds still per sample) made it worse, 1.18 → 1.51 ms.
+
+Two refinements of the window, as single runs of advectMomentum against the 1.18 ms of HEAD+S2:
+
+| variant | what it does | advectMomentum |
+|---|---|---|
+| m3, staged addressing | Per job, threadgroup copies of the 27 tile homes and the 27 page kinds around the tile. umSampleTile and umPointBounds become threadgroup lookups; the texture fetch stays. | 1.38 ms |
+| m4, m3 plus a window | An 8³ window of the job tile's own halo block: 512 texel loads, one home, exact taps. A miss falls back to the sampler. | 1.51 ms |
+| bound on m4 | The h jobs sample only from the window, and a miss reads 0. A measurement launch. | 0.59 ms (the h jobs alone, today 0.72) |
+
+**Finding:** with every tap in threadgroup memory, the h jobs save at most 0.13 ms.
+- The cost is the trace's sample count. The substep trace takes 2 samples per segment of at most one cell, 3 components each, and a SIMD group runs as long as its longest lane.
+- Each job's staging preamble adds to its critical path. It costs more than the addressing it removes.
+
+The fused bench's momentum stage (530 µs for 2.1M faces) used one midpoint step without walls, seams or freeze. That is not today's trace, so it overstated the win.
+
+**So momentum alone does not justify a brick-job form, and it is not wired.** Its only possible win is sharing the staged windows with phi and particles in one pass.
+
+## B1 steps (S1 and S4 withdrawn, S2 and S3 landed)
 
 Each step replaces one field's classify, list and twin machinery with one claimed launch and deletes the old path.
 
