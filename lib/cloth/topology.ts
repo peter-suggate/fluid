@@ -76,6 +76,8 @@ export function clothTopologyErrors(data: ClothTopologyData, materials: readonly
     if (field && (field.length !== width * n || !field.every(Number.isFinite))) errors.push(`Cloth ${name} must hold ${width} finite values per vertex`);
   };
   vector(data.initialPositions_m, 3, "initial positions"); vector(data.initialVelocities_m_s, 3, "initial velocities"); vector(data.uv, 2, "uv");
+  if (data.vertexMass_kg && (data.vertexMass_kg.length !== n || !data.vertexMass_kg.every(m => Number.isFinite(m) && m > 0)))
+    errors.push("Cloth vertex masses must be one positive finite value per vertex");
   if (data.groups && (data.groups.length !== n || !data.groups.every(g => Number.isInteger(g) && g >= 0))) errors.push("Cloth groups must be a non-negative integer per vertex");
   const s = data.solverState;
   if (s) {
@@ -163,6 +165,7 @@ export function prepareClothTopology(data: ClothTopologyData, materials: readonl
     const rho = materials[faceMaterial[f]!]!.arealDensity_kg_m2;
     for (const v of [a, b, c]) mass[v]! += rho * faceArea[f]! / 3;
   }
+  if (data.vertexMass_kg) mass.set(data.vertexMass_kg);
   // Canonical edges: (min, max) sorted; the first face is the lower face index.
   const edgeMap = new Map<number, number[]>();
   for (let f = 0; f < F; f++) for (let k = 0; k < 3; k++) {

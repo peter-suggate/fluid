@@ -65,6 +65,9 @@ export interface ClothTopologyData {
   /** Per vertex attachment group; 0 is free cloth, g > 0 is a hard AVBD pin
    * following the scripts of group g. */
   readonly groups?: readonly number[];
+  /** Authored mass per vertex (kg), replacing the area lumping rho A / 3 (e.g. Bridson 2002's equal particle
+   * masses). A cut carries it as a per-vertex areal density m_v / A_v, so removed cloth takes its mass along. */
+  readonly vertexMass_kg?: readonly number[];
 }
 
 export type ClothGeometryReference = { readonly kind: "inline"; readonly data: ClothTopologyData };

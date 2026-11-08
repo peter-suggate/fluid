@@ -177,8 +177,16 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
   for(const f of touchedFaces)for(let k=0;k<3;k++)touched.add(newTriangles[3*f+k]!);
   keptOrigins.forEach((o,i)=>{if(o.vertices.length!==1)touched.add(i);});
   const positionsOut=compact(current,3);
+  // Authored masses travel as areal density m_v / A_v (A_v: a third of the incident rest area), blended like uv.
+  const lumped=(tris:ArrayLike<number>,p:ArrayLike<number>,n:number)=>{const a=new Float64Array(n);for(let f=0;f<tris.length/3;f++){const v=[tris[3*f]!,tris[3*f+1]!,tris[3*f+2]!],s=crossArea(p3(p,v[0]!),p3(p,v[1]!),p3(p,v[2]!))/3;for(const i of v)a[i]!+=s;}return a;};
+  let vertexMass_kg:number[]|undefined;
+  if(data.vertexMass_kg){
+    const oldArea=lumped(data.triangles,data.restPositions_m,data.restPositions_m.length/3),density=data.vertexMass_kg.map((m,i)=>m/oldArea[i]!);
+    const newArea=lumped(newTriangles,compact(rest,3),used.length);
+    vertexMass_kg=blend(density,1)!.map((d,i)=>d*newArea[i]!);
+  }
   const topology:ClothTopologyData={...data,restPositions_m:compact(rest,3),triangles:newTriangles,triangleMaterials,triangleIds,
-    initialPositions_m:positionsOut,initialVelocities_m_s:blend(data.initialVelocities_m_s,3),uv:blend(data.uv,2),groups,
+    initialPositions_m:positionsOut,initialVelocities_m_s:blend(data.initialVelocities_m_s,3),uv:blend(data.uv,2),groups,vertexMass_kg,
     solverState:data.solverState?remapClothSolverState(data.solverState,data,{triangles:newTriangles,groups},keptOrigins):undefined};
   return {document:{...document,geometry:{kind:'inline',data:topology}},topology,positions_m:new Float64Array(positionsOut),vertexOrigins:keptOrigins,touchedVertices:touched,removedArea_m2:removedArea,changed:removedArea>0};
 }
