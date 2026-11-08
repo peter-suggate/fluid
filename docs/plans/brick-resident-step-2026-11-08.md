@@ -173,6 +173,15 @@ both levels, with one group per brick:
 | **B4 projection → tail** | projected u | band project; extension sweeps in threadgroup memory; dynamics publish; support plan and certificate for the next head; region-heat evidence (omission, speed, phi revision) reduced per brick; receipts by atomics | extended u, the next frame's marks and heat inputs | P+sweeps on the projected field |
 | **T topology** (frames whose marks changed) | B4's marks | `ubaUpdate` (enter/leave), records for changed slots only, prolong into entering slots, restrict out of leaving ones | slots, records | already incremental in the arena |
 
+**Correction to B1 (Lane T, measured in the code).** Velocity advect
+(momentum) cannot join B1. Its kernel reads this frame's `centerPhi`,
+`volume` and `phase`: momentumGroup culls air with `umCullAir`, after the
+surface, reconstruct, retire, redistance and geometry gather. Only the
+particle move and the surface advect read the previous frame alone.
+Dilating the cull to the previous frame's surface would change the
+physics, so momentum stays its own single claimed launch (S2), after the
+geometry. B1 is therefore the particle move and the phi advect.
+
 **Census.** Today the census is about 10 launches, including
 classifyCoarse's 96-load lanes. It becomes a reduction of evidence that B4
 already holds in threadgroup memory. The tier and owner decisions are

@@ -89,11 +89,25 @@ const CENSUS_TILE_GRID=4096;
  * (2), importance words (2), gap, directed travel, flags (bit 0 crossing,
  * 1 wet, 2 near, 3 required, 4 a crossing 4h owner), reach (f32 bits), stamp
  * (the region's deep epoch + 1 when written; 0 none) and the policy
- * generation (policy.reach.z: encode advances it at any policy change). A record replays while
+ * generation (policy.reach.z: encode advances it at any policy change); the
+ * region's own stamp and generation (regionList) decide. A record replays while
  * its region is deep COLD at the epoch that wrote it: nothing in the
- * region's 27-region neighbourhood has run non-COLD since, so phi, velocity,
- * widths and the open-cell masks classify read are the ones it saw. */
+ * region's 27-region neighbourhood has run non-COLD since, so phi, widths
+ * and the open-cell masks classify read are the ones it saw. Velocity is
+ * not certified: the census reads the extended field, whose air faces the
+ * extension's lagged state may move. Every velocity word of a record is a
+ * function of the tile's velocity keys, so replay takes them afresh and
+ * demotes a region whose keys moved (replay). */
 const REPLAY_WORDS=10;
+/** The census's region lists (regionList, bounds words after the records):
+ * per region its stamp and policy generation, then its mode this census,
+ * then the two counts (and two spare words) and the two lists. 5 words a
+ * region and 4. */
+const REGION_LIST_WORDS=5;
+/** Workgroups of the region launches (replay, classifyCoarse) at most: a
+ * workgroup a listed region at a time, strided; a workgroup past the list
+ * exits at once. */
+const CENSUS_REGION_GRID=1024;
 /** pageMark's fixed grid: a workgroup a visited page at a time, strided. */
 const PAGE_MARK_GRID=UNIFORM_LIVE_GROUP_GROUPS;
 /** Persistent words after the importance words: a hold per tile, the
@@ -275,6 +289,8 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   * replay records from replayRecords. */
  private readonly replayOffset:number;
  private readonly replayRecords:number;
+ /** bounds words: the region lists (regionList, REGION_LIST_WORDS a region). */
+ private readonly regionOffset:number;
  /** census words: decide's band bits, a bit a tile key, kept across censuses. */
  private readonly decidedOffset:number;
  /** Static closure bits (CC_STATIC), a bit a tile key after the decided ones. */
@@ -404,7 +420,9 @@ export class UniformMixedDynamicClassifier implements UniformPageInitBlocks {
   // REPLAY_WORDS a tile key of classify's results.
   this.replayOffset=(UNIFORM_BOUND_CUBE_WORDS+UNIFORM_TILE_BITS_WORDS)*address.blocks;
   this.replayRecords=this.replayOffset+3*this.pages;
-  const boundsBytes=(this.replayRecords+REPLAY_WORDS*tiles)*4;
+  // Then the region lists: regionList's stamps, modes, counts and lists.
+  this.regionOffset=this.replayRecords+REPLAY_WORDS*tiles;
+  const boundsBytes=(this.regionOffset+REGION_LIST_WORDS*this.pages+4)*4;
   this.bounds=device.createBuffer({label:"Uniform dynamic ownership bound cubes",size:boundsBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
   this.allocatedBytes=workBytes+boundsBytes+readBytes+112+(2*(this.joinWords+this.planeWords)+UNIFORM_MIXED_REGION_TABLE_WORDS)*4;
   this.resources=uniformDetailBindLayout(device,{entries:[
@@ -512,7 +530,7 @@ fn interfaceIndex(b:u32,i:u32)->u32{return ${UNIFORM_BOUND_CUBE_WORDS}u*UM_BLOCK
 // Deep COLD (UniformRegionHeat, copied in by encode; zero without a heat):
 // a region whose 27-region neighbourhood holds its values. decide keeps its
 // tiles' widths, holds do not run down and the budget does not drop them;
-// under surface authority classify replays their records (REPLAY_WORDS).
+// under surface authority replay publishes their records (REPLAY_WORDS).
 const CC_DEEP:u32=${this.replayOffset}u;
 const CC_EPOCH:u32=CC_DEEP+${2*this.pages}u;
 const CC_RECORD:u32=${this.replayRecords}u;
@@ -532,7 +550,17 @@ fn ccStamp(tile:u32)->u32{
  if(bounds[CC_DEEP+region]==0u){return 0u;}
  return bounds[CC_EPOCH+region]+1u;
 }
-fn ccValid(tile:u32)->bool{let stamp=ccStamp(tile);let r=CC_RECORD+CC_WORDS*tile;return stamp!=0u&&bounds[r+8u]==stamp&&bounds[r+9u]==policy.reach.z;}
+// The region lists (regionList): per region the stamp and policy generation
+// its last classification wrote (a deep COLD region's records are current
+// while they match), its mode this census (1 replay, 2 classify; resident
+// regions only), then the counts (classify, replay) and the two lists, each
+// in the pool's resident order.
+const CC_REGION:u32=${this.regionOffset}u;
+const CC_MODE:u32=CC_REGION+${2*this.pages}u;
+const CC_LISTS:u32=CC_MODE+${this.pages}u;
+const CC_CLASSIFY:u32=CC_LISTS+4u;
+const CC_REPLAY:u32=CC_CLASSIFY+${this.pages}u;
+fn ccReplayed(tile:u32)->bool{return bounds[CC_MODE+umPageOfTile(tile)]==1u;}
 // A tile of the window: a box of tiles is held to its UNIFORM_WINDOW_PAGES
 // pages an axis, never to a box of the scene's, and a tile nothing stores
 // answers nothing.
@@ -1042,35 +1070,19 @@ fn umDepthSample(tile:u32,i:u32)->vec2u{
 // Interface: an owner whose corner phi changes sign. V/phi disagreement
 // without one is counted, not refined: 4h V error is at or below fine on the
 // same cells (plan, same-cell A/B).
-// bounds: the owner's extended face velocity bounds here, in this lane
-// (classifyCoarse spreads a 4h owner's faces over the workgroup instead).
-// Returns whether the owner has open cells (is classified at all).
-fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>,bounds:bool)->bool{
+// Whether the owner in this lane has open cells (is classified at all).
+fn umOwnerOpen(tile:u32,width:u32,lane:u32)->bool{
  let open=umCensusOpenCells(tile);
- if(all(open==vec2u(0u))||(width==1u&&(open[lane/32u]&(1u<<(lane%32u)))==0u)){return false;}
- let surfaceAuthority=(policy.shaping.x&32768u)!=0u;
- let side=4u/width;
- let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
- // By the owner's width: a 4h owner's texels are canonical, an h owner's the h texture's.
- let coarseOwner=width==4u;
- var v=0.0;if(!surfaceAuthority){if(coarseOwner){v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x;}else{v=textureLoad(volume,vec3i(origin),0).x;}}
- var inside=0u;var deep=0u;var lowPhi=3.0e38;var highPhi=-3.0e38;
- var c8:array<f32,8>;if(coarseOwner){c8=umLoadCorner8(origin,4u);}else{c8=umLoadFine8(origin,width);}
- for(var k=0u;k<8u;k++){
-  let value=c8[k];
-  lowPhi=min(lowPhi,value);highPhi=max(highPhi,value);
-  if(value<0.0){inside++;}
-  if(value< -2.0*MAX_H*f32(width)){deep++;}
-  // Flag 8: the frame plan seed would mark this owner (residency near).
-  if(value<4.0*MAX_H*f32(width)){(*c).flags|=8u;}
- }
- if(!surfaceAuthority&&v!=0.0){(*c).flags|=8u;}
- // Signed bounds of the extended face velocities the next trace samples.
- // An h owner's faces are single patches anchored at its origin (+) and one
- // cell below it (-), whatever the neighbour (umFace).
- var owner=UMOwner();if(bounds&&width!=1u){owner=umOwnerAt(vec3i(origin));}
+ return !(all(open==vec2u(0u))||(width==1u&&(open[lane/32u]&(1u<<(lane%32u)))==0u));
+}
+// Signed bounds of the extended face velocities the next trace samples: the
+// tile's velocity keys, the only velocity any classification reads (replay
+// checks them). An h owner's faces are single patches anchored at its
+// origin (+) and one cell below it (-), whatever the neighbour (umFace).
+fn umOwnerBounds(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>){
+ let origin=umTileCoord(tile)*4u+umCorner(lane,4u/width)*width;
+ var owner=UMOwner();if(width!=1u){owner=umOwnerAt(vec3i(origin));}
  for(var axis=0u;axis<3u;axis++){
-  if(!bounds){break;}
   var low=3.0e38;var high=-3.0e38;
   for(var sign=-1;sign<=1;sign+=2){
    var count=1u;var anchor=vec3i(origin);if(sign<0){anchor[axis]-=1;}
@@ -1088,6 +1100,30 @@ fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>,bounds:
   }
   (*c).low[axis]=min((*c).low[axis],orderKey(low));(*c).high[axis]=max((*c).high[axis],orderKey(high));
  }
+}
+// bounds: the owner's extended face velocity bounds here, in this lane
+// (classifyCoarse spreads a 4h owner's faces over the workgroup instead).
+// Returns whether the owner has open cells (is classified at all).
+fn umClassifyOwner(tile:u32,width:u32,lane:u32,c:ptr<function,TileClass>,bounds:bool)->bool{
+ if(!umOwnerOpen(tile,width,lane)){return false;}
+ let surfaceAuthority=(policy.shaping.x&32768u)!=0u;
+ let side=4u/width;
+ let origin=umTileCoord(tile)*4u+umCorner(lane,side)*width;
+ // By the owner's width: a 4h owner's texels are canonical, an h owner's the h texture's.
+ let coarseOwner=width==4u;
+ var v=0.0;if(!surfaceAuthority){if(coarseOwner){v=${UNIFORM_DETAIL_4H_LOAD}textureLoad(volume,vec3i(origin),0).x;}else{v=textureLoad(volume,vec3i(origin),0).x;}}
+ var inside=0u;var deep=0u;var lowPhi=3.0e38;var highPhi=-3.0e38;
+ var c8:array<f32,8>;if(coarseOwner){c8=umLoadCorner8(origin,4u);}else{c8=umLoadFine8(origin,width);}
+ for(var k=0u;k<8u;k++){
+  let value=c8[k];
+  lowPhi=min(lowPhi,value);highPhi=max(highPhi,value);
+  if(value<0.0){inside++;}
+  if(value< -2.0*MAX_H*f32(width)){deep++;}
+  // Flag 8: the frame plan seed would mark this owner (residency near).
+  if(value<4.0*MAX_H*f32(width)){(*c).flags|=8u;}
+ }
+ if(!surfaceAuthority&&v!=0.0){(*c).flags|=8u;}
+ if(bounds){umOwnerBounds(tile,width,lane,c);}
  // Largest interior deficit and largest air volume, per fine/coarse width.
  let coarse=select(0u,1u,width!=1u);
  if(!surfaceAuthority&&deep==8u){atomicMax(&groupExtreme[coarse],bitcast<u32>(max(1.0-v,0.0)));}
@@ -1163,7 +1199,7 @@ fn umFinishTile(tile:u32,width:u32,c:TileClass){
   }
   gap=min(u32(ceil(speed)),255u)<<24u;for(var k=0u;k<6u;k++){gap|=c.gap[k]<<(4u*k);}
  }
- // The velocity keys are classify's alone: a replay keeps them in place.
+ // The velocity keys are classify's alone: a replay checks them against the field.
  for(var a=0u;a<3u;a++){atomicStore(&census[boundIndex(tile,a)],c.low[a]);atomicStore(&census[boundIndex(tile,3u+a)],c.high[a]);}
  // A positive coarse distance is not a physical reader. NB needs owned h
  // tiles and liquid here;
@@ -1191,23 +1227,133 @@ fn umPublishTile(tile:u32,cells:vec2u,w0:u32,w1:u32,gap:u32,directed:u32,flags:u
  if((flags&4u)!=0u){atomicOr(&census[nearIndex(tile/32u)],1u<<(tile%32u));}
  if((flags&8u)!=0u&&!umTileResident(tile)){atomicOr(&census[auditIndex()],1u);}
 }
-// A deep COLD tile's record (ccValid): its owners' census counter too.
-fn umReplayTile(tile:u32){
- let r=CC_RECORD+CC_WORDS*tile;let flags=bounds[r+6u];
- if((flags&16u)!=0u){atomicAdd(&census[7],1u);}
- umPublishTile(tile,vec2u(bounds[r],bounds[r+1u]),bounds[r+2u],bounds[r+3u],bounds[r+4u],bounds[r+5u],flags,bounds[r+7u]);
+// The census's regions, in the pool's resident order: one workgroup. A
+// region replays (mode 1) when surface authority holds, it is deep COLD and
+// its stamp and generation are the ones its last classification wrote (the
+// deep epoch + 1 and policy.reach.z): its tiles' records are then current
+// but for velocity, which replay checks (a region it demotes classifies).
+// Every other region classifies (mode 2) and takes this census's stamp
+// (0 unless it is deep COLD under surface authority), which every tile
+// record it writes carries too. Two ordered lists, compacted by a scan, not
+// by atomics: the census is the same words whatever order the GPU runs.
+var<workgroup> rlScan:array<u32,256>;
+@compute @workgroup_size(256) fn regionList(@builtin(local_invocation_index) lane:u32){
+ let regions=8u*ulResidentCount();let authority=(policy.shaping.x&32768u)!=0u;
+ var classified=0u;var replayed=0u;
+ for(var first=0u;first<regions;first+=256u){
+  let i=first+lane;var region=0u;var mode=0u;
+  if(i<regions){
+   region=8u*ulResidentBlock(i>>3u)+(i&7u);
+   let deep=authority&&bounds[CC_DEEP+region]!=0u;let stamp=select(0u,bounds[CC_EPOCH+region]+1u,deep);
+   let s=CC_REGION+2u*region;
+   mode=select(2u,1u,deep&&bounds[s]==stamp&&bounds[s+1u]==policy.reach.z);
+   if(mode==2u){bounds[s]=stamp;bounds[s+1u]=policy.reach.z;}
+   bounds[CC_MODE+region]=mode;
+  }
+  // Both counts in one inclusive scan (a chunk sums at most 256 of each).
+  rlScan[lane]=select(0u,1u,mode==2u)|select(0u,65536u,mode==1u);
+  for(var offset=1u;offset<256u;offset*=2u){
+   workgroupBarrier();var v=0u;if(lane>=offset){v=rlScan[lane-offset];}
+   workgroupBarrier();rlScan[lane]+=v;
+  }
+  workgroupBarrier();
+  let at=rlScan[lane];let total=rlScan[255];
+  if(mode==2u){bounds[CC_CLASSIFY+classified+(at&65535u)-1u]=region;}
+  if(mode==1u){bounds[CC_REPLAY+replayed+(at>>16u)-1u]=region;}
+  classified+=total&65535u;replayed+=total>>16u;
+  workgroupBarrier();
+ }
+ if(lane==0u){bounds[CC_LISTS]=classified;bounds[CC_LISTS+1u]=replayed;bounds[CC_LISTS+2u]=0u;bounds[CC_LISTS+3u]=0u;}
+}
+// The replayed regions' records: a workgroup a region, a lane a tile. Each
+// tile's words as umPublishTile writes them, its owners' counter
+// (census[7]) too; the counters, the wet and near bits and the audit are
+// gathered per region and flushed once. A region's lanes 16 z .. 16 z + 15
+// (umPageTile: x and y of one tile row z) share a band-bit word.
+// The key check first: the deep epoch certifies phi, widths and masks, not
+// the extended velocity the census reads (the extension's air faces carry
+// lagged state no 27-region certificate bounds). Every velocity word of a
+// record is a function of the tile's keys, so a region whose live tiles'
+// keys, taken afresh, are the stored ones replays exactly what classifying
+// it writes; one whose keys moved is demoted (mode 2) and classify and
+// classifyCoarse classify it in this census. A 4h tile's keys are its lane's
+// serial loop; an h tile's are the workgroup's, a lane an owner, one tile at
+// a time until a key differs.
+var<workgroup> rpCount:u32;
+var<workgroup> rpWords:array<atomic<u32>,11>;
+var<workgroup> rpStale:atomic<u32>;
+var<workgroup> rpFine:atomic<u32>;
+var<workgroup> rpFineTile:array<u32,64>;
+var<workgroup> rpFineCount:u32;
+var<workgroup> rpUniform:u32;
+fn rpKeysMoved(tile:u32,c:TileClass)->bool{
+ for(var a=0u;a<3u;a++){if(atomicLoad(&census[boundIndex(tile,a)])!=c.low[a]||atomicLoad(&census[boundIndex(tile,3u+a)])!=c.high[a]){return true;}}
+ return false;
+}
+@compute @workgroup_size(64) fn replay(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){rpCount=bounds[CC_LISTS+1u];}
+ let count=workgroupUniformLoad(&rpCount);
+ for(var job=group.x;job<count;job+=groups.x){
+  if(lane<11u){atomicStore(&rpWords[lane],0u);}
+  if(lane==0u){resetGroupCensus();atomicStore(&rpStale,0u);atomicStore(&rpFine,0u);}
+  workgroupBarrier();
+  let region=bounds[CC_REPLAY+job];let tile=umPageTile(region,lane);
+  let live=umTileLive(tile);let width=umTileWidth(tile);
+  if(live&&width==1u){rpFineTile[atomicAdd(&rpFine,1u)]=tile;}
+  else if(live&&width==4u){var c=umEmptyClass();if(umOwnerOpen(tile,4u,0u)){umOwnerBounds(tile,4u,0u,&c);}if(rpKeysMoved(tile,c)){atomicStore(&rpStale,1u);}}
+  workgroupBarrier();
+  if(lane==0u){rpFineCount=atomicLoad(&rpFine);}
+  let fine=workgroupUniformLoad(&rpFineCount);
+  for(var i=0u;i<fine;i++){
+   if(lane==0u){rpUniform=atomicLoad(&rpStale);}
+   if(workgroupUniformLoad(&rpUniform)!=0u){break;}
+   if(lane<3u){atomicStore(&tileLow[lane],0xffffffffu);atomicStore(&tileHigh[lane],0u);}
+   workgroupBarrier();
+   let t=rpFineTile[i];
+   if(umOwnerOpen(t,1u,lane)){var c=umEmptyClass();umOwnerBounds(t,1u,lane,&c);for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}}
+   workgroupBarrier();
+   if(lane==0u){var c=umEmptyClass();for(var a=0u;a<3u;a++){c.low[a]=atomicLoad(&tileLow[a]);c.high[a]=atomicLoad(&tileHigh[a]);}if(rpKeysMoved(t,c)){atomicStore(&rpStale,1u);}}
+  }
+  workgroupBarrier();
+  if(lane==0u){rpUniform=atomicLoad(&rpStale);}
+  if(workgroupUniformLoad(&rpUniform)!=0u){
+   if(lane==0u){bounds[CC_MODE+region]=2u;}
+   workgroupBarrier();continue;
+  }
+  let r=CC_RECORD+CC_WORDS*tile;let flags=bounds[r+6u];
+  atomicMax(&groupReach,bounds[r+7u]);
+  for(var k=0u;k<2u;k++){atomicStore(&census[crossingIndex(tile,k)],bounds[r+k]);atomicStore(&census[importanceIndex(tile,k)],bounds[r+2u+k]);}
+  atomicStore(&census[gapIndex(tile)],bounds[r+4u]);
+  atomicStore(&census[travelIndex(tile)],bounds[r+5u]);
+  let row=lane>>4u;let bit=1u<<(tile%32u);
+  if((flags&1u)!=0u){atomicAdd(&rpWords[0],1u);}
+  if((flags&16u)!=0u){atomicAdd(&rpWords[1],1u);}
+  if((flags&2u)!=0u){atomicOr(&rpWords[2u+row],bit);}
+  if((flags&4u)!=0u){atomicOr(&rpWords[6u+row],bit);}
+  if((flags&8u)!=0u&&!umTileResident(tile)){atomicStore(&rpWords[10],1u);}
+  workgroupBarrier();
+  if(lane<4u){
+   let w=umPageTile(region,16u*lane)/32u;
+   let wet=atomicLoad(&rpWords[2u+lane]);if(wet!=0u){atomicOr(&census[wetIndex(w)],wet);}
+   let near=atomicLoad(&rpWords[6u+lane]);if(near!=0u){atomicOr(&census[nearIndex(w)],near);}
+  }
+  if(lane==0u){
+   let crossing=atomicLoad(&rpWords[0]);if(crossing!=0u){atomicAdd(&census[0],crossing);}
+   let owners=atomicLoad(&rpWords[1]);if(owners!=0u){atomicAdd(&census[7],owners);}
+   if(atomicLoad(&rpWords[10])!=0u){atomicOr(&census[auditIndex()],1u);}
+   flushGroupCensus();
+  }
+  workgroupBarrier();
+ }
 }
 // h tiles: one workgroup per tile, one lane per owner. A fixed grid strides
 // over the live h list; umCounts is uniform, so the loop keeps its barriers.
 @compute @workgroup_size(64) fn classify(@builtin(workgroup_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
  for(var job=gid.x;job<umCounts.x;job+=groups.x){
  let tile=umTopology[UM_TILES+job];
- // A deep COLD tile replays its record on one lane.
- if(lane==0u){replayTile=u32(ccValid(tile));}
- if(workgroupUniformLoad(&replayTile)!=0u){
-  if(lane==0u){resetGroupCensus();umReplayTile(tile);flushGroupCensus();}
-  workgroupBarrier();continue;
- }
+ // A replayed region's tile is replay's (a region replay demoted is classify's).
+ if(lane==0u){replayTile=u32(ccReplayed(tile));}
+ if(workgroupUniformLoad(&replayTile)!=0u){workgroupBarrier();continue;}
  if(lane==0u){resetGroupCensus();atomicStore(&mixedTile,0u);for(var k=0u;k<2u;k++){atomicStore(&tileCrossing[k],0u);}for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}atomicStore(&tileError,0u);atomicStore(&tileSigned,0);atomicStore(&tileCrossings,0u);atomicStore(&tileCurve,0);atomicStore(&tileCurves,0u);atomicStore(&tileCorner,0u);atomicStore(&tileWide,0u);for(var k=0u;k<2u;k++){atomicStore(&tileDeep[k],0u);}}workgroupBarrier();
  // The h list holds h tiles only: one lane per owner.
  const width=1u;
@@ -1281,24 +1427,34 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i,widePatch:bool){
  let finite=abs(u)<=3.0e38;
  atomicMin(&cqLow[owner][axis],orderKey(select(-3.0e38,u,finite)));atomicMax(&cqHigh[owner][axis],orderKey(select(3.0e38,u,finite)));
 }
+// A workgroup a classified region (regionList), a lane a tile: its 4h
+// tiles. The jobs past the classify list are the replay list's: a region
+// replay demoted (mode 2: its keys moved) classifies here, any other exits.
+var<workgroup> cqRegions:u32;
+var<workgroup> cqRegion:u32;
 @compute @workgroup_size(64) fn classifyCoarse(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- for(var first=64u*group.x;first<umCounts.y;first+=64u*groups.x){
+ if(lane==0u){cqRegions=bounds[CC_LISTS]+bounds[CC_LISTS+1u];}
+ let regions=workgroupUniformLoad(&cqRegions);
+ for(var job=group.x;job<regions;job+=groups.x){
+ if(lane==0u){
+  let listed=bounds[CC_LISTS];var region=0xffffffffu;
+  if(job<listed){region=bounds[CC_CLASSIFY+job];}
+  else{let r=bounds[CC_REPLAY+job-listed];if(bounds[CC_MODE+r]==2u){region=r;}}
+  cqRegion=region;
+ }
+ let region=workgroupUniformLoad(&cqRegion);
+ if(region==0xffffffffu){workgroupBarrier();continue;}
  if(lane==0u){resetGroupCensus();atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);atomicStore(&cqParts,0u);}
  for(var a=0u;a<3u;a++){atomicStore(&cqLow[lane][a],orderKey(3.0e38));atomicStore(&cqHigh[lane][a],orderKey(-3.0e38));}
  cqBounded[lane]=0u;
  atomicStore(&cqWorst[lane],0u);atomicStore(&cqCurve[lane],0u);atomicStore(&cqDeepest[lane][0],0u);atomicStore(&cqDeepest[lane][1],0u);
  workgroupBarrier();
- let index=first+lane;
- var c=umEmptyClass();var classified=false;var tile=0u;
- if(index<umCounts.y){
-  tile=umTopology[UM_TILES+umCounts.x+index];cqTile[lane]=tile;
-  if(ccValid(tile)){umReplayTile(tile);}
-  else{
-   classified=true;
-   if(umClassifyOwner(tile,4u,0u,&c,umCoarseSerialBounds)&&!umCoarseSerialBounds){cqBounded[lane]=1u;cqOwner[lane]=umOwnerAt(vec3i(umTileCoord(tile)*4u));}
-   if((c.flags&2u)!=0u&&policy.step.y>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
-   if((c.flags&2u)!=0u&&thinWanted()){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;}
-  }
+ var c=umEmptyClass();var classified=false;let tile=umPageTile(region,lane);
+ if(umTileLive(tile)&&umTileWidth(tile)==4u){
+  cqTile[lane]=tile;classified=true;
+  if(umClassifyOwner(tile,4u,0u,&c,umCoarseSerialBounds)&&!umCoarseSerialBounds){cqBounded[lane]=1u;cqOwner[lane]=umOwnerAt(vec3i(umTileCoord(tile)*4u));}
+  if((c.flags&2u)!=0u&&policy.step.y>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
+  if((c.flags&2u)!=0u&&thinWanted()){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;}
  }
  workgroupBarrier();
  for(var j=lane;j<6u*64u;j+=64u){
@@ -1692,8 +1848,10 @@ fn movingShapeNear(tile:u32,p:vec3i)->bool{
  }}}
  return false;
 }
+// A workgroup a resident region (umPageTile), a lane a tile: a deep COLD
+// region's lanes take the short path together.
 @compute @workgroup_size(64) fn decide(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){decideTile(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
+ for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){let i=visit>>6u;decideTile(umPageTile(8u*ulResidentBlock(i>>3u)+(i&7u),visit&63u));}
 }
 fn decideTile(tile:u32){
  if(!umTileLive(tile)){return;}
@@ -1968,7 +2126,7 @@ fn compactPage(i:u32)->u32{return 8u*ulResidentBlock(i>>3u)+(i&7u);}
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources]});
-  await Promise.all(["classify","classifyCoarse","importance","interfaceBits","interfaceBlocks","boundCubes","decide","solidActive","solidPromote","pageSeed","pageMark","pageCompact",...NARROW_BAND_BUDGET_ENTRIES].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
+  await Promise.all(["regionList","replay","classify","classifyCoarse","importance","interfaceBits","interfaceBlocks","boundCubes","decide","solidActive","solidPromote","pageSeed","pageMark","pageCompact",...NARROW_BAND_BUDGET_ENTRIES].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX}}}));}));
   if(UniformMixedDynamicClassifier.serialCoarseBounds)this.serialCoarse=await uniformDetailPipeline(this.device,this.ownership,{layout,compute:{module,entryPoint:"classifyCoarse",constants:{umDispatchX:this.ownership.dispatchX,umCoarseSerialBounds:1}}});
   await this.initializeRequest();
  }
@@ -2038,7 +2196,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
  setBodies(mark?:(encoder:GPUCommandEncoder,tiles:GPUBuffer)=>void):void{this.bodies=mark;}
  /** The frame's region heat (UniformRegionHeat.tiers, regions = the census's
   * pages), read after its head encode: decide keeps a deep COLD region's
-  * widths and classify replays its tiles (REPLAY_WORDS). Without it every
+  * widths and replay publishes its tiles' records (REPLAY_WORDS). Without it every
   * tile is classified and decided each census. */
  attachHeat(tiers:GPUBuffer):void{
   if(tiers.size<4*(UNIFORM_REGION_HEAT_DEEP_WORD(this.pages)+3*this.pages))throw new Error(`Dynamic ownership: region heat tiers of ${tiers.size} bytes do not hold ${this.pages} regions`);
@@ -2094,16 +2252,18 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
  private censusLaunches(){
   const tiles=this.ownership.capacity.tiles,blocks=this.ownership.capacity.address.blocks;
   const launch=(entry:string,when:0|1|2|3)=>{
-   // Fixed grids, none sized by the pool: classify strides over the h list
-   // and classifyCoarse over the 4h list (a lane a tile); the per-key
-   // entries over the resident tile keys, the interface bits a workgroup a
-   // resident z-slab, the interface summary a lane and the bound cubes a
-   // workgroup a resident block; pageSeed a lane a visited page. classify
-   // and classifyCoarse take the ownership's buffered h and 4h work below
-   // their grids (a workgroup an h tile, or 64 4h tiles).
+   // Fixed grids, none sized by the pool: regionList one workgroup over the
+   // resident regions, replay and classifyCoarse a workgroup a listed region
+   // (a lane a tile), classify strides over the h list; the per-key
+   // entries over the resident tile keys (decide a workgroup a region), the
+   // interface bits a workgroup a resident z-slab, the interface summary a
+   // lane and the bound cubes a workgroup a resident block; pageSeed a lane
+   // a visited page. classify takes the ownership's buffered h work below
+   // its grid (a workgroup an h tile).
    const pipeline=this.pipelines.get(entry)!;
+   if(entry==="regionList")return {pipeline,when,x:1,y:0};
+   if(entry==="replay"||entry==="classifyCoarse")return {pipeline,when,x:Math.min(CENSUS_REGION_GRID,this.pages),y:0};
    if(entry==="classify")return {pipeline,when,x:Math.min(CENSUS_TILE_GRID,tiles),y:0,work:"fine" as const,per:1};
-   if(entry==="classifyCoarse")return {pipeline,when,x:Math.min(UNIFORM_LIVE_KEY_GROUPS,tiles/64),y:0,work:"coarse" as const,per:64};
    if(entry==="boundCubes")return {pipeline,when,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,blocks),y:0};
    if(entry==="interfaceBits")return {pipeline,when,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,tiles/64),y:0};
    if(entry==="interfaceBlocks")return {pipeline,when,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(blocks/64)),y:0};
@@ -2111,7 +2271,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
    if(entry==="pageSeed")return {pipeline,when,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.pages/64)),y:0,visit:true};
    return {pipeline,when,x:Math.min(UNIFORM_LIVE_KEY_GROUPS,tiles/64),y:0};
   };
-  return [launch("classify",0),launch("classifyCoarse",0),launch("importance",1),...NARROW_BAND_BUDGET_ENTRIES.map(entry=>launch(entry,2)),
+  return [launch("regionList",0),launch("replay",0),launch("classify",0),launch("classifyCoarse",0),launch("importance",1),...NARROW_BAND_BUDGET_ENTRIES.map(entry=>launch(entry,2)),
    launch("interfaceBits",1),launch("interfaceBlocks",1),launch("boundCubes",0),
    launch("decide",0),launch("solidActive",3),launch("solidPromote",3),launch("pageSeed",0)];
  }
@@ -2126,7 +2286,7 @@ ${uniformPageInitBlocksWGSL(l,"censusInitBlocks",512,`census[${hold}u+key]=0u;ce
   * host relayout path); without it the census reads nothing back. */
  encode(encoder:GPUCommandEncoder,policy:UniformMixedDynamicPolicy,readback=true):void{
   const request=this.request;
-  if(this.pipelines.size!==12+NARROW_BAND_BUDGET_ENTRIES.length||!request)throw new Error("Dynamic ownership census is not initialized");
+  if(this.pipelines.size!==14+NARROW_BAND_BUDGET_ENTRIES.length||!request)throw new Error("Dynamic ownership census is not initialized");
   const queue=this.device.queue,F=this.policyF,U=this.policyU;
   // Each of the policy's numbers is read once: a read of one is a heap number until this function is optimised.
   const dt=policy.dt,surfaceTolerance=policy.surfaceTolerance,fullTolerance=policy.fullTolerance,emptyTolerance=policy.emptyTolerance,reach=policy.reach,hysteresis=policy.hysteresis;

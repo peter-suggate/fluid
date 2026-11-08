@@ -526,11 +526,6 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   * a floor (NB_ARENA_WINDOW_FLOOR). The arena held about a brick an h tile:
   * the letters 2396 bricks at 2466 h tiles, the seep 994 at 931. */
  readonly arenaWindows:number;
- /** sampleSeparation "pairs" runs as its own launch ahead of the move
-  * (separationPrepass): three words a record of the bank after the arena's
-  * windows (NB_SEPARATION) hold each record's pair correction. */
- private readonly separationPrepass:boolean;
- private readonly separationWord:number;
  /** The shared brick table's first bins word (uniform-brick-table.ts). */
  private readonly brickWord:number;
  /** transferRefine's prediction for the next census (refine): a join bit a
@@ -751,10 +746,9 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.reuseControls=buffer("regional reuse pass controls",72);device.queue.writeBuffer(this.reuseControls,0,new Uint32Array([0,1,1,1,1,1,0,1,0,1,1,0,0,0,0,1,0,0]));
   // The arena's windows follow: a window (9³ vertices) an arena brick (ubWindow).
   this.arenaWord=this.binCells+7*this.capacity;this.arenaWindows=Math.min(64*address.blocks,budget&&budget.records===undefined?Math.max(NB_ARENA_WINDOW_FLOOR,budget.fineTiles):Infinity);
-  this.separationPrepass=sampleSeparation==="pairs";this.separationWord=this.arenaWord+729*this.arenaWindows;
-  const linkBytes=4*(this.separationWord+(this.separationPrepass?3*this.capacity:0));
-  if(linkBytes>limit)throw new Error(`Narrow-band links, arena windows and separation words (${linkBytes} bytes) exceed GPU buffer limit ${limit}`);
-  this.next=buffer("cell starts, compact neighbor samples, surface brick arena windows and separation corrections",linkBytes);this.params=buffer("parameters",80,true);
+  const linkBytes=4*(this.arenaWord+729*this.arenaWindows);
+  if(linkBytes>limit)throw new Error(`Narrow-band links and arena windows (${linkBytes} bytes) exceed GPU buffer limit ${limit}`);
+  this.next=buffer("cell starts, compact neighbor samples and surface brick arena windows",linkBytes);this.params=buffer("parameters",80,true);
   this.liveGate=buffer("live sample gate",16,true);device.queue.writeBuffer(this.liveGate,0,new Uint32Array([1,0,0,0]));
   this.particleAllocation=buffer("particle allocation support",8*address.blocks*PARTICLE_RESIDENCY_WORDS*4);
   const size=uniformCoarseCacheExtent(address);
@@ -932,7 +926,6 @@ fn nbParticlesLive()->bool{return params.live.x!=0u;}
 ${unitTaps&&!slots?"@group(1) @binding(12) var unitHalo:texture_3d<f32>;":""}
 const NB_ARENA:u32=${this.arenaWord}u;
 const NB_ARENA_WINDOWS:u32=${this.arenaWindows}u;
-const NB_SEPARATION:u32=${this.separationWord}u;
 // The particle cell bins: a cell's count at bins[nbBinCell(cell)] and its
 // start at links[nbBinCell(cell)]; NB_LINKS words of starts head the links.
 // Under a particle budget a covered tile's 64 bins are in its brick's slot
@@ -1009,10 +1002,7 @@ ${uniformMixedVertexBuriedWGSL}
 ${narrowBandTerrainContactSource("nbMoveBodyAt(q)")}
 ${narrowBandRigidContactSource("nbMoveBodyMask(point)")}
 ${uniformMixedSourceWGSL(16)}
-// Allocation and scheduling cannot select different sampling arithmetic.
 // Every particle uses the same compiled general interpolant.
-const nbFastSample:bool=false;
-var<private> nbSlow:bool=false;
 fn sampleVelocity(p:vec3f)->vec3f{return umSampleVelocity(p);}
 fn nbMoveSample(p:vec3f)->vec3f{return sampleVelocity(p);}
 ${this.apic?/* wgsl */`
@@ -1179,16 +1169,15 @@ fn markSurfaceTiles(position:vec3f,heat:f32){
 }
 ${particleSlabWGSL(this.capacity-this.spill,this.spill,this.binSlots,this.seedBudget)}
 override nbAdvectScalarCollision:bool=false;
-// With a static solid in the scene the fast launch (umSolidFree) still
-// advects a sample whose trace has no closed cell and no cell the
-// procedural field cuts in its box (every stage and end it reaches) while the scene
-// holds no rigid body or terrain: every other cell is whole or closed, the
-// walk moves only through cells inside that box, the general launch's
-// collision walk blocks nothing there and the field's contact finds no hit
-// (its value is positive throughout every other cell). The proof is the
-// record's open-cell and field-cut bits (umSolidOpenCells, umSolidFieldCut) of the
-// box's tiles, all stored. Any other sample is listed slow, untouched. nbSolidRouting off restores the general launch
-// for every sample.
+// With a static solid in the scene the move skips the collision walk of a
+// sample whose trace has no closed cell and no cell the procedural field
+// cuts in its box (every stage and end it reaches) while the scene holds no
+// rigid body or terrain: every other cell is whole or closed, the walk
+// moves only through cells inside that box, blocks nothing there and the
+// field's contact finds no hit (its value is positive throughout every
+// other cell). The proof is the record's open-cell and field-cut bits
+// (umSolidOpenCells, umSolidFieldCut) of the box's tiles, all stored.
+// nbSolidRouting off walks every sample.
 override nbSolidRouting:bool=true;
 var<private> nbHullLo:vec3f;
 var<private> nbHullHi:vec3f;
@@ -1254,10 +1243,7 @@ fn nbMoveDepth(p:vec3f)->f32{
  if(w<64u){reached=(nbWinFlags[w]&NB_WIN_REACH)!=0u;}else{reached=(atomicLoad(&bins[NB_BAND_REACH+umTileAt(t)])&1u)!=0u;}
  return particleDepthIn(p,reached);
 }
-fn nbListSlow(i:u32){let j=atomicAdd(&state[NB_SLOW_PARTICLES],1u);links[NB_LINKS+j]=i;}
-// A moved record: status 0 live, 1 retired (or past a fatal), 2 slow (the
-// fast launch cannot serve it: nothing of it is stored, the general launch
-// moves it from the same record).
+// A moved record: status 0 live, 1 retired (or past a fatal).
 struct NbMoved{p:Particle,status:u32}
 // The move is the step's whole particle stage, one pass a record (i its
 // current-bank index):
@@ -1333,9 +1319,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
  let n=g/l;return d-dot(d,n)*n;
 }
 `:""}fn nbAdvect(record:Particle,i:u32)->NbMoved{
-  nbSlow=false;var p=record;var q=p.position.xyz-nbHeldShift();
-  // Whether q and the mass are still the record's own (separationPrepass).
-  var sepShared=true;
+  var p=record;var q=p.position.xyz-nbHeldShift();
   // A seed's first move (its age nbSeedFirst): age 0, and G2P gives
   // it the grid's velocity, as the tail seeds sampled the step's final field.
   let first=bitcast<u32>(nbParticleAge(record))==NB_SEED_FIRST;
@@ -1353,7 +1337,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
     if(i>=start&&i-start<count){
      let centre=floor(q)+0.5;let deep=nbMoveDepth(centre);let cap=nbCellCap(deep);
      if(deep< -1.0&&count>cap){
-      if(i-start<cap){p=nbMergeRun(p,i+cap,start+count,cap);q=p.position.xyz-nbHeldShift();sepShared=false;}
+      if(i-start<cap){p=nbMergeRun(p,i+cap,start+count,cap);q=p.position.xyz-nbHeldShift();}
       else if(nbMergeAbsorbed(start,i,cap)){${narrowBandRetireCounting.on?"nbRetireCount(2u,deep,q.x,1.0);":""}return NbMoved(p,1u);}
       ${narrowBandRetireCounting.on?"else{nbMergeCount(1u,1u);}":""}
      }
@@ -1361,10 +1345,8 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
    }
   }
   `:""}
-  let routed=nbFastSample&&umSolidPresent();
-  nbHullLo=q;nbHullHi=q;if(routed&&!nbHullUncut()){return NbMoved(p,2u);}
+  nbHullLo=q;nbHullHi=q;
   let mode=nbParticleMode(p);
-  ${this.apic?"// APIC's moments take the general sampler: the fast launch lists the record.\n  if(nbFastSample&&mode!=1.0){return NbMoved(p,2u);}":""}
   // Uniform stores velocity half a step ahead of position. Ballistic drift
   // uses that midpoint velocity; G2P supplies its full gravity kick.
   // One step of Heun's third-order rule over the whole dt, every field
@@ -1384,8 +1366,6 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
    if(stage<3u){
     nbHullInclude(x);
     let k=nbMoveSample(x);
-    // Nothing of this sample is stored yet: the general launch redoes it.
-    if(nbFastSample&&nbSlow){return NbMoved(record,2u);}
     if(stage==1u){x=q+2.0*dt*k/(3.0*h);stage=2u;continue;}
     if(stage==2u){end=q+0.25*dt*(k1+3.0*k/h);break;}
     pic=k;
@@ -1423,7 +1403,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
    }
    // Bodies advance at the previous fluid step's tail. Push samples they
    // overtook out to the moving surface before the static-solid rejection.
-   let rigidStart=nbRigidContact(q,p.velocity.xyz,nbSampleRadius(nbParticleMass(p)));if(any(rigidStart.position!=q)){sepShared=false;}q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
+   let rigidStart=nbRigidContact(q,p.velocity.xyz,nbSampleRadius(nbParticleMass(p)));q=rigidStart.position;p.velocity=vec4f(rigidStart.velocity,p.velocity.w);
    // Solid collision, rather than grid ownership, limits particle motion.
    if(nbParticleBlocked(q)){${narrowBandRetireCounting.on?"nbRetireCount(3u,depth,q.x,nbParticleMass(p));":""}return NbMoved(p,1u);}
    ballistic=mode==1.0||!gridSupported(q);p.before.w=nbParticleRestate(p,nbParticleAge(p),select(0.0,1.0,ballistic));
@@ -1447,7 +1427,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
   // Reject nonfinite traces before the wall clamp can hide them. The
   // lattice reach applies to the actual collision-bounded trajectory:
   // a far endpoint behind a tank wall still stops at that wall.
-  ${this.sampleSeparation==="pairs"?"if(!ballistic){"+(this.separationPrepass?"var sepd:vec3f;if(sepShared){let a=NB_SEPARATION+3u*i;sepd=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}else{sepd=nbSeparation(i,q,nbParticleMass(p));}":"let sepd=nbSeparation(i,q,nbParticleMass(p));")+"end+=nbSurfaceShift(q,sepd);}":""}
+  ${this.sampleSeparation==="pairs"?"if(!ballistic){let sepd=nbSeparation(i,q,nbParticleMass(p));end+=nbSurfaceShift(q,sepd);}":""}
   if(!all(abs(end)<vec3f(1e30))){atomicStore(&state[3],2u);return NbMoved(p,1u);}
   let endpoint=nbTraceEndpointIn(vec3i(floor(q)),end,nbSampleRadius(nbParticleMass(p)));
   let reach=abs(endpoint-q);
@@ -1455,15 +1435,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
   nbHullInclude(endpoint);
   // The box the sample's sphere sweeps: its centre's, out by its radius.
   {let r=nbSampleRadius(nbParticleMass(p));nbHullLo-=vec3f(r);nbHullHi+=vec3f(r);}
-  // A trace box the fast launch cannot prove uncut: with no body in the
-  // scene its walk alone is left (advectWalk), else the general launch
-  // redoes the sample from its record.
-  if(routed&&!nbHullUncut()){
-   if(umBodyCount()==0u){nbListWalk(i,p,q,end);return NbMoved(p,1u);}
-   return NbMoved(p,2u);
-  }
-  // A routed record's box was proven just above (routed implies nbFastSolid).
-  return nbFinish(p,q,end,endpoint,ballistic,nbFastSolid()&&umBodyCount()==0u&&(routed||nbHullUncut()));
+  return nbFinish(p,q,end,endpoint,ballistic,nbFastSolid()&&umBodyCount()==0u&&nbHullUncut());
 }
 // The trace's end: the solid walk from start to endpoint (end held inside
 // a SOLID page's face), the arrival and its heat. uncut: the box is proven
@@ -1578,39 +1550,15 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   }
   `:""}return NbMoved(p,0u);
 }
-// The walk list: an index a record in the dead compact stream past the slow
-// list (both hold at most a bank's records), the record (its trace's start
-// in position) back in its current-bank slot, its end in its motion words
-// (the seed list's, consumed before the move; the deposit writes them next).
-const NB_WALK_PARTICLES:u32=23u;
-fn nbWalkList()->u32{return NB_LINKS+2u*arrayLength(&particles);}
-fn nbListWalk(i:u32,p:Particle,start:vec3f,end:vec3f){
- let j=atomicAdd(&state[NB_WALK_PARTICLES],1u);links[nbWalkList()+j]=i;
- var r=p;r.position=vec4f(start,p.position.w);particles[i]=r;
- let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let e=bitcast<vec3u>(end);links[a]=e.x;links[a+1u]=e.y;links[a+2u]=e.z;
-}
-// The walk lane: a listed sample's solid walk and arrival, without the
-// trace's samplers. It appends as the flat lane does.
-@compute @workgroup_size(64) fn advectWalk(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- let n=atomicLoad(&state[NB_WALK_PARTICLES]);
- for(var j=gid.x;j<n;j+=64u*groups.x){
-  let i=links[nbWalkList()+j];let p=particles[i];let start=p.position.xyz;
-  let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let end=bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));
-  let r=nbFinish(p,start,end,nbTraceEndpointIn(vec3i(floor(start)),end,nbSampleRadius(nbParticleMass(p))),nbParticleMode(p)==1.0,false);
-  if(r.status==0u){nbMoveAppend(r.p);}
- }
-}
 // The move: a workgroup a job of the row (NARROW_BAND_PARTICLE_GRID). A job
 // is NB_MOVE_CHUNK records of an input slab (last move's current slabs: a dense brick
-// is many jobs, so no workgroup serializes one) or 64 entries of the flat lane (the samples the fast launch listed, then the spill reserve).
+// is many jobs, so no workgroup serializes one) or 64 entries of the flat lane (the spill reserve).
 // Every record goes through the one nbAdvect site (Metal inlines every
 // call) and appends to its brick's slab in the scratch bank. A slab job's
 // appends to the 27 bricks around its own are counted in workgroup memory
-// and take one device atomic a brick a job; the rest take one each. The
-// fast launch is compiled solid-free: with a solid in the scene the general
-// launch takes every sample, unless the fast launch may route them by the
-// record's uncut regions (nbFastSolid).
-const NB_SLOW_PARTICLES:u32=10u;
+// and take one device atomic a brick a job; the rest take one each.
+// sampleSeparation "pairs" takes each record's pair correction inline, from
+// the current bank, which the move does not write: the move is one launch.
 var<workgroup> nbMoveJobs:vec4u;
 var<workgroup> nbMoveJob:vec4u;
 var<workgroup> nbMoveCount:array<atomic<u32>,27>;
@@ -1649,8 +1597,6 @@ fn nbMoveTurn(r:NbMoved,job:vec4u,lane:u32){
 fn nbMove(group:u32,groups:u32,lane:u32){
  if(lane==0u){
   // Slab/spill placement is an allocation detail, not a numerical choice.
-  // Use one compiled sampler for every record: even algebraically equal
-  // fast and general expressions can contract differently on the GPU.
   let entries=atomicLoad(&state[22u]);let flat=nbSpillCount(false);
   nbMoveJobs=vec4u(entries,(flat+63u)/64u,flat,0u);
  }
@@ -1674,9 +1620,9 @@ fn nbMove(group:u32,groups:u32,lane:u32){
    let k=off+lane;var r=NbMoved();r.status=1u;
    if(k<job.z){
     var i=job.y+k;
-    if(job.x==1u){i=select(nbSpillBase(false)+i-jobs.w,links[NB_LINKS+i],i<jobs.w);}
+    if(job.x==1u){i+=nbSpillBase(false);}
     let record=particles[i];
-    if(nbLive(record)){r=nbAdvect(record,i);if(r.status==2u){nbListSlow(i);r.status=1u;}}
+    if(nbLive(record)){r=nbAdvect(record,i);}
    }
    nbMoveTurn(r,job,lane);
   }
@@ -1685,39 +1631,6 @@ fn nbMove(group:u32,groups:u32,lane:u32){
 }
 @compute @workgroup_size(64) fn advectParticles(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){nbMove(group.x,groups.x,lane);}
 @compute @workgroup_size(64) fn advectParticlesDeferred(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){nbMove(group.x,groups.x,lane);}
-${this.separationPrepass?`// sampleSeparation "pairs", ahead of the move: each record of the move's
-// jobs (the same slab records and flat lane as nbMove) that is not ballistic
-// by mode takes its pair correction from the current bank, which the move
-// does not write, at its record's position and mass, into its words at
-// NB_SEPARATION. The move adds them where its sample kept that position
-// and mass (nbAdvect: a merge gatherer or a rigid contact recomputes its
-// own). Apart from the move's trace and walk, whose registers hold the
-// move to a few hundred lanes a core, the pair loop hides its latency.
-@compute @workgroup_size(64) fn separationPrepass(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
- if(lane==0u){let entries=atomicLoad(&state[22u]);let flat=nbSpillCount(false);nbMoveJobs=vec4u(entries,(flat+63u)/64u,flat,0u);}
- let jobs=workgroupUniformLoad(&nbMoveJobs);
- // A launch job is a quarter of a slab job (64 records), so a dense
- // brick's pair loops spread over four workgroups.
- let quarters=NB_MOVE_CHUNK/64u;
- for(var j=group.x;j<quarters*jobs.x+jobs.y;j+=groups.x){
-  if(lane==0u){
-   if(j<quarters*jobs.x){let s=nbSlabJob(j/quarters);let off=64u*(j%quarters);nbMoveJob=vec4u(0u,s.y+off,min(64u,s.z-min(off,s.z)),s.w);}
-   else{let k=64u*(j-quarters*jobs.x);nbMoveJob=vec4u(1u,k,min(64u,jobs.z-k),0u);}
-  }
-  let job=workgroupUniformLoad(&nbMoveJob);
-  if(lane<job.z){
-   var i=job.y+lane;
-   if(job.x==1u){i=select(nbSpillBase(false)+i-jobs.w,links[NB_LINKS+i],i<jobs.w);}
-   let record=particles[i];
-   if(nbLive(record)&&nbParticleMode(record)!=1.0){
-    let d=bitcast<vec3u>(nbSeparation(i,record.position.xyz-nbHeldShift(),nbParticleMass(record)));
-    let a=NB_SEPARATION+3u*i;links[a]=d.x;links[a+1u]=d.y;links[a+2u]=d.z;
-   }
-  }
-  workgroupBarrier();
- }
-}
-`:""}
 // Jittered sub-cell sampling (Zhu and Bridson 2005; Bridson 2008): a seed
 // lies anywhere in its eighth of the cell, hashed from the cell, the site and
 // the seeding salt (narrowBandSeedJitterWGSL). Seeds stay where they are
@@ -1989,9 +1902,9 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   }
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.solid.tileLayout]});
-  await Promise.all([...(this.separationPrepass?["separationPrepass"]:[]),"activity","activitySpread","advectParticlesDeferred","advectWalk","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
+  await Promise.all(["activity","activitySpread","advectParticlesDeferred","slabMark","slabAllocate","slabPlace","slabOverflow","slabPrepare","slabSort","surfaceClear","surfaceCells","surfaceSplat","surfaceSplatPlan","surfaceSplatOccupied","seedCells","seed","seedSources",...this.seedRankEntries,"countInitial","seedInitial","transferProperties","transfer","transferOwners","transferSeams","snapshot","couple","coupleFine","diagnoseBefore","depthPlanSeed","depthPlanExpand","depthTiles","depthSeeds","depthLists",...narrowBandNearestControlEntries,...narrowBandNearestEntries,"depthReuseSelect@withX","depthTiles@cold","depthSeeds@cold","coarseCorners","coarseBuilds","depthCoarse","redistanceCoarse",
    "arenaMark",...UNIFORM_BRICK_TABLE_ENTRIES,"arenaGather","arenaGather@base","arenaGather@derived","arenaCross","arenaNearest","arenaDistance","arenaFar","arenaStore",...(this.solid.coarse?[...NB_CANONICAL_SURFACE_ENTRIES,"arenaGather@publication","arenaGather@publication@derived"]:[]),"airClearCoarse@planned","airPlanSeeds","airPlanPropagate","airPlanSeeds@fused","airPlanPropagate@fused","airSeeds","airSeedsFine","airSpread0","airSpread1","airSpread2","airGate","airClearFine","airClearCoarse",...NB_FREE_TWIN_ENTRIES.map(entry=>`${entry}@free`),"transferDeposit","transferRefine",...(this.sharedDeposit?["transferClear"]:[])].map(async name=>{
-   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","advectWalk","snapshot","seed","seedSources","seedRank","seedCut","separationPrepass"].includes(entryPoint)?1:0]!;
+   const entryPoint=name.split("@")[0]!,module=modules[["advectParticles","advectParticlesDeferred","snapshot","seed","seedSources","seedRank","seedCut"].includes(entryPoint)?1:0]!;
    if(this.omittedPipelines.has(name))return;
    const compile=()=>uniformMixedSolidPipeline(this.solid,s=>uniformDetailPipeline(this.device,this.ownership,{label:`Narrow-band FLIP ${entryPoint}`,layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(entryPoint==="transferDeposit"?{PB_LANES:this.apic?192:128}:{}),...(entryPoint==="seedRank"||entryPoint==="seedCut"?{nbSeedLevel:Number(name.split("@")[1])}:{}),...(name.endsWith("@fused")?{nbAirFused:1,...(entryPoint==="airPlanPropagate"?{nbAirLanes:256}: {})}:{}),...(name.endsWith("@withX")?{nbXWithSelect:1}:{}),...(name.endsWith("@planned")?{nbAirListed:1}:{}),...(entryPoint==="depthReuseSnapshot"?{nbListWithSnapshot:1}:{}),umCountedJobs:entryPoint==="transfer"?3:0,...(entryPoint==="transferOwners"&&this.freeze?{umActiveCoarse:1}:{}),...(name.endsWith("@cold")?{nbColdCurrentPhi:1}:{}),...(name.endsWith("@derived")?{nbArenaDerived:1}:{}),...(name.includes("@publication")?{nbArenaClearPublication:1}:{}),...(entryPoint==="arenaCross"?{nbReachTiles:this.redistanceReach}:{}),...(NB_H_STORE_ENTRIES.has(entryPoint)&&!name.endsWith("@base")?UNIFORM_DETAIL_H_STORE:{}),...(entryPoint==="depthSeeds"?UNIFORM_DETAIL_MERGED_SLOTS:{}),...(name.endsWith("@free")?{umSolidFree:1}:NB_FREE_TWIN_ENTRIES.includes(name)?{umSolidTwinned:1}:{}),...s}}})).catch(e=>{throw new Error(`${entryPoint}: ${e.message} ${e.reason}`,{cause:e});});
    if(NB_BACKGROUND_PIPELINES.has(name)){this.background.add(name,compile);return;}
@@ -2012,7 +1925,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   this.crossingDomain=this.compile(["depthPlanSeed","depthPlanExpand"],"surface","shared frame crossing domain");
   const search=["depthTiles","depthSeeds",...narrowBandNearestControlEntries,...narrowBandNearestEntries];
   this.batches={
-   advect:this.compile([...(this.separationPrepass?["separationPrepass"]:[]),"advectParticlesDeferred","advectWalk"],"advectParticles","advectParticles"),
+   advect:this.compile(["advectParticlesDeferred"],"advectParticles","advectParticles"),
    // The slabs (uniform-particle-slab.wgsl): last move's slabs and the
    // spills mark their bricks, the shared table lists them and their ring,
    // one workgroup sizes the scratch slabs. After the move one workgroup
@@ -2123,8 +2036,8 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   // params.live.z: the reseed's salt, this move's frame index (from 1).
   this.seedFrameWords[0]=this.seedFrameWords[0]!+1;this.device.queue.writeBuffer(this.params,56,this.seedFrameWords);
   {const g=this.gravityWords;g[0]=gravity[0];g[1]=gravity[1];g[2]=gravity[2];this.device.queue.writeBuffer(this.params,64,g);}
-  // Words 4 to 10 are the step's (10: advect's slow samples) and 23 (its walk list); word 11, the arrival fatal's page, stays.
-  encoder.clearBuffer(this.state,16,28);encoder.clearBuffer(this.state,4*23,4);
+  // Words 4 to 10 are the step's; word 11, the arrival fatal's page, stays.
+  encoder.clearBuffer(this.state,16,28);
   this.bootstrap(encoder);
   // G2P reads the samples' depth from the last step's band (its tiers
   // too: the snapshot's, so a COLD sample takes no delta from either).

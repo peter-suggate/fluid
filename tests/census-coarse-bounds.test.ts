@@ -10,14 +10,15 @@ import { advanceUniform, createUniformSolver, withUniformDevice } from "./helper
 // sixteen-part seam face). On a recorded frame, the census it writes (the
 // census words, bound cubes and tile records) must be bit-identical to the
 // serial reference's (one lane an owner, the faces in series), both launched
-// over the same inputs from the same saved outputs. The trough dam-break on a
+// over the same inputs from the same saved outputs (regionList first, which
+// lists the regions classifyCoarse takes). The trough dam-break on a
 // census start holds 4h tiles beside h ones, so seam faces are in the frame.
 const gpu = { skip: !process.env.WEBGPU_NODE_MODULE };
 
 type Classifier = {
   work: GPUBuffer; bounds: GPUBuffer; serialCoarse?: GPUComputePipeline; pipelines: Map<string, GPUComputePipeline>;
-  group: { group: GPUBindGroup }; ownership: { bindGroup: GPUBindGroup; dispatchBuffered(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, kind: string, maximum: number, per: number): void };
-  censusLaunches(): { pipeline: GPUComputePipeline; x: number; work?: string; per?: number }[];
+  group: { group: GPUBindGroup }; ownership: { bindGroup: GPUBindGroup };
+  censusLaunches(): { pipeline: GPUComputePipeline; x: number }[];
 };
 
 async function words(device: GPUDevice, buffer: GPUBuffer): Promise<Uint32Array> {
@@ -44,7 +45,8 @@ test("classifyCoarse's spread face bounds give the serial loop's census bit for 
       try {
         const c = (solver as unknown as { mixedDynamic: Classifier }).mixedDynamic;
         assert.ok(c.serialCoarse, "the reference is compiled");
-        const launch = c.censusLaunches().find(l => l.work === "coarse")!, spread = c.pipelines.get("classifyCoarse")!;
+        const spread = c.pipelines.get("classifyCoarse")!, regions = c.pipelines.get("regionList")!;
+        const launch = c.censusLaunches().find(l => l.pipeline === spread)!;
         const saved = [c.work, c.bounds].map(b => device.createBuffer({ size: b.size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }));
         try {
           for (let step = 1; step <= 3; step++) {
@@ -58,7 +60,8 @@ test("classifyCoarse's spread face bounds give the serial loop's census bit for 
               const e = device.createCommandEncoder();
               e.copyBufferToBuffer(saved[0]!, 0, c.work, 0, c.work.size); e.copyBufferToBuffer(saved[1]!, 0, c.bounds, 0, c.bounds.size);
               const pass = e.beginComputePass(); pass.setBindGroup(0, c.ownership.bindGroup); pass.setBindGroup(1, c.group.group);
-              c.ownership.dispatchBuffered(pass, pipeline, "coarse", launch.x, launch.per!); pass.end();
+              pass.setPipeline(regions); pass.dispatchWorkgroups(1);
+              pass.setPipeline(pipeline); pass.dispatchWorkgroups(launch.x); pass.end();
               device.queue.submit([e.finish()]);
               results.push([await words(device, c.work), await words(device, c.bounds)]);
             }

@@ -1,4 +1,4 @@
-import { uniformWindowAddressWGSL } from "./uniform-window-address";
+import { UNIFORM_DIRECTORY_WORDS, UNIFORM_WINDOW_HEADER, UNIFORM_WINDOW_HEADER_WORDS, uniformWindowAddressWGSL } from "./uniform-window-address";
 import {uniformRuntimeConstantsWGSL} from "./uniform-scene-constants";
 import { uniformCompileStencilWGSL } from "./uniform-compiled-topology";
 import {UNIFORM_MIXED_OVERFLOW_FINE,UNIFORM_MIXED_OVERFLOW_HANGING} from "./uniform-mixed-topology.wgsl";
@@ -21,6 +21,18 @@ const CATEGORIES=5;
 const TICKET=6;
 /** Work word counting the h tiles the band and statics ask for (widths). */
 const NEED=7;
+/** Cleared work word: the same launch's ticket (groups in the low 16 bits,
+ * groups that found a changed input in the high 16). */
+const SAME_TICKET=9;
+/** Persistent work words past the cleared counters. CLEAN: the last build
+ * was whole (no fatal bit; nothing refused, cut or deferred). SAME: this
+ * encode's build repeats the last one (UNIFORM_MIXED_BUILD_SAME_WORD).
+ * EPOCH: the host epoch (params.epoch) the last encode ran under. */
+const CLEAN=16,SAME=17,EPOCH=18;
+/** Work word, non-zero where the encode's build repeats the last one: its
+ * buffers already hold the generation the live ownership adopted, every
+ * launch after the input check skipped, and the remap's adoption skips. */
+export const UNIFORM_MIXED_BUILD_SAME_WORD=SAME;
 /** Under a slot claim, words after the changed-tile lists: the cut key, the
  * h-capacity cut key (0: the h tiles asked for fit), spare, then from
  * CLAIM_WANT a want a block, then the h tiles asked for at each claim level
@@ -240,14 +252,17 @@ export class UniformMixedLayoutBuilder {
   const topology=storage("Uniform layout builder topology",5*n);
   const support=storage("Uniform layout builder support",9*n+24);
   const slots=storage("Uniform layout builder slots",2*n);
-  // The slot claim's words follow the changed-tile lists (CLAIM_WANT).
-  const work=device.createBuffer({label:"Uniform layout builder work",size:(uniformMixedChangedTilesWords(n).words+(claims?CLAIM_WANT+(1+8*CLAIM_LEVELS)*n/512:0))*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
-  const params=device.createBuffer({label:"Uniform layout builder params",size:24,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  // The slot claim's words follow the changed-tile lists (CLAIM_WANT), then
+  // the inputs the last encode held (same): the band's 16 words a block and
+  // the window's header and block records.
+  const work=device.createBuffer({label:"Uniform layout builder work",size:(uniformMixedChangedTilesWords(n).words+(claims?CLAIM_WANT+(1+8*CLAIM_LEVELS)*n/512:0)+n/32+UNIFORM_WINDOW_HEADER_WORDS+28*n/512)*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  const params=device.createBuffer({label:"Uniform layout builder params",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
   // Hanging capacity: the ownership's preallocated tap cache.
   // Residency audit word, or none. h-tile capacity: the owner-indexed buffers'.
-  // Admission capacity: none (setAdmission).
+  // Admission capacity: none (setAdmission). Epoch 1: the first build is never the last one's.
   const lattice=ownership.capacity.lattice;
-  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,n]));
+  device.queue.writeBuffer(params,0,new Uint32Array([band.wordOffset,ownership.capacity.hangingSlots,band.auditWord??0xffffffff,ownership.capacity.fineTiles,0xffffffff,n,this.epoch,0]));
+  this.bounds={hanging:ownership.capacity.hangingSlots,fine:ownership.capacity.fineTiles};
   device.queue.writeBuffer(work,COUNTS*4+28,new Uint32Array([n]));
   device.queue.writeBuffer(work,COUNTS*4+32,new Float32Array([...lattice.cellSize_m,Math.min(...lattice.cellSize_m)]));
   const status=device.createBuffer({label:"Uniform layout builder relayout receipt",size:R.words*4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
@@ -279,7 +294,8 @@ export class UniformMixedLayoutBuilder {
 @group(0) @binding(0) var<storage,read> band:array<u32>;
 @group(0) @binding(1) var<storage,read> statics:array<u32>;
 @group(0) @binding(2) var<storage,read> current:array<u32>;
-struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileKeys:u32}
+// epoch: bumped by every host write a build reads beyond its bound inputs (UniformMixedLayoutBuilder.bumpEpoch).
+struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,admitCapacity:u32,tileKeys:u32,epoch:u32,spare:u32}
 @group(0) @binding(3) var<uniform> params:Params;
 @group(0) @binding(4) var<storage,read_write> work:array<atomic<u32>>;
 @group(0) @binding(5) var<storage,read_write> topology:array<u32>;
@@ -287,7 +303,7 @@ struct Params {bandOffset:u32,hangingCapacity:u32,audit:u32,fineCapacity:u32,adm
 @group(0) @binding(7) var<storage,read_write> slots:array<u32>;
 // The compact relayout receipt (UNIFORM_MIXED_RELAYOUT_RECEIPT).
 @group(0) @binding(8) var<storage,read_write> status:array<atomic<u32>>;
-// The pool's live lists: widths, admit, classify, mirror, scatter and
+// The pool's live lists: same, widths, admit, classify, mirror, scatter and
 // verifyWords stride its resident blocks (a free tile key writes nothing).
 ${uniformLiveListsWGSL(0,9,this.pool.layout)}
 const R_CHANGED:u32=${R.changed}u;const R_TIERS:u32=${R.tiers}u;const R_SEAMS:u32=${R.seams}u;const R_COUNTS:u32=${R.counts}u;
@@ -310,11 +326,78 @@ fn fineAt(t:u32)->bool{
 }
 fn wordWidth(word:u32)->u32{return select(4u,1u,(word&0x80000000u)!=0u);}
 fn widthAt(t:u32)->u32{return atomicLoad(&work[FLAGS+t])&7u;}
+// The build repeats the last one (same). The launches with barriers read it
+// through one uniform load (every lane calls it, at the launch's top).
+const CLEAN:u32=${CLEAN}u;const SAME:u32=${SAME}u;const EPOCH:u32=${EPOCH}u;const SAME_TICKET:u32=${SAME_TICKET}u;
+fn repeated()->bool{return atomicLoad(&work[SAME])!=0u;}
+var<workgroup> repeatWord:u32;
+fn repeatedUniform(lane:u32)->bool{if(lane==0u){repeatWord=atomicLoad(&work[SAME]);}return workgroupUniformLoad(&repeatWord)!=0u;}
+// A build reads the band's words of the resident blocks, the window's header
+// and block records, the page words of the pages around each resident block
+// (every read is within two tiles of a resident tile, so within one page),
+// the region table and the capacities, and the live ownership's tile words.
+// Of the header, word 8 is the boundary decision's counter, which every
+// commit advances and no address reads (UNIFORM_WINDOW_HEADER.boundary). A
+// build is the last one's when the first three match the copies the last encode held, the
+// host epoch is the one it ran under (the region table and capacities are
+// host writes, and so is a live ownership the last build's adoption did not
+// make), and the last build was whole (CLEAN: no fatal bit, and every tile
+// it asked for at h it made h, so the slots its h tiles' rings hold stay
+// held and the claim has nothing to take). Its buffers are then already the
+// generation the live ownership adopted: every later launch skips, the
+// remap's adoption skips (UNIFORM_MIXED_BUILD_SAME_WORD), and the receipt
+// numbers a build that changed no tile. Each group refreshes the copies it
+// compares; the last group to finish decides.
+const HELD_BAND:u32=DILATED+N${claims?`+${CLAIM_WANT}u+${1+8*CLAIM_LEVELS}u*(N/512u)`:""};const HELD_WINDOW:u32=HELD_BAND+N/32u;
+const WINDOW:u32=5u*N+${UNIFORM_DIRECTORY_WORDS}u;const WINDOW_WORDS:u32=${UNIFORM_WINDOW_HEADER_WORDS}u+N/512u;
+const HELD_PAGES:u32=HELD_WINDOW+WINDOW_WORDS;const BOUNDARY:u32=${UNIFORM_WINDOW_HEADER.boundary}u;
+var<workgroup> sameDiffers:atomic<u32>;
+@compute @workgroup_size(256) fn same(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){atomicStore(&sameDiffers,0u);}
+ workgroupBarrier();
+ let bandWords=16u*ulResidentCount();let windowEnd=bandWords+WINDOW_WORDS;var differs=false;
+ for(var i=group.x*256u+lane;i<windowEnd+27u*ulResidentCount();i+=256u*groups.x){
+  var at=0u;var word=0u;
+  if(i<bandWords){let j=16u*ulResidentBlock(i>>4u)+(i&15u);at=HELD_BAND+j;word=band[params.bandOffset+j];}
+  else if(i<windowEnd){let k=i-bandWords;if(k==BOUNDARY){continue;}at=HELD_WINDOW+k;word=current[WINDOW+k];}
+  // A resident block's page and its 26 neighbours, as the address reads them.
+  else{let k=i-windowEnd;let b=ulResidentBlock(k/27u);let o=k%27u;at=HELD_PAGES+27u*b+o;word=umPageWord(vec3i(umBlockPage(b))+vec3i(i32(o%3u),i32((o/3u)%3u),i32(o/9u))-vec3i(1));}
+  if(atomicLoad(&work[at])!=word){atomicStore(&work[at],word);differs=true;}
+ }
+ if(differs){atomicStore(&sameDiffers,1u);}
+ workgroupBarrier();
+ if(lane!=0u){return;}
+ // Each group's verdict and its ticket are one RMW on one word (verifyWords).
+ let d=atomicLoad(&sameDiffers);
+ let ticket=atomicAdd(&work[SAME_TICKET],1u+(d<<16u))+1u+(d<<16u);
+ if((ticket&0xffffu)!=groups.x){return;}
+ sameDecide((ticket>>16u)==0u);
+}
+fn sameDecide(unchanged:bool){
+ // Every encode: the band producer's receipt header and its residency audit.
+${this.headerWords?` for(var i=0u;i<${this.headerWords}u;i++){atomicStore(&status[${R.census}u+i],band[i]);}`:""}
+ var audit=0u;if(params.audit!=0xffffffffu){audit=band[params.audit];}
+ atomicStore(&status[${R.audit}u],audit);
+ if(audit!=0u){atomicOr(&status[R_FATAL],FATAL_RESIDENCY);}
+ atomicStore(&work[8u],N);
+ let again=unchanged&&atomicLoad(&work[CLEAN])!=0u&&atomicLoad(&work[EPOCH])==params.epoch&&atomicLoad(&status[R_FATAL])==0u;
+ atomicStore(&work[EPOCH],params.epoch);atomicStore(&work[SAME],u32(again));
+ if(!again){return;}
+ // The counters the skipped launches write, from the receipt of the build
+ // this one repeats; no tile changed, nothing was claimed or refused.
+ atomicStore(&work[1],atomicLoad(&status[R_TIERS]));atomicStore(&work[2],atomicLoad(&status[R_TIERS+1u]));
+ atomicStore(&work[3],atomicLoad(&status[R_SEAMS]));atomicStore(&work[4],atomicLoad(&status[R_SEAMS+1u]));
+ atomicStore(&work[NEED],atomicLoad(&status[R_NEED]));
+ atomicStore(&status[R_CHANGED],0u);
+${claims?` atomicStore(&status[${R.refused}u],0u);atomicStore(&status[${R.claims}u],0u);
+ let free=atomicLoad(&fsState[FS_FREE]);atomicStore(&status[${R.free}u],free);atomicMin(&status[${R.leastFree}u],free);`:""}
+ atomicAdd(&status[R_BUILDS],1u);
+}
 // Width: h for the band and static tiles, else 4h (ungraded). Staged as a
 // plain word in the tile-word plane, which scatter overwrites, so classify's
 // 27 neighbour reads are plain loads.
 @compute @workgroup_size(64) fn widths(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
- if(gid.x==0u){atomicStore(&work[8u],N);}
+ if(repeated()){return;}
  for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){widthOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
 }
 fn widthOf(t:u32){
@@ -367,6 +450,7 @@ ${uniformCompileStencilWGSL}
 // A fixed grid strides the resident blocks' groups of ${BLOCK} keys (two a
 // block): a free block's totals are neither written nor read (scan skips it).
 @compute @workgroup_size(${BLOCK}) fn classify(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(repeatedUniform(lane)){return;}
  for(var visit=group.x;visit<2u*ulResidentCount();visit+=groups.x){classifyGroup(2u*ulResidentBlock(visit>>1u)+(visit&1u),lane);workgroupBarrier();}
 }
 fn classifyGroup(g:u32,lane:u32){
@@ -417,8 +501,7 @@ fn scanPartialHeld(lane:u32){
 }
 // Exclusive block offsets per category, grand totals, and the headers.
 @compute @workgroup_size(${BLOCK}) fn scan(@builtin(local_invocation_index) lane:u32){
-${this.headerWords?`// The band producer's receipt header, carried into this build's receipt.
- if(lane<${this.headerWords}u){atomicStore(&status[${R.census}u+lane],band[lane]);}`:""}
+ if(repeatedUniform(lane)){return;}
  // The stored tiles: 512 a block that holds a page, wherever the page lies.
  if(lane==0u){atomicStore(&stored,0u);}
  workgroupBarrier();
@@ -457,7 +540,6 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
   // The per-build receipt words, then its checks: fatal bits are sticky.
   atomicStore(&status[R_CHANGED],atomicLoad(&work[0]));atomicStore(&status[R_TIERS],f);atomicStore(&status[R_TIERS+1u],c);
   atomicStore(&status[R_SEAMS],grand[2]);atomicStore(&status[R_SEAMS+1u],grand[3]);
-  for(var i=R_SEAMS+2u;i<R_COUNTS;i++){atomicStore(&status[i],0u);}
   atomicStore(&status[R_NEED],atomicLoad(&work[NEED]));atomicStore(&status[R_ADMIT],params.admitCapacity);
   atomicStore(&status[R_COUNTS],f);atomicStore(&status[R_COUNTS+1u],c);atomicStore(&status[R_COUNTS+2u],0u);atomicStore(&status[R_COUNTS+3u],8u);
   if(f+c!=atomicLoad(&stored)){atomicOr(&status[R_FATAL],FATAL_TIER_SUM);}
@@ -468,15 +550,14 @@ ${this.headerWords?`// The band producer's receipt header, carried into this bui
   if(f>params.fineCapacity){atomicOr(&status[R_FATAL],FATAL_OWNERS);}
 ${claims?`  // The refusals settle counted, summed over builds.
   atomicAdd(&status[${R.refusedSum}u],atomicLoad(&status[${R.refused}u]));`:""}
-  var audit=0u;if(params.audit!=0xffffffffu){audit=band[params.audit];}
-  atomicStore(&status[${UNIFORM_MIXED_RELAYOUT_RECEIPT.audit}u],audit);
-  if(audit!=0u){atomicOr(&status[R_FATAL],FATAL_RESIDENCY);}
+  // The census header and residency audit are same's.
  }
 }
 // Owner numbering, worklists and the hanging slot table, in tile key order.
 // A fixed grid: a slot no seam tile takes names no tile (every slot of the
 // table's N, whatever its key holds), then the resident blocks' groups.
 @compute @workgroup_size(${BLOCK}) fn scatter(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(repeatedUniform(lane)){return;}
  let seamF=atomicLoad(&work[3]);let seamC=atomicLoad(&work[4]);
  for(var s=min(seamF+seamC,params.hangingCapacity)+group.x*${BLOCK}u+lane;s<N;s+=${BLOCK}u*groups.x){slots[N+s]=INF;}
  for(var visit=group.x;visit<2u*ulResidentCount();visit+=groups.x){scatterGroup(2u*ulResidentBlock(visit>>1u)+(visit&1u),lane,seamF);workgroupBarrier();}
@@ -517,6 +598,7 @@ fn scatterTile(t:u32,g:u32,w:u32,regular:bool,c:array<u32,${CATEGORIES}>,packed:
 // word, an h tile within three tiles, from classify's 27-bit h masks of the
 // tiles two apart. Each lane writes its own word.
 @compute @workgroup_size(64) fn mirror(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(repeated()){return;}
  for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){mirrorOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
 }
 fn mirrorOf(t:u32){
@@ -535,6 +617,7 @@ var<workgroup> groupBad:atomic<u32>;
 // A fixed grid of VERIFY_GROUPS workgroups, a workgroup a resident z-slab at a time.
 const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
 @compute @workgroup_size(64) fn verifyWords(@builtin(workgroup_id) group:vec3u,@builtin(num_workgroups) groups:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(repeatedUniform(lane)){return;}
  if(lane==0u){atomicStore(&groupBad,0u);}
  workgroupBarrier();
  for(var slab=group.x;slab<8u*ulResidentCount();slab+=groups.x){
@@ -551,7 +634,8 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
  // Each group's verdict and its ticket are one RMW on one word, so the
  // last group's read holds every verdict. It seals the build once every
  // check has run (scan, verifyWords): number the build, latch the first
- // fatal one, else advance the generation if a tile changed.
+ // fatal one, else advance the generation if a tile changed; then mark
+ // whether the build was whole (CLEAN), which the next encode's same reads.
  let bad=atomicLoad(&groupBad);
  let ticket=atomicAdd(&work[${TICKET}u],1u+(bad<<16u))+1u+(bad<<16u);
  if((ticket&0xffffu)!=VERIFY_GROUPS){return;}
@@ -559,6 +643,8 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
  let build=atomicAdd(&status[R_BUILDS],1u)+1u;
  if(atomicLoad(&status[R_FATAL])!=0u){if(atomicLoad(&status[R_FATAL_BUILD])==0u){atomicStore(&status[R_FATAL_BUILD],build);}}
  else if(atomicLoad(&status[R_CHANGED])!=0u){atomicAdd(&status[R_GENERATION],1u);}
+ let whole=atomicLoad(&status[R_FATAL])==0u&&${claims?`atomicLoad(&status[${R.refused}u])==0u&&atomicLoad(&work[CLAIMS+1u])==0u`:`atomicLoad(&work[NEED])<=params.admitCapacity`};
+ atomicStore(&work[CLEAN],u32(whole));
 }
 `,{
  N:{type:"u32",value:"params.tileKeys"},
@@ -572,7 +658,8 @@ const VERIFY_GROUPS:u32=${Math.min(UNIFORM_LIVE_GROUP_GROUPS,Math.ceil(n/64))}u;
   if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
   const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.resources]});
   const claimLayout=this.claimResources&&this.device.createPipelineLayout({bindGroupLayouts:[this.claimResources]});
-  await Promise.all(this.entries().map(async (entryPoint,i)=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout:claimLayout&&i<5?claimLayout:layout,compute:{module,entryPoint}}));}));
+  // Under a slot claim, same and the claim's launches (the first six) bind the claim's group.
+  await Promise.all(this.entries().map(async (entryPoint,i)=>{this.pipelines.set(entryPoint,await this.device.createComputePipelineAsync({layout:claimLayout&&i<6?claimLayout:layout,compute:{module,entryPoint}}));}));
  }
  /** The slot claim (UniformMixedSlotClaims), between widths and classify.
   * One rule decides the h tiles and their slots before any tile word is
@@ -700,6 +787,7 @@ fn wantedFrom(k:u32,lane:u32)->u32{
 // second cut (the tile cut): settle refuses every tile below it, and the
 // slot cut is never below it.
 @compute @workgroup_size(256) fn slotCut(@builtin(local_invocation_index) lane:u32){
+ if(repeatedUniform(lane)){return;}
  if(lane==0u){freeSlots=atomicLoad(&fsState[FS_FREE]);askedTiles=atomicLoad(&work[NEED]);}
  let free=workgroupUniformLoad(&freeSlots);let asked=workgroupUniformLoad(&askedTiles);
  var tileCut=0u;
@@ -720,6 +808,7 @@ fn wantedFrom(k:u32,lane:u32)->u32{
  atomicStore(&status[${R.refused}u],0u);atomicStore(&status[${R.claims}u],0u);
 }
 @compute @workgroup_size(64) fn slotClaim(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(repeated()){return;}
  for(var i=gid.x;i<ulResidentCount();i+=64u*groups.x){slotClaimOf(ulResidentBlock(i));}
 }
 fn slotClaimOf(b:u32){
@@ -738,6 +827,7 @@ fn slotClaimOf(b:u32){
 // below the tile cut, is refused (4h); then the tiles whose width changed
 // are listed.
 @compute @workgroup_size(64) fn settle(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(repeated()){return;}
  for(var visit=gid.x;visit<512u*ulResidentCount();visit+=64u*groups.x){settleOf(512u*ulResidentBlock(visit>>9u)+(visit&511u));}
 }
 fn settleOf(t:u32){
@@ -759,7 +849,7 @@ fn settleOf(t:u32){
  setRegions(table:Uint32Array<ArrayBuffer>):void{
   if(table.length!==UNIFORM_MIXED_REGION_TABLE_WORDS||table[0]!>UNIFORM_MIXED_REGION_LIMIT)throw new Error(`Mixed layout builder region table has ${table.length} words and ${table[0]} regions, expected ${UNIFORM_MIXED_REGION_TABLE_WORDS} words and at most ${UNIFORM_MIXED_REGION_LIMIT} regions`);
   this.device.queue.writeBuffer(this.statics,0,table);
-  this.staticReady=true;
+  this.staticReady=true;this.bumpEpoch();
  }
  /** Seam tiles a built generation may slot in the hanging tap cache; more
   * raises UNIFORM_MIXED_RELAYOUT_FATAL.hangingCapacity. Default and upper
@@ -768,7 +858,8 @@ fn settleOf(t:u32){
  setHangingCapacity(slots:number):void{
   const most=this.level.current.capacity.hangingSlots;
   if(!Number.isSafeInteger(slots)||slots<0||slots>most)throw new Error(`Mixed layout builder hanging capacity must be an integer in 0..${most}: ${slots}`);
-  this.device.queue.writeBuffer(this.level.params,4,new Uint32Array([slots]));
+  if(slots===this.bounds.hanging)return;
+  this.bounds.hanging=slots;this.device.queue.writeBuffer(this.level.params,4,new Uint32Array([slots]));this.bumpEpoch();
  }
  /** h tiles a built generation may hold; more raises
   * UNIFORM_MIXED_RELAYOUT_FATAL.fineCapacity. Default and upper bound: the
@@ -777,7 +868,8 @@ fn settleOf(t:u32){
  setFineCapacity(tiles:number):void{
   const most=this.level.current.capacity.fineTiles;
   if(!Number.isSafeInteger(tiles)||tiles<0||tiles>most)throw new Error(`Mixed layout builder h-tile capacity must be an integer in 0..${most}: ${tiles}`);
-  this.device.queue.writeBuffer(this.level.params,12,new Uint32Array([tiles]));
+  if(tiles===this.bounds.fine)return;
+  this.bounds.fine=tiles;this.device.queue.writeBuffer(this.level.params,12,new Uint32Array([tiles]));this.bumpEpoch();
  }
  /** h tiles a build may ask for before it is deferred (the host's
   * reservation): a build over it keeps the generation it is against and
@@ -788,9 +880,22 @@ fn settleOf(t:u32){
  setAdmission(tiles?:number):void{
   if(tiles!==undefined&&(!Number.isSafeInteger(tiles)||tiles<0||tiles>this.tiles))throw new Error(`Mixed layout builder admission capacity must be an integer in 0..${this.tiles}: ${tiles}`);
   if(tiles!==undefined&&this.claims)throw new Error("Mixed layout builder: a slot claim refuses tiles instead of deferring builds (no admission capacity)");
-  this.admission=tiles;this.word[0]=tiles??0xffffffff;this.device.queue.writeBuffer(this.level.params,16,this.word);
+  if(tiles===this.admission)return;
+  this.admission=tiles;this.word[0]=tiles??0xffffffff;this.device.queue.writeBuffer(this.level.params,16,this.word);this.bumpEpoch();
  }
  private admission?:number;
+ /** The hanging and h-tile bounds the params hold. */
+ private readonly bounds:{hanging:number;fine:number};
+ /** The host epoch (params.epoch): bumped by every host write a build reads
+  * that the GPU's same check cannot see (the region table, the capacities)
+  * and by a live ownership this builder's last build did not make, so the
+  * next build runs whole. Queue-ordered, like the writes it follows. */
+ private epoch=1;
+ private bumpEpoch():void{this.epoch=(this.epoch+1)>>>0;this.word[0]=this.epoch;this.device.queue.writeBuffer(this.level.params,24,this.word);}
+ /** The live ownership's revision at the last encode: the frame adopts each
+  * build once (UniformMixedRemap.applyGpu), so anything else in between is
+  * a host generation. */
+ private ownershipRevision=-2;
  /** Zero the build's counters: encode once before each encode, in the same
   * encoder, ahead of the band producer's pass (no pass between them touches
   * the work buffer), so the clear joins the frame's first blit run. */
@@ -801,7 +906,7 @@ fn settleOf(t:u32){
  /** encode's launches in order, resolved once (apart from encode: a closure there would cost every encode a context). */
  private buildLaunches():readonly GPUComputePipeline[]{return this.entries().map(entry=>this.pipelines.get(entry)!);}
  /** The entry points, in launch order (admit only under an admission capacity, the claim's under a slot claim). */
- private entries():readonly string[]{return this.claims?["widths","tileKeys","slotCut","slotClaim","settle","classify","mirror","dilate","scan","scatter","verifyWords"]:["widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"];}
+ private entries():readonly string[]{return this.claims?["same","widths","tileKeys","slotCut","slotClaim","settle","classify","mirror","dilate","scan","scatter","verifyWords"]:["same","widths","admit","classify","mirror","dilate","scan","scatter","verifyWords"];}
  /** Encode after the band bits are written, while the ownership is still
   * the generation to compare against; encodeClear must precede it. */
  encode(encoder:GPUCommandEncoder):void{
@@ -818,23 +923,29 @@ fn settleOf(t:u32){
   // (queue-ordered, ahead of this encoder's submit).
   if(level.current.capacityRevision!==this.capacityRevision){
    this.capacityRevision=level.current.capacityRevision;
-   this.word[0]=level.current.capacity.hangingSlots;this.device.queue.writeBuffer(level.params,4,this.word);
-   this.word[0]=level.current.capacity.fineTiles;this.device.queue.writeBuffer(level.params,12,this.word);
+   this.bounds.hanging=level.current.capacity.hangingSlots;this.word[0]=this.bounds.hanging;this.device.queue.writeBuffer(level.params,4,this.word);
+   this.bounds.fine=level.current.capacity.fineTiles;this.word[0]=this.bounds.fine;this.device.queue.writeBuffer(level.params,12,this.word);
+   this.bumpEpoch();
   }
+  // Only this builder's adoption may have intervened since its last build.
+  if(level.current.revision!==this.ownershipRevision+1)this.bumpEpoch();
+  this.ownershipRevision=level.current.revision;
   const launches=this.launches??=this.buildLaunches();
   const pass=encoder.beginComputePass(UniformMixedLayoutBuilder.PASS);pass.setBindGroup(0,this.claimGroup??level.group);
+  // same checks the inputs first: a repeated build skips every launch after it.
+  pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(wide);
   // admit is launched only under an admission capacity: without one it could never act.
-  pass.setPipeline(launches[0]!);pass.dispatchWorkgroups(keys);
-  let next=1;
+  pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);
+  let next=2;
   if(this.claims){
    // The claim: the tiles count their keys over the h capacity, one group
    // cuts, the resident blocks claim, the tiles settle.
-   pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);
-   pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(1);
-   pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,Math.ceil(this.tiles/512/64)));
-   pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(keys);
-   pass.setBindGroup(0,level.group);next=5;
-  }else{if(this.admission!==undefined){pass.setPipeline(launches[1]!);pass.dispatchWorkgroups(keys);}next=2;}
+   pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(keys);
+   pass.setPipeline(launches[3]!);pass.dispatchWorkgroups(1);
+   pass.setPipeline(launches[4]!);pass.dispatchWorkgroups(Math.min(UNIFORM_LIVE_KEY_GROUPS,Math.ceil(this.tiles/512/64)));
+   pass.setPipeline(launches[5]!);pass.dispatchWorkgroups(keys);
+   pass.setBindGroup(0,level.group);next=6;
+  }else{if(this.admission!==undefined){pass.setPipeline(launches[2]!);pass.dispatchWorkgroups(keys);}next=3;}
   pass.setPipeline(launches[next]!);pass.dispatchWorkgroups(wide);
   pass.setPipeline(launches[next+1]!);pass.dispatchWorkgroups(keys);
   pass.setPipeline(launches[next+2]!);pass.dispatchWorkgroups(keys);

@@ -10,7 +10,7 @@ import {uniformMixedSolidPipeline,uniformMixedSolidLibraryWGSL,type UniformMixed
 import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {uniformVolumeTargetWGSL} from "./uniform-volume.wgsl";
 import {geometricPlaneBoxWGSL} from "../../core/geometric-plane-box.wgsl";
-import {UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
+import {UNIFORM_MIXED_BUILD_SAME_WORD,UNIFORM_MIXED_RELAYOUT_RECEIPT,uniformMixedChangedTilesWGSL} from "./uniform-mixed-layout-builder";
 import {uniformBufferedWork} from "./uniform-buffered-work";
 import {uniformKeyGroups} from "./uniform-lattice-address";
 import {uniformMixedRemapCapacity} from "./uniform-mixed-remap-capacity";
@@ -71,10 +71,11 @@ export class UniformMixedRemap {
   * receipt, bound per changes buffer. */
  private readonly listResources:GPUBindGroupLayout;
  private listGroup?:{readonly changes:GPUBuffer;readonly receipt:GPUBuffer;readonly group:UniformDetailGroup};
- /** adopt's group 1: the live ownership's adoptionTargets and the source's
-  * hanging slot table, bound per (source topology, live hanging) pair. */
+ /** adopt's group 1: the live ownership's adoptionTargets, the source's
+  * hanging slot table and its builder's work words (a repeated build skips
+  * the copy), bound per (source topology, live hanging, changes). */
  private readonly adoptLayout:GPUBindGroupLayout;
- private adoptGroup?:{readonly topology:GPUBuffer;readonly hanging?:GPUBuffer;readonly group:GPUBindGroup};
+ private adoptGroup?:{readonly topology:GPUBuffer;readonly hanging?:GPUBuffer;readonly changes:GPUBuffer;readonly group:GPUBindGroup};
  private adoptPipeline?:GPUComputePipeline;
  constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,input:Fields,scratch:Fields,private readonly solid?:UniformMixedSolid,private readonly surfaceOnly=false){
   const capacity=uniformMixedRemapCapacity(ownership.layout.lattice.dimensions,ownership.capacity.tiles,Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize),!!solid);
@@ -113,6 +114,7 @@ export class UniformMixedRemap {
   this.adoptLayout=device.createBindGroupLayout({label:"Uniform mixed remap adopt",entries:[
    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},
    ...(sampled?[{binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}}]:[]),
+   {binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
  }
  private bindStatusGroup(status:GPUBuffer):UniformDetailGroup{return uniformDetailGroup(this.device,{layout:this.statusLayout,entries:[{binding:0,resource:{buffer:status,size:UNIFORM_MIXED_STATUS_WORDS*4}}]});}
@@ -252,9 +254,10 @@ export class UniformMixedRemap {
   * live ownership, a fixed grid striding them (uniformMixedAdoptWGSL). */
  private encodeAdopt(encoder:GPUCommandEncoder,source:UniformMixedGenerationBuffers):void{
   const live=this.ownership.adoptionTargets;
-  if(this.adoptGroup?.topology!==source.topology||this.adoptGroup.hanging!==live.hanging)this.adoptGroup={topology:source.topology,hanging:live.hanging,group:this.device.createBindGroup({label:"Uniform mixed remap adopt",layout:this.adoptLayout,entries:[
+  if(this.adoptGroup?.topology!==source.topology||this.adoptGroup.hanging!==live.hanging||this.adoptGroup.changes!==source.changes)this.adoptGroup={topology:source.topology,hanging:live.hanging,changes:source.changes,group:this.device.createBindGroup({label:"Uniform mixed remap adopt",layout:this.adoptLayout,entries:[
    {binding:0,resource:{buffer:live.topology}},{binding:1,resource:{buffer:live.support}},
    ...(live.hanging?[{binding:2,resource:{buffer:source.slots}},{binding:3,resource:{buffer:live.hanging}}]:[]),
+   {binding:4,resource:{buffer:source.changes}},
   ]})};
   const pass=encoder.beginComputePass(REMAP_ADOPT_PASS);
   pass.setPipeline(this.adoptPipeline!);pass.setBindGroup(0,this.targetGroup!.group.group);pass.setBindGroup(1,this.adoptGroup.group);
@@ -275,7 +278,9 @@ const REMAP_ADOPT_PASS:GPUComputePassDescriptor={label:"Uniform mixed remap adop
  * - the h and 4h lists, the support's h list, seam lists and regular 4h list
  *   (with their headers) and the slot-to-tile table, each by its count, which
  *   bounds every reader of it.
- * A lane a word group, striding the concatenation on a fixed grid. */
+ * A lane a word group, striding the concatenation on a fixed grid. A
+ * repeated build (UNIFORM_MIXED_BUILD_SAME_WORD of its builder's work words)
+ * copies nothing: its buffers hold the generation the live ownership took. */
 export function uniformMixedAdoptWGSL(tiles:number,sampled:boolean):string{
  return /* wgsl */`
 @group(0) @binding(0) var<storage,read> srcTopology:array<u32>;
@@ -285,6 +290,7 @@ export function uniformMixedAdoptWGSL(tiles:number,sampled:boolean):string{
 @group(1) @binding(1) var<storage,read_write> support:array<u32>;
 ${sampled?`@group(1) @binding(2) var<storage,read> srcSlots:array<u32>;
 @group(1) @binding(3) var<storage,read_write> hanging:array<u32>;`:""}
+@group(1) @binding(4) var<storage,read> srcChanges:array<u32>;
 const N:u32=${tiles}u;
 // The support lists: the h list, the seam header and lists, the regular 4h header and list.
 const FINE:u32=6u*N+16u;const SEAMS:u32=7u*N+16u;const REGULAR:u32=8u*N+20u;
@@ -293,6 +299,7 @@ fn copyKey(t:u32){
  ${sampled?"hanging[t]=srcSlots[t];":""}
 }
 @compute @workgroup_size(64) fn adopt(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
+ if(srcChanges[${UNIFORM_MIXED_BUILD_SAME_WORD}u]!=0u){return;}
  let live=srcCounts.x+srcCounts.y;let seams=srcSupport[SEAMS]+srcSupport[SEAMS+1u];let regular=srcSupport[REGULAR];
  ${sampled?`let slots=min(seams,(arrayLength(&hanging)-2u*N)/${UNIFORM_MIXED_HANGING_RECORD}u);`:"let slots=0u;"}
  // [0, live) a live tile and its list entry; then the two sentinel blocks'

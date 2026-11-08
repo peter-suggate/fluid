@@ -28,8 +28,7 @@
  *   [17] the move serial; [18] the scratch extent; [19] the input entries;
  *   [20] the output entries (slabs); [21] the current spill reserve's
  *   records (word 15 is the air pass's change gate); [22] the move's slab
- *   jobs (NB_MOVE_CHUNK-record chunks of the input entries); [23] the walk list's
- *   records (the fast launch's samples whose trace box a solid cuts).
+ *   jobs (NB_MOVE_CHUNK-record chunks of the input entries).
  * * - From NB_SLAB_RECORD, 12 words a brick id: [0] scratch base, [1] scratch
  *   cap (after slabPlace: the overflow cursor), [2] scratch cursor (after
  *   slabPlace: the appends), [3] stamp (the serial of the move that sized
@@ -74,7 +73,7 @@ fn nbSlabCurrent(id:u32)->bool{return id!=UB_NONE&&atomicLoad(&state[nbSlab(id,3
 // can use all remaining records instead of exhausting a fixed tail partition.
 fn nbSpillBase(scratch:bool)->u32{return min(atomicLoad(&state[select(0u,18u,scratch)]),NB_SLAB_LIMIT);}
 fn nbSpillCount(scratch:bool)->u32{return min(atomicLoad(&state[select(21u,16u,scratch)]),NB_PARTICLE_CAPACITY-nbSpillBase(scratch));}
-// The move's endpoint workspace is dead after advectWalk. SORT writes only
+// The words past the compact positions are free after the move. SORT writes only
 // compact positions (the preceding 4*capacity words), so these indices stay
 // live until every brick has read its overflow. No particle is copied twice.
 fn nbOverflowIndex(k:u32)->u32{return NB_LINKS+4u*NB_PARTICLE_CAPACITY+k;}

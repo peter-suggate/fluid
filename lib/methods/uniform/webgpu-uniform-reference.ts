@@ -1869,7 +1869,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.mixedDynamic=new UniformMixedDynamicClassifier(this.device,this.mixedFrame.ownership,this.volumeA,this.vertexPhiField,this.velocityB,this.params,this.mixedFrame.pagePool,this.mixedFrame.narrowBandFlip.particleTiles,hostPages,this.mixedFrame.solid!.coarse!);
     this.mixedFrame.registerPageOwner(this.mixedDynamic);this.mixedFrame.registerCertificate(this.mixedDynamic);
     // coldCensus "replay": deep COLD regions keep their widths and replay their census records.
-    if(this.narrowBandColdCensus==="replay")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
+    // Only under the COLD freeze: coldRegions "fine" re-solves a COLD region every step.
+    if(this.narrowBandColdCensus==="replay"&&this.narrowBandColdRegions!=="fine")this.mixedDynamic.attachHeat(this.mixedFrame.heat.tiers);
     // A coarse start over slotted h stores: the build claims the slots of the
     // tiles it makes h and keeps at 4h a tile no free slot serves (M4b).
     const slotClaims=coarseStart&&uniformFineBlocks(tiers)!==undefined?{...detail.slotClaims,particles:this.mixedFrame.narrowBandFlip.particleTiles.allocation,heat:this.mixedFrame.heat.tiers}:undefined;

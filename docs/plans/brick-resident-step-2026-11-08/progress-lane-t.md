@@ -238,6 +238,190 @@ Everything is under `~/code/me/fluid-scratch/lane-t/`.
 - `edits/`: the scripts that rebuild each tree from its base.
 - `out/`: every run's logs and JSON, with `gate.log` as the index.
 
+## Phase D (2026-11-08, in the working tree, not yet gated)
+
+### The move as one launch
+
+- **Dead fast-sample code deleted.** `nbFastSample` was a constant false,
+  so the slow status (2), `nbListSlow`, state word 10's slow list, the
+  routed walk list (`nbListWalk`, word 23) and the `advectWalk` entry never
+  did any work. advectWalk was still a launch every step. The flat lane's
+  slow-list index (`jobs.w`, always 0) is gone too.
+- **separationPrepass folded into the move.** sampleSeparation "pairs" now
+  takes each record's pair correction inline (`nbSeparation`) from the
+  current bank, which the move does not write. That frees the prepass
+  launch and its 3 words a record past the arena windows (about 40 MB at
+  capacity 3.39M). The advect batch is the single `advectParticlesDeferred`.
+- **What the combined gate should check.** Whether the inline pair loop
+  raises the move's register pressure. If it does, the fix is to compute
+  the pair corrections into threadgroup memory ahead of the trace, inside
+  the same job, not a separate launch.
+- **Files touched:** uniform-narrow-band-flip.ts,
+  uniform-particle-slab.wgsl.ts (comments only), tools/nbflip-hot-variants.ts,
+  tools/probe-nbflip-variant-replay.ts and tools/experiment-nbflip-hot-frame.ts
+  (dropped references to the deleted entries), and the plan's B1 note.
+
+### G closed with no code change
+
+- **Remap.** It runs only in encodeRelayoutHead, which only runs when
+  `relayout.due()`. On a census frame the generation is built on the GPU,
+  and remapFaces, copyFaces, planeSums and remapCells stride markListed's
+  dilated changed-tile list, so an unchanged generation is empty
+  workgroups. A host gate would need a readback or a heuristic.
+- **The remaining fixed cost of an unchanged census frame** is the adopt
+  copy (proportional to live tiles) and the ownership revision bump. Both
+  need proof that the generation is word-identical. That proof is E's job:
+  a deterministic builder with an exact "identical" bit.
+- **NB transfer** is P2G. It reads the moved particles every step and is
+  already skipped when idle.
+
+### Momentum stays out of B1
+
+momentumGroup reads this frame's centerPhi, volume and phase (`umCullAir`),
+so it runs after the geometry. That is recorded under the plan's pass table.
+
+### The move's cold compile: 6.9 s, accepted
+
+The one-launch move compiles cold in 6.9 s against 6.5 s at HEAD. The
+coordinator accepted it unstaged. If the gate shows the inline pair loop
+costs registers, the pair corrections go to threadgroup memory inside the
+same job (above), which would also bring the compile back down.
+
+### E-a: a repeated build is exact, and skips its adoption
+
+- **same** (the builder's first launch, a workgroup of 256 a group) compares
+  three sets of words against copies the last encode held, and refreshes
+  them. The last group to finish decides, through one ticket word.
+  - The band words of the resident blocks.
+  - The window's header and block records. Header word 8 is skipped: it is
+    the boundary decision's counter, which every commit advances and no
+    address reads. A first GPU check found it was why no build ever repeated.
+  - The resolved page words of each resident block's 27-page neighbourhood.
+    Every build read is within two tiles of a resident tile, so within one
+    page. This covers AIR, SOLID and BULK16 page kinds, which block records
+    do not show.
+- **A build repeats** when those inputs match, the host epoch matches and the
+  last build was CLEAN: no fatal bit, and (claims) nothing refused and no
+  slot cut, or (admission) the need within the capacity. A clean build left
+  nothing to claim, so its buffers are already the adopted generation.
+- **The host epoch** (params word 6) is bumped by every host write a build
+  reads that `same` cannot see: the region table, the capacities and the
+  admission. It is also bumped by a live ownership revision that this
+  builder's own adoption did not make.
+- **On a repeat** every later launch exits at once (`repeated`,
+  `repeatedUniform`). The receipt's counters are restored from the build it
+  repeats, with changed 0. The adopt (`uniformMixedAdoptWGSL`) reads the
+  builder's SAME word and copies nothing.
+- **Checked by** tests/census-region-replay.test.ts (the second test). On the
+  still tank, after each repeated build, every word the adoption would copy
+  must already be the live ownership's.
+
+### E-b: the census's deep COLD cache, by region
+
+- **regionList** (one workgroup) walks the resident regions in pool order. A
+  region replays when surface authority holds, it is deep COLD, and its stamp
+  and generation are the ones its last classification wrote. Its records are
+  then current. Every other region classifies and takes this census's stamp.
+  The two lists are compacted by a scan, not by atomics.
+- **replay**: a workgroup a replayed region, a lane a tile. It publishes
+  each record, gathers the counters, the wet and near bits and the audit per
+  region, and flushes them once. It replaces the per-tile replay inside
+  classify and classifyCoarse.
+- **classifyCoarse**: a workgroup a classified region, a lane a 4h tile. It
+  was a fixed grid over the whole 4h list, which mixed deep and live regions
+  in a workgroup and ran each group over several list chunks in series.
+- **classify (h)** skips a replayed region's tile.
+- **decide** now maps a workgroup to a region, so a deep COLD region's lanes
+  take the short path together.
+- **The replay is kept, not dropped**, because importance read-modify-writes
+  classify's importance words in place. The tile record format (10 words) is
+  unchanged.
+- **Checked by** tests/census-region-replay.test.ts (the first test), on the
+  drop frame. It runs the census twice from saved state. Run A has every
+  region classified. Run B replays the deep regions from A's records. Every
+  census word and bounds word must match, except the modes and lists. The
+  reference is the census without the cache, which the cached census is
+  contracted to equal. tests/census-coarse-bounds.test.ts now launches
+  regionList before classifyCoarse.
+- **uniform-mixed-frame.ts is not touched by E**, so it needs no
+  COORDINATION entries.
+
+### E checks (single GPU checks, 2026-11-08, no timing)
+
+- **Drop frame, step 32, 8x8x4 drop=2.** The frame's census had 132 regions
+  classified and 380 replayed (512 resident). Run A, every region
+  classified: 512/0. Run B: 132/380. Every census word matches, and so does
+  every bounds word outside the modes and lists. Running the frame's own
+  census again, with the frame's own records, also gives census words
+  identical to A's. That held only in this working tree's run: on HEAD plus
+  the patch alone, the same run differed in 32440 velocity-key words (see
+  the key check below).
+- **Repeated builds, still tank.** 5 of the 6 builds the frames ran were
+  repeats. That tank stops building once its layout is no longer due. After
+  each repeat, every word the adoption would copy was already the live
+  ownership's. Before the header word 8 fix, 0 of 24 frames repeated.
+- **census-coarse-bounds** (the spread classifyCoarse against the serial
+  reference, now launched per region) passes.
+- **Unit tests** are at baseline. The one failure is the peer's known
+  reservoir-particle-cost test.
+
+### E-b key check: HEAD's replay was stale in velocity
+
+- **The latent staleness.** HEAD's replay already kept a tile's velocity
+  keys in place ("the velocity keys are classify's alone"), and so did E-b.
+  The deep epoch certifies phi, widths and the open-cell masks. It does not
+  certify the field the census reads: velocityB, the extension's output.
+  UniformColdFreeze freezes f.velocity, but the extension's air faces carry
+  lagged state that no 27-region certificate bounds. HEAD's extension has
+  held slots, regional marks and a frozen bit taken from its own marks. B4
+  keeps the last frame's far field wherever no sweep reaches.
+- **The evidence.** On HEAD plus the patch, the frame's own census and a
+  full classification differed in 32440 key words, all in replayed tiles.
+  The first went from 0 to about 5e-10 m/s. In this working tree's run (B4
+  extension, 512 rather than 544 resident regions) they matched by
+  coincidence of the field.
+- **Every reader of the keys reaches replayed tiles.** importance covers
+  every live tile (flow activity, approach, speed). boundCubes covers every
+  tile, and decide's departure trace and pageSeed read the cubes. decide's
+  movingShapeNear reads neighbours' speed. Only decide's deep short path
+  reads no keys.
+- **Every velocity word of a record is a function of the keys.** That
+  covers speed, reach, the fast hysteresis, the shape score, gap, directed
+  travel and umBoundary. So a record is exact when its keys are.
+- **The fix: a key-checked replay.**
+  - replay takes each live tile's keys afresh (umOwnerBounds, the velocity
+    half of umClassifyOwner, now its own function).
+  - A 4h tile's keys come from its lane's serial loop. An h tile's come
+    from the workgroup, a lane an owner, one tile at a time, and the check
+    stops at the first key that differs.
+  - A region whose keys all match publishes its records, and its keys are
+    the stored ones by construction. A region with any moved key is demoted
+    to mode 2 and publishes nothing.
+  - classify (h) then classifies its h tiles, since ccReplayed is mode 1
+    only. classifyCoarse's jobs now run on past the classify list into the
+    replay list, and a demoted region classifies there. Every other
+    replayed region's job exits at once.
+  - The region's stamp is unchanged, so its new records replay next census.
+- **The saving shrinks.** E-b no longer saves classify's velocity loads (6
+  face loads for a regular 4h tile, up to 96 beside h tiles, 64 owners for
+  an h tile). It still saves the phi corners, volume, shape error, depth
+  samples, boundary and thin work. The velocity loads can't be skipped,
+  because the census contract is equality with a full classification and
+  velocity is the one input the deep epoch doesn't certify.
+- **coldRegions "fine".** There's no UniformColdFreeze, and a COLD region is
+  re-solved every step, yet the reference attached the heat for replay on
+  coldCensus alone. It now attaches only when coldRegions isn't "fine"
+  (webgpu-uniform-reference.ts, patch-only). That also drops decide's
+  deep-COLD keep under "fine", whose premise ("nothing around it moved")
+  fails in the same way.
+- **The test.** The first test now asserts C (the frame's own census and
+  records again) against A, word for word, and logs how many replayed
+  regions C demoted. It is not yet run: it goes into the combined round's
+  correctness checks. The census WGSL passes naga in the CPU preflight
+  (tools/capture-uniform-wgsl.mts, bulk-rest-tank). The three naga
+  failures there are the known umUnitTrace and nbBoundaryCubicHit
+  returns.
+
 ## Slot space (coordinated 2026-11-08)
 
 B1 runs on what exists today and has no store of its own:

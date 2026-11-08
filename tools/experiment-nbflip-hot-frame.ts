@@ -181,10 +181,10 @@ function replay(c:Capture,replacements:Map<GPUComputePipeline,GPUComputePipeline
   if(op.kind==='copy'){close();Reflect.apply(Reflect.get(e,op.method,e),e,op.args);dirty=true;continue;}
   const entry=pipelines.get(op.pipeline)?.compute.entryPoint;
   if(candidate&&fuseSurface&&entry==='arenaPublishCanonical')continue;
-  const sized=candidate&&activeDispatch&&['separationPrepass','advectParticlesDeferred'].includes(entry??'');
+  const sized=candidate&&activeDispatch&&entry==='advectParticlesDeferred';
   if(sized&&!jobsBuilt){close();const p=e.beginComputePass();p.setPipeline(jobPipeline!);p.setBindGroup(0,jobGroup!);p.dispatchWorkgroups(1);p.end();jobsBuilt=true;dirty=true;}
   if(!pass||last!==op.pass){close();pass=e.beginComputePass({label:op.phase??op.label});last=op.pass;}
-  pass.setPipeline(replacements.get(op.pipeline)??op.pipeline);for(const i of bound)if(!op.bindings.has(i))pass.setBindGroup(i,null);for(const [i,b]of op.bindings)pass.setBindGroup(i,b.group,b.offsets);bound=new Set(op.bindings.keys());if(sized)pass.dispatchWorkgroupsIndirect(jobArgs!,entry==='separationPrepass'?0:12);else Reflect.apply(pass[op.method],pass,op.args);dirty=true;
+  pass.setPipeline(replacements.get(op.pipeline)??op.pipeline);for(const i of bound)if(!op.bindings.has(i))pass.setBindGroup(i,null);for(const [i,b]of op.bindings)pass.setBindGroup(i,b.group,b.offsets);bound=new Set(op.bindings.keys());if(sized)pass.dispatchWorkgroupsIndirect(jobArgs!,12);else Reflect.apply(pass[op.method],pass,op.args);dirty=true;
  }
  close();if(dirty)raw.queue.submit([e.finish()]);
 }

@@ -37,7 +37,7 @@ const assertParity=process.argv.includes('--assert-parity');
 const variantNames=(option('variants')??'aa').split(',');
 for(const name of variantNames)assert.ok(name==='aa'||name==='transfer192'||replayVariants[name],`unknown variant ${name}`);
 const frames=(option('frames')??'60').split(',').map(Number).sort((a,b)=>a-b),repeats=Number(option('repeats')??5),inner=Number(option('inner')??1),nth=Number(option('nth')??0);
-assert.ok(inner===1||!selected.some(e=>['transferDeposit','advectParticles','advectParticlesDeferred','advectWalk'].includes(e)),'Accumulating kernels require --inner=1 and restored inputs');
+assert.ok(inner===1||!selected.some(e=>['transferDeposit','advectParticles','advectParticlesDeferred'].includes(e)),'Accumulating kernels require --inner=1 and restored inputs');
 const dump=option('dump');if(dump)mkdirSync(dump,{recursive:true});
 assert.ok(frames.every(n=>Number.isInteger(n)&&n>0)&&repeats>0&&inner>0);
 paceDawnEventPolling();

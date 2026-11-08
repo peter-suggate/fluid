@@ -1,11 +1,6 @@
 /** Same-arithmetic candidates for real-scene hot-kernel replay. */
 import {fnSpan,replaceFn,replaceOnce,probeVariants} from './probe-nbflip-variants';
 import {depositLanes,pressureTilePacket,surfacePacket} from './nbflip-stage-replay-variants';
-export function separationCompact(code:string,streamOnly=false){
- return replaceOnce(code,'let other=particles[j].position;if(other.w<=0.0){continue;}',streamOnly?
-  'let other=vec4f(nbPosition(j),1.0);':
-  'let other=vec4f(nbPosition(j),particles[j].position.w);if(other.w<=0.0){continue;}');
-}
 export function transferGuard(code:string){
  return replaceOnce(code,'atomicMax(&state[5],bitcast<u32>(outside));','if(bitcast<u32>(outside)!=0u){atomicMax(&state[5],bitcast<u32>(outside));}');
 }
@@ -89,7 +84,7 @@ export const hotVariants:Record<string,(code:string,entry:string)=>string>={
  lean128:(c,e)=>e==='transferDeposit'?transferGuard(transferLean(depositLanes(c,128))):c,
  aggregate128:(c,e)=>e==='transferDeposit'?transferAggregate(depositLanes(c,128)):c,
  leanAggregate128:(c,e)=>e==='transferDeposit'?transferAggregate(transferLean(depositLanes(c,128))):c,
- hotA:(c,e)=>coarseEntry(e)?coarseOffsets(c):e==='advectParticlesDeferred'?moveLanes(c,128):e==='separationPrepass'?separationCompact(c):e==='transferDeposit'?transferGuard(c):e==='pRelax'?pressureStableWalls(c):e==='arenaDistanceCanonical'?surfacePacket(c,128):e.startsWith('arena')?surfaceShape(c,e,128):c,
- hotB:(c,e)=>coarseEntry(e)?coarseHalves(c):e==='advectParticlesDeferred'?moveLanes(c,32):e==='separationPrepass'?separationCompact(c,true):e==='transferDeposit'?depositLanes(transferGuard(c),96):e==='pRelax'?pressureUnroll(c):e==='arenaDistanceCanonical'?surfacePacket(c,64):e.startsWith('arena')?surfaceShape(c,e,64):c,
- hotC:(c,e)=>coarseEntry(e)?coarseHalves(coarseOffsets(c)):e==='advectParticlesDeferred'?moveLanes(c,256):e==='separationPrepass'?probeVariants.separationselect!(c,e):e==='transferDeposit'?depositLanes(transferGuard(c),128):e==='pRelax'?pressureTilePacket(c):c,
+ hotA:(c,e)=>coarseEntry(e)?coarseOffsets(c):e==='advectParticlesDeferred'?moveLanes(c,128):e==='transferDeposit'?transferGuard(c):e==='pRelax'?pressureStableWalls(c):e==='arenaDistanceCanonical'?surfacePacket(c,128):e.startsWith('arena')?surfaceShape(c,e,128):c,
+ hotB:(c,e)=>coarseEntry(e)?coarseHalves(c):e==='advectParticlesDeferred'?moveLanes(c,32):e==='transferDeposit'?depositLanes(transferGuard(c),96):e==='pRelax'?pressureUnroll(c):e==='arenaDistanceCanonical'?surfacePacket(c,64):e.startsWith('arena')?surfaceShape(c,e,64):c,
+ hotC:(c,e)=>coarseEntry(e)?coarseHalves(coarseOffsets(c)):e==='advectParticlesDeferred'?moveLanes(c,256):e==='transferDeposit'?depositLanes(transferGuard(c),128):e==='pRelax'?pressureTilePacket(c):c,
 };
