@@ -81,6 +81,7 @@ export function clothTopologyErrors(data: ClothTopologyData, materials: readonly
   if (s) {
     if (s.previousVelocities_m_s.length !== 3 * n || s.previousDisplacements_m.length !== 3 * n) errors.push("Cloth solver state must cover every vertex");
     if (!(s.previousStep_s >= 0)) errors.push("Cloth solver state needs a non-negative previous step");
+    if (!(s.time_s >= 0)) errors.push("Cloth solver state needs a non-negative clock");
   }
   return errors;
 }

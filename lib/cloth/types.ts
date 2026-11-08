@@ -39,6 +39,8 @@ export interface ClothSolverStateData {
   readonly previousDisplacements_m: readonly number[];
   /** Length of the previous step, s; 0 before the first step. */
   readonly previousStep_s: number;
+  /** Scene time of the cloth clock, s; attachment scripts are evaluated at it. */
+  readonly time_s: number;
   /** Warm-started AVBD duals, one (lambda xyz, k) per pinned vertex in vertex order. */
   readonly pinDuals: readonly number[];
   /** One (lambda, k) per edge of the canonical edge list (`prepareClothTopology`). */

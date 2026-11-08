@@ -117,7 +117,7 @@ export function remapClothSolverState(state:ClothSolverStateData,old:{readonly t
     const e=a>=0&&b>=0?oldEdge.get(Math.min(a,b)*oldN+Math.max(a,b)):undefined;
     edgeDuals.push(...(e!==undefined?state.edgeDuals.slice(2*e,2*e+2):[0,0]));
   }
-  return {previousVelocities_m_s:blend(state.previousVelocities_m_s),previousDisplacements_m:blend(state.previousDisplacements_m),previousStep_s:state.previousStep_s,pinDuals,edgeDuals};
+  return {previousVelocities_m_s:blend(state.previousVelocities_m_s),previousDisplacements_m:blend(state.previousDisplacements_m),previousStep_s:state.previousStep_s,time_s:state.time_s,pinDuals,edgeDuals};
 }
 
 /** Exact polygon clipping in the currently deformed surface. Rest shape, UVs,
