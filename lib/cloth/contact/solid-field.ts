@@ -379,34 +379,67 @@ export interface ClothSolidSampleOptions {
 }
 
 /**
- * Points on the field's zero set where vertex contact alone lets a cloth face
- * sag into the solid: a face of edge e (circumradius about e / sqrt 3) lying on
- * a convex surface of curvature kappa dips about kappa e^2 / 6 below its
- * vertices, which rest at least r / 2 out; wherever the dip exceeds r / 2
- * (kappa > 3 r / e^2, measured as the normal's turn over two cells along the
- * surface) the surface is sampled and the samples meet the cloth's faces and
- * their edges as static points (sharp edges and corners of a voxel solid, the
- * rims of a frustum). Flat and gently curved surface, and every concave
- * crease, carry none.
- *
- * Spacing h / 2: a sharp cell (its centre's two-cell turn above the
- * threshold) is seeded at its eight half-cell centres, each projected onto
- * the surface and kept where the turn over half a cell still exceeds the
- * threshold; kept samples are at least h / 8 apart. Between samples h / 2
- * apart a face's sag is at most kappa h^2 / 32, far below r for the field's
- * own rounding of a crease (kappa ~ 1 / h). A straight cloth edge lying
- * across a crease passes within about h / 4 of a sample, so the barrier
- * engages it only where h / 4 < r: an edge may graze a crease between samples
- * when h > 4 r (the Bridson scenes: h = 1 cm, r = 1.5 mm). Exact coverage of
- * edges by points needs spacing ~ r over every sampled area (measured: 0.2 to
- * 0.35 M samples per Bridson scene); a face-against-field closest point (the
- * face's own minimum of phi) removes that bound. Setup-time CPU work, over the surface cells whose field is not
- * affine; returns (x, y, z, mu) per sample.
+ * Normal turn per cell below which the trilinear field is taken as flat: the
+ * interpolant's own error, not a contact tolerance (a sphere of radius 100 h
+ * turns 0.01 rad per cell).
  */
-export function clothSolidSamples(field: ClothSolidField, options: ClothSolidSampleOptions): Float32Array {
-  const h = field.cell, kappaMin = 3 * options.r / (options.edge * options.edge), CELL_STEP = 2;
+export const SOLID_SAMPLE_TURN_FLOOR = 0.01;
+/**
+ * Normal turn per cell above which the surface is sharp (radius of curvature
+ * under 4 h: an edge or corner the trilinear field rounds over a cell), and is
+ * sampled at h / 2 rather than h.
+ */
+export const SOLID_SAMPLE_SHARP_TURN = 0.25;
+
+/**
+ * Static contact points just outside the field's zero set wherever it is
+ * convex and not flat: the sharp edges and corners of a voxel solid, a
+ * frustum's rims, every curved convex surface. They meet the cloth's faces
+ * (and the faces' edges) as static points. Vertex contact alone does not keep
+ * a face out: the vertices may come arbitrarily close to phi = 0 (the
+ * barrier's domain is phi > 0, and an impact drives them there; the drape gate
+ * measured 6e-5 m), and a face of edge e over curvature kappa then dips about
+ * kappa e^2 / 8 below them. Flat surface (affine cells) and concave creases
+ * (|grad phi| ~ 0 at the trilinear zero set) carry none.
+ *
+ * A cell whose centre's normal turns (convexly) by more than the floor over
+ * two cells is sampled:
+ *   - smooth (a turn under SOLID_SAMPLE_SHARP_TURN per cell): its centre's
+ *     projection, spacing s about h;
+ *   - sharp: seeded at its eight half-cell centres, each projected onto the
+ *     surface and kept where the turn over half a cell still exceeds the
+ *     floor, spacing s about h / 2.
+ * Kept samples are at least h / 4 apart. A smooth sample stands
+ * (kappa_1 + kappa_2) s^2 / 8 out along its normal: the surface between
+ * samples s apart rises at most that far above their plane (a square of side
+ * s: its centre is (s / 2, s / 2) from a corner), so a face kept off the
+ * samples is kept off the surface. A crease's samples stay on it: the
+ * trilinear field of a lattice box keeps its edge sharp, and the surface is
+ * straight along the edge and flat beside it.
+ *
+ * A straight cloth edge lying across a crease passes within about h / 4 of a
+ * sample (h / 2 on a smooth surface), so the barrier engages it only where
+ * that is under r: an edge may graze the solid between samples when h > 4 r
+ * (the Bridson scenes: h = 1 cm, r = 1.5 mm). Setup-time CPU work over the
+ * surface cells whose field is not affine; returns (x, y, z, mu) per sample,
+ * with phi there equal to its lift.
+ *
+ * `options` (the cloth's r and longest edge) are validated and otherwise not
+ * used: the samples depend on the field alone.
+ */
+export function clothSolidSamples(field: ClothSolidField, options?: ClothSolidSampleOptions): Float32Array {
+  if (options && !(options.r > 0 && options.edge > 0)) throw new RangeError("Cloth solid samples need r > 0 and edge > 0");
+  let cached = sampleCache.get(field);
+  if (!cached) sampleCache.set(field, cached = buildSolidSamples(field));
+  return cached;
+}
+
+/** A field is immutable once built (a rebuild returns a new one): its samples are computed once. */
+const sampleCache = new WeakMap<ClothSolidField, Float32Array>();
+
+function buildSolidSamples(field: ClothSolidField): Float32Array {
+  const h = field.cell, kappaMin = SOLID_SAMPLE_TURN_FLOOR / h, CELL_STEP = 2;
   const spacing = 0.5 * h, m = 2, localStep = 0.5;
-  if (!(options.r > 0 && options.edge > 0)) throw new RangeError("Cloth solid samples need r > 0 and edge > 0");
   const sample = (p: V3) => sampleClothSolidField(field, p);
   // Newton onto phi = 0 along the gradient; undefined when it leaves the stored field or drifts more than a cell.
   const project = (p0: V3): { p: V3; n: V3; mu: number } | undefined => {
@@ -432,31 +465,35 @@ export function clothSolidSamples(field: ClothSolidField, options: ClothSolidSam
     }
     return undefined;
   };
-  // The largest convex curvature seen `step` cells away along the surface, in four tangent directions.
-  const kappa = (q: { p: V3; n: V3 }, step: number): number => {
+  // The convex normal turn per length seen `step` cells away along two orthogonal
+  // tangents (both ways): [the larger, their sum (at least kappa_1 + kappa_2)].
+  const turns = (q: { p: V3; n: V3 }, step: number): [number, number] => {
     const n = q.n, a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] : Math.abs(n[1]) < 0.6 ? [0, 1, 0] : [0, 0, 1];
     const t1 = [n[1] * a[2]! - n[2] * a[1]!, n[2] * a[0]! - n[0] * a[2]!, n[0] * a[1]! - n[1] * a[0]!];
     const l1 = Math.hypot(...t1), u = t1.map(v => v / l1), w = [n[1] * u[2]! - n[2] * u[1]!, n[2] * u[0]! - n[0] * u[2]!, n[0] * u[1]! - n[1] * u[0]!];
-    let k = 0;
-    for (const d of [u, w]) for (const sgn of [1, -1]) {
+    const k = [0, 0];
+    for (const [i, d] of [u, w].entries()) for (const sgn of [1, -1]) {
       const o = project([q.p[0] + sgn * step * h * d[0]!, q.p[1] + sgn * step * h * d[1]!, q.p[2] + sgn * step * h * d[2]!]);
       if (!o) continue;
       const dp = [o.p[0] - q.p[0], o.p[1] - q.p[1], o.p[2] - q.p[2]], dn = [o.n[0] - n[0], o.n[1] - n[1], o.n[2] - n[2]];
       const len = Math.hypot(...dp);
       if (len < 0.125 * step * h || dp[0]! * dn[0]! + dp[1]! * dn[1]! + dp[2]! * dn[2]! <= 0) continue;
-      k = Math.max(k, Math.hypot(...dn) / len);
+      k[i] = Math.max(k[i]!, Math.hypot(...dn) / len);
     }
-    return k;
+    return [Math.max(k[0]!, k[1]!), k[0]! + k[1]!];
   };
-  // Kept samples at least h / 8 apart (a hash of h / 8 cells, one each): only coincident projections merge.
-  const out: number[] = [], seen = new Map<string, number>(), minSep = 0.25 * spacing;
-  const keep = (q: { p: V3; mu: number }) => {
+  const kappa = (q: { p: V3; n: V3 }, step: number) => turns(q, step)[0];
+  // Kept samples at least h / 4 apart (a hash of h / 4 cells, one each): the seeds of
+  // neighbouring cells project onto the same stretch of surface.
+  const out: number[] = [], seen = new Map<string, number>(), minSep = 0.5 * spacing;
+  // A sample sits `lift` out along its normal: the surface it stands for bulges at most that far above the samples' plane.
+  const keep = (q: { p: V3; n: V3; mu: number }, lift: number) => {
     const c = q.p.map(v => Math.floor(v / minSep));
     for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
       const j = seen.get(`${c[0]! + dx},${c[1]! + dy},${c[2]! + dz}`);
       if (j !== undefined && Math.hypot(out[j]! - q.p[0], out[j + 1]! - q.p[1], out[j + 2]! - q.p[2]) < minSep) return;
     }
-    seen.set(c.join(","), out.length); out.push(q.p[0], q.p[1], q.p[2], q.mu);
+    seen.set(c.join(","), out.length); out.push(q.p[0] + lift * q.n[0], q.p[1] + lift * q.n[1], q.p[2] + lift * q.n[2], q.mu);
   };
   const cellNodes = new Float64Array(8);
   for (const brick of field.bricks.values()) {
@@ -473,11 +510,17 @@ export function clothSolidSamples(field: ClothSolidField, options: ClothSolidSam
       const c = [0, 1, 2].map(a => field.origin[a]! + (brick.brick[a]! * SOLID_BRICK_CELLS + [x, y, z][a]! + 0.5) * h);
       const centre = project(c as unknown as V3);
       if (!centre) continue;
-      if (kappa(centre, CELL_STEP) <= kappaMin) continue;
+      const [k0, kSum] = turns(centre, CELL_STEP);
+      if (k0 <= kappaMin) continue;
+      // A smooth cell (the normal turns less than SOLID_SAMPLE_SHARP_TURN per cell) keeps its centre's sample,
+      // lifted by its bulge (kappa_1 + kappa_2) s^2 / 8 at s = h.
+      if (k0 * h < SOLID_SAMPLE_SHARP_TURN) { keep(centre, 0.125 * kSum * h * h); continue; }
       for (let s = 0; s < m * m * m; s++) {
         const o = [s % m, Math.floor(s / m) % m, Math.floor(s / (m * m))].map(i => ((i + 0.5) / m - 0.5) * h);
         const q = project([c[0]! + o[0]!, c[1]! + o[1]!, c[2]! + o[2]!]);
-        if (q && kappa(q, localStep) > kappaMin) keep(q);
+        if (!q) continue;
+        // On a crease the surface is straight along it and flat across it off the crease: no bulge.
+        if (kappa(q, localStep) > kappaMin) keep(q, 0);
       }
     }
   }

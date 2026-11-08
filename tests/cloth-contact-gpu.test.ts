@@ -566,7 +566,7 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     const S = det.solidSamples, samples: V3[] = [];
     for (let s = 0; s < S; s++) samples.push([xdet[4 * (N + s)], xdet[4 * (N + s) + 1], xdet[4 * (N + s) + 2]]);
     const onBox = samples.filter(p => solidBox(p) < solidBall(p)).length;
-    assert.ok(onBox > 100 && S - onBox > 100 && samples.every(p => Math.abs(sampleClothSolidField(field, p).phi) < 1e-6), `${S} samples, ${onBox} on the box`);
+    assert.ok(onBox > 100 && S - onBox > 100 && samples.every(p => sampleClothSolidField(field, p).phi > -1e-6 && sampleClothSolidField(field, p).phi < 0.005 / 8), `${S} samples, ${onBox} on the box`);
     // Sample-facet entries: brute force over the sheet with the samples as free points.
     const isSample = (e: Entry) => e.w === 1 && (e.y & 0x80000000) === 0;
     const withSamples: OracleMesh = { ...oracle, x: [...mesh.x, ...samples] };

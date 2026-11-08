@@ -34,7 +34,7 @@ import { ClothGPUSolver } from "../lib/cloth/gpu-solver";
 import { CLOTH_BINDING, CLOTH_STATE } from "../lib/cloth/gpu-solver-wgsl";
 import { OGC_ROUND_KERNELS, OgcContactDetector, type OgcContactConfig, type OgcCellRule, type OgcFrameCounters, type OgcPrediction } from "../lib/cloth/contact/ogc-detector";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
-import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, clothSolidSamples, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import { trianglesIntersect, type V3 } from "./cloth-contact-oracle";
 
 const gates = new Set((process.env.CLOTH_CONTACT_GATES ?? "").split(",").filter(Boolean));
@@ -168,6 +168,31 @@ function cpuIntersections(x: Float64Array, faces: Uint32Array, cell: number): { 
 
 interface Frame { step: number; c: OgcFrameCounters }
 
+/** Debug: the faces reaching phi < 0 (Float64 over the field), their depth, vertex phi and nearest sample. */
+async function solidDiagnosis(field: ClothSolidField, x: Float64Array, faces: Uint32Array, det: OgcContactDetector): Promise<string> {
+  const S = clothSolidSamples(field), P = (v: number): V3 => [x[3 * v]!, x[3 * v + 1]!, x[3 * v + 2]!];
+  const rows: string[] = [];
+  for (let t = 0; t < faces.length / 3; t++) {
+    const A = [0, 1, 2].map(k => P(faces[3 * t + k]!)), n = 16;
+    let worst = Infinity, at: V3 = [0, 0, 0];
+    for (let i = 0; i <= n; i++) for (let j = 0; j <= n - i; j++) {
+      const u = i / n, w = j / n, p = [0, 1, 2].map(a => (1 - u - w) * A[0]![a]! + u * A[1]![a]! + w * A[2]![a]!) as V3;
+      const q = sampleClothSolidField(field, p);
+      if (q.stored && q.phi < worst) { worst = q.phi; at = p; }
+    }
+    if (!(worst < 0)) continue;
+    let near = Infinity, nearPhi = 0;
+    for (let k = 0; k < S.length / 4; k++) {
+      const d = Math.hypot(S[4 * k]! - at[0], S[4 * k + 1]! - at[1], S[4 * k + 2]! - at[2]);
+      if (d < near) { near = d; nearPhi = sampleClothSolidField(field, [S[4 * k]!, S[4 * k + 1]!, S[4 * k + 2]!]).phi; }
+    }
+    // Distance from the nearest sample to the face's plane region (its closest point).
+    rows.push(`face ${t} depth ${worst.toExponential(2)} at (${at.map(v => v.toFixed(4)).join(",")}), vertex phi ${A.map(p => sampleClothSolidField(field, p).phi.toExponential(2)).join("/")}, nearest sample ${near.toExponential(2)} (lift ${nearPhi.toExponential(2)})`);
+  }
+  void det;
+  return `${rows.length} faces below phi 0 (Float64): ${rows.slice(0, 6).join(" | ")}`;
+}
+
 async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, config: OgcContactConfig, field: ClothSolidField | undefined, log: (s: string) => void) {
   const { mesh, rest } = meshOf(m), N = mesh.vertexCount;
   const det = await OgcContactDetector.create(device, mesh, rest, config);
@@ -218,6 +243,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
       log(`${name} debug step ${s}: y [${ylo.toFixed(4)}, ${yhi.toFixed(4)}], non-finite ${bad}, min phi ${minPhi.toExponential(3)}, status [${OgcContactDetector.describeStatus(c.status)}], `
         + `rounds ${c.detections}, truncated ${c.truncated}, vf ${c.vfPairs} ee ${c.eePairs} dat ${c.datPairs} peakSlots ${c.framePeakPairSlots}, solid ${c.solidContacts}, envelope ${c.peakEnvelope.toExponential(2)}, cell ${c.cell.toExponential(2)}, candidates ${c.candidates}, held ${c.held} conflicts ${c.conflicts} redos ${c.redos} capped ${c.capped} uncertified ${c.uncertified} envCap ${c.envelopeCapHits}`);
     }
+    if (c.solidIntersections && field && process.env.CLOTH_GATE_DEBUG) log(`${name} step ${s}: ${await solidDiagnosis(field, await solver.readPositions(), m.topology.faces, det)}`);
     if (c.intersections) {
       const x = await solver.readPositions(), cpu = cpuIntersections(x, m.topology.faces, 0.02);
       log(`${name} step ${s}: GPU counts ${c.intersections} intersecting pairs, Float64 ${cpu.count}: ${JSON.stringify(cpu.pairs.slice(0, 4))} `
@@ -293,7 +319,7 @@ function pedestal(band: number): ClothSolidField {
   ], lo: [-0.36, -0.2, -0.36], hi: [0.36, 0.22, 0.36], cell: 0.005, band });
 }
 
-/** Surface samples a scene's field may hold, authored above the measured count (the drop's pedestal and slab edges: logged per gate). */
+/** Surface samples a gate field may hold, authored above the measured counts (pedestal 7,758; drape 13,766). */
 const SOLID_SAMPLES = 16384;
 
 function dropConfig(N: number, T: number, E: number, solidWords: number, variant: { truncation: "planar" | "isotropic"; adaptive: boolean }): OgcContactConfig {

@@ -186,27 +186,36 @@ test("solid field parts: a lattice-box floor and an sdf ball match the single-sd
   assert.throws(() => buildClothSolidField({ ...box, parts: [{ ...parts[1]!, mu: 3 } as ClothSolidPart] }), /friction/);
 });
 
-test("solid surface samples: on the zero set at a sharp box's edges and a tight sphere, none on flat faces, a broad sphere or a concave crease", () => {
-  const r = 2e-3, edge = 0.01 * Math.SQRT2, h = 0.005;
+test("solid surface samples: on the zero set wherever it is convex and not flat (box edges, spheres), none on flat faces or along a concave crease", () => {
+  const h = 0.005;
   const at = (s: Float32Array) => Array.from({ length: s.length / 4 }, (_, i) => [s[4 * i]!, s[4 * i + 1]!, s[4 * i + 2]!] as V3);
-  const pts = at(clothSolidSamples(field, { r, edge }));
-  assert.ok(pts.every(p => Math.abs(phiAt(p)) < 1e-6), "on the zero set");
+  const pts = at(clothSolidSamples(field));
+  // A smooth sample stands its bulge (kappa_1 + kappa_2) h^2 / 8 out, a crease sample on the surface.
+  assert.ok(pts.every(p => phiAt(p) > -1e-6 && phiAt(p) < h / 8), "just outside the zero set");
   // Box samples lie within a cell of an edge (two faces' planes): the faces' interiors carry none.
   const onBox = pts.filter(p => box(p) < ball(p));
   const out = (p: V3) => [p[0] < 0.02 + h || p[0] > 0.08 - h, p[1] < 0.02 + h || p[1] > 0.06 - h, p[2] < h || p[2] > 0.03 - h].filter(Boolean).length;
   assert.ok(onBox.length > 300 && onBox.every(p => out(p) >= 2), `${onBox.length} box samples, off the edges: ${onBox.filter(p => out(p) < 2).length}`);
-  // A sphere of curvature 40/m > 3 r / e^2 = 30/m is sampled; one of 10/m is not.
-  assert.ok(pts.length - onBox.length > 300, `${pts.length - onBox.length} samples on the 2.5 cm ball`);
+  // The ball (smooth: it turns 0.2 rad per cell) is covered at about h: its area over h^2 within a factor of two.
+  const nBall = pts.length - onBox.length, ideal = 4 * Math.PI * 0.025 ** 2 / h ** 2;
+  assert.ok(nBall > 0.5 * ideal && nBall < 2 * ideal, `${nBall} samples on the 2.5 cm ball, ideal ${ideal.toFixed(0)}`);
+  // So is a broad sphere (any convex curvature lets a face sag below its vertices), and every point of it is near one.
   const broad = buildClothSolidField({ sdf: sphereSdf([0, 0, 0], 0.1), lo: [-0.13, -0.13, -0.13], hi: [0.13, 0.13, 0.13], cell: h, band: 0.02 });
-  assert.equal(clothSolidSamples(broad, { r, edge }).length, 0, "the 10 cm sphere");
-  // A step's inner crease (two boxes) is concave: samples only on the convex edges.
+  const bp = at(clothSolidSamples(broad)), R = rng(5);
+  for (let i = 0; i < 200; i++) {
+    const u = unit(R), p = scale(u, 0.1);
+    assert.ok(bp.some(q => norm(sub(q, p)) < 0.75 * h), `no sample within 0.75 h of ${p}`);
+  }
+  // A step's inner crease (two boxes) is concave, its faces flat: samples only on the convex edges.
   const step = buildClothSolidField({ parts: [
     { kind: "lattice-box", lo: [-0.05, -0.05, -0.02], hi: [0.05, 0.05, 0], mu: 0.3 },
     { kind: "lattice-box", lo: [-0.05, -0.05, 0], hi: [0, 0.05, 0.02], mu: 0.3 },
   ], lo: [-0.08, -0.08, -0.05], hi: [0.08, 0.08, 0.05], cell: h, band: 0.02 });
-  const sp = at(clothSolidSamples(step, { r, edge }));
+  const sp = at(clothSolidSamples(step));
   // The crease ends on the convex edges of the end faces y = +-0.05.
   const inner = sp.filter(p => Math.hypot(p[0], p[2]) <= h && Math.abs(p[1]) < 0.05 - 2 * h);
-  assert.ok(sp.length > 100 && inner.length === 0, `${sp.length} step samples, ${inner.length} along the inner crease`);
-  assert.throws(() => clothSolidSamples(field, { r: 0, edge }), RangeError);
+  const flat = sp.filter(p => Math.abs(p[1]) < 0.05 - h && ((Math.abs(p[2] - 0.02) < 1e-6 && p[0] < -h && p[0] > -0.05 + h) || (Math.abs(p[2]) < 1e-6 && p[0] > h && p[0] < 0.05 - h)));
+  assert.ok(sp.length > 100 && inner.length === 0 && flat.length === 0, `${sp.length} step samples, ${inner.length} along the inner crease, ${flat.length} on the flat tops`);
+  assert.equal(clothSolidSamples(step), clothSolidSamples(step), "computed once per field");
+  assert.throws(() => clothSolidSamples(field, { r: 0, edge: 0.01 }), RangeError);
 });
