@@ -3,7 +3,7 @@
 Date: 2026-11-09. Status: approved 2026-11-09; implementation in progress (lanes C1 and C2, progress in `progress-lane-c1.md` and `progress-lane-c2.md` beside this file).
 
 **Decisions (user, 2026-11-09):**
-- Cloth takes its own GPU-chosen substeps inside a fluid step. The no-substeps rule applies to the water solve only.
+- **No substepping, ever** (user, 2026-11-09, overriding the earlier substep approval). Cloth takes exactly one implicit step per 1/60 s frame, the same dt as the fluid. Contact re-detection rounds inside that step's iteration loop are allowed: they refresh the contact set during one solve and do not advance time.
 - Two-way rigid coupling uses option (b): bodies that touch cloth become AVBD 6-DOF blocks in the cloth's GPU solve.
 - The libwetcloth reproduction is retired as a goal. Yarn, rods and towels are parked.
 - **The old cloth code is deleted, not parked.** That covers mechanics, contact, rods, porous transport, cohesion, the wet coupling in NB-FLIP, wetcloth scenes, assets, tools, tests and plan docs. Keep the tree neat: only what the new triangle cloth uses survives, rewritten where that is simpler.
@@ -52,10 +52,10 @@ The current cloth reproduces libwetcloth (Fei et al. 2018). It uses an implicit-
 ### Step (all on the GPU, no readback)
 
 ```
-per substep:
+per frame (dt = 1/60 s, one step, no substeps):
   y = x_t + dt v + dt² g                       (inertia target)
   x = VBD adaptive init(y), truncated to b_v    (penetration-free start)
-  for k in 1..K:                                (K ≈ 4–20)
+  for k in 1..K:                                (K authored per scene; the only budget)
     for colour c:                               (≈ 6–8 colours for a cloth mesh)
       per vertex i in c: gather f_i, H_i from incident faces, hinges, contacts
                          (and AVBD terms)
@@ -68,7 +68,12 @@ per substep:
 
 - **The vertex's own line search** fixes OGC failure 2. The local energy is a sum over a dozen elements, so backtracking is cheap.
 - **Re-detection is GPU-decided.** An atomic counter writes the indirect args for detection: zero workgroups normally, N when bounds are exhausted. The CPU never sees it.
-- **Substeps (decision needed).** OGC's bounds make substeps (dt ≈ 1/300–1/1200) the cheap way to avoid locking (failure 1). AVBD also reports that 1 iteration per substep beats the same total iterations in fewer substeps. I propose the GPU choose the cloth substep count from `max|v|·dt / r` and write it to indirect args. That decouples cloth time from the fluid step. The water rule "no substeps" is about the fluid solve, so it needs your call for cloth.
+- **One 1/60 s step, no substeps.** The published OGC scenes use dt 1/100–1/1200, so a full 1/60 step is beyond what the papers demonstrate. Three things make it work:
+  - **Velocity-adaptive envelope.** Per vertex, `r_q,v = r + s·|v|·dt`, capped by an authored limit with a status word. The query uses the larger envelope of each pair, so no pair is missed. The bound is `d_min` clipped at the vertex's own envelope, so free-flying fast cloth gets a bound as large as its motion, and only cloth near other cloth is truncated.
+  - **Re-detection rounds inside the step.** They run between iterations through the exceed-count and indirect dispatch, with an authored cap per step.
+  - **Convergence at large dt.** AVBD strain limits and stiff terms, Chebyshev acceleration, warm-started duals and stiffnesses, and the vertex line search.
+- **BDF2 by default.** Implicit Euler at 1/60 visibly damps swinging cloth. BDF2 is the same variational VBD solve with a different inertia target and weights.
+- **Fallback if OGC still locks at 1/60.** Use the active-set idea from Zheng, Luo and Li (2026): add every pair found along the swept motion as AVBD inequality constraints at once, with augmented-Lagrangian multipliers, instead of only truncating. Penetration-freedom stays exact. Switching needs evidence from the gates.
 
 ### Self-contact (OGC)
 
@@ -81,7 +86,7 @@ per substep:
 
 ### Execution on M1 Max: two tiers
 
-**Tier A (baseline, lands first).** Global coloured VBD: one dispatch per colour per iteration. Use one SIMD-group per small vertex group: lanes take incident elements and contacts, then reduce with subgroup ops (Dawn `subgroups`; fall back to workgroup memory). Element terms are recomputed per incident vertex, as VBD does; there is no element pre-pass. Dispatch count is colours × iterations × substeps. That is fine for correctness, but it is the launch-bound pattern from the OGC profile.
+**Tier A (baseline, lands first).** Global coloured VBD: one dispatch per colour per iteration. Use one SIMD-group per small vertex group: lanes take incident elements and contacts, then reduce with subgroup ops (Dawn `subgroups`; fall back to workgroup memory). Element terms are recomputed per incident vertex, as VBD does; there is no element pre-pass. Dispatch count is colours × iterations. That is fine for correctness, but it is the launch-bound pattern from the OGC profile.
 
 **Tier B (the big swing).** Patch-resident solve, the cloth analogue of the brick-resident fluid step:
 
@@ -145,7 +150,7 @@ Coupling enters VBD as per-vertex external forces in the inertia target: NB-FLIP
 |---|---|---|
 | M0 | Float64 CPU oracle of one VBD vertex update: energies, gradients, PSD Hessians, OGC energy and bound | unit tests only |
 | M1 | Tier A dry cloth: membrane, bending, damping, AVBD pins, ground | 64² and 256² hanging cloth; residual decay per iteration; ms/frame; matches the M0 oracle per vertex |
-| M2 | OGC self-contact, hash broad phase, GPU re-detection, vertex line search, adaptive substeps | twisting cloth (10K, from OGC Fig. 12); 10-layer drop; intersections = 0; ms/frame vs OGC Table 1 |
+| M2 | OGC self-contact, hash broad phase, velocity-adaptive envelope, in-step GPU re-detection, vertex line search | twisting cloth (10K, from OGC Fig. 12); 10-layer drop; intersections = 0; ms/frame vs OGC Table 1 |
 | M3 | Tier B patch-resident solve, sleeping patches | equal-time residual vs Tier A; 16K/64K targets |
 | M4 | Edit contract: GPU recolour, cut mid-simulation, picking, save/load/undo | AGENTS.md regressions |
 | M5 | Static voxel-solid contact, including solid-feature samples | sphere drape, sharp box, solid cut under cloth |
@@ -159,7 +164,7 @@ C2 starts once M1's per-vertex interfaces are frozen.
 
 ## Risks to watch
 
-1. **OGC locking** under fast motion. Mitigated by GPU-chosen substeps and bounds taken from `x_det` across iterations, not per iteration. If locking persists, measure it before reaching for anything else.
+1. **OGC locking** under fast motion at a single 1/60 s step. This is the central risk. Mitigated by the velocity-adaptive envelope, in-step re-detection rounds, and bounds taken from `x_det` across iterations. If locking persists, the fallback is the swept active set as AVBD constraints. Gate it on truncated fraction, residual, rounds per step and intersection count.
 2. **Float32 stiffness blow-ups.** Mitigated by the vertex line search and AVBD for stiff terms, not by stiffer penalties.
 3. **Gauss-Seidel inconsistency.** Contacts between same-colour vertices are lagged within a colour, as VBD does. Watch the residual in dense stacks.
 4. **Dawn limits:**
