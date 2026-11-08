@@ -407,12 +407,15 @@ export class UniformMixedFrame {
  /** rho g h of the advance under way: a promote's hydrostatic pressure step a cell (Pa). */
  private readonly bulkGradient:[number,number,number]=[0,0,0];
  private readonly bulkGroup?:UniformDetailGroup;
- /** The extension of the stored field into velocityScratch; and FLIP's old
-  * field: the transferred field's band extension into departure (old: only
-  * the supported band's faces), which recordDelta reads against the tail's
-  * extension. */
+ /** The extension of the stored field into velocityScratch; FLIP's keep
+  * (the transferred field into departure where the tail's second channel
+  * reads it, with the frame's flags and seeds); and the pair tail: the
+  * projected field and the kept one extended together, the first into
+  * velocityScratch, their difference into the extension's delta pool, which
+  * recordDelta reads. */
  private extensionGroup!:UniformFrameExtensionGroup;
- private flipOldExtensionGroup!:UniformFrameExtensionGroup;
+ private flipKeepGroup!:UniformFrameExtensionGroup;
+ private flipTailGroup!:UniformFrameExtensionGroup;
  private readonly cacheGroup:UniformDetailGroup;
  private surfaceGroup!:UniformDetailGroup;
  private surfaceVolumeGroup!:UniformDetailGroup;
@@ -704,7 +707,7 @@ export class UniformMixedFrame {
  private bindStage():void{
   // FLIP's own stage taps: its old-field snapshot runs before forces,
   // whose viscosity still reads the frame's unit taps.
-  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging});
+  this.narrowBandFlip.bind({...this.fields,coarseExtended:this.coarseCache,unitExtended:this.hanging.unitVelocity,hanging:this.hanging,extensionDelta:this.extension.delta});
   const f=this.fields,stage:GPUBufferBinding={buffer:this.stageScratch};
   // The retained extension slots expire before surface transport. Surface and
   // volume finish before momentum; forces and the next extension run after it.
@@ -713,7 +716,8 @@ export class UniformMixedFrame {
    extended:f.velocityScratch,physical:f.velocity,phase:f.phase,volume:f.volume,centerPhi:f.centerPhi,negative:f.negativeScratch,
    output:f.departure,outputNegative:f.negativeDeparture,params:this.params.momentum,coarseExtended:this.coarseCache});
   this.extensionGroup=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension});
-  this.flipOldExtensionGroup=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.departure,outputNegative:f.negativeScratch,params:this.params.extension,old:true});
+  this.flipKeepGroup=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negativeDeparture,output:f.departure,outputNegative:f.negativeScratch,params:this.params.extension,mode:"keep"});
+  this.flipTailGroup=this.extension.bind({physical:f.velocity,phase:f.phase,negative:f.negative,output:f.velocityScratch,outputNegative:f.negativeScratch,params:this.params.extension,prior:f.departure,mode:"pair"});
   this.surfaceGroup=this.surface.bind({narrowBandState:this.narrowBandFlip.state,unitVelocity:this.hanging.unitVelocity,unitHalo:this.hanging.haloOf(this.hanging.unitVelocity),velocity:f.velocityScratch,coarseVelocity:this.coarseCache,negative:f.negativeScratch,params:this.params.surface,evidence:stage,phi:f.phi,outputPhi:f.phiScratch});
   if(this.surfaceVolume)this.surfaceVolumeGroup=this.surfaceVolume.bind(f.phi,f.target,stage);
   // NB-FLIP's transfer leaves the advected field in the stored velocity (a
@@ -919,8 +923,8 @@ export class UniformMixedFrame {
   * sets it. Every warm brick is recomputed and the frozen (COLD) regions are
   * held, so there is nothing to retain or invalidate between encodes.
   * seeded: an extension of this advance, on the same table, phase and
-  * freeze, already wrote its flags, h seeds and headers (the tail after the
-  * old field's); a table update in between voids that. */
+  * freeze, already wrote its flags, h seeds and headers (the pair tail
+  * after the keep); a table update in between voids that. */
  private encodeVelocityExtension(encoder:GPUCommandEncoder,group:UniformFrameExtensionGroup,seeded=false):void{
   const updated=!this.bricksCurrent;this.encodeBricks(encoder);this.extension.encode(encoder,group,seeded&&!updated);
  }
@@ -1268,10 +1272,11 @@ export class UniformMixedFrame {
    if(!kick){
     // G2P must compare the same extrapolation of valid fluid faces on both
     // sides of pressure. Raw air-face clearing is not a physical FLIP delta.
-    // The old field: its band extension into departure (momentum, its last
-    // reader, has run), held there to the tail's recordDelta.
-    // An idle frozen advance encodes no extension (extensionIdle).
-    if(!this.extensionIdle)this.encodeVelocityExtension(encoder,this.flipOldExtensionGroup);
+    // The keep: the transferred field into departure (the transfer, its last
+    // reader, has run) where the pair tail's second channel reads it, held
+    // there to the tail. APIC's G2P reads no delta. An idle frozen advance
+    // encodes no extension (extensionIdle).
+    if(!this.extensionIdle&&this.narrowBandFlip.transferMode!=="apic")this.encodeVelocityExtension(encoder,this.flipKeepGroup);
    }
    // An idle frozen advance holds phi (no geometry change, so no capillary cache is dirty) and every owner is frozen: the forces write nothing.
    this.dynamics.encodeClassify(encoder);if(!this.extensionIdle)this.forces.encode(encoder,this.forceGroup,p.surfaceTension>0);
@@ -1330,15 +1335,18 @@ export class UniformMixedFrame {
    this.dynamics.encodePublish(encoder);
    if(!kick){
     // The projected field's extension: the next move's G2P and the next
-    // head's census and advection read it. Against the old field in
-    // departure it is each sample's FLIP delta (recordDelta). An idle
-    // frozen advance encodes none (extensionIdle).
-    // The old field's extension above (the same conditions) seeded it:
-    // pressure changes no seed. With bodies or physics plugins the split's
-    // authority and the solids may change within the advance (a seeded tail
-    // overflowed the submerged-sphere regression's particle pool), so those
-    // advances seed afresh.
-    if(!this.extensionIdle){this.encodeVelocityExtension(encoder,this.extensionGroup,!bodies&&this.physicsPlugins.length===0);this.narrowBandFlip.recordDelta(encoder);}
+    // head's census and advection read it. The pair tail extends the kept
+    // field with it, and their difference is each sample's FLIP delta
+    // (recordDelta). An idle frozen advance encodes none (extensionIdle).
+    // The keep above (the same conditions) seeded it: pressure changes no
+    // seed. With bodies or physics plugins the split's authority and the
+    // solids may change within the advance (a seeded tail overflowed the
+    // submerged-sphere regression's particle pool), so those advances seed
+    // afresh (the kept texels are the keep's). APIC extends alone.
+    if(!this.extensionIdle){
+     if(this.narrowBandFlip.transferMode==="apic")this.encodeVelocityExtension(encoder,this.extensionGroup);
+     else{this.encodeVelocityExtension(encoder,this.flipTailGroup,!bodies&&this.physicsPlugins.length===0);this.narrowBandFlip.recordDelta(encoder);}
+    }
    }
    const root=this.levels[0]!,rootPressure=root.pressure,rootPhi=root.phi!;
    // Present the live all-4h words only: level 0 keeps the simulation

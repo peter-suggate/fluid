@@ -511,9 +511,242 @@ The round-3 gate (HEAD e357848c + B4: seep 32.9 against 30.8 ms, letters 61.6 ag
   - This is unconfirmed. To check it, compare at letters step 112, HEAD against B4: the heat diagnostics' COLD/WARM/HOT counts, the phi resolve held-word count, and the per-call phi resolve time.
   - If confirmed, the fix is to make the B4 extension honour COLD the way the deleted one did: skip a COLD brick's sweep and keep its published values (the freeze is already honoured), and limit the old payload to within one region of a non-COLD one.
 
+## Phase 4 (2026-11-09): the two-channel tail (B4 round 5)
+
+**Item 1, phi resolve at letters (+0.46 ms): the COLD wake hypothesis is not confirmed.** No code change follows from it.
+- **Probe:** letters step 112, HEAD~ e357848c against B4 83e48800, means over the last 12 frames (`fluid-scratch/lane-e/r5/heat-*.log`):
+
+  | | HEAD~ | B4 |
+  |---|---|---|
+  | COLD | 375 | 440 |
+  | WARM | 387 | 371 |
+  | HOT | 425 | 516 |
+  | free | 365 | 224 |
+  | gate openings (of 112) | 74 | 80 |
+  | seam tiles, fine / fours | 6899 / 8911 | 6977 / 8878 |
+  | phi resolve, held call | 0.472 ms | 0.471 ms |
+  | phi resolve, full / scratch | 0.369 / 0.369 | 0.372 / 0.371 |
+
+- **Variance:** an earlier pair of identical runs gave COLD 637 on HEAD~ against 481 on B4. The variance between runs of one tree is larger than the difference between the trees. Neither tree opened the gate in the last 12 frames.
+- **Conclusion:** B4 changes neither phi resolve's per-call cost nor its inputs. B4 has more COLD regions, not fewer, so its deltas do not wake COLD regions. The +0.46 ms is run variance in the heat tiers, or an attribution artefact.
+- **Kept as before:** the extension does not hold COLD bricks.
+- **A COLD region's G2P is unchanged from HEAD.** recordDelta gives a COLD tile's samples NB_DELTA_NONE on every axis, and G2P skips the delta of a COLD sample (nbMoveCold).
+
+**Item 2, the two-channel tail: implemented.**
+
+The old-field call is gone. In its place are two calls. Frame order: momentum, transfer, **keep**, forces, pressure, **pair tail**, recordDelta.
+- **Keep** (`mode:"keep"`, the transferred velocity into departure):
+  - It runs ufxF, then ufxR in keep mode, which computes only the active bits (one launch, a page group a workgroup). Then ufxRH runs.
+  - Then ufx4 and ufxH copy the raw transferred texel at the 4h anchors, the seam subfaces and the owned h cells of active, non-frozen pages and bricks.
+  - It has no negative copy and no sweeps. Departure then holds O, the transferred field, and holds it to the tail.
+  - With bodies, the kept texels are the keep's own (there is no separate old-field extension).
+- **Pair tail** (`mode:"pair"`, a second module):
+  - One sweep carries `UfxV = vec2f(C, O)`. C is the current field and O is departure, read through bindings 9 and 10 (`prior`, `priorTexels`).
+  - Given fixed distances and seeds, the extension is linear in its values, so both channels share the distances, roots and flags.
+  - At a frozen texel, O takes C: frozen faces stay put in both fields, so their delta is 0, as on HEAD. Frozen neighbour bricks are marked in ufxNM bit 31, and the restriction uses `umFrozenRegion(umPageOfTile(t))`.
+  - Publication writes ext(C) to velocityScratch, as before, and writes the delta ext(C) − ext(O) to the **delta pool** (binding 11) at every swept face:
+    - 4h canonical: `ufxDelta4Index(block, cell, axis)`.
+    - h cells: `ufxDeltaRowIndex(rank, l&3, axis)`, where the rank is the h tile's list rank from header words 88+i.
+    - Seam subfaces, into the across h tile's low row: `ufxDeltaLowIndex(rank, axis, u, v)`.
+- **Delta pool** (`f32`), `deltaWords(blocks, fineTiles)`:
+
+  | region | offset | size |
+  |---|---|---|
+  | 4h deltas | 0 | fours = 3·512·blocks |
+  | prior seeds | fours | fours |
+  | prior state | 2·fours | fours |
+  | h rows | 3·fours | 240 words × fineTiles (192 +face values, then 48 low subfaces) |
+
+  - Sizes: letters 16.3 MB, seep 8.2 MB.
+  - Sizing: the rows are indexed by h list rank and sized by the ownership's h tile ceiling (`capacity.fineTiles`, the authored peak).
+  - That needs no counter and cannot overflow. It is smaller than a per-brick pool at the measured peak band (letters 2048 bricks × 7.5 KB ≈ 15.7 MB).
+  - No runtime growth.
+- **recordDelta** now reads the pool (binding 19, read-only storage) in place of the two face textures (8 and 17). It no longer makes two rewritten face loads (page walks) per face.
+  - `ndSlot[27]` holds an h tile's rank, or a 4h tile's block.
+  - An h rank at or past `UFX_DELTA_FINE` is fatal 11 ("an h tile's rank lies past the frame extension's N FLIP delta rows").
+- **Encode order:** in all modes it is flag, restrict, seed and RH, coarse, fine. Seed and RH moved before coarse; a seeded call skips flag and seed.
+  - A keep is never seeded (it throws).
+  - With bodies or physics plugins, the tail is unseeded.
+  - APIC has no keep and no recordDelta; its tail is the single unseeded extend.
+- **Detail rewrite:** `prior` (face) and `priorTexels` (atlas) are added to CLASS_BY_NAME. Bindings 8 and 10 are skipped.
+- **Deleted:** `flipOldExtensionGroup`, the old-field extension call, recordDelta's face-texture bindings, and ufxS.
+
+**Item 3, correctness:**
+- **Dam-break before/after** (`fluid-scratch/lane-e/r6/probe-delta-eq.ts`, an h box [8,8,8] to [40,40,24], FLIP), comparing every live sample's FLIP delta against HEAD:
+  - Step 1: 6049 samples on both trees, at identical positions.
+  - No sample's delta is known on one tree and NONE on the other.
+  - 48.5% of components are bit-exact. The max |Δ| is 3.0e-8 against a delta scale of 0.163, which is rounding: the pair sweep combines in a different order.
+  - Steps 2, 3 and 8: 7513, 14330 and 26097 samples, against HEAD's 7516, 14342 and 26034. This is the small drift expected from rounding-level differences (no bit-parity).
+- **GPU regressions on HEAD + patch** (`fluid-gpu-run.sh check`, `fluid-scratch/lane-e/r6/final-*.log`): the frame extension, NB-FLIP Galilean seeds and brick stage (2 of 2) all pass.
+- **Body contact:** its "static and body contact" case fails, as it does on HEAD (known).
+- **The submerged-sphere case fails on HEAD 83e48800 as well** (`fluid-scratch/lane-e/r7`). This batch does not cause it; round 4 does. It overflows at frame 66: "particle slabs exceed the pool: 52224 records sized of 52224". HEAD~ e357848c passes.
+  - **Live samples with a non-binding budget** (`fluid.tiers.bricks` 256), peak at frame 66:
+
+    | tree | peak live | at 70 | at 100 |
+    |---|---|---|---|
+    | HEAD~ | 46587 | 37892 | 24708 |
+    | HEAD | 45234 | 39593 | 25096 |
+    | HEAD + patch | 45242 | 39699 | 25273 |
+
+  - So B4 does not make more particles, and the scene's peak demand exceeds its rule-sized pool in every tree. The rule sizes 56320 records, with a 52224-record slab limit.
+  - **Reseed deferral** (`reseedClipped`, rule-sized pool):
+    - HEAD~ clips 7034 seeds at frame 65 and 8232 at 66, holding at 36260 live, and survives.
+    - HEAD clips 4903 at 65, then overflows the slab limit at 66 with 38.3k live.
+  - **Cause:** the deferral is judged against the record capacity. The slabs' per-brick slack (a quarter more, at least 32; an eighth more, at least 16, plus refused seeds) can exhaust the slab limit first. B4's particle spread trips that limit where HEAD~'s did not.
+  - **Owner:** the seed and slab code, in `uniform-particle-slab.wgsl.ts` and the seed deferral in `uniform-narrow-band-flip.ts`. Two fixes are open:
+    - make reseed deferral respect the slab limit;
+    - author the scene's particle budget from its measured peak.
+  - This lane does not change it.
+- **Types:** check:types is clean. The extracted tree (HEAD + patch) is also clean, apart from two app pages that import files git does not track.
+- **test:unit on the extracted HEAD + patch tree:** 1784 pass, 0 fail.
+
+**Timing, by counters.** Captures are in `fluid-scratch/lane-e/r7/prof-{letters,seep}-{verify-head,patch-check}`:
+- Settings: `profile-mini-dam-xctrace --counters --split-dispatches --frame-labels`, 10 frames after warmup (letters 112 steps, seep 60).
+- Kernels are split by their call within each frame (`r7/split.py`, `r7/ctr.py`).
+- All times are ms a frame.
+
+| | letters HEAD | letters patch | seep HEAD | seep patch |
+|---|---|---|---|---|
+| first call (HEAD: old field; patch: keep) | 1.900 | 0.429 | 0.586 | 0.167 |
+| tail (HEAD: single; patch: pair) | 1.695 | 2.668 | 0.497 | 0.771 |
+| recordDelta | 0.899 | 0.714 | 0.084 | 0.068 |
+| **total** | **4.494** | **3.812** (−0.68) | **1.167** | **1.006** (−0.16) |
+
+- **Keep:** it saves what was expected, 1.47 ms at letters.
+  - Of its 0.43 ms, 0.21 is ufxRH, the headers the seeded tail reuses (the old call ran it too). The copies are ufx4 0.105 and ufxH 0.091.
+- **Pair tail:** +0.97 ms at letters, mostly ufxH (1.888 against 1.175; ufxR +0.13, ufx4 +0.13).
+  - ufxH counters, pair against single: occupancy 15.9% against 15.7% (one 512-lane workgroup a core; neither fits two in threadgroup memory); ALU 24.2% against 32.0%.
+  - So ALU work grows 22% (1.888 × 24.2% against 1.175 × 32.0%) while time grows 61%.
+  - **Attribution:** the pair ufxH is latency-bound. The doubled window staging loads (C and O for each of 1728 window cells, four a lane) and the second channel's 4h state reads (`ufxP4O`, from the pool) are not hidden at one workgroup a core.
+- **recordDelta:** −0.19 ms. TLB misses fell from 43.6% to 13.1% and texture sampling to 0, but its cost is the per-sample interpolation (ALU 44%), not the face loads.
+- **Pool memory:** letters +16.3 MB, seep +8.2 MB (no runtime growth).
+- **Next:**
+  - ufxH's occupancy. Single and pair alike run one workgroup a core: the pair uses about 25 KB of threadgroup memory, the single about 19 KB. Halving the workgroup, or the window staging, would let latency hide, and would save more than the second channel costs.
+  - recordDelta's per-sample interpolation, now the whole of its cost.
+
+
+### B4 round 6 (2026-11-09): the pair ufxH's window
+
+Goal: the pair ufxH at no more than the single one's 1.175 ms (letters), so the keep's full saving lands.
+
+**Attribution** (isolated and in-frame A/B of ufxH variants, `fluid-scratch/lane-e/r8/probe-{pairh,inframe,slim}.ts`; the in-frame harness swaps the tail's ufxH for a variant, timestamped in its own pass, a variant a frame after 100 warm frames). In frame, at letters step 112, against the round 5 pair (1.84) and single (1.36):
+- the departure's atlas loads (`ufxLoadPrior`, the second texel of each window cell) cost about 0.32 ms; with no window loads at all the pair is 1.37 against single's 1.28, so the doubled sweep is about 0.1;
+- the C loads are free in the single but not in the pair: the pair holds a second vec3 a window cell through all three axes, and the registers, not threadgroup memory, are what hide the loads' latency. The occupancy counter reads the same for both (15.9% against 15.7%), and padding the single's threadgroup memory to 9 KB or 14 KB more changes nothing (1.353, 1.349 against 1.33);
+- no help: staging only the cells a seam reads (lazy), loading per axis, issuing the loads before the 4h stage, reading the kept value by h tile rank (1.72).
+
+**Changes** (exact; both kept):
+- **The kept field by brick slot.** The keep writes each h cell it copies into the departure and also into the pool's tail (`UFX_KEPT`, `ufxKeptIndex(w,l)`, 3 × 512 words a slot). The pair's window reads its second channel there: one buffer load a cell for the departure's atlas texel, still the field's own value in a frozen region. The keep's and the tail's slots are the same, from the same headers. The restriction and ufx4 still read the departure texture. `ufxLoadPrior` and the departure's h-store twin (binding 10, `priorTexels`) are gone.
+- **A slimmer window.** A window cell is held as a vec3 texel, with its kind packed into the low 2 bits of its seed word: 9 fewer registers a lane in both modes. This is worth −0.09 ms in the pair and nothing in the single.
+
+**Checks.**
+- Dam-break deltas against round 5 (`r6/probe-delta-eq.ts`, `r6/cmp-r5.py`): step 1 has no NONE mismatches, and max |Δ| is 3.0e-8 of 0.163, the same transfer-atomic noise as round 5 against HEAD.
+- GPU tests on HEAD 99dd6d64 + patch, all passing: frame extension, Galilean seeds, brick stage (2/2), body contact (2/2, including the submerged sphere after Lane T's slab fix).
+- test:unit: 1784 pass, 0 fail. check:types is clean (apart from the two untracked app imports in the extracted tree).
+
+**Counters** (`r7/prof-{letters,seep}-patch-check`; round 5 in `-r5`, the slot buffer alone in `-buf`). All ms a frame:
+
+| | letters HEAD | letters r5 | letters r6 | seep HEAD | seep r5 | seep r6 |
+|---|---|---|---|---|---|---|
+| first call (HEAD old; keep) | 1.900 | 0.429 | 0.463 | 0.586 | 0.167 | 0.177 |
+| tail ufxH | 1.175 | 1.888 | **1.678** | 0.252 | 0.425 | 0.375 |
+| tail total | 1.695 | 2.668 | 2.517 | 0.497 | 0.771 | 0.713 |
+| recordDelta | 0.899 | 0.714 | 0.709 | 0.084 | 0.068 | 0.068 |
+| **total** | **4.494** | 3.812 | **3.689** (−0.81) | **1.167** | 1.006 | **0.958** (−0.21) |
+
+- The pair ufxH is −0.21 at letters (the slot buffer alone −0.10); the keep's ufxH is +0.03 for the extra write.
+- The letters tail's ufx4 reads 0.456 against 0.38–0.41 in the other captures. Its code is unchanged, so this is capture noise.
+- ufxH counters (letters, pair): ALU 26.9% (from 24.2%), MMU miss 35.9%.
+
+**Memory** (superseded by round 7, which removes the kept field). The kept field is 6 KB a brick slot of the authored capacity. The pool is letters 88.3 MB (12416 slots; round 5 had 16.3 MB) and seep 32.4 MB (4202 slots). There is no runtime growth. Indexed by h tile rank (192 words a tile) instead, it would be about 10 MB at letters, at the cost of one dependent rank load a window cell (in frame, 1.72 against 1.68: within noise of the slot layout). This is the coordinator's call if memory matters here.
+
+**Gap to the target.** The pair ufxH is still about 0.5 ms over the single (1.678 against 1.175). What remains is the second channel's register footprint across the axis loop and the buffer load itself (1.52 with no second-channel load at all). An exact pair cannot drop either. The remaining lever changes semantics and needs the coordinator's decision:
+- D = C − O stays exact at owned sources;
+- extended h faces take D prolonged from the 4h extension, which already carries both channels;
+- this drops the h window's second channel, so ufxH ≈ single.
+
+A 256-lane half-brick workgroup was not built. Occupancy is not the limit (the same counter for single and pair, and padding is flat), and a half-brick's 12 × 12 × 8 window stages 4.5 cells a lane against 3.4.
+
+
+### B4 round 7 (2026-11-09): the h window sweeps one channel (a deliberate approximation)
+
+The coordinator decided round 6's two open questions.
+- **Semantics (approved):** the h window drops its second channel.
+- **Memory:** rank-indexed kept field. That field is now gone with the second channel, so the pool is back to round 5's size: letters 16.3 MB, seep 8.2 MB.
+
+**The approximation.** The pair tail's h window (ufxH) sweeps the projected field alone (`Ufh`, `ufxHV`, the `ufxHw` sweep). The FLIP delta it writes to an h tile's row, by face (`ufxFinishH`):
+- **The face holds its own value** (a source, a closed wall, a face nothing reached): its own values' difference, C − O. This is exact; O is the departure's own texel, one load an owned cell.
+- **The h sweep extended the face:** the 4h band's delta, prolonged as the h seams prolong the 4h state (linear along the axis, constant across it). The 4h window still sweeps both channels, so a uniform delta is exact (a Galilean translation) and a linear one holds to the prolongation's order.
+- **The h sweep reached the face and the 4h band did not:** unknown (`UFX_DELTA_NONE`, 3e38). recordDelta drops it from the sample's weights, and G2P takes PIC on an axis with none.
+- **The h sweep did not reach the face but the 4h band did:** the 4h band's value and delta, as before.
+
+So FLIP's delta is at the 4h band's resolution, but only in the h band's extrapolated faces. Source faces, and therefore every liquid sample's own faces, stay exact.
+
+**Code.**
+- The sweep and the combine are generated by state type: `sweep(name, V, D, w, T, S)` and `combine(T, S)`. These give the 4h `Ufx` (a value pair in a pair) and the h `Ufh` (the field's value).
+- `ufxReached` takes a distance.
+- The round 6 slot-indexed kept field and its keep write are deleted. `ufxLoadPrior` and binding 10 (`priorTexels`) are back for the one own-cell load.
+- The slim window (kind packed into the seed word, vec3 texels) stays.
+
+**Checks.**
+- **New test,** `tests/uniform-frame-extension.test.ts` "pair tail: an h face's delta is exact at sources, a linear shear's to the 4h order where extended". It runs on the dam break with the h box.
+  - A detail-rewritten pass writes the departure as the velocity less D = k (y, z, x): at every face of an h tile, and at a 4h tile's anchors and its subfaces against an h tile. The test checks that every h face holds the shear.
+  - All 12608 source h faces' deltas are exact.
+  - 22368 h faces are extended, 0 of them unknown.
+  - The shear's error is at most 11.00 k (bound 12: the 4h band's two 4h cells, 8, plus 1.5 each for the constant prolongation across a 4h face and the liquid restriction's offset). The mean is 2.48 k (bound 4).
+- **Galilean seeds:** passes (a uniform delta is exact).
+- **Frame extension:** passes. Its h band is unchanged: the same 22368 h and 268 4h faces extended, none stale, none outside the source range.
+- **Brick stage and body contact:** 2/2 each.
+- **Dam-break sample deltas against round 5, step 1:** no NONE mismatches; max |Δ| is 3.2e-3 of 0.163, mean 5.1e-5. 44.6% of known axes are bit-exact; the rest are the extrapolated faces.
+- **test:unit** on HEAD + patch: 1784 pass, 0 fail.
+- **check:types:** clean (the extracted tree has only its two untracked app imports).
+
+**Counters** (`r7/prof-{letters,seep}-patch-check`; HEAD 99dd6d64 in `r7/prof-*-verify-head99`). ms a frame:
+
+| | letters HEAD | letters r7 | seep HEAD | seep r7 |
+|---|---|---|---|---|
+| first call (HEAD old field; keep) | 1.884 | 0.430 | 0.589 | 0.170 |
+| tail ufxR / ufx4 / ufxH | 0.255 / 0.243 / 1.180 | 0.360 / 0.417 / **1.536** | 0.106 / 0.133 / 0.250 | 0.153 / 0.186 / 0.324 |
+| tail total | 1.678 | 2.313 | 0.489 | 0.663 |
+| recordDelta | 0.928 | 0.699 | 0.082 | 0.068 |
+| **total** | **4.490** | **3.442 (−1.05)** | **1.160** | **0.901 (−0.26)** |
+
+- **Pair ufxH:** 1.888 (r5), then 1.678 (r6), then 1.536.
+  - The in-frame A/B, the same frame state with the single module swapped in (`r8/probe-r7.ts`, 12 rounds), gives single 1.41 against pair 1.57.
+  - So on equal work the pair is +0.15 (11%). Of that, about 0.08 is the own-cell kept load, the delta row write and the prolongation at extended faces, and the rest is the 4h state's second channel staged for the seams.
+  - The counter capture's larger gap against HEAD also includes the two trees' different band states at step 112.
+- **What remains over HEAD's single tail is the 4h pair:** ufxR +0.10 and ufx4 +0.17 at letters, from both channels' restriction, sweep and publication. The next lever, if wanted, is the 4h window's second channel.
+- **Declined: cheapening recordDelta** (hoisting the per-axis base and fraction work, plus an all-eight-known fast path): −0.087 ms at letters, under the 0.1 bar. Folding recordDelta into G2P was declined too: the taps differ, and the relayout invalidates the pool.
+
+**Combined gate (coordinator, HEAD 99dd6d64 against HEAD + E + T).**
+
+| | HEAD | HEAD + E + T |
+|---|---|---|
+| letters 120 step | 54.5 ms (p95 79.3) | 55.3 ms (p95 81.6) |
+| letters drift | −0.0079 | −0.0080 |
+| letters memory | 1.98 GiB | 1.97 GiB |
+| seep 300 step | 29.6 ms | 29.6 ms |
+| seep drift | 0.0004 | 0.0003 |
+| rest16 | 3.44 | 3.44 |
+| drop16 | 15.7 | 14.86 (within noise; the drop kernels are lower) |
+
+- **Checks:** 16/17; the one failure is the known work-control test.
+- **Kernel medians as reported** (letters steps 116–119, then seep):
+  - letters extension 2.556 and 3.473; letters FLIP delta 0.590 and 0.852; seep extension 0.917 and 1.179.
+  - These are listed in the coordinator's column order (HEAD, then HEAD + E + T), which makes the combined tree higher. Lane E's own counters show the reverse: total 4.490 → 3.442 at letters and 1.160 → 0.901 at seep. The columns may be swapped; this is not yet confirmed.
+- **NB-FLIP seed +0.39 ms and transfer +0.26 ms at letters (follow-up, by code reading):** neither comes from the keep or from the change to departure.
+  - **Order:** the keep runs after `encodeParticleMomentum`, in the slot of HEAD's old-field extension. Within the frame, the transfer reads departure as momentum leaves it (`["transfer",f.departure,…]`), before the keep writes it.
+  - **Cross-frame:** momentum rewrites departure ahead of the next transfer. A frozen quiet frame skips momentum, but even then the transfer would only read different values: neither kernel branches on velocity values.
+  - **Seed:** the seed (`compiled.seed`, on the advectParticles group) samples no velocity at all. A seed takes the grid's velocity at the next G2P (`nbSeedFirst`).
+  - **Pair tail:** its first channel (velocityScratch) is HEAD's tail extension.
+  - **Lane E alone:** the E-only captures at the same window (`r7/prof-letters-verify-head99` against `r7/prof-letters-r7`) show no rise. Seed's kernels sum to 1.670 → 1.645 ms and the transfer's to 4.508 → 4.486.
+  - **Likely cause, Lane T's uncommitted `particleDepthIn` rewrite** (`uniform-narrow-band-membership.wgsl.ts`):
+    - it moves the key selection inside the rolled tap loop;
+    - `particleDepth` is called eight times for each seed site (`seedSite`) and at each transfer face (the depth blend);
+    - so the rewrite reaches both kernels.
+
 ## COORDINATION
 
 - **Frame (`uniform-mixed-frame.ts`), Lane E's hunks:**
-  - the B4 rewire: encodeVelocityExtension, encodeExtensionOf, the old-field departure extension (`flipOldExtensionGroup`, into departure), `extension.attachFreeze`, `narrowBandFlip.recordDelta` after the tail extension, and the paired-extension removal;
+  - the B4 rewire: encodeVelocityExtension, encodeExtensionOf, the keep (`flipKeepGroup`: the transferred field into departure) and the pair tail (`flipTailGroup`: velocity and departure, publishing into velocityScratch and the FLIP delta pool), `extension.attachFreeze`, `narrowBandFlip.recordDelta` after the pair tail (bound to `extension.delta`), and the paired-extension removal;
   - `bricksCurrent`, `encodeBricks`, the `"bricks"` reach case, and the update after `remap.applyGpu` in encodeRelayoutHead.
 - **Lane T** owns the store's widening (particle bricks, level-2 pages), on hold with D's fused launch over the compile constraint. The particle move's jobs come from the particle slab table, so nothing reads leaving slots and the release stays beside the update in `encodeBricks`. If the widening resumes, Lane T's edits go beside that call as exact-string edits, announced first.

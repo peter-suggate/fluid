@@ -39,6 +39,7 @@ import { uniformPageInitBlocksWGSL, uniformPageInitGroups, type UniformPageInitB
 import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import type { UniformColdFrame } from "./uniform-cold-frame";
+import { uniformFrameExtensionDeltaWGSL } from "./uniform-frame-extension";
 import { UNIFORM_REGION_TIER } from "./uniform-region-heat";
 
 /** Workgroups of every launch over the live samples or slabs, one row: a
@@ -94,45 +95,49 @@ interface NarrowBandBatches{
  readonly seed:NarrowBandBatch;readonly clearAir:NarrowBandBatch;
 }
 /** The FLIP delta (recordDelta), in its own module beside the stage
- * source: the tail's extension (velocity, binding 8: velocityScratch) minus
- * the departure's (binding 17: the departure field, UniformFrameExtension's
- * old field). A workgroup an occupied tile, like the deposit: the 3³ tiles'
- * flags, then the 540 faces of the tile's samples' MAC stencils (per axis 5
- * anchors along, 6 across: offsets -1..3 and -1..4), each the current minus
- * the old value where the old field holds it, else none. Each sample interpolates
- * the faces that have a value, renormalised; an axis with none (and every
- * sample the record does not reach: a COLD tile's, a seed's, a spilled one's)
- * takes NB_DELTA_NONE, which G2P reads as PIC on that axis.
+ * source: the frame extension's pair tail wrote the projected field's
+ * extension minus the transferred field's into its delta pool (binding 19,
+ * uniformFrameExtensionDeltaWGSL), a face each. A workgroup an occupied
+ * tile, like the deposit: the 3³ tiles' flags and pool indices, then the
+ * 540 faces of the tile's samples' MAC stencils (per axis 5 anchors along,
+ * 6 across: offsets -1..3 and -1..4), each the pool's delta where the tail
+ * swept it, else none. Each sample interpolates the faces that have a
+ * value, renormalised; an axis with none (and every sample the record does
+ * not reach: a COLD tile's, a seed's, a spilled one's) takes NB_DELTA_NONE,
+ * which G2P reads as PIC on that axis.
  *
- * A face is known where the old field holds it: on a tile with the support
- * bit outside a frozen region (umFrozenRegion: this frame's held set, which
- * neither extension writes). There a 4h tile's face lies on its
- * +planes: the canonical texel, or against an h tile the subface's own
- * (the texels both extensions publish). Low faces are the negative
- * buffers': none. */
+ * A face is known where the tail swept it: on a tile with the support bit
+ * outside a frozen region (umFrozenRegion: this frame's held set, which the
+ * extension never writes). There an h tile's face is its row's (by the
+ * tile's h list rank), and a 4h tile's lies on its +planes: the canonical
+ * delta, or against an h tile the subface's, in the row of the h tile
+ * across. Low faces are the negative buffers': none. An h tile whose rank
+ * lies past the pool's rows is fatal (11). */
 const NB_DELTA_RECORD_WGSL=/* wgsl */`
-@group(1) @binding(17) var departure:texture_3d<f32>;
+@group(1) @binding(19) var<storage,read> ufxDelta:array<f32>;
 const NB_DELTA_NONE:f32=3e38;const ND_LANES:u32=128u;
 var<workgroup> ndJobs:u32;
 var<workgroup> ndTile:u32;
 var<workgroup> ndCold:u32;
 // A window tile: 1 live, 2 known (the support bit, not held), 4 an h tile.
 var<workgroup> ndFlags:array<u32,27>;
+// A live window tile's pool index: an h tile's rank, a 4h tile's block.
+var<workgroup> ndSlot:array<u32,27>;
 var<workgroup> ndDelta:array<f32,540>;
 // A face of the window: the anchor's offset from the tile origin.
 fn ndOffset(s:u32)->vec3i{let axis=s/180u;let k=s%180u;var o=vec3i(0);o[axis]=i32(k%5u)-1;o[(axis+1u)%3u]=i32((k/5u)%6u)-1;o[(axis+2u)%3u]=i32(k/30u)-1;return o;}
 fn ndWindow(origin:vec3i,cell:vec3i)->u32{let r=vec3u((cell>>vec3u(2u))-(origin>>vec3u(2u))+1);return r.x+3u*r.y+9u*r.z;}
 fn ndFaceDelta(origin:vec3i,s:u32)->f32{
- let axis=s/180u;let anchor=origin+ndOffset(s);let flags=ndFlags[ndWindow(origin,anchor)];
+ let axis=s/180u;let anchor=origin+ndOffset(s);let w=ndWindow(origin,anchor);let flags=ndFlags[w];
  if((flags&2u)==0u||umFaceLow(anchor,axis)){return NB_DELTA_NONE;}
- var q=anchor;
- if((flags&4u)==0u){
-  if((anchor[axis]&3)!=3){return NB_DELTA_NONE;}
-  var e=vec3i(0);e[axis]=1;
-  // Offsets reach 4 along the axis: the cell across lies in the window.
-  if((ndFlags[ndWindow(origin,anchor+e)]&5u)!=5u){q=4*(anchor>>vec3u(2u))+3*e;}
- }
- return textureLoad(velocity,q,0)[axis]-textureLoad(departure,q,0)[axis];
+ let l=vec3u(anchor&vec3i(3));
+ if((flags&4u)!=0u){return ufxDelta[ufxDeltaRowIndex(ndSlot[w],l,axis)];}
+ if((anchor[axis]&3)!=3){return NB_DELTA_NONE;}
+ var e=vec3i(0);e[axis]=1;
+ // Offsets reach 4 along the axis: the cell across lies in the window.
+ let x=ndWindow(origin,anchor+e);
+ if((ndFlags[x]&5u)==5u){return ufxDelta[ufxDeltaLowIndex(ndSlot[x],axis,l[(axis+1u)%3u],l[(axis+2u)%3u])];}
+ return ufxDelta[ufxDelta4Index(ndSlot[w],vec3u(anchor>>vec3u(2u))&vec3u(7u),axis)];
 }
 // A sample's delta, p relative to the tile origin.
 fn ndSample(p:vec3f)->vec3f{
@@ -164,9 +169,14 @@ fn ndSample(p:vec3f)->vec3f{
   let origin=vec3i(4u*umTileCoord(tile));
   if(lane<27u){
    let key=umTileKey((origin>>vec3u(2u))+vec3i(i32(lane%3u),i32((lane/3u)%3u),i32(lane/9u))-1);
-   var flags=0u;
-   if(umKeyStored(key)&&umTileLive(key)){flags=1u|select(0u,2u,(umTileSupport(key)&2u)!=0u&&!umFrozenRegion(umPageOfTile(key)))|select(0u,4u,umTileWidth(key)==1u);}
-   ndFlags[lane]=flags;
+   var flags=0u;var slot=0u;
+   if(umKeyStored(key)&&umTileLive(key)){
+    let fine=umTileWidth(key)==1u;
+    flags=1u|select(0u,2u,(umTileSupport(key)&2u)!=0u&&!umFrozenRegion(umPageOfTile(key)))|select(0u,4u,fine);
+    slot=select(key>>9u,ufxDeltaRank(key),fine);
+    if(fine&&slot>=UFX_DELTA_FINE){atomicStore(&state[3],11u);flags=0u;}
+   }
+   ndFlags[lane]=flags;ndSlot[lane]=slot;
   }
   workgroupBarrier();
   for(var s=lane;s<540u;s+=ND_LANES){ndDelta[s]=ndFaceDelta(origin,s);}
@@ -755,13 +765,13 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  }
  /** The stage resources; with the freeze, its region snapshot at binding 18. */
  /** recordDelta's: the samples (1) and their bins (2, 3, 4), the params (6),
-  * the tail's extension (8), the departure's (17); with the freeze, its regions (18). */
+  * the frame extension's delta pool (19); with the freeze, its regions (18). */
  private deltaLayout(freeze:boolean):GPUBindGroupLayout{
   return uniformDetailBindLayout(this.device,{entries:[
    ...(freeze?[{binding:18,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"2d" as const}}]:[]),
    ...[1,2,3,4].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage" as const}})),
    {binding:6,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
-   ...[8,17].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float" as const,viewDimension:"3d" as const}})),
+   {binding:19,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}},
   ]});
  }
  private resourceLayout(freeze:boolean):GPUBindGroupLayout{
@@ -812,16 +822,15 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.freeze=UNIFORM_COLD_FREEZE?freeze:undefined;
   if(this.freeze){this.resources=this.resourceLayout(true);this.deltaResources=this.deltaLayout(true);}
  }
- bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps}):void{
+ bind(fields:{phi:GPUTexture;phiScratch:GPUTexture;phase:GPUTexture;velocity:GPUTexture;velocityScratch:GPUTexture;departure:GPUTexture;negative:GPUBuffer;negativeScratch:GPUBuffer;negativeDeparture:GPUBuffer;coarseExtended:GPUTexture;unitExtended:GPUTexture;hanging:UniformMixedHangingTaps;extensionDelta:GPUBuffer}):void{
   const f=fields;
   // The transfer writes the stored velocity: momentum was its last reader,
   // and the pressure split rewrites every face of it after the forces.
-  // recordDelta reads the tail's extension (velocityScratch) against the
-  // departure's (departure: UniformFrameExtension's old field), both
-  // resting from the tail extension to the next momentum.
+  // recordDelta reads the frame extension's delta pool, which its pair
+  // tail writes (UniformFrameExtension).
   this.deltaGroup=uniformDetailGroup(this.device,{layout:this.deltaResources,entries:[
    {binding:1,resource:{buffer:this.activeParticles,size:this.recordBytes}},{binding:2,resource:{buffer:this.bins}},{binding:3,resource:{buffer:this.next}},{binding:4,resource:{buffer:this.state}},
-   {binding:6,resource:{buffer:this.params}},{binding:8,resource:f.velocityScratch},{binding:17,resource:f.departure},
+   {binding:6,resource:{buffer:this.params}},{binding:19,resource:{buffer:f.extensionDelta}},
    ...(this.freeze?[{binding:18,resource:this.freeze.regions.createView()}]:[]),
   ]});
   for(const [name,velocity,negative,output] of [["bootstrap",f.velocityScratch,f.negativeScratch,f.departure],["advectParticles",f.velocityScratch,f.negativeScratch,f.departure],["transfer",f.departure,f.negativeDeparture,f.velocity],["surface",f.velocity,f.negative,f.departure],["reconstruct",f.velocity,f.negative,f.departure],["redistance",f.velocity,f.negative,f.departure],["redistanceStore",f.velocity,f.negative,f.departure]] as const){
@@ -945,7 +954,7 @@ fn umLoadCorner(p:vec3u)->f32{return ${UNIFORM_DETAIL_4H_LOAD}textureLoad(phi,ve
 fn umLoadVertex8(p:vec3u,s:u32)->array<f32,8>{return udLoad8_phi(vec3i(p),s);}
 fn umLoadCorner8(p:vec3u,s:u32)->array<f32,8>{return udLoad48_phi(vec3i(p),s);}
 ${uniformMixedVertexSamplingSource("",true,undefined,"umLoadCorner",true)}
-${delta?NB_DELTA_RECORD_WGSL:""}
+${delta?uniformFrameExtensionDeltaWGSL(this.ownership.capacity.address.blocks,this.ownership.capacity.fineTiles)+NB_DELTA_RECORD_WGSL:""}
 fn umLoadMixedFace(anchor:vec3i,axis:u32)->f32{
  if(umFaceLow(anchor,axis)){return negative[umLowFaceIndex(umLowFaceAbove(anchor,axis),axis)];}
  return textureLoad(velocity,anchor,0)[axis];
@@ -2060,10 +2069,10 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   encoder.clearBuffer(this.bins,(this.bandWord+3)*4,4);
   this.run(encoder,this.compiled.transfer);
  }
- /** The FLIP delta into before.xyz, after the tail extension: a workgroup
-  * an occupied tile stages its samples' face window once (the tail's
-  * extension minus the departure's, where both hold the face), then
-  * interpolates it at each sample. APIC's G2P reads no delta. */
+ /** The FLIP delta into before.xyz, after the pair tail extension: a
+  * workgroup an occupied tile stages its samples' face window once (the
+  * tail's delta pool, where it swept the face), then interpolates it at
+  * each sample. APIC's G2P reads no delta. */
  recordDelta(encoder:GPUCommandEncoder):void{
   if(this.idleNow||this.apic)return;
   if(!this.deltaPipeline||!this.deltaGroup)throw new Error("Narrow-band FLIP delta is not initialized");
@@ -2179,6 +2188,7 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
    :words[3]===8?`coarse corners exceed their list (${this.coarseListCapacity} entries)`
    :words[3]===9?`particle bricks exceed the cell bins' ${this.binSlots} brick slots`
    :words[3]===10?`surface arena bricks (${words[11]}) exceed the arena's ${this.arenaWindows} windows`
+   :words[3]===11?`an h tile's rank lies past the frame extension's ${this.ownership.capacity.fineTiles} FLIP delta rows`
    :`unknown particle fatal ${words[3]}`}${budget}`);
  }
  destroy():void{this.displayMotion.destroy();this.reuseControls.destroy();this.coarseVelocity.destroy();this.particleAllocation.destroy();for(const b of [...this.particles,this.state,this.bins,this.next,this.params,this.liveGate])b.destroy();}
