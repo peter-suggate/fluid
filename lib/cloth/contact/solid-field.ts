@@ -367,3 +367,119 @@ export function sampleClothSolidField(field: ClothSolidField, p: V3): { phi: num
   const n = l.map(v => Math.min(SOLID_BRICK_CELLS, Math.max(0, Math.round(v))));
   return { phi: s[3], grad: [s[0] / field.cell, s[1] / field.cell, s[2] / field.cell], mu: brick.mu[nodeIndex(n[0]!, n[1]!, n[2]!)]! / SOLID_MU_SCALE, stored: true };
 }
+
+/** Words of one surface sample on the GPU: position (f32 x3) and friction coefficient. */
+export const SOLID_SAMPLE_WORDS = 4;
+
+export interface ClothSolidSampleOptions {
+  /** The cloth's contact radius r (m). */
+  r: number;
+  /** The cloth's longest edge (m). */
+  edge: number;
+}
+
+/**
+ * Points on the field's zero set where vertex contact alone lets a cloth face
+ * sag into the solid: a face of edge e (circumradius about e / sqrt 3) lying on
+ * a convex surface of curvature kappa dips about kappa e^2 / 6 below its
+ * vertices, which rest at least r / 2 out; wherever the dip exceeds r / 2
+ * (kappa > 3 r / e^2, measured as the normal's turn over two cells along the
+ * surface) the surface is sampled and the samples meet the cloth's faces and
+ * their edges as static points (sharp edges and corners of a voxel solid, the
+ * rims of a frustum). Flat and gently curved surface, and every concave
+ * crease, carry none.
+ *
+ * Spacing h / 2: a sharp cell (its centre's two-cell turn above the
+ * threshold) is seeded at its eight half-cell centres, each projected onto
+ * the surface and kept where the turn over half a cell still exceeds the
+ * threshold; kept samples are at least h / 8 apart. Between samples h / 2
+ * apart a face's sag is at most kappa h^2 / 32, far below r for the field's
+ * own rounding of a crease (kappa ~ 1 / h). A straight cloth edge lying
+ * across a crease passes within about h / 4 of a sample, so the barrier
+ * engages it only where h / 4 < r: an edge may graze a crease between samples
+ * when h > 4 r (the Bridson scenes: h = 1 cm, r = 1.5 mm). Exact coverage of
+ * edges by points needs spacing ~ r over every sampled area (measured: 0.2 to
+ * 0.35 M samples per Bridson scene); a face-against-field closest point (the
+ * face's own minimum of phi) removes that bound. Setup-time CPU work, over the surface cells whose field is not
+ * affine; returns (x, y, z, mu) per sample.
+ */
+export function clothSolidSamples(field: ClothSolidField, options: ClothSolidSampleOptions): Float32Array {
+  const h = field.cell, kappaMin = 3 * options.r / (options.edge * options.edge), CELL_STEP = 2;
+  const spacing = 0.5 * h, m = 2, localStep = 0.5;
+  if (!(options.r > 0 && options.edge > 0)) throw new RangeError("Cloth solid samples need r > 0 and edge > 0");
+  const sample = (p: V3) => sampleClothSolidField(field, p);
+  // Newton onto phi = 0 along the gradient; undefined when it leaves the stored field or drifts more than a cell.
+  const project = (p0: V3): { p: V3; n: V3; mu: number } | undefined => {
+    let p: V3 = p0;
+    for (let i = 0; i < 10; i++) {
+      const s = sample(p);
+      if (!s.stored) return undefined;
+      const g2 = s.grad[0] ** 2 + s.grad[1] ** 2 + s.grad[2] ** 2;
+      if (!(g2 > 1e-12)) return undefined;
+      if (Math.abs(s.phi) < 1e-5 * h) {
+        if (Math.hypot(p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]) > 2.5 * h) return undefined;
+        // The normal from central differences a quarter cell wide: at a lattice edge the
+        // one-sided cell gradient may vanish. A concave crease (phi ~ xz / h) has none: skip it.
+        const d = 0.25 * h, gc = [0, 1, 2].map(a => {
+          const at = (o: number): V3 => [p[0] + (a === 0 ? o : 0), p[1] + (a === 1 ? o : 0), p[2] + (a === 2 ? o : 0)];
+          return (sample(at(d)).phi - sample(at(-d)).phi) / (2 * d);
+        });
+        const gl = Math.hypot(...gc);
+        if (!(gl > 0.35)) return undefined;
+        return { p, n: [gc[0]! / gl, gc[1]! / gl, gc[2]! / gl], mu: s.mu };
+      }
+      p = [p[0] - s.phi * s.grad[0] / g2, p[1] - s.phi * s.grad[1] / g2, p[2] - s.phi * s.grad[2] / g2];
+    }
+    return undefined;
+  };
+  // The largest convex curvature seen `step` cells away along the surface, in four tangent directions.
+  const kappa = (q: { p: V3; n: V3 }, step: number): number => {
+    const n = q.n, a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] : Math.abs(n[1]) < 0.6 ? [0, 1, 0] : [0, 0, 1];
+    const t1 = [n[1] * a[2]! - n[2] * a[1]!, n[2] * a[0]! - n[0] * a[2]!, n[0] * a[1]! - n[1] * a[0]!];
+    const l1 = Math.hypot(...t1), u = t1.map(v => v / l1), w = [n[1] * u[2]! - n[2] * u[1]!, n[2] * u[0]! - n[0] * u[2]!, n[0] * u[1]! - n[1] * u[0]!];
+    let k = 0;
+    for (const d of [u, w]) for (const sgn of [1, -1]) {
+      const o = project([q.p[0] + sgn * step * h * d[0]!, q.p[1] + sgn * step * h * d[1]!, q.p[2] + sgn * step * h * d[2]!]);
+      if (!o) continue;
+      const dp = [o.p[0] - q.p[0], o.p[1] - q.p[1], o.p[2] - q.p[2]], dn = [o.n[0] - n[0], o.n[1] - n[1], o.n[2] - n[2]];
+      const len = Math.hypot(...dp);
+      if (len < 0.125 * step * h || dp[0]! * dn[0]! + dp[1]! * dn[1]! + dp[2]! * dn[2]! <= 0) continue;
+      k = Math.max(k, Math.hypot(...dn) / len);
+    }
+    return k;
+  };
+  // Kept samples at least h / 8 apart (a hash of h / 8 cells, one each): only coincident projections merge.
+  const out: number[] = [], seen = new Map<string, number>(), minSep = 0.25 * spacing;
+  const keep = (q: { p: V3; mu: number }) => {
+    const c = q.p.map(v => Math.floor(v / minSep));
+    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const j = seen.get(`${c[0]! + dx},${c[1]! + dy},${c[2]! + dz}`);
+      if (j !== undefined && Math.hypot(out[j]! - q.p[0], out[j + 1]! - q.p[1], out[j + 2]! - q.p[2]) < minSep) return;
+    }
+    seen.set(c.join(","), out.length); out.push(q.p[0], q.p[1], q.p[2], q.mu);
+  };
+  const cellNodes = new Float64Array(8);
+  for (const brick of field.bricks.values()) {
+    const v = brick.values;
+    for (let z = 0; z < SOLID_BRICK_CELLS; z++) for (let y = 0; y < SOLID_BRICK_CELLS; y++) for (let x = 0; x < SOLID_BRICK_CELLS; x++) {
+      let lo = Infinity, hi = -Infinity;
+      for (let k = 0; k < 8; k++) {
+        const s = v[nodeIndex(x + (k & 1), y + ((k >> 1) & 1), z + (k >> 2))]!;
+        cellNodes[k] = s; lo = Math.min(lo, s); hi = Math.max(hi, s);
+      }
+      if (lo > 0 || hi < 0) continue;
+      const g = cellGradientRange(v, [x, y, z]);
+      if (Math.max(g.hi[0] - g.lo[0], g.hi[1] - g.lo[1], g.hi[2] - g.lo[2]) <= 1e-6 * h) continue;
+      const c = [0, 1, 2].map(a => field.origin[a]! + (brick.brick[a]! * SOLID_BRICK_CELLS + [x, y, z][a]! + 0.5) * h);
+      const centre = project(c as unknown as V3);
+      if (!centre) continue;
+      if (kappa(centre, CELL_STEP) <= kappaMin) continue;
+      for (let s = 0; s < m * m * m; s++) {
+        const o = [s % m, Math.floor(s / m) % m, Math.floor(s / (m * m))].map(i => ((i + 0.5) / m - 0.5) * h);
+        const q = project([c[0]! + o[0]!, c[1]! + o[1]!, c[2]! + o[2]!]);
+        if (q && kappa(q, localStep) > kappaMin) keep(q);
+      }
+    }
+  }
+  return new Float32Array(out);
+}

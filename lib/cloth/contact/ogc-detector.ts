@@ -42,7 +42,7 @@ import {
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
-import { SOLID_HEADER_WORDS, type ClothSolidField } from "./solid-field";
+import { SOLID_HEADER_WORDS, SOLID_SAMPLE_WORDS, clothSolidSamples, type ClothSolidField } from "./solid-field";
 import { OGC_NONE } from "./ogc-topology";
 
 export interface OgcContactConfig {
@@ -79,6 +79,12 @@ export interface OgcContactConfig {
   roundCap: number;
   /** Words reserved for the static solid field image (solid-field.ts); 0 or absent: the cloth sees no solid. */
   solidCapacityWords?: number;
+  /**
+   * Static surface samples reserved for the solid's sharp features (solid-field.ts
+   * clothSolidSamples), which meet the cloth's faces; a field with more fails at
+   * setSolidField. Absent: 0.
+   */
+  solidSampleCapacity?: number;
   /**
    * Predicted-motion DAT, predicting v dt + g dt^2 ("inertial", the default) or the
    * solver's initial guess x_guess - x_t ("guess": needs `stepStart`, with the guess
@@ -149,6 +155,10 @@ export interface OgcFrameCounters {
   peakGrid: number;
   intersections: number;
   cell: number;
+  /** Sample-face contacts (static sharp-feature samples against cloth faces) over the frame's rounds. */
+  sfPairs: number;
+  /** Cloth faces reaching inside the static solid at the last intersection count. */
+  solidIntersections: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -216,7 +226,10 @@ export class OgcContactDetector {
     const mk = (label: string, bytes: number, u = usage) => device.createBuffer({ label: `ogc ${label}`, size: Math.max(16, Math.ceil(bytes / 16) * 16), usage: u });
     this.params = mk("params", 4 * OGC_PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.topo = mk("topology", 4 * topology.words.length);
-    this.det = mk("x_det", 16 * N);
+    const sampleCap = config.solidSampleCapacity ?? 0;
+    if (!(Number.isSafeInteger(sampleCap) && sampleCap >= 0)) throw new Error("OGC: solidSampleCapacity must be a whole number");
+    this.solidSampleCapacity = sampleCap;
+    this.det = mk("x_det", 16 * (N + sampleCap));
     this.pred = mk("predictions", 32 * N);
     this.work = mk("work", 4 * (8 * N + T + E));
     this.counts = mk("grid counts", 4 * H);
@@ -231,7 +244,9 @@ export class OgcContactDetector {
     if (solidWords > 0 && solidWords < SOLID_HEADER_WORDS + 4) throw new Error("OGC: solidCapacityWords cannot hold an empty solid image");
     this.solidBase = solidWords > 0 ? 4 * (entriesBase + N * config.contactCapacity) : 0;
     this.solidCapacityWords = solidWords;
-    this.contacts = mk("contacts", 16 * (entriesBase + N * config.contactCapacity) + 4 * solidWords);
+    if (sampleCap > 0 && !solidWords) throw new Error("OGC: solidSampleCapacity needs solidCapacityWords");
+    this.sampleBase = Math.ceil((4 * (entriesBase + N * config.contactCapacity) + solidWords) / 4);
+    this.contacts = mk("contacts", 16 * (this.sampleBase + sampleCap));
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
@@ -267,7 +282,7 @@ export class OgcContactDetector {
     const hdr = new Uint32Array(12), hf = new Float32Array(hdr.buffer);
     hdr[0] = N; hdr[1] = config.contactCapacity; hdr[2] = countsBase; hdr[3] = entriesBase;
     hf[4] = config.r; hf[5] = config.kc; hf[6] = config.mu; hf[7] = config.epsV * config.dt;
-    hdr[8] = this.solidBase;
+    hdr[8] = this.solidBase; hdr[9] = this.sampleBase; hdr[10] = 0;
     device.queue.writeBuffer(this.contacts, 0, hdr);
     if (this.solidBase) {
       // No solid until one is set: one empty slot, no bricks, an unbounded band.
@@ -280,6 +295,10 @@ export class OgcContactDetector {
   /** Word offset of the solid image in the contact buffer (0: no solid) and its authored capacity. */
   readonly solidBase: number;
   readonly solidCapacityWords: number;
+  /** The surface samples: their vec4 offset in the contact buffer, authored capacity, and the current field's count. */
+  readonly sampleBase: number;
+  readonly solidSampleCapacity: number;
+  solidSamples = 0;
 
   /**
    * Upload the static solid field (setup and solid edits only; never in a step
@@ -294,6 +313,21 @@ export class OgcContactDetector {
     const need = this.config.r + 1.5 * field.maxLipschitz * this.config.rqMax;
     if (!(field.band >= need)) throw new Error(`OGC: the solid field's band ${field.band} m is below r + 1.5 L_max rqMax = ${need} m`);
     writeBufferChunked(this.device.queue, this.contacts, 4 * this.solidBase, field.words);
+    // The sharp features' surface samples, for this cloth's r and longest edge.
+    const samples = clothSolidSamples(field, { r: this.config.r, edge: this.topology.layout.maxEdgeLength });
+    const S = samples.length / SOLID_SAMPLE_WORDS;
+    if (S > this.solidSampleCapacity)
+      throw new Error(`OGC: the solid field has ${S} surface samples at its sharp features, the scene authored ${this.solidSampleCapacity} (solidSampleCapacity)`);
+    if (Math.ceil((this.N + this.E + S) / WG) > 65535) throw new Error("OGC: vertices, edges and surface samples exceed one dispatch dimension");
+    if (S) {
+      writeBufferChunked(this.device.queue, this.det, 16 * this.N, samples);
+      writeBufferChunked(this.device.queue, this.contacts, 16 * this.sampleBase, samples);
+    }
+    this.solidSamples = S;
+    this.device.queue.writeBuffer(this.contacts, 40, new Uint32Array([S]));
+    this.paramWords[OGC_PARAM.S] = S;
+    this.paramWords[OGC_PARAM.wgNE] = Math.ceil((this.N + this.E + S) / WG);
+    this.device.queue.writeBuffer(this.params, 0, this.paramWords);
   }
 
   /**
@@ -355,7 +389,7 @@ export class OgcContactDetector {
       // Intersection counting reads the solver's current positions where detection reads x_det.
       ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
       ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],
-      ["xTest", OGC_INTERSECT_WGSL, [0, 1, 4, 7, 9], { 4: "positions" }],
+      ["xTest", OGC_INTERSECT_WGSL, [0, 1, 4, 7, 8, 9], { 4: "positions" }],
     ];
     await Promise.all(specs.map(async ([name, code, bindings, override]) => {
       const module = this.device.createShaderModule({ label: `ogc ${name}`, code });
@@ -459,6 +493,7 @@ export class OgcContactDetector {
       solidContacts: u[C.frameSolidContacts], solidCut: u[C.frameSolidCut],
       conflicts: u[C.frameConflicts], redos: u[C.frameRedos], held: u[C.frameHeld],
       peakGrid: u[C.peakGrid], intersections: u[C.intersections], cell: fl[C.cell],
+      sfPairs: u[C.frameSfPairs], solidIntersections: u[C.solidIntersections],
     };
   }
 

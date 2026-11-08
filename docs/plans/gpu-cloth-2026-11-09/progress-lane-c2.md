@@ -597,3 +597,72 @@ det.setSolidField(field);
   - Fix: prepend the patches (`[...patches, ...shell, ...fills]`), or set `patchCount: shell.length + patches.length` and `patchesKey: solidVoxelPatchesKey(scene.solidVoxels.slice(0, that))`, as `rebaseProceduralSolid` does.
   - The adapter accepts either layout: it finds the baked run at offset 0 or right after the shell.
 - `ClothSystem`'s status text in `lib/core/scenes.ts` ("Not yet: cloth-solid contact (lane C2), so the cloth passes through the solids") can go once this is attached.
+
+## 2026-11-09 MILESTONE (M5, part 1): surface samples against cloth faces, and the cloth–solid intersection counter
+
+### What is implemented
+
+- **Surface samples** (`clothSolidSamples` in `lib/cloth/contact/solid-field.ts`). These are static points on the field's zero set wherever vertex contact alone lets a face sag into the solid.
+  - The criterion: a face of edge e over convex curvature κ dips about κe²/6, so samples go where κ > 3r/e². κ is measured as the normal's turn over two cells, from central-difference normals a quarter cell wide.
+  - Concave creases get no samples (|∇φ| ≈ 0 there). Neither do flat faces or broad spheres.
+  - Spacing is h/2: a sharp cell is seeded at its 8 half-cell centres, which are projected (Newton) and kept where the half-cell turn exceeds the threshold. Kept samples are at least h/8 apart.
+  - CPU, once per field.
+- **Detector.**
+  - Samples sit in x_det at N + s (w = μ) and in the contacts buffer (header [2].y, count [2].z).
+  - The query kernel runs N + E + S threads. `sampleFacet` does a point query against the face grid. A sample within r of a face (with OGC's feature acceptance) becomes an entry on that feature's vertices, carrying (s, t | feature, μλ, w = 1).
+  - A sample within the envelope becomes a DAT pair with ids[0] = N + s. The sample is static: no truncation of its own, dn = 0, prediction 0.
+  - Config `solidSampleCapacity` is authored. `setSolidField` throws if the field has more samples.
+- **Vertex block.** A sample entry reads the sample from the contacts buffer. Friction uses μλ from the entry, and the sample's own motion is zero.
+- **Counters.**
+  - `sfPairs`: sample–face pairs per frame.
+  - `solidIntersections`: cloth faces with φ < 0 at any point of a barycentric lattice of spacing ≤ cell/4, run in the intersection pass.
+
+### Tests
+
+| Test | What it checks | Result |
+|---|---|---|
+| `tests/cloth-contact-solid.test.ts` (CPU) | Samples lie on the zero set at the box's edges (none on face interiors) and on a 2.5 cm ball (κ 40/m > 30/m). None on a 10 cm ball or along a step's concave crease. r = 0 is refused. | 9/9 pass |
+| `tests/cloth-contact-gpu.test.ts`, static solid | Sample–face pairs equal the Float64 brute force (sheet plus samples as free points). `sfPairs` equals the pair count. Force, Hessian and energy match the oracle with sample entries. Planar truncation matches with sample DAT pairs. After truncation, 0 face pairs and 0 faces in the solid. A vertex pushed 2 mm into the box edge puts 1–6 of its faces in the solid. A detector authored for 8 samples refuses the field. | 2/2 pass |
+| Unit suite | Only the known `reservoir-particle-cost` "merge cap" failure. | 1662 pass, 1 fail |
+| Types | | Clean |
+
+### Gates (60 steps, then 30 timed)
+
+| Gate | Samples | Faces in solid | Intersections | Other |
+|---|---|---|---|---|
+| drop (10 × 31², sharp pedestal) | 9,822 (capacity 16,384) | 0, every step and after the timed batch | 0 | 1,467 sample–face pairs at step 59; 122.9 ms/step (priority 3); peak pair slots 833.8N of 840N |
+| **drape** (61² sheet on a 10 cm sphere on a slab) | 8,351 (slab edges; sphere κ 10/m below the threshold) | **34 at step 5** | 0 | **Fails** |
+
+**Why the drape fails** (CLOTH_GATE_DEBUG):
+- The impact drives the vertices to a minimum φ of 6e-5 m at step 5 (round cap, 4,628 capped).
+- The faces then sag κe²/8 = 0.25 mm into the sphere.
+- The sample criterion assumed that vertices rest r/2 out. During impact they do not, so any curvature lets faces in.
+
+### The fix (M5 part 2, next)
+
+Each cloth face and edge gets its own closest point to the field: the minimum of φ over the triangle and over the segment, found by local minimisation on the trilinear field (Macklin et al. 2020, *Local Optimization for Robust Signed Distance Field Collision*).
+- Contacts:
+  - an interior face minimum, or an interior edge minimum inside its normal cone, becomes an entry on the feature's vertices with frozen barycentric weights;
+  - force −g′(φ) β_v ∇φ;
+  - Hessian g″ β_v² ∇φ∇φᵀ.
+- Truncation: a vertex's cap includes γφ_f/L over its faces and edges. Every point of a face moves at most max|δ_i|.
+- Cost follows the cloth faces near a solid, not the solid's area.
+- It covers creases and curvature alike. It also removes the samples' edge bound: a straight cloth edge crossing a crease passes within about h/4 of a sample, so it is held only where h/4 < r. That holds for the gates (h 5 mm, r 2 mm) but not for the Bridson scenes (h 1 cm, r 1.5 mm).
+- Exact edge coverage by points would need spacing about r everywhere. Measured, that is 0.19, 0.20 and 0.35 M samples and 13–19 s of CPU for the curtain, rotating sphere and tablecloth.
+- If the face and edge minima hold the drape and the drop alone, the samples go.
+
+Sample counts at h/2 for the Bridson scenes (r 1.5 mm, e 2 cm):
+
+| Scene | Samples | CPU |
+|---|---|---|
+| curtain | 17,170 | 2.0 s |
+| rotating sphere | 14,856 | 1.9 s |
+| tablecloth | 22,897 | 2.2 s |
+
+## 2026-11-09 COORDINATION (C2 → C1): author `solidSampleCapacity`
+
+`OgcContactDetector.create` now needs `solidSampleCapacity` whenever a solid field has sharp features. `setSolidField` throws otherwise, giving the field's count.
+
+For the Bridson scenes, use 24,576, which covers the tablecloth's 22,897; per scene would be 17,170 / 14,856 / 22,897. The count is deterministic per field and r, so author it from these numbers.
+
+M5 part 2 may remove the samples; I will say so here if it does.

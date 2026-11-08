@@ -10,11 +10,14 @@
  *   edge-edge     x = own edge e, y = other edge | 1 << 31,
  *                 z = lagged normal force magnitude, w = pack2x16unorm(s, t)
  *   vertex-solid  x = v, y = OGC_SOLID_Y (feature 7, no face), z = lagged normal force, w = 0
+ *   sample-facet  x = N + s for static surface sample s, y = face | feature << 28,
+ *                 z = mu lambda (the solid's mu), w = 1; held by the face's feature vertices
  * Feature: vertex k (0..2), edge (t[k], t[k+1]) (3..5), face interior (6), static solid (7).
  * Every entry is self-describing, so the gather never chases a second list.
  *
  * Contact buffer header (vec4<u32>): [0] (N, list capacity, counts base, entries base),
- * [1] (r, k_c, mu, eps_v dt) as f32, [2] (solid image word offset, 0 when none, 0, 0).
+ * [1] (r, k_c, mu, eps_v dt) as f32, [2] (solid image word offset, 0 when none, the surface
+ * samples' vec4 offset, their count, 0); sample s is (x, y, z, mu) as f32.
  */
 import { SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WORD } from "./solid-field";
 
@@ -38,9 +41,13 @@ export const OGC_COUNTER = {
   conflicts: 31, forceHeld: 32, frameConflicts: 33, frameRedos: 34, frameHeld: 35,
   /** The round's (r_q / rqMax)^3 summed in units of 1 / 1024 (the cell kernel's cubic mean; consumed by it). */
   envelopeSum: 36,
+  /** Sample-face contacts of the frame's rounds (static surface samples against cloth faces). */
+  frameSfPairs: 37,
+  /** Cloth faces that reach inside the static solid (the intersection count's solid half). */
+  solidIntersections: 38,
 } as const;
 export const OGC_COUNTER_WORDS = 40;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37];
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -106,6 +113,8 @@ const OGC_F_CONFLICTS = ${OGC_COUNTER.frameConflicts}u;
 const OGC_F_REDOS = ${OGC_COUNTER.frameRedos}u;
 const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;
 const OGC_ENVELOPE_SUM = ${OGC_COUNTER.envelopeSum}u;
+const OGC_F_SF_PAIRS = ${OGC_COUNTER.frameSfPairs}u;
+const OGC_SOLID_INTERSECTIONS = ${OGC_COUNTER.solidIntersections}u;
 const OGC_ST_SOLID_PENETRATION = ${OGC_STATUS.solidPenetration}u;
 const OGC_ST_SOLID_BOUNDS = ${OGC_STATUS.solidBounds}u;
 const OGC_ST_PAIR_OVERFLOW = ${OGC_STATUS.pairOverflow}u;
@@ -320,6 +329,8 @@ ${OGC_COMMON_WGSL}
 @group(${group}) @binding(${binding}) var<storage, read> ogcContacts: array<vec4<u32>>;
 fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
 fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
+// Static surface sample at index i >= N (sample-facet entries).
+fn ogcSamplePos(i: u32) -> vec3<f32> { return bitcast<vec3<f32>>(ogcContacts[ogcContacts[2].y + i - ogcContacts[0].x].xyz); }
 ${OGC_SOLID_WGSL}
 
 struct OgcPairEval { f: vec3<f32>, h: mat3x3<f32>, e: f32 }
@@ -362,7 +373,8 @@ fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   if ((ent.y & OGC_EE_BIT) == 0u) {
     let feature = (ent.y >> 28u) & 7u;
     ids = vec4<u32>(ent.x, ogcTri(ent.y & OGC_ID_MASK));
-    for (var i = 0u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); }
+    for (var i = 1u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); }
+    if (ent.w == 1u) { X[0] = ogcSamplePos(ent.x); } else { X[0] = select(ogcX(ids[0]), xv, ids[0] == v); }
     let p = X[0];
     w.x = 1.0;
     if (feature < 3u) {
@@ -395,11 +407,12 @@ fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   let act = ogcActivation(d, params.x, params.y);
   let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
   var out = OgcPairEval(-act.y * wr * n, (wr * wr * act.z) * nn, act.x);
-  let mu = params.z;
-  if (mu > 0.0) {
-    let ml = mu * bitcast<f32>(ent.z);
+  // A sample-facet entry carries mu lambda with the solid's own mu; its sample is static.
+  let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
+  let ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled);
+  if (ml > 0.0) {
     var dx = vec3<f32>(0.0);
-    for (var i = 0u; i < 4u; i++) { dx += w[i] * (X[i] - ogcXt(ids[i])); }
+    for (var i = select(0u, 1u, sampled); i < 4u; i++) { dx += w[i] * (X[i] - ogcXt(ids[i])); }
     let u = dx - n * dot(n, dx);
     let un = length(u);
     let fy = ogcFrictionF1OverY(un, params.w);

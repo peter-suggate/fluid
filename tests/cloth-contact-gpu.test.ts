@@ -554,13 +554,28 @@ async function detectWithSolid(device: GPUDevice, mesh: OracleMesh, vel: V3[], c
 test("GPU static solid: entries, truncation terms, the vertex block and the truncated motion against the oracle", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const field = solidField(), mesh = solidSheet(21), N = mesh.x.length, R = rng(22);
-    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.012, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64 };
+    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.012, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 };
     const { det, positions, oracle } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
     const c0 = await det.readCounters();
     assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
     const xdet = new Float32Array(await readBuffer(device, det.det));
     const work = new Float32Array(await readBuffer(device, det.work));
     const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
+    // Static surface samples at x_det[N + s], on the zero set: the box's edges, and the ball,
+    // whose curvature 40/m exceeds 3 r / e^2 = 30/m for the sheet's 1.41 cm diagonals.
+    const S = det.solidSamples, samples: V3[] = [];
+    for (let s = 0; s < S; s++) samples.push([xdet[4 * (N + s)], xdet[4 * (N + s) + 1], xdet[4 * (N + s) + 2]]);
+    const onBox = samples.filter(p => solidBox(p) < solidBall(p)).length;
+    assert.ok(onBox > 100 && S - onBox > 100 && samples.every(p => Math.abs(sampleClothSolidField(field, p).phi) < 1e-6), `${S} samples, ${onBox} on the box`);
+    // Sample-facet entries: brute force over the sheet with the samples as free points.
+    const isSample = (e: Entry) => e.w === 1 && (e.y & 0x80000000) === 0;
+    const withSamples: OracleMesh = { ...oracle, x: [...mesh.x, ...samples] };
+    const bf = bruteForceDetection(withSamples, config.r, withSamples.x.map(() => config.rqBase), 0.9);
+    const sampleKeys = new Set(lists.flatMap(l => l.filter(isSample).map(e => `${e.x}|${globalFeature(oracle, e.y & 0x0fffffff, (e.y >>> 28) & 7)}`)));
+    const wantKeys = new Set([...bf.vf].filter(k => +k.split("|")[0] >= N));
+    for (const k of wantKeys) assert.ok(sampleKeys.has(k) || bf.ambiguousVF.has(k), `sample-facet pair ${k} missing`);
+    for (const k of sampleKeys) assert.ok(wantKeys.has(k) || bf.ambiguousVF.has(k), `sample-facet pair ${k} not in the oracle`);
+    assert.ok(sampleKeys.size > 20 && c0.sfPairs === sampleKeys.size, `${sampleKeys.size} sample-facet pairs, counter ${c0.sfPairs}`);
     const solidOff = 3 * N + det.T + det.E;
     // The ball holds the round's whole reach, |w| + r_q / 2 (w = 0 here); the cap is 0.45 r_q.
     const bounds = mesh.x.map((x, v) => solidBallBound(field, x, xdet[4 * v + 3] / 0.9, config.r));
@@ -595,6 +610,7 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     // The vertex block at positions nudged within the solid-safe ball, with friction from a shifted step start.
     const X = f32(mesh.x.map((p, v) => { const h = 0.3 * Math.min(xdet[4 * v + 3], bounds[v].phi0); return [p[0] + (R() - 0.5) * h, p[1] + (R() - 0.5) * h, p[2] + (R() - 0.5) * h] as V3; }));
     const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 2e-4, p[1] + (R() - 0.5) * 2e-4, p[2]] as V3));
+    const XS = [...X, ...samples], XtS = [...Xt, ...samples];
     device.queue.writeBuffer(positions, 0, vec4s(X));
     const res = await evalVertexBlock(device, det, positions, Xt, N);
     const P = { r: config.r, k: config.kc, mu: config.mu, epsV: config.epsV, dt: config.dt };
@@ -605,7 +621,12 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
         const lambda = new Float32Array(new Uint32Array([ent.z]).buffer)[0];
         let q: { f: V3; H: number[][] }, en: number;
         if (ent.y === 0x70000000) { const sc = solidContact(field, X[v], Xt[v], lambda, P); q = sc; en = sc.e; }
-        else { const c = asOracleContact(ent, oracle); q = vertexForceHessian(c, X, Xt, P, c.ids.indexOf(v)); en = contactEnergy(c, X, Xt, P); }
+        else {
+          // A sample-facet entry carries mu lambda with the solid's mu; the static sample sits at X = Xt.
+          const c = asOracleContact(ent, oracle);
+          if (isSample(ent)) c.lambda /= config.mu;
+          q = vertexForceHessian(c, XS, XtS, P, c.ids.indexOf(v)); en = contactEnergy(c, XS, XtS, P);
+        }
         f = [f[0] + q.f[0], f[1] + q.f[1], f[2] + q.f[2]]; e += en;
         for (let i = 0; i < 3; i++) for (let k = 0; k < 3; k++) H[i][k] += q.H[i][k];
       }
@@ -623,7 +644,8 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     device.queue.writeBuffer(positions, 0, vec4s(Xnew));
     await runPass(device, pass => det.encodeTruncate(pass));
     const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
-    const planar = planarTruncate(X0, Xnew, pairs, mesh.x.map((_, v) => xdet[4 * v + 3]), 0.9, 1e-6);
+    assert.ok(pairs.some(p => p.ids[0] >= N), "sample-facet DAT pairs");
+    const planar = planarTruncate([...X0, ...samples], [...Xnew, ...samples], pairs, [...mesh.x.map((_, v) => xdet[4 * v + 3]), ...samples.map(() => 0)], 0.9, 1e-6);
     let cut = 0;
     for (let v = 0; v < N; v++) {
       const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
@@ -635,6 +657,17 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     assert.equal(motionPenetrates(oracle, X0, got), false);
     const c1 = await det.readCounters();
     assert.ok(cut > 20 && Math.abs(c1.solidCut - cut) <= 2 + ambiguous.size, `solid cut ${c1.solidCut} vs ${cut} (${ambiguous.size} on a cell face)`);
+    // No face of the truncated sheet reaches into a solid; one pushed through the box's top edge does.
+    await runPass(device, pass => det.encodeIntersectionCount(pass));
+    const c2 = await det.readCounters();
+    assert.ok(c2.intersections === 0 && c2.solidIntersections === 0, `${c2.intersections} face pairs, ${c2.solidIntersections} faces in a solid`);
+    const edgeV = mesh.x.reduce((b, p, v) => Math.hypot(p[0] - 0.08, p[1] - 0.04) < Math.hypot(mesh.x[b][0] - 0.08, mesh.x[b][1] - 0.04) ? v : b, 0);
+    const pushed = got.map((p, v) => (v === edgeV ? [0.078, 0.04, 0.028] : p) as V3);
+    device.queue.writeBuffer(positions, 0, vec4s(pushed));
+    await runPass(device, pass => det.encodeIntersectionCount(pass));
+    const c3 = await det.readCounters();
+    const faces = mesh.tris.filter(t => t.includes(edgeV)).length;
+    assert.ok(c3.solidIntersections >= 1 && c3.solidIntersections <= faces, `${c3.solidIntersections} faces in the box (vertex ${edgeV} in ${faces} faces)`);
     det.destroy();
   });
 });
@@ -645,7 +678,7 @@ test("GPU static solid fails explicitly: a vertex inside it is held, one outside
     const inside = 37, outside = 0;
     mesh.x[inside] = [0.05, 0.04, 0.025];
     mesh.x[outside] = [-0.05, 0.004, 0.0305];
-    const config: OgcContactConfig = { ...baseConfig(N), solidCapacityWords: field.words.length };
+    const config: OgcContactConfig = { ...baseConfig(N), solidCapacityWords: field.words.length, solidSampleCapacity: 8192 };
     const { det, positions } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
     const c = await det.readCounters();
     assert.ok(c.status & OGC_STATUS.solidPenetration, "inside");
@@ -656,6 +689,10 @@ test("GPU static solid fails explicitly: a vertex inside it is held, one outside
     const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
     assert.deepEqual(got[inside], mesh.x[inside].map(Math.fround), "the penetrating vertex holds");
     assert.throws(() => det.setSolidField(solidField(0.03)), /band/);
+    // The box's edges hold more surface samples than an under-authored detector takes.
+    const few = await OgcContactDetector.create(device, { vertexCount: N, triangles: topologyOf(mesh).triangles, edges: topologyOf(mesh).edges }, vec4s(mesh.x), { ...config, solidSampleCapacity: 8 }, { positions, velocities: positions });
+    assert.throws(() => few.setSolidField(field), /surface samples .* \(solidSampleCapacity\)/);
+    few.destroy();
     assert.throws(() => det.setSolidField(buildClothSolidField({ sdf: p => Math.min(solidBox(p), solidBall(p), boxSdf([0.2, 0, 0], [0.35, 0.1, 0.05])(p)), lo: [-0.02, -0.02, -0.03], hi: [0.38, 0.12, 0.1], cell: 0.005, band: 0.06 })), /authored/);
     det.destroy();
   });

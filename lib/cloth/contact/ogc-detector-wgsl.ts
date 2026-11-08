@@ -15,7 +15,9 @@
  * word solidBase.
  *
  * One detection round is nine indirect dispatches:
- *   prep (N)  cell (1)  insert-count (T)  scan x3  insert (T)  query (N + E)  bound (N)
+ *   prep (N)  cell (1)  insert-count (T)  scan x3  insert (T)  query (N + E + S)  bound (N)
+ * with S the static solid's surface samples (solid-field.ts clothSolidSamples), held in
+ * x_det after the vertices (index N + s: position, and the solid's mu in w).
  * then the redo decision, and the same nine again (zero workgroups unless the round
  * had a conflict, see OGC_REDO_WGSL). The insert pass consumes the counts back to
  * zero, so no pass ever clears the grid.
@@ -55,7 +57,7 @@ struct OgcParams {
   wgS1: u32, wgS2: u32, kc: f32, mode: u32,
   gammaR: f32, pairCap: u32, tvOff: u32, sepEps: f32,
   solidBase: u32, solidOff: u32, heldOff: u32, predict: u32,
-  cellRule: u32, pad0: u32, pad1: u32, pad2: u32,
+  cellRule: u32, S: u32, pad1: u32, pad2: u32,
 }
 `;
 
@@ -66,7 +68,7 @@ export const OGC_PARAM = {
   gravity: 16, trisOff: 20, edgesOff: 21, triEdgesOff: 22, vtOffOff: 23, vtListOff: 24, veOffOff: 25, veListOff: 26, B1: 27,
   local1Off: 28, sums1Off: 29, local2Off: 30, sums2Off: 31, local3Off: 32, sums3Off: 33, entriesOff: 34, B2: 35,
   countsOff: 36, entriesBase: 37, dminTOff: 38, dminEOff: 39, envOff: 40, wgN: 41, wgT: 42, wgNE: 43, wgS1: 44, wgS2: 45, kc: 46,
-  mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53, heldOff: 54, predict: 55, cellRule: 56,
+  mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53, heldOff: 54, predict: 55, cellRule: 56, S: 57,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -107,8 +109,9 @@ function header(bindings: readonly number[], rw: readonly number[] = []): string
  * at both ends of its straight path is on it throughout.
  */
 const PRED_FNS = /* wgsl */`
-fn predOf(i: u32) -> vec3<f32> { return pred[i].xyz; }
-fn anchored(i: u32) -> vec3<f32> { return xdet[i].xyz + pred[i].xyz; }
+// Indices N .. N + S - 1 are the static solid's surface samples (x_det only): no prediction.
+fn predOf(i: u32) -> vec3<f32> { if (i >= P.N) { return vec3<f32>(0.0); } return pred[i].xyz; }
+fn anchored(i: u32) -> vec3<f32> { return xdet[i].xyz + predOf(i); }
 `;
 
 const TOPO_FNS = /* wgsl */`
@@ -430,7 +433,8 @@ fn ratio(s0: f32, s1: f32) -> f32 {
   if (s1 >= 0.0) { return 1.0; }
   return clamp(P.gammaR * s0 / (s0 - s1), 0.0, 1.0);
 }
-fn lower(v: u32, t: f32) { if (t < 1.0) { atomicMin(&work[P.tvOff + v], bitcast<u32>(t)); } }
+// A surface sample (index >= N) is static: it neither moves nor is truncated.
+fn lower(v: u32, t: f32) { if (t < 1.0 && v < P.N) { atomicMin(&work[P.tvOff + v], bitcast<u32>(t)); } }
 var<workgroup> wgUncert: atomic<u32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(num_workgroups) nwg: vec3<u32>) {
@@ -455,7 +459,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
         for (var k = 0u; k < 4u; k++) {
           let Y = anchored(ids[k]);
           proj[k] = dot(n, Y - o);
-          dn[k] = dot(n, pos[ids[k]].xyz - Y);
+          dn[k] = select(0.0, dot(n, pos[min(ids[k], P.N - 1u)].xyz - Y), ids[k] < P.N);
           if (k < nA) { supA = min(supA, proj[k]); apA = max(apA, -dn[k]); }
           else { supB = max(supB, proj[k]); apB = max(apB, dn[k]); }
         }
@@ -544,7 +548,7 @@ export function ogcGridCountWGSL(intersect: boolean): string {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
-  ${intersect ? "if (t == 0u) { atomicStore(&counters[OGC_INTERSECTIONS], 0u); }" : ""}
+  ${intersect ? "if (t == 0u) { atomicStore(&counters[OGC_INTERSECTIONS], 0u); atomicStore(&counters[OGC_SOLID_INTERSECTIONS], 0u); }" : ""}
   if (t >= P.T) { return; }
   ${intersect ? "" : "atomicStore(&work[P.dminTOff + t], 0x7f7fffffu);"}
   let inv = invCell();
@@ -684,7 +688,7 @@ fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) {
   }
   if (conflict) {
     atomicAdd(&counters[OGC_CONFLICTS], 1u);
-    for (var k = 0u; k < 4u; k++) { atomicOr(&work[P.heldOff + ids[k]], 1u); }
+    for (var k = 0u; k < 4u; k++) { if (ids[k] < P.N) { atomicOr(&work[P.heldOff + ids[k]], 1u); } }
   }
 }
 fn pairVT(v: u32, tri: vec3<u32>, x: vec3<f32>, cp: vec3<f32>) {
@@ -813,6 +817,49 @@ fn vertexFacet(v: u32) -> RoleOut {
   return out;
 }
 
+// A static surface sample i (index N + s) against the cloth's faces: the faces' grid
+// boxes carry their own envelopes and predictions, so a point query finds every face
+// within its envelope of the sample. Entries go to the face's feature vertices only
+// (the sample does not move) and carry mu lambda with mu the solid's at the sample
+// (x_det.w); w = 1 marks them. The DAT pair puts the sample first, as a vertex.
+fn sampleFacet(i: u32) -> RoleOut {
+  var out = RoleOut(0u, 0u, 0u);
+  let planar = P.mode == OGC_PLANAR;
+  let xs = xdet[i];
+  let x = xs.xyz;
+  let q = OgcBox(x, x);
+  let inv = invCell();
+  let c = cellOf(x, inv);
+  let key = cellKey(c); let h = cellHash(c);
+  let end = min(bucketStart(h + 1u), P.gridCap);
+  for (var j = bucketStart(h); j < end; j++) {
+    if (entryKey(j) != key) { continue; }
+    let box = entryBox(j);
+    if (!boxesOverlap(q, box)) { continue; }
+    let t = entryFace(j);
+    let tri = triVerts(t);
+    out.candidates++;
+    let a = xd(tri.x); let b = xd(tri.y); let cc = xd(tri.z);
+    let cl = ogcClosestTriangle(x, a, b, cc);
+    let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
+    let d = length(x - cp);
+    if (planar) {
+      if (d <= triEnv(tri) + spreadVT(i, tri)) { pairVT(i, tri, x, cp); out.dat++; }
+    } else {
+      atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
+    }
+    if (d < P.r && vfAccept(OGC_NONE, x, t, tri, cl.feature)) {
+      let lambda = -ogcActivation(d, P.r, P.kc).y * xs.w;
+      let ent = vec4<u32>(i, t | (cl.feature << 28u), bitcast<u32>(lambda), 1u);
+      if (cl.feature < 3u) { pushEntry(tri[cl.feature], ent); }
+      else if (cl.feature < OGC_FACE) { let li = cl.feature - 3u; pushEntry(tri[li], ent); pushEntry(tri[(li + 1u) % 3u], ent); }
+      else { pushEntry(tri.x, ent); pushEntry(tri.y, ent); pushEntry(tri.z, ent); }
+      out.pairs++;
+    }
+  }
+  return out;
+}
+
 // Algorithm 2 for edge e: every other edge is reached through its face0's grid entries,
 // once. A pair whose closest points are inside both edges is an edge-edge contact; the
 // endpoint cases are vertex-edge contacts, which Algorithm 1 already holds.
@@ -870,6 +917,7 @@ var<workgroup> wgCand: atomic<u32>;
 var<workgroup> wgVf: atomic<u32>;
 var<workgroup> wgEe: atomic<u32>;
 var<workgroup> wgDat: atomic<u32>;
+var<workgroup> wgSf: atomic<u32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let i = gid.x;
@@ -879,6 +927,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   } else if (i < P.N + P.E) {
     let o = edgeEdge(i - P.N);
     atomicAdd(&wgCand, o.candidates); atomicAdd(&wgEe, o.pairs); atomicAdd(&wgDat, o.dat);
+  } else if (i < P.N + P.E + P.S) {
+    let o = sampleFacet(i - P.E);
+    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgSf, o.pairs); atomicAdd(&wgDat, o.dat);
   }
   closePairs();
   workgroupBarrier();
@@ -887,6 +938,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     atomicAdd(&counters[OGC_F_VF_PAIRS], atomicLoad(&wgVf));
     atomicAdd(&counters[OGC_F_EE_PAIRS], atomicLoad(&wgEe));
     atomicAdd(&counters[OGC_F_DAT_PAIRS], atomicLoad(&wgDat));
+    atomicAdd(&counters[OGC_F_SF_PAIRS], atomicLoad(&wgSf));
   }
 }
 `;
@@ -945,7 +997,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * positions; offset contact keeps every pair apart by a fraction of r, far
  * above their rounding.
  */
-export const OGC_INTERSECT_WGSL = header([0, 1, 4, 7, 9]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(true) + /* wgsl */`
+export const OGC_INTERSECT_WGSL = header([0, 1, 4, 7, 8, 9]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(true) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+// The face reaches inside the static solid: phi < 0 at a point of a barycentric lattice
+// over it with spacing at most a quarter cell (the field is trilinear per cell).
+fn insideSolid(A: array<vec3<f32>, 3>) -> bool {
+  let h = ogcSolidHeader();
+  let longest = max(length(A[1] - A[0]), max(length(A[2] - A[1]), length(A[0] - A[2])));
+  let n = u32(clamp(ceil(4.0 * longest / h.cell), 1.0, 32.0));
+  let inv = 1.0 / f32(n);
+  for (var i = 0u; i <= n; i++) { for (var j = 0u; j <= n - i; j++) {
+    let u = f32(i) * inv; let w = f32(j) * inv;
+    let p = (1.0 - u - w) * A[0] + u * A[1] + w * A[2];
+    let s = ogcSolidSample(h, p);
+    if (s.stored && s.phi < 0.0) { return true; }
+  } }
+  return false;
+}
 // Orientation with its forward error bound: f32 differences of f32 inputs are exact to
 // a relative 2^-24, so |error| <= 16 u perm with perm the permanent of the differences.
 fn orient(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> vec2<f32> {
@@ -994,12 +1061,14 @@ fn triTri(Av: array<vec3<f32>, 3>, Bv: array<vec3<f32>, 3>) -> bool {
   return undecided && triDistance(A, B) <= 7.6294e-6 * scale;
 }
 var<workgroup> wgHits: atomic<u32>;
+var<workgroup> wgSolidHits: atomic<u32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let t = gid.x;
   if (t < P.T) {
     let tv = triVerts(t);
     let A = array<vec3<f32>, 3>(xdet[tv.x].xyz, xdet[tv.y].xyz, xdet[tv.z].xyz);
+    if (P.solidBase != 0u && insideSolid(A)) { atomicAdd(&wgSolidHits, 1u); }
     let q = triBox(t);
     let inv = invCell();
     let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
@@ -1023,6 +1092,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     atomicAdd(&wgHits, hits);
   }
   workgroupBarrier();
-  if (li == 0u) { let h = atomicLoad(&wgHits); if (h != 0u) { atomicAdd(&counters[OGC_INTERSECTIONS], h); } }
+  if (li == 0u) {
+    let h = atomicLoad(&wgHits); if (h != 0u) { atomicAdd(&counters[OGC_INTERSECTIONS], h); }
+    let sh = atomicLoad(&wgSolidHits); if (sh != 0u) { atomicAdd(&counters[OGC_SOLID_INTERSECTIONS], sh); }
+  }
 }
 `;

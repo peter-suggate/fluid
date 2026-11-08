@@ -6,15 +6,18 @@
  *   drop   ten 31 x 31 sheets, each turned a few degrees, fall onto a voxel
  *          pedestal (a sharp box on a floor slab, both from the static solid
  *          field: no analytic collider) and pile over its edges
+ *   drape  a 61 x 61 sheet falls onto a smooth sphere (an sdf part: no surface
+ *          samples) resting on a floor slab, and drapes to the floor
  *   twist  a 100 x 100 sheet whose two opposite edges turn a quarter turn per
  *          second each in opposite directions while moving together (OGC Fig. 12)
  *
- * Every frame: no intersecting face pair, no vertex inside a solid, no
- * overflowing capacity. Solid friction is the pedestal's own (0.3); cloth on
+ * Every frame: no intersecting face pair, no vertex inside a solid, no cloth
+ * face reaching into a solid (the sharp edges are held off the faces by their
+ * surface samples), no overflowing capacity. Solid friction is the pedestal's own (0.3); cloth on
  * cloth uses the detector's mu (0.2). The frame's rounds, truncations, pairs, envelope and
  * residual are reported; then one timed batch of steps without readback.
  *
- * GPU only and opt-in: CLOTH_CONTACT_GATES=drop,twist (or "all");
+ * GPU only and opt-in: CLOTH_CONTACT_GATES=drop,drape,twist (or "all");
  * CLOTH_GATE_STEPS (default 60); CLOTH_GATE_VARIANTS=all adds the isotropic
  * truncation and the fixed envelope to the drop.
  */
@@ -180,7 +183,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
   // x_t: the solver's step-start segment (C1 to expose it as a getter; see COORDINATION 2026-11-09).
   const stride = solver.tables.stride;
   det.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: { buffer: solver.state, offset: 16 * CLOTH_STATE.xt * stride, size: 16 * stride } });
-  if (field) det.setSolidField(field);
+  if (field) { det.setSolidField(field); log(`${name}: ${det.solidSamples} surface samples at the field's sharp features (capacity ${det.solidSampleCapacity})`); }
 
   const frame = (count: number, intersections: boolean) => {
     const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
@@ -222,6 +225,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
     }
     assert.equal(c.status & FAILING, 0, `${name}: status ${OgcContactDetector.describeStatus(c.status)} at step ${s}`);
     assert.equal(c.intersections, 0, `${name}: ${c.intersections} intersecting face pairs at step ${s}`);
+    assert.equal(c.solidIntersections, 0, `${name}: ${c.solidIntersections} faces reach into the solid at step ${s}`);
     if (s % 10 === 9) assert.equal(await inside(), 0, `${name}: vertices inside the solid at step ${s}`);
   }
   const report = await solver.readStatus();
@@ -235,6 +239,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
   const ms = (performance.now() - t0) / TIMED_STEPS;
   const cT = await det.readCounters();
   assert.equal(cT.intersections, 0, `${name}: intersections after the timed batch`);
+  assert.equal(cT.solidIntersections, 0, `${name}: faces in the solid after the timed batch`);
   assert.equal(cT.status & FAILING, 0, `${name}: status ${OgcContactDetector.describeStatus(cT.status)} after the timed batch`);
   assert.equal(await inside(), 0, `${name}: vertices inside the solid after the timed batch`);
 
@@ -243,7 +248,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
   for (const fr of frames) if (fr.step % 10 === 0 || fr.step === STEPS - 1) {
     const c = fr.c;
     log(`${name} step ${fr.step}: rounds ${c.detections} (re ${c.redetections}), truncated/N ${(c.truncated / N).toFixed(3)} (max ${(c.truncatedMax / N).toFixed(3)}), `
-      + `pairs/N vf ${(c.vfPairs / N).toFixed(2)} ee ${(c.eePairs / N).toFixed(2)} dat ${(c.datPairs / N).toFixed(2)}, solid ${c.solidContacts} cut ${c.solidCut}, `
+      + `pairs/N vf ${(c.vfPairs / N).toFixed(2)} ee ${(c.eePairs / N).toFixed(2)} dat ${(c.datPairs / N).toFixed(2)}, solid ${c.solidContacts} cut ${c.solidCut} sample-facet ${c.sfPairs}, `
       + `capped ${c.capped}, uncertified ${c.uncertified}, envelope ${c.peakEnvelope.toExponential(2)}, candidates/N ${(c.candidates / N).toFixed(1)}, `
       + `held/N ${(c.held / N).toFixed(3)} conflicts ${c.conflicts} redos ${c.redos}, residual ${residual.get(fr.step)?.toExponential(2) ?? "-"}`);
   }
@@ -288,12 +293,15 @@ function pedestal(band: number): ClothSolidField {
   ], lo: [-0.36, -0.2, -0.36], hi: [0.36, 0.22, 0.36], cell: 0.005, band });
 }
 
+/** Surface samples a scene's field may hold, authored above the measured count (the drop's pedestal and slab edges: logged per gate). */
+const SOLID_SAMPLES = 16384;
+
 function dropConfig(N: number, T: number, E: number, solidWords: number, variant: { truncation: "planar" | "isotropic"; adaptive: boolean }): OgcContactConfig {
   return {
     r: R_C, kc: KC, mu: 0.2, epsV: 1e-2, dt: DT, gravity: g,
     rqBase: variant.adaptive ? 3e-3 : 1e-2, rqMax: RQ_MAX, envelopeScale: variant.adaptive ? ENVELOPE_S : 0, truncation: variant.truncation,
     contactCapacity: 128, pairCapacity: PAIRS_PER_VERTEX * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 18, roundCap: 4, solidCapacityWords: solidWords,
-    ...knobs,
+    solidSampleCapacity: SOLID_SAMPLES, ...knobs,
   };
 }
 
@@ -308,6 +316,21 @@ test("gate: ten sheets drop onto a sharp voxel pedestal without intersecting or 
     : [{ truncation: "planar", adaptive: true }] as const;
   for (const v of variants)
     await runGate(device, `drop/${v.truncation}/${v.adaptive ? "adaptive" : "fixed"}`, m, dropConfig(N, T, E, field.words.length, v), field, s => t.diagnostic(s));
+}));
+
+// ---------------------------------------------------------------- drape
+
+test("gate: a sheet drapes over a smooth sphere onto the floor without intersecting or entering the solid", { skip: !want("drape") }, async t => withDevice(async device => {
+  const n = 61, W = 0.6;
+  const m = model(clothGridData({ columns: n, rows: n, width_m: W, height_m: W, origin_m: [-0.5 * W, 0.1, -0.5 * W] }));
+  const N = m.topology.vertexCount, T = m.topology.faceCount, E = m.topology.edgeCount;
+  const t0 = performance.now(), R = 0.1, c: V3 = [0, -0.02, 0];
+  const field = buildClothSolidField({ parts: [
+    { kind: "sdf", sdf: p => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]) - R, lo: [-R, c[1] - R, -R], hi: [R, c[1] + R, R], mu: 0.3 },
+    { kind: "lattice-box", lo: [-0.32, -0.16, -0.32], hi: [0.32, -0.12, 0.32], mu: 0.3 },
+  ], lo: [-0.36, -0.2, -0.36], hi: [0.36, 0.22, 0.36], cell: 0.005, band: R_C + 1.5 * Math.sqrt(3) * RQ_MAX + 0.005 });
+  t.diagnostic(`solid field: ${field.bricks.size} bricks, ${field.words.length} words, L_max ${field.maxLipschitz.toFixed(3)}, built in ${(performance.now() - t0).toFixed(0)} ms`);
+  await runGate(device, "drape", m, dropConfig(N, T, E, field.words.length, { truncation: "planar", adaptive: true }), field, s => t.diagnostic(s));
 }));
 
 // ---------------------------------------------------------------- twist
