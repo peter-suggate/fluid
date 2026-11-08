@@ -125,7 +125,9 @@ export interface ClothGPUTables {
   readonly stateRecords: number;
 }
 
-const PARAM_WORDS = 44;
+const PARAM_WORDS = 56;
+/** u32 words of the Tier B block: colour count, then two partitions' (owner, patch offsets, vertices, colour offsets). */
+const PARAM_PATCH = 44;
 /** Float words of the params uniform: gravity xyz + dt, then the clock origin and rho. */
 const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
@@ -187,6 +189,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'adaptive'];
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
   paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, guess, 0], PARAM_GRAVITY);
+  params[PARAM_PATCH] = model.colourCount;
   return { topo, rest, trianglesWord: topoBase[8]!, edgesWord: topoBase[9]!, colourRanges, params, strainLimited, damped, stride, edgeDualRecord,
     dampFaceRecord, dampHingeRecord, partialRecord, clockRecord, stateRecords };
 }
@@ -250,6 +253,10 @@ export class ClothGPUSolver {
   get triangles(): GPUBufferBinding { return { buffer: this.topo, offset: 4 * this.tables.trianglesWord, size: 16 * Math.max(this.T, 1) }; }
   get edges(): GPUBufferBinding { return { buffer: this.topo, offset: 4 * this.tables.edgesWord, size: 16 * Math.max(this.E, 1) }; }
   get positionsBinding(): GPUBufferBinding { return { buffer: this.positions, offset: 0, size: 16 * this.tables.stride }; }
+  /** Scene time of clock step 0 (the uploaded state's clock). */
+  get startTime_s(): number { return this.timeBase; }
+  /** x_t of the step in flight (the positions at the start of the step); C2's detector binds it. */
+  get stepStart(): GPUBufferBinding { return { buffer: this.state, offset: 16 * CLOTH_STATE.xt * this.tables.stride, size: 16 * this.tables.stride }; }
 
   /** Change K (a per-scene authoring value, up to `maxIterations`); rewrites the dispatch records, never per step. */
   setIterations(k: number): void {
@@ -367,6 +374,18 @@ export class ClothGPUSolver {
       }
       if (4 * p !== solverState.pinDuals.length) throw new Error('Cloth solver state has pin duals for a different pin set');
       for (let e = 0; e < this.E; e++) state.set([solverState.edgeDuals[2 * e]!, solverState.edgeDuals[2 * e + 1]!], 4 * (L.edgeDualRecord + e));
+    }
+    // Render normals of the uploaded pose; every step rewrites them at its end.
+    const tri = this.model.topology.data.triangles, nrm = at(CLOTH_STATE.normal, 0);
+    for (let f = 0; f < tri.length; f += 3) {
+      const [a, b, c] = [tri[f]!, tri[f + 1]!, tri[f + 2]!], p = (v: number, k: number) => x[4 * v + k]!;
+      const u = [0, 1, 2].map(k => p(b, k) - p(a, k)), w = [0, 1, 2].map(k => p(c, k) - p(a, k));
+      const n = [u[1]! * w[2]! - u[2]! * w[1]!, u[2]! * w[0]! - u[0]! * w[2]!, u[0]! * w[1]! - u[1]! * w[0]!];
+      for (const v of [a, b, c]) for (let k = 0; k < 3; k++) state[nrm + 4 * v + k]! += n[k]!;
+    }
+    for (let i = 0; i < N; i++) {
+      const o4 = nrm + 4 * i, l = Math.hypot(state[o4]!, state[o4 + 1]!, state[o4 + 2]!);
+      if (l > 0) for (let k = 0; k < 3; k++) state[o4 + k]! /= l; else state[o4 + 1] = 1;
     }
     state.set([0, solverState?.previousStep_s ?? 0, this.options.dt_s, 0], 4 * L.clockRecord);
     writeBufferChunked(q, this.positions, 0, x); writeBufferChunked(q, this.state, 0, state);

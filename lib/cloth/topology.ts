@@ -106,6 +106,11 @@ export function validateClothDocument(document: ClothDocument): string[] {
     if (script.kind === "oscillate" && !(script.period_s! > 0)) errors.push("Cloth oscillation needs a positive period");
     if (script.easing !== undefined && script.easing !== "linear" && script.easing !== "cosine") errors.push(`Unsupported cloth script easing ${String(script.easing)}`);
   }
+  if (document.pendingSolids !== undefined) {
+    if (!Array.isArray(document.pendingSolids)) errors.push("Cloth pending solids must be an array");
+    else for (const p of document.pendingSolids)
+      if (!p || typeof p.id !== "string" || !p.id || !(Number.isFinite(p.start_s) && p.start_s >= 0)) errors.push("Cloth pending solid needs an id and a non-negative finite start time");
+  }
   const solver = document.solver;
   if (solver) {
     if (solver.integrator !== undefined && solver.integrator !== "implicit-euler" && solver.integrator !== "bdf2") errors.push(`Unsupported cloth integrator ${String(solver.integrator)}`);

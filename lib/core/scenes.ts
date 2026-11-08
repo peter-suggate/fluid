@@ -70,6 +70,8 @@ import { solidVoxelEditsForScene, solidVoxelShellForScene } from "./scene-lattic
 import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
 import type { SceneryGraph } from "./scenery-graph";
+import { BRIDSON_2002_SCENES, type Bridson2002Scene } from "../cloth/scenes/bridson-2002";
+import { bridson2002Camera, bridson2002SceneDescription, bridson2002SceneLayout } from "../cloth/scenes/bridson-2002/scene-description";
 import {
   defineScene,
   presentationModeForScene,
@@ -82,6 +84,34 @@ import {
   type ScenePresentationMode,
   type SceneVariant,
 } from "./scene-definition";
+
+const BRIDSON_2002_NAMES: Record<string, string> = {
+  "bridson-2002-curtain": "Bridson 2002 \u00b7 Fig 1 curtain and ball",
+  "bridson-2002-rotating-sphere": "Bridson 2002 \u00b7 Fig 2 rotating sphere",
+  "bridson-2002-tablecloth": "Bridson 2002 \u00b7 Fig 3 tablecloth",
+};
+
+/** One catalog entry per reproduced figure; the card says what it cannot show yet. */
+function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
+  const source = make(), layout = bridson2002SceneLayout(source);
+  const halts = layout.pending.map(p => `${p.start_s.toFixed(2)} s ('moving cloth solid ${p.id} requires C2 M6')`).join(", ");
+  return defineScene({
+    id: source.id,
+    name: BRIDSON_2002_NAMES[source.id] ?? source.id,
+    blurb: `${source.caption} Bridson, Fedkiw & Anderson 2002, Fig ${source.figure}; one implicit 1/60 s cloth step per frame.`,
+    audience: "study",
+    shelf: "Cloth \u00b7 Bridson 2002",
+    environment: "default",
+    presentationMode: "full-scene",
+    build: () => bridson2002SceneDescription(make()),
+    preview: () => bridson2002SceneDescription(make(), { bake: false }),
+    cameraForDocument: bridson2002Camera,
+    attribution: { label: "Bridson, Fedkiw & Anderson, SIGGRAPH 2002", url: "https://graphics.stanford.edu/papers/cloth-sig02/" },
+    status: `Tier A GPU cloth, K = ${source.cloth.solver?.iterations ?? 64}. Not yet: cloth-solid contact (lane C2), so the cloth passes through the solids;`
+      + ` the ${source.sheet.columns}\u00d7${source.sheet.rows} sheet diverges at this K until the patch-resident solve (C1 M3);`
+      + (halts ? ` halts at ${halts}.` : " no moving solids."),
+  });
+}
 
 /** Preset factories author only their extra solid edits; the catalog compiler
  * adds the ordinary tank shell once, after the final lattice is known. */
@@ -2261,6 +2291,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createGardenSvoLightingScene,
     camera: gardenCamera,
   }),
+  // Bridson, Fedkiw & Anderson 2002, Figs 1-3 (Fig 4 is a production robe:
+  // reference only). Dry scenes whose cloth runs on the GPU cloth solver.
+  ...BRIDSON_2002_SCENES.map(bridson2002Definition),
   ...NBFLIP_ANALYTIC_CASES.map(name => defineScene({
     id: nbflipAnalyticSceneId(name),
     name: `NB-FLIP analytic \u00b7 ${name.replace("-", " ")}`,

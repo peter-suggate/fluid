@@ -4,13 +4,14 @@
  * updates and iteration order are those of the Float64 oracle (oracle.ts) in
  * f32. Every buffer and bind slot is described in gpu-solver.ts. */
 import { CLOTH_AVBD, CLOTH_LINE_SEARCH } from './oracle';
+import { CLOTH_PATCH_SLOT_BITS } from './patches';
 
 /** vec4<f32> per-vertex segments of the `state` buffer, each CLOTH_SEGMENT_ALIGN-padded N long.
  * Segment 0 is the step-start velocity, so C2 binds `state` as its velocity input. After the
  * segments: one record per edge (AVBD dual lambda, k, stabilized limit), the diagnostics
  * partials (2 per workgroup) and the clock record (step, previous step, h~, BDF2 as floats). */
-export const CLOTH_STATE = { velocity: 0, xt: 1, vPrev: 2, dxPrev: 3, y: 4, xHat: 5, prev1: 6, prev2: 7, pinTarget: 8, pinDual: 9, normal: 10 } as const;
-export const CLOTH_STATE_SEGMENTS = 11;
+export const CLOTH_STATE = { velocity: 0, xt: 1, vPrev: 2, dxPrev: 3, y: 4, xHat: 5, prev1: 6, prev2: 7, pinTarget: 8, pinDual: 9, normal: 10, patchOut: 11 } as const;
+export const CLOTH_STATE_SEGMENTS = 12;
 /** Segment padding in vec4 records: 16 records = 256 B, the storage binding offset alignment. */
 export const CLOTH_SEGMENT_ALIGN = 16;
 /** Status words: [0] status bits (sticky), [1] steps completed; slots start at CLOTH_STATUS_RING_BASE. */
@@ -31,10 +32,13 @@ export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as co
 export interface ClothSolverWGSLOptions {
   /** C2's vertex contact block (ogcVertexBlockWGSL at group 0, CLOTH_BINDING.contact); omitted: no contact terms. */
   readonly contactBlock?: string;
+  /** Tier B module: positions resolve through the patch's workgroup copy (the solvePatches entry point). */
+  readonly patch?: { readonly maxVertices: number; readonly workgroup: number };
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
-  const contact = !!options.contactBlock;
+  const contact = !!options.contactBlock, patch = options.patch;
+  if (patch && contact) throw new Error('Cloth Tier B does not take a contact block yet: truncation must run inside the patch dispatch');
   return /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, H
@@ -48,8 +52,11 @@ struct Params {
   state1: vec4u, // damping tangent: faces (2 records), hinges (3 records), damped flag
   gravity: vec4f, // xyz, dt
   misc: vec4f,   // clock origin (s), Chebyshev rho, initial guess (0 previous, 1 adaptive, 2 inertial)
+  tierB: vec4u,  // colour count
+  partA: vec4u,  // Tier B partition 0: owner, patch offsets, vertices, colour offsets (topo words)
+  partB: vec4u,  // partition 1
 }
-struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration), (omega)
+struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration) or Tier B (partition, inner iterations), (omega)
 
 @group(0) @binding(${CLOTH_BINDING.params}) var<uniform> P: Params;
 @group(0) @binding(${CLOTH_BINDING.dispatch}) var<uniform> R: Dispatch;
@@ -69,13 +76,22 @@ const EPS32: f32 = 1.1920929e-7;
 const PI: f32 = 3.14159265358979;
 const S_VEL = ${CLOTH_STATE.velocity}u; const S_NORMAL = ${CLOTH_STATE.normal}u; const S_XT = ${CLOTH_STATE.xt}u; const S_VPREV = ${CLOTH_STATE.vPrev}u; const S_DXPREV = ${CLOTH_STATE.dxPrev}u;
 const S_Y = ${CLOTH_STATE.y}u; const S_XHAT = ${CLOTH_STATE.xHat}u; const S_PREV1 = ${CLOTH_STATE.prev1}u;
-const S_PREV2 = ${CLOTH_STATE.prev2}u; const S_PINC = ${CLOTH_STATE.pinTarget}u; const S_PIND = ${CLOTH_STATE.pinDual}u;
+const S_PREV2 = ${CLOTH_STATE.prev2}u; const S_PINC = ${CLOTH_STATE.pinTarget}u; const S_PIND = ${CLOTH_STATE.pinDual}u; const S_POUT = ${CLOTH_STATE.patchOut}u;
 const RING_BASE = ${CLOTH_STATUS_RING_BASE}u; const SLOT_WORDS = ${CLOTH_STATUS_SLOT_WORDS}u; const RING_SLOTS = ${CLOTH_STATUS_RING_SLOTS}u;
 const WG = ${CLOTH_WORKGROUP}u;
 const IDENTITY = mat3x3f(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
 
 fn seg(s: u32, v: u32) -> u32 { return s * P.state0.x + v; }
-fn pos(i: u32) -> vec3f { return positions[i].xyz; }
+${patch ? `const SLOT_BITS = ${CLOTH_PATCH_SLOT_BITS}u; const PATCH_WG = ${patch.workgroup}u;
+var<workgroup> patchX: array<vec4f, ${patch.maxVertices}>;
+var<private> patchId: u32;
+var<private> ownerBase: u32;
+// The patch's own vertices live in workgroup memory; every other vertex is frozen at the dispatch's start.
+fn pos(i: u32) -> vec3f {
+  let o = topo[ownerBase + i];
+  if ((o >> SLOT_BITS) == patchId) { return patchX[o & ((1u << SLOT_BITS) - 1u)].xyz; }
+  return positions[i].xyz;
+}` : `fn pos(i: u32) -> vec3f { return positions[i].xyz; }`}
 fn tris(f: u32) -> vec4u { let b = P.topo2.x + 4u * f; return vec4u(topo[b], topo[b + 1u], topo[b + 2u], topo[b + 3u]); }
 fn edges(e: u32) -> vec4u { let b = P.topo2.y + 4u * e; return vec4u(topo[b], topo[b + 1u], topo[b + 2u], topo[b + 3u]); }
 fn edgeDual(e: u32) -> vec4f { return state[P.state0.y + e]; }
@@ -419,25 +435,57 @@ fn adaptiveGravity(a: vec3f, g: vec3f) -> f32 {
   state[seg(S_PREV2, v)] = vec4f(init, 0.0);
 }
 
-// One VBD block update of every vertex of one colour, with the per-vertex Armijo line search.
-@compute @workgroup_size(${CLOTH_WORKGROUP}) fn solveColour(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= R.range.y) { return; }
-  let v = topo[P.topo1.z + R.range.x + id.x];
-  let xv = pos(v);
+// One VBD block update of vertex v from xv: the Newton step with the per-vertex Armijo line search (xv if none descends).
+fn vertexStep(v: u32, xv: vec3f) -> vec3f {
   let s = vertexSystem(v, xv);
   let solved = solve3(s.H, -s.g);
-  if (solved.w == 0.0) { return; }
+  if (solved.w == 0.0) { return xv; }
   let delta = solved.xyz; let slope = dot(s.g, delta);
   var alpha = 1.0;
   for (var i = 0u; i <= HALVINGS; i++) {
     let trial = xv + alpha * delta;
     let next = vertexEnergy(v, trial);
-    if (next.x <= s.e + ARMIJO * alpha * slope + 4.0 * EPS32 * (s.mag + next.y)) {
-      positions[v] = vec4f(trial, positions[v].w);
-      return;
-    }
+    if (next.x <= s.e + ARMIJO * alpha * slope + 4.0 * EPS32 * (s.mag + next.y)) { return trial; }
     alpha *= 0.5;
   }
+  return xv;
+}
+
+// Every vertex of one colour.
+@compute @workgroup_size(${CLOTH_WORKGROUP}) fn solveColour(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= R.range.y) { return; }
+  let v = topo[P.topo1.z + R.range.x + id.x];
+  positions[v] = vec4f(vertexStep(v, pos(v)), positions[v].w);
+}
+${patch ? `
+// Tier B: one workgroup per patch of partition R.range.x runs R.range.y Gauss-Seidel sweeps over the patch's colours
+// in workgroup memory, then writes its vertices to the patchOut segment (commitPatches makes them the iterate).
+@compute @workgroup_size(${patch.workgroup}) fn solvePatches(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) lane: u32) {
+  var part = P.partA;
+  if (R.range.x == 1u) { part = P.partB; }
+  ownerBase = part.x; patchId = wg.x;
+  let start = topo[part.y + patchId]; let count = topo[part.y + patchId + 1u] - start; let C = P.tierB.x;
+  for (var s = lane; s < count; s += PATCH_WG) { patchX[s] = vec4f(positions[topo[part.z + start + s]].xyz, 0.0); }
+  workgroupBarrier();
+  for (var k = 0u; k < R.range.y; k++) {
+    for (var c = 0u; c < C; c++) {
+      let cb = part.w + patchId * (C + 1u) + c;
+      let c1 = topo[cb + 1u];
+      for (var s = topo[cb] + lane; s < c1; s += PATCH_WG) {
+        let v = topo[part.z + start + s];
+        patchX[s] = vec4f(vertexStep(v, patchX[s].xyz), 0.0);
+      }
+      workgroupBarrier();
+    }
+  }
+  for (var s = lane; s < count; s += PATCH_WG) { state[seg(S_POUT, topo[part.z + start + s])] = patchX[s]; }
+}` : ''}
+
+// Tier B: the patch results become the iterate.
+@compute @workgroup_size(${CLOTH_WORKGROUP}) fn commitPatches(@builtin(global_invocation_id) id: vec3u) {
+  let v = id.x;
+  if (v >= P.n.x) { return; }
+  positions[v] = vec4f(state[seg(S_POUT, v)].xyz, positions[v].w);
 }
 
 // After all colours: Chebyshev (free vertices${contact ? ' without contacts' : ''}), the iterate history and the pin duals.

@@ -15,6 +15,7 @@
  *    an optional per-edge strain limit |e| <= (1 + eps) L (inequality), with
  *    progressive stiffness, warm-started duals and the alpha regularization.
  */
+import type { ClothPatchPartition } from './patches';
 import type { ClothAttachmentScript, ClothIntegrator, ClothMaterial, ClothVector } from './types';
 import { CLOTH_NO_FACE, type PreparedClothTopology } from './topology';
 
@@ -566,8 +567,32 @@ export function clothMaxEdgeStrain(model: ClothSolverModel, x: ArrayLike<number>
 }
 
 /** One implicit step of length dt: no substeps; K iterations over colours, Chebyshev, AVBD duals. */
-export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState, options: ClothStepOptions, track = false): ClothStepReport {
+/** Tier B: each iteration is one sweep of a patch partition (alternating), `innerIterations` Gauss-Seidel
+ * sweeps per patch over its colour lists, with every vertex outside the patch frozen at the sweep's start. */
+export interface ClothPatchSchedule {
+  readonly partitions: readonly [ClothPatchPartition, ClothPatchPartition];
+  readonly innerIterations: number;
+}
+
+function colourSweep(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState, list: readonly number[], epsilon?: number): void {
+  const updates = list.map(v => clothVertexUpdate(model, frame, state, v, epsilon).position);
+  list.forEach((v, i) => state.x.set(updates[i]!, 3 * v));
+}
+
+function patchSweep(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState, part: ClothPatchPartition, inner: number, epsilon?: number): void {
+  const C = model.colourCount, snapshot = Float64Array.from(state.x), result = Float64Array.from(state.x);
+  for (let p = 0; p < part.patchCount; p++) {
+    const start = part.patchOffsets[p]!, verts = part.vertices.subarray(start, part.patchOffsets[p + 1]!);
+    for (let k = 0; k < inner; k++) for (let c = 0; c < C; c++)
+      colourSweep(model, frame, state, Array.from(verts.subarray(part.colourOffsets[p * (C + 1) + c]!, part.colourOffsets[p * (C + 1) + c + 1]!)), epsilon);
+    for (const v of verts) for (let a = 0; a < 3; a++) { result[3 * v + a] = state.x[3 * v + a]!; state.x[3 * v + a] = snapshot[3 * v + a]!; }
+  }
+  state.x.set(result);
+}
+
+export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState, options: ClothStepOptions, track = false, patches?: ClothPatchSchedule): ClothStepReport {
   const n = model.topology.vertexCount, { frame, init, bdf2 } = clothStepFrame(model, state, options);
+  if (patches && !(Number.isInteger(patches.innerIterations) && patches.innerIterations >= 1)) throw new Error('Cloth patch sweeps need at least one inner iteration');
   clothWarmStartDuals(model, state, frame.hEff);
   state.x.set(init);
   const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
@@ -575,10 +600,8 @@ export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState
   const prev1 = Float64Array.from(state.x), prev2 = Float64Array.from(state.x), residuals: number[] = [];
   let omega = 1;
   for (let it = 1; it <= options.iterations; it++) {
-    for (const list of byColour) {
-      const updates = list.map(v => clothVertexUpdate(model, frame, state, v, options.lineSearchEpsilon).position);
-      list.forEach((v, i) => state.x.set(updates[i]!, 3 * v));
-    }
+    if (patches) patchSweep(model, frame, state, patches.partitions[(it - 1) % 2]!, patches.innerIterations, options.lineSearchEpsilon);
+    else for (const list of byColour) colourSweep(model, frame, state, list, options.lineSearchEpsilon);
     omega = clothChebyshevOmega(it, options.chebyshevRho, omega);
     if (it >= 2 && omega !== 1) for (let v = 0; v < n; v++) {
       if (isPinned(model, v)) continue;

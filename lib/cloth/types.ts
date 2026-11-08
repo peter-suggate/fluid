@@ -108,6 +108,16 @@ export interface ClothSolverSettings {
   readonly patchIterations?: number;
 }
 
+/** A solid the cloth would meet that the scene cannot carry yet (a moving
+ * solid needs a scene rigid body with a prescribed pose and cloth contact
+ * against it: lane C2, M6). The cloth system halts with an explicit failure
+ * before its clock passes `start_s`; it never runs on without the solid. */
+export interface ClothPendingSolid {
+  readonly id: string;
+  /** Scene time up to which the cloth runs correctly without it. */
+  readonly start_s: number;
+}
+
 export interface ClothDocument {
   readonly schemaVersion: "2.0.0";
   readonly id: string;
@@ -115,6 +125,7 @@ export interface ClothDocument {
   readonly materials: readonly ClothMaterial[];
   readonly scripts?: readonly ClothAttachmentScript[];
   readonly solver?: ClothSolverSettings;
+  readonly pendingSolids?: readonly ClothPendingSolid[];
 }
 
 export interface ClothFrameIdentity {

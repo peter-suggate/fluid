@@ -67,6 +67,7 @@ import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from "../svo/features/shading/program
 import { ClothSurfaceRenderer } from "../cloth/render";
 import {RigidCutRenderAtlas} from './rigid-cut-render';
 import { publishSceneClothSurfaces } from "../cloth/scene-geometry";
+import { composeSceneCloth } from "../cloth/system";
 import { svoRenderScenePublication, type SvoRenderScenePublication } from "../svo/features/scene-publication/svo-render-scene-publication";
 import {
   createSvoPrimitiveCandidateRefitPlan,
@@ -2092,7 +2093,8 @@ export class FluidLabRenderer {
           ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
           : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0)));
       }
-      if (scene.cloth?.length) throw new Error("Cloth scenes need the GPU cloth system, which is not yet installed");
+      // Every cloth document steps on the scene clock beside (or, dry, instead of) the fluid.
+      if (scene.cloth?.length && !retainSimulation) solver = await composeSceneCloth(device, scene, solver, planSceneRuntime(scene).fluidSolver);
       if (presentationMode === "fluid-only" || solver.sparseVoxelSceneSource) return {solver};
       try {
         const refinement=config.values.svoEnvironmentBrickRefinementLevels;

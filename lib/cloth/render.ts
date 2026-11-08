@@ -6,12 +6,13 @@ import { SVO_DRY_SCENE_REVERSED_Z_NEAR_M } from '../svo/features/shading/program
  * place: no CPU copy of the pose sits between the step and the draw. */
 export interface ClothRenderSource {
   readonly document: ClothDocument;
-  /** array<vec4f>: cloth-local positions (xyz). */
-  readonly positions: GPUBuffer;
+  /** array<vec4f>: cloth-local positions (xyz). Bindings, since the solver's
+   * normals and triangles are slices of its state and topology buffers. */
+  readonly positions: GPUBufferBinding;
   /** array<vec4f>: unit vertex normals (xyz), cloth-local. */
-  readonly normals: GPUBuffer;
+  readonly normals: GPUBufferBinding;
   /** array<vec4u>: vertex indices (xyz) and material (w). */
-  readonly triangles: GPUBuffer;
+  readonly triangles: GPUBufferBinding;
   readonly triangleCount: number;
   /** World position of the cloth-local origin. */
   readonly origin_m: ClothVector;
@@ -64,6 +65,7 @@ export function packClothRenderUniform(source: Pick<ClothRenderSource, 'document
 }
 
 interface Bound { source: ClothRenderSource; group: GPUBindGroup; uniform: GPUBuffer }
+const sameBinding = (a: GPUBufferBinding, b: GPUBufferBinding) => a.buffer === b.buffer && (a.offset ?? 0) === (b.offset ?? 0) && a.size === b.size;
 export class ClothSurfaceRenderer {
   private layout?: GPUBindGroupLayout;
   private pipeline?: GPURenderPipeline;
@@ -89,12 +91,13 @@ export class ClothSurfaceRenderer {
     for (const [id, b] of this.bound) if (!live.has(id)) { b.uniform.destroy(); this.bound.delete(id); }
     for (const source of sources) {
       const old = this.bound.get(source.document.id);
-      if (old && old.source.revision === source.revision && old.source.positions === source.positions && old.source.document === source.document) continue;
+      if (old && old.source.revision === source.revision && old.source.document === source.document
+        && sameBinding(old.source.positions, source.positions) && sameBinding(old.source.normals, source.normals) && sameBinding(old.source.triangles, source.triangles)) { old.source = source; continue; }
       const uniform = old?.uniform ?? this.device.createBuffer({label: 'Cloth render uniform', size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
       this.device.queue.writeBuffer(uniform, 0, packClothRenderUniform(source));
       const group = this.device.createBindGroup({label: 'Cloth surface', layout: this.layout, entries: [
-        {binding: 0, resource: {buffer: this.view}}, {binding: 1, resource: {buffer: source.positions}},
-        {binding: 2, resource: {buffer: source.normals}}, {binding: 3, resource: {buffer: source.triangles}}, {binding: 4, resource: {buffer: uniform}}]});
+        {binding: 0, resource: {buffer: this.view}}, {binding: 1, resource: source.positions},
+        {binding: 2, resource: source.normals}, {binding: 3, resource: source.triangles}, {binding: 4, resource: {buffer: uniform}}]});
       this.bound.set(source.document.id, {source, group, uniform});
     }
   }

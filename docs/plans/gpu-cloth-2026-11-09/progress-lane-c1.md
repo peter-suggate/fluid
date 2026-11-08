@@ -225,3 +225,119 @@ With ρ = 0.9 it diverges faster: 1e4 % strain at K = 16. The Float64 oracle rep
 **Change:** `initialGuess` ('adaptive' default | 'previous' | 'inertial') on both the oracle and the GPU. Unknown values throw. All three are GPU = oracle tested.
 
 **Consequence:** 64² and up need Tier B's patch-resident inner iterations, which propagate support across a 32×32 patch per outer iteration, or more K. Integration demos above about 32² wait on M3. I am starting M3 now.
+
+## 2026-11-09 MILESTONE: cloth runs in scenes; the Bridson 2002 scenes are registered
+
+Done at the coordinator's priority, ahead of the rest of M3.
+
+- **Scene clock.** `lib/cloth/system.ts` `ClothSystem` steps each `SceneDescription.cloth` document with `ClothGPUSolver`, exactly once per 1/60 frame:
+  - in a dry scene, the cloth owns `info.submittedTime_s` and takes one tick per `advanceTo` once `time_s ≥ now + dt/2`, so half a tick is not a step;
+  - in a wet scene, it follows the fluid's submitted time, catching up at most 4 steps.
+  - All work is on the GPU. The pose comes back through an async mirror with persistent MAP_READ staging and one map in flight. Every 4 steps it publishes a `ClothSurfacePublication`, which feeds picking and cutting through the shared store.
+- **Renderer.** `webgpu-renderer.ts` no longer throws "Cloth scenes need the GPU cloth system…". It calls `composeSceneCloth(device, scene, solver, fluidSolver)`. `withClothSystem` is a Proxy:
+  - it overrides `advanceTo`, `clothSurfaces`, `clothRenderSources` and `destroy`;
+  - it overrides `stageSceneUpdate`, `applySceneUniforms` and `reseed` only when the base has them, and `reseed` returns false for cloth scenes;
+  - it forwards everything else bound to the base, so `instanceof` still holds.
+  - `ClothRenderSource` positions, normals and triangles are now `GPUBufferBinding`s that point straight at the solver's buffers. The bind group is reused while they are unchanged.
+- **Edits.** `stageSceneUpdate` compares per-document content keys. A changed document is rebuilt asynchronously. The old solver keeps drawing and the clock waits (`pending`), then the old solver is retired after `onSubmittedWorkDone`. A document being rebuilt is left out of the published surfaces, so the store never sees a stale publication.
+- **Capture hook for Lane S.** `ClothSystem.capture(times_s)` steps one tick at a time, fences each tick and mirrors. It returns `ClothSurfacePublication[][]` and throws on failure.
+- **Scenes.** `bridson2002Curtain`, `bridson2002RotatingSphere` and `bridson2002Tablecloth` are registered in `lib/core/scenes.ts`:
+  - audience "study", shelf "Cloth · Bridson 2002", full-scene mode, attributed to Bridson, Fedkiw & Anderson 2002;
+  - they appear in `sceneCatalogCards`;
+  - `lib/cloth/scenes/bridson-2002/scene-description.ts` builds each `SceneDescription`, and each card's status states what is missing.
+- **Solids are real scene voxel solids.**
+  - A lattice-aligned box, such as the ground slab, becomes an exact `fill` patch.
+  - Any other shape is one `bakeProceduralSolid` over a clipped local lattice.
+  - They render, hit-test and edit through the shared path. The test covers a `visibleToolSurface` pick on the ground and on the ball, a `sceneWithSolidStroke` cut of the ball that leaves the ground unchanged, and a save/load round trip that keeps the pick.
+  - Build times: curtain 0.63 s, sphere 2.0–2.4 s, table 1.3 s. A full-domain bake took 23–76 s.
+- **Moving solids fail explicitly.** A pose track still at rest at t = 0 is baked at that pose, and its motion start is recorded as `ClothDocument.pendingSolids` (validated). Before a step passes `start_s`, the system fails with code `cloth-pending-solid` and the message "<doc>: moving cloth solid '<id>' requires C2 M6":
+
+  | Scene | Moving solid | Fails at |
+  |---|---|---|
+  | Curtain | ball | 2.00 s |
+  | Rotating sphere | sphere | 0.75 s |
+  | Tablecloth | sphere (already moving at t = 0) | 3.45 s, when it first reaches the cloth's rest AABB |
+
+- **Layout.** The domain is brick-aligned and holds the cloth, the held solids and all tracks. The translation centres the container in x and z and puts the floor at y = 0, so the paper's ground plane sits at scene y = 0.08. Rest positions are translated, and `vertexMass_kg` is the source's `nodeMass_kg`.
+- **Tests.** `tests/cloth-system.test.ts` has 5 CPU and 2 GPU tests, all green.
+  - The GPU dry 8×8 scene matches the oracle to within 1e-4 over 6 ticks. It also covers the mirror tick and pick, a cut that rebuilds while the clock waits, and the gate failing at tick 10.
+  - The GPU tablecloth capture runs 6 ticks of uniform free fall.
+  - The unit suite has one red, the existing "merge cap protects neither…", which is not cloth.
+
+**Not yet, and stated on the cards:**
+- No cloth–solid contact in scenes, so the cloth passes through the solids. That waits on a scene solid-world adapter for C2's contact (see the COORDINATION entry below).
+- At K = 64, the 150² and 254×150 sheets diverge until the M3 patch-resident solve.
+- The scenes run at about 5 fps (see the tick cost below).
+
+## 2026-11-09 INTERFACE
+
+- `ClothSystem.create(device, scene, {label?, mirrorInterval?})` exposes:
+  - `time_s`, `pending`, `surfaces`, `renderSources`, `solverFor(id)`;
+  - `stepTo(target_s, maxSteps = 1)`, `mirrorNow()`, `adopt(scene)`, `settled()`, `capture(times_s)`;
+  - `failure`, which is `{code, message}`;
+  - `destroy()`.
+- `composeSceneCloth(device, scene, base, fluidSolver)` and `withClothSystem(base, cloth, fluid)`.
+- `ClothPendingSolid {id, start_s}` and `ClothDocument.pendingSolids?`.
+- `ClothGPUSolver` adds three getters:
+  - `startTime_s`;
+  - `stepStart`, the `GPUBufferBinding` of segment `CLOTH_STATE.xt`, which C2 asked for;
+  - `positionsBinding`.
+- It also now uploads area-weighted render normals.
+- `ClothRenderSource.positions/normals/triangles: GPUBufferBinding`.
+
+## 2026-11-09 DECISION
+
+- **Gate rule.** A moving solid without M6 fails the scene at the moving solid's start time. It is not silently held static.
+- **Mirror solverState after a cut or undo is a "restart".** It keeps time_s and zeroes the BDF2 history and the AVBD duals, with `previousStep_s` 0. The first step after an edit is therefore implicit Euler. Carrying the exact history through an edit is M4.
+- **Tier B in scenes refuses explicitly**, with "…Tier B patch solve, which is not installed yet (lane C1, M3)".
+- **Gravity is fixed at build time.** It is read from `scene.fluid.gravity_m_s2`. `applySceneUniforms` does not change cloth gravity yet.
+
+## 2026-11-09 MEASUREMENT: Tier A tick cost at scene scale
+
+On the 150² tablecloth: 22,500 vertices, 6 colours of 3.8–4.7K vertices each, 66.9K edges and 66.3K hinges. One fenced tick:
+
+| | K = 1 | K = 16 | K = 64 |
+|---|---|---|---|
+| strain limit + damping | 3.35 ms | 45 ms | 178.7 ms |
+| no strain limit | 2.57 ms | | 155.5 ms |
+| no damping | 2.12 ms | | 125.7 ms |
+
+- That is about 2.8 ms per iteration, or about 0.5 ms per colour dispatch, for only 4K threads each. The cost is latency: every thread does a long serial pass over its adjacency, so dispatch overhead is not the problem.
+- Two levers follow, and both are M3:
+  1. do less work per thread, by caching per-element terms;
+  2. use fewer, larger passes, which is Tier B's patch residency.
+
+## 2026-11-09 MEASUREMENT: Tier B oracle (block-Jacobi patches, Gauss-Seidel inside each patch)
+
+Float64 oracle, 64², pins at 1 corner, flat start, 2 % strain limit, adaptive init. "Strain at step 29" is the maximum strain at step 29 / ‖∇G‖ at step 29.
+
+| Patches (count/size) | Inner | K | Strain at step 29 |
+|---|---|---|---|
+| 9/16 | 8 | 8 | 26 % / 6.5e2 |
+| 9/16 | 16 | 4 | 40 % / 7.6e2 |
+| 9/16 | 32 | 2 | 213 % / 9.3e4 |
+| 9/16 | 4 | 16 | 12 % / 9.8e2 |
+| 9/9, 1024 per patch | 32 | 4 | 33 % / 3.3e2 |
+| 9/16 | 32 | 6 | 13.6 % / 2.0e2 |
+
+Tier A at K = 16 reached 83 %.
+
+- Patches help, but they do not converge.
+- Raising the inner iterations at fixed total work makes things worse, because the Jacobi seams between patches lag.
+- Larger patches do not fix it.
+- Conclusion: one sweep moves support only a short distance, and that is the real limit, so a coarse (two-level or multigrid) correction is the next candidate, as the coordinator suggested.
+- The Tier B kernels (`solvePatches`/`commitPatches`), `lib/cloth/patches.ts` and the oracle patch schedule are committed but not wired. The GPU encode loop and the timing run are still to do.
+
+## 2026-11-09 RESULT: AVBD strain limit at 10 % (coordinator's request)
+
+- Moving the limit from 2 % to 10 % does not change the divergence materially at 64² below K ≈ 192.
+- The cause is the stiffness ratio h²k/m ≈ 2200 of the membrane itself, combined with Gauss-Seidel moving support only about K rings per step. An active AVBD limit just adds more stiff terms on top.
+- The K-sweep notes above apply unchanged.
+
+## 2026-11-09 COORDINATION (C1 → C2)
+
+- Added `ClothGPUSolver.stepStart`, the x_t segment, as requested.
+- **Scene contact.** The Bridson scenes now hold their static solids as scene voxel solids, built as fill and procedural patches in `bridson2002SceneDescription`. C2 needs a scene solid-world → `ClothSolidSource` adapter, ground as `lattice-box` and the other parts as `sdf` with each solid's μ, so that `ClothSystem.build` can attach contact.
+  - Until it exists, the cards say the cloth passes through the solids.
+  - The hook point is `ClothSystem.build` in `lib/cloth/system.ts`. I'll wire it once the adapter's interface lands.
+- **M6.** The gates are `ClothDocument.pendingSolids`. When M6 lands, a moving solid should be removed from `pendingSolids` and supplied as a posed body instead.
