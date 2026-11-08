@@ -172,5 +172,110 @@ These are the old extension's semantics, which the fused passes must keep. They 
 
 ## Status
 
-- The frame brick store landed (above). B4 is next: the wiring plan above, with the store as its slot space.
-- ubaExtend is wired into nothing yet, so the excess is still 8.87 ms.
+- The frame brick store landed (above). B4 was built and measured, but did not land (below).
+- The frame runs the old extension, so its share of the excess is unchanged.
+
+## B4 build (not landed; saved as a patch)
+
+`UniformFrameExtension` (`uniform-frame-extension.ts`), built on the frame brick store.
+- **ufx4** (strided over held pages, the arena's level 2):
+  - each 4h face is its canonical texel, or the liquid-subface mean of its 16 h subfaces;
+  - it is a source where any subface is;
+  - two Jacobi sweeps at 4h, reach 2;
+  - each face's (value, distance) goes to a per-block buffer, then 4h tiles publish their texels.
+- **ufxH** (strided over live bricks):
+  - two sweeps at h, with seams prolonged from the 4h state;
+  - a face past the h band takes the 4h value where that sweep reached it, else keeps its own.
+- **Rewire:** the frame calls one `encodeExtension` for both the current field and the departure field (the paired FLIP delta), with NB-FLIP's flipDelta "swept" mode removed. In the same patch:
+  - the slot extension, the pair/slots/compiled WGSL, the hierarchy pyramid and its CPU twin, and three probes are deleted;
+  - in total, 24 files change, +442 −3977.
+- **Regression:** `tests/uniform-frame-extension.test.ts`, on a dam break with an h box across the surface. It checks:
+  - sources exact;
+  - no stale face against a departure poison;
+  - side walls kept;
+  - both levels reach the band;
+  - every extended face within its axis's source [min, max], the maximum principle of fast sweeping (Zhao 2005; Adalsteinsson & Sethian 1999).
+  - Result: 13232 sources, 22368 h and 268 4h faces extended, 0 stale, 0 outside the range.
+- `npm run check:types` reports 0 errors, and `npm run test:unit` 0 failures (2133 tests) on the B4 tree.
+
+**Patch:** `~/code/me/fluid-scratch/lane-e/b4-final/b4-extension-rewire.patch` (against b759020c).
+- It covers the whole change. It applies with `git apply`; the NB-FLIP hunks sit beside the peer's NB_CELL_MASS hunks without overlapping.
+- Split patches for the two shared files are in `~/code/me/fluid-scratch/lane-e/patches/`. The new files are also copied in `b4-final/`.
+
+**Cross-scene gates** (B4 tree c3 = 8822b2d8 + B4, one run each, all rc 0), against Lane T's latest at 8822b2d8:
+
+| scene | B4 | before | |
+|---|---|---|---|
+| seep 300 | 43.7 ms, drift +5e-4 | 31.0 ms, +4e-4 | **+12.7 ms** |
+| letters 120 | 75.8 ms, drift −0.0082 | 54.0 ms, −0.0090 | **+21.8 ms** |
+| rest 16x8x4 | 3.66 ms | 3.28 ms | +0.4 |
+| drop=2 16x8x4 | 24.78 ms | 15.69 ms | **+9.1 ms** |
+| rest 8x8x4 | 2.92 ms | 2.94 (334745cb) | 0 |
+| drop=2 8x8x4 | 16.28 ms | 13.58 (334745cb) | +2.7 |
+
+Drift is in band. The fixed reach (2 sweeps at h plus 2 at 4h, unreached faces keeping their value) replaced the pyramid's far field without moving seep or letters drift.
+
+**Non-pressure excess at drop=2** (8x8x4, 32 steps, `--kernels=29`, `excess.py`): **11.58 ms** with B4, against 8.71 on Lane T's s23 tree with the old extension.
+
+| stage | old | B4 |
+|---|---|---|
+| extension (mixed extension + regions + retain) | 1.11 | — |
+| ufx4 | — | **3.87** |
+| ufxH | — | 0.62 |
+| frame bricks update | — | 0.13 |
+| NB-FLIP snapshot | 0.05 | 0.26 |
+
+**Cold compile:** profile-solver-construction with a fresh shader cache, stopped at the wrap-up with 3 pipelines still pending.
+- ufxH took 1.35 s cold.
+- ufx4 and the frame bricks pipelines are not measured: they are not in the slowest-12 list, which starts at 1.35 s, but may have been among the 3 pending.
+- The slowest pipelines in the frame were `Uniform mixed surface / advectDeferred`, at about 26 s each (Lane C's).
+
+## LEARNINGS
+
+**Landed (Lane E):**
+- ubaStage, f1da3003;
+- ubaExtend, d78a265f;
+- the frame brick store, 26c969e4;
+- the B4 inventory, 1a7daa91.
+
+None of them changes the step, so the drop=2 and seep numbers are the baseline: seep 31.0 ms; drop=2 16x8x4 15.69 ms; non-pressure excess 8.71 ms.
+
+**Did not land: B4.**
+- **Step-time regression.** Mechanism measured:
+  - ufx4's publish loop visits all 512·64 = 32768 h texels of every held page, and runs a coarse index lookup and a detail-rewritten load and store on each, to publish only the 4h tiles' 3 canonical faces a 4h cell (1536 a page).
+  - It is a capacity-sized loop, 21x the useful work, and it costs 3.87 ms at drop=2.
+  - It scales with held pages, which is consistent with the much larger seep and letters regressions (seep holds 1792 resident pages). Per-kernel times on seep and letters were not measured.
+  - ufxH (0.62 ms) plus the bricks update (0.13 ms) alone is already below the old extension (1.11 ms).
+- **The snapshot rose by 0.21 ms.** Unknown: it is likely that NB-FLIP's snapshot now reads the departure extension's output in a different pattern, but this was not attributed.
+- **Two correctness bugs, found and fixed on the way:**
+  1. *Lattice-coordinate accesses need the detail rewrite.* The rewrite runs only for the device object a `UniformDetailStorage` registered, which is the solver's initialization-wrapped device. A module built with the raw device compiles raw accesses that read zeros and drop every store. `initialize()` now throws in that case.
+  2. *The maximum principle had two breaks* (616 faces, worst 0.22 of the span):
+     - the 4h restriction averaged air subfaces, so it now takes the liquid-subface mean;
+     - the 4h prolongation weighted unreached faces, so it now weights only reached ones.
+
+**Share of the drop=2 non-pressure excess in Lane E's scope** (Lane T's attribution at 8822b2d8):
+- extension 0.97 ms (B4);
+- census 0.72 (T);
+- remap 0.37 (T);
+- NB transfer 0.36 (T);
+- plan tail, certificate, heat and publish about 0.80 (B4, a regex group at 334745cb).
+
+That is about 3.2 of the 8.7 ms.
+
+**What remains:**
+- B4's ufx4 publish fix, then landing the patch;
+- the census as a reduction;
+- T only on change frames;
+- the plan tail, heat and publish fusion;
+- one bricks update a step (it now runs 3 to 4 a step);
+- the cold compile of ufx4 and the frame bricks pipelines.
+
+**Recommendations, ranked by expected gain at drop=2 (estimates, not measured):**
+1. **Land B4 with ufx4 publishing only its 1536 canonical texels a page, from one workgroup a page.**
+   - ufx4 is expected to fall from 3.87 to about 0.2 ms, which puts the extension at about 0.95 against 1.11 today.
+   - Also make the departure pass share the current pass's staging, or drop the snapshot's extra read: about −0.2 more.
+   - Net: −0.2 to −0.4 ms, plus 3977 lines and the pyramid deleted. Re-gate seep and letters first, since their regression should vanish with the same fix.
+2. **The census as a reduction over the brick store's enter/leave lists.** classifyCoarse alone costs 0.24 ms per step on every coarse tile. Expected −0.4 to −0.6 ms of the 0.72.
+3. **Fuse the plan tail, certificate, heat and publish into one pass over the live list.** Expected −0.3 to −0.5 ms of the 0.80.
+4. **T (remap and NB transfer) only on change frames.** Expected about −0.2 ms at drop=2, where most frames change topology, and up to −0.7 ms on settled scenes.
+5. **One `encodeUpdate` of the frame bricks a step,** once the head topology is final. Expected −0.08 ms.
