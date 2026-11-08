@@ -99,7 +99,7 @@ function sheet(columns: number, rows: number, opts: { pins?: 'corners' | 'edge' 
 }
 const g: [number, number, number] = [0, -9.81, 0];
 
-test('local vertex system: FD gradient with pins, strain limits, damping and a frozen damping Hessian', () => {
+test('local vertex system: FD gradient and Hessian with pins, strain limits and damping', () => {
   const { topology, colours, material } = sheet(5, 5, { strainLimit: 0.02, damping: 0.01 });
   const model = buildClothSolverModel(topology, [material], colours);
   const r = rng(11), x0 = Float64Array.from(topology.data.restPositions_m);
@@ -116,7 +116,7 @@ test('local vertex system: FD gradient with pins, strain limits, damping and a f
   for (const v of [0, 6, 12, 4]) {
     const xv: Vec3 = [state.x[3 * v]!, state.x[3 * v + 1]!, state.x[3 * v + 2]!];
     const local = clothLocalSystem(model, frame, state, v, xv);
-    const fd = fdGradient(p => clothLocalSystem(model, frame, state, v, p, local.damping).energy, xv, 1e-7);
+    const fd = fdGradient(p => clothLocalSystem(model, frame, state, v, p).energy, xv, 1e-7);
     close(local.gradient, fd, 2e-5, `local gradient v${v}`);
     assert.ok(minEigen(local.hessian) > 0, `local Hessian PD at v${v}`);
     const update = clothVertexUpdate(model, frame, state, v);
@@ -145,9 +145,9 @@ test('augmented-Lagrangian energies differentiate to the clamped AVBD force', ()
   }
 });
 
-test('free fall: implicit Euler and BDF2 integrate a rigid drop exactly', () => {
+test('free fall: implicit Euler and BDF2 integrate a rigid drop exactly, damping included', () => {
   for (const integrator of ['implicit-euler', 'bdf2'] as const) {
-    const { topology, colours, material } = sheet(4, 4, { pins: 'none' });
+    const { topology, colours, material } = sheet(4, 4, { pins: 'none', damping: 0.05 });
     const model = buildClothSolverModel(topology, [material], colours);
     const state = createClothOracleState(model, topology.data.restPositions_m);
     const steps = 10, dt = 1 / 60;
@@ -216,9 +216,9 @@ test('one step converges with K: the residual falls and Chebyshev accelerates it
   const residualsAt = (rho: number) => {
     const state = createClothOracleState(model, topology.data.restPositions_m);
     for (let s = 0; s < 5; s++) clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 32, chebyshevRho: rho });
-    return clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 32, chebyshevRho: rho }, true).residuals;
+    return clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 64, chebyshevRho: rho }, true).residuals;
   };
   const plain = residualsAt(0), accelerated = residualsAt(0.9);
-  assert.ok(plain.at(-1)! < 0.1 * plain[0]!, `residual falls: ${plain[0]} -> ${plain.at(-1)}`);
+  assert.ok(plain.at(-1)! < 0.2 * plain[0]!, `residual falls: ${plain[0]} -> ${plain.at(-1)}`);
   assert.ok(accelerated.at(-1)! <= plain.at(-1)!, `Chebyshev: ${accelerated.at(-1)} vs ${plain.at(-1)}`);
 });

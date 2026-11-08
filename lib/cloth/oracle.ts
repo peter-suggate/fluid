@@ -9,8 +9,8 @@
  *    coordinates with C1 compression softening, per-vertex Hessian projected
  *    to PSD;
  *  - discrete-shell dihedral bending, Gauss-Newton Hessian;
- *  - stiffness-proportional Rayleigh damping in VBD form, the damping
- *    Hessian frozen for the vertex's line search;
+ *  - stiffness-proportional Rayleigh damping as a dissipation potential
+ *    with the element tangent frozen at the step start (see ClothDampingTangent);
  *  - AVBD hard constraints: pins on scripted attachments (3D equality) and
  *    an optional per-edge strain limit |e| <= (1 + eps) L (inequality), with
  *    progressive stiffness, warm-started duals and the alpha regularization.
@@ -270,6 +270,8 @@ export interface ClothStepOptions {
   readonly integrator: ClothIntegrator;
   readonly iterations: number;
   readonly chebyshevRho: number;
+  /** Rounding unit of the line search's error bound (default: f64). Comparing with the f32 GPU solver passes 2^-23. */
+  readonly lineSearchEpsilon?: number;
 }
 
 /** The per-step quantities every vertex update reads. */
@@ -283,6 +285,8 @@ export interface ClothStepFrame {
   /** Pin targets at t and t + h, 3 per vertex (pinned vertices only). */
   readonly target0: Float64Array;
   readonly target1: Float64Array;
+  /** The damping tangent frozen at x_t. */
+  readonly damping: ClothDampingTangent;
 }
 
 const isPinned = (model: ClothSolverModel, v: number) => model.topology.groups[v]! > 0;
@@ -292,15 +296,74 @@ export function clothReferenceStiffness(model: ClothSolverModel, v: number, hEff
   return model.topology.mass_kg[v]! / (hEff * hEff) + model.elasticStiffness_N_m[v]!;
 }
 
-export interface ClothLocalSystem { gradient: Vec3; hessian: Mat3; energy: number; magnitude: number; damping: Mat3 }
+export interface ClothLocalSystem { gradient: Vec3; hessian: Mat3; energy: number; magnitude: number }
 
-/** Gradient, PSD Hessian and energy of vertex v's local objective at position xv,
- * the other vertices at `x`. `damping` (the frozen k_d-weighted element
- * Hessian) is computed when not supplied. */
-export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState, v: number, xv: Vec3, frozenDamping?: Mat3): ClothLocalSystem {
+/** Rayleigh (stiffness-proportional) damping as a dissipation potential frozen
+ * at the step start: per element, (k_d / 2h~) A rate^T D_t rate with rate the
+ * strain increment linearized at x_t over dx = x - x^ and D_t the material
+ * tangent at x_t (membrane), and (k_d / 2h~) k_b (grad theta(x_t) . dx)^2
+ * (bending). It is quadratic and convex in x, zero for rigid motion, and the
+ * same objective for every iteration of the step. */
+export interface ClothDampingTangent {
+  /** Per face: f0(x_t), f1(x_t) (3 each) and the tangent diagonal (D11, D22) at x_t. */
+  readonly face: Float64Array;
+  /** Per hinge: grad theta at x_t, 4 x 3 (zero when degenerate). */
+  readonly hinge: Float64Array;
+}
+
+export function clothDampingTangent(model: ClothSolverModel, x0: ArrayLike<number>): ClothDampingTangent {
+  const t = model.topology, face = new Float64Array(8 * t.faceCount), hinge = new Float64Array(12 * t.hingeCount);
+  for (let f = 0; f < t.faceCount; f++) {
+    const c = model.membrane[t.faceMaterial[f]!]!, dm = t.faceDmInv, o = 4 * f;
+    const p0 = at3(x0, t.faces[3 * f]!), e1 = sub(at3(x0, t.faces[3 * f + 1]!), p0), e2 = sub(at3(x0, t.faces[3 * f + 2]!), p0);
+    const f0 = [0, 1, 2].map(r => e1[r]! * dm[o]! + e2[r]! * dm[o + 1]!), f1 = [0, 1, 2].map(r => e1[r]! * dm[o + 2]! + e2[r]! * dm[o + 3]!);
+    const e11 = 0.5 * (dot(f0 as Vec3, f0 as Vec3) - 1), e22 = 0.5 * (dot(f1 as Vec3, f1 as Vec3) - 1);
+    face.set([...f0, ...f1, c.c11 - (e11 < 0 ? (1 - c.ratio) * c.softWarp : 0), c.c22 - (e22 < 0 ? (1 - c.ratio) * c.softWeft : 0)], 8 * f);
+  }
+  for (let h = 0; h < t.hingeCount; h++) {
+    const q = clothHingeAngleGradient(...[0, 1, 2, 3].map(k => at3(x0, t.hinges[4 * h + k]!)) as [Vec3, Vec3, Vec3, Vec3]);
+    if (q) q.gradient.forEach((gk, k) => hinge.set(gk, 12 * h + 3 * k));
+  }
+  return { face, hinge };
+}
+
+function addFaceDamping(model: ClothSolverModel, frame: ClothStepFrame, f: number, k: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
+  const t = model.topology, kd = model.faceDamping_s[f]!;
+  if (!(kd > 0)) return 0;
+  const c = model.membrane[t.faceMaterial[f]!]!, T = frame.damping.face, o = 8 * f, scale = kd * t.faceArea_m2[f]! / frame.hEff;
+  const f0: Vec3 = [T[o]!, T[o + 1]!, T[o + 2]!], f1: Vec3 = [T[o + 3]!, T[o + 4]!, T[o + 5]!], d11 = T[o + 6]!, d22 = T[o + 7]!;
+  const df0 = zero3(), df1 = zero3();
+  for (let j = 0; j < 3; j++) {
+    const v = t.faces[3 * f + j]!, [a, b] = clothFaceWeights(t.faceDmInv, 4 * f, j), u = sub(pos(v), at3(frame.xHat, v));
+    for (let r = 0; r < 3; r++) { df0[r] += a * u[r]!; df1[r] += b * u[r]!; }
+  }
+  const rate: Vec3 = [dot(f0, df0), dot(f1, df1), dot(f0, df1) + dot(f1, df0)];
+  const sigma: Vec3 = [d11 * rate[0] + c.c12 * rate[1], c.c12 * rate[0] + d22 * rate[1], c.g * rate[2]];
+  const [a, b] = clothFaceWeights(t.faceDmInv, 4 * f, k);
+  const j1 = f0.map(q => a * q) as Vec3, j2 = f1.map(q => b * q) as Vec3, j3 = [0, 1, 2].map(r => a * f1[r]! + b * f0[r]!) as Vec3;
+  for (let r = 0; r < 3; r++) g[r] += scale * (sigma[0] * j1[r]! + sigma[1] * j2[r]! + sigma[2] * j3[r]!);
+  addOuter(H, scale * d11, j1, j1); addOuter(H, scale * d22, j2, j2);
+  addOuter(H, scale * c.c12, j1, j2); addOuter(H, scale * c.c12, j2, j1); addOuter(H, scale * c.g, j3, j3);
+  return 0.5 * scale * dot(rate, sigma);
+}
+
+function addHingeDamping(model: ClothSolverModel, frame: ClothStepFrame, h: number, k: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
+  const t = model.topology, kd = model.hingeDamping_s[h]!;
+  if (!(kd > 0)) return 0;
+  const T = frame.damping.hinge, scale = kd * t.hingeStiffness_N_m[h]! / frame.hEff;
+  let rate = 0;
+  for (let j = 0; j < 4; j++) { const v = t.hinges[4 * h + j]!; rate += dot([T[12 * h + 3 * j]!, T[12 * h + 3 * j + 1]!, T[12 * h + 3 * j + 2]!], sub(pos(v), at3(frame.xHat, v))); }
+  const gk: Vec3 = [T[12 * h + 3 * k]!, T[12 * h + 3 * k + 1]!, T[12 * h + 3 * k + 2]!];
+  for (let r = 0; r < 3; r++) g[r] += scale * rate * gk[r]!;
+  addOuter(H, scale, gk, gk);
+  return 0.5 * scale * rate * rate;
+}
+
+/** Gradient, PSD Hessian and energy of vertex v's local objective at position xv, the other vertices at `x`. */
+export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState, v: number, xv: Vec3): ClothLocalSystem {
   const t = model.topology, x = state.x, m = t.mass_kg[v]!, h = frame.hEff, w = m / (h * h);
   const pos = (i: number): Vec3 => i === v ? xv : at3(x, i);
-  const g = zero3(), H = zero9(), D = zero9();
+  const g = zero3(), H = zero9();
   let energy = 0, magnitude = 0;
   const y = at3(frame.y, v), r = sub(xv, y);
   for (let k = 0; k < 3; k++) g[k] += w * r[k]!;
@@ -309,21 +372,18 @@ export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame,
     const f = t.vertexFaces[j]! >> 2, k = t.vertexFaces[j]! & 3;
     const b = clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, k, pos(t.faces[3 * f]!), pos(t.faces[3 * f + 1]!), pos(t.faces[3 * f + 2]!));
     for (let c = 0; c < 3; c++) g[c] += b.gradient[c]!;
-    for (let c = 0; c < 9; c++) { H[c] += b.hessian[c]!; D[c] += model.faceDamping_s[f]! * b.hessian[c]!; }
-    energy += b.energy; magnitude += Math.abs(b.energy);
+    for (let c = 0; c < 9; c++) H[c] += b.hessian[c]!;
+    const ed = addFaceDamping(model, frame, f, k, pos, g, H);
+    energy += b.energy + ed; magnitude += Math.abs(b.energy) + ed;
   }
   for (let j = t.vertexHingeOffsets[v]!; j < t.vertexHingeOffsets[v + 1]!; j++) {
     const hg = t.vertexHinges[j]! >> 2, k = t.vertexHinges[j]! & 3;
     const b = clothBendingBlock(t.hingeStiffness_N_m[hg]!, t.hingeRestAngle_rad[hg]!, k, pos(t.hinges[4 * hg]!), pos(t.hinges[4 * hg + 1]!), pos(t.hinges[4 * hg + 2]!), pos(t.hinges[4 * hg + 3]!));
     for (let c = 0; c < 3; c++) g[c] += b.gradient[c]!;
-    for (let c = 0; c < 9; c++) { H[c] += b.hessian[c]!; D[c] += model.hingeDamping_s[hg]! * b.hessian[c]!; }
-    energy += b.energy; magnitude += Math.abs(b.energy);
+    for (let c = 0; c < 9; c++) H[c] += b.hessian[c]!;
+    const ed = addHingeDamping(model, frame, hg, k, pos, g, H);
+    energy += b.energy + ed; magnitude += Math.abs(b.energy) + ed;
   }
-  // Rayleigh damping, VBD form: f = -(1/h~) D (x - x^), with D frozen across the line search.
-  const Df = frozenDamping ?? D, u = sub(xv, at3(frame.xHat, v));
-  for (let r0 = 0; r0 < 3; r0++) for (let c = 0; c < 3; c++) { g[r0] += Df[3 * r0 + c]! * u[c]! / h; H[3 * r0 + c] += Df[3 * r0 + c]! / h; }
-  const ed = 0.5 * dot(u, [0, 1, 2].map(r0 => Df[3 * r0]! * u[0] + Df[3 * r0 + 1]! * u[1] + Df[3 * r0 + 2]! * u[2]) as Vec3) / h;
-  energy += ed; magnitude += Math.abs(ed);
   if (isPinned(model, v)) {
     const k = state.pinDuals[4 * v + 3]!, x0 = at3(frame.x0, v), p0 = at3(frame.target0, v), p1 = at3(frame.target1, v);
     for (let c = 0; c < 3; c++) {
@@ -348,7 +408,7 @@ export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame,
     addOuter(H, kEff - force / len, n, n); addDiag(H, force / len);
     const en = clothAugmentedEnergy(k, lambda, C, true); energy += en; magnitude += Math.abs(en);
   }
-  return { gradient: g, hessian: H, energy, magnitude, damping: D };
+  return { gradient: g, hessian: H, energy, magnitude };
 }
 
 function solve3(H: Mat3, b: Vec3): Vec3 | undefined {
@@ -373,7 +433,7 @@ export function clothVertexUpdate(model: ClothSolverModel, frame: ClothStepFrame
   let alpha = 1;
   for (let i = 0; i <= CLOTH_LINE_SEARCH.halvings; i++, alpha *= 0.5) {
     const trial: Vec3 = [xv[0] + alpha * delta[0], xv[1] + alpha * delta[1], xv[2] + alpha * delta[2]];
-    const next = clothLocalSystem(model, frame, state, v, trial, local.damping);
+    const next = clothLocalSystem(model, frame, state, v, trial);
     if (next.energy <= local.energy + CLOTH_LINE_SEARCH.armijo * alpha * slope + 4 * epsilon * (local.magnitude + next.magnitude))
       return { position: trial, step: alpha, energyBefore: local.energy, energyAfter: next.energy, gradient: local.gradient };
   }
@@ -419,7 +479,7 @@ export function clothStepFrame(model: ClothSolverModel, state: ClothOracleState,
       for (let c = 0; c < 3; c++) { target0[3 * v + c] = p0[c]!; target1[3 * v + c] = p1[c]!; init[3 * v + c] = state.x[3 * v + c]! + p1[c]! - p0[c]!; }
     }
   }
-  return { frame: { hEff, y, xHat, x0: Float64Array.from(state.x), target0, target1 }, init, bdf2 };
+  return { frame: { hEff, y, xHat, x0: Float64Array.from(state.x), target0, target1, damping: clothDampingTangent(model, state.x) }, init, bdf2 };
 }
 
 /** Warm start (AVBD 19): k = max(gamma k, k_start), lambda = alpha gamma lambda. */
@@ -504,7 +564,7 @@ export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState
   let omega = 1;
   for (let it = 1; it <= options.iterations; it++) {
     for (const list of byColour) {
-      const updates = list.map(v => clothVertexUpdate(model, frame, state, v).position);
+      const updates = list.map(v => clothVertexUpdate(model, frame, state, v, options.lineSearchEpsilon).position);
       list.forEach((v, i) => state.x.set(updates[i]!, 3 * v));
     }
     omega = clothChebyshevOmega(it, options.chebyshevRho, omega);

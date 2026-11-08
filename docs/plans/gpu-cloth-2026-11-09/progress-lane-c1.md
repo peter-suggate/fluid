@@ -118,3 +118,64 @@ Until the new cloth system is installed (M1 integration), `webgpu-renderer` refu
 **Evidence:**
 - `npm run check:types`: green.
 - `npm run test:unit`: 1624 pass, 1 fail, 303 skipped. The failure is the pre-existing `reservoir-particle-cost` one.
+
+## 2026-11-09 INTERFACE: Tier A solver layout, frozen for C2 (M1)
+
+`lib/cloth/gpu-solver.ts`, class `ClothGPUSolver`. The WGSL is in `gpu-solver-wgsl.ts`.
+
+**Device limit.** The M1 Max adapter grants only **10 storage buffers per stage**, so the solver binds 5: positions, state, status, topo and rest. C2's contact buffer is the sixth, at `CLOTH_BINDING.contact` = 7. The solver fails explicitly if the device grants fewer.
+
+**Buffers C2 binds** (all cloth-local metres; `options.origin_m` is the world origin of the frame):
+- `solver.positions` (`GPUBuffer`): `array<vec4f>`, the iterate x (xyz); `w` is free. Truncation may write xyz in place. The solver never resets positions to x_t within a step.
+- `solver.state` (`GPUBuffer`) as C2's **velocities** input. Segment 0, records 0..N−1, is the step-start velocity (vec4f). Bind the whole buffer and index by vertex.
+- `solver.model.topology` for the mesh:
+  - triangles are `faces` + `faceMaterial` packed as vec4u (`solver.triangles` is that slice of `topo`);
+  - **edges are the solver's canonical list** (v0 < v1, face0 the lower face index, face1 = 0xffffffff on a boundary), sorted by (v0, v1). Pass `{ vertexCount, triangles, edges: topology.edges }` to `OgcContactDetector.create`. Then C2's edge ids are the solver's: `ogcEdgeVerts(e)` reads this table. `buildOgcTopology` accepts any order, and face0 ownership matches `buildOgcEdges`.
+- `ogcXt(i)` is the x_t segment of `state`.
+
+**Vertex kernel hook.** Construct with `contact: { wgsl: ogcVertexBlockWGSL({ group: 0, binding: CLOTH_BINDING.contact }), buffer: detector.solverBuffer }`.
+- The solver defines `ogcX`, `ogcXt`, `ogcTri` and `ogcEdgeVerts`.
+- Its local system adds −f and H from `ogcAccumulateVertexContact`, and its Armijo line search adds `ogcVertexContactEnergy`.
+- Chebyshev skips vertices with `ogcContactCount(v) > 0`.
+
+**Encode hooks** (`ClothStepHooks`, all inside the solver's one compute pass, none advancing time):
+- `afterFrame(pass)`: the initial guess is in place. Run stepBegin, detection and the first truncate here.
+- `afterColour(pass, iteration, colour)`: after each colour sweep. Truncate here (DAT §5.1).
+- `afterIteration(pass, iteration)`: after Chebyshev and the dual updates. Truncate the Chebyshev move, then decide and detect.
+- `beforeFinish(pass)`: after the last iteration, before velocities are formed.
+
+**Order per step:**
+1. beginStep (clock, BDF2 bootstrap, h~);
+2. frameElements (edge-dual warm start and the damping tangent at x_t);
+3. frame (x̂, y, adaptive init, pin targets from WGSL scripts);
+4. K × [colour sweeps, then postIteration (Chebyshev, pin duals), then edgeDualUpdate];
+5. diagnose and reduce, when on;
+6. finishStep (v, BDF2 history, normals, the finite check, clock++).
+
+**Status.** `status` words: [0] sticky bits (`CLOTH_STATUS.nonFinite` = 1), [1] steps, then a 64-slot ring of {step, BDF2, residual ‖∇E‖/‖mg‖, max edge strain, kinetic, potential, elastic}. `readStatus()` is for harnesses and gates only.
+
+**State save/load.** `readState()` and `uploadState()` cover positions, velocities, v_{n−1}, Δx_{n−1}, pin and edge duals, previous step and `time_s`.
+
+## 2026-11-09 DECISION (C1, physics): Rayleigh damping is a frozen dissipation potential
+
+The VBD-paper form, D = k_d·H(x) re-evaluated at every vertex update and frozen only for the line search, had no fixed objective inside a step. The compression switch makes H(x) discontinuous, so the damping force chattered between branches.
+
+Measured with the oracle (8×8, two pins, BDF2, ρ = 0.9), residual after steps 5, 10, 15 and 20:
+
+| K | damping k_d = 0.002 s | undamped |
+|---|---|---|
+| 200 | 1.4e-5, 0.21, 0.40, 0.12 | 4.6e-7, 1.8e-7, 3.3e-7, 3.8e-6 |
+
+So the damped case did not converge, at any K.
+
+**Replaced by** Rayleigh stiffness-proportional damping as a dissipation potential, with the element tangent frozen at x_t (`ClothDampingTangent`):
+- membrane: (k_d/2h̃)·A·ε̇ᵀ D_t ε̇, where ε̇ is the Green-strain increment linearized at x_t over x − x̂, and D_t is the softened material tangent at x_t;
+- bending: (k_d/2h̃)·k_b·(∇θ(x_t)·(x − x̂))².
+
+This is quadratic and convex in x, the same objective for all K iterations, and zero for rigid translation. The old per-vertex form also damped free fall. The test is now exact free fall with damping on.
+
+**Residuals after the change** (same setup, steps 5–20):
+- K = 200: 2.8e-6, 8.1e-7, 8.6e-7, 4.2e-7;
+- K = 48: 6.0e-2, 3.8e-2, 3.9e-2, 1.7e-2.
+
+The GPU uses the same form. A frameElements pass stores f0 and f1 with (D11, D22) per face, and ∇θ × 4 per hinge, in `state` (damped scenes only).
