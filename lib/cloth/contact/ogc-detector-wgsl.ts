@@ -95,7 +95,7 @@ struct OgcParams {
   edgeBase: u32, SE: u32, bodyEdgeBase: u32, SEB: u32,
   solidDevOff: u32, bodyDevOff: u32, scaleOff: u32, originOff: u32,
   fixedWord: u32, segWord: u32, recWord: u32, recCap: u32,
-  recCountOff: u32, pad5: u32, pad6: u32, pad7: u32,
+  recCountOff: u32, newton: u32, pad6: u32, pad7: u32,
 }
 `;
 
@@ -109,7 +109,7 @@ export const OGC_PARAM = {
   mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53, heldOff: 54, predict: 55, cellRule: 56, S: 57,
   bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62,
   edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67, solidDevOff: 68, bodyDevOff: 69, scaleOff: 70, originOff: 71,
-  fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76,
+  fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76, newton: 77,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -339,8 +339,16 @@ fn termsOf(h: OgcSolidHeader, sb: OgcSolidBound, rc: f32, margin: f32) -> OgcTer
  * solver's initial guess less x_t, or the solver's inertial target y less x_t (prediction
  * "target": exact in free flight, whatever the guess), and its envelope covers only the
  * residual motion: r + s rho, with rho the last step's deviation from its own prediction.
- * A re-detection round predicts 0 about the iterate, its envelope covering the rest of the
- * step's prediction and rho. A vertex in contact keeps its prediction too: a conflict
+ * A re-detection round predicts 0 about the iterate x, held or not, and its envelope covers
+ * the motion left from x: at most |yref - x| + rho (yref the step's predicted end, rho the
+ * estimate of the end's deviation from it), and with a Newton solver the smaller of that and
+ * |d_v|, the solver's last direction, its own estimate of the way left. Neither the step's whole
+ * prediction from x_t (|v dt + g dt^2| + rho, the held envelope) nor |yref - x| + rho alone fits
+ * an iterate that has already made most of its deviation: on the rotating sphere (frozen
+ * 7809cbe1, ticks 4-15) the motion after a step's last round is 1-200 um a vertex on average
+ * while those envelopes budget 0.8-6 mm, and the held one alone set every re-detection round's
+ * largest envelope (39 mm against 7 mm unheld at tick 5) and with it the cell. An envelope
+ * that falls short costs a truncation and a round, never a certificate. A vertex in contact keeps its prediction too: a conflict
  * shifts only its pair's predictions, towards X or towards moving with the moving solid,
  * as far as the pair needs (least shift, resolvePlane), and the envelope grows by the shift.
  * A held vertex (not yet measured, every vertex of the fail-safe round, of isotropic mode,
@@ -378,7 +386,7 @@ fn termsOf(h: OgcSolidHeader, sb: OgcSolidBound, rc: f32, margin: f32) -> OgcTer
  * Threads N .. N + SB - 1 pose the solid's surface samples: x_det at the detection pose
  * and the exact prediction to the end pose.
  */
-export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13, 14, 17], [14]) + SHIFT_CONSTS + SOLID_ACCESS + OGC_SOLID_WGSL + CUT_FNS + /* wgsl */`
+export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13, 14, 15, 17], [14]) + SHIFT_CONSTS + SOLID_ACCESS + OGC_SOLID_WGSL + CUT_FNS + /* wgsl */`
 var<workgroup> wgMaxEnv: atomic<u32>;
 var<workgroup> wgMaxPred: atomic<u32>;
 var<workgroup> wgCube: array<f32, 64>;
@@ -555,11 +563,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     var w = select(yref.xyz - x, vec3<f32>(0.0), held);
     var dev = select(yref.w, plen + yref.w, held);
     // A re-detection round commits the iterate x as X, so its certificates must hold x itself:
-    // |x - X - w| = |w| <= the cap only for w = 0. It predicts 0 (Planar-DAT about the iterate)
-    // and its envelope covers the rest of the step's prediction, |yref - x| + rho. A prediction
+    // |x - X - w| = |w| <= the cap only for w = 0. It predicts 0 (Planar-DAT about the iterate),
+    // held or not, and its envelope covers the motion left from x: |yref - x| + rho, or with a
+    // Newton solver the smaller of that and its last direction |d_v|. A prediction
     // of the rest would leave the iterate |w| from its ball's centre, and the round's
     // truncation would pull it there outside the solve (and hold it, a cascade).
-    if (!mandatory && !held) { dev = length(w) + yref.w; w = vec3<f32>(0.0); }
+    if (!mandatory) {
+      let left = length(yref.xyz - x) + yref.w;
+      dev = select(left, min(left, length(dir[v].xyz)), P.newton != 0u);
+      w = vec3<f32>(0.0);
+    }
     atomicStore(&contacts[P.countsOff + v], 0u);
     // The moving solid: its terms (R1 q, j) and the co-moving displacement a_v.
     // The terms are in the body frame at the end pose: the relative motion d is R1^T (w - a_v).

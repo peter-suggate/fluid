@@ -1933,3 +1933,53 @@ in ~/code/me/fluid-scratch/c2/rounds-f0d.log).
   - Tick 12: 2.0e-2 -> 3.7e-2, 4.7 M -> 12.2 M candidates. The cap is reached from tick 15.
   - The envelope there is |yref - x| + rho. Once the iterate has made the step's deviation from its
     prediction, both terms measure the same deviation.
+
+## 2026-11-10 item 3: the re-detection envelope (the held envelope sets every re-detection round's largest)
+
+**Cause.** A re-detection round predicts 0 about the iterate x. A vertex held there (any flagged vertex,
+e.g. truncated earlier in the step) kept the mandatory round's held envelope r + s (|v dt + g dt^2| + rho):
+the step's whole inertial motion from x_t, laid about an iterate that has already made most of it.
+- Fixed state, frozen 7809cbe1 + (a), tick 5, one step: re-detection max envelope 7.0 mm unheld against
+  39 mm held, while the held vertices' |yref - x| + rho is at most 7.4 mm. The held envelope alone set the
+  round's largest envelope, so it set the cell (40 mm) and the large-box query workgroups.
+- The unheld rule |yref - x| + rho double counts once the iterate has made the step's deviation: the motion
+  after the step's last round is 1-200 um a vertex on average (ticks 4-15) against budgets of 0.8-6 mm.
+- This is also why (a)'s queryVertex went from 6.9 to 54 ms at tick 5 (twice, both runs): 40 mm cells and
+  the held vertices' own 40 mm query boxes.
+
+**Fix.** Every vertex of a re-detection round, held or not, takes the motion left from x: |yref - x| + rho,
+and with the Newton solver the smaller of that and |d_v| (its last direction). An envelope that falls short
+costs a truncation and a round, never a certificate. Variants measured on the same states: the triangle
+rule alone for held vertices (tick 5: 5.1 M candidates, 280 K DAT pairs) and |d_v| alone (diverged states
+35/42: 12 K vertices at the cap, 4.4 M plane records). The min takes the better of the two in each.
+
+**Fixed state, frozen 7809cbe1 + (a), one step (F1 -> item 3).**
+
+| state | candidates | DAT pairs | truncated | rounds | plane records | re-detection max env | positions rms vs F1 (F1 run-to-run) |
+|---|---|---|---|---|---|---|---|
+| 2 | 713 K = | 3158 = | 52 = | 1+0 = | 1296 = | - | bit-identical |
+| 5 | 9.26 M -> 4.48 M | 1.96 M -> 103 K | 1120 -> 1529 | 6+4 = | 15674 = | 39 -> 7.8 mm | 7.0 um (3.7 um) |
+| 35 | 7.21 M -> 9.29 M | 1.10 M -> 1.81 M | 48.7 K = | 6+4 = | 286 K -> 509 K | 40 = (held) | 0.26 mm (0.22 mm) |
+| 42 | 32.8 M -> 23.2 M | 2.77 M -> 3.39 M | 54 K = | 14+4 = | 401 K -> 784 K | 40 = (held) | 2.2 mm (1.2 mm) |
+
+States 35 and 42 are diverged solves (|d| 7-8 m) on the frozen solver; their counts are chaotic.
+
+**Trajectory ticks 4-15 (frozen 7809cbe1 + (a), from tick 0).** Candidates drop 1.3-4x (tick 15: 70 M ->
+21 M) and DAT pairs 4-15x (tick 10: 4.3 M -> 628 K). The peak envelope goes from 25-40 mm to 7-32 mm.
+envelopeCap clears at ticks 7-14. Truncations rise by up to a quarter. Rounds are equal, or one more
+(ticks 8, 9, 13). The Newton final |g|^2 is of the same order. Last-round budgets sit at the floor
+(800 um) with the max realized/budget ratio at 0.5-1.5, where it was 0.06-1.2 against 0.9-5.9 mm.
+
+**Detector GPU ms per step (split-pass profile, one step from each state; solver in brackets, nwProject).**
+
+| state | F0 (7809cbe1) | F1 (+ (a)) | item 3 |
+|---|---|---|---|
+| 2 | 9.1 [95.6, 0.7] | 8.7 [95.0, 0.7] | 9.2 [97.8, 0.7] |
+| 5 | 105.7 / 290.7 [150.7 / 141.3, 2.6] | 144.6 / 135.8 [144.6 / 142.6, 2.5] | 24.9 [142.7, 2.8] |
+| 35 | 135.5 [459.4, 131.3] | 68.3 [445.7, 129.2] | 61.1 [432.9, 115.7] |
+| 42 | 259.9 / 242.4 [479.3 / 426.4, 126 / 117] | 184.9 / 168.8 [971 / 893, 661 / 528] | 156.4 [462.3, 131.2] |
+
+- Two runs where two values are given. F0's queryEdge varies 67 -> 250 ms between runs at tick 5.
+- nwProject (the projected arc, ogcProject inside C1's dispatch) is 115-660 ms a step in the diverged
+  states. Its cost is the longest plane-record segment a workgroup sweeps; it follows the direction.
+- Suites on item 3 (frozen 7809cbe1 + (a) + item 3): cloth-contact-body, -gpu and -solid, 38/38.

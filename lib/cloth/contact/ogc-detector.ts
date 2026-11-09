@@ -395,7 +395,7 @@ export class OgcContactDetector {
     w[P.originOff] = (body ? 24 : 12) * N + OGC_SHIFT_WORDS * N + T + E;
     // The filter's per-vertex plane-record counts follow the origins; its records are in the contact buffer.
     w[P.recCountOff] = (body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E;
-    w[P.fixedWord] = 4 * fixedBase; w[P.segWord] = 4 * segBase; w[P.recWord] = 4 * recBase; w[P.recCap] = recCap;
+    w[P.fixedWord] = 4 * fixedBase; w[P.segWord] = 4 * segBase; w[P.recWord] = 4 * recBase; w[P.recCap] = recCap; w[P.newton] = config.newton ? 1 : 0;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
@@ -617,7 +617,7 @@ export class OgcContactDetector {
 
   private async compile() {
     const specs: [string, string, number[], Record<number, "positions">?][] = [
-      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13, 14, 17]],
+      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13, 14, 15, 17]],
       ["cell", OGC_CELL_WGSL, [0, 9]],
       ["count", ogcGridCountWGSL(false), [0, 1, 4, 5, 6, 9, 14]],
       ["scan1", ogcScanWGSL(1), [0, 6, 7]],
