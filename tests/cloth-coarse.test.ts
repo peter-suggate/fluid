@@ -271,7 +271,9 @@ test('a hanging Bridson sheet comes to rest at its exact uniaxial equilibrium at
   const topology = prepareClothTopology({ ...flat, restPositions_m: rest }, [material]);
   const hanging = buildClothSolverModel(topology, [material], colourClothVertices(clothVertexNeighbours(topology)));
   const solver = await ClothGPUSolver.create(device, hanging, { origin_m: [0.5, 1.15, 0], dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2',
-    iterations: CLOTH.iterations.value, chebyshevRho: 0, initialGuess: 'previous', coarse: buildClothCoarseSpace(topology) });
+    // K = 8, the gate's own setting: the scene's K went to 128 (44f02436), where the step is near converged and the
+    // weakly damped sheet (0.002 s) still swings at 10 s (KE 8.9e-4 J, bending or not); at K = 8 it rests (5e-9 J).
+    iterations: 8, chebyshevRho: 0, initialGuess: 'previous', coarse: buildClothCoarseSpace(topology) });
   for (let s = 0; s < 10; s++) solver.step(60);
   const { positions_m: x, velocities_m_s: v } = await solver.readState();
   const k = material.stretchWeft_N_m, rho = material.arealDensity_kg_m2;

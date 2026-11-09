@@ -225,7 +225,7 @@ fn nwApplyAt(v: u32, pv: vec3f) -> vec3f {
 }
 
 // Line search: G(x + alpha d) - G(x) in difference form for alpha = 2^-k, k < ${CLOTH_NEWTON_TRIALS}, with its rounding floor, and
-// the slope g.d. Each vertex takes its own terms and the faces and hinges whose first slot it is.
+// the slope g.d. Each vertex takes its own terms, its bending row and the faces whose first slot it is.
 var<private> nwE: array<vec4f, 2>;
 var<private> nwF: array<vec4f, 2>;
 fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += e.y; }
@@ -292,27 +292,11 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
         alpha *= 0.5;
       }
     }
-    for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
-      let entry = topo[P.topo0.w + j];
-      if ((entry & 3u) != 0u) { continue; }
-      let hg = entry >> 2u; let hv = hingeVerts(hg); let hw = hingeW(hg); let kd = hingeKD(hg);
-      let x0 = pos(hv.x); let x1 = pos(hv.y); let x2 = pos(hv.z); let x3 = pos(hv.w);
-      let s = hingeS(hw, x0, x1, x2, x3); let sr = hingeRound(hw, x0, x1, x2, x3);
-      let ds1 = hingeS(hw, nwD(hv.x), nwD(hv.y), nwD(hv.z), nwD(hv.w));
-      var u = vec3f(0.0); var ur = 0.0; let scale = kd.x * kd.y / h;
-      if (kd.y > 0.0) {
-        let u0 = x0 - state[seg(S_XHAT, hv.x)].xyz; let u1 = x1 - state[seg(S_XHAT, hv.y)].xyz;
-        let u2 = x2 - state[seg(S_XHAT, hv.z)].xyz; let u3 = x3 - state[seg(S_XHAT, hv.w)].xyz;
-        u = hingeS(hw, u0, u1, u2, u3); ur = hingeRound(hw, u0, u1, u2, u3);
-      }
-      var alpha = 1.0;
-      for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-        let ds = alpha * ds1;
-        let lin = kd.x * dot(s, ds) + scale * dot(u, ds); let quad = 0.5 * (kd.x + scale) * dot(ds, ds);
-        nwAdd(k, vec2f(lin + quad, abs(lin) + quad + (kd.x * sr + scale * ur) * length(ds)));
-        alpha *= 0.5;
-      }
-    }
+    // Bending row v (and its damping): L d once, then each trial exactly.
+    let q = loadBend(v); var ds1 = vec3f(0.0);
+    for (var o = topo[P.topo0.z + v]; o < topo[P.topo0.z + v + 1u]; o++) { ds1 += bendW(o) * (nwD(bendJ(o)) - dv); }
+    alpha = 1.0;
+    for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, bendDelta(q, alpha * ds1)); alpha *= 0.5; }
   }
   let base = nwPartial(${CLOTH_NEWTON_PARTIALS}u);
   nwPartialSum(lane, wgi, nwE[0], base);

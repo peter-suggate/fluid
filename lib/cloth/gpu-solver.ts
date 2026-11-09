@@ -13,13 +13,12 @@
  *                          8 pin offset p_{n+1} + alpha (x_t - p_n), 9 pin dual (lambda xyz, k),
  *                          10 vertex normal (render)
  *                        then per edge (lambda, k, stabilized limit), the damping tangent at x_t
- *                        (per face f0, f1 with D11, D22; per hinge grad theta x 4; damped scenes
- *                        only), diagnostics partials, and the clock record (step, previous step, h~, BDF2).
+ *                        (per face f0, f1 with D11, D22; damped scenes only), diagnostics partials, and the clock record (step, previous step, h~, BDF2).
  *   status     u32       sticky status bits, steps completed, the diagnostics ring
- *   topo       u32       CSR vertex-face/hinge/edge adjacency, colour-sorted vertices, hinge vertices,
+ *   topo       u32       CSR vertex-face/edge adjacency, bending rows (j, w_j), colour-sorted vertices,
  *                        triangles (v0, v1, v2, material) and canonical edges (v0 < v1, f0, f1), each
  *                        segment 256 B aligned so render and C2 bind slices of it
- *   rest       vec4f     face Dm^-1, (area, damping), hinge (theta0, k, kd), edge (L, eps),
+ *   rest       vec4f     face Dm^-1, (area, damping), bending row (k, kd), edge (L, eps),
  *                        vertex (m, elastic, length, group), anchor, materials, scripts
  */
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
@@ -192,25 +191,25 @@ const PARAM_GRAB = 84;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /**
- * The bending stencil (quadratic bending, Bergou et al. 2006): bending is (k/2)|sum_i w_i x_i|^2 a hinge and its damping
- * (kd k / 2h~)|sum_i w_i (x_i - x^_i)|^2, so a vertex's bending gradient is sum_j Q_vj (x_j - x_v) (+ the damping
- * counterpart in u = x - x^ over h~) with Q = sum_h k w w^T and Qd = sum_h kd k w w^T over v's stencil neighbours j != v
- * (sum_j Q_vj = 0 a row, as the weights of a hinge sum to zero), and its Hessian (Q_vv + Qd_vv / h~) I. Per vertex: CSR
- * neighbours (j, Q_vj, Qd_vj) and the diagonal (Q_vv, Qd_vv), in Float64 at setup.
+ * The bending stencil (isometric bending, topology `clothBendingRows`): bending is (k/2)|L_r x|^2 a row and its damping
+ * (kd k / 2h~)|L_r (x - x^)|^2, so a vertex's bending gradient is sum_j Q_vj (x_j - x_v) (+ the damping counterpart
+ * in u = x - x^ over h~) with Q = sum_r k w w^T and Qd = sum_r kd k w w^T over v's stencil neighbours j != v
+ * (sum_j Q_vj = 0 a row, as the weights of a bending row sum to zero), and its Hessian (Q_vv + Qd_vv / h~) I. Per
+ * vertex: CSR neighbours (j, Q_vj, Qd_vj) and the diagonal (Q_vv, Qd_vv), in Float64 at setup.
  */
 export function clothBendingStencil(model: ClothSolverModel): { offsets: Uint32Array; columns: Uint32Array; q: Float64Array; qd: Float64Array; diagonal: Float64Array } {
   const t = model.topology, N = t.vertexCount;
   const rows: Map<number, [number, number]>[] = Array.from({ length: N }, () => new Map());
   const diagonal = new Float64Array(2 * N);
-  for (let h = 0; h < t.hingeCount; h++) {
-    const k = t.hingeStiffness_N_m[h]!, kd = model.hingeDamping_s[h]! * k;
-    for (let a = 0; a < 4; a++) {
-      const va = t.hinges[4 * h + a]!, wa = t.hingeWeights[4 * h + a]!;
+  for (let r = 0; r < N; r++) {
+    const k = t.bendStiffness_N_m3[r]!, kd = model.bendDamping_s[r]! * k, o0 = t.bendOffsets[r]!, o1 = t.bendOffsets[r + 1]!;
+    for (let a = o0; a < o1; a++) {
+      const va = t.bendVertices[a]!, wa = t.bendWeights[a]!;
       diagonal[2 * va] += k * wa * wa; diagonal[2 * va + 1] += kd * wa * wa;
-      for (let b = 0; b < 4; b++) {
-        const vb = t.hinges[4 * h + b]!;
+      for (let b = o0; b < o1; b++) {
+        const vb = t.bendVertices[b]!;
         if (b === a || vb === va) continue;
-        const wb = t.hingeWeights[4 * h + b]!, entry = rows[va]!.get(vb) ?? [0, 0];
+        const wb = t.bendWeights[b]!, entry = rows[va]!.get(vb) ?? [0, 0];
         entry[0] += k * wa * wb; entry[1] += kd * wa * wb; rows[va]!.set(vb, entry);
       }
     }
@@ -268,7 +267,7 @@ export function packClothStarRecords(model: ClothSolverModel, byColour: readonly
 }
 
 export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho' | 'initialGuess'> & { readonly coarse: ClothCoarseSpace }, time_s = 0): ClothGPUTables {
-  const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, H = t.hingeCount, M = model.materials.length, S = model.scripts.length;
+  const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, M = model.materials.length, S = model.scripts.length;
   const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
   for (let v = 0; v < N; v++) byColour[model.colours[v]!]!.push(v);
   const order = byColour.flat(), colourRanges: [number, number][] = [];
@@ -281,14 +280,17 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   // The bending stencil as plain CSR records (j, Q_vj, Qd_vj, 0) in vertex order (Newton's H p).
   const stencilRecords = new Uint32Array(4 * Math.max(stencil.columns.length, 1)), stencilF = new Float32Array(stencilRecords.buffer);
   for (let o = 0; o < stencil.columns.length; o++) { stencilRecords[4 * o] = stencil.columns[o]!; stencilF[4 * o + 1] = stencil.q[o]!; stencilF[4 * o + 2] = stencil.qd[o]!; }
-  const parts = [t.vertexFaceOffsets, t.vertexFaces, t.vertexHingeOffsets, t.vertexHinges, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), t.hinges, triangles, t.edges,
+  // Bending rows relative to their own vertex: per row the offsets of its other entries, each a pair (j, w_j bits).
+  const bendOffsets = Uint32Array.from(t.bendOffsets, (o, r) => o - Math.min(r, N)), bendEntries = new Uint32Array(2 * Math.max(t.bendVertices.length - N, 1)), bendF = new Float32Array(bendEntries.buffer);
+  for (let r = 0, q = 0; r < N; r++) for (let o = t.bendOffsets[r]! + 1; o < t.bendOffsets[r + 1]!; o++, q++) { bendEntries[2 * q] = t.bendVertices[o]!; bendF[2 * q + 1] = t.bendWeights[o]!; }
+  const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), new Uint32Array(4), triangles, t.edges,
     ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn, stencil.offsets, star.header, star.records, stencilRecords];
   const topoBase: number[] = [];
   let words = 0;
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
   const topo = new Uint32Array(Math.max(align(words, 4), 4));
   parts.forEach((p, i) => topo.set(p, topoBase[i]));
-  const restCounts = [T, T, 2 * H, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : []), N], restBase: number[] = [];
+  const restCounts = [T, T, N, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : []), N], restBase: number[] = [];
   let records = 0;
   for (const c of restCounts) { restBase.push(records); records += c; }
   const rest = new Float32Array(4 * Math.max(records, 1));
@@ -296,10 +298,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     rest.set(t.faceDmInv.subarray(4 * f, 4 * f + 4), 4 * (restBase[0]! + f));
     rest.set([t.faceArea_m2[f]!, model.faceDamping_s[f]!], 4 * (restBase[1]! + f));
   }
-  for (let h = 0; h < H; h++) {
-    rest.set(t.hingeWeights.subarray(4 * h, 4 * h + 4), 4 * (restBase[2]! + 2 * h));
-    rest.set([t.hingeStiffness_N_m[h]!, model.hingeDamping_s[h]!], 4 * (restBase[2]! + 2 * h + 1));
-  }
+  for (let r = 0; r < N; r++) rest.set([t.bendStiffness_N_m3[r]!, model.bendDamping_s[r]!], 4 * (restBase[2]! + r));
   const diagonalRecord = restBase[restCounts.length - 1]!;
   for (let v = 0; v < N; v++) rest.set(stencil.diagonal.subarray(2 * v, 2 * v + 2), 4 * (diagonalRecord + v));
   let strainLimited = false;
@@ -324,13 +323,13 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   if (ct) { rest.set(ct.rowWeights, 4 * restBase[8]!); rest.set(ct.faceNodes, 4 * restBase[9]!); }
   let damped = false;
   for (let f = 0; f < T; f++) damped ||= model.faceDamping_s[f]! > 0;
-  for (let h = 0; h < H; h++) damped ||= model.hingeDamping_s[h]! > 0;
+  for (let r = 0; r < N; r++) damped ||= model.bendDamping_s[r]! > 0;
   const stride = align(N, CLOTH_SEGMENT_ALIGN), workgroups = Math.ceil(N / CLOTH_WORKGROUP);
   const edgeDualRecord = CLOTH_STATE_SEGMENTS * stride, dampFaceRecord = edgeDualRecord + align(E, CLOTH_SEGMENT_ALIGN);
   const partialRecord = dampFaceRecord + (damped ? align(2 * T, CLOTH_SEGMENT_ALIGN) : 0);
   const clockRecord = partialRecord + align(2 * workgroups, CLOTH_SEGMENT_ALIGN), stateRecords = clockRecord + CLOTH_SEGMENT_ALIGN;
   const params = new Uint32Array(PARAM_WORDS), paramsF = new Float32Array(params.buffer);
-  params.set([N, T, E, H, ...topoBase.slice(0, 10), topoBase[parts.length - 4]!, 0, ...restBase.slice(0, 8), S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups,
+  params.set([N, T, E, N, ...topoBase.slice(0, 10), topoBase[parts.length - 4]!, 0, ...restBase.slice(0, 8), S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups,
     stride, edgeDualRecord, partialRecord, clockRecord, dampFaceRecord, 0, damped ? 1 : 0, 0]);
   const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'adaptive'];
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
@@ -342,13 +341,13 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   let coarse: ClothCoarseLayout;
   {
     const m = 3 * ct.nodeCount, sq = align(Math.ceil(m * m / 4), CLOTH_SEGMENT_ALIGN), vec = align(Math.ceil(m / 4), CLOTH_SEGMENT_ALIGN);
-    const trialWorkgroups = Math.ceil(Math.max(N, T, H, E) / CLOTH_WORKGROUP), pairCount = ct.pairs.length / 2;
+    const trialWorkgroups = Math.ceil(Math.max(N, T, E) / CLOTH_WORKGROUP), pairCount = ct.pairs.length / 2;
     const at: number[] = [];
     let r = 0;
-    for (const size of [6 * T, sq, sq, N, N, 2 * trialWorkgroups, vec, vec, 3, 3 * T, 4 * H, E, 2 * N]) { at.push(r); r = align(r + size, CLOTH_SEGMENT_ALIGN); }
-    const [faceShare, A, Ainv, grad, dir, partials, rv, dc, misc, faceGrad, hingeGrad, edgeGrad, contactH] = at as [number, number, number, number, number, number, number, number, number, number, number, number, number];
+    for (const size of [6 * T, sq, sq, N, N, 2 * trialWorkgroups, vec, vec, 3, 3 * T, 0, E, 2 * N]) { at.push(r); r = align(r + size, CLOTH_SEGMENT_ALIGN); }
+    const [faceShare, A, Ainv, grad, dir, partials, rv, dc, misc, faceGrad, bendGrad, edgeGrad, contactH] = at as [number, number, number, number, number, number, number, number, number, number, number, number, number];
     params.set([ct.nodeCount, m, pairCount, topoBase[10]!, topoBase[11]!, topoBase[12]!, topoBase[13]!, topoBase[14]!, topoBase[15]!, topoBase[16]!, topoBase[17]!, restBase[8]!,
-      restBase[9]!, faceShare, A, Ainv, grad, dir, partials, rv, dc, misc, trialWorkgroups, 0, faceGrad, hingeGrad, edgeGrad, contactH], PARAM_COARSE);
+      restBase[9]!, faceShare, A, Ainv, grad, dir, partials, rv, dc, misc, trialWorkgroups, 0, faceGrad, bendGrad, edgeGrad, contactH], PARAM_COARSE);
     coarse = { nodeCount: ct.nodeCount, pairCount, trialWorkgroups, records: r, miscRecord: misc };
   }
   return { topo, rest, trianglesWord: topoBase[8]!, edgesWord: topoBase[9]!, colourRanges, params, strainLimited, damped, stride, edgeDualRecord,
@@ -578,7 +577,7 @@ export class ClothGPUSolver {
     const C = this.tables.colourRanges.length, limited = this.tables.strainLimited;
     if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', this.threads(this.N)); this.grabAnchorsPending = false; }
     this.run(pass, 'beginStep', 1);
-    if (limited || this.tables.damped) this.run(pass, 'frameElements', this.threads(Math.max(limited ? this.E : 0, this.tables.damped ? Math.max(this.T, this.model.topology.hingeCount) : 0)));
+    if (limited || this.tables.damped) this.run(pass, 'frameElements', this.threads(Math.max(limited ? this.E : 0, this.tables.damped ? this.T : 0)));
     this.run(pass, 'frame', this.threads(this.N));
     this.hooks.afterFrame?.(pass);
     if (this.newton) { this.encodeNewton(pass); return; }
@@ -589,7 +588,7 @@ export class ClothGPUSolver {
     for (let it = 1; it <= this.iterations; it++) {
       const base = (it - 1) * (C + 1);
       if ((it - 1) % this.coarseEvery === 0) {
-        this.run(pass, 'coarseElements', this.threads(Math.max(this.T, this.model.topology.hingeCount, limited ? this.E : 0)));
+        this.run(pass, 'coarseElements', this.threads(Math.max(this.N, this.T, limited ? this.E : 0)));
         this.run(pass, 'coarseGradient', this.threads(this.N));
         this.run(pass, 'coarseRestrict', coarse.nodeCount);
         this.run(pass, 'coarseSolve', 1);

@@ -16,7 +16,7 @@
  * limit edges, inertia); contact is not in it. This file is the Float64 reference of the GPU path.
  */
 import type { PreparedClothTopology } from './topology';
-import { clothAddBending, clothAddFaceDamping, clothAddHingeDamping, clothAugmentedEnergy, clothFaceWeights, clothLocalSystem,
+import { clothAddBendDamping, clothAddBending, clothAddFaceDamping, clothAugmentedEnergy, clothFaceWeights, clothLocalSystem,
   clothMembraneBlock, CLOTH_AVBD, CLOTH_LINE_SEARCH, type ClothOracleCoarse, type ClothOracleState, type ClothSolverModel, type ClothStepFrame,
   type Mat3, type Vec3 } from './oracle';
 
@@ -33,7 +33,7 @@ export const CLOTH_COARSE = Object.freeze({
    * Bridson sheet passes its 1% equilibrium gate (0.77%), but the cut sheet's free swing lags a converged run by 20.0 mm
    * (13.3 mm at 2; gate 20 mm), progress-lane-c1.md RESULT (14). */
   every: 2 as number,
-  /** Whether A_c holds the hinges. Bending of the smooth coarse modes is O(k_b / h_c^2), far below their membrane
+  /** Whether A_c holds the bending rows. Bending of the smooth coarse modes is O(k_b / h_c^2), far below their membrane
    * and inertia terms, so the coarse operator leaves it out (the line search still sees all of G). */
   bending: false as boolean,
 });
@@ -225,10 +225,10 @@ export function clothCoarseOperator(model: ClothSolverModel, frame: ClothStepFra
       scatter(space, A, vs, (i, j) => tangentBlock(D.j[i]!, D.j[j]!, T[q + 6]!, c.c12, T[q + 7]!, c.g).map(h => scale * h) as Mat3);
     }
   }
-  if (bending) for (let h = 0; h < t.hingeCount; h++) {
-    // The exact Hessian of (k/2)|s|^2 plus its damping: (k + kd k / h~) w_i w_j I.
-    const vs = [0, 1, 2, 3].map(k => t.hinges[4 * h + k]!), k = t.hingeStiffness_N_m[h]! * (1 + model.hingeDamping_s[h]! / frame.hEff), w = t.hingeWeights;
-    scatter(space, A, vs, (i, j) => I(k * w[4 * h + i]! * w[4 * h + j]!));
+  if (bending) for (let r = 0; r < t.vertexCount; r++) {
+    // The exact Hessian of (k/2)|L x|^2 plus its damping: (k + kd k / h~) w_i w_j I.
+    const o0 = t.bendOffsets[r]!, vs = Array.from(t.bendVertices.subarray(o0, t.bendOffsets[r + 1]!)), k = t.bendStiffness_N_m3[r]! * (1 + model.bendDamping_s[r]! / frame.hEff), w = t.bendWeights;
+    scatter(space, A, vs, (i, j) => I(k * w[o0 + i]! * w[o0 + j]!));
   }
   for (let e = 0; e < t.edgeCount; e++) {
     const eps = model.edgeStrainLimit[e]!;
@@ -282,9 +282,9 @@ export function clothObjective(model: ClothSolverModel, frame: ClothStepFrame, s
     add(clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, 0, ...vs, false).energy);
     add(clothAddFaceDamping(model, frame, f, 0, pos, g, H));
   }
-  for (let h = 0; h < t.hingeCount; h++) {
-    add(clothAddBending(t, h, 0, pos, g, H));
-    add(clothAddHingeDamping(model, frame, h, 0, pos, g, H));
+  for (let r = 0; r < t.vertexCount; r++) {
+    add(clothAddBending(t, t.bendOffsets[r]!, pos, g, H));
+    add(clothAddBendDamping(model, frame, t.bendOffsets[r]!, pos, g, H));
   }
   for (let e = 0; e < t.edgeCount; e++) {
     const eps = model.edgeStrainLimit[e]!;

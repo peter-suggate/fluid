@@ -51,7 +51,7 @@ fn c4Set(r: u32, x: vec4f) { let i = 4u * r; coarse[i] = x.x; coarse[i + 1u] = x
 //        coarse3: face node records (rest), face shares, A, A^-1 (W1) (coarse records)
 //        coarse4: gradient, direction, partials, r (coarse records)
 //        coarse5: dc, misc (coarse records), partial count (coarseTrial workgroups), 0
-//        coarse6: face, hinge, edge corner gradients, per-vertex contact Hessians (coarse records, two a vertex)
+//        coarse6: face corner gradients, unused, edge gradients, per-vertex contact Hessians (coarse records, two a vertex)
 fn cA() -> u32 { return 4u * P.coarse3.z; }
 fn cW1() -> u32 { return 4u * P.coarse3.w; }
 fn cR() -> u32 { return 4u * P.coarse4.w; }
@@ -290,9 +290,9 @@ ${rounds.map(r => `  if (e${r}.x != C_NONE) { cfSet(W1 + e${r}.x * CM + e${r}.y,
 }
 
 // The gradient of G at the iterate (every term but contact), the coarse step's right-hand side, in two passes:
-// each element's corner gradients once (thread i: face i, hinge i, edge i), then each vertex gathers its own.
+// each element's corner gradients once (thread i: face i, edge i), then each vertex gathers its own (and its bending
+// stencil's).
 fn cFaceGrad(f: u32, k: u32) -> u32 { return P.coarse6.x + 3u * f + k; }
-fn cHingeGrad(h: u32, k: u32) -> u32 { return P.coarse6.y + 4u * h + k; }
 fn cEdgeGrad(e: u32) -> u32 { return P.coarse6.z + e; }
 @compute @workgroup_size(${workgroup}) fn coarseElements(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
@@ -319,13 +319,6 @@ fn cEdgeGrad(e: u32) -> u32 { return P.coarse6.z + e; }
     }
     for (var k = 0u; k < 3u; k++) { c4Set(cFaceGrad(i, k), vec4f(av[k] * p0 + bv[k] * p1, 0.0)); }
   }
-  if (i < P.n.w) {
-    // Quadratic bending and its damping: corner k's gradient w_k (k s + (kd k / h~) u).
-    let q = loadHinge(i, 0u, pos(hingeVerts(i).x)); let w = hingeW(i);
-    let c = q.kd.x * q.s + (q.kd.x * q.kd.y / hEff()) * q.u;
-    var g = array<vec3f, 4>(hingeWeight(w, 0u) * c, hingeWeight(w, 1u) * c, hingeWeight(w, 2u) * c, hingeWeight(w, 3u) * c);
-    for (var k = 0u; k < 4u; k++) { c4Set(cHingeGrad(i, k), vec4f(g[k], 0.0)); }
-  }
   if (P.flags.z != 0u && i < P.n.z) {
     var g = vec3f(0.0);
     if (rest[P.rest0.w + i].y > 0.0) {
@@ -339,7 +332,7 @@ fn coarseGradientAt(v: u32, xv: vec3f) -> vec3f {
   let h = hEff(); let w = vertexRest(v).x / (h * h);
   var g = w * (xv - state[seg(S_Y, v)].xyz);
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) { let e = topo[P.topo0.y + j]; g += c4(cFaceGrad(e >> 2u, e & 3u)).xyz; }
-  for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) { let e = topo[P.topo0.w + j]; g += c4(cHingeGrad(e >> 2u, e & 3u)).xyz; }
+  g += stencilBlock(v, xv).g;
   if (P.flags.z != 0u) {
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
       let e = topo[P.topo1.y + j]; let f = c4(cEdgeGrad(e >> 2u)).xyz;
@@ -445,13 +438,6 @@ fn faceDampingDeltaAll(f: u32, d0: vec3f, d1: vec3f, d2: vec3f) -> vec2f {
   let roundRate = vec3f(length(f0) * ru.x, length(f1) * ru.y, length(f0) * ru.y + length(f1) * ru.x);
   return vec2f(lin + quad, abs(lin) + quad + scale * dot(abs(dsigma), roundRate));
 }
-// Bending and its damping when the hinge's vertices move by d0..d3, exactly (both are quadratic in s and u).
-fn hingeDeltaAll(h: u32, d0: vec3f, d1: vec3f, d2: vec3f, d3: vec3f) -> vec2f {
-  let q = loadHinge(h, 0u, pos(hingeVerts(h).x)); let ds = hingeS(hingeW(h), d0, d1, d2, d3);
-  let scale = q.kd.x * q.kd.y / hEff();
-  let lin = q.kd.x * dot(q.s, ds) + scale * dot(q.u, ds); let quad = 0.5 * (q.kd.x + scale) * dot(ds, ds);
-  return vec2f(lin + quad, abs(lin) + quad + (q.kd.x * q.sr + scale * q.ur) * length(ds));
-}
 fn edgeDeltaAll(e: u32, d: vec3f) -> vec2f {
   let er = rest[P.rest0.w + e];
   if (!(er.y > 0.0)) { return vec2f(0.0); }
@@ -476,7 +462,7 @@ fn coarseContactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
   if (!(ec1 <= 3.0e38)) { return vec2f(ec1, 0.0); }
   return vec2f(ec1 - ec0, abs(ec0) + abs(ec1));
 }
-` : ''}// Element passes: (dG, floor) at trial steps; thread i takes vertex i, face i, hinge i and edge i. The full step
+` : ''}// Element passes: (dG, floor) at trial steps; thread i takes vertex i (and its bending row), face i and edge i. The full step
 // first (nearly every correction takes it), then, only for a correction that rejected it, the shorter trials 1/2,
 // 1/4, ... in the Back pass: the energy evaluations are the trial pass's cost, so the first pass evaluates one.
 ${[['coarseTrial', 0, 1], ['coarseTrialBack', 1, CLOTH_COARSE.trials - 1]].map(([name, first, count]) => `@compute @workgroup_size(${workgroup}) fn ${name}(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u) {
@@ -488,16 +474,17 @@ ${[['coarseTrial', 0, 1], ['coarseTrialBack', 1, CLOTH_COARSE.trials - 1]].map((
   if (live) {
     var alpha = ${(2 ** -(first as number)).toFixed(1)};${contact ? `
     var ec0 = 0.0; if (i < P.n.x) { ec0 = ogcVertexContactEnergy(i, pos(i)); }` : ''}
+    var bq = BendIn(vec2f(0.0), vec3f(0.0), 0.0, vec3f(0.0), 0.0); var bds = vec3f(0.0);
+    if (i < P.n.x) {
+      bq = loadBend(i); let ci = cdir(i);
+      for (var o = topo[P.topo0.z + i]; o < topo[P.topo0.z + i + 1u]; o++) { bds += bendW(o) * (cdir(bendJ(o)) - ci); }
+    }
     for (var k = 0u; k < ${count}u; k++) {
       var q = vec2f(0.0);
-      if (i < P.n.x) { q += ownDelta(i, pos(i), alpha * cdir(i));${contact ? ' q += coarseContactDelta(i, pos(i), ec0, alpha * cdir(i));' : ''} }
+      if (i < P.n.x) { q += ownDelta(i, pos(i), alpha * cdir(i)) + bendDelta(bq, alpha * bds);${contact ? ' q += coarseContactDelta(i, pos(i), ec0, alpha * cdir(i));' : ''} }
       if (i < P.n.y) {
         let t = tris(i); let a0 = alpha * cdir(t.x); let a1 = alpha * cdir(t.y); let a2 = alpha * cdir(t.z);
         q += membraneDeltaAll(i, a0, a1, a2) + faceDampingDeltaAll(i, a0, a1, a2);
-      }
-      if (i < P.n.w) {
-        let hv = hingeVerts(i); let a0 = alpha * cdir(hv.x); let a1 = alpha * cdir(hv.y); let a2 = alpha * cdir(hv.z); let a3 = alpha * cdir(hv.w);
-        q += hingeDeltaAll(i, a0, a1, a2, a3);
       }
       if (P.flags.z != 0u && i < P.n.z) { let ev = edges(i); q += edgeDeltaAll(i, alpha * (cdir(ev.x) - cdir(ev.y))); }
       dE[k] = q.x; fl[k] = q.y;

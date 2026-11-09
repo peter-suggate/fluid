@@ -20,13 +20,16 @@ function equalMassSheet(n: number, nodeMass: number): ClothTopologyData {
   return { ...data, vertexMass_kg: new Array(n * n).fill(nodeMass) };
 }
 
-test('the 150 x 150 Bridson tablecloth colours into five balanced classes (greedy left a one-vertex sixth class costing a dispatch per iteration)', () => {
+test('the 150 x 150 Bridson tablecloth colours properly, in at most eleven classes', () => {
+  // The bending rows couple an interior vertex to its 12 nearest (its 5-point row's neighbours and theirs), and a
+  // boundary row to its quadratic-exact support, so the old five classes (faces and edge hinges) are gone: greedy
+  // takes seven interior classes (a lattice colouring i + 2j mod 5 would take five) and four small boundary ones,
+  // 3737,3740,3729,3664,3385,2961,1041,112,81,42,8. Only the VBD colour sweeps pay for classes; Newton-PCG does not.
   const { cloth } = bridson2002Tablecloth();
   const neighbours = clothVertexNeighbours(prepareClothTopology(cloth.geometry.data, cloth.materials));
   const colour = colourClothVertices(neighbours), sizes: number[] = [];
   for (const c of colour) sizes[c] = (sizes[c] ?? 0) + 1;
-  assert.equal(sizes.length, 5, `classes ${sizes.join(',')}`);
-  assert.ok(Math.min(...sizes) > 0.15 * colour.length, `classes ${sizes.join(',')}`);
+  assert.ok(sizes.length <= 11, `classes ${sizes.join(',')}`);
   for (let v = 0; v < colour.length; v++)
     for (let j = neighbours.offsets[v]!; j < neighbours.offsets[v + 1]!; j++) assert.notEqual(colour[neighbours.values[j]!], colour[v]);
 });

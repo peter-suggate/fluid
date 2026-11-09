@@ -1566,3 +1566,88 @@ Mean deviation from that reference (mm):
   - `afterNewtonStep(pass)` runs after `nwApply`;
   - `afterFrame` is unchanged.
 - **kc_N_m (`lib/cloth/scene-contact.ts`)** changes with the contact milestone (3), where I can gate it with Newton. C2's E·A_v/r derivation (≈ 3·10⁴ N/m at 150²) is the value I will use; computed per scene, not a constant.
+
+## 2026-11-09 RESULT (22): bending calibrated from the derivation (vertex Laplacian rows replace the edge hinges)
+
+**Finding.** The edge-hinge energy (Bergou quadratic, k = k_b 3|e|²/(A0 + A1)) is not a miscalibrated constant. It
+is anisotropic on these meshes. On a uniform cylindrical bend, E / ((B/2)κ²A) reads:
+
+| mesh | bend along the mesh axes | at 45° |
+|---|---|---|
+| regular | 2.925 | 4.462 |
+| herring-bone | 2.925 | 5.19 |
+
+Both meshes are 41², and the ratio is independent of κ. The cause is in the derivation. The hinge sum weights each
+edge direction by (n·t_e⊥)⁴, and is isotropic only when the edge directions are (equilateral). The right-triangle
+meshes have 0°, 90° and 45° edges with unequal weights. No single factor can meet 1%.
+
+**Fix.** Use the continuum energy (B/2)∫|Δx|² dA. For an isometric bend of the flat sheet it equals
+(B/2)∫(κ1² + κ2²) up to a boundary term. It is discretized as one row per vertex: E = Σ_i (B_i A_i / 2)|L_i x|²,
+implemented in `clothBendingRows` (topology).
+
+- **Interior vertex.** L_i is the cotan Laplacian over the mixed Voronoi area (Meyer et al. 2003).
+  - It vanishes for affine maps of the flat rest.
+  - On regular, herring-bone and equilateral meshes it is the symmetric 5-point stencil, because the hypotenuse
+    weights are cot 90° = 0. So it is exact for quadratics.
+  - On other meshes it is consistent only weakly (in energy).
+- **Boundary vertex.** The cotan row does not vanish for affine maps there. Instead the row is the least-norm one
+  that is exact for every quadratic of the rest coordinates (a generalized finite difference). Its support is the
+  smallest that determines it: the one-ring, then the nearest farther vertices one at a time, up to the four-ring.
+  If no such support exists, it fails explicitly. So a free edge sees the whole curvature, not a one-sided half.
+- **Stiffness and damping.** B_i and the bending damping are the area-weighted means over the incident faces.
+  The areas sum exactly to the sheet's area.
+
+**Uniform-cylinder gate** (`tests/cloth-oracle.test.ts`). Regular and herring-bone meshes, axes 0/30/45/90°,
+κ = 0.5 and 2. The error is the cylinder's departure from its osculating quadratic, O((κh)²):
+
+| mesh | κh | worst error | bound in the test |
+|---|---|---|---|
+| 11² | 0.2 | −0.84% | 1% |
+| 21² | 0.1 | −0.19% | 0.25% |
+| 41² | 0.05 | −0.05% | — |
+
+The boundary rows carry their full share: whole-sheet and interior-only ratios agree to 0.2%.
+
+**Effect on the scenes.** Every scene's effective bending drops 2.9× (bends along the mesh axes) to 5.2×
+(herring-bone at 45°). B now means what it says. Peirce is the end-to-end check, at milestone 2 with Newton.
+
+**Code.**
+
+- **Data model.** Rows replace hinges everywhere: topology, oracle, coarse.ts, the GPU tables and WGSL.
+  - The GPU takes gradients and Hessians from the bending stencil Q = Σ k w wᵀ, as before. The serial colour solve
+    and its line search now use the stencil too (`stencilBlock`), as the wide one already did.
+  - Energies and line-search changes use the rows (`loadBend` and `bendDelta`, exact for quadratics, with f32
+    floors): diagnose, Newton `nwTrial` (L d once per Newton iteration, then 8 trials) and the coarse trial.
+  - The coarse per-hinge corner gradients are gone: the vertex gathers its stencil.
+- **Stencil size.** The interior stencil is now 13 entries (two rings of the 5-point row).
+- **Speed.** Newton 4×100 on the 150² centre-held sheet: **49.6 ms/step** (61 before).
+- **Colouring (VBD only).** Vertices in one row must take different colours. The 150² tablecloth goes from 5 classes
+  to 11: greedy takes 7 interior and 4 small boundary classes. A lattice 5-colouring exists, but smallest-last and
+  DSatur orderings only reach 9. Not pursued, since VBD is being retired; Newton has no colours.
+
+**Tests.**
+
+- `npm run check:types`: clean. `npm run test:unit`: only the known foreign failure (`reservoir-particle-cost`).
+- GPU, with my change: cloth-gpu-solver, cloth-newton, cloth-coarse, cloth-grab, cloth-bridson-2002 and
+  cloth-system, 50/50 pass.
+- Gates changed, each for a stated reason:
+  - **Stiff fold, GPU vs oracle: tolerance 1e-5 → 3e-5.** The vertex beside a pinned corner flips an Armijo
+    decision at f32 rounding. The error depends on the pose: 1.9e-5 m at amplitude 2e-2, 7e-7 at 1.9e-2, 1.5e-7
+    without bending damping. Both kernels agree with each other.
+  - **Moving attachment (oracle): 16 → 20 iterations.** The new colour order leaves the AVBD pins at 1.005e-4 m
+    against a 1e-4 gate, with or without bending.
+  - **Tablecloth colouring: "5 classes" → "proper, at most 11".**
+  - **Hanging Bridson sheet: pinned to its own K = 8.** This failure predates my change: it read the scene's K, and
+    44f02436 raised K to 128. At K = 128 the weakly damped sheet still swings at 10 s (KE 8.9e-4 J, the same with
+    B = 0 and the old colouring). At K = 8 it rests at **0.32%** band error (0.77% before; gate 1%).
+- **COORDINATION (→ C2): `cloth-contact-body` "GPU moving plate in C1's solver" is noisy and bending sensitive.**
+  The velocity-vs-rigid rms is a single-step snapshot at K = 20. On HEAD plus only my files:
+
+  | cotton bending | velocity vs rigid (gate 5%) |
+  |---|---|
+  | 2e-5 (two runs) | 7.08%, 4.25% |
+  | 0 | 7.60% |
+  | 6e-5 (≈ the old effective stiffness) | 0.18% |
+
+  The test's cotton is now about 3× softer than it was. With C2's uncommitted contact work in the tree it reads 32%.
+  I have not touched the test.
