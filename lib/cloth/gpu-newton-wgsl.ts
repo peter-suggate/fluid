@@ -2,30 +2,52 @@
  * WGSL of the Newton-PCG cloth step (appended to the solver module, which supplies the element helpers). One implicit
  * step per call, no substeps: Newton iterations on the step's objective G (BDF2 inertia, membrane, Bergou bending,
  * frozen-tangent damping, grab spring), each solving H d = -g by preconditioned conjugate gradients and taking the
- * largest Armijo step of 1, 1/2, ..., 1/128 on G. Pins are Dirichlet DOFs held at their frame targets (their rows and
+ * largest Armijo step of 1, 1/2, ..., 1/128 on G. With contact the trial points are the projected arc x(alpha)_v =
+ * Pi_v(x_v + alpha d_v), Pi_v onto vertex v's certified set (nwProject), with the slope g.(x(alpha) - x) of each trial. Pins are Dirichlet DOFs held at their frame targets (their rows and
  * directions are zero). Everything is decided on the GPU: convergence and stalls set control flags that every later
  * kernel of the step reads, so the CPU encodes fixed caps and never reads back.
  *
- * H is matrix-free: per face the Green-strain tangent J D J^T plus the geometric term S (x) I with the 2x2 stress S
- * clamped PSD (nwFaces records f0, f1 and S once per Newton iteration); bending and damping are exact (quadratic). The
- * preconditioner is the inverse of each vertex's 3x3 diagonal block (vertexSystem).
+ * H is assembled once per Newton iteration (nwGradient) over the compiled topology (gpu-solver.ts,
+ * compileClothPCGPatches): per face the Green-strain tangent J D J^T plus the geometric term S (x) I with the 2x2
+ * stress S clamped PSD (nwFaces records f0, f1 and S), the frozen-tangent damping, the active strain-limit edges and
+ * the bending stencil, as 3x3 blocks in sliced-ELL order (patches of 256 rows; per row K1 blocks, slot 0 the diagonal,
+ * and K2 scalar bending entries beyond the 1-ring). Contact (C2) stays matrix-free, a separate additive stage of the
+ * product. The preconditioner is the inverse of each vertex's 3x3 diagonal block (vertexSystem, contact included).
  *
- * The `nw` buffer (vec4 records): per-vertex segments (stride Np) g, r, z, d, p (two, ping-pong), q, M^-1 (two records),
- * then 3 records per face, then the workgroup partials (W = workgroups of a per-vertex dispatch each): G (r.z, g.g at
- * the Newton iterate), A (p.q), B0..B2 (r.z by PCG iteration mod 3), trial (5 per workgroup), then the control record
- * (Newton done, PCG done, accepted step, Newton iteration), then |g|^2 at the first and latest Newton iterate.
+ * PCG is the single-reduction (Chronopoulos-Gear) form: one dispatch per iteration (pcgStep, one 256-thread
+ * workgroup per patch). Dispatch i forms s, r, u = M^-1 r of iteration i for its rows and its halo in workgroup
+ * memory, advances d, multiplies w = H u and writes the partials (r.u, w.u) that dispatch i + 1 reduces into alpha and
+ * beta. r, w and s ping-pong so a dispatch reads the previous iteration's values while it writes its own.
+ *
+ * The `nw` buffer (vec4 records): per-vertex segments (stride Np) g, r (two), w (two), s (two), d, p, M^-1 (two
+ * records), with contact the trial moves (one per trial), then 3 records per face, the assembled blocks and bending
+ * entries, the line-search partials (W = workgroups of a per-vertex dispatch each, 7 arrays), the PCG partials (3 arrays of one record per patch), the PCG scalars
+ * (gamma_0, then alpha by iteration mod 2), then the control record (Newton done, PCG done, accepted step, Newton
+ * iteration), then |g|^2 at the first and latest Newton iterate.
  */
 import { CLOTH_LINE_SEARCH } from './oracle';
 
-export const CLOTH_NEWTON_SEGMENTS = { g: 0, r: 1, z: 2, d: 3, p0: 4, p1: 5, q: 6, m0: 7, m1: 8 } as const;
-export const CLOTH_NEWTON_SEGMENT_COUNT = 9;
+export const CLOTH_NEWTON_SEGMENTS = { g: 0, r0: 1, r1: 2, w0: 3, w1: 4, s0: 5, s1: 6, d: 7, p: 8, m0: 9, m1: 10, moves: 11 } as const;
 /** Line-search trials per Newton iteration: steps 1, 1/2, ..., 2^-(TRIALS-1). */
 export const CLOTH_NEWTON_TRIALS = 8;
-/** Partial arrays (each W records) before the trial block: G, A, B0, B1, B2. */
-export const CLOTH_NEWTON_PARTIALS = 5;
-export const CLOTH_NEWTON_TRIAL_RECORDS = 5;
+/** Per-vertex segments: the 11 solver vectors, then with contact one projected move per trial (nwProject). */
+export function clothNewtonSegmentCount(contact: boolean): number { return CLOTH_NEWTON_SEGMENTS.moves + (contact ? CLOTH_NEWTON_TRIALS : 0); }
+/** Line-search partial arrays (each W records): energy changes (2), rounding floors (2), slopes (2), max |d|^2. */
+export const CLOTH_NEWTON_TRIAL_RECORDS = 7;
+/** PCG partial arrays (one record per patch each, by iteration mod 3), then the PCG scalar records. */
+export const CLOTH_PCG_PARTIALS = 3;
+export const CLOTH_PCG_SCALARS = 3;
 
-export function clothNewtonWGSL(binding: number, workgroup: number, contact = false): string {
+/** The compiled PCG layout the shaders are specialised to (gpu-solver.ts, compileClothPCGPatches). */
+export interface ClothPCGLayout {
+  /** Workgroup-memory vertices a patch stages (its 256 rows, then its halo). */
+  readonly shared: number;
+  /** Largest blocks per row and bending entries per row over the patches. */
+  readonly maxK1: number;
+  readonly maxK2: number;
+}
+
+export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout): string {
   const S = CLOTH_NEWTON_SEGMENTS;
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
@@ -35,8 +57,16 @@ fn nwFaceRecord(f: u32) -> u32 { return P.newton0.x + 3u * f; }
 fn nwPartial(k: u32) -> u32 { return P.newton0.y + k * P.newton0.z; }
 fn nwControl() -> u32 { return P.newton0.w; }
 fn nwPinned(v: u32) -> bool { return vertexGroup(v) > 0u; }
-// The largest step the line search tries: the contact filter's alpha_min (every vertex's certificates hold on [0, alpha_min] d), else 1.
-fn nwAlpha0() -> f32 { return ${contact ? 'clamp(ogcAlphaMin(), 0.0, 1.0)' : '1.0'}; }
+// Trial k's move of vertex j (alpha = 2^-k): alpha d_j, or with contact the projected arc's move Pi_j(x_j + alpha d_j) - x_j
+// (nwProject; exactly alpha d_j where the projection keeps the trial point; d_j.w != 0 marks a vertex the arc cuts on some trial).
+fn nwMove(j: u32, k: u32, alpha: f32) -> vec3f {
+  ${contact ? `let D = nw[nseg(${S.d}u, j)];
+  if (D.w == 0.0) { return alpha * D.xyz; }
+  return nw[nseg(${S.moves}u + k, j)].xyz;` : 'return alpha * nwD(j);'}
+}
+fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
+// d_j with its cut mark (w != 0: the arc's moves of j are not alpha d_j; always 0 without contact).
+fn nwD4(j: u32) -> vec4f { return nw[nseg(${S.d}u, j)]; }
 
 var<workgroup> nwRed: array<vec4f, ${workgroup}>;
 var<workgroup> nwOut: vec4f;
@@ -56,6 +86,29 @@ fn nwPartialSum(lane: u32, wgi: u32, value: vec4f, base: u32) {
   nwRed[lane] = value;
   workgroupBarrier();
   for (var s = NW_WG / 2u; s > 0u; s >>= 1u) { if (lane < s) { nwRed[lane] += nwRed[lane + s]; } workgroupBarrier(); }
+  if (lane == 0u) { nw[base + wgi] = nwRed[0]; }
+}
+// As nwSum / nwPartialSum with x summed and y the maximum (the line search's slope and largest |d_v|^2).
+fn nwSumMax(lane: u32, base: u32) -> vec2f {
+  var a = vec2f(0.0);
+  for (var i = lane; i < P.newton0.z; i += NW_WG) { let q = nw[base + i]; a = vec2f(a.x + q.x, max(a.y, q.y)); }
+  nwRed[lane] = vec4f(a, 0.0, 0.0);
+  workgroupBarrier();
+  for (var s = NW_WG / 2u; s > 0u; s >>= 1u) {
+    if (lane < s) { let o = nwRed[lane + s]; nwRed[lane] = vec4f(nwRed[lane].x + o.x, max(nwRed[lane].y, o.y), 0.0, 0.0); }
+    workgroupBarrier();
+  }
+  if (lane == 0u) { nwOut = nwRed[0]; }
+  return workgroupUniformLoad(&nwOut).xy;
+}
+fn nwPartialSumMax(lane: u32, wgi: u32, value: vec2f, base: u32) {
+  workgroupBarrier();
+  nwRed[lane] = vec4f(value, 0.0, 0.0);
+  workgroupBarrier();
+  for (var s = NW_WG / 2u; s > 0u; s >>= 1u) {
+    if (lane < s) { let o = nwRed[lane + s]; nwRed[lane] = vec4f(nwRed[lane].x + o.x, max(nwRed[lane].y, o.y), 0.0, 0.0); }
+    workgroupBarrier();
+  }
   if (lane == 0u) { nw[base + wgi] = nwRed[0]; }
 }
 var<workgroup> nwCtl: vec4f;
@@ -93,71 +146,100 @@ fn wgIndex(wg: vec3u, nwg: vec3u) -> u32 { return wg.x + wg.y * nwg.x; }
   nw[r] = vec4f(f0, S.x); nw[r + 1u] = vec4f(f1, S.y); nw[r + 2u] = vec4f(S.z, c0.x - w11, c0.y - w22, 0.0);
 }
 
-// Per vertex: g at the iterate, the inverse diagonal block, and the PCG start r = -g, z = M^-1 r, d = 0, p = 0.
-@compute @workgroup_size(${workgroup}) fn nwGradient(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
+// ---------------------------------------------------------------- compiled topology (gpu-solver.ts)
+const PCG_PATCH = 256u;
+const PCG_SHARED = ${pcg.shared}u;
+const PCG_MAXK1 = ${pcg.maxK1}u;
+const PCG_MAXK2 = ${Math.max(pcg.maxK2, 2)}u;
+const PCG_GLOBAL = 0x80000000u;
+const PCG_FAR = 0x40000000u;
+// Patch p's table words: K1, K2, halo count, halo (topo word), blocks, bending entries (nw records), columns (topo word), rows.
+fn pcgTable(p: u32) -> u32 { return P.newton2.x + 8u * p; }
+// Patches are tiles of the vertices' Morton order: the vertex of patch slot p PATCH + lane, and the slot of vertex v.
+fn pcgRowVertex(slot: u32) -> u32 { return topo[P.newton4.x + slot]; }
+fn pcgVertexSlot(v: u32) -> u32 { return topo[P.newton4.y + v]; }
+// Block slot k of patch-row lane: row c of H_vj at nw[blocks + (3k + c) PATCH + lane] (row 0's w: the column bits).
+fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u * k + c) * PCG_PATCH + lane; }
+
+// Per vertex: g at the iterate, the inverse diagonal block, the assembled row of H, and the PCG start r = -g, s = 0,
+// d = 0, p = 0.
+@compute @workgroup_size(${workgroup}) fn nwGradient(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0) { return; }
   let v = wgIndex(wg, nwg) * NW_WG + lane;
-  var part = vec4f(0.0);
-  if (v < P.n.x) {
-    var g = vec3f(0.0); var M0 = vec4f(0.0); var M1 = vec4f(0.0);
-    if (!nwPinned(v)) {
-      let s = vertexSystem(v, pos(v));
-      g = s.g;
-      let H = s.H; let det = determinant(H);
-      if (det > 0.0 && abs(det) <= 3.0e38) {
-        let c0 = cross(H[1], H[2]); let c1 = cross(H[2], H[0]); let c2 = cross(H[0], H[1]);
-        M0 = vec4f(c0.x, c0.y, c0.z, c1.y) / det; M1 = vec4f(c1.z, c2.z, 0.0, 0.0) / det;
-      } else {
-        M0 = vec4f(1.0 / max(H[0][0], 1e-30), 0.0, 0.0, 1.0 / max(H[1][1], 1e-30)); M1 = vec4f(0.0, 1.0 / max(H[2][2], 1e-30), 0.0, 0.0);
-      }
+  if (v >= P.n.x) { return; }
+  var g = vec3f(0.0); var M0 = vec4f(0.0); var M1 = vec4f(0.0);
+  // The row's blocks and bending entries, assembled in function-local arrays (measured fastest: 334 us at 150^2,
+  // against 574 for registers selected by a switch and 750 for module-private arrays with direct entry writes).
+  var Hb: array<mat3x3f, PCG_MAXK1>;
+  var Bw: array<f32, PCG_MAXK2>;
+  if (!nwPinned(v)) {
+    let s = vertexSystem(v, pos(v));
+    g = s.g;
+    let H = s.H; let det = determinant(H);
+    if (det > 0.0 && abs(det) <= 3.0e38) {
+      let c0 = cross(H[1], H[2]); let c1 = cross(H[2], H[0]); let c2 = cross(H[0], H[1]);
+      M0 = vec4f(c0.x, c0.y, c0.z, c1.y) / det; M1 = vec4f(c1.z, c2.z, 0.0, 0.0) / det;
+    } else {
+      M0 = vec4f(1.0 / max(H[0][0], 1e-30), 0.0, 0.0, 1.0 / max(H[1][1], 1e-30)); M1 = vec4f(0.0, 1.0 / max(H[2][2], 1e-30), 0.0, 0.0);
     }
-    let r = -g; let z = nwPrecondition(M0, M1, r);
-    nw[nseg(${S.g}u, v)] = vec4f(g, 0.0); nw[nseg(${S.r}u, v)] = vec4f(r, 0.0); nw[nseg(${S.z}u, v)] = vec4f(z, 0.0);
-    nw[nseg(${S.d}u, v)] = vec4f(0.0); nw[nseg(${S.p0}u, v)] = vec4f(0.0);
-    nw[nseg(${S.m0}u, v)] = M0; nw[nseg(${S.m1}u, v)] = M1;
-    part = vec4f(dot(r, z), dot(g, g), 0.0, 0.0);
+    nwAssembleRow(v, &Hb, &Bw);
   }
-  let wgi = wgIndex(wg, nwg);
-  nwPartialSum(lane, wgi, part, nwPartial(0u));
-  nwPartialSum(lane, wgi, part, nwPartial(2u));
+  nw[nseg(${S.g}u, v)] = vec4f(g, 0.0); nw[nseg(${S.r0}u, v)] = vec4f(-g, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
+  nw[nseg(${S.d}u, v)] = vec4f(0.0); nw[nseg(${S.p}u, v)] = vec4f(0.0);
+  nw[nseg(${S.m0}u, v)] = M0; nw[nseg(${S.m1}u, v)] = M1;
+  // The row in sliced-ELL order (a pinned row and the patch's padding slots: zero blocks on a valid column).
+  let slot = pcgVertexSlot(v); let tw = pcgTable(slot / PCG_PATCH); let l = slot % PCG_PATCH;
+  let K1 = topo[tw]; let K2 = topo[tw + 1u]; let blocks = topo[tw + 4u]; let bends = topo[tw + 5u]; let cols = topo[tw + 6u];
+  for (var k = 0u; k < K1; k++) {
+    let H = Hb[min(k, PCG_MAXK1 - 1u)]; let col = bitcast<f32>(topo[cols + k * PCG_PATCH + l]);
+    nw[pcgBlock(blocks, k, 0u, l)] = vec4f(H[0][0], H[1][0], H[2][0], col);
+    nw[pcgBlock(blocks, k, 1u, l)] = vec4f(H[0][1], H[1][1], H[2][1], 0.0);
+    nw[pcgBlock(blocks, k, 2u, l)] = vec4f(H[0][2], H[1][2], H[2][2], 0.0);
+  }
+  for (var m = 0u; 2u * m < K2; m++) {
+    let c = cols + (K1 + 2u * m) * PCG_PATCH + l;
+    nw[bends + m * PCG_PATCH + l] = vec4f(bitcast<f32>(topo[c]), Bw[min(2u * m, PCG_MAXK2 - 1u)], bitcast<f32>(topo[c + PCG_PATCH]), Bw[min(2u * m + 1u, PCG_MAXK2 - 1u)]);
+  }
 }
 // M^-1 r with the symmetric inverse (xx, xy, xz, yy), (yz, zz).
 fn nwPrecondition(M0: vec4f, M1: vec4f, r: vec3f) -> vec3f {
   return vec3f(M0.x * r.x + M0.y * r.y + M0.z * r.z, M0.y * r.x + M0.w * r.y + M1.x * r.z, M0.z * r.x + M1.x * r.y + M1.y * r.z);
 }
 
-var<private> nwBeta: f32;
-var<private> nwPOld: u32;
-// p_i at vertex j, formed on the fly from z and p_{i-1}: p_i = z + beta p_{i-1} (pinned vertices have z = p = 0).
-fn nwP(j: u32) -> vec3f { return nw[nseg(${S.z}u, j)].xyz + nwBeta * nw[nseg(nwPOld, j)].xyz; }
-
-// (H p)_v: inertia, grab, membrane (tangent + clamped geometric), face damping, bending stencil.
-fn nwApplyAt(v: u32, pv: vec3f) -> vec3f {
+// Row v of H (all but contact) into its slots: inertia, grab, bending diagonal; per face the membrane tangent (rates
+// R_k = (a_k f0, b_k f1, a_k f1 + b_k f0) through the constitutive matrix) plus the clamped geometric term, and the face
+// damping; the active strain-limit edges; the bending stencil (1-ring entries into blocks, the rest into Bw).
+fn nwAssembleRow(v: u32, Hb: ptr<function, array<mat3x3f, PCG_MAXK1>>, Bw: ptr<function, array<f32, PCG_MAXK2>>) {
   let h = hEff(); let m = vertexRest(v).x;
-  var out = (m / (h * h) + grabSpring(v, pos(v)).w) * pv;
+  (*Hb)[0] = (m / (h * h) + grabSpring(v, pos(v)).w) * IDENTITY + stencilDiagonal(v);
   let damped = P.state1.z != 0u;
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
-    let entry = topo[P.topo0.y + j]; let f = entry >> 2u; let k = entry & 3u;
+    let entry = topo[P.topo0.y + j]; let f = entry >> 2u; let k = entry & 3u; let slots = topo[P.newton2.y + j];
     let t = tris(f); let dm = rest[P.rest0.x + f]; let fr = rest[P.rest0.y + f]; let c0 = rest[P.rest1.z + 2u * t.w];
     let a = vec3f(-dm.x - dm.y, dm.x, dm.y); let b = vec3f(-dm.z - dm.w, dm.z, dm.w);
-    let p0 = select(nwP(t.x), pv, k == 0u); let p1 = select(nwP(t.y), pv, k == 1u); let p2 = select(nwP(t.z), pv, k == 2u);
-    let d0 = a.x * p0 + a.y * p1 + a.z * p2; let d1 = b.x * p0 + b.y * p1 + b.z * p2;
-    let ak = select(select(a.x, a.y, k == 1u), a.z, k == 2u); let bk = select(select(b.x, b.y, k == 1u), b.z, k == 2u);
     let r = nwFaceRecord(f); let F0 = nw[r]; let F1 = nw[r + 1u]; let F2 = nw[r + 2u];
     let f0 = F0.xyz; let f1 = F1.xyz;
-    let rate = vec3f(dot(f0, d0), dot(f1, d1), dot(f0, d1) + dot(f1, d0));
-    let sg = fr.x * vec3f(F2.y * rate.x + c0.z * rate.y, c0.z * rate.x + F2.z * rate.y, c0.w * rate.z);
-    out += sg.x * ak * f0 + sg.y * bk * f1 + sg.z * (ak * f1 + bk * f0) + fr.x * (ak * (F0.w * d0 + F2.x * d1) + bk * (F2.x * d0 + F1.w * d1));
-    if (damped && fr.y > 0.0) {
-      let T0 = state[P.state1.x + 2u * f]; let T1 = state[P.state1.x + 2u * f + 1u];
-      let g0 = T0.xyz; let g1 = T1.xyz; let sc = fr.y * fr.x / h;
-      let rt = vec3f(dot(g0, d0), dot(g1, d1), dot(g0, d1) + dot(g1, d0));
-      let sd = sc * vec3f(T0.w * rt.x + c0.z * rt.y, c0.z * rt.x + T1.w * rt.y, c0.w * rt.z);
-      out += sd.x * ak * g0 + sd.y * bk * g1 + sd.z * (ak * g1 + bk * g0);
+    let ak = a[k]; let bk = b[k];
+    let rk0 = ak * f0; let rk1 = bk * f1; let rk2 = ak * f1 + bk * f0;
+    let wd = damped && fr.y > 0.0;
+    var T0 = vec4f(0.0); var T1 = vec4f(0.0); var sc = 0.0;
+    if (wd) { T0 = state[P.state1.x + 2u * f]; T1 = state[P.state1.x + 2u * f + 1u]; sc = fr.y * fr.x / h; }
+    let gk0 = ak * T0.xyz; let gk1 = bk * T1.xyz; let gk2 = ak * T1.xyz + bk * T0.xyz;
+    for (var c = 0u; c < 3u; c++) {
+      let al = a[c]; let bl = b[c];
+      let rl0 = al * f0; let rl1 = bl * f1; let rl2 = al * f1 + bl * f0;
+      let skl = ak * al * F0.w + (ak * bl + bk * al) * F2.x + bk * bl * F1.w;
+      var B = fr.x * (F2.y * outer(rk0, rl0) + c0.z * (outer(rk0, rl1) + outer(rk1, rl0)) + F2.z * outer(rk1, rl1) + c0.w * outer(rk2, rl2) + skl * IDENTITY);
+      if (wd) {
+        let gl0 = al * T0.xyz; let gl1 = bl * T1.xyz; let gl2 = al * T1.xyz + bl * T0.xyz;
+        B += sc * (T0.w * outer(gk0, gl0) + c0.z * (outer(gk0, gl1) + outer(gk1, gl0)) + T1.w * outer(gk1, gl1) + c0.w * outer(gk2, gl2));
+      }
+      let sl = (slots >> (8u * c)) & 255u;
+      (*Hb)[sl] += B;
     }
   }
-  // Strain-limit edges (augmented Lagrangian, active only): k n n^T + (f / len) (I - n n^T) on p_v - p_other.
+  // Strain-limit edges (augmented Lagrangian, active only): K = k n n^T + (f / len) (I - n n^T) on x_v - x_other.
   if (P.flags.z != 0u) {
     let xv = pos(v);
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
@@ -167,102 +249,184 @@ fn nwApplyAt(v: u32, pv: vec3f) -> vec3f {
       let dd = xv - pos(other); let len = length(dd);
       let dual = edgeDual(e); let f = dual.y * (len - dual.z) + dual.x;
       if (!(len > 0.0) || !(f > 0.0)) { continue; }
-      let n = dd / len; let dp = pv - nwP(other); let dn = dot(n, dp);
-      out += dual.y * dn * n + (f / len) * (dp - dn * n);
+      let n = dd / len; let K = (dual.y - f / len) * outer(n, n) + (f / len) * IDENTITY;
+      (*Hb)[0] += K;
+      let so = topo[P.newton2.z + j];
+      (*Hb)[so] -= K;
     }
   }
-  out += stencilDiagonal(v) * pv;
-  // Contact pairs (C2): the sum over v's entries of w_v M (sum_j w_j p_j), linearized at the iterate.
-  ${contact ? 'out += ogcVertexContactHvLanes(v, 0u, 1u);' : ''}
+  // The bending stencil (and its damping) off the diagonal.
   let hd = 1.0 / h;
-  for (var j = topo[P.topo2.z + v]; j < topo[P.topo2.z + v + 1u]; j++) {
-    let rec = topo4[P.newton1.x + j];
-    out += (bitcast<f32>(rec.y) + select(0.0, bitcast<f32>(rec.z) * hd, damped)) * nwP(rec.x);
+  for (var o = topo[P.topo2.z + v]; o < topo[P.topo2.z + v + 1u]; o++) {
+    let rec = topo4[P.newton1.x + o];
+    let w = bitcast<f32>(rec.y) + select(0.0, bitcast<f32>(rec.z) * hd, damped);
+    let dst = topo[P.newton2.w + o];
+    if ((dst & PCG_FAR) != 0u) { (*Bw)[dst & (PCG_FAR - 1u)] += w; } else { (*Hb)[dst] += w * IDENTITY; }
   }
-  return out;
 }
 
-// PCG iteration i (R.range.z, from 1): p_i = z + beta p_{i-1}, q = H p_i, and the partial p.q. The first iteration of
-// a Newton iteration also tests the residual; any iteration tests the PCG tolerance (both from the partials).
-@compute @workgroup_size(${workgroup}) fn pcgApply(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
+// ---------------------------------------------------------------- PCG (Chronopoulos-Gear), one dispatch per iteration
+var<workgroup> pcgUx: array<f32, PCG_SHARED>;
+var<workgroup> pcgUy: array<f32, PCG_SHARED>;
+var<workgroup> pcgUz: array<f32, PCG_SHARED>;
+var<workgroup> pcgRed: array<vec4f, PCG_PATCH>;
+var<workgroup> pcgOut: vec4f;
+var<workgroup> pcgScal: vec4f;
+var<private> pcgI: u32;
+var<private> pcgAlpha: f32;
+var<private> pcgBeta: f32;
+var<private> pcgPatchIndex: u32;
+fn pcgPartial(slot: u32, p: u32) -> u32 { return P.newton3.x + slot * P.newton3.y + p; }
+fn pcgScalar(k: u32) -> u32 { return P.newton3.z + k; }
+fn pcgMr(j: u32, r: vec3f) -> vec3f { return nwPrecondition(nw[nseg(${S.m0}u, j)], nw[nseg(${S.m1}u, j)], r); }
+// u = M^-1 r of this dispatch's iteration at vertex j from global memory: u_0 = M^-1 r_0; else r_i = r_{i-1} - alpha
+// s_{i-1} with s_{i-1} = w_{i-1} + beta s_{i-2}.
+fn pcgUGlobal(j: u32) -> vec3f {
+  if (pcgI == 0u) { return pcgMr(j, nw[nseg(${S.r0}u, j)].xyz); }
+  let o = (pcgI + 1u) % 2u;
+  let sv = nw[nseg(${S.w0}u + o, j)].xyz + pcgBeta * nw[nseg(${S.s0}u + pcgI % 2u, j)].xyz;
+  return pcgMr(j, nw[nseg(${S.r0}u + o, j)].xyz - pcgAlpha * sv);
+}
+fn pcgStage(c: u32, u: vec3f) { pcgUx[c] = u.x; pcgUy[c] = u.y; pcgUz[c] = u.z; }
+// u at a compiled column: a staged row or halo vertex, else (bit 31) global.
+fn pcgU(c: u32) -> vec3f {
+  if (c < PCG_SHARED) { return vec3f(pcgUx[c], pcgUy[c], pcgUz[c]); }
+  return pcgUGlobal(c & (PCG_GLOBAL - 1u));
+}
+// u at vertex j (the contact product's partners): the patch's own rows are staged.
+fn pcgDir(j: u32) -> vec3f {
+  let slot = pcgVertexSlot(j);
+  if (slot / PCG_PATCH == pcgPatchIndex) { let l = slot % PCG_PATCH; return vec3f(pcgUx[l], pcgUy[l], pcgUz[l]); }
+  return pcgUGlobal(j);
+}
+
+// PCG dispatch i (R.range.z, from 0). i = 0: u_0 = M^-1 r_0, w_0 = H u_0 and the partials (r.u, w.u, |g|^2). i >= 1:
+// gamma = r.u and delta = w.u of iteration i - 1 (with i = 1 the Newton residual test), beta = gamma / gamma_{i-2},
+// alpha = gamma / (delta - beta gamma / alpha_{i-2}); then p_{i-1} = u_{i-1} + beta p_{i-2}, s_{i-1} = w_{i-1} + beta
+// s_{i-2}, d += alpha p_{i-1}, r_i = r_{i-1} - alpha s_{i-1}, u_i = M^-1 r_i, w_i = H u_i and the partials of iteration i.
+@compute @workgroup_size(256) fn pcgStep(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0 || ctl.y != 0.0) { return; }
-  let i = R.range.z;
-  let G = nwSum(lane, nwPartial(0u));
-  let rz1 = nwSum(lane, nwPartial(2u + (i - 1u) % 3u)).x;
-  var beta = 0.0;
-  if (i > 1u) { beta = rz1 / nwSum(lane, nwPartial(2u + (i - 2u) % 3u)).x; }
-  let wgi = wgIndex(wg, nwg);
-  // Residual record (control + 1): |g|^2 over free DOFs at the step's first and latest Newton iterate.
-  if (i == 1u && wgi == 0u && lane == 0u) { var rr = nw[nwControl() + 1u]; if (ctl.w == 0.0) { rr.x = G.y; } rr.y = G.y; nw[nwControl() + 1u] = rr; }
-  if (i == 1u && G.y <= bitcast<f32>(P.newton1.z)) {
-    if (wgi == 0u && lane == 0u) { nw[nwControl()].x = 1.0; }
-    return;
+  let i = R.range.z; let p = wgIndex(wg, nwg); let lead = p == 0u && lane == 0u;
+  var alpha = 0.0; var beta = 0.0;
+  if (i > 0u) {
+    // Sums of the partials of iterations i - 1 and i - 2, and the scalars (gamma_0, alpha_{i-2}), uniform.
+    var a = vec4f(0.0);
+    for (var k = lane; k < P.newton3.y; k += PCG_PATCH) {
+      let q1 = nw[pcgPartial((i - 1u) % 3u, k)];
+      a += vec4f(q1.xyz, select(0.0, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
+    }
+    pcgRed[lane] = a;
+    workgroupBarrier();
+    for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
+    if (lane == 0u) { pcgOut = pcgRed[0]; pcgScal = vec4f(nw[pcgScalar(0u)].x, nw[pcgScalar(1u + i % 2u)].x, 0.0, 0.0); }
+    let sums = workgroupUniformLoad(&pcgOut);
+    let scal = workgroupUniformLoad(&pcgScal);
+    let gam = sums.x;
+    var gamma0 = scal.x;
+    if (i == 1u) {
+      gamma0 = gam;
+      // Residual record (control + 1): |g|^2 over free DOFs at the step's first and latest Newton iterate.
+      if (lead) { var rr = nw[nwControl() + 1u]; if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam); }
+      if (sums.z <= bitcast<f32>(P.newton1.z)) { if (lead) { nw[nwControl()].x = 1.0; } return; }
+    }
+    if (!(gam > bitcast<f32>(P.newton1.y) * gamma0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+    var denom = sums.y;
+    if (i >= 2u) { beta = gam / sums.w; denom = sums.y - beta * gam / scal.y; }
+    // H is PSD by construction; a non-positive curvature (rounding at convergence) ends this solve with d so far.
+    if (!(denom > 0.0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+    alpha = gam / denom;
+    if (lead) { nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(alpha); }
   }
-  if (!(rz1 > bitcast<f32>(P.newton1.y) * G.x)) {
-    if (wgi == 0u && lane == 0u) { nw[nwControl()].y = 1.0; }
-    return;
+  pcgI = i; pcgAlpha = alpha; pcgBeta = beta;
+  let tw = pcgTable(p);
+  let K1 = topo[tw]; let K2 = topo[tw + 1u]; let haloN = min(topo[tw + 2u], PCG_SHARED - PCG_PATCH); let halo = topo[tw + 3u];
+  let blocks = topo[tw + 4u]; let bends = topo[tw + 5u]; let rows = topo[tw + 7u];
+  pcgPatchIndex = p;
+  let own = lane < rows; let v = select(0u, pcgRowVertex(p * PCG_PATCH + lane), own);
+  var r = vec3f(0.0); var u = vec3f(0.0);
+  if (own) {
+    let M0 = nw[nseg(${S.m0}u, v)]; let M1 = nw[nseg(${S.m1}u, v)];
+    if (i == 0u) { r = nw[nseg(${S.r0}u, v)].xyz; } else {
+      let o = (i + 1u) % 2u;
+      let rOld = nw[nseg(${S.r0}u + o, v)].xyz;
+      let sv = nw[nseg(${S.w0}u + o, v)].xyz + beta * nw[nseg(${S.s0}u + i % 2u, v)].xyz;
+      let pv = nwPrecondition(M0, M1, rOld) + beta * nw[nseg(${S.p}u, v)].xyz;
+      r = rOld - alpha * sv;
+      nw[nseg(${S.p}u, v)] = vec4f(pv, 0.0);
+      nw[nseg(${S.d}u, v)] = vec4f(nw[nseg(${S.d}u, v)].xyz + alpha * pv, 0.0);
+      nw[nseg(${S.s0}u + o, v)] = vec4f(sv, 0.0);
+      nw[nseg(${S.r0}u + i % 2u, v)] = vec4f(r, 0.0);
+    }
+    u = nwPrecondition(M0, M1, r);
   }
-  nwBeta = beta; nwPOld = ${S.p0}u + (i - 1u) % 2u;
-  let v = wgi * NW_WG + lane;
-  var part = vec4f(0.0);
-  if (v < P.n.x) {
-    var q = vec3f(0.0); var p = vec3f(0.0);
-    if (!nwPinned(v)) { p = nwP(v); q = nwApplyAt(v, p); }
-    nw[nseg(${S.p0}u + i % 2u, v)] = vec4f(p, 0.0); nw[nseg(${S.q}u, v)] = vec4f(q, 0.0);
-    part = vec4f(dot(p, q), 0.0, 0.0, 0.0);
+  pcgStage(lane, u);
+  for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, pcgUGlobal(topo[halo + h])); }
+  workgroupBarrier();
+  var w = vec3f(0.0);
+  if (own) {
+    for (var k = 0u; k < K1; k++) {
+      let b0 = nw[pcgBlock(blocks, k, 0u, lane)]; let b1 = nw[pcgBlock(blocks, k, 1u, lane)]; let b2 = nw[pcgBlock(blocks, k, 2u, lane)];
+      let uj = pcgU(bitcast<u32>(b0.w));
+      w += vec3f(dot(b0.xyz, uj), dot(b1.xyz, uj), dot(b2.xyz, uj));
+    }
+    for (var m = 0u; 2u * m < K2; m++) {
+      let e = nw[bends + m * PCG_PATCH + lane];
+      w += e.y * pcgU(bitcast<u32>(e.x)) + e.w * pcgU(bitcast<u32>(e.z));
+    }
+    // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
+    ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+    nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
   }
-  nwPartialSum(lane, wgi, part, nwPartial(1u));
+  pcgRed[lane] = vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0);
+  workgroupBarrier();
+  for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
+  if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = pcgRed[0]; }
 }
 
-// PCG iteration i: alpha = r.z / p.q; d += alpha p, r -= alpha q, z = M^-1 r, and the partial r.z of iteration i.
-@compute @workgroup_size(${workgroup}) fn pcgUpdate(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
-  let ctl = nwControlUniform(lane);
-  if (ctl.x != 0.0 || ctl.y != 0.0) { return; }
-  let i = R.range.z;
-  let rz1 = nwSum(lane, nwPartial(2u + (i - 1u) % 3u)).x;
-  let pq = nwSum(lane, nwPartial(1u)).x;
-  let wgi = wgIndex(wg, nwg);
-  // H is PSD by construction; a non-positive curvature (rounding at convergence) ends this solve with d so far.
-  if (!(pq > 0.0)) {
-    if (wgi == 0u && lane == 0u) { nw[nwControl()].y = 1.0; }
-    return;
+${contact ? `// The projected arc (contact): after the filter hook fixes the round's certificates, each trial's move
+// delta_k(v) = Pi_v(x_v + 2^-k d_v) - x_v of vertex v, Pi_v onto v's certified set. Where Pi keeps the trial point the
+// move is exactly 2^-k d_v; pinned vertices (d = 0) stay put.
+@compute @workgroup_size(${workgroup}) fn nwProject(@builtin(global_invocation_id) id: vec3u) {
+  let v = id.x;
+  if (v >= P.n.x || nw[nwControl()].x != 0.0) { return; }
+  let x = pos(v); let d = nwD(v);
+  if (nwPinned(v) || all(d == vec3f(0.0))) { return; }
+  var alpha = 1.0; var cut = false;
+  for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+    var m = alpha * d;
+    let y = x + m; let q = nwProjectTrial(v, x, y, alpha, d);
+    if (any(q != y)) { m = q - x; cut = true; }
+    nw[nseg(${S.moves}u + k, v)] = vec4f(m, 0.0);
+    alpha *= 0.5;
   }
-  let alpha = rz1 / pq;
-  let v = wgi * NW_WG + lane;
-  var part = vec4f(0.0);
-  if (v < P.n.x) {
-    let p = nw[nseg(${S.p0}u + i % 2u, v)].xyz;
-    let d = nw[nseg(${S.d}u, v)].xyz + alpha * p;
-    let r = nw[nseg(${S.r}u, v)].xyz - alpha * nw[nseg(${S.q}u, v)].xyz;
-    let z = nwPrecondition(nw[nseg(${S.m0}u, v)], nw[nseg(${S.m1}u, v)], r);
-    nw[nseg(${S.d}u, v)] = vec4f(d, 0.0); nw[nseg(${S.r}u, v)] = vec4f(r, 0.0); nw[nseg(${S.z}u, v)] = vec4f(z, 0.0);
-    part = vec4f(dot(r, z), 0.0, 0.0, 0.0);
-  }
-  nwPartialSum(lane, wgi, part, nwPartial(2u + i % 3u));
+  if (cut) { nw[nseg(${S.d}u, v)] = vec4f(d, 1.0); }
 }
-
-// Line search: G(x + alpha d) - G(x) in difference form for alpha = 2^-k, k < ${CLOTH_NEWTON_TRIALS}, with its rounding floor, and
-// the slope g.d. Each vertex takes its own terms, its bending row and the faces whose first slot it is.
+` : ''}
+// Line search: G(x(alpha)) - G(x) in difference form for alpha = 2^-k, k < ${CLOTH_NEWTON_TRIALS}, with its rounding floor,
+// and the slope g.(x(alpha) - x) of each trial; x(alpha) = x + alpha d, or with contact the projected arc (nwMove).
+// Each vertex takes its own terms, its bending row and the faces whose first slot it is.
 var<private> nwE: array<vec4f, 2>;
 var<private> nwF: array<vec4f, 2>;
+var<private> nwS: array<vec4f, 2>;
 fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += e.y; }
-fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
 @compute @workgroup_size(${workgroup}) fn nwTrial(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0) { return; }
   let wgi = wgIndex(wg, nwg); let v = wgi * NW_WG + lane;
-  let a0 = nwAlpha0();
-  nwE = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwF = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
-  var slope = 0.0;
+  nwE = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwF = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwS = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
+  var dmax = 0.0; var cut = 0.0;
   if (v < P.n.x) {
-    let h = hEff(); let xv = pos(v); let dv = nwD(v);
-    slope = dot(nw[nseg(${S.g}u, v)].xyz, dv);
+    let h = hEff(); let xv = pos(v); let dv = nwD(v); let gv = nw[nseg(${S.g}u, v)].xyz;
+    dmax = dot(dv, dv);
+    // The arc cuts v's full step (its certificates bound it): a stall of the whole arc is then no convergence.
+    ${contact ? `cut = select(0.0, 1.0, nw[nseg(${S.d}u, v)].w != 0.0);` : ''}
     let w = vertexRest(v).x / (h * h); let rv = xv - state[seg(S_Y, v)].xyz; let gs = grabSpring(v, xv);
     let damped = P.state1.z != 0u;
-    var alpha = a0;
+    var alpha = 1.0;
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-      let d = alpha * dv;
+      let d = nwMove(v, k, alpha);
+      nwS[k / 4u][k % 4u] = dot(gv, d);
       let lin = w * dot(rv, d) + dot(gs.xyz, d); let quad = 0.5 * (w + gs.w) * dot(d, d);
       nwAdd(k, vec2f(lin + quad, abs(lin) + quad + (w * length(rv) + length(gs.xyz)) * length(d)));
       alpha *= 0.5;
@@ -275,24 +439,30 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
       let a = vec3f(-dm.x - dm.y, dm.x, dm.y); let b = vec3f(-dm.z - dm.w, dm.z, dm.w);
       let x0 = pos(t.x); let x1 = pos(t.y); let x2 = pos(t.z);
       let f0 = (x1 - x0) * dm.x + (x2 - x0) * dm.y; let f1 = (x1 - x0) * dm.z + (x2 - x0) * dm.w;
-      let D0 = nwD(t.x); let D1 = nwD(t.y); let D2 = nwD(t.z);
-      let g0 = a.x * D0 + a.y * D1 + a.z * D2; let g1 = b.x * D0 + b.y * D1 + b.z * D2;
       let e11 = 0.5 * (dot(f0, f0) - 1.0); let e22 = 0.5 * (dot(f1, f1) - 1.0); let gam = dot(f0, f1);
       let s11 = (1.0 - c1.z) * c1.x; let s22 = (1.0 - c1.z) * c1.y;
-      var T0 = vec4f(0.0); var T1 = vec4f(0.0); var rate = vec3f(0.0); var roundRate = vec3f(0.0); var drate1 = vec3f(0.0);
+      var T0 = vec4f(0.0); var T1 = vec4f(0.0); var rate = vec3f(0.0); var roundRate = vec3f(0.0);
       let sc = fr.y * fr.x / h;
-      if (damped && fr.y > 0.0) {
+      let faceDamped = damped && fr.y > 0.0;
+      if (faceDamped) {
         T0 = state[P.state1.x + 2u * f]; T1 = state[P.state1.x + 2u * f + 1u];
         let u0 = x0 - state[seg(S_XHAT, t.x)].xyz; let u1 = x1 - state[seg(S_XHAT, t.y)].xyz; let u2 = x2 - state[seg(S_XHAT, t.z)].xyz;
         let q0 = a.x * u0 + a.y * u1 + a.z * u2; let q1 = b.x * u0 + b.y * u1 + b.z * u2;
         rate = vec3f(dot(T0.xyz, q0), dot(T1.xyz, q1), dot(T0.xyz, q1) + dot(T1.xyz, q0));
         let ru = vec2f(abs(a.x) * length(u0) + abs(a.y) * length(u1) + abs(a.z) * length(u2), abs(b.x) * length(u0) + abs(b.y) * length(u1) + abs(b.z) * length(u2));
         roundRate = vec3f(length(T0.xyz) * ru.x, length(T1.xyz) * ru.y, length(T0.xyz) * ru.y + length(T1.xyz) * ru.x);
-        drate1 = vec3f(dot(T0.xyz, g0), dot(T1.xyz, g1), dot(T0.xyz, g1) + dot(T1.xyz, g0));
       }
-      var alpha = a0;
+      // A face none of whose vertices the arc cuts moves by alpha (a.d, b.d): gathered once.
+      let Q0 = nwD4(t.x); let Q1 = nwD4(t.y); let Q2 = nwD4(t.z);
+      let linear = Q0.w == 0.0 && Q1.w == 0.0 && Q2.w == 0.0;
+      let G0 = a.x * Q0.xyz + a.y * Q1.xyz + a.z * Q2.xyz; let G1 = b.x * Q0.xyz + b.y * Q1.xyz + b.z * Q2.xyz;
+      var alpha = 1.0;
       for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-        let df0 = alpha * g0; let df1 = alpha * g1;
+        var df0 = alpha * G0; var df1 = alpha * G1;
+        if (!linear) {
+          let D0 = nwMove(t.x, k, alpha); let D1 = nwMove(t.y, k, alpha); let D2 = nwMove(t.z, k, alpha);
+          df0 = a.x * D0 + a.y * D1 + a.z * D2; df1 = b.x * D0 + b.y * D1 + b.z * D2;
+        }
         let d11 = dot(f0, df0) + 0.5 * dot(df0, df0); let d22 = dot(f1, df1) + 0.5 * dot(df1, df1);
         let dg = dot(f0, df1) + dot(df0, f1) + dot(df0, df1);
         let q11 = quadDelta(c0.x - select(0.0, s11, e11 < 0.0), c0.x - select(0.0, s11, e11 + d11 < 0.0), e11, d11);
@@ -300,8 +470,8 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
         let q12 = c0.z * (e11 * d22 + d11 * e22 + d11 * d22); let qs = c0.w * (gam * dg + 0.5 * dg * dg);
         let rounding = (c0.x + c0.z) * abs(d11) * (0.5 + e11) + (c0.y + c0.z) * abs(d22) * (0.5 + e22) + c0.w * abs(dg) * sqrt(max((1.0 + 2.0 * e11) * (1.0 + 2.0 * e22), 0.0));
         var out = fr.x * vec2f(q11 + q22 + q12 + qs, abs(q11) + abs(q22) + abs(q12) + abs(qs) + rounding);
-        if (damped && fr.y > 0.0) {
-          let dr = alpha * drate1;
+        if (faceDamped) {
+          let dr = vec3f(dot(T0.xyz, df0), dot(T1.xyz, df1), dot(T0.xyz, df1) + dot(T1.xyz, df0));
           let sigma = vec3f(T0.w * rate.x + c0.z * rate.y, c0.z * rate.x + T1.w * rate.y, c0.w * rate.z);
           let dsigma = vec3f(T0.w * dr.x + c0.z * dr.y, c0.z * dr.x + T1.w * dr.y, c0.w * dr.z);
           let lin = sc * dot(dr, sigma); let quad = 0.5 * sc * dot(dr, dsigma);
@@ -311,73 +481,91 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
         alpha *= 0.5;
       }
     }
-    // Vertex v's bending rows (and their damping): R d once a row, then each trial exactly.
+    // Vertex v's bending rows (and their damping): each trial's stencil move R delta (alpha R d once a row when the
+    // arc cuts none of its vertices), then its exact change.
+    let cutV = nwD4(v).w != 0.0;
     for (var r = BEND_ROWS * v; r < BEND_ROWS * (v + 1u); r++) {
-      let q = loadBend(r); var ds1 = vec3f(0.0);
-      for (var o = topo[P.topo0.z + r]; o < topo[P.topo0.z + r + 1u]; o++) { ds1 += bendW(o) * (nwD(bendJ(o)) - dv); }
-      alpha = a0;
-      for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, bendDelta(q, alpha * ds1)); alpha *= 0.5; }
+      let q = loadBend(r); var ds1 = vec3f(0.0); var linear = !cutV;
+      for (var o = topo[P.topo0.z + r]; o < topo[P.topo0.z + r + 1u]; o++) { let Q = nwD4(bendJ(o)); ds1 += bendW(o) * (Q.xyz - dv); linear = linear && Q.w == 0.0; }
+      alpha = 1.0;
+      for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+        var ds = alpha * ds1;
+        if (!linear) {
+          let mv = nwMove(v, k, alpha); ds = vec3f(0.0);
+          for (var o = topo[P.topo0.z + r]; o < topo[P.topo0.z + r + 1u]; o++) { ds += bendW(o) * (nwMove(bendJ(o), k, alpha) - mv); }
+        }
+        nwAdd(k, bendDelta(q, ds));
+        alpha *= 0.5;
+      }
     }
-    // Strain-limit edges whose first slot v is: exact in the relative move d_v - d_other.
+    // Strain-limit edges whose first slot v is: exact in the relative move.
     if (P.flags.z != 0u) {
       for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
         let entry = topo[P.topo1.y + j];
         if ((entry & 3u) != 0u) { continue; }
         let e = entry >> 2u; let ev = edges(e); let other = select(ev.x, ev.y, ev.x == v);
-        let rel = dv - nwD(other);
-        alpha = a0;
-        for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, edgeDelta(v, xv, e, alpha * rel)); alpha *= 0.5; }
+        let Qo = nwD4(other); let linear = !cutV && Qo.w == 0.0; let rel = dv - Qo.xyz;
+        alpha = 1.0;
+        for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+          var m = alpha * rel;
+          if (!linear) { m = nwMove(v, k, alpha) - nwMove(other, k, alpha); }
+          nwAdd(k, edgeDelta(v, xv, e, m)); alpha *= 0.5;
+        }
       }
     }
-    ${contact ? `// Contact pairs v owns (each pair once over all vertices), at x and at every trial x + a d.
+    ${contact ? `// Contact pairs v owns (each pair once over all vertices), at x and at every trial point x(alpha) (ogcX).
     let ec0 = ogcContactEnergyOwnedLanes(v, 0u, 1u);
-    alpha = a0;
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-      nwTrialStep = alpha; let ec = ogcContactEnergyOwnedLanes(v, 0u, 1u); nwTrialStep = 0.0;
+      nwTrialMove = k + 1u; let ec = ogcContactEnergyOwnedLanes(v, 0u, 1u); nwTrialMove = 0u;
       nwAdd(k, vec2f(ec - ec0, abs(ec0) + abs(ec)));
-      alpha *= 0.5;
     }` : ''}
   }
-  let base = nwPartial(${CLOTH_NEWTON_PARTIALS}u);
+  let base = nwPartial(0u);
   nwPartialSum(lane, wgi, nwE[0], base);
   nwPartialSum(lane, wgi, nwE[1], base + P.newton0.z);
   nwPartialSum(lane, wgi, nwF[0], base + 2u * P.newton0.z);
   nwPartialSum(lane, wgi, nwF[1], base + 3u * P.newton0.z);
-  nwPartialSum(lane, wgi, vec4f(slope, 0.0, 0.0, 0.0), base + 4u * P.newton0.z);
+  nwPartialSum(lane, wgi, nwS[0], base + 4u * P.newton0.z);
+  nwPartialSum(lane, wgi, nwS[1], base + 5u * P.newton0.z);
+  nwPartialSumMax(lane, wgi, vec2f(cut, dmax), base + 6u * P.newton0.z);
 }
 
-// One workgroup: the largest Armijo step (0 and Newton done if none descends), and the next Newton iteration's PCG reset.
+// One workgroup: the largest trial whose move descends (g.(x(alpha) - x) < 0) and passes Armijo along it, and the next
+// Newton iteration's PCG reset. If none does, Newton is done, unless the arc was cut (a vertex's certificates bound its
+// full step): then the iterate stays, Newton runs on, and the re-detection round that follows (afterNewtonStep) gives
+// the next iteration new certificates to step in.
 @compute @workgroup_size(${workgroup}) fn nwChoose(@builtin(local_invocation_index) lane: u32) {
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0) { return; }
-  let base = nwPartial(${CLOTH_NEWTON_PARTIALS}u);
+  let base = nwPartial(0u);
   let E0 = nwSum(lane, base); let E1 = nwSum(lane, base + P.newton0.z);
   let F0 = nwSum(lane, base + 2u * P.newton0.z); let F1 = nwSum(lane, base + 3u * P.newton0.z);
-  let slope = nwSum(lane, base + 4u * P.newton0.z).x;
+  let S0 = nwSum(lane, base + 4u * P.newton0.z); let S1 = nwSum(lane, base + 5u * P.newton0.z);
+  let sm = nwSumMax(lane, base + 6u * P.newton0.z);
   if (lane != 0u) { return; }
-  let a0 = nwAlpha0();
-  // A filter that allows no step (alpha_min = 0: a certificate is already tight) moves nothing and leaves Newton running:
-  // it arms a re-detection round, whose new certificates the next Newton iteration steps in.
-  if (!(a0 > 0.0)) { nw[nwControl()] = vec4f(0.0, 0.0, 0.0, ctl.w + 1.0); return; }
-  var chosen = 0.0; var alpha = a0;
-  if (slope < 0.0) {
-    for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-      let e = select(E1[k - 4u], E0[k], k < 4u); let fl = select(F1[k - 4u], F0[k], k < 4u);
-      if (e <= ${CLOTH_LINE_SEARCH.armijo} * alpha * slope + 4.0 * EPS32 * fl) { chosen = alpha; break; }
-      alpha *= 0.5;
-    }
+  var chosen = 0.0; var alpha = 1.0;
+  for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+    let e = select(E1[k - 4u], E0[k], k < 4u); let fl = select(F1[k - 4u], F0[k], k < 4u); let sl = select(S1[k - 4u], S0[k], k < 4u);
+    if (sl < 0.0 && e <= ${CLOTH_LINE_SEARCH.armijo} * sl + 4.0 * EPS32 * fl) { chosen = alpha; break; }
+    alpha *= 0.5;
   }
-  nw[nwControl()] = vec4f(select(0.0, 1.0, chosen == 0.0), 0.0, chosen, ctl.w + 1.0);
+  // Converged: no descending step, or (velocity tolerance, newton3.w) the accepted step moves no vertex faster than
+  // tol h~ / h~ (alpha |d_v| bounds the projected move too: each certified set holds x_v). nwApply still applies a converged step's move.
+  let tolV = bitcast<f32>(P.newton3.w);
+  let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff();
+  let stalled = chosen == 0.0 && !(sm.x > 0.0);
+  nw[nwControl()] = vec4f(select(0.0, 1.0, stalled || small), 0.0, chosen, ctl.w + 1.0);
 }
 
 @compute @workgroup_size(${workgroup}) fn nwApply(@builtin(global_invocation_id) id: vec3u) {
   let v = id.x;
   let ctl = nw[nwControl()];
   if (v >= P.n.x) { return; }
-  // Newton done: d = 0, so the capped iterations left (all early exits) give the contact filter and re-detection nothing to act on.
-  if (ctl.x != 0.0) { nw[nseg(${S.d}u, v)] = vec4f(0.0); return; }
-  if (!(ctl.z > 0.0)) { return; }
-  positions[v] = vec4f(pos(v) + ctl.z * nwD(v), positions[v].w);
+  // The accepted trial's move (a converged step's too; once Newton is done d = 0 and this moves nothing). chosen = 2^-k exactly.
+  // Newton done: d = 0 (its w too, so no stored move is read again), so the capped iterations left (all early exits, the
+  // control record keeping its last step) move nothing and give the contact filter and re-detection nothing to act on.
+  if (ctl.z > 0.0) { positions[v] = vec4f(pos(v) + nwMove(v, u32(round(-log2(ctl.z))), ctl.z), positions[v].w); }
+  if (ctl.x != 0.0) { nw[nseg(${S.d}u, v)] = vec4f(0.0); }
 }
 
 // After each applied Newton iteration (not once Newton is done): the AVBD dual update of every strain-limit edge, so

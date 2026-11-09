@@ -38,7 +38,9 @@ import type { ClothDocument, ClothVector } from './types';
  */
 export const CLOTH_SCENE_CONTACT = {
   kc_N_m: 100,
-  epsV_m_s: 1e-2,
+  // IPC's friction regularization: below eps_v a sticking contact creeps at about eps_v-scale speeds. 1 mm/s (coordinator
+  // ruling 2026-11-10): the 20 degree incline patch creeps 0.6 mm/s (4.8 mm/s at 1 cm/s), the 35 degree slide is unchanged.
+  epsV_m_s: 1e-3,
   rqBase_m: 3e-3,
   rqMax_m: 0.04,
   envelopeScale: 2.5,

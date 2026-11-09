@@ -110,6 +110,9 @@ export interface ClothNewtonSettings {
   readonly pcgTolerance?: number;
   /** Newton stops when |g| <= tol |m g| over free vertices (default 1e-4). */
   readonly residualTolerance?: number;
+  /** Newton also stops after an accepted step that moves no vertex faster than this (|alpha d_v| <= tol h, m/s;
+   * default 0, off): the step's velocities are then settled to this tolerance. */
+  readonly velocityTolerance_m_s?: number;
 }
 
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per

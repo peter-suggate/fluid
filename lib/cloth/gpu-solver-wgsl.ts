@@ -3,7 +3,7 @@
  * contact) are those of the Float64 oracle (oracle.ts) in f32. Every buffer and bind slot is described in gpu-solver.ts. */
 import { CLOTH_AVBD } from './oracle';
 import { CLOTH_BEND_ROWS } from './topology';
-import { clothNewtonWGSL } from './gpu-newton-wgsl';
+import { clothNewtonWGSL, type ClothPCGLayout } from './gpu-newton-wgsl';
 
 /** vec4<f32> per-vertex segments of the `state` buffer, each CLOTH_SEGMENT_ALIGN-padded N long.
  * Segment 0 is the step-start velocity, so C2 binds `state` as its velocity input. After the
@@ -35,11 +35,15 @@ export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as co
 export interface ClothSolverWGSLOptions {
   /** C2's vertex contact block (ogcVertexBlockWGSL at group 0, CLOTH_BINDING.contact); omitted: no contact terms. */
   readonly contactBlock?: string;
+  /** The compiled PCG layout (ClothGPUTables.pcg) the Newton kernels are specialised to. */
+  readonly pcg: ClothPCGLayout;
 }
 
-export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
+export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
   // With contact the BDF2 history restarts at a contact onset (C2's contact state).
   const contact = !!options.contactBlock, restart = contact;
+  // TEMPORARY (the projected-arc bridge): C2's block without ogcProject yet. Deleted with the commit that consumes ogcProject.
+  const bridge = contact && !options.contactBlock!.includes('fn ogcProject(');
   return /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)
@@ -57,8 +61,11 @@ struct Params {
   grab: vec4f,   // mouse grab: displacement of its anchors (xyz, metres), held (w: 1, else 0)
   newton0: vec4u, // Newton-PCG (gpu-newton-wgsl.ts): face records, partials, partial count W, control record (nw records)
   newton1: vec4u, // bending stencil records (topo4 index), PCG tolerance^2 and residual tolerance^2 |m g|^2 (f32 bits)
+  newton2: vec4u, // compiled topology (topo words): patch table, face corner slots, edge slots, stencil destinations
+  newton3: vec4u, // PCG partials (nw record), patches, PCG scalars (nw record), unused
+  newton4: vec4u, // compiled topology (topo words): vertex of each patch slot, patch slot of each vertex, unused, unused
 }
-struct Dispatch { range: vec4u, values: vec4f } // (0, N, PCG iteration)
+struct Dispatch { range: vec4u, values: vec4f } // (0, N, PCG iteration from 0)
 
 @group(0) @binding(${CLOTH_BINDING.params}) var<uniform> P: Params;
 @group(0) @binding(${CLOTH_BINDING.dispatch}) var<uniform> R: Dispatch;
@@ -112,13 +119,22 @@ fn grabSpring(v: u32, xv: vec3f) -> vec4f {
 fn outer(u: vec3f, w: vec3f) -> mat3x3f { return mat3x3f(u * w.x, u * w.y, u * w.z); }
 fn finite3(x: vec3f) -> bool { return all(abs(x) <= vec3f(3.0e38)); }
 
-${contact ? `// Newton: the line search evaluates the contact energy at x + a d (nwTrialStep = a, 0 everywhere else); H.p
-// multiplies the PCG direction p formed on the fly; the filter's alpha_v per vertex and alpha_min (word N) bound d.
-var<private> nwTrialStep: f32;
-fn ogcX(i: u32) -> vec3f { if (nwTrialStep != 0.0) { return positions[i].xyz + nwTrialStep * nwD(i); } return positions[i].xyz; }
-fn ogcDir(i: u32) -> vec3f { return nwP(i); }
+${contact ? `// Newton: the line search evaluates the contact energy at each trial point x(alpha) of the projected arc
+// (nwTrialMove = k + 1 for trial k, 0 everywhere else); H.p multiplies the PCG vector u (staged in the patch, else formed
+// from global memory).
+var<private> nwTrialMove: u32;
+fn ogcX(i: u32) -> vec3f {
+  if (nwTrialMove != 0u) { let k = nwTrialMove - 1u; return positions[i].xyz + nwMove(i, k, exp2(-f32(k))); }
+  return positions[i].xyz;
+}
+fn ogcDir(i: u32) -> vec3f { return pcgDir(i); }
 @group(0) @binding(${CLOTH_BINDING.filter}) var<storage, read> ogcFilter: array<f32>;
-fn ogcAlphaMin() -> f32 { return ogcFilter[P.n.x]; }` : ''}
+${bridge
+  ? `// TEMPORARY bridge until C2's ogcProject lands (deleted with the commit that consumes it): the filter's alpha_v, the
+// largest step along d inside every certificate of v (each convex and holding x_v), gives the certified point x + min(alpha, alpha_v) d.
+fn nwProjectTrial(v: u32, x: vec3f, y: vec3f, alpha: f32, d: vec3f) -> vec3f { return x + min(alpha, clamp(ogcFilter[v], 0.0, 1.0)) * d; }`
+  : `// Pi_v (C2's ogcProject): a point of v's certified set from the trial point y = x + alpha d.
+fn nwProjectTrial(v: u32, x: vec3f, y: vec3f, alpha: f32, d: vec3f) -> vec3f { return ogcProject(v, x, y); }`}` : ''}
 ${contact ? `fn ogcXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
 fn ogcTri(t: u32) -> vec3u { return tris(t).xyz; }
 fn ogcEdgeVerts(e: u32) -> vec2u { return edges(e).xy; }
@@ -585,5 +601,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact)}`;
+${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg)}`;
 }

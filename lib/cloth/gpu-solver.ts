@@ -24,7 +24,7 @@
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothNewtonSettings, ClothSolverStateData, ClothVector } from './types';
 import { CLOTH_INITIAL_GUESS, type ClothInitialGuess, type ClothSolverModel } from './oracle';
-import { CLOTH_NEWTON_PARTIALS, CLOTH_NEWTON_SEGMENT_COUNT, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS } from './gpu-newton-wgsl';
+import { clothNewtonSegmentCount, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, type ClothPCGLayout } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
   CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
@@ -88,7 +88,7 @@ export interface ClothGPUSolverOptions {
 
 export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
-export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4 });
+export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0 });
 
 export interface ClothStatusSlot {
   readonly step: number;
@@ -136,16 +136,18 @@ export interface ClothGPUTables {
   readonly stateRecords: number;
   /** vec4 records of the Newton-PCG `nw` buffer. */
   readonly newtonRecords: number;
+  /** The compiled PCG layout (compileClothPCGPatches): the shaders' constants, the patch count (pcgStep workgroups). */
+  readonly pcg: ClothPCGLayout & { readonly patches: number; readonly maxHalo: number };
 }
 
-const PARAM_WORDS = 64;
+const PARAM_WORDS = 72;
 /** u32 words of the bending block (Params.bend: its diagonal's rest record in w). */
 const PARAM_BEND = 44;
 /** Float words of the params uniform: gravity xyz + dt, then the clock origin and the initial guess. */
 const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 /** Float words of the mouse grab (Params.grab): displacement xyz, held flag. */
 const PARAM_GRAB = 48;
-/** u32 words of the Newton block (Params.newton0, newton1). */
+/** u32 words of the Newton block (Params.newton0 .. newton4). */
 const PARAM_NEWTON = 52;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
@@ -183,7 +185,152 @@ export function clothBendingStencil(model: ClothSolverModel): { offsets: Uint32A
   return { offsets, columns, q, qd, diagonal };
 }
 
-export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess'>, time_s = 0): ClothGPUTables {
+/** Rows per PCG patch: one 256-thread workgroup per patch, one row per thread (gpu-newton-wgsl.ts, pcgStep). */
+export const CLOTH_PCG_PATCH = 256;
+/** Workgroup-memory vertices (vec3 as three f32 arrays) a patch can stage under a device's workgroup storage limit
+ * (pcgStep also holds a 256-record reduction and two scalars): its rows and as much of its halo as fits; the rest of
+ * a halo is read through global memory. */
+export function clothPCGSharedCap(workgroupStorageBytes: number): number {
+  const cap = Math.floor((workgroupStorageBytes - 16 * CLOTH_PCG_PATCH - 64) / 12 / 32) * 32;
+  if (cap < CLOTH_PCG_PATCH) throw new Error(`Cloth PCG needs ${12 * CLOTH_PCG_PATCH + 16 * CLOTH_PCG_PATCH + 64} B of workgroup storage; the device grants ${workgroupStorageBytes}`);
+  return cap;
+}
+/** u32 words per patch in the patch table: K1, K2, halo count, halo word, block record, bending record, column word, rows. */
+export const CLOTH_PCG_PATCH_WORDS = 8;
+/** A compiled column at or above this bit is a global vertex index (outside the staged halo). */
+export const CLOTH_PCG_GLOBAL = 0x80000000;
+
+/**
+ * The compiled topology of the assembled H (built once per topology revision, CPU, edit time): the vertices in the
+ * Morton order of their rest positions fall into patches of CLOTH_PCG_PATCH rows (compact tiles, so a patch's halo
+ * is its border; the vertex numbering itself is unchanged, `rows` and `vertexSlot` map between the two). Row v holds, in sliced-ELL order (slot s of lane l at s * PATCH + l),
+ * K1 3x3 blocks (slot 0 the diagonal, then v's 1-ring neighbours by index: membrane, damping, strain edges and the
+ * bending entries of the 1-ring) and K2 scalar entries (the bending stencil's 2-ring entries beyond the 1-ring), K1, K2
+ * the patch's largest. A column is a patch-local index (rows 0..PATCH-1, then the patch's halo of outside columns, as
+ * far as the staged workgroup memory holds) or CLOTH_PCG_GLOBAL | v. Per incidence the assembly reads the slot that
+ * each corner of a face (faceSlots: three bytes), the other end of an edge (edgeSlots) and each bending stencil record
+ * (stencilDest: a block slot, or bit 30 and the 2-ring index) lands in.
+ */
+export interface ClothPCGPatches {
+  readonly patches: number;
+  readonly shared: number;
+  /** The vertex of each patch slot (p * PATCH + lane), and the slot of each vertex. */
+  readonly rows: Uint32Array;
+  readonly vertexSlot: Uint32Array;
+  /** Per patch: K1, K2, halo count, halo offset (into halo), rows; block and bending records relative to their regions. */
+  readonly table: Uint32Array;
+  readonly halo: Uint32Array;
+  /** Per patch, K1 * PATCH block columns then K2 * PATCH bending columns, local-encoded; relative word offsets in table. */
+  readonly columns: Uint32Array;
+  readonly faceSlots: Uint32Array;
+  readonly edgeSlots: Uint32Array;
+  readonly stencilDest: Uint32Array;
+  /** vec4 records of the assembled blocks (3 per slot) and of the bending entries (one per two slots). */
+  readonly blockRecords: number;
+  readonly bendRecords: number;
+  /** Largest K1 and K2 over the patches, and the largest halo (diagnostics). */
+  readonly maxK1: number; readonly maxK2: number; readonly maxHalo: number;
+}
+
+export function compileClothPCGPatches(model: ClothSolverModel, stencil: ReturnType<typeof clothBendingStencil>, sharedCap = clothPCGSharedCap(16384)): ClothPCGPatches {
+  const t = model.topology, N = t.vertexCount, PATCH = CLOTH_PCG_PATCH, patches = Math.max(1, Math.ceil(N / PATCH));
+  // 1-ring by index (faces and edges share it: every edge is a face edge).
+  const ring: number[][] = Array.from({ length: N }, () => []);
+  for (let f = 0; f < t.faceCount; f++) for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) {
+    const u = t.faces[3 * f + a]!, w = t.faces[3 * f + b]!;
+    if (u !== w) ring[u]!.push(w);
+  }
+  for (let e = 0; e < t.edgeCount; e++) { const u = t.edges[4 * e]!, w = t.edges[4 * e + 1]!; ring[u]!.push(w); ring[w]!.push(u); }
+  const slotOf: Map<number, number>[] = ring.map(r => new Map([...new Set(r)].sort((x, y) => x - y).map((j, i) => [j, i + 1])));
+  const far: number[][] = Array.from({ length: N }, (_, v) => {
+    const out: number[] = [];
+    for (let o = stencil.offsets[v]!; o < stencil.offsets[v + 1]!; o++) { const j = stencil.columns[o]!; if (j !== v && !slotOf[v]!.has(j)) out.push(j); }
+    return out;
+  });
+  const farIndex = far.map(list => new Map(list.map((j, i) => [j, i])));
+  // Morton order (10 bits an axis) of the rest positions in their bounding box, ties by index.
+  const x = t.data.restPositions_m, lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let v = 0; v < N; v++) for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a]!, x[3 * v + a]!); hi[a] = Math.max(hi[a]!, x[3 * v + a]!); }
+  const spread = (q: number) => { let r = 0; for (let b = 0; b < 10; b++) r |= ((q >> b) & 1) << (3 * b); return r >>> 0; };
+  const code = new Uint32Array(N);
+  for (let v = 0; v < N; v++) {
+    let c = 0;
+    for (let a = 0; a < 3; a++) {
+      const span = hi[a]! - lo[a]!, q = span > 0 ? Math.min(1023, Math.floor(1024 * (x[3 * v + a]! - lo[a]!) / span)) : 0;
+      c |= spread(q) << a;
+    }
+    code[v] = c >>> 0;
+  }
+  const rows = Uint32Array.from({ length: N }, (_, v) => v).sort((a, b) => code[a]! - code[b]! || a - b);
+  const vertexSlot = new Uint32Array(N);
+  rows.forEach((v, slot) => { vertexSlot[v] = slot; });
+  const patchOf = (v: number) => Math.floor(vertexSlot[v]! / PATCH);
+  const table = new Uint32Array(CLOTH_PCG_PATCH_WORDS * patches), halos: number[][] = [], local: Map<number, number>[] = [];
+  let maxK1 = 1, maxK2 = 0, maxHalo = 0;
+  for (let p = 0; p < patches; p++) {
+    const r0 = p * PATCH, r1 = Math.min(N, r0 + PATCH);
+    let K1 = 1, K2 = 0;
+    const outside = new Set<number>();
+    for (let s = r0; s < r1; s++) {
+      const v = rows[s]!;
+      K1 = Math.max(K1, 1 + slotOf[v]!.size); K2 = Math.max(K2, far[v]!.length);
+      for (const j of [...slotOf[v]!.keys(), ...far[v]!]) if (patchOf(j) !== p) outside.add(j);
+    }
+    K2 += K2 & 1; // bending entries pack two to a record
+    const halo = [...outside].sort((x, y) => x - y);
+    halos.push(halo); maxK1 = Math.max(maxK1, K1); maxK2 = Math.max(maxK2, K2); maxHalo = Math.max(maxHalo, halo.length);
+    table.set([K1, K2, halo.length, 0, 0, 0, 0, r1 - r0], CLOTH_PCG_PATCH_WORDS * p);
+  }
+  const shared = Math.min(sharedCap, align(PATCH + maxHalo, 32));
+  let haloWords = 0, columnWords = 0, blockRecords = 0, bendRecords = 0;
+  for (let p = 0; p < patches; p++) {
+    const w = CLOTH_PCG_PATCH_WORDS * p, K1 = table[w]!, K2 = table[w + 1]!;
+    table[w + 3] = haloWords; haloWords += halos[p]!.length;
+    table[w + 4] = blockRecords; blockRecords += 3 * K1 * PATCH;
+    table[w + 5] = bendRecords; bendRecords += (K2 / 2) * PATCH;
+    table[w + 6] = columnWords; columnWords += (K1 + K2) * PATCH;
+    const map = new Map<number, number>();
+    halos[p]!.forEach((j, h) => { if (PATCH + h < shared) map.set(j, PATCH + h); });
+    local.push(map);
+  }
+  const halo = new Uint32Array(Math.max(haloWords, 1)), columns = new Uint32Array(Math.max(columnWords, 1));
+  for (let p = 0; p < patches; p++) {
+    const w = CLOTH_PCG_PATCH_WORDS * p, K1 = table[w]!, K2 = table[w + 1]!, r0 = p * PATCH, count = table[w + 7]!, c0 = table[w + 6]!;
+    halo.set(halos[p]!, table[w + 3]);
+    const enc = (j: number) => patchOf(j) === p ? vertexSlot[j]! - r0 : local[p]!.get(j) ?? (CLOTH_PCG_GLOBAL | j) >>> 0;
+    for (let l = 0; l < PATCH; l++) {
+      // Padding slots point at the row itself (lane l, or lane 0 past the last row) with zero blocks and weights.
+      const self = l < count ? l : 0;
+      for (let k = 0; k < K1; k++) columns[c0 + k * PATCH + l] = self;
+      for (let k = 0; k < K2; k++) columns[c0 + (K1 + k) * PATCH + l] = self;
+      if (l >= count) continue;
+      const v = rows[r0 + l]!;
+      for (const [j, k] of slotOf[v]!) columns[c0 + k * PATCH + l] = enc(j);
+      far[v]!.forEach((j, k) => { columns[c0 + (K1 + k) * PATCH + l] = enc(j); });
+    }
+  }
+  const faceSlots = new Uint32Array(Math.max(t.vertexFaces.length, 1));
+  for (let v = 0; v < N; v++) for (let j = t.vertexFaceOffsets[v]!; j < t.vertexFaceOffsets[v + 1]!; j++) {
+    const f = t.vertexFaces[j]! >>> 2;
+    let word = 0;
+    for (let c = 0; c < 3; c++) { const u = t.faces[3 * f + c]!; word |= (u === v ? 0 : slotOf[v]!.get(u)!) << (8 * c); }
+    faceSlots[j] = word;
+  }
+  const edgeSlots = new Uint32Array(Math.max(t.vertexEdges.length, 1));
+  for (let v = 0; v < N; v++) for (let j = t.vertexEdgeOffsets[v]!; j < t.vertexEdgeOffsets[v + 1]!; j++) {
+    const e = t.vertexEdges[j]! >>> 2, u = t.edges[4 * e]!, w = t.edges[4 * e + 1]!;
+    edgeSlots[j] = slotOf[v]!.get(u === v ? w : u)!;
+  }
+  const stencilDest = new Uint32Array(Math.max(stencil.columns.length, 1));
+  for (let v = 0; v < N; v++) for (let o = stencil.offsets[v]!; o < stencil.offsets[v + 1]!; o++) {
+    const j = stencil.columns[o]!, k = slotOf[v]!.get(j);
+    stencilDest[o] = k !== undefined ? k : (0x40000000 | farIndex[v]!.get(j)!) >>> 0;
+  }
+  if (maxK1 > 255) throw new Error(`Cloth vertex valence ${maxK1 - 1} exceeds the compiled stencil's 255 slots`);
+  return { patches, shared, rows, vertexSlot, table, halo, columns, faceSlots, edgeSlots, stencilDest, blockRecords, bendRecords, maxK1, maxK2, maxHalo };
+}
+
+export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess'> & { readonly contact?: unknown }, time_s = 0, workgroupStorageBytes = 16384): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, M = model.materials.length, S = model.scripts.length;
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
@@ -195,7 +342,9 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const R = t.bendRowCount;
   const bendOffsets = Uint32Array.from(t.bendOffsets, (o, r) => o - Math.min(r, R)), bendEntries = new Uint32Array(2 * Math.max(t.bendVertices.length - R, 1)), bendF = new Float32Array(bendEntries.buffer);
   for (let r = 0, q = 0; r < R; r++) for (let o = t.bendOffsets[r]! + 1; o < t.bendOffsets[r + 1]!; o++, q++) { bendEntries[2 * q] = t.bendVertices[o]!; bendF[2 * q + 1] = t.bendWeights[o]!; }
-  const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, triangles, t.edges, stencil.offsets, stencilRecords];
+  const pcg = compileClothPCGPatches(model, stencil, clothPCGSharedCap(workgroupStorageBytes));
+  const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, triangles, t.edges, stencil.offsets, stencilRecords,
+    pcg.table, pcg.halo, pcg.columns, pcg.faceSlots, pcg.edgeSlots, pcg.stencilDest, pcg.rows, pcg.vertexSlot];
   const topoBase: number[] = [];
   let words = 0;
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
@@ -246,17 +395,30 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
   paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, 0, guess, 0], PARAM_GRAVITY);
   params.set([0, 0, 0, diagonalRecord], PARAM_BEND);
-  const newtonFaces = CLOTH_NEWTON_SEGMENT_COUNT * stride, newtonPartials = align(newtonFaces + 3 * T, CLOTH_SEGMENT_ALIGN);
-  const newtonControl = align(newtonPartials + (CLOTH_NEWTON_PARTIALS + CLOTH_NEWTON_TRIAL_RECORDS) * workgroups, CLOTH_SEGMENT_ALIGN);
+  // nw: segments, face records, assembled blocks and bending entries, line-search partials, PCG partials and scalars, control.
+  const newtonFaces = clothNewtonSegmentCount(!!options.contact) * stride, newtonBlocks = align(newtonFaces + 3 * T, CLOTH_SEGMENT_ALIGN);
+  const newtonBends = newtonBlocks + pcg.blockRecords, newtonPartials = align(newtonBends + pcg.bendRecords, CLOTH_SEGMENT_ALIGN);
+  const pcgPartials = align(newtonPartials + CLOTH_NEWTON_TRIAL_RECORDS * workgroups, CLOTH_SEGMENT_ALIGN);
+  const pcgScalars = pcgPartials + CLOTH_PCG_PARTIALS * pcg.patches;
+  const newtonControl = align(pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN);
+  // The patch table's relative offsets become absolute: halo and columns (topo words), blocks and bending entries (nw records).
+  for (let p = 0; p < pcg.patches; p++) {
+    const w = topoBase[10]! + CLOTH_PCG_PATCH_WORDS * p;
+    topo[w + 3]! += topoBase[11]!; topo[w + 4]! += newtonBlocks; topo[w + 5]! += newtonBends; topo[w + 6]! += topoBase[12]!;
+  }
   params.set([newtonFaces, newtonPartials, workgroups, newtonControl, topoBase[9]! / 4], PARAM_NEWTON);
+  params.set([topoBase[10]!, topoBase[13]!, topoBase[14]!, topoBase[15]!, pcgPartials, pcg.patches, pcgScalars, 0, topoBase[16]!, topoBase[17]!, 0, 0], PARAM_NEWTON + 8);
   return { topo, rest, trianglesWord: topoBase[6]!, edgesWord: topoBase[7]!, params, strainLimited, damped, stride, edgeDualRecord,
-    dampFaceRecord, partialRecord, clockRecord, stateRecords, newtonRecords: newtonControl + CLOTH_SEGMENT_ALIGN };
+    dampFaceRecord, partialRecord, clockRecord, stateRecords, newtonRecords: newtonControl + CLOTH_SEGMENT_ALIGN,
+    pcg: { shared: pcg.shared, maxK1: pcg.maxK1, maxK2: pcg.maxK2, patches: pcg.patches, maxHalo: pcg.maxHalo } };
 }
 
-const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgApply', 'pcgUpdate', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
+const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
+/** With contact: the projected arc's trial moves (after the filter hook, before nwTrial). */
+const CONTACT_NEWTON_KERNELS = ['nwProject'] as const;
 /** With contact: the BDF2 restart's scans of C2's contact state. */
 const RESTART_KERNELS = ['restartScan', 'onsetScan'] as const;
-type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number];
+type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'diagnose', 'reduceDiagnostics', 'finishStep', ...NEWTON_KERNELS];
 
 export class ClothGPUSolver {
@@ -289,7 +451,7 @@ export class ClothGPUSolver {
     if (!o || !(Number.isInteger(o.iterations) && o.iterations >= 1) || !(Number.isInteger(o.pcgIterations) && o.pcgIterations >= 1))
       throw new Error('Cloth Newton solver needs integer caps newton.iterations >= 1 and newton.pcgIterations >= 1');
     this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
-    if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
+    if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0 && this.newton.velocityTolerance_m_s >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
     if (options.contact && !(options.contact.alpha && options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
       throw new Error('Cloth Newton solver with contact needs the filter output and contact state (contact.alpha, contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
@@ -299,7 +461,7 @@ export class ClothGPUSolver {
     if (device.limits.maxStorageBuffersPerShaderStage < need)
       throw new Error(`Cloth solver needs ${need} storage buffers per stage; the device grants ${device.limits.maxStorageBuffersPerShaderStage}`);
     this.diagnostics = !!options.diagnostics; this.hooks = options.hooks ?? {};
-    this.tables = packClothGPUTables(model, options.origin_m, options, options.solverState?.time_s ?? 0);
+    this.tables = packClothGPUTables(model, options.origin_m, options, options.solverState?.time_s ?? 0, device.limits.maxComputeWorkgroupStorageSize);
     const label = options.label ?? 'Cloth', storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (name: string, bytes: number, usage = storage) => device.createBuffer({ label: `${label} ${name}`, size: Math.max(256, align(bytes, 256)), usage });
     this.positions = make('positions', 16 * this.tables.stride);
@@ -310,17 +472,18 @@ export class ClothGPUSolver {
     this.params = make('params', 4 * PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.newtonWork = make('newton work', 16 * this.tables.newtonRecords);
     {
-      const P = new Uint32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8), F = new Float32Array(P.buffer, P.byteOffset, 8);
+      const P = new Uint32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 16), F = new Float32Array(P.buffer, P.byteOffset, 16);
       const g = options.gravity_m_s2, gg = g[0] ** 2 + g[1] ** 2 + g[2] ** 2;
       let m2 = 0; for (let v = 0; v < this.N; v++) if (!(t.groups[v]! > 0)) m2 += t.mass_kg[v]! ** 2;
-      F[5] = this.newton.pcgTolerance ** 2; F[6] = this.newton.residualTolerance ** 2 * m2 * gg;
+      F[5] = this.newton.pcgTolerance ** 2; F[6] = this.newton.residualTolerance ** 2 * m2 * gg; F[15] = this.newton.velocityTolerance_m_s;
     }
-    // One dispatch record per PCG iteration i: (0, N, i, 0).
-    this.dispatch = make('dispatch records', CLOTH_DISPATCH_STRIDE * this.newton.pcgIterations, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    // One dispatch record per PCG dispatch i = 0 .. pcgIterations: (0, N, i, 0).
+    const dispatches = this.newton.pcgIterations + 1;
+    this.dispatch = make('dispatch records', CLOTH_DISPATCH_STRIDE * dispatches, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     writeBufferChunked(device.queue, this.topo, 0, this.tables.topo);
     writeBufferChunked(device.queue, this.rest, 0, this.tables.rest);
-    const records = new ArrayBuffer(CLOTH_DISPATCH_STRIDE * this.newton.pcgIterations);
-    for (let i = 1; i <= this.newton.pcgIterations; i++) new Uint32Array(records, CLOTH_DISPATCH_STRIDE * (i - 1), 4).set([0, this.N, i, 0]);
+    const records = new ArrayBuffer(CLOTH_DISPATCH_STRIDE * dispatches);
+    for (let i = 0; i < dispatches; i++) new Uint32Array(records, CLOTH_DISPATCH_STRIDE * i, 4).set([0, this.N, i, 0]);
     writeBufferChunked(device.queue, this.dispatch, 0, new Uint8Array(records));
     this.uploadState(options.positions_m ?? t.data.restPositions_m, options.velocities_m_s, options.solverState);
   }
@@ -366,9 +529,9 @@ export class ClothGPUSolver {
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
       buffer(B.newton, this.newtonWork),
       ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.filter, contact.alpha), buffer(B.contactState, contact.state)] : [])] });
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl }) });
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? RESTART_KERNELS : [])];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
@@ -436,11 +599,10 @@ export class ClothGPUSolver {
     for (let n = 0; n < o.iterations; n++) {
       this.run(pass, 'nwFaces', this.threads(this.T));
       this.run(pass, 'nwGradient', W);
-      for (let i = 1; i <= o.pcgIterations; i++) {
-        this.run(pass, 'pcgApply', W, i - 1);
-        this.run(pass, 'pcgUpdate', W, i - 1);
-      }
+      // PCG: dispatch 0 starts the solve, dispatch i >= 1 takes iteration i (one dispatch each, Chronopoulos-Gear).
+      for (let i = 0; i <= o.pcgIterations; i++) this.run(pass, 'pcgStep', this.tables.pcg.patches, i);
       this.hooks.filter?.(pass);
+      if (this.options.contact) this.run(pass, 'nwProject', W);
       this.run(pass, 'nwTrial', W);
       this.run(pass, 'nwChoose', 1);
       this.run(pass, 'nwApply', W);

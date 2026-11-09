@@ -73,8 +73,9 @@ function bridsonNewton(): ClothNewtonSettings {
     pcgTolerance: CLOTH.newtonPcgTolerance.value, residualTolerance: CLOTH.newtonResidualTolerance.value };
 }
 
-function sheetSize(short_m: number, long_m: number) {
-  const rows = CLOTH.nodesAcross.value, columns = Math.floor((long_m / short_m) * (rows - 1) + 1e-9) + 1;
+function sheetSize(short_m: number, long_m: number, nodesAcross = CLOTH.nodesAcross.value) {
+  if (!(Number.isInteger(nodesAcross) && nodesAcross >= 2)) throw new Error(`Bridson sheet needs an integer nodesAcross >= 2, not ${nodesAcross}`);
+  const rows = nodesAcross, columns = Math.floor((long_m / short_m) * (rows - 1) + 1e-9) + 1;
   return { columns, rows };
 }
 
@@ -135,9 +136,10 @@ export function bridson2002Curtain(): Bridson2002Scene {
   });
 }
 
-/** Fig 2. The black frustum is in the video and the figure but not the text. */
-export function bridson2002RotatingSphere(): Bridson2002Scene {
-  const side = SPHERE.side.value, { columns, rows } = sheetSize(side, side), y = SPHERE.height.value;
+/** Fig 2. The black frustum is in the video and the figure but not the text. `nodesAcross` resamples the sheet (the
+ * paper's 150 by default) for resolution studies such as the cloth benchmark. */
+export function bridson2002RotatingSphere(options: { readonly nodesAcross?: number } = {}): Bridson2002Scene {
+  const side = SPHERE.side.value, { columns, rows } = sheetSize(side, side, options.nodesAcross), y = SPHERE.height.value;
   const geometry = herringBoneSheet({ columns, rows, width_m: side, depth_m: side, origin_m: [-side / 2, y, -side / 2] });
   const centre = v3(0, SPHERE.sphereCentreY.value, 0), start = SPHERE.spinStart.value, end = SPHERE.duration.value;
   // Constant rate from spinStart; keyframes 1 s (pi/4) apart keep the slerp on its shortest arc.
