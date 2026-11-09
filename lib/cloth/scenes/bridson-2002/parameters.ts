@@ -48,8 +48,8 @@ export const CLOTH = {
   bending: P(1.5e-4, "N m", "assumption",
     "bending springs between every other node have no linear bending modulus; chosen for a 2.5 cm bending length (B = rho g c^3) at 1 kg/m^2, to be checked against Fig 1 fold spacing"),
   damping: P(0.002, "s", "assumption", "paper gives none; critically damps edge modes near 1000 rad/s"),
-  iterations: P(8, "iterations", "assumption",
-    "our solver's choice, not the paper's: with the two-level correction, a hanging Bridson sheet (150 nodes, 1 x 1.7 m, top edge pinned) rests at its exact uniaxial equilibrium at K 8 (band strain within 0.3%, top 7.48% vs 7.46%; K 16 0.2%; K 64 1.3% and still ringing after 10 s); K 8 is the lowest of 8/16/64 that does (2026-11-09, tests/cloth-coarse.test.ts). In the three scenes the bulk median strain is 0.1-0.8% and only edges near pins, leg tops and the sphere cap reach the 10% limit"),
+  iterations: P(128, "iterations", "assumption",
+    "our solver's choice, not the paper's; correctness first (user, 2026-11-09). A static hanging sheet converges at K 8 (tests/cloth-coarse.test.ts), but the dynamic drape does not. On the rotating sphere at K 8 the sheet falls 28.1 mm/step at tick 12 against 34.1 converged (about free fall), then stands as a tent and buckles into radial ridges. K 32 gets the fall speed right but still tents at tick 30. K 128 and K 256 agree at ticks 30 and 45 and match the Fig 2 video (tight cap, hanging skirt, cloth on the ground by f018). Lower this only when a cheaper solve matches the K 256 drape"),
   selfFriction: P(0.3, "1", "assumption",
     "paper gives one mu for static and kinetic (section 7.3) but no value; PhysBAM later uses 3.2 for self contact, rejected as tuned for its repulsion scheme"),
 } as const;
