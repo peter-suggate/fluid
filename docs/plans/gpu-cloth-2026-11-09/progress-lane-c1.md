@@ -1175,3 +1175,53 @@ The scratch script is `fluid-scratch/cloth-c1/r3/rebuild-trace.mts`.
 - This needs a C2 detector API, for example `OgcContactDetector.adoptPools(previous)` or a pool object passed in. ClothSystem.build (C1) would then hand the live entry's pools to the new one.
 - Separately, the 977 MiB pair pool for a 38K-vertex sheet is itself worth a memory-must-scale look (C2).
 - The cloth solver's own buffers (about 80 MB) are not part of the hitch.
+
+## 2026-11-09 RESULT (16): the light-contact sweep's load chains, and the fenced-vs-busy gap by owner
+
+**(2) The fenced-vs-busy gap.**
+- Scratch script: `fluid-scratch/cloth-c1/r3/gap.mts`.
+- Per tick it measures:
+  - CPU `stepTo` time, split into the detector's encode (`encodeFrameBegin` and the solver hooks) and the rest;
+  - the GPU span of the one unsplit `Cloth step` pass (timestamps on that pass only);
+  - fenced wall time;
+  - dispatches by owner.
+- A second mode cuts the pass only where the encoding owner changes (solver or detector), 28 passes a tick.
+
+| ticks | fenced | GPU span | CPU stepTo (detector / rest) | fenced − span − CPU | GPU by owner: solver / detector |
+|---|---|---|---|---|---|
+| 45–56 | 46.5 | 44.4 | 1.62 (0.76 / 0.86) | 0.43 | 7.1–7.3 / 37.0–37.3 |
+| 61–70 | 13.6 | 11.7 | 1.34 (0.68 / 0.66) | 0.55 | 7.2 / 6.2 (ticks 63–68) |
+
+- Each tick is 1 submit, with 103 solver and 252 detector dispatches.
+- An empty submit and fence round trip is 0.05 ms.
+- With the status copy every tick (`statusInterval` 1), fenced is unchanged.
+- **The gap is not CPU, submit or status.** Fenced is the CPU encode, plus the GPU span, plus 0.45 ms.
+- **It is inside the GPU span, in the detector's share.** The kernel-level split counted 32.9 ms busy at ticks 57–59. The owner split counts 44 ms, of which 37 is the detector's, because the kernel split loses the time between the detector's dependent indirect dispatches.
+- **The solver's GPU time is a steady 7.2 ms in both phases.**
+- **C1's own CPU encode is 0.66–0.86 ms a tick.** It is on the fenced path only because the scripts fence every tick; a pipelined frame overlaps it with the previous GPU frame.
+
+**(1) Light-contact colour sweep (tick-44 snapshot, A/B from one pose).**
+- Machine drift was ±30 µs per iteration this round (two runs of the same base: 504 and 563 µs), so each variant is paired with a base in the same run.
+
+| variant | µs per iteration | against base |
+|---|---|---|
+| base | 502–575 | — |
+| bending stencil unrolled ×2 (both records loaded before either position) | 533 | +6% |
+| stencil unrolled ×4 | 559 | +11% |
+| star faces unrolled ×2 | 580 | +15% |
+| trial faces unrolled ×2 | 526 | +5% |
+| all unrolled ×2 / ×4 | 565 / 584 | +13% / +16% |
+| x_t read from the x̂ segment (proxy for one packed record) | 521–549 | within noise |
+| stencil without its x̂ reads (bound on packing x̂ with x) | 496–498 | −3% to −13% (paired −14 and −78 µs, inside the drift) |
+| **no contact in the kernel at all (diagnostic)** | **356–360** | **−30% to −36%** |
+| no contact in the trials only | 557 | +0 |
+
+- **Prefetching by unrolling makes the sweep slower.** The compiler already overlaps the loads across loop iterations. Unrolling only adds registers and loses residency.
+- **Packing x_t, x̂ and x into one record is worth at most about 3% (≈ 15 µs).** Those reads are independent loads, issued together.
+- **The light-contact lever is the contact chain in the build phase, about 150 µs per iteration.** This matches the duplication marginals of RESULT (14): `ownSystem` 80 + `ec0` 60.
+  - Each colour dispatch (8K vertices × 2 lanes) is resident as about one wave, so its time is the slowest thread's chain of dependent loads.
+  - The contact pass at x_v walks: header → per-vertex count → entry → (solid) header words → brick → nodes.
+  - It walks this twice: once for f and H in `pinTerms`, once for the energy at x_v.
+- **Fix, already approved:** C2's `ogcVertexContactLanes` (f, H and e in one pass) halves that chain. With the lane split it also divides the trial energies at the pile.
+- **Suggestion for C2:** shorten the solid lookup chain (header words in the uniform or in workgroup memory, fewer dependent levels before the brick nodes). Only C2 can reach that part.
+- Nothing from this round is landed.
