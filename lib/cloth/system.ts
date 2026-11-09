@@ -37,14 +37,13 @@ import { ClothGPUSolver, type ClothGPUState } from './gpu-solver';
 import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
 import { OgcContactDetector, type OgcCarriedState } from './contact/ogc-detector';
 import type { ClothSolidField } from './contact/solid-field';
-import { buildClothCoarseSpace } from './coarse';
 import { buildClothSolverModel } from './oracle';
 import type { ClothRenderSource } from './render';
 import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactFieldKey,
   clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
-import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from './topology';
-import type { ClothContactStateData, ClothDocument, ClothGrab, ClothSurfacePublication, ClothVector } from './types';
+import { prepareClothTopology } from './topology';
+import type { ClothContactStateData, ClothDocument, ClothGrab, ClothNewtonSettings, ClothSurfacePublication, ClothVector } from './types';
 
 /** One implicit cloth step per 1/60 s frame. */
 export const CLOTH_SCENE_STEP_S = 1 / 60;
@@ -53,8 +52,8 @@ export const CLOTH_CATCH_UP_STEPS = 4;
 if (CLOTH_CATCH_UP_STEPS + 1 > CLOTH_BODY_POSES_PER_FRAME) throw new Error('A frame of cloth steps needs more moving-solid poses than the detector is authored for');
 /** Steps between status-word reads (the non-finite watchdog; never the pose). */
 export const CLOTH_STATUS_INTERVAL_STEPS = 4;
-/** K with the two-level correction, which every step takes (lane C1, 2026-11-09: a hanging sheet rests at its exact equilibrium). */
-const DEFAULT_ITERATIONS = 8;
+/** Newton-PCG caps and tolerances of a document that names none: the Bridson scenes' (CLOTH.newton*, C1 RESULT 21). */
+export const CLOTH_NEWTON_SCENE_DEFAULTS: ClothNewtonSettings = Object.freeze({ iterations: 8, pcgIterations: 200, pcgTolerance: 1e-4, residualTolerance: 1e-5 });
 
 let systemGenerations = 0, renderRevisions = 0;
 
@@ -150,8 +149,6 @@ export interface ClothSystemOptions {
   readonly label?: string;
   /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
   readonly statusInterval?: number;
-  /** Lanes per vertex of the colour solve (`ClothGPUSolverOptions.vertexLanes`); default `CLOTH_VERTEX_LANES`. */
-  readonly vertexLanes?: number;
 }
 
 export class ClothSystem {
@@ -230,10 +227,9 @@ export class ClothSystem {
    */
   private async build(document: ClothDocument, topologyRevision: number, frame?: ClothVector, start?: ClothSurfacePublication): Promise<Entry> {
     const settings = document.solver ?? {};
-    if (settings.tier === 'B') throw new Error(`Cloth document '${document.id}' asks for the Tier B patch solve, which is not installed yet (lane C1, M3)`);
     if (document.geometry.kind !== 'inline') throw new Error(`Cloth document '${document.id}' has an unsupported geometry kind`);
     const data = document.geometry.data, topology = prepareClothTopology(data, document.materials);
-    const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)), document.scripts ?? []);
+    const model = buildClothSolverModel(topology, document.materials, document.scripts ?? []);
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     data.restPositions_m.forEach((v, i) => { lo[i % 3] = Math.min(lo[i % 3]!, v); hi[i % 3] = Math.max(hi[i % 3]!, v); });
     // A rebuilt document keeps its frame, so its contact field is reused.
@@ -247,35 +243,23 @@ export class ClothSystem {
       bodyField = this.bodyFields.get(key) ?? buildClothBodyField(this.scene, body, r);
       this.bodyFields.set(key, bodyField);
     }
-    // The two-level correction's coarse space follows the mesh topology, so it is rebuilt with it (edit time only).
-    // Every document takes it; a mesh that cannot build one fails here.
-    const coarse = buildClothCoarseSpace(topology);
-    const newton = settings.newton;
-    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField, !!newton);
+    const newton = settings.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS;
+    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField, true);
     const hooks = contact.stepHooks;
     let solver: ClothGPUSolver;
     try {
       solver = await ClothGPUSolver.create(this.device, model, {
         origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity,
-        integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? DEFAULT_ITERATIONS, chebyshevRho: settings.chebyshevRho ?? 0,
-        // VBD: the extrapolating guesses overshoot an unconverged solve; the coarse step carries the bulk motion instead.
+        integrator: settings.integrator ?? 'bdf2', newton,
         // Newton starts at the inertial target y, the centre of contact's "target" certificates (free cloth needs no cut).
-        coarse, initialGuess: newton ? 'inertial' : 'previous',
+        initialGuess: 'inertial',
         positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
         solverState: start ? start.solverState : data.solverState, label,
-        ...(this.options.vertexLanes !== undefined ? { vertexLanes: this.options.vertexLanes } : {}),
-        ...(newton ? {
-          // Newton: contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
-          method: 'newton' as const, newton,
-          contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
-          hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
-        } : {
-          contact: contact.solverContact(CLOTH_BINDING.contact),
-          // The coarse move is truncated like a colour sweep's, before the sweeps start from it.
-          hooks: { afterFrame: hooks.afterFrame, afterIteration: hooks.afterIteration, afterCoarse: hooks.afterCoarse },
-        }),
+        // Contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
+        contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
+        hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
       });
-      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, ...(newton ? { direction: solver.newtonDirection } : {}) });
+      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, direction: solver.newtonDirection });
       contact.setSolidField(field);
       if (bodyField) contact.setBodyField(bodyField);
       // The detector continues from the state carried with the pose (an undo, a load, a moving solid's edit).
@@ -338,8 +322,6 @@ export class ClothSystem {
     try { status = await e.mirror.readStatus(); } catch { return; } // device lost or destroyed
     if (this.destroyed || this.entries.get(e.document.id) !== e) return;
     if (status.solver & CLOTH_STATUS.nonFinite) this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(status.solver & CLOTH_STATUS.nonFinite).join('; '), 'finishStep', e, [status.solver]);
-    // There is no one-level path: a step whose coarse operator was indefinite halts the scene.
-    if (status.solver & CLOTH_STATUS.coarseIndefinite) this.fail('cloth-coarse-indefinite', ClothGPUSolver.describeStatus(CLOTH_STATUS.coarseIndefinite).join('; '), 'coarseFactor', e, [status.solver]);
     const notes = OgcContactDetector.describeStatus(status.contact & ~CLOTH_CONTACT_FAILING);
     for (const name of notes) if (!this.notes.has(name)) this.notes.set(name, this.entryTime(e));
     if (status.contact & CLOTH_CONTACT_FAILING)

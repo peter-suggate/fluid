@@ -48,8 +48,6 @@ export const CLOTH = {
   bending: P(1.5e-4, "N m", "assumption",
     "bending springs between every other node have no linear bending modulus; chosen for a 2.5 cm bending length (B = rho g c^3) at 1 kg/m^2, to be checked against Fig 1 fold spacing"),
   damping: P(0.002, "s", "assumption", "paper gives none; critically damps edge modes near 1000 rad/s"),
-  iterations: P(128, "iterations", "assumption",
-    "our solver's choice, not the paper's; correctness first (user, 2026-11-09). A static hanging sheet converges at K 8 (tests/cloth-coarse.test.ts), but the dynamic drape does not. On the rotating sphere at K 8 the sheet falls 28.1 mm/step at tick 12 against 34.1 converged (about free fall), then stands as a tent and buckles into radial ridges. K 32 gets the fall speed right but still tents at tick 30. K 128 and K 256 agree at ticks 30 and 45 and match the Fig 2 video (tight cap, hanging skirt, cloth on the ground by f018). Lower this only when a cheaper solve matches the K 256 drape"),
   newtonIterations: P(8, "iterations", "assumption",
     "our solver's choice, not the paper's (C1 RESULT 21): Newton-PCG at 8 Newton x 200 PCG iterations is within 1.5 mm of 20 x 400 on the centre-held 150 x 150 sheet at tick 30, where VBD K 128 is 155 mm off. A cap: a step stops earlier once its residual is below newtonResidualTolerance"),
   newtonPcgIterations: P(200, "iterations", "assumption", "PCG cap per Newton iteration (C1 RESULT 21, as newtonIterations)"),

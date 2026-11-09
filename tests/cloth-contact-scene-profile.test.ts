@@ -1,15 +1,13 @@
 /**
  * Scene-contact profile (GPU, opt in with CLOTH_CONTACT_PROFILE=rotating): the
  * Bridson rotating-sphere sheet built as ClothSystem builds it (scene field,
- * createClothSceneContact, K iterations), run once per truncation schedule.
+ * createClothSceneContact, Newton-PCG with its filter and re-detection hooks), run once per schedule.
  *
- *   CLOTH_PROFILE_TRUNCATE  comma list of iteration (every iteration, the
- *                           detector's hooks) and colour (also after every colour
- *                           sweep, the schedule before 2026-11-09); default iteration
+ *   CLOTH_PROFILE_TRUNCATE  comma list of schedules: iteration (the detector's Newton
+ *                           hooks, the only one since the VBD colour sweeps were removed in M4)
  *   CLOTH_PROFILE_TICKS     ticks per schedule, default 20
- *   CLOTH_PROFILE_K         iterations per step, default 8 (ClothSystem's with the coarse space)
- *   CLOTH_PROFILE_COARSE    0 for the one-level solve (ClothSystem's settings.coarse = false)
- *   CLOTH_PROFILE_GUESS     the solver's initial guess (default ClothSystem's: previous with the coarse space)
+ *   CLOTH_PROFILE_NEWTON    Newton x PCG caps per step, e.g. 8x200 (default: the document's solver.newton)
+ *   CLOTH_PROFILE_GUESS     the solver's initial guess (default ClothSystem's: inertial)
  *   CLOTH_PROFILE_DETECTOR  JSON overrides of the scene's detector config (e.g. {"prediction":"inertial"})
  *
  * First the same solve without contact (its median tick: the solve's own cost), then
@@ -26,12 +24,11 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
-import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from "../lib/cloth/topology";
+import { prepareClothTopology } from "../lib/cloth/topology";
 import { buildClothSolverModel } from "../lib/cloth/oracle";
 import { ClothGPUSolver } from "../lib/cloth/gpu-solver";
 import { CLOTH_BINDING } from "../lib/cloth/gpu-solver-wgsl";
-import { CLOTH_SCENE_STEP_S } from "../lib/cloth/system";
-import { buildClothCoarseSpace } from "../lib/cloth/coarse";
+import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S } from "../lib/cloth/system";
 import { CLOTH_CONTACT_FAILING, buildClothSceneField, clothContactRadius, createClothSceneContact } from "../lib/cloth/scene-contact";
 import { OGC_ROUND_KERNELS, OgcContactDetector, type OgcContactConfig } from "../lib/cloth/contact/ogc-detector";
 import { sampleClothSolidField, type ClothSolidField, type V3 } from "../lib/cloth/contact/solid-field";
@@ -43,8 +40,7 @@ import { facesInsideSolid } from "./cloth-contact-oracle";
 const want = !!process.env.WEBGPU_NODE_MODULE && process.env.CLOTH_CONTACT_PROFILE === "rotating";
 const SCHEDULES = (process.env.CLOTH_PROFILE_TRUNCATE ?? "iteration").split(",").filter(Boolean);
 const TICKS = Number(process.env.CLOTH_PROFILE_TICKS ?? 20);
-const ITERATIONS = Number(process.env.CLOTH_PROFILE_K ?? 8);
-const COARSE = process.env.CLOTH_PROFILE_COARSE !== "0";
+const NEWTON_CAPS = process.env.CLOTH_PROFILE_NEWTON?.split("x").map(Number);
 const GUESS = process.env.CLOTH_PROFILE_GUESS as "previous" | "adaptive" | "inertial" | undefined;
 const DETECTOR = JSON.parse(process.env.CLOTH_PROFILE_DETECTOR ?? "{}") as Partial<OgcContactConfig>;
 
@@ -168,19 +164,19 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
   const scene = bridson2002SceneDescription(bridson2002RotatingSphere(), { movingSolids: "held" }), document = scene.cloth![0]!;
   const data = document.geometry.kind === "inline" ? document.geometry.data : assert.fail("inline geometry");
   const topology = prepareClothTopology(data, document.materials);
-  const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)), document.scripts ?? []);
+  const model = buildClothSolverModel(topology, document.materials, document.scripts ?? []);
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   data.restPositions_m.forEach((v, i) => { lo[i % 3] = Math.min(lo[i % 3]!, v); hi[i % 3] = Math.max(hi[i % 3]!, v); });
   const origin = [0, 1, 2].map(a => (lo[a]! + hi[a]!) / 2) as unknown as ClothVector;
   const g = scene.fluid.gravity_m_s2, gravity: [number, number, number] = [g.x, g.y, g.z], r = clothContactRadius(document);
   const t0 = performance.now(), field = buildClothSceneField(scene, origin, r);
-  const N = topology.vertexCount, colours = model.colourCount;
-  log(`rotating sphere: ${N} vertices, ${topology.faceCount} faces, ${topology.edgeCount} edges, ${colours} colours, K = ${ITERATIONS}, r ${r}; field ${field.bricks.size} bricks, built in ${(performance.now() - t0).toFixed(0)} ms`);
+  const N = topology.vertexCount, own = document.solver?.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS;
+  const newton = NEWTON_CAPS ? { ...own, iterations: NEWTON_CAPS[0]!, pcgIterations: NEWTON_CAPS[1]! } : own;
+  log(`rotating sphere: ${N} vertices, ${topology.faceCount} faces, ${topology.edgeCount} edges, Newton ${newton.iterations} x PCG ${newton.pcgIterations}, r ${r}; field ${field.bricks.size} bricks, built in ${(performance.now() - t0).toFixed(0)} ms`);
 
-  // ClothSystem's solve: the two-level correction from the previous step's positions, its coarse move truncated.
-  const coarse = COARSE ? buildClothCoarseSpace(topology) : undefined;
-  const solveOptions = { origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity, integrator: "bdf2" as const, iterations: ITERATIONS, chebyshevRho: 0,
-    positions_m: data.initialPositions_m, velocities_m_s: data.initialVelocities_m_s, ...(coarse ? { coarse, initialGuess: "previous" as const } : {}), ...(GUESS ? { initialGuess: GUESS } : {}) };
+  // ClothSystem's solve: Newton-PCG from the inertial target.
+  const solveOptions = { origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity, integrator: "bdf2" as const, newton,
+    positions_m: data.initialPositions_m, velocities_m_s: data.initialVelocities_m_s, initialGuess: GUESS ?? "inertial" as const };
   // The solve alone, no contact: the floor under every contact cost below.
   let baseline = NaN;
   {
@@ -194,14 +190,14 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
       ms.push(performance.now() - ts);
     }
     baseline = [...ms].sort((a, b) => a - b)[ms.length >> 1]!;
-    log(`solve without contact (K = ${ITERATIONS}${coarse ? ", coarse" : ""}, guess ${solveOptions.initialGuess ?? "adaptive"}): median tick ${baseline.toFixed(2)} ms`);
+    log(`solve without contact (Newton ${newton.iterations} x PCG ${newton.pcgIterations}, guess ${solveOptions.initialGuess}): median tick ${baseline.toFixed(2)} ms`);
     bare.destroy();
   }
 
   const failures: string[] = [], diagnosed = new Set<string>();
   for (const schedule of SCHEDULES) {
-    if (schedule !== "colour" && schedule !== "iteration") throw new Error(`Unknown truncation schedule "${schedule}"`);
-    let det = await createClothSceneContact(device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity);
+    if (schedule !== "iteration") throw new Error(`Unknown truncation schedule "${schedule}" (the colour schedule went with the VBD sweeps)`);
+    let det = await createClothSceneContact(device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, undefined, true);
     if (Object.keys(DETECTOR).length) {
       // The scene's detector with the overrides: same mesh, rest pose (cloth frame) and capacities.
       const t = model.topology, triangles = new Uint32Array(4 * t.faceCount), rest = new Float32Array(4 * N);
@@ -212,12 +208,10 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
       det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges: t.edges }, rest, config);
       log(`detector overrides ${JSON.stringify(DETECTOR)}`);
     }
-    const base = coarse ? { ...det.stepHooks, afterCoarse: (p: GPUComputePassEncoder) => det.encodeTruncate(p) } : det.stepHooks;
-    const hooks = schedule === "colour" ? { ...base, afterColour: (p: GPUComputePassEncoder) => det.encodeTruncate(p) } : base;
-    const solver = await ClothGPUSolver.create(device, model, { ...solveOptions, label: `profile ${schedule}`, contact: det.solverContact(CLOTH_BINDING.contact), hooks });
-    det.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart });
+    const hooks = { afterFrame: det.stepHooks.afterFrame, filter: det.stepHooks.filter, afterNewtonStep: det.stepHooks.afterNewtonStep, stepEnd: det.stepHooks.stepEnd };
+    const solver = await ClothGPUSolver.create(device, model, { ...solveOptions, label: `profile ${schedule}`, contact: { ...det.solverContact(CLOTH_BINDING.contact, true), alpha: det.alpha, state: det.contactState }, hooks });
+    det.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, ...(det.config.prediction === "target" ? { target: solver.inertialTarget } : {}), direction: solver.newtonDirection });
     det.setSolidField(field);
-    const truncations = (schedule === "iteration" ? ITERATIONS + 1 : ITERATIONS * (colours + 1) + 1) + (coarse ? 1 : 0);
     const inside = async () => {
       const x = await solver.readPositions();
       let n = 0, minPhi = Infinity;
@@ -257,7 +251,7 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
       exactWorst = Math.max(exactWorst, exact.inside.length);
     }
     const med = [...tickMs].sort((a, b) => a - b)[tickMs.length >> 1]!;
-    log(`${schedule} summary: ${truncations} truncations and ${ITERATIONS} decides per step; median tick ${med.toFixed(1)} ms (first ${tickMs[0]!.toFixed(1)}, max ${Math.max(...tickMs).toFixed(1)}), contact ${(med - baseline).toFixed(2)} ms over the bare solve; `
+    log(`${schedule} summary: Newton ${newton.iterations} x PCG ${newton.pcgIterations} per step; median tick ${med.toFixed(1)} ms (first ${tickMs[0]!.toFixed(1)}, max ${Math.max(...tickMs).toFixed(1)}), contact ${(med - baseline).toFixed(2)} ms over the bare solve; `
       + `max intersections ${worstIntersections}, max faces in solid ${worstSolid} (GPU lattice) / ${exactWorst} (exact), min vertex phi ${minPhi.toExponential(2)}, `
       + `phi over every face >= ${faceLower.toExponential(2)} (exact lower bound)`);
 
@@ -285,7 +279,7 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
       const roundMs = round.reduce((a, b) => a + b, 0);
       log(`${schedule} kernels: round ${roundMs.toFixed(3)} ms (${roundNames.map((n, i) => `${n} ${round[i]!.toFixed(3)}`).filter((_, i) => round[i]! >= 0.005).join(", ")}); `
         + `planes ${trunc[0]!.toFixed(3)}, apply ${trunc[1]!.toFixed(3)}, decide ${trunc[2]!.toFixed(3)}, unarmed detection ${trunc[3]!.toFixed(3)} ms; `
-        + `truncation per step ${(truncations * (trunc[0]! + trunc[1]!)).toFixed(1)} ms, decides + unarmed detections ${(ITERATIONS * (trunc[2]! + trunc[3]!)).toFixed(1)} ms`);
+        + `per Newton iteration: truncation ${(trunc[0]! + trunc[1]!).toFixed(2)} ms, decide + unarmed detection ${(trunc[2]! + trunc[3]!).toFixed(2)} ms`);
     }
 
     solver.destroy(); det.destroy();

@@ -32,7 +32,7 @@ export function bdf2StartOffset_m(h_s: number, g: number): number {
 
 /**
  * Lane C1's exact equilibrium of a sheet hanging from its whole top edge
- * (tests/cloth-coarse.test.ts), Poisson 0 and area-lumped mass: band j (between
+ * (tests/cloth-analytic.test.ts, the hanging curtain), Poisson 0 and area-lumped mass: band j (between
  * rows j and j + 1 of n rows at spacing h) carries the weight below its middle,
  * rho g (n - 1.5 - j) h per unit width, by uniaxial StVK k lambda (lambda^2 - 1) / 2.
  * Returns the band's engineering strain lambda - 1.

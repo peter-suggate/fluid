@@ -1,72 +1,64 @@
 /**
- * Tier A GPU cloth solver: one implicit step per `encodeStep`, at the scene dt,
- * with K VBD iterations over vertex colours. There are no substeps. Every
- * per-step stage runs on the GPU and nothing is read back. The step clock,
- * the BDF2 bootstrap and attachment scripts are evaluated in WGSL. Status
- * and diagnostics land in a ring that harnesses read asynchronously.
+ * GPU cloth solver: one implicit step per `encodeStep`, at the scene dt, by Newton-PCG on the step's objective
+ * (gpu-newton-wgsl.ts; caps and tolerances in `newton`). There are no substeps. Every per-step stage runs on the GPU
+ * and nothing is read back: the step clock, the BDF2 bootstrap and its contact restart, attachment scripts and the
+ * Newton and PCG stopping tests are evaluated in WGSL. Status and diagnostics land in a ring that harnesses read
+ * asynchronously.
  *
- * Five storage buffers (the M1 Max grants 10 per stage; C2's contact block adds one):
+ * Storage buffers (the M1 Max grants 10 per stage; C2's contact adds three):
  *   positions  vec4f[N]  the iterate x, cloth-local metres (xyz; w free). Shared with render and C2.
  *   state      vec4f     per-vertex segments (stride Np = N padded to 16 records, 256 B):
  *                          0 velocity at the step start (C2 binds `state` as its velocity input)
- *                          1 x_t, 2 v_{n-1}, 3 dx_{n-1}, 4 y, 5 x^, 6 Chebyshev x(n-1), 7 x(n-2),
- *                          8 pin offset p_{n+1} + alpha (x_t - p_n), 9 pin dual (lambda xyz, k),
- *                          10 vertex normal (render)
+ *                          1 x_t, 2 v_{n-1}, 3 dx_{n-1}, 4 y, 5 x^, 6 pin offset p_{n+1} + alpha (x_t - p_n),
+ *                          7 pin dual (lambda xyz, k), 8 vertex normal (render), 9 mouse grab
  *                        then per edge (lambda, k, stabilized limit), the damping tangent at x_t
  *                        (per face f0, f1 with D11, D22; damped scenes only), diagnostics partials, and the clock record (step, previous step, h~, BDF2).
- *   status     u32       sticky status bits, steps completed, the diagnostics ring
- *   topo       u32       CSR vertex-face/edge adjacency, bending rows (j, w_j), colour-sorted vertices,
- *                        triangles (v0, v1, v2, material) and canonical edges (v0 < v1, f0, f1), each
- *                        segment 256 B aligned so render and C2 bind slices of it
+ *   status     u32       sticky status bits, steps completed, the contact restart's words, the diagnostics ring
+ *   topo       u32       CSR vertex-face/edge adjacency, bending rows (j, w_j), triangles (v0, v1, v2, material),
+ *                        canonical edges (v0 < v1, f0, f1) and the bending stencil, each segment 256 B aligned so
+ *                        render and C2 bind slices of it (bound twice: as u32 and as vec4u records, `topo4`)
  *   rest       vec4f     face Dm^-1, (area, damping), bending row (k, kd), edge (L, eps),
- *                        vertex (m, elastic, length, group), anchor, materials, scripts
+ *                        vertex (m, elastic, length, group), anchor, materials, scripts, bending diagonal
+ *   nw         vec4f     the Newton-PCG work buffer (gpu-newton-wgsl.ts)
  */
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothNewtonSettings, ClothSolverStateData, ClothVector } from './types';
-import { CLOTH_INITIAL_GUESS, clothChebyshevOmega, type ClothInitialGuess, type ClothSolverModel } from './oracle';
-import { CLOTH_COARSE, buildClothCoarseSpace, packClothCoarseTables, type ClothCoarseSpace } from './coarse';
-import { CLOTH_COARSE_SWEEP_WORKGROUP, clothCoarseFactorBytes } from './gpu-coarse-wgsl';
+import { CLOTH_INITIAL_GUESS, type ClothInitialGuess, type ClothSolverModel } from './oracle';
 import { CLOTH_NEWTON_PARTIALS, CLOTH_NEWTON_SEGMENT_COUNT, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
-  CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_VERTEX_LANES, CLOTH_WIDE_WORKGROUP, CLOTH_WORKGROUP, clothSolverWGSL,
+  CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
 } from './gpu-solver-wgsl';
 
-/** Storage buffers per stage the solver binds; C2's contact block adds one. */
-export const CLOTH_SOLVER_STORAGE_BUFFERS = 5;
+/** Storage buffers per stage the solver binds (topo counts twice, as topo and topo4); C2's contact adds three (its
+ * block, the line-search filter output and the contact state). */
+export const CLOTH_SOLVER_STORAGE_BUFFERS = 7;
 
 export interface ClothSolverContact {
   /** ogcVertexBlockWGSL({group: 0, binding: CLOTH_BINDING.contact}). */
   readonly wgsl: string;
   /** OgcContactDetector.solverBuffer. */
   readonly buffer: GPUBuffer;
-  /** Newton only: the detector's line-search filter output (OgcContactDetector.alpha: alpha_v per vertex, alpha_min in word N). */
-  readonly alpha?: GPUBuffer;
-  /** Newton only: the detector's per-vertex contact state (OgcContactDetector.contactState; bit 1, the contact switched on
-   * in the last step), which restarts the vertex's BDF2 history (finishStep, and the frame of the step after). */
-  readonly state?: GPUBuffer;
+  /** The detector's line-search filter output (OgcContactDetector.alpha: alpha_v per vertex, alpha_min in word N). */
+  readonly alpha: GPUBuffer;
+  /** The detector's per-vertex contact state (OgcContactDetector.contactState; bit 1, the contact switched on in the
+   * last step), which restarts the cloth's BDF2 history (finishStep, and the step after). */
+  readonly state: GPUBuffer;
 }
 
 /** Points inside one step where another lane encodes work into the solver's
  * compute pass. They never advance time: C2's detection and truncation
  * rounds run here, between iterations of the one step. */
 export interface ClothStepHooks {
-  /** After the step frame (inertia target and initial guess are in place), before iteration 1. */
+  /** After the step frame (inertia target and initial guess are in place), before Newton iteration 1. */
   afterFrame?(pass: GPUComputePassEncoder): void;
-  /** After iteration `iteration`'s coarse correction moved the iterate, before its colour sweeps (the same truncation applies). */
-  afterCoarse?(pass: GPUComputePassEncoder, iteration: number): void;
-  /** After colour `colour`'s sweep of iteration `iteration` (1-based); C2 truncates here (DAT section 5.1). */
-  afterColour?(pass: GPUComputePassEncoder, iteration: number, colour: number): void;
-  /** After iteration `iteration` (1-based): all colours, then Chebyshev (skipped for vertices with
-   * contacts) and the dual updates. C2 truncates the Chebyshev move and re-detects here. */
-  afterIteration?(pass: GPUComputePassEncoder, iteration: number): void;
-  /** After the last iteration, before velocities are formed. */
+  /** After the last Newton iteration, before the diagnostics and the step's end. */
   beforeFinish?(pass: GPUComputePassEncoder): void;
-  /** Newton: after the PCG solve wrote the direction d (`newtonDirection`), before the line search; C2 writes the filter's alpha here. */
+  /** After the PCG solve wrote the direction d (`newtonDirection`), before the line search; C2 writes the filter's alpha here. */
   filter?(pass: GPUComputePassEncoder): void;
-  /** Newton: after each Newton iteration moved the iterate; C2 decides and runs re-detection rounds here. */
+  /** After each Newton iteration moved the iterate; C2 decides and runs re-detection rounds here. */
   afterNewtonStep?(pass: GPUComputePassEncoder): void;
-  /** Newton with contact: once per step after the last position update (and the diagnostics), before finishStep forms the
+  /** With contact: once per step after the last position update (and the diagnostics), before finishStep forms the
    * velocities and the BDF2 history; C2 writes the step's contact state here. */
   stepEnd?(pass: GPUComputePassEncoder): void;
 }
@@ -77,39 +69,24 @@ export interface ClothGPUSolverOptions {
   readonly dt_s: number;
   readonly gravity_m_s2: ClothVector;
   readonly integrator: ClothIntegrator;
-  readonly iterations: number;
-  readonly chebyshevRho: number;
-  /** Default 'adaptive' (see ClothInitialGuess). */
+  /** Newton-PCG caps and tolerances (tolerances default to CLOTH_NEWTON_DEFAULTS). */
+  readonly newton: ClothNewtonOptions;
+  /** Default 'inertial' (see ClothInitialGuess): the inertial target y, the centre of contact's "target" certificates. */
   readonly initialGuess?: ClothInitialGuess;
-  /** Most iterations `setIterations` may ask for (dispatch records are authored once); default `iterations`. */
-  readonly maxIterations?: number;
   /** World positions and velocities at the start (default: rest, zero). */
   readonly positions_m?: ArrayLike<number>;
   readonly velocities_m_s?: ArrayLike<number>;
   readonly solverState?: ClothSolverStateData;
   /** Write the diagnostics slot of every step (residual, strain, energies). */
   readonly diagnostics?: boolean;
-  /** Threads per vertex of the colour solve: a power of two up to CLOTH_WIDE_WORKGROUP (solveColourWide, default
-   *  CLOTH_VERTEX_LANES), or 1 for the serial solveColour (one thread walks the whole star). */
-  readonly vertexLanes?: number;
-  /** Sum a vertex's lanes in solveColourWide with subgroup shuffles. Default: when the device has `subgroups` and its
-   *  smallest subgroup holds a vertex's lanes; false keeps the workgroup-memory sums; true without them fails. */
-  readonly subgroups?: boolean;
   readonly contact?: ClothSolverContact;
-  /** Two-level correction (coarse.ts): its coarse space, built from this model's topology (default: built here). Every
-   *  step takes it; there is no one-level path (a fine-only solve at K = 8 can explode, coordinator ruling 2026-11-09),
-   *  and a mesh that cannot build one fails explicitly. */
-  readonly coarse?: ClothCoarseSpace;
-  /** Iterations between two-level corrections; default CLOTH_COARSE.every. */
-  readonly coarseEvery?: number;
   readonly hooks?: ClothStepHooks;
   readonly label?: string;
-  /** 'vbd' (colour sweeps with the two-level correction, default) or 'newton' (Newton-PCG, `newton` caps). */
+  /** 'newton', the only method (VBD and its two-level correction were removed in M4); any other value fails. */
   readonly method?: ClothSolverMethod;
-  readonly newton?: ClothNewtonOptions;
 }
 
-export type ClothSolverMethod = 'vbd' | 'newton';
+export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
 export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4 });
 
@@ -147,8 +124,6 @@ export interface ClothGPUTables {
   /** Word offsets of the triangle and edge segments in `topo` (256 B aligned). */
   readonly trianglesWord: number;
   readonly edgesWord: number;
-  /** Colour ranges (start, count) in the colour-sorted vertex list. */
-  readonly colourRanges: readonly (readonly [number, number])[];
   readonly params: Uint32Array<ArrayBuffer>;
   readonly strainLimited: boolean;
   readonly damped: boolean;
@@ -159,39 +134,19 @@ export interface ClothGPUTables {
   readonly partialRecord: number;
   readonly clockRecord: number;
   readonly stateRecords: number;
-  /** The two-level correction's sizes. */
-  readonly coarse: ClothCoarseLayout;
   /** vec4 records of the Newton-PCG `nw` buffer. */
   readonly newtonRecords: number;
 }
 
-export interface ClothCoarseLayout {
-  readonly nodeCount: number;
-  readonly pairCount: number;
-  readonly trialWorkgroups: number;
-  /** vec4 records of the `coarse` work buffer and the misc record (slope, step, ok), then the stats records. */
-  readonly records: number;
-  readonly miscRecord: number;
-}
-
-/** Counters of the two-level correction since the solver was created. */
-export interface ClothCoarseStats {
-  readonly corrections: number;
-  /** Accepted corrections per trial step 1, 1/2, 1/4, 1/8. */
-  readonly accepted: readonly number[];
-}
-
-const PARAM_WORDS = 96;
-/** u32 words of the Newton block (Params.newton0, newton1). */
-const PARAM_NEWTON = 88;
-/** u32 words of the coarse block (Params.coarse0..6). */
-const PARAM_COARSE = 56;
-/** u32 words of the Tier B block: colour count, then two partitions' (owner, patch offsets, vertices, colour offsets). */
-const PARAM_PATCH = 44;
-/** Float words of the params uniform: gravity xyz + dt, then the clock origin and rho. */
+const PARAM_WORDS = 64;
+/** u32 words of the bending block (Params.bend: its diagonal's rest record in w). */
+const PARAM_BEND = 44;
+/** Float words of the params uniform: gravity xyz + dt, then the clock origin and the initial guess. */
 const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 /** Float words of the mouse grab (Params.grab): displacement xyz, held flag. */
-const PARAM_GRAB = 84;
+const PARAM_GRAB = 48;
+/** u32 words of the Newton block (Params.newton0, newton1). */
+const PARAM_NEWTON = 52;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /**
@@ -228,74 +183,25 @@ export function clothBendingStencil(model: ClothSolverModel): { offsets: Uint32A
   return { offsets, columns, q, qd, diagonal };
 }
 
-/**
- * Star records of the colour passes: per colour, every vertex's faces as 8-word records, record j of slot i at
- * 8 (j n + i) words (n the colour's size), so the lanes of a SIMD group read consecutive records, then its bending
- * stencil as 4-word records (j, Q_vj, Qd_vj, 0) at 4 (j n + i). A face is seen from the vertex as corner 0 (its corners
- * v, A, B in cyclic order, Dm^-1 rewritten for that order). Header: per colour (face, stencil) record offsets in vec4s,
- * 4 words a colour.
- */
-export function packClothStarRecords(model: ClothSolverModel, byColour: readonly (readonly number[])[], stencil = clothBendingStencil(model)): { header: Uint32Array; records: Uint32Array } {
-  const t = model.topology;
-  if (t.vertexCount >= 2 ** 24) throw new Error('Cloth star records take fewer than 2^24 vertices');
-  if (model.materials.length > 256) throw new Error('Cloth star records take at most 256 materials');
-  const header = new Uint32Array(4 * byColour.length);
-  let words = 0;
-  const sizes = byColour.map(list => {
-    let F = 0, S = 0;
-    for (const v of list) { F = Math.max(F, t.vertexFaceOffsets[v + 1]! - t.vertexFaceOffsets[v]!); S = Math.max(S, stencil.offsets[v + 1]! - stencil.offsets[v]!); }
-    return { F, S };
-  });
-  byColour.forEach((list, c) => {
-    header[4 * c] = words / 4; words += 8 * sizes[c]!.F * list.length;
-    header[4 * c + 1] = words / 4; words += 4 * sizes[c]!.S * list.length;
-  });
-  const records = new Uint32Array(Math.max(words, 4)), f32 = new Float32Array(records.buffer);
-  byColour.forEach((list, c) => {
-    const n = list.length;
-    list.forEach((v, i) => {
-      for (let j = 0, o = t.vertexFaceOffsets[v]!; o < t.vertexFaceOffsets[v + 1]!; j++, o++) {
-        const entry = t.vertexFaces[o]!, f = entry >>> 2, k = entry & 3, w = 4 * header[4 * c]! + 8 * (j * n + i);
-        const dm = t.faceDmInv.subarray(4 * f, 4 * f + 4), a = [-dm[0]! - dm[1]!, dm[0]!, dm[1]!], b = [-dm[2]! - dm[3]!, dm[2]!, dm[3]!];
-        const A = (k + 1) % 3, B = (k + 2) % 3;
-        records[w] = t.faces[3 * f + A]! | (t.faceMaterial[f]! << 24); records[w + 1] = t.faces[3 * f + B]!;
-        f32.set([a[A]!, a[B]!, b[A]!, b[B]!, t.faceArea_m2[f]!, model.faceDamping_s[f]!], w + 2);
-      }
-      for (let j = 0, o = stencil.offsets[v]!; o < stencil.offsets[v + 1]!; j++, o++) {
-        const w = 4 * header[4 * c + 1]! + 4 * (j * n + i);
-        records[w] = stencil.columns[o]!; f32[w + 1] = stencil.q[o]!; f32[w + 2] = stencil.qd[o]!;
-      }
-    });
-  });
-  return { header, records };
-}
-
-export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho' | 'initialGuess'> & { readonly coarse: ClothCoarseSpace }, time_s = 0): ClothGPUTables {
+export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess'>, time_s = 0): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, M = model.materials.length, S = model.scripts.length;
-  const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
-  for (let v = 0; v < N; v++) byColour[model.colours[v]!]!.push(v);
-  const order = byColour.flat(), colourRanges: [number, number][] = [];
-  let start = 0;
-  for (const list of byColour) { colourRanges.push([start, list.length]); start += list.length; }
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
-  const ct = packClothCoarseTables(t, options.coarse);
-  const stencil = clothBendingStencil(model), star = packClothStarRecords(model, byColour, stencil);
-  // The bending stencil as plain CSR records (j, Q_vj, Qd_vj, 0) in vertex order (Newton's H p).
+  const stencil = clothBendingStencil(model);
+  // The bending stencil as CSR records (j, Q_vj, Qd_vj, 0) in vertex order (Newton's H p).
   const stencilRecords = new Uint32Array(4 * Math.max(stencil.columns.length, 1)), stencilF = new Float32Array(stencilRecords.buffer);
   for (let o = 0; o < stencil.columns.length; o++) { stencilRecords[4 * o] = stencil.columns[o]!; stencilF[4 * o + 1] = stencil.q[o]!; stencilF[4 * o + 2] = stencil.qd[o]!; }
   // Bending rows relative to their own vertex: per row the offsets of its other entries, each a pair (j, w_j bits).
   const R = t.bendRowCount;
   const bendOffsets = Uint32Array.from(t.bendOffsets, (o, r) => o - Math.min(r, R)), bendEntries = new Uint32Array(2 * Math.max(t.bendVertices.length - R, 1)), bendF = new Float32Array(bendEntries.buffer);
   for (let r = 0, q = 0; r < R; r++) for (let o = t.bendOffsets[r]! + 1; o < t.bendOffsets[r + 1]!; o++, q++) { bendEntries[2 * q] = t.bendVertices[o]!; bendF[2 * q + 1] = t.bendWeights[o]!; }
-  const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), new Uint32Array(4), triangles, t.edges,
-    ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn, stencil.offsets, star.header, star.records, stencilRecords];
+  const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, triangles, t.edges, stencil.offsets, stencilRecords];
   const topoBase: number[] = [];
   let words = 0;
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
   const topo = new Uint32Array(Math.max(align(words, 4), 4));
   parts.forEach((p, i) => topo.set(p, topoBase[i]));
-  const restCounts = [T, T, R, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : []), N], restBase: number[] = [];
+  const restCounts = [T, T, R, E, N, N, 2 * M, 4 * S, N], restBase: number[] = [];
   let records = 0;
   for (const c of restCounts) { restBase.push(records); records += c; }
   const rest = new Float32Array(4 * Math.max(records, 1));
@@ -304,7 +210,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     rest.set([t.faceArea_m2[f]!, model.faceDamping_s[f]!], 4 * (restBase[1]! + f));
   }
   for (let r = 0; r < R; r++) rest.set([t.bendStiffness_N_m3[r]!, model.bendDamping_s[r]!], 4 * (restBase[2]! + r));
-  const diagonalRecord = restBase[restCounts.length - 1]!;
+  const diagonalRecord = restBase[8]!;
   for (let v = 0; v < N; v++) rest.set(stencil.diagonal.subarray(2 * v, 2 * v + 2), 4 * (diagonalRecord + v));
   let strainLimited = false;
   for (let e = 0; e < E; e++) { rest.set([t.edgeRestLength_m[e]!, model.edgeStrainLimit[e]!], 4 * (restBase[3]! + e)); strainLimited ||= model.edgeStrainLimit[e]! > 0; }
@@ -325,7 +231,6 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     rest.set([kind, s.group, s.start_s, s.end_s, ...s.vector, s.angle_rad ?? 0, o[0] - origin[0], o[1] - origin[1], o[2] - origin[2], s.period_s ?? 0,
       s.easing === 'cosine' ? 1 : 0, 0, 0, 0], 4 * (restBase[7]! + 4 * i));
   });
-  if (ct) { rest.set(ct.rowWeights, 4 * restBase[8]!); rest.set(ct.faceNodes, 4 * restBase[9]!); }
   let damped = false;
   for (let f = 0; f < T; f++) damped ||= model.faceDamping_s[f]! > 0;
   for (let r = 0; r < R; r++) damped ||= model.bendDamping_s[r]! > 0;
@@ -334,60 +239,39 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const partialRecord = dampFaceRecord + (damped ? align(2 * T, CLOTH_SEGMENT_ALIGN) : 0);
   const clockRecord = partialRecord + align(2 * workgroups, CLOTH_SEGMENT_ALIGN), stateRecords = clockRecord + CLOTH_SEGMENT_ALIGN;
   const params = new Uint32Array(PARAM_WORDS), paramsF = new Float32Array(params.buffer);
-  params.set([N, T, E, N, ...topoBase.slice(0, 10), topoBase[parts.length - 4]!, 0, ...restBase.slice(0, 8), S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups,
-    stride, edgeDualRecord, partialRecord, clockRecord, dampFaceRecord, 0, damped ? 1 : 0, 0]);
-  const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'adaptive'];
+  // Params: n, topo0 (vertex faces, bending rows), topo1 (vertex edges), topo2 (triangles, edges, stencil offsets), rest0, rest1, flags, state0, state1.
+  params.set([N, T, E, N, ...topoBase.slice(0, 4), topoBase[4]!, topoBase[5]!, 0, 0, topoBase[6]!, topoBase[7]!, topoBase[8]!, 0, ...restBase.slice(0, 8),
+    S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups, stride, edgeDualRecord, partialRecord, clockRecord, dampFaceRecord, 0, damped ? 1 : 0, 0]);
+  const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'inertial'];
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
-  paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, guess, 0], PARAM_GRAVITY);
-  params.set([model.colourCount, topoBase[parts.length - 3]!, topoBase[parts.length - 2]! / 4, diagonalRecord], PARAM_PATCH);
+  paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, 0, guess, 0], PARAM_GRAVITY);
+  params.set([0, 0, 0, diagonalRecord], PARAM_BEND);
   const newtonFaces = CLOTH_NEWTON_SEGMENT_COUNT * stride, newtonPartials = align(newtonFaces + 3 * T, CLOTH_SEGMENT_ALIGN);
   const newtonControl = align(newtonPartials + (CLOTH_NEWTON_PARTIALS + CLOTH_NEWTON_TRIAL_RECORDS) * workgroups, CLOTH_SEGMENT_ALIGN);
-  params.set([newtonFaces, newtonPartials, workgroups, newtonControl, topoBase[parts.length - 1]! / 4], PARAM_NEWTON);
-  let coarse: ClothCoarseLayout;
-  {
-    const m = 3 * ct.nodeCount, sq = align(Math.ceil(m * m / 4), CLOTH_SEGMENT_ALIGN), vec = align(Math.ceil(m / 4), CLOTH_SEGMENT_ALIGN);
-    const trialWorkgroups = Math.ceil(Math.max(N, T, E) / CLOTH_WORKGROUP), pairCount = ct.pairs.length / 2;
-    const at: number[] = [];
-    let r = 0;
-    for (const size of [6 * T, sq, sq, N, N, 2 * trialWorkgroups, vec, vec, 3, 3 * T, 0, E, 2 * N]) { at.push(r); r = align(r + size, CLOTH_SEGMENT_ALIGN); }
-    const [faceShare, A, Ainv, grad, dir, partials, rv, dc, misc, faceGrad, bendGrad, edgeGrad, contactH] = at as [number, number, number, number, number, number, number, number, number, number, number, number, number];
-    params.set([ct.nodeCount, m, pairCount, topoBase[10]!, topoBase[11]!, topoBase[12]!, topoBase[13]!, topoBase[14]!, topoBase[15]!, topoBase[16]!, topoBase[17]!, restBase[8]!,
-      restBase[9]!, faceShare, A, Ainv, grad, dir, partials, rv, dc, misc, trialWorkgroups, 0, faceGrad, bendGrad, edgeGrad, contactH], PARAM_COARSE);
-    coarse = { nodeCount: ct.nodeCount, pairCount, trialWorkgroups, records: r, miscRecord: misc };
-  }
-  return { topo, rest, trianglesWord: topoBase[8]!, edgesWord: topoBase[9]!, colourRanges, params, strainLimited, damped, stride, edgeDualRecord,
-    dampFaceRecord, partialRecord, clockRecord, stateRecords, coarse, newtonRecords: newtonControl + CLOTH_SEGMENT_ALIGN };
+  params.set([newtonFaces, newtonPartials, workgroups, newtonControl, topoBase[9]! / 4], PARAM_NEWTON);
+  return { topo, rest, trianglesWord: topoBase[6]!, edgesWord: topoBase[7]!, params, strainLimited, damped, stride, edgeDualRecord,
+    dampFaceRecord, partialRecord, clockRecord, stateRecords, newtonRecords: newtonControl + CLOTH_SEGMENT_ALIGN };
 }
 
-const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseTrialBack', 'coarseChooseBack', 'coarseApply'] as const;
 const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgApply', 'pcgUpdate', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
-/** Newton with contact: the BDF2 restart's scans of C2's contact state. */
+/** With contact: the BDF2 restart's scans of C2's contact state. */
 const RESTART_KERNELS = ['restartScan', 'onsetScan'] as const;
-type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number] | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number];
-const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
+type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number];
+const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'diagnose', 'reduceDiagnostics', 'finishStep', ...NEWTON_KERNELS];
 
 export class ClothGPUSolver {
   readonly N: number; readonly T: number; readonly E: number;
   readonly positions: GPUBuffer; readonly state: GPUBuffer; readonly status: GPUBuffer; readonly topo: GPUBuffer;
   private readonly rest: GPUBuffer; private readonly params: GPUBuffer; private readonly dispatch: GPUBuffer;
-  /** The two-level correction's work buffer. */
-  private readonly coarse: GPUBuffer;
-  /** The Newton-PCG work buffer (method 'newton'). */
-  private readonly newtonWork?: GPUBuffer;
-  readonly method: ClothSolverMethod;
-  private readonly newton?: Required<ClothNewtonOptions>;
-  /** Newton with contact: the BDF2 history restarts after a contact onset (restartScan, onsetScan). */
+  /** The Newton-PCG work buffer. */
+  private readonly newtonWork: GPUBuffer;
+  readonly method: ClothSolverMethod = 'newton';
+  private readonly newton: Required<ClothNewtonOptions>;
+  /** With contact: the BDF2 history restarts after a contact onset (restartScan, onsetScan). */
   private readonly restarts: boolean;
-  /** Dispatch record of PCG iteration 1 (after the VBD records). */
-  private newtonRecord = 0;
   readonly tables: ClothGPUTables;
   private pipelines!: Record<Kernel, GPUComputePipeline>;
   private bindGroup!: GPUBindGroup;
-  private iterations: number;
-  private readonly coarseEvery: number;
-  /** Whether solveColourWide sums its lanes with subgroup shuffles (see ClothGPUSolverOptions.subgroups). */
-  subgroups = false;
-  private readonly maxIterations: number;
   /** Scene time at clock step 0 (load and undo restart the step count). */
   private timeBase = 0;
   diagnostics: boolean;
@@ -400,39 +284,22 @@ export class ClothGPUSolver {
     const t = model.topology;
     this.N = t.vertexCount; this.T = t.faceCount; this.E = t.edgeCount;
     if (!(options.dt_s > 0)) throw new Error('Cloth solver needs a positive step');
-    if (!(Number.isInteger(options.iterations) && options.iterations >= 1)) throw new Error('Cloth solver needs at least one iteration per step');
-    // Chebyshev extrapolation assumes a stationary sweep; the two-level correction every step takes breaks that, and the
-    // pair explodes (the Float64 oracle of an 8^2 scripted sheet at K = 48: residual 5e1 at rho 0.8, 3e10 at 0.9).
-    if (options.chebyshevRho !== 0) throw new Error(`Cloth Chebyshev acceleration must be off (rho 0): with the two-level correction it can explode, got rho ${options.chebyshevRho}`);
-    this.method = options.method ?? 'vbd';
-    if (this.method !== 'vbd' && this.method !== 'newton') throw new Error(`Unknown cloth solver method ${String(this.method)}`);
-    if (this.method === 'newton') {
-      const o = options.newton;
-      if (!o || !(Number.isInteger(o.iterations) && o.iterations >= 1) || !(Number.isInteger(o.pcgIterations) && o.pcgIterations >= 1))
-        throw new Error('Cloth Newton solver needs integer caps newton.iterations >= 1 and newton.pcgIterations >= 1');
-      this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
-      if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
-      // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
-      if (options.contact && !(options.contact.alpha && options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
-        throw new Error('Cloth Newton solver with contact needs the filter output and contact state (contact.alpha, contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
-    } else if (options.newton) throw new Error('Cloth newton options need method \'newton\'');
-    // Newton binds its work buffer in place of the coarse one, and with contact the filter output and the contact state.
-    this.restarts = this.method === 'newton' && !!options.contact;
-    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1 + (this.restarts ? 2 : 0);
-    if (options.coarseEvery !== undefined && !(Number.isInteger(options.coarseEvery) && options.coarseEvery >= 1)) throw new Error('Cloth coarse correction interval must be a positive integer');
-    // The coarse move is a move like a colour sweep's: with contact it must be truncated before the sweeps start from it.
-    if (this.method === 'vbd' && options.contact && !options.hooks?.afterCoarse) throw new Error('Cloth solver with contact needs hooks.afterCoarse to truncate the two-level correction\'s move');
-    const coarseSpace = options.coarse ?? buildClothCoarseSpace(t);
-    if (clothCoarseFactorBytes(coarseSpace.nodeCount) > device.limits.maxComputeWorkgroupStorageSize)
-      throw new Error(`Cloth coarse space has ${coarseSpace.nodeCount} nodes; its factor needs ${clothCoarseFactorBytes(coarseSpace.nodeCount)} B of workgroup memory, the device has ${device.limits.maxComputeWorkgroupStorageSize}`);
-    if (Math.min(device.limits.maxComputeInvocationsPerWorkgroup, device.limits.maxComputeWorkgroupSizeX) < CLOTH_COARSE_SWEEP_WORKGROUP)
-      throw new Error(`Cloth coarse factor needs ${CLOTH_COARSE_SWEEP_WORKGROUP}-lane workgroups; the device grants ${device.limits.maxComputeInvocationsPerWorkgroup}`);
+    if (options.method !== undefined && options.method !== 'newton') throw new Error(`Unknown cloth solver method ${String(options.method)}`);
+    const o = options.newton;
+    if (!o || !(Number.isInteger(o.iterations) && o.iterations >= 1) || !(Number.isInteger(o.pcgIterations) && o.pcgIterations >= 1))
+      throw new Error('Cloth Newton solver needs integer caps newton.iterations >= 1 and newton.pcgIterations >= 1');
+    this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
+    if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
+    // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
+    if (options.contact && !(options.contact.alpha && options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
+      throw new Error('Cloth Newton solver with contact needs the filter output and contact state (contact.alpha, contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
+    // With contact: the contact records, the filter output and the contact state (the per-stage limit is 10 storage buffers).
+    this.restarts = !!options.contact;
+    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 3 : 0);
     if (device.limits.maxStorageBuffersPerShaderStage < need)
       throw new Error(`Cloth solver needs ${need} storage buffers per stage; the device grants ${device.limits.maxStorageBuffersPerShaderStage}`);
-    this.coarseEvery = options.coarseEvery ?? CLOTH_COARSE.every;
-    this.iterations = options.iterations; this.maxIterations = Math.max(options.maxIterations ?? options.iterations, options.iterations);
     this.diagnostics = !!options.diagnostics; this.hooks = options.hooks ?? {};
-    this.tables = packClothGPUTables(model, options.origin_m, { ...options, coarse: coarseSpace }, options.solverState?.time_s ?? 0);
+    this.tables = packClothGPUTables(model, options.origin_m, options, options.solverState?.time_s ?? 0);
     const label = options.label ?? 'Cloth', storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (name: string, bytes: number, usage = storage) => device.createBuffer({ label: `${label} ${name}`, size: Math.max(256, align(bytes, 256)), usage });
     this.positions = make('positions', 16 * this.tables.stride);
@@ -441,19 +308,20 @@ export class ClothGPUSolver {
     this.topo = make('topology', 4 * this.tables.topo.length);
     this.rest = make('rest data', 4 * this.tables.rest.length);
     this.params = make('params', 4 * PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-    this.coarse = make('coarse work', 16 * this.tables.coarse.records);
-    this.newtonRecord = this.recordCount(this.maxIterations);
-    if (this.newton) {
-      this.newtonWork = make('newton work', 16 * this.tables.newtonRecords);
+    this.newtonWork = make('newton work', 16 * this.tables.newtonRecords);
+    {
       const P = new Uint32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8), F = new Float32Array(P.buffer, P.byteOffset, 8);
       const g = options.gravity_m_s2, gg = g[0] ** 2 + g[1] ** 2 + g[2] ** 2;
       let m2 = 0; for (let v = 0; v < this.N; v++) if (!(t.groups[v]! > 0)) m2 += t.mass_kg[v]! ** 2;
       F[5] = this.newton.pcgTolerance ** 2; F[6] = this.newton.residualTolerance ** 2 * m2 * gg;
     }
-    this.dispatch = make('dispatch records', CLOTH_DISPATCH_STRIDE * (this.newtonRecord + (this.newton ? this.newton.pcgIterations : 0)), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    // One dispatch record per PCG iteration i: (0, N, i, 0).
+    this.dispatch = make('dispatch records', CLOTH_DISPATCH_STRIDE * this.newton.pcgIterations, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     writeBufferChunked(device.queue, this.topo, 0, this.tables.topo);
     writeBufferChunked(device.queue, this.rest, 0, this.tables.rest);
-    this.writeDispatchRecords();
+    const records = new ArrayBuffer(CLOTH_DISPATCH_STRIDE * this.newton.pcgIterations);
+    for (let i = 1; i <= this.newton.pcgIterations; i++) new Uint32Array(records, CLOTH_DISPATCH_STRIDE * (i - 1), 4).set([0, this.N, i, 0]);
+    writeBufferChunked(device.queue, this.dispatch, 0, new Uint8Array(records));
     this.uploadState(options.positions_m ?? t.data.restPositions_m, options.velocities_m_s, options.solverState);
   }
 
@@ -463,8 +331,6 @@ export class ClothGPUSolver {
     return solver;
   }
 
-  get iterationCount(): number { return this.iterations; }
-  get colourCount(): number { return this.tables.colourRanges.length; }
   get strainLimited(): boolean { return this.tables.strainLimited; }
   /** Slices other consumers bind: velocities (C2), normals and triangles (render), canonical edges (C2). */
   get velocities(): GPUBufferBinding { return { buffer: this.state, offset: 16 * CLOTH_STATE.velocity * this.tables.stride, size: 16 * this.tables.stride }; }
@@ -480,36 +346,7 @@ export class ClothGPUSolver {
   get inertialTarget(): GPUBufferBinding { return { buffer: this.state, offset: 16 * CLOTH_STATE.y * this.tables.stride, size: 16 * this.tables.stride }; }
   /** Newton: the direction d of the iteration in flight (vec4 per vertex), which C2's line-search filter reads. */
   get newtonDirection(): GPUBufferBinding {
-    if (!this.newtonWork) throw new Error('Cloth solver is not a Newton solver');
     return { buffer: this.newtonWork, offset: 16 * CLOTH_NEWTON_SEGMENTS.d * this.tables.stride, size: 16 * this.tables.stride };
-  }
-
-  /** Change K (a per-scene authoring value, up to `maxIterations`); rewrites the dispatch records, never per step. */
-  setIterations(k: number): void {
-    if (!(Number.isInteger(k) && k >= 1)) throw new Error('Cloth solver needs at least one iteration per step');
-    if (k > this.maxIterations) throw new Error(`Cloth dispatch records were authored for at most ${this.maxIterations} iterations`);
-    this.iterations = k; this.writeDispatchRecords();
-  }
-
-  private recordCount(k: number): number { return k * (this.tables.colourRanges.length + 1); }
-
-  private writeDispatchRecords(): void {
-    const C = this.tables.colourRanges.length, records = new ArrayBuffer(CLOTH_DISPATCH_STRIDE * this.recordCount(this.iterations));
-    let omega = 1;
-    for (let it = 1; it <= this.iterations; it++) {
-      omega = clothChebyshevOmega(it, this.options.chebyshevRho, omega);
-      for (let c = 0; c <= C; c++) {
-        const offset = CLOTH_DISPATCH_STRIDE * ((it - 1) * (C + 1) + c), u = new Uint32Array(records, offset, 8), f = new Float32Array(records, offset, 8);
-        const [start, count] = c < C ? this.tables.colourRanges[c]! : [0, this.N];
-        u.set([start, count, it, c]); f[4] = omega;
-      }
-    }
-    writeBufferChunked(this.device.queue, this.dispatch, 0, new Uint8Array(records));
-    if (this.newton) {
-      const nr = new ArrayBuffer(CLOTH_DISPATCH_STRIDE * this.newton.pcgIterations);
-      for (let i = 1; i <= this.newton.pcgIterations; i++) new Uint32Array(nr, CLOTH_DISPATCH_STRIDE * (i - 1), 4).set([0, this.N, i, 0]);
-      writeBufferChunked(this.device.queue, this.dispatch, CLOTH_DISPATCH_STRIDE * this.newtonRecord, new Uint8Array(nr));
-    }
   }
 
   private async compile(): Promise<void> {
@@ -519,29 +356,19 @@ export class ClothGPUSolver {
       { binding: B.params, visibility: C, buffer: { type: 'uniform' } },
       { binding: B.dispatch, visibility: C, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 32 } },
       storage(B.positions), storage(B.state), storage(B.status), storage(B.topo, true), storage(B.rest, true), storage(B.topo4, true)];
-    if (this.options.contact) entries.push(storage(B.contact, true));
-    // Newton never runs the two-level correction: no coarse binding (the per-stage limit is 10 storage buffers).
-    if (this.newtonWork) entries.push(storage(B.newton)); else entries.push(storage(B.coarse));
-    const filter = this.newtonWork ? this.options.contact?.alpha : undefined;
-    if (filter) entries.push(storage(B.filter, true));
-    const contactState = this.newtonWork ? this.options.contact?.state : undefined;
-    if (contactState) entries.push(storage(B.contactState, true));
+    const contact = this.options.contact;
+    entries.push(storage(B.newton));
+    if (contact) entries.push(storage(B.contact, true), storage(B.filter, true), storage(B.contactState, true));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
-      ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []),
-      ...(this.newtonWork ? [buffer(B.newton, this.newtonWork)] : [buffer(B.coarse, this.coarse)]), ...(filter ? [buffer(B.filter, filter)] : []),
-      ...(contactState ? [buffer(B.contactState, contactState)] : [])] });
-    const lanes = this.options.vertexLanes ?? CLOTH_VERTEX_LANES;
-    const available = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= lanes;
-    if (this.options.subgroups && !available) throw new Error(`Cloth subgroup sums need the subgroups feature with subgroups of at least ${lanes} invocations`);
-    this.subgroups = lanes > 1 && (this.options.subgroups ?? available);
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, coarseNodes: this.newtonWork ? 0 : this.tables.coarse.nodeCount, newton: !!this.newtonWork,
-      ...(lanes > 1 ? { vertexLanes: lanes, subgroups: this.subgroups } : {}) }) });
+      buffer(B.newton, this.newtonWork),
+      ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.filter, contact.alpha), buffer(B.contactState, contact.state)] : [])] });
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const kernels: readonly Kernel[] = [...KERNELS, ...(this.newtonWork ? NEWTON_KERNELS : COARSE_KERNELS), ...(contactState ? RESTART_KERNELS : [])];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? RESTART_KERNELS : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
@@ -598,87 +425,44 @@ export class ClothGPUSolver {
 
   /** Encode exactly one implicit step of length dt into `pass`. */
   encodeStep(pass: GPUComputePassEncoder): void {
-    const C = this.tables.colourRanges.length, limited = this.tables.strainLimited;
-    if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', this.threads(this.N)); this.grabAnchorsPending = false; }
-    if (this.restarts) this.run(pass, 'restartScan', this.threads(this.N));
+    const limited = this.tables.strainLimited, o = this.newton, W = this.threads(this.N);
+    if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', W); this.grabAnchorsPending = false; }
+    if (this.restarts) this.run(pass, 'restartScan', W);
     this.run(pass, 'beginStep', 1);
     if (limited || this.tables.damped) this.run(pass, 'frameElements', this.threads(Math.max(limited ? this.E : 0, this.tables.damped ? this.T : 0)));
-    this.run(pass, 'frame', this.threads(this.N));
+    this.run(pass, 'frame', W);
     this.hooks.afterFrame?.(pass);
-    if (this.newton) { this.encodeNewton(pass); return; }
-    const coarse = this.tables.coarse;
-    this.run(pass, 'coarseFactors', this.threads(this.T));
-    this.run(pass, 'coarseAssemble', coarse.pairCount);
-    this.run(pass, 'coarseFactor', 1);
-    for (let it = 1; it <= this.iterations; it++) {
-      const base = (it - 1) * (C + 1);
-      if ((it - 1) % this.coarseEvery === 0) {
-        this.run(pass, 'coarseElements', this.threads(Math.max(this.N, this.T, limited ? this.E : 0)));
-        this.run(pass, 'coarseGradient', this.threads(this.N));
-        this.run(pass, 'coarseRestrict', coarse.nodeCount);
-        this.run(pass, 'coarseSolve', 1);
-        this.run(pass, 'coarseProlong', this.threads(this.N));
-        this.run(pass, 'coarseTrial', coarse.trialWorkgroups);
-        this.run(pass, 'coarseChoose', 1);
-        // Shorter trials only after a rejected full step: otherwise both are uniform early exits.
-        this.run(pass, 'coarseTrialBack', coarse.trialWorkgroups);
-        this.run(pass, 'coarseChooseBack', 1);
-        this.run(pass, 'coarseApply', this.threads(this.N));
-        this.hooks.afterCoarse?.(pass, it);
-      }
-      for (let c = 0; c < C; c++) {
-        const count = this.tables.colourRanges[c]![1];
-        if (this.options.vertexLanes === 1) this.run(pass, 'solveColour', this.threads(count), base + c);
-        else this.run(pass, 'solveColourWide', Math.ceil(count * (this.options.vertexLanes ?? CLOTH_VERTEX_LANES) / CLOTH_WIDE_WORKGROUP), base + c);
-        this.hooks.afterColour?.(pass, it, c);
-      }
-      this.run(pass, 'postIteration', this.threads(this.N), base + C);
-      if (limited) this.run(pass, 'edgeDualUpdate', this.threads(this.E), base + C);
-      this.hooks.afterIteration?.(pass, it);
-    }
-    this.hooks.beforeFinish?.(pass);
-    if (this.diagnostics) {
-      this.run(pass, 'diagnose', this.threads(this.N));
-      this.run(pass, 'reduceDiagnostics', 1);
-    }
-    this.run(pass, 'finishStep', this.threads(this.N));
-  }
-
-  /** The Newton-PCG iterations and the step's end (method 'newton'). */
-  private encodeNewton(pass: GPUComputePassEncoder): void {
-    const o = this.newton!, W = this.threads(this.N);
     this.run(pass, 'nwBeginStep', 1);
     for (let n = 0; n < o.iterations; n++) {
       this.run(pass, 'nwFaces', this.threads(this.T));
       this.run(pass, 'nwGradient', W);
       for (let i = 1; i <= o.pcgIterations; i++) {
-        this.run(pass, 'pcgApply', W, this.newtonRecord + i - 1);
-        this.run(pass, 'pcgUpdate', W, this.newtonRecord + i - 1);
+        this.run(pass, 'pcgApply', W, i - 1);
+        this.run(pass, 'pcgUpdate', W, i - 1);
       }
       this.hooks.filter?.(pass);
       this.run(pass, 'nwTrial', W);
       this.run(pass, 'nwChoose', 1);
       this.run(pass, 'nwApply', W);
       this.hooks.afterNewtonStep?.(pass);
-      if (this.tables.strainLimited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
+      if (limited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
     }
     this.hooks.beforeFinish?.(pass);
     if (this.diagnostics) {
-      this.run(pass, 'diagnose', this.threads(this.N));
+      this.run(pass, 'diagnose', W);
       this.run(pass, 'reduceDiagnostics', 1);
     }
     this.hooks.stepEnd?.(pass);
-    if (this.restarts) this.run(pass, 'onsetScan', this.threads(this.N));
-    this.run(pass, 'finishStep', this.threads(this.N));
+    if (this.restarts) this.run(pass, 'onsetScan', W);
+    this.run(pass, 'finishStep', W);
   }
 
   /** Newton-PCG control records (harness reads; never a step path): done flag, PCG done, last step, Newton iterations
    * of the last step; then |g|^2 over free DOFs at its first and latest Newton iterate, and |m g|^2 for scale. */
   async readNewtonControl(): Promise<Float32Array> {
-    if (!this.newtonWork) throw new Error('Cloth solver is not a Newton solver');
     const L = this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN;
     const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 32));
-    out[6] = new Float32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8)[6]! / this.newton!.residualTolerance ** 2;
+    out[6] = new Float32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8)[6]! / this.newton.residualTolerance ** 2;
     return out;
   }
 
@@ -814,16 +598,8 @@ export class ClothGPUSolver {
   }
 
   static describeStatus(status: number): string[] {
-    return [...(status & CLOTH_STATUS.nonFinite ? ['A cloth position or velocity became non-finite'] : []),
-      ...(status & CLOTH_STATUS.coarseIndefinite ? ['coarseIndefinite: a step\'s coarse operator was not positive definite, so its two-level correction could not run (a failure: there is no one-level path)'] : [])];
+    return status & CLOTH_STATUS.nonFinite ? ['A cloth position or velocity became non-finite'] : [];
   }
 
-  /** The two-level correction's counters (harness reads; never a step path). */
-  async readCoarseStats(): Promise<ClothCoarseStats> {
-    const layout = this.tables.coarse;
-    const all = new Float32Array(await this.read(this.coarse, 16 * (layout.miscRecord + 3))), s = 4 * (layout.miscRecord + 1);
-    return { corrections: all[s]!, accepted: [all[s + 1]!, all[s + 2]!, all[s + 3]!, all[s + 4]!] };
-  }
-
-  destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.coarse, this.newtonWork]) b?.destroy(); }
+  destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.newtonWork]) b.destroy(); }
 }

@@ -1,7 +1,7 @@
 /**
  * The Newton-PCG GPU step (method 'newton') against the Float64 oracle run to convergence: the same objective
- * (BDF2 inertia, membrane, bending, damping), so a converged Newton step and a converged VBD step land on the same
- * minimizer. Pins are Dirichlet DOFs in Newton and AVBD terms in the oracle, which agree at convergence; strain limits are
+ * (BDF2 inertia, membrane, bending, damping), so a converged Newton step and a converged oracle step land on the same
+ * minimizer (the oracle runs Gauss-Seidel sweeps with its two-level correction, oracle-coarse.ts). Pins are Dirichlet DOFs in Newton and AVBD terms in the oracle, which agree at convergence; strain limits are
  * augmented-Lagrangian terms in both, whose duals reach the same KKT point. Also the refusals: unknown methods and caps. Skips without WEBGPU_NODE_MODULE.
  */
 import assert from 'node:assert/strict';
@@ -10,11 +10,11 @@ import { pathToFileURL } from 'node:url';
 import { createProcessRetainedDawnGPU } from '../lib/harness/node-dawn-provider';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { clothGridData } from '../lib/cloth/grid';
-import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from '../lib/cloth/topology';
+import { prepareClothTopology } from '../lib/cloth/topology';
 import type { ClothMaterial } from '../lib/cloth/types';
 import { buildClothSolverModel, clothOracleStep, createClothOracleState, type ClothStepOptions } from '../lib/cloth/oracle';
 import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
-import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/coarse';
+import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
 
@@ -39,18 +39,18 @@ function setup(columns: number, material = cotton) {
   const data = clothGridData({ columns, rows: columns, width_m: 0.5, height_m: 0.5, origin_m: [0, 1, 0],
     group: (i, j) => j === 0 && (i === 0 || i === columns - 1) ? 1 : 0 });
   const topology = prepareClothTopology(data, [material]);
-  return buildClothSolverModel(topology, [material], colourClothVertices(clothVertexNeighbours(topology)));
+  return buildClothSolverModel(topology, [material]);
 }
 
-const base = { origin_m: origin, dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, iterations: 1, chebyshevRho: 0, initialGuess: 'previous' as const };
+const base = { origin_m: origin, dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, initialGuess: 'previous' as const };
 
 test('Newton-PCG steps match the converged Float64 oracle over a BDF2 run of a corner-held sheet', { skip: !gpu }, async () => withDevice(async device => {
   const model = setup(10), steps = 15;
   const solver = await ClothGPUSolver.create(device, model, { ...base, method: 'newton', newton: { iterations: 12, pcgIterations: 200, pcgTolerance: 1e-4, residualTolerance: 1e-5 } });
   const st = createClothOracleState(model, model.topology.data.restPositions_m);
-  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 250, chebyshevRho: 0, initialGuess: 'previous' };
+  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 250, initialGuess: 'previous' };
   const coarse = new ClothCoarseCorrection(model, buildClothCoarseSpace(model.topology));
-  for (let s = 0; s < steps; s++) clothOracleStep(model, st, options, false, undefined, coarse);
+  for (let s = 0; s < steps; s++) clothOracleStep(model, st, options, false, coarse);
   solver.step(steps);
   const x = await solver.readPositions(), status = await solver.readStatus(), ctl = await solver.readNewtonControl();
   assert.equal(status.status, 0); assert.equal(status.steps, steps);
@@ -69,9 +69,9 @@ test('Newton-PCG with augmented-Lagrangian strain limits matches the converged F
   // The multipliers converge over Newton iterations (one AVBD dual update after each): 16 leave 3.4e-5 m, 32 reach 3.1e-6.
   const solver = await ClothGPUSolver.create(device, model, { ...base, method: 'newton', newton: { iterations: 32, pcgIterations: 200, pcgTolerance: 1e-4, residualTolerance: 1e-5 } });
   const st = createClothOracleState(model, model.topology.data.restPositions_m);
-  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 250, chebyshevRho: 0, initialGuess: 'previous' };
+  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 250, initialGuess: 'previous' };
   const coarse = new ClothCoarseCorrection(model, buildClothCoarseSpace(model.topology));
-  for (let s = 0; s < steps; s++) clothOracleStep(model, st, options, false, undefined, coarse);
+  for (let s = 0; s < steps; s++) clothOracleStep(model, st, options, false, coarse);
   solver.step(steps);
   const x = await solver.readPositions(), status = await solver.readStatus(), ctl = await solver.readNewtonControl();
   assert.equal(status.status, 0); assert.equal(status.steps, steps);
@@ -95,8 +95,11 @@ test('Newton-PCG with augmented-Lagrangian strain limits matches the converged F
 
 test('the Newton method refuses unknown methods and bad caps', { skip: !gpu }, async () => withDevice(async device => {
   const model = setup(6);
-  await assert.rejects(ClothGPUSolver.create(device, model, { ...base, method: 'jacobi' as never }), /Unknown cloth solver method/);
-  await assert.rejects(ClothGPUSolver.create(device, model, { ...base, method: 'newton' }), /needs integer caps/);
-  await assert.rejects(ClothGPUSolver.create(device, model, { ...base, method: 'newton', newton: { iterations: 2, pcgIterations: 0 } }), /needs integer caps/);
-  await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton: { iterations: 2, pcgIterations: 4 } }), /need method 'newton'/);
+  const newton = { iterations: 2, pcgIterations: 4 };
+  // VBD was removed (M4): its method name is an unknown method like any other.
+  for (const method of ['jacobi', 'vbd'])
+    await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton, method: method as never }), /Unknown cloth solver method/);
+  await assert.rejects(ClothGPUSolver.create(device, model, { ...base } as never), /needs integer caps/);
+  await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton: { iterations: 2, pcgIterations: 0 } }), /needs integer caps/);
+  await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton: { iterations: 2.5, pcgIterations: 4 } }), /needs integer caps/);
 }));

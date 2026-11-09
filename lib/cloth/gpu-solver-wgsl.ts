@@ -1,25 +1,21 @@
-/** WGSL of the Tier A cloth solver: one implicit step per call (no substeps),
- * K VBD iterations over vertex colours with the per-vertex line search,
- * Chebyshev, and AVBD pins and strain limits. The energies, constraint
- * updates and iteration order are those of the Float64 oracle (oracle.ts) in
- * f32. Every buffer and bind slot is described in gpu-solver.ts. */
-import { CLOTH_AVBD, CLOTH_LINE_SEARCH } from './oracle';
-import { CLOTH_PATCH_SLOT_BITS } from './patches';
+/** WGSL of the GPU cloth solver: one implicit step per call (no substeps), Newton-PCG (gpu-newton-wgsl.ts) on the
+ * step's objective, whose element terms (membrane, bending, damping, augmented-Lagrangian strain limits, pins, grab,
+ * contact) are those of the Float64 oracle (oracle.ts) in f32. Every buffer and bind slot is described in gpu-solver.ts. */
+import { CLOTH_AVBD } from './oracle';
 import { CLOTH_BEND_ROWS } from './topology';
-import { CLOTH_STATUS_COARSE_INDEFINITE, clothCoarseWGSL } from './gpu-coarse-wgsl';
 import { clothNewtonWGSL } from './gpu-newton-wgsl';
 
 /** vec4<f32> per-vertex segments of the `state` buffer, each CLOTH_SEGMENT_ALIGN-padded N long.
  * Segment 0 is the step-start velocity, so C2 binds `state` as its velocity input. After the
  * segments: one record per edge (AVBD dual lambda, k, stabilized limit), the diagnostics
- * partials (2 per workgroup) and the clock record (step, previous step, h~, BDF2 as floats). Segment 12 is the mouse
+ * partials (2 per workgroup) and the clock record (step, previous step, h~, BDF2 as floats). Segment 9 is the mouse
  * grab (`ClothGPUSolver.setGrab`): per vertex its anchor (xyz, the vertex at the grab's first step) and weight (w, 0 free). */
-export const CLOTH_STATE = { velocity: 0, xt: 1, vPrev: 2, dxPrev: 3, y: 4, xHat: 5, prev1: 6, prev2: 7, pinTarget: 8, pinDual: 9, normal: 10, patchOut: 11, grab: 12 } as const;
-export const CLOTH_STATE_SEGMENTS = 13;
+export const CLOTH_STATE = { velocity: 0, xt: 1, vPrev: 2, dxPrev: 3, y: 4, xHat: 5, pinTarget: 6, pinDual: 7, normal: 8, grab: 9 } as const;
+export const CLOTH_STATE_SEGMENTS = 10;
 /** Segment padding in vec4 records: 16 records = 256 B, the storage binding offset alignment. */
 export const CLOTH_SEGMENT_ALIGN = 16;
 /** Status words: [0] status bits (sticky), [1] steps completed; slots start at CLOTH_STATUS_RING_BASE. */
-export const CLOTH_STATUS = { nonFinite: 1, coarseIndefinite: CLOTH_STATUS_COARSE_INDEFINITE } as const;
+export const CLOTH_STATUS = { nonFinite: 1 } as const;
 export const CLOTH_STATUS_RING_BASE = 16;
 /** Status words below the ring: 0 status flags, 1 steps; the contact restart's words (Newton with contact): this step's
  * onset, the next step's restart, and restarts since the state was uploaded. */
@@ -30,47 +26,25 @@ export const CLOTH_STATUS_WORDS = CLOTH_STATUS_RING_BASE + CLOTH_STATUS_SLOT_WOR
 /** Slot words: step + 1 (0: empty), BDF2 flag, residual |grad E| / |m g|, max edge strain, kinetic, potential, elastic energy (f32 bits). */
 export const CLOTH_SLOT = { step: 0, bdf2: 1, residual: 2, maxStrain: 3, kinetic: 4, potential: 5, elastic: 6 } as const;
 export const CLOTH_WORKGROUP = 64;
-/** Default lanes per vertex of the grouped Tier A colour solve (solveColourWide). 4: the lanes split the vertex's
- * contact entries, which dominate the sweep in a pile of folds (Bridson curtain at 3.3 s: 4 lanes 6-33% under 2);
- * under light contact 4 is within about 5% of 2 (progress-lane-c1.md RESULT (17)). */
-export const CLOTH_VERTEX_LANES = 4;
-/** solveColourWide workgroup: CLOTH_WIDE_WORKGROUP / lanes vertices, one SIMD group. */
-export const CLOTH_WIDE_WORKGROUP = 32;
-/** Uniform records of the per-dispatch data, one per (iteration, colour) and one post record per iteration. */
+/** Uniform records of the per-dispatch data, one per PCG iteration (its index in range.z). */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9, newton: 10, filter: 11, contactState: 12 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, newton: 10, filter: 11, contactState: 12 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
   /** C2's vertex contact block (ogcVertexBlockWGSL at group 0, CLOTH_BINDING.contact); omitted: no contact terms. */
   readonly contactBlock?: string;
-  /** Tier B module: positions resolve through the patch's workgroup copy (the solvePatches entry point). */
-  readonly patch?: { readonly maxVertices: number; readonly workgroup: number };
-  /** Lanes per vertex of solveColourWide: a power of two from 1 to CLOTH_WIDE_WORKGROUP (default CLOTH_VERTEX_LANES). */
-  readonly vertexLanes?: number;
-  /** The two-level correction's kernels and its `coarse` work buffer (gpu-coarse-wgsl.ts), for this many coarse nodes. */
-  readonly coarseNodes?: number;
-  /** solveColourWide sums a vertex's lanes with subgroup shuffles (`enable subgroups`) instead of workgroup memory. The
-   *  caller checks the device has `subgroups` with subgroups of at least `vertexLanes` invocations. */
-  readonly subgroups?: boolean;
-  /** Append the Newton-PCG kernels (gpu-newton-wgsl.ts) and their `nw` buffer. */
-  readonly newton?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
-  const contact = !!options.contactBlock, patch = options.patch, lanes = options.vertexLanes ?? CLOTH_VERTEX_LANES;
-  // The BDF2 restart at a contact onset reads C2's contact state: Newton with contact only (VBD and its coarse space go in M4).
-  const restart = contact && !!options.newton;
-  if (!(Number.isInteger(lanes) && lanes >= 1 && lanes <= CLOTH_WIDE_WORKGROUP && (lanes & (lanes - 1)) === 0))
-    throw new Error(`Cloth vertexLanes must be a power of two from 1 to ${CLOTH_WIDE_WORKGROUP}, got ${lanes}`);
-  if (patch && contact) throw new Error('Cloth Tier B does not take a contact block yet: truncation must run inside the patch dispatch');
-  if (patch && options.coarseNodes) throw new Error('Cloth Tier B does not take the two-level correction');
-  return /* wgsl */`${options.subgroups && !patch ? 'enable subgroups;\n' : ''}
+  // With contact the BDF2 history restarts at a contact onset (C2's contact state).
+  const contact = !!options.contactBlock, restart = contact;
+  return /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)
   topo0: vec4u,  // vertexFaceOffsets, vertexFaces, bending row offsets, bending row entries (j, w_j bits)
-  topo1: vec4u,  // vertexEdgeOffsets, vertexEdges, colour order, unused
+  topo1: vec4u,  // vertexEdgeOffsets, vertexEdges, unused, unused
   topo2: vec4u,  // triangles (v0, v1, v2, material), edges (v0, v1, f0, f1), bending stencil offsets
   rest0: vec4u,  // face Dm^-1, face (area, damping), bending row (k, kd), edge (L, eps)
   rest1: vec4u,  // vertex (m, elastic, length, group), anchor, material, script
@@ -78,16 +52,13 @@ struct Params {
   state0: vec4u, // segment stride, edge duals, partials, clock
   state1: vec4u, // damping tangent: faces (2 records), unused, damped flag
   gravity: vec4f, // xyz, dt
-  misc: vec4f,   // clock origin (s), Chebyshev rho, initial guess (0 previous, 1 adaptive, 2 inertial)
-  tierB: vec4u,  // colour count, star header (topo word), star records (topo4 index), bending diagonal (rest record)
-  partA: vec4u,  // Tier B partition 0: owner, patch offsets, vertices, colour offsets (topo words)
-  partB: vec4u,  // partition 1
-  coarse0: vec4u, coarse1: vec4u, coarse2: vec4u, coarse3: vec4u, coarse4: vec4u, coarse5: vec4u, coarse6: vec4u, // gpu-coarse-wgsl.ts
+  misc: vec4f,   // clock origin (s), unused, initial guess (0 previous, 1 adaptive, 2 inertial)
+  bend: vec4u,   // unused, unused, unused, bending diagonal (rest record)
   grab: vec4f,   // mouse grab: displacement of its anchors (xyz, metres), held (w: 1, else 0)
   newton0: vec4u, // Newton-PCG (gpu-newton-wgsl.ts): face records, partials, partial count W, control record (nw records)
   newton1: vec4u, // bending stencil records (topo4 index), PCG tolerance^2 and residual tolerance^2 |m g|^2 (f32 bits)
 }
-struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration) or Tier B (partition, inner iterations), (omega)
+struct Dispatch { range: vec4u, values: vec4f } // (0, N, PCG iteration)
 
 @group(0) @binding(${CLOTH_BINDING.params}) var<uniform> P: Params;
 @group(0) @binding(${CLOTH_BINDING.dispatch}) var<uniform> R: Dispatch;
@@ -104,29 +75,17 @@ const EDGE_ALPHA: f32 = ${CLOTH_AVBD.edgeAlpha};
 const GAMMA: f32 = ${CLOTH_AVBD.gamma};
 const BETA: f32 = ${CLOTH_AVBD.beta};
 const K_MAX_RATIO: f32 = ${CLOTH_AVBD.maxStiffnessRatio};
-const ARMIJO: f32 = ${CLOTH_LINE_SEARCH.armijo};
-const HALVINGS: u32 = ${CLOTH_LINE_SEARCH.halvings}u;
 const EPS32: f32 = 1.1920929e-7;
 const PI: f32 = 3.14159265358979;
 const S_VEL = ${CLOTH_STATE.velocity}u; const S_NORMAL = ${CLOTH_STATE.normal}u; const S_XT = ${CLOTH_STATE.xt}u; const S_VPREV = ${CLOTH_STATE.vPrev}u; const S_DXPREV = ${CLOTH_STATE.dxPrev}u;
-const S_Y = ${CLOTH_STATE.y}u; const S_XHAT = ${CLOTH_STATE.xHat}u; const S_PREV1 = ${CLOTH_STATE.prev1}u;
-const S_PREV2 = ${CLOTH_STATE.prev2}u; const S_PINC = ${CLOTH_STATE.pinTarget}u; const S_PIND = ${CLOTH_STATE.pinDual}u; const S_POUT = ${CLOTH_STATE.patchOut}u;
+const S_Y = ${CLOTH_STATE.y}u; const S_XHAT = ${CLOTH_STATE.xHat}u; const S_PINC = ${CLOTH_STATE.pinTarget}u; const S_PIND = ${CLOTH_STATE.pinDual}u;
 const S_GRAB = ${CLOTH_STATE.grab}u;
 const RING_BASE = ${CLOTH_STATUS_RING_BASE}u; const SLOT_WORDS = ${CLOTH_STATUS_SLOT_WORDS}u; const RING_SLOTS = ${CLOTH_STATUS_RING_SLOTS}u;
 const WG = ${CLOTH_WORKGROUP}u;
 const IDENTITY = mat3x3f(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
 
 fn seg(s: u32, v: u32) -> u32 { return s * P.state0.x + v; }
-${patch ? `const SLOT_BITS = ${CLOTH_PATCH_SLOT_BITS}u; const PATCH_WG = ${patch.workgroup}u;
-var<workgroup> patchX: array<vec4f, ${patch.maxVertices}>;
-var<private> patchId: u32;
-var<private> ownerBase: u32;
-// The patch's own vertices live in workgroup memory; every other vertex is frozen at the dispatch's start.
-fn pos(i: u32) -> vec3f {
-  let o = topo[ownerBase + i];
-  if ((o >> SLOT_BITS) == patchId) { return patchX[o & ((1u << SLOT_BITS) - 1u)].xyz; }
-  return positions[i].xyz;
-}` : `fn pos(i: u32) -> vec3f { return positions[i].xyz; }`}
+fn pos(i: u32) -> vec3f { return positions[i].xyz; }
 fn tris(f: u32) -> vec4u { return topo4[(P.topo2.x >> 2u) + f]; }
 fn edges(e: u32) -> vec4u { return topo4[(P.topo2.y >> 2u) + e]; }
 fn edgeDual(e: u32) -> vec4f { return state[P.state0.y + e]; }
@@ -153,13 +112,13 @@ fn grabSpring(v: u32, xv: vec3f) -> vec4f {
 fn outer(u: vec3f, w: vec3f) -> mat3x3f { return mat3x3f(u * w.x, u * w.y, u * w.z); }
 fn finite3(x: vec3f) -> bool { return all(abs(x) <= vec3f(3.0e38)); }
 
-${contact && options.newton ? `// Newton: the line search evaluates the contact energy at x + a d (nwTrialStep = a, 0 everywhere else); H.p
+${contact ? `// Newton: the line search evaluates the contact energy at x + a d (nwTrialStep = a, 0 everywhere else); H.p
 // multiplies the PCG direction p formed on the fly; the filter's alpha_v per vertex and alpha_min (word N) bound d.
 var<private> nwTrialStep: f32;
 fn ogcX(i: u32) -> vec3f { if (nwTrialStep != 0.0) { return positions[i].xyz + nwTrialStep * nwD(i); } return positions[i].xyz; }
 fn ogcDir(i: u32) -> vec3f { return nwP(i); }
 @group(0) @binding(${CLOTH_BINDING.filter}) var<storage, read> ogcFilter: array<f32>;
-fn ogcAlphaMin() -> f32 { return ogcFilter[P.n.x]; }` : contact ? `fn ogcX(i: u32) -> vec3f { return positions[i].xyz; }` : ''}
+fn ogcAlphaMin() -> f32 { return ogcFilter[P.n.x]; }` : ''}
 ${contact ? `fn ogcXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
 fn ogcTri(t: u32) -> vec3u { return tris(t).xyz; }
 fn ogcEdgeVerts(e: u32) -> vec2u { return edges(e).xy; }
@@ -188,7 +147,7 @@ fn projectMembranePSD(H: mat3x3f, f0: vec3f, f1: vec3f) -> mat3x3f {
 }
 
 // r: for the quadratic damping terms, a bound per unit |d| on the first-order rounding of g . d (|g| plus the base
-// rate's rounding through the frozen tangent), so the wide sweep's line search takes their change in closed form.
+// rate's rounding through the frozen tangent). Newton's global line search does not read it (the VBD sweeps did).
 struct Block { g: vec3f, H: mat3x3f, e: f32, r: f32 }
 
 // Face f seen from its corner k with that corner at xv: every load the face's terms share, made once.
@@ -251,21 +210,6 @@ fn bendDelta(q: BendIn, ds: vec3f) -> vec2f {
   return vec2f(lin + quad, abs(lin) + quad + (q.kd.x * q.sr + scale * q.ur) * length(ds));
 }
 
-// Star records (solveColourWide): per colour, record j of slot i at 2 (j n + i) vec4s, so a SIMD group's lanes read
-// consecutive records. A face record is seen from the vertex as corner 0 (corners v, A, B in the face's cyclic order,
-// Dm^-1 rewritten for that order): (A | material << 24, B, Dm', area, damping); its damping tangents come from x_t, as
-// frameElements forms them. The bending stream is one vec4 a record, record j of slot i at (j n + i): a stencil record.
-fn starRecord(r: u32) -> array<vec4u, 2> { let i = P.tierB.z + r; return array<vec4u, 2>(topo4[i], topo4[i + 1u]); }
-fn starFace(r: u32, v: u32, xv: vec3f) -> FaceIn {
-  let w = starRecord(r); let A = w[0].x & 0xffffffu; let m = w[0].x >> 24u; let B = w[0].y;
-  return FaceIn(0xffffffffu, 0u, vec4u(v, A, B, m), xv, pos(A), pos(B), bitcast<vec4f>(vec4u(w[0].zw, w[1].xy)),
-    vec4f(bitcast<vec2f>(w[1].zw), 0.0, 0.0), rest[P.rest1.z + 2u * m], rest[P.rest1.z + 2u * m + 1u]);
-}
-fn starFaceDamping(q: FaceIn) -> Block {
-  if (!(q.fr.y > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
-  let T = faceTangent(state[seg(S_XT, q.t.x)].xyz, state[seg(S_XT, q.t.y)].xyz, state[seg(S_XT, q.t.z)].xyz, q.dm, q.c0, q.c1);
-  return faceDampingWith(q, T[0], T[1]);
-}
 // The bending stencil of vertex v (bending and its damping summed over the rows holding v): g = sum_j Q_vj (x_j -
 // x_v) + sum_j Qd_vj (u_j - u_v) / h~ over v's stencil neighbours j (u = x - x^), Hessian (Q_vv + Qd_vv / h~) I. A
 // stencil record is (j, Q_vj, Qd_vj, 0); this adds one into dmp's gradient and rounding scale (xhv is x^_v).
@@ -277,8 +221,7 @@ fn stencilRecord(rec: vec4u, xv: vec3f, xhv: vec3f, dmp: ptr<function, Block>) {
     (*dmp).g += qd * du; (*dmp).r += abs(qd) * length(du);
   }
 }
-fn stencilCount(v: u32) -> u32 { return topo[P.topo2.z + v + 1u] - topo[P.topo2.z + v]; }
-fn stencilDiagonal(v: u32) -> mat3x3f { let q = rest[P.tierB.w + v].xy; return (q.x + q.y / hEff()) * IDENTITY; }
+fn stencilDiagonal(v: u32) -> mat3x3f { let q = rest[P.bend.w + v].xy; return (q.x + q.y / hEff()) * IDENTITY; }
 // Vertex v's whole bending stencil with v at xv (vertex-ordered records at topo4 P.newton1.x): gradient, Hessian, rounding.
 fn stencilBlock(v: u32, xv: vec3f) -> Block {
   var b = Block(vec3f(0.0), stencilDiagonal(v), 0.0, 0.0); let xhv = state[seg(S_XHAT, v)].xyz;
@@ -347,53 +290,13 @@ fn vertexSystem(v: u32, xv: vec3f) -> System {
   return constraints(v, xv, s);
 }
 
-// Line-search energy changes in difference form. E(xv + d) - E(xv) is assembled from exact increments (strain,
-// rate and residual increments are linear or quadratic in d), so the Armijo test does not compare two nearly equal f32
-// energies: a near-converged vertex no longer fails every trial on rounding noise. Each returns (dE, floor): floor
-// sums |increments| and the first-order rounding of the base quantities (strain ~ eps, residual ~ eps |x|), and the
-// test allows 4 eps * floor.
+// Line-search energy changes in difference form (the Newton trials, gpu-newton-wgsl.ts). E(x + d) - E(x) is assembled
+// from exact increments (strain and residual increments are linear or quadratic in d), so the Armijo test does not
+// compare two nearly equal f32 energies. Each returns (dE, floor): floor sums |increments| and the first-order rounding
+// of the base quantities, and the test allows 4 eps * floor.
 fn quadDelta(aOld: f32, aNew: f32, e: f32, de: f32) -> f32 {
   if (aOld == aNew) { return aOld * (e * de + 0.5 * de * de); }
   let en = e + de; return 0.5 * (aNew * en * en - aOld * e * e);
-}
-fn membraneDelta(q: FaceIn, d: vec3f) -> vec2f {
-  let k = q.k; let dm = q.dm; let area = q.fr.x; let c0 = q.c0; let c1 = q.c1;
-  let e1 = q.x1 - q.x0; let e2 = q.x2 - q.x0;
-  let f0 = e1 * dm.x + e2 * dm.y; let f1 = e1 * dm.z + e2 * dm.w;
-  var a = dm.y; var b = dm.w;
-  if (k == 0u) { a = -dm.x - dm.y; b = -dm.z - dm.w; } else if (k == 1u) { a = dm.x; b = dm.z; }
-  let df0 = a * d; let df1 = b * d;
-  let e11 = 0.5 * (dot(f0, f0) - 1.0); let e22 = 0.5 * (dot(f1, f1) - 1.0); let gam = dot(f0, f1);
-  let d11 = dot(f0, df0) + 0.5 * dot(df0, df0); let d22 = dot(f1, df1) + 0.5 * dot(df1, df1);
-  let dg = dot(f0, df1) + dot(df0, f1) + dot(df0, df1);
-  let s11 = (1.0 - c1.z) * c1.x; let s22 = (1.0 - c1.z) * c1.y;
-  let q11 = quadDelta(c0.x - select(0.0, s11, e11 < 0.0), c0.x - select(0.0, s11, e11 + d11 < 0.0), e11, d11);
-  let q22 = quadDelta(c0.y - select(0.0, s22, e22 < 0.0), c0.y - select(0.0, s22, e22 + d22 < 0.0), e22, d22);
-  let q12 = c0.z * (e11 * d22 + d11 * e22 + d11 * d22); let qs = c0.w * (gam * dg + 0.5 * dg * dg);
-  let rounding = (c0.x + c0.z) * abs(d11) * (0.5 + e11) + (c0.y + c0.z) * abs(d22) * (0.5 + e22) + c0.w * abs(dg) * sqrt((1.0 + 2.0 * e11) * (1.0 + 2.0 * e22));
-  return area * vec2f(q11 + q22 + q12 + qs, abs(q11) + abs(q22) + abs(q12) + abs(qs) + rounding);
-}
-fn faceDampingDelta(q: FaceIn, d: vec3f) -> vec2f {
-  let fr = q.fr;
-  if (!(fr.y > 0.0)) { return vec2f(0.0); }
-  let f = q.f; let k = q.k; let t = q.t; let dm = q.dm; let c0 = q.c0;
-  let T0 = state[P.state1.x + 2u * f]; let T1 = state[P.state1.x + 2u * f + 1u];
-  let f0 = T0.xyz; let f1 = T1.xyz;
-  let a = vec3f(-dm.x - dm.y, dm.x, dm.y); let b = vec3f(-dm.z - dm.w, dm.z, dm.w);
-  let u0 = q.x0 - state[seg(S_XHAT, t.x)].xyz;
-  let u1 = q.x1 - state[seg(S_XHAT, t.y)].xyz;
-  let u2 = q.x2 - state[seg(S_XHAT, t.z)].xyz;
-  let r0 = a.x * u0 + a.y * u1 + a.z * u2; let r1 = b.x * u0 + b.y * u1 + b.z * u2;
-  let rate = vec3f(dot(f0, r0), dot(f1, r1), dot(f0, r1) + dot(f1, r0));
-  let ak = select(select(a.x, a.y, k == 1u), a.z, k == 2u); let bk = select(select(b.x, b.y, k == 1u), b.z, k == 2u);
-  let dr = vec3f(ak * dot(f0, d), bk * dot(f1, d), bk * dot(f0, d) + ak * dot(f1, d));
-  let sigma = vec3f(T0.w * rate.x + c0.z * rate.y, c0.z * rate.x + T1.w * rate.y, c0.w * rate.z);
-  let dsigma = vec3f(T0.w * dr.x + c0.z * dr.y, c0.z * dr.x + T1.w * dr.y, c0.w * dr.z);
-  let scale = fr.y * fr.x / hEff();
-  let lin = scale * dot(dr, sigma); let quad = 0.5 * scale * dot(dr, dsigma);
-  let ru = vec3f(abs(a.x) * length(u0) + abs(a.y) * length(u1) + abs(a.z) * length(u2), abs(b.x) * length(u0) + abs(b.y) * length(u1) + abs(b.z) * length(u2), 0.0);
-  let roundRate = vec3f(length(f0) * ru.x, length(f1) * ru.y, length(f0) * ru.y + length(f1) * ru.x);
-  return vec2f(lin + quad, abs(lin) + quad + scale * dot(abs(dsigma), roundRate));
 }
 fn edgeDelta(v: u32, xv: vec3f, e: u32, d: vec3f) -> vec2f {
   let er = rest[P.rest0.w + e];
@@ -411,42 +314,6 @@ fn edgeDelta(v: u32, xv: vec3f, e: u32, d: vec3f) -> vec2f {
   if (!(f0 > 0.0 && f1 > 0.0)) { de = (f1 - f0) * (f1 + f0) / (2.0 * dual.y); }
   return vec2f(de, abs(de) + dual.y * l0 * abs(dC));
 }
-// Inertia and pins of vertex v.
-fn ownDelta(v: u32, xv: vec3f, d: vec3f) -> vec2f {
-  let h = hEff(); let w = vertexRest(v).x / (h * h);
-  let r = xv - state[seg(S_Y, v)].xyz;
-  let lin = w * dot(r, d); let quad = 0.5 * w * dot(d, d);
-  var out = vec2f(lin + quad, abs(lin) + quad + w * length(r) * length(d));
-  if (vertexGroup(v) > 0u) {
-    let p = state[seg(S_PIND, v)]; let C = xv - state[seg(S_PINC, v)].xyz;
-    let f = p.w * C + p.xyz; let l = dot(f, d); let q = 0.5 * p.w * dot(d, d);
-    out += vec2f(l + q, abs(l) + q + p.w * length(C) * length(d));
-  }
-  let gs = grabSpring(v, xv);
-  if (gs.w > 0.0) {
-    let l = dot(gs.xyz, d); let q = 0.5 * gs.w * dot(d, d);
-    out += vec2f(l + q, abs(l) + q + length(gs.xyz) * length(d));
-  }
-  return out;
-}
-${contact ? `fn contactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
-  let ec1 = ogcVertexContactEnergy(v, xv + d); return vec2f(ec1 - ec0, abs(ec0) + abs(ec1));
-}` : ''}
-// The whole star of v: (dE, floor) of moving v from xv by d.
-fn vertexDelta(v: u32, xv: vec3f, d: vec3f${contact ? ', ec0: f32' : ''}) -> vec2f {
-  var out = ownDelta(v, xv, d);
-  for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
-    let entry = topo[P.topo0.y + j]; let q = loadFace(entry >> 2u, entry & 3u, xv);
-    out += membraneDelta(q, d) + faceDampingDelta(q, d);
-  }
-  { let b = stencilBlock(v, xv); let quad = 0.5 * dot(d, b.H * d); let lin = dot(b.g, d); out += vec2f(lin + quad, b.r * length(d) + quad); }
-  if (P.flags.z != 0u) {
-    for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { out += edgeDelta(v, xv, topo[P.topo1.y + j] >> 2u, d); }
-  }
-  ${contact ? 'out += contactDelta(v, xv, ec0, d);' : ''}
-  return out;
-}
-
 // Strain limit of edge e at vertex v (AVBD hard inequality).
 fn edgeTerm(v: u32, xv: vec3f, e: u32, s0: System) -> System {
   var s = s0;
@@ -458,9 +325,8 @@ fn edgeTerm(v: u32, xv: vec3f, e: u32, s0: System) -> System {
   let dual = edgeDual(e); let C = len - dual.z; let n = d / len;
   let f = max(dual.y * C + dual.x, 0.0);
   var kEff = dual.y;
-  ${options.newton ? `// Newton: the exact Hessian of the augmented term, zero while its clamped force is zero.
-  if (!(dual.y * C + dual.x > 0.0)) { kEff = 0.0; }` : `// AVBD (14): a force clamped at zero keeps the rescaled stiffness -lambda / C.
-  if (!(dual.y * C + dual.x > 0.0)) { kEff = select(0.0, max(-dual.x / C, 0.0), C != 0.0); }`}
+  // The exact Hessian of the augmented term, zero while its clamped force is zero.
+  if (!(dual.y * C + dual.x > 0.0)) { kEff = 0.0; }
   s.g += f * n; s.H += (kEff - f / len) * outer(n, n) + (f / len) * IDENTITY;
   return s;
 }
@@ -477,7 +343,7 @@ fn pinTerms(v: u32, xv: vec3f, s0: System) -> System {
   return s;
 }
 ${contact ? `// Contact entries first, first + stride, ... of vertex v added to s, in one pass that also returns their energy at xv
-// (a vertex's VL lanes take one stride each; one thread takes them all at stride 1).
+// (stride 1 from 0 takes them all).
 fn contactTerms(v: u32, xv: vec3f, first: u32, stride: u32, s: ptr<function, System>) -> f32 {
   var fc = vec3f(0.0); var Hc = mat3x3f();
   let e = ogcVertexContactLanes(v, xv, first, stride, &fc, &Hc);
@@ -493,13 +359,6 @@ fn constraints(v: u32, xv: vec3f, s0: System) -> System {
   ${contact ? 's = pinTerms(v, xv, s); _ = contactTerms(v, xv, 0u, 1u, &s); return s;' : 'return pinTerms(v, xv, s);'}
 }
 
-fn solve3(H: mat3x3f, b: vec3f) -> vec4f {
-  let det = determinant(H);
-  if (!(det > 0.0) || !(abs(det) <= 3.0e38)) { return vec4f(0.0); }
-  let c0 = cross(H[1], H[2]); let c1 = cross(H[2], H[0]); let c2 = cross(H[0], H[1]);
-  // H symmetric: inverse rows are the cofactor columns / det.
-  return vec4f(vec3f(dot(c0, b), dot(c1, b), dot(c2, b)) / det, 1.0);
-}
 
 fn attachment(group: u32, anchor: vec3f, t: f32) -> vec3f {
   var p = anchor;
@@ -615,225 +474,6 @@ fn adaptiveGravity(a: vec3f, g: vec3f) -> f32 {
     state[seg(S_PIND, v)] = d;
   }
   positions[v] = vec4f(init, positions[v].w);
-  state[seg(S_PREV1, v)] = vec4f(init, 0.0);
-  state[seg(S_PREV2, v)] = vec4f(init, 0.0);
-}
-
-// One VBD block update of vertex v from xv: the Newton step with the per-vertex Armijo line search on the
-// difference-form energy change (xv if no trial descends).
-fn vertexStep(v: u32, xv: vec3f) -> vec3f {
-  let s = vertexSystem(v, xv);
-  let solved = solve3(s.H, -s.g);
-  if (solved.w == 0.0) { return xv; }
-  let delta = solved.xyz;
-  ${contact ? 'let ec0 = ogcVertexContactEnergy(v, xv);' : ''}
-  var alpha = 1.0;
-  for (var i = 0u; i <= HALVINGS; i++) {
-    let trial = xv + alpha * delta; let d = trial - xv;
-    let change = vertexDelta(v, xv, d${contact ? ', ec0' : ''});
-    if (change.x <= ARMIJO * dot(s.g, d) + 4.0 * EPS32 * change.y) { return trial; }
-    alpha *= 0.5;
-  }
-  return xv;
-}
-
-${patch ? '' : `// The block update of the vertex in slot i of this colour from its star records (one thread a vertex): the
-// damping and bending terms' line-search change in closed form, every other term in difference form.
-fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
-  let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy; let n = R.range.y;
-  let h = hEff(); let w = vertexRest(v).x / (h * h);
-  var s = pinTerms(v, xv, System(w * (xv - state[seg(S_Y, v)].xyz), w * IDENTITY));
-  ${contact ? 'let ec0 = contactTerms(v, xv, 0u, 1u, &s);' : ''}
-  var dmp = Block(vec3f(0.0), stencilDiagonal(v), 0.0, 0.0);
-  let nf = topo[P.topo0.x + v + 1u] - topo[P.topo0.x + v]; let ns = stencilCount(v);
-  let xhv = state[seg(S_XHAT, v)].xyz;
-  for (var j = 0u; j < nf; j++) {
-    let q = starFace(star.x + 2u * (j * n + i), v, xv);
-    let b = membraneBlock(q); let d = starFaceDamping(q);
-    s.g += b.g; s.H += b.H; dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
-  }
-  for (var j = 0u; j < ns; j++) { stencilRecord(topo4[P.tierB.z + star.y + j * n + i], xv, xhv, &dmp); }
-  if (P.flags.z != 0u) {
-    for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); }
-  }
-  s.g += dmp.g; s.H += dmp.H;
-  let solved = solve3(s.H, -s.g);
-  if (solved.w == 0.0) { return xv; }
-  var alpha = 1.0;
-  for (var t = 0u; t <= HALVINGS; t++) {
-    let d = alpha * solved.xyz;
-    let quad = 0.5 * abs(dot(d, dmp.H * d));
-    var en = ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''} + vec2f(dot(dmp.g, d) + quad, dmp.r * length(d) + quad);
-    for (var j = 0u; j < nf; j++) { en += membraneDelta(starFace(star.x + 2u * (j * n + i), v, xv), d); }
-    if (P.flags.z != 0u) {
-      for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { en += edgeDelta(v, xv, topo[P.topo1.y + j] >> 2u, d); }
-    }
-    if (en.x <= ARMIJO * dot(s.g, d) + 4.0 * EPS32 * en.y) { return xv + d; }
-    alpha *= 0.5;
-  }
-  return xv;
-}
-`}
-// Every vertex of one colour.
-@compute @workgroup_size(${CLOTH_WORKGROUP}) fn solveColour(@builtin(global_invocation_id) id: vec3u) {
-  if (id.x >= R.range.y) { return; }
-  let v = topo[P.topo1.z + R.range.x + id.x];
-  positions[v] = vec4f(${patch ? 'vertexStep(v, pos(v))' : 'starStep(v, id.x, pos(v))'}, positions[v].w);
-}
-${patch ? '' : `
-// The same block update with ${lanes} lanes per vertex (${CLOTH_WIDE_WORKGROUP / lanes} vertices per ${CLOTH_WIDE_WORKGROUP}-lane workgroup). Lane l of a vertex
-// takes its faces l, l + ${lanes}, ..., then its bending stencil records and strain-limited edges the same way, and lane 0 adds inertia and pins${contact ? ' and contact' : ''}:
-// every lane of the SIMD group runs the same element kind at the same time (no kind divergence), the block and every
-// line-search trial are summed per vertex ${options.subgroups ? 'by subgroup shuffles' : 'in workgroup memory'}, and a colour has ${lanes} threads per vertex.
-const VL = ${lanes}u;
-const VPW = ${CLOTH_WIDE_WORKGROUP / lanes}u;${options.subgroups ? '' : `
-var<workgroup> wA: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;
-var<workgroup> wB: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;
-var<workgroup> wC: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;`}
-var<workgroup> wDone: array<u32, ${CLOTH_WIDE_WORKGROUP / lanes}>;
-var<workgroup> wAll: u32;
-
-fn ownSystem(v: u32, xv: vec3f) -> System {
-  let h = hEff(); let w = vertexRest(v).x / (h * h);
-  let r = xv - state[seg(S_Y, v)].xyz;
-  return pinTerms(v, xv, System(w * r, w * IDENTITY));
-}
-
-// Per-vertex sums of the (a, b, c) records of its VL lanes; every lane gets its vertex's totals.${options.subgroups ? `
-// A butterfly of subgroup shuffles: a vertex's VL lanes are VL consecutive invocations of the 1-D workgroup, VL-aligned,
-// which on a subgroup of at least VL invocations are VL-aligned consecutive subgroup invocations (xor k < VL stays
-// inside the vertex).
-fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
-  var sa = a; var sb = b; var sc = c;
-  for (var k = VL / 2u; k > 0u; k >>= 1u) { sa += subgroupShuffleXor(sa, k); sb += subgroupShuffleXor(sb, k); sc += subgroupShuffleXor(sc, k); }
-  return array<vec4f, 3>(sa, sb, sc);
-}` : `
-// A tree in workgroup memory (no subgroups).
-fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
-  workgroupBarrier();
-  wA[lane] = a; wB[lane] = b; wC[lane] = c;
-  workgroupBarrier();
-  let sub = lane % VL;
-  for (var k = VL / 2u; k > 0u; k >>= 1u) {
-    if (sub < k) { wA[lane] += wA[lane + k]; wB[lane] += wB[lane + k]; wC[lane] += wC[lane + k]; }
-    workgroupBarrier();
-  }
-  let head = lane - sub;
-  return array<vec4f, 3>(wA[head], wB[head], wC[head]);
-}`}
-
-@compute @workgroup_size(${CLOTH_WIDE_WORKGROUP}) fn solveColourWide(@builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u, @builtin(local_invocation_index) lane: u32) {
-  let group = lane / VL; let sub = lane % VL;
-  let index = (wg.x + wg.y * nwg.x) * VPW + group;
-  let valid = index < R.range.y;
-  // This colour's star streams (face, stencil record offsets); R.range.w is the colour.
-  let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy;
-  var v = 0u; var xv = vec3f(0.0); var nf = 0u; var ns = 0u; var ne = 0u;
-  var s = System(vec3f(0.0), mat3x3f());
-  // This lane's damping and bending terms, quadratic in xv: the trials take their change in closed form from these.
-  var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);${contact ? `
-  // This lane's share of the contact entries (entries sub, sub + VL, ...): its energy at xv, for its trials.
-  var ec0 = 0.0;` : ''}
-  if (valid) {
-    v = topo[P.topo1.z + R.range.x + index]; xv = pos(v);
-    let f0 = topo[P.topo0.x + v]; nf = topo[P.topo0.x + v + 1u] - f0;
-    ns = stencilCount(v);
-    let e0 = topo[P.topo1.x + v]; ne = select(0u, topo[P.topo1.x + v + 1u] - e0, P.flags.z != 0u);
-    if (sub == 0u) { s = ownSystem(v, xv); dmp.H = stencilDiagonal(v); }${contact ? `
-    ec0 = contactTerms(v, xv, sub, VL, &s);` : ''}
-    for (var j = sub; j < nf; j += VL) {
-      let q = starFace(star.x + 2u * (j * R.range.y + index), v, xv);
-      let b = membraneBlock(q); let d = starFaceDamping(q);
-      s.g += b.g; s.H += b.H; dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
-    }
-    let xhv = state[seg(S_XHAT, v)].xyz;
-    for (var j = sub; j < ns; j += VL) { stencilRecord(topo4[P.tierB.z + star.y + j * R.range.y + index], xv, xhv, &dmp); }
-    for (var j = sub; j < ne; j += VL) { s = edgeTerm(v, xv, topo[P.topo1.y + e0 + j] >> 2u, s); }
-  }
-  s.g += dmp.g; s.H += dmp.H;
-  let sum = groupSum(lane, vec4f(s.g, 0.0), vec4f(s.H[0][0], s.H[1][0], s.H[2][0], 0.0), vec4f(s.H[1][1], s.H[2][1], s.H[2][2], 0.0));
-  let g = sum[0].xyz;
-  let H = mat3x3f(sum[1].x, sum[1].y, sum[1].z, sum[1].y, sum[2].x, sum[2].y, sum[1].z, sum[2].y, sum[2].z);
-  let solved = solve3(H, -g);
-  let delta = solved.xyz;
-  if (sub == 0u) { wDone[group] = select(1u, 0u, valid && solved.w != 0.0); }
-  var alpha = 1.0;
-  for (var i = 0u; i <= HALVINGS; i++) {
-    workgroupBarrier();
-    if (lane == 0u) { var all = 1u; for (var q = 0u; q < VPW; q++) { all &= wDone[q]; } wAll = all; }
-    if (workgroupUniformLoad(&wAll) != 0u) { break; }
-    let live = wDone[group] == 0u;
-    let trial = xv + alpha * delta; let d = trial - xv;
-    var en = vec2f(0.0);
-    if (live) {
-      // Damping and bending, exactly: dg . d + d^T dH d / 2 (faceDampingDelta and the bending stencil in closed form).
-      let quad = 0.5 * abs(dot(d, dmp.H * d)); let lin = dot(dmp.g, d);
-      en = vec2f(lin + quad, dmp.r * length(d) + quad);
-      if (sub == 0u) { en += ownDelta(v, xv, d); }${contact ? `
-      { let ec1 = ogcVertexContactEnergyLanes(v, xv + d, sub, VL); en += vec2f(ec1 - ec0, abs(ec0) + abs(ec1)); }` : ''}
-      for (var j = sub; j < nf; j += VL) {
-        en += membraneDelta(starFace(star.x + 2u * (j * R.range.y + index), v, xv), d);
-      }
-      for (var j = sub; j < ne; j += VL) { en += edgeDelta(v, xv, topo[P.topo1.y + topo[P.topo1.x + v] + j] >> 2u, d); }
-    }
-    let t = groupSum(lane, vec4f(en, 0.0, 0.0), vec4f(0.0), vec4f(0.0));
-    if (live && sub == 0u) {
-      let ok = t[0].x <= ARMIJO * dot(g, d) + 4.0 * EPS32 * t[0].y;
-      if (ok) { positions[v] = vec4f(trial, positions[v].w); wDone[group] = 1u; }
-    }
-    alpha *= 0.5;
-  }
-}
-`}${patch ? `
-// Tier B: one workgroup per patch of partition R.range.x runs R.range.y Gauss-Seidel sweeps over the patch's colours
-// in workgroup memory, then writes its vertices to the patchOut segment (commitPatches makes them the iterate).
-@compute @workgroup_size(${patch.workgroup}) fn solvePatches(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) lane: u32) {
-  var part = P.partA;
-  if (R.range.x == 1u) { part = P.partB; }
-  ownerBase = part.x; patchId = wg.x;
-  let start = topo[part.y + patchId]; let count = topo[part.y + patchId + 1u] - start; let C = P.tierB.x;
-  for (var s = lane; s < count; s += PATCH_WG) { patchX[s] = vec4f(positions[topo[part.z + start + s]].xyz, 0.0); }
-  workgroupBarrier();
-  for (var k = 0u; k < R.range.y; k++) {
-    for (var c = 0u; c < C; c++) {
-      let cb = part.w + patchId * (C + 1u) + c;
-      let c1 = topo[cb + 1u];
-      for (var s = topo[cb] + lane; s < c1; s += PATCH_WG) {
-        let v = topo[part.z + start + s];
-        patchX[s] = vec4f(vertexStep(v, patchX[s].xyz), 0.0);
-      }
-      workgroupBarrier();
-    }
-  }
-  for (var s = lane; s < count; s += PATCH_WG) { state[seg(S_POUT, topo[part.z + start + s])] = patchX[s]; }
-}` : ''}
-
-// Tier B: the patch results become the iterate.
-@compute @workgroup_size(${CLOTH_WORKGROUP}) fn commitPatches(@builtin(global_invocation_id) id: vec3u) {
-  let v = id.x;
-  if (v >= P.n.x) { return; }
-  positions[v] = vec4f(state[seg(S_POUT, v)].xyz, positions[v].w);
-}
-
-// After all colours: Chebyshev (free vertices${contact ? ' without contacts' : ''}), the iterate history and the pin duals.
-@compute @workgroup_size(${CLOTH_WORKGROUP}) fn postIteration(@builtin(global_invocation_id) id: vec3u) {
-  let v = id.x;
-  if (v >= P.n.x) { return; }
-  var x = pos(v);
-  let p1 = state[seg(S_PREV1, v)]; let p2 = state[seg(S_PREV2, v)].xyz;
-  let omega = R.values.x; let group = vertexGroup(v);
-  if (R.range.z >= 2u && omega != 1.0 && group == 0u${contact ? ' && ogcContactCount(v) == 0u' : ''}) {
-    x = omega * (x - p2) + p2;
-    positions[v] = vec4f(x, positions[v].w);
-  }
-  state[seg(S_PREV2, v)] = p1;
-  state[seg(S_PREV1, v)] = vec4f(x, 0.0);
-  if (group > 0u) {
-    let s = referenceStiffness(v); let kMax = K_MAX_RATIO * s; let l = vertexRest(v).z;
-    let d = state[seg(S_PIND, v)]; let C = x - state[seg(S_PINC, v)].xyz;
-    let lambda = clamp(d.w * C + d.xyz, vec3f(-kMax * l), vec3f(kMax * l));
-    state[seg(S_PIND, v)] = vec4f(lambda, min(d.w + BETA * s * length(C) / l, kMax));
-  }
 }
 
 // AVBD dual update of edge e at the current positions: lambda <- clamp(k C + lambda, 0, kMax l), k grows while active.
@@ -850,7 +490,6 @@ fn updateEdgeDual(e: u32) {
   if (lambda > 0.0) { d.y = min(d.y + BETA * s * abs(C) / er.x, kMax); }
   state[P.state0.y + e] = d;
 }
-@compute @workgroup_size(${CLOTH_WORKGROUP}) fn edgeDualUpdate(@builtin(global_invocation_id) id: vec3u) { updateEdgeDual(id.x); }
 
 // Optional diagnostics, before finishStep: the step's force residual, strain and energies.
 var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
@@ -861,7 +500,8 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
     let x = pos(v); let m = vertexRest(v).x; let g = P.gravity.xyz;
     let s = vertexSystem(v, x);
     let vel = (x - state[seg(S_XHAT, v)].xyz) / hEff();
-    a = vec4f(dot(s.g, s.g), m * m * dot(g, g), 0.5 * m * dot(vel, vel), -m * dot(g, x));
+    // The residual over free DOFs, as Newton's own test: a pinned vertex is a Dirichlet DOF whose g is the pin's reaction.
+    a = vec4f(select(dot(s.g, s.g), 0.0, vertexGroup(v) > 0u), m * m * dot(g, g), 0.5 * m * dot(vel, vel), -m * dot(g, x));
     var elastic = 0.0;
     for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
       let entry = topo[P.topo0.y + j];
@@ -945,6 +585,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${options.coarseNodes ? clothCoarseWGSL(CLOTH_BINDING.coarse, CLOTH_WORKGROUP, options.coarseNodes, contact) : ''}
-${options.newton ? clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact) : ''}`;
+${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact)}`;
 }

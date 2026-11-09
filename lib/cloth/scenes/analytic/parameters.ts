@@ -12,7 +12,7 @@
  * Sources:
  * - bridson:    the Bridson 2002 cloth model (../bridson-2002/parameters.ts), reused so a
  *               gate here speaks for the paper scenes;
- * - c1:         lane C1's hanging-sheet equilibrium (tests/cloth-coarse.test.ts);
+ * - c1:         lane C1's hanging-sheet equilibrium (the removed VBD gate, tests/cloth-coarse.test.ts until M4);
  * - textbook:   a standard result (named in `ref`);
  * - astm:       ASTM D1388 / Peirce (1930) cantilever bending test;
  * - choice:     a configuration choice made for this scene; the reason is in `ref`.
@@ -64,7 +64,7 @@ export const FREE_FALL = {
 
 /** Scene 2: lane C1's hanging Bridson sheet, pinned along its whole top edge. */
 export const CURTAIN = {
-  width: P(1, "m", "c1", "tests/cloth-coarse.test.ts: 1 m wide"),
+  width: P(1, "m", "c1", "the hanging sheet of C1's VBD gate (tests/cloth-coarse.test.ts until M4): 1 m wide"),
   aspect: P(1.7, "1", "c1", "1.7 m hanging length, as the Fig 1 curtain"),
   nodesAcross: P(100, "nodes", "choice",
     "C1's test runs 150 nodes across (38 100 vertices); 100 keeps the 1 cm spacing of the other scenes at 16 900 vertices, so the scene settles in a reasonable wall time"),

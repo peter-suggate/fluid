@@ -10,7 +10,7 @@ export const norm3 = (a: ClothVector) => Math.hypot(a[0], a[1], a[2]);
 export const point3 = (p: ArrayLike<number>, i: number): [number, number, number] => [p[3 * i]!, p[3 * i + 1]!, p[3 * i + 2]!];
 
 /** Setup-time mesh tables shared by the Float64 oracle, the GPU solver and
- * the edit path. Element terms are recomputed per incident vertex (VBD), so
+ * the edit path. Element terms are recomputed per incident vertex, so
  * every table is rest data plus vertex-to-element adjacency. */
 export interface PreparedClothTopology {
   readonly data: ClothTopologyData;
@@ -124,17 +124,16 @@ export function validateClothDocument(document: ClothDocument): string[] {
   const solver = document.solver;
   if (solver) {
     if (solver.integrator !== undefined && solver.integrator !== "implicit-euler" && solver.integrator !== "bdf2") errors.push(`Unsupported cloth integrator ${String(solver.integrator)}`);
-    if (solver.tier !== undefined && solver.tier !== "A" && solver.tier !== "B") errors.push(`Unsupported cloth solver tier ${String(solver.tier)}`);
-    if (solver.iterations !== undefined && !(Number.isInteger(solver.iterations) && solver.iterations >= 1)) errors.push("Cloth iterations must be a positive integer");
     if (solver.newton !== undefined) {
       const n = solver.newton;
       if (!n || !(Number.isInteger(n.iterations) && n.iterations >= 1) || !(Number.isInteger(n.pcgIterations) && n.pcgIterations >= 1)) errors.push("Cloth Newton caps must be positive integers");
       else if ((n.pcgTolerance !== undefined && !(n.pcgTolerance >= 0)) || (n.residualTolerance !== undefined && !(n.residualTolerance >= 0))) errors.push("Cloth Newton tolerances must be non-negative");
     }
-    if (solver.chebyshevRho !== undefined && solver.chebyshevRho !== 0) errors.push("Cloth Chebyshev rho must be 0: with the two-level correction every step takes, Chebyshev acceleration can explode");
     if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
-    // Every Tier A step takes the two-level correction; a document that asks to turn it off (or on) names a setting that is gone.
-    if ("coarse" in solver) errors.push("Cloth solver setting 'coarse' was removed: every step takes the two-level correction");
+    // The VBD solver and its settings were removed (M4): every document runs Newton-PCG, and a document that names a
+    // VBD setting is refused rather than silently ignored.
+    for (const key of ["iterations", "chebyshevRho", "tier", "patchVertices", "patchIterations", "coarse"])
+      if (key in solver) errors.push(`Cloth solver setting '${key}' was removed with the VBD solver: every step is Newton-PCG (solver.newton)`);
   }
   return errors;
 }
@@ -382,78 +381,4 @@ export function clothCanonicalEdgeKeys(triangles: ArrayLike<number>, n: number):
     keys.add(Math.min(u, v) * n + Math.max(u, v));
   }
   return [...keys].sort((x, y) => x - y);
-}
-
-/** Vertices that share a force element (face or bending row) must not share a colour. */
-export function clothVertexNeighbours(t: PreparedClothTopology): {offsets: Uint32Array; values: Uint32Array} {
-  const sets = Array.from({length: t.vertexCount}, () => new Set<number>());
-  const link = (list: ArrayLike<number>, width: number, count: number) => {
-    for (let e = 0; e < count; e++) for (let i = 0; i < width; i++) for (let j = 0; j < width; j++)
-      if (i !== j) sets[list[width * e + i]!]!.add(list[width * e + j]!);
-  };
-  link(t.faces, 3, t.faceCount);
-  for (let r = 0; r < t.bendRowCount; r++) for (let a = t.bendOffsets[r]!; a < t.bendOffsets[r + 1]!; a++) for (let b = t.bendOffsets[r]!; b < t.bendOffsets[r + 1]!; b++)
-    if (a !== b) sets[t.bendVertices[a]!]!.add(t.bendVertices[b]!);
-  const entries: [number, number][] = [];
-  sets.forEach((s, v) => [...s].sort((a, b) => a - b).forEach(u => entries.push([v, u])));
-  return csr(t.vertexCount, entries);
-}
-
-/** Greedy vertex colouring (setup time). `previous` keeps the colours of
- * vertices outside `touched`; only touched vertices are recoloured, each
- * taking the smallest colour none of its neighbours holds. */
-/**
- * Greedy colouring can leave a last colour class of a handful of vertices (the Bridson 150 x 150 tablecloth: five
- * classes of ~4600 and one single vertex), and every class costs one dependent dispatch per iteration. Empty a small last class
- * by Kempe-chain interchanges: for a member v and colours (a, b) below it, swap a and b on the a/b component holding
- * v's a-neighbours; when that component holds none of v's b-neighbours, colour a becomes free at v. The colouring
- * stays proper throughout, and is left unchanged when a member cannot be moved within a bounded component.
- */
-/** Largest a/b component an interchange may recolour: a mesh-wide chain would reshuffle whole classes and lose the
- *  index locality of each colour's vertex list (measured: +12 % per colour pass on the 150 x 150 tablecloth). */
-const KEMPE_COMPONENT_LIMIT = 256;
-function emptyLastColour(neighbours: {offsets: Uint32Array; values: Uint32Array}, colour: Uint32Array): boolean {
-  const n = colour.length;
-  let last = 0; for (let v = 0; v < n; v++) last = Math.max(last, colour[v]!);
-  const members: number[] = []; for (let v = 0; v < n; v++) if (colour[v] === last) members.push(v);
-  if (last === 0 || members.length > n / (8 * (last + 1))) return false;
-  const saved = Uint32Array.from(colour), mark = new Int32Array(n).fill(-1);
-  let stamp = 0;
-  const neighboursOf = (v: number) => neighbours.values.subarray(neighbours.offsets[v]!, neighbours.offsets[v + 1]!);
-  for (const v of members) {
-    let moved = false;
-    for (let a = 0; a < last && !moved; a++) for (let b = 0; b < last && !moved; b++) {
-      if (a === b) continue;
-      const id = stamp++, stack: number[] = [];
-      for (const u of neighboursOf(v)) if (colour[u] === a && mark[u] !== id) { mark[u] = id; stack.push(u); }
-      const component: number[] = [];
-      while (stack.length && component.length <= KEMPE_COMPONENT_LIMIT) {
-        const u = stack.pop()!; component.push(u);
-        for (const w of neighboursOf(u)) if (w !== v && mark[w] !== id && (colour[w] === a || colour[w] === b)) { mark[w] = id; stack.push(w); }
-      }
-      if (component.length > KEMPE_COMPONENT_LIMIT || neighboursOf(v).some(u => colour[u] === b && mark[u] === id)) continue;
-      for (const u of component) colour[u] = colour[u] === a ? b : a;
-      colour[v] = a; moved = true;
-    }
-    if (!moved) { colour.set(saved); return false; }
-  }
-  return true;
-}
-
-export function colourClothVertices(neighbours: {offsets: Uint32Array; values: Uint32Array}, previous?: Uint32Array, touched?: ReadonlySet<number>): Uint32Array {
-  const n = neighbours.offsets.length - 1, NONE = 0xffffffff, colour = new Uint32Array(n).fill(NONE);
-  if (previous && touched) for (let v = 0; v < n; v++) if (!touched.has(v)) colour[v] = previous[v]!;
-  const order = previous && touched ? [...touched].sort((a, b) => a - b) : Array.from({length: n}, (_, v) => v);
-  const used: number[] = [];
-  for (const v of order) {
-    used.length = 0;
-    for (let j = neighbours.offsets[v]!; j < neighbours.offsets[v + 1]!; j++) { const c = colour[neighbours.values[j]!]!; if (c !== NONE) used[c] = 1; }
-    let c = 0; while (used[c]) c++;
-    colour[v] = c;
-  }
-  if (!previous) while (emptyLastColour(neighbours, colour));
-  // A kept colour that now conflicts (an edit joined two vertices) is a bug in the caller's touched set.
-  for (let v = 0; v < n; v++) for (let j = neighbours.offsets[v]!; j < neighbours.offsets[v + 1]!; j++)
-    if (colour[neighbours.values[j]!] === colour[v]) throw new Error(`Cloth colouring conflict at vertex ${v}`);
-  return colour;
 }

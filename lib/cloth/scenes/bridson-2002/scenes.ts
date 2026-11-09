@@ -1,5 +1,5 @@
 import type { Quaternion, RigidPoseTrack, Vec3 } from "../../../core/model";
-import type { ClothDocument, ClothMaterial } from "../../types";
+import type { ClothDocument, ClothMaterial, ClothNewtonSettings } from "../../types";
 import { BRIDSON_2002_CLOTH_COLOR_LINEAR } from "./appearance";
 import { equalNodeMass_kg, herringBoneSheet } from "./mesh";
 import { BRIDSON_2002_STEP_S, BRIDSON_2002_VIDEO_FRAME_RATE, CLOTH, CURTAIN, SPHERE, TABLE, VOXEL } from "./parameters";
@@ -67,6 +67,12 @@ function material(id: string): ClothMaterial {
 
 /** Square-celled sheet: `nodesAcross` nodes over the short side, PhysBAM's
  * m = int(aspect * (n - 1)) + 1 over the long side. */
+/** The Newton-PCG caps and tolerances every Bridson sheet runs at (CLOTH.newton*, with their provenance). */
+function bridsonNewton(): ClothNewtonSettings {
+  return { iterations: CLOTH.newtonIterations.value, pcgIterations: CLOTH.newtonPcgIterations.value,
+    pcgTolerance: CLOTH.newtonPcgTolerance.value, residualTolerance: CLOTH.newtonResidualTolerance.value };
+}
+
 function sheetSize(short_m: number, long_m: number) {
   const rows = CLOTH.nodesAcross.value, columns = Math.floor((long_m / short_m) * (rows - 1) + 1e-9) + 1;
   return { columns, rows };
@@ -111,7 +117,7 @@ export function bridson2002Curtain(): Bridson2002Scene {
     caption: "Initially, a curtain is draped over a ball on the ground. The ball moves, flipping the curtain over on top of itself producing stable folds and wrinkles using our static friction model. Another ball enters the scene and pushes through the complicated structure of folds before slipping underneath unraveling the curtain.",
     duration_s: end, step_s: BRIDSON_2002_STEP_S, videoStart_s: 0,
     cloth: { schemaVersion: "2.0.0", id: "bridson-2002-curtain-cloth", geometry: { kind: "inline", data: geometry },
-      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", iterations: CLOTH.iterations.value, selfFriction: CLOTH.selfFriction.value } },
+      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", newton: bridsonNewton(), selfFriction: CLOTH.selfFriction.value } },
     sheet: { columns, rows, width_m: width, depth_m: depth },
     nodeMass_kg: equalNodeMass_kg(columns, rows, width, depth, CLOTH.arealDensity.value),
     selfFriction: CLOTH.selfFriction.value,
@@ -149,7 +155,7 @@ export function bridson2002RotatingSphere(): Bridson2002Scene {
     caption: "The friction between a rotating sphere and a piece of cloth draped over it creates a complex structure of wrinkles and folds.",
     duration_s: end, step_s: BRIDSON_2002_STEP_S, videoStart_s: 0,
     cloth: { schemaVersion: "2.0.0", id: "bridson-2002-rotating-sphere-cloth", geometry: { kind: "inline", data: geometry },
-      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", iterations: CLOTH.iterations.value, selfFriction: CLOTH.selfFriction.value } },
+      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", newton: bridsonNewton(), selfFriction: CLOTH.selfFriction.value } },
     sheet: { columns, rows, width_m: side, depth_m: side },
     nodeMass_kg: equalNodeMass_kg(columns, rows, side, side, CLOTH.arealDensity.value),
     selfFriction: CLOTH.selfFriction.value,
@@ -187,7 +193,7 @@ export function bridson2002Tablecloth(): Bridson2002Scene {
     caption: "A tablecloth draped over table legs with no tabletop is dragged to the ground by a descending sphere.",
     duration_s: end, step_s: BRIDSON_2002_STEP_S, videoStart_s: t0,
     cloth: { schemaVersion: "2.0.0", id: "bridson-2002-tablecloth-cloth", geometry: { kind: "inline", data: geometry },
-      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", iterations: CLOTH.iterations.value, selfFriction: CLOTH.selfFriction.value } },
+      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", newton: bridsonNewton(), selfFriction: CLOTH.selfFriction.value } },
     sheet: { columns, rows, width_m: side, depth_m: side },
     nodeMass_kg: equalNodeMass_kg(columns, rows, side, side, CLOTH.arealDensity.value),
     selfFriction: CLOTH.selfFriction.value,

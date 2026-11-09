@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { clothGridData } from '../lib/cloth/grid';
-import { CLOTH_BEND_ROWS, clothVertexNeighbours, colourClothVertices, prepareClothTopology } from '../lib/cloth/topology';
+import { CLOTH_BEND_ROWS, prepareClothTopology } from '../lib/cloth/topology';
 import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import type { ClothAttachmentScript, ClothMaterial, ClothTopologyData } from '../lib/cloth/types';
 import {
@@ -233,19 +233,18 @@ function sheet(columns: number, rows: number, opts: { pins?: 'corners' | 'edge' 
     group: (i, j) => pins === 'corners' ? (j === 0 && (i === 0 || i === columns - 1) ? 1 : 0) : pins === 'edge' ? (j === 0 ? 1 : 0) : 0 });
   const material = { ...cotton, strainLimit: opts.strainLimit, damping_s: opts.damping ?? 0, bending_N_m: opts.bending ?? cotton.bending_N_m };
   const topology = prepareClothTopology(data, [material]);
-  const colours = colourClothVertices(clothVertexNeighbours(topology));
-  return { data, topology, colours, material };
+  return { data, topology, material };
 }
 const g: [number, number, number] = [0, -9.81, 0];
 
 test('local vertex system: FD gradient and Hessian with pins, strain limits and damping', () => {
-  const { topology, colours, material } = sheet(5, 5, { strainLimit: 0.02, damping: 0.01 });
-  const model = buildClothSolverModel(topology, [material], colours);
+  const { topology, material } = sheet(5, 5, { strainLimit: 0.02, damping: 0.01 });
+  const model = buildClothSolverModel(topology, [material]);
   const r = rng(11), x0 = Float64Array.from(topology.data.restPositions_m);
   const state = createClothOracleState(model, x0);
   for (let i = 0; i < state.x.length; i++) state.x[i] += 0.01 * (r() - 0.5);
   for (let i = 0; i < state.v.length; i++) state.v[i] = 0.2 * (r() - 0.5);
-  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'implicit-euler', iterations: 1, chebyshevRho: 0 };
+  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'implicit-euler', iterations: 1 };
   const { frame } = clothStepFrame(model, state, options);
   clothWarmStartDuals(model, state, frame.hEff);
   for (let e = 0; e < topology.edgeCount; e++) { state.edgeDuals[2 * e] = 0.5 * r(); }
@@ -264,11 +263,11 @@ test('local vertex system: FD gradient and Hessian with pins, strain limits and 
 });
 
 test('repeated block updates of one vertex reach its local stationary point', () => {
-  const { topology, colours, material } = sheet(4, 4, { pins: 'none', damping: 0.02 });
-  const model = buildClothSolverModel(topology, [material], colours);
+  const { topology, material } = sheet(4, 4, { pins: 'none', damping: 0.02 });
+  const model = buildClothSolverModel(topology, [material]);
   const state = createClothOracleState(model, topology.data.restPositions_m);
   const r = rng(5); for (let i = 0; i < state.x.length; i++) state.x[i] += 0.02 * (r() - 0.5);
-  const { frame } = clothStepFrame(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'implicit-euler', iterations: 1, chebyshevRho: 0 });
+  const { frame } = clothStepFrame(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'implicit-euler', iterations: 1 });
   const v = 5;
   let last = Infinity;
   for (let i = 0; i < 40; i++) { const u = clothVertexUpdate(model, frame, state, v); state.x.set(u.position, 3 * v); last = Math.hypot(...u.gradient); }
@@ -286,22 +285,22 @@ test('augmented-Lagrangian energies differentiate to the clamped AVBD force', ()
 
 test('free fall: implicit Euler and BDF2 integrate a rigid drop exactly, damping included', () => {
   for (const integrator of ['implicit-euler', 'bdf2'] as const) {
-    const { topology, colours, material } = sheet(4, 4, { pins: 'none', damping: 0.05 });
-    const model = buildClothSolverModel(topology, [material], colours);
+    const { topology, material } = sheet(4, 4, { pins: 'none', damping: 0.05 });
+    const model = buildClothSolverModel(topology, [material]);
     const state = createClothOracleState(model, topology.data.restPositions_m);
     const steps = 10, dt = 1 / 60;
-    for (let s = 0; s < steps; s++) clothOracleStep(model, state, { dt_s: dt, gravity_m_s2: g, integrator, iterations: 4, chebyshevRho: 0 });
+    for (let s = 0; s < steps; s++) clothOracleStep(model, state, { dt_s: dt, gravity_m_s2: g, integrator, iterations: 4 });
     for (let v = 0; v < topology.vertexCount; v++) assert.ok(Math.abs(state.v[3 * v + 1]! + 9.81 * steps * dt) < 1e-10, `${integrator}: v_y = ${state.v[3 * v + 1]}`);
   }
 });
 
 test('a moving attachment carries its pins to the scripted target', () => {
-  const { topology, colours, material } = sheet(6, 6, { pins: 'edge' });
+  const { topology, material } = sheet(6, 6, { pins: 'edge' });
   const scripts: ClothAttachmentScript[] = [{ kind: 'translate', group: 1, start_s: 0, end_s: 0.25, vector: [0.1, 0, 0.05], easing: 'cosine' }];
-  const model = buildClothSolverModel(topology, [material], colours, scripts);
+  const model = buildClothSolverModel(topology, [material], scripts);
   const state = createClothOracleState(model, topology.data.restPositions_m);
-  // 20 iterations: the AVBD pin duals converge with the sweep order; the bending rows' 17-colour order leaves 1.005e-4 m at 16 (with or without bending).
-  for (let s = 0; s < 30; s++) clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 20, chebyshevRho: 0 });
+  // 20 iterations: the AVBD pin duals converge with the sweeps.
+  for (let s = 0; s < 30; s++) clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 20 });
   let worst = 0;
   for (let v = 0; v < topology.vertexCount; v++) if (topology.groups[v]) {
     const target = [topology.data.restPositions_m[3 * v]! + 0.1, topology.data.restPositions_m[3 * v + 1]!, topology.data.restPositions_m[3 * v + 2]! + 0.05];
@@ -312,12 +311,12 @@ test('a moving attachment carries its pins to the scripted target', () => {
 
 test('the AVBD strain limit holds a soft sheet near its limit', () => {
   const soft = (strainLimit?: number) => {
-    const { topology, colours, material } = sheet(6, 6, { pins: 'edge', strainLimit, damping: 0.02 });
+    const { topology, material } = sheet(6, 6, { pins: 'edge', strainLimit, damping: 0.02 });
     const m = { ...material, stretchWarp_N_m: 2, stretchWeft_N_m: 2, shear_N_m: 0.5, poisson: 0 };
-    const model = buildClothSolverModel(prepareClothTopology(topology.data, [m]), [m], colours);
+    const model = buildClothSolverModel(prepareClothTopology(topology.data, [m]), [m]);
     const state = createClothOracleState(model, topology.data.restPositions_m);
     let report;
-    for (let s = 0; s < 40; s++) report = clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 24, chebyshevRho: 0 });
+    for (let s = 0; s < 40; s++) report = clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 24 });
     return report!.maxStrain;
   };
   const free = soft(), limited = soft(0.03);
@@ -331,12 +330,12 @@ test('energy loss of a free-swinging pinned sheet at dt 1/60: BDF2 keeps more th
     const data = clothGridData({ columns: 8, rows: 8, width_m: 0.4, height_m: 0.4, origin_m: [0, 1, 0],
       group: (i, j) => j === 0 && (i === 0 || i === 7) ? 1 : 0 });
     const topology = prepareClothTopology(data, [cotton]);
-    const model = buildClothSolverModel(topology, [cotton], colourClothVertices(clothVertexNeighbours(topology)));
+    const model = buildClothSolverModel(topology, [cotton]);
     const state = createClothOracleState(model, data.restPositions_m);
     const e0 = clothMechanicalEnergy(model, state.x, state.v, g).total;
     let lowest = Infinity, final = e0;
     for (let s = 0; s < 60; s++) {
-      clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator, iterations: 48, chebyshevRho: 0 });
+      clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator, iterations: 48 });
       const e = clothMechanicalEnergy(model, state.x, state.v, g);
       lowest = Math.min(lowest, e.potential); final = e.total;
     }
@@ -350,15 +349,11 @@ test('energy loss of a free-swinging pinned sheet at dt 1/60: BDF2 keeps more th
   assert.ok(bdf2.lost < ie.lost, `BDF2 loses less: ${bdf2.lost} vs ${ie.lost}`);
 });
 
-test('one step converges with K: the residual falls and Chebyshev accelerates it', () => {
-  const { topology, colours, material } = sheet(10, 10, { damping: 0.005 });
-  const model = buildClothSolverModel(topology, [material], colours);
-  const residualsAt = (rho: number) => {
-    const state = createClothOracleState(model, topology.data.restPositions_m);
-    for (let s = 0; s < 5; s++) clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 32, chebyshevRho: rho });
-    return clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 64, chebyshevRho: rho }, true).residuals;
-  };
-  const plain = residualsAt(0), accelerated = residualsAt(0.9);
-  assert.ok(plain.at(-1)! < 0.2 * plain[0]!, `residual falls: ${plain[0]} -> ${plain.at(-1)}`);
-  assert.ok(accelerated.at(-1)! <= plain.at(-1)!, `Chebyshev: ${accelerated.at(-1)} vs ${plain.at(-1)}`);
+test('one step converges with K: the residual falls', () => {
+  const { topology, material } = sheet(10, 10, { damping: 0.005 });
+  const model = buildClothSolverModel(topology, [material]);
+  const state = createClothOracleState(model, topology.data.restPositions_m);
+  for (let s = 0; s < 5; s++) clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 32 });
+  const residuals = clothOracleStep(model, state, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 64 }, true).residuals;
+  assert.ok(residuals.at(-1)! < 0.2 * residuals[0]!, `residual falls: ${residuals[0]} -> ${residuals.at(-1)}`);
 });

@@ -1940,3 +1940,72 @@ straight free-fall landing, which rests at 0.99 mm, the contact radius. A mean h
 floor surface, inside the contact distance. The gate's 2 mm tolerance admits that, but the difference is a whole
 contact radius. Whether it comes from the converged caps, from the solid cut, or from the barrier's balance is not
 yet attributed.
+
+## 2026-11-10 RESULT (28): M4 — the VBD solver is removed; every cloth step is Newton-PCG, and the UI runs it
+
+**What is removed.** The VBD colour sweeps, the Chebyshev acceleration, the tier/patch solves and the GPU coarse step
+go: `gpu-coarse-wgsl.ts`, `coarse.ts`, `patches.ts`, `cloth-coarse.test.ts` and the topology's colouring are deleted.
+The Float64 oracle keeps its two-level correction as a test-only module (`oracle-coarse.ts`), so that its Gauss–Seidel
+reference converges in 250 sweeps.
+
+**Settings.** A document that sets `iterations`, `chebyshevRho`, `tier`, `patchVertices`, `patchIterations` or
+`coarse` is refused explicitly. `solver.newton` defaults to `CLOTH_NEWTON_SCENE_DEFAULTS`
+(8 × 200, tolerances 1e-4 / 1e-5), and the Bridson scenes take theirs from `CLOTH.newton*`.
+
+**C2's four tests: mechanical edits only.** The edits are: a `newton: true` detector, the Newton step hooks and contact
+(alpha and state), and binding the target only when `prediction === "target"`. No thresholds were changed.
+
+### Before (HEAD c7c26dd1, VBD) and after (M4, Newton 8 × 200), C2's WIP absent (clean export)
+
+| gate | before | after |
+|---|---|---|
+| moving plate in the solver | 51.9 ms/step; min vertex phi 1.49e-3; faces >= 6.71e-5; 0.52 % rms vs rigid; 2 redone, 5 conflicts | 102.6 ms/step; min vertex phi 4.67e-4; faces >= 7.48e-4; 0.37 % rms; 6 redone, 17 conflicts |
+| plate 3r over a sheet | floor 2.00e-3, plate 4.00e-3; drift 4.46e-7; 0 cuts | floor 2.00e-3, plate 4.00e-3; drift 3.66e-7; 0 cuts |
+| body / contact-gpu units (29 tests) | all pass | all pass |
+| gate drop (opt-in) | fails: pairOverflow at step 4 | fails: roundCap, envelopeCap, pairOverflow at step 4 — todo, C2 |
+| gate drape (opt-in) | passes 60 steps; faces >= 8.36e-7; solver alone 21.3 ms | **fails at step 13** (prediction "target": step 14) — todo, C2 |
+| gate twist (opt-in) | fails at step 30 | fails at step 41 — todo, C2 |
+| system: sheet on the moving solid | nearest 0.6 mm off the sphere | nearest −0.1 mm (passes the test's bound) |
+| system: cut of the moving solid | passes; centre 7.9 mm above the cut face | passed once, then heldConflict in 2 of 3 runs — todo, C2 (carry cascade) |
+| system: undo of a cut | 0.00e0 m from the never-cut run | coincident at tick 7 (the cut document's first step) — todo, C2 |
+| system: tablecloth 150² | K 128: 205.2 ms/tick | 8 × 200: 196.8 ms/tick |
+| system: rotating sphere 150² | 267.0 ms/tick; closest 0.5 mm | 403.4 ms/tick; closest −0.1 mm, cap top 0.0 mm; no failing status |
+| analytic suite | (the tilted drop: RESULT 27) | all pass except the incline (C2's item (5), a HEAD failure, todo) |
+
+### What the Newton-only tests found
+
+**1. The oracle comparisons were ill-posed, not Newton.** The rewritten `cloth-gpu-solver` tests compare a converged
+Newton step with the converged oracle (250 against 1000 sweeps differ by 1e-11). Their per-vertex noise starts failed
+by 9.7e-5 to 6.6e-2 m, for two reasons:
+- **Pins.** The noise moved the pinned vertices off their targets. Newton holds a pin as a Dirichlet DOF from the
+  first step, while the oracle's AVBD pin only approaches it: 9.7e-5 m is left after one step.
+- **Multistability.** On a compression-softened membrane (compressionRatio 0.05), noise is multistable. Newton reaches
+  the f32 floor at every step (accepted step 1, done flag 0, no line-search stop; 128 and 512 iterations give the same
+  answer), and so does the oracle, but at stationary points mm to cm apart.
+
+From a smooth bump (pins at their targets), GPU and oracle agree to 1.5e-8 (one step, every guess), 2.1e-8 (the stiff
+fold at 2 cm) and 2.2e-7 (20 scripted BDF2 steps with strain limits), all at 12 × 200. The thresholds are unchanged.
+
+**2. The ring's residual included the pins.** `diagnose` summed |g|² over pinned vertices too, whose g on Newton is the
+Dirichlet reaction (12.6 |mg|). It now covers free DOFs, as Newton's own test does: 7.6e-4.
+
+**3. The residual stop never fires (input to the performance work).** On every pose measured, the f32 residual floors
+at 2–8e-4 |mg|, so `residualTolerance` 1e-5 never stops a step, and every step runs all its Newton iterations (8 in the
+scenes).
+
+**4. The history endpoint is exact; the trajectories branch.** The drift test failed at 2.87e-3 m against a straight-run
+spread of 4.0e-4. I ran a buffer-swap experiment: two straight runs A and C, plus a run B rebuilt from the tick-12
+endpoint. Each of the solver's 8 and the detector's 14 GPU buffers was copied from A into B in turn, then all three
+stepped.
+- **Branches.** One tick on, every run, straight or rebuilt, lands on one of two branches 1.3e-3 m apart, and which run
+  splits off is random (sometimes B, sometimes A alone, sometimes C alone).
+- **No missing state.** A rebuilt run on A's branch stays within 1e-5 of A, as two straight runs do.
+
+The test now checks what the contract requires: every restored segment exact. That covers positions, velocities, the
+clock, v_{n-1}, dx_{n-1}, the pin and edge duals, the held flags and contact state, and the reference predictions with
+rho_v. The run then steps on without failing.
+
+**Open for C2 (repro tree `~/code/me/fluid-scratch/cloth-c1/m4`, logs `~/code/me/fluid-scratch/cloth-c1/m4-c2/`):**
+- the drape regression and the drop and twist halts on Newton;
+- the cut document's coincident status;
+- the intermittent heldConflict on the cut moving solid.

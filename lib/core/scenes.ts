@@ -109,10 +109,9 @@ function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
     preview: () => bridson2002SceneDescription(make(), { bake: false }),
     camera: bridson2002Camera(source),
     attribution: { label: "Bridson, Fedkiw & Anderson, SIGGRAPH 2002", url: "https://graphics.stanford.edu/papers/cloth-sig02/" },
-    status: `Tier A GPU cloth: K = ${source.cloth.solver?.iterations ?? 64} iterations with the two-level coarse correction (C1), OGC self and solid contact (C2)`
+    status: `GPU cloth: one Newton-PCG step per frame (at most ${source.cloth.solver?.newton?.iterations ?? "?"} Newton x ${source.cloth.solver?.newton?.pcgIterations ?? "?"} PCG iterations, C1), OGC self and solid contact (C2)`
       + (moving.length ? `; the ${moving.join(" and ")} ${moving.length > 1 ? "are scene rigid bodies" : "is a scene rigid body"} on the paper's pose track, one-way.` : ".")
-      + " Not yet the paper's drape: the coarse tent basis cannot express a fold about a curved rim, so folds lag the 2002 frames,"
-      + " and contact-held vertices can exceed the 10% strain limit (progress-lane-c1.md).",
+      + " The drape is not yet gated against the 2002 frames (progress-lane-c1.md).",
   });
 }
 

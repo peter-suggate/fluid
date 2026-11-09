@@ -1,7 +1,9 @@
-/** Float64 CPU oracle of the cloth solver: one VBD vertex block update and
- * the whole implicit step built from it. The GPU solver (`gpu-solver.ts`)
- * implements the same energies, constraint updates and iteration order in
- * f32. This file is a test oracle only; nothing in a simulation step calls it.
+/** Float64 CPU oracle of the cloth step: one vertex block update and the
+ * whole implicit step built from it (Gauss-Seidel in vertex order, with
+ * oracle-coarse.ts to converge a stiff sheet). The GPU solver (`gpu-solver.ts`,
+ * Newton-PCG) minimizes the same objective in f32, so a converged oracle step
+ * is its reference. This file is a test oracle only; nothing in a simulation
+ * step calls it (the GPU tables read `buildClothSolverModel`).
  *
  * Energies (all per vertex block, other vertices held, as VBD solves):
  *  - inertia (m / 2h~^2)|x - y|^2, with h~ = h (implicit Euler) or 2h/3 (BDF2);
@@ -15,7 +17,6 @@
  *    an optional per-edge strain limit |e| <= (1 + eps) L (inequality), with
  *    progressive stiffness, warm-started duals and the alpha regularization.
  */
-import type { ClothPatchPartition } from './patches';
 import type { ClothAttachmentScript, ClothIntegrator, ClothMaterial, ClothVector } from './types';
 import { CLOTH_BEND_ROWS, CLOTH_NO_FACE, type PreparedClothTopology } from './topology';
 
@@ -198,12 +199,10 @@ export interface ClothSolverModel {
   readonly faceDamping_s: Float64Array;
   /** Per bending row damping coefficient: its vertex's incident faces' (s), area weighted. */
   readonly bendDamping_s: Float64Array;
-  readonly colours: Uint32Array;
-  readonly colourCount: number;
   readonly scripts: readonly ClothAttachmentScript[];
 }
 
-export function buildClothSolverModel(topology: PreparedClothTopology, materials: readonly ClothMaterial[], colours: Uint32Array, scripts: readonly ClothAttachmentScript[] = []): ClothSolverModel {
+export function buildClothSolverModel(topology: PreparedClothTopology, materials: readonly ClothMaterial[], scripts: readonly ClothAttachmentScript[] = []): ClothSolverModel {
   const t = topology, n = t.vertexCount, membrane = materials.map(clothMembraneConstants), rest = t.data.restPositions_m;
   const elastic = new Float64Array(n), length = new Float64Array(n), counts = new Float64Array(n);
   for (let f = 0; f < t.faceCount; f++) {
@@ -229,9 +228,8 @@ export function buildClothSolverModel(topology: PreparedClothTopology, materials
     for (let j = t.vertexFaceOffsets[v]!; j < t.vertexFaceOffsets[v + 1]!; j++) { const f = t.vertexFaces[j]! >> 2; a += t.faceArea_m2[f]!; b += t.faceArea_m2[f]! * faceDamping[f]!; }
     bendDamping.fill(b / a, CLOTH_BEND_ROWS * v, CLOTH_BEND_ROWS * (v + 1));
   }
-  let colourCount = 0; for (const c of colours) colourCount = Math.max(colourCount, c + 1);
   return { topology, materials, membrane, elasticStiffness_N_m: elastic, vertexLength_m: length, edgeStrainLimit: limit,
-    faceDamping_s: faceDamping, bendDamping_s: bendDamping, colours, colourCount, scripts };
+    faceDamping_s: faceDamping, bendDamping_s: bendDamping, scripts };
 }
 
 export interface ClothOracleState {
@@ -268,7 +266,6 @@ export interface ClothStepOptions {
   readonly gravity_m_s2: ClothVector;
   readonly integrator: ClothIntegrator;
   readonly iterations: number;
-  readonly chebyshevRho: number;
   /** Rounding unit of the line search's error bound (default: f64). Comparing with the f32 GPU solver passes 2^-23. */
   readonly lineSearchEpsilon?: number;
   /** Default 'adaptive'. */
@@ -430,11 +427,6 @@ export function clothVertexUpdate(model: ClothSolverModel, frame: ClothStepFrame
   return { position: xv, step: 0, energyBefore: local.energy, energyAfter: local.energy, gradient: local.gradient };
 }
 
-/** omega_n of the Chebyshev semi-iteration (n from 1). */
-export function clothChebyshevOmega(n: number, rho: number, previous: number): number {
-  return n <= 1 ? 1 : n === 2 ? 2 / (2 - rho * rho) : 4 / (4 - rho * rho * previous);
-}
-
 /** Whether this step runs BDF2: the previous step must exist and have the same length. */
 export function clothStepUsesBDF2(integrator: ClothIntegrator, previousStep_s: number, dt_s: number): boolean {
   return integrator === 'bdf2' && previousStep_s > 0 && Math.abs(previousStep_s - dt_s) <= 1e-12 * dt_s;
@@ -544,57 +536,23 @@ export function clothMaxEdgeStrain(model: ClothSolverModel, x: ArrayLike<number>
   return worst;
 }
 
-/** One implicit step of length dt: no substeps; K iterations over colours, Chebyshev, AVBD duals. */
-/** Tier B: each iteration is one sweep of a patch partition (alternating), `innerIterations` Gauss-Seidel
- * sweeps per patch over its colour lists, with every vertex outside the patch frozen at the sweep's start. */
-export interface ClothPatchSchedule {
-  readonly partitions: readonly [ClothPatchPartition, ClothPatchPartition];
-  readonly innerIterations: number;
-}
-
-function colourSweep(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState, list: readonly number[], epsilon?: number): void {
-  const updates = list.map(v => clothVertexUpdate(model, frame, state, v, epsilon).position);
-  list.forEach((v, i) => state.x.set(updates[i]!, 3 * v));
-}
-
-function patchSweep(model: ClothSolverModel, frame: ClothStepFrame, state: ClothOracleState, part: ClothPatchPartition, inner: number, epsilon?: number): void {
-  const C = model.colourCount, snapshot = Float64Array.from(state.x), result = Float64Array.from(state.x);
-  for (let p = 0; p < part.patchCount; p++) {
-    const start = part.patchOffsets[p]!, verts = part.vertices.subarray(start, part.patchOffsets[p + 1]!);
-    for (let k = 0; k < inner; k++) for (let c = 0; c < C; c++)
-      colourSweep(model, frame, state, Array.from(verts.subarray(part.colourOffsets[p * (C + 1) + c]!, part.colourOffsets[p * (C + 1) + c + 1]!)), epsilon);
-    for (const v of verts) for (let a = 0; a < 3; a++) { result[3 * v + a] = state.x[3 * v + a]!; state.x[3 * v + a] = snapshot[3 * v + a]!; }
-  }
-  state.x.set(result);
-}
-
-/** Two-level correction (coarse.ts): set up once per step after the warm start at the initial guess,
- * then applied before each iteration's colour sweeps. */
+/** Two-level correction (oracle-coarse.ts): set up once per step after the warm start at the initial guess,
+ * then applied before each iteration's sweep. */
 export interface ClothOracleCoarse {
   begin(frame: ClothStepFrame, state: ClothOracleState): void;
   correct(frame: ClothStepFrame, state: ClothOracleState): void;
 }
 
-export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState, options: ClothStepOptions, track = false, patches?: ClothPatchSchedule, coarse?: ClothOracleCoarse): ClothStepReport {
-  const n = model.topology.vertexCount, { frame, init, bdf2 } = clothStepFrame(model, state, options);
-  if (patches && !(Number.isInteger(patches.innerIterations) && patches.innerIterations >= 1)) throw new Error('Cloth patch sweeps need at least one inner iteration');
+/** One implicit step of length dt: no substeps; K Gauss-Seidel sweeps in vertex order, each followed by the AVBD dual
+ * updates, with an optional two-level correction before each sweep. */
+export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState, options: ClothStepOptions, track = false, coarse?: ClothOracleCoarse): ClothStepReport {
+  const n = model.topology.vertexCount, { frame, init, bdf2 } = clothStepFrame(model, state, options), residuals: number[] = [];
   clothWarmStartDuals(model, state, frame.hEff);
   state.x.set(init);
   coarse?.begin(frame, state);
-  const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
-  for (let v = 0; v < n; v++) byColour[model.colours[v]!]!.push(v);
-  const prev1 = Float64Array.from(state.x), prev2 = Float64Array.from(state.x), residuals: number[] = [];
-  let omega = 1;
   for (let it = 1; it <= options.iterations; it++) {
     coarse?.correct(frame, state);
-    if (patches) patchSweep(model, frame, state, patches.partitions[(it - 1) % 2]!, patches.innerIterations, options.lineSearchEpsilon);
-    else for (const list of byColour) colourSweep(model, frame, state, list, options.lineSearchEpsilon);
-    omega = clothChebyshevOmega(it, options.chebyshevRho, omega);
-    if (it >= 2 && omega !== 1) for (let v = 0; v < n; v++) {
-      if (isPinned(model, v)) continue;
-      for (let c = 0; c < 3; c++) state.x[3 * v + c] = omega * (state.x[3 * v + c]! - prev2[3 * v + c]!) + prev2[3 * v + c]!;
-    }
-    prev2.set(prev1); prev1.set(state.x);
+    for (let v = 0; v < n; v++) state.x.set(clothVertexUpdate(model, frame, state, v, options.lineSearchEpsilon).position, 3 * v);
     clothUpdateDuals(model, frame, state);
     if (track) residuals.push(clothStepResidual(model, frame, state, options.gravity_m_s2));
   }

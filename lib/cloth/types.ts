@@ -45,7 +45,6 @@ export interface ClothSolverStateData {
   readonly pinDuals: readonly number[];
   /** One (lambda, k) per edge of the canonical edge list (`prepareClothTopology`). */
   readonly edgeDuals: readonly number[];
-  /** Chebyshev skip flags are per step and are not saved. */
   /** The contact detector's state carried from step to step (C2's OgcCarriedState), so a run continued from this
    *  state steps on as the straight run does. Omitted: the detector starts as before any step. */
   readonly contact?: ClothContactStateData;
@@ -99,7 +98,6 @@ export interface ClothAttachmentScript {
 }
 
 export type ClothIntegrator = "implicit-euler" | "bdf2";
-export type ClothSolverTier = "A" | "B";
 
 /** Caps and tolerances of the Newton-PCG step (all decided on the GPU; the caps bound the encoded work). One step per
  * frame: Newton and PCG iterations and contact re-detection rounds stay inside it and never advance time. */
@@ -115,25 +113,15 @@ export interface ClothNewtonSettings {
 }
 
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per
- * advance, at the frame/fluid dt: there is no substepping of any kind, and
- * the iteration count K is the only budget. */
+ * advance, at the frame/fluid dt: there is no substepping of any kind; the
+ * Newton and PCG caps are the only budget. */
 export interface ClothSolverSettings {
   /** BDF2 by default: implicit Euler visibly damps a swing at 1/60 s. */
   readonly integrator?: ClothIntegrator;
-  /** VBD iterations per step (K). */
-  readonly iterations?: number;
-  /** Newton-PCG caps and tolerances: when present the document runs the Newton solver (lane C1) instead of VBD. */
+  /** Newton-PCG caps and tolerances (default CLOTH_NEWTON_SCENE_DEFAULTS in system.ts). */
   readonly newton?: ClothNewtonSettings;
-  /** Chebyshev spectral radius estimate: only 0 (off) is accepted, since with the two-level correction acceleration can explode. */
-  readonly chebyshevRho?: number;
   /** Coulomb friction of cloth on cloth (self contact); omitted means frictionless. */
   readonly selfFriction?: number;
-  readonly tier?: ClothSolverTier;
-  /** Tier B: target owned vertices per patch. */
-  readonly patchVertices?: number;
-  /** Tier B: iterations per patch-resident dispatch; partitions alternate
-   * between dispatches, so K / this is the number of halo exchanges. */
-  readonly patchIterations?: number;
 }
 
 /** A solid the cloth would meet that the scene cannot carry yet (a moving

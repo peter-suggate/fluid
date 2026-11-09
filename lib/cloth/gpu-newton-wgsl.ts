@@ -8,7 +8,7 @@
  *
  * H is matrix-free: per face the Green-strain tangent J D J^T plus the geometric term S (x) I with the 2x2 stress S
  * clamped PSD (nwFaces records f0, f1 and S once per Newton iteration); bending and damping are exact (quadratic). The
- * preconditioner is the inverse of each vertex's 3x3 diagonal block (the VBD block of vertexSystem).
+ * preconditioner is the inverse of each vertex's 3x3 diagonal block (vertexSystem).
  *
  * The `nw` buffer (vec4 records): per-vertex segments (stride Np) g, r, z, d, p (two, ping-pong), q, M^-1 (two records),
  * then 3 records per face, then the workgroup partials (W = workgroups of a per-vertex dispatch each): G (r.z, g.g at

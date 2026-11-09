@@ -35,7 +35,7 @@ const down = (x: number, z: number) => ({ origin: [x, 2, z] as ClothVector, dire
 function sheetScene(): SceneDescription {
   const scene = createEmptyScene({ sceneId: 'cloth-grab-test' });
   const cloth: ClothDocument = { schemaVersion: '2.0.0', id: 'sheet', geometry: { kind: 'inline', data: sheetData() }, materials: [cotton],
-    solver: { integrator: 'bdf2', iterations: 8 } };
+    solver: { integrator: 'bdf2' } };
   scene.cloth = [cloth];
   assert.deepEqual(validateScene(scene), []);
   return scene;

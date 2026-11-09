@@ -1,19 +1,15 @@
 /**
- * Two-level correction of the VBD sweeps (lane C1): a Galerkin coarse space built from the mesh topology.
+ * The Float64 oracle's two-level correction (test reference only; the GPU solver is Newton-PCG and has no coarse
+ * path since M4): a Galerkin coarse space built from the mesh topology, which carries a Gauss-Seidel oracle's
+ * support across a stiff sheet so that `clothOracleStep` converges in a few hundred sweeps.
  *
- * A Gauss-Seidel sweep moves information one ring per colour, so at K = 8 a 150^2 sheet cannot carry its
- * support across (progress-lane-c1.md, 2026-11-09). Each iteration therefore first takes one global step in
- * the span of a few smooth shape functions: d = P (P^T H P)^-1 (-P^T grad G), with a line search on G.
- *
- * P is built in rest space from the topology only (no (u, v) grid), so cuts, holes and any document work
- * unchanged: seeds are farthest points by rest geodesic distance (Dijkstra over rest edge lengths), one
- * seed per connected component first; each seed's shape function is a geodesic tent max(0, 1 - d / R),
- * truncated to the CLOTH_COARSE.maxEntries strongest per vertex and normalised to a partition of unity.
- * It is rebuilt at build and edit time only.
- *
- * A_c = P^T H P is assembled once per step at the initial guess from PSD element Hessians (membrane
- * Gauss-Newton plus the PSD-clamped stress term, the quadratic bending (optional), the frozen damping, pins, strain
- * limit edges, inertia); contact is not in it. This file is the Float64 reference of the GPU path.
+ * Each iteration first takes one global step in the span of a few smooth shape functions: d = P (P^T H P)^-1
+ * (-P^T grad G), with a line search on G. P is built in rest space from the topology only: seeds are farthest points
+ * by rest geodesic distance (Dijkstra over rest edge lengths), one seed per connected component first; each seed's
+ * shape function is a geodesic tent max(0, 1 - d / R), truncated to the CLOTH_COARSE.maxEntries strongest per vertex
+ * and normalised to a partition of unity. A_c = P^T H P is assembled once per step at the initial guess from PSD
+ * element Hessians (membrane Gauss-Newton plus the PSD-clamped stress term, the frozen damping, pins, strain limit
+ * edges, inertia). It only accelerates the oracle: the converged step is the minimizer of G either way.
  */
 import type { PreparedClothTopology } from './topology';
 import { clothAddBendDamping, clothAddBending, clothAddFaceDamping, clothAugmentedEnergy, clothFaceWeights, clothLocalSystem,
@@ -21,17 +17,15 @@ import { clothAddBendDamping, clothAddBending, clothAddFaceDamping, clothAugment
   type Mat3, type Vec3 } from './oracle';
 
 export const CLOTH_COARSE = Object.freeze({
-  /** Coarse nodes per document (3 unknowns each): the one-workgroup inverse holds A_c in registers, a row pair per 128 lanes (42 nodes at most). */
+  /** Coarse nodes per document (3 unknowns each). */
   nodes: 40,
-  /** Prolongation entries kept per vertex (4 or 8: GPU rows are whole vec4 records, owner slots 3 bits). */
+  /** Prolongation entries kept per vertex. */
   maxEntries: 4,
   /** Tent radius R over the farthest-point covering radius. */
   radius: 1.5,
-  /** Line search trials of the coarse step: 1, 1/2, ... (the GPU evaluates the full step, then the rest in one pass only when it was rejected). */
+  /** Line search trials of the coarse step: 1, 1/2, ... */
   trials: 4,
-  /** Iterations between corrections: before iterations 1, 1 + every, ... of a step. 2 at K = 8. At 3 the hanging
-   * Bridson sheet passes its 1% equilibrium gate (0.77%), but the cut sheet's free swing lags a converged run by 20.0 mm
-   * (13.3 mm at 2; gate 20 mm), progress-lane-c1.md RESULT (14). */
+  /** Iterations between corrections: before iterations 1, 1 + every, ... of a step. */
   every: 2 as number,
   /** Whether A_c holds the bending rows. Bending of the smooth coarse modes is O(k_b / h_c^2), far below their membrane
    * and inertia terms, so the coarse operator leaves it out (the line search still sees all of G). */
@@ -343,87 +337,4 @@ export class ClothCoarseCorrection implements ClothOracleCoarse {
       }
     }
   }
-}
-
-/** Bits of a face's node slot in a pair entry (face << 2 * SLOT_BITS | slot c << SLOT_BITS | slot c'). */
-export const CLOTH_COARSE_SLOT_BITS = 5;
-const NO_EDGE = 0xffffffff;
-
-/**
- * Setup-time tables of the GPU coarse path (edit time only). A_c is assembled per coarse pair (c <= c') from the
- * faces whose node union holds both: each face carries its own membrane and damping, the inertia and pins of the
- * vertices it owns (their first face) and the strain limits of the edges it owns (their face0), so one list per
- * pair sums every term of A_c once, in a fixed order (no float atomics).
- */
-export interface ClothCoarseTables {
-  readonly nodeCount: number;
-  /** CLOTH_COARSE.maxEntries node ids per vertex (0xffffffff pads) and their weights. */
-  readonly rowNodes: Uint32Array;
-  readonly rowWeights: Float32Array;
-  /** Per node CSR of (vertex << 3 | slot): the restriction r_c = -sum_v P_vc g_v. */
-  readonly ownerOffsets: Uint32Array;
-  readonly owners: Uint32Array;
-  /** Per face CSR of its node union: (w0, w1, w2, node) records (corner weights of that node). */
-  readonly faceNodeOffsets: Uint32Array;
-  readonly faceNodes: Float32Array;
-  /** Coarse pairs (c, c'), c <= c', and per pair CSR entries (face, slot c, slot c'). */
-  readonly pairs: Uint32Array;
-  readonly pairOffsets: Uint32Array;
-  readonly pairEntries: Uint32Array;
-  /** Per face: owned-corner bits, then the owned edge ids of corner pairs (0, 1), (1, 2), (2, 0) (0xffffffff: not owned). */
-  readonly faceOwn: Uint32Array;
-}
-
-export function packClothCoarseTables(t: PreparedClothTopology, space: ClothCoarseSpace): ClothCoarseTables {
-  const n = t.vertexCount, W = CLOTH_COARSE.maxEntries, nc = space.nodeCount;
-  if (space.rowOffsets.length !== n + 1) throw new Error('Cloth coarse space was built for another topology');
-  if (t.faceCount >= 2 ** (32 - 2 * CLOTH_COARSE_SLOT_BITS)) throw new Error('Cloth document has too many faces for the coarse pair entries');
-  const rowNodes = new Uint32Array(W * n).fill(0xffffffff), rowWeights = new Float32Array(W * n), owners: number[][] = Array.from({ length: nc }, () => []);
-  for (let v = 0; v < n; v++) {
-    const a = space.rowOffsets[v]!, b = space.rowOffsets[v + 1]!;
-    if (b - a > W) throw new Error(`Cloth coarse row of vertex ${v} has ${b - a} entries; the GPU path holds ${W}`);
-    for (let p = a; p < b; p++) { rowNodes[W * v + p - a] = space.rowNodes[p]!; rowWeights[W * v + p - a] = space.rowWeights[p]!; owners[space.rowNodes[p]!]!.push(v << 3 | (p - a)); }
-  }
-  const csr = (lists: number[][]) => {
-    const offsets = new Uint32Array(lists.length + 1);
-    lists.forEach((l, i) => { offsets[i + 1] = offsets[i]! + l.length; });
-    return { offsets, values: Uint32Array.from(lists.flat()) };
-  };
-  const owner = csr(owners);
-  const weight = (v: number, c: number) => { for (let s = 0; s < W; s++) if (rowNodes[W * v + s] === c) return rowWeights[W * v + s]!; return 0; };
-  const faceNodeOffsets = new Uint32Array(t.faceCount + 1), records: number[] = [], unions: number[][] = [];
-  const pairLists = new Map<number, number[]>();
-  for (let f = 0; f < t.faceCount; f++) {
-    const vs = [0, 1, 2].map(k => t.faces[3 * f + k]!), U = new Set<number>();
-    for (const v of vs) for (let s = 0; s < W; s++) if (rowNodes[W * v + s] !== 0xffffffff) U.add(rowNodes[W * v + s]!);
-    const nodes = [...U].sort((a, b) => a - b);
-    if (nodes.length > 2 ** CLOTH_COARSE_SLOT_BITS) throw new Error(`Cloth face ${f} touches ${nodes.length} coarse nodes`);
-    unions.push(nodes);
-    for (const c of nodes) records.push(weight(vs[0]!, c), weight(vs[1]!, c), weight(vs[2]!, c), c);
-    faceNodeOffsets[f + 1] = faceNodeOffsets[f]! + nodes.length;
-    for (let i = 0; i < nodes.length; i++) for (let j = i; j < nodes.length; j++) {
-      const key = nodes[i]! * nc + nodes[j]!;
-      let list = pairLists.get(key);
-      if (!list) pairLists.set(key, list = []);
-      list.push(f << 2 * CLOTH_COARSE_SLOT_BITS | i << CLOTH_COARSE_SLOT_BITS | j);
-    }
-  }
-  const keys = [...pairLists.keys()].sort((a, b) => a - b), pairs = new Uint32Array(2 * keys.length);
-  keys.forEach((k, p) => { pairs[2 * p] = Math.floor(k / nc); pairs[2 * p + 1] = k % nc; });
-  const pair = csr(keys.map(k => pairLists.get(k)!));
-  const faceOwn = new Uint32Array(4 * t.faceCount);
-  for (let f = 0; f < t.faceCount; f++) faceOwn.set([0, NO_EDGE, NO_EDGE, NO_EDGE], 4 * f);
-  for (let v = 0; v < n; v++) {
-    if (t.vertexFaceOffsets[v + 1] === t.vertexFaceOffsets[v]) throw new Error(`Cloth vertex ${v} has no face`);
-    const entry = t.vertexFaces[t.vertexFaceOffsets[v]!]!;
-    faceOwn[4 * (entry >> 2)] |= 1 << (entry & 3);
-  }
-  for (let e = 0; e < t.edgeCount; e++) {
-    const f = t.edges[4 * e + 2]!, a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, vs = [0, 1, 2].map(k => t.faces[3 * f + k]!);
-    const k = [0, 1, 2].findIndex(i => (vs[i] === a && vs[(i + 1) % 3] === b) || (vs[i] === b && vs[(i + 1) % 3] === a));
-    if (k < 0) throw new Error(`Cloth edge ${e} is not a side of its face`);
-    faceOwn[4 * f + 1 + k] = e;
-  }
-  return { nodeCount: nc, rowNodes, rowWeights, ownerOffsets: owner.offsets, owners: owner.values, faceNodeOffsets, faceNodes: Float32Array.from(records),
-    pairs, pairOffsets: pair.offsets, pairEntries: pair.values, faceOwn };
 }
