@@ -1806,3 +1806,76 @@ builds and the 20° patch sticks, but the 35° patch sat still (a = 0).
   - The ruling says the fail-safe must never carry a pile, so ruling 4 is not closed.
 - *Curtain.* Halted at tick 126 on heldConflict, nondeterministically (zone 10256, then 6721); one run passed to
   tick 127.
+
+## 2026-11-10: the projected arc (ruling: Bertsekas projected Newton) — ogcProject over CSR plane records
+
+**Design.**
+- The filter no longer writes the solver's direction. The (ii) projection pass, the geometric activity
+  test (bit 10, OGC_ACTIVE_ULPS) and their diagnosis counters are removed. newtonDirection is written only by
+  pcgStep.
+- Per Newton iteration the filter (encodeFilter) runs, in order:
+  - filterBegin;
+  - planes (count): alpha along d into tv, and each vertex's plane-record count;
+  - alloc: a workgroup scan of the counts, then one atomic allocation per workgroup, giving each vertex a
+    contiguous segment (first, count) at segWord;
+  - planes (records): writes each record (m = sigma n, b = -gamma_r max(s0, 0)), relative to the cap's
+    centre X + w;
+  - filter: the re-bound (i) where a solid cuts d; each vertex's fixed records (the cap, then each solid's
+    convex piece: origin, q with its ball, D); alpha_v.
+- Plane records are pruned when the trial region cannot reach them. Each projection is onto a convex set holding
+  x, so every trial and its projections stay within |d| of x and inside the cap. A plane that keeps the whole
+  ball |d| about x, or the whole cap, is redundant and is not recorded.
+- Capacity: planeRecordCapacity, default 16 N. Overflow fails the step (planeRecordOverflow) and holds the
+  vertices past the capacity. The persistent and frame peaks are reported (peakPlaneRecords,
+  framePeakPlaneRecords).
+- The solid piece: of a solid bound's two certificates (the affine one in its ball, or the Lipschitz ball
+  r_l), the one that keeps more of d at the iterate. The Lipschitz ball is stored as the affine form with
+  q = D = 0. An inside marker, or a bound that holds neither piece, holds the vertex.
+- ogcProject(v, x, y), in the vertex block (contact header word 11 = the sub-header vec4):
+  - three sweeps of alternating projections: the cap (radial); the planes (orthogonal); each solid (along its
+    active orthant's gradient D∘sign(u) - q, then its ball; the moving solid in its end-pose frame);
+  - then the largest t <= 1 of x + t (p - x) that every certificate keeps exactly, so the result is always
+    certified;
+  - a point every certificate holds comes back as y exactly; a held vertex (no separating plane, an inside
+    marker, an overflowed segment) comes back as x, which C1's stall rule counts as a cut.
+- cutScale and ballExit move to OGC_COMMON as ogcCutScale and ogcBallExit, with ogcPieceScale (the
+  affine-in-ball scale) shared by the filter, the apply and ogcProject.
+- The bit-8 contact hold is reverted to HEAD.
+- Exactness (C1's requirement): a trial the filter would keep whole comes back bit-exactly.
+  - ogcProject first takes ogcArcScale along y - x: the filter's own test, with the filter's operands in the
+    filter's order. The cap is ballExit(x - (X + w), .), each plane m.(x - c) - b against m.e, and each solid
+    piece from x - O with O its world origin.
+    - To make the operands agree, the filter now forms them the same way. The plane room is
+      sigma dn + gamma_r max(s0, 0), where it was s0 + sigma dn - (s0 - gamma_r max(s0, 0)), which cancels
+      to the same value but rounds differently. The solid cuts take x - O, where they took (x - X) - o.
+    - The records store world origins O rather than offsets from c.
+  - When that scale is >= 1, y is returned as is. Otherwise the sweeps run in world coordinates and then
+    x + t (p - x) is taken with the same scale function.
+  - The solid piece returns its input unchanged when it does not project, since o + R^T (R (p - o)) is not
+    exact in f32.
+  - The filter test now requires every vertex with alpha_v >= 1 to come back bit-exactly at alpha 1 and
+    0.5: 7 of 7 do.
+  - The first failure of that check was not rounding. The test's default capacity of 16 N overflowed:
+    3 sheets 2 mm apart with 5 mm motions need 37 k records (170 a vertex), and overflowed segments hold
+    their vertex. The test now authors 256 N and asserts no planeRecordOverflow.
+  - Record volume scales with the candidate pairs (4 records a pair, 16 B each, about twice the pair
+    list's memory). (a)'s smaller candidate sets cut it directly.
+
+**Results** (export of HEAD + C1's bridge WIP; GPU, one job at a time):
+- Plate (Newton, 8 iterations per step, every step): the test passes at 0.15 % rms with 32 N records (0.19 % before the filter took ogcProject's operand forms)
+  (0.16 % in the trace run at 1024 N). That is below the 0.37-0.80 % the earlier truncating filter gave. |g|^2 falls in every step;
+  the last accepted alpha is 1 in 56 of 60 steps; the round cap is hit in 1 step (S15, the impulsive
+  start). Plane records peak at 16.9 per vertex after both prunes (25 per vertex with the |d| prune only,
+  127 k in total at S0 with neither).
+- Contact suites (final): cloth-contact-body 4/4 and cloth-contact-gpu 22/22. Test 22 and the tilted drop (rebound gate)
+  pass again. The WIP regressions came from the filter writing newtonDirection (the old (ii) projection),
+  together with the bit-8 hold. Both are gone.
+- Projected-arc test (line-search filter): from the certified iterate after the second filter, the
+  projection of x + k d (k = 1, 0.5) is certified, moves no vertex further than its trial, and returns every
+  unbound vertex bit-exactly (7 of 7). The 213 bound vertices move 0.46 of their trial at k = 1 against the
+  filter's alpha_v of 0.24, and 0.65 against 0.40 at k = 0.5.
+- The rotating sphere (N = 22500) breaks down from tick 16 under both the arc and C1's bridge, so the arc
+  is not the cause. The arc halts at ticks 19-21 on solidPenetration after planeRecordOverflow, with 4-19 M
+  records demanded by huge directions; the bridge has faces inside from tick 19 and heldConflict at 46.
+  planeRecordOverflow should halt the step in system.ts (C1's file). Envelope inflation drives this, which
+  (a) local swept bounds addresses next.

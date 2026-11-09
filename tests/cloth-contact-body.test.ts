@@ -409,7 +409,7 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
     const rest = new Float32Array(4 * N);
     for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) rest[4 * i + k] = m.topology.data.restPositions_m[3 * i + k]!;
     const config: OgcContactConfig = { r: R_C, kc: 100, mu: 0.2, epsV: 1e-2, dt: DT, gravity: [0, -9.81, 0], rqBase: 3e-3, rqMax: RQ_MAX, envelopeScale: 2.5,
-      contactCapacity: 128, pairCapacity: 840 * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 16, roundCap: 4, prediction: "guess", newton: true,
+      contactCapacity: 128, pairCapacity: 840 * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 16, roundCap: 4, prediction: "guess", newton: true, planeRecordCapacity: 32 * N,
       body: { capacityWords: field.words.length, sampleCapacity: 8192, poseCapacity: 2 } };
     const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges: m.topology.edges }, rest, config);
     const solver = await ClothGPUSolver.create(device, m, { origin_m: [0, 0, 0], dt_s: DT, gravity_m_s2: [0, -9.81, 0], integrator: "bdf2", newton: CLOTH_NEWTON_SCENE_DEFAULTS,
@@ -420,10 +420,10 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
     det.setBodyField(field);
     t.diagnostic(`plate field ${field.words.length} words, ${det.bodySamples} samples, ${det.bodySampleEdges} hull edges, ${(performance.now() - t0).toFixed(0)} ms`);
     const FAILING = OGC_STATUS.contactOverflow | OGC_STATUS.gridOverflow | OGC_STATUS.pairOverflow | OGC_STATUS.nonFinite | OGC_STATUS.solidPenetration
-      | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose;
+      | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose | OGC_STATUS.planeRecordOverflow;
     let worstPhi = Infinity, faceLower = Infinity;
     const t1 = performance.now();
-    let redoSteps = 0, redosMax = 0, conflictsAll = 0, zoneSteps = 0, zoneAll = 0, zonePeak = 0;
+    let redoSteps = 0, redosMax = 0, conflictsAll = 0, zoneSteps = 0, zoneAll = 0, zonePeak = 0, capHitSteps = 0, recordPeak = 0;
     for (let step = 0; step < STILL + MOVING; step++) {
       det.setBodyPoses([poseAt(step), poseAt(step + 1)]);
       const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
@@ -432,6 +432,8 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
       const c = await det.readCounters();
       if (c.redos > 0) redoSteps++;
       redosMax = Math.max(redosMax, c.redos); conflictsAll += c.conflicts;
+      if (c.roundCapHits) capHitSteps++;
+      recordPeak = c.peakPlaneRecords;
       assert.equal(c.status & FAILING, 0, `step ${step}: status ${OgcContactDetector.describeStatus(c.status)} (a held conflict's pair, past N: ${c.heldConflictPair.map(i => (i & 0x7fffffff) - N).join(", ")})`);
       const end = poseOf(poseAt(step + 1)), x = await solver.readPositions();
       const body = new Float64Array(3 * N);
@@ -468,7 +470,7 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
     }
     const rel = Math.sqrt(err / ref);
     assert.ok(onTop > N / 3, `${onTop} vertices on the plate's top`);
-    t.diagnostic(`plate: ${N} vertices (${onTop} on the top), ${STILL + MOVING} steps, ${ms.toFixed(1)} ms/step with readback; min vertex phi ${worstPhi.toExponential(2)} m, faces (exact) phi >= ${faceLower.toExponential(2)} m; velocity vs rigid ${(100 * rel).toFixed(2)}% rms; ${redoSteps} steps redone, ${conflictsAll} conflicts; impact zones in ${zoneSteps} steps, ${zoneAll} vertices carried in all, largest ${zonePeak}`);
+    t.diagnostic(`plate: ${N} vertices (${onTop} on the top), ${STILL + MOVING} steps, ${ms.toFixed(1)} ms/step with readback; min vertex phi ${worstPhi.toExponential(2)} m, faces (exact) phi >= ${faceLower.toExponential(2)} m; velocity vs rigid ${(100 * rel).toFixed(2)}% rms; ${redoSteps} steps redone, ${conflictsAll} conflicts; impact zones in ${zoneSteps} steps, ${zoneAll} vertices carried in all, largest ${zonePeak}; round cap hit in ${capHitSteps} steps; plane records peak ${recordPeak} (${(recordPeak / N).toFixed(1)} per vertex)`);
     assert.ok(rel < 0.05, `the sheet moves with the plate: ${(100 * rel).toFixed(2)}% rms from its rigid velocity`);
     solver.destroy(); det.destroy();
   });
@@ -497,7 +499,7 @@ test("GPU moving plate 3r over a sheet on the floor: the gap is wider than the c
     const rest = new Float32Array(4 * N);
     for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) rest[4 * i + k] = m.topology.data.restPositions_m[3 * i + k]!;
     const config: OgcContactConfig = { r: R_C, kc: 100, mu: 0.2, epsV: 1e-2, dt: DT, gravity: [0, -9.81, 0], rqBase: 3e-3, rqMax: RQ_MAX, envelopeScale: 2.5,
-      contactCapacity: 128, pairCapacity: 840 * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 16, roundCap: 4, prediction: "guess", newton: true,
+      contactCapacity: 128, pairCapacity: 840 * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 16, roundCap: 4, prediction: "guess", newton: true, planeRecordCapacity: 32 * N,
       solidCapacityWords: floor.words.length, solidSampleCapacity: 8192, body: { capacityWords: plate.words.length, sampleCapacity: 8192, poseCapacity: 2 } };
     const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges: m.topology.edges }, rest, config);
     const solver = await ClothGPUSolver.create(device, m, { origin_m: [0, 0, 0], dt_s: DT, gravity_m_s2: [0, -9.81, 0], integrator: "bdf2", newton: CLOTH_NEWTON_SCENE_DEFAULTS,
@@ -506,7 +508,7 @@ test("GPU moving plate 3r over a sheet on the floor: the gap is wider than the c
     det.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: { buffer: solver.state, offset: 16 * CLOTH_STATE.xt * stride, size: 16 * stride }, ...(det.config.prediction === "target" ? { target: solver.inertialTarget } : {}), direction: solver.newtonDirection });
     det.setSolidField(floor); det.setBodyField(plate);
     const FAILING = OGC_STATUS.contactOverflow | OGC_STATUS.gridOverflow | OGC_STATUS.pairOverflow | OGC_STATUS.nonFinite | OGC_STATUS.solidPenetration
-      | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose;
+      | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose | OGC_STATUS.planeRecordOverflow;
     const x0 = await solver.readPositions();
     let worstFloor = Infinity, worstPlate = Infinity, drift = 0, bodyCuts = 0;
     for (let step = 0; step < DOWN + SLIDE; step++) {

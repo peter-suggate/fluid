@@ -34,11 +34,11 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
-  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_POSE_WORDS, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
+  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
@@ -123,6 +123,12 @@ export interface OgcContactConfig {
    * Absent: the per-truncation placement that follows the residual (the VBD sweeps).
    */
   newton?: boolean;
+  /**
+   * Plane records the line-search filter may hold at once for ogcProject (newton config): one per
+   * cloth vertex of each DAT pair of the round. Default 16 per vertex; author it from the measured
+   * peak (peakPlaneRecords). Overflow fails the step (planeRecordOverflow).
+   */
+  planeRecordCapacity?: number;
 }
 
 export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2, target: 3 } as const;
@@ -214,6 +220,11 @@ export interface OgcFrameCounters {
    */
   zoneVertices: number;
   zonePeak: number;
+  /** The line-search filter over the frame's Newton iterations (newton config): vertices whose solid bounds it re-took about the iterate. */
+  filterRebound: number;
+  /** The filter's plane records (ogcProject): the frame's peak and the persistent peak (against planeRecordCapacity). */
+  framePeakPlaneRecords: number;
+  peakPlaneRecords: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -309,7 +320,7 @@ export class OgcContactDetector {
     this.bodySampleCapacity = bodySampleCap;
     this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
     this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
-    this.work = mk("work", 4 * ((body ? 24 : 12) * N + OGC_SHIFT_WORDS * N + T + E));
+    this.work = mk("work", 4 * ((body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E + (config.newton ? N : 0)));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
@@ -333,7 +344,15 @@ export class OgcContactDetector {
     this.bodyEdgeBase = body ? this.bodySampleBase + bodySampleCap : 0;
     this.poseTableBase = body ? this.bodyEdgeBase + edgeVec4s(bodySampleCap) : 0;
     this.poseCapacity = body?.poseCapacity ?? 0;
-    const contactVec4s = body ? this.poseTableBase + 1 + (OGC_POSE_WORDS / 4) * body.poseCapacity : this.edgeBase + edgeVec4s(sampleCap);
+    const solidVec4s = body ? this.poseTableBase + 1 + (OGC_POSE_WORDS / 4) * body.poseCapacity : this.edgeBase + edgeVec4s(sampleCap);
+    // The filter's records for ogcProject (newton config): a sub-header, each vertex's fixed
+    // records and segment (first, count), and the plane records.
+    const recCap = config.newton ? config.planeRecordCapacity ?? 16 * N : 0;
+    if (!(Number.isSafeInteger(recCap) && recCap >= 0)) throw new Error("OGC: planeRecordCapacity must be a whole number");
+    this.planeRecordCapacity = recCap;
+    this.projBase = config.newton ? solidVec4s : 0;
+    const fixedBase = this.projBase + 1, segBase = fixedBase + OGC_PROJECT_RECORD * N, recBase = segBase + Math.ceil(N / 2);
+    const contactVec4s = config.newton ? recBase + recCap : solidVec4s;
     this.contacts = mk("contacts", 16 * contactVec4s);
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
@@ -369,6 +388,11 @@ export class OgcContactDetector {
     w[P.solidDevOff] = (body ? 16 : 8) * N + T + E; w[P.bodyDevOff] = body ? 20 * N + T + E : 0;
     // The least shift's words of the mandatory round's redos (OGC_SHIFT_WORDS).
     w[P.scaleOff] = (body ? 24 : 12) * N + T + E;
+    // The filter's re-bound origins (vec4 per vertex) follow the least shift's words.
+    w[P.originOff] = (body ? 24 : 12) * N + OGC_SHIFT_WORDS * N + T + E;
+    // The filter's per-vertex plane-record counts follow the origins; its records are in the contact buffer.
+    w[P.recCountOff] = (body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E;
+    w[P.fixedWord] = 4 * fixedBase; w[P.segWord] = 4 * segBase; w[P.recWord] = 4 * recBase; w[P.recCap] = recCap;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
@@ -378,11 +402,12 @@ export class OgcContactDetector {
     const hdr = new Uint32Array(16 + 2 * OGC_POSE_WORDS), hf = new Float32Array(hdr.buffer);
     hdr[0] = N; hdr[1] = config.contactCapacity; hdr[2] = countsBase; hdr[3] = entriesBase;
     hf[4] = config.r; hf[5] = config.kc; hf[6] = config.mu; hf[7] = config.epsV * config.dt;
-    hdr[8] = this.solidBase; hdr[9] = this.sampleBase; hdr[10] = 0;
+    hdr[8] = this.solidBase; hdr[9] = this.sampleBase; hdr[10] = 0; hdr[11] = this.projBase;
     hdr[12] = this.bodyBase; hdr[13] = this.bodySampleBase; hdr[14] = 0; hdr[15] = this.poseTableBase;
     // Identity poses until the owner uploads some (no step runs on them: the pose table is empty).
     for (const k of [0, 1]) { hf[16 + OGC_POSE_WORDS * k + 4] = 1; hf[16 + OGC_POSE_WORDS * k + 9] = 1; hf[16 + OGC_POSE_WORDS * k + 14] = 1; }
     device.queue.writeBuffer(this.contacts, 0, hdr);
+    if (this.projBase) device.queue.writeBuffer(this.contacts, 16 * this.projBase, new Uint32Array([fixedBase, 4 * segBase, recBase, recCap]));
     // No solid until one is set: one empty slot, no bricks, an unbounded band.
     const empty = new Uint32Array(SOLID_HEADER_WORDS + 4), ef = new Float32Array(empty.buffer);
     ef[2] = 1; ef[3] = 3.0e38; empty[SOLID_HEADER_WORDS + 3] = OGC_NONE;
@@ -393,6 +418,9 @@ export class OgcContactDetector {
     }
   }
 
+  /** The filter's records for ogcProject: their sub-header's vec4 (0: no newton config) and the plane records' capacity. */
+  readonly projBase: number;
+  readonly planeRecordCapacity: number;
   /** The moving solid: its image's word offset (0: none), its samples' and pose table's vec4 offsets, and capacities. */
   readonly bodyBase: number;
   readonly bodySampleBase: number;
@@ -600,10 +628,12 @@ export class OgcContactDetector {
       ["redo", OGC_REDO_WGSL, [0, 9, 10]],
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
-      ["planes", ogcPlanesWGSL(!!this.config.newton, false), [0, 2, 4, 5, 9, 11, 14]],
+      ["planes", ogcPlanesWGSL(!!this.config.newton, "truncate"), [0, 2, 4, 5, 9, 11, 14]],
       ...(this.config.newton ? [
-        ["filterBegin", OGC_FILTER_BEGIN_WGSL, [0, 16]],
-        ["filterPlanes", ogcPlanesWGSL(true, true), [0, 2, 4, 5, 9, 11, 14, 15]],
+        ["filterBegin", OGC_FILTER_BEGIN_WGSL, [0, 9, 16]],
+        ["filterPlanes", ogcPlanesWGSL(true, "filter"), [0, 2, 4, 5, 9, 11, 14, 15]],
+        ["filterAlloc", OGC_FILTER_ALLOC_WGSL, [0, 5, 8, 9]],
+        ["filterRecords", ogcPlanesWGSL(true, "records"), [0, 2, 4, 5, 8, 9, 11, 14, 15]],
         ["filter", OGC_FILTER_WGSL, [0, 2, 4, 5, 8, 9, 14, 15, 16]],
       ] as [string, string, number[]][] : []),
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 8, 9, 14]],
@@ -704,18 +734,24 @@ export class OgcContactDetector {
     this.run(pass, "apply", Math.ceil(this.N / WG));
   }
   /**
-   * The line-search filter (newton config): for the iterate in positions (untouched) and the
-   * bound direction d, alpha_v = the largest alpha <= 1 with x + alpha d inside the round's
-   * certificates (planes, cap, static and moving solid bounds) into alpha[v], and alpha_min
-   * into alpha[N]. Each certificate is convex and holds x, so every alpha in [0, alpha_v] is
-   * certified too. Vertices bound below 1 count towards encodeDecide's re-detection, and one
-   * at 0 arms it.
+   * The line-search filter (newton config, OGC_FILTER_WGSL), once per Newton iteration, for the
+   * iterate in positions (untouched) and the solver's direction d: the round's certificates of
+   * each vertex for ogcProject, which projects the solver's trials onto them (the projected arc).
+   * The planes pass counts each vertex's plane records (and reduces each plane's alpha into tv),
+   * the allocation gives each vertex a contiguous segment, the records pass writes them, and the
+   * filter re-takes the solid bounds a solid cuts d by about the iterate, writes each vertex's
+   * fixed records (cap, solid pieces) and alpha_v = the largest alpha <= 1 with x + alpha d
+   * inside every certificate into alpha[v], alpha_min into alpha[N]. Vertices bound below 1
+   * count towards encodeDecide's re-detection, and each held at 0 arms it.
    */
   encodeFilter(pass: GPUComputePassEncoder) {
     if (!this.config.newton) throw new Error("OGC: encodeFilter needs the newton config");
     this.run(pass, "filterBegin", 1);
-    const k = this.kernel("filterPlanes");
-    pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
+    for (const name of ["filterPlanes", "filterAlloc", "filterRecords"] as const) {
+      if (name === "filterAlloc") { this.run(pass, name, Math.ceil(this.N / 256)); continue; }
+      const k = this.kernel(name);
+      pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
+    }
     this.run(pass, "filter", Math.ceil(this.N / WG));
   }
   /**
@@ -774,6 +810,7 @@ export class OgcContactDetector {
       bodyContacts: u[C.frameBodyContacts], bodyCut: u[C.frameBodyCut],
       heldConflictPair: [u[C.heldConflictPair]!, u[C.heldConflictPair + 1]!, u[C.heldConflictPair + 2]!, u[C.heldConflictPair + 3]!],
       zoneVertices: u[C.frameZoneVertices]!, zonePeak: u[C.frameZonePeak]!,
+      filterRebound: u[C.frameRebound]!, framePeakPlaneRecords: u[C.framePeakPlaneRecords]!, peakPlaneRecords: u[C.peakPlaneRecords]!,
     };
   }
 

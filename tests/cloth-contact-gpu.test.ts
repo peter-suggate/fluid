@@ -186,6 +186,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   return new Float32Array(await readBuffer(device, out));
 }
 
+/** ogcProject(v, X_v, Y_v) of the vertex block (the projected arc's projection) for every vertex. */
+async function evalProject(device: GPUDevice, det: OgcContactDetector, X: V3[], Y: V3[]): Promise<V3[]> {
+  const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y));
+  const out = device.createBuffer({ size: 16 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> Y: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outBuf: array<vec4<f32>>;
+fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return X[i].xyz; }
+// The projection reads no topology.
+fn ogcTri(t: u32) -> vec3<u32> { return vec3<u32>(t); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { return vec2<u32>(e); }
+${OgcContactDetector.vertexBlockWGSL(0, 4)}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= ${N}u) { return; }
+  outBuf[v] = vec4<f32>(ogcProject(v, X[v].xyz, Y[v].xyz), 0.0);
+}`;
+  const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], [3, out], [4, det.solverBuffer]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
+  device.queue.submit([enc.finish()]);
+  const got = toV3(new Float32Array(await readBuffer(device, out)), N);
+  xb.destroy(); yb.destroy(); out.destroy();
+  return got;
+}
+
 async function detect(device: GPUDevice, mesh: OracleMesh, vel: V3[], config: OgcContactConfig) {
   const { triangles, edges, oracle } = topologyOf(mesh);
   const positions = storage(device, vec4s(mesh.x)), velocities = storage(device, vec4s(vel));
@@ -488,7 +518,9 @@ test("GPU line-search filter: x + alpha d is certified for every alpha up to alp
   await withContactDevice(async device => {
     const mesh = stackScene(9), N = mesh.x.length, R = rng(5);
     const motion = f32(mesh.x.map(p => [(R() - 0.5) * 6e-3, (R() - 0.5) * 6e-3, (p[2] < 1.9e-3 ? 1 : -1) * R() * 5e-3] as V3));
-    const config: OgcContactConfig = { ...baseConfig(N), newton: true };
+    // Three sheets 2 mm apart and 5 mm motions through each other: some 170 plane records a vertex at
+    // the first filter (records past the capacity hold their vertex and fail the step).
+    const config: OgcContactConfig = { ...baseConfig(N), newton: true, planeRecordCapacity: 256 * N };
     const vel = motion.map(d => [d[0] / config.dt, d[1] / config.dt, d[2] / config.dt - config.gravity[2] * config.dt] as V3);
     const { triangles, edges, oracle } = topologyOf(mesh);
     const positions = storage(device, vec4s(mesh.x)), velocities = storage(device, vec4s(vel)), direction = storage(device, vec4s(motion));
@@ -537,8 +569,29 @@ test("GPU line-search filter: x + alpha d is certified for every alpha up to alp
     device.queue.writeBuffer(direction, 0, vec4s(f32(motion.map(m => [m[0] * (1 - lo), m[1] * (1 - lo), m[2] * (1 - lo)] as V3))));
     await runPass(device, pass => det.encodeFilter(pass));
     const again = new Float32Array(await readBuffer(device, det.alpha, 4 * (N + 1)));
+    const counters = await det.readCounters();
+    assert.equal(counters.status & OGC_STATUS.planeRecordOverflow, 0, `plane records within the capacity: peak ${counters.peakPlaneRecords} of ${256 * N}`);
+    console.log(`filter plane records: peak ${counters.peakPlaneRecords} (${(counters.peakPlaneRecords / N).toFixed(1)} a vertex)`);
     assert.ok(again[N]! > 0, `the second filter moves on: alpha_min ${again[N]}`);
     await certified(f32(global.map((x, v) => [x[0] + again[N]! * (1 - lo) * motion[v]![0], x[1] + again[N]! * (1 - lo) * motion[v]![1], x[2] + again[N]! * (1 - lo) * motion[v]![2]] as V3)), "second step");
+    // The projected arc (ogcProject onto this filter's records, about the certified iterate): every
+    // vertex's trial projected onto its certificates at once is certified too; the projection never
+    // moves a vertex further than its trial, a vertex its certificates keep whole comes back bit-exactly, and
+    // the bound ones are carried on past their alpha_v.
+    for (const k of [1, 0.5]) {
+      const Y = f32(global.map((x, v) => [x[0] + k * (1 - lo) * motion[v]![0], x[1] + k * (1 - lo) * motion[v]![1], x[2] + k * (1 - lo) * motion[v]![2]] as V3));
+      const Pk = await evalProject(device, det, global, Y);
+      let kept = 0, free = 0, projected = 0, keptArc = 0, keptFilter = 0;
+      for (let v = 0; v < N; v++) {
+        const m = norm(sub(Pk[v]!, global[v]!)), dl = norm(sub(Y[v]!, global[v]!));
+        assert.ok(m <= dl * (1 + 1e-5) + 1e-9, `vertex ${v}: the projection moves ${m}, past the trial's ${dl}`);
+        if (again[v]! >= 1) { free++; if (Pk[v]!.every((u, i) => u === Y[v]![i])) kept++; }
+        else if (dl > 0) { projected++; keptArc += m / dl; keptFilter += Math.min(again[v]! / k, 1); }
+      }
+      await certified(Pk, `projected arc at alpha ${k}`);
+      assert.equal(kept, free, `alpha ${k}: ${kept} of ${free} unbound vertices kept bit-exactly (a solver reads any change as a cut)`);
+      console.log(`projected arc at alpha ${k}: ${kept} of ${free} unbound vertices kept; the ${projected} bound ones move ${(keptArc / Math.max(projected, 1)).toFixed(3)} of their trial on average (the filter's alpha_v keeps ${(keptFilter / Math.max(projected, 1)).toFixed(3)})`);
+    }
     positions.destroy(); velocities.destroy(); direction.destroy(); det.destroy();
   });
 });

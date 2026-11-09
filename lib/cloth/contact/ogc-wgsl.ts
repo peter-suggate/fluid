@@ -70,9 +70,18 @@ export const OGC_COUNTER = {
   filterStalled: 50,
   /** The round's longest vertex prediction |w| (f32 bits; consumed by the cell kernel, which sizes the cell by it). */
   maxPrediction: 51,
+  /** The line-search filter over the frame's Newton iterations: vertices whose solid bounds it re-took about the iterate. */
+  frameRebound: 52,
+  /**
+   * The filter's plane records (ogcProject): this filter's total (its allocation counter), their
+   * persistent peak against the authored planeRecordCapacity, and the frame's peak.
+   */
+  planeRecords: 53, peakPlaneRecords: 54, framePeakPlaneRecords: 55,
 } as const;
-export const OGC_COUNTER_WORDS = 52;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47];
+export const OGC_COUNTER_WORDS = 56;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55];
+/** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, then (origin, q, D) per solid. */
+export const OGC_PROJECT_RECORD = 7;
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -113,6 +122,8 @@ export const OGC_STATUS = {
    * sec. 7.4). Never the normal path: a scene that reports it is a finding.
    */
   failSafe: 8192,
+  /** The filter's plane records (ogcProject) overflowed the authored planeRecordCapacity: the vertices past it were held. */
+  planeRecordOverflow: 16384,
 } as const;
 
 /** Truncation schemes: Planar-DAT (Chen, Hsu, Ayman, Macklin 2026) and the isotropic OGC bound. */
@@ -184,6 +195,11 @@ const OGC_F_ZONE_PEAK = ${OGC_COUNTER.frameZonePeak}u;
 const OGC_STEP_ZONE = ${OGC_COUNTER.stepZone}u;
 const OGC_REDO_PROGRESS = ${OGC_COUNTER.redoProgress}u;
 const OGC_FILTER_STALLED = ${OGC_COUNTER.filterStalled}u;
+const OGC_F_REBOUND = ${OGC_COUNTER.frameRebound}u;
+const OGC_PLANE_RECORDS = ${OGC_COUNTER.planeRecords}u;
+const OGC_PEAK_PLANE_RECORDS = ${OGC_COUNTER.peakPlaneRecords}u;
+const OGC_F_PEAK_PLANE_RECORDS = ${OGC_COUNTER.framePeakPlaneRecords}u;
+const OGC_ST_PLANE_RECORD_OVERFLOW = ${OGC_STATUS.planeRecordOverflow}u;
 `;
 
 /** Geometry, activation and friction shared by detection, the vertex block and the tests. */
@@ -228,6 +244,38 @@ fn ogcSegmentSegment(p0: vec3<f32>, p1: vec3<f32>, q0: vec3<f32>, q1: vec3<f32>)
   if (t < 0.0) { t = 0.0; s = clamp(-c / a, 0.0, 1.0); }
   else if (t > 1.0) { t = 1.0; s = clamp((b - c) / a, 0.0, 1.0); }
   return vec3<f32>(s, t, length(p0 + d1 * s - (q0 + d2 * t)));
+}
+
+// A solid's affine certificate on the motion u from its origin: f(u) = D.|u| - q.u <= 1 within
+// the ball |u| <= R (q.w), with f convex, subadditive and positively homogeneous. The largest
+// k <= 1 it keeps for base + k delta: room 1 - f(base) over f(delta), and the ball; none from a
+// base outside the ball (the room is 0 from a base past f = 1). q = D = 0 is the plain ball.
+fn ogcPieceScale(q: vec4<f32>, D: vec3<f32>, base: vec3<f32>, delta: vec3<f32>) -> f32 {
+  // The prediction scale leaves a base on a ball's sphere to f32 rounding.
+  if (dot(base, base) > q.w * q.w * (1.0 + 1.0e-5)) { return 0.0; }
+  let room = max(1.0 - (dot(D, abs(base)) - dot(q.xyz, base)), 0.0);
+  let den = dot(D, abs(delta)) - dot(q.xyz, delta);
+  return min(select(1.0, room / den, den > room), ogcBallExit(base, delta, q.w));
+}
+// The largest scale k <= 1 of delta that one of a solid bound's certificates keeps for the motion
+// base + k delta (OgcTerms: q, (D, rl)): the affine one (ogcPieceScale), or the Lipschitz ball
+// |base + k delta| <= rl when it holds the base. No bound (q.w = 0) keeps all; an inside marker
+// (q.w >= 1e38) allows no motion.
+fn ogcCutScale(q: vec4<f32>, D4: vec4<f32>, base: vec3<f32>, delta: vec3<f32>) -> f32 {
+  if (q.w >= 1.0e38) { return select(1.0, 0.0, any(delta != vec3<f32>(0.0))); }
+  if (q.w == 0.0) { return 1.0; }
+  var k = ogcPieceScale(q, D4.xyz, base, delta);
+  if (k < 1.0 && dot(base, base) <= D4.w * D4.w * (1.0 + 1.0e-5)) { k = max(k, ogcBallExit(base, delta, D4.w)); }
+  return k;
+}
+// The largest t <= 1 with |base + t delta| <= R, for a base within R.
+fn ogcBallExit(base: vec3<f32>, delta: vec3<f32>, R: f32) -> f32 {
+  let e = base + delta;
+  let r2 = R * R;
+  if (dot(e, e) <= r2) { return 1.0; }
+  let dd = dot(delta, delta);
+  let bd = dot(base, delta);
+  return clamp((sqrt(max(bd * bd + dd * (r2 - dot(base, base)), 0.0)) - bd) / dd, 0.0, 1.0);
 }
 
 // OGC's two-stage activation (eqs. 18-20) with tau = r/2: (g, g', g'').
@@ -447,6 +495,100 @@ export interface OgcVertexBlockOptions {
  *       the energy of those entries
  * The caller sums the lanes (first = 0 .. stride - 1); stride 1 from 0 is the whole block.
  */
+/**
+ * The projection of a trial point y of vertex v onto its certified set (the projected arc of a
+ * Newton line search, Bertsekas' projected Newton): the intersection of the convex certificates
+ * the detector's line-search filter recorded about the iterate x for this Newton iteration
+ * (OGC_FILTER_WGSL and its plane records), each of which holds x. All are relative to the cap's
+ * centre c = X + w:
+ *   the cap        |z| <= R;
+ *   each DAT plane  m.z >= b, m = sigma n its side's unit normal and b = -gamma_r max(s0, 0)
+ *                   (the slack keeps the truncation's own target); m = 0: no separating plane, held;
+ *   each solid     f(u) = D.|u| - q.u <= 1 within |u| <= R (q.w), u = y - O (O its world
+ *                   origin), in the moving solid's frame at the step's end pose for the moving
+ *                   one (ogcPieceScale).
+ * Three sweeps of alternating projections (the cap's radial one, a plane's orthogonal one, a
+ * solid's along its active piece's gradient D o sign(u) - q, then its ball), and then,
+ * since alternating projections only approach the intersection, the largest t <= 1 of the
+ * segment from x to that point that every certificate keeps exactly as the filter does: each
+ * is convex and holds x, so x + t (p - x) is certified. A trial the filter's own test keeps
+ * whole along y - x (ogcArcScale, the filter's operands in the filter's order) is returned
+ * bit-exactly, since a solver reads q != y as a cut; a vertex held (an inside marker, a pair
+ * with no plane, records past their capacity) does not move.
+ */
+const OGC_PROJECT_WGSL = /* wgsl */`
+fn ogcProj4(i: u32) -> vec4<f32> { return bitcast<vec4<f32>>(ogcContacts[i]); }
+// One solid's projection of p onto f(p - o) <= 1 within |p - o| <= R, with Rt to its frame.
+// A point the piece holds comes back bit-exactly (the round trip through the frame would not).
+fn ogcProjectPiece(p: vec3<f32>, o: vec3<f32>, q: vec4<f32>, D: vec3<f32>, Rt: mat3x3<f32>) -> vec3<f32> {
+  var u = Rt * (p - o);
+  var moved = false;
+  let f = dot(D, abs(u)) - dot(q.xyz, u);
+  if (f > 1.0) {
+    let g = D * sign(u) - q.xyz;
+    let gg = dot(g, g);
+    if (gg > 0.0) { u -= ((f - 1.0) / gg) * g; moved = true; }
+  }
+  let l = length(u);
+  if (l > q.w) { u *= q.w / l; moved = true; }
+  if (!moved) { return p; }
+  return o + transpose(Rt) * u;
+}
+// The largest t <= 1 with x + t e inside every certificate of the vertex's records at fb (and its
+// n plane records from first), each evaluated exactly as the line-search filter evaluates it along
+// d (same operands, same order), so a trial the filter keeps whole is kept here bit for bit.
+fn ogcArcScale(fb: u32, first: u32, n: u32, x: vec3<f32>, e: vec3<f32>, Rb: mat3x3<f32>) -> f32 {
+  let cap = ogcProj4(fb);
+  let zx = x - cap.xyz;
+  var t = ogcBallExit(zx, e, cap.w);
+  for (var i = 0u; i < n; i++) {
+    let r = ogcProj4(first + i);
+    let s = dot(r.xyz, e);
+    if (s < 0.0) { t = min(t, clamp((dot(r.xyz, zx) - r.w) / -s, 0.0, 1.0)); }
+  }
+  let so = ogcProj4(fb + 1u);
+  if (so.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 2u), ogcProj4(fb + 3u).xyz, x - so.xyz, e)); }
+  let bo = ogcProj4(fb + 4u);
+  if (bo.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb * (x - bo.xyz), Rb * e)); }
+  return t;
+}
+fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> {
+  let pb = ogcContacts[2].w;
+  if (pb == 0u) { return x; }
+  let ph = ogcContacts[pb];
+  let fb = ph.x + ${OGC_PROJECT_RECORD}u * v;
+  let n = ogcSolidWord(ph.y + 2u * v + 1u);
+  if (n == OGC_NONE) { return x; }
+  let first = ph.z + ogcSolidWord(ph.y + 2u * v);
+  let so = ogcProj4(fb + 1u); let bo = ogcProj4(fb + 4u);
+  if (so.w == 2.0 || bo.w == 2.0) { return x; }
+  for (var i = 0u; i < n; i++) {
+    if (all(ogcProj4(first + i).xyz == vec3<f32>(0.0))) { return x; }
+  }
+  let Rb = transpose(ogcPose(1u).R);
+  // A trial every certificate keeps whole (the filter's own test along y - x) is the point itself.
+  if (ogcArcScale(fb, first, n, x, y - x, Rb) >= 1.0) { return y; }
+  let cap = ogcProj4(fb);
+  let sq = ogcProj4(fb + 2u); let sD = ogcProj4(fb + 3u).xyz;
+  let bq = ogcProj4(fb + 5u); let bD = ogcProj4(fb + 6u).xyz;
+  var p = y;
+  for (var sweep = 0u; sweep < 3u; sweep++) {
+    let z = p - cap.xyz;
+    let l = length(z);
+    if (l > cap.w) { p = cap.xyz + z * (cap.w / l); }
+    for (var i = 0u; i < n; i++) {
+      let r = ogcProj4(first + i);
+      let e = dot(r.xyz, p - cap.xyz) - r.w;
+      if (e < 0.0) { p -= e * r.xyz; }
+    }
+    if (so.w != 0.0) { p = ogcProjectPiece(p, so.xyz, sq, sD, OGC_I3); }
+    if (bo.w != 0.0) { p = ogcProjectPiece(p, bo.xyz, bq, bD, Rb); }
+  }
+  let e = p - x;
+  return x + ogcArcScale(fb, first, n, x, e, Rb) * e;
+}
+`;
+
 export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
   const { group, binding } = options;
   return /* wgsl */`
@@ -455,6 +597,7 @@ ${OGC_COMMON_WGSL}
 fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
 fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
 ${OGC_SOLID_WGSL}
+${OGC_PROJECT_WGSL}
 // Surface sample at index i >= N (sample-facet entries): static below N + S, else the
 // moving solid's body-frame sample posed at the step's end, and where it started the step.
 fn ogcSampleRel(i: u32) -> u32 { return i - ogcContacts[0].x; }
