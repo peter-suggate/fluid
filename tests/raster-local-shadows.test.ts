@@ -255,3 +255,31 @@ test("area emitters get one perspective map when the domain is in front of them,
   const ordered=rasterLocalShadowViews(mixed,bounds);
   assert.deepEqual(ordered.map(view=>view.pointFace),[-1,0,1,2,3,4,5],"spot-layer views precede point faces in the atlas");
 });
+
+test("moving triangle casters keep the static maps in a twin and redraw them whole only on entering or leaving",()=>{
+  const g=globalThis as Record<string,unknown>;
+  g.GPUBufferUsage??={UNIFORM:64,COPY_DST:8,STORAGE:128};g.GPUTextureUsage??={RENDER_ATTACHMENT:16,COPY_SRC:1,COPY_DST:2,TEXTURE_BINDING:4};
+  const textures:{size:number[];destroyed:boolean}[]=[],groups:unknown[]=[],writes:{offset:number;data:unknown}[]=[];
+  const device={
+    createTexture:(d:{size:number[]})=>{const t={size:d.size,destroyed:false,destroy(){t.destroyed=true;},createView:()=>({})};textures.push(t);return t;},
+    createBuffer:()=>({destroy(){}}),createBindGroup:(d:unknown)=>{groups.push(d);return d;},
+    queue:{writeBuffer:(_b:unknown,offset:number,data:unknown)=>writes.push({offset,data})},
+  };
+  const raster=Object.assign(Object.create(SvoRasterAo.prototype),{device,params:{},generation:0,shadowLayerCount:3,shadowResolution:2048,
+    shadowPhysicalLayers:3,localViews:[{pointFace:-1}],spotCount:1,shadow:{createView:()=>({})},triangleCasterLayout:{},
+    triangleCasters:new Map(),triangleCasterKey:"",sampledShadowViews:[]});
+  const binding={buffer:{size:1024}},cloth=(tick:number)=>({key:"sheet",positions:binding,triangles:binding,triangleCount:8,origin_m:[0,1,0],revision:1,tick});
+  raster.setTriangleCasters([cloth(1)]);
+  assert.deepEqual(textures.map(t=>t.size),[[2048,2048,3]],"one twin of the sampled maps");
+  assert.equal(raster.generation,1);
+  assert.deepEqual(writes.filter(w=>w.data instanceof Uint32Array).map(w=>w.offset),[0,1,2].map(layer=>layer*RASTER_LIGHTING_PARAM_BYTES),"every layer is redrawn whole into the empty twin");
+  assert.equal(groups.length,1);
+  const key=raster.triangleCasterKey;
+  raster.setTriangleCasters([cloth(2)]);
+  assert.equal(textures.length,1);assert.equal(raster.generation,1,"a new pose copies and redraws only the caster");
+  assert.equal(groups.length,1,"unchanged buffers keep their bind group");
+  assert.notEqual(raster.triangleCasterKey,key,"the pose is part of the settled-map key");
+  raster.setTriangleCasters([]);
+  assert.ok(textures[0]!.destroyed);assert.equal(raster.generation,2,"the sampled maps still hold the last pose and are redrawn whole");
+  assert.equal(raster.triangleCasterKey,"");
+});

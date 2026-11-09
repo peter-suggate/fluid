@@ -15,7 +15,7 @@ import { importedSurfaceShadowInstances, type ImportedSurfaceShadowGroup } from 
 import { MESH_ASSETS, meshAssetVolume } from "../../core/imported-assets/asset-library";
 import { meshVolumeSurface, prepareMeshVolumeSurfaces } from "../../core/imported-assets/mesh-volume-surface";
 import { svoVoxelLightCacheShape } from "../features/lighting-visibility/svo-voxel-light-cache";
-import { SvoRasterAo, type RasterAoPipelines } from "../features/lighting-visibility/svo-raster-ao";
+import { SvoRasterAo, type RasterAoPipelines, type RasterTriangleCaster } from "../features/lighting-visibility/svo-raster-ao";
 import { canUseOpaqueConeLighting, canUseOpaqueRasterLighting } from "../features/shading/deferred-specialization";
 import type { SceneDescription } from "../../core/model";
 import {
@@ -6397,6 +6397,10 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
+  private triangleShadowCasters: readonly RasterTriangleCaster[] = [];
+  /** Moving GPU-resident meshes (cloth) that cast into the raster shadow maps. */
+  setTriangleShadowCasters(casters: readonly RasterTriangleCaster[]): void { this.triangleShadowCasters = casters; }
+
   setRigidMotionSource(source: GPUBuffer | undefined): void {
     if (!source && this.rigidMotionSource) this.device.queue.writeBuffer(this.rigidMotionUniformBuffer, 0, new Uint32Array(SVO_DRY_RIGID_MOTION_UNIFORM_BYTES / 4));
     this.rigidMotionSource = source;
@@ -7186,6 +7190,7 @@ export class SparseVoxelDrySceneRenderer {
         this.rasterAoTrace = tracePhase;
         this.completeRasterShadows ??= () => this.rasterAoTrace?.("raster-sun-shadows");
         this.completeRasterAo ??= () => this.rasterAoTrace?.("screen-contact-ao");
+        this.rasterAo.setTriangleCasters(this.triangleShadowCasters);
         this.rasterAo.encode(encoder, this.rasterAoPipelines, this.bindGroup, this.surfaceMeshDrawGroup!,
           this.splitLightingBindGroup!, this.surfaceMeshState!, this.surfaceMeshArena!.size / 32, this.lightingOptions.ambientOcclusionEnabled, this.lightingOptions.shadowsEnabled,
           this.completeRasterShadows, this.completeRasterAo,

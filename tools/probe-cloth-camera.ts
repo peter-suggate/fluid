@@ -99,6 +99,14 @@ let passPhase = "";
       views: rasterLocalShadowViews(lights, { origin, extent }).map(v => ({ index: v.index, pointFace: v.pointFace, tan: +v.tanHalfAngle.toFixed(3), near: +v.near.toFixed(3), far: +v.far.toFixed(3) })) })); }
     return update.call(this, origin, extent, cellSize, direction, lights);
   }; }
+// CLOTH_CAMERA_FORCE_CASTERS=1: treat paused cloth as moving, so each frame
+// pays the moving-caster shadow cost without the solver's step in the timing.
+if (process.env.CLOTH_CAMERA_FORCE_CASTERS === "1") {
+  const set = SvoRasterAo.prototype.setTriangleCasters; let forced = 0;
+  SvoRasterAo.prototype.setTriangleCasters = function (this: SvoRasterAo, sources) {
+    forced++; return set.call(this, sources.map(source => ({ ...source, tick: source.tick * 1e6 + forced })));
+  };
+}
 const read = GPUPassTimestampRecorder.prototype.read;
 GPUPassTimestampRecorder.prototype.read = async function (this: GPUPassTimestampRecorder) {
   const reading = await read.call(this);

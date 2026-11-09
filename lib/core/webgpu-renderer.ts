@@ -3210,6 +3210,8 @@ export class FluidLabRenderer {
     const clothSurfaces = this.gpuFluid?.clothSurfaces ?? [];
     const clothSources = this.gpuFluid?.clothRenderSources ?? [];
     if (this.clothSurfaceRenderer) this.clothSurfaceRenderer.setSources(clothSources);
+    this.svoDryScenePipeline?.setTriangleShadowCasters(clothSources.map((source) => ({ key: source.document.id, positions: source.positions,
+      triangles: source.triangles, triangleCount: source.triangleCount, origin_m: source.origin_m, revision: source.revision, tick: source.tick })));
     if (clothSurfaces.length) publishSceneClothSurfaces(scene, clothSurfaces);
     this.clothPublicationScene = scene;
     // Cloth is drawn over the dry target; a still-view reuse of that target

@@ -18,9 +18,30 @@ export const SVO_RASTER_SHADOW_CASTER_CAPACITY = 1 << 22;
 const REDRAW = Object.freeze({ nothing: 0, whole: 1, listed: 2, tested: 3 } as const);
 /** Words of the cache buffer: two indirect draws, the revisions last drawn, then the caster list's count and overflow flag. */
 const CACHE = Object.freeze({ clearDraw: 0, casterDraw: 4, revisions: 8, listed: 16, overflowed: 17, bytes: 128 } as const);
+/**
+ * A GPU-resident triangle mesh whose pose changes every step (cloth). The
+ * cached maps are kept in a twin texture while one exists; each moved frame
+ * copies them into the sampled maps and draws the casters' triangles over
+ * them, so static casters are never redrawn for a moving one.
+ */
+export interface RasterTriangleCaster {
+  readonly key: string;
+  /** array<vec4f>: caster-local positions (xyz). */
+  readonly positions: GPUBufferBinding;
+  /** array<vec4u>: vertex indices (xyz). */
+  readonly triangles: GPUBufferBinding;
+  readonly triangleCount: number;
+  readonly origin_m: readonly number[];
+  /** Changes whenever the buffers are replaced. */
+  readonly revision: number;
+  /** Changes whenever the pose changes. */
+  readonly tick: number;
+}
 export interface RasterAoPipelines {
   shadow: GPURenderPipeline;
   nativeShadow?: GPURenderPipeline;
+  /** Moving triangle casters (cloth), drawn over a copy of the cached maps. */
+  triangleShadow?: GPURenderPipeline;
   nativeCut?: GPURenderPipeline;
   nativeCachedCut?: GPURenderPipeline;
   terrain: GPURenderPipeline;
@@ -489,6 +510,22 @@ fn rasterShadowCastersMain(@builtin(global_invocation_id) id:vec3u,@builtin(loca
   if(mode!=${REDRAW.whole}u&&!rasterShadowCasterRedrawn(quad,layer)){return vec4f(0,0,0,1);}
   return clip;
 }
+struct RasterTriangleCaster { origin:vec4f }
+@group(3) @binding(0) var<storage,read> rasterCasterPositions:array<vec4f>;
+@group(3) @binding(1) var<storage,read> rasterCasterTriangles:array<vec4u>;
+@group(3) @binding(2) var<uniform> rasterTriangleCaster:RasterTriangleCaster;
+struct RasterTriangleShadowVertex { @builtin(position) position:vec4f, @location(0) world:vec3f }
+@vertex fn rasterTriangleShadowVertex(@builtin(vertex_index) vertex:u32)->RasterTriangleShadowVertex{
+  let world=rasterCasterPositions[rasterCasterTriangles[vertex/3u][vertex%3u]].xyz+rasterTriangleCaster.origin.xyz;
+  let layer=rasterLighting.control.y;
+  if(layer>=2u){return RasterTriangleShadowVertex(rasterSpotClip(world,rasterLighting.spots[layer-2u]),world);}
+  return RasterTriangleShadowVertex(vec4f(rasterShadowPosition(world,layer),1),world);
+}
+@fragment fn rasterTriangleShadowFragment(input:RasterTriangleShadowVertex)->@builtin(frag_depth) f32{
+  let layer=rasterLighting.control.y;
+  if(layer>=2u){let spot=rasterLighting.spots[layer-2u];if(spot.rangeRadiusIndex.w>0.0&&distance(input.world,spot.positionNear.xyz)<=spot.rangeRadiusIndex.y){discard;}}
+  return input.position.z;
+}
 @vertex fn rasterShadowClearVertex(@builtin(vertex_index) vertex:u32)->@builtin(position) vec4f{
   let p=array<vec2f,6>(vec2f(-1,-1),vec2f(1,-1),vec2f(-1,1),vec2f(-1,1),vec2f(1,-1),vec2f(1,1));
   let layer=rasterLighting.control.y;
@@ -701,14 +738,20 @@ export class SvoRasterAo {
     this.cacheLayout=device.createBindGroupLayout({entries:[
       {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}}]});
+    const storage={type:"read-only-storage" as const};
+    this.triangleCasterLayout=device.createBindGroupLayout({label:"Raster triangle caster",entries:[
+      {binding:0,visibility:GPUShaderStage.VERTEX,buffer:storage},{binding:1,visibility:GPUShaderStage.VERTEX,buffer:storage},
+      {binding:2,visibility:GPUShaderStage.VERTEX,buffer:{type:"uniform"}}]});
+    this.emptyLayout=device.createBindGroupLayout({label:"Raster triangle caster (no mesh arena)",entries:[]});
+    this.emptyGroup=device.createBindGroup({layout:this.emptyLayout,entries:[]});
     this.aoLayout=device.createBindGroupLayout({entries:[uniform,aoRange,{binding:23,visibility:GPUShaderStage.FRAGMENT|GPUShaderStage.COMPUTE,texture:{sampleType:"unfilterable-float"}},
       {binding:1,visibility:GPUShaderStage.COMPUTE,texture:{sampleType:"depth",viewDimension:"2d-array"}},
       {binding:2,visibility:GPUShaderStage.COMPUTE,sampler:{type:"non-filtering"}},
       {binding:4,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"rgba16float"}},
       {binding:6,visibility:GPUShaderStage.COMPUTE,storageTexture:{access:"write-only",format:"r32float"}},
       {binding:16,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage"}}]});
-    this.shadow=device.createTexture({label:"Cached world-space sun shadows",size:[SVO_RASTER_SHADOW_SIZE,SVO_RASTER_SHADOW_SIZE,2],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
-    this.shadowViews=[0,1].map(baseArrayLayer=>this.shadow.createView({dimension:"2d",baseArrayLayer,arrayLayerCount:1}));
+    this.shadow=device.createTexture({label:"Cached world-space sun shadows",size:[SVO_RASTER_SHADOW_SIZE,SVO_RASTER_SHADOW_SIZE,2],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+    this.shadowViews=this.sampledShadowViews=[0,1].map(baseArrayLayer=>this.shadow.createView({dimension:"2d",baseArrayLayer,arrayLayerCount:1}));
     this.shadowGroups=Array.from({length:2+RASTER_MAX_LOCAL_SHADOW_VIEWS},(_,i)=>i).map(layer=>device.createBindGroup({layout:this.shadowLayout,entries:[{binding:0,resource:{buffer:this.params,offset:layer*RASTER_LIGHTING_PARAM_BYTES,size:RASTER_LIGHTING_PARAM_BYTES}},{binding:7,resource:{buffer:this.redraw}},{binding:10,resource:{buffer:this.casters}}]}));
     this.sampler=device.createSampler({});
   }
@@ -759,7 +802,44 @@ export class SvoRasterAo {
     const nativeCachedCut = nativeShadows ? await this.device.createRenderPipelineAsync({label:"Cached sculpt wall shadow triangles",layout,
       vertex:{module,entryPoint:"rasterCachedWallVertex",buffers:[sculptWallVertexLayout]},fragment:{module,entryPoint:"rasterCachedWallFragment",targets:[]},
       primitive:{topology:"triangle-list",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}}) : undefined;
-    return {shadow,terrain,casters,ao,nativeShadow,nativeCut,nativeCachedCut,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges,exactContact,aoRange,mappedLights:mapped[0],mappedExactEdges:mapped[1],mappedInlineEdges:mapped[2]};
+    const triangleShadow = await this.device.createRenderPipelineAsync({label:"Moving triangle shadow casters",
+      // The mesh arena's group stays empty: the vertex stage's storage-buffer
+      // budget has no room for it beside the caster's own two buffers.
+      layout:this.device.createPipelineLayout({bindGroupLayouts:[scene,this.emptyLayout,this.shadowLayout,this.triangleCasterLayout]}),
+      vertex:{module,entryPoint:"rasterTriangleShadowVertex"},fragment:{module,entryPoint:"rasterTriangleShadowFragment",targets:[]},
+      primitive:{topology:"triangle-list",cullMode:"none"},depthStencil:{format:"depth32float",depthWriteEnabled:true,depthCompare:"less"}});
+    return {triangleShadow,shadow,terrain,casters,ao,nativeShadow,nativeCut,nativeCachedCut,lights,lightEdges,aoTiled,classify,finalize,exactEdges,exactFinalize,inlineEdges,exactContact,aoRange,mappedLights:mapped[0],mappedExactEdges:mapped[1],mappedInlineEdges:mapped[2]};
+  }
+  private readonly triangleCasterLayout: GPUBindGroupLayout;
+  private readonly emptyLayout: GPUBindGroupLayout;
+  private readonly emptyGroup: GPUBindGroup;
+  private shadowTwin?: GPUTexture;
+  private sampledShadowViews: GPUTextureView[] = [];
+  private readonly triangleCasters = new Map<string, { source: RasterTriangleCaster; uniform: GPUBuffer; group: GPUBindGroup }>();
+  private triangleCasterKey = "";
+  private renderedCasterKey?: string;
+  /** Bind this frame's moving triangle casters; unchanged buffers keep their bind groups. */
+  setTriangleCasters(sources: readonly RasterTriangleCaster[]): void {
+    const had = this.triangleCasters.size > 0;
+    const live = new Set(sources.map(source => source.key));
+    for (const [key, caster] of this.triangleCasters) if (!live.has(key)) { caster.uniform.destroy(); this.triangleCasters.delete(key); }
+    const same = (a: GPUBufferBinding, b: GPUBufferBinding) => a.buffer === b.buffer && (a.offset ?? 0) === (b.offset ?? 0) && a.size === b.size;
+    for (const source of sources) {
+      const old = this.triangleCasters.get(source.key);
+      const uniform = old?.uniform ?? this.device.createBuffer({ label: "Raster triangle caster", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      if (old?.source.origin_m.some((v, i) => v !== source.origin_m[i]) ?? true) this.device.queue.writeBuffer(uniform, 0, new Float32Array([...source.origin_m, 0]));
+      if (old && old.source.revision === source.revision && same(old.source.positions, source.positions) && same(old.source.triangles, source.triangles)) { old.source = source; continue; }
+      const group = this.device.createBindGroup({ label: "Raster triangle caster", layout: this.triangleCasterLayout, entries: [
+        { binding: 0, resource: source.positions }, { binding: 1, resource: source.triangles }, { binding: 2, resource: { buffer: uniform } }] });
+      this.triangleCasters.set(source.key, { source, uniform, group });
+    }
+    this.triangleCasterKey = sources.map(source => `${source.key}:${source.revision}:${source.tick}`).join("|");
+    // Entering or leaving the twin regime redraws the static maps whole: the
+    // twin starts empty, and the sampled maps last held a caster's pose.
+    if ((this.triangleCasters.size > 0) !== had) {
+      this.replaceCachedTwin(); this.updateShadowViews(); this.generation++;
+      for (let layer = 0; layer < this.shadowLayerCount; layer++) this.device.queue.writeBuffer(this.params, layer * RASTER_LIGHTING_PARAM_BYTES, new Uint32Array([this.generation]));
+    }
   }
   /** Membership/asset changes alter caster geometry even when the camera does not move. */
   invalidateNativeGeometry():void{
@@ -828,12 +908,20 @@ export class SvoRasterAo {
     if(force||count!==this.shadowPhysicalLayers){this.shadowPhysicalLayers=count;this.replaceShadowTexture();}
     else this.updateShadowViews();
   }
+  /** The twin the static passes draw into while a triangle caster exists. */
+  private replaceCachedTwin():void{
+    this.shadowTwin?.destroy();this.shadowTwin=undefined;this.renderedCasterKey=undefined;
+    if(this.triangleCasters.size)this.shadowTwin=this.device.createTexture({label:"Cached shadow maps under moving casters",size:[this.shadowResolution,this.shadowResolution,this.shadowPhysicalLayers],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+  }
   private updateShadowViews():void{
-    this.shadowViews=Array.from({length:this.shadowLayerCount},(_,layer)=>this.shadow.createView({dimension:"2d",baseArrayLayer:rasterShadowTile(this.localViews[layer-2],layer,this.spotCount,this.shadowResolution).layer,arrayLayerCount:1}));
+    const tile=(layer:number)=>rasterShadowTile(this.localViews[layer-2],layer,this.spotCount,this.shadowResolution).layer;
+    this.sampledShadowViews=Array.from({length:this.shadowLayerCount},(_,layer)=>this.shadow.createView({dimension:"2d",baseArrayLayer:tile(layer),arrayLayerCount:1}));
+    this.shadowViews=this.shadowTwin?Array.from({length:this.shadowLayerCount},(_,layer)=>this.shadowTwin!.createView({dimension:"2d",baseArrayLayer:tile(layer),arrayLayerCount:1})):this.sampledShadowViews;
   }
   private replaceShadowTexture():void{
     const previous=this.shadow;
-    this.shadow=this.device.createTexture({label:"Cached sun and local shadow atlas",size:[this.shadowResolution,this.shadowResolution,this.shadowPhysicalLayers],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+    this.shadow=this.device.createTexture({label:"Cached sun and local shadow atlas",size:[this.shadowResolution,this.shadowResolution,this.shadowPhysicalLayers],format:"depth32float",usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+    this.replaceCachedTwin();
     this.updateShadowViews();
     this.invalidateVisibility();
     if(this.ao)this.bindScreenTargets();
@@ -909,9 +997,13 @@ export class SvoRasterAo {
   encode(encoder:GPUCommandEncoder,pipelines:RasterAoPipelines,scene:GPUBindGroup,mesh:GPUBindGroup,split:GPUBindGroup,state:GPUBuffer,arenaQuads:number,aoEnabled:boolean,shadowsEnabled:boolean,shadowComplete?:()=>void,aoComplete?:()=>void,settledMeshKey?:string,drawNative?:(pass:GPURenderPassEncoder,cutPipeline?:GPURenderPipeline,cachedPipeline?:GPURenderPipeline)=>void,receiverKey?:string):void{
     if(state!==this.meshState){this.renderedSettledKey=undefined;this.meshState=state;this.cacheGroup=this.device.createBindGroup({layout:this.cacheLayout,entries:[{binding:0,resource:{buffer:state}},{binding:1,resource:{buffer:this.params,offset:0,size:64}},{binding:2,resource:{buffer:this.cache}},{binding:3,resource:{buffer:this.redraw}}]});}
     const settledKey=settledMeshKey;
-    const reuse=settledKey!==undefined&&settledKey===this.renderedSettledKey&&this.renderedSettledGeneration===this.generation;
+    const staticReuse=settledKey!==undefined&&settledKey===this.renderedSettledKey&&this.renderedSettledGeneration===this.generation;
+    // A moving caster alone copies the cached maps and draws itself over them;
+    // its pose is part of what the sampled maps show.
+    const casterRedraw=shadowsEnabled&&this.shadowTwin!==undefined&&pipelines.triangleShadow!==undefined&&(!staticReuse||this.triangleCasterKey!==this.renderedCasterKey);
+    const reuse=staticReuse&&!casterRedraw;
     if(!shadowsEnabled)this.renderedSettledKey=undefined;
-    if(shadowsEnabled&&!reuse){
+    if(shadowsEnabled&&!staticReuse){
     const invalidation=encoder.beginComputePass({label:"Raster shadow cache check"});invalidation.setPipeline(this.cachePipeline!);invalidation.setBindGroup(0,this.cacheGroup!);invalidation.dispatchWorkgroups(1);invalidation.end();
     if(this.nativeArgumentPipeline&&this.nativeArgumentGroup){
       const gate=encoder.beginComputePass({label:"Native shadow cached draw gate"});gate.setPipeline(this.nativeArgumentPipeline);gate.setBindGroup(0,this.nativeArgumentGroup);gate.dispatchWorkgroups(Math.ceil(this.nativeDrawArguments!.size/24/64));gate.end();
@@ -937,11 +1029,28 @@ export class SvoRasterAo {
       pass.end();
     }
     this.renderedSettledKey=settledKey;this.renderedSettledGeneration=this.generation;
-    shadowComplete?.();
     }else if(shadowsEnabled){
       encoder.clearBuffer(this.cache,0,32);
-      shadowComplete?.();
     }
+    const triangleShadow=pipelines.triangleShadow;
+    if(casterRedraw&&this.shadowTwin&&triangleShadow){
+      encoder.copyTextureToTexture({texture:this.shadowTwin},{texture:this.shadow},[this.shadowResolution,this.shadowResolution,this.shadowPhysicalLayers]);
+      for(let layer=0;layer<this.shadowLayerCount;){
+        const physical=rasterShadowTile(this.localViews[layer-2],layer,this.spotCount,this.shadowResolution).layer;
+        const pass=encoder.beginRenderPass({label:`Moving shadow casters ${physical}`,colorAttachments:[],depthStencilAttachment:{view:this.sampledShadowViews[layer]!,depthLoadOp:"load",depthStoreOp:"store"}});
+        pass.setPipeline(triangleShadow);pass.setBindGroup(0,scene);pass.setBindGroup(1,this.emptyGroup);
+        do{
+          const tile=rasterShadowTile(this.localViews[layer-2],layer,this.spotCount,this.shadowResolution);
+          pass.setViewport(tile.x,tile.y,tile.size,tile.size,0,1);pass.setScissorRect(tile.x,tile.y,tile.size,tile.size);
+          pass.setBindGroup(2,this.shadowGroups[layer]);
+          for(const caster of this.triangleCasters.values()){pass.setBindGroup(3,caster.group);pass.draw(3*caster.source.triangleCount);}
+          layer++;
+        }while(layer<this.shadowLayerCount&&rasterShadowTile(this.localViews[layer-2],layer,this.spotCount,this.shadowResolution).layer===physical);
+        pass.end();
+      }
+      this.renderedCasterKey=this.triangleCasterKey;
+    }
+    if(shadowsEnabled)shadowComplete?.();
     // Reuse only after an unchanged, settled shadow publication and an explicit
     // complete receiver-input key. Moving views always execute all producers.
     const reuseVisibility=this.visibilityEnabled&&reuse&&receiverKey!==undefined&&receiverKey===this.visibilityCacheKey;
@@ -991,5 +1100,5 @@ export class SvoRasterAo {
     }
     if(aoEnabled||shadowsEnabled)aoComplete?.();
   }
-  destroy():void{this.aoImportance?.destroy();this.aoRange.destroy();this.nativeDrawArguments?.destroy();this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();this.lightVisibility?.destroy();this.guide?.destroy();this.tileRequests?.destroy();this.tileIndirect?.destroy();this.exactRequests?.destroy();this.exactIndirect?.destroy();}
+  destroy():void{this.shadowTwin?.destroy();for(const caster of this.triangleCasters.values())caster.uniform.destroy();this.triangleCasters.clear();this.aoImportance?.destroy();this.aoRange.destroy();this.nativeDrawArguments?.destroy();this.params.destroy();this.cache.destroy();this.redraw.destroy();this.casters.destroy();this.shadow.destroy();this.ao?.destroy();this.shadowVisibility?.destroy();this.lightVisibility?.destroy();this.guide?.destroy();this.tileRequests?.destroy();this.tileIndirect?.destroy();this.exactRequests?.destroy();this.exactIndirect?.destroy();}
 }
