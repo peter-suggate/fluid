@@ -29,7 +29,9 @@ export const CLOTH_COARSE = Object.freeze({
   radius: 1.5,
   /** Line search trials of the coarse step: 1, 1/2, ... (the GPU evaluates the full step, then the rest in one pass only when it was rejected). */
   trials: 4,
-  /** Iterations between corrections: before iterations 1, 1 + every, ... of a step. */
+  /** Iterations between corrections: before iterations 1, 1 + every, ... of a step. 2 at K = 8. At 3 the hanging
+   * Bridson sheet passes its 1% equilibrium gate (0.77%), but the cut sheet's free swing lags a converged run by 20.0 mm
+   * (13.3 mm at 2; gate 20 mm), progress-lane-c1.md RESULT (14). */
   every: 2 as number,
   /** Whether A_c holds the hinges. Bending of the smooth coarse modes is O(k_b / h_c^2), far below their membrane
    * and inertia terms, so the coarse operator leaves it out (the line search still sees all of G). */

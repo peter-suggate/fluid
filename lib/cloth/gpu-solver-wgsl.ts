@@ -296,23 +296,24 @@ fn augmented(k: f32, lambda: f32, C: f32, inequality: bool) -> f32 {
   return (f * f - lambda * lambda) / (2.0 * k);
 }
 
-struct System { g: vec3f, H: mat3x3f, e: f32, mag: f32 }
+// A vertex's gradient and Hessian. No energy is summed here: the line search takes its energy changes in difference
+// form (vertexDelta, the star trials).
+struct System { g: vec3f, H: mat3x3f }
 
 // Vertex v's local objective at xv (other vertices at their current positions):
 // inertia, membrane, bending, damping, pins, strain limits${contact ? ', contact' : ''}.
 fn vertexSystem(v: u32, xv: vec3f) -> System {
   let h = hEff(); let vr = vertexRest(v); let w = vr.x / (h * h);
-  var s = System(vec3f(0.0), w * IDENTITY, 0.0, 0.0);
   let r = xv - state[seg(S_Y, v)].xyz;
-  s.g = w * r; s.e = 0.5 * w * dot(r, r); s.mag = s.e;
+  var s = System(w * r, w * IDENTITY);
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
     let entry = topo[P.topo0.y + j]; let q = loadFace(entry >> 2u, entry & 3u, xv);
     let b = membraneBlock(q); let d = faceDamping(q);
-    s.g += b.g + d.g; s.H += b.H + d.H; s.e += b.e + d.e; s.mag += abs(b.e) + d.e;
+    s.g += b.g + d.g; s.H += b.H + d.H;
   }
   for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
     let entry = topo[P.topo0.w + j]; let b = hingeBlock(loadHinge(entry >> 2u, entry & 3u, xv));
-    s.g += b.g; s.H += b.H; s.e += b.e; s.mag += b.e;
+    s.g += b.g; s.H += b.H;
   }
   return constraints(v, xv, s);
 }
@@ -428,7 +429,6 @@ fn edgeTerm(v: u32, xv: vec3f, e: u32, s0: System) -> System {
   var kEff = dual.y;
   if (!(dual.y * C + dual.x > 0.0)) { kEff = select(0.0, max(-dual.x / C, 0.0), C != 0.0); }
   s.g += f * n; s.H += (kEff - f / len) * outer(n, n) + (f / len) * IDENTITY;
-  let en = augmented(dual.y, dual.x, C, true); s.e += en; s.mag += abs(en);
   return s;
 }
 
@@ -438,12 +438,10 @@ fn pinTerms(v: u32, xv: vec3f, s0: System) -> System {
   if (vertexGroup(v) > 0u) {
     let d = state[seg(S_PIND, v)]; let C = xv - state[seg(S_PINC, v)].xyz;
     s.g += d.w * C + d.xyz; s.H += d.w * IDENTITY;
-    for (var c = 0u; c < 3u; c++) { let e = augmented(d.w, d[c], C[c], false); s.e += e; s.mag += abs(e); }
   }
 ${contact ? `  var fc = vec3f(0.0); var Hc = mat3x3f();
   ogcAccumulateVertexContact(v, xv, &fc, &Hc);
-  s.g -= fc; s.H += Hc;
-  let ec = ogcVertexContactEnergy(v, xv); s.e += ec; s.mag += abs(ec);` : ''}
+  s.g -= fc; s.H += Hc;` : ''}
   return s;
 }
 
@@ -576,7 +574,7 @@ ${patch ? '' : `// The block update of the vertex in slot i of this colour from 
 fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
   let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy; let n = R.range.y;
   let h = hEff(); let w = vertexRest(v).x / (h * h);
-  var s = pinTerms(v, xv, System(w * (xv - state[seg(S_Y, v)].xyz), w * IDENTITY, 0.0, 0.0));
+  var s = pinTerms(v, xv, System(w * (xv - state[seg(S_Y, v)].xyz), w * IDENTITY));
   var dmp = Block(vec3f(0.0), stencilDiagonal(v), 0.0, 0.0);
   let nf = topo[P.topo0.x + v + 1u] - topo[P.topo0.x + v]; let ns = stencilCount(v);
   let xhv = state[seg(S_XHAT, v)].xyz;
@@ -630,7 +628,7 @@ var<workgroup> wAll: u32;
 fn ownSystem(v: u32, xv: vec3f) -> System {
   let h = hEff(); let w = vertexRest(v).x / (h * h);
   let r = xv - state[seg(S_Y, v)].xyz;
-  return pinTerms(v, xv, System(w * r, w * IDENTITY, 0.0, 0.0));
+  return pinTerms(v, xv, System(w * r, w * IDENTITY));
 }
 
 // Per-vertex sums of the (a, b, c) records of its VL lanes; every lane gets its vertex's totals.${options.subgroups ? `
@@ -663,7 +661,7 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   // This colour's star streams (face, stencil record offsets); R.range.w is the colour.
   let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy;
   var v = 0u; var xv = vec3f(0.0); var nf = 0u; var ns = 0u; var ne = 0u;
-  var s = System(vec3f(0.0), mat3x3f(), 0.0, 0.0);
+  var s = System(vec3f(0.0), mat3x3f());
   // This lane's damping and bending terms, quadratic in xv: the trials take their change in closed form from these.
   var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);
   if (valid) {

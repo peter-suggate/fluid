@@ -1015,3 +1015,109 @@ Notes on the table:
   - Both passed at the start of the round.
   - They started failing when C2's uncommitted `ogc-detector*.ts` / `ogc-wgsl.ts` changes appeared.
   - Neither test cuts the cloth. The only C1 change in between was `edit.ts`.
+
+## 2026-11-09 RESULT (14): coarse every 3 not landed (a second gate), the colour sweep attributed, and the pile phase
+
+**Ruling (1): coarse every 3 is not landed.** It is still 2, pending a re-ruling.
+- Every 3 passes the hanging-sheet gate (0.77% < 1%), but it fails two other committed gates:
+  - **CPU:** `cloth-system`, "a cut sheet keeps its energy bounded…". The free swing lags a converged run (K = 64, every 1) by 0.020008 m against a < 0.02 m gate.
+  - **GPU:** `cloth-gpu-solver`, "every lanes-per-vertex layout…". At 32 lanes the result is 3.05e-6 from the oracle, against a 2e-6 tolerance.
+- Measured lag for the cut 16² sheet at K = 8:
+
+  | every | lag (mm) | strain p99 | energy growth |
+  |---|---|---|---|
+  | 2 | 13.3 | 2.08% | none |
+  | 3 | 20.0 | 2.21% | none |
+  | 4 | 46.1 | 2.15% | none |
+
+- I did not loosen either gate on my own. Landing every 3 means re-ruling the swing-lag gate to about 25 mm and the 32-lane tolerance to about 4e-6.
+- `CLOTH_COARSE.every` carries this in its doc comment.
+
+**Ruling (2): acknowledged.** Next time I make an interface change, I land a migration for the other lane's committed callers or tell the coordinator before committing.
+- That is also why the lane-split contact below is a proposal, not a commit: it needs a new entry point in C2's vertex block.
+
+**Ruling (3): the colour sweep, attributed.**
+
+*Method.*
+- The curtain is profiled with timestamped split passes (scratch `fluid-scratch/cloth-c1/r3/colour-variants.mts` and `colour-ab.mts`).
+- **Attribution by duplication:** each variant runs one kernel section a second time into a dummy, scaled by a runtime zero (`workgroup_id.z`), with its load addresses offset by that zero so no load is reused. Trajectories stay bit-identical, so a variant's extra time is that section's marginal cost.
+- **Restructurings** are A/B'd from one pose snapshot (the load path), so every variant profiles the same state.
+- Noise is about ±10 µs per iteration at tick 44 and about ±30 µs at tick 200.
+
+*Per colour, µs per iteration, base (2 lanes):*
+
+| state | c0 | c1 | c2 | c3 | c4 | sum |
+|---|---|---|---|---|---|---|
+| tick 44, ≤ 1 contact per vertex | 80 | 100 | 106 | 106 | 102 | 490 |
+| tick 200, the pile | 492 | 634 | 527 | 492 | 563 | 2706 (21.6 ms per tick) |
+
+Colour sizes are 6417, 7992, 8023, 7835 and 7833 vertices.
+
+*Marginal costs at tick 44 (µs per iteration, base 490):*
+- These overlap through latency hiding. Read each as the most that removing the section could save; they do not add up.
+- Star face records:
+  - face loads alone (record, `pos(A)`, `pos(B)`, material): 41
+  - with `membraneBlock`: 68
+  - with damping: 54
+  - all three: 76
+- Bending stencil records: 60.
+- `ownSystem` (inertia, pins, contact gradient and Hessian, on lane 0): 80.
+- Contact energy at x_v (`ec0`): 60.
+- Trial `membraneDelta` over the star: 58. Trial contact energy: 31. Trial inertia and pins: 23.
+- Lanes per vertex: 1 lane (serial `starStep`) runs 442–461 and 4 lanes 547, against 490 for 2. The sweep is latency-bound; the lanes buy nothing at this state.
+
+*At the pile (tick 200, same snapshot):*
+
+| variant | µs per iteration | change |
+|---|---|---|
+| base, 2 lanes (twice) | 2706 / 2679 | — |
+| fused: lane 0 evaluates contact f, H and e in one pass over the entries | 2297 | −15% |
+| lane-split contact, 2 lanes: lane l takes entries l, l + VL, … for f, H, e and the trial energies; e is summed with the trial's groupSum | 1466 | −46% |
+| lane-split contact, 4 lanes | 1095 | −60% (at tick 44: 504 vs 451 at 2 lanes) |
+| 1 lane | 2682 | 0 |
+| one trial only (diagnostic, not physics) | 1652 | trials after the first are 39% |
+| trial `membraneDelta` duplicated | +0 | — |
+
+- At the pile, the sweep is contact evaluation on lane 0: three passes over the vertex's entries (the gradient/Hessian, then the energy at x_v, then one per trial), while the vertex's other lane and the other vertices of the SIMD group wait.
+
+*Landed:*
+- `System` drops its energy sums (`e`, `mag`). No kernel reads them; the line searches use the difference form.
+- This includes the contact energy pass inside `pinTerms`. A/B against HEAD at ticks 44 and 200 shows no time change (2662–2758 vs 2769–2791 µs at 200; 505–519 vs 535–541 at 44), so the compiler had already removed that pass. This is a cleanup, not a speed-up.
+- `cloth-gpu-solver` and `cloth-coarse` pass 13/13 on the GPU.
+
+*Proposed, needs C2:*
+- Two entries in the vertex block:
+  - `ogcVertexContactLanes(v, xv, first, stride, &f, &H) -> f32` (the energy)
+  - `ogcVertexContactEnergyLanes(v, xv, first, stride) -> f32`
+- The scratch prototype calls `ogcEvalEntry` and the `ogcContacts` header directly; C1 should not depend on those internals.
+- With these entries, solveColourWide splits contacts across the vertex's lanes. Expect −46% at the pile with 2 lanes, or −60% with 4.
+- The 4-lane choice trades +3% at the light-contact state for −25% at the pile.
+
+**The pile tick.**
+- Curtain at tick 200: fenced 407 ms; GPU busy 367 ms.
+
+  | group | ms per tick |
+  |---|---|
+  | detection | 320.6 |
+  | — queryEdge | 187 |
+  | — querySample | 80 |
+  | — queryVertex | 37 |
+  | — insert | 10.8 |
+  | truncate (planes) | 23.5 |
+  | solve | 15.8 |
+  | coarse | 7.0 |
+
+- At tick 60 it is 13.3 ms GPU busy (18.7 fenced), unchanged from RESULT (13).
+- The solve is under 5% of the pile tick; detection is 87%.
+- **Nondeterminism.** From one snapshot, the same code diverges by 4–6.5 cm in 7 ticks at the pile.
+- **Unexplained, not traced.** A system rebuilt from its tick-44 pose ran at 45.7 ms fenced per tick for the next 7 ticks.
+
+**Ruling (4): waiting on C2's relative-to-body truncation** (not in `git log` at c19d6787).
+- `cloth-system` on the GPU is still 16/18. Tests 13 and 14 halt on heldConflict at 0.48 s and 0.25 s.
+
+**Checks:**
+- `check:types` clean.
+- `test:unit`: 1672 pass, 1 fail (the known foreign `reservoir-particle-cost` "merge cap…").
+- GPU:
+  - cloth-gpu-solver and cloth-coarse 13/13
+  - cloth-system 16/18 (as above)
