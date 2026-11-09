@@ -295,37 +295,61 @@ test('a tilted sheet slaps down onto the floor as implicit Euler at h / 8 does (
   assert.ok(Math.abs(got.at(-1)!.y - want.at(-1)!.y) <= 0.002, `settled at ${got.at(-1)!.y} m, reference ${want.at(-1)!.y}`);
 }));
 
+/**
+ * The rest value c of a lightly damped ringdown y(t) = c + e^(-a t) (p cos w t + q sin w t), sampled at t: the decay a
+ * and frequency w by least squares over a grid (shared), then c, p, q linear for each series. A window mean leaves
+ * the part of the sway its length does not cancel; this does not.
+ */
+function ringdown(t: readonly number[], series: readonly (readonly number[])[]): { rest: number[]; w: number; a: number; amplitude: number; rms: number } {
+  const basis = (a: number, w: number) => t.map(s => [1, Math.exp(-a * s) * Math.cos(w * s), Math.exp(-a * s) * Math.sin(w * s)] as const);
+  const fit = (B: readonly (readonly [number, number, number])[], y: readonly number[]) => {
+    const M = [0, 1, 2].map(i => [0, 1, 2].map(j => B.reduce((q, r) => q + r[i]! * r[j]!, 0))), v = [0, 1, 2].map(i => B.reduce((q, r, k) => q + r[i]! * y[k]!, 0));
+    for (let i = 0; i < 3; i++) for (let r = 0; r < 3; r++) if (r !== i) { const f = M[r]![i]! / M[i]![i]!; for (let c = i; c < 3; c++) M[r]![c]! -= f * M[i]![c]!; v[r]! -= f * v[i]!; }
+    const c = [v[0]! / M[0]![0]!, v[1]! / M[1]![1]!, v[2]! / M[2]![2]!];
+    return { c, res: B.reduce((q, r, k) => q + (r[0] * c[0]! + r[1] * c[1]! + r[2] * c[2]! - y[k]!) ** 2, 0) };
+  };
+  let best = { res: Infinity, a: 0, w: 0, c: [0, 0, 0] };
+  for (let w = 2; w <= 60; w += 0.01) for (let a = 0; a <= 2; a += 0.025) { const f = fit(basis(a, w), series[0]!); if (f.res < best.res) best = { ...f, a, w }; }
+  const B = basis(best.a, best.w);
+  return { rest: series.map(y => fit(B, y).c[0]!), w: best.w, a: best.a, amplitude: Math.hypot(best.c[1]!, best.c[2]!), rms: Math.sqrt(best.res / t.length) };
+}
+
 test('hanging curtain: the pinned sheet comes to rest at its exact uniaxial equilibrium', { skip: !runs('hanging-curtain') }, async () => withDevice(async device => {
-  // A near-undamped curtain still sways after the settle time when the solve is converged (an under-converged one
-  // dissipates and stops sooner), so the equilibrium is measured as the mean over the last second, which a sway about it
-  // does not move; the kinetic energy is reported, not gated.
+  // Released unstretched, the near-undamped sheet still rings in its first longitudinal mode at the settle time
+  // (period ~0.45 s, ~8 % of the hem drop at 10 s, decaying at ~0.2 / s), so the rest state is the centre of that
+  // ringdown fitted over the last second, not its window mean (which leaves 0.85 % of it: RESULT (26)).
   const source = clothAnalyticHangingCurtain(), m = source.probe.columns as number, n = source.probe.rows as number, hc = source.probe.cell as number, top = source.probe.top as number;
-  const settle = Math.round((source.probe.settle as number) / h), window = Math.round(1 / h);
+  const settle = Math.round((source.probe.settle as number) / h), window = Math.round(1 / h), first = settle - window + 1;
   const scene = clothAnalyticSceneDescription(source, override(source));
-  const { frames, ms } = await capture(device, scene, range(settle - window + 1, settle));
+  const { frames, ms } = await capture(device, scene, range(first, settle));
   const material = source.cloth[0]!.materials[0]!, k = material.stretchWeft_N_m, rho = material.arealDensity_kg_m2;
   const mass = prepareClothTopology(source.cloth[0]!.geometry.data, source.cloth[0]!.materials).mass_kg;
-  const bands = new Float64Array(n - 1), bottom = Math.floor(m / 2) + m * (n - 1);
-  let stretch = 0, maxEdge = 0, ke = 0;
+  const bottom = Math.floor(m / 2) + m * (n - 1), gated = range(2, n - 5);
+  const hem: number[] = [], bands = gated.map(() => [] as number[]);
+  let maxEdge = 0, ke = 0;
   for (const [pose] of frames) {
     const x = pose!.positions_m;
-    for (let j = 0; j + 1 < n; j++) for (let i = 1; i < m - 1; i++) {
-      const a = i + m * j, b = a + m;
-      const e = Math.hypot(x[3 * a]! - x[3 * b]!, x[3 * a + 1]! - x[3 * b + 1]!, x[3 * a + 2]! - x[3 * b + 2]!) / hc - 1;
-      bands[j] += e / ((m - 2) * frames.length); maxEdge = Math.max(maxEdge, e);
-    }
-    stretch += (top - x[3 * bottom + 1]! - (n - 1) * hc) / frames.length;
+    gated.forEach((j, q) => {
+      let e = 0;
+      for (let i = 1; i < m - 1; i++) {
+        const a = i + m * j, b = a + m, s = Math.hypot(x[3 * a]! - x[3 * b]!, x[3 * a + 1]! - x[3 * b + 1]!, x[3 * a + 2]! - x[3 * b + 2]!) / hc - 1;
+        e += s / (m - 2); maxEdge = Math.max(maxEdge, s);
+      }
+      bands[q]!.push(e);
+    });
+    hem.push(top - x[3 * bottom + 1]! - (n - 1) * hc);
   }
   const v = frames.at(-1)![0]!.velocities_m_s!;
   for (let i = 0; i < mass.length; i++) ke += 0.5 * mass[i]! * (v[3 * i]! ** 2 + v[3 * i + 1]! ** 2 + v[3 * i + 2]! ** 2);
+  const fit = ringdown(range(0, frames.length - 1).map(i => i * h), [hem, ...bands]), stretch = fit.rest[0]!;
   let worst = 0, drop = 0;
-  for (let j = 0; j + 1 < n; j++) {
-    const exact = hangingBandStrain(j, n, hc, k, rho, g);
-    drop += exact * hc;
-    if (j >= 2 && j < n - 4) worst = Math.max(worst, Math.abs(bands[j]! - exact) / exact);
-  }
-  console.log(`[${label(source)}] ${settle} steps, ${ms.toFixed(1)} ms/tick, mean over the last ${window} steps: worst band strain error ${(100 * worst).toFixed(2)} %, hem drop ${(1000 * stretch).toFixed(2)} mm (exact ${(1000 * drop).toFixed(2)}), `
-    + `max edge strain ${(100 * maxEdge).toFixed(2)} %; kinetic energy at step ${settle} ${ke.toExponential(2)} J`);
+  for (let j = 0; j + 1 < n; j++) drop += hangingBandStrain(j, n, hc, k, rho, g) * hc;
+  gated.forEach((j, q) => { const exact = hangingBandStrain(j, n, hc, k, rho, g); worst = Math.max(worst, Math.abs(fit.rest[q + 1]! - exact) / exact); });
+  const windowMean = hem.reduce((s, y) => s + y, 0) / hem.length, L = (n - 1) * hc;
+  console.log(`[${label(source)}] ${settle} steps, ${ms.toFixed(1)} ms/tick, ringdown over the last ${window} steps: worst band strain error ${(100 * worst).toFixed(3)} %, hem drop ${(1000 * stretch).toFixed(3)} mm (exact ${(1000 * drop).toFixed(3)}; `
+    + `window mean ${(1000 * windowMean).toFixed(2)}); sway ${(1000 * fit.amplitude).toFixed(2)} mm at ${fit.w.toFixed(2)} rad/s (linear fixed-free ${(Math.PI / 2 * Math.sqrt(k / rho) / L).toFixed(2)}), decay ${fit.a.toFixed(3)} / s, `
+    + `fit rms ${(1e6 * fit.rms).toFixed(1)} um; max edge strain ${(100 * maxEdge).toFixed(2)} %; kinetic energy at step ${settle} ${ke.toExponential(2)} J`);
+  assert.ok(fit.rms < 0.01 * drop, `the hem is no ringdown: fit rms ${fit.rms} m`);
   assert.ok(worst < 0.01, `band strain off its equilibrium by ${worst}`);
   assert.ok(Math.abs(stretch - drop) < 0.01 * drop, `hem drop ${stretch} m, exact ${drop} m`);
 }));

@@ -1880,3 +1880,40 @@ these scenes in IE for most of their contact phase. Raised with the coordinator.
   1.38e-3 m, above h / 16". This is C2's solid-field.ts, before any step.
 - `reservoir-particle-cost` "merge cap protects neither …" fails in test:unit. This is the fluid lane's
   uncommitted uniform-narrow-band-flip.ts.
+
+## 2026-11-10 RESULT (26): the hanging curtain passes; its 1.11 % was the gate's window mean, not the solver
+
+**The cause.** A probe sampled every 0.1 s to 12 s. The sheet is released unstretched and rings in its first
+longitudinal mode the whole time:
+- period 0.45 s;
+- 36 mm about the rest drop at 2 s, ~8 mm at 10 s.
+
+The gate averaged one second (2.2 periods), so it kept the part of the sway a 1 s window does not cancel: hem
+−0.85 %, worst band 1.11 %. The solver was not biased.
+
+**The fix: fit the ringdown, not the window mean.** The gate now fits y(t) = c + e^(−a t)(p cos ω t + q sin ω t)
+over the same last second (60 steps):
+- a and ω by least squares on a grid, from the hem series;
+- c, p and q linear for the hem and for every gated band, with the shared a and ω.
+
+It gates c. It also requires the hem to be a ringdown: fit rms < 1 % of the drop.
+
+**Result (Newton 8 × 200, 600 steps):**
+
+| quantity | value |
+|---|---|
+| worst band strain error | **0.038 %** (gate 1 %; was 1.11 % as a window mean) |
+| hem drop | **65.532 mm** against exact 65.554 (−0.03 %; window mean 64.99) |
+| sway | 7.78 mm at ω 13.88 rad/s |
+| decay | 0.225 / s |
+| fit rms | 10.7 µm |
+
+A check of the fit offline on the probe's 0.1 s series:
+- c = 65.53, 65.52, 65.54 and 65.50 mm over 9–10 s, 8–10 s, 10–12 s and 6–10 s;
+- ω = 13.87 rad/s every time.
+
+The two dynamic numbers also check out against independent references:
+- **ω:** the linear fixed-free string gives 13.09 rad/s. 13.88 is higher by 6 %, which fits StVK stiffening under the
+  0–8 % prestretch.
+- **Decay:** Rayleigh damping alone gives 0.5 · 0.002 s · ω² = 0.193 / s. The remaining 0.03 / s is BDF2's
+  numerical damping at ωh = 0.23 (about (ωh)⁴ / 4 per step, i.e. 0.04 / s).
