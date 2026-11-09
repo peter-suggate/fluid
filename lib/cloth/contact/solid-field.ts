@@ -735,18 +735,23 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
         .sort((x, y) => x.ang - y.ang);
       for (const F of fan) if (F.j > i) edges.push(i, F.j);
       if (fan.length < 2) continue;
-      for (let k = 0; k < fan.length; k++) {
-        const A = fan[k]!, B = fan[(k + 1) % fan.length]!;
+      // Every wedge of the fan short of half a turn, not only consecutive neighbours: the local
+      // convex hull's facet over a wedge can span neighbours that stand under it (a lattice
+      // bevel's corner: the facet over the Bridson tablecloth's leg tops skips a sample, and
+      // without it a face resting on the lifted samples entered the field by 0.15 mm).
+      for (let k = 0; k < fan.length; k++) for (let l = 1; l < fan.length; l++) {
+        const A = fan[k]!, B = fan[(k + l) % fan.length]!;
         let gap = B.ang - A.ang; if (gap <= 0) gap += 2 * Math.PI;
         // A gap of half a turn or more faces the edge of the sampled surface: no hole there.
-        if (gap >= Math.PI || fan.length < 3 && k > 0) continue;
+        if (gap >= Math.PI) break;
+        if (fan.length < 3 && k > 0) continue;
         const lo = Math.min(i, A.j, B.j), hi = Math.max(i, A.j, B.j), key = (lo * S3 + (i + A.j + B.j - lo - hi)) * S3 + hi;
         if (done.has(key)) continue;
         done.add(key);
         // So does a wide gap whose middle holds no surface the seeding would sample: a concave
         // crease (no normal) or flat surface just past the last row. (On a curved boundary row
         // the gap falls a little short of half a turn.)
-        if (gap > 0.5 * Math.PI) {
+        if (l === 1 && gap > 0.5 * Math.PI) {
           const ang = A.ang + 0.5 * gap, sp = spacingOf[i]!;
           const probe = project([0, 1, 2].map(a => qi.p[a]! + sp * (Math.cos(ang) * u[a]! + Math.sin(ang) * w[a]!)) as unknown as V3);
           if (!probe || kappa(probe, localStep) <= kappaMin) continue;

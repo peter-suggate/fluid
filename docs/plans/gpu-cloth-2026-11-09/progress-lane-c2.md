@@ -1027,3 +1027,61 @@ Also in this commit:
   with zero workgroups, and about 6–8 µs per direct one-workgroup dispatch. Skipping validation changes nothing. One
   detection call is 36 indirect dispatches (with heldRounds 3) plus 4 direct ones, about 0.2–0.5 ms, and a step makes 9
   calls. That overhead is a floor under the "contact < 3 ms" target, before any work is done.
+
+## 2026-11-09 Tablecloth faces inside a solid: the leg tops' bevel
+
+**Which solid.** The faces are on the static leg-top 45° bevels, at scene (-0.187, 0.81, ±0.29). The 4 legs are symmetric
+and the faces appear on two of them. The probe is the rigid-body variant at K = 64. Each face rests 11–25 µm above one
+sample: the drape's load compresses the r = 1 mm barrier, so only DAT holds it at 2 sepEps. No hull edge pierces the
+face, every sample lies below it, and the field pokes 0.15–0.21 mm through it.
+
+**Why it was missed: two coverage defects in the sample lift.** The samples are lifted so that a face resting on them
+stays outside the field. A static oracle, kept in scratch at `~/code/me/fluid-scratch/c2/cover.ts`, samples every
+lifted hull facet against the field.
+
+1. **Missing hull facets (fixed in this commit).** `measure()` only formed triangles between angularly consecutive fan
+   neighbours. Where a consecutive triangle is not a facet of the local convex hull, because a neighbour stands above
+   it, it was skipped "because other facets cover it". But the covering facet spans non-consecutive neighbours and was
+   never formed. At the first face (tick 39, -z leg), all 15 field points under the face had no facet at all within 3 mm
+   along the face normal. Every fan wedge short of half a turn is now a facet candidate. The face is then covered: 40
+   hull edges pierce it.
+   - Builds: rotating 5778 samples in 1.3 s, curtain 5005 in 1.1 s, tablecloth 15202 in 3.1 s (was 2.4 s).
+   - GPU probe at K = 64, ticks 30–44: faces inside drop from the earlier 1 at ticks 36–42 to 1 at ticks 34–38 and 43–44.
+     That remaining face is on the +z leg, with the field 0.10 mm through it.
+2. **`roofHeight` underestimates (open).** The roof bound assumes the surface between three samples is convex. Over a
+   lattice bevel the trilinear zero set is a saddle inside a cell, and it rises above every tangent plane at the samples.
+   A sample lifted along its own normal also raises a facet across a sharp edge by less than its lift. On the tablecloth,
+   6897 lifted facets enter the field, by up to 0.29 mm.
+   - The +z face is covered by facet 6743-15009-15015. Its roof lift is 0.14 mm, and the field stands about 0.22 mm
+     above it.
+   - Tried: measuring the depth along the mean normal, sphere-traced from the unlifted triangle. Still 1084 facets enter,
+     by up to 0.26 mm, because a lift along diverging normals is not a lift along the mean normal.
+   - **Prototype:** saved at `~/code/me/fluid-scratch/c2/solid-field-coverage-refine.ts`; not committed. It checks each
+     convex lifted facet directly at h/8 spacing. Where the facet enters the field, its samples rise by the depth divided
+     by the samples' blended normal component along the facet. Each pass uses a max over facets, not a sum, and only
+     facets around samples that rose are rechecked. A hole that goes past the ceiling is refined.
+   - **Tablecloth with the prototype: 0 faces inside at ticks 30–44 on GPU** (K = 64, rigid-body). The build has 15434
+     samples and 67454 edges, in 5.3 s.
+   - **Blocker:** the rotating scene's pedestal box corner at (-0.49, -0.464, 0.49) needs 0.69–0.73 mm of lift. That is
+     above the h/16 = 0.625 mm ceiling, and refinement cannot lower it (it raises the corner sample's roof). Without
+     refinement, a sliver at (-0.8, -0.44, 0.5) needs 1.42 mm. So the build fails explicitly, as it should.
+   - **Decision needed:** whether the ceiling may follow the field's own corner rounding. A lattice box corner rounds
+     over more than a cell, and h/16 was argued from an edge's rounding, not a corner's. The alternative is a corner
+     treatment that needs no lift above h/16. Until then, tick 222 (2 faces) is not re-run.
+
+**Hull edges (C1's 8 cm sphere, item 3).** Each sample's edges are all of its neighbours within 1.6 × its nominal
+spacing. The seeding keeps samples 0.5 spacing apart, so the actual spacing is about half the nominal one. The reach
+then covers about 3 actual spacings, a degree of about 17–23. Measured on a 1 cm lattice, with the current build:
+
+| Sphere | Samples | Mean spacing | Fan edges | Per sample | Mean length | Hull-facet edges | Per sample |
+|---|---|---|---|---|---|---|---|
+| R 4 cm | 1277 | 4.0 mm | 8091 | 6.3 | 5.6 mm | 4040 | 3.2 |
+| R 5 cm | 1562 | 4.5 mm | 17868 | 11.4 | 9.6 mm | 4728 | 3.0 |
+
+So the count is not intended: it comes from the nominal reach. The edges of the local hull facets (the triangulation the
+lift is measured on) are the 1-ring set, at 3 per sample. A chord the hull leaves out lies under the lifted facets, so
+it touches nothing outside the field.
+
+There is one exception. Where the samples form a single row (a sharp box edge) there are no facets, so the chain edges
+next to a gap of half a turn must stay. Changing the edge set to hull-facet edges plus those boundary edges is the next
+step. It is mine (it only changes `clothSolidSampleEdges`), and it shrinks the EE query about 4x on curved bodies.
