@@ -1105,3 +1105,7 @@ Gates:
 
 (C) from the coordinator: the setup failure "a lifted facet … enters the field" came from the coverage prototype, which
 was in the working tree for a short time. That prototype is not committed, and the committed build passes that test.
+
+**(E) done.** `tests/cloth-contact-scene-solids.test.ts` (its shared `sceneOf`, used by all its scene tests) and
+`tests/cloth-contact-scene-profile.test.ts` now pass `movingSolids: "held"` explicitly, and the 6 tests pass. **C1:** you
+can flip `bridson2002SceneDescription`'s default to `"rigid-body"`.

@@ -11,7 +11,7 @@ import { bridson2002SceneDescription, bridson2002SceneLayout } from '../lib/clot
 const BAND = 0.06;
 const sources = [bridson2002Curtain(), bridson2002RotatingSphere(), bridson2002Tablecloth()];
 const scenes = new Map<string, SceneDescription>();
-const sceneOf = (s: Bridson2002Scene) => { let d = scenes.get(s.id); if (!d) scenes.set(s.id, d = bridson2002SceneDescription(s)); return d; };
+const sceneOf = (s: Bridson2002Scene) => { let d = scenes.get(s.id); if (!d) scenes.set(s.id, d = bridson2002SceneDescription(s, { movingSolids: "held" })); return d; };
 const sourcesOf = new Map<string, ClothSolidSource>();
 const solidsOf = (s: Bridson2002Scene) => { let d = sourcesOf.get(s.id); if (!d) sourcesOf.set(s.id, d = clothSolidSourceForScene(sceneOf(s), { band_m: BAND })); return d; };
 const toScene = (s: Bridson2002Scene, p: { x: number; y: number; z: number }): V3 => {

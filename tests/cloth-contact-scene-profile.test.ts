@@ -165,7 +165,7 @@ function solidDiagnosis(field: ClothSolidField, x: Float64Array, origin: ClothVe
 
 test("profile: the rotating-sphere sheet through scene contact, per truncation schedule", { skip: !want }, async t => withDevice(async device => {
   const log = (s: string) => { t.diagnostic(s); console.log(s); };
-  const scene = bridson2002SceneDescription(bridson2002RotatingSphere()), document = scene.cloth![0]!;
+  const scene = bridson2002SceneDescription(bridson2002RotatingSphere(), { movingSolids: "held" }), document = scene.cloth![0]!;
   const data = document.geometry.kind === "inline" ? document.geometry.data : assert.fail("inline geometry");
   const topology = prepareClothTopology(data, document.materials);
   const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)), document.scripts ?? []);
