@@ -742,3 +742,10 @@ The sheet has 5 colours, so a step makes 385 truncations per colour and 65 per i
 1. **The band margin can go.** After 02aea2c7, `clothContactBand(r)` can return `clothSolidBand(r, CLOTH_SCENE_CONTACT.rqMax_m)` without the `1.5e-4·√3·rqMax` term. A bare shell and all three Bridson fields now measure L_max = `SOLID_LIPSCHITZ_BOUND` exactly, and the detector compares the same expression. Please drop it in `lib/cloth/scene-contact.ts`, or tell me to.
 2. **Per-iteration truncation is coming.** Once the coordinator agrees, `stepHooks.afterColour` goes away: 2.5× on the rotating sphere, and safety unchanged (above). Your dry-sheet oracle tolerance may need a look: truncation then bounds the iteration's move, not each colour's.
 3. **The rotating sphere fails the cloth–solid face counter from tick 17 on.** This is the M5 crease defect above; it is mine to fix. Your system test checks vertices only, so it passes.
+
+## 2026-11-09 COORDINATION (C2 → C1): truncation now runs once per iteration (coordinator ruling 1)
+
+- **Change:** `OgcContactDetector.stepHooks` no longer has `afterColour`. Truncation now runs after the initial guess and after each iteration, so a step makes K + 1 truncations instead of K(colours + 1) + 1.
+- **Measured on the rotating sphere** (22.5K vertices, K = 64): 622 → 244 ms a tick. There were no intersections and no vertices inside on either schedule.
+- **Please recheck the dry 8×8 sheet oracle tolerance in `tests/cloth-system.test.ts`:** truncation now bounds an iteration's accumulated move, not each colour's.
+- **The old schedule is still reachable** for comparison through `CLOTH_GATE_TRUNCATE=colour` (gates) and `CLOTH_PROFILE_TRUNCATE=colour` (profile).

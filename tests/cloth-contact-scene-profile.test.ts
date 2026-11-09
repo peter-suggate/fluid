@@ -3,9 +3,9 @@
  * Bridson rotating-sphere sheet built as ClothSystem builds it (scene field,
  * createClothSceneContact, K iterations), run once per truncation schedule.
  *
- *   CLOTH_PROFILE_TRUNCATE  comma list of colour (every colour sweep and every
- *                           iteration, the system's hooks) and iteration (every
- *                           iteration only); default colour,iteration
+ *   CLOTH_PROFILE_TRUNCATE  comma list of iteration (every iteration, the
+ *                           detector's hooks) and colour (also after every colour
+ *                           sweep, the schedule before 2026-11-09); default iteration
  *   CLOTH_PROFILE_TICKS     ticks per schedule, default 20
  *
  * Per schedule: each tick fenced alone (the step only), then the intersection
@@ -34,7 +34,7 @@ import { bridson2002SceneDescription } from "../lib/cloth/scenes/bridson-2002/sc
 import type { ClothVector } from "../lib/cloth/types";
 
 const want = !!process.env.WEBGPU_NODE_MODULE && process.env.CLOTH_CONTACT_PROFILE === "rotating";
-const SCHEDULES = (process.env.CLOTH_PROFILE_TRUNCATE ?? "colour,iteration").split(",").filter(Boolean);
+const SCHEDULES = (process.env.CLOTH_PROFILE_TRUNCATE ?? "iteration").split(",").filter(Boolean);
 const TICKS = Number(process.env.CLOTH_PROFILE_TICKS ?? 20);
 const ITERATIONS = 64;
 
@@ -168,7 +168,7 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
   for (const schedule of SCHEDULES) {
     if (schedule !== "colour" && schedule !== "iteration") throw new Error(`Unknown truncation schedule "${schedule}"`);
     const det = await createClothSceneContact(device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity);
-    const hooks = schedule === "iteration" ? { ...det.stepHooks, afterColour: undefined } : det.stepHooks;
+    const hooks = schedule === "colour" ? { ...det.stepHooks, afterColour: (p: GPUComputePassEncoder) => det.encodeTruncate(p) } : det.stepHooks;
     const solver = await ClothGPUSolver.create(device, model, {
       origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity, integrator: "bdf2", iterations: ITERATIONS, chebyshevRho: 0,
       positions_m: data.initialPositions_m, velocities_m_s: data.initialVelocities_m_s, label: `profile ${schedule}`,

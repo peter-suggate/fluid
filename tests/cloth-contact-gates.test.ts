@@ -202,7 +202,8 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
     // CLOTH_GATE_NO_CONTACT: the solver alone (diagnosis baseline; the intersection count still runs).
     ...(process.env.CLOTH_GATE_NO_CONTACT ? {} : {
       contact: det.solverContact(CLOTH_BINDING.contact),
-      hooks: process.env.CLOTH_GATE_TRUNCATE === "iteration" ? { ...det.stepHooks, afterColour: undefined } : det.stepHooks,
+      // CLOTH_GATE_TRUNCATE=colour: also truncate after every colour sweep (the schedule before 2026-11-09).
+      hooks: process.env.CLOTH_GATE_TRUNCATE === "colour" ? { ...det.stepHooks, afterColour: (p: GPUComputePassEncoder) => det.encodeTruncate(p) } : det.stepHooks,
     }),
   });
   // x_t: the solver's step-start segment (C1 to expose it as a getter; see COORDINATION 2026-11-09).
@@ -278,7 +279,7 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
       + `capped ${c.capped}, uncertified ${c.uncertified}, envelope ${c.peakEnvelope.toExponential(2)}, candidates/N ${(c.candidates / N).toFixed(1)}, `
       + `held/N ${(c.held / N).toFixed(3)} conflicts ${c.conflicts} redos ${c.redos}, residual ${residual.get(fr.step)?.toExponential(2) ?? "-"}`);
   }
-  log(`${name} [kc ${config.kc}, s ${config.envelopeScale}, prediction ${config.prediction ?? "inertial"}, cell ${cT.cell.toExponential(2)}, truncate per ${process.env.CLOTH_GATE_TRUNCATE ?? "colour"}] summary (${N} vertices, ${STEPS} steps): `
+  log(`${name} [kc ${config.kc}, s ${config.envelopeScale}, prediction ${config.prediction ?? "inertial"}, cell ${cT.cell.toExponential(2)}, truncate per ${process.env.CLOTH_GATE_TRUNCATE ?? "iteration"}] summary (${N} vertices, ${STEPS} steps): `
     + `rounds/step ${(sum(c => c.detections) / STEPS).toFixed(2)}, round-cap steps ${sum(c => c.roundCapHits)}, redone steps ${sum(c => c.redos)}, `
     + `candidates/N per step ${(sum(c => c.candidates) / STEPS / N).toFixed(1)}, dat pairs/N per step ${(sum(c => c.datPairs) / STEPS / N).toFixed(2)}, `
     + `envelope-cap hits ${sum(c => c.envelopeCapHits)}, peak contacts/vertex ${cT.peakContacts}/${config.contactCapacity}, `
