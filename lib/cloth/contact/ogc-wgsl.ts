@@ -377,6 +377,13 @@ export interface OgcVertexBlockOptions {
  * Provided:
  *   ogcAccumulateVertexContact(v, xv, &f, &H)  force and PSD Hessian of v's contacts at xv
  *   ogcVertexContactEnergy(v, xv) -> f32       their energy, for the vertex line search
+ * and their lane-split forms for a solver that spreads one vertex over several lanes:
+ *   ogcVertexContactLanes(v, xv, first, stride, &f, &H) -> f32
+ *       adds the force and Hessian of v's entries first, first + stride, ... and returns
+ *       their energy
+ *   ogcVertexContactEnergyLanes(v, xv, first, stride) -> f32
+ *       the energy of those entries
+ * The caller sums the lanes (first = 0 .. stride - 1); stride 1 from 0 is the whole block.
  */
 export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
   const { group, binding } = options;
@@ -522,25 +529,33 @@ fn ogcContactCount(v: u32) -> u32 {
   return min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
 }
 
-fn ogcAccumulateVertexContact(v: u32, xv: vec3<f32>, f: ptr<function, vec3<f32>>, H: ptr<function, mat3x3<f32>>) {
-  let header = ogcContacts[0];
-  let params = bitcast<vec4<f32>>(ogcContacts[1]);
-  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
-  let base = header.w + v * header.y;
-  for (var i = 0u; i < count; i++) {
-    let r = ogcEvalEntry(v, xv, ogcContacts[base + i], params);
-    *f += r.f; *H += r.h;
-  }
-}
-
-fn ogcVertexContactEnergy(v: u32, xv: vec3<f32>) -> f32 {
+fn ogcVertexContactLanes(v: u32, xv: vec3<f32>, first: u32, stride: u32, f: ptr<function, vec3<f32>>, H: ptr<function, mat3x3<f32>>) -> f32 {
   let header = ogcContacts[0];
   let params = bitcast<vec4<f32>>(ogcContacts[1]);
   let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
   let base = header.w + v * header.y;
   var e = 0.0;
-  for (var i = 0u; i < count; i++) { e += ogcEvalEntry(v, xv, ogcContacts[base + i], params).e; }
+  for (var i = first; i < count; i += stride) {
+    let r = ogcEvalEntry(v, xv, ogcContacts[base + i], params);
+    *f += r.f; *H += r.h; e += r.e;
+  }
   return e;
 }
+
+fn ogcVertexContactEnergyLanes(v: u32, xv: vec3<f32>, first: u32, stride: u32) -> f32 {
+  let header = ogcContacts[0];
+  let params = bitcast<vec4<f32>>(ogcContacts[1]);
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+  let base = header.w + v * header.y;
+  var e = 0.0;
+  for (var i = first; i < count; i += stride) { e += ogcEvalEntry(v, xv, ogcContacts[base + i], params).e; }
+  return e;
+}
+
+fn ogcAccumulateVertexContact(v: u32, xv: vec3<f32>, f: ptr<function, vec3<f32>>, H: ptr<function, mat3x3<f32>>) {
+  _ = ogcVertexContactLanes(v, xv, 0u, 1u, f, H);
+}
+
+fn ogcVertexContactEnergy(v: u32, xv: vec3<f32>) -> f32 { return ogcVertexContactEnergyLanes(v, xv, 0u, 1u); }
 `;
 }

@@ -1250,3 +1250,22 @@ p50 = 1e-7 m and p90 = 2–5e-4 m.
 
 Please add `OGC_STATUS.coincident` to `CLOTH_CONTACT_FAILING` in `lib/cloth/scene-contact.ts`. A coincident pair has no
 normal: the detector pushes no entry for it, so the step must halt rather than continue without that contact.
+
+## 2026-11-09 COORDINATION (C2 → C1): the lane-split vertex contact block
+
+`lib/cloth/contact/ogc-wgsl.ts` (`OGC_WGSL`) now exposes the per-lane forms of the
+vertex contact block, for a solve that spreads one vertex over several lanes:
+
+    fn ogcVertexContactLanes(v: u32, xv: vec3<f32>, first: u32, stride: u32,
+                             f: ptr<function, vec3<f32>>, H: ptr<function, mat3x3<f32>>) -> f32
+    fn ogcVertexContactEnergyLanes(v: u32, xv: vec3<f32>, first: u32, stride: u32) -> f32
+
+Each lane handles v's entries first, first + stride, …, adds their force and Hessian
+into *f and *H, and returns their energy. The caller reduces over the lanes
+(first = 0 .. stride − 1). Stride 1 from 0 is the whole block, and
+`ogcAccumulateVertexContact` and `ogcVertexContactEnergy` are now exactly those calls,
+so nothing changes for existing callers. A `coincident` entry still reads as +inf
+energy in whichever lane holds it.
+
+Regression: `tests/cloth-contact-gpu.test.ts` test 3 sums 3 lanes against the whole
+block (force, Hessian and energy within 1e-5 relative), on the GPU.

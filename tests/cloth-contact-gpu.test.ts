@@ -136,8 +136,12 @@ function asOracleContact(e: Entry, mesh: OracleMesh): OracleContact {
   return { kind: "vf", ids: [e.x, tri[0], tri[1], tri[2]], feature: (e.y >>> 28) & 7, s: 0, t: 0, lambda };
 }
 
-/** Run the vertex contact block at the current positions: per vertex (f, e), (H[0], count), H[1], H[2]. */
-async function evalVertexBlock(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, Xt: V3[], N: number): Promise<Float32Array> {
+/**
+ * Run the vertex contact block at the current positions: per vertex (f, e), (H[0], count), H[1], H[2].
+ * With lanes > 1 it runs the lane-split forms over lanes 0 .. lanes - 1 and sums them, as a lane-split
+ * solver does; H[1].w then holds ogcVertexContactLanes's summed energy.
+ */
+async function evalVertexBlock(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, Xt: V3[], N: number, lanes = 1): Promise<Float32Array> {
   const xt = storage(device, vec4s(Xt));
   const L = det.topology.layout;
   const out = device.createBuffer({ size: 64 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -156,11 +160,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v = gid.x;
   if (v >= ${N}u) { return; }
   var f = vec3<f32>(0.0); var H = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
-  ogcAccumulateVertexContact(v, ogcX(v), &f, &H);
-  let e = ogcVertexContactEnergy(v, ogcX(v));
+  var e = 0.0; var eLanes = 0.0;
+  if (${lanes}u == 1u) {
+    ogcAccumulateVertexContact(v, ogcX(v), &f, &H);
+    e = ogcVertexContactEnergy(v, ogcX(v));
+  } else {
+    for (var lane = 0u; lane < ${lanes}u; lane++) {
+      eLanes += ogcVertexContactLanes(v, ogcX(v), lane, ${lanes}u, &f, &H);
+      e += ogcVertexContactEnergyLanes(v, ogcX(v), lane, ${lanes}u);
+    }
+  }
   outBuf[4u * v] = vec4<f32>(f, e);
   outBuf[4u * v + 1u] = vec4<f32>(H[0], f32(ogcContactCount(v)));
-  outBuf[4u * v + 2u] = vec4<f32>(H[1], 0.0);
+  outBuf[4u * v + 2u] = vec4<f32>(H[1], eLanes);
   outBuf[4u * v + 3u] = vec4<f32>(H[2], 0.0);
 }`;
   const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
@@ -273,7 +285,7 @@ test("GPU DAT division pairs: every pair within the larger envelope, once, with 
   });
 });
 
-test("GPU vertex contact block: force, Hessian and energy against the oracle", { skip: !gpu }, async () => {
+test("GPU vertex contact block: force, Hessian and energy against the oracle, and its lane-split forms sum to it", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const mesh = stackScene(5), N = mesh.x.length, R = rng(77);
     const config: OgcContactConfig = { ...baseConfig(N), truncation: "isotropic" };
@@ -306,6 +318,13 @@ test("GPU vertex contact block: force, Hessian and energy against the oracle", {
         assert.ok(Math.abs(res[16 * v + 4 * (col + 1) + row] - H[row][col]) <= 2e-3 * hs, `vertex ${v} H`);
     }
     assert.ok(active > 100);
+    // Lane-split: three lanes over entries 0, 3, ... / 1, 4, ... / 2, 5, ... sum to the whole block.
+    const split = await evalVertexBlock(device, det, positions, Xt, N, 3);
+    for (let v = 0; v < N; v++) {
+      const scale = Math.max(1, ...Array.from(res.subarray(16 * v, 16 * v + 16)).map(Math.abs));
+      for (const k of [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 13, 14]) assert.ok(Math.abs(split[16 * v + k]! - res[16 * v + k]!) <= 1e-5 * scale, `vertex ${v} lanes [${k}] ${split[16 * v + k]} vs ${res[16 * v + k]}`);
+      assert.ok(Math.abs(split[16 * v + 11]! - res[16 * v + 3]!) <= 1e-5 * Math.max(1e-6, Math.abs(res[16 * v + 3]!)), `vertex ${v} lane energies ${split[16 * v + 11]} vs ${res[16 * v + 3]}`);
+    }
     det.destroy();
   });
 });
