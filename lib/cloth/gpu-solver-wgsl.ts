@@ -29,7 +29,7 @@ export const CLOTH_WORKGROUP = 64;
 /** Uniform records of the per-dispatch data, one per PCG iteration (its index in range.z). */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, newton: 10, filter: 11, contactState: 12 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, newton: 10, contactState: 12 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
@@ -42,8 +42,8 @@ export interface ClothSolverWGSLOptions {
 export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
   // With contact the BDF2 history restarts at a contact onset (C2's contact state).
   const contact = !!options.contactBlock, restart = contact;
-  // TEMPORARY (the projected-arc bridge): C2's block without ogcProject yet. Deleted with the commit that consumes ogcProject.
-  const bridge = contact && !options.contactBlock!.includes('fn ogcProject(');
+  // The projected arc's Pi_v is C2's ogcProject (a block without it is refused).
+  if (contact && !options.contactBlock!.includes('fn ogcProject(')) throw new Error('Cloth solver contact block lacks ogcProject (the projected arc search needs Pi_v)');
   return /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)
@@ -128,13 +128,7 @@ fn ogcX(i: u32) -> vec3f {
   return positions[i].xyz;
 }
 fn ogcDir(i: u32) -> vec3f { return pcgDir(i); }
-@group(0) @binding(${CLOTH_BINDING.filter}) var<storage, read> ogcFilter: array<f32>;
-${bridge
-  ? `// TEMPORARY bridge until C2's ogcProject lands (deleted with the commit that consumes it): the filter's alpha_v, the
-// largest step along d inside every certificate of v (each convex and holding x_v), gives the certified point x + min(alpha, alpha_v) d.
-fn nwProjectTrial(v: u32, x: vec3f, y: vec3f, alpha: f32, d: vec3f) -> vec3f { return x + min(alpha, clamp(ogcFilter[v], 0.0, 1.0)) * d; }`
-  : `// Pi_v (C2's ogcProject): a point of v's certified set from the trial point y = x + alpha d.
-fn nwProjectTrial(v: u32, x: vec3f, y: vec3f, alpha: f32, d: vec3f) -> vec3f { return ogcProject(v, x, y); }`}` : ''}
+` : ''}
 ${contact ? `fn ogcXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
 fn ogcTri(t: u32) -> vec3u { return tris(t).xyz; }
 fn ogcEdgeVerts(e: u32) -> vec2u { return edges(e).xy; }

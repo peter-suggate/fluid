@@ -395,7 +395,7 @@ ${contact ? `// The projected arc (contact): after the filter hook fixes the rou
   var alpha = 1.0; var cut = false;
   for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
     var m = alpha * d;
-    let y = x + m; let q = nwProjectTrial(v, x, y, alpha, d);
+    let y = x + m; let q = ogcProject(v, x, y);
     if (any(q != y)) { m = q - x; cut = true; }
     nw[nseg(${S.moves}u + k, v)] = vec4f(m, 0.0);
     alpha *= 0.5;

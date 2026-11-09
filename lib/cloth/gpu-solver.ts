@@ -39,8 +39,8 @@ export interface ClothSolverContact {
   readonly wgsl: string;
   /** OgcContactDetector.solverBuffer. */
   readonly buffer: GPUBuffer;
-  /** The detector's line-search filter output (OgcContactDetector.alpha: alpha_v per vertex, alpha_min in word N). */
-  readonly alpha: GPUBuffer;
+  /** Unread since the projected arc (Pi_v is ogcProject); kept only while callers still pass it. */
+  readonly alpha?: GPUBuffer;
   /** The detector's per-vertex contact state (OgcContactDetector.contactState; bit 1, the contact switched on in the
    * last step), which restarts the cloth's BDF2 history (finishStep, and the step after). */
   readonly state: GPUBuffer;
@@ -453,9 +453,9 @@ export class ClothGPUSolver {
     this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
     if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0 && this.newton.velocityTolerance_m_s >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
-    if (options.contact && !(options.contact.alpha && options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
-      throw new Error('Cloth Newton solver with contact needs the filter output and contact state (contact.alpha, contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
-    // With contact: the contact records, the filter output and the contact state (the per-stage limit is 10 storage buffers).
+    if (options.contact && !(options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
+      throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
+    // With contact: the contact records and the contact state (the per-stage limit is 10 storage buffers).
     this.restarts = !!options.contact;
     const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 3 : 0);
     if (device.limits.maxStorageBuffersPerShaderStage < need)
@@ -521,14 +521,14 @@ export class ClothGPUSolver {
       storage(B.positions), storage(B.state), storage(B.status), storage(B.topo, true), storage(B.rest, true), storage(B.topo4, true)];
     const contact = this.options.contact;
     entries.push(storage(B.newton));
-    if (contact) entries.push(storage(B.contact, true), storage(B.filter, true), storage(B.contactState, true));
+    if (contact) entries.push(storage(B.contact, true), storage(B.contactState, true));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
       buffer(B.newton, this.newtonWork),
-      ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.filter, contact.alpha), buffer(B.contactState, contact.state)] : [])] });
+      ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : [])] });
     const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : [])];

@@ -2009,3 +2009,31 @@ rho_v. The run then steps on without failing.
 - the drape regression and the drop and twist halts on Newton;
 - the cut document's coincident status;
 - the intermittent heldConflict on the cut moving solid.
+
+## 2026-11-10 RESULT (29): the projected-arc bridge is deleted (ogcProject consumed); OPEN DEVIATION: plane-record overflow holds
+
+7809cbe1 landed the solver batch on top of C2's ca462bbb, whose contact block already carries `fn ogcProject(`, so
+that commit's source switch already compiled C2's Pi_v. This commit deletes the bridge, the switch, the `ogcFilter`
+binding (11) and the solver's use of the filter's alpha_v. A contact block without ogcProject is refused. The generated
+WGSL is otherwise unchanged. ClothSolverContact.alpha is optional and unread until C2's tests stop passing it.
+
+The GPU-solver test's "empty contact list" was a bare header (word 11 = 0). Under ogcProject that reads as no
+certificate, so every vertex was held and the run moved 2.0 mm off the contact-free one. It now builds C2's filter
+sub-header: a cap ball that holds every trial, no solid pieces, and an empty plane segment per vertex. ogcProject then
+returns y bit-exactly and the test passes again (< 5e-7 m).
+
+**Open deviation (acceptance blocker, owner C2): planeRecordOverflow is non-failing, and the vertices it holds freeze.**
+A vertex whose filter records pass the capacity gets count OGC_NONE, and ogcProject returns x for it. The detector
+default is 16 N records. Peaks measured with the capacity raised to 400 N (one diagnostic run, HEAD 7809cbe1 solver),
+in records per vertex: free-fall sheet 1162, moving-solid sheet (N = 576) 1315, rotating sphere 818, incline 166,
+swing 72, a 94-vertex sheet 46, curtain 4.9, tablecloth 0. That is about 470 MB of records at 150² for the largest, so
+these are demand problems (envelopes at the cap), not capacities to author.
+
+Suite on HEAD with ogcProject live (the overflow bit not failing): 86 tests, 80 pass, 2 fail, 4 todo.
+- Flat drop: the sheet rests at 101 mm, held in the air, with an upward mean velocity of 1.17 m/s.
+- Swing: the free edge never passes under the pin.
+- Incline (todo): a = 0.574 against an exact 1.609.
+
+Making the bit failing turns six tests red. It lands as failing when C2's demand fits an authored per-scene
+capacity. Until then the bit is reported in the system notes, and the held count goes into every gate and benchmark
+output once C2's counter exists.

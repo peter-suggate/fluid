@@ -17,7 +17,7 @@ import { buildClothSolverModel, clothBendVector, clothOracleStep, createClothOra
 import { ClothGPUSolver, clothBendingStencil, type ClothNewtonOptions } from '../lib/cloth/gpu-solver';
 import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
 import { CLOTH_BINDING } from '../lib/cloth/gpu-solver-wgsl';
-import { ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
+import { OGC_PROJECT_RECORD, ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
 
@@ -187,14 +187,18 @@ test("C2's OGC vertex block compiles into the Newton kernels; an empty contact l
   const newton = { iterations: 6, pcgIterations: 50 };
   const options = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, newton, origin_m: origin, positions_m: start };
   const plain = await ClothGPUSolver.create(device, model, options);
-  // Header (0, capacity 0, counts at word-vec 2, entries at 2): every vertex has no contacts.
+  // Header (0, capacity 0, counts at word-vec 2, entries at 2): every vertex has no contacts. Header word 11 (vec4 2's w)
+  // is the filter's sub-header for ogcProject (C2's layout, ogc-detector-wgsl.ts): every vertex's fixed records (a cap
+  // ball that holds every trial, no static or moving solid piece) and an empty plane segment, so each trial is kept whole.
   const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-  const contacts = device.createBuffer({ size: 16 * (4 + Math.ceil(N / 4)), usage });
-  device.queue.writeBuffer(contacts, 0, new Uint32Array([0, 0, 2, 2]));
-  // The filter allows the full step (alpha_v = alpha_min = 1); no vertex is in contact.
-  const alpha = device.createBuffer({ size: 4 * (N + 1), usage }), state = device.createBuffer({ size: 4 * Math.max(N, 4), usage });
-  device.queue.writeBuffer(alpha, 0, new Float32Array(N + 1).fill(1));
-  const contact = { wgsl: ogcVertexBlockWGSL({ group: 0, binding: CLOTH_BINDING.contact, newton: true }), buffer: contacts, alpha, state };
+  const fixed = 4, segWord = 4 * (fixed + OGC_PROJECT_RECORD * N), records = fixed + OGC_PROJECT_RECORD * N + Math.ceil(2 * N / 4);
+  const words = new Uint32Array(4 * (records + 1)), floats = new Float32Array(words.buffer);
+  words.set([0, 0, 2, 2]); words[11] = 3; words.set([fixed, segWord, records, 0], 12);
+  for (let v = 0; v < N; v++) floats[4 * (fixed + OGC_PROJECT_RECORD * v) + 3] = 1e3;
+  const contacts = device.createBuffer({ size: words.byteLength, usage });
+  device.queue.writeBuffer(contacts, 0, words);
+  const state = device.createBuffer({ size: 4 * Math.max(N, 4), usage });
+  const contact = { wgsl: ogcVertexBlockWGSL({ group: 0, binding: CLOTH_BINDING.contact, newton: true }), buffer: contacts, state };
   // Contact enters Newton through the filter and re-detection: a solver with contact refuses to start without those hooks.
   await assert.rejects(ClothGPUSolver.create(device, model, { ...options, contact }), /hooks\.filter/);
   let rounds = 0;
@@ -205,5 +209,5 @@ test("C2's OGC vertex block compiles into the Newton kernels; an empty contact l
   const d = maxDifference(await plain.readPositions(), await withContact.readPositions());
   // The contact block's zero terms change the shader's FMA contraction, so the runs agree to f32 rounding, not bitwise.
   assert.ok(d < 5e-7, `empty contact list moved the cloth by ${d} m`);
-  plain.destroy(); withContact.destroy(); contacts.destroy(); alpha.destroy(); state.destroy();
+  plain.destroy(); withContact.destroy(); contacts.destroy(); state.destroy();
 }));
