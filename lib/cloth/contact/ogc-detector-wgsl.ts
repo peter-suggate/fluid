@@ -268,15 +268,18 @@ fn ogcSolidWord(i: u32) -> u32 { return atomicLoad(&contacts[i]); }
  * solver has already placed its initial guess, which the round's truncation then
  * cuts); a re-detection round commits the current, truncated iterate.
  *
- * A free vertex is predicted to move its inertial v dt + g dt^2, the solver's initial guess
- * less x_t, or the solver's inertial target y less x_t (prediction "target": exact in free
- * flight, whatever the guess), the rest of it in a re-detection round, and its envelope
- * covers only the residual motion:
- * r + s rho, with rho the last step's deviation from its own prediction. A held
+ * In the mandatory round a free vertex is predicted to move its inertial v dt + g dt^2, the
+ * solver's initial guess less x_t, or the solver's inertial target y less x_t (prediction
+ * "target": exact in free flight, whatever the guess), and its envelope covers only the
+ * residual motion: r + s rho, with rho the last step's deviation from its own prediction.
+ * A re-detection round predicts 0 about the iterate, its envelope covering the rest of the
+ * step's prediction and rho. A held
  * vertex (in contact, truncated or in a conflict in this step or the last, or
  * every vertex of a redone round, of isotropic mode, or without predictions) is
- * predicted 0 and its envelope covers the inertial displacement, r + s |v dt + g dt^2|:
- * Planar-DAT itself. A prediction into the static solid stops where the solid's
+ * predicted 0 and its envelope covers the inertial displacement and the residual,
+ * r + s (|v dt + g dt^2| + rho): Planar-DAT itself. An envelope without rho caps a held
+ * vertex whose solve deviates from its prediction by more than 0.5 gamma_r rqBase, which
+ * holds it again (every vertex held and every round at the cap). A prediction into the static solid stops where the solid's
  * affine bound does, so every cut of the round scales only the residual.
  *
  * The moving solid (one-way: its poses are input) is a static solid in its own frame: its
@@ -447,10 +450,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       // or when its prediction would leave it more than half of its motion to cover
       // anyway (rho > |w| / 2): Planar-DAT's envelope then costs no more pairs and
       // caps no more often, and a held vertex never conflicts.
-      yref = vec4<f32>(x + inertial, select(length(x - yref.xyz), plen, yref.w < 0.0));
+      // Before any step has measured rho (w < 0) the vertex is held (when it moves), its
+      // envelope the inertial motion alone: rho is stored as 0.
+      let unmeasured = yref.w < 0.0;
+      yref = vec4<f32>(x + inertial, select(length(x - yref.xyz), 0.0, unmeasured));
       // In contact and touching or moving with the moving solid last step: held in its frame.
       flags = ((flags & 1u) << 1u) | select(0u, 32u, (flags & 1u) != 0u && (flags & 80u) != 0u);
-      if (2.0 * yref.w > plen) { flags |= 2u; }
+      if (2.0 * yref.w > plen || (unmeasured && plen > 0.0)) { flags |= 2u; }
       atomicStore(&work[P.heldOff + v], flags);
     }
     // Held: a vertex the step's fresh round held (bit 1) or a conflict marked (bit 3); after the
@@ -461,8 +467,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let held = (forced && P.bodyBase == 0u) || P.predict == 0u || P.mode != OGC_PLANAR || heldBits != 0u;
     // Carried with the moving solid (bit 2): in an impact zone a conflict with it formed this step.
     let carried = P.bodyBase != 0u && (flags & 4u) != 0u;
+    // The envelope covers the round's residual |x - X - w| <= rho + |inertial - w| (triangle
+    // inequality): rho, the last step's deviation from its prediction, plus how far the round's
+    // prediction lies from the inertial one (0 when free, the whole motion when held). Holding
+    // shifts the prediction; it does not make the vertex follow it any better.
     var w = select(yref.xyz - x, vec3<f32>(0.0), held);
-    var dev = select(yref.w, plen, held);
+    var dev = select(yref.w, plen + yref.w, held);
+    // A re-detection round commits the iterate x as X, so its certificates must hold x itself:
+    // |x - X - w| = |w| <= the cap only for w = 0. It predicts 0 (Planar-DAT about the iterate)
+    // and its envelope covers the rest of the step's prediction, |yref - x| + rho. A prediction
+    // of the rest would leave the iterate |w| from its ball's centre, and the round's
+    // truncation would pull it there outside the solve (and hold it, a cascade).
+    if (!mandatory && !held) { dev = length(w) + yref.w; w = vec3<f32>(0.0); }
     atomicStore(&contacts[P.countsOff + v], 0u);
     // The moving solid: its terms (R1 q, j) and the co-moving displacement a_v.
     // The terms are in the body frame at the end pose: the relative motion d is R1^T (w - a_v).
@@ -488,7 +504,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       // where its pairs with the solid hold (Planar-DAT there). Carried or held with the solid,
       // the vertex deviates from its prediction by its inertial motion less a_v.
       if (carried || (held && (flags & 32u) != 0u && length(y0) < P.bodyReach)) {
-        w = a; dev = length(inertial - a); pushed = true; withBody = true;
+        w = a; dev = length(inertial - a) + yref.w; pushed = true; withBody = true;
         atomicOr(&work[P.heldOff + v], 64u);
       }
       env = envelopeOf(dev);

@@ -1502,3 +1502,48 @@ bottleneck. Either way the filter should not set bit 0 for α_v < 1 (it does tod
 contact, and holding the vertex next step is what spreads the cascade. C2 will make both changes in its own files
 when C1's Newton contact path is in the tree to gate against: the filter's hold bit, and w = 0 in newton
 re-detection.
+
+## 2026-11-09 The hold cascade: attributed and fixed (two detector rules)
+
+**Symptom** (moving-sphere cut test, `cloth-system`): about 570 of 576 vertices held every step, every round at
+`roundCap`, 400–600 vertices capped per step. Flaky on HEAD at 1.6–21 mm (bound 10 mm). Probe:
+`~/code/me/fluid-scratch/c2/snap/tests/c2-cut-probe.test.ts` (per tick: hold bits, env/ρ percentiles, step motion).
+
+**Causes, in order of the data:**
+1. **A held vertex's envelope left out the measured residual.** It was `envelopeOf(plen)` (or |inertial − a| with
+   the body), the shift of its prediction, not how well the vertex follows it. With the guess at x̂ ('previous'),
+   plen is under 1 mm while the vertex moves 2.1 mm a step: env sat at rqBase 3.0 mm, so the cap was 1.35 mm < the
+   motion. Capped, the vertex is held again. A free vertex's envelope r + 2.5ρ always admits ρ (0.45 · 2.5 > 1); a
+   held one's did not. **Fix:** the triangle inequality, |x − X − w| ≤ ρ + |inertial − w|. So dev = ρ (free),
+   plen + ρ (held), |inertial − a| + ρ (held with the body). An unmeasured ρ is now stored as 0 with the vertex
+   held, which reproduces the old first-step envelopes exactly.
+2. **A re-detection round was mis-centred.** It commits X = x but predicted the rest of the step's motion,
+   w = yref − x. The iterate then lay |w| from its ball's centre, so the round's truncation pulled it there
+   outside the solve and held it. **Fix:** a re-detection round predicts 0 (Planar-DAT about the iterate) with
+   envelope |yref − x| + ρ. Truncation right after a round is now a no-op. (This is the "w = 0" rule proposed for
+   Newton; it applies to every solver.)
+
+**Measured** (snapshot of 97113838 + this, VBD):
+
+| case | capped / step | cut-test centre (min..max in 3 cm) |
+|---|---|---|
+| before | 400–600 | 0.4..11 mm (a fold) |
+| fix 1 only | about 5 | 0.1..11.7 mm |
+| fixes 1+2, "guess" | 0–23 | 0.5..11.3 mm (2.4 mm in the suite run) |
+| fixes 1+2, "target" + `initialGuess: 'inertial'` | about 1 | **0.5..0.9 mm**, falls 35 mm in 4 ticks, flat |
+
+3. **Remaining holds are the prediction's**, not the detector's:
+   - Under "guess" with init x̂, `2ρ > plen` holds every vertex.
+   - Under "target", init x̂ puts the guess |h v̂ + h² g| from y. The step's first truncation caps it and holds it
+     (about 200 / step).
+   **Needed from C1:** `initialGuess: 'inertial'` (init = y) wherever the prediction is "target" (`system.ts`, both
+   solvers). Free cloth then starts exactly at its certificates' centre.
+
+**Suites** (old solver): contact-gpu 18/18, contact-solid, contact-body (plate 0.48% and 1.30%), scene-solids,
+contact-gates, contact-oracle pass. Unit suite: only the foreign failure.
+- **"In contact, a history endpoint steps on within the run-to-run spread": now marginal (2 of 4 runs fail).**
+  Probe `c2-undo-probe.test.ts`: three continuations from one endpoint are bit-identical (0.00 mm apart), and they
+  lie 0.90 / 2.52 / 2.58 mm from the three straight runs, whose own spread is 2.18–2.84 mm. There is no systematic
+  rebuild offset. The straight runs used to differ by 4–7 mm (truncation chaos), and now differ by about 2 mm. One
+  continued sample against three straight runs is then a coin flip. Suggest 5 straight runs, or test the
+  continuation's exchangeability. The bound is not changed here.
