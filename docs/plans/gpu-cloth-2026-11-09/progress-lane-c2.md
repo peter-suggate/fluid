@@ -1109,3 +1109,53 @@ was in the working tree for a short time. That prototype is not committed, and t
 **(E) done.** `tests/cloth-contact-scene-solids.test.ts` (its shared `sceneOf`, used by all its scene tests) and
 `tests/cloth-contact-scene-profile.test.ts` now pass `movingSolids: "held"` explicitly, and the 6 tests pass. **C1:** you
 can flip `bridson2002SceneDescription`'s default to `"rigid-body"`.
+
+**(D) done: the carried state is exposed.**
+- New `OgcContactDetector.readCarriedState()` returns `OgcCarriedState`, which holds:
+  - `reference`: per vertex, pred[N + v], which is the reference prediction xyz plus rho_v in w (-1 before any step);
+  - `held`: the held flags (bit 0, read by the next step as "held in the last step").
+- `writeCarriedState(state?)` restores that state exactly. With no argument it sets the state before any step. A
+  vertex-count mismatch fails explicitly.
+- Nothing else the detector holds survives a step.
+- GPU regression in `cloth-contact-gpu`: a step replayed from the restored state is bit-identical to the original
+  (predictions, carried state, held count and redos).
+- **COORDINATION (C1, `system.ts`):** publish `contactFor(id).readCarriedState()` with the frame's positions. On undo
+  or load, call `writeCarriedState(saved)`, or `writeCarriedState()` for a document with no saved state.
+
+## 2026-11-09 (B) heldConflict at K = 8: curtain tick 121–122, diagnosed, not fixed
+
+Probe: `~/code/me/fluid-scratch/c2/tests/table-faces-probe.test.ts`, with `SCENE=curtain K=8`, rigid-body. It now dumps
+the held pair on a halt.
+
+**Before the halt (curtain):**
+- No face is inside the solid at any checked tick up to 120 (every 6th tick, then every tick from 118).
+- The status is envelopeCap only. Body contacts are 300–400.
+
+**At tick 121–122:**
+- The ball starts moving at 2 s: it is at rest until `ballStart`, then rises at 1.12 m/s, 1.86 cm per step.
+- Body contacts jump from 403 to 10049. Half of the 38100-vertex curtain is draped on the ball and is carried.
+- The status is heldConflict | bodySqueeze | solidPenetration | envelopeCap | roundCap.
+- The last pair is a cloth edge against a ball hull edge, 5.2 mm apart at the detection pose. It is 10 cm from any
+  static solid.
+
+**Mechanism: carry propagates one layer per held round.**
+- A redone round moves only the solid's samples and the cloth carried with it. Everything else is held still.
+- Cloth that is uncarried but lies within the ball's 1.86 cm sweep is then crossed by the ball, so it conflicts and is
+  carried in the next round. The cloth next to it conflicts in the round after that.
+- With heldRounds 3 the third round still finds new cloth in the sweep, which raises heldConflict.
+- Scratch override (not committed) with heldRounds 16: the run halts one tick earlier, at 121. Body contacts reach
+  20978, and the last pair is cloth against cloth (carried against held).
+- So more rounds do not converge. Each round grows the carried set by the cloth the last carry swept into.
+
+**Proposed fix (mine, not yet implemented):**
+- In the first held round, carry at once every cloth vertex within the body's swept volume for the step: its distance
+  to the body samples at X, within the samples' own displacement plus r.
+- Carried cloth is exempt from cloth-cloth truncation, and its cloth-cloth conflicts carry the other side.
+- That is one closure per step, not one layer per round.
+- Whether rigidly carrying half the curtain for the step at the ball's start is acceptable motion is a ruling for the
+  coordinator. It is what an infinite-mass solid starting at 1.12 m/s from rest does to the cloth resting on it.
+
+The rotating sphere (tick 128) and the tablecloth (tick 226) are not re-probed yet. The 1154 faces inside the solid C1
+saw come after the halt (zero up to it here), with the halt disabled.
+
+**(A) truncation versus strain limit: not started.**

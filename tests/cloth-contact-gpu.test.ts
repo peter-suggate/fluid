@@ -447,6 +447,40 @@ test("GPU predicted-motion DAT: crossing predictions redo the round held, which 
   });
 });
 
+test("GPU carried state: the per-vertex reference, rho_v and held flags a step hands the next restore exactly, so a replayed step equals the original", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const mesh = spacedStack(23), N = mesh.x.length;
+    // The crossing-prediction scene: its first steps leave held flags and residuals behind.
+    const vel = mesh.x.map(p => [0, 0, p[2] > 6e-3 ? (-7e-3 + 9.81 / 3600) * 60 : 9.81 / 60] as V3);
+    const config: OgcContactConfig = { ...baseConfig(N), r: 1e-3, rqBase: 1.5e-3, envelopeScale: 2.5, prediction: "inertial", rqMax: 4e-2, gridCapacity: 2048 * N };
+    const { det, positions } = await detectPredicted(device, mesh, vel, config);
+    const saved = await det.readCarriedState();
+    assert.ok(Array.from(saved.held).some(f => f & 1), "the step leaves held flags");
+    assert.ok(Array.from({ length: N }, (_, v) => saved.reference[4 * v + 3]!).every(w => w >= 0), "and measured residuals");
+    // The next step from moved positions, then the same step replayed from the restored state.
+    const X1 = vec4s(mesh.x.map((x, v) => [x[0], x[1], x[2] + 1e-4 * (v % 7)] as V3));
+    const step = async () => {
+      device.queue.writeBuffer(positions, 0, X1);
+      await runPass(device, pass => { det.encodeFrameBegin(pass); det.encodeStepBegin(pass); det.encodeDetection(pass); });
+      return { pred: new Float32Array(await readBuffer(device, det.pred)), carried: await det.readCarriedState(), counters: await det.readCounters() };
+    };
+    const first = await step();
+    assert.notDeepEqual(first.carried.reference, saved.reference, "the step changes the carried state");
+    det.writeCarriedState(saved);
+    assert.deepEqual(await det.readCarriedState(), saved, "written back exactly");
+    const replay = await step();
+    assert.deepEqual(replay.pred, first.pred, "predictions bit-identical");
+    assert.deepEqual(replay.carried, first.carried, "carried state bit-identical");
+    assert.equal(replay.counters.held, first.counters.held); assert.equal(replay.counters.redos, first.counters.redos);
+    // With no state: the state before any step.
+    det.writeCarriedState();
+    const fresh = await det.readCarriedState();
+    assert.ok(Array.from({ length: N }, (_, v) => fresh.reference[4 * v + 3]!).every(w => w === -1) && fresh.held.every(f => f === 0), "no residual, nothing held");
+    assert.throws(() => det.writeCarriedState({ reference: new Float32Array(4), held: new Uint32Array(1) }), /carried state for 1 vertices/);
+    det.destroy();
+  });
+});
+
 test("GPU isotropic truncation keeps |x - x_det| <= b_v and arms re-detection on the GPU, up to the round cap", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const mesh = stackScene(9), N = mesh.x.length, R = rng(5);

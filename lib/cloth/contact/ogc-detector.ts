@@ -116,6 +116,14 @@ export interface OgcContactConfig {
 export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2 } as const;
 
 /** A rigid pose of the moving solid: x_world = R(orientation) x_body + position. */
+/** The per-vertex detector state carried from one step to the next (readCarriedState). */
+export interface OgcCarriedState {
+  /** Per vertex: the reference predicted position (xyz) and residual rho_v (w; -1 before any step). */
+  readonly reference: Float32Array;
+  /** Per vertex: the held flags (bit 0: held in the step that wrote it). */
+  readonly held: Uint32Array;
+}
+
 export interface OgcBodyPose {
   position: readonly [number, number, number];
   /** Unit quaternion (x, y, z, w). */
@@ -695,6 +703,35 @@ export class OgcContactDetector {
     const pred = new Float32Array(out[1]!), rho = new Float32Array(N);
     for (let v = 0; v < N; v++) rho[v] = pred[4 * (N + v) + 3]!;
     return { xdet: new Float32Array(out[0]!), pred, rho, env: new Float32Array(out[2]!), held: new Uint32Array(out[3]!), cell: new Float32Array(out[4]!)[OGC_COUNTER.cell]! };
+  }
+
+  /**
+   * The per-vertex state one step hands the next, which is part of the cloth's
+   * published state (an undo or load restores it with the positions): each vertex's
+   * reference prediction and residual rho_v (pred[N + v]: xyz the predicted end
+   * position, w = rho_v, or -1 before any step), and its held flags (bit 0 held in
+   * this step, which the next step reads as held in the last). Reading is off the step
+   * path (the frame's owner publishes it); everything else the detector holds is
+   * rebuilt by every step.
+   */
+  async readCarriedState(): Promise<OgcCarriedState> {
+    const N = this.N, size = [16 * N, 4 * N], src: [GPUBuffer, number][] = [[this.pred, 16 * N], [this.work, 4 * (7 * N + this.T + this.E)]];
+    const reads = size.map(s => this.device.createBuffer({ size: s, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }));
+    const enc = this.device.createCommandEncoder();
+    src.forEach(([b, off], i) => enc.copyBufferToBuffer(b, off, reads[i]!, 0, size[i]!));
+    this.device.queue.submit([enc.finish()]);
+    const out = await Promise.all(reads.map(async b => { await b.mapAsync(GPUMapMode.READ); const a = b.getMappedRange().slice(0); b.destroy(); return a; }));
+    return { reference: new Float32Array(out[0]!), held: new Uint32Array(out[1]!) };
+  }
+
+  /** Restore the state readCarriedState returned (for this detector's vertex count), or, with none, the state before any step. */
+  writeCarriedState(state?: OgcCarriedState) {
+    const N = this.N;
+    if (state && (state.reference.length !== 4 * N || state.held.length !== N))
+      throw new Error(`OGC: carried state for ${state.held.length} vertices, the detector has ${N}`);
+    const reference = state?.reference ?? (() => { const r = new Float32Array(4 * N); for (let v = 0; v < N; v++) r[4 * v + 3] = -1; return r; })();
+    writeBufferChunked(this.device.queue, this.pred, 16 * N, reference);
+    writeBufferChunked(this.device.queue, this.work, 4 * (7 * N + this.T + this.E), state?.held ?? new Uint32Array(N));
   }
 
   /** Explain a status word. */
