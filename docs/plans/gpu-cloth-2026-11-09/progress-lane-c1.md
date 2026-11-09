@@ -803,3 +803,63 @@ Notes on the table:
 - K = 16 holds the curtain's bulk within 0.4% of the limit, at 1.4–1.7× the tick cost.
 - The provenance in `parameters.ts` says this is our solver's choice, not the paper's, and records the numbers.
 - At K = 8 the existing free-fall capture test runs at 38 ms per tick and the held rotating-sphere test at 30 ms per tick (they were 101 ms per tick at K = 64). Both still pass, with no vertex inside and status 0.
+
+## 2026-11-09 RESULT (11): strain against equilibrium (ruling 1), and what breaks the hard limit (ruling 2)
+
+**The equilibrium.** The Bridson material is 1 kg/m² at k = 200 N/m, Poisson 0. A hanging strip carries the weight below it, so its strain is ρ g d / k, where d is the hanging length below.
+- For 1 m of cloth below, that is 9.81 / 200 = **4.9%**, not 0.5%. The ruling's figure is 10× low.
+- Exact equilibrium of band j (rows j, j + 1) with area-lumped mass is uniaxial StVK: k λ(λ² − 1)/2 = ρ g d_j.
+- For the 1.7 m Bridson sheet, the top band is 7.46%, the middle 3.90% and the bottom 0.05%. The bottom row drops 6.56 cm.
+- The paper's 10% limit is a safety bound. On a hanging sheet it is inactive everywhere except next to point pins.
+
+**Static hanging sheet.** 150 nodes across, 1 × 1.7 m, herring-bone, no contact. Bridson material, top edge pinned, 600 steps (10 s). Probe in fluid-scratch `cloth-c1/prof/hang.mts`.
+
+| Correction | K | Top band (exact 7.457%) | Middle band (exact 3.900%) | Worst band error | KE at 10 s |
+|---|---|---|---|---|---|
+| two-level | 8 | 7.477% | 3.900% | **0.3%** | 2e-8 J |
+| two-level | 16 | | | 0.2% | |
+| two-level | 64 | | | 1.3% | 1.2e-4 J, still ringing |
+| fine only, `previous` guess | 8 | 1.93% | | unconverged | |
+| fine only, `previous` guess | 64 | 5.24% | | unconverged | |
+| fine only, adaptive guess (the default) | 8 / 16 / 64 | | | explodes: 300–900% strain | |
+
+- At K = 8 with the two-level correction the bottom drop is 6.56 cm (exact 6.56) and the max vertical edge is 7.50%, so the limit is inactive.
+- With two pins, the top band carries nothing (it sags into the catenary) and the middle band holds 3.83% against 3.90%. The max vertical edge is 9.0% with the limit on and 17.5% with it off, so the limit is active only next to the pins, as it should be.
+- **Defect, fine only, adaptive guess:** the sheet blows up and the hard limit breaks. No scene uses this path, because every ClothSystem scene carries the two-level space. I am recording it rather than fixing it now.
+  - K = 64 is worse than K = 8 at 10 s. The extra iterations on the two-level path do not damp the coarse modes the way K = 8 does.
+
+**The Bridson scenes are not "at the limit".** K = 8, first 114 ticks:
+
+| Scene | p50 | p90 | p99 | p99.9 |
+|---|---|---|---|---|
+| curtain | 0.1–0.8% | 1.7–3.3% | 6.3–8.6% | about 10% |
+| sphere | −0.1% | 3.2% | 10% | |
+| table | about 0.1% | 3.5% | 8.5% | 10.4% |
+
+- About 95% of the curtain's edges above 9.5% lie within 15 cm of the two pins. The sphere's lie on the cap and the table's at the leg tops and corners.
+- RESULT (10) read p99 as the bulk. That was wrong: p99 measures local concentrations.
+
+**K = 8 stays, re-justified.** Bulk strain matches the exact equilibrium at K = 8 with the two-level correction. The `parameters.ts` provenance now cites the hanging-sheet equilibrium.
+- New GPU regression in `tests/cloth-coarse.test.ts`: "a hanging Bridson sheet comes to rest at its exact uniaxial equilibrium…" (4.7 s). It asserts band error under 1%, drop within 1%, max edge under the limit, KE under 1e-6 J and status 0.
+
+**Ruling 2: the truncation wins over the limit.** Per-vertex truncation diagnostics accumulate the displacement each OGC truncation removes, around every encodeTruncate.
+
+*K = 8 violators* (21–40%, at the frustum top and the table's leg tops and corners):
+- Solid φ is 0.6–5 mm, so they sit at the solid.
+- One end of each is truncated in every truncation, 0.5–1.1 mm per cut, against an excess over the limit of 0.8–2 mm.
+- The AVBD dual is not the cause: λ = 0 and k is 5e2–2e3, far below kMax.
+- The edge constraint's α = 0.95 carries the truncated violation forward: the target becomes limit + 0.95 · max(C0, 0), so λ stays 0 while only 5% of the excess is corrected per step.
+- A/B with α = 0 on edges only: p99.9 falls to 10.0% and edges past 13% fall from 13 to 5, but the max is still 19%. The truncation re-creates the excess every step.
+
+*K = 64, tick 24* (52–82%, in the free skirt, 12–20 cm from any solid and 5–50 mm from other cloth):
+- Here the dual winds up: λ is 7–141 and k is 3e3–2e4.
+- The truncation removed motion from 22104 of 22500 vertices in that step, 156 m in total.
+- The worst vertex lost 349 mm over 76 cuts, the last cut 4.4 mm, against its 3.9 mm excess.
+- Status carries roundCap and envelopeCap (12). roundCap 16 or 64 does not fix it (max 36–51%).
+- The sphere scene at K = 8, tick 24: 19521 vertices truncated, 128 m removed.
+
+*Removing the truncation* (scratch only) halts with solidPenetration at tick 6, so it is required. The cure belongs to the truncation (C2).
+- The bound is per vertex and does not know the strain constraint, so it cuts one end of a limit-active edge and the other end walks on.
+- The cure is either a truncation that preserves the edge constraint (cut both ends of an active edge together), or fewer conservative cuts on cloth far from contacts. The K = 64 skirt is truncated by self-contact bounds that are much tighter than the gap.
+- **For C2 (via the coordinator):** at K = 64 nearly every vertex is truncated every step. The strain limit cannot hold against a bound that removes 156 m of motion per step.
+- **For C1, pending a ruling:** α = 0 for strain-limit edges (not for pins) would stop AVBD accepting a carried violation. It helps partly. I have not changed the solver's α without a ruling.

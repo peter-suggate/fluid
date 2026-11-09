@@ -14,6 +14,8 @@ import type { ClothMaterial, ClothTopologyData } from '../lib/cloth/types';
 import { buildClothSolverModel, clothMechanicalEnergy, clothOracleStep, createClothOracleState, type ClothStepOptions } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace, ClothCoarseCorrection, packClothCoarseTables } from '../lib/cloth/coarse';
 import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
+import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
+import { CLOTH } from '../lib/cloth/scenes/bridson-2002/parameters';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
 
@@ -157,5 +159,54 @@ test('a GPU two-level run tracks its reference over many steps, and its saved st
   solver.step(5);
   const replay = await solver.readPositions();
   assert.ok(replay.every((v, i) => Math.abs(v - reference[i]!) < 1e-6), 'replay from the saved state differs');
+  solver.destroy();
+}));
+
+// Bulk strain must match the static equilibrium, not merely sit under the strain limit. The Bridson sheet (150 nodes
+// across, 1 m by 1.7 m, Bridson material) hangs from its whole top edge. With Poisson 0 and area-lumped mass, the
+// exact equilibrium of band j (rows j, j + 1) is uniaxial StVK: k lambda (lambda^2 - 1) / 2 = rho g d, where d is
+// the band middle's height above the bottom row. Top band 7.46%, middle 3.90%. That is rho g L / k = 4.9% per metre
+// of hanging cloth below. At K = 8 with the two-level correction the sheet reaches it in 10 s.
+test('a hanging Bridson sheet comes to rest at its exact uniaxial equilibrium at K = 8 with the two-level correction', { skip: !gpu }, async () => withDevice(async device => {
+  const m = CLOTH.nodesAcross.value, h = 1 / (m - 1), n = Math.floor(1.7 * (m - 1) + 1e-9) + 1, top = 2;
+  const flat = herringBoneSheet({ columns: m, rows: n, width_m: 1, depth_m: (n - 1) * h, origin_m: [0, 0, 0], group: (_i, j) => j === 0 ? 1 : 0 });
+  const rest: number[] = [];
+  for (let v = 0; v < m * n; v++) rest.push(flat.restPositions_m[3 * v]!, top - flat.restPositions_m[3 * v + 2]!, 0);
+  const material: ClothMaterial = { id: 'bridson', arealDensity_kg_m2: CLOTH.arealDensity.value, stretchWarp_N_m: CLOTH.stretch.value,
+    stretchWeft_N_m: CLOTH.stretch.value, shear_N_m: CLOTH.shear.value, poisson: CLOTH.poisson.value, compressionRatio: CLOTH.compressionRatio.value,
+    bending_N_m: CLOTH.bending.value, damping_s: CLOTH.damping.value, thickness_m: CLOTH.thickness.value, strainLimit: CLOTH.strainLimit.value };
+  const topology = prepareClothTopology({ ...flat, restPositions_m: rest }, [material]);
+  const hanging = buildClothSolverModel(topology, [material], colourClothVertices(clothVertexNeighbours(topology)));
+  const solver = await ClothGPUSolver.create(device, hanging, { origin_m: [0.5, 1.15, 0], dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2',
+    iterations: CLOTH.iterations.value, chebyshevRho: 0, initialGuess: 'previous', coarse: buildClothCoarseSpace(topology) });
+  for (let s = 0; s < 10; s++) solver.step(60);
+  const { positions_m: x, velocities_m_s: v } = await solver.readState();
+  const k = material.stretchWeft_N_m, rho = material.arealDensity_kg_m2;
+  const exact = (j: number) => {
+    const load = rho * 9.81 * (n - 1.5 - j) * h;
+    let l = 1;
+    for (let it = 0; it < 50; it++) l -= (k * l * (l * l - 1) / 2 - load) / (k * (3 * l * l - 1) / 2);
+    return l - 1;
+  };
+  let worst = 0, drop = 0, maxEdge = 0;
+  for (let j = 0; j + 1 < n; j++) {
+    drop += exact(j) * h;
+    let sum = 0;
+    for (let i = 1; i < m - 1; i++) {
+      const a = i + m * j, b = a + m;
+      const e = Math.hypot(x[3 * a]! - x[3 * b]!, x[3 * a + 1]! - x[3 * b + 1]!, x[3 * a + 2]! - x[3 * b + 2]!) / h - 1;
+      sum += e; maxEdge = Math.max(maxEdge, e);
+    }
+    if (j >= 2 && j < n - 4) worst = Math.max(worst, Math.abs(sum / (m - 2) - exact(j)) / exact(j));
+  }
+  let ke = 0;
+  for (let i = 0; i < v.length; i++) ke += 0.5 * rho * h * h * v[i]! ** 2;
+  const bottom = Math.floor(m / 2) + m * (n - 1), stretch = top - x[3 * bottom + 1]! - (n - 1) * h;
+  console.log(`hanging sheet, 600 steps: worst band strain error ${(100 * worst).toFixed(2)}%, bottom stretch ${stretch.toFixed(4)} m (exact ${drop.toFixed(4)}), max edge ${(100 * maxEdge).toFixed(2)}%, KE ${ke.toExponential(2)} J`);
+  assert.ok(worst < 0.01, `band strain off its equilibrium by ${worst}`);
+  assert.ok(Math.abs(stretch - drop) < 0.01 * drop, `stretch ${stretch} m, exact ${drop} m`);
+  assert.ok(maxEdge < CLOTH.strainLimit.value, `max edge strain ${maxEdge}: the limit should be inactive at rest`);
+  assert.ok(ke < 1e-6, `kinetic energy ${ke} J`);
+  assert.equal((await solver.readStatus()).status, 0);
   solver.destroy();
 }));
