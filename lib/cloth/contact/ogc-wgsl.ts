@@ -77,9 +77,21 @@ export const OGC_COUNTER = {
    * persistent peak against the authored planeRecordCapacity, and the frame's peak.
    */
   planeRecords: 53, peakPlaneRecords: 54, framePeakPlaneRecords: 55,
+  /** Over the frame (f32 bits): the rounds' longest prediction |w|, and the longest direction |d| a line-search filter took. */
+  frameMaxPrediction: 56, frameMaxDirection: 57,
+  /**
+   * The frame's round log (harness diagnosis): rounds logged so far, then OGC_ROUND_LOG entries of
+   * OGC_ROUND_LOG_WORDS from roundLog: at the round's cell kernel its longest prediction |w| and
+   * largest envelope (f32 bits) and the frame's candidates, DAT pairs and held vertices so far;
+   * then over the round's line-search filters their count, the largest plane-record demand and
+   * the longest direction |d| (f32 bits). Rounds past OGC_ROUND_LOG go unlogged.
+   */
+  roundLogCount: 58, roundLog: 64,
 } as const;
-export const OGC_COUNTER_WORDS = 56;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55];
+export const OGC_ROUND_LOG = 64;
+export const OGC_ROUND_LOG_WORDS = 8;
+export const OGC_COUNTER_WORDS = 64 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, then (origin, q, D) per solid. */
 export const OGC_PROJECT_RECORD = 7;
 
@@ -151,6 +163,12 @@ const OGC_F_CANDIDATES = ${OGC_COUNTER.frameCandidates}u;
 const OGC_INTERSECTIONS = ${OGC_COUNTER.intersections}u;
 const OGC_F_ENVELOPE_CAP = ${OGC_COUNTER.frameEnvelopeCapHits}u;
 const OGC_F_PEAK_ENVELOPE = ${OGC_COUNTER.framePeakEnvelope}u;
+const OGC_F_MAX_PREDICTION = ${OGC_COUNTER.frameMaxPrediction}u;
+const OGC_F_MAX_DIRECTION = ${OGC_COUNTER.frameMaxDirection}u;
+const OGC_ROUND_LOG_COUNT = ${OGC_COUNTER.roundLogCount}u;
+const OGC_ROUND_LOG_BASE = ${OGC_COUNTER.roundLog}u;
+const OGC_ROUND_LOG_N = ${OGC_ROUND_LOG}u;
+const OGC_ROUND_LOG_W = ${OGC_ROUND_LOG_WORDS}u;
 const OGC_F_PAIR_MAX = ${OGC_COUNTER.framePairMax}u;
 const OGC_F_ROUND_CAP = ${OGC_COUNTER.frameRoundCapHits}u;
 const OGC_F_VF_PAIRS = ${OGC_COUNTER.frameVfPairs}u;

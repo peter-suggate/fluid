@@ -1879,3 +1879,57 @@ builds and the 20° patch sticks, but the 35° patch sat still (a = 0).
   records demanded by huge directions; the bridge has faces inside from tick 19 and heldConflict at 46.
   planeRecordOverflow should halt the step in system.ts (C1's file). Envelope inflation drives this, which
   (a) local swept bounds addresses next.
+
+## 2026-11-10 (a) local swept bounds, measured on the frozen solver; per-round detector log; the sphere's direction blow-up
+
+**(a) Local swept bounds.** A face's grid box grows by its own envelope (its vertices' widest), and a
+querying primitive's swept box grows by its own. A solid's sample or hull edge has envelope 0, since its
+motion is exact. Previously every face grew by the round's largest envelope.
+- Two boxes meet whenever the primitives' swept paths come within the sum of the two envelopes. That
+  covers the larger of the two for every pair the round keeps.
+- A pair whose boxes do not meet stays apart over the round: each cap closes at most 0.45 r_q, leaving
+  0.55 (r_q,a + r_q,b) >= r.
+- The brute-force oracle (cloth-contact-oracle bruteForcePredictedPairs) now encodes the same
+  definition, and the detection-vs-oracle tests check it.
+
+Fixed-state check (rule 3): the rotating sphere at 150², restored from C1's saved states (tick 2, 5,
+35, 42), one step each. F0 is the frozen 7809cbe1. F1 is F0 + (a) + the diagnostic counters.
+
+| state | candidates F0 -> F1 | DAT pairs F0 -> F1 | plane records F0 -> F1 | rounds | held | conflicts | positions F1 vs F0 |
+|---|---|---|---|---|---|---|---|
+| 2 | 713 k -> 713 k | 3158 -> 3158 | 1296 -> 1296 | 1+0 both | 0 | 0 | bit-identical |
+| 5 | 75.4 M -> 9.26 M (8.1x) | 1.982 M -> 1.959 M | 17.7 k -> 15.7 k | 6+4 both | 0 | 2702 both | rms 1.7 um, max 79 um |
+| 35 | 84.9 M -> 7.21 M (11.8x) | 1.106 M -> 1.102 M | 287 k -> 286 k | 6+4 both | 0 | 17557 both | rms 0.22 mm, max 4.9 mm |
+| 42 | 130.6 M -> 32.8 M (4.0x) | 2.787 M -> 2.775 M | 405 k -> 401 k | 14+4 both | 0 | 21858 both | rms 1.2 mm, max 16.7 mm |
+
+- The DAT pairs drop by 0.4-1.1 %: the pairs beyond both local envelopes, which the round's largest
+  envelope used to admit and which cannot touch over the round. The planes, and with them the
+  truncation, change slightly; hence the position differences.
+- States 35 and 42 come from a diverging solve (|d| 7.5-8.7 m), so their positions are chaotic.
+- Suites on F1 (frozen 7809cbe1 + (a)): cloth-contact-gpu 22/22 and cloth-contact-body 4/4. These include
+  detection vs the Float64 brute force and the DAT division pairs vs the oracle; the plate is at 0.16 % rms.
+- On the moving tree (C1's bridge WIP) the 150² sphere runs to tick 47 and halts at 48 on heldConflict.
+  contactOverflow is gone, and its tick-46 halt with it. Candidates drop 3.4x at tick 4 and 6.6x at tick 10.
+  After that the direction blow-up (below) dominates.
+- Not yet gated: the drape, drop and twist overflows, and the sphere through tick 60. Both wait on C1's fix
+  for the direction blow-up, which every later tick depends on.
+
+**Diagnostics (harness only).**
+- Frame counters maxPrediction (the rounds' longest |w|) and maxDirection (the filters' longest |d|).
+- A per-frame round log of 64 entries x 8 words in the counters buffer, read by readRoundLog(). Per
+  detection round it records: |w| max, envelope max, candidates, DAT pairs, held vertices, the round's
+  filters, the largest plane-record demand, and |d| max.
+
+**The sphere's blow-up is the solver's direction, not the detector** (frozen 7809cbe1, no (a), round log
+in ~/code/me/fluid-scratch/c2/rounds-f0d.log).
+- |g|^2 first -> last Newton iteration of the step:
+  - tick 12: 1902 -> 0.38; tick 13: 941 -> 5.6; tick 14: 707 -> 42; tick 15: 3193 -> 15;
+  - tick 16: 14310 -> 1.1e7; tick 17: 2.2e7 -> 1.6e9; tick 21: 4.7e12 -> 2.0e13.
+- max |d| grows within each tick's rounds (tick 16: 2.3 -> 5.1 cm; tick 18: 0.27 -> 0.70 m).
+- Plane-record demand follows |d|: 0.12-0.24 M at ticks 12-15, 0.87 M at tick 16, 16 M at tick 19.
+- C1 attributes the blow-up to the AVBD strain-limit duals ramping inside the step on cut vertices.
+- Detector-side finding (open, next): re-detection rounds take an envelope about twice the mandatory
+  round's at zero prediction, and about 2.5x its candidates.
+  - Tick 12: 2.0e-2 -> 3.7e-2, 4.7 M -> 12.2 M candidates. The cap is reached from tick 15.
+  - The envelope there is |yref - x| + rho. Once the iterate has made the step's deviation from its
+    prediction, both terms measure the same deviation.

@@ -38,7 +38,7 @@ import {
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
-  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
+  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_ROUND_LOG, OGC_ROUND_LOG_WORDS, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
@@ -225,6 +225,9 @@ export interface OgcFrameCounters {
   /** The filter's plane records (ogcProject): the frame's peak and the persistent peak (against planeRecordCapacity). */
   framePeakPlaneRecords: number;
   peakPlaneRecords: number;
+  /** Over the frame: the rounds' longest prediction |w| and the longest direction |d| a line-search filter took (m). */
+  maxPrediction: number;
+  maxDirection: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -620,7 +623,7 @@ export class OgcContactDetector {
       ["scan1", ogcScanWGSL(1), [0, 6, 7]],
       ["scan2", ogcScanWGSL(2), [0, 7]],
       ["scan3", ogcScanWGSL(3), [0, 7]],
-      ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 6, 7, 9, 14]],
+      ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 5, 6, 7, 9, 14]],
       ...OGC_QUERY_ROLES.map(role => [role, ogcQueryWGSL(role), [0, 1, 4, 5, 7, 8, 9, 11, 14]] as [string, string, number[]]),
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
@@ -785,6 +788,32 @@ export class OgcContactDetector {
     return { intersections: c.intersections, solidIntersections: c.solidIntersections };
   }
 
+  /**
+   * The frame's round log (harness and gate use only): per detection round its longest
+   * prediction and largest envelope, the candidates and DAT pairs it found and the held vertices
+   * its prep counted, then its line-search filters: their count, the largest plane-record demand
+   * (records the filter asked for, before the capacity) and the longest direction |d|.
+   */
+  async readRoundLog(): Promise<{ maxPrediction: number; maxEnvelope: number; candidates: number; datPairs: number; held: number; filters: number; planeRecords: number; maxDirection: number }[]> {
+    const read = this.device.createBuffer({ size: 4 * OGC_COUNTER_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyBufferToBuffer(this.counters, 0, read, 0, 4 * OGC_COUNTER_WORDS);
+    this.device.queue.submit([enc.finish()]);
+    await read.mapAsync(GPUMapMode.READ);
+    const u = new Uint32Array(read.getMappedRange().slice(0)), fl = new Float32Array(u.buffer);
+    read.destroy();
+    const C = OGC_COUNTER, n = Math.min(u[C.roundLogCount]!, OGC_ROUND_LOG), at = (i: number, k: number) => C.roundLog + OGC_ROUND_LOG_WORDS * i + k;
+    // Candidates and pairs are found after the round's cell kernel (the next snapshot, or the frame's total, less this one);
+    // its prep counted the held vertices before it (this snapshot less the last).
+    const next = (i: number, k: number, total: number) => (i + 1 < n ? u[at(i + 1, k)]! : total) - u[at(i, k)]!;
+    return Array.from({ length: n }, (_, i) => ({
+      maxPrediction: fl[at(i, 0)]!, maxEnvelope: fl[at(i, 1)]!,
+      candidates: next(i, 2, u[C.frameCandidates]!), datPairs: next(i, 3, u[C.frameDatPairs]!),
+      held: u[at(i, 4)]! - (i ? u[at(i - 1, 4)]! : 0),
+      filters: u[at(i, 5)]!, planeRecords: u[at(i, 6)]!, maxDirection: fl[at(i, 7)]!,
+    }));
+  }
+
   /** Read the counters. Harness and gate use only: never in a step path. */
   async readCounters(): Promise<OgcFrameCounters> {
     const read = this.device.createBuffer({ size: 4 * OGC_COUNTER_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -811,6 +840,7 @@ export class OgcContactDetector {
       heldConflictPair: [u[C.heldConflictPair]!, u[C.heldConflictPair + 1]!, u[C.heldConflictPair + 2]!, u[C.heldConflictPair + 3]!],
       zoneVertices: u[C.frameZoneVertices]!, zonePeak: u[C.frameZonePeak]!,
       filterRebound: u[C.frameRebound]!, framePeakPlaneRecords: u[C.framePeakPlaneRecords]!, peakPlaneRecords: u[C.peakPlaneRecords]!,
+      maxPrediction: fl[C.frameMaxPrediction]!, maxDirection: fl[C.frameMaxDirection]!,
     };
   }
 

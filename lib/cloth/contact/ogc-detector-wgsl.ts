@@ -154,6 +154,15 @@ function header(bindings: readonly number[], rw: readonly number[] = []): string
  * the normal found at X and translate from X to X + w, so a vertex on its side
  * at both ends of its straight path is on it throughout.
  */
+const ROUND_LOG_FNS = /* wgsl */`
+// The current round's log entry word (0xffffffff before the frame's first round or past the log).
+fn roundLogWord() -> u32 {
+  let n = atomicLoad(&counters[OGC_ROUND_LOG_COUNT]);
+  if (n == 0u || n > OGC_ROUND_LOG_N) { return 0xffffffffu; }
+  return OGC_ROUND_LOG_BASE + OGC_ROUND_LOG_W * (n - 1u);
+}
+`;
+
 const PRED_FNS = /* wgsl */`
 // Indices N .. N + S - 1 are the static solid's surface samples (x_det only): no prediction.
 // N + S .. N + S + SB - 1 are the moving solid's, predicted exactly by its poses (pred[N + i - S]).
@@ -260,17 +269,23 @@ function triBoxFns(intersect: boolean, envelopes = !intersect): string {
 fn envOf(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&work[P.envOff + i])); }
 fn triEnv(v: vec3<u32>) -> f32 { return max(envOf(v.x), max(envOf(v.y), envOf(v.z))); }
 ` : "") + /* wgsl */`
-// The round's largest envelope: a face's grid box is grown by it, so any primitive's
-// unenlarged swept box finds every face within the larger of the two envelopes.
-fn roundEnv() -> f32 { ${intersect ? "return 0.0;" : "return bitcast<f32>(atomicLoad(&counters[OGC_ROUND_ENVELOPE]));"} }
-// The face's box over the round: from X to the predicted X + w, grown by the round's largest envelope.
+// Local swept bounds: a face's grid box is grown by its own envelope (its vertices' widest) and
+// a querying primitive's swept box by its own (0 for a solid's sample or hull edge, whose motion
+// is exact), so two boxes meet whenever the primitives' swept paths come within the sum of the
+// two envelopes. That covers the larger of the two for every pair the round keeps at X, and a pair
+// whose boxes do not meet stays apart over the round: each vertex ends within its cap 0.45 r_q of
+// its path, and two caps close at most 0.45 of the sum, leaving 0.55 (r_q,a + r_q,b) >= r.
+// (Growing every face by the round's largest envelope, a few capped vertices' 4 cm, set every box
+// and the cell: 85 candidates per primitive a round on the rotating sphere.)
+fn faceEnv(v: vec3<u32>) -> f32 { ${intersect ? "return 0.0;" : "return triEnv(v);"} }
+// The face's box over the round: from X to the predicted X + w, grown by its own envelope.
 fn triBox(t: u32) -> OgcBox {
   let v = triVerts(t);
   let a = xdet[v.x].xyz; let b = xdet[v.y].xyz; let c = xdet[v.z].xyz;
   var lo = min(a, min(b, c)); var hi = max(a, max(b, c));
   ${intersect ? "" : `let a1 = a + predOf(v.x); let b1 = b + predOf(v.y); let c1 = c + predOf(v.z);
   lo = min(lo, min(a1, min(b1, c1))); hi = max(hi, max(a1, max(b1, c1)));`}
-  let e = roundEnv();
+  let e = faceEnv(v);
   return OgcBox(lo - vec3<f32>(e), hi + vec3<f32>(e));
 }
 fn invCell() -> f32 { ${intersect ? "return 1.0 / P.intersectCell;" : "return bitcast<f32>(atomicLoad(&counters[OGC_INV_CELL]));"} }
@@ -699,6 +714,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
 export const OGC_CELL_WGSL = header([0, 9]) + /* wgsl */`
 @compute @workgroup_size(1)
 fn main() {
+  let li = atomicAdd(&counters[OGC_ROUND_LOG_COUNT], 1u);
   let m = bitcast<f32>(atomicExchange(&counters[OGC_MAX_ENVELOPE], 0u));
   atomicMax(&counters[OGC_F_PEAK_ENVELOPE], bitcast<u32>(m));
   atomicStore(&counters[OGC_ROUND_ENVELOPE], bitcast<u32>(m));
@@ -707,6 +723,15 @@ fn main() {
   // longest prediction keeps every box within a few cells per axis however fast the cloth moves
   // (entries per primitive are bounded by construction, not by the authored grid capacity).
   let wmax = bitcast<f32>(atomicExchange(&counters[OGC_MAX_PREDICTION], 0u));
+  atomicMax(&counters[OGC_F_MAX_PREDICTION], bitcast<u32>(wmax));
+  if (li < OGC_ROUND_LOG_N) {
+    let b = OGC_ROUND_LOG_BASE + OGC_ROUND_LOG_W * li;
+    atomicStore(&counters[b], bitcast<u32>(wmax)); atomicStore(&counters[b + 1u], bitcast<u32>(m));
+    atomicStore(&counters[b + 2u], atomicLoad(&counters[OGC_F_CANDIDATES]));
+    atomicStore(&counters[b + 3u], atomicLoad(&counters[OGC_F_DAT_PAIRS]));
+    atomicStore(&counters[b + 4u], atomicLoad(&counters[OGC_F_HELD]));
+    for (var k = 5u; k < OGC_ROUND_LOG_W; k++) { atomicStore(&counters[b + k], 0u); }
+  }
   let h = max(select(max(P.cellFloor, m), max(P.cellFloor, P.rqMax * pow(cube, 1.0 / 3.0)), P.cellRule == 1u), wmax);
   atomicStore(&counters[OGC_CELL], bitcast<u32>(h));
   atomicStore(&counters[OGC_INV_CELL], bitcast<u32>(1.0 / h));
@@ -1052,10 +1077,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * it limits a line search, it is no contact, and the round that follows predicts 0 about the
  * iterate anyway. (Holding them spread the holds a ring per step from a pin.)
  */
-export const OGC_FILTER_WGSL = header([0, 2, 4, 5, 8, 9, 14, 15, 16]) + PRED_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + CUT_FNS + /* wgsl */`
+export const OGC_FILTER_WGSL = header([0, 2, 4, 5, 8, 9, 14, 15, 16]) + ROUND_LOG_FNS + PRED_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + CUT_FNS + /* wgsl */`
 var<workgroup> wgBound: atomic<u32>;
 var<workgroup> wgStalled: atomic<u32>;
 var<workgroup> wgRebound: atomic<u32>;
+var<workgroup> wgMaxDir: atomic<u32>;
 // The world origin of v's static (0) or moving (1) solid terms: X plus a_v (0 for the static
 // solid), or the re-bound o. ogcProject reads it back from the records, so the filter's cuts and
 // its own test take the same operands (x - origin) bit for bit.
@@ -1151,6 +1177,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let w = predOf(v);
     let rel = x - det.xyz;
     let d = dir[v].xyz;
+    atomicMax(&wgMaxDir, bitcast<u32>(length(d)));
     var al = 1.0;
     if (any(d != vec3<f32>(0.0))) {
       var k = cutsOf(v, x, det, w, d);
@@ -1172,14 +1199,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (z != 0u) { atomicAdd(&counters[OGC_FILTER_STALLED], z); }
     let rb = atomicLoad(&wgRebound);
     if (rb != 0u) { atomicAdd(&counters[OGC_F_REBOUND], rb); }
+    let md = atomicLoad(&wgMaxDir);
+    if (md != 0u) {
+      atomicMax(&counters[OGC_F_MAX_DIRECTION], md);
+      let lw = roundLogWord();
+      if (lw != 0xffffffffu) { atomicMax(&counters[lw + 7u], md); }
+    }
   }
 }
 `;
 
 /** Before a filter: alpha_min = 1 (it is the atomic min of the alpha_v that follow). */
-export const OGC_FILTER_BEGIN_WGSL = header([0, 9, 16]) + /* wgsl */`
+export const OGC_FILTER_BEGIN_WGSL = header([0, 9, 16]) + ROUND_LOG_FNS + /* wgsl */`
 @compute @workgroup_size(1)
-fn main() { atomicStore(&alpha[P.N], bitcast<u32>(1.0)); atomicStore(&counters[OGC_PLANE_RECORDS], 0u); }
+fn main() {
+  atomicStore(&alpha[P.N], bitcast<u32>(1.0)); atomicStore(&counters[OGC_PLANE_RECORDS], 0u);
+  let b = roundLogWord();
+  if (b != 0xffffffffu) { atomicAdd(&counters[b + 5u], 1u); }
+}
 `;
 
 /**
@@ -1189,7 +1226,7 @@ fn main() { atomicStore(&alpha[P.N], bitcast<u32>(1.0)); atomicStore(&counters[O
  * for the records pass to fill. Records past the authored capacity fail the step
  * (planeRecordOverflow) and hold their vertex (count OGC_NONE); the total's peak is kept.
  */
-export const OGC_FILTER_ALLOC_WGSL = header([0, 5, 8, 9]) + /* wgsl */`
+export const OGC_FILTER_ALLOC_WGSL = header([0, 5, 8, 9]) + ROUND_LOG_FNS + /* wgsl */`
 var<workgroup> scan: array<u32, 256>;
 var<workgroup> base: u32;
 @compute @workgroup_size(256)
@@ -1211,6 +1248,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     base = b;
     atomicMax(&counters[OGC_PEAK_PLANE_RECORDS], b + scan[255]);
     atomicMax(&counters[OGC_F_PEAK_PLANE_RECORDS], b + scan[255]);
+    let lw = roundLogWord();
+    if (lw != 0xffffffffu) { atomicMax(&counters[lw + 6u], b + scan[255]); }
   }
   workgroupBarrier();
   if (v < P.N) {
@@ -1280,8 +1319,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
 
 /** Scatter each face into its buckets; the count it takes back leaves the counts zero for the next round. */
 export function ogcGridInsertWGSL(intersect: boolean): string {
-  const bindings = intersect ? [0, 1, 4, 6, 7, 9] : [0, 1, 4, 6, 7, 9, 14];
-  return header(bindings) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(intersect, false) + /* wgsl */`
+  const bindings = intersect ? [0, 1, 4, 6, 7, 9] : [0, 1, 4, 5, 6, 7, 9, 14];
+  return header(bindings) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(intersect) + /* wgsl */`
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
@@ -1629,8 +1668,8 @@ fn vertexFacet(v: u32) -> RoleOut {
   let x = xd(v);
   let rv = envOf(v);
   let x1 = x + predOf(v);
-  // One-sided: the faces' boxes carry the round's largest envelope, so the query is the bare swept box.
-  let q = OgcBox(min(x, x1), max(x, x1));
+  // Its swept box grown by its own envelope (local swept bounds, triBox).
+  let q = OgcBox(min(x, x1) - vec3<f32>(rv), max(x, x1) + vec3<f32>(rv));
   let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   var dmin = 3.4e38;
@@ -1673,9 +1712,9 @@ fn vertexFacet(v: u32) -> RoleOut {
 }
 
 // A surface sample i (index N + s) against the cloth's faces: the faces' grid boxes
-// carry their predictions and the round's largest envelope, so the sample's bare swept
-// box (a point for a static sample; to its exact predicted end for the moving solid's)
-// finds every face within its envelope of the sample. Entries go to the face's feature
+// carry their predictions and their own envelopes, so the sample's bare swept box (a
+// point for a static sample; to its exact predicted end for the moving solid's; its
+// motion is exact, envelope 0) finds every face within its envelope of the sample. Entries go to the face's feature
 // vertices only (the sample is not solved for) and carry mu lambda with mu the solid's
 // at the sample (x_det.w); w = 1 marks them. The DAT pair puts the sample first, as a vertex.
 fn sampleFacet(i: u32) -> RoleOut {
@@ -1733,7 +1772,7 @@ fn edgeEdge(e: u32) -> RoleOut {
   let p0 = xd(er.x); let p1 = xd(er.y);
   let re = max(envOf(er.x), envOf(er.y));
   let p01 = p0 + predOf(er.x); let p11 = p1 + predOf(er.y);
-  let q = OgcBox(min(min(p0, p1), min(p01, p11)), max(max(p0, p1), max(p01, p11)));
+  let q = OgcBox(min(min(p0, p1), min(p01, p11)) - vec3<f32>(re), max(max(p0, p1), max(p01, p11)) + vec3<f32>(re));
   let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   var dmin = 3.4e38;
