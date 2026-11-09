@@ -56,8 +56,8 @@ test('the three Bridson scenes are registered study cards that open as valid dry
   for (const id of BRIDSON_IDS) {
     const card = sceneCatalogCards.find(c => c.id === id);
     assert.ok(card, `${id} has a library card`);
-    assert.match(card.status ?? '', /C2 M6/);
-    assert.match(card.status ?? '', /diverges/);
+    assert.match(card.status ?? '', /two-level coarse correction/);
+    assert.doesNotMatch(card.status ?? '', /diverges|C2 M6/);
     assert.match(card.status ?? '', /contact/);
   }
   const definition = findSceneDefinition('bridson-2002-curtain')!;

@@ -2,8 +2,8 @@ import { createEmptyScene } from "../../../core/empty-scene";
 import type { CameraState, RigidBodyDescription, SceneDescription, Vec3 } from "../../../core/model";
 import { bakeProceduralSolid } from "../../../core/procedural-solid";
 import { solidVoxelPatchesKey, type SolidWorldVoxelPatch } from "../../../core/solid-world";
-import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
 import type { ClothDocument, ClothPendingSolid } from "../../types";
+import { BRIDSON_2002_GROUND_MATERIAL, BRIDSON_2002_SOLID_MATERIAL, bridson2002Lighting, bridson2002Look, bridson2002LookCamera, bridson2002Scenery } from "./appearance";
 import type { Bridson2002Scene } from "./scenes";
 import { bridsonShapeBox, bridsonShapeReach, bridsonSolidDistance, bridsonSolidPose, type BridsonSolid } from "./solids";
 
@@ -148,7 +148,7 @@ function bakeHeldSolids(source: Bridson2002Scene, layout: Bridson2002SceneLayout
     if (!aligned) { shaped.push(solid); continue; }
     const r = cells.map(Math.round), clip = (v: number, a: number) => Math.max(0, Math.min(dims[a]!, v));
     fills.push({ operation: "fill", minimum: [clip(r[0]!, 0), clip(r[1]!, 1), clip(r[2]!, 2)],
-      maximumExclusive: [clip(r[3]!, 0), clip(r[4]!, 1), clip(r[5]!, 2)], materialId: VOXEL_MATERIAL_IDS.terrain });
+      maximumExclusive: [clip(r[3]!, 0), clip(r[4]!, 1), clip(r[5]!, 2)], materialId: BRIDSON_2002_GROUND_MATERIAL });
   }
   if (!shaped.length) return { solidVoxels: fills };
   // A brick-aligned lattice around the shaped solids with a two-cell margin, clipped to the container.
@@ -163,7 +163,7 @@ function bakeHeldSolids(source: Bridson2002Scene, layout: Bridson2002SceneLayout
     let d = Infinity;
     for (const s of shaped) d = Math.min(d, bridsonSolidDistance(s, p, 0));
     return d / h;
-  }, VOXEL_MATERIAL_IDS.white);
+  }, BRIDSON_2002_SOLID_MATERIAL);
   const shift = <T extends readonly number[]>(v: T) => v.map((x, a) => x + start[a]!) as unknown as [number, number, number];
   const patches = baked.solidVoxels.map(p => ({ ...p, minimum: shift(p.minimum), maximumExclusive: shift(p.maximumExclusive) }));
   // The procedural patches come first: a later fill owns the cells it covers, so the slab and a solid buried in it union exactly.
@@ -198,6 +198,9 @@ export function bridson2002SceneDescription(source: Bridson2002Scene, options: B
     extents_m: { x: layout.dimensions[0] * h, y: layout.dimensions[1] * h, z: layout.dimensions[2] * h } });
   scene.duration_s = source.duration_s;
   scene.numerics = { ...scene.numerics, fixedDt_s: source.step_s, maxDt_s: source.step_s };
+  const look = bridson2002Look(source.id);
+  scene.scenery = bridson2002Scenery();
+  scene.lighting = bridson2002Lighting(look);
   if (options.bake !== false) {
     const solids = bakeHeldSolids(source, layout, rigid);
     // The procedural bake's patches lead: its boundary covers the prefix solidVoxels.slice(0, patchCount).
@@ -214,13 +217,7 @@ export function bridson2002SceneDescription(source: Bridson2002Scene, options: B
   return scene;
 }
 
-/** Frames the cloth's rest sheet from above and to the side. */
-export function bridson2002Camera(scene: SceneDescription): Partial<CameraState> {
-  const rest = scene.cloth?.[0]?.geometry.data.restPositions_m;
-  if (!rest?.length) return {};
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < rest.length; i++) { lo[i % 3] = Math.min(lo[i % 3]!, rest[i]!); hi[i % 3] = Math.max(hi[i % 3]!, rest[i]!); }
-  const span = Math.max(hi[0]! - lo[0]!, hi[2]! - lo[2]!);
-  return { azimuth_rad: 0.72, elevation_rad: 0.5, distance_m: 2.2 * span,
-    target_m: { x: (lo[0]! + hi[0]!) / 2, y: 0.6 * hi[1]!, z: (lo[2]! + hi[2]!) / 2 } };
+/** The 2002 video's framing of this scene (appearance.ts), in scene coordinates. */
+export function bridson2002Camera(source: Bridson2002Scene): Partial<CameraState> {
+  return bridson2002LookCamera(bridson2002Look(source.id), bridson2002SceneLayout(source).translation_m);
 }

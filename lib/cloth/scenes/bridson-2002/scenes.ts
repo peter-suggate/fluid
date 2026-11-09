@@ -1,5 +1,6 @@
 import type { Quaternion, RigidPoseTrack, Vec3 } from "../../../core/model";
 import type { ClothDocument, ClothMaterial } from "../../types";
+import { BRIDSON_2002_CLOTH_COLOR_LINEAR } from "./appearance";
 import { equalNodeMass_kg, herringBoneSheet } from "./mesh";
 import { BRIDSON_2002_STEP_S, BRIDSON_2002_VIDEO_FRAME_RATE, CLOTH, CURTAIN, SPHERE, TABLE, VOXEL } from "./parameters";
 import { assertBridsonSolidResolved, yawQuaternion, type BridsonSolid } from "./solids";
@@ -60,6 +61,7 @@ function material(id: string): ClothMaterial {
     stretchWarp_N_m: CLOTH.stretch.value, stretchWeft_N_m: CLOTH.stretch.value, shear_N_m: CLOTH.shear.value,
     poisson: CLOTH.poisson.value, compressionRatio: CLOTH.compressionRatio.value, bending_N_m: CLOTH.bending.value,
     damping_s: CLOTH.damping.value, thickness_m: CLOTH.thickness.value, strainLimit: CLOTH.strainLimit.value,
+    baseColor: BRIDSON_2002_CLOTH_COLOR_LINEAR,
   };
 }
 

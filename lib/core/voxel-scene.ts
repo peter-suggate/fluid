@@ -17,7 +17,9 @@ export const VOXEL_MATERIAL_IDS = {
   cylinder: 19,
   cup: 20,
   white: 21,
-  "rounded-plate":22
+  "rounded-plate":22,
+  marble: 23,
+  obsidian: 24
 } as const;
 
 export interface VoxelMaterial {
@@ -47,6 +49,19 @@ export interface VoxelMaterial {
  */
 export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
   {id:VOXEL_MATERIAL_IDS["rounded-plate"],key:"rounded-plate",name:"Rounded clamp",closure:"opaque",baseColorLinear:[.24,.26,.29],emissiveLinear:[0,0,0],metallic:.3,roughness:.45,transmission:0,ior:1.45,colorProvenance:"Authored clamp neutral material"},
+  {
+    // Bridson, Fedkiw & Anderson 2002's ground: a pale grey stone, matte
+    // enough that the key light's shadow reads on it.
+    id: VOXEL_MATERIAL_IDS.marble, key: "marble", name: "Marble", closure: "opaque",
+    baseColorLinear: [0.62, 0.62, 0.6], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.45, transmission: 0, ior: 1.5,
+    colorProvenance: "pale grey of the Bridson 2002 video ground"
+  },
+  {
+    // The 2002 frustum and table legs: near-black and slightly reflective.
+    id: VOXEL_MATERIAL_IDS.obsidian, key: "obsidian", name: "Obsidian", closure: "opaque",
+    baseColorLinear: [0.025, 0.027, 0.027], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.22, transmission: 0, ior: 1.5,
+    colorProvenance: "black frustum and dark legs of the Bridson 2002 video"
+  },
   {
     id: VOXEL_MATERIAL_IDS.white, key: "white", name: "White composite", closure: "opaque",
     baseColorLinear: [0.9, 0.9, 0.9], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.32, transmission: 0, ior: 1.45,

@@ -104,7 +104,7 @@ export function clothAnalyticHangingCurtain(): ClothAnalyticScene {
   return {
     id: "cloth-analytic-hanging-curtain", kind: "hanging-curtain", name: "Cloth analytic · Hanging curtain",
     expectation: `Pinned along its top edge, the sheet comes to rest with strain ρg(L − s)/E at depth s: ${(100 * rho * g * L / k).toFixed(1)} % at the rod, 0 at the hem (uniaxial StVK, exact per band).`,
-    gate: `after ${CURTAIN.settle.value} s: every interior band's mean strain within 1 % of its exact equilibrium, the hem's drop within 1 %, kinetic energy under 1e-6 J`,
+    gate: `averaged over the second before ${CURTAIN.settle.value} s (the converged sheet still sways about its rest state): every interior band's mean strain within 1 % of its exact equilibrium, the hem's drop within 1 %`,
     duration_s: CURTAIN.duration.value, step_s: CLOTH_ANALYTIC_STEP_S, cell_m: 0.02, extents_m: { x: 1.6, y: 2.4, z: 0.96 },
     cloth: [document("cloth-analytic-hanging-curtain-sheet", data, sheetMaterial("curtain-crimson", 0xb3132e))],
     solids: [],

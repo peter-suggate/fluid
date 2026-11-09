@@ -71,7 +71,7 @@ import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
 import type { SceneryGraph } from "./scenery-graph";
 import { BRIDSON_2002_SCENES, type Bridson2002Scene } from "../cloth/scenes/bridson-2002";
-import { bridson2002Camera, bridson2002SceneDescription, bridson2002SceneLayout } from "../cloth/scenes/bridson-2002/scene-description";
+import { bridson2002Camera, bridson2002SceneDescription } from "../cloth/scenes/bridson-2002/scene-description";
 import { CLOTH_ANALYTIC_SCENES, type ClothAnalyticScene } from "../cloth/scenes/analytic/scenes";
 import { clothAnalyticCamera, clothAnalyticSceneDescription } from "../cloth/scenes/analytic/scene-description";
 import {
@@ -95,8 +95,7 @@ const BRIDSON_2002_NAMES: Record<string, string> = {
 
 /** One catalog entry per reproduced figure; the card says what it cannot show yet. */
 function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
-  const source = make(), layout = bridson2002SceneLayout(source);
-  const halts = layout.pending.map(p => `${p.start_s.toFixed(2)} s ('moving cloth solid ${p.id} requires C2 M6')`).join(", ");
+  const source = make(), moving = source.solids.filter(s => s.motion.kind === "pose-track").map(s => s.id);
   return defineScene({
     id: source.id,
     name: BRIDSON_2002_NAMES[source.id] ?? source.id,
@@ -108,11 +107,12 @@ function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
     // The moving solids are scene rigid bodies on their pose tracks (the default): they render, pick and cut through the shared rigid surface path.
     build: () => bridson2002SceneDescription(make()),
     preview: () => bridson2002SceneDescription(make(), { bake: false }),
-    cameraForDocument: bridson2002Camera,
+    camera: bridson2002Camera(source),
     attribution: { label: "Bridson, Fedkiw & Anderson, SIGGRAPH 2002", url: "https://graphics.stanford.edu/papers/cloth-sig02/" },
-    status: `Tier A GPU cloth, K = ${source.cloth.solver?.iterations ?? 64}, with OGC self and solid contact (lane C2). Not yet:`
-      + ` the ${source.sheet.columns}\u00d7${source.sheet.rows} sheet diverges at this K until the two-level coarse correction lands (C1);`
-      + (halts ? ` halts at ${halts}.` : " no moving solids."),
+    status: `Tier A GPU cloth: K = ${source.cloth.solver?.iterations ?? 64} iterations with the two-level coarse correction (C1), OGC self and solid contact (C2)`
+      + (moving.length ? `; the ${moving.join(" and ")} ${moving.length > 1 ? "are scene rigid bodies" : "is a scene rigid body"} on the paper's pose track, one-way.` : ".")
+      + " Not yet the paper's drape: the coarse tent basis cannot express a fold about a curved rim, so folds lag the 2002 frames,"
+      + " and contact-held vertices can exceed the 10% strain limit (progress-lane-c1.md).",
   });
 }
 

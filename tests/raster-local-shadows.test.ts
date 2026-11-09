@@ -204,9 +204,17 @@ ${sampling}
 test("area emitters get one perspective map when the domain is in front of them, otherwise a soft cube",async()=>{
   const {getScenePreset}=await import("../lib/core/scenes");
   const {RASTER_MAX_SPOT_LIGHTS}=await import("../lib/svo/features/lighting-visibility/raster-spot-lights");
+  const {createEmptyScene}=await import("../lib/core/empty-scene");
+  // The Bridson containers in the default room (enclosure + ceiling softbox):
+  // the shipped Bridson look replaced that room with a black sky and a
+  // directional key light (bridson-2002/appearance.ts), which has no local map.
+  const inStudio=(id:string)=>{const scene=getScenePreset(id).create(),room=createEmptyScene();return {...scene,scenery:room.scenery,lighting:room.lighting};};
   for(const id of ["bridson-2002-rotating-sphere","bridson-2002-curtain","bridson-2002-tablecloth"]){
-    const scene=getScenePreset(id).create(),box=scene.container;
+    const scene=inStudio(id),box=scene.container;
     const domain={origin:[-box.width_m/2,0,-box.depth_m/2],extent:[box.width_m,box.height_m,box.depth_m]};
+    const shipped=packSvoLightRecords(buildSvoSceneLights(getScenePreset(id).create()).records),local=rasterLocalShadowViews(shipped,domain);
+    assert.equal(shipped.length,SVO_LIGHT_RECORD_WORDS,`${id}: the shipped look has one light, the key`);
+    assert.ok(local.length===0&&rasterLocalMapsComplete(shipped,local),`${id}: the key is directional (sun maps), nothing traces per pixel`);
     const records=packSvoLightRecords(buildSvoSceneLights(scene).records),before=records.slice();
     const views=rasterLocalShadowViews(records,domain);
     assert.deepEqual(records,before,id);
@@ -223,11 +231,11 @@ test("area emitters get one perspective map when the domain is in front of them,
       assert.ok(Math.max(Math.abs(dot(r)),Math.abs(dot(u)))/axial<=area.tanHalfAngle,`${id}: corner ${corner} inside the frustum`);
     }
   }
-  // The live Fig 2 studio: the softbox hangs inside the voxel domain, beside
+  // Fig 2 in the live studio: the softbox hangs inside the voxel domain, beside
   // walls no single frustum reaches, so it takes a soft cube and the cached-map
   // kernel still covers every light.
   const studio={origin:[-9.44,-.16,-9.44],extent:[18.88,12.32,18.88]};
-  const fig2=packSvoLightRecords(buildSvoSceneLights(getScenePreset("bridson-2002-rotating-sphere").create()).records);
+  const fig2=packSvoLightRecords(buildSvoSceneLights(inStudio("bridson-2002-rotating-sphere")).records);
   const softbox=rasterLocalShadowViews(fig2,studio);
   assert.deepEqual(softbox.map(view=>[view.index,view.pointFace]),[0,1,2,3,4,5].map(face=>[1,face]));
   const disc=Math.sqrt(4*2.4192*2.4192/Math.PI);
