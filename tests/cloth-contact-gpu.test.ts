@@ -18,7 +18,7 @@ import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import {
-  activation, boxSdf, solidBallBound, solidContact, solidTruncate, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
+  activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, sheet, sub, vertexForceHessian, add,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate,
   type DatPair, type OracleContact, type OracleMesh, type V3,
@@ -576,13 +576,13 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     for (const k of wantKeys) assert.ok(sampleKeys.has(k) || bf.ambiguousVF.has(k), `sample-facet pair ${k} missing`);
     for (const k of sampleKeys) assert.ok(wantKeys.has(k) || bf.ambiguousVF.has(k), `sample-facet pair ${k} not in the oracle`);
     assert.ok(sampleKeys.size > 20 && c0.sfPairs === sampleKeys.size, `${sampleKeys.size} sample-facet pairs, counter ${c0.sfPairs}`);
-    const solidOff = 3 * N + det.T + det.E;
+    const solidOff = 3 * N + det.T + det.E, solidDevOff = 8 * N + det.T + det.E;
     // The ball holds the round's whole reach, |w| + r_q / 2 (w = 0 here); the cap is 0.45 r_q.
     const bounds = mesh.x.map((x, v) => solidBallBound(field, x, xdet[4 * v + 3] / 0.9, config.r));
     // A ball whose box ends on a cell face (x0 + rho = 0.01 here) reads one more cell row in float32 or not.
     const ambiguous = new Set(mesh.x.flatMap((x, v) => {
       const rb = xdet[4 * v + 3] / 0.9, lo = solidBallBound(field, x, rb * (1 - 1e-5), config.r), hi = solidBallBound(field, x, rb * (1 + 1e-5), config.r);
-      return lo.J !== hi.J || lo.far !== hi.far ? [v] : [];
+      return lo.D.some((d, a) => d !== hi.D[a]) || lo.far !== hi.far ? [v] : [];
     }));
     let near = 0, entries = 0;
     for (let v = 0; v < N; v++) {
@@ -595,12 +595,13 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
       // A ball whose box ends on a cell face (x0 + rho = 0.01 here) reads one more cell row in float32 or not.
       if (ambiguous.has(v)) continue;
       assert.equal(solid.length, b.far ? 0 : 1, `vertex ${v} solid entry (far ${b.far}, margin ${margin})`);
-      const q = [0, 1, 2, 3].map(k => work[solidOff + 4 * v + k]);
-      if (b.far) { assert.deepEqual(q, [0, 0, 0, 0]); continue; }
+      const q = [0, 1, 2, 3, 4, 5, 6].map(k => k < 4 ? work[solidOff + 4 * v + k] : work[solidDevOff + 4 * v + k - 4]);
+      if (b.far) { assert.deepEqual(q, [0, 0, 0, 0, 0, 0, 0]); continue; }
       near++;
-      const s = 1 / (0.9 * b.phi0), qr = [b.g0[0] * s, b.g0[1] * s, b.g0[2] * s, b.J * s];
+      assert.equal(q[3], 1, `vertex ${v} bound marker`);
+      const s = solidTermScale(b.phi0, 0.9, config.r), qr = [b.g0[0] * s, b.g0[1] * s, b.g0[2] * s, 1, b.D[0] * s, b.D[1] * s, b.D[2] * s];
       const qs = Math.max(...qr.map(Math.abs));
-      for (let k = 0; k < 4; k++) assert.ok(Math.abs(q[k] - qr[k]) <= 2e-3 * qs, `vertex ${v} q/j[${k}] ${q[k]} vs ${qr[k]}`);
+      for (let k = 0; k < 7; k++) assert.ok(Math.abs(q[k] - qr[k]) <= 2e-3 * qs, `vertex ${v} q/D[${k}] ${q[k]} vs ${qr[k]}`);
       const lambda = new Float32Array(new Uint32Array([solid[0].z]).buffer)[0];
       const lr = (b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0) * sampleClothSolidField(field, mesh.x[v]).mu;
       assert.ok(Math.abs(lambda - lr) <= 2e-3 * Math.max(1, lr), `vertex ${v} lambda ${lambda} vs ${lr}`);
@@ -648,11 +649,11 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     const planar = planarTruncate([...X0, ...samples], [...Xnew, ...samples], pairs, [...mesh.x.map((_, v) => xdet[4 * v + 3]), ...samples.map(() => 0)], 0.9, 1e-6);
     let cut = 0;
     for (let v = 0; v < N; v++) {
-      const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
+      const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9, config.r), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
       if (norm(sub(ref, planar.x[v])) > 1e-9) cut++;
       if (!ambiguous.has(v)) assert.ok(norm(sub(got[v], ref)) <= 2e-7 + 2e-4 * norm(sub(Xnew[v], X0[v])), `vertex ${v}: ${got[v]} vs ${ref}`);
       const phi = sampleClothSolidField(field, got[v]).phi;
-      assert.ok(phi >= (bounds[v].far ? config.r : 0.1 * bounds[v].phi0) * (1 - 1e-3), `vertex ${v} phi ${phi} after truncation`);
+      assert.ok(phi >= (bounds[v].far ? config.r : solidKeep(bounds[v].phi0, 0.9, config.r)) * (1 - 1e-3), `vertex ${v} phi ${phi} after truncation`);
     }
     assert.equal(motionPenetrates(oracle, X0, got), false);
     const c1 = await det.readCounters();

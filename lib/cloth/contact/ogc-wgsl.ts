@@ -315,22 +315,22 @@ fn ogcSolidMu(h: OgcSolidHeader, p: vec3<f32>) -> f32 {
   return f32((w >> (8u * (i & 3u))) & 255u) * ${(1 / SOLID_MU_SCALE).toFixed(6)};
 }
 
-// Over the ball |d| <= rho around x0: phi(x0 + d) >= phi0 + g0.d - J |d|, with g0 the
-// gradient at x0 and J the largest deviation of the gradient from g0 over the cells
-// the ball's box touches (per axis, d phi / d x_a over a cell spans its four a-edge
-// differences). far: the whole ball lies further than r from the solid and is free of
+// Over the ball |d| <= rho around x0: phi(x0 + d) >= phi0 + g0.d - sum_a D_a |d_a|, with
+// g0 the gradient at x0 and D_a the largest deviation of d phi / d x_a from g0_a over the
+// cells the ball's box touches (over a cell it spans its four a-edge differences): the
+// path integral of (grad - g0).d, axis by axis. far: the whole ball lies further than r from the solid and is free of
 // it: either min(phi0, band) - L_max rho >= r, or the box touches a missing brick, where
 // phi > band; the upload requires band >= r + 1.5 L_max rqMax with rho <= rqMax / 2.
-struct OgcSolidBound { far: bool, phi0: f32, g0: vec3<f32>, J: f32 }
+struct OgcSolidBound { far: bool, phi0: f32, g0: vec3<f32>, D: vec3<f32> }
 fn ogcSolidBallBound(h: OgcSolidHeader, x0: vec3<f32>, rho: f32, r: f32) -> OgcSolidBound {
   let s = ogcSolidSample(h, x0);
-  var out = OgcSolidBound(true, s.phi, s.grad, 0.0);
+  var out = OgcSolidBound(true, s.phi, s.grad, vec3<f32>(0.0));
   if (min(s.phi, h.band) - h.lmax * rho >= r) { return out; }
   let c0 = ogcSolidCellOf(h, x0 - vec3<f32>(rho));
   let c1 = ogcSolidCellOf(h, x0 + vec3<f32>(rho));
   var lastBrick = vec3<i32>(-2147483647);
   var rec = OGC_NONE;
-  var J = 0.0;
+  var D = vec3<f32>(0.0);
   let inv = 1.0 / h.cell;
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
@@ -348,10 +348,10 @@ fn ogcSolidBallBound(h: OgcSolidHeader, x0: vec3<f32>, rho: f32, r: f32) -> OgcS
       if ((k & 4u) == 0u) { let d = n[k | 4u] - n[k]; lo.z = min(lo.z, d); hi.z = max(hi.z, d); }
     }
     let dev = max(abs(hi * inv - s.grad), abs(s.grad - lo * inv));
-    J = max(J, length(dev));
+    D = max(D, dev);
   } } }
   out.far = false;
-  out.J = J;
+  out.D = D;
   return out;
 }
 `;

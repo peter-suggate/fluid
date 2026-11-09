@@ -265,7 +265,7 @@ export class OgcContactDetector {
     this.bodySampleCapacity = bodySampleCap;
     this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
     this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
-    this.work = mk("work", 4 * ((body ? 16 : 8) * N + T + E));
+    this.work = mk("work", 4 * ((body ? 24 : 12) * N + T + E));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
@@ -319,6 +319,8 @@ export class OgcContactDetector {
     w[P.heldOff] = 7 * N + T + E; w[P.predict] = OGC_PREDICTION[prediction]; w[P.cellRule] = OGC_CELL_RULE[cellRule];
     w[P.bodyBase] = this.bodyBase; w[P.bodyOff] = body ? 8 * N + T + E : 0; w[P.SB] = 0; w[P.wgPrep] = Math.ceil(N / WG);
     w[P.edgeBase] = this.edgeBase; w[P.bodyEdgeBase] = this.bodyEdgeBase; w[P.SE] = 0; w[P.SEB] = 0;
+    // The per-axis deviations D of the solids' terms (OgcTerms) follow the body's terms.
+    w[P.solidDevOff] = (body ? 16 : 8) * N + T + E; w[P.bodyDevOff] = body ? 20 * N + T + E : 0;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
@@ -541,7 +543,7 @@ export class OgcContactDetector {
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
       ["planes", OGC_PLANES_WGSL, [0, 2, 4, 5, 9, 11, 14]],
-      ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 9, 14]],
+      ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 8, 9, 14]],
       // Intersection counting reads the solver's current positions where detection reads x_det.
       ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
       ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],

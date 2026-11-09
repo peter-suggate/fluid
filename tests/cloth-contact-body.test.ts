@@ -29,7 +29,7 @@ import { buildClothSolverModel } from "../lib/cloth/oracle";
 import { ClothGPUSolver } from "../lib/cloth/gpu-solver";
 import { CLOTH_BINDING, CLOTH_STATE } from "../lib/cloth/gpu-solver-wgsl";
 import {
-  activation, boxSdf, contactEnergy, facesInsideSolid, motionPenetrates, norm, rng, sheet, solidBallBound, solidContact, sub, vertexForceHessian,
+  activation, boxSdf, contactEnergy, facesInsideSolid, motionPenetrates, norm, rng, sheet, solidBallBound, solidContact, solidKeep, solidTermScale, sub, vertexForceHessian,
   type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
 
@@ -66,6 +66,7 @@ const vec4s = (pts: V3[]) => new Float32Array(pts.flatMap(p => [p[0], p[1], p[2]
 const f32 = (pts: V3[]) => pts.map(p => p.map(Math.fround) as V3);
 const toV3 = (a: Float32Array, N: number, at = 0) => Array.from({ length: N }, (_, v) => [a[4 * (at + v)]!, a[4 * (at + v) + 1]!, a[4 * (at + v) + 2]!] as V3);
 const add3 = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const scale3 = (a: V3, s: number): V3 => [a[0] * s, a[1] * s, a[2] * s];
 const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
 // ---- poses, as the GPU holds them (rotation entries rounded to f32)
@@ -179,36 +180,51 @@ test("GPU moving solid: carried predictions, body entries and terms, posed sampl
     const pred = new Float32Array(await readBuffer(device, det.pred));
     const xdet = new Float32Array(await readBuffer(device, det.det));
     const contacts = new Uint32Array(await readBuffer(device, det.contacts)), lists = listsOf(contacts, N);
-    const bodyOff = 8 * N + det.T + det.E;
+    const bodyOff = 8 * N + det.T + det.E, bodyDevOff = 20 * N + det.T + det.E;
+    // A round redone held (a conflict with the plate's samples) carries every vertex the plate reaches.
+    const forced = c0.redos > 0;
 
     // Every vertex is held (prediction "none"): w = a_v where the plate can reach it, 0 elsewhere.
     let carried = 0, entries = 0;
     const bounds = mesh.x.map((x, v) => {
-      const env = diag.env[v]!, y0 = toBody(p0, x), a = sub(toWorld(p1, y0), x), rho = norm(a) + 0.5 * env;
+      // A vertex in a conflict with a plate sample (flag bit 2) was carried before its ball was taken.
+      const conflictCarried = (diag.held[v]! & 4) !== 0;
+      const env = diag.env[v]!, y0 = toBody(p0, x), a = sub(toWorld(p1, y0), x), rho = (conflictCarried ? 0 : norm(a)) + 0.5 * env;
       const room = Math.max(0.5 * (config.rqMax - env), 0);
-      if (norm(y0) - rho >= det.bodyReach) return { y0, a, env, b: { far: true, phi0: field.band, g0: [0, 0, 0] as V3, J: 0, stored: false } };
+      if (norm(y0) - rho >= det.bodyReach) return { y0, a, env, conflictCarried, b: { far: true, phi0: field.band, g0: [0, 0, 0] as V3, D: [0, 0, 0] as V3, stored: false } };
       assert.ok(norm(a) <= room, `vertex ${v}: the step's carry ${norm(a)} fits the band`);
-      return { y0, a, env, b: solidBallBound(field, y0, rho, config.r) };
+      return { y0, a, env, conflictCarried, b: solidBallBound(field, y0, rho, config.r) };
     });
     for (let v = 0; v < N; v++) {
-      const { y0, a, env, b } = bounds[v]!;
+      const { y0, a, env, b, conflictCarried } = bounds[v]!;
       const body = lists[v]!.filter(e => e.y === BODY_Y);
       entries += body.length;
-      const margin = Math.min(b.phi0, field.band) - field.maxLipschitz * (norm(a) + 0.5 * env) - config.r;
+      const margin = Math.min(b.phi0, field.band) - field.maxLipschitz * ((conflictCarried ? 0 : norm(a)) + 0.5 * env) - config.r;
       if (Math.abs(margin) < 1e-5) continue;
       assert.equal(body.length, b.far ? 0 : 1, `vertex ${v} body entry (far ${b.far}, margin ${margin})`);
-      const w = [0, 1, 2].map(k => pred[4 * v + k]!) as V3, q = [0, 1, 2, 3].map(k => work[bodyOff + 8 * v + k]!);
+      const w = [0, 1, 2].map(k => pred[4 * v + k]!) as V3;
+      const q = [0, 1, 2, 3, 4, 5, 6].map(k => k < 4 ? work[bodyOff + 8 * v + k]! : work[bodyDevOff + 4 * v + k - 4]!);
       const aGpu = [0, 1, 2].map(k => work[bodyOff + 8 * v + 4 + k]!) as V3;
       assert.ok(norm(sub(aGpu, a)) <= 2e-7 + 1e-4 * norm(a), `vertex ${v} a ${aGpu} vs ${a}`);
-      if (b.far) { assert.deepEqual(q, [0, 0, 0, 0]); assert.deepEqual(w, [0, 0, 0]); continue; }
-      carried++;
-      assert.ok(norm(sub(w, a)) <= 2e-7 + 1e-4 * norm(a), `vertex ${v} carried prediction ${w} vs ${a}`);
-      const sc = 1 / (0.9 * b.phi0), g = mul(p1.R, b.g0), qr = [g[0] * sc, g[1] * sc, g[2] * sc, b.J * sc], qs = Math.max(...qr.map(Math.abs));
-      for (let k = 0; k < 4; k++) assert.ok(Math.abs(q[k]! - qr[k]!) <= 2e-3 * qs, `vertex ${v} q/j[${k}] ${q[k]} vs ${qr[k]}`);
+      if (b.far) { assert.deepEqual(q, [0, 0, 0, 0, 0, 0, 0]); if (!conflictCarried) assert.deepEqual(w, [0, 0, 0]); continue; }
+      // The terms are in the body frame at the end pose: (g0 s, 1) and D s.
+      const sc = solidTermScale(b.phi0, 0.9, config.r), qr = [b.g0[0] * sc, b.g0[1] * sc, b.g0[2] * sc, 1, b.D[0] * sc, b.D[1] * sc, b.D[2] * sc];
+      const qs = Math.max(...qr.map(Math.abs));
+      // Held: carried in contact or in a redone round; else moved towards a_v as far as the bound needs
+      // ((1 - t) f(-a) = 1), or kept at 0. f(d) = D s.|d| - g0 s.d with d = R1^T (w - a) = -R1^T a.
+      const ab = mulT(p1.R, a);
+      const fb = qr[4]! * Math.abs(ab[0]) + qr[5]! * Math.abs(ab[1]) + qr[6]! * Math.abs(ab[2]) + (qr[0]! * ab[0] + qr[1]! * ab[1] + qr[2]! * ab[2]);
+      const full = conflictCarried || forced || b.phi0 < config.r;
+      const want = full ? a : fb > 1 ? scale3(a, 1 - 1 / fb) : [0, 0, 0] as V3;
+      if (full || fb > 1) carried++;
+      if (conflictCarried || forced || (Math.abs(fb - 1) > 1e-3 && Math.abs(b.phi0 - config.r) > 1e-6))
+        assert.ok(norm(sub(w, want)) <= 2e-7 + 1e-3 * norm(a), `vertex ${v} prediction ${w} vs ${want} (phi0 ${b.phi0}, f(-a) ${fb})`);
+      for (let k = 0; k < 7; k++) assert.ok(Math.abs(q[k]! - qr[k]!) <= 2e-3 * qs, `vertex ${v} q/D[${k}] ${q[k]} vs ${qr[k]}`);
       const lr = (b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0) * sampleClothSolidField(field, y0).mu;
       assert.ok(Math.abs(lambdaOf(body[0]!) - lr) <= 2e-3 * Math.max(1, lr), `vertex ${v} lambda ${lambdaOf(body[0]!)} vs ${lr}`);
     }
-    assert.ok(carried > 30 && c0.bodyContacts === entries, `${carried} carried vertices, ${entries} body entries, counter ${c0.bodyContacts}`);
+    // The frame counter sums its rounds (the held redos of conflicts with the plate's samples too).
+    assert.ok(carried > 30 && (c0.redos ? c0.bodyContacts >= entries : c0.bodyContacts === entries), `${carried} carried vertices, ${entries} body entries, counter ${c0.bodyContacts} over ${1 + c0.redos} rounds`);
     assert.ok(carried < N, "the plate's reach ends inside the sheet");
 
     // The plate's surface samples: x_det at the start pose, predicted exactly to the end pose.
@@ -272,7 +288,7 @@ test("GPU moving solid: carried predictions, body entries and terms, posed sampl
     const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
     for (let v = 0; v < N; v++) {
       const { b } = bounds[v]!, phi = sampleClothSolidField(field, toBody(p1, got[v]!)).phi;
-      assert.ok(phi >= (b.far ? config.r : 0.1 * b.phi0) * (1 - 1e-3), `vertex ${v} phi_body ${phi} after truncation (far ${b.far}, phi0 ${b.phi0})`);
+      assert.ok(phi >= (b.far ? config.r : solidKeep(b.phi0, 0.9, config.r)) * (1 - 1e-3), `vertex ${v} phi_body ${phi} after truncation (far ${b.far}, phi0 ${b.phi0})`);
     }
     assert.equal(motionPenetrates(oracle, mesh.x, got), false);
     const c1 = await det.readCounters();
@@ -406,6 +422,64 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
     assert.ok(onTop > N / 3, `${onTop} vertices on the plate's top`);
     t.diagnostic(`plate: ${N} vertices (${onTop} on the top), ${STILL + MOVING} steps, ${ms.toFixed(1)} ms/step with readback; min vertex phi ${worstPhi.toExponential(2)} m, faces (exact) phi >= ${faceLower.toExponential(2)} m; velocity vs rigid ${(100 * rel).toFixed(2)}% rms; ${redoSteps} steps redone held (at most ${redosMax} held rounds), ${conflictsAll} conflicts`);
     assert.ok(rel < 0.05, `the sheet moves with the plate: ${(100 * rel).toFixed(2)}% rms from its rigid velocity`);
+    solver.destroy(); det.destroy();
+  });
+});
+
+test("GPU moving plate 3r over a sheet on the floor: the gap is wider than the cloth, so the sheet stays put while the plate comes down and slides", { skip: !gpu }, async t => {
+  await withDevice(async device => {
+    const DT = 1 / 60, RQ_MAX = 0.04, R_C = 2e-3, DOWN = 10, SLIDE = 30, GAP = 3 * R_C, START = 8 * R_C;
+    const half: V3 = [0.15, 0.01, 0.15], band = R_C + 1.5 * Math.sqrt(3) * RQ_MAX + 0.005;
+    const plate = buildClothSolidField({
+      parts: [{ kind: "sdf", sdf: boxSdf([-half[0], -half[1], -half[2]], half), lo: [-half[0], -half[1], -half[2]], hi: half, mu: 0.5 }],
+      lo: [-0.25, -0.13, -0.25], hi: [0.25, 0.13, 0.25], cell: 0.01, band });
+    const floor = buildClothSolidField({ parts: [{ kind: "lattice-box", lo: [-0.4, -0.1, -0.4], hi: [0.4, 0, 0.4], mu: 0.5 }], lo: [-0.5, -0.2, -0.5], hi: [0.5, 0.1, 0.5], cell: 0.01, band });
+    // The plate's bottom comes down from 8 r to 3 r over the floor's top (y = 0), then slides in x at 0.2 m/s.
+    const poseAt = (step: number): OgcBodyPose => {
+      const down = Math.min(step, DOWN) / DOWN, slide = Math.max(0, step - DOWN) * DT * 0.2;
+      return { position: [slide, half[1] + START + (GAP - START) * down, 0], orientation: [0, 0, 0, 1] };
+    };
+    const n = 21, W = 0.2;
+    const data = clothGridData({ columns: n, rows: n, width_m: W, height_m: W, origin_m: [-0.5 * W, 0.9 * R_C, -0.5 * W] });
+    const topology = prepareClothTopology(data, [cotton]);
+    const m = buildClothSolverModel(topology, [cotton], colourClothVertices(clothVertexNeighbours(topology)), []);
+    const T = m.topology.faceCount, N = m.topology.vertexCount, E = m.topology.edgeCount;
+    const triangles = new Uint32Array(4 * T);
+    for (let f = 0; f < T; f++) triangles.set(m.topology.faces.subarray(3 * f, 3 * f + 3), 4 * f);
+    const rest = new Float32Array(4 * N);
+    for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) rest[4 * i + k] = m.topology.data.restPositions_m[3 * i + k]!;
+    const config: OgcContactConfig = { r: R_C, kc: 100, mu: 0.2, epsV: 1e-2, dt: DT, gravity: [0, -9.81, 0], rqBase: 3e-3, rqMax: RQ_MAX, envelopeScale: 2.5,
+      contactCapacity: 128, pairCapacity: 840 * N, gridCapacity: 32 * (N + T + E), bucketCount: 1 << 16, roundCap: 4, prediction: "guess",
+      solidCapacityWords: floor.words.length, solidSampleCapacity: 8192, body: { capacityWords: plate.words.length, sampleCapacity: 8192, poseCapacity: 2 } };
+    const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges: m.topology.edges }, rest, config);
+    const solver = await ClothGPUSolver.create(device, m, { origin_m: [0, 0, 0], dt_s: DT, gravity_m_s2: [0, -9.81, 0], integrator: "bdf2", iterations: 20,
+      chebyshevRho: 0, diagnostics: true, label: "gap", contact: det.solverContact(CLOTH_BINDING.contact), hooks: det.stepHooks });
+    const stride = solver.tables.stride;
+    det.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: { buffer: solver.state, offset: 16 * CLOTH_STATE.xt * stride, size: 16 * stride } });
+    det.setSolidField(floor); det.setBodyField(plate);
+    const FAILING = OGC_STATUS.contactOverflow | OGC_STATUS.gridOverflow | OGC_STATUS.pairOverflow | OGC_STATUS.nonFinite | OGC_STATUS.solidPenetration
+      | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose;
+    const x0 = await solver.readPositions();
+    let worstFloor = Infinity, worstPlate = Infinity, drift = 0, bodyCuts = 0;
+    for (let step = 0; step < DOWN + SLIDE; step++) {
+      det.setBodyPoses([poseAt(step), poseAt(step + 1)]);
+      const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+      det.encodeFrameBegin(pass); solver.encodeStep(pass); det.encodeIntersectionCount(pass); pass.end(); device.queue.submit([enc.finish()]);
+      const c = await det.readCounters();
+      assert.equal(c.status & FAILING, 0, `step ${step}: status ${OgcContactDetector.describeStatus(c.status)}`);
+      assert.ok(c.intersections === 0 && c.solidIntersections === 0, `step ${step}: ${c.intersections} face pairs, ${c.solidIntersections} faces in a solid`);
+      bodyCuts += c.bodyCut;
+      const end = poseOf(poseAt(step + 1)), x = await solver.readPositions();
+      for (let i = 0; i < N; i++) {
+        const p: V3 = [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
+        worstFloor = Math.min(worstFloor, sampleClothSolidField(floor, p).phi);
+        worstPlate = Math.min(worstPlate, sampleClothSolidField(plate, toBody(end, p)).phi);
+        drift = Math.max(drift, Math.hypot(p[0] - x0[3 * i]!, p[2] - x0[3 * i + 2]!));
+      }
+    }
+    t.diagnostic(`gap 3 r: ${N} vertices, ${DOWN + SLIDE} steps; min phi floor ${worstFloor.toExponential(2)} m, plate ${worstPlate.toExponential(2)} m; largest sideways drift ${drift.toExponential(2)} m; ${bodyCuts} plate cuts`);
+    assert.ok(worstFloor > 0 && worstPlate > 0, "no vertex inside either solid");
+    assert.ok(drift < R_C, `the plate drags the sheet ${drift} m sideways without touching it`);
     solver.destroy(); det.destroy();
   });
 });

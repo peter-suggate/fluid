@@ -9,8 +9,8 @@
  *   9 counters (atomic)       10 indirect args            11 DAT division pairs
  *   12 planes indirect args (apart from 10: the bound pass is itself dispatched from 10)
  *   13 the step start x_t     14 predictions w | predicted step end and residual estimate
- * work also holds, per vertex at solidOff, the static solid's truncation terms (q.xyz, j)
- * of the round, and at heldOff the held flags (bit 0: contact, truncation or conflict
+ * work also holds, per vertex at solidOff and solidDevOff, the static solid's truncation
+ * terms (q.xyz, marker) and (D.xyz, 0) of the round (OgcTerms), and at heldOff the held flags (bit 0: contact, truncation or conflict
  * this step; bit 1: held this step; bit 2: carried with the moving solid this step, after
  * a conflict with its sample); the solid image sits in the contact buffer at
  * word solidBase.
@@ -35,7 +35,7 @@
  */
 import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_SOLID_WGSL } from "./ogc-wgsl";
 
-export const OGC_PARAM_WORDS = 68;
+export const OGC_PARAM_WORDS = 72;
 /** Indirect-args slots, three u32 each, in dispatch order. */
 export const OGC_DETECT_DISPATCHES = ["prep", "cell", "count", "scan1", "scan2", "scan3", "insert", "query", "bound"] as const;
 export const OGC_ARGS_WORDS = 3 * OGC_DETECT_DISPATCHES.length;
@@ -61,6 +61,7 @@ struct OgcParams {
   cellRule: u32, S: u32, bodyBase: u32, bodyOff: u32,
   SB: u32, wgPrep: u32, bodyReach: f32, pad2: u32,
   edgeBase: u32, SE: u32, bodyEdgeBase: u32, SEB: u32,
+  solidDevOff: u32, bodyDevOff: u32, pad3: u32, pad4: u32,
 }
 `;
 
@@ -73,7 +74,7 @@ export const OGC_PARAM = {
   countsOff: 36, entriesBase: 37, dminTOff: 38, dminEOff: 39, envOff: 40, wgN: 41, wgT: 42, wgNE: 43, wgS1: 44, wgS2: 45, kc: 46,
   mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53, heldOff: 54, predict: 55, cellRule: 56, S: 57,
   bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62,
-  edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67,
+  edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67, solidDevOff: 68, bodyDevOff: 69,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -241,37 +242,43 @@ fn pushSolidEntry(v: u32, y: u32, lambda: f32) {
     atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_CONTACT_OVERFLOW);
   }
 }
-// The truncation terms (q, j) / (gamma_r phi0) of a ball bound, the "inside" marker
-// (j = 3e38) at phi0 <= 0, and the entry with mu lambda (the solid's own mu at x0).
-fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u32) -> vec4<f32> {
+// The truncation terms (q, D) = (g0, D) / max(gamma_r phi0, phi0 - r) of a ball bound
+// (q.w = 1; 0: no bound), the "inside" marker (q.w = 3e38) at phi0 <= 0, and the entry
+// with mu lambda (the solid's own mu at x0). f(d) = D.|d| - q.d <= 1 keeps
+// phi(x0 + d) >= min((1 - gamma_r) phi0, r): a vertex may come to the contact distance r,
+// where the barrier holds it, or by gamma_r of its clearance once nearer than r / (1 - gamma_r).
+struct OgcTerms { q: vec4<f32>, D: vec3<f32> }
+fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u32) -> OgcTerms {
   if (!(sb.phi0 > 0.0)) {
     atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_PENETRATION);
-    return vec4<f32>(0.0, 0.0, 0.0, 3.0e38);
+    return OgcTerms(vec4<f32>(0.0, 0.0, 0.0, 3.0e38), vec3<f32>(0.0));
   }
-  let s = 1.0 / (P.gammaR * sb.phi0);
+  let s = 1.0 / max(P.gammaR * sb.phi0, sb.phi0 - P.r);
   let lambda = select(0.0, -ogcActivation(sb.phi0, P.r, P.kc).y * length(sb.g0), sb.phi0 < P.r) * ogcSolidMu(h, x0);
   pushSolidEntry(v, y, lambda);
-  return vec4<f32>(sb.g0 * s, sb.J * s);
+  return OgcTerms(vec4<f32>(sb.g0 * s, 1.0), sb.D * s);
 }
-// f(d) = j |d| - q.d: the cut keeps f(d) <= 1 (an inside marker allows only d = 0).
-fn cutOf(qj: vec4<f32>, d: vec3<f32>) -> f32 {
-  if (qj.w >= 1.0e38) { return select(0.0, 3.0e38, any(d != vec3<f32>(0.0))); }
-  return qj.w * length(d) - dot(qj.xyz, d);
+// f(d) = D.|d| - q.d, convex and positively homogeneous: the cut keeps f(d) <= 1 (an
+// inside marker allows only d = 0).
+fn cutOf(t: OgcTerms, d: vec3<f32>) -> f32 {
+  if (t.q.w >= 1.0e38) { return select(0.0, 3.0e38, any(d != vec3<f32>(0.0))); }
+  return dot(t.D, abs(d)) - dot(t.q.xyz, d);
 }
-// The static solid over the ball |d| <= rho around x0: the truncation terms (q, j) =
-// (g0, J) / (gamma_r phi0), so that phi(x0 + d) >= (1 - gamma_r) phi0 wherever
-// j |d| - q.d <= 1, and a solid entry for the vertex when the ball can reach r.
-fn solidRound(v: u32, x0: vec3<f32>, rho: f32) -> vec4<f32> {
+// The static solid over the ball |d| <= rho around x0: the truncation terms (q, D) =
+// (g0, D) / max(gamma_r phi0, phi0 - r), so that phi(x0 + d) >= min((1 - gamma_r) phi0, r) wherever
+// D.|d| - q.d <= 1, and a solid entry for the vertex when the ball can reach r.
+fn solidRound(v: u32, x0: vec3<f32>, rho: f32) -> OgcTerms {
   let h = ogcSolidHeader();
   let rel = (x0 - h.origin) / (8.0 * h.cell);
   if (any(rel < vec3<f32>(0.0)) || any(rel >= vec3<f32>(h.dims))) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_BOUNDS); }
   let sb = ogcSolidBallBound(h, x0, rho, P.r);
-  var qj = vec4<f32>(0.0);
+  var qj = OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0));
   if (!sb.far) {
     qj = boundTerms(v, h, sb, x0, OGC_SOLID_Y);
-    if (qj.w < 1.0e38) { atomicAdd(&wgSolid, 1u); }
+    if (qj.q.w < 1.0e38) { atomicAdd(&wgSolid, 1u); }
   }
-  putWork4(P.solidOff + 4u * v, qj);
+  putWork4(P.solidOff + 4u * v, qj.q);
+  putWork4(P.solidDevOff + 4u * v, vec4<f32>(qj.D, 0.0));
   return qj;
 }
 @compute @workgroup_size(64)
@@ -320,13 +327,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (env > P.rqMax) { env = P.rqMax; atomicAdd(&wgCap, 1u); }
     atomicStore(&contacts[P.countsOff + v], 0u);
     // The moving solid: its terms (R1 q, j) and the carried displacement a_v.
-    var bq = vec4<f32>(0.0);
+    // The terms are in the body frame at the end pose: the relative motion d is R1^T (w - a_v).
+    var bq = OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0));
+    var bRt = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0));
     var a = vec3<f32>(0.0);
     // Bit 2: in a conflict with the moving solid's sample this step, so carried rigidly
     // with it: the pair then keeps its gap whatever the solid does.
     var carried = P.bodyBase != 0u && (flags & 4u) != 0u;
     if (P.bodyBase != 0u) {
       let p1 = ogcPose(1u);
+      bRt = transpose(p1.R);
       var pd = p1;
       if (mandatory) { pd = ogcPose(0u); }
       let y0 = ogcToBody(pd, x);
@@ -342,10 +352,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
         let hb = ogcSolidHeaderAt(P.bodyBase);
         let sb = ogcSolidBallBound(hb, y0, length(w - a) + 0.5 * env, P.r);
         if (!sb.far) {
-          let t = boundTerms(v, hb, sb, y0, OGC_BODY_Y);
-          bq = vec4<f32>(p1.R * t.xyz, t.w);
-          if (t.w >= 1.0e38) { bq = t; } else { atomicAdd(&wgBody, 1u); }
-          if (held || cutOf(bq, w - a) > 1.0) { w = a; carried = true; }
+          bq = boundTerms(v, hb, sb, y0, OGC_BODY_Y);
+          if (bq.q.w < 1.0e38) { atomicAdd(&wgBody, 1u); }
+          // Carried with the solid: held and in contact (the anchor friction keeps it at),
+          // or within its reach in a round redone held (a conflict with the solid's samples:
+          // the cloth near them moves with them, the conflict's whole neighbourhood at once).
+          // Otherwise the prediction moves towards a_v only as far as the bound needs,
+          // (1 - t) f(w - a) = 1: a vertex the solid does not touch is not dragged.
+          let fb = cutOf(bq, bRt * (w - a));
+          if (forced || (held && sb.phi0 < P.r)) { w = a; carried = true; }
+          else if (fb > 1.0) { w = mix(w, a, 1.0 - 1.0 / fb); carried = true; }
         }
       }
     }
@@ -356,14 +372,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       let lw = length(w);
       if (lw > room) { w *= room / lw; atomicAdd(&wgCap, 1u); }
       let qj = solidRound(v, x, length(w) + 0.5 * env);
-      let f = qj.w * length(w) - dot(qj.xyz, w);
-      if (f > 1.0) { w = select(w / f, vec3<f32>(0.0), qj.w >= 1.0e38); }
+      let f = cutOf(qj, w);
+      if (f > 1.0) { w = select(w / f, vec3<f32>(0.0), qj.q.w >= 1.0e38); }
     }
     if (P.bodyBase != 0u) {
       // Both bounds hold the prediction (f32 rounding aside), or the cloth is squeezed.
-      if (cutOf(bq, w - a) > 1.0 + 1.0e-5) { atomicAdd(&wgSqueeze, 1u); }
-      putWork4(P.bodyOff + 8u * v, bq);
+      if (cutOf(bq, bRt * (w - a)) > 1.0 + 1.0e-5) { atomicAdd(&wgSqueeze, 1u); }
+      putWork4(P.bodyOff + 8u * v, bq.q);
       putWork4(P.bodyOff + 8u * v + 4u, vec4<f32>(a, 0.0));
+      putWork4(P.bodyDevOff + 4u * v, vec4<f32>(bq.D, 0.0));
     }
     if (fresh) { pred[P.N + v] = vec4<f32>(select(x + w, yref.xyz, held && !carried), yref.w); }
     pred[v] = vec4<f32>(w, plen);
@@ -622,7 +639,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * The moving solid cuts delta alike, its bound on the motion relative to the solid
  * w - a_v + delta (its q already turned to the world frame by the end pose).
  */
-export const OGC_APPLY_WGSL = header([0, 2, 4, 5, 9, 14], [2]) + PRED_FNS + /* wgsl */`
+export const OGC_APPLY_WGSL = header([0, 2, 4, 5, 8, 9, 14], [2]) + PRED_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 var<workgroup> wgCount: atomic<u32>;
 var<workgroup> wgCapped: atomic<u32>;
 var<workgroup> wgSolidCut: atomic<u32>;
@@ -630,12 +647,13 @@ var<workgroup> wgBodyCut: atomic<u32>;
 fn work4(b: u32) -> vec4<f32> {
   return bitcast<vec4<f32>>(vec4<u32>(atomicLoad(&work[b]), atomicLoad(&work[b + 1u]), atomicLoad(&work[b + 2u]), atomicLoad(&work[b + 3u])));
 }
-// Scale delta so that f(base + delta) <= 1 with f(d) = j |d| - q.d (subadditive): room 1 - f(base).
-fn affineCut(qj: vec4<f32>, base: vec3<f32>, delta: ptr<function, vec3<f32>>) -> bool {
-  let room = max(1.0 - (qj.w * length(base) - dot(qj.xyz, base)), 0.0);
-  let den = qj.w * length(*delta) - dot(qj.xyz, *delta);
-  if (den > room) { *delta *= room / den; return true; }
-  return false;
+// The scale of delta that keeps f(base + delta) <= 1 with f(d) = D.|d| - q.d (subadditive
+// and positively homogeneous): room 1 - f(base). An inside marker allows no motion.
+fn cutScale(q: vec4<f32>, D: vec3<f32>, base: vec3<f32>, delta: vec3<f32>) -> f32 {
+  if (q.w >= 1.0e38) { return select(1.0, 0.0, any(delta != vec3<f32>(0.0))); }
+  let room = max(1.0 - (dot(D, abs(base)) - dot(q.xyz, base)), 0.0);
+  let den = dot(D, abs(delta)) - dot(q.xyz, delta);
+  return select(1.0, room / den, den > room);
 }
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -650,13 +668,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let l = length(delta);
     if (l > det.w) { delta *= det.w / l; cut = true; atomicAdd(&wgCapped, 1u); }
     if (P.solidBase != 0u) {
-      // The static solid: phi(x_det + w + t delta) >= (1 - gamma_r) phi0 for t <= (1 - f(w)) / (j |delta| - q.delta).
-      if (affineCut(work4(P.solidOff + 4u * v), w, &delta)) { cut = true; atomicAdd(&wgSolidCut, 1u); }
+      // The static solid: phi(x_det + w + t delta) >= min((1 - gamma_r) phi0, r) for t <= (1 - f(w)) / f(delta).
+      let k = cutScale(work4(P.solidOff + 4u * v), work4(P.solidDevOff + 4u * v).xyz, w, delta);
+      if (k < 1.0) { delta *= k; cut = true; atomicAdd(&wgSolidCut, 1u); }
     }
     if (P.bodyBase != 0u) {
-      // The moving solid: phi_body >= (1 - gamma_r) phi0 for the motion w - a_v + delta relative to it.
+      // The moving solid: phi_body >= min((1 - gamma_r) phi0, r) for the motion w - a_v + delta relative to it.
+      // Its terms are in the body frame at the end pose.
       let qj = work4(P.bodyOff + 8u * v);
-      if (qj.w != 0.0 && affineCut(qj, w - work4(P.bodyOff + 8u * v + 4u).xyz, &delta)) { cut = true; atomicAdd(&wgBodyCut, 1u); }
+      if (qj.w != 0.0) {
+        let Rt = transpose(ogcPose(1u).R);
+        let k = cutScale(qj, work4(P.bodyDevOff + 4u * v).xyz, Rt * (w - work4(P.bodyOff + 8u * v + 4u).xyz), Rt * delta);
+        if (k < 1.0) { delta *= k; cut = true; atomicAdd(&wgBodyCut, 1u); }
+      }
     }
     if (cut) {
       pos[v] = vec4<f32>(det.xyz + w + delta, p.w);

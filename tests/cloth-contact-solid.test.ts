@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildClothSolidField, clothSolidSampleEdges, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
 import {
-  add, boxSdf, dot, faceInsideSolid, norm, rng, scale, solidBallBound, solidContact, solidTruncate, sphereSdf, sub,
+  add, boxSdf, dot, faceInsideSolid, norm, rng, scale, solidBallBound, solidBoundDrop, solidContact, solidKeep, solidTruncate, sphereSdf, sub,
   type ContactParams, type V3,
 } from "./cloth-contact-oracle";
 
@@ -97,7 +97,7 @@ test("solid field: a local rebuild after a cut equals a full build of the cut so
   assert.ok(phiAt([0.05, 0.04, 0.03 + 1e-3]) < 2e-3 && sampleClothSolidField(local, [0.05, 0.04, 0.02]).phi > 0, "the cut opens the solid under the point");
 });
 
-test("solid ball bound: phi(x0 + d) >= phi0 + g0.d - J|d| over the ball, at sharp edges, corners and the sphere", () => {
+test("solid ball bound: phi(x0 + d) >= phi0 + g0.d - D.|d| over the ball (per-axis gradient deviation), at sharp edges, corners and the sphere", () => {
   const R = rng(7), r = 2e-3;
   let near = 0, far = 0;
   for (const x0 of nearSolid(R, 300)) {
@@ -106,33 +106,33 @@ test("solid ball bound: phi(x0 + d) >= phi0 + g0.d - J|d| over the ball, at shar
     for (let k = 0; k < 120; k++) {
       const d = scale(unit(R), rho * Math.cbrt(R())), phi = phiAt(add(x0, d));
       if (b.far) assert.ok(phi >= r - 1e-9, `far ball reaches ${phi} at ${x0}`);
-      else assert.ok(phi >= b.phi0 + dot(b.g0, d) - b.J * norm(d) - 1e-9, `bound at ${x0} + ${d}: ${phi}`);
+      else assert.ok(phi >= b.phi0 + dot(b.g0, d) - solidBoundDrop(b, d) - 1e-9, `bound at ${x0} + ${d}: ${phi}`);
     }
   }
   assert.ok(near > 100 && far > 10, `${near} near, ${far} far`);
 });
 
-test("solid truncation keeps phi >= (1 - gamma_r) phi0 along the whole motion and leaves sliding on a flat face whole", () => {
+test("solid truncation keeps phi >= min((1 - gamma_r) phi0, r) along the whole motion and leaves sliding on a flat face whole", () => {
   const R = rng(9), r = 2e-3, gammaR = 0.9;
   let cut = 0;
   for (const x0 of nearSolid(R, 300)) {
     const rho = 0.002 + 0.016 * R(), b = solidBallBound(field, x0, rho, r);
     const raw = scale(unit(R), rho * (0.3 + 0.7 * R()));
-    const d = solidTruncate(b, raw, gammaR);
+    const d = solidTruncate(b, raw, gammaR, r);
     if (norm(sub(d, raw)) > 1e-12) cut++;
     for (let s = 0; s <= 64; s++) {
       const phi = phiAt(add(x0, scale(d, s / 64)));
-      assert.ok(phi >= (b.far ? r : (1 - gammaR) * b.phi0) - 1e-9, `phi ${phi} along the truncated motion from ${x0}`);
+      assert.ok(phi >= (b.far ? r : solidKeep(b.phi0, gammaR, r)) - 1e-9, `phi ${phi} along the truncated motion from ${x0}`);
     }
   }
   assert.ok(cut > 30, `the motions cut (${cut})`);
   // Resting on the box's top face 0.4 r up: a slide ten times the gap is untouched,
   // an approach of twice the gap keeps (1 - gamma_r) of it.
   const x0: V3 = [0.05, 0.04, 0.03 + 0.4 * r], b = solidBallBound(field, x0, 0.009, r);
-  assert.ok(!b.far && b.J < 1e-4, `flat face J ${b.J}`);
+  assert.ok(!b.far && Math.max(...b.D) < 1e-4, `flat face D ${b.D}`);
   const slide: V3 = [8e-3, -3e-3, 0];
-  assert.deepEqual(solidTruncate(b, slide, gammaR), slide);
-  const press = solidTruncate(b, [0, 0, -0.8 * r], gammaR);
+  assert.deepEqual(solidTruncate(b, slide, gammaR, r), slide);
+  const press = solidTruncate(b, [0, 0, -0.8 * r], gammaR, r);
   assert.ok(Math.abs(phiAt(add(x0, press)) - (1 - gammaR) * 0.4 * r) < 1e-8, "approach to the planar limit");
   // An isotropic Lipschitz ball (phi0 / L_max) would have cut the slide to under a tenth.
   assert.ok(0.9 * 0.4 * r / field.maxLipschitz < 0.1 * norm(slide));

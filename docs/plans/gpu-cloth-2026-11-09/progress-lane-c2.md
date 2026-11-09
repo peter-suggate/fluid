@@ -937,3 +937,46 @@ The plate test:
    - with a body, `encodeDetection` encodes `heldRounds` redo/round pairs, plus a final `redoLast` check.
 6. **Counters.** `solidIntersections` now includes faces inside the moving solid at the step's end pose. `OgcFrameCounters` gains `bodyContacts`, `bodyCut` and `heldConflictPair`.
 7. **Static solids now get hull-edge pairs too.** No change is needed on your side. The cost is +3 ms a round on the rotating sphere, and the contact buffer grows 64 bytes per authored sample (1.4 MB at 21 K samples).
+
+## 2026-11-09 M6 squeeze semantics: the bound keeps min((1 − γ_r) φ0, r), least carry, per-axis deviations
+
+Coordinator's item (2): `bodySqueeze` must fire only when the gap between the solids really is below the cloth's 2r. Cloth pressed into a wider gap must resolve.
+
+**Bound normalisation, static and moving.** The scale changes from s = 1/(γ_r φ0) to s = 1/max(γ_r φ0, φ0 − r).
+- f(d) ≤ 1 now keeps φ ≥ min((1 − γ_r) φ0, r). A vertex may come down to the contact distance r, where the barrier holds it. Once nearer than r/(1 − γ_r), it may close γ_r of its clearance.
+- The old scale stopped every vertex at 0.1 φ0 of its clearance, however far it was. So a 3r gap could not take a sheet resting at r below a plate coming down: carrying with the plate cut against the floor, which raised `bodySqueeze`.
+- The squeeze check (the body's cut after the static cut > 1 + 1e-5) is now equivalent to a gap below about 2r along the path from hold to carry.
+
+**Per-axis gradient deviations.** The bound changes from J|d| to D·|d|: φ(x0 + d) ≥ φ0 + g0·d − Σ_a D_a|d_a|, with D_a the largest |∂_a φ − g0_a| over the cells the ball's box touches.
+- J was |D| (Cauchy–Schwarz). The per-axis form uses the same cell ranges, so it is strictly tighter and costs the same.
+- Under a plate's edge, a slide along x sees D_x = 1, not |D| ≈ 1.16. That difference is what dragged the sheet in the gap test (below).
+- **Layout.** Each set of terms is two vec4s, `OgcTerms {q: (g0 s, marker), D: D s}`. The marker is 1 for a bound, 3e38 inside, and 0 for none.
+  - The static D sits at `solidDevOff`, which is 8N + T + E without a body and 16N + T + E with one.
+  - The body's D sits at `bodyDevOff` = 20N + T + E. The body's terms stay in the body frame at the end pose; prep and apply rotate d by R1ᵀ.
+  - The work buffer grows from (8 | 16)N + T + E to (12 | 24)N + T + E words. `OGC_PARAM_WORDS` goes from 68 to 72.
+  - Apply now binds the contact buffer (binding 8) to read the end pose.
+
+**Carry rule (prep, moving solid).**
+- **Full carry, w = a_v**, in two cases:
+  - held and in contact (φ0_body < r): the friction anchor;
+  - any vertex the solid's bound reaches, in a round redone held. A conflict with the solid's samples carries the whole neighbourhood at once, instead of one ring per held round.
+- **Least carry otherwise.** When f(w − a) > 1, w moves towards a_v only as far as the bound needs: w = mix(w, a, 1 − 1/f). A vertex the solid does not touch is not dragged.
+- The old rule carried every held vertex the bound could reach. It pushed floor-held cloth under a descending plate into the floor (a false squeeze), and it would drag a sheet under a passing plate.
+
+**Results (GPU, Metal).** `cloth-contact-body` (4 tests) and `cloth-contact-gpu` (11 tests): 15 of 15 pass.
+
+| Test | Result |
+|---|---|
+| New: gap 3r | Setup and measurements below. |
+| Plate in C1's solver (K = 20) | 0.99% RMS from rigid. 45 steps redone held, needing at most 2 held rounds. Min vertex φ 1.96e-3 m; faces φ ≥ 7.2e-5 m (exact). 31.6 ms per step with readback. |
+| Squeeze | Still fails explicitly. The plate descends onto the sheet's own thickness. |
+| Unit test against the oracle | The oracle (`solidBallBound` with D, `solidBoundDrop`, `solidTermScale`, `solidKeep`) is mirrored in Float64. |
+
+The gap-3r test:
+- **Setup.** A 21×21 sheet lies on a floor. A 30×2×30 cm plate comes down from 8r to 3r over 10 steps, then slides 10 cm at 0.2 m/s, so its trailing edge passes 2r over the sheet.
+- **Measurements.**
+  - No failing status and no intersections, on every step.
+  - Min φ is 2.00e-3 m to the floor and 4.00e-3 m to the plate.
+  - Sideways drift is 7e-6 m with 0 plate cuts. The least carry with J|d| had given 9.5 mm.
+
+**Note for C1.** The static solid now also uses the r floor and the per-axis bound, so there is less truncation near solids. Nothing changes on your side.

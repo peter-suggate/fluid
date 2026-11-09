@@ -657,31 +657,46 @@ export const boxSdf = (lo: V3, hi: V3) => {
 };
 export const sphereSdf = (c: V3, R: number) => (p: readonly number[]) => Math.hypot(p[0] - c[0], p[1] - c[1], p[2] - c[2]) - R;
 
-export interface OracleSolidBound { far: boolean; phi0: number; g0: V3; J: number; stored: boolean }
+/** phi(x0 + d) >= phi0 + g0.d - sum_a D_a |d_a| over the ball (D: per-axis gradient deviation). */
+export interface OracleSolidBound { far: boolean; phi0: number; g0: V3; D: V3; stored: boolean }
+
+/** The bound's drop D.|d|. */
+export function solidBoundDrop(b: OracleSolidBound, d: V3): number {
+  return b.D[0] * Math.abs(d[0]) + b.D[1] * Math.abs(d[1]) + b.D[2] * Math.abs(d[2]);
+}
 
 /** The GPU's ball bound (ogcSolidBallBound) in Float64 on the field's node values. */
 export function solidBallBound(field: ClothSolidField, x0: V3, rho: number, r: number): OracleSolidBound {
   const s = sampleClothSolidField(field, x0);
-  const out: OracleSolidBound = { far: true, phi0: s.phi, g0: [...s.grad] as V3, J: 0, stored: s.stored };
+  const out: OracleSolidBound = { far: true, phi0: s.phi, g0: [...s.grad] as V3, D: [0, 0, 0], stored: s.stored };
   if (Math.min(s.phi, field.band) - field.maxLipschitz * rho >= r) return out;
   const cellOf = (p: V3) => p.map((v, a) => Math.floor((v - field.origin[a]) / field.cell));
   const c0 = cellOf(sub(x0, [rho, rho, rho])), c1 = cellOf(add(x0, [rho, rho, rho]));
-  let J = 0;
+  const D: V3 = [0, 0, 0];
   for (let cz = c0[2]; cz <= c1[2]; cz++) for (let cy = c0[1]; cy <= c1[1]; cy++) for (let cx = c0[0]; cx <= c1[0]; cx++) {
     const c = [cx, cy, cz], b = c.map(v => Math.floor(v / SOLID_BRICK_CELLS));
     const brick = field.bricks.get(b.join(","));
     if (!brick) return out;
     const { lo, hi } = cellGradientRange(brick.values, c.map((v, a) => v - SOLID_BRICK_CELLS * b[a]) as V3);
-    J = Math.max(J, Math.hypot(...[0, 1, 2].map(a => Math.max(Math.abs(hi[a] / field.cell - s.grad[a]), Math.abs(s.grad[a] - lo[a] / field.cell)))));
+    for (let a = 0; a < 3; a++) D[a] = Math.max(D[a], Math.abs(hi[a] / field.cell - s.grad[a]), Math.abs(s.grad[a] - lo[a] / field.cell));
   }
-  return { ...out, far: false, J };
+  return { ...out, far: false, D };
 }
 
-/** Apply's solid factor: the displacement d from x_det scaled by 1 / max(1, j|d| - q.d). */
-export function solidTruncate(b: OracleSolidBound, d: V3, gammaR: number): V3 {
+/** The bound's normalisation: f(d) = (D.|d| - g0.d) s <= 1 keeps phi >= min((1 - gamma_r) phi0, r). */
+export function solidTermScale(phi0: number, gammaR: number, r: number): number {
+  return 1 / Math.max(gammaR * phi0, phi0 - r);
+}
+/** The clearance a cut keeps: min((1 - gamma_r) phi0, r). */
+export function solidKeep(phi0: number, gammaR: number, r: number): number {
+  return Math.min((1 - gammaR) * phi0, r);
+}
+
+/** Apply's solid factor: the displacement d from x_det scaled by 1 / max(1, D.|d| s - q.d). */
+export function solidTruncate(b: OracleSolidBound, d: V3, gammaR: number, r: number): V3 {
   if (b.far) return d;
   if (!(b.phi0 > 0)) return [0, 0, 0];
-  const s = 1 / (gammaR * b.phi0), den = b.J * s * norm(d) - s * dot(b.g0, d);
+  const s = solidTermScale(b.phi0, gammaR, r), den = s * solidBoundDrop(b, d) - s * dot(b.g0, d);
   return den > 1 ? scale(d, 1 / den) : d;
 }
 
