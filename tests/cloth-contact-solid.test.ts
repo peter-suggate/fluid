@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildClothSolidField, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, clothSolidSampleEdges, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
 import {
   add, boxSdf, dot, faceInsideSolid, norm, rng, scale, solidBallBound, solidContact, solidTruncate, sphereSdf, sub,
   type ContactParams, type V3,
@@ -219,6 +219,28 @@ test("solid surface samples: on the zero set wherever it is convex and not flat 
   assert.ok(sp.length > 100 && inner.length === 0 && flat.length === 0, `${sp.length} step samples, ${inner.length} along the inner crease, ${flat.length} on the flat tops`);
   assert.equal(clothSolidSamples(step), clothSolidSamples(step), "computed once per field");
   assert.throws(() => clothSolidSamples(field, { r: 0, edge: 0.01 }), RangeError);
+  // Hull edges: each a pair i < j of neighbouring samples, once; along a convex edge each sample
+  // reaches the next, so a straight segment between two samples lies within the hull edges' cover.
+  const edges = clothSolidSampleEdges(step), keys = new Set<number>(), S = sp.length, deg = new Uint32Array(S);
+  for (let k = 0; k < edges.length; k += 2) {
+    const i = edges[k]!, j = edges[k + 1]!;
+    assert.ok(i < j && j < S && !keys.has(i * S + j), `hull edge ${i}-${j}`);
+    keys.add(i * S + j); deg[i]!++; deg[j]!++;
+    assert.ok(norm(sub(sp[i]!, sp[j]!)) < 2 * h, `hull edge ${i}-${j} spans ${norm(sub(sp[i]!, sp[j]!))} m`);
+  }
+  const lone = sp.filter((_, i) => deg[i] === 0);
+  assert.ok(lone.length < 0.05 * S, `${lone.length} of ${S} samples without a neighbour: ${lone.slice(0, 4).map(p => p.map(v => v.toFixed(4)).join(" ")).join("; ")}`);
+  // The convex edge x = 0.05, z = -0.02: consecutive samples along it, a cell or less apart, are joined.
+  const line = sp.map((p, i) => ({ p, i })).filter(({ p }) => Math.abs(p[0] - 0.05) < 1e-3 && Math.abs(p[2] + 0.02) < 1e-3).sort((a, b) => a.p[1] - b.p[1]);
+  let joined = 0;
+  for (let k = 1; k < line.length; k++) {
+    const a = line[k - 1]!, b = line[k]!;
+    if (b.p[1] - a.p[1] > h) continue;
+    joined++;
+    assert.ok(keys.has(Math.min(a.i, b.i) * S + Math.max(a.i, b.i)), `edge samples at y ${a.p[1]} and ${b.p[1]} are not joined`);
+  }
+  assert.ok(joined > 10, `${joined} consecutive pairs along the edge x = 0.05, z = -0.02 (${line.length} samples)`);
+  assert.equal(clothSolidSampleEdges(step), edges, "computed once per field");
 });
 
 test("exact face-in-solid oracle: a face cutting a box edge between outside vertices is inside, one clearing it is not, and it agrees with dense sampling", () => {

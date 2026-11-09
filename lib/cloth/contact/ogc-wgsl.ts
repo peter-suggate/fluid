@@ -10,14 +10,21 @@
  *   edge-edge     x = own edge e, y = other edge | 1 << 31,
  *                 z = lagged normal force magnitude, w = pack2x16unorm(s, t)
  *   vertex-solid  x = v, y = OGC_SOLID_Y (feature 7, no face), z = lagged normal force, w = 0
- *   sample-facet  x = N + s for static surface sample s, y = face | feature << 28,
- *                 z = mu lambda (the solid's mu), w = 1; held by the face's feature vertices
+ *   vertex-body   x = v, y = OGC_BODY_Y (feature 7, face 1): the moving solid, likewise
+ *   sample-facet  x = N + s for surface sample s, y = face | feature << 28,
+ *                 z = mu lambda (the solid's mu), w = 1; held by the face's feature vertices.
+ *                 s < S is a static sample; S <= s < S + SB is the moving solid's sample s - S,
+ *                 posed by the step's end pose.
  * Feature: vertex k (0..2), edge (t[k], t[k+1]) (3..5), face interior (6), static solid (7).
  * Every entry is self-describing, so the gather never chases a second list.
  *
  * Contact buffer header (vec4<u32>): [0] (N, list capacity, counts base, entries base),
  * [1] (r, k_c, mu, eps_v dt) as f32, [2] (solid image word offset, 0 when none, the surface
- * samples' vec4 offset, their count, 0); sample s is (x, y, z, mu) as f32.
+ * samples' vec4 offset, their count S, 0); sample s is (x, y, z, mu) as f32.
+ * [3] (the moving solid's image word offset, 0 when none, its body-frame samples' vec4
+ * offset, their count SB, the pose table's vec4 offset), [4..7] the step's start pose and
+ * [8..11] its end pose (OGC_POSE_WORDS each: centre, then the rotation's columns), which the
+ * step's begin copies from the table the frame's owner uploads.
  */
 import { SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WORD } from "./solid-field";
 
@@ -47,9 +54,13 @@ export const OGC_COUNTER = {
   solidIntersections: 38,
   /** The round's largest envelope (f32 bits, set by the cell kernel): every face's grid box is grown by it. */
   roundEnvelope: 39,
+  /** Vertices with a moving-solid entry over the frame's rounds, and the truncations its bound made. */
+  frameBodyContacts: 40, frameBodyCut: 41,
+  /** A pair (words 42..45, ids as in the pair buffer: EE bit on an edge-edge pair) that conflicted in a held round. */
+  heldConflictPair: 42,
 } as const;
-export const OGC_COUNTER_WORDS = 40;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37];
+export const OGC_COUNTER_WORDS = 46;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41];
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -71,6 +82,16 @@ export const OGC_STATUS = {
   solidPenetration: 128,
   /** A vertex left the box the solid field covers, where the solid is not seen. */
   solidBounds: 256,
+  /**
+   * A vertex carried by the moving solid has no motion that both it and the static
+   * solid allow (cloth pressed between them), or its carried motion leaves the band
+   * the static field covers: the step cannot keep both bounds.
+   */
+  bodySqueeze: 512,
+  /** A round already redone held still had crossing predictions (the moving solid's carried ones). */
+  heldConflict: 1024,
+  /** A step ran past the poses the frame's owner uploaded for the moving solid. */
+  bodyPose: 2048,
 } as const;
 
 /** Truncation schemes: Planar-DAT (Chen, Hsu, Ayman, Macklin 2026) and the isotropic OGC bound. */
@@ -128,6 +149,12 @@ const OGC_ST_GRID_OVERFLOW = ${OGC_STATUS.gridOverflow}u;
 const OGC_ST_ROUND_CAP = ${OGC_STATUS.roundCap}u;
 const OGC_ST_ENVELOPE_CAP = ${OGC_STATUS.envelopeCap}u;
 const OGC_ST_NONFINITE = ${OGC_STATUS.nonFinite}u;
+const OGC_ST_BODY_SQUEEZE = ${OGC_STATUS.bodySqueeze}u;
+const OGC_ST_HELD_CONFLICT = ${OGC_STATUS.heldConflict}u;
+const OGC_ST_BODY_POSE = ${OGC_STATUS.bodyPose}u;
+const OGC_F_BODY_CONTACTS = ${OGC_COUNTER.frameBodyContacts}u;
+const OGC_F_BODY_CUT = ${OGC_COUNTER.frameBodyCut}u;
+const OGC_HELD_PAIR = ${OGC_COUNTER.heldConflictPair}u;
 `;
 
 /** Geometry, activation and friction shared by detection, the vertex block and the tests. */
@@ -195,28 +222,51 @@ fn ogcFrictionF1OverY(y: f32, eps: f32) -> f32 {
 }
 `;
 
+/** Words of one pose in the contact buffer: the centre (xyz, 0), then the rotation's three columns. */
+export const OGC_POSE_WORDS = 16;
+/** Contact-buffer word of the step's start pose; its end pose follows. */
+export const OGC_POSE_WORD = 16;
+
 /**
- * The static solid field (solid-field.ts) as the GPU reads it. The host defines
- *   fn ogcSolidBase() -> u32          word offset of the image (0: no solid)
- *   fn ogcSolidWord(i: u32) -> u32    word i of the buffer holding it
+ * Solid fields (solid-field.ts) as the GPU reads them: the static one, and the
+ * moving one in its own body frame. The host defines
+ *   fn ogcSolidBase() -> u32          word offset of the static image (0: no solid)
+ *   fn ogcSolidWord(i: u32) -> u32    word i of the contact buffer holding them
+ * The moving solid's image offset is header word 12 (0: none); the step's start
+ * and end poses sit at OGC_POSE_WORD.
  */
 export const OGC_SOLID_WGSL = /* wgsl */`
 const OGC_SOLID_FEATURE = 7u;
 const OGC_SOLID_Y = 0x70000000u;
+const OGC_BODY_Y = 0x70000001u;
 const OGC_SOLID_HEADER_WORDS = ${SOLID_HEADER_WORDS}u;
-struct OgcSolidHeader { mask: u32, cell: f32, band: f32, lmax: f32, origin: vec3<f32>, dims: vec3<u32> }
-fn ogcSolidHeader() -> OgcSolidHeader {
-  let b = ogcSolidBase();
+const OGC_POSE_WORD = ${OGC_POSE_WORD}u;
+const OGC_POSE_WORDS = ${OGC_POSE_WORDS}u;
+struct OgcSolidHeader { base: u32, mask: u32, cell: f32, band: f32, lmax: f32, origin: vec3<f32>, dims: vec3<u32> }
+fn ogcSolidHeaderAt(b: u32) -> OgcSolidHeader {
   let w = vec4<u32>(ogcSolidWord(b), ogcSolidWord(b + 2u), ogcSolidWord(b + 3u), ogcSolidWord(b + 7u));
-  return OgcSolidHeader(w.x, bitcast<f32>(w.y), bitcast<f32>(w.z), bitcast<f32>(w.w),
+  return OgcSolidHeader(b, w.x, bitcast<f32>(w.y), bitcast<f32>(w.z), bitcast<f32>(w.w),
     bitcast<vec3<f32>>(vec3<u32>(ogcSolidWord(b + 4u), ogcSolidWord(b + 5u), ogcSolidWord(b + 6u))),
     vec3<u32>(ogcSolidWord(b + 8u), ogcSolidWord(b + 9u), ogcSolidWord(b + 10u)));
 }
+fn ogcSolidHeader() -> OgcSolidHeader { return ogcSolidHeaderAt(ogcSolidBase()); }
+fn ogcBodyBase() -> u32 { return ogcSolidWord(12u); }
+// A rigid pose: x_world = R x_body + c.
+struct OgcPose { c: vec3<f32>, R: mat3x3<f32> }
+fn ogcWordF(i: u32) -> f32 { return bitcast<f32>(ogcSolidWord(i)); }
+fn ogcWordV(i: u32) -> vec3<f32> { return vec3<f32>(ogcWordF(i), ogcWordF(i + 1u), ogcWordF(i + 2u)); }
+// k = 0: the step's start pose; k = 1: its end pose.
+fn ogcPose(k: u32) -> OgcPose {
+  let b = OGC_POSE_WORD + OGC_POSE_WORDS * k;
+  return OgcPose(ogcWordV(b), mat3x3<f32>(ogcWordV(b + 4u), ogcWordV(b + 8u), ogcWordV(b + 12u)));
+}
+fn ogcToBody(p: OgcPose, x: vec3<f32>) -> vec3<f32> { return transpose(p.R) * (x - p.c); }
+fn ogcToWorld(p: OgcPose, y: vec3<f32>) -> vec3<f32> { return p.R * y + p.c; }
 // Absolute word offset of brick b's nodes, or OGC_NONE. The table is at most half full.
 fn ogcSolidBrick(h: OgcSolidHeader, b: vec3<i32>) -> u32 {
   if (any(b < vec3<i32>(0)) || any(vec3<u32>(b) >= h.dims)) { return OGC_NONE; }
   let u = vec3<u32>(b);
-  let base = ogcSolidBase();
+  let base = h.base;
   var s = ((u.x * 73856093u) ^ (u.y * 19349663u) ^ (u.z * 83492791u)) & h.mask;
   loop {
     let at = base + OGC_SOLID_HEADER_WORDS + 4u * s;
@@ -332,21 +382,35 @@ ${OGC_COMMON_WGSL}
 @group(${group}) @binding(${binding}) var<storage, read> ogcContacts: array<vec4<u32>>;
 fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
 fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
-// Static surface sample at index i >= N (sample-facet entries).
-fn ogcSamplePos(i: u32) -> vec3<f32> { return bitcast<vec3<f32>>(ogcContacts[ogcContacts[2].y + i - ogcContacts[0].x].xyz); }
 ${OGC_SOLID_WGSL}
+// Surface sample at index i >= N (sample-facet entries): static below N + S, else the
+// moving solid's body-frame sample posed at the step's end, and where it started the step.
+fn ogcSampleRel(i: u32) -> u32 { return i - ogcContacts[0].x; }
+fn ogcSampleLocal(i: u32) -> vec3<f32> {
+  let s = ogcSampleRel(i); let S = ogcContacts[2].z;
+  if (s < S) { return bitcast<vec3<f32>>(ogcContacts[ogcContacts[2].y + s].xyz); }
+  return bitcast<vec3<f32>>(ogcContacts[ogcContacts[3].y + s - S].xyz);
+}
+fn ogcSamplePos(i: u32) -> vec3<f32> {
+  if (ogcSampleRel(i) < ogcContacts[2].z) { return ogcSampleLocal(i); }
+  return ogcToWorld(ogcPose(1u), ogcSampleLocal(i));
+}
+fn ogcSampleStart(i: u32) -> vec3<f32> {
+  if (ogcSampleRel(i) < ogcContacts[2].z) { return ogcSampleLocal(i); }
+  return ogcToWorld(ogcPose(0u), ogcSampleLocal(i));
+}
 
 struct OgcPairEval { f: vec3<f32>, h: mat3x3<f32>, e: f32 }
 
-// Vertex v against the static solid field at xv: the activation on phi with the
-// Gauss-Newton Hessian g'' grad phi grad phi^T, and lagged friction against the
-// fixed solid. phi <= 0 lies outside the barrier's domain: infinite energy.
-fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
-  let s = ogcSolidSample(ogcSolidHeader(), xv);
+// A vertex against a solid field at a point where it reads phi with world gradient g,
+// having slipped dx against the solid's surface over the step: the activation on phi
+// with the Gauss-Newton Hessian g'' g g^T, and lagged friction on the tangential slip.
+// phi <= 0 lies outside the barrier's domain: infinite energy.
+fn ogcFieldEval(phi: f32, g: vec3<f32>, dx: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
   var out = OgcPairEval(vec3<f32>(0.0), mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)), 0.0);
-  if (!(s.phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); return out; }
-  let act = ogcActivation(s.phi, params.x, params.y);
-  let g = s.grad;
+  // Infinity from a runtime word (ent.w is 0): a constant one would not fold.
+  if (!(phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); return out; }
+  let act = ogcActivation(phi, params.x, params.y);
   out.f = -act.y * g;
   out.h = act.z * mat3x3<f32>(g * g.x, g * g.y, g * g.z);
   out.e = act.x;
@@ -356,7 +420,6 @@ fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
     let gl = length(g);
     let n = select(vec3<f32>(0.0), g / gl, gl > 1e-30);
     let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
-    let dx = xv - ogcXt(v);
     let u = dx - n * dot(n, dx);
     let un = length(u);
     let fy = ogcFrictionF1OverY(un, params.w);
@@ -367,9 +430,26 @@ fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   return out;
 }
 
+// Vertex v against the static solid: the slip is its whole step x - x_t.
+fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
+  let s = ogcSolidSample(ogcSolidHeader(), xv);
+  return ogcFieldEval(s.phi, s.grad, xv - ogcXt(v), ent, params);
+}
+
+// Vertex v against the moving solid at its end pose: phi_body(R1^T (x - c1)) with
+// gradient R1 grad phi_body, and the slip measured against the solid's material point
+// that sat at x_t when the step began, carried rigidly to R1 R0^T (x_t - c0) + c1.
+fn ogcBodyEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
+  let p1 = ogcPose(1u);
+  let s = ogcSolidSample(ogcSolidHeaderAt(ogcBodyBase()), ogcToBody(p1, xv));
+  let carried = ogcToWorld(p1, ogcToBody(ogcPose(0u), ogcXt(v)));
+  return ogcFieldEval(s.phi, p1.R * s.grad, xv - carried, ent, params);
+}
+
 // One contact entry evaluated for vertex v placed at xv.
 fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
   if (ent.y == OGC_SOLID_Y) { return ogcSolidEval(v, xv, ent, params); }
+  if (ent.y == OGC_BODY_Y) { return ogcBodyEval(v, xv, ent, params); }
   var ids: vec4<u32>;
   var w = vec4<f32>(0.0);
   var X: array<vec3<f32>, 4>;
@@ -410,12 +490,14 @@ fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   let act = ogcActivation(d, params.x, params.y);
   let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
   var out = OgcPairEval(-act.y * wr * n, (wr * wr * act.z) * nn, act.x);
-  // A sample-facet entry carries mu lambda with the solid's own mu; its sample is static.
+  // A sample-facet entry carries mu lambda with the solid's own mu; its sample's own
+  // motion over the step is the solid's (none for a static one).
   let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
   let ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled);
   if (ml > 0.0) {
     var dx = vec3<f32>(0.0);
-    for (var i = select(0u, 1u, sampled); i < 4u; i++) { dx += w[i] * (X[i] - ogcXt(ids[i])); }
+    if (sampled) { dx = X[0] - ogcSampleStart(ent.x); } else { dx = w.x * (X[0] - ogcXt(ids[0])); }
+    for (var i = 1u; i < 4u; i++) { dx += w[i] * (X[i] - ogcXt(ids[i])); }
     let u = dx - n * dot(n, dx);
     let un = length(u);
     let fy = ogcFrictionF1OverY(un, params.w);

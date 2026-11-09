@@ -11,7 +11,8 @@
  *   13 the step start x_t     14 predictions w | predicted step end and residual estimate
  * work also holds, per vertex at solidOff, the static solid's truncation terms (q.xyz, j)
  * of the round, and at heldOff the held flags (bit 0: contact, truncation or conflict
- * this step; bit 1: held this step); the solid image sits in the contact buffer at
+ * this step; bit 1: held this step; bit 2: carried with the moving solid this step, after
+ * a conflict with its sample); the solid image sits in the contact buffer at
  * word solidBase.
  *
  * One detection round is nine indirect dispatches:
@@ -32,9 +33,9 @@
  *   plane  (n.xyz, certified support gap) as f32 bits; n points from the second primitive
  *          to the first; a gap <= 0 marks a pair with no separating plane
  */
-import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_SOLID_WGSL } from "./ogc-wgsl";
+import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_SOLID_WGSL } from "./ogc-wgsl";
 
-export const OGC_PARAM_WORDS = 64;
+export const OGC_PARAM_WORDS = 68;
 /** Indirect-args slots, three u32 each, in dispatch order. */
 export const OGC_DETECT_DISPATCHES = ["prep", "cell", "count", "scan1", "scan2", "scan3", "insert", "query", "bound"] as const;
 export const OGC_ARGS_WORDS = 3 * OGC_DETECT_DISPATCHES.length;
@@ -57,7 +58,9 @@ struct OgcParams {
   wgS1: u32, wgS2: u32, kc: f32, mode: u32,
   gammaR: f32, pairCap: u32, tvOff: u32, sepEps: f32,
   solidBase: u32, solidOff: u32, heldOff: u32, predict: u32,
-  cellRule: u32, S: u32, pad1: u32, pad2: u32,
+  cellRule: u32, S: u32, bodyBase: u32, bodyOff: u32,
+  SB: u32, wgPrep: u32, bodyReach: f32, pad2: u32,
+  edgeBase: u32, SE: u32, bodyEdgeBase: u32, SEB: u32,
 }
 `;
 
@@ -69,6 +72,8 @@ export const OGC_PARAM = {
   local1Off: 28, sums1Off: 29, local2Off: 30, sums2Off: 31, local3Off: 32, sums3Off: 33, entriesOff: 34, B2: 35,
   countsOff: 36, entriesBase: 37, dminTOff: 38, dminEOff: 39, envOff: 40, wgN: 41, wgT: 42, wgNE: 43, wgS1: 44, wgS2: 45, kc: 46,
   mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53, heldOff: 54, predict: 55, cellRule: 56, S: 57,
+  bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62,
+  edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -110,7 +115,12 @@ function header(bindings: readonly number[], rw: readonly number[] = []): string
  */
 const PRED_FNS = /* wgsl */`
 // Indices N .. N + S - 1 are the static solid's surface samples (x_det only): no prediction.
-fn predOf(i: u32) -> vec3<f32> { if (i >= P.N) { return vec3<f32>(0.0); } return pred[i].xyz; }
+// N + S .. N + S + SB - 1 are the moving solid's, predicted exactly by its poses (pred[N + i - S]).
+fn predOf(i: u32) -> vec3<f32> {
+  if (i < P.N) { return pred[i].xyz; }
+  if (i < P.N + P.S) { return vec3<f32>(0.0); }
+  return pred[P.N + i - P.S].xyz;
+}
 fn anchored(i: u32) -> vec3<f32> { return xdet[i].xyz + predOf(i); }
 `;
 
@@ -196,6 +206,17 @@ fn ogcSolidWord(i: u32) -> u32 { return atomicLoad(&contacts[i]); }
  * predicted 0 and its envelope covers the inertial displacement, r + s |v dt + g dt^2|:
  * Planar-DAT itself. A prediction into the static solid stops where the solid's
  * affine bound does, so every cut of the round scales only the residual.
+ *
+ * The moving solid (one-way: its poses are input). A vertex's detection pose is the
+ * step's start pose in the mandatory round and its end pose after (the solver's
+ * iterates already face the end pose), and a_v = R1 R_det^T (x_det - c_det) + c1 - x_det
+ * is the displacement that carries it with the solid. The solid's ball bound is taken
+ * in the body frame around R_det^T (x_det - c_det) and its cut is relative to a_v: a
+ * vertex the solid can reach that is held, or whose prediction the bound forbids,
+ * is predicted a_v (holding still is unsafe where the solid advances). A carried
+ * prediction the static solid then has to cut fails as OGC_ST_BODY_SQUEEZE. Threads
+ * N .. N + SB - 1 pose the solid's surface samples: x_det at the detection pose and
+ * the exact prediction to the end pose.
  */
 export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13, 14], [14]) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 var<workgroup> wgMaxEnv: atomic<u32>;
@@ -204,9 +225,38 @@ var<workgroup> wgCap: atomic<u32>;
 var<workgroup> wgBad: atomic<u32>;
 var<workgroup> wgHeld: atomic<u32>;
 var<workgroup> wgSolid: atomic<u32>;
+var<workgroup> wgBody: atomic<u32>;
+var<workgroup> wgSqueeze: atomic<u32>;
 fn putWork4(i: u32, q: vec4<f32>) {
   atomicStore(&work[i], bitcast<u32>(q.x)); atomicStore(&work[i + 1u], bitcast<u32>(q.y));
   atomicStore(&work[i + 2u], bitcast<u32>(q.z)); atomicStore(&work[i + 3u], bitcast<u32>(q.w));
+}
+fn pushSolidEntry(v: u32, y: u32, lambda: f32) {
+  let slot = atomicAdd(&contacts[P.countsOff + v], 1u);
+  if (slot < P.contactCap) {
+    let b = P.entriesBase + 4u * (v * P.contactCap + slot);
+    atomicStore(&contacts[b], v); atomicStore(&contacts[b + 1u], y);
+    atomicStore(&contacts[b + 2u], bitcast<u32>(lambda)); atomicStore(&contacts[b + 3u], 0u);
+  } else {
+    atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_CONTACT_OVERFLOW);
+  }
+}
+// The truncation terms (q, j) / (gamma_r phi0) of a ball bound, the "inside" marker
+// (j = 3e38) at phi0 <= 0, and the entry with mu lambda (the solid's own mu at x0).
+fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u32) -> vec4<f32> {
+  if (!(sb.phi0 > 0.0)) {
+    atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_PENETRATION);
+    return vec4<f32>(0.0, 0.0, 0.0, 3.0e38);
+  }
+  let s = 1.0 / (P.gammaR * sb.phi0);
+  let lambda = select(0.0, -ogcActivation(sb.phi0, P.r, P.kc).y * length(sb.g0), sb.phi0 < P.r) * ogcSolidMu(h, x0);
+  pushSolidEntry(v, y, lambda);
+  return vec4<f32>(sb.g0 * s, sb.J * s);
+}
+// f(d) = j |d| - q.d: the cut keeps f(d) <= 1 (an inside marker allows only d = 0).
+fn cutOf(qj: vec4<f32>, d: vec3<f32>) -> f32 {
+  if (qj.w >= 1.0e38) { return select(0.0, 3.0e38, any(d != vec3<f32>(0.0))); }
+  return qj.w * length(d) - dot(qj.xyz, d);
 }
 // The static solid over the ball |d| <= rho around x0: the truncation terms (q, j) =
 // (g0, J) / (gamma_r phi0), so that phi(x0 + d) >= (1 - gamma_r) phi0 wherever
@@ -218,24 +268,8 @@ fn solidRound(v: u32, x0: vec3<f32>, rho: f32) -> vec4<f32> {
   let sb = ogcSolidBallBound(h, x0, rho, P.r);
   var qj = vec4<f32>(0.0);
   if (!sb.far) {
-    if (!(sb.phi0 > 0.0)) {
-      qj.w = 3.0e38;
-      atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_PENETRATION);
-    } else {
-      let s = 1.0 / (P.gammaR * sb.phi0);
-      qj = vec4<f32>(sb.g0 * s, sb.J * s);
-      // mu lambda: the solid's own friction at x_det times the lagged normal force.
-      let lambda = select(0.0, -ogcActivation(sb.phi0, P.r, P.kc).y * length(sb.g0), sb.phi0 < P.r) * ogcSolidMu(h, x0);
-      let slot = atomicAdd(&contacts[P.countsOff + v], 1u);
-      if (slot < P.contactCap) {
-        let b = P.entriesBase + 4u * (v * P.contactCap + slot);
-        atomicStore(&contacts[b], v); atomicStore(&contacts[b + 1u], OGC_SOLID_Y);
-        atomicStore(&contacts[b + 2u], bitcast<u32>(lambda)); atomicStore(&contacts[b + 3u], 0u);
-      } else {
-        atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_CONTACT_OVERFLOW);
-      }
-      atomicAdd(&wgSolid, 1u);
-    }
+    qj = boundTerms(v, h, sb, x0, OGC_SOLID_Y);
+    if (qj.w < 1.0e38) { atomicAdd(&wgSolid, 1u); }
   }
   putWork4(P.solidOff + 4u * v, qj);
   return qj;
@@ -249,6 +283,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   let fresh = mandatory && !forced;
   if (v == 0u) { atomicStore(&counters[OGC_PAIR_SLOTS], 0u); atomicStore(&counters[OGC_CONFLICTS], 0u); }
   wgCube[li] = 0.0;
+  if (v >= P.N && v < P.N + P.SB) {
+    // The moving solid's sample: x_det at the detection pose, predicted exactly to the end pose.
+    let b = 4u * (atomicLoad(&contacts[13u]) + v - P.N);
+    let local = bitcast<vec4<f32>>(vec4<u32>(atomicLoad(&contacts[b]), atomicLoad(&contacts[b + 1u]), atomicLoad(&contacts[b + 2u]), atomicLoad(&contacts[b + 3u])));
+    let s = v - P.N;
+    let x1 = ogcToWorld(ogcPose(1u), local.xyz);
+    let x0 = select(x1, ogcToWorld(ogcPose(0u), local.xyz), mandatory);
+    xdet[P.N + P.S + s] = vec4<f32>(x0, local.w);
+    pred[2u * P.N + s] = vec4<f32>(x1 - x0, 0.0);
+  }
   if (v < P.N) {
     let x = select(pos[v].xyz, xt[v].xyz, mandatory);
     // The step's predicted displacement: v dt + g dt^2, or the solver's own initial
@@ -275,6 +319,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     var env = max(P.rqBase, P.r + P.envScale * select(yref.w, plen, held));
     if (env > P.rqMax) { env = P.rqMax; atomicAdd(&wgCap, 1u); }
     atomicStore(&contacts[P.countsOff + v], 0u);
+    // The moving solid: its terms (R1 q, j) and the carried displacement a_v.
+    var bq = vec4<f32>(0.0);
+    var a = vec3<f32>(0.0);
+    // Bit 2: in a conflict with the moving solid's sample this step, so carried rigidly
+    // with it: the pair then keeps its gap whatever the solid does.
+    var carried = P.bodyBase != 0u && (flags & 4u) != 0u;
+    if (P.bodyBase != 0u) {
+      let p1 = ogcPose(1u);
+      var pd = p1;
+      if (mandatory) { pd = ogcPose(0u); }
+      let y0 = ogcToBody(pd, x);
+      a = ogcToWorld(p1, y0) - x;
+      if (carried) { w = a; }
+      // Relative to the solid the round moves the vertex at most |w - a_v| + env / 2. A ball
+      // that clears every stored brick (all within bodyReach of the body origin) is free of
+      // it; otherwise the ball is kept within the band (rqMax / 2) and bounded.
+      if (length(y0) - (length(w - a) + 0.5 * env) < P.bodyReach) {
+        let room = max(0.5 * (P.rqMax - env), 0.0);
+        let lu = length(w - a);
+        if (lu > room) { w = a + (w - a) * (room / lu); atomicAdd(&wgCap, 1u); }
+        let hb = ogcSolidHeaderAt(P.bodyBase);
+        let sb = ogcSolidBallBound(hb, y0, length(w - a) + 0.5 * env, P.r);
+        if (!sb.far) {
+          let t = boundTerms(v, hb, sb, y0, OGC_BODY_Y);
+          bq = vec4<f32>(p1.R * t.xyz, t.w);
+          if (t.w >= 1.0e38) { bq = t; } else { atomicAdd(&wgBody, 1u); }
+          if (held || cutOf(bq, w - a) > 1.0) { w = a; carried = true; }
+        }
+      }
+    }
     if (P.solidBase != 0u) {
       // The round moves the vertex at most |w| + env / 2 (the cap is 0.5 gamma_r or gamma_p
       // of env); the field's band covers rqMax / 2.
@@ -285,7 +359,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       let f = qj.w * length(w) - dot(qj.xyz, w);
       if (f > 1.0) { w = select(w / f, vec3<f32>(0.0), qj.w >= 1.0e38); }
     }
-    if (fresh) { pred[P.N + v] = vec4<f32>(select(x + w, yref.xyz, held), yref.w); }
+    if (P.bodyBase != 0u) {
+      // Both bounds hold the prediction (f32 rounding aside), or the cloth is squeezed.
+      if (cutOf(bq, w - a) > 1.0 + 1.0e-5) { atomicAdd(&wgSqueeze, 1u); }
+      putWork4(P.bodyOff + 8u * v, bq);
+      putWork4(P.bodyOff + 8u * v + 4u, vec4<f32>(a, 0.0));
+    }
+    if (fresh) { pred[P.N + v] = vec4<f32>(select(x + w, yref.xyz, held && !carried), yref.w); }
     pred[v] = vec4<f32>(w, plen);
     if (!(all(abs(x) < vec3<f32>(3.0e38)))) { atomicOr(&wgBad, 1u); }
     xdet[v] = vec4<f32>(x, 0.0);
@@ -311,6 +391,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (hc != 0u) { atomicAdd(&counters[OGC_F_HELD], hc); }
     let sc = atomicLoad(&wgSolid);
     if (sc != 0u) { atomicAdd(&counters[OGC_F_SOLID_CONTACTS], sc); }
+    let bc = atomicLoad(&wgBody);
+    if (bc != 0u) { atomicAdd(&counters[OGC_F_BODY_CONTACTS], bc); }
+    if (atomicLoad(&wgSqueeze) != 0u) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_BODY_SQUEEZE); }
   }
 }
 `;
@@ -341,17 +424,35 @@ fn main() {
 
 const ARGS_FNS = /* wgsl */`
 fn writeArgs(on: bool) {
-  var n = array<u32, 9>(P.wgN, 1u, P.wgT, P.wgS1, P.wgS2, 1u, P.wgT, P.wgNE, P.wgN);
+  var n = array<u32, 9>(P.wgPrep, 1u, P.wgT, P.wgS1, P.wgS2, 1u, P.wgT, P.wgNE, P.wgN);
   for (var i = 0u; i < 9u; i++) {
     args[3u * i] = select(0u, n[i], on); args[3u * i + 1u] = 1u; args[3u * i + 2u] = 1u;
   }
 }
 `;
 
-/** Start of a step: the mandatory detection round, and the step's round count reset. */
-export const OGC_STEP_BEGIN_WGSL = header([0, 9, 10]) + ARGS_FNS + /* wgsl */`
+/**
+ * Start of a step: the mandatory detection round, and the step's round count reset.
+ * With a moving solid, the step's start and end poses are copied from the frame's
+ * pose table (entries k and k + 1 for the frame's step k; the table's first vec4
+ * holds its pose count); a step past the table fails as OGC_ST_BODY_POSE.
+ */
+export const OGC_STEP_BEGIN_WGSL = header([0, 8, 9, 10]) + ARGS_FNS + /* wgsl */`
+const OGC_POSE_WORD = ${OGC_POSE_WORD}u;
+const OGC_POSE_WORDS = ${OGC_POSE_WORDS}u;
 @compute @workgroup_size(1)
 fn main() {
+  if (P.bodyBase != 0u) {
+    let k = atomicLoad(&counters[OGC_F_STEPS]);
+    let table = 4u * atomicLoad(&contacts[15u]);
+    if (k + 1u < atomicLoad(&contacts[table])) {
+      for (var i = 0u; i < 2u * OGC_POSE_WORDS; i++) {
+        atomicStore(&contacts[OGC_POSE_WORD + i], atomicLoad(&contacts[table + 4u + OGC_POSE_WORDS * k + i]));
+      }
+    } else {
+      atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_BODY_POSE);
+    }
+  }
   atomicStore(&counters[OGC_ROUNDS], 0u);
   atomicStore(&counters[OGC_EXCEED], 0u);
   atomicStore(&counters[OGC_FORCE_HELD], 0u);
@@ -408,6 +509,22 @@ fn main() {
     atomicAdd(&counters[OGC_F_DETECTIONS], 1u);
   }
   writeArgs(on);
+}
+`;
+
+/**
+ * After the last round redone held: a conflict left there fails as OGC_ST_HELD_CONFLICT
+ * (the moving solid's carried cloth did not close over the conflicts in time).
+ */
+export const OGC_REDO_LAST_WGSL = header([0, 9, 10]) + ARGS_FNS + /* wgsl */`
+@compute @workgroup_size(1)
+fn main() {
+  let c = atomicExchange(&counters[OGC_CONFLICTS], 0u);
+  if (c > 0u) {
+    atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_HELD_CONFLICT);
+    atomicAdd(&counters[OGC_F_CONFLICTS], c);
+  }
+  writeArgs(false);
 }
 `;
 
@@ -502,11 +619,24 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * step and the next; tv is left at 1 for the next pass. A static solid then cuts
  * delta by its affine lower bound of phi (prep), which the prediction already meets:
  * f(w + delta) <= f(w) + j |delta| - q.delta for the convex f(d) = j |d| - q.d.
+ * The moving solid cuts delta alike, its bound on the motion relative to the solid
+ * w - a_v + delta (its q already turned to the world frame by the end pose).
  */
 export const OGC_APPLY_WGSL = header([0, 2, 4, 5, 9, 14], [2]) + PRED_FNS + /* wgsl */`
 var<workgroup> wgCount: atomic<u32>;
 var<workgroup> wgCapped: atomic<u32>;
 var<workgroup> wgSolidCut: atomic<u32>;
+var<workgroup> wgBodyCut: atomic<u32>;
+fn work4(b: u32) -> vec4<f32> {
+  return bitcast<vec4<f32>>(vec4<u32>(atomicLoad(&work[b]), atomicLoad(&work[b + 1u]), atomicLoad(&work[b + 2u]), atomicLoad(&work[b + 3u])));
+}
+// Scale delta so that f(base + delta) <= 1 with f(d) = j |d| - q.d (subadditive): room 1 - f(base).
+fn affineCut(qj: vec4<f32>, base: vec3<f32>, delta: ptr<function, vec3<f32>>) -> bool {
+  let room = max(1.0 - (qj.w * length(base) - dot(qj.xyz, base)), 0.0);
+  let den = qj.w * length(*delta) - dot(qj.xyz, *delta);
+  if (den > room) { *delta *= room / den; return true; }
+  return false;
+}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let v = gid.x;
@@ -521,11 +651,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (l > det.w) { delta *= det.w / l; cut = true; atomicAdd(&wgCapped, 1u); }
     if (P.solidBase != 0u) {
       // The static solid: phi(x_det + w + t delta) >= (1 - gamma_r) phi0 for t <= (1 - f(w)) / (j |delta| - q.delta).
-      let b = P.solidOff + 4u * v;
-      let qj = bitcast<vec4<f32>>(vec4<u32>(atomicLoad(&work[b]), atomicLoad(&work[b + 1u]), atomicLoad(&work[b + 2u]), atomicLoad(&work[b + 3u])));
-      let room = max(1.0 - (qj.w * length(w) - dot(qj.xyz, w)), 0.0);
-      let den = qj.w * length(delta) - dot(qj.xyz, delta);
-      if (den > room) { delta *= room / den; cut = true; atomicAdd(&wgSolidCut, 1u); }
+      if (affineCut(work4(P.solidOff + 4u * v), w, &delta)) { cut = true; atomicAdd(&wgSolidCut, 1u); }
+    }
+    if (P.bodyBase != 0u) {
+      // The moving solid: phi_body >= (1 - gamma_r) phi0 for the motion w - a_v + delta relative to it.
+      let qj = work4(P.bodyOff + 8u * v);
+      if (qj.w != 0.0 && affineCut(qj, w - work4(P.bodyOff + 8u * v + 4u).xyz, &delta)) { cut = true; atomicAdd(&wgBodyCut, 1u); }
     }
     if (cut) {
       pos[v] = vec4<f32>(det.xyz + w + delta, p.w);
@@ -541,6 +672,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (k != 0u) { atomicAdd(&counters[OGC_F_CAPPED], k); }
     let sc = atomicLoad(&wgSolidCut);
     if (sc != 0u) { atomicAdd(&counters[OGC_F_SOLID_CUT], sc); }
+    let bc = atomicLoad(&wgBodyCut);
+    if (bc != 0u) { atomicAdd(&counters[OGC_F_BODY_CUT], bc); }
   }
 }
 `;
@@ -677,10 +810,10 @@ fn certify(n0: vec3<f32>, g0: f32, alt: vec3<f32>, gp: f32, gm: f32) -> vec4<f32
 // A conflict: some vertex is predicted to move and either X has no separating plane or
 // the predicted positions X + w close below 2 sepEps along it (and below the gap at X).
 // The planes pass computes the same predicted gap, bit for bit.
-fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) {
+fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> bool {
   var moving = false;
   for (var k = 0u; k < 4u; k++) { if (any(predOf(ids[k]) != vec3<f32>(0.0))) { moving = true; } }
-  if (!moving) { return; }
+  if (!moving) { return false; }
   var conflict = !(pl.w > 0.0);
   if (!conflict) {
     let o = xdet[ids[nA]].xyz;
@@ -694,8 +827,20 @@ fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) {
   }
   if (conflict) {
     atomicAdd(&counters[OGC_CONFLICTS], 1u);
-    for (var k = 0u; k < 4u; k++) { if (ids[k] < P.N) { atomicOr(&work[P.heldOff + ids[k]], 1u); } }
+    // A pair with the moving solid's sample cannot be held apart: the sample moves anyway.
+    // Its cloth vertices are carried with the solid instead (bit 2), which keeps the gap.
+    // A round redone held moves only the solid's samples and the cloth carried with it,
+    // so a conflict there straddles the carried cloth's edge: its cloth is carried too.
+    let forced = atomicLoad(&counters[OGC_FORCE_HELD]) != 0u;
+    var flag = select(1u, 5u, forced);
+    for (var k = 0u; k < 4u; k++) { if (ids[k] >= P.N + P.S) { flag = 5u; } }
+    for (var k = 0u; k < 4u; k++) { if (ids[k] < P.N) { atomicOr(&work[P.heldOff + ids[k]], flag); } }
+    return forced;
   }
+  return false;
+}
+fn recordHeldConflict(ids: vec4<u32>) {
+  for (var k = 0u; k < 4u; k++) { atomicStore(&counters[OGC_HELD_PAIR + k], ids[k]); }
 }
 fn pairVT(v: u32, tri: vec3<u32>, x: vec3<f32>, cp: vec3<f32>) {
   let a = xd(tri.x); let b = xd(tri.y); let c = xd(tri.z);
@@ -703,7 +848,7 @@ fn pairVT(v: u32, tri: vec3<u32>, x: vec3<f32>, cp: vec3<f32>) {
   let fnorm = unitOr0(cross(b - a, c - a));
   let ids = vec4<u32>(v, tri);
   let pl = certify(n0, gapVT(n0, x, a, b, c), fnorm, gapVT(fnorm, x, a, b, c), gapVT(-fnorm, x, a, b, c));
-  checkConflict(ids, 1u, pl);
+  if (checkConflict(ids, 1u, pl)) { recordHeldConflict(ids); }
   pushPair(ids, pl);
 }
 fn pairEE(er: vec4<u32>, r2: vec4<u32>, ca: vec3<f32>, cb: vec3<f32>) {
@@ -711,7 +856,7 @@ fn pairEE(er: vec4<u32>, r2: vec4<u32>, ca: vec3<f32>, cb: vec3<f32>) {
   let n0 = unitOr0(ca - cb);
   let ec = unitOr0(cross(p1 - p0, q1 - q0));
   let pl = certify(n0, gapEE(n0, p0, p1, q0, q1), ec, gapEE(ec, p0, p1, q0, q1), gapEE(-ec, p0, p1, q0, q1));
-  checkConflict(vec4<u32>(er.x, er.y, r2.x, r2.y), 2u, pl);
+  if (checkConflict(vec4<u32>(er.x, er.y, r2.x, r2.y), 2u, pl)) { recordHeldConflict(vec4<u32>(er.x | OGC_EE_BIT, er.y, r2.x, r2.y)); }
   pushPair(vec4<u32>(er.x | OGC_EE_BIT, er.y, r2.x, r2.y), pl);
 }
 fn spreadVT(v: u32, tri: vec3<u32>) -> f32 {
@@ -824,25 +969,29 @@ fn vertexFacet(v: u32) -> RoleOut {
   return out;
 }
 
-// A static surface sample i (index N + s) against the cloth's faces: the faces' grid
-// boxes carry their predictions and the round's largest envelope, so a point query
-// finds every face within its envelope of the sample. Entries go to the face's feature vertices only
-// (the sample does not move) and carry mu lambda with mu the solid's at the sample
-// (x_det.w); w = 1 marks them. The DAT pair puts the sample first, as a vertex.
+// A surface sample i (index N + s) against the cloth's faces: the faces' grid boxes
+// carry their predictions and the round's largest envelope, so the sample's bare swept
+// box (a point for a static sample; to its exact predicted end for the moving solid's)
+// finds every face within its envelope of the sample. Entries go to the face's feature
+// vertices only (the sample is not solved for) and carry mu lambda with mu the solid's
+// at the sample (x_det.w); w = 1 marks them. The DAT pair puts the sample first, as a vertex.
 fn sampleFacet(i: u32) -> RoleOut {
   var out = RoleOut(0u, 0u, 0u);
   let planar = P.mode == OGC_PLANAR;
   let xs = xdet[i];
   let x = xs.xyz;
-  let q = OgcBox(x, x);
+  let x1 = x + predOf(i);
+  let q = OgcBox(min(x, x1), max(x, x1));
   let inv = invCell();
-  let c = cellOf(x, inv);
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
+  for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+  let c = vec3<i32>(cx, cy, cz);
   let key = cellKey(c); let h = cellHash(c);
   let end = min(bucketStart(h + 1u), P.gridCap);
   for (var j = bucketStart(h); j < end; j++) {
     if (entryKey(j) != key) { continue; }
     let box = entryBox(j);
-    if (!boxesOverlap(q, box)) { continue; }
+    if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
     let t = entryFace(j);
     let tri = triVerts(t);
     out.candidates++;
@@ -864,6 +1013,7 @@ fn sampleFacet(i: u32) -> RoleOut {
       out.pairs++;
     }
   }
+  } } }
   return out;
 }
 
@@ -920,6 +1070,53 @@ fn edgeEdge(e: u32) -> RoleOut {
   return out;
 }
 
+// A hull edge of the samples (solid-field.ts clothSolidSampleEdges; the static solid's,
+// then the moving solid's) against the cloth's edges, reached through their faces' grid
+// entries as a sample is: a DAT pair with each cloth edge within its envelope, so no
+// cloth edge passes between two samples. (Pairs only: the faces' barrier against the
+// samples holds the cloth off; planar truncation only.)
+fn hullEdgeAt(k: u32) -> vec2<u32> {
+  var w = 4u * P.edgeBase + 2u * k;
+  var off = P.N;
+  if (k >= P.SE) { w = 4u * P.bodyEdgeBase + 2u * (k - P.SE); off = P.N + P.S; }
+  return vec2<u32>(atomicLoad(&contacts[w]), atomicLoad(&contacts[w + 1u])) + vec2<u32>(off);
+}
+fn hullEdge(k: u32) -> RoleOut {
+  var out = RoleOut(0u, 0u, 0u);
+  if (P.mode != OGC_PLANAR) { return out; }
+  let hv = hullEdgeAt(k);
+  let hr = vec4<u32>(hv, 0u, 0u);
+  let p0 = xd(hv.x); let p1 = xd(hv.y);
+  let p01 = p0 + predOf(hv.x); let p11 = p1 + predOf(hv.y);
+  let q = OgcBox(min(min(p0, p1), min(p01, p11)), max(max(p0, p1), max(p01, p11)));
+  let inv = invCell();
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
+  for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+    let c = vec3<i32>(cx, cy, cz);
+    let key = cellKey(c); let h = cellHash(c);
+    let end = min(bucketStart(h + 1u), P.gridCap);
+    for (var j = bucketStart(h); j < end; j++) {
+      if (entryKey(j) != key) { continue; }
+      let t = entryFace(j);
+      let box = entryBox(j);
+      if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+      let te = topo[P.triEdgesOff + 4u * t + 3u];
+      for (var m = 0u; m < 3u; m++) {
+        if ((te & (1u << m)) == 0u) { continue; }
+        let r2 = edgeRec(topo[P.triEdgesOff + 4u * t + m]);
+        out.candidates++;
+        let q0 = xd(r2.x); let q1 = xd(r2.y);
+        let st = ogcSegmentSegment(q0, q1, p0, p1);
+        if (st.z <= max(envOf(r2.x), envOf(r2.y)) + spreadEE(r2, hr)) {
+          pairEE(r2, hr, q0 + st.x * (q1 - q0), p0 + st.y * (p1 - p0));
+          out.dat++;
+        }
+      }
+    }
+  } } }
+  return out;
+}
+
 var<workgroup> wgCand: atomic<u32>;
 var<workgroup> wgVf: atomic<u32>;
 var<workgroup> wgEe: atomic<u32>;
@@ -934,9 +1131,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   } else if (i < P.N + P.E) {
     let o = edgeEdge(i - P.N);
     atomicAdd(&wgCand, o.candidates); atomicAdd(&wgEe, o.pairs); atomicAdd(&wgDat, o.dat);
-  } else if (i < P.N + P.E + P.S) {
+  } else if (i < P.N + P.E + P.S + P.SB) {
     let o = sampleFacet(i - P.E);
     atomicAdd(&wgCand, o.candidates); atomicAdd(&wgSf, o.pairs); atomicAdd(&wgDat, o.dat);
+  } else if (i < P.N + P.E + P.S + P.SB + P.SE + P.SEB) {
+    let o = hullEdge(i - P.N - P.E - P.S - P.SB);
+    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgDat, o.dat);
   }
   closePairs();
   workgroupBarrier();
@@ -1005,10 +1205,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * above their rounding.
  */
 export const OGC_INTERSECT_WGSL = header([0, 1, 4, 7, 8, 9]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(true) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
-// The face reaches inside the static solid: phi < 0 at a point of a barycentric lattice
-// over it with spacing at most a quarter cell (the field is trilinear per cell).
-fn insideSolid(A: array<vec3<f32>, 3>) -> bool {
-  let h = ogcSolidHeader();
+// The face reaches inside a solid: phi < 0 at a point of a barycentric lattice over it
+// with spacing at most a quarter cell (the field is trilinear per cell). The face is in
+// the field's frame (the moving solid's body frame at its end pose).
+fn insideSolid(h: OgcSolidHeader, A: array<vec3<f32>, 3>) -> bool {
   let longest = max(length(A[1] - A[0]), max(length(A[2] - A[1]), length(A[0] - A[2])));
   let n = u32(clamp(ceil(4.0 * longest / h.cell), 1.0, 32.0));
   let inv = 1.0 / f32(n);
@@ -1075,7 +1275,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   if (t < P.T) {
     let tv = triVerts(t);
     let A = array<vec3<f32>, 3>(xdet[tv.x].xyz, xdet[tv.y].xyz, xdet[tv.z].xyz);
-    if (P.solidBase != 0u && insideSolid(A)) { atomicAdd(&wgSolidHits, 1u); }
+    if (P.solidBase != 0u && insideSolid(ogcSolidHeader(), A)) { atomicAdd(&wgSolidHits, 1u); }
+    else if (P.bodyBase != 0u) {
+      let p1 = ogcPose(1u);
+      if (insideSolid(ogcSolidHeaderAt(P.bodyBase), array<vec3<f32>, 3>(ogcToBody(p1, A[0]), ogcToBody(p1, A[1]), ogcToBody(p1, A[2])))) { atomicAdd(&wgSolidHits, 1u); }
+    }
     let q = triBox(t);
     let inv = invCell();
     let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);

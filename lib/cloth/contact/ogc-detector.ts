@@ -34,15 +34,15 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_WGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_WGSL, OGC_REDO_LAST_WGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
-  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
+  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_POSE_WORDS, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
-import { SOLID_HEADER_WORDS, SOLID_SAMPLE_WORDS, clothSolidSamples, type ClothSolidField } from "./solid-field";
+import { SOLID_HEADER_WORDS, SOLID_SAMPLE_WORDS, clothSolidSampleEdges, clothSolidSamples, type ClothSolidField } from "./solid-field";
 import { OGC_NONE } from "./ogc-topology";
 
 export interface OgcContactConfig {
@@ -86,6 +86,16 @@ export interface OgcContactConfig {
    */
   solidSampleCapacity?: number;
   /**
+   * One moving solid (one-way: its poses are prescribed). Words reserved for its
+   * body-frame field image (solid-field.ts), its sharp-feature surface samples, and
+   * the poses one frame uploads (its steps plus one; setBodyPoses). Planar truncation
+   * only. A round redone held moves the solid's samples and carries the cloth they
+   * conflict with; each further held round (heldRounds in all, default 3) also carries
+   * the cloth of the previous one's conflicts, and a conflict after the last fails as
+   * heldConflict. Absent: no moving solid.
+   */
+  body?: { capacityWords: number; sampleCapacity: number; poseCapacity: number; heldRounds?: number };
+  /**
    * Predicted-motion DAT, predicting v dt + g dt^2 ("inertial", the default) or the
    * solver's initial guess x_guess - x_t ("guess": needs `stepStart`, with the guess
    * in `positions` when the mandatory round runs), or Planar-DAT with every
@@ -104,6 +114,13 @@ export interface OgcContactConfig {
 }
 
 export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2 } as const;
+
+/** A rigid pose of the moving solid: x_world = R(orientation) x_body + position. */
+export interface OgcBodyPose {
+  position: readonly [number, number, number];
+  /** Unit quaternion (x, y, z, w). */
+  orientation: readonly [number, number, number, number];
+}
 export const OGC_CELL_RULE = { largest: 0, cubicMean: 1 } as const;
 export type OgcCellRule = keyof typeof OGC_CELL_RULE;
 export type OgcPrediction = keyof typeof OGC_PREDICTION;
@@ -157,8 +174,13 @@ export interface OgcFrameCounters {
   cell: number;
   /** Sample-face contacts (static sharp-feature samples against cloth faces) over the frame's rounds. */
   sfPairs: number;
-  /** Cloth faces reaching inside the static solid at the last intersection count. */
+  /** Cloth faces reaching inside a solid (static or moving) at the last intersection count. */
   solidIntersections: number;
+  /** Vertices with a moving-solid entry over the frame's rounds, and truncations its bound made. */
+  bodyContacts: number;
+  bodyCut: number;
+  /** A pair that conflicted in a held round (status heldConflict), ids as in the pair buffer. */
+  heldConflictPair: [number, number, number, number];
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -167,6 +189,8 @@ const WG = 64;
 const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, insert: 6, query: 7, bound: 8 } as const;
 /** The detection round's kernels in dispatch order (for profiling). */
 export const OGC_ROUND_KERNELS = Object.keys(DISPATCH) as (keyof typeof DISPATCH)[];
+/** Hull edges the contact buffer holds per authored surface sample (a sample's fan holds a few neighbours past it). */
+export const OGC_HULL_EDGES_PER_SAMPLE = 8;
 const FLOAT32_EPS = 2 ** -23;
 
 export class OgcContactDetector {
@@ -229,16 +253,26 @@ export class OgcContactDetector {
     const sampleCap = config.solidSampleCapacity ?? 0;
     if (!(Number.isSafeInteger(sampleCap) && sampleCap >= 0)) throw new Error("OGC: solidSampleCapacity must be a whole number");
     this.solidSampleCapacity = sampleCap;
-    this.det = mk("x_det", 16 * (N + sampleCap));
-    this.pred = mk("predictions", 32 * N);
-    this.work = mk("work", 4 * (8 * N + T + E));
+    const body = config.body;
+    if (body) {
+      for (const [k, v] of Object.entries(body)) if (!(Number.isSafeInteger(v) && v >= 0)) throw new Error(`OGC: body.${k} must be a whole number`);
+      if (body.capacityWords < SOLID_HEADER_WORDS + 4) throw new Error("OGC: body.capacityWords cannot hold an empty solid image");
+      if (body.poseCapacity < 2) throw new Error("OGC: body.poseCapacity must hold a step's start and end poses");
+      if ((body.heldRounds ?? 3) < 1) throw new Error("OGC: body.heldRounds must be at least 1");
+      if ((config.truncation ?? "planar") !== "planar") throw new Error("OGC: a moving solid needs planar truncation");
+    }
+    const bodySampleCap = body?.sampleCapacity ?? 0;
+    this.bodySampleCapacity = bodySampleCap;
+    this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
+    this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
+    this.work = mk("work", 4 * ((body ? 16 : 8) * N + T + E));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
     const entriesOff = Math.ceil((sums3Off + 1) / 8) * 8;
     if (4 * (entriesOff + 8 * config.gridCapacity) > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: gridCapacity exceeds one storage binding");
     this.grid = mk("grid", 4 * (entriesOff + 8 * config.gridCapacity));
-    const countsBase = 3, entriesBase = 3 + Math.ceil(N / 4);
+    const countsBase = 12, entriesBase = 12 + Math.ceil(N / 4);
     const solidWords = config.solidCapacityWords ?? 0;
     if (!(Number.isSafeInteger(solidWords) && solidWords >= 0)) throw new Error("OGC: solidCapacityWords must be a whole number");
     if (solidWords > 0 && solidWords < SOLID_HEADER_WORDS + 4) throw new Error("OGC: solidCapacityWords cannot hold an empty solid image");
@@ -246,7 +280,17 @@ export class OgcContactDetector {
     this.solidCapacityWords = solidWords;
     if (sampleCap > 0 && !solidWords) throw new Error("OGC: solidSampleCapacity needs solidCapacityWords");
     this.sampleBase = Math.ceil((4 * (entriesBase + N * config.contactCapacity) + solidWords) / 4);
-    this.contacts = mk("contacts", 16 * (this.sampleBase + sampleCap));
+    // The samples' hull edges, two words each, OGC_HULL_EDGES_PER_SAMPLE per sample authored.
+    const edgeVec4s = (cap: number) => Math.ceil(OGC_HULL_EDGES_PER_SAMPLE * cap / 2);
+    this.edgeBase = this.sampleBase + sampleCap;
+    // The moving solid: its image (word offset), its body-frame samples, their hull edges and its pose table (vec4 offsets).
+    this.bodyBase = body ? 4 * (this.edgeBase + edgeVec4s(sampleCap)) : 0;
+    this.bodySampleBase = body ? Math.ceil((this.bodyBase + body.capacityWords) / 4) : 0;
+    this.bodyEdgeBase = body ? this.bodySampleBase + bodySampleCap : 0;
+    this.poseTableBase = body ? this.bodyEdgeBase + edgeVec4s(bodySampleCap) : 0;
+    this.poseCapacity = body?.poseCapacity ?? 0;
+    const contactVec4s = body ? this.poseTableBase + 1 + (OGC_POSE_WORDS / 4) * body.poseCapacity : this.edgeBase + edgeVec4s(sampleCap);
+    this.contacts = mk("contacts", 16 * contactVec4s);
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
@@ -273,23 +317,126 @@ export class OgcContactDetector {
     w[P.tvOff] = 2 * N + T + E; f[P.sepEps] = sepEps;
     w[P.solidBase] = this.solidBase; w[P.solidOff] = 3 * N + T + E;
     w[P.heldOff] = 7 * N + T + E; w[P.predict] = OGC_PREDICTION[prediction]; w[P.cellRule] = OGC_CELL_RULE[cellRule];
+    w[P.bodyBase] = this.bodyBase; w[P.bodyOff] = body ? 8 * N + T + E : 0; w[P.SB] = 0; w[P.wgPrep] = Math.ceil(N / WG);
+    w[P.edgeBase] = this.edgeBase; w[P.bodyEdgeBase] = this.bodyEdgeBase; w[P.SE] = 0; w[P.SEB] = 0;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
     for (let v = 0; v < N; v++) pred0[4 * (N + v) + 3] = -1;
     writeBufferChunked(device.queue, this.pred, 0, pred0);
     writeBufferChunked(device.queue, this.topo, 0, topology.words);
-    const hdr = new Uint32Array(12), hf = new Float32Array(hdr.buffer);
+    const hdr = new Uint32Array(16 + 2 * OGC_POSE_WORDS), hf = new Float32Array(hdr.buffer);
     hdr[0] = N; hdr[1] = config.contactCapacity; hdr[2] = countsBase; hdr[3] = entriesBase;
     hf[4] = config.r; hf[5] = config.kc; hf[6] = config.mu; hf[7] = config.epsV * config.dt;
     hdr[8] = this.solidBase; hdr[9] = this.sampleBase; hdr[10] = 0;
+    hdr[12] = this.bodyBase; hdr[13] = this.bodySampleBase; hdr[14] = 0; hdr[15] = this.poseTableBase;
+    // Identity poses until the owner uploads some (no step runs on them: the pose table is empty).
+    for (const k of [0, 1]) { hf[16 + OGC_POSE_WORDS * k + 4] = 1; hf[16 + OGC_POSE_WORDS * k + 9] = 1; hf[16 + OGC_POSE_WORDS * k + 14] = 1; }
     device.queue.writeBuffer(this.contacts, 0, hdr);
-    if (this.solidBase) {
-      // No solid until one is set: one empty slot, no bricks, an unbounded band.
-      const empty = new Uint32Array(SOLID_HEADER_WORDS + 4), ef = new Float32Array(empty.buffer);
-      ef[2] = 1; ef[3] = 3.0e38; empty[SOLID_HEADER_WORDS + 3] = OGC_NONE;
-      device.queue.writeBuffer(this.contacts, 4 * this.solidBase, empty);
+    // No solid until one is set: one empty slot, no bricks, an unbounded band.
+    const empty = new Uint32Array(SOLID_HEADER_WORDS + 4), ef = new Float32Array(empty.buffer);
+    ef[2] = 1; ef[3] = 3.0e38; empty[SOLID_HEADER_WORDS + 3] = OGC_NONE;
+    if (this.solidBase) device.queue.writeBuffer(this.contacts, 4 * this.solidBase, empty);
+    if (this.bodyBase) {
+      device.queue.writeBuffer(this.contacts, 4 * this.bodyBase, empty);
+      device.queue.writeBuffer(this.contacts, 16 * this.poseTableBase, new Uint32Array(4));
     }
+  }
+
+  /** The moving solid: its image's word offset (0: none), its samples' and pose table's vec4 offsets, and capacities. */
+  readonly bodyBase: number;
+  readonly bodySampleBase: number;
+  readonly poseTableBase: number;
+  readonly bodySampleCapacity: number;
+  readonly poseCapacity: number;
+  bodySamples = 0;
+  /** Radius about the body origin that holds every stored brick of the moving solid's field. */
+  bodyReach = 0;
+  private bodyField?: ClothSolidField;
+  /** Whether the frame's poses were uploaded since the last frame began. */
+  private posesPending = false;
+
+  /**
+   * Upload the moving solid's field, in its body frame (setup and edits of that
+   * solid only; never in a step path), with its sharp features' surface samples.
+   * Refuses an image or sample set beyond the authored capacity and a band too thin
+   * for the envelope, as setSolidField does.
+   */
+  setBodyField(field: ClothSolidField) {
+    const body = this.config.body;
+    if (!body) throw new Error("OGC: the detector was built without a moving solid (config.body)");
+    if (field.words.length > body.capacityWords)
+      throw new Error(`OGC: the moving solid's field needs ${field.words.length} words, the scene authored ${body.capacityWords}`);
+    const need = this.config.r + 1.5 * field.maxLipschitz * this.config.rqMax;
+    if (!(field.band >= need)) throw new Error(`OGC: the moving solid's band ${field.band} m is below r + 1.5 L_max rqMax = ${need} m`);
+    writeBufferChunked(this.device.queue, this.contacts, 4 * this.bodyBase, field.words);
+    const samples = clothSolidSamples(field, { r: this.config.r, edge: this.topology.layout.maxEdgeLength });
+    const SB = samples.length / SOLID_SAMPLE_WORDS;
+    if (SB > this.bodySampleCapacity)
+      throw new Error(`OGC: the moving solid has ${SB} surface samples at its sharp features, the scene authored ${this.bodySampleCapacity} (body.sampleCapacity)`);
+    if (SB) writeBufferChunked(this.device.queue, this.contacts, 16 * this.bodySampleBase, samples);
+    this.bodySamples = SB;
+    this.bodySampleEdges = this.uploadHullEdges(field, this.bodyEdgeBase, this.bodySampleCapacity, "the moving solid", "body.sampleCapacity");
+    this.paramWords[OGC_PARAM.SEB] = this.bodySampleEdges;
+    this.bodyField = field;
+    // Every stored brick lies within bodyReach of the body origin: a ball clear of it reads the band.
+    const span = 8 * field.cell;
+    let reach = 0;
+    for (const key of field.bricks.keys()) {
+      const b = key.split(",").map(Number);
+      let far2 = 0;
+      for (let a = 0; a < 3; a++) { const lo = field.origin[a]! + b[a]! * span; far2 += Math.max(lo * lo, (lo + span) ** 2); }
+      reach = Math.max(reach, Math.sqrt(far2));
+    }
+    this.bodyReach = Math.fround(reach * (1 + 2 ** -20));
+    new Float32Array(this.paramWords.buffer)[OGC_PARAM.bodyReach] = this.bodyReach;
+    this.device.queue.writeBuffer(this.contacts, 56, new Uint32Array([SB]));
+    this.paramWords[OGC_PARAM.SB] = SB;
+    this.writeDispatchSizes();
+  }
+
+  /**
+   * The moving solid's poses for the frame about to be encoded: one per step
+   * boundary, poses[k] and poses[k + 1] bounding the frame's step k, so a frame of
+   * n steps passes n + 1 (an input upload, like an attachment's time: no readback).
+   * Every frame with a moving solid must pass them before encodeFrameBegin.
+   */
+  setBodyPoses(poses: readonly OgcBodyPose[]) {
+    if (!this.config.body) throw new Error("OGC: the detector was built without a moving solid (config.body)");
+    if (poses.length < 2 || poses.length > this.poseCapacity)
+      throw new Error(`OGC: ${poses.length} moving-solid poses for a frame; it takes 2 to ${this.poseCapacity} (body.poseCapacity)`);
+    const words = new Uint32Array(4 + OGC_POSE_WORDS * poses.length), f = new Float32Array(words.buffer);
+    words[0] = poses.length;
+    poses.forEach((p, k) => {
+      const [x, y, z, w] = p.orientation, n = Math.hypot(x, y, z, w);
+      if (!(n > 0) || Math.abs(n - 1) > 1e-6 || !p.position.every(Number.isFinite)) throw new Error(`OGC: moving-solid pose ${k} needs a finite position and a unit quaternion`);
+      const b = 4 + OGC_POSE_WORDS * k;
+      f.set(p.position, b);
+      // Columns of R(q).
+      f.set([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)], b + 4);
+      f.set([2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)], b + 8);
+      f.set([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)], b + 12);
+    });
+    this.device.queue.writeBuffer(this.contacts, 16 * this.poseTableBase, words);
+    this.posesPending = true;
+  }
+
+  /** The samples' hull edges (clothSolidSampleEdges) into the contact buffer at vec4 `base`; returns their count. */
+  private uploadHullEdges(field: ClothSolidField, base: number, sampleCapacity: number, what: string, knob: string): number {
+    const edges = clothSolidSampleEdges(field, { r: this.config.r, edge: this.topology.layout.maxEdgeLength });
+    const n = edges.length / 2;
+    if (n > OGC_HULL_EDGES_PER_SAMPLE * sampleCapacity)
+      throw new Error(`OGC: ${what}'s samples have ${n} hull edges, more than ${OGC_HULL_EDGES_PER_SAMPLE} per authored sample (${knob} ${sampleCapacity})`);
+    if (n) writeBufferChunked(this.device.queue, this.contacts, 16 * base, edges);
+    return n;
+  }
+
+  private writeDispatchSizes() {
+    const S = this.solidSamples, SB = this.bodySamples, SE = this.solidSampleEdges + this.bodySampleEdges;
+    if (Math.ceil((this.N + this.E + S + SB + SE) / WG) > 65535) throw new Error("OGC: vertices, edges, surface samples and their hull edges exceed one dispatch dimension");
+    this.paramWords[OGC_PARAM.wgNE] = Math.ceil((this.N + this.E + S + SB + SE) / WG);
+    this.paramWords[OGC_PARAM.wgPrep] = Math.ceil((this.N + SB) / WG);
+    this.device.queue.writeBuffer(this.params, 0, this.paramWords);
   }
 
   /** Word offset of the solid image in the contact buffer (0: no solid) and its authored capacity. */
@@ -299,6 +446,11 @@ export class OgcContactDetector {
   readonly sampleBase: number;
   readonly solidSampleCapacity: number;
   solidSamples = 0;
+  /** The samples' hull edges: vec4 offsets in the contact buffer and the current counts (static, moving). */
+  readonly edgeBase: number;
+  readonly bodyEdgeBase: number;
+  solidSampleEdges = 0;
+  bodySampleEdges = 0;
 
   /**
    * Upload the static solid field (setup and solid edits only; never in a step
@@ -318,16 +470,16 @@ export class OgcContactDetector {
     const S = samples.length / SOLID_SAMPLE_WORDS;
     if (S > this.solidSampleCapacity)
       throw new Error(`OGC: the solid field has ${S} surface samples at its sharp features, the scene authored ${this.solidSampleCapacity} (solidSampleCapacity)`);
-    if (Math.ceil((this.N + this.E + S) / WG) > 65535) throw new Error("OGC: vertices, edges and surface samples exceed one dispatch dimension");
     if (S) {
       writeBufferChunked(this.device.queue, this.det, 16 * this.N, samples);
       writeBufferChunked(this.device.queue, this.contacts, 16 * this.sampleBase, samples);
     }
     this.solidSamples = S;
+    this.solidSampleEdges = this.uploadHullEdges(field, this.edgeBase, this.solidSampleCapacity, "the solid field", "solidSampleCapacity");
+    this.paramWords[OGC_PARAM.SE] = this.solidSampleEdges;
     this.device.queue.writeBuffer(this.contacts, 40, new Uint32Array([S]));
     this.paramWords[OGC_PARAM.S] = S;
-    this.paramWords[OGC_PARAM.wgNE] = Math.ceil((this.N + this.E + S) / WG);
-    this.device.queue.writeBuffer(this.params, 0, this.paramWords);
+    this.writeDispatchSizes();
   }
 
   /**
@@ -383,9 +535,10 @@ export class OgcContactDetector {
       ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 6, 7, 9, 14]],
       ["query", OGC_QUERY_WGSL, [0, 1, 4, 5, 7, 8, 9, 11, 14]],
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
-      ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 9, 10]],
+      ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
       ["decide", OGC_DECIDE_WGSL, [0, 9, 10]],
       ["redo", OGC_REDO_WGSL, [0, 9, 10]],
+      ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
       ["planes", OGC_PLANES_WGSL, [0, 2, 4, 5, 9, 11, 14]],
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 9, 14]],
@@ -436,7 +589,11 @@ export class OgcContactDetector {
   }
 
   /** Reset the per-frame statistics (status and peaks persist). */
-  encodeFrameBegin(pass: GPUComputePassEncoder) { this.run(pass, "frameBegin", 1); }
+  encodeFrameBegin(pass: GPUComputePassEncoder) {
+    if (this.bodyField && !this.posesPending) throw new Error("OGC: a frame with a moving solid needs its poses (setBodyPoses) before it begins");
+    this.posesPending = false;
+    this.run(pass, "frameBegin", 1);
+  }
   /** Start of a step: arm the mandatory detection round. */
   encodeStepBegin(pass: GPUComputePassEncoder) { this.run(pass, "stepBegin", 1); }
   /**
@@ -446,8 +603,11 @@ export class OgcContactDetector {
    */
   encodeDetection(pass: GPUComputePassEncoder) {
     for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
-    this.run(pass, "redo", 1);
-    for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
+    for (let k = 0; k < (this.config.body ? this.config.body.heldRounds ?? 3 : 1); k++) {
+      this.run(pass, "redo", 1);
+      for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
+    }
+    this.run(pass, "redoLast", 1);
   }
   /** One kernel of a detection round, indirectly, or the redo decision (profiling only). */
   encodeRoundKernel(pass: GPUComputePassEncoder, name: keyof typeof DISPATCH | "redo") {
@@ -510,6 +670,8 @@ export class OgcContactDetector {
       conflicts: u[C.frameConflicts], redos: u[C.frameRedos], held: u[C.frameHeld],
       peakGrid: u[C.peakGrid], intersections: u[C.intersections], cell: fl[C.cell],
       sfPairs: u[C.frameSfPairs], solidIntersections: u[C.solidIntersections],
+      bodyContacts: u[C.frameBodyContacts], bodyCut: u[C.frameBodyCut],
+      heldConflictPair: [u[C.heldConflictPair]!, u[C.heldConflictPair + 1]!, u[C.heldConflictPair + 2]!, u[C.heldConflictPair + 3]!],
     };
   }
 
@@ -521,7 +683,7 @@ export class OgcContactDetector {
    */
   async readDiagnosis(): Promise<{ xdet: Float32Array; pred: Float32Array; rho: Float32Array; env: Float32Array; held: Uint32Array; cell: number }> {
     const N = this.N, T = this.T, E = this.E, S = this.solidSamples;
-    const copies: [GPUBuffer, number, number][] = [[this.det, 0, 16 * (N + S)], [this.pred, 0, 32 * N], [this.work, 4 * (N + T + E), 4 * N], [this.work, 4 * (7 * N + T + E), 4 * N], [this.counters, 0, 4 * OGC_COUNTER_WORDS]];
+    const copies: [GPUBuffer, number, number][] = [[this.det, 0, 16 * (N + S + this.bodySampleCapacity)], [this.pred, 0, 32 * N + 16 * this.bodySampleCapacity], [this.work, 4 * (N + T + E), 4 * N], [this.work, 4 * (7 * N + T + E), 4 * N], [this.counters, 0, 4 * OGC_COUNTER_WORDS]];
     const reads = copies.map(([, , size]) => this.device.createBuffer({ size: Math.ceil(size / 16) * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }));
     const enc = this.device.createCommandEncoder();
     copies.forEach(([src, off, size], i) => enc.copyBufferToBuffer(src, off, reads[i]!, 0, Math.ceil(size / 4) * 4));

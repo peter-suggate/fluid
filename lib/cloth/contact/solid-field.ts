@@ -507,6 +507,21 @@ function roofHeight(P: readonly [V3, V3, V3], N: V3, supports: readonly { p: V3;
  * used: the samples depend on the field alone.
  */
 export function clothSolidSamples(field: ClothSolidField, options?: ClothSolidSampleOptions): Float32Array {
+  return clothSolidSampleHull(field, options).samples;
+}
+
+/**
+ * The samples' hull edges: each pair of samples (local indices, i < j, two words per
+ * edge) neighbouring in a sample's fan, the edges of the holes a face resting on the
+ * samples spans. A cloth face can rest on the samples and still have one of its edges
+ * pass between two of them (between two samples of a sharp edge, say); a cloth edge
+ * kept apart from every hull edge cannot, so the detector pairs them (DAT).
+ */
+export function clothSolidSampleEdges(field: ClothSolidField, options?: ClothSolidSampleOptions): Uint32Array {
+  return clothSolidSampleHull(field, options).edges;
+}
+
+function clothSolidSampleHull(field: ClothSolidField, options?: ClothSolidSampleOptions): { samples: Float32Array; edges: Uint32Array } {
   if (options && !(options.r > 0 && options.edge > 0)) throw new RangeError("Cloth solid samples need r > 0 and edge > 0");
   let cached = sampleCache.get(field);
   if (!cached) sampleCache.set(field, cached = buildSolidSamples(field));
@@ -514,11 +529,11 @@ export function clothSolidSamples(field: ClothSolidField, options?: ClothSolidSa
 }
 
 /** A field is immutable once built (a rebuild returns a new one): its samples are computed once. */
-const sampleCache = new WeakMap<ClothSolidField, Float32Array>();
+const sampleCache = new WeakMap<ClothSolidField, { samples: Float32Array; edges: Uint32Array }>();
 
 type SurfacePoint = { p: V3; n: V3; mu: number };
 
-function buildSolidSamples(field: ClothSolidField): Float32Array {
+function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edges: Uint32Array } {
   // A cell's turn is read two cells out (it finds an edge the centre's own cell misses); a seed's
   // a tenth of a cell out, so a point on a voxel solid's flat face near its edge is not kept.
   const h = field.cell, kappaMin = SOLID_SAMPLE_TURN_FLOOR / h, CELL_STEP = 2, localStep = 0.1;
@@ -658,14 +673,15 @@ function buildSolidSamples(field: ClothSolidField): Float32Array {
   const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
   const ceiling = SOLID_SAMPLE_MAX_LIFT * h;
   // The lift of every sample, and the holes bulging past the ceiling.
-  const measure = (): { lift: Float64Array; over: number[][] } => {
-    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<string>();
+  const measure = (): { lift: Float64Array; over: number[][]; edges: number[] } => {
+    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<string>(), edges: number[] = [];
     for (let i = 0; i < pts.length; i++) {
       const qi = pts[i]!, n = qi.n, reach = 1.6 * spacingOf[i]!;
       const a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] as V3 : Math.abs(n[1]) < 0.6 ? [0, 1, 0] as V3 : [0, 0, 1] as V3;
       const t1 = cross(n, a), l1 = Math.hypot(...t1), u: V3 = [t1[0] / l1, t1[1] / l1, t1[2] / l1], w = cross(n, u);
       const fan = within(qi.p, reach).filter(j => j !== i).map(j => { const d = sub(pts[j]!.p, qi.p); return { j, ang: Math.atan2(dot(d, w), dot(d, u)) }; })
         .sort((x, y) => x.ang - y.ang);
+      for (const F of fan) if (F.j > i) edges.push(i, F.j);
       if (fan.length < 2) continue;
       for (let k = 0; k < fan.length; k++) {
         const A = fan[k]!, B = fan[(k + 1) % fan.length]!;
@@ -701,7 +717,7 @@ function buildSolidSamples(field: ClothSolidField): Float32Array {
         if (bulge > ceiling) over.push([i, A.j, B.j]);
       }
     }
-    return { lift, over };
+    return { lift, over, edges };
   };
   index(0);
   let measured = measure();
@@ -730,5 +746,5 @@ function buildSolidSamples(field: ClothSolidField): Float32Array {
       throw new RangeError(`Cloth solid samples: the surface between the samples near (${q.p.map(v => v.toFixed(4)).join(", ")}) bulges ${l.toExponential(2)} m, above h / 16 = ${ceiling.toExponential(2)} m, with samples refined to ${spacingOf[i]!.toExponential(2)} m`);
     out.set([q.p[0] + l * q.n[0], q.p[1] + l * q.n[1], q.p[2] + l * q.n[2], q.mu], SOLID_SAMPLE_WORDS * i);
   }
-  return out;
+  return { samples: out, edges: Uint32Array.from(measured.edges) };
 }

@@ -869,3 +869,71 @@ The sheet has 5 colours, so a step makes 385 truncations per colour and 65 per i
 - The round is 8.2 ms, about 5% of the tick.
 - An LBVH would at best halve the scan, at the price of a per-step build (sort plus refit). It cannot recover more than about 4 ms of a 161 ms tick.
 - Skipped. If detection becomes the bottleneck, the next step is the per-round cell size (R_max), not the structure.
+
+## 2026-11-09 MILESTONE (M6, one-way): one moving solid, prescribed poses
+
+**What it is.** One rigid solid whose motion is given (one-way coupling). Its field is baked once, in its body frame, with its surface samples and their hull edges. Each frame the owner uploads the poses at the step boundaries: n steps take n + 1 poses. Each step copies its start and end poses into the contact buffer on the GPU, so nothing is read back. Planar truncation only.
+
+**How a step treats it.**
+- **Detection.** Detection runs at the start pose in the mandatory round and at the end pose afterwards.
+- **Carried prediction.** A vertex the solid can reach gets the carried displacement a_v = R1·R_detᵀ(x − c_det) + c1 − x. Its prediction is clamped to the band room about a_v, then bounded by the body field's ball bound.
+- **Which vertices are carried.** A held vertex is carried (w = a_v). So is one whose prediction the bound would cut. The static solid's cut then applies.
+- **Squeeze.** If the body bound still fails after the static solid's cut, the cloth is squeezed between the two solids. Status `bodySqueeze`.
+- **Solver block.** The block uses φ_body(R1ᵀ(x − c1)) with gradient R1·∇φ. Friction slip is measured against the carried start position.
+- **Body samples.** The body's samples are posed on the GPU. Their predicted motion is exact. They pair with cloth faces through a swept box.
+- **Conflicts with the solid.** A sample's pair cannot be held apart, because the sample moves regardless. So the cloth vertices of a conflicting pair with a body sample are carried with the solid (flag bit 2).
+- **Held rounds.** A held round can still conflict where carried cloth meets held cloth. Its conflicting cloth is then carried as well, and the round is redone.
+  - `body.heldRounds` sets the number of held rounds. The default is 3.
+  - A conflict after the last held round fails as `heldConflict`.
+  - The pair that conflicted is kept in counter words 42–45 (`heldConflictPair`).
+- **Missing poses.** A step past the uploaded poses fails as `bodyPose`. A frame encoded without `setBodyPoses` throws on the host.
+
+**Hull edges (new, static and moving solids).** A cloth face can rest on the samples and still have one of its edges pass *between* two samples on a sharp edge.
+- The truncation-only unit check found this: 7 faces inside the solid, with a face edge between two edge samples 2.4 mm apart.
+- The overhang plate test found it again intermittently: 2 faces inside at step 22 in one run of two.
+- **Fix:** `clothSolidSampleEdges` gives each pair of fan neighbours as a hull edge, and the query kernel pairs every hull edge with each cloth edge in its envelope (DAT, Planar mode). The sample–face and edge–edge pairs are what convex intersection needs. With them, truncation alone leaves no face in the solid. The unit test now asserts this exactly.
+- **What it is not:** hull edges add DAT pairs only, not barrier entries. The faces' barrier against the samples is what holds the cloth off.
+
+**Results (GPU, M1 Max).**
+
+| Check | Result |
+|---|---|
+| Unit test vs the Float64 oracle | Body entries and terms, carried predictions, posed samples, the vertex block and truncation all match. After truncation φ_body ≥ 0.1 φ0, and no face is inside (exact and lattice). |
+| Squeeze | A plate descending onto a sheet over a floor raises `bodySqueeze`. |
+| Plate, in C1's solver (K = 20, BDF2) | Setup and measurements below. |
+| Earlier plate without overhang | 0.32% RMS, 25.7 ms per step. |
+| Rotating sphere (static), cost of hull edges | Round 9.1 → 12.2 ms (query 8.3 → 11.2 ms). Median tick 100.2 → 102.2 ms (profile at K = 64, 12 ticks). 0 faces inside in both runs. Face lower bound 3.1e-6 → 7.4e-6 m. |
+
+The plate test:
+- **Setup.**
+  - The sheet is 26×26 and overhangs a 16×2×16 cm plate by 2 cm.
+  - The plate rests for 15 steps, then moves for 45 steps at v = (0.3, 0.2, 0) m/s, turning at ω = 1 rad/s about y.
+  - The plate has 404 samples and 876 hull edges, built in 0.17 s.
+- **Clearances.** Minimum vertex φ is 1.96e-3 m (r = 2e-3). Over every face, φ ≥ 1.55e-5 m (exact).
+- **Per-step checks.** Zero intersections and zero faces inside, on every step.
+- **Friction.** The top of the sheet moves at 1.06% RMS of the plate's rigid velocity.
+- **Redos.** One step was redone held, needing 2 held rounds.
+- **Cost.** 33.7 ms per step, including the test's per-step readback.
+
+**Limits.**
+- One moving solid only, one way: its poses are prescribed.
+- Planar truncation only.
+- A squeeze between two solids fails explicitly; nothing pushes the cloth through.
+- Hull edges carry no barrier. A cloth edge pressed onto a hull edge is held there by truncation (faces get to about 1e-5 m).
+- Two-way coupling has not started; it is for review.
+
+## 2026-11-09 COORDINATION (C2 → C1): wiring the moving solid, and what changed in the detector
+
+1. **Failing status bits.** Add `OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose` to `CLOTH_CONTACT_FAILING` in `scene-contact.ts`.
+2. **The scene's rigid body.** Replace the pending-solids path with `config.body = { capacityWords, sampleCapacity, poseCapacity, heldRounds? }`.
+   - `capacityWords` and `sampleCapacity` come from the body-frame field's `words.length` and `clothSolidSamples(field).length / 4`. The detector authors 8 hull edges per authored sample and throws past that.
+   - `poseCapacity` is the most steps per frame + 1.
+3. **Setup.** Call `setBodyField(field)` once, with the RigidBodyDescription shape baked in its body frame (body origin at 0, axes of the identity pose).
+4. **Every frame.** Call `setBodyPoses(poses)` with the owed steps + 1 poses from the pose track (step boundaries k = 0..n) *before* `encodeFrameBegin`, which throws without them.
+5. **Layout changes** (all read through the exports, so nothing should need editing):
+   - `OGC_PARAM_WORDS` 64 → 68;
+   - `OGC_COUNTER_WORDS` 42 → 46: `frameBodyContacts` 40, `frameBodyCut` 41, `heldConflictPair` 42–45;
+   - the contact header's `countsBase` is 12;
+   - with a body, `encodeDetection` encodes `heldRounds` redo/round pairs, plus a final `redoLast` check.
+6. **Counters.** `solidIntersections` now includes faces inside the moving solid at the step's end pose. `OgcFrameCounters` gains `bodyContacts`, `bodyCut` and `heldConflictPair`.
+7. **Static solids now get hull-edge pairs too.** No change is needed on your side. The cost is +3 ms a round on the rotating sphere, and the contact buffer grows 64 bytes per authored sample (1.4 MB at 21 K samples).
