@@ -181,7 +181,7 @@ test("GPU moving solid: pushed predictions, body entries and terms, posed sample
     const pred = new Float32Array(await readBuffer(device, det.pred));
     const xdet = new Float32Array(await readBuffer(device, det.det));
     const contacts = new Uint32Array(await readBuffer(device, det.contacts)), lists = listsOf(contacts, N);
-    const bodyOff = 8 * N + det.T + det.E, bodyDevOff = 20 * N + det.T + det.E;
+    const bodyOff = 8 * N + det.T + det.E, bodyDevOff = 20 * N + det.T + det.E, scaleOff = 24 * N + det.T + det.E;
     // The plate turns theta over the step; a vertex's straight motion strays from straight in its
     // frame by sigma = (theta^2 (|x - c0| + Q) + 2 theta Q) / 8, Q = max(|w - dc|, |a - dc|, |dc|) + env / 2
     // (w = 0 or a_v: the same Q), which the field bound's room loses L_max sigma of.
@@ -189,8 +189,9 @@ test("GPU moving solid: pushed predictions, body entries and terms, posed sample
     for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) trace += p1.R[i]![j]! * p0.R[i]![j]!;
     const theta = 2 * Math.asin(Math.min(1, 0.5 * Math.sqrt(Math.max(3 - trace, 0)))), dc = sub(p1.c, p0.c), L = field.maxLipschitz;
     // Every vertex is held (prediction "none"): w = 0, moved towards a_v as far as the plate's bound
-    // needs; one carried with the plate (bit 2: a conflict with it, or its bound in a round redone) is a_v.
-    let pushedCount = 0, carriedCount = 0, entries = 0;
+    // needs; a conflict's least shift then moves it back towards its anchor; one carried with the plate
+    // (bit 2: the fail-safe's impact zone, never in this scene) is a_v.
+    let pushedCount = 0, carriedCount = 0, entries = 0, shifted = 0;
     const bounds = mesh.x.map((x, v) => {
       const carried = (diag.held[v]! & 4) !== 0;
       const env = diag.env[v]!, y0 = toBody(p0, x), a = sub(toWorld(p1, y0), x);
@@ -241,13 +242,22 @@ test("GPU moving solid: pushed predictions, body entries and terms, posed sample
       for (let k = 0; k < 7; k++) assert.ok(Math.abs(q[k]! - qr[k]!) <= 2e-3 * qs, `vertex ${v} q/D[${k}] ${q[k]} vs ${qr[k]}`);
       // Moved towards a_v as far as either certificate needs (predictionScale on d = R1^T (0 - a_v)):
       // the affine f(d) = D s.|d| - g0 s.d <= 1 within rc, or the Lipschitz ball |d| <= rl = room / L_max.
-      const d = mulT(p1.R, scale3(a, -1)), l = norm(d), rl = room / L;
-      const f = qr[4]! * Math.abs(d[0]) + qr[5]! * Math.abs(d[1]) + qr[6]! * Math.abs(d[2]) - (qr[0]! * d[0] + qr[1]! * d[1] + qr[2]! * d[2]);
-      let kb = 1;
-      if (l > rl && !(f <= 1 && l <= rc)) kb = Math.max(f > 1 ? Math.min(rc / l, 1 / f) : rc / l, rl / l);
-      // In a round redone a vertex its bound moves is carried outright (counted above).
-      assert.ok(!(c0.redos > 0 && kb < 1 - 1e-3), `vertex ${v}: a round redone carries a vertex its bound moves (kb ${kb})`);
-      const want = kb < 1 ? scale3(a, 1 - kb) : [0, 0, 0] as V3;
+      const rl = room / L;
+      const scaleOf = (d: V3) => {
+        const l = norm(d), f = qr[4]! * Math.abs(d[0]) + qr[5]! * Math.abs(d[1]) + qr[6]! * Math.abs(d[2]) - (qr[0]! * d[0] + qr[1]! * d[1] + qr[2]! * d[2]);
+        return { f, l, k: l > rl && !(f <= 1 && l <= rc) ? Math.max(f > 1 ? Math.min(rc / l, 1 / f) : rc / l, rl / l) : 1 };
+      };
+      const { f, l, k: kb } = scaleOf(mulT(p1.R, scale3(a, -1)));
+      let want = kb < 1 ? scale3(a, 1 - kb) : [0, 0, 0] as V3;
+      // A round redone shifts a conflict's predictions (least shift, OGC_REDO_WGSL): towards the
+      // anchor (a_v with bit 5, else X) by the round's scale s, then bounded again about a_v.
+      const shift = work[scaleOff + 2 * v + 1]!, anc = (diag.held[v]! & 32) ? a : [0, 0, 0] as V3;
+      if (shift < 1) {
+        shifted++;
+        want = add3(anc, scale3(sub(want, anc), shift));
+        const k2 = scaleOf(mulT(p1.R, sub(want, a))).k;
+        if (k2 < 1) want = add3(a, scale3(sub(want, a), k2));
+      }
       if (kb < 1) pushedCount++;
       if (Math.abs(f - 1) > 1e-3 && Math.abs(l - rl) > 1e-3 * rl && Math.abs(l - rc) > 1e-3 * rc)
         assert.ok(norm(sub(w, want)) <= 2e-7 + 1e-3 * norm(a), `vertex ${v} prediction ${w} vs ${want} (phi0 ${b.phi0}, f(-a) ${f}, kb ${kb})`);
@@ -257,6 +267,7 @@ test("GPU moving solid: pushed predictions, body entries and terms, posed sample
     // The frame counter sums its rounds (the redos of conflicts with the plate's samples too).
     assert.ok(pushedCount + carriedCount > 30 && (c0.redos ? c0.bodyContacts >= entries : c0.bodyContacts === entries), `${pushedCount} vertices the plate's bound pushed and ${carriedCount} carried, ${entries} body entries, counter ${c0.bodyContacts} over ${1 + c0.redos} rounds`);
     assert.ok(pushedCount + carriedCount < N, "the plate's reach ends inside the sheet");
+    assert.ok(c0.redos === 0 || shifted > 0, `${c0.redos} redos shifted ${shifted} vertices`);
     assert.equal(c0.zoneVertices, carriedCount, "the zone counter counts the carried vertices");
 
     // The plate's surface samples: x_det at the start pose, predicted exactly to the end pose.
