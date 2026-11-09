@@ -532,6 +532,8 @@ export class OgcContactDetector {
     return {
       afterFrame: (pass: GPUComputePassEncoder) => { this.encodeStepBegin(pass); this.encodeDetection(pass); this.encodeTruncate(pass); },
       afterIteration: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); this.encodeDecide(pass); this.encodeDetection(pass); },
+      // The solver's two-level correction moves every vertex at once: truncate that move too.
+      afterCoarse: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); },
     };
   }
 
