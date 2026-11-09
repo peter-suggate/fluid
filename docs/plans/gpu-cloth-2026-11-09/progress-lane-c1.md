@@ -780,3 +780,26 @@ Tests: `cloth-oracle`, `cloth-gpu-solver` (new stencil regression), `cloth-coars
   - 3 more ticks match a never-cut 9-tick run to **0 m** (bit-identical).
   - Redo restages the cut document.
 - `cloth-system` GPU file: 12 pass, 1 todo. `check:types` is clean. `test:unit` has only the known `reservoir-particle-cost` failure.
+
+## 2026-11-09 RESULT (10): Bridson K = 8, set from measurement
+
+**Window.** All three scenes, rigid-body variant, the first 114 ticks. That is the window all three reach before C2's heldConflict; neither variant can run full length yet (the held variant halts at its pending solids). Fenced per tick, pose read every 6.
+
+**Strain measure.** The paper's limit is 10%, and the bulk of the cloth sits on it, so "strain under 3%" is read as excess over the limit. The measure is p99 edge strain at most 13%.
+
+| K | p99 strain, curtain / sphere / table | edges past 13%: worst count | ms per tick, curtain / sphere / table | KE |
+|---|---|---|---|---|
+| 8 | 12.0 / 10.0 / 8.6% | 758 / 7 / 35 | 46 / 27 / 25 | decays (curtain last 3e-5 J) |
+| 16 | 10.4 / 10.1 / 9.9% | 442 / 8 / 41 | 65 / 44 / 42 | decays |
+| 32 | 10.0 / 10.0 / 10.0% | 288 / 30 / 83 | 101 / 67 / 74 | decays |
+| 64 | 10.0 / 10.0 / 10.2% | 13 / 18 / 170 | 170 / 120 / 133 | decays |
+
+Notes on the table:
+- The sphere scene halts heldConflict at tick 90 (K 8) and tick 83 (K 16); at K 32 and 64 it reaches 114.
+- The curtain's p99.9 is 17.6% at K 8 and 18.2% at K 16.
+- The single-edge maxima (21–103%) sit where cloth catches a solid edge (the frustum top, the table edge). They do not fall with K.
+
+**Choice: K = 8.** It is the lowest K that meets the criterion on all three scenes: the curtain's p99 is 2.0% over the limit, and energy is bounded and decaying.
+- K = 16 holds the curtain's bulk within 0.4% of the limit, at 1.4–1.7× the tick cost.
+- The provenance in `parameters.ts` says this is our solver's choice, not the paper's, and records the numbers.
+- At K = 8 the existing free-fall capture test runs at 38 ms per tick and the held rotating-sphere test at 30 ms per tick (they were 101 ms per tick at K = 64). Both still pass, with no vertex inside and status 0.

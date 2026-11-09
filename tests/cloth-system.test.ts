@@ -413,7 +413,7 @@ test('capture runs a 150 x 150 Bridson sheet on the scene clock with contact: fr
   assert.ok(Math.abs(lo - exact) < 0.25 * exact && hi - lo < 1e-3, `drop ${lo}..${hi} m, exact ${exact}`);
   const t1 = performance.now();
   await cloth.capture([18 * CLOTH_SCENE_STEP_S]);
-  console.log(`tablecloth ${rest.length / 3} vertices, K=64: first 6 ticks ${ms.toFixed(0)} ms, next 12 ticks ${((performance.now() - t1) / 12).toFixed(1)} ms per tick (fenced each tick)`);
+  console.log(`tablecloth ${rest.length / 3} vertices, K=${scene.cloth![0]!.solver?.iterations}: first 6 ticks ${ms.toFixed(0)} ms, next 12 ticks ${((performance.now() - t1) / 12).toFixed(1)} ms per tick (fenced each tick)`);
   cloth.destroy();
 }));
 

@@ -48,7 +48,8 @@ export const CLOTH = {
   bending: P(1.5e-4, "N m", "assumption",
     "bending springs between every other node have no linear bending modulus; chosen for a 2.5 cm bending length (B = rho g c^3) at 1 kg/m^2, to be checked against Fig 1 fold spacing"),
   damping: P(0.002, "s", "assumption", "paper gives none; critically damps edge modes near 1000 rad/s"),
-  iterations: P(64, "iterations", "assumption", "solver budget K per 1/60 s step; set by the M1/M2 gates, not by the paper"),
+  iterations: P(8, "iterations", "assumption",
+    "our solver's choice, not the paper's: the lowest K of 8/16/32/64 whose bulk strain (p99) stays within 3% of the 10% limit with decaying kinetic energy on all three scenes (2026-11-09, first 114 ticks; p99 12.0/10.0/8.6% at K 8, 10.4/10.1/9.9% at K 16); the contact-driven tail (p99.9 ~18%) does not fall with K"),
   selfFriction: P(0.3, "1", "assumption",
     "paper gives one mu for static and kinetic (section 7.3) but no value; PhysBAM later uses 3.2 for self contact, rejected as tuned for its repulsion scheme"),
 } as const;
