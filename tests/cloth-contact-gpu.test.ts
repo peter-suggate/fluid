@@ -16,7 +16,7 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { OgcContactDetector, type OgcContactConfig } from "../lib/cloth/contact/ogc-detector";
 import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
-import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, clothSolidClearance, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
@@ -1045,6 +1045,79 @@ test("GPU free flight: the solver's inertial target as the prediction and the so
     const c2 = await det.readCounters(), out = toV3(new Float32Array(await readBuffer(device, positions)), N);
     assert.equal(c2.redetections, 0); assert.equal(c2.solidCut, 0);
     for (let v = 0; v < N; v++) assert.deepEqual(out[v], guess[v]);
+    det.destroy();
+  });
+});
+
+test("GPU solid round over its chord: a long prediction along a floor is certified by the ball about the chord's midpoint, not truncated", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    // A sheet 20 cm above a floor predicted 25 cm along it, diagonally: the ball |w| + env / 2 about the start
+    // reaches the floor, the ball about the chord's midpoint (radius |w| / 2 + env / 2) is clear by
+    // the clearance table.
+    const r = 2e-3, rqMax = 0.04, band = r + 1.5 * Math.sqrt(3) * rqMax + 1e-6, z0 = 0.2;
+    const field = buildClothSolidField({ parts: [{ kind: "lattice-box", lo: [-0.3, -0.3, -0.1], hi: [0.5, 0.5, 0], mu: 0.3 }], lo: [-0.3, -0.3, -0.1], hi: [0.5, 0.5, 1.2], cell: 0.01, band });
+    const s = sheet(15, 10, 0.01, [0, 0, z0]), mesh: OracleMesh = { ...s, x: f32(s.x) }, N = mesh.x.length, X = mesh.x;
+    const D: V3 = [0.18, 0.18, 0], env = 3e-3, rho = norm(D) + env / 2, rr = norm(D) / 2 + env / 2;
+    assert.ok(rho > z0, "the start ball reaches the floor");
+    for (const x of X) {
+      const mid = add(x, scale(D, 0.5));
+      assert.ok(clothSolidClearance(field, x) - rho < r && Math.min(sampleClothSolidField(field, x).phi, field.band) - field.maxLipschitz * rho < r, "the start ball is certified by neither rule");
+      assert.ok(clothSolidClearance(field, mid) - rr >= r + 1e-3, "the chord ball is clear by the table");
+    }
+    const { triangles, edges } = topologyOf(mesh);
+    const at = (d: V3) => vec4s(f32(X.map(x => add(x, d))));
+    const positions = storage(device, at(D)), xt = storage(device, at([0, 0, 0])), target = storage(device, at(D));
+    const velocities = storage(device, vec4s(X.map(() => scale(D, 60) as V3)));
+    // The scenes' grid, 32 entries per primitive: the cell is at least the longest prediction, so a
+    // face's swept box spans a few cells however far it moves (no gridOverflow).
+    const gridCapacity = 32 * (N + triangles.length / 4 + edges.length / 4);
+    const config: OgcContactConfig = { ...baseConfig(N), r, rqMax, prediction: "target", gridCapacity, solidCapacityWords: field.words.length, solidSampleCapacity: 8192 };
+    const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges }, vec4s(X), config, { positions, velocities, stepStart: xt, target });
+    det.setSolidField(field);
+    det.writeCarriedState({ reference: vec4s(X), held: new Uint32Array(N) });
+    await runPass(device, pass => { det.encodeFrameBegin(pass); det.stepHooks.afterFrame(pass); });
+    const guess = toV3(new Float32Array(await readBuffer(device, positions)), N), c = await det.readCounters(), dg = await det.readDiagnosis();
+    assert.equal(c.status, 0, `status ${OgcContactDetector.describeStatus(c.status)}`);
+    assert.equal(c.solidContacts, 0, "no vertex has a floor entry");
+    assert.ok(dg.held.every(h => h === 0), "no vertex is held");
+    for (let v = 0; v < N; v++) assert.ok(norm(sub(guess[v], add(X[v], D))) < 1e-6, `vertex ${v} keeps its guess: ${guess[v]}`);
+    det.destroy();
+  });
+});
+
+test("GPU contact state: touching is a normal force at the step's end, onset its first step, carried with the held flags", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const r = 2e-3, rqMax = 0.02, band = r + 1.5 * Math.sqrt(3) * rqMax + 1e-6;
+    const field = buildClothSolidField({ parts: [{ kind: "lattice-box", lo: [-0.2, -0.2, -0.1], hi: [0.3, 0.3, 0], mu: 0.3 }], lo: [-0.2, -0.2, -0.1], hi: [0.3, 0.3, 0.3], cell: 0.01, band });
+    // Half the sheet rests 1.5 mm above the floor (inside r), the other half 2.6 mm (outside).
+    const s = sheet(9, 6, 0.01, [0, 0, 0]), N = s.x.length;
+    const X = f32(s.x.map(p => [p[0], p[1], p[0] < 0.035 ? 1.5e-3 : 2.6e-3] as V3)), mesh: OracleMesh = { ...s, x: X };
+    const { triangles, edges } = topologyOf(mesh);
+    const positions = storage(device, vec4s(X)), xt = storage(device, vec4s(X)), velocities = storage(device, vec4s(X.map(() => [0, 0, 0] as V3)));
+    const config: OgcContactConfig = { ...baseConfig(N), r, rqMax, gravity: [0, 0, 0], solidCapacityWords: field.words.length, solidSampleCapacity: 8192 };
+    const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges }, vec4s(X), config, { positions, velocities });
+    det.setSolidField(field);
+    const state = async () => new Uint32Array(await readBuffer(device, det.contactState, 4 * N));
+    await runPass(device, pass => { det.encodeFrameBegin(pass); det.stepHooks.afterFrame(pass); det.stepHooks.stepEnd(pass); });
+    const x = toV3(new Float32Array(await readBuffer(device, positions)), N), s1 = await state();
+    assert.equal((await det.readCounters()).status, 0);
+    for (let v = 0; v < N; v++) assert.equal(s1[v], x[v]![2] < r ? 3 : 0, `vertex ${v} at ${x[v]![2]}: state ${s1[v]}`);
+    assert.ok(s1.some(b => b === 3) && s1.some(b => b === 0), "both halves");
+    // The next step end: still touching, no onset.
+    await runPass(device, pass => det.stepHooks.stepEnd(pass));
+    const s2 = await state();
+    for (let v = 0; v < N; v++) assert.equal(s2[v], s1[v]! & 1, `vertex ${v} after a second step`);
+    // Carried: a restored detector reports the last step's state, and a step end after it sees no new onset.
+    const carried = await det.readCarriedState();
+    det.writeCarriedState({ reference: carried.reference, held: carried.held });
+    assert.deepEqual(await state(), s2);
+    // Lifted clear: nothing touches; set back down: onset again.
+    device.queue.writeBuffer(positions, 0, vec4s(X.map(p => [p[0], p[1], 0.01] as V3)));
+    await runPass(device, pass => det.stepHooks.stepEnd(pass));
+    assert.ok((await state()).every(b => b === 0), "lifted clear");
+    device.queue.writeBuffer(positions, 0, vec4s(x));
+    await runPass(device, pass => det.stepHooks.stepEnd(pass));
+    assert.deepEqual(await state(), s1, "set down: onset again");
     det.destroy();
   });
 });

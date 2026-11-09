@@ -15,7 +15,8 @@
  * zone; bit 3: held by a conflict this step; bit 4: touched the moving solid this step (a field
  * bound whose ball reaches r, a cut, or a sample entry); bit 5: held with the moving solid this step (last step it was in
  * contact and touched or moved with the solid); bit 6: moved with the solid this step (w = a_v,
- * set by prep)); the solid image sits in the contact buffer at word solidBase.
+ * set by prep); bit 8: touching at the end of the last step; bit 9: its contact onset (OGC_CONTACT_STATE_WGSL));
+ * the solid image sits in the contact buffer at word solidBase.
  *
  * One detection round is nine indirect dispatches:
  *   prep (N)  cell (1)  insert-count (T)  scan x3  insert (T)  query (N + E + S)  bound (N)
@@ -35,7 +36,7 @@
  *   plane  (n.xyz, certified support gap) as f32 bits; n points from the second primitive
  *          to the first; a gap <= 0 marks a pair with no separating plane
  */
-import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_SOLID_WGSL } from "./ogc-wgsl";
+import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_SOLID_WGSL, ogcVertexBlockWGSL } from "./ogc-wgsl";
 
 export const OGC_PARAM_WORDS = 72;
 /**
@@ -312,6 +313,7 @@ fn ogcSolidWord(i: u32) -> u32 { return atomicLoad(&contacts[i]); }
  */
 export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13, 14, 17], [14]) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 var<workgroup> wgMaxEnv: atomic<u32>;
+var<workgroup> wgMaxPred: atomic<u32>;
 var<workgroup> wgCube: array<f32, 64>;
 var<workgroup> wgCap: atomic<u32>;
 var<workgroup> wgBad: atomic<u32>;
@@ -377,9 +379,13 @@ fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u3
 // ball rc = min(rho, rqMax / 2), within which an unstored brick still reads clear of r (the band
 // holds r + 1.5 L_max rqMax); a ball clear of the solid certifies all of it (q = D = 0). Beyond
 // rc only the Lipschitz ball certifies, so a long prediction is never moved for the ball's sake.
-fn roundBound(v: u32, h: OgcSolidHeader, x0: vec3<f32>, rho: f32, y: u32, margin: f32) -> OgcTerms {
-  if (min(ogcSolidSample(h, x0).phi, h.band) - h.lmax * (rho + margin) >= P.r
-    || ogcSolidClearance(h, x0) - (rho + margin) >= P.r) { return OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0), 0.0); }
+// The round's reach is the ball |d| <= rho about x0; it lies in the smaller ball about x0 + c of
+// radius rho - |c| when the round moves along a chord (c its half: the start and the predicted end
+// within env / 2 of it lie there, and the ball is convex). Clear of the solid there, no terms.
+fn roundBound(v: u32, h: OgcSolidHeader, x0: vec3<f32>, rho: f32, y: u32, margin: f32, c: vec3<f32>) -> OgcTerms {
+  let xc = x0 + c; let rr = rho - length(c) + margin;
+  if (min(ogcSolidSample(h, xc).phi, h.band) - h.lmax * rr >= P.r
+    || ogcSolidClearance(h, xc) - rr >= P.r) { return OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0), 0.0); }
   let rc = min(rho, 0.5 * P.rqMax);
   var sb = ogcSolidBallBound(h, x0, rc, P.r);
   if (sb.far) { sb.g0 = vec3<f32>(0.0); sb.D = vec3<f32>(0.0); }
@@ -404,11 +410,12 @@ fn predictionScale(t: OgcTerms, d: vec3<f32>) -> f32 {
 // The static solid over the ball |d| <= rho around x0: the truncation terms (q, D) =
 // (g0, D) / max(gamma_r phi0, phi0 - r), so that phi(x0 + d) >= min((1 - gamma_r) phi0, r) wherever
 // D.|d| - q.d <= 1, and a solid entry for the vertex when the ball can reach r.
-fn solidRound(v: u32, x0: vec3<f32>, rho: f32, margin: f32) -> OgcTerms {
+fn solidRound(v: u32, x0: vec3<f32>, w: vec3<f32>, env: f32, margin: f32) -> OgcTerms {
+  let rho = length(w) + 0.5 * env;
   let h = ogcSolidHeader();
   let rel = (x0 - h.origin) / (8.0 * h.cell);
   if (any(rel < vec3<f32>(0.0)) || any(rel >= vec3<f32>(h.dims))) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_SOLID_BOUNDS); }
-  let qj = roundBound(v, h, x0, rho, OGC_SOLID_Y, margin);
+  let qj = roundBound(v, h, x0, rho, OGC_SOLID_Y, margin, 0.5 * w);
   if (qj.q.w != 0.0 && qj.q.w < 1.0e38) { atomicAdd(&wgSolid, 1u); }
   putWork4(P.solidOff + 4u * v, qj.q);
   putWork4(P.solidDevOff + 4u * v, vec4<f32>(qj.D, qj.rl));
@@ -455,7 +462,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       let unmeasured = yref.w < 0.0;
       yref = vec4<f32>(x + inertial, select(length(x - yref.xyz), 0.0, unmeasured));
       // In contact and touching or moving with the moving solid last step: held in its frame.
-      flags = ((flags & 1u) << 1u) | select(0u, 32u, (flags & 1u) != 0u && (flags & 80u) != 0u);
+      flags = ((flags & 1u) << 1u) | select(0u, 32u, (flags & 1u) != 0u && (flags & 80u) != 0u) | (flags & 768u);
       if (2.0 * yref.w > plen || (unmeasured && plen > 0.0)) { flags |= 2u; }
       atomicStore(&work[P.heldOff + v], flags);
     }
@@ -524,7 +531,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       // Moving with the solid, the vertex's round is straight in the solid's frame: none there.
       let bm = select(sigma, 0.0, withBody);
       if (length(y0) - rho - bm < P.bodyReach) {
-        bq = roundBound(v, hb, y0, rho, OGC_BODY_Y, bm);
+        bq = roundBound(v, hb, y0, rho, OGC_BODY_Y, bm, vec3<f32>(0.0));
         // It touches the solid when its ball can reach r (a far ball's terms are only the
         // Lipschitz length limit, q = D = 0): held with the solid next step only then.
         if (bq.q.w != 0.0 && bq.q.w < 1.0e38) {
@@ -556,7 +563,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     if (P.solidBase != 0u) {
       // The round moves the vertex at most |w| + env / 2 (the cap is 0.5 gamma_r or gamma_p of env),
       // straight in the world, or within sigma_v of straight when it moves with the solid.
-      let qj = solidRound(v, x, length(w) + 0.5 * env, select(0.0, sigma, withBody));
+      let qj = solidRound(v, x, w, env, select(0.0, sigma, withBody));
       if (qj.q.w >= 1.0e38) { w = vec3<f32>(0.0); } else { w *= predictionScale(qj, w); }
     }
     if (P.bodyBase != 0u) {
@@ -573,6 +580,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     atomicStore(&work[P.envOff + v], bitcast<u32>(env));
     atomicStore(&work[P.tvOff + v], bitcast<u32>(1.0));
     atomicMax(&wgMaxEnv, bitcast<u32>(env));
+    atomicMax(&wgMaxPred, bitcast<u32>(length(w)));
     let e = env / P.rqMax;
     wgCube[li] = e * e * e;
     if (fresh && held) { atomicAdd(&wgHeld, 1u); }
@@ -581,6 +589,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   if (li == 0u) {
     let m = atomicLoad(&wgMaxEnv);
     if (m != 0u) { atomicMax(&counters[OGC_MAX_ENVELOPE], m); }
+    let mw = atomicLoad(&wgMaxPred);
+    if (mw != 0u) { atomicMax(&counters[OGC_MAX_PREDICTION], mw); }
     var cube = 0.0;
     for (var i = 0u; i < 64u; i++) { cube += wgCube[i]; }
     let es = u32(round(cube * 1024.0));
@@ -619,7 +629,11 @@ fn main() {
   atomicMax(&counters[OGC_F_PEAK_ENVELOPE], bitcast<u32>(m));
   atomicStore(&counters[OGC_ROUND_ENVELOPE], bitcast<u32>(m));
   let cube = f32(atomicExchange(&counters[OGC_ENVELOPE_SUM], 0u)) / (1024.0 * f32(P.N));
-  let h = select(max(P.cellFloor, m), max(P.cellFloor, P.rqMax * pow(cube, 1.0 / 3.0)), P.cellRule == 1u);
+  // A face's box spans its swept prediction as well as the envelope: a cell at least the round's
+  // longest prediction keeps every box within a few cells per axis however fast the cloth moves
+  // (entries per primitive are bounded by construction, not by the authored grid capacity).
+  let wmax = bitcast<f32>(atomicExchange(&counters[OGC_MAX_PREDICTION], 0u));
+  let h = max(select(max(P.cellFloor, m), max(P.cellFloor, P.rqMax * pow(cube, 1.0 / 3.0)), P.cellRule == 1u), wmax);
   atomicStore(&counters[OGC_CELL], bitcast<u32>(h));
   atomicStore(&counters[OGC_INV_CELL], bitcast<u32>(1.0 / h));
 }
@@ -948,7 +962,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * with the base x - X, and x - X - a_v in the body frame). Each is a convex set containing
  * x, so alpha_v bounds an interval [0, alpha_v]. Writes alpha_v and the atomic min alpha_min
  * (alpha[N], set to 1 by OGC_FILTER_BEGIN_WGSL); the vertices it bounds below 1 count towards
- * the re-detection decision, and one held at 0 arms it outright (OGC_FILTER_STALLED).
+ * the re-detection decision, and one held at 0 arms it outright (OGC_FILTER_STALLED). A bound
+ * holds no vertex: it limits a line search, it is no contact, and the round that follows
+ * predicts 0 about the iterate anyway. (Holding them spread the holds a ring per step from a pin.)
  */
 export const OGC_FILTER_WGSL = header([0, 2, 4, 5, 8, 9, 14, 15, 16]) + PRED_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + CUT_FNS + /* wgsl */`
 var<workgroup> wgBound: atomic<u32>;
@@ -976,7 +992,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     al = max(al, 0.0);
     atomicStore(&alpha[v], bitcast<u32>(al));
     atomicMin(&alpha[P.N], bitcast<u32>(al));
-    if (al < 1.0) { atomicAdd(&wgBound, 1u); atomicOr(&work[P.heldOff + v], 1u); }
+    if (al < 1.0) { atomicAdd(&wgBound, 1u); }
     if (al <= 0.0) { atomicAdd(&wgStalled, 1u); }
   }
   workgroupBarrier();
@@ -1720,5 +1736,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let h = atomicLoad(&wgHits); if (h != 0u) { atomicAdd(&counters[OGC_INTERSECTIONS], h); }
     let sh = atomicLoad(&wgSolidHits); if (sh != 0u) { atomicAdd(&counters[OGC_SOLID_INTERSECTIONS], sh); }
   }
+}
+`;
+
+/**
+ * The per-vertex contact state at the end of a step (once per step, after the solver's last
+ * update of its positions and before it forms its velocities and history): a vertex touches
+ * when one of its entries of the step's last round (a cloth pair it weighs on, or a static or
+ * moving solid entry) puts a normal contact force on it at the step's end x_{n+1}: the gap is
+ * below r there (the barrier's kappa'' > 0) and the vertex's own weight in it is nonzero. The
+ * last round's entries hold every primitive within r of the final iterate (the round's
+ * certificate: OGC's completeness), so this is exact. state[v]: bit 0 touches at the end of
+ * this step, bit 1 contact onset, touching now and not at the end of the step before (carried
+ * in the held flags, bits 8 and 9, across steps and saves). Writes nothing else.
+ */
+export const OGC_CONTACT_STATE_WGSL = [PARAMS_STRUCT, DECL[0], DECL[1], DECL[2], DECL[5], DECL[13]].join("\n") + /* wgsl */`
+@group(0) @binding(18) var<storage, read_write> state: array<u32>;
+fn ogcX(i: u32) -> vec3<f32> { return pos[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return xt[i].xyz; }
+fn ogcTri(t: u32) -> vec3<u32> { let b = P.trisOff + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = P.edgesOff + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
+` + ogcVertexBlockWGSL({ group: 0, binding: 8 }) + /* wgsl */`
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= P.N) { return; }
+  let header = ogcContacts[0];
+  let params = bitcast<vec4<f32>>(ogcContacts[1]);
+  let count = ogcContactCount(v);
+  let base = header.w + v * header.y;
+  let xv = pos[v].xyz;
+  var touching = false;
+  for (var i = 0u; i < count; i++) {
+    let l = ogcEntryLin(v, xv, ogcContacts[base + i], params);
+    if (l.wr != 0.0 && l.Mn[0][0] + l.Mn[1][1] + l.Mn[2][2] > 0.0) { touching = true; break; }
+  }
+  let old = atomicLoad(&work[P.heldOff + v]);
+  let s = select(0u, 1u, touching) | select(0u, 2u, touching && (old & 256u) == 0u);
+  state[v] = s;
+  atomicStore(&work[P.heldOff + v], (old & ~768u) | (s << 8u));
 }
 `;

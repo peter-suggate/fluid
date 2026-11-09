@@ -1547,3 +1547,87 @@ contact-gates, contact-oracle pass. Unit suite: only the foreign failure.
   rebuild offset. The straight runs used to differ by 4–7 mm (truncation chaos), and now differ by about 2 mm. One
   continued sample against three straight runs is then a coin flip. Suggest 5 straight runs, or test the
   continuation's exchangeability. The bound is not changed here.
+
+## 2026-11-10 RESULT: the contact-on swinging sheet passes on Newton; gridOverflow and the solid round's reach fixed; the contact-onset signal for C1
+
+**Swing gate, contact ON (ClothSystem, Newton 8 × 200, init = y via the scratch preload).** The free edge stays
+within 0.000 mm of free fall over the 20 gate steps. It passes under the pin at **0.4950 s**, the same as bare.
+Per tick through k45 the contact run matches the bare trajectory to 0.1–0.2 mm (k30: −34.7, 224.7 mm in both;
+k45: −920.7 vs −920.8, 807.9). From k34 on it takes 1–2 rounds a step, with no roundCap. Free fall with contact:
+0.0005 mm. The curtain with contact gives band 1.11%, hem 64.99 mm, KE 2.05e-3 J, which is bare's own result
+(C1's table: 1.10%). So contact adds nothing there; the failure is the solver's.
+
+Two causes were found on the way. Both are fixed in `ogc-detector-wgsl.ts` / `ogc-wgsl.ts`.
+
+1. **gridOverflow at tick 17 (0.283 s).**
+   - Cause: a face's broad-phase box spans its swept prediction X → X + w, grown by the round's envelope. But
+     the "largest" cell rule sized the cell by the envelope alone (17 mm). A free sheet moving 4.6 cm a step
+     then covers more than 32 cells per face (the scenes' authored gridEntriesPerPrimitive).
+   - Fix: prep reduces the round's longest |w| (new counter `maxPrediction`, word 51; OGC_COUNTER_WORDS 52).
+     The cell kernel takes h = max(rule, max |w|) for both rules. A face box then spans a few cells per axis
+     however fast the cloth moves. Entries per primitive are bounded by construction, with no pool growth and
+     no capacity change.
+2. **The whip stalled at k30.** The free edge stopped at x = 20 mm instead of −35 mm, and from there every
+   step hit roundCap with α_min = 0 and all 10100 vertices bound.
+   - Cause: the static solid's round certificate tested the ball |d| ≤ |w| + env/2 about the step start. For
+     the free edge at 22 cm above the floor, moving 12 cm a step, that ball reaches the floor. Neither the
+     band-limited φ (band 10.5 cm, L = √3) nor the 2 cm-cell clearance table (8 cm blocks, √3 h slack)
+     certifies it. So roundBound gave far-ball terms of reach min(ρ, rqMax/2) = 2 cm, and predictionScale cut
+     a 120 mm prediction to about 20 mm. The cap ball (0.5 γ rqMax) then left 100 mm to cover at about 18 mm a
+     round, under a global α. It never got there, and the free edge was "solid"-flagged (202 vertices, bit 0),
+     so it was held the next step as well.
+   - Fix: a round moves along its chord. Its start and its predicted end (within env/2) lie in the ball about
+     the chord's midpoint, of radius |w|/2 + env/2, and that ball is convex. roundBound now takes the centre
+     offset c = w/2 for its two clear tests. The terms, when they are needed, are unchanged (about x0 over
+     ρ). The moving solid's round passes c = 0, which is unchanged.
+   - Diagnosis runs (scratch): rqMax 8 cm got k30 right but stalled at k31 on the hold; roundCap 16 did not help.
+- The filter's bound no longer holds the vertex (the no-hold filter of the w = 0 design).
+
+**Regressions** (`tests/cloth-contact-gpu.test.ts`):
+- "solid round over its chord": a sheet 20 cm above a floor, predicted 25 cm diagonally along it, on the scenes'
+  grid of 32 entries per primitive. Status 0, no floor entry, nothing held, the guess kept. Without the chord
+  centre it fails with floor entries, and without the prediction cell it fails with gridOverflow (both checked).
+- "contact state" (below).
+
+**Suites.**
+- contact-gpu: 20/20 plus the 2 new tests.
+- contact-solid, contact-body and contact-gates pass with HEAD's solver files.
+- Unit suite: only the foreign `reservoir-particle-cost` failure and my scratch probe (`tests/c2-*`, not committed).
+- **C1, please check:** with your uncommitted `gpu-newton-wgsl.ts` / `gpu-solver-wgsl.ts` / `gpu-coarse-wgsl.ts`,
+  "moving plate in C1's solver" fails: 23.43% rms, 26 steps redone, 651 conflicts, 550 vertices on the top.
+  On HEAD's versions with my changes it passes: 0.80%, 4 redone, 19 conflicts.
+
+**Still needed from C1:** `initialGuess: 'inertial'` wherever the prediction is "target" (system.ts, both solvers).
+Every number above used the scratch preload for it. Under 'previous' the swing is 448 mm off at step 20.
+
+### The contact-onset signal (C2 → C1, for the per-vertex BDF2 restart)
+
+**Definition.**
+- Vertex v **touches** at the end of step n when a normal contact force acts on it at x_{n+1}. That means one of
+  its entries from the step's last round has a gap below r there (the barrier's κ'' > 0), and v's own weight in
+  that entry is nonzero.
+- The entries are those the solver's vertex block sums: cloth VT/EE pairs it weighs on, static-solid field
+  entries, moving-solid entries and sample-face entries.
+- The last round's certificate holds every primitive within r of the final iterate, so the test is exact. It is
+  not "within the query radius".
+- **Onset** at step n: touching at the end of step n and not at the end of step n − 1.
+
+**Buffer.** `OgcContactDetector.contactState` holds one u32 per vertex (read only for the solver):
+- bit 0: touching at the end of the last step;
+- bit 1: onset in that step.
+
+It is carried in the held flags (bits 8 and 9), so `readCarriedState` / `writeCarriedState` (save, load, undo)
+restore it, and a restored detector sees no false onset.
+
+**Hook.** `stepHooks.stepEnd(pass)` (= `encodeContactState`), one dispatch of N/64 workgroups. Call it once per
+step, after the last position update and before you form velocities and the BDF2 history. Bit 1 is then the
+onset of the step you are finishing. Use it for that step's velocity, or for the next step's history, whichever
+your restart needs. It stays valid until the next stepEnd.
+
+Tested on the GPU: half a sheet 1.5 mm above a floor (r = 2 mm) and half 2.6 mm.
+- First step: states 3 and 0. Next step: 1 and 0.
+- Restored from the carried state: unchanged.
+- Lifted clear: all 0. Set back down: 3 again.
+
+If you want "touching" to also count the friction-only lag, or the face side of a VT pair with zero weight,
+say so; I chose "a normal force on v".

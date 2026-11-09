@@ -68,8 +68,10 @@ export const OGC_COUNTER = {
   redoProgress: 49,
   /** The line-search filter: vertices it held at alpha_v = 0 (consumed by the decision, which then re-detects). */
   filterStalled: 50,
+  /** The round's longest vertex prediction |w| (f32 bits; consumed by the cell kernel, which sizes the cell by it). */
+  maxPrediction: 51,
 } as const;
-export const OGC_COUNTER_WORDS = 51;
+export const OGC_COUNTER_WORDS = 52;
 export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47];
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
@@ -117,6 +119,7 @@ const OGC_STATUS_WORD = ${OGC_COUNTER.status}u;
 const OGC_PEAK_CONTACTS = ${OGC_COUNTER.peakContacts}u;
 const OGC_PEAK_GRID = ${OGC_COUNTER.peakGrid}u;
 const OGC_MAX_ENVELOPE = ${OGC_COUNTER.maxEnvelope}u;
+const OGC_MAX_PREDICTION = ${OGC_COUNTER.maxPrediction}u;
 const OGC_CELL = ${OGC_COUNTER.cell}u;
 const OGC_INV_CELL = ${OGC_COUNTER.invCell}u;
 const OGC_F_DETECTIONS = ${OGC_COUNTER.frameDetections}u;

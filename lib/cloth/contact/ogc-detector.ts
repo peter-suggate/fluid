@@ -34,7 +34,7 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
@@ -251,6 +251,12 @@ export class OgcContactDetector {
    * and then alpha_min = min_v alpha_v. A 4-byte placeholder otherwise.
    */
   readonly alpha: GPUBuffer;
+  /**
+   * The contact state of every vertex at the end of the last step (encodeContactState, the
+   * stepEnd hook): one u32 per vertex, bit 0 touching (a normal contact force on it at x_{n+1}),
+   * bit 1 its contact onset (touching, and not at the end of the step before). Read only.
+   */
+  readonly contactState: GPUBuffer;
   private kernels = new Map<string, Kernel>();
   private readonly paramWords = new Uint32Array(OGC_PARAM_WORDS);
 
@@ -336,6 +342,7 @@ export class OgcContactDetector {
     this.args = mk("args", 4 * OGC_ARGS_WORDS, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.planesArgs = mk("planes args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.alpha = mk("filter alpha", config.newton ? 4 * (N + 1) : 4);
+    this.contactState = mk("contact state", 4 * N);
     const w = this.paramWords, f = new Float32Array(w.buffer), P = OGC_PARAM;
     w[P.N] = N; w[P.T] = T; w[P.E] = E; w[P.H] = H;
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
@@ -571,6 +578,8 @@ export class OgcContactDetector {
       // A Newton solver (newton config): filter its direction, then after its step re-detect.
       filter: (pass: GPUComputePassEncoder) => { this.encodeFilter(pass); },
       afterNewtonStep: (pass: GPUComputePassEncoder) => { this.encodeAfterNewtonStep(pass); },
+      // Once per step, after the last position update and before velocities and history.
+      stepEnd: (pass: GPUComputePassEncoder) => { this.encodeContactState(pass); },
     };
   }
 
@@ -597,6 +606,7 @@ export class OgcContactDetector {
         ["filter", OGC_FILTER_WGSL, [0, 2, 4, 5, 8, 9, 14, 15, 16]],
       ] as [string, string, number[]][] : []),
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 8, 9, 14]],
+      ["contactState", OGC_CONTACT_STATE_WGSL, [0, 1, 2, 5, 8, 13, 18]],
       // Intersection counting reads the solver's current positions where detection reads x_det.
       ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
       ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],
@@ -624,6 +634,7 @@ export class OgcContactDetector {
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
       13: res(inputs.stepStart ?? inputs.positions), 14: res(this.pred),
       15: res(inputs.direction ?? inputs.positions), 16: res(this.alpha), 17: res(inputs.target ?? inputs.positions),
+      18: res(this.contactState),
     };
     for (const [name, k] of this.kernels) {
       k.bindGroup = this.device.createBindGroup({
@@ -708,6 +719,8 @@ export class OgcContactDetector {
    * usually empty) re-detection round and the truncation that re-anchors the iterate in a new
    * round's certificates (a no-op, to rounding, when no round ran: the iterate is certified).
    */
+  /** The step's contact state (contactState), once per step after its final positions. */
+  encodeContactState(pass: GPUComputePassEncoder) { this.run(pass, "contactState", Math.ceil(this.N / WG)); }
   encodeAfterNewtonStep(pass: GPUComputePassEncoder) {
     this.encodeDecide(pass); this.encodeDetection(pass, false); this.encodeTruncate(pass);
   }
@@ -805,7 +818,9 @@ export class OgcContactDetector {
       throw new Error(`OGC: carried state for ${state.held.length} vertices, the detector has ${N}`);
     const reference = state?.reference ?? (() => { const r = new Float32Array(4 * N); for (let v = 0; v < N; v++) r[4 * v + 3] = -1; return r; })();
     writeBufferChunked(this.device.queue, this.pred, 16 * N, reference);
-    writeBufferChunked(this.device.queue, this.work, 4 * (7 * N + this.T + this.E), state?.held ?? new Uint32Array(N));
+    const held = state?.held ?? new Uint32Array(N);
+    writeBufferChunked(this.device.queue, this.work, 4 * (7 * N + this.T + this.E), held);
+    writeBufferChunked(this.device.queue, this.contactState, 0, held.map(f => (f >> 8) & 3));
   }
 
   /** Explain a status word. */
@@ -814,6 +829,6 @@ export class OgcContactDetector {
   }
 
   destroy() {
-    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs, this.alpha]) buffer.destroy();
+    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs, this.alpha, this.contactState]) buffer.destroy();
   }
 }
