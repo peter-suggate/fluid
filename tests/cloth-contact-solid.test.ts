@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildClothSolidField, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
 import {
-  add, boxSdf, dot, norm, rng, scale, solidBallBound, solidContact, solidTruncate, sphereSdf, sub,
+  add, boxSdf, dot, faceInsideSolid, norm, rng, scale, solidBallBound, solidContact, solidTruncate, sphereSdf, sub,
   type ContactParams, type V3,
 } from "./cloth-contact-oracle";
 
@@ -190,15 +190,16 @@ test("solid surface samples: on the zero set wherever it is convex and not flat 
   const h = 0.005;
   const at = (s: Float32Array) => Array.from({ length: s.length / 4 }, (_, i) => [s[4 * i]!, s[4 * i + 1]!, s[4 * i + 2]!] as V3);
   const pts = at(clothSolidSamples(field));
-  // A smooth sample stands its bulge (kappa_1 + kappa_2) h^2 / 8 out, a crease sample on the surface.
+  // A sample stands out by its holes' measured bulge, at most h / 16 (phi rises up to |grad phi| <= sqrt 3 times that).
   assert.ok(pts.every(p => phiAt(p) > -1e-6 && phiAt(p) < h / 8), "just outside the zero set");
   // Box samples lie within a cell of an edge (two faces' planes): the faces' interiors carry none.
   const onBox = pts.filter(p => box(p) < ball(p));
   const out = (p: V3) => [p[0] < 0.02 + h || p[0] > 0.08 - h, p[1] < 0.02 + h || p[1] > 0.06 - h, p[2] < h || p[2] > 0.03 - h].filter(Boolean).length;
   assert.ok(onBox.length > 300 && onBox.every(p => out(p) >= 2), `${onBox.length} box samples, off the edges: ${onBox.filter(p => out(p) < 2).length}`);
-  // The ball (smooth: it turns 0.2 rad per cell) is covered at about h: its area over h^2 within a factor of two.
+  // The ball (it turns about 0.2 rad per cell, near the sharp turn) is covered at h to h / 2: its area over
+  // h^2, up to four times that.
   const nBall = pts.length - onBox.length, ideal = 4 * Math.PI * 0.025 ** 2 / h ** 2;
-  assert.ok(nBall > 0.5 * ideal && nBall < 2 * ideal, `${nBall} samples on the 2.5 cm ball, ideal ${ideal.toFixed(0)}`);
+  assert.ok(nBall > 0.5 * ideal && nBall < 8 * ideal, `${nBall} samples on the 2.5 cm ball, ideal ${ideal.toFixed(0)}`);
   // So is a broad sphere (any convex curvature lets a face sag below its vertices), and every point of it is near one.
   const broad = buildClothSolidField({ sdf: sphereSdf([0, 0, 0], 0.1), lo: [-0.13, -0.13, -0.13], hi: [0.13, 0.13, 0.13], cell: h, band: 0.02 });
   const bp = at(clothSolidSamples(broad)), R = rng(5);
@@ -218,4 +219,38 @@ test("solid surface samples: on the zero set wherever it is convex and not flat 
   assert.ok(sp.length > 100 && inner.length === 0 && flat.length === 0, `${sp.length} step samples, ${inner.length} along the inner crease, ${flat.length} on the flat tops`);
   assert.equal(clothSolidSamples(step), clothSolidSamples(step), "computed once per field");
   assert.throws(() => clothSolidSamples(field, { r: 0, edge: 0.01 }), RangeError);
+});
+
+test("exact face-in-solid oracle: a face cutting a box edge between outside vertices is inside, one clearing it is not, and it agrees with dense sampling", () => {
+  const h = 0.005, f = buildClothSolidField({ parts: [{ kind: "lattice-box", lo: [0, 0, 0], hi: [0.1, 0.05, 0.1], mu: 0.3 }], lo: [-0.05, -0.05, -0.05], hi: [0.15, 0.1, 0.15], cell: h, band: 0.03 });
+  // A face in the plane x + y = 0.15 + o over the top edge (x = 0.1, y = 0.05), vertices well outside.
+  const tilted = (o: number): V3[] => [[0.08 + o, 0.07, 0.03], [0.12 + o, 0.03, 0.03], [0.11 + o, 0.04, 0.07]];
+  const phi = (p: V3) => sampleClothSolidField(f, p).phi;
+  for (const o of [-5e-4, -2e-5]) {
+    const T = tilted(o);
+    assert.ok(T.every(p => phi(p) > 0.005), "vertices outside");
+    assert.equal(faceInsideSolid(f, T[0]!, T[1]!, T[2]!).inside, true, `cut by ${o}`);
+  }
+  for (const o of [2e-5, 5e-4]) {
+    const T = tilted(o), r = faceInsideSolid(f, T[0]!, T[1]!, T[2]!);
+    assert.equal(r.inside, false, `clear by ${o}`);
+    assert.ok(r.lower >= 0 && r.lower <= o, `lower bound ${r.lower} within the clearance ${o}`);
+  }
+  // Random faces near the box and the ball: inside exactly when a dense lattice finds phi < 0 (or the
+  // dip is shallower than the lattice resolves); never outside where the lattice finds phi < 0.
+  const R = rng(11);
+  let agree = 0, finer = 0;
+  for (let i = 0; i < 300; i++) {
+    const c = nearSolid(R, 1)[0]!, T = [0, 1, 2].map(() => add(c, scale(unit(R), 0.004 + 0.01 * R()))) as V3[];
+    const exact = faceInsideSolid(field, T[0]!, T[1]!, T[2]!), n = 48;
+    let lattice = Infinity;
+    for (let a = 0; a <= n; a++) for (let b = 0; b <= n - a; b++) {
+      const p = [0, 1, 2].map(k => ((n - a - b) * T[0]![k]! + a * T[1]![k]! + b * T[2]![k]!) / n) as unknown as V3;
+      lattice = Math.min(lattice, phiAt(p));
+    }
+    if (lattice < 0) assert.equal(exact.inside, true, `face ${i}: lattice phi ${lattice}`);
+    else if (exact.inside) { finer++; assert.ok(lattice < 1e-4, `face ${i} inside, lattice min ${lattice}`); }
+    else { agree++; assert.ok(exact.lower <= lattice + 1e-12, `face ${i}: lower ${exact.lower} above lattice ${lattice}`); }
+  }
+  console.log(`# exact face oracle: ${agree} outside agreeing, ${finer} inside below the lattice's resolution`);
 });

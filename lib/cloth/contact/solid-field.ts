@@ -409,11 +409,65 @@ export interface ClothSolidSampleOptions {
  */
 export const SOLID_SAMPLE_TURN_FLOOR = 0.01;
 /**
+ * The largest lift a sample may need, as a fraction of the cell: a sample stands
+ * out by its holes' bulge (below), and a bulge above h / 16 means the samples are
+ * too sparse for the surface's curvature. The build then fails; it never clamps.
+ * h / 16 lies inside the trilinear field's own rounding of a sharp edge (about a cell).
+ */
+export const SOLID_SAMPLE_MAX_LIFT = 1 / 16;
+/**
  * Normal turn per cell above which the surface is sharp (radius of curvature
  * under 4 h: an edge or corner the trilinear field rounds over a cell), and is
- * sampled at h / 2 rather than h.
+ * seeded at h / 2 rather than h.
  */
 export const SOLID_SAMPLE_SHARP_TURN = 0.25;
+
+/**
+ * How far a locally convex surface can rise above the triangle P, along the
+ * unit direction N: it lies below each supporting (tangent) plane, so over the
+ * triangle below the lowest of them, whose highest point is the bound. The
+ * lowest of affine heights over a triangle is concave and piecewise affine: its
+ * maximum is at a corner, where two heights meet on an edge, or where three
+ * meet inside. A plane at or past perpendicular to N bounds nothing; with none
+ * left the bound is infinite.
+ */
+function roofHeight(P: readonly [V3, V3, V3], N: V3, supports: readonly { p: V3; n: V3 }[]): number {
+  const e1 = [0, 1, 2].map(i => P[1][i]! - P[0][i]!), e2 = [0, 1, 2].map(i => P[2][i]! - P[0][i]!);
+  // Height over y = P0 + u e1 + v e2 of tangent plane k along N: -n_k.(y - p_k) / (n_k.N), affine in (u, v).
+  const planes = supports.map(({ p: pk, n }) => {
+    const nN = n[0]! * N[0]! + n[1]! * N[1]! + n[2]! * N[2]!;
+    // A tangent plane at or past perpendicular to the triangle bounds nothing above it.
+    if (!(nN > 1e-6)) return undefined;
+    const d0 = [0, 1, 2].map(i => P[0][i]! - pk[i]!);
+    const c0 = -(n[0]! * d0[0]! + n[1]! * d0[1]! + n[2]! * d0[2]!) / nN;
+    const cu = -(n[0]! * e1[0]! + n[1]! * e1[1]! + n[2]! * e1[2]!) / nN, cv = -(n[0]! * e2[0]! + n[1]! * e2[1]! + n[2]! * e2[2]!) / nN;
+    return [c0, cu, cv] as const;
+  }).filter((x): x is readonly [number, number, number] => !!x);
+  if (!planes.length) return Infinity;
+  const at = (u: number, v: number) => Math.min(...planes.map(q => q[0] + q[1] * u + q[2] * v));
+  const inside = (u: number, v: number) => u >= -1e-12 && v >= -1e-12 && u + v <= 1 + 1e-12;
+  let best = Math.max(at(0, 0), at(1, 0), at(0, 1));
+  // Two heights equal along a triangle edge: edges u = 0, v = 0, u + v = 1 as (u, v) = o + t d.
+  const edges: [number, number, number, number][] = [[0, 0, 1, 0], [0, 0, 0, 1], [1, 0, -1, 1]];
+  for (let i = 0; i < planes.length; i++) for (let j = i + 1; j < planes.length; j++) {
+    const A = planes[i]!, B = planes[j]!, d = [A[0] - B[0], A[1] - B[1], A[2] - B[2]];
+    for (const [ou, ov, du, dv] of edges) {
+      const den = d[1]! * du + d[2]! * dv;
+      if (Math.abs(den) < 1e-30) continue;
+      const t = -(d[0]! + d[1]! * ou + d[2]! * ov) / den;
+      if (t >= 0 && t <= 1) best = Math.max(best, at(ou + t * du, ov + t * dv));
+    }
+    // All three equal inside.
+    for (let k = j + 1; k < planes.length; k++) {
+      const C = planes[k]!, a1 = A[1] - B[1], b1 = A[2] - B[2], r1 = B[0] - A[0], a2 = A[1] - C[1], b2 = A[2] - C[2], r2 = C[0] - A[0];
+      const det = a1 * b2 - a2 * b1;
+      if (Math.abs(det) < 1e-30) continue;
+      const u = (r1 * b2 - r2 * b1) / det, v = (a1 * r2 - a2 * r1) / det;
+      if (inside(u, v)) best = Math.max(best, at(u, v));
+    }
+  }
+  return Math.max(0, best);
+}
 
 /**
  * Static contact points just outside the field's zero set wherever it is
@@ -426,27 +480,28 @@ export const SOLID_SAMPLE_SHARP_TURN = 0.25;
  * kappa e^2 / 8 below them. Flat surface (affine cells) and concave creases
  * (|grad phi| ~ 0 at the trilinear zero set) carry none.
  *
- * A cell whose centre's normal turns (convexly) by more than the floor over
- * two cells is sampled:
- *   - smooth (a turn under SOLID_SAMPLE_SHARP_TURN per cell): its centre's
- *     projection, spacing s about h;
- *   - sharp: seeded at its eight half-cell centres, each projected onto the
- *     surface and kept where the turn over half a cell still exceeds the
- *     floor, spacing s about h / 2.
- * Kept samples are at least h / 4 apart. A smooth sample stands
- * (kappa_1 + kappa_2) s^2 / 8 out along its normal: the surface between
- * samples s apart rises at most that far above their plane (a square of side
- * s: its centre is (s / 2, s / 2) from a corner), so a face kept off the
- * samples is kept off the surface. A crease's samples stay on it: the
- * trilinear field of a lattice box keeps its edge sharp, and the surface is
- * straight along the edge and flat beside it.
+ * A cell whose normal turns (convexly) by more than the floor is seeded at its
+ * centre; one turning past SOLID_SAMPLE_SHARP_TURN (an edge or corner the
+ * trilinear field rounds over a cell) on a 2^3 lattice and at its eight
+ * corners (a voxel solid's corner is a node). Each seed is projected onto the
+ * surface and kept where the surface still turns there, at least half its
+ * spacing from a kept sample, corners and edges (the most cells' tangent
+ * planes meeting at the point) first.
  *
- * A straight cloth edge lying across a crease passes within about h / 4 of a
- * sample (h / 2 on a smooth surface), so the barrier engages it only where
- * that is under r: an edge may graze the solid between samples when h > 4 r
- * (the Bridson scenes: h = 1 cm, r = 1.5 mm). Setup-time CPU work over the
- * surface cells whose field is not affine; returns (x, y, z, mu) per sample,
- * with phi there equal to its lift.
+ * The lift is measured on the samples as built, not assumed. Each sample's
+ * neighbours, ordered around its normal, span its fan of triangles; those
+ * that are facets of the samples' local convex hull are the holes a face
+ * resting on the samples spans. A convex surface lies below every one of its
+ * tangent planes, those of each adjacent cell at an edge or corner included,
+ * so over a hole it rises at most the highest point of their lower envelope
+ * (roofHeight), measured along the three samples' mean normal; each of the
+ * three stands that far out along its normal. A hole bulging past
+ * SOLID_SAMPLE_MAX_LIFT h is refined (its centre and edge midpoints sampled at
+ * half the spacing) and measured again; one still past it once the spacing is
+ * down to the ceiling fails the build explicitly.
+ *
+ * Setup-time CPU work over the surface cells whose field is not affine; returns
+ * (x, y, z, mu) per sample, with phi there equal to its lift.
  *
  * `options` (the cloth's r and longest edge) are validated and otherwise not
  * used: the samples depend on the field alone.
@@ -461,19 +516,22 @@ export function clothSolidSamples(field: ClothSolidField, options?: ClothSolidSa
 /** A field is immutable once built (a rebuild returns a new one): its samples are computed once. */
 const sampleCache = new WeakMap<ClothSolidField, Float32Array>();
 
+type SurfacePoint = { p: V3; n: V3; mu: number };
+
 function buildSolidSamples(field: ClothSolidField): Float32Array {
-  const h = field.cell, kappaMin = SOLID_SAMPLE_TURN_FLOOR / h, CELL_STEP = 2;
-  const spacing = 0.5 * h, m = 2, localStep = 0.5;
+  // A cell's turn is read two cells out (it finds an edge the centre's own cell misses); a seed's
+  // a tenth of a cell out, so a point on a voxel solid's flat face near its edge is not kept.
+  const h = field.cell, kappaMin = SOLID_SAMPLE_TURN_FLOOR / h, CELL_STEP = 2, localStep = 0.1;
   const sample = (p: V3) => sampleClothSolidField(field, p);
   // Newton onto phi = 0 along the gradient; undefined when it leaves the stored field or drifts more than a cell.
-  const project = (p0: V3): { p: V3; n: V3; mu: number } | undefined => {
+  const project = (p0: V3): SurfacePoint | undefined => {
     let p: V3 = p0;
-    for (let i = 0; i < 10; i++) {
+    // Tight enough that a point at a voxel solid's edge, where phi vanishes quadratically and
+    // Newton only halves its distance per step, ends within 1e-4 cells of it.
+    for (let i = 0; i < 40; i++) {
       const s = sample(p);
       if (!s.stored) return undefined;
-      const g2 = s.grad[0] ** 2 + s.grad[1] ** 2 + s.grad[2] ** 2;
-      if (!(g2 > 1e-12)) return undefined;
-      if (Math.abs(s.phi) < 1e-5 * h) {
+      if (Math.abs(s.phi) < 1e-10 * h) {
         if (Math.hypot(p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]) > 2.5 * h) return undefined;
         // The normal from central differences a quarter cell wide: at a lattice edge the
         // one-sided cell gradient may vanish. A concave crease (phi ~ xz / h) has none: skip it.
@@ -485,48 +543,73 @@ function buildSolidSamples(field: ClothSolidField): Float32Array {
         if (!(gl > 0.35)) return undefined;
         return { p, n: [gc[0]! / gl, gc[1]! / gl, gc[2]! / gl], mu: s.mu };
       }
+      // (A voxel solid's corner node may see no gradient in the cell holding it: test phi first.)
+      const g2 = s.grad[0] ** 2 + s.grad[1] ** 2 + s.grad[2] ** 2;
+      if (!(g2 > 1e-18)) return undefined;
       p = [p[0] - s.phi * s.grad[0] / g2, p[1] - s.phi * s.grad[1] / g2, p[2] - s.phi * s.grad[2] / g2];
     }
     return undefined;
   };
-  // The convex normal turn per length seen `step` cells away along two orthogonal
-  // tangents (both ways): [the larger, their sum (at least kappa_1 + kappa_2)].
-  const turns = (q: { p: V3; n: V3 }, step: number): [number, number] => {
+  // The largest convex normal turn per length seen `step` cells away along two orthogonal tangents, both ways.
+  const kappa = (q: SurfacePoint, step: number): number => {
     const n = q.n, a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] : Math.abs(n[1]) < 0.6 ? [0, 1, 0] : [0, 0, 1];
     const t1 = [n[1] * a[2]! - n[2] * a[1]!, n[2] * a[0]! - n[0] * a[2]!, n[0] * a[1]! - n[1] * a[0]!];
     const l1 = Math.hypot(...t1), u = t1.map(v => v / l1), w = [n[1] * u[2]! - n[2] * u[1]!, n[2] * u[0]! - n[0] * u[2]!, n[0] * u[1]! - n[1] * u[0]!];
-    const k = [0, 0];
-    for (const [i, d] of [u, w].entries()) for (const sgn of [1, -1]) {
+    let k = 0;
+    for (const d of [u, w]) for (const sgn of [1, -1]) {
       const o = project([q.p[0] + sgn * step * h * d[0]!, q.p[1] + sgn * step * h * d[1]!, q.p[2] + sgn * step * h * d[2]!]);
       if (!o) continue;
       const dp = [o.p[0] - q.p[0], o.p[1] - q.p[1], o.p[2] - q.p[2]], dn = [o.n[0] - n[0], o.n[1] - n[1], o.n[2] - n[2]];
       const len = Math.hypot(...dp);
       if (len < 0.125 * step * h || dp[0]! * dn[0]! + dp[1]! * dn[1]! + dp[2]! * dn[2]! <= 0) continue;
-      k[i] = Math.max(k[i]!, Math.hypot(...dn) / len);
+      k = Math.max(k, Math.hypot(...dn) / len);
     }
-    return [Math.max(k[0]!, k[1]!), k[0]! + k[1]!];
+    return k;
   };
-  const kappa = (q: { p: V3; n: V3 }, step: number) => turns(q, step)[0];
-  // Kept samples at least h / 4 apart (a hash of h / 4 cells, one each): the seeds of
-  // neighbouring cells project onto the same stretch of surface.
-  const out: number[] = [], seen = new Map<string, number>(), minSep = 0.5 * spacing;
-  // A sample sits `lift` out along its normal: the surface it stands for bulges at most that far above the samples' plane.
-  const keep = (q: { p: V3; n: V3; mu: number }, lift: number) => {
-    const c = q.p.map(v => Math.floor(v / minSep));
-    for (let dz = -1; dz <= 1; dz++) for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-      const j = seen.get(`${c[0]! + dx},${c[1]! + dy},${c[2]! + dz}`);
-      if (j !== undefined && Math.hypot(out[j]! - q.p[0], out[j + 1]! - q.p[1], out[j + 2]! - q.p[2]) < minSep) return;
+
+  // A point's supporting planes: its normal's, and every adjacent cell's own tangent plane there
+  // (at an edge or corner of a voxel solid the cells meeting at the point each carry one face's).
+  const supportPlanes = (q: SurfacePoint): { p: V3; n: V3 }[] => {
+    const g = q.p.map((v, a) => (v - field.origin[a]!) / h);
+    const span = g.map(v => { const c = Math.floor(v), f = v - c; return f < 1e-4 ? [c - 1, c] : f > 1 - 1e-4 ? [c, c + 1] : [c]; });
+    const out = [{ p: q.p, n: q.n }];
+    for (const cz of span[2]!) for (const cy of span[1]!) for (const cx of span[0]!) {
+      const cell = [cx, cy, cz], b = cell.map(v => Math.floor(v / SOLID_BRICK_CELLS)), brick = field.bricks.get(b.join(","));
+      if (!brick) continue;
+      const l = g.map((v, a) => Math.min(cell[a]! + 1 - 1e-9, Math.max(cell[a]!, v)) - b[a]! * SOLID_BRICK_CELLS) as unknown as V3;
+      const t = trilinear(brick.values, l), gl = Math.hypot(t[0], t[1], t[2]) / h;
+      // A cell whose gradient (nearly) vanishes there holds a concave crease or the solid's inside: no plane.
+      if (!(gl > 0.35)) continue;
+      const n: V3 = [t[0] / h / gl, t[1] / h / gl, t[2] / h / gl];
+      if (out.every(o => Math.abs(o.n[0] * n[0] + o.n[1] * n[1] + o.n[2] * n[2] - 1) > 1e-12)) out.push({ p: q.p, n });
     }
-    seen.set(c.join(","), out.length); out.push(q.p[0] + lift * q.n[0], q.p[1] + lift * q.n[1], q.p[2] + lift * q.n[2], q.mu);
+    return out;
   };
-  const cellNodes = new Float64Array(8);
+
+  // ---- the samples: per kept sample its point, normal, friction, curvature and spacing.
+  const pts: SurfacePoint[] = [], spacingOf: number[] = [], supports: { p: V3; n: V3 }[][] = [];
+  const HC = h / 8, hashOf = (p: V3, c: number) => p.map(v => Math.floor(v / c));
+  const fine = new Map<string, number[]>();
+  const keep = (q: SurfacePoint, planes: { p: V3; n: V3 }[], spacing: number) => {
+    const minSep = 0.5 * spacing, c = hashOf(q.p, HC), R = Math.ceil(minSep / HC);
+    for (let dz = -R; dz <= R; dz++) for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      for (const j of fine.get(`${c[0]! + dx},${c[1]! + dy},${c[2]! + dz}`) ?? []) {
+        const o = pts[j]!.p;
+        if (Math.hypot(o[0] - q.p[0], o[1] - q.p[1], o[2] - q.p[2]) < minSep) return;
+      }
+    }
+    const key = c.join(","), l = fine.get(key);
+    if (l) l.push(pts.length); else fine.set(key, [pts.length]);
+    pts.push(q); spacingOf.push(spacing); supports.push(planes);
+  };
+  const found: { q: SurfacePoint; k: number; spacing: number; planes: { p: V3; n: V3 }[] }[] = [];
   for (const brick of field.bricks.values()) {
     const v = brick.values;
     for (let z = 0; z < SOLID_BRICK_CELLS; z++) for (let y = 0; y < SOLID_BRICK_CELLS; y++) for (let x = 0; x < SOLID_BRICK_CELLS; x++) {
       let lo = Infinity, hi = -Infinity;
       for (let k = 0; k < 8; k++) {
         const s = v[nodeIndex(x + (k & 1), y + ((k >> 1) & 1), z + (k >> 2))]!;
-        cellNodes[k] = s; lo = Math.min(lo, s); hi = Math.max(hi, s);
+        lo = Math.min(lo, s); hi = Math.max(hi, s);
       }
       if (lo > 0 || hi < 0) continue;
       const g = cellGradientRange(v, [x, y, z]);
@@ -534,19 +617,118 @@ function buildSolidSamples(field: ClothSolidField): Float32Array {
       const c = [0, 1, 2].map(a => field.origin[a]! + (brick.brick[a]! * SOLID_BRICK_CELLS + [x, y, z][a]! + 0.5) * h);
       const centre = project(c as unknown as V3);
       if (!centre) continue;
-      const [k0, kSum] = turns(centre, CELL_STEP);
-      if (k0 <= kappaMin) continue;
-      // A smooth cell (the normal turns less than SOLID_SAMPLE_SHARP_TURN per cell) keeps its centre's sample,
-      // lifted by its bulge (kappa_1 + kappa_2) s^2 / 8 at s = h.
-      if (k0 * h < SOLID_SAMPLE_SHARP_TURN) { keep(centre, 0.125 * kSum * h * h); continue; }
-      for (let s = 0; s < m * m * m; s++) {
-        const o = [s % m, Math.floor(s / m) % m, Math.floor(s / (m * m))].map(i => ((i + 0.5) / m - 0.5) * h);
+      const kc = kappa(centre, CELL_STEP);
+      if (kc <= kappaMin) continue;
+      const m = kc * h < SOLID_SAMPLE_SHARP_TURN ? 1 : 2;
+      if (m === 1) { found.push({ q: centre, k: kc, spacing: h, planes: supportPlanes(centre) }); continue; }
+      // A sharp cell is seeded at its corners too: a voxel solid's corner is a node, which no
+      // projection from inside the cell reaches, and the samples' hull would cut it off.
+      const seeds = [...Array(m * m * m).keys()].map(s => [s % m, Math.floor(s / m) % m, Math.floor(s / (m * m))].map(i => ((i + 0.5) / m - 0.5) * h))
+        .concat([...Array(8).keys()].map(k => [k & 1, (k >> 1) & 1, k >> 2].map(b => (b - 0.5) * h)));
+      for (const o of seeds) {
         const q = project([c[0]! + o[0]!, c[1]! + o[1]!, c[2]! + o[2]!]);
         if (!q) continue;
-        // On a crease the surface is straight along it and flat across it off the crease: no bulge.
-        if (kappa(q, localStep) > kappaMin) keep(q, 0);
+        const kq = kappa(q, localStep);
+        if (kq > kappaMin) found.push({ q, k: kq, spacing: h / m, planes: supportPlanes(q) });
       }
     }
   }
-  return new Float32Array(out);
+  // Corners (most cells' planes meeting) first, then edges, then the sharpest curvature: a nearby
+  // sample on a face never displaces the one on the feature.
+  found.sort((a, b) => b.planes.length - a.planes.length || b.k - a.k);
+  for (const f of found) keep(f.q, f.planes, f.spacing);
+
+  // ---- the lifts: each sample's fan of holes, measured; a hole bulging past the ceiling is
+  // refined (its centre and edge midpoints sampled at half the spacing) and measured again.
+  const HN = 0.5 * h, coarse = new Map<string, number[]>();
+  const index = (from: number) => {
+    for (let i = from; i < pts.length; i++) { const k = hashOf(pts[i]!.p, HN).join(","), l = coarse.get(k); if (l) l.push(i); else coarse.set(k, [i]); }
+  };
+  const within = (p: V3, rad: number): number[] => {
+    const c0 = p.map(v => Math.floor((v - rad) / HN)), c1 = p.map(v => Math.floor((v + rad) / HN)), out: number[] = [];
+    for (let z = c0[2]!; z <= c1[2]!; z++) for (let y = c0[1]!; y <= c1[1]!; y++) for (let x = c0[0]!; x <= c1[0]!; x++)
+      for (const j of coarse.get(`${x},${y},${z}`) ?? []) {
+        const o = pts[j]!.p;
+        if (Math.hypot(o[0] - p[0], o[1] - p[1], o[2] - p[2]) <= rad) out.push(j);
+      }
+    return out;
+  };
+  const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot = (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const ceiling = SOLID_SAMPLE_MAX_LIFT * h;
+  // The lift of every sample, and the holes bulging past the ceiling.
+  const measure = (): { lift: Float64Array; over: number[][] } => {
+    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<string>();
+    for (let i = 0; i < pts.length; i++) {
+      const qi = pts[i]!, n = qi.n, reach = 1.6 * spacingOf[i]!;
+      const a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] as V3 : Math.abs(n[1]) < 0.6 ? [0, 1, 0] as V3 : [0, 0, 1] as V3;
+      const t1 = cross(n, a), l1 = Math.hypot(...t1), u: V3 = [t1[0] / l1, t1[1] / l1, t1[2] / l1], w = cross(n, u);
+      const fan = within(qi.p, reach).filter(j => j !== i).map(j => { const d = sub(pts[j]!.p, qi.p); return { j, ang: Math.atan2(dot(d, w), dot(d, u)) }; })
+        .sort((x, y) => x.ang - y.ang);
+      if (fan.length < 2) continue;
+      for (let k = 0; k < fan.length; k++) {
+        const A = fan[k]!, B = fan[(k + 1) % fan.length]!;
+        let gap = B.ang - A.ang; if (gap <= 0) gap += 2 * Math.PI;
+        // A gap of half a turn or more faces the edge of the sampled surface: no hole there.
+        if (gap >= Math.PI || fan.length < 3 && k > 0) continue;
+        const key = [i, A.j, B.j].sort((x, y) => x - y).join(",");
+        if (done.has(key)) continue;
+        done.add(key);
+        // So does a wide gap whose middle holds no surface the seeding would sample: a concave
+        // crease (no normal) or flat surface just past the last row. (On a curved boundary row
+        // the gap falls a little short of half a turn.)
+        if (gap > 0.5 * Math.PI) {
+          const ang = A.ang + 0.5 * gap, sp = spacingOf[i]!;
+          const probe = project([0, 1, 2].map(a => qi.p[a]! + sp * (Math.cos(ang) * u[a]! + Math.sin(ang) * w[a]!)) as unknown as V3);
+          if (!probe || kappa(probe, localStep) <= kappaMin) continue;
+        }
+        // Only a facet of the samples' local convex hull is crossed by a face resting on them: a
+        // triangle with a neighbour outside its plane lies under the hull, which other facets cover.
+        const pa = pts[A.j]!.p, pb = pts[B.j]!.p;
+        let N = cross(sub(pa, qi.p), sub(pb, qi.p));
+        const nl = Math.hypot(...N);
+        if (!(nl > 0)) continue;
+        const sgn = dot(N, n) + dot(N, pts[A.j]!.n) + dot(N, pts[B.j]!.n) < 0 ? -1 / nl : 1 / nl;
+        N = [N[0] * sgn, N[1] * sgn, N[2] * sgn];
+        const tol = 1e-9 * spacingOf[i]!;
+        if (fan.some(F => F.j !== A.j && F.j !== B.j && dot(sub(pts[F.j]!.p, qi.p), N) > tol)) continue;
+        // Measured along the samples' mean normal, the direction they are lifted in (a sliver
+        // standing across the surface has a facet normal along it, which measures nothing).
+        const D = [0, 1, 2].map(a => n[a]! + pts[A.j]!.n[a]! + pts[B.j]!.n[a]!) as unknown as V3, dl = Math.hypot(...D);
+        const bulge = roofHeight([qi.p, pa, pb], [D[0] / dl, D[1] / dl, D[2] / dl], [...supports[i]!, ...supports[A.j]!, ...supports[B.j]!]);
+        for (const j of [i, A.j, B.j]) lift[j] = Math.max(lift[j]!, bulge);
+        if (bulge > ceiling) over.push([i, A.j, B.j]);
+      }
+    }
+    return { lift, over };
+  };
+  index(0);
+  let measured = measure();
+  while (measured.over.length) {
+    const before = pts.length;
+    for (const tri of measured.over) {
+      const spacing = 0.5 * Math.min(...tri.map(j => spacingOf[j]!));
+      // Refining stops at the ceiling's own scale: below it the bulge cannot be resolved.
+      if (spacing < ceiling) continue;
+      const [P0, P1, P2] = tri.map(j => pts[j]!.p) as [V3, V3, V3];
+      for (const wts of [[1, 1, 1], [1, 1, 0], [0, 1, 1], [1, 0, 1]]) {
+        const ws = wts[0]! + wts[1]! + wts[2]!;
+        const q = project([0, 1, 2].map(a => (wts[0]! * P0[a]! + wts[1]! * P1[a]! + wts[2]! * P2[a]!) / ws) as unknown as V3);
+        if (q) keep(q, supportPlanes(q), spacing);
+      }
+    }
+    if (pts.length === before) break;
+    index(before);
+    measured = measure();
+  }
+  const S = pts.length, lift = measured.lift;
+  const out = new Float32Array(SOLID_SAMPLE_WORDS * S);
+  for (let i = 0; i < S; i++) {
+    const q = pts[i]!, l = lift[i]!;
+    if (l > SOLID_SAMPLE_MAX_LIFT * h)
+      throw new RangeError(`Cloth solid samples: the surface between the samples near (${q.p.map(v => v.toFixed(4)).join(", ")}) bulges ${l.toExponential(2)} m, above h / 16 = ${ceiling.toExponential(2)} m, with samples refined to ${spacingOf[i]!.toExponential(2)} m`);
+    out.set([q.p[0] + l * q.n[0], q.p[1] + l * q.n[1], q.p[2] + l * q.n[2], q.mu], SOLID_SAMPLE_WORDS * i);
+  }
+  return out;
 }

@@ -749,3 +749,45 @@ The sheet has 5 colours, so a step makes 385 truncations per colour and 65 per i
 - **Measured on the rotating sphere** (22.5K vertices, K = 64): 622 → 244 ms a tick. There were no intersections and no vertices inside on either schedule.
 - **Please recheck the dry 8×8 sheet oracle tolerance in `tests/cloth-system.test.ts`:** truncation now bounds an iteration's accumulated move, not each colour's.
 - **The old schedule is still reachable** for comparison through `CLOTH_GATE_TRUNCATE=colour` (gates) and `CLOTH_PROFILE_TRUNCATE=colour` (profile).
+
+## 2026-11-09 M5 part 2: no face inside the solid (coordinator ruling 2)
+
+- **The lift is a measured coverage bound, not a constant.** `clothSolidSamples` (lib/cloth/contact/solid-field.ts):
+  - **Facets:** each sample's neighbours, ordered around its normal, span a fan of triangles. Only facets of the samples' local convex hull count, meaning no neighbour lies outside the facet's plane: a face resting on the samples spans those.
+  - **Bound:** a convex surface lies below each of its tangent planes, including each adjacent cell's own plane at a voxel edge or corner. So over a facet it rises at most the top of their lower envelope (`roofHeight`: corners, edge crossings, triple points). This is measured along the three samples' mean normal, and each sample is lifted by the largest bulge of its facets.
+  - **Refinement:** a facet bulging past h/16 has its centre and edge midpoints sampled at half the spacing, and is measured again. If refining down to the ceiling's own scale cannot bring it under, the build throws a `RangeError` naming the place. It never clamps.
+  - **Gaps:** a fan gap of half a turn or more is the edge of the sampled surface. So is a gap wider than a quarter turn whose middle holds no surface the seeding would sample: a concave crease, or flat surface just past the last row.
+- **Seeding changes:**
+  - Sharp cells are seeded at their 8 corners too, because a voxel corner is a node.
+  - Corners and edges are kept first. The order is the number of cells' planes meeting at the point, so a nearby face sample never displaces the feature's sample.
+  - A seed's turn is read a tenth of a cell out, so flat-face points next to a voxel edge are dropped.
+  - Newton projection now converges to 1e-10 h, and tests φ before the gradient: at a voxel edge φ vanishes quadratically.
+- **Measured sample builds (setup, CPU):**
+
+  | Field | Samples | Time | Largest φ at a lifted sample |
+  |---|---|---|---|
+  | curtain | 10.1 K | 6.9 s | 0.027 h |
+  | rotating sphere | 15.7 K | 8.8 s | 0.083 h |
+  | tablecloth | 15.2 K | 8.2 s | 0.066 h |
+  | drape sphere | 10.8 K | 5.1 s | 0.040 h |
+
+  The largest lift is ≤ h/16 by construction; φ can read up to |∇φ| ≤ √3 times the lift. For comparison, the κR²/2 design took 33–38 s per field and hit the ceiling at exact voxel edges.
+- **The exact face gate:** `faceInsideSolid` / `facesInsideSolid` in `tests/cloth-contact-oracle.ts`.
+  - It clips each face into the cells it crosses. On each piece φ is a cubic in barycentrics, and its Bernstein coefficients (the symmetrised blossom of the cell's multi-affine interpolant) bound φ on that piece.
+  - It subdivides until every coefficient is ≥ −1e-9 h (outside) or a corner is below −1e-9 h (inside), and throws if a piece is still undecided at depth 16.
+  - It is unit-tested: a face cutting a voxel edge between vertices that are well outside is inside, one clearing it by 2e-5 m is not, and it agrees with a 48-step lattice on 300 random faces.
+- **Gates (one GPU run each), all with zero faces inside:**
+
+  | Scene | Faces inside (exact) | GPU lattice counter | φ over every face, exact lower bound |
+  |---|---|---|---|
+  | drop (sharp voxel pedestal) | 0 | 0 | ≥ 2.2e-7 m |
+  | drape (sphere and floor) | 0 | 0 | ≥ 2.7e-6 m |
+  | rotating sphere, 20 ticks | 0 | 0 | ≥ 3.1e-6 m |
+
+  On the rotating sphere the minimum vertex φ is 4.5e-4 m and the median tick is 242 ms. The 25 faces that were inside at tick 17 are gone.
+- **The GPU counter already counts faces.** `solidIntersections` tests every face at four lattice points per cell along its longest edge. The new `OgcContactDetector.countIntersections()` (harness only) submits the count and returns `{ intersections, solidIntersections }`.
+
+## 2026-11-09 COORDINATION (C2 → C1): face-in-solid check for the system test
+
+- **To see faces, not just vertices, in `tests/cloth-system.test.ts`:** call `await detector.countIntersections()` after a tick and assert `solidIntersections === 0`. For the exact Float64 check, use `facesInsideSolid(field, positions, faces, origin)` from `tests/cloth-contact-oracle.ts`, which returns `{ inside: number[], lower }`.
+- **`clothSolidSamples` now takes 5–9 s on the Bridson fields** (once per field, cached). The rotating sphere has 15.7 K samples, so `solidSampleCapacity` in `createClothSceneContact` grows with it, as it already reads the count.

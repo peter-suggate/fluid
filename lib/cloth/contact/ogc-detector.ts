@@ -475,6 +475,19 @@ export class OgcContactDetector {
     this.run(pass, "xInsert", Math.max(1, wgT)); this.run(pass, "xTest", Math.max(1, wgT));
   }
 
+  /**
+   * Harness and gate use only (never in a step path): count, at the current positions, the
+   * intersecting non-adjacent face pairs and the faces reaching into the static solid (phi < 0 at a
+   * lattice of four points per cell along the longest edge, every face), in their own submission.
+   */
+  async countIntersections(): Promise<{ intersections: number; solidIntersections: number }> {
+    const enc = this.device.createCommandEncoder(), pass = enc.beginComputePass();
+    this.encodeIntersectionCount(pass); pass.end();
+    this.device.queue.submit([enc.finish()]);
+    const c = await this.readCounters();
+    return { intersections: c.intersections, solidIntersections: c.solidIntersections };
+  }
+
   /** Read the counters. Harness and gate use only: never in a step path. */
   async readCounters(): Promise<OgcFrameCounters> {
     const read = this.device.createBuffer({ size: 4 * OGC_COUNTER_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

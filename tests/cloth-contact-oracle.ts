@@ -699,3 +699,83 @@ export function solidContact(field: ClothSolidField, x: V3, xt: V3, lambda: numb
   }
   return { e, f, H };
 }
+
+/**
+ * Whether the triangle (a, b, c) reaches into the solid, phi < 0, decided
+ * exactly on the field's trilinear interpolant (its f32 node values, in double):
+ * the triangle is clipped into the cells it crosses; on each piece phi is a
+ * cubic in the barycentrics, whose Bernstein coefficients (the blossom of the
+ * cell's multi-affine interpolant) bound it. A piece with every coefficient
+ * >= -1e-9 h is outside, one with a corner below it inside; any other is split in four,
+ * down to `depth` levels, past which the call throws (it never guesses).
+ * `lower` is a lower bound on phi over the triangle (the least coefficient
+ * where outside).
+ */
+export function faceInsideSolid(field: ClothSolidField, a: V3, b: V3, c: V3, depth = 16): { inside: boolean; lower: number } {
+  const h = field.cell, B = SOLID_BRICK_CELLS, NN = B + 1;
+  // Depths under 1e-9 h are rounding (a piece on a node plane where phi = 0): taken as on the surface.
+  const eps = 1e-9 * h;
+  const toCell = (p: V3): V3 => [(p[0] - field.origin[0]) / h, (p[1] - field.origin[1]) / h, (p[2] - field.origin[2]) / h];
+  const P = [toCell(a), toCell(b), toCell(c)];
+  // Lipschitz prefilter: phi(p) >= phi(v) - L |p - v| for the triangle's vertices v.
+  const edge = Math.max(norm(sub(a, b)), norm(sub(b, c)), norm(sub(c, a)));
+  const phiV = [a, b, c].map(p => sampleClothSolidField(field, p as unknown as readonly [number, number, number]).phi);
+  if (Math.min(...phiV) - field.maxLipschitz * edge > 0) return { inside: false, lower: Math.min(...phiV) - field.maxLipschitz * edge };
+  const lo = [0, 1, 2].map(k => Math.floor(Math.min(P[0]![k]!, P[1]![k]!, P[2]![k]!))), hi = [0, 1, 2].map(k => Math.floor(Math.max(P[0]![k]!, P[1]![k]!, P[2]![k]!)));
+  let lower = Infinity;
+  for (let z = lo[2]!; z <= hi[2]!; z++) for (let y = lo[1]!; y <= hi[1]!; y++) for (let x = lo[0]!; x <= hi[0]!; x++) {
+    const cell = [x, y, z];
+    // Clip the triangle to the cell [cell, cell + 1]^3.
+    let poly: V3[] = P.map(p => [...p] as V3);
+    for (let k = 0; k < 3 && poly.length; k++) for (const [bound, sgn] of [[cell[k]!, 1], [cell[k]! + 1, -1]] as const) {
+      const next: V3[] = [];
+      for (let i = 0; i < poly.length; i++) {
+        const p = poly[i]!, q = poly[(i + 1) % poly.length]!, dp = sgn * (p[k]! - bound), dq = sgn * (q[k]! - bound);
+        if (dp >= 0) next.push(p);
+        if (dp >= 0 !== dq >= 0) { const t = dp / (dp - dq); next.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[2] + t * (q[2] - p[2])]); }
+      }
+      poly = next;
+    }
+    if (poly.length < 3) continue;
+    const bk = cell.map(v => Math.floor(v / B)), brick = field.bricks.get(bk.join(","));
+    if (!brick) { lower = Math.min(lower, field.band); continue; }
+    const l = cell.map((v, k) => v - bk[k]! * B), vals = Array.from({ length: 8 }, (_, k) =>
+      brick.values[(l[0]! + (k & 1)) + NN * ((l[1]! + ((k >> 1) & 1)) + NN * (l[2]! + (k >> 2)))]!);
+    // The cell's interpolant at mixed coordinates: x from U, y from V, z from W (cell-local).
+    const T = (fx: number, fy: number, fz: number) => {
+      let s = 0;
+      for (let k = 0; k < 8; k++) s += vals[k]! * ((k & 1) ? fx : 1 - fx) * (((k >> 1) & 1) ? fy : 1 - fy) * ((k >> 2) ? fz : 1 - fz);
+      return s;
+    };
+    const blossom = (U: V3, V: V3, W: V3) => {
+      const f = (p: V3, k: number) => p[k]! - cell[k]!;
+      return (T(f(U, 0), f(V, 1), f(W, 2)) + T(f(U, 0), f(W, 1), f(V, 2)) + T(f(V, 0), f(U, 1), f(W, 2))
+        + T(f(V, 0), f(W, 1), f(U, 2)) + T(f(W, 0), f(U, 1), f(V, 2)) + T(f(W, 0), f(V, 1), f(U, 2))) / 6;
+    };
+    const mid = (p: V3, q: V3): V3 => [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2];
+    const piece = (A: V3, Bp: V3, C: V3, d: number): boolean => {
+      const coef = [blossom(A, A, A), blossom(Bp, Bp, Bp), blossom(C, C, C), blossom(A, A, Bp), blossom(A, A, C), blossom(A, Bp, Bp),
+        blossom(Bp, Bp, C), blossom(A, C, C), blossom(Bp, C, C), blossom(A, Bp, C)];
+      if (coef[0]! < -eps || coef[1]! < -eps || coef[2]! < -eps) return true;
+      const m = Math.min(...coef);
+      if (m >= -eps) { lower = Math.min(lower, m); return false; }
+      if (d >= depth) throw new Error(`faceInsideSolid: undecided at depth ${depth} (coefficients down to ${m.toExponential(2)})`);
+      const ab = mid(A, Bp), bc = mid(Bp, C), ca = mid(C, A);
+      return piece(A, ab, ca, d + 1) || piece(ab, Bp, bc, d + 1) || piece(ca, bc, C, d + 1) || piece(ab, bc, ca, d + 1);
+    };
+    for (let i = 1; i + 1 < poly.length; i++) if (piece(poly[0]!, poly[i]!, poly[i + 1]!, 0)) return { inside: true, lower: -Infinity };
+  }
+  return { inside: false, lower };
+}
+
+/** faceInsideSolid over a mesh at positions x (field frame after subtracting `origin`): the faces inside and the least lower bound. */
+export function facesInsideSolid(field: ClothSolidField, x: ArrayLike<number>, faces: ArrayLike<number>, origin: readonly number[] = [0, 0, 0]): { inside: number[]; lower: number } {
+  const P = (v: number): V3 => [x[3 * v]! - origin[0]!, x[3 * v + 1]! - origin[1]!, x[3 * v + 2]! - origin[2]!];
+  const inside: number[] = [];
+  let lower = Infinity;
+  for (let t = 0; t < faces.length / 3; t++) {
+    const r = faceInsideSolid(field, P(faces[3 * t]!), P(faces[3 * t + 1]!), P(faces[3 * t + 2]!));
+    if (r.inside) inside.push(t); else lower = Math.min(lower, r.lower);
+  }
+  return { inside, lower };
+}

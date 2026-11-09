@@ -35,7 +35,7 @@ import { CLOTH_BINDING, CLOTH_STATE } from "../lib/cloth/gpu-solver-wgsl";
 import { OGC_ROUND_KERNELS, OgcContactDetector, type OgcContactConfig, type OgcCellRule, type OgcFrameCounters, type OgcPrediction } from "../lib/cloth/contact/ogc-detector";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, clothSolidSamples, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
-import { trianglesIntersect, type V3 } from "./cloth-contact-oracle";
+import { facesInsideSolid, trianglesIntersect, type V3 } from "./cloth-contact-oracle";
 
 const gates = new Set((process.env.CLOTH_CONTACT_GATES ?? "").split(",").filter(Boolean));
 const want = (name: string) => !!process.env.WEBGPU_NODE_MODULE && (gates.has(name) || gates.has("all"));
@@ -226,6 +226,14 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
     return n;
   };
 
+  // Every face against the trilinear surface, exactly (Float64 Bernstein bounds), not at a lattice.
+  let faceClearance = Infinity;
+  const exactFaces = (x: Float64Array, when: string) => {
+    if (!field) return;
+    const r = facesInsideSolid(field, x, m.topology.faces);
+    faceClearance = Math.min(faceClearance, r.lower);
+    assert.equal(r.inside.length, 0, `${name}: ${r.inside.length} faces inside the solid (exact) ${when}: ${r.inside.slice(0, 8).join(", ")}`);
+  };
   frame(0, true);
   const c0 = await det.readCounters();
   assert.equal(c0.intersections, 0, `${name}: the authored pose intersects`);
@@ -253,7 +261,10 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
     assert.equal(c.status & FAILING, 0, `${name}: status ${OgcContactDetector.describeStatus(c.status)} at step ${s}`);
     assert.equal(c.intersections, 0, `${name}: ${c.intersections} intersecting face pairs at step ${s}`);
     assert.equal(c.solidIntersections, 0, `${name}: ${c.solidIntersections} faces reach into the solid at step ${s}`);
-    if (s % 10 === 9) assert.equal(await inside(), 0, `${name}: vertices inside the solid at step ${s}`);
+    if (s % 10 === 9) {
+      assert.equal(await inside(), 0, `${name}: vertices inside the solid at step ${s}`);
+      exactFaces(await solver.readPositions(), `step ${s}`);
+    }
   }
   const report = await solver.readStatus();
   const residual = new Map(report.slots.map(r => [r.step, r.residual]));
@@ -269,6 +280,8 @@ async function runGate(device: GPUDevice, name: string, m: ClothSolverModel, con
   assert.equal(cT.solidIntersections, 0, `${name}: faces in the solid after the timed batch`);
   assert.equal(cT.status & FAILING, 0, `${name}: status ${OgcContactDetector.describeStatus(cT.status)} after the timed batch`);
   assert.equal(await inside(), 0, `${name}: vertices inside the solid after the timed batch`);
+  exactFaces(await solver.readPositions(), "after the timed batch");
+  if (field) log(`${name}: faces (exact, Float64 Bernstein on the trilinear field) keep phi >= ${faceClearance.toExponential(2)} m (a lower bound)`);
 
   const sum = (f: (c: OgcFrameCounters) => number) => frames.reduce((a, fr) => a + f(fr.c), 0);
   const max = (f: (c: OgcFrameCounters) => number) => frames.reduce((a, fr) => Math.max(a, f(fr.c)), 0);

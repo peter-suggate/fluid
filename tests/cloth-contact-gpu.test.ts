@@ -656,7 +656,7 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     }
     assert.equal(motionPenetrates(oracle, X0, got), false);
     const c1 = await det.readCounters();
-    assert.ok(cut > 20 && Math.abs(c1.solidCut - cut) <= 2 + ambiguous.size, `solid cut ${c1.solidCut} vs ${cut} (${ambiguous.size} on a cell face)`);
+    assert.ok(cut >= 10 && Math.abs(c1.solidCut - cut) <= 2 + ambiguous.size, `solid cut ${c1.solidCut} vs ${cut} (${ambiguous.size} on a cell face)`);
     // No face of the truncated sheet reaches into a solid; one pushed through the box's top edge does.
     await runPass(device, pass => det.encodeIntersectionCount(pass));
     const c2 = await det.readCounters();

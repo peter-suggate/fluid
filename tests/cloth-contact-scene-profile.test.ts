@@ -32,6 +32,7 @@ import { sampleClothSolidField, type ClothSolidField, type V3 } from "../lib/clo
 import { bridson2002RotatingSphere } from "../lib/cloth/scenes/bridson-2002";
 import { bridson2002SceneDescription } from "../lib/cloth/scenes/bridson-2002/scene-description";
 import type { ClothVector } from "../lib/cloth/types";
+import { facesInsideSolid } from "./cloth-contact-oracle";
 
 const want = !!process.env.WEBGPU_NODE_MODULE && process.env.CLOTH_CONTACT_PROFILE === "rotating";
 const SCHEDULES = (process.env.CLOTH_PROFILE_TRUNCATE ?? "iteration").split(",").filter(Boolean);
@@ -187,7 +188,7 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
       return { n, minPhi };
     };
     const tickMs: number[] = [];
-    let worstIntersections = 0, worstSolid = 0, minPhi = Infinity;
+    let worstIntersections = 0, worstSolid = 0, minPhi = Infinity, faceLower = Infinity, exactWorst = 0;
     for (let s = 0; s < TICKS; s++) {
       await device.queue.onSubmittedWorkDone();
       const ts = performance.now();
@@ -209,10 +210,16 @@ test("profile: the rotating-sphere sheet through scene contact, per truncation s
       if (c.intersections) failures.push(`${schedule}: ${c.intersections} intersecting face pairs at tick ${s}`);
       if (c.solidIntersections) failures.push(`${schedule}: ${c.solidIntersections} faces reach into the solid at tick ${s}`);
       if (ins.n) failures.push(`${schedule}: ${ins.n} vertices inside the solid at tick ${s}`);
+      // Every face against the trilinear surface, exactly (Float64 Bernstein bounds).
+      const exact = facesInsideSolid(field, await solver.readPositions(), topology.faces, origin);
+      faceLower = Math.min(faceLower, exact.lower);
+      if (exact.inside.length) failures.push(`${schedule}: ${exact.inside.length} faces inside the solid (exact) at tick ${s}: ${exact.inside.slice(0, 8).join(", ")}`);
+      exactWorst = Math.max(exactWorst, exact.inside.length);
     }
     const med = [...tickMs].sort((a, b) => a - b)[tickMs.length >> 1]!;
     log(`${schedule} summary: ${truncations} truncations and ${ITERATIONS} decides per step; median tick ${med.toFixed(1)} ms (first ${tickMs[0]!.toFixed(1)}, max ${Math.max(...tickMs).toFixed(1)}); `
-      + `max intersections ${worstIntersections}, max faces in solid ${worstSolid}, min vertex phi ${minPhi.toExponential(2)}`);
+      + `max intersections ${worstIntersections}, max faces in solid ${worstSolid} (GPU lattice) / ${exactWorst} (exact), min vertex phi ${minPhi.toExponential(2)}, `
+      + `phi over every face >= ${faceLower.toExponential(2)} (exact lower bound)`);
 
     // Candidate diagnosis on the step's last round (before the kernel timings re-run a round).
     const d = await det.readDiagnosis();
