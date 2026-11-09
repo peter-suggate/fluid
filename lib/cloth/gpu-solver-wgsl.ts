@@ -6,6 +6,7 @@
 import { CLOTH_AVBD, CLOTH_LINE_SEARCH } from './oracle';
 import { CLOTH_PATCH_SLOT_BITS } from './patches';
 import { CLOTH_STATUS_COARSE_INDEFINITE, clothCoarseWGSL } from './gpu-coarse-wgsl';
+import { clothNewtonWGSL } from './gpu-newton-wgsl';
 
 /** vec4<f32> per-vertex segments of the `state` buffer, each CLOTH_SEGMENT_ALIGN-padded N long.
  * Segment 0 is the step-start velocity, so C2 binds `state` as its velocity input. After the
@@ -34,7 +35,7 @@ export const CLOTH_WIDE_WORKGROUP = 32;
 /** Uniform records of the per-dispatch data, one per (iteration, colour) and one post record per iteration. */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9, newton: 10 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
@@ -49,6 +50,8 @@ export interface ClothSolverWGSLOptions {
   /** solveColourWide sums a vertex's lanes with subgroup shuffles (`enable subgroups`) instead of workgroup memory. The
    *  caller checks the device has `subgroups` with subgroups of at least `vertexLanes` invocations. */
   readonly subgroups?: boolean;
+  /** Append the Newton-PCG kernels (gpu-newton-wgsl.ts) and their `nw` buffer. */
+  readonly newton?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
@@ -75,6 +78,8 @@ struct Params {
   partB: vec4u,  // partition 1
   coarse0: vec4u, coarse1: vec4u, coarse2: vec4u, coarse3: vec4u, coarse4: vec4u, coarse5: vec4u, coarse6: vec4u, // gpu-coarse-wgsl.ts
   grab: vec4f,   // mouse grab: displacement of its anchors (xyz, metres), held (w: 1, else 0)
+  newton0: vec4u, // Newton-PCG (gpu-newton-wgsl.ts): face records, partials, partial count W, control record (nw records)
+  newton1: vec4u, // bending stencil records (topo4 index), PCG tolerance^2 and residual tolerance^2 |m g|^2 (f32 bits)
 }
 struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration) or Tier B (partition, inner iterations), (omega)
 
@@ -909,5 +914,6 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${options.coarseNodes ? clothCoarseWGSL(CLOTH_BINDING.coarse, CLOTH_WORKGROUP, options.coarseNodes, contact) : ''}`;
+${options.coarseNodes ? clothCoarseWGSL(CLOTH_BINDING.coarse, CLOTH_WORKGROUP, options.coarseNodes, contact) : ''}
+${options.newton ? clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP) : ''}`;
 }

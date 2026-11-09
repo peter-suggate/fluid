@@ -1429,3 +1429,140 @@ Probe: `strain.mts`. HEAD solver with the live detector, sphere scene to tick 30
 This is not landed.
 
 **Conclusion.** The strain limit cannot be met by a vertex that contact truncation holds. The fix belongs in the truncation, not in AVBD: make the cut of an edge's endpoints consistent, or release a hold once its pair is certified. The data goes to C2.
+
+## 2026-11-09 RESULT (20): the multilevel (geodesic-tent hierarchy) correction, stopped. Numbers, and why it fails
+
+**Stopped on direction ("it looks like multigrid is wrong"). Nothing from it is committed.** My solver files are back at HEAD. The code is saved in `~/code/me/fluid-scratch/cloth-c1/r6/multigrid/`: `tracked.patch`, `multilevel.ts` and `cloth-multilevel.test.ts`. The probes are `r5/mlcpu.mts`, `r5/compare.mts` and `r4/swing.mts`.
+
+**What was built**
+- A recursive geodesic-tent hierarchy: ratio 4, bottom level ≤ 40 nodes, with Galerkin levels A_{l+1} = PᵀA_lP.
+- The cycle replaces the two-level tent correction. It is a V-cycle with ν = 2 block-smoothing sweeps a side, a dense bottom solve, and the same Armijo trials (1, ½, ¼, ⅛) on the true G, run every 2 iterations.
+- A Float64 CPU version and a GPU version, with GPU-to-Float64 parity of 2e-7 m on levels 144 > 36 > 12.
+
+### Centre-held sheet, CPU Float64: t30 mean deviation from tent K = 128 (mm)
+
+| method | N = 32: K8 / K16 / K32 | N = 64: K8 / K16 / K32 |
+|---|---|---|
+| tent (HEAD) | 49.2 / – / 20.3 | 192.9 / – / 59.5 |
+| ml, damped block Jacobi ω 0.6 | 33.6 / 15.5 / 12.7 | 63.2 / 22.4 / 13.6 |
+| ml, abs-l1 ω 1.4 | 31.0 / 15.2 / 12.5 | 61.1 / 22.4 / 13.4 |
+| ml, Frobenius l1 ω 1 | 44.4 / 16.5 / 13.1 | 84.4 / 46.1 / 20.4 |
+
+How good the reference is:
+- At N = 32, tent K256 against tent K128 is 1.1 mm, and ml-l1 K128 is 0.9 mm from it. The reference is converged there.
+- At N = 64, ml-l1 K128 is 17.3 mm from tent K128, so the reference is not converged there.
+- At N = 128 there is no reference: tent K128 costs 27 s a step on the CPU and was stopped.
+
+At N = 128, the corrections accepted at K8, as [α = 1, ½, ¼, ⅛] out of 120:
+
+| method | accepted |
+|---|---|
+| tent | [102, 12, 5, 1] |
+| ml Jacobi | [2, 1, 10, 23] |
+| ml abs-l1 | [29, 2, 4, 18] |
+| ml Frobenius | [120, 0, 0, 0] (accepted, but too small to help) |
+
+### GPU 150² Bridson sheet, ml with abs-l1 and no coarse bending
+
+| K | ms/step | result |
+|---|---|---|
+| 8 | 11.8 | only 1/1/1/15 of 120 corrections accepted; t15 mean y is 0.99, against 0.79 at K128 (the sheet hangs) |
+| 16 | 17.8 | |
+| 32 | 31.5 | t30 mean deviation from K128 is 186.6 mm (17.6 mm at t15) |
+| 128 | 149.3 | |
+
+At 150² it is worse than the tent at every K.
+
+### Why it fails
+
+1. **The smoother diverges on Galerkin tent levels.** λmax(D⁻¹A) is 2.4–4.9 at N = 128, and it grows with the row width of the Galerkin operator. It passes 2/ω, so damped block Jacobi diverges unless ω is cut so far that it does nothing.
+2. **The l1 fixes trade divergence for stalling.**
+   - The Frobenius l1 diagonal is convergent, but it over-damps the soft (bending and shear) directions of an anisotropic operator. It needs about 2× the iterations.
+   - The abs-l1, D_c = A_cc + Σ_d |A_cd| with |M| = (MMᵀ)^½, guarantees D ≥ A and works at N ≤ 64. It fails at N = 128 on the CPU and at 150² on the GPU.
+3. **The root cause: the coarse operators have no bending.** The Galerkin tents carry membrane and inertia only.
+   - Inertia ρ/h² = 3600 equals the Bridson bending stiffness Bq⁴ at a wavelength of λ ≈ 9 cm.
+   - Level 1 (N/4 nodes) resolves about 3 cm wavelengths, where bending is about 80× inertia.
+   - So the coarse model is far too soft there: its step overshoots, and Armijo rejects it.
+   - A finer mesh gives a finer level 1, which is further below the crossover, so it gets worse with resolution. That is the opposite of what a hierarchy is for.
+4. **Coarse bending was implemented but not tested.** It was a Float64 Galerkin hinge term per level-1 pair, added in coarseAssemble. Even if it worked, the hierarchy would need the right curvature operator at every level and a smoother that respects anisotropy. That is the fragility the direction change rules out.
+
+**Cost.** On the CPU at N = 64, K8, a step takes about 1.7 s for both ml and tent, so ml was not cheaper per iteration. On the GPU at 150², ml is 11.8 ms at K8 against the tent's figure at K8 in RESULT (19), which ml never matches in accuracy.
+
+## 2026-11-09 RESULT (21): Newton–PCG on the GPU, milestone 1 (centre-held sheet, no contact), and the contact interface answer
+
+**Landed:**
+- `method: 'newton'` in `ClothGPUSolver`, with the kernels in `lib/cloth/gpu-newton-wgsl.ts`.
+- The test `tests/cloth-newton.test.ts`: over a BDF2 run, GPU Newton is within 2 µm of the converged Float64 oracle after a 0.31 m fall.
+- VBD is still the default. It goes at milestone 4.
+
+**What each step does.**
+1. **Per step, unchanged.** beginStep, then frameElements and frame. These build y, x̂, the damping tangent and the pin targets.
+2. **Then up to `newton.iterations` Newton iterations.** Each iteration runs these kernels in order:
+
+| kernel | what it does |
+|---|---|
+| `nwFaces` | per face: f0, f1, the 2×2 stress clamped PSD, and the tangent |
+| `nwGradient` | g and the 3×3 diagonal block from `vertexSystem` (contact terms come in through it), the block inverse, and the PCG start |
+| `pcgApply`, `pcgUpdate` | `pcgIterations` times, as below |
+| `nwTrial` | G(x + αd) − G(x) in difference form for α = 1 … 2⁻⁷, with the rounding floors of the VBD line search, and the slope g·d |
+| `nwChoose` | the largest Armijo α |
+| `nwApply` | moves the iterate |
+
+The PCG pair, per iteration:
+- **`pcgApply`:** p = z + βp, formed on the fly at the neighbours with ping-pong p. Then a matrix-free H·p, with these terms:
+  - inertia, the grab spring, membrane J D Jᵀ plus S_clamped ⊗ I, face damping, and the bending stencil.
+- **`pcgUpdate`:** the update of d, r and z.
+
+How control works:
+- Every global scalar is a workgroup-redundant sum of per-workgroup partials. There are no reduction dispatches and no readback.
+- Stopping is all decided on the GPU. These set flags that every later kernel of the step exits on, uniformly:
+  - the residual |g| ≤ tol·|mg| over free DOFs;
+  - the PCG test r·z ≤ tol²·r₀·z₀;
+  - a failed line search.
+- Pins are Dirichlet DOFs: zero rows, zero directions.
+- No strain limit yet; it is refused explicitly. Contact is refused until the filter is wired.
+
+### Milestone 1: the centre-held 150² Bridson sheet, no strain limit (both solvers), 30 ticks
+
+The reference is GPU Newton at 20 × 400. It matches Float64 CPU Newton at 4 × 100 to 3.9 mm, and CPU against GPU agree, so f32 is not a limit. Newton runs at 8 × 200 and 20 × 400 agree to 1.5 mm, so this is the converged trajectory, not a chaotic one.
+
+Mean deviation from that reference (mm):
+
+| solver | ms/step | t15 | t30 |
+|---|---|---|---|
+| VBD K = 8 | 9.6 | 71.0 | 460.4 |
+| VBD K = 32 | 33.0 | 34.8 | 345.6 |
+| VBD K = 128 | 118.7 | 22.0 | 154.9 |
+| VBD K = 256 | 144.6 | 15.9 | 93.3 |
+| VBD K = 512 | 284.3 | 12.3 | 54.7 |
+| Newton 2 × 50 | 16.2 | 30.7 | 254.3 |
+| **Newton 3 × 50** | **23.4** | 16.7 | 116.4 |
+| Newton 4 × 50 | 31.5 | 10.8 | 87.0 |
+| **Newton 4 × 100** | **61.0** | 3.0 | 3.9 |
+| Newton 6 × 100 | 91.4 | 1.4 | 2.3 |
+| Newton 8 × 200 | 231 | 0.6 | 1.5 |
+
+(The Newton runs use PCG tol 1e-4 and residual tol 1e-5, so every Newton run used its full caps.)
+
+**Decision numbers:**
+- **VBD K = 128 is far from converged.** It is 155 mm off at t30. VBD K = 512 is still 55 mm off.
+- **At matched accuracy, Newton is 5× cheaper.** Newton 3 × 50 (116 mm) costs 23 ms, against K = 128's 119 ms. Newton 4 × 50 (87 mm, 31 ms) beats K = 256 (93 mm, 145 ms).
+- **Newton gets a level VBD never reaches.** 4 × 100 is within 4 mm at 61 ms.
+- **Cost per PCG iteration is about 150 µs.**
+  - About 21 µs of it is the two dispatches. An early-exit dispatch measures 10.6 µs.
+  - The rest is the gather H·p: about 150 vec4 loads per vertex.
+  - The next speed work is fewer loads per H·p (assembled blocks or a stored p) and a better preconditioner.
+
+**f32 floor.** The free-DOF residual stalls at about 2.4e-2 |mg|. The line search's error bound then rejects every trial, and Newton stops by flag. That is far below the accuracy that matters: 8 × 200 against 20 × 400 is 1.5 mm.
+
+### Answer to C2's interface (progress-lane-c2.md, 2026-11-09 COORDINATION): it fits; this is how I bind it
+
+- **`ogcDir(i)`** = the on-the-fly p_i (z_i + β p_{i−1}) inside `pcgApply`. `ogcVertexContactHvLanes(v, 0, 1)` adds into (H p)_v.
+- **The gradient and preconditioner** already include contact, through `vertexSystem` → `contactTerms` (`ogcVertexContactLanes`).
+- **The line search** needs the contact energy at x + αd for the 8 trial α. I will evaluate `ogcContactEnergyOwnedLanes(v, 0, 1)` with `ogcX(i)` returning x_i + α d_i, set per trial in `nwTrial`. **C2:** please confirm the energy reads positions only through `ogcX`, not through `positions` directly.
+- **The filter's direction buffer** is my `d` segment: the `nw` buffer at offset 16·3·Np B, size 16·N B. `ogcAlphaMin()` scales the trial ladder to α_min·2⁻ᵏ.
+- **Hooks:**
+  - `filter(pass)` runs after the PCG loop, before `nwTrial`;
+  - `afterNewtonStep(pass)` runs after `nwApply`;
+  - `afterFrame` is unchanged.
+- **kc_N_m (`lib/cloth/scene-contact.ts`)** changes with the contact milestone (3), where I can gate it with Newton. C2's E·A_v/r derivation (≈ 3·10⁴ N/m at 150²) is the value I will use; computed per scene, not a constant.
