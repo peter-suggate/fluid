@@ -525,6 +525,38 @@ test('in contact, a history endpoint steps on within the run-to-run spread of th
   assert.ok(drift <= runToRun, `undo drift ${drift} m exceeds the run-to-run spread ${runToRun} m`);
 }));
 
+test("the colour solve splits a vertex's contact entries across its lanes: 1, 2, 4 and 8 lanes step on from one in-contact pose within the run-to-run spread", { skip: !gpu }, async () => withDevice(async device => {
+  // Each lane takes entries sub, sub + VL, ... in one pass (force, Hessian and energy), and its own share of every
+  // trial's energy change; the lanes' sums are the vertex's. From one pose in contact, one tick with any lane count is
+  // one more sample of the detector's run-to-run spread (entry order is not reproducible, so f32 sums differ).
+  const { scene } = movingSolidScene(), dt = CLOTH_SCENE_STEP_S;
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 });
+  await cloth.capture([12 * dt]);
+  const counters = await cloth.contactFor('sheet')!.readCounters();
+  assert.ok(counters.pairMax >= 2, `a vertex with at least two contact entries at the pose (most: ${counters.pairMax})`);
+  publishSceneClothSurfaces(scene, cloth.surfaces);
+  const endpoint = snapshotSceneClothPose(scene);
+  cloth.destroy();
+  const onTick = async (vertexLanes?: number) => {
+    const s = await ClothSystem.create(device, cloneScene(endpoint), { statusInterval: 1, ...(vertexLanes ? { vertexLanes } : {}) });
+    const [frame] = await s.capture([14 * dt]);
+    assert.equal(s.failure, undefined, s.failure?.message);
+    s.destroy();
+    return frame![0]!.positions_m;
+  };
+  const spread = (p: ArrayLike<number>, q: ArrayLike<number>) => { let d = 0; for (let i = 0; i < p.length; i++) d = Math.max(d, Math.abs(p[i]! - q[i]!)); return d; };
+  const base = [await onTick(), await onTick(), await onTick()];
+  const runToRun = Math.max(spread(base[0]!, base[1]!), spread(base[0]!, base[2]!), spread(base[1]!, base[2]!));
+  const lanes: [number, number][] = [];
+  for (const vertexLanes of [1, 2, 4, 8]) { const x = await onTick(vertexLanes); lanes.push([vertexLanes, Math.min(...base.map(b => spread(b, x)))]); }
+  console.log(`2 ticks from the tick-12 pose (most entries at a vertex ${counters.pairMax}): default-lane runs differ by up to ${runToRun.toExponential(2)} m; ` +
+    lanes.map(([l, d]) => `${l} lanes ${d.toExponential(2)} m`).join(', ') + ' from the nearest');
+  // Measured over two rounds: runs differ by 5.1e-7 and 1.3e-4 m; 2, 4 and 8 lanes by 3.4e-7 to 5.3e-6, the serial
+  // one-lane solve (its own summation order throughout) by 2.7e-6 and 1.1e-5. A lane that dropped or doubled entries
+  // moves the sheet by millimetres.
+  for (const [l, d] of lanes) assert.ok(d <= Math.max(2e-5, 2 * runToRun), `${l} lanes per vertex: ${d} m from the nearest default-lane run (runs differ by ${runToRun} m)`);
+}));
+
 test('undo of a cut through the system: the history endpoint rebuilds the uncut sheet with its exact state and steps on as if never cut', { skip: !gpu }, async () => withDevice(async device => {
   const scene = sheetScene(1e9), staged: SceneDescription[] = [];
   // The reference never cuts: 9 ticks straight.

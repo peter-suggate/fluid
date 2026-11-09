@@ -1225,3 +1225,48 @@ The scratch script is `fluid-scratch/cloth-c1/r3/rebuild-trace.mts`.
 - **Fix, already approved:** C2's `ogcVertexContactLanes` (f, H and e in one pass) halves that chain. With the lane split it also divides the trial energies at the pile.
 - **Suggestion for C2:** shorten the solid lookup chain (header words in the uniform or in workgroup memory, fewer dependent levels before the brick nodes). Only C2 can reach that part.
 - Nothing from this round is landed.
+
+## 2026-11-09 RESULT (17): lane-split contact landed on C2's 05183dc9, 4 lanes per vertex
+
+**What changed** (`gpu-solver-wgsl.ts`):
+- `pinTerms` holds the pins only.
+- Contact goes through a new `contactTerms(v, xv, first, stride, &s) -> f32`. It wraps C2's `ogcVertexContactLanes`, so force, Hessian and energy come in one pass over the entries.
+- **solveColourWide:**
+  - Every lane takes entries `sub, sub + VL, …`, adds them into its share of the vertex system (summed by groupSum), and keeps its own energy at x_v.
+  - Every trial adds the lane's own change, `ogcVertexContactEnergyLanes(v, xv + d, sub, VL) − ec0`. The floor is |ec0| + |ec1| per lane, so the lane-summed floor bounds the rounding of the lane-summed difference.
+- **The serial `starStep`** (1 lane) takes the energy from that same single pass, stride 1.
+- **`vertexSystem` / `constraints`** (diagnose and the patch path) take the whole block at stride 1.
+- `ownSystem`, on lane 0, is now inertia and pins only.
+- **Default lanes:** `CLOTH_VERTEX_LANES` changes from 2 to 4.
+- **`ClothSystemOptions.vertexLanes`** is passed through to the solver, for tests and profiling.
+
+**A/B** (curtain, each block from one pose snapshot; µs per colour-sweep iteration):
+
+| snapshot | HEAD contact (2 lanes) | fused on lane 0 | lane split, 2 lanes | lane split, 4 lanes | lane split, 8 lanes |
+|---|---|---|---|---|---|
+| tick 200, run A | 1136–1207 | 1032 | 836 | 751–786 | — |
+| tick 200, run B | — | — | 2610–2646 | 1759–1772 | 1286 |
+| tick 44 | — | — | 456–494 | 475–522 | 584 |
+
+- Each tick-200 snapshot is a different pile: detection is not reproducible, so a run reaches its own state.
+- **4 lanes are 6–10% under 2 at pile A and 33% under 2 at pile B. At light contact they are within about ±5% of 2.** 8 lanes win at the pile but cost +20–28% at light contact, so the default is 4 (as ruled).
+- **Against HEAD at pile A:** 4 lanes are 31–38% under HEAD's two-pass lane-0 contact, and 2 lanes are 26–31% under.
+
+**The pile tick is dominated by C2.** At the tick-200 snapshots, fenced ticks were 383–1280 ms. The solve is under 2% of that; the rest is C2's detection.
+
+**Regression** (`cloth-system`, "the colour solve splits a vertex's contact entries across its lanes…"):
+- Setup: the moving-solid sheet's tick-12 pose, where the busiest vertex has 12 contact entries.
+- Each run steps on 2 ticks: 3 default-lane runs, then 1, 2, 4 and 8 lanes.
+- Each lane count must land within max(2e-5 m, 2 × the runs' spread) of the nearest default run.
+- Measured over two rounds:
+  - the default runs differ by 5.1e-7 and 1.3e-4 m;
+  - 2, 4 and 8 lanes are 3.4e-7 to 5.3e-6 m from the nearest;
+  - 1 lane is 2.7e-6 and 1.1e-5 m.
+- A lane that dropped or doubled entries would move the sheet by millimetres.
+
+**Checks:**
+- `check:types` clean.
+- `test:unit`: 1672 pass, 1 fail (the known foreign `reservoir-particle-cost` "merge cap…").
+- GPU:
+  - `cloth-system`, `cloth-gpu-solver` and `cloth-coarse`: 32/32 pass.
+  - C2's `cloth-contact-body`, `cloth-contact-gpu` and `cloth-contact-gates`: 17/17 pass with the new default. The two moving-solid tests now pass on C2's working tree at this time; relative-to-body truncation is not yet committed.

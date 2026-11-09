@@ -150,6 +150,8 @@ export interface ClothSystemOptions {
   readonly label?: string;
   /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
   readonly statusInterval?: number;
+  /** Lanes per vertex of the colour solve (`ClothGPUSolverOptions.vertexLanes`); default `CLOTH_VERTEX_LANES`. */
+  readonly vertexLanes?: number;
 }
 
 export class ClothSystem {
@@ -256,6 +258,7 @@ export class ClothSystem {
         coarse, initialGuess: 'previous',
         positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
         solverState: start ? start.solverState : data.solverState, label,
+        ...(this.options.vertexLanes !== undefined ? { vertexLanes: this.options.vertexLanes } : {}),
         contact: contact.solverContact(CLOTH_BINDING.contact),
         // The coarse move is truncated like a colour sweep's, before the sweeps start from it.
         hooks: { ...contact.stepHooks, afterCoarse: (pass: GPUComputePassEncoder) => contact.encodeTruncate(pass) },

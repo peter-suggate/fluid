@@ -24,8 +24,10 @@ export const CLOTH_STATUS_WORDS = CLOTH_STATUS_RING_BASE + CLOTH_STATUS_SLOT_WOR
 /** Slot words: step + 1 (0: empty), BDF2 flag, residual |grad E| / |m g|, max edge strain, kinetic, potential, elastic energy (f32 bits). */
 export const CLOTH_SLOT = { step: 0, bdf2: 1, residual: 2, maxStrain: 3, kinetic: 4, potential: 5, elastic: 6 } as const;
 export const CLOTH_WORKGROUP = 64;
-/** Default lanes per vertex of the grouped Tier A colour solve (solveColourWide). */
-export const CLOTH_VERTEX_LANES = 2;
+/** Default lanes per vertex of the grouped Tier A colour solve (solveColourWide). 4: the lanes split the vertex's
+ * contact entries, which dominate the sweep in a pile of folds (Bridson curtain at 3.3 s: 4 lanes 6-33% under 2);
+ * under light contact 4 is within about 5% of 2 (progress-lane-c1.md RESULT (17)). */
+export const CLOTH_VERTEX_LANES = 4;
 /** solveColourWide workgroup: CLOTH_WIDE_WORKGROUP / lanes vertices, one SIMD group. */
 export const CLOTH_WIDE_WORKGROUP = 32;
 /** Uniform records of the per-dispatch data, one per (iteration, colour) and one post record per iteration. */
@@ -432,25 +434,30 @@ fn edgeTerm(v: u32, xv: vec3f, e: u32, s0: System) -> System {
   return s;
 }
 
-// Pin${contact ? ' and contact' : ''} terms of vertex v.
+// Pin terms of vertex v.
 fn pinTerms(v: u32, xv: vec3f, s0: System) -> System {
   var s = s0;
   if (vertexGroup(v) > 0u) {
     let d = state[seg(S_PIND, v)]; let C = xv - state[seg(S_PINC, v)].xyz;
     s.g += d.w * C + d.xyz; s.H += d.w * IDENTITY;
   }
-${contact ? `  var fc = vec3f(0.0); var Hc = mat3x3f();
-  ogcAccumulateVertexContact(v, xv, &fc, &Hc);
-  s.g -= fc; s.H += Hc;` : ''}
   return s;
 }
-
+${contact ? `// Contact entries first, first + stride, ... of vertex v added to s, in one pass that also returns their energy at xv
+// (a vertex's VL lanes take one stride each; one thread takes them all at stride 1).
+fn contactTerms(v: u32, xv: vec3f, first: u32, stride: u32, s: ptr<function, System>) -> f32 {
+  var fc = vec3f(0.0); var Hc = mat3x3f();
+  let e = ogcVertexContactLanes(v, xv, first, stride, &fc, &Hc);
+  (*s).g -= fc; (*s).H += Hc;
+  return e;
+}
+` : ''}
 fn constraints(v: u32, xv: vec3f, s0: System) -> System {
   var s = s0;
   if (P.flags.z != 0u) {
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); }
   }
-  return pinTerms(v, xv, s);
+  ${contact ? 's = pinTerms(v, xv, s); _ = contactTerms(v, xv, 0u, 1u, &s); return s;' : 'return pinTerms(v, xv, s);'}
 }
 
 fn solve3(H: mat3x3f, b: vec3f) -> vec4f {
@@ -575,6 +582,7 @@ fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
   let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy; let n = R.range.y;
   let h = hEff(); let w = vertexRest(v).x / (h * h);
   var s = pinTerms(v, xv, System(w * (xv - state[seg(S_Y, v)].xyz), w * IDENTITY));
+  ${contact ? 'let ec0 = contactTerms(v, xv, 0u, 1u, &s);' : ''}
   var dmp = Block(vec3f(0.0), stencilDiagonal(v), 0.0, 0.0);
   let nf = topo[P.topo0.x + v + 1u] - topo[P.topo0.x + v]; let ns = stencilCount(v);
   let xhv = state[seg(S_XHAT, v)].xyz;
@@ -590,7 +598,6 @@ fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
   s.g += dmp.g; s.H += dmp.H;
   let solved = solve3(s.H, -s.g);
   if (solved.w == 0.0) { return xv; }
-  ${contact ? 'let ec0 = ogcVertexContactEnergy(v, xv);' : ''}
   var alpha = 1.0;
   for (var t = 0u; t <= HALVINGS; t++) {
     let d = alpha * solved.xyz;
@@ -663,13 +670,16 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   var v = 0u; var xv = vec3f(0.0); var nf = 0u; var ns = 0u; var ne = 0u;
   var s = System(vec3f(0.0), mat3x3f());
   // This lane's damping and bending terms, quadratic in xv: the trials take their change in closed form from these.
-  var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);
+  var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);${contact ? `
+  // This lane's share of the contact entries (entries sub, sub + VL, ...): its energy at xv, for its trials.
+  var ec0 = 0.0;` : ''}
   if (valid) {
     v = topo[P.topo1.z + R.range.x + index]; xv = pos(v);
     let f0 = topo[P.topo0.x + v]; nf = topo[P.topo0.x + v + 1u] - f0;
     ns = stencilCount(v);
     let e0 = topo[P.topo1.x + v]; ne = select(0u, topo[P.topo1.x + v + 1u] - e0, P.flags.z != 0u);
-    if (sub == 0u) { s = ownSystem(v, xv); dmp.H = stencilDiagonal(v); }
+    if (sub == 0u) { s = ownSystem(v, xv); dmp.H = stencilDiagonal(v); }${contact ? `
+    ec0 = contactTerms(v, xv, sub, VL, &s);` : ''}
     for (var j = sub; j < nf; j += VL) {
       let q = starFace(star.x + 2u * (j * R.range.y + index), v, xv);
       let b = membraneBlock(q); let d = starFaceDamping(q);
@@ -686,7 +696,6 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   let solved = solve3(H, -g);
   let delta = solved.xyz;
   if (sub == 0u) { wDone[group] = select(1u, 0u, valid && solved.w != 0.0); }
-  ${contact ? 'var ec0 = 0.0; if (valid && sub == 0u) { ec0 = ogcVertexContactEnergy(v, xv); }' : ''}
   var alpha = 1.0;
   for (var i = 0u; i <= HALVINGS; i++) {
     workgroupBarrier();
@@ -699,7 +708,8 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
       // Damping and bending, exactly: dg . d + d^T dH d / 2 (faceDampingDelta and the bending stencil in closed form).
       let quad = 0.5 * abs(dot(d, dmp.H * d)); let lin = dot(dmp.g, d);
       en = vec2f(lin + quad, dmp.r * length(d) + quad);
-      if (sub == 0u) { en += ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''}; }
+      if (sub == 0u) { en += ownDelta(v, xv, d); }${contact ? `
+      { let ec1 = ogcVertexContactEnergyLanes(v, xv + d, sub, VL); en += vec2f(ec1 - ec0, abs(ec0) + abs(ec1)); }` : ''}
       for (var j = sub; j < nf; j += VL) {
         en += membraneDelta(starFace(star.x + 2u * (j * R.range.y + index), v, xv), d);
       }
