@@ -1159,3 +1159,78 @@ The rotating sphere (tick 128) and the tablecloth (tick 226) are not re-probed y
 saw come after the halt (zero up to it here), with the halt disabled.
 
 **(A) truncation versus strain limit: not started.**
+
+## 2026-11-09 Rulings (1) and (2): evidence
+
+### (2) Curtain heldConflict: histogram of the conflicting pairs at tick 121
+
+**Method.** A scratch-only GPU instrumentation (reverted, never committed) records every conflicting pair of the
+halting step from inside `checkConflict`. For each pair it stores the ids, the gap d at X, the predicted gap g1, whether
+the round was forced, and each cloth vertex's held and carried bits. The pairs are then classified on the CPU:
+- **same sheet:** the rest distance is under 1.5 × the current distance + 1 cm;
+- **separate layers:** anything else among cloth-cloth pairs;
+- **cloth-body:** the pair includes a ball sample.
+
+The probe is `~/code/me/fluid-scratch/c2/tests/table-faces-probe.test.ts` with `HIST=1`.
+
+**Result:** 5179 conflicts in the step.
+
+| Round | Pair class | Conflicts | Gap d at X | Closure d − g1 |
+|---|---|---|---|---|
+| Mandatory (free predictions) | cloth-body | 2323 | median 4–9 mm, range 0.9–17.9 mm | median ≈ d + 0.3–0.8 mm, max 18.4 mm |
+| Mandatory | cloth-cloth, same sheet | **0** | | |
+| Mandatory | cloth-cloth, separate layers | **0** | | |
+| Held redo rounds | cloth-cloth, same sheet | 2856 | 4.74–9.6 mm (1–2 mesh spacings) | 4.8–10.1 mm |
+| Held redo rounds | cloth-cloth, separate layers | **0** | | |
+
+**Mandatory round: correct.** The ball starts from rest at 1.86 cm per step into cloth resting on it, whose predictions
+are about 0. Every conflict in this round is real, with closure about d + 0.5 mm. Smooth free predictions never make two
+vertices of one sheet conflict.
+
+**Held redo rounds: this is the misfiring definition.** The prediction field there is discontinuous: carried vertices get
+the ball's displacement, and every other vertex gets exactly 0. Two vertices of one sheet 5–10 mm apart, one carried and
+one held, then close by about 1 cm. The conflict test does what it should for those predictions (closure > d), so the
+fault is in the predictions. Each redo round carries one more ring of the same sheet: a cascade through a single layer,
+not stacked layers being swept.
+
+**Proposed definition fix (pending your ruling; nothing implemented):**
+- Drop the "carry" and the held redo rounds for the moving solid. That removes the held rounds, the carried
+  displacement, `heldConflict` and `bodySqueeze`.
+- Pairs with the moving solid are conflict-tested and truncated against relative motion, in the solid's frame (the
+  plane fixed to the solid, which the planes pass already does).
+- The cloth then keeps its own smooth prediction. Cloth the ball sweeps into is reached through the cloth-body pairs and
+  is pushed by the contact energy within the step's iterations.
+- One gap remains: a cloth vertex whose relative motion into the ball exceeds the gap can only be truncated, not pushed,
+  within one step. In the solid's frame that truncation leaves it moving with the ball, which is the carry, but only for
+  that vertex and without a cascade.
+
+### (1) Corner lift: the per-feature bound, measured
+
+**What I implemented (scratch only, not landed):** `~/code/me/fluid-scratch/c2/solid-field-coverage-refine.ts` and
+`solid-field-allowance-attempt.ts`.
+- The coverage passes from the prototype.
+- Each sample's allowed lift measured as the field's own rounding of its feature. From the surface 2 cells out around
+  the sample (8 directions), the lowest bounding face plane gives the sharp feature's height along the sample's normal.
+- Planes within the turn floor of the sample's own plane are excluded, since along an edge they are the same rounding.
+- Capped at the contact radius r. The cache is keyed by (field, r).
+
+**Finding:** the measured rounding is about zero almost everywhere. On the rotating scene the allowance is p10 = 0,
+p50 = 1e-7 m and p90 = 2–5e-4 m.
+- A lattice-aligned box edge or corner is exactly sharp in the trilinear field: a box SDF sampled on nodes on its faces
+  interpolates to the sharp edge.
+- The samples' hull still needs lift there. Samples sit near the edge, not on it, so facets between samples on the two
+  faces cut the corner. The convex hull of points on a convex surface always lies inside it.
+- So "lift ≤ the field's own rounding" fails at every such feature. Refinement chases it: 5386 → 20294 samples in 4
+  rounds, until the build exceeds `Set` capacity.
+- I reverted to the committed build.
+
+**Proposed definition fix:** put the samples on the sharp features they bound.
+- An edge sample is projected onto the intersection line of its two face planes (the supports already carry them), and
+  a corner sample onto the three planes' point.
+- A facet across a sharp edge then lies on the faces, so the lift is only needed where the field is genuinely rounded
+  (the 45° leg-top bevel, off-lattice edges), which is what the per-feature bound measures.
+- The cap r stays the hard ceiling.
+- This replaces lift with placement at sharp features, and should also shrink the coverage passes' work. Tablecloth
+  tick 222 and the all-scene zero-faces gate wait on it.
+
+### (A) Truncation against the strain limit: not started.
