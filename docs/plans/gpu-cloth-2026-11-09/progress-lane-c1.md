@@ -1336,3 +1336,96 @@ The scratch script is `fluid-scratch/cloth-c1/r3/rebuild-trace.mts`.
   - With the range fix off, it is bit-identical: the drop is 48.39..49.87 mm both ways.
   - The cause was ebbfaecc's bending ×8. At bending 1.5e-4 the spread is 0.38 mm, and 3b0bd218 has since reverted the change.
 - `cloth-coarse`: 8/8 after the revert.
+
+## 2026-11-09 RESULT (19): the K = 8 impact lag attributed, the swing's coarse locking measured, and the strain violations traced to contact holds
+
+**Nothing in `lib/` landed this round.** My three solver files are back at HEAD (44f02436). The work in progress is saved as a patch: `~/code/me/fluid-scratch/cloth-c1/r4/wip/filter-bending.patch`. It holds two things: the contact filter, and bending in A_c. The probes are in `~/code/me/fluid-scratch/cloth-c1/r4/`: `gate.mts`, `stepk.mts`, `swing.mts` and `strain.mts`. The HEAD-reference copies are in `head/`.
+
+**Caveat on comparisons.** C2's detector is changing in the working tree, and a run takes whatever is on disk. The HEAD reference copy is therefore rebuilt from the live tree with only my three files at HEAD, so every A/B below shares one detector. Contact runs are also not deterministic tick for tick: HEAD at K = 128 gave a t30 floor fraction of 0.074 in one run and 0.041 in the next.
+
+### 1. The K = 8 free-fall lag on the sphere sheet: one cause, at the impact tick
+
+The lag comes from the coarse step's Armijo test at the tick the sheet lands (tick 3).
+- A few vertices' share of the full coarse step would put them inside a barrier's domain, where the energy is infinite.
+- That rejects the trial for the whole sheet. The halved step then carries only part of the bulk motion.
+- Every later step is converged, but it inherits the lagged velocity.
+
+Median per-tick fall (mm), K = 8 against K = 64:
+
+| tick | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|
+| HEAD, K = 8 | 4.37 | 5.27 | 7.10 | 9.44 | 12.02 |
+| K = 64 | 6.96 | 9.58 | 12.28 | 15.00 | 17.71 |
+| filter, K = 8 | 6.97 | 9.60 | 12.31 | 15.03 | 17.77 |
+
+**The filter (in the patch, not landed):**
+- A vertex whose trial position has infinite contact energy is held at its position in that trial.
+- The trial is then tested on the move it actually makes: Armijo uses G's exact change against the slope g · m of that move.
+- Every accepted trial lowers G at finite energy.
+- At K = 8, all four corrections on the impact tick are accepted at α = 1.
+
+Sphere gate results:
+
+| run | fall12 (mm) | t30 floor / mean y | t45 floor / mean y | final contact status |
+|---|---|---|---|---|
+| HEAD, K = 128 | 31.30 | 0.041 / 0.2411 | 0.252 / 0.2147 | 12 |
+| HEAD, K = 8 | 25.36 | 0.021 / 0.2826 | 0.089 / 0.2544 | |
+| filter, K = 8 | 31.11 | 0.154 / 0.2386 | 0.236 / 0.228 | 8 |
+| filter, K = 128 | 31.19 | 0.120 / 0.2390 | 0.162 / 0.2314 | **1164** |
+
+**Why it is not landed.** At K = 128 the filter adds two contact failures; HEAD at K = 128 has neither:
+- solidPenetration (128), first seen at tick 33 or 38;
+- heldConflict (1024), at tick 52.
+
+The coarse move still goes through `afterCoarse` truncation. So a vertex reaching φ ≤ 0 means the larger accepted coarse moves (4878 of 5760 at α = 1, against 2819 at HEAD) push the detector into a case it does not certify. Every penetration so far has come with envelopeCap (8). C2's scratch counters 50..55 read zero at the moment it was flagged, so the penetrating vertex is not identified yet. This needs C2 before the filter can land.
+
+**Bending in A_c (in the patch, not landed).** I added it while the lag was still unattributed. The impact-tick filter, not bending, removes the lag. So I have not landed bending without a separate gate.
+
+### 2. Rotation locking: the swing is a coarse-basis limit, not stale A_c or too few corrections
+
+Probe: `swing.mts`. A centre-held sheet: 150 × 150, Bridson material, a pin disk of radius 0.05 m, no contact. Each K is compared with K = 128 at ticks 15 and 30.
+
+| variant | K = 8, mean deviation at t30 | K = 16, mean deviation at t30 | K = 128 cost (ms per step) |
+|---|---|---|---|
+| HEAD (A_c once per step, coarse every 2) | 328 mm | 285 mm | 96 |
+| A_c rebuilt at every correction | 327 mm | 284 mm | 96 |
+| A_c rebuilt, coarse every iteration | 335 mm | 294 mm | 159 |
+| coarse every iteration | 336 mm | 294 mm | 73 |
+
+- K = 32 gives 214 mm.
+- At t30 the corner sits at y = 0.72 (K = 8) against 0.34 (K = 128).
+- Every correction is accepted at α = 1 in every variant.
+
+So a fresher A_c does not help, and neither do more frequent corrections. The 40-node tent space (120 unknowns) cannot express the skirt folding about the disk rim. A tent displacement of that rotation stretches the fold region, so the coarse step leaves the fold to the fine sweeps, which move one ring per colour. This confirms the coordinator's locking hypothesis, and places it in the basis.
+
+The remedy is a richer coarse basis:
+- per-aggregate rotations, i.e. 6 unknowns per node;
+- or smoothed-aggregation prolongation (P smoothed by the fine operator, rigid modes as the near null space).
+
+Either one exceeds the one-workgroup register inverse (42 nodes × 3 at most). That is an architecture change, and I am raising it, not starting it.
+
+### 3. Strain-limit violations: at contact-held vertices, not the AVBD ramp
+
+Probe: `strain.mts`. HEAD solver with the live detector, sphere scene to tick 30. For each tick it reports the edges over (1 + ε) L with ε = 0.1, and the worst edges' λ, k and the detector's held flags. On the current detector, K = 128 and K = 256 behave alike; neither is clean.
+
+| run | tick 17: edges over / max | tick 18: edges over / max | tick 30: edges over / max |
+|---|---|---|---|
+| HEAD, K = 128 | 266 / 37.8% | 294 / 42.6% | 1 / 15.2% |
+| HEAD, K = 256 | 301 / 33.5% | 306 / 42.7% | 1 / 11.5% |
+| roundCap 16, K = 128 | 170 / 29.4% | 259 / 40.0% | 49 / 31.5% |
+| roundCap 16, K = 256 | 179 / 40.2% | 314 / 30.8% | 30 / 36.3% |
+
+- **The worst edges have both endpoints held by the detector.** Held flags are 3/3: bit 0 means contacted or truncated this step, bit 1 means held this step. Truncated vertices stay held for the rest of the step and the next.
+- **The violations sit at the sphere's top** (y ≈ 0.31–0.33) and, later, on the floor.
+- **The duals are nowhere near their cap.** k p99 is 3e3 and k max is 2.6e4, against kMax = 1e6 s ≈ 2e8.
+- **On many violators λ = 0.** At the edge's last dual update the edge was within its limit. It was stretched afterwards, by the truncation in `afterIteration`: per-vertex scaling of a common move pulls the endpoints apart.
+- **The round cap is not the cause.** With roundCap 16 there are no round-cap hits, and the violations stay.
+
+**A tried fix that is wrong.** I moved the dual update after the truncation, so λ sees the iterate that is kept.
+- At K = 128 it helps: max strain is 16.7% at tick 17.
+- At K = 256 it winds up: the held vertices cannot satisfy the constraint, so λ climbs to its cap kMax L (6.0e6) and k to 7.9e7.
+- Strain reaches 121% at tick 17 and 770% at tick 28, with status 140.
+
+This is not landed.
+
+**Conclusion.** The strain limit cannot be met by a vertex that contact truncation holds. The fix belongs in the truncation, not in AVBD: make the cut of an edge's endpoints consistent, or release a hold once its pair is certified. The data goes to C2.
