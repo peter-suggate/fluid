@@ -9,6 +9,13 @@ Date: 2026-11-09. Status: approved 2026-11-09; implementation in progress (lanes
 - **The old cloth code is deleted, not parked.** That covers mechanics, contact, rods, porous transport, cohesion, the wet coupling in NB-FLIP, wetcloth scenes, assets, tools, tests and plan docs. Keep the tree neat: only what the new triangle cloth uses survives, rewritten where that is simpler.
 - Long-range support at 1/60 comes from a two-level Galerkin correction over a coarse space built from the mesh topology (coordinator ruling 2026-11-09). Plain VBD, Tier B patches and a lower membrane stiffness were each measured, and none of them converges at 64² or above.
 - Moving voxel solids are scene rigid bodies with prescribed poses. Each is baked once in its body frame and posed on the GPU. Coupling is one-way; two-way waits for review. Box3D gets no per-frame sync.
+- **Correctness first, performance later** (user, 2026-11-09): "we should have simulation physics results matching the analytical / paper". Never tune physical parameters to hide solver error. Lane A's analytic shelf ("Cloth · Analytic") and the Bridson 2002 frames are the gates. Bridson scenes run K = 128 until a cheaper solve matches the K = 256 drape (44f02436).
+- **The solver becomes GPU Newton–PCG, with GPU collision** (user, 2026-11-09: "GPU-based collision and the Newton's method are the way to go indeed. Proceed as fast as possible").
+  - VBD colour sweeps at K = 8 lagged the drape: a tent with radial buckling ridges.
+  - C1 RESULT (19) traced the skirt swing to the two-level coarse basis. It cannot express the rotation. More levels (multigrid) were rejected by the user.
+  - Newton passes with a global PCG solve carry that coupling in each pass.
+  - OGC contact carries over in two parts. Pair energy, gradient and PSD Hessian blocks join the global system. The OGC conservative bounds become the Newton line-search filter.
+  - VBD and the coarse space are deleted once Newton passes the gates.
 - CPU work is allowed at setup and edit time: mesh build, partitioning and initial colouring. Per-step work is GPU only, with no readbacks in the step path.
 
 Paper texts (pdftotext) for the lanes: `~/code/me/fluid-scratch/gpu-cloth-papers/` (vbd, avbd, ogc, jgs2, pfb, webgpu).
