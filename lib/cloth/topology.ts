@@ -28,15 +28,16 @@ export interface PreparedClothTopology {
   readonly edgeRestLength_m: Float64Array;
   /** Kirchhoff plate bending from the flat rest, CLOTH_BEND_ROWS rows per vertex (row r belongs to vertex
    * floor(r / CLOTH_BEND_ROWS), its own vertex first among the row's entries o in [bendOffsets[r], bendOffsets[r + 1])):
-   * R_r x = sum_o w_o x_(v_o) (see `clothBendingRows`); the energy is sum_r (k_r/2)|R_r x|^2, k_r = B_i A_i of its
-   * vertex i. Each row vanishes for every affine map of the rest, so for every rigid motion. */
+   * R_r x = sum_o w_o x_(v_o) (see `clothBendingRows`); the energy is sum_r (k_r/2)|R_r x|^2, k_r of its vertex i
+   * (`bendStiffness_N_m3`). Each row vanishes for every affine map of the rest, so for every rigid motion. */
   readonly bendRowCount: number;
   readonly bendOffsets: Uint32Array;
   readonly bendVertices: Uint32Array;
   readonly bendWeights: Float64Array;
-  /** Per row, k = B_i A_i (N m^3) of its vertex i: the mean incident bending stiffness B (area weighted) times its area. */
+  /** Per row, k = B_i A_i^2 / A_free,i (N m^3) of its vertex i: the mean bending stiffness B of its faces that are not held
+   * rigid (area weighted) times its area, scaled by A_i / A_free,i at a held region's edge (1 elsewhere, 0 inside one). */
   readonly bendStiffness_N_m3: Float64Array;
-  /** Mixed Voronoi area A_i of each vertex (Meyer et al. 2003); they sum to the sheet's area. */
+  /** Barycentric area A_i of each vertex (a third of each incident face); they sum to the sheet's area. */
   readonly vertexArea_m2: Float64Array;
   /** The rows holding each vertex: CSR of entry indices o, and the row of each entry. */
   readonly vertexBendOffsets: Uint32Array;
@@ -161,33 +162,35 @@ export const CLOTH_BEND_ROWS = 3;
  * second derivatives D_uu, D_vv, D_uv of x in rest coordinates (u, v) of the flat sheet at i:
  *   R_0 = sqrt((1 + nu) / 2) (D_uu + D_vv), R_1 = sqrt((1 - nu) / 2) (D_uu - D_vv), R_2 = sqrt(2 (1 - nu)) D_uv,
  * so sum_a |R_a x|^2 = nu |Delta x|^2 + (1 - nu)(|D_uu x|^2 + |D_vv x|^2 + 2 |D_uv x|^2), independent of the frame, and the
- * energy is sum_i (B_i A_i / 2) sum_a |R_ia x|^2. A uniform cylindrical bend of curvature kappa gives (B/2) kappa^2 A
- * along any axis; a twist or a saddle costs its full energy (the Laplacian alone, nu = 1, gave both zero, so a strip
- * could bend anticlastically for free).
- *  - Each D is the least-norm generalized finite difference exact for every quadratic of the rest coordinates, over the
- *    smallest support that determines them: the one-ring, then the nearest vertices of the next rings (up to the
- *    four-ring) one at a time. On a symmetric one-ring (regular grids of right isosceles triangles, herring-bone and
- *    equilateral meshes) D_uu + D_vv is the 5-point (resp. 7-point) Laplacian. Each row vanishes for every affine map
- *    of the rest, so for every rigid motion.
- *  - A_i is the mixed Voronoi area (Meyer et al. 2003); the areas sum to the sheet's area. nu_i is per vertex (the
- *    caller's area-weighted material Poisson ratio), in [0, 1).
+ * energy is sum_i (B_i A_i / 2) sum_a |R_ia x|^2 (`prepareClothTopology` scales A_i at a held region's edge). A
+ * twist or a saddle costs its full energy (the Laplacian alone, nu = 1, gave both zero, so a strip could bend
+ * anticlastically for free).
+ *  - D starts from the weak (mixed finite element) Hessian of the piecewise-linear interpolant tested against the hat
+ *    function phi_i (Stein et al. 2018, "Natural boundary conditions for smoothing in geometry processing"):
+ *    A_i H_i = -sum_(f at i) A_f sym(grad phi_i (x) grad x_f) + sum_(boundary edges e at i) (|e|/2) sym(n_e (x) grad x_f(e)),
+ *    A_i the barycentric area. Its boundary term gives a free edge the plate's natural conditions: least-norm fits
+ *    over a one-sided support spread a boundary vertex's D_uu over the lines inside it, so the edge line's own
+ *    curvature went under-penalised (a cantilever strip 23% too compliant at h/W = 1/8, the error growing as W shrank).
+ *  - The weak Hessian is exact for quadratics on meshes of uniform valence (herring-bone, equilateral), not on
+ *    mixed-valence ones (a union-jack grid: 0.75 and 1.5 of the curvature on alternate vertices, and none of the
+ *    normal curvature at a boundary vertex). Each D then takes the least change of its weights that makes it exact for
+ *    every quadratic, over the smallest determining support: the one-ring, then the nearest vertices of the next
+ *    rings (up to the four-ring) one at a time. Where the weak Hessian is already exact the change is zero.
+ *  - Each row vanishes for every affine map of the rest, so for every rigid motion. nu_i is per vertex (the caller's
+ *    area-weighted material Poisson ratio), in [0, 1).
  * Entries with |w| below 1e-12 of the row's largest are dropped; the vertex's own weight, first in its row, is minus
  * the sum of the others. A vertex with no quadratic-exact support within its four-ring fails explicitly.
  */
 export function clothBendingRows(rest: ArrayLike<number>, faces: ArrayLike<number>, n: number, poisson?: ArrayLike<number>): { offsets: Uint32Array; vertices: Uint32Array; weights: Float64Array; area_m2: Float64Array } {
   const P = (i: number) => point3(rest, i), F = faces.length / 3;
-  const area = new Float64Array(n), ring = Array.from({length: n}, () => new Set<number>()), first = new Int32Array(n).fill(-1);
+  const area = new Float64Array(n), ring = Array.from({length: n}, () => new Set<number>()), incident = Array.from({length: n}, () => [] as number[]);
+  const edgeFaces = new Map<number, number>(), edgeKey = (a: number, b: number) => Math.min(a, b) * n + Math.max(a, b);
   for (let f = 0; f < F; f++) {
-    const v = [faces[3 * f]!, faces[3 * f + 1]!, faces[3 * f + 2]!], x = v.map(P), twice = norm3(cross3(sub3(x[1]!, x[0]!), sub3(x[2]!, x[0]!)));
-    const c: number[] = [], d: number[] = [];
-    for (let k = 0; k < 3; k++) { const a = sub3(x[(k + 1) % 3]!, x[k]!), b = sub3(x[(k + 2) % 3]!, x[k]!); d.push(dot3(a, b)); c.push(dot3(a, b) / twice); }
-    const obtuse = d.some(q => q < 0);
+    const v = [faces[3 * f]!, faces[3 * f + 1]!, faces[3 * f + 2]!], twice = norm3(cross3(sub3(P(v[1]!), P(v[0]!)), sub3(P(v[2]!), P(v[0]!))));
     for (let k = 0; k < 3; k++) {
-      const i = v[k]!;
-      if (first[i] < 0) first[i] = f;
+      const i = v[k]!; area[i] += twice / 6; incident[i]!.push(f);
       ring[i]!.add(v[(k + 1) % 3]!); ring[i]!.add(v[(k + 2) % 3]!);
-      const eij = sub3(x[(k + 1) % 3]!, x[k]!), eil = sub3(x[(k + 2) % 3]!, x[k]!);
-      area[i] += obtuse ? (d[k]! < 0 ? twice / 4 : twice / 8) : (dot3(eij, eij) * c[(k + 2) % 3]! + dot3(eil, eil) * c[(k + 1) % 3]!) / 8;
+      const e = edgeKey(i, v[(k + 1) % 3]!); edgeFaces.set(e, (edgeFaces.get(e) ?? 0) + 1);
     }
   }
   const R = CLOTH_BEND_ROWS, offsets = new Uint32Array(R * n + 1), vertices: number[] = [], weights: number[] = [];
@@ -201,15 +204,37 @@ export function clothBendingRows(rest: ArrayLike<number>, faces: ArrayLike<numbe
   // Right-hand sides of the fit in the basis (1, u, v, u^2, uv, v^2): D_uu, D_vv, D_uv.
   const targets = [[0, 0, 0, 2, 0, 0], [0, 0, 0, 0, 0, 2], [0, 0, 0, 0, 1, 0]];
   for (let i = 0; i < n; i++) {
-    if (first[i] < 0) throw new Error(`Cloth vertex ${i} belongs to no face`);
+    if (!incident[i]!.length) throw new Error(`Cloth vertex ${i} belongs to no face`);
     const nu = poisson?.[i] ?? 0;
     if (!(nu >= 0 && nu < 1)) throw new Error(`Cloth vertex ${i}: bending Poisson ratio ${nu} is outside [0, 1)`);
     // Rest frame at i (the face plane) and the mean incident edge length h, so the fit is in coordinates of order 1.
-    const fv = [0, 1, 2].map(k => P(faces[3 * first[i]! + k]!)), nn = cross3(sub3(fv[1]!, fv[0]!), sub3(fv[2]!, fv[0]!)), ln = norm3(nn);
+    const f0 = incident[i]![0]!, fv = [0, 1, 2].map(k => P(faces[3 * f0 + k]!)), nn = cross3(sub3(fv[1]!, fv[0]!), sub3(fv[2]!, fv[0]!)), ln = norm3(nn);
     const N: [number, number, number] = [nn[0] / ln, nn[1] / ln, nn[2] / ln], xi = P(i);
     let h = 0; for (const j of ring[i]!) h += norm3(sub3(P(j), xi)); h /= ring[i]!.size;
     const e = sub3(P(ring[i]!.values().next().value!), xi), ep = sub3(e, [N[0] * dot3(e, N), N[1] * dot3(e, N), N[2] * dot3(e, N)]), le = norm3(ep);
     const t1: [number, number, number] = [ep[0] / le, ep[1] / le, ep[2] / le], t2 = cross3(N, t1);
+    const uv = (j: number): [number, number] => { const d = sub3(P(j), xi); return [dot3(d, t1) / h, dot3(d, t2) / h]; };
+    // The weak Hessian in h-scaled coordinates (weights times h^2): (D_uu, D_vv, D_uv) per one-ring vertex.
+    const weak = new Map<number, [number, number, number]>();
+    const add = (j: number, s: number, a: readonly [number, number], b: readonly [number, number]) => {
+      const q = weak.get(j) ?? [0, 0, 0]; q[0] += s * a[0] * b[0]; q[1] += s * a[1] * b[1]; q[2] += s * 0.5 * (a[0] * b[1] + a[1] * b[0]); weak.set(j, q);
+    };
+    let Ai = 0;
+    for (const f of incident[i]!) {
+      const v = [faces[3 * f]!, faces[3 * f + 1]!, faces[3 * f + 2]!], p = v.map(uv);
+      const A2 = (p[1]![0] - p[0]![0]) * (p[2]![1] - p[0]![1]) - (p[2]![0] - p[0]![0]) * (p[1]![1] - p[0]![1]), Af = Math.abs(A2) / 2;
+      const grad = [0, 1, 2].map(k => { const a = p[(k + 1) % 3]!, b = p[(k + 2) % 3]!; return [(a[1] - b[1]) / A2, (b[0] - a[0]) / A2] as [number, number]; });
+      const k0 = v.indexOf(i); Ai += Af / 3;
+      for (let k = 0; k < 3; k++) add(v[k]!, -Af, grad[k0]!, grad[k]!);
+      for (const k1 of [(k0 + 1) % 3, (k0 + 2) % 3]) {
+        if (edgeFaces.get(edgeKey(i, v[k1]!)) !== 1) continue;
+        const pa = p[k0]!, pb = p[k1]!, c = p[3 - k0 - k1]!, L = Math.hypot(pb[0] - pa[0], pb[1] - pa[1]);
+        let nrm: [number, number] = [(pb[1] - pa[1]) / L, -(pb[0] - pa[0]) / L];
+        if ((c[0] - pa[0]) * nrm[0] + (c[1] - pa[1]) * nrm[1] > 0) nrm = [-nrm[0], -nrm[1]];
+        for (let k = 0; k < 3; k++) add(v[k]!, L / 2, nrm, grad[k]!);
+      }
+    }
+    for (const q of weak.values()) { q[0] /= Ai; q[1] /= Ai; q[2] /= Ai; }
     // Candidates by ring, then rest distance: the one-ring first, then the nearest farther vertices one at a time
     // until the quadratics are determined, so the rows (and the vertices they couple) stay as small as they can.
     const ringOf = new Map<number, number>([[i, 0]]); let front = [i];
@@ -219,9 +244,11 @@ export function clothBendingRows(rest: ArrayLike<number>, faces: ArrayLike<numbe
     for (let size = 1 + ring[i]!.size; size <= candidates.length && !rows; size++) {
       S = candidates.slice(0, size);
       if (S.length < 6) continue;
-      const M = S.map(j => { const d = sub3(P(j), xi), u = dot3(d, t1) / h, v = dot3(d, t2) / h; return [1, u, v, u * u, u * v, v * v]; });
-      // The least-norm rows: w_j = m_j . y with G y = b, G = sum_j m_j m_j^T (6 x 6; Gauss-Jordan, partial pivoting), one b per D.
-      const A = Array.from({length: 6}, (_, a) => [...Array.from({length: 6}, (_, c) => M.reduce((q, m) => q + m[a]! * m[c]!, 0)), ...targets.map(t => t[a]!)]);
+      const M = S.map(j => { const [u, v] = uv(j); return [1, u, v, u * u, u * v, v * v]; });
+      // The least change: w = w_weak + M y with G y = b - M^T w_weak, G = sum_j m_j m_j^T (6 x 6; Gauss-Jordan,
+      // partial pivoting), one b per D.
+      const residual = targets.map((t, d) => t.map((b, a) => b - S.reduce((q, j, k) => q + (weak.get(j)?.[d] ?? 0) * M[k]![a]!, 0)));
+      const A = Array.from({length: 6}, (_, a) => [...Array.from({length: 6}, (_, c) => M.reduce((q, m) => q + m[a]! * m[c]!, 0)), ...residual.map(t => t[a]!)]);
       let pmax = 0, pmin = Infinity;
       for (let c = 0; c < 6; c++) {
         let p = c; for (let r = c + 1; r < 6; r++) if (Math.abs(A[r]![c]!) > Math.abs(A[p]![c]!)) p = r;
@@ -231,7 +258,7 @@ export function clothBendingRows(rest: ArrayLike<number>, faces: ArrayLike<numbe
         for (let r = 0; r < 6; r++) if (r !== c) { const q = A[r]![c]! / pv; for (let k = c; k < 9; k++) A[r]![k]! -= q * A[c]![k]!; }
       }
       if (!(pmin > 1e-9 * pmax)) continue;
-      rows = targets.map((_, t) => { const y = A.map((r, a) => r[6 + t]! / r[a]!); return M.map(m => m.reduce((q, mm, a) => q + mm * y[a]!, 0) / (h * h)); });
+      rows = targets.map((_, d) => { const y = A.map((r, a) => r[6 + d]! / r[a]!); return S.map((j, k) => ((weak.get(j)?.[d] ?? 0) + M[k]!.reduce((q, mm, a) => q + mm * y[a]!, 0)) / (h * h)); });
     }
     if (!rows) throw new Error(`Cloth vertex ${i}: no quadratic-exact bending support within its four-ring (the mesh is too small or degenerate there)`);
     const [Duu, Dvv, Duv] = rows as [number[], number[], number[]], a0 = Math.sqrt((1 + nu) / 2), a1 = Math.sqrt((1 - nu) / 2), a2 = Math.sqrt(2 * (1 - nu));
@@ -314,16 +341,29 @@ export function prepareClothTopology(data: ClothTopologyData, materials: readonl
   for (let e = 0; e < E; e++) for (let k = 0; k < 2; k++) edgeEntries.push([edges[4 * e + k]!, e << 2 | k]);
   const vf = csr(n, faceEntries), ve = csr(n, edgeEntries);
   for (let v = 0; v < n; v++) if (vf.offsets[v + 1] === vf.offsets[v]) throw new Error(`Cloth vertex ${v} belongs to no face`);
-  // Per vertex the area-weighted mean of its faces' bending stiffness B and Poisson ratio (the plate's, as the membrane's).
-  const bendB = new Float64Array(n), bendNu = new Float64Array(n);
+  // A face whose three vertices are pinned to one group is held rigid, so it is not elastic sheet. A vertex on the
+  // held region's edge has the kink there inside its cell: its rows see the mean curvature over the cell, the held
+  // part's zero averaged with the free part's kappa, so A_i H_i = A_free kappa. The free part's energy
+  // (B/2) kappa^2 A_free is then (B/2) |H_i|^2 A_i^2 / A_free, so the row's stiffness is B A_i^2 / A_free (A_free, the
+  // vertex's area in faces that are not held). Centred rows over the kink otherwise carry a quarter of the energy on
+  // the free half-cell where they should carry all of it, and the clamp rotates. On a cantilever this is about
+  // 2h/L of the tip deflection, 1.7 deg of the Peirce chord at h = 5 mm. A vertex wholly inside a held region
+  // carries no bending.
+  const groups = data.groups, held = (f: number) => { const g = groups?.[faces[3 * f]!] ?? 0; return g > 0 && groups![faces[3 * f + 1]!] === g && groups![faces[3 * f + 2]!] === g; };
+  // Per vertex the area-weighted mean of its free faces' bending stiffness B and Poisson ratio (the plate's, as the membrane's).
+  const bendB = new Float64Array(n), bendNu = new Float64Array(n), freeArea = new Float64Array(n);
   for (let v = 0; v < n; v++) {
-    let a = 0, b = 0, nu = 0;
-    for (let j = vf.offsets[v]!; j < vf.offsets[v + 1]!; j++) { const f = vf.values[j]! >> 2, m = materials[faceMaterial[f]!]!; a += faceArea[f]!; b += faceArea[f]! * m.bending_N_m; nu += faceArea[f]! * m.poisson; }
-    bendB[v] = b / a; bendNu[v] = nu / a;
+    let a = 0, b = 0, nu = 0, all = 0, nuAll = 0;
+    for (let j = vf.offsets[v]!; j < vf.offsets[v + 1]!; j++) {
+      const f = vf.values[j]! >> 2, m = materials[faceMaterial[f]!]!; all += faceArea[f]!; nuAll += faceArea[f]! * m.poisson;
+      if (held(f)) continue;
+      a += faceArea[f]!; b += faceArea[f]! * m.bending_N_m; nu += faceArea[f]! * m.poisson;
+    }
+    freeArea[v] = a / 3; bendB[v] = a > 0 ? b / a : 0; bendNu[v] = a > 0 ? nu / a : nuAll / all;
   }
   const bend = clothBendingRows(rest, faces, n, bendNu), rows = CLOTH_BEND_ROWS * n;
   const bendK = new Float64Array(rows);
-  for (let r = 0; r < rows; r++) { const v = Math.floor(r / CLOTH_BEND_ROWS); bendK[r] = bendB[v]! * bend.area_m2[v]!; }
+  for (let r = 0; r < rows; r++) { const v = Math.floor(r / CLOTH_BEND_ROWS), A = bend.area_m2[v]!; bendK[r] = freeArea[v]! > 0 ? bendB[v]! * A * A / freeArea[v]! : 0; }
   const bendEntries: [number, number][] = [], bendEntryRow = new Uint32Array(bend.vertices.length);
   for (let r = 0; r < rows; r++) for (let o = bend.offsets[r]!; o < bend.offsets[r + 1]!; o++) { bendEntries.push([bend.vertices[o]!, o]); bendEntryRow[o] = r; }
   const vb = csr(n, bendEntries);

@@ -114,10 +114,10 @@ function cylinderRatio(data: ClothTopologyData, deg: number, kappa: number): num
 }
 
 test('a uniform cylindrical bend has bending energy (B/2) kappa^2 A within 1% on regular and herring-bone meshes, any bend axis', () => {
-  // Mesh dependence: the rows are exact for quadratics (interior: the symmetric cotan stencil of right isosceles
-  // meshes; boundary: by construction), so the error is the cylinder's departure from its osculating quadratic,
-  // O((kappa h)^2): measured -0.84% at kappa h = 0.2 (11 x 11, kappa = 2), -0.19% at 0.1 (21 x 21). The edge-hinge
-  // energy it replaces read 2.93 (bend along the mesh axes) to 5.19 (herring-bone, 45 degrees).
+  // Mesh dependence: the rows are exact for quadratics at every vertex, so the error is the cylinder's departure from
+  // its osculating quadratic, O((kappa h)^2): measured -0.66% at kappa h = 0.2 (11 x 11, kappa = 2), -0.17% at 0.1
+  // (21 x 21), on both meshes. The edge-hinge energy it replaces read 2.93 (bend along the mesh axes) to 5.19
+  // (herring-bone, 45 degrees).
   for (const [m, tol] of [[11, 0.01], [21, 0.0025]] as const) {
     const meshes: [string, ClothTopologyData][] = [['regular', clothGridData({ columns: m, rows: m, width_m: 1, height_m: 1, origin_m: [0, 0, 0] })],
       ['herring-bone', herringBoneSheet({ columns: m, rows: m, width_m: 1, depth_m: 1, origin_m: [0, 0, 0] })]];
@@ -180,6 +180,37 @@ function symmetricEigenvalues(M: Float64Array, n: number): number[] {
   }
   return Array.from({ length: n }, (_, i) => A[i * n + i]!);
 }
+
+test('a held cantilever plate under a uniform load deflects as the beam, q L^4 / 8B, on regular and herring-bone strips of any width', () => {
+  // Linear plate (out-of-plane w only, nu = 0): Q w = q A over the free vertices, the strip held along its first
+  // columns. Two defects of the earlier rows show here: least-norm boundary rows left the free edges soft
+  // (tip / beam 1.63 at W = 10 mm, 1.23 at 40, h = 5 mm), and a centred row over the clamp's kink let the clamp
+  // rotate (+2h/L). Now 0.2% (herring-bone) and 1.5% (regular).
+  const B = 1e-3, h = 0.005, L = 0.12, clampCells = 4, cells = Math.round(L / h), cols = clampCells + cells + 1;
+  for (const W of [0.01, 0.04]) for (const mesh of ['regular', 'herring-bone']) {
+    const rows = Math.round(W / h) + 1, group = (i: number) => i <= clampCells ? 1 : 0;
+    const data = mesh === 'regular' ? clothGridData({ columns: cols, rows, width_m: (cols - 1) * h, height_m: (rows - 1) * h, origin_m: [-clampCells * h, 0, 0], group })
+      : herringBoneSheet({ columns: cols, rows, width_m: (cols - 1) * h, depth_m: (rows - 1) * h, origin_m: [-clampCells * h, 0, 0], group });
+    const t = prepareClothTopology(data, [{ ...cotton, bending_N_m: B, poisson: 0 }]), n = t.vertexCount, rest = t.data.restPositions_m;
+    const idx = new Int32Array(n).fill(-1), free: number[] = [];
+    for (let v = 0; v < n; v++) if (t.groups[v] === 0) { idx[v] = free.length; free.push(v); }
+    const m = free.length, K = new Float64Array(m * m), y = free.map(v => -t.vertexArea_m2[v]!);
+    for (let r = 0; r < t.bendRowCount; r++) for (let a = t.bendOffsets[r]!; a < t.bendOffsets[r + 1]!; a++) for (let b = t.bendOffsets[r]!; b < t.bendOffsets[r + 1]!; b++) {
+      const ia = idx[t.bendVertices[a]!]!, ib = idx[t.bendVertices[b]!]!;
+      if (ia >= 0 && ib >= 0) K[ia * m + ib] += t.bendStiffness_N_m3[r]! * t.bendWeights[a]! * t.bendWeights[b]!;
+    }
+    for (let j = 0; j < m; j++) { // Cholesky, then the two triangular solves
+      let d = K[j * m + j]!; for (let k = 0; k < j; k++) d -= K[j * m + k]! ** 2; d = Math.sqrt(d); K[j * m + j] = d;
+      for (let i = j + 1; i < m; i++) { let q = K[i * m + j]!; for (let k = 0; k < j; k++) q -= K[i * m + k]! * K[j * m + k]!; K[i * m + j] = q / d; }
+    }
+    for (let i = 0; i < m; i++) { for (let k = 0; k < i; k++) y[i] -= K[i * m + k]! * y[k]!; y[i] /= K[i * m + i]!; }
+    for (let i = m - 1; i >= 0; i--) { for (let k = i + 1; k < m; k++) y[i] -= K[k * m + i]! * y[k]!; y[i] /= K[i * m + i]!; }
+    let tip = 0, count = 0;
+    free.forEach((v, j) => { if (Math.abs(rest[3 * v]! - L) < 1e-9) { tip += y[j]!; count++; } });
+    const ratio = tip / count / (-(L ** 4) / (8 * B));
+    assert.ok(Math.abs(ratio - 1) < 0.02, `${mesh}, W ${W * 1000} mm: tip / beam ${ratio}`);
+  }
+});
 
 test('a non-flat rest shape fails explicitly, naming the interior edge', () => {
   const data = clothGridData({ columns: 3, rows: 3, width_m: 0.2, height_m: 0.2, origin_m: [0, 0.5, 0] });

@@ -1753,3 +1753,60 @@ Probe: `~/code/me/fluid-scratch/cloth-c1/m2/c1-impact-probe.test.ts`. Copy it in
 - `cloth-contact-gpu` failed 6 tests when run alongside five other files, while C2 was editing
   `ogc-detector-wgsl.ts`. Run alone it is 18/18, and 18/18 on a clean HEAD export.
 - `cloth-system` "cut of the moving solid" (1 mm inside) is C2's known flake.
+
+## 2026-11-09 RESULT (24): Peirce PASS — weak-Hessian Kirchhoff rows with a quadratic-exact correction, and held-region stiffness
+
+**Peirce, GPU, bare, Newton 8 × 200, against the exact 22.26 / 41.60 / 56.99°: 22.26 / 41.71 / 57.16°. PASS (gate 1°).**
+Free fall (0.0005 mm) and swing (crossing 0.4950 s) still pass. The curtain is still 1.11% (gate 1%); it comes next.
+Log: `~/code/me/fluid-scratch/cloth-c1/m2/bare-hybrid.log`.
+
+**Mesh agreement ("herring-bone and regular must agree").** The Float64 static solve of the same discrete energy
+(`peirce-static.ts`, MESH=grid) gives 22.49 / 41.90 / 57.22° on the regular one-diagonal mesh, against
+22.26 / 41.71 / 57.16° on the herring-bone. The two meshes differ by ≤ 0.23°, and both are within 0.23° of exact.
+
+**The committed (RESULT 23) rows had a defect on the regular mesh.** Linear cantilever plate, tip deflection against
+qL⁴/8B (`beam-linear.ts`; ν = 0, held over 4 clamp columns, dense Cholesky):
+
+| h, W | HEAD herring-bone | HEAD regular | new herring-bone | new regular |
+|---|---|---|---|---|
+| 5 mm, 10 mm | 1.626 | 1.564 | 1.0021 | 1.0147 |
+| 5 mm, 40 mm | 1.231 | 1.463 | 1.0020 | 1.0127 |
+| 2.5 mm, 40 mm | 1.091 | 1.420 | 1.0016 | 1.0082 |
+| 5 mm, 80 mm | 1.129 | 1.416 | 1.0027 | 1.0091 |
+| 1.25 mm, 40 mm | 1.051 | 1.412 | 1.0003 | 1.0077 |
+
+The old regular column does not converge. It stays 41% too compliant at every h. The cause is the least-norm stencil
+on a union-jack/one-diagonal ring: it is quadratic-exact, but its weights have a component along a smooth mode that
+the exactness conditions do not see, so it under-penalises real curvature on that mesh. The new rows converge on both
+meshes, at O(h) on regular and better than that on herring-bone.
+
+**The rows (`clothBendingRows`).**
+- Start from the weak (mixed-FEM) Hessian of Stein et al. 2018:
+  A_i H_i = −Σ_f A_f sym(∇φ_i ⊗ ∇x_f) + Σ_{boundary e ∋ i} (|e|/2) sym(n_e ⊗ ∇x_f), with barycentric A_i.
+  This is consistent on any triangulation, and its boundary term is what makes the free edge carry its own curvature.
+  It is not quadratic-exact on irregular rings.
+- Apply the least change to those weights that makes each of Duu, Dvv and Duv exact on quadratics (a 6 × 6 normal
+  solve). The support is the smallest determining one: the one-ring first, then the next rings by distance, up to the
+  4-ring. Past that it throws.
+- The three Kirchhoff rows are as in RESULT (23). CPU tests on regular, sheared and herring-bone meshes at
+  ν = 0 / 0.3 / 0.6 still hold: exactness to 1e-9, null space 3, and the cylinder within 0.66% / 0.17% at
+  κh = 0.2 / 0.1.
+
+**The held region (the clamp kink).** A face is held when its three vertices are pinned in the same group > 0. A held
+face is rigid, so no curvature energy lives there. A row centred on the last held column measures the curvature of
+the free side only. That row must carry the energy of the vertex's free area A_free,i, not of its whole cell. The
+measured curvature is the free side's own, scaled by A_i / A_free,i through the stencil's area normalisation.
+Hence k_r = B_i A_i² / A_free,i (0 if A_free,i = 0), with B and ν averaged over the free faces. Interior vertices
+have A_free = A, which recovers B A. This replaces RESULT (23)'s "clamp column × 2" candidate with the rule that
+produces it. No tuning is involved: the result is the same on both meshes and at every width and h above.
+
+**Tests.**
+- New CPU regression: "a held cantilever plate ... deflects as the beam" on regular and herring-bone, W = 10 and
+  40 mm, |tip/beam − 1| < 2%.
+- `npm run check:types`: clean. `npm run test:unit`: only the known foreign failures (reservoir-particle-cost, C2's
+  c2-swing-probe).
+- GPU: cloth-newton and cloth-gpu-solver pass. Of the analytic scenes, free fall, swing and Peirce pass, and the
+  curtain fails at 1.11%.
+
+**Next.** The curtain's 1.11%: is it sway or bias? Then the BDF2 per-vertex restart (the onset signal to agree with
+C2 in the progress files), then M4.
