@@ -58,9 +58,14 @@ function distinctPiece(piece:readonly Vertex[],index:(v:Vertex)=>number):Vertex[
   }
   return Math.hypot(...area)/2>1e-9*perimeter*perimeter?kept:[];
 }
-/** A convex piece as triangles; with points on its sides it fans from its centroid. */
+/** A convex piece as triangles; with points on its sides it fans from its centroid. A corner is on a side when its
+ * turn is within ON_PLANE_RELATIVE of straight, relative to its two sides (a fan through it would emit a sliver with no
+ * rest area, whose normal, and so its bending rest shape, is rounding). */
 function convexTriangles(polygon:readonly Vertex[]):[Vertex,Vertex,Vertex][]{
-  const n=polygon.length,collinear=polygon.some((b,j)=>crossArea(polygon[(j+n-1)%n]!.p,b.p,polygon[(j+1)%n]!.p)<1e-20);
+  const n=polygon.length,collinear=polygon.some((b,j)=>{
+    const a=polygon[(j+n-1)%n]!.p,c=polygon[(j+1)%n]!.p;
+    return crossArea(a,b.p,c)<=ON_PLANE_RELATIVE*Math.hypot(a[0]-b.p[0],a[1]-b.p[1],a[2]-b.p[2])*Math.hypot(c[0]-b.p[0],c[1]-b.p[1],c[2]-b.p[2]);
+  });
   if(!collinear||n<=3)return Array.from({length:Math.max(0,n-2)},(_,j)=>[polygon[0]!,polygon[j+1]!,polygon[j+2]!]);
   const weights=new Map<number,number>();
   for(const v of polygon)for(const [k,w] of v.weights)weights.set(k,(weights.get(k)??0)+w/n);

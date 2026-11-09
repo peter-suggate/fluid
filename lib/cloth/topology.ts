@@ -30,8 +30,11 @@ export interface PreparedClothTopology {
   /** (opposite0, opposite1, edgeStart, edgeEnd) per interior edge. */
   readonly hinges: Uint32Array;
   readonly hingeEdge: Uint32Array;
-  readonly hingeRestAngle_rad: Float64Array;
-  /** Bending stiffness k_b 3|e|^2/(A0+A1), so the energy is (k/2)(theta - theta0)^2. */
+  /** Quadratic isometric bending (Bergou et al. 2006) from the flat rest: per hinge the weights w (4) of its vertices,
+   * the dihedral angle's gradient along the rest normal, so s = sum_i w_i x_i is theta n to first order and vanishes
+   * for any rigid motion of the rest; the energy is (k/2)|s|^2. */
+  readonly hingeWeights: Float64Array;
+  /** Bending stiffness k_b 3|e|^2/(A0+A1), so the energy is (k/2)|s|^2 ~ (k/2) theta^2. */
   readonly hingeStiffness_N_m: Float64Array;
   /** CSR vertex adjacency; entries are (element << 2 | local order). */
   readonly vertexFaceOffsets: Uint32Array;
@@ -133,6 +136,19 @@ export function clothHingeAngle(p: ArrayLike<number>, o0: number, o1: number, e0
   return Math.atan2(dot3(cross3(a, b), e) / le, dot3(a, b));
 }
 
+/** Largest rest dihedral angle (rad) the flat-rest bending model takes: 8 f32 ulps of 1. */
+export const CLOTH_FLAT_REST_TOLERANCE_RAD = 8 * 2 ** -23;
+
+/** Bergou weights of a flat-rest hinge (o0, o1, e0, e1): grad theta of each vertex along face0's unit normal. */
+export function clothHingeWeights(p: ArrayLike<number>, o0: number, o1: number, e0: number, e1: number): [number, number, number, number] {
+  const x0 = point3(p, o0), x1 = point3(p, o1), x2 = point3(p, e0), x3 = point3(p, e1);
+  const n1 = cross3(sub3(x2, x0), sub3(x3, x0)), n2 = cross3(sub3(x3, x1), sub3(x2, x1)), e = sub3(x3, x2);
+  const l1 = norm3(n1), le = norm3(e), q2 = dot3(n2, n2);
+  const c1 = 1 / l1, c2 = dot3(n2, n1) / (l1 * q2);
+  const s03 = dot3(sub3(x0, x3), e) / le, s13 = dot3(sub3(x1, x3), e) / le, s02 = dot3(sub3(x0, x2), e) / le, s12 = dot3(sub3(x1, x2), e) / le;
+  return [-le * c1, -le * c2, -(s03 * c1 + s13 * c2), s02 * c1 + s12 * c2];
+}
+
 function csr(count: number, entries: readonly (readonly [number, number])[]): {offsets: Uint32Array; values: Uint32Array} {
   const offsets = new Uint32Array(count + 1);
   for (const [v] of entries) offsets[v + 1]!++;
@@ -181,7 +197,7 @@ export function prepareClothTopology(data: ClothTopologyData, materials: readonl
   }
   const keys = [...edgeMap.keys()].sort((x, y) => x - y), E = keys.length;
   const edges = new Uint32Array(4 * E), edgeRest = new Float64Array(E);
-  const hingeList: number[] = [], hingeEdge: number[] = [], hingeAngle: number[] = [], hingeK: number[] = [];
+  const hingeList: number[] = [], hingeEdge: number[] = [], hingeWeights: number[] = [], hingeK: number[] = [];
   for (let e = 0; e < E; e++) {
     const key = keys[e]!, v0 = Math.floor(key / n), v1 = key % n, list = edgeMap.get(key)!;
     if (list.length > 2) throw new Error(`Cloth edge ${v0}-${v1} is non-manifold (${list.length} faces)`);
@@ -194,8 +210,11 @@ export function prepareClothTopology(data: ClothTopologyData, materials: readonl
       let s = v0, t = v1;
       for (let k = 0; k < 3; k++) if (faces[3 * f0 + k] === v1 && faces[3 * f0 + (k + 1) % 3] === v0) { s = v1; t = v0; }
       const o0 = opposite(f0), o1 = opposite(f1);
+      const angle = clothHingeAngle(rest, o0, o1, s, t);
+      if (!(Math.abs(angle) <= CLOTH_FLAT_REST_TOLERANCE_RAD))
+        throw new Error(`Cloth hinge ${hingeEdge.length} (vertices ${o0}, ${o1} across edge ${s}-${t}) has rest dihedral angle ${angle} rad: quadratic bending needs a flat rest shape`);
       hingeList.push(o0, o1, s, t); hingeEdge.push(e);
-      hingeAngle.push(clothHingeAngle(rest, o0, o1, s, t));
+      hingeWeights.push(...clothHingeWeights(rest, o0, o1, s, t));
       const kb = Math.max(materials[faceMaterial[f0]!]!.bending_N_m, 0) * 0.5 + Math.max(materials[faceMaterial[f1]!]!.bending_N_m, 0) * 0.5;
       hingeK.push(kb * 3 * edgeRest[e]! ** 2 / (faceArea[f0]! + faceArea[f1]!));
     }
@@ -208,7 +227,7 @@ export function prepareClothTopology(data: ClothTopologyData, materials: readonl
   const vf = csr(n, faceEntries), vh = csr(n, hingeEntries), ve = csr(n, edgeEntries);
   for (let v = 0; v < n; v++) if (vf.offsets[v + 1] === vf.offsets[v]) throw new Error(`Cloth vertex ${v} belongs to no face`);
   return {data, vertexCount: n, faceCount: F, faces, faceMaterial, faceDmInv, faceArea_m2: faceArea, edgeCount: E, edges, edgeRestLength_m: edgeRest,
-    hingeCount: H, hinges, hingeEdge: Uint32Array.from(hingeEdge), hingeRestAngle_rad: Float64Array.from(hingeAngle), hingeStiffness_N_m: Float64Array.from(hingeK),
+    hingeCount: H, hinges, hingeEdge: Uint32Array.from(hingeEdge), hingeWeights: Float64Array.from(hingeWeights), hingeStiffness_N_m: Float64Array.from(hingeK),
     vertexFaceOffsets: vf.offsets, vertexFaces: vf.values, vertexHingeOffsets: vh.offsets, vertexHinges: vh.values, vertexEdgeOffsets: ve.offsets, vertexEdges: ve.values,
     mass_kg: mass, groups: Uint32Array.from(data.groups ?? new Array(n).fill(0))};
 }

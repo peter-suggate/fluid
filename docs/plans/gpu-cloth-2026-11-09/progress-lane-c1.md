@@ -705,3 +705,36 @@ This is a physics change. It holds for nearly inextensible cloth with flat rest 
   - its pin duals are identical, and its history and edge duals are non-zero.
 
   Save and load go through the same publication, so they now keep the exact history too.
+
+## 2026-11-09 RESULT (8), ruling (1): quadratic bending is the only bending model; subgroup sums
+
+**Model.** Bergou et al. 2006 quadratic isometric bending replaces the dihedral hinge everywhere (oracle, coarse reference, GPU colour passes, coarse kernels, diagnostics). Per hinge, weights w_i = (∇θ_i at the flat rest) · n̂ (Σw = 0); s = Σ w_i x_i; E = (k/2)|s|², damping (kd k / 2h̃)|Σ w_i (x_i − x̂_i)|². k is unchanged (k_b 3|e|²/(A0 + A1)), so |s| ≈ |θ| for small folds. Gradient k w_v s, Hessian k w_v² I, both exact.
+- **Non-flat rest fails explicitly.** `prepareClothTopology` throws on any rest dihedral beyond `CLOTH_FLAT_REST_TOLERANCE_RAD` (8 · 2⁻²³ rad), naming the hinge, its vertices and its edge. Tested.
+- **Deleted:** hingeGeometry, the wrapped-angle helpers, the hinge records of the star stream, the per-hinge damping tangents (the `state1.y` segment, 3H records of state) and the trial's hinge loop.
+- **The colour passes read a per-vertex stencil.** Setup builds it in Float64 (`clothBendingStencil`): g = Σ_j Q_vj (x_j − x_v) + Σ_j Qd_vj (u_j − u_v)/h̃, H = (Q_vv + Qd_vv/h̃) I, with Q = Σ_h k w wᵀ and Qd = Σ_h kd k w wᵀ. A stencil record is one vec4 (j, Q_vj, Qd_vj, 0) in the colour-major star layout. The trial's bending change is closed form, through the damping block. Tier B's `vertexStep` keeps the per-hinge form; the two forms are the same energy.
+- **Subgroup sums.** solveColourWide sums a vertex's lanes with a subgroupShuffleXor butterfly when the device has `subgroups` with subgroupMinSize ≥ the lane count. The scene device already requests the feature (`fluidExecutionDeviceFeatures`). Otherwise it keeps the workgroup-memory tree. `subgroups: false` forces the tree; `true` without the feature fails.
+
+**Cut bug that the explicit check exposed.** A cut through the deformed sheet produced a rest-collinear sliver: area 2·10⁻¹⁹ m² beside a 3 cm edge. Its rest normal was rounding, giving a "rest dihedral" of π or −1.83 rad. The old hinge model would have folded toward that angle. The cause was `convexTriangles` (edit.ts), which tested a polygon corner for collinearity against an absolute 10⁻²⁰ m², so a T-junction corner inserted by `conformingPieces` was fanned through. The test is now relative (ON_PLANE_RELATIVE of the two sides' lengths), so such pieces fan from the centroid.
+
+**Oracle match:**
+
+| Check | Result |
+|---|---|
+| 20-step scripted BDF2 run, strain limits + Chebyshev | 4.75e-6 m (was 6.40e-6) |
+| one step, every initial guess | < 1e-6 m |
+| every lane layout × {subgroup, workgroup} sums | < 2e-6 m |
+| stiff fold (k_b 2e-3, damping 0.01, 2 cm perturbation), 1 and 4 lanes | 6.1e-8 / 9.2e-8 m |
+| Float64 stencil gradient vs per-hinge Σ k w s | < 1e-12 relative; rows sum to zero |
+| coarse GPU vs Float64 reference | 2.7e-8 to 5.3e-8 m one step; 3.7e-6 m over 16 steps |
+
+**Per colour, 150² tablecloth, K = 8, lanes 2, 60 steps.** Each dispatch is timed in its own pass. HEAD was run in the same session from a `git archive` copy.
+
+| | colours c0..c4 (µs) | step span | wall ms a step |
+|---|---|---|---|
+| HEAD (hinge records) | 71.5 / 76.3 / 76.2 / 78.5 / 76.3 | 4.35 ms | 2.54 |
+| quadratic bending | 58.6 / 65.7 / 67.3 / 68.3 / 67.0 | 3.85 ms | 1.80 |
+| + subgroup sums | 48.2 / 56.1 / 55.8 / 56.5 / 56.5 | 3.40 ms | 1.72 |
+
+Lanes 1 (serial starStep) with quadratic bending: 58.3–67.9 µs.
+
+Tests: `cloth-oracle`, `cloth-gpu-solver` (new stencil regression), `cloth-coarse`, `cloth-system` and `cloth-topology` pass. The scene tests run with `subgroups` requested. They were verified on HEAD plus these files, because C2's in-progress `ogc-detector.ts` edit in the working tree currently mismatches the "ogc apply" bind group (6 entries against 7).

@@ -12,11 +12,11 @@
  * It is rebuilt at build and edit time only.
  *
  * A_c = P^T H P is assembled once per step at the initial guess from PSD element Hessians (membrane
- * Gauss-Newton plus the PSD-clamped stress term, hinge Gauss-Newton, the frozen damping, pins, strain
+ * Gauss-Newton plus the PSD-clamped stress term, the quadratic bending (optional), the frozen damping, pins, strain
  * limit edges, inertia); contact is not in it. This file is the Float64 reference of the GPU path.
  */
 import type { PreparedClothTopology } from './topology';
-import { clothAddFaceDamping, clothAddHingeDamping, clothAugmentedEnergy, clothBendingBlock, clothFaceWeights, clothHingeAngleGradient, clothLocalSystem,
+import { clothAddBending, clothAddFaceDamping, clothAddHingeDamping, clothAugmentedEnergy, clothFaceWeights, clothLocalSystem,
   clothMembraneBlock, CLOTH_AVBD, CLOTH_LINE_SEARCH, type ClothOracleCoarse, type ClothOracleState, type ClothSolverModel, type ClothStepFrame,
   type Mat3, type Vec3 } from './oracle';
 
@@ -224,14 +224,9 @@ export function clothCoarseOperator(model: ClothSolverModel, frame: ClothStepFra
     }
   }
   if (bending) for (let h = 0; h < t.hingeCount; h++) {
-    const vs = [0, 1, 2, 3].map(k => t.hinges[4 * h + k]!), k = t.hingeStiffness_N_m[h]!;
-    const q = clothHingeAngleGradient(...vs.map(v => at3(x, v)) as [Vec3, Vec3, Vec3, Vec3]);
-    if (q) scatter(space, A, vs, (i, j) => outer(k, q.gradient[i]!, q.gradient[j]!));
-    const kd = model.hingeDamping_s[h]!;
-    if (kd > 0) {
-      const T = frame.damping.hinge, g = [0, 1, 2, 3].map(i => at3(T, 4 * h + i)), scale = kd * k / frame.hEff;
-      scatter(space, A, vs, (i, j) => outer(scale, g[i]!, g[j]!));
-    }
+    // The exact Hessian of (k/2)|s|^2 plus its damping: (k + kd k / h~) w_i w_j I.
+    const vs = [0, 1, 2, 3].map(k => t.hinges[4 * h + k]!), k = t.hingeStiffness_N_m[h]! * (1 + model.hingeDamping_s[h]! / frame.hEff), w = t.hingeWeights;
+    scatter(space, A, vs, (i, j) => I(k * w[4 * h + i]! * w[4 * h + j]!));
   }
   for (let e = 0; e < t.edgeCount; e++) {
     const eps = model.edgeStrainLimit[e]!;
@@ -286,8 +281,7 @@ export function clothObjective(model: ClothSolverModel, frame: ClothStepFrame, s
     add(clothAddFaceDamping(model, frame, f, 0, pos, g, H));
   }
   for (let h = 0; h < t.hingeCount; h++) {
-    const vs = [0, 1, 2, 3].map(k => pos(t.hinges[4 * h + k]!)) as [Vec3, Vec3, Vec3, Vec3];
-    add(clothBendingBlock(t.hingeStiffness_N_m[h]!, t.hingeRestAngle_rad[h]!, 0, ...vs).energy);
+    add(clothAddBending(t, h, 0, pos, g, H));
     add(clothAddHingeDamping(model, frame, h, 0, pos, g, H));
   }
   for (let e = 0; e < t.edgeCount; e++) {

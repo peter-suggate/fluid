@@ -22,7 +22,7 @@ async function withDevice(run: (device: GPUDevice) => Promise<void>) {
   Object.assign(globalThis, dawn.globals);
   const adapter = await createProcessRetainedDawnGPU(dawn, [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? 'metal'}`]).requestAdapter();
   assert.ok(adapter);
-  const device = await adapter.requestDevice({ requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+  const device = await adapter.requestDevice({ requiredFeatures: adapter.features.has('subgroups') ? ['subgroups'] : [], requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
   const errors: string[] = [];
   device.addEventListener('uncapturederror', (e: Event) => { e.preventDefault(); const m = (e as GPUUncapturedErrorEvent).error.message; if (!errors.length) console.error(m); errors.push(m); });
   try { await run(device); await device.queue.onSubmittedWorkDone(); assert.deepEqual(errors, []); }

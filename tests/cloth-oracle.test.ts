@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { clothGridData } from '../lib/cloth/grid';
-import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from '../lib/cloth/topology';
+import { clothHingeAngle, clothVertexNeighbours, colourClothVertices, prepareClothTopology } from '../lib/cloth/topology';
 import type { ClothAttachmentScript, ClothMaterial, ClothTopologyData } from '../lib/cloth/types';
 import {
-  buildClothSolverModel, clothAugmentedEnergy, clothBendingBlock, clothHingeAngleGradient, clothLocalSystem, clothMechanicalEnergy,
+  buildClothSolverModel, clothAddBending, clothAugmentedEnergy, clothHingeVector, clothLocalSystem, clothMechanicalEnergy,
   clothMembraneBlock, clothMembraneConstants, clothOracleStep, clothProjectPSD, clothStepFrame, clothSymmetricEigen3, clothVertexUpdate,
   clothWarmStartDuals, createClothOracleState, type ClothStepOptions, type Mat3, type Vec3,
 } from '../lib/cloth/oracle';
@@ -64,20 +64,45 @@ test('membrane energy is C1 across fibre compression and positive definite in st
   }
 });
 
-test('bending: FD angle gradient and a PSD Gauss-Newton Hessian', () => {
-  const r = rng(3);
-  for (let trial = 0; trial < 16; trial++) {
-    const X: [Vec3, Vec3, Vec3, Vec3] = [[0.3 * r(), 0.8 + 0.2 * r(), 0.3 * r()], [0.3 * r(), -0.8 - 0.2 * r(), 0.4 * r() - 0.2], [0, 0, 0], [1 + 0.1 * r(), 0.1 * r(), 0.1 * r()]];
-    const hinge = clothHingeAngleGradient(...X)!;
-    for (let k = 0; k < 4; k++) {
-      const fd = fdGradient(p => { const Y = [...X] as typeof X; Y[k] = p; return clothHingeAngleGradient(...Y)!.angle; }, X[k]!, 1e-7);
-      close(hinge.gradient[k]!, fd, 1e-6, `angle gradient ${trial}.${k}`);
-      const block = clothBendingBlock(0.3, 0.2, k, ...X);
-      const fdE = fdGradient(p => { const Y = [...X] as typeof X; Y[k] = p; return clothBendingBlock(0.3, 0.2, k, ...Y).energy; }, X[k]!, 1e-7);
-      close(block.gradient, fdE, 1e-6, `bending gradient ${trial}.${k}`);
-      assert.ok(minEigen(block.hessian) >= -1e-12 * Math.max(...block.hessian.map(Math.abs)), 'GN Hessian PSD');
-    }
+test('quadratic bending: zero for rigid motions of the flat rest, |s| ~ |theta|, FD gradient, exact Hessian k w^2 I', () => {
+  const r = rng(3), data = clothGridData({ columns: 4, rows: 4, width_m: 0.3, height_m: 0.24, origin_m: [0, 0.5, 0] });
+  // Shear the grid in plane so its hinges are not all alike.
+  const rest = data.restPositions_m.map((x, i) => i % 3 === 0 ? x + 0.1 * data.restPositions_m[i + 2]! : x);
+  const t = prepareClothTopology({ ...data, restPositions_m: rest }, [cotton]), at = (x: ArrayLike<number>, i: number): Vec3 => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
+  // A rigid motion of the rest: rotation about a random axis plus a translation.
+  const axis = [r() - 0.5, r() - 0.5, r() - 0.5], l = Math.hypot(...axis), u = axis.map(a => a / l) as Vec3, angle = 0.7;
+  const rotate = (p: Vec3): Vec3 => { const c = Math.cos(angle), sn = Math.sin(angle), d = u[0] * p[0] + u[1] * p[1] + u[2] * p[2];
+    return [0, 1, 2].map(k => p[k]! * c + (u[(k + 1) % 3]! * p[(k + 2) % 3]! - u[(k + 2) % 3]! * p[(k + 1) % 3]!) * sn + u[k]! * d * (1 - c) + 0.3) as Vec3; };
+  for (let h = 0; h < t.hingeCount; h++) {
+    const w = t.hingeWeights.subarray(4 * h, 4 * h + 4);
+    assert.ok(Math.abs(w[0]! + w[1]! + w[2]! + w[3]!) < 1e-9 * Math.max(...Array.from(w, Math.abs)), `hinge ${h} weights sum to zero`);
+    const s0 = clothHingeVector(t, h, i => at(rest, i)), s1 = clothHingeVector(t, h, i => rotate(at(rest, i)));
+    assert.ok(Math.hypot(...s0) < 1e-12 && Math.hypot(...s1) < 1e-12, `hinge ${h}: s vanishes at the rest and its rigid motions`);
+    // Fold opposite0 about the hinge edge by a small angle: |s| = |theta| to first order.
+    const [o0, , e0, e1] = Array.from(t.hinges.subarray(4 * h, 4 * h + 4)), x = [...rest];
+    const a = at(rest, e0!), e = at(rest, e1!).map((q, k) => q - a[k]!), le = Math.hypot(...e), n = e.map(q => q / le), p = at(rest, o0!).map((q, k) => q - a[k]!);
+    const theta = 1e-4, c = Math.cos(theta), sn = Math.sin(theta), d = p[0]! * n[0]! + p[1]! * n[1]! + p[2]! * n[2]!;
+    for (let k = 0; k < 3; k++) x[3 * o0! + k] = a[k]! + p[k]! * c + (n[(k + 1) % 3]! * p[(k + 2) % 3]! - n[(k + 2) % 3]! * p[(k + 1) % 3]!) * sn + n[k]! * d * (1 - c);
+    const folded = Math.abs(clothHingeAngle(x, ...(Array.from(t.hinges.subarray(4 * h, 4 * h + 4)) as [number, number, number, number])));
+    assert.ok(Math.abs(Math.hypot(...clothHingeVector(t, h, i => at(x, i))) / folded - 1) < 1e-3, `hinge ${h}: |s| ~ |theta|`);
   }
+  // FD gradient and the exact Hessian at a random bent pose.
+  const X = rest.map(q => q + 0.01 * (r() - 0.5));
+  for (let h = 0; h < t.hingeCount; h += 3) for (let k = 0; k < 4; k++) {
+    const v = t.hinges[4 * h + k]!, g: Vec3 = [0, 0, 0], H: Mat3 = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    const energy = (p: Vec3) => clothAddBending(t, h, k, i => i === v ? p : at(X, i), [0, 0, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    clothAddBending(t, h, k, i => at(X, i), g, H);
+    close(g, fdGradient(energy, at(X, v), 1e-7), 1e-6, `bending gradient ${h}.${k}`);
+    const kw2 = t.hingeStiffness_N_m[h]! * t.hingeWeights[4 * h + k]! ** 2;
+    close(H, [kw2, 0, 0, 0, kw2, 0, 0, 0, kw2], 1e-15, `bending Hessian ${h}.${k}`);
+  }
+});
+
+test('a non-flat rest shape fails explicitly, naming the hinge', () => {
+  const data = clothGridData({ columns: 3, rows: 3, width_m: 0.2, height_m: 0.2, origin_m: [0, 0.5, 0] });
+  const rest = [...data.restPositions_m]; rest[3 * 4 + 1] += 0.01;
+  assert.throws(() => prepareClothTopology({ ...data, restPositions_m: rest }, [cotton]), /Cloth hinge \d+ \(vertices \d+, \d+ across edge \d+-\d+\) has rest dihedral angle .* quadratic bending needs a flat rest shape/);
+  assert.doesNotThrow(() => prepareClothTopology(data, [cotton]));
 });
 
 test('PSD projection clamps an indefinite matrix to its nearest PSD part', () => {

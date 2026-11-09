@@ -43,6 +43,9 @@ export interface ClothSolverWGSLOptions {
   readonly vertexLanes?: number;
   /** The two-level correction's kernels and its `coarse` work buffer (gpu-coarse-wgsl.ts), for this many coarse nodes. */
   readonly coarseNodes?: number;
+  /** solveColourWide sums a vertex's lanes with subgroup shuffles (`enable subgroups`) instead of workgroup memory. The
+   *  caller checks the device has `subgroups` with subgroups of at least `vertexLanes` invocations. */
+  readonly subgroups?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
@@ -51,20 +54,20 @@ export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
     throw new Error(`Cloth vertexLanes must be a power of two from 1 to ${CLOTH_WIDE_WORKGROUP}, got ${lanes}`);
   if (patch && contact) throw new Error('Cloth Tier B does not take a contact block yet: truncation must run inside the patch dispatch');
   if (patch && options.coarseNodes) throw new Error('Cloth Tier B does not take the two-level correction');
-  return /* wgsl */`
+  return /* wgsl */`${options.subgroups && !patch ? 'enable subgroups;\n' : ''}
 struct Params {
   n: vec4u,      // N, T, E, H
   topo0: vec4u,  // vertexFaceOffsets, vertexFaces, vertexHingeOffsets, vertexHinges
   topo1: vec4u,  // vertexEdgeOffsets, vertexEdges, colour order, hinge vertices
-  topo2: vec4u,  // triangles (v0, v1, v2, material), edges (v0, v1, f0, f1)
-  rest0: vec4u,  // face Dm^-1, face (area, damping), hinge (theta0, k, kd), edge (L, eps)
+  topo2: vec4u,  // triangles (v0, v1, v2, material), edges (v0, v1, f0, f1), bending stencil offsets
+  rest0: vec4u,  // face Dm^-1, face (area, damping), hinge (w, then (k, kd)), edge (L, eps)
   rest1: vec4u,  // vertex (m, elastic, length, group), anchor, material, script
   flags: vec4u,  // script count, BDF2 requested, strain limited, partial count
   state0: vec4u, // segment stride, edge duals, partials, clock
-  state1: vec4u, // damping tangent: faces (2 records), hinges (3 records), damped flag
+  state1: vec4u, // damping tangent: faces (2 records), unused, damped flag
   gravity: vec4f, // xyz, dt
   misc: vec4f,   // clock origin (s), Chebyshev rho, initial guess (0 previous, 1 adaptive, 2 inertial)
-  tierB: vec4u,  // colour count, star header (topo word), star records (topo4 index)
+  tierB: vec4u,  // colour count, star header (topo word), star records (topo4 index), bending diagonal (rest record)
   partA: vec4u,  // Tier B partition 0: owner, patch offsets, vertices, colour offsets (topo words)
   partB: vec4u,  // partition 1
   coarse0: vec4u, coarse1: vec4u, coarse2: vec4u, coarse3: vec4u, coarse4: vec4u, coarse5: vec4u, coarse6: vec4u, // gpu-coarse-wgsl.ts
@@ -185,42 +188,46 @@ fn membraneBlock(q: FaceIn) -> Block {
   return Block(g, H, m.e, 0.0);
 }
 
-struct HingeFull { angle: f32, g0: vec3f, g1: vec3f, g2: vec3f, g3: vec3f, ok: bool }
-// Signed dihedral angle of a hinge (opposite0, opposite1, edge start, edge end) and its gradient for all four vertices.
-fn hingeGeometry(x0: vec3f, x1: vec3f, x2: vec3f, x3: vec3f) -> HingeFull {
-  var out: HingeFull;
-  let n1 = cross(x2 - x0, x3 - x0); let n2 = cross(x3 - x1, x2 - x1); let e = x3 - x2;
-  let q1 = dot(n1, n1); let q2 = dot(n2, n2); let le = length(e);
-  out.ok = q1 > 0.0 && q2 > 0.0 && le > 0.0;
-  if (!out.ok) { return out; }
-  let l12 = sqrt(q1) * sqrt(q2);
-  out.angle = atan2(dot(cross(n1, n2), e) / (l12 * le), dot(n1, n2) / l12);
-  let u1 = n1 / q1; let u2 = n2 / q2; let eh = e / le;
-  out.g0 = -le * u1; out.g1 = -le * u2;
-  out.g2 = -(dot(x0 - x3, eh) * u1 + dot(x1 - x3, eh) * u2);
-  out.g3 = dot(x0 - x2, eh) * u1 + dot(x1 - x2, eh) * u2;
-  return out;
-}
-fn pick4(k: u32, a: vec3f, b: vec3f, c: vec3f, d: vec3f) -> vec3f { return select(select(a, b, k == 1u), select(c, d, k == 3u), k >= 2u); }
-struct Hinge { angle: f32, g: vec3f, ok: bool }
-// Hinge h seen from its vertex k with that vertex at xv, loaded once.
-struct HingeIn { h: u32, k: u32, hv: vec4u, x0: vec3f, x1: vec3f, x2: vec3f, x3: vec3f, hr: vec4f }
+// Quadratic isometric bending (Bergou et al. 2006) from the flat rest: hinge h's weights w (summing to zero, the
+// dihedral angle's gradient along the rest normal) and (k, kd). The energy is (k/2)|s|^2 with s = sum_i w_i x_i, taken
+// relative to x2 so it is exactly translation invariant; its damping is (kd k / 2h~)|s(x - x^)|^2.
+fn hingeW(h: u32) -> vec4f { return rest[P.rest0.z + 2u * h]; }
+fn hingeKD(h: u32) -> vec2f { return rest[P.rest0.z + 2u * h + 1u].xy; }
+fn hingeS(w: vec4f, x0: vec3f, x1: vec3f, x2: vec3f, x3: vec3f) -> vec3f { return w.x * (x0 - x2) + w.y * (x1 - x2) + w.w * (x3 - x2); }
+// The rounding scale of hingeS: sum_i |w_i| |x_i - x2|.
+fn hingeRound(w: vec4f, x0: vec3f, x1: vec3f, x2: vec3f, x3: vec3f) -> f32 { return abs(w.x) * length(x0 - x2) + abs(w.y) * length(x1 - x2) + abs(w.w) * length(x3 - x2); }
+// Vertex k's weight in the relative form (slot 2 carries -(w0 + w1 + w3)).
+fn hingeWeight(w: vec4f, k: u32) -> f32 { return select(select(w.x, w.y, k == 1u), select(-(w.x + w.y + w.w), w.w, k == 3u), k >= 2u); }
+// Hinge h seen from its vertex k with that vertex at xv: s, its damping counterpart u, their rounding scales.
+struct HingeIn { kw: f32, kd: vec2f, s: vec3f, sr: f32, u: vec3f, ur: f32 }
 fn loadHinge(h: u32, k: u32, xv: vec3f) -> HingeIn {
-  let hv = hingeVerts(h);
-  return HingeIn(h, k, hv, select(pos(hv.x), xv, k == 0u), select(pos(hv.y), xv, k == 1u), select(pos(hv.z), xv, k == 2u), select(pos(hv.w), xv, k == 3u), rest[P.rest0.z + h]);
+  let hv = hingeVerts(h); let w = hingeW(h); let kd = hingeKD(h);
+  let x0 = select(pos(hv.x), xv, k == 0u); let x1 = select(pos(hv.y), xv, k == 1u);
+  let x2 = select(pos(hv.z), xv, k == 2u); let x3 = select(pos(hv.w), xv, k == 3u);
+  var u = vec3f(0.0); var ur = 0.0;
+  if (kd.y > 0.0) {
+    let u0 = x0 - state[seg(S_XHAT, hv.x)].xyz; let u1 = x1 - state[seg(S_XHAT, hv.y)].xyz;
+    let u2 = x2 - state[seg(S_XHAT, hv.z)].xyz; let u3 = x3 - state[seg(S_XHAT, hv.w)].xyz;
+    u = hingeS(w, u0, u1, u2, u3); ur = hingeRound(w, u0, u1, u2, u3);
+  }
+  return HingeIn(hingeWeight(w, k), kd, hingeS(w, x0, x1, x2, x3), hingeRound(w, x0, x1, x2, x3), u, ur);
 }
-// The hinge with vertex k moved by d.
-fn hingeOf(q: HingeIn, d: vec3f) -> Hinge {
-  let k = q.k;
-  let g = hingeGeometry(select(q.x0, q.x0 + d, k == 0u), select(q.x1, q.x1 + d, k == 1u), select(q.x2, q.x2 + d, k == 2u), select(q.x3, q.x3 + d, k == 3u));
-  return Hinge(g.angle, pick4(k, g.g0, g.g1, g.g2, g.g3), g.ok);
+// Bending and its damping at the vertex: exact gradient, Hessian (k + kd k / h~) w_k^2 I and energy.
+fn hingeBlock(q: HingeIn) -> Block {
+  let scale = q.kd.x * q.kd.y / hEff();
+  return Block(q.kw * (q.kd.x * q.s + scale * q.u), (q.kd.x + scale) * q.kw * q.kw * IDENTITY, 0.5 * (q.kd.x * dot(q.s, q.s) + scale * dot(q.u, q.u)), 0.0);
 }
-fn hingeAt(h: u32, k: u32, xv: vec3f) -> Hinge { return hingeOf(loadHinge(h, k, xv), vec3f(0.0)); }
+// Their change when the vertex moves by d, exactly (both are quadratic), with the rounding of the base s and u.
+fn hingeDelta(q: HingeIn, d: vec3f) -> vec2f {
+  let scale = q.kd.x * q.kd.y / hEff(); let ds = q.kw * d;
+  let lin = q.kd.x * dot(q.s, ds) + scale * dot(q.u, ds); let quad = 0.5 * (q.kd.x + scale) * dot(ds, ds);
+  return vec2f(lin + quad, abs(lin) + quad + (q.kd.x * q.sr + scale * q.ur) * length(ds));
+}
 
 // Star records (solveColourWide): per colour, record j of slot i at 2 (j n + i) vec4s, so a SIMD group's lanes read
 // consecutive records. A face record is seen from the vertex as corner 0 (corners v, A, B in the face's cyclic order,
-// Dm^-1 rewritten for that order): (A | material << 24, B, Dm', area, damping). A hinge record is the hinge's vertices,
-// the vertex's slot k, (theta0, k, kd). Damping tangents come from x_t, as frameElements forms them.
+// Dm^-1 rewritten for that order): (A | material << 24, B, Dm', area, damping); its damping tangents come from x_t, as
+// frameElements forms them. The bending stream is one vec4 a record, record j of slot i at (j n + i): a stencil record.
 fn starRecord(r: u32) -> array<vec4u, 2> { let i = P.tierB.z + r; return array<vec4u, 2>(topo4[i], topo4[i + 1u]); }
 fn starFace(r: u32, v: u32, xv: vec3f) -> FaceIn {
   let w = starRecord(r); let A = w[0].x & 0xffffffu; let m = w[0].x >> 24u; let B = w[0].y;
@@ -232,17 +239,19 @@ fn starFaceDamping(q: FaceIn) -> Block {
   let T = faceTangent(state[seg(S_XT, q.t.x)].xyz, state[seg(S_XT, q.t.y)].xyz, state[seg(S_XT, q.t.z)].xyz, q.dm, q.c0, q.c1);
   return faceDampingWith(q, T[0], T[1]);
 }
-fn starHinge(r: u32, xv: vec3f) -> HingeIn {
-  let w = starRecord(r); let hv = w[0]; let k = w[1].x;
-  return HingeIn(0xffffffffu, k, hv, select(pos(hv.x), xv, k == 0u), select(pos(hv.y), xv, k == 1u), select(pos(hv.z), xv, k == 2u), select(pos(hv.w), xv, k == 3u),
-    vec4f(bitcast<vec3f>(w[1].yzw), 0.0));
+// The bending stencil of vertex v (quadratic bending and its damping summed over v's hinges): g = sum_j Q_vj (x_j -
+// x_v) + sum_j Qd_vj (u_j - u_v) / h~ over v's stencil neighbours j (u = x - x^), Hessian (Q_vv + Qd_vv / h~) I. A
+// stencil record is (j, Q_vj, Qd_vj, 0); this adds one into dmp's gradient and rounding scale (xhv is x^_v).
+fn stencilRecord(rec: vec4u, xv: vec3f, xhv: vec3f, dmp: ptr<function, Block>) {
+  let dx = pos(rec.x) - xv; let q = bitcast<f32>(rec.y);
+  (*dmp).g += q * dx; (*dmp).r += abs(q) * length(dx);
+  if (P.state1.z != 0u) {
+    let qd = bitcast<f32>(rec.z) / hEff(); let du = dx - (state[seg(S_XHAT, rec.x)].xyz - xhv);
+    (*dmp).g += qd * du; (*dmp).r += abs(qd) * length(du);
+  }
 }
-fn starHingeDamping(q: HingeIn) -> Block {
-  if (!(q.hr.z > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
-  let g = hingeGeometry(state[seg(S_XT, q.hv.x)].xyz, state[seg(S_XT, q.hv.y)].xyz, state[seg(S_XT, q.hv.z)].xyz, state[seg(S_XT, q.hv.w)].xyz);
-  let on = select(0.0, 1.0, g.ok);
-  return hingeDampingWith(q, on * g.g0, on * g.g1, on * g.g2, on * g.g3);
-}
+fn stencilCount(v: u32) -> u32 { return topo[P.topo2.z + v + 1u] - topo[P.topo2.z + v]; }
+fn stencilDiagonal(v: u32) -> mat3x3f { let q = rest[P.tierB.w + v].xy; return (q.x + q.y / hEff()) * IDENTITY; }
 
 // Rayleigh damping as a dissipation potential with the element tangent frozen at x_t (oracle: ClothDampingTangent).
 // The frozen tangent of a face at x_t: (f0, softened c11), (f1, softened c22).
@@ -280,23 +289,6 @@ fn faceDampingWith(q: FaceIn, T0: vec4f, T1: vec4f) -> Block {
   return Block(g, scale * (T0.w * outer(j1, j1) + T1.w * outer(j2, j2) + c0.z * (outer(j1, j2) + outer(j2, j1)) + c0.w * outer(j3, j3)),
     0.5 * scale * dot(rate, sigma), length(g) + scale * dot(dsig, roundRate));
 }
-fn hingeDamping(q: HingeIn) -> Block {
-  if (!(q.hr.z > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
-  let gb = P.state1.y + 3u * q.h;
-  let G0 = state[gb]; let G1 = state[gb + 1u]; let G2 = state[gb + 2u];
-  return hingeDampingWith(q, G0.xyz, vec3f(G0.w, G1.x, G1.y), vec3f(G1.z, G1.w, G2.x), G2.yzw);
-}
-fn hingeDampingWith(q: HingeIn, g0: vec3f, g1: vec3f, g2: vec3f, g3: vec3f) -> Block {
-  let hr = q.hr; let k = q.k; let hv = q.hv;
-  let rate = dot(g0, q.x0 - state[seg(S_XHAT, hv.x)].xyz) + dot(g1, q.x1 - state[seg(S_XHAT, hv.y)].xyz)
-    + dot(g2, q.x2 - state[seg(S_XHAT, hv.z)].xyz) + dot(g3, q.x3 - state[seg(S_XHAT, hv.w)].xyz);
-  let scale = hr.z * hr.y / hEff(); let gk = pick4(k, g0, g1, g2, g3);
-  let roundRate = length(g0) * length(q.x0 - state[seg(S_XHAT, hv.x)].xyz) + length(g1) * length(q.x1 - state[seg(S_XHAT, hv.y)].xyz)
-    + length(g2) * length(q.x2 - state[seg(S_XHAT, hv.z)].xyz) + length(g3) * length(q.x3 - state[seg(S_XHAT, hv.w)].xyz);
-  return Block(scale * rate * gk, scale * outer(gk, gk), 0.5 * scale * rate * rate, scale * length(gk) * (abs(rate) + roundRate));
-}
-fn wrapAngle(d: f32) -> f32 { return d - 2.0 * PI * floor((d + PI) / (2.0 * PI)); }
-
 fn augmented(k: f32, lambda: f32, C: f32, inequality: bool) -> f32 {
   var f = k * C + lambda;
   if (inequality) { f = max(f, 0.0); }
@@ -318,14 +310,8 @@ fn vertexSystem(v: u32, xv: vec3f) -> System {
     s.g += b.g + d.g; s.H += b.H + d.H; s.e += b.e + d.e; s.mag += abs(b.e) + d.e;
   }
   for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
-    let entry = topo[P.topo0.w + j]; let q = loadHinge(entry >> 2u, entry & 3u, xv);
-    let d = hingeDamping(q);
-    s.g += d.g; s.H += d.H; s.e += d.e; s.mag += d.e;
-    let hinge = hingeOf(q, vec3f(0.0));
-    if (!hinge.ok) { continue; }
-    let hr = q.hr; let delta = wrapAngle(hinge.angle - hr.x);
-    s.g += hr.y * delta * hinge.g; s.H += hr.y * outer(hinge.g, hinge.g);
-    let e = 0.5 * hr.y * delta * delta; s.e += e; s.mag += e;
+    let entry = topo[P.topo0.w + j]; let b = hingeBlock(loadHinge(entry >> 2u, entry & 3u, xv));
+    s.g += b.g; s.H += b.H; s.e += b.e; s.mag += b.e;
   }
   return constraints(v, xv, s);
 }
@@ -378,31 +364,6 @@ fn faceDampingDelta(q: FaceIn, d: vec3f) -> vec2f {
   let roundRate = vec3f(length(f0) * ru.x, length(f1) * ru.y, length(f0) * ru.y + length(f1) * ru.x);
   return vec2f(lin + quad, abs(lin) + quad + scale * dot(abs(dsigma), roundRate));
 }
-fn hingeDelta(q: HingeIn, d: vec3f) -> vec2f {
-  let hr = q.hr;
-  let before = hingeOf(q, vec3f(0.0)); let after = hingeOf(q, d);
-  let w0 = wrapAngle(before.angle - hr.x); let dt = wrapAngle(after.angle - before.angle);
-  var de = 0.0;
-  if (before.ok && after.ok) { de = hr.y * dt * (w0 + 0.5 * dt); }
-  else { let w1 = wrapAngle(after.angle - hr.x); de = select(0.0, 0.5 * hr.y * w1 * w1, after.ok) - select(0.0, 0.5 * hr.y * w0 * w0, before.ok); }
-  return vec2f(de, abs(de) + hr.y * PI * (abs(w0) + abs(dt)));
-}
-fn hingeDampingDelta(q: HingeIn, d: vec3f) -> vec2f {
-  let hr = q.hr;
-  if (!(hr.z > 0.0)) { return vec2f(0.0); }
-  let k = q.k;
-  let gb = P.state1.y + 3u * q.h;
-  let G0 = state[gb]; let G1 = state[gb + 1u]; let G2 = state[gb + 2u];
-  let g0 = G0.xyz; let g1 = vec3f(G0.w, G1.x, G1.y); let g2 = vec3f(G1.z, G1.w, G2.x); let g3 = G2.yzw;
-  let hv = q.hv;
-  let u0 = q.x0 - state[seg(S_XHAT, hv.x)].xyz; let u1 = q.x1 - state[seg(S_XHAT, hv.y)].xyz;
-  let u2 = q.x2 - state[seg(S_XHAT, hv.z)].xyz; let u3 = q.x3 - state[seg(S_XHAT, hv.w)].xyz;
-  let rate = dot(g0, u0) + dot(g1, u1) + dot(g2, u2) + dot(g3, u3);
-  let scale = hr.z * hr.y / hEff(); let dr = dot(pick4(k, g0, g1, g2, g3), d);
-  let lin = scale * rate * dr; let quad = 0.5 * scale * dr * dr;
-  let roundRate = length(g0) * length(u0) + length(g1) * length(u1) + length(g2) * length(u2) + length(g3) * length(u3);
-  return vec2f(lin + quad, abs(lin) + quad + scale * abs(dr) * roundRate);
-}
 fn edgeDelta(v: u32, xv: vec3f, e: u32, d: vec3f) -> vec2f {
   let er = rest[P.rest0.w + e];
   if (!(er.y > 0.0)) { return vec2f(0.0); }
@@ -443,8 +404,7 @@ fn vertexDelta(v: u32, xv: vec3f, d: vec3f${contact ? ', ec0: f32' : ''}) -> vec
     out += membraneDelta(q, d) + faceDampingDelta(q, d);
   }
   for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
-    let entry = topo[P.topo0.w + j]; let q = loadHinge(entry >> 2u, entry & 3u, xv);
-    out += hingeDelta(q, d) + hingeDampingDelta(q, d);
+    let entry = topo[P.topo0.w + j]; out += hingeDelta(loadHinge(entry >> 2u, entry & 3u, xv), d);
   }
   if (P.flags.z != 0u) {
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { out += edgeDelta(v, xv, topo[P.topo1.y + j] >> 2u, d); }
@@ -532,7 +492,7 @@ fn stepTime() -> f32 { return P.misc.x + f32(clockStep()) * P.gravity.w; }
 }
 
 // At x_t, before the frame pass moves positions: AVBD warm start of the edge duals and
-// their stabilized limits, and the damping tangent of every face and hinge.
+// their stabilized limits, and the damping tangent of every face.
 @compute @workgroup_size(${CLOTH_WORKGROUP}) fn frameElements(@builtin(global_invocation_id) id: vec3u) {
   let i = id.x;
   if (P.flags.z != 0u && i < P.n.z) {
@@ -552,13 +512,6 @@ fn stepTime() -> f32 { return P.misc.x + f32(clockStep()) * P.gravity.w; }
     let t = tris(i);
     let T = faceTangent(pos(t.x), pos(t.y), pos(t.z), rest[P.rest0.x + i], rest[P.rest1.z + 2u * t.w], rest[P.rest1.z + 2u * t.w + 1u]);
     state[P.state1.x + 2u * i] = T[0]; state[P.state1.x + 2u * i + 1u] = T[1];
-  }
-  if (i < P.n.w) {
-    let base = P.topo1.w + 4u * i;
-    let q = hingeGeometry(pos(topo[base]), pos(topo[base + 1u]), pos(topo[base + 2u]), pos(topo[base + 3u]));
-    let on = select(0.0, 1.0, q.ok); let g0 = on * q.g0; let g1 = on * q.g1; let g2 = on * q.g2; let g3 = on * q.g3;
-    let gb = P.state1.y + 3u * i;
-    state[gb] = vec4f(g0, g1.x); state[gb + 1u] = vec4f(g1.yz, g2.xy); state[gb + 2u] = vec4f(g2.z, g3);
   }
 }
 
@@ -618,25 +571,20 @@ fn vertexStep(v: u32, xv: vec3f) -> vec3f {
 }
 
 ${patch ? '' : `// The block update of the vertex in slot i of this colour from its star records (one thread a vertex): the
-// damping terms' line-search change in closed form, every other term in difference form.
+// damping and bending terms' line-search change in closed form, every other term in difference form.
 fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
   let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy; let n = R.range.y;
   let h = hEff(); let w = vertexRest(v).x / (h * h);
   var s = pinTerms(v, xv, System(w * (xv - state[seg(S_Y, v)].xyz), w * IDENTITY, 0.0, 0.0));
-  var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);
-  let nf = topo[P.topo0.x + v + 1u] - topo[P.topo0.x + v];
-  let nh = topo[P.topo0.z + v + 1u] - topo[P.topo0.z + v];
+  var dmp = Block(vec3f(0.0), stencilDiagonal(v), 0.0, 0.0);
+  let nf = topo[P.topo0.x + v + 1u] - topo[P.topo0.x + v]; let ns = stencilCount(v);
+  let xhv = state[seg(S_XHAT, v)].xyz;
   for (var j = 0u; j < nf; j++) {
     let q = starFace(star.x + 2u * (j * n + i), v, xv);
     let b = membraneBlock(q); let d = starFaceDamping(q);
     s.g += b.g; s.H += b.H; dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
   }
-  for (var j = 0u; j < nh; j++) {
-    let q = starHinge(star.y + 2u * (j * n + i), xv);
-    let hinge = hingeOf(q, vec3f(0.0));
-    if (hinge.ok) { let delta = wrapAngle(hinge.angle - q.hr.x); s.g += q.hr.y * delta * hinge.g; s.H += q.hr.y * outer(hinge.g, hinge.g); }
-    let d = starHingeDamping(q); dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
-  }
+  for (var j = 0u; j < ns; j++) { stencilRecord(topo4[P.tierB.z + star.y + j * n + i], xv, xhv, &dmp); }
   if (P.flags.z != 0u) {
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); }
   }
@@ -650,7 +598,6 @@ fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
     let quad = 0.5 * abs(dot(d, dmp.H * d));
     var en = ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''} + vec2f(dot(dmp.g, d) + quad, dmp.r * length(d) + quad);
     for (var j = 0u; j < nf; j++) { en += membraneDelta(starFace(star.x + 2u * (j * n + i), v, xv), d); }
-    for (var j = 0u; j < nh; j++) { en += hingeDelta(starHinge(star.y + 2u * (j * n + i), xv), d); }
     if (P.flags.z != 0u) {
       for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { en += edgeDelta(v, xv, topo[P.topo1.y + j] >> 2u, d); }
     }
@@ -668,14 +615,14 @@ fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
 }
 ${patch ? '' : `
 // The same block update with ${lanes} lanes per vertex (${CLOTH_WIDE_WORKGROUP / lanes} vertices per ${CLOTH_WIDE_WORKGROUP}-lane workgroup). Lane l of a vertex
-// takes its faces l, l + ${lanes}, ..., then its hinges and strain-limited edges the same way, and lane 0 adds inertia and pins${contact ? ' and contact' : ''}:
+// takes its faces l, l + ${lanes}, ..., then its bending stencil records and strain-limited edges the same way, and lane 0 adds inertia and pins${contact ? ' and contact' : ''}:
 // every lane of the SIMD group runs the same element kind at the same time (no kind divergence), the block and every
-// line-search trial are summed per vertex in workgroup memory, and a colour has ${lanes} threads per vertex.
+// line-search trial are summed per vertex ${options.subgroups ? 'by subgroup shuffles' : 'in workgroup memory'}, and a colour has ${lanes} threads per vertex.
 const VL = ${lanes}u;
-const VPW = ${CLOTH_WIDE_WORKGROUP / lanes}u;
+const VPW = ${CLOTH_WIDE_WORKGROUP / lanes}u;${options.subgroups ? '' : `
 var<workgroup> wA: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;
 var<workgroup> wB: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;
-var<workgroup> wC: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;
+var<workgroup> wC: array<vec4f, ${CLOTH_WIDE_WORKGROUP}>;`}
 var<workgroup> wDone: array<u32, ${CLOTH_WIDE_WORKGROUP / lanes}>;
 var<workgroup> wAll: u32;
 
@@ -685,7 +632,16 @@ fn ownSystem(v: u32, xv: vec3f) -> System {
   return pinTerms(v, xv, System(w * r, w * IDENTITY, 0.0, 0.0));
 }
 
-// Per-vertex sums of the (a, b, c) records of its VL lanes; every lane gets its vertex's totals.
+// Per-vertex sums of the (a, b, c) records of its VL lanes; every lane gets its vertex's totals.${options.subgroups ? `
+// A butterfly of subgroup shuffles: a vertex's VL lanes are VL consecutive invocations of the 1-D workgroup, VL-aligned,
+// which on a subgroup of at least VL invocations are VL-aligned consecutive subgroup invocations (xor k < VL stays
+// inside the vertex).
+fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
+  var sa = a; var sb = b; var sc = c;
+  for (var k = VL / 2u; k > 0u; k >>= 1u) { sa += subgroupShuffleXor(sa, k); sb += subgroupShuffleXor(sb, k); sc += subgroupShuffleXor(sc, k); }
+  return array<vec4f, 3>(sa, sb, sc);
+}` : `
+// A tree in workgroup memory (no subgroups).
 fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   workgroupBarrier();
   wA[lane] = a; wB[lane] = b; wC[lane] = c;
@@ -697,38 +653,31 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   }
   let head = lane - sub;
   return array<vec4f, 3>(wA[head], wB[head], wC[head]);
-}
+}`}
 
 @compute @workgroup_size(${CLOTH_WIDE_WORKGROUP}) fn solveColourWide(@builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u, @builtin(local_invocation_index) lane: u32) {
   let group = lane / VL; let sub = lane % VL;
   let index = (wg.x + wg.y * nwg.x) * VPW + group;
   let valid = index < R.range.y;
-  // This colour's star streams (face, hinge record offsets); R.range.w is the colour.
+  // This colour's star streams (face, stencil record offsets); R.range.w is the colour.
   let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy;
-  var v = 0u; var xv = vec3f(0.0); var nf = 0u; var nh = 0u; var ne = 0u;
+  var v = 0u; var xv = vec3f(0.0); var nf = 0u; var ns = 0u; var ne = 0u;
   var s = System(vec3f(0.0), mat3x3f(), 0.0, 0.0);
-  // This lane's damping terms, quadratic in xv: the trials take their change in closed form from these.
+  // This lane's damping and bending terms, quadratic in xv: the trials take their change in closed form from these.
   var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);
   if (valid) {
     v = topo[P.topo1.z + R.range.x + index]; xv = pos(v);
     let f0 = topo[P.topo0.x + v]; nf = topo[P.topo0.x + v + 1u] - f0;
-    let h0 = topo[P.topo0.z + v]; nh = topo[P.topo0.z + v + 1u] - h0;
+    ns = stencilCount(v);
     let e0 = topo[P.topo1.x + v]; ne = select(0u, topo[P.topo1.x + v + 1u] - e0, P.flags.z != 0u);
-    if (sub == 0u) { s = ownSystem(v, xv); }
+    if (sub == 0u) { s = ownSystem(v, xv); dmp.H = stencilDiagonal(v); }
     for (var j = sub; j < nf; j += VL) {
       let q = starFace(star.x + 2u * (j * R.range.y + index), v, xv);
       let b = membraneBlock(q); let d = starFaceDamping(q);
       s.g += b.g; s.H += b.H; dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
     }
-    for (var j = sub; j < nh; j += VL) {
-      let q = starHinge(star.y + 2u * (j * R.range.y + index), xv);
-      let hinge = hingeOf(q, vec3f(0.0));
-      if (hinge.ok) {
-        let delta = wrapAngle(hinge.angle - q.hr.x);
-        s.g += q.hr.y * delta * hinge.g; s.H += q.hr.y * outer(hinge.g, hinge.g);
-      }
-      let d = starHingeDamping(q); dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
-    }
+    let xhv = state[seg(S_XHAT, v)].xyz;
+    for (var j = sub; j < ns; j += VL) { stencilRecord(topo4[P.tierB.z + star.y + j * R.range.y + index], xv, xhv, &dmp); }
     for (var j = sub; j < ne; j += VL) { s = edgeTerm(v, xv, topo[P.topo1.y + e0 + j] >> 2u, s); }
   }
   s.g += dmp.g; s.H += dmp.H;
@@ -748,15 +697,12 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
     let trial = xv + alpha * delta; let d = trial - xv;
     var en = vec2f(0.0);
     if (live) {
-      // Damping, exactly: dg . d + d^T dH d / 2 (faceDampingDelta and hingeDampingDelta in closed form).
+      // Damping and bending, exactly: dg . d + d^T dH d / 2 (faceDampingDelta and the bending stencil in closed form).
       let quad = 0.5 * abs(dot(d, dmp.H * d)); let lin = dot(dmp.g, d);
       en = vec2f(lin + quad, dmp.r * length(d) + quad);
       if (sub == 0u) { en += ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''}; }
       for (var j = sub; j < nf; j += VL) {
         en += membraneDelta(starFace(star.x + 2u * (j * R.range.y + index), v, xv), d);
-      }
-      for (var j = sub; j < nh; j += VL) {
-        en += hingeDelta(starHinge(star.y + 2u * (j * R.range.y + index), xv), d);
       }
       for (var j = sub; j < ne; j += VL) { en += edgeDelta(v, xv, topo[P.topo1.y + topo[P.topo1.x + v] + j] >> 2u, d); }
     }
@@ -853,8 +799,7 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
     for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
       let entry = topo[P.topo0.w + j];
       if ((entry & 3u) != 0u) { continue; }
-      let hg = entry >> 2u; let hinge = hingeAt(hg, 0u, x);
-      if (hinge.ok) { let hr = rest[P.rest0.z + hg]; let delta = wrapAngle(hinge.angle - hr.x); elastic += 0.5 * hr.y * delta * delta; }
+      let q = loadHinge(entry >> 2u, 0u, x); elastic += 0.5 * q.kd.x * dot(q.s, q.s);
     }
     var strain = -3.0e38;
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {

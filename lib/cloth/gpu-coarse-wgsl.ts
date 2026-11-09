@@ -297,19 +297,10 @@ fn cEdgeGrad(e: u32) -> u32 { return P.coarse6.z + e; }
     for (var k = 0u; k < 3u; k++) { c4Set(cFaceGrad(i, k), vec4f(av[k] * p0 + bv[k] * p1, 0.0)); }
   }
   if (i < P.n.w) {
-    let hr = rest[P.rest0.z + i]; let hv = hingeVerts(i);
-    let q = hingeGeometry(pos(hv.x), pos(hv.y), pos(hv.z), pos(hv.w));
-    var g = array<vec3f, 4>(vec3f(0.0), vec3f(0.0), vec3f(0.0), vec3f(0.0));
-    if (q.ok) { let s = hr.y * wrapAngle(q.angle - hr.x); g = array<vec3f, 4>(s * q.g0, s * q.g1, s * q.g2, s * q.g3); }
-    if (hr.z > 0.0) {
-      let gb = P.state1.y + 3u * i;
-      let G0 = state[gb]; let G1 = state[gb + 1u]; let G2 = state[gb + 2u];
-      let d0 = G0.xyz; let d1 = vec3f(G0.w, G1.x, G1.y); let d2 = vec3f(G1.z, G1.w, G2.x); let d3 = G2.yzw;
-      let rate = dot(d0, pos(hv.x) - state[seg(S_XHAT, hv.x)].xyz) + dot(d1, pos(hv.y) - state[seg(S_XHAT, hv.y)].xyz)
-        + dot(d2, pos(hv.z) - state[seg(S_XHAT, hv.z)].xyz) + dot(d3, pos(hv.w) - state[seg(S_XHAT, hv.w)].xyz);
-      let s = hr.z * hr.y / hEff() * rate;
-      g[0] += s * d0; g[1] += s * d1; g[2] += s * d2; g[3] += s * d3;
-    }
+    // Quadratic bending and its damping: corner k's gradient w_k (k s + (kd k / h~) u).
+    let q = loadHinge(i, 0u, pos(hingeVerts(i).x)); let w = hingeW(i);
+    let c = q.kd.x * q.s + (q.kd.x * q.kd.y / hEff()) * q.u;
+    var g = array<vec3f, 4>(hingeWeight(w, 0u) * c, hingeWeight(w, 1u) * c, hingeWeight(w, 2u) * c, hingeWeight(w, 3u) * c);
     for (var k = 0u; k < 4u; k++) { c4Set(cHingeGrad(i, k), vec4f(g[k], 0.0)); }
   }
   if (P.flags.z != 0u && i < P.n.z) {
@@ -428,30 +419,12 @@ fn faceDampingDeltaAll(f: u32, d0: vec3f, d1: vec3f, d2: vec3f) -> vec2f {
   let roundRate = vec3f(length(f0) * ru.x, length(f1) * ru.y, length(f0) * ru.y + length(f1) * ru.x);
   return vec2f(lin + quad, abs(lin) + quad + scale * dot(abs(dsigma), roundRate));
 }
+// Bending and its damping when the hinge's vertices move by d0..d3, exactly (both are quadratic in s and u).
 fn hingeDeltaAll(h: u32, d0: vec3f, d1: vec3f, d2: vec3f, d3: vec3f) -> vec2f {
-  let hr = rest[P.rest0.z + h]; let hv = hingeVerts(h);
-  let x0 = pos(hv.x); let x1 = pos(hv.y); let x2 = pos(hv.z); let x3 = pos(hv.w);
-  let before = hingeGeometry(x0, x1, x2, x3); let after = hingeGeometry(x0 + d0, x1 + d1, x2 + d2, x3 + d3);
-  let w0 = wrapAngle(before.angle - hr.x); let dt = wrapAngle(after.angle - before.angle);
-  var de = 0.0;
-  if (before.ok && after.ok) { de = hr.y * dt * (w0 + 0.5 * dt); }
-  else { let w1 = wrapAngle(after.angle - hr.x); de = select(0.0, 0.5 * hr.y * w1 * w1, after.ok) - select(0.0, 0.5 * hr.y * w0 * w0, before.ok); }
-  return vec2f(de, abs(de) + hr.y * PI * (abs(w0) + abs(dt)));
-}
-fn hingeDampingDeltaAll(h: u32, d0: vec3f, d1: vec3f, d2: vec3f, d3: vec3f) -> vec2f {
-  let hr = rest[P.rest0.z + h];
-  if (!(hr.z > 0.0)) { return vec2f(0.0); }
-  let gb = P.state1.y + 3u * h;
-  let G0 = state[gb]; let G1 = state[gb + 1u]; let G2 = state[gb + 2u];
-  let g0 = G0.xyz; let g1 = vec3f(G0.w, G1.x, G1.y); let g2 = vec3f(G1.z, G1.w, G2.x); let g3 = G2.yzw;
-  let hv = hingeVerts(h);
-  let u0 = pos(hv.x) - state[seg(S_XHAT, hv.x)].xyz; let u1 = pos(hv.y) - state[seg(S_XHAT, hv.y)].xyz;
-  let u2 = pos(hv.z) - state[seg(S_XHAT, hv.z)].xyz; let u3 = pos(hv.w) - state[seg(S_XHAT, hv.w)].xyz;
-  let rate = dot(g0, u0) + dot(g1, u1) + dot(g2, u2) + dot(g3, u3);
-  let scale = hr.z * hr.y / hEff(); let dr = dot(g0, d0) + dot(g1, d1) + dot(g2, d2) + dot(g3, d3);
-  let lin = scale * rate * dr; let quad = 0.5 * scale * dr * dr;
-  let roundRate = length(g0) * length(u0) + length(g1) * length(u1) + length(g2) * length(u2) + length(g3) * length(u3);
-  return vec2f(lin + quad, abs(lin) + quad + scale * abs(dr) * roundRate);
+  let q = loadHinge(h, 0u, pos(hingeVerts(h).x)); let ds = hingeS(hingeW(h), d0, d1, d2, d3);
+  let scale = q.kd.x * q.kd.y / hEff();
+  let lin = q.kd.x * dot(q.s, ds) + scale * dot(q.u, ds); let quad = 0.5 * (q.kd.x + scale) * dot(ds, ds);
+  return vec2f(lin + quad, abs(lin) + quad + (q.kd.x * q.sr + scale * q.ur) * length(ds));
 }
 fn edgeDeltaAll(e: u32, d: vec3f) -> vec2f {
   let er = rest[P.rest0.w + e];
@@ -494,7 +467,7 @@ fn coarseContactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
       }
       if (i < P.n.w) {
         let hv = hingeVerts(i); let a0 = alpha * cdir(hv.x); let a1 = alpha * cdir(hv.y); let a2 = alpha * cdir(hv.z); let a3 = alpha * cdir(hv.w);
-        q += hingeDeltaAll(i, a0, a1, a2, a3) + hingeDampingDeltaAll(i, a0, a1, a2, a3);
+        q += hingeDeltaAll(i, a0, a1, a2, a3);
       }
       if (P.flags.z != 0u && i < P.n.z) { let ev = edges(i); q += edgeDeltaAll(i, alpha * (cdir(ev.x) - cdir(ev.y))); }
       dE[k] = q.x; fl[k] = q.y;

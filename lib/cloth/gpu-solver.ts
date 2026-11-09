@@ -80,6 +80,9 @@ export interface ClothGPUSolverOptions {
   /** Threads per vertex of the colour solve: a power of two up to CLOTH_WIDE_WORKGROUP (solveColourWide, default
    *  CLOTH_VERTEX_LANES), or 1 for the serial solveColour (one thread walks the whole star). */
   readonly vertexLanes?: number;
+  /** Sum a vertex's lanes in solveColourWide with subgroup shuffles. Default: when the device has `subgroups` and its
+   *  smallest subgroup holds a vertex's lanes; false keeps the workgroup-memory sums; true without them fails. */
+  readonly subgroups?: boolean;
   readonly contact?: ClothSolverContact;
   /** Two-level correction (coarse.ts): its coarse space, built from this model's topology. */
   readonly coarse?: ClothCoarseSpace;
@@ -130,7 +133,6 @@ export interface ClothGPUTables {
   readonly stride: number;
   readonly edgeDualRecord: number;
   readonly dampFaceRecord: number;
-  readonly dampHingeRecord: number;
   readonly partialRecord: number;
   readonly clockRecord: number;
   readonly stateRecords: number;
@@ -164,25 +166,60 @@ const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /**
- * Star records of solveColourWide: per colour, every vertex's faces then hinges as 8-word records, record j of slot i
- * at 8 (j n + i) words (n the colour's size), so the lanes of a SIMD group read consecutive records. A face is seen
- * from the vertex as corner 0 (its corners v, A, B in cyclic order, Dm^-1 rewritten for that order); a hinge keeps its
- * vertex order and names the vertex's slot. Header: per colour (face, hinge) record offsets in vec4s, 4 words a colour.
+ * The bending stencil (quadratic bending, Bergou et al. 2006): bending is (k/2)|sum_i w_i x_i|^2 a hinge and its damping
+ * (kd k / 2h~)|sum_i w_i (x_i - x^_i)|^2, so a vertex's bending gradient is sum_j Q_vj (x_j - x_v) (+ the damping
+ * counterpart in u = x - x^ over h~) with Q = sum_h k w w^T and Qd = sum_h kd k w w^T over v's stencil neighbours j != v
+ * (sum_j Q_vj = 0 a row, as the weights of a hinge sum to zero), and its Hessian (Q_vv + Qd_vv / h~) I. Per vertex: CSR
+ * neighbours (j, Q_vj, Qd_vj) and the diagonal (Q_vv, Qd_vv), in Float64 at setup.
  */
-export function packClothStarRecords(model: ClothSolverModel, byColour: readonly (readonly number[])[]): { header: Uint32Array; records: Uint32Array } {
+export function clothBendingStencil(model: ClothSolverModel): { offsets: Uint32Array; columns: Uint32Array; q: Float64Array; qd: Float64Array; diagonal: Float64Array } {
+  const t = model.topology, N = t.vertexCount;
+  const rows: Map<number, [number, number]>[] = Array.from({ length: N }, () => new Map());
+  const diagonal = new Float64Array(2 * N);
+  for (let h = 0; h < t.hingeCount; h++) {
+    const k = t.hingeStiffness_N_m[h]!, kd = model.hingeDamping_s[h]! * k;
+    for (let a = 0; a < 4; a++) {
+      const va = t.hinges[4 * h + a]!, wa = t.hingeWeights[4 * h + a]!;
+      diagonal[2 * va] += k * wa * wa; diagonal[2 * va + 1] += kd * wa * wa;
+      for (let b = 0; b < 4; b++) {
+        const vb = t.hinges[4 * h + b]!;
+        if (b === a || vb === va) continue;
+        const wb = t.hingeWeights[4 * h + b]!, entry = rows[va]!.get(vb) ?? [0, 0];
+        entry[0] += k * wa * wb; entry[1] += kd * wa * wb; rows[va]!.set(vb, entry);
+      }
+    }
+  }
+  const offsets = new Uint32Array(N + 1);
+  for (let v = 0; v < N; v++) offsets[v + 1] = offsets[v]! + rows[v]!.size;
+  const columns = new Uint32Array(offsets[N]!), q = new Float64Array(offsets[N]!), qd = new Float64Array(offsets[N]!);
+  rows.forEach((row, v) => {
+    let o = offsets[v]!;
+    for (const [j, [a, b]] of [...row].sort((x, y) => x[0] - y[0])) { columns[o] = j; q[o] = a; qd[o] = b; o++; }
+  });
+  return { offsets, columns, q, qd, diagonal };
+}
+
+/**
+ * Star records of the colour passes: per colour, every vertex's faces as 8-word records, record j of slot i at
+ * 8 (j n + i) words (n the colour's size), so the lanes of a SIMD group read consecutive records, then its bending
+ * stencil as 4-word records (j, Q_vj, Qd_vj, 0) at 4 (j n + i). A face is seen from the vertex as corner 0 (its corners
+ * v, A, B in cyclic order, Dm^-1 rewritten for that order). Header: per colour (face, stencil) record offsets in vec4s,
+ * 4 words a colour.
+ */
+export function packClothStarRecords(model: ClothSolverModel, byColour: readonly (readonly number[])[], stencil = clothBendingStencil(model)): { header: Uint32Array; records: Uint32Array } {
   const t = model.topology;
   if (t.vertexCount >= 2 ** 24) throw new Error('Cloth star records take fewer than 2^24 vertices');
   if (model.materials.length > 256) throw new Error('Cloth star records take at most 256 materials');
   const header = new Uint32Array(4 * byColour.length);
   let words = 0;
   const sizes = byColour.map(list => {
-    let F = 0, H = 0;
-    for (const v of list) { F = Math.max(F, t.vertexFaceOffsets[v + 1]! - t.vertexFaceOffsets[v]!); H = Math.max(H, t.vertexHingeOffsets[v + 1]! - t.vertexHingeOffsets[v]!); }
-    return { F, H };
+    let F = 0, S = 0;
+    for (const v of list) { F = Math.max(F, t.vertexFaceOffsets[v + 1]! - t.vertexFaceOffsets[v]!); S = Math.max(S, stencil.offsets[v + 1]! - stencil.offsets[v]!); }
+    return { F, S };
   });
   byColour.forEach((list, c) => {
     header[4 * c] = words / 4; words += 8 * sizes[c]!.F * list.length;
-    header[4 * c + 1] = words / 4; words += 8 * sizes[c]!.H * list.length;
+    header[4 * c + 1] = words / 4; words += 4 * sizes[c]!.S * list.length;
   });
   const records = new Uint32Array(Math.max(words, 4)), f32 = new Float32Array(records.buffer);
   byColour.forEach((list, c) => {
@@ -195,10 +232,9 @@ export function packClothStarRecords(model: ClothSolverModel, byColour: readonly
         records[w] = t.faces[3 * f + A]! | (t.faceMaterial[f]! << 24); records[w + 1] = t.faces[3 * f + B]!;
         f32.set([a[A]!, a[B]!, b[A]!, b[B]!, t.faceArea_m2[f]!, model.faceDamping_s[f]!], w + 2);
       }
-      for (let j = 0, o = t.vertexHingeOffsets[v]!; o < t.vertexHingeOffsets[v + 1]!; j++, o++) {
-        const entry = t.vertexHinges[o]!, h = entry >>> 2, w = 4 * header[4 * c + 1]! + 8 * (j * n + i);
-        records.set(t.hinges.subarray(4 * h, 4 * h + 4), w); records[w + 4] = entry & 3;
-        f32.set([t.hingeRestAngle_rad[h]!, t.hingeStiffness_N_m[h]!, model.hingeDamping_s[h]!], w + 5);
+      for (let j = 0, o = stencil.offsets[v]!; o < stencil.offsets[v + 1]!; j++, o++) {
+        const w = 4 * header[4 * c + 1]! + 4 * (j * n + i);
+        records[w] = stencil.columns[o]!; f32[w + 1] = stencil.q[o]!; f32[w + 2] = stencil.qd[o]!;
       }
     });
   });
@@ -215,15 +251,15 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
   const ct = options.coarse ? packClothCoarseTables(t, options.coarse) : undefined;
-  const star = packClothStarRecords(model, byColour);
+  const stencil = clothBendingStencil(model), star = packClothStarRecords(model, byColour, stencil);
   const parts = [t.vertexFaceOffsets, t.vertexFaces, t.vertexHingeOffsets, t.vertexHinges, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), t.hinges, triangles, t.edges,
-    ...(ct ? [ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn] : []), star.header, star.records];
+    ...(ct ? [ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn] : []), stencil.offsets, star.header, star.records];
   const topoBase: number[] = [];
   let words = 0;
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
   const topo = new Uint32Array(Math.max(align(words, 4), 4));
   parts.forEach((p, i) => topo.set(p, topoBase[i]));
-  const restCounts = [T, T, H, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : [])], restBase: number[] = [];
+  const restCounts = [T, T, 2 * H, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : []), N], restBase: number[] = [];
   let records = 0;
   for (const c of restCounts) { restBase.push(records); records += c; }
   const rest = new Float32Array(4 * Math.max(records, 1));
@@ -231,7 +267,12 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     rest.set(t.faceDmInv.subarray(4 * f, 4 * f + 4), 4 * (restBase[0]! + f));
     rest.set([t.faceArea_m2[f]!, model.faceDamping_s[f]!], 4 * (restBase[1]! + f));
   }
-  for (let h = 0; h < H; h++) rest.set([t.hingeRestAngle_rad[h]!, t.hingeStiffness_N_m[h]!, model.hingeDamping_s[h]!], 4 * (restBase[2]! + h));
+  for (let h = 0; h < H; h++) {
+    rest.set(t.hingeWeights.subarray(4 * h, 4 * h + 4), 4 * (restBase[2]! + 2 * h));
+    rest.set([t.hingeStiffness_N_m[h]!, model.hingeDamping_s[h]!], 4 * (restBase[2]! + 2 * h + 1));
+  }
+  const diagonalRecord = restBase[restCounts.length - 1]!;
+  for (let v = 0; v < N; v++) rest.set(stencil.diagonal.subarray(2 * v, 2 * v + 2), 4 * (diagonalRecord + v));
   let strainLimited = false;
   for (let e = 0; e < E; e++) { rest.set([t.edgeRestLength_m[e]!, model.edgeStrainLimit[e]!], 4 * (restBase[3]! + e)); strainLimited ||= model.edgeStrainLimit[e]! > 0; }
   const restPos = t.data.restPositions_m;
@@ -257,16 +298,15 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   for (let h = 0; h < H; h++) damped ||= model.hingeDamping_s[h]! > 0;
   const stride = align(N, CLOTH_SEGMENT_ALIGN), workgroups = Math.ceil(N / CLOTH_WORKGROUP);
   const edgeDualRecord = CLOTH_STATE_SEGMENTS * stride, dampFaceRecord = edgeDualRecord + align(E, CLOTH_SEGMENT_ALIGN);
-  const dampHingeRecord = dampFaceRecord + (damped ? align(2 * T, CLOTH_SEGMENT_ALIGN) : 0);
-  const partialRecord = dampHingeRecord + (damped ? align(3 * H, CLOTH_SEGMENT_ALIGN) : 0);
+  const partialRecord = dampFaceRecord + (damped ? align(2 * T, CLOTH_SEGMENT_ALIGN) : 0);
   const clockRecord = partialRecord + align(2 * workgroups, CLOTH_SEGMENT_ALIGN), stateRecords = clockRecord + CLOTH_SEGMENT_ALIGN;
   const params = new Uint32Array(PARAM_WORDS), paramsF = new Float32Array(params.buffer);
-  params.set([N, T, E, H, ...topoBase.slice(0, 10), 0, 0, ...restBase.slice(0, 8), S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups,
-    stride, edgeDualRecord, partialRecord, clockRecord, dampFaceRecord, dampHingeRecord, damped ? 1 : 0, 0]);
+  params.set([N, T, E, H, ...topoBase.slice(0, 10), topoBase[parts.length - 3]!, 0, ...restBase.slice(0, 8), S, options.integrator === 'bdf2' ? 1 : 0, strainLimited ? 1 : 0, workgroups,
+    stride, edgeDualRecord, partialRecord, clockRecord, dampFaceRecord, 0, damped ? 1 : 0, 0]);
   const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'adaptive'];
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
   paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, guess, 0], PARAM_GRAVITY);
-  params.set([model.colourCount, topoBase[parts.length - 2]!, topoBase[parts.length - 1]! / 4], PARAM_PATCH);
+  params.set([model.colourCount, topoBase[parts.length - 2]!, topoBase[parts.length - 1]! / 4, diagonalRecord], PARAM_PATCH);
   let coarse: ClothCoarseLayout | undefined;
   if (ct) {
     const m = 3 * ct.nodeCount, sq = align(Math.ceil(m * m / 4), CLOTH_SEGMENT_ALIGN), vec = align(Math.ceil(m / 4), CLOTH_SEGMENT_ALIGN);
@@ -280,7 +320,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     coarse = { nodeCount: ct.nodeCount, pairCount, trialWorkgroups, records: r, miscRecord: misc };
   }
   return { topo, rest, trianglesWord: topoBase[8]!, edgesWord: topoBase[9]!, colourRanges, params, strainLimited, damped, stride, edgeDualRecord,
-    dampFaceRecord, dampHingeRecord, partialRecord, clockRecord, stateRecords, coarse };
+    dampFaceRecord, partialRecord, clockRecord, stateRecords, coarse };
 }
 
 const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseApply'] as const;
@@ -298,6 +338,8 @@ export class ClothGPUSolver {
   private bindGroup!: GPUBindGroup;
   private iterations: number;
   private readonly coarseEvery: number;
+  /** Whether solveColourWide sums its lanes with subgroup shuffles (see ClothGPUSolverOptions.subgroups). */
+  subgroups = false;
   private readonly maxIterations: number;
   /** Scene time at clock step 0 (load and undo restart the step count). */
   private timeBase = 0;
@@ -396,8 +438,12 @@ export class ClothGPUSolver {
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
       ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []), ...(this.coarse ? [buffer(B.coarse, this.coarse)] : [])] });
+    const lanes = this.options.vertexLanes ?? CLOTH_VERTEX_LANES;
+    const available = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= lanes;
+    if (this.options.subgroups && !available) throw new Error(`Cloth subgroup sums need the subgroups feature with subgroups of at least ${lanes} invocations`);
+    this.subgroups = lanes > 1 && (this.options.subgroups ?? available);
     const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, coarseNodes: this.tables.coarse?.nodeCount,
-      ...(this.options.vertexLanes && this.options.vertexLanes > 1 ? { vertexLanes: this.options.vertexLanes } : {}) }) });
+      ...(lanes > 1 ? { vertexLanes: lanes, subgroups: this.subgroups } : {}) }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const kernels: readonly Kernel[] = this.coarse ? [...KERNELS, ...COARSE_KERNELS] : KERNELS;
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
