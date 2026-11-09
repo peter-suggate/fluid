@@ -80,6 +80,34 @@ export function clothGrabRegion(topology: ClothTopologyData, positions: ArrayLik
   return { vertices, weights, radius_m };
 }
 
+/** A displacement range per axis, world metres. */
+export interface ClothGrabReach {
+  readonly lo: ClothVector;
+  readonly hi: ClothVector;
+}
+
+/**
+ * How far a grab may pull its region: the displacements that keep every grabbed vertex's target inside `box` (the
+ * container, which is also the box cloth contact sees solids in; a vertex outside it halts the solver), with
+ * `margin_m` to spare for the motion between the press's pose and the anchors the GPU takes at the grab's first step.
+ * Zero is always in range, so a press never jumps.
+ */
+export function clothGrabReach(grab: Pick<ClothGrab, 'vertices'>, positions: ArrayLike<number>, box: { readonly lo: ClothVector; readonly hi: ClothVector }, margin_m: number): ClothGrabReach {
+  const lo = [0, 0, 0], hi = [0, 0, 0];
+  for (let c = 0; c < 3; c++) {
+    let min = Infinity, max = -Infinity;
+    for (const v of grab.vertices) { const x = positions[3 * v + c]!; min = Math.min(min, x); max = Math.max(max, x); }
+    lo[c] = Math.min(0, box.lo[c]! + margin_m - min);
+    hi[c] = Math.max(0, box.hi[c]! - margin_m - max);
+  }
+  return { lo: lo as unknown as ClothVector, hi: hi as unknown as ClothVector };
+}
+
+/** `displacement_m` held within `reach`. */
+export function clothGrabDisplacement(displacement_m: ClothVector, reach: ClothGrabReach): ClothVector {
+  return [0, 1, 2].map(c => Math.min(reach.hi[c]!, Math.max(reach.lo[c]!, displacement_m[c]!))) as unknown as ClothVector;
+}
+
 /** The grab a press on `hit` opens on the published surface it picked, at zero displacement. */
 export function clothGrabForHit(id: number, surface: ClothSurfacePublication, hit: Pick<ClothSurfaceHit, 'documentId' | 'element' | 'point_m'>): ClothGrab {
   if (surface.documentId !== hit.documentId) throw new Error('Cloth grab hit and surface name different documents');

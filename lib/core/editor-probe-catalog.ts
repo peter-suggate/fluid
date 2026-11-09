@@ -320,7 +320,8 @@ const clothProbe: EditorProbeDefinition = {
     return {
       probeId: "cloth",
       kind: "cloth",
-      id: `${hit.documentId}:${hit.element}`,
+      // The sheet, not the triangle: a hover moving across one sheet is over the same thing.
+      id: hit.documentId,
       label: `cloth ${hit.documentId}`,
       tone: "prop",
       distance_m: hit.distance_m,

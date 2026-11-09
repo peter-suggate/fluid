@@ -31,7 +31,7 @@ import { hoverSceneAt, restFluidInWorld, restInContainer, type EditorHover } fro
 import { roomPointForRay, targetActionsAt, targetAtRay, targetSurfaceNormal } from "../lib/core/editor-probe-catalog";
 import { interactivePlacementWedge } from "../lib/features/interactive/ring";
 import { highlightInstanceRange, type EditorHighlight, type EditorTarget } from "../lib/core/editor-target";
-import { clothGrabForHit } from "../lib/cloth/grab";
+import { clothGrabDisplacement, clothGrabForHit, clothGrabRadius, clothGrabReach, type ClothGrabReach } from "../lib/cloth/grab";
 import { sceneClothSurface } from "../lib/cloth/scene-geometry";
 import type { ClothGrab } from "../lib/cloth/types";
 import { EditorHighlightLayer } from "./EditorHighlightLayer";
@@ -587,7 +587,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     // A region of cloth held by the cursor: `grab` is the region as pressed (its vertices, weights and press id), and
     // the drag moves it on the camera-facing plane through the grab point. Nothing in the document changes.
-    | { id: number; action: "cloth-grab"; grab: ClothGrab; planePoint: Vec3; planeNormal: Vec3 }
+    | { id: number; action: "cloth-grab"; grab: ClothGrab; reach: ClothGrabReach; planePoint: Vec3; planeNormal: Vec3 }
     | null
   >(null);
   // Render reads whether a press is held, never the gesture itself: handlers
@@ -968,12 +968,18 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
   const beginClothGrab = (pointerId: number, target: EditorTarget): boolean => {
     const renderer = rendererRef.current, documentId = target.detail?.documentId, element = target.detail?.element;
     if (!renderer || typeof documentId !== "string" || typeof element !== "number") return false;
-    const surface = sceneClothSurface(session.scene.getState().scene, documentId);
+    const scene = session.scene.getState().scene, surface = sceneClothSurface(scene, documentId);
     if (!surface) return false;
     const p = target.point_m;
     const grab = clothGrabForHit(++clothGrabIds.current, surface, { documentId, element, point_m: [p.x, p.y, p.z] });
     renderer.setClothGrab(grab);
-    setPointer({ id: pointerId, action: "cloth-grab", grab, planePoint: p, planeNormal: cameraBasis(session.ui.getState().camera).forward });
+    // The pull lives in the cloth's own step, so a paused cloth would not follow at all. Like dropping a body
+    // into the scene, a grab sets the simulation running (and leaves it running).
+    if (simulation.runState() !== "running") simulation.setRunState("running");
+    // The cursor may go anywhere; the grabbed region's targets stay inside the container, where cloth contact sees solids.
+    const box = sceneContainerBox(scene);
+    const reach = clothGrabReach(grab, surface.positions_m, { lo: [box.min.x, box.min.y, box.min.z], hi: [box.max.x, box.max.y, box.max.z] }, clothGrabRadius(surface.topology));
+    setPointer({ id: pointerId, action: "cloth-grab", grab, reach, planePoint: p, planeNormal: cameraBasis(session.ui.getState().camera).forward });
     return true;
   };
 
@@ -2048,7 +2054,7 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
       const ray = pointerRay(event), point = planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal);
       if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) return;
       const at = active.planePoint;
-      rendererRef.current?.setClothGrab({ ...active.grab, displacement_m: [point.x - at.x, point.y - at.y, point.z - at.z] });
+      rendererRef.current?.setClothGrab({ ...active.grab, displacement_m: clothGrabDisplacement([point.x - at.x, point.y - at.y, point.z - at.z], active.reach) });
       return;
     }
     if (active.action === "fluid-paint") {

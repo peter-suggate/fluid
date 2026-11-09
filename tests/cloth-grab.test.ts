@@ -19,7 +19,7 @@ import { targetAtRay } from '../lib/core/editor-probe-catalog';
 import { gestureForPress } from '../lib/core/editor-gesture-catalog';
 import { clothGridData } from '../lib/cloth/grid';
 import { pickClothSurface } from '../lib/cloth/geometry';
-import { clothGrabForHit, clothGrabRadius, clothGrabRegion, CLOTH_GRAB_CORNER_WEIGHT } from '../lib/cloth/grab';
+import { clothGrabDisplacement, clothGrabForHit, clothGrabRadius, clothGrabReach, clothGrabRegion, CLOTH_GRAB_CORNER_WEIGHT } from '../lib/cloth/grab';
 import { CLOTH_SCENE_STEP_S, ClothSystem, withClothSystem } from '../lib/cloth/system';
 import type { ClothDocument, ClothMaterial, ClothVector } from '../lib/cloth/types';
 
@@ -95,6 +95,27 @@ test('the cloth probe names the sheet under the ray, and a press on it with noth
   assert.equal(gestureForPress('fluid-paint', target, none, true), 'fluid-paint');
   // A ray that misses the sheet is not a cloth target.
   assert.notEqual(targetAtRay(context, { origin: { x: 1, y: 2, z: 1 }, direction: { x: 0, y: -1, z: 0 } }).kind, 'cloth');
+});
+
+test('a drag holds every grabbed vertex inside the container, and a press never jumps', () => {
+  const data = sheetData(), x = data.restPositions_m;
+  const hit = pickClothSurface(sheetScene().cloth![0]!, data, x, down(0.01, 0.02))!;
+  const grab = clothGrabForHit(1, { documentId: 'sheet', topology: data, positions_m: Float64Array.from(x), generation: 0, tick: 0, topologyRevision: 0, time_s: 0 }, hit);
+  const box = { lo: [-0.5, 0, -0.5] as ClothVector, hi: [0.5, 1, 0.5] as ClothVector }, margin = 0.02;
+  const reach = clothGrabReach(grab, x, box, margin);
+  // A cursor dragged far out of the box in every direction: each grabbed vertex's target stays within the margin.
+  for (const far of [[5, 5, 5], [-5, -5, -5], [0, 3, 0]] as ClothVector[]) {
+    const d = clothGrabDisplacement(far, reach);
+    for (const v of grab.vertices) for (let c = 0; c < 3; c++) {
+      const target = x[3 * v + c]! + d[c]!;
+      assert.ok(target >= box.lo[c]! + margin - 1e-12 && target <= box.hi[c]! - margin + 1e-12, `vertex ${v} axis ${c} at ${target}`);
+    }
+  }
+  // Inside the box the drag is the cursor's; zero is always in reach, even for a region already within the margin.
+  assert.deepEqual(clothGrabDisplacement([0.01, 0.02, -0.03], reach), [0.01, 0.02, -0.03]);
+  const tight = clothGrabReach(grab, x, { lo: [-0.5, 0.899, -0.5], hi: [0.5, 0.901, 0.5] }, margin);
+  assert.deepEqual(clothGrabDisplacement([0, 0, 0], tight), [0, 0, 0]);
+  assert.deepEqual(clothGrabDisplacement([0, 0.5, 0], tight), [0, 0, 0]);
 });
 
 // ---------------------------------------------------------------- GPU
