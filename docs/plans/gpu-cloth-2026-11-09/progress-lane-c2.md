@@ -1631,3 +1631,54 @@ Tested on the GPU: half a sheet 1.5 mm above a floor (r = 2 mm) and half 2.6 mm.
 
 If you want "touching" to also count the friction-only lag, or the face side of a VT pair with zero weight,
 say so; I chose "a normal force on v".
+
+## 2026-11-10 The cap alone holds no vertex (Bridson curtain pairOverflow at tick 14); heldConflict status
+
+**Cause (curtain, VBD K = 128, init = y).** The curtain is released hanging. From tick 3, its tension takes 2.7 k
+to 26 k vertices further from y than their cap, 0.45 · 3 mm. Truncation then cut each of them to its cap and set
+bit 0. Each was held the next step: w = 0, envelope plen + ρ, capped at 4 cm. A ball of radius 18 mm about X
+cannot cover a 2 cm step, so the vertex was capped again, and so on.
+
+| tick | held | DAT pairs | status |
+|---|---|---|---|
+| 10 | 4 k | 18 M | |
+| 13 | 36 k | 564 M | |
+| 14 | | | pairOverflow |
+
+**Fix (apply kernel).**
+- Bit 0 is set only by a contact constraint: a DAT plane (tv < 1), a static solid cut or a body cut.
+- The cap alone is no contact. The vertex deviated from its prediction by more than its envelope, and the
+  residual the next step measures widens that envelope (r + 2.5 ρ).
+- This is the same rule as "a filter bound holds no vertex".
+
+**After the fix:**
+
+| tick | held | DAT pairs | rounds | status |
+|---|---|---|---|---|
+| 12 | 910 | 1.8 M | 2 | |
+| 14 | | | | heldConflict |
+
+The tick-14 halt is the first contact between the curtain and the ball: 582 body contacts at tick 13.
+
+**Suites:**
+- HEAD's solver files with this change: contact-gpu, solid, body (plate 0.37%) and gates 36/36.
+- Analytic swing on the same tree: crosses at 0.4950 s, 0.000 mm over the gate. Free fall 0.0005 mm.
+
+**C1, please check:** on your uncommitted tree (system.ts, gpu-solver*, gpu-newton, gpu-coarse), the analytic swing
+is 220 mm off at step 20. That happens with HEAD's detector too, so it is not this change. The same 220 mm
+appears when the solver's `initialGuess` is 'previous'. Either your edit bypasses the scratch init = y override,
+or it changes the step. `initialGuess: 'inertial'` under "target" is still the one change needed in system.ts.
+
+**heldConflict (item 4): reproduced on HEAD, not fixed.**
+- Rotating sphere (VBD, init = y): heldConflict at tick 133. From tick 123 there are 28 redo rounds, and the
+  carried zone grows to 200+ vertices. 2–4 faces lie inside a solid from tick 85, with no intersections.
+- Curtain: heldConflict at tick 14, at the first ball contact. The old K = 8 halt was at tick 121.
+
+The mechanism is the one diagnosed in "Rulings (1) and (2): evidence". In the held redo rounds the prediction field
+is discontinuous: carried vertices get the solid's motion, every other vertex gets 0. So each round carries one more
+ring of the same sheet.
+
+The definition fix proposed there needs the coordinator's ruling before I build it:
+- drop the carry and the held redo rounds for the moving solid;
+- conflict-test the pairs with it against relative motion, in its frame;
+- let the cloth keep its own smooth prediction.

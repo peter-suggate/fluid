@@ -10,7 +10,7 @@
  *   12 planes indirect args (apart from 10: the bound pass is itself dispatched from 10)
  *   13 the step start x_t     14 predictions w | predicted step end and residual estimate
  * work also holds, per vertex at solidOff and solidDevOff, the static solid's truncation
- * terms (q.xyz, marker) and (D.xyz, 0) of the round (OgcTerms), and at heldOff the held flags (bit 0: contact, truncation or conflict
+ * terms (q.xyz, marker) and (D.xyz, 0) of the round (OgcTerms), and at heldOff the held flags (bit 0: contact, a plane or solid cut, or conflict
  * this step; bit 1: held this step; bit 2: carried with the moving solid this step, in an impact
  * zone; bit 3: held by a conflict this step; bit 4: touched the moving solid this step (a field
  * bound whose ball reaches r, a cut, or a sample entry); bit 5: held with the moving solid this step (last step it was in
@@ -917,12 +917,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let w = predOf(v);
     var delta = (p.xyz - det.xyz - w) * tv;
     var cut = tv < 1.0;
+    // A plane (another primitive within the envelope) or a solid cut it: a contact constraint, which
+    // holds the vertex next step. The cap alone is no contact: the vertex deviated from its prediction
+    // by more than its envelope, and the residual the next step measures widens that envelope.
+    var held = cut;
     let l = length(delta);
     if (l > det.w) { delta *= det.w / l; cut = true; atomicAdd(&wgCapped, 1u); }
     if (P.solidBase != 0u) {
       // The static solid: phi(x_det + w + t delta) >= min((1 - gamma_r) phi0, r) for t <= (1 - f(w)) / f(delta).
       let k = cutScale(work4(P.solidOff + 4u * v), work4(P.solidDevOff + 4u * v), w, delta);
-      if (k < 1.0) { delta *= k; cut = true; atomicAdd(&wgSolidCut, 1u); }
+      if (k < 1.0) { delta *= k; cut = true; held = true; atomicAdd(&wgSolidCut, 1u); }
     }
     if (P.bodyBase != 0u) {
       // The moving solid: phi_body >= min((1 - gamma_r) phi0, r) for the motion w - a_v + delta relative to it.
@@ -931,13 +935,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       if (qj.w != 0.0) {
         let Rt = transpose(ogcPose(1u).R);
         let k = cutScale(qj, work4(P.bodyDevOff + 4u * v), Rt * (w - work4(P.bodyOff + 8u * v + 4u).xyz), Rt * delta);
-        if (k < 1.0) { delta *= k; cut = true; atomicAdd(&wgBodyCut, 1u); atomicOr(&work[P.heldOff + v], 16u); }
+        if (k < 1.0) { delta *= k; cut = true; held = true; atomicAdd(&wgBodyCut, 1u); atomicOr(&work[P.heldOff + v], 16u); }
       }
     }
     if (cut) {
       pos[v] = vec4<f32>(det.xyz + w + delta, p.w);
       atomicAdd(&wgCount, 1u);
-      atomicOr(&work[P.heldOff + v], 1u);
+      if (held) { atomicOr(&work[P.heldOff + v], 1u); }
     }
   }
   workgroupBarrier();
