@@ -441,6 +441,36 @@ test("GPU predicted-motion DAT: pairs, translating planes and the truncated resi
   });
 });
 
+test("GPU predicted-motion DAT: a plane translating along its normal past the second primitive's support is placed where the oracle places it", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    // The layers fall together along their normal by about 4 times their 4 mm spacing, so every
+    // cross-layer pair's predicted projections lie wholly on one side of its X: the support of the
+    // second primitive is then negative along n (a support clamped at 0 would close the predicted gap).
+    const mesh = spacedStack(19), N = mesh.x.length, R = rng(20);
+    const vel = mesh.x.map(() => [(R() - 0.5) * 0.02, (R() - 0.5) * 0.02, -0.9 + (R() - 0.5) * 0.02] as V3);
+    const config: OgcContactConfig = { ...baseConfig(N), r: 1e-3, rqBase: 6e-3, envelopeScale: 2.5, prediction: "inertial", rqMax: 5e-2, pairCapacity: 1024 * N, gridCapacity: 2048 * N };
+    const { det, positions, oracle, W } = await detectPredicted(device, mesh, vel, config);
+    const c0 = await det.readCounters();
+    assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
+    assert.equal(c0.redos, 0);
+    const rq = mesh.x.map(() => config.rqBase);
+    const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c0.framePeakPairSlots, oracle);
+    const X = oracle.x;
+    const across = got.filter(g => new Set(g.pair.ids.map(i => Math.round(X[i]![2] / 4e-3))).size > 1).length;
+    assert.ok(across > 100, `${across} pairs across the layers`);
+    // Residuals push the layers together by up to 1.5 of their gaps.
+    const res = X.map(p => [(R() - 0.5) * 1e-3, (R() - 0.5) * 1e-3, (p[2] < 2e-3 ? 1 : p[2] > 6e-3 ? -1 : (R() < 0.5 ? 1 : -1)) * R() * 6e-3] as V3);
+    const Xnew = f32(X.map((x, v) => add(add(x, W[v]), res[v])));
+    device.queue.writeBuffer(positions, 0, vec4s(Xnew));
+    await runPass(device, pass => { det.encodeTruncate(pass); det.encodeDecide(pass); });
+    const out = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    const oracleOut = predictedTruncate(X, Xnew, W, got.map(g => g.pair), rq.map(q => 0.45 * q), 0.9, 1e-6);
+    for (let v = 0; v < N; v++) assert.ok(norm(sub(out[v], oracleOut.x[v])) <= 2e-7 + 2e-4 * norm(res[v]), `vertex ${v}: ${out[v]} vs ${oracleOut.x[v]}`);
+    assert.equal(motionPenetrates(oracle, X, out), false, "the truncated motion is penetration-free");
+    det.destroy();
+  });
+});
+
 test("GPU predicted-motion DAT: crossing predictions redo the round held, which is Planar-DAT", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const mesh = spacedStack(23), N = mesh.x.length;
@@ -679,8 +709,10 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
       const q = [0, 1, 2, 3, 4, 5, 6].map(k => k < 4 ? work[solidOff + 4 * v + k] : work[solidDevOff + 4 * v + k - 4]);
       if (b.far) { assert.deepEqual(q, [0, 0, 0, 0, 0, 0, 0]); continue; }
       near++;
-      assert.equal(q[3], 1, `vertex ${v} bound marker`);
-      const s = solidTermScale(b.phi0, 0.9, config.r), qr = [b.g0[0] * s, b.g0[1] * s, b.g0[2] * s, 1, b.D[0] * s, b.D[1] * s, b.D[2] * s];
+      // q.w is the affine bound's ball, the round's reach (within rqMax / 2 here).
+      const rc = Math.min(xdet[4 * v + 3] / 0.9, 0.5 * config.rqMax);
+      assert.ok(Math.abs(q[3] - rc) <= 1e-6 * rc, `vertex ${v} affine ball ${q[3]} vs ${rc}`);
+      const s = solidTermScale(b.phi0, 0.9, config.r), qr = [b.g0[0] * s, b.g0[1] * s, b.g0[2] * s, q[3], b.D[0] * s, b.D[1] * s, b.D[2] * s];
       const qs = Math.max(...qr.map(Math.abs));
       for (let k = 0; k < 7; k++) assert.ok(Math.abs(q[k] - qr[k]) <= 2e-3 * qs, `vertex ${v} q/D[${k}] ${q[k]} vs ${qr[k]}`);
       const lambda = new Float32Array(new Uint32Array([solid[0].z]).buffer)[0];
@@ -730,7 +762,7 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     const planar = planarTruncate([...X0, ...samples], [...Xnew, ...samples], pairs, [...mesh.x.map((_, v) => xdet[4 * v + 3]), ...samples.map(() => 0)], 0.9, 1e-6);
     let cut = 0;
     for (let v = 0; v < N; v++) {
-      const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9, config.r), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
+      const d = solidTruncate(bounds[v], sub(planar.x[v], X0[v]), 0.9, config.r, field.maxLipschitz), ref: V3 = [X0[v][0] + d[0], X0[v][1] + d[1], X0[v][2] + d[2]];
       if (norm(sub(ref, planar.x[v])) > 1e-9) cut++;
       if (!ambiguous.has(v)) assert.ok(norm(sub(got[v], ref)) <= 2e-7 + 2e-4 * norm(sub(Xnew[v], X0[v])), `vertex ${v}: ${got[v]} vs ${ref}`);
       const phi = sampleClothSolidField(field, got[v]).phi;

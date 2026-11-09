@@ -595,7 +595,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
         let o = xdet[ids[nA]].xyz;
         var proj: array<f32, 4>;
         var dn: array<f32, 4>;
-        var supA = 3.4e38; var supB = 0.0; var apA = 0.0; var apB = 0.0;
+        var supA = 3.4e38; var supB = -3.4e38; var apA = 0.0; var apB = 0.0;
         for (var k = 0u; k < 4u; k++) {
           let Y = anchored(ids[k]);
           proj[k] = dot(n, Y - o);
