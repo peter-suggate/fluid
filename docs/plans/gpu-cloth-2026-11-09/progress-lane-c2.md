@@ -1082,6 +1082,26 @@ So the count is not intended: it comes from the nominal reach. The edges of the 
 lift is measured on) are the 1-ring set, at 3 per sample. A chord the hull leaves out lies under the lifted facets, so
 it touches nothing outside the field.
 
-There is one exception. Where the samples form a single row (a sharp box edge) there are no facets, so the chain edges
-next to a gap of half a turn must stay. Changing the edge set to hull-facet edges plus those boundary edges is the next
-step. It is mine (it only changes `clothSolidSampleEdges`), and it shrinks the EE query about 4x on curved bodies.
+**Done (next commit).** The hull edges are now the samples' Gabriel graph (a subgraph of their Delaunay graph; it joins
+consecutive samples along a sharp edge's row, as the solid-samples test requires) plus the local hull facets' edges.
+
+| Case | Before | After |
+|---|---|---|
+| Sphere R 4 cm | 6.3 per sample | 3.3 |
+| Sphere R 5 cm | 11.4 per sample | 3.4 |
+| Sphere R 10 cm | | 3.1 |
+| Rotating scene | | 42974 for 15696 samples |
+| Curtain | 34773 | 23857 |
+| Tablecloth | 64636 | 46757 |
+
+Builds take 2.7 s, 1.3 s and 2.3 s. A wide wedge is a facet only over neighbours strictly below it, so coplanar samples
+yield one triangulation, not all of them.
+
+Gates:
+- CPU: `cloth-contact-solid` 10/10.
+- GPU: `cloth-contact-gpu` and `cloth-contact-body` 15/15, and both cloth-system scene-contact tests (the held rotating
+  sphere, and riding the moving solid) pass.
+- Table probe at K = 64, ticks 30–44: 1 face at ticks 38–39, from the open roof item above.
+
+(C) from the coordinator: the setup failure "a lifted facet … enters the field" came from the coverage prototype, which
+was in the working tree for a short time. That prototype is not committed, and the committed build passes that test.

@@ -723,7 +723,13 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
   const ceiling = SOLID_SAMPLE_MAX_LIFT * h;
   // The lift of every sample, and the holes bulging past the ceiling.
   const measure = (): { lift: Float64Array; over: number[][]; edges: number[] } => {
-    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<number>(), edges: number[] = [];
+    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<number>(), edgeKeys = new Set<number>();
+    // The hull edges are the samples' Gabriel graph (a subgraph of their Delaunay graph: it
+    // joins consecutive samples along a sharp edge's row) and the edges of the local hull's
+    // facets. Any other chord between neighbours lies under the lifted facets, where no contact
+    // outside the field reaches it; all neighbours within the nominal reach (about three actual
+    // spacings) made 6-11 hull edges per sample on a sphere, against about 3.
+    const edge = (a: number, b: number) => { edgeKeys.add(a < b ? a * pts.length + b : b * pts.length + a); };
     // Triangle keys i S^2 + j S + k exact in a double.
     const S3 = pts.length;
     if (S3 ** 3 > Number.MAX_SAFE_INTEGER) throw new RangeError(`Cloth solid samples: ${S3} samples exceed the hole key's range`);
@@ -733,7 +739,14 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
       const t1 = cross(n, a), l1 = Math.hypot(...t1), u: V3 = [t1[0] / l1, t1[1] / l1, t1[2] / l1], w = cross(n, u);
       const fan = within(qi.p, reach).filter(j => j !== i).map(j => { const d = sub(pts[j]!.p, qi.p); return { j, ang: Math.atan2(dot(d, w), dot(d, u)) }; })
         .sort((x, y) => x.ang - y.ang);
-      for (const F of fan) if (F.j > i) edges.push(i, F.j);
+      // Gabriel edges: no other sample inside the sphere on the edge as diameter (any such
+      // sample lies within the edge's length of i, so in its fan).
+      for (const F of fan) {
+        if (F.j < i) continue;
+        const pj = pts[F.j]!.p, mx = 0.5 * (qi.p[0] + pj[0]), my = 0.5 * (qi.p[1] + pj[1]), mz = 0.5 * (qi.p[2] + pj[2]);
+        const r2 = 0.25 * ((qi.p[0] - pj[0]) ** 2 + (qi.p[1] - pj[1]) ** 2 + (qi.p[2] - pj[2]) ** 2);
+        if (!fan.some(M => M.j !== F.j && (pts[M.j]!.p[0] - mx) ** 2 + (pts[M.j]!.p[1] - my) ** 2 + (pts[M.j]!.p[2] - mz) ** 2 < r2)) edge(i, F.j);
+      }
       if (fan.length < 2) continue;
       // Every wedge of the fan short of half a turn, not only consecutive neighbours: the local
       // convex hull's facet over a wedge can span neighbours that stand under it (a lattice
@@ -766,14 +779,20 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
         N = [N[0] * sgn, N[1] * sgn, N[2] * sgn];
         const tol = 1e-9 * spacingOf[i]!;
         if (fan.some(F => F.j !== A.j && F.j !== B.j && dot(sub(pts[F.j]!.p, qi.p), N) > tol)) continue;
+        // A wide wedge is a facet only over neighbours strictly under it: over one on its plane
+        // the narrower wedges are the same facet's triangulation.
+        if (l > 1) { let on = false; for (let m = 1; m < l; m++) if (dot(sub(pts[fan[(k + m) % fan.length]!.j]!.p, qi.p), N) >= -tol) on = true; if (on) continue; }
         // Measured along the samples' mean normal, the direction they are lifted in (a sliver
         // standing across the surface has a facet normal along it, which measures nothing).
         const D = [0, 1, 2].map(a => n[a]! + pts[A.j]!.n[a]! + pts[B.j]!.n[a]!) as unknown as V3, dl = Math.hypot(...D);
         const bulge = roofHeight([qi.p, pa, pb], [D[0] / dl, D[1] / dl, D[2] / dl], [...supports[i]!, ...supports[A.j]!, ...supports[B.j]!]);
         for (const j of [i, A.j, B.j]) lift[j] = Math.max(lift[j]!, bulge);
         if (bulge > ceiling) over.push([i, A.j, B.j]);
+        edge(i, A.j); edge(A.j, B.j); edge(B.j, i);
       }
     }
+    const edges: number[] = [];
+    for (const key of edgeKeys) edges.push(Math.floor(key / S3), key % S3);
     return { lift, over, edges };
   };
   index(0);
