@@ -72,6 +72,8 @@ import { withSceneryNodes } from "./scenery-edit";
 import type { SceneryGraph } from "./scenery-graph";
 import { BRIDSON_2002_SCENES, type Bridson2002Scene } from "../cloth/scenes/bridson-2002";
 import { bridson2002Camera, bridson2002SceneDescription, bridson2002SceneLayout } from "../cloth/scenes/bridson-2002/scene-description";
+import { CLOTH_ANALYTIC_SCENES, type ClothAnalyticScene } from "../cloth/scenes/analytic/scenes";
+import { clothAnalyticCamera, clothAnalyticSceneDescription } from "../cloth/scenes/analytic/scene-description";
 import {
   defineScene,
   presentationModeForScene,
@@ -111,6 +113,24 @@ function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
     status: `Tier A GPU cloth, K = ${source.cloth.solver?.iterations ?? 64}, with OGC self and solid contact (lane C2). Not yet:`
       + ` the ${source.sheet.columns}\u00d7${source.sheet.rows} sheet diverges at this K until the two-level coarse correction lands (C1);`
       + (halts ? ` halts at ${halts}.` : " no moving solids."),
+  });
+}
+
+/** One catalog entry per analytic cloth gate; the card states the closed-form answer and the gate. */
+function clothAnalyticDefinition(make: () => ClothAnalyticScene): SceneDefinition {
+  const source = make();
+  return defineScene({
+    id: source.id,
+    name: source.name,
+    blurb: `${source.expectation} One implicit 1/60 s cloth step per frame, K = ${source.cloth[0]?.solver?.iterations ?? 8}.`,
+    audience: "validation",
+    shelf: "Cloth \u00b7 Analytic",
+    environment: "default",
+    presentationMode: "full-scene",
+    build: () => clothAnalyticSceneDescription(make()),
+    preview: () => clothAnalyticSceneDescription(make(), { bake: false }),
+    camera: clothAnalyticCamera(source),
+    status: `Gate (tests/cloth-analytic.test.ts): ${source.gate}.`,
   });
 }
 
@@ -2295,6 +2315,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   // Bridson, Fedkiw & Anderson 2002, Figs 1-3 (Fig 4 is a production robe:
   // reference only). Dry scenes whose cloth runs on the GPU cloth solver.
   ...BRIDSON_2002_SCENES.map(bridson2002Definition),
+  ...CLOTH_ANALYTIC_SCENES.map(clothAnalyticDefinition),
   ...NBFLIP_ANALYTIC_CASES.map(name => defineScene({
     id: nbflipAnalyticSceneId(name),
     name: `NB-FLIP analytic \u00b7 ${name.replace("-", " ")}`,
