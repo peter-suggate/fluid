@@ -28,6 +28,7 @@ import { ClothCoarseCorrection, buildClothCoarseSpace } from '../lib/cloth/coars
 import { sceneWithClothStroke } from '../lib/cloth/scene-edit';
 import { publishSceneClothSurfaces } from '../lib/cloth/scene-geometry';
 import { CLOTH_SCENE_STEP_S, ClothSystem, withClothSystem } from '../lib/cloth/system';
+import type { ClothGPUSolver } from '../lib/cloth/gpu-solver';
 import { buildClothSceneField, clothContactFieldKey, clothContactRadius } from '../lib/cloth/scene-contact';
 import { proceduralSolidField } from '../lib/core/procedural-solid';
 import type { ClothDocument, ClothMaterial } from '../lib/cloth/types';
@@ -195,6 +196,11 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   await Promise.all([solver.readClothPose!(), solver.readClothPose!()]);
   const surface = solver.clothSurfaces![0]!;
   assert.equal(surface.tick, 6);
+  // The mirrored pose carries the exact solver state (BDF2 history, AVBD duals, clock), not a restart.
+  const liveSolver = () => (cloth as unknown as { entries: Map<string, { solver: ClothGPUSolver }> }).entries.get('sheet')!.solver;
+  const exact = (await liveSolver().readState()).solverState;
+  assert.deepEqual(surface.solverState, exact);
+  assert.ok(Math.abs(exact.previousStep_s - CLOTH_SCENE_STEP_S) < 1e-9 && exact.previousVelocities_m_s.some(v => v !== 0) && exact.pinDuals.some(v => v !== 0));
   const document = scene.cloth![0]!, topology = prepareClothTopology(document.geometry.data, document.materials);
   const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)));
   const oracle = createClothOracleState(model, document.geometry.data.restPositions_m);
@@ -224,6 +230,12 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   assert.ok(after.document === edited.cloth![0] && after.revision !== before.revision && after.triangleCount === edited.cloth![0]!.geometry.data.triangles.length / 3);
   assert.notEqual(after.triangleCount, before.triangleCount);
   assert.equal(solver.clothSurfaces![0]!.topologyRevision, 1);
+  // The rebuilt solver continues the history: BDF2 from its first step, pin duals kept (vertex origins remap the rest);
+  // its clock base is the f32 time of the cut.
+  const carried = (await liveSolver().readState()).solverState;
+  assert.ok(Math.abs(carried.previousStep_s - CLOTH_SCENE_STEP_S) < 1e-9 && carried.time_s === Math.fround(exact.time_s));
+  assert.deepEqual(carried.pinDuals, exact.pinDuals);
+  assert.ok(carried.previousVelocities_m_s.some(v => v !== 0) && carried.edgeDuals.some(v => v !== 0));
   assert.equal(solver.advanceTo(7 * CLOTH_SCENE_STEP_S, []), true);
 
   // The pending solid stops the clock at 10 ticks with an explicit failure.

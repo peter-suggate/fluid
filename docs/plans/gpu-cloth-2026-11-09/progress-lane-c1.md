@@ -649,3 +649,59 @@ The floor, about 17 µs, is the vertex loads, the group sum and the write.
   - interleave x_t and x̂ into one vertex record, so each damping gather is one line;
   - pack the edge records into the star.
 - I expect the register caching and the edge packing to reach about 50 µs. Getting to 30 µs likely needs a cheaper bending term (a quadratic or precomputed-Q bending model). That is a physics change and the coordinator's call. I will not make it unasked.
+
+## 2026-11-09 MEASUREMENT: the colour pass after star records, and what does not help
+
+Method: 60 steps (20 steps gave ±10 µs of clock noise), mean over colours, each dispatch in its own timestamped pass.
+
+The production step (one submission of 60 steps, wall clock) is **2.52 ms** at K = 8 on the 150² sheet, against 3.95 ms in split mode. Per-pass overhead is therefore about 10 µs of each split-mode figure, and a colour costs about 54 µs in production.
+
+| probe (60 steps) | µs a colour |
+|---|---|
+| base | 63–66 |
+| no hinges (system and trial) | 49.5 |
+| no system hinges | 60.3 |
+| no trial hinges | 59.5 |
+| no faces | 61.3 |
+| no strain-limit edges | 63.4 |
+| no trial | 53.5 |
+| no x_t and x̂ gathers (served from positions) | 62.1 |
+| cheap hinge geometry (no atan2, cross or sqrt) | 61.4 |
+| floor (no elements, no trial) | 15.9 |
+
+- The line search accepts at α = 1 for every vertex: 11.16 M accepted at trial 0, none later. The trial is one pass.
+- Counters: LLC limiter 61 %, buffer-read limiter 62 %, ALU 20 %, occupancy 9 % (9,000 threads a colour).
+
+**Tried and reverted:**
+- **Register-cached slots.** Each lane's 3 faces and 6 hinges were loaded up front and reused by the trial. Result: 119 µs, from spills.
+- **Prefetch without the trial cache.** Result: 101 µs.
+- **One-deep software pipelining** of the hinge loop. Result: 65.8 µs, no change.
+- **More lanes per vertex.** 4 lanes: 84.6 µs. 8 lanes: 98.6 µs.
+- **Subgroup-shuffle groupSum.** −4 % production, but it needs the `subgroups` feature, which the scene device does not request. Not taken.
+
+**Conclusion.** No single term dominates: the element work is spread over hinge records, face records and gathers, all through the LLC. The kernel is not latency-bound: pipelining did nothing and more lanes made it worse.
+
+Under 30 µs means cutting the bytes, not the instructions. The one change that does that at scale is a **quadratic (isometric) bending model** (Bergou et al. 2006):
+- the per-vertex bending is a fixed 1-ring stencil Σ Q_vj x_j with Hessian Q_vv I;
+- its trial ΔE and its Rayleigh damping are closed form;
+- so the 12 hinge records a vertex reads twice, the hinge geometry and the hinge gathers all go.
+
+This is a physics change. It holds for nearly inextensible cloth with flat rest shape, and the strain limit already enforces that. **It needs the coordinator's ruling.** I have not made it.
+
+## 2026-11-09 RESULT (7), M4: the edit path carries the exact solver state
+
+- **Before:** a mirrored pose (on a pick, an edit or a capture) published a restart state: zero BDF2 history, zero duals, `previousStep_s` 0. Every cut or undo therefore restarted with implicit Euler.
+- **Now:** `PoseMirror` copies the solver's `stateRanges()`:
+  - positions;
+  - the velocity, v_{n−1}, Δx_{n−1} and pin-dual segments;
+  - the edge duals;
+  - the clock record.
+
+  `ClothGPUSolver.decodeState` decodes them, and `readState` uses the same pair. The publication's `solverState` is the exact GPU state. `remapClothSolverState` (edit.ts) carries it through the cut by vertex origin. The rebuilt solver takes BDF2 from its first step, keeps the pin duals, and keeps the edge duals of edges whose ends are kept vertices.
+- **Cost:** about 3.2 MB per pose read on the 150² sheet, against 0.7 MB before. That is on demand only (a pick, an edit or a capture), never on the step path.
+- **Regression** (`tests/cloth-system.test.ts`, dry scene):
+  - the mirrored `solverState` deep-equals `readState()` after 6 ticks, with previousStep 1/60 and non-zero history and pin duals;
+  - after the cut, the rebuilt solver has previousStep 1/60 and the f32 clock of the cut;
+  - its pin duals are identical, and its history and edge duals are non-zero.
+
+  Save and load go through the same publication, so they now keep the exact history too.

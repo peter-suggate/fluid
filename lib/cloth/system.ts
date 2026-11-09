@@ -28,7 +28,7 @@ import type { GPUSolverInstance } from '../core/method-contract';
 import type { SceneDescription } from '../core/model';
 import type { SimulationFailure } from '../core/simulation-failure';
 import { clothDocumentsKey } from './content-stamp';
-import { ClothGPUSolver } from './gpu-solver';
+import { ClothGPUSolver, type ClothGPUState } from './gpu-solver';
 import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
 import { OgcContactDetector } from './contact/ogc-detector';
 import type { ClothSolidField } from './contact/solid-field';
@@ -38,7 +38,7 @@ import type { ClothRenderSource } from './render';
 import { CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothSceneField, clothContactFieldKey, clothContactRadius, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
 import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from './topology';
-import type { ClothDocument, ClothSolverStateData, ClothSurfacePublication, ClothVector } from './types';
+import type { ClothDocument, ClothSurfacePublication, ClothVector } from './types';
 
 /** One implicit cloth step per 1/60 s frame. */
 export const CLOTH_SCENE_STEP_S = 1 / 60;
@@ -53,26 +53,37 @@ const DEFAULT_COARSE_ITERATIONS = 8;
 let systemGenerations = 0, renderRevisions = 0;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
-/** Asynchronous copy of the status words and, on request, positions and velocities; one map in flight. */
+/** Asynchronous copy of the status words and, on request, the full dynamic state (pose, BDF2 history, duals, clock); one map in flight. */
 class PoseMirror {
   private readonly staging: GPUBuffer;
   private readonly statusStaging: GPUBuffer;
-  private readonly span: number;
+  /** Staging offsets of the solver's state ranges, then the status words. */
+  private readonly offsets: number[];
   busy = false;
   statusBusy = false;
   constructor(device: GPUDevice, private readonly solver: ClothGPUSolver, label: string, private readonly contact?: OgcContactDetector) {
-    this.span = align(16 * Math.max(solver.N, 1), 256);
-    this.staging = device.createBuffer({ label: `${label} pose mirror`, size: 2 * this.span + 4 * CLOTH_STATUS_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    let at = 0;
+    this.offsets = [...solver.stateRanges(), { size: 4 * CLOTH_STATUS_WORDS }].map(r => { const o = at; at += align(Math.max(r.size, 4), 256); return o; });
+    this.staging = device.createBuffer({ label: `${label} pose mirror`, size: at, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     this.statusStaging = device.createBuffer({ label: `${label} status mirror`, size: 4 * CLOTH_STATUS_WORDS + 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   }
   encode(encoder: GPUCommandEncoder): boolean {
     if (this.busy) return false;
-    const s = this.solver, v = s.velocities, bytes = 16 * s.N;
-    encoder.copyBufferToBuffer(s.positions, 0, this.staging, 0, bytes);
-    encoder.copyBufferToBuffer(v.buffer, v.offset ?? 0, this.staging, this.span, bytes);
-    encoder.copyBufferToBuffer(s.status, 0, this.staging, 2 * this.span, 4 * CLOTH_STATUS_WORDS);
+    this.solver.stateRanges().forEach((r, k) => { if (r.size) encoder.copyBufferToBuffer(r.buffer, r.offset, this.staging, this.offsets[k]!, r.size); });
+    encoder.copyBufferToBuffer(this.solver.status, 0, this.staging, this.offsets.at(-1)!, 4 * CLOTH_STATUS_WORDS);
     this.busy = true;
     return true;
+  }
+  /** After the encoder holding `encode` is submitted. */
+  async read(): Promise<{ state: ClothGPUState; status: number }> {
+    try {
+      await this.staging.mapAsync(GPUMapMode.READ);
+      const all = this.staging.getMappedRange(), ranges = this.solver.stateRanges(), o = this.offsets;
+      const state = this.solver.decodeState(ranges.map((r, k) => all.slice(o[k]!, o[k]! + r.size)));
+      const status = new Uint32Array(all.slice(o.at(-1)!, o.at(-1)! + 4))[0]!;
+      this.staging.unmap();
+      return { state, status };
+    } finally { this.busy = false; }
   }
   encodeStatus(encoder: GPUCommandEncoder): boolean {
     if (this.statusBusy) return false;
@@ -80,17 +91,6 @@ class PoseMirror {
     if (this.contact) encoder.copyBufferToBuffer(this.contact.counters, CLOTH_CONTACT_STATUS_OFFSET, this.statusStaging, 4 * CLOTH_STATUS_WORDS, 4);
     this.statusBusy = true;
     return true;
-  }
-  /** After the encoder holding `encode` is submitted. */
-  async read(): Promise<{ positions: Float32Array; velocities: Float32Array; status: number }> {
-    try {
-      await this.staging.mapAsync(GPUMapMode.READ);
-      const all = this.staging.getMappedRange(), n = 4 * this.solver.N;
-      const out = { positions: new Float32Array(all.slice(0, 4 * n)), velocities: new Float32Array(all.slice(this.span, this.span + 4 * n)),
-        status: new Uint32Array(all.slice(2 * this.span, 2 * this.span + 4))[0]! };
-      this.staging.unmap();
-      return out;
-    } finally { this.busy = false; }
   }
   /** After the encoder holding `encodeStatus` is submitted: the solver's status word and the detector's (0 without contact). */
   async readStatus(): Promise<{ solver: number; contact: number }> {
@@ -120,8 +120,6 @@ interface Entry {
   sinceStatus: number;
   publication: ClothSurfacePublication;
   inflight?: Promise<void>;
-  /** Zero BDF2 history and duals, shared by every mirrored publication (see `restartState`). */
-  zeros?: Omit<ClothSolverStateData, 'time_s'>;
 }
 
 export interface ClothSystemOptions {
@@ -292,22 +290,6 @@ export class ClothSystem {
     return (this.poseRead = read);
   }
 
-  /**
-   * The solver state a mirrored pose carries: its clock, with the BDF2
-   * history and AVBD duals of a fresh start. A cut or undo from it restarts
-   * the integrator with one implicit Euler step at the right scene time, so
-   * attachment scripts and pending-solid gates stay on the scene clock. (The
-   * exact history needs a full state read; lane C1 M4.)
-   */
-  private restartState(e: Entry, time_s: number): ClothSolverStateData {
-    if (!e.zeros) {
-      const n = e.solver.N, pins = e.solver.model.topology.groups.reduce((c: number, g: number) => c + (g > 0 ? 1 : 0), 0);
-      const zeros = (k: number) => new Array<number>(k).fill(0);
-      e.zeros = { previousVelocities_m_s: zeros(3 * n), previousDisplacements_m: zeros(3 * n), previousStep_s: 0, pinDuals: zeros(4 * pins), edgeDuals: zeros(2 * e.solver.E) };
-    }
-    return { ...e.zeros, time_s };
-  }
-
   private async receive(e: Entry, time_s: number): Promise<void> {
     const tick = Math.round(time_s / CLOTH_SCENE_STEP_S);
     let read;
@@ -315,12 +297,10 @@ export class ClothSystem {
     if (this.destroyed || this.entries.get(e.document.id) !== e) return;
     if (read.status & CLOTH_STATUS.nonFinite) { this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(read.status).join('; '), 'finishStep', e, [read.status]); return; }
     if (tick < e.publication.tick) return;
-    const n = e.solver.N, positions = new Float64Array(3 * n), velocities = new Float64Array(3 * n);
-    for (let i = 0; i < n; i++) for (let c = 0; c < 3; c++) {
-      positions[3 * i + c] = read.positions[4 * i + c]! + e.origin[c]!; velocities[3 * i + c] = read.velocities[4 * i + c]!;
-    }
-    e.publication = { documentId: e.document.id, topology: e.document.geometry.data, positions_m: positions, velocities_m_s: velocities,
-      solverState: this.restartState(e, time_s), generation: this.generation, tick, topologyRevision: e.topologyRevision, time_s };
+    // The exact state at the pose: a cut or undo from it keeps the BDF2 history and the duals (remapped by vertex origin).
+    const { positions_m, velocities_m_s, solverState } = read.state;
+    e.publication = { documentId: e.document.id, topology: e.document.geometry.data, positions_m, velocities_m_s,
+      solverState, generation: this.generation, tick, topologyRevision: e.topologyRevision, time_s };
   }
 
   private fail(code: string, message: string, kernel: string, e: Entry, operands: number[]): void {

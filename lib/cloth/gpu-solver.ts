@@ -520,11 +520,12 @@ export class ClothGPUSolver {
     q.writeBuffer(this.status, 0, new Uint32Array(CLOTH_STATUS_WORDS));
   }
 
-  private async read(buffer: GPUBuffer, bytes: number): Promise<ArrayBuffer> {
+  private read(buffer: GPUBuffer, bytes: number): Promise<ArrayBuffer> { return this.readRange(buffer, 0, bytes); }
+  private async readRange(buffer: GPUBuffer, offset: number, bytes: number): Promise<ArrayBuffer> {
     const size = align(Math.max(bytes, 4), 4);
     const staging = this.device.createBuffer({ label: 'Cloth readback', size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder();
-    encoder.copyBufferToBuffer(buffer, 0, staging, 0, size);
+    encoder.copyBufferToBuffer(buffer, offset, staging, 0, size);
     this.device.queue.submit([encoder.finish()]);
     await staging.mapAsync(GPUMapMode.READ);
     const out = staging.getMappedRange().slice(0);
@@ -539,24 +540,39 @@ export class ClothGPUSolver {
     return out;
   }
 
-  /** The full dynamic state for save, load and undo. */
-  async readState(): Promise<ClothGPUState> {
-    const N = this.N, L = this.tables;
-    const [xb, sb] = await Promise.all([this.read(this.positions, 16 * N), this.read(this.state, 16 * L.stateRecords)]);
-    const x = new Float32Array(xb), s = new Float32Array(sb), o = this.options.origin_m, at = (seg: number, i: number) => 4 * (seg * L.stride + i);
+  /**
+   * The buffer ranges that hold the full dynamic state, in `decodeState`'s order: positions, then the velocity, v_{n-1},
+   * dx_{n-1} and pin-dual segments, the edge duals and the clock record. A pose mirror copies these to read the state
+   * without a step-path readback.
+   */
+  stateRanges(): readonly { readonly buffer: GPUBuffer; readonly offset: number; readonly size: number }[] {
+    const L = this.tables, seg = (k: number) => ({ buffer: this.state, offset: 16 * k * L.stride, size: 16 * this.N });
+    return [{ buffer: this.positions, offset: 0, size: 16 * this.N }, seg(CLOTH_STATE.velocity), seg(CLOTH_STATE.vPrev), seg(CLOTH_STATE.dxPrev),
+      seg(CLOTH_STATE.pinDual), { buffer: this.state, offset: 16 * L.edgeDualRecord, size: 16 * this.E }, { buffer: this.state, offset: 16 * L.clockRecord, size: 16 }];
+  }
+
+  /** The state from the bytes of `stateRanges`, one buffer per range (save, load, undo and the edit path's pose). */
+  decodeState(parts: readonly ArrayBuffer[]): ClothGPUState {
+    const N = this.N, o = this.options.origin_m;
+    if (parts.length !== 7) throw new Error('Cloth state decode needs the 7 stateRanges');
+    const [x, v, vp, dx, pin, edge, clock] = parts.map(b => new Float32Array(b)) as [Float32Array, Float32Array, Float32Array, Float32Array, Float32Array, Float32Array, Float32Array];
     const positions = new Float64Array(3 * N), velocities = new Float64Array(3 * N), vPrev: number[] = [], dxPrev: number[] = [], pinDuals: number[] = [];
     for (let i = 0; i < N; i++) {
       for (let c = 0; c < 3; c++) {
-        positions[3 * i + c] = x[4 * i + c]! + o[c]!; velocities[3 * i + c] = s[at(CLOTH_STATE.velocity, i) + c]!;
-        vPrev.push(s[at(CLOTH_STATE.vPrev, i) + c]!); dxPrev.push(s[at(CLOTH_STATE.dxPrev, i) + c]!);
+        positions[3 * i + c] = x[4 * i + c]! + o[c]!; velocities[3 * i + c] = v[4 * i + c]!;
+        vPrev.push(vp[4 * i + c]!); dxPrev.push(dx[4 * i + c]!);
       }
-      if (this.model.topology.groups[i]! > 0) pinDuals.push(...s.subarray(at(CLOTH_STATE.pinDual, i), at(CLOTH_STATE.pinDual, i) + 4));
+      if (this.model.topology.groups[i]! > 0) pinDuals.push(...pin.subarray(4 * i, 4 * i + 4));
     }
     const edgeDuals: number[] = [];
-    for (let k = 0; k < this.E; k++) edgeDuals.push(s[4 * (L.edgeDualRecord + k)]!, s[4 * (L.edgeDualRecord + k) + 1]!);
-    const clock = s.subarray(4 * L.clockRecord, 4 * L.clockRecord + 4);
+    for (let k = 0; k < this.E; k++) edgeDuals.push(edge[4 * k]!, edge[4 * k + 1]!);
     return { positions_m: positions, velocities_m_s: velocities, solverState: { previousVelocities_m_s: vPrev, previousDisplacements_m: dxPrev,
       previousStep_s: clock[1]!, time_s: Math.fround(this.timeBase) + clock[0]! * this.options.dt_s, pinDuals, edgeDuals } };
+  }
+
+  /** The full dynamic state for save, load and undo. */
+  async readState(): Promise<ClothGPUState> {
+    return this.decodeState(await Promise.all(this.stateRanges().map(r => this.readRange(r.buffer, r.offset, r.size))));
   }
 
   async readStatus(): Promise<ClothStatusReport> {
