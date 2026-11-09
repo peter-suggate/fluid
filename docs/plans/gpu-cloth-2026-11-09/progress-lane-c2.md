@@ -826,3 +826,46 @@ The sheet has 5 colours, so a step makes 385 truncations per colour and 65 per i
 
   All three pass.
 - **Capacity:** the grid holds up to (⌈(D + M)/R⌉ + 3)³ entries per face. That is 64 when the face plus its motion fit in a cell. `tests/cloth-contact-gpu.test.ts`'s base grid went from 64 N to 128 N, because its velocity envelopes vary. Please check `gridEntriesPerPrimitive` against the new peak (C1, scene-contact).
+
+## 2026-11-09 Cost steps 2–3 (rulings 3b, 3c)
+
+### 3b: break the held-at-cap loop (tried, reverted)
+
+- **Variant tried (the ruling's preference):**
+  - A vertex is held only by a conflict. A conflict is a new hold bit, bit 2.
+  - A vertex cut by a DAT plane or the cap keeps its prediction for the next step. Its residual is measured against its *truncated* motion, not the full inertial motion.
+  - No rqMax was derived from the scene's speed.
+- **Rotating sphere** (one profile run, 20 ticks):
+
+  | Rotating sphere | 3a (hold on any cut) | 3b (conflict-only hold) |
+  |---|---|---|
+  | median tick | 161 ms | 174 ms |
+  | rounds per tick | 2.25 | 3.55 |
+  | conflicts per tick | not logged | 50–578 |
+  | redo rounds | not logged | nearly every tick |
+  | DAT pairs per vertex | 160–250 | 140–240 |
+
+  No intersections and no faces inside, as before.
+- **Diagnosis:** the hold is what keeps conflicts away.
+  - A held vertex's envelope is r + s·plen. Its prediction is the previous truncated step, so neighbouring held vertices agree on direction and their pair planes are compatible.
+  - Released from the hold, a vertex predicts its full inertial motion again. Pairs then disagree, a conflict follows, and the redo holds *every* vertex.
+  - So the variant trades the cap loop for redo rounds, which cost more.
+  - The cap loop itself is cheap: the envelope is at the cap because the cloth really is moving at about 0.45 r_q a step against the sphere.
+- **What could work next (design needed, not started):** a redo that holds only the conflict's vertices and their 1-ring, repeated until no conflict remains (multi-redo). Each repeat is a full round of about 8 ms, so it only pays if most ticks converge in one repeat.
+- **Where the about 161 ms tick goes now:**
+
+  | Part | Time per tick |
+  |---|---|
+  | truncation (DAT planes, 0.85 ms × 65 iterations) | ≈ 55 ms |
+  | detection rounds | ≈ 18 ms |
+  | decides plus unarmed detections | 4.2 ms |
+  | solver and the rest | ≈ 85 ms |
+
+  Truncation cost scales with about 200 DAT pairs per vertex. That pair count, not the detector, is the next contact cost.
+
+### 3c: LBVH against the hash (not implemented)
+
+- After 3a, a vertex query scans 290 entries for 116 candidates, a 2.5× over-scan, in 1 cell.
+- The round is 8.2 ms, about 5% of the tick.
+- An LBVH would at best halve the scan, at the price of a per-step build (sort plus refit). It cannot recover more than about 4 ms of a 161 ms tick.
+- Skipped. If detection becomes the bottleneck, the next step is the per-round cell size (R_max), not the structure.
