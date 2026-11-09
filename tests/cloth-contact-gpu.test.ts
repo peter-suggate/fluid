@@ -561,6 +561,34 @@ test("GPU envelope cap and contact-list overflow fail explicitly through the sta
   });
 });
 
+test("GPU coincident primitives fail explicitly (status coincident), and the vertex block reads a zero-distance entry as infinite energy, never NaN", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    // Two separate sheets 1 mm apart, each vertex over one of the other's (its contact is with that
+    // vertex feature); then one vertex of the upper sheet placed exactly on the lower one's.
+    const lower = sheet(4, 4, 0.01, [0, 0, 0]), upper = sheet(4, 4, 0.01, [0, 0, 1e-3]);
+    const mesh = merge(lower, upper), N = mesh.x.length, v = lower.x.length + 5, on = 5;
+    const apart: OracleMesh = { ...mesh, x: f32(mesh.x) };
+    let { det, positions } = await detect(device, apart, apart.x.map(() => [0, 0, 0]), baseConfig(N));
+    assert.equal((await det.readCounters()).status & OGC_STATUS.coincident, 0, "separate sheets are not coincident");
+    // The vertex block at a trial position where an entry's two primitives coincide: no NaN.
+    const res = await evalVertexBlock(device, det, positions, apart.x, N);
+    assert.ok(res[16 * v + 4 * 1 + 3]! > 0, "the upper vertex has contact entries");
+    const trial = apart.x.map((p, i) => (i === v ? apart.x[on]! : p) as V3);
+    device.queue.writeBuffer(positions, 0, vec4s(trial));
+    const at = await evalVertexBlock(device, det, positions, apart.x, N);
+    const block = Array.from(at.subarray(16 * v, 16 * v + 16));
+    assert.ok(block.every(x => !Number.isNaN(x)), `vertex block at a coincident trial: ${block.join(", ")}`);
+    assert.equal(at[16 * v + 3], Infinity, "a coincident entry lies outside the barrier's domain");
+    det.destroy();
+    // Detection at coincident primitives fails explicitly.
+    const touching: OracleMesh = { ...mesh, x: f32(trial) };
+    ({ det } = await detect(device, touching, touching.x.map(() => [0, 0, 0]), baseConfig(N)));
+    const c = await det.readCounters();
+    assert.ok(c.status & OGC_STATUS.coincident, `status ${OgcContactDetector.describeStatus(c.status)}`);
+    det.destroy();
+  });
+});
+
 // ------------------------------------------------------------------ static solid field
 
 const solidBox = boxSdf([0.02, 0.02, 0], [0.08, 0.06, 0.03]), solidBall = sphereSdf([0.11, 0.05, 0], 0.025);

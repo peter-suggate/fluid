@@ -1234,3 +1234,19 @@ p50 = 1e-7 m and p90 = 2–5e-4 m.
   tick 222 and the all-scene zero-faces gate wait on it.
 
 ### (A) Truncation against the strain limit: not started.
+
+## 2026-11-09 Item (b): a zero-distance pair fails explicitly (no NaN)
+
+- `ogcEvalEntry` returned n = gap/d at d = 0, so a coincident trial position put NaN into the vertex block.
+  It now returns zero force and Hessian with infinite energy, like the solid entry at phi <= 0. A coincident trial lies
+  outside the barrier's domain, and the line search rejects it.
+- Detection sets a new status bit, `OGC_STATUS.coincident` (4096), when a vertex-face, sample-face or edge-edge pair is
+  at distance 0. No entry is pushed for it, because no contact normal exists.
+- Regression: `tests/cloth-contact-gpu.test.ts`, "GPU coincident primitives fail explicitly…". Two sheets 1 mm apart
+  give no coincident status. A trial position with a vertex on the other sheet's vertex gives a NaN-free block with
+  energy Infinity. Detection at that position sets `coincident`.
+
+## 2026-11-09 COORDINATION (C2 → C1): halt the scene on `coincident`
+
+Please add `OGC_STATUS.coincident` to `CLOTH_CONTACT_FAILING` in `lib/cloth/scene-contact.ts`. A coincident pair has no
+normal: the detector pushes no entry for it, so the step must halt rather than continue without that contact.

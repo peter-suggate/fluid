@@ -92,6 +92,8 @@ export const OGC_STATUS = {
   heldConflict: 1024,
   /** A step ran past the poses the frame's owner uploaded for the moving solid. */
   bodyPose: 2048,
+  /** Two primitives of a contact pair coincided at detection (distance 0): no contact normal exists. */
+  coincident: 4096,
 } as const;
 
 /** Truncation schemes: Planar-DAT (Chen, Hsu, Ayman, Macklin 2026) and the isotropic OGC bound. */
@@ -152,6 +154,7 @@ const OGC_ST_NONFINITE = ${OGC_STATUS.nonFinite}u;
 const OGC_ST_BODY_SQUEEZE = ${OGC_STATUS.bodySqueeze}u;
 const OGC_ST_HELD_CONFLICT = ${OGC_STATUS.heldConflict}u;
 const OGC_ST_BODY_POSE = ${OGC_STATUS.bodyPose}u;
+const OGC_ST_COINCIDENT = ${OGC_STATUS.coincident}u;
 const OGC_F_BODY_CONTACTS = ${OGC_COUNTER.frameBodyContacts}u;
 const OGC_F_BODY_CUT = ${OGC_COUNTER.frameBodyCut}u;
 const OGC_HELD_PAIR = ${OGC_COUNTER.heldConflictPair}u;
@@ -486,6 +489,12 @@ fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> Ogc
   var wr = 0.0;
   for (var i = 0u; i < 4u; i++) { gap += w[i] * X[i]; wr += select(0.0, w[i], ids[i] == v); }
   let d = length(gap);
+  // Coincident primitives (d = 0) lie outside the barrier's domain, like phi <= 0 above: infinite
+  // energy and no direction to push along. Detection fails a coincident pair explicitly (OGC_STATUS.coincident).
+  // The infinity is built from a runtime word (ent.w & 0 is 0), as in ogcFieldEval: a constant one would not fold.
+  if (!(d > 0.0)) {
+    return OgcPairEval(vec3<f32>(0.0), mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)), bitcast<f32>(0x7f800000u | (ent.w & 0u)));
+  }
   let n = gap / d;
   let act = ogcActivation(d, params.x, params.y);
   let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);

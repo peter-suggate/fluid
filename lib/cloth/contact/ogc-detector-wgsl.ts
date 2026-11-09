@@ -1010,7 +1010,8 @@ fn vertexFacet(v: u32) -> RoleOut {
       } else {
         atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
       }
-      if (d < P.r && vfAccept(v, x, t, tri, cl.feature)) {
+      if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+      else if (d < P.r && vfAccept(v, x, t, tri, cl.feature)) {
         let lambda = -ogcActivation(d, P.r, P.kc).y;
         let ent = vec4<u32>(v, t | (cl.feature << 28u), bitcast<u32>(lambda), 0u);
         pushEntry(v, ent);
@@ -1060,7 +1061,8 @@ fn sampleFacet(i: u32) -> RoleOut {
     } else {
       atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
     }
-    if (d < P.r && vfAccept(OGC_NONE, x, t, tri, cl.feature)) {
+    if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+    else if (d < P.r && vfAccept(OGC_NONE, x, t, tri, cl.feature)) {
       let lambda = -ogcActivation(d, P.r, P.kc).y * xs.w;
       let ent = vec4<u32>(i, t | (cl.feature << 28u), bitcast<u32>(lambda), 1u);
       if (cl.feature < 3u) { pushEntry(tri[cl.feature], ent); }
@@ -1113,7 +1115,8 @@ fn edgeEdge(e: u32) -> RoleOut {
           pairEE(er, r2, p0 + st.x * (p1 - p0), q0 + st.y * (q1 - q0));
           out.dat++;
         }
-        if (st.z < P.r && st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0) {
+        if (!(st.z > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+        else if (st.z < P.r && st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0) {
           let lambda = -ogcActivation(st.z, P.r, P.kc).y;
           let ent = vec4<u32>(e, e2 | OGC_EE_BIT, bitcast<u32>(lambda), pack2x16unorm(st.xy));
           pushEntry(er.x, ent); pushEntry(er.y, ent);
