@@ -14,7 +14,7 @@ import type { ClothMaterial, ClothTopologyData } from '../lib/cloth/types';
 import { buildClothSolverModel, clothMechanicalEnergy, clothOracleStep, createClothOracleState, type ClothStepOptions } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace, ClothCoarseCorrection, packClothCoarseTables } from '../lib/cloth/coarse';
 import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
-import { CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
+import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 import { CLOTH_COARSE_MISC } from '../lib/cloth/gpu-coarse-wgsl';
 import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import { CLOTH } from '../lib/cloth/scenes/bridson-2002/parameters';
@@ -176,6 +176,59 @@ test('the GPU coarse factor inverts blocks of one stiff contact direction over s
   console.log(`stiff blocks k / s = ${k / s0}: |A^-1 A - I| ${worst.toExponential(2)}`);
   assert.ok(worst < 0.05, `A^-1 A off the identity by ${worst}`);
   solver.destroy();
+}));
+
+// A stand-in for C2's vertex contact block: vertex v with k_v > 0 carries the spring (k_v / 2) (n_v . (x - x0_v))^2,
+// one stiff direction per vertex (the Gauss-Newton form of a barrier spike). Records per vertex: (n, k), (x0, 0).
+const STIFF_SPRING_CONTACT_WGSL = /* wgsl */`
+@group(0) @binding(${CLOTH_BINDING.contact}) var<storage, read> springs: array<vec4f>;
+fn ogcContactCount(v: u32) -> u32 { return select(0u, 1u, springs[2u * v].w > 0.0); }
+fn ogcVertexContactLanes(v: u32, xv: vec3f, first: u32, stride: u32, f: ptr<function, vec3f>, H: ptr<function, mat3x3f>) -> f32 {
+  let s = springs[2u * v];
+  if (first != 0u || !(s.w > 0.0)) { return 0.0; }
+  let c = dot(s.xyz, xv - springs[2u * v + 1u].xyz);
+  *f -= s.w * c * s.xyz; *H += s.w * mat3x3f(s.xyz * s.x, s.xyz * s.y, s.xyz * s.z);
+  return 0.5 * s.w * c * c;
+}
+fn ogcVertexContactEnergyLanes(v: u32, xv: vec3f, first: u32, stride: u32) -> f32 {
+  var f = vec3f(0.0); var H = mat3x3f(); return ogcVertexContactLanes(v, xv, first, stride, &f, &H);
+}
+fn ogcAccumulateVertexContact(v: u32, xv: vec3f, f: ptr<function, vec3f>, H: ptr<function, mat3x3f>) { _ = ogcVertexContactLanes(v, xv, 0u, 1u, f, H); }
+fn ogcVertexContactEnergy(v: u32, xv: vec3f) -> f32 { return ogcVertexContactEnergyLanes(v, xv, 0u, 1u); }
+`;
+
+test('a contact spike far past f32\'s range (k / s = 1e10, one off-axis direction per coarse node) neither halts the step nor stops its coarse corrections', { skip: !gpu }, async () => withDevice(async device => {
+  // The curtain halted at a contact spike of k / s 4e9 at one vertex (coarseIndefinite, RESULT 18): A_c held, per
+  // node, one direction 1e9 stiffer than the soft ones, which no f32 sum or sweep resolves. The fine solve survives it.
+  // The coarse model now takes such a vertex's contact scaled into f32's range, Hessian and force alike (its minimizer
+  // kept), so the factor runs and its step along the stiff direction stays the Newton one: corrections are accepted.
+  const m = model(sheet(8)), space = buildClothCoarseSpace(m.topology, 6), n = m.topology.vertexCount, h = (2 / 3) / 60;
+  const springs = new Float32Array(8 * n), rest = m.topology.data.restPositions_m;
+  for (let c = 0; c < space.nodeCount; c++) {
+    // The spike sits on the node's seed (its largest weight), across the sheet at a different slant per node.
+    const v = space.seeds[c]!, d = [1, 0.3 * (c - 2), 0.7], l = Math.hypot(...d);
+    springs.set([d[0]! / l, d[1]! / l, d[2]! / l, 1e10 * m.topology.mass_kg[v]! / (h * h)], 8 * v);
+    springs.set([rest[3 * v]! - origin[0], rest[3 * v + 1]! - origin[1], rest[3 * v + 2]! - origin[2], 0], 8 * v + 4);
+  }
+  const buffer = device.createBuffer({ size: springs.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(buffer, 0, springs);
+  const solver = await ClothGPUSolver.create(device, m, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 4, chebyshevRho: 0, origin_m: origin,
+    coarse: space, contact: { wgsl: STIFF_SPRING_CONTACT_WGSL, buffer }, hooks: { afterCoarse: () => {} } });
+  solver.step(6);
+  const status = await solver.readStatus(), stats = await solver.readCoarseStats(), x = await solver.readPositions();
+  assert.deepEqual(ClothGPUSolver.describeStatus(status.status), [], 'the spike halted the step');
+  assert.equal(stats.corrections, 6 * 2, 'every coarse slot ran');
+  const accepted = stats.accepted.reduce((s, a) => s + a, 0);
+  console.log(`spike k / s = 1e10: ${stats.corrections} corrections, accepted at 1, 1/2, 1/4, 1/8: ${stats.accepted.join(', ')}`);
+  assert.ok(accepted > 0, 'no coarse correction was accepted');
+  // The springs hold their vertices along n (to the f32 resolution of 1e10 s against gravity's pull).
+  let slip = 0;
+  for (let c = 0; c < space.nodeCount; c++) {
+    const v = space.seeds[c]!, s = springs.subarray(8 * v, 8 * v + 8);
+    slip = Math.max(slip, Math.abs(s[0]! * (x[3 * v]! - rest[3 * v]!) + s[1]! * (x[3 * v + 1]! - rest[3 * v + 1]!) + s[2]! * (x[3 * v + 2]! - rest[3 * v + 2]!)));
+  }
+  assert.ok(x.every(Number.isFinite) && slip < 1e-4, `spiked vertices slipped ${slip} m along their normals`);
+  solver.destroy(); buffer.destroy();
 }));
 
 test('a GPU two-level run tracks its reference over many steps, and its saved state replays', { skip: !gpu }, async () => withDevice(async device => {

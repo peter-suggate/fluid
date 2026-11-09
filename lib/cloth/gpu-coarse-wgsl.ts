@@ -20,6 +20,10 @@ export const CLOTH_COARSE_SWEEP_WORKGROUP = 1024;
 export const CLOTH_COARSE_MISC = { slope: 0, alpha: 1, ok: 2 } as const;
 /** Status bit of a step whose A_c had a non-positive pivot (its corrections were skipped). Reported, not failing. */
 export const CLOTH_STATUS_COARSE_INDEFINITE = 2;
+/** Most a vertex's contact Hessian block may exceed its own diagonal share s (inertia, pin) by in A_c: f32 resolves a soft
+ * direction s under a stiff one k to about (k / s) 2^-23 per operation, so 1e4 keeps the sweep's pivots to ~1e-3 (the
+ * curtain's factor failed at k / s 4e9 and passed with pivots 4e-5 of their diagonal at 3e7). */
+export const CLOTH_COARSE_CONTACT_RANGE = 1e4;
 
 /** Workgroup memory of coarseFactor: two blocks of three columns of A_c and the ok flag. */
 export function clothCoarseFactorBytes(nodes: number): number { return 4 * (18 * nodes + 1); }
@@ -36,6 +40,7 @@ const CFW = ${CLOTH_COARSE_FACTOR_WORKGROUP}u;
 const C_ENTRIES = ${CLOTH_COARSE.maxEntries}u;
 const C_SLOT_BITS = ${CLOTH_COARSE_SLOT_BITS}u;
 const C_NONE = 0xffffffffu;
+const C_RANGE: f32 = ${CLOTH_COARSE_CONTACT_RANGE.toExponential()};
 fn cf(i: u32) -> f32 { return coarse[i]; }
 fn cfSet(i: u32, x: f32) { coarse[i] = x; }
 fn c4(r: u32) -> vec4f { let i = 4u * r; return vec4f(coarse[i], coarse[i + 1u], coarse[i + 2u], coarse[i + 3u]); }
@@ -121,10 +126,21 @@ fn tangentParts(f0: vec3f, f1: vec3f, d11: f32, d12: f32, d22: f32, g: f32) -> a
     sk[k] = vertexRest(v).x / (h * h);
     if (vertexGroup(v) > 0u) { sk[k] += state[seg(S_PIND, v)].w; }
     sk[k] += grabSpring(v, pos(v)).w;${contact ? `
-    // The vertex's contact Hessian block at the step's guess, read by every face sharing a node pair with it.
+    // The vertex's contact Hessian block at the step's guess, read by every face sharing a node pair with it. A_c holds
+    // it in f32 over the soft directions the correction is for, and past C_RANGE times the vertex's own diagonal s_k
+    // neither A_c's f32 sums nor its sweep resolve those (the factor fails on a positive definite A_c: a barrier spike
+    // reached 4e9). So the coarse model takes that vertex's contact scaled by a = C_RANGE s_k / trace (Hessian and force
+    // alike, so a stiff term keeps its minimizer and the coarse step along it stays the Newton one); a is stored for
+    // coarseGradientAt. Non-finite enters as the isotropic limit with no force. The objective, the Armijo test's change
+    // of G and the fine solve keep the whole contact.
     var fc = vec3f(0.0); var Hc = mat3x3f();
     ogcAccumulateVertexContact(v, pos(v), &fc, &Hc);
-    c4Set(cContactH(v), vec4f(Hc[0], Hc[1].y)); c4Set(cContactH(v) + 1u, vec4f(Hc[1].z, Hc[2].z, 0.0, 0.0));` : ''}
+    let held = C_RANGE * sk[k]; let tr = Hc[0].x + Hc[1].y + Hc[2].z;
+    var a = 1.0;
+    if (!(tr <= held)) {
+      if (tr <= 3.0e38) { a = held / tr; Hc = a * Hc; } else { a = 0.0; Hc = (held / 3.0) * IDENTITY; }
+    }
+    c4Set(cContactH(v), vec4f(Hc[0], Hc[1].y)); c4Set(cContactH(v) + 1u, vec4f(Hc[1].z, Hc[2].z, a, 0.0));` : ''}
   }
   if (P.flags.z != 0u) {
     // Corner difference w_k - w_k1 = p a + q b (Dm's inverse maps (a, b) back to (w1 - w0, w2 - w0)).
@@ -208,8 +224,8 @@ fn faceCoarseBlock(f: u32, wc: vec3f, wd: vec3f) -> mat3x3f {
 // a pass. Sweeping block K with D = A_KK: A_KK <- -D^-1, A_iK <- A_iK D^-1, A_ij <- A_ij - A_iK D^-1 A_Kj; after every
 // block the matrix holds -A^-1. Each lane keeps its packed lower-triangle entries in registers; only the block's three
 // columns pass through workgroup memory, written for the next block by the owners of its entries, so a block is one
-// pass and one barrier. A block that is not positive definite (only round-off can make the PSD element blocks so)
-// skips the step's corrections and raises the status bit.
+// pass and one barrier. A block that is not positive definite (only round-off can make the PSD element blocks so;
+// coarseFactors holds contact inside the range f32 resolves) skips the step's corrections and raises the status bit.
 const CM = ${3 * nodes}u;
 const CPAIRS = ${Math.ceil(3 * nodes / 2)}u;
 const CSW = ${CLOTH_COARSE_SWEEP_WORKGROUP}u;
@@ -334,7 +350,9 @@ fn coarseGradientAt(v: u32, xv: vec3f) -> vec3f {
   g += grabSpring(v, xv).xyz;${contact ? `
   var fc = vec3f(0.0); var Hc = mat3x3f();
   ogcAccumulateVertexContact(v, xv, &fc, &Hc);
-  g -= fc;` : ''}
+  // Scaled as coarseFactors scaled the vertex's block into A_c (the coarse model's contact, see there).
+  let a = c4(cContactH(v) + 1u).z;
+  if (a > 0.0) { g -= a * fc; }` : ''}
   return g;
 }
 fn coarseLive() -> bool { return cf(cMisc() * 4u + ${CLOTH_COARSE_MISC.ok}u) != 0.0; }

@@ -1270,3 +1270,69 @@ The scratch script is `fluid-scratch/cloth-c1/r3/rebuild-trace.mts`.
 - GPU:
   - `cloth-system`, `cloth-gpu-solver` and `cloth-coarse`: 32/32 pass.
   - C2's `cloth-contact-body`, `cloth-contact-gpu` and `cloth-contact-gates`: 17/17 pass with the new default. The two moving-solid tests now pass on C2's working tree at this time; relative-to-body truncation is not yet committed.
+
+## 2026-11-09 RESULT (18): the curtain's coarseIndefinite halt, traced to f32 range at a contact spike and fixed in the coarse model
+
+**Reproduced** on HEAD 913b7e3d plus C2's working tree (curtain, rigid-body solids, C2's probe construction). The halt is not reproducible tick for tick, because detection is not deterministic. One run halted at tick 143 and one at tick 146; another ran to 220 without halting. Scratch: `~/code/me/fluid-scratch/cloth-c1/r3/coarse-indef.mts`.
+- The script reads every step's assembled A_c (GPU f32), the face shares and the per-vertex contact Hessians.
+- It reassembles A_c in Float64 from the same records and factors it by Float64 Cholesky.
+- It replays the GPU's f32 block sweep on the CPU.
+
+**Cause: candidate 1, the sweep's f32 range at a contact spike.** Candidates 2 and 3 are ruled out.
+
+| tick | largest contact Hessian trace at one vertex | worst node contact / inertia | min pivot / diagonal (f64 and f32 replay) | GPU factor |
+|---|---|---|---|---|
+| 125 | 2.2e3 | 2.8e2 | 4.9e-2 | ok |
+| 135 | 3.3e6 | 1.8e4 | 5.3e-3 | ok |
+| 139 | 4.9e9 | 1.1e7 | 1.1e-4 | ok |
+| 143 | 3.1e10 | 2.9e7 | 3.7e-5 | ok |
+| 146 | **1.4e12** | **4.0e9** | 6.6e-6 to 7.8e-6 | **coarseIndefinite** |
+
+- **A_c was positive definite every step.** The Float64 Cholesky passes on both the GPU's own A_c and the Float64 reassembly.
+- **Every contact block is PSD**, to round-off (worst relative min eigenvalue -1e-7).
+- **The f32 assembly is accurate**: its error is at most 8e-7 relative to sqrt(A_ii A_jj).
+- **The real cause:** a soft direction under a stiff one keeps about (k/s) 2^-23 relative accuracy in f32. At k/s = 4e9 the soft pivots (6.6e-6 of their diagonal) sit within the GPU sweep's rounding. Its FMA and order differ from the CPU replay, which passed narrowly.
+- **The fine solve survives the same spike.** solve3 skips a vertex whose determinant fails.
+- The spike itself (trace 1.4e12 at one vertex, about 4e9 times its m/h²) is C2's barrier at a tiny gap. It is reported to C2, not changed here.
+
+**Fix (`gpu-coarse-wgsl.ts`):** the coarse model takes a spiking vertex's contact scaled into the range f32 resolves.
+- `coarseFactors` scales the vertex's contact block by a = C_RANGE s_k / trace whenever its trace exceeds C_RANGE s_k.
+  - s_k is the vertex's own diagonal share (m/h² plus pin).
+  - `CLOTH_COARSE_CONTACT_RANGE` = 1e4. It keeps the sweep's pivots to about 1e-3, and its derivation is in the doc comment.
+- The record stores a, and `coarseGradientAt` scales that vertex's contact force by the same a.
+  - Hessian and force scale alike, so a stiff term keeps its minimizer.
+  - The coarse step along it stays the Newton step (force / stiffness unchanged), instead of overshooting by k / (C_RANGE s).
+- A non-finite block enters as the isotropic limit with no force.
+- The objective, the Armijo change of G and the fine solve keep the whole contact.
+  - The Armijo slope comes from the scaled model, so it is no steeper than the true slope. Acceptance still demands a true decrease in G.
+- What remains of the halt is genuine non-finite or indefinite element blocks (round-off on PSD elements only).
+
+**Before and after, curtain to tick 220:**
+
+| run | halts | coarse corrections accepted (at 1, 1/2, 1/4, 1/8) |
+|---|---|---|
+| range off, a run that did not halt | — | 530/880 (383, 103, 25, 19) |
+| with the fix | none | 602/880 (482, 69, 42, 9) |
+
+- With the fix, the min pivot / diagonal from tick 150 on is at least 3.5e-2.
+- The fix costs a few ALU operations per owned vertex once per step, plus one record read per vertex at each coarse gradient.
+
+**Regression** (`cloth-coarse`, "a contact spike far past f32's range…"):
+- A stand-in contact block gives one spring per coarse-node seed: k = 1e10 m/h², each along a different slant off the axes.
+- Before the fix: coarseIndefinite on the first step.
+- After the fix:
+  - status clean;
+  - 12/12 corrections ran, 9 of them accepted at the full step;
+  - the spiked vertices hold along their normals to under 1e-4 m.
+- I first tried scaling only the Hessian. That cleared the halt, but all 12 corrections were then rejected (the overshoot). That is why the force is scaled too.
+
+**The mouse grab (dbc9910b) landed in my files while this was in progress.** The fix sits on it: `sk[k]` includes the grab spring, so a grabbed vertex's range is taken from its whole diagonal.
+
+**Checks:**
+- `check:types` clean.
+- `test:unit`: 1675 pass, 1 fail (the known foreign `reservoir-particle-cost`).
+- GPU suite (`cloth-coarse`, `cloth-gpu-solver`, `cloth-system` and all `cloth-contact-*`): 79 pass, 1 fail, 4 skipped.
+  - The one failure is "capture runs a 150 x 150 Bridson sheet… free fall": the drop spread was 1.48 mm against a 1 mm gate.
+  - With the range fix off, it is bit-identical: the drop is 48.39..49.87 mm both ways.
+  - The cause was ebbfaecc's bending ×8. At bending 1.5e-4 the spread is 0.38 mm, and 3b0bd218 has since reverted the change.
+- `cloth-coarse`: 8/8 after the revert.
