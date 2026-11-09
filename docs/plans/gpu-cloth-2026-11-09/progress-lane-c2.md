@@ -1397,3 +1397,73 @@ Also in this commit:
   contact-neutral (a regression checks the parts are identical with and without paint).
 - Detector flag bit 4 (touched the moving solid) is set only when the body ball reaches r.
 
+
+## 2026-11-09 C2 takeover: free fall with contact ON, the solidBounds halt, and the "target" prediction
+
+Takeover of the previous C2 agent's uncommitted WIP. Audited, part landed (below), part dropped; the dropped part
+(`applyGuess`, a non-holding first truncation of the solver's guess) is saved under
+`~/code/me/fluid-scratch/c2/wip-takeover/with-applyguess/` and `c2-wip.patch`. It was the moving-plate regression
+(18–52 % rms from the rigid velocity against HEAD's 1.7 / 8.2 / 4.8 %; without it 8.4 % then 4.2 %).
+
+### Landed
+
+1. **Prediction `"target"`** (`OgcContactConfig.prediction`, `OgcSolverInputs.target`, binding 17): the predicted
+   motion of a free vertex is y − x_t, y the solver's inertial target (BDF2: x̂ + h v̂ + h² g). That is the exact
+   free-flight solution of any implicit step, whatever the solver's initial guess, so free cloth is never truncated.
+   `bind` refuses `"target"` without `stepStart` and `target`, and a `target` without `"target"`.
+2. **Clearance table** (`solid-field.ts`, image word 11): per 4³-cell block K_b = f(c_b) − √3 h (f32 rounded down),
+   so φ ≥ min(band, K_b − |x0 − c_b| − ρ) within ρ of x0. `roundBound` gives a vertex no solid terms when that
+   clears r. A missing brick only knows φ > band, so a step longer than (band − r)/L_max (6 cm at the scenes'
+   band) far above a floor could not be certified before. The table is rebuilt whole on an edit.
+3. **The lattice edge** (`ogcSolidBallBound`, header word 12, `SOLID_HEADER_WORDS` 12 → 16): a cell outside the
+   lattice used to read as a missing brick (certified far). In a scene field the container shell lies just past the
+   box, so the free-fall sheet's ball reached through the floor's face, was certified, and the next round halted
+   with `solidBounds` (analytic free fall, frame 32). A field now states whether its exterior is clear
+   (`exteriorClear`: every part's box lies band inside the lattice, true for a moving body's padded box). Clear: the
+   cell is a missing brick, as before. Not clear: the cell adds nothing (the path crosses the lattice face in a
+   stored or a missing cell), and a vertex outside the lattice still fails as `solidBounds`. **With it the free-fall
+   sheet lands at frame 29–30 with no halt through 70 ticks.** The Float64 oracle mirrors it.
+
+Tests: `cloth-contact-solid` (clearance bound over 32 000 points, 0.1 m motions certified 0.5 m above a floor,
+rebuild equals full build; the ball at the lattice edge is cut for the floor, far for a body field),
+`cloth-contact-gpu` (GPU free flight: a 7 cm/step sheet 0.8 m above a floor under `"target"` has 0 floor entries,
+0 held, ρ = 0, the envelope at rqBase, no cut, no re-detection). GPU suites contact-gpu, contact-solid,
+contact-body, contact-scene-solids and cloth-system: 58 / 59. The one failure is the moving-sphere cut test, which
+is **flaky on HEAD**: HEAD 1.6, 1.7, 4.5, 9.4, 21.0, 12.0, 19.0 mm (bound 10 mm), this commit 8.6, 1.3, 12.1, 17.8 mm.
+In that test every vertex is held and every round ends in `roundCap`, so the sheet falls at the cap rate
+(0.5 γ_r r_q per step) and the end height is set by the creep. That is the hold cascade below, not this commit.
+
+### Findings (priority 1: contact must not disturb free cloth)
+
+- **Free fall passes with contact ON** under `"target"`, using a preload that binds the solver's y segment, plus the
+  gravity fix below: 0.0001 mm, 0.0028 mm/s, flatness 0.0040 mm, strain 2.44e-6. The bare solver gives 0.0002 mm.
+- **Gravity mismatch in the analytic scenes:** the scene runs at −9.80665 (`createEmptyScene`) while the reference
+  uses `GRAVITY.value` = 9.81. That alone fails the 1e-4 m gate, with contact on or off.
+- **`"guess"` truncates free cloth.** The mandatory round predicts the guess; any guess cut sets bit 0 and the
+  vertex is held in the next step, its envelope covering its whole inertial motion capped at rqMax. A falling
+  sheet then locks into a cascade where all vertices are held and every round ends in `roundCap`.
+- **Swinging sheet not solved under VBD.** `"guess"` gives about 1.35 mm, no crossing, all vertices held.
+  `"target"` gives 211 mm at step 20: y is a poor prediction near the pin, so the cap ball sits on the wrong centre.
+  Fix for Newton (C2, next): re-detection rounds predict the current Newton target x + d (`encodeFilter` stores it);
+  yref stays y so the next step's ρ stays honest.
+- **BDF2 impact rebound:** under `"target"` the falling sheet rebounds at about 3.8 m/s after a 4.8 m/s impact on
+  the floor. Under `"guess"` it rests only because the hold cascade locks it. The contact energy stiffness kc
+  (100 N/m in `scene-contact.ts`) is a per-pair spring, not a through-thickness stiffness. Needs C1 (Newton
+  converged impact) before a contact-side change.
+- Tooling pitfall: a tsx `--import` preload outside the repo (no `"type": "module"`) loads as CJS and patches a
+  different module instance than the ESM tests. Keep preloads under the repo's `tests/`.
+
+## 2026-11-09 COORDINATION (C2 → C1): scene-contact and analytic scene changes C2 needs (C1's files)
+
+a. `clothAnalyticSceneDescription`: set `scene.fluid.gravity_m_s2 = { x: 0, y: -GRAVITY.value, z: 0 }`. The
+   free-fall gate fails at 1e-4 m on 9.80665 against 9.81 with contact off as well.
+b. `scene-contact.ts`: `prediction: 'target'`, and bind `target` to the solver's y segment, in `system.ts`
+   `contact.bind({ positions, velocities, stepStart, target })`. Offset = stepStart offset +
+   (CLOTH_STATE.y − CLOTH_STATE.xt) · 16 · stride; a `solver.inertialTarget` binding getter would do. With it free
+   fall passes with contact on.
+c. `CLOTH_CONTACT_FAILING` lacks `OGC_STATUS.coincident` (the zero-distance pair status): add it so the scene halts.
+d. Pinned vertices: the solver's y for a pinned vertex should be its attachment target, so that "target" predicts
+   the pin's motion exactly. Today pins take the attachment in init but y comes from x̂ + h v̂.
+e. The BDF2 impact rebound above: please confirm on the converged Newton trajectory (0.8 m drop onto the floor)
+   before C2 tunes anything contact-side. We do not tune parameters; if the converged rebound is still about 80 %,
+   the contact energy's stiffness model is the cause, and C2 owns that.

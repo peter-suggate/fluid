@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildClothSolidField, clothSolidSampleEdges, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, clothSolidClearance, clothSolidSampleEdges, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
 import {
   add, boxSdf, dot, faceInsideSolid, norm, rng, scale, solidBallBound, solidBoundDrop, solidContact, solidKeep, solidTruncate, sphereSdf, sub,
   type ContactParams, type V3,
@@ -97,6 +97,40 @@ test("solid field: a local rebuild after a cut equals a full build of the cut so
   assert.ok(phiAt([0.05, 0.04, 0.03 + 1e-3]) < 2e-3 && sampleClothSolidField(local, [0.05, 0.04, 0.02]).phi > 0, "the cut opens the solid under the point");
 });
 
+test("solid clearance table: the field is at least min(band, K_b - |x0 - c_b| - rho) within rho of x0, it certifies long motions far from the solid, and a rebuild keeps it", () => {
+  // Every point of a ball, missing bricks (band) and stored ones alike, at the sampled field; the
+  // floor and ball scene at the 1 cm lattice of the scenes, where a missing brick reads 6 cm.
+  const cell = 0.01, floorLo: V3 = [-1.4, -0.1, -1.4], floorHi: V3 = [1.4, 0, 1.4], sphere = sphereSdf([0.3, 0.3, -0.2], 0.25);
+  const parts: ClothSolidPart[] = [{ kind: "lattice-box", lo: floorLo, hi: floorHi, mu: 0.3 }, { kind: "sdf", sdf: p => sphere(p), lo: [0.05, 0.05, -0.45], hi: [0.55, 0.55, 0.05], mu: 1 }];
+  const f = buildClothSolidField({ lo: [-1.44, -0.16, -1.44], hi: [1.44, 1.2, 1.44], cell, band: 0.06, parts });
+  const R = rng(11);
+  let checked = 0, certified = 0;
+  for (let i = 0; i < 4000; i++) {
+    const x0: V3 = [-1.3 + 2.6 * R(), 0.01 + 1.1 * R(), -1.3 + 2.6 * R()], rho = 0.3 * R() * R(), k = clothSolidClearance(f, x0);
+    for (let j = 0; j < 8; j++) {
+      const y = add(x0, scale(unit(R), rho * Math.cbrt(R()))), phi = sampleClothSolidField(f, y).phi;
+      assert.ok(phi >= Math.min(f.band, k - rho) - 1e-9, `field ${phi} at ${y} below the clearance bound ${k - rho} of x0 ${x0}, rho ${rho}`);
+      checked++;
+    }
+    if (k - rho >= 2e-3) certified++;
+  }
+  // A vertex 0.5 m above the floor and clear of the ball: a 0.1 m motion is certified, where the
+  // bricks' own rule (min(phi, band) - L_max rho >= r) stops at (0.06 - r) / L_max = 3.3 cm.
+  const high: V3 = [-0.8, 0.5, 0.8];
+  assert.ok(clothSolidClearance(f, high) - 0.1 >= 2e-3, `clearance ${clothSolidClearance(f, high)} at 0.5 m`);
+  assert.ok(Math.min(sampleClothSolidField(f, high).phi, f.band) - f.maxLipschitz * 0.1 < 2e-3, "the brick rule alone cannot certify it");
+  // At the floor the table certifies nothing it should not.
+  assert.ok(clothSolidClearance(f, [-0.8, 0.004, 0.8]) < 2e-3);
+  // The edit path rebuilds the table from the edited source.
+  const hole = boxSdf([-0.2, -0.1, -0.2], [0.2, 0, 0.2]);
+  const cutParts: ClothSolidPart[] = [{ kind: "sdf", sdf: p => Math.max(boxSdf(floorLo, floorHi)(p), -hole(p)), lo: floorLo, hi: floorHi, mu: 0.3 }, parts[1]!];
+  const src = { lo: [-1.44, -0.16, -1.44] as V3, hi: [1.44, 1.2, 1.44] as V3, cell, band: 0.06, parts: cutParts };
+  const rebuilt = rebuildClothSolidField(f, src, [-0.2, -0.1, -0.2], [0.2, 0, 0.2]), fresh = buildClothSolidField(src);
+  assert.deepEqual(rebuilt.clearance, fresh.clearance);
+  assert.ok(clothSolidClearance(rebuilt, [0, -0.05, 0]) > clothSolidClearance(f, [0, -0.05, 0]), "the cut opens the clearance inside it");
+  console.log(`# clearance: ${checked} points checked, ${certified} of 4000 balls certified by the table`);
+});
+
 test("solid ball bound: phi(x0 + d) >= phi0 + g0.d - D.|d| over the ball (per-axis gradient deviation), at sharp edges, corners and the sphere", () => {
   const R = rng(7), r = 2e-3;
   let near = 0, far = 0;
@@ -110,6 +144,29 @@ test("solid ball bound: phi(x0 + d) >= phi0 + g0.d - D.|d| over the ball (per-ax
     }
   }
   assert.ok(near > 100 && far > 10, `${near} near, ${far} far`);
+});
+
+test("solid ball bound at the lattice's edge: cells outside the field's box are no missing bricks, so a ball reaching past a floor on the box's face is cut, not certified far", () => {
+  // The scenes' container floor: a lattice-box just below the field's box, its top face on the box's;
+  // the scenes' band r + 1.5 L_max rqMax at rqMax 4 cm, and rho <= rqMax / 2.
+  const cell = 0.01, r = 2e-3, gammaR = 0.9, rqMax = 0.04;
+  const f = buildClothSolidField({ lo: [-0.4, 0, -0.4], hi: [0.4, 0.6, 0.4], cell, band: r + 1.5 * Math.sqrt(3) * rqMax, parts: [{ kind: "lattice-box", lo: [-0.5, -0.02, -0.5], hi: [0.5, 0, 0.5], mu: 0.3 }] });
+  const R = rng(13);
+  for (let i = 0; i < 400; i++) {
+    const x0: V3 = [-0.3 + 0.6 * R(), 0.001 + 0.019 * R(), -0.3 + 0.6 * R()], rho = x0[1] + (rqMax / 2 - x0[1]) * R();
+    const b = solidBallBound(f, x0, rho, r);
+    assert.ok(!b.far, `ball at height ${x0[1]}, rho ${rho} certified far`);
+    const d = solidTruncate(b, [0.3 * rho * (R() - 0.5), -rho, 0.3 * rho * (R() - 0.5)], gammaR, r), y = add(x0, d);
+    assert.ok(y[1] >= solidKeep(b.phi0, gammaR, r) - 1e-9, `the motion from ${x0[1]} ends at ${y[1]}`);
+  }
+  assert.equal(f.exteriorClear, false, "the floor reaches past the box");
+  // A moving body's field: its box pads the solid by band, so outside the lattice phi >= band and a
+  // ball reaching past the lattice is as clear as one reaching a missing brick (certified far).
+  const R0 = 0.1, band = r + 1.5 * Math.sqrt(3) * rqMax, reach = R0 + band + 2 * cell, ball = sphereSdf([0, 0, 0], R0);
+  const body = buildClothSolidField({ parts: [{ kind: "sdf", sdf: p => ball(p), lo: [-R0, -R0, -R0], hi: [R0, R0, R0], mu: 0.3 }], lo: [-reach, -reach, -reach], hi: [reach, reach, reach], cell, band });
+  assert.equal(body.exteriorClear, true);
+  const lat = body.origin[0] + 8 * cell * body.dims[0], edge: V3 = [lat - 0.004, 0, 0], eb = solidBallBound(body, edge, 0.019, 0.1);
+  assert.ok(eb.far && sampleClothSolidField(body, edge).stored, `a ball across the body lattice's face (phi ${eb.phi0}) is far`);
 });
 
 test("solid truncation keeps phi >= min((1 - gamma_r) phi0, r) along the whole motion and leaves sliding on a flat face whole", () => {

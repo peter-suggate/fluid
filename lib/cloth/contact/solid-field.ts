@@ -15,12 +15,29 @@
  * loses it: the build samples every cell the surface can cross and throws
  * where the source and the interpolant disagree (checkResolved).
  *
+ * A missing brick reads `band`, so a round's motion longer than band / L_max
+ * cannot be certified from the brick table alone, however far the solid is. The
+ * clearance table certifies it: per block of 4^3 cells (two per brick and axis,
+ * over every brick of the box) K_b = f(c_b) - sqrt(3) h, with f the source's
+ * union (1-Lipschitz) at the block centre c_b. A stored node holds a union over a
+ * subset of the parts, so it is at least f there, and a point's trilinear value
+ * mixes nodes within sqrt(3) h of it. So the field is at least
+ * min(band, K_b - |x0 - c_b| - rho) at every point within rho of any x0 (a
+ * missing brick reads band): with band >= r, a ball whose bound clears r needs
+ * no solid terms.
+ *
  * GPU image (u32 words, appended to the contact buffer at a word offset base):
  *   header  [0] slots - 1  [1] brick count  [2] cell (f32)  [3] band (f32)
- *           [4..6] origin (f32)  [7] L_max (f32)  [8..10] bricks per axis  [11] 0
+ *           [4..6] origin (f32)  [7] L_max (f32)  [8..10] bricks per axis
+ *           [11] word offset of the clearance table from base (0: none)
+ *           [12] 1 when the field's exterior is clear (every part's box lies band
+ *           inside the lattice, so outside it phi >= band, as a missing brick
+ *           reads); 0 when a part reaches past the box (the scene container's
+ *           shell): outside the lattice the image knows nothing  [13..15] 0
  *   slots   (bx, by, bz, record word offset from base); an empty slot has w = OGC_NONE
  *   records 729 node values (f32), x fastest, padded to 732 words, then the
  *           node friction coefficients, one byte per node (mu * 100), four per word
+ *   clearance  K_b (f32, rounded down) per block, x fastest, 2 * dims per axis
  *
  * A source is one signed distance or a union of parts, each with its own
  * friction coefficient. A part is evaluated only for bricks within band of its
@@ -35,12 +52,22 @@ export type V3 = readonly [number, number, number];
 
 export const SOLID_BRICK_CELLS = 8;
 const N = SOLID_BRICK_CELLS + 1, NODES = N ** 3;
-export const SOLID_HEADER_WORDS = 12;
+export const SOLID_HEADER_WORDS = 16;
+/** Cells per side of a clearance block (two blocks per brick and axis). */
+export const SOLID_CLEARANCE_CELLS = 4;
+/**
+ * Slack (m) taken off every clearance for the GPU's f32 evaluation of
+ * K_b - |x0 - c_b|: a few ulps of coordinates of a few metres.
+ */
+export const SOLID_CLEARANCE_ROUNDING = 1e-5;
 /** Word offset of the friction bytes in a record. */
 export const SOLID_MU_WORD = 4 * Math.ceil(NODES / 4);
 export const SOLID_RECORD_WORDS = SOLID_MU_WORD + 4 * Math.ceil(NODES / 16);
 /** Friction coefficients are stored per node to 0.01, from 0 to 2.55. */
 export const SOLID_MU_SCALE = 100;
+
+/** The largest f32 at or below x: a lower bound stored as f32 must not round up. */
+export function f32Down(x: number): number { return -f32Up(-x); }
 
 /** The smallest f32 at or above x: the image stores L_max as f32, and a bound must not round down. */
 export function f32Up(x: number): number {
@@ -59,7 +86,7 @@ export function f32Up(x: number): number {
 export const SOLID_LIPSCHITZ_BOUND = f32Up(Math.sqrt(3));
 
 export type ClothSolidPart =
-  /** Any 1-Lipschitz signed distance whose solid lies inside [lo, hi]. */
+  /** Any 1-Lipschitz signed distance whose solid lies inside [lo, hi] (outside the box, at least its distance to the box). */
   | { readonly kind: "sdf"; sdf(p: V3): number; readonly lo: V3; readonly hi: V3; readonly mu: number }
   /** A box with every face on a node plane of the field's lattice. */
   | { readonly kind: "lattice-box"; readonly lo: V3; readonly hi: V3; readonly mu: number };
@@ -92,6 +119,10 @@ export interface ClothSolidField {
   /** Bricks per axis over the authored box. */
   dims: V3;
   bricks: Map<string, ClothSolidBrick>;
+  /** K_b per clearance block (2 * dims per axis, x fastest), f32 rounded down: the field is at least min(band, K_b - |p - c_b|) at every p. */
+  clearance: Float32Array;
+  /** Every part's box lies band inside the lattice: outside the lattice phi >= band (a missing brick). */
+  exteriorClear: boolean;
   /** Largest per-brick L, rounded up to f32 (the image's word 7 exactly). */
   maxLipschitz: number;
   /** The GPU image. */
@@ -315,11 +346,13 @@ function pack(field: Omit<ClothSolidField, "words">): Uint32Array<ArrayBuffer> {
   const bricks = [...field.bricks.values()];
   let slots = 1;
   while (slots < 2 * Math.max(1, bricks.length)) slots *= 2;
-  const words = new Uint32Array(SOLID_HEADER_WORDS + 4 * slots + bricks.length * SOLID_RECORD_WORDS);
+  const clearanceAt = SOLID_HEADER_WORDS + 4 * slots + bricks.length * SOLID_RECORD_WORDS;
+  const words = new Uint32Array(clearanceAt + field.clearance.length);
   const f = new Float32Array(words.buffer);
   words[0] = slots - 1; words[1] = bricks.length; f[2] = field.cell; f[3] = field.band;
   f[4] = field.origin[0]; f[5] = field.origin[1]; f[6] = field.origin[2]; f[7] = field.maxLipschitz;
-  words[8] = field.dims[0]; words[9] = field.dims[1]; words[10] = field.dims[2];
+  words[8] = field.dims[0]; words[9] = field.dims[1]; words[10] = field.dims[2]; words[11] = clearanceAt; words[12] = field.exteriorClear ? 1 : 0;
+  f.set(field.clearance, clearanceAt);
   for (let s = 0; s < slots; s++) words[SOLID_HEADER_WORDS + 4 * s + 3] = OGC_NONE;
   let record = SOLID_HEADER_WORDS + 4 * slots;
   for (const b of bricks) {
@@ -351,7 +384,42 @@ export function buildClothSolidField(src: ClothSolidSource): ClothSolidField {
     const b = buildBrick(parts, cell, band, origin, [bx, by, bz]);
     if (b) bricks.set(`${bx},${by},${bz}`, b);
   }
-  return finish({ cell, band, origin, dims, bricks, maxLipschitz: 0 });
+  return finish({ cell, band, origin, dims, bricks, clearance: clearanceOf(parts, cell, band, origin, dims), exteriorClear: exteriorClearOf(parts, cell, band, origin, dims), maxLipschitz: 0 });
+}
+
+/**
+ * K_b = f(c_b) - sqrt(3) h per clearance block, f the union of every part (each
+ * 1-Lipschitz, so the union is), rounded down to f32 with the GPU's rounding slack.
+ * A part's box further than band from c_b stands in for its distance there.
+ */
+function clearanceOf(parts: readonly Part[], cell: number, band: number, origin: V3, dims: V3): Float32Array {
+  const per = SOLID_BRICK_CELLS / SOLID_CLEARANCE_CELLS, n = dims.map(d => per * d), span = SOLID_CLEARANCE_CELLS * cell;
+  const out = new Float32Array(n[0]! * n[1]! * n[2]!), slack = Math.sqrt(3) * cell + SOLID_CLEARANCE_ROUNDING;
+  const c: [number, number, number] = [0, 0, 0];
+  for (let z = 0, i = 0; z < n[2]!; z++) for (let y = 0; y < n[1]!; y++) for (let x = 0; x < n[0]!; x++, i++) {
+    c[0] = origin[0] + (x + 0.5) * span; c[1] = origin[1] + (y + 0.5) * span; c[2] = origin[2] + (z + 0.5) * span;
+    let fc = Infinity;
+    for (const part of parts) {
+      // A part further than band from c is at least its box's distance there (a signed distance
+      // of a solid inside the box), which the near-part rule of buildBrick relies on as well.
+      const d = Math.hypot(Math.max(0, part.lo[0] - c[0], c[0] - part.hi[0]), Math.max(0, part.lo[1] - c[1], c[1] - part.hi[1]), Math.max(0, part.lo[2] - c[2], c[2] - part.hi[2]));
+      fc = Math.min(fc, d > band ? d : part.sdf(c));
+    }
+    if (Number.isNaN(fc)) throw new RangeError("Cloth solid distance must not be NaN");
+    out[i] = Number.isFinite(fc) ? f32Down(fc - slack) : (fc > 0 ? 3.0e38 : -3.0e38);
+  }
+  return out;
+}
+
+/**
+ * Whether every part's box lies band inside the lattice [origin, origin + 8 h dims]: a part's
+ * solid lies inside its box and its distance is at least the box's outside it, so the field
+ * outside the lattice is then at least band (a moving body's padded box). A scene's container
+ * reaches past the box, and outside the lattice the image knows nothing.
+ */
+function exteriorClearOf(parts: readonly Part[], cell: number, band: number, origin: V3, dims: V3): boolean {
+  const span = SOLID_BRICK_CELLS * cell;
+  return parts.every(p => p.lo.every((v, a) => v - band >= origin[a]!) && p.hi.every((v, a) => v + band <= origin[a]! + span * dims[a]!));
 }
 
 function finish(f: Omit<ClothSolidField, "words">): ClothSolidField {
@@ -365,7 +433,8 @@ function finish(f: Omit<ClothSolidField, "words">): ClothSolidField {
 /**
  * The field after a solid edit inside the cloth-local box [lo, hi]: the bricks
  * within `band` of the box are rebuilt from the edited source, every other
- * brick is kept as it is. Edit-time CPU work.
+ * brick is kept as it is (the source is unchanged there), and the clearance
+ * table is rebuilt whole (an edit moves the distance everywhere). Edit-time CPU work.
  */
 export function rebuildClothSolidField(field: ClothSolidField, src: ClothSolidSource, lo: V3, hi: V3): ClothSolidField {
   if (src.cell !== field.cell || src.band !== field.band) throw new RangeError("A solid edit cannot change the cloth solid field's cell or band");
@@ -378,7 +447,15 @@ export function rebuildClothSolidField(field: ClothSolidField, src: ClothSolidSo
     const key = `${bx},${by},${bz}`, b = buildBrick(parts, field.cell, field.band, field.origin, [bx, by, bz]);
     if (b) bricks.set(key, b); else bricks.delete(key);
   }
-  return finish({ cell: field.cell, band: field.band, origin: field.origin, dims: field.dims, bricks, maxLipschitz: 0 });
+  return finish({ cell: field.cell, band: field.band, origin: field.origin, dims: field.dims, bricks, clearance: clearanceOf(parts, field.cell, field.band, field.origin, field.dims), exteriorClear: exteriorClearOf(parts, field.cell, field.band, field.origin, field.dims), maxLipschitz: 0 });
+}
+
+/** The clearance table's bound at p (ogcSolidClearance): within rho of p the field is at least min(band, this - rho). */
+export function clothSolidClearance(field: ClothSolidField, p: V3): number {
+  const per = SOLID_BRICK_CELLS / SOLID_CLEARANCE_CELLS, span = SOLID_CLEARANCE_CELLS * field.cell, n = field.dims.map(d => per * d);
+  const b = p.map((v, a) => Math.min(n[a]! - 1, Math.max(0, Math.floor((v - field.origin[a]!) / span))));
+  const c = b.map((v, a) => field.origin[a]! + (v + 0.5) * span);
+  return field.clearance[b[0]! + n[0]! * (b[1]! + n[1]! * b[2]!)]! - Math.hypot(p[0] - c[0]!, p[1] - c[1]!, p[2] - c[2]!);
 }
 
 /** The field at a cloth-local point: phi (m), its gradient, the nearest node's friction, and whether a stored brick holds the point (else phi reads band). */

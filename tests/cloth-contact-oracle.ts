@@ -683,6 +683,9 @@ export function solidBallBound(field: ClothSolidField, x0: V3, rho: number, r: n
   const D: V3 = [0, 0, 0];
   for (let cz = c0[2]; cz <= c1[2]; cz++) for (let cy = c0[1]; cy <= c1[1]; cy++) for (let cx = c0[0]; cx <= c1[0]; cx++) {
     const c = [cx, cy, cz], b = c.map(v => Math.floor(v / SOLID_BRICK_CELLS));
+    // Outside the lattice: a missing brick when the exterior is clear (a body's padded box),
+    // else no information (the container shell lies there).
+    if (b.some((v, a) => v < 0 || v >= field.dims[a])) { if (field.exteriorClear) return out; continue; }
     const brick = field.bricks.get(b.join(","));
     if (!brick) return out;
     const { lo, hi } = cellGradientRange(brick.values, c.map((v, a) => v - SOLID_BRICK_CELLS * b[a]) as V3);

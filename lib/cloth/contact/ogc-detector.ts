@@ -100,10 +100,12 @@ export interface OgcContactConfig {
    */
   body?: { capacityWords: number; sampleCapacity: number; poseCapacity: number };
   /**
-   * Predicted-motion DAT, predicting v dt + g dt^2 ("inertial", the default) or the
+   * Predicted-motion DAT, predicting v dt + g dt^2 ("inertial", the default), the
    * solver's initial guess x_guess - x_t ("guess": needs `stepStart`, with the guess
-   * in `positions` when the mandatory round runs), or Planar-DAT with every
-   * prediction held ("none").
+   * in `positions` when the mandatory round runs), the solver's inertial target
+   * y - x_t ("target": needs `stepStart` and `target`; the free-flight solution of
+   * any implicit step, so a sheet in free flight is never truncated whatever the
+   * solver's guess), or Planar-DAT with every prediction held ("none").
    */
   prediction?: OgcPrediction;
   /** The broad-phase cell's floor (m); default the larger of the mean edge length and rqBase. */
@@ -124,7 +126,7 @@ export interface OgcContactConfig {
   newton?: boolean;
 }
 
-export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2 } as const;
+export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2, target: 3 } as const;
 
 /** A rigid pose of the moving solid: x_world = R(orientation) x_body + position. */
 /** The per-vertex detector state carried from one step to the next (readCarriedState). */
@@ -157,6 +159,11 @@ export interface OgcSolverInputs {
   stepStart?: GPUBuffer | GPUBufferBinding;
   /** vec4<f32> per vertex, metres: a Newton solver's direction d for encodeFilter (newton config only). */
   direction?: GPUBuffer | GPUBufferBinding;
+  /**
+   * vec4<f32> per vertex, cloth-local metres: the step's inertial target y (the minimizer
+   * of the step's inertia term), in place when the mandatory round runs (prediction "target" only).
+   */
+  target?: GPUBuffer | GPUBufferBinding;
 }
 
 export interface OgcFrameCounters {
@@ -569,7 +576,7 @@ export class OgcContactDetector {
 
   private async compile() {
     const specs: [string, string, number[], Record<number, "positions">?][] = [
-      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13, 14]],
+      ["prep", OGC_PREP_WGSL, [0, 2, 3, 4, 5, 8, 9, 13, 14, 17]],
       ["cell", OGC_CELL_WGSL, [0, 9]],
       ["count", ogcGridCountWGSL(false), [0, 1, 4, 5, 6, 9, 14]],
       ["scan1", ogcScanWGSL(1), [0, 6, 7]],
@@ -608,13 +615,15 @@ export class OgcContactDetector {
     if (this.config.newton && !inputs.direction) throw new Error("OGC: a newton detector needs the solver's direction buffer");
     if (!this.config.newton && inputs.direction) throw new Error("OGC: a direction is bound only with the newton config");
     if (this.prediction === "guess" && !inputs.stepStart) throw new Error('OGC: prediction "guess" needs the solver\'s stepStart (x_t) with the guess in positions');
+    if (this.prediction === "target" && !(inputs.stepStart && inputs.target)) throw new Error('OGC: prediction "target" needs the solver\'s stepStart (x_t) and its inertial target y');
+    if (this.prediction !== "target" && inputs.target) throw new Error('OGC: a target is bound only with prediction "target"');
     this.inputs = inputs;
     const res = (b: GPUBuffer | GPUBufferBinding): GPUBufferBinding => ("buffer" in b ? b : { buffer: b });
     const all: Record<number, GPUBufferBinding> = {
       0: res(this.params), 1: res(this.topo), 2: res(inputs.positions), 3: res(inputs.velocities), 4: res(this.det), 5: res(this.work),
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
       13: res(inputs.stepStart ?? inputs.positions), 14: res(this.pred),
-      15: res(inputs.direction ?? inputs.positions), 16: res(this.alpha),
+      15: res(inputs.direction ?? inputs.positions), 16: res(this.alpha), 17: res(inputs.target ?? inputs.positions),
     };
     for (const [name, k] of this.kernels) {
       k.bindGroup = this.device.createBindGroup({

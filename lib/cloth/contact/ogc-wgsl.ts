@@ -26,7 +26,7 @@
  * [8..11] its end pose (OGC_POSE_WORDS each: centre, then the rotation's columns), which the
  * step's begin copies from the table the frame's owner uploads.
  */
-import { SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WORD } from "./solid-field";
+import { SOLID_CLEARANCE_CELLS, SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WORD } from "./solid-field";
 
 
 /** Counter word indices (atomic<u32>) shared by the TS host and the WGSL. */
@@ -321,6 +321,19 @@ fn ogcSolidSample(h: OgcSolidHeader, p: vec3<f32>) -> OgcSolidSample {
   return OgcSolidSample(phi, g / h.cell, true);
 }
 
+// The field at every point within rho of p is at least min(band, ogcSolidClearance(h, p) - rho)
+// (solid-field.ts: K_b - |p - c_b| of p's clearance block, clamped into the table; -3e38
+// for an image without the table).
+fn ogcSolidClearance(h: OgcSolidHeader, p: vec3<f32>) -> f32 {
+  let t = ogcSolidWord(h.base + 11u);
+  if (t == 0u) { return -3.0e38; }
+  let span = ${SOLID_CLEARANCE_CELLS}.0 * h.cell;
+  let n = (8u / ${SOLID_CLEARANCE_CELLS}u) * h.dims;
+  let b = vec3<u32>(clamp(floor((p - h.origin) / span), vec3<f32>(0.0), vec3<f32>(n - vec3<u32>(1u))));
+  let c = h.origin + (vec3<f32>(b) + 0.5) * span;
+  return bitcast<f32>(ogcSolidWord(h.base + t + b.x + n.x * (b.y + n.y * b.z))) - length(p - c);
+}
+
 // The friction coefficient of the node nearest p (0 outside the stored bricks).
 fn ogcSolidMu(h: OgcSolidHeader, p: vec3<f32>) -> f32 {
   let q = (p - h.origin) / h.cell;
@@ -339,6 +352,12 @@ fn ogcSolidMu(h: OgcSolidHeader, p: vec3<f32>) -> f32 {
 // path integral of (grad - g0).d, axis by axis. far: the whole ball lies further than r from the solid and is free of
 // it: either min(phi0, band) - L_max rho >= r, or the box touches a missing brick, where
 // phi > band; the upload requires band >= r + 1.5 L_max rqMax with rho <= rqMax / 2.
+// Cells outside the lattice read as a missing brick when the field's exterior is clear (header
+// word 12: every part lies band inside the box, a moving body's field). Otherwise they are no
+// missing bricks: the scene container's shell lies there, just past the box. They then add
+// nothing to D: a path that leaves the lattice crosses its boundary in a stored cell (where the
+// bound holds, and phi is 0 on a shell's face) or in a missing one, and a vertex outside the
+// lattice fails the next round as OGC_ST_SOLID_BOUNDS.
 struct OgcSolidBound { far: bool, phi0: f32, g0: vec3<f32>, D: vec3<f32> }
 fn ogcSolidBallBound(h: OgcSolidHeader, x0: vec3<f32>, rho: f32, r: f32) -> OgcSolidBound {
   let s = ogcSolidSample(h, x0);
@@ -350,9 +369,11 @@ fn ogcSolidBallBound(h: OgcSolidHeader, x0: vec3<f32>, rho: f32, r: f32) -> OgcS
   var rec = OGC_NONE;
   var D = vec3<f32>(0.0);
   let inv = 1.0 / h.cell;
+  let clearOutside = ogcSolidWord(h.base + 12u) != 0u;
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
     let b = c >> vec3<u32>(3u);
+    if (any(b < vec3<i32>(0)) || any(vec3<u32>(b) >= h.dims)) { if (clearOutside) { return out; } continue; }
     if (any(b != lastBrick)) { lastBrick = b; rec = ogcSolidBrick(h, b); }
     if (rec == OGC_NONE) { return out; }
     let l = vec3<u32>(c - 8 * b);

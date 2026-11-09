@@ -19,7 +19,7 @@ import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
-  motionPenetrates, norm, planarTruncate, rng, sheet, sub, vertexForceHessian, add,
+  motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate,
   type DatPair, type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
@@ -1006,6 +1006,45 @@ test("GPU static solid fails explicitly: a vertex inside it is held, one outside
     assert.throws(() => few.setSolidField(field), /surface samples .* \(solidSampleCapacity\)/);
     few.destroy();
     assert.throws(() => det.setSolidField(buildClothSolidField({ sdf: p => Math.min(solidBox(p), solidBall(p), boxSdf([0.2, 0, 0], [0.35, 0.1, 0.05])(p)), lo: [-0.02, -0.02, -0.03], hi: [0.38, 0.12, 0.1], cell: 0.005, band: 0.06 })), /authored/);
+    det.destroy();
+  });
+});
+
+test("GPU free flight: the solver's inertial target as the prediction and the solid's clearance table leave a fast sheet far above a floor untouched", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    // A floor at z = 0 and a sheet 0.8 m above it moving 7 cm a step: longer than the bricks'
+    // own rule certifies, (band - r) / L_max = 6 cm, so only the clearance table keeps the
+    // solid out of the round.
+    const r = 2e-3, rqMax = 0.04, band = r + 1.5 * Math.sqrt(3) * rqMax + 1e-6;
+    const field = buildClothSolidField({ parts: [{ kind: "lattice-box", lo: [-0.3, -0.3, -0.1], hi: [0.5, 0.5, 0], mu: 0.3 }], lo: [-0.3, -0.3, -0.1], hi: [0.5, 0.5, 1.2], cell: 0.01, band });
+    const s = sheet(15, 10, 0.01, [0, 0, 0.8]), mesh: OracleMesh = { ...s, x: f32(s.x) }, N = mesh.x.length, X = mesh.x;
+    const D: V3 = [0.008, -0.005, -0.07];
+    assert.ok(norm(D) > (band - r) / field.maxLipschitz, "the step is longer than the brick rule certifies");
+    const { triangles, edges } = topologyOf(mesh);
+    const at = (d: V3) => vec4s(f32(X.map(x => add(x, d))));
+    const positions = storage(device, at(D)), xt = storage(device, at([0, 0, 0])), target = storage(device, at(D));
+    const velocities = storage(device, vec4s(X.map(() => scale(D, 60) as V3)));
+    const config: OgcContactConfig = { ...baseConfig(N), r, rqMax, prediction: "target", solidCapacityWords: field.words.length, solidSampleCapacity: 8192 };
+    const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges }, vec4s(X), config, { positions, velocities, stepStart: xt, target });
+    assert.throws(() => det.bind({ positions, velocities, stepStart: xt, target }), /already bound/);
+    det.setSolidField(field);
+    // The last step ended at X as predicted (residual 0, nothing held); this one starts there,
+    // predicted to its target X + D, where the solver's guess also starts: no cut, nothing held.
+    det.writeCarriedState({ reference: vec4s(X), held: new Uint32Array(N) });
+    await runPass(device, pass => { det.encodeFrameBegin(pass); det.stepHooks.afterFrame(pass); });
+    const guess = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    for (let v = 0; v < N; v++) assert.ok(norm(sub(guess[v], add(X[v], D))) < 1e-6, `vertex ${v} keeps its guess: ${guess[v]}`);
+    const dg = await det.readDiagnosis(), c = await det.readCounters();
+    assert.equal(c.status, 0, `status ${OgcContactDetector.describeStatus(c.status)}`);
+    assert.equal(c.solidContacts, 0, "no vertex has a floor entry");
+    assert.equal(c.pairEntries, 0, "a flat sheet in free flight has no self entries");
+    assert.ok(dg.held.every(h => h === 0), "no vertex is held");
+    for (let v = 0; v < N; v++) assert.ok(Math.abs(dg.rho[v]!) < 1e-6 && Math.abs(dg.env[v]! - config.rqBase) < 1e-9, `vertex ${v}: residual ${dg.rho[v]}, envelope ${dg.env[v]}`);
+    // The solve ends at the prediction: no cut, no re-detection, and the next step is free as well.
+    await runPass(device, pass => det.stepHooks.afterIteration(pass));
+    const c2 = await det.readCounters(), out = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    assert.equal(c2.redetections, 0); assert.equal(c2.solidCut, 0);
+    for (let v = 0; v < N; v++) assert.deepEqual(out[v], guess[v]);
     det.destroy();
   });
 });

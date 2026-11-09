@@ -112,6 +112,8 @@ const DECL: Record<number, string> = {
   /** The line-search filter's direction d (the solver's, vec4 per vertex) and its output (N + 1 words, f32 bits: alpha_v, then alpha_min). */
   15: "@group(0) @binding(15) var<storage, read> dir: array<vec4<f32>>;",
   16: "@group(0) @binding(16) var<storage, read_write> alpha: array<atomic<u32>>;",
+  /** The solver's inertial target y (vec4 per vertex, prediction "target"; positions otherwise). */
+  17: "@group(0) @binding(17) var<storage, read> tgt: array<vec4<f32>>;",
 };
 /** Truncation writes the solver's positions; prep writes the predictions. */
 const DECL_POS_RW = "@group(0) @binding(2) var<storage, read_write> pos: array<vec4<f32>>;";
@@ -266,8 +268,10 @@ fn ogcSolidWord(i: u32) -> u32 { return atomicLoad(&contacts[i]); }
  * solver has already placed its initial guess, which the round's truncation then
  * cuts); a re-detection round commits the current, truncated iterate.
  *
- * A free vertex is predicted to move its inertial v dt + g dt^2 (the rest of it
- * in a re-detection round), and its envelope covers only the residual motion:
+ * A free vertex is predicted to move its inertial v dt + g dt^2, the solver's initial guess
+ * less x_t, or the solver's inertial target y less x_t (prediction "target": exact in free
+ * flight, whatever the guess), the rest of it in a re-detection round, and its envelope
+ * covers only the residual motion:
  * r + s rho, with rho the last step's deviation from its own prediction. A held
  * vertex (in contact, truncated or in a conflict in this step or the last, or
  * every vertex of a redone round, of isotropic mode, or without predictions) is
@@ -303,7 +307,7 @@ fn ogcSolidWord(i: u32) -> u32 { return atomicLoad(&contacts[i]); }
  * Threads N .. N + SB - 1 pose the solid's surface samples: x_det at the detection pose
  * and the exact prediction to the end pose.
  */
-export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13, 14], [14]) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+export const OGC_PREP_WGSL = header([0, 2, 3, 4, 5, 8, 9, 13, 14, 17], [14]) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 var<workgroup> wgMaxEnv: atomic<u32>;
 var<workgroup> wgCube: array<f32, 64>;
 var<workgroup> wgCap: atomic<u32>;
@@ -365,12 +369,14 @@ fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u3
   return OgcTerms(vec4<f32>(sb.g0 * s, rc), sb.D * s, room / h.lmax);
 }
 // A solid's terms for a round that moves the vertex at most rho from x0 (in the field's frame).
-// A round the field's slope clears by r needs none. Otherwise the affine bound is taken over the
+// A round the field's slope clears by r needs none, nor one the clearance table clears by r
+// (a long motion far from the solid, where the bricks only know the field exceeds band). Otherwise the affine bound is taken over the
 // ball rc = min(rho, rqMax / 2), within which an unstored brick still reads clear of r (the band
 // holds r + 1.5 L_max rqMax); a ball clear of the solid certifies all of it (q = D = 0). Beyond
 // rc only the Lipschitz ball certifies, so a long prediction is never moved for the ball's sake.
 fn roundBound(v: u32, h: OgcSolidHeader, x0: vec3<f32>, rho: f32, y: u32, margin: f32) -> OgcTerms {
-  if (min(ogcSolidSample(h, x0).phi, h.band) - h.lmax * (rho + margin) >= P.r) { return OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0), 0.0); }
+  if (min(ogcSolidSample(h, x0).phi, h.band) - h.lmax * (rho + margin) >= P.r
+    || ogcSolidClearance(h, x0) - (rho + margin) >= P.r) { return OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0), 0.0); }
   let rc = min(rho, 0.5 * P.rqMax);
   var sb = ogcSolidBallBound(h, x0, rc, P.r);
   if (sb.far) { sb.g0 = vec3<f32>(0.0); sb.D = vec3<f32>(0.0); }
@@ -431,6 +437,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     // in pred[v].w for the held envelope of the step's later rounds.
     var inertial = vel[v].xyz * P.dt + P.gravity.xyz * (P.dt * P.dt);
     if (P.predict == 2u) { inertial = pos[v].xyz - x; }
+    if (P.predict == 3u) { inertial = tgt[v].xyz - x; }
     var plen = length(inertial);
     if (!mandatory) { plen = pred[v].w; }
     var flags = atomicLoad(&work[P.heldOff + v]);
