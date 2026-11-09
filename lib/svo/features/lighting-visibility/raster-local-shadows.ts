@@ -7,7 +7,11 @@ export const RASTER_LOCAL_LOOKUP_WORD = 16 + RASTER_MAX_LOCAL_SHADOW_VIEWS * 12;
 export const RASTER_LOCAL_LAYOUT_WORD = RASTER_LOCAL_LOOKUP_WORD + 32 * 4;
 export const RASTER_LIGHTING_PARAM_BYTES = Math.ceil((RASTER_LOCAL_LAYOUT_WORD + 4) * 4 / 256) * 256;
 export const RASTER_CUBE_DIRECTIONS = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]] as const;
-export interface RasterLocalShadowView extends RasterSpotLight { readonly pointFace: number }
+export interface RasterLocalShadowView extends RasterSpotLight {
+  readonly pointFace: number;
+  /** Cube faces of an area emitter: contact-hardening width (a point light's faces are hard). */
+  readonly penumbraRadius?: number;
+}
 export interface RasterShadowBounds { readonly origin: readonly number[]; readonly extent: readonly number[] }
 
 /** A draw-time proof for removing native/SVO fallback stacks from visibility
@@ -30,6 +34,58 @@ export function rasterShadowFar(position: readonly number[], bounds: RasterShado
   return Math.max(.01, Math.hypot(...position.map((p, axis) => Math.max(
     Math.abs(bounds.origin[axis]! - p), Math.abs(bounds.origin[axis]! + bounds.extent[axis]! - p)))) * 1.001);
 }
+/** Widest single perspective view of an area emitter (about 76 degrees off axis). */
+export const RASTER_AREA_MAX_TAN = 4;
+/** The square-frustum basis the WGSL shadow projection uses (rasterSpotBasis). */
+function rasterSpotBasis(forward: readonly number[]): [number[], number[]] {
+  const helper = Math.abs(forward[1]!) > .95 ? [1, 0, 0] : [0, 1, 0];
+  const cross = (a: readonly number[], b: readonly number[]) => [a[1]! * b[2]! - a[2]! * b[1]!, a[2]! * b[0]! - a[0]! * b[2]!, a[0]! * b[1]! - a[1]! * b[0]!];
+  const r = cross(forward, helper), length = Math.hypot(...r), right = r.map(v => v / length);
+  return [right, cross(right, forward)];
+}
+interface RasterAreaEmitter { readonly index: number; readonly position: number[]; readonly radius: number; readonly sphere: boolean; readonly view?: RasterSpotLight }
+/**
+ * A finite area emitter is mapped from its centre, filtered by the existing
+ * contact-hardening lookup over its equivalent disc radius. When the whole
+ * domain lies in front of it, one perspective view (`view`) covers it;
+ * otherwise (an emitter hanging inside the room) it takes a soft cube.
+ */
+function rasterAreaEmitter(records: Uint32Array, f: Float32Array, at: number, bounds: RasterShadowBounds): RasterAreaEmitter | undefined {
+  const kind = records[at + 24];
+  if (kind !== SVO_LIGHT_KINDS.rectangleArea && kind !== SVO_LIGHT_KINDS.sphereArea) return undefined;
+  for (let i = 0; i < 7; i++) if (!Number.isFinite(f[at + i])) return undefined;
+  if (f[at + 3]! < 0) return undefined;
+  const position = Array.from(f.subarray(at, at + 3)), sphere = kind === SVO_LIGHT_KINDS.sphereArea;
+  let direction: number[], radius: number;
+  if (!sphere) {
+    const halfWidth = f[at + 15]!, halfHeight = f[at + 19]!;
+    if (!(halfWidth >= 0) || !(halfHeight >= 0) || !Number.isFinite(halfWidth * halfHeight)) return undefined;
+    direction = Array.from(f.subarray(at + 4, at + 7));
+    radius = Math.sqrt(4 * halfWidth * halfHeight / Math.PI);
+  } else {
+    radius = f[at + 20]!;
+    if (!(radius >= 0) || !Number.isFinite(radius)) return undefined;
+    direction = bounds.origin.map((v, axis) => v + bounds.extent[axis]! * .5 - position[axis]!);
+  }
+  const emitter = { index: at / SVO_LIGHT_RECORD_WORDS, position, radius, sphere };
+  const length = Math.hypot(...direction);
+  if (!(length >= 1e-6)) return emitter;
+  direction = direction.map(v => v / length);
+  const far = rasterShadowFar(position, bounds), [right, up] = rasterSpotBasis(direction);
+  // Near stays inside the emitter's own extent without costing depth precision.
+  const near = Math.max(.001, Math.min(radius * 1.01, far * .01));
+  let widest = 0;
+  for (let corner = 0; corner < 8; corner++) {
+    const delta = bounds.origin.map((v, axis) => v + ((corner >> axis) & 1) * bounds.extent[axis]! - position[axis]!);
+    const dot = (axis: readonly number[]) => delta.reduce((sum, v, i) => sum + v * axis[i]!, 0);
+    const axial = dot(direction);
+    if (!(axial > near)) return emitter;
+    widest = Math.max(widest, Math.max(Math.abs(dot(right)), Math.abs(dot(up))) / axial);
+  }
+  if (widest > RASTER_AREA_MAX_TAN || !(far > near)) return emitter;
+  // The square frustum is convex: all eight corners inside cover the domain.
+  return { ...emitter, view: { index: emitter.index, position, direction, near, far, radius, tanHalfAngle: Math.max(1e-3, widest * 1.001) } };
+}
 export function rasterLocalShadowViews(records: Uint32Array | undefined, bounds: RasterShadowBounds): RasterLocalShadowView[] {
   if (!records || records.length % SVO_LIGHT_RECORD_WORDS) return [];
   // Resolve projection bounds in a copy; never change the live light's energy,
@@ -41,6 +97,14 @@ export function rasterLocalShadowViews(records: Uint32Array | undefined, bounds:
     }
   }
   const result: RasterLocalShadowView[] = rasterSpotLights(bounded).map(spot => ({ ...spot, pointFace: -1 }));
+  // Spot-layer views precede point faces: the atlas allots one layer per spot.
+  // Area emitters past the spot-layer budget take a cube like the rest.
+  const cubes: RasterAreaEmitter[] = [];
+  for (let at = 0; at < Math.min(records.length, 32 * SVO_LIGHT_RECORD_WORDS); at += SVO_LIGHT_RECORD_WORDS) {
+    const emitter = rasterAreaEmitter(records, f, at, bounds);
+    if (emitter?.view && result.length < RASTER_MAX_SPOT_LIGHTS) result.push({ ...emitter.view, pointFace: -1 });
+    else if (emitter) cubes.push(emitter);
+  }
   let face = 0;
   for (let at = 0; at < Math.min(records.length, 32 * SVO_LIGHT_RECORD_WORDS); at += SVO_LIGHT_RECORD_WORDS) {
     if (records[at + 24] !== SVO_LIGHT_KINDS.point) continue;
@@ -51,6 +115,16 @@ export function rasterLocalShadowViews(records: Uint32Array | undefined, bounds:
     if (far <= near) continue;
     for (const direction of RASTER_CUBE_DIRECTIONS) result.push({ index: at / SVO_LIGHT_RECORD_WORDS,
       position, radius, direction: [...direction], near, far, tanHalfAngle: 1, pointFace: face++ });
+  }
+  for (const { index, position, radius, sphere } of cubes) {
+    const far = rasterShadowFar(position, bounds);
+    // `radius` is the caster clearance about the centre (a sphere's own
+    // surface); the PCSS width is the emitter's equivalent disc radius.
+    const clearance = sphere ? radius * 1.01 : Math.max(.001, Math.min(radius * 1.01, far * .01));
+    const near = Math.max(.001, clearance / Math.sqrt(3) * .99);
+    if (!(far > near)) continue;
+    for (const direction of RASTER_CUBE_DIRECTIONS) result.push({ index, position, radius: clearance,
+      direction: [...direction], near, far, tanHalfAngle: 1, pointFace: face++, penumbraRadius: radius });
   }
   return result;
 }

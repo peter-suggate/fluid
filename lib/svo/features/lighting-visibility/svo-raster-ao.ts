@@ -179,8 +179,12 @@ fn rasterSpotVisibility(position:vec3f,normal:vec3f,slot:u32)->f32{
     -2e-7;
   // Point lights already use hard shadows. One receiver-plane corrected
   // bilinear lookup preserves that model without a per-pixel native ray.
-  if(spot.rangeRadiusIndex.w>0.0){return rasterCompareReceiverPlane(uv,i32(slot+2u),depth,gradient);}
-  let radius=spot.rangeRadiusIndex.y;
+  // An area emitter's cube faces carry its disc radius in the light's lookup.
+  var radius=spot.rangeRadiusIndex.y;
+  if(spot.rangeRadiusIndex.w>0.0){
+    radius=bitcast<f32>(rasterLighting.lightSlots[u32(spot.rangeRadiusIndex.z)].w);
+    if(!(radius>0.0)){return rasterCompareReceiverPlane(uv,i32(slot+2u),depth,gradient);}
+  }
   // Compare against the receiver plane, but measure the blocker at its actual
   // depth. A slope-corrected depth is not a physical occluder distance.
   // Perspective depth is nonlinear. Recover axial blocker distance before
@@ -789,7 +793,7 @@ export class SvoRasterAo {
       if(this.fullWidth)this.ensureSize(this.fullWidth,this.fullHeight);
       for(let layer=0;layer<this.shadowLayerCount;layer++)this.device.queue.writeBuffer(this.params,layer*RASTER_LIGHTING_PARAM_BYTES+12,new Uint32Array([this.visibilityControl]));
     }
-    const key=[...origin,...extent,...cellSize,...direction,...spots.flatMap(spot=>[...spot.position,spot.near,...spot.direction,spot.tanHalfAngle,spot.far,spot.radius,spot.index,spot.pointFace])].join(",");if(key===this.key)return;
+    const key=[...origin,...extent,...cellSize,...direction,...spots.flatMap(spot=>[...spot.position,spot.near,...spot.direction,spot.tanHalfAngle,spot.far,spot.radius,spot.index,spot.pointFace,spot.penumbraRadius??0])].join(",");if(key===this.key)return;
     this.key=key;this.generation++;
     const radius=Math.max(.1,Math.hypot(...extent)*.5);
     this.localViews=spots;this.spotCount=spots.filter(spot=>spot.pointFace<0).length;
@@ -802,7 +806,7 @@ export class SvoRasterAo {
       for(let slot=0;slot<spots.length;slot++){
         const spot=spots[slot]!,offset=16+slot*12;
         f.set([...spot.position,spot.near,...spot.direction,spot.tanHalfAngle,spot.far,spot.radius,spot.index,spot.pointFace+1],offset);
-        if(spot.pointFace<0||spot.pointFace%6===0)u.set([slot+1,spot.pointFace<0?1:6,0,0],RASTER_LOCAL_LOOKUP_WORD+spot.index*4);
+        if(spot.pointFace<0||spot.pointFace%6===0){u.set([slot+1,spot.pointFace<0?1:6,0,0],RASTER_LOCAL_LOOKUP_WORD+spot.index*4);f[RASTER_LOCAL_LOOKUP_WORD+spot.index*4+3]=spot.penumbraRadius??0;}
       }
       u.set([this.spotCount,this.shadowResolution/RASTER_POINT_SHADOW_SIZE,RASTER_POINT_SHADOW_SIZE,0],RASTER_LOCAL_LAYOUT_WORD);
       this.device.queue.writeBuffer(this.params,layer*RASTER_LIGHTING_PARAM_BYTES,buffer);

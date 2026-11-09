@@ -200,3 +200,58 @@ ${sampling}
     }finally{output.destroy();raster.destroy();}
   });
 });
+
+test("area emitters get one perspective map when the domain is in front of them, otherwise a soft cube",async()=>{
+  const {getScenePreset}=await import("../lib/core/scenes");
+  const {RASTER_MAX_SPOT_LIGHTS}=await import("../lib/svo/features/lighting-visibility/raster-spot-lights");
+  for(const id of ["bridson-2002-rotating-sphere","bridson-2002-curtain","bridson-2002-tablecloth"]){
+    const scene=getScenePreset(id).create(),box=scene.container;
+    const domain={origin:[-box.width_m/2,0,-box.depth_m/2],extent:[box.width_m,box.height_m,box.depth_m]};
+    const records=packSvoLightRecords(buildSvoSceneLights(scene).records),before=records.slice();
+    const views=rasterLocalShadowViews(records,domain);
+    assert.deepEqual(records,before,id);
+    assert.equal(rasterLocalMapsComplete(records,views),true,`${id}: the softbox must not fall back to per-pixel SVO tracing`);
+    const area=views.find(view=>records[view.index*SVO_LIGHT_RECORD_WORDS+24]===4);
+    assert.ok(area&&area.pointFace<0&&area.radius>0,id);
+    for(let corner=0;corner<8;corner++){
+      const delta=domain.origin.map((v,i)=>v+((corner>>i)&1)*domain.extent[i]!-area.position[i]!);
+      const axial=delta.reduce((s,v,i)=>s+v*area.direction[i]!,0);
+      assert.ok(axial>area.near&&Math.hypot(...delta)<area.far,`${id}: corner ${corner} between the planes`);
+      // The WGSL projection's square frustum basis.
+      const f=area.direction,h=Math.abs(f[1]!)>.95?[1,0,0]:[0,1,0],x=(a:number[],b:number[])=>[a[1]!*b[2]!-a[2]!*b[1]!,a[2]!*b[0]!-a[0]!*b[2]!,a[0]!*b[1]!-a[1]!*b[0]!];
+      const r=x(f,h).map((v,_,a)=>v/Math.hypot(...a)),u=x(r,f),dot=(a:number[])=>delta.reduce((s,v,i)=>s+v*a[i]!,0);
+      assert.ok(Math.max(Math.abs(dot(r)),Math.abs(dot(u)))/axial<=area.tanHalfAngle,`${id}: corner ${corner} inside the frustum`);
+    }
+  }
+  // The live Fig 2 studio: the softbox hangs inside the voxel domain, beside
+  // walls no single frustum reaches, so it takes a soft cube and the cached-map
+  // kernel still covers every light.
+  const studio={origin:[-9.44,-.16,-9.44],extent:[18.88,12.32,18.88]};
+  const fig2=packSvoLightRecords(buildSvoSceneLights(getScenePreset("bridson-2002-rotating-sphere").create()).records);
+  const softbox=rasterLocalShadowViews(fig2,studio);
+  assert.deepEqual(softbox.map(view=>[view.index,view.pointFace]),[0,1,2,3,4,5].map(face=>[1,face]));
+  const disc=Math.sqrt(4*2.4192*2.4192/Math.PI);
+  for(const face of softbox){
+    assert.ok(Math.abs(face.penumbraRadius!-disc)<1e-4,"contact hardening uses the emitter's equivalent disc");
+    assert.ok(face.radius<.2&&face.near<face.radius,"the caster clearance stays inside the 10 cm softbox proxy");
+  }
+  assert.equal(rasterLocalMapsComplete(fig2,softbox),true);
+  const light=(kind:"rectangleArea"|"sphereArea",position:number[],id:number)=>({kind,position_m:position,direction:[0,-1,0],range_m:0,colorLinear:[1,1,1],intensity:1,
+    axisU:[1,0,0],axisV:[0,0,1],halfWidth_m:.5,halfHeight_m:.5,radius_m:.3,lightId:id,ownerId:id,revision:0,sourceKey:`t${id}`});
+  const pack=(lights:ReturnType<typeof light>[])=>packSvoLightRecords(lights as never);
+  const inside=pack([light("sphereArea",[0,1,0],1)]),insideViews=rasterLocalShadowViews(inside,bounds);
+  assert.deepEqual(insideViews.map(view=>view.pointFace),[0,1,2,3,4,5],"a sphere inside the domain takes a cube");
+  assert.ok(insideViews.every(view=>Math.abs(view.radius-.303)<1e-6&&Math.abs(view.penumbraRadius!-.3)<1e-6),"its own surface is the caster clearance");
+  assert.equal(rasterLocalMapsComplete(inside,insideViews),true);
+  const many=pack(Array.from({length:RASTER_MAX_SPOT_LIGHTS+1},(_,i)=>light(i%2?"sphereArea":"rectangleArea",[i,60,0],i+1)));
+  const capped=rasterLocalShadowViews(many,bounds);
+  assert.equal(capped.filter(view=>view.pointFace<0).length,RASTER_MAX_SPOT_LIGHTS);
+  assert.deepEqual(capped.filter(view=>view.pointFace>=0).map(view=>view.index),Array(6).fill(RASTER_MAX_SPOT_LIGHTS),"the emitter past the spot-layer budget takes a cube");
+  assert.equal(rasterLocalMapsComplete(many,capped),true);
+  const malformed=pack([light("rectangleArea",[0,60,0],1)]);new Float32Array(malformed.buffer)[15]=NaN;
+  assert.deepEqual(rasterLocalShadowViews(malformed,bounds),[]);
+  assert.equal(rasterLocalMapsComplete(malformed,[]),false,"a malformed emitter keeps exact tracing");
+  const mixed=pack([{...light("rectangleArea",[0,60,0],1),kind:"point" as never},light("sphereArea",[0,60,0],2)]);
+  const ordered=rasterLocalShadowViews(mixed,bounds);
+  assert.deepEqual(ordered.map(view=>view.pointFace),[-1,0,1,2,3,4,5],"spot-layer views precede point faces in the atlas");
+});
