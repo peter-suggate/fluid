@@ -29,7 +29,7 @@ import { CLOTH_COARSE_SWEEP_WORKGROUP, clothCoarseFactorBytes } from './gpu-coar
 import { CLOTH_NEWTON_PARTIALS, CLOTH_NEWTON_SEGMENT_COUNT, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
-  CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_VERTEX_LANES, CLOTH_WIDE_WORKGROUP, CLOTH_WORKGROUP, clothSolverWGSL,
+  CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_VERTEX_LANES, CLOTH_WIDE_WORKGROUP, CLOTH_WORKGROUP, clothSolverWGSL,
 } from './gpu-solver-wgsl';
 
 /** Storage buffers per stage the solver binds; C2's contact block adds one. */
@@ -42,6 +42,9 @@ export interface ClothSolverContact {
   readonly buffer: GPUBuffer;
   /** Newton only: the detector's line-search filter output (OgcContactDetector.alpha: alpha_v per vertex, alpha_min in word N). */
   readonly alpha?: GPUBuffer;
+  /** Newton only: the detector's per-vertex contact state (OgcContactDetector.contactState; bit 1, the contact switched on
+   * in the last step), which restarts the vertex's BDF2 history (finishStep, and the frame of the step after). */
+  readonly state?: GPUBuffer;
 }
 
 /** Points inside one step where another lane encodes work into the solver's
@@ -63,6 +66,9 @@ export interface ClothStepHooks {
   filter?(pass: GPUComputePassEncoder): void;
   /** Newton: after each Newton iteration moved the iterate; C2 decides and runs re-detection rounds here. */
   afterNewtonStep?(pass: GPUComputePassEncoder): void;
+  /** Newton with contact: once per step after the last position update (and the diagnostics), before finishStep forms the
+   * velocities and the BDF2 history; C2 writes the step's contact state here. */
+  stepEnd?(pass: GPUComputePassEncoder): void;
 }
 
 export interface ClothGPUSolverOptions {
@@ -122,6 +128,8 @@ export interface ClothStatusSlot {
 export interface ClothStatusReport {
   readonly status: number;
   readonly steps: number;
+  /** Steps restarted as implicit Euler after a contact onset since the state was uploaded (Newton with contact). */
+  readonly restarts: number;
   /** Ring slots in step order (only steps run with diagnostics on; the last CLOTH_STATUS_RING_SLOTS). */
   readonly slots: readonly ClothStatusSlot[];
 }
@@ -353,7 +361,9 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
 
 const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseTrialBack', 'coarseChooseBack', 'coarseApply'] as const;
 const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgApply', 'pcgUpdate', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
-type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number] | typeof NEWTON_KERNELS[number];
+/** Newton with contact: the BDF2 restart's scans of C2's contact state. */
+const RESTART_KERNELS = ['restartScan', 'onsetScan'] as const;
+type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number] | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
 
 export class ClothGPUSolver {
@@ -366,6 +376,8 @@ export class ClothGPUSolver {
   private readonly newtonWork?: GPUBuffer;
   readonly method: ClothSolverMethod;
   private readonly newton?: Required<ClothNewtonOptions>;
+  /** Newton with contact: the BDF2 history restarts after a contact onset (restartScan, onsetScan). */
+  private readonly restarts: boolean;
   /** Dispatch record of PCG iteration 1 (after the VBD records). */
   private newtonRecord = 0;
   readonly tables: ClothGPUTables;
@@ -401,10 +413,12 @@ export class ClothGPUSolver {
       this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
       if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
       // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
-      if (options.contact && !(options.contact.alpha && options.hooks?.filter && options.hooks.afterNewtonStep))
-        throw new Error('Cloth Newton solver with contact needs the filter output (contact.alpha) and hooks.filter and hooks.afterNewtonStep');
+      if (options.contact && !(options.contact.alpha && options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
+        throw new Error('Cloth Newton solver with contact needs the filter output and contact state (contact.alpha, contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
     } else if (options.newton) throw new Error('Cloth newton options need method \'newton\'');
-    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1 + (this.method === 'newton' ? 1 : 0) + (this.method === 'newton' && options.contact ? 1 : 0);
+    // Newton binds its work buffer in place of the coarse one, and with contact the filter output and the contact state.
+    this.restarts = this.method === 'newton' && !!options.contact;
+    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1 + (this.restarts ? 2 : 0);
     if (options.coarseEvery !== undefined && !(Number.isInteger(options.coarseEvery) && options.coarseEvery >= 1)) throw new Error('Cloth coarse correction interval must be a positive integer');
     // The coarse move is a move like a colour sweep's: with contact it must be truncated before the sweeps start from it.
     if (this.method === 'vbd' && options.contact && !options.hooks?.afterCoarse) throw new Error('Cloth solver with contact needs hooks.afterCoarse to truncate the two-level correction\'s move');
@@ -506,25 +520,28 @@ export class ClothGPUSolver {
       { binding: B.dispatch, visibility: C, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 32 } },
       storage(B.positions), storage(B.state), storage(B.status), storage(B.topo, true), storage(B.rest, true), storage(B.topo4, true)];
     if (this.options.contact) entries.push(storage(B.contact, true));
-    entries.push(storage(B.coarse));
-    if (this.newtonWork) entries.push(storage(B.newton));
+    // Newton never runs the two-level correction: no coarse binding (the per-stage limit is 10 storage buffers).
+    if (this.newtonWork) entries.push(storage(B.newton)); else entries.push(storage(B.coarse));
     const filter = this.newtonWork ? this.options.contact?.alpha : undefined;
     if (filter) entries.push(storage(B.filter, true));
+    const contactState = this.newtonWork ? this.options.contact?.state : undefined;
+    if (contactState) entries.push(storage(B.contactState, true));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
-      ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []), buffer(B.coarse, this.coarse),
-      ...(this.newtonWork ? [buffer(B.newton, this.newtonWork)] : []), ...(filter ? [buffer(B.filter, filter)] : [])] });
+      ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []),
+      ...(this.newtonWork ? [buffer(B.newton, this.newtonWork)] : [buffer(B.coarse, this.coarse)]), ...(filter ? [buffer(B.filter, filter)] : []),
+      ...(contactState ? [buffer(B.contactState, contactState)] : [])] });
     const lanes = this.options.vertexLanes ?? CLOTH_VERTEX_LANES;
     const available = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= lanes;
     if (this.options.subgroups && !available) throw new Error(`Cloth subgroup sums need the subgroups feature with subgroups of at least ${lanes} invocations`);
     this.subgroups = lanes > 1 && (this.options.subgroups ?? available);
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, coarseNodes: this.tables.coarse.nodeCount, newton: !!this.newtonWork,
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, coarseNodes: this.newtonWork ? 0 : this.tables.coarse.nodeCount, newton: !!this.newtonWork,
       ...(lanes > 1 ? { vertexLanes: lanes, subgroups: this.subgroups } : {}) }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const kernels: readonly Kernel[] = [...KERNELS, ...(this.newtonWork ? NEWTON_KERNELS : COARSE_KERNELS)];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(this.newtonWork ? NEWTON_KERNELS : COARSE_KERNELS), ...(contactState ? RESTART_KERNELS : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
@@ -583,6 +600,7 @@ export class ClothGPUSolver {
   encodeStep(pass: GPUComputePassEncoder): void {
     const C = this.tables.colourRanges.length, limited = this.tables.strainLimited;
     if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', this.threads(this.N)); this.grabAnchorsPending = false; }
+    if (this.restarts) this.run(pass, 'restartScan', this.threads(this.N));
     this.run(pass, 'beginStep', 1);
     if (limited || this.tables.damped) this.run(pass, 'frameElements', this.threads(Math.max(limited ? this.E : 0, this.tables.damped ? this.T : 0)));
     this.run(pass, 'frame', this.threads(this.N));
@@ -649,6 +667,8 @@ export class ClothGPUSolver {
       this.run(pass, 'diagnose', this.threads(this.N));
       this.run(pass, 'reduceDiagnostics', 1);
     }
+    this.hooks.stepEnd?.(pass);
+    if (this.restarts) this.run(pass, 'onsetScan', this.threads(this.N));
     this.run(pass, 'finishStep', this.threads(this.N));
   }
 
@@ -790,7 +810,7 @@ export class ClothGPUSolver {
         maxStrain: floats[b + CLOTH_SLOT.maxStrain]!, kinetic_J: floats[b + CLOTH_SLOT.kinetic]!, potential_J: floats[b + CLOTH_SLOT.potential]!, elastic_J: floats[b + CLOTH_SLOT.elastic]! });
     }
     slots.sort((a, b) => a.step - b.step);
-    return { status: words[0]!, steps: words[1]!, slots };
+    return { status: words[0]!, steps: words[1]!, restarts: words[CLOTH_STATUS_WORD.restarts]!, slots };
   }
 
   static describeStatus(status: number): string[] {

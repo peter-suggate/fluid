@@ -1760,9 +1760,17 @@ Probe: `~/code/me/fluid-scratch/cloth-c1/m2/c1-impact-probe.test.ts`. Copy it in
 Free fall (0.0005 mm) and swing (crossing 0.4950 s) still pass. The curtain is still 1.11% (gate 1%); it comes next.
 Log: `~/code/me/fluid-scratch/cloth-c1/m2/bare-hybrid.log`.
 
-**Mesh agreement ("herring-bone and regular must agree").** The Float64 static solve of the same discrete energy
-(`peirce-static.ts`, MESH=grid) gives 22.49 / 41.90 / 57.22° on the regular one-diagonal mesh, against
-22.26 / 41.71 / 57.16° on the herring-bone. The two meshes differ by ≤ 0.23°, and both are within 0.23° of exact.
+**Mesh agreement ("herring-bone and regular must agree").** Float64 static solve of the same discrete energy
+(`peirce-static.ts`, clamp held as group 1, |g| < 3e-6), chord angle at l/c = 1.5 / 2 / 2.5:
+
+| | l/c 1.5 | l/c 2 | l/c 2.5 |
+|---|---|---|---|
+| exact | 22.26° | 41.60° | 56.99° |
+| herring-bone, static | 22.33° | 41.70° | 57.08° |
+| regular one-diagonal, static | 22.50° | 41.91° | 57.23° |
+| herring-bone, GPU (Newton 8 × 200, dynamic, settled) | 22.26° | 41.71° | 57.16° |
+
+The meshes agree within 0.21°, and every entry is within 0.31° of exact.
 
 **The committed (RESULT 23) rows had a defect on the regular mesh.** Linear cantilever plate, tip deflection against
 qL⁴/8B (`beam-linear.ts`; ν = 0, held over 4 clamp columns, dense Cholesky):
@@ -1810,3 +1818,65 @@ produces it. No tuning is involved: the result is the same on both meshes and at
 
 **Next.** The curtain's 1.11%: is it sway or bias? Then the BDF2 per-vertex restart (the onset signal to agree with
 C2 in the progress files), then M4.
+
+## 2026-11-10 RESULT (25): the BDF2 history restarts globally at a contact onset (Newton); its measurements
+
+**Why the restart.** At an impact, the BDF2 velocity (3x_{n+1} − 4x_n + x_{n−1})/2h straddles the velocity jump.
+It leaves a rebound of about +V/2: the flat free-fall sheet came back up at 2.98 m/s.
+
+**The design (approved: (a) global).**
+- C2's `contactState` (32fcfd8d) gives bit 1, the onset, in the step that writes it.
+- At step end, `onsetScan` ORs every vertex's onset bit into one status atomic (`CLOTH_STATUS_WORD.onset`).
+- In that step `finishStep` writes the one-step velocity (x_{n+1} − x_n)/h in place of the BDF2 one, and sets
+  v_prev := v_new.
+- `restartScan` copies the flag before the next `beginStep`, which then runs one IE step for the whole cloth
+  (clock w = −1) and again sets v_prev := v_new. After that, BDF2 resumes from a steady history.
+- Everything stays on the GPU: atomics read by the restart dispatches, with no readback and no CPU branch.
+  `status[restarts]` counts the restarts for the harness.
+- Newton with contact only. VBD and every bare scene compile without it.
+- Newton binds its work buffer in place of the coarse one (10 storage buffers per stage).
+- The per-vertex restart failed the tilted drop (0.575 m/s): the vertices next to the landing edge are stopped by
+  membrane tension, not contact, so they kept their BDF2 history.
+
+**Initial guess.** Newton starts at the inertial target y (`initialGuess: 'inertial'`), which is the centre of C2's
+"target" certificates. VBD stays on 'previous' until M4 deletes it.
+
+**Measured on this tree** (C2's uncommitted ogc files included):
+
+| gate | result |
+|---|---|
+| Flat free-fall landing, Newton 8 × 200 | fastest fall −4.742 m/s, rebound **0.0150 m/s** (≤ 0.05; was 2.98), rests at 0.99 mm |
+| Tilted 15° landing vs IE at h/8 | **todo**: see below |
+| Swinging sheet, contact on | crosses under the pin at 0.4950 s; free edge 0.000 mm off free fall; converged within 0.21 mm |
+| Hanging curtain | 1.11 %, hem 64.99 mm, KE 2.05e-3 J; identical to 83916d6c (the curtain gate is next) |
+| Peirce | passes |
+| Free fall (no floor) | 0.0005 mm off the BDF2 recurrence |
+| Moving plate (cloth-contact-body) | 0.60 % rms, 4/4 pass |
+| Bridson rotating sphere, Newton 8 × 200 | through tick 45 with no halt |
+
+**Tilted 15° drop: blocked by a floor tunnel (C2).**
+- At 8 × 200 and at 32 × 800 tol/16 alike, the whip edge (max|v| 6.3 m/s) goes through the floor at tick 29
+  (min y −73 mm), then halts with solidBounds after tick 31.
+- The result is identical on a HEAD export (13c426af) with only the inertial guess added, so the restart does not
+  cause it.
+- The same converged run before 13c426af did not penetrate. It rebounded at 0.575 m/s (per-vertex) and 0.066 m/s
+  (global IE).
+- The test is todo with a pointer. It compares the converged run against the same drop under IE at h/8: rebound
+  within 0.02 m/s, settled mean y within 2 mm.
+
+**Restarts on the Bridson scenes** (Newton 8 × 200, 45 ticks, no halts):
+
+| scene | restarts | ticks |
+|---|---|---|
+| curtain | 27 | 18, 19, then every tick from 21 |
+| rotating sphere | 42 | every tick from 4 |
+| tablecloth | 33 | 4, 6–9, 11–28, 30, 32, 33, 35–38, 41, 44, 45 |
+
+While a large sheet drapes, some vertex makes first contact almost every step. The global restart therefore runs
+these scenes in IE for most of their contact phase. Raised with the coordinator.
+
+**Also seen, not mine:**
+- The friction incline fails in setup: `buildSolidSamples` reports "the surface between the samples … bulges
+  1.38e-3 m, above h / 16". This is C2's solid-field.ts, before any step.
+- `reservoir-particle-cost` "merge cap protects neither …" fails in test:unit. This is the fluid lane's
+  uncommitted uniform-narrow-band-flip.ts.

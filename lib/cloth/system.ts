@@ -258,16 +258,17 @@ export class ClothSystem {
       solver = await ClothGPUSolver.create(this.device, model, {
         origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity,
         integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? DEFAULT_ITERATIONS, chebyshevRho: settings.chebyshevRho ?? 0,
-        // The extrapolating guesses overshoot an unconverged solve; the coarse step carries the bulk motion instead.
-        coarse, initialGuess: 'previous',
+        // VBD: the extrapolating guesses overshoot an unconverged solve; the coarse step carries the bulk motion instead.
+        // Newton starts at the inertial target y, the centre of contact's "target" certificates (free cloth needs no cut).
+        coarse, initialGuess: newton ? 'inertial' : 'previous',
         positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
         solverState: start ? start.solverState : data.solverState, label,
         ...(this.options.vertexLanes !== undefined ? { vertexLanes: this.options.vertexLanes } : {}),
         ...(newton ? {
           // Newton: contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
           method: 'newton' as const, newton,
-          contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha },
-          hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep },
+          contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
+          hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
         } : {
           contact: contact.solverContact(CLOTH_BINDING.contact),
           // The coarse move is truncated like a colour sweep's, before the sweeps start from it.

@@ -28,6 +28,8 @@ import { buildClothSolverModel } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace } from '../lib/cloth/coarse';
 import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
 import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
+import { CLOTH_BINDING } from '../lib/cloth/gpu-solver-wgsl';
+import { buildClothSceneField, clothContactRadius, createClothSceneContact } from '../lib/cloth/scene-contact';
 import type { ClothDocument, ClothNewtonSettings, ClothSurfacePublication } from '../lib/cloth/types';
 import {
   CLOTH_ANALYTIC_PARAMETERS, CLOTH_ANALYTIC_SCENES, CLOTH_ANALYTIC_STEP_S, GRAVITY, INCLINE, PEIRCE, SWING, bdf2FreeFall, bdf2StartOffset_m, bendingLength_m,
@@ -210,6 +212,87 @@ test('free fall: the sheet falls exactly as the BDF2 recurrence, flat and unstra
   assert.ok(velocity < 1e-3, `velocity ${velocity} m/s off g t`);
   assert.ok(flat < 1e-4, `sheet departs from rigid translation by ${flat} m`);
   assert.ok(strain < 1e-4, `edge strain ${strain}`);
+}));
+
+/** The free-fall sheet's drop onto the floor: per tick its mean height and mean vertical velocity. */
+function dropTrack(frames: readonly (readonly { positions_m: ArrayLike<number>; velocities_m_s?: ArrayLike<number> }[])[]) {
+  return frames.map(([pose]) => {
+    const x = pose!.positions_m, v = pose!.velocities_m_s!, N = x.length / 3;
+    let y = 0, vy = 0;
+    for (let i = 0; i < N; i++) { y += x[3 * i + 1]! / N; vy += v[3 * i + 1]! / N; }
+    return { y, vy };
+  });
+}
+/** The largest upward mean velocity after the fastest mean fall, and that fall. */
+function rebound(track: readonly { vy: number }[]) {
+  let k = 0;
+  track.forEach((t, i) => { if (t.vy < track[k]!.vy) k = i; });
+  return { fall: track[k]!.vy, up: Math.max(0, ...track.slice(k + 1).map(t => t.vy)) };
+}
+/** The free-fall scene with its sheet turned by `tilt` about the z axis through its centre (one edge lands first). */
+function tiltedDrop(tilt: number): ClothAnalyticScene {
+  const source = clothAnalyticFreeFall(), cy = source.probe.y0 as number, c = Math.cos(tilt), s = Math.sin(tilt);
+  const turn = (p: readonly number[]) => p.map((u, i) => { const k = i % 3, x = p[i - k]!, y = p[i - k + 1]! - cy; return k === 0 ? c * x - s * y : k === 1 ? cy + s * x + c * y : u; });
+  return { ...source, cloth: source.cloth.map(d => ({ ...d, geometry: { kind: 'inline' as const, data: { ...d.geometry.data, restPositions_m: turn(d.geometry.data.restPositions_m),
+    ...(d.geometry.data.initialPositions_m ? { initialPositions_m: turn(d.geometry.data.initialPositions_m) } : {}) } } })) };
+}
+/**
+ * The reference for a landing (test only, not a product path): the same document, floor and contact, stepped as implicit
+ * Euler at h / substeps, read at each tick.
+ */
+async function landingOracle(device: GPUDevice, scene: SceneDescription, document: ClothDocument, ticks: number, substeps: number) {
+  const data = document.geometry.data, topology = prepareClothTopology(data, document.materials);
+  const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)), []);
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  data.restPositions_m.forEach((v, i) => { lo[i % 3] = Math.min(lo[i % 3]!, v); hi[i % 3] = Math.max(hi[i % 3]!, v); });
+  const origin = [0, 1, 2].map(a => (lo[a]! + hi[a]!) / 2) as unknown as [number, number, number], dt = CLOTH_SCENE_STEP_S / substeps;
+  const field = buildClothSceneField(scene, origin, clothContactRadius(document));
+  const contact = await createClothSceneContact(device, model, document, origin, field, dt, [0, -g, 0], undefined, true), hooks = contact.stepHooks;
+  const solver = await ClothGPUSolver.create(device, model, { origin_m: origin, dt_s: dt, gravity_m_s2: [0, -g, 0], integrator: 'implicit-euler', iterations: 1, chebyshevRho: 0,
+    initialGuess: 'inertial', coarse: buildClothCoarseSpace(topology), positions_m: data.initialPositions_m ?? data.restPositions_m, method: 'newton', newton: document.solver!.newton!,
+    contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
+    hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd } });
+  contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, direction: solver.newtonDirection });
+  contact.setSolidField(field);
+  const frames: { positions_m: Float64Array; velocities_m_s: Float64Array }[][] = [];
+  try {
+    for (let t = 0; t < ticks; t++) {
+      const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+      contact.encodeFrameBegin(pass);
+      for (let k = 0; k < substeps; k++) solver.encodeStep(pass);
+      pass.end(); device.queue.submit([encoder.finish()]);
+      frames.push([await solver.readState()]);
+    }
+  } finally { solver.destroy(); contact.destroy(); }
+  return frames;
+}
+
+test('free fall onto the floor: the sheet lands without a rebound (the BDF2 history restarts at the contact onset)', { skip: !runs('free-fall') }, async () => withDevice(async device => {
+  // BDF2's velocity (3x_{n+1} - 4x_n + x_{n-1}) / 2h straddles the impact's velocity jump and replays half of it as a
+  // rebound (2.98 m/s from 4.74 m/s before the restart, RESULT (23)); a frictionless floor and an inelastic barrier leave none.
+  const source = clothAnalyticFreeFall(), scene = clothAnalyticSceneDescription(source, override(source));
+  const { frames, ms } = await capture(device, scene, range(1, 45));
+  const track = dropTrack(frames), r = rebound(track);
+  console.log(`[${label(source)}] landing, ${ms.toFixed(1)} ms/tick: fastest fall ${r.fall.toFixed(3)} m/s, largest upward mean velocity after it ${r.up.toFixed(4)} m/s, rests at ${(1000 * track.at(-1)!.y).toFixed(2)} mm`);
+  assert.ok(r.fall < -4, `the sheet reached the floor (${r.fall} m/s)`);
+  assert.ok(r.up <= 0.05, `rebound ${r.up} m/s`);
+}));
+
+// todo: lane C2's 13c426af (a cap-only truncation holds no vertex) lets the slap's whip edge (6 m/s) tunnel the floor at
+// tick 29 and halt with solidBounds, at 8 x 200 and converged alike; un-todo when that lands and judge against the oracle.
+test('a tilted sheet slaps down onto the floor as implicit Euler at h / 8 does (the whole cloth restarts at an onset)', { skip: !runs('free-fall'), todo: 'C2 floor tunnel since 13c426af' }, async () => withDevice(async device => {
+  // One edge lands first and the membrane carries the jump to vertices no contact touches, so a per-vertex restart left
+  // them a rebound of 0.575 m/s (RESULT (25)). Part of the slap's upward motion is membrane recoil, so the reference is
+  // the same landing at an eighth of the step, not zero; both run converged, so the gate judges the restart, not the caps.
+  const own = newtonOf(clothAnalyticFreeFall()), converged = { iterations: 32, pcgIterations: 800, pcgTolerance: own.pcgTolerance! / 16, residualTolerance: own.residualTolerance! / 16 };
+  const ticks = 60, source = tiltedDrop(15 * Math.PI / 180), scene = clothAnalyticSceneDescription(source, { newton: converged });
+  const { frames, ms } = await capture(device, scene, range(1, ticks));
+  const oracle = await landingOracle(device, scene, scene.cloth![0]!, ticks, 8);
+  const got = dropTrack(frames), want = dropTrack(oracle), a = rebound(got), b = rebound(want);
+  console.log(`[${label(source)}] tilted 15 deg landing, ${ms.toFixed(1)} ms/tick: rebound ${a.up.toFixed(4)} m/s (h/8 implicit Euler ${b.up.toFixed(4)}), `
+    + `settled mean height ${(1000 * got.at(-1)!.y).toFixed(2)} mm (${(1000 * want.at(-1)!.y).toFixed(2)})`);
+  assert.ok(Math.abs(a.up - b.up) <= 0.02, `rebound ${a.up} m/s, reference ${b.up}`);
+  assert.ok(Math.abs(got.at(-1)!.y - want.at(-1)!.y) <= 0.002, `settled at ${got.at(-1)!.y} m, reference ${want.at(-1)!.y}`);
 }));
 
 test('hanging curtain: the pinned sheet comes to rest at its exact uniaxial equilibrium', { skip: !runs('hanging-curtain') }, async () => withDevice(async device => {

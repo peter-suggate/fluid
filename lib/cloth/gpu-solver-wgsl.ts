@@ -21,6 +21,9 @@ export const CLOTH_SEGMENT_ALIGN = 16;
 /** Status words: [0] status bits (sticky), [1] steps completed; slots start at CLOTH_STATUS_RING_BASE. */
 export const CLOTH_STATUS = { nonFinite: 1, coarseIndefinite: CLOTH_STATUS_COARSE_INDEFINITE } as const;
 export const CLOTH_STATUS_RING_BASE = 16;
+/** Status words below the ring: 0 status flags, 1 steps; the contact restart's words (Newton with contact): this step's
+ * onset, the next step's restart, and restarts since the state was uploaded. */
+export const CLOTH_STATUS_WORD = { onset: 2, restart: 3, restarts: 4 } as const;
 export const CLOTH_STATUS_SLOT_WORDS = 16;
 export const CLOTH_STATUS_RING_SLOTS = 64;
 export const CLOTH_STATUS_WORDS = CLOTH_STATUS_RING_BASE + CLOTH_STATUS_SLOT_WORDS * CLOTH_STATUS_RING_SLOTS;
@@ -36,7 +39,7 @@ export const CLOTH_WIDE_WORKGROUP = 32;
 /** Uniform records of the per-dispatch data, one per (iteration, colour) and one post record per iteration. */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9, newton: 10, filter: 11 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9, newton: 10, filter: 11, contactState: 12 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
@@ -57,6 +60,8 @@ export interface ClothSolverWGSLOptions {
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
   const contact = !!options.contactBlock, patch = options.patch, lanes = options.vertexLanes ?? CLOTH_VERTEX_LANES;
+  // The BDF2 restart at a contact onset reads C2's contact state: Newton with contact only (VBD and its coarse space go in M4).
+  const restart = contact && !!options.newton;
   if (!(Number.isInteger(lanes) && lanes >= 1 && lanes <= CLOTH_WIDE_WORKGROUP && (lanes & (lanes - 1)) === 0))
     throw new Error(`Cloth vertexLanes must be a power of two from 1 to ${CLOTH_WIDE_WORKGROUP}, got ${lanes}`);
   if (patch && contact) throw new Error('Cloth Tier B does not take a contact block yet: truncation must run inside the patch dispatch');
@@ -129,7 +134,9 @@ fn edgeDual(e: u32) -> vec4f { return state[P.state0.y + e]; }
 fn clockStep() -> u32 { return u32(state[P.state0.w].x); }
 fn previousStep() -> f32 { return state[P.state0.w].y; }
 fn hEff() -> f32 { return state[P.state0.w].z; }
-fn bdf2Step() -> bool { return state[P.state0.w].w != 0.0; }
+fn bdf2Step() -> bool { return state[P.state0.w].w > 0.0; }
+// A restart step (clock w = -1): implicit Euler after a contact onset anywhere on the cloth (beginStep).
+fn restartStep() -> bool { return state[P.state0.w].w < 0.0; }
 fn vertexRest(v: u32) -> vec4f { return rest[P.rest1.x + v]; }
 fn vertexGroup(v: u32) -> u32 { return u32(vertexRest(v).w); }
 fn referenceStiffness(v: u32) -> f32 { let r = vertexRest(v); let h = hEff(); return r.x / (h * h) + r.y; }
@@ -524,13 +531,30 @@ fn stepTime() -> f32 { return P.misc.x + f32(clockStep()) * P.gravity.w; }
   if (a.w > 0.0) { state[seg(S_GRAB, v)] = vec4f(positions[v].xyz, a.w); }
 }
 
-// Step begin (one thread): BDF2 needs a previous step of the same length.
+// Step begin (one thread): BDF2 needs a previous step of the same length${restart ? `, and no contact onset in it` : ''}.
 @compute @workgroup_size(1) fn beginStep() {
-  let dt = P.gravity.w; let previous = previousStep();
-  let bdf2 = P.flags.y != 0u && previous > 0.0 && abs(previous - dt) <= 1e-6 * dt;
+  let dt = P.gravity.w; let previous = previousStep();${restart ? `
+  let restart = atomicLoad(&status[${CLOTH_STATUS_WORD.restart}u]) != 0u;
+  atomicStore(&status[${CLOTH_STATUS_WORD.restart}u], 0u); atomicStore(&status[${CLOTH_STATUS_WORD.onset}u], 0u);
+  if (restart) { atomicAdd(&status[${CLOTH_STATUS_WORD.restarts}u], 1u); }` : `
+  let restart = false;`}
+  let bdf2 = !restart && P.flags.y != 0u && previous > 0.0 && abs(previous - dt) <= 1e-6 * dt;
   state[P.state0.w].z = select(dt, 2.0 * dt / 3.0, bdf2);
-  state[P.state0.w].w = select(0.0, 1.0, bdf2);
+  state[P.state0.w].w = select(select(0.0, 1.0, bdf2), -1.0, restart);
 }
+${restart ? `
+// The BDF2 restart at a contact onset (progress-lane-c1 RESULT (25)). C2's contact state (bit 1: the vertex's contact
+// switched on in the step that wrote it, at stepEnd) raises one cloth-wide word: restartScan, before beginStep, reads the
+// last step's onset (this step restarts: implicit Euler, x^ = x, v^ = v, h~ = h); onsetScan, after this step's stepEnd,
+// reads this step's (finishStep's one-step velocity). The whole cloth restarts: the membrane carries an impact's velocity
+// jump to vertices no contact touches, so every vertex's BDF2 history straddles it.
+@group(0) @binding(${CLOTH_BINDING.contactState}) var<storage, read> ogcState: array<u32>;
+@compute @workgroup_size(${CLOTH_WORKGROUP}) fn restartScan(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x < P.n.x && (ogcState[id.x] & 2u) != 0u) { atomicOr(&status[${CLOTH_STATUS_WORD.restart}u], 1u); }
+}
+@compute @workgroup_size(${CLOTH_WORKGROUP}) fn onsetScan(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x < P.n.x && (ogcState[id.x] & 2u) != 0u) { atomicOr(&status[${CLOTH_STATUS_WORD.onset}u], 1u); }
+}` : ''}
 
 // At x_t, before the frame pass moves positions: AVBD warm start of the edge duals and
 // their stabilized limits, and the damping tangent of every face.
@@ -900,11 +924,18 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
     state[P.state0.w].x = f32(step); state[P.state0.w].y = P.gravity.w; atomicStore(&status[1], step);
   }
   if (v >= P.n.x) { return; }
-  let x = pos(v);
-  let vNew = (x - state[seg(S_XHAT, v)].xyz) / hEff();
-  state[seg(S_VPREV, v)] = state[seg(S_VEL, v)];
+  let x = pos(v); let xt = state[seg(S_XT, v)].xyz;
+  var vNew = (x - state[seg(S_XHAT, v)].xyz) / hEff();
+  var vPrev = state[seg(S_VEL, v)];${restart ? `
+  // The BDF2 velocity (3x_{n+1} - 4x_n + x_{n-1}) / 2h straddles an impact's velocity jump and replays it as a rebound.
+  // In the step of an onset the cloth takes the one-step velocity (x_{n+1} - x_n) / h, the next step is implicit Euler
+  // (restartStep), and after both the history is the steady one (v_{n-1} = v_n): no BDF2 step reaches back across it.
+  let onset = atomicLoad(&status[${CLOTH_STATUS_WORD.onset}u]) != 0u;
+  if (onset && bdf2Step()) { vNew = (x - xt) / P.gravity.w; }
+  if (onset || restartStep()) { vPrev = vec4f(vNew, 0.0); }` : ''}
+  state[seg(S_VPREV, v)] = vPrev;
   state[seg(S_VEL, v)] = vec4f(vNew, 0.0);
-  state[seg(S_DXPREV, v)] = vec4f(x - state[seg(S_XT, v)].xyz, 0.0);
+  state[seg(S_DXPREV, v)] = vec4f(x - xt, 0.0);
   var n = vec3f(0.0);
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
     let t = tris(topo[P.topo0.y + j] >> 2u);
