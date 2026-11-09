@@ -7,6 +7,8 @@ Date: 2026-11-09. Status: approved 2026-11-09; implementation in progress (lanes
 - Two-way rigid coupling uses option (b): bodies that touch cloth become AVBD 6-DOF blocks in the cloth's GPU solve.
 - The libwetcloth reproduction is retired as a goal. Yarn, rods and towels are parked.
 - **The old cloth code is deleted, not parked.** That covers mechanics, contact, rods, porous transport, cohesion, the wet coupling in NB-FLIP, wetcloth scenes, assets, tools, tests and plan docs. Keep the tree neat: only what the new triangle cloth uses survives, rewritten where that is simpler.
+- Long-range support at 1/60 comes from a two-level Galerkin correction over a coarse space built from the mesh topology (coordinator ruling 2026-11-09). Plain VBD, Tier B patches and a lower membrane stiffness were each measured, and none of them converges at 64² or above.
+- Moving voxel solids are scene rigid bodies with prescribed poses. Each is baked once in its body frame and posed on the GPU. Coupling is one-way; two-way waits for review. Box3D gets no per-frame sync.
 - CPU work is allowed at setup and edit time: mesh build, partitioning and initial colouring. Per-step work is GPU only, with no readbacks in the step path.
 
 Paper texts (pdftotext) for the lanes: `~/code/me/fluid-scratch/gpu-cloth-papers/` (vbd, avbd, ogc, jgs2, pfb, webgpu).
@@ -44,7 +46,7 @@ The current cloth reproduces libwetcloth (Fei et al. 2018). It uses an implicit-
 
 - **Mesh.** A triangle shell, stored as a structure of arrays. Per vertex: `x`, `x_t`, `v`, inertia target `y`, mass, OGC bound `b_v`, detection position `x_det`, AVBD duals. Per face: `Dm⁻¹` (2×2), area, material. Per hinge: 4 vertices, rest angle, stiffness. Vertex→element adjacency is CSR. Each vertex keeps its local index in each incident element.
 - **Membrane.** Orthotropic StVK, so warp and weft can differ for woven fabric. The per-vertex 3×3 Hessian is projected to PSD, and compression is softened so the cloth buckles instead of resisting.
-- **Bending.** Discrete-shell dihedral energy with a Gauss-Newton Hessian `k ∇θ ∇θᵀ`, which is PSD and cheap. The rest angle comes from the authored shape.
+- **Bending.** Quadratic isometric bending (Bergou et al. 2006), a fixed 1-ring stencil whose Hessian is `Q_vv·I`. Its line-search trial and damping are closed form. It needs a flat rest shape, and a document with a non-flat rest dihedral fails explicitly. (Coordinator ruling 2026-11-09. It replaces the discrete-shell hinge, whose records were the largest per-colour byte cost.)
 - **Damping.** Rayleigh damping in the VBD form, `k_d H (x − x_t)/dt`.
 - **Hard constraints (AVBD).** Pins, moving attachments, and an optional per-edge strain limit `|e| ≤ (1+ε) L`. The strain limit lets near-inextensible fabric use soft stretch energy without the high stiffness ratio that stalls plain VBD.
 - **Precision.** Float32 in a cloth-local frame. Solve for per-step increments `Δx` from `x_t`, which the current GPU-Newton already does well. Keep that idea.
