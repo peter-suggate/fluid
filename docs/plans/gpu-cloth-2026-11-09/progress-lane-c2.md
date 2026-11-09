@@ -1269,3 +1269,94 @@ energy in whichever lane holds it.
 
 Regression: `tests/cloth-contact-gpu.test.ts` test 3 sums 3 lanes against the whole
 block (force, Hessian and energy within 1e-5 relative), on the GPU.
+
+## 2026-11-09 COORDINATION (C2 → C1): the contact interface for the Newton–PCG solver
+
+User decision (via coordinator): GPU collision and Newton's method. This is the interface C2 provides; C1 please answer
+here or in your progress file if anything does not fit the PCG layout. Everything is GPU, fixed caps, no readback.
+
+**1. Energy terms (WGSL block, the same contact buffer and per-vertex entry lists as today).**
+Every pair already sits in the entry list of each of its vertices with nonzero weight (VT: the vertex and the closest
+feature's vertices; EE: all four; cloth–solid field entries: the one vertex; sample–face: the face's vertices). So the
+global terms are all gathers per vertex, no scatter, no atomics.
+
+A pair's gap is g = Σ_i w_i x_i (w = (1, −barycentrics) for VT, (1 − s, s, −(1 − t), −t) for EE, d = |g|, n = g / d).
+Its Gauss–Newton Hessian is the Kronecker product **(w wᵀ) ⊗ M** with
+M = κ''(d) n nᵀ + μλ (f1(|u|)/|u|) (I − n nᵀ), u the tangential slip.
+κ'' ≥ 0 (quadratic, then log barrier) and f1/y ≥ 1/ε > 0, so every pair block is PSD by construction: no eigen
+projection is needed. The dropped terms are κ'·∂²d (the gap's own curvature) and friction's slip-direction curvature,
+as today. Field entries (static and moving solid) are the 1-vertex case: M = κ'' g gᵀ + friction, w = (1).
+
+Host accessors, as today: `ogcX(i)`, `ogcXt(i)`, `ogcTri(t)`, `ogcEdgeVerts(e)`; new: `ogcDir(i) -> vec3<f32>` (the vector
+H multiplies; samples of a solid read 0, since solid motion is prescribed).
+
+| Function | Returns | Use |
+|---|---|---|
+| `ogcVertexContactLanes(v, xv, first, stride, &f, &H) -> e` (exists) | f = −∂E/∂x_v; H = Σ w_v² M, the exact diagonal block of the global Gauss–Newton Hessian | gradient, block-Jacobi preconditioner |
+| `ogcVertexContactHvLanes(v, first, stride) -> vec3<f32>` (new) | (H p)_v = Σ_entries w_v M (Σ_j w_j p_j), p = `ogcDir` | matrix-free H·p, one pass over vertices |
+| `ogcContactEnergyOwnedLanes(v, first, stride) -> f32` (new) | the energy of the entries v *owns* (VT, field: the vertex; sample–face: the face's lowest cloth vertex; EE: the lower edge's first vertex), all at `ogcX` | Σ_v is the global contact energy, each pair once, for the line search |
+
+Recommendation: matrix-free H·p. A BSR assembly would need the off-diagonal blocks Σ w_v w_j M, which
+`ogcVertexContactHvLanes` already applies implicitly; nothing in the contact terms needs a stored matrix. The linearization
+(weights, n, M) is taken at the current `ogcX` on each call, so H·p must be called with `ogcX` at the Newton iterate, not at a
+line-search trial.
+
+**2. The line-search filter (replaces truncation of sweep moves).**
+`encodeFilter(pass, direction)`: given the iterate x (the `positions` buffer, untouched) and a direction d (a vec4 per
+vertex buffer that C1 binds once, `OgcSolverInputs.direction`), for each vertex
+α_v = the largest α ≤ 1 with x + α d inside every certificate of the vertex's round:
+- the Planar-DAT planes, with the γ_r fraction-to-boundary;
+- the |x − X − w| ≤ cap ball;
+- the static-solid and moving-solid bounds (`cutScale`).
+
+Each certificate is a convex set in x that contains x, so the feasible α of each vertex is an interval [0, α_v].
+Outputs:
+- the per-vertex α_v (an f32 buffer);
+- the global α_min = min_v α_v, an f32 word that C1 reads in WGSL (`ogcAlphaMin()` in the block).
+
+C1's line search starts at α = α_min. A global α is what removes the strain breaks of RESULT (19) by construction.
+The filtered step x + α d lies on the segment between x and x + d, and an edge's length is convex along it. So
+|e(x + α d)| ≤ max(|e(x)|, |e(x + d)|): the filter can no longer stretch an edge that neither end of the step stretches.
+Today's truncation scales each vertex's residual towards its own anchor, which moves one endpoint and not the other.
+I will regress this on the GPU (random directions, an edge's length never above max of its two ends).
+The per-vertex α_v stays exposed for diagnosis.
+
+Two details make the feasible set fixed during a round, so that a filtered iterate stays feasible for the next filter:
+- The planes are placed once per round, from the round's data only: the clamped midpoint of the anchored support gap.
+  Today's per-truncation placement follows the residual, so it would move the set under an iterate.
+- A re-detection round re-anchors: its first act on the iterate is today's radial truncation towards X + w. The new
+  round's certificates contain the iterate before Newton continues, and nothing moves the iterate afterwards except
+  filtered steps.
+
+**3. Re-detection between Newton iterations.**
+`encodeAfterNewtonStep(pass)` = decide plus `encodeDetection(pass, false)`, as `afterIteration` is today.
+- The round arms when the step was bound by a certificate: α_min < 1 for γ_e N or more vertices, or any vertex at α_v = 0.
+- Rounds stay within roundCap, redos within the fixed OGC_REDO_* counts, everything indirect.
+- The step's mandatory round and the initial-guess truncation (`afterFrame`) are unchanged.
+
+`stepHooks` gains `filter(pass)` and `afterNewtonStep(pass)`; the VBD hooks stay until C1 drops the colour sweeps.
+
+**Barrier stiffness (C1 owns `CLOTH_SCENE_CONTACT.kc_N_m`): please raise it from 100 to the cloth's through-thickness
+stiffness.** Measured, rotating sphere, K = 128, full 533 ticks:
+
+| kc_N_m | Result |
+|---|---|
+| 100 | `heldConflict` halt at tick 185 or 270, 247 faces inside the frustum, strain to 30% at ticks 16–22 |
+| 10⁴ | **No halt over 533 ticks**, 0 intersections, 1 face inside the frustum (tick 208), 408 ms/tick |
+
+The cause: the skirt load presses cloth at the frustum corner and the floor into the log zone, to µm. There the solid
+bound's room is ~0 and the vertex freezes while its neighbours move. That freeze is behind the halts, behind most
+faces-in, and behind the strain breaks. A physical value: E·A_v / r with E = stretch / thickness =
+200 N/m / 1 mm = 2·10⁵ Pa and A_v = (1.9 m / 149)² = 1.6·10⁻⁴ m², which gives ≈ 3·10⁴ N/m. This is a material property,
+not a tuning knob.
+
+**Lane state (uncommitted, my files only):**
+- two-frame stray σ: a vertex's round is straight in the solid's frame (bit 6) or the world's, and a pair pays σ only for
+  its vertices of the other family;
+- the redo closure (OGC_REDO_MANDATORY 32, progress counter);
+- the sepEps floor in the solid bounds;
+- bit 4 now means a body bound whose ball reaches r; a far ball's length-only limit no longer marks a vertex as touching,
+  which had held cloth 0.9 m away on the frustum "with the solid".
+
+These land with the filter, once SCRATCH counters are stripped.
+
