@@ -17,6 +17,9 @@ import { OgcContactDetector, type OgcContactConfig } from "../lib/cloth/contact/
 import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, clothSolidClearance, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
+import { CLOTH_SCENE_STEP_S, ClothSystem } from "../lib/cloth/system";
+import { clothAnalyticFreeFall } from "../lib/cloth/scenes/analytic/scenes";
+import { clothAnalyticSceneDescription } from "../lib/cloth/scenes/analytic/scene-description";
 import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
@@ -1083,6 +1086,65 @@ test("GPU solid round over its chord: a long prediction along a floor is certifi
     for (let v = 0; v < N; v++) assert.ok(norm(sub(guess[v], add(X[v], D))) < 1e-6, `vertex ${v} keeps its guess: ${guess[v]}`);
     det.destroy();
   });
+});
+
+test("GPU solid round over its chord: a midpoint past a scene field's box certifies nothing, so a fast vertex is truncated at the floor", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    // C1's tilted drop: a whip vertex 3 cm above the floor predicted 10.5 cm down. The chord's midpoint lies past the
+    // field's box, where a scene field holds nothing (the container's shell or the rest of a solid lies there): read as
+    // band it passed the Lipschitz rule, the round had no terms and the vertex tunnelled the floor.
+    const r = 2e-3, rqMax = 0.04, band = r + 1.5 * Math.sqrt(3) * rqMax + 1e-6, z0 = 0.03;
+    const field = buildClothSolidField({ parts: [{ kind: "lattice-box", lo: [-0.3, -0.3, -0.3], hi: [0.5, 0.5, 0], mu: 0.3 }], lo: [-0.05, -0.05, -0.005], hi: [0.25, 0.15, 0.12], cell: 0.0025, band });
+    const s = sheet(15, 10, 0.01, [0, 0, z0]), mesh: OracleMesh = { ...s, x: f32(s.x) }, N = mesh.x.length, X = mesh.x;
+    const D: V3 = [0, 0, -0.105], env = 3e-3, rr = norm(D) / 2 + env / 2;
+    assert.equal(field.exteriorClear, false, "the floor runs on past the box");
+    for (const x of X) {
+      const mid = add(x, scale(D, 0.5)), b = field.origin.map((o, a) => Math.floor((mid[a]! - o) / (8 * field.cell)));
+      assert.ok(b.some((v, a) => v < 0 || v >= field.dims[a]!), "the chord's midpoint lies past the box");
+      assert.ok(field.band - field.maxLipschitz * rr >= r, "read as band, the midpoint would clear the chord ball");
+    }
+    const { triangles, edges } = topologyOf(mesh);
+    const at = (d: V3) => vec4s(f32(X.map(x => add(x, d))));
+    const positions = storage(device, at(D)), xt = storage(device, at([0, 0, 0])), target = storage(device, at(D));
+    const velocities = storage(device, vec4s(X.map(() => scale(D, 60) as V3)));
+    const gridCapacity = 32 * (N + triangles.length / 4 + edges.length / 4);
+    const config: OgcContactConfig = { ...baseConfig(N), r, rqMax, prediction: "target", gridCapacity, solidCapacityWords: field.words.length, solidSampleCapacity: 8192 };
+    const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges }, vec4s(X), config, { positions, velocities, stepStart: xt, target });
+    det.setSolidField(field);
+    det.writeCarriedState({ reference: vec4s(X), held: new Uint32Array(N) });
+    await runPass(device, pass => { det.encodeFrameBegin(pass); det.stepHooks.afterFrame(pass); });
+    const guess = toV3(new Float32Array(await readBuffer(device, positions)), N), c = await det.readCounters();
+    assert.equal(c.status & ~OGC_STATUS.envelopeCap, 0, `status ${OgcContactDetector.describeStatus(c.status)}`);
+    for (let v = 0; v < N; v++) assert.ok(guess[v]![2] > 0 && sampleClothSolidField(field, guess[v]!).phi > 0, `vertex ${v} stays above the floor: ${guess[v]}`);
+    det.destroy();
+  });
+});
+
+test("GPU tilted drop (C1's slap): a sheet turned 15 degrees falls onto the floor; its whip edge never enters it and nothing halts", { skip: !gpu }, async () => {
+  const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
+  Object.assign(globalThis, dawn.globals);
+  const adapter = await createProcessRetainedDawnGPU(dawn, [`backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`]).requestAdapter();
+  assert.ok(adapter);
+  const device = await adapter.requestDevice({ requiredFeatures: adapter.features.has("subgroups") ? ["subgroups"] : [], requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+  try {
+    const tilt = 15 * Math.PI / 180, source = clothAnalyticFreeFall(), cy = source.probe.y0 as number, c = Math.cos(tilt), sn = Math.sin(tilt);
+    const turn = (p: readonly number[]) => p.map((u, i) => { const k = i % 3, x = p[i - k]!, y = p[i - k + 1]! - cy; return k === 0 ? c * x - sn * y : k === 1 ? cy + sn * x + c * y : u; });
+    const tilted = { ...source, cloth: source.cloth.map(d => ({ ...d, geometry: { kind: "inline" as const, data: { ...d.geometry.data, restPositions_m: turn(d.geometry.data.restPositions_m),
+      ...(d.geometry.data.initialPositions_m ? { initialPositions_m: turn(d.geometry.data.initialPositions_m) } : {}) } } })) };
+    const scene = clothAnalyticSceneDescription(tilted), cloth = await ClothSystem.create(device, scene);
+    try {
+      // Tick 29 lands the whip edge at about 6 m/s (10 cm a step); the sheet has settled by tick 60.
+      const frames = await cloth.capture(Array.from({ length: 60 }, (_, i) => (i + 1) * CLOTH_SCENE_STEP_S));
+      let lowest = Infinity, fastest = 0;
+      for (const [pose] of frames) {
+        const x = pose!.positions_m, v = pose!.velocities_m_s!;
+        for (let i = 0; i < x.length / 3; i++) { lowest = Math.min(lowest, x[3 * i + 1]!); fastest = Math.max(fastest, Math.hypot(v[3 * i]!, v[3 * i + 1]!, v[3 * i + 2]!)); }
+      }
+      assert.equal(cloth.failure, undefined, `halted: ${cloth.failure?.message}`);
+      assert.ok(fastest > 5, `the whip edge lands fast (${fastest} m/s)`);
+      assert.ok(lowest >= 0, `no vertex below the floor (lowest ${lowest} m)`);
+    } finally { cloth.destroy(); }
+  } finally { device.destroy(); }
 });
 
 test("GPU contact state: touching is a normal force at the step's end, onset its first step, carried with the held flags", { skip: !gpu }, async () => {

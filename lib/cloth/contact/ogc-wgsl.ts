@@ -324,6 +324,16 @@ fn ogcSolidSample(h: OgcSolidHeader, p: vec3<f32>) -> OgcSolidSample {
   return OgcSolidSample(phi, g / h.cell, true);
 }
 
+// A certified lower bound of the field at p, min(phi, band). Inside the lattice a missing brick
+// reads band, which it exceeds (bricks are left out only when every node lies beyond band). Outside
+// it the image holds nothing: a moving body's field is clear there (header word 12), but past a
+// scene field's box the scene's shell or the rest of a solid may lie, so it bounds nothing (-3e38).
+fn ogcSolidPhiLower(h: OgcSolidHeader, p: vec3<f32>) -> f32 {
+  let b = floor((p - h.origin) / (8.0 * h.cell));
+  if (any(b < vec3<f32>(0.0)) || any(b >= vec3<f32>(h.dims))) { return select(-3.0e38, h.band, ogcSolidWord(h.base + 12u) != 0u); }
+  return min(ogcSolidSample(h, p).phi, h.band);
+}
+
 // The field at every point within rho of p is at least min(band, ogcSolidClearance(h, p) - rho)
 // (solid-field.ts: K_b - |p - c_b| of p's clearance block, clamped into the table; -3e38
 // for an image without the table).
@@ -365,7 +375,7 @@ struct OgcSolidBound { far: bool, phi0: f32, g0: vec3<f32>, D: vec3<f32> }
 fn ogcSolidBallBound(h: OgcSolidHeader, x0: vec3<f32>, rho: f32, r: f32) -> OgcSolidBound {
   let s = ogcSolidSample(h, x0);
   var out = OgcSolidBound(true, s.phi, s.grad, vec3<f32>(0.0));
-  if (min(s.phi, h.band) - h.lmax * rho >= r) { return out; }
+  if (ogcSolidPhiLower(h, x0) - h.lmax * rho >= r) { return out; }
   let c0 = ogcSolidCellOf(h, x0 - vec3<f32>(rho));
   let c1 = ogcSolidCellOf(h, x0 + vec3<f32>(rho));
   var lastBrick = vec3<i32>(-2147483647);

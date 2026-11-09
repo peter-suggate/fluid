@@ -384,7 +384,7 @@ fn boundTerms(v: u32, h: OgcSolidHeader, sb: OgcSolidBound, x0: vec3<f32>, y: u3
 // within env / 2 of it lie there, and the ball is convex). Clear of the solid there, no terms.
 fn roundBound(v: u32, h: OgcSolidHeader, x0: vec3<f32>, rho: f32, y: u32, margin: f32, c: vec3<f32>) -> OgcTerms {
   let xc = x0 + c; let rr = rho - length(c) + margin;
-  if (min(ogcSolidSample(h, xc).phi, h.band) - h.lmax * rr >= P.r
+  if (ogcSolidPhiLower(h, xc) - h.lmax * rr >= P.r
     || ogcSolidClearance(h, xc) - rr >= P.r) { return OgcTerms(vec4<f32>(0.0), vec3<f32>(0.0), 0.0); }
   let rc = min(rho, 0.5 * P.rqMax);
   var sb = ogcSolidBallBound(h, x0, rc, P.r);

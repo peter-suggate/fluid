@@ -1682,3 +1682,43 @@ The definition fix proposed there needs the coordinator's ruling before I build 
 - drop the carry and the held redo rounds for the moving solid;
 - conflict-test the pairs with it against relative motion, in its frame;
 - let the cloth keep its own smooth prediction.
+
+## 2026-11-10 FIX (C1's regression): a certificate read "clear" past a scene field's box, and the tilted drop tunnelled the floor
+
+**Symptom (C1).** The 15° tilted drop onto the floor halts with solidBounds at tick 29 (normal settings) or 31-32
+(converged). Its whip edge lands at about 6 m/s (8-10 cm a step). Reproduced on HEAD 13c426af with the
+`initialGuess: 'inertial'` preload; HEAD's own `previous` guess does not reach it.
+
+**Bisect.** 13c426af only exposed the hole. Before it, a capped vertex was held, so its next round predicted w = 0.
+13c426af left it free, w = 8 cm, and the round is then certified by the ball about the chord's midpoint (32fcfd8d).
+
+**Cause: a soundness hole, not tuning.** Instrumented prep caught the first vertex outside the field.
+- It was v6375, 3.0 cm above the floor, predicted 80 mm down.
+- Its round had no solid terms (q = D = rl = 0): the chord rule had certified it clear.
+- The chord's midpoint lies about 1 cm under the floor, below the field's lattice. The analytic scenes' floor is the
+  container shell, at the edge of the box.
+- `ogcSolidSample` reads band there, as for a missing brick. So min(phi, band) - L rr >= r passed for a point inside
+  the floor.
+
+A missing brick inside the lattice does exceed band, since bricks are left out only when every node lies beyond it.
+Past a scene field's box the image holds nothing: the shell, or the rest of a solid, may lie there. Only a body
+field (exteriorClear) is clear outside.
+
+**Fix.** `ogcSolidPhiLower(h, p)` is the certified lower bound of the field.
+- Inside the lattice it is min(phi, band).
+- Outside a scene field's lattice it is -3e38 (certifies nothing); outside a body field, band.
+- It replaces the raw sample in the chord rule (`roundBound`) and in the ball bound's far test (`ogcSolidBallBound`).
+- The clearance table needs no change: K_b - |p - c_b| is a 1-Lipschitz bound of the parts' union at any p.
+
+**Result.**
+- Tilted drop: lands without a halt and settles on the floor, with min y >= 0 at every tick to tick 60.
+- `cloth-contact-gpu`: 22/22 pass in the snapshot.
+- check:types is clean. test:unit fails only the known reservoir-particle-cost test.
+
+**Regressions** (both fail without the fix):
+- *"GPU solid round over its chord: a midpoint past a scene field's box certifies nothing"*. A sheet 3 cm above a
+  floor predicted 10.5 cm down; without the fix the guess lands at z = -0.075.
+- *"GPU tilted drop (C1's slap)"*. The analytic scene through ClothSystem for 60 ticks: no halt, whip > 5 m/s, no
+  vertex below the floor. In the main tree (C1's `inertial` guess), without the fix it halts with solidBounds at
+  0.533 s.
+- C1: the tilted-drop todo can come off once this lands.
