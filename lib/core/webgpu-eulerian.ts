@@ -88,6 +88,8 @@ export interface GPUEulerianInfo {
   /** Background compilation failure, if a presentation-only solver could not become runnable. */
   simulationPipelineError?: string;
   simulationFailure?: SimulationFailure;
+  /** Cloth scenes: reported (non-failing) status bits, e.g. a contact round or envelope cap taken, a step without the two-level correction. */
+  clothNotes?: string[];
   /** Latest compact activity census, weighted by represented liquid volume. */
   adaptivePhysicalWidthCensus?: readonly { width: number; leaves: number; liquidVolumeFineCells: number }[];
   adaptivePhysicalWidthCensusStep?: number;

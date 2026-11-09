@@ -526,3 +526,85 @@ Tests:
 - `tests/cloth-system.test.ts`: the bake-leads regression; contact settings and explicit failures (self-friction validation, thickness, terrain, rigid bodies, carved solid); the rotating-sphere contact test on the GPU.
 - check:types is clean.
 - test:unit has 2 foreign failures: `cloth-contact-solid` (C2, in progress) and `reservoir-particle-cost` (lanes T/E).
+
+## 2026-11-09 RESULT (5): two-level correction on the GPU, topology coarse space, contact-aware
+
+What landed (coordinator notes on the two-level correction):
+
+- **P comes from the mesh topology** (`lib/cloth/coarse.ts`), not the (u, v) grid.
+  - Seeds are farthest points by rest geodesic distance (Dijkstra on rest edge lengths), one per connected component first.
+  - Each seed carries a tent of radius 1.5× its cover radius. Rows are truncated to 4 entries and normalised to a partition of unity.
+  - Cuts, holes and non-rectangular documents need no special case. P is rebuilt only when the topology is (edit time).
+  - More pieces than nodes (40) fail explicitly.
+- **A_c = PᵀHP per step, on the GPU.**
+  - `coarseFactors` (one thread per face) writes each face's share as a quadratic form in its corner weights. The share covers membrane GN tangent plus PSD-clamped stress, face damping, the owned strain-limit edges, and the owned corners' inertia, pins and contact Hessian.
+  - `coarseAssemble` runs one workgroup per node pair, as a fixed-order tree sum.
+  - `coarseFactor` is one 1024-lane workgroup. It inverts A_c by a block symmetric sweep with the packed lower triangle in registers, so CM = 3·nodes < 128 and nodes ≤ 42.
+  - A non-positive block skips that step's corrections and raises solver status bit 2 (`coarseIndefinite`).
+- **Per correction:** an element-centric gradient (contact included), restriction, dc = A_c⁻¹ r, prolongation, a four-trial difference-form line search (1, ½, ¼, ⅛ with the summation floor), Armijo choice, the move, then the contact truncation (`afterCoarse` hook).
+  - The correction runs every 2nd iteration (`coarseEvery`; CPU: every 2 ≈ every 1, 3.26 vs 3.21 % at K = 8).
+- **`ClothSystem`:** the correction is on by default (`solver.coarse: false` turns it off).
+  - The default K is 8 with coarse, and the initial guess is 'previous'. The extrapolating guesses overshoot an unconverged solve; the coarse step carries the bulk motion instead.
+- **Status 12 is now visible.** `info.clothNotes` latches roundCap, envelopeCap and coarseIndefinite with their first-seen time. The diagnostics overlay shows "Cloth caps CAPPED/CLEAR".
+
+Cost at 150², 40 nodes, 100 reps a kernel (µs):
+
+| kernel | time (µs) | when |
+|---|---|---|
+| coarseFactors | 60 | per step |
+| coarseAssemble (304 pairs) | 275 | per step |
+| coarseFactor (inverse, one workgroup) | 339 | per step; device-memory Cholesky was 8.3 ms |
+| elements + gradient + restrict + solve + prolong | 51 + 62 + 37 + 31 + 11 | per correction |
+| trial + choose + apply | 108 + 11 + 9 | per correction |
+| **total** | about 675 per step, plus about 320 per correction | |
+
+The coarse solve itself (dc = A_c⁻¹ r, one workgroup) is 31 µs.
+
+Step times without contact (ms/step):
+
+| case | ms/step |
+|---|---|
+| plain K = 8 | 4.4 |
+| plain K = 16 | 8.9 |
+| coarse K = 8 | 7.0 |
+| coarse K = 12 | 8.6 |
+| coarse K = 16 | 11.1 |
+
+K reached at 150², strain limit 2 %, 60 steps, every 2:
+
+| K | max strain | p99.9 | p99 |
+|---|---|---|---|
+| 4 | 9.8 % | 4.19 % | 2.96 % |
+| 8 | 5.5 % (at a corner pin) | 3.65 % | 2.53 % |
+| 12 | 4.1 % | 3.21 % | 2.21 % |
+| 16 | 3.8 % | 2.73 % | 2.12 % |
+
+- Energy is bounded and decreasing in every coarse run. Plain adaptive at K = 8 explodes (H 1.96 → 1063 J, strain 1888 %).
+- **p99.9 under 3 % needs K = 16, and p99 is under 3 % from K = 4.** The maximum stays at the corner pins.
+- **Cut-sheet regression** (CPU, `tests/cloth-coarse.test.ts`): 16² cut sheet, K = 8. Max strain 2.31 %, and H stays at or below H0 (0.46589 vs 0.46652 J). Mean height is 13 mm off a K = 32 run; plain 'previous' is about 130 mm off and plain adaptive reaches 5.7 % with H growing.
+
+**Contact.** The first version left contact out of the coarse gradient, A_c and the line search.
+- With the truncation alone, it fought the barrier: up to 614 faces in the solid, strain 250–330 %, solidPenetration FAILING, even at K = 64.
+- Now:
+  - The gradient includes each vertex's `ogcAccumulateVertexContact` force.
+  - A_c includes the owned corners' contact Hessian blocks.
+  - The line search adds each vertex's own-entry energy change, `ogcVertexContactEnergy`. This is exact for the static solid and first-order for pair entries. A trial that enters a barrier's domain fails outright.
+- Truncation still makes the move safe. C2's WGSL is used read-only; `lib/cloth/contact/` is unchanged.
+
+Rotating sphere (22,500 vertices, 5 colours) through scene contact, at d72f279e, 60 ticks, fenced each tick:
+
+| case | median tick | min tick | max strain | in solid | contact status |
+|---|---|---|---|---|---|
+| plain K = 64, adaptive | 145.7 ms | 48.8 ms | 44.2 % | 1 face | roundCap, envelopeCap |
+| **coarse K = 8, previous** | **19.5 ms** | 13.3 ms | 19.7 % | 0 | clear |
+| coarse K = 12 | 23.4 ms | 18.3 ms | 27.2 % | 0 | clear |
+| coarse K = 16 | 28.9 ms | 19.3 ms | 26.1 % | 0 | clear |
+
+At K = 8 that is 7.5× faster per tick, with half the peak strain and no caps taken.
+
+The Bridson scenes still pin `CLOTH.iterations = 64` (`lib/cloth/scenes/bridson-2002/parameters.ts`, not my file). With coarse on, they run at K = 64. The system test shows 144 ms a tick and status 12 there. Setting their K to 8 is the owner's call.
+
+Tests:
+- `tests/cloth-coarse.test.ts`: topology space; exact free fall in one iteration; cut-sheet energy and strain; GPU one step against the Float64 reference for (K, every) ∈ {(1,1), (4,1), (4,2)}, within 6e-8 m; a 16-step GPU run, 3.5e-6 m, with save/load replay.
+- `tests/cloth-system.test.ts`: the dry-scene oracle now runs the same default coarse correction.
+- check:types is clean. test:unit has 1 foreign failure (`reservoir-particle-cost`).

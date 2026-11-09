@@ -5,6 +5,7 @@
  * f32. Every buffer and bind slot is described in gpu-solver.ts. */
 import { CLOTH_AVBD, CLOTH_LINE_SEARCH } from './oracle';
 import { CLOTH_PATCH_SLOT_BITS } from './patches';
+import { CLOTH_STATUS_COARSE_INDEFINITE, clothCoarseWGSL } from './gpu-coarse-wgsl';
 
 /** vec4<f32> per-vertex segments of the `state` buffer, each CLOTH_SEGMENT_ALIGN-padded N long.
  * Segment 0 is the step-start velocity, so C2 binds `state` as its velocity input. After the
@@ -15,7 +16,7 @@ export const CLOTH_STATE_SEGMENTS = 12;
 /** Segment padding in vec4 records: 16 records = 256 B, the storage binding offset alignment. */
 export const CLOTH_SEGMENT_ALIGN = 16;
 /** Status words: [0] status bits (sticky), [1] steps completed; slots start at CLOTH_STATUS_RING_BASE. */
-export const CLOTH_STATUS = { nonFinite: 1 } as const;
+export const CLOTH_STATUS = { nonFinite: 1, coarseIndefinite: CLOTH_STATUS_COARSE_INDEFINITE } as const;
 export const CLOTH_STATUS_RING_BASE = 16;
 export const CLOTH_STATUS_SLOT_WORDS = 16;
 export const CLOTH_STATUS_RING_SLOTS = 64;
@@ -30,7 +31,7 @@ export const CLOTH_WIDE_WORKGROUP = 32;
 /** Uniform records of the per-dispatch data, one per (iteration, colour) and one post record per iteration. */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
@@ -40,6 +41,8 @@ export interface ClothSolverWGSLOptions {
   readonly patch?: { readonly maxVertices: number; readonly workgroup: number };
   /** Lanes per vertex of solveColourWide: a power of two from 1 to CLOTH_WIDE_WORKGROUP (default CLOTH_VERTEX_LANES). */
   readonly vertexLanes?: number;
+  /** The two-level correction's kernels and its `coarse` work buffer (gpu-coarse-wgsl.ts), for this many coarse nodes. */
+  readonly coarseNodes?: number;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
@@ -47,6 +50,7 @@ export function clothSolverWGSL(options: ClothSolverWGSLOptions = {}): string {
   if (!(Number.isInteger(lanes) && lanes >= 1 && lanes <= CLOTH_WIDE_WORKGROUP && (lanes & (lanes - 1)) === 0))
     throw new Error(`Cloth vertexLanes must be a power of two from 1 to ${CLOTH_WIDE_WORKGROUP}, got ${lanes}`);
   if (patch && contact) throw new Error('Cloth Tier B does not take a contact block yet: truncation must run inside the patch dispatch');
+  if (patch && options.coarseNodes) throw new Error('Cloth Tier B does not take the two-level correction');
   return /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, H
@@ -63,6 +67,7 @@ struct Params {
   tierB: vec4u,  // colour count
   partA: vec4u,  // Tier B partition 0: owner, patch offsets, vertices, colour offsets (topo words)
   partB: vec4u,  // partition 1
+  coarse0: vec4u, coarse1: vec4u, coarse2: vec4u, coarse3: vec4u, coarse4: vec4u, coarse5: vec4u, coarse6: vec4u, // gpu-coarse-wgsl.ts
 }
 struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration) or Tier B (partition, inner iterations), (omega)
 
@@ -822,5 +827,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-`;
+${options.coarseNodes ? clothCoarseWGSL(CLOTH_BINDING.coarse, CLOTH_WORKGROUP, options.coarseNodes, contact) : ''}`;
 }

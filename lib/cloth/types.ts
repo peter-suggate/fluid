@@ -102,6 +102,8 @@ export interface ClothSolverSettings {
   readonly chebyshevRho?: number;
   /** Coulomb friction of cloth on cloth (self contact); omitted means frictionless. */
   readonly selfFriction?: number;
+  /** Tier A two-level correction (coarse.ts): on unless false. */
+  readonly coarse?: boolean;
   readonly tier?: ClothSolverTier;
   /** Tier B: target owned vertices per patch. */
   readonly patchVertices?: number;

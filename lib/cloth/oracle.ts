@@ -339,7 +339,7 @@ export function clothDampingTangent(model: ClothSolverModel, x0: ArrayLike<numbe
   return { face, hinge };
 }
 
-function addFaceDamping(model: ClothSolverModel, frame: ClothStepFrame, f: number, k: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
+export function clothAddFaceDamping(model: ClothSolverModel, frame: ClothStepFrame, f: number, k: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
   const t = model.topology, kd = model.faceDamping_s[f]!;
   if (!(kd > 0)) return 0;
   const c = model.membrane[t.faceMaterial[f]!]!, T = frame.damping.face, o = 8 * f, scale = kd * t.faceArea_m2[f]! / frame.hEff;
@@ -359,7 +359,7 @@ function addFaceDamping(model: ClothSolverModel, frame: ClothStepFrame, f: numbe
   return 0.5 * scale * dot(rate, sigma);
 }
 
-function addHingeDamping(model: ClothSolverModel, frame: ClothStepFrame, h: number, k: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
+export function clothAddHingeDamping(model: ClothSolverModel, frame: ClothStepFrame, h: number, k: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
   const t = model.topology, kd = model.hingeDamping_s[h]!;
   if (!(kd > 0)) return 0;
   const T = frame.damping.hinge, scale = kd * t.hingeStiffness_N_m[h]! / frame.hEff;
@@ -385,7 +385,7 @@ export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame,
     const b = clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, k, pos(t.faces[3 * f]!), pos(t.faces[3 * f + 1]!), pos(t.faces[3 * f + 2]!));
     for (let c = 0; c < 3; c++) g[c] += b.gradient[c]!;
     for (let c = 0; c < 9; c++) H[c] += b.hessian[c]!;
-    const ed = addFaceDamping(model, frame, f, k, pos, g, H);
+    const ed = clothAddFaceDamping(model, frame, f, k, pos, g, H);
     energy += b.energy + ed; magnitude += Math.abs(b.energy) + ed;
   }
   for (let j = t.vertexHingeOffsets[v]!; j < t.vertexHingeOffsets[v + 1]!; j++) {
@@ -393,7 +393,7 @@ export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame,
     const b = clothBendingBlock(t.hingeStiffness_N_m[hg]!, t.hingeRestAngle_rad[hg]!, k, pos(t.hinges[4 * hg]!), pos(t.hinges[4 * hg + 1]!), pos(t.hinges[4 * hg + 2]!), pos(t.hinges[4 * hg + 3]!));
     for (let c = 0; c < 3; c++) g[c] += b.gradient[c]!;
     for (let c = 0; c < 9; c++) H[c] += b.hessian[c]!;
-    const ed = addHingeDamping(model, frame, hg, k, pos, g, H);
+    const ed = clothAddHingeDamping(model, frame, hg, k, pos, g, H);
     energy += b.energy + ed; magnitude += Math.abs(b.energy) + ed;
   }
   if (isPinned(model, v)) {
@@ -590,16 +590,25 @@ function patchSweep(model: ClothSolverModel, frame: ClothStepFrame, state: Cloth
   state.x.set(result);
 }
 
-export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState, options: ClothStepOptions, track = false, patches?: ClothPatchSchedule): ClothStepReport {
+/** Two-level correction (coarse.ts): set up once per step after the warm start at the initial guess,
+ * then applied before each iteration's colour sweeps. */
+export interface ClothOracleCoarse {
+  begin(frame: ClothStepFrame, state: ClothOracleState): void;
+  correct(frame: ClothStepFrame, state: ClothOracleState): void;
+}
+
+export function clothOracleStep(model: ClothSolverModel, state: ClothOracleState, options: ClothStepOptions, track = false, patches?: ClothPatchSchedule, coarse?: ClothOracleCoarse): ClothStepReport {
   const n = model.topology.vertexCount, { frame, init, bdf2 } = clothStepFrame(model, state, options);
   if (patches && !(Number.isInteger(patches.innerIterations) && patches.innerIterations >= 1)) throw new Error('Cloth patch sweeps need at least one inner iteration');
   clothWarmStartDuals(model, state, frame.hEff);
   state.x.set(init);
+  coarse?.begin(frame, state);
   const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
   for (let v = 0; v < n; v++) byColour[model.colours[v]!]!.push(v);
   const prev1 = Float64Array.from(state.x), prev2 = Float64Array.from(state.x), residuals: number[] = [];
   let omega = 1;
   for (let it = 1; it <= options.iterations; it++) {
+    coarse?.correct(frame, state);
     if (patches) patchSweep(model, frame, state, patches.partitions[(it - 1) % 2]!, patches.innerIterations, options.lineSearchEpsilon);
     else for (const list of byColour) colourSweep(model, frame, state, list, options.lineSearchEpsilon);
     omega = clothChebyshevOmega(it, options.chebyshevRho, omega);

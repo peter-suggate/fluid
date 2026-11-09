@@ -118,6 +118,7 @@ export function validateClothDocument(document: ClothDocument): string[] {
     if (solver.iterations !== undefined && !(Number.isInteger(solver.iterations) && solver.iterations >= 1)) errors.push("Cloth iterations must be a positive integer");
     if (solver.chebyshevRho !== undefined && !(solver.chebyshevRho >= 0 && solver.chebyshevRho < 1)) errors.push("Cloth Chebyshev rho must lie in [0, 1)");
     if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
+    if (solver.coarse !== undefined && typeof solver.coarse !== "boolean") errors.push("Cloth two-level correction setting must be a boolean");
   }
   return errors;
 }

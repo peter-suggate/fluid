@@ -24,6 +24,7 @@ import { visibleToolSurface } from '../lib/core/voxel-editor/surface';
 import { clothGridData } from '../lib/cloth/grid';
 import { validateClothDocument, prepareClothTopology, clothVertexNeighbours, colourClothVertices } from '../lib/cloth/topology';
 import { buildClothSolverModel, clothOracleStep, createClothOracleState } from '../lib/cloth/oracle';
+import { ClothCoarseCorrection, buildClothCoarseSpace } from '../lib/cloth/coarse';
 import { sceneWithClothStroke } from '../lib/cloth/scene-edit';
 import { publishSceneClothSurfaces } from '../lib/cloth/scene-geometry';
 import { CLOTH_SCENE_STEP_S, ClothSystem, withClothSystem } from '../lib/cloth/system';
@@ -197,7 +198,9 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   const document = scene.cloth![0]!, topology = prepareClothTopology(document.geometry.data, document.materials);
   const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)));
   const oracle = createClothOracleState(model, document.geometry.data.restPositions_m);
-  for (let k = 0; k < 6; k++) clothOracleStep(model, oracle, { dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: [0, scene.fluid.gravity_m_s2.y, 0], integrator: 'bdf2', iterations: 12, chebyshevRho: 0 });
+  // The scene's default two-level correction, from the 'previous' guess (the system's pairing).
+  const coarse = new ClothCoarseCorrection(model, buildClothCoarseSpace(topology));
+  for (let k = 0; k < 6; k++) clothOracleStep(model, oracle, { dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: [0, scene.fluid.gravity_m_s2.y, 0], integrator: 'bdf2', iterations: 12, chebyshevRho: 0, initialGuess: 'previous' }, false, undefined, coarse);
   let worst = 0;
   for (let i = 0; i < oracle.x.length; i++) worst = Math.max(worst, Math.abs(oracle.x[i]! - surface.positions_m[i]!));
   // The scene runs with OGC contact; with nothing in reach its truncation still bounds each
