@@ -372,6 +372,174 @@ test("GPU Planar-DAT truncation matches the oracle and keeps large motions penet
   });
 });
 
+/**
+ * The Newton forms of the vertex block at the current positions, with p in dir: per vertex
+ * ((H p)_v, owned energy), (f, per-vertex energy).
+ */
+async function evalNewtonBlock(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, xt: GPUBuffer, dir: GPUBuffer, N: number): Promise<Float32Array> {
+  const L = det.topology.layout;
+  const out = device.createBuffer({ size: 32 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> Xt: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> topo: array<u32>;
+@group(0) @binding(3) var<storage, read_write> outBuf: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> D: array<vec4<f32>>;
+fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return Xt[i].xyz; }
+fn ogcDir(i: u32) -> vec3<f32> { return D[i].xyz; }
+fn ogcTri(t: u32) -> vec3<u32> { let b = ${L.trisOffset}u + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = ${L.edgesOffset}u + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
+${OgcContactDetector.vertexBlockWGSL(0, 4, true)}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= ${N}u) { return; }
+  var f = vec3<f32>(0.0); var H = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  let e = ogcVertexContactLanes(v, ogcX(v), 0u, 1u, &f, &H);
+  // Two lanes for the global forms, as a lane-split solver sums them.
+  let hv = ogcVertexContactHvLanes(v, 0u, 2u) + ogcVertexContactHvLanes(v, 1u, 2u);
+  let eo = ogcContactEnergyOwnedLanes(v, 0u, 2u) + ogcContactEnergyOwnedLanes(v, 1u, 2u);
+  outBuf[2u * v] = vec4<f32>(hv, eo);
+  outBuf[2u * v + 1u] = vec4<f32>(f, e);
+}`;
+  const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, positions], [1, xt], [2, det.topo], [3, out], [4, det.solverBuffer], [5, dir]] as [number, GPUBuffer][]).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
+  device.queue.submit([enc.finish()]);
+  const res = new Float32Array(await readBuffer(device, out));
+  out.destroy();
+  return res;
+}
+
+test("GPU Newton contact terms: H p is symmetric, PSD and has the vertex block's diagonal; the owned energy counts each pair once and its gradient is the block's force", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const mesh = stackScene(5), N = mesh.x.length, R = rng(91);
+    const config: OgcContactConfig = { ...baseConfig(N), truncation: "isotropic" };
+    const { det, positions, oracle } = await detect(device, mesh, mesh.x.map(() => [0, 0, 0]), config);
+    const xdet = new Float32Array(await readBuffer(device, det.det));
+    const X = f32(mesh.x.map((p, v) => { const b = xdet[4 * v + 3] * 0.9; return [p[0] + (R() - 0.5) * b, p[1] + (R() - 0.5) * b, p[2] + (R() - 0.5) * b] as V3; }));
+    const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 2e-4, p[1] + (R() - 0.5) * 2e-4, p[2]] as V3));
+    device.queue.writeBuffer(positions, 0, vec4s(X));
+    const xt = storage(device, vec4s(Xt));
+    const randomDir = () => f32(mesh.x.map(() => [R() - 0.5, R() - 0.5, R() - 0.5] as V3));
+    const P = randomDir(), Q = randomDir();
+    const dir = storage(device, vec4s(P));
+    const at = async (d: V3[]) => { device.queue.writeBuffer(dir, 0, vec4s(d)); return evalNewtonBlock(device, det, positions, xt, dir, N); };
+    const hv = (res: Float32Array, v: number): V3 => [res[8 * v]!, res[8 * v + 1]!, res[8 * v + 2]!];
+    const rp = await at(P), rq = await at(Q);
+    // Symmetric and PSD: q.(H p) = p.(H q), p.(H p) >= 0.
+    let qHp = 0, pHq = 0, pHp = 0, scale = 0;
+    for (let v = 0; v < N; v++) { qHp += dot(Q[v], hv(rp, v)); pHq += dot(P[v], hv(rq, v)); pHp += dot(P[v], hv(rp, v)); scale += norm(P[v]) * norm(hv(rp, v)); }
+    assert.ok(scale > 0, "contacts act");
+    assert.ok(Math.abs(qHp - pHq) <= 1e-4 * scale, `symmetric: ${qHp} vs ${pHq} (scale ${scale})`);
+    assert.ok(pHp >= -1e-5 * scale, `PSD: ${pHp}`);
+    // The diagonal: p = e_a at vertices sharing no pair, so (H p)_v = H_vv e_a, the vertex block's column.
+    const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
+    const ids = (ent: Entry) => asOracleContact(ent, oracle).ids;
+    const taken = new Set<number>(), probe: number[] = [];
+    for (let v = 0; v < N; v++) {
+      if (!lists[v]!.length) continue;
+      const nb = new Set(lists[v]!.flatMap(ids));
+      if ([...nb].some(i => taken.has(i))) continue;
+      probe.push(v); for (const i of nb) taken.add(i);
+    }
+    assert.ok(probe.length > 10, `${probe.length} probe vertices`);
+    const block = await evalVertexBlock(device, det, positions, Xt, N);
+    for (let a = 0; a < 3; a++) {
+      const E = mesh.x.map(() => [0, 0, 0] as V3);
+      for (const v of probe) E[v]![a] = 1;
+      const r = await at(E);
+      for (const v of probe) {
+        const col: V3 = [block[16 * v + 4 * (a + 1)]!, block[16 * v + 4 * (a + 1) + 1]!, block[16 * v + 4 * (a + 1) + 2]!];
+        const s = Math.max(1, norm(col));
+        assert.ok(norm(sub(hv(r, v), col)) <= 1e-4 * s, `vertex ${v} column ${a}: ${hv(r, v)} vs ${col}`);
+      }
+    }
+    // Each pair once: the owned energies sum to the unique pairs' oracle energies; an EE pair sits in four lists.
+    const params = { r: config.r, k: config.kc, mu: config.mu, epsV: config.epsV, dt: config.dt };
+    const unique = new Map<string, number>(), eeCopies = new Map<string, number>();
+    for (let v = 0; v < N; v++) for (const ent of lists[v]!) {
+      const ee = (ent.y & 0x80000000) !== 0, key = ee ? [ent.x, ent.y & 0x0fffffff].sort((x, y) => x - y).join("|") : `${ent.x}|${ent.y}`;
+      if (ee) eeCopies.set(key, (eeCopies.get(key) ?? 0) + 1);
+      unique.set(key, contactEnergy(asOracleContact(ent, oracle), X, Xt, params));
+    }
+    for (const [key, n] of eeCopies) assert.equal(n, 4, `EE pair ${key} in ${n} lists`);
+    assert.ok(eeCopies.size > 10, `${eeCopies.size} EE pairs`);
+    const owned = (res: Float32Array) => { let e = 0; for (let v = 0; v < N; v++) e += res[8 * v + 3]!; return e; };
+    const ref = [...unique.values()].reduce((x, y) => x + y, 0);
+    assert.ok(Math.abs(owned(rp) - ref) <= 2e-3 * ref, `owned energy ${owned(rp)} vs ${ref} over ${unique.size} pairs`);
+    // Its directional derivative is -f.p (central difference along a short p).
+    const h = 2e-6;
+    let fp = 0;
+    for (let v = 0; v < N; v++) fp -= dot([rp[8 * v + 4]!, rp[8 * v + 5]!, rp[8 * v + 6]!], P[v]!);
+    const shifted = async (s: number) => { device.queue.writeBuffer(positions, 0, vec4s(X.map((x, v) => [x[0] + s * P[v]![0], x[1] + s * P[v]![1], x[2] + s * P[v]![2]] as V3))); return owned(await at(P)); };
+    const fd = (await shifted(h) - await shifted(-h)) / (2 * h);
+    assert.ok(Math.abs(fd - fp) <= 2e-2 * Math.abs(fp), `dE/ds ${fd} vs -f.p ${fp}`);
+    xt.destroy(); dir.destroy(); det.destroy();
+  });
+});
+
+test("GPU line-search filter: x + alpha d is certified for every alpha up to alpha_v, alpha_min is their min, and the whole-step filter stretches no edge", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const mesh = stackScene(9), N = mesh.x.length, R = rng(5);
+    const motion = f32(mesh.x.map(p => [(R() - 0.5) * 6e-3, (R() - 0.5) * 6e-3, (p[2] < 1.9e-3 ? 1 : -1) * R() * 5e-3] as V3));
+    const config: OgcContactConfig = { ...baseConfig(N), newton: true };
+    const vel = motion.map(d => [d[0] / config.dt, d[1] / config.dt, d[2] / config.dt - config.gravity[2] * config.dt] as V3);
+    const { triangles, edges, oracle } = topologyOf(mesh);
+    const positions = storage(device, vec4s(mesh.x)), velocities = storage(device, vec4s(vel)), direction = storage(device, vec4s(motion));
+    const det = await OgcContactDetector.create(device, { vertexCount: N, triangles, edges }, vec4s(mesh.x), config, { positions, velocities, direction });
+    await runPass(device, pass => { det.encodeFrameBegin(pass); det.encodeStepBegin(pass); det.encodeDetection(pass); });
+    const X = f32(mesh.x), full = X.map((x, v) => [x[0] + motion[v]![0], x[1] + motion[v]![1], x[2] + motion[v]![2]] as V3);
+    assert.ok(motionPenetrates(oracle, X, full), "the whole step penetrates");
+    await runPass(device, pass => det.encodeFilter(pass));
+    const alpha = new Float32Array(await readBuffer(device, det.alpha, 4 * (N + 1)));
+    let lo = 1, bound = 0;
+    for (let v = 0; v < N; v++) { assert.ok(alpha[v]! >= 0 && alpha[v]! <= 1, `alpha_${v} ${alpha[v]}`); lo = Math.min(lo, alpha[v]!); if (alpha[v]! < 1) bound++; }
+    assert.equal(alpha[N], lo, "alpha_min");
+    assert.ok(lo > 0 && lo < 1 && bound > 0.05 * N, `alpha_min ${lo}, ${bound} vertices bound`);
+    // A certified point: the truncation leaves it (to f32 rounding), no motion to it penetrates, no faces cross.
+    const certified = async (Y: V3[], what: string) => {
+      device.queue.writeBuffer(positions, 0, vec4s(Y));
+      await runPass(device, pass => det.encodeTruncate(pass));
+      const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
+      for (let v = 0; v < N; v++) assert.ok(norm(sub(got[v]!, Y[v]!)) <= 2e-8 + 1e-5 * norm(motion[v]!), `${what}: truncation moves vertex ${v} by ${norm(sub(got[v]!, Y[v]!))}`);
+      assert.equal(motionPenetrates(oracle, X, Y), false, `${what}: penetration-free`);
+      assert.equal(countIntersections({ ...oracle, x: Y }), 0, `${what}: no intersections`);
+    };
+    const along = (k: (v: number) => number) => f32(X.map((x, v) => [x[0] + k(v) * motion[v]![0], x[1] + k(v) * motion[v]![1], x[2] + k(v) * motion[v]![2]] as V3));
+    const global = along(() => lo);
+    await certified(global, "alpha_min");
+    await certified(along(() => 0.5 * lo), "alpha_min / 2");
+    // Each alpha_v certifies its own vertex: every vertex at its own alpha_v at once is certified too.
+    await certified(along(v => alpha[v]!), "alpha_v");
+    // The strain-limit breaks of per-vertex truncation: an edge is convex along the segment, so the
+    // global step never stretches an edge past both ends of the step; the per-vertex truncation of
+    // the whole step (each residual towards its own anchor) does.
+    const len = (Y: V3[], e: [number, number, number, number]) => norm(sub(Y[e[0]]!, Y[e[1]]!));
+    device.queue.writeBuffer(positions, 0, vec4s(full));
+    await runPass(device, pass => det.encodeTruncate(pass));
+    const truncated = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    let globalOver = 0, truncOver = 0;
+    for (const e of oracle.edges) {
+      const limit = Math.max(len(X, e), len(full, e)) * (1 + 1e-6) + 1e-9;
+      if (len(global, e) > limit) globalOver++;
+      if (len(truncated, e) > limit) truncOver++;
+    }
+    assert.equal(globalOver, 0, "the global step stretches no edge past both ends");
+    console.log(`filter: alpha_min ${lo.toFixed(4)}, ${bound} of ${N} vertices bound; per-vertex truncation of the whole step stretches ${truncOver} of ${oracle.edges.length} edges past both ends`);
+    // Fixed planes: from the filtered iterate the rest of the direction filters again, from a certified start.
+    device.queue.writeBuffer(positions, 0, vec4s(global));
+    device.queue.writeBuffer(direction, 0, vec4s(f32(motion.map(m => [m[0] * (1 - lo), m[1] * (1 - lo), m[2] * (1 - lo)] as V3))));
+    await runPass(device, pass => det.encodeFilter(pass));
+    const again = new Float32Array(await readBuffer(device, det.alpha, 4 * (N + 1)));
+    assert.ok(again[N]! > 0, `the second filter moves on: alpha_min ${again[N]}`);
+    await certified(f32(global.map((x, v) => [x[0] + again[N]! * (1 - lo) * motion[v]![0], x[1] + again[N]! * (1 - lo) * motion[v]![1], x[2] + again[N]! * (1 - lo) * motion[v]![2]] as V3)), "second step");
+    positions.destroy(); velocities.destroy(); direction.destroy(); det.destroy();
+  });
+});
+
 /** Three sheets 4 mm apart, out of contact (r = 1 mm), lightly jittered. */
 function spacedStack(seed: number): OracleMesh {
   const R = rng(seed), h = 0.01;
@@ -783,6 +951,36 @@ test("GPU static solid: entries, truncation terms, the vertex block and the trun
     const faces = mesh.tris.filter(t => t.includes(edgeV)).length;
     assert.ok(c3.solidIntersections >= 1 && c3.solidIntersections <= faces, `${c3.solidIntersections} faces in the box (vertex ${edgeV} in ${faces} faces)`);
     det.destroy();
+  });
+});
+
+test("GPU static solid: a cut never closes a gap below sepEps, and a vertex rounding left within it may only move away", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const field = solidField(), mesh = solidSheet(29), N = mesh.x.length, sepEps = 2e-6;
+    // Over the box's flat top (z = 0.03, on the lattice, so phi is the height exactly): one vertex
+    // rounding has left within sepEps, one 3 sepEps up, one 1 mm up; all pushed 2 mm down.
+    const within = 51, near = 53, far = 55, top = 0.03;
+    mesh.x[within] = [mesh.x[within]![0], mesh.x[within]![1], Math.fround(top + 0.5 * sepEps)];
+    mesh.x[near] = [mesh.x[near]![0], mesh.x[near]![1], Math.fround(top + 3 * sepEps)];
+    mesh.x[far] = [mesh.x[far]![0], mesh.x[far]![1], Math.fround(top + 1e-3)];
+    const phi0 = (v: number) => sampleClothSolidField(field, mesh.x[v]!).phi;
+    for (const v of [within, near, far]) assert.ok(Math.abs(phi0(v) - (mesh.x[v]![2] - top)) < 1e-9, `vertex ${v} over the flat top`);
+    const config: OgcContactConfig = { ...baseConfig(N), solidCapacityWords: field.words.length, solidSampleCapacity: 8192, separationEps: sepEps };
+    const { det, positions } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
+    assert.equal((await det.readCounters()).status & OGC_STATUS.solidPenetration, 0);
+    device.queue.writeBuffer(positions, 0, vec4s(mesh.x.map(p => [p[0], p[1], p[2] - 2e-3] as V3)));
+    await runPass(device, pass => det.encodeTruncate(pass));
+    const got = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    const phi = (v: number) => sampleClothSolidField(field, got[v]!).phi;
+    assert.ok(phi(within) >= phi0(within) - 1e-9, `within sepEps: phi ${phi(within)} from ${phi0(within)}, no approach`);
+    assert.ok(phi(near) >= sepEps - 1e-9 && phi(near) < phi0(near), `3 sepEps up: phi ${phi(near)} closes to sepEps, not below`);
+    assert.ok(phi(far) >= solidKeep(phi0(far), 0.9, config.r, sepEps) - 1e-9 && phi(far) < phi0(far), `1 mm up: phi ${phi(far)} approaches, to (1 - gamma_r) phi0 at most`);
+    // Away from the solid the vertex within sepEps moves freely.
+    device.queue.writeBuffer(positions, 0, vec4s(mesh.x.map(p => [p[0], p[1], p[2] + 1e-4] as V3)));
+    await runPass(device, pass => det.encodeTruncate(pass));
+    const up = toV3(new Float32Array(await readBuffer(device, positions)), N);
+    assert.ok(Math.abs(up[within]![2] - (mesh.x[within]![2] + 1e-4)) < 1e-9, `within sepEps it moves away: z ${up[within]![2]}`);
+    det.destroy(); positions.destroy();
   });
 });
 

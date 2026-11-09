@@ -1360,3 +1360,40 @@ not a tuning knob.
 
 These land with the filter, once SCRATCH counters are stripped.
 
+## 2026-11-09 MILESTONE: the Newton interface, landed (filter, H·p, owned energy, lagged friction)
+
+All of section 1–3 above is implemented, with one change to the pair block: **friction is lagged at the step start**.
+The Newton test's finite difference of the owned energy disagreed with the force by 35% (−63.9 vs −47.3) and agreed
+exactly at μ = 0. The friction force was not the gradient of any energy: its tangent plane and weights followed the
+iterate. Now friction takes its weights wl and normal nl from `ogcXt` (sample–face: the sample's start), the slip
+is u = (I − nl nlᵀ) Σ wl (x − x_t), and the friction energy is μλ f0(|u|) with λ lagged as before. The force is
+its exact gradient, which Newton's line search needs. The pair Hessian is
+
+(w wᵀ) ⊗ Mn + (wl wlᵀ) ⊗ Mf, Mn = κ''(d) n nᵀ, Mf = μλ (f1(|u|)/|u|)(I − nl nlᵀ),
+
+still PSD by construction. The VBD path uses the same lagged terms (same buffers, same block).
+
+Functions (`ogc-wgsl.ts`, `OgcVertexBlockOptions.newton`; the host defines `ogcDir(i)`):
+`ogcVertexContactHvLanes(v, first, stride)`, `ogcContactEnergyOwnedLanes(v, first, stride)`; the existing
+`ogcVertexContactLanes` returns the same diagonal blocks. Detector (`ogc-detector.ts`, `OgcContactConfig.newton`,
+`OgcSolverInputs.direction`): `encodeFilter(pass)`, `encodeAfterNewtonStep(pass)`, `stepHooks.filter` and
+`stepHooks.afterNewtonStep`, and the `alpha` buffer (α_v per vertex, α_min in word N). `bind()` throws on a direction
+without `newton` or `newton` without a direction. In newton mode the planes are placed at the round's midpoint and
+never move during the round. A filter with α_v = 0 arms a re-detection round (`filterStalled`).
+
+Tests (GPU, `tests/cloth-contact-gpu.test.ts`):
+- H·p: symmetric (pᵀHq = qᵀHp), PSD (pᵀHp ≥ 0, random p), the diagonal column equals the block; the owned energy
+  equals the Float64 sum over unique pairs (2e-3); an EE pair sits in 4 lists; the energy's FD directional derivative
+  along random d at h = 2e-6 matches −f·d (2e-2).
+- The filter: α ∈ [0, 1] and word N = min (α_min 0.084, 213 of 220 vertices bound); x + α d certified at α_min,
+  α_min/2 and per-vertex α_v (truncation is a no-op, no penetration, 0 intersections); **the global step stretches 0
+  of 546 edges past both ends of the step, per-vertex truncation stretches 26**; a second filter from the new iterate
+  moves on.
+- Oracle (`tests/cloth-contact-oracle.test.ts`): force = −∇E by FD of the full energy with lagged friction.
+- Body and static-solid tests unchanged and passing.
+
+Also in this commit:
+- `scene-solids.ts` dispatches `cloth-analytic-*` scenes to Lane A's `clothAnalyticSceneSolids`; paint patches are
+  contact-neutral (a regression checks the parts are identical with and without paint).
+- Detector flag bit 4 (touched the moving solid) is set only when the body ball reaches r.
+

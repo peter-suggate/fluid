@@ -56,11 +56,21 @@ export const OGC_COUNTER = {
   roundEnvelope: 39,
   /** Vertices with a moving-solid entry over the frame's rounds, and the truncations its bound made. */
   frameBodyContacts: 40, frameBodyCut: 41,
-  /** A pair (words 42..45, ids as in the pair buffer: EE bit on an edge-edge pair) that conflicted in a held round. */
+  /** A pair (words 42..45, ids as in the pair buffer: EE bit on an edge-edge pair) that conflicted in the held round. */
   heldConflictPair: 42,
+  /**
+   * Impact zones with the moving solid over the frame: cloth vertices a conflict carried with
+   * it (each once per step), and the largest such zone of one step (all its zones together).
+   */
+  frameZoneVertices: 46, frameZonePeak: 47,
+  /** The current step's zone vertices (each redo decision folds it into frameZonePeak; the step's begin clears it). */
+  stepZone: 48,
+  redoProgress: 49,
+  /** The line-search filter: vertices it held at alpha_v = 0 (consumed by the decision, which then re-detects). */
+  filterStalled: 50,
 } as const;
-export const OGC_COUNTER_WORDS = 46;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41];
+export const OGC_COUNTER_WORDS = 51;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47];
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -83,12 +93,12 @@ export const OGC_STATUS = {
   /** A vertex left the box the solid field covers, where the solid is not seen. */
   solidBounds: 256,
   /**
-   * A vertex carried by the moving solid has no motion that both it and the static
-   * solid allow (cloth pressed between them), or its carried motion leaves the band
-   * the static field covers: the step cannot keep both bounds.
+   * A vertex's prediction cannot keep both the moving solid's bound and the static
+   * solid's: the static cut takes it back into the moving solid's (cloth pressed
+   * between them, nearer than about 2 r).
    */
   bodySqueeze: 512,
-  /** A round already redone held still had crossing predictions (the moving solid's carried ones). */
+  /** The round redone held still had crossing predictions: cloth the moving solid pushes together. */
   heldConflict: 1024,
   /** A step ran past the poses the frame's owner uploaded for the moving solid. */
   bodyPose: 2048,
@@ -158,6 +168,11 @@ const OGC_ST_COINCIDENT = ${OGC_STATUS.coincident}u;
 const OGC_F_BODY_CONTACTS = ${OGC_COUNTER.frameBodyContacts}u;
 const OGC_F_BODY_CUT = ${OGC_COUNTER.frameBodyCut}u;
 const OGC_HELD_PAIR = ${OGC_COUNTER.heldConflictPair}u;
+const OGC_F_ZONE_VERTICES = ${OGC_COUNTER.frameZoneVertices}u;
+const OGC_F_ZONE_PEAK = ${OGC_COUNTER.frameZonePeak}u;
+const OGC_STEP_ZONE = ${OGC_COUNTER.stepZone}u;
+const OGC_REDO_PROGRESS = ${OGC_COUNTER.redoProgress}u;
+const OGC_FILTER_STALLED = ${OGC_COUNTER.filterStalled}u;
 `;
 
 /** Geometry, activation and friction shared by detection, the vertex block and the tests. */
@@ -364,6 +379,11 @@ export interface OgcVertexBlockOptions {
   group: number;
   /** Binding of the contact buffer (read). */
   binding: number;
+  /**
+   * Also the global (Newton) forms, ogcVertexContactHvLanes and ogcContactEnergyOwnedLanes;
+   * the host then defines fn ogcDir(i: u32) -> vec3<f32> too, the vector H multiplies.
+   */
+  newton?: boolean;
 }
 
 /**
@@ -412,116 +432,162 @@ fn ogcSampleStart(i: u32) -> vec3<f32> {
 
 struct OgcPairEval { f: vec3<f32>, h: mat3x3<f32>, e: f32 }
 
-// A vertex against a solid field at a point where it reads phi with world gradient g,
-// having slipped dx against the solid's surface over the step: the activation on phi
-// with the Gauss-Newton Hessian g'' g g^T, and lagged friction on the tangential slip.
-// phi <= 0 lies outside the barrier's domain: infinite energy.
-fn ogcFieldEval(phi: f32, g: vec3<f32>, dx: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
-  var out = OgcPairEval(vec3<f32>(0.0), mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)), 0.0);
+// One contact entry linearized for vertex v placed at xv (the others at ogcX). Its energy is
+// the barrier kappa(d) on the gap g = sum_i w_i x_i (w at the current positions: the closest
+// point, so its gradient is kappa' w n) plus lagged friction mu lambda f0(|u|) on the slip
+// u = T sum_i wl_i (x_i - x_t,i), with the weights wl, the normal nl and T = I - nl nl^T all
+// taken at the step start (IPC's lagged friction): u is linear in x, so the friction force is
+// the exact gradient of its energy and a Newton line search sees one function. The Gauss-Newton
+// Hessian is (w w^T) (x) Mn + (wl wl^T) (x) Mf, Mn = kappa'' n n^T and Mf = mu lambda (f1/|u|) T,
+// PSD by construction. ids: the pair's vertices (a solid's sample, or none, past the cloth's);
+// wc, wlc: the weights on the cloth vertices only (0 at a sample); wr, wrl: v's own weights;
+// f: the force on v; e: the pair's energy. A field entry is the one-vertex case (w = (1)).
+struct OgcPairLin { ids: vec4<u32>, wc: vec4<f32>, wlc: vec4<f32>, wr: f32, wrl: f32, f: vec3<f32>, Mn: mat3x3<f32>, Mf: mat3x3<f32>, e: f32 }
+
+const OGC_I3 = mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+const OGC_Z3 = mat3x3<f32>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+fn ogcUnitOr(g: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
+  let l = length(g);
+  return select(fallback, g / l, l > 1e-30);
+}
+
+// Friction on the slip dx (lagged weights already applied) with the lagged unit normal nl:
+// adds to the pair its force on v (weight wrl), Mf and energy.
+fn ogcFriction(out: ptr<function, OgcPairLin>, ml: f32, dx: vec3<f32>, nl: vec3<f32>, eps: f32) {
+  let u = dx - nl * dot(nl, dx);
+  let un = length(u);
+  let fy = ogcFrictionF1OverY(un, eps);
+  (*out).f -= (ml * (*out).wrl * fy) * u;
+  (*out).Mf = (ml * fy) * (OGC_I3 - mat3x3<f32>(nl * nl.x, nl * nl.y, nl * nl.z));
+  (*out).e += ml * ogcFrictionF0(un, eps);
+}
+
+// A vertex against a solid field at a point where it reads phi with world gradient g, having
+// slipped dx against the solid's surface over the step, with the field's normal at the step
+// start nl: the activation on phi with the Gauss-Newton Hessian kappa'' g g^T, and lagged
+// friction on the tangential slip. phi <= 0 lies outside the barrier's domain: infinite energy.
+fn ogcFieldEval(v: u32, phi: f32, g: vec3<f32>, dx: vec3<f32>, nl: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairLin {
+  let one = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  var out = OgcPairLin(vec4<u32>(v, OGC_NONE, OGC_NONE, OGC_NONE), one, one, 1.0, 1.0, vec3<f32>(0.0), OGC_Z3, OGC_Z3, 0.0);
   // Infinity from a runtime word (ent.w is 0): a constant one would not fold.
-  if (!(phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); return out; }
+  if (!(phi > 0.0)) { out.e = bitcast<f32>(ent.w | 0x7f800000u); out.wr = 0.0; out.wrl = 0.0; return out; }
   let act = ogcActivation(phi, params.x, params.y);
   out.f = -act.y * g;
-  out.h = act.z * mat3x3<f32>(g * g.x, g * g.y, g * g.z);
+  out.Mn = act.z * mat3x3<f32>(g * g.x, g * g.y, g * g.z);
   out.e = act.x;
   // The entry carries mu lambda, mu the solid's own coefficient at x_det.
   let ml = bitcast<f32>(ent.z);
-  if (ml > 0.0) {
-    let gl = length(g);
-    let n = select(vec3<f32>(0.0), g / gl, gl > 1e-30);
-    let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
-    let u = dx - n * dot(n, dx);
-    let un = length(u);
-    let fy = ogcFrictionF1OverY(un, params.w);
-    out.f -= (ml * fy) * u;
-    out.h += (ml * fy) * (mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) - nn);
-    out.e += ml * ogcFrictionF0(un, params.w);
-  }
+  if (ml > 0.0) { ogcFriction(&out, ml, dx, nl, params.w); }
   return out;
 }
 
-// Vertex v against the static solid: the slip is its whole step x - x_t.
-fn ogcSolidEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
-  let s = ogcSolidSample(ogcSolidHeader(), xv);
-  return ogcFieldEval(s.phi, s.grad, xv - ogcXt(v), ent, params);
+// Vertex v against the static solid: the slip is its whole step x - x_t, the lagged normal the field's at x_t.
+fn ogcSolidLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairLin {
+  let h = ogcSolidHeader();
+  let s = ogcSolidSample(h, xv);
+  let xt = ogcXt(v);
+  var nl = vec3<f32>(0.0);
+  if (bitcast<f32>(ent.z) > 0.0) { nl = ogcUnitOr(ogcSolidSample(h, xt).grad, ogcUnitOr(s.grad, vec3<f32>(0.0))); }
+  return ogcFieldEval(v, s.phi, s.grad, xv - xt, nl, ent, params);
 }
 
 // Vertex v against the moving solid at its end pose: phi_body(R1^T (x - c1)) with
 // gradient R1 grad phi_body, and the slip measured against the solid's material point
-// that sat at x_t when the step began, carried rigidly to R1 R0^T (x_t - c0) + c1.
-fn ogcBodyEval(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
+// that sat at x_t when the step began, carried rigidly to R1 R0^T (x_t - c0) + c1, whose
+// field normal (turned to the end pose) is the lagged one.
+fn ogcBodyLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairLin {
   let p1 = ogcPose(1u);
-  let s = ogcSolidSample(ogcSolidHeaderAt(ogcBodyBase()), ogcToBody(p1, xv));
-  let carried = ogcToWorld(p1, ogcToBody(ogcPose(0u), ogcXt(v)));
-  return ogcFieldEval(s.phi, p1.R * s.grad, xv - carried, ent, params);
+  let h = ogcSolidHeaderAt(ogcBodyBase());
+  let s = ogcSolidSample(h, ogcToBody(p1, xv));
+  let yt = ogcToBody(ogcPose(0u), ogcXt(v));
+  let carried = ogcToWorld(p1, yt);
+  var nl = vec3<f32>(0.0);
+  if (bitcast<f32>(ent.z) > 0.0) { nl = p1.R * ogcUnitOr(ogcSolidSample(h, yt).grad, ogcUnitOr(s.grad, vec3<f32>(0.0))); }
+  return ogcFieldEval(v, s.phi, p1.R * s.grad, xv - carried, nl, ent, params);
 }
 
-// One contact entry evaluated for vertex v placed at xv.
-fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
-  if (ent.y == OGC_SOLID_Y) { return ogcSolidEval(v, xv, ent, params); }
-  if (ent.y == OGC_BODY_Y) { return ogcBodyEval(v, xv, ent, params); }
+// The weights of point p against the feature of triangle (a, b, c): (1, -barycentrics).
+fn ogcVtWeights(feature: u32, p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> vec4<f32> {
+  var w = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+  var X = array<vec3<f32>, 3>(a, b, c);
+  if (feature < 3u) {
+    w[1u + feature] = -1.0;
+  } else if (feature < OGC_FACE) {
+    let i = feature - 3u; let j = (i + 1u) % 3u;
+    let dir = X[j] - X[i];
+    let s = dot(p - X[i], dir) / dot(dir, dir);
+    w[1u + i] = -(1.0 - s); w[1u + j] = -s;
+  } else {
+    let v0 = b - a; let v1 = c - a; let v2 = p - a;
+    let d00 = dot(v0, v0); let d01 = dot(v0, v1); let d11 = dot(v1, v1);
+    let d20 = dot(v2, v0); let d21 = dot(v2, v1);
+    let den = d00 * d11 - d01 * d01;
+    let bv = (d11 * d20 - d01 * d21) / den; let bw = (d00 * d21 - d01 * d20) / den;
+    w.y = -(1.0 - bv - bw); w.z = -bv; w.w = -bw;
+  }
+  return w;
+}
+
+fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairLin {
+  if (ent.y == OGC_SOLID_Y) { return ogcSolidLin(v, xv, ent, params); }
+  if (ent.y == OGC_BODY_Y) { return ogcBodyLin(v, xv, ent, params); }
   var ids: vec4<u32>;
-  var w = vec4<f32>(0.0);
+  var w: vec4<f32>;
+  var wl: vec4<f32>;
   var X: array<vec3<f32>, 4>;
+  var Xl: array<vec3<f32>, 4>;
+  var cloth = vec4<f32>(1.0);
+  let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
   if ((ent.y & OGC_EE_BIT) == 0u) {
     let feature = (ent.y >> 28u) & 7u;
     ids = vec4<u32>(ent.x, ogcTri(ent.y & OGC_ID_MASK));
-    for (var i = 1u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); }
-    if (ent.w == 1u) { X[0] = ogcSamplePos(ent.x); } else { X[0] = select(ogcX(ids[0]), xv, ids[0] == v); }
-    let p = X[0];
-    w.x = 1.0;
-    if (feature < 3u) {
-      w[1u + feature] = -1.0;
-    } else if (feature < OGC_FACE) {
-      let i = feature - 3u; let j = (i + 1u) % 3u;
-      let dir = X[1u + j] - X[1u + i];
-      let s = dot(p - X[1u + i], dir) / dot(dir, dir);
-      w[1u + i] = -(1.0 - s); w[1u + j] = -s;
-    } else {
-      let v0 = X[2] - X[1]; let v1 = X[3] - X[1]; let v2 = p - X[1];
-      let d00 = dot(v0, v0); let d01 = dot(v0, v1); let d11 = dot(v1, v1);
-      let d20 = dot(v2, v0); let d21 = dot(v2, v1);
-      let den = d00 * d11 - d01 * d01;
-      let bv = (d11 * d20 - d01 * d21) / den; let bw = (d00 * d21 - d01 * d20) / den;
-      w.y = -(1.0 - bv - bw); w.z = -bv; w.w = -bw;
-    }
+    for (var i = 1u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); Xl[i] = ogcXt(ids[i]); }
+    if (sampled) { X[0] = ogcSamplePos(ent.x); Xl[0] = ogcSampleStart(ent.x); cloth.x = 0.0; }
+    else { X[0] = select(ogcX(ids[0]), xv, ids[0] == v); Xl[0] = ogcXt(ids[0]); }
+    w = ogcVtWeights(feature, X[0], X[1], X[2], X[3]);
+    wl = ogcVtWeights(feature, Xl[0], Xl[1], Xl[2], Xl[3]);
   } else {
     let e0 = ogcEdgeVerts(ent.x); let e1 = ogcEdgeVerts(ent.y & OGC_ID_MASK);
     ids = vec4<u32>(e0, e1);
-    for (var i = 0u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); }
+    for (var i = 0u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); Xl[i] = ogcXt(ids[i]); }
     let st = unpack2x16unorm(ent.w);
     w = vec4<f32>(1.0 - st.x, st.x, -(1.0 - st.y), -st.y);
+    wl = w;
   }
   var gap = vec3<f32>(0.0);
   var wr = 0.0;
-  for (var i = 0u; i < 4u; i++) { gap += w[i] * X[i]; wr += select(0.0, w[i], ids[i] == v); }
+  var wrl = 0.0;
+  for (var i = 0u; i < 4u; i++) {
+    gap += w[i] * X[i];
+    wr += select(0.0, w[i], ids[i] == v);
+    wrl += select(0.0, wl[i], ids[i] == v);
+  }
   let d = length(gap);
   // Coincident primitives (d = 0) lie outside the barrier's domain, like phi <= 0 above: infinite
   // energy and no direction to push along. Detection fails a coincident pair explicitly (OGC_STATUS.coincident).
   // The infinity is built from a runtime word (ent.w & 0 is 0), as in ogcFieldEval: a constant one would not fold.
-  if (!(d > 0.0)) {
-    return OgcPairEval(vec3<f32>(0.0), mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0)), bitcast<f32>(0x7f800000u | (ent.w & 0u)));
-  }
+  if (!(d > 0.0)) { return OgcPairLin(ids, vec4<f32>(0.0), vec4<f32>(0.0), 0.0, 0.0, vec3<f32>(0.0), OGC_Z3, OGC_Z3, bitcast<f32>(0x7f800000u | (ent.w & 0u))); }
   let n = gap / d;
   let act = ogcActivation(d, params.x, params.y);
-  let nn = mat3x3<f32>(n * n.x, n * n.y, n * n.z);
-  var out = OgcPairEval(-act.y * wr * n, (wr * wr * act.z) * nn, act.x);
+  var out = OgcPairLin(ids, cloth * w, cloth * wl, wr, wrl, -act.y * wr * n, act.z * mat3x3<f32>(n * n.x, n * n.y, n * n.z), OGC_Z3, act.x);
   // A sample-facet entry carries mu lambda with the solid's own mu; its sample's own
   // motion over the step is the solid's (none for a static one).
-  let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
   let ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled);
   if (ml > 0.0) {
     var dx = vec3<f32>(0.0);
-    if (sampled) { dx = X[0] - ogcSampleStart(ent.x); } else { dx = w.x * (X[0] - ogcXt(ids[0])); }
-    for (var i = 1u; i < 4u; i++) { dx += w[i] * (X[i] - ogcXt(ids[i])); }
-    let u = dx - n * dot(n, dx);
-    let un = length(u);
-    let fy = ogcFrictionF1OverY(un, params.w);
-    out.f -= (ml * wr * fy) * u;
-    out.h += (ml * wr * wr * fy) * (mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0) - nn);
-    out.e += ml * ogcFrictionF0(un, params.w);
+    var gl = vec3<f32>(0.0);
+    for (var i = 0u; i < 4u; i++) { dx += wl[i] * (X[i] - Xl[i]); gl += wl[i] * Xl[i]; }
+    ogcFriction(&out, ml, dx, ogcUnitOr(gl, n), params.w);
   }
   return out;
+}
+
+// One contact entry evaluated for vertex v placed at xv: its force, its diagonal Hessian block
+// wr^2 Mn + wrl^2 Mf, its energy.
+fn ogcEvalEntry(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcPairEval {
+  let l = ogcEntryLin(v, xv, ent, params);
+  return OgcPairEval(l.f, (l.wr * l.wr) * l.Mn + (l.wrl * l.wrl) * l.Mf, l.e);
 }
 
 fn ogcContactCount(v: u32) -> u32 {
@@ -557,5 +623,63 @@ fn ogcAccumulateVertexContact(v: u32, xv: vec3<f32>, f: ptr<function, vec3<f32>>
 }
 
 fn ogcVertexContactEnergy(v: u32, xv: vec3<f32>) -> f32 { return ogcVertexContactEnergyLanes(v, xv, 0u, 1u); }
-`;
+${options.newton ? OGC_NEWTON_BLOCK_WGSL : ""}`;
 }
+
+/**
+ * The global (Newton) forms over the same per-vertex entry lists. Every pair sits in the
+ * list of each vertex it weighs on (VT: the vertex and its closest feature's vertices; EE:
+ * both edges' vertices, one copy per edge; a field entry: its vertex; sample-face: the
+ * face's feature vertices), so each is a gather: no scatter, no atomics.
+ *   ogcVertexContactHvLanes(v, first, stride) -> vec3   (H p)_v = sum w_v Mn (sum_j w_j p_j)
+ *       + wl_v Mf (sum_j wl_j p_j),
+ *       with p = ogcDir (host accessor; a solid's sample reads none), linearized at ogcX
+ *   ogcContactEnergyOwnedLanes(v, first, stride) -> f32 the energy of the entries v owns, at
+ *       ogcX: summed over all vertices, every pair once
+ */
+const OGC_NEWTON_BLOCK_WGSL = /* wgsl */`
+// The one holder of each pair that counts its energy: a field entry's vertex, a VT pair's
+// vertex, a sample-face pair's least feature vertex, an EE pair's lower edge's first vertex.
+fn ogcEntryOwned(v: u32, ent: vec4<u32>) -> bool {
+  if (ent.y == OGC_SOLID_Y || ent.y == OGC_BODY_Y) { return true; }
+  if ((ent.y & OGC_EE_BIT) != 0u) { return ent.x < (ent.y & OGC_ID_MASK) && v == ogcEdgeVerts(ent.x).x; }
+  if (ent.w != 1u) { return v == ent.x; }
+  let tri = ogcTri(ent.y & OGC_ID_MASK);
+  let feature = (ent.y >> 28u) & 7u;
+  if (feature < 3u) { return v == tri[feature]; }
+  if (feature < OGC_FACE) { let i = feature - 3u; return v == min(tri[i], tri[(i + 1u) % 3u]); }
+  return v == min(min(tri.x, tri.y), tri.z);
+}
+
+fn ogcVertexContactHvLanes(v: u32, first: u32, stride: u32) -> vec3<f32> {
+  let header = ogcContacts[0];
+  let params = bitcast<vec4<f32>>(ogcContacts[1]);
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+  let base = header.w + v * header.y;
+  let xv = ogcX(v);
+  var out = vec3<f32>(0.0);
+  for (var i = first; i < count; i += stride) {
+    let l = ogcEntryLin(v, xv, ogcContacts[base + i], params);
+    var q = vec3<f32>(0.0); var ql = vec3<f32>(0.0);
+    for (var k = 0u; k < 4u; k++) {
+      if (l.wc[k] != 0.0 || l.wlc[k] != 0.0) { let p = ogcDir(l.ids[k]); q += l.wc[k] * p; ql += l.wlc[k] * p; }
+    }
+    out += l.wr * (l.Mn * q) + l.wrl * (l.Mf * ql);
+  }
+  return out;
+}
+
+fn ogcContactEnergyOwnedLanes(v: u32, first: u32, stride: u32) -> f32 {
+  let header = ogcContacts[0];
+  let params = bitcast<vec4<f32>>(ogcContacts[1]);
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+  let base = header.w + v * header.y;
+  let xv = ogcX(v);
+  var e = 0.0;
+  for (var i = first; i < count; i += stride) {
+    let ent = ogcContacts[base + i];
+    if (ogcEntryOwned(v, ent)) { e += ogcEvalEntry(v, xv, ent, params).e; }
+  }
+  return e;
+}
+`;

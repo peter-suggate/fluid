@@ -99,6 +99,9 @@ test('Scene solids: solid edits, foreign boxes and unknown kinds fail explicitly
     /no solid for the box fill/);
   assert.throws(() => clothSolidSourceForScene(at({ operation: 'fill', kind: 'sphere', minimum: [10, 8, 10], maximumExclusive: [12, 10, 12], materialId: 2 }), { band_m: BAND }),
     /cannot follow solid patch \d+ \(fill sphere\)/);
+  // A paint recolours cells only: the same parts, so the same contact.
+  const painted = clothSolidSourceForScene(at({ operation: 'paint', minimum: [10, 0, 10], maximumExclusive: [12, 8, 12], materialId: 2 }), { band_m: BAND });
+  assert.deepEqual(painted.parts!.map(p => ({ ...p, sdf: undefined })), solidsOf(s).parts!.map(p => ({ ...p, sdf: undefined })));
   // A boundary that no longer matches its analytic solids.
   const b = scene.solidBoundary!, bricks = b.bricks.map((x, i) => i ? x : { ...x, values: x.values.map((v, j) => j === 300 ? v + 0.5 : v) });
   assert.throws(() => clothSolidSourceForScene({ ...scene, solidBoundary: { ...b, bricks } }, { band_m: BAND }), /procedural solid at .* reads/);

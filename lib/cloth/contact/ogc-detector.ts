@@ -34,7 +34,7 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
@@ -89,12 +89,16 @@ export interface OgcContactConfig {
    * One moving solid (one-way: its poses are prescribed). Words reserved for its
    * body-frame field image (solid-field.ts), its sharp-feature surface samples, and
    * the poses one frame uploads (its steps plus one; setBodyPoses). Planar truncation
-   * only. A round redone held moves the solid's samples and carries the cloth they
-   * conflict with; each further held round (heldRounds in all, default 3) also carries
-   * the cloth of the previous one's conflicts, and a conflict after the last fails as
-   * heldConflict. Absent: no moving solid.
+   * only. In the solid's frame it is a static solid: its field, samples and hull edges
+   * meet the cloth mapped into that frame at both ends of a round, with the curvature of
+   * the cloth's straight world motion there added to the margins. A conflict with it carries
+   * its cloth with it in the round redone (an impact zone, which grows by the zone's own
+   * conflicts until it closes: up to OGC_REDO_MANDATORY redos of the mandatory round and
+   * OGC_REDO_ROUNDS of a later one; a conflict left after the last, or one that marks nothing
+   * new, fails as heldConflict).
+   * Absent: no moving solid.
    */
-  body?: { capacityWords: number; sampleCapacity: number; poseCapacity: number; heldRounds?: number };
+  body?: { capacityWords: number; sampleCapacity: number; poseCapacity: number };
   /**
    * Predicted-motion DAT, predicting v dt + g dt^2 ("inertial", the default) or the
    * solver's initial guess x_guess - x_t ("guess": needs `stepStart`, with the guess
@@ -111,6 +115,13 @@ export interface OgcContactConfig {
    * the candidates a larger cell adds (twist gate: 11 ms vs 44 ms a round).
    */
   cellRule?: OgcCellRule;
+  /**
+   * A Newton solver steps along whole directions (encodeFilter): the division planes are
+   * placed once per round, at the clamped midpoint of the anchored support gap, so the
+   * round's certificates stay fixed under the iterate; the filter kernels are compiled.
+   * Absent: the per-truncation placement that follows the residual (the VBD sweeps).
+   */
+  newton?: boolean;
 }
 
 export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2 } as const;
@@ -120,7 +131,7 @@ export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2 } as const;
 export interface OgcCarriedState {
   /** Per vertex: the reference predicted position (xyz) and residual rho_v (w; -1 before any step). */
   readonly reference: Float32Array;
-  /** Per vertex: the held flags (bit 0: held in the step that wrote it). */
+  /** Per vertex: the held flags (bit 0: held in the step that wrote it; bit 1: held in it). */
   readonly held: Uint32Array;
 }
 
@@ -144,6 +155,8 @@ export interface OgcSolverInputs {
    * `positions` by then). Absent: `positions` holds x_t when the round runs.
    */
   stepStart?: GPUBuffer | GPUBufferBinding;
+  /** vec4<f32> per vertex, metres: a Newton solver's direction d for encodeFilter (newton config only). */
+  direction?: GPUBuffer | GPUBufferBinding;
 }
 
 export interface OgcFrameCounters {
@@ -189,6 +202,12 @@ export interface OgcFrameCounters {
   bodyCut: number;
   /** A pair that conflicted in a held round (status heldConflict), ids as in the pair buffer. */
   heldConflictPair: [number, number, number, number];
+  /**
+   * Impact zones with the moving solid: cloth vertices a conflict carried rigidly with it, summed
+   * over the frame's steps, and the most in one step.
+   */
+  zoneVertices: number;
+  zonePeak: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -220,6 +239,11 @@ export class OgcContactDetector {
   readonly counters: GPUBuffer; readonly args: GPUBuffer;
   /** The planes dispatch's indirect args, written by the round's bound pass. */
   readonly planesArgs: GPUBuffer;
+  /**
+   * The line-search filter's output (newton config): N + 1 f32 words, alpha_v of each vertex
+   * and then alpha_min = min_v alpha_v. A 4-byte placeholder otherwise.
+   */
+  readonly alpha: GPUBuffer;
   private kernels = new Map<string, Kernel>();
   private readonly paramWords = new Uint32Array(OGC_PARAM_WORDS);
 
@@ -267,7 +291,6 @@ export class OgcContactDetector {
       for (const [k, v] of Object.entries(body)) if (!(Number.isSafeInteger(v) && v >= 0)) throw new Error(`OGC: body.${k} must be a whole number`);
       if (body.capacityWords < SOLID_HEADER_WORDS + 4) throw new Error("OGC: body.capacityWords cannot hold an empty solid image");
       if (body.poseCapacity < 2) throw new Error("OGC: body.poseCapacity must hold a step's start and end poses");
-      if ((body.heldRounds ?? 3) < 1) throw new Error("OGC: body.heldRounds must be at least 1");
       if ((config.truncation ?? "planar") !== "planar") throw new Error("OGC: a moving solid needs planar truncation");
     }
     const bodySampleCap = body?.sampleCapacity ?? 0;
@@ -305,6 +328,7 @@ export class OgcContactDetector {
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
     this.args = mk("args", 4 * OGC_ARGS_WORDS, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.planesArgs = mk("planes args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
+    this.alpha = mk("filter alpha", config.newton ? 4 * (N + 1) : 4);
     const w = this.paramWords, f = new Float32Array(w.buffer), P = OGC_PARAM;
     w[P.N] = N; w[P.T] = T; w[P.E] = E; w[P.H] = H;
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
@@ -510,11 +534,14 @@ export class OgcContactDetector {
   /** The buffer the solver kernel binds for ogcVertexBlockWGSL. */
   get solverBuffer(): GPUBuffer { return this.contacts; }
 
-  static vertexBlockWGSL(group: number, binding: number): string { return ogcVertexBlockWGSL({ group, binding }); }
+  static vertexBlockWGSL(group: number, binding: number, newton = false): string { return ogcVertexBlockWGSL({ group, binding, newton }); }
 
-  /** What the cloth solver's vertex kernel takes: the block at (group 0, binding) and the buffer it reads. */
-  solverContact(binding: number): { wgsl: string; buffer: GPUBuffer } {
-    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding }), buffer: this.contacts };
+  /**
+   * What the cloth solver's vertex kernel takes: the block at (group 0, binding) and the buffer it
+   * reads; with newton, the global forms too (ogcVertexContactHvLanes, ogcContactEnergyOwnedLanes).
+   */
+  solverContact(binding: number, newton = false): { wgsl: string; buffer: GPUBuffer } {
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton }), buffer: this.contacts };
   }
 
   /**
@@ -531,9 +558,12 @@ export class OgcContactDetector {
   get stepHooks() {
     return {
       afterFrame: (pass: GPUComputePassEncoder) => { this.encodeStepBegin(pass); this.encodeDetection(pass); this.encodeTruncate(pass); },
-      afterIteration: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); this.encodeDecide(pass); this.encodeDetection(pass); },
+      afterIteration: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); this.encodeDecide(pass); this.encodeDetection(pass, false); },
       // The solver's two-level correction moves every vertex at once: truncate that move too.
       afterCoarse: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); },
+      // A Newton solver (newton config): filter its direction, then after its step re-detect.
+      filter: (pass: GPUComputePassEncoder) => { this.encodeFilter(pass); },
+      afterNewtonStep: (pass: GPUComputePassEncoder) => { this.encodeAfterNewtonStep(pass); },
     };
   }
 
@@ -553,7 +583,12 @@ export class OgcContactDetector {
       ["redo", OGC_REDO_WGSL, [0, 9, 10]],
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
-      ["planes", OGC_PLANES_WGSL, [0, 2, 4, 5, 9, 11, 14]],
+      ["planes", ogcPlanesWGSL(!!this.config.newton, false), [0, 2, 4, 5, 9, 11, 14]],
+      ...(this.config.newton ? [
+        ["filterBegin", OGC_FILTER_BEGIN_WGSL, [0, 16]],
+        ["filterPlanes", ogcPlanesWGSL(true, true), [0, 2, 4, 5, 9, 11, 14, 15]],
+        ["filter", OGC_FILTER_WGSL, [0, 2, 4, 5, 8, 9, 14, 15, 16]],
+      ] as [string, string, number[]][] : []),
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 8, 9, 14]],
       // Intersection counting reads the solver's current positions where detection reads x_det.
       ["xCount", ogcGridCountWGSL(true), [0, 1, 4, 6, 9], { 4: "positions" }],
@@ -570,6 +605,8 @@ export class OgcContactDetector {
   /** Attach the solver's positions and step-start velocities (once, at setup). */
   bind(inputs: OgcSolverInputs) {
     if (this.inputs) throw new Error("OGC: the detector is already bound to a solver");
+    if (this.config.newton && !inputs.direction) throw new Error("OGC: a newton detector needs the solver's direction buffer");
+    if (!this.config.newton && inputs.direction) throw new Error("OGC: a direction is bound only with the newton config");
     if (this.prediction === "guess" && !inputs.stepStart) throw new Error('OGC: prediction "guess" needs the solver\'s stepStart (x_t) with the guess in positions');
     this.inputs = inputs;
     const res = (b: GPUBuffer | GPUBufferBinding): GPUBufferBinding => ("buffer" in b ? b : { buffer: b });
@@ -577,6 +614,7 @@ export class OgcContactDetector {
       0: res(this.params), 1: res(this.topo), 2: res(inputs.positions), 3: res(inputs.velocities), 4: res(this.det), 5: res(this.work),
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
       13: res(inputs.stepStart ?? inputs.positions), 14: res(this.pred),
+      15: res(inputs.direction ?? inputs.positions), 16: res(this.alpha),
     };
     for (const [name, k] of this.kernels) {
       k.bindGroup = this.device.createBindGroup({
@@ -611,12 +649,13 @@ export class OgcContactDetector {
   encodeStepBegin(pass: GPUComputePassEncoder) { this.run(pass, "stepBegin", 1); }
   /**
    * One detection round, dispatched indirectly: zero workgroups unless armed;
-   * then the redo decision, and the round again with every prediction held
-   * (zero workgroups unless the first had a conflict).
+   * then the redo decisions, each with the round again (zero workgroups unless the
+   * last had a conflict). The step's mandatory round (after encodeStepBegin) needs the
+   * mandatory count of redos; a later round (after encodeDecide) passes false.
    */
-  encodeDetection(pass: GPUComputePassEncoder) {
+  encodeDetection(pass: GPUComputePassEncoder, mandatory = true) {
     for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
-    for (let k = 0; k < (this.config.body ? this.config.body.heldRounds ?? 3 : 1); k++) {
+    for (let k = 0; k < (this.bodyField ? (mandatory ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS) : 1); k++) {
       this.run(pass, "redo", 1);
       for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
     }
@@ -639,6 +678,29 @@ export class OgcContactDetector {
     const k = this.kernel("planes");
     pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
     this.run(pass, "apply", Math.ceil(this.N / WG));
+  }
+  /**
+   * The line-search filter (newton config): for the iterate in positions (untouched) and the
+   * bound direction d, alpha_v = the largest alpha <= 1 with x + alpha d inside the round's
+   * certificates (planes, cap, static and moving solid bounds) into alpha[v], and alpha_min
+   * into alpha[N]. Each certificate is convex and holds x, so every alpha in [0, alpha_v] is
+   * certified too. Vertices bound below 1 count towards encodeDecide's re-detection, and one
+   * at 0 arms it.
+   */
+  encodeFilter(pass: GPUComputePassEncoder) {
+    if (!this.config.newton) throw new Error("OGC: encodeFilter needs the newton config");
+    this.run(pass, "filterBegin", 1);
+    const k = this.kernel("filterPlanes");
+    pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.planesArgs, 0);
+    this.run(pass, "filter", Math.ceil(this.N / WG));
+  }
+  /**
+   * After a Newton step x <- x + alpha d with alpha <= alpha_min: the decision, the (indirect,
+   * usually empty) re-detection round and the truncation that re-anchors the iterate in a new
+   * round's certificates (a no-op, to rounding, when no round ran: the iterate is certified).
+   */
+  encodeAfterNewtonStep(pass: GPUComputePassEncoder) {
+    this.encodeDecide(pass); this.encodeDetection(pass, false); this.encodeTruncate(pass);
   }
   /** Count intersecting non-adjacent face pairs of the current positions (counter `intersections`). */
   encodeIntersectionCount(pass: GPUComputePassEncoder) {
@@ -685,6 +747,7 @@ export class OgcContactDetector {
       sfPairs: u[C.frameSfPairs], solidIntersections: u[C.solidIntersections],
       bodyContacts: u[C.frameBodyContacts], bodyCut: u[C.frameBodyCut],
       heldConflictPair: [u[C.heldConflictPair]!, u[C.heldConflictPair + 1]!, u[C.heldConflictPair + 2]!, u[C.heldConflictPair + 3]!],
+      zoneVertices: u[C.frameZoneVertices]!, zonePeak: u[C.frameZonePeak]!,
     };
   }
 
@@ -742,6 +805,6 @@ export class OgcContactDetector {
   }
 
   destroy() {
-    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs]) buffer.destroy();
+    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs, this.alpha]) buffer.destroy();
   }
 }

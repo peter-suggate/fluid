@@ -9,7 +9,8 @@
  *   - the patches of the scene's procedural bake (`solidBoundary`) are covered
  *     by the analytic solids the scene author sampled them from, as "sdf"
  *     parts; the build proves it by re-evaluating every stored boundary node;
- *   - any other patch (a clear, a paint, a sculpted or round kind, a voxel
+ *   - a paint patch only recolours cells (no geometry, no friction): contact-neutral;
+ *   - any other patch (a clear, a sculpted or round kind, a voxel
  *     block from an edit) fails explicitly: cloth contact does not follow
  *     solid edits yet, and must not silently disagree with the visible solid.
  *
@@ -21,6 +22,7 @@ import type { ProceduralSolidBoundary } from "../../core/procedural-solid";
 import { sceneCellSizes_m, sceneLatticeDimensions, solidVoxelShellForScene } from "../../core/scene-lattice";
 import { SOLID_PATCH_BOX_KIND } from "../../core/solid-patch/kind";
 import { solidVoxelPatchesKey, type SolidWorldVoxelPatch } from "../../core/solid-world";
+import { CLOTH_ANALYTIC_SCENE_PREFIX, clothAnalyticSceneSolids } from "../scenes/analytic/contact-solids";
 import { bridson2002ClothSceneSolids } from "../scenes/bridson-2002/contact-solids";
 import { SOLID_LIPSCHITZ_BOUND, type ClothSolidPart, type ClothSolidSource, type V3 } from "./solid-field";
 
@@ -122,6 +124,8 @@ export function clothSolidSourceFromScene(scene: SceneDescription, authoring: Cl
       if (!authoring.procedural?.length) throw new Error("Cloth contact: the scene has a procedural solid but no authored analytic solids for it");
       return;
     }
+    // A paint recolours cells only: the solid's geometry, and so its contact, is unchanged.
+    if (patch.operation === "paint") return;
     if (isBoxFill(patch)) { parts.push({ kind: "lattice-box", ...box, mu: authoring.boxFriction(patch, box) }); return; }
     throw new Error(`Cloth contact cannot follow solid patch ${i} (${patch.operation} ${patch.kind ?? SOLID_PATCH_BOX_KIND}) yet: solid edits under cloth are not supported`);
   });
@@ -134,7 +138,8 @@ export function clothSolidSourceFromScene(scene: SceneDescription, authoring: Cl
 
 /** The scene's solids as a cloth solid source, by the scene family's authoring. */
 export function clothSolidSourceForScene(scene: SceneDescription, options: ClothSceneSolidOptions): ClothSolidSource {
-  const authoring = options.authoring ?? (scene.sceneId.startsWith("bridson-2002-") ? bridson2002ClothSceneSolids(scene) : SHELL_ONLY);
+  const authoring = options.authoring ?? (scene.sceneId.startsWith("bridson-2002-") ? bridson2002ClothSceneSolids(scene)
+    : scene.sceneId.startsWith(CLOTH_ANALYTIC_SCENE_PREFIX) ? clothAnalyticSceneSolids(scene) : SHELL_ONLY);
   const src = clothSolidSourceFromScene(scene, authoring, options.band_m);
   return options.frameOrigin_m ? clothSolidSourceInFrame(src, options.frameOrigin_m) : src;
 }

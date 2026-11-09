@@ -91,11 +91,8 @@ test("pair energy: analytic gradient, Hessian and friction force against finite 
       const { grad, hess } = normalGradientHessian(c, X, p, role);
       const fd = fdGradient(normalOnly, X, role, h);
       for (let k = 0; k < 3; k++) close(grad[k], fd[k], 2e-5, `${kind}${feature} role ${role} grad`);
-      // The full gradient with friction's basis frozen at this point is minus the accumulated force.
-      const w = contactWeights(c, X);
-      const g = w.reduce<V3>((s, wi, i) => add(s, scale(X[c.ids[i]], wi)), [0, 0, 0]), n = scale(g, 1 / norm(g));
-      const frozen = (P: V3[]) => contactEnergy(c, P, Xt, p, { w, n });
-      const fdf = fdGradient(frozen, X, role, h);
+      // Friction's basis lagged at the step start: the full energy's gradient is minus the accumulated force.
+      const fdf = fdGradient((P: V3[]) => contactEnergy(c, P, Xt, p), X, role, h);
       const { f, H } = vertexForceHessian(c, X, Xt, p, role);
       for (let k = 0; k < 3; k++) close(-f[k], fdf[k], 2e-4, `${kind}${feature} role ${role} force`);
       // Hessian: exact where the weights are constant (vertex features, edge-edge); in the
@@ -108,6 +105,7 @@ test("pair energy: analytic gradient, Hessian and friction force against finite 
       const constantWeights = kind === "ee" || feature < 3;
       if (constantWeights) for (let i = 0; i < 3; i++) for (let k = 0; k < 3; k++) close(hess[i][k], fdH[k][i], 1e-3, `${kind}${feature} H`);
       if (role === 0 && kind === "vf") {
+        const w = contactWeights(c, X), g = w.reduce<V3>((s, wi, i) => add(s, scale(X[c.ids[i]], wi)), [0, 0, 0]), n = scale(g, 1 / norm(g));
         const Hn = dot(n, [0, 1, 2].map(i => dot(n, fdH[i] as V3)) as V3);
         const pn = { ...p, mu: 0 }, Hgn = vertexForceHessian(c, X, Xt, pn, 0).H;
         close(dot(n, Hgn.map(row => dot(row as V3, n)) as V3), Hn, 1e-4, "normal curvature");

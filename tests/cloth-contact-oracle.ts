@@ -282,17 +282,26 @@ function gapOf(w: number[], ids: number[], X: V3[]): V3 {
 }
 
 /**
- * Pair energy: normal activation of the gap distance plus lagged friction
- * mu*lambda*f0(|u|), u the tangential relative displacement since the step
- * start. `frozen` (weights, normal) evaluates the friction term with the
- * detection-time basis, as its derivative is defined.
+ * Friction's lagged basis (IPC): the weights wl and unit normal nl of the pair at the step
+ * start Xt (nl falls back to the current n when the start gap is 0), and the slip
+ * u = (I - nl nl^T) sum_i wl_i (X_i - Xt_i), linear in X.
  */
-export function contactEnergy(c: OracleContact, X: V3[], Xt: V3[], p: ContactParams, frozen?: { w: number[]; n: V3 }): number {
-  const w = frozen?.w ?? contactWeights(c, X), ids = c.ids;
-  const g = gapOf(w, ids, X), d = norm(g), n = frozen?.n ?? scale(g, 1 / d);
+function laggedSlip(c: OracleContact, X: V3[], Xt: V3[], n: V3): { wl: number[]; nl: V3; u: V3 } {
+  const wl = contactWeights(c, Xt), gl = gapOf(wl, c.ids, Xt), l = norm(gl), nl = l > 1e-30 ? scale(gl, 1 / l) : n;
   let dx: V3 = [0, 0, 0];
-  for (let i = 0; i < 4; i++) dx = add(dx, scale(sub(X[ids[i]], Xt[ids[i]]), w[i]));
-  const u = sub(dx, scale(n, dot(n, dx)));
+  for (let i = 0; i < 4; i++) dx = add(dx, scale(sub(X[c.ids[i]], Xt[c.ids[i]]), wl[i]));
+  return { wl, nl, u: sub(dx, scale(nl, dot(nl, dx))) };
+}
+
+/**
+ * Pair energy: normal activation of the gap distance plus lagged friction
+ * mu*lambda*f0(|u|), u the tangential slip since the step start in the
+ * step start's basis (laggedSlip), so the block's force is its exact gradient.
+ */
+export function contactEnergy(c: OracleContact, X: V3[], Xt: V3[], p: ContactParams): number {
+  const w = contactWeights(c, X), ids = c.ids;
+  const g = gapOf(w, ids, X), d = norm(g), n = scale(g, 1 / d);
+  const { u } = laggedSlip(c, X, Xt, n);
   return activation(d, p.r, p.k)[0] + p.mu * c.lambda * frictionF0(norm(u), p.epsV * p.dt);
 }
 
@@ -307,17 +316,16 @@ export function normalGradientHessian(c: OracleContact, X: V3[], p: ContactParam
 
 /**
  * What the vertex block accumulates for participant `role`: force (minus the
- * gradient with friction's basis treated as constant) and the PSD Hessian
- * g'' w^2 n n^T + mu lambda w^2 (f1/|u|) (I - n n^T).
+ * energy's gradient) and the PSD Hessian
+ * g'' w^2 n n^T + mu lambda wl^2 (f1/|u|) (I - nl nl^T).
  */
 export function vertexForceHessian(c: OracleContact, X: V3[], Xt: V3[], p: ContactParams, role: number): { f: V3; H: number[][] } {
   const w = contactWeights(c, X), ids = c.ids, g = gapOf(w, ids, X), d = norm(g), n = scale(g, 1 / d);
   const [, g1, g2] = activation(d, p.r, p.k), wr = w[role];
-  let dx: V3 = [0, 0, 0];
-  for (let i = 0; i < 4; i++) dx = add(dx, scale(sub(X[ids[i]], Xt[ids[i]]), w[i]));
-  const u = sub(dx, scale(n, dot(n, dx))), fy = frictionF1OverY(norm(u), p.epsV * p.dt), ml = p.mu * c.lambda;
-  const f = add(scale(n, -g1 * wr), scale(u, -ml * wr * fy));
-  const H = [0, 1, 2].map(i => [0, 1, 2].map(j => wr * wr * (g2 * n[i] * n[j] + ml * fy * ((i === j ? 1 : 0) - n[i] * n[j]))));
+  const { wl, nl, u } = laggedSlip(c, X, Xt, n), wrl = wl[role];
+  const fy = frictionF1OverY(norm(u), p.epsV * p.dt), ml = p.mu * c.lambda;
+  const f = add(scale(n, -g1 * wr), scale(u, -ml * wrl * fy));
+  const H = [0, 1, 2].map(i => [0, 1, 2].map(j => wr * wr * g2 * n[i] * n[j] + wrl * wrl * ml * fy * ((i === j ? 1 : 0) - nl[i] * nl[j])));
   return { f, H };
 }
 
@@ -684,23 +692,29 @@ export function solidBallBound(field: ClothSolidField, x0: V3, rho: number, r: n
 }
 
 /** The bound's normalisation: f(d) = (D.|d| - g0.d) s <= 1 keeps phi >= min((1 - gamma_r) phi0, r). */
-export function solidTermScale(phi0: number, gammaR: number, r: number): number {
-  return 1 / Math.max(gammaR * phi0, phi0 - r);
+export function solidTermScale(phi0: number, gammaR: number, r: number, sepEps = 0): number {
+  return 1 / Math.max(phi0 - solidKeep(phi0, gammaR, r, sepEps), 1e-30);
 }
-/** The clearance a cut keeps: min((1 - gamma_r) phi0, r). */
-export function solidKeep(phi0: number, gammaR: number, r: number): number {
-  return Math.min((1 - gammaR) * phi0, r);
+/** The clearance a cut keeps: min((1 - gamma_r) phi0, r) and at least sepEps (f32 resolution); within sepEps, phi0 (no approach). */
+export function solidKeep(phi0: number, gammaR: number, r: number, sepEps = 0): number {
+  return phi0 > sepEps ? Math.max(Math.min((1 - gammaR) * phi0, r), sepEps) : phi0;
 }
 
-/** Apply's solid factor: the displacement d from x_det scaled by 1 / max(1, D.|d| s - q.d). */
-export function solidTruncate(b: OracleSolidBound, d: V3, gammaR: number, r: number): V3 {
+/**
+ * Apply's solid factor on the displacement d from x_det: the largest scale either certificate
+ * keeps, the affine 1 / (D.|d| s - q.d) or the Lipschitz ball |d| <= rl = (1 / s) / L_max
+ * (lmax absent: the affine bound alone).
+ */
+export function solidTruncate(b: OracleSolidBound, d: V3, gammaR: number, r: number, lmax = Infinity): V3 {
   if (b.far) return d;
   if (!(b.phi0 > 0)) return [0, 0, 0];
   const s = solidTermScale(b.phi0, gammaR, r), den = s * solidBoundDrop(b, d) - s * dot(b.g0, d);
-  return den > 1 ? scale(d, 1 / den) : d;
+  if (den <= 1) return d;
+  const l = norm(d), rl = 1 / (s * lmax);
+  return l <= rl ? d : scale(d, Math.max(1 / den, rl / l));
 }
 
-/** The solid entry's energy, force and Gauss-Newton Hessian at x (ogcSolidEval); the entry carries mu lambda (the solid's friction times the lagged normal force). */
+/** The solid entry's energy, force and Gauss-Newton Hessian at x (ogcSolidLin); the entry carries mu lambda (the solid's friction times the lagged normal force). */
 export function solidContact(field: ClothSolidField, x: V3, xt: V3, lambda: number, p: ContactParams): { e: number; f: V3; H: number[][] } {
   const s = sampleClothSolidField(field, x);
   if (!(s.phi > 0)) return { e: Infinity, f: [0, 0, 0], H: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] };
@@ -708,7 +722,9 @@ export function solidContact(field: ClothSolidField, x: V3, xt: V3, lambda: numb
   let e = g0, f = scale(g, -g1);
   const H = [0, 1, 2].map(i => [0, 1, 2].map(k => g2 * g[i] * g[k]));
   if (lambda > 0) {
-    const gl = norm(g), n: V3 = gl > 1e-30 ? scale(g, 1 / gl) : [0, 0, 0];
+    // Friction's basis lagged at the step start (the field's normal at xt).
+    const unit = (v: V3): V3 | undefined => { const l = norm(v); return l > 1e-30 ? scale(v, 1 / l) : undefined; };
+    const n: V3 = unit(sampleClothSolidField(field, xt).grad as V3) ?? unit(g) ?? [0, 0, 0];
     const dx = sub(x, xt), u = sub(dx, scale(n, dot(n, dx))), un = norm(u), eps = p.epsV * p.dt;
     const ml = lambda, fy = frictionF1OverY(un, eps);
     f = sub(f, scale(u, ml * fy));

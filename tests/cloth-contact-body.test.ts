@@ -3,7 +3,7 @@
  * baked once in its own body frame, against the OGC detector (GPU only).
  *
  *   detector  a sheet over a plate that rises, slides and turns in one step:
- *             carried predictions a_v, body entries and terms against the Float64
+ *             predictions pushed towards a_v by the bound, body entries and terms against the Float64
  *             ball bound in the body frame, the posed surface samples, the vertex
  *             block (friction against the carried surface point) against the oracle,
  *             and the truncation keeping phi_body >= (1 - gamma_r) phi0 at the end pose
@@ -152,7 +152,7 @@ const plateField = (band = 0.09) => buildClothSolidField({
   parts: [{ kind: "sdf", sdf: boxSdf([-plateHalf[0], -plateHalf[1], -plateHalf[2]], plateHalf), lo: [-plateHalf[0], -plateHalf[1], -plateHalf[2]], hi: plateHalf, mu: 0.4 }],
   lo: [-0.13, -0.13, -0.11], hi: [0.13, 0.13, 0.11], cell: 0.005, band });
 
-test("GPU moving solid: carried predictions, body entries and terms, posed samples, the vertex block and the truncation against the oracle", { skip: !gpu }, async () => {
+test("GPU moving solid: pushed predictions, body entries and terms, posed samples, the vertex block and the truncation against the oracle", { skip: !gpu }, async () => {
   await withDevice(async device => {
     const field = plateField(), R = rng(31);
     // The sheet 0.5-4.5 mm over the plate's top (z = 0.03); the plate rises 3 mm, slides 2 mm and turns 3 degrees over the step.
@@ -174,58 +174,89 @@ test("GPU moving solid: carried predictions, body entries and terms, posed sampl
     det.setBodyPoses(poses);
     await runPass(device, pass => { det.encodeFrameBegin(pass); det.encodeStepBegin(pass); det.encodeDetection(pass); });
     const c0 = await det.readCounters();
-    assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
+    assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}, ${c0.conflicts} conflicts, held pair ${c0.heldConflictPair.map(i => (i & 0x7fffffff) - N).join(", ")} past N`);
     const diag = await det.readDiagnosis();
     const work = new Float32Array(await readBuffer(device, det.work));
     const pred = new Float32Array(await readBuffer(device, det.pred));
     const xdet = new Float32Array(await readBuffer(device, det.det));
     const contacts = new Uint32Array(await readBuffer(device, det.contacts)), lists = listsOf(contacts, N);
     const bodyOff = 8 * N + det.T + det.E, bodyDevOff = 20 * N + det.T + det.E;
-    // A round redone held (a conflict with the plate's samples) carries every vertex the plate reaches.
-    const forced = c0.redos > 0;
-
-    // Every vertex is held (prediction "none"): w = a_v where the plate can reach it, 0 elsewhere.
-    let carried = 0, entries = 0;
+    // The plate turns theta over the step; a vertex's straight motion strays from straight in its
+    // frame by sigma = (theta^2 (|x - c0| + Q) + 2 theta Q) / 8, Q = max(|w - dc|, |a - dc|, |dc|) + env / 2
+    // (w = 0 or a_v: the same Q), which the field bound's room loses L_max sigma of.
+    let trace = 0;
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) trace += p1.R[i]![j]! * p0.R[i]![j]!;
+    const theta = 2 * Math.asin(Math.min(1, 0.5 * Math.sqrt(Math.max(3 - trace, 0)))), dc = sub(p1.c, p0.c), L = field.maxLipschitz;
+    // Every vertex is held (prediction "none"): w = 0, moved towards a_v as far as the plate's bound
+    // needs; one carried with the plate (bit 2: a conflict with it, or its bound in a round redone) is a_v.
+    let pushedCount = 0, carriedCount = 0, entries = 0;
     const bounds = mesh.x.map((x, v) => {
-      // A vertex in a conflict with a plate sample (flag bit 2) was carried before its ball was taken.
-      const conflictCarried = (diag.held[v]! & 4) !== 0;
-      const env = diag.env[v]!, y0 = toBody(p0, x), a = sub(toWorld(p1, y0), x), rho = (conflictCarried ? 0 : norm(a)) + 0.5 * env;
+      const carried = (diag.held[v]! & 4) !== 0;
+      const env = diag.env[v]!, y0 = toBody(p0, x), a = sub(toWorld(p1, y0), x);
+      const Q = Math.max(norm(sub(a, dc)), norm(dc)) + 0.5 * env;
+      const sigma = (theta * theta * (norm(sub(x, p0.c)) + Q) + 2 * theta * Q) / 8;
+      // A vertex carried before its ball was taken moves 0 relative to the plate; else |a_v|.
+      const rho = norm(a) + 0.5 * env;
       const room = Math.max(0.5 * (config.rqMax - env), 0);
-      if (norm(y0) - rho >= det.bodyReach) return { y0, a, env, conflictCarried, b: { far: true, phi0: field.band, g0: [0, 0, 0] as V3, D: [0, 0, 0] as V3, stored: false } };
+      if (norm(y0) - rho - sigma >= det.bodyReach) return { y0, a, carried, sigma, rho, reach: false, b: { far: true, phi0: field.band, g0: [0, 0, 0] as V3, D: [0, 0, 0] as V3, stored: false } };
       assert.ok(norm(a) <= room, `vertex ${v}: the step's carry ${norm(a)} fits the band`);
-      return { y0, a, env, conflictCarried, b: solidBallBound(field, y0, rho, config.r) };
+      // The oracle's ball bound is far when the ball rc clears r without sigma: then its terms are 0.
+      return { y0, a, carried, sigma, rho, reach: true, b: solidBallBound(field, y0, Math.min(rho, 0.5 * config.rqMax), config.r) };
     });
     for (let v = 0; v < N; v++) {
-      const { y0, a, env, b, conflictCarried } = bounds[v]!;
+      const { y0, a, carried, sigma, rho, reach, b } = bounds[v]!;
       const body = lists[v]!.filter(e => e.y === BODY_Y);
       entries += body.length;
-      const margin = Math.min(b.phi0, field.band) - field.maxLipschitz * ((conflictCarried ? 0 : norm(a)) + 0.5 * env) - config.r;
-      if (Math.abs(margin) < 1e-5) continue;
-      assert.equal(body.length, b.far ? 0 : 1, `vertex ${v} body entry (far ${b.far}, margin ${margin})`);
       const w = [0, 1, 2].map(k => pred[4 * v + k]!) as V3;
-      const q = [0, 1, 2, 3, 4, 5, 6].map(k => k < 4 ? work[bodyOff + 8 * v + k]! : work[bodyDevOff + 4 * v + k - 4]!);
       const aGpu = [0, 1, 2].map(k => work[bodyOff + 8 * v + 4 + k]!) as V3;
       assert.ok(norm(sub(aGpu, a)) <= 2e-7 + 1e-4 * norm(a), `vertex ${v} a ${aGpu} vs ${a}`);
-      if (b.far) { assert.deepEqual(q, [0, 0, 0, 0, 0, 0, 0]); if (!conflictCarried) assert.deepEqual(w, [0, 0, 0]); continue; }
-      // The terms are in the body frame at the end pose: (g0 s, 1) and D s.
-      const sc = solidTermScale(b.phi0, 0.9, config.r), qr = [b.g0[0] * sc, b.g0[1] * sc, b.g0[2] * sc, 1, b.D[0] * sc, b.D[1] * sc, b.D[2] * sc];
+      // Moving with the plate (bit 6), its round is straight in the plate's frame; its sigma is how far
+      // that path c(t) + R(t) l(t) strays from straight in the world, Q = |w - a_v| + |w| + env / 2.
+      const Qs = norm(sub(w, aGpu)) + norm(w) + 0.5 * diag.env[v]!;
+      const sigmaV = (diag.held[v]! & 64) ? (theta * theta * (norm(sub(mesh.x[v]!, p0.c)) + Qs) + 2 * theta * Qs) / 8 : sigma;
+      assert.ok(Math.abs(work[bodyOff + 8 * v + 7]! - sigmaV) <= 1e-9 + 1e-4 * sigmaV, `vertex ${v} sigma ${work[bodyOff + 8 * v + 7]} vs ${sigmaV}`);
+      if (carried) {
+        carriedCount++;
+        assert.deepEqual(w, aGpu, `vertex ${v} carried: prediction ${w} vs a ${aGpu}`);
+        continue;
+      }
+      // The vertex has an entry when the ball rho, widened by sigma, can reach r.
+      const margin = Math.min(b.phi0, field.band) - L * (rho + sigma) - config.r;
+      if (Math.abs(margin) < 1e-5) continue;
+      assert.equal(body.length, !reach || margin > 0 ? 0 : 1, `vertex ${v} body entry (far ${b.far}, reach gap ${norm(y0) - rho - sigma - det.bodyReach}, margin ${margin}, held ${diag.held[v]}, w ${[0, 1, 2].map(k => pred[4 * v + k])}, env ${diag.env[v]})`);
+      const q = [0, 1, 2, 3, 4, 5, 6].map(k => k < 4 ? work[bodyOff + 8 * v + k]! : work[bodyDevOff + 4 * v + k - 4]!);
+      if (!reach || margin > 0) {
+        assert.deepEqual(q, [0, 0, 0, 0, 0, 0, 0]);
+        assert.deepEqual(w, [0, 0, 0], `vertex ${v} prediction beyond the plate's reach`);
+        continue;
+      }
+      // The terms are in the body frame at the end pose: (g0 s, rc) and D s with s = 1 / (room - L sigma),
+      // rc = min(rho, rqMax / 2) the affine bound's ball.
+      const room = Math.max(0.9 * b.phi0, b.phi0 - config.r) - L * sigma, sc = 1 / room, rc = Math.min(rho, 0.5 * config.rqMax);
+      assert.ok(Math.abs(q[3]! - rc) <= 1e-5 * rc, `vertex ${v} affine ball ${q[3]} vs ${rc}`);
+      const g0 = b.far ? [0, 0, 0] : b.g0, D = b.far ? [0, 0, 0] : b.D;
+      const qr = [g0[0]! * sc, g0[1]! * sc, g0[2]! * sc, rc, D[0]! * sc, D[1]! * sc, D[2]! * sc];
       const qs = Math.max(...qr.map(Math.abs));
-      // Held: carried in contact or in a redone round; else moved towards a_v as far as the bound needs
-      // ((1 - t) f(-a) = 1), or kept at 0. f(d) = D s.|d| - g0 s.d with d = R1^T (w - a) = -R1^T a.
-      const ab = mulT(p1.R, a);
-      const fb = qr[4]! * Math.abs(ab[0]) + qr[5]! * Math.abs(ab[1]) + qr[6]! * Math.abs(ab[2]) + (qr[0]! * ab[0] + qr[1]! * ab[1] + qr[2]! * ab[2]);
-      const full = conflictCarried || forced || b.phi0 < config.r;
-      const want = full ? a : fb > 1 ? scale3(a, 1 - 1 / fb) : [0, 0, 0] as V3;
-      if (full || fb > 1) carried++;
-      if (conflictCarried || forced || (Math.abs(fb - 1) > 1e-3 && Math.abs(b.phi0 - config.r) > 1e-6))
-        assert.ok(norm(sub(w, want)) <= 2e-7 + 1e-3 * norm(a), `vertex ${v} prediction ${w} vs ${want} (phi0 ${b.phi0}, f(-a) ${fb})`);
       for (let k = 0; k < 7; k++) assert.ok(Math.abs(q[k]! - qr[k]!) <= 2e-3 * qs, `vertex ${v} q/D[${k}] ${q[k]} vs ${qr[k]}`);
+      // Moved towards a_v as far as either certificate needs (predictionScale on d = R1^T (0 - a_v)):
+      // the affine f(d) = D s.|d| - g0 s.d <= 1 within rc, or the Lipschitz ball |d| <= rl = room / L_max.
+      const d = mulT(p1.R, scale3(a, -1)), l = norm(d), rl = room / L;
+      const f = qr[4]! * Math.abs(d[0]) + qr[5]! * Math.abs(d[1]) + qr[6]! * Math.abs(d[2]) - (qr[0]! * d[0] + qr[1]! * d[1] + qr[2]! * d[2]);
+      let kb = 1;
+      if (l > rl && !(f <= 1 && l <= rc)) kb = Math.max(f > 1 ? Math.min(rc / l, 1 / f) : rc / l, rl / l);
+      // In a round redone a vertex its bound moves is carried outright (counted above).
+      assert.ok(!(c0.redos > 0 && kb < 1 - 1e-3), `vertex ${v}: a round redone carries a vertex its bound moves (kb ${kb})`);
+      const want = kb < 1 ? scale3(a, 1 - kb) : [0, 0, 0] as V3;
+      if (kb < 1) pushedCount++;
+      if (Math.abs(f - 1) > 1e-3 && Math.abs(l - rl) > 1e-3 * rl && Math.abs(l - rc) > 1e-3 * rc)
+        assert.ok(norm(sub(w, want)) <= 2e-7 + 1e-3 * norm(a), `vertex ${v} prediction ${w} vs ${want} (phi0 ${b.phi0}, f(-a) ${f}, kb ${kb})`);
       const lr = (b.phi0 < config.r ? -activation(b.phi0, config.r, config.kc)[1] * norm(b.g0) : 0) * sampleClothSolidField(field, y0).mu;
       assert.ok(Math.abs(lambdaOf(body[0]!) - lr) <= 2e-3 * Math.max(1, lr), `vertex ${v} lambda ${lambdaOf(body[0]!)} vs ${lr}`);
     }
-    // The frame counter sums its rounds (the held redos of conflicts with the plate's samples too).
-    assert.ok(carried > 30 && (c0.redos ? c0.bodyContacts >= entries : c0.bodyContacts === entries), `${carried} carried vertices, ${entries} body entries, counter ${c0.bodyContacts} over ${1 + c0.redos} rounds`);
-    assert.ok(carried < N, "the plate's reach ends inside the sheet");
+    // The frame counter sums its rounds (the redos of conflicts with the plate's samples too).
+    assert.ok(pushedCount + carriedCount > 30 && (c0.redos ? c0.bodyContacts >= entries : c0.bodyContacts === entries), `${pushedCount} vertices the plate's bound pushed and ${carriedCount} carried, ${entries} body entries, counter ${c0.bodyContacts} over ${1 + c0.redos} rounds`);
+    assert.ok(pushedCount + carriedCount < N, "the plate's reach ends inside the sheet");
+    assert.equal(c0.zoneVertices, carriedCount, "the zone counter counts the carried vertices");
 
     // The plate's surface samples: x_det at the start pose, predicted exactly to the end pose.
     const SB = det.bodySamples;
@@ -239,7 +270,7 @@ test("GPU moving solid: carried predictions, body entries and terms, posed sampl
     const sampled = lists.flatMap(l => l.filter(e => e.w === 1 && (e.y & 0x80000000) === 0));
     assert.ok(sampled.length > 0 && sampled.every(e => e.x >= N && e.x < N + SB), `${sampled.length} sample-facet entries on the plate's samples`);
 
-    // The vertex block, near the carried positions, against the Float64 contact in the body frame at the end pose.
+    // The vertex block, near the co-moving positions, against the Float64 contact in the body frame at the end pose.
     const X = f32(mesh.x.map((x, v) => {
       const { a, b } = bounds[v]!, h = 0.3 * Math.min(xdet[4 * v + 3]!, b.phi0);
       return [x[0] + (b.far ? 0 : a[0]) + (R() - 0.5) * h, x[1] + (b.far ? 0 : a[1]) + (R() - 0.5) * h, x[2] + (b.far ? 0 : a[2]) + (R() - 0.5) * h] as V3;
@@ -380,7 +411,7 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
       | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose;
     let worstPhi = Infinity, faceLower = Infinity;
     const t1 = performance.now();
-    let redoSteps = 0, redosMax = 0, conflictsAll = 0;
+    let redoSteps = 0, redosMax = 0, conflictsAll = 0, zoneSteps = 0, zoneAll = 0, zonePeak = 0;
     for (let step = 0; step < STILL + MOVING; step++) {
       det.setBodyPoses([poseAt(step), poseAt(step + 1)]);
       const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
@@ -390,7 +421,6 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
       if (c.redos > 0) redoSteps++;
       redosMax = Math.max(redosMax, c.redos); conflictsAll += c.conflicts;
       assert.equal(c.status & FAILING, 0, `step ${step}: status ${OgcContactDetector.describeStatus(c.status)} (a held conflict's pair, past N: ${c.heldConflictPair.map(i => (i & 0x7fffffff) - N).join(", ")})`);
-      assert.ok(c.intersections === 0 && c.solidIntersections === 0, `step ${step}: ${c.intersections} face pairs, ${c.solidIntersections} faces in the plate`);
       const end = poseOf(poseAt(step + 1)), x = await solver.readPositions();
       const body = new Float64Array(3 * N);
       for (let i = 0; i < N; i++) {
@@ -399,12 +429,18 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
         worstPhi = Math.min(worstPhi, sampleClothSolidField(field, y).phi);
       }
       assert.ok(worstPhi > 0, `step ${step}: a vertex inside the plate (phi ${worstPhi})`);
+      if (c.intersections !== 0 || c.solidIntersections !== 0) {
+        const r = facesInsideSolid(field, body, m.topology.faces);
+        const what = r.inside.slice(0, 4).map(f => [0, 1, 2].map(k => { const i = m.topology.faces[3 * f + k]!, y = [body[3 * i]!, body[3 * i + 1]!, body[3 * i + 2]!] as V3; return `${i}:(${y.map(u => u.toFixed(5))}) phi ${sampleClothSolidField(field, y).phi.toExponential(3)}`; }).join(' ')).join(' | ');
+        assert.fail(`step ${step}: ${c.intersections} face pairs, ${c.solidIntersections} faces in the plate (status ${OgcContactDetector.describeStatus(c.status)}, uncertified ${c.uncertified}, rounds ${c.detections}, conflicts ${c.conflicts}, redos ${c.redos}, held ${c.held}); exact ${r.inside.length}: ${what}`);
+      }
       if (step % 10 === 9 || step === STILL + MOVING - 1) {
         const r = facesInsideSolid(field, body, m.topology.faces);
         faceLower = Math.min(faceLower, r.lower);
         assert.equal(r.inside.length, 0, `step ${step}: ${r.inside.length} faces inside the plate (exact)`);
       }
-      if (step % 15 === 14) t.diagnostic(`step ${step}: rounds ${c.detections}, body contacts ${c.bodyContacts}, body cuts ${c.bodyCut}, sample-facet ${c.sfPairs}, truncated ${c.truncated}, conflicts ${c.conflicts} redos ${c.redos}, held ${c.held}, envelope ${c.peakEnvelope.toExponential(2)}`);
+      if (c.zoneVertices) { zoneSteps++; zoneAll += c.zoneVertices; zonePeak = Math.max(zonePeak, c.zonePeak); }
+      if (step % 15 === 14) t.diagnostic(`step ${step}: zone ${c.zoneVertices} peak ${c.zonePeak}, rounds ${c.detections}, body contacts ${c.bodyContacts}, body cuts ${c.bodyCut}, sample-facet ${c.sfPairs}, truncated ${c.truncated}, conflicts ${c.conflicts} redos ${c.redos}, held ${c.held}, envelope ${c.peakEnvelope.toExponential(2)}`);
     }
     const ms = (performance.now() - t1) / (STILL + MOVING);
     // Friction carries the sheet on the plate's top at its rigid velocity v + omega x (x - c).
@@ -420,7 +456,7 @@ test("GPU moving plate in C1's solver: the sheet rides it without entering it, a
     }
     const rel = Math.sqrt(err / ref);
     assert.ok(onTop > N / 3, `${onTop} vertices on the plate's top`);
-    t.diagnostic(`plate: ${N} vertices (${onTop} on the top), ${STILL + MOVING} steps, ${ms.toFixed(1)} ms/step with readback; min vertex phi ${worstPhi.toExponential(2)} m, faces (exact) phi >= ${faceLower.toExponential(2)} m; velocity vs rigid ${(100 * rel).toFixed(2)}% rms; ${redoSteps} steps redone held (at most ${redosMax} held rounds), ${conflictsAll} conflicts`);
+    t.diagnostic(`plate: ${N} vertices (${onTop} on the top), ${STILL + MOVING} steps, ${ms.toFixed(1)} ms/step with readback; min vertex phi ${worstPhi.toExponential(2)} m, faces (exact) phi >= ${faceLower.toExponential(2)} m; velocity vs rigid ${(100 * rel).toFixed(2)}% rms; ${redoSteps} steps redone, ${conflictsAll} conflicts; impact zones in ${zoneSteps} steps, ${zoneAll} vertices carried in all, largest ${zonePeak}`);
     assert.ok(rel < 0.05, `the sheet moves with the plate: ${(100 * rel).toFixed(2)}% rms from its rigid velocity`);
     solver.destroy(); det.destroy();
   });
