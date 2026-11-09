@@ -1,5 +1,5 @@
 import { createEmptyScene } from "../../../core/empty-scene";
-import type { CameraState, SceneDescription, Vec3 } from "../../../core/model";
+import type { CameraState, RigidBodyDescription, SceneDescription, Vec3 } from "../../../core/model";
 import { bakeProceduralSolid } from "../../../core/procedural-solid";
 import { solidVoxelPatchesKey, type SolidWorldVoxelPatch } from "../../../core/solid-world";
 import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
@@ -15,11 +15,14 @@ import { bridsonShapeBox, bridsonShapeReach, bridsonSolidDistance, bridsonSolidP
  *
  * Solids that hold still at t = 0 (the ground, legs, frustum, and the curtain
  * ball and spinning sphere until they start to move) are baked at their t = 0
- * pose. A solid in motion is a scene rigid body with a prescribed pose, which
- * the scene cannot carry for cloth yet (lane C2, M6). Each is recorded on the
- * cloth document as a pending solid, and the cloth system fails explicitly
- * when the clock reaches it: at the first motion of a held solid, or when a
- * moving one first comes within reach of the cloth.
+ * pose. A solid in motion is a scene rigid body with a prescribed pose. By
+ * default (`movingSolids: "held"`) each is recorded on the cloth document as
+ * a pending solid, and the cloth system fails explicitly when the clock
+ * reaches it: at the first motion of a held solid, or when a moving one first
+ * comes within reach of the cloth. With `movingSolids: "rigid-body"` each
+ * solid with a pose track is a scene rigid body carrying that track for the
+ * whole run, which the cloth system's contact (lane C2, M6, one-way) bakes in
+ * its body frame and poses every step.
  *
  * Scene coordinates are the paper's translated by `bridson2002SceneLayout(s)
  * .translation_m`: the container is centred on x and z with its floor at
@@ -37,6 +40,13 @@ export interface Bridson2002SceneLayout {
   readonly held: readonly string[];
   /** Solids the scene cannot represent yet, and when the cloth system stops for each. */
   readonly pending: readonly ClothPendingSolid[];
+}
+
+export interface Bridson2002SceneOptions {
+  /** `bake: false` skips the voxel bake (library card previews). */
+  readonly bake?: boolean;
+  /** How a solid with a pose track enters the scene: held voxels then pending (default), or a scene rigid body. */
+  readonly movingSolids?: "held" | "rigid-body";
 }
 
 const BRICK = 8;
@@ -123,9 +133,9 @@ export function bridson2002SceneLayout(source: Bridson2002Scene): Bridson2002Sce
 }
 
 /** Held solids as voxel patches: lattice-aligned boxes as exact fills, every other shape through one procedural bake. */
-function bakeHeldSolids(source: Bridson2002Scene, layout: Bridson2002SceneLayout): Pick<SceneDescription, "solidVoxels" | "solidBoundary"> {
+function bakeHeldSolids(source: Bridson2002Scene, layout: Bridson2002SceneLayout, rigid: ReadonlySet<string>): Pick<SceneDescription, "solidVoxels" | "solidBoundary"> {
   const h = layout.cell_m, o = layout.lower_m, dims = layout.dimensions;
-  const held = source.solids.filter(s => layout.held.includes(s.id));
+  const held = source.solids.filter(s => layout.held.includes(s.id) && !rigid.has(s.id));
   const fills: SolidWorldVoxelPatch[] = [], shaped: BridsonSolid[] = [];
   for (const solid of held) {
     const pose = bridsonSolidPose(solid, 0), box = poseBox(solid, 0);
@@ -161,15 +171,32 @@ function bakeHeldSolids(source: Bridson2002Scene, layout: Bridson2002SceneLayout
   };
 }
 
-/** The document the product opens. `bake: false` skips the voxel bake (library card previews). */
-export function bridson2002SceneDescription(source: Bridson2002Scene, options: { readonly bake?: boolean } = {}): SceneDescription {
+/** The moving solids as scene rigid bodies: the pose track in scene coordinates, one-way (the cloth never moves them). */
+function movingRigidBodies(source: Bridson2002Scene, t: Vec3): RigidBodyDescription[] {
+  return source.solids.filter(s => bridsonSolidMotionStart(s) < Infinity).map(solid => {
+    if (solid.motion.kind !== "pose-track") throw new Error(`Bridson 2002 solid '${solid.id}' moves without a pose track`);
+    if (solid.shape.kind !== "sphere") throw new Error(`Bridson 2002 moving solid '${solid.id}' is a ${solid.shape.kind}; scene rigid bodies take its shape only as a sphere`);
+    const keyframes = solid.motion.track.keyframes.map(k => ({ time_s: k.time_s, orientation: { ...k.orientation },
+      position_m: { x: k.position_m.x + t.x, y: k.position_m.y + t.y, z: k.position_m.z + t.z } }));
+    const pose = bridsonSolidPose(solid, 0), r = solid.shape.radius_m;
+    return { id: solid.id, name: solid.id, shape: "sphere", dimensions_m: { x: r, y: r, z: r }, density_kg_m3: 1000,
+      position_m: { x: pose.position_m.x + t.x, y: pose.position_m.y + t.y, z: pose.position_m.z + t.z }, orientation: { ...pose.orientation },
+      linearVelocity_m_s: { x: 0, y: 0, z: 0 }, angularVelocity_rad_s: { x: 0, y: 0, z: 0 }, restitution: 0, friction: solid.friction,
+      motion: "static", poseTrack: { keyframes, ...(solid.motion.track.localOffset_m ? { localOffset_m: { ...solid.motion.track.localOffset_m } } : {}) } };
+  });
+}
+
+/** The document the product opens (see Bridson2002SceneOptions). */
+export function bridson2002SceneDescription(source: Bridson2002Scene, options: Bridson2002SceneOptions = {}): SceneDescription {
   const layout = bridson2002SceneLayout(source), h = layout.cell_m, t = layout.translation_m;
+  const rigidBodies = options.movingSolids === "rigid-body" ? movingRigidBodies(source, t) : [];
+  const rigid = new Set(rigidBodies.map(b => b.id)), pending = layout.pending.filter(p => !rigid.has(p.id));
   const scene = createEmptyScene({ sceneId: source.id, finestCellSize_m: h,
     extents_m: { x: layout.dimensions[0] * h, y: layout.dimensions[1] * h, z: layout.dimensions[2] * h } });
   scene.duration_s = source.duration_s;
   scene.numerics = { ...scene.numerics, fixedDt_s: source.step_s, maxDt_s: source.step_s };
   if (options.bake !== false) {
-    const solids = bakeHeldSolids(source, layout);
+    const solids = bakeHeldSolids(source, layout, rigid);
     // The procedural bake's patches lead: its boundary covers the prefix solidVoxels.slice(0, patchCount).
     scene.solidVoxels = [...solids.solidVoxels, ...scene.solidVoxels];
     if (solids.solidBoundary) scene.solidBoundary = solids.solidBoundary;
@@ -178,8 +205,9 @@ export function bridson2002SceneDescription(source: Bridson2002Scene, options: {
   const vertexCount = rest.length / 3;
   const cloth: ClothDocument = { ...source.cloth,
     geometry: { kind: "inline", data: { ...data, restPositions_m: rest, vertexMass_kg: new Array(vertexCount).fill(source.nodeMass_kg) } },
-    ...(layout.pending.length ? { pendingSolids: layout.pending } : {}) };
+    ...(pending.length ? { pendingSolids: pending } : {}) };
   scene.cloth = [cloth];
+  scene.rigidBodies = rigidBodies;
   return scene;
 }
 

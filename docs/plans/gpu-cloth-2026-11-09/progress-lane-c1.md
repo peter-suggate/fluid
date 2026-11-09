@@ -738,3 +738,45 @@ This is a physics change. It holds for nearly inextensible cloth with flat rest 
 Lanes 1 (serial starStep) with quadratic bending: 58.3–67.9 µs.
 
 Tests: `cloth-oracle`, `cloth-gpu-solver` (new stencil regression), `cloth-coarse`, `cloth-system` and `cloth-topology` pass. The scene tests run with `subgroups` requested. They were verified on HEAD plus these files, because C2's in-progress `ogc-detector.ts` edit in the working tree currently mismatches the "ogc apply" bind group (6 entries against 7).
+
+## 2026-11-09 RESULT (9): C2's M6 moving solid wired into ClothSystem; undo regression through the system
+
+**Wiring (COORDINATION items 1–4 of progress-lane-c2.md).**
+- `CLOTH_CONTACT_FAILING` adds `bodySqueeze | heldConflict | bodyPose`.
+- The scene's moving solid is a scene rigid body with a prescribed pose track: `motion "static"`, a `poseTrack`, and no orbit, motor or kinematic plugin. `clothSceneMovingSolids` accepts at most one. Any other rigid body, or a second one, fails explicitly at setup.
+- `buildClothBodyField` bakes the body once in its body frame, on the scene's lattice cell, with the contact band and the body's friction. Only a sphere bakes; any other shape, or a cut body, fails explicitly. The field is cached across rebuilds.
+- `config.body` is sized exactly: field words; sample capacity = max(samples, ⌈hull edges / 8⌉). The edge term is new and applies to the static field too: a rounded body has more hull edges than samples (sphere r 8 cm: 254 samples, 2240 edges).
+- `poseCapacity` is `CLOTH_BODY_POSES_PER_FRAME` = 5, asserted to be at least the catch-up steps + 1.
+- `setBodyPoses` gets owed + 1 cloth-frame poses from `sampleRigidPoseTrack` before each frame's pass.
+- The `cloth-pending-solid` halt now skips the scene's moving solid. Any other pending solid still halts, with "is not the scene's moving solid".
+- **Bridson variant.** `bridson2002SceneDescription(source, { movingSolids: "rigid-body" })` makes each scene's moving solid a pose-tracked rigid sphere. It carries the track, translated, including `localOffset_m`, and the solid's friction; the solid is no longer held or pending. `contact-solids.ts` leaves such a body out of the static field.
+- **The product default stays `"held"`.** A rigid sphere is not yet drawn, picked or cut in a dry scene: `visibleToolSurface` and the dry renderer see only held voxel solids. AGENTS.md forbids a visible surface that editing cannot address, so flipping the default needs renderer and editor support for a posed rigid sphere first.
+
+**Full-length runs, rigid-body variant, K = 64.** Fenced per tick, pose read every 6 ticks; HEAD plus these files.
+
+| Scene | Ticks run | Halt | Status (OR) | Max intersections | Faces in solid before halt | ms per tick | Strain p99 | Max edge strain |
+|---|---|---|---|---|---|---|---|---|
+| curtain | 122 / 400 | heldConflict (t 2.03 s, ball rising) | 1676 | 0 | 0 (1476 at the halted step) | 221–261 | 10.00% | 20.8% |
+| rotating sphere | 119 / 533 | heldConflict (t 1.98 s, spinning) | 1036 | 0 | 0 (1 at the halted step) | 136 | 10.02% | 167% |
+| tablecloth | 224 / 353 | heldConflict (t 3.73 s, ball on cloth) | 1036 | 0 | 1 at ticks 36–42; 2 at tick 222 | 122–151 | 10.5% | 52–55% |
+
+- Status at the curtain's halt: 1676 = heldConflict + bodySqueeze + solidPenetration + envelopeCap + roundCap. The others: 1036 = heldConflict + envelopeCap + roundCap.
+- The held conflict pairs are cloth edge vs body hull edge, for example (cloth 21634–…, body samples 49691, 50127).
+- The strain limit is the paper's 10%, and the bulk sits on it (p99). The isolated maxima are edges caught on the frustum top edge (rotating sphere) or on the table edge.
+- The rotating sphere's 167% is late, at tick 108. In the held variant it reached 35% by tick 18.
+
+**C1 → C2 finding: cloth resting on the moving solid halts heldConflict.** The conflict is a cloth edge against a body hull edge. It recurs with the same pair at heldRounds 3, 6 and 12, and with friction 0 or 0.2. A slower sphere halts the same way.
+- With a body sample in the pair, `checkConflict` is always "moving", so any pair with no separating plane at X conflicts every held round.
+- Repro: a 24 × 24 sheet on a 1 cm lattice falling 4 cm onto a sphere (r 10 cm) that slides 3 cm and turns 0.6 rad. It halts at tick 29.
+- On a 5 cm lattice (the empty scene's default) the same scene halts at tick 12. There a vertex also lies 3.7 mm inside the true sphere, which is the trilinear error of a 5 cm bake (h²/8R), not a contact miss.
+
+**Tests (tests/cloth-system.test.ts).**
+- CPU: the rigid-body variant validates for all three scenes, with one pose-tracked sphere (track and friction carried) that is neither held nor pending. The rigid-body rejection message is updated.
+- GPU: the scene's moving solid is baked and posed. The clock passes its pending start; at tick 8 the sheet is in contact (body contacts > 0), with no vertex inside and no failing bit. Two moving solids, a dynamic body and a cup each fail explicitly.
+- GPU, `todo`: the sheet lands on the moving sphere and rides it for 36 ticks. Blocked on the heldConflict above. It becomes a plain test once C2's M6 holds resting cloth.
+- GPU, undo: 6 ticks, read the pose, take the editor's history endpoint (`snapshotSceneClothPose`), cut, step 3 ticks, then stage the endpoint (undo).
+  - The uncut document is rebuilt: triangle count and document restored, topologyRevision 2, tick 6.
+  - Positions, the BDF2 history and the AVBD duals equal the endpoint's; the clock is Math.fround of it.
+  - 3 more ticks match a never-cut 9-tick run to **0 m** (bit-identical).
+  - Redo restages the cut document.
+- `cloth-system` GPU file: 12 pass, 1 todo. `check:types` is clean. `test:unit` has only the known `reservoir-particle-cost` failure.

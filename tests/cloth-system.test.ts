@@ -6,8 +6,10 @@
  * (skips without WEBGPU_NODE_MODULE): the cloth system composed onto a dry
  * scene steps one 1/60 s tick per advance and tracks the oracle, mirrors its
  * pose for picking, keeps the base instance's optional members, rebuilds a
- * cut document in place, halts explicitly at a pending solid, and captures a
- * Bridson sheet in free fall.
+ * cut document in place, halts explicitly at a pending solid that is not the
+ * scene's moving solid, lands a sheet on the moving solid (a rigid body on a
+ * pose track) and refuses any other rigid body, and captures a Bridson sheet
+ * in free fall.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -26,10 +28,10 @@ import { validateClothDocument, prepareClothTopology, clothVertexNeighbours, col
 import { buildClothSolverModel, clothOracleStep, createClothOracleState } from '../lib/cloth/oracle';
 import { ClothCoarseCorrection, buildClothCoarseSpace } from '../lib/cloth/coarse';
 import { sceneWithClothStroke } from '../lib/cloth/scene-edit';
-import { publishSceneClothSurfaces } from '../lib/cloth/scene-geometry';
+import { publishSceneClothSurfaces, snapshotSceneClothPose } from '../lib/cloth/scene-geometry';
 import { CLOTH_SCENE_STEP_S, ClothSystem, withClothSystem } from '../lib/cloth/system';
 import type { ClothGPUSolver } from '../lib/cloth/gpu-solver';
-import { buildClothSceneField, clothContactFieldKey, clothContactRadius } from '../lib/cloth/scene-contact';
+import { CLOTH_CONTACT_FAILING, buildClothSceneField, clothContactFieldKey, clothContactRadius, clothSceneMovingSolids } from '../lib/cloth/scene-contact';
 import { proceduralSolidField } from '../lib/core/procedural-solid';
 import type { ClothDocument, ClothMaterial } from '../lib/cloth/types';
 import { bridson2002Curtain, bridson2002RotatingSphere, bridson2002Tablecloth, BRIDSON_2002_SCENES } from '../lib/cloth/scenes/bridson-2002';
@@ -68,6 +70,22 @@ test('held solids are voxel solids; moving solids are pending at their first mot
   // The table sphere descends from 3.74 m at 0.82 m/s; it reaches the flat sheet (0.76 m) plus its radius at ~3.45 s.
   assert.ok(Math.abs(layouts[2]!.pending[0]!.start_s - 3.45) < 0.02, `${layouts[2]!.pending[0]!.start_s}`);
   for (const l of layouts) assert.ok(l.dimensions.every(d => d % 8 === 0));
+});
+
+test("the rigid-body variant makes each scene's moving solid a pose-tracked rigid sphere, not held and not pending", () => {
+  for (const make of BRIDSON_2002_SCENES) {
+    const source = make(), held = bridson2002SceneDescription(source, { bake: false }), scene = bridson2002SceneDescription(source, { bake: false, movingSolids: 'rigid-body' });
+    assert.deepEqual(validateScene(scene), []);
+    const [body, ...rest] = clothSceneMovingSolids(scene), solid = source.solids.find(s => s.id === body!.id)!, t = bridson2002SceneLayout(source).translation_m;
+    assert.equal(rest.length, 0);
+    assert.ok(body!.shape === 'sphere' && body!.motion === 'static' && body!.poseTrack!.keyframes.length > 1 && body!.friction === solid.friction);
+    // The track is the source's, in the translated scene frame.
+    assert.equal(solid.motion.kind, 'pose-track');
+    const k = body!.poseTrack!.keyframes[0]!, s0 = (solid.motion as { track: { keyframes: typeof k[] } }).track.keyframes[0]!;
+    assert.ok(Math.abs(k.position_m.x - s0.position_m.x - t.x) < 1e-12 && Math.abs(k.position_m.y - s0.position_m.y - t.y) < 1e-12);
+    assert.deepEqual(scene.cloth![0]!.pendingSolids ?? [], (held.cloth![0]!.pendingSolids ?? []).filter(p => p.id !== body!.id));
+    assert.equal(held.rigidBodies.length, 0);
+  }
 });
 
 test('the cloth keeps its authored masses and lands on the translated scene frame', () => {
@@ -127,7 +145,7 @@ test('cloth contact settings: self friction is validated and carried; a solid wo
   assert.ok(field.bricks.size > 0, 'the container shell is a solid');
   assert.notEqual(clothContactFieldKey(empty, origin, 1e-3), clothContactFieldKey(empty, [0, 1.5, 0], 1e-3));
   assert.throws(() => buildClothSceneField({ ...empty, terrain: { baseHeight_m: 0.1, features: [] } as unknown as SceneDescription['terrain'] }, origin, 1e-3), /terrain/);
-  assert.throws(() => buildClothSceneField({ ...empty, rigidBodies: [{ id: 'b' } as SceneDescription['rigidBodies'][number]] }, origin, 1e-3), /rigid bodies/);
+  assert.throws(() => buildClothSceneField({ ...empty, rigidBodies: [{ id: 'b' } as SceneDescription['rigidBodies'][number]] }, origin, 1e-3), /rigid body only as a moving solid with a prescribed pose track/);
   const carved = sceneWithSolidStroke(empty, [{ operation: 'clear', affectsScenery: true, minimum: [10, 0, 10], maximumExclusive: [20, 4, 20] }]);
   assert.throws(() => buildClothSceneField(carved, origin, 1e-3), /Cloth contact cannot follow solid patch/);
 });
@@ -242,8 +260,140 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   for (let k = 8; k <= 10; k++) assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true);
   assert.equal(solver.advanceTo(11 * CLOTH_SCENE_STEP_S, []), false);
   assert.equal(solver.info.simulationFailure?.code, 'cloth-pending-solid');
-  assert.match(solver.info.simulationFailure!.message, /moving cloth solid 'probe' requires C2 M6/);
+  assert.match(solver.info.simulationFailure!.message, /moving cloth solid 'probe' is not the scene's moving solid/);
   assert.ok(Math.abs(solver.info.submittedTime_s! - 10 * CLOTH_SCENE_STEP_S) < 1e-12);
+  solver.destroy();
+}));
+
+/**
+ * A sphere of radius R centred at y on a pose track (scene coordinates): it slides `dx` along x and turns `turn` rad
+ * about y over `end_s`.
+ */
+function trackedSphere(R: number, y: number, dx: number, turn: number, end_s: number): SceneDescription['rigidBodies'][number] {
+  const at = (x: number) => ({ x, y, z: 0 }), zero = { x: 0, y: 0, z: 0 }, q = (a: number) => ({ w: Math.cos(a / 2), x: 0, y: Math.sin(a / 2), z: 0 });
+  return { id: 'turner', name: 'turner', shape: 'sphere', dimensions_m: { x: R, y: R, z: R }, density_kg_m3: 1000, position_m: at(0), orientation: q(0),
+    linearVelocity_m_s: zero, angularVelocity_rad_s: zero, restitution: 0, friction: 0.5, motion: 'static',
+    poseTrack: { keyframes: [0, 0.5, 1].map(f => ({ time_s: f * end_s, position_m: at(f * dx), orientation: q(f * turn) })) } };
+}
+
+/** A 24 x 24 sheet (1.7 cm edges) 4 cm above a sphere that slides 3 cm and turns 0.6 rad under it over 36 ticks, on a 1 cm lattice (the body field's cell). */
+function movingSolidScene() {
+  const R = 0.1, y = 0.76, scene = createEmptyScene({ sceneId: 'cloth-moving-solid-test', finestCellSize_m: 0.01, extents_m: { x: 1.2, y: 1.6, z: 1.2 } }), ticks = 36, end_s = ticks * CLOTH_SCENE_STEP_S;
+  const data = clothGridData({ columns: 24, rows: 24, width_m: 0.4, height_m: 0.4, origin_m: [-0.2, 0.9, -0.2] });
+  scene.cloth = [{ schemaVersion: '2.0.0', id: 'sheet', geometry: { kind: 'inline', data }, materials: [cotton], solver: { integrator: 'bdf2', iterations: 12 },
+    pendingSolids: [{ id: 'turner', start_s: 0 }] }];
+  const body = trackedSphere(R, y, 0.03, 0.6, end_s);
+  scene.rigidBodies = [body];
+  assert.deepEqual(validateScene(scene), []);
+  return { scene, body, R, y, ticks };
+}
+
+test("the scene's moving solid (a rigid body on a pose track) is baked once and posed every frame; any other rigid body fails explicitly", { skip: !gpu }, async () => withDevice(async device => {
+  const { scene, body, R, y } = movingSolidScene();
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 }), contact = cloth.contactFor('sheet')!;
+  // The pending solid at t = 0 is the scene's moving solid: the clock runs past it, with its poses uploaded every frame.
+  const [frame] = await cloth.capture([8 * CLOTH_SCENE_STEP_S]);
+  assert.equal(cloth.failure, undefined, cloth.failure?.message);
+  assert.equal(frame![0]!.tick, 8);
+  const counters = await contact.readCounters(), x = frame![0]!.positions_m, cx = 0.03 * 8 / 36;
+  let nearest = Infinity;
+  for (let v = 0; v < x.length / 3; v++) nearest = Math.min(nearest, Math.hypot(x[3 * v]! - cx, x[3 * v + 1]! - y, x[3 * v + 2]!));
+  // The sheet falls the 4 cm onto the posed sphere in about 6 ticks and is in contact with it at tick 8, not inside it.
+  assert.ok(counters.bodyContacts > 0 && nearest > R - 1e-3, `${counters.bodyContacts} body contacts, nearest vertex ${nearest - R} m off the sphere`);
+  assert.equal(counters.status & CLOTH_CONTACT_FAILING, 0);
+  cloth.destroy();
+  // More than one moving solid, or a body the cloth cannot see as one, fails explicitly.
+  scene.rigidBodies = [body, { ...body, id: 'second' }];
+  await assert.rejects(ClothSystem.create(device, scene), /at most one moving solid/);
+  scene.rigidBodies = [{ ...body, poseTrack: undefined, motion: 'dynamic' }];
+  await assert.rejects(ClothSystem.create(device, scene), /prescribed pose track/);
+  scene.rigidBodies = [{ ...body, shape: 'cup' }];
+  await assert.rejects(ClothSystem.create(device, scene), /cannot bake a moving solid of shape cup/);
+}));
+
+test('a sheet lands on the moving solid and rides it: nothing passes inside, no failing status',
+  { skip: !gpu, todo: "C2 M6: cloth resting on the moving sphere halts heldConflict at tick 29 (a cloth edge against a body hull edge); the Bridson rigid-body variants halt the same way" },
+  async () => withDevice(async device => {
+  const { scene, R, y, ticks } = movingSolidScene();
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 }), contact = cloth.contactFor('sheet')!;
+  let nearest = Infinity, bodyContacts = 0, top = -Infinity;
+  for (let k = 6; k <= ticks; k += 6) {
+    const [frame] = await cloth.capture([k * CLOTH_SCENE_STEP_S]);
+    const x = frame![0]!.positions_m, cx = 0.03 * k / ticks;
+    nearest = Infinity; top = -Infinity;
+    for (let v = 0; v < x.length / 3; v++) {
+      nearest = Math.min(nearest, Math.hypot(x[3 * v]! - cx, x[3 * v + 1]! - y, x[3 * v + 2]!));
+      if (Math.hypot(x[3 * v]! - cx, x[3 * v + 2]!) < 0.03) top = Math.max(top, x[3 * v + 1]!);
+    }
+    bodyContacts = Math.max(bodyContacts, (await contact.readCounters()).bodyContacts);
+    // Every 6 ticks: every vertex outside the sphere at its pose, no face inside it.
+    assert.ok(nearest > R - 1e-3, `tick ${k}: a vertex ${R - nearest} m inside the moving sphere`);
+    assert.deepEqual(await contact.countIntersections(), { intersections: 0, solidIntersections: 0 }, `tick ${k}`);
+  }
+  console.log(`moving sphere: nearest vertex ${(nearest - R).toFixed(4)} m off the sphere, cap ${(top - y - R).toFixed(4)} m above its top, peak body contacts ${bodyContacts}`);
+  assert.equal(cloth.failure, undefined, cloth.failure?.message);
+  // The sheet fell 4 cm onto the sphere and is held on its top: not inside, not left behind.
+  assert.ok(top - y - R > 0 && top - y - R < 0.01, `cap ${top - y - R} m above the sphere`);
+  cloth.destroy();
+}));
+
+test('undo of a cut through the system: the history endpoint rebuilds the uncut sheet with its exact state and steps on as if never cut', { skip: !gpu }, async () => withDevice(async device => {
+  const scene = sheetScene(1e9), staged: SceneDescription[] = [];
+  // The reference never cuts: 9 ticks straight.
+  const reference = await ClothSystem.create(device, cloneScene(scene));
+  const uncut = (await reference.capture([9 * CLOTH_SCENE_STEP_S]))[0]![0]!;
+  reference.destroy();
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 });
+  const solver = withClothSystem(dryBase(staged), cloth, false);
+  const liveState = () => (cloth as unknown as { entries: Map<string, { solver: ClothGPUSolver }> }).entries.get('sheet')!.solver.readState();
+  for (let k = 1; k <= 6; k++) assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true);
+  await solver.readClothPose!();
+  publishSceneClothSurfaces(scene, solver.clothSurfaces!);
+  // The editor's history endpoint before the cut: the accepted pose and the exact solver state.
+  const before = snapshotSceneClothPose(scene), saved = before.cloth![0]!.geometry.data;
+  assert.equal(saved.triangles, scene.cloth![0]!.geometry.data.triangles);
+  assert.ok(saved.initialPositions_m && saved.solverState && Math.abs(saved.solverState.time_s - 6 * CLOTH_SCENE_STEP_S) < 1e-6);
+  const edited = sceneWithClothStroke(scene, [{ kind: 'box', box: { minimum_m: [-0.06, -1, -0.06], maximum_m: [0.06, 2, 0.06] } }]);
+  solver.stageSceneUpdate!(edited);
+  await cloth.settled();
+  for (let k = 7; k <= 9; k++) assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true);
+  const cut = solver.clothRenderSources![0]!;
+  assert.equal(cut.triangleCount, edited.cloth![0]!.geometry.data.triangles.length / 3);
+
+  // Undo: stage the endpoint. The uncut document is rebuilt from its pose and state; the clock goes back to tick 6.
+  solver.stageSceneUpdate!(before);
+  assert.equal(solver.advanceTo(10 * CLOTH_SCENE_STEP_S, []), false, 'no step while the undone document builds');
+  await cloth.settled();
+  const undone = solver.clothRenderSources![0]!;
+  assert.ok(undone.document === before.cloth![0] && undone.revision !== cut.revision && undone.triangleCount === saved.triangles.length / 3);
+  assert.equal(solver.clothSurfaces![0]!.topologyRevision, 2);
+  assert.equal(solver.clothSurfaces![0]!.tick, 6);
+  const restored = await liveState();
+  for (let i = 0; i < restored.positions_m.length; i++) assert.ok(Math.abs(restored.positions_m[i]! - saved.initialPositions_m![i]!) < 1e-6, `position ${i}`);
+  const want = saved.solverState!, got = restored.solverState;
+  assert.ok(Math.abs(got.previousStep_s - want.previousStep_s) < 1e-9 && got.time_s === Math.fround(want.time_s));
+  for (const key of ['previousVelocities_m_s', 'previousDisplacements_m', 'pinDuals', 'edgeDuals'] as const) {
+    let worst = 0;
+    want[key].forEach((v, i) => { worst = Math.max(worst, Math.abs(v - got[key][i]!)); });
+    assert.ok(worst <= 1e-6 * Math.max(1, ...want[key].map(Math.abs)), `${key} restored to ${worst}`);
+  }
+  // It steps on from tick 6 to 9 as the reference did without the cut: the host clock goes on, the scene's time follows the cloth's.
+  for (let k = 10; k <= 12; k++) {
+    assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true);
+    assert.ok(Math.abs(solver.info.submittedTime_s! - (k - 3) * CLOTH_SCENE_STEP_S) < 1e-9);
+  }
+  await solver.readClothPose!();
+  const after = solver.clothSurfaces![0]!;
+  assert.equal(after.tick, 9);
+  let drift = 0;
+  for (let i = 0; i < uncut.positions_m.length; i++) drift = Math.max(drift, Math.abs(after.positions_m[i]! - uncut.positions_m[i]!));
+  console.log(`undo: 3 ticks after the undo the sheet is ${drift.toExponential(2)} m from the never-cut run`);
+  assert.ok(drift < 1e-5, `undone sheet ${drift} m from the never-cut run`);
+  // Redo stages the cut document again.
+  solver.stageSceneUpdate!(edited);
+  await cloth.settled();
+  assert.equal(solver.clothRenderSources![0]!.triangleCount, cut.triangleCount);
+  assert.equal(cloth.failure, undefined, cloth.failure?.message);
   solver.destroy();
 }));
 

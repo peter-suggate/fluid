@@ -13,19 +13,24 @@
  * a capture), never on the step cadence; every few steps only the 4-byte
  * status words (the solver's and the contact detector's) are copied back,
  * so a non-finite step or a contact failure halts the scene. A failing status
- * word, a pending solid (`ClothDocument.pendingSolids`), a solid world contact
- * cannot follow or a document the system cannot run halts the scene with an
- * explicit `SimulationFailure`.
+ * word, a pending solid (`ClothDocument.pendingSolids`) the scene does not
+ * declare as its moving solid, a solid world contact cannot follow or a
+ * document the system cannot run halts the scene with an explicit
+ * `SimulationFailure`.
  *
  * Every document runs with lane C2's OGC contact (`scene-contact.ts`): self
  * contact and the scene's solids, as one static field per solid world and
- * cloth frame, built at setup and on solid edits, never in a step.
+ * cloth frame, built at setup and on solid edits, never in a step. The
+ * scene's moving solid (at most one rigid body with a prescribed pose track)
+ * is baked once in its body frame; each frame uploads its poses at the
+ * frame's step boundaries before the steps are encoded (an input upload, no
+ * readback).
  *
  * An edited document (a cut, an undo) is rebuilt in place of the live one,
  * from the pose and solver state the edit carries; the clock waits for it.
  */
 import type { GPUSolverInstance } from '../core/method-contract';
-import type { SceneDescription } from '../core/model';
+import type { RigidBodyDescription, SceneDescription } from '../core/model';
 import type { SimulationFailure } from '../core/simulation-failure';
 import { clothDocumentsKey } from './content-stamp';
 import { ClothGPUSolver, type ClothGPUState } from './gpu-solver';
@@ -35,7 +40,8 @@ import type { ClothSolidField } from './contact/solid-field';
 import { buildClothCoarseSpace } from './coarse';
 import { buildClothSolverModel } from './oracle';
 import type { ClothRenderSource } from './render';
-import { CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothSceneField, clothContactFieldKey, clothContactRadius, createClothSceneContact } from './scene-contact';
+import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactFieldKey,
+  clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
 import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from './topology';
 import type { ClothDocument, ClothSurfacePublication, ClothVector } from './types';
@@ -44,6 +50,7 @@ import type { ClothDocument, ClothSurfacePublication, ClothVector } from './type
 export const CLOTH_SCENE_STEP_S = 1 / 60;
 /** Most steps a lagging document takes in one advance beside a fluid solver. */
 export const CLOTH_CATCH_UP_STEPS = 4;
+if (CLOTH_CATCH_UP_STEPS + 1 > CLOTH_BODY_POSES_PER_FRAME) throw new Error('A frame of cloth steps needs more moving-solid poses than the detector is authored for');
 /** Steps between status-word reads (the non-finite watchdog; never the pose). */
 export const CLOTH_STATUS_INTERVAL_STEPS = 4;
 const DEFAULT_ITERATIONS = 64;
@@ -113,6 +120,8 @@ interface Entry {
   readonly contact: OgcContactDetector;
   field: ClothSolidField;
   fieldKey: string;
+  /** The scene's moving solid, whose body-frame field the detector holds. */
+  readonly body?: RigidBodyDescription;
   readonly origin: ClothVector;
   readonly revision: number;
   readonly topologyRevision: number;
@@ -142,6 +151,8 @@ export class ClothSystem {
   /** A solid edit's field rebuild; the clock waits for it. */
   private solidUpdate?: Promise<void>;
   private solidVoxels: SceneDescription['solidVoxels'];
+  /** Body-frame fields of moving solids, by body, shape and band: baked once, kept across cloth rebuilds. */
+  private readonly bodyFields = new Map<string, ClothSolidField>();
   private destroyed = false;
 
   private constructor(private readonly device: GPUDevice, private scene: SceneDescription, private readonly options: ClothSystemOptions) {
@@ -201,10 +212,17 @@ export class ClothSystem {
     // A rebuilt document keeps its frame, so its contact field is reused.
     const origin = frame ?? [0, 1, 2].map(a => (lo[a]! + hi[a]!) / 2) as unknown as ClothVector;
     const g = this.scene.fluid.gravity_m_s2, gravity: [number, number, number] = [g.x, g.y, g.z], label = `${this.options.label ?? 'Cloth'} ${document.id}`;
-    const { field, fieldKey } = this.fieldFor(origin, clothContactRadius(document));
+    const r = clothContactRadius(document), { field, fieldKey } = this.fieldFor(origin, r);
+    const body = clothSceneMovingSolids(this.scene)[0];
+    let bodyField: ClothSolidField | undefined;
+    if (body) {
+      const key = JSON.stringify([body.id, body.shape, body.dimensions_m, body.friction, body.cuts ?? [], r]);
+      bodyField = this.bodyFields.get(key) ?? buildClothBodyField(this.scene, body, r);
+      this.bodyFields.set(key, bodyField);
+    }
     // The two-level correction's coarse space follows the mesh topology, so it is rebuilt with it (edit time only).
     const coarse = settings.coarse === false ? undefined : buildClothCoarseSpace(topology);
-    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity);
+    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField);
     let solver: ClothGPUSolver;
     try {
       solver = await ClothGPUSolver.create(this.device, model, {
@@ -219,9 +237,10 @@ export class ClothSystem {
       });
       contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart });
       contact.setSolidField(field);
+      if (bodyField) contact.setBodyField(bodyField);
     } catch (error) { contact.destroy(); throw error; }
     const positions = Float64Array.from(data.initialPositions_m ?? data.restPositions_m);
-    const entry: Entry = { document, key: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, contact), contact, field, fieldKey, origin,
+    const entry: Entry = { document, key: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, contact), contact, field, fieldKey, body, origin,
       revision: ++renderRevisions, topologyRevision, steps: 0, sinceStatus: 0,
       publication: { documentId: document.id, topology: data, positions_m: positions,
         ...(data.initialVelocities_m_s ? { velocities_m_s: Float64Array.from(data.initialVelocities_m_s) } : {}),
@@ -234,21 +253,28 @@ export class ClothSystem {
   /**
    * Step every document to `target_s` in whole ticks (at most `maxSteps`
    * each), in one submission. Returns whether any step was encoded. A pending
-   * solid the next step would pass halts the system before it is encoded.
+   * solid the next step would pass, unless it is the scene's moving solid,
+   * halts the system before it is encoded.
    */
   stepTo(target_s: number, maxSteps = 1): boolean {
     if (this.failure || this.destroyed || this.pending) return false;
+    if (maxSteps + 1 > CLOTH_BODY_POSES_PER_FRAME) throw new Error(`Cloth frames take at most ${CLOTH_BODY_POSES_PER_FRAME - 1} steps`);
     const encoder = this.device.createCommandEncoder({ label: 'Cloth system step' }), watched: Entry[] = [];
     let stepped = false;
     for (const e of this.entries.values()) {
       let owed = Math.min(maxSteps, Math.floor((target_s - this.entryTime(e)) / CLOTH_SCENE_STEP_S + 0.5));
       if (owed <= 0) continue;
       const next = this.entryTime(e) + owed * CLOTH_SCENE_STEP_S;
-      const blocker = (e.document.pendingSolids ?? []).find(p => next > p.start_s + 1e-9);
+      const blocker = (e.document.pendingSolids ?? []).find(p => next > p.start_s + 1e-9 && p.id !== e.body?.id);
       if (blocker) {
         owed = Math.floor((blocker.start_s - this.entryTime(e)) / CLOTH_SCENE_STEP_S + 1e-9);
-        if (owed <= 0) { this.fail('cloth-pending-solid', `moving cloth solid '${blocker.id}' requires C2 M6`, 'ClothSystem.stepTo', e, [blocker.start_s]); return false; }
+        if (owed <= 0) {
+          this.fail('cloth-pending-solid', `moving cloth solid '${blocker.id}' is not the scene's moving solid (a rigid body with a prescribed pose track)`, 'ClothSystem.stepTo', e, [blocker.start_s]);
+          return false;
+        }
       }
+      // The moving solid's poses at this frame's step boundaries, uploaded before the frame's commands run.
+      if (e.body) e.contact.setBodyPoses(clothBodyPoses(e.body, e.origin, this.entryTime(e), owed, CLOTH_SCENE_STEP_S));
       // One pass per frame: the detector's frame statistics restart, then the steps (its hooks run inside each).
       const pass = encoder.beginComputePass({ label: 'Cloth step' });
       e.contact.encodeFrameBegin(pass);

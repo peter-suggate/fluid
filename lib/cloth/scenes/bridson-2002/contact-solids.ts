@@ -32,7 +32,8 @@ export function bridson2002ClothSceneSolids(scene: SceneDescription): ClothScene
   const origin: V3 = [layout.lower_m.x + t[0], layout.lower_m.y + t[1], layout.lower_m.z + t[2]];
   const top = layout.dimensions.map((n, a) => origin[a]! + n * h);
   const onLattice = (v: number, a: number) => Math.abs((v - origin[a]!) / h - Math.round((v - origin[a]!) / h)) < ALIGNED_TOLERANCE_CELLS;
-  const held = source.solids.filter(s => layout.held.includes(s.id));
+  // A solid the scene carries as a rigid body is the cloth's moving solid (scene-contact.ts), not part of the static field.
+  const held = source.solids.filter(s => layout.held.includes(s.id) && !scene.rigidBodies.some(b => b.id === s.id));
   // The bake's rule: an unrotated box with every face on a lattice plane is a fill; everything else is sampled.
   const boxes: { solid: BridsonSolid; lo: V3; hi: V3 }[] = [], procedural: ClothSolidPart[] = [];
   for (const solid of held) {
