@@ -608,3 +608,44 @@ Tests:
 - `tests/cloth-coarse.test.ts`: topology space; exact free fall in one iteration; cut-sheet energy and strain; GPU one step against the Float64 reference for (K, every) ∈ {(1,1), (4,1), (4,2)}, within 6e-8 m; a 16-step GPU run, 3.5e-6 m, with save/load replay.
 - `tests/cloth-system.test.ts`: the dry-scene oracle now runs the same default coarse correction.
 - check:types is clean. test:unit has 1 foreign failure (`reservoir-particle-cost`).
+
+## 2026-11-09 RESULT (6): colour pass on star records, 91.8 → 69.8 µs a colour
+
+Setup: 150² sheet (22,500 vertices, 5 colours), K = 8, BDF2, 20 steps, timestamp per dispatch, mean over colours.
+
+| kernel | HEAD b1ce8573 | now |
+|---|---|---|
+| `solveColourWide` (default, 2 lanes a vertex) | 91.8 µs | **69.8 µs** |
+| `solveColour` (`vertexLanes: 1`) | 163.7 µs | 96.0 µs |
+| step span, lanes 2 | 4.93 ms | 3.95 ms |
+
+**What changed.**
+- **Star records.** `packClothStarRecords` builds them at setup time; they are stored in the topo buffer.
+  - Each colour holds, for every vertex, its incident faces and hinges, already seen from that vertex: face corner 0 and Dm' are pre-rotated, and hinges carry their 4 vertices, k, θ0, stiffness and kd.
+  - Record j of slot i sits at 8(j·n + i) words, so the lanes of a SIMD group read consecutive records. This replaces the gather through the element and incidence tables.
+- **Closed-form damping in the trial.** Damping is quadratic, so the trial's ΔE for damping is dg·d + ½dᵀHd, with a rounding floor r·|d| + quad. The trial no longer re-evaluates the face and hinge damping per element.
+- **Shared code.** Face and hinge loading share `FaceIn` and `HingeIn` with the patch and diagnose paths, which still use `vertexSystem`.
+- It fails explicitly at 2^24 or more vertices, or more than 256 materials.
+
+GPU solver, coarse and system tests: 20/20 pass. GPU against the Float64 oracle: 6.40e-6 m after 20 steps, as before.
+
+**Where the 70 µs goes** (probes remove one part and remeasure):
+
+| probe | µs | part |
+|---|---|---|
+| base | 69.8 | |
+| no hinges | 47.2 | hinges ≈ 23 µs, of which hinge damping ≈ 7 µs |
+| no faces | 59.9 | faces ≈ 10 µs |
+| no edges | 59.2 | strain-limit edges ≈ 10 µs |
+| no trial | 58.2 | trial ≈ 12 µs |
+| no hinges, faces, edges or trial | 21.0 | floor |
+| floor without the own/inertia term | 17.1 | |
+
+The floor, about 17 µs, is the vertex loads, the group sum and the write.
+
+**Toward 30 µs.** Removing every element term entirely only gets to 21 µs, so 30 µs needs the element work cut about 4× (49 → 9 µs).
+- Plan:
+  - cache the per-slot record data in registers between the system and the trial;
+  - interleave x_t and x̂ into one vertex record, so each damping gather is one line;
+  - pack the edge records into the star.
+- I expect the register caching and the edge packing to reach about 50 µs. Getting to 30 µs likely needs a cheaper bending term (a quadratic or precomputed-Q bending model). That is a physics change and the coordinator's call. I will not make it unasked.

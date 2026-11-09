@@ -64,7 +64,7 @@ struct Params {
   state1: vec4u, // damping tangent: faces (2 records), hinges (3 records), damped flag
   gravity: vec4f, // xyz, dt
   misc: vec4f,   // clock origin (s), Chebyshev rho, initial guess (0 previous, 1 adaptive, 2 inertial)
-  tierB: vec4u,  // colour count
+  tierB: vec4u,  // colour count, star header (topo word), star records (topo4 index)
   partA: vec4u,  // Tier B partition 0: owner, patch offsets, vertices, colour offsets (topo words)
   partB: vec4u,  // partition 1
   coarse0: vec4u, coarse1: vec4u, coarse2: vec4u, coarse3: vec4u, coarse4: vec4u, coarse5: vec4u, coarse6: vec4u, // gpu-coarse-wgsl.ts
@@ -150,16 +150,23 @@ fn projectMembranePSD(H: mat3x3f, f0: vec3f, f1: vec3f) -> mat3x3f {
   return max(l1, 0.0) * outer(w1, w1) + max(l2, 0.0) * outer(w2, w2);
 }
 
-struct Block { g: vec3f, H: mat3x3f, e: f32 }
+// r: for the quadratic damping terms, a bound per unit |d| on the first-order rounding of g . d (|g| plus the base
+// rate's rounding through the frozen tangent), so the wide sweep's line search takes their change in closed form.
+struct Block { g: vec3f, H: mat3x3f, e: f32, r: f32 }
 
-struct Membrane { f0: vec3f, f1: vec3f, j1: vec3f, j2: vec3f, j3: vec3f, s11: f32, s22: f32, tau: f32, d11: f32, d22: f32, sigma: f32, e: f32, area: f32, c12: f32, g: f32 }
-fn membraneAt(f: u32, k: u32, xv: vec3f) -> Membrane {
+// Face f seen from its corner k with that corner at xv: every load the face's terms share, made once.
+struct FaceIn { f: u32, k: u32, t: vec4u, x0: vec3f, x1: vec3f, x2: vec3f, dm: vec4f, fr: vec4f, c0: vec4f, c1: vec4f }
+fn loadFace(f: u32, k: u32, xv: vec3f) -> FaceIn {
   let t = tris(f);
   var x0 = pos(t.x); var x1 = pos(t.y); var x2 = pos(t.z);
   if (k == 0u) { x0 = xv; } else if (k == 1u) { x1 = xv; } else { x2 = xv; }
-  let dm = rest[P.rest0.x + f]; let area = rest[P.rest0.y + f].x;
-  let c0 = rest[P.rest1.z + 2u * t.w]; let c1 = rest[P.rest1.z + 2u * t.w + 1u];
-  let e1 = x1 - x0; let e2 = x2 - x0;
+  return FaceIn(f, k, t, x0, x1, x2, rest[P.rest0.x + f], rest[P.rest0.y + f], rest[P.rest1.z + 2u * t.w], rest[P.rest1.z + 2u * t.w + 1u]);
+}
+struct Membrane { f0: vec3f, f1: vec3f, j1: vec3f, j2: vec3f, j3: vec3f, s11: f32, s22: f32, tau: f32, d11: f32, d22: f32, sigma: f32, e: f32, area: f32, c12: f32, g: f32 }
+fn membraneAt(f: u32, k: u32, xv: vec3f) -> Membrane { return membraneOf(loadFace(f, k, xv)); }
+fn membraneOf(q: FaceIn) -> Membrane {
+  let k = q.k; let dm = q.dm; let area = q.fr.x; let c0 = q.c0; let c1 = q.c1;
+  let e1 = q.x1 - q.x0; let e2 = q.x2 - q.x0;
   let f0 = e1 * dm.x + e2 * dm.y; let f1 = e1 * dm.z + e2 * dm.w;
   let e11 = 0.5 * (dot(f0, f0) - 1.0); let e22 = 0.5 * (dot(f1, f1) - 1.0); let gam = dot(f0, f1);
   let w11 = select(0.0, (1.0 - c1.z) * c1.x, e11 < 0.0); let w22 = select(0.0, (1.0 - c1.z) * c1.y, e22 < 0.0);
@@ -169,13 +176,13 @@ fn membraneAt(f: u32, k: u32, xv: vec3f) -> Membrane {
   let energy = area * (0.5 * (c0.x * e11 * e11 + 2.0 * c0.z * e11 * e22 + c0.y * e22 * e22) - 0.5 * (w11 * e11 * e11 + w22 * e22 * e22) + 0.5 * c0.w * gam * gam);
   return Membrane(f0, f1, a * f0, b * f1, a * f1 + b * f0, s11, s22, tau, c0.x - w11, c0.y - w22, s11 * a * a + s22 * b * b + 2.0 * tau * a * b, energy, area, c0.z, c0.w);
 }
-fn membraneBlock(f: u32, k: u32, xv: vec3f) -> Block {
-  let m = membraneAt(f, k, xv);
+fn membraneBlock(q: FaceIn) -> Block {
+  let m = membraneOf(q);
   let g = m.area * (m.s11 * m.j1 + m.s22 * m.j2 + m.tau * m.j3);
   var H = m.area * (m.d11 * outer(m.j1, m.j1) + m.d22 * outer(m.j2, m.j2) + m.c12 * (outer(m.j1, m.j2) + outer(m.j2, m.j1)) + m.g * outer(m.j3, m.j3) + m.sigma * IDENTITY);
   // J D J^T is PSD, so only a compressive sigma makes the block indefinite.
   if (m.sigma < 0.0) { H = projectMembranePSD(H, m.f0, m.f1); }
-  return Block(g, H, m.e);
+  return Block(g, H, m.e, 0.0);
 }
 
 struct HingeFull { angle: f32, g0: vec3f, g1: vec3f, g2: vec3f, g3: vec3f, ok: bool }
@@ -196,45 +203,97 @@ fn hingeGeometry(x0: vec3f, x1: vec3f, x2: vec3f, x3: vec3f) -> HingeFull {
 }
 fn pick4(k: u32, a: vec3f, b: vec3f, c: vec3f, d: vec3f) -> vec3f { return select(select(a, b, k == 1u), select(c, d, k == 3u), k >= 2u); }
 struct Hinge { angle: f32, g: vec3f, ok: bool }
-fn hingeAt(h: u32, k: u32, xv: vec3f) -> Hinge {
+// Hinge h seen from its vertex k with that vertex at xv, loaded once.
+struct HingeIn { h: u32, k: u32, hv: vec4u, x0: vec3f, x1: vec3f, x2: vec3f, x3: vec3f, hr: vec4f }
+fn loadHinge(h: u32, k: u32, xv: vec3f) -> HingeIn {
   let hv = hingeVerts(h);
-  let x0 = select(pos(hv.x), xv, k == 0u); let x1 = select(pos(hv.y), xv, k == 1u);
-  let x2 = select(pos(hv.z), xv, k == 2u); let x3 = select(pos(hv.w), xv, k == 3u);
-  let q = hingeGeometry(x0, x1, x2, x3);
-  return Hinge(q.angle, pick4(k, q.g0, q.g1, q.g2, q.g3), q.ok);
+  return HingeIn(h, k, hv, select(pos(hv.x), xv, k == 0u), select(pos(hv.y), xv, k == 1u), select(pos(hv.z), xv, k == 2u), select(pos(hv.w), xv, k == 3u), rest[P.rest0.z + h]);
+}
+// The hinge with vertex k moved by d.
+fn hingeOf(q: HingeIn, d: vec3f) -> Hinge {
+  let k = q.k;
+  let g = hingeGeometry(select(q.x0, q.x0 + d, k == 0u), select(q.x1, q.x1 + d, k == 1u), select(q.x2, q.x2 + d, k == 2u), select(q.x3, q.x3 + d, k == 3u));
+  return Hinge(g.angle, pick4(k, g.g0, g.g1, g.g2, g.g3), g.ok);
+}
+fn hingeAt(h: u32, k: u32, xv: vec3f) -> Hinge { return hingeOf(loadHinge(h, k, xv), vec3f(0.0)); }
+
+// Star records (solveColourWide): per colour, record j of slot i at 2 (j n + i) vec4s, so a SIMD group's lanes read
+// consecutive records. A face record is seen from the vertex as corner 0 (corners v, A, B in the face's cyclic order,
+// Dm^-1 rewritten for that order): (A | material << 24, B, Dm', area, damping). A hinge record is the hinge's vertices,
+// the vertex's slot k, (theta0, k, kd). Damping tangents come from x_t, as frameElements forms them.
+fn starRecord(r: u32) -> array<vec4u, 2> { let i = P.tierB.z + r; return array<vec4u, 2>(topo4[i], topo4[i + 1u]); }
+fn starFace(r: u32, v: u32, xv: vec3f) -> FaceIn {
+  let w = starRecord(r); let A = w[0].x & 0xffffffu; let m = w[0].x >> 24u; let B = w[0].y;
+  return FaceIn(0xffffffffu, 0u, vec4u(v, A, B, m), xv, pos(A), pos(B), bitcast<vec4f>(vec4u(w[0].zw, w[1].xy)),
+    vec4f(bitcast<vec2f>(w[1].zw), 0.0, 0.0), rest[P.rest1.z + 2u * m], rest[P.rest1.z + 2u * m + 1u]);
+}
+fn starFaceDamping(q: FaceIn) -> Block {
+  if (!(q.fr.y > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
+  let T = faceTangent(state[seg(S_XT, q.t.x)].xyz, state[seg(S_XT, q.t.y)].xyz, state[seg(S_XT, q.t.z)].xyz, q.dm, q.c0, q.c1);
+  return faceDampingWith(q, T[0], T[1]);
+}
+fn starHinge(r: u32, xv: vec3f) -> HingeIn {
+  let w = starRecord(r); let hv = w[0]; let k = w[1].x;
+  return HingeIn(0xffffffffu, k, hv, select(pos(hv.x), xv, k == 0u), select(pos(hv.y), xv, k == 1u), select(pos(hv.z), xv, k == 2u), select(pos(hv.w), xv, k == 3u),
+    vec4f(bitcast<vec3f>(w[1].yzw), 0.0));
+}
+fn starHingeDamping(q: HingeIn) -> Block {
+  if (!(q.hr.z > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
+  let g = hingeGeometry(state[seg(S_XT, q.hv.x)].xyz, state[seg(S_XT, q.hv.y)].xyz, state[seg(S_XT, q.hv.z)].xyz, state[seg(S_XT, q.hv.w)].xyz);
+  let on = select(0.0, 1.0, g.ok);
+  return hingeDampingWith(q, on * g.g0, on * g.g1, on * g.g2, on * g.g3);
 }
 
 // Rayleigh damping as a dissipation potential with the element tangent frozen at x_t (oracle: ClothDampingTangent).
-fn faceDamping(f: u32, k: u32, xv: vec3f) -> Block {
-  let fr = rest[P.rest0.y + f];
-  if (!(fr.y > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0); }
-  let t = tris(f); let dm = rest[P.rest0.x + f]; let c0 = rest[P.rest1.z + 2u * t.w];
-  let T0 = state[P.state1.x + 2u * f]; let T1 = state[P.state1.x + 2u * f + 1u];
+// The frozen tangent of a face at x_t: (f0, softened c11), (f1, softened c22).
+fn faceTangent(x0: vec3f, x1: vec3f, x2: vec3f, dm: vec4f, c0: vec4f, c1: vec4f) -> array<vec4f, 2> {
+  let e1 = x1 - x0; let e2 = x2 - x0;
+  let f0 = e1 * dm.x + e2 * dm.y; let f1 = e1 * dm.z + e2 * dm.w;
+  let e11 = 0.5 * (dot(f0, f0) - 1.0); let e22 = 0.5 * (dot(f1, f1) - 1.0);
+  return array<vec4f, 2>(vec4f(f0, c0.x - select(0.0, (1.0 - c1.z) * c1.x, e11 < 0.0)), vec4f(f1, c0.y - select(0.0, (1.0 - c1.z) * c1.y, e22 < 0.0)));
+}
+fn faceDamping(q: FaceIn) -> Block {
+  if (!(q.fr.y > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
+  return faceDampingWith(q, state[P.state1.x + 2u * q.f], state[P.state1.x + 2u * q.f + 1u]);
+}
+fn faceDampingWith(q: FaceIn, T0: vec4f, T1: vec4f) -> Block {
+  let fr = q.fr;
+  let k = q.k; let t = q.t; let dm = q.dm; let c0 = q.c0;
   let f0 = T0.xyz; let f1 = T1.xyz;
   let a = vec3f(-dm.x - dm.y, dm.x, dm.y); let b = vec3f(-dm.z - dm.w, dm.z, dm.w);
-  let u0 = select(pos(t.x), xv, k == 0u) - state[seg(S_XHAT, t.x)].xyz;
-  let u1 = select(pos(t.y), xv, k == 1u) - state[seg(S_XHAT, t.y)].xyz;
-  let u2 = select(pos(t.z), xv, k == 2u) - state[seg(S_XHAT, t.z)].xyz;
+  let u0 = q.x0 - state[seg(S_XHAT, t.x)].xyz;
+  let u1 = q.x1 - state[seg(S_XHAT, t.y)].xyz;
+  let u2 = q.x2 - state[seg(S_XHAT, t.z)].xyz;
   let df0 = a.x * u0 + a.y * u1 + a.z * u2; let df1 = b.x * u0 + b.y * u1 + b.z * u2;
   let rate = vec3f(dot(f0, df0), dot(f1, df1), dot(f0, df1) + dot(f1, df0));
   let sigma = vec3f(T0.w * rate.x + c0.z * rate.y, c0.z * rate.x + T1.w * rate.y, c0.w * rate.z);
   let ak = select(select(a.x, a.y, k == 1u), a.z, k == 2u); let bk = select(select(b.x, b.y, k == 1u), b.z, k == 2u);
   let j1 = ak * f0; let j2 = bk * f1; let j3 = ak * f1 + bk * f0;
   let scale = fr.y * fr.x / hEff();
-  return Block(scale * (sigma.x * j1 + sigma.y * j2 + sigma.z * j3),
-    scale * (T0.w * outer(j1, j1) + T1.w * outer(j2, j2) + c0.z * (outer(j1, j2) + outer(j2, j1)) + c0.w * outer(j3, j3)), 0.5 * scale * dot(rate, sigma));
+  let g = scale * (sigma.x * j1 + sigma.y * j2 + sigma.z * j3);
+  // faceDampingDelta's rounding term scale (|dsigma| . roundRate) with |dr_i| <= J_i |d|.
+  let ru = vec2f(abs(a.x) * length(u0) + abs(a.y) * length(u1) + abs(a.z) * length(u2), abs(b.x) * length(u0) + abs(b.y) * length(u1) + abs(b.z) * length(u2));
+  let lf0 = length(f0); let lf1 = length(f1);
+  let roundRate = vec3f(lf0 * ru.x, lf1 * ru.y, lf0 * ru.y + lf1 * ru.x);
+  let J = vec3f(abs(ak) * lf0, abs(bk) * lf1, abs(bk) * lf0 + abs(ak) * lf1);
+  let dsig = vec3f(abs(T0.w) * J.x + abs(c0.z) * J.y, abs(c0.z) * J.x + abs(T1.w) * J.y, abs(c0.w) * J.z);
+  return Block(g, scale * (T0.w * outer(j1, j1) + T1.w * outer(j2, j2) + c0.z * (outer(j1, j2) + outer(j2, j1)) + c0.w * outer(j3, j3)),
+    0.5 * scale * dot(rate, sigma), length(g) + scale * dot(dsig, roundRate));
 }
-fn hingeDamping(h: u32, k: u32, xv: vec3f) -> Block {
-  let hr = rest[P.rest0.z + h];
-  if (!(hr.z > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0); }
-  let gb = P.state1.y + 3u * h;
+fn hingeDamping(q: HingeIn) -> Block {
+  if (!(q.hr.z > 0.0)) { return Block(vec3f(0.0), mat3x3f(), 0.0, 0.0); }
+  let gb = P.state1.y + 3u * q.h;
   let G0 = state[gb]; let G1 = state[gb + 1u]; let G2 = state[gb + 2u];
-  let g0 = G0.xyz; let g1 = vec3f(G0.w, G1.x, G1.y); let g2 = vec3f(G1.z, G1.w, G2.x); let g3 = G2.yzw;
-  let hv = hingeVerts(h); let v0 = hv.x; let v1 = hv.y; let v2 = hv.z; let v3 = hv.w;
-  let rate = dot(g0, select(pos(v0), xv, k == 0u) - state[seg(S_XHAT, v0)].xyz) + dot(g1, select(pos(v1), xv, k == 1u) - state[seg(S_XHAT, v1)].xyz)
-    + dot(g2, select(pos(v2), xv, k == 2u) - state[seg(S_XHAT, v2)].xyz) + dot(g3, select(pos(v3), xv, k == 3u) - state[seg(S_XHAT, v3)].xyz);
+  return hingeDampingWith(q, G0.xyz, vec3f(G0.w, G1.x, G1.y), vec3f(G1.z, G1.w, G2.x), G2.yzw);
+}
+fn hingeDampingWith(q: HingeIn, g0: vec3f, g1: vec3f, g2: vec3f, g3: vec3f) -> Block {
+  let hr = q.hr; let k = q.k; let hv = q.hv;
+  let rate = dot(g0, q.x0 - state[seg(S_XHAT, hv.x)].xyz) + dot(g1, q.x1 - state[seg(S_XHAT, hv.y)].xyz)
+    + dot(g2, q.x2 - state[seg(S_XHAT, hv.z)].xyz) + dot(g3, q.x3 - state[seg(S_XHAT, hv.w)].xyz);
   let scale = hr.z * hr.y / hEff(); let gk = pick4(k, g0, g1, g2, g3);
-  return Block(scale * rate * gk, scale * outer(gk, gk), 0.5 * scale * rate * rate);
+  let roundRate = length(g0) * length(q.x0 - state[seg(S_XHAT, hv.x)].xyz) + length(g1) * length(q.x1 - state[seg(S_XHAT, hv.y)].xyz)
+    + length(g2) * length(q.x2 - state[seg(S_XHAT, hv.z)].xyz) + length(g3) * length(q.x3 - state[seg(S_XHAT, hv.w)].xyz);
+  return Block(scale * rate * gk, scale * outer(gk, gk), 0.5 * scale * rate * rate, scale * length(gk) * (abs(rate) + roundRate));
 }
 fn wrapAngle(d: f32) -> f32 { return d - 2.0 * PI * floor((d + PI) / (2.0 * PI)); }
 
@@ -254,22 +313,19 @@ fn vertexSystem(v: u32, xv: vec3f) -> System {
   let r = xv - state[seg(S_Y, v)].xyz;
   s.g = w * r; s.e = 0.5 * w * dot(r, r); s.mag = s.e;
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
-    let entry = topo[P.topo0.y + j]; let f = entry >> 2u;
-    let b = membraneBlock(f, entry & 3u, xv); let d = faceDamping(f, entry & 3u, xv);
+    let entry = topo[P.topo0.y + j]; let q = loadFace(entry >> 2u, entry & 3u, xv);
+    let b = membraneBlock(q); let d = faceDamping(q);
     s.g += b.g + d.g; s.H += b.H + d.H; s.e += b.e + d.e; s.mag += abs(b.e) + d.e;
   }
   for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
-    let entry = topo[P.topo0.w + j]; let hg = entry >> 2u;
-    let hinge = hingeAt(hg, entry & 3u, xv);
+    let entry = topo[P.topo0.w + j]; let q = loadHinge(entry >> 2u, entry & 3u, xv);
+    let d = hingeDamping(q);
+    s.g += d.g; s.H += d.H; s.e += d.e; s.mag += d.e;
+    let hinge = hingeOf(q, vec3f(0.0));
     if (!hinge.ok) { continue; }
-    let hr = rest[P.rest0.z + hg]; let delta = wrapAngle(hinge.angle - hr.x);
+    let hr = q.hr; let delta = wrapAngle(hinge.angle - hr.x);
     s.g += hr.y * delta * hinge.g; s.H += hr.y * outer(hinge.g, hinge.g);
     let e = 0.5 * hr.y * delta * delta; s.e += e; s.mag += e;
-  }
-  for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
-    let entry = topo[P.topo0.w + j];
-    let d = hingeDamping(entry >> 2u, entry & 3u, xv);
-    s.g += d.g; s.H += d.H; s.e += d.e; s.mag += d.e;
   }
   return constraints(v, xv, s);
 }
@@ -283,13 +339,9 @@ fn quadDelta(aOld: f32, aNew: f32, e: f32, de: f32) -> f32 {
   if (aOld == aNew) { return aOld * (e * de + 0.5 * de * de); }
   let en = e + de; return 0.5 * (aNew * en * en - aOld * e * e);
 }
-fn membraneDelta(f: u32, k: u32, xv: vec3f, d: vec3f) -> vec2f {
-  let t = tris(f);
-  var x0 = pos(t.x); var x1 = pos(t.y); var x2 = pos(t.z);
-  if (k == 0u) { x0 = xv; } else if (k == 1u) { x1 = xv; } else { x2 = xv; }
-  let dm = rest[P.rest0.x + f]; let area = rest[P.rest0.y + f].x;
-  let c0 = rest[P.rest1.z + 2u * t.w]; let c1 = rest[P.rest1.z + 2u * t.w + 1u];
-  let e1 = x1 - x0; let e2 = x2 - x0;
+fn membraneDelta(q: FaceIn, d: vec3f) -> vec2f {
+  let k = q.k; let dm = q.dm; let area = q.fr.x; let c0 = q.c0; let c1 = q.c1;
+  let e1 = q.x1 - q.x0; let e2 = q.x2 - q.x0;
   let f0 = e1 * dm.x + e2 * dm.y; let f1 = e1 * dm.z + e2 * dm.w;
   var a = dm.y; var b = dm.w;
   if (k == 0u) { a = -dm.x - dm.y; b = -dm.z - dm.w; } else if (k == 1u) { a = dm.x; b = dm.z; }
@@ -304,16 +356,16 @@ fn membraneDelta(f: u32, k: u32, xv: vec3f, d: vec3f) -> vec2f {
   let rounding = (c0.x + c0.z) * abs(d11) * (0.5 + e11) + (c0.y + c0.z) * abs(d22) * (0.5 + e22) + c0.w * abs(dg) * sqrt((1.0 + 2.0 * e11) * (1.0 + 2.0 * e22));
   return area * vec2f(q11 + q22 + q12 + qs, abs(q11) + abs(q22) + abs(q12) + abs(qs) + rounding);
 }
-fn faceDampingDelta(f: u32, k: u32, xv: vec3f, d: vec3f) -> vec2f {
-  let fr = rest[P.rest0.y + f];
+fn faceDampingDelta(q: FaceIn, d: vec3f) -> vec2f {
+  let fr = q.fr;
   if (!(fr.y > 0.0)) { return vec2f(0.0); }
-  let t = tris(f); let dm = rest[P.rest0.x + f]; let c0 = rest[P.rest1.z + 2u * t.w];
+  let f = q.f; let k = q.k; let t = q.t; let dm = q.dm; let c0 = q.c0;
   let T0 = state[P.state1.x + 2u * f]; let T1 = state[P.state1.x + 2u * f + 1u];
   let f0 = T0.xyz; let f1 = T1.xyz;
   let a = vec3f(-dm.x - dm.y, dm.x, dm.y); let b = vec3f(-dm.z - dm.w, dm.z, dm.w);
-  let u0 = select(pos(t.x), xv, k == 0u) - state[seg(S_XHAT, t.x)].xyz;
-  let u1 = select(pos(t.y), xv, k == 1u) - state[seg(S_XHAT, t.y)].xyz;
-  let u2 = select(pos(t.z), xv, k == 2u) - state[seg(S_XHAT, t.z)].xyz;
+  let u0 = q.x0 - state[seg(S_XHAT, t.x)].xyz;
+  let u1 = q.x1 - state[seg(S_XHAT, t.y)].xyz;
+  let u2 = q.x2 - state[seg(S_XHAT, t.z)].xyz;
   let r0 = a.x * u0 + a.y * u1 + a.z * u2; let r1 = b.x * u0 + b.y * u1 + b.z * u2;
   let rate = vec3f(dot(f0, r0), dot(f1, r1), dot(f0, r1) + dot(f1, r0));
   let ak = select(select(a.x, a.y, k == 1u), a.z, k == 2u); let bk = select(select(b.x, b.y, k == 1u), b.z, k == 2u);
@@ -326,24 +378,25 @@ fn faceDampingDelta(f: u32, k: u32, xv: vec3f, d: vec3f) -> vec2f {
   let roundRate = vec3f(length(f0) * ru.x, length(f1) * ru.y, length(f0) * ru.y + length(f1) * ru.x);
   return vec2f(lin + quad, abs(lin) + quad + scale * dot(abs(dsigma), roundRate));
 }
-fn hingeDelta(h: u32, k: u32, xv: vec3f, d: vec3f) -> vec2f {
-  let hr = rest[P.rest0.z + h];
-  let before = hingeAt(h, k, xv); let after = hingeAt(h, k, xv + d);
+fn hingeDelta(q: HingeIn, d: vec3f) -> vec2f {
+  let hr = q.hr;
+  let before = hingeOf(q, vec3f(0.0)); let after = hingeOf(q, d);
   let w0 = wrapAngle(before.angle - hr.x); let dt = wrapAngle(after.angle - before.angle);
   var de = 0.0;
   if (before.ok && after.ok) { de = hr.y * dt * (w0 + 0.5 * dt); }
   else { let w1 = wrapAngle(after.angle - hr.x); de = select(0.0, 0.5 * hr.y * w1 * w1, after.ok) - select(0.0, 0.5 * hr.y * w0 * w0, before.ok); }
   return vec2f(de, abs(de) + hr.y * PI * (abs(w0) + abs(dt)));
 }
-fn hingeDampingDelta(h: u32, k: u32, xv: vec3f, d: vec3f) -> vec2f {
-  let hr = rest[P.rest0.z + h];
+fn hingeDampingDelta(q: HingeIn, d: vec3f) -> vec2f {
+  let hr = q.hr;
   if (!(hr.z > 0.0)) { return vec2f(0.0); }
-  let gb = P.state1.y + 3u * h;
+  let k = q.k;
+  let gb = P.state1.y + 3u * q.h;
   let G0 = state[gb]; let G1 = state[gb + 1u]; let G2 = state[gb + 2u];
   let g0 = G0.xyz; let g1 = vec3f(G0.w, G1.x, G1.y); let g2 = vec3f(G1.z, G1.w, G2.x); let g3 = G2.yzw;
-  let hv = hingeVerts(h); let v0 = hv.x; let v1 = hv.y; let v2 = hv.z; let v3 = hv.w;
-  let u0 = select(pos(v0), xv, k == 0u) - state[seg(S_XHAT, v0)].xyz; let u1 = select(pos(v1), xv, k == 1u) - state[seg(S_XHAT, v1)].xyz;
-  let u2 = select(pos(v2), xv, k == 2u) - state[seg(S_XHAT, v2)].xyz; let u3 = select(pos(v3), xv, k == 3u) - state[seg(S_XHAT, v3)].xyz;
+  let hv = q.hv;
+  let u0 = q.x0 - state[seg(S_XHAT, hv.x)].xyz; let u1 = q.x1 - state[seg(S_XHAT, hv.y)].xyz;
+  let u2 = q.x2 - state[seg(S_XHAT, hv.z)].xyz; let u3 = q.x3 - state[seg(S_XHAT, hv.w)].xyz;
   let rate = dot(g0, u0) + dot(g1, u1) + dot(g2, u2) + dot(g3, u3);
   let scale = hr.z * hr.y / hEff(); let dr = dot(pick4(k, g0, g1, g2, g3), d);
   let lin = scale * rate * dr; let quad = 0.5 * scale * dr * dr;
@@ -386,12 +439,12 @@ ${contact ? `fn contactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
 fn vertexDelta(v: u32, xv: vec3f, d: vec3f${contact ? ', ec0: f32' : ''}) -> vec2f {
   var out = ownDelta(v, xv, d);
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
-    let entry = topo[P.topo0.y + j];
-    out += membraneDelta(entry >> 2u, entry & 3u, xv, d) + faceDampingDelta(entry >> 2u, entry & 3u, xv, d);
+    let entry = topo[P.topo0.y + j]; let q = loadFace(entry >> 2u, entry & 3u, xv);
+    out += membraneDelta(q, d) + faceDampingDelta(q, d);
   }
   for (var j = topo[P.topo0.z + v]; j < topo[P.topo0.z + v + 1u]; j++) {
-    let entry = topo[P.topo0.w + j];
-    out += hingeDelta(entry >> 2u, entry & 3u, xv, d) + hingeDampingDelta(entry >> 2u, entry & 3u, xv, d);
+    let entry = topo[P.topo0.w + j]; let q = loadHinge(entry >> 2u, entry & 3u, xv);
+    out += hingeDelta(q, d) + hingeDampingDelta(q, d);
   }
   if (P.flags.z != 0u) {
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { out += edgeDelta(v, xv, topo[P.topo1.y + j] >> 2u, d); }
@@ -496,12 +549,9 @@ fn stepTime() -> f32 { return P.misc.x + f32(clockStep()) * P.gravity.w; }
   }
   if (P.state1.z == 0u) { return; }
   if (i < P.n.y) {
-    let t = tris(i); let dm = rest[P.rest0.x + i]; let c1 = rest[P.rest1.z + 2u * t.w]; let c2 = rest[P.rest1.z + 2u * t.w + 1u];
-    let x0 = pos(t.x); let e1 = pos(t.y) - x0; let e2 = pos(t.z) - x0;
-    let f0 = e1 * dm.x + e2 * dm.y; let f1 = e1 * dm.z + e2 * dm.w;
-    let e11 = 0.5 * (dot(f0, f0) - 1.0); let e22 = 0.5 * (dot(f1, f1) - 1.0);
-    state[P.state1.x + 2u * i] = vec4f(f0, c1.x - select(0.0, (1.0 - c2.z) * c2.x, e11 < 0.0));
-    state[P.state1.x + 2u * i + 1u] = vec4f(f1, c1.y - select(0.0, (1.0 - c2.z) * c2.y, e22 < 0.0));
+    let t = tris(i);
+    let T = faceTangent(pos(t.x), pos(t.y), pos(t.z), rest[P.rest0.x + i], rest[P.rest1.z + 2u * t.w], rest[P.rest1.z + 2u * t.w + 1u]);
+    state[P.state1.x + 2u * i] = T[0]; state[P.state1.x + 2u * i + 1u] = T[1];
   }
   if (i < P.n.w) {
     let base = P.topo1.w + 4u * i;
@@ -567,11 +617,54 @@ fn vertexStep(v: u32, xv: vec3f) -> vec3f {
   return xv;
 }
 
+${patch ? '' : `// The block update of the vertex in slot i of this colour from its star records (one thread a vertex): the
+// damping terms' line-search change in closed form, every other term in difference form.
+fn starStep(v: u32, i: u32, xv: vec3f) -> vec3f {
+  let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy; let n = R.range.y;
+  let h = hEff(); let w = vertexRest(v).x / (h * h);
+  var s = pinTerms(v, xv, System(w * (xv - state[seg(S_Y, v)].xyz), w * IDENTITY, 0.0, 0.0));
+  var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);
+  let nf = topo[P.topo0.x + v + 1u] - topo[P.topo0.x + v];
+  let nh = topo[P.topo0.z + v + 1u] - topo[P.topo0.z + v];
+  for (var j = 0u; j < nf; j++) {
+    let q = starFace(star.x + 2u * (j * n + i), v, xv);
+    let b = membraneBlock(q); let d = starFaceDamping(q);
+    s.g += b.g; s.H += b.H; dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
+  }
+  for (var j = 0u; j < nh; j++) {
+    let q = starHinge(star.y + 2u * (j * n + i), xv);
+    let hinge = hingeOf(q, vec3f(0.0));
+    if (hinge.ok) { let delta = wrapAngle(hinge.angle - q.hr.x); s.g += q.hr.y * delta * hinge.g; s.H += q.hr.y * outer(hinge.g, hinge.g); }
+    let d = starHingeDamping(q); dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
+  }
+  if (P.flags.z != 0u) {
+    for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); }
+  }
+  s.g += dmp.g; s.H += dmp.H;
+  let solved = solve3(s.H, -s.g);
+  if (solved.w == 0.0) { return xv; }
+  ${contact ? 'let ec0 = ogcVertexContactEnergy(v, xv);' : ''}
+  var alpha = 1.0;
+  for (var t = 0u; t <= HALVINGS; t++) {
+    let d = alpha * solved.xyz;
+    let quad = 0.5 * abs(dot(d, dmp.H * d));
+    var en = ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''} + vec2f(dot(dmp.g, d) + quad, dmp.r * length(d) + quad);
+    for (var j = 0u; j < nf; j++) { en += membraneDelta(starFace(star.x + 2u * (j * n + i), v, xv), d); }
+    for (var j = 0u; j < nh; j++) { en += hingeDelta(starHinge(star.y + 2u * (j * n + i), xv), d); }
+    if (P.flags.z != 0u) {
+      for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { en += edgeDelta(v, xv, topo[P.topo1.y + j] >> 2u, d); }
+    }
+    if (en.x <= ARMIJO * dot(s.g, d) + 4.0 * EPS32 * en.y) { return xv + d; }
+    alpha *= 0.5;
+  }
+  return xv;
+}
+`}
 // Every vertex of one colour.
 @compute @workgroup_size(${CLOTH_WORKGROUP}) fn solveColour(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= R.range.y) { return; }
   let v = topo[P.topo1.z + R.range.x + id.x];
-  positions[v] = vec4f(vertexStep(v, pos(v)), positions[v].w);
+  positions[v] = vec4f(${patch ? 'vertexStep(v, pos(v))' : 'starStep(v, id.x, pos(v))'}, positions[v].w);
 }
 ${patch ? '' : `
 // The same block update with ${lanes} lanes per vertex (${CLOTH_WIDE_WORKGROUP / lanes} vertices per ${CLOTH_WIDE_WORKGROUP}-lane workgroup). Lane l of a vertex
@@ -610,8 +703,12 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   let group = lane / VL; let sub = lane % VL;
   let index = (wg.x + wg.y * nwg.x) * VPW + group;
   let valid = index < R.range.y;
+  // This colour's star streams (face, hinge record offsets); R.range.w is the colour.
+  let star = topo4[(P.tierB.y >> 2u) + R.range.w].xy;
   var v = 0u; var xv = vec3f(0.0); var nf = 0u; var nh = 0u; var ne = 0u;
   var s = System(vec3f(0.0), mat3x3f(), 0.0, 0.0);
+  // This lane's damping terms, quadratic in xv: the trials take their change in closed form from these.
+  var dmp = Block(vec3f(0.0), mat3x3f(), 0.0, 0.0);
   if (valid) {
     v = topo[P.topo1.z + R.range.x + index]; xv = pos(v);
     let f0 = topo[P.topo0.x + v]; nf = topo[P.topo0.x + v + 1u] - f0;
@@ -619,21 +716,22 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
     let e0 = topo[P.topo1.x + v]; ne = select(0u, topo[P.topo1.x + v + 1u] - e0, P.flags.z != 0u);
     if (sub == 0u) { s = ownSystem(v, xv); }
     for (var j = sub; j < nf; j += VL) {
-      let entry = topo[P.topo0.y + f0 + j]; let f = entry >> 2u;
-      let b = membraneBlock(f, entry & 3u, xv); let d = faceDamping(f, entry & 3u, xv);
-      s.g += b.g + d.g; s.H += b.H + d.H;
+      let q = starFace(star.x + 2u * (j * R.range.y + index), v, xv);
+      let b = membraneBlock(q); let d = starFaceDamping(q);
+      s.g += b.g; s.H += b.H; dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
     }
     for (var j = sub; j < nh; j += VL) {
-      let entry = topo[P.topo0.w + h0 + j]; let hg = entry >> 2u;
-      let hinge = hingeAt(hg, entry & 3u, xv);
+      let q = starHinge(star.y + 2u * (j * R.range.y + index), xv);
+      let hinge = hingeOf(q, vec3f(0.0));
       if (hinge.ok) {
-        let hr = rest[P.rest0.z + hg]; let delta = wrapAngle(hinge.angle - hr.x);
-        s.g += hr.y * delta * hinge.g; s.H += hr.y * outer(hinge.g, hinge.g);
+        let delta = wrapAngle(hinge.angle - q.hr.x);
+        s.g += q.hr.y * delta * hinge.g; s.H += q.hr.y * outer(hinge.g, hinge.g);
       }
-      let d = hingeDamping(hg, entry & 3u, xv); s.g += d.g; s.H += d.H;
+      let d = starHingeDamping(q); dmp.g += d.g; dmp.H += d.H; dmp.r += d.r;
     }
     for (var j = sub; j < ne; j += VL) { s = edgeTerm(v, xv, topo[P.topo1.y + e0 + j] >> 2u, s); }
   }
+  s.g += dmp.g; s.H += dmp.H;
   let sum = groupSum(lane, vec4f(s.g, 0.0), vec4f(s.H[0][0], s.H[1][0], s.H[2][0], 0.0), vec4f(s.H[1][1], s.H[2][1], s.H[2][2], 0.0));
   let g = sum[0].xyz;
   let H = mat3x3f(sum[1].x, sum[1].y, sum[1].z, sum[1].y, sum[2].x, sum[2].y, sum[1].z, sum[2].y, sum[2].z);
@@ -650,14 +748,15 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
     let trial = xv + alpha * delta; let d = trial - xv;
     var en = vec2f(0.0);
     if (live) {
-      if (sub == 0u) { en = ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''}; }
+      // Damping, exactly: dg . d + d^T dH d / 2 (faceDampingDelta and hingeDampingDelta in closed form).
+      let quad = 0.5 * abs(dot(d, dmp.H * d)); let lin = dot(dmp.g, d);
+      en = vec2f(lin + quad, dmp.r * length(d) + quad);
+      if (sub == 0u) { en += ownDelta(v, xv, d)${contact ? ' + contactDelta(v, xv, ec0, d)' : ''}; }
       for (var j = sub; j < nf; j += VL) {
-        let entry = topo[P.topo0.y + topo[P.topo0.x + v] + j];
-        en += membraneDelta(entry >> 2u, entry & 3u, xv, d) + faceDampingDelta(entry >> 2u, entry & 3u, xv, d);
+        en += membraneDelta(starFace(star.x + 2u * (j * R.range.y + index), v, xv), d);
       }
       for (var j = sub; j < nh; j += VL) {
-        let entry = topo[P.topo0.w + topo[P.topo0.z + v] + j];
-        en += hingeDelta(entry >> 2u, entry & 3u, xv, d) + hingeDampingDelta(entry >> 2u, entry & 3u, xv, d);
+        en += hingeDelta(starHinge(star.y + 2u * (j * R.range.y + index), xv), d);
       }
       for (var j = sub; j < ne; j += VL) { en += edgeDelta(v, xv, topo[P.topo1.y + topo[P.topo1.x + v] + j] >> 2u, d); }
     }

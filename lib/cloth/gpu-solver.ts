@@ -163,6 +163,48 @@ const PARAM_PATCH = 44;
 const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
+/**
+ * Star records of solveColourWide: per colour, every vertex's faces then hinges as 8-word records, record j of slot i
+ * at 8 (j n + i) words (n the colour's size), so the lanes of a SIMD group read consecutive records. A face is seen
+ * from the vertex as corner 0 (its corners v, A, B in cyclic order, Dm^-1 rewritten for that order); a hinge keeps its
+ * vertex order and names the vertex's slot. Header: per colour (face, hinge) record offsets in vec4s, 4 words a colour.
+ */
+export function packClothStarRecords(model: ClothSolverModel, byColour: readonly (readonly number[])[]): { header: Uint32Array; records: Uint32Array } {
+  const t = model.topology;
+  if (t.vertexCount >= 2 ** 24) throw new Error('Cloth star records take fewer than 2^24 vertices');
+  if (model.materials.length > 256) throw new Error('Cloth star records take at most 256 materials');
+  const header = new Uint32Array(4 * byColour.length);
+  let words = 0;
+  const sizes = byColour.map(list => {
+    let F = 0, H = 0;
+    for (const v of list) { F = Math.max(F, t.vertexFaceOffsets[v + 1]! - t.vertexFaceOffsets[v]!); H = Math.max(H, t.vertexHingeOffsets[v + 1]! - t.vertexHingeOffsets[v]!); }
+    return { F, H };
+  });
+  byColour.forEach((list, c) => {
+    header[4 * c] = words / 4; words += 8 * sizes[c]!.F * list.length;
+    header[4 * c + 1] = words / 4; words += 8 * sizes[c]!.H * list.length;
+  });
+  const records = new Uint32Array(Math.max(words, 4)), f32 = new Float32Array(records.buffer);
+  byColour.forEach((list, c) => {
+    const n = list.length;
+    list.forEach((v, i) => {
+      for (let j = 0, o = t.vertexFaceOffsets[v]!; o < t.vertexFaceOffsets[v + 1]!; j++, o++) {
+        const entry = t.vertexFaces[o]!, f = entry >>> 2, k = entry & 3, w = 4 * header[4 * c]! + 8 * (j * n + i);
+        const dm = t.faceDmInv.subarray(4 * f, 4 * f + 4), a = [-dm[0]! - dm[1]!, dm[0]!, dm[1]!], b = [-dm[2]! - dm[3]!, dm[2]!, dm[3]!];
+        const A = (k + 1) % 3, B = (k + 2) % 3;
+        records[w] = t.faces[3 * f + A]! | (t.faceMaterial[f]! << 24); records[w + 1] = t.faces[3 * f + B]!;
+        f32.set([a[A]!, a[B]!, b[A]!, b[B]!, t.faceArea_m2[f]!, model.faceDamping_s[f]!], w + 2);
+      }
+      for (let j = 0, o = t.vertexHingeOffsets[v]!; o < t.vertexHingeOffsets[v + 1]!; j++, o++) {
+        const entry = t.vertexHinges[o]!, h = entry >>> 2, w = 4 * header[4 * c + 1]! + 8 * (j * n + i);
+        records.set(t.hinges.subarray(4 * h, 4 * h + 4), w); records[w + 4] = entry & 3;
+        f32.set([t.hingeRestAngle_rad[h]!, t.hingeStiffness_N_m[h]!, model.hingeDamping_s[h]!], w + 5);
+      }
+    });
+  });
+  return { header, records };
+}
+
 export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho' | 'initialGuess' | 'coarse'>, time_s = 0): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, H = t.hingeCount, M = model.materials.length, S = model.scripts.length;
   const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
@@ -173,8 +215,9 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
   const ct = options.coarse ? packClothCoarseTables(t, options.coarse) : undefined;
+  const star = packClothStarRecords(model, byColour);
   const parts = [t.vertexFaceOffsets, t.vertexFaces, t.vertexHingeOffsets, t.vertexHinges, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), t.hinges, triangles, t.edges,
-    ...(ct ? [ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn] : [])];
+    ...(ct ? [ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn] : []), star.header, star.records];
   const topoBase: number[] = [];
   let words = 0;
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
@@ -223,7 +266,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const guess = CLOTH_INITIAL_GUESS[options.initialGuess ?? 'adaptive'];
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
   paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, guess, 0], PARAM_GRAVITY);
-  params[PARAM_PATCH] = model.colourCount;
+  params.set([model.colourCount, topoBase[parts.length - 2]!, topoBase[parts.length - 1]! / 4], PARAM_PATCH);
   let coarse: ClothCoarseLayout | undefined;
   if (ct) {
     const m = 3 * ct.nodeCount, sq = align(Math.ceil(m * m / 4), CLOTH_SEGMENT_ALIGN), vec = align(Math.ceil(m / 4), CLOTH_SEGMENT_ALIGN);
@@ -332,7 +375,7 @@ export class ClothGPUSolver {
       for (let c = 0; c <= C; c++) {
         const offset = CLOTH_DISPATCH_STRIDE * ((it - 1) * (C + 1) + c), u = new Uint32Array(records, offset, 8), f = new Float32Array(records, offset, 8);
         const [start, count] = c < C ? this.tables.colourRanges[c]! : [0, this.N];
-        u.set([start, count, it, 0]); f[4] = omega;
+        u.set([start, count, it, c]); f[4] = omega;
       }
     }
     writeBufferChunked(this.device.queue, this.dispatch, 0, new Uint8Array(records));
