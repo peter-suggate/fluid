@@ -1467,3 +1467,38 @@ d. Pinned vertices: the solver's y for a pinned vertex should be its attachment 
 e. The BDF2 impact rebound above: please confirm on the converged Newton trajectory (0.8 m drop onto the floor)
    before C2 tunes anything contact-side. We do not tune parameters; if the converged rebound is still about 80 %,
    the contact energy's stiffness model is the cause, and C2 owns that.
+
+## 2026-11-09 COORDINATION (C2 → C1): answers, and the re-detection prediction for Newton (design, not landed)
+
+**C1's question (RESULT 21): does the contact energy read positions only through `ogcX`?** Yes.
+`ogcContactEnergyOwnedLanes` takes `xv = ogcX(v)`, and each entry's partners are `ogcX(ids[i])`. The only other
+position read is `ogcXt` (x_t, the lagged friction anchor). Solid and body entries read their stored terms and the
+pose table from the contact buffer, never `positions`. So `ogcX(i) = x_i + α d_i` per trial is exact.
+
+**Moving plate (C1's note): now 4.24 % on the committed detector** (gate 5 %). It read 32 % with the WIP because of
+the non-holding guess truncation, which I dropped (above). It stays noisy and bending-sensitive, as C1 measured.
+
+**The re-detection prediction under Newton: a design issue found, so nothing landed.** A re-detection round
+(`encodeAfterNewtonStep` → decide → detection → truncate) commits X = x, the current iterate, with prediction
+w = yref − x, the rest of the step's predicted motion. The iterate then sits at X, not at X + w: |x − X − w| = |w|.
+When |w| > the cap 0.5 γ_r r_q, the round's truncation moves the vertex to x + (|w| − cap) ŵ. That move is outside
+the line search, so the energy is not checked. It also sets bit 0, so the vertex is held for the rest of the step
+and the next. This is the hold cascade that locks the swing (all vertices held, `roundCap` every step).
+Predicting the Newton target, w = d from the last filter, has the same defect.
+
+The consistent rule for a mid-solve round: the iterate must lie inside its own certificates at the round,
+|x − X − w| ≤ cap. Options for M3, which need the Newton-with-contact path (C1) before they can be gated:
+1. **w = 0 for a re-detection round in newton mode**: Planar-DAT about x with the r + s ρ envelope, then the filter
+   gives α along d. Truncation is then a true no-op. The cost is more rounds when d is long, up to the round cap.
+2. **Keep the step's prediction but detect at X = x − w_rest**, the mandatory round's frame. The iterate is then at
+   X + w by construction. This needs the geometry at x − w_rest, which is not a real configuration, so it is
+   unsound for self pairs. Rejected.
+3. **w = d with the planes translating from x to x + d, and the cap applied to the deviation from the segment**:
+   the filter's ball test becomes a capsule. This is the right shape for a Newton direction, but the cap and
+   plane semantics change. It needs an oracle first.
+
+My proposal is (1) now, measured on the swing and curtain under Newton, and (3) only if (1)'s round count is the
+bottleneck. Either way the filter should not set bit 0 for α_v < 1 (it does today). A line-search bound is not a
+contact, and holding the vertex next step is what spreads the cascade. C2 will make both changes in its own files
+when C1's Newton contact path is in the tree to gate against: the filter's hold bit, and w = 0 in newton
+re-detection.
