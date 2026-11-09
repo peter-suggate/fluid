@@ -44,7 +44,7 @@ import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS
   clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
 import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from './topology';
-import type { ClothContactStateData, ClothDocument, ClothSurfacePublication, ClothVector } from './types';
+import type { ClothContactStateData, ClothDocument, ClothGrab, ClothSurfacePublication, ClothVector } from './types';
 
 /** One implicit cloth step per 1/60 s frame. */
 export const CLOTH_SCENE_STEP_S = 1 / 60;
@@ -169,6 +169,8 @@ export class ClothSystem {
   private solidVoxels: SceneDescription['solidVoxels'];
   /** Body-frame fields of moving solids, by body, shape and band: baked once, kept across cloth rebuilds. */
   private readonly bodyFields = new Map<string, ClothSolidField>();
+  /** The held mouse grab: its press id and the entry it holds (none: that press was refused). */
+  private grab?: { readonly id: number; readonly entry?: Entry };
   private destroyed = false;
 
   private constructor(private readonly device: GPUDevice, private scene: SceneDescription, private readonly options: ClothSystemOptions) {
@@ -335,6 +337,33 @@ export class ClothSystem {
   }
 
   /**
+   * The viewport's cloth grab (`ClothGrab`): a new press id holds the region on its document's live solver, the same id
+   * moves it, null lets go. A press on a document being rebuilt, or on a topology other than the live one, is refused
+   * for the whole press (it never starts late, mid-drag, with a jump); a rebuild during the press lets go. Input
+   * uploads only (no readback, nothing in the step path). Returns whether the grab is held.
+   */
+  setGrab(grab: ClothGrab | null): boolean {
+    const held = this.grab;
+    const live = (e?: Entry) => !!e && !this.destroyed && this.entries.get(e.document.id) === e && !this.building.has(e.document.id);
+    if (held && (!grab || grab.id !== held.id)) {
+      if (live(held.entry)) held.entry!.solver.releaseGrab();
+      this.grab = undefined;
+    }
+    if (!grab) return false;
+    if (this.grab) {
+      if (!live(this.grab.entry)) { this.grab = { id: grab.id }; return false; }
+      this.grab.entry!.solver.moveGrab(grab.displacement_m);
+      return true;
+    }
+    const e = this.entries.get(grab.documentId);
+    if (!live(e) || e!.topologyRevision !== grab.topologyRevision || grab.displacement_m.some(c => c !== 0)) { this.grab = { id: grab.id }; return false; }
+    e!.solver.setGrab(grab.vertices, grab.weights);
+    e!.solver.moveGrab(grab.displacement_m);
+    this.grab = { id: grab.id, entry: e };
+    return true;
+  }
+
+  /**
    * Read every document's pose back now and publish it: what a press that
    * picks, an edit or a capture asks for. Concurrent requests share one read.
    */
@@ -472,7 +501,7 @@ export class ClothSystem {
   }
 }
 
-const OVERRIDDEN = new Set<PropertyKey>(['advanceTo', 'clothSurfaces', 'clothRenderSources', 'readClothPose', 'destroy', 'stageSceneUpdate', 'applySceneUniforms', 'reseed']);
+const OVERRIDDEN = new Set<PropertyKey>(['advanceTo', 'clothSurfaces', 'clothRenderSources', 'readClothPose', 'setClothGrab', 'destroy', 'stageSceneUpdate', 'applySceneUniforms', 'reseed']);
 
 /**
  * The scene solver with the cloth system composed onto it. Everything the
@@ -505,6 +534,7 @@ export function withClothSystem(base: GPUSolverInstance, cloth: ClothSystem, flu
     get clothSurfaces() { latch(); return cloth.surfaces; },
     get clothRenderSources() { return cloth.renderSources; },
     readClothPose: () => cloth.readPose().then(latch),
+    setClothGrab: (grab: ClothGrab | null) => cloth.setGrab(grab),
     destroy() { cloth.destroy(); base.destroy(); },
   };
   if (base.stageSceneUpdate) overrides.stageSceneUpdate = (scene: SceneDescription) => { cloth.adopt(scene); base.stageSceneUpdate!(scene); };

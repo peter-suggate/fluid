@@ -141,6 +141,27 @@ export interface ClothDocument {
   readonly pendingSolids?: readonly ClothPendingSolid[];
 }
 
+/**
+ * A mouse grab of a region of one cloth document (the viewport's cloth-grab gesture, `ClothSystem.setGrab`). Each
+ * listed vertex is pulled by an implicit spring, of stiffness weight x the vertex's reference stiffness, towards where it
+ * was at the grab's first step plus `displacement_m`. Transient input: never saved, published or undone, and a
+ * rebuild of the document (a cut, an undo) lets go.
+ */
+export interface ClothGrab {
+  /** Names one press: a new id starts a grab (its anchors taken from the live pose), the same id moves it. A press
+   *  starts at zero displacement, so a grab first seen displaced (pressed before this cloth system was built) is
+   *  refused for the whole press rather than started mid-drag with a jump. */
+  readonly id: number;
+  readonly documentId: string;
+  /** The topology the vertices index (`ClothSurfacePublication.topologyRevision`); a grab of another is refused. */
+  readonly topologyRevision: number;
+  readonly vertices: readonly number[];
+  /** Spring weight per vertex, in (0, 1]: 1 at the grab point, falling to 0 at the region's edge. */
+  readonly weights: readonly number[];
+  /** Where the cursor holds the grab point, minus where the press picked it (world metres). */
+  readonly displacement_m: ClothVector;
+}
+
 export interface ClothFrameIdentity {
   readonly generation: number;
   readonly tick: number;

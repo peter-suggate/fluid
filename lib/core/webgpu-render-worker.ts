@@ -279,6 +279,7 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
     runtime.setSimulationScene(message.scene ? markSceneRevision(message.scene) : undefined);
   }
   else if (message.type === "set-hover-highlight") runtime.setHoverHighlight(message.range);
+  else if (message.type === "set-cloth-grab") runtime.setClothGrab(message.grab);
   else if (message.type === "set-simulation-running") {
     void runtime.setSimulationRunning(message.running)
       .then((submittedTime_s) => post({

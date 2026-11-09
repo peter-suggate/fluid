@@ -10,9 +10,10 @@ import { CLOTH_STATUS_COARSE_INDEFINITE, clothCoarseWGSL } from './gpu-coarse-wg
 /** vec4<f32> per-vertex segments of the `state` buffer, each CLOTH_SEGMENT_ALIGN-padded N long.
  * Segment 0 is the step-start velocity, so C2 binds `state` as its velocity input. After the
  * segments: one record per edge (AVBD dual lambda, k, stabilized limit), the diagnostics
- * partials (2 per workgroup) and the clock record (step, previous step, h~, BDF2 as floats). */
-export const CLOTH_STATE = { velocity: 0, xt: 1, vPrev: 2, dxPrev: 3, y: 4, xHat: 5, prev1: 6, prev2: 7, pinTarget: 8, pinDual: 9, normal: 10, patchOut: 11 } as const;
-export const CLOTH_STATE_SEGMENTS = 12;
+ * partials (2 per workgroup) and the clock record (step, previous step, h~, BDF2 as floats). Segment 12 is the mouse
+ * grab (`ClothGPUSolver.setGrab`): per vertex its anchor (xyz, the vertex at the grab's first step) and weight (w, 0 free). */
+export const CLOTH_STATE = { velocity: 0, xt: 1, vPrev: 2, dxPrev: 3, y: 4, xHat: 5, prev1: 6, prev2: 7, pinTarget: 8, pinDual: 9, normal: 10, patchOut: 11, grab: 12 } as const;
+export const CLOTH_STATE_SEGMENTS = 13;
 /** Segment padding in vec4 records: 16 records = 256 B, the storage binding offset alignment. */
 export const CLOTH_SEGMENT_ALIGN = 16;
 /** Status words: [0] status bits (sticky), [1] steps completed; slots start at CLOTH_STATUS_RING_BASE. */
@@ -73,6 +74,7 @@ struct Params {
   partA: vec4u,  // Tier B partition 0: owner, patch offsets, vertices, colour offsets (topo words)
   partB: vec4u,  // partition 1
   coarse0: vec4u, coarse1: vec4u, coarse2: vec4u, coarse3: vec4u, coarse4: vec4u, coarse5: vec4u, coarse6: vec4u, // gpu-coarse-wgsl.ts
+  grab: vec4f,   // mouse grab: displacement of its anchors (xyz, metres), held (w: 1, else 0)
 }
 struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration) or Tier B (partition, inner iterations), (omega)
 
@@ -98,6 +100,7 @@ const PI: f32 = 3.14159265358979;
 const S_VEL = ${CLOTH_STATE.velocity}u; const S_NORMAL = ${CLOTH_STATE.normal}u; const S_XT = ${CLOTH_STATE.xt}u; const S_VPREV = ${CLOTH_STATE.vPrev}u; const S_DXPREV = ${CLOTH_STATE.dxPrev}u;
 const S_Y = ${CLOTH_STATE.y}u; const S_XHAT = ${CLOTH_STATE.xHat}u; const S_PREV1 = ${CLOTH_STATE.prev1}u;
 const S_PREV2 = ${CLOTH_STATE.prev2}u; const S_PINC = ${CLOTH_STATE.pinTarget}u; const S_PIND = ${CLOTH_STATE.pinDual}u; const S_POUT = ${CLOTH_STATE.patchOut}u;
+const S_GRAB = ${CLOTH_STATE.grab}u;
 const RING_BASE = ${CLOTH_STATUS_RING_BASE}u; const SLOT_WORDS = ${CLOTH_STATUS_SLOT_WORDS}u; const RING_SLOTS = ${CLOTH_STATUS_RING_SLOTS}u;
 const WG = ${CLOTH_WORKGROUP}u;
 const IDENTITY = mat3x3f(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
@@ -125,6 +128,16 @@ fn bdf2Step() -> bool { return state[P.state0.w].w != 0.0; }
 fn vertexRest(v: u32) -> vec4f { return rest[P.rest1.x + v]; }
 fn vertexGroup(v: u32) -> u32 { return u32(vertexRest(v).w); }
 fn referenceStiffness(v: u32) -> f32 { let r = vertexRest(v); let h = hEff(); return r.x / (h * h) + r.y; }
+// The mouse grab at vertex v: the spring (k/2)|x - (a + D)|^2 towards its anchor a moved by the grab's displacement D,
+// with k = weight x the vertex's reference stiffness (the scale an AVBD pin starts from). Returns (k (x - a - D), k);
+// zero for a free vertex or with no grab held (a uniform branch, so an idle grab costs one uniform read).
+fn grabSpring(v: u32, xv: vec3f) -> vec4f {
+  if (P.grab.w == 0.0) { return vec4f(0.0); }
+  let a = state[seg(S_GRAB, v)];
+  if (!(a.w > 0.0)) { return vec4f(0.0); }
+  let k = a.w * referenceStiffness(v);
+  return vec4f(k * (xv - a.xyz - P.grab.xyz), k);
+}
 fn outer(u: vec3f, w: vec3f) -> mat3x3f { return mat3x3f(u * w.x, u * w.y, u * w.z); }
 fn finite3(x: vec3f) -> bool { return all(abs(x) <= vec3f(3.0e38)); }
 
@@ -395,6 +408,11 @@ fn ownDelta(v: u32, xv: vec3f, d: vec3f) -> vec2f {
     let f = p.w * C + p.xyz; let l = dot(f, d); let q = 0.5 * p.w * dot(d, d);
     out += vec2f(l + q, abs(l) + q + p.w * length(C) * length(d));
   }
+  let gs = grabSpring(v, xv);
+  if (gs.w > 0.0) {
+    let l = dot(gs.xyz, d); let q = 0.5 * gs.w * dot(d, d);
+    out += vec2f(l + q, abs(l) + q + length(gs.xyz) * length(d));
+  }
   return out;
 }
 ${contact ? `fn contactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
@@ -441,6 +459,8 @@ fn pinTerms(v: u32, xv: vec3f, s0: System) -> System {
     let d = state[seg(S_PIND, v)]; let C = xv - state[seg(S_PINC, v)].xyz;
     s.g += d.w * C + d.xyz; s.H += d.w * IDENTITY;
   }
+  let gs = grabSpring(v, xv);
+  s.g += gs.xyz; s.H += gs.w * IDENTITY;
   return s;
 }
 ${contact ? `// Contact entries first, first + stride, ... of vertex v added to s, in one pass that also returns their energy at xv
@@ -488,6 +508,15 @@ fn attachment(group: u32, anchor: vec3f, t: f32) -> vec3f {
 }
 
 fn stepTime() -> f32 { return P.misc.x + f32(clockStep()) * P.gravity.w; }
+
+// A new mouse grab (ClothGPUSolver.setGrab), before the step that first holds it: each grabbed vertex's anchor is where
+// the vertex is now, so the grab starts at zero displacement from the live pose, not from the pose the press picked.
+@compute @workgroup_size(${CLOTH_WORKGROUP}) fn grabBegin(@builtin(global_invocation_id) id: vec3u) {
+  let v = id.x;
+  if (v >= P.n.x) { return; }
+  let a = state[seg(S_GRAB, v)];
+  if (a.w > 0.0) { state[seg(S_GRAB, v)] = vec4f(positions[v].xyz, a.w); }
+}
 
 // Step begin (one thread): BDF2 needs a previous step of the same length.
 @compute @workgroup_size(1) fn beginStep() {

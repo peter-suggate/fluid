@@ -119,7 +119,8 @@ fn tangentParts(f0: vec3f, f1: vec3f, d11: f32, d12: f32, d22: f32, g: f32) -> a
     if ((own & (1u << k)) == 0u) { continue; }
     let v = corner[k]; let h = hEff();
     sk[k] = vertexRest(v).x / (h * h);
-    if (vertexGroup(v) > 0u) { sk[k] += state[seg(S_PIND, v)].w; }${contact ? `
+    if (vertexGroup(v) > 0u) { sk[k] += state[seg(S_PIND, v)].w; }
+    sk[k] += grabSpring(v, pos(v)).w;${contact ? `
     // The vertex's contact Hessian block at the step's guess, read by every face sharing a node pair with it.
     var fc = vec3f(0.0); var Hc = mat3x3f();
     ogcAccumulateVertexContact(v, pos(v), &fc, &Hc);
@@ -329,7 +330,8 @@ fn coarseGradientAt(v: u32, xv: vec3f) -> vec3f {
       g += select(f, -f, (e & 3u) == 1u);
     }
   }
-  if (vertexGroup(v) > 0u) { let p = state[seg(S_PIND, v)]; g += p.w * (xv - state[seg(S_PINC, v)].xyz) + p.xyz; }${contact ? `
+  if (vertexGroup(v) > 0u) { let p = state[seg(S_PIND, v)]; g += p.w * (xv - state[seg(S_PINC, v)].xyz) + p.xyz; }
+  g += grabSpring(v, xv).xyz;${contact ? `
   var fc = vec3f(0.0); var Hc = mat3x3f();
   ogcAccumulateVertexContact(v, xv, &fc, &Hc);
   g -= fc;` : ''}

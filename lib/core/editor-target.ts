@@ -38,6 +38,7 @@ export type EditorTargetKind =
   | "solid-voxel"
   | "tank-wall"
   | "terrain"
+  | "cloth"
   | "room";
 
 export interface EditorTarget {

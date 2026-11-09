@@ -200,6 +200,8 @@ export interface GPUSolverInstance {
   readonly clothSurfaces?: readonly ClothSurfacePublication[];
   /** Read the cloth pose back now (a press that picks, or an edit); never on the step cadence. */
   readClothPose?(): Promise<void>;
+  /** Hold, move (same `id`) or let go (null) of a mouse grab of a cloth region; returns whether it is held. */
+  setClothGrab?(grab: import('../cloth/types').ClothGrab | null): boolean;
   /** The cloth solver's GPU geometry, drawn in place. */
   readonly clothRenderSources?: readonly import('../cloth/render').ClothRenderSource[];
   /** Physical frame of the fluid lattice when it extends beyond the tank. */

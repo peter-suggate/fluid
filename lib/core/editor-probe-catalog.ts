@@ -16,6 +16,7 @@ import { terrainFeatureAt, terrainFeatureSelectionId } from "./editor-terrain";
 import type { EditorHighlight, EditorTarget } from "./editor-target";
 import type { EditorSelection } from "./editor-tools";
 import { voxelRegionContains, VOXEL_REGION_SELECTION } from "./editor-voxel-region";
+import { clothSurfaceAt } from "../cloth/scene-geometry";
 import { add, scale } from "./math";
 import type { SceneDescription, Vec3 } from "./model";
 import type { SolidWorldCoordinate } from "./solid-world";
@@ -297,6 +298,40 @@ const terrainProbe: EditorProbeDefinition = {
   },
 };
 
+// ---- cloth ----------------------------------------------------------------
+
+/**
+ * A cloth sheet: the nearest visible triangle through the shared cloth query
+ * (`clothSurfaceAt`), against the pose the cloth system last published. That
+ * pose is read back on a press, never per move, so a hover over moving cloth
+ * answers from the last press's pose — a press reads it fresh before the
+ * gesture is resolved (see the cloth pose hold in the viewport).
+ *
+ * It names nothing to select: a sheet is grabbed and dragged (`cloth-grab`),
+ * and a click on it is still the camera's.
+ */
+const clothProbe: EditorProbeDefinition = {
+  id: "cloth",
+  probe: (context, ray) => {
+    if (!context.scene.cloth?.length) return undefined;
+    const hit = clothSurfaceAt(context.scene, ray);
+    if (!hit) return undefined;
+    const point_m = { x: hit.point_m[0], y: hit.point_m[1], z: hit.point_m[2] };
+    return {
+      probeId: "cloth",
+      kind: "cloth",
+      id: `${hit.documentId}:${hit.element}`,
+      label: `cloth ${hit.documentId}`,
+      tone: "prop",
+      distance_m: hit.distance_m,
+      point_m,
+      normal: { x: hit.normal[0], y: hit.normal[1], z: hit.normal[2] },
+      highlight: { kind: "point", position_m: point_m, radius_m: surfaceMarkRadius_m(context.scene) },
+      detail: { documentId: hit.documentId, element: hit.element },
+    };
+  },
+};
+
 // ---- room (the fallback) --------------------------------------------------
 
 /**
@@ -389,6 +424,7 @@ export const EDITOR_PROBES: readonly EditorProbeDefinition[] = Object.freeze([
   tankWallProbe,
   solidVoxelProbe,
   entityProbe,
+  clothProbe,
   terrainProbe,
   roomProbe,
 ]);

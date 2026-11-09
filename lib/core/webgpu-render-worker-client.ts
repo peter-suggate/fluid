@@ -1,6 +1,6 @@
 import {publishSceneRigidSurfaces} from './rigid-surface';
 import { publishSceneClothSurfaces, clearSceneClothSurfaces } from "../cloth/scene-geometry";
-import type { ClothSurfacePublication } from "../cloth/types";
+import type { ClothGrab, ClothSurfacePublication } from "../cloth/types";
 import type { FluidStepRequest } from "../interaction/runtime/physics";
 import type { FluidExchange } from "../interaction/contracts";
 import { registerMeshAssetDistanceField } from "./imported-assets/asset-library";
@@ -92,6 +92,8 @@ export type WebGPURenderWorkerRequest =
   | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number }; instrumentationMode: PerformanceInstrumentationMode }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
+  /** The viewport's cloth grab at pointer rate: a new id holds a region, the same id moves it, null lets go. */
+  | { type: "set-cloth-grab"; grab: ClothGrab | null }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
   | { type: "reset-simulation-timeline" }
   /**
@@ -289,6 +291,14 @@ export class WebGPURenderWorkerClient {
    */
   setHoverHighlight(range: { first: number; last: number } | undefined): void {
     this.post({ type: "set-hover-highlight", range });
+  }
+
+  /**
+   * Hold, move or let go of a mouse grab of a cloth region (`ClothGrab`). Posted at pointer rate like the hover rim:
+   * it is input to the next step, an upload on the worker's device, and nothing waits on it.
+   */
+  setClothGrab(grab: ClothGrab | null): void {
+    this.post({ type: "set-cloth-grab", grab });
   }
 
   setSimulationRunning(running: boolean): Promise<number | undefined> {

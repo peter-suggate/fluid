@@ -55,6 +55,7 @@ export type EditorGestureId =
   | "slice-grab"
   | "fill-level"
   | "voxel-sweep"
+  | "cloth-grab"
   | "body-throw"
   | "orbit"
   | "pan";
@@ -171,6 +172,17 @@ export const EDITOR_GESTURES: readonly EditorGestureDefinition[] = Object.freeze
     label: "SWEEP",
     hint: "drag across solids to select the box they are in",
     claims: (target) => target.kind === "solid-voxel" || target.kind === "tank-wall",
+  },
+  // Cloth under the press is grabbed: the region around the press follows the
+  // cursor on a camera-facing plane, pulled by a spring in the cloth's own
+  // implicit solve, and is let go on release with the velocity it was given.
+  // Presentation-gated: it pulls the live pose the reader is looking at.
+  {
+    id: "cloth-grab",
+    label: "GRAB",
+    needsPresentation: true,
+    hint: "drag the cloth to pull it around · release to let it go",
+    claims: (target) => target.kind === "cloth",
   },
   // A body under the press opens a throw. The exact grab point comes from the
   // GPU pick where one is available; the target only decides *that* it is a

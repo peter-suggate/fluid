@@ -1468,6 +1468,12 @@ export class FluidLabRenderer {
     if (this.gpuFluid === fluid && scene && surfaces.length) publishSceneClothSurfaces(scene, surfaces);
   }
 
+  /** The viewport's cloth grab (`ClothGrab`), handed to the cloth system as input to its next step; false when not held. */
+  setClothGrab(grab: import("../cloth/types").ClothGrab | null): boolean {
+    if (!this.lifecycle.open) return false;
+    return this.gpuFluid?.setClothGrab?.(grab) ?? false;
+  }
+
   /* ----------------------------------------------------------------------- */
   /* Live pixel trace                                                        */
   /* ----------------------------------------------------------------------- */

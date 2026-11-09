@@ -31,6 +31,9 @@ import { hoverSceneAt, restFluidInWorld, restInContainer, type EditorHover } fro
 import { roomPointForRay, targetActionsAt, targetAtRay, targetSurfaceNormal } from "../lib/core/editor-probe-catalog";
 import { interactivePlacementWedge } from "../lib/features/interactive/ring";
 import { highlightInstanceRange, type EditorHighlight, type EditorTarget } from "../lib/core/editor-target";
+import { clothGrabForHit } from "../lib/cloth/grab";
+import { sceneClothSurface } from "../lib/cloth/scene-geometry";
+import type { ClothGrab } from "../lib/cloth/types";
 import { EditorHighlightLayer } from "./EditorHighlightLayer";
 import {
   addFluidBall,
@@ -582,6 +585,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // draft instead.
     | { id: number; action: "entity-handle"; entity: EditorEntity; handle: EditorHandle; grabOffset: Vec3; lastRay?: { origin: Vec3; direction: Vec3 }; pose?: Vec3; described?: Partial<RigidBodyDescription>; gesture: EditGesture }
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
+    // A region of cloth held by the cursor: `grab` is the region as pressed (its vertices, weights and press id), and
+    // the drag moves it on the camera-facing plane through the grab point. Nothing in the document changes.
+    | { id: number; action: "cloth-grab"; grab: ClothGrab; planePoint: Vec3; planeNormal: Vec3 }
     | null
   >(null);
   // Render reads whether a press is held, never the gesture itself: handlers
@@ -949,6 +955,26 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     focus.resolve(ray, bodyDragPick(surfacePosition, basis.forward));
     if (focus.lock) setPlacementFocusLock(focus.lock);
     setPointer({ id: pointerId, action: "body", bodyId: body.description.id, dragging: false, orientation, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp, focus });
+  };
+
+  /**
+   * Grab the cloth under the press: the region around the picked point, on the
+   * pose the press read back, follows the cursor across the camera-facing plane
+   * through it. The spring lives in the cloth's own implicit step; this only
+   * names the region and moves its target. False when nothing is published to
+   * grab, so the press stays the camera's.
+   */
+  const clothGrabIds = useRef(0);
+  const beginClothGrab = (pointerId: number, target: EditorTarget): boolean => {
+    const renderer = rendererRef.current, documentId = target.detail?.documentId, element = target.detail?.element;
+    if (!renderer || typeof documentId !== "string" || typeof element !== "number") return false;
+    const surface = sceneClothSurface(session.scene.getState().scene, documentId);
+    if (!surface) return false;
+    const p = target.point_m;
+    const grab = clothGrabForHit(++clothGrabIds.current, surface, { documentId, element, point_m: [p.x, p.y, p.z] });
+    renderer.setClothGrab(grab);
+    setPointer({ id: pointerId, action: "cloth-grab", grab, planePoint: p, planeNormal: cameraBasis(session.ui.getState().camera).forward });
+    return true;
   };
 
   /**
@@ -1835,6 +1861,9 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
         case "body-drag":
           beginBodySweep(event, ray);
           return;
+        case "cloth-grab":
+          if (beginClothGrab(event.pointerId, pressTarget)) return;
+          break;
         case "fluid-ball":
           beginFluidBallDrop(event, ray);
           return;
@@ -2015,6 +2044,13 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     }
     if (active.id !== event.pointerId) return;
     if (active.action === "pick") return;
+    if (active.action === "cloth-grab") {
+      const ray = pointerRay(event), point = planeHit(ray.origin, ray.direction, active.planePoint, active.planeNormal);
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)) return;
+      const at = active.planePoint;
+      rendererRef.current?.setClothGrab({ ...active.grab, displacement_m: [point.x - at.x, point.y - at.y, point.z - at.z] });
+      return;
+    }
     if (active.action === "fluid-paint") {
       setPointer({ ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) });
       return;
@@ -2198,6 +2234,10 @@ export function WebGPUViewport({ paneId = PRIMARY_PANE_ID }: WebGPUViewportProps
     // The next placement over open air stands where this one's lock did.
     if ((active.action === "body" || active.action === "body-place" || active.action === "fluid-ball") && active.focus?.anchor) {
       placementAnchorRef.current = active.focus.anchor;
+    }
+    if (active.action === "cloth-grab") {
+      rendererRef.current?.setClothGrab(null);
+      return;
     }
     if (active.action === "body") {
       if (active.focus.lock && !session.ui.getState().armedGesture) setPlacementFocusLock(undefined);

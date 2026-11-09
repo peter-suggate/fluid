@@ -158,13 +158,15 @@ export interface ClothCoarseStats {
   readonly accepted: readonly number[];
 }
 
-const PARAM_WORDS = 84;
+const PARAM_WORDS = 88;
 /** u32 words of the coarse block (Params.coarse0..6). */
 const PARAM_COARSE = 56;
 /** u32 words of the Tier B block: colour count, then two partitions' (owner, patch offsets, vertices, colour offsets). */
 const PARAM_PATCH = 44;
 /** Float words of the params uniform: gravity xyz + dt, then the clock origin and rho. */
 const PARAM_GRAVITY = 36, PARAM_TIME = 40;
+/** Float words of the mouse grab (Params.grab): displacement xyz, held flag. */
+const PARAM_GRAB = 84;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /**
@@ -326,8 +328,8 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
 }
 
 const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseTrialBack', 'coarseChooseBack', 'coarseApply'] as const;
-type Kernel = 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number];
-const KERNELS: readonly Kernel[] = ['beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
+type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number];
+const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
 
 export class ClothGPUSolver {
   readonly N: number; readonly T: number; readonly E: number;
@@ -347,6 +349,9 @@ export class ClothGPUSolver {
   private timeBase = 0;
   diagnostics: boolean;
   hooks: ClothStepHooks;
+  /** A grab set since the last step: the next step first takes its anchors from the live pose (grabBegin). */
+  private grabAnchorsPending = false;
+  private grabHeld = false;
 
   private constructor(private readonly device: GPUDevice, readonly model: ClothSolverModel, readonly options: ClothGPUSolverOptions) {
     const t = model.topology;
@@ -467,9 +472,50 @@ export class ClothGPUSolver {
   }
   private threads(n: number): number { return Math.ceil(n / CLOTH_WORKGROUP); }
 
+  /** Whether a mouse grab is held (`setGrab`). */
+  get grabbing(): boolean { return this.grabHeld; }
+
+  /**
+   * Hold a mouse grab: each listed vertex is pulled by the spring (k/2)|x - (a + D)|^2, where k is its weight times its
+   * reference stiffness (m/h^2 + elastic, the scale an AVBD pin starts from), a is where the vertex is at the first
+   * step that holds the grab (taken on the GPU, so the grab starts from the live pose) and D is the displacement
+   * (`moveGrab`, starting at zero). An implicit energy term like the pins: no substeps, no clamps, stable at any
+   * weight. Transient input: never saved or published; `uploadState` and `releaseGrab` drop it. Writes the grab
+   * segment and the params uniform (input uploads, no readback); edit time per press, never per step.
+   */
+  setGrab(vertices: ArrayLike<number>, weights: ArrayLike<number>): void {
+    if (vertices.length !== weights.length) throw new Error('Cloth grab needs one weight per vertex');
+    if (!vertices.length) throw new Error('Cloth grab needs at least one vertex');
+    const segment = new Float32Array(4 * this.tables.stride);
+    for (let i = 0; i < vertices.length; i++) {
+      const v = vertices[i]!, w = weights[i]!;
+      if (!(Number.isInteger(v) && v >= 0 && v < this.N)) throw new Error(`Cloth grab vertex ${v} is not a vertex of this cloth (${this.N})`);
+      if (!(w > 0 && Number.isFinite(w))) throw new Error(`Cloth grab weight ${w} must be positive and finite`);
+      segment[4 * v + 3] = w;
+    }
+    writeBufferChunked(this.device.queue, this.state, 16 * CLOTH_STATE.grab * this.tables.stride, segment);
+    this.grabAnchorsPending = true; this.grabHeld = true;
+    this.moveGrab([0, 0, 0]);
+  }
+
+  /** The held grab's displacement D from its anchors (metres; world and cloth frames differ by a translation only). */
+  moveGrab(displacement_m: ClothVector): void {
+    if (!this.grabHeld) return;
+    if (!displacement_m.every(Number.isFinite)) throw new Error('Cloth grab displacement must be finite');
+    this.device.queue.writeBuffer(this.params, 4 * PARAM_GRAB, new Float32Array([...displacement_m, 1]));
+  }
+
+  /** Let go: the cloth carries on with the velocity the grab gave it. */
+  releaseGrab(): void {
+    if (!this.grabHeld) return;
+    this.grabHeld = false; this.grabAnchorsPending = false;
+    this.device.queue.writeBuffer(this.params, 4 * PARAM_GRAB, new Float32Array(4));
+  }
+
   /** Encode exactly one implicit step of length dt into `pass`. */
   encodeStep(pass: GPUComputePassEncoder): void {
     const C = this.tables.colourRanges.length, limited = this.tables.strainLimited;
+    if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', this.threads(this.N)); this.grabAnchorsPending = false; }
     this.run(pass, 'beginStep', 1);
     if (limited || this.tables.damped) this.run(pass, 'frameElements', this.threads(Math.max(limited ? this.E : 0, this.tables.damped ? Math.max(this.T, this.model.topology.hingeCount) : 0)));
     this.run(pass, 'frame', this.threads(this.N));
@@ -568,6 +614,8 @@ export class ClothGPUSolver {
     state.set([0, solverState?.previousStep_s ?? 0, this.options.dt_s, 0], 4 * L.clockRecord);
     writeBufferChunked(q, this.positions, 0, x); writeBufferChunked(q, this.state, 0, state);
     this.timeBase = solverState?.time_s ?? 0;
+    // A new state drops any grab (the params below hold none, the grab segment above is zero).
+    this.grabHeld = false; this.grabAnchorsPending = false;
     const params = L.params.slice();
     new Float32Array(params.buffer)[PARAM_TIME] = this.timeBase;
     q.writeBuffer(this.params, 0, params);
