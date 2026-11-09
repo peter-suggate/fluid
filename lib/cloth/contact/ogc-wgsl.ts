@@ -106,6 +106,13 @@ export const OGC_STATUS = {
   bodyPose: 2048,
   /** Two primitives of a contact pair coincided at detection (distance 0): no contact normal exists. */
   coincident: 4096,
+  /**
+   * Reported, not a failure: the least-shift redos of a step's mandatory round left a conflict,
+   * so the fail-safe ran: the round redone with every prediction held (Planar-DAT) and, with a
+   * moving solid, the conflicts' cloth carried rigidly with it (Bridson, Fedkiw, Anderson 2002,
+   * sec. 7.4). Never the normal path: a scene that reports it is a finding.
+   */
+  failSafe: 8192,
 } as const;
 
 /** Truncation schemes: Planar-DAT (Chen, Hsu, Ayman, Macklin 2026) and the isotropic OGC bound. */
@@ -168,6 +175,7 @@ const OGC_ST_BODY_SQUEEZE = ${OGC_STATUS.bodySqueeze}u;
 const OGC_ST_HELD_CONFLICT = ${OGC_STATUS.heldConflict}u;
 const OGC_ST_BODY_POSE = ${OGC_STATUS.bodyPose}u;
 const OGC_ST_COINCIDENT = ${OGC_STATUS.coincident}u;
+const OGC_ST_FAIL_SAFE = ${OGC_STATUS.failSafe}u;
 const OGC_F_BODY_CONTACTS = ${OGC_COUNTER.frameBodyContacts}u;
 const OGC_F_BODY_CUT = ${OGC_COUNTER.frameBodyCut}u;
 const OGC_HELD_PAIR = ${OGC_COUNTER.heldConflictPair}u;

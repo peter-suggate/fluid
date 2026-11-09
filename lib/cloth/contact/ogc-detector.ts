@@ -34,7 +34,7 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
@@ -91,11 +91,10 @@ export interface OgcContactConfig {
    * the poses one frame uploads (its steps plus one; setBodyPoses). Planar truncation
    * only. In the solid's frame it is a static solid: its field, samples and hull edges
    * meet the cloth mapped into that frame at both ends of a round, with the curvature of
-   * the cloth's straight world motion there added to the margins. A conflict with it carries
-   * its cloth with it in the round redone (an impact zone, which grows by the zone's own
-   * conflicts until it closes: up to OGC_REDO_MANDATORY redos of the mandatory round and
-   * OGC_REDO_ROUNDS of a later one; a conflict left after the last, or one that marks nothing
-   * new, fails as heldConflict).
+   * the cloth's straight world motion there added to the margins. A conflict with it moves its
+   * cloth's predictions towards moving with it only as far as the pair needs (least shift, the
+   * relative motion scaled in the solid's frame; OGC_REDO_WGSL); the fail-safe past the
+   * least-shift redos carries the zones rigidly (counted and reported as failSafe).
    * Absent: no moving solid.
    */
   body?: { capacityWords: number; sampleCapacity: number; poseCapacity: number };
@@ -310,7 +309,7 @@ export class OgcContactDetector {
     this.bodySampleCapacity = bodySampleCap;
     this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
     this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
-    this.work = mk("work", 4 * ((body ? 24 : 12) * N + T + E));
+    this.work = mk("work", 4 * ((body ? 24 : 12) * N + OGC_SHIFT_WORDS * N + T + E));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
@@ -368,6 +367,8 @@ export class OgcContactDetector {
     w[P.edgeBase] = this.edgeBase; w[P.bodyEdgeBase] = this.bodyEdgeBase; w[P.SE] = 0; w[P.SEB] = 0;
     // The per-axis deviations D of the solids' terms (OgcTerms) follow the body's terms.
     w[P.solidDevOff] = (body ? 16 : 8) * N + T + E; w[P.bodyDevOff] = body ? 20 * N + T + E : 0;
+    // The least shift's words of the mandatory round's redos (OGC_SHIFT_WORDS).
+    w[P.scaleOff] = (body ? 24 : 12) * N + T + E;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
@@ -675,7 +676,10 @@ export class OgcContactDetector {
    */
   encodeDetection(pass: GPUComputePassEncoder, mandatory = true) {
     for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
-    for (let k = 0; k < (this.bodyField ? (mandatory ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS) : 1); k++) {
+    // Later rounds predict 0 about the iterate and never conflict: one slot. The mandatory round's
+    // least-shift redos and fail-safe (OGC_REDO_WGSL), with a moving solid its zone redos too.
+    const slots = !mandatory ? 1 : this.bodyField ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS + 1;
+    for (let k = 0; k < slots; k++) {
       this.run(pass, "redo", 1);
       for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
     }

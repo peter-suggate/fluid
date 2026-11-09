@@ -1722,3 +1722,87 @@ field (exteriorClear) is clear outside.
   vertex below the floor. In the main tree (C1's `inertial` guess), without the fix it halts with solidBounds at
   0.533 s.
 - C1: the tilted-drop todo can come off once this lands.
+
+## 2026-11-10 MILESTONE: least shift (ruling 4), the squeeze fix, convex-feature samples (ruling 5) and lagged friction lambda
+
+**Least shift (ruling 4).** A conflict no longer holds or carries its cloth. The round is redone with the
+conflict's cloth predictions moved back along straight paths only as far as the pair needs.
+- Y(t) = X + c + t (w - c). The anchor c is a_v (bit 5: moving with the moving solid; the relative motion is
+  scaled in the solid's frame) or X.
+- The scale is a 24-step bisection to the pair's goal separation. It is reduced per vertex by atomicMin into the
+  shift words (`OGC_SHIFT_WORDS` at scaleOff).
+- K = OGC_REDO_ROUNDS = 8 least-shift redos. The fail-safe (Bridson 2002 §7.4) runs at round K + 1. It holds the
+  round, and carries a body's conflicts rigidly as impact zones (zone redos up to redoCap() = 32). It is counted
+  and reported as the new non-failing status `failSafe` (8192).
+- Fail-safe carry is narrowed. Only cloth already carried (bits 2 or 6) or a body sample carries. Touched-only
+  cloth (bit 4) no longer carries.
+
+**Squeeze fix (bodySqueeze at tick 121 of the curtain).** The static cut scaled a body-bounded prediction towards
+0, which can leave the body's bound.
+- Now a vertex the body bounds (bodyReached, bq.q.w != 0) is cut towards a_v whenever the static set holds a_v:
+  w = a + (w - a) · cutScale(q, D, a, w - a). Both sets are star-shaped about a_v, so the cut keeps both.
+- The static round's balls cover a_v. The affine ball radius is max(|w|, |a|) + env/2. The chord ball about
+  x0 + w/2 has radius max(|w|/2, |a - w/2|) + env/2, which is unchanged when a = 0, so the chord rule stays.
+- Failures fixed along the way:
+  - The a-branch was not taken while |a| (18.6 mm) exceeded the static ball (2.6 mm).
+  - pairOverflow at tick 63, from disabling the chord rule.
+
+**Convex-feature samples (ruling 5: no relaxing of h/16).** `buildSolidSamples` places edge and corner seeds on
+the cell's planes (`feature`, `placed`).
+- A seed is kept only when two tests hold:
+  - its projection lies under every plane it used;
+  - for each pair of used planes A and B, phi(x + h/2 (n_A - n_B)) > 0.
+- That makes the feature convex. A concave junction, such as a table leg's base, failed before with the bulge
+  error.
+- Trilinear error goes the safe way: it overestimates convex fields and underestimates concave ones.
+- Box regression: every sample on an edge lies within h/16, more than 100 lie on the box, and all 12 edges are
+  covered at 41 points within 0.6 h.
+- The incline's wedges, the tablecloth, the rotating scene and the curtain all build on the real path.
+
+**Lagged friction lambda (the incline's 35° patch was frozen).** First-ever run of the incline gate: the wedge
+builds and the 20° patch sticks, but the 35° patch sat still (a = 0).
+- With mu = 0 both patches slide exactly: g sin 35 = 5.59 m/s² (5.63 exact) and g sin 20 = 3.33 (3.36 exact). So
+  the cause is friction, not truncation.
+- **Cause.** A solid entry's mu·lambda was the barrier force at the round's x0. That is a Newton iterate, or the
+  prediction the mandatory round's cut left about 0.9 mm closer to the face. That force far exceeds the m g cos θ
+  the step balances.
+- **Fix.** lambda and mu are taken at the vertex's step start x_t, as the slip's lagged normal already is (IPC):
+  `boundTerms(..., xs)`, with xs = x_t for the static solid and R0^T (x_t - c0) for the moving solid.
+- **Result.** The sliding patch's fitted a = 1.6091 m/s² (exact 1.6088, 0.02 %).
+- **Still failing: the sticking patch creeps 3.84 mm over the gate (limit 2 mm).** This is IPC's friction
+  regularization exactly.
+  - Below eps_v·h the friction is f1(y) = 2y/ε - y²/ε², ε = eps_v h. Holding tan 20 / mu = 0.728 needs y/ε =
+    1 - sqrt(1 - 0.728) = 0.478. That is a creep of 0.478 eps_v = 4.8 mm/s at CLOTH_SCENE_CONTACT.epsV_m_s =
+    1 cm/s, which is what was measured.
+  - With eps_v = 1 mm/s it creeps 0.6 mm/s (0.48 mm over the gate), and the slide stays at 1.609.
+  - The choice is C1's (scene-contact.ts) or A's (the gate): one of
+    - eps_v ≤ 5 mm/s (IPC's own default scale is 1e-3 m/s);
+    - a gate on the regularized model's exact creep, v = eps_v (1 - sqrt(1 - tan θ / mu)).
+- **Open.** Cloth-cloth entries (VT, sample-facet and EE) still take lambda at the round's distance. The same lag
+  to x_t applies there, but it needs the pair's x_t distance in the query kernel, so it is not done yet.
+
+**Tests updated to the least-shift semantics:**
+- *"crossing predictions are shifted back along their paths only as far as the pairs need"* checks:
+  - each W_v = s_v W0_v with s_v in [0, 1];
+  - only the top sheet is shifted;
+  - the final round's pairs equal the Float64 oracle's for the shifted predictions, with no pair conflicting;
+  - the predicted motion is penetration-free;
+  - nothing is held.
+- The carried-state test gets its held flags from a truncation.
+- The moving-plate oracle applies the least shift (anchor by bit 5, then the bound again about a_v) in place of
+  "a round redone carries".
+
+**Suites:**
+- cloth-contact-gpu, body: 26/26.
+- cloth-contact-solid: 12/12.
+- check:types is clean.
+- test:unit fails only the known reservoir-particle-cost test.
+
+**Bridson gates (ruling 4), not yet met:**
+- *Rotating sphere (Newton).* 0 intersections and 0 faces inside a solid at every tick to 195, then heldConflict
+  at tick 196. The carry cascade before this halted at tick 133.
+  - The fail-safe runs on many ticks from tick 30.
+  - From tick 80 it carries a growing pile: 565 vertices at tick 80, 1.7-1.9 k at ticks 190-195.
+  - The ruling says the fail-safe must never carry a pile, so ruling 4 is not closed.
+- *Curtain.* Halted at tick 126 on heldConflict, nondeterministically (zone 10256, then 6721); one run passed to
+  tick 127.

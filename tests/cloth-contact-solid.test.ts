@@ -249,10 +249,21 @@ test("solid surface samples: on the zero set wherever it is convex and not flat 
   const pts = at(clothSolidSamples(field));
   // A sample stands out by its holes' measured bulge, at most h / 16 (phi rises up to |grad phi| <= sqrt 3 times that).
   assert.ok(pts.every(p => phiAt(p) > -1e-6 && phiAt(p) < h / 8), "just outside the zero set");
-  // Box samples lie within a cell of an edge (two faces' planes): the faces' interiors carry none.
+  // Box samples lie on its sharp edges (two faces' planes, where the trilinear field rounds them
+  // over a cell): the faces' interiors and the rounding between carry none, and every point of
+  // every edge is near one.
   const onBox = pts.filter(p => box(p) < ball(p));
-  const out = (p: V3) => [p[0] < 0.02 + h || p[0] > 0.08 - h, p[1] < 0.02 + h || p[1] > 0.06 - h, p[2] < h || p[2] > 0.03 - h].filter(Boolean).length;
-  assert.ok(onBox.length > 300 && onBox.every(p => out(p) >= 2), `${onBox.length} box samples, off the edges: ${onBox.filter(p => out(p) < 2).length}`);
+  const lo = [0.02, 0.02, 0], hi = [0.08, 0.06, 0.03];
+  const edgeGap = (p: V3) => { const d = [0, 1, 2].map(a => Math.min(Math.abs(p[a]! - lo[a]!), Math.abs(p[a]! - hi[a]!))).sort((x, y) => x - y); return Math.hypot(d[0]!, d[1]!); };
+  const offEdge = onBox.filter(p => edgeGap(p) > h / 16);
+  assert.ok(onBox.length > 100 && offEdge.length === 0, `${onBox.length} box samples, off the edges: ${offEdge.length} (${offEdge.slice(0, 3).map(p => p.map(v => v.toFixed(4)).join(" ")).join("; ")})`);
+  for (let a = 0; a < 3; a++) for (const u of [lo[(a + 1) % 3]!, hi[(a + 1) % 3]!]) for (const v of [lo[(a + 2) % 3]!, hi[(a + 2) % 3]!]) {
+    for (let k = 0; k <= 40; k++) {
+      const p = [0, 0, 0] as unknown as V3;
+      p[a] = lo[a]! + (hi[a]! - lo[a]!) * k / 40; p[(a + 1) % 3] = u; p[(a + 2) % 3] = v;
+      assert.ok(onBox.some(q => norm(sub(q, p)) < 0.6 * h), `no box sample within 0.6 h of its edge point ${p.map(x => x.toFixed(4)).join(" ")}`);
+    }
+  }
   // The ball (it turns about 0.2 rad per cell, near the sharp turn) is covered at h to h / 2: its area over
   // h^2, up to four times that.
   const nBall = pts.length - onBox.length, ideal = 4 * Math.PI * 0.025 ** 2 / h ** 2;

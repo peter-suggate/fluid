@@ -642,7 +642,7 @@ test("GPU predicted-motion DAT: a plane translating along its normal past the se
   });
 });
 
-test("GPU predicted-motion DAT: crossing predictions redo the round held, which is Planar-DAT", { skip: !gpu }, async () => {
+test("GPU predicted-motion DAT: crossing predictions are shifted back along their paths only as far as the pairs need (least shift)", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const mesh = spacedStack(23), N = mesh.x.length;
     // The top sheet is predicted 7 mm down at the others, which stay.
@@ -651,18 +651,32 @@ test("GPU predicted-motion DAT: crossing predictions redo the round held, which 
     const { det, oracle, W } = await detectPredicted(device, mesh, vel, config);
     const c = await det.readCounters();
     assert.equal(c.status & ~OGC_STATUS.envelopeCap, 0, `status ${OgcContactDetector.describeStatus(c.status)}`);
-    assert.equal(c.redos, 1, "the round is redone"); assert.ok(c.conflicts > 0);
-    assert.ok(W.every(w => norm(w) === 0), "the redone round holds every prediction");
-    const rq = vel.map(v => envelope(config, v));
-    const ref = bruteForceDatPairs(oracle, rq, 2e-6);
+    assert.ok(c.redos >= 1 && c.conflicts > 0, `${c.redos} redos, ${c.conflicts} conflicts`);
+    // Each prediction is its inertial one scaled by the round's shift s in [0, 1] (anchor X: no moving solid).
+    const work = new Float32Array(await readBuffer(device, det.work)), scaleOff = 12 * N + det.T + det.E;
+    const W0 = vel.map(v => [0, 1, 2].map(k => v[k]! * config.dt + config.gravity[k]! * config.dt ** 2) as V3);
+    let shifted = 0;
+    for (let v = 0; v < N; v++) {
+      const sv = work[scaleOff + 2 * v + 1]!;
+      assert.ok(sv >= 0 && sv <= 1, `vertex ${v} shift ${sv}`);
+      if (sv < 1 && norm(W0[v]) > 0) shifted++;
+      assert.ok(norm(sub(W[v], scale(W0[v], sv))) <= 1e-8 + 1e-5 * norm(W0[v]), `vertex ${v}: ${W[v]} vs ${sv} x ${W0[v]}`);
+    }
+    const top = W0.filter(w => norm(w) > 0).length;
+    assert.ok(shifted > 0 && shifted <= top, `${shifted} of the top sheet's ${top} predictions shifted`);
+    // The round redone is the oracle's for the shifted predictions, conflict-free, and its motion penetration-free.
+    const xdet = new Float32Array(await readBuffer(device, det.det));
+    const rq = Array.from({ length: N }, (_, v) => xdet[4 * v + 3]! / 0.45);
+    const ref = bruteForcePredictedPairs(oracle, rq, W, 2e-6);
     const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c.framePeakPairSlots, oracle);
     const strict = (keys: Iterable<string>) => [...keys].filter(k => !ref.ambiguous.has(k)).sort();
-    assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "held round: vertex-triangle pairs");
-    assert.deepEqual(strict(got.filter(g => g.pair.kind === "ee").map(g => g.key)), strict(ref.ee), "held round: edge-edge pairs");
-    // The conflict's vertices stay held into the next step.
-    const held = new Uint32Array(await readBuffer(device, det.work));
-    const off = 7 * N + det.T + det.E;
-    assert.ok(Array.from(held.subarray(off, off + N)).some(f => f & 1), "conflicting vertices are flagged");
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "shifted round: vertex-triangle pairs");
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "ee").map(g => g.key)), strict(ref.ee), "shifted round: edge-edge pairs");
+    assert.ok(got.every(g => !predictedConflict(g.pair, oracle.x, W, 1e-6)), "no pair of the final round conflicts");
+    assert.equal(motionPenetrates(oracle, oracle.x, oracle.x.map((x, v) => add(x, W[v]))), false, "the predicted motion is penetration-free");
+    // A shift holds nothing: no vertex carries a contact flag into the next step.
+    const held = new Uint32Array(work.buffer), off = 7 * N + det.T + det.E;
+    assert.ok(Array.from(held.subarray(off, off + N)).every(f => (f & 1) === 0), "nothing held");
     det.destroy();
   });
 });
@@ -670,10 +684,13 @@ test("GPU predicted-motion DAT: crossing predictions redo the round held, which 
 test("GPU carried state: the per-vertex reference, rho_v and held flags a step hands the next restore exactly, so a replayed step equals the original", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const mesh = spacedStack(23), N = mesh.x.length;
-    // The crossing-prediction scene: its first steps leave held flags and residuals behind.
+    // The crossing-prediction scene: its first steps leave residuals behind, and a residual driving
+    // the layers into each other the truncation cuts, holding those vertices.
     const vel = mesh.x.map(p => [0, 0, p[2] > 6e-3 ? (-7e-3 + 9.81 / 3600) * 60 : 9.81 / 60] as V3);
     const config: OgcContactConfig = { ...baseConfig(N), r: 1e-3, rqBase: 1.5e-3, envelopeScale: 2.5, prediction: "inertial", rqMax: 4e-2, gridCapacity: 2048 * N };
-    const { det, positions } = await detectPredicted(device, mesh, vel, config);
+    const { det, positions, oracle, W } = await detectPredicted(device, mesh, vel, config);
+    device.queue.writeBuffer(positions, 0, vec4s(f32(oracle.x.map((x, v) => add(add(x, W[v]), [0, 0, (x[2] > 6e-3 ? -1 : x[2] < 2e-3 ? 1 : 0) * 6e-3] as V3)))));
+    await runPass(device, pass => det.encodeTruncate(pass));
     const saved = await det.readCarriedState();
     assert.ok(Array.from(saved.held).some(f => f & 1), "the step leaves held flags");
     assert.ok(Array.from({ length: N }, (_, v) => saved.reference[4 * v + 3]!).every(w => w >= 0), "and measured residuals");

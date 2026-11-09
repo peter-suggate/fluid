@@ -716,6 +716,109 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
     return out;
   };
 
+  // ---- sharp features: a point near a convex edge or corner of the solid's faces moves onto it.
+  // Where one face's plane is the field (a cell whose eight nodes are affine: trilinear
+  // interpolation reproduces a plane exactly, the max of a wedge's planes inside and outside its
+  // edges, a box inside), the cell gives that plane; the trilinear field rounds the faces' edges
+  // over a cell, below the planes (it overestimates a convex field), so samples projected onto it
+  // stand below the solid's sharp edge and the faces between them bulge over the samples by the
+  // rounding. A point on the faces' edge (two planes) or corner (three), within a cell of the
+  // projected point, outside the field and inside every nearby face's half-space, is on the
+  // solid's own feature: the faces' planes there are its supports (the surface lies below each).
+  // A plane is n . (x - o) + c, about its cell's node o (an offset about the frame's origin would
+  // carry the f32 gradient's rounding |o| / h times over).
+  type Plane = { n: V3; o: V3; c: number };
+  const AFFINE_SPREAD = 1e-6 * h, planeCache = new Map<number, Plane | null>();
+  const cellPlane = (cx: number, cy: number, cz: number): Plane | null => {
+    const key = brickKey(cx, cy, cz);
+    const hit = planeCache.get(key);
+    if (hit !== undefined) return hit;
+    let out: Plane | null = null;
+    const b = [cx, cy, cz].map(c => Math.floor(c / SOLID_BRICK_CELLS)), brick = table.get(brickKey(b[0]!, b[1]!, b[2]!));
+    if (brick) {
+      const l = [cx - SOLID_BRICK_CELLS * b[0]!, cy - SOLID_BRICK_CELLS * b[1]!, cz - SOLID_BRICK_CELLS * b[2]!] as unknown as V3;
+      const g = cellGradientRange(brick.values, l);
+      if (Math.max(g.hi[0] - g.lo[0], g.hi[1] - g.lo[1], g.hi[2] - g.lo[2]) <= AFFINE_SPREAD) {
+        const gr = [0, 1, 2].map(a => 0.5 * (g.hi[a]! + g.lo[a]!)), gl = Math.hypot(gr[0]!, gr[1]!, gr[2]!);
+        if (gl > 0.35 * h) {
+          // phi = v000 + gr . (x - x000) / h on the cell (gr: metres per cell).
+          const x000 = [cx, cy, cz].map((c, a) => field.origin[a]! + c * h) as unknown as V3, v000 = brick.values[nodeIndex(l[0], l[1], l[2])]!;
+          out = { n: [gr[0]! / gl, gr[1]! / gl, gr[2]! / gl], o: x000, c: v000 * h / gl };
+        }
+      }
+    }
+    planeCache.set(key, out);
+    return out;
+  };
+  const planeAt = (P: Plane, x: readonly number[]) => P.n[0] * (x[0]! - P.o[0]) + P.n[1] * (x[1]! - P.o[1]) + P.n[2] * (x[2]! - P.o[2]) + P.c;
+  const feature = (q: SurfacePoint): { q: SurfacePoint; planes: { p: V3; n: V3 }[] }[] | undefined => {
+    const c = q.p.map((v, a) => Math.floor((v - field.origin[a]!) / h));
+    const near: Plane[] = [];
+    // The same face from another cell: its normal, and its value at the point, agree to rounding.
+    const tol = 1e-5 * h;
+    for (let dz = -2; dz <= 2; dz++) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const P = cellPlane(c[0]! + dx, c[1]! + dy, c[2]! + dz);
+      if (!P || Math.abs(planeAt(P, q.p)) > 2 * h) continue;
+      if (near.every(o => !(o.n[0] * P.n[0] + o.n[1] * P.n[1] + o.n[2] * P.n[2] > 1 - 1e-7 && Math.abs(planeAt(o, q.p) - planeAt(P, q.p)) < tol))) near.push(P);
+    }
+    if (near.length < 2) return undefined;
+    near.sort((A, B) => Math.abs(planeAt(A, q.p)) - Math.abs(planeAt(B, q.p)));
+    // On the faces' feature: outside (or on) the field, in every nearby face's half-space.
+    const valid = (x: V3) => near.every(P => planeAt(P, x) <= tol) && phiAt(x[0], x[1], x[2]) >= -tol;
+    // A convex feature of the faces used: the solid there is the intersection of their
+    // half-spaces, so a point outside one face and inside another is clear of it, where a
+    // concave crease (a post standing on the ground: the union of the half-spaces) has it in
+    // the solid. The trilinear field errs the safe way at both (it overestimates a convex field
+    // and underestimates a concave one). And the projected point, on the field, lies under every
+    // face used: where the field fills a crease past them they are no supports there.
+    const convex = (x: V3, used: Plane[]) => {
+      if (!used.every(P => planeAt(P, q.p) <= tol)) return false;
+      for (const A of used) for (const B of used) if (A !== B) {
+        const p = [0, 1, 2].map(a => x[a]! + 0.5 * h * (A.n[a]! - B.n[a]!));
+        if (!(phiAt(p[0]!, p[1]!, p[2]!) > 0)) return false;
+      }
+      return true;
+    };
+    const made = (x: V3, used: Plane[]) => {
+      const m = [0, 1, 2].map(a => used.reduce((s, P) => s + P.n[a]!, 0)), ml = Math.hypot(m[0]!, m[1]!, m[2]!);
+      return { q: { p: x, n: [m[0]! / ml, m[1]! / ml, m[2]! / ml] as V3, mu: q.mu }, planes: used.map(P => ({ p: x, n: P.n })) };
+    };
+    const K = Math.min(near.length, 4);
+    // An edge: the point of two planes' line nearest the projected point, within the rounding's
+    // reach (the trilinear field rounds a feature over about a cell, so the seeds of the cells it
+    // touches lie within two of it).
+    const edge = (A: Plane, B: Plane) => {
+      const ab = A.n[0] * B.n[0] + A.n[1] * B.n[1] + A.n[2] * B.n[2];
+      if (!(1 - ab * ab > 1e-4)) return undefined;
+      // x = q - alpha nA - beta nB on both planes.
+      const ea = planeAt(A, q.p), eb = planeAt(B, q.p), den = 1 - ab * ab;
+      const alpha = (ea - ab * eb) / den, beta = (eb - ab * ea) / den;
+      const x = [0, 1, 2].map(a => q.p[a]! - alpha * A.n[a]! - beta * B.n[a]!) as unknown as V3;
+      return Math.hypot(x[0] - q.p[0], x[1] - q.p[1], x[2] - q.p[2]) <= 2 * h && valid(x) && convex(x, [A, B]) ? made(x, [A, B]) : undefined;
+    };
+    // A corner: three planes meeting as near.
+    const corner = (P: Plane, Q: Plane, R: Plane) => {
+      const A = P.n, B = Q.n, C = R.n;
+      const bc = [B[1] * C[2] - B[2] * C[1], B[2] * C[0] - B[0] * C[2], B[0] * C[1] - B[1] * C[0]];
+      const det = A[0] * bc[0]! + A[1] * bc[1]! + A[2] * bc[2]!;
+      if (!(Math.abs(det) > 1e-3)) return undefined;
+      const ca = [C[1] * A[2] - C[2] * A[1], C[2] * A[0] - C[0] * A[2], C[0] * A[1] - C[1] * A[0]];
+      const ab = [A[1] * B[2] - A[2] * B[1], A[2] * B[0] - A[0] * B[2], A[0] * B[1] - A[1] * B[0]];
+      // n . (x - q) = -plane(q) for each plane (Cramer's rule).
+      const r = [-planeAt(P, q.p), -planeAt(Q, q.p), -planeAt(R, q.p)];
+      const x = [0, 1, 2].map(a => q.p[a]! + (r[0]! * bc[a]! + r[1]! * ca[a]! + r[2]! * ab[a]!) / det) as unknown as V3;
+      return Math.hypot(x[0] - q.p[0], x[1] - q.p[1], x[2] - q.p[2]) <= 2 * h && valid(x) && convex(x, [P, Q, R]) ? made(x, [P, Q, R]) : undefined;
+    };
+    // The nearest two faces' edge, else another pair's, and any corner of three as near: a seed by
+    // a corner gives both (a sample on the corner, and the edge's own up to it).
+    const out: { q: SurfacePoint; planes: { p: V3; n: V3 }[] }[] = [];
+    for (let i = 0; i < K && !out.length; i++) for (let j = i + 1; j < K && !out.length; j++) { const f = edge(near[i]!, near[j]!); if (f) out.push(f); }
+    for (let i = 0; i < K; i++) for (let j = i + 1; j < K; j++) for (let k = j + 1; k < K; k++) { const f = corner(near[i]!, near[j]!, near[k]!); if (f) out.push(f); }
+    return out.length ? out : undefined;
+  };
+  // A seed's sample: on the solid's feature when one is near, else the projected point itself.
+  const placed = (q: SurfacePoint, planes: () => { p: V3; n: V3 }[]) => feature(q) ?? [{ q, planes: planes() }];
+
   // ---- the samples: per kept sample its point, normal, friction, curvature and spacing.
   const pts: SurfacePoint[] = [], spacingOf: number[] = [], supports: { p: V3; n: V3 }[][] = [];
   // Point hashes on numeric cell keys (cells within 2^16 of the cloth frame's origin).
@@ -754,7 +857,7 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
       const kc = kappa(centre, CELL_STEP);
       if (kc <= kappaMin) continue;
       const m = kc * h < SOLID_SAMPLE_SHARP_TURN ? 1 : 2;
-      if (m === 1) { found.push({ q: centre, k: kc, spacing: h, planes: supportPlanes(centre) }); continue; }
+      if (m === 1) { for (const f of placed(centre, () => supportPlanes(centre))) found.push({ q: f.q, k: kc, spacing: h, planes: f.planes }); continue; }
       // A sharp cell is seeded at its corners too: a voxel solid's corner is a node, which no
       // projection from inside the cell reaches, and the samples' hull would cut it off.
       const seeds = [...Array(m * m * m).keys()].map(s => [s % m, Math.floor(s / m) % m, Math.floor(s / (m * m))].map(i => ((i + 0.5) / m - 0.5) * h))
@@ -763,7 +866,7 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
         const q = project([c[0]! + o[0]!, c[1]! + o[1]!, c[2]! + o[2]!]);
         if (!q) continue;
         const kq = kappa(q, localStep);
-        if (kq > kappaMin) found.push({ q, k: kq, spacing: h / m, planes: supportPlanes(q) });
+        if (kq > kappaMin) for (const f of placed(q, () => supportPlanes(q))) found.push({ q: f.q, k: kq, spacing: h / m, planes: f.planes });
       }
     }
   }
@@ -884,7 +987,7 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
       for (const wts of [[1, 1, 1], [1, 1, 0], [0, 1, 1], [1, 0, 1]]) {
         const ws = wts[0]! + wts[1]! + wts[2]!;
         const q = project([0, 1, 2].map(a => (wts[0]! * P0[a]! + wts[1]! * P1[a]! + wts[2]! * P2[a]!) / ws) as unknown as V3);
-        if (q) keep(q, supportPlanes(q), spacing);
+        if (q) for (const f of placed(q, () => supportPlanes(q))) keep(f.q, f.planes, spacing);
       }
     }
     if (pts.length === before) break;
