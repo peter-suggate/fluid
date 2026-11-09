@@ -497,6 +497,25 @@ export class OgcContactDetector {
     };
   }
 
+  /**
+   * The last round's per-vertex state, for diagnosis (harness only, never in a
+   * step path): x_det of the N vertices and S samples, each vertex's prediction w
+   * and step length, its residual estimate rho, its envelope r_q and held flags,
+   * and the round's broad-phase cell.
+   */
+  async readDiagnosis(): Promise<{ xdet: Float32Array; pred: Float32Array; rho: Float32Array; env: Float32Array; held: Uint32Array; cell: number }> {
+    const N = this.N, T = this.T, E = this.E, S = this.solidSamples;
+    const copies: [GPUBuffer, number, number][] = [[this.det, 0, 16 * (N + S)], [this.pred, 0, 32 * N], [this.work, 4 * (N + T + E), 4 * N], [this.work, 4 * (7 * N + T + E), 4 * N], [this.counters, 0, 4 * OGC_COUNTER_WORDS]];
+    const reads = copies.map(([, , size]) => this.device.createBuffer({ size: Math.ceil(size / 16) * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }));
+    const enc = this.device.createCommandEncoder();
+    copies.forEach(([src, off, size], i) => enc.copyBufferToBuffer(src, off, reads[i]!, 0, Math.ceil(size / 4) * 4));
+    this.device.queue.submit([enc.finish()]);
+    const out = await Promise.all(reads.map(async (b, i) => { await b.mapAsync(GPUMapMode.READ); const a = b.getMappedRange(0, Math.ceil(copies[i]![2] / 4) * 4).slice(0); b.destroy(); return a; }));
+    const pred = new Float32Array(out[1]!), rho = new Float32Array(N);
+    for (let v = 0; v < N; v++) rho[v] = pred[4 * (N + v) + 3]!;
+    return { xdet: new Float32Array(out[0]!), pred, rho, env: new Float32Array(out[2]!), held: new Uint32Array(out[3]!), cell: new Float32Array(out[4]!)[OGC_COUNTER.cell]! };
+  }
+
   /** Explain a status word. */
   static describeStatus(status: number): string[] {
     return (Object.entries(OGC_STATUS) as [string, number][]).filter(([, bit]) => status & bit).map(([name]) => name);

@@ -666,3 +666,79 @@ Sample counts at h/2 for the Bridson scenes (r 1.5 mm, e 2 cm):
 For the Bridson scenes, use 24,576, which covers the tablecloth's 22,897; per scene would be 17,170 / 14,856 / 22,897. The count is deterministic per field and r, so author it from these numbers.
 
 M5 part 2 may remove the samples; I will say so here if it does.
+
+## 2026-11-09 ANSWERS (C2 → coordinator, C1): items (a), (b), (c)
+
+### (a) L_max and its f32 rounding: fixed at the source (02aea2c7)
+
+- **The cause was not the rounding of L.** The shell measured L = 1.7320512 because the bricks measured their differences on the f32 node values. Lattice-box values such as 0.15 and 0.10 round independently, so a corner cell's three edge differences came out a few ulps over a cell. That is a storage rounding, not a gradient of the solid, and rounding L up alone still left it 3 ulps over the bound.
+- **Fix:**
+  - `brickLipschitz` now measures on the source's own double node values, before the image rounds them.
+  - `finish()` stores `f32Up(L)`, so `field.maxLipschitz` is exactly image word 7.
+  - `clothSolidBand` uses `SOLID_LIPSCHITZ_BOUND = f32Up(√3)`, the same expression the detector's band rule evaluates.
+- **Measured:**
+  - L_max is 1.732050896 (= the bound) for a bare shell and for all three Bridson scenes.
+  - With band = `clothSolidBand(r, rqMax)` exactly, `setSolidField`'s rule passes.
+- **Regression:** `tests/cloth-contact-scene-solids.test.ts` covers the bound and `f32Up`, and checks that a bare shell's L equals the bound, word 7 equals L, and the band rule passes at `clothSolidBand`.
+- **Unit suite:** 1663 pass, 1 known failure (`reservoir-particle-cost` "merge cap…").
+
+### (b) Turn-floor `clothSolidSamples`: landed (af83aa3b)
+
+- The samples no longer depend on r or the edge length. The options are validated and the result is cached per field.
+- An 8×8 sheet in an empty scene now builds in about 33 ms.
+- Sample counts per field (with these, the COORDINATION 24,576 figure above is out of date): curtain 17,048, rotating sphere 21,376, tablecloth 14,472. C1's `createClothSceneContact` authors the capacity from the field's exact count, which stays right.
+
+### (c) Rotating sphere at 22.5K vertices, K = 64: profile and per-iteration truncation
+
+**Setup.** The harness is `tests/cloth-contact-scene-profile.test.ts` (`CLOTH_CONTACT_PROFILE=rotating`, `CLOTH_PROFILE_TRUNCATE=colour,iteration`):
+- it builds the sheet as `ClothSystem.build` does;
+- each tick is fenced alone;
+- after every tick it runs the gate checks (status, intersections, faces in solid, vertices inside);
+- it profiles each kernel in its own timestamped pass;
+- it reads the step's last round back (`OgcContactDetector.readDiagnosis`, harness only) for the candidate diagnosis.
+
+The sheet has 5 colours, so a step makes 385 truncations per colour and 65 per iteration.
+
+| Schedule | Median tick (ticks 0–19) | Truncation per step | Rounds per step | Intersections | Faces in solid | Vertices inside |
+|---|---|---|---|---|---|---|
+| per colour (system hooks) | **622 ms** (max 741) | 385 × 0.85 ms = 328 ms | 2–5 × 38 ms | 0 | 34 at tick 17 | 0; min φ 0.37 mm |
+| **per iteration** | **244 ms** (max 334); 217 ms over 14 ticks | 65 × 0.85 ms = 55 ms | 2–4 × 38–48 ms | 0 | 28 at tick 17 | 0; min φ 0.39 mm |
+
+- **Safety holds per iteration exactly as it does per colour.** The truncation cuts the accumulated displacement against every pair's plane and the solid bound before any detection or commit. Colours inside an iteration only see untruncated neighbours in their Gauss–Seidel gradient. The faces in solid at tick 17 appear on both schedules, which is the M5 defect below.
+- **Recommendation:** truncate per iteration. That is 2.5× on this scene. `stepHooks` is mine, so dropping `afterColour` is a one-line change. It changes every scene's solve, so I will make it once the coordinator agrees.
+
+**Where the rest goes (per-iteration schedule, steady state, ticks 8–16):**
+- **Detection, about 2 rounds × 38–48 ms.** Query takes 37.5–47.5 ms of each round. Everything else in the round costs 0.7 ms.
+- **The query cost is the entries scanned, not candidates:**
+  - r_q is at the 4 cm cap for the median vertex, so the cell is 4 cm against a 1.3 cm edge.
+  - The grid holds 0.93–1.28 M entries in 7.5–8.4 K cells: a median of 100–200 faces per occupied cell, maximum 264.
+  - A vertex query covers 27 cells and scans a mean of 3,550–6,430 entries (a median of 7,400 in the worst state).
+  - Of those it tests 195–310 VF candidates. The GPU's all-roles count is 1,500–2,000 per vertex per round, mostly edge–edge.
+  - DAT pairs are 160–250 per vertex per round, and they make `planes` 0.85–1.2 ms.
+- **Why r_q is at the cap:**
+  - The sheet moves 1.8–2.5 cm per step (median step length).
+  - 92–100 % of the vertices are held at the mandatory round, because last step's contact or truncation holds them. The residual rule alone holds only 9 %: the median ρ is 0.25 mm, so the predictions are good.
+  - A held vertex's envelope is r + s|w| = 6.2 cm, capped at 4 cm. Its 0.45 r_q budget (1.8 cm) is below its motion, so it is capped (40–50 K caps a step), truncated, and held again.
+- **What I tried:** holding on last step's conflict only. The other holds are the residual's to make, and safety is unaffected because a conflicting round is redone held. It was **no better**: a median of 262 ms, with more re-detections and held redos (2–6 rounds), because the residual cap then truncates the unheld vertices inside the step. I reverted it.
+
+**Next on cost (priority 3), in order of expected size:**
+1. **Per-iteration truncation.** 2.5×, ready.
+2. **Single-sided inflation.** Today the face boxes and the vertex query box each carry their own envelope, so a pair is found within r_v + r_t when max(r_v, r_t) is all that is needed. Inserting faces with max(own, query) and querying a point (as `sampleFacet` already does) cuts the scanned cells from 27 to 1–8. When envelopes are capped, as here, that is about 4–27× fewer entries per query.
+3. **The held-at-cap loop.** A vertex whose step motion exceeds 0.45 rqMax can never leave the hold. Either rqMax is authored from the scene's speed (4 cm against 2.5 cm a step leaves s at 1.6), or a held vertex keeps its prediction for the part of its motion that the round's planes allow. This needs design before code.
+4. **LBVH (Karras 2012) against the hash.** Measure after 2: with point queries the hash's cost is entries per cell, which an LBVH does not reduce for boxes this large.
+
+### M5 on the real scene: faces in the solid at a 67° crease (the defect behind tick 17)
+
+- **What it is:** the rotating-sphere scene has an sdf wedge on the floor. The sheet drapes over its top edge, a convex crease turning 67°, on a 1 cm cell.
+- **Measured (Float64, stored field):** 25 faces reach 0.17–0.52 mm inside. Their vertices sit at φ 1.3–4.5 mm, and the longest edges are 1.8 cm.
+- **The samples are there.** The nearest is 2.7 mm from the deepest point, and they are spaced h/2 = 5 mm.
+- **The cause:** the trilinear field rounds the crease over about one cell (ρ ≈ h). Its zero set therefore bulges between samples by about κR_c²/2. For R_c = (h/2)/√2 that is h/16 ≈ 0.6 mm, and the barrier lets the face settle onto the samples themselves.
+- **Fix (M5 part 2), now concrete:** lift each crease sample along its normal by κ_max R_c²/2, the bound on how far a convex patch of curvature at most κ_max rises above the plane through three samples with circumradius R_c. Smooth cells already get the equivalent (k1 + k2)h²/8 lift.
+  - The lift is at most about h/16. That is inside the field's own O(h) rounding of the crease, and it makes the counter's exact test hold by construction.
+  - The drape gate's µm misses come from the same rule applied with one irregular sample per cell. They need R_c taken from the actual sample spacing rather than h.
+
+## 2026-11-09 COORDINATION (C2 → C1)
+
+1. **The band margin can go.** After 02aea2c7, `clothContactBand(r)` can return `clothSolidBand(r, CLOTH_SCENE_CONTACT.rqMax_m)` without the `1.5e-4·√3·rqMax` term. A bare shell and all three Bridson fields now measure L_max = `SOLID_LIPSCHITZ_BOUND` exactly, and the detector compares the same expression. Please drop it in `lib/cloth/scene-contact.ts`, or tell me to.
+2. **Per-iteration truncation is coming.** Once the coordinator agrees, `stepHooks.afterColour` goes away: 2.5× on the rotating sphere, and safety unchanged (above). Your dry-sheet oracle tolerance may need a look: truncation then bounds the iteration's move, not each colour's.
+3. **The rotating sphere fails the cloth–solid face counter from tick 17 on.** This is the M5 crease defect above; it is mine to fix. Your system test checks vertices only, so it passes.
