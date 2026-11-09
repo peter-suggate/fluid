@@ -1121,3 +1121,57 @@ Colour sizes are 6417, 7992, 8023, 7835 and 7833 vertices.
 - GPU:
   - cloth-gpu-solver and cloth-coarse 13/13
   - cloth-system 16/18 (as above)
+
+## 2026-11-09 RESULT (15): the 45.7 ms after a rebuild from the tick-44 pose, traced (ruling 3)
+
+The scratch script is `fluid-scratch/cloth-c1/r3/rebuild-trace.mts`.
+- One curtain system runs straight to tick 44 and reads its pose.
+- It then runs ticks 45–56 straight.
+- It is rebuilt from the tick-44 pose through `ClothSystem.build`, the path that edits, undo and load take, and runs the same ticks again.
+- Each run ends with split profiles.
+
+**Most of the 45.7 ms is the scene, not the rebuild.** The straight run costs the same at those ticks:
+
+| ticks 45..56, fenced ms | values |
+|---|---|
+| straight | 46.1 44.0 42.9 46.1 48.7 48.2 47.5 47.0 46.4 46.3 47.5 44.8 |
+| rebuilt from the tick-44 pose | **108.4** 44.1 42.7 45.7 48.6 48.2 47.3 46.3 46.2 46.2 47.5 45.2 |
+
+- The split profiles at ticks 57–59 agree to 0.1 ms per kernel (GPU busy 32.94 straight, 32.88 rebuilt).
+- In this phase the detector runs its per-iteration rounds: `[afterIteration]` queryEdge 7.1, insert 3.0, queryVertex 2.0, querySample 1.6 ms.
+- At ticks 66–68 those rounds are idle (13.3 ms busy, 18.7 ms fenced). The 13–19 ms reference was a later, quieter state of the same straight run.
+- Fenced minus busy is about 13 ms here, against about 5 ms at tick 60.
+- Both of these belong to C2's detector.
+
+**What the rebuild does cost: a one-off first tick of 100–110 ms, against 44 ms.**
+- The split first tick shows 52.2 ms of GPU busy, but a 113 ms first-to-last span. The second tick is 43.3 ms busy over a 48.6 ms span.
+- So about 9 ms of the excess is extra detection work: the afterFrame queryEdge is 8.1 ms against 5.5, and insert 5.7 against 1.7.
+- The other about 60 ms is GPU idle between passes, at the first touch of the new buffers.
+- The build creates 22 buffers, 1431 MiB in total:
+
+  | buffer | MiB |
+  |---|---|
+  | ogc dat pairs | 976.7 |
+  | ogc grid | 222.7 |
+  | ogc contacts | 138.6 |
+  | all cloth solver buffers | about 80 |
+
+  The largest cloth solver buffers are topology 28.1, coarse work 21.5, rest data 14.3 and state 11.0 MiB.
+- Touching them by copy right after the build, before the first tick:
+
+  | buffers touched | copy time | first tick |
+  |---|---|---|
+  | cloth solver only | 40 ms | 105–110 ms (no change) |
+  | ogc only | 91 ms | 54–62 ms |
+  | all | 188–428 ms | 73–77 ms |
+
+- So the hitch is the first touch of the detector's fresh 1.34 GB of pools: Dawn's lazy zero-init and page wiring.
+- Priming is not a fix. It moves 90+ ms of GPU work into the queue the live entry steps on.
+
+**Cause, and a proposal.**
+- Each rebuild allocates a fresh detector with 1.34 GB of pools.
+- The live entry is retired only after its replacement is ready, so a rebuild also holds about 2 × 1.43 GB at peak (the runner saw 3.0 GB).
+- The fix that removes both costs is to reuse the live detector's pools across a rebuild whenever they still fit; only the buffers whose size changed would be reallocated.
+- This needs a C2 detector API, for example `OgcContactDetector.adoptPools(previous)` or a pool object passed in. ClothSystem.build (C1) would then hand the live entry's pools to the new one.
+- Separately, the 977 MiB pair pool for a 38K-vertex sheet is itself worth a memory-must-scale look (C2).
+- The cloth solver's own buffers (about 80 MB) are not part of the hitch.
