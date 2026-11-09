@@ -791,3 +791,38 @@ The sheet has 5 colours, so a step makes 385 truncations per colour and 65 per i
 
 - **To see faces, not just vertices, in `tests/cloth-system.test.ts`:** call `await detector.countIntersections()` after a tick and assert `solidIntersections === 0`. For the exact Float64 check, use `facesInsideSolid(field, positions, faces, origin)` from `tests/cloth-contact-oracle.ts`, which returns `{ inside: number[], lower }`.
 - **`clothSolidSamples` now takes 5–9 s on the Bridson fields** (once per field, cached). The rotating sphere has 15.7 K samples, so `solidSampleCapacity` in `createClothSceneContact` grows with it, as it already reads the count.
+
+## 2026-11-09 Cost step 1 (ruling 3a): one-sided inflation
+
+- **Change:**
+  - A face's grid box now grows by the round's largest envelope. That value is the new counter word `roundEnvelope`, which the cell kernel sets.
+  - The vertex and edge queries are their bare swept boxes.
+  - `sampleFacet` was already a point query.
+- **What it still guarantees:** every pair whose predicted paths come within the larger envelope is still found. A pair the search now skips stays more than R_max apart along its predicted paths, and the two caps (0.45 r_q each) cannot close that gap.
+- **Oracle:** `bruteForcePredictedPairs` mirrors this: a bare swept box against a face box grown by max r_q, with an edge reached through its first face. The GPU predicted-pair sets still equal the oracle's.
+- **The insert kernel no longer binds `work`.**
+- **Rotating sphere** (one profile run, 20 ticks, K = 64), everything at the 4 cm cap:
+
+  | Rotating sphere | Before | After |
+  |---|---|---|
+  | entries scanned per vertex query (mean) | 3,735 | 290 |
+  | median entries scanned | 4,703 | 236 |
+  | VF candidates per vertex (mean) | 200 | 116 |
+  | all-roles candidates per vertex per round | 1,165 | 600 |
+  | cells per query (median) | 27 | 1 |
+  | round | 38.9 ms | 8.2 ms |
+  | query kernel | 38.3 ms | 7.3 ms |
+  | median tick | 242 ms | 161 ms |
+  | grid entries | 0.93–1.28 M | 1.54 M |
+
+  Rounds per tick are unchanged at 2.25. There were no intersections and no faces inside, by the GPU lattice or the exact check.
+- **Gates (one run):** mixed envelopes pay for the wider face boxes.
+
+  | Gate | Candidates/N per step, before → after | ms/step, before → after | Peak grid, before → after |
+  |---|---|---|---|
+  | drop | 4,379 → 7,690 | 113.7 → 118.2 | 0.64 M → 0.91 M |
+  | drape | 1,425 → 3,278 | 28.1 → 27.4 | 0.23 M → 0.38 M |
+  | twist | 15,316 (no comparable baseline) | 138.1 | — |
+
+  All three pass.
+- **Capacity:** the grid holds up to (⌈(D + M)/R⌉ + 3)³ entries per face. That is 64 when the face plus its motion fit in a cell. `tests/cloth-contact-gpu.test.ts`'s base grid went from 64 N to 128 N, because its velocity envelopes vary. Please check `gridEntriesPerPrimitive` against the new peak (C1, scene-contact).

@@ -45,6 +45,8 @@ export const OGC_COUNTER = {
   frameSfPairs: 37,
   /** Cloth faces that reach inside the static solid (the intersection count's solid half). */
   solidIntersections: 38,
+  /** The round's largest envelope (f32 bits, set by the cell kernel): every face's grid box is grown by it. */
+  roundEnvelope: 39,
 } as const;
 export const OGC_COUNTER_WORDS = 40;
 export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37];
@@ -115,6 +117,7 @@ const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;
 const OGC_ENVELOPE_SUM = ${OGC_COUNTER.envelopeSum}u;
 const OGC_F_SF_PAIRS = ${OGC_COUNTER.frameSfPairs}u;
 const OGC_SOLID_INTERSECTIONS = ${OGC_COUNTER.solidIntersections}u;
+const OGC_ROUND_ENVELOPE = ${OGC_COUNTER.roundEnvelope}u;
 const OGC_ST_SOLID_PENETRATION = ${OGC_STATUS.solidPenetration}u;
 const OGC_ST_SOLID_BOUNDS = ${OGC_STATUS.solidBounds}u;
 const OGC_ST_PAIR_OVERFLOW = ${OGC_STATUS.pairOverflow}u;

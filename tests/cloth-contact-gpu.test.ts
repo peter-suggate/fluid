@@ -86,7 +86,7 @@ function topologyOf(mesh: OracleMesh) {
 /** Planar-DAT alone (every prediction held), as the oracle's planarTruncate; the predicted tests opt in. */
 const baseConfig = (N: number): OgcContactConfig => ({
   r: 2e-3, kc: 1e5, mu: 0.3, epsV: 1e-2, dt: 1 / 60, gravity: [0, 0, -9.81],
-  rqBase: 3e-3, rqMax: 2e-2, envelopeScale: 1.5, contactCapacity: 96, pairCapacity: 512 * N, gridCapacity: 64 * N, bucketCount: 4096, roundCap: 2,
+  rqBase: 3e-3, rqMax: 2e-2, envelopeScale: 1.5, contactCapacity: 96, pairCapacity: 512 * N, gridCapacity: 128 * N, bucketCount: 4096, roundCap: 2,
   prediction: "none",
 });
 

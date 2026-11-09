@@ -85,7 +85,7 @@ const fmt = (xs: number[], d = 2) => xs.map(x => x.toExponential(d)).join(" / ")
 
 /**
  * The round's broad phase rebuilt on the CPU from its own state (x_det, w, r_q,
- * cell): each face's grid box (triBox), its cells, and per vertex the entries its
+ * cell): each face's grid box (triBox: grown by the round's largest r_q), its cells, and per vertex the entries its
  * query scans (every entry of every bucket its box covers, hash collisions
  * included) and the candidates it tests (box overlap, owned cell, not incident).
  */
@@ -96,8 +96,11 @@ function brokenDownGrid(d: Awaited<ReturnType<OgcContactDetector["readDiagnosis"
   const key = (x: number, y: number, z: number) => `${x},${y},${z}`;
   const hash = (x: number, y: number, z: number) => ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) >>> 0) & (H - 1);
   const cells = new Map<string, number[]>(), buckets = new Map<number, number>();
+  // One-sided: every face's box grows by the round's largest envelope, a vertex's query by nothing.
+  let e = 0;
+  for (let v = 0; v < N; v++) e = Math.max(e, d.env[v]!);
   for (let t = 0; t < T; t++) {
-    const v = [faces[3 * t]!, faces[3 * t + 1]!, faces[3 * t + 2]!], e = Math.max(...v.map(i => d.env[i]!));
+    const v = [faces[3 * t]!, faces[3 * t + 1]!, faces[3 * t + 2]!];
     for (let c = 0; c < 3; c++) {
       const ps = v.flatMap(i => [X(i, c), X(i, c) + W(i, c)]);
       boxes[6 * t + c] = Math.min(...ps) - e; boxes[6 * t + 3 + c] = Math.max(...ps) + e;
@@ -111,7 +114,7 @@ function brokenDownGrid(d: Awaited<ReturnType<OgcContactDetector["readDiagnosis"
   const perCell = [...cells.values()].map(l => l.length);
   const scanned = new Float64Array(N), tested = new Float64Array(N), cellsPerQuery = new Float64Array(N);
   for (let v = 0; v < N; v++) {
-    const r = d.env[v]!, lo = [0, 1, 2].map(c => Math.min(X(v, c), X(v, c) + W(v, c)) - r), hi = [0, 1, 2].map(c => Math.max(X(v, c), X(v, c) + W(v, c)) + r);
+    const r = 0, lo = [0, 1, 2].map(c => Math.min(X(v, c), X(v, c) + W(v, c)) - r), hi = [0, 1, 2].map(c => Math.max(X(v, c), X(v, c) + W(v, c)) + r);
     const c0 = lo.map(x => Math.floor(x * inv)), c1 = hi.map(x => Math.floor(x * inv));
     for (let z = c0[2]!; z <= c1[2]!; z++) for (let y = c0[1]!; y <= c1[1]!; y++) for (let x = c0[0]!; x <= c1[0]!; x++) {
       cellsPerQuery[v]!++;

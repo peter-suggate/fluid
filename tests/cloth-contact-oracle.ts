@@ -505,18 +505,21 @@ const boxesMeet = (a: { lo: V3; hi: V3 }, b: { lo: V3; hi: V3 }) => [0, 1, 2].ev
 export const predictionSpread = (W: V3[], a: number[], b: number[]) => Math.max(...a.flatMap(i => b.map(j => norm(sub(W[i], W[j])))));
 
 /**
- * Every non-adjacent pair whose swept boxes (X to X + w, grown by the envelope)
- * meet and whose distance at X is at most the larger envelope plus the pair's
- * prediction spread. Any other pair stays apart over the round: its relative
- * motion is at most the spread plus the two caps.
+ * Every non-adjacent pair whose swept boxes (X to X + w) come within the round's
+ * largest envelope (the detector grows the face's box by it, the vertex's or
+ * edge's not; an edge is reached through its first face) and whose distance at X
+ * is at most the larger envelope plus the pair's prediction spread. Any other
+ * pair stays apart over the round: either its relative motion is at most the
+ * spread plus the two caps, or its predicted paths stay more than the largest
+ * envelope apart, which the two caps (0.45 r_q each) cannot close.
  */
 export function bruteForcePredictedPairs(mesh: OracleMesh, rq: number[], W: V3[], margin = 1e-6) {
   const X = mesh.x, vt = new Set<string>(), ee = new Set<string>(), ambiguous = new Set<string>();
-  const pairs: DatPair[] = [];
+  const pairs: DatPair[] = [], R = Math.max(...rq);
   for (let v = 0; v < X.length; v++) for (let t = 0; t < mesh.tris.length; t++) {
     const tri = mesh.tris[t];
     if (tri.includes(v)) continue;
-    if (!boxesMeet(sweptBox([X[v]], [W[v]], rq[v]), sweptBox(tri.map(i => X[i]), tri.map(i => W[i]), faceEnvelope(rq, tri)))) continue;
+    if (!boxesMeet(sweptBox([X[v]], [W[v]], 0), sweptBox(tri.map(i => X[i]), tri.map(i => W[i]), R))) continue;
     const { bary } = closestPointTriangle(X[v], X[tri[0]], X[tri[1]], X[tri[2]]);
     const cp = add(add(scale(X[tri[0]], bary[0]), scale(X[tri[1]], bary[1])), scale(X[tri[2]], bary[2]));
     const d = norm(sub(X[v], cp)), thr = Math.max(rq[v], faceEnvelope(rq, tri)) + predictionSpread(W, [v], tri);
@@ -526,8 +529,8 @@ export function bruteForcePredictedPairs(mesh: OracleMesh, rq: number[], W: V3[]
   for (let e = 0; e < mesh.edges.length; e++) for (let f = e + 1; f < mesh.edges.length; f++) {
     const [a0, a1] = mesh.edges[e], [b0, b1] = mesh.edges[f];
     if (a0 === b0 || a0 === b1 || a1 === b0 || a1 === b1) continue;
-    const ea = Math.max(rq[a0], rq[a1]), eb = Math.max(rq[b0], rq[b1]);
-    if (!boxesMeet(sweptBox([X[a0], X[a1]], [W[a0], W[a1]], ea), sweptBox([X[b0], X[b1]], [W[b0], W[b1]], eb))) continue;
+    const ea = Math.max(rq[a0], rq[a1]), eb = Math.max(rq[b0], rq[b1]), face = mesh.tris[mesh.edges[f][2]];
+    if (!boxesMeet(sweptBox([X[a0], X[a1]], [W[a0], W[a1]], 0), sweptBox(face.map(i => X[i]), face.map(i => W[i]), R))) continue;
     const d = closestSegmentSegment(X[a0], X[a1], X[b0], X[b1]).d;
     const thr = Math.max(ea, eb) + predictionSpread(W, [a0, a1], [b0, b1]);
     if (Math.abs(d - thr) < margin) ambiguous.add(`${e}|${f}`);

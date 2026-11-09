@@ -380,7 +380,7 @@ export class OgcContactDetector {
       ["scan1", ogcScanWGSL(1), [0, 6, 7]],
       ["scan2", ogcScanWGSL(2), [0, 7]],
       ["scan3", ogcScanWGSL(3), [0, 7]],
-      ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 5, 6, 7, 9, 14]],
+      ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 6, 7, 9, 14]],
       ["query", OGC_QUERY_WGSL, [0, 1, 4, 5, 7, 8, 9, 11, 14]],
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 9, 10]],

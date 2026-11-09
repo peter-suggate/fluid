@@ -152,18 +152,23 @@ fn bucketStart(h: u32) -> u32 {
 `;
 
 /** Envelope of vertex i (detection) and the face box inflated by its vertices' widest envelope. */
-function triBoxFns(intersect: boolean): string {
-  return (intersect ? "" : PRED_FNS) + /* wgsl */`
-fn envOf(i: u32) -> f32 { ${intersect ? "return 0.0;" : "return bitcast<f32>(atomicLoad(&work[P.envOff + i]));"} }
+/** The face box helpers; `envelopes` adds the per-vertex envelope reads (the work buffer, binding 5). */
+function triBoxFns(intersect: boolean, envelopes = !intersect): string {
+  return (intersect ? "" : PRED_FNS) + (envelopes ? /* wgsl */`
+fn envOf(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&work[P.envOff + i])); }
 fn triEnv(v: vec3<u32>) -> f32 { return max(envOf(v.x), max(envOf(v.y), envOf(v.z))); }
-// The face's box over the round: from X to the predicted X + w, grown by its widest envelope.
+` : "") + /* wgsl */`
+// The round's largest envelope: a face's grid box is grown by it, so any primitive's
+// unenlarged swept box finds every face within the larger of the two envelopes.
+fn roundEnv() -> f32 { ${intersect ? "return 0.0;" : "return bitcast<f32>(atomicLoad(&counters[OGC_ROUND_ENVELOPE]));"} }
+// The face's box over the round: from X to the predicted X + w, grown by the round's largest envelope.
 fn triBox(t: u32) -> OgcBox {
   let v = triVerts(t);
   let a = xdet[v.x].xyz; let b = xdet[v.y].xyz; let c = xdet[v.z].xyz;
   var lo = min(a, min(b, c)); var hi = max(a, max(b, c));
   ${intersect ? "" : `let a1 = a + predOf(v.x); let b1 = b + predOf(v.y); let c1 = c + predOf(v.z);
   lo = min(lo, min(a1, min(b1, c1))); hi = max(hi, max(a1, max(b1, c1)));`}
-  let e = triEnv(v);
+  let e = roundEnv();
   return OgcBox(lo - vec3<f32>(e), hi + vec3<f32>(e));
 }
 fn invCell() -> f32 { ${intersect ? "return 1.0 / P.intersectCell;" : "return bitcast<f32>(atomicLoad(&counters[OGC_INV_CELL]));"} }
@@ -326,6 +331,7 @@ export const OGC_CELL_WGSL = header([0, 9]) + /* wgsl */`
 fn main() {
   let m = bitcast<f32>(atomicExchange(&counters[OGC_MAX_ENVELOPE], 0u));
   atomicMax(&counters[OGC_F_PEAK_ENVELOPE], bitcast<u32>(m));
+  atomicStore(&counters[OGC_ROUND_ENVELOPE], bitcast<u32>(m));
   let cube = f32(atomicExchange(&counters[OGC_ENVELOPE_SUM], 0u)) / (1024.0 * f32(P.N));
   let h = select(max(P.cellFloor, m), max(P.cellFloor, P.rqMax * pow(cube, 1.0 / 3.0)), P.cellRule == 1u);
   atomicStore(&counters[OGC_CELL], bitcast<u32>(h));
@@ -595,8 +601,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) l
 
 /** Scatter each face into its buckets; the count it takes back leaves the counts zero for the next round. */
 export function ogcGridInsertWGSL(intersect: boolean): string {
-  const bindings = intersect ? [0, 1, 4, 6, 7, 9] : [0, 1, 4, 5, 6, 7, 9, 14];
-  return header(bindings) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(intersect) + /* wgsl */`
+  const bindings = intersect ? [0, 1, 4, 6, 7, 9] : [0, 1, 4, 6, 7, 9, 14];
+  return header(bindings) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(intersect, false) + /* wgsl */`
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
@@ -776,7 +782,8 @@ fn vertexFacet(v: u32) -> RoleOut {
   let x = xd(v);
   let rv = envOf(v);
   let x1 = x + predOf(v);
-  let q = OgcBox(min(x, x1) - vec3<f32>(rv), max(x, x1) + vec3<f32>(rv));
+  // One-sided: the faces' boxes carry the round's largest envelope, so the query is the bare swept box.
+  let q = OgcBox(min(x, x1), max(x, x1));
   let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   var dmin = 3.4e38;
@@ -818,8 +825,8 @@ fn vertexFacet(v: u32) -> RoleOut {
 }
 
 // A static surface sample i (index N + s) against the cloth's faces: the faces' grid
-// boxes carry their own envelopes and predictions, so a point query finds every face
-// within its envelope of the sample. Entries go to the face's feature vertices only
+// boxes carry their predictions and the round's largest envelope, so a point query
+// finds every face within its envelope of the sample. Entries go to the face's feature vertices only
 // (the sample does not move) and carry mu lambda with mu the solid's at the sample
 // (x_det.w); w = 1 marks them. The DAT pair puts the sample first, as a vertex.
 fn sampleFacet(i: u32) -> RoleOut {
@@ -870,7 +877,7 @@ fn edgeEdge(e: u32) -> RoleOut {
   let p0 = xd(er.x); let p1 = xd(er.y);
   let re = max(envOf(er.x), envOf(er.y));
   let p01 = p0 + predOf(er.x); let p11 = p1 + predOf(er.y);
-  let q = OgcBox(min(min(p0, p1), min(p01, p11)) - vec3<f32>(re), max(max(p0, p1), max(p01, p11)) + vec3<f32>(re));
+  let q = OgcBox(min(min(p0, p1), min(p01, p11)), max(max(p0, p1), max(p01, p11)));
   let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   var dmin = 3.4e38;
