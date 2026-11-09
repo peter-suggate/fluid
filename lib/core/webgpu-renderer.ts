@@ -107,6 +107,7 @@ import {
   surfaceMeshConstructionFailed,
 } from "../svo/features/primary-visibility/svo-surface-mesh";
 import { planSceneRuntime } from "./scene-runtime";
+import { samplePrescribedRigidBody } from "./prescribed-rigid-motion";
 import type { GPUStatus } from "./gpu-status";
 import {
   resolveEffectiveRendererStatus,
@@ -987,6 +988,22 @@ export class FluidLabRenderer {
   private rigidPoseReadbacks: StagedReadback[] = [];
   private latestRigidBodyPoses: readonly DrawnRigidBodyPose[] = [];
   private latestRigidBodyPoseRevision = 0;
+  private dryPosedScene?: SceneDescription;
+  private dryPosedTime_s = NaN;
+  private dryPosedBodies: readonly RigidBodyState[] = [];
+
+  /** The roster at `time_s` with every prescribed pose sampled; the poses are published once per scene and time. */
+  private posePrescribedDryBodies(scene: SceneDescription, bodies: RigidBodyState[], time_s: number): RigidBodyState[] {
+    if (!bodies.some(body => body.description.motion === "static" && (body.description.poseTrack || body.description.prescribedMotion))) return bodies;
+    const posed = bodies.map(body => samplePrescribedRigidBody(body, time_s, scene.numerics.fixedDt_s));
+    if (scene !== this.dryPosedScene || time_s !== this.dryPosedTime_s || bodies !== this.dryPosedBodies) {
+      this.dryPosedScene = scene; this.dryPosedTime_s = time_s; this.dryPosedBodies = bodies;
+      this.latestRigidBodyPoses = posed.slice(0, GPU_RIGID_BODY_CAPACITY).map(body => ({ id: body.description.id, position_m: body.position_m, orientation: body.orientation }));
+      publishSceneRigidSurfaces(scene, this.latestRigidBodyPoses);
+      this.latestRigidBodyPoseRevision += 1;
+    }
+    return posed;
+  }
   private svoSourceAvailable = false;
   private svoMaterialsSupported = true;
   private svoLightingSupported = true;
@@ -3041,6 +3058,12 @@ export class FluidLabRenderer {
     // Interactive poses are CPU-owned; presentation may animate independently
     // of the capsule uploaded to the fluid solver.
     const residentRigidBuffer = this.currentInteractionScene ? undefined : this.gpuFluid?.rigidRenderBuffer;
+    // A dry scene has no rigid solver: a body with a prescribed pose is posed
+    // here, at the time the presented state reached (the cloth's clock, which
+    // poses the same track for its contact), and published as a resident
+    // solver's readback is, so picking, cuts and gizmos see the drawn frame.
+    if (!residentRigidBuffer && !this.currentInteractionScene && !planSceneRuntime(scene).fluidSolver)
+      bodies = this.posePrescribedDryBodies(scene, bodies, readyGPUFluid?.info.submittedTime_s ?? time_s);
     if (residentRigidBuffer) {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));
     } else {

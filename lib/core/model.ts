@@ -991,7 +991,7 @@ export function validateScene(scene: SceneDescription): string[] {
       ids.add(body.id);
       if (!SCENE_SHAPES_BY_CODE.some(shape => shape.name === body.shape)) errors.push(`Unsupported rigid shape ${body.shape}`);
       if(body.kinematic!==undefined&&(typeof body.kinematic!=='boolean'||body.kinematic&&body.motion!=='static'))errors.push('Kinematic pose ownership requires a static body');
-      if(body.cuts){try{validateSolidBoxCuts(body.cuts);}catch(e){errors.push(String(e));}if(body.shape!=='rounded-plate'||body.motion!=='static')errors.push('Solid cuts currently require static rounded plates');}
+      if(body.cuts){try{validateSolidBoxCuts(body.cuts);}catch(e){errors.push(String(e));}if(body.motion!=='static'||!(body.shape==='rounded-plate'||body.shape==='sphere'&&scene.systems?.fluid===false))errors.push('Solid cuts currently require static or prescribed rounded plates, or such spheres in a dry scene');}
       if (body.appearance !== undefined && !(body.appearance === 'bub' && body.shape === 'capsule')
         && !(['paddleboat-red', 'paddleboat-teal', 'paddleboat-wheel', 'seaweed'].includes(body.appearance) && body.shape === 'box')) errors.push(`Unsupported appearance for body ${body.id}`);
       if (body.motorAttachment) {

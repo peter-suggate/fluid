@@ -863,3 +863,61 @@ Notes on the table:
 - The cure is either a truncation that preserves the edge constraint (cut both ends of an active edge together), or fewer conservative cuts on cloth far from contacts. The K = 64 skirt is truncated by self-contact bounds that are much tighter than the gap.
 - **For C2 (via the coordinator):** at K = 64 nearly every vertex is truncated every step. The strain limit cannot hold against a bound that removes 156 m of motion per step.
 - **For C1, pending a ruling:** α = 0 for strain-limit edges (not for pins) would stop AVBD accepting a carried violation. It helps partly. I have not changed the solver's α without a ruling.
+
+## 2026-11-09 RESULT (12): moving rigid bodies in dry scenes render, pick and cut through the shared path (ruling 3)
+
+**What a dry scene did before.** A pose-tracked sphere was drawn at its t = 0 pose (the host roster), because no rigid solver poses bodies when there is no fluid. The voxel-editor surface query passed straight through it, because only rounded plates were rigid editing surfaces. So the moving solid was render-only geometry that the cut tool could not address, against AGENTS.md.
+
+**Now:**
+- **Render.** In a scene with no fluid solver and no resident rigid buffer, `webgpu-renderer.ts` (`posePrescribedDryBodies`) poses every prescribed body (pose track or orbit) with `samplePrescribedRigidBody`.
+  - The pose is taken at the time the presented state reached: the cloth's clock, which poses the same track for its contact.
+  - The drawn poses are published exactly as a resident solver's readback is (`latestRigidBodyPoses`, `publishSceneRigidSurfaces`), so the worker snapshot, gizmos, hover and the shared surface query all see the drawn frame.
+- **Cut spheres render exactly.** A sphere is the rounded plate with no core.
+  - `rigid-cut-render.ts` adds `rigidSurfaceCutCount` and `cutSphereSurfaceHit`. Every sphere consumer with the cut atlas (SVO dry `bodyHit`, which shadows also use; the SVO rigid raster; the rigid raymarch) takes the rounded-plate patches and cut planes for a sphere with cuts.
+  - An uncut sphere keeps its closed form.
+- **Pick and cut.** `rigidBodyIsEditableSurface` covers every rounded plate, plus spheres whose pose is static or prescribed in a dry scene.
+  - `roundedPlateSurfaceAt` hits them with `intersectCutSphere` (the same zero-core patches) at the published pose.
+  - `sceneWithRoundedPlateCuts` stores a stroke's box in the body frame, as for plates.
+  - `validateScene` accepts such cuts. On a wet scene's sphere it still fails explicitly ("…or such spheres in a dry scene"), because the fluid's rigid boundary does not cut spheres. A wet scene's spheres keep their object tool.
+- **Cloth contact follows the cut.**
+  - `buildClothBodyField` bakes the body's cuts in the same body frame: max(d, −box), which stays 1-Lipschitz. A remnant thinner than a cell is refused by the field's resolution check.
+  - `ClothSystem` entries are keyed by the document *and* the moving solid (`entryKey`). An edit of the moving solid alone (a cut, a new track) stops the clock, reads the live pose, then rebuilds the entry from it with its BDF2 history, duals and clock, and the rebaked body field. The detector is re-sized for the new field, so there is no runtime pool growth.
+  - A combined stroke that also cuts the cloth rebuilds from the edited document as before.
+- **Catalog.** The three Bridson cards now open `movingSolids: "rigid-body"`.
+  - `bridson2002SceneDescription`'s own default stays `"held"`, because C2's `tests/cloth-contact-scene-solids.test.ts` is written against the held layout (5 of its tests fail if the library default flips).
+  - Flipping the library default is one line once those tests state `movingSolids: 'held'`.
+
+**Regressions:**
+- **CPU** (`tests/cloth-system.test.ts`, "the moving ball is a shared editing surface at its drawn pose…"):
+  - The curtain ball drawn at t = 3 s is hit at its posed surface (to 1e-9 m), not at its t = 0 pose.
+  - A solid stroke cuts it in its body frame: the near ray goes deeper to the cut face; the far side and the ground keep their exact hits.
+  - Drawn at t = 3.5 s, the cut travels with the ball.
+  - Save/load gives the same hits, and undo (the previous document) hits the uncut ball.
+  - The cloth body field reads the removed cap as outside, and the far side is bit-equal to the uncut bake.
+  - The wet-scene sphere is not an editing surface, and its cut fails validation.
+- **GPU raster** (`tests/rigid-cut-render.test.ts`): a sphere with two oriented cuts rasters the same nearest visible surface as the picking oracle (3 µm), with more than 20 carved pixels, and stays the closed form uncut. The dry SVO shader compiles (0 errors), and the raymarch compiles through `rigid-rounded-plate-render`.
+- **GPU cloth** ("a cut of the moving solid at edit time…"):
+  - A sheet resting on the moving sphere at tick 12 has the sphere's cap above 6 cm cut through the shared rigid path.
+  - The clock holds while the entry rebuilds. It resumes at tick 12 from the live pose (jump **0 m**).
+  - The sheet falls the 4 cm onto the cut face: centre 3–8 mm above it at tick 36, no vertex inside the cut body (deepest +0.1 mm), no failure.
+  - Undo (the history endpoint) restores the uncut body and the endpoint pose exactly, and steps on without failure.
+  - One unexplained failure in 6 runs, from the first full-file run. The error text was lost, and it came before the landing log, so it was the rebuild or a halt during the ride. The next 5 runs passed.
+- **GPU, todo** ("in contact, a history endpoint steps on as if never rebuilt"): a rebuild from an endpoint while resting on the moving sphere drifts 2 mm to 1.7 cm from the straight run 6 ticks later.
+  - The endpoint lacks the detector's cross-step per-vertex state: rho_v, and "held in the last step".
+  - The old free-fall undo test is still bit-identical, because no vertex is in contact there.
+  - **For C2:** expose that state. **For C1:** carry it with the solver state.
+  - The run-to-run spread (2.2 mm vs 16.7 mm) also says the detector is not deterministic in contact.
+- The sheet-on-moving-solid test, a `todo` until now, passes after C2's 40d73e7f and is a plain test.
+
+**Bridson rigid-body runs after 40d73e7f** (K = 8, full length):
+
+| Scene | Halts heldConflict at tick | Other |
+|---|---|---|
+| curtain | 122 of 400 | max faces inside solid 1154 |
+| rotating sphere | 128 of 533 | max edge 58% |
+| tablecloth | 226 of 353 | |
+
+- The held variant halts earlier, at its pending solids. The rigid-body variant is the furthest-running product path.
+- For C2.
+
+**C2's dirty `solid-field.ts`** (its uncommitted lifted-facet check) fails the held rotating-sphere GPU test at setup: "a lifted facet near (−0.80, −0.44, 0.50) enters the field by 1.00e-3 m". With HEAD's `solid-field.ts` (scratch copy) the test passes. This is not from C1's changes.

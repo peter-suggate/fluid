@@ -25,3 +25,9 @@ export function intersectRoundedPlate(body:Pick<RigidBodyDescription,'dimensions
   for(let axis=0;axis<3;axis++)if(Math.abs(d[axis]!)>1e-15)for(const side of[-1,1]){const t=(side*extent[axis]!-o[axis]!)/d[axis]!,p=o.map((v,i)=>v+t*d[i]!);if(p.every((v,i)=>Math.abs(v)<=extent[i]!+epsilon)){const n=[0,0,0];n[axis]=-side;accept(t,xyz(quaternionRotate(cut.orientation,vector(n))));}}
  }return best;
 }
+/** A sphere is the rounded plate with no core (radius `dimensions_m.x`): with
+ * local cuts it takes the same exact patches and cut planes, as the GPU's
+ * cutSphereSurfaceHit does. */
+export function intersectCutSphere(body:Pick<RigidBodyDescription,'dimensions_m'|'position_m'|'orientation'|'cuts'>,ray:{readonly origin:Vec3;readonly direction:Vec3},maximum_m=Infinity):RoundedPlateRayHit|null{
+ return intersectRoundedPlate({...body,dimensions_m:{x:0,y:body.dimensions_m.x,z:0}},ray,maximum_m);
+}

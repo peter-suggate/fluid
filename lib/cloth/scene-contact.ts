@@ -20,6 +20,7 @@
 import type { RigidBodyDescription, SceneDescription } from '../core/model';
 import { sampleRigidPoseTrack } from '../core/prescribed-rigid-motion';
 import { sceneCellSizes_m } from '../core/scene-lattice';
+import { applySolidBoxCuts } from '../core/solid-cuts';
 import { solidWorldContentStamp } from '../core/solid-world';
 import { OGC_HULL_EDGES_PER_SAMPLE, OgcContactDetector, type OgcBodyPose, type OgcContactConfig } from './contact/ogc-detector';
 import { buildOgcTopology, type OgcMeshTopology } from './contact/ogc-topology';
@@ -96,17 +97,20 @@ export const CLOTH_BODY_POSES_PER_FRAME = 5;
 
 /**
  * The moving solid's shape baked in its body frame (body origin at 0, axes of the identity orientation) on the scene's
- * lattice cell, with the scene contact's band and the body's friction. Setup only (and a cut of that body, once
- * bodies can be cut). A shape it cannot bake, or a cut body, fails explicitly.
+ * lattice cell, with the scene contact's band and the body's friction, minus the body's local cuts. Setup and edit
+ * time only (ClothSystem.adopt rebakes a cut body). A shape it cannot bake fails explicitly.
  */
 export function buildClothBodyField(scene: SceneDescription, body: RigidBodyDescription, r: number): ClothSolidField {
-  if (body.cuts?.length) throw new Error(`Cloth contact cannot bake the cuts of moving solid '${body.id}' yet`);
-  const cell = sceneCellSizes_m(scene)[0], band = clothContactBand(r);
+  const cell = sceneCellSizes_m(scene)[0], band = clothContactBand(r), cuts = body.cuts ?? [];
   switch (body.shape) {
     case 'sphere': {
       const R = body.dimensions_m.x, reach = R + band + 2 * cell;
       if (!(R > 0)) throw new Error(`Moving solid '${body.id}' needs a positive sphere radius`);
-      return buildClothSolidField({ parts: [{ kind: 'sdf', sdf: p => Math.hypot(p[0], p[1], p[2]) - R, lo: [-R, -R, -R], hi: [R, R, R], mu: body.friction }],
+      // The body's local cuts are in this same body frame (the shared editing path stores them so): each one
+      // subtracts an oriented box, max(d, -box), which stays 1-Lipschitz. The field's resolution check refuses
+      // a remnant thinner than its cell.
+      const sdf = (p: readonly number[]) => applySolidBoxCuts(Math.hypot(p[0]!, p[1]!, p[2]!) - R, cuts, { x: p[0]!, y: p[1]!, z: p[2]! });
+      return buildClothSolidField({ parts: [{ kind: 'sdf', sdf, lo: [-R, -R, -R], hi: [R, R, R], mu: body.friction }],
         lo: [-reach, -reach, -reach], hi: [reach, reach, reach], cell, band });
     }
     default: throw new Error(`Cloth contact cannot bake a moving solid of shape ${body.shape} yet ('${body.id}')`);

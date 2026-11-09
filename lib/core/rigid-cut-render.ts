@@ -90,4 +90,9 @@ fn roundedPlateSurfaceHit(origin:vec3f,direction:vec3f,half:vec3f,bodyIndex:u32)
   }
  }return best;
 }
+fn rigidSurfaceCutCount(bodyIndex:u32)->u32{return u32(textureLoad(rigidSurfaceCuts,vec2i(i32(bodyIndex),0),0).y);}
+// A sphere is the rounded plate with no core (the rectangle shrinks to its
+// centre), so a sphere with local cuts takes the same exact patches and cut
+// planes. An uncut sphere keeps its own closed form.
+fn cutSphereSurfaceHit(origin:vec3f,direction:vec3f,radius:f32,bodyIndex:u32)->RoundedPlateSurfaceHit{return roundedPlateSurfaceHit(origin,direction,vec3f(radius),bodyIndex);}
 `;}

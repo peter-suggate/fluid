@@ -113,7 +113,10 @@ class PoseMirror {
 
 interface Entry {
   readonly document: ClothDocument;
+  /** The document and the scene's moving solid it was built against (`entryKey`). */
   readonly key: string;
+  /** The document alone (`clothDocumentsKey`): equal across an edit of the moving solid only. */
+  readonly documentKey: string;
   readonly solver: ClothGPUSolver;
   readonly mirror: PoseMirror;
   /** The contact detector and the static field it holds (`fieldKey` names the solid world and frame it was built for). */
@@ -201,7 +204,16 @@ export class ClothSystem {
     return { field: buildClothSceneField(this.scene, origin, r), fieldKey };
   }
 
-  private async build(document: ClothDocument, topologyRevision: number, frame?: ClothVector): Promise<Entry> {
+  /** What an entry is built from: the document, and the scene's moving solid (its shape, cuts, friction and track). */
+  private entryKey(document: ClothDocument): string {
+    return JSON.stringify([clothDocumentsKey([document]), clothSceneMovingSolids(this.scene)[0] ?? null]);
+  }
+
+  /**
+   * Build a document's entry. `start` (an edit of the moving solid only) starts it from that accepted pose, with
+   * its BDF2 history, duals and clock, instead of the document's initial state.
+   */
+  private async build(document: ClothDocument, topologyRevision: number, frame?: ClothVector, start?: ClothSurfacePublication): Promise<Entry> {
     const settings = document.solver ?? {};
     if (settings.tier === 'B') throw new Error(`Cloth document '${document.id}' asks for the Tier B patch solve, which is not installed yet (lane C1, M3)`);
     if (document.geometry.kind !== 'inline') throw new Error(`Cloth document '${document.id}' has an unsupported geometry kind`);
@@ -230,7 +242,8 @@ export class ClothSystem {
         integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? (coarse ? DEFAULT_COARSE_ITERATIONS : DEFAULT_ITERATIONS), chebyshevRho: settings.chebyshevRho ?? 0,
         // The extrapolating guesses overshoot an unconverged solve; the coarse step carries the bulk motion instead.
         ...(coarse ? { coarse, initialGuess: 'previous' as const } : {}),
-        positions_m: data.initialPositions_m, velocities_m_s: data.initialVelocities_m_s, solverState: data.solverState, label,
+        positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
+        solverState: start ? start.solverState : data.solverState, label,
         contact: contact.solverContact(CLOTH_BINDING.contact),
         // The coarse move is truncated like a colour sweep's, before the sweeps start from it.
         hooks: { ...contact.stepHooks, afterCoarse: (pass: GPUComputePassEncoder) => contact.encodeTruncate(pass) },
@@ -239,12 +252,13 @@ export class ClothSystem {
       contact.setSolidField(field);
       if (bodyField) contact.setBodyField(bodyField);
     } catch (error) { contact.destroy(); throw error; }
-    const positions = Float64Array.from(data.initialPositions_m ?? data.restPositions_m);
-    const entry: Entry = { document, key: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, contact), contact, field, fieldKey, body, origin,
+    const positions = Float64Array.from(start?.positions_m ?? data.initialPositions_m ?? data.restPositions_m);
+    const velocities = start ? start.velocities_m_s : data.initialVelocities_m_s, solverState = start ? start.solverState : data.solverState;
+    const entry: Entry = { document, key: this.entryKey(document), documentKey: clothDocumentsKey([document]), solver, mirror: new PoseMirror(this.device, solver, label, contact), contact, field, fieldKey, body, origin,
       revision: ++renderRevisions, topologyRevision, steps: 0, sinceStatus: 0,
       publication: { documentId: document.id, topology: data, positions_m: positions,
-        ...(data.initialVelocities_m_s ? { velocities_m_s: Float64Array.from(data.initialVelocities_m_s) } : {}),
-        ...(data.solverState ? { solverState: data.solverState } : {}),
+        ...(velocities ? { velocities_m_s: Float64Array.from(velocities) } : {}),
+        ...(solverState ? { solverState } : {}),
         generation: this.generation, tick: 0, topologyRevision, time_s: solver.startTime_s } };
     entry.publication = { ...entry.publication, tick: this.tick(entry) };
     return entry;
@@ -337,16 +351,29 @@ export class ClothSystem {
   /**
    * Take a new revision of the scene. Documents whose content changed (a cut,
    * an undo) are rebuilt from the pose the edit carries; the live entry keeps
-   * drawing until its replacement is ready. Roster changes rebuild the system.
+   * drawing until its replacement is ready. An edit of the moving solid alone
+   * (a cut of it, a new track) rebakes its body-frame field and rebuilds the
+   * entry from the live pose, read after the clock has stopped for it, so the
+   * cloth carries on where it was. Roster changes rebuild the system.
    */
   adopt(scene: SceneDescription): void {
     this.scene = scene;
     if (scene.solidVoxels !== this.solidVoxels) { this.solidVoxels = scene.solidVoxels; this.followSolids(); }
     for (const document of scene.cloth ?? []) {
-      const live = this.entries.get(document.id), key = clothDocumentsKey([document]);
+      const live = this.entries.get(document.id), key = this.entryKey(document);
       if (this.building.get(document.id)?.key === key || (!this.building.has(document.id) && live?.key === key)) continue;
-      const topologyRevision = Math.max(sceneClothSurface(scene, document.id)?.topologyRevision ?? 0, live ? live.topologyRevision + 1 : 0);
-      const ready = this.build(document, topologyRevision, live?.origin).then(entry => {
+      const solidOnly = !!live && !this.building.has(document.id) && live.documentKey === clothDocumentsKey([document]);
+      const topologyRevision = solidOnly ? live.topologyRevision
+        : Math.max(sceneClothSurface(scene, document.id)?.topologyRevision ?? 0, live ? live.topologyRevision + 1 : 0);
+      // `building` is set below, before any await, so no step is encoded between the edit and the pose read.
+      const built = solidOnly
+        ? this.readPose().then(() => {
+          if (this.entries.get(document.id) !== live) throw new Error('the cloth was rebuilt while its moving solid was edited');
+          if (live.publication.tick !== this.tick(live)) throw new Error(`the pose read for the moving solid's edit is at tick ${live.publication.tick}, the cloth at ${this.tick(live)}`);
+          return this.build(document, topologyRevision, live.origin, live.publication);
+        })
+        : this.build(document, topologyRevision, live?.origin);
+      const ready = built.then(entry => {
         if (this.destroyed || this.building.get(document.id)?.key !== key) { this.retire(entry); return; }
         const old = this.entries.get(document.id);
         this.entries.set(document.id, entry); this.building.delete(document.id);

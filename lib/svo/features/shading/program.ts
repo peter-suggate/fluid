@@ -4683,6 +4683,7 @@ fn bodyHit(ro:vec3f,rd:vec3f,body:BodyGPU,bodyIndex:u32)->DryHit {
   else if(shape==9){let weed=seaweedHit(localOrigin,localDirection);t=select(DRY_MISS,weed.t,weed.t<1e19);normal=weed.normal;}
   else if(shape==10){let plate=roundedPlateSurfaceHit(localOrigin,localDirection,body.halfSizeShape.xyz,bodyIndex);t=select(DRY_MISS,plate.t,plate.t<1e19);normal=plate.normal;}
   else if(shape==5){let robot=bubHit(localOrigin,localDirection,body.halfSizeShape.xyz);t=select(DRY_MISS,robot.t,robot.t<1e19);normal=robot.normal;}
+  else if(shape==0&&rigidSurfaceCutCount(bodyIndex)>0u){let sphere=cutSphereSurfaceHit(localOrigin,localDirection,body.halfSizeShape.x,bodyIndex);t=select(DRY_MISS,sphere.t,sphere.t<1e19);normal=sphere.normal;}
   else if (shape==0) {
     let radius=body.halfSizeShape.x; let b=dot(localOrigin,localDirection); let discriminant=b*b-dot(localOrigin,localOrigin)+radius*radius;
     if (discriminant>=0.0) { let root=sqrt(discriminant); t=-b-root; if(t<=1e-4){t=-b+root;} if(t>1e-4){normal=normalize(localOrigin+localDirection*t);}else{t=DRY_MISS;} }

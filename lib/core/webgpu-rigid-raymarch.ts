@@ -50,7 +50,8 @@ fn cylinderRigidHit(ro:vec3f,rd:vec3f,radius:f32,halfHeight:f32,capped:bool)->Ri
 fn bodyRigidHit(ro:vec3f,rd:vec3f,body:BodyGPU,bodyIndex:u32)->RigidHit{
   if(body.colorSelected.w<0.0){return RigidHit(1e20,vec3f(0,1,0));}
   let o=qinv(body.orientation,ro-body.positionRadius.xyz);let d=qinv(body.orientation,rd);let shape=i32(round(body.halfSizeShape.w));var hit=RigidHit(1e20,vec3f(0,1,0));
-  if(shape==0){hit=sphereRigidHit(o,d,vec3f(0),body.halfSizeShape.x);}
+  if(shape==0&&rigidSurfaceCutCount(bodyIndex)>0u){let sphere=cutSphereSurfaceHit(o,d,body.halfSizeShape.x,bodyIndex);hit=RigidHit(sphere.t,sphere.normal);}
+  else if(shape==0){hit=sphereRigidHit(o,d,vec3f(0),body.halfSizeShape.x);}
   else if(shape==1){let interval=boxHit(o,d,-body.halfSizeShape.xyz,body.halfSizeShape.xyz);var t=interval.x;if(t<=1e-4){t=interval.y;}
     if(t>1e-4&&interval.x<=interval.y){let p=o+d*t;let q=abs(p/max(body.halfSizeShape.xyz,vec3f(1e-5)));var n=vec3f(0,0,sign(p.z));
       if(q.x>=q.y&&q.x>=q.z){n=vec3f(sign(p.x),0,0);}else if(q.y>=q.z){n=vec3f(0,sign(p.y),0);}hit=RigidHit(t,n);}}

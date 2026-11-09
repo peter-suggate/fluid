@@ -368,7 +368,8 @@ fn rigidCapsuleHit(origin:vec3f,direction:vec3f,radius:f32,halfHeight:f32)->Rigi
 fn rigidBodyHit(origin:vec3f,direction:vec3f,body:BodyGPU,bodyIndex:u32)->RigidRasterHit{
   let localOrigin=rigidQinv(body.orientation,origin-body.positionRadius.xyz);let localDirection=normalize(rigidQinv(body.orientation,direction));
   let shape=i32(round(body.halfSizeShape.w));var hit=rigidMiss();
-  if(shape==0){hit=rigidSphereHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6));}
+  if(shape==0&&rigidSurfaceCutCount(bodyIndex)>0u){let sphere=cutSphereSurfaceHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),bodyIndex);hit=RigidRasterHit(sphere.t,sphere.normal,0u,select(0u,1u,sphere.t<1e19));}
+  else if(shape==0){hit=rigidSphereHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6));}
   else if(shape==1){hit=rigidBoxHit(localOrigin,localDirection,max(body.halfSizeShape.xyz,vec3f(1e-6)));}
   else if(shape==2){hit=rigidCapsuleHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),max(body.halfSizeShape.y,0.0));}
   else if(shape==3){hit=rigidCylinderHit(localOrigin,localDirection,max(body.halfSizeShape.x,1e-6),max(body.halfSizeShape.y,1e-6));}
