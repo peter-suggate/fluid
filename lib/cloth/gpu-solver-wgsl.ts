@@ -442,9 +442,10 @@ fn edgeTerm(v: u32, xv: vec3f, e: u32, s0: System) -> System {
   if (!(len > 0.0)) { return s; }
   let dual = edgeDual(e); let C = len - dual.z; let n = d / len;
   let f = max(dual.y * C + dual.x, 0.0);
-  // AVBD (14): a force clamped at zero keeps the rescaled stiffness -lambda / C.
   var kEff = dual.y;
-  if (!(dual.y * C + dual.x > 0.0)) { kEff = select(0.0, max(-dual.x / C, 0.0), C != 0.0); }
+  ${options.newton ? `// Newton: the exact Hessian of the augmented term, zero while its clamped force is zero.
+  if (!(dual.y * C + dual.x > 0.0)) { kEff = 0.0; }` : `// AVBD (14): a force clamped at zero keeps the rescaled stiffness -lambda / C.
+  if (!(dual.y * C + dual.x > 0.0)) { kEff = select(0.0, max(-dual.x / C, 0.0), C != 0.0); }`}
   s.g += f * n; s.H += (kEff - f / len) * outer(n, n) + (f / len) * IDENTITY;
   return s;
 }
@@ -801,8 +802,8 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   }
 }
 
-@compute @workgroup_size(${CLOTH_WORKGROUP}) fn edgeDualUpdate(@builtin(global_invocation_id) id: vec3u) {
-  let e = id.x;
+// AVBD dual update of edge e at the current positions: lambda <- clamp(k C + lambda, 0, kMax l), k grows while active.
+fn updateEdgeDual(e: u32) {
   if (e >= P.n.z) { return; }
   let er = rest[P.rest0.w + e];
   if (!(er.y > 0.0)) { return; }
@@ -815,6 +816,7 @@ fn groupSum(lane: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   if (lambda > 0.0) { d.y = min(d.y + BETA * s * abs(C) / er.x, kMax); }
   state[P.state0.y + e] = d;
 }
+@compute @workgroup_size(${CLOTH_WORKGROUP}) fn edgeDualUpdate(@builtin(global_invocation_id) id: vec3u) { updateEdgeDual(id.x); }
 
 // Optional diagnostics, before finishStep: the step's force residual, strain and energies.
 var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;

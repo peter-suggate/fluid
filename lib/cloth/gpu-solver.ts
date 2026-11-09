@@ -355,7 +355,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
 }
 
 const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseTrialBack', 'coarseChooseBack', 'coarseApply'] as const;
-const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgApply', 'pcgUpdate', 'nwTrial', 'nwChoose', 'nwApply'] as const;
+const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgApply', 'pcgUpdate', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
 type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number] | typeof NEWTON_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
 
@@ -404,7 +404,6 @@ export class ClothGPUSolver {
       this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
       if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
       if (options.contact) throw new Error('Cloth Newton solver does not take contact yet (C2 pair terms and the OGC line-search filter)');
-      if (t.edgeCount && model.edgeStrainLimit.some(e => e > 0)) throw new Error('Cloth Newton solver does not take strain limits yet');
     } else if (options.newton) throw new Error('Cloth newton options need method \'newton\'');
     const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1 + (this.method === 'newton' ? 1 : 0);
     if (options.coarseEvery !== undefined && !(Number.isInteger(options.coarseEvery) && options.coarseEvery >= 1)) throw new Error('Cloth coarse correction interval must be a positive integer');
@@ -633,6 +632,7 @@ export class ClothGPUSolver {
       this.run(pass, 'nwTrial', W);
       this.run(pass, 'nwChoose', 1);
       this.run(pass, 'nwApply', W);
+      if (this.tables.strainLimited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
     }
     this.hooks.beforeFinish?.(pass);
     if (this.diagnostics) {

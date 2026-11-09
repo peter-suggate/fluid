@@ -155,6 +155,20 @@ fn nwApplyAt(v: u32, pv: vec3f) -> vec3f {
       out += sd.x * ak * g0 + sd.y * bk * g1 + sd.z * (ak * g1 + bk * g0);
     }
   }
+  // Strain-limit edges (augmented Lagrangian, active only): k n n^T + (f / len) (I - n n^T) on p_v - p_other.
+  if (P.flags.z != 0u) {
+    let xv = pos(v);
+    for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
+      let e = topo[P.topo1.y + j] >> 2u;
+      if (!(rest[P.rest0.w + e].y > 0.0)) { continue; }
+      let ev = edges(e); let other = select(ev.x, ev.y, ev.x == v);
+      let dd = xv - pos(other); let len = length(dd);
+      let dual = edgeDual(e); let f = dual.y * (len - dual.z) + dual.x;
+      if (!(len > 0.0) || !(f > 0.0)) { continue; }
+      let n = dd / len; let dp = pv - nwP(other); let dn = dot(n, dp);
+      out += dual.y * dn * n + (f / len) * (dp - dn * n);
+    }
+  }
   out += stencilDiagonal(v) * pv;
   let hd = 1.0 / h;
   for (var j = topo[P.topo2.z + v]; j < topo[P.topo2.z + v + 1u]; j++) {
@@ -297,6 +311,17 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
     for (var o = topo[P.topo0.z + v]; o < topo[P.topo0.z + v + 1u]; o++) { ds1 += bendW(o) * (nwD(bendJ(o)) - dv); }
     alpha = 1.0;
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, bendDelta(q, alpha * ds1)); alpha *= 0.5; }
+    // Strain-limit edges whose first slot v is: exact in the relative move d_v - d_other.
+    if (P.flags.z != 0u) {
+      for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
+        let entry = topo[P.topo1.y + j];
+        if ((entry & 3u) != 0u) { continue; }
+        let e = entry >> 2u; let ev = edges(e); let other = select(ev.x, ev.y, ev.x == v);
+        let rel = dv - nwD(other);
+        alpha = 1.0;
+        for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, edgeDelta(v, xv, e, alpha * rel)); alpha *= 0.5; }
+      }
+    }
   }
   let base = nwPartial(${CLOTH_NEWTON_PARTIALS}u);
   nwPartialSum(lane, wgi, nwE[0], base);
@@ -331,6 +356,13 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
   let ctl = nw[nwControl()];
   if (v >= P.n.x || !(ctl.z > 0.0)) { return; }
   positions[v] = vec4f(pos(v) + ctl.z * nwD(v), positions[v].w);
+}
+
+// After each applied Newton iteration (not once Newton is done): the AVBD dual update of every strain-limit edge, so
+// the next iteration's gradient carries the new multipliers and the residual test sees any constraint still violated.
+@compute @workgroup_size(${workgroup}) fn nwEdgeDuals(@builtin(global_invocation_id) id: vec3u) {
+  if (nw[nwControl()].x != 0.0) { return; }
+  updateEdgeDual(id.x);
 }
 `;
 }

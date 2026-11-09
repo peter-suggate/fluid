@@ -1,8 +1,8 @@
 /**
  * The Newton-PCG GPU step (method 'newton') against the Float64 oracle run to convergence: the same objective
  * (BDF2 inertia, membrane, bending, damping), so a converged Newton step and a converged VBD step land on the same
- * minimizer. Pins are Dirichlet DOFs in Newton and AVBD terms in the oracle, which agree at convergence. Also the
- * refusals: unknown methods, caps, and the terms Newton does not take yet. Skips without WEBGPU_NODE_MODULE.
+ * minimizer. Pins are Dirichlet DOFs in Newton and AVBD terms in the oracle, which agree at convergence; strain limits are
+ * augmented-Lagrangian terms in both, whose duals reach the same KKT point. Also the refusals: unknown methods and caps. Skips without WEBGPU_NODE_MODULE.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -64,11 +64,39 @@ test('Newton-PCG steps match the converged Float64 oracle over a BDF2 run of a c
   solver.destroy();
 }));
 
-test('the Newton method refuses unknown methods, bad caps and the terms it does not take yet', { skip: !gpu }, async () => withDevice(async device => {
+test('Newton-PCG with augmented-Lagrangian strain limits matches the converged Float64 oracle with the limit active', { skip: !gpu }, async () => withDevice(async device => {
+  const limit = 0.01, model = setup(10, { ...cotton, strainLimit: limit }), steps = 15;
+  // The multipliers converge over Newton iterations (one AVBD dual update after each): 16 leave 3.4e-5 m, 32 reach 3.1e-6.
+  const solver = await ClothGPUSolver.create(device, model, { ...base, method: 'newton', newton: { iterations: 32, pcgIterations: 200, pcgTolerance: 1e-4, residualTolerance: 1e-5 } });
+  const st = createClothOracleState(model, model.topology.data.restPositions_m);
+  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 250, chebyshevRho: 0, initialGuess: 'previous' };
+  const coarse = new ClothCoarseCorrection(model, buildClothCoarseSpace(model.topology));
+  for (let s = 0; s < steps; s++) clothOracleStep(model, st, options, false, undefined, coarse);
+  solver.step(steps);
+  const x = await solver.readPositions(), status = await solver.readStatus(), ctl = await solver.readNewtonControl();
+  assert.equal(status.status, 0); assert.equal(status.steps, steps);
+  const t = model.topology, strain = (p: ArrayLike<number>) => {
+    let worst = -Infinity;
+    for (let e = 0; e < t.edgeCount; e++) {
+      const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!;
+      worst = Math.max(worst, Math.hypot(p[3 * a]! - p[3 * b]!, p[3 * a + 1]! - p[3 * b + 1]!, p[3 * a + 2]! - p[3 * b + 2]!) / t.edgeRestLength_m[e]! - 1);
+    }
+    return worst;
+  };
+  let active = 0, worst = 0;
+  for (let e = 0; e < t.edgeCount; e++) if (st.edgeDuals[2 * e]! > 0) active++;
+  for (let i = 0; i < x.length; i++) worst = Math.max(worst, Math.abs(x[i]! - st.x[i]!));
+  assert.ok(active > 0, 'the limit is active in the oracle');
+  assert.ok(strain(x) < limit * 1.05, `GPU strain ${strain(x)} within the limit ${limit}`);
+  assert.ok(worst < 1e-5, `Newton GPU vs converged oracle: ${worst} m`);
+  assert.ok(Math.sqrt(ctl[5]! / ctl[6]!) < 1e-2, `residual ${Math.sqrt(ctl[5]! / ctl[6]!)}`);
+  solver.destroy();
+}));
+
+test('the Newton method refuses unknown methods and bad caps', { skip: !gpu }, async () => withDevice(async device => {
   const model = setup(6);
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base, method: 'jacobi' as never }), /Unknown cloth solver method/);
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base, method: 'newton' }), /needs integer caps/);
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base, method: 'newton', newton: { iterations: 2, pcgIterations: 0 } }), /needs integer caps/);
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton: { iterations: 2, pcgIterations: 4 } }), /need method 'newton'/);
-  await assert.rejects(ClothGPUSolver.create(device, setup(6, { ...cotton, strainLimit: 0.02 }), { ...base, method: 'newton', newton: { iterations: 2, pcgIterations: 4 } }), /strain limits/);
 }));
