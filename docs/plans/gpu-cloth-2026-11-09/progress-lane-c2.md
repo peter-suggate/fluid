@@ -980,3 +980,50 @@ The gap-3r test:
   - Sideways drift is 7e-6 m with 0 plate cuts. The least carry with J|d| had given 9.5 mm.
 
 **Note for C1.** The static solid now also uses the r floor and the per-axis bound, so there is less truncation near solids. Nothing changes on your side.
+
+## 2026-11-09 M6 fix: heldConflict with cloth resting on the moving solid
+
+Repro: C1's `todo` test in `tests/cloth-system.test.ts`. A 24×24 sheet lands on a sliding, turning sphere (1 cm lattice) and
+halted at tick 29. C1's riser probe (a translating sphere on the default lattice) halted at tick 9. The pair it recorded was
+a cloth edge against a body hull edge. Read back at the halt, the two were about 5 µm apart, with a separating plane.
+
+There were two causes, and both are fixed in `ogc-detector-wgsl.ts`:
+1. **The conflict threshold equalled the gap the truncation keeps.** The planes pass keeps each side sepEps from its plane,
+   so a pair pressed together rests 2 sepEps apart. The conflict test was `g1 < 2 sepEps && g1 < gap(X)`. For cloth carried
+   rigidly with the solid, g1 equals gap(X) up to rounding, so every held round conflicted again. The test is now
+   `g1 < sepEps` (oracle `predictedConflict` changed to match). To conflict, a prediction must close the gap by at least
+   sepEps, which is the rounding scale sepEps is sized for. Between sepEps and 2 sepEps, the planes pass starts both sides on
+   the wrong side of the plane and lets neither cross further.
+2. **A pair with a moving-solid sample kept a world-fixed plane.** A co-rotating pair (cloth carried with a turning sphere)
+   closes along a fixed axis by about turn × extent, roughly 0.5 mm a tick here. That registers as a conflict that carrying
+   can never remove. The plane is now certified at X and turned to the end pose (`bodyFrame`: R1 R0ᵀ in the mandatory round,
+   which detects at the start pose; no turn after it). The conflict test and the planes pass then meet the plane where the
+   samples are fixed: in the solid's frame.
+
+Result: `a sheet lands on the moving solid and rides it` passes. The nearest vertex is 0.1 mm off the sphere, the cap
+1.0 mm above its top, the peak body contacts 752, and there is no failing status. **C1: please drop its `todo`.**
+`cloth-contact-body` (4), `cloth-contact-gpu` (11) and `cloth-contact-solid` (10) pass, and so does check:types. Unit tests:
+1669 pass; the one failure is the known `merge cap`.
+
+The riser probe now runs all 36 ticks with no heldConflict, but from tick 12, 2–17 faces lie inside the rising sphere. This
+is the same family as the tablecloth item below; see "lift".
+
+Also in this commit:
+- **Sample build:** the field is sampled without allocation, and bricks and point hashes use numeric keys. The output is
+  bit-identical (sha1 of samples and edges unchanged on all three scenes).
+
+  | Scene | Samples + hull edges, before | After |
+  |---|---|---|
+  | Rotating sphere | 8.1 s | 2.3 s |
+  | Curtain | 5.1 s | 1.2 s |
+  | Tablecloth | 7.3 s | 2.4 s |
+
+  The remaining cost is seeding (0.8–1.2 s: Newton projections and κ probes) and lift measurement.
+- **Query split into three pipelines** (vertices, edges, samples with hull edges) over the same indirect arguments. A
+  workgroup with no thread of its role exits at once. The single kernel carried the largest role's registers into every
+  thread. The isolated query, with envelopeScale 1 on the rotating sphere at K 8, went from 4.06 ms to 2.16 ms (vertex 0.26,
+  edge 1.11, sample 0.79). The tick-level effect is not yet measured cleanly: another lane's K = 64 run shared the GPU.
+- **Dispatch cost measured** (scratch microbenchmark, Dawn/Metal on the M1 Max): about 15 µs per indirect dispatch, even
+  with zero workgroups, and about 6–8 µs per direct one-workgroup dispatch. Skipping validation changes nothing. One
+  detection call is 36 indirect dispatches (with heldRounds 3) plus 4 direct ones, about 0.2–0.5 ms, and a step makes 9
+  calls. That overhead is a floor under the "contact < 3 ms" target, before any work is done.

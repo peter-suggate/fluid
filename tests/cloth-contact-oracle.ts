@@ -542,7 +542,7 @@ export function bruteForcePredictedPairs(mesh: OracleMesh, rq: number[], W: V3[]
 /**
  * A pair the round cannot divide: no separating plane at X while some vertex
  * is predicted to move, or predicted positions X + w that cross (or close to
- * within 2 sepEps) along the pair's plane normal. A round with a conflict is
+ * within sepEps, half the gap the truncation keeps) along the pair's plane normal. A round with a conflict is
  * redone with every prediction held at 0, which is Planar-DAT itself.
  */
 export function predictedConflict(p: DatPair, X: V3[], W: V3[], sepEps: number): boolean {
@@ -551,7 +551,7 @@ export function predictedConflict(p: DatPair, X: V3[], W: V3[], sepEps: number):
   if (!sep) return true;
   const Y = p.ids.map(i => add(X[i], W[i]));
   const g1 = supportGap(sep.n, Y.slice(0, p.nA), Y.slice(p.nA));
-  return g1 < 2 * sepEps && g1 < sep.gap;
+  return g1 < sepEps && g1 < sep.gap;
 }
 
 /**

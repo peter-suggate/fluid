@@ -34,7 +34,7 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_WGSL, OGC_REDO_LAST_WGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, OGC_PLANES_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
@@ -186,7 +186,8 @@ export interface OgcFrameCounters {
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
 
 const WG = 64;
-const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, insert: 6, query: 7, bound: 8 } as const;
+/** Each round kernel's indirect-argument slot; the query's roles share the query's. */
+const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, insert: 6, queryVertex: 7, queryEdge: 7, querySample: 7, bound: 8 } as const;
 /** The detection round's kernels in dispatch order (for profiling). */
 export const OGC_ROUND_KERNELS = Object.keys(DISPATCH) as (keyof typeof DISPATCH)[];
 /** Hull edges the contact buffer holds per authored surface sample (a sample's fan holds a few neighbours past it). */
@@ -535,7 +536,7 @@ export class OgcContactDetector {
       ["scan2", ogcScanWGSL(2), [0, 7]],
       ["scan3", ogcScanWGSL(3), [0, 7]],
       ["insert", ogcGridInsertWGSL(false), [0, 1, 4, 6, 7, 9, 14]],
-      ["query", OGC_QUERY_WGSL, [0, 1, 4, 5, 7, 8, 9, 11, 14]],
+      ...OGC_QUERY_ROLES.map(role => [role, ogcQueryWGSL(role), [0, 1, 4, 5, 7, 8, 9, 11, 14]] as [string, string, number[]]),
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
       ["decide", OGC_DECIDE_WGSL, [0, 9, 10]],

@@ -383,13 +383,49 @@ export function rebuildClothSolidField(field: ClothSolidField, src: ClothSolidSo
 
 /** The field at a cloth-local point: phi (m), its gradient, the nearest node's friction, and whether a stored brick holds the point (else phi reads band). */
 export function sampleClothSolidField(field: ClothSolidField, p: V3): { phi: number; grad: V3; mu: number; stored: boolean } {
-  const q = p.map((v, a) => (v - field.origin[a]!) / field.cell);
-  const b = q.map(v => Math.floor(v / SOLID_BRICK_CELLS));
-  const brick = field.bricks.get(b.join(","));
-  if (!brick) return { phi: field.band, grad: [0, 0, 0], mu: 0, stored: false };
-  const l = q.map((v, a) => v - b[a]! * SOLID_BRICK_CELLS) as unknown as V3, s = trilinear(brick.values, l);
-  const n = l.map(v => Math.min(SOLID_BRICK_CELLS, Math.max(0, Math.round(v))));
-  return { phi: s[3], grad: [s[0] / field.cell, s[1] / field.cell, s[2] / field.cell], mu: brick.mu[nodeIndex(n[0]!, n[1]!, n[2]!)]! / SOLID_MU_SCALE, stored: true };
+  const o = sampleInto(field, brickTable(field), p[0], p[1], p[2], new Float64Array(SAMPLE_OUT));
+  if (!o[5]) return { phi: field.band, grad: [0, 0, 0], mu: 0, stored: false };
+  return { phi: o[0]!, grad: [o[1]!, o[2]!, o[3]!], mu: o[4]!, stored: true };
+}
+
+// Setup-time sampling without allocation (the samples' build reads the field a few million
+// times): bricks by a numeric key, and the value, gradient and friction written into `out`.
+const brickKey = (x: number, y: number, z: number) => ((z + 65536) * 131072 + (y + 65536)) * 131072 + (x + 65536);
+const brickTables = new WeakMap<ClothSolidField, Map<number, ClothSolidBrick>>();
+function brickTable(field: ClothSolidField): Map<number, ClothSolidBrick> {
+  let t = brickTables.get(field);
+  if (!t) {
+    t = new Map();
+    for (const b of field.bricks.values()) t.set(brickKey(b.brick[0], b.brick[1], b.brick[2]), b);
+    brickTables.set(field, t);
+  }
+  return t;
+}
+const SAMPLE_OUT = 6;
+/** out = [phi, d/dx, d/dy, d/dz (per m), mu, stored (1 or 0)]; the same arithmetic as trilinear. */
+function sampleInto(field: ClothSolidField, table: Map<number, ClothSolidBrick>, px: number, py: number, pz: number, out: Float64Array): Float64Array {
+  const B = SOLID_BRICK_CELLS, h = field.cell, O = field.origin;
+  const qx = (px - O[0]) / h, qy = (py - O[1]) / h, qz = (pz - O[2]) / h;
+  const bx = Math.floor(qx / B), by = Math.floor(qy / B), bz = Math.floor(qz / B);
+  const brick = table.get(brickKey(bx, by, bz));
+  if (!brick) { out[0] = field.band; out[1] = 0; out[2] = 0; out[3] = 0; out[4] = 0; out[5] = 0; return out; }
+  const lx = qx - bx * B, ly = qy - by * B, lz = qz - bz * B;
+  const cx = Math.min(B - 1, Math.max(0, Math.floor(lx))), cy = Math.min(B - 1, Math.max(0, Math.floor(ly))), cz = Math.min(B - 1, Math.max(0, Math.floor(lz)));
+  const fx = lx - cx, fy = ly - cy, fz = lz - cz, values = brick.values;
+  let gx = 0, gy = 0, gz = 0, phi = 0;
+  for (let k = 0; k < 8; k++) {
+    const b0 = k & 1, b1 = (k >> 1) & 1, b2 = k >> 2;
+    const w0 = b0 ? fx : 1 - fx, w1 = b1 ? fy : 1 - fy, w2 = b2 ? fz : 1 - fz;
+    const v = values[nodeIndex(cx + b0, cy + b1, cz + b2)]!;
+    phi += v * w0 * w1 * w2;
+    gx += v * (b0 ? 1 : -1) * w1 * w2;
+    gy += v * (b1 ? 1 : -1) * w2 * w0;
+    gz += v * (b2 ? 1 : -1) * w0 * w1;
+  }
+  const nx = Math.min(B, Math.max(0, Math.round(lx))), ny = Math.min(B, Math.max(0, Math.round(ly))), nz = Math.min(B, Math.max(0, Math.round(lz)));
+  out[0] = phi; out[1] = gx / h; out[2] = gy / h; out[3] = gz / h;
+  out[4] = brick.mu[nodeIndex(nx, ny, nz)]! / SOLID_MU_SCALE; out[5] = 1;
+  return out;
 }
 
 /** Words of one surface sample on the GPU: position (f32 x3) and friction coefficient. */
@@ -537,31 +573,33 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
   // A cell's turn is read two cells out (it finds an edge the centre's own cell misses); a seed's
   // a tenth of a cell out, so a point on a voxel solid's flat face near its edge is not kept.
   const h = field.cell, kappaMin = SOLID_SAMPLE_TURN_FLOOR / h, CELL_STEP = 2, localStep = 0.1;
-  const sample = (p: V3) => sampleClothSolidField(field, p);
+  const table = brickTable(field), so = new Float64Array(SAMPLE_OUT);
+  const phiAt = (x: number, y: number, z: number) => sampleInto(field, table, x, y, z, so)[0]!;
   // Newton onto phi = 0 along the gradient; undefined when it leaves the stored field or drifts more than a cell.
   const project = (p0: V3): SurfacePoint | undefined => {
-    let p: V3 = p0;
+    let x = p0[0], y = p0[1], z = p0[2];
     // Tight enough that a point at a voxel solid's edge, where phi vanishes quadratically and
     // Newton only halves its distance per step, ends within 1e-4 cells of it.
     for (let i = 0; i < 40; i++) {
-      const s = sample(p);
-      if (!s.stored) return undefined;
-      if (Math.abs(s.phi) < 1e-10 * h) {
-        if (Math.hypot(p[0] - p0[0], p[1] - p0[1], p[2] - p0[2]) > 2.5 * h) return undefined;
+      const s = sampleInto(field, table, x, y, z, so);
+      if (!s[5]) return undefined;
+      const phi = s[0]!, gx = s[1]!, gy = s[2]!, gz = s[3]!, mu = s[4]!;
+      if (Math.abs(phi) < 1e-10 * h) {
+        if (Math.hypot(x - p0[0], y - p0[1], z - p0[2]) > 2.5 * h) return undefined;
         // The normal from central differences a quarter cell wide: at a lattice edge the
         // one-sided cell gradient may vanish. A concave crease (phi ~ xz / h) has none: skip it.
-        const d = 0.25 * h, gc = [0, 1, 2].map(a => {
-          const at = (o: number): V3 => [p[0] + (a === 0 ? o : 0), p[1] + (a === 1 ? o : 0), p[2] + (a === 2 ? o : 0)];
-          return (sample(at(d)).phi - sample(at(-d)).phi) / (2 * d);
-        });
-        const gl = Math.hypot(...gc);
+        const d = 0.25 * h;
+        const g0 = (phiAt(x + d, y, z) - phiAt(x - d, y, z)) / (2 * d);
+        const g1 = (phiAt(x, y + d, z) - phiAt(x, y - d, z)) / (2 * d);
+        const g2 = (phiAt(x, y, z + d) - phiAt(x, y, z - d)) / (2 * d);
+        const gl = Math.hypot(g0, g1, g2);
         if (!(gl > 0.35)) return undefined;
-        return { p, n: [gc[0]! / gl, gc[1]! / gl, gc[2]! / gl], mu: s.mu };
+        return { p: [x, y, z], n: [g0 / gl, g1 / gl, g2 / gl], mu };
       }
       // (A voxel solid's corner node may see no gradient in the cell holding it: test phi first.)
-      const g2 = s.grad[0] ** 2 + s.grad[1] ** 2 + s.grad[2] ** 2;
+      const g2 = gx ** 2 + gy ** 2 + gz ** 2;
       if (!(g2 > 1e-18)) return undefined;
-      p = [p[0] - s.phi * s.grad[0] / g2, p[1] - s.phi * s.grad[1] / g2, p[2] - s.phi * s.grad[2] / g2];
+      x = x - phi * gx / g2; y = y - phi * gy / g2; z = z - phi * gz / g2;
     }
     return undefined;
   };
@@ -603,17 +641,21 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
 
   // ---- the samples: per kept sample its point, normal, friction, curvature and spacing.
   const pts: SurfacePoint[] = [], spacingOf: number[] = [], supports: { p: V3; n: V3 }[][] = [];
-  const HC = h / 8, hashOf = (p: V3, c: number) => p.map(v => Math.floor(v / c));
-  const fine = new Map<string, number[]>();
+  // Point hashes on numeric cell keys (cells within 2^16 of the cloth frame's origin).
+  const cellAt = (v: number, c: number) => Math.floor(v / c);
+  const HC = h / 2;
+  const fine = new Map<number, number[]>();
   const keep = (q: SurfacePoint, planes: { p: V3; n: V3 }[], spacing: number) => {
-    const minSep = 0.5 * spacing, c = hashOf(q.p, HC), R = Math.ceil(minSep / HC);
+    const minSep = 0.5 * spacing, R = Math.ceil(minSep / HC);
+    const cx = cellAt(q.p[0], HC), cy = cellAt(q.p[1], HC), cz = cellAt(q.p[2], HC);
     for (let dz = -R; dz <= R; dz++) for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
-      for (const j of fine.get(`${c[0]! + dx},${c[1]! + dy},${c[2]! + dz}`) ?? []) {
+      const l = fine.get(brickKey(cx + dx, cy + dy, cz + dz));
+      if (l) for (const j of l) {
         const o = pts[j]!.p;
         if (Math.hypot(o[0] - q.p[0], o[1] - q.p[1], o[2] - q.p[2]) < minSep) return;
       }
     }
-    const key = c.join(","), l = fine.get(key);
+    const key = brickKey(cx, cy, cz), l = fine.get(key);
     if (l) l.push(pts.length); else fine.set(key, [pts.length]);
     pts.push(q); spacingOf.push(spacing); supports.push(planes);
   };
@@ -655,17 +697,24 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
 
   // ---- the lifts: each sample's fan of holes, measured; a hole bulging past the ceiling is
   // refined (its centre and edge midpoints sampled at half the spacing) and measured again.
-  const HN = 0.5 * h, coarse = new Map<string, number[]>();
+  const HN = 0.5 * h, coarse = new Map<number, number[]>();
   const index = (from: number) => {
-    for (let i = from; i < pts.length; i++) { const k = hashOf(pts[i]!.p, HN).join(","), l = coarse.get(k); if (l) l.push(i); else coarse.set(k, [i]); }
+    for (let i = from; i < pts.length; i++) {
+      const p = pts[i]!.p, k = brickKey(cellAt(p[0], HN), cellAt(p[1], HN), cellAt(p[2], HN)), l = coarse.get(k);
+      if (l) l.push(i); else coarse.set(k, [i]);
+    }
   };
   const within = (p: V3, rad: number): number[] => {
-    const c0 = p.map(v => Math.floor((v - rad) / HN)), c1 = p.map(v => Math.floor((v + rad) / HN)), out: number[] = [];
-    for (let z = c0[2]!; z <= c1[2]!; z++) for (let y = c0[1]!; y <= c1[1]!; y++) for (let x = c0[0]!; x <= c1[0]!; x++)
-      for (const j of coarse.get(`${x},${y},${z}`) ?? []) {
+    const out: number[] = [];
+    const x0 = Math.floor((p[0] - rad) / HN), y0 = Math.floor((p[1] - rad) / HN), z0 = Math.floor((p[2] - rad) / HN);
+    const x1 = Math.floor((p[0] + rad) / HN), y1 = Math.floor((p[1] + rad) / HN), z1 = Math.floor((p[2] + rad) / HN);
+    for (let z = z0; z <= z1; z++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const l = coarse.get(brickKey(x, y, z));
+      if (l) for (const j of l) {
         const o = pts[j]!.p;
         if (Math.hypot(o[0] - p[0], o[1] - p[1], o[2] - p[2]) <= rad) out.push(j);
       }
+    }
     return out;
   };
   const sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -674,7 +723,10 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
   const ceiling = SOLID_SAMPLE_MAX_LIFT * h;
   // The lift of every sample, and the holes bulging past the ceiling.
   const measure = (): { lift: Float64Array; over: number[][]; edges: number[] } => {
-    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<string>(), edges: number[] = [];
+    const lift = new Float64Array(pts.length), over: number[][] = [], done = new Set<number>(), edges: number[] = [];
+    // Triangle keys i S^2 + j S + k exact in a double.
+    const S3 = pts.length;
+    if (S3 ** 3 > Number.MAX_SAFE_INTEGER) throw new RangeError(`Cloth solid samples: ${S3} samples exceed the hole key's range`);
     for (let i = 0; i < pts.length; i++) {
       const qi = pts[i]!, n = qi.n, reach = 1.6 * spacingOf[i]!;
       const a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] as V3 : Math.abs(n[1]) < 0.6 ? [0, 1, 0] as V3 : [0, 0, 1] as V3;
@@ -688,7 +740,7 @@ function buildSolidSamples(field: ClothSolidField): { samples: Float32Array; edg
         let gap = B.ang - A.ang; if (gap <= 0) gap += 2 * Math.PI;
         // A gap of half a turn or more faces the edge of the sampled surface: no hole there.
         if (gap >= Math.PI || fan.length < 3 && k > 0) continue;
-        const key = [i, A.j, B.j].sort((x, y) => x - y).join(",");
+        const lo = Math.min(i, A.j, B.j), hi = Math.max(i, A.j, B.j), key = (lo * S3 + (i + A.j + B.j - lo - hi)) * S3 + hi;
         if (done.has(key)) continue;
         done.add(key);
         // So does a wide gap whose middle holds no surface the seeding would sample: a concave

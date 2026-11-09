@@ -790,7 +790,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ------------------------------------------------------------------ query (Algorithms 1 and 2) and bounds
 
-export const OGC_QUERY_WGSL = header([0, 1, 4, 5, 7, 8, 9, 11, 14]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + /* wgsl */`
+/**
+ * The query's roles, one pipeline each over the same dispatch (a workgroup with no
+ * thread of its role exits at once): the cloth's vertices, its edges, and the solids'
+ * surface samples with their hull edges. One kernel holding all of them carried the
+ * largest role's registers into every thread (M1 Max: about 4 ms a round for 2
+ * candidates per vertex).
+ */
+export const OGC_QUERY_ROLES = ["queryVertex", "queryEdge", "querySample"] as const;
+export type OgcQueryRole = (typeof OGC_QUERY_ROLES)[number];
+export function ogcQueryWGSL(role: OgcQueryRole): string {
+  const lo = role === "queryVertex" ? "0u" : role === "queryEdge" ? "P.N" : "P.N + P.E";
+  const hi = role === "queryVertex" ? "P.N" : role === "queryEdge" ? "P.N + P.E" : "P.N + P.E + P.S + P.SB + P.SE + P.SEB";
+  return header([0, 1, 4, 5, 7, 8, 9, 11, 14]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 fn xd(i: u32) -> vec3<f32> { return xdet[i].xyz; }
 
 // ---- DAT division pairs: every non-adjacent pair whose swept boxes meet and that is
@@ -832,7 +844,13 @@ fn certify(n0: vec3<f32>, g0: f32, alt: vec3<f32>, gp: f32, gm: f32) -> vec4<f32
   return best;
 }
 // A conflict: some vertex is predicted to move and either X has no separating plane or
-// the predicted positions X + w close below 2 sepEps along it (and below the gap at X).
+// the predicted positions X + w close below sepEps along it (and below the gap at X).
+// The truncation keeps a divided pair 2 sepEps apart (sepEps each side of its plane), so
+// a pair pressed together rests there; a threshold at 2 sepEps would make rounding of
+// a co-moving pair's predictions (cloth carried with the moving solid against the
+// solid's hull edges) a conflict in every round. Below sepEps a prediction has closed
+// the pair by at least sepEps, the rounding scale it is sized for; between sepEps and
+// 2 sepEps the planes pass starts both sides wrong side and lets neither cross further.
 // The planes pass computes the same predicted gap, bit for bit.
 fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> bool {
   var moving = false;
@@ -847,7 +865,7 @@ fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> bool {
       if (k < nA) { supA = min(supA, pr); } else { supB = max(supB, pr); }
     }
     let g1 = supA - supB;
-    conflict = g1 < 2.0 * P.sepEps && g1 < pl.w;
+    conflict = g1 < P.sepEps && g1 < pl.w;
   }
   if (conflict) {
     atomicAdd(&counters[OGC_CONFLICTS], 1u);
@@ -863,6 +881,20 @@ fn checkConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> bool {
   }
   return false;
 }
+// A pair with one of the moving solid's samples keeps its plane fixed in the solid's
+// frame: the samples do not move there, and cloth carried with the solid neither. The
+// plane is certified at X (the detection pose) and turned to the end pose, where the
+// conflict test and the planes pass meet it: by R1 R0^T in the mandatory round, which
+// detects at the start pose, and not at all after it (detection is at the end pose).
+// A plane fixed in the world would see a co-rotating pair close by its turn times its
+// extent, a conflict that carrying cannot remove.
+fn bodyFrame(ids: vec4<u32>, pl: vec4<f32>) -> vec4<f32> {
+  if (P.SB == 0u || atomicLoad(&counters[OGC_ROUNDS]) != 0u) { return pl; }
+  var body = false;
+  for (var k = 0u; k < 4u; k++) { if (ids[k] >= P.N + P.S && ids[k] < P.N + P.S + P.SB) { body = true; } }
+  if (!body) { return pl; }
+  return vec4<f32>(ogcPose(1u).R * (transpose(ogcPose(0u).R) * pl.xyz), pl.w);
+}
 fn recordHeldConflict(ids: vec4<u32>) {
   for (var k = 0u; k < 4u; k++) { atomicStore(&counters[OGC_HELD_PAIR + k], ids[k]); }
 }
@@ -871,7 +903,7 @@ fn pairVT(v: u32, tri: vec3<u32>, x: vec3<f32>, cp: vec3<f32>) {
   let n0 = unitOr0(x - cp);
   let fnorm = unitOr0(cross(b - a, c - a));
   let ids = vec4<u32>(v, tri);
-  let pl = certify(n0, gapVT(n0, x, a, b, c), fnorm, gapVT(fnorm, x, a, b, c), gapVT(-fnorm, x, a, b, c));
+  let pl = bodyFrame(ids, certify(n0, gapVT(n0, x, a, b, c), fnorm, gapVT(fnorm, x, a, b, c), gapVT(-fnorm, x, a, b, c)));
   if (checkConflict(ids, 1u, pl)) { recordHeldConflict(ids); }
   pushPair(ids, pl);
 }
@@ -879,7 +911,7 @@ fn pairEE(er: vec4<u32>, r2: vec4<u32>, ca: vec3<f32>, cb: vec3<f32>) {
   let p0 = xd(er.x); let p1 = xd(er.y); let q0 = xd(r2.x); let q1 = xd(r2.y);
   let n0 = unitOr0(ca - cb);
   let ec = unitOr0(cross(p1 - p0, q1 - q0));
-  let pl = certify(n0, gapEE(n0, p0, p1, q0, q1), ec, gapEE(ec, p0, p1, q0, q1), gapEE(-ec, p0, p1, q0, q1));
+  let pl = bodyFrame(vec4<u32>(er.x, er.y, r2.x, r2.y), certify(n0, gapEE(n0, p0, p1, q0, q1), ec, gapEE(ec, p0, p1, q0, q1), gapEE(-ec, p0, p1, q0, q1)));
   if (checkConflict(vec4<u32>(er.x, er.y, r2.x, r2.y), 2u, pl)) { recordHeldConflict(vec4<u32>(er.x | OGC_EE_BIT, er.y, r2.x, r2.y)); }
   pushPair(vec4<u32>(er.x | OGC_EE_BIT, er.y, r2.x, r2.y), pl);
 }
@@ -1147,20 +1179,22 @@ var<workgroup> wgEe: atomic<u32>;
 var<workgroup> wgDat: atomic<u32>;
 var<workgroup> wgSf: atomic<u32>;
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>) {
+  let roleLo = ${lo}; let roleHi = ${hi};
+  if (64u * wg.x + 64u <= roleLo || 64u * wg.x >= roleHi) { return; }
   let i = gid.x;
-  if (i < P.N) {
-    let o = vertexFacet(i);
-    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgVf, o.pairs); atomicAdd(&wgDat, o.dat);
-  } else if (i < P.N + P.E) {
-    let o = edgeEdge(i - P.N);
-    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgEe, o.pairs); atomicAdd(&wgDat, o.dat);
-  } else if (i < P.N + P.E + P.S + P.SB) {
-    let o = sampleFacet(i - P.E);
-    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgSf, o.pairs); atomicAdd(&wgDat, o.dat);
-  } else if (i < P.N + P.E + P.S + P.SB + P.SE + P.SEB) {
-    let o = hullEdge(i - P.N - P.E - P.S - P.SB);
-    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgDat, o.dat);
+  if (i >= roleLo && i < roleHi) {
+    ${role === "queryVertex" ? `let o = vertexFacet(i);
+    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgVf, o.pairs); atomicAdd(&wgDat, o.dat);`
+    : role === "queryEdge" ? `let o = edgeEdge(i - P.N);
+    atomicAdd(&wgCand, o.candidates); atomicAdd(&wgEe, o.pairs); atomicAdd(&wgDat, o.dat);`
+    : `if (i < P.N + P.E + P.S + P.SB) {
+      let o = sampleFacet(i - P.E);
+      atomicAdd(&wgCand, o.candidates); atomicAdd(&wgSf, o.pairs); atomicAdd(&wgDat, o.dat);
+    } else {
+      let o = hullEdge(i - P.N - P.E - P.S - P.SB);
+      atomicAdd(&wgCand, o.candidates); atomicAdd(&wgDat, o.dat);
+    }`}
   }
   closePairs();
   workgroupBarrier();
@@ -1173,6 +1207,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   }
 }
 `;
+}
 
 /**
  * The per-vertex displacement cap in x_det.w. Isotropic: OGC's
