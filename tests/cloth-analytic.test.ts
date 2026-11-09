@@ -278,9 +278,7 @@ test('free fall onto the floor: the sheet lands without a rebound (the BDF2 hist
   assert.ok(r.up <= 0.05, `rebound ${r.up} m/s`);
 }));
 
-// todo: lane C2's 13c426af (a cap-only truncation holds no vertex) lets the slap's whip edge (6 m/s) tunnel the floor at
-// tick 29 and halt with solidBounds, at 8 x 200 and converged alike; un-todo when that lands and judge against the oracle.
-test('a tilted sheet slaps down onto the floor as implicit Euler at h / 8 does (the whole cloth restarts at an onset)', { skip: !runs('free-fall'), todo: 'C2 floor tunnel since 13c426af' }, async () => withDevice(async device => {
+test('a tilted sheet slaps down onto the floor as implicit Euler at h / 8 does (the whole cloth restarts at an onset)', { skip: !runs('free-fall') }, async () => withDevice(async device => {
   // One edge lands first and the membrane carries the jump to vertices no contact touches, so a per-vertex restart left
   // them a rebound of 0.575 m/s (RESULT (25)). Part of the slap's upward motion is membrane recoil, so the reference is
   // the same landing at an eighth of the step, not zero; both run converged, so the gate judges the restart, not the caps.

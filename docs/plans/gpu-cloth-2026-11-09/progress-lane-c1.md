@@ -1917,3 +1917,26 @@ The two dynamic numbers also check out against independent references:
   0–8 % prestretch.
 - **Decay:** Rayleigh damping alone gives 0.5 · 0.002 s · ω² = 0.193 / s. The remaining 0.03 / s is BDF2's
   numerical damping at ωh = 0.23 (about (ωh)⁴ / 4 per step, i.e. 0.04 / s).
+
+## 2026-11-10 RESULT (27): the tilted drop passes against implicit Euler at h/8 (todo removed)
+
+C2's 73a0297c fixed the floor tunnel: a chord midpoint past a scene field's box no longer certifies a vertex clear. With
+it in HEAD, the tilted-drop gate is on again, judged by the ruled tolerances: rebound within 0.02 m/s and settled mean
+height within 2 mm of the oracle.
+
+The run was HEAD dce1aeba in a clean export, so C2's uncommitted detector edits were absent. Both sides ran converged:
+32 Newton x 800 PCG, tolerances / 16.
+
+| | rebound (m/s) | settled mean y (mm) |
+|---|---|---|
+| Newton at h, global restart | 0.0000 | 0.00 |
+| implicit Euler at h/8 (oracle) | 0.0017 | 0.99 |
+| difference / tolerance | 0.0017 / 0.02 | 0.99 / 2 |
+
+There was no halt, and the run took 1986 ms a tick at the converged caps.
+
+**Open (reported, not acted on).** The converged run settles about 1 mm lower than the oracle, and lower than the
+straight free-fall landing, which rests at 0.99 mm, the contact radius. A mean height of 0.00 mm puts the sheet on the
+floor surface, inside the contact distance. The gate's 2 mm tolerance admits that, but the difference is a whole
+contact radius. Whether it comes from the converged caps, from the solid cut, or from the barrier's balance is not
+yet attributed.
