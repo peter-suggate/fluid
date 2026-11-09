@@ -14,6 +14,8 @@ import type { ClothMaterial, ClothTopologyData } from '../lib/cloth/types';
 import { buildClothSolverModel, clothMechanicalEnergy, clothOracleStep, createClothOracleState, type ClothStepOptions } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace, ClothCoarseCorrection, packClothCoarseTables } from '../lib/cloth/coarse';
 import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
+import { CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
+import { CLOTH_COARSE_MISC } from '../lib/cloth/gpu-coarse-wgsl';
 import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import { CLOTH } from '../lib/cloth/scenes/bridson-2002/parameters';
 
@@ -120,8 +122,10 @@ test('one GPU step with the two-level correction matches its Float64 reference',
   const m = model(sheet(8)), space = buildClothCoarseSpace(m.topology, 6);
   let seed = 12345;
   const r = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32 - 0.5);
-  const start = Float64Array.from(m.topology.data.restPositions_m, (p, i) => Math.fround(p + 4e-3 * r() - origin[i % 3]!) + origin[i % 3]!);
-  for (const [iterations, every] of [[1, 1], [4, 1], [4, 2]] as const) {
+  // A 4 cm perturbation is far enough from equilibrium that the full coarse step is rejected: the shorter trials run.
+  for (const [amplitude, iterations, every] of [[4e-3, 1, 1], [4e-3, 4, 1], [4e-3, 4, 2], [4e-2, 4, 1]] as const) {
+    seed = 12345;
+    const start = Float64Array.from(m.topology.data.restPositions_m, (p, i) => Math.fround(p + amplitude * r() - origin[i % 3]!) + origin[i % 3]!);
     const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations, chebyshevRho: 0 };
     const solver = await ClothGPUSolver.create(device, m, { ...options, origin_m: origin, positions_m: start, coarse: space, coarseEvery: every });
     const oracle = createClothOracleState(m, start), coarse = new ClothCoarseCorrection(m, space, 2 ** -23, false, every);
@@ -131,11 +135,47 @@ test('one GPU step with the two-level correction matches its Float64 reference',
     const x = await solver.readPositions();
     for (let i = 0; i < x.length; i++) d = Math.max(d, Math.abs(x[i]! - oracle.x[i]!));
     const stats = await solver.readCoarseStats();
-    console.log(`K=${iterations} every ${every}: GPU vs reference ${d.toExponential(2)} m; GPU ${JSON.stringify(stats)}; reference ${JSON.stringify(coarse.stats)}`);
+    console.log(`perturbation ${amplitude} m, K=${iterations} every ${every}: GPU vs reference ${d.toExponential(2)} m; GPU ${JSON.stringify(stats)}; reference ${JSON.stringify(coarse.stats)}`);
     assert.equal(stats!.corrections, Math.ceil(iterations / every));
+    assert.deepEqual(stats.accepted, coarse.stats.accepted);
+    if (amplitude > 1e-2) assert.ok(stats.accepted[0]! < stats.corrections, 'some full step is rejected');
     assert.ok(d < 1e-5, `K=${iterations}: GPU vs reference ${d} m`);
     solver.destroy();
   }
+}));
+
+test('the GPU coarse factor inverts blocks of one stiff contact direction over soft ones (k / s = 1e5 off the axes)', { skip: !gpu }, async () => withDevice(async device => {
+  // A contact Hessian puts k n n^T on a node block over its soft s I. The block's determinant s^2 (s + k) cancels
+  // from terms of k^3 in f32, so a determinant test called this positive definite block indefinite.
+  const m = model(sheet(8)), space = buildClothCoarseSpace(m.topology, 6), M = 3 * space.nodeCount;
+  const solver = await ClothGPUSolver.create(device, m, { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 1, chebyshevRho: 0, origin_m: origin, coarse: space });
+  const raw = solver as unknown as { coarse: GPUBuffer; T: number; tables: { coarse: { miscRecord: number } }; run(pass: GPUComputePassEncoder, name: string, workgroups: number): void; read(b: GPUBuffer, size: number): Promise<ArrayBuffer> };
+  const align = (x: number) => Math.ceil(x / CLOTH_SEGMENT_ALIGN) * CLOTH_SEGMENT_ALIGN, aRecord = align(6 * raw.T), wRecord = align(aRecord + align(Math.ceil(M * M / 4)));
+  const A = new Float64Array(M * M), s0 = 1, k = 1e5;
+  for (let c = 0; c < space.nodeCount; c++) {
+    const n = [1, (-1) ** c, 1 + 0.1 * c], l = Math.hypot(...n);
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) A[(3 * c + i) * M + 3 * c + j] = (i === j ? s0 : 0) + k * n[i]! * n[j]! / (l * l);
+    // A soft coupling to the next node keeps the sweep's Schur updates in play.
+    if (c + 1 < space.nodeCount) for (let i = 0; i < 3; i++) { A[(3 * c + i) * M + 3 * (c + 1) + i] = -0.25 * s0; A[(3 * (c + 1) + i) * M + 3 * c + i] = -0.25 * s0; }
+  }
+  device.queue.writeBuffer(raw.coarse, 16 * aRecord, Float32Array.from(A));
+  const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
+  raw.run(pass, 'coarseFactor', 1);
+  pass.end(); device.queue.submit([encoder.finish()]);
+  const words = new Float32Array(await raw.read(raw.coarse, 16 * (raw.tables.coarse.miscRecord + 1)));
+  assert.equal(words[4 * raw.tables.coarse.miscRecord + CLOTH_COARSE_MISC.ok], 1, 'the factor called a positive definite A_c indefinite');
+  assert.equal((await solver.readStatus()).status, 0);
+  // A^-1 A = I in its soft directions too (columns of size 1 / s).
+  const W = words.subarray(4 * wRecord, 4 * wRecord + M * M);
+  let worst = 0;
+  for (let i = 0; i < M; i++) for (let j = 0; j < M; j++) {
+    let p = 0;
+    for (let q = 0; q < M; q++) p += W[i * M + q]! * A[q * M + j]!;
+    worst = Math.max(worst, Math.abs(p - (i === j ? 1 : 0)));
+  }
+  console.log(`stiff blocks k / s = ${k / s0}: |A^-1 A - I| ${worst.toExponential(2)}`);
+  assert.ok(worst < 0.05, `A^-1 A off the identity by ${worst}`);
+  solver.destroy();
 }));
 
 test('a GPU two-level run tracks its reference over many steps, and its saved state replays', { skip: !gpu }, async () => withDevice(async device => {

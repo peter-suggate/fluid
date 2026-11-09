@@ -27,7 +27,7 @@ export const CLOTH_COARSE = Object.freeze({
   maxEntries: 4,
   /** Tent radius R over the farthest-point covering radius. */
   radius: 1.5,
-  /** Line search trials of the coarse step: 1, 1/2, ... (the GPU evaluates them in one pass). */
+  /** Line search trials of the coarse step: 1, 1/2, ... (the GPU evaluates the full step, then the rest in one pass only when it was rejected). */
   trials: 4,
   /** Iterations between corrections: before iterations 1, 1 + every, ... of a step. */
   every: 2 as number,
@@ -234,7 +234,7 @@ export function clothCoarseOperator(model: ClothSolverModel, frame: ClothStepFra
     const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, L = t.edgeRestLength_m[e]!, d = [0, 1, 2].map(r => x[3 * a + r]! - x[3 * b + r]!) as Vec3, len = Math.sqrt(dot(d, d));
     if (!(len > 0)) continue;
     const d0 = [0, 1, 2].map(r => frame.x0[3 * a + r]! - frame.x0[3 * b + r]!) as Vec3, C0 = Math.sqrt(dot(d0, d0)) - (1 + eps) * L;
-    const C = len - (1 + eps) * L - CLOTH_AVBD.alpha * Math.max(C0, 0), lambda = state.edgeDuals[2 * e]!, k = state.edgeDuals[2 * e + 1]!;
+    const C = len - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(C0, 0), lambda = state.edgeDuals[2 * e]!, k = state.edgeDuals[2 * e + 1]!;
     const force = Math.max(k * C + lambda, 0), kEff = k * C + lambda > 0 ? k : C !== 0 ? Math.max(-lambda / C, 0) : 0, n = d.map(q => q / len) as Vec3;
     const B = outer(kEff - force / len, n, n); B[0] += force / len; B[4] += force / len; B[8] += force / len;
     scatter(space, A, [a, b], (i, j) => i === j ? B : B.map(q => -q) as Mat3);
@@ -289,7 +289,7 @@ export function clothObjective(model: ClothSolverModel, frame: ClothStepFrame, s
     if (!(eps > 0)) continue;
     const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, L = t.edgeRestLength_m[e]!;
     const d = [0, 1, 2].map(r => x[3 * a + r]! - x[3 * b + r]!) as Vec3, d0 = [0, 1, 2].map(r => frame.x0[3 * a + r]! - frame.x0[3 * b + r]!) as Vec3;
-    const C = Math.sqrt(dot(d, d)) - (1 + eps) * L - CLOTH_AVBD.alpha * Math.max(Math.sqrt(dot(d0, d0)) - (1 + eps) * L, 0);
+    const C = Math.sqrt(dot(d, d)) - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(Math.sqrt(dot(d0, d0)) - (1 + eps) * L, 0);
     add(clothAugmentedEnergy(state.edgeDuals[2 * e + 1]!, state.edgeDuals[2 * e]!, C, true));
   }
   return { value, magnitude };

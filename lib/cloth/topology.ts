@@ -87,6 +87,8 @@ export function clothTopologyErrors(data: ClothTopologyData, materials: readonly
     if (s.previousVelocities_m_s.length !== 3 * n || s.previousDisplacements_m.length !== 3 * n) errors.push("Cloth solver state must cover every vertex");
     if (!(s.previousStep_s >= 0)) errors.push("Cloth solver state needs a non-negative previous step");
     if (!(s.time_s >= 0)) errors.push("Cloth solver state needs a non-negative clock");
+    if (s.contact && (s.contact.reference.length !== 4 * n || s.contact.held.length !== n || !s.contact.reference.every(Number.isFinite)
+      || !s.contact.held.every(h => Number.isInteger(h) && h >= 0))) errors.push("Cloth contact state must hold a finite reference and rho per vertex and integer held flags");
   }
   return errors;
 }
@@ -119,9 +121,10 @@ export function validateClothDocument(document: ClothDocument): string[] {
     if (solver.integrator !== undefined && solver.integrator !== "implicit-euler" && solver.integrator !== "bdf2") errors.push(`Unsupported cloth integrator ${String(solver.integrator)}`);
     if (solver.tier !== undefined && solver.tier !== "A" && solver.tier !== "B") errors.push(`Unsupported cloth solver tier ${String(solver.tier)}`);
     if (solver.iterations !== undefined && !(Number.isInteger(solver.iterations) && solver.iterations >= 1)) errors.push("Cloth iterations must be a positive integer");
-    if (solver.chebyshevRho !== undefined && !(solver.chebyshevRho >= 0 && solver.chebyshevRho < 1)) errors.push("Cloth Chebyshev rho must lie in [0, 1)");
+    if (solver.chebyshevRho !== undefined && solver.chebyshevRho !== 0) errors.push("Cloth Chebyshev rho must be 0: with the two-level correction every step takes, Chebyshev acceleration can explode");
     if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
-    if (solver.coarse !== undefined && typeof solver.coarse !== "boolean") errors.push("Cloth two-level correction setting must be a boolean");
+    // Every Tier A step takes the two-level correction; a document that asks to turn it off (or on) names a setting that is gone.
+    if ("coarse" in solver) errors.push("Cloth solver setting 'coarse' was removed: every step takes the two-level correction");
   }
   return errors;
 }

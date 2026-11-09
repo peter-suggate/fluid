@@ -22,7 +22,11 @@ import { CLOTH_NO_FACE, type PreparedClothTopology } from './topology';
 /** AVBD constants (Giles et al. 2025, Table 2). beta is made scale free:
  * a constraint's stiffness grows by beta * s * |C| / l per iteration, with
  * s the vertex's reference stiffness and l its edge length. */
-export const CLOTH_AVBD = Object.freeze({ alpha: 0.95, gamma: 0.99, beta: 10, maxStiffnessRatio: 1e6 });
+export const CLOTH_AVBD = Object.freeze({ alpha: 0.95, gamma: 0.99, beta: 10, maxStiffnessRatio: 1e6,
+  /** The strain limit's stabilization: 0, so an edge's target is its limit itself and a violation carried in from
+   * x_t (OGC's truncation leaves one) is corrected in this step, not accepted at 95% (coordinator ruling 2026-11-09,
+   * progress-lane-c1.md RESULT 11). Pins keep alpha. The warm start lambda <- alpha gamma lambda is unchanged. */
+  edgeAlpha: 0 });
 /** Per-vertex backtracking line search: Armijo constant and halvings. */
 export const CLOTH_LINE_SEARCH = Object.freeze({ armijo: 1e-4, halvings: 8 });
 
@@ -386,7 +390,7 @@ export function clothLocalSystem(model: ClothSolverModel, frame: ClothStepFrame,
     const d = sub(xv, pos(other)), len = Math.sqrt(dot(d, d));
     if (!(len > 0)) continue;
     const d0 = sub(at3(frame.x0, a), at3(frame.x0, b)), C0 = Math.sqrt(dot(d0, d0)) - (1 + eps) * L;
-    const C = len - (1 + eps) * L - CLOTH_AVBD.alpha * Math.max(C0, 0), lambda = state.edgeDuals[2 * e]!, k = state.edgeDuals[2 * e + 1]!;
+    const C = len - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(C0, 0), lambda = state.edgeDuals[2 * e]!, k = state.edgeDuals[2 * e + 1]!;
     const n = d.map(q => q / len) as Vec3, force = Math.max(k * C + lambda, 0);
     for (let c = 0; c < 3; c++) g[c] += force * n[c]!;
     // AVBD (14): a force clamped at zero keeps the rescaled stiffness (0 - lambda) / C.
@@ -505,7 +509,7 @@ export function clothUpdateDuals(model: ClothSolverModel, frame: ClothStepFrame,
     const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, L = t.edgeRestLength_m[e]!;
     const s = Math.max(clothReferenceStiffness(model, a, frame.hEff), clothReferenceStiffness(model, b, frame.hEff)), kMax = maxStiffnessRatio * s;
     const d = sub(at3(state.x, a), at3(state.x, b)), d0 = sub(at3(frame.x0, a), at3(frame.x0, b));
-    const C = Math.sqrt(dot(d, d)) - (1 + eps) * L - alpha * Math.max(Math.sqrt(dot(d0, d0)) - (1 + eps) * L, 0);
+    const C = Math.sqrt(dot(d, d)) - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(Math.sqrt(dot(d0, d0)) - (1 + eps) * L, 0);
     const k = state.edgeDuals[2 * e + 1]!, lambda = k * C + state.edgeDuals[2 * e]!;
     state.edgeDuals[2 * e] = Math.min(Math.max(lambda, 0), kMax * L);
     if (lambda > 0) state.edgeDuals[2 * e + 1] = Math.min(k + beta * s * Math.abs(C) / L, kMax);

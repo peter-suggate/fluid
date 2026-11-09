@@ -35,7 +35,7 @@ import type { SimulationFailure } from '../core/simulation-failure';
 import { clothDocumentsKey } from './content-stamp';
 import { ClothGPUSolver, type ClothGPUState } from './gpu-solver';
 import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
-import { OgcContactDetector } from './contact/ogc-detector';
+import { OgcContactDetector, type OgcCarriedState } from './contact/ogc-detector';
 import type { ClothSolidField } from './contact/solid-field';
 import { buildClothCoarseSpace } from './coarse';
 import { buildClothSolverModel } from './oracle';
@@ -44,7 +44,7 @@ import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS
   clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
 import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from './topology';
-import type { ClothDocument, ClothSurfacePublication, ClothVector } from './types';
+import type { ClothContactStateData, ClothDocument, ClothSurfacePublication, ClothVector } from './types';
 
 /** One implicit cloth step per 1/60 s frame. */
 export const CLOTH_SCENE_STEP_S = 1 / 60;
@@ -53,11 +53,23 @@ export const CLOTH_CATCH_UP_STEPS = 4;
 if (CLOTH_CATCH_UP_STEPS + 1 > CLOTH_BODY_POSES_PER_FRAME) throw new Error('A frame of cloth steps needs more moving-solid poses than the detector is authored for');
 /** Steps between status-word reads (the non-finite watchdog; never the pose). */
 export const CLOTH_STATUS_INTERVAL_STEPS = 4;
-const DEFAULT_ITERATIONS = 64;
-/** K with the two-level correction (lane C1 sweep, 2026-11-09: 150^2 sheet, strain and energy). */
-const DEFAULT_COARSE_ITERATIONS = 8;
+/** K with the two-level correction, which every step takes (lane C1, 2026-11-09: a hanging sheet rests at its exact equilibrium). */
+const DEFAULT_ITERATIONS = 8;
 
 let systemGenerations = 0, renderRevisions = 0;
+
+/** The detector's carried state in world metres, as a pose's solver state saves it. */
+function clothContactStateData(state: OgcCarriedState, origin: ClothVector): ClothContactStateData {
+  const reference = Array.from(state.reference, (q, i) => (i & 3) === 3 ? q : q + origin[i & 3]!);
+  return { reference, held: Array.from(state.held) };
+}
+
+/** A saved carried state in the detector's cloth frame at `origin`; one for another vertex count fails explicitly. */
+function ogcCarriedState(data: ClothContactStateData, origin: ClothVector, vertexCount: number): OgcCarriedState {
+  if (data.reference.length !== 4 * vertexCount || data.held.length !== vertexCount)
+    throw new Error(`Cloth contact state covers ${data.held.length} vertices, the document has ${vertexCount}`);
+  return { reference: Float32Array.from(data.reference, (q, i) => (i & 3) === 3 ? q : q - origin[i & 3]!), held: Uint32Array.from(data.held) };
+}
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /** Asynchronous copy of the status words and, on request, the full dynamic state (pose, BDF2 history, duals, clock); one map in flight. */
@@ -144,8 +156,7 @@ export class ClothSystem {
   readonly generation = ++systemGenerations;
   failure?: SimulationFailure;
   /** Reported (not failing) status bits, by name, with the scene time a status read first showed each: the
-   * detector's roundCap and envelopeCap (it took its authored cap) and the solver's coarseIndefinite (a step ran
-   * without the two-level correction), so the scene's diagnostics show them. */
+   * detector's roundCap and envelopeCap (it took its authored cap), so the scene's diagnostics show them. */
   readonly notes = new Map<string, number>();
   private readonly entries = new Map<string, Entry>();
   private readonly building = new Map<string, { key: string; ready: Promise<void> }>();
@@ -233,15 +244,16 @@ export class ClothSystem {
       this.bodyFields.set(key, bodyField);
     }
     // The two-level correction's coarse space follows the mesh topology, so it is rebuilt with it (edit time only).
-    const coarse = settings.coarse === false ? undefined : buildClothCoarseSpace(topology);
+    // Every document takes it; a mesh that cannot build one fails here.
+    const coarse = buildClothCoarseSpace(topology);
     const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField);
     let solver: ClothGPUSolver;
     try {
       solver = await ClothGPUSolver.create(this.device, model, {
         origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity,
-        integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? (coarse ? DEFAULT_COARSE_ITERATIONS : DEFAULT_ITERATIONS), chebyshevRho: settings.chebyshevRho ?? 0,
+        integrator: settings.integrator ?? 'bdf2', iterations: settings.iterations ?? DEFAULT_ITERATIONS, chebyshevRho: settings.chebyshevRho ?? 0,
         // The extrapolating guesses overshoot an unconverged solve; the coarse step carries the bulk motion instead.
-        ...(coarse ? { coarse, initialGuess: 'previous' as const } : {}),
+        coarse, initialGuess: 'previous',
         positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
         solverState: start ? start.solverState : data.solverState, label,
         contact: contact.solverContact(CLOTH_BINDING.contact),
@@ -251,6 +263,9 @@ export class ClothSystem {
       contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart });
       contact.setSolidField(field);
       if (bodyField) contact.setBodyField(bodyField);
+      // The detector continues from the state carried with the pose (an undo, a load, a moving solid's edit).
+      const carried = (start ? start.solverState : data.solverState)?.contact;
+      if (carried) contact.writeCarriedState(ogcCarriedState(carried, origin, model.topology.vertexCount));
     } catch (error) { contact.destroy(); throw error; }
     const positions = Float64Array.from(start?.positions_m ?? data.initialPositions_m ?? data.restPositions_m);
     const velocities = start ? start.velocities_m_s : data.initialVelocities_m_s, solverState = start ? start.solverState : data.solverState;
@@ -308,7 +323,9 @@ export class ClothSystem {
     try { status = await e.mirror.readStatus(); } catch { return; } // device lost or destroyed
     if (this.destroyed || this.entries.get(e.document.id) !== e) return;
     if (status.solver & CLOTH_STATUS.nonFinite) this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(status.solver & CLOTH_STATUS.nonFinite).join('; '), 'finishStep', e, [status.solver]);
-    const notes = [...OgcContactDetector.describeStatus(status.contact & ~CLOTH_CONTACT_FAILING), ...(status.solver & CLOTH_STATUS.coarseIndefinite ? ['coarseIndefinite'] : [])];
+    // There is no one-level path: a step whose coarse operator was indefinite halts the scene.
+    if (status.solver & CLOTH_STATUS.coarseIndefinite) this.fail('cloth-coarse-indefinite', ClothGPUSolver.describeStatus(CLOTH_STATUS.coarseIndefinite).join('; '), 'coarseFactor', e, [status.solver]);
+    const notes = OgcContactDetector.describeStatus(status.contact & ~CLOTH_CONTACT_FAILING);
     for (const name of notes) if (!this.notes.has(name)) this.notes.set(name, this.entryTime(e));
     if (status.contact & CLOTH_CONTACT_FAILING)
       this.fail('cloth-contact', `contact failed: ${OgcContactDetector.describeStatus(status.contact & CLOTH_CONTACT_FAILING).join('; ')}`, 'OgcContactDetector', e, [status.contact]);
@@ -325,20 +342,22 @@ export class ClothSystem {
       if (this.destroyed) return;
       const encoder = this.device.createCommandEncoder({ label: 'Cloth pose read' }), entries = [...this.entries.values()].filter(e => e.mirror.encode(encoder));
       this.device.queue.submit([encoder.finish()]);
-      await Promise.all(entries.map(e => (e.inflight = this.receive(e, this.entryTime(e)))));
+      // The detector's carried state at the same tick: its copy is submitted now, before any further step.
+      const carried = entries.map(e => e.contact.readCarriedState());
+      await Promise.all(entries.map((e, k) => (e.inflight = this.receive(e, this.entryTime(e), carried[k]!))));
     })().finally(() => { if (this.poseRead === read) this.poseRead = undefined; });
     return (this.poseRead = read);
   }
 
-  private async receive(e: Entry, time_s: number): Promise<void> {
+  private async receive(e: Entry, time_s: number, carried: Promise<OgcCarriedState>): Promise<void> {
     const tick = Math.round(time_s / CLOTH_SCENE_STEP_S);
-    let read;
-    try { read = await e.mirror.read(); } catch { return; } // device lost or destroyed: nothing to publish
+    let read, contact;
+    try { [read, contact] = await Promise.all([e.mirror.read(), carried]); } catch { return; } // device lost or destroyed: nothing to publish
     if (this.destroyed || this.entries.get(e.document.id) !== e) return;
     if (read.status & CLOTH_STATUS.nonFinite) { this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(read.status).join('; '), 'finishStep', e, [read.status]); return; }
     if (tick < e.publication.tick) return;
     // The exact state at the pose: a cut or undo from it keeps the BDF2 history and the duals (remapped by vertex origin).
-    const { positions_m, velocities_m_s, solverState } = read.state;
+    const { positions_m, velocities_m_s } = read.state, solverState = { ...read.state.solverState, contact: clothContactStateData(contact, e.origin) };
     e.publication = { documentId: e.document.id, topology: e.document.geometry.data, positions_m, velocities_m_s,
       solverState, generation: this.generation, tick, topologyRevision: e.topologyRevision, time_s };
   }

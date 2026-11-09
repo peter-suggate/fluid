@@ -20,17 +20,13 @@ const crossArea=(a:ClothVector,b:ClothVector,c:ClothVector)=>Math.hypot(
   (b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),
   (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]))/2;
 const p3=(p:ArrayLike<number>,i:number):ClothVector=>[p[3*i]!,p[3*i+1]!,p[3*i+2]!];
-/** Unit normal of a current-pose face; a degenerate face has none and moves no plane. */
-const faceNormal=(a:ClothVector,b:ClothVector,c:ClothVector):ClothVector=>{
-  const n:ClothVector=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])];
-  const length=Math.hypot(...n);return length>0?n.map(v=>v/length) as unknown as ClothVector:[0,0,0];
-};
 /** A piece split off by one plane shares its cut edge with the remainder, which
  * later planes split again. Insert those later points into every piece edge
  * they lie on, so neighbouring pieces meet vertex to vertex (no T-junction
- * that would let the membrane open along a cut line). */
-function conformingPieces(pieces:readonly Vertex[][]):Vertex[][]{
-  const pool=[...new Set(pieces.flat())];
+ * that would let the membrane open along a cut line). `shared` adds the points
+ * the neighbouring faces' splits put on this face's sides. */
+function conformingPieces(pieces:readonly Vertex[][],shared:readonly Vertex[]=[]):Vertex[][]{
+  const pool=[...new Set([...pieces.flat(),...shared])];
   return pieces.map(polygon=>polygon.flatMap((a,j)=>{
     const b=polygon[(j+1)%polygon.length]!,d=[0,1,2].map(k=>b.p[k]!-a.p[k]!),length2=d[0]!**2+d[1]!**2+d[2]!**2,eps=1e-10*Math.sqrt(length2);
     if(!(length2>0))return [a];
@@ -77,11 +73,11 @@ export interface ClothCutHalfSpace { readonly normal:ClothVector; readonly offse
 /** A corner within a millionth of the piece's size of the plane lies on it
  * (planes come from Float32 cell coordinates); it belongs to both sides. */
 const ON_PLANE_RELATIVE=1e-6;
-function split(poly:Vertex[],distance:(p:ClothVector)=>number):[Vertex[],Vertex[]] {
+function split(poly:Vertex[],distance:(v:Vertex)=>number):[Vertex[],Vertex[]] {
   const inside:Vertex[]=[],outside:Vertex[]=[];
   let size=0;
   for(let i=0;i<poly.length;i++){const a=poly[i]!.p,b=poly[(i+1)%poly.length]!.p;size=Math.max(size,Math.hypot(b[0]-a[0],b[1]-a[1],b[2]-a[2]));}
-  const distances=poly.map(v=>{const d=distance(v.p);return Math.abs(d)<=ON_PLANE_RELATIVE*size?0:d;});
+  const distances=poly.map(v=>{const d=distance(v);return Math.abs(d)<=ON_PLANE_RELATIVE*size?0:d;});
   if(distances.every(d=>d<=0))return [[...poly],[]];
   if(distances.every(d=>d>=0))return [[],[...poly]];
   for(let i=0;i<poly.length;i++){
@@ -122,7 +118,13 @@ export function remapClothSolverState(state:ClothSolverStateData,old:{readonly t
     const e=a>=0&&b>=0?oldEdge.get(Math.min(a,b)*oldN+Math.max(a,b)):undefined;
     edgeDuals.push(...(e!==undefined?state.edgeDuals.slice(2*e,2*e+2):[0,0]));
   }
-  return {previousVelocities_m_s:blend(state.previousVelocities_m_s),previousDisplacements_m:blend(state.previousDisplacements_m),previousStep_s:state.previousStep_s,time_s:state.time_s,pinDuals,edgeDuals};
+  // The detector's carried state: a kept vertex keeps its own; a new one starts as before any step (rho -1, not held).
+  const c=state.contact;
+  if(c&&(c.reference.length!==4*oldN||c.held.length!==oldN))throw new Error('Cloth contact state does not match the vertices');
+  const contact=c?{reference:origins.flatMap((o,v)=>single[v]!>=0?c.reference.slice(4*single[v]!,4*single[v]!+4)
+      :[...[0,1,2].map(a=>o.vertices.reduce((s,u,k)=>s+o.weights[k]!*c.reference[4*u+a]!,0)),-1]),
+    held:single.map(u=>u>=0?c.held[u]!:0)}:undefined;
+  return {previousVelocities_m_s:blend(state.previousVelocities_m_s),previousDisplacements_m:blend(state.previousDisplacements_m),previousStep_s:state.previousStep_s,time_s:state.time_s,pinDuals,edgeDuals,...(contact?{contact}:{})};
 }
 
 /** Exact polygon clipping in the currently deformed surface. Rest shape, UVs,
@@ -146,24 +148,61 @@ export function cutClothShellBox(document:ClothDocument,data:ClothTopologyData,p
     for(let a=0;a<3;a++)rest.push(pairs.reduce((s,[i,w])=>s+w*data.restPositions_m[3*i+a]!,0));
     current.push(...v.p);return n;
   };
+  // The shell is a solid of its thickness about this mid-surface: each box plane moves out by the through-thickness
+  // fibre's support, h/2 |n.m|. The support is a vertex's own (its area-weighted normal, the thickest incident
+  // face) blended by a point's weights, so the faces on either side of an edge cut it at one point: a per-face
+  // support splits a shared edge at two points on a curved sheet and leaves a slit of unwelded coincident vertices.
+  const vertexCount=rest.length/3,vertexNormal=new Float64Array(3*vertexCount),vertexHalf=new Float64Array(vertexCount);
   for(let f=0;f<data.triangles.length/3;f++){
+    const [i,j,k]=[0,1,2].map(c=>data.triangles[3*f+c]!) as [number,number,number],a=p3(positions,i),b=p3(positions,j),c=p3(positions,k);
+    const n=[(b[1]-a[1])*(c[2]-a[2])-(b[2]-a[2])*(c[1]-a[1]),(b[2]-a[2])*(c[0]-a[0])-(b[0]-a[0])*(c[2]-a[2]),(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])];
+    const half=(document.materials[data.triangleMaterials?.[f]??0]?.thickness_m??0)/2;
+    for(const v of [i,j,k]){for(let q=0;q<3;q++)vertexNormal[3*v+q]+=n[q]!;vertexHalf[v]=Math.max(vertexHalf[v]!,half);}
+  }
+  const support=new Float64Array(3*vertexCount);
+  for(let v=0;v<vertexCount;v++){
+    const length=Math.hypot(vertexNormal[3*v]!,vertexNormal[3*v+1]!,vertexNormal[3*v+2]!);
+    for(let q=0;q<3;q++)support[3*v+q]=length>0?vertexHalf[v]!*Math.abs(vertexNormal[3*v+q]!/length):0;
+  }
+  const supportOf=(v:Vertex,a:number)=>{let s=0;for(const [i,w] of v.weights)s+=w*support[3*i+a]!;return s;};
+  const faceCount=data.triangles.length/3,pieces:(Vertex[][]|undefined)[]=[];
+  // Points a split put on an original edge (a blend of its two ends), by edge: the face across it must take them
+  // too. A plane splits a face's side wherever it crosses it, also outside the box along another axis, where the
+  // neighbour may be disjoint and keep the whole side: a T-junction, a vertex lying on its neighbour's edge.
+  const edgePoints=new Map<number,Vertex[]>(),edgeKey=(i:number,j:number)=>Math.min(i,j)*vertexCount+Math.max(i,j);
+  for(let f=0;f<faceCount;f++){
     const vertices=data.triangles.slice(3*f,3*f+3),poly:Vertex[]=vertices.map(i=>({p:p3(positions,i),weights:new Map([[i,1]])}));
-    // The shell is a solid of its thickness about this mid-surface: each box
-    // plane moves out by the through-thickness fibre's support, h/2 |n.m|.
-    const half=(document.materials[data.triangleMaterials?.[f]??0]?.thickness_m??0)/2,normal=faceNormal(poly[0]!.p,poly[1]!.p,poly[2]!.p);
-    const lower=box.minimum_m.map((v,a)=>v-half*Math.abs(normal[a]!)),upper=box.maximum_m.map((v,a)=>v+half*Math.abs(normal[a]!));
-    const disjoint=[0,1,2].some(a=>poly.every(v=>v.p[a]!<=lower[a]!)||poly.every(v=>v.p[a]!>=upper[a]!));
-    if(disjoint){triangles.push(...vertices);triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(data.triangleIds?.[f]??f);continue;}
+    const disjoint=[0,1,2].some(a=>poly.every(v=>v.p[a]!<=box.minimum_m[a]!-supportOf(v,a))||poly.every(v=>v.p[a]!>=box.maximum_m[a]!+supportOf(v,a)));
+    if(disjoint){pieces.push(undefined);continue;}
     let remaining=poly;const kept:Vertex[][]=[];
-    for(let a=0;a<3&&remaining.length>=3;a++)for(const [value,sign] of [[lower[a]!,-1],[upper[a]!,1]] as const){
-      const [inside,outside]=split(remaining,p=>sign*(p[a]!-value));if(outside.length>=3)kept.push(outside);remaining=inside;
+    for(let a=0;a<3&&remaining.length>=3;a++)for(const sign of [-1,1] as const){
+      const bound=sign<0?box.minimum_m[a]!:box.maximum_m[a]!;
+      const [inside,outside]=split(remaining,v=>sign*(v.p[a]!-bound)-supportOf(v,a));if(outside.length>=3)kept.push(outside);remaining=inside;
     }
     for(const h of halfSpaces){
       if(remaining.length<3)break;
-      const [inside,outside]=split(remaining,p=>dot3(h.normal,p)-h.offset_m);if(outside.length>=3)kept.push(outside);remaining=inside;
+      const [inside,outside]=split(remaining,v=>dot3(h.normal,v.p)-h.offset_m);if(outside.length>=3)kept.push(outside);remaining=inside;
     }
     if(remaining.length>=3)for(let j=1;j<remaining.length-1;j++)removedArea+=crossArea(remaining[0]!.p,remaining[j]!.p,remaining[j+1]!.p);
-    for(const polygon of conformingPieces(kept).map(piece=>distinctPiece(piece,index)))for(const [a,b,c] of convexTriangles(polygon)){
+    pieces.push(kept);
+    for(const v of new Set(kept.flat())){
+      const ends=[...v.weights].filter(([,w])=>Math.abs(w)>1e-14);
+      if(ends.length!==2)continue;
+      const key=edgeKey(ends[0]![0],ends[1]![0]);let list=edgePoints.get(key);if(!list)edgePoints.set(key,list=[]);list.push(v);
+    }
+  }
+  for(let f=0;f<faceCount;f++){
+    const vertices=data.triangles.slice(3*f,3*f+3),shared=[0,1,2].flatMap(k=>edgePoints.get(edgeKey(vertices[k]!,vertices[(k+1)%3]!))??[]);
+    let kept=pieces[f];
+    if(!kept){
+      // A disjoint face keeps its triangle unless a neighbour's split put a point on one of its sides.
+      const triangle=vertices.map(i=>({p:p3(positions,i),weights:new Map([[i,1]])}));
+      if(!conformingPieces([triangle],shared)[0]!.some(v=>!triangle.includes(v))){
+        triangles.push(...vertices);triangleMaterials.push(data.triangleMaterials?.[f]??0);triangleIds.push(data.triangleIds?.[f]??f);continue;
+      }
+      kept=[triangle];
+    }
+    for(const polygon of conformingPieces(kept,shared).map(piece=>distinctPiece(piece,index)))for(const [a,b,c] of convexTriangles(polygon)){
       if(crossArea(a.p,b.p,c.p)<1e-20)continue;
       const ia=index(a),ib=index(b),ic=index(c);if(ia===ib||ib===ic||ic===ia)continue;
       touchedFaces.push(triangles.length/3);

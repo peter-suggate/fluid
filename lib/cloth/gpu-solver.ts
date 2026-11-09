@@ -25,7 +25,7 @@
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothSolverStateData, ClothVector } from './types';
 import { CLOTH_INITIAL_GUESS, clothChebyshevOmega, type ClothInitialGuess, type ClothSolverModel } from './oracle';
-import { CLOTH_COARSE, packClothCoarseTables, type ClothCoarseSpace } from './coarse';
+import { CLOTH_COARSE, buildClothCoarseSpace, packClothCoarseTables, type ClothCoarseSpace } from './coarse';
 import { CLOTH_COARSE_SWEEP_WORKGROUP, clothCoarseFactorBytes } from './gpu-coarse-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
@@ -84,7 +84,9 @@ export interface ClothGPUSolverOptions {
    *  smallest subgroup holds a vertex's lanes; false keeps the workgroup-memory sums; true without them fails. */
   readonly subgroups?: boolean;
   readonly contact?: ClothSolverContact;
-  /** Two-level correction (coarse.ts): its coarse space, built from this model's topology. */
+  /** Two-level correction (coarse.ts): its coarse space, built from this model's topology (default: built here). Every
+   *  step takes it; there is no one-level path (a fine-only solve at K = 8 can explode, coordinator ruling 2026-11-09),
+   *  and a mesh that cannot build one fails explicitly. */
   readonly coarse?: ClothCoarseSpace;
   /** Iterations between two-level corrections; default CLOTH_COARSE.every. */
   readonly coarseEvery?: number;
@@ -136,8 +138,8 @@ export interface ClothGPUTables {
   readonly partialRecord: number;
   readonly clockRecord: number;
   readonly stateRecords: number;
-  /** The two-level correction's sizes (absent without a coarse space). */
-  readonly coarse?: ClothCoarseLayout;
+  /** The two-level correction's sizes. */
+  readonly coarse: ClothCoarseLayout;
 }
 
 export interface ClothCoarseLayout {
@@ -241,7 +243,7 @@ export function packClothStarRecords(model: ClothSolverModel, byColour: readonly
   return { header, records };
 }
 
-export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho' | 'initialGuess' | 'coarse'>, time_s = 0): ClothGPUTables {
+export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'chebyshevRho' | 'initialGuess'> & { readonly coarse: ClothCoarseSpace }, time_s = 0): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, H = t.hingeCount, M = model.materials.length, S = model.scripts.length;
   const byColour: number[][] = Array.from({ length: model.colourCount }, () => []);
   for (let v = 0; v < N; v++) byColour[model.colours[v]!]!.push(v);
@@ -250,10 +252,10 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   for (const list of byColour) { colourRanges.push([start, list.length]); start += list.length; }
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
-  const ct = options.coarse ? packClothCoarseTables(t, options.coarse) : undefined;
+  const ct = packClothCoarseTables(t, options.coarse);
   const stencil = clothBendingStencil(model), star = packClothStarRecords(model, byColour, stencil);
   const parts = [t.vertexFaceOffsets, t.vertexFaces, t.vertexHingeOffsets, t.vertexHinges, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), t.hinges, triangles, t.edges,
-    ...(ct ? [ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn] : []), stencil.offsets, star.header, star.records];
+    ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn, stencil.offsets, star.header, star.records];
   const topoBase: number[] = [];
   let words = 0;
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
@@ -307,8 +309,8 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   if (guess === undefined) throw new Error(`Unknown cloth initial guess ${String(options.initialGuess)}`);
   paramsF.set([...options.gravity_m_s2, options.dt_s, time_s, options.chebyshevRho, guess, 0], PARAM_GRAVITY);
   params.set([model.colourCount, topoBase[parts.length - 2]!, topoBase[parts.length - 1]! / 4, diagonalRecord], PARAM_PATCH);
-  let coarse: ClothCoarseLayout | undefined;
-  if (ct) {
+  let coarse: ClothCoarseLayout;
+  {
     const m = 3 * ct.nodeCount, sq = align(Math.ceil(m * m / 4), CLOTH_SEGMENT_ALIGN), vec = align(Math.ceil(m / 4), CLOTH_SEGMENT_ALIGN);
     const trialWorkgroups = Math.ceil(Math.max(N, T, H, E) / CLOTH_WORKGROUP), pairCount = ct.pairs.length / 2;
     const at: number[] = [];
@@ -323,7 +325,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     dampFaceRecord, partialRecord, clockRecord, stateRecords, coarse };
 }
 
-const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseApply'] as const;
+const COARSE_KERNELS = ['coarseFactors', 'coarseAssemble', 'coarseFactor', 'coarseElements', 'coarseGradient', 'coarseRestrict', 'coarseSolve', 'coarseProlong', 'coarseTrial', 'coarseChoose', 'coarseTrialBack', 'coarseChooseBack', 'coarseApply'] as const;
 type Kernel = 'beginStep' | 'frameElements' | 'frame' | 'solveColour' | 'solveColourWide' | 'postIteration' | 'edgeDualUpdate' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof COARSE_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['beginStep', 'frameElements', 'frame', 'solveColour', 'solveColourWide', 'postIteration', 'edgeDualUpdate', 'diagnose', 'reduceDiagnostics', 'finishStep'];
 
@@ -331,8 +333,8 @@ export class ClothGPUSolver {
   readonly N: number; readonly T: number; readonly E: number;
   readonly positions: GPUBuffer; readonly state: GPUBuffer; readonly status: GPUBuffer; readonly topo: GPUBuffer;
   private readonly rest: GPUBuffer; private readonly params: GPUBuffer; private readonly dispatch: GPUBuffer;
-  /** The two-level correction's work buffer (absent without a coarse space). */
-  private readonly coarse?: GPUBuffer;
+  /** The two-level correction's work buffer. */
+  private readonly coarse: GPUBuffer;
   readonly tables: ClothGPUTables;
   private pipelines!: Record<Kernel, GPUComputePipeline>;
   private bindGroup!: GPUBindGroup;
@@ -351,19 +353,24 @@ export class ClothGPUSolver {
     this.N = t.vertexCount; this.T = t.faceCount; this.E = t.edgeCount;
     if (!(options.dt_s > 0)) throw new Error('Cloth solver needs a positive step');
     if (!(Number.isInteger(options.iterations) && options.iterations >= 1)) throw new Error('Cloth solver needs at least one iteration per step');
-    if (!(options.chebyshevRho >= 0 && options.chebyshevRho < 1)) throw new Error('Cloth Chebyshev rho must be in [0, 1)');
-    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + (options.coarse ? 1 : 0);
+    // Chebyshev extrapolation assumes a stationary sweep; the two-level correction every step takes breaks that, and the
+    // pair explodes (the Float64 oracle of an 8^2 scripted sheet at K = 48: residual 5e1 at rho 0.8, 3e10 at 0.9).
+    if (options.chebyshevRho !== 0) throw new Error(`Cloth Chebyshev acceleration must be off (rho 0): with the two-level correction it can explode, got rho ${options.chebyshevRho}`);
+    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1;
     if (options.coarseEvery !== undefined && !(Number.isInteger(options.coarseEvery) && options.coarseEvery >= 1)) throw new Error('Cloth coarse correction interval must be a positive integer');
-    if (options.coarse && clothCoarseFactorBytes(options.coarse.nodeCount) > device.limits.maxComputeWorkgroupStorageSize)
-      throw new Error(`Cloth coarse space has ${options.coarse.nodeCount} nodes; its factor needs ${clothCoarseFactorBytes(options.coarse.nodeCount)} B of workgroup memory, the device has ${device.limits.maxComputeWorkgroupStorageSize}`);
-    if (options.coarse && Math.min(device.limits.maxComputeInvocationsPerWorkgroup, device.limits.maxComputeWorkgroupSizeX) < CLOTH_COARSE_SWEEP_WORKGROUP)
+    // The coarse move is a move like a colour sweep's: with contact it must be truncated before the sweeps start from it.
+    if (options.contact && !options.hooks?.afterCoarse) throw new Error('Cloth solver with contact needs hooks.afterCoarse to truncate the two-level correction\'s move');
+    const coarseSpace = options.coarse ?? buildClothCoarseSpace(t);
+    if (clothCoarseFactorBytes(coarseSpace.nodeCount) > device.limits.maxComputeWorkgroupStorageSize)
+      throw new Error(`Cloth coarse space has ${coarseSpace.nodeCount} nodes; its factor needs ${clothCoarseFactorBytes(coarseSpace.nodeCount)} B of workgroup memory, the device has ${device.limits.maxComputeWorkgroupStorageSize}`);
+    if (Math.min(device.limits.maxComputeInvocationsPerWorkgroup, device.limits.maxComputeWorkgroupSizeX) < CLOTH_COARSE_SWEEP_WORKGROUP)
       throw new Error(`Cloth coarse factor needs ${CLOTH_COARSE_SWEEP_WORKGROUP}-lane workgroups; the device grants ${device.limits.maxComputeInvocationsPerWorkgroup}`);
     if (device.limits.maxStorageBuffersPerShaderStage < need)
       throw new Error(`Cloth solver needs ${need} storage buffers per stage; the device grants ${device.limits.maxStorageBuffersPerShaderStage}`);
     this.coarseEvery = options.coarseEvery ?? CLOTH_COARSE.every;
     this.iterations = options.iterations; this.maxIterations = Math.max(options.maxIterations ?? options.iterations, options.iterations);
     this.diagnostics = !!options.diagnostics; this.hooks = options.hooks ?? {};
-    this.tables = packClothGPUTables(model, options.origin_m, options, options.solverState?.time_s ?? 0);
+    this.tables = packClothGPUTables(model, options.origin_m, { ...options, coarse: coarseSpace }, options.solverState?.time_s ?? 0);
     const label = options.label ?? 'Cloth', storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (name: string, bytes: number, usage = storage) => device.createBuffer({ label: `${label} ${name}`, size: Math.max(256, align(bytes, 256)), usage });
     this.positions = make('positions', 16 * this.tables.stride);
@@ -372,7 +379,7 @@ export class ClothGPUSolver {
     this.topo = make('topology', 4 * this.tables.topo.length);
     this.rest = make('rest data', 4 * this.tables.rest.length);
     this.params = make('params', 4 * PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-    if (this.tables.coarse) this.coarse = make('coarse work', 16 * this.tables.coarse.records);
+    this.coarse = make('coarse work', 16 * this.tables.coarse.records);
     this.dispatch = make('dispatch records', CLOTH_DISPATCH_STRIDE * this.recordCount(this.maxIterations), GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     writeBufferChunked(device.queue, this.topo, 0, this.tables.topo);
     writeBufferChunked(device.queue, this.rest, 0, this.tables.rest);
@@ -431,21 +438,21 @@ export class ClothGPUSolver {
       { binding: B.dispatch, visibility: C, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 32 } },
       storage(B.positions), storage(B.state), storage(B.status), storage(B.topo, true), storage(B.rest, true), storage(B.topo4, true)];
     if (this.options.contact) entries.push(storage(B.contact, true));
-    if (this.coarse) entries.push(storage(B.coarse));
+    entries.push(storage(B.coarse));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
-      ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []), ...(this.coarse ? [buffer(B.coarse, this.coarse)] : [])] });
+      ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []), buffer(B.coarse, this.coarse)] });
     const lanes = this.options.vertexLanes ?? CLOTH_VERTEX_LANES;
     const available = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= lanes;
     if (this.options.subgroups && !available) throw new Error(`Cloth subgroup sums need the subgroups feature with subgroups of at least ${lanes} invocations`);
     this.subgroups = lanes > 1 && (this.options.subgroups ?? available);
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, coarseNodes: this.tables.coarse?.nodeCount,
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: this.options.contact?.wgsl, coarseNodes: this.tables.coarse.nodeCount,
       ...(lanes > 1 ? { vertexLanes: lanes, subgroups: this.subgroups } : {}) }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const kernels: readonly Kernel[] = this.coarse ? [...KERNELS, ...COARSE_KERNELS] : KERNELS;
+    const kernels: readonly Kernel[] = [...KERNELS, ...COARSE_KERNELS];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
@@ -468,14 +475,12 @@ export class ClothGPUSolver {
     this.run(pass, 'frame', this.threads(this.N));
     this.hooks.afterFrame?.(pass);
     const coarse = this.tables.coarse;
-    if (coarse) {
-      this.run(pass, 'coarseFactors', this.threads(this.T));
-      this.run(pass, 'coarseAssemble', coarse.pairCount);
-      this.run(pass, 'coarseFactor', 1);
-    }
+    this.run(pass, 'coarseFactors', this.threads(this.T));
+    this.run(pass, 'coarseAssemble', coarse.pairCount);
+    this.run(pass, 'coarseFactor', 1);
     for (let it = 1; it <= this.iterations; it++) {
       const base = (it - 1) * (C + 1);
-      if (coarse && (it - 1) % this.coarseEvery === 0) {
+      if ((it - 1) % this.coarseEvery === 0) {
         this.run(pass, 'coarseElements', this.threads(Math.max(this.T, this.model.topology.hingeCount, limited ? this.E : 0)));
         this.run(pass, 'coarseGradient', this.threads(this.N));
         this.run(pass, 'coarseRestrict', coarse.nodeCount);
@@ -483,6 +488,9 @@ export class ClothGPUSolver {
         this.run(pass, 'coarseProlong', this.threads(this.N));
         this.run(pass, 'coarseTrial', coarse.trialWorkgroups);
         this.run(pass, 'coarseChoose', 1);
+        // Shorter trials only after a rejected full step: otherwise both are uniform early exits.
+        this.run(pass, 'coarseTrialBack', coarse.trialWorkgroups);
+        this.run(pass, 'coarseChooseBack', 1);
         this.run(pass, 'coarseApply', this.threads(this.N));
         this.hooks.afterCoarse?.(pass, it);
       }
@@ -635,16 +643,15 @@ export class ClothGPUSolver {
 
   static describeStatus(status: number): string[] {
     return [...(status & CLOTH_STATUS.nonFinite ? ['A cloth position or velocity became non-finite'] : []),
-      ...(status & CLOTH_STATUS.coarseIndefinite ? ['coarseIndefinite: a step\'s coarse operator was not positive definite, so it ran without the two-level correction'] : [])];
+      ...(status & CLOTH_STATUS.coarseIndefinite ? ['coarseIndefinite: a step\'s coarse operator was not positive definite, so its two-level correction could not run (a failure: there is no one-level path)'] : [])];
   }
 
   /** The two-level correction's counters (harness reads; never a step path). */
-  async readCoarseStats(): Promise<ClothCoarseStats | undefined> {
+  async readCoarseStats(): Promise<ClothCoarseStats> {
     const layout = this.tables.coarse;
-    if (!this.coarse || !layout) return undefined;
     const all = new Float32Array(await this.read(this.coarse, 16 * (layout.miscRecord + 3))), s = 4 * (layout.miscRecord + 1);
     return { corrections: all[s]!, accepted: [all[s + 1]!, all[s + 2]!, all[s + 3]!, all[s + 4]!] };
   }
 
-  destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.coarse]) b?.destroy(); }
+  destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.coarse]) b.destroy(); }
 }

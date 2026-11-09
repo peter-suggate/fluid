@@ -1,9 +1,10 @@
 /**
  * Tier A GPU cloth solver against the Float64 oracle: one step, a scripted
- * multi-step run with BDF2, strain limits, damping and Chebyshev, the
+ * multi-step run with BDF2, strain limits and damping (Chebyshev refused), the
  * diagnostics ring, save/load of the solver state, and C2's contact block
- * plugged into the vertex kernel. Skips without
- * WEBGPU_NODE_MODULE.
+ * plugged into the vertex kernel. Every GPU step takes the two-level
+ * correction (there is no one-level path), so the oracle runs it too, from
+ * the same coarse space. Skips without WEBGPU_NODE_MODULE.
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -15,6 +16,7 @@ import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from
 import type { ClothAttachmentScript, ClothMaterial } from '../lib/cloth/types';
 import { buildClothSolverModel, clothHingeVector, clothOracleStep, createClothOracleState, type ClothStepOptions } from '../lib/cloth/oracle';
 import { ClothGPUSolver, clothBendingStencil } from '../lib/cloth/gpu-solver';
+import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/coarse';
 import { CLOTH_BINDING } from '../lib/cloth/gpu-solver-wgsl';
 import { ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
 
@@ -54,6 +56,9 @@ function perturbed(model: ReturnType<typeof setup>, amplitude: number): Float64A
   return x;
 }
 
+/** The oracle's two-level correction on the coarse space the GPU solver builds (f32 line-search slack). */
+const coarseOf = (model: ReturnType<typeof setup>) => new ClothCoarseCorrection(model, buildClothCoarseSpace(model.topology), 2 ** -23);
+
 function maxDifference(a: ArrayLike<number>, b: ArrayLike<number>): number {
   let worst = 0;
   for (let i = 0; i < a.length; i++) worst = Math.max(worst, Math.abs(a[i]! - b[i]!));
@@ -66,7 +71,7 @@ test('one GPU step matches the oracle, for every initial guess', { skip: !gpu },
     const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations, chebyshevRho: 0, initialGuess };
     const solver = await ClothGPUSolver.create(device, model, { ...options, origin_m: origin, positions_m: start });
     const oracle = createClothOracleState(model, start);
-    clothOracleStep(model, oracle, options);
+    clothOracleStep(model, oracle, options, false, undefined, coarseOf(model));
     solver.step();
     const d = maxDifference(await solver.readPositions(), oracle.x);
     assert.ok(d < 1e-6, `K=${iterations} ${initialGuess}: GPU vs oracle ${d} m`);
@@ -77,8 +82,8 @@ test('one GPU step matches the oracle, for every initial guess', { skip: !gpu },
 test('every lanes-per-vertex layout of the colour solve matches the oracle, with subgroup or workgroup sums; invalid layouts fail', { skip: !gpu }, async () => withDevice(async device => {
   const model = setup(7), start = perturbed(model, 4e-3);
   const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 4, chebyshevRho: 0, initialGuess: 'adaptive' };
-  const oracle = createClothOracleState(model, start);
-  for (let s = 0; s < 3; s++) clothOracleStep(model, oracle, options);
+  const oracle = createClothOracleState(model, start), coarse = coarseOf(model);
+  for (let s = 0; s < 3; s++) clothOracleStep(model, oracle, options, false, undefined, coarse);
   // Subgroup shuffles where the device has them, and the workgroup-memory sums always.
   for (const subgroups of device.features.has('subgroups') ? [undefined, false] : [false]) for (const vertexLanes of [1, 2, 4, 8, 32]) {
     const solver = await ClothGPUSolver.create(device, model, { ...options, origin_m: origin, positions_m: start, vertexLanes, subgroups });
@@ -119,8 +124,8 @@ test('the bending stencil is the per-hinge quadratic bending: gradient, zero row
   if (!gpu) { t.skip('no GPU'); return; }
   await withDevice(async device => {
     const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 4, chebyshevRho: 0, initialGuess: 'adaptive' };
-    const oracle = createClothOracleState(model, x);
-    for (let s = 0; s < 3; s++) clothOracleStep(model, oracle, options);
+    const oracle = createClothOracleState(model, x), coarse = coarseOf(model);
+    for (let s = 0; s < 3; s++) clothOracleStep(model, oracle, options, false, undefined, coarse);
     for (const vertexLanes of [1, 4]) {
       const solver = await ClothGPUSolver.create(device, model, { ...options, origin_m: origin, positions_m: x, vertexLanes });
       solver.step(3);
@@ -132,14 +137,17 @@ test('the bending stencil is the per-hinge quadratic bending: gradient, zero row
   });
 });
 
-test('a scripted BDF2 run with strain limits and Chebyshev tracks the oracle; the ring reports its residual', { skip: !gpu }, async t => withDevice(async device => {
+test('a scripted BDF2 run with strain limits tracks the oracle; the ring reports its residual; Chebyshev acceleration fails explicitly', { skip: !gpu }, async t => withDevice(async device => {
   const scripts: ClothAttachmentScript[] = [{ kind: 'translate', group: 1, start_s: 0, end_s: 0.2, vector: [0.05, 0.02, 0], easing: 'cosine' }];
   const model = setup(8, scripts), start = perturbed(model, 4e-3);
-  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 48, chebyshevRho: 0.9 };
+  const options: ClothStepOptions = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2', iterations: 48, chebyshevRho: 0 };
+  // Chebyshev on top of the two-level correction explodes this run (the oracle: residual 3e10 at rho 0.9), so the solver refuses it.
+  await assert.rejects(ClothGPUSolver.create(device, model, { ...options, chebyshevRho: 0.9, origin_m: origin }), /Chebyshev/);
   const solver = await ClothGPUSolver.create(device, model, { ...options, origin_m: origin, diagnostics: true, positions_m: start });
   const oracle = createClothOracleState(model, start);
   const steps = 20, residuals: number[] = [];
-  for (let s = 0; s < steps; s++) residuals.push(clothOracleStep(model, oracle, options, true).residuals.at(-1)!);
+  const coarse = coarseOf(model);
+  for (let s = 0; s < steps; s++) residuals.push(clothOracleStep(model, oracle, options, true, undefined, coarse).residuals.at(-1)!);
   solver.step(steps);
   const x = await solver.readPositions(), d = maxDifference(x, oracle.x);
   const report = await solver.readStatus();
@@ -157,7 +165,7 @@ test('a scripted BDF2 run with strain limits and Chebyshev tracks the oracle; th
 test('saved solver state reloads to the same trajectory', { skip: !gpu }, async () => withDevice(async device => {
   const scripts: ClothAttachmentScript[] = [{ kind: 'oscillate', group: 1, start_s: 0, end_s: 10, vector: [0.03, 0, 0], period_s: 0.5 }];
   const model = setup(7, scripts);
-  const options = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, iterations: 8, chebyshevRho: 0.8, origin_m: origin };
+  const options = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, iterations: 8, chebyshevRho: 0, origin_m: origin };
   const solver = await ClothGPUSolver.create(device, model, options);
   solver.step(6);
   const saved = await solver.readState();
@@ -174,18 +182,24 @@ test('saved solver state reloads to the same trajectory', { skip: !gpu }, async 
   solver.destroy(); fresh.destroy();
 }));
 
-test("C2's OGC vertex block compiles into the vertex kernel; an empty contact list changes nothing", { skip: !gpu }, async () => withDevice(async device => {
+test("C2's OGC vertex block compiles into the vertex kernel; an empty contact list changes nothing beyond f32 rounding; contact needs the coarse move's truncation", { skip: !gpu }, async () => withDevice(async device => {
   const model = setup(6), start = perturbed(model, 4e-3);
-  const options = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, iterations: 6, chebyshevRho: 0.8, origin_m: origin, positions_m: start };
+  const options = { dt_s: 1 / 60, gravity_m_s2: g, integrator: 'bdf2' as const, iterations: 6, chebyshevRho: 0, origin_m: origin, positions_m: start };
   const plain = await ClothGPUSolver.create(device, model, options);
   // Header (0, capacity 0, counts at word-vec 2, entries at 2): every vertex has no contacts.
   const contacts = device.createBuffer({ size: 16 * (4 + Math.ceil(model.topology.vertexCount / 4)), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(contacts, 0, new Uint32Array([0, 0, 2, 2]));
-  const withContact = await ClothGPUSolver.create(device, model, { ...options, contact: { wgsl: ogcVertexBlockWGSL({ group: 0, binding: CLOTH_BINDING.contact }), buffer: contacts } });
+  const contact = { wgsl: ogcVertexBlockWGSL({ group: 0, binding: CLOTH_BINDING.contact }), buffer: contacts };
+  // The two-level correction's move is a move like a sweep's: a solver with contact refuses to start without its truncation.
+  await assert.rejects(ClothGPUSolver.create(device, model, { ...options, contact }), /afterCoarse/);
+  const withContact = await ClothGPUSolver.create(device, model, { ...options, contact, hooks: { afterCoarse: () => {} } });
   let rounds = 0;
   withContact.hooks = { afterIteration: () => { rounds++; } };
   plain.step(3); withContact.step(3);
   assert.equal(rounds, 18);
-  assert.ok(maxDifference(await plain.readPositions(), await withContact.readPositions()) === 0);
+  const d = maxDifference(await plain.readPositions(), await withContact.readPositions());
+  // The two-level kernels compile differently with the contact block (its zero terms change the shader's FMA
+  // contraction), so the runs agree to f32 rounding, not bitwise: measured 9.3e-8 m, one ulp at 1 m.
+  assert.ok(d < 5e-7, `empty contact list moved the cloth by ${d} m`);
   plain.destroy(); withContact.destroy(); contacts.destroy();
 }));

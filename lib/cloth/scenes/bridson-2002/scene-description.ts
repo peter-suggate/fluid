@@ -16,13 +16,13 @@ import { bridsonShapeBox, bridsonShapeReach, bridsonSolidDistance, bridsonSolidP
  * Solids that hold still at t = 0 (the ground, legs, frustum, and the curtain
  * ball and spinning sphere until they start to move) are baked at their t = 0
  * pose. A solid in motion is a scene rigid body with a prescribed pose.
- * With `movingSolids: "rigid-body"` (what the catalog opens) each solid with
+ * With `movingSolids: "rigid-body"` (the default, what the catalog opens) each solid with
  * a pose track is a scene rigid body carrying that track for the whole run,
  * which the cloth system's contact (lane C2, M6, one-way) bakes in its body
  * frame and poses every step; it renders, picks and takes local cuts through
  * the shared rigid surface path (lib/core/rigid-surface.ts). With
- * `movingSolids: "held"` (this function's default, which the contact lane's
- * scene-solid tests are written against) each is held voxels recorded on the
+ * `movingSolids: "held"` (which the contact lane's scene-solid tests ask for)
+ * each is held voxels recorded on the
  * cloth document as a pending solid, and the cloth system fails explicitly
  * when the clock reaches it: at the first motion of a held solid, or when a
  * moving one first comes within reach of the cloth.
@@ -48,7 +48,7 @@ export interface Bridson2002SceneLayout {
 export interface Bridson2002SceneOptions {
   /** `bake: false` skips the voxel bake (library card previews). */
   readonly bake?: boolean;
-  /** How a solid with a pose track enters the scene: held voxels then pending (default), or a scene rigid body (the catalog's choice). */
+  /** How a solid with a pose track enters the scene: a scene rigid body (default), or held voxels then pending. */
   readonly movingSolids?: "held" | "rigid-body";
 }
 
@@ -192,7 +192,7 @@ function movingRigidBodies(source: Bridson2002Scene, t: Vec3): RigidBodyDescript
 /** The document the product opens (see Bridson2002SceneOptions). */
 export function bridson2002SceneDescription(source: Bridson2002Scene, options: Bridson2002SceneOptions = {}): SceneDescription {
   const layout = bridson2002SceneLayout(source), h = layout.cell_m, t = layout.translation_m;
-  const rigidBodies = options.movingSolids === "rigid-body" ? movingRigidBodies(source, t) : [];
+  const rigidBodies = (options.movingSolids ?? "rigid-body") === "rigid-body" ? movingRigidBodies(source, t) : [];
   const rigid = new Set(rigidBodies.map(b => b.id)), pending = layout.pending.filter(p => !rigid.has(p.id));
   const scene = createEmptyScene({ sceneId: source.id, finestCellSize_m: h,
     extents_m: { x: layout.dimensions[0] * h, y: layout.dimensions[1] * h, z: layout.dimensions[2] * h } });

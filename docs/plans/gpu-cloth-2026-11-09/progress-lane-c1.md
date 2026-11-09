@@ -921,3 +921,97 @@ Notes on the table:
 - For C2.
 
 **C2's dirty `solid-field.ts`** (its uncommitted lifted-facet check) fails the held rotating-sphere GPU test at setup: "a lifted facet near (−0.80, −0.44, 0.50) enters the field by 1.00e-3 m". With HEAD's `solid-field.ts` (scratch copy) the test passes. This is not from C1's changes.
+
+## 2026-11-09 RESULT (13): two-level only, the tick split, carried contact state, and two coarse failures traced to their causes
+
+**Rulings (1), (2): the solve itself.**
+- **Strain-limit edges use α = 0** (`CLOTH_AVBD.edgeAlpha`, oracle, coarse operator and WGSL). Pins keep α. The warm start λ ← αγλ is unchanged.
+- **The fine-only path is gone.**
+  - `ClothGPUSolver` always builds a coarse space (from the model's topology when none is passed) and always dispatches the correction. The `coarse` solver setting is removed and now fails validation ("'coarse' was removed").
+  - A mesh that can't build a coarse space fails explicitly: more pieces than nodes, an uncovered vertex, a vertex with no face.
+  - `coarseIndefinite` now halts the scene (`cloth-coarse-indefinite`). It is no longer a note.
+  - A solver with contact must have `hooks.afterCoarse`, or construction throws. C2's working-tree `stepHooks` carries it.
+- **Chebyshev is forbidden.** ρ must be 0, enforced in the solver and in validation. With the coarse step, the scripted ρ 0.9 test exploded on both the GPU and the oracle: residual 3e10.
+- **Tests that used the fine-only path now use the two-level path.** The GPU-vs-oracle cases pass the oracle a `ClothCoarseCorrection`. Empty-contact bit identity is relaxed to < 5e-7 m (measured 9.3e-8, from FMA contraction).
+
+**Two `coarseIndefinite` failures, traced to their causes** (the halt surfaced both):
+1. **Undo of a cut (`sheetScene`): the cut was wrong.**
+   - The A_c on the GPU was NaN on 14 of 40 nodes. Its source was the per-vertex contact Hessians of 12 vertices, which were pairs of coincident, unwelded vertices.
+   - Cause: the box planes moved out by a *per-face* thickness support h/2 |n_f·m|. On a curved sheet, the two faces of an edge cut it at two points. The result was a slit, and contact saw distance 0, so n = gap/d was NaN. The entries also carried z = +inf.
+   - Fix (`edit.ts`): the support is per vertex (area-weighted normal, thickest incident face) and blended by each point's weights, so both faces cut an edge at one point.
+   - Second defect in the same cut: a plane splits a face's side wherever it crosses it, even outside the box along another axis. A disjoint neighbour kept the whole side, leaving a T-junction (a vertex 0 m from a non-incident edge, barrier Hessian 2e11).
+   - Fix: a cross-face conforming pass. Points on an original edge are inserted into the face across it, and a disjoint face re-fans only when it receives one.
+   - New regression (`cloth-topology`): a bowl cut at 0 and 5 mm thickness has the same vertices, faces and boundary edges, no vertex pair under 1 mm, and 0 T-junctions. Before the fix: 94 vs 86 vertices, 8 near pairs.
+   - **For C2:** `ogcEvalEntry` turns d = 0 into NaN. Mesh contact entries at coincident features should fail explicitly rather than poison the solve. The solve's vertex line search silently rejected those vertices.
+2. **In contact (moving-solid scene): the f32 block test was wrong.**
+   - The factor tested each 3×3 pivot block by its determinant. A contact Hessian makes a block k n nᵀ + s I. Its determinant s²(s + k) cancels from k³ terms, and f32 loses it at k/s ≈ 10^3.5.
+   - Measured on the GPU's A_c over the moving-solid run: the minor ratio fell to 6.5e-6 at a 1e6 contact spike.
+   - Fix: invert blocks by 3×3 Cholesky (D⁻¹ = L⁻ᵀL⁻¹), whose pivots keep s to k/s ≈ 1e7. It is also cheaper: coarseFactor 0.39 → 0.31 ms.
+   - New GPU regression (`cloth-coarse`): six blocks at k/s = 1e5 off the axes, with soft couplings. The factor says positive definite, and |A⁻¹A − I| = 4.6e-3. The old f32 determinant on those blocks is −3e6 to 4e6 (exact 1e5).
+
+**Ruling (3): one tick, the split.** The catalog curtain, rigid-body variant: N 38100, T 75394, E 113493, 5 colours, K = 8, 40 coarse nodes, ticks 71–76, split-pass timestamps (`fluid-scratch/cloth-c1/r2/tick-profile.mts`).
+
+| Group | Start of round | After this round |
+|---|---|---|
+| detection (C2) | 6.34 | 4.95 * |
+| solve (colour sweeps, duals, frame) | 4.24 | 4.38 |
+| coarse | 3.57 | 3.15 |
+| truncate (C2) | 0.40 | 0.42 |
+| GPU busy per tick | 14.55 | 12.89 |
+| fenced tick (CPU encode) | 19.17 (2.36) | 13.60 (1.58) |
+
+\* C2's working tree changed during the round.
+
+- **Largest items now** (ms per tick):
+  - solveColourWide 4.00
+  - coarseAssemble 0.68
+  - coarseTrial 0.60
+  - coarseGradient 0.45
+  - coarseElements 0.33
+  - coarseFactor 0.31
+  - coarseRestrict 0.25
+- **Render handoff:** the normals are part of finishStep (0.03 ms), and the renderer reads the solver's buffers in place, so the handoff has no copy.
+- **Landed: the full coarse step first.**
+  - Nearly every correction takes α = 1, so coarseTrial evaluates only that trial. The shorter trials 1/2, 1/4, 1/8 run in coarseTrialBack and coarseChooseBack only after a rejection; otherwise those passes are uniform early exits.
+  - Cost: trial 1.15 → 0.60 ms, plus 0.12 ms for both Back passes.
+  - Validated: a 4 cm perturbed sheet rejects 3 of 4 full steps, and the GPU accepted counts equal the oracle's ([1, 3, 0, 0]), 8e-8 m apart. Hanging-sheet equilibrium is unchanged: 0.35%, stretch exact, KE 2e-8.
+- **Measured, not landed:**
+  - coarseEvery 4 fails the band gate (1.24% > 1%).
+  - coarseEvery 3 passes at 0.77% and saves one correction in four (≈ 0.55 ms at 38K). This is the coordinator's call.
+- **Against the 4 ms / 16K target:**
+  - Scaled linearly, my share is ≈ 3.2 ms at 16K: solve 1.8, coarse 1.4 (factor and solve are fixed costs). C2's share is ≈ 2.3 ms.
+  - The remaining big item is the colour sweep, 0.5 ms per iteration at 38K. Wider lanes measured worse earlier.
+  - Next candidates: assembling A_c once per step at a lower cost (0.68 ms is pair-gather of face shares), and the colour sweep's memory layout.
+
+**Ruling (4): `posePrescribedDryBodies` is tested.**
+- The posing moved to `lib/core/dry-rigid-poses.ts` (`dryPrescribedRigidPoses`, `rigidBodyIsPrescribed`). The renderer calls it, and the fluid-solver check is inside it.
+- CPU test in `cloth-system`: a dry scene's prescribed bodies are posed at the presented time, the published pose is what picking sees, and a wet scene returns undefined (its rigid solver owns the poses).
+
+**Ruling (5) and C2's follow-up.**
+- **The detector's carried state is part of the published solver state.** `ClothSolverStateData.contact = { reference (xyzw, world m), held }`, published with each pose (`readCarriedState` beside the mirror read).
+  - It is restored on rebuild by `writeCarriedState`, for undo, load and adopt.
+  - It is validated: 4n finite reference, n integer held flags.
+  - A cut remaps it: kept vertices keep theirs; new vertices take the blended xyz with ρ = −1 and held 0.
+- **The library default is `movingSolids: "rigid-body"`.** C2's tests state "held" explicitly, and `scenes.ts` no longer passes it.
+- **Undo drift vs run to run** (GPU, moving-solid scene; endpoint at tick 12, 6 ticks on): the test now takes 3 straight runs plus a control without the carried state, and asserts nearest-straight-run drift ≤ the maximum pairwise spread.
+
+  | Run | Drift / spread (m) |
+  |---|---|
+  | undo with carried state, nearest straight run | 5.7e-4 |
+  | control, without carried state | 6.6e-4 |
+  | straight runs, maximum pairwise spread | 2.7e-3 |
+
+  - The earlier two-run form saw 1.6e-3 vs 1.8e-3 (pass) and 2.0e-3 vs 6.9e-4 (fail): the spread itself varies 4×.
+  - Honest reading: the carried state is now exact through undo, but in this scene the detector's own nondeterminism dominates, so carrying it changes the drift little.
+
+**Checks:**
+- `check:types` clean.
+- `test:unit`: 1672 pass, 1 fail (the known foreign `reservoir-particle-cost` "merge cap…").
+- GPU:
+  - cloth-coarse 7/7
+  - cloth-gpu-solver 6/6
+  - cloth-system 16/18
+- The 2 cloth-system failures, "sheet lands on the moving solid" and "a cut of the moving solid…", both halt on **heldConflict**. They are not from C1:
+  - Both passed at the start of the round.
+  - They started failing when C2's uncommitted `ogc-detector*.ts` / `ogc-wgsl.ts` changes appeared.
+  - Neither test cuts the cloth. The only C1 change in between was `edit.ts`.

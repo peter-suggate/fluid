@@ -34,7 +34,8 @@ import type { ClothGPUSolver } from '../lib/cloth/gpu-solver';
 import { CLOTH_CONTACT_FAILING, buildClothBodyField, buildClothSceneField, clothContactFieldKey, clothContactRadius, clothSceneMovingSolids } from '../lib/cloth/scene-contact';
 import { proceduralSolidField } from '../lib/core/procedural-solid';
 import { sampleRigidPoseTrack } from '../lib/core/prescribed-rigid-motion';
-import { quaternionInverseRotate } from '../lib/core/rigid-body';
+import { initializeRigidBodies, quaternionInverseRotate } from '../lib/core/rigid-body';
+import { dryPrescribedRigidPoses } from '../lib/core/dry-rigid-poses';
 import { publishSceneRigidSurfaces, rigidBodyIsEditableSurface, sceneWithRoundedPlateCuts } from '../lib/core/rigid-surface';
 import { sampleClothSolidField } from '../lib/cloth/contact/solid-field';
 import { applySolidBoxCuts } from '../lib/core/solid-cuts';
@@ -78,10 +79,12 @@ test('held solids are voxel solids; moving solids are pending at their first mot
   for (const l of layouts) assert.ok(l.dimensions.every(d => d % 8 === 0));
 });
 
-test("the rigid-body variant makes each scene's moving solid a pose-tracked rigid sphere, not held and not pending", () => {
+test("the rigid-body variant (the default) makes each scene's moving solid a pose-tracked rigid sphere, not held and not pending", () => {
   for (const make of BRIDSON_2002_SCENES) {
-    const source = make(), held = bridson2002SceneDescription(source, { bake: false }), scene = bridson2002SceneDescription(source, { bake: false, movingSolids: 'rigid-body' });
+    const source = make(), held = bridson2002SceneDescription(source, { bake: false, movingSolids: 'held' }), scene = bridson2002SceneDescription(source, { bake: false, movingSolids: 'rigid-body' });
     assert.deepEqual(validateScene(scene), []);
+    // It is the default.
+    assert.deepEqual(bridson2002SceneDescription(source, { bake: false }), scene);
     const [body, ...rest] = clothSceneMovingSolids(scene), solid = source.solids.find(s => s.id === body!.id)!, t = bridson2002SceneLayout(source).translation_m;
     assert.equal(rest.length, 0);
     assert.ok(body!.shape === 'sphere' && body!.motion === 'static' && body!.poseTrack!.keyframes.length > 1 && body!.friction === solid.friction);
@@ -102,7 +105,7 @@ test('the cloth keeps its authored masses and lands on the translated scene fram
   assert.equal(data.restPositions_m[1], rest[1]! + t.y);
   // The ball is the scene's moving solid (a rigid body), so nothing is pending; held, it would stop the clock at 2 s.
   assert.equal(scene.cloth![0]!.pendingSolids, undefined);
-  assert.deepEqual(bridson2002SceneDescription(source, { bake: false }).cloth![0]!.pendingSolids, [{ id: 'ball', start_s: 2 }]);
+  assert.deepEqual(bridson2002SceneDescription(source, { bake: false, movingSolids: 'held' }).cloth![0]!.pendingSolids, [{ id: 'ball', start_s: 2 }]);
   // The container is centred on x and z, floor at y = 0.
   assert.ok(Math.abs(layout.lower_m.x + t.x + scene.container.width_m / 2) < 1e-12);
   assert.equal(layout.lower_m.y + t.y, 0);
@@ -130,6 +133,31 @@ test('the shared nearest-surface query hits the ground and the ball, and a solid
   const loaded = JSON.parse(JSON.stringify(cut)) as SceneDescription;
   assert.deepEqual(validateScene(loaded), []);
   assert.equal(visibleToolSurface(loaded, side)?.point.x, after.point.x);
+});
+
+test("a dry scene's prescribed bodies are posed for drawing at the presented time, and the published pose is what picking sees; a wet scene's rigid solver owns its poses", () => {
+  const scene = cloneScene(curtain()), ball = scene.rigidBodies.find(b => b.id === 'ball')!, bodies = initializeRigidBodies(scene.rigidBodies);
+  const at = (t: number) => sampleRigidPoseTrack(ball.poseTrack!, t);
+  const dry = dryPrescribedRigidPoses(scene, bodies, 3)!;
+  assert.ok(dry, 'the dry curtain poses its ball');
+  assert.deepEqual(dry.bodies[0]!.position_m, at(3).position_m);
+  assert.deepEqual(dry.bodies[0]!.orientation, at(3).orientation);
+  assert.deepEqual(dry.poses, [{ id: 'ball', position_m: at(3).position_m, orientation: at(3).orientation }]);
+  assert.deepEqual(bodies[0]!.position_m, ball.position_m, 'the roster itself is not moved');
+  // Published as the renderer publishes it, picking finds the ball where it is drawn, not at its t = 0 pose.
+  const p3 = at(3).position_m, through = ray([p3.x, p3.y + 1.5, p3.z], [0, -1, 0]);
+  publishSceneRigidSurfaces(scene, dry.poses);
+  const hit = visibleToolSurface(scene, through)!;
+  assert.equal(hit.rigidBodyId, 'ball');
+  assert.ok(Math.abs(hit.point.y - (p3.y + ball.dimensions_m.x)) < 1e-9, `top of the drawn ball at ${hit.point.y}`);
+  publishSceneRigidSurfaces(scene, dryPrescribedRigidPoses(scene, bodies, 0)!.poses);
+  assert.notEqual(visibleToolSurface(scene, through)?.rigidBodyId, 'ball', 'the t = 0 pose is elsewhere');
+  // The GPU roster's capacity bounds the published poses; the roster itself is posed whole.
+  assert.equal(dryPrescribedRigidPoses(scene, bodies, 3, 0)!.poses.length, 0);
+  // Nothing prescribed: nothing to pose. A wet scene: its rigid solver owns the poses and reads them back.
+  const still = { ...ball, poseTrack: undefined };
+  assert.equal(dryPrescribedRigidPoses({ ...scene, rigidBodies: [still] }, initializeRigidBodies([still]), 3), undefined);
+  assert.equal(dryPrescribedRigidPoses({ ...scene, systems: { ...scene.systems, fluid: true } }, bodies, 3), undefined);
 });
 
 test("the moving ball is a shared editing surface at its drawn pose: hit, a local cut in its body frame that travels with it, the rest untouched, save/load and undo; a wet scene's sphere is not one", () => {
@@ -188,7 +216,7 @@ test("each Bridson bake leads solidVoxels, so the visible held solids come from 
   // The curtain's only shaped solid is its ball, a rigid body in the catalog: its held world is the lattice-aligned ground alone.
   assert.equal(proceduralSolidField(curtain()), undefined);
   assert.equal(proceduralSolidField(sceneDocument(findSceneDefinition('bridson-2002-curtain')!)), undefined);
-  assert.ok(proceduralSolidField(bridson2002SceneDescription(bridson2002Curtain())), 'the held ball is baked procedurally');
+  assert.ok(proceduralSolidField(bridson2002SceneDescription(bridson2002Curtain(), { movingSolids: 'held' })), 'the held ball is baked procedurally');
   for (const make of BRIDSON_2002_SCENES.filter(m => m().id !== 'bridson-2002-curtain')) {
     const scene = bridson2002SceneDescription(make(), { movingSolids: 'rigid-body' });
     const field = proceduralSolidField(scene);
@@ -202,6 +230,9 @@ test('cloth contact settings: self friction is validated and carried; a solid wo
   assert.equal(document.solver?.selfFriction, 0.3);
   for (const bad of [-0.1, NaN, Infinity])
     assert.ok(validateClothDocument({ ...document, solver: { ...document.solver, selfFriction: bad } }).some(e => e.includes('self friction')));
+  // There is no one-level path: a document asking to switch the two-level correction off (or on) fails explicitly.
+  for (const coarse of [false, true])
+    assert.ok(validateClothDocument({ ...document, solver: { ...document.solver, coarse } as typeof document.solver }).some(e => e.includes("'coarse' was removed")));
   assert.equal(clothContactRadius(document), 1e-3);
   assert.throws(() => clothContactRadius({ ...document, materials: [{ ...document.materials[0]!, thickness_m: 0 }] }), /material thickness/);
   const empty = createEmptyScene({ sceneId: 'cloth-contact-test' }), origin = [0, 1, 0] as const;
@@ -280,8 +311,10 @@ test('a dry scene steps its cloth one tick per advance, tracks the oracle, and h
   assert.equal(surface.tick, 6);
   // The mirrored pose carries the exact solver state (BDF2 history, AVBD duals, clock), not a restart.
   const liveSolver = () => (cloth as unknown as { entries: Map<string, { solver: ClothGPUSolver }> }).entries.get('sheet')!.solver;
-  const exact = (await liveSolver().readState()).solverState;
-  assert.deepEqual(surface.solverState, exact);
+  const exact = (await liveSolver().readState()).solverState, { contact, ...published } = surface.solverState!;
+  assert.deepEqual(published, exact);
+  // With the detector's state carried from step to step (world metres), so an edit or undo from it steps on the same way.
+  assert.ok(contact && contact.reference.length === 4 * exact.previousVelocities_m_s.length / 3 && contact.held.length === exact.previousVelocities_m_s.length / 3);
   assert.ok(Math.abs(exact.previousStep_s - CLOTH_SCENE_STEP_S) < 1e-9 && exact.previousVelocities_m_s.some(v => v !== 0) && exact.pinDuals.some(v => v !== 0));
   const document = scene.cloth![0]!, topology = prepareClothTopology(document.geometry.data, document.materials);
   const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)));
@@ -455,24 +488,41 @@ test("a cut of the moving solid at edit time rebakes its body frame and rebuilds
   cloth.destroy();
 }));
 
-test('in contact, a history endpoint steps on as if never rebuilt', { skip: !gpu,
-  todo: "the endpoint lacks the detector's cross-step per-vertex state (rho_v, held in the last step): 2.2 mm after 6 ticks resting on the moving sphere; C2 to expose it, C1 to carry it with the solver state" },
-async () => withDevice(async device => {
+// Bit-identity is not required in contact (performance over parity), but undo must add no drift of its own: the
+// endpoint carries the detector's per-vertex state (C2's readCarriedState) with the solver state, and a run rebuilt
+// from it stays within the spread of two straight runs.
+test('in contact, a history endpoint steps on within the run-to-run spread of the straight run', { skip: !gpu }, async () => withDevice(async device => {
+  // Contact detection is not bit-reproducible run to run (performance over parity), so "steps on as the straight run
+  // does" is measured against that spread: the continued run is one more sample of it, as close to some straight run
+  // as the straight runs are to each other. A continuation without the detector's carried state is the control.
   const { scene } = movingSolidScene(), dt = CLOTH_SCENE_STEP_S;
-  const reference = await ClothSystem.create(device, cloneScene(scene));
-  const straight = (await reference.capture([18 * dt]))[0]![0]!;
-  reference.destroy();
+  const straight = async () => { const s = await ClothSystem.create(device, cloneScene(scene)); const c = (await s.capture([18 * dt]))[0]![0]!; s.destroy(); return c.positions_m; };
+  const runs = [await straight(), await straight(), await straight()];
   const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 });
   await cloth.capture([12 * dt]);
   publishSceneClothSurfaces(scene, cloth.surfaces);
-  cloth.adopt(snapshotSceneClothPose(scene));
-  await cloth.settled();
-  const [again] = await cloth.capture([18 * dt]);
-  let drift = 0;
-  for (let i = 0; i < straight.positions_m.length; i++) drift = Math.max(drift, Math.abs(again![0]!.positions_m[i]! - straight.positions_m[i]!));
-  console.log(`endpoint rebuilt at tick 12 in contact: 6 ticks on, ${drift.toExponential(2)} m from the straight run`);
+  const endpoint = snapshotSceneClothPose(scene), carried = endpoint.cloth![0]!.geometry.data.solverState!.contact!;
+  assert.equal(carried.held.length, runs[0]!.length / 3);
+  assert.ok(carried.reference.some((q, i) => (i & 3) === 3 && q >= 0), 'the endpoint carries rho_v from the steps taken');
+  // Save and load keep it.
+  assert.deepEqual(JSON.parse(JSON.stringify(carried)), carried);
+  const continued = async (from: SceneDescription) => {
+    cloth.adopt(from);
+    await cloth.settled();
+    const [again] = await cloth.capture([18 * dt]);
+    assert.equal(cloth.failure, undefined, cloth.failure?.message);
+    return again![0]!.positions_m;
+  };
+  const undone = await continued(cloneScene(endpoint));
+  const data = endpoint.cloth![0]!.geometry.data, { contact: _, ...state } = data.solverState!;
+  const cold = { ...cloneScene(endpoint), cloth: [{ ...endpoint.cloth![0]!, geometry: { kind: 'inline' as const, data: { ...data, solverState: state } } }] };
+  const control = await continued(cold);
   cloth.destroy();
-  assert.ok(drift < 1e-5, `drift ${drift} m`);
+  const spread = (p: ArrayLike<number>, q: ArrayLike<number>) => { let d = 0; for (let i = 0; i < p.length; i++) d = Math.max(d, Math.abs(p[i]! - q[i]!)); return d; };
+  const runToRun = Math.max(spread(runs[0]!, runs[1]!), spread(runs[0]!, runs[2]!), spread(runs[1]!, runs[2]!));
+  const drift = Math.min(...runs.map(r => spread(undone, r))), coldDrift = Math.min(...runs.map(r => spread(control, r)));
+  console.log(`endpoint rebuilt at tick 12 in contact, 6 ticks on: ${drift.toExponential(2)} m from the nearest of 3 straight runs (${coldDrift.toExponential(2)} m without the carried detector state); the straight runs differ by up to ${runToRun.toExponential(2)} m`);
+  assert.ok(drift <= runToRun, `undo drift ${drift} m exceeds the run-to-run spread ${runToRun} m`);
 }));
 
 test('undo of a cut through the system: the history endpoint rebuilds the uncut sheet with its exact state and steps on as if never cut', { skip: !gpu }, async () => withDevice(async device => {
@@ -517,7 +567,7 @@ test('undo of a cut through the system: the history endpoint rebuilds the uncut 
   }
   // It steps on from tick 6 to 9 as the reference did without the cut: the host clock goes on, the scene's time follows the cloth's.
   for (let k = 10; k <= 12; k++) {
-    assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true);
+    assert.equal(solver.advanceTo(k * CLOTH_SCENE_STEP_S, []), true, cloth.failure?.message);
     assert.ok(Math.abs(solver.info.submittedTime_s! - (k - 3) * CLOTH_SCENE_STEP_S) < 1e-9);
   }
   await solver.readClothPose!();
@@ -536,7 +586,7 @@ test('undo of a cut through the system: the history endpoint rebuilds the uncut 
 }));
 
 test('capture runs a 150 x 150 Bridson sheet on the scene clock with contact: free fall above the floor', { skip: !gpu }, async () => withDevice(async device => {
-  const scene = bridson2002SceneDescription(bridson2002Tablecloth(), { bake: false });
+  const scene = bridson2002SceneDescription(bridson2002Tablecloth(), { bake: false, movingSolids: 'held' });
   const cloth = await ClothSystem.create(device, cloneScene(scene));
   const t0 = performance.now();
   const [start, later] = await cloth.capture([0, 6 * CLOTH_SCENE_STEP_S]);
@@ -556,7 +606,7 @@ test('capture runs a 150 x 150 Bridson sheet on the scene clock with contact: fr
 }));
 
 test('the rotating-sphere sheet lands on the held sphere through scene contact: no vertex inside, no failing status', { skip: !gpu }, async () => withDevice(async device => {
-  const source = bridson2002RotatingSphere(), scene = bridson2002SceneDescription(source), t = bridson2002SceneLayout(source).translation_m;
+  const source = bridson2002RotatingSphere(), scene = bridson2002SceneDescription(source, { movingSolids: 'held' }), t = bridson2002SceneLayout(source).translation_m;
   const t0 = performance.now();
   const cloth = await ClothSystem.create(device, cloneScene(scene), { statusInterval: 1 });
   const setup = performance.now() - t0, ticks = Number(process.env.CLOTH_CONTACT_TICKS ?? 20);

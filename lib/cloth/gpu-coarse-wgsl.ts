@@ -35,7 +35,6 @@ const CW = ${CLOTH_COARSE_WORKGROUP}u;
 const CFW = ${CLOTH_COARSE_FACTOR_WORKGROUP}u;
 const C_ENTRIES = ${CLOTH_COARSE.maxEntries}u;
 const C_SLOT_BITS = ${CLOTH_COARSE_SLOT_BITS}u;
-const C_TRIALS = ${CLOTH_COARSE.trials}u;
 const C_NONE = 0xffffffffu;
 fn cf(i: u32) -> f32 { return coarse[i]; }
 fn cfSet(i: u32, x: f32) { coarse[i] = x; }
@@ -61,6 +60,7 @@ var<workgroup> cRa: array<vec4f, ${CLOTH_COARSE_FACTOR_WORKGROUP}>;
 var<workgroup> cRb: array<vec4f, ${CLOTH_COARSE_FACTOR_WORKGROUP}>;
 var<workgroup> cRc: array<vec4f, ${CLOTH_COARSE_FACTOR_WORKGROUP}>;
 var<workgroup> cOk: u32;
+var<workgroup> cGate: u32;
 // Fixed-order tree sum of three records over the first n lanes (n a power of two).
 fn coarseReduce(lane: u32, n: u32, a: vec4f, b: vec4f, c: vec4f) -> array<vec4f, 3> {
   cRa[lane] = a; cRb[lane] = b; cRc[lane] = c;
@@ -239,13 +239,19 @@ ${rounds.map(r => `  let e${r} = sweepEntry(lane, ${r}u); var x${r} = 0.0;
   workgroupBarrier();
   for (var c = 0u; c < CM / 3u; c++) {
     let cur = c & 1u; let nxt = 1u - cur; let k0 = 3u * c; let k1 = k0 + 3u;
-    // D^-1 by its adjugate; D is positive definite iff its leading minors are.
+    // D^-1 = L^-T L^-1 by D's Cholesky factor L, which exists iff D is positive definite. Not by the adjugate: a
+    // contact Hessian makes a block one stiff direction k over soft ones s, and its determinant s^2 k cancels from
+    // terms of k^3 (f32 loses it at k / s ~ 1e3.5, where the pivots' s survives to k / s ~ 1e7).
     let d0 = sweepColumns(cur, k0); let d1 = sweepColumns(cur, k0 + 1u); let d2 = sweepColumns(cur, k0 + 2u);
-    let D = mat3x3f(d0, d1, d2);
-    let m2 = d0.x * d1.y - d0.y * d1.x; let det = determinant(D);
-    let good = d0.x > 0.0 && m2 > 0.0 && det > 0.0 && det <= 3.0e38 && d0.x <= 3.0e38;
+    let l00 = sqrt(max(d0.x, 0.0)); let l10 = d0.y / l00; let l20 = d0.z / l00;
+    let t11 = d1.y - l10 * l10; let l11 = sqrt(max(t11, 0.0)); let l21 = (d1.z - l20 * l10) / l11;
+    let t22 = d2.z - l20 * l20 - l21 * l21; let l22 = sqrt(max(t22, 0.0));
+    let good = d0.x > 0.0 && t11 > 0.0 && t22 > 0.0 && d0.x <= 3.0e38 && d1.y <= 3.0e38 && d2.z <= 3.0e38;
     if (!good && lane == 0u) { cOk = 0u; }
-    let Di = transpose(mat3x3f(cross(d1, d2), cross(d2, d0), cross(d0, d1))) * (1.0 / select(1.0, det, good));
+    let i00 = 1.0 / select(1.0, l00, good); let i11 = 1.0 / select(1.0, l11, good); let i22 = 1.0 / select(1.0, l22, good);
+    let i10 = select(0.0, -l10 * i00 * i11, good); let i21 = select(0.0, -l21 * i11 * i22, good); let i20 = select(0.0, -(l20 * i00 + l21 * i10) * i22, good);
+    let Linv = mat3x3f(vec3f(i00, i10, i20), vec3f(0.0, i11, i21), vec3f(0.0, 0.0, i22));
+    let Di = transpose(Linv) * Linv;
 ${rounds.map(r => `    if (e${r}.x != C_NONE) {
       let i = e${r}.x; let j = e${r}.y; let iK = i >= k0 && i < k1; let jK = j >= k0 && j < k1;
       let ci = sweepColumns(cur, i); let cj = sweepColumns(cur, j);
@@ -450,15 +456,19 @@ fn coarseContactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
   if (!(ec1 <= 3.0e38)) { return vec2f(ec1, 0.0); }
   return vec2f(ec1 - ec0, abs(ec0) + abs(ec1));
 }
-` : ''}// Element pass: (dG, floor) at every trial step; thread i takes vertex i, face i, hinge i and edge i.
-@compute @workgroup_size(${workgroup}) fn coarseTrial(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u) {
+` : ''}// Element passes: (dG, floor) at trial steps; thread i takes vertex i, face i, hinge i and edge i. The full step
+// first (nearly every correction takes it), then, only for a correction that rejected it, the shorter trials 1/2,
+// 1/4, ... in the Back pass: the energy evaluations are the trial pass's cost, so the first pass evaluates one.
+${[['coarseTrial', 0, 1], ['coarseTrialBack', 1, CLOTH_COARSE.trials - 1]].map(([name, first, count]) => `@compute @workgroup_size(${workgroup}) fn ${name}(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u) {
   let i = id.x;
   var dE = vec4f(0.0); var fl = vec4f(0.0);
-  let live = coarseLive() && cf(cMisc() * 4u + ${CLOTH_COARSE_MISC.slope}u) < 0.0;
+  if (lane == 0u) { cGate = u32(coarseLive() && ${first === 0 ? `cf(cMisc() * 4u + ${CLOTH_COARSE_MISC.slope}u) < 0.0` : `cf(cMisc() * 4u + ${CLOTH_COARSE_MISC.alpha}u) < 0.0`}); }
+  let live = workgroupUniformLoad(&cGate) != 0u;
+  ${first === 0 ? '' : 'if (!live) { return; }'}
   if (live) {
-    var alpha = 1.0;${contact ? `
+    var alpha = ${(2 ** -(first as number)).toFixed(1)};${contact ? `
     var ec0 = 0.0; if (i < P.n.x) { ec0 = ogcVertexContactEnergy(i, pos(i)); }` : ''}
-    for (var k = 0u; k < C_TRIALS; k++) {
+    for (var k = 0u; k < ${count}u; k++) {
       var q = vec2f(0.0);
       if (i < P.n.x) { q += ownDelta(i, pos(i), alpha * cdir(i));${contact ? ' q += coarseContactDelta(i, pos(i), ec0, alpha * cdir(i));' : ''} }
       if (i < P.n.y) {
@@ -477,31 +487,33 @@ fn coarseContactDelta(v: u32, xv: vec3f, ec0: f32, d: vec3f) -> vec2f {
   let s = coarseReduce(lane, ${workgroup}u, dE, fl, vec4f(0.0));
   if (lane == 0u) { c4Set(P.coarse4.z + 2u * wg.x, s[0]); c4Set(P.coarse4.z + 2u * wg.x + 1u, s[1]); }
 }
-
-// One workgroup: the largest trial step passing Armijo with the summation error bound, or none.
-@compute @workgroup_size(${CLOTH_COARSE_FACTOR_WORKGROUP}) fn coarseChoose(@builtin(local_invocation_index) lane: u32) {
+`).join('\n')}
+// One workgroup: the largest trial step passing Armijo with the summation error bound, or none. coarseChoose decides
+// the full step: alpha 1, or -1 (pending) for coarseTrialBack and coarseChooseBack to try the shorter ones.
+${(['coarseChoose', 'coarseChooseBack'] as const).map(name => { const back = name === 'coarseChooseBack'; return `@compute @workgroup_size(${CLOTH_COARSE_FACTOR_WORKGROUP}) fn ${name}(@builtin(local_invocation_index) lane: u32) {
   let slope = cf(cMisc() * 4u + ${CLOTH_COARSE_MISC.slope}u);
-  let live = coarseLive() && slope < 0.0;
+  if (lane == 0u) { cGate = u32(coarseLive() && ${back ? `cf(cMisc() * 4u + ${CLOTH_COARSE_MISC.alpha}u) < 0.0` : 'slope < 0.0'}); }
+  let live = workgroupUniformLoad(&cGate) != 0u;
+  ${back ? 'if (!live) { return; }' : ''}
   var dE = vec4f(0.0); var fl = vec4f(0.0);
   if (live) { for (var j = lane; j < P.coarse5.z; j += CFW) { dE += c4(P.coarse4.z + 2u * j); fl += c4(P.coarse4.z + 2u * j + 1u); } }
   let s = coarseReduce(lane, CFW, dE, fl, vec4f(0.0));
   if (lane == 0u) {
-    var chosen = 0.0; var alpha = 1.0; var which = 4u;
+    var chosen = ${back ? '0.0' : '-1.0'}; var alpha = ${back ? '0.5' : '1.0'}; var which = ${back ? '4u' : '0u'};
     if (live) {
-      for (var k = 0u; k < C_TRIALS; k++) {
-        if (s[0][k] <= ARMIJO * alpha * slope + 24.0 * EPS32 * s[1][k]) { chosen = alpha; which = k; break; }
+      ${back ? `for (var k = 0u; k < ${CLOTH_COARSE.trials - 1}u; k++) {
+        if (s[0][k] <= ARMIJO * alpha * slope + 24.0 * EPS32 * s[1][k]) { chosen = alpha; which = k + 1u; break; }
         alpha *= 0.5;
-      }
-    }
+      }` : `if (s[0][0] <= ARMIJO * slope + 24.0 * EPS32 * s[1][0]) { chosen = 1.0; }`}
+    } else { chosen = 0.0; }
     cfSet(cMisc() * 4u + ${CLOTH_COARSE_MISC.alpha}u, chosen);
     let st = cMisc() + 1u;
     var a = c4(st); var b = c4(st + 1u);
-    if (coarseLive()) { a.x += 1.0; }
-    if (which < 3u) { a[which + 1u] += 1.0; } else if (which == 3u) { b.x += 1.0; }
+    ${back ? 'if (which < 3u) { a[which + 1u] += 1.0; } else if (which == 3u) { b.x += 1.0; }' : 'if (coarseLive()) { a.x += 1.0; }\n    if (chosen > 0.0) { a.y += 1.0; }'}
     c4Set(st, a); c4Set(st + 1u, b);
   }
 }
-
+`; }).join('\n')}
 @compute @workgroup_size(${workgroup}) fn coarseApply(@builtin(global_invocation_id) id: vec3u) {
   let v = id.x;
   if (v >= P.n.x) { return; }

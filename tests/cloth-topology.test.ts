@@ -65,3 +65,37 @@ test('a cut keeps authored masses outside the cut and removes mass with the cut 
   assert.ok(total < before && total > before * (1 - 2 * cut.removedArea_m2), `total ${total} vs ${before}, removed ${cut.removedArea_m2} m^2`);
   assert.doesNotThrow(() => prepareClothTopology(cut.topology, [cotton]));
 });
+
+test('a cut through a curved sheet of finite thickness splits each shared edge at one point, in both faces: no slit of unwelded coincident vertices, no T-junction', () => {
+  // A bowl: the faces either side of an edge have different normals, so a per-face thickness support moved the plane
+  // differently for each and cut a shared edge twice (the GPU contact then saw coincident vertices at distance 0).
+  const data = clothGridData({ columns: 8, rows: 8, width_m: 0.4, height_m: 0.4, origin_m: [-0.2, 0.9, -0.2] });
+  const bowl = data.restPositions_m.map((v, i) => i % 3 === 1 ? v - 0.8 * (data.restPositions_m[i - 1]! ** 2 + data.restPositions_m[i + 1]! ** 2) : v);
+  const box = { minimum_m: [-0.06, -1, -0.06] as const, maximum_m: [0.06, 2, 0.06] as const };
+  const shape = (thickness_m: number) => {
+    const document: ClothDocument = { schemaVersion: '2.0.0', id: 'bowl', geometry: { kind: 'inline', data }, materials: [{ ...cotton, thickness_m }] };
+    const cut = cutClothShellBox(document, data, bowl, box), p = cut.positions_m, n = p.length / 3, t = cut.topology.triangles;
+    let nearest = Infinity;
+    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) nearest = Math.min(nearest, Math.hypot(p[3 * i]! - p[3 * j]!, p[3 * i + 1]! - p[3 * j + 1]!, p[3 * i + 2]! - p[3 * j + 2]!));
+    const uses = new Map<number, number>();
+    for (let f = 0; f < t.length / 3; f++) for (let k = 0; k < 3; k++) { const a = t[3 * f + k]!, b = t[3 * f + (k + 1) % 3]!, key = Math.min(a, b) * n + Math.max(a, b); uses.set(key, (uses.get(key) ?? 0) + 1); }
+    // T-junctions: a vertex on the inside of an edge it is not an end of (the face across kept the whole side).
+    let junctions = 0;
+    for (const key of uses.keys()) {
+      const a = Math.floor(key / n), b = key % n, d = [0, 1, 2].map(k => p[3 * b + k]! - p[3 * a + k]!), l2 = d[0]! ** 2 + d[1]! ** 2 + d[2]! ** 2;
+      for (let v = 0; v < n; v++) {
+        if (v === a || v === b) continue;
+        const s = [0, 1, 2].reduce((q, k) => q + (p[3 * v + k]! - p[3 * a + k]!) * d[k]!, 0) / l2;
+        if (s > 1e-6 && s < 1 - 1e-6 && Math.hypot(...[0, 1, 2].map(k => p[3 * v + k]! - p[3 * a + k]! - s * d[k]!)) < 1e-9) junctions++;
+      }
+    }
+    return { n, faces: t.length / 3, nearest, boundary: [...uses.values()].filter(c => c === 1).length, junctions };
+  };
+  const thin = shape(0), thick = shape(5e-3);
+  // The thick shell's hole is larger, but its mesh is the thin one's: same vertices, faces and boundary, no near pair.
+  assert.deepEqual([thick.n, thick.faces, thick.boundary], [thin.n, thin.faces, thin.boundary]);
+  assert.ok(thick.nearest > 1e-3, `nearest vertex pair ${thick.nearest} m`);
+  // A plane also crosses a face's side outside the box (along another axis), where the face across may be disjoint:
+  // it takes the point too, so no vertex lies on an edge it does not end.
+  assert.deepEqual([thin.junctions, thick.junctions], [0, 0]);
+});

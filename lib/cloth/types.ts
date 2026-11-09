@@ -46,6 +46,17 @@ export interface ClothSolverStateData {
   /** One (lambda, k) per edge of the canonical edge list (`prepareClothTopology`). */
   readonly edgeDuals: readonly number[];
   /** Chebyshev skip flags are per step and are not saved. */
+  /** The contact detector's state carried from step to step (C2's OgcCarriedState), so a run continued from this
+   *  state steps on as the straight run does. Omitted: the detector starts as before any step. */
+  readonly contact?: ClothContactStateData;
+}
+
+/** OgcCarriedState beside a pose, in world metres (the detector holds it in its cloth frame). */
+export interface ClothContactStateData {
+  /** Per vertex: the reference predicted position (xyz, world metres) and the residual rho_v (w; -1 before any step). */
+  readonly reference: readonly number[];
+  /** Per vertex: the held flags (bit 0: held in the step that wrote it). */
+  readonly held: readonly number[];
 }
 
 export interface ClothTopologyData {
@@ -98,12 +109,10 @@ export interface ClothSolverSettings {
   readonly integrator?: ClothIntegrator;
   /** VBD iterations per step (K). */
   readonly iterations?: number;
-  /** Chebyshev spectral radius estimate in [0, 1); 0 disables acceleration. */
+  /** Chebyshev spectral radius estimate: only 0 (off) is accepted, since with the two-level correction acceleration can explode. */
   readonly chebyshevRho?: number;
   /** Coulomb friction of cloth on cloth (self contact); omitted means frictionless. */
   readonly selfFriction?: number;
-  /** Tier A two-level correction (coarse.ts): on unless false. */
-  readonly coarse?: boolean;
   readonly tier?: ClothSolverTier;
   /** Tier B: target owned vertices per patch. */
   readonly patchVertices?: number;

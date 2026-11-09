@@ -85,6 +85,7 @@ struct Dispatch { range: vec4u, values: vec4f } // (start, count, iteration) or 
 @group(0) @binding(${CLOTH_BINDING.topo4}) var<storage, read> topo4: array<vec4u>;
 
 const ALPHA: f32 = ${CLOTH_AVBD.alpha};
+const EDGE_ALPHA: f32 = ${CLOTH_AVBD.edgeAlpha};
 const GAMMA: f32 = ${CLOTH_AVBD.gamma};
 const BETA: f32 = ${CLOTH_AVBD.beta};
 const K_MAX_RATIO: f32 = ${CLOTH_AVBD.maxStiffnessRatio};
@@ -503,7 +504,7 @@ fn stepTime() -> f32 { return P.misc.x + f32(clockStep()) * P.gravity.w; }
       let limit = (1.0 + er.y) * er.x;
       var d = edgeDual(i);
       d.x *= ALPHA * GAMMA; d.y = max(GAMMA * d.y, s);
-      d.z = limit + ALPHA * max(length(pos(ev.x) - pos(ev.y)) - limit, 0.0);
+      d.z = limit + EDGE_ALPHA * max(length(pos(ev.x) - pos(ev.y)) - limit, 0.0);
       state[P.state0.y + i] = d;
     }
   }

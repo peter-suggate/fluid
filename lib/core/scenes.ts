@@ -103,9 +103,9 @@ function bridson2002Definition(make: () => Bridson2002Scene): SceneDefinition {
     shelf: "Cloth \u00b7 Bridson 2002",
     environment: "default",
     presentationMode: "full-scene",
-    // The moving solids are scene rigid bodies on their pose tracks: they render, pick and cut through the shared rigid surface path.
-    build: () => bridson2002SceneDescription(make(), { movingSolids: "rigid-body" }),
-    preview: () => bridson2002SceneDescription(make(), { bake: false, movingSolids: "rigid-body" }),
+    // The moving solids are scene rigid bodies on their pose tracks (the default): they render, pick and cut through the shared rigid surface path.
+    build: () => bridson2002SceneDescription(make()),
+    preview: () => bridson2002SceneDescription(make(), { bake: false }),
     cameraForDocument: bridson2002Camera,
     attribution: { label: "Bridson, Fedkiw & Anderson, SIGGRAPH 2002", url: "https://graphics.stanford.edu/papers/cloth-sig02/" },
     status: `Tier A GPU cloth, K = ${source.cloth.solver?.iterations ?? 64}, with OGC self and solid contact (lane C2). Not yet:`
