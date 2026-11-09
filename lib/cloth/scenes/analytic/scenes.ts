@@ -6,7 +6,7 @@
  * ground every scene lands on.
  */
 import type { CameraState, Vec3 } from "../../../core/model";
-import type { ClothDocument, ClothMaterial, ClothTopologyData, ClothVector } from "../../types";
+import type { ClothDocument, ClothMaterial, ClothNewtonSettings, ClothTopologyData, ClothVector } from "../../types";
 import { herringBoneSheet } from "../bridson-2002/mesh";
 import { CLOTH_ANALYTIC_STEP_S, CURTAIN, FREE_FALL, GRAVITY, INCLINE, PEIRCE, SHEET, SWING } from "./parameters";
 import { bdf2StartOffset_m, bendingLength_m, heavyElastica, inclineAcceleration_m_s2, peirceChordAngle_deg } from "./references";
@@ -65,7 +65,13 @@ function sheetMaterial(id: string, hex: number, overrides: Partial<ClothMaterial
 
 function document(id: string, data: ClothTopologyData, material: ClothMaterial): ClothDocument {
   return { schemaVersion: "2.0.0", id, geometry: { kind: "inline", data }, materials: [material],
-    solver: { integrator: "bdf2", iterations: SHEET.iterations.value } };
+    solver: { integrator: "bdf2", newton: clothAnalyticNewton() } };
+}
+
+/** The Newton-PCG settings every analytic document runs (the Bridson scenes'). */
+export function clothAnalyticNewton(): ClothNewtonSettings {
+  return { iterations: SHEET.newtonIterations.value, pcgIterations: SHEET.newtonPcgIterations.value,
+    pcgTolerance: SHEET.newtonPcgTolerance.value, residualTolerance: SHEET.newtonResidualTolerance.value };
 }
 
 /** Map a flat herring-bone sheet's (x, y0, z) rest positions through `place`. */

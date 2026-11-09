@@ -34,7 +34,7 @@ const P = (value: number, unit: string, source: ClothAnalyticSource, ref: string
 /** One implicit cloth step per 1/60 s frame. Never substepped. */
 export const CLOTH_ANALYTIC_STEP_S = 1 / 60;
 
-export const GRAVITY = P(9.81, "m/s^2", "textbook", "the scene default |g| (SceneDescription.fluid.gravity_m_s2)");
+export const GRAVITY = P(9.81, "m/s^2", "textbook", "every analytic scene sets SceneDescription.fluid.gravity_m_s2 to (0, -g, 0); the references use the same g");
 
 /** The shared cloth: the Bridson 2002 material, so these gates speak for the paper scenes. */
 export const SHEET = {
@@ -47,8 +47,10 @@ export const SHEET = {
   damping: P(CLOTH.damping.value, "s", "bridson", "CLOTH.damping"),
   thickness: P(CLOTH.thickness.value, "m", "bridson", "CLOTH.thickness"),
   strainLimit: P(CLOTH.strainLimit.value, "1", "bridson", "CLOTH.strainLimit"),
-  iterations: P(CLOTH.iterations.value, "iterations", "bridson",
-    "the Bridson scenes' K (CLOTH.iterations): a gate here speaks for them. CLOTH_ANALYTIC_ITERATIONS overrides it in the tests"),
+  newtonIterations: P(CLOTH.newtonIterations.value, "iterations", "bridson", "CLOTH.newtonIterations: the Newton-PCG caps of the Bridson scenes, so a gate here speaks for them"),
+  newtonPcgIterations: P(CLOTH.newtonPcgIterations.value, "iterations", "bridson", "CLOTH.newtonPcgIterations"),
+  newtonPcgTolerance: P(CLOTH.newtonPcgTolerance.value, "1", "bridson", "CLOTH.newtonPcgTolerance"),
+  newtonResidualTolerance: P(CLOTH.newtonResidualTolerance.value, "1", "bridson", "CLOTH.newtonResidualTolerance"),
   cell: P(0.01, "m", "choice", "1 cm cloth spacing, near the Bridson sheets' 6.7-12.8 mm: the resolution at which K 8 under-converged the Fig 2 drape"),
 } as const;
 
@@ -78,7 +80,7 @@ export const SWING = {
   height: P(1.3, "m", "choice", "pinned edge 1.3 m above the floor: the swung sheet (about 1.08 m at its stretch) clears it"),
   gateSteps: P(20, "steps", "choice",
     "the outer part of the sheet stays flat for about 22 steps (Float64 oracle at 41 x 41 nodes, K 8-256: free edge on free fall to 0.01 mm through step 22); gated over 20"),
-  convergedFactor: P(4, "1", "choice", "the semi-analytic reference is the same scene at 4K iterations"),
+  convergedFactor: P(4, "1", "choice", "the semi-analytic reference is the same scene at 4x the Newton and PCG caps and tolerances / 4^2"),
   duration: P(4, "s", "choice", "first swing and the following swings under the pinned edge"),
 } as const;
 

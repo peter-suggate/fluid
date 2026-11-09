@@ -26,14 +26,15 @@ export interface PreparedClothTopology {
   /** (v0, v1, face0, face1) per canonical edge, v0 < v1, sorted; face1 is CLOTH_NO_FACE on a boundary. */
   readonly edges: Uint32Array;
   readonly edgeRestLength_m: Float64Array;
-  /** Isometric bending from the flat rest, one row per vertex (row i is vertex i): L_i x = sum_o w_o x_(v_o) over the
-   * row's entries o in [bendOffsets[i], bendOffsets[i + 1]), the vertex itself first, estimates the Laplace-Beltrami
-   * of the embedding at i (see `clothBendingRows`); the energy is (k_i/2)|L_i x|^2, k_i = B_i A_i. Each row vanishes
-   * for every affine map of the rest, so for every rigid motion. */
+  /** Kirchhoff plate bending from the flat rest, CLOTH_BEND_ROWS rows per vertex (row r belongs to vertex
+   * floor(r / CLOTH_BEND_ROWS), its own vertex first among the row's entries o in [bendOffsets[r], bendOffsets[r + 1])):
+   * R_r x = sum_o w_o x_(v_o) (see `clothBendingRows`); the energy is sum_r (k_r/2)|R_r x|^2, k_r = B_i A_i of its
+   * vertex i. Each row vanishes for every affine map of the rest, so for every rigid motion. */
+  readonly bendRowCount: number;
   readonly bendOffsets: Uint32Array;
   readonly bendVertices: Uint32Array;
   readonly bendWeights: Float64Array;
-  /** k_i = B_i A_i (N m^3): the row's mean incident bending stiffness B (area weighted) times its area. */
+  /** Per row, k = B_i A_i (N m^3) of its vertex i: the mean incident bending stiffness B (area weighted) times its area. */
   readonly bendStiffness_N_m3: Float64Array;
   /** Mixed Voronoi area A_i of each vertex (Meyer et al. 2003); they sum to the sheet's area. */
   readonly vertexArea_m2: Float64Array;
@@ -124,6 +125,11 @@ export function validateClothDocument(document: ClothDocument): string[] {
     if (solver.integrator !== undefined && solver.integrator !== "implicit-euler" && solver.integrator !== "bdf2") errors.push(`Unsupported cloth integrator ${String(solver.integrator)}`);
     if (solver.tier !== undefined && solver.tier !== "A" && solver.tier !== "B") errors.push(`Unsupported cloth solver tier ${String(solver.tier)}`);
     if (solver.iterations !== undefined && !(Number.isInteger(solver.iterations) && solver.iterations >= 1)) errors.push("Cloth iterations must be a positive integer");
+    if (solver.newton !== undefined) {
+      const n = solver.newton;
+      if (!n || !(Number.isInteger(n.iterations) && n.iterations >= 1) || !(Number.isInteger(n.pcgIterations) && n.pcgIterations >= 1)) errors.push("Cloth Newton caps must be positive integers");
+      else if ((n.pcgTolerance !== undefined && !(n.pcgTolerance >= 0)) || (n.residualTolerance !== undefined && !(n.residualTolerance >= 0))) errors.push("Cloth Newton tolerances must be non-negative");
+    }
     if (solver.chebyshevRho !== undefined && solver.chebyshevRho !== 0) errors.push("Cloth Chebyshev rho must be 0: with the two-level correction every step takes, Chebyshev acceleration can explode");
     if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
     // Every Tier A step takes the two-level correction; a document that asks to turn it off (or on) names a setting that is gone.
@@ -145,85 +151,93 @@ export function clothHingeAngle(p: ArrayLike<number>, o0: number, o1: number, e0
 /** Largest rest dihedral angle (rad) the flat-rest bending model takes: 8 f32 ulps of 1. */
 export const CLOTH_FLAT_REST_TOLERANCE_RAD = 8 * 2 ** -23;
 
+/** Bending rows per vertex (row r belongs to vertex floor(r / CLOTH_BEND_ROWS)). */
+export const CLOTH_BEND_ROWS = 3;
+
 /**
- * Bending rows of a flat rest mesh: per vertex i a linear estimate L_i x = sum_j w_ij x_j of the Laplace-Beltrami of
- * the embedding x at i, so the isometric bending energy (B/2) int |Delta x|^2 dA (|Delta x| = |kappa_1 + kappa_2|,
- * which for an isometric bend of the flat sheet is int (kappa_1^2 + kappa_2^2) up to a boundary term) is
- * sum_i (B_i A_i / 2)|L_i x|^2, a uniform cylindrical bend of curvature kappa giving (B/2) kappa^2 A.
- *  - Interior vertex: the cotan Laplacian over its mixed Voronoi area (Meyer et al. 2003), w_ij = (cot a_ij +
- *    cot b_ij) / 2A_i. It vanishes for affine maps of the flat rest, and is exact for quadratics where the one-ring
- *    is symmetric (regular grids of right isosceles triangles, herring-bone and equilateral meshes); on other meshes it
- *    is consistent in the weak (energy) sense only.
- *  - Boundary vertex (an incident edge with one face): the cotan row does not vanish for affine maps there, so the row
- *    is the least-norm one exact for every quadratic of the rest coordinates (Delta of 1, u, v, uv: 0; of u^2, v^2: 2),
- *    a generalized finite difference, over the smallest support that determines them: the one-ring, then the nearest
- *    vertices of the next rings (up to the four-ring) one at a time. So a free edge sees the whole curvature, not a
- *    one-sided half, and a row couples few vertices (the colouring and the stencil stay small).
- * Entries with |w| below 1e-12 of the row's largest are dropped (the cotan weight of a right angle's hypotenuse is 0);
- * the vertex's own weight, first in its row, is minus the sum of the others. Rest areas sum to the sheet's area.
+ * Bending rows of a flat rest mesh: the Kirchhoff plate energy (B/2) int [nu (Delta x)^2 + (1 - nu)|grad grad x|^2] dA,
+ * which for a bend of the flat sheet is (B/2) int [(kappa_1 + kappa_2)^2 - 2 (1 - nu) kappa_1 kappa_2] dA; at nu = 0,
+ * (B/2) int (kappa_1^2 + kappa_2^2). Per vertex i three rows R_ia x = sum_j w_ija x_j over the same support, from the
+ * second derivatives D_uu, D_vv, D_uv of x in rest coordinates (u, v) of the flat sheet at i:
+ *   R_0 = sqrt((1 + nu) / 2) (D_uu + D_vv), R_1 = sqrt((1 - nu) / 2) (D_uu - D_vv), R_2 = sqrt(2 (1 - nu)) D_uv,
+ * so sum_a |R_a x|^2 = nu |Delta x|^2 + (1 - nu)(|D_uu x|^2 + |D_vv x|^2 + 2 |D_uv x|^2), independent of the frame, and the
+ * energy is sum_i (B_i A_i / 2) sum_a |R_ia x|^2. A uniform cylindrical bend of curvature kappa gives (B/2) kappa^2 A
+ * along any axis; a twist or a saddle costs its full energy (the Laplacian alone, nu = 1, gave both zero, so a strip
+ * could bend anticlastically for free).
+ *  - Each D is the least-norm generalized finite difference exact for every quadratic of the rest coordinates, over the
+ *    smallest support that determines them: the one-ring, then the nearest vertices of the next rings (up to the
+ *    four-ring) one at a time. On a symmetric one-ring (regular grids of right isosceles triangles, herring-bone and
+ *    equilateral meshes) D_uu + D_vv is the 5-point (resp. 7-point) Laplacian. Each row vanishes for every affine map
+ *    of the rest, so for every rigid motion.
+ *  - A_i is the mixed Voronoi area (Meyer et al. 2003); the areas sum to the sheet's area. nu_i is per vertex (the
+ *    caller's area-weighted material Poisson ratio), in [0, 1).
+ * Entries with |w| below 1e-12 of the row's largest are dropped; the vertex's own weight, first in its row, is minus
+ * the sum of the others. A vertex with no quadratic-exact support within its four-ring fails explicitly.
  */
-export function clothBendingRows(rest: ArrayLike<number>, faces: ArrayLike<number>, n: number): { offsets: Uint32Array; vertices: Uint32Array; weights: Float64Array; area_m2: Float64Array } {
+export function clothBendingRows(rest: ArrayLike<number>, faces: ArrayLike<number>, n: number, poisson?: ArrayLike<number>): { offsets: Uint32Array; vertices: Uint32Array; weights: Float64Array; area_m2: Float64Array } {
   const P = (i: number) => point3(rest, i), F = faces.length / 3;
-  const area = new Float64Array(n), cot = Array.from({length: n}, () => new Map<number, number>()), use = new Map<number, number>(), first = new Int32Array(n).fill(-1);
+  const area = new Float64Array(n), ring = Array.from({length: n}, () => new Set<number>()), first = new Int32Array(n).fill(-1);
   for (let f = 0; f < F; f++) {
     const v = [faces[3 * f]!, faces[3 * f + 1]!, faces[3 * f + 2]!], x = v.map(P), twice = norm3(cross3(sub3(x[1]!, x[0]!), sub3(x[2]!, x[0]!)));
     const c: number[] = [], d: number[] = [];
     for (let k = 0; k < 3; k++) { const a = sub3(x[(k + 1) % 3]!, x[k]!), b = sub3(x[(k + 2) % 3]!, x[k]!); d.push(dot3(a, b)); c.push(dot3(a, b) / twice); }
     const obtuse = d.some(q => q < 0);
     for (let k = 0; k < 3; k++) {
-      const i = v[k]!, j = v[(k + 1) % 3]!, l = v[(k + 2) % 3]!;
+      const i = v[k]!;
       if (first[i] < 0) first[i] = f;
-      cot[j]!.set(l, (cot[j]!.get(l) ?? 0) + 0.5 * c[k]!); cot[l]!.set(j, (cot[l]!.get(j) ?? 0) + 0.5 * c[k]!);
+      ring[i]!.add(v[(k + 1) % 3]!); ring[i]!.add(v[(k + 2) % 3]!);
       const eij = sub3(x[(k + 1) % 3]!, x[k]!), eil = sub3(x[(k + 2) % 3]!, x[k]!);
       area[i] += obtuse ? (d[k]! < 0 ? twice / 4 : twice / 8) : (dot3(eij, eij) * c[(k + 2) % 3]! + dot3(eil, eil) * c[(k + 1) % 3]!) / 8;
-      const key = Math.min(j, l) * n + Math.max(j, l); use.set(key, (use.get(key) ?? 0) + 1);
     }
   }
-  const boundary = new Uint8Array(n);
-  for (const [key, c] of use) if (c === 1) { boundary[Math.floor(key / n)] = 1; boundary[key % n] = 1; }
-  const offsets = new Uint32Array(n + 1), vertices: number[] = [], weights: number[] = [];
-  const push = (i: number, S: readonly number[], w: readonly number[]) => {
+  const R = CLOTH_BEND_ROWS, offsets = new Uint32Array(R * n + 1), vertices: number[] = [], weights: number[] = [];
+  const push = (row: number, i: number, S: readonly number[], w: readonly number[]) => {
     let big = 0; for (const q of w) big = Math.max(big, Math.abs(q));
     let own = 0; vertices.push(i); weights.push(0);
     const at = weights.length - 1;
     S.forEach((j, k) => { if (j !== i && Math.abs(w[k]!) > 1e-12 * big) { vertices.push(j); weights.push(w[k]!); own -= w[k]!; } });
-    weights[at] = own; offsets[i + 1] = vertices.length;
+    weights[at] = own; offsets[row + 1] = vertices.length;
   };
+  // Right-hand sides of the fit in the basis (1, u, v, u^2, uv, v^2): D_uu, D_vv, D_uv.
+  const targets = [[0, 0, 0, 2, 0, 0], [0, 0, 0, 0, 0, 2], [0, 0, 0, 0, 1, 0]];
   for (let i = 0; i < n; i++) {
     if (first[i] < 0) throw new Error(`Cloth vertex ${i} belongs to no face`);
-    if (!boundary[i]) { push(i, [...cot[i]!.keys()], [...cot[i]!.values()].map(c => c / area[i]!)); continue; }
+    const nu = poisson?.[i] ?? 0;
+    if (!(nu >= 0 && nu < 1)) throw new Error(`Cloth vertex ${i}: bending Poisson ratio ${nu} is outside [0, 1)`);
     // Rest frame at i (the face plane) and the mean incident edge length h, so the fit is in coordinates of order 1.
     const fv = [0, 1, 2].map(k => P(faces[3 * first[i]! + k]!)), nn = cross3(sub3(fv[1]!, fv[0]!), sub3(fv[2]!, fv[0]!)), ln = norm3(nn);
     const N: [number, number, number] = [nn[0] / ln, nn[1] / ln, nn[2] / ln], xi = P(i);
-    let h = 0; for (const j of cot[i]!.keys()) h += norm3(sub3(P(j), xi)); h /= cot[i]!.size;
-    const e = sub3(P(cot[i]!.keys().next().value!), xi), ep = sub3(e, [N[0] * dot3(e, N), N[1] * dot3(e, N), N[2] * dot3(e, N)]), le = norm3(ep);
+    let h = 0; for (const j of ring[i]!) h += norm3(sub3(P(j), xi)); h /= ring[i]!.size;
+    const e = sub3(P(ring[i]!.values().next().value!), xi), ep = sub3(e, [N[0] * dot3(e, N), N[1] * dot3(e, N), N[2] * dot3(e, N)]), le = norm3(ep);
     const t1: [number, number, number] = [ep[0] / le, ep[1] / le, ep[2] / le], t2 = cross3(N, t1);
     // Candidates by ring, then rest distance: the one-ring first, then the nearest farther vertices one at a time
-    // until the quadratics are determined, so the row (and the vertices it couples) stays as small as it can.
+    // until the quadratics are determined, so the rows (and the vertices they couple) stay as small as they can.
     const ringOf = new Map<number, number>([[i, 0]]); let front = [i];
-    for (let r = 1; r <= 4; r++) { const next: number[] = []; for (const u of front) for (const q of cot[u]!.keys()) if (!ringOf.has(q)) { ringOf.set(q, r); next.push(q); } front = next; }
+    for (let r = 1; r <= 4; r++) { const next: number[] = []; for (const u of front) for (const q of ring[u]!) if (!ringOf.has(q)) { ringOf.set(q, r); next.push(q); } front = next; }
     const candidates = [...ringOf.keys()].sort((a, b) => ringOf.get(a)! - ringOf.get(b)! || norm3(sub3(P(a), xi)) - norm3(sub3(P(b), xi)));
-    let row: number[] | undefined, S: number[] = [];
-    for (let size = 1 + cot[i]!.size; size <= candidates.length && !row; size++) {
+    let rows: number[][] | undefined, S: number[] = [];
+    for (let size = 1 + ring[i]!.size; size <= candidates.length && !rows; size++) {
       S = candidates.slice(0, size);
       if (S.length < 6) continue;
       const M = S.map(j => { const d = sub3(P(j), xi), u = dot3(d, t1) / h, v = dot3(d, t2) / h; return [1, u, v, u * u, u * v, v * v]; });
-      // The least-norm row: w_j = m_j . y with G y = b, G = sum_j m_j m_j^T (6 x 6; Gaussian elimination, partial pivoting).
-      const A = Array.from({length: 6}, (_, a) => [...Array.from({length: 6}, (_, c) => M.reduce((s, m) => s + m[a]! * m[c]!, 0)), [0, 0, 0, 2, 0, 2][a]!]);
+      // The least-norm rows: w_j = m_j . y with G y = b, G = sum_j m_j m_j^T (6 x 6; Gauss-Jordan, partial pivoting), one b per D.
+      const A = Array.from({length: 6}, (_, a) => [...Array.from({length: 6}, (_, c) => M.reduce((q, m) => q + m[a]! * m[c]!, 0)), ...targets.map(t => t[a]!)]);
       let pmax = 0, pmin = Infinity;
       for (let c = 0; c < 6; c++) {
         let p = c; for (let r = c + 1; r < 6; r++) if (Math.abs(A[r]![c]!) > Math.abs(A[p]![c]!)) p = r;
         [A[c], A[p]] = [A[p]!, A[c]!];
         const pv = A[c]![c]!; pmax = Math.max(pmax, Math.abs(pv)); pmin = Math.min(pmin, Math.abs(pv));
         if (!(Math.abs(pv) > 0)) break;
-        for (let r = 0; r < 6; r++) if (r !== c) { const q = A[r]![c]! / pv; for (let k = c; k < 7; k++) A[r]![k]! -= q * A[c]![k]!; }
+        for (let r = 0; r < 6; r++) if (r !== c) { const q = A[r]![c]! / pv; for (let k = c; k < 9; k++) A[r]![k]! -= q * A[c]![k]!; }
       }
       if (!(pmin > 1e-9 * pmax)) continue;
-      const y = A.map((r, a) => r[6]! / r[a]!);
-      row = M.map(m => m.reduce((s, q, a) => s + q * y[a]!, 0) / (h * h));
+      rows = targets.map((_, t) => { const y = A.map((r, a) => r[6 + t]! / r[a]!); return M.map(m => m.reduce((q, mm, a) => q + mm * y[a]!, 0) / (h * h)); });
     }
-    if (!row) throw new Error(`Cloth boundary vertex ${i}: no quadratic-exact bending row within its four-ring (the mesh is too small or degenerate there)`);
-    push(i, S, row);
+    if (!rows) throw new Error(`Cloth vertex ${i}: no quadratic-exact bending support within its four-ring (the mesh is too small or degenerate there)`);
+    const [Duu, Dvv, Duv] = rows as [number[], number[], number[]], a0 = Math.sqrt((1 + nu) / 2), a1 = Math.sqrt((1 - nu) / 2), a2 = Math.sqrt(2 * (1 - nu));
+    push(R * i, i, S, Duu.map((w, k) => a0 * (w + Dvv[k]!)));
+    push(R * i + 1, i, S, Duu.map((w, k) => a1 * (w - Dvv[k]!)));
+    push(R * i + 2, i, S, Duv.map(w => a2 * w));
   }
   return { offsets, vertices: Uint32Array.from(vertices), weights: Float64Array.from(weights), area_m2: area };
 }
@@ -300,18 +314,21 @@ export function prepareClothTopology(data: ClothTopologyData, materials: readonl
   for (let e = 0; e < E; e++) for (let k = 0; k < 2; k++) edgeEntries.push([edges[4 * e + k]!, e << 2 | k]);
   const vf = csr(n, faceEntries), ve = csr(n, edgeEntries);
   for (let v = 0; v < n; v++) if (vf.offsets[v + 1] === vf.offsets[v]) throw new Error(`Cloth vertex ${v} belongs to no face`);
-  const bend = clothBendingRows(rest, faces, n);
-  const bendK = new Float64Array(n);
+  // Per vertex the area-weighted mean of its faces' bending stiffness B and Poisson ratio (the plate's, as the membrane's).
+  const bendB = new Float64Array(n), bendNu = new Float64Array(n);
   for (let v = 0; v < n; v++) {
-    let a = 0, b = 0;
-    for (let j = vf.offsets[v]!; j < vf.offsets[v + 1]!; j++) { const f = vf.values[j]! >> 2; a += faceArea[f]!; b += faceArea[f]! * materials[faceMaterial[f]!]!.bending_N_m; }
-    bendK[v] = b / a * bend.area_m2[v]!;
+    let a = 0, b = 0, nu = 0;
+    for (let j = vf.offsets[v]!; j < vf.offsets[v + 1]!; j++) { const f = vf.values[j]! >> 2, m = materials[faceMaterial[f]!]!; a += faceArea[f]!; b += faceArea[f]! * m.bending_N_m; nu += faceArea[f]! * m.poisson; }
+    bendB[v] = b / a; bendNu[v] = nu / a;
   }
+  const bend = clothBendingRows(rest, faces, n, bendNu), rows = CLOTH_BEND_ROWS * n;
+  const bendK = new Float64Array(rows);
+  for (let r = 0; r < rows; r++) { const v = Math.floor(r / CLOTH_BEND_ROWS); bendK[r] = bendB[v]! * bend.area_m2[v]!; }
   const bendEntries: [number, number][] = [], bendEntryRow = new Uint32Array(bend.vertices.length);
-  for (let r = 0; r < n; r++) for (let o = bend.offsets[r]!; o < bend.offsets[r + 1]!; o++) { bendEntries.push([bend.vertices[o]!, o]); bendEntryRow[o] = r; }
+  for (let r = 0; r < rows; r++) for (let o = bend.offsets[r]!; o < bend.offsets[r + 1]!; o++) { bendEntries.push([bend.vertices[o]!, o]); bendEntryRow[o] = r; }
   const vb = csr(n, bendEntries);
   return {data, vertexCount: n, faceCount: F, faces, faceMaterial, faceDmInv, faceArea_m2: faceArea, edgeCount: E, edges, edgeRestLength_m: edgeRest,
-    bendOffsets: bend.offsets, bendVertices: bend.vertices, bendWeights: bend.weights, bendStiffness_N_m3: bendK, vertexArea_m2: bend.area_m2,
+    bendRowCount: rows, bendOffsets: bend.offsets, bendVertices: bend.vertices, bendWeights: bend.weights, bendStiffness_N_m3: bendK, vertexArea_m2: bend.area_m2,
     vertexBendOffsets: vb.offsets, vertexBends: vb.values, bendEntryRow,
     vertexFaceOffsets: vf.offsets, vertexFaces: vf.values, vertexEdgeOffsets: ve.offsets, vertexEdges: ve.values,
     mass_kg: mass, groups: Uint32Array.from(data.groups ?? new Array(n).fill(0))};
@@ -335,7 +352,7 @@ export function clothVertexNeighbours(t: PreparedClothTopology): {offsets: Uint3
       if (i !== j) sets[list[width * e + i]!]!.add(list[width * e + j]!);
   };
   link(t.faces, 3, t.faceCount);
-  for (let r = 0; r < t.vertexCount; r++) for (let a = t.bendOffsets[r]!; a < t.bendOffsets[r + 1]!; a++) for (let b = t.bendOffsets[r]!; b < t.bendOffsets[r + 1]!; b++)
+  for (let r = 0; r < t.bendRowCount; r++) for (let a = t.bendOffsets[r]!; a < t.bendOffsets[r + 1]!; a++) for (let b = t.bendOffsets[r]!; b < t.bendOffsets[r + 1]!; b++)
     if (a !== b) sets[t.bendVertices[a]!]!.add(t.bendVertices[b]!);
   const entries: [number, number][] = [];
   sets.forEach((s, v) => [...s].sort((a, b) => a - b).forEach(u => entries.push([v, u])));

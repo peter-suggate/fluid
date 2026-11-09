@@ -50,6 +50,11 @@ export const CLOTH = {
   damping: P(0.002, "s", "assumption", "paper gives none; critically damps edge modes near 1000 rad/s"),
   iterations: P(128, "iterations", "assumption",
     "our solver's choice, not the paper's; correctness first (user, 2026-11-09). A static hanging sheet converges at K 8 (tests/cloth-coarse.test.ts), but the dynamic drape does not. On the rotating sphere at K 8 the sheet falls 28.1 mm/step at tick 12 against 34.1 converged (about free fall), then stands as a tent and buckles into radial ridges. K 32 gets the fall speed right but still tents at tick 30. K 128 and K 256 agree at ticks 30 and 45 and match the Fig 2 video (tight cap, hanging skirt, cloth on the ground by f018). Lower this only when a cheaper solve matches the K 256 drape"),
+  newtonIterations: P(8, "iterations", "assumption",
+    "our solver's choice, not the paper's (C1 RESULT 21): Newton-PCG at 8 Newton x 200 PCG iterations is within 1.5 mm of 20 x 400 on the centre-held 150 x 150 sheet at tick 30, where VBD K 128 is 155 mm off. A cap: a step stops earlier once its residual is below newtonResidualTolerance"),
+  newtonPcgIterations: P(200, "iterations", "assumption", "PCG cap per Newton iteration (C1 RESULT 21, as newtonIterations)"),
+  newtonPcgTolerance: P(1e-4, "1", "assumption", "PCG stops at r.z <= tol^2 r0.z0 (C1 RESULT 21's converged runs)"),
+  newtonResidualTolerance: P(1e-5, "1", "assumption", "Newton stops at |g| <= tol |m g| over free vertices (C1 RESULT 21's converged runs; f32 stalls near 2e-2 |m g| on 150 x 150, where the line search stops it instead)"),
   selfFriction: P(0.3, "1", "assumption",
     "paper gives one mu for static and kinetic (section 7.3) but no value; PhysBAM later uses 3.2 for self contact, rejected as tuned for its repulsion scheme"),
 } as const;

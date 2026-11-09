@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { clothGridData } from '../lib/cloth/grid';
-import { clothVertexNeighbours, colourClothVertices, prepareClothTopology } from '../lib/cloth/topology';
+import { CLOTH_BEND_ROWS, clothVertexNeighbours, colourClothVertices, prepareClothTopology } from '../lib/cloth/topology';
 import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import type { ClothAttachmentScript, ClothMaterial, ClothTopologyData } from '../lib/cloth/types';
 import {
@@ -77,10 +77,11 @@ test('bending rows: zero for affine maps of the flat rest (so for rigid motions)
   const A = [r(), r(), r(), r(), r(), r(), r(), r(), r()], affine = (p: Vec3): Vec3 => [0, 1, 2].map(k => A[3 * k]! * p[0] + A[3 * k + 1]! * p[1] + A[3 * k + 2]! * p[2] + k) as Vec3;
   let area = 0; for (let v = 0; v < t.vertexCount; v++) area += t.vertexArea_m2[v]!;
   assert.ok(Math.abs(area - 0.3 * 0.24) < 1e-12, `vertex areas sum to the sheet's: ${area}`);
-  for (let row = 0; row < t.vertexCount; row++) {
+  assert.equal(t.bendRowCount, CLOTH_BEND_ROWS * t.vertexCount);
+  for (let row = 0; row < t.bendRowCount; row++) {
     let sum = 0, big = 0;
     for (let o = t.bendOffsets[row]!; o < t.bendOffsets[row + 1]!; o++) { sum += t.bendWeights[o]!; big = Math.max(big, Math.abs(t.bendWeights[o]!)); }
-    assert.equal(t.bendVertices[t.bendOffsets[row]!], row, `row ${row} starts with its own vertex`);
+    assert.equal(t.bendVertices[t.bendOffsets[row]!], Math.floor(row / CLOTH_BEND_ROWS), `row ${row} starts with its own vertex`);
     assert.ok(Math.abs(sum) < 1e-12 * big, `row ${row} weights sum to zero`);
     for (const map of [(p: Vec3) => p, rotate, affine]) {
       const s = clothBendVector(t, row, i => map(at(rest, i)));
@@ -108,7 +109,7 @@ function cylinderRatio(data: ClothTopologyData, deg: number, kappa: number): num
     x[3 * v] = c * along - s * X; x[3 * v + 1] = (1 - Math.cos(phi)) / kappa; x[3 * v + 2] = s * along + c * X;
   }
   let E = 0;
-  for (let r = 0; r < n; r++) { const q = clothBendVector(t, r, i => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!]); E += 0.5 * t.bendStiffness_N_m3[r]! * (q[0] ** 2 + q[1] ** 2 + q[2] ** 2); }
+  for (let r = 0; r < t.bendRowCount; r++) { const q = clothBendVector(t, r, i => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!]); E += 0.5 * t.bendStiffness_N_m3[r]! * (q[0] ** 2 + q[1] ** 2 + q[2] ** 2); }
   return E / (0.5 * B * kappa * kappa);
 }
 
@@ -126,6 +127,59 @@ test('a uniform cylindrical bend has bending energy (B/2) kappa^2 A within 1% on
     }
   }
 });
+
+/** Bending meshes on the unit square: regular, in-plane sheared (no right angles) and herring-bone. */
+function plateMeshes(m: number): [string, ClothTopologyData][] {
+  const regular = clothGridData({ columns: m, rows: m, width_m: 1, height_m: 1, origin_m: [0, 0, 0] });
+  const sheared = { ...regular, restPositions_m: regular.restPositions_m.map((x, i) => i % 3 === 0 ? x + 0.3 * regular.restPositions_m[i + 2]! : x) };
+  return [['regular', regular], ['sheared', sheared], ['herring-bone', herringBoneSheet({ columns: m, rows: m, width_m: 1, depth_m: 1, origin_m: [0, 0, 0] })]];
+}
+
+test('Kirchhoff rows: every quadratic out-of-plane shape w = (a u^2 + 2b uv + c v^2)/2 gets (B/2) A [nu (a + c)^2 + (1 - nu)(a^2 + 2b^2 + c^2)] exactly', () => {
+  // The rows are exact for quadratics at every vertex (boundary included), so the energy of x = (u, w(u, v), v) is the
+  // plate energy to round-off on any mesh. Twist (b only) and saddle (a = -c) have zero Laplacian: the nu = 1 Laplacian
+  // rows these replace gave them no energy at all, which is why the Peirce strips over-drooped.
+  const r = rng(11), B = 1e-3;
+  for (const [name, data] of plateMeshes(7)) for (const nu of [0, 0.3, 0.6]) {
+    const t = prepareClothTopology(data, [{ ...cotton, bending_N_m: B, poisson: nu }]), rest = t.data.restPositions_m;
+    let area = 0; for (let v = 0; v < t.vertexCount; v++) area += t.vertexArea_m2[v]!;
+    for (const [shape, a, b, c] of [['cylinder', 2, 0, 0], ['twist', 0, 1.5, 0], ['saddle', 1, 0, -1], ['random', r() - 0.5, r() - 0.5, r() - 0.5]] as const) {
+      const pos = (i: number): Vec3 => { const u = rest[3 * i]!, v = rest[3 * i + 2]!; return [u, (a * u * u + 2 * b * u * v + c * v * v) / 2, v]; };
+      let E = 0; for (let row = 0; row < t.bendRowCount; row++) { const q = clothBendVector(t, row, pos); E += 0.5 * t.bendStiffness_N_m3[row]! * (q[0] ** 2 + q[1] ** 2 + q[2] ** 2); }
+      const want = 0.5 * B * area * (nu * (a + c) ** 2 + (1 - nu) * (a * a + 2 * b * b + c * c));
+      assert.ok(Math.abs(E - want) < 1e-9 * want, `${name}, nu ${nu}, ${shape}: E ${E} vs ${want}`);
+    }
+  }
+});
+
+test('Kirchhoff rows: the scalar bending form Q = sum_r k_r w_r w_r^T has exactly the affine null space (dimension 3)', () => {
+  // No spurious zero-energy (hourglass) modes: the kernel of Q on one coordinate is {1, u, v}.
+  for (const [name, data] of plateMeshes(6)) {
+    const t = prepareClothTopology(data, [cotton]), n = t.vertexCount, Q = new Float64Array(n * n);
+    for (let row = 0; row < t.bendRowCount; row++) for (let a = t.bendOffsets[row]!; a < t.bendOffsets[row + 1]!; a++) for (let b = t.bendOffsets[row]!; b < t.bendOffsets[row + 1]!; b++)
+      Q[n * t.bendVertices[a]! + t.bendVertices[b]!] += t.bendStiffness_N_m3[row]! * t.bendWeights[a]! * t.bendWeights[b]!;
+    const values = symmetricEigenvalues(Q, n).sort((x, y) => x - y), top = values[n - 1]!;
+    assert.ok(values.slice(0, 3).every(x => Math.abs(x) < 1e-10 * top), `${name}: three zero eigenvalues (${values.slice(0, 4).map(x => (x / top).toExponential(2))})`);
+    assert.ok(values[3]! > 1e-6 * top, `${name}: no fourth zero mode, lambda_4 / lambda_max = ${values[3]! / top}`);
+  }
+});
+
+/** Eigenvalues of a dense symmetric n x n matrix (cyclic Jacobi; test sizes only). */
+function symmetricEigenvalues(M: Float64Array, n: number): number[] {
+  const A = Float64Array.from(M);
+  for (let sweep = 0; sweep < 100; sweep++) {
+    let off = 0, diag = 0;
+    for (let p = 0; p < n; p++) { diag += A[p * n + p]! ** 2; for (let q = p + 1; q < n; q++) off += A[p * n + q]! ** 2; }
+    if (off < 1e-30 * diag) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      const apq = A[p * n + q]!; if (apq === 0) continue;
+      const theta = (A[q * n + q]! - A[p * n + p]!) / (2 * apq), tt = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1)), c = 1 / Math.sqrt(tt * tt + 1), s = tt * c;
+      for (let k = 0; k < n; k++) { const akp = A[k * n + p]!, akq = A[k * n + q]!; A[k * n + p] = c * akp - s * akq; A[k * n + q] = s * akp + c * akq; }
+      for (let k = 0; k < n; k++) { const apk = A[p * n + k]!, aqk = A[q * n + k]!; A[p * n + k] = c * apk - s * aqk; A[q * n + k] = s * apk + c * aqk; }
+    }
+  }
+  return Array.from({ length: n }, (_, i) => A[i * n + i]!);
+}
 
 test('a non-flat rest shape fails explicitly, naming the interior edge', () => {
   const data = clothGridData({ columns: 3, rows: 3, width_m: 0.2, height_m: 0.2, origin_m: [0, 0.5, 0] });

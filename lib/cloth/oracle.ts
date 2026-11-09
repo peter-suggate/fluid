@@ -8,7 +8,7 @@
  *  - orthotropic StVK membrane on Green strain in material (warp, weft)
  *    coordinates with C1 compression softening, per-vertex Hessian projected
  *    to PSD;
- *  - isometric bending (B/2)|Delta x|^2 per vertex row (topology `clothBendingRows`), exact Hessian;
+ *  - Kirchhoff plate bending (B/2)[nu (Delta x)^2 + (1 - nu)|grad grad x|^2], three rows per vertex (topology `clothBendingRows`), exact Hessian;
  *  - stiffness-proportional Rayleigh damping as a dissipation potential
  *    with the element tangent frozen at the step start (see ClothDampingTangent);
  *  - AVBD hard constraints: pins on scripted attachments (3D equality) and
@@ -17,7 +17,7 @@
  */
 import type { ClothPatchPartition } from './patches';
 import type { ClothAttachmentScript, ClothIntegrator, ClothMaterial, ClothVector } from './types';
-import { CLOTH_NO_FACE, type PreparedClothTopology } from './topology';
+import { CLOTH_BEND_ROWS, CLOTH_NO_FACE, type PreparedClothTopology } from './topology';
 
 /** AVBD constants (Giles et al. 2025, Table 2). beta is made scale free:
  * a constraint's stiffness grows by beta * s * |C| / l per iteration, with
@@ -138,7 +138,7 @@ export function clothMembraneBlock(c: ClothMembraneConstants, dm: ArrayLike<numb
   return { energy: area * clothMembraneDensity(c, e11, e22, gamma), gradient, hessian: project && sigma < 0 ? clothProjectPSD(H) : H };
 }
 
-/** L_r x = sum_o w_o x_(v_o) of bending row r (the Laplace-Beltrami of the embedding at vertex r, `clothBendingRows`),
+/** R_r x = sum_o w_o x_(v_o) of bending row r (a Kirchhoff plate row of its vertex, `clothBendingRows`),
  * taken relative to the row's own vertex: zero at the flat rest and under any affine map of it. */
 export function clothBendVector(t: PreparedClothTopology, r: number, pos: (i: number) => Vec3): Vec3 {
   const s = zero3(), o0 = t.bendOffsets[r]!, x0 = pos(t.bendVertices[o0]!);
@@ -146,7 +146,7 @@ export function clothBendVector(t: PreparedClothTopology, r: number, pos: (i: nu
   return s;
 }
 
-/** Bending of the row holding entry o, at that entry's vertex: E = (k_r/2)|L_r x|^2, gradient k_r w_o L_r x, Hessian
+/** Bending of the row holding entry o, at that entry's vertex: E = (k_r/2)|R_r x|^2, gradient k_r w_o L_r x, Hessian
  * k_r w_o^2 I (exact: E is quadratic in x). Adds into g and H; returns E. */
 export function clothAddBending(t: PreparedClothTopology, o: number, pos: (i: number) => Vec3, g: Vec3, H: Mat3): number {
   const r = t.bendEntryRow[o]!, k = t.bendStiffness_N_m3[r]!, w = t.bendWeights[o]!, s = clothBendVector(t, r, pos);
@@ -196,7 +196,7 @@ export interface ClothSolverModel {
   readonly edgeStrainLimit: Float64Array;
   /** Per face damping coefficient (s). */
   readonly faceDamping_s: Float64Array;
-  /** Per bending row (vertex) damping coefficient: its incident faces' (s), area weighted. */
+  /** Per bending row damping coefficient: its vertex's incident faces' (s), area weighted. */
   readonly bendDamping_s: Float64Array;
   readonly colours: Uint32Array;
   readonly colourCount: number;
@@ -223,11 +223,11 @@ export function buildClothSolverModel(topology: PreparedClothTopology, materials
   }
   for (let v = 0; v < n; v++) length[v] /= counts[v]!;
   const faceDamping = Float64Array.from(t.faceMaterial, m => materials[m]!.damping_s);
-  const bendDamping = new Float64Array(n);
+  const bendDamping = new Float64Array(t.bendRowCount);
   for (let v = 0; v < n; v++) {
     let a = 0, b = 0;
     for (let j = t.vertexFaceOffsets[v]!; j < t.vertexFaceOffsets[v + 1]!; j++) { const f = t.vertexFaces[j]! >> 2; a += t.faceArea_m2[f]!; b += t.faceArea_m2[f]! * faceDamping[f]!; }
-    bendDamping[v] = b / a;
+    bendDamping.fill(b / a, CLOTH_BEND_ROWS * v, CLOTH_BEND_ROWS * (v + 1));
   }
   let colourCount = 0; for (const c of colours) colourCount = Math.max(colourCount, c + 1);
   return { topology, materials, membrane, elasticStiffness_N_m: elastic, vertexLength_m: length, edgeStrainLimit: limit,
@@ -467,7 +467,7 @@ export function clothStepFrame(model: ClothSolverModel, state: ClothOracleState,
     const group = model.topology.groups[v]!;
     if (group > 0) {
       const anchor = at3(rest, v), p0 = clothAttachmentTarget(model.scripts, group, anchor, state.time_s), p1 = clothAttachmentTarget(model.scripts, group, anchor, state.time_s + h);
-      for (let c = 0; c < 3; c++) { target0[3 * v + c] = p0[c]!; target1[3 * v + c] = p1[c]!; init[3 * v + c] = state.x[3 * v + c]! + p1[c]! - p0[c]!; }
+      for (let c = 0; c < 3; c++) { target0[3 * v + c] = p0[c]!; target1[3 * v + c] = p1[c]!; init[3 * v + c] = state.x[3 * v + c]! + p1[c]! - p0[c]!; y[3 * v + c] = init[3 * v + c]!; }
     }
   }
   return { frame: { hEff, y, xHat, x0: Float64Array.from(state.x), target0, target1, damping: clothDampingTangent(model, state.x) }, init, bdf2 };
@@ -616,6 +616,6 @@ export function clothMechanicalEnergy(model: ClothSolverModel, x: ArrayLike<numb
   }
   for (let f = 0; f < t.faceCount; f++)
     elastic += clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, 0, at3(x, t.faces[3 * f]!), at3(x, t.faces[3 * f + 1]!), at3(x, t.faces[3 * f + 2]!), false).energy;
-  for (let r = 0; r < t.vertexCount; r++) { const q = clothBendVector(t, r, i => at3(x, i)); elastic += 0.5 * t.bendStiffness_N_m3[r]! * dot(q, q); }
+  for (let r = 0; r < t.bendRowCount; r++) { const q = clothBendVector(t, r, i => at3(x, i)); elastic += 0.5 * t.bendStiffness_N_m3[r]! * dot(q, q); }
   return { kinetic, potential, elastic, total: kinetic + potential + elastic };
 }

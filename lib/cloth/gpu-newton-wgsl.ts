@@ -25,7 +25,7 @@ export const CLOTH_NEWTON_TRIALS = 8;
 export const CLOTH_NEWTON_PARTIALS = 5;
 export const CLOTH_NEWTON_TRIAL_RECORDS = 5;
 
-export function clothNewtonWGSL(binding: number, workgroup: number): string {
+export function clothNewtonWGSL(binding: number, workgroup: number, contact = false): string {
   const S = CLOTH_NEWTON_SEGMENTS;
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
@@ -35,6 +35,8 @@ fn nwFaceRecord(f: u32) -> u32 { return P.newton0.x + 3u * f; }
 fn nwPartial(k: u32) -> u32 { return P.newton0.y + k * P.newton0.z; }
 fn nwControl() -> u32 { return P.newton0.w; }
 fn nwPinned(v: u32) -> bool { return vertexGroup(v) > 0u; }
+// The largest step the line search tries: the contact filter's alpha_min (every vertex's certificates hold on [0, alpha_min] d), else 1.
+fn nwAlpha0() -> f32 { return ${contact ? 'clamp(ogcAlphaMin(), 0.0, 1.0)' : '1.0'}; }
 
 var<workgroup> nwRed: array<vec4f, ${workgroup}>;
 var<workgroup> nwOut: vec4f;
@@ -170,6 +172,8 @@ fn nwApplyAt(v: u32, pv: vec3f) -> vec3f {
     }
   }
   out += stencilDiagonal(v) * pv;
+  // Contact pairs (C2): the sum over v's entries of w_v M (sum_j w_j p_j), linearized at the iterate.
+  ${contact ? 'out += ogcVertexContactHvLanes(v, 0u, 1u);' : ''}
   let hd = 1.0 / h;
   for (var j = topo[P.topo2.z + v]; j < topo[P.topo2.z + v + 1u]; j++) {
     let rec = topo4[P.newton1.x + j];
@@ -248,6 +252,7 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0) { return; }
   let wgi = wgIndex(wg, nwg); let v = wgi * NW_WG + lane;
+  let a0 = nwAlpha0();
   nwE = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwF = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
   var slope = 0.0;
   if (v < P.n.x) {
@@ -255,7 +260,7 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
     slope = dot(nw[nseg(${S.g}u, v)].xyz, dv);
     let w = vertexRest(v).x / (h * h); let rv = xv - state[seg(S_Y, v)].xyz; let gs = grabSpring(v, xv);
     let damped = P.state1.z != 0u;
-    var alpha = 1.0;
+    var alpha = a0;
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
       let d = alpha * dv;
       let lin = w * dot(rv, d) + dot(gs.xyz, d); let quad = 0.5 * (w + gs.w) * dot(d, d);
@@ -285,7 +290,7 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
         roundRate = vec3f(length(T0.xyz) * ru.x, length(T1.xyz) * ru.y, length(T0.xyz) * ru.y + length(T1.xyz) * ru.x);
         drate1 = vec3f(dot(T0.xyz, g0), dot(T1.xyz, g1), dot(T0.xyz, g1) + dot(T1.xyz, g0));
       }
-      var alpha = 1.0;
+      var alpha = a0;
       for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
         let df0 = alpha * g0; let df1 = alpha * g1;
         let d11 = dot(f0, df0) + 0.5 * dot(df0, df0); let d22 = dot(f1, df1) + 0.5 * dot(df1, df1);
@@ -306,11 +311,13 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
         alpha *= 0.5;
       }
     }
-    // Bending row v (and its damping): L d once, then each trial exactly.
-    let q = loadBend(v); var ds1 = vec3f(0.0);
-    for (var o = topo[P.topo0.z + v]; o < topo[P.topo0.z + v + 1u]; o++) { ds1 += bendW(o) * (nwD(bendJ(o)) - dv); }
-    alpha = 1.0;
-    for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, bendDelta(q, alpha * ds1)); alpha *= 0.5; }
+    // Vertex v's bending rows (and their damping): R d once a row, then each trial exactly.
+    for (var r = BEND_ROWS * v; r < BEND_ROWS * (v + 1u); r++) {
+      let q = loadBend(r); var ds1 = vec3f(0.0);
+      for (var o = topo[P.topo0.z + r]; o < topo[P.topo0.z + r + 1u]; o++) { ds1 += bendW(o) * (nwD(bendJ(o)) - dv); }
+      alpha = a0;
+      for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, bendDelta(q, alpha * ds1)); alpha *= 0.5; }
+    }
     // Strain-limit edges whose first slot v is: exact in the relative move d_v - d_other.
     if (P.flags.z != 0u) {
       for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
@@ -318,10 +325,18 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
         if ((entry & 3u) != 0u) { continue; }
         let e = entry >> 2u; let ev = edges(e); let other = select(ev.x, ev.y, ev.x == v);
         let rel = dv - nwD(other);
-        alpha = 1.0;
+        alpha = a0;
         for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) { nwAdd(k, edgeDelta(v, xv, e, alpha * rel)); alpha *= 0.5; }
       }
     }
+    ${contact ? `// Contact pairs v owns (each pair once over all vertices), at x and at every trial x + a d.
+    let ec0 = ogcContactEnergyOwnedLanes(v, 0u, 1u);
+    alpha = a0;
+    for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+      nwTrialStep = alpha; let ec = ogcContactEnergyOwnedLanes(v, 0u, 1u); nwTrialStep = 0.0;
+      nwAdd(k, vec2f(ec - ec0, abs(ec0) + abs(ec)));
+      alpha *= 0.5;
+    }` : ''}
   }
   let base = nwPartial(${CLOTH_NEWTON_PARTIALS}u);
   nwPartialSum(lane, wgi, nwE[0], base);
@@ -340,7 +355,11 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
   let F0 = nwSum(lane, base + 2u * P.newton0.z); let F1 = nwSum(lane, base + 3u * P.newton0.z);
   let slope = nwSum(lane, base + 4u * P.newton0.z).x;
   if (lane != 0u) { return; }
-  var chosen = 0.0; var alpha = 1.0;
+  let a0 = nwAlpha0();
+  // A filter that allows no step (alpha_min = 0: a certificate is already tight) moves nothing and leaves Newton running:
+  // it arms a re-detection round, whose new certificates the next Newton iteration steps in.
+  if (!(a0 > 0.0)) { nw[nwControl()] = vec4f(0.0, 0.0, 0.0, ctl.w + 1.0); return; }
+  var chosen = 0.0; var alpha = a0;
   if (slope < 0.0) {
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
       let e = select(E1[k - 4u], E0[k], k < 4u); let fl = select(F1[k - 4u], F0[k], k < 4u);
@@ -354,7 +373,10 @@ fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
 @compute @workgroup_size(${workgroup}) fn nwApply(@builtin(global_invocation_id) id: vec3u) {
   let v = id.x;
   let ctl = nw[nwControl()];
-  if (v >= P.n.x || !(ctl.z > 0.0)) { return; }
+  if (v >= P.n.x) { return; }
+  // Newton done: d = 0, so the capped iterations left (all early exits) give the contact filter and re-detection nothing to act on.
+  if (ctl.x != 0.0) { nw[nseg(${S.d}u, v)] = vec4f(0.0); return; }
+  if (!(ctl.z > 0.0)) { return; }
   positions[v] = vec4f(pos(v) + ctl.z * nwD(v), positions[v].w);
 }
 

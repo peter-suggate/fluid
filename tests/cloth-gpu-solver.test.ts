@@ -104,7 +104,7 @@ test('the bending stencil is the per-row bending: gradient, zero row sums, and a
   const x = perturbed(model, 2e-2), stencil = clothBendingStencil(model), N = topology.vertexCount;
   // Float64: the stencil's sum_j Q_vj (x_j - x_v) is sum_r k_r w_rv L_r x over the rows holding v, and each row of Q sums to zero.
   const perRow = new Float64Array(3 * N);
-  for (let r = 0; r < N; r++) {
+  for (let r = 0; r < topology.bendRowCount; r++) {
     const s = clothBendVector(topology, r, i => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!]), k = topology.bendStiffness_N_m3[r]!;
     for (let o = topology.bendOffsets[r]!; o < topology.bendOffsets[r + 1]!; o++) for (let c = 0; c < 3; c++) perRow[3 * topology.bendVertices[o]! + c] += k * topology.bendWeights[o]! * s[c]!;
   }

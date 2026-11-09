@@ -1651,3 +1651,105 @@ The boundary rows carry their full share: whole-sheet and interior-only ratios a
 
   The test's cotton is now about 3× softer than it was. With C2's uncommitted contact work in the tree it reads 32%.
   I have not touched the test.
+
+## 2026-11-09 RESULT (23): Kirchhoff plate rows, contact in the Newton step, analytic scenes on Newton, C2's requests (a)–(e)
+
+**Bending: Kirchhoff plate rows replace the Laplacian rows (ν = 1).** The energy is
+(B/2)∫[ν(Δx)² + (1−ν)|∇∇x|²]. There are three rows per vertex, R0 = √((1+ν)/2)(Duu+Dvv), R1 = √((1−ν)/2)(Duu−Dvv)
+and R2 = √(2(1−ν))Duv. Each is a least-norm quadratic-exact difference on the same support, and ν is the vertex's
+area-weighted material Poisson ratio.
+
+Why: the Laplacian alone gives twist (κuv) and saddle (κ(u²−v²)/2) zero energy, so the Peirce strips drooped
+anticlastically for free.
+
+New CPU tests:
+- every quadratic shape w = (au² + 2buv + cv²)/2 gets (B/2)A[ν(a+c)² + (1−ν)(a² + 2b² + c²)] to 1e-9. This covers
+  regular, sheared and herring-bone meshes at ν = 0, 0.3 and 0.6;
+- the scalar form Q has exactly the 3-dimensional affine null space (Jacobi eigenvalues, three meshes);
+- the cylinder test is unchanged and still passes.
+
+Every consumer now loops over `bendRowCount`: oracle, coarse, GPU packing, the Newton trial/diagnose, and the
+coarse trial.
+
+**Peirce (bare, Newton 8×200), against an exact reference of 22.26 / 41.60 / 56.99°:**
+
+| bending | chord angles (°) |
+|---|---|
+| Laplacian | 48.03 / 64.76 / 73.14 |
+| Kirchhoff | 26.19 / 46.41 / 60.14 |
+
+Still FAIL (gate 1°). **The GPU result is the discrete model's equilibrium.** A Float64 L-BFGS static solve of the
+same discrete energy (membrane + rows + gravity, |g| < 3e-7) gives 26.19 / 46.41 / 60.13°
+(`~/code/me/fluid-scratch/cloth-c1/m2/peirce-static.ts`). The remaining error is the discretization. A linear
+cantilever-plate harness (`beam-linear.ts`: tip deflection against qL⁴/8B) splits it into two O(h) defects:
+
+1. **The clamp kink.** At the last pinned column the centred row sees half the jump in curvature, so it carries a
+   quarter of the energy over its full cell where it should carry all of it over the free half. The clamp then
+   rotates, adding about 2h/L to the tip deflection. Embedding the exact elastica, the clamp column holds
+   3.6 µJ against 7.4 µJ; everything else is within 1–2%.
+2. **Free-edge rows are soft.** The least-norm boundary Duu spreads over the inward lines, so the edge line's own
+   curvature is under-penalised. The edges droop more (a U-shaped section) and the strip is uniformly too
+   compliant, in proportion to h/W: tip/beam is 1.63 at W = 10 mm, 1.23 at 40 and 1.13 at 80 (h = 5 mm).
+
+Candidate fix under test, not landed:
+- distance-weighted least norm, minimising Σ (r_j/h)^16 w_j² over a 25-point support;
+- a clamp-boundary row scaled by A/A_free.
+
+Linear tip/beam with both, on the herring-bone mesh: 1.0026 (W 10), 1.0021 (40), 1.0006 (h 2.5), 1.0002 (h 1.25).
+The regular one-diagonal grid is still 4% off and not converging, so that is next.
+
+**Contact in the Newton step (wired, first GPU runs).**
+- `clothNewtonWGSL(…, contact)`:
+  - H·p adds `ogcVertexContactHvLanes`;
+  - `nwTrial` adds the owned contact energy difference per trial, with `ogcX = x + α d` through `nwTrialStep`;
+  - the trial ladder starts at α0 = clamp(α_min, 0, 1) (C2's filter buffer at word N, binding 11);
+  - α0 = 0 counts as a stalled iteration, not a converged one.
+- The encoder runs C2's `filter` before `nwTrial` and `afterNewtonStep` after `nwApply`.
+- A done step zeroes d, so the filter, decide and detection see no motion.
+- `ClothSystem` builds Newton with `solverContact(binding, true)`, `alpha`, the hooks, and `direction`.
+- The Bridson scenes' Newton settings (8 × 200, 1e-4, 1e-5) are in `CLOTH` with provenance from RESULT (21). Those
+  scenes still run K = 128 until M4.
+- The analytic scenes now run Newton (`clothAnalyticNewton()`), and their tests take `CLOTH_ANALYTIC_NEWTON=NxP`.
+
+**Analytic gates on Newton 8 × 200.**
+
+| scene | bare | contact ON (ClothSystem) |
+|---|---|---|
+| free fall | PASS, 0.0005 mm, 62 ms/tick | PASS, 0.0005 mm, 122 ms/tick |
+| swing | PASS, crosses at 0.4950 s like 32 × 800, 79 ms/tick | FAIL, free edge 448 mm off at step 20 |
+| curtain | FAIL, band 1.10%, hem 64.99 vs 65.55 mm, KE 2.05e-3 J at 10 s (still swaying) | — |
+
+The contact-on swing failure is C2's re-detection prediction defect (progress-lane-c2). **C2: the Newton-with-contact
+path is in the tree and committed with this entry.** w = 0 in newton re-detection and no hold from the filter can
+be built on it.
+
+**C2's requests.**
+- (a) The analytic scenes set gravity to (0, −GRAVITY, 0).
+- (b) `prediction: 'target'`, with `target` bound to `solver.inertialTarget` (state segment y).
+- (c) `OGC_STATUS.coincident` is in `CLOTH_CONTACT_FAILING`.
+- (d) A pinned vertex's y is its prescribed motion x + p1 − p0, the same as its initial guess, in both the GPU
+  frame pass and the oracle.
+
+**(e) The impact rebound is BDF2, not the barrier.** Free-fall sheet onto the floor (impact at 4.74 m/s), contact
+ON, through ClothSystem:
+
+| integrator, caps | peak upward mean v | apex | energy kept |
+|---|---|---|---|
+| BDF2, 8 × 200 | 2.98 m/s | 589 mm | 49% |
+| BDF2, converged 32 × 800, tol / 16 | identical trajectory | | |
+| implicit Euler, converged | 0.011 m/s; rests at 0.99 mm from tick 32 | | 0.0% |
+
+With BDF2, the sheet keeps accelerating upward between ticks 32 and 33, 30–74 mm clear of the floor where no
+contact force acts. That is the multistep history: v̂ = (4vₙ − vₙ₋₁)/3 and x̂ = xₙ + Δxₙ₋₁/3 extrapolate the
+velocity jump at impact, and the extrapolation is replayed as an impulse. The fix is in the integrator, not the
+contact stiffness. The standard treatment is to restart the multistep history across the non-smooth event. To be
+designed with C2: which vertices count, and how to detect them from contact data on the GPU.
+
+Probe: `~/code/me/fluid-scratch/cloth-c1/m2/c1-impact-probe.test.ts`. Copy it into tests/ to run.
+
+**Tests.**
+- `npm run check:types`: clean. `npm run test:unit`: only the known foreign failure.
+- GPU: cloth-newton, cloth-gpu-solver, cloth-grab, cloth-system and analytic free fall pass.
+- `cloth-contact-gpu` failed 6 tests when run alongside five other files, while C2 was editing
+  `ogc-detector-wgsl.ts`. Run alone it is 18/18, and 18/18 on a clean HEAD export.
+- `cloth-system` "cut of the moving solid" (1 mm inside) is C2's known flake.

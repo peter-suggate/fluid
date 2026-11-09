@@ -250,7 +250,9 @@ export class ClothSystem {
     // The two-level correction's coarse space follows the mesh topology, so it is rebuilt with it (edit time only).
     // Every document takes it; a mesh that cannot build one fails here.
     const coarse = buildClothCoarseSpace(topology);
-    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField);
+    const newton = settings.newton;
+    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField, !!newton);
+    const hooks = contact.stepHooks;
     let solver: ClothGPUSolver;
     try {
       solver = await ClothGPUSolver.create(this.device, model, {
@@ -261,11 +263,18 @@ export class ClothSystem {
         positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
         solverState: start ? start.solverState : data.solverState, label,
         ...(this.options.vertexLanes !== undefined ? { vertexLanes: this.options.vertexLanes } : {}),
-        contact: contact.solverContact(CLOTH_BINDING.contact),
-        // The coarse move is truncated like a colour sweep's, before the sweeps start from it.
-        hooks: { ...contact.stepHooks, afterCoarse: (pass: GPUComputePassEncoder) => contact.encodeTruncate(pass) },
+        ...(newton ? {
+          // Newton: contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
+          method: 'newton' as const, newton,
+          contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha },
+          hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep },
+        } : {
+          contact: contact.solverContact(CLOTH_BINDING.contact),
+          // The coarse move is truncated like a colour sweep's, before the sweeps start from it.
+          hooks: { afterFrame: hooks.afterFrame, afterIteration: hooks.afterIteration, afterCoarse: hooks.afterCoarse },
+        }),
       });
-      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart });
+      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, ...(newton ? { direction: solver.newtonDirection } : {}) });
       contact.setSolidField(field);
       if (bodyField) contact.setBodyField(bodyField);
       // The detector continues from the state carried with the pose (an undo, a load, a moving solid's edit).

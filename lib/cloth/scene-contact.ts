@@ -52,7 +52,7 @@ export const CLOTH_SCENE_CONTACT = {
 /** Status bits that halt the scene (as the M2 and M6 gates fail them). Envelope and round caps, and held pairs, are reported, not failures. */
 export const CLOTH_CONTACT_FAILING = OGC_STATUS.contactOverflow | OGC_STATUS.gridOverflow | OGC_STATUS.pairOverflow
   | OGC_STATUS.nonFinite | OGC_STATUS.solidPenetration | OGC_STATUS.solidBounds
-  | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose;
+  | OGC_STATUS.bodySqueeze | OGC_STATUS.heldConflict | OGC_STATUS.bodyPose | OGC_STATUS.coincident;
 
 /** Byte offset of the detector's status word in its counter buffer. */
 export const CLOTH_CONTACT_STATUS_OFFSET = 4 * OGC_COUNTER.status;
@@ -157,15 +157,15 @@ function meshOf(model: ClothSolverModel, origin: ClothVector): { mesh: OgcMeshTo
  * the field.
  */
 export async function createClothSceneContact(device: GPUDevice, model: ClothSolverModel, document: ClothDocument, origin: ClothVector,
-  field: ClothSolidField, dt_s: number, gravity_m_s2: readonly [number, number, number], bodyField?: ClothSolidField): Promise<OgcContactDetector> {
+  field: ClothSolidField, dt_s: number, gravity_m_s2: readonly [number, number, number], bodyField?: ClothSolidField, newton = false): Promise<OgcContactDetector> {
   const r = clothContactRadius(document), { mesh, rest } = meshOf(model, origin), C = CLOTH_SCENE_CONTACT;
   const { vertexCount: N, faceCount: T, edgeCount: E } = model.topology;
   const edge = buildOgcTopology(mesh, rest).layout.maxEdgeLength;
   const config: OgcContactConfig = {
     r, kc: C.kc_N_m, mu: document.solver?.selfFriction ?? 0, epsV: C.epsV_m_s, dt: dt_s, gravity: gravity_m_s2,
-    rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction: 'guess',
+    rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction: 'target',
     contactCapacity: C.contactCapacity, pairCapacity: C.pairSlotsPerVertex * N, gridCapacity: C.gridEntriesPerPrimitive * (N + T + E),
-    bucketCount: C.bucketCount, roundCap: C.roundCap, solidCapacityWords: field.words.length,
+    bucketCount: C.bucketCount, roundCap: C.roundCap, solidCapacityWords: field.words.length, newton,
     solidSampleCapacity: sampleCapacity(field, r, edge),
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),

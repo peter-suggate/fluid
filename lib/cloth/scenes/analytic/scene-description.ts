@@ -8,11 +8,13 @@
  * the rule cloth contact reads back (`contact-solids.ts`).
  */
 import { createEmptyScene } from "../../../core/empty-scene";
+import type { ClothNewtonSettings } from "../../types";
 import type { CameraState, SceneDescription, Vec3 } from "../../../core/model";
 import { bakeProceduralSolid } from "../../../core/procedural-solid";
 import { solidVoxelPatchesKey, type SolidWorldVoxelPatch } from "../../../core/solid-world";
 import { VOXEL_MATERIAL_IDS } from "../../../core/voxel-scene";
 import type { ClothAnalyticScene, ClothAnalyticSolid, ClothAnalyticSolidShape } from "./scenes";
+import { GRAVITY } from "./parameters";
 
 const BRICK = 8;
 const ALIGNED_TOLERANCE_CELLS = 1e-6;
@@ -101,8 +103,8 @@ function bakeSolids(source: ClothAnalyticScene): Pick<SceneDescription, "solidVo
 export interface ClothAnalyticSceneOptions {
   /** `bake: false` skips the voxel bake (library card previews). */
   readonly bake?: boolean;
-  /** Solver iterations for every document (the tests' K sweep); default the scene's own. */
-  readonly iterations?: number;
+  /** Newton-PCG settings for every document (the tests' sweeps); default the scene's own. */
+  readonly newton?: ClothNewtonSettings;
 }
 
 /** The document the product opens. */
@@ -110,13 +112,15 @@ export function clothAnalyticSceneDescription(source: ClothAnalyticScene, option
   const dims = latticeDimensions(source), h = source.cell_m;
   const scene = createEmptyScene({ sceneId: source.id, finestCellSize_m: h, extents_m: { x: dims[0] * h, y: dims[1] * h, z: dims[2] * h } });
   scene.duration_s = source.duration_s;
+  // The references use GRAVITY; the empty scene's default is standard gravity (9.80665), 1e-3 off.
+  scene.fluid = { ...scene.fluid, gravity_m_s2: { x: 0, y: -GRAVITY.value, z: 0 } };
   scene.numerics = { ...scene.numerics, fixedDt_s: source.step_s, maxDt_s: source.step_s };
   if (options.bake !== false) {
     const solids = bakeSolids(source);
     scene.solidVoxels = [...solids.solidVoxels, ...scene.solidVoxels];
     if (solids.solidBoundary) scene.solidBoundary = solids.solidBoundary;
   }
-  scene.cloth = source.cloth.map(d => options.iterations === undefined ? d : { ...d, solver: { ...d.solver, iterations: options.iterations } });
+  scene.cloth = source.cloth.map(d => options.newton === undefined ? d : { ...d, solver: { ...d.solver, newton: options.newton } });
   return scene;
 }
 

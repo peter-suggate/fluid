@@ -101,6 +101,19 @@ export interface ClothAttachmentScript {
 export type ClothIntegrator = "implicit-euler" | "bdf2";
 export type ClothSolverTier = "A" | "B";
 
+/** Caps and tolerances of the Newton-PCG step (all decided on the GPU; the caps bound the encoded work). One step per
+ * frame: Newton and PCG iterations and contact re-detection rounds stay inside it and never advance time. */
+export interface ClothNewtonSettings {
+  /** Newton iterations per step (cap). */
+  readonly iterations: number;
+  /** PCG iterations per Newton iteration (cap). */
+  readonly pcgIterations: number;
+  /** PCG stops when r.z <= tol^2 r0.z0 (default 1e-3). */
+  readonly pcgTolerance?: number;
+  /** Newton stops when |g| <= tol |m g| over free vertices (default 1e-4). */
+  readonly residualTolerance?: number;
+}
+
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per
  * advance, at the frame/fluid dt: there is no substepping of any kind, and
  * the iteration count K is the only budget. */
@@ -109,6 +122,8 @@ export interface ClothSolverSettings {
   readonly integrator?: ClothIntegrator;
   /** VBD iterations per step (K). */
   readonly iterations?: number;
+  /** Newton-PCG caps and tolerances: when present the document runs the Newton solver (lane C1) instead of VBD. */
+  readonly newton?: ClothNewtonSettings;
   /** Chebyshev spectral radius estimate: only 0 (off) is accepted, since with the two-level correction acceleration can explode. */
   readonly chebyshevRho?: number;
   /** Coulomb friction of cloth on cloth (self contact); omitted means frictionless. */

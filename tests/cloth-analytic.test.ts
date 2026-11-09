@@ -6,8 +6,8 @@
  * WEBGPU_NODE_MODULE): each scene run on the scene clock at its K, measured
  * against its answer with the tolerance its card states.
  *
- * For lane C1's K and solver sweeps:
- *   CLOTH_ANALYTIC_ITERATIONS=8      run every scene at this K instead of its own
+ * For lane C1's solver sweeps:
+ *   CLOTH_ANALYTIC_NEWTON=8x200      run every scene at these Newton x PCG caps instead of its own (its tolerances)
  *   CLOTH_ANALYTIC_ONLY=free-fall,swinging-sheet   run only these kinds
  *   CLOTH_ANALYTIC_CONVERGED=0      skip the swinging sheet's 4K reference run
  * A failing gate is a finding about the solver, never a reason to change the scene.
@@ -28,7 +28,7 @@ import { buildClothSolverModel } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace } from '../lib/cloth/coarse';
 import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
 import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
-import type { ClothDocument, ClothSurfacePublication } from '../lib/cloth/types';
+import type { ClothDocument, ClothNewtonSettings, ClothSurfacePublication } from '../lib/cloth/types';
 import {
   CLOTH_ANALYTIC_PARAMETERS, CLOTH_ANALYTIC_SCENES, CLOTH_ANALYTIC_STEP_S, GRAVITY, INCLINE, PEIRCE, SWING, bdf2FreeFall, bdf2StartOffset_m, bendingLength_m,
   clothAnalyticSceneDescription, hangingBandStrain, hangingStrainContinuum, heavyElastica, inclineAcceleration_m_s2, peirceChordAngle_deg,
@@ -38,12 +38,15 @@ import {
 import { clothAnalyticSceneSolids } from '../lib/cloth/scenes/analytic/contact-solids';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
-const K = process.env.CLOTH_ANALYTIC_ITERATIONS ? Number(process.env.CLOTH_ANALYTIC_ITERATIONS) : undefined;
+const caps = process.env.CLOTH_ANALYTIC_NEWTON?.split('x').map(Number);
+if (caps && !(caps.length === 2 && caps.every(c => Number.isInteger(c) && c >= 1))) throw new Error(`CLOTH_ANALYTIC_NEWTON must be <newton>x<pcg>, got ${process.env.CLOTH_ANALYTIC_NEWTON}`);
 const only = process.env.CLOTH_ANALYTIC_ONLY?.split(',').map(s => s.trim()).filter(Boolean);
 const runs = (kind: ClothAnalyticKind) => gpu && (!only || only.includes(kind));
 const g = GRAVITY.value, h = CLOTH_ANALYTIC_STEP_S;
 const ray = (o: [number, number, number], d: [number, number, number]) => ({ origin: { x: o[0], y: o[1], z: o[2] }, direction: { x: d[0], y: d[1], z: d[2] } });
-const iterationsOf = (s: ClothAnalyticScene) => K ?? s.cloth[0]!.solver!.iterations!;
+/** The Newton settings a scene runs at: its own, or CLOTH_ANALYTIC_NEWTON's caps with its tolerances. */
+const newtonOf = (s: ClothAnalyticScene): ClothNewtonSettings => { const own = s.cloth[0]!.solver!.newton!; return caps ? { ...own, iterations: caps[0]!, pcgIterations: caps[1]! } : own; };
+const override = caps ? (s: ClothAnalyticScene) => ({ newton: newtonOf(s) }) : () => ({});
 
 // ---------------------------------------------------------------- CPU
 
@@ -159,7 +162,7 @@ async function capture(device: GPUDevice, scene: SceneDescription, ticks: readon
 }
 
 async function captureSolverOnly(device: GPUDevice, scene: SceneDescription, ticks: readonly number[]): Promise<{ frames: ClothSurfacePublication[][]; ms: number }> {
-  const solvers = await Promise.all((scene.cloth ?? []).map(d => solverFor(device, d, d.solver?.iterations)));
+  const solvers = await Promise.all((scene.cloth ?? []).map(d => solverFor(device, d)));
   try {
     const frames: ClothSurfacePublication[][] = [];
     let tick = 0, stepping = 0;
@@ -178,11 +181,11 @@ async function captureSolverOnly(device: GPUDevice, scene: SceneDescription, tic
 }
 
 const range = (a: number, b: number) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
-const label = (s: ClothAnalyticScene) => `${s.kind}, K = ${iterationsOf(s)}`;
+const label = (s: ClothAnalyticScene, n = newtonOf(s)) => `${s.kind}, Newton ${n.iterations} x ${n.pcgIterations}`;
 
 test('free fall: the sheet falls exactly as the BDF2 recurrence, flat and unstrained', { skip: !runs('free-fall') }, async () => withDevice(async device => {
   const source = clothAnalyticFreeFall(), n = source.probe.gateSteps as number, y0 = source.probe.y0 as number;
-  const scene = clothAnalyticSceneDescription(source, K ? { bake: true, iterations: K } : {});
+  const scene = clothAnalyticSceneDescription(source, override(source));
   const { frames, ms } = await capture(device, scene, range(1, n));
   const data = source.cloth[0]!.geometry.data, rest = data.restPositions_m, tri = data.triangles;
   const ref = bdf2FreeFall(n, h, -g);
@@ -215,7 +218,7 @@ test('hanging curtain: the pinned sheet comes to rest at its exact uniaxial equi
   // does not move; the kinetic energy is reported, not gated.
   const source = clothAnalyticHangingCurtain(), m = source.probe.columns as number, n = source.probe.rows as number, hc = source.probe.cell as number, top = source.probe.top as number;
   const settle = Math.round((source.probe.settle as number) / h), window = Math.round(1 / h);
-  const scene = clothAnalyticSceneDescription(source, K ? { iterations: K } : {});
+  const scene = clothAnalyticSceneDescription(source, override(source));
   const { frames, ms } = await capture(device, scene, range(settle - window + 1, settle));
   const material = source.cloth[0]!.materials[0]!, k = material.stretchWeft_N_m, rho = material.arealDensity_kg_m2;
   const mass = prepareClothTopology(source.cloth[0]!.geometry.data, source.cloth[0]!.materials).mass_kg;
@@ -245,9 +248,9 @@ test('hanging curtain: the pinned sheet comes to rest at its exact uniaxial equi
 }));
 
 /** The swinging sheet's free edge: mean height, and the first time (s, interpolated) its mean x passes under the pin (x = 0). */
-async function swing(device: GPUDevice, iterations: number | undefined, ticks: number) {
+async function swing(device: GPUDevice, newton: ClothNewtonSettings, ticks: number) {
   const source = clothAnalyticSwingingSheet(), edge = source.probe.freeEdge as readonly number[];
-  const scene = clothAnalyticSceneDescription(source, iterations ? { iterations } : {});
+  const scene = clothAnalyticSceneDescription(source, { newton });
   const { frames, ms } = await capture(device, scene, range(1, ticks));
   const y: number[] = [], x: number[] = [];
   for (const [pose] of frames) {
@@ -261,23 +264,24 @@ async function swing(device: GPUDevice, iterations: number | undefined, ticks: n
 }
 
 test('swinging sheet: the flat outer part falls exactly as free fall, and the swing reaches the pin as the converged run does', { skip: !runs('swinging-sheet') }, async () => withDevice(async device => {
-  const ticks = 45, run = await swing(device, K, ticks), { source } = run, n = source.probe.gateSteps as number, y0 = source.probe.y0 as number;
+  const n0 = newtonOf(clothAnalyticSwingingSheet()), ticks = 45, run = await swing(device, n0, ticks), { source } = run, n = source.probe.gateSteps as number, y0 = source.probe.y0 as number;
   const ref = bdf2FreeFall(n, h, -g);
   let worst = 0, at = 0;
   for (let k = 0; k < n; k++) { const e = Math.abs(run.y[k]! - (y0 + ref.displacement_m[k]!)); if (e > worst) { worst = e; at = k + 1; } }
-  const k0 = iterationsOf(source);
   console.log(`[${label(source)}] ${run.ms.toFixed(1)} ms/tick: free edge off free fall by up to ${(1000 * worst).toFixed(3)} mm (step ${at}) over ${n} steps; `
     + `per-step lag at steps 6/12/18: ${[6, 12, 18].map(s => (1000 * (run.y[s - 1]! - y0 - ref.displacement_m[s - 1]!)).toFixed(2)).join('/')} mm; passes under the pin at ${run.crossing.toFixed(4)} s`);
   let converged: Awaited<ReturnType<typeof swing>> | undefined;
   if (process.env.CLOTH_ANALYTIC_CONVERGED !== '0') {
-    converged = await swing(device, SWING.convergedFactor.value * k0, ticks);
+    const f = SWING.convergedFactor.value, n1: ClothNewtonSettings = { iterations: f * n0.iterations, pcgIterations: f * n0.pcgIterations,
+      pcgTolerance: n0.pcgTolerance! / f ** 2, residualTolerance: n0.residualTolerance! / f ** 2 };
+    converged = await swing(device, n1, ticks);
     let gap = 0;
     for (let k = 0; k < ticks; k++) gap = Math.max(gap, Math.hypot(run.x[k]! - converged.x[k]!, run.y[k]! - converged.y[k]!));
-    console.log(`[swinging-sheet, K = ${SWING.convergedFactor.value * k0}] passes under the pin at ${converged.crossing.toFixed(4)} s; free edge differs from K = ${k0} by up to ${(1000 * gap).toFixed(2)} mm over ${ticks} steps`);
+    console.log(`[${label(source, n1)}] passes under the pin at ${converged.crossing.toFixed(4)} s; free edge differs from ${n0.iterations} x ${n0.pcgIterations} by up to ${(1000 * gap).toFixed(2)} mm over ${ticks} steps`);
   }
   assert.ok(worst < 1e-3, `free edge ${worst} m off free fall at step ${at}`);
   assert.ok(Number.isFinite(run.crossing), 'the free edge never passed under the pin');
-  if (converged) assert.ok(Math.abs(run.crossing - converged.crossing) <= h, `passes the pin at ${run.crossing} s, ${converged.crossing} s at 4K`);
+  if (converged) assert.ok(Math.abs(run.crossing - converged.crossing) <= h, `passes the pin at ${run.crossing} s, ${converged.crossing} s converged`);
 }));
 
 test('Peirce cantilever: each strip droops to the exact heavy elastica of its bending length', { skip: !runs('peirce-cantilever') }, async () => withDevice(async device => {
@@ -287,7 +291,7 @@ test('Peirce cantilever: each strip droops to the exact heavy elastica of its be
   const lines: string[] = [], misses: string[] = [];
   for (const [s, document] of source.cloth.entries()) {
     const [clampCells, cols, rows, overhang, exact, peirce] = source.probe[`strip${s}`] as number[];
-    const solver = await solverFor(device, document, K);
+    const solver = await solverFor(device, document, caps ? newtonOf(source) : undefined);
     let tickMs = performance.now();
     solver.step(settle);
     const x = await solver.readPositions();
@@ -307,18 +311,21 @@ test('Peirce cantilever: each strip droops to the exact heavy elastica of its be
   assert.deepEqual(misses, []);
 }));
 
-async function solverFor(device: GPUDevice, document: ClothDocument, iterations?: number) {
+/** A document's solver exactly as ClothSystem sets it up, without the contact pass. */
+async function solverFor(device: GPUDevice, document: ClothDocument, newtonOverride?: ClothNewtonSettings) {
   const data = document.geometry.data, topology = prepareClothTopology(data, document.materials);
   const model = buildClothSolverModel(topology, document.materials, colourClothVertices(clothVertexNeighbours(topology)), document.scripts ?? []);
   const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   data.restPositions_m.forEach((v, i) => { lo[i % 3] = Math.min(lo[i % 3]!, v); hi[i % 3] = Math.max(hi[i % 3]!, v); });
+  const newton = newtonOverride ?? document.solver!.newton;
   return ClothGPUSolver.create(device, model, { origin_m: [0, 1, 2].map(a => (lo[a]! + hi[a]!) / 2) as [number, number, number], dt_s: CLOTH_SCENE_STEP_S,
-    gravity_m_s2: [0, -g, 0], integrator: 'bdf2', iterations: iterations ?? document.solver!.iterations!, chebyshevRho: 0, initialGuess: 'previous', coarse: buildClothCoarseSpace(topology) });
+    gravity_m_s2: [0, -g, 0], integrator: 'bdf2', iterations: document.solver!.iterations ?? 1, chebyshevRho: 0, initialGuess: 'previous', coarse: buildClothCoarseSpace(topology),
+    ...(newton ? { method: 'newton' as const, newton } : {}) });
 }
 
 test('friction on an incline: the patch below the friction angle sticks, the one above slides at g (sin - mu cos)', { skip: !runs('friction-incline') }, async () => withDevice(async device => {
   const source = clothAnalyticFrictionIncline(), t0 = Math.round(INCLINE.gateStart.value / h), t1 = Math.round(INCLINE.gateEnd.value / h);
-  const scene = clothAnalyticSceneDescription(source, K ? { iterations: K } : {});
+  const scene = clothAnalyticSceneDescription(source, override(source));
   const { frames, ms } = await capture(device, scene, range(t0, t1));
   const along = source.cloth.map((_, s) => {
     const [, , dx, dy] = source.probe[`slope${s}`] as number[];

@@ -5,6 +5,7 @@
  * f32. Every buffer and bind slot is described in gpu-solver.ts. */
 import { CLOTH_AVBD, CLOTH_LINE_SEARCH } from './oracle';
 import { CLOTH_PATCH_SLOT_BITS } from './patches';
+import { CLOTH_BEND_ROWS } from './topology';
 import { CLOTH_STATUS_COARSE_INDEFINITE, clothCoarseWGSL } from './gpu-coarse-wgsl';
 import { clothNewtonWGSL } from './gpu-newton-wgsl';
 
@@ -35,7 +36,7 @@ export const CLOTH_WIDE_WORKGROUP = 32;
 /** Uniform records of the per-dispatch data, one per (iteration, colour) and one post record per iteration. */
 export const CLOTH_DISPATCH_STRIDE = 256;
 /** Bindings (group 0). */
-export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9, newton: 10 } as const;
+export const CLOTH_BINDING = { params: 0, dispatch: 1, positions: 2, state: 3, status: 4, topo: 5, rest: 6, contact: 7, topo4: 8, coarse: 9, newton: 10, filter: 11 } as const;
 export const CLOTH_SCRIPT_KIND = { translate: 0, rotate: 1, oscillate: 2 } as const;
 
 export interface ClothSolverWGSLOptions {
@@ -145,8 +146,14 @@ fn grabSpring(v: u32, xv: vec3f) -> vec4f {
 fn outer(u: vec3f, w: vec3f) -> mat3x3f { return mat3x3f(u * w.x, u * w.y, u * w.z); }
 fn finite3(x: vec3f) -> bool { return all(abs(x) <= vec3f(3.0e38)); }
 
-${contact ? `fn ogcX(i: u32) -> vec3f { return positions[i].xyz; }
-fn ogcXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
+${contact && options.newton ? `// Newton: the line search evaluates the contact energy at x + a d (nwTrialStep = a, 0 everywhere else); H.p
+// multiplies the PCG direction p formed on the fly; the filter's alpha_v per vertex and alpha_min (word N) bound d.
+var<private> nwTrialStep: f32;
+fn ogcX(i: u32) -> vec3f { if (nwTrialStep != 0.0) { return positions[i].xyz + nwTrialStep * nwD(i); } return positions[i].xyz; }
+fn ogcDir(i: u32) -> vec3f { return nwP(i); }
+@group(0) @binding(${CLOTH_BINDING.filter}) var<storage, read> ogcFilter: array<f32>;
+fn ogcAlphaMin() -> f32 { return ogcFilter[P.n.x]; }` : contact ? `fn ogcX(i: u32) -> vec3f { return positions[i].xyz; }` : ''}
+${contact ? `fn ogcXt(i: u32) -> vec3f { return state[seg(S_XT, i)].xyz; }
 fn ogcTri(t: u32) -> vec3u { return tris(t).xyz; }
 fn ogcEdgeVerts(e: u32) -> vec2u { return edges(e).xy; }
 ${options.contactBlock}` : ''}
@@ -208,19 +215,20 @@ fn membraneBlock(q: FaceIn) -> Block {
   return Block(g, H, m.e, 0.0);
 }
 
-// Isometric bending (topology clothBendingRows): row r (vertex r) is L_r x = sum_j w_j (x_j - x_r) over its other
-// entries (j, w_j bits) at topo words P.topo0.w + 2o, o in [topo[P.topo0.z + r], topo[P.topo0.z + r + 1]). With (k, kd)
-// at rest[P.rest0.z + r], its energy is (k/2)|L_r x|^2 and its damping (kd k / 2h~)|L_r (x - x^)|^2. Gradients and
+// Kirchhoff plate bending (topology clothBendingRows): ${CLOTH_BEND_ROWS} rows per vertex, row r of vertex i = r / ${CLOTH_BEND_ROWS} is
+// R_r x = sum_j w_j (x_j - x_i) over its other entries (j, w_j bits) at topo words P.topo0.w + 2o, o in [topo[P.topo0.z + r],
+// topo[P.topo0.z + r + 1]). With (k, kd) at rest[P.rest0.z + r], its energy is (k/2)|R_r x|^2 and its damping (kd k / 2h~)|R_r (x - x^)|^2. Gradients and
 // Hessians go through the bending stencil (Q = sum_r k w w^T); the rows give the energies and line-search changes.
 fn bendKD(r: u32) -> vec2f { return rest[P.rest0.z + r].xy; }
 fn bendJ(o: u32) -> u32 { return topo[P.topo0.w + 2u * o]; }
 fn bendW(o: u32) -> f32 { return bitcast<f32>(topo[P.topo0.w + 2u * o + 1u]); }
 // Row r at the current positions: L x, its damping counterpart L (x - x^), and their rounding scales sum_j |w_j| |.|.
 struct BendIn { kd: vec2f, s: vec3f, sr: f32, u: vec3f, ur: f32 }
+const BEND_ROWS = ${CLOTH_BEND_ROWS}u;
 fn loadBend(r: u32) -> BendIn {
-  let kd = bendKD(r); let xr = pos(r); var q = BendIn(kd, vec3f(0.0), 0.0, vec3f(0.0), 0.0);
+  let i = r / BEND_ROWS; let kd = bendKD(r); let xr = pos(i); var q = BendIn(kd, vec3f(0.0), 0.0, vec3f(0.0), 0.0);
   let damped = kd.y > 0.0; var xhr = vec3f(0.0);
-  if (damped) { xhr = state[seg(S_XHAT, r)].xyz; }
+  if (damped) { xhr = state[seg(S_XHAT, i)].xyz; }
   for (var o = topo[P.topo0.z + r]; o < topo[P.topo0.z + r + 1u]; o++) {
     let j = bendJ(o); let w = bendW(o); let dx = pos(j) - xr;
     q.s += w * dx; q.sr += abs(w) * length(dx);
@@ -575,6 +583,8 @@ fn adaptiveGravity(a: vec3f, g: vec3f) -> f32 {
     let anchor = rest[P.rest1.y + v].xyz; let t0 = stepTime();
     let p0 = attachment(group, anchor, t0); let p1 = attachment(group, anchor, t0 + P.gravity.w);
     init = x + p1 - p0;
+    // A pinned vertex's inertial target is its prescribed motion (contact's "target" prediction reads y).
+    state[seg(S_Y, v)] = vec4f(init, 0.0);
     state[seg(S_PINC, v)] = vec4f(p1 + ALPHA * (x - p0), 0.0);
     var d = state[seg(S_PIND, v)];
     d = vec4f(d.xyz * (ALPHA * GAMMA), max(GAMMA * d.w, referenceStiffness(v)));
@@ -833,7 +843,7 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
       let entry = topo[P.topo0.y + j];
       if ((entry & 3u) == 0u) { elastic += membraneAt(entry >> 2u, 0u, x).e; }
     }
-    elastic += bendEnergy(loadBend(v));
+    for (var r = BEND_ROWS * v; r < BEND_ROWS * (v + 1u); r++) { elastic += bendEnergy(loadBend(r)); }
     var strain = -3.0e38;
     for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) {
       let entry = topo[P.topo1.y + j];
@@ -905,5 +915,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
 ${options.coarseNodes ? clothCoarseWGSL(CLOTH_BINDING.coarse, CLOTH_WORKGROUP, options.coarseNodes, contact) : ''}
-${options.newton ? clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP) : ''}`;
+${options.newton ? clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact) : ''}`;
 }

@@ -225,8 +225,8 @@ export function clothCoarseOperator(model: ClothSolverModel, frame: ClothStepFra
       scatter(space, A, vs, (i, j) => tangentBlock(D.j[i]!, D.j[j]!, T[q + 6]!, c.c12, T[q + 7]!, c.g).map(h => scale * h) as Mat3);
     }
   }
-  if (bending) for (let r = 0; r < t.vertexCount; r++) {
-    // The exact Hessian of (k/2)|L x|^2 plus its damping: (k + kd k / h~) w_i w_j I.
+  if (bending) for (let r = 0; r < t.bendRowCount; r++) {
+    // The exact Hessian of (k/2)|R x|^2 plus its damping: (k + kd k / h~) w_i w_j I.
     const o0 = t.bendOffsets[r]!, vs = Array.from(t.bendVertices.subarray(o0, t.bendOffsets[r + 1]!)), k = t.bendStiffness_N_m3[r]! * (1 + model.bendDamping_s[r]! / frame.hEff), w = t.bendWeights;
     scatter(space, A, vs, (i, j) => I(k * w[o0 + i]! * w[o0 + j]!));
   }
@@ -282,7 +282,7 @@ export function clothObjective(model: ClothSolverModel, frame: ClothStepFrame, s
     add(clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, 0, ...vs, false).energy);
     add(clothAddFaceDamping(model, frame, f, 0, pos, g, H));
   }
-  for (let r = 0; r < t.vertexCount; r++) {
+  for (let r = 0; r < t.bendRowCount; r++) {
     add(clothAddBending(t, t.bendOffsets[r]!, pos, g, H));
     add(clothAddBendDamping(model, frame, t.bendOffsets[r]!, pos, g, H));
   }

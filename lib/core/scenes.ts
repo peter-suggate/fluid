@@ -122,7 +122,7 @@ function clothAnalyticDefinition(make: () => ClothAnalyticScene): SceneDefinitio
   return defineScene({
     id: source.id,
     name: source.name,
-    blurb: `${source.expectation} One implicit 1/60 s cloth step per frame, K = ${source.cloth[0]?.solver?.iterations ?? 8}.`,
+    blurb: `${source.expectation} One implicit 1/60 s cloth step per frame, Newton-PCG at most ${source.cloth[0]?.solver?.newton?.iterations} x ${source.cloth[0]?.solver?.newton?.pcgIterations} iterations.`,
     audience: "validation",
     shelf: "Cloth \u00b7 Analytic",
     environment: "default",

@@ -474,14 +474,17 @@ ${[['coarseTrial', 0, 1], ['coarseTrialBack', 1, CLOTH_COARSE.trials - 1]].map((
   if (live) {
     var alpha = ${(2 ** -(first as number)).toFixed(1)};${contact ? `
     var ec0 = 0.0; if (i < P.n.x) { ec0 = ogcVertexContactEnergy(i, pos(i)); }` : ''}
-    var bq = BendIn(vec2f(0.0), vec3f(0.0), 0.0, vec3f(0.0), 0.0); var bds = vec3f(0.0);
+    var bq: array<BendIn, BEND_ROWS>; var bds: array<vec3f, BEND_ROWS>;
     if (i < P.n.x) {
-      bq = loadBend(i); let ci = cdir(i);
-      for (var o = topo[P.topo0.z + i]; o < topo[P.topo0.z + i + 1u]; o++) { bds += bendW(o) * (cdir(bendJ(o)) - ci); }
+      let ci = cdir(i);
+      for (var a = 0u; a < BEND_ROWS; a++) {
+        let r = BEND_ROWS * i + a; bq[a] = loadBend(r);
+        for (var o = topo[P.topo0.z + r]; o < topo[P.topo0.z + r + 1u]; o++) { bds[a] += bendW(o) * (cdir(bendJ(o)) - ci); }
+      }
     }
     for (var k = 0u; k < ${count}u; k++) {
       var q = vec2f(0.0);
-      if (i < P.n.x) { q += ownDelta(i, pos(i), alpha * cdir(i)) + bendDelta(bq, alpha * bds);${contact ? ' q += coarseContactDelta(i, pos(i), ec0, alpha * cdir(i));' : ''} }
+      if (i < P.n.x) { q += ownDelta(i, pos(i), alpha * cdir(i)); for (var a = 0u; a < BEND_ROWS; a++) { q += bendDelta(bq[a], alpha * bds[a]); }${contact ? ' q += coarseContactDelta(i, pos(i), ec0, alpha * cdir(i));' : ''} }
       if (i < P.n.y) {
         let t = tris(i); let a0 = alpha * cdir(t.x); let a1 = alpha * cdir(t.y); let a2 = alpha * cdir(t.z);
         q += membraneDeltaAll(i, a0, a1, a2) + faceDampingDeltaAll(i, a0, a1, a2);

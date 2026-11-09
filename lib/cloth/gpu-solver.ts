@@ -22,11 +22,11 @@
  *                        vertex (m, elastic, length, group), anchor, materials, scripts
  */
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
-import type { ClothIntegrator, ClothSolverStateData, ClothVector } from './types';
+import type { ClothIntegrator, ClothNewtonSettings, ClothSolverStateData, ClothVector } from './types';
 import { CLOTH_INITIAL_GUESS, clothChebyshevOmega, type ClothInitialGuess, type ClothSolverModel } from './oracle';
 import { CLOTH_COARSE, buildClothCoarseSpace, packClothCoarseTables, type ClothCoarseSpace } from './coarse';
 import { CLOTH_COARSE_SWEEP_WORKGROUP, clothCoarseFactorBytes } from './gpu-coarse-wgsl';
-import { CLOTH_NEWTON_PARTIALS, CLOTH_NEWTON_SEGMENT_COUNT, CLOTH_NEWTON_TRIAL_RECORDS } from './gpu-newton-wgsl';
+import { CLOTH_NEWTON_PARTIALS, CLOTH_NEWTON_SEGMENT_COUNT, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
   CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_VERTEX_LANES, CLOTH_WIDE_WORKGROUP, CLOTH_WORKGROUP, clothSolverWGSL,
@@ -40,6 +40,8 @@ export interface ClothSolverContact {
   readonly wgsl: string;
   /** OgcContactDetector.solverBuffer. */
   readonly buffer: GPUBuffer;
+  /** Newton only: the detector's line-search filter output (OgcContactDetector.alpha: alpha_v per vertex, alpha_min in word N). */
+  readonly alpha?: GPUBuffer;
 }
 
 /** Points inside one step where another lane encodes work into the solver's
@@ -57,6 +59,10 @@ export interface ClothStepHooks {
   afterIteration?(pass: GPUComputePassEncoder, iteration: number): void;
   /** After the last iteration, before velocities are formed. */
   beforeFinish?(pass: GPUComputePassEncoder): void;
+  /** Newton: after the PCG solve wrote the direction d (`newtonDirection`), before the line search; C2 writes the filter's alpha here. */
+  filter?(pass: GPUComputePassEncoder): void;
+  /** Newton: after each Newton iteration moved the iterate; C2 decides and runs re-detection rounds here. */
+  afterNewtonStep?(pass: GPUComputePassEncoder): void;
 }
 
 export interface ClothGPUSolverOptions {
@@ -98,17 +104,7 @@ export interface ClothGPUSolverOptions {
 }
 
 export type ClothSolverMethod = 'vbd' | 'newton';
-/** Caps and tolerances of the Newton-PCG step (all decided on the GPU; the caps bound the encoded work). */
-export interface ClothNewtonOptions {
-  /** Newton iterations per step (cap). */
-  readonly iterations: number;
-  /** PCG iterations per Newton iteration (cap). */
-  readonly pcgIterations: number;
-  /** PCG stops when r.z <= tol^2 r0.z0 (default 1e-3). */
-  readonly pcgTolerance?: number;
-  /** Newton stops when |g| <= tol |m g| over free vertices (default 1e-4). */
-  readonly residualTolerance?: number;
-}
+export type ClothNewtonOptions = ClothNewtonSettings;
 export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4 });
 
 export interface ClothStatusSlot {
@@ -191,8 +187,8 @@ const PARAM_GRAB = 84;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /**
- * The bending stencil (isometric bending, topology `clothBendingRows`): bending is (k/2)|L_r x|^2 a row and its damping
- * (kd k / 2h~)|L_r (x - x^)|^2, so a vertex's bending gradient is sum_j Q_vj (x_j - x_v) (+ the damping counterpart
+ * The bending stencil (Kirchhoff plate rows, topology `clothBendingRows`): bending is (k/2)|R_r x|^2 a row and its damping
+ * (kd k / 2h~)|R_r (x - x^)|^2, so a vertex's bending gradient is sum_j Q_vj (x_j - x_v) (+ the damping counterpart
  * in u = x - x^ over h~) with Q = sum_r k w w^T and Qd = sum_r kd k w w^T over v's stencil neighbours j != v
  * (sum_j Q_vj = 0 a row, as the weights of a bending row sum to zero), and its Hessian (Q_vv + Qd_vv / h~) I. Per
  * vertex: CSR neighbours (j, Q_vj, Qd_vj) and the diagonal (Q_vv, Qd_vv), in Float64 at setup.
@@ -201,7 +197,7 @@ export function clothBendingStencil(model: ClothSolverModel): { offsets: Uint32A
   const t = model.topology, N = t.vertexCount;
   const rows: Map<number, [number, number]>[] = Array.from({ length: N }, () => new Map());
   const diagonal = new Float64Array(2 * N);
-  for (let r = 0; r < N; r++) {
+  for (let r = 0; r < t.bendRowCount; r++) {
     const k = t.bendStiffness_N_m3[r]!, kd = model.bendDamping_s[r]! * k, o0 = t.bendOffsets[r]!, o1 = t.bendOffsets[r + 1]!;
     for (let a = o0; a < o1; a++) {
       const va = t.bendVertices[a]!, wa = t.bendWeights[a]!;
@@ -281,8 +277,9 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const stencilRecords = new Uint32Array(4 * Math.max(stencil.columns.length, 1)), stencilF = new Float32Array(stencilRecords.buffer);
   for (let o = 0; o < stencil.columns.length; o++) { stencilRecords[4 * o] = stencil.columns[o]!; stencilF[4 * o + 1] = stencil.q[o]!; stencilF[4 * o + 2] = stencil.qd[o]!; }
   // Bending rows relative to their own vertex: per row the offsets of its other entries, each a pair (j, w_j bits).
-  const bendOffsets = Uint32Array.from(t.bendOffsets, (o, r) => o - Math.min(r, N)), bendEntries = new Uint32Array(2 * Math.max(t.bendVertices.length - N, 1)), bendF = new Float32Array(bendEntries.buffer);
-  for (let r = 0, q = 0; r < N; r++) for (let o = t.bendOffsets[r]! + 1; o < t.bendOffsets[r + 1]!; o++, q++) { bendEntries[2 * q] = t.bendVertices[o]!; bendF[2 * q + 1] = t.bendWeights[o]!; }
+  const R = t.bendRowCount;
+  const bendOffsets = Uint32Array.from(t.bendOffsets, (o, r) => o - Math.min(r, R)), bendEntries = new Uint32Array(2 * Math.max(t.bendVertices.length - R, 1)), bendF = new Float32Array(bendEntries.buffer);
+  for (let r = 0, q = 0; r < R; r++) for (let o = t.bendOffsets[r]! + 1; o < t.bendOffsets[r + 1]!; o++, q++) { bendEntries[2 * q] = t.bendVertices[o]!; bendF[2 * q + 1] = t.bendWeights[o]!; }
   const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, Uint32Array.from(order), new Uint32Array(4), triangles, t.edges,
     ct.rowNodes, ct.ownerOffsets, ct.owners, ct.faceNodeOffsets, ct.pairs, ct.pairOffsets, ct.pairEntries, ct.faceOwn, stencil.offsets, star.header, star.records, stencilRecords];
   const topoBase: number[] = [];
@@ -290,7 +287,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   for (const p of parts) { words = align(words, 64); topoBase.push(words); words += p.length; }
   const topo = new Uint32Array(Math.max(align(words, 4), 4));
   parts.forEach((p, i) => topo.set(p, topoBase[i]));
-  const restCounts = [T, T, N, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : []), N], restBase: number[] = [];
+  const restCounts = [T, T, R, E, N, N, 2 * M, 4 * S, ...(ct ? [ct.rowWeights.length / 4, ct.faceNodes.length / 4] : []), N], restBase: number[] = [];
   let records = 0;
   for (const c of restCounts) { restBase.push(records); records += c; }
   const rest = new Float32Array(4 * Math.max(records, 1));
@@ -298,7 +295,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     rest.set(t.faceDmInv.subarray(4 * f, 4 * f + 4), 4 * (restBase[0]! + f));
     rest.set([t.faceArea_m2[f]!, model.faceDamping_s[f]!], 4 * (restBase[1]! + f));
   }
-  for (let r = 0; r < N; r++) rest.set([t.bendStiffness_N_m3[r]!, model.bendDamping_s[r]!], 4 * (restBase[2]! + r));
+  for (let r = 0; r < R; r++) rest.set([t.bendStiffness_N_m3[r]!, model.bendDamping_s[r]!], 4 * (restBase[2]! + r));
   const diagonalRecord = restBase[restCounts.length - 1]!;
   for (let v = 0; v < N; v++) rest.set(stencil.diagonal.subarray(2 * v, 2 * v + 2), 4 * (diagonalRecord + v));
   let strainLimited = false;
@@ -323,7 +320,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   if (ct) { rest.set(ct.rowWeights, 4 * restBase[8]!); rest.set(ct.faceNodes, 4 * restBase[9]!); }
   let damped = false;
   for (let f = 0; f < T; f++) damped ||= model.faceDamping_s[f]! > 0;
-  for (let r = 0; r < N; r++) damped ||= model.bendDamping_s[r]! > 0;
+  for (let r = 0; r < R; r++) damped ||= model.bendDamping_s[r]! > 0;
   const stride = align(N, CLOTH_SEGMENT_ALIGN), workgroups = Math.ceil(N / CLOTH_WORKGROUP);
   const edgeDualRecord = CLOTH_STATE_SEGMENTS * stride, dampFaceRecord = edgeDualRecord + align(E, CLOTH_SEGMENT_ALIGN);
   const partialRecord = dampFaceRecord + (damped ? align(2 * T, CLOTH_SEGMENT_ALIGN) : 0);
@@ -403,12 +400,14 @@ export class ClothGPUSolver {
         throw new Error('Cloth Newton solver needs integer caps newton.iterations >= 1 and newton.pcgIterations >= 1');
       this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
       if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
-      if (options.contact) throw new Error('Cloth Newton solver does not take contact yet (C2 pair terms and the OGC line-search filter)');
+      // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
+      if (options.contact && !(options.contact.alpha && options.hooks?.filter && options.hooks.afterNewtonStep))
+        throw new Error('Cloth Newton solver with contact needs the filter output (contact.alpha) and hooks.filter and hooks.afterNewtonStep');
     } else if (options.newton) throw new Error('Cloth newton options need method \'newton\'');
-    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1 + (this.method === 'newton' ? 1 : 0);
+    const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 1 : 0) + 1 + (this.method === 'newton' ? 1 : 0) + (this.method === 'newton' && options.contact ? 1 : 0);
     if (options.coarseEvery !== undefined && !(Number.isInteger(options.coarseEvery) && options.coarseEvery >= 1)) throw new Error('Cloth coarse correction interval must be a positive integer');
     // The coarse move is a move like a colour sweep's: with contact it must be truncated before the sweeps start from it.
-    if (options.contact && !options.hooks?.afterCoarse) throw new Error('Cloth solver with contact needs hooks.afterCoarse to truncate the two-level correction\'s move');
+    if (this.method === 'vbd' && options.contact && !options.hooks?.afterCoarse) throw new Error('Cloth solver with contact needs hooks.afterCoarse to truncate the two-level correction\'s move');
     const coarseSpace = options.coarse ?? buildClothCoarseSpace(t);
     if (clothCoarseFactorBytes(coarseSpace.nodeCount) > device.limits.maxComputeWorkgroupStorageSize)
       throw new Error(`Cloth coarse space has ${coarseSpace.nodeCount} nodes; its factor needs ${clothCoarseFactorBytes(coarseSpace.nodeCount)} B of workgroup memory, the device has ${device.limits.maxComputeWorkgroupStorageSize}`);
@@ -463,6 +462,13 @@ export class ClothGPUSolver {
   get startTime_s(): number { return this.timeBase; }
   /** x_t of the step in flight (the positions at the start of the step); C2's detector binds it. */
   get stepStart(): GPUBufferBinding { return { buffer: this.state, offset: 16 * CLOTH_STATE.xt * this.tables.stride, size: 16 * this.tables.stride }; }
+  /** The step's inertial target y (vec4 per vertex, cloth-local metres; a pinned vertex's is its attachment target), set by the frame pass. */
+  get inertialTarget(): GPUBufferBinding { return { buffer: this.state, offset: 16 * CLOTH_STATE.y * this.tables.stride, size: 16 * this.tables.stride }; }
+  /** Newton: the direction d of the iteration in flight (vec4 per vertex), which C2's line-search filter reads. */
+  get newtonDirection(): GPUBufferBinding {
+    if (!this.newtonWork) throw new Error('Cloth solver is not a Newton solver');
+    return { buffer: this.newtonWork, offset: 16 * CLOTH_NEWTON_SEGMENTS.d * this.tables.stride, size: 16 * this.tables.stride };
+  }
 
   /** Change K (a per-scene authoring value, up to `maxIterations`); rewrites the dispatch records, never per step. */
   setIterations(k: number): void {
@@ -502,13 +508,15 @@ export class ClothGPUSolver {
     if (this.options.contact) entries.push(storage(B.contact, true));
     entries.push(storage(B.coarse));
     if (this.newtonWork) entries.push(storage(B.newton));
+    const filter = this.newtonWork ? this.options.contact?.alpha : undefined;
+    if (filter) entries.push(storage(B.filter, true));
     const layout = d.createBindGroupLayout({ label: 'Cloth solver bindings', entries });
     const buffer = (binding: number, b: GPUBuffer, size?: number): GPUBindGroupEntry => ({ binding, resource: { buffer: b, size } });
     this.bindGroup = d.createBindGroup({ label: 'Cloth solver', layout, entries: [
       buffer(B.params, this.params), buffer(B.dispatch, this.dispatch, 32), buffer(B.positions, this.positions), buffer(B.state, this.state),
       buffer(B.status, this.status), buffer(B.topo, this.topo), buffer(B.rest, this.rest), buffer(B.topo4, this.topo),
       ...(this.options.contact ? [buffer(B.contact, this.options.contact.buffer)] : []), buffer(B.coarse, this.coarse),
-      ...(this.newtonWork ? [buffer(B.newton, this.newtonWork)] : [])] });
+      ...(this.newtonWork ? [buffer(B.newton, this.newtonWork)] : []), ...(filter ? [buffer(B.filter, filter)] : [])] });
     const lanes = this.options.vertexLanes ?? CLOTH_VERTEX_LANES;
     const available = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= lanes;
     if (this.options.subgroups && !available) throw new Error(`Cloth subgroup sums need the subgroups feature with subgroups of at least ${lanes} invocations`);
@@ -629,9 +637,11 @@ export class ClothGPUSolver {
         this.run(pass, 'pcgApply', W, this.newtonRecord + i - 1);
         this.run(pass, 'pcgUpdate', W, this.newtonRecord + i - 1);
       }
+      this.hooks.filter?.(pass);
       this.run(pass, 'nwTrial', W);
       this.run(pass, 'nwChoose', 1);
       this.run(pass, 'nwApply', W);
+      this.hooks.afterNewtonStep?.(pass);
       if (this.tables.strainLimited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
     }
     this.hooks.beforeFinish?.(pass);
