@@ -2131,3 +2131,64 @@ each, one timing run per variant). Tree: HEAD 0228c3e6 + c022831b's files. "Unbo
 - **The strip needs** envelopes or records sized to the mesh, not to the step's motion: either the
   envelope from the relative motion of each pair's own vertices, or records merged per vertex
   (near-parallel half-spaces). This is the next design item.
+
+## 2026-11-10 (5) levelled conflicts attributed; the per-vertex fallback measured (not landed)
+
+**Attribution (16^2 rotating sphere, ladder, 7cbf076b's edits + counters 69-70, landed).** Before the
+change, every levelled re-detection from tick 3 to 60 fell back (levelled 4 = fallback 4 a tick in
+the 16^2 sphere too). Its conflicts by cause, a tick:
+- no plane at X: 0 on every tick;
+- predictions closing below sepEps: 8 to 12 246 a tick (peak at tick 30). Every one to tick 27
+  has the moving solid's sample or hull primitive in the pair; 85-100 % to tick 45, 42-93 % after.
+- Neither artifact. sigma_v is 0 in a re-detection round (theta = 0 once both poses are the end
+  pose), and the solid's samples predict 0 there. The cloth predicts the rest of its Newton
+  step, which the projection cut at the sphere. The field bound cuts each vertex's prediction,
+  but a cloth face's chord between vertices held at r still sags onto the solid's samples. These
+  are real crossings of the predicted motion, local to the contact.
+
+**The per-vertex fallback (patch fluid-scratch/c2/per-vertex-fallback-on-7cbf076b.patch).** A levelled conflict takes the mandatory round's least shift: leastShift on its own
+pair, which scales that pair's cloth predictions back towards the iterate, to 0 where X has no
+plane. The round is redone levelled while that makes progress, up to OGC_LEVEL_REDOS = 3 times, and
+only then unlevelled (w = 0).
+- The levels stay sound: each vertex's chord X + a w_v only shortens, and the family is still one
+  level for all vertices.
+- A shifted vertex's envelope grows by (1 - s)|w| (the solve does not follow the shift).
+- A redo keeps the round's first-detection envelope (OGC_SHIFT_WORDS 2 -> 3), since by then X' and
+  w' have been overwritten.
+- leastShift does not ask for the a_v anchor after the mandatory round (a_v = 0 there).
+- A re-detection now has OGC_LEVEL_REDOS + 1 redo slots with the Newton config (1 before).
+- Counters (landed without the fallback): frameLevelConflicts, 69 no plane at X and 70 closing,
+  high 16 bits with a solid in the pair. The patch adds frameLevelRedos (71).
+
+**16^2 sphere after.** Levelled rounds apply in contact: fallback 0 on 59 of 60 ticks (4 at tick
+17), and redos 4-12 a tick (about one a levelled round). Nothing intersects or enters the solid to
+tick 60.
+
+**Gate of the patch.** analytic, system, contact-gpu/body/solid/scene-solids, oracle, newton,
+gpu-solver, grab, C1's ladder and this ladder: 116 tests, 0 fail after two tests' hard-coded shift
+stride was made OGC_SHIFT_WORDS (landed), 5 todo. rc 0.
+
+**Dual-bench (150^2, 7cbf076b, timing; the first pair of runs was contended, the HEAD tick 16
+median 1742 ms; repeated for ticks 16, 35, 60).**
+
+| tick | HEAD fenced / GPU span ms | per-vertex fallback | levelled fell back (5 steps) | plane records summed |
+|---|---|---|---|---|
+| 16 | 435 / 365 | 539 / 463 | 20 -> 6 | 0.9-12.7 M -> 2.1-8.3 M |
+| 35 | 466 / 458 | 563 / 511 | 20 -> 1 | 0.23-0.69 M -> 0.94-3.2 M |
+| 60 | 607 / 599 | 662 / 612 | 20 -> 4 | 0.38-0.46 M -> 1.3-1.7 M |
+
+The levels now apply in contact. Each redo is a detection round, and the levelled family's records
+(two ends a pair, envelopes grown by the shift) are 2-4x HEAD's. Truncations are the same to 25 %
+fewer, and nothing is held either way. That is 9-23 % slower a step, so it is not landed. Applying
+the levels in contact pays only once a levelled round's records cost no more than an unlevelled
+one's.
+
+**Strip at 16N on 7cbf076b (C1's edits landed, control bound), as the coordinator asked.** It still
+fails: 306 held for overflow, lambda 9.1 N against the 1.0 N bound, 40.9-190 records a vertex
+(free twin the same). So the pair-relative envelope item stands. With the per-vertex fallback it
+is 953 held, strain 2.09 at tick 3. Its cloth-cloth conflicts (13-31 a tick) are now redone
+levelled and their envelopes grow, where the unlevelled fallback used to reset them. The strip
+case is still todo.
+
+**Sphere ladder case:** marked as the carried-stray soundness regression (item 2 without strayOf
+put a vertex inside the solid at tick 37). It checks every tick to 60.
