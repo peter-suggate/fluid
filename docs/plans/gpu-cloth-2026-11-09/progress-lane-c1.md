@@ -2299,3 +2299,34 @@ shift target cases (v508, v46).
 Gate (cloth-ladder, -gpu-solver, -analytic, contact ladder/-gpu/-body on 036472e3 + this): 62 tests, 61 pass, 0 fail,
 1 todo (C2's incline item 5), Newton counts identical to the 1a13f604 gate (the rule never fires at the default
 tolerances there); ladder 2b passes on its own run.
+
+## 2026-11-10 RESULT (39): the Float64 picture of the complete method (Claude's redirect; 150^2 acceptance deferred)
+
+Oracle (scratch-newton-contact, sphere-32 states t5 / t15 / t25, PROJ 2 mm, PSELF, 150 iterations, stop at a 1 um
+move): the Newton count to 1 um, or \|g\| at n149 when it does not converge.
+
+| method | t5 | t15 | t25 |
+|---|---|---|---|
+| A PSD + LS, Euclidean, frozen half gaps | 9 | 47 | 13.2 |
+| B A + H_vv metric | 9 | 46 | 2.00 |
+| C B + levelled, conflict-only holds | 10 | 46 | 1.64 |
+| D B + levelled, relative-motion least shift (2 passes, then fail-safe holds) | 10 | 46 | 5.16 |
+| D12 as D, 12 passes | - | 46 | 0.78 (held 0) |
+| E D + hybrid (PSD + LS, then exact H + TR) | 10 | 14 | 1.47 |
+| E12 as E, 12 passes | 10 | 14 | 2.89 |
+| F C + hybrid | 10 | 14 | 1.42 |
+| G B + hybrid | 9 | 16 | 1.41 |
+
+- On t5 and t15, G (the H_vv metric plus the hybrid) is the smallest combination within 1.5 x of the best:
+  9 / 9 and 16 / 14. Levelling buys nothing there. The hybrid is what turns t15's n46 into n14-16.
+- On t25 no combination converges in 150 iterations, so gate (a) fails for all of them and gate (b) is undefined.
+- The least shift (C2's form: a mass-weighted mean over the union, one bisected s per vertex, simultaneous updates)
+  needs more than 2 passes on t25: with 2, every iteration exhausts the bound and falls to the holds; |g| 5.16, worse
+  than C. With 6 to 12 passes, the held count goes to 0 from about n20, and passes fall 12 -> 1 by n149. That gives the
+  best t25 |g|, 0.78. Records per vertex are unchanged (52852 in total).
+- Is the t25 tail the PSD-tail mechanism? Not the PSD Hessian alone. With the exact H plus TR, the accepted steps have
+  rho 0.99-1.0, so the model is accurate where the step is feasible. The rejected steps (rho -Infinity) are infeasible
+  or crossing at 0.1-1.8 mm, and the trust radius collapses to 8-30 um. With the caging gone (D12, held 0), PSD + LS
+  still needs alpha 0.125 (uphill at 1, 0.5 and 0.25) with full steps of about 150 um. Both point to the barrier's
+  model radius: the quadratic is valid only over distances comparable to the active gaps. Hypothesis, not yet
+  measured: it needs the min active gap per stalled vertex.
