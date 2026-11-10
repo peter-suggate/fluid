@@ -344,3 +344,29 @@ test("exact face-in-solid oracle: a face cutting a box edge between outside vert
   }
   console.log(`# exact face oracle: ${agree} outside agreeing, ${finer} inside below the lattice's resolution`);
 });
+
+// Known soundness defect (coordinator ruling 2026-11-10): the trilinear field rounds the Bridson frustum's slanted
+// edge by about 2 mm, so a face can lie inside the true solid while the field reads it outside, and nothing keeps
+// it out. The planned fix is C2's (C), cloth-vertex vs sample-hull-facet pairs; this test then checks the contact
+// surface (the field or the samples' hull) instead of the field alone.
+test("solid soundness: face 360 of the Bridson rotating sphere at tick 49 (vertex 192 1.5 mm inside the true frustum) reads inside the contact surface", {
+  todo: "C2 known soundness defect: HEAD's trilinear field rounds the frustum's slanted edge ~2 mm, so face 360 passes 1.79 mm inside the true solid reading phi > 0; fix: (C) cloth-vertex vs sample-hull-facet pairs (progress-lane-c2.md)",
+}, async () => {
+  const { bridson2002RotatingSphere } = await import("../lib/cloth/scenes/bridson-2002");
+  const { bridson2002SceneDescription } = await import("../lib/cloth/scenes/bridson-2002/scene-description");
+  const { clothContactBand } = await import("../lib/cloth/scene-contact");
+  const { clothSolidSourceForScene } = await import("../lib/cloth/contact/scene-solids");
+  const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }));
+  const src = clothSolidSourceForScene(scene, { band_m: clothContactBand(1e-3), frameOrigin_m: [0, 0.64, 0] }), f = buildClothSolidField(src);
+  // The true solid: the union of the source's shaped (sdf) parts, the frustum among them.
+  const shaped = (src.parts ?? []).flatMap(p => (p.kind === "sdf" ? [p] : []));
+  const truth = (p: V3) => Math.min(...shaped.map(s => s.sdf(p)));
+  // The face's scene vertices as dumped; the cloth frame is the rest pose's box centre, (0, 0.64, 0).
+  const V = [[-0.49594, 0.18363, 0.49512], [-0.57303, 0.28009, 0.51783], [-0.45847, 0.23810, 0.39021]].map(p => [p[0]!, p[1]! - 0.64, p[2]!] as V3);
+  assert.ok(truth(V[0]!) < -1.5e-3, `vertex 192 lies ${truth(V[0]!)} m in the frustum`);
+  assert.ok(sampleClothSolidField(f, V[0]!).phi < 0, `vertex 192, ${truth(V[0]!)} m inside the frustum, reads phi ${sampleClothSolidField(f, V[0]!).phi} outside`);
+  for (let i = 0; i <= 64; i++) for (let j = 0; j <= 64 - i; j++) {
+    const q = [0, 1, 2].map(a => (1 - i / 64 - j / 64) * V[0]![a]! + i / 64 * V[1]![a]! + j / 64 * V[2]![a]!) as unknown as V3;
+    if (truth(q) < 0) assert.ok(sampleClothSolidField(f, q).phi < 0, `face point ${q} inside the frustum reads outside the field`);
+  }
+});

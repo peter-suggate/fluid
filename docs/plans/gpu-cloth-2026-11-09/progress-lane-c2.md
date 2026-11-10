@@ -2551,3 +2551,32 @@ against kc 100's 10 / 16 / no convergence. C1 cleared the wiring.
   - Determinism: flat and sphere bit-identical over three runs.
 - tests/cloth-contact-stiffness.test.ts (new, CPU): the tent bound against the herring-bone link, the
   scaling, Poisson's |c12|, the scene values, and the explicit failure.
+
+## 2026-11-10 — (A) not landed; face 360 recorded as an open soundness defect; (C) approved as the fix
+
+**OPEN DEFECT (soundness).** HEAD's trilinear field rounds the Bridson frustum's slanted edge by about 2 mm. Face 360
+of the 16^2 rotating sphere can pass 1.79 mm inside the true frustum at tick 49 while the field reads its vertex 192
+outside (phi = +0.13 mm), so nothing keeps it out.
+- The regression is tests/cloth-contact-solid.test.ts "solid soundness: face 360 ...", marked todo with this
+  defect and its planned fix in its label. It checks the face against the source's own distance (the truth).
+
+**What was tried, and why (A) does not land (coordinator ruling (i)).**
+
+| Field | Incline | Bridson sphere | Face 360 | Visible cost (frustum) |
+|---|---|---|---|---|
+| HEAD | builds (2371 / 2413 samples) | builds | defect | none |
+| A1: per-node lowering, sqrt(3)-Lipschitz closure | sample bulge 8.1e-4 m > h/16 (C1's ladder 4e fails) | builds; drape at zero true penetration | fixed | faces <= 0.26 mm; base max 3.32 / median 0.76 mm; lateral median 1.45 mm |
+| Per-part certified offsets, lattice-box nodes exact | builds | the foot's knee at the floor: sample bulge 1.2e-3 m, the scene does not build | fixed | 3.81 mm on every face (2.54 mm for the slanted edges, plus 1.27 mm from the cells by the floor) |
+
+- A1 also made the field build about 5x slower (a floor + ball 484 -> 2525 ms).
+- Root cause: any lowering that differs between neighbouring nodes puts a knee inside a trilinear cell, which the
+  samples' hull cannot follow. The knees sit exactly where a lowered part meets an exact lattice box, or a node of
+  another e.
+- Option (iii), sampling the knees, was rejected: it piles machinery onto a distorted field.
+- Both variants are kept in fluid-scratch/c2 (solid-field.A1.ts, solid-field.perpart.ts with its tests).
+
+**The fix, approved (ruling (ii)): (C) cloth-vertex vs sample-hull-facet pairs.** This completes VF contact both ways,
+so the solid's surface is represented consistently and the field needs no lowering.
+- Gates: face 360, the frustum drape at zero true penetration, the incline and the full ladder.
+- Report: the extra pairs (only near convex features) and their cost.
+- Order: the H_vv metric first, then (C), then the least shift.
