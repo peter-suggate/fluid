@@ -103,6 +103,11 @@ export const OGC_COUNTER = {
    */
   frameLevelConflicts: 69,
   /**
+   * The intersection count's first face found inside a solid (report only): its id + 1, bit 31 set
+   * when it is the moving solid's (0: none), and the field value at the lattice point that found it (f32 bits).
+   */
+  solidHitFace: 70, solidHitPhi: 71,
+  /**
    * The frame's round log (harness diagnosis): rounds logged so far, then OGC_ROUND_LOG entries of
    * OGC_ROUND_LOG_WORDS from roundLog: at the round's cell kernel its longest prediction |w| and
    * largest envelope (f32 bits) and the frame's candidates, DAT pairs and held vertices so far;
@@ -114,7 +119,7 @@ export const OGC_COUNTER = {
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
 export const OGC_COUNTER_WORDS = 72 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 69, 70];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 69];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
 /**
@@ -233,6 +238,8 @@ const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;
 const OGC_ENVELOPE_SUM = ${OGC_COUNTER.envelopeSum}u;
 const OGC_F_SF_PAIRS = ${OGC_COUNTER.frameSfPairs}u;
 const OGC_SOLID_INTERSECTIONS = ${OGC_COUNTER.solidIntersections}u;
+const OGC_SOLID_HIT_FACE = ${OGC_COUNTER.solidHitFace}u;
+const OGC_SOLID_HIT_PHI = ${OGC_COUNTER.solidHitPhi}u;
 const OGC_ROUND_ENVELOPE = ${OGC_COUNTER.roundEnvelope}u;
 const OGC_ST_SOLID_PENETRATION = ${OGC_STATUS.solidPenetration}u;
 const OGC_ST_SOLID_BOUNDS = ${OGC_STATUS.solidBounds}u;
@@ -894,8 +901,13 @@ fn ogcProjectAt(t: OgcTrialCtx, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> {
  * three: the caller decides whether the round's trust region enters its active set). held: the
  * vertex does not move (q = x, count 0). Valid where the records are the iterate's: after the
  * round's filter, before the next re-detection.
+ * travel: some certificate binding at q (any of them, not only the three kept) is a bound on the
+ * round's travel rather than a contact there: the cap, a solid piece's ball, a solid's orthant
+ * face where that solid's field at q is at least r (no barrier acts), or a plane record whose
+ * pair the filter found at least r apart over every trial (its far bit). Newton's step stopped
+ * by one is not converged: the round's certificates, not the physics, hold it.
  */
-struct OgcActive { q: vec3<f32>, held: bool, count: u32, n0: vec3<f32>, n1: vec3<f32>, n2: vec3<f32>, capOn: bool, nc: vec3<f32> }
+struct OgcActive { q: vec3<f32>, held: bool, count: u32, n0: vec3<f32>, n1: vec3<f32>, n2: vec3<f32>, capOn: bool, nc: vec3<f32>, travel: bool }
 struct OgcActiveAcc { a: OgcActive, b0: vec3<f32>, b1: vec3<f32> }
 fn ogcActiveAdd(s: ptr<function, OgcActiveAcc>, g: vec3<f32>) {
   if ((*s).a.count >= 3u) { return; }
@@ -912,13 +924,21 @@ fn ogcActiveAdd(s: ptr<function, OgcActiveAcc>, g: vec3<f32>) {
   else { (*s).a.n2 = n; }
   (*s).a.count++;
 }
-fn ogcActiveFaces(s: ptr<function, OgcActiveAcc>, k: OgcProjSet, z: vec3<f32>, base: u32, ball: u32, tol: f32) {
+// far: the solid's field at q is at least r, so a binding orthant face there is no contact.
+fn ogcActiveFaces(s: ptr<function, OgcActiveAcc>, k: OgcProjSet, z: vec3<f32>, base: u32, ball: u32, tol: f32, far: bool) {
   let cb = ogcConOf(k, ball);
-  if (ogcConViol(cb, z) >= -tol) { ogcActiveAdd(s, z - cb.n); }
+  if (ogcConViol(cb, z) >= -tol) { ogcActiveAdd(s, z - cb.n); (*s).a.travel = true; }
   for (var o = 0u; o < 8u; o++) {
     let c = ogcConOf(k, base + o);
-    if (ogcConViol(c, z) >= -tol) { ogcActiveAdd(s, c.n); }
+    if (ogcConViol(c, z) >= -tol) { ogcActiveAdd(s, c.n); (*s).a.travel = (*s).a.travel || far; }
   }
+}
+// The filter's far bit of a vertex's plane record (vec4 index rec): its pair stays at least r apart
+// over every trial. The bits follow the record pool, one per slot.
+fn ogcRecordFar(rec: u32) -> bool {
+  let ph = ogcContacts[ogcContacts[2].w];
+  let slot = rec - ph.z;
+  return (ogcSolidWord(4u * (ph.z + ph.w) + (slot >> 5u)) & (1u << (slot & 31u))) != 0u;
 }
 fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive {
   var s: OgcActiveAcc;
@@ -946,11 +966,16 @@ fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive
     ogcActiveAdd(&s, ogcConOf(k, pick).n);
     last = pk; seen = true;
   }
-  if (k.sOn) { ogcActiveFaces(&s, k, z, OGC_CON_SOLID, OGC_CON_SOLID_BALL, tol); }
-  if (k.bOn) { ogcActiveFaces(&s, k, z, OGC_CON_BODY, OGC_CON_BODY_BALL, tol); }
+  // Every binding record for travel, the three kept above or not.
+  for (var i = 0u; i < k.n && !s.a.travel; i++) {
+    if (ogcConViol(ogcConOf(k, i), z) >= -tol && ogcRecordFar(k.first + i)) { s.a.travel = true; }
+  }
+  let r = bitcast<vec4<f32>>(ogcContacts[1]).x;
+  if (k.sOn) { ogcActiveFaces(&s, k, z, OGC_CON_SOLID, OGC_CON_SOLID_BALL, tol, ogcSolidSample(ogcSolidHeader(), s.a.q).phi >= r); }
+  if (k.bOn) { ogcActiveFaces(&s, k, z, OGC_CON_BODY, OGC_CON_BODY_BALL, tol, ogcSolidSample(ogcSolidHeaderAt(ogcBodyBase()), ogcToBody(ogcPose(1u), s.a.q)).phi >= r); }
   let lz = length(z);
   s.a.capOn = lz >= k.R - tol && lz > 0.0;
-  if (s.a.capOn) { s.a.nc = z / lz; }
+  if (s.a.capOn) { s.a.nc = z / lz; s.a.travel = true; }
   return s.a;
 }
 // The mandatory round's and an unlevelled round's projection (no level: the trial's alpha is unread).

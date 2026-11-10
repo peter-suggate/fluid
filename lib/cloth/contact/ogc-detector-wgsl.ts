@@ -58,9 +58,9 @@ export const OGC_PARAM_WORDS = 84;
  * without a moving solid), and with one Bridson et al.'s rigid impact zones (2002, sec. 7.4):
  * a conflict with the solid carries its cloth rigidly with it (w = a_v), growing the zones a redo,
  * up to OGC_REDO_MANDATORY redos in all. A zone redo that marks nothing new, or a conflict in the
- * last, fails as heldConflict. A later round's unlevelled form predicts 0 about the iterate:
- * without a moving solid it never conflicts (one redo slot); with one, the solid's remaining
- * motion can close on the cloth at the iterate, so every round gets the whole ladder.
+ * last, fails as heldConflict. A later round's unlevelled form predicts 0 about the iterate,
+ * every vertex and every sample exactly (the moving solid is at its end pose, a_v = 0), so it
+ * never conflicts: one redo slot, and a conflict left after it fails as heldConflict.
  */
 export const OGC_REDO_ROUNDS = 8;
 export const OGC_REDO_MANDATORY = 32;
@@ -631,7 +631,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       pd = p1;
       if (mandatory) { pd = ogcPose(0u); }
       let y0 = ogcToBody(pd, x);
-      a = ogcToWorld(p1, y0) - x;
+      // After the mandatory round the detection pose is the end pose, where a_v = R1 R1^T (x - c1)
+      // + c1 - x is 0 exactly. Evaluated in f32 it is rounding, which gave held and carried cloth
+      // a prediction of a few ulps and made a pair nearer than sepEps a conflict of a round that
+      // cannot conflict (16^2 rotating sphere, tick 60: a cloth edge against a hull edge).
+      if (mandatory) { a = ogcToWorld(p1, y0) - x; }
       // Carried with the solid (the fail-safe's impact zones), the vertex deviates from its
       // prediction by its inertial motion less a_v.
       if (carried) {
@@ -866,7 +870,14 @@ fn main() {
     let ctl = nwctl[0];
     let it = u32(ctl.w);
     if (it != atomicLoad(&contacts[P.levelWord + 2u])) {
-      noStep = ctl.z == 0.0 && ctl.x == 0.0;
+      // Also, by the solver's cap-aware done rule, an iteration whose step was small while travel
+      // bounds bind (certificates at q that are not contacts there: the cap, a piece's ball, a
+      // solid face beyond r, a record its pair cannot close within r) with a positive multiplier,
+      // their vertices counted in (control + 2).w: Newton is not done, and they need new
+      // certificates about the iterate. Read only where the solver binds that word.
+      var travel = false;
+      if (arrayLength(&nwctl) > 2u) { travel = nwctl[2].w > 0.0; }
+      noStep = ctl.x == 0.0 && (ctl.z == 0.0 || travel);
       atomicStore(&contacts[P.levelWord + 2u], it);
       atomicStore(&contacts[P.levelWord + 3u], bitcast<u32>(ctl.z));
       let lf = atomicLoad(&contacts[P.levelWord + 1u]);
@@ -1003,8 +1014,9 @@ fn ratio(s0: f32, s1: f32) -> f32 {
 }
 // A surface sample (index >= N) is static: it neither moves nor is truncated.
 fn lower(v: u32, t: f32) { if (t < 1.0 && v < P.N) { atomicMin(&work[P.tvOff + v], bitcast<u32>(t)); } }
-// The filter's plane record (m, b) of cloth vertex v: counted (filter), then written into its segment (records).
-fn record(v: u32, r: vec4<f32>) {
+// The filter's plane record (m, b) of cloth vertex v: counted (filter), then written into its segment
+// (records) with its far bit (ogcRecordFar: the bits follow the pool, one per slot).
+fn record(v: u32, r: vec4<f32>, far: bool) {
   if (v >= P.N) { return; }
   ${filter ? "atomicAdd(&work[P.recCountOff + v], 1u);" : ""}
   ${records ? `let i = atomicAdd(&work[P.recCountOff + v], 1u);
@@ -1013,6 +1025,8 @@ fn record(v: u32, r: vec4<f32>) {
     let b = P.recWord + 4u * slot;
     atomicStore(&contacts[b], bitcast<u32>(r.x)); atomicStore(&contacts[b + 1u], bitcast<u32>(r.y));
     atomicStore(&contacts[b + 2u], bitcast<u32>(r.z)); atomicStore(&contacts[b + 3u], bitcast<u32>(r.w));
+    let fw = P.recWord + 4u * P.recCap + (slot >> 5u); let bit = 1u << (slot & 31u);
+    if (far) { atomicOr(&contacts[fw], bit); } else { atomicAnd(&contacts[fw], ~bit); }
   }` : ""}
 }
 var<workgroup> wgUncert: atomic<u32>;
@@ -1028,7 +1042,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       var ids = vec4<u32>(raw.x & ~OGC_EE_BIT, raw.y, raw.z, raw.w);
       if (!(pl.w > 0.0)) {
         // No separating plane at X: the pair's vertices hold until the next round.
-        for (var k = 0u; k < 4u; k++) { ${records ? "record(ids[k], vec4<f32>(0.0, 0.0, 0.0, 1.0));" : `lower(ids[k], 0.0);${filter ? " record(ids[k], vec4<f32>(0.0));" : ""}`} }
+        for (var k = 0u; k < 4u; k++) { ${records ? "record(ids[k], vec4<f32>(0.0, 0.0, 0.0, 1.0), false);" : `lower(ids[k], 0.0);${filter ? " record(ids[k], vec4<f32>(0.0), false);" : ""}`} }
         ${records ? "" : "atomicAdd(&wgUncert, 1u);"}
       } else {
         let n = pl.xyz;
@@ -1077,6 +1091,26 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             s00[k] = select(plane0 - p0[k], p0[k] - plane0, k < nA) - P.sepEps - strayOf(ids[k], turned);
           }
         }` : ""}
+        ${records ? `// Far: the pair stays at least r apart at every trial of this filter, so its records bound
+        // travel, not contact (ogcProjectActive's travel). Along n each side's support at a trial is
+        // within its reach of the iterate's: |d| (every trial point and its projections stay within
+        // |d| of x), or in a levelled round, whose projections start from the anchor, the farthest
+        // anchor c(u) (u in [0, U]) plus the cap. A surface sample does not move.
+        var far = false;
+        {
+          let nh = n / length(n);
+          var lo = 3.4e38; var hi = -3.4e38;
+          for (var k = 0u; k < 4u; k++) {
+            var p = dot(nh, anchored(ids[k])); var reach = 0.0;
+            if (ids[k] < P.N) {
+              let xk = pos[ids[k]].xyz; let dk = xdet[ids[k]]; let c1 = dk.xyz + predOf(ids[k]);
+              p = dot(nh, xk);
+              reach = select(length(dir[ids[k]].xyz), max(length(c1 - xk), length(c1 - U * predOf(ids[k]) - xk)) + dk.w, lev);
+            }
+            if (k < nA) { lo = min(lo, p - reach); } else { hi = max(hi, p + reach); }
+          }
+          far = lo - hi >= P.r;
+        }` : ""}
         for (var k = 0u; k < 4u; k++) {
           let a = k < nA;
           let s0 = select(plane - proj[k], proj[k] - plane, a) - P.sepEps - strayOf(ids[k], turned);
@@ -1101,7 +1135,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
             // x: there only the cap makes a plane redundant.
             let ln = length(n) * (1.0 + 1.0e-5);
             if ((lev || room < ln * length(d)) && nb < ln * xdet[ids[k]].w) {
-              record(ids[k], vec4<f32>(select(-1.0, 1.0, a) * n, -nb));
+              record(ids[k], vec4<f32>(select(-1.0, 1.0, a) * n, -nb), ${records ? "far" : "false"});
             }
           }` : "lower(ids[k], ratio(s0, s0 + select(-dn[k], dn[k], a)));"}
         }
@@ -1458,7 +1492,7 @@ export function ogcGridCountWGSL(intersect: boolean): string {
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let t = gid.x;
-  ${intersect ? "if (t == 0u) { atomicStore(&counters[OGC_INTERSECTIONS], 0u); atomicStore(&counters[OGC_SOLID_INTERSECTIONS], 0u); }" : ""}
+  ${intersect ? "if (t == 0u) { atomicStore(&counters[OGC_INTERSECTIONS], 0u); atomicStore(&counters[OGC_SOLID_INTERSECTIONS], 0u); atomicStore(&counters[OGC_SOLID_HIT_FACE], 0u); }" : ""}
   if (t >= P.T) { return; }
   ${intersect ? "" : "atomicStore(&work[P.dminTOff + t], 0x7f7fffffu);"}
   let inv = invCell();
@@ -2273,10 +2307,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * above their rounding.
  */
 export const OGC_INTERSECT_WGSL = header([0, 1, 4, 7, 8, 9]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(true) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+var<workgroup> wgHits: atomic<u32>;
+var<workgroup> wgSolidHits: atomic<u32>;
 // The face reaches inside a solid: phi < 0 at a point of a barycentric lattice over it
 // with spacing at most a quarter cell (the field is trilinear per cell). The face is in
 // the field's frame (the moving solid's body frame at its end pose).
-fn insideSolid(h: OgcSolidHeader, A: array<vec3<f32>, 3>) -> bool {
+// Returns the first such phi (negative), or 1 when the face is clear.
+fn insideSolid(h: OgcSolidHeader, A: array<vec3<f32>, 3>) -> f32 {
   let longest = max(length(A[1] - A[0]), max(length(A[2] - A[1]), length(A[0] - A[2])));
   let n = u32(clamp(ceil(4.0 * longest / h.cell), 1.0, 32.0));
   let inv = 1.0 / f32(n);
@@ -2284,9 +2321,13 @@ fn insideSolid(h: OgcSolidHeader, A: array<vec3<f32>, 3>) -> bool {
     let u = f32(i) * inv; let w = f32(j) * inv;
     let p = (1.0 - u - w) * A[0] + u * A[1] + w * A[2];
     let s = ogcSolidSample(h, p);
-    if (s.stored && s.phi < 0.0) { return true; }
+    if (s.stored && s.phi < 0.0) { return s.phi; }
   } }
-  return false;
+  return 1.0;
+}
+fn solidHit(t: u32, phi: f32) {
+  atomicAdd(&wgSolidHits, 1u);
+  if (atomicCompareExchangeWeak(&counters[OGC_SOLID_HIT_FACE], 0u, t).exchanged) { atomicStore(&counters[OGC_SOLID_HIT_PHI], bitcast<u32>(phi)); }
 }
 // Orientation with its forward error bound: f32 differences of f32 inputs are exact to
 // a relative 2^-24, so |error| <= 16 u perm with perm the permanent of the differences.
@@ -2335,18 +2376,19 @@ fn triTri(Av: array<vec3<f32>, 3>, Bv: array<vec3<f32>, 3>) -> bool {
   }
   return undecided && triDistance(A, B) <= 7.6294e-6 * scale;
 }
-var<workgroup> wgHits: atomic<u32>;
-var<workgroup> wgSolidHits: atomic<u32>;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let t = gid.x;
   if (t < P.T) {
     let tv = triVerts(t);
     let A = array<vec3<f32>, 3>(xdet[tv.x].xyz, xdet[tv.y].xyz, xdet[tv.z].xyz);
-    if (P.solidBase != 0u && insideSolid(ogcSolidHeader(), A)) { atomicAdd(&wgSolidHits, 1u); }
+    var phi = 1.0;
+    if (P.solidBase != 0u) { phi = insideSolid(ogcSolidHeader(), A); }
+    if (phi < 0.0) { solidHit(t + 1u, phi); }
     else if (P.bodyBase != 0u) {
       let p1 = ogcPose(1u);
-      if (insideSolid(ogcSolidHeaderAt(P.bodyBase), array<vec3<f32>, 3>(ogcToBody(p1, A[0]), ogcToBody(p1, A[1]), ogcToBody(p1, A[2])))) { atomicAdd(&wgSolidHits, 1u); }
+      phi = insideSolid(ogcSolidHeaderAt(P.bodyBase), array<vec3<f32>, 3>(ogcToBody(p1, A[0]), ogcToBody(p1, A[1]), ogcToBody(p1, A[2])));
+      if (phi < 0.0) { solidHit((t + 1u) | 0x80000000u, phi); }
     }
     let q = triBox(t);
     let inv = invCell();

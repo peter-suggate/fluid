@@ -400,7 +400,8 @@ export class OgcContactDetector {
     this.projBase = config.newton ? solidVec4s : 0;
     // The sub-header, then the level header (OGC_LEVEL), then the fixed records.
     const fixedBase = this.projBase + 1 + OGC_LEVEL_VEC4S, segBase = fixedBase + OGC_PROJECT_RECORD * N, recBase = segBase + Math.ceil(N / 2);
-    const contactVec4s = config.newton ? recBase + recCap : solidVec4s;
+    // The records' far bits (one per slot, ogcRecordFar) follow the pool.
+    const contactVec4s = config.newton ? recBase + recCap + Math.ceil(recCap / 128) : solidVec4s;
     this.contacts = mk("contacts", 16 * contactVec4s);
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
@@ -762,13 +763,11 @@ export class OgcContactDetector {
    */
   encodeDetection(pass: GPUComputePassEncoder, mandatory = true) {
     for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
-    // The mandatory round's least-shift redos and fail-safe (OGC_REDO_WGSL). A later round predicts
-    // the cloth 0 about the iterate: without a moving solid only its levelled form can conflict, and
-    // its one redo (unlevelled) cannot. With a moving solid the unlevelled redo can conflict too (the
-    // solid's remaining motion closing on cloth at the iterate: 16^2 rotating sphere, tick 60, a
-    // cloth edge against a hull edge), so every round gets the whole ladder (redoCap, as the kernel
-    // counts it): the least shift anchors the pair's cloth with the solid, the fail-safe carries it.
-    const slots = this.bodyField ? OGC_REDO_MANDATORY : mandatory ? OGC_REDO_ROUNDS + 1 : 1;
+    // The mandatory round's least-shift redos and fail-safe (OGC_REDO_WGSL), with a moving solid its
+    // impact zones too (redoCap, as the kernel counts it). A later round predicts 0 about the
+    // iterate, the moving solid at rest at its end pose (a_v = 0 exactly): only its levelled form
+    // can conflict, and its one redo (unlevelled) cannot; a conflict there fails as heldConflict.
+    const slots = !mandatory ? 1 : this.bodyField ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS + 1;
     for (let k = 0; k < slots; k++) {
       this.run(pass, "redo", 1);
       for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
@@ -837,12 +836,14 @@ export class OgcContactDetector {
    * intersecting non-adjacent face pairs and the faces reaching into the static solid (phi < 0 at a
    * lattice of four points per cell along the longest edge, every face), in their own submission.
    */
-  async countIntersections(): Promise<{ intersections: number; solidIntersections: number }> {
+  async countIntersections(): Promise<{ intersections: number; solidIntersections: number; solidHit?: { face: number; body: boolean; phi: number } }> {
     const enc = this.device.createCommandEncoder(), pass = enc.beginComputePass();
     this.encodeIntersectionCount(pass); pass.end();
     this.device.queue.submit([enc.finish()]);
     const c = await this.readCounters();
-    return { intersections: c.intersections, solidIntersections: c.solidIntersections };
+    const u = new Uint32Array(await this.readBuffer(this.counters, 4 * OGC_COUNTER.solidHitFace, 8)), w = u[0]!;
+    const solidHit = w ? { face: (w & 0x7fffffff) - 1, body: (w & 0x80000000) !== 0, phi: new Float32Array(u.buffer)[1]! } : undefined;
+    return { intersections: c.intersections, solidIntersections: c.solidIntersections, solidHit };
   }
 
   /**
@@ -915,6 +916,29 @@ export class OgcContactDetector {
    * and step length, its residual estimate rho, its envelope r_q and held flags,
    * and the round's broad-phase cell.
    */
+  /**
+   * The last round's DAT division pairs (harness reads; never a step path): ids as in the pair buffer
+   * (a hole has x = OGC_NONE) and planes (n, certified gap), over its slots (pairSlots, at most pairCapacity).
+   */
+  async readPairs(): Promise<{ ids: Uint32Array; planes: Float32Array; slots: number }> {
+    const counters = new Uint32Array(await this.readBuffer(this.counters, 0, 4 * OGC_COUNTER_WORDS));
+    const slots = Math.min(counters[OGC_COUNTER.pairSlots]!, this.config.pairCapacity);
+    const raw = slots ? await this.readBuffer(this.pairs, 0, 32 * slots) : new ArrayBuffer(0);
+    const all = new Uint32Array(raw), ids = new Uint32Array(4 * slots), planes = new Float32Array(4 * slots);
+    for (let k = 0; k < slots; k++) { ids.set(all.subarray(8 * k, 8 * k + 4), 4 * k); planes.set(new Float32Array(all.buffer, 32 * k + 16, 4), 4 * k); }
+    return { ids, planes, slots };
+  }
+  private async readBuffer(src: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer> {
+    const read = this.device.createBuffer({ size: Math.ceil(size / 16) * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyBufferToBuffer(src, offset, read, 0, Math.ceil(size / 4) * 4);
+    this.device.queue.submit([enc.finish()]);
+    await read.mapAsync(GPUMapMode.READ);
+    const out = read.getMappedRange(0, Math.ceil(size / 4) * 4).slice(0);
+    read.destroy();
+    return out;
+  }
+
   async readDiagnosis(): Promise<{ xdet: Float32Array; pred: Float32Array; rho: Float32Array; env: Float32Array; held: Uint32Array; cell: number }> {
     const N = this.N, T = this.T, E = this.E, S = this.solidSamples;
     const copies: [GPUBuffer, number, number][] = [[this.det, 0, 16 * (N + S + this.bodySampleCapacity)], [this.pred, 0, 32 * N + 16 * this.bodySampleCapacity], [this.work, 4 * (N + T + E), 4 * N], [this.work, 4 * (7 * N + T + E), 4 * N], [this.counters, 0, 4 * OGC_COUNTER_WORDS]];

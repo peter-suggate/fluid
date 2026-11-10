@@ -2435,3 +2435,72 @@ cut-direction variant failed at step 16.
   - The ladder's own determinism runs are bit-identical.
 - check:types is clean.
 - test:unit: 1724 pass, 1 fail (the known foreign reservoir-particle-cost test).
+
+## 2026-11-10 — Later rounds at a_v = 0, the far bit, and the cap-aware done rule (travel)
+
+**Later rounds anchor at a_v = 0 exactly.**
+- In a mandatory (later) round, a = ogcToWorld(p1, y0) - x: the plane is taken about the iterate's own
+  position, not a predicted motion.
+- Later rounds get one redo slot (`!mandatory ? 1 : ...`). redoLast fails as heldConflict if a
+  conflict remains; nothing is carried silently.
+
+**The far bit per plane record.**
+- A record is far when the pair's support gap along n at the iterate, less both sides' reach, is >= r.
+  - A side's reach is |d|. In a levelled round it is max(|c1 - x|, |c1 - U w - x|) + cap.
+  - Samples have reach 0.
+- The bits follow the record pool: word recWord + 4 recCap + slot / 32.
+- ogcRecordFar reads them. Agreed with C1: a record counts as a contact unless its far bit is set.
+
+**OgcActive.travel.** ogcProjectActive sets it when the accepted trial binds a travel bound:
+- the cap;
+- a solid or body ball;
+- a solid or body Lipschitz face while the trial's field phi >= r;
+- a far record.
+
+C1's nwChoose counts the travel-binding vertices with mu > 0 into (control + 2).w.
+
+**Decide (the cap-aware done rule).** A levelled round is armed when Newton made no step and either no
+vertex is cut or some cut vertex binds a travel bound:
+- the rule is ctl.x == 0 && (ctl.z == 0 || nwctl[2].w > 0), within roundCap;
+- the read is guarded by arrayLength(nwctl) > 2, so a solver without the word keeps the old rule.
+
+**Diagnostics.**
+- `tests/cloth-contact-cost.test.ts` (new) attributes the contact cost per stage and per round.
+- The detector's readPairs() and countIntersections().solidHit give the first face found inside a solid
+  (counters 70 and 71, with its phi).
+- The ladder logs that face against the CPU field, the samples and the hull edges (describeSolidHit).
+- `CLOTH_LADDER_SPHEREDIAG` reports the least static-field phi over vertices and faces, and the true
+  frustum SDF, per tick.
+
+**Cost (sphere, 60 ticks).**
+
+| Case | Before (HEAD) | After |
+|---|---|---|
+| 16^2 wall ms | 123.5 | 95.9 |
+| Unarmed later detection ms | 1.376 | 0.131 |
+| 32^2 wall ms | 202.5 | 184.5 |
+| 64^2 afterNewtonStep: ms | 202 | 162 |
+| 64^2 afterNewtonStep: dispatches | 9576 | 648 |
+
+**Tests.** The cloth-contact-gpu active-set test now takes a field image and random far bits. It checks:
+- every sure travel binding gives travel;
+- travel appears only with bindings that may be travel (faces within 1e-5 of r are undecided).
+
+Results: 3250 travel trials. Sure bindings: cap 1266, ball 336, faces >= r 204 / < r 428. Records:
+far 2848 / near 2820.
+
+**The tick-49 face-in-solid (seen on ae5a12a2 + this; it does not reproduce on 1a13f604).**
+- It was a real penetration: face 360 lies 1.79 mm inside the true frustum.
+- The cause is a gap in the static field's sample coverage. The trilinear field rounds the frustum's
+  slanted corner by about 2 mm. The samples near the edge all collapse onto the edge line, which
+  leaves the flat faces' rounding zone uncovered.
+- The fix is the next item (true-plane samples across the rounding zone, plus an authoring check).
+
+**Gates.**
+- The combined gate (contact ladder/gpu/body/solid/scene-solids/oracle, cloth-ladder, -gpu-solver,
+  -analytic, -system, -newton on 1a13f604 + these files): 120 tests, 116 pass, 0 fail, 4 todo.
+  - All four todos are already on HEAD: the incline's samples (item 5), the moving-solid capture, and
+    two Newton cut/undo items.
+  - The ladder's determinism runs are bit-identical.
+- check:types is clean.
+- test:unit: 1733 pass, 1 fail (the known foreign reservoir-particle-cost test).

@@ -19,11 +19,14 @@ import { createEmptyScene } from '../lib/core/empty-scene';
 import { validateScene, type SceneDescription } from '../lib/core/model';
 import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import { OgcContactDetector } from '../lib/cloth/contact/ogc-detector';
+import { OGC_POSE_WORD, OGC_POSE_WORDS } from '../lib/cloth/contact/ogc-wgsl';
+import { SOLID_SAMPLE_WORDS, clothSolidSampleEdges, clothSolidSamples, sampleClothSolidField, type ClothSolidField } from '../lib/cloth/contact/solid-field';
 import { CLOTH_SCENE_CONTACT, clothContactRadius } from '../lib/cloth/scene-contact';
 import type { ClothTopologyData } from '../lib/cloth/types';
 import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
-import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/scene-description';
+import { bridson2002SceneDescription, bridson2002SceneLayout } from '../lib/cloth/scenes/bridson-2002/scene-description';
+import { bridsonSolidDistance } from '../lib/cloth/scenes/bridson-2002/solids';
 import { clothAnalyticFreeFall, clothAnalyticPeirceCantilever, clothAnalyticSceneDescription, type ClothAnalyticScene } from '../lib/cloth/scenes/analytic';
 import { prepareClothTopology } from '../lib/cloth/topology';
 
@@ -104,8 +107,9 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
       try { [pose] = (await cloth.capture([k * CLOTH_SCENE_STEP_S]))[0]!; }
       catch (e) { failure = `tick ${k}: ${String(e).slice(0, 240)}`; break; }
       const c = await det.readCounters(), ctl = Array.from(await solver.readNewtonControl() as ArrayLike<number>);
-      const { intersections, solidIntersections } = await det.countIntersections();
+      const { intersections, solidIntersections, solidHit } = await det.countIntersections();
       const x = pose!.positions_m, v = pose!.velocities_m_s!;
+      if (solidHit) console.log(`  tick ${k}: ${await describeSolidHit(cloth, doc.id, doc.geometry.data.triangles, x, solidHit)}`);
       let y = 0, vy = 0, minY = Infinity;
       for (let i = 0; i < N; i++) { y += x[3 * i + 1]! / N; vy += v[3 * i + 1]! / N; minY = Math.min(minY, x[3 * i + 1]!); }
       const status = [OgcContactDetector.describeStatus(c.status)].flat().join(",");
@@ -121,6 +125,69 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
   } finally { cloth.destroy(); }
   if (failure) console.log(`  HALT ${failure}`);
   return { track, failure, N };
+}
+/**
+ * The intersection count's first face inside a solid: its vertices, the GPU's phi, and the CPU field (the entry's static
+ * field, or the moving solid's in its body frame at the end pose the detector holds) at the same lattice in the detector's
+ * cloth frame, with the face's least phi there and where.
+ */
+async function describeSolidHit(cloth: ClothSystem, id: string, tris: ArrayLike<number>, x: ArrayLike<number>, hit: { face: number; body: boolean; phi: number }): Promise<string> {
+  const e = (cloth as unknown as { entries: Map<string, { field: ClothSolidField; origin: readonly number[] }> }).entries.get(id)!;
+  const det = cloth.contactFor(id)!, d = det as unknown as { bodyField?: ClothSolidField; readBuffer(b: GPUBuffer, o: number, n: number): Promise<ArrayBuffer>; contacts: GPUBuffer };
+  const V = [0, 1, 2].map(k => [0, 1, 2].map(a => x[3 * tris[3 * hit.face + k]! + a]!) as [number, number, number]);
+  let text = `solid hit: face ${hit.face} (${[0, 1, 2].map(k => tris[3 * hit.face + k]).join(', ')}) in the ${hit.body ? 'moving' : 'static'} solid, GPU phi ${hit.phi.toExponential(3)}; scene vertices ${V.map(p => p.map(c => c.toFixed(5)).join(' ')).join(' | ')}`;
+  // The detector's cloth frame, and the field's frame within it.
+  let Y = V.map(p => p.map((c, a) => c - e.origin[a]!) as [number, number, number]), field = e.field;
+  if (hit.body) {
+    if (!d.bodyField) return text + '; no body field';
+    field = d.bodyField;
+    const f = new Float32Array(await d.readBuffer(d.contacts, 4 * OGC_POSE_WORD, 4 * OGC_POSE_WORDS));
+    const c = [f[0]!, f[1]!, f[2]!], R = [[f[4]!, f[5]!, f[6]!], [f[8]!, f[9]!, f[10]!], [f[12]!, f[13]!, f[14]!]];
+    // y = R^T (x - c), R's columns R[0..2].
+    Y = Y.map(p => R.map(col => col[0]! * (p[0] - c[0]!) + col[1]! * (p[1] - c[1]!) + col[2]! * (p[2] - c[2]!)) as [number, number, number]);
+    text += `; pose c ${c.map(v => v.toFixed(5)).join(' ')}`;
+  }
+  const longest = Math.max(...[0, 1, 2].map(k => Math.hypot(...[0, 1, 2].map(a => Y[(k + 1) % 3]![a]! - Y[k]![a]!))));
+  const n = Math.min(32, Math.max(1, Math.ceil(4 * longest / field.cell)));
+  const at = (i: number, j: number, m: number) => [0, 1, 2].map(a => (1 - i / m - j / m) * Y[0]![a]! + i / m * Y[1]![a]! + j / m * Y[2]![a]!) as [number, number, number];
+  let least = Infinity, where = '';
+  for (let i = 0; i <= n; i++) for (let j = 0; j <= n - i; j++) {
+    const q = at(i, j, n), s = sampleClothSolidField(field, q);
+    if (s.stored && s.phi < least) { least = s.phi; where = `(${i}, ${j}) of ${n}, field frame ${q.map(v => v.toFixed(5)).join(' ')}`; }
+  }
+  const fine = 128;
+  let fineLeast = Infinity;
+  for (let i = 0; i <= fine; i++) for (let j = 0; j <= fine - i; j++) { const s = sampleClothSolidField(field, at(i, j, fine)); if (s.stored) fineLeast = Math.min(fineLeast, s.phi); }
+  const vphi = Y.map(q => sampleClothSolidField(field, q).phi.toExponential(2)).join(' / ');
+  // The field's surface samples and hull edges near the face: the sample-face and hull-edge pairs that should keep it out.
+  const smp = clothSolidSamples(field), edges = clothSolidSampleEdges(field), SW = SOLID_SAMPLE_WORDS;
+  const S = (k: number) => [smp[SW * k]!, smp[SW * k + 1]!, smp[SW * k + 2]!] as [number, number, number];
+  const sub = (a: number[], b: number[]) => [a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!];
+  const dot = (a: number[], b: number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+  const triPoint = (p: number[]) => { let m = Infinity; for (let i = 0; i <= 64; i++) for (let j = 0; j <= 64 - i; j++) m = Math.min(m, Math.hypot(...sub(at(i, j, 64), p))); return m; };
+  const segSeg = (a: number[], b: number[], c: number[], e: number[]) => {
+    let m = Infinity;
+    for (let i = 0; i <= 64; i++) { const t = i / 64, p = a.map((v, k) => v + t * (b[k]! - v)), u = sub(e, c), l2 = dot(u, u);
+      const sP = l2 > 0 ? Math.min(1, Math.max(0, dot(sub(p, c), u) / l2)) : 0; m = Math.min(m, Math.hypot(...sub(p, c.map((v, k) => v + sP * u[k]!)))); }
+    return m;
+  };
+  const cen = [0, 1, 2].map(a => (Y[0]![a]! + Y[1]![a]! + Y[2]![a]!) / 3), reach = longest;
+  const near: string[] = [];
+  let sMin = Infinity;
+  for (let k = 0; k < smp.length / SW; k++) {
+    const q = S(k);
+    if (Math.hypot(...sub(q, cen)) > reach) continue;
+    const dq = triPoint(q); sMin = Math.min(sMin, dq);
+    if (dq < 0.01) near.push(`s${k} ${q.map(v => v.toFixed(4)).join(' ')} phi ${sampleClothSolidField(field, q).phi.toExponential(2)} to face ${dq.toExponential(2)}`);
+  }
+  let eMin = Infinity, eAt = '';
+  for (let k = 0; k < edges.length / 2; k++) {
+    const a = S(edges[2 * k]!), b = S(edges[2 * k + 1]!);
+    if (Math.hypot(...sub(a, cen)) > reach && Math.hypot(...sub(b, cen)) > reach) continue;
+    for (let f = 0; f < 3; f++) { const dq = segSeg(Y[f]!, Y[(f + 1) % 3]!, a, b); if (dq < eMin) { eMin = dq; eAt = `cloth edge ${f} vs hull edge s${edges[2 * k]}-s${edges[2 * k + 1]}`; } }
+  }
+  text += `; samples within the face's reach: nearest to the face ${sMin.toExponential(2)} m (${near.length} within 1 cm: ${near.slice(0, 12).join('; ')}); hull edges: nearest to a cloth edge ${eMin.toExponential(2)} m (${eAt})`;
+  return text + `; CPU field: vertices ${vphi}, lattice least ${least.toExponential(3)} at ${where}, 128-lattice least ${fineLeast.toExponential(3)} (cell ${field.cell}, band ${field.band})`;
 }
 const clean = (label: string, r: { track: TickReport[]; failure?: string }) => {
   assert.equal(r.failure, undefined, `${label}: ${r.failure}`);
@@ -165,10 +232,62 @@ test('ladder: two co-moving stacked 8 x 8 sheets in free fall need no cloth-clot
   assert.ok(total <= out.N, `co-moving layers keep ${total} plane records over ${out.track.length} ticks`);
 }));
 
+/**
+ * The last round's DAT pairs broken down (CLOTH_LADDER_PAIRS=1): within one piece or across two (pieces of
+ * `pieceSize` vertices), vertex-face or edge-edge, each pair's distance at X and at X + w against its keep
+ * threshold thr = 0.5 gamma_r (env_a + env_b) + sepEps (strays and rounding left out) and its prediction spread
+ * L; and per vertex the pairs it is in (its plane records), its envelope, |w| and rho.
+ */
+async function pairBreakdown(det: OgcContactDetector, pieceSize: number) {
+  const [{ ids, slots }, d] = [await det.readPairs(), await det.readDiagnosis()];
+  const N = d.env.length, X = (i: number) => [d.xdet[4 * i]!, d.xdet[4 * i + 1]!, d.xdet[4 * i + 2]!];
+  const W = (i: number) => (i < N ? [d.pred[4 * i]!, d.pred[4 * i + 1]!, d.pred[4 * i + 2]!] : [0, 0, 0]);
+  const Y = (i: number) => X(i).map((x, k) => x + W(i)[k]!);
+  const sub = (a: number[], b: number[]) => a.map((x, k) => x - b[k]!), dot = (a: number[], b: number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+  const segPt = (p: number[], a: number[], b: number[]) => { const ab = sub(b, a), t = Math.max(0, Math.min(1, dot(sub(p, a), ab) / Math.max(dot(ab, ab), 1e-30))); return Math.hypot(...sub(p, a.map((x, k) => x + t * ab[k]!))); };
+  const ptTri = (p: number[], a: number[], b: number[], c: number[]) => {
+    const n = [(b[1]! - a[1]!) * (c[2]! - a[2]!) - (b[2]! - a[2]!) * (c[1]! - a[1]!), (b[2]! - a[2]!) * (c[0]! - a[0]!) - (b[0]! - a[0]!) * (c[2]! - a[2]!), (b[0]! - a[0]!) * (c[1]! - a[1]!) - (b[1]! - a[1]!) * (c[0]! - a[0]!)];
+    const nl = Math.hypot(...n), h = dot(sub(p, a), n) / nl, q = p.map((x, k) => x - h * n[k]! / nl);
+    const inside = [[a, b], [b, c], [c, a]].every(([u, v]) => { const e = sub(v!, u!), m = [e[1]! * (q[2]! - u![2]!) - e[2]! * (q[1]! - u![1]!), e[2]! * (q[0]! - u![0]!) - e[0]! * (q[2]! - u![2]!), e[0]! * (q[1]! - u![1]!) - e[1]! * (q[0]! - u![0]!)]; return dot(m, n) >= 0; });
+    return inside ? Math.abs(h) : Math.min(segPt(p, a, b), segPt(p, b, c), segPt(p, c, a));
+  };
+  const segSeg = (p0: number[], p1: number[], q0: number[], q1: number[]) => {
+    let best = Math.min(segPt(p0, q0, q1), segPt(p1, q0, q1), segPt(q0, p0, p1), segPt(q1, p0, p1));
+    const u = sub(p1, p0), v = sub(q1, q0), w0 = sub(p0, q0), a = dot(u, u), b = dot(u, v), c = dot(v, v), dd = dot(u, w0), e = dot(v, w0), den = a * c - b * b;
+    if (den > 1e-30) { const s = (b * e - c * dd) / den, t = (a * e - b * dd) / den; if (s > 0 && s < 1 && t > 0 && t < 1) best = Math.min(best, Math.hypot(...sub(p0.map((x, k) => x + s * u[k]!), q0.map((x, k) => x + t * v[k]!)))); }
+    return best;
+  };
+  const rec = new Uint32Array(N), recCross = new Uint32Array(N);
+  const kinds = new Map<string, { n: number; dX: number[]; dY: number[]; thr: number[]; L: number[]; closes: number }>();
+  for (let k = 0; k < slots; k++) {
+    const x = ids[4 * k]!;
+    if (x === 0xffffffff) continue;
+    const ee = (x & 0x80000000) !== 0, v = [x & 0x7fffffff, ids[4 * k + 1]!, ids[4 * k + 2]!, ids[4 * k + 3]!], nA = ee ? 2 : 1;
+    const piece = (i: number) => (i < N ? Math.floor(i / pieceSize) : -1);
+    const cross = piece(v[0]!) !== piece(v[nA]!);
+    const envOf = (i: number) => (i < N ? d.env[i]! : 0);
+    const eA = Math.max(...v.slice(0, nA).map(envOf)), eB = Math.max(...v.slice(nA).map(envOf));
+    const thr = 0.5 * det.gammaR * (eA + eB) + det.sepEps;
+    let L = 0;
+    for (const i of v.slice(0, nA)) for (const j of v.slice(nA)) L = Math.max(L, Math.hypot(...sub(W(i), W(j))));
+    const dist = (P: (i: number) => number[]) => (ee ? segSeg(P(v[0]!), P(v[1]!), P(v[2]!), P(v[3]!)) : ptTri(P(v[0]!), P(v[1]!), P(v[2]!), P(v[3]!)));
+    const dX = dist(X), dY = dist(Y), key = `${cross ? 'cross' : 'same'} ${ee ? 'EE' : 'VF'}`;
+    const s = kinds.get(key) ?? { n: 0, dX: [], dY: [], thr: [], L: [], closes: 0 };
+    s.n++; s.dX.push(dX); s.dY.push(dY); s.thr.push(thr); s.L.push(L); if (Math.min(dX, dY) <= thr) s.closes++;
+    kinds.set(key, s);
+    for (const i of v) if (i < N) { rec[i]!++; if (cross) recCross[i]!++; }
+  }
+  const q = (a: ArrayLike<number>) => { const t = Float64Array.from(a).sort(); return [0, 0.5, 0.9, 1].map(f => t[Math.min(t.length - 1, Math.floor(f * (t.length - 1)))]!); };
+  const f = (a: number[]) => a.map(x => x.toExponential(1)).join('/');
+  console.log(`    pairs: ${slots} slots; per vertex (min/med/90%/max) records ${q(rec).join('/')} (across pieces ${q(recCross).join('/')}); env ${f(q(d.env))} |w| ${f(q(Float64Array.from({ length: N }, (_, i) => Math.hypot(...W(i)))))} rho ${f(q(d.rho))}; flagged (held or in contact) ${d.held.reduce((a, h) => a + ((h & 15) !== 0 ? 1 : 0), 0)} of ${N}`);
+  for (const [key, s] of kinds) console.log(`      ${key}: ${s.n} pairs, ${s.closes} within thr at X or X + w; d(X) ${f(q(s.dX))} d(X + w) ${f(q(s.dY))} thr ${f(q(s.thr))} L ${f(q(s.L))}`);
+}
+
 test('ladder: a sheet sliding over and onto another is divided: pairs exist and nothing intersects', { skip: !runs('sliding') }, async () => withDevice(async device => {
   // Both fall freely; the upper one slides across at 0.6 m/s and closes the 4 mm gap at 0.3 m/s.
   const scene = analyticWith(sheets(square(8, 0.01, [-0.035, 0.4, -0.035]), moving(square(8, 0.01, [-0.06, 0.404, -0.035]), [0.6, -0.3, 0])), 1);
-  const out = await ladder(device, 'sliding 2 x 8^2', authored(scene, SLIDING_RECORDS), 20);
+  const out = await ladder(device, 'sliding 2 x 8^2', authored(scene, SLIDING_RECORDS), 20,
+    process.env.CLOTH_LADDER_PAIRS === '1' ? async cloth => pairBreakdown(cloth.contactFor(scene.cloth![0]!.id)!, 64) : undefined);
   peakRecords('sliding', out);
   clean('sliding', out);
   assert.ok(out.track.some(t => t.datPairs > 0), 'the sliding sheets are paired');
@@ -196,7 +315,30 @@ test('ladder: an 8 x 8 sheet lands on a slowly moving large sphere (the plate) a
 // tick 37 (item 2 without strayOf, 2026-11-10). Every tick to 60 is checked, faces and solid alike.
 test('ladder: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)', { skip: !runs('sphere') }, async () => withDevice(async device => {
   const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }));
-  const out = await ladder(device, 'sphere 16^2', scene, 60);
+  // CLOTH_LADDER_SPHEREDIAG=1: each tick, over every face (a 32-per-side barycentric lattice) and over the vertices, the
+  // least value of the static field the detector holds, and of the true frustum's signed distance (scene frame).
+  const faces = scene.cloth![0]!.geometry.data.triangles;
+  const source = bridson2002RotatingSphere({ nodesAcross: 16 }), t = bridson2002SceneLayout(source).translation_m;
+  const frustum = source.solids.find(sd => sd.id === 'frustum')!;
+  const trueFr = (q: readonly number[]) => bridsonSolidDistance(frustum, { x: q[0]! - t.x, y: q[1]! - t.y, z: q[2]! - t.z }, 0);
+  const diag = process.env.CLOTH_LADDER_SPHEREDIAG === '1' ? async (cloth: ClothSystem) => {
+    const id = scene.cloth![0]!.id, x = (await cloth.capture([cloth.time_s]))[0]![0]!.positions_m;
+    const e = (cloth as unknown as { entries: Map<string, { field: ClothSolidField; origin: readonly number[] }> }).entries.get(id)!;
+    const P = (i: number) => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
+    const phi = (q: readonly number[]) => sampleClothSolidField(e.field, [q[0]! - e.origin[0]!, q[1]! - e.origin[1]!, q[2]! - e.origin[2]!]).phi;
+    let vField = Infinity, vTrue = Infinity, fField = Infinity, fTrue = Infinity, fAt = -1;
+    for (let i = 0; i < x.length / 3; i++) { vField = Math.min(vField, phi(P(i))); vTrue = Math.min(vTrue, trueFr(P(i))); }
+    for (let f = 0; f < faces.length / 3; f++) {
+      const [A, B, C] = [P(faces[3 * f]!), P(faces[3 * f + 1]!), P(faces[3 * f + 2]!)];
+      for (let i = 0; i <= 32; i++) for (let j = 0; j <= 32 - i; j++) {
+        const u = i / 32, w = j / 32, q = [0, 1, 2].map(k => (1 - u - w) * A[k]! + u * B[k]! + w * C[k]!);
+        const pf = phi(q); if (pf < fField) { fField = pf; fAt = f; }
+        fTrue = Math.min(fTrue, trueFr(q));
+      }
+    }
+    console.log(`    static field: vertices >= ${vField.toExponential(2)}, faces >= ${fField.toExponential(2)} m (face ${fAt}); true frustum: vertices >= ${vTrue.toExponential(2)}, faces >= ${fTrue.toExponential(2)} m`);
+  } : undefined;
+  const out = await ladder(device, 'sphere 16^2', scene, 60, diag);
   clean('sphere', out);
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
 }));
