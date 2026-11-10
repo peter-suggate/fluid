@@ -2673,3 +2673,52 @@ kernels string for string when off (a CPU test compares the WGSL).
 - With travel bounds off, the plane records peak at 117 per vertex at tick 30 (frozen alone: 19), and none are
   held for overflow.
 - check:types is clean. test:unit shows only the known foreign failures.
+
+## 2026-11-11: (C) finished - cloth-vertex vs sample-hull-facet contacts, main green
+
+840ad0b5 (the coordinator's work-in-progress commit) left four regressions on its gate (83 pass, 4 fail, 2 todo).
+Each was fixed at its cause. The bulge bound h/16 is unchanged.
+
+- **The incline (two tests).** The sampling was wrong, not the bound.
+  - The hull's corner apex, sampled where a triangle bulges past the ceiling, was rejected by the refined spacing's
+    separation and never kept, so the triangle stayed over the ceiling.
+  - Fix: apexes are kept with a separation of the ceiling itself. Two samples closer than h/16 hold the surface to
+    within the bound by definition.
+  - The authoring check over every probe deeper than the ceiling now passes on both incline patches.
+- **The GPU hull-facet test.** Since the restriction the ball has no facets, because the field over a smooth ball
+  rounds less than the ceiling. The fixture is now a box rotated 30 degrees about y, whose off-lattice edge the field
+  rounds by about 1.65 mm. The test also authors its pair capacity (4096 N); before, it overflowed explicitly.
+- **The sphere ladder at tick 58.** Face 330 entered the static field by 45 um, where the field equals the truth, through
+  a gap in the hull.
+  - On one side was a patch of true samples refined to h/2 on the frustum's slanted face (s3833); on the other, field
+    samples at h (4370, 4385), 9.4 mm away.
+  - The fan reach was 1.6 x i's own spacing, so the refined sample never saw the coarse ones, and nothing closed the gap.
+  - Fix: a pair's reach is 1.6 x max(spacing_i, spacing_j), which is symmetric. Hull edge 3833-4370 now exists.
+
+| | 840ad0b5 gate | now |
+|---|---|---|
+| Combined gate | 83 pass, 4 fail, 2 todo (89 tests) | 118 pass, 0 fail, 5 todo (123 tests) |
+| Sphere 16^2: least true frustum distance | -6.5e-5 m (tick 59) | +1.675e-4 m (tick 44) |
+| Sphere 16^2, H_vv metric: least true frustum distance | +3.5e-4 m | +1.465e-4 m |
+| Face 360 (CPU soundness) | in hull | in hull, 873 of 873 facets outward, deepest facet point -1.71e-4 m against the ceiling 6.25e-4 m |
+| Incline patch 1: samples / facets / build time | build failed | 5901 / 6853 / 5.4 s (HEAD before (C): about 2371 samples) |
+| Bridson static: samples / facets / build time | - | 4821 / 873 / 3.0 s |
+| Bridson body sphere: samples / facets | - | 9949 / 0 |
+| Plate: plane-record peak | 22.34 per vertex | 22.34 per vertex |
+| cost-16 | 74.1 ms/tick (ad95092e) | 71.2 ms/tick |
+
+The five todos are all known, and none is new:
+- the H_vv sphere's heldConflict (the least shift);
+- ladder 2c (C1);
+- the moving-solid bodySqueeze;
+- the two cut and undo tests on Newton.
+
+The GPU hull-facet test: 1790 facets and 1114 samples. 24 of 45 vertices hold a facet entry and 21 a field entry. 341
+facet contacts were found and 341 dropped as farther than the field entry.
+
+**Open defect, reported, not hidden.** At a concave crease, where one part stands on another, the field over-reads the
+truth past the ceiling: 3.75 mm at the Bridson frustum's base on the table, and 1.38 mm at the incline's foot. The
+authoring check excludes probes there (`convexAt`) and `clothSolidConcaveRounding(field)` reports the depth. No hull
+facet covers them; the fix is a concave-crease representation, not hull facets.
+
+check:types is clean. test:unit: 2133 tests, 0 fail (the two foreign failures are gone at 50bc0d0d).

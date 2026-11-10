@@ -999,8 +999,8 @@ function buildSolidSamples(field: ClothSolidField): SolidSampleHull {
   const cellAt = (v: number, c: number) => Math.floor(v / c);
   const HC = h / 2;
   const fine = new Map<number, number[]>();
-  const keep = (q: SurfacePoint, planes: { p: V3; n: V3 }[], spacing: number, onSource = false) => {
-    const minSep = 0.5 * spacing, R = Math.ceil(minSep / HC);
+  const keep = (q: SurfacePoint, planes: { p: V3; n: V3 }[], spacing: number, onSource = false, minSep = 0.5 * spacing) => {
+    const R = Math.ceil(minSep / HC);
     const cx = cellAt(q.p[0], HC), cy = cellAt(q.p[1], HC), cz = cellAt(q.p[2], HC);
     for (let dz = -R; dz <= R; dz++) for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
       const l = fine.get(brickKey(cx + dx, cy + dy, cz + dz));
@@ -1108,10 +1108,14 @@ function buildSolidSamples(field: ClothSolidField): SolidSampleHull {
     // spacings) made 6-11 hull edges per sample on a sphere, against about 3.
     const edge = (a: number, b: number) => { edgeKeys.add(a < b ? a * pts.length + b : b * pts.length + a); };
     // Triangle keys i S^2 + j S + k exact in a double.
-    const S3 = pts.length;
+    const S3 = pts.length, maxSpacing = Math.max(...spacingOf);
     if (S3 ** 3 > Number.MAX_SAFE_INTEGER) throw new RangeError(`Cloth solid samples: ${S3} samples exceed the hole key's range`);
     for (let i = 0; i < pts.length; i++) {
-      const qi = pts[i]!, n = qi.n, reach = 1.6 * spacingOf[i]!;
+      // A pair's reach is the coarser spacing of the two: a sample refined to h / 2 beside a
+      // field sample at h must see it, as the field sample sees the refined one (a reach of
+      // i's own spacing alone left a gap between the patches the hull never closed).
+      const qi = pts[i]!, n = qi.n, reach = 1.6 * maxSpacing;
+      const near = (j: number) => Math.hypot(...sub(pts[j]!.p, qi.p)) <= 1.6 * Math.max(spacingOf[i]!, spacingOf[j]!);
       const a = Math.abs(n[0]) < 0.6 ? [1, 0, 0] as V3 : Math.abs(n[1]) < 0.6 ? [0, 1, 0] as V3 : [0, 0, 1] as V3;
       const t1 = cross(n, a), l1 = Math.hypot(...t1), u: V3 = [t1[0] / l1, t1[1] / l1, t1[2] / l1], w = cross(n, u);
       // A concave junction belongs to the field, not a convex hull spanning both
@@ -1119,7 +1123,7 @@ function buildSolidSamples(field: ClothSolidField): SolidSampleHull {
       // Convex surface normals are monotone: (pj - pi) . (nj - ni) >= 0.
       // Allow rounding at coplanar samples, but exclude a turn into the solid.
       const convexNeighbour = (j: number) => dot(sub(pts[j]!.p, qi.p), sub(pts[j]!.n, n)) >= -1e-6 * h;
-      const fan = within(qi.p, reach).filter(j => j !== i && convexNeighbour(j)).map(j => { const d = sub(pts[j]!.p, qi.p); return { j, ang: Math.atan2(dot(d, w), dot(d, u)) }; })
+      const fan = within(qi.p, reach).filter(j => j !== i && near(j) && convexNeighbour(j)).map(j => { const d = sub(pts[j]!.p, qi.p); return { j, ang: Math.atan2(dot(d, w), dot(d, u)) }; })
         .sort((x, y) => x.ang - y.ang);
       // Gabriel edges: no other sample inside the sphere on the edge as diameter (any such
       // sample lies within the edge's length of i, so in its fan).
@@ -1216,7 +1220,9 @@ function buildSolidSamples(field: ClothSolidField): SolidSampleHull {
       if (!through.length) continue;
       const m = [0, 1, 2].map(a => through.reduce((s, P) => s + P.n[a]!, 0)), ml = Math.hypot(m[0]!, m[1]!, m[2]!);
       if (!(ml > 0)) continue;
-      keep({ p: A.p, n: [m[0]! / ml, m[1]! / ml, m[2]! / ml], mu: sampleClothSolidField(field, A.p).mu }, through, 0.5 * A.spacing, true);
+      // Kept unless a sample stands within the ceiling of it already (then the hull holds it to the bound):
+      // the samples' spacing gives way to the feature the hole needs.
+      keep({ p: A.p, n: [m[0]! / ml, m[1]! / ml, m[2]! / ml], mu: sampleClothSolidField(field, A.p).mu }, through, 0.5 * A.spacing, true, ceiling);
     }
     if (pts.length === before) break;
     index(before);

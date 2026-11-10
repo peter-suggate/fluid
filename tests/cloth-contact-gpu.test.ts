@@ -1296,16 +1296,26 @@ async function detectWithSolid(device: GPUDevice, mesh: OracleMesh, vel: V3[], c
   return { det, positions, oracle };
 }
 
-test("GPU hull facets: vertices over the ball keep the nearest of their field and facet entries, and the vertex block matches the oracle", { skip: !gpu }, async () => {
+test("GPU hull facets: vertices across an off-lattice box edge keep the nearest of their field and facet entries, and the vertex block matches the oracle", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
-    // A sheet draped over the ball's top 1.0-1.4 mm off it (r = 2 mm): the field (cell 5 mm) misreads the sphere by up to
-    // a fraction of a millimetre, and where its phi reads farther than the samples' hull facets the facet is the nearer.
-    const field = solidField(), base = sheet(8, 6, 0.01), R = rng(31), N = base.x.length;
+    // A box turned 30 degrees about y, so its edges along y lie off the lattice and the field (cell 5 mm) rounds them
+    // in by 1.65 mm: the samples stand on the true edge and their hull facets span it. A flat sheet across the
+    // top-front edge's bisector, 1.0-1.4 mm off it (r = 2 mm), its rows 1.25 mm apart across the edge.
+    const th = Math.PI / 6, C = Math.cos(th), Sn = Math.sin(th), ctr: V3 = [0.05, 0.04, 0.02], hb: V3 = [0.03, 0.025, 0.015];
+    const local = boxSdf([-hb[0], -hb[1], -hb[2]], hb);
+    const sdf = (p: readonly number[]) => { const d = [p[0]! - ctr[0], p[1]! - ctr[1], p[2]! - ctr[2]]; return local([C * d[0]! - Sn * d[2]!, d[1]!, Sn * d[0]! + C * d[2]!]); };
+    const field = buildClothSolidField({ parts: [{ kind: "sdf", sdf, lo: [0.0, 0.01, -0.02], hi: [0.09, 0.07, 0.06], mu: 0.3 }], lo: [-0.02, -0.02, -0.03], hi: [0.18, 0.12, 0.1], cell: 0.005, band: 0.06 });
+    // The bisector of the edge's two face normals (C, 0, -S) and (S, 0, C), and the direction across the edge.
+    const nb: V3 = [(C + Sn) / Math.SQRT2, 0, (C - Sn) / Math.SQRT2], tb: V3 = [(C - Sn) / Math.SQRT2, 0, (-Sn - C) / Math.SQRT2];
+    const base = sheet(8, 4, 0.01), R = rng(31), N = base.x.length;
     const mesh: OracleMesh = { ...base, x: f32(base.x.map((_, k) => {
-      const i = k % 9, j = Math.floor(k / 9), a = 0.6 * (j / 6 - 0.5), b = 0.6 * (i / 8 - 0.5), rb = 0.025 + 1.0e-3 + 4e-4 * R();
-      return [0.11 + rb * Math.sin(a), 0.05 + rb * Math.sin(b), rb * Math.cos(a) * Math.cos(b)] as V3;
+      const i = k % 9, j = Math.floor(k / 9), s = (j - 2) * 1.25e-3, off = 1.0e-3 + 4e-4 * R();
+      const e: V3 = [ctr[0] + C * hb[0] + Sn * hb[2], ctr[1] - 0.01 + 0.0025 * i, ctr[2] - Sn * hb[0] + C * hb[2]];
+      return [0, 1, 2].map(a => e[a]! + off * nb[a]! + s * tb[a]!) as unknown as V3;
     })) };
-    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.004, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 };
+    // The samples stand about a cell apart along the rounded edge and the reach (4 mm) takes in several hull edges and
+    // facets per vertex: the pair slots are authored for that.
+    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.004, pairCapacity: 4096 * N, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 };
     const { det, positions, oracle } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
     const c0 = await det.readCounters();
     assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
@@ -1328,14 +1338,14 @@ test("GPU hull facets: vertices over the ball keep the nearest of their field an
         withFacet++;
         const k = fe[0].y & 0x0fffffff;
         assert.ok(k < det.facetCapacity && d[k] < config.r && d[k] <= dmin + 1e-7 && phi >= d[k] - 1e-6, `vertex ${v}: facet ${k} at ${d[k]} (nearest ${dmin}, phi ${phi})`);
-        // mu lambda: the barrier's force at d times the solid's mu (0.5 on the ball) at the samples.
-        const lambda = new Float32Array(new Uint32Array([fe[0].z]).buffer)[0], want = -activation(d[k], config.r, config.kc)[1] * 0.5;
+        // mu lambda: the barrier's force at d times the solid's mu (0.3) at the samples.
+        const lambda = new Float32Array(new Uint32Array([fe[0].z]).buffer)[0], want = -activation(d[k], config.r, config.kc)[1] * 0.3;
         assert.ok(Math.abs(lambda - want) <= 2e-3 * want, `vertex ${v}: mu lambda ${lambda} vs ${want}`);
       }
       if (so.length) withField++;
       if (dmin < config.r - 1e-6 && phi > dmin + 1e-6) { nearer++; assert.equal(fe.length, 1, `vertex ${v}: facet at ${dmin} nearer than the field's ${phi}, no facet entry`); }
     }
-    console.log(`  hull facets: ${facets.length / 3} facets, ${S} samples; ${withFacet} vertices hold a facet entry, ${withField} a field entry (of ${N}); counters ${c0.hfPairs} facet contacts, ${c0.hfDropped} dropped`);
+    console.log(`  hull facets: ${facets.length / 3} facets, ${S} samples; ${withFacet} vertices hold a facet entry, ${withField} a field entry (of ${N}); counters ${c0.hfPairs} facet contacts, ${c0.hfDropped} dropped; ${c0.peakPairSlots} pair slots`);
     assert.ok(nearer >= 10 && withFacet === nearer && c0.hfPairs >= withFacet && c0.hfDropped > 0, `${nearer} vertices nearer a facet, ${withFacet} with its entry`);
     // The vertex block at positions nudged within a tenth of the clearance, against the oracle with the facet's samples.
     const X = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 1e-4, p[1] + (R() - 0.5) * 1e-4, p[2] + (R() - 0.5) * 1e-4] as V3));
