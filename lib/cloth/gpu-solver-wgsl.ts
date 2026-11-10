@@ -291,19 +291,23 @@ fn augmented(k: f32, lambda: f32, C: f32, inequality: bool) -> f32 {
 // A vertex's gradient and Hessian. No energy is summed here: the line search takes its energy changes in difference
 // form (vertexDelta, the star trials).
 struct System { g: vec3f, H: mat3x3f }
+// The magnitudes of the force terms the last vertexSystem call summed into g, per component (inertia, each face's
+// membrane and damping, the bending stencil, each strain-limit edge, then pins and contact together): the first-order
+// rounding of the f32 sum, which the Newton stop test's KKT tolerance takes (nwGradient, gpu-newton-wgsl.ts).
+var<private> gTerms: vec3f;
 
 // Vertex v's local objective at xv (other vertices at their current positions):
 // inertia, membrane, bending, damping, pins, strain limits${contact ? ', contact' : ''}.
 fn vertexSystem(v: u32, xv: vec3f) -> System {
   let h = hEff(); let vr = vertexRest(v); let w = vr.x / (h * h);
   let r = xv - state[seg(S_Y, v)].xyz;
-  var s = System(w * r, w * IDENTITY);
+  var s = System(w * r, w * IDENTITY); gTerms = abs(w * r);
   for (var j = topo[P.topo0.x + v]; j < topo[P.topo0.x + v + 1u]; j++) {
     let entry = topo[P.topo0.y + j]; let q = loadFace(entry >> 2u, entry & 3u, xv);
     let b = membraneBlock(q); let d = faceDamping(q);
-    s.g += b.g + d.g; s.H += b.H + d.H;
+    s.g += b.g + d.g; s.H += b.H + d.H; gTerms += abs(b.g) + abs(d.g);
   }
-  { let b = stencilBlock(v, xv); s.g += b.g; s.H += b.H; }
+  { let b = stencilBlock(v, xv); s.g += b.g; s.H += b.H; gTerms += abs(b.g); }
   return constraints(v, xv, s);
 }
 
@@ -371,9 +375,12 @@ fn contactTerms(v: u32, xv: vec3f, first: u32, stride: u32, s: ptr<function, Sys
 fn constraints(v: u32, xv: vec3f, s0: System) -> System {
   var s = s0;
   if (P.flags.z != 0u) {
-    for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); }
+    for (var j = topo[P.topo1.x + v]; j < topo[P.topo1.x + v + 1u]; j++) { let ge = s.g; s = edgeTerm(v, xv, topo[P.topo1.y + j] >> 2u, s); gTerms += abs(s.g - ge); }
   }
-  ${contact ? 's = pinTerms(v, xv, s); _ = contactTerms(v, xv, 0u, 1u, &s); return s;' : 'return pinTerms(v, xv, s);'}
+  let gp = s.g;
+  ${contact ? 's = pinTerms(v, xv, s); _ = contactTerms(v, xv, 0u, 1u, &s);' : 's = pinTerms(v, xv, s);'}
+  gTerms += abs(s.g - gp);
+  return s;
 }
 
 

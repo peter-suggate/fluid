@@ -507,10 +507,11 @@ test('ladder 2b: the cap-aware done rule: with a velocity tolerance so loose tha
   assert.ok(records[0]!.newton > 1, `tick 1 ended after ${records[0]!.newton} Newton iteration: the travel bounds binding there did not keep Newton running`);
 }));
 
-/** Ladder 2c's open defect (C1 RESULT 43): both runs end done at a 1 um move, 0.96 mm (tick 20) and 1.70 mm (tick 40)
- * apart on about 200 of the 256 vertices; the residual gradient there (|g| 1.8e-2 |mg|) sits wholly on the vertices
- * the sphere's surface samples hold (sampleFace entries). The step's result depends on the path. */
-const METRIC_TODO = "C1 open: the converged 16^2 sphere step depends on the projection metric (0.96 / 1.70 mm at ticks 20 / 40); the residual sits on the sample-face vertices (RESULT 43)";
+/** Ladder 2c's open defect (C1 RESULTs 43-44). With the KKT stop test (RESULT 44) neither run converges at tick 20:
+ * after 150 iterations the largest |P g_v| is 14x its f32 floor, and the ends are 0.96 mm apart. The Float64 objective
+ * (the oracle's frozen pairs, the sample-face pairs included) has one minimiser from x0 and from both GPU ends (within
+ * 0.41 um), 15.8 mm from them. So the GPU stalls short of a unique solution: there are not several minima. */
+const METRIC_TODO = "C1 open: on the 16^2 sphere Newton stalls 14x above the f32 KKT floor at tick 20 (ends 0.96 mm apart); the Float64 minimiser is unique, 15.8 mm away (RESULT 44)";
 
 /** One step of the 16^2 rotating sphere from the published state at `tick`, under `solver` (caps and tolerances
  * replaced); the result and the step's Newton record. */
@@ -525,8 +526,12 @@ async function sphereStepFrom(device: GPUDevice, tick: number, solver: (doc: Clo
   try {
     assert.ok(cloth.stepTo(start.time_s + CLOTH_SCENE_STEP_S), `the step from tick ${tick} was refused: ${cloth.failure?.message ?? 'pending'}`);
     const record = await newtonOf(gpuSolver), x = await gpuSolver.readPositions();
+    // The stop test's KKT residual at the last iterate (nwGradient's g.w): the largest |P g_v|^2 / floor_v^2.
+    const reader = gpuSolver as unknown as { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer };
+    const g4 = new Float32Array(await reader.readRange(reader.newtonWork, 0, 16 * (x.length / 3)));
+    let kkt = 0; for (let v = 3; v < g4.length; v += 4) kkt = Math.max(kkt, g4[v]!);
     assert.equal(cloth.failure, undefined, cloth.failure?.message);
-    return { record, x };
+    return { record, x, kkt: Math.sqrt(kkt) };
   } finally { cloth.destroy(); }
 }
 
@@ -546,7 +551,7 @@ test('ladder 2c: on the 16^2 sphere a step\'s result is independent of the trial
       if (d > 2 * tol) over++;
       if (d > gap) { gap = d; at = v; }
     }
-    lines.push(`tick ${tick}: Newton identity ${off.record.newton} (done ${+off.record.done}), H_vv ${hvv.record.newton} (done ${+hvv.record.done}); ends ${(1e6 * gap).toFixed(3)} um apart at vertex ${at}, ${over} vertices past 2 tol`);
+    lines.push(`tick ${tick}: Newton identity ${off.record.newton} (done ${+off.record.done}), H_vv ${hvv.record.newton} (done ${+hvv.record.done}); |g|/|mg| ${off.record.last.toExponential(2)} / ${hvv.record.last.toExponential(2)}; max |P g_v| / floor_v ${off.kkt.toFixed(2)} / ${hvv.kkt.toFixed(2)}; ends ${(1e6 * gap).toFixed(3)} um apart at vertex ${at}, ${over} vertices past 2 tol`);
     console.log(`[ladder 2c] ${lines.at(-1)}`);
     assert.ok(off.record.done && hvv.record.done, `tick ${tick}: a run did not converge in 150 iterations (identity ${off.record.newton}, H_vv ${hvv.record.newton})`);
     if (!(gap <= 2 * tol)) fails.push(`tick ${tick}: the identity and H_vv ends are ${(1e6 * gap).toFixed(3)} um apart at vertex ${at} (bound 2 um)`);

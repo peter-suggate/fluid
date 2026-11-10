@@ -247,24 +247,26 @@ fn nwPartialSum(lane: u32, wgi: u32, value: vec4f, base: u32) {
   if (lane == 0u) { nw[base + wgi] = nwRed[0]; }
 }
 // As nwSum / nwPartialSum with x summed and y the maximum (the line search's slope and largest |d_v|^2).
-fn nwSumMax(lane: u32, base: u32) -> vec2f {
-  var a = vec2f(0.0);
-  for (var i = lane; i < P.newton0.z; i += NW_WG) { let q = nw[base + i]; a = vec2f(a.x + q.x, max(a.y, q.y)); }
-  nwRed[lane] = vec4f(a, 0.0, 0.0);
+// (sum, max, sum, max) of four-component records.
+fn nwSumMax4(a: vec4f, b: vec4f) -> vec4f { return vec4f(a.x + b.x, max(a.y, b.y), a.z + b.z, max(a.w, b.w)); }
+fn nwSumMax(lane: u32, base: u32) -> vec4f {
+  var a = vec4f(0.0);
+  for (var i = lane; i < P.newton0.z; i += NW_WG) { a = nwSumMax4(a, nw[base + i]); }
+  nwRed[lane] = a;
   workgroupBarrier();
   for (var s = NW_WG / 2u; s > 0u; s >>= 1u) {
-    if (lane < s) { let o = nwRed[lane + s]; nwRed[lane] = vec4f(nwRed[lane].x + o.x, max(nwRed[lane].y, o.y), 0.0, 0.0); }
+    if (lane < s) { nwRed[lane] = nwSumMax4(nwRed[lane], nwRed[lane + s]); }
     workgroupBarrier();
   }
   if (lane == 0u) { nwOut = nwRed[0]; }
-  return workgroupUniformLoad(&nwOut).xy;
+  return workgroupUniformLoad(&nwOut);
 }
-fn nwPartialSumMax(lane: u32, wgi: u32, value: vec2f, base: u32) {
+fn nwPartialSumMax(lane: u32, wgi: u32, value: vec4f, base: u32) {
   workgroupBarrier();
-  nwRed[lane] = vec4f(value, 0.0, 0.0);
+  nwRed[lane] = value;
   workgroupBarrier();
   for (var s = NW_WG / 2u; s > 0u; s >>= 1u) {
-    if (lane < s) { let o = nwRed[lane + s]; nwRed[lane] = vec4f(nwRed[lane].x + o.x, max(nwRed[lane].y, o.y), 0.0, 0.0); }
+    if (lane < s) { nwRed[lane] = nwSumMax4(nwRed[lane], nwRed[lane + s]); }
     workgroupBarrier();
   }
   if (lane == 0u) { nw[base + wgi] = nwRed[0]; }
@@ -330,7 +332,7 @@ fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u
   if (ctl.x != 0.0) { return; }
   let v = wgIndex(wg, nwg) * NW_WG + lane;
   if (v >= P.n.x) { return; }
-  var g = vec3f(0.0); var M0 = vec4f(0.0); var M1 = vec4f(0.0);
+  var g = vec3f(0.0); var M0 = vec4f(0.0); var M1 = vec4f(0.0); var gFloor = 0.0;
   // The row's blocks and bending entries, assembled in function-local arrays (measured fastest: 334 us at 150^2,
   // against 574 for registers selected by a switch and 750 for module-private arrays with direct entry writes).
   var Hb: array<mat3x3f, PCG_MAXK1>;
@@ -339,6 +341,9 @@ fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u
     let s = vertexSystem(v, pos(v));
     g = s.g;
     let H = s.H; let det = determinant(H);
+    // The f32 floor of g_v (the stop test's KKT tolerance): the rounding of the terms' sum, eps |terms|, and of the
+    // position the iterate can hold, |H_vv| eps |x_v| (the largest column of the vertex block bounds |H_vv|).
+    gFloor = 4.0 * EPS32 * (length(gTerms) + max(length(H[0]), max(length(H[1]), length(H[2]))) * length(pos(v)));
     if (det > 0.0 && abs(det) <= 3.0e38) {
       let c0 = cross(H[1], H[2]); let c1 = cross(H[2], H[0]); let c2 = cross(H[0], H[1]);
       M0 = vec4f(c0.x, c0.y, c0.z, c1.y) / det; M1 = vec4f(c1.z, c2.z, 0.0, 0.0) / det;
@@ -358,7 +363,9 @@ fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u
       M0 = vec4f(Mt[0][0], Mt[0][1], Mt[0][2], Mt[1][1]); M1 = vec4f(Mt[1][2], Mt[2][2], 0.0, 0.0);
     }
   } else { nw[nseg(NW_PROJ + 1u, v)] = vec4f(0.0); }` : ''}
-  nw[nseg(${S.g}u, v)] = vec4f(g, 0.0); nw[nseg(${S.r0}u, v)] = vec4f(r0, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
+  // g.w: the KKT residual against the floor, |P g_v|^2 / floor^2 (P g_v the gradient on v's free directions, the active
+  // set's normals kept by the KKT sign); at most 1 at every vertex is the stop test's stationarity (nwChoose).
+  nw[nseg(${S.g}u, v)] = vec4f(g, select(0.0, dot(r0, r0) / (gFloor * gFloor), gFloor > 0.0)); nw[nseg(${S.r0}u, v)] = vec4f(r0, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
   nw[nseg(${S.d}u, v)] = vec4f(0.0); nw[nseg(${S.p}u, v)] = vec4f(0.0);
   nw[nseg(${S.m0}u, v)] = M0; nw[nseg(${S.m1}u, v)] = M1;
   // The row in sliced-ELL order (a pinned row and the patch's padding slots: zero blocks on a valid column).
@@ -745,10 +752,10 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   if (ctl.x != 0.0) { return; }
   let wgi = wgIndex(wg, nwg); let v = wgi * NW_WG + lane;
   nwE = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwF = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwS = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
-  var dmax = 0.0; var cut = 0.0; var act = vec4f(0.0); var trav = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
+  var dmax = 0.0; var cut = 0.0; var kkt = 0.0; var act = vec4f(0.0); var trav = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
   if (v < P.n.x) {
-    let h = hEff(); let xv = pos(v); let dv = nwD(v); let gv = nw[nseg(${S.g}u, v)].xyz;
-    dmax = dot(dv, dv);
+    let h = hEff(); let xv = pos(v); let dv = nwD(v); let g4 = nw[nseg(${S.g}u, v)]; let gv = g4.xyz;
+    dmax = dot(dv, dv); kkt = g4.w;
     ${contact ? `let pr = nw[nseg(NW_PROJ + 1u, v)]; act = vec4f(select(0.0, 1.0, pr.w > 0.0), pr.w, pr.z, 0.0);` : ''}
     // The arc cuts v's full step (its certificates bound it): a stall of the whole arc is then no convergence.
     ${contact ? `cut = select(0.0, 1.0, nw[nseg(${S.d}u, v)].w != 0.0);
@@ -860,7 +867,7 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   nwPartialSum(lane, wgi, nwF[1], base + 3u * P.newton0.z);
   nwPartialSum(lane, wgi, nwS[0], base + 4u * P.newton0.z);
   nwPartialSum(lane, wgi, nwS[1], base + 5u * P.newton0.z);
-  nwPartialSumMax(lane, wgi, vec2f(cut, dmax), base + 6u * P.newton0.z);
+  nwPartialSumMax(lane, wgi, vec4f(cut, dmax, 0.0, kkt), base + 6u * P.newton0.z);
   ${contact ? `nwPartialSum(lane, wgi, act, base + 7u * P.newton0.z);
   nwPartialSum(lane, wgi, trav[0], base + 8u * P.newton0.z);
   nwPartialSum(lane, wgi, trav[1], base + 9u * P.newton0.z);` : ''}
@@ -960,7 +967,10 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   // and the contact hook's re-detection gives those vertices new certificates about the iterate.
   // In a trust-region iteration only an interior step (the solve ended inside the region, tn.y 0) measures the Newton
   // step: a step on the boundary is as small as Delta, not as the iterate's distance to the solution.
-  let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0 && !(region && tn.y != 0.0);
+  // Nor is a small step convergence while the iterate is not stationary (Claude's ruling on RESULT 43: stiff barriers
+  // keep steps short at |g| far above the f32 floor): every vertex's KKT residual (sm.w, nwGradient's g.w: the gradient
+  // on its free directions, the multipliers of its kept normals positive) within the f32 floor of its gradient.
+  let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0 && sm.w <= 1.0 && !(region && tn.y != 0.0);
   // (A rejected trust-region step is no stall: Delta shrinks and Newton runs on.)
   let stalled = chosen == 0.0 && !(sm.x > 0.0) && !region;
   nw[nwControl()] = vec4f(select(0.0, 1.0, stalled || small), 0.0, chosen, ctl.w + 1.0);

@@ -2599,3 +2599,64 @@ No 150^2 acceptance.
 **Gate** (HEAD 8d076e74 plus this commit; cloth-ladder with 2c, -gpu-solver, -analytic, contact ladder / gpu / body):
 74 tests, 72 pass, 0 fail, 2 todo (ladder 2c above; C2's H_vv sphere). check:types clean; test:unit 2 foreign
 failures (paused-rigid-publication, reservoir-particle-cost).
+
+## 2026-11-10 RESULT (44): the KKT stop test (Claude's ruling 1); the Float64 step problem has one minimiser
+
+Claude's rulings on (43):
+1. The stop test is the first defect. Done must also require the KKT residual below a stated f32 floor.
+2. Take both ladder-2c ends to Float64, and flag the sample spacing to C2.
+3. Feed the GPU's entries to the Float64 objective, and drop the GPU frozen-set baseline.
+4. No 150^2 acceptance yet.
+
+**The stop test.**
+- A small step (alpha max \|d_v\| <= tol h~, no travel-held vertex) is done only if every vertex is stationary: its KKT
+  residual \|P g_v\| is at most the f32 floor of its gradient.
+- P is the active set's projector, built from the normals the KKT release keeps (positive multipliers), so P g_v is the
+  gradient on v's free directions.
+- The floor is floor_v = 4 eps32 (\|Sigma\|terms\|\| + \|H_vv\| \|x_v\|):
+  - Sigma\|terms\| is the componentwise sum of the magnitudes of the force terms vertexSystem adds: inertia, each face's
+    membrane and damping, the bending stencil, each strain-limit edge, and pins plus contact. It is the first-order
+    rounding of the f32 sum.
+  - \|H_vv\| \|x_v\| (the vertex block's largest column, times the vertex's local position) is the rounding of the
+    position an f32 iterate can hold.
+  - The 4 is the Armijo floor's.
+- Implementation:
+  - gpu-solver-wgsl.ts accumulates the terms in a private gTerms.
+  - nwGradient writes \|P g_v\|^2 / floor_v^2 in g.w.
+  - nwTrial carries the maximum through the (sum, max) partial, now four components.
+  - nwChoose requires sm.w <= 1.
+- **Scope.** The scenes' own Newton settings (velocityTolerance 0) never take the small-step exit, so production steps
+  are unchanged. The test applies wherever a velocity tolerance is set.
+- **Ladder 1a** (corner-held sheet against the converged oracle, stop at a 1 um move): the stop now lands much nearer
+  the solution. Line search with forcing: 0.30 -> 0.06 um off the oracle (PCG 269 -> 277 per step). Hybrid:
+  0.49 -> 0.07 um (692 -> 792).
+
+**Ladder 2c with the stop test.**
+- Tick 20: neither metric converges in 150 iterations. The largest \|P g_v\| / floor_v is 14.1 / 14.0 (identity / H_vv),
+  \|g\|/\|mg\| is 1.9e-2 / 1.6e-2, and the ends are still 0.96 mm apart.
+- So the earlier "done" was a stall short of stationarity, and the new test reports it as one. The check stays a todo
+  with this attribution.
+
+**Ruling 2, step 1: Float64 from both GPU ends.**
+- Setup: m7/state-sphere-16-t20.json holds the published state plus both GPU ends (cap 150, KKT stop). The oracle runs A
+  at BDF2 with BODY=field, SAMPLES=1 (49778 sample-face pairs within rc = 112 mm, 22 pairs within r at x0) and the scene's
+  kc of 19980 N/m (the derived kc at 16^2). The new START=gpu \| gpuHvv option starts it from a GPU end.
+- From x0, from the identity end and from the H_vv end, the oracle converges in 26 iterations each. The three ends agree
+  within 0.41 um.
+- **This objective has one minimiser, not several**, so the sample bumps make no spurious minima on this state.
+- That minimiser is 15.8 mm from both GPU ends (median 2.7 mm). Float64 Newton's first step from a GPU end moves 11.5 mm
+  (\|g\| 19). The GPU ends are far from stationary in it.
+- **The largest gaps are not at the contacts.** They are on the free hanging corner (i 0-2, j 12-14): 10-14 mm, with
+  the GPU higher. The sample-face vertices agree within 0.6 mm.
+- **The strain-limit duals are part of it, not all of it.** The oracle holds the duals at their warm start, while the
+  GPU steps them each iteration. Freezing the GPU's duals too (scratch; the state then differs, 12.9 mm at the start):
+  - both metrics converge under the KKT test, identity 82 and H_vv 73 iterations, ends 0.18 mm apart;
+  - they are still 12.5 mm from that state's oracle minimiser (median 2.2 mm), again at the corner;
+  - so with the duals frozen, the two objectives themselves differ at the corner.
+- That is ruling 3's attribution: the GPU's entries (self pairs at a folding corner, as the first suspect) in the
+  Float64 objective.
+
+**To C2:** the coordinator's sample-spacing question has been sent, with the measurement that the Float64 minimiser is
+unique on this state.
+
+**Gate** (HEAD a3d820ea plus this commit): 74 tests, 72 pass, 0 fail, 2 todo (ladder 2c; C2's H_vv sphere).
