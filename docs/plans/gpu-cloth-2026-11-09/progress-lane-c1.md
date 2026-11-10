@@ -2197,3 +2197,42 @@ contention (936 ms/tick); three reruns of it on the same build (two with subgrou
 off) rebounded 0.0019 / 0.0019 / 0.0018 and pass, as every earlier gate did (0.0018-0.0019). Not reproduced; the
 onset restart is a discrete decision, so a run-to-run difference that large points at an order-dependent input to
 it (atomics in detection?), recorded here to watch, not attributed.
+
+## 2026-11-10 RESULT (36): Fix A landed - the projected-Newton active set, rebuilt every iteration; the ledge strip's blocking was carried travel bounds
+
+**The dump** (A3 + scratch instrumentation of ogcProjectActive's kinds and nwActiveSet's multipliers; logs
+fluid-scratch/cloth-c1/m7/active-dump{1,2}.log). At tick 1 the strip hangs at y 502.3 mm over a 500 mm ledge top: 2.3 mm
+of gap against r = 1 mm, so no vertex is in contact. Yet 11-18 vertices held normals from iteration 2 on:
+
+| vertices | kind | normal | mu (N) |
+|---|---|---|---|
+| left end v0 / v49 / v98, and others along the top | static piece's ball | (+-1, 0, 0) | 0.2-2.2 |
+| the columns at x = -14 and -9 mm | static orthant faces 2 / 3 | (-+1, 0, 0) | 0.3-5.9 |
+| the same columns | static orthant face 0 | (-0.45, -0.89, 0) | ~1e-8 |
+| v33, v85 (overhang) | plane records (self) | (-0.8, 0, 0.6) in the sheet plane | 0.02-0.95 |
+
+The KKT sign is right: the contraction force pushes into each (mu > 0). They are the certified set's travel bounds (the
+piece's validity ball, its Lipschitz faces at 1.3 mm of true clearance, in-plane self planes), not contacts. The edges
+carrying the high lambda (1.4-1.5 N, x = -175 .. -21 mm) hold no normal at all: free edges whose chain the held columns
+block. A3's defect was its bookkeeping: it carried normals across certificate sets (the freshest first, older ones kept
+until their mu turned), so a travel bound outlived the re-detection that replaced it.
+
+**The fix (this commit, "A8").** nwApply stores, for every free vertex, the normals of the certificates binding its
+accepted trial (at a stall the smallest trial's) in that iteration's filter set, replacing the last iteration's;
+nwActiveSet reduces them to an independent set and releases by the KKT sign; none at a step's first iteration. Strip
+(C2's test), tick-1 strain and the lambda peak against the 1.04 N bound:
+
+| variant | lambda peak | strain t1 | |
+|---|---|---|---|
+| HEAD (no A) | 0.35 N | 0.349 | pass |
+| A3 (carried) | 1.48 N | 0.443 | fail |
+| A8 (rebuilt) | 0.29 N | 0.155 | pass |
+| contact-only normals (scratch: field at q < r, no balls or records) | 0.35 N | 0.349 | pass (A inactive at t1) |
+
+Travel normals are kept in the active set: projected off for one iteration they make the direction slide along the bound
+instead of being cut, which is why A8 contracts faster than HEAD. They cannot end the step: C2 adds OgcActive.travel and
+the cap-aware done rule (item 2, next) refuses done while a travel bound with mu > 0 binds.
+
+Gate (cloth-ladder, cloth-gpu-solver, cloth-analytic, cloth-contact-ladder/-gpu/-body on ae5a12a2 + this): 62 tests,
+61 pass, 0 fail, 1 todo (C2's incline item 5); the contact ladder's 3-run determinism (flat 16^2, sphere 16^2) is
+bit-identical. check:types clean; test:unit 1725 pass, 1 fail (the known foreign reservoir-particle-cost test).

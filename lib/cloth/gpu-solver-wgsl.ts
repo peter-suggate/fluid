@@ -46,6 +46,7 @@ export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
   const contact = !!options.contactBlock, restart = contact;
   // The projected arc's Pi_v is C2's ogcProject (a block without it is refused).
   if (contact && !options.contactBlock!.includes('fn ogcProjectTrial(')) throw new Error('Cloth solver contact block lacks ogcProjectTrial (the projected arc search needs Pi_v at each trial level)');
+  if (contact && !options.contactBlock!.includes('fn ogcProjectActive(')) throw new Error('Cloth solver contact block lacks ogcProjectActive (the projected Newton active set needs the binding certificate normals)');
   return (options.subgroups ? 'enable subgroups;\n' : '') + /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)

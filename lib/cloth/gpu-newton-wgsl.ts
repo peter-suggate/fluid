@@ -3,7 +3,12 @@
  * step per call, no substeps: Newton iterations on the step's objective G (BDF2 inertia, membrane, Bergou bending,
  * frozen-tangent damping, grab spring), each solving H d = -g by preconditioned conjugate gradients and taking the
  * largest Armijo step of 1, 1/2, ..., 1/128 on G. With contact the trial points are the projected arc x(alpha)_v =
- * Pi_v(x_v + alpha d_v), Pi_v onto vertex v's certified set (nwProject), with the slope g.(x(alpha) - x) of each trial. Pins are Dirichlet DOFs held at their frame targets (their rows and
+ * Pi_v(x_v + alpha d_v), Pi_v onto vertex v's certified set (nwProject), with the slope g.(x(alpha) - x) of each trial,
+ * and the direction is projected Newton's (Bertsekas): each vertex's active set is the outward normals of the
+ * certificates binding it at the iterate (up to three, from the latest filter's set: ogcProjectActive at the accepted
+ * trial, rebuilt every iteration, never carried across certificate sets) less those whose KKT multipliers are not
+ * positive, and H d = -g is solved in the reduced space, P H P d = -P g with P_v the projection off v's active normals
+ * (nwGradient, pcgStep, pcgSolve). Pins are Dirichlet DOFs held at their frame targets (their rows and
  * directions are zero). Everything is decided on the GPU: convergence and stalls set control flags that every later
  * kernel of the step reads, so the CPU encodes fixed caps and never reads back.
  *
@@ -20,21 +25,25 @@
  * beta. r, w and s ping-pong so a dispatch reads the previous iteration's values while it writes its own.
  *
  * The `nw` buffer (vec4 records): per-vertex segments (stride Np) g, r (two), w (two), s (two), d, p, M^-1 (two
- * records), with contact the trial moves (one per trial), then 3 records per face, the assembled blocks and bending
- * entries, the line-search partials (W = workgroups of a per-vertex dispatch each, 7 arrays), the PCG partials (3 arrays of one record per patch), the PCG scalars
+ * records), with contact the trial moves (one per trial), the active normals (three) and the projector P (two records:
+ * xx, xy, xz, yy; yz, zz, the changes, the active count), then 3 records per face, the assembled blocks and bending
+ * entries, the line-search partials (W = workgroups of a per-vertex dispatch each, 8 arrays), the PCG partials (3 arrays of one record per patch), the PCG scalars
  * (gamma_0 and the solve's stop tolerance^2, then alpha by iteration mod 2), then the control record (Newton done, PCG
  * done, accepted step, Newton iteration), then |g|^2 at the first and latest Newton iterate, the latest PCG stop
- * tolerance^2 (z, the forcing's eta^2) and the step's PCG iterations (w).
+ * tolerance^2 (z, the forcing's eta^2) and the step's PCG iterations (w), then with contact the latest iteration's
+ * active set (control + 2: vertices with an active normal, normals kept, normals released by the KKT sign, 0).
  */
 import { CLOTH_LINE_SEARCH } from './oracle';
 
 export const CLOTH_NEWTON_SEGMENTS = { g: 0, r0: 1, r1: 2, w0: 3, w1: 4, s0: 5, s1: 6, d: 7, p: 8, m0: 9, m1: 10, moves: 11 } as const;
 /** Line-search trials per Newton iteration: steps 1, 1/2, ..., 2^-(TRIALS-1). */
 export const CLOTH_NEWTON_TRIALS = 8;
-/** Per-vertex segments: the 11 solver vectors, then with contact one projected move per trial (nwProject). */
-export function clothNewtonSegmentCount(contact: boolean): number { return CLOTH_NEWTON_SEGMENTS.moves + (contact ? CLOTH_NEWTON_TRIALS : 0); }
-/** Line-search partial arrays (each W records): energy changes (2), rounding floors (2), slopes (2), max |d|^2. */
-export const CLOTH_NEWTON_TRIAL_RECORDS = 7;
+/** With contact, after the trial moves: the active set's normals (3 segments) and projector (2). */
+export const CLOTH_NEWTON_ACTIVE = { normals: CLOTH_NEWTON_SEGMENTS.moves + CLOTH_NEWTON_TRIALS, projector: CLOTH_NEWTON_SEGMENTS.moves + CLOTH_NEWTON_TRIALS + 3 } as const;
+/** Per-vertex segments: the 11 solver vectors, then with contact one projected move per trial (nwProject) and the active set. */
+export function clothNewtonSegmentCount(contact: boolean): number { return CLOTH_NEWTON_SEGMENTS.moves + (contact ? CLOTH_NEWTON_TRIALS + 5 : 0); }
+/** Line-search partial arrays (each W records): energy changes (2), rounding floors (2), slopes (2), max |d|^2, the active set. */
+export const CLOTH_NEWTON_TRIAL_RECORDS = 8;
 /** PCG partial arrays (one record per patch each, by iteration mod 3), then the PCG scalar records. */
 export const CLOTH_PCG_PARTIALS = 3;
 export const CLOTH_PCG_SCALARS = 3;
@@ -81,6 +90,63 @@ fn nwMove(j: u32, k: u32, alpha: f32) -> vec3f {
 fn nwD(j: u32) -> vec3f { return nw[nseg(${S.d}u, j)].xyz; }
 // d_j with its cut mark (w != 0: the arc's moves of j are not alpha d_j; always 0 without contact).
 fn nwD4(j: u32) -> vec4f { return nw[nseg(${S.d}u, j)]; }
+${contact ? `
+// ---------------------------------------------------------------- the active set (projected Newton)
+const NW_ACTIVE = ${CLOTH_NEWTON_ACTIVE.normals}u;
+const NW_PROJ = ${CLOTH_NEWTON_ACTIVE.projector}u;
+// P w at vertex v: the projection off its active normals (w itself with none).
+fn nwProjectP(v: u32, w: vec3f) -> vec3f {
+  let b = nw[nseg(NW_PROJ + 1u, v)];
+  if (b.w == 0.0) { return w; }
+  let a = nw[nseg(NW_PROJ, v)];
+  return vec3f(a.x * w.x + a.y * w.y + a.z * w.z, a.y * w.x + a.w * w.y + b.x * w.z, a.z * w.x + b.x * w.y + b.y * w.z);
+}
+// Gram-Schmidt of N[0..cnt): orthonormal rows, a (numerically) dependent one zero.
+fn nwOrtho(N: array<vec3f, 3>, cnt: u32) -> array<vec3f, 3> {
+  var Q: array<vec3f, 3>;
+  for (var i = 0u; i < cnt; i++) {
+    var r = N[i];
+    for (var j = 0u; j < i; j++) { r -= dot(r, Q[j]) * Q[j]; }
+    let l = length(r); Q[i] = select(vec3f(0.0), r / l, l > NW_RANK);
+  }
+  return Q;
+}
+// The rank floor of the active normals (unit vectors): a normal within asin(1e-2) of the others' span adds nothing.
+const NW_RANK = 1e-2;
+// Vertex v's active set at the Newton iterate with gradient g: the normals the last nwApply stored (the certificates
+// binding the iterate in the latest filter's set; none at the step's first iteration, whose certificates are the
+// step's own), reduced to an independent set, then released by the KKT sign: the multipliers
+// mu = (N^T N)^-1 N^T (-g) of the force against the normals, every normal with mu <= 0 dropped and mu recomputed on
+// the rest. Writes P = I - Q Q^T (projector records: xx, xy, xz, yy; yz, zz, the normals released, the count kept;
+// count 0: P = I).
+fn nwActiveSet(v: u32, g: vec3f, first: bool) -> mat3x3f {
+  var N: array<vec3f, 3>; var cnt = 0u; var stored = 0.0;
+  for (var i = 0u; i < 3u; i++) {
+    let a = nw[nseg(NW_ACTIVE + i, v)];
+    if (first || a.w == 0.0) { continue; }
+    stored += 1.0;
+    var r = a.xyz; let Q = nwOrtho(N, cnt);
+    for (var j = 0u; j < cnt; j++) { r -= dot(r, Q[j]) * Q[j]; }
+    if (length(r) > NW_RANK) { N[cnt] = a.xyz; cnt++; }
+  }
+  for (var round = 0u; round < 3u && cnt > 0u; round++) {
+    var G = IDENTITY; var b = vec3f(0.0);
+    for (var i = 0u; i < cnt; i++) { b[i] = -dot(N[i], g); for (var j = 0u; j < cnt; j++) { G[i][j] = dot(N[i], N[j]); } }
+    // Cramer on the Gram matrix (identity past cnt): the signs of mu only.
+    let det = determinant(G);
+    let mu = vec3f(determinant(mat3x3f(b, G[1], G[2])), determinant(mat3x3f(G[0], b, G[2])), determinant(mat3x3f(G[0], G[1], b))) / det;
+    var K: array<vec3f, 3>; var k = 0u;
+    for (var i = 0u; i < cnt; i++) { if (mu[i] > 0.0) { K[k] = N[i]; k++; } }
+    if (k == cnt) { break; }
+    N = K; cnt = k;
+  }
+  let Q = nwOrtho(N, cnt);
+  var Pm = IDENTITY;
+  for (var i = 0u; i < cnt; i++) { Pm -= outer(Q[i], Q[i]); }
+  nw[nseg(NW_PROJ, v)] = vec4f(Pm[0][0], Pm[0][1], Pm[0][2], Pm[1][1]);
+  nw[nseg(NW_PROJ + 1u, v)] = vec4f(Pm[1][2], Pm[2][2], stored - f32(cnt), f32(cnt));
+  return Pm;
+}` : ''}
 
 var<workgroup> nwRed: array<vec4f, ${workgroup}>;
 var<workgroup> nwOut: vec4f;
@@ -199,7 +265,17 @@ fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u
     }
     nwAssembleRow(v, &Hb, &Bw);
   }
-  nw[nseg(${S.g}u, v)] = vec4f(g, 0.0); nw[nseg(${S.r0}u, v)] = vec4f(-g, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
+  var r0 = -g;
+  ${contact ? `// The reduced system: r0 = -P g and the preconditioner P M^-1 P (pinned rows: no set, P = I on zero rows).
+  if (!nwPinned(v)) {
+    let Pm = nwActiveSet(v, g, ctl.w == 0.0);
+    if (nw[nseg(NW_PROJ + 1u, v)].w > 0.0) {
+      r0 = Pm * r0;
+      let Mt = Pm * mat3x3f(M0.x, M0.y, M0.z, M0.y, M0.w, M1.x, M0.z, M1.x, M1.y) * Pm;
+      M0 = vec4f(Mt[0][0], Mt[0][1], Mt[0][2], Mt[1][1]); M1 = vec4f(Mt[1][2], Mt[2][2], 0.0, 0.0);
+    }
+  } else { nw[nseg(NW_PROJ + 1u, v)] = vec4f(0.0); }` : ''}
+  nw[nseg(${S.g}u, v)] = vec4f(g, 0.0); nw[nseg(${S.r0}u, v)] = vec4f(r0, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
   nw[nseg(${S.d}u, v)] = vec4f(0.0); nw[nseg(${S.p}u, v)] = vec4f(0.0);
   nw[nseg(${S.m0}u, v)] = M0; nw[nseg(${S.m1}u, v)] = M1;
   // The row in sliced-ELL order (a pinned row and the patch's padding slots: zero blocks on a valid column).
@@ -411,7 +487,7 @@ fn pcgDir(j: u32) -> vec3f {
       w += e.y * pcgU(bitcast<u32>(e.x)) + e.w * pcgU(bitcast<u32>(e.z));
     }
     // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
-    ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+    ${contact ? 'if (!nwPinned(v)) { w = nwProjectP(v, w + ogcVertexContactHvLanes(v, 0u, 1u)); }' : ''}
     nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
   }
   ${reduce('vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0)')}
@@ -473,7 +549,7 @@ fn pcgDir(j: u32) -> vec3f {
         let e = nw[bends + m * PCG_PATCH + lane];
         w += e.y * pcgULocal(bitcast<u32>(e.x)) + e.w * pcgULocal(bitcast<u32>(e.z));
       }
-      ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+      ${contact ? 'if (!nwPinned(v)) { w = nwProjectP(v, w + ogcVertexContactHvLanes(v, 0u, 1u)); }' : ''}
     }
     // The reduction's barriers also order this iteration's reads of the staged u before the next one overwrites it;
     // pcgOut is read after the next iteration's uniform load (a barrier).
@@ -518,10 +594,11 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   if (ctl.x != 0.0) { return; }
   let wgi = wgIndex(wg, nwg); let v = wgi * NW_WG + lane;
   nwE = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwF = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwS = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
-  var dmax = 0.0; var cut = 0.0;
+  var dmax = 0.0; var cut = 0.0; var act = vec4f(0.0);
   if (v < P.n.x) {
     let h = hEff(); let xv = pos(v); let dv = nwD(v); let gv = nw[nseg(${S.g}u, v)].xyz;
     dmax = dot(dv, dv);
+    ${contact ? `let pr = nw[nseg(NW_PROJ + 1u, v)]; act = vec4f(select(0.0, 1.0, pr.w > 0.0), pr.w, pr.z, 0.0);` : ''}
     // The arc cuts v's full step (its certificates bound it): a stall of the whole arc is then no convergence.
     ${contact ? `cut = select(0.0, 1.0, nw[nseg(${S.d}u, v)].w != 0.0);` : ''}
     let w = vertexRest(v).x / (h * h); let rv = xv - state[seg(S_Y, v)].xyz; let gs = grabSpring(v, xv);
@@ -631,6 +708,7 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   nwPartialSum(lane, wgi, nwS[0], base + 4u * P.newton0.z);
   nwPartialSum(lane, wgi, nwS[1], base + 5u * P.newton0.z);
   nwPartialSumMax(lane, wgi, vec2f(cut, dmax), base + 6u * P.newton0.z);
+  ${contact ? 'nwPartialSum(lane, wgi, act, base + 7u * P.newton0.z);' : ''}
 }
 
 // One workgroup: the largest trial whose move descends (g.(x(alpha) - x) < 0) and passes Armijo along it, and the next
@@ -645,6 +723,8 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   let F0 = nwSum(lane, base + 2u * P.newton0.z); let F1 = nwSum(lane, base + 3u * P.newton0.z);
   let S0 = nwSum(lane, base + 4u * P.newton0.z); let S1 = nwSum(lane, base + 5u * P.newton0.z);
   let sm = nwSumMax(lane, base + 6u * P.newton0.z);
+  ${contact ? `let act = nwSum(lane, base + 7u * P.newton0.z);
+  if (lane == 0u) { nw[nwControl() + 2u] = act; }` : ''}
   if (lane != 0u) { return; }
   var chosen = 0.0; var alpha = 1.0;
   for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
@@ -667,6 +747,20 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   // The accepted trial's move (a converged step's too; once Newton is done d = 0 and this moves nothing). chosen = 2^-k exactly.
   // Newton done: d = 0 (its w too, so no stored move is read again), so the capped iterations left (all early exits, the
   // control record keeping its last step) move nothing and give the contact filter and re-detection nothing to act on.
+  ${contact ? `// The active set the next iteration starts from: the outward normals of the certificates binding the vertex's
+  // accepted trial point (at a stall, the smallest trial's: the iterate stays) in this iteration's filter's set
+  // (ogcProjectActive: up to three independent, the cap apart - the round's trust region bounds travel, not the set),
+  // replacing the last iteration's: a normal from an earlier certificate set is not a constraint of the next one
+  // (re-detection runs after nwApply and replaces the set). A held vertex (no move) blocks its whole direction d.
+  if (ctl.x == 0.0 && !nwPinned(v)) {
+    let D = nwD4(v);
+    var a = exp2(-f32(${CLOTH_NEWTON_TRIALS - 1}u));
+    if (ctl.z > 0.0) { a = ctl.z; }
+    let x = pos(v); let act = ogcProjectActive(v, x, x + a * D.xyz, a);
+    var N = array<vec3f, 3>(act.n0, act.n1, act.n2); var cnt = act.count;
+    if (act.held) { cnt = select(0u, 1u, any(D.xyz != vec3f(0.0))); N[0] = select(vec3f(0.0), normalize(D.xyz), cnt > 0u); }
+    for (var i = 0u; i < 3u; i++) { nw[nseg(NW_ACTIVE + i, v)] = select(vec4f(0.0), vec4f(N[i], 1.0), i < cnt); }
+  }` : ''}
   if (ctl.z > 0.0) { positions[v] = vec4f(pos(v) + nwMove(v, u32(round(-log2(ctl.z))), ctl.z), positions[v].w); }
   if (ctl.x != 0.0) { nw[nseg(${S.d}u, v)] = vec4f(0.0); }
 }
@@ -674,8 +768,9 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
 // After each applied Newton iteration (not once Newton is done): the AVBD dual update of every strain-limit edge, so
 // the next iteration's gradient carries the new multipliers and the residual test sees any constraint still violated.
 // The method of multipliers steps a dual only where the primal could respond: with contact, not in an iteration that
-// moved nothing (the stall), and not on an edge an endpoint of which the arc cut (its chosen move is not alpha d), since
-// there the violation measures the projection, not the multiplier, and ascent would ramp lambda and k without bound.
+// moved nothing (the stall), and not on an edge an endpoint of which the arc cut (its chosen move is not alpha d) or the
+// active set holds (d projected off its normals: the cut the reduced direction no longer makes), since there the
+// violation measures the projection, not the multiplier, and ascent would ramp lambda and k without bound.
 @compute @workgroup_size(${workgroup}) fn nwEdgeDuals(@builtin(global_invocation_id) id: vec3u) {
   let ctl = nw[nwControl()];
   if (ctl.x != 0.0) { return; }${contact ? `
@@ -684,8 +779,10 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   if (nwChosenCut(ev.x, ctl.z) || nwChosenCut(ev.y, ctl.z)) { return; }` : ''}
   updateEdgeDual(id.x);
 }${contact ? `
-// Whether the arc cut vertex v's move at the chosen trial alpha (a power of two, as nwApply reads it).
+// Whether vertex v's move at the chosen trial alpha (a power of two, as nwApply reads it) is not free: an active normal
+// holds it, or the arc cut it.
 fn nwChosenCut(v: u32, alpha: f32) -> bool {
+  if (nw[nseg(NW_PROJ + 1u, v)].w > 0.0) { return true; }
   let D = nwD4(v);
   if (D.w == 0.0) { return false; }
   return any(nw[nseg(${S.moves}u + u32(round(-log2(alpha))), v)].xyz != alpha * D.xyz);
