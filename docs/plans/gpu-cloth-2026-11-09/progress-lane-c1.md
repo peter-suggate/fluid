@@ -2236,3 +2236,66 @@ the cap-aware done rule (item 2, next) refuses done while a travel bound with mu
 Gate (cloth-ladder, cloth-gpu-solver, cloth-analytic, cloth-contact-ladder/-gpu/-body on ae5a12a2 + this): 62 tests,
 61 pass, 0 fail, 1 todo (C2's incline item 5); the contact ladder's 3-run determinism (flat 16^2, sphere 16^2) is
 bit-identical. check:types clean; test:unit 1725 pass, 1 fail (the known foreign reservoir-particle-cost test).
+
+## 2026-11-10 RESULT (37): the t25 stall attributed - the per-step problem is well posed; two method mechanisms
+
+Float64 frozen-set oracle (pP/tests/scratch-newton-contact.test.ts) on sphere-32 t25: PSD model + line search,
+projection floor delta = 0.002 r, PSELF (each self pair's half gap per vertex), no cap, PCG to 1e-24 relative.
+
+**Well posed.** x is never outside its own set (0 constraints, every iteration); no empty or conflicting set; |P g| = |g|;
+the one vertex active at x (v16, field) has mu = 0. Energy E 1.5111 falling ~1e-5 per iteration (elastic 1.4259,
+barrier 7.8e-3, rest 7.74e-2); 8-9 vertices cut per accepted trial; one on the delta floor (v16). Not every step is a
+boundary step.
+
+**Mechanism 1: the Euclidean per-vertex projection deletes a floor vertex's escape.** v16 at phi 2 um (the floor) under
+the 12.5 N outward barrier force (H_yy = 6.25e6, H_xx = 37 N/m): Newton's d_y = +2.01 um = g/H, the log barrier's
+exact escape. The same d asks 2.7 mm tangential; a slanted self half-gap plane (n ~ (0.70, 0.20, 0.68)) cuts it, and the
+Euclidean projection takes its -y share too, so the point lands on both that plane and the field plane: the trial's y
+move is 5.6e-17 m, n2-n39. Not the line search, not the cap (the oracle has none). Projected in v's own H_vv metric
+(w = L^T z, n' = L^-1 n) the cut comes out of the soft directions:
+
+| projection | v16 phi, n2 -> n10 | \|g\| n39 | \|g\| n149 | on the floor |
+|---|---|---|---|---|
+| Euclidean | 2.000 um throughout | 14.0 | ~14 | 1 every iteration |
+| H_vv metric | 2, 4, 8, 16, 34, 74, 176, 482, 1528 um (doubling) | 2.45 | 2.00 | 0 after n10 |
+| H_vv + relative floor 0.1 phi (IPC-like) | - | - | 2.33 | - |
+| Euclidean + relative floor 0.1 phi | - | - | 12.6 | - |
+
+Ruled (Claude): C2 implements ogcProjectTrial / ogcProjectActive in the H_vv metric from nwVertexInv (H_vv^-1 before the
+active-set projection, now stored by nwGradient), the cap by a radial scale after the plane projection.
+
+**Mechanism 2: the half-gap split cages a fold's common motion.** The remaining \|g\| ~2 sits at fold vertices (v508, v507,
+v509, v46, v540, v476: self gaps 30-200 um, elastic forces 0.5-1.4 N); nothing is active at x. v508's Newton move is
+294 x its half gap while its pairs' relative closing is 0.68 of the gap; v46 17 x with 2 pairs that truly close
+(2.3 x). Ruled (Claude): no coupled constraints; the levelled rounds (planes about X + a w, w = d) are the design.
+The oracle now runs them (LEVEL; C2's levelledRound / levelledCons, gamma_r 0.9, sepEps delta, trial alpha at level
+a = alpha, the radial cut from the anchor):
+
+| t25, 150 iterations | \|g\| n149 | vertices held at w = 0 |
+|---|---|---|
+| frozen half gaps, Euclidean | ~14 | - |
+| levelled, GPU fallback (any conflict: every w = 0), Euclidean | 13.9 | 1024 every iteration |
+| levelled, conflict-only holds, Euclidean | 13.9 | 91 -> 17 |
+| frozen half gaps, H_vv | 2.00 | - |
+| levelled, conflict-only holds, H_vv | 1.48 | 91 -> 8 |
+
+Every t25 round conflicts somewhere, so today's fallback is the frozen half gaps; conflict-only holds plus the H_vv metric
+is the best Float64 method so far (1.48 at n149, moves ~20 um, still unconverged). The held fold vertices are C2's least-
+shift target cases (v508, v46).
+
+## 2026-11-10 RESULT (38): the cap-aware done rule (C1 half), on C2's 036472e3
+
+- nwProject: on a cut trial that could end Newton (alpha |d_v| <= tol h~, which nwChoose's small step needs), nwTravelHeld:
+  ogcProjectActive's travel bit, and the KKT release (nwRelease, shared with nwActiveSet) of its binding normals (the
+  cap's nc included; a held vertex: its direction) against -g keeps some mu > 0. The bit rides in the trial move's w.
+- nwTrial sums the bits per trial (two more line-search partial arrays, CLOTH_NEWTON_TRIAL_RECORDS 10); nwChoose takes the
+  accepted trial's count into (control + 2).w (C2's ogcDecide arms a levelled round on it) and refuses the small-step
+  done while it is > 0. A stall (no step) is unchanged and reports 0.
+- nwVertexInv(v): H_vv^-1 before the active-set projection (two more contact segments), for C2's metric projection.
+- readNewtonControl returns control + 2 too ([8..11]); steppedScene asserts no step ends done with a travel-held vertex.
+- ladder 2b: the ledge strip at a 10 m/s velocity tolerance (every accepted step small): Newton per step 6 10 6, all done
+  with 0 held; with the rule switched off it fails (step 1 done while a travel bound holds 78 vertices).
+
+Gate (cloth-ladder, -gpu-solver, -analytic, contact ladder/-gpu/-body on 036472e3 + this): 62 tests, 61 pass, 0 fail,
+1 todo (C2's incline item 5), Newton counts identical to the 1a13f604 gate (the rule never fires at the default
+tolerances there); ladder 2b passes on its own run.

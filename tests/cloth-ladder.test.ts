@@ -69,10 +69,11 @@ async function withDevice(run: (device: GPUDevice) => Promise<void>) {
 
 // ---------------------------------------------------------------- helpers
 
-/** Newton record of the last step: Newton iterations, PCG iterations, |g| / |m g| at its first and latest Newton iterate. */
+/** Newton record of the last step: Newton iterations, PCG iterations, |g| / |m g| at its first and latest Newton iterate,
+ * whether Newton ended done, and (contact) the vertices a travel bound held at its last accepted trial. */
 async function newtonOf(solver: ClothGPUSolver) {
   const c = await solver.readNewtonControl(), scale = Math.sqrt(c[6]!);
-  return { newton: c[3]!, pcg: c[7]!, first: Math.sqrt(c[4]!) / scale, last: Math.sqrt(c[5]!) / scale };
+  return { newton: c[3]!, pcg: c[7]!, first: Math.sqrt(c[4]!) / scale, last: Math.sqrt(c[5]!) / scale, done: c[0] === 1, travelHeld: c[11]! };
 }
 
 type Internals = { newtonWork: GPUBuffer; tables: { newtonRecords: number; pcg: { patches: number } }; N: number; T: number;
@@ -265,7 +266,9 @@ async function steppedScene(device: GPUDevice, scene: SceneDescription, ticks: n
   const records: Awaited<ReturnType<typeof newtonOf>>[] = [];
   for (let t = 1; t <= ticks; t++) {
     assert.ok(cloth.stepTo(t * CLOTH_SCENE_STEP_S), `step ${t} refused: ${cloth.failure?.message ?? 'pending'}`);
-    records.push(await newtonOf(solver));
+    const rec = await newtonOf(solver); records.push(rec);
+    // The cap-aware done rule: Newton never ends done on a step a travel bound holds a vertex at.
+    assert.ok(!(rec.done && rec.travelHeld > 0), `step ${t}: Newton done while a travel bound holds ${rec.travelHeld} vertices`);
     await after?.(cloth, t);
   }
   assert.equal(cloth.failure, undefined, cloth.failure?.message);
@@ -360,7 +363,7 @@ test('ladder 1b: Newton with contact on a 16^2 sheet landing flat on the floor: 
     const x = pose.positions_m, N = x.length / 3;
     let lo = Infinity, hi = -Infinity, speed = 0;
     for (let i = 0; i < N; i++) { lo = Math.min(lo, x[3 * i + 1]!); hi = Math.max(hi, x[3 * i + 1]!); speed = Math.max(speed, Math.hypot(pose.velocities_m_s[3 * i]!, pose.velocities_m_s[3 * i + 1]!, pose.velocities_m_s[3 * i + 2]!)); }
-    lines.push(`${name}: Newton per step ${fmt(records.map(q => q.newton))}; PCG per Newton ${fmt(records.map(q => q.pcg / Math.max(1, q.newton)), 0)} (${(sum(records.slice(-10).map(q => q.pcg)) / 10).toFixed(0)} per step, last 10); `
+    lines.push(`${name}: Newton per step ${fmt(records.map(q => q.newton))}; unconverged steps ${records.filter(q => !q.done).length} (${records.filter(q => !q.done && q.travelHeld > 0).length} held by travel bounds); PCG per Newton ${fmt(records.map(q => q.pcg / Math.max(1, q.newton)), 0)} (${(sum(records.slice(-10).map(q => q.pcg)) / 10).toFixed(0)} per step, last 10); `
       + `step-end |g|/|mg| first/last step ${records[0]!.last.toExponential(1)} / ${records.at(-1)!.last.toExponential(1)}; at tick ${ticks} heights ${(1000 * lo).toFixed(3)}-${(1000 * hi).toFixed(3)} mm (r ${(1000 * r).toFixed(2)}), max speed ${(1000 * speed).toFixed(2)} mm/s`);
     // At rest on a frictionless floor: flat, still, and no vertex below the contact radius' floor band or far above it.
     assert.ok(lo > 0 && hi - lo < 1e-4, `the sheet rests flat: heights ${lo}-${hi} m`);
@@ -436,6 +439,26 @@ test('ladder 2: a strip starting stretched past its strain limit lands half on a
   // bound (31 N against 1.04 N on 510e4bd8) before decaying. No lambda clamp: the fix is the contact-side restriction.
   if (Math.max(...lambdas) > bound) t.todo('C2: the tick-1 round-cap hold and envelope caps make the strain limit infeasible within the step');
   assert.ok(Math.max(...lambdas) <= bound, `a dual ramped past the strip's momentum bound: ${Math.max(...lambdas)} N > ${bound} N`);
+}));
+
+test('ladder 2b: the cap-aware done rule: with a velocity tolerance so loose that every accepted step is small, Newton on the ledge strip is not done while a travel bound holds a vertex', { skip: !gpu }, async () => withDevice(async device => {
+  // The ladder-2 strip 5 mm over the ledge. At 10 m/s every accepted step passes the small-step test (alpha max |d_v| <=
+  // tol h~), so the old rule ended every step after its first Newton iteration. The ledge piece's ball and its orthant
+  // faces bind the cut trials there with a positive multiplier (the tick-1 dump, RESULT 36) - travel bounds, not contacts
+  // - so the rule must run Newton on until none holds a vertex at the accepted trial, or report the step unconverged.
+  const peirce = clothAnalyticPeirceCantilever(), cell = 0.005, cols = 49, rows = 3, top = 0.5, ticks = 3;
+  const material = { ...clothAnalyticFreeFall().cloth[0]!.materials[0]! }, x0 = -(2 / 3) * (cols - 1) * cell;
+  const flat = herringBoneSheet({ columns: cols, rows, width_m: (cols - 1) * cell, depth_m: (rows - 1) * cell, origin_m: [x0, top + 0.005, -0.12 - (rows - 1) * cell / 2] });
+  const initial = flat.restPositions_m.map((v, i) => i % 3 === 0 ? 1.5 * v : v);
+  const newton = { ...CONVERGED, velocityTolerance_m_s: 10 };
+  const scene = clothAnalyticSceneDescription({ ...peirce, cloth: [{ ...peirce.cloth[0]!, id: 'ladder-strip', materials: [material],
+    solver: { integrator: 'bdf2', newton, contactPlaneRecordsPerVertex: 288 }, geometry: { kind: 'inline', data: { ...flat, initialPositions_m: initial } } }] });
+  const { cloth, records } = await steppedScene(device, scene, ticks);
+  cloth.destroy();
+  console.log(`[ladder 2b] strip over the ledge at a 10 m/s velocity tolerance: Newton per step ${fmt(records.map(r => r.newton))}; done ${records.map(r => r.done ? 1 : 0).join(' ')}; `
+    + `vertices a travel bound held at the last accepted trial ${fmt(records.map(r => r.travelHeld))} (the cap ${newton.iterations})`);
+  // steppedScene asserts no step ends done while a travel bound holds a vertex; here the rule must also have acted.
+  assert.ok(records[0]!.newton > 1, `tick 1 ended after ${records[0]!.newton} Newton iteration: the travel bounds binding there did not keep Newton running`);
 }));
 
 // ---------------------------------------------------------------- 3. PCG cost
