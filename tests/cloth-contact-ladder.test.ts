@@ -97,7 +97,7 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
       for (let i = 0; i < N; i++) { y += x[3 * i + 1]! / N; vy += v[3 * i + 1]! / N; minY = Math.min(minY, x[3 * i + 1]!); }
       const status = [OgcContactDetector.describeStatus(c.status)].flat().join(",");
       track.push({ tick: k, y, vy, minY, intersections, solidIntersections, records: c.framePeakPlaneRecords / N, recordsTotal: c.planeRecordsTotal, held: c.planeRecordHeld, heldVertices: c.held, conflicts: c.conflicts, datPairs: c.datPairs, rounds: c.detections, status });
-      console.log(`  tick ${k}: y ${(1000 * y).toFixed(2)} mm vy ${vy.toFixed(3)}; rounds ${c.detections - c.redetections}+${c.redetections} (levelled ${c.levelled}, fallback ${c.levelFallback}) alpha ${+Number(ctl[2]).toPrecision(3)} newton ${ctl[3]} env ${e2(c.peakEnvelope)}; `
+      console.log(`  tick ${k}: y ${(1000 * y).toFixed(2)} mm vy ${vy.toFixed(3)}; rounds ${c.detections - c.redetections}+${c.redetections} (levelled ${c.levelled}, fallback ${c.levelFallback}; conflicts no plane / closing ${c.levelConflicts.map(w => `${w & 0xffff} (${w >>> 16} solid)`).join(' / ')}) alpha ${+Number(ctl[2]).toPrecision(3)} newton ${ctl[3]} env ${e2(c.peakEnvelope)}; `
         + `scan ${c.scanned}/${c.collisions}/${c.boxRejected}/${c.candidates} (max ${c.scanMax}); dat ${c.datPairs}; records ${(c.framePeakPlaneRecords / N).toFixed(1)}/v, ${c.planeRecordsTotal} summed; held ${c.held} (overflow ${c.planeRecordHeld}); conflicts ${c.conflicts}; `
         + `x ${intersections}/${solidIntersections}; ${status}`);
       if (each) await each(cloth, c);
@@ -164,10 +164,14 @@ test('ladder: an 8 x 8 sheet lands on a slowly moving large sphere (the plate) a
   assert.ok(out.track.at(-1)!.minY > cy + R - 0.03, 'the sheet rests on the sphere');
 }));
 
-test('ladder: a 16 x 16 sheet lands on the rotating sphere', { skip: !runs('sphere') }, async () => withDevice(async device => {
+// Soundness regression (envelope and pair-bound changes): a cloth-cloth pair bound taken on world-straight
+// paths without the stray sigma_v of the vertices moving with the solid left a vertex inside the solid at
+// tick 37 (item 2 without strayOf, 2026-11-10). Every tick to 60 is checked, faces and solid alike.
+test('ladder: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)', { skip: !runs('sphere') }, async () => withDevice(async device => {
   const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }));
   const out = await ladder(device, 'sphere 16^2', scene, 60);
   clean('sphere', out);
+  assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
 }));
 
 test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip'), todo: 'C2 next: the contracting strip needs 40-190 plane records a vertex in its first ticks (free in space too); its pairs are within the two envelopes (6-40 mm) already at X, so relative-motion path bounds drop none (item 2, measured); 231-407 held for overflow at 16N on (5); needs envelopes or records sized to the mesh (progress-lane-c2.md)' }, async () => withDevice(async device => {

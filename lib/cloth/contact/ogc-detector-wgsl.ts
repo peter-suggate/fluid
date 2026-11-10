@@ -1604,6 +1604,7 @@ fn resolvePlane(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> vec4<f32> {
   let st = pairStray(ids, nA);
   let sg = st.x + st.y;
   var conflict = !(pl.w > sg);
+  var cause = 0u;
   if (!conflict) {
     let o = xdet[ids[nA]].xyz;
     var supA = 3.4e38; var supB = -3.4e38;
@@ -1613,13 +1614,19 @@ fn resolvePlane(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> vec4<f32> {
     }
     let g1 = supA - supB;
     conflict = g1 < P.sepEps + sg && g1 < pl.w;
+    cause = 1u;
   }
   if (!conflict) { return pl; }
   let alt = predictedAxis(ids, nA, sg);
   if (alt.w > 0.0) { return alt; }
   atomicAdd(&counters[OGC_CONFLICTS], 1u);
   // A levelled re-detection's conflict redoes its round unlevelled (OGC_REDO_WGSL).
-  if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) { return pl; }
+  if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) {
+    var solid = false;
+    for (var k = 0u; k < 4u; k++) { if (ids[k] >= P.N) { solid = true; } }
+    atomicAdd(&counters[OGC_F_LEVEL_CONFLICTS + cause], select(1u, 65537u, solid));
+    return pl;
+  }
   let redone = atomicLoad(&counters[OGC_FORCE_HELD]);
   if (!failSafeRound()) { leastShift(ids, nA, pl, sg); return pl; }
   // The fail-safe (redone past the least-shift redos): its cloth is held, or with a moving

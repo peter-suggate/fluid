@@ -97,6 +97,12 @@ export const OGC_COUNTER = {
    */
   frameLevelled: 67, frameLevelFallback: 68,
   /**
+   * Levelled rounds' conflicts by cause (each sends its round back unlevelled): no plane at X (or
+   * none past the pair's strays), and the predictions closing a pair below sepEps. Each word's
+   * high 16 bits count those with a solid's sample or hull primitive in the pair.
+   */
+  frameLevelConflicts: 69,
+  /**
    * The frame's round log (harness diagnosis): rounds logged so far, then OGC_ROUND_LOG entries of
    * OGC_ROUND_LOG_WORDS from roundLog: at the round's cell kernel its longest prediction |w| and
    * largest envelope (f32 bits) and the frame's candidates, DAT pairs and held vertices so far;
@@ -108,7 +114,7 @@ export const OGC_COUNTER = {
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
 export const OGC_COUNTER_WORDS = 72 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 69, 70];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
 /**
@@ -200,6 +206,7 @@ const OGC_F_SCAN_MAX = ${OGC_COUNTER.frameScanMax}u;
 const OGC_F_PLANE_RECORDS_TOTAL = ${OGC_COUNTER.framePlaneRecordsTotal}u;
 const OGC_F_LEVELLED = ${OGC_COUNTER.frameLevelled}u;
 const OGC_F_LEVEL_FALLBACK = ${OGC_COUNTER.frameLevelFallback}u;
+const OGC_F_LEVEL_CONFLICTS = ${OGC_COUNTER.frameLevelConflicts}u;
 const OGC_LEVELLED = ${OGC_LEVEL_FLAG.levelled}u;
 const OGC_FROZEN = ${OGC_LEVEL_FLAG.frozen}u;
 const OGC_ROUND_LOG_COUNT = ${OGC_COUNTER.roundLogCount}u;

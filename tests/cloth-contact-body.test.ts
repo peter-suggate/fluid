@@ -13,6 +13,7 @@
  *             no intersection, no vertex or face inside the plate at any step, and
  *             friction carries the sheet at the plate's rigid velocity
  */
+import { OGC_SHIFT_WORDS } from '../lib/cloth/contact/ogc-detector-wgsl';
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -251,7 +252,7 @@ test("GPU moving solid: pushed predictions, body entries and terms, posed sample
       let want = kb < 1 ? scale3(a, 1 - kb) : [0, 0, 0] as V3;
       // A round redone shifts a conflict's predictions (least shift, OGC_REDO_WGSL): towards the
       // anchor (a_v with bit 5, else X) by the round's scale s, then bounded again about a_v.
-      const shift = work[scaleOff + 2 * v + 1]!, anc = (diag.held[v]! & 32) ? a : [0, 0, 0] as V3;
+      const shift = work[scaleOff + OGC_SHIFT_WORDS * v + 1]!, anc = (diag.held[v]! & 32) ? a : [0, 0, 0] as V3;
       if (shift < 1) {
         shifted++;
         want = add3(anc, scale3(sub(want, anc), shift));

@@ -8,6 +8,7 @@
  * static solid field's entries, truncation terms and vertex block.
  * Skips without WEBGPU_NODE_MODULE.
  */
+import { OGC_SHIFT_WORDS } from '../lib/cloth/contact/ogc-detector-wgsl';
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
@@ -710,7 +711,7 @@ test("GPU predicted-motion DAT: crossing predictions are shifted back along thei
     const W0 = vel.map(v => [0, 1, 2].map(k => v[k]! * config.dt + config.gravity[k]! * config.dt ** 2) as V3);
     let shifted = 0;
     for (let v = 0; v < N; v++) {
-      const sv = work[scaleOff + 2 * v + 1]!;
+      const sv = work[scaleOff + OGC_SHIFT_WORDS * v + 1]!;
       assert.ok(sv >= 0 && sv <= 1, `vertex ${v} shift ${sv}`);
       if (sv < 1 && norm(W0[v]) > 0) shifted++;
       assert.ok(norm(sub(W[v], scale(W0[v], sv))) <= 1e-8 + 1e-5 * norm(W0[v]), `vertex ${v}: ${W[v]} vs ${sv} x ${W0[v]}`);

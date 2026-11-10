@@ -247,6 +247,8 @@ export interface OgcFrameCounters {
   /** Levelled re-detection over the frame: its rounds, and those a conflict sent back unlevelled (w = 0). */
   levelled: number;
   levelFallback: number;
+  /** Levelled rounds' conflicts: no plane at X, predictions closing (high 16 bits: with a solid in the pair). */
+  levelConflicts: number[];
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -871,6 +873,7 @@ export class OgcContactDetector {
       heldConflictPair: [u[C.heldConflictPair]!, u[C.heldConflictPair + 1]!, u[C.heldConflictPair + 2]!, u[C.heldConflictPair + 3]!],
       zoneVertices: u[C.frameZoneVertices]!, zonePeak: u[C.frameZonePeak]!,
       filterRebound: u[C.frameRebound]!, framePeakPlaneRecords: u[C.framePeakPlaneRecords]!, peakPlaneRecords: u[C.peakPlaneRecords]!,
+      levelConflicts: [u[C.frameLevelConflicts]!, u[C.frameLevelConflicts + 1]!],
       maxPrediction: fl[C.frameMaxPrediction]!, maxDirection: fl[C.frameMaxDirection]!,
       planeRecordHeld: u[C.framePlaneRecordHeld]!, planeRecordHeldMax: u[C.framePlaneRecordHeldMax]!,
       scanned: u[C.frameScanned]!, collisions: u[C.frameCollisions]!, boxRejected: u[C.frameBoxRejected]!, scanMax: u[C.frameScanMax]!,
