@@ -385,6 +385,72 @@ fn pcgDir(j: u32) -> vec3f {
   if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = pcgRed[0]; }
 }
 
+// PCG in one dispatch (one patch: every vertex a row of workgroup 0, no halo): the iterations of pcgStep, each lane
+// keeping its row's r, s, p, d, u and w in registers, u shared through the staging arrays, the partials reduced in
+// the workgroup, and the stop a uniform break. The same Chronopoulos-Gear recurrence as dispatches 0..cap (R.range.z).
+@compute @workgroup_size(256) fn pcgSolve(@builtin(local_invocation_index) lane: u32) {
+  let ctl = nwControlUniform(lane);
+  if (ctl.x != 0.0 || ctl.y != 0.0) { return; }
+  let cap = R.range.z; let lead = lane == 0u;
+  let tw = pcgTable(0u);
+  let K1 = topo[tw]; let K2 = topo[tw + 1u]; let blocks = topo[tw + 4u]; let bends = topo[tw + 5u]; let rows = topo[tw + 7u];
+  pcgPatchIndex = 0u; pcgI = 0u; pcgAlpha = 0.0; pcgBeta = 0.0;
+  let own = lane < rows; let v = select(0u, pcgRowVertex(lane), own);
+  var M0 = vec4f(0.0); var M1 = vec4f(0.0); var r = vec3f(0.0);
+  if (own) { M0 = nw[nseg(${S.m0}u, v)]; M1 = nw[nseg(${S.m1}u, v)]; r = nw[nseg(${S.r0}u, v)].xyz; }
+  var u = nwPrecondition(M0, M1, r);
+  var pv = vec3f(0.0); var sv = vec3f(0.0); var d = vec3f(0.0); var w = vec3f(0.0);
+  var gamma0 = 0.0; var gamPrev = 0.0; var alphaPrev = 0.0;
+  var taken = 0.0; var stop = 0u;
+  for (var i = 0u; i <= cap; i++) {
+    if (i > 0u) {
+      // gamma = r.u, delta = w.u of iteration i - 1 (pcgRed[0] after the reduction below), uniform.
+      let sums = workgroupUniformLoad(&pcgOut);
+      let gam = sums.x;
+      if (i == 1u) {
+        gamma0 = gam;
+        if (lead) { var rr = nw[nwControl() + 1u]; if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam); }
+        if (sums.z <= bitcast<f32>(P.newton1.z)) { stop = 2u; break; }
+      }
+      if (!(gam > bitcast<f32>(P.newton1.y) * gamma0)) { stop = 1u; break; }
+      var beta = 0.0; var denom = sums.y;
+      if (i >= 2u) { beta = gam / gamPrev; denom = sums.y - beta * gam / alphaPrev; }
+      if (!(denom > 0.0)) { stop = 1u; break; }
+      let alpha = gam / denom;
+      taken += 1.0;
+      pv = u + beta * pv; sv = w + beta * sv; d += alpha * pv; r -= alpha * sv;
+      u = nwPrecondition(M0, M1, r);
+      gamPrev = gam; alphaPrev = alpha;
+    }
+    pcgStage(lane, u);
+    workgroupBarrier();
+    w = vec3f(0.0);
+    if (own) {
+      for (var k = 0u; k < K1; k++) {
+        let b0 = nw[pcgBlock(blocks, k, 0u, lane)]; let b1 = nw[pcgBlock(blocks, k, 1u, lane)]; let b2 = nw[pcgBlock(blocks, k, 2u, lane)];
+        let uj = pcgU(bitcast<u32>(b0.w));
+        w += vec3f(dot(b0.xyz, uj), dot(b1.xyz, uj), dot(b2.xyz, uj));
+      }
+      for (var m = 0u; 2u * m < K2; m++) {
+        let e = nw[bends + m * PCG_PATCH + lane];
+        w += e.y * pcgU(bitcast<u32>(e.x)) + e.w * pcgU(bitcast<u32>(e.z));
+      }
+      ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+    }
+    pcgRed[lane] = vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0);
+    workgroupBarrier();
+    for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
+    // The tree's last barrier also orders this iteration's reads of the staged u before the next one overwrites it;
+    // pcgOut is read after the next iteration's uniform load (a barrier).
+    if (lane == 0u) { pcgOut = pcgRed[0]; }
+  }
+  if (own) { nw[nseg(${S.d}u, v)] = vec4f(d, 0.0); }
+  if (lead) {
+    if (stop == 2u) { nw[nwControl()].x = 1.0; } else { nw[nwControl()].y = 1.0; }
+    nw[nwControl() + 1u].w += taken;
+  }
+}
+
 ${contact ? `// The projected arc (contact): after the filter hook fixes the round's certificates, each trial's move
 // delta_k(v) = Pi_v(x_v + 2^-k d_v) - x_v of vertex v, Pi_v onto v's certified set. Where Pi keeps the trial point the
 // move is exactly 2^-k d_v; pinned vertices (d = 0) stay put.

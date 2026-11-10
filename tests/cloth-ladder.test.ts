@@ -30,6 +30,7 @@ import { prepareClothTopology } from '../lib/cloth/topology';
 import { buildClothSolverModel, clothOracleStep, createClothOracleState, type ClothSolverModel, type ClothStepOptions } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
 import { ClothGPUSolver, type ClothGPUSolverOptions } from '../lib/cloth/gpu-solver';
+import { CLOTH_NEWTON_SEGMENTS } from '../lib/cloth/gpu-newton-wgsl';
 import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import { buildClothSceneField, clothContactRadius, createClothSceneContact } from '../lib/cloth/scene-contact';
@@ -140,19 +141,59 @@ async function resolveMicros(device: GPUDevice, encoder: GPUCommandEncoder, set:
   read.destroy(); resolve.destroy(); set.destroy();
   return { us: range(0, count - 1).map(k => Number(t[2 * k + 1]! - t[2 * k]!) / 1e3 / reps), control: Array.from(c) };
 }
+/** One whole PCG solve at the solver's last state, GPU-timed: Newton re-armed (control cleared), nwFaces and nwGradient
+ * in a priming pass, then the solve in its own timestamped pass, `reps` times; 'chain' is the pcgStep dispatches 0..cap,
+ * 'solve' the one-dispatch pcgSolve (one patch). Mean us per solve and the iterations the last one took. */
+async function solveMicros(device: GPUDevice, solver: ClothGPUSolver, mode: 'chain' | 'solve' | 'replay', reps = 8) {
+  const S = solver as unknown as Internals & { newton: { pcgIterations: number } }, W = S.threads(S.N), Wp = S.tables.pcg.patches;
+  const offset = 16 * (S.tables.newtonRecords - CLOTH_SEGMENT_ALIGN), cap = S.newton.pcgIterations;
+  const set = device.createQuerySet({ type: 'timestamp', count: 2 * reps }), encoder = device.createCommandEncoder({ label: 'ladder solve' });
+  for (let r = 0; r < reps; r++) {
+    encoder.clearBuffer(S.newtonWork, offset, 32);
+    const prime = encoder.beginComputePass(); S.run(prime, 'nwFaces', S.threads(S.T)); S.run(prime, 'nwGradient', W);
+    if (mode === 'replay') { S.run(prime, 'pcgStep', Wp, 0); S.run(prime, 'pcgStep', Wp, 1); }
+    prime.end();
+    const pass = encoder.beginComputePass({ timestampWrites: { querySet: set, beginningOfPassWriteIndex: 2 * r, endOfPassWriteIndex: 2 * r + 1 } });
+    if (mode === 'solve') S.run(pass, 'pcgSolve', 1, cap); else for (let i = 0; i <= cap; i++) S.run(pass, 'pcgStep', Wp, mode === 'replay' ? 2 : i);
+    pass.end();
+  }
+  const { us, control } = await resolveMicros(device, encoder, set, reps, 1, S.newtonWork, offset + 16);
+  return { us: us.reduce((a, b) => a + b, 0) / reps, iterations: control[3]! };
+}
+/** The Newton direction d (the PCG solution) of the last solve, per vertex (x, y, z). */
+async function readDirection(device: GPUDevice, solver: ClothGPUSolver) {
+  const S = solver as unknown as Internals, Np = Math.ceil(S.N / 16) * 16, bytes = 16 * S.N;
+  const read = device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }), encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(S.newtonWork, 16 * CLOTH_NEWTON_SEGMENTS.d * Np, read, 0, bytes);
+  device.queue.submit([encoder.finish()]);
+  await read.mapAsync(GPUMapMode.READ);
+  const v = new Float32Array(read.getMappedRange().slice(0)); read.destroy();
+  return Array.from({ length: S.N }, (_, i) => [v[4 * i]!, v[4 * i + 1]!, v[4 * i + 2]!] as const);
+}
 /** GPU time (us) per dispatch of a standalone 256-lane kernel, `workgroups` workgroups, `reps` per timed pass. */
-async function kernelMicros(device: GPUDevice, wgsl: string, workgroups: number, reps = 256) {
+/** Mean us per dispatch of `wgsl` (entry main) over `reps` in one pass. `mode`: 'direct' dispatches `workgroups`;
+ * 'indirect' reads the count `workgroups` from an indirect buffer; 'written' has a one-lane kernel write that count
+ * into the indirect buffer before each indirect dispatch (the GPU-decided stop), the pair timed as one. */
+async function kernelMicros(device: GPUDevice, wgsl: string, workgroups: number, reps = 256, mode: 'direct' | 'indirect' | 'written' = 'direct') {
   const module = device.createShaderModule({ code: wgsl });
   const pipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
   const buffer = device.createBuffer({ size: 16 * 1024, usage: GPUBufferUsage.STORAGE });
+  const args = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(args, 0, new Uint32Array([workgroups, 1, 1, 0]));
+  const writer = mode === 'written' ? await device.createComputePipelineAsync({ layout: 'auto', compute: { entryPoint: 'main', module: device.createShaderModule({
+    code: `@group(0) @binding(0) var<storage, read_write> a: array<u32, 4>;\n@compute @workgroup_size(1) fn main() { a[0] = ${workgroups}u; a[1] = 1u; a[2] = 1u; }` }) } }) : undefined;
+  const writeBind = writer ? device.createBindGroup({ layout: writer.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: args } }] }) : undefined;
   const bind = wgsl.includes('@binding(0)') ? device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer } }] }) : undefined;
   const set = device.createQuerySet({ type: 'timestamp', count: 2 });
   const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass({ timestampWrites: { querySet: set, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
-  pass.setPipeline(pipeline); if (bind) pass.setBindGroup(0, bind);
-  for (let r = 0; r < reps; r++) pass.dispatchWorkgroups(workgroups);
+  for (let r = 0; r < reps; r++) {
+    if (writer) { pass.setPipeline(writer); pass.setBindGroup(0, writeBind!); pass.dispatchWorkgroups(1); }
+    if (writer || r === 0) { pass.setPipeline(pipeline); if (bind) pass.setBindGroup(0, bind); }
+    if (mode === 'direct') pass.dispatchWorkgroups(workgroups); else pass.dispatchWorkgroupsIndirect(args, 0);
+  }
   pass.end();
   const { us } = await resolveMicros(device, encoder, set, 1, reps);
-  buffer.destroy();
+  buffer.destroy(); args.destroy();
   return us[0]!;
 }
 const EMPTY_WGSL = '@compute @workgroup_size(256) fn main() {}';
@@ -244,11 +285,15 @@ test('ladder 0: a 16^2 PCG iteration attributed: the empty-dispatch floor, an ea
     const exited = await replayEach(device, solver, [...kernels.map(k => [k, 2] as const), ['nwTrial', 0], ['nwGradient', 0]], 64, [1, 1]);
     const empty1 = await kernelMicros(device, EMPTY_WGSL, 1), emptyP = await kernelMicros(device, EMPTY_WGSL, patches);
     const reduce1 = await kernelMicros(device, REDUCE_WGSL, 1), reduceP = await kernelMicros(device, REDUCE_WGSL, patches);
+    // The stop without early exits: a zero-workgroup indirect dispatch, and the same with its count GPU-written each time.
+    const ind0 = await kernelMicros(device, REDUCE_WGSL, 0, 256, 'indirect'), indP = await kernelMicros(device, REDUCE_WGSL, patches, 256, 'indirect');
+    const wr0 = await kernelMicros(device, REDUCE_WGSL, 0, 256, 'written'), wrP = await kernelMicros(device, REDUCE_WGSL, patches, 256, 'written');
     solver.destroy();
     const total = work.us.reduce((a, b) => a + b, 0), reductions = kernels.length === 2 ? 3 : 2;
     rows.push(`${n}^2 (${patches} patch${patches > 1 ? 'es' : ''}): one PCG iteration ${total.toFixed(2)} us = ${kernels.map((k, i) => `${k} ${work.us[i]!.toFixed(2)}`).join(' + ')}; `
       + `empty dispatch ${empty1.toFixed(2)} us (1 workgroup) / ${emptyP.toFixed(2)} (${patches}); early exit on the control flags ${exited.us.map((u, i) => `${[...kernels, 'nwTrial', 'nwGradient'][i]} ${u.toFixed(2)}`).join(', ')} us; `
       + `one 256-lane reduction ${(reduce1 - empty1).toFixed(2)} us over the floor (${(reduceP - emptyP).toFixed(2)} at ${patches}); `
+      + `indirect dispatch: 0 workgroups ${ind0.toFixed(2)} us, ${patches} ${indP.toFixed(2)} (direct reduce ${reduceP.toFixed(2)}); count GPU-written before each: 0 workgroups ${wr0.toFixed(2)}, ${patches} ${wrP.toFixed(2)} us per pair; `
       + `so ${kernels.length} x floor ${(kernels.length * emptyP).toFixed(2)} + ${reductions} reductions ${(reductions * (reduceP - emptyP)).toFixed(2)} + body ${(total - kernels.length * emptyP - reductions * (reduceP - emptyP)).toFixed(2)} us`);
   }
   console.log(`[ladder 0] PCG iteration attribution (64 replays per pass; standalone kernels 256 per pass):\n  ${rows.join('\n  ')}`);
@@ -265,7 +310,10 @@ test('ladder 1a: Newton on a corner-held 16^2 sheet matches the converged Float6
   const coarse = new ClothCoarseCorrection(model, buildClothCoarseSpace(model.topology));
   for (let s = 0; s < steps; s++) clothOracleStep(model, st, options, false, coarse);
   const lines: string[] = [];
-  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED]] as const) {
+  // The displacement stop (newton3.w): done once the accepted step moves no vertex more than dx = tol h~.
+  const stops = (process.env.CLOTH_LADDER_DX ?? '').split(',').filter(Boolean).map(Number)
+    .map(dx => [`converged caps, stop at dx ${dx} um`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 * dx / h }] as const);
+  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops] as const) {
     const { solver } = await bareSolver(device, document, { dt_s: h, newton });
     const records: Awaited<ReturnType<typeof newtonOf>>[] = [];
     for (let s = 0; s < steps; s++) { solver.step(1); records.push(await newtonOf(solver)); }
@@ -275,7 +323,7 @@ test('ladder 1a: Newton on a corner-held 16^2 sheet matches the converged Float6
     lines.push(`${name}: off the oracle ${(1e6 * worst).toFixed(2)} um; Newton per step ${fmt(records.map(r => r.newton))}; PCG per Newton ${fmt(records.map(r => r.pcg / r.newton), 1)}; `
       + `step-end |g|/|mg| ${records.at(-1)!.last.toExponential(2)}`);
     assert.equal(status.status, 0);
-    if (newton === CONVERGED) assert.ok(worst < 2e-5, `converged Newton vs the converged oracle: ${worst} m`);
+    if (newton !== BRIDSON) assert.ok(worst < 2e-5, `converged Newton vs the converged oracle: ${worst} m`);
     else assert.ok(worst < 1e-3, `Bridson caps vs the converged oracle: ${worst} m`);
     // |g| per Newton iterate of the last step: rerun it from the saved state with caps 1..K (|g| at iterate K - 1).
     if (newton === BRIDSON) {
@@ -296,7 +344,9 @@ test('ladder 1a: Newton on a corner-held 16^2 sheet matches the converged Float6
 test('ladder 1b: Newton with contact on a 16^2 sheet landing flat on the floor: iterations, |g| and the rest it reaches', { skip: !gpu }, async () => withDevice(async device => {
   const source = clothAnalyticFreeFall(), n = 16, y0 = 0.05, ticks = 30;
   const lines: string[] = [];
-  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED]] as const) {
+  const stops = (process.env.CLOTH_LADDER_DX ?? '').split(',').filter(Boolean).map(Number)
+    .map(dx => [`converged caps, stop at dx ${dx} um`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 * dx / h }] as const);
+  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops] as const) {
     const scene = clothAnalyticSceneDescription(resized(source, sheet(n, y0)), { newton });
     const r = clothContactRadius(scene.cloth![0]!);
     const { cloth, solver, records } = await steppedScene(device, scene, ticks);
@@ -393,8 +443,24 @@ test('ladder 3: PCG cost per iteration and iterations per Newton solve, 16^2 to 
     let newton = 0, pcg = 0;
     for (let s = 0; s < warm; s++) { solver.step(1); const r = await newtonOf(solver); newton += r.newton; pcg += r.pcg; }
     const us = await pcgMicros(device, solver);
+    // A whole solve at the last state: the dispatch chain to the cap (its early exits included), and (one patch) pcgSolve.
+    const S = solver as unknown as Internals, chain = await solveMicros(device, solver, 'chain');
+    const replay = process.env.CLOTH_LADDER_REPLAY ? await solveMicros(device, solver, 'replay') : undefined;
+    if (replay) console.log(`[ladder 3] ${n}^2: iteration 2 replayed ${(S as unknown as { newton: { pcgIterations: number } }).newton.pcgIterations + 1} times in one pass ${(replay.us / 201).toFixed(2)} us each (control w ${replay.iterations})`);
+    const one = S.tables.pcg.patches === 1 && 'pcgSolve' in S.pipelines ? await solveMicros(device, solver, 'solve') : undefined;
+    if (one) {
+      // Fixed-state equivalence: the same solve both ways from the same iterate agree to the PCG tolerance.
+      await solveMicros(device, solver, 'chain', 1); const a = await readDirection(device, solver);
+      await solveMicros(device, solver, 'solve', 1); const b = await readDirection(device, solver);
+      let diff = 0, size = 0;
+      for (let v = 0; v < a.length; v++) { diff = Math.max(diff, Math.hypot(a[v]![0] - b[v]![0], a[v]![1] - b[v]![1], a[v]![2] - b[v]![2])); size = Math.max(size, Math.hypot(...a[v]!)); }
+      lines.push(`  ${n}^2 fixed state: pcgSolve's d off the chain's ${(diff / size).toExponential(2)} of max |d| ${(1e3 * size).toFixed(3)} mm`);
+      assert.ok(diff <= 10 * BRIDSON.pcgTolerance! * size, `pcgSolve vs the chain at a fixed state: ${diff} m of ${size} m`);
+    }
     solver.destroy();
-    lines.push(`no contact ${n}^2 (${n * n} vertices, sweeps ${sweeps}): ${us.toFixed(2)} us per PCG iteration, ${(pcg / newton).toFixed(1)} PCG per Newton, ${(newton / warm).toFixed(1)} Newton per step (steps 1-${warm})`);
+    lines.push(`no contact ${n}^2 (${n * n} vertices, sweeps ${sweeps}): ${us.toFixed(2)} us per PCG iteration, ${(pcg / newton).toFixed(1)} PCG per Newton, ${(newton / warm).toFixed(1)} Newton per step (steps 1-${warm}); `
+      + `one solve: chain ${chain.us.toFixed(0)} us (${chain.iterations} iterations, ${(chain.us / chain.iterations).toFixed(2)} us each)`
+      + (one ? `, pcgSolve ${one.us.toFixed(0)} us (${one.iterations} iterations, ${(one.us / one.iterations).toFixed(2)} us each)` : ''));
     assert.ok(Number.isNaN(us) || us > 0);
   }
   // With contact: a 32^2 sheet resting on the floor (dropped 3 mm, 20 ticks) and the Bridson sphere at 32 nodes across

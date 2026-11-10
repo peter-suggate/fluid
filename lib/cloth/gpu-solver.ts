@@ -413,7 +413,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     pcg: { shared: pcg.shared, maxK1: pcg.maxK1, maxK2: pcg.maxK2, patches: pcg.patches, maxHalo: pcg.maxHalo } };
 }
 
-const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
+const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'pcgSolve', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
 /** With contact: the projected arc's trial moves (after the filter hook, before nwTrial). */
 const CONTACT_NEWTON_KERNELS = ['nwProject'] as const;
 /** With contact: the BDF2 restart's scans of C2's contact state. */
@@ -600,7 +600,9 @@ export class ClothGPUSolver {
       this.run(pass, 'nwFaces', this.threads(this.T));
       this.run(pass, 'nwGradient', W);
       // PCG: dispatch 0 starts the solve, dispatch i >= 1 takes iteration i (one dispatch each, Chronopoulos-Gear).
-      for (let i = 0; i <= o.pcgIterations; i++) this.run(pass, 'pcgStep', this.tables.pcg.patches, i);
+      // One patch (every vertex a row of one workgroup): the whole solve in one dispatch, its stop a loop break.
+      if (this.tables.pcg.patches === 1) this.run(pass, 'pcgSolve', 1, o.pcgIterations);
+      else for (let i = 0; i <= o.pcgIterations; i++) this.run(pass, 'pcgStep', this.tables.pcg.patches, i);
       this.hooks.filter?.(pass);
       if (this.options.contact) this.run(pass, 'nwProject', W);
       this.run(pass, 'nwTrial', W);

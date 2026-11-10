@@ -2098,3 +2098,33 @@ capacity (288 = 260 + 10 %), gates planeRecordHeld == 0, the final strain and th
 
 Gate: cloth-analytic + cloth-gpu-solver + cloth-ladder on HEAD 510e4bd8 + this, 25 tests, 23 pass, 0 fail, 2 todo
 (C2's incline item 5; ladder 2's bound).
+
+## 2026-11-10 RESULT (32): the Newton stop's latency; (3a) one-dispatch PCG for one-patch problems
+
+Measured first (ladder 0, Dawn on Metal): skipping work by a zero-workgroup dispatchWorkgroupsIndirect costs 3.6-4.1 us
+a dispatch (as much as the 256-lane reduction kernel's whole run, more than an early exit's 2-3 us), and 4.6-10.5 us
+with the count GPU-written before each (Dawn validates indirect arguments with its own pass). Indirect dispatch is no
+cheaper stop than the early exits; rejected.
+
+The displacement stop already in nwChoose (newton3.w: done once the accepted step moves no vertex more than
+dx = tol h~), on ladder 1a against the converged oracle at converged caps: dx 10 um 4.6 um off, 3-5 Newton; dx 1 um
+0.49 um off (Bridson 8 x 200: 0.47), 4-8 Newton, mean 4.7 for 8; dx 0.1 um 0.07 um off (converged), mean 5.9 for 12.
+1b (contact, floor) stops by the stall at the f32 floor for every dx: 1 Newton in free fall, 5 at rest. dx = 1 um is the
+Bridson caps' own accuracy, 1e-3 of the cloth's 1 mm thickness. Not yet made the scenes' default (gates: drape 3 mm
+reference at the next acceptance round); its saving is real work only where a skipped iteration costs no latency.
+
+(3a) pcgSolve: with one patch (every vertex a row of one 256-lane workgroup, no halo) the whole Chronopoulos-Gear
+solve runs in one dispatch: each lane keeps its row's r, s, p, d, u, w in registers, u is shared through the staging
+arrays, the partials reduce in the workgroup, and the stop is a uniform loop break, so iterations not needed cost
+nothing. encodeStep takes it whenever patches == 1. 16^2, one whole solve at a fixed state (GPU timestamps): the
+dispatch chain to the cap 2425-2621 us (125 iterations, 19.4-21.0 us each, early exits included), pcgSolve 836-1081 us
+(6.7-8.7 us each), 3.1x; d off the chain's by 3.1e-5 of max |d| (f32 contraction order, the PCG tolerance is 1e-4).
+16^2 free fall 40.1 -> 11.5 ms/tick, 21 x 11 swing 38.9 -> 11.0 (wall, with per-tick readbacks). The oracle match is
+unchanged (0.47 / 0.07 um). A two-level partial sum (2 barriers, serial lane-0 sums) instead of the 8-level tree was
+slower (8.3 us an iteration): barriers are cheap here; kept the tree.
+
+Timing noise: other lanes share the GPU; single passes spike 2x (22 -> 45 us an iteration at 64^2, 26 -> 63 at 128^2)
+and a 128^2 chain read 94-119 us an iteration under contention against 25-26 steady. Take the minimum over passes.
+
+Gate: cloth-analytic, cloth-gpu-solver, cloth-ladder, cloth-system, cloth-contact-gpu/-solid/-body on HEAD e34e7a37 +
+this: 81 tests, 76 pass, 0 fail, 5 todo (C2's incline item 5, moving solid, cut/undo; ladder 2's bound).
