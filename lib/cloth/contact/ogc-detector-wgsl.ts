@@ -58,8 +58,9 @@ export const OGC_PARAM_WORDS = 84;
  * without a moving solid), and with one Bridson et al.'s rigid impact zones (2002, sec. 7.4):
  * a conflict with the solid carries its cloth rigidly with it (w = a_v), growing the zones a redo,
  * up to OGC_REDO_MANDATORY redos in all. A zone redo that marks nothing new, or a conflict in the
- * last, fails as heldConflict. Later rounds predict 0 about the iterate with the solid at its end
- * pose and never conflict: one redo slot.
+ * last, fails as heldConflict. A later round's unlevelled form predicts 0 about the iterate:
+ * without a moving solid it never conflicts (one redo slot); with one, the solid's remaining
+ * motion can close on the cloth at the iterate, so every round gets the whole ladder.
  */
 export const OGC_REDO_ROUNDS = 8;
 export const OGC_REDO_MANDATORY = 32;
@@ -96,7 +97,7 @@ struct OgcParams {
   solidDevOff: u32, bodyDevOff: u32, scaleOff: u32, originOff: u32,
   fixedWord: u32, segWord: u32, recWord: u32, recCap: u32,
   recCountOff: u32, newton: u32, levelWord: u32, levelOn: u32,
-  targetOff: u32, pad8: u32, pad9: u32, pad10: u32,
+  targetOff: u32, rqTop: f32, pad9: u32, pad10: u32,
 }
 `;
 
@@ -110,7 +111,7 @@ export const OGC_PARAM = {
   mode: 47, gammaR: 48, pairCap: 49, tvOff: 50, sepEps: 51, solidBase: 52, solidOff: 53, heldOff: 54, predict: 55, cellRule: 56, S: 57,
   bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62,
   edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67, solidDevOff: 68, bodyDevOff: 69, scaleOff: 70, originOff: 71,
-  fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76, newton: 77, levelWord: 78, levelOn: 79, targetOff: 80,
+  fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76, newton: 77, levelWord: 78, levelOn: 79, targetOff: 80, rqTop: 81,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -406,10 +407,11 @@ var<workgroup> wgHeld: atomic<u32>;
 var<workgroup> wgSolid: atomic<u32>;
 var<workgroup> wgBody: atomic<u32>;
 var<workgroup> wgSqueeze: atomic<u32>;
-// The envelope r + s rho, clamped to [rqBase, rqMax] (a clamp at rqMax is counted).
+// The envelope r + s rho, at least rqBase and at most rqTop (a clamp at rqTop is counted): rqMax, or
+// gamma_r times the smallest rest altitude when the envelope is capped to the mesh (OgcContactConfig).
 fn envelopeOf(rho: f32) -> f32 {
   let env = max(P.rqBase, P.r + P.envScale * rho);
-  if (env > P.rqMax) { atomicAdd(&wgCap, 1u); return P.rqMax; }
+  if (env > P.rqTop) { atomicAdd(&wgCap, 1u); return P.rqTop; }
   return env;
 }
 fn pushSolidEntry(v: u32, y: u32, lambda: f32) {
@@ -842,7 +844,8 @@ fn main() {
 
 /**
  * Between iterations (OGC Algorithm 3, lines 23-30): when gamma_e N vertices
- * hit their bound, the next detection round's dispatches get their workgroups;
+ * hit their bound, the filter held a vertex at 0, or (levelOn) the Newton iteration's line search
+ * took no step on a cut arc, the next detection round's dispatches get their workgroups;
  * otherwise they get none. The decision never leaves the GPU.
  * Levelled re-detection (levelOn: a Newton solver with its control record bound, planar
  * predicted DAT): first the level of the round in flight follows the Newton step just applied,
@@ -855,10 +858,15 @@ export function ogcDecideWGSL(level: boolean): string {
   return header(level ? [0, 8, 9, 10, 19] : [0, 9, 10]) + ARGS_FNS + /* wgsl */`
 @compute @workgroup_size(1)
 fn main() {
+  // A Newton iteration whose line search took no step on a cut arc (nwChoose: alpha 0, not done)
+  // leaves the iterate where the round's set stops it: the next iteration needs new certificates
+  // about it (a levelled round's, predicting that direction), as a vertex the filter held at 0.
+  var noStep = false;
   ${level ? `if (P.levelOn != 0u) {
     let ctl = nwctl[0];
     let it = u32(ctl.w);
     if (it != atomicLoad(&contacts[P.levelWord + 2u])) {
+      noStep = ctl.z == 0.0 && ctl.x == 0.0;
       atomicStore(&contacts[P.levelWord + 2u], it);
       atomicStore(&contacts[P.levelWord + 3u], bitcast<u32>(ctl.z));
       let lf = atomicLoad(&contacts[P.levelWord + 1u]);
@@ -875,7 +883,7 @@ fn main() {
   atomicAdd(&counters[OGC_F_TRUNCATED], ex);
   atomicMax(&counters[OGC_F_TRUNCATED_MAX], ex);
   var on = false;
-  if ((ex > 0u && ex >= P.exceedThreshold) || stalled != 0u) {
+  if ((ex > 0u && ex >= P.exceedThreshold) || stalled != 0u || noStep) {
     if (atomicLoad(&counters[OGC_ROUNDS]) < P.roundCap) {
       atomicAdd(&counters[OGC_ROUNDS], 1u);
       atomicAdd(&counters[OGC_F_REDETECTIONS], 1u);
@@ -1792,6 +1800,88 @@ fn spreadEE(a: vec4<u32>, b: vec4<u32>) -> f32 {
   return max(max(length(wa0 - wb0), length(wa0 - wb1)), max(length(wa1 - wb0), length(wa1 - wb1)));
 }
 
+// The cloth-cloth DAT test (E12). A round moves every vertex along one shared parameter s in [0, 1]:
+// the time of the straight motion X -> x1 in an unlevelled round, the level of the joint path in a
+// levelled one (ogcProjectTrial). At s each vertex lies within its cap, 0.5 gamma_r env_v, of its
+// chord point X + s w (the cap ball's centre moves affinely with s, and the joint path is convex),
+// so a face or edge point within its corners' widest cap of the same point on the predicted
+// primitive. Two primitives therefore stay apart over the round when, at every s, their predicted
+// primitives are further apart than the two caps (and each vertex's stray from its world chord):
+// (i) at X, d > caps + strays + the spread L = max |w_i - w_j| over the pair (the relative motion
+// closes the distance at most L s); (ii) on the predicted paths, the bound datPathVT / datPathEE.
+// The threshold adds sepEps, the gap paired primitives keep, and datRound, the f32 error of the
+// distances (128 ulps of the coordinates' scale), so a dropped pair keeps at least sepEps.
+fn datCaps(a: f32, b: f32) -> f32 { return 0.5 * P.gammaR * (a + b) + P.sepEps; }
+fn datRound(s: f32) -> f32 { return 1.52587890625e-5 * s; }
+fn absMax(p: vec3<f32>) -> f32 { return max(abs(p.x), max(abs(p.y), abs(p.z))); }
+fn pathStray(i: u32) -> f32 { return strayOf(i, false); }
+// Exact distances for the path bound; a degenerate segment is its point, a zero-area triangle the
+// union of its edges.
+fn datPointSeg(p: vec3<f32>, q0: vec3<f32>, q1: vec3<f32>) -> f32 {
+  let d = q1 - q0; let e = dot(d, d);
+  let t = select(0.0, clamp(dot(p - q0, d) / e, 0.0, 1.0), e > 0.0);
+  return length(p - (q0 + t * d));
+}
+fn datSegSeg(p0: vec3<f32>, p1: vec3<f32>, q0: vec3<f32>, q1: vec3<f32>) -> f32 {
+  if (!(dot(p1 - p0, p1 - p0) > 0.0)) { return datPointSeg(p0, q0, q1); }
+  if (!(dot(q1 - q0, q1 - q0) > 0.0)) { return datPointSeg(q0, p0, p1); }
+  return ogcSegmentSegment(p0, p1, q0, q1).z;
+}
+fn datPointTri(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> f32 {
+  let n = cross(b - a, c - a);
+  if (!(dot(n, n) > 0.0)) { return min(datPointSeg(p, a, b), min(datPointSeg(p, b, c), datPointSeg(p, c, a))); }
+  let cl = ogcClosestTriangle(p, a, b, c);
+  return length(p - (cl.bary.x * a + cl.bary.y * b + cl.bary.z * c));
+}
+// (ii) The distance g(s) of the predicted primitives, every vertex at X + s w, is L-Lipschitz in s
+// (for fixed barycentric weights the difference of the two points moves at a convex mix of the
+// w_i - w_j), so on [k/K, (k+1)/K] it is at least (g_k + g_k+1) / 2 - L / 2K. K levels make that
+// sampling slack at most a tenth of the threshold (K <= 32; the bound stays sound beyond).
+fn datLevels(L: f32, thr: f32) -> u32 { return u32(clamp(ceil(5.0 * L / max(thr, 1.0e-30)), 1.0, 32.0)); }
+fn datPathVT(x: vec3<f32>, v: u32, tri: vec3<u32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, L: f32, thr: f32) -> f32 {
+  let wv = predOf(v); let w0 = predOf(tri.x); let w1 = predOf(tri.y); let w2 = predOf(tri.z);
+  let K = datLevels(L, thr);
+  var prev = datPointTri(x, a, b, c);
+  var lo = 3.4e38;
+  for (var k = 1u; k <= K; k++) {
+    let t = f32(k) / f32(K);
+    let dk = datPointTri(x + t * wv, a + t * w0, b + t * w1, c + t * w2);
+    lo = min(lo, 0.5 * (prev + dk));
+    prev = dk;
+  }
+  return lo - L / (2.0 * f32(K));
+}
+fn datPathEE(ep: vec4<u32>, eq: vec4<u32>, p0: vec3<f32>, p1: vec3<f32>, q0: vec3<f32>, q1: vec3<f32>, L: f32, thr: f32) -> f32 {
+  let wp0 = predOf(ep.x); let wp1 = predOf(ep.y); let wq0 = predOf(eq.x); let wq1 = predOf(eq.y);
+  let K = datLevels(L, thr);
+  var prev = datSegSeg(p0, p1, q0, q1);
+  var lo = 3.4e38;
+  for (var k = 1u; k <= K; k++) {
+    let t = f32(k) / f32(K);
+    let dk = datSegSeg(p0 + t * wp0, p1 + t * wp1, q0 + t * wq0, q1 + t * wq1);
+    lo = min(lo, 0.5 * (prev + dk));
+    prev = dk;
+  }
+  return lo - L / (2.0 * f32(K));
+}
+// Whether v and face tri (at X: x; a, b, c) need a DAT pair: (i), then (ii) (a NaN keeps the pair).
+fn datPairVT(x: vec3<f32>, d: f32, v: u32, tri: vec3<u32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, rv: f32) -> bool {
+  let L = spreadVT(v, tri);
+  let wmax = max(absMax(predOf(v)), max(absMax(predOf(tri.x)), max(absMax(predOf(tri.y)), absMax(predOf(tri.z)))));
+  let st = pathStray(v) + max(pathStray(tri.x), max(pathStray(tri.y), pathStray(tri.z)));
+  let thr = datCaps(rv, triEnv(tri)) + st + datRound(max(absMax(x), max(absMax(a), max(absMax(b), absMax(c)))) + wmax);
+  if (d > thr + L) { return false; }
+  return !(datPathVT(x, v, tri, a, b, c, L, thr) > thr);
+}
+fn datPairEE(er: vec4<u32>, r2: vec4<u32>, d: f32, p0: vec3<f32>, p1: vec3<f32>, q0: vec3<f32>, q1: vec3<f32>, re: f32, re2: f32) -> bool {
+  let L = spreadEE(er, r2);
+  let wmax = max(max(absMax(predOf(er.x)), absMax(predOf(er.y))), max(absMax(predOf(r2.x)), absMax(predOf(r2.y))));
+  let st = max(pathStray(er.x), pathStray(er.y)) + max(pathStray(r2.x), pathStray(r2.y));
+  let thr = datCaps(re, re2) + st + datRound(max(max(absMax(p0), absMax(p1)), max(absMax(q0), absMax(q1))) + wmax);
+  if (d > thr + L) { return false; }
+  return !(datPathEE(er, r2, p0, p1, q0, q1, L, thr) > thr);
+}
+
 fn pushEntry(u: u32, ent: vec4<u32>) {
   let slot = atomicAdd(&contacts[P.countsOff + u], 1u);
   if (slot < P.contactCap) {
@@ -1879,7 +1969,7 @@ fn vertexFacet(v: u32) -> RoleOut {
       let d = length(x - cp);
       dmin = min(dmin, d);
       if (planar) {
-        if (d <= max(rv, triEnv(tri)) + spreadVT(v, tri)) { pairVT(v, tri, x, cp); out.dat++; }
+        if (datPairVT(x, d, v, tri, a, b, cc, rv)) { pairVT(v, tri, x, cp); out.dat++; }
       } else {
         atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
       }
@@ -1988,7 +2078,7 @@ fn edgeEdge(e: u32) -> RoleOut {
         if (e < e2) { st = ogcSegmentSegment(p0, p1, q0, q1); }
         else { let w = ogcSegmentSegment(q0, q1, p0, p1); st = vec3<f32>(w.y, w.x, w.z); }
         dmin = min(dmin, st.z);
-        if (planar && e < e2 && st.z <= max(re, max(envOf(r2.x), envOf(r2.y))) + spreadEE(er, r2)) {
+        if (planar && e < e2 && datPairEE(er, r2, st.z, p0, p1, q0, q1, re, max(envOf(r2.x), envOf(r2.y)))) {
           pairEE(er, r2, p0 + st.x * (p1 - p0), q0 + st.y * (q1 - q0));
           out.dat++;
         }

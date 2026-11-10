@@ -824,42 +824,121 @@ fn ogcProjectExact(k: OgcProjSet, zy: vec3<f32>) -> vec3<f32> {
   }
   return z;
 }
-// The projection of the trial y = x + alpha d (alpha the trial's step) onto its level's set.
-fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> {
+// A vertex's projection context at a trial's level: its records (fb, first, n), the level (U the
+// iterate's, u the trial's), the anchors at the two levels (cx, c), the prediction w and the moving
+// solid's end-pose turn Rb; held: the vertex does not move (no records, an inside marker, a pair
+// with no plane, records past their capacity).
+struct OgcTrialCtx { held: bool, fb: u32, first: u32, n: u32, levelled: bool, U: f32, u: f32, w: vec3<f32>, cx: vec3<f32>, c: vec3<f32>, Rb: mat3x3<f32> }
+fn ogcTrialCtx(v: u32, alpha: f32) -> OgcTrialCtx {
+  var t: OgcTrialCtx;
+  t.held = true;
   let pb = ogcContacts[2].w;
-  if (pb == 0u) { return x; }
+  if (pb == 0u) { return t; }
   let ph = ogcContacts[pb];
-  let fb = ph.x + ${OGC_PROJECT_RECORD}u * v;
-  let n = ogcSolidWord(ph.y + 2u * v + 1u);
-  if (n == OGC_NONE) { return x; }
-  let first = ph.z + ogcSolidWord(ph.y + 2u * v);
-  let so = ogcProj4(fb + 1u); let bo = ogcProj4(fb + 4u);
-  if (so.w == 2.0 || bo.w == 2.0) { return x; }
-  for (var i = 0u; i < n; i++) {
-    if (all(ogcProj4(first + i).xyz == vec3<f32>(0.0))) { return x; }
+  t.fb = ph.x + ${OGC_PROJECT_RECORD}u * v;
+  t.n = ogcSolidWord(ph.y + 2u * v + 1u);
+  if (t.n == OGC_NONE) { return t; }
+  t.first = ph.z + ogcSolidWord(ph.y + 2u * v);
+  if (ogcProj4(t.fb + 1u).w == 2.0 || ogcProj4(t.fb + 4u).w == 2.0) { return t; }
+  for (var i = 0u; i < t.n; i++) {
+    if (all(ogcProj4(t.first + i).xyz == vec3<f32>(0.0))) { return t; }
   }
   // The level: the iterate's (U = 1 - L) and the trial's (u = U (1 - alpha), U when frozen).
   let lh = ogcContacts[pb + 1u];
-  let levelled = (lh.y & ${OGC_LEVEL_FLAG.levelled}u) != 0u;
-  let U = select(0.0, bitcast<f32>(lh.x), levelled);
-  let u = select(U * (1.0 - alpha), U, (lh.y & ${OGC_LEVEL_FLAG.frozen}u) != 0u);
-  let Rb = transpose(ogcPose(1u).R);
-  let cap = ogcProj4(fb);
-  let w = ogcProj4(fb + 7u).xyz;
+  t.levelled = (lh.y & ${OGC_LEVEL_FLAG.levelled}u) != 0u;
+  t.U = select(0.0, bitcast<f32>(lh.x), t.levelled);
+  t.u = select(t.U * (1.0 - alpha), t.U, (lh.y & ${OGC_LEVEL_FLAG.frozen}u) != 0u);
+  t.Rb = transpose(ogcPose(1u).R);
+  t.w = ogcProj4(t.fb + 7u).xyz;
   // The anchors at the iterate's level and the trial's: c1 - U w and c1 - u w (c1 = X + w).
-  let cx = cap.xyz - U * w;
-  let c = cap.xyz - u * w;
+  let c1 = ogcProj4(t.fb).xyz;
+  t.cx = c1 - t.U * t.w;
+  t.c = c1 - t.u * t.w;
+  t.held = false;
+  return t;
+}
+// The certificate set relative to the trial's anchor, each pulled in by margin.
+fn ogcTrialSet(t: OgcTrialCtx, margin: f32) -> OgcProjSet {
+  let so = ogcProj4(t.fb + 1u); let bo = ogcProj4(t.fb + 4u);
+  return OgcProjSet(t.first, t.n, ogcProj4(t.fb).w, margin, so.w != 0.0, so.xyz - t.c, ogcProj4(t.fb + 2u), ogcProj4(t.fb + 3u).xyz,
+    bo.w != 0.0, bo.xyz - t.c, ogcProj4(t.fb + 5u), ogcProj4(t.fb + 6u).xyz, t.Rb);
+}
+// The projection of the trial y = x + alpha d (alpha the trial's step) onto its level's set.
+fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> { return ogcProjectAt(ogcTrialCtx(v, alpha), x, y); }
+fn ogcProjectAt(t: OgcTrialCtx, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> {
+  if (t.held) { return x; }
   // A trial every certificate keeps whole along the joint path from (x, L) (the filter's own test) is the point itself.
-  if (ogcArcScale(fb, first, n, x - cx, (y - x) - (U - u) * w, x, y - x, Rb) >= 1.0) { return y; }
-  let zy = y - c;
-  let cert = OgcProjSet(first, n, cap.w, 1.52587890625e-5 * (cap.w + length(zy)), so.w != 0.0, so.xyz - c, ogcProj4(fb + 2u), ogcProj4(fb + 3u).xyz,
-    bo.w != 0.0, bo.xyz - c, ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb);
-  let p = c + ogcProjectExact(cert, zy);
+  if (ogcArcScale(t.fb, t.first, t.n, x - t.cx, (y - x) - (t.U - t.u) * t.w, x, y - x, t.Rb) >= 1.0) { return y; }
+  let zy = y - t.c;
+  let p = t.c + ogcProjectExact(ogcTrialSet(t, 1.52587890625e-5 * (ogcProj4(t.fb).w + length(zy))), zy);
   // From the anchor c(a) in a levelled round (every certificate holds it: the cap's centre,
   // records with b <= 0, solids holding X and X + w), else from the iterate.
-  let o = select(x, c, levelled);
+  let o = select(x, t.c, t.levelled);
   let e = p - o;
-  return o + ogcArcExit(fb, first, n, o - c, e, o, e, Rb) * e;
+  return o + ogcArcExit(t.fb, t.first, t.n, o - t.c, e, o, e, t.Rb) * e;
+}
+/**
+ * The projected trial q = ogcProjectTrial(v, x, y, alpha) and the outward unit normals of the
+ * certificates binding it other than the cap (the cap is the round's trust region about the
+ * anchor, not a contact): plane records, the solid pieces' balls and their eight orthant faces
+ * (the piece D.|u| - q.u <= 1 is the eight half-spaces' intersection, so a point on an orthant
+ * boundary reports each face meeting there), up to three linearly independent ones (Gram-Schmidt
+ * at OGC_GS_FLOOR in the records' list order, then the static solid, then the moving one).
+ * Binding: the true certificate's slack within tol = 4 tau + 2^-20 (|q|_inf + |c|_inf), tau =
+ * 2^-17 (R + |y - c|) as the projection's: its point sits 2 tau inside the certificates its
+ * working set holds, the final segment's exit puts the one it stops at within rounding of 0, and
+ * q and c are world f32 positions (each component within 2^-24 of its magnitude, so z = q - c
+ * within 2 sqrt(3) 2^-24 < 2^-21 of both). The final working set alone misses both ties and the
+ * exit's constraint. capOn: the cap binds at q too, nc its outward unit normal (apart from the
+ * three: the caller decides whether the round's trust region enters its active set). held: the
+ * vertex does not move (q = x, count 0). Valid where the records are the iterate's: after the
+ * round's filter, before the next re-detection.
+ */
+struct OgcActive { q: vec3<f32>, held: bool, count: u32, n0: vec3<f32>, n1: vec3<f32>, n2: vec3<f32>, capOn: bool, nc: vec3<f32> }
+struct OgcActiveAcc { a: OgcActive, b0: vec3<f32>, b1: vec3<f32> }
+fn ogcActiveAdd(s: ptr<function, OgcActiveAcc>, g: vec3<f32>) {
+  if ((*s).a.count >= 3u) { return; }
+  let l0 = length(g);
+  if (!(l0 > 0.0)) { return; }
+  let n = g / l0;
+  var e = n;
+  if ((*s).a.count > 0u) { e -= dot(e, (*s).b0) * (*s).b0; }
+  if ((*s).a.count > 1u) { e -= dot(e, (*s).b1) * (*s).b1; }
+  let L = length(e);
+  if (!(L > OGC_GS_FLOOR)) { return; }
+  if ((*s).a.count == 0u) { (*s).a.n0 = n; (*s).b0 = e / L; }
+  else if ((*s).a.count == 1u) { (*s).a.n1 = n; (*s).b1 = e / L; }
+  else { (*s).a.n2 = n; }
+  (*s).a.count++;
+}
+fn ogcActiveFaces(s: ptr<function, OgcActiveAcc>, k: OgcProjSet, z: vec3<f32>, base: u32, ball: u32, tol: f32) {
+  let cb = ogcConOf(k, ball);
+  if (ogcConViol(cb, z) >= -tol) { ogcActiveAdd(s, z - cb.n); }
+  for (var o = 0u; o < 8u; o++) {
+    let c = ogcConOf(k, base + o);
+    if (ogcConViol(c, z) >= -tol) { ogcActiveAdd(s, c.n); }
+  }
+}
+fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive {
+  var s: OgcActiveAcc;
+  let t = ogcTrialCtx(v, alpha);
+  s.a.q = ogcProjectAt(t, x, y);
+  s.a.held = t.held;
+  if (t.held) { return s.a; }
+  let z = s.a.q - t.c;
+  let aq = abs(s.a.q); let ac = abs(t.c);
+  let tol = 6.103515625e-5 * (ogcProj4(t.fb).w + length(y - t.c)) + 9.5367431640625e-7 * (max(aq.x, max(aq.y, aq.z)) + max(ac.x, max(ac.y, ac.z)));
+  let k = ogcTrialSet(t, 0.0);
+  for (var i = 0u; i < k.n; i++) {
+    let c = ogcConOf(k, i);
+    if (ogcConViol(c, z) >= -tol) { ogcActiveAdd(&s, c.n); }
+  }
+  if (k.sOn) { ogcActiveFaces(&s, k, z, OGC_CON_SOLID, OGC_CON_SOLID_BALL, tol); }
+  if (k.bOn) { ogcActiveFaces(&s, k, z, OGC_CON_BODY, OGC_CON_BODY_BALL, tol); }
+  let lz = length(z);
+  s.a.capOn = lz >= k.R - tol && lz > 0.0;
+  if (s.a.capOn) { s.a.nc = z / lz; }
+  return s.a;
 }
 // The mandatory round's and an unlevelled round's projection (no level: the trial's alpha is unread).
 fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return ogcProjectTrial(v, x, y, 1.0); }

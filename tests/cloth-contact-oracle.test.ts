@@ -11,11 +11,15 @@ import {
   frictionF0, frictionF1OverY, merge, normalGradientHessian, rng, sheet, sub, vertexForceHessian, dot, norm, scale,
   bruteForceDatPairs, isotropicTruncate, motionPenetrates, planarTruncate,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate, predictionSpread, buildEdges,
+  datTest, pointTriangleDistance, segmentSegmentDistance, cross, type DatRule,
   type ContactParams, type OracleContact, type OracleMesh, type V3,
   levelledInside, levelledLadder, levelledRound, type WorldHalfSpace,
   bruteForceProjection, conViolation, projectionCase, projectionCaseCons, projectionKkt, workingSetProjection, type ProjCon,
 } from "./cloth-contact-oracle";
 import { buildOgcEdges, buildOgcTopology, OGC_NONE } from "../lib/cloth/contact/ogc-topology";
+
+/** The DAT test's constants in these tests: gamma_r 0.9, sepEps 1 um. */
+const DAT: DatRule = { gammaR: 0.9, sepEps: 1e-6 };
 
 const close = (a: number, b: number, tol: number, msg?: string) => assert.ok(Math.abs(a - b) <= tol * Math.max(1, Math.abs(a), Math.abs(b)), `${msg ?? ""} ${a} vs ${b}`);
 
@@ -231,7 +235,7 @@ test("DAT condition: every primitive pair left unpaired is further apart than it
   for (const seed of [1, 2, 3]) {
     const m = datScene(seed), Xnew = datMotion(m, seed, 8e-3);
     const rq = envelopes(m, Xnew, 1e-3, 1.5, 1.5e-3, 2e-2);
-    const { vt, ee } = bruteForceDatPairs(m, rq, 0);
+    const { vt, ee } = bruteForceDatPairs(m, rq, 0, DAT);
     for (let v = 0; v < m.x.length; v++) for (let t = 0; t < m.tris.length; t++) {
       const tri = m.tris[t];
       if (tri.includes(v) || vt.has(`${v}|${t}`)) continue;
@@ -257,7 +261,7 @@ test("Planar-DAT and isotropic DAT keep large random motions penetration-free; t
     const m = datScene(seed), X = m.x, Xnew = datMotion(m, seed, 8e-3);
     if (motionPenetrates(m, X, Xnew)) rawPenetrations++;
     const rq = envelopes(m, Xnew, r, 1.5, 1.5e-3, 2e-2);
-    const { pairs } = bruteForceDatPairs(m, rq, 0);
+    const { pairs } = bruteForceDatPairs(m, rq, 0, DAT);
     const planar = planarTruncate(X, Xnew, pairs, rq.map(q => 0.5 * gammaR * q), gammaR, sepEps);
     assert.equal(motionPenetrates(m, X, planar.x), false, `planar seed ${seed}`);
     assert.equal(countIntersections({ ...m, x: planar.x }), 0);
@@ -278,7 +282,7 @@ test("Planar-DAT leaves tangential sliding and separation untouched where the sp
     const Xnew = X.map((x, i) => (i < n ? x : add(x, d as unknown as V3)));
     // s = 2.5 > 2 / gamma_r: the cap 0.5 gamma_r r_q,v exceeds the vertex's own motion.
     const rq = envelopes(m, Xnew, r, 2.5, 1.5e-3, 2e-2);
-    const { pairs } = bruteForceDatPairs(m, rq, 0);
+    const { pairs } = bruteForceDatPairs(m, rq, 0, DAT);
     assert.ok(pairs.length > 0);
     const planar = planarTruncate(X, Xnew, pairs, rq.map(q => 0.5 * gammaR * q), gammaR, sepEps);
     assert.ok(planar.tv.every(t => t === 1), label);
@@ -289,7 +293,7 @@ test("Planar-DAT leaves tangential sliding and separation untouched where the sp
   // Approaching layers: each keeps a share of the gap proportional to its own approach.
   const Xnew = X.map((x, i) => add(x, [0, 0, i < n ? 0.5e-3 : -3e-3]));
   const rq = envelopes(m, Xnew, r, 2.5, 1.5e-3, 2e-2);
-  const planar = planarTruncate(X, Xnew, bruteForceDatPairs(m, rq, 0).pairs, rq.map(q => 0.5 * gammaR * q), gammaR, sepEps);
+  const planar = planarTruncate(X, Xnew, bruteForceDatPairs(m, rq, 0, DAT).pairs, rq.map(q => 0.5 * gammaR * q), gammaR, sepEps);
   const gapAfter = planar.x[n][2] - planar.x[0][2];
   assert.ok(gapAfter > 0.09 * 2e-3 && gapAfter < 0.5 * 2e-3, `gap after ${gapAfter}`);
 });
@@ -319,7 +323,7 @@ test("predicted-motion DAT: a pair whose vertices have different predictions sta
   const Xnew = X.map((x, i) => add(add(x, W[i]), R[i]));
   assert.ok(motionPenetrates(m, X, Xnew), "the raw motion passes the vertex through the face");
   const rq = X.map(() => 6e-3), cap = rq.map(q => 0.5 * gammaR * q);
-  const { pairs } = bruteForcePredictedPairs(m, rq, W, 0);
+  const { pairs } = bruteForcePredictedPairs(m, rq, W, 0, DAT);
   assert.equal(pairs.length, 1);
   assert.ok(predictionSpread(W, [0], [1, 2, 3]) > 1.5e-3, "the predictions differ");
   assert.equal(predictedConflict(pairs[0], X, W, sepEps), false, "the predicted positions are still divided");
@@ -339,7 +343,7 @@ test("predicted-motion DAT: a pair whose vertices have different predictions sta
   const Re: V3[] = [[0, 0, -2.5e-3], [0, 0, -2.5e-3], [0, 0, 2e-3], [0, 0, 2e-3], [0, 0, -2.5e-3], [0, 0, 2e-3]];
   const Enew = E.map((x, i) => add(add(x, We[i]), Re[i]));
   assert.ok(motionPenetrates(me, E, Enew), "the raw edges cross");
-  const pe = bruteForcePredictedPairs(me, E.map(() => 4e-3), We, 0).pairs;
+  const pe = bruteForcePredictedPairs(me, E.map(() => 4e-3), We, 0, DAT).pairs;
   assert.ok(pe.some(p => p.kind === "ee") && pe.every(p => !predictedConflict(p, E, We, sepEps)));
   const oe = predictedTruncate(E, Enew, We, pe, E.map(() => 0.45 * 4e-3), gammaR, sepEps);
   assert.ok(pathsSeparated(me, E, oe.x), "the truncated edges never cross");
@@ -359,38 +363,14 @@ test("predicted-motion DAT: random rounds with per-vertex predictions are penetr
     if (motionPenetrates(m, X, Xnew)) rawPenetrations++;
     const rq = X.map((_, i) => Math.min(2e-2, Math.max(1.5e-3, r + 2.5 * norm(res[i]))));
     const cap = rq.map(q => 0.5 * gammaR * q);
-    const { pairs, vt, ee } = bruteForcePredictedPairs(m, rq, W, 0);
-    // Unpaired: the distance exceeds both caps plus the prediction spread, so the two never meet.
-    for (let v = 0; v < X.length; v++) for (let t = 0; t < m.tris.length; t++) {
-      const tri = m.tris[t];
-      if (tri.includes(v) || vt.has(`${v}|${t}`)) continue;
-      const { bary } = closestPointTriangle(X[v], X[tri[0]], X[tri[1]], X[tri[2]]);
-      const cp = add(add(scale(X[tri[0]], bary[0]), scale(X[tri[1]], bary[1])), scale(X[tri[2]], bary[2]));
-      const reach = cap[v] + Math.max(...tri.map(i => cap[i])) + predictionSpread(W, [v], tri);
-      const d = norm(sub(X[v], cp));
-      // Either beyond reach or with swept boxes apart (then they cannot meet either).
-      if (!(reach < d)) {
-        const lo = (P: V3[], e: number) => [0, 1, 2].map(k => Math.min(...P.map(p => p[k])) - e), hi = (P: V3[], e: number) => [0, 1, 2].map(k => Math.max(...P.map(p => p[k])) + e);
-        const A = [X[v], add(X[v], W[v])], B = tri.flatMap(i => [X[i], add(X[i], W[i])]);
-        const apart = [0, 1, 2].some(k => lo(A, cap[v])[k] > hi(B, Math.max(...tri.map(i => cap[i])))[k] || lo(B, Math.max(...tri.map(i => cap[i])))[k] > hi(A, cap[v])[k]);
-        assert.ok(apart, `unpaired vt ${v}|${t}: reach ${reach} vs ${d}`);
-      }
-    }
-    for (let e = 0; e < m.edges.length; e++) for (let f = e + 1; f < m.edges.length; f++) {
-      const [a0, a1] = m.edges[e], [b0, b1] = m.edges[f];
-      if (a0 === b0 || a0 === b1 || a1 === b0 || a1 === b1 || ee.has(`${e}|${f}`)) continue;
-      const d = closestSegmentSegment(X[a0], X[a1], X[b0], X[b1]).d;
-      const reach = Math.max(cap[a0], cap[a1]) + Math.max(cap[b0], cap[b1]) + predictionSpread(W, [a0, a1], [b0, b1]);
-      if (reach < d) continue;
-      const box = (ids: number[], c: number) => sweptBoxOf(ids.map(i => X[i]), ids.map(i => W[i]), c);
-      const A = box([a0, a1], Math.max(cap[a0], cap[a1])), B = box([b0, b1], Math.max(cap[b0], cap[b1]));
-      assert.ok([0, 1, 2].some(k => A.lo[k] > B.hi[k] || B.lo[k] > A.hi[k]), `unpaired ee ${e}|${f}`);
-    }
+    const { pairs, vt, ee } = bruteForcePredictedPairs(m, rq, W, 0, DAT);
+    // Unpaired: the predicted primitives stay further apart than the two caps plus sepEps at every shared level.
+    droppedApart(m, X, W, cap, sepEps, vt, ee);
     if (pairs.some(p => predictedConflict(p, X, W, sepEps))) {
       // The round is redone with every prediction held: Planar-DAT with the whole motion in the envelope.
       conflicted++;
       const rq0 = X.map((x, i) => Math.min(2e-2, Math.max(1.5e-3, r + 2.5 * norm(sub(Xnew[i], x)))));
-      const held = predictedTruncate(X, Xnew, X.map(() => [0, 0, 0]), bruteForceDatPairs(m, rq0, 0).pairs, rq0.map(q => 0.5 * gammaR * q), gammaR, sepEps);
+      const held = predictedTruncate(X, Xnew, X.map(() => [0, 0, 0]), bruteForceDatPairs(m, rq0, 0, DAT).pairs, rq0.map(q => 0.5 * gammaR * q), gammaR, sepEps);
       assert.equal(motionPenetrates(m, X, held.x), false, `held seed ${seed}`);
       continue;
     }
@@ -404,11 +384,155 @@ test("predicted-motion DAT: random rounds with per-vertex predictions are penetr
   assert.ok(rawPenetrations >= 3, `the raw motions penetrate (${rawPenetrations}/6)`);
 });
 
-function sweptBoxOf(P: V3[], W: V3[], e: number) {
-  const lo: V3 = [Infinity, Infinity, Infinity], hi: V3 = [-Infinity, -Infinity, -Infinity];
-  P.forEach((p, i) => { for (const q of [p, add(p, W[i])]) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], q[k] - e); hi[k] = Math.max(hi[k], q[k] + e); } });
-  return { lo, hi };
+const unitOf = (a: V3): V3 => { const l = norm(a); return l > 0 ? scale(a, 1 / l) : [0, 0, 0]; };
+const distanceOf = (kind: "vt" | "ee", Q: V3[]) =>
+  kind === "vt" ? pointTriangleDistance(Q[0], Q[1], Q[2], Q[3]) : segmentSegmentDistance(Q[0], Q[1], Q[2], Q[3]);
+const atLevel = (P: V3[], W: V3[], s: number) => P.map((p, i) => add(p, scale(W[i], s)));
+
+/**
+ * The smallest distance of the predicted primitives (every vertex at X + s w) over the shared
+ * level s in [0, 1]: sampled at n + 1 levels, then refined by golden section about the best
+ * sample. An upper estimate of the true minimum, so a dropped pair that comes too close fails.
+ */
+function pathMinimum(kind: "vt" | "ee", P: V3[], W: V3[], n: number): { g: number; s: number } {
+  const g = (s: number) => distanceOf(kind, atLevel(P, W, s));
+  let best = { g: Infinity, s: 0 };
+  for (let k = 0; k <= n; k++) { const v = g(k / n); if (v < best.g) best = { g: v, s: k / n }; }
+  let lo = Math.max(0, best.s - 1 / n), hi = Math.min(1, best.s + 1 / n);
+  const phi = (Math.sqrt(5) - 1) / 2;
+  for (let it = 0; it < 40; it++) {
+    const s1 = hi - phi * (hi - lo), s2 = lo + phi * (hi - lo);
+    if (g(s1) < g(s2)) hi = s2; else lo = s1;
+  }
+  const s = 0.5 * (lo + hi), v = g(s);
+  return v < best.g ? { g: v, s } : best;
 }
+
+/**
+ * The caps' worst realisation at level s: every vertex of side A displaced by its own cap along
+ * the closest-point axis toward B, every vertex of B by its own toward A. Its distance.
+ */
+function adversarialDistance(kind: "vt" | "ee", P: V3[], W: V3[], cap: number[], s: number): number {
+  const Q = atLevel(P, W, s), nA = kind === "vt" ? 1 : 2;
+  let n: V3;
+  if (kind === "vt") {
+    const { bary } = closestPointTriangle(Q[0], Q[1], Q[2], Q[3]);
+    n = unitOf(sub(Q[0], add(add(scale(Q[1], bary[0]), scale(Q[2], bary[1])), scale(Q[3], bary[2]))));
+  } else {
+    const c = closestSegmentSegment(Q[0], Q[1], Q[2], Q[3]);
+    n = unitOf(sub(add(Q[0], scale(sub(Q[1], Q[0]), c.s)), add(Q[2], scale(sub(Q[3], Q[2]), c.t))));
+  }
+  return distanceOf(kind, Q.map((q, i) => add(q, scale(n, i < nA ? -cap[i] : cap[i]))));
+}
+
+/**
+ * Every non-adjacent pair the round leaves unpaired keeps its predicted primitives further apart
+ * than its two caps (each side's widest) plus sepEps at every shared level, and the caps' worst
+ * realisation at the closest level keeps at least sepEps. (i) is checked on 8 levels (the
+ * Lipschitz bound g(s) >= d - L s covers the rest), any other pair on 512 and refined.
+ */
+function droppedApart(m: OracleMesh, X: V3[], W: V3[], cap: number[], sepEps: number, vt: Set<string>, ee: Set<string>) {
+  const check = (kind: "vt" | "ee", ids: number[], key: string) => {
+    const nA = kind === "vt" ? 1 : 2, P = ids.map(i => X[i]), Wp = ids.map(i => W[i]);
+    const caps = Math.max(...ids.slice(0, nA).map(i => cap[i])) + Math.max(...ids.slice(nA).map(i => cap[i]));
+    const L = predictionSpread(W, ids.slice(0, nA), ids.slice(nA)), d = distanceOf(kind, P);
+    const min = pathMinimum(kind, P, Wp, d - L > caps + sepEps ? 8 : 512);
+    assert.ok(min.g > caps + sepEps, `unpaired ${kind} ${key}: the predicted primitives come to ${min.g} at level ${min.s}, caps ${caps} + sepEps`);
+    const worst = adversarialDistance(kind, P, Wp, ids.map(i => cap[i]), min.s);
+    assert.ok(worst >= sepEps, `unpaired ${kind} ${key}: the caps' worst realisation closes to ${worst}`);
+  };
+  for (let v = 0; v < X.length; v++) for (let t = 0; t < m.tris.length; t++) {
+    const tri = m.tris[t];
+    if (!tri.includes(v) && !vt.has(`${v}|${t}`)) check("vt", [v, ...tri], `${v}|${t}`);
+  }
+  for (let e = 0; e < m.edges.length; e++) for (let f = e + 1; f < m.edges.length; f++) {
+    const [a0, a1] = m.edges[e], [b0, b1] = m.edges[f];
+    if (a0 !== b0 && a0 !== b1 && a1 !== b0 && a1 !== b1 && !ee.has(`${e}|${f}`)) check("ee", [a0, a1, b0, b1], `${e}|${f}`);
+  }
+}
+
+test("E12 DAT test (i) and (ii): random pairs it drops stay more than sepEps apart along the shared-level path, the caps realised adversarially", () => {
+  const R = rng(1201), rv = (sz: number): V3 => [(R() - 0.5) * sz, (R() - 0.5) * sz, (R() - 0.5) * sz];
+  const byI = { vt: 0, ee: 0 }, byII = { vt: 0, ee: 0 }, kept = { vt: 0, ee: 0 };
+  let closeKept = 0;
+  for (let trial = 0; trial < 6000; trial++) {
+    const kind = trial % 2 ? "ee" : "vt";
+    // Four points in a 2 cm box, a shared drift and per-vertex predictions of up to 1.5 cm, envelopes 1.5 to 6 mm.
+    const X = [0, 1, 2, 3].map(() => rv(2e-2));
+    const drift = rv(3e-2), spread = R() * 1.5e-2;
+    const W = X.map(() => add(drift, rv(spread)));
+    const rq = X.map(() => 1.5e-3 + R() * 4.5e-3), cap = rq.map(q => 0.5 * DAT.gammaR * q);
+    const t = datTest(kind, [0, 1, 2, 3], X, W, rq, DAT);
+    const nA = kind === "vt" ? 1 : 2;
+    const caps = Math.max(...cap.slice(0, nA)) + Math.max(...cap.slice(nA));
+    const min = pathMinimum(kind, X, W, 512);
+    if (t.keep) { kept[kind]++; if (min.g <= caps + DAT.sepEps) closeKept++; continue; }
+    if (t.d > t.thr + t.L) byI[kind]++; else byII[kind]++;
+    assert.ok(min.g > caps + DAT.sepEps, `trial ${trial} ${kind}: dropped, yet the path comes to ${min.g} at level ${min.s} (caps ${caps})`);
+    assert.ok(adversarialDistance(kind, X, W, cap, min.s) >= DAT.sepEps, `trial ${trial}: the caps' worst realisation closes`);
+    // (i) is the Lipschitz bound itself: g(s) >= d - L s.
+    if (t.d > t.thr + t.L) assert.ok(min.g >= t.d - t.L * min.s - 1e-15);
+  }
+  console.log(`E12 random pairs: dropped by (i) ${JSON.stringify(byI)}, by (ii) ${JSON.stringify(byII)}, kept ${JSON.stringify(kept)} (${closeKept} of them within the caps)`);
+  for (const k of ["vt", "ee"] as const) {
+    assert.ok(byI[k] > 100 && byII[k] > 50 && kept[k] > 100, `${k}: every branch exercised`);
+  }
+  assert.ok(closeKept > 50, "pairs whose paths come within the caps exist and are kept");
+});
+
+test("E12 DAT test: the shared level is necessary - with each side at its own level, pairs it drops meet", () => {
+  // A vertex 5 mm above a face, both predicted 1 cm down: L = 0 and (i) drops the pair.
+  const X: V3[] = [[2e-3, 2e-3, 5e-3], [0, 0, 0], [8e-3, 0, 0], [0, 8e-3, 0]], w: V3 = [0, 0, -1e-2], W = X.map(() => w);
+  const rq = X.map(() => 2e-3), cap = rq.map(q => 0.5 * DAT.gammaR * q);
+  const t = datTest("vt", [0, 1, 2, 3], X, W, rq, DAT);
+  assert.equal(t.keep, false); assert.equal(t.L, 0);
+  assert.ok(pathMinimum("vt", X, W, 64).g > 4.9e-3, "along the shared level the pair stays 5 mm apart");
+  // The vertex at level 1 and the face at level 0: the vertex is 5 mm below the face, through it.
+  const split = (sA: number, sB: number) => pointTriangleDistance(add(X[0], scale(w, sA)), ...(X.slice(1).map(p => add(p, scale(w, sB))) as [V3, V3, V3]));
+  assert.ok(split(0.5, 0) < 1e-15, "the vertex at level 0.5 lies in the face at level 0");
+  // Random drops: some pairs, each side at its own level, come within the caps.
+  const R = rng(1202), rv = (sz: number): V3 => [(R() - 0.5) * sz, (R() - 0.5) * sz, (R() - 0.5) * sz];
+  let dropped = 0, meet = 0;
+  for (let trial = 0; trial < 2000; trial++) {
+    const P = [0, 1, 2, 3].map(() => rv(2e-2)), drift = rv(4e-2), Wp = P.map(() => add(drift, rv(2e-3)));
+    const rp = P.map(() => 1.5e-3 + R() * 4.5e-3), cp = rp.map(q => 0.5 * DAT.gammaR * q);
+    const kind = trial % 2 ? "ee" : "vt";
+    if (datTest(kind, [0, 1, 2, 3], P, Wp, rp, DAT).keep) continue;
+    dropped++;
+    const nA = kind === "vt" ? 1 : 2, caps = Math.max(...cp.slice(0, nA)) + Math.max(...cp.slice(nA));
+    let lo = Infinity;
+    for (let i = 0; i <= 16; i++) for (let j = 0; j <= 16; j++) {
+      const Q = P.map((p, k) => add(p, scale(Wp[k], (k < nA ? i : j) / 16)));
+      lo = Math.min(lo, distanceOf(kind, Q));
+    }
+    if (lo <= caps) meet++;
+  }
+  console.log(`unshared levels: ${meet} of ${dropped} dropped pairs meet`);
+  assert.ok(meet > 20, `pairs the shared-level test drops meet at unshared levels (${meet} of ${dropped})`);
+  void cap;
+});
+
+test("E12 (iii): the envelope cap gamma_r h_min keeps a resting sheet from pairing with itself", () => {
+  const R = rng(1203);
+  for (const [label, m] of [["grid", sheet(8, 8, 6e-3)], ["jittered", (() => { const s = sheet(8, 8, 6e-3); for (const v of s.x) { v[0] += (R() - 0.5) * 1.5e-3; v[1] += (R() - 0.5) * 1.5e-3; v[2] += (R() - 0.5) * 3e-4; } return s; })()]] as const) {
+    // The smallest rest altitude, in Float64, and as the topology computes it from the f32 positions.
+    let hmin = Infinity;
+    for (const [a, b, c] of m.tris) {
+      const ab = sub(m.x[b], m.x[a]), ac = sub(m.x[c], m.x[a]);
+      hmin = Math.min(hmin, norm(cross(ab, ac)) / Math.max(norm(ab), norm(ac), norm(sub(m.x[c], m.x[b]))));
+    }
+    const pos = new Float32Array(4 * m.x.length);
+    m.x.forEach((p, i) => pos.set(p, 4 * i));
+    const tris = new Uint32Array(4 * m.tris.length);
+    m.tris.forEach((t, i) => tris.set([...t, 0], 4 * i));
+    const { layout } = buildOgcTopology({ vertexCount: m.x.length, triangles: tris, edges: buildOgcEdges(tris) }, pos);
+    close(layout.minAltitude, hmin, 1e-6, `${label}: minAltitude`);
+    const at = (rq: number) => bruteForceDatPairs(m, m.x.map(() => rq), 0, DAT).pairs.length;
+    assert.equal(at(DAT.gammaR * hmin), 0, `${label}: at the cap a resting sheet pairs with nothing`);
+    // Above h_min / gamma_r the two caps reach a non-adjacent primitive: the cap is what keeps it unpaired.
+    assert.ok(at(1.25 * hmin / DAT.gammaR) > 0, `${label}: beyond the cap the sheet pairs with itself`);
+  }
+});
 
 test("predicted-motion DAT: layers falling together pair as at rest and move whole; crossing predictions are conflicts", () => {
   const gammaR = 0.9, sepEps = 1e-6, r = 1e-3;
@@ -417,9 +541,9 @@ test("predicted-motion DAT: layers falling together pair as at rest and move who
   const fall: V3 = [0, 0, -12e-3], W = X.map(() => fall);
   const Xnew = X.map(x => add(x, add(fall, [1e-4, 0, -1e-4])));
   // Absolute envelopes: the whole 12 mm fall in every query radius.
-  const abs = bruteForceDatPairs(m, X.map((x, i) => Math.min(2e-2, r + 2.5 * norm(sub(Xnew[i], x)))), 0).pairs.length;
+  const abs = bruteForceDatPairs(m, X.map((x, i) => Math.min(2e-2, r + 2.5 * norm(sub(Xnew[i], x)))), 0, DAT).pairs.length;
   const rq = X.map(() => Math.max(1.5e-3, r + 2.5 * Math.hypot(1e-4, 1e-4)));
-  const { pairs } = bruteForcePredictedPairs(m, rq, W, 0);
+  const { pairs } = bruteForcePredictedPairs(m, rq, W, 0, DAT);
   assert.ok(pairs.length < 0.1 * abs, `co-moving pairs ${pairs.length} vs ${abs} with absolute envelopes`);
   assert.ok(pairs.every(p => !predictedConflict(p, X, W, sepEps)));
   const out = predictedTruncate(X, Xnew, W, pairs, rq.map(q => 0.5 * gammaR * q), gammaR, sepEps);
@@ -427,7 +551,7 @@ test("predicted-motion DAT: layers falling together pair as at rest and move who
   out.x.forEach((p, i) => assert.ok(norm(sub(p, Xnew[i])) < 1e-15, `vertex ${i} moved whole`));
   // The upper layer predicted 6 mm down onto a lower one predicted to stay: the predictions cross.
   const Wc = X.map((_, i) => (i < n ? [0, 0, 0] : [0, 0, -6e-3]) as V3);
-  const pc = bruteForcePredictedPairs(m, rq, Wc, 0).pairs;
+  const pc = bruteForcePredictedPairs(m, rq, Wc, 0, DAT).pairs;
   assert.ok(pc.length > 0 && pc.some(p => predictedConflict(p, X, Wc, sepEps)), "a conflict sends the round back to Planar-DAT");
   // Held predictions are never conflicts: Planar-DAT is always available.
   assert.ok(pc.every(p => !predictedConflict(p, X, X.map(() => [0, 0, 0]), sepEps)));
@@ -453,7 +577,7 @@ test("levelled re-detection: every trial of the ladder, projected onto its level
     const d = W.map((w, i) => add(w, dev[i]));
     const rq = X.map((_, i) => Math.min(2e-2, Math.max(1.5e-3, r + 2.5 * norm(dev[i]))));
     const cap = rq.map(q => 0.5 * gammaR * q);
-    const { pairs } = bruteForcePredictedPairs(m, rq, W, 0);
+    const { pairs } = bruteForcePredictedPairs(m, rq, W, 0, DAT);
     const round = levelledRound(m, W, pairs, cap, gammaR, sepEps);
     if (round.conflict) { conflicted++; continue; }
     divided++; records += round.records;

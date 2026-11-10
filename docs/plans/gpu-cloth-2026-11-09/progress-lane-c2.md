@@ -2263,3 +2263,110 @@ failure is the known reservoir-particle-cost test, from the foreign uncommitted 
 | tilted 15 degree landing rebound | 0.0426 m/s once under contention (0.0018-0.0019 on reruns) | 0.0020 m/s in all 3 runs (the gate and two reruns; h/8 Euler 0.0017) |
 | 32^2 draped sphere (C1 ladder 3) | Newton 8 per step (cap) | Newton 8 per step (cap), 52 PCG per Newton: C1 to check |
 | strip at 16N (todo, item 2) | 306 held, lambda 9.1 N | 469 held, lambda peak 6.3 N (bound 1.04) |
+
+## 2026-11-10 E12 LANDED: the DAT test with its caps, the envelope cap, the strip's lag, and the active set C1 asked for
+
+**What changed.**
+
+- **(i) and (ii) The DAT test** (`ogc-detector-wgsl.ts`: datCaps, datRound, datLevels, datPathVT/EE,
+  datPairVT/EE). A pair is dropped when its pair can never close within the shared parameter s.
+  Each vertex stays within its cap 0.5 gamma_r env of X + s w.
+  - (i) Drop when d(X) > thr + L. thr = 0.5 gamma_r (env_a + env_b) + sepEps + strays + datRound,
+    and L = max |w_i - w_j| is the predictions' spread.
+  - (ii) Otherwise drop when the Lipschitz-sampled path bound min_k (g_k + g_k+1)/2 - L/(2K) > thr,
+    with K = clamp(ceil(5 L / thr), 1, 32).
+  - datRound = 2^-16 (max |coord| + max |w|), which is 128 ulps (about 18 um at 1.2 m).
+- **(iii) The envelope cap.** rqTop = min(rqMax, gamma_r h_min). h_min is the rest mesh's least
+  altitude (`ogc-topology.ts` minAltitude), so no envelope pairs a primitive with its own rest
+  neighbourhood.
+  - envelopeOf clamps at rqTop and sets status envelopeCap (8).
+  - It throws if rqTop < r. `scene-contact.ts` sets envelopeMeshCap.
+- **The strip's lag.** roundCap = max(8, the Newton iterations), so every Newton iteration can have
+  its round.
+- **Later-round redo slots.** With a moving solid, a later round's unlevelled fallback can conflict
+  (16^2 rotating sphere, tick 60: a cloth edge against a hull edge). With a bodyField, every round now
+  gets OGC_REDO_MANDATORY slots, where before it got one and failed as heldConflict.
+- **Re-detection on a no-step iteration** (`ogcDecideWGSL`). nwChoose's contract is that alpha 0 on a
+  cut arc means "the iterate stays, Newton runs on, and the re-detection that follows gives new
+  certificates", but the decide kernel never armed that round. It armed only on gamma_e N exceeds or
+  a filter-stalled vertex.
+  - noStep = (ctl.z == 0 && ctl.x == 0) on a new iteration now arms the round, budgeted by roundCap.
+  - The new round is levelled with w = d, which is the stalled direction. This re-levels a
+    direction that has left its prediction. In anchor-relative coordinates the records and the cap
+    translate by alpha U w (the solids are world-fixed), so a constraint-bound vertex's arc
+    derivative is U w + P_T(d - U w), which is not descent once d differs from U w.
+  - This clears C1's 32^2 t15 stall (alpha 0 at every trial, 10 cut vertices, below gamma_e N) and
+    the free strip's cascade.
+- **`ogcProjectActive(v, x, y, alpha)`** (`ogc-wgsl.ts`, for C1's active-set projected Newton).
+  - It returns q, which is ogcProjectTrial's result bit for bit; ogcProjectTrial is now
+    ogcProjectAt(ogcTrialCtx(..)).
+  - It returns up to 3 independent outward unit normals of the non-cap certificates binding q:
+    records, solid balls, and all eight orthant faces. Order: records in list order, then the static
+    solid, then the moving one. Independence is Gram-Schmidt at OGC_GS_FLOOR.
+  - It reports the cap separately (capOn, nc) and sets held.
+  - Binding means true slack <= 4 tau + 2^-20 (|q|inf + |c|inf). The final working set alone is not
+    the binding set: ties and the exit's constraint are missing from it.
+  - It is valid after the round's filter and before the next re-detection, so C1 calls it in nwApply.
+- **Oracle** (`tests/cloth-contact-oracle.ts`): datTest, datPathBound, datLevels, and the predicted
+  brute force through datTest.
+
+**Verification.**
+
+- **Oracle (CPU).**
+  - 6000 random pairs for (i) and (ii). Dropped by (i): vt 1003, ee 691. Dropped by (ii): vt 1169,
+    ee 976. None closes within its caps along an adversarial path (512 samples plus golden-section
+    refinement).
+  - The shared level is necessary: 482 of 1394 dropped pairs meet at unshared levels.
+  - (iii) on a grid and a jittered sheet: minAltitude is exact, there are 0 pairs at gamma h_min,
+    and there are pairs at 1.25 h_min / gamma.
+- **GPU.**
+  - The envelope cap: status envelopeCap, xdet.w = 0.45 min(env, rqTop), the pairs match the
+    oracle, no pair within one sheet, and the throw below r.
+  - ogcProjectActive over 4096 trials. q is bit-identical to ogcProjectTrial. Counts 0/1/2/3 are
+    766/1212/1078/1040, and the cap binds in 1268. All 6636 binding certificates lie in the span
+    (residual 5.0e-5). Reported normals are within 0.12 of their analytic f32 rounding.
+- **Gate** (one combined round on 112163d3 + this): contact ladder, gpu, body, solid, scene-solids
+  and oracle, plus C1's cloth-ladder, cloth-gpu-solver and cloth-analytic. 99 tests: 96 pass,
+  2 fail, 1 todo.
+  - The ogcProjectActive test's first tolerance was 1e-5 flat. It should have been each normal's
+    f32 rounding, which is ball normals over mm radii at 1.5 m. With that fixed, a rerun of the two
+    projection tests passes 2 of 2.
+  - The free strip twin holds 4 vertices for plane-record overflow at tick 2 (see below). This is
+    the remaining fail.
+  - The todo is the incline's sharp edge, item 5, a HEAD failure.
+  - check:types shows only the foreign files. test:unit: 1724 pass, 1 fail (the known
+    reservoir-particle-cost test).
+
+| | HEAD 112163d3 | E12 |
+|---|---|---|
+| strip on the ledge at 16N: held | 469 | 0 |
+| strip on the ledge: lambda peak (bound 1.0 N) | 6.3 N | 0.35 N |
+| strip on the ledge: strain, tick 1 to 60 (limit 0.1) | lagging | 0.349, 0.026, 0.017 ... 0.002 |
+| strip on the ledge: plane-record peak per vertex | at the cap | 12.3 (one tick), 0.8-3.8 otherwise |
+| free twin: tick 2 | overflow, then a cascade through the alpha-0 stall | 16.0/v, 4 held for overflow, no cascade (lambda 0.11 N, strain 0.105 to 0) |
+| 16^2 rotating sphere to tick 60 | heldConflict at t60 | passes (no intersection, none in the solid) |
+| determinism, flat and sphere x3 | bit-identical | bit-identical |
+
+150^2 dual-bench (C1's states, 5 steps each, fenced median, 1 profile step). This is the E12 build
+before the slot and noStep changes:
+
+| tick | ms/step | nwProject ms/step | plane-record peak |
+|---|---|---|---|
+| 5 | 173 -> 180 | 4.06 -> 3.80 | 85K -> 36K |
+| 16 | 435 -> 383 | 54.5 -> 13.9 | 4.9M -> 79K |
+| 35 | 542 -> 496 | 11.1 -> 9.2 | - |
+| 60 | 587 -> 507 | 14.1 -> 10.5 | - |
+
+**The 469 vs 306 holds at HEAD (the coordinator's question).** These were the expected consequence
+of the exact set, not a defect.
+- Tick 1 is identical both ways (81 held).
+- Item 1 changes tick 1's last Newton step (alpha 1 -> 0).
+- At tick 2 the 40 mm envelope overflowed the records either way (60.8 vs 65.2 records/v against 16).
+- So this was trajectory-sensitive overflow. E12's caps take it to 0 holds on the ledge strip.
+
+**Open: the free twin at tick 2.** The 1.5x-stretched free strip snaps back within one frame. Its
+compressed neighbourhood comes within the cap (gamma_r h_min is a rest altitude) and fills the
+16 x 147 pool exactly: 2204 DAT pairs and 4 vertices held. The cascade is gone.
+- The rules allow authoring the strip document's pool from its measured peak. The test says
+  "default capacity", so I left it failing rather than raise the pool myself.
+- Lowering datRound or tightening the caps would be tuning.

@@ -395,33 +395,83 @@ export interface DatPair { kind: "vt" | "ee"; ids: [number, number, number, numb
 
 const faceEnvelope = (rq: number[], ids: number[]) => Math.max(...ids.map(i => rq[i]));
 
+/** The DAT test's constants: the truncation ratio gamma_r and the separation sepEps (the GPU's P.gammaR, P.sepEps). */
+export interface DatRule { gammaR: number; sepEps: number }
+
+const absMax3 = (p: V3) => Math.max(Math.abs(p[0]), Math.abs(p[1]), Math.abs(p[2]));
+/** The f32 error the GPU allows its distances: 128 ulps (2^-16) of the coordinates' scale. */
+export const datRound = (s: number) => 2 ** -16 * s;
+/** The levels of the path bound: K = ceil(5 L / thr) in [1, 32], so the slack L / 2K is at most a tenth of thr. */
+export const datLevels = (L: number, thr: number) => Math.min(32, Math.max(1, Math.ceil(5 * L / Math.max(thr, 1e-30))));
+
+const pointSegment = (p: V3, q0: V3, q1: V3) => {
+  const d = sub(q1, q0), e = dot(d, d), t = e > 0 ? Math.min(1, Math.max(0, dot(sub(p, q0), d) / e)) : 0;
+  return norm(sub(p, add(q0, scale(d, t))));
+};
+/** Exact primitive distances; a degenerate segment is its point, a zero-area triangle the union of its edges. */
+export function pointTriangleDistance(p: V3, a: V3, b: V3, c: V3): number {
+  const n = cross(sub(b, a), sub(c, a));
+  if (!(dot(n, n) > 0)) return Math.min(pointSegment(p, a, b), pointSegment(p, b, c), pointSegment(p, c, a));
+  const { bary } = closestPointTriangle(p, a, b, c);
+  return norm(sub(p, add(add(scale(a, bary[0]), scale(b, bary[1])), scale(c, bary[2]))));
+}
+export function segmentSegmentDistance(p0: V3, p1: V3, q0: V3, q1: V3): number {
+  if (!(dot(sub(p1, p0), sub(p1, p0)) > 0)) return pointSegment(p0, q0, q1);
+  if (!(dot(sub(q1, q0), sub(q1, q0)) > 0)) return pointSegment(q0, p0, p1);
+  return closestSegmentSegment(p0, p1, q0, q1).d;
+}
+const primitiveDistance = (kind: "vt" | "ee", P: V3[]) =>
+  kind === "vt" ? pointTriangleDistance(P[0], P[1], P[2], P[3]) : segmentSegmentDistance(P[0], P[1], P[2], P[3]);
+
 /**
- * Every non-adjacent vertex-triangle and edge-edge pair whose distance is at most
- * the larger of the two primitives' envelopes (a face's or an edge's envelope is
- * the widest of its vertices'). Keys "v|t" and "e|f" with e < f; pairs within
- * `margin` of the threshold are listed as ambiguous.
+ * The distance of the predicted primitives, every vertex at X + s w, sampled at K levels: on
+ * [k/K, (k+1)/K] the L-Lipschitz g(s) is at least (g_k + g_k+1) / 2 - L / 2K. The minimum of that.
  */
-export function bruteForceDatPairs(mesh: OracleMesh, rq: number[], margin = 1e-6) {
-  const X = mesh.x, vt = new Set<string>(), ee = new Set<string>(), ambiguous = new Set<string>();
-  const pairs: DatPair[] = [];
-  for (let v = 0; v < X.length; v++) for (let t = 0; t < mesh.tris.length; t++) {
-    const tri = mesh.tris[t];
-    if (tri.includes(v)) continue;
-    const { bary } = closestPointTriangle(X[v], X[tri[0]], X[tri[1]], X[tri[2]]);
-    const cp = add(add(scale(X[tri[0]], bary[0]), scale(X[tri[1]], bary[1])), scale(X[tri[2]], bary[2]));
-    const d = norm(sub(X[v], cp)), thr = Math.max(rq[v], faceEnvelope(rq, tri));
-    if (Math.abs(d - thr) < margin) ambiguous.add(`${v}|${t}`);
-    if (d <= thr) { vt.add(`${v}|${t}`); pairs.push({ kind: "vt", ids: [v, tri[0], tri[1], tri[2]], nA: 1 }); }
+export function datPathBound(kind: "vt" | "ee", P: V3[], W: V3[], L: number, K: number): number {
+  let prev = primitiveDistance(kind, P), lo = Infinity;
+  for (let k = 1; k <= K; k++) {
+    const t = k / K, dk = primitiveDistance(kind, P.map((p, i) => add(p, scale(W[i], t))));
+    lo = Math.min(lo, 0.5 * (prev + dk));
+    prev = dk;
   }
-  for (let e = 0; e < mesh.edges.length; e++) for (let f = e + 1; f < mesh.edges.length; f++) {
-    const [a0, a1] = mesh.edges[e], [b0, b1] = mesh.edges[f];
-    if (a0 === b0 || a0 === b1 || a1 === b0 || a1 === b1) continue;
-    const d = closestSegmentSegment(X[a0], X[a1], X[b0], X[b1]).d;
-    const thr = Math.max(rq[a0], rq[a1], rq[b0], rq[b1]);
-    if (Math.abs(d - thr) < margin) ambiguous.add(`${e}|${f}`);
-    if (d <= thr) { ee.add(`${e}|${f}`); pairs.push({ kind: "ee", ids: [a0, a1, b0, b1], nA: 2 }); }
-  }
-  return { vt, ee, ambiguous, pairs };
+  return lo - L / (2 * K);
+}
+
+/** One pair's DAT test (the GPU's datPairVT / datPairEE): its distance, threshold, spread, levels and path bound. */
+export interface DatTest { d: number; thr: number; L: number; K: number; path: number; keep: boolean }
+
+/**
+ * Whether a pair needs a division plane. Every vertex moves along the round's one shared parameter
+ * s and stays within its cap 0.5 gamma_r r_q of X + s w, so the pair stays more than sepEps apart
+ * when its predicted primitives are, at every s, further apart than the two caps (each side's
+ * widest) plus the strays: (i) at X, d > thr + L, as the relative motion closes the distance at most
+ * L s; (ii) else the path bound exceeds thr. thr adds sepEps and datRound to the caps.
+ */
+export function datTest(kind: "vt" | "ee", ids: number[], X: V3[], W: V3[], rq: number[], rule: DatRule, strays = 0): DatTest {
+  const nA = kind === "vt" ? 1 : 2, P = ids.map(i => X[i]), Wp = ids.map(i => W[i]);
+  const ea = faceEnvelope(rq, ids.slice(0, nA)), eb = faceEnvelope(rq, ids.slice(nA));
+  const L = predictionSpread(W, ids.slice(0, nA), ids.slice(nA));
+  const scaleOf = Math.max(...P.map(absMax3)) + Math.max(...Wp.map(absMax3));
+  const thr = 0.5 * rule.gammaR * (ea + eb) + rule.sepEps + strays + datRound(scaleOf);
+  const d = primitiveDistance(kind, P), K = datLevels(L, thr);
+  if (d > thr + L) return { d, thr, L, K, path: Infinity, keep: false };
+  const path = datPathBound(kind, P, Wp, L, K);
+  return { d, thr, L, K, path, keep: !(path > thr) };
+}
+
+/** Within margin of the test's decision: of (i), of (ii), or of a change in the levels. */
+const datAmbiguous = (t: DatTest, margin: number) =>
+  Math.abs(t.d - t.thr - t.L) < margin || (t.d <= t.thr + t.L + margin && (Math.abs(t.path - t.thr) < margin
+    || datLevels(t.L, t.thr - margin) !== datLevels(t.L, t.thr + margin)));
+
+/**
+ * Every non-adjacent vertex-triangle and edge-edge pair the DAT test keeps with every vertex at
+ * rest (w = 0): the distance is at most the two caps 0.5 gamma_r (r_q,a + r_q,b) plus sepEps and
+ * the rounding (a face's or an edge's envelope is the widest of its vertices'). Keys "v|t" and
+ * "e|f" with e < f; pairs within `margin` of the threshold are listed as ambiguous.
+ */
+export function bruteForceDatPairs(mesh: OracleMesh, rq: number[], margin: number, rule: DatRule) {
+  return bruteForcePredictedPairs(mesh, rq, mesh.x.map(() => [0, 0, 0] as V3), margin, rule);
 }
 
 /** Support gap of a pair along unit n: min over side A minus max over side B. */
@@ -513,36 +563,31 @@ const boxesMeet = (a: { lo: V3; hi: V3 }, b: { lo: V3; hi: V3 }) => [0, 1, 2].ev
 export const predictionSpread = (W: V3[], a: number[], b: number[]) => Math.max(...a.flatMap(i => b.map(j => norm(sub(W[i], W[j])))));
 
 /**
- * Every non-adjacent pair whose swept boxes (X to X + w), each grown by its own
- * envelope (a vertex's r_q, an edge's or a face's its vertices' widest; an edge
- * is reached through its first face), meet, and whose distance at X is at most
- * the larger envelope plus the pair's prediction spread. Any other pair stays
- * apart over the round: either its relative motion is at most the spread plus
- * the two caps, or its predicted paths stay more than the sum of the two
- * envelopes apart, which the two caps (0.45 r_q each) cannot close.
+ * Every non-adjacent pair whose swept boxes (X to X + w), each grown by its own envelope (a
+ * vertex's r_q, an edge's or a face's its vertices' widest; an edge is reached through its first
+ * face), meet, and that the DAT test (datTest) keeps. Any other pair's predicted primitives stay
+ * further apart than its two caps at every level of the round's shared parameter, which the
+ * caps (0.5 gamma_r r_q each) cannot close.
  */
-export function bruteForcePredictedPairs(mesh: OracleMesh, rq: number[], W: V3[], margin = 1e-6) {
+export function bruteForcePredictedPairs(mesh: OracleMesh, rq: number[], W: V3[], margin: number, rule: DatRule) {
   const X = mesh.x, vt = new Set<string>(), ee = new Set<string>(), ambiguous = new Set<string>();
   const pairs: DatPair[] = [];
   for (let v = 0; v < X.length; v++) for (let t = 0; t < mesh.tris.length; t++) {
     const tri = mesh.tris[t];
     if (tri.includes(v)) continue;
     if (!boxesMeet(sweptBox([X[v]], [W[v]], rq[v]), sweptBox(tri.map(i => X[i]), tri.map(i => W[i]), faceEnvelope(rq, tri)))) continue;
-    const { bary } = closestPointTriangle(X[v], X[tri[0]], X[tri[1]], X[tri[2]]);
-    const cp = add(add(scale(X[tri[0]], bary[0]), scale(X[tri[1]], bary[1])), scale(X[tri[2]], bary[2]));
-    const d = norm(sub(X[v], cp)), thr = Math.max(rq[v], faceEnvelope(rq, tri)) + predictionSpread(W, [v], tri);
-    if (Math.abs(d - thr) < margin) ambiguous.add(`${v}|${t}`);
-    if (d <= thr) { vt.add(`${v}|${t}`); pairs.push({ kind: "vt", ids: [v, tri[0], tri[1], tri[2]], nA: 1 }); }
+    const test = datTest("vt", [v, ...tri], X, W, rq, rule);
+    if (datAmbiguous(test, margin)) ambiguous.add(`${v}|${t}`);
+    if (test.keep) { vt.add(`${v}|${t}`); pairs.push({ kind: "vt", ids: [v, tri[0], tri[1], tri[2]], nA: 1 }); }
   }
   for (let e = 0; e < mesh.edges.length; e++) for (let f = e + 1; f < mesh.edges.length; f++) {
     const [a0, a1] = mesh.edges[e], [b0, b1] = mesh.edges[f];
     if (a0 === b0 || a0 === b1 || a1 === b0 || a1 === b1) continue;
-    const ea = Math.max(rq[a0], rq[a1]), eb = Math.max(rq[b0], rq[b1]), face = mesh.tris[mesh.edges[f][2]];
+    const ea = Math.max(rq[a0], rq[a1]), face = mesh.tris[mesh.edges[f][2]];
     if (!boxesMeet(sweptBox([X[a0], X[a1]], [W[a0], W[a1]], ea), sweptBox(face.map(i => X[i]), face.map(i => W[i]), faceEnvelope(rq, face)))) continue;
-    const d = closestSegmentSegment(X[a0], X[a1], X[b0], X[b1]).d;
-    const thr = Math.max(ea, eb) + predictionSpread(W, [a0, a1], [b0, b1]);
-    if (Math.abs(d - thr) < margin) ambiguous.add(`${e}|${f}`);
-    if (d <= thr) { ee.add(`${e}|${f}`); pairs.push({ kind: "ee", ids: [a0, a1, b0, b1], nA: 2 }); }
+    const test = datTest("ee", [a0, a1, b0, b1], X, W, rq, rule);
+    if (datAmbiguous(test, margin)) ambiguous.add(`${e}|${f}`);
+    if (test.keep) { ee.add(`${e}|${f}`); pairs.push({ kind: "ee", ids: [a0, a1, b0, b1], nA: 2 }); }
   }
   return { vt, ee, ambiguous, pairs };
 }

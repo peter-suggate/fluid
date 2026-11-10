@@ -17,9 +17,9 @@ import { createProcessRetainedDawnGPU } from '../lib/harness/node-dawn-provider'
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { createEmptyScene } from '../lib/core/empty-scene';
 import { validateScene, type SceneDescription } from '../lib/core/model';
-import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
+import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import { OgcContactDetector } from '../lib/cloth/contact/ogc-detector';
-import { clothContactRadius } from '../lib/cloth/scene-contact';
+import { CLOTH_SCENE_CONTACT, clothContactRadius } from '../lib/cloth/scene-contact';
 import type { ClothTopologyData } from '../lib/cloth/types';
 import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
@@ -174,7 +174,7 @@ test('ladder: a 16 x 16 sheet lands on the rotating sphere: nothing intersects o
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
 }));
 
-test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip'), todo: 'C2 next: the contracting strip needs 40-190 plane records a vertex in its first ticks (free in space too); its pairs are within the two envelopes (6-40 mm) already at X, so relative-motion path bounds drop none (item 2, measured); 231-407 held for overflow at 16N on (5); needs envelopes or records sized to the mesh (progress-lane-c2.md)' }, async () => withDevice(async device => {
+test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip') }, async () => withDevice(async device => {
   // C1's ladder-2 strip (tests/cloth-ladder.test.ts) with the default plane-record capacity: the Peirce ledge (top 0.5 m,
   // edge at x = 0), 5 mm cells, 5 mm above it, stretched 1.5x along its length about the ledge edge. Twin: the same
   // strip in free space (the free-fall scene, 1.2 m above its floor), where only the strain limit acts.
@@ -279,3 +279,7 @@ test('ladder: the flat 16 x 16 drop and the 16 x 16 sphere are deterministic ove
   const sphere = await determinism(device, 'sphere 16^2', bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 60));
   assert.deepEqual([...flat, ...sphere], []);
 }));
+
+test('the scene round cap covers the Newton iteration cap: a re-detection round can follow every Newton iteration (the strip lagged at 4 against 8)', () => {
+  assert.ok(CLOTH_SCENE_CONTACT.roundCap >= CLOTH_NEWTON_SCENE_DEFAULTS.iterations, `roundCap ${CLOTH_SCENE_CONTACT.roundCap} < Newton ${CLOTH_NEWTON_SCENE_DEFAULTS.iterations}`);
+});

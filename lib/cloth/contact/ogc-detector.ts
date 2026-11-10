@@ -22,11 +22,13 @@
  *   r_q,v = clamp(max(rqBase, r + s rho_v), rqMax),
  * rho_v the last step's deviation from its own prediction. A vertex in contact,
  * truncated or in a conflict (in this step or the last) is held: w_v = 0 and
- * r_q,v = clamp(max(rqBase, r + s |w_v|), rqMax). A division pair is
- * recorded whenever the swept boxes meet and the primitives are within the larger
- * envelope (a face's or edge's is its vertices' widest) plus their prediction
- * spread; every vertex's residual is capped at 0.5 gamma_r r_q,v, so two unpaired
- * primitives close by less than their distance. Planes translate with the
+ * r_q,v = clamp(max(rqBase, r + s |w_v|), rqMax), capped (envelopeMeshCap) at
+ * gamma_r h_min, h_min the rest mesh's least altitude, so no envelope pairs a primitive with
+ * its own neighbourhood. Every vertex's residual is capped at 0.5 gamma_r r_q,v about its path
+ * X + s w (one shared s), so a pair is dropped (DAT test, E12) when d(X) exceeds
+ * thr + L, thr = 0.5 gamma_r (r_q,a + r_q,b) + sepEps + strays + rounding and L the
+ * predictions' spread, or when a Lipschitz-sampled bound of the distance along the shared path
+ * exceeds thr; the kept pairs are recorded once the swept boxes meet. Planes translate with the
  * predictions; a round whose predictions cross is redone with every one held.
  * Capacities are authored per scene; overflow, a round cap or an envelope cap
  * set the status word (OGC_STATUS), which the frame's owner reads off the step path.
@@ -60,6 +62,14 @@ export interface OgcContactConfig {
   rqBase: number;
   /** Authored envelope cap; reaching it raises OGC_STATUS.envelopeCap. */
   rqMax: number;
+  /**
+   * Cap the envelope at gamma_r times the mesh's smallest rest triangle altitude h_min too (E12 iii; default off).
+   * Two caps then sum to at most gamma_r^2 h_min, below the distance from any vertex to a primitive it is not
+   * adjacent to in a sheet at its rest shape (at least its one-ring's altitude), so a resting sheet pairs with
+   * nothing and a vertex's plane records are its genuine approaches, not its neighbourhood. Reaching the cap is
+   * reported as OGC_STATUS.envelopeCap like rqMax: a longer motion takes more rounds, never a weaker certificate.
+   */
+  envelopeMeshCap?: boolean;
   /** Safety factor s on the inertial displacement; 0 gives the fixed envelope. */
   envelopeScale: number;
   /** OGC's gamma_p (0 < gamma_p < 0.5) and gamma_e. */
@@ -298,6 +308,10 @@ export class OgcContactDetector {
   readonly contactState: GPUBuffer;
   private kernels = new Map<string, Kernel>();
   private readonly paramWords = new Uint32Array(OGC_PARAM_WORDS);
+  /** The envelope cap in effect: rqMax, or with envelopeMeshCap the smaller of it and gamma_r h_min. */
+  readonly rqTop: number;
+  /** The truncation ratio gamma_r and the separation sepEps in effect (the DAT test's caps and margin). */
+  readonly gammaR: number; readonly sepEps: number;
 
   private inputs?: OgcSolverInputs;
 
@@ -328,8 +342,12 @@ export class OgcContactDetector {
     if (!(cell > 0)) throw new Error("OGC: cellSize must be positive");
     const gammaR = config.gammaR ?? 0.9;
     if (!(gammaR > 0 && gammaR < 1)) throw new Error("OGC: gamma_r must lie in (0, 1)");
+    const rqTop = config.envelopeMeshCap ? Math.min(config.rqMax, gammaR * L.minAltitude) : config.rqMax;
+    if (!(rqTop >= config.r)) throw new Error(`OGC: the envelope cap gamma_r h_min = ${rqTop} m is below the contact radius ${config.r} m (a finer mesh needs a smaller r)`);
+    this.rqTop = rqTop;
     const sepEps = config.separationEps ?? Math.max(1e-6, 4 * FLOAT32_EPS * coordinateScale);
     if (!(sepEps > 0 && sepEps < 0.5 * config.r)) throw new Error("OGC: separationEps must lie in (0, r/2)");
+    this.gammaR = gammaR; this.sepEps = sepEps;
     if (2 * config.pairCapacity * 16 > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: pairCapacity exceeds one storage binding");
     const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const mk = (label: string, bytes: number, u = usage) => device.createBuffer({ label: `ogc ${label}`, size: Math.max(16, Math.ceil(bytes / 16) * 16), usage: u });
@@ -395,7 +413,7 @@ export class OgcContactDetector {
     w[P.N] = N; w[P.T] = T; w[P.E] = E; w[P.H] = H;
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
     w[P.exceedThreshold] = Math.max(1, Math.ceil(gammaE * N));
-    f[P.r] = config.r; f[P.rqBase] = config.rqBase; f[P.rqMax] = config.rqMax; f[P.envScale] = config.envelopeScale;
+    f[P.r] = config.r; f[P.rqBase] = config.rqBase; f[P.rqMax] = config.rqMax; f[P.rqTop] = this.rqTop; f[P.envScale] = config.envelopeScale;
     f[P.gammaP] = gammaP; f[P.cellFloor] = cell; f[P.dt] = config.dt;
     f[P.intersectCell] = Math.max(L.meanEdgeLength, 1e-6);
     f.set(config.gravity, P.gravity);
@@ -744,9 +762,13 @@ export class OgcContactDetector {
    */
   encodeDetection(pass: GPUComputePassEncoder, mandatory = true) {
     for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
-    // Later rounds predict 0 about the iterate and never conflict: one slot. The mandatory round's
-    // least-shift redos and fail-safe (OGC_REDO_WGSL), with a moving solid its zone redos too.
-    const slots = !mandatory ? 1 : this.bodyField ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS + 1;
+    // The mandatory round's least-shift redos and fail-safe (OGC_REDO_WGSL). A later round predicts
+    // the cloth 0 about the iterate: without a moving solid only its levelled form can conflict, and
+    // its one redo (unlevelled) cannot. With a moving solid the unlevelled redo can conflict too (the
+    // solid's remaining motion closing on cloth at the iterate: 16^2 rotating sphere, tick 60, a
+    // cloth edge against a hull edge), so every round gets the whole ladder (redoCap, as the kernel
+    // counts it): the least shift anchors the pair's cloth with the solid, the fail-safe carries it.
+    const slots = this.bodyField ? OGC_REDO_MANDATORY : mandatory ? OGC_REDO_ROUNDS + 1 : 1;
     for (let k = 0; k < slots; k++) {
       this.run(pass, "redo", 1);
       for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);

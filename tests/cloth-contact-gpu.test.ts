@@ -25,7 +25,7 @@ import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate,
-  bruteForceProjection, conViolation, projectionCase, projectionCaseCons, projectionKkt, shrinkCons, type ProjectionCase,
+  bruteForceProjection, conViolation, projectionCase, projectionCaseCons, projectionKkt, shrinkCons, solidPieceCons, type ProjectionCase,
   type DatPair, type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
 
@@ -284,7 +284,7 @@ test("GPU detection matches the Float64 brute force: pairs, d_min and bounds wit
   });
 });
 
-test("GPU DAT division pairs: every pair within the larger envelope, once, with a certified plane", { skip: !gpu }, async () => {
+test("GPU DAT division pairs: every pair within its two caps (with sepEps and the rounding), once, with a certified plane", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     for (const seed of [3, 11]) {
       const mesh = stackScene(seed), N = mesh.x.length, R = rng(seed + 200);
@@ -293,7 +293,7 @@ test("GPU DAT division pairs: every pair within the larger envelope, once, with 
       const config: OgcContactConfig = { ...baseConfig(N), rqMax: 4e-2, gridCapacity: 2048 * N };
       const { det, oracle } = await detect(device, mesh, vel, config);
       const rq = vel.map(v => envelope(config, v));
-      const ref = bruteForceDatPairs(oracle, rq, 2e-6);
+      const ref = bruteForceDatPairs(oracle, rq, 2e-6, det);
       const c = await det.readCounters();
       assert.equal(c.status, 0, `status ${OgcContactDetector.describeStatus(c.status)}`);
       const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c.peakPairSlots, oracle);
@@ -317,6 +317,49 @@ test("GPU DAT division pairs: every pair within the larger envelope, once, with 
       assert.equal(planesArgs[0], Math.ceil(c.peakPairSlots / 64));
       det.destroy();
     }
+  });
+});
+
+test("GPU envelope cap (E12 iii): with envelopeMeshCap every envelope is at most gamma_r h_min, and a contact radius above it fails", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const mesh = stackScene(3), N = mesh.x.length, R = rng(1204);
+    let hmin = Infinity;
+    for (const [a, b, c] of mesh.tris) {
+      const ab = sub(mesh.x[b], mesh.x[a]), ac = sub(mesh.x[c], mesh.x[a]), bc = sub(mesh.x[c], mesh.x[b]);
+      const cr = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]] as V3;
+      hmin = Math.min(hmin, norm(cr) / Math.max(norm(ab), norm(ac), norm(bc)));
+    }
+    // 0.8 m/s gives envelopes of r + 1.5 |v dt| ~ 2 cm, the cap ~ 6 mm.
+    const vel: V3[] = mesh.x.map(() => [(R() - 0.5) * 1.6, (R() - 0.5) * 1.6, (R() - 0.5) * 1.6]);
+    const config: OgcContactConfig = { ...baseConfig(N), envelopeMeshCap: true };
+    const { det, oracle } = await detect(device, mesh, vel, config);
+    const top = Math.min(config.rqMax, 0.9 * hmin);
+    assert.ok(Math.abs(det.rqTop - top) <= 1e-6 * top && top < config.rqMax, `rqTop ${det.rqTop} vs gamma_r h_min ${top}`);
+    const c = await det.readCounters();
+    // The cap is reported (status envelopeCap), and nothing else.
+    assert.equal(c.status, OGC_STATUS.envelopeCap, `status ${OgcContactDetector.describeStatus(c.status)}`);
+    const xdet = new Float32Array(await readBuffer(device, det.det));
+    const rq = vel.map(v => Math.min(envelope(config, v), det.rqTop));
+    let capped = 0;
+    for (let v = 0; v < N; v++) {
+      assert.ok(Math.abs(xdet[4 * v + 3] - 0.45 * rq[v]) <= 1e-6 * rq[v], `vertex ${v}: cap ${xdet[4 * v + 3]} vs 0.45 min(envelope, rqTop)`);
+      if (envelope(config, vel[v]) > det.rqTop) capped++;
+    }
+    assert.ok(capped > N / 2, `${capped} of ${N} envelopes capped`);
+    // The pairs are the oracle's at the capped envelopes, and each spans two sheets: a sheet at its build
+    // (rest) shape pairs with nothing of itself (sheets of 64 vertices, then the 28 of the arc).
+    const ref = bruteForceDatPairs(oracle, rq, 2e-6, det);
+    const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c.peakPairSlots, oracle);
+    const strict = (keys: Iterable<string>) => [...keys].filter(k => !ref.ambiguous.has(k)).sort();
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "vertex-triangle pairs");
+    assert.deepEqual(strict(got.filter(g => g.pair.kind === "ee").map(g => g.key)), strict(ref.ee), "edge-edge pairs");
+    const sheetOf = (i: number) => Math.min(3, Math.floor(i / 64));
+    assert.ok(got.length > 0 && got.every(g => g.pair.ids.some(i => sheetOf(i) !== sheetOf(g.pair.ids[0]))), "no pair within one resting sheet");
+    det.destroy();
+    // A contact radius above gamma_r h_min cannot be met by any envelope: explicit failure.
+    const { triangles, edges } = topologyOf(mesh);
+    const bad: OgcContactConfig = { ...config, r: 1.2 * top, rqBase: 1.3 * top, rqMax: 2e-2 };
+    await assert.rejects(OgcContactDetector.create(device, { vertexCount: N, triangles, edges }, vec4s(mesh.x), bad, { positions: storage(device, vec4s(mesh.x)), velocities: storage(device, vec4s(vel)) }), /envelope cap gamma_r h_min/);
   });
 });
 
@@ -688,6 +731,114 @@ test("GPU exact projection (ogcProjectTrial): the Euclidean projection onto the 
   });
 });
 
+/** ogcProjectActive(v, X_v, Y_v, 1) for every vertex: q (w: count + 4 held + 8 capOn), n0..n2, nc. */
+async function evalActive(device: GPUDevice, det: GPUBuffer, X: V3[], Y: V3[]): Promise<Float32Array> {
+  const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y));
+  const out = device.createBuffer({ size: 80 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> Y: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> outBuf: array<vec4<f32>>;
+fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcTri(t: u32) -> vec3<u32> { return vec3<u32>(t); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { return vec2<u32>(e); }
+${OgcContactDetector.vertexBlockWGSL(0, 4)}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= ${N}u) { return; }
+  let a = ogcProjectActive(v, X[v].xyz, Y[v].xyz, 1.0);
+  outBuf[5u * v] = vec4<f32>(a.q, f32(a.count + select(0u, 4u, a.held) + select(0u, 8u, a.capOn)));
+  outBuf[5u * v + 1u] = vec4<f32>(a.n0, 0.0); outBuf[5u * v + 2u] = vec4<f32>(a.n1, 0.0);
+  outBuf[5u * v + 3u] = vec4<f32>(a.n2, 0.0); outBuf[5u * v + 4u] = vec4<f32>(a.nc, 0.0);
+}`;
+  const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], [3, out], [4, det]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
+  device.queue.submit([enc.finish()]);
+  const got = new Float32Array(await readBuffer(device, out));
+  xb.destroy(); yb.destroy(); out.destroy();
+  return got;
+}
+
+test("GPU projection active set (ogcProjectActive): q is ogcProjectTrial's bit for bit, every reported normal is a non-cap certificate binding q, and every certificate binding q lies in their span", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const R = rng(91), N = 2048;
+    const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
+    const a = unitRand(), th = 1.3, cs = Math.cos(th), sn = Math.sin(th), K = [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
+    const Rb = [0, 1, 2].map(i => [0, 1, 2].map(j => Math.fround((i === j ? cs : 0) + sn * K[i]![j]! + (1 - cs) * a[i]! * a[j]!)));
+    const fr = (v: V3) => v.map(Math.fround) as V3;
+    const cases = Array.from({ length: N }, () => {
+      const k = projectionCase(R, Rb);
+      const piece = (p: typeof k.solid) => p && { o: fr(p.o), q: fr(p.q), Rq: Math.fround(p.Rq), D: fr(p.D), Rb: p.Rb };
+      return { R: Math.fround(k.R), planes: k.planes.map(p => ({ m: fr(p.m), b: Math.fround(p.b) })), solid: piece(k.solid), body: piece(k.body), y: k.y };
+    });
+    const c = cases.map(() => fr(scale(unitRand(), 1.5 * R())));
+    const Y = cases.map((k, v) => fr(add(c[v]!, k.y)));
+    const counts = [0, 0, 0, 0];
+    let capOn = 0, worstNormal = 0, worstSpan = 0, binding = 0;
+    const bad: string[] = [];
+    for (const levelled of [false, true]) {
+      const buf = storage(device, projectionBuffer(cases, c, Rb, levelled));
+      const qs = await evalProject(device, buf, c, Y);
+      const got = await evalActive(device, buf, c, Y);
+      buf.destroy();
+      cases.forEach((k, v) => {
+        const at = (i: number): V3 => [got[20 * v + 4 * i]!, got[20 * v + 4 * i + 1]!, got[20 * v + 4 * i + 2]!];
+        const q = at(0), flags = got[20 * v + 3]!, count = flags % 4, held = (flags & 4) !== 0, cap = (flags & 8) !== 0;
+        if (!q.every((x, i) => Object.is(x, qs[v]![i]))) bad.push(`vertex ${v}: q ${q} is not ogcProjectTrial's ${qs[v]}`);
+        if (held) bad.push(`vertex ${v}: held with no inside marker`);
+        counts[count]!++; if (cap) capOn++;
+        const zq = sub(q, c[v]!), zy = sub(Y[v]!, c[v]!), am = (p: V3) => Math.max(...p.map(Math.abs));
+        // The GPU's binding slack: 4 tau + 2^-20 (|q|_inf + |c|_inf), tau = 2^-17 (R + |y - c|).
+        const tol = 2 ** -15 * (k.R + norm(zy)) + 2 ** -20 * (am(q) + am(c[v]!));
+        const cons = projectionCaseCons(k);
+        const outward = (j: number): V3 => { const q2 = cons[j]!; return q2.ball ? scale(sub(zq, q2.c), 1 / norm(sub(zq, q2.c))) : scale(q2.n, 1 / norm(q2.n)); };
+        const viol = cons.map(q2 => conViolation(q2, zq));
+        // Each normal's f32 rounding: a ball's (z - o)/|z - o| carries z = q - c's world rounding (|dz| <= sqrt(3)
+        // 2^-24 (|q|_inf + |c|_inf) < 2^-23 (...)) twice over |z - o|; an orthant face's D s - q (and its turn) a few
+        // ulps of |D| + |q| over |D s - q|; a plane's is the record's own.
+        const round = 2 ** -22 * (am(q) + am(c[v]!));
+        const normTol: number[] = [0, ...k.planes.map(() => 1e-6)];
+        for (const piece of [k.solid, k.body]) {
+          if (!piece) continue;
+          const pc = solidPieceCons(piece.o, piece.q, piece.Rq, piece.D, piece.Rb), dq = norm(piece.D) + norm(piece.q);
+          pc.forEach(q2 => normTol.push(q2.ball ? round / Math.max(norm(sub(zq, q2.c)), 1e-30) + 1e-6 : 16 * 2 ** -24 * dq / norm(q2.n) + 1e-6));
+        }
+        assert.equal(normTol.length, cons.length);
+        const ns = [1, 2, 3].slice(0, count).map(at);
+        // Reported: the outward normal of a non-cap certificate within the slack, to that normal's rounding.
+        ns.forEach((n, i) => {
+          let best = Infinity;
+          for (let j = 1; j < cons.length; j++) if (viol[j]! >= -1.5 * tol) best = Math.min(best, norm(sub(n, outward(j))) / normTol[j]!);
+          worstNormal = Math.max(worstNormal, best);
+          if (!(best <= 1)) bad.push(`vertex ${v}: normal ${i} ${n} is no binding certificate's (nearest at ${best.toFixed(2)} of its rounding)`);
+        });
+        // Every certificate binding q well inside the slack lies in the reported normals' span.
+        const basis: V3[] = [];
+        for (const n of ns) { let e = n; for (const b of basis) e = sub(e, scale(b, dot(e, b))); const l = norm(e); if (l > 1e-9) basis.push(scale(e, 1 / l)); }
+        for (let j = 1; j < cons.length; j++) {
+          if (!(viol[j]! >= -0.5 * tol)) continue;
+          binding++;
+          let e = outward(j); for (const b of basis) e = sub(e, scale(b, dot(e, b)));
+          worstSpan = Math.max(worstSpan, norm(e));
+          if (!(norm(e) <= 1e-4 + normTol[j]!)) bad.push(`vertex ${v} (levelled ${levelled}): certificate ${j} binds q (slack ${(-viol[j]!).toExponential(2)}, tol ${tol.toExponential(2)}) outside the ${count} normals' span by ${norm(e).toExponential(2)}`);
+        }
+        const capV = viol[0]!;
+        if (capV >= -0.5 * tol && !cap) bad.push(`vertex ${v}: the cap binds (slack ${(-capV).toExponential(2)}) but capOn is clear`);
+        if (capV < -1.5 * tol && cap) bad.push(`vertex ${v}: capOn with the cap's slack ${(-capV).toExponential(2)}`);
+        if (cap) { const nc = at(4); const off = norm(sub(nc, scale(zq, 1 / norm(zq)))); if (!(off <= 1e-5)) bad.push(`vertex ${v}: nc off the cap's normal by ${off.toExponential(2)}`); }
+      });
+    }
+    if (bad.length) console.log(`${bad.length} active-set failures:\n${bad.slice(0, 12).join('\n')}`);
+    console.log(`projection active set: ${2 * N} trials, counts 0/1/2/3 = ${counts.join('/')}, cap binding ${capOn}; ${binding} binding certificates, all in the span to ${worstSpan.toExponential(2)}; reported normals off their certificate's by ${worstNormal.toFixed(2)} of its rounding at most`);
+    assert.equal(bad.length, 0, `${bad.length} active-set failures`);
+    assert.ok(counts[1]! + counts[2]! + counts[3]! > N / 4, "the cases bind certificates");
+  });
+});
+
 /** Three sheets 4 mm apart, out of contact (r = 1 mm), lightly jittered. */
 function spacedStack(seed: number): OracleMesh {
   const R = rng(seed), h = 0.01;
@@ -731,14 +882,14 @@ test("GPU predicted-motion DAT: pairs, translating planes and the truncated resi
     const xdet = new Float32Array(await readBuffer(device, det.det));
     const rq = mesh.x.map(() => config.rqBase);
     for (let v = 0; v < N; v++) assert.ok(Math.abs(xdet[4 * v + 3] - 0.45 * config.rqBase) < 1e-9, "the residual envelope is rqBase");
-    const ref = bruteForcePredictedPairs(oracle, rq, W, 2e-6);
+    const ref = bruteForcePredictedPairs(oracle, rq, W, 2e-6, det);
     // The frame's peak: the first step's all-pairs round is the detector-lifetime peak.
     const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c0.framePeakPairSlots, oracle);
     const strict = (keys: Iterable<string>) => [...keys].filter(k => !ref.ambiguous.has(k)).sort();
     assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "vertex-triangle pairs");
     assert.deepEqual(strict(got.filter(g => g.pair.kind === "ee").map(g => g.key)), strict(ref.ee), "edge-edge pairs");
     // Absolute envelopes would pair the layers 4 mm apart; the co-moving predictions pair far fewer.
-    const absolute = bruteForceDatPairs(oracle, mesh.x.map((_, v) => Math.min(config.rqMax, config.r + 2.5 * norm(W[v]))), 0).pairs.length;
+    const absolute = bruteForceDatPairs(oracle, mesh.x.map((_, v) => Math.min(config.rqMax, config.r + 2.5 * norm(W[v]))), 0, det).pairs.length;
     assert.ok(got.length < 0.25 * absolute, `${got.length} predicted pairs vs ${absolute} absolute`);
     assert.ok(got.every(g => !predictedConflict(g.pair, oracle.x, W, 1e-6)));
     // Residuals drive the layers into each other by several gaps.
@@ -812,7 +963,7 @@ test("GPU predicted-motion DAT: crossing predictions are shifted back along thei
     // The round redone is the oracle's for the shifted predictions, conflict-free, and its motion penetration-free.
     const xdet = new Float32Array(await readBuffer(device, det.det));
     const rq = Array.from({ length: N }, (_, v) => xdet[4 * v + 3]! / 0.45);
-    const ref = bruteForcePredictedPairs(oracle, rq, W, 2e-6);
+    const ref = bruteForcePredictedPairs(oracle, rq, W, 2e-6, det);
     const got = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c.framePeakPairSlots, oracle);
     const strict = (keys: Iterable<string>) => [...keys].filter(k => !ref.ambiguous.has(k)).sort();
     assert.deepEqual(strict(got.filter(g => g.pair.kind === "vt").map(g => g.key)), strict(ref.vt), "shifted round: vertex-triangle pairs");

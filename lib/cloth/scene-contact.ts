@@ -47,7 +47,12 @@ export const CLOTH_SCENE_CONTACT = {
   contactCapacity: 128,
   gridEntriesPerPrimitive: 32,
   bucketCount: 1 << 18,
-  roundCap: 4,
+  // Re-detection rounds per step: at least the Newton iteration cap (CLOTH_NEWTON_SCENE_DEFAULTS.iterations, 8; a
+  // document authoring more Newton iterations gets as many). A round can follow each Newton iteration's filter, so a
+  // smaller cap ends a step's last iterations early: at 4 the ledge strip (C2's ladder) lagged its free twin's strain by
+  // a tick, its vertices over the ledge's edge carried at most 4 solid certificates' reach. Rounds run only when a filter
+  // bounds a vertex, so the cap costs nothing where the motion is certified.
+  roundCap: 8,
   pairSlotsPerVertex: 840,
   // The contact filter's plane records per vertex unless the document authors its own (contactPlaneRecordsPerVertex).
   planeRecordsPerVertex: 16,
@@ -169,7 +174,9 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     r, kc: C.kc_N_m, mu: document.solver?.selfFriction ?? 0, epsV: C.epsV_m_s, dt: dt_s, gravity: gravity_m_s2,
     rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction: 'target',
     contactCapacity: C.contactCapacity, pairCapacity: C.pairSlotsPerVertex * N, gridCapacity: C.gridEntriesPerPrimitive * (N + T + E),
-    bucketCount: C.bucketCount, roundCap: C.roundCap, solidCapacityWords: field.words.length, newton,
+    bucketCount: C.bucketCount, roundCap: Math.max(C.roundCap, document.solver?.newton?.iterations ?? 0), solidCapacityWords: field.words.length, newton,
+    // E12 (iii): the envelope capped at gamma_r times the smallest rest altitude, so a vertex's records are its approaches.
+    envelopeMeshCap: true,
     // INTERIM (demand bug, C2): the document's authored plane records per vertex, until the relative-motion pair test.
     ...(newton ? { planeRecordCapacity: (document.solver?.contactPlaneRecordsPerVertex ?? C.planeRecordsPerVertex) * N } : {}),
     solidSampleCapacity: sampleCapacity(field, r, edge),

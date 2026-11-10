@@ -38,6 +38,8 @@ export interface OgcTopologyLayout {
   /** Mean rest edge length at build time (metres), for the grid cell floor. */
   meanEdgeLength: number;
   maxEdgeLength: number;
+  /** Smallest rest triangle altitude (metres). */
+  minAltitude: number;
 }
 
 export interface OgcTopology { layout: OgcTopologyLayout; words: Uint32Array }
@@ -92,13 +94,21 @@ export function buildOgcTopology(mesh: OgcMeshTopology, positions: Float32Array)
     const l = Math.hypot(positions[4 * a] - positions[4 * b], positions[4 * a + 1] - positions[4 * b + 1], positions[4 * a + 2] - positions[4 * b + 2]);
     sum += l; max = Math.max(max, l);
   }
+  let minAlt = Infinity;
+  for (let t = 0; t < T; t++) {
+    const P3 = [0, 1, 2].map(k => { const v = mesh.triangles[4 * t + k]; return [positions[4 * v], positions[4 * v + 1], positions[4 * v + 2]]; });
+    const u = P3[1].map((c, i) => c - P3[0][i]), w = P3[2].map((c, i) => c - P3[0][i]);
+    const cr = Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]);
+    const lmax = Math.max(Math.hypot(...u), Math.hypot(...w), Math.hypot(...P3[2].map((c, i) => c - P3[1][i])));
+    if (lmax > 0) minAlt = Math.min(minAlt, cr / lmax);
+  }
   const layout: OgcTopologyLayout = {
     vertexCount: N, triangleCount: T, edgeCount: E,
     trisOffset: 0, edgesOffset: 4 * T, triEdgesOffset: 4 * T + 4 * E,
     vtOffOffset: 8 * T + 4 * E, vtListOffset: 8 * T + 4 * E + N + 1,
     veOffOffset: 11 * T + 4 * E + N + 1, veListOffset: 11 * T + 4 * E + 2 * N + 2,
     words: 11 * T + 6 * E + 2 * N + 2,
-    meanEdgeLength: E ? sum / E : 0, maxEdgeLength: max,
+    meanEdgeLength: E ? sum / E : 0, maxEdgeLength: max, minAltitude: minAlt,
   };
   const words = new Uint32Array(Math.ceil(layout.words / 4) * 4);
   words.set(mesh.triangles.subarray(0, 4 * T), layout.trisOffset);
