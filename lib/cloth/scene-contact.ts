@@ -27,7 +27,7 @@ import { buildOgcTopology, type OgcMeshTopology } from './contact/ogc-topology';
 import { OGC_COUNTER, OGC_STATUS } from './contact/ogc-wgsl';
 import { clothSolidBand, clothSolidSourceForScene } from './contact/scene-solids';
 import { SOLID_SAMPLE_WORDS, buildClothSolidField, clothSolidSampleEdges, clothSolidSamples, type ClothSolidField } from './contact/solid-field';
-import type { ClothSolverModel } from './oracle';
+import { clothMembraneConstants, type ClothSolverModel } from './oracle';
 import type { ClothDocument, ClothVector } from './types';
 
 /**
@@ -37,7 +37,9 @@ import type { ClothDocument, ClothVector } from './types';
  * capacity is a failing status bit, never a silent truncation.
  */
 export const CLOTH_SCENE_CONTACT = {
-  kc_N_m: 100,
+  // The barrier stiffness is no constant here: clothContactStiffness derives it per document from its materials' traction
+  // at their strain limit and its rest mesh (kc = 2 F_max / r; 2026-11-10 coordinator ruling (a), replacing kc 100, which
+  // squeezed the Bridson folds' loads into the log stage at 18-50 um of the 1 mm thickness).
   // IPC's friction regularization: below eps_v a sticking contact creeps at about eps_v-scale speeds. 1 mm/s (coordinator
   // ruling 2026-11-10): the 20 degree incline patch creeps 0.6 mm/s (4.8 mm/s at 1 cm/s), the 35 degree slide is unchanged.
   epsV_m_s: 1e-3,
@@ -71,6 +73,45 @@ export function clothContactRadius(document: ClothDocument): number {
   const r = Math.max(...document.materials.map(m => m.thickness_m));
   if (!(r > 0 && r < CLOTH_SCENE_CONTACT.rqBase_m)) throw new Error(`Cloth contact needs a material thickness in (0, ${CLOTH_SCENE_CONTACT.rqBase_m}) m, got ${r}`);
   return r;
+}
+
+/**
+ * The barrier stiffness kc (N/m): the smallest that carries every vertex's design contact load in the barrier's
+ * quadratic stage, d >= r / 2, where the force kc (r - d) peaks at kc r / 2. Below r / 2 the log stage holds a load F at
+ * d* = kc r^2 / (4 F): at kc 100 the Bridson folds' 0.5-1.4 N sat at 18-50 um against r = 1 mm, the thickness was not
+ * honoured, and Newton's model held only for steps of about the gap (C1's t25 measurement). So kc = 2 F_max / r.
+ *
+ * The design load is the membrane's: the normal force a contact carries is what the cloth's in-plane tension delivers
+ * to the vertex as the sheet turns over a fold or tents over a point (its weight column is two to three orders
+ * smaller). With the traction at most T_f in each incident face f, the linear-FEM membrane force on v is
+ * sum_f P_f rot(e_f) / 2 (e_f the rest edge opposite v), so |F_v| <= sum_f T_f |e_f| / 2: half v's link perimeter, the
+ * tent bound (a fold's reversal is within it). T_f is the traction of f's material at its strain limit eps, the StVK
+ * first Piola stress (1 + eps) (max(c11, c22) + |c12|) E with E = ((1 + eps)^2 - 1) / 2 the Green strain at the limit
+ * in both fibres. F_max is the largest |F_v| bound over the rest mesh.
+ *
+ * A load past the design (strain past the limit's traction, an impact) enters the log stage: still the barrier, only
+ * slower to converge. A material without a strain limit states no traction bound and fails explicitly.
+ */
+export function clothContactStiffness(document: ClothDocument): { kc_N_m: number; load_N: number } {
+  const r = clothContactRadius(document), data = document.geometry.data, x = data.restPositions_m, tri = data.triangles;
+  const traction = document.materials.map(m => {
+    const eps = m.strainLimit;
+    if (!(eps !== undefined && eps > 0)) throw new Error(`Cloth contact stiffness needs material ${m.id}'s strain limit, the bound on its traction`);
+    const c = clothMembraneConstants(m), E = ((1 + eps) ** 2 - 1) / 2;
+    return (1 + eps) * (Math.max(c.c11, c.c22) + Math.abs(c.c12)) * E;
+  });
+  const load = new Float64Array(x.length / 3);
+  for (let f = 0; f < tri.length / 3; f++) {
+    const T = traction[data.triangleMaterials?.[f] ?? 0]!;
+    for (let k = 0; k < 3; k++) {
+      const a = tri[3 * f + (k + 1) % 3]!, b = tri[3 * f + (k + 2) % 3]!;
+      load[tri[3 * f + k]!]! += T * Math.hypot(x[3 * a]! - x[3 * b]!, x[3 * a + 1]! - x[3 * b + 1]!, x[3 * a + 2]! - x[3 * b + 2]!) / 2;
+    }
+  }
+  let F = 0;
+  for (const l of load) F = Math.max(F, l);
+  if (!(F > 0)) throw new Error(`Cloth contact stiffness: document ${document.id} carries no membrane load`);
+  return { kc_N_m: 2 * F / r, load_N: F };
 }
 
 /** What the field depends on: the solid world, the cloth frame and the band. */
@@ -171,7 +212,7 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
   const { vertexCount: N, faceCount: T, edgeCount: E } = model.topology;
   const edge = buildOgcTopology(mesh, rest).layout.maxEdgeLength;
   const config: OgcContactConfig = {
-    r, kc: C.kc_N_m, mu: document.solver?.selfFriction ?? 0, epsV: C.epsV_m_s, dt: dt_s, gravity: gravity_m_s2,
+    r, kc: clothContactStiffness(document).kc_N_m, mu: document.solver?.selfFriction ?? 0, epsV: C.epsV_m_s, dt: dt_s, gravity: gravity_m_s2,
     rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction: 'target',
     contactCapacity: C.contactCapacity, pairCapacity: C.pairSlotsPerVertex * N, gridCapacity: C.gridEntriesPerPrimitive * (N + T + E),
     bucketCount: C.bucketCount, roundCap: Math.max(C.roundCap, document.solver?.newton?.iterations ?? 0), solidCapacityWords: field.words.length, newton,

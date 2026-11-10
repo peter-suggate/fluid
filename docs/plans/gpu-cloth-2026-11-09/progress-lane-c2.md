@@ -2504,3 +2504,50 @@ far 2848 / near 2820.
   - The ladder's determinism runs are bit-identical.
 - check:types is clean.
 - test:unit: 1733 pass, 1 fail (the known foreign reservoir-particle-cost test).
+
+## 2026-11-10 — kc LANDED: the barrier stiffness from the cloth's own design load (ruling (a))
+
+**Rule.** `clothContactStiffness(document)` in lib/cloth/scene-contact.ts replaces the constant kc 100:
+- kc = 2 F_max / r, so the design load F_max rests in the barrier's quadratic stage, d >= r / 2.
+- F_max is the membrane's tent bound: |F_v| <= sum_f T_f |e_f| / 2 over v's faces (e_f the rest edge opposite v).
+- T_f is the StVK first Piola traction at the material's strain limit eps in both fibres:
+  (1 + eps) (max(c11, c22) + |c12|) E, E = ((1 + eps)^2 - 1) / 2.
+- A material with no strain limit states no traction bound and fails explicitly.
+- Provenance is in CLOTH_SCENE_CONTACT's table (scene-contact.ts) and the function's doc.
+
+**Values.**
+
+| Scene | F_max (N) | kc (N/m) |
+|---|---|---|
+| Bridson rotating sphere 32^2 | 4.83 | 9668 |
+| Analytic sheets (free fall, curtain, incline, Peirce) | 0.79 | 1577 |
+
+C1's oracle (RESULT 40/41, BDF2 restored): kc 9668 converges at t5 / t15 / t25 in 10 / 14 / 43 iterations,
+against kc 100's 10 / 16 / no convergence. C1 cleared the wiring.
+
+**Before / after (same gate set; "before" is the g8 round at kc 100).**
+
+| Case | kc 100 | kc derived |
+|---|---|---|
+| Flat 16^2 drop: rebound | 0.0134 m/s | 0.0009 m/s |
+| Flat 16^2 drop: rest height (r = 1 mm) | 0.991 mm | 0.999 mm |
+| Free-fall landing: largest upward mean velocity | 0.0151 m/s | 0.0010 m/s |
+| Tilted 15 deg drop: rebound (h/8 implicit Euler) | 0.0037 (0.0017) m/s | 0.0002 (0.0000) m/s |
+| Tilted drop: settled height | 0.99 mm | 1.00 mm |
+| Incline: sticking creep 0.2-1 s / sliding a vs exact | (the g8 field refused it) | 0.513 mm / 1.6035 vs 1.6088 m/s^2 (-0.33 %) |
+| Curtain: band strain error, hem drop | 0.014 %, 1.639 mm | unchanged |
+| Peirce 41.6 deg chord | 41.70 deg | unchanged |
+| Ladder 1c s.H s ratio to Float64 | — | 1.00292 |
+| Sphere 16^2 cost per tick (60 ticks) | 80.8 ms, 16.6 rounds, 68.7 K DAT pairs | 73.5 ms, 15.2 rounds, 45.9 K DAT pairs |
+| Sphere 150^2 (20 ticks) | status 8 | status 8, closest 0.9 mm off the sphere |
+
+**Gates.**
+- The combined round on HEAD d9885020 + these two files: stiffness, contact ladder/gpu/body/scene-solids/oracle,
+  cloth-ladder, -gpu-solver, -analytic, -system, -newton.
+  - 112 tests: 108 pass, 0 fail, 4 todo; rc 0.
+  - The todos are the existing moving-solid capture and two Newton cut/undo items.
+  - The analytic incline's todo (item 5) now passes: HEAD's field builds its samples (2371 / 2413), so the
+    todo label is stale. It is in cloth-analytic.test.ts, which is not C2's file.
+  - Determinism: flat and sphere bit-identical over three runs.
+- tests/cloth-contact-stiffness.test.ts (new, CPU): the tent bound against the herring-bone link, the
+  scaling, Poisson's |c12|, the scene values, and the explicit failure.
