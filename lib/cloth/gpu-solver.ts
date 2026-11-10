@@ -637,12 +637,13 @@ export class ClothGPUSolver {
    * of the last step; then |g|^2 over free DOFs at its first and latest Newton iterate, |m g|^2 for scale (overwritten
    * here), and the step's PCG iterations; then with contact the last Newton iteration's active set (vertices with an
    * active normal, normals kept, normals released) and the vertices a travel bound held at its accepted trial; then the
-   * trust region (control + 3: trust-region mode, radius, the last direction's squared preconditioner norm, whether its
-   * solve ended on the boundary) and the step's globalisation counts (control + 4: consecutive full line-search steps,
-   * trust-region iterations, of them rejected, the last ratio rho). */
+   * trust region (control + 3: trust-region mode, radius), the step's globalisation counts (control + 4: consecutive
+   * full line-search steps, trust-region iterations, of them rejected, the last ratio rho), the last direction (control
+   * + 5: its squared preconditioner norm, whether its solve ended on the boundary) and the last trust-region iteration's
+   * model (control + 6: g.s, s.H s, contact's share of s.H s, the energy change at s). */
   async readNewtonControl(): Promise<Float32Array> {
     const L = this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN;
-    const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 80));
+    const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 112));
     out[6] = new Float32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8)[6]! / this.newton.residualTolerance ** 2;
     return out;
   }

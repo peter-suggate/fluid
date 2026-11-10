@@ -33,12 +33,13 @@
  * tolerance^2 (z, the forcing's eta^2) and the step's PCG iterations (w), then with contact the latest iteration's
  * active set (control + 2: vertices with an active normal, normals kept, normals released by the KKT sign, and the
  * vertices a travel bound holds at the accepted trial - the cap-aware done rule, read by the contact hook's re-detection),
- * then the trust region (control + 3, control + 4, control + 5; nwTrust below).
+ * then the trust region (control + 3 to control + 6; nwTrust below).
  *
  * newton.trustRegion 'hybrid' (trustRegion): the line search above until two consecutive iterations of a step accept the
- * full step, then trust-region iterations for the rest of the step (Steihaug-Toint): the model is H with the membrane's
- * stress term unclamped (nwFaces; the exact membrane Hessian - the oracle's t15 count to 1 um falls from 46 to 16 with
- * it, and to 46 again with the trust region on the PSD model, C1 RESULT 40), contact's terms and the preconditioner
+ * full step (with contact, each moving no vertex more than r / 2), then trust-region iterations for the rest of the
+ * step (Steihaug-Toint): the model is H with the membrane's stress term unclamped (nwFaces; the exact Hessian of all
+ * but contact, ladder 1c, C1 RESULT 41; at BDF2 the oracle's gain over the line search is modest, kc 9668 t15 14 -> 9
+ * and t25 43 -> 38, C1 RESULT 41 correcting the backward-Euler counts of RESULT 40), contact's terms and the preconditioner
  * unchanged; PCG stops on the boundary ||d||_M = Delta or at negative curvature (Steihaug's step to the boundary along p),
  * the norms by the CG recurrences (M the preconditioner's inverse, in the reduced space); the trial is the projected arc
  * at alpha 1 (s, nwProject's trial 0), the model's decrease pred = -(g.s + s.H s / 2) with s.H s one more product
@@ -98,10 +99,12 @@ fn nwControl() -> u32 { return P.newton0.w; }
 // The trust region: mode (0 the line search, 1 trust-region iterations) and Delta (the preconditioner's norm), set by
 // nwChoose and read-only through the solve; this iteration's direction (written by the solve's lead: ||d||_M^2, 1 where the
 // solve ended on the boundary); the step's counts (consecutive full line-search steps, trust-region iterations, of them
-// rejected, the last rho; harness reads).
+// rejected, the last rho; harness reads); the last trust-region iteration's model (g.s, s.H s, contact's share, the energy
+// change at s; harness reads, for the fixed-state check of the model against the Float64 Hessian).
 fn nwTrust() -> u32 { return nwControl() + 3u; }
 fn nwTrustNorm() -> u32 { return nwControl() + 5u; }
 fn nwTrustCounts() -> u32 { return nwControl() + 4u; }
+fn nwTrustModel() -> u32 { return nwControl() + 6u; }
 fn nwPinned(v: u32) -> bool { return vertexGroup(v) > 0u; }
 // Trial k's move of vertex j (alpha = 2^-k): alpha d_j, or with contact the projected arc's move Pi_j(x_j + alpha d_j) - x_j
 // (nwProject; exactly alpha d_j where the projection keeps the trial point; d_j.w != 0 marks a vertex the arc cuts on some trial).
@@ -260,7 +263,7 @@ fn wgIndex(wg: vec3u, nwg: vec3u) -> u32 { return wg.x + wg.y * nwg.x; }
 // Step start (one thread): Newton not done, the line search's mode (the active-set record, control + 2, is the contact hooks').
 @compute @workgroup_size(1) fn nwBeginStep() {
   nw[nwControl()] = vec4f(0.0); nw[nwControl() + 1u] = vec4f(0.0);
-  nw[nwTrust()] = vec4f(0.0); nw[nwTrustCounts()] = vec4f(0.0); nw[nwTrustNorm()] = vec4f(0.0);
+  nw[nwTrust()] = vec4f(0.0); nw[nwTrustCounts()] = vec4f(0.0); nw[nwTrustNorm()] = vec4f(0.0); nw[nwTrustModel()] = vec4f(0.0);
 }
 
 // Per face at the Newton iterate: f0, f1, the stress (S11, S22, S12) - PSD-clamped, or in trust-region iterations as it
@@ -861,12 +864,13 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   pcgStage(lane, sv);
   for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, nwMove(topo[halo + h], 0u, 1.0)); }
   workgroupBarrier();
-  var w = vec3f(0.0);
+  var w = vec3f(0.0); var wc = vec3f(0.0);
   if (own) {
     w = pcgRowProduct(lane, K1, K2, blocks, bends);
-    ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+    ${contact ? 'if (!nwPinned(v)) { wc = ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
   }
-  ${reduce('vec4f(dot(sv, w), 0.0, 0.0, 0.0)')}
+  // s.H s, and of it contact's share (the model record, control + 6, reads both).
+  ${reduce('vec4f(dot(sv, w + wc), dot(sv, wc), 0.0, 0.0)')}
   if (lane == 0u) { nw[pcgPartial(2u, p)] = total; }
 }
 
@@ -885,7 +889,8 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   ${contact ? `let act = nwSum(lane, base + 7u * P.newton0.z);
   let T0 = nwSum(lane, base + 8u * P.newton0.z); let T1 = nwSum(lane, base + 9u * P.newton0.z);` : ''}
   var sHs = 0.0;
-  if (NW_HYBRID) { sHs = nwSumN(lane, pcgPartial(2u, 0u), P.newton3.y).x; }
+  var sHv = vec4f(0.0);
+  if (NW_HYBRID) { sHv = nwSumN(lane, pcgPartial(2u, 0u), P.newton3.y); sHs = sHv.x; }
   if (lane != 0u) { return; }
   var chosen = 0.0; var alpha = 1.0; var held = 0.0;
   let trust = nw[nwTrust()]; let tn = nw[nwTrustNorm()]; var counts = nw[nwTrustCounts()];
@@ -903,6 +908,8 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
       if (!(rho >= 0.25)) { radius = 0.25 * sqrt(tn.x); } else if (rho > 0.75 && tn.y != 0.0) { radius = 2.0 * radius; }
     }
     nw[nwTrust()] = vec4f(1.0, radius, 0.0, 0.0);
+    // The model record (harness reads): g.s, s.H s, contact's share of it, and the energy change at s.
+    nw[nwTrustModel()] = vec4f(S0[0], sHs, sHv.y, e);
     counts = vec4f(counts.x, counts.y + 1.0, counts.z + select(1.0, 0.0, chosen > 0.0), rho);
   } else {
     for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
@@ -910,9 +917,13 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
       if (sl < 0.0 && e <= ${CLOTH_LINE_SEARCH.armijo} * sl + 4.0 * EPS32 * fl) { chosen = alpha; ${contact ? 'held = select(T1[k - 4u], T0[k], k < 4u); ' : ''}break; }
       alpha *= 0.5;
     }
-    // The hybrid: two consecutive full steps start the trust region, Delta the last full step's ||d||_M.
+    // The hybrid: two consecutive full steps start the trust region, Delta the last full step's ||d||_M. With contact
+    // each must also move no vertex more than r / 2 (max |d_v|, which bounds the projected move): the contact scale
+    // over which the barrier's model holds (C1 RESULT 40/41: at t25 the full steps of 1.6-2.6 cm inertial transients
+    // started the trust region far outside it, and it crawled on Cauchy steps).
     if (NW_HYBRID) {
-      counts.x = select(0.0, counts.x + 1.0, chosen == 1.0);
+      let full = chosen == 1.0${contact ? ' && sqrt(sm.y) <= 0.5 * bitcast<vec4f>(ogcContacts[1]).x' : ''};
+      counts.x = select(0.0, counts.x + 1.0, full);
       if (counts.x >= 2.0) { nw[nwTrust()] = vec4f(1.0, sqrt(tn.x), 0.0, 0.0); }
     }
   }

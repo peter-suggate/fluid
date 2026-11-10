@@ -2389,3 +2389,59 @@ move): the Newton count to 1 um, or \|g\| at n149 when it does not converge.
 - On t25, the ruled switch fires at n0 / n1 on 1.6-2.6 cm inertial steps (\|g\| 2-3e3). The trust region then crawls with pcg-0 Cauchy steps and 37 rejections in 148 iterations.
 - Requiring the two full steps to lie inside the contact scale (max move <= r / 2, a stated quantity) rescues it. This is a proposal, not landed: the ruled form is unchanged in code.
 - On the kc 100 dumps the same switch gives t5 9 and t15 13. Requiring \|g\| to fall at both steps instead does not rescue t25.
+
+## 2026-11-10 RESULT (41): the GPU model is the exact Hessian; the oracle was solving backward Euler; the r/2 switch
+
+Claude's rulings on (40): the interior-only done rule is approved, and so is the r/2 switch. The ruled next steps were
+the product read-back and, after it, the 150^2 acceptance.
+
+**The r/2 switch, in code.** With contact, the hybrid starts the trust region only after two consecutive full steps whose
+max \|d_v\| is at most r / 2. That is the contact scale over which the barrier's model holds (r is the contact record's
+radius, ogcContacts[1].x). Without contact the rule stays alpha = 1 twice.
+
+**The model record and the fixed-state check.**
+
+- nwModel now reduces s.H s with contact's share split out.
+- In trust-region iterations nwChoose writes control + 6 = (g.s, s.H s, contact's share, dE). readNewtonControl reads 7 records.
+- Scratch probe (m9/diag.mts, the edge duals frozen as in the oracle): GPU iterates x_k and x_k+1 from caps k-1 and k of one replayed step. In a scratch copy only, nwModel re-assembles each row one term at a time. Against that, the Float64 per-term s.H s at x_k.
+- First result: the GPU's elastic s.H s was 1.12-1.58x the Float64 exact. The first term to differ was **inertia, exactly 2.250x** at every k, with damping 1.5x. Everything else (membrane tangent, stress, bending stiffness, AL) agreed to 4-5 digits. 2.25 = (h / h~)^2.
+- **The cause was on the oracle side.**
+  - The dumps hold previous step = 0.0166666675 s, the f32 image of h.
+  - clothStepUsesBDF2 requires \|prev - h\| <= 1e-12 h in Float64, so the scratch oracle silently fell back to backward Euler on every dumped state.
+  - The GPU (f32) correctly runs BDF2 (h~ = 2h/3).
+  - Restoring h from its f32 image, the GPU's elastic s.H s matches the Float64 exact Hessian per term: total 1.00004 / 0.99986 / 0.99849 at t15 iterations 27 / 30 / 40.
+  - The repo's GPU-against-oracle tests compute the previous step in Float64 and are unaffected. Any oracle consumer of a GPU-saved state would hit the same fallback.
+- **Committed regression, ladder 1c** (corner-held 16^2 sheet, hybrid, no contact): at the first accepted trust-region iteration of step 10, the record's s.H s against the Float64 objective's central second difference along s, the frame the oracle's own BDF2 step. Ratio 1.0029 (max \|s\| 187 um, rho 1.007), g.s = -s.H s.
+
+**Correction: every oracle count in RESULTs (37)-(40) is a backward-Euler step, not the scene's.** At BDF2 (PROJ 2 mm, PSELF, stop at a 1 um move, interior steps only in trust-region iterations):
+
+| state | B | G (switch: alpha = 1 twice) | G + r/2 switch |
+|---|---|---|---|
+| kc 100 t5 | 10 | 10 | 10 |
+| kc 100 t15 | 16 | 15 | 15 |
+| kc 100 t25 | no (\|g\| 1.21) | no (1.38) | no (0.30) |
+| kc 9668 t5 | 10 | 9 | 9 |
+| kc 9668 t15 | 14 | 8 | 9 |
+| kc 9668 t25 | 43 | no (\|g\| 0.90) | 38 |
+
+- The t15 "46 -> 16" hybrid gain of (39)/(40) was the backward-Euler problem. At BDF2 the line search alone needs 16.
+- The kc conclusion stands: kc 9668 converges every state under B, and t25 at kc 100 converges under nothing.
+- The hybrid's real gain is modest: kc 9668 t15 14 -> 9, t25 43 -> 38, with the r/2 switch needed on t25.
+
+**The GPU against the BDF2 oracle** (production build plus the r/2 switch, duals stepped per iteration, scene PCG tolerance; kc 9668 in a scratch export):
+
+| state | GPU line search | GPU hybrid | oracle B |
+|---|---|---|---|
+| kc 100 t5 | 11 | 11 | 10 |
+| kc 100 t15 | 53 | 49 | 16 |
+| kc 100 t25 | no (\|g\|/\|mg\| 9.95) | no (11.2) | no |
+| kc 9668 t5 | 21 | 21 | 10 |
+| kc 9668 t15 | 68 | 121 | 14 |
+| kc 9668 t25 | no (\|g\|/\|mg\| 167) | no (3.37) | 43 |
+
+- The GPU needs 3-5x the oracle's iterations on the contact states, in both globalisations.
+- The elastic operator is now verified identical, and freezing the duals moved t15 only 53 -> 47 ((40)). So the gap is the contact formulation: the GPU's OGC block (per-iteration re-detection, travel bounds, the projected-Newton active set, its contact Hessian) against the oracle's frozen pair set with half-gap projections.
+- That is the next attribution. It needs a common contact set (C2's lane).
+- On the GPU the hybrid is not a win (kc 9668 t15 121 against 68), so B stays the method for the acceptance.
+
+**Gate** (cloth-ladder with 1c, -gpu-solver, -analytic, contact ladder / gpu / body): 64 tests, 63 pass, 0 fail, 1 todo (C2's incline item 5).

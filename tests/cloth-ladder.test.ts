@@ -27,8 +27,8 @@ import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/scene-description';
 import { prepareClothTopology } from '../lib/cloth/topology';
-import { buildClothSolverModel, clothOracleStep, createClothOracleState, type ClothSolverModel, type ClothStepOptions } from '../lib/cloth/oracle';
-import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
+import { buildClothSolverModel, clothOracleStep, clothStepFrame, clothWarmStartDuals, createClothOracleState, type ClothSolverModel, type ClothStepOptions } from '../lib/cloth/oracle';
+import { buildClothCoarseSpace, ClothCoarseCorrection, clothObjective } from '../lib/cloth/oracle-coarse';
 import { ClothGPUSolver, type ClothGPUSolverOptions } from '../lib/cloth/gpu-solver';
 import { CLOTH_NEWTON_SEGMENTS } from '../lib/cloth/gpu-newton-wgsl';
 import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
@@ -374,6 +374,49 @@ test('ladder 1b: Newton with contact on a 16^2 sheet landing flat on the floor: 
     assert.ok(speed < 0.01, `the sheet is at rest: ${speed} m/s`);
   }
   console.log(`[ladder 1b] ${n}^2 sheet dropped ${1000 * y0} mm onto the floor, ${ticks} ticks:\n  ${lines.join('\n  ')}`);
+}));
+
+// The hybrid's trust-region model is the exact Hessian (C1 RESULT 41): at the first accepted trust-region iteration of
+// the corner-held sheet's step 10, s.H s from the GPU's model record (control + 6; no contact) against the Float64
+// objective's central second difference along s = x_k+1 - x_k at x_k, the frame the oracle's own BDF2 step 10 (the step
+// size exact in Float64: a GPU-saved state's previous step is h's f32 image, on which clothStepUsesBDF2 falls back to
+// backward Euler). Also the model's own consistency there: an interior step solves H s = -g, so g.s = -s.H s.
+test('ladder 1c: the hybrid trust region\'s model is the exact Hessian at a fixed iterate (s.H s against the Float64 objective)', { skip: !gpu }, async () => withDevice(async device => {
+  const n = 16, steps = 10, document = resized(clothAnalyticFreeFall(), sheet(n, 1, (i, j) => j === 0 && (i === 0 || i === n - 1) ? 1 : 0)).cloth[0]!;
+  const model: ClothSolverModel = buildClothSolverModel(prepareClothTopology(document.geometry.data, document.materials), document.materials);
+  const st = createClothOracleState(model, model.topology.data.restPositions_m);
+  const options: ClothStepOptions = { dt_s: h, gravity_m_s2: [0, -g, 0], integrator: 'bdf2', iterations: 250, initialGuess: 'previous' };
+  const coarse = new ClothCoarseCorrection(model, buildClothCoarseSpace(model.topology));
+  for (let s = 0; s < steps - 1; s++) clothOracleStep(model, st, options, false, coarse);
+  const { frame, bdf2 } = clothStepFrame(model, st, options);
+  assert.ok(bdf2);
+  clothWarmStartDuals(model, st, frame.hEff);
+  const newton = HYBRID[0][1];
+  const before = await (async () => { const { solver: s } = await bareSolver(device, document, { dt_s: h, newton }); s.step(steps - 1); const state = await s.readState(); s.destroy(); return state; })();
+  const at = async (k: number) => {
+    const { solver: s } = await bareSolver(device, document, { dt_s: h, newton: { ...newton, iterations: k } });
+    s.uploadState(before.positions_m, before.velocities_m_s, before.solverState);
+    s.step(1); const c = Array.from(await s.readNewtonControl()), x = Float64Array.from(await s.readPositions()); s.destroy();
+    return { c, x };
+  };
+  let prev = await at(1), found = false;
+  for (let k = 2; k <= 8 && !found; k++) {
+    const cur = await at(k);
+    // An accepted trust-region iteration k: one more trust-region iteration, no more rejected, the iterate moved.
+    if (cur.c[12] === 1 && cur.c[17]! === prev.c[17]! + 1 && cur.c[18] === prev.c[18] && cur.c[3] === k) {
+      const s = Float64Array.from(cur.x, (q, i) => q - prev.x[i]!), [gs, sHs, sHc] = cur.c.slice(24, 27) as number[];
+      const E = (t: number) => clothObjective(model, frame, st, Float64Array.from(prev.x, (q, i) => q + t * s[i]!)).value;
+      const fd = E(1) - 2 * E(0) + E(-1);
+      let smax = 0; for (let v = 0; 3 * v < s.length; v++) smax = Math.max(smax, Math.hypot(s[3 * v]!, s[3 * v + 1]!, s[3 * v + 2]!));
+      console.log(`[ladder 1c] step ${steps}, Newton iteration ${k} (trust-region iteration ${cur.c[17]}, rho ${cur.c[19]!.toFixed(4)}, max |s| ${(1e6 * smax).toFixed(2)} um): `
+        + `GPU s.H s ${sHs!.toExponential(5)} (contact ${sHc}), Float64 second difference ${fd.toExponential(5)}, ratio ${(sHs! / fd).toFixed(5)}; g.s ${gs!.toExponential(5)}`);
+      assert.equal(sHc, 0);
+      assert.ok(Math.abs(sHs! / fd - 1) < 1e-2, `GPU model s.H s ${sHs} vs Float64 ${fd}`);
+      found = true;
+    }
+    prev = cur;
+  }
+  assert.ok(found, 'no accepted trust-region iteration in Newton iterations 2..8 of step 10');
 }));
 
 // ---------------------------------------------------------------- 2. the dual rule
