@@ -77,6 +77,12 @@ function analyticWith(data: ClothTopologyData, duration_s: number, extent_m = 0.
  * rest, so its neighbourhood comes within the rest-altitude envelope cap.
  */
 const FREE_STRIP_RECORDS = 18;
+/**
+ * The sliding and plate cases' authored plane records per vertex, each its measured peak (one filter, under a pool that
+ * does not bind, on b85f074e) plus the scenes' margin of about 10 %: sliding 10451 records (81.65 per vertex) -> 90,
+ * plate 1396 (21.81 per vertex) -> 24. At the default 16 both held vertices for overflow and passed: clean fails that now.
+ */
+const SLIDING_RECORDS = 90, PLATE_RECORDS = 24;
 const e2 = (x: number) => (x === undefined ? '-' : x.toExponential(1));
 interface TickReport { tick: number; y: number; vy: number; minY: number; intersections: number; solidIntersections: number; records: number; recordsTotal: number; held: number; heldVertices: number; conflicts: number; datPairs: number; rounds: number; status: string }
 
@@ -119,7 +125,19 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
 const clean = (label: string, r: { track: TickReport[]; failure?: string }) => {
   assert.equal(r.failure, undefined, `${label}: ${r.failure}`);
   for (const t of r.track) assert.equal(t.intersections + t.solidIntersections, 0, `${label}: tick ${t.tick} intersects (${t.intersections} faces, ${t.solidIntersections} in the solid)`);
+  // Plane-record overflow holds its vertices (planeRecordOverflow): no case passes with one.
+  for (const t of r.track) assert.equal(t.held, 0, `${label}: tick ${t.tick} holds ${t.held} vertices for plane-record overflow (peak ${t.records.toFixed(2)} per vertex)`);
 };
+/**
+ * `scene` with each cloth document's plane-record pool authored at `perVertex` (a case's measured peak plus the
+ * scenes' margin of about 10 %); CLOTH_LADDER_RECORDS overrides it (to measure a peak under a pool that does not bind).
+ */
+const authored = (scene: SceneDescription, perVertex: number): SceneDescription => {
+  const n = Number(process.env.CLOTH_LADDER_RECORDS ?? perVertex);
+  return { ...scene, cloth: scene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactPlaneRecordsPerVertex: n } })) };
+};
+const peakRecords = (label: string, r: { track: TickReport[]; N: number }) =>
+  console.log(`  ${label}: plane-record peak ${Math.round(Math.max(...r.track.map(t => t.records)) * r.N)} records in one filter (${Math.max(...r.track.map(t => t.records)).toFixed(2)} per vertex)`);
 
 test('ladder: a flat 16 x 16 sheet dropped from 1.2 m (the analytic free fall) lands on the floor, rests at the contact radius without a rebound, with few plane records', { skip: !runs('flat') }, async () => withDevice(async device => {
   const scene = analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6), r = clothContactRadius(scene.cloth![0]!);
@@ -150,7 +168,8 @@ test('ladder: two co-moving stacked 8 x 8 sheets in free fall need no cloth-clot
 test('ladder: a sheet sliding over and onto another is divided: pairs exist and nothing intersects', { skip: !runs('sliding') }, async () => withDevice(async device => {
   // Both fall freely; the upper one slides across at 0.6 m/s and closes the 4 mm gap at 0.3 m/s.
   const scene = analyticWith(sheets(square(8, 0.01, [-0.035, 0.4, -0.035]), moving(square(8, 0.01, [-0.06, 0.404, -0.035]), [0.6, -0.3, 0])), 1);
-  const out = await ladder(device, 'sliding 2 x 8^2', scene, 20);
+  const out = await ladder(device, 'sliding 2 x 8^2', authored(scene, SLIDING_RECORDS), 20);
+  peakRecords('sliding', out);
   clean('sliding', out);
   assert.ok(out.track.some(t => t.datPairs > 0), 'the sliding sheets are paired');
 }));
@@ -166,7 +185,8 @@ test('ladder: an 8 x 8 sheet lands on a slowly moving large sphere (the plate) a
     poseTrack: { keyframes: [0, 1].map(f => ({ time_s: f * end_s, position_m: at(0.04 * f), orientation: q })) } }];
   base.cloth = [{ ...base.cloth![0]!, pendingSolids: [{ id: 'plate', start_s: 0 }] }];
   assert.deepEqual(validateScene(base), []);
-  const out = await ladder(device, 'plate 8^2', base, ticks);
+  const out = await ladder(device, 'plate 8^2', authored(base, PLATE_RECORDS), ticks);
+  peakRecords('plate', out);
   clean('plate', out);
   assert.ok(out.track.at(-1)!.minY > cy + R - 0.03, 'the sheet rests on the sphere');
 }));

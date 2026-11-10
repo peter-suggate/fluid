@@ -763,7 +763,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   return got;
 }
 
-test("GPU projection active set (ogcProjectActive): q is ogcProjectTrial's bit for bit, every reported normal is a non-cap certificate binding q, and every certificate binding q lies in their span", { skip: !gpu }, async () => {
+test("GPU projection active set (ogcProjectActive): q is ogcProjectTrial's bit for bit, every reported normal is a non-cap certificate binding q, every certificate binding q lies in their span, and the result is bit-identical for any record order", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
     const R = rng(91), N = 2048;
     const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
@@ -784,7 +784,11 @@ test("GPU projection active set (ogcProjectActive): q is ogcProjectTrial's bit f
       const buf = storage(device, projectionBuffer(cases, c, Rb, levelled));
       const qs = await evalProject(device, buf, c, Y);
       const got = await evalActive(device, buf, c, Y);
-      buf.destroy();
+      const rev = storage(device, projectionBuffer(cases, c, Rb, levelled, true));
+      const back = await evalActive(device, rev, c, Y);
+      buf.destroy(); rev.destroy();
+      const orderDep = got.findIndex((x, i) => !Object.is(x, back[i]));
+      if (orderDep >= 0) bad.push(`vertex ${Math.floor(orderDep / 20)} (levelled ${levelled}): the active set depends on the records' order`);
       cases.forEach((k, v) => {
         const at = (i: number): V3 => [got[20 * v + 4 * i]!, got[20 * v + 4 * i + 1]!, got[20 * v + 4 * i + 2]!];
         const q = at(0), flags = got[20 * v + 3]!, count = flags % 4, held = (flags & 4) !== 0, cap = (flags & 8) !== 0;

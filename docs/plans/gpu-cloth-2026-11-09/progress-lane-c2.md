@@ -2384,3 +2384,54 @@ The strip test is now 2/2 pass:
 - 0 held and 0 held for overflow;
 - lambda peak 0.35 N against the 1.0 N bound;
 - free strain 0.105, then 0.000.
+
+## 2026-11-10 ogcProjectActive order-independent; overflow holds asserted on every ladder case
+
+**The determinism failure C1 found (A2, tick 13).** The records pass appends plane records with atomicAdd,
+so each vertex's records arrive in a race order.
+- The projection q does not depend on that order.
+- ogcProjectActive did: it picked binding records in list order, so with ties the reported normals
+  (and C1's active set) depended on the race.
+
+**Fix (`ogc-wgsl.ts`).**
+- ogcProjectActive now picks binding records in key order (ogcConKey / ogcKeyLess). That is the same
+  content-tie rule the projection uses.
+- A vertex now gets the same normals for any record order.
+
+**A second bug the old order had hidden.** ogcProjectActive's tolerance constant was 2^-14, not the
+documented 2^-15 (4 tau).
+- Found by a dump at vertex 935: a record with slack -3.449e-6 was accepted against the documented
+  tol of 2.12e-6.
+- Fixed to tol = 2^-15 (R + |y - c|) + 2^-20 (|q|inf + |c|inf).
+
+**Tests.**
+- `cloth-contact-gpu`: the active-set test now also evaluates with every vertex's records reversed.
+  Its outputs must be bit-identical.
+- `cloth-contact-ladder`: `clean()` asserts zero plane-record overflow holds on every case. Before,
+  only the strip asserted them.
+  - The sliding and plate cases held overflow silently.
+  - Their pools are now authored from peaks measured on b85f074e under a pool that does not bind,
+    plus the scenes' margin of about 10 %:
+
+    | Case | Measured peak | Authored per vertex |
+    |---|---|---|
+    | Sliding | 10451 records (81.65/v) | 90 |
+    | Plate | 1396 records (21.81/v) | 24 |
+
+  - `CLOTH_LADDER_RECORDS` overrides the pool, to measure a peak.
+
+**The moving-plate flake (planeRecordOverflow once, in a full run).** C1 saw it on 9aa9b596 + A2 in
+cloth-contact-body's "GPU moving plate in C1's solver" at step 17. It passed standalone, and the
+cut-direction variant failed at step 16.
+- It depends on the trajectory, so it has the same cause as the order dependence.
+- On the new ogcProjectActive it passes in C1's build and in this gate.
+
+**Gates.**
+- C1's 3-run determinism (pE = b85f074e + this ogc-wgsl.ts + C1's A2) is bit-identical for flat
+  16^2 over 50 ticks and sphere 16^2 over 60.
+- The combined gate (contact ladder/gpu/body/solid/scene-solids/oracle plus C1's cloth-ladder,
+  gpu-solver and analytic, on b85f074e + these files) gives 98 pass, 0 fail, 1 todo.
+  - The todo is the incline's sharp-edge samples (item 5), a known HEAD todo.
+  - The ladder's own determinism runs are bit-identical.
+- check:types is clean.
+- test:unit: 1724 pass, 1 fail (the known foreign reservoir-particle-cost test).

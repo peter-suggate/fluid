@@ -883,7 +883,8 @@ fn ogcProjectAt(t: OgcTrialCtx, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> {
  * anchor, not a contact): plane records, the solid pieces' balls and their eight orthant faces
  * (the piece D.|u| - q.u <= 1 is the eight half-spaces' intersection, so a point on an orthant
  * boundary reports each face meeting there), up to three linearly independent ones (Gram-Schmidt
- * at OGC_GS_FLOOR in the records' list order, then the static solid, then the moving one).
+ * at OGC_GS_FLOOR in the records' key order, then the static solid, then the moving one: the same
+ * normals for any record order).
  * Binding: the true certificate's slack within tol = 4 tau + 2^-20 (|q|_inf + |c|_inf), tau =
  * 2^-17 (R + |y - c|) as the projection's: its point sits 2 tau inside the certificates its
  * working set holds, the final segment's exit puts the one it stops at within rounding of 0, and
@@ -927,11 +928,23 @@ fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive
   if (t.held) { return s.a; }
   let z = s.a.q - t.c;
   let aq = abs(s.a.q); let ac = abs(t.c);
-  let tol = 6.103515625e-5 * (ogcProj4(t.fb).w + length(y - t.c)) + 9.5367431640625e-7 * (max(aq.x, max(aq.y, aq.z)) + max(ac.x, max(ac.y, ac.z)));
+  let tol = 3.0517578125e-5 * (ogcProj4(t.fb).w + length(y - t.c)) + 9.5367431640625e-7 * (max(aq.x, max(aq.y, aq.z)) + max(ac.x, max(ac.y, ac.z)));
   let k = ogcTrialSet(t, 0.0);
-  for (var i = 0u; i < k.n; i++) {
-    let c = ogcConOf(k, i);
-    if (ogcConViol(c, z) >= -tol) { ogcActiveAdd(&s, c.n); }
+  // The binding records in key order (their bits, ogcConKey): the records pass appends a vertex's
+  // records in any order, and which of near-dependent normals Gram-Schmidt keeps depends on it.
+  // Records with equal bits are one plane.
+  var last = vec4<u32>(0u); var seen = false;
+  for (var r = 0u; r < k.n && s.a.count < 3u; r++) {
+    var pick = OGC_NONE; var pk = vec4<u32>(0u);
+    for (var i = 0u; i < k.n; i++) {
+      let key = ogcConKey(k, i);
+      if (seen && !ogcKeyLess(last, key)) { continue; }
+      if (pick != OGC_NONE && !ogcKeyLess(key, pk)) { continue; }
+      if (ogcConViol(ogcConOf(k, i), z) >= -tol) { pick = i; pk = key; }
+    }
+    if (pick == OGC_NONE) { break; }
+    ogcActiveAdd(&s, ogcConOf(k, pick).n);
+    last = pk; seen = true;
   }
   if (k.sOn) { ogcActiveFaces(&s, k, z, OGC_CON_SOLID, OGC_CON_SOLID_BALL, tol); }
   if (k.bOn) { ogcActiveFaces(&s, k, z, OGC_CON_BODY, OGC_CON_BODY_BALL, tol); }
