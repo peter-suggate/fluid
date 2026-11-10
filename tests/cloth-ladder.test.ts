@@ -151,10 +151,11 @@ async function solveMicros(device: GPUDevice, solver: ClothGPUSolver, mode: 'cha
   for (let r = 0; r < reps; r++) {
     encoder.clearBuffer(S.newtonWork, offset, 32);
     const prime = encoder.beginComputePass(); S.run(prime, 'nwFaces', S.threads(S.T)); S.run(prime, 'nwGradient', W);
-    if (mode === 'replay') { S.run(prime, 'pcgStep', Wp, 0); S.run(prime, 'pcgStep', Wp, 1); }
+    if (mode === 'replay') for (const i of [0, 1]) for (const k of 'pcgPrecond' in S.pipelines ? ['pcgPrecond', 'pcgStep'] : ['pcgStep']) S.run(prime, k, Wp, i);
     prime.end();
     const pass = encoder.beginComputePass({ timestampWrites: { querySet: set, beginningOfPassWriteIndex: 2 * r, endOfPassWriteIndex: 2 * r + 1 } });
-    if (mode === 'solve') S.run(pass, 'pcgSolve', 1, cap); else for (let i = 0; i <= cap; i++) S.run(pass, 'pcgStep', Wp, mode === 'replay' ? 2 : i);
+    const iteration: string[] = 'pcgPrecond' in S.pipelines ? ['pcgPrecond', 'pcgStep'] : ['pcgStep'];
+    if (mode === 'solve') S.run(pass, 'pcgSolve', 1, cap); else for (let i = 0; i <= cap; i++) for (const k of iteration) S.run(pass, k, Wp, mode === 'replay' ? 2 : i);
     pass.end();
   }
   const { us, control } = await resolveMicros(device, encoder, set, reps, 1, S.newtonWork, offset + 16);

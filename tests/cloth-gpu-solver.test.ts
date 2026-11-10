@@ -17,7 +17,7 @@ import { buildClothSolverModel, clothBendVector, clothOracleStep, createClothOra
 import { ClothGPUSolver, clothBendingStencil, type ClothNewtonOptions } from '../lib/cloth/gpu-solver';
 import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
 import { CLOTH_BINDING } from '../lib/cloth/gpu-solver-wgsl';
-import { OGC_PROJECT_RECORD, ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
+import { OGC_LEVEL_VEC4S, OGC_PROJECT_RECORD, ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
 
@@ -191,7 +191,7 @@ test("C2's OGC vertex block compiles into the Newton kernels; an empty contact l
   // is the filter's sub-header for ogcProject (C2's layout, ogc-detector-wgsl.ts): every vertex's fixed records (a cap
   // ball that holds every trial, no static or moving solid piece) and an empty plane segment, so each trial is kept whole.
   const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
-  const fixed = 4, segWord = 4 * (fixed + OGC_PROJECT_RECORD * N), records = fixed + OGC_PROJECT_RECORD * N + Math.ceil(2 * N / 4);
+  const fixed = 3 + 1 + OGC_LEVEL_VEC4S, segWord = 4 * (fixed + OGC_PROJECT_RECORD * N), records = fixed + OGC_PROJECT_RECORD * N + Math.ceil(2 * N / 4);
   const words = new Uint32Array(4 * (records + 1)), floats = new Float32Array(words.buffer);
   words.set([0, 0, 2, 2]); words[11] = 3; words.set([fixed, segWord, records, 0], 12);
   for (let v = 0; v < N; v++) floats[4 * (fixed + OGC_PROJECT_RECORD * v) + 3] = 1e3;

@@ -259,7 +259,7 @@ export class ClothSystem {
         contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
         hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
       });
-      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, direction: solver.newtonDirection });
+      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, direction: solver.newtonDirection, control: solver.newtonControl });
       contact.setSolidField(field);
       if (bodyField) contact.setBodyField(bodyField);
       // The detector continues from the state carried with the pose (an undo, a load, a moving solid's edit).

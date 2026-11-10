@@ -43,7 +43,7 @@ export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
   // With contact the BDF2 history restarts at a contact onset (C2's contact state).
   const contact = !!options.contactBlock, restart = contact;
   // The projected arc's Pi_v is C2's ogcProject (a block without it is refused).
-  if (contact && !options.contactBlock!.includes('fn ogcProject(')) throw new Error('Cloth solver contact block lacks ogcProject (the projected arc search needs Pi_v)');
+  if (contact && !options.contactBlock!.includes('fn ogcProjectTrial(')) throw new Error('Cloth solver contact block lacks ogcProjectTrial (the projected arc search needs Pi_v at each trial level)');
   return /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)

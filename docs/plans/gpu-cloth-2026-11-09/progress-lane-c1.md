@@ -2128,3 +2128,16 @@ and a 128^2 chain read 94-119 us an iteration under contention against 25-26 ste
 
 Gate: cloth-analytic, cloth-gpu-solver, cloth-ladder, cloth-system, cloth-contact-gpu/-solid/-body on HEAD e34e7a37 +
 this: 81 tests, 76 pass, 0 fail, 5 todo (C2's incline item 5, moving solid, cut/undo; ladder 2's bound).
+
+## 2026-11-10 RESULT (33): C2's alpha edits landed; ladder 2 passes under levelled re-detection
+
+C2's (5) (c022831b) reads the Newton control record for its level, so the solver now binds it (newtonControl, passed
+in contact.bind), and nwProject projects each arc-search trial onto its level's end set (ogcProjectTrial(v, x, y,
+alpha)); the solver's contact-block guard names ogcProjectTrial, and the GPU-solver test's sub-header is
+3 + 1 + OGC_LEVEL_VEC4S vec4s. With it, ladder 2 (the stretched strip released on the ledge) no longer meets the tick-1
+round-cap hold: the AL duals peak at 0.49 N against the 1.04 N momentum bound (25-31 N before), the strain settles at
+1.9e-3, the overhang 13 nodes 56 mm below the ledge top; its todo is not reached. Also landed: the ladder's solveMicros
+chain names the preconditioner kernel when one exists, and the sphere benchmark prints holds for plane-record overflow.
+
+Gate: cloth-analytic, cloth-gpu-solver, cloth-ladder, cloth-contact-ladder on c022831b + this: 31 tests, 29 pass, 0 fail,
+2 todo (C2's incline item 5 and the contact-ladder strip, item 2).

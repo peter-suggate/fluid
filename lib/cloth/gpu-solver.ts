@@ -512,6 +512,11 @@ export class ClothGPUSolver {
     return { buffer: this.newtonWork, offset: 16 * CLOTH_NEWTON_SEGMENTS.d * this.tables.stride, size: 16 * this.tables.stride };
   }
 
+  /** Newton: the control record (vec4: done, PCG done, the accepted step alpha, Newton iterations of the step), which C2's re-detection reads after each step for its level. */
+  get newtonControl(): GPUBufferBinding {
+    return { buffer: this.newtonWork, offset: 16 * (this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN), size: 16 };
+  }
+
   private async compile(): Promise<void> {
     const d = this.device, B = CLOTH_BINDING, C = GPUShaderStage.COMPUTE;
     const storage = (binding: number, readOnly = false): GPUBindGroupLayoutEntry => ({ binding, visibility: C, buffer: { type: readOnly ? 'read-only-storage' : 'storage' } });

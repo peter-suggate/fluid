@@ -329,7 +329,7 @@ for (const tick of TICKS) {
     + `GPU span median ${median(steps.map(s => s.spanMs)).toFixed(2)} ms`);
   console.log(`  Newton iterations used per step: ${steps.map(s => s.newton).join(' ')}`);
   console.log(`  detector per step: candidates ${c.map(x => x.candidates).join(' ')}; pairs (vf+ee) ${c.map(x => x.vfPairs + x.eePairs).join(' ')}; `
-    + `rounds (detections+redetections) ${c.map(x => x.detections + x.redetections).join(' ')}; solid contacts ${c.map(x => x.solidContacts).join(' ')}; held ${c.map(x => x.held).join(' ')}; status ${c.map(x => x.status).join(' ')}`);
+    + `rounds (detections+redetections) ${c.map(x => x.detections + x.redetections).join(' ')}; solid contacts ${c.map(x => x.solidContacts).join(' ')}; held ${c.map(x => x.held).join(' ')}; held for plane-record overflow (sum/max) ${c.map(x => `${x.planeRecordHeld}/${x.planeRecordHeldMax}`).join(' ')}; plane-record peak ${c.map(x => x.framePeakPlaneRecords).join(' ')}; status ${c.map(x => x.status).join(' ')}`);
   if (prof) {
     console.log(`  profile (${prof.steps} step, split passes): ${prof.dispatches} dispatches queued, ${prof.worked} did work; `
       + `Newton iterations with work ${prof.newtonWorked}, PCG iterations with work ${prof.pcgWorked}; split sum ${prof.sumMs.toFixed(2)} ms (65.5 us clock)`);
