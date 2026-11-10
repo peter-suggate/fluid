@@ -187,7 +187,7 @@ const report: Record<string, unknown> = {
   renderProfile: scene.renderProfile,
   containerSize_m: [scene.container.width_m, scene.container.height_m, scene.container.depth_m],
   requestedTime_s, targetTime_s, dt, steps, width, height, renderScale, lightSamples, areaSamples, indirectLighting, visibilityMode, reflectionMode: selectedReflections, pngPath,
-  capturePath: "FluidLabRenderer.drawWithDeferredPresentation -> production BGRA8 swap chain",
+  capturePath: "FluidLabRenderer.draw -> production BGRA8 swap chain",
   presentationMode: preset.presentationMode, assetIds, decorativeWater: false,
   ...(process.env.FLUID_ASSET_VARIANT_PROOF ? {stagedAssetVariants:JSON.parse(process.env.FLUID_ASSET_VARIANT_PROOF)} : {}),
 };
@@ -334,7 +334,7 @@ try {
   ];
   const draw = async (time: number) => {
     check();
-    lastMetrics = await renderer!.drawWithDeferredPresentation(args(time)); frames++;
+    lastMetrics = renderer!.draw(...args(time)); frames++;
     await device!.queue.onSubmittedWorkDone();
     if(captureBloomEnabled&&internals.waterPipeline&&!internals.waterPipeline.lensBloomReady)await internals.waterPipeline.ensureLensBloomReady();
     // Production completion callbacks retire their health receipts before

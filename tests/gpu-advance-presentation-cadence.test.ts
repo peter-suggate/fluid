@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RuntimeLifecycle } from "../lib/core/runtime-lifecycle";
 
 import {
   canQueuePreparedGPUAdvance,
-  completedFrameAwaitsPresentation,
   FluidLabRenderer,
   presentationHeldByPendingFrame,
   submitNextPreparedGPUAdvance,
@@ -145,99 +143,18 @@ test("holding the presentation for the advance it just made shows every second s
     "and publishes the host clock in two-step jumps");
 });
 
-// Unlike the immediate-publication fixture above, Uniform pressure has not submitted its
-// publication on return from advanceTo. A completed step must be shown before
-// another advance can make its fields mutable again.
-test("deferred pressure publication presents every completed step without starvation", () => {
-  const fluid = {deferredFramePublication:true, info:{completedTime_s:0}} as GPUSolverInstance;
-  let submitted = 0, presented = 0, remaining = 0;
-  const shown: number[] = [];
-  for (let draw=0; draw<40; draw++) {
-    if (remaining > 0) { if (--remaining === 0) fluid.info.completedTime_s = submitted; continue; }
-    if (completedFrameAwaitsPresentation(fluid, presented)) {
-      shown.push(fluid.info.completedTime_s!); presented = fluid.info.completedTime_s!;
-    } else { submitted += DT; remaining = 2; }
-  }
-  assert.ok(shown.length >= 9);
-  shown.forEach((time,i) => assert.ok(Math.abs(time-(i+1)*DT)<1e-9));
-  assert.equal(completedFrameAwaitsPresentation({...fluid,deferredFramePublication:false},0),false,
-    "existing immediately-published solvers retain their cadence");
-});
-
-function deferredPresentationFixture() {
-  let complete!: () => void;
-  const receipt = new Promise<void>(resolve => { complete = resolve; });
-  const solver = {
-    deferredFramePublication: true, framePending: true,
-    info: { completedTime_s: 0 }, awaitFrameCompletion: () => receipt,
-  };
-  let draws = 0;
-  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    lifecycle: new RuntimeLifecycle(), gpuFluid: solver, gpuFluidGeneration: 1, deferredPresentedTimes: new WeakMap(),
-    draw: () => ({ context: "test", methodId: "uniform-volume", presentationSubmitted: ++draws > 1 }),
-  }) as FluidLabRenderer;
-  return {
-    renderer, solver, draws: () => draws,
-    args: [] as unknown as Parameters<FluidLabRenderer["draw"]>,
-    complete: () => { solver.framePending = false; solver.info.completedTime_s = DT; complete(); },
-  };
-}
-
-test("a deferred frame presents on its receipt without another animation-frame request", async () => {
-  const f = deferredPresentationFixture();
-  const request = f.renderer.drawWithDeferredPresentation(f.args);
-  assert.equal(f.draws(), 1, "mutable simulation fields must not be presented");
-  f.complete();
-  assert.equal((await request).presentationSubmitted, true);
-  assert.equal(f.draws(), 2, "the original worker request must submit the completed frame exactly once");
-});
-
-test("a replaced scene cannot be redrawn by an old pressure receipt", async () => {
-  const f = deferredPresentationFixture();
-  let current = true;
-  const request = f.renderer.drawWithDeferredPresentation(f.args, () => current);
-  current = false;
-  f.complete();
-  assert.equal((await request).presentationSubmitted, false);
-  assert.equal(f.draws(), 1);
-});
-
-test("a solver reset invalidates an outstanding deferred presentation", async () => {
-  const f = deferredPresentationFixture();
-  const request = f.renderer.drawWithDeferredPresentation(f.args);
-  Object.assign(f.renderer, { gpuFluidGeneration: 2 });
-  f.complete();
-  assert.equal((await request).presentationSubmitted, false);
-  assert.equal(f.draws(), 1);
-});
-
-test("a failed pressure receipt rejects the request without presenting it", async () => {
-  const f = deferredPresentationFixture();
-  const failure = new Error("pressure failed to converge");
-  f.solver.awaitFrameCompletion = () => Promise.reject(failure);
-  await assert.rejects(f.renderer.drawWithDeferredPresentation(f.args), failure);
-  assert.equal(f.draws(), 1);
-});
-
-test("NB-FLIP receipt backpressure does not defer an already-submitted image or drain the worker", async () => {
+test("NB-FLIP receipt backpressure does not defer an already-submitted image or drain the worker", () => {
   // Use the production admission/publication getters without constructing GPU
   // resources. A full ring has submitted every frame, including its final
   // fields; only admission of a further advance must wait for a receipt.
   const solver = Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype), {
     mixedFrame: {}, mixedFramesInFlight: UNIFORM_MIXED_RECEIPT_RING,
-    rigidSystem: { nativeMotorContacts: false },
     executionInfo: { submittedTime_s: 2 * DT, completedTime_s: 0 },
     awaitFrameCompletion: () => { throw new Error("must not drain submitted frames for presentation"); },
   }) as WebGPUUniformReferenceSolver;
   assert.equal(solver.framePending, true, "the next simulation advance remains blocked");
   assert.equal(solver.presentationPending, false, "its image can follow the final submission on the same queue");
   assert.equal(presentationHeldByPendingFrame(solver.framePending, true), false);
-  const metrics = { context: "test", methodId: "uniform-narrow-band-flip", presentationSubmitted: false };
-  const renderer = Object.assign(Object.create(FluidLabRenderer.prototype), {
-    lifecycle: new RuntimeLifecycle(), gpuFluid: solver, draw: () => metrics,
-  }) as FluidLabRenderer;
-  assert.equal(await renderer.drawWithDeferredPresentation([] as unknown as Parameters<FluidLabRenderer["draw"]>), metrics,
-    "a later request at the full-ring gate returns instead of awaiting the entire queue");
   Object.assign(solver, { mixedFramesInFlight: UNIFORM_MIXED_RECEIPT_RING - 1 });
   assert.equal(solver.framePending, false, "one receipt is enough to admit the next advance");
   Object.assign(solver, { deferredFrameValues: {} });
@@ -246,17 +163,17 @@ test("NB-FLIP receipt backpressure does not defer an already-submitted image or 
   assert.equal(solver.presentationPending, true, "failed frames remain withheld");
 });
 
-test("native motor contacts hold admission and presentation until the corrected pose is published", () => {
+test("motor-assembly contacts resolve on the GPU: a frame in flight neither holds admission nor presentation", () => {
+  // Paddleboats used to step its wheel contacts on the CPU after a pose
+  // readback, which held every frame until the readback landed. Contacts are
+  // now part of the rigid kernel of the same submission, so a boat scene with
+  // one frame in flight admits and presents like every other scene.
   const solver = Object.assign(Object.create(WebGPUUniformReferenceSolver.prototype), {
-    mixedFrame: {}, mixedFramesInFlight: 1, rigidSystem: { nativeMotorContacts: true },
+    mixedFrame: {}, mixedFramesInFlight: 1,
     executionInfo: { submittedTime_s: DT, completedTime_s: 0 },
   }) as WebGPUUniformReferenceSolver;
-  assert.equal(solver.framePending, true);
-  assert.equal(solver.presentationPending, true);
-  assert.equal(completedFrameAwaitsPresentation(solver, 0), false);
-  Object.assign(solver, { mixedFramesInFlight: 0, executionInfo: { submittedTime_s: DT, completedTime_s: DT } });
-  assert.equal(solver.framePending, false);
-  assert.equal(solver.presentationPending, false);
-  assert.equal(completedFrameAwaitsPresentation(solver, 0), true, "the completed native frame must be drawn before advancing again");
-  assert.equal(completedFrameAwaitsPresentation(solver, DT), false);
+  assert.equal(solver.framePending, false, "a frame in flight below the receipt ring admits the next advance");
+  assert.equal(solver.presentationPending, false, "its image follows the submission on the same queue");
+  assert.equal((solver as unknown as { deferredFramePublication?: boolean }).deferredFramePublication, undefined,
+    "no solver publishes after a readback any more");
 });

@@ -1,5 +1,5 @@
 /** Camera-motion cost in a cloth scene on the production renderer (Dawn/Metal).
- * Same draw loop as the render worker (reply-gated drawWithDeferredPresentation
+ * Same draw loop as the render worker (reply-gated draw
  * at 60 Hz, the product's method and UI stores), alternating a still camera
  * with an orbiting one. Frame wall time is draw start to presentation retired.
  * CLOTH_CAMERA_SCENE=bridson-2002-rotating-sphere CLOTH_CAMERA_FRAMES=60 \
@@ -150,7 +150,7 @@ try {
   // The frame is a placeholder until the full-scene presentation is active.
   while (!(effective?.state === "active" && (ui.svoPrimaryTraversal !== "mesh" || effective.surfaceMesh?.state === "ready")
     && effective.lightingVisibility?.state === ui.svoConeTracingMode)) {
-    await renderer.drawWithDeferredPresentation(args(0, base)); await device!.queue.onSubmittedWorkDone();
+    renderer.draw(...args(0, base)); await device!.queue.onSubmittedWorkDone();
     await new Promise(r => setTimeout(r, 20));
     if (failure) throw failure;
     assert.ok(performance.now() - ready < 600_000, `presentation must become active: ${statuses.at(-1)}`);
@@ -164,7 +164,7 @@ try {
     for (let k = 0; k < count; k++, frame++) {
       const start = performance.now();
       const time = frozen && !phase.startsWith("warmup") ? 40 * dt : frame * dt;
-      const metrics = await renderer.drawWithDeferredPresentation(args(time, cameraAt(frame, moving)));
+      const metrics = renderer.draw(...args(time, cameraAt(frame, moving)));
       const draw_ms = performance.now() - start;
       await device!.queue.onSubmittedWorkDone();
       const wall_ms = performance.now() - start;

@@ -932,11 +932,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
       this.terrainTexture, [cells[0], cells[2]]);
-    this.rigidSystem.enableNativeMotorContacts = !scene.interaction?.entities.length;
     this.rigidSystem.setProceduralCollisionSource({
       buffer: this.activeScratch, pointerWord: this.activeScratch.size / 4 - 2, sculptCollision: true,
       origin_m: [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2],
       cellSize_m: [scene.container.width_m / cells[0], scene.container.height_m / cells[1], scene.container.depth_m / cells[2]],
+      // Motor assemblies contact this mask and the box shell less its cuts (rigid-assembly-contact.ts).
+      ...(scene.container.shape !== "sphere" && scene.container.walls !== "none" && scene.container.boundary !== "free-space"
+        && (this.solidMask.walls.policy === 1 || this.solidMask.walls.policy === 2)
+        ? { assemblySolid: { cells: [cells[0], cells[1], cells[2]] as [number, number, number], walls: this.solidMask.walls } } : {}),
     });
     const initialRigidBodies = initializeRigidBodies(scene.rigidBodies);
     this.prescribedSolidMotion.sample(initialRigidBodies, 0);
@@ -3018,8 +3021,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     return this.mixedPipelineAdmission !== undefined || this.mixedHostBusy;
   }
   private get mixedHostBusy(): boolean {
-    return (this.mixedFrameInFlight && this.rigidSystem.nativeMotorContacts)
-      || this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
+    return this.mixedFramesInFlight >= UNIFORM_MIXED_RECEIPT_RING
       || (this.mixedFrameInFlight && this.deferredFrameEdit);
   }
   /** Scene, value and body edits wait for every submitted frame. */
@@ -3032,9 +3034,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   // draw queued behind it sees the final fields by WebGPU queue ordering.
   // Treating a full ring as deferred publication drains both frames before
   // submitting the second image and repeatedly starves the GPU pipeline.
-  // Native motor contacts split submission: publish the corrected poses first.
-  get deferredFramePublication(): boolean { return this.rigidSystem.nativeMotorContacts; }
-  get presentationPending(): boolean { return this.pressureFrameFailure !== undefined || (this.mixedFrameInFlight && this.deferredFramePublication); }
+  // Rigid contacts (motor assemblies included) resolve inside the rigid
+  // kernel of the same submission, so no pose waits on a readback.
+  get presentationPending(): boolean { return this.pressureFrameFailure !== undefined; }
   async awaitFrameCompletion(): Promise<void> {
     await this.mixedPipelineAdmission;
     await this.mixedFrameChain;
@@ -3257,13 +3259,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       // The step's completion record (its time, with handlers built once) is
       // its receipt's alone until one of them has run.
       const completion=this.mixedCompletions.take()??this.mixedCompletion();completion.time_s=stepEnd_s;
-      if (this.rigidSystem.nativeMotorContacts) receipt = receipt.then(async result => {
-        if (await this.rigidSystem.finishNativeStep()) {
-          const publish = this.device.createCommandEncoder({ label: "Native contact solid publication" });
-          this.mixedFrame!.solid!.encodeBodies(publish); this.device.queue.submit([publish.finish()]);
-        }
-        return result;
-      });
       const handled=receipt.then(completion.accepted,completion.failed);
       // awaitFrameCompletion's fence: this frame's handling while it is the
       // only one unhandled, else one promise for every frame until none is.

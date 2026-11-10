@@ -4,7 +4,8 @@ import { RIGID_MOTOR_FLOATS, rigidMotorWGSL, rigidControlOwnerId, rigidMotorStre
 import { rigidAppearanceSkin } from "./rigid-appearance";
 import { sculptCollisionWGSL } from "./sculpt-collision.wgsl";
 import type { RigidBodyDescription, SceneDescription } from "./model";
-import { Box3DMotorContacts } from "../interaction/adapters/box3d/motor-contacts";
+import { rigidAssemblyContactWGSL, rigidAssemblySolidWGSL, rigidAxleLanes, rigidContactTableHeader, rigidContactTableLayout, rigidContactTableThreads, rigidContactTableWGSL, RIGID_CONTACT_ITERATIONS, RIGID_MOTOR_AXLE_FLOAT, RIGID_TABLE_WORKGROUP, type RigidAssemblySolidLayout } from "./rigid-assembly-contact";
+import type { SolidOccupancyMaskWalls } from "./solid-occupancy-mask";
 import type { Quaternion, Vec3 } from "./model";
 import { boundingRadius, primitiveVolume, quaternionInverseRotate, quaternionRotate, type RigidBodyState } from "./rigid-body";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "../svo/features/scene-publication/svo-primitive-motion";
@@ -63,6 +64,53 @@ export function rigidMotionLane(body: RigidBodyState): number {
 }
 
 export const GPU_RIGID_STATE_FLOATS = 32;
+
+/**
+ * The 32 floats `syncBodies` packs for one body (lane 29, the motion
+ * generation, is written by the caller). Pure, so the CPU mirror of the kernel
+ * (`stepRigidMirror`) starts from exactly the record the GPU receives.
+ */
+export function rigidStateRecord(body: RigidBodyState, rho: number, selection: number): number[] {
+  const d = body.description.dimensions_m, q = body.orientation, shape = sceneShapeCode(body.description.shape);
+  // Same reason as the palette: this was a hand-rolled ternary chain that
+  // fell through to the capsule's radius for anything it did not name, so a
+  // cup was packed with a bounding sphere it does not have.
+  const radius = boundingRadius(body.description);
+  // A held body is immovable rather than weightless: zero inverse mass and
+  // inertia is what makes `planeContact` return early and `applyImpulse` a
+  // no-op, so a wall or a neighbouring crate cannot push the thing in the
+  // user's hand. Gravity is refused separately, by the motion lane below.
+  const inverseMass = body.held ? 0 : body.inverseMass_kg * rho;
+  const inverseInertia = body.held
+    ? { x: 0, y: 0, z: 0 }
+    : { x: body.inverseInertiaBody_kg_m2.x*rho, y: body.inverseInertiaBody_kg_m2.y*rho, z: body.inverseInertiaBody_kg_m2.z*rho };
+  // Negative shape codes are fluid-only interior boundaries: they reach no
+  // static surface (rigidShapeSupportRadius is zero); presentation keeps
+  // the ordinary shape code.
+  const fluidShape = body.description.fluidBoundary === "interior" ? -shape-1 : shape;
+  return [body.position_m.x,body.position_m.y,body.position_m.z,fluidShape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,inverseMass,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,inverseMass,inverseInertia.x,inverseInertia.y,inverseInertia.z,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,rigidMotionLane(body),selection];
+}
+
+/**
+ * The motor uniform for a roster: pivot/parent, offset/phase, axis/speed,
+ * orientation, timing, the appearance skin (floats 20-23) and the axle
+ * envelope (floats 24-27) that motor-assembly contact supports. `drives[i]`
+ * is the body's ramped drive, undefined for a body without a motor.
+ */
+export function rigidMotorRecords(descriptions: readonly RigidBodyDescription[], drives: readonly (RigidMotorDrive | undefined)[]): Float32Array<ArrayBuffer> {
+  const ids = descriptions.map(d => d.id), axles = rigidAxleLanes(descriptions);
+  const motorData = new Float32Array(GPU_RIGID_BODY_CAPACITY*RIGID_MOTOR_FLOATS);
+  descriptions.forEach((description,index) => {
+    const m=description.motorAttachment, at=index*RIGID_MOTOR_FLOATS, skin=rigidAppearanceSkin(description);
+    if(m){const parent=ids.indexOf(m.parentId);if(parent<0)throw new Error(`Missing motor parent ${m.parentId}`);
+      const drive=drives[index];if(!drive)throw new Error(`Missing motor drive for ${description.id}`);
+      motorData.set([m.pivot_m.x,m.pivot_m.y,m.pivot_m.z,parent+1,m.offset_m.x,m.offset_m.y,m.offset_m.z,m.phase_rad + drive.phaseOffset_rad,
+        m.axis.x,m.axis.y,m.axis.z,m.angularSpeed_rad_s * drive.strength,m.orientation.w,m.orientation.x,m.orientation.y,m.orientation.z,m.startTime_s,m.rampUp_s,0,0],at);}
+    if(skin)motorData.set([...skin.half,skin.shape],at+20);
+    motorData.set(axles[index]!,at+RIGID_MOTOR_AXLE_FLOAT);
+  });
+  return motorData;
+}
 export const GPU_RIGID_STATE_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_STATE_FLOATS * 4;
 export const GPU_RIGID_RENDER_FLOATS = 16;
 export const GPU_RIGID_RENDER_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_RENDER_FLOATS * 4;
@@ -109,12 +157,25 @@ export interface GPURigidSolidWorldCollisionSource {
 /** Shared, edit-aware sampled boundary already resident in the fluid solver. */
 export interface GPURigidProceduralCollisionSource {
   readonly sculptCollision?: boolean;
+  /**
+   * The fluid's solid mask lies at word 0 of `buffer`: motor assemblies
+   * contact it and the container's shell less the sculpt cuts in place of
+   * the container's planes (rigidAssemblySolidWGSL). Needs `sculptCollision`.
+   */
+  readonly assemblySolid?: { readonly cells: readonly [number, number, number]; readonly walls: SolidOccupancyMaskWalls };
   readonly buffer: GPUBuffer;
   readonly pointerWord: number;
   readonly origin_m: readonly [number, number, number];
   readonly cellSize_m: readonly [number, number, number];
 }
 
+/** The assembly solid a procedural source carries, if any; a source that names one it cannot serve is refused. */
+export function rigidAssemblySolidLayout(source: GPURigidProceduralCollisionSource | undefined, terrainContact: boolean): RigidAssemblySolidLayout | undefined {
+  const solid = source?.assemblySolid;
+  if (!solid) return undefined;
+  if (!source.sculptCollision) throw new Error("Assembly voxel contact reads the sculpt cut field: attach it with sculptCollision");
+  return { cells: solid.cells, walls: solid.walls, origin_m: source.origin_m, cellSize_m: source.cellSize_m, floor: !terrainContact };
+}
 function rigidProceduralContactWGSL(source: GPURigidProceduralCollisionSource): string {
   const vector = (v: readonly number[]) => `vec3f(${v.map(n => `${n}`).join(",")})`;
   return /* wgsl */ `
@@ -122,16 +183,15 @@ function rigidProceduralContactWGSL(source: GPURigidProceduralCollisionSource): 
 ${source.sculptCollision ? sculptCollisionWGSL("rigidBoundary") : ""}
 ${proceduralSolidRenderWGSL(`rigidBoundary[${source.pointerWord}u]`, "rigidBoundary[index]",
     vector(source.cellSize_m), vector(source.origin_m), "rigidBoundary")}
-fn proceduralContact(body:ptr<function,RigidBody>){
+fn proceduralContact(body:ptr<function,RigidBody>,index:u32){
   if((*body).inverseMassInertia.x<=0.0){return;}
   let sample=rigidBoundarySample((*body).positionShape.xyz);
   let magnitude=length(sample.xyz);
   if(sample.w>=1e19||magnitude<1e-8){return;}
   let normal=sample.xyz/magnitude;
-  let radius=supportRadius(*body,normal);
   // Normalize the implicit field's value by its gradient, preserving its
   // distance even when the procedural author used a non-unit field.
-  resolveStaticContact(body,normal,radius-sample.w/magnitude,radius);
+  staticSurfaceContact(body,index,normal,sample.w/magnitude);
 }
 `;
 }
@@ -302,11 +362,11 @@ fn voxelInteriorContact(center:vec3f,minimum:vec3f,maximum:vec3f)->vec4f{
   if(toMaximum.z<distance){distance=toMaximum.z;normal=vec3f(0,0,1);}
   return vec4f(normal,max(0.0,distance));
 }
-fn solidVoxelContact(body:ptr<function,RigidBody>){
+fn solidVoxelContact(body:ptr<function,RigidBody>,index:u32){
   let rho=max(params.step.y,1e-9);
   if((*body).inverseMassInertia.x/rho<=0.0){return;}
   let origin=params.solidOrigin.xyz;let cell=max(params.solidCell.xyz,vec3f(1e-7));
-  let broadRadius=max((*body).dimensions.w,1e-7);
+  let broadRadius=max(rigidContactRadius(*body,index),1e-7);
   let bodyMinimum=(*body).positionShape.xyz-vec3f(broadRadius);
   let bodyMaximum=(*body).positionShape.xyz+vec3f(broadRadius);
   let solidOriginFine=rigidSolidOriginFine();
@@ -350,14 +410,14 @@ fn solidVoxelContact(body:ptr<function,RigidBody>){
             safeNormalize((*body).positionShape.xyz-centre,vec3f(0,1,0)));
           let sdfMetres=f32(clamp(rigidSolidSdfQ8(q),-512,512))/256.0
             *min(cell.x,min(cell.y,cell.z));
-          let surface=centre-normal*sdfMetres;radius=supportRadius(*body,normal);
+          let surface=centre-normal*sdfMetres;radius=contactReach(*body,index,normal);
           penetration=radius-(dot(normal,(*body).positionShape.xyz)-dot(normal,surface));
         }else if(separation>1e-7){
-          normal=delta/separation;radius=supportRadius(*body,normal);
+          normal=delta/separation;radius=contactReach(*body,index,normal);
           penetration=radius-separation;
         }else{
           let interior=voxelInteriorContact((*body).positionShape.xyz,minimum,maximum);
-          normal=interior.xyz;radius=supportRadius(*body,normal);
+          normal=interior.xyz;radius=contactReach(*body,index,normal);
           penetration=radius+interior.w;
         }
         if(penetration>bestPenetration){
@@ -384,11 +444,11 @@ fn solidVoxelContact(body:ptr<function,RigidBody>){
     if(separation>broadRadius){continue;}
     var normal=vec3f(0,1,0);var penetration=0.0;var radius=0.0;
     if(separation>1e-7){
-      normal=delta/separation;radius=supportRadius(*body,normal);
+      normal=delta/separation;radius=contactReach(*body,index,normal);
       penetration=radius-separation;
     }else{
       let interior=voxelInteriorContact((*body).positionShape.xyz,minimum,maximum);
-      normal=interior.xyz;radius=supportRadius(*body,normal);
+      normal=interior.xyz;radius=contactReach(*body,index,normal);
       penetration=radius+interior.w;
     }
     if(penetration>bestPenetration){
@@ -396,15 +456,17 @@ fn solidVoxelContact(body:ptr<function,RigidBody>){
     }
   }
   if(bestPenetration>0.0){
-    resolveStaticContact(body,bestNormal,bestPenetration,bestRadius);
+    if(rigidIsAssembly(index)){assemblyPlaneContact(body,index,bestNormal,dot(bestNormal,(*body).positionShape.xyz)-(bestRadius-bestPenetration));}
+    else{resolveStaticContact(body,bestNormal,bestPenetration,bestRadius);}
   }
 }
 `;
 
-const gpuRigidBodyShaderSource = (
+export const gpuRigidBodyShaderSource = (
   terrainContact: boolean,
   solidWorldContact?: GPURigidSolidWorldCollisionSource,
   proceduralContact?: GPURigidProceduralCollisionSource,
+  assemblySolid = rigidAssemblySolidLayout(proceduralContact, terrainContact),
 ): string => /* wgsl */ `
 ${svoPrimitiveMotionWGSL}
 struct RigidBody {
@@ -437,7 +499,6 @@ ${terrainContact ? rigidTerrainBindingWGSL : ""}
 @group(0) @binding(6) var<storage, read_write> pickResult: PickResult;
 @group(0) @binding(7) var<storage, read_write> rigidMotion: array<SvoPrimitiveMotionRecord, ${GPU_RIGID_BODY_CAPACITY}>;
 @group(0) @binding(8) var<storage, read_write> immersedVolumes: array<f32>;
-@group(0) @binding(12) var<storage, read> nativePrevious: array<RigidBody, ${GPU_RIGID_BODY_CAPACITY}>;
 ${solidWorldContact ? rigidSolidWorldBindingWGSL : ""}
 
 ${rigidMotorWGSL}
@@ -471,13 +532,14 @@ fn applyImpulse(body: ptr<function,RigidBody>, impulse: vec3f, arm: vec3f) {
   (*body).angularMomentumRestitution=vec4f((*body).angularMomentumRestitution.xyz+cross(arm,impulse),(*body).angularMomentumRestitution.w);
   (*body).angularVelocity=vec4f(inverseInertia(*body,(*body).angularMomentumRestitution.xyz),(*body).angularVelocity.w);
 }
-fn resolveStaticContact(body:ptr<function,RigidBody>,normal:vec3f,
-  penetration:f32,radius:f32){
+// arm: from the body centre to the contact point.
+fn resolveStaticContactArm(body:ptr<function,RigidBody>,normal:vec3f,
+  penetration:f32,arm:vec3f){
   let rho=max(params.step.y,1e-9);let inverseMass=(*body).inverseMassInertia.x/rho;
   if(inverseMass<=0.0||penetration<=0.0){return;}
   (*body).positionShape=vec4f((*body).positionShape.xyz
     +normal*(penetration+1e-7),(*body).positionShape.w);
-  let arm=-normal*radius;var relative=velocityAt(*body,arm);
+  var relative=velocityAt(*body,arm);
   let normalSpeed=dot(relative,normal);if(normalSpeed>=0.0){return;}
   let restitution=select(0.0,(*body).angularMomentumRestitution.w,-normalSpeed>0.5);
   let denominator=max(inverseMass+angularTerm(*body,arm,normal),1e-9);
@@ -491,14 +553,21 @@ fn resolveStaticContact(body:ptr<function,RigidBody>,normal:vec3f,
     -(*body).material.x*normalMagnitude,(*body).material.x*normalMagnitude);
   applyImpulse(body,tangent*tangentMagnitude,arm);
 }
-${solidWorldContact ? "" : rigidPlaneContactWGSL}
+fn resolveStaticContact(body:ptr<function,RigidBody>,normal:vec3f,
+  penetration:f32,radius:f32){
+  resolveStaticContactArm(body,normal,penetration,-normal*radius);
+}
+${rigidPlaneContactWGSL}
+${rigidAssemblyContactWGSL(GPU_RIGID_BODY_CAPACITY)}
+${rigidContactTableWGSL(GPU_RIGID_BODY_CAPACITY)}
 ${proceduralContact ? rigidProceduralContactWGSL(proceduralContact) : ""}
+${assemblySolid ? rigidAssemblySolidWGSL(assemblySolid, "rigidBoundary", GPU_RIGID_BODY_CAPACITY) : ""}
 fn bodyVolume(body: RigidBody) -> f32 {
   return rigidShapeVolume(rigidShapeTag(body),body.dimensions.xyz);
 }
 ${terrainContact ? rigidTerrainContactWGSL : ""}
 ${terrainContact && proceduralContact?.sculptCollision ? /* wgsl */ `
-fn editedTerrainContact(body:ptr<function,RigidBody>){
+fn editedTerrainContact(body:ptr<function,RigidBody>,index:u32){
  let world=(*body).positionShape.xyz;let terrain=terrainPlane(world);
  var normal=terrain.xyz;var distance=dot(normal,world)-terrain.w;
  let cut=collisionSculptSample(world);
@@ -507,12 +576,12 @@ fn editedTerrainContact(body:ptr<function,RigidBody>){
   normal=-cut.normal/magnitude;distance=-cut.distance/magnitude;
  }
  if(dot(normal,normal)<0.5){return;}
- let radius=supportRadius(*body,normal);resolveStaticContact(body,normal,radius-distance,radius);
+ staticSurfaceContact(body,index,normal,distance);
 }` : ""}
 ${solidWorldContact ? rigidSolidWorldContactWGSL(solidWorldContact) : ""}
 fn solveBodyPair(aIndex: u32,bIndex: u32) {
   if(motors[aIndex].pivotParent.w>.5||motors[bIndex].pivotParent.w>.5){return;}
-  var a=bodies[aIndex];var b=bodies[bIndex];let rho=max(params.step.y,1e-9);
+  var a=rigidLocal[aIndex];var b=rigidLocal[bIndex];let rho=max(params.step.y,1e-9);
   let inverseA=a.inverseMassInertia.x/rho;let inverseB=b.inverseMassInertia.x/rho;let inverseTotal=inverseA+inverseB;
   if(inverseTotal<=0.0){return;}
   let delta=b.positionShape.xyz-a.positionShape.xyz;let distance=length(delta);let normal=select(vec3f(1,0,0),delta/distance,distance>1e-8);
@@ -529,7 +598,7 @@ fn solveBodyPair(aIndex: u32,bIndex: u32) {
     relative=velocityAt(b,armB)-velocityAt(a,armA);let tangentVelocity=relative-normal*dot(relative,normal);let tangentSpeed=length(tangentVelocity);
     if(tangentSpeed>1e-8){let tangent=tangentVelocity/tangentSpeed;let friction=sqrt(max(0.0,a.material.x*b.material.x));let tangentDenominator=max(inverseTotal+angularTerm(a,armA,tangent)+angularTerm(b,armB,tangent),1e-9);let magnitude=clamp(-tangentSpeed/tangentDenominator,-friction*normalMagnitude,friction*normalMagnitude);applyImpulse(&a,-tangent*magnitude,armA);applyImpulse(&b,tangent*magnitude,armB);}
   }
-  bodies[aIndex]=a;bodies[bIndex]=b;
+  rigidLocal[aIndex]=a;rigidLocal[bIndex]=b;
 }
 fn publish(index: u32) {
   let body=bodies[index];let physicalShape=rigidShapeTag(body);let shape=select(physicalShape,-physicalShape-1,physicalShape<0);
@@ -584,65 +653,179 @@ fn pickRigidBody(@builtin(global_invocation_id) id: vec3u) {
   let body=bodies[bestIndex];
   pickResult=PickResult(bestIndex,1u,bestDistance,0.0,vec4f(body.positionShape.xyz,1),body.orientation);
 }
-@compute @workgroup_size(1)
-fn integrate(@builtin(global_invocation_id) id: vec3u) {
-  if(any(id!=vec3u(0))){return;}let count=u32(round(params.step.z));let dt=params.step.x;let rho=max(params.step.y,1e-9);let snapshots=max(params.step.w,1.0);
-  gatherMotorTraction(count);
-  var previousBodies:array<RigidBody,${GPU_RIGID_BODY_CAPACITY}>;for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){previousBodies[index]=bodies[index];}
-  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];
-    let base=index*12u;let wet=f32(atomicLoad(&exchange[base+6u]))/65536.0/snapshots;let displaced=min(max(0.0,wet*params.coupling.x),bodyVolume(body));
+// The fluid's exchange for one body with its fixtures' gathered onto it:
+// pressure impulses are measured about each paddle's own centre, so their
+// torque is translated to the assembly centre. Reads only (rigidGatherCommit
+// is the write), so every thread of rigidTables sees the same sums.
+struct RigidExchange { linear:vec3i, angular:vec3i, coupled:bool }
+fn rigidExchangeOf(index:u32,count:u32)->RigidExchange{
+  let base=index*12u;
+  var linear=vec3i(atomicLoad(&exchange[base]),atomicLoad(&exchange[base+1u]),atomicLoad(&exchange[base+2u]));
+  var angular=vec3i(atomicLoad(&exchange[base+3u]),atomicLoad(&exchange[base+4u]),atomicLoad(&exchange[base+5u]));
+  var coupled=atomicLoad(&exchange[base+10u])!=0;
+  for(var i=0u;i<count;i++){
+    let pivot=motors[i].pivotParent;if(pivot.w<.5||u32(pivot.w)-1u!=index){continue;}let a=i*12u;
+    let own=vec3i(atomicLoad(&exchange[a]),atomicLoad(&exchange[a+1u]),atomicLoad(&exchange[a+2u]));
+    let moment=cross(bodies[i].positionShape.xyz-bodies[index].positionShape.xyz,vec3f(own)*1e-6);
+    linear+=own;
+    angular+=vec3i(atomicLoad(&exchange[a+3u]),atomicLoad(&exchange[a+4u]),atomicLoad(&exchange[a+5u]))+vec3i(round(moment*1e6));
+    if(atomicLoad(&exchange[a+10u])!=0){coupled=true;}
+  }
+  return RigidExchange(linear,angular,coupled);
+}
+// The same gather written into the parent's exchange lanes, once a step, by
+// the one thread that owns the parent.
+fn rigidGatherCommit(index:u32,count:u32){
+  let gathered=rigidExchangeOf(index,count);let base=index*12u;
+  for(var axis=0u;axis<3u;axis++){atomicStore(&exchange[base+axis],gathered.linear[axis]);atomicStore(&exchange[base+3u+axis],gathered.angular[axis]);}
+  if(gathered.coupled){atomicStore(&exchange[base+10u],1);}
+}
+fn rigidDisplaced(index:u32,body:RigidBody)->f32{
+  let wet=f32(atomicLoad(&exchange[index*12u+6u]))/65536.0/max(params.step.w,1.0);
+  return min(max(0.0,wet*params.coupling.x),bodyVolume(body));
+}
+fn rigidIsDynamic(body:RigidBody)->bool{return body.material.z>0.5&&body.material.z<1.5;}
+// The body with this step's gravity, buoyancy, drag and exchanged impulses on
+// its velocities, before any contact. Pure.
+fn rigidKicked(index:u32,count:u32)->RigidBody{
+  var body=bodies[index];
+  if(!rigidIsDynamic(body)){return body;}
+  let dt=params.step.x;let rho=max(params.step.y,1e-9);let snapshots=max(params.step.w,1.0);let base=index*12u;
+  let displaced=rigidDisplaced(index,body);let gathered=rigidExchangeOf(index,count);
+  let impulse=vec3f(gathered.linear)*1e-6;
+  let angularImpulse=vec3f(gathered.angular)*1e-6;
+  let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;
+  let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;
+  let pressureCoupled=gathered.coupled;
+  let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);
+  let scaledInverseMass=body.inverseMassInertia.x;
+  let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);
+  let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);
+  let relative=body.linearVelocity.xyz-meanVelocity;
+  let speed=length(relative);
+  // Pressure traction already includes buoyancy and acceleration of the
+  // displaced water. Extra drag/added mass would change body momentum
+  // without applying the matching impulse to the fluid.
+  let drag=-.5*rho*select(params.coupling.y,0.0,pressureCoupled)*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;
+  let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);
+  let added=select(params.coupling.z*rho*displaced,0.0,pressureCoupled);
+  let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);
+  body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);
+  body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);
+  body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);
+  return body;
+}
+fn rigidIntegrated(kicked:RigidBody)->RigidBody{
+  var body=kicked;if(!rigidIsDynamic(body)){return body;}let dt=params.step.x;
+  body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);
+  let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);
+  body.orientation=normalize(body.orientation+.5*dt*derivative);
+  return body;
+}
+// Launch 1 of a step, wide: one thread a body kicks it and predicts its
+// integrated pose; one thread a (body, piece, world axis) tabulates a support;
+// one thread a (phase, assembly, other body, piece, piece, axis) tabulates a
+// separating-axis candidate of a linked pair. Reads the bodies and the
+// exchange, writes only its own rows of rigidTable (rigid-assembly-contact.ts).
+@compute @workgroup_size(${RIGID_TABLE_WORKGROUP})
+fn rigidTables(@builtin(global_invocation_id) id: vec3u) {
+  let count=u32(round(params.step.z));var t=id.x;
+  if(t<${GPU_RIGID_BODY_CAPACITY}u){
+    if(t>=count){return;}
+    let kicked=rigidKicked(t,count);let integrated=rigidIntegrated(kicked);let at=RT_BODY+10u*t;
+    rigidTable[at]=kicked.positionShape;rigidTable[at+1u]=kicked.dimensions;rigidTable[at+2u]=kicked.orientation;rigidTable[at+3u]=kicked.linearVelocity;
+    rigidTable[at+4u]=kicked.angularVelocity;rigidTable[at+5u]=kicked.inverseMassInertia;rigidTable[at+6u]=kicked.angularMomentumRestitution;rigidTable[at+7u]=kicked.material;
+    rigidTable[at+8u]=integrated.positionShape;rigidTable[at+9u]=integrated.orientation;
     // Static bodies retain the analytic authored-waterline volume uploaded by
     // syncBodies. Free, held and motor-attached poses need a recurring immersed update.
     // A held body is on the moving side of that line and not the integrating
     // one: a cup carried into the tank has to keep displacing water even while
     // the hand holding it refuses gravity.
-    if(body.material.z>0.5||motors[index].pivotParent.w>.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}}
-    if(body.material.z>0.5&&body.material.z<1.5){
-      let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;
-      let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;
-      let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;
-      let velocityWeight=f32(atomicLoad(&exchange[base+11u]))/65536.0/snapshots;
-      let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;
-      let meanVelocity=select(vec3f(0),weighted/velocityWeight,velocityWeight>1e-8);
-      let scaledInverseMass=body.inverseMassInertia.x;
-      let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);
-      let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);
-      let relative=body.linearVelocity.xyz-meanVelocity;
-      let speed=length(relative);
-      // Pressure traction already includes buoyancy and acceleration of the
-      // displaced water. Extra drag/added mass would change body momentum
-      // without applying the matching impulse to the fluid.
-      let drag=-.5*rho*select(params.coupling.y,0.0,pressureCoupled)*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;
-      let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);
-      let added=select(params.coupling.z*rho*displaced,0.0,pressureCoupled);
-      let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);
-      body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);
-      body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);
-      if(params.solidCell.w<.5){body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);}
-      body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);
-      let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);
-      if(params.solidCell.w<.5){body.orientation=normalize(body.orientation+.5*dt*derivative);}
-      bodies[index]=body;
-    }
+    if(kicked.material.z>0.5||motors[t].pivotParent.w>.5){if(t<arrayLength(&immersedVolumes)){immersedVolumes[t]=rigidDisplaced(t,kicked);}}
+    return;
   }
-  // Native motor assemblies consume the kicked velocities and own contacts/drift.
-  if(params.solidCell.w>.5){return;}
-  for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}var body=bodies[index];${solidWorldContact ? "solidVoxelContact(&body);" : "if(params.terrain.y>=0.0){planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}}"}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body);" : "let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body);" : ""}bodies[index]=body;}for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
-  // A held body is the host's to place. Whatever the contact iterations did to
-  // it — a pair impulse from a crate it was shoved into, an angular momentum it
-  // would spin off the instant it is let go — is rolled back to the pose the
-  // pointer authored. It still pushes its neighbours; nothing pushes back.
-  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}if(bodies[index].material.z>1.5){bodies[index]=previousBodies[index];}}
-  for(var index=0u;index<count;index++){attachMotor(index,params.gravity.w,dt);}
-  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
+  t-=${GPU_RIGID_BODY_CAPACITY}u;
+  if(t<${GPU_RIGID_BODY_CAPACITY}u*RT_PIECES*6u){
+    let code=t%6u;let slot=(t/6u)%RT_PIECES;let index=t/(6u*RT_PIECES);
+    if(index>=count||rigidAssemblySlot(index)<0||slot>=rigidSlotCount(index)){return;}
+    rigidTableFillSupport(rigidIntegrated(rigidKicked(index,count)),index,slot,code);
+    return;
+  }
+  t-=${GPU_RIGID_BODY_CAPACITY}u*RT_PIECES*6u;
+  let k=t%18u;t/=18u;let sy=t%RT_PIECES;t/=RT_PIECES;let sx=t%RT_PIECES;t/=RT_PIECES;let y=t%${GPU_RIGID_BODY_CAPACITY}u;t/=${GPU_RIGID_BODY_CAPACITY}u;let phase=t%2u;let slot=t/2u;
+  if(y>=count||f32(slot)>=rigidTable[0].x){return;}
+  let x=u32(rigidTable[1u+slot].x);
+  if(x==y||x>=count||motors[y].pivotParent.w>.5||sx>=rigidSlotCount(x)||sy>=rigidSlotCount(y)){return;}
+  // A pair of assemblies is tabulated once, in the rows of the lower index.
+  if(rigidAssemblySlot(y)>=0&&y<x){return;}
+  var bx=rigidKicked(x,count);var by=rigidKicked(y,count);
+  if(bx.inverseMassInertia.x+by.inverseMassInertia.x<=0.0){return;}
+  rigidAssemblyBuild(count);
+  // Twice integrate's margin: every pair it solves has its rows written.
+  if(!rigidLinked(bx,x,by,y,2.0*RIGID_PAIR_MARGIN)){return;}
+  if(phase==1u){bx=rigidIntegrated(bx);by=rigidIntegrated(by);}
+  rigidTableFillPair(bx,x,sx,by,y,sy,phase,k);
 }
+// Launch 2 of a step, one thread a body. Bodies that can touch this step
+// (rigidLinked) are solved together, and nothing else couples two bodies: the
+// free bodies with mass fall into islands, and each island is solved, in the
+// order one thread would have solved the whole roster, by the thread of its
+// lowest index. That thread owns its island's bodies and their fixtures: it
+// alone writes and publishes them. A free body without mass (static, held,
+// prescribed) is read by every island near it and written by its own thread.
 @compute @workgroup_size(1)
-fn publishNative() {
-  let count=u32(round(params.step.z));let dt=params.step.x;
-  for(var index=0u;index<count;index++){attachMotor(index,params.gravity.w,dt);}
-  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){
-    if(index<count){publish(index);publishMotion(index,nativePrevious[index],bodies[index],dt);}
-    else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}
+fn integrate(@builtin(global_invocation_id) id: vec3u) {
+  let thread=id.x;let count=u32(round(params.step.z));let dt=params.step.x;
+  if(thread>=${GPU_RIGID_BODY_CAPACITY}u){return;}
+  if(thread>=count){renderBodies[thread]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[thread]=SvoPrimitiveMotionRecord();return;}
+  if(motors[thread].pivotParent.w>.5){return;}
+  rigidLocal[thread]=rigidTableBody(thread);
+  var group=1u<<thread;var movable=0u;var links:array<u32,${GPU_RIGID_BODY_CAPACITY}>;
+  if(rigidLocal[thread].inverseMassInertia.x>0.0){
+    rigidAssemblyBuild(count);var free=0u;
+    for(var i=0u;i<${GPU_RIGID_BODY_CAPACITY}u;i++){if(i>=count){break;}if(motors[i].pivotParent.w>.5){continue;}
+      free|=1u<<i;rigidLocal[i]=rigidTableBody(i);if(rigidLocal[i].inverseMassInertia.x>0.0){movable|=1u<<i;}}
+    for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}if(((free>>a)&1u)==0u){continue;}
+      for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}if(((free>>b)&1u)==0u||(((movable>>a)|(movable>>b))&1u)==0u){continue;}
+        if(rigidLinked(rigidLocal[a],a,rigidLocal[b],b,RIGID_PAIR_MARGIN)){links[a]|=1u<<b;links[b]|=1u<<a;}}}
+    for(var round=0u;round<${GPU_RIGID_BODY_CAPACITY}u;round++){var next=group;
+      for(var j=0u;j<${GPU_RIGID_BODY_CAPACITY}u;j++){if((((group&movable)>>j)&1u)==1u){next|=links[j];}}
+      if(next==group){break;}group=next;}
+    if(firstTrailingBit(group&movable)!=thread){return;}
+    // Travel bound, on the kicked velocities: a pair that holds a motor
+    // assembly closes at most its gap this step (rigid-assembly-contact.ts).
+    for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}if(((group>>a)&1u)==0u){continue;}
+      for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}if((((group&links[a])>>b)&1u)==0u){continue;}
+        if(rigidPairUsesAssembly(a,b)){solveAssemblyPair(a,b,true,dt);}}}
+  }
+  // Integration. A body the speculative pass left alone takes the pose
+  // rigidTables predicted for it, bit for bit: the tables are keyed by it.
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}if(((group>>index)&1u)==0u){continue;}
+    var body=rigidLocal[index];if(!rigidIsDynamic(body)){continue;}let at=RT_BODY+10u*index;
+    if(all(body.linearVelocity==rigidTable[at+3u])&&all(body.angularVelocity==rigidTable[at+4u])){
+      body.positionShape=vec4f(rigidTable[at+8u].xyz,body.positionShape.w);body.orientation=rigidTable[at+9u];
+    }else{body=rigidIntegrated(body);}
+    rigidLocal[index]=body;
+  }
+  if(movable!=0u){
+  for(var iteration=0u;iteration<${RIGID_CONTACT_ITERATIONS}u;iteration++){for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}if((((group&movable)>>index)&1u)==0u){continue;}var body=rigidLocal[index];${solidWorldContact ? "solidVoxelContact(&body,index);" : `if(params.terrain.y>=0.0){${assemblySolid ? "if(rigidIsAssembly(index)){assemblyVoxelContact(&body,index);}else{" : "{"}staticPlaneContact(&body,index,vec3f(1,0,0),-.5*params.container.x);staticPlaneContact(&body,index,vec3f(-1,0,0),-.5*params.container.x);staticPlaneContact(&body,index,vec3f(0,0,1),-.5*params.container.z);staticPlaneContact(&body,index,vec3f(0,0,-1),-.5*params.container.z);staticPlaneContact(&body,index,vec3f(0,1,0),0);if(params.terrain.y>.5){staticPlaneContact(&body,index,vec3f(0,-1,0),-params.container.y);}}}`}${terrainContact ? (proceduralContact?.sculptCollision ? "editedTerrainContact(&body,index);" : "let terrain=terrainPlane(body.positionShape.xyz);staticPlaneContact(&body,index,terrain.xyz,terrain.w);") : ""}${proceduralContact ? "proceduralContact(&body,index);" : ""}rigidLocal[index]=body;}
+    for(var a=0u;a<${GPU_RIGID_BODY_CAPACITY}u;a++){if(a>=count){break;}if(((group>>a)&1u)==0u){continue;}
+      for(var b=a+1u;b<${GPU_RIGID_BODY_CAPACITY}u;b++){if(b>=count){break;}if((((group&links[a])>>b)&1u)==0u){continue;}
+        if(rigidPairUsesAssembly(a,b)){solveAssemblyPair(a,b,false,dt);}else{solveBodyPair(a,b);}}}}
+  }
+  // Contacts move only the movable: a neighbour without mass (a held body is
+  // the host's to place) is not written here, whatever a pair did to its copy.
+  let owned=select(1u<<thread,group&movable,movable!=0u);
+  for(var index=0u;index<${GPU_RIGID_BODY_CAPACITY}u;index++){if(index>=count){break;}if(((owned>>index)&1u)==0u){continue;}
+    rigidGatherCommit(index,count);
+    let previous=bodies[index];bodies[index]=rigidLocal[index];
+    publish(index);publishMotion(index,previous,rigidLocal[index],dt);
+    for(var fixture=0u;fixture<${GPU_RIGID_BODY_CAPACITY}u;fixture++){if(fixture>=count){break;}
+      let pivot=motors[fixture].pivotParent;if(pivot.w<.5||u32(pivot.w)-1u!=index){continue;}
+      let before=bodies[fixture];bodies[fixture]=rigidTableBody(fixture);
+      attachMotor(fixture,params.gravity.w,dt);
+      publish(fixture);publishMotion(fixture,before,bodies[fixture],dt);
+    }
   }
 }
 `;
@@ -652,8 +835,9 @@ export const gpuRigidBodyShader = gpuRigidBodyShaderSource(true);
 
 
 
-/** Resident rigid state. Motor assemblies finish each pressure kick through
- * Box3D before publishing their corrected poses; other bodies integrate on GPU. */
+/** Resident rigid state, integrated and contacted on the GPU in one pass a
+ * step. Motor assemblies (a hull and its wheel fixtures) contact through
+ * their compound support (rigid-assembly-contact.ts); nothing is read back. */
 export class WebGPURigidBodySystem {
   readonly stateBuffer: GPUBuffer;
   readonly renderBuffer: GPUBuffer;
@@ -666,24 +850,19 @@ export class WebGPURigidBodySystem {
   private readonly renderScratch: GPUBuffer;
   private readonly motionScratch: GPUBuffer;
   private readonly motorBuffer: GPUBuffer;
+  /** The contact tables (`rigidContactTableLayout`): the host's header, then what `rigidTables` fills each step. */
+  private readonly tableBuffer: GPUBuffer;
+  private tablesPipeline!: GPUComputePipeline;
+  private tablesBindGroup!: GPUBindGroup;
+  /** Motor assemblies in the roster: what sizes the `rigidTables` launch. */
+  private assemblyCount = 0;
   private motorTime_s = 0;
   private motorStrengths: number[] = [];
   private motorDrives = new Map<string, RigidMotorDrive>();
   private selectionOwners: number[] = [];
   private readonly paramsBuffer: GPUBuffer;
   private pipeline!: GPUComputePipeline;
-  private nativePipeline!: GPUComputePipeline;
-  private nativeBindings!: GPUBindGroup;
-  private nativeContacts?: Box3DMotorContacts;
-  private nativeDescriptions: RigidBodyDescription[] = [];
-  private nativeSignature = '';
-  private nativeScene?: SceneDescription;
-  /** The native step `encode` owes `finishNativeStep`; concurrent finishers share its one completion. */
-  private nativeStep?: { readonly dt_s: number; finishing?: Promise<boolean> };
   private disposed = false;
-  /** Opt in only where the caller completes the native step before advancing. */
-  enableNativeMotorContacts = false;
-  get nativeMotorContacts(): boolean { return this.enableNativeMotorContacts && this.nativeDescriptions.some(b => b.motorAttachment); }
 
   private bindGroup!: GPUBindGroup;
   private pickPipeline!: GPUComputePipeline;
@@ -728,6 +907,8 @@ export class WebGPURigidBodySystem {
     this.renderScratch = device.createBuffer({ label: "GPU rigid render roster scratch", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionScratch = device.createBuffer({ label: "GPU rigid motion roster scratch", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motorBuffer = device.createBuffer({label:"Rigid motor attachments and skins",size:GPU_RIGID_BODY_CAPACITY*RIGID_MOTOR_FLOATS*4,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+    this.tableBuffer = device.createBuffer({ label: "GPU rigid-body contact tables", size: 16 * rigidContactTableLayout(GPU_RIGID_BODY_CAPACITY).rows, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(this.tableBuffer, 0, rigidContactTableHeader(new Float32Array(0), 0, GPU_RIGID_BODY_CAPACITY));
     this.paramsBuffer = device.createBuffer({ label: "GPU rigid-body step parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickParamsBuffer = device.createBuffer({ label: "GPU rigid-body pick ray", size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pickResultBuffer = device.createBuffer({ label: "GPU rigid-body pick result", size: GPU_RIGID_PICK_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -736,7 +917,7 @@ export class WebGPURigidBodySystem {
   /** Adopt authored scene scalars and roster metadata without replacing GPU state. */
   setScene(scene: SceneDescription): void { this.scene = scene; }
 
-  private descriptor(entryPoint: "integrate" | "pickRigidBody" | "publishNative"): GPUComputePipelineDescriptor {
+  private descriptor(entryPoint: "integrate" | "rigidTables" | "pickRigidBody"): GPUComputePipelineDescriptor {
     if (!this.terrainTexture && !this.solidWorldCollisionSource) {
       throw new Error("Rigid-body static contact requires terrain or SolidWorld occupancy");
     }
@@ -759,8 +940,8 @@ export class WebGPURigidBodySystem {
       { binding: 2, resource: { buffer: this.renderBuffer } },
       { binding: 3, resource: { buffer: this.paramsBuffer } },
       { binding: 7, resource: { buffer: this.motionBuffer } },
-      { binding: 8, resource: { buffer: this.immersedVolumeBuffer } },
       { binding: 11, resource: { buffer: this.motorBuffer } },
+      { binding: 12, resource: { buffer: this.tableBuffer } },
     ];
     if (this.terrainTexture) entries.push({ binding: 4,
       resource: this.terrainTexture.createView() });
@@ -771,6 +952,15 @@ export class WebGPURigidBodySystem {
 
   private createIntegrationBindings(): void {
     this.bindGroup = this.integrationBindings(this.pipeline);
+    // rigidTables reads the bodies, the exchange and the motors, and writes the tables and the immersed volumes.
+    this.tablesBindGroup = this.device.createBindGroup({ layout: this.tablesPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.stateBuffer } },
+      { binding: 1, resource: { buffer: this.exchangeBuffer } },
+      { binding: 3, resource: { buffer: this.paramsBuffer } },
+      { binding: 8, resource: { buffer: this.immersedVolumeBuffer } },
+      { binding: 11, resource: { buffer: this.motorBuffer } },
+      { binding: 12, resource: { buffer: this.tableBuffer } },
+    ] });
   }
 
   /**
@@ -862,23 +1052,17 @@ export class WebGPURigidBodySystem {
    * had to force a rebuild, so removing it is what actually makes
    * `adoptsRigidRosterShape` true rather than merely declared.
    *
-   * The cost is three small pipelines from one module for a scene that never
+   * The cost is two small pipelines from one module for a scene that never
    * gains a body, next to the several hundred a solver already compiles.
    */
   initializationTasks(): GPUInitializationTask[] {
     if (!this.pipelinesDeferred) return [];
     return [
-      { id: "rigid.pipeline.native", phase: "solver-pipelines", label: "Compile native rigid publication",
-        run: async () => {
-          this.nativePipeline = await this.device.createComputePipelineAsync(this.descriptor("publishNative"));
-          this.nativeBindings = this.device.createBindGroup({ layout: this.nativePipeline.getBindGroupLayout(0), entries:
-            [[0,this.stateBuffer],[2,this.renderBuffer],[3,this.paramsBuffer],[7,this.motionBuffer],[11,this.motorBuffer],[12,this.stateScratch]].map(([binding, buffer]) =>
-              ({ binding: binding as number, resource: { buffer: buffer as GPUBuffer } })) });
-        } },
       { id: "rigid.pipeline.integrate", phase: "solver-pipelines",
         label: "Compile rigid-body integration",
-        run: async () => { this.pipeline = await this.device.createComputePipelineAsync(
-          this.descriptor("integrate")); this.createIntegrationBindings(); } },
+        run: async () => { [this.pipeline, this.tablesPipeline] = await Promise.all([
+          this.device.createComputePipelineAsync(this.descriptor("integrate")),
+          this.device.createComputePipelineAsync(this.descriptor("rigidTables"))]); this.createIntegrationBindings(); } },
       { id: "rigid.pipeline.pick", phase: "solver-pipelines", label: "Compile rigid-body picking",
         run: async () => { this.pickPipeline = await this.device.createComputePipelineAsync(
           this.descriptor("pickRigidBody")); this.createPickBindings(); } },
@@ -886,7 +1070,6 @@ export class WebGPURigidBodySystem {
   }
 
   syncBodies(bodies: readonly RigidBodyState[]) {
-    if (this.enableNativeMotorContacts) this.nativeDescriptions = bodies.slice(0, GPU_RIGID_BODY_CAPACITY).map(b => b.description);
     // No body held and none given: the signatures are empty on both sides, so
     // a scene without bodies builds none of them each step. The upload is its
     // own function: its closures would cost this one a context on every call.
@@ -909,17 +1092,18 @@ export class WebGPURigidBodySystem {
     this.motorStrengths = strengths;
     this.selectionOwners = active.map(body => ids.indexOf(rigidControlOwnerId(body.description)));
     const nextDrives = new Map<string, RigidMotorDrive>();
-    const motorData = new Float32Array(GPU_RIGID_BODY_CAPACITY*RIGID_MOTOR_FLOATS);
-    active.forEach((body,index) => {
-      const m=body.description.motorAttachment, at=index*RIGID_MOTOR_FLOATS, skin=rigidAppearanceSkin(body.description);
-      if(m){const parent=ids.indexOf(m.parentId);if(parent<0)throw new Error(`Missing motor parent ${m.parentId}`);
-        const drive = updateRigidMotorDrive(m, strengths[index]!, this.motorTime_s, this.motorDrives.get(body.description.id));
-        nextDrives.set(body.description.id, drive);
-        motorData.set([m.pivot_m.x,m.pivot_m.y,m.pivot_m.z,parent+1,m.offset_m.x,m.offset_m.y,m.offset_m.z,m.phase_rad + drive.phaseOffset_rad,
-          m.axis.x,m.axis.y,m.axis.z,m.angularSpeed_rad_s * drive.strength,m.orientation.w,m.orientation.x,m.orientation.y,m.orientation.z,m.startTime_s,m.rampUp_s,0,0],at);}
-      if(skin)motorData.set([...skin.half,skin.shape],at+20);
+    const drives = active.map((body, index) => {
+      const m = body.description.motorAttachment;
+      if (!m) return undefined;
+      const drive = updateRigidMotorDrive(m, strengths[index]!, this.motorTime_s, this.motorDrives.get(body.description.id));
+      nextDrives.set(body.description.id, drive);
+      return drive;
     });
-    this.device.queue.writeBuffer(this.motorBuffer,0,motorData);
+    const motorRecords = rigidMotorRecords(active.map(body => body.description), drives);
+    this.device.queue.writeBuffer(this.motorBuffer,0,motorRecords);
+    const tableHeader = rigidContactTableHeader(motorRecords, active.length, GPU_RIGID_BODY_CAPACITY);
+    this.device.queue.writeBuffer(this.tableBuffer,0,tableHeader);
+    this.assemblyCount = tableHeader[0]!;
     this.motorDrives = nextDrives;
     // A drive command touches neither body poses nor momentum, even when paused.
     if (sameBodies) return;
@@ -948,24 +1132,9 @@ export class WebGPURigidBodySystem {
     active.forEach((body, index) => {
       const o = index * GPU_RIGID_STATE_FLOATS, d = body.description.dimensions_m, q = body.orientation, shape = sceneShapeCode(body.description.shape);
       const rho = this.scene.fluid.density_kg_m3;
-      // Same reason as the palette: this was a hand-rolled ternary chain that
-      // fell through to the capsule's radius for anything it did not name, so a
-      // cup was packed with a bounding sphere it does not have.
-      const radius = boundingRadius(body.description);
       // The render-only selection lane uses -1 for invisible collision bodies.
       const selection = body.description.renderHidden ? -1 : this.selectionOwners[index] === this.selectedIndex ? 1 : 0;
-      // A held body is immovable rather than weightless: zero inverse mass and
-      // inertia is what makes `planeContact` return early and `applyImpulse` a
-      // no-op, so a wall or a neighbouring crate cannot push the thing in the
-      // user's hand. Gravity is refused separately, by the motion lane below.
-      const inverseMass = body.held ? 0 : body.inverseMass_kg * rho;
-      const inverseInertia = body.held
-        ? { x: 0, y: 0, z: 0 }
-        : { x: body.inverseInertiaBody_kg_m2.x*rho, y: body.inverseInertiaBody_kg_m2.y*rho, z: body.inverseInertiaBody_kg_m2.z*rho };
-      // Negative shape codes are fluid-only interior boundaries. Native Box3D
-      // owns their integration; presentation keeps the ordinary shape code.
-      const fluidShape = body.description.fluidBoundary === "interior" ? -shape-1 : shape;
-      state.set([body.position_m.x,body.position_m.y,body.position_m.z,fluidShape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,inverseMass,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,inverseMass,inverseInertia.x,inverseInertia.y,inverseInertia.z,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,rigidMotionLane(body),selection],o);
+      state.set(rigidStateRecord(body, rho, selection),o);
       stateWords[o+29]=nextMotionGenerations[index];
       const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
       const skin=rigidAppearanceSkin(body.description), renderHalf=skin?.half??half;
@@ -1070,61 +1239,15 @@ export class WebGPURigidBodySystem {
   }
 
   encode(encoder: GPUCommandEncoder, dt_s: number, cellVolume_m3: number, snapshotCount = 1, cellHeight_m = 1) {
-    if (this.nativeStep) throw new Error("Finish the native rigid step before encoding another");
-    if (this.nativeMotorContacts) {
-      this.nativeStep = { dt_s };
-      encoder.copyBufferToBuffer(this.stateBuffer, 0, this.stateScratch, 0, GPU_RIGID_STATE_BYTES);
-    }
     this.motorTime_s += dt_s;
     const c=this.scene.container,g=this.scene.fluid.gravity_m_s2;
     const solid=this.solidWorldCollisionSource;
-    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.boundary === "free-space"?-1:c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),this.nativeMotorContacts?1:0]));
-    const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
+    this.device.queue.writeBuffer(this.paramsBuffer,0,new Float32Array([dt_s,this.scene.fluid.density_kg_m3,this.bodyCount,Math.max(1,snapshotCount),g.x,g.y,g.z,this.motorTime_s,c.width_m,c.height_m,c.depth_m,this.terrainTexture&&sceneHasTerrain(this.scene)?1:0,cellHeight_m,c.boundary === "free-space"?-1:c.top === "closed"?1:0,this.terrainColumns?.[0]??this.terrainTexture?.width??1,this.terrainColumns?.[1]??this.terrainTexture?.height??1,cellVolume_m3,.9,.5,Math.max(cellHeight_m,1e-6),...(solid?.origin_m??[0,0,0]),solid?1:0,...(solid?.cellSize_m??[1,1,1]),0]));
+    // Two launches (gpuRigidBodyShaderSource): the tables, wide, then one thread a body.
+    const tables=encoder.beginComputePass({label:"GPU resident rigid-body contact tables"});tables.setPipeline(this.tablesPipeline);tables.setBindGroup(0,this.tablesBindGroup);
+    tables.dispatchWorkgroups(Math.ceil(rigidContactTableThreads(GPU_RIGID_BODY_CAPACITY,this.assemblyCount)/RIGID_TABLE_WORKGROUP));tables.end();
+    const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(GPU_RIGID_BODY_CAPACITY);pass.end();
   }
 
-  /** The readback is bounded to 3 KiB. Keep presentation and the next fluid
-   * step behind the returned publication; they must see contacts and motors together. */
-  finishNativeStep(): Promise<boolean> {
-    const step = this.nativeStep;
-    if (!step || this.disposed) return Promise.resolve(false);
-    return step.finishing ??= this.runNativeStep(step.dt_s).finally(() => { this.nativeStep = undefined; });
-  }
-
-  private async runNativeStep(dt: number): Promise<boolean> {
-    const readback = this.device.createBuffer({ label: "Native rigid velocity handoff", size: GPU_RIGID_STATE_BYTES,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    try {
-      const encoder = this.device.createCommandEncoder();
-      encoder.copyBufferToBuffer(this.stateBuffer, 0, readback, 0, GPU_RIGID_STATE_BYTES);
-      this.device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(GPUMapMode.READ);
-      const values = new Float32Array(readback.getMappedRange().slice(0)); readback.unmap();
-      if (this.disposed) return false;
-      const signature = JSON.stringify(this.nativeDescriptions.map(b => [b.id,b.shape,b.dimensions_m,b.density_kg_m3,b.friction,b.restitution,b.appearance,b.motorAttachment]));
-      if (!this.nativeContacts || this.nativeSignature !== signature) {
-        const next = await Box3DMotorContacts.create(this.scene, this.nativeDescriptions);
-        if (this.disposed) { next.destroy(); return false; }
-        this.nativeContacts?.destroy(); this.nativeContacts = next;
-        this.nativeSignature = signature; this.nativeScene = this.scene;
-      } else if (this.nativeScene !== this.scene) {
-        this.nativeContacts.updateSolids(this.scene); this.nativeScene = this.scene;
-      }
-      this.nativeContacts.step(values, this.nativeDescriptions, dt);
-      // Selection can change while the readback is outstanding. Preserve the
-      // material/command lanes and let attachMotor publish every fixture.
-      for (let i = 0; i < this.nativeDescriptions.length; i++) {
-        if (this.nativeDescriptions[i].motorAttachment || values[i*GPU_RIGID_STATE_FLOATS+30] !== 1) continue;
-        this.device.queue.writeBuffer(this.stateBuffer, i*GPU_RIGID_STATE_FLOATS*4,
-          values, i*GPU_RIGID_STATE_FLOATS, 28);
-      }
-      const publish = this.device.createCommandEncoder({ label: "Publish native boat contacts and wheel poses" });
-      const pass = publish.beginComputePass(); pass.setPipeline(this.nativePipeline); pass.setBindGroup(0,this.nativeBindings);
-      pass.dispatchWorkgroups(1); pass.end(); this.device.queue.submit([publish.finish()]);
-      return true;
-    } finally {
-      if (readback.mapState === "mapped") readback.unmap(); readback.destroy();
-    }
-  }
-
-  destroy() { this.disposed = true; this.nativeContacts?.destroy(); this.motorBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
+  destroy() { this.disposed = true; this.motorBuffer.destroy();this.tableBuffer.destroy();this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
 }

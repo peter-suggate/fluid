@@ -1,5 +1,5 @@
 /** Native renderer + solver cadence probe. The offscreen target replaces only
- * the browser swap chain; drawWithDeferredPresentation and the 60 Hz,
+ * the browser swap chain; draw and the 60 Hz,
  * latest-wins worker request loop are the production path.
  * node --import tsx tools/probe-nbflip-presentation.ts /tmp/pour.json
  * This measures submissions/completions, not compositor/display timestamps.
@@ -76,7 +76,7 @@ try {
         const at = performance.now() - started;
         const before = internals.gpuFluid!.info.submittedTime_s ?? 0;
         // PaneClockHost supplies whole fixed steps, never the raw wall clock.
-        const pending = renderer.drawWithDeferredPresentation(args(Math.min(steps, Math.floor(at / (1000 * dt))) * dt));
+        const pending = Promise.resolve(renderer.draw(...args(Math.min(steps, Math.floor(at / (1000 * dt))) * dt)));
         const encode = performance.now() - started - at;
         const metrics = await pending;
         rows.push({ at, encode, elapsed: performance.now() - started - at, before,

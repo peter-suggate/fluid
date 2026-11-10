@@ -2,8 +2,14 @@
  * the UI. No method, scene, time-step, or quality overrides are accepted.
  * node --import tsx tools/benchmark-nbflip-ui.ts NAME [--steps=120]
  *   [--scene=nbflip-figure-9-teaser] [--profile] [--dispatch-probe]
- *   [--heap] [--cpu] [--unpaced] [--memory]
+ *   [--heap] [--cpu] [--unpaced] [--memory] [--dispatches]
  *   [--dispatch-labels="Pass label|Other pass"] (with --dispatch-probe)
+ * Per frame (Phase 0): encode_ms is host encode, wall_ms encode through
+ * completion, fineTiles/coarseTiles the h and 4h tiles, particles the NB-FLIP
+ * particles; --dispatches adds the frame's compute launches (direct and
+ * indirect, counted at the device boundary) and --profile solverGpu_ms (the
+ * sum of the frame's pass timestamps). Render time and rAF period have no
+ * headless equivalent: this harness has no renderer.
  * Plain wall time includes encoding, submissions and completion receipts;
  * excludes construction, renderer and diagnostic timestamp readback.
  * The summary reports the measured window's collections (count and pause
@@ -32,12 +38,13 @@ import type { WebGPUUniformReferenceSolver } from "../lib/methods/uniform/webgpu
 import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { GPUPassProfile } from "./gpu-pass-profile";
 import { NarrowBandDispatchProbe } from "./narrow-band-dispatch-probe";
+import { gpuDispatchCounter, type GPUDispatchCounter } from "./gpu-dispatch-counter";
 
 const option = (key: string) => process.argv.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const name = process.argv[2] ?? "current";
 assert.match(name, /^[a-z0-9-]+$/);
 for (const argument of process.argv.slice(3)) {
-  assert.ok(/^(--(?:steps|from|scene|out|dispatch-labels)=.+|--profile|--dispatch-probe|--heap|--cpu|--unpaced|--memory)$/.test(argument), `Unknown option: ${argument}`);
+  assert.ok(/^(--(?:steps|from|scene|out|dispatch-labels)=.+|--profile|--dispatch-probe|--heap|--cpu|--unpaced|--memory|--dispatches)$/.test(argument), `Unknown option: ${argument}`);
 }
 const steps = Number(option("steps") ?? 120), from = Number(option("from") ?? 13);
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(from) && from > 0 && from <= steps);
@@ -79,6 +86,7 @@ const metadata = { paced, date: new Date().toISOString(), arguments: process.arg
   scope: "simulation advance and completion; excludes renderer and construction", profiled, split };
 let memory: GPUMemoryProfile | undefined;
 let device: GPUDevice | undefined, profile: GPUPassProfile | undefined, solver: WebGPUUniformReferenceSolver | undefined;
+let dispatchCounter: GPUDispatchCounter | undefined;
 const errors: string[] = [], rows: Record<string, unknown>[] = [];
 let activeFrame=0,activePhase="construction";
 try {
@@ -92,7 +100,9 @@ try {
   if (profiled) profile = new GPUPassProfile(raw);
   const probe = split ? new NarrowBandDispatchProbe(profile!.device,dispatchLabels?new Set(dispatchLabels):undefined) : undefined;
   if (process.argv.includes("--memory")) memory = new GPUMemoryProfile(probe?.device ?? profile?.device ?? raw);
-  device = managedGPUDevice(memory?.device ?? probe?.device ?? profile?.device ?? raw, { requireWorkerRealm: false });
+  const base = memory?.device ?? probe?.device ?? profile?.device ?? raw;
+  dispatchCounter = process.argv.includes("--dispatches") ? gpuDispatchCounter(base) : undefined;
+  device = managedGPUDevice(dispatchCounter?.device ?? base, { requireWorkerRealm: false });
   device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); });
   const start = performance.now();
   solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {}) as WebGPUUniformReferenceSolver;
@@ -107,10 +117,14 @@ try {
     if (frame === from && heap) await inspect("HeapProfiler.startSampling", { samplingInterval: 4096, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
     if (frame === from && cpu) { await inspect("Profiler.enable"); await inspect("Profiler.start"); }
     if (frame >= from) measuring = frame;
+    if (dispatchCounter) { dispatchCounter.take(); dispatchCounter.enabled = true; }
     const start = performance.now();
     assert.ok(solver.advanceTo(frame * dt, []));
     const encode_ms = performance.now() - start;
     activePhase="completion";await solver.awaitFrameCompletion();
+    // A frame's launches: the advance and anything its completion encodes.
+    const launches = dispatchCounter ? Object.values(dispatchCounter.take()) : undefined;
+    if (dispatchCounter) dispatchCounter.enabled = false;
     const wall_ms = performance.now() - start;
     assert.equal(solver.info.simulationPipelineError, undefined);
     assert.ok(Math.abs((solver.info.completedTime_s ?? 0) - frame * dt) < 1e-8);
@@ -119,7 +133,10 @@ try {
     const published = solver.info as typeof solver.info & Record<string, unknown>;
     const row = { allocatedBytes: memory?.allocatedBytes, frame, time: frame * dt, wall_ms, encode_ms, ...solver.narrowBandFlipInfo, ...solver.workDomainInfo,
       residentPages: solver.pagePoolInfo?.residentPages, claimedPages: solver.pagePoolInfo?.claimedPages, retiredPages: solver.pagePoolInfo?.retiredPages,
-      fineTiles: solver.workDomainInfo?.fineTiles ?? solver.info.uniformMixedFineTiles, fineCapacity: solver.info.uniformMixedFineCapacity,
+      fineTiles: solver.workDomainInfo?.fineTiles ?? solver.info.uniformMixedFineTiles, coarseTiles: solver.workDomainInfo?.coarseTiles ?? solver.info.uniformMixedCoarseTiles,
+      fineCapacity: solver.info.uniformMixedFineCapacity,
+      dispatches: launches && { direct: launches.reduce((n, c) => n + c.direct, 0), indirect: launches.reduce((n, c) => n + c.indirect, 0) },
+      solverGpu_ms: passes?.reduce((n, p) => n + p.ms, 0),
       changedTiles: published.uniformMixedDynamicChangedTiles, refined: published.uniformMixedDynamicRefined, coarsened: published.uniformMixedDynamicCoarsened,
       bandTiles: solver.info.uniformPressureBandTiles,
       bandCycles: solver.info.uniformPressureBandCycles, bandResidual: solver.info.uniformPressureBandResidual, passes };

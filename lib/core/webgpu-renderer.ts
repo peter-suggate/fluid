@@ -119,6 +119,7 @@ import {
   GPUQueueWallPerformanceTraceRecorder,
   type PerformanceTrace,
 } from "./performance-trace";
+import { setFrameDispatchCounting, takeFrameDispatches, type FrameDispatchCount } from "./frame-instrumentation";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import {
   RENDER_FRAME_STAGE_PLUGINS,
@@ -200,12 +201,6 @@ export function submitNextPreparedGPUAdvance(fluid: GPUSolverInstance, time_s: n
     || (fluid.awaitFrameCompletion && !fluid.framePending)) fluid.advanceTo(time_s, bodies);
   const submittedTime = fluid.info.submittedTime_s ?? previousSubmittedTime;
   return { previousSubmittedTime, submittedTime };
-}
-
-/** A deferred-publication solver gets one presentation before another advance. */
-export function completedFrameAwaitsPresentation(fluid: Pick<GPUSolverInstance, "deferredFramePublication" | "info"> | undefined,
-  lastPresentedTime_s: number): boolean {
-  return Boolean(fluid?.deferredFramePublication && (fluid.info.completedTime_s ?? 0) > lastPresentedTime_s);
 }
 
 /** Bound physics queue depth to the fixed throughput window. */
@@ -741,6 +736,8 @@ export interface RendererFrameMetrics {
   presentationSubmitted: boolean;
   /** Latest presentation evidence; independent of solver publication authority. */
   waterSurfacePresentation?: WaterSurfacePresentationDiagnostics;
+  /** Compute launches encoded in this realm since the previous frame; only while instrumentation is enabled. */
+  dispatches?: FrameDispatchCount;
 }
 
 /**
@@ -948,7 +945,6 @@ export class FluidLabRenderer {
   private pressureSamplesFallbackTexture?: GPUTexture;
   private scalarFallbackTexture?: GPUTexture;
   private gpuFluid?: GPUSolverInstance;
-  private readonly deferredPresentedTimes = new WeakMap<GPUSolverInstance, number>();
   /** Newest submitted solver time each solver's last presentation carried. */
   private readonly presentedStateTimes = new WeakMap<GPUSolverInstance, number>();
   /** Renderer-owned sparse source for fluid methods that do not publish one. */
@@ -1997,6 +1993,7 @@ export class FluidLabRenderer {
       context,
       methodId,
       presentationSubmitted,
+      dispatches: instrumentation.enabled ? takeFrameDispatches() : undefined,
       ...(water ? { waterSurfacePresentation: {
         surfaceGeometrySource: water.surfaceGeometrySource,
         sourceFrameCounts: water.sourceFrameCounts,
@@ -2712,33 +2709,6 @@ export class FluidLabRenderer {
   /** Frames whose presentation submission has actually finished on the GPU. */
   get completedPresentationCount(): number { return this.completedPresentations; }
 
-  /** Keep a split pressure advance and its presentation in one worker request.
-   * The accepted pressure receipt resumes this request immediately; waiting for
-   * another animation frame leaves the GPU idle between simulation and rendering.
-   * Scene replacement may arrive while the receipt is outstanding, so the worker
-   * also supplies its retained-document validity check.
-   */
-  async drawWithDeferredPresentation(
-    args: Parameters<FluidLabRenderer["draw"]>,
-    isCurrent: () => boolean = () => true,
-  ): Promise<RendererFrameMetrics> {
-    const metrics = this.draw(...args);
-    const solver = this.gpuFluid;
-    if (metrics.presentationSubmitted || !solver?.deferredFramePublication
-      || !solver.framePending || !solver.awaitFrameCompletion) return metrics;
-    const generation = this.gpuFluidGeneration;
-    try {
-      await solver.awaitFrameCompletion();
-    } catch (error) {
-      if (!this.lifecycle.open || this.gpuFluid !== solver || this.gpuFluidGeneration !== generation || !isCurrent()) return metrics;
-      throw error;
-    }
-    if (!this.lifecycle.open
-      || this.gpuFluid !== solver || this.gpuFluidGeneration !== generation || !isCurrent()
-      || !completedFrameAwaitsPresentation(solver, this.deferredPresentedTimes.get(solver) ?? 0)) return metrics;
-    return this.draw(...args);
-  }
-
   /** The described object the cursor is over, or undefined to clear the rim. */
   setHoverHighlight(range: { readonly first: number; readonly last: number } | undefined): void {
     if (range?.first === this.hoverHighlight?.first && range?.last === this.hoverHighlight?.last) return;
@@ -2763,6 +2733,8 @@ export class FluidLabRenderer {
     } else if (!composesLayers && gridOverlay?.layers) gridOverlay = { ...gridOverlay, layers: undefined };
 
     const measurementInstrumentationEnabled = usePerformanceInstrumentationStore.getState().enabled;
+    // Patches the compute pass encoder only while measuring; off restores the platform's methods.
+    setFrameDispatchCounting(measurementInstrumentationEnabled);
     const cpuTrace = measurementInstrumentationEnabled
       ? new CPUPerformanceTrace(
         ++this.cpuTraceSampleId,
@@ -2945,9 +2917,7 @@ export class FluidLabRenderer {
     // the one thing that can make a split-submission solver's frame pending
     // between the draw's entry gate above and the presentation below.
     const accountedSubmittedTime_s = this.gpuAccountedSubmittedTime_s;
-    const completedAwaitingPresentation = completedFrameAwaitsPresentation(readyGPUFluid,
-      readyGPUFluid ? this.deferredPresentedTimes.get(readyGPUFluid) ?? 0 : 0);
-    if (readyGPUFluid && !completedAwaitingPresentation) {
+    if (readyGPUFluid) {
       gpuInfo = this.submitPreparedGPUFluid(
         readyGPUFluid, time_s, bodies,
         this.simulationRunning ? config.inFlightDepth ?? BROWSER_GPU_THROUGHPUT_DEPTH : 1,
@@ -3490,11 +3460,6 @@ export class FluidLabRenderer {
     this.device.queue.submit([presentationCommands]);
     this.particleSurfacePipeline?.pumpStats();
     if (readyGPUFluid) this.presentedStateTimes.set(readyGPUFluid, readyGPUFluid.info.submittedTime_s ?? 0);
-    if (readyGPUFluid?.deferredFramePublication) {
-      // The image carries the newest submitted state, not the newest receipt.
-      this.deferredPresentedTimes.set(readyGPUFluid, Math.max(readyGPUFluid.info.completedTime_s ?? 0,
-        readyGPUFluid.info.submittedTime_s ?? 0));
-    }
     const presentationHealth = readPresentationHealth?.();
     // Mapping can overlap completion. Always drain the receipt, even if a
     // solver rebuild makes the presentation callback below obsolete.

@@ -241,12 +241,9 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       usePerformanceInstrumentationStore.getState().setMode(message.instrumentationMode);
       runtime.setViewportSize(message.viewport.width, message.viewport.height, message.viewport.devicePixelRatio);
       const [time_s, ...args] = message.args;
-      const metrics = await runtime.drawWithDeferredPresentation(
-        [time_s, renderScene.document, ...args],
-        () => renderer === runtime && renderScene?.revision === message.sceneRevision,
-      );
-      // A scene edit can be accepted while the pressure receipt is pending.
-      // The next queued request owns that document; this one only retires.
+      const metrics = runtime.draw(time_s, renderScene.document, ...args);
+      // A scene edit accepted meanwhile owns the next queued request; this
+      // one only retires.
       if (renderer !== runtime || !renderScene || renderScene.revision !== message.sceneRevision) return metrics;
       const catalog = cachedEnvironmentProxyCatalog(renderScene.document);
       const assetFields = catalog && needsSceneryCatalog

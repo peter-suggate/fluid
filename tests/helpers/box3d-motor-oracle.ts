@@ -1,11 +1,11 @@
-import asset from '../../../core/imported-assets/paddleboats.generated.json';
-import type { RigidBodyDescription, SceneDescription, Vec3 } from '../../../core/model';
-import { add, cross, dot, normalize, scale } from '../../../core/math';
-import { boundingRadius, massProperties, quaternionInverseRotate, quaternionRotate } from '../../../core/rigid-body';
-import { rigidAppearanceSkin } from '../../../core/rigid-appearance';
-import { sceneShapeRenderHalfExtent_m } from '../../../core/scene-shape';
-import { Box3DWorld } from './world';
-import { GPU_RIGID_BODY_CAPACITY } from '../../../core/rigid-capacity';
+import asset from '../../lib/core/imported-assets/paddleboats.generated.json';
+import type { RigidBodyDescription, SceneDescription, Vec3 } from '../../lib/core/model';
+import { add, cross, dot, normalize, scale } from '../../lib/core/math';
+import { boundingRadius, massProperties, quaternionInverseRotate, quaternionRotate } from '../../lib/core/rigid-body';
+import { rigidAppearanceSkin } from '../../lib/core/rigid-appearance';
+import { sceneShapeRenderHalfExtent_m } from '../../lib/core/scene-shape';
+import { Box3DWorld } from '../../lib/interaction/adapters/box3d/world';
+import { GPU_RIGID_BODY_CAPACITY } from '../../lib/core/rigid-capacity';
 
 const corners = (lo: readonly number[], hi: readonly number[]): Vec3[] =>
   Array.from({ length: 8 }, (_, i) => ({ x: (i & 1 ? hi : lo)[0], y: (i & 2 ? hi : lo)[1], z: (i & 4 ? hi : lo)[2] }));
@@ -29,9 +29,13 @@ export function motorContactEnvelope(body: RigidBodyDescription): Vec3[] {
     add(m.pivot_m, add(scale(axis, z), add(scale(u, r * Math.cos(i * 2 * Math.PI / n)), scale(v, r * Math.sin(i * 2 * Math.PI / n)))))));
 }
 
-/** GPU pressure/gravity kick, then native CCD/contact/drift, then GPU motor
- * publication. The core collider alone carries mass and inertia; decorative
- * hull and swept wheel envelopes carry none and displace no extra water. */
+/** TEST ORACLE ONLY. The CPU Box3D motor-assembly contact solve that the
+ * paddleboats scene used to run after a per-step pose readback; production
+ * now resolves the same contacts inside the GPU rigid kernel
+ * (lib/core/rigid-assembly-contact.ts). Kept here so the kernel's mirror can
+ * be compared against an independent rigid-body engine. Native CCD/contact/
+ * drift with substeps bounded by travel; the core collider alone carries mass
+ * and inertia, the hull and swept wheel envelopes carry none. */
 export class Box3DMotorContacts {
   private types = new Map<string, string>();
   private constructor(private readonly world: Box3DWorld) {}

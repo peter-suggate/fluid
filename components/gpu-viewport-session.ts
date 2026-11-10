@@ -1,4 +1,6 @@
 import { createBrowserFrameBenchmark } from "../lib/core/browser-frame-benchmark";
+import { paneFrameCapture, type FrameInstrumentationInput } from "../lib/core/frame-instrumentation";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import type { PixelTraceConfig } from "../lib/core/webgpu-renderer";
 import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
 import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
@@ -391,7 +393,7 @@ export class GPUViewportSession implements GPUViewportLifecycle {
     return this.stopPromise;
   }
 
-  private readonly render = () => {
+  private readonly render = (raf_ms?: number) => {
     if (this.currentPhase !== "rendering") return;
     this.frame = requestAnimationFrame(this.render);
     const { session, paneId } = this.options;
@@ -486,6 +488,11 @@ export class GPUViewportSession implements GPUViewportLifecycle {
       && state.resourceReadiness.fluid.state === "ready");
     this.binding.publishPixelTrace(renderer);
     simulation.recordFrame(metrics, renderer.presentationResolution, paneId);
+    // Phase 0 frame capture: built only while instrumentation is enabled.
+    paneFrameCapture(paneId, usePerformanceInstrumentationStore.getState().enabled)?.record({
+      raf_ms, cpu: metrics.cpu, presentation: metrics.presentation, dispatches: metrics.dispatches,
+      presentationSubmitted: metrics.presentationSubmitted, solver: state.gpuInfo as FrameInstrumentationInput["solver"],
+    });
     this.binding.publishFrameRate(this.frameRate.sampleCompleted(renderer.completedPresentationCount, performance.now()));
     if (metrics.presentationSubmitted) {
       simulationRecording.capturePresentedState(this.canvas, runtime.simulationTime);
