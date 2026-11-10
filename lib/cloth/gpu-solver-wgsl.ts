@@ -37,6 +37,8 @@ export interface ClothSolverWGSLOptions {
   readonly contactBlock?: string;
   /** The compiled PCG layout (ClothGPUTables.pcg) the Newton kernels are specialised to. */
   readonly pcg: ClothPCGLayout;
+  /** The PCG reductions by subgroupAdd (the device has 'subgroups' with subgroups of at least 16 lanes); else trees. */
+  readonly subgroups?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
@@ -44,7 +46,7 @@ export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
   const contact = !!options.contactBlock, restart = contact;
   // The projected arc's Pi_v is C2's ogcProject (a block without it is refused).
   if (contact && !options.contactBlock!.includes('fn ogcProjectTrial(')) throw new Error('Cloth solver contact block lacks ogcProjectTrial (the projected arc search needs Pi_v at each trial level)');
-  return /* wgsl */`
+  return (options.subgroups ? 'enable subgroups;\n' : '') + /* wgsl */`
 struct Params {
   n: vec4u,      // N, T, E, bending rows (N: row r is vertex r)
   topo0: vec4u,  // vertexFaceOffsets, vertexFaces, bending row offsets, bending row entries (j, w_j bits)
@@ -595,5 +597,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg)}`;
+${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups)}`;
 }

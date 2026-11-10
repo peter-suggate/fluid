@@ -48,8 +48,21 @@ export interface ClothPCGLayout {
   readonly maxK2: number;
 }
 
-export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout): string {
+export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false): string {
   const S = CLOTH_NEWTON_SEGMENTS;
+  // The PCG kernels' workgroup sum of the vec4 `part` into `total` (valid in lane 0; every lane has passed a barrier
+  // after its last read of the staged u): with subgroups, subgroupAdd, the subgroups' partials through pcgRed and a
+  // second subgroupAdd (PCG_PATCH / sgn <= sgn: subgroups of at least 16 lanes); else the 8-level tree.
+  const sgArgs = subgroups ? ', @builtin(subgroup_invocation_id) sgl: u32, @builtin(subgroup_size) sgn: u32' : '';
+  const reduce = (part: string) => subgroups ? `
+  let sgPart = subgroupAdd(${part});
+  if (sgl == 0u) { pcgRed[lane / sgn] = sgPart; }
+  workgroupBarrier();
+  let total = subgroupAdd(select(vec4f(0.0), pcgRed[min(sgl, PCG_PATCH / sgn - 1u)], sgl < PCG_PATCH / sgn));` : `
+  pcgRed[lane] = ${part};
+  workgroupBarrier();
+  for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
+  let total = pcgRed[0];`;
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
 const NW_WG = ${workgroup}u;
@@ -304,6 +317,8 @@ fn pcgUGlobal(j: u32) -> vec3f {
   let sv = nw[nseg(${S.w0}u + o, j)].xyz + pcgBeta * nw[nseg(${S.s0}u + pcgI % 2u, j)].xyz;
   return pcgMr(j, nw[nseg(${S.r0}u + o, j)].xyz - pcgAlpha * sv);
 }
+// u at a column of a one-patch problem (pcgSolve): no halo, so every column is a staged row.
+fn pcgULocal(c: u32) -> vec3f { return vec3f(pcgUx[c], pcgUy[c], pcgUz[c]); }
 fn pcgStage(c: u32, u: vec3f) { pcgUx[c] = u.x; pcgUy[c] = u.y; pcgUz[c] = u.z; }
 // u at a compiled column: a staged row or halo vertex, else (bit 31) global.
 fn pcgU(c: u32) -> vec3f {
@@ -321,7 +336,7 @@ fn pcgDir(j: u32) -> vec3f {
 // gamma = r.u and delta = w.u of iteration i - 1 (with i = 1 the Newton residual test), beta = gamma / gamma_{i-2},
 // alpha = gamma / (delta - beta gamma / alpha_{i-2}); then p_{i-1} = u_{i-1} + beta p_{i-2}, s_{i-1} = w_{i-1} + beta
 // s_{i-2}, d += alpha p_{i-1}, r_i = r_{i-1} - alpha s_{i-1}, u_i = M^-1 r_i, w_i = H u_i and the partials of iteration i.
-@compute @workgroup_size(256) fn pcgStep(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
+@compute @workgroup_size(256) fn pcgStep(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u${sgArgs}) {
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0 || ctl.y != 0.0) { return; }
   let i = R.range.z; let p = wgIndex(wg, nwg); let lead = p == 0u && lane == 0u;
@@ -333,10 +348,8 @@ fn pcgDir(j: u32) -> vec3f {
       let q1 = nw[pcgPartial((i - 1u) % 3u, k)];
       a += vec4f(q1.xyz, select(0.0, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
     }
-    pcgRed[lane] = a;
-    workgroupBarrier();
-    for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
-    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; pcgOut = pcgRed[0]; pcgScal = vec4f(s0.x, nw[pcgScalar(1u + i % 2u)].x, s0.y, 0.0); }
+    ${reduce('a')}
+    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; pcgOut = total; pcgScal = vec4f(s0.x, nw[pcgScalar(1u + i % 2u)].x, s0.y, 0.0); }
     let sums = workgroupUniformLoad(&pcgOut);
     let scal = workgroupUniformLoad(&pcgScal);
     let gam = sums.x;
@@ -401,16 +414,14 @@ fn pcgDir(j: u32) -> vec3f {
     ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
     nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
   }
-  pcgRed[lane] = vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0);
-  workgroupBarrier();
-  for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
-  if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = pcgRed[0]; }
+  ${reduce('vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0)')}
+  if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = total; }
 }
 
 // PCG in one dispatch (one patch: every vertex a row of workgroup 0, no halo): the iterations of pcgStep, each lane
-// keeping its row's r, s, p, d, u and w in registers, u shared through the staging arrays, the partials reduced in
-// the workgroup, and the stop a uniform break. The same Chronopoulos-Gear recurrence as dispatches 0..cap (R.range.z).
-@compute @workgroup_size(256) fn pcgSolve(@builtin(local_invocation_index) lane: u32) {
+// keeping its row's r, s, p, d, u and w in registers, u shared through the staging arrays and gathered without the
+// global fallback (every column is a row lane), the partials reduced in the workgroup, and the stop a uniform break. The same Chronopoulos-Gear recurrence as dispatches 0..cap (R.range.z).
+@compute @workgroup_size(256) fn pcgSolve(@builtin(local_invocation_index) lane: u32${sgArgs}) {
   let ctl = nwControlUniform(lane);
   if (ctl.x != 0.0 || ctl.y != 0.0) { return; }
   let cap = R.range.z; let lead = lane == 0u;
@@ -455,21 +466,19 @@ fn pcgDir(j: u32) -> vec3f {
     if (own) {
       for (var k = 0u; k < K1; k++) {
         let b0 = nw[pcgBlock(blocks, k, 0u, lane)]; let b1 = nw[pcgBlock(blocks, k, 1u, lane)]; let b2 = nw[pcgBlock(blocks, k, 2u, lane)];
-        let uj = pcgU(bitcast<u32>(b0.w));
+        let uj = pcgULocal(bitcast<u32>(b0.w));
         w += vec3f(dot(b0.xyz, uj), dot(b1.xyz, uj), dot(b2.xyz, uj));
       }
       for (var m = 0u; 2u * m < K2; m++) {
         let e = nw[bends + m * PCG_PATCH + lane];
-        w += e.y * pcgU(bitcast<u32>(e.x)) + e.w * pcgU(bitcast<u32>(e.z));
+        w += e.y * pcgULocal(bitcast<u32>(e.x)) + e.w * pcgULocal(bitcast<u32>(e.z));
       }
       ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
     }
-    pcgRed[lane] = vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0);
-    workgroupBarrier();
-    for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
-    // The tree's last barrier also orders this iteration's reads of the staged u before the next one overwrites it;
+    // The reduction's barriers also order this iteration's reads of the staged u before the next one overwrites it;
     // pcgOut is read after the next iteration's uniform load (a barrier).
-    if (lane == 0u) { pcgOut = pcgRed[0]; }
+    ${reduce('vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0)')}
+    if (lane == 0u) { pcgOut = total; }
   }
   if (own) { nw[nseg(${S.d}u, v)] = vec4f(d, 0.0); }
   if (lead) {

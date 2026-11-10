@@ -2170,3 +2170,30 @@ does not, so forcing goes with the dx stop: both ride into the next 150^2 accept
 
 Gate: cloth-ladder, cloth-gpu-solver, cloth-analytic on HEAD 7cbf076b + this: 25 tests, 24 pass, 0 fail, 1 todo
 (C2's incline item 5); cloth-system (CPU) 10 pass.
+
+## 2026-11-10 RESULT (35): pcgSolve's rate - subgroup reductions and the one-patch local gather
+
+The rate profile (16^2 pcgSolve at a fixed state, 200 iterations forced, GPU timestamps, best of 5 passes, scratch
+ablation flags on cbc8622d): 6.43 us an iteration as built; without the bending entries 3.73, without the whole Hu
+1.82, without the reduction tree 4.98, without both 0.47. So the iteration is the Hu gathers (the bending entries' and
+blocks' columns through pcgU, whose global fallback - pcgUGlobal, recomputing u from r, s, w - the compiler keeps on
+every gather) plus the 8-level reduction's serial stages. H rows in registers (preloading the K1 blocks) 6.64 and
+vec4 staging 6.37: no gain; the kernel is latency- and instruction-bound, not bandwidth-bound.
+
+Landed: (a) with the 'subgroups' feature and subgroupMinSize >= 16, the PCG reductions (pcgSolve's, and both of
+pcgStep's) are subgroupAdd, the subgroups' partials through pcgRed and a second subgroupAdd (2 barriers' worth instead
+of 8); without the feature the tree is unchanged. (b) pcgSolve gathers u with pcgULocal: one patch has no halo, so every
+column is a staged row and the global fallback is dead code there. Forced 200 iterations: 6.43 -> 3.93 us an
+iteration (1.64x); the production solve (125 iterations, its own stop) 6.65 -> 4.19 us.
+
+Ladder 3 (timing mode, HEAD cbc8622d + this): 16^2 fixed state pcgSolve's d off the chain's by 1.69e-5 of max |d|
+(3.06e-5 before; the PCG tolerance is 1e-4); one solve pcgSolve 516 us (125 iterations, 4.13 us each), chain 2466 us
+(19.7 us each); chain 17.6 / 19.5 / 23.4 us an iteration at 32^2 / 64^2 / 128^2; PCG per Newton unchanged (103.9 /
+132.6 / 153.3 / 159.7; forcing eta_max 0.1 33.9 / 36.5 / 38.3).
+
+Gate: cloth-ladder, cloth-gpu-solver, cloth-analytic on cbc8622d + this: 25 tests, 23 pass, 1 fail, 1 todo (C2's incline
+item 5). The failure: the tilted 15 degree landing rebounded 0.0426 m/s (reference 0.0017) in that run, under GPU
+contention (936 ms/tick); three reruns of it on the same build (two with subgroups, one with the feature switched
+off) rebounded 0.0019 / 0.0019 / 0.0018 and pass, as every earlier gate did (0.0018-0.0019). Not reproduced; the
+onset restart is a discrete decision, so a run-to-run difference that large points at an order-dependent input to
+it (atomics in detection?), recorded here to watch, not attributed.
