@@ -230,6 +230,11 @@ test('cloth contact settings: self friction is validated and carried; a solid wo
   assert.equal(document.solver?.selfFriction, 0.3);
   for (const bad of [-0.1, NaN, Infinity])
     assert.ok(validateClothDocument({ ...document, solver: { ...document.solver, selfFriction: bad } }).some(e => e.includes('self friction')));
+  // Eisenstat-Walker forcing: eta_max in [0, 1).
+  const newton = { iterations: 8, pcgIterations: 200 };
+  assert.deepEqual(validateClothDocument({ ...document, solver: { ...document.solver, newton: { ...newton, forcingMax: 0.1 } } }), []);
+  for (const bad of [-0.1, 1, NaN])
+    assert.ok(validateClothDocument({ ...document, solver: { ...document.solver, newton: { ...newton, forcingMax: bad } } }).some(e => e.includes('forcingMax')), String(bad));
   // The VBD solver's settings were removed with it (M4): a document that names one fails explicitly.
   for (const [key, value] of [['iterations', 8], ['chebyshevRho', 0], ['tier', 'A'], ['patchVertices', 64], ['patchIterations', 2], ['coarse', false], ['coarse', true]] as const)
     assert.ok(validateClothDocument({ ...document, solver: { ...document.solver, [key]: value } as typeof document.solver }).some(e => e.includes(`'${key}' was removed`)), key);

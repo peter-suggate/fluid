@@ -22,8 +22,9 @@
  * The `nw` buffer (vec4 records): per-vertex segments (stride Np) g, r (two), w (two), s (two), d, p, M^-1 (two
  * records), with contact the trial moves (one per trial), then 3 records per face, the assembled blocks and bending
  * entries, the line-search partials (W = workgroups of a per-vertex dispatch each, 7 arrays), the PCG partials (3 arrays of one record per patch), the PCG scalars
- * (gamma_0, then alpha by iteration mod 2), then the control record (Newton done, PCG done, accepted step, Newton
- * iteration), then |g|^2 at the first and latest Newton iterate and the step's PCG iterations (w).
+ * (gamma_0 and the solve's stop tolerance^2, then alpha by iteration mod 2), then the control record (Newton done, PCG
+ * done, accepted step, Newton iteration), then |g|^2 at the first and latest Newton iterate, the latest PCG stop
+ * tolerance^2 (z, the forcing's eta^2) and the step's PCG iterations (w).
  */
 import { CLOTH_LINE_SEARCH } from './oracle';
 
@@ -278,6 +279,22 @@ var<private> pcgBeta: f32;
 var<private> pcgPatchIndex: u32;
 fn pcgPartial(slot: u32, p: u32) -> u32 { return P.newton3.x + slot * P.newton3.y + p; }
 fn pcgScalar(k: u32) -> u32 { return P.newton3.z + k; }
+// The PCG stop of Newton iteration n (as tol^2 on r.u / r0.u0): pcgTolerance^2, or with Eisenstat-Walker forcing (eta_max^2
+// at P.newton4.z, f32 bits; 0 off) choice 2 at gamma 0.9, eta = 0.9 (|g_n| / |g_n-1|)^2, safeguarded by 0.9 eta_n-1^2 where
+// that exceeds 0.1, capped at eta_max and floored at pcgTolerance. prior: the step's residual record (control + 1)
+// before iteration n writes it (y |g_n-1|^2, z eta_n-1^2); gg = |g_n|^2.
+fn pcgForcing(gg: f32, prior: vec4f, n: f32) -> f32 {
+  let floor2 = bitcast<f32>(P.newton1.y); let max2 = bitcast<f32>(P.newton4.z);
+  if (!(max2 > 0.0)) { return floor2; }
+  var e2 = max2;
+  if (n > 0.0 && prior.y > 0.0) {
+    let q = gg / prior.y; e2 = 0.81 * q * q;
+    let sg = 0.9 * prior.z;
+    if (sg > 0.1) { e2 = max(e2, sg * sg); }
+    e2 = min(e2, max2);
+  }
+  return max(e2, floor2);
+}
 fn pcgMr(j: u32, r: vec3f) -> vec3f { return nwPrecondition(nw[nseg(${S.m0}u, j)], nw[nseg(${S.m1}u, j)], r); }
 // u = M^-1 r of this dispatch's iteration at vertex j from global memory: u_0 = M^-1 r_0; else r_i = r_{i-1} - alpha
 // s_{i-1} with s_{i-1} = w_{i-1} + beta s_{i-2}.
@@ -319,7 +336,7 @@ fn pcgDir(j: u32) -> vec3f {
     pcgRed[lane] = a;
     workgroupBarrier();
     for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
-    if (lane == 0u) { pcgOut = pcgRed[0]; pcgScal = vec4f(nw[pcgScalar(0u)].x, nw[pcgScalar(1u + i % 2u)].x, 0.0, 0.0); }
+    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; pcgOut = pcgRed[0]; pcgScal = vec4f(s0.x, nw[pcgScalar(1u + i % 2u)].x, s0.y, 0.0); }
     let sums = workgroupUniformLoad(&pcgOut);
     let scal = workgroupUniformLoad(&pcgScal);
     let gam = sums.x;
@@ -327,10 +344,15 @@ fn pcgDir(j: u32) -> vec3f {
     if (i == 1u) {
       gamma0 = gam;
       // Residual record (control + 1): |g|^2 over free DOFs at the step's first and latest Newton iterate.
-      if (lead) { var rr = nw[nwControl() + 1u]; if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam); }
+      // The lead reads the record before writing it (its forcing needs |g| of the last Newton iterate); at i = 1 the stop
+      // below passes for any tolerance < 1, so the other workgroups need the stop's tolerance only from dispatch 2 on.
+      if (lead) {
+        var rr = nw[nwControl() + 1u]; let e2 = pcgForcing(sums.z, rr, ctl.w);
+        if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = e2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, e2, 0.0, 0.0);
+      }
       if (sums.z <= bitcast<f32>(P.newton1.z)) { if (lead) { nw[nwControl()].x = 1.0; } return; }
     }
-    if (!(gam > bitcast<f32>(P.newton1.y) * gamma0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+    if (!(gam > select(scal.z, 0.0, i == 1u) * gamma0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
     var denom = sums.y;
     if (i >= 2u) { beta = gam / sums.w; denom = sums.y - beta * gam / scal.y; }
     // H is PSD by construction; a non-positive curvature (rounding at convergence) ends this solve with d so far.
@@ -402,6 +424,10 @@ fn pcgDir(j: u32) -> vec3f {
   var pv = vec3f(0.0); var sv = vec3f(0.0); var d = vec3f(0.0); var w = vec3f(0.0);
   var gamma0 = 0.0; var gamPrev = 0.0; var alphaPrev = 0.0;
   var taken = 0.0; var stop = 0u;
+  // The step's residual record before this Newton iteration writes it (the forcing's |g_n-1| and eta_n-1).
+  if (lead) { pcgScal = nw[nwControl() + 1u]; }
+  let prior = workgroupUniformLoad(&pcgScal);
+  var tol2 = bitcast<f32>(P.newton1.y);
   for (var i = 0u; i <= cap; i++) {
     if (i > 0u) {
       // gamma = r.u, delta = w.u of iteration i - 1 (pcgRed[0] after the reduction below), uniform.
@@ -409,10 +435,11 @@ fn pcgDir(j: u32) -> vec3f {
       let gam = sums.x;
       if (i == 1u) {
         gamma0 = gam;
-        if (lead) { var rr = nw[nwControl() + 1u]; if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam); }
+        tol2 = pcgForcing(sums.z, prior, ctl.w);
+        if (lead) { var rr = prior; if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = tol2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, tol2, 0.0, 0.0); }
         if (sums.z <= bitcast<f32>(P.newton1.z)) { stop = 2u; break; }
       }
-      if (!(gam > bitcast<f32>(P.newton1.y) * gamma0)) { stop = 1u; break; }
+      if (!(gam > tol2 * gamma0)) { stop = 1u; break; }
       var beta = 0.0; var denom = sums.y;
       if (i >= 2u) { beta = gam / gamPrev; denom = sums.y - beta * gam / alphaPrev; }
       if (!(denom > 0.0)) { stop = 1u; break; }

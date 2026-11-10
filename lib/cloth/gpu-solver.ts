@@ -88,7 +88,7 @@ export interface ClothGPUSolverOptions {
 
 export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
-export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0 });
+export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0 });
 
 export interface ClothStatusSlot {
   readonly step: number;
@@ -452,6 +452,7 @@ export class ClothGPUSolver {
       throw new Error('Cloth Newton solver needs integer caps newton.iterations >= 1 and newton.pcgIterations >= 1');
     this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
     if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0 && this.newton.velocityTolerance_m_s >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
+    if (!(this.newton.forcingMax >= 0 && this.newton.forcingMax < 1)) throw new Error(`Cloth Newton forcingMax must be in [0, 1), got ${this.newton.forcingMax}`);
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
     if (options.contact && !(options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
       throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
@@ -472,10 +473,11 @@ export class ClothGPUSolver {
     this.params = make('params', 4 * PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.newtonWork = make('newton work', 16 * this.tables.newtonRecords);
     {
-      const P = new Uint32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 16), F = new Float32Array(P.buffer, P.byteOffset, 16);
+      const P = new Uint32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 20), F = new Float32Array(P.buffer, P.byteOffset, 20);
       const g = options.gravity_m_s2, gg = g[0] ** 2 + g[1] ** 2 + g[2] ** 2;
       let m2 = 0; for (let v = 0; v < this.N; v++) if (!(t.groups[v]! > 0)) m2 += t.mass_kg[v]! ** 2;
       F[5] = this.newton.pcgTolerance ** 2; F[6] = this.newton.residualTolerance ** 2 * m2 * gg; F[15] = this.newton.velocityTolerance_m_s;
+      F[18] = this.newton.forcingMax ** 2;
     }
     // One dispatch record per PCG dispatch i = 0 .. pcgIterations: (0, N, i, 0).
     const dispatches = this.newton.pcgIterations + 1;

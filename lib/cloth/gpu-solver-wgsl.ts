@@ -63,7 +63,7 @@ struct Params {
   newton1: vec4u, // bending stencil records (topo4 index), PCG tolerance^2 and residual tolerance^2 |m g|^2 (f32 bits)
   newton2: vec4u, // compiled topology (topo words): patch table, face corner slots, edge slots, stencil destinations
   newton3: vec4u, // PCG partials (nw record), patches, PCG scalars (nw record), unused
-  newton4: vec4u, // compiled topology (topo words): vertex of each patch slot, patch slot of each vertex, unused, unused
+  newton4: vec4u, // compiled topology (topo words): vertex of each patch slot, patch slot of each vertex; Eisenstat-Walker eta_max^2 (f32 bits), unused
 }
 struct Dispatch { range: vec4u, values: vec4f } // (0, N, PCG iteration from 0)
 

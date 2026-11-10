@@ -128,6 +128,7 @@ export function validateClothDocument(document: ClothDocument): string[] {
       const n = solver.newton;
       if (!n || !(Number.isInteger(n.iterations) && n.iterations >= 1) || !(Number.isInteger(n.pcgIterations) && n.pcgIterations >= 1)) errors.push("Cloth Newton caps must be positive integers");
       else if ((n.pcgTolerance !== undefined && !(n.pcgTolerance >= 0)) || (n.residualTolerance !== undefined && !(n.residualTolerance >= 0)) || (n.velocityTolerance_m_s !== undefined && !(n.velocityTolerance_m_s >= 0 && Number.isFinite(n.velocityTolerance_m_s)))) errors.push("Cloth Newton tolerances must be non-negative");
+      else if (n.forcingMax !== undefined && !(n.forcingMax >= 0 && n.forcingMax < 1)) errors.push("Cloth Newton forcingMax must be in [0, 1)");
     }
     if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
     if (solver.contactPlaneRecordsPerVertex !== undefined && !(Number.isInteger(solver.contactPlaneRecordsPerVertex) && solver.contactPlaneRecordsPerVertex >= 1))

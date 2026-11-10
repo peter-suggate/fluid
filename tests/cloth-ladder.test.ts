@@ -49,6 +49,10 @@ const BRIDSON: ClothNewtonSettings = clothAnalyticFreeFall().cloth[0]!.solver!.n
 // Converged to the f32 floor: on 16^2 |g| / |m g| reaches its floor (about 2e-3) by Newton iterate 4 (ladder 1a), so
 // 12 iterations at 400 PCG and tolerances / 16 solve as far as f32 can.
 const CONVERGED: ClothNewtonSettings = { iterations: 12, pcgIterations: 400, pcgTolerance: BRIDSON.pcgTolerance! / 16, residualTolerance: BRIDSON.residualTolerance! / 16 };
+// Eisenstat-Walker forcing (forcingMax) with the dx = 1 um displacement stop at the converged caps: always eta_max 0.1, and
+// CLOTH_LADDER_EW=0.05,0.2 adds rows. Held to the converged rows' oracle bound.
+const FORCED = [0.1, ...(process.env.CLOTH_LADDER_EW ?? '').split(',').filter(Boolean).map(Number)]
+  .map(eta => [`converged caps, stop at dx 1 um, forcing eta_max ${eta}`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 / h, forcingMax: eta }] as const);
 
 async function withDevice(run: (device: GPUDevice) => Promise<void>) {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -314,14 +318,14 @@ test('ladder 1a: Newton on a corner-held 16^2 sheet matches the converged Float6
   // The displacement stop (newton3.w): done once the accepted step moves no vertex more than dx = tol h~.
   const stops = (process.env.CLOTH_LADDER_DX ?? '').split(',').filter(Boolean).map(Number)
     .map(dx => [`converged caps, stop at dx ${dx} um`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 * dx / h }] as const);
-  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops] as const) {
+  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops, ...FORCED] as const) {
     const { solver } = await bareSolver(device, document, { dt_s: h, newton });
     const records: Awaited<ReturnType<typeof newtonOf>>[] = [];
     for (let s = 0; s < steps; s++) { solver.step(1); records.push(await newtonOf(solver)); }
     const x = await solver.readPositions(), status = await solver.readStatus();
     let worst = 0;
     for (let i = 0; i < x.length; i++) worst = Math.max(worst, Math.abs(x[i]! - st.x[i]!));
-    lines.push(`${name}: off the oracle ${(1e6 * worst).toFixed(2)} um; Newton per step ${fmt(records.map(r => r.newton))}; PCG per Newton ${fmt(records.map(r => r.pcg / r.newton), 1)}; `
+    lines.push(`${name}: off the oracle ${(1e6 * worst).toFixed(2)} um; Newton per step ${fmt(records.map(r => r.newton))}; PCG per Newton ${fmt(records.map(r => r.pcg / r.newton), 1)} (${(sum(records.map(r => r.pcg)) / steps).toFixed(0)} per step); `
       + `step-end |g|/|mg| ${records.at(-1)!.last.toExponential(2)}`);
     assert.equal(status.status, 0);
     if (newton !== BRIDSON) assert.ok(worst < 2e-5, `converged Newton vs the converged oracle: ${worst} m`);
@@ -347,7 +351,7 @@ test('ladder 1b: Newton with contact on a 16^2 sheet landing flat on the floor: 
   const lines: string[] = [];
   const stops = (process.env.CLOTH_LADDER_DX ?? '').split(',').filter(Boolean).map(Number)
     .map(dx => [`converged caps, stop at dx ${dx} um`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 * dx / h }] as const);
-  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops] as const) {
+  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops, ...FORCED] as const) {
     const scene = clothAnalyticSceneDescription(resized(source, sheet(n, y0)), { newton });
     const r = clothContactRadius(scene.cloth![0]!);
     const { cloth, solver, records } = await steppedScene(device, scene, ticks);
@@ -356,7 +360,7 @@ test('ladder 1b: Newton with contact on a 16^2 sheet landing flat on the floor: 
     const x = pose.positions_m, N = x.length / 3;
     let lo = Infinity, hi = -Infinity, speed = 0;
     for (let i = 0; i < N; i++) { lo = Math.min(lo, x[3 * i + 1]!); hi = Math.max(hi, x[3 * i + 1]!); speed = Math.max(speed, Math.hypot(pose.velocities_m_s[3 * i]!, pose.velocities_m_s[3 * i + 1]!, pose.velocities_m_s[3 * i + 2]!)); }
-    lines.push(`${name}: Newton per step ${fmt(records.map(q => q.newton))}; PCG per Newton ${fmt(records.map(q => q.pcg / Math.max(1, q.newton)), 0)}; `
+    lines.push(`${name}: Newton per step ${fmt(records.map(q => q.newton))}; PCG per Newton ${fmt(records.map(q => q.pcg / Math.max(1, q.newton)), 0)} (${(sum(records.slice(-10).map(q => q.pcg)) / 10).toFixed(0)} per step, last 10); `
       + `step-end |g|/|mg| first/last step ${records[0]!.last.toExponential(1)} / ${records.at(-1)!.last.toExponential(1)}; at tick ${ticks} heights ${(1000 * lo).toFixed(3)}-${(1000 * hi).toFixed(3)} mm (r ${(1000 * r).toFixed(2)}), max speed ${(1000 * speed).toFixed(2)} mm/s`);
     // At rest on a frictionless floor: flat, still, and no vertex below the contact radius' floor band or far above it.
     assert.ok(lo > 0 && hi - lo < 1e-4, `the sheet rests flat: heights ${lo}-${hi} m`);
@@ -463,6 +467,15 @@ test('ladder 3: PCG cost per iteration and iterations per Newton solve, 16^2 to 
       + `one solve: chain ${chain.us.toFixed(0)} us (${chain.iterations} iterations, ${(chain.us / chain.iterations).toFixed(2)} us each)`
       + (one ? `, pcgSolve ${one.us.toFixed(0)} us (${one.iterations} iterations, ${(one.us / one.iterations).toFixed(2)} us each)` : ''));
     assert.ok(Number.isNaN(us) || us > 0);
+  }
+  // Eisenstat-Walker forcing (eta_max 0.1) at the Bridson caps: PCG per Newton at one patch (pcgSolve) and over patches (the chain).
+  for (const n of [16, 32, 64]) {
+    const document = resized(clothAnalyticFreeFall(), sheet(n, 1, (i, j) => j === 0 && (i === 0 || i === n - 1) ? 1 : 0)).cloth[0]!;
+    const { solver } = await bareSolver(device, document, { dt_s: h, newton: { ...BRIDSON, forcingMax: 0.1 } });
+    let newton = 0, pcg = 0;
+    for (let s = 0; s < warm; s++) { solver.step(1); const r = await newtonOf(solver); newton += r.newton; pcg += r.pcg; }
+    lines.push(`forcing eta_max 0.1 ${n}^2 (${(solver as unknown as Internals).tables.pcg.patches} patches): ${(pcg / newton).toFixed(1)} PCG per Newton, ${(newton / warm).toFixed(1)} Newton per step (steps 1-${warm})`);
+    solver.destroy();
   }
   // With contact: a 32^2 sheet resting on the floor (dropped 3 mm, 20 ticks) and the Bridson sphere at 32 nodes across
   // draped on its sphere (40 ticks).

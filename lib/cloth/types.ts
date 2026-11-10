@@ -113,6 +113,10 @@ export interface ClothNewtonSettings {
   /** Newton also stops after an accepted step that moves no vertex faster than this (|alpha d_v| <= tol h, m/s;
    * default 0, off): the step's velocities are then settled to this tolerance. */
   readonly velocityTolerance_m_s?: number;
+  /** Eisenstat-Walker forcing (choice 2, gamma 0.9, safeguarded): the PCG solve of Newton iteration n stops at
+   * eta_n = 0.9 (|g_n| / |g_n-1|)^2 (in place of pcgTolerance), capped at this and floored at pcgTolerance; the first
+   * iteration of a step solves to this. In [0, 1); default 0, off (pcgTolerance in every iteration). */
+  readonly forcingMax?: number;
 }
 
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per

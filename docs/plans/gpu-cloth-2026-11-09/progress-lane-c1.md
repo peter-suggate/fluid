@@ -2141,3 +2141,32 @@ chain names the preconditioner kernel when one exists, and the sphere benchmark 
 
 Gate: cloth-analytic, cloth-gpu-solver, cloth-ladder, cloth-contact-ladder on c022831b + this: 31 tests, 29 pass, 0 fail,
 2 todo (C2's incline item 5 and the contact-ladder strip, item 2).
+
+## 2026-11-10 RESULT (34): conditioning is the membrane, not the AL term; Eisenstat-Walker forcing (forcingMax)
+
+kappa (Lanczos from the CG coefficients of a tight solve, cap 200, tol 1e-6; scratch instrumentation on 0228c3e6):
+stretch modulus 200 N/m, 1 kg/m^2, so h^2 k / m = 556 at the 1 cm cell (2220 at 5 mm). The 1a sheet at step 10:
+lambda(M^-1 H) 1.6e-3 .. 2.6, kappa 1.66e3 with the AL strain-limit term and 1.68e3 without it (Newton iteration 1;
+1.61e3 / 1.66e3 at iteration 4), with 2-3 active edges at AL k up to 2.2x the stretch modulus. lambda_max is bounded
+by the block-Jacobi preconditioner; lambda_min ~ 1 / (1 + 1.1 h^2 k / m) is the smooth membrane modes against the
+mass, so kappa ~ h^2 k / m ~ 1/dx^2, and the stiff band runs from dx to h sqrt(Y / rho) ~ 24 cm: the long-wavelength
+membrane stiffness (the coarse space's job), not the penalty. The ledge strip before (5) (AL k 36-40x the stretch
+modulus on 57-90 edges) at most doubled kappa (1.3e4 against 5.8e3 at tick 3); (5) has since removed that case.
+
+Eisenstat-Walker forcing (ClothNewtonSettings.forcingMax = eta_max, default 0 off; validated in [0, 1)): choice 2,
+eta_n = 0.9 (|g_n| / |g_n-1|)^2, safeguarded by 0.9 eta_n-1^2 where that exceeds 0.1, capped at eta_max and floored at
+pcgTolerance, the first Newton iteration of a step at eta_max; in pcgSolve and in the pcgStep chain (the lead writes
+eta^2 with gamma_0 at dispatch 1, read from dispatch 2 on; the step's residual record keeps eta^2 in z). Ladder
+(rows always on; CLOTH_LADDER_EW adds eta_max values):
+  1a (16^2 against the converged oracle): Bridson caps 0.47 um off, 824 PCG per step; dx 1 um alone 0.49 um, 699;
+  dx 1 um + eta_max 0.1: 0.30 um, 269 PCG per step (2.6x fewer), 5.5 Newton per step.
+  1b (contact floor, 30 ticks): Bridson caps 273 PCG per step (last 10); dx 1 um + eta_max 0.1: 92, rest heights
+  0.990-0.998 mm and step-end |g| as the converged run's (1.4e-3).
+  3 (Bridson caps + eta_max 0.1): 33.8 / 36.5 / 38.3 PCG per Newton at 16^2 / 32^2 / 64^2 (1 / 4 / 16 patches)
+  against 103 / 134 / 153.
+eta_max 0.5 fails the converged oracle row (58 um): at the f32 floor |g| stalls, the ratio goes to 1 and eta sits at
+eta_max. eta_max 0.1 with the Bridson caps alone loosens the step end (1b 4.3e-2 against 1.7e-3); with the dx stop it
+does not, so forcing goes with the dx stop: both ride into the next 150^2 acceptance run.
+
+Gate: cloth-ladder, cloth-gpu-solver, cloth-analytic on HEAD 7cbf076b + this: 25 tests, 24 pass, 0 fail, 1 todo
+(C2's incline item 5); cloth-system (CPU) 10 pass.
