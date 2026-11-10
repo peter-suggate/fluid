@@ -17,6 +17,7 @@ import { buildClothSolverModel, clothBendVector, clothOracleStep, createClothOra
 import { ClothGPUSolver, clothBendingStencil, type ClothNewtonOptions } from '../lib/cloth/gpu-solver';
 import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
 import { CLOTH_BINDING } from '../lib/cloth/gpu-solver-wgsl';
+import { clothNewtonWGSL } from '../lib/cloth/gpu-newton-wgsl';
 import { OGC_LEVEL_VEC4S, OGC_PROJECT_RECORD, ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
@@ -96,6 +97,20 @@ test('one converged GPU step matches the converged oracle from every initial gue
     solver.destroy();
   }
 }));
+
+test('newton.activeSet: the default is the active set\'s kernels exactly; \'off\' drops only nwApply\'s active-set write', () => {
+  const pcg = { patches: 4, patchVertices: 64, coarse: 0, levels: 1 } as unknown as Parameters<typeof clothNewtonWGSL>[3];
+  for (const subgroups of [false, true]) for (const trust of [false, true]) {
+    const on = clothNewtonWGSL(3, 64, true, pcg, subgroups, trust), off = clothNewtonWGSL(3, 64, true, pcg, subgroups, trust, false);
+    assert.equal(clothNewtonWGSL(3, 64, true, pcg, subgroups, trust, true), on);
+    // Without contact the switch has nothing to drop.
+    assert.equal(clothNewtonWGSL(3, 64, false, pcg, subgroups, trust, false), clothNewtonWGSL(3, 64, false, pcg, subgroups, trust));
+    const apply = (w: string) => w.slice(w.indexOf('fn nwApply('), w.indexOf('fn nwEdgeDuals('));
+    assert.match(apply(on), /ogcProjectActive/);
+    assert.doesNotMatch(apply(off), /ogcProjectActive|NW_ACTIVE/);
+    assert.equal(off.replace(apply(off), ''), on.replace(apply(on), ''), "'off' changes nothing outside nwApply");
+  }
+});
 
 test('the bending stencil is the per-row bending: gradient, zero row sums, and a stiff fold against the oracle', async t => {
   const stiff: ClothMaterial = { ...cotton, id: 'stiff', bending_N_m: 2e-3, damping_s: 0.01 };

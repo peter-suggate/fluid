@@ -41,6 +41,8 @@ export interface ClothSolverWGSLOptions {
   readonly subgroups?: boolean;
   /** newton.trustRegion 'hybrid': the trust-region iterations after the line search's (gpu-newton-wgsl.ts). */
   readonly trustRegion?: boolean;
+  /** newton.activeSet: false (only 'off') drops the projected-Newton active set; omitted, on (gpu-newton-wgsl.ts). */
+  readonly activeSet?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
@@ -600,5 +602,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups, !!options.trustRegion)}`;
+${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups, !!options.trustRegion, options.activeSet ?? true)}`;
 }

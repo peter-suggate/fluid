@@ -73,7 +73,7 @@ export interface ClothPCGLayout {
   readonly maxK2: number;
 }
 
-export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false): string {
+export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false, activeSet = true): string {
   const S = CLOTH_NEWTON_SEGMENTS;
   // The PCG kernels' workgroup sum of the vec4 `part` into `total` (valid in lane 0; every lane has passed a barrier
   // after its last read of the staged u): with subgroups, subgroupAdd, the subgroups' partials through pcgRed and a
@@ -973,7 +973,7 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   // The accepted trial's move (a converged step's too; once Newton is done d = 0 and this moves nothing). chosen = 2^-k exactly.
   // Newton done: d = 0 (its w too, so no stored move is read again), so the capped iterations left (all early exits, the
   // control record keeping its last step) move nothing and give the contact filter and re-detection nothing to act on.
-  ${contact ? `// The active set the next iteration starts from: the outward normals of the certificates binding the vertex's
+  ${contact && activeSet ? `// The active set the next iteration starts from: the outward normals of the certificates binding the vertex's
   // accepted trial point (at a stall, the smallest trial's: the iterate stays) in this iteration's filter's set
   // (ogcProjectActive: up to three independent, the cap apart - the round's trust region bounds travel, not the set),
   // replacing the last iteration's: a normal from an earlier certificate set is not a constraint of the next one

@@ -32,7 +32,7 @@ import { buildClothCoarseSpace, ClothCoarseCorrection, clothObjective } from '..
 import { ClothGPUSolver, type ClothGPUSolverOptions } from '../lib/cloth/gpu-solver';
 import { CLOTH_NEWTON_SEGMENTS } from '../lib/cloth/gpu-newton-wgsl';
 import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
-import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
+import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import { buildClothSceneField, clothContactRadius, createClothSceneContact } from '../lib/cloth/scene-contact';
 import type { ClothDocument, ClothNewtonSettings, ClothTopologyData } from '../lib/cloth/types';
 import {
@@ -505,6 +505,53 @@ test('ladder 2b: the cap-aware done rule: with a velocity tolerance so loose tha
     + `vertices a travel bound held at the last accepted trial ${fmt(records.map(r => r.travelHeld))} (the cap ${newton.iterations})`);
   // steppedScene asserts no step ends done while a travel bound holds a vertex; here the rule must also have acted.
   assert.ok(records[0]!.newton > 1, `tick 1 ended after ${records[0]!.newton} Newton iteration: the travel bounds binding there did not keep Newton running`);
+}));
+
+/** Ladder 2c's open defect (C1 RESULT 43): both runs end done at a 1 um move, 0.96 mm (tick 20) and 1.70 mm (tick 40)
+ * apart on about 200 of the 256 vertices; the residual gradient there (|g| 1.8e-2 |mg|) sits wholly on the vertices
+ * the sphere's surface samples hold (sampleFace entries). The step's result depends on the path. */
+const METRIC_TODO = "C1 open: the converged 16^2 sphere step depends on the projection metric (0.96 / 1.70 mm at ticks 20 / 40); the residual sits on the sample-face vertices (RESULT 43)";
+
+/** One step of the 16^2 rotating sphere from the published state at `tick`, under `solver` (caps and tolerances
+ * replaced); the result and the step's Newton record. */
+async function sphereStepFrom(device: GPUDevice, tick: number, solver: (doc: ClothDocument) => ClothDocument['solver']) {
+  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), doc = base.cloth![0]!;
+  if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
+  const start = (await captureScene(device, base, [tick])).frames[0]![0]!;
+  if (!start.velocities_m_s || !start.solverState) throw new Error(`the tick-${tick} publication carries no velocities or solver state`);
+  const scene = { ...base, cloth: [{ ...doc, solver: solver(doc), geometry: { kind: 'inline' as const, data: { ...doc.geometry.data,
+    initialPositions_m: Array.from(start.positions_m), initialVelocities_m_s: Array.from(start.velocities_m_s), solverState: start.solverState } } }] };
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 }), gpuSolver = cloth.solverFor(doc.id)!;
+  try {
+    assert.ok(cloth.stepTo(start.time_s + CLOTH_SCENE_STEP_S), `the step from tick ${tick} was refused: ${cloth.failure?.message ?? 'pending'}`);
+    const record = await newtonOf(gpuSolver), x = await gpuSolver.readPositions();
+    assert.equal(cloth.failure, undefined, cloth.failure?.message);
+    return { record, x };
+  } finally { cloth.destroy(); }
+}
+
+test('ladder 2c: on the 16^2 sphere a step\'s result is independent of the trial projection\'s metric (identity against H_vv) to within the convergence tolerance', { skip: !gpu, todo: METRIC_TODO }, async () => withDevice(async device => {
+  // The metric only chooses the projected trial points of each iteration's arc: both runs must converge to the same
+  // step solution. Newton stops at an accepted move of at most tol = 1 um (velocityTolerance tol / h~); each run's end is
+  // then within about one last move of the solution, so the two ends must agree to 2 tol. Ticks 20 and 40: the sheet on
+  // the sphere (before C2's tick-46 heldConflict in the metric).
+  const tol = 1e-6, hEff = 2 * CLOTH_SCENE_STEP_S / 3, lines: string[] = [], fails: string[] = [];
+  for (const tick of [20, 40]) {
+    const solve = (metric: 'off' | 'hvv') => (doc: ClothDocument) => ({ ...doc.solver!, contactProjectionMetric: metric,
+      newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations: 150, velocityTolerance_m_s: tol / hEff } });
+    const off = await sphereStepFrom(device, tick, solve('off')), hvv = await sphereStepFrom(device, tick, solve('hvv'));
+    let gap = 0, at = -1, over = 0;
+    for (let v = 0; 3 * v < off.x.length; v++) {
+      const d = Math.hypot(off.x[3 * v]! - hvv.x[3 * v]!, off.x[3 * v + 1]! - hvv.x[3 * v + 1]!, off.x[3 * v + 2]! - hvv.x[3 * v + 2]!);
+      if (d > 2 * tol) over++;
+      if (d > gap) { gap = d; at = v; }
+    }
+    lines.push(`tick ${tick}: Newton identity ${off.record.newton} (done ${+off.record.done}), H_vv ${hvv.record.newton} (done ${+hvv.record.done}); ends ${(1e6 * gap).toFixed(3)} um apart at vertex ${at}, ${over} vertices past 2 tol`);
+    console.log(`[ladder 2c] ${lines.at(-1)}`);
+    assert.ok(off.record.done && hvv.record.done, `tick ${tick}: a run did not converge in 150 iterations (identity ${off.record.newton}, H_vv ${hvv.record.newton})`);
+    if (!(gap <= 2 * tol)) fails.push(`tick ${tick}: the identity and H_vv ends are ${(1e6 * gap).toFixed(3)} um apart at vertex ${at} (bound 2 um)`);
+  }
+  assert.deepEqual(fails, []);
 }));
 
 // ---------------------------------------------------------------- 3. PCG cost

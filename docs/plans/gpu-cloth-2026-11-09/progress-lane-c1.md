@@ -2512,3 +2512,90 @@ It still halts with these fixes, so the todo's attribution to the C1 done rule d
 **Gate** (HEAD ad95092e plus this commit; cloth-ladder, -gpu-solver, -analytic, contact ladder / gpu / body):
 69 tests, 68 pass, 0 fail, 1 todo (C2's H_vv sphere). check:types clean. test:unit: 2 foreign failures
 (paused-rigid-publication, reservoir-particle-cost) and C2's face-360 todo.
+
+## 2026-11-10 RESULT (43): t15/t25 on the armed done rule; ladder 2c (the metric check) fails, the step's result depends on the path; stage (i) on the GPU does not converge
+
+**Counts on 284149af against the sample-face-pair oracle** (A at BDF2, BODY=field, SAMPLES=1; oracle counts are
+index + 1):
+
+| state | GPU | oracle | ratio | oracle sample-face pairs |
+|---|---|---|---|---|
+| kc 9668 t5 | 23 | 16 | 1.44x | 4081 |
+| kc 9668 t15 | 72 | 23 | 3.1x | 87065 |
+| kc 9668 t25 | no (150, \|g\|/\|mg\| 184) | 43 | >3.5x | 114930 |
+| kc 100 t5 | 19 | 15 | 1.27x | 4165 |
+| kc 100 t15 | 53 | 33 | 1.6x | 100808 |
+| kc 100 t25 | no (150) | (not run) | | |
+
+The 1.5x bar holds at t5 only.
+
+t15 end states, GPU against the oracle:
+
+| | median | max | vertices past 100 um |
+|---|---|---|---|
+| kc 9668 | 22 um | 2.3 mm | 243 |
+| kc 100 | 100 um | 8.4 mm | 513 |
+
+The GPU converges to a different contact solution, not just more slowly.
+
+**Ladder 2c (Claude's metric check), committed as a todo.** On the 16^2 sphere, from the published states at ticks 20
+and 40, one step under each projection metric. The caps are 150; Newton stops at a 1 um move.
+
+| | tick 20 | tick 40 |
+|---|---|---|
+| Newton, identity / H_vv | 145 / 132 | 91 / 98 |
+| ends apart (max) | 0.96 mm | 1.70 mm |
+| vertices past 2 um | 203 of 256 | 202 of 256 |
+
+Both runs end done. The result depends on the path, not just on the problem.
+
+- **Determinism.** Identity against identity is bit-identical (0 um), so this is not GPU nondeterminism.
+- **Where the residual sits.** At done |g|/|mg| is 1.8e-2 (tick 20) and 3.8e-3 (tick 40); the scene's residualTolerance
+  is 1e-5. alpha at done is 0.5 and 1/64, with no held, active or kept vertices at tick 20. The gradient sits wholly on
+  vertices the sphere's surface samples hold: v120 has 73 % of it, through 13 sampleFace entries, all feature 6 (the
+  face). No vertex's entries reach the cap K = 128 (max 15).
+- **Ruled out, each by an ablation on the same check.**
+  - Friction: with mu 0 the ends are still 2.86 / 0.19 mm apart.
+  - The strain-limit duals: frozen, still 0.85 mm.
+  - The done rule's exemption: counting every binding certificate as held, still 0.15 / 1.69 mm, and H_vv no longer
+    converges at tick 40.
+- **Reading.** Two different points both pass the move test at a gradient 3-4 orders above the residual tolerance, on
+  vertices pressed by many stiff sample-face barriers. Either the move test accepts points that are not stationary
+  (the stiff barrier makes |d| small while g stays large), or the step problem has several minima over the
+  discrete-sample "bed of nails" (~9 mm sample spacing against r = 1 mm). The next measurement tells these apart: the
+  Float64 objective's minimum from each GPU end, with the same entries.
+
+**The stage (i)/(ii) switches.**
+- C2's 8d076e74 adds solver.contactFreeze 'mandatory', contactTravelBound 'off' and readContactEntries.
+- This commit adds newton.activeSet 'on' | 'off'. 'off' drops nwApply's active-set write, so no normals are stored and
+  P = I. The default is HEAD's WGSL string for string (a CPU test). An unknown value fails explicitly.
+
+**Stage (i) on the GPU does not converge** (16^2 sphere, tick 20, cap 150):
+
+| setting | Newton | alpha at the end | \|g\|/\|mg\| | ends apart, identity / H_vv |
+|---|---|---|---|---|
+| frozen set (travel bounds and active set on) | no | 0 (a stall), 8 active | 12.7 / 14.8 | 2.6 mm |
+| frozen set + frozen duals | no | 0 | 12.5 | 2.0 mm |
+| stage (i): frozen set, travel off, active set off, frozen duals | no | 1 | 17.5 / 16.4 | 9.0 mm |
+| stage (i) with the duals stepped | no | 1 | 2.3e3 | |
+
+In the last row 99 % of the gradient sits on two low vertices (y 0.11-0.19 m) that have no contact entries.
+
+- The frozen mandatory-round set is therefore no working baseline on this scene.
+- The likely cause: the frozen sampleFace entries keep their detection-time feature with unclamped barycentrics while
+  the rotating sphere carries the samples, and contacts that start during the step have no entries at all. That needs
+  confirming.
+- The oracle's like-for-like comparison has to come from a GPU readContactEntries dump fed to the Float64 objective,
+  not from a GPU run on a frozen set.
+
+**Next:**
+1. Take each ladder-2c GPU end with its entries (readContactEntries) to Float64. Find whether either is stationary in the
+   Float64 objective (a projected-gradient check), and minimise from both ends with the entries fixed. This decides
+   "false done" against "two minima".
+2. Only then stages (ii)/(iii).
+
+No 150^2 acceptance.
+
+**Gate** (HEAD 8d076e74 plus this commit; cloth-ladder with 2c, -gpu-solver, -analytic, contact ladder / gpu / body):
+74 tests, 72 pass, 0 fail, 2 todo (ladder 2c above; C2's H_vv sphere). check:types clean; test:unit 2 foreign
+failures (paused-rigid-publication, reservoir-particle-cost).

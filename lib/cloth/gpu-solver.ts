@@ -88,7 +88,7 @@ export interface ClothGPUSolverOptions {
 
 export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
-export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0, trustRegion: 'off' as 'off' | 'hybrid' });
+export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0, trustRegion: 'off' as 'off' | 'hybrid', activeSet: 'on' as 'on' | 'off' });
 
 export interface ClothStatusSlot {
   readonly step: number;
@@ -454,6 +454,7 @@ export class ClothGPUSolver {
     if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0 && this.newton.velocityTolerance_m_s >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
     if (!(this.newton.forcingMax >= 0 && this.newton.forcingMax < 1)) throw new Error(`Cloth Newton forcingMax must be in [0, 1), got ${this.newton.forcingMax}`);
     if (this.newton.trustRegion !== 'off' && this.newton.trustRegion !== 'hybrid') throw new Error(`Unknown cloth Newton trustRegion ${String(this.newton.trustRegion)}`);
+    if (this.newton.activeSet !== 'on' && this.newton.activeSet !== 'off') throw new Error(`Unknown cloth Newton activeSet ${String(this.newton.activeSet)}`);
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
     if (options.contact && !(options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
       throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
@@ -541,7 +542,7 @@ export class ClothGPUSolver {
       ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : [])] });
     // The PCG reductions take two subgroupAdds where the device has subgroups of at least 16 lanes (256 / 16 partials).
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid' }) });
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on' }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
