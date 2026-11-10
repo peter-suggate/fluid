@@ -70,6 +70,13 @@ function analyticWith(data: ClothTopologyData, duration_s: number, extent_m = 0.
   return scene;
 }
 
+/**
+ * The free strip twin's authored plane records per vertex: its measured peak, 16.04 per vertex (2358 records in one
+ * filter at tick 2 on 9aa9b596, under a pool that does not bind; 16.0 with 96 per vertex), plus the scenes' margin of
+ * about 10 % (18 x 147 = 2646, 12 % over the peak). Snapping back from 1.5x within one frame the strip compresses below
+ * rest, so its neighbourhood comes within the rest-altitude envelope cap.
+ */
+const FREE_STRIP_RECORDS = 18;
 const e2 = (x: number) => (x === undefined ? '-' : x.toExponential(1));
 interface TickReport { tick: number; y: number; vy: number; minY: number; intersections: number; solidIntersections: number; records: number; recordsTotal: number; held: number; heldVertices: number; conflicts: number; datPairs: number; rounds: number; status: string }
 
@@ -174,7 +181,7 @@ test('ladder: a 16 x 16 sheet lands on the rotating sphere: nothing intersects o
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
 }));
 
-test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip') }, async () => withDevice(async device => {
+test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity, its free twin at its authored capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip') }, async () => withDevice(async device => {
   // C1's ladder-2 strip (tests/cloth-ladder.test.ts) with the default plane-record capacity: the Peirce ledge (top 0.5 m,
   // edge at x = 0), 5 mm cells, 5 mm above it, stretched 1.5x along its length about the ledge edge. Twin: the same
   // strip in free space (the free-fall scene, 1.2 m above its floor), where only the strain limit acts.
@@ -190,7 +197,9 @@ test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a led
     solver: { integrator: 'bdf2', newton }, geometry: { kind: 'inline', data } }] });
   assert.deepEqual(validateScene(scene), []);
   const free = analyticWith(strip(1.2).data, 1, 1.6);
-  free.cloth = [{ ...free.cloth![0]!, materials: [material] }];
+  // The free twin's authored pool (FREE_STRIP_RECORDS); overflow still holds vertices, which the test fails.
+  const freeRecords = Number(process.env.CLOTH_LADDER_STRIP_FREE_RECORDS ?? FREE_STRIP_RECORDS);
+  free.cloth = [{ ...free.cloth![0]!, materials: [material], solver: { ...free.cloth![0]!.solver!, contactPlaneRecordsPerVertex: freeRecords } }];
   const topology = prepareClothTopology(flat, [material]), mass = topology.mass_kg.reduce((a, b) => a + b, 0);
   // No edge force beyond moving the whole strip's mass through the whole initial excess length within one step (C1's bound).
   const h = CLOTH_SCENE_STEP_S, bound = mass * (stretch - 1) * (cols - 1) * cell / (h * h);
@@ -208,6 +217,7 @@ test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a led
   const out = await ladder(device, 'strip 3 x 49', scene, ticks, probe('ladder-strip', lam, strain));
   const twin = await ladder(device, 'strip 3 x 49 free', free, Math.min(ticks, 25), probe(free.cloth![0]!.id, freeLam, freeStrain));
   clean('strip', out); clean('strip free', twin);
+  console.log(`  strip free: plane-record peak ${Math.round(Math.max(...twin.track.map(t => t.records)) * rows * cols)} records in one filter, against ${freeRecords} x ${rows * cols}`);
   const at = (a: number[], ks: number[]) => ks.filter(k => k < a.length).map(k => a[k]!);
   const ks = [0, 1, 2, 4, 8, 12, 16, 24, ticks - 1];
   console.log(`  strip: max |lambda| ${at(lam, ks).map(e2).join(' ')} N (free ${at(freeLam, ks).map(e2).join(' ')}) at ticks ${ks.map(k => k + 1).join(' ')}; peak ${e2(Math.max(...lam))} N, momentum bound ${e2(bound)} N; `

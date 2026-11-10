@@ -2370,3 +2370,17 @@ compressed neighbourhood comes within the cap (gamma_r h_min is a rest altitude)
 - The rules allow authoring the strip document's pool from its measured peak. The test says
   "default capacity", so I left it failing rather than raise the pool myself.
 - Lowering datRound or tightening the caps would be tuning.
+
+## 2026-11-10 E12 fix: the free strip twin's pool authored from its measured peak
+
+The coordinator approved authoring the pool per scene. The free twin's measured peak is 2358 plane records in one
+filter at tick 2, 16.04 per vertex, measured under a pool that does not bind. The pool is set to
+FREE_STRIP_RECORDS = 18 per vertex, which is 2646 in all, 12 % over the peak. That is the scenes' margin of about 10 %.
+
+The test now reads "its free twin at its authored capacity" and still asserts zero holds. An overflow still holds
+vertices and fails it. The ledge strip stays at the default 16.
+
+The strip test is now 2/2 pass:
+- 0 held and 0 held for overflow;
+- lambda peak 0.35 N against the 1.0 N bound;
+- free strain 0.105, then 0.000.
