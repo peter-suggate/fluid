@@ -170,7 +170,7 @@ test('ladder: a 16 x 16 sheet lands on the rotating sphere', { skip: !runs('sphe
   clean('sphere', out);
 }));
 
-test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip'), todo: 'C2 next: the contracting strip needs 40-190 plane records a vertex in its first ticks (free in space too): the envelopes follow absolute motion, so co-moving neighbours pair; 315 held for overflow at 16N on (5), lambda 16 N against the 1.0 N bound (item 2, relative-motion path bounds)' }, async () => withDevice(async device => {
+test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip'), todo: 'C2 next: the contracting strip needs 40-190 plane records a vertex in its first ticks (free in space too); its pairs are within the two envelopes (6-40 mm) already at X, so relative-motion path bounds drop none (item 2, measured); 231-407 held for overflow at 16N on (5); needs envelopes or records sized to the mesh (progress-lane-c2.md)' }, async () => withDevice(async device => {
   // C1's ladder-2 strip (tests/cloth-ladder.test.ts) with the default plane-record capacity: the Peirce ledge (top 0.5 m,
   // edge at x = 0), 5 mm cells, 5 mm above it, stretched 1.5x along its length about the ledge edge. Twin: the same
   // strip in free space (the free-fall scene, 1.2 m above its floor), where only the strain limit acts.
