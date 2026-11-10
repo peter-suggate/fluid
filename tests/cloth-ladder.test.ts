@@ -27,13 +27,15 @@ import { herringBoneSheet } from '../lib/cloth/scenes/bridson-2002/mesh';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/scene-description';
 import { prepareClothTopology } from '../lib/cloth/topology';
-import { buildClothSolverModel, clothOracleStep, clothStepFrame, clothWarmStartDuals, createClothOracleState, type ClothSolverModel, type ClothStepOptions } from '../lib/cloth/oracle';
+import { CLOTH_AVBD, buildClothSolverModel, clothAddBendDamping, clothAddBending, clothAddFaceDamping, clothMembraneBlock, clothOracleStep, clothStepFrame, clothWarmStartDuals, createClothOracleState, type ClothSolverModel, type ClothStepOptions } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace, ClothCoarseCorrection, clothObjective } from '../lib/cloth/oracle-coarse';
 import { ClothGPUSolver, type ClothGPUSolverOptions } from '../lib/cloth/gpu-solver';
 import { CLOTH_NEWTON_SEGMENTS } from '../lib/cloth/gpu-newton-wgsl';
 import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
-import { buildClothSceneField, clothContactRadius, createClothSceneContact } from '../lib/cloth/scene-contact';
+import { buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactRadius, createClothSceneContact } from '../lib/cloth/scene-contact';
+import { decodeOgcContactEntry } from '../lib/cloth/contact/ogc-detector';
+import { clothSolidSamples, sampleClothSolidField } from '../lib/cloth/contact/solid-field';
 import type { ClothDocument, ClothNewtonSettings, ClothTopologyData } from '../lib/cloth/types';
 import {
   CLOTH_ANALYTIC_STEP_S, GRAVITY, bdf2FreeFall, clothAnalyticFreeFall, clothAnalyticFrictionIncline, clothAnalyticHangingCurtain,
@@ -419,6 +421,161 @@ test('ladder 1c: the hybrid trust region\'s model is the exact Hessian at a fixe
   assert.ok(found, 'no accepted trust-region iteration in Newton iterations 2..8 of step 10');
 }));
 
+// The GPU's objective at a fixed iterate, term by term against Float64 (RESULT 45). Every GPU contact entry of the
+// iterate (decodeOgcContactEntry) is evaluated in Float64 as ogcEntryLin does: the barrier ogcActivation(d; r, kc) on the
+// gap sum w_i x_i (a vertex-facet feature's unclamped barycentrics at x, ee at its stored s, t), friction mu lambda on the
+// slip sum wl_i (x_i - x_t,i) with weights and normal lagged at x_t. Unknown kinds fail explicitly.
+type V3 = [number, number, number];
+const sub3 = (a: readonly number[], b: readonly number[]): V3 => [a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!];
+const dot3 = (a: readonly number[], b: readonly number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+const unit3 = (a: readonly number[], fallback: readonly number[]): V3 => { const l = Math.hypot(a[0]!, a[1]!, a[2]!); return (l > 1e-30 ? [a[0]! / l, a[1]! / l, a[2]! / l] : [...fallback]) as V3; };
+const rot3 = (q: readonly number[]) => { const [x, y, z, w] = q as [number, number, number, number]; return [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w), 2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]; };
+const mulR = (R: readonly number[], p: readonly number[]): V3 => [0, 1, 2].map(i => R[3 * i]! * p[0]! + R[3 * i + 1]! * p[1]! + R[3 * i + 2]! * p[2]!) as V3;
+const mulRT = (R: readonly number[], p: readonly number[]): V3 => [0, 1, 2].map(j => R[j]! * p[0]! + R[3 + j]! * p[1]! + R[6 + j]! * p[2]!) as V3;
+function vtWeights(feature: number, p: V3, a: V3, b: V3, c: V3): number[] {
+  const w = [1, 0, 0, 0], X = [a, b, c];
+  if (feature < 3) w[1 + feature] = -1;
+  else if (feature < 6) { const i = feature - 3, j = (i + 1) % 3, dir = sub3(X[j]!, X[i]!), s = dot3(sub3(p, X[i]!), dir) / dot3(dir, dir); w[1 + i] = -(1 - s); w[1 + j] = -s; }
+  else {
+    const v0 = sub3(b, a), v1 = sub3(c, a), v2 = sub3(p, a), d00 = dot3(v0, v0), d01 = dot3(v0, v1), d11 = dot3(v1, v1), d20 = dot3(v2, v0), d21 = dot3(v2, v1), den = d00 * d11 - d01 * d01;
+    const bv = (d11 * d20 - d01 * d21) / den, bw = (d00 * d21 - d01 * d20) / den; w[1] = -(1 - bv - bw); w[2] = -bv; w[3] = -bw;
+  }
+  return w;
+}
+
+test('ladder 1d: at a fixed iterate of a restarted contact step on the 16^2 sphere, the GPU gradient is the Float64 implicit-Euler objective\'s, term by term (inertia, membrane, damping, bending, strain limit, each contact kind)', { skip: !gpu }, async () => withDevice(async device => {
+  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), doc = base.cloth![0]!, H = CLOTH_SCENE_STEP_S, K = 6;
+  if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
+  // The first step that restarts BDF2 as implicit Euler (a contact onset in the step before it: RESULT 25).
+  let restartTick = 0;
+  { const cloth = await ClothSystem.create(device, base, { statusInterval: 1 }), solver = cloth.solverFor(doc.id)!;
+    try { for (let t = 1; t <= 40 && !restartTick; t++) { assert.ok(cloth.stepTo(t * H), `step ${t} refused: ${cloth.failure?.message ?? 'pending'}`); if ((await solver.readStatus()).restarts > 0) restartTick = t; } }
+    finally { cloth.destroy(); } }
+  assert.ok(restartTick > 1, 'no contact restart in the sphere\'s first 40 steps');
+  const start = (await captureScene(device, base, [restartTick - 1])).frames[0]![0]!;
+  if (!start.velocities_m_s || !start.solverState) throw new Error('the publication carries no velocities or solver state');
+  const scene = (iterations: number) => ({ ...base, cloth: [{ ...doc, solver: { ...doc.solver!, newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations } },
+    geometry: { kind: 'inline' as const, data: { ...doc.geometry.data, initialPositions_m: Array.from(start.positions_m), initialVelocities_m_s: Array.from(start.velocities_m_s!), solverState: start.solverState } } }] });
+  type Reader = { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer; state: GPUBuffer; tables: { edgeDualRecord: number }; E: number };
+  // Deterministic runs to K - 1 and K iterations: the first ends at x_{K-1} with the entries and duals iteration K - 1's
+  // gradient reads, the second's g segment holds that gradient.
+  const at = async (iterations: number) => {
+    const cloth = await ClothSystem.create(device, scene(iterations), { statusInterval: 1 }), solver = cloth.solverFor(doc.id)!, r = solver as unknown as Reader;
+    try {
+      assert.ok(cloth.stepTo(start.time_s + H), `the step from tick ${restartTick - 1} was refused: ${cloth.failure?.message ?? 'pending'}`);
+      const rec = await newtonOf(solver), status = await solver.readStatus(), x = Float64Array.from(await solver.readPositions()), N = x.length / 3;
+      const g = new Float32Array(await r.readRange(r.newtonWork, 0, 16 * N)), duals = new Float32Array(await r.readRange(r.state, 16 * r.tables.edgeDualRecord, 16 * r.E));
+      const det = cloth.contactFor(doc.id)!, entries = await det.readContactEntries();
+      return { rec, restarts: status.restarts, x, g, duals, entries, S: det.solidSamples, facets: det.facetCapacity, edge: det.topology.layout.maxEdgeLength, origin: cloth.renderSources[0]!.origin_m };
+    } finally { cloth.destroy(); }
+  };
+  const prev = await at(K - 1), cur = await at(K);
+  assert.deepEqual([prev.rec.newton, cur.rec.newton, prev.restarts, cur.restarts], [K - 1, K, 1, 1], 'both runs restart and run to their caps');
+  // Float64 at x_{K-1}: the step frame of each integrator, the GPU's duals.
+  const model = buildClothSolverModel(prepareClothTopology(doc.geometry.data, doc.materials), doc.materials, doc.scripts ?? []), t = model.topology, N = t.vertexCount, ss = start.solverState;
+  const frameOf = (integrator: 'implicit-euler' | 'bdf2') => {
+    const st = createClothOracleState(model, start.positions_m, start.velocities_m_s);
+    st.vPrev.set(ss.previousVelocities_m_s); st.dxPrev.set(ss.previousDisplacements_m); st.previousStep_s = Math.fround(ss.previousStep_s) === Math.fround(H) ? H : ss.previousStep_s;
+    const gv = base.fluid.gravity_m_s2;
+    return clothStepFrame(model, st, { dt_s: H, gravity_m_s2: [gv.x, gv.y, gv.z], integrator, iterations: 1, initialGuess: 'inertial' }).frame;
+  };
+  const euler = frameOf('implicit-euler'), bdf2 = frameOf('bdf2'), x = prev.x, o = prev.origin;
+  const pos = (i: number): V3 => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
+  const elastic = (frame: typeof euler, v: number) => {
+    const w = t.mass_kg[v]! / (frame.hEff * frame.hEff), inertia = [0, 1, 2].map(c => w * (x[3 * v + c]! - frame.y[3 * v + c]!)) as V3, Hs = new Array(9).fill(0) as never;
+    const membrane: V3 = [0, 0, 0], damping: V3 = [0, 0, 0], bending: V3 = [0, 0, 0], limit: V3 = [0, 0, 0];
+    for (let j = t.vertexFaceOffsets[v]!; j < t.vertexFaceOffsets[v + 1]!; j++) {
+      const f = t.vertexFaces[j]! >> 2, k = t.vertexFaces[j]! & 3;
+      const b = clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, k, pos(t.faces[3 * f]!), pos(t.faces[3 * f + 1]!), pos(t.faces[3 * f + 2]!));
+      for (let c = 0; c < 3; c++) membrane[c] += b.gradient[c]!;
+      clothAddFaceDamping(model, frame, f, k, pos, damping, Hs);
+    }
+    for (let j = t.vertexBendOffsets[v]!; j < t.vertexBendOffsets[v + 1]!; j++) { clothAddBending(t, t.vertexBends[j]!, pos, bending, Hs); clothAddBendDamping(model, frame, t.vertexBends[j]!, pos, bending, Hs); }
+    for (let j = t.vertexEdgeOffsets[v]!; j < t.vertexEdgeOffsets[v + 1]!; j++) {
+      const e = t.vertexEdges[j]! >> 2, eps = model.edgeStrainLimit[e]!; if (!(eps > 0)) continue;
+      const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, d = sub3(pos(v), pos(a === v ? b : a)), len = Math.hypot(...d), L = t.edgeRestLength_m[e]!;
+      const C0 = Math.hypot(...sub3([frame.x0[3 * a]!, frame.x0[3 * a + 1]!, frame.x0[3 * a + 2]!], [frame.x0[3 * b]!, frame.x0[3 * b + 1]!, frame.x0[3 * b + 2]!])) - (1 + eps) * L;
+      const force = Math.max(prev.duals[4 * e + 1]! * (len - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(C0, 0)) + prev.duals[4 * e]!, 0);
+      for (let c = 0; c < 3; c++) limit[c] += force * d[c]! / len;
+    }
+    return { inertia, membrane, damping, bending, limit, stiffness: w };
+  };
+  // Contact, cloth frame (x - origin), from the entries.
+  const { header, counts, entries } = prev.entries, KE = header[1]!, pf = new Float32Array(Uint32Array.from(header.slice(4, 8)).buffer);
+  const [rc, kc, selfMu, epsV] = [pf[0]!, pf[1]!, pf[2]!, pf[3]!];
+  const act = (d: number): V3 => { if (d >= rc) return [0, 0, 0]; const tau = rc / 2; if (d >= tau) return [0.5 * kc * (rc - d) ** 2, -kc * (rc - d), kc]; const k2 = kc * tau * (rc - tau); return [0, -k2 / d, k2 / (d * d)]; };
+  const f1y = (y: number) => y >= epsV ? 1 / y : 2 / epsV - y / (epsV * epsV);
+  const r = clothContactRadius(doc), field = buildClothSceneField(base, o, r), statics = clothSolidSamples(field, { r: rc, edge: prev.edge });
+  assert.equal(statics.length / 4, prev.S, 'the static samples rebuild as the detector holds them');
+  const body = base.rigidBodies[0]!, bodyField = buildClothBodyField(base, body, r), bodySamples = clothSolidSamples(bodyField, { r: rc, edge: prev.edge });
+  const poses = clothBodyPoses(body, o, ss.time_s, 1, H), R = poses.map(p => rot3(p.orientation)), C = poses.map(p => p.position);
+  const X = (v: number): V3 => [x[3 * v]! - o[0], x[3 * v + 1]! - o[1], x[3 * v + 2]! - o[2]];
+  const Xt = (v: number): V3 => [start.positions_m[3 * v]! - o[0], start.positions_m[3 * v + 1]! - o[1], start.positions_m[3 * v + 2]! - o[2]];
+  const sample = (i: number, body: boolean, k: number): V3 => {
+    if (!body) return [statics[4 * i]!, statics[4 * i + 1]!, statics[4 * i + 2]!];
+    const p = mulR(R[k]!, [bodySamples[4 * i]!, bodySamples[4 * i + 1]!, bodySamples[4 * i + 2]!]); return [p[0] + C[k]![0], p[1] + C[k]![1], p[2] + C[k]![2]];
+  };
+  const KINDS = ['field', 'bodyField', 'vf', 'sampleFace', 'ee'] as const, seen: Record<string, number> = {};
+  const contact = Array.from({ length: N }, () => ({ g: KINDS.map(() => [0, 0, 0] as V3), magnitude: 0, stiffness: 0 }));
+  const fieldTerm = (out: V3, phi: number, grad: readonly number[], slip: V3, nl: V3, ml: number) => {
+    const a = act(phi); let m = 0; for (let c = 0; c < 3; c++) { out[c] += a[1] * grad[c]; m += Math.abs(a[1] * grad[c]); }
+    if (ml > 0) { const u = sub3(slip, nl.map(q => q * dot3(nl, slip))), fy = f1y(Math.hypot(...u)); for (let c = 0; c < 3; c++) { out[c] += ml * fy * u[c]!; m += Math.abs(ml * fy * u[c]!); } }
+    return { m, k: a[2] * dot3(grad, grad) };
+  };
+  for (let v = 0; v < N; v++) for (let k = 0; k < counts[v]!; k++) {
+    const e = decodeOgcContactEntry(entries.subarray(4 * (v * KE + k), 4 * (v * KE + k) + 4), N, prev.S, prev.facets), q = KINDS.indexOf(e.kind as never);
+    if (q < 0) throw new Error(`ladder 1d: no Float64 form for a ${e.kind} entry`);
+    seen[e.kind] = (seen[e.kind] ?? 0) + 1;
+    const out = contact[v]!.g[q]!; let term: { m: number; k: number };
+    if (e.kind === 'field') {
+      const s = sampleClothSolidField(field, X(v)), st = sampleClothSolidField(field, Xt(v));
+      term = fieldTerm(out, s.phi, s.grad, sub3(X(v), Xt(v)), unit3(st.grad, unit3(s.grad, [0, 0, 0])), e.muLambda);
+    } else if (e.kind === 'bodyField') {
+      const s = sampleClothSolidField(bodyField, mulRT(R[1]!, sub3(X(v), C[1]!))), yt = mulRT(R[0]!, sub3(Xt(v), C[0]!)), carried = mulR(R[1]!, yt);
+      term = fieldTerm(out, s.phi, mulR(R[1]!, s.grad), sub3(X(v), [carried[0] + C[1]![0], carried[1] + C[1]![1], carried[2] + C[1]![2]]), mulR(R[1]!, unit3(sampleClothSolidField(bodyField, yt).grad, unit3(s.grad, [0, 0, 0]))), e.muLambda);
+    } else if (e.kind === 'ee' || e.kind === 'vf' || e.kind === 'sampleFace') {
+      let ids: number[], P: V3[], Pt: V3[], w: number[], wl: number[], ml: number;
+      if (e.kind === 'ee') {
+        ids = [t.edges[4 * e.e0]!, t.edges[4 * e.e0 + 1]!, t.edges[4 * e.e1]!, t.edges[4 * e.e1 + 1]!]; P = ids.map(X); Pt = ids.map(Xt);
+        w = [1 - e.s, e.s, -(1 - e.t), -e.t]; wl = w; ml = selfMu * e.lambda;
+      } else {
+        const tri = [t.faces[3 * e.face]!, t.faces[3 * e.face + 1]!, t.faces[3 * e.face + 2]!];
+        if (e.kind === 'sampleFace') { ids = [-1, ...tri]; P = [sample(e.sample, e.body, 1), ...tri.map(X)]; Pt = [sample(e.sample, e.body, 0), ...tri.map(Xt)]; ml = e.muLambda; }
+        else { ids = [e.vertex, ...tri]; P = ids.map(X); Pt = ids.map(Xt); ml = selfMu * e.lambda; }
+        w = vtWeights(e.feature, P[0]!, P[1]!, P[2]!, P[3]!); wl = vtWeights(e.feature, Pt[0]!, Pt[1]!, Pt[2]!, Pt[3]!);
+      }
+      const gap = [0, 1, 2].map(c => w.reduce((s, wi, i) => s + wi * P[i]![c]!, 0)) as V3, d = Math.hypot(...gap), n = gap.map(z => z / d) as V3, a = act(d);
+      const wr = ids.reduce((s, id, i) => s + (id === v ? w[i]! : 0), 0), wrl = ids.reduce((s, id, i) => s + (id === v ? wl[i]! : 0), 0);
+      let m = 0; for (let c = 0; c < 3; c++) { out[c] += a[1] * wr * n[c]; m += Math.abs(a[1] * wr * n[c]); }
+      if (ml > 0) {
+        const slip = [0, 1, 2].map(c => wl.reduce((s, wi, i) => s + wi * (P[i]![c]! - Pt[i]![c]!), 0)) as V3, nl = unit3([0, 1, 2].map(c => wl.reduce((s, wi, i) => s + wi * Pt[i]![c]!, 0)), n);
+        const u = sub3(slip, nl.map(z => z * dot3(nl, slip))), fy = f1y(Math.hypot(...u)); for (let c = 0; c < 3; c++) { out[c] += ml * wrl * fy * u[c]!; m += Math.abs(ml * wrl * fy * u[c]!); }
+      }
+      term = { m, k: a[2] * wr * wr };
+    } else throw new Error(`ladder 1d: no Float64 form for a ${e.kind} entry`);
+    contact[v]!.magnitude += term.m; contact[v]!.stiffness += term.k;
+  }
+  // Per vertex: |g_GPU - g_F64| within the f32 floor of the terms' sum and of the positions the terms read,
+  // 64 eps32 (sum |terms| + (m / h~^2 + contact stiffness) max |x - origin|).
+  let Xmax = 0; for (let v = 0; v < N; v++) Xmax = Math.max(Xmax, Math.hypot(...X(v)));
+  const compare = (frame: typeof euler) => {
+    let worst = 0, at = -1;
+    for (let v = 0; v < N; v++) {
+      if (t.groups[v]! > 0) continue;
+      const el = elastic(frame, v), terms = [el.inertia, el.membrane, el.damping, el.bending, el.limit, ...contact[v]!.g];
+      const total = [0, 1, 2].map(c => terms.reduce((s, q) => s + q[c]!, 0)), gv = [cur.g[4 * v]!, cur.g[4 * v + 1]!, cur.g[4 * v + 2]!];
+      const floor = 64 * 2 ** -23 * (terms.reduce((s, q) => s + Math.abs(q[0]!) + Math.abs(q[1]!) + Math.abs(q[2]!), 0) + contact[v]!.magnitude + (el.stiffness + contact[v]!.stiffness) * Xmax);
+      const ratio = Math.hypot(...sub3(gv, total)) / floor; if (ratio > worst) { worst = ratio; at = v; }
+    }
+    return { worst, at };
+  };
+  const E = compare(euler), B = compare(bdf2);
+  console.log(`[ladder 1d] restart at step ${restartTick}, iterate ${K - 1}: entries ${JSON.stringify(seen)}; max |g_GPU - g_F64| / f32 floor: implicit Euler ${E.worst.toFixed(3)} (v${E.at}), BDF2 ${B.worst.toExponential(2)} (v${B.at})`);
+  assert.ok(Object.keys(seen).length > 0, 'the iterate holds contact entries');
+  assert.ok(E.worst <= 1, `the GPU gradient leaves the Float64 implicit-Euler objective's at v${E.at} by ${E.worst} f32 floors`);
+  assert.ok(B.worst > 10, 'the restarted step\'s objective is not BDF2\'s (the frame matters at this iterate)');
+}));
+
 // ---------------------------------------------------------------- 2. the dual rule
 
 test('ladder 2: a strip starting stretched past its strain limit lands half on a ledge: the duals stay bounded and it comes to rest at its exact hanging strain', { skip: !gpu }, async t => withDevice(async device => {
@@ -511,7 +668,7 @@ test('ladder 2b: the cap-aware done rule: with a velocity tolerance so loose tha
  * after 150 iterations the largest |P g_v| is 14x its f32 floor, and the ends are 0.96 mm apart. The Float64 objective
  * (the oracle's frozen pairs, the sample-face pairs included) has one minimiser from x0 and from both GPU ends (within
  * 0.41 um), 15.8 mm from them. So the GPU stalls short of a unique solution: there are not several minima. */
-const METRIC_TODO = "C1 open: on the 16^2 sphere Newton stalls 14x above the f32 KKT floor at tick 20 (ends 0.96 mm apart); the Float64 minimiser is unique, 15.8 mm away (RESULT 44)";
+const METRIC_TODO = "C1 open: on the 16^2 sphere Newton stalls 14x above the f32 KKT floor at tick 20 (ends 0.96 mm apart); with the duals frozen both converge; the Float64 implicit-Euler minimiser (the step restarts) is 0.96 mm from them (RESULT 45)";
 
 /** One step of the 16^2 rotating sphere from the published state at `tick`, under `solver` (caps and tolerances
  * replaced); the result and the step's Newton record. */

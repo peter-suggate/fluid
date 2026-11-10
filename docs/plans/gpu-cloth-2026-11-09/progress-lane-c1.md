@@ -2660,3 +2660,82 @@ Claude's rulings on (43):
 unique on this state.
 
 **Gate** (HEAD a3d820ea plus this commit): 74 tests, 72 pass, 0 fail, 2 todo (ladder 2c; C2's H_vv sphere).
+
+## RESULT (45): the corner gap was in the Float64 reference, not on the GPU (Claude's ruling 1 on RESULT 44)
+
+**Method: one fixed state, no Newton loop.**
+- Scratch export: 1bc56288 with the duals frozen. nwGradient wrote each term's g_v into a debug region every iteration,
+  with the position it read and the iteration. One compile and one run, so the terms and the total come from the same
+  iterate.
+- Terms: inertia, membrane, face damping, bending (with bend damping), strain limit, pins, and contact split by entry kind
+  (field, bodyField, vf, sampleFace, ee).
+- Float64 side: the oracle helpers at that x with the GPU's dual records. Contact used the GPU's decoded entries,
+  evaluated as ogcEntryLin does: static samples rebuilt as the detector builds them, body samples posed at the step's
+  two poses, friction lagged at x_t.
+
+**On the 16^2 sphere at tick 20, iterate 149:** every term matches once the step frame is right.
+
+| term | max \|GPU − F64\| (implicit Euler frame) | max \|F64\| |
+|---|---|---|
+| inertia | 2.3e-6 | 1.2 |
+| membrane | 6.3e-6 | 7.0 |
+| damping | 6.7e-8 | 0.26 |
+| bending | 1.5e-9 | 1.2e-2 |
+| strain limit | 1.2e-5 | 3.8 |
+| sampleFace | 7.8e-4 | 9.7 |
+| total | 7.7e-4 (v136) | 7.3e-2 (\|g_GPU\|) |
+
+- The sampleFace and total differences are f32 rounding of positions times the barrier stiffness (kc 2e4 N/m, \|x\| about 0.3 m).
+- **No self pairs:** the iterate holds 0 vf and 0 ee entries (93 sampleFace and 2 field only). The suspicion of self
+  pairs at a folding corner is ruled out.
+- **The corner is not free.** Vertices 193, 194, 209, 210, 225 and 226 carry static sample-face forces of 0.3-2.3 N:
+  the static solid's samples at its sharp edges against the cloth faces. Vertices 192, 208 and 224 carry none.
+
+**The Float64 reference had two errors.**
+1. **Wrong integrator.** This step restarts BDF2 as implicit Euler (RESULT 25: a contact onset in the step before it).
+   - The GPU solved the implicit-Euler objective (h~ = h, y = x + h v + h^2 g). The oracle solved BDF2's.
+   - Under BDF2 the GPU's inertia is off by up to 1.4 at the corner (GPU / F64 0.44 = (2/3)^2) and damping by 0.29.
+     Under implicit Euler they agree to 2e-6.
+2. **Missing contact.** The oracle's SAMPLES=1 built sample-face pairs from the moving body's samples only. It left out
+   the static solid's 3973 samples, so it had no contact at the corner.
+
+**Fixed oracle, RESULT 44's frozen-dual state** (sphere-16-t20fd: implicit Euler, static and body samples, from x0):
+- The oracle's own Newton converges in 46 iterations (CONVERGED at n46).
+- Its end is 0.96 mm from the GPU's identity end and 1.02 mm from its H_vv end. Was 12.5 mm.
+- Median 22 um. Was 2.2 mm.
+- Under BDF2 with the static samples the gap is 9.4 mm, so the integrator alone accounts for most of it.
+- What remains is up to 1 mm on the static sample-face vertices (v193 holds 11 entries). The oracle's pairs are fixed at
+  x0, all samples within rc, while the GPU's are re-detected each round. That comparison is stage (ii)/(iii): it needs
+  the GPU's entries inside the Float64 objective.
+- **RESULT 44's "Float64 minimiser 15.8 mm from the GPU ends, the gap on the free corner" is withdrawn.** It compared the
+  GPU against a different objective.
+
+**Restarts are frequent.**
+- On the 16^2 sphere at HEAD 850ebfff, 11 of the first 20 steps run as implicit Euler. Contact starts at tick 3 and the
+  first restart is at step 4.
+- Any Float64 like-for-like comparison on a contact scene must take each step's frame from the GPU, not assume BDF2.
+- The tick 20 -> 21 step is BDF2 at HEAD but restarted in the 1bc56288 scratch build. The trajectory is chaotic in f32:
+  that build's tick-20 state is 24 mm from the earlier one.
+
+**Also seen: the KKT stop is marginal.**
+- The scratch build with the debug writes, otherwise identical arithmetic, did not converge in 150 iterations on its
+  frozen-dual state, where the uninstrumented build had stopped at 82.
+- That is evidence for ruling 2: the stop sits at the edge of the f32 floor.
+
+**Regression: ladder 1d** (tests/cloth-ladder.test.ts).
+- Steps the 16^2 sphere one tick at a time to its first restarted step (step 4). Captures the tick before it.
+- Runs that step deterministically to K − 1 = 5 and K = 6 Newton iterations, both restarted:
+  - run 5 gives x_5, the dual records and the contact entries;
+  - run 6's g segment gives g(x_5).
+- Evaluates the Float64 objective at x_5 term by term: the oracle's elastic helpers, plus every decoded entry kind
+  (field, bodyField, vf, sampleFace, ee). Any other kind fails explicitly.
+- Holds every free vertex to 64 eps32 (sum \|terms\| + (m/h~^2 + contact stiffness) max \|x\|).
+- Results at HEAD: implicit Euler 0.57 floors (v135), BDF2 161 floors. The test also asserts BDF2 is more than 10
+  floors off, so the frame provably matters at this iterate.
+- No GPU code changed: there was no GPU term to fix.
+
+**Ladder 2c's todo note** now cites RESULT 45 instead of RESULT 44's 15.8 mm. The stall it records, 14x the floor with
+live duals, is ruling 2's question.
+
+**Gate** (HEAD 850ebfff plus this commit): 76 tests, 74 pass, 0 fail, 2 todo (ladder 2c; C2's H_vv sphere).
+`npm run check:types` is clean. `npm run test:unit`: 2134 tests, 0 fail.
