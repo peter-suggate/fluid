@@ -17,13 +17,13 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { OgcContactDetector, type OgcContactConfig } from "../lib/cloth/contact/ogc-detector";
 import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
 import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
-import { buildClothSolidField, clothSolidClearance, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, clothSolidClearance, clothSolidSampleFacets, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import { CLOTH_SCENE_STEP_S, ClothSystem } from "../lib/cloth/system";
 import { clothAnalyticFreeFall } from "../lib/cloth/scenes/analytic/scenes";
 import { clothAnalyticSceneDescription } from "../lib/cloth/scenes/analytic/scene-description";
 import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
-  motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
+  motionPenetrates, norm, planarTruncate, pointTriangleDistance, rng, scale, sheet, sub, vertexForceHessian, add,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate,
   bruteForceProjection, conViolation, metricProjection, projectionCase, projectionCaseCons, projectionKkt, randomMetric, shrinkCons, solidPieceCons, type ProjectionCase,
   type DatPair, type OracleContact, type OracleMesh, type V3,
@@ -1295,6 +1295,86 @@ async function detectWithSolid(device: GPUDevice, mesh: OracleMesh, vel: V3[], c
   await runPass(device, pass => { det.encodeFrameBegin(pass); det.encodeStepBegin(pass); det.encodeDetection(pass); });
   return { det, positions, oracle };
 }
+
+test("GPU hull facets: vertices over the ball keep the nearest of their field and facet entries, and the vertex block matches the oracle", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    // A sheet draped over the ball's top 1.0-1.4 mm off it (r = 2 mm): the field (cell 5 mm) misreads the sphere by up to
+    // a fraction of a millimetre, and where its phi reads farther than the samples' hull facets the facet is the nearer.
+    const field = solidField(), base = sheet(8, 6, 0.01), R = rng(31), N = base.x.length;
+    const mesh: OracleMesh = { ...base, x: f32(base.x.map((_, k) => {
+      const i = k % 9, j = Math.floor(k / 9), a = 0.6 * (j / 6 - 0.5), b = 0.6 * (i / 8 - 0.5), rb = 0.025 + 1.0e-3 + 4e-4 * R();
+      return [0.11 + rb * Math.sin(a), 0.05 + rb * Math.sin(b), rb * Math.cos(a) * Math.cos(b)] as V3;
+    })) };
+    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.004, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 };
+    const { det, positions, oracle } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
+    const c0 = await det.readCounters();
+    assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
+    const xdet = new Float32Array(await readBuffer(device, det.det));
+    const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
+    const S = det.solidSamples, samples: V3[] = [];
+    for (let s = 0; s < S; s++) samples.push([xdet[4 * (N + s)], xdet[4 * (N + s) + 1], xdet[4 * (N + s) + 2]]);
+    const facets = clothSolidSampleFacets(field, { r: config.r, edge: det.topology.layout.maxEdgeLength });
+    assert.equal(det.solidSampleFacets, facets.length / 3);
+    const corner = (k: number, c: number) => samples[facets[3 * k + c]];
+    const isFacet = (e: Entry) => e.w === 2 && (e.y & 0x80000000) === 0;
+    let withFacet = 0, withField = 0, nearer = 0;
+    for (let v = 0; v < N; v++) {
+      const x = mesh.x[v], d = Array.from({ length: facets.length / 3 }, (_, k) => pointTriangleDistance(x, corner(k, 0), corner(k, 1), corner(k, 2)));
+      const dmin = Math.min(...d), phi = sampleClothSolidField(field, x).phi;
+      const fe = lists[v].filter(isFacet), so = lists[v].filter(e => e.y === 0x70000000);
+      // One representation of the static solid.
+      assert.ok(fe.length + so.length <= 1, `vertex ${v}: ${fe.length} facet and ${so.length} field entries`);
+      if (fe.length) {
+        withFacet++;
+        const k = fe[0].y & 0x0fffffff;
+        assert.ok(k < det.facetCapacity && d[k] < config.r && d[k] <= dmin + 1e-7 && phi >= d[k] - 1e-6, `vertex ${v}: facet ${k} at ${d[k]} (nearest ${dmin}, phi ${phi})`);
+        // mu lambda: the barrier's force at d times the solid's mu (0.5 on the ball) at the samples.
+        const lambda = new Float32Array(new Uint32Array([fe[0].z]).buffer)[0], want = -activation(d[k], config.r, config.kc)[1] * 0.5;
+        assert.ok(Math.abs(lambda - want) <= 2e-3 * want, `vertex ${v}: mu lambda ${lambda} vs ${want}`);
+      }
+      if (so.length) withField++;
+      if (dmin < config.r - 1e-6 && phi > dmin + 1e-6) { nearer++; assert.equal(fe.length, 1, `vertex ${v}: facet at ${dmin} nearer than the field's ${phi}, no facet entry`); }
+    }
+    console.log(`  hull facets: ${facets.length / 3} facets, ${S} samples; ${withFacet} vertices hold a facet entry, ${withField} a field entry (of ${N}); counters ${c0.hfPairs} facet contacts, ${c0.hfDropped} dropped`);
+    assert.ok(nearer >= 10 && withFacet === nearer && c0.hfPairs >= withFacet && c0.hfDropped > 0, `${nearer} vertices nearer a facet, ${withFacet} with its entry`);
+    // The vertex block at positions nudged within a tenth of the clearance, against the oracle with the facet's samples.
+    const X = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 1e-4, p[1] + (R() - 0.5) * 1e-4, p[2] + (R() - 0.5) * 1e-4] as V3));
+    const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 2e-4, p[1] + (R() - 0.5) * 2e-4, p[2]] as V3));
+    const XS = [...X, ...samples], XtS = [...Xt, ...samples];
+    device.queue.writeBuffer(positions, 0, vec4s(X));
+    const res = await evalVertexBlock(device, det, positions, Xt, N);
+    const P = { r: config.r, k: config.kc, mu: config.mu, epsV: config.epsV, dt: config.dt };
+    for (let v = 0; v < N; v++) {
+      let f: V3 = [0, 0, 0], e = 0;
+      const H = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      for (const ent of lists[v]) {
+        const lambda = new Float32Array(new Uint32Array([ent.z]).buffer)[0];
+        let q: { f: V3; H: number[][] }, en: number;
+        if (ent.y === 0x70000000) { const sc = solidContact(field, X[v], Xt[v], lambda, P); q = sc; en = sc.e; }
+        else {
+          const k = ent.y & 0x0fffffff;
+          const c: OracleContact = isFacet(ent)
+            ? { kind: "vf", ids: [v, N + facets[3 * k], N + facets[3 * k + 1], N + facets[3 * k + 2]], feature: (ent.y >>> 28) & 7, s: 0, t: 0, lambda: lambda / config.mu }
+            : asOracleContact(ent, oracle);
+          // A sample-face entry carries mu lambda with the solid's mu too.
+          if (ent.w === 1 && (ent.y & 0x80000000) === 0) c.lambda /= config.mu;
+          q = vertexForceHessian(c, XS, XtS, P, c.ids.indexOf(v)); en = contactEnergy(c, XS, XtS, P);
+        }
+        f = [f[0] + q.f[0], f[1] + q.f[1], f[2] + q.f[2]]; e += en;
+        for (let i = 0; i < 3; i++) for (let k = 0; k < 3; k++) H[i][k] += q.H[i][k];
+      }
+      const fs = Math.max(1, Math.hypot(...f)), hs = Math.max(1, ...H.flat().map(Math.abs));
+      for (let k = 0; k < 3; k++) assert.ok(Math.abs(res[16 * v + k] - f[k]) <= 2e-3 * fs, `vertex ${v} f[${k}] ${res[16 * v + k]} vs ${f[k]}`);
+      assert.ok(Math.abs(res[16 * v + 3] - e) <= 2e-3 * Math.max(1e-6, Math.abs(e)) + 1e-9, `vertex ${v} energy ${res[16 * v + 3]} vs ${e}`);
+      for (let col = 0; col < 3; col++) for (let row = 0; row < 3; row++)
+        assert.ok(Math.abs(res[16 * v + 4 * (col + 1) + row] - H[row][col]) <= 2e-3 * hs, `vertex ${v} H`);
+    }
+    // Every DAT pair with a facet puts the vertex first and the facet's samples as its face.
+    const pairs = pairsOf(new Uint32Array(await readBuffer(device, det.pairs)), c0.peakPairSlots, oracle).map(g => g.pair);
+    assert.ok(pairs.some(p => p.ids[0] < N && p.ids[1] >= N && p.ids[2] >= N && p.ids[3] >= N), "vertex-facet DAT pairs");
+    det.destroy();
+  });
+});
 
 test("GPU static solid: entries, truncation terms, the vertex block and the truncated motion against the oracle", { skip: !gpu }, async () => {
   await withContactDevice(async device => {

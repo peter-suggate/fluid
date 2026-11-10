@@ -22,11 +22,11 @@ import { sampleRigidPoseTrack } from '../core/prescribed-rigid-motion';
 import { sceneCellSizes_m } from '../core/scene-lattice';
 import { applySolidBoxCuts } from '../core/solid-cuts';
 import { solidWorldContentStamp } from '../core/solid-world';
-import { OGC_HULL_EDGES_PER_SAMPLE, OgcContactDetector, type OgcBodyPose, type OgcContactConfig } from './contact/ogc-detector';
+import { OGC_HULL_EDGES_PER_SAMPLE, OGC_HULL_FACETS_PER_SAMPLE, OgcContactDetector, type OgcBodyPose, type OgcContactConfig } from './contact/ogc-detector';
 import { buildOgcTopology, type OgcMeshTopology } from './contact/ogc-topology';
 import { OGC_COUNTER, OGC_STATUS } from './contact/ogc-wgsl';
 import { clothSolidBand, clothSolidSourceForScene } from './contact/scene-solids';
-import { SOLID_SAMPLE_WORDS, buildClothSolidField, clothSolidSampleEdges, clothSolidSamples, type ClothSolidField } from './contact/solid-field';
+import { SOLID_SAMPLE_WORDS, buildClothSolidField, clothSolidSampleEdges, clothSolidSampleFacets, clothSolidSamples, type ClothSolidField } from './contact/solid-field';
 import { clothMembraneConstants, type ClothSolverModel } from './oracle';
 import type { ClothDocument, ClothVector } from './types';
 
@@ -183,13 +183,15 @@ export function buildClothSceneField(scene: SceneDescription, origin: ClothVecto
 }
 
 /**
- * A field's sample capacity, exactly: its sharp features' surface samples, or as many as its samples' hull edges need
- * (the detector stores up to OGC_HULL_EDGES_PER_SAMPLE edges per authored sample); a rounded body has many edges.
+ * A field's sample capacity, exactly: its sharp features' surface samples, or as many as its samples' hull edges and
+ * hull facets need (the detector stores up to OGC_HULL_EDGES_PER_SAMPLE edges and OGC_HULL_FACETS_PER_SAMPLE facets
+ * per authored sample); a rounded body has many edges.
  */
 function sampleCapacity(field: ClothSolidField, r: number, edge: number): number {
   const options = { r, edge };
   return Math.max(clothSolidSamples(field, options).length / SOLID_SAMPLE_WORDS,
-    Math.ceil(clothSolidSampleEdges(field, options).length / 2 / OGC_HULL_EDGES_PER_SAMPLE));
+    Math.ceil(clothSolidSampleEdges(field, options).length / 2 / OGC_HULL_EDGES_PER_SAMPLE),
+    Math.ceil(clothSolidSampleFacets(field, options).length / 3 / OGC_HULL_FACETS_PER_SAMPLE));
 }
 
 /** The detector's mesh and cloth-frame rest pose from the solver model. */

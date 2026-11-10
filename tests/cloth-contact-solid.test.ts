@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildClothSolidField, clothSolidClearance, clothSolidSampleEdges, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
+import { buildClothSolidField, clothSolidClearance, clothSolidSampleEdges, clothSolidSampleFacets, clothSolidSamples, rebuildClothSolidField, sampleClothSolidField, type ClothSolidPart, type ClothSolidSource } from "../lib/cloth/contact/solid-field";
 import {
   add, boxSdf, dot, faceInsideSolid, norm, rng, scale, solidBallBound, solidBoundDrop, solidContact, solidKeep, solidTruncate, sphereSdf, sub,
   type ContactParams, type V3,
@@ -349,24 +349,103 @@ test("exact face-in-solid oracle: a face cutting a box edge between outside vert
 // edge by about 2 mm, so a face can lie inside the true solid while the field reads it outside, and nothing keeps
 // it out. The planned fix is C2's (C), cloth-vertex vs sample-hull-facet pairs; this test then checks the contact
 // surface (the field or the samples' hull) instead of the field alone.
-test("solid soundness: face 360 of the Bridson rotating sphere at tick 49 (vertex 192 1.5 mm inside the true frustum) reads inside the contact surface", {
-  todo: "C2 known soundness defect: HEAD's trilinear field rounds the frustum's slanted edge ~2 mm, so face 360 passes 1.79 mm inside the true solid reading phi > 0; fix: (C) cloth-vertex vs sample-hull-facet pairs (progress-lane-c2.md)",
-}, async () => {
+// The nearest point of triangle (a, b, c) to p (Ericson, Real-Time Collision Detection 5.1.5).
+function closestOnTriangle(p: V3, a: V3, b: V3, c: V3): V3 {
+  const sub = (u: V3, v: V3): V3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const dot = (u: V3, v: V3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const at = (o: V3, d: V3, t: number): V3 => [o[0] + t * d[0], o[1] + t * d[1], o[2] + t * d[2]];
+  const ab = sub(b, a), ac = sub(c, a), ap = sub(p, a), d1 = dot(ab, ap), d2 = dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0) return a;
+  const bp = sub(p, b), d3 = dot(ab, bp), d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return b;
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return at(a, ab, d1 / (d1 - d3));
+  const cp = sub(p, c), d5 = dot(ab, cp), d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return c;
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return at(a, ac, d2 / (d2 - d6));
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) return at(b, sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6)));
+  const den = 1 / (va + vb + vc);
+  return at(at(a, ab, vb * den), ac, vc * den);
+}
+
+test("solid soundness: face 360 of the Bridson rotating sphere at tick 49 (vertex 192 1.79 mm inside the true frustum, the field reading it outside) lies inside the contact surface, the field and the samples' hull facets", async () => {
   const { bridson2002RotatingSphere } = await import("../lib/cloth/scenes/bridson-2002");
   const { bridson2002SceneDescription } = await import("../lib/cloth/scenes/bridson-2002/scene-description");
   const { clothContactBand } = await import("../lib/cloth/scene-contact");
   const { clothSolidSourceForScene } = await import("../lib/cloth/contact/scene-solids");
   const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }));
   const src = clothSolidSourceForScene(scene, { band_m: clothContactBand(1e-3), frameOrigin_m: [0, 0.64, 0] }), f = buildClothSolidField(src);
-  // The true solid: the union of the source's shaped (sdf) parts, the frustum among them.
-  const shaped = (src.parts ?? []).flatMap(p => (p.kind === "sdf" ? [p] : []));
-  const truth = (p: V3) => Math.min(...shaped.map(s => s.sdf(p)));
+  const truth = f.truth, S = clothSolidSamples(f), F = clothSolidSampleFacets(f), h = f.cell;
+  const P = (i: number): V3 => [S[4 * i]!, S[4 * i + 1]!, S[4 * i + 2]!];
+  const sub = (u: V3, v: V3): V3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const cross = (u: V3, v: V3): V3 => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  const dot = (u: V3, v: V3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  // The nearest facet to p: its distance, and the side of its (outward) plane p lies on.
+  const nearestFacet = (p: V3) => {
+    let d = Infinity, side = 0;
+    for (let t = 0; t < F.length / 3; t++) {
+      const a = P(F[3 * t]!), b = P(F[3 * t + 1]!), c = P(F[3 * t + 2]!), q = closestOnTriangle(p, a, b, c), dq = Math.hypot(...sub(p, q));
+      if (dq < d) { d = dq; side = dot(sub(p, a), cross(sub(b, a), sub(c, a))); }
+    }
+    return { d, inside: side < 0 };
+  };
   // The face's scene vertices as dumped; the cloth frame is the rest pose's box centre, (0, 0.64, 0).
   const V = [[-0.49594, 0.18363, 0.49512], [-0.57303, 0.28009, 0.51783], [-0.45847, 0.23810, 0.39021]].map(p => [p[0]!, p[1]! - 0.64, p[2]!] as V3);
   assert.ok(truth(V[0]!) < -1.5e-3, `vertex 192 lies ${truth(V[0]!)} m in the frustum`);
-  assert.ok(sampleClothSolidField(f, V[0]!).phi < 0, `vertex 192, ${truth(V[0]!)} m inside the frustum, reads phi ${sampleClothSolidField(f, V[0]!).phi} outside`);
+  // The field rounds the frustum's slanted edge: it reads vertex 192 outside. The facets stand on the
+  // true faces there, so vertex 192 lies behind its nearest facet by its true depth (to the ceiling h / 16).
+  assert.ok(sampleClothSolidField(f, V[0]!).phi > 0, "the field reads vertex 192 outside (the rounding the facets cover)");
+  const n192 = nearestFacet(V[0]!);
+  assert.ok(n192.inside && Math.abs(n192.d + truth(V[0]!)) <= h / 16, `vertex 192 (${truth(V[0]!)} m inside the frustum): its nearest facet ${n192.d} m away, ${n192.inside ? "behind" : "in front of"} it`);
+  // UI loading regression: floor samples across the concave base junction used to
+  // suppress the sloped face's hull, leaving its nearest facet over 2 cm away.
+  const base: V3 = [-0.84625, -0.55375, 0.47375], baseFacet = nearestFacet(base);
+  assert.ok(truth(base) < -h / 16 && sampleClothSolidField(f, base).phi >= 0);
+  assert.ok(baseFacet.inside && Math.abs(baseFacet.d + truth(base)) <= h / 16,
+    `the frustum base must retain its own supporting facet: ${JSON.stringify(baseFacet)}`);
+  // Every point of the face inside the true solid is inside the field or behind its nearest facet.
+  let behind = 0;
   for (let i = 0; i <= 64; i++) for (let j = 0; j <= 64 - i; j++) {
     const q = [0, 1, 2].map(a => (1 - i / 64 - j / 64) * V[0]![a]! + i / 64 * V[1]![a]! + j / 64 * V[2]![a]!) as unknown as V3;
-    if (truth(q) < 0) assert.ok(sampleClothSolidField(f, q).phi < 0, `face point ${q} inside the frustum reads outside the field`);
+    if (!(truth(q) < 0) || sampleClothSolidField(f, q).phi < 0) continue;
+    const n = nearestFacet(q);
+    assert.ok(n.inside, `face point ${q}, ${truth(q)} m inside the frustum, reads outside the field and in front of its nearest facet (${n.d} m)`);
+    behind++;
   }
+  assert.ok(behind > 0);
+});
+
+test("solid samples: the hull facets are wound outward, lie on or outside the source within the ceiling, and stand on the frustum's faces across the field's rounding (Bridson rotating sphere's static solid)", async () => {
+  const { bridson2002RotatingSphere } = await import("../lib/cloth/scenes/bridson-2002");
+  const { bridson2002SceneDescription } = await import("../lib/cloth/scenes/bridson-2002/scene-description");
+  const { clothContactBand } = await import("../lib/cloth/scene-contact");
+  const { clothSolidSourceForScene } = await import("../lib/cloth/contact/scene-solids");
+  const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }));
+  const src = clothSolidSourceForScene(scene, { band_m: clothContactBand(1e-3), frameOrigin_m: [0, 0.64, 0] }), f = buildClothSolidField(src);
+  const truth = f.truth, S = clothSolidSamples(f), F = clothSolidSampleFacets(f), h = f.cell;
+  const P = (i: number): V3 => [S[4 * i]!, S[4 * i + 1]!, S[4 * i + 2]!];
+  const sub = (u: V3, v: V3): V3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]];
+  const cross = (u: V3, v: V3): V3 => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+  const dot = (u: V3, v: V3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  assert.ok(F.length > 0 && F.length % 3 === 0);
+  let deepest = 0, outward = 0, along = 0;
+  for (let t = 0; t < F.length / 3; t++) {
+    const a = P(F[3 * t]!), b = P(F[3 * t + 1]!), c = P(F[3 * t + 2]!);
+    for (const w of [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1 / 3, 1 / 3, 1 / 3], [0.5, 0.5, 0], [0, 0.5, 0.5], [0.5, 0, 0.5]]) {
+      const q = [0, 1, 2].map(k => w[0]! * a[k]! + w[1]! * b[k]! + w[2]! * c[k]!) as unknown as V3;
+      deepest = Math.min(deepest, truth(q));
+    }
+    // Outward: the source lies behind the facet's plane, a cell in from its centroid along -N.
+    const n = cross(sub(b, a), sub(c, a)), nl = Math.hypot(...n);
+    if (!(nl > 0)) continue;
+    const m = [0, 1, 2].map(k => (a[k]! + b[k]! + c[k]!) / 3), u = n.map(v => v / nl);
+    const inner = truth(m.map((v, k) => v - 0.5 * h * u[k]!) as unknown as V3), outer = truth(m.map((v, k) => v + 0.5 * h * u[k]!) as unknown as V3);
+    if (outer > inner) outward++; else console.log(`# not outward: facet ${t} at ${m.map(v => v.toFixed(4))}, truth in ${inner.toExponential(2)} out ${outer.toExponential(2)}, n ${u.map(v => v.toFixed(3))}, altitude ${(nl / Math.max(Math.hypot(...sub(a, b)), Math.hypot(...sub(b, c)), Math.hypot(...sub(c, a)))).toExponential(2)}`);
+    along++;
+  }
+  console.log(`# ${S.length / 4} samples, ${F.length / 3} hull facets; deepest facet point ${deepest.toExponential(2)} m (ceiling ${(h / 16).toExponential(2)} m); outward ${outward} of ${along}`);
+  assert.ok(deepest >= -h / 16, `a facet point lies ${deepest} m inside the source, past the ceiling h / 16`);
+  assert.equal(outward, along, "every facet faces out of the source");
 });

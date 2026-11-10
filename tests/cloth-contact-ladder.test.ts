@@ -116,7 +116,7 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
       const status = [OgcContactDetector.describeStatus(c.status)].flat().join(",");
       track.push({ tick: k, y, vy, minY, intersections, solidIntersections, records: c.framePeakPlaneRecords / N, recordsTotal: c.planeRecordsTotal, held: c.planeRecordHeld, heldVertices: c.held, conflicts: c.conflicts, datPairs: c.datPairs, rounds: c.detections, status });
       console.log(`  tick ${k}: y ${(1000 * y).toFixed(2)} mm vy ${vy.toFixed(3)}; rounds ${c.detections - c.redetections}+${c.redetections} (levelled ${c.levelled}, fallback ${c.levelFallback}; conflicts no plane / closing ${c.levelConflicts.map(w => `${w & 0xffff} (${w >>> 16} solid)`).join(' / ')}) alpha ${+Number(ctl[2]).toPrecision(3)} newton ${ctl[3]} env ${e2(c.peakEnvelope)}; `
-        + `scan ${c.scanned}/${c.collisions}/${c.boxRejected}/${c.candidates} (max ${c.scanMax}); dat ${c.datPairs}; records ${(c.framePeakPlaneRecords / N).toFixed(1)}/v, ${c.planeRecordsTotal} summed; held ${c.held} (overflow ${c.planeRecordHeld}); conflicts ${c.conflicts}; `
+        + `scan ${c.scanned}/${c.collisions}/${c.boxRejected}/${c.candidates} (max ${c.scanMax}); dat ${c.datPairs}; records ${(c.framePeakPlaneRecords / N).toFixed(1)}/v, ${c.planeRecordsTotal} summed; held ${c.held} (overflow ${c.planeRecordHeld}); conflicts ${c.conflicts}; facets ${c.hfPairs}/${c.hfDropped} dropped; `
         + `x ${intersections}/${solidIntersections}; ${status}`);
       if (each) await each(cloth, c);
       if (rounds) for (const [i, r] of (await det.readRoundLog()).entries())
@@ -327,13 +327,17 @@ test('ladder: an 8 x 8 sheet lands on a slowly moving large sphere (the plate) a
 for (const metric of [false, true])
 test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)`, { skip: !runs('sphere'), ...(metric ? { todo: HVV_SPHERE_TODO } : {}) }, async () => withDevice(async device => {
   const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), scene = metric ? hvv(base) : base;
-  // CLOTH_LADDER_SPHEREDIAG=1: each tick, over every face (a 32-per-side barycentric lattice) and over the vertices, the
-  // least value of the static field the detector holds, and of the true frustum's signed distance (scene frame).
+  // Each tick, over every face (a 32-per-side barycentric lattice) and over the vertices, the least value of the static
+  // field the detector holds, and of the true frustum's signed distance (scene frame); printed with
+  // CLOTH_LADDER_SPHEREDIAG=1. The true distance is the (C) gate: the cloth stays out of the true frustum, not only out
+  // of the field that rounds its rim in (face 360 at tick 49 was 1.79 mm inside it).
   const faces = scene.cloth![0]!.geometry.data.triangles;
   const source = bridson2002RotatingSphere({ nodesAcross: 16 }), t = bridson2002SceneLayout(source).translation_m;
   const frustum = source.solids.find(sd => sd.id === 'frustum')!;
   const trueFr = (q: readonly number[]) => bridsonSolidDistance(frustum, { x: q[0]! - t.x, y: q[1]! - t.y, z: q[2]! - t.z }, 0);
-  const diag = process.env.CLOTH_LADDER_SPHEREDIAG === '1' ? async (cloth: ClothSystem) => {
+  const print = process.env.CLOTH_LADDER_SPHEREDIAG === '1';
+  let leastTrue = Infinity, leastTick = 0;
+  const diag = async (cloth: ClothSystem) => {
     const id = scene.cloth![0]!.id, x = (await cloth.capture([cloth.time_s]))[0]![0]!.positions_m;
     const e = (cloth as unknown as { entries: Map<string, { field: ClothSolidField; origin: readonly number[] }> }).entries.get(id)!;
     const P = (i: number) => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
@@ -348,11 +352,14 @@ test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rota
         fTrue = Math.min(fTrue, trueFr(q));
       }
     }
-    console.log(`    static field: vertices >= ${vField.toExponential(2)}, faces >= ${fField.toExponential(2)} m (face ${fAt}); true frustum: vertices >= ${vTrue.toExponential(2)}, faces >= ${fTrue.toExponential(2)} m`);
-  } : undefined;
+    if (Math.min(vTrue, fTrue) < leastTrue) { leastTrue = Math.min(vTrue, fTrue); leastTick = Math.round(cloth.time_s / CLOTH_SCENE_STEP_S); }
+    if (print) console.log(`    static field: vertices >= ${vField.toExponential(2)}, faces >= ${fField.toExponential(2)} m (face ${fAt}); true frustum: vertices >= ${vTrue.toExponential(2)}, faces >= ${fTrue.toExponential(2)} m`);
+  };
   const out = await ladder(device, `sphere 16^2${metric ? ' hvv' : ''}`, scene, 60, diag);
+  console.log(`  sphere: the cloth's least true frustum distance ${leastTrue.toExponential(3)} m (tick ${leastTick})`);
   clean('sphere', out);
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
+  assert.ok(leastTrue > 0, `the cloth reaches ${leastTrue} m into the true frustum at tick ${leastTick}`);
 }));
 
 test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity, its free twin at its authored capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip') }, async () => withDevice(async device => {
@@ -486,7 +493,7 @@ test(`ladder (frozen contact set${travel === 'off' ? ', no travel bounds' : ''})
     const N = header[0]!, K = header[1]!;
     assert.equal(counts.length, N);
     for (let v = 0; v < N; v++) for (let k = 0; k < counts[v]!; k++) {
-      const e = decodeOgcContactEntry(entries.subarray(4 * (v * K + k), 4 * (v * K + k) + 4), N, det.solidSamples);
+      const e = decodeOgcContactEntry(entries.subarray(4 * (v * K + k), 4 * (v * K + k) + 4), N, det.solidSamples, det.facetCapacity);
       kinds[e.kind] = (kinds[e.kind] ?? 0) + 1; checked++;
     }
   });

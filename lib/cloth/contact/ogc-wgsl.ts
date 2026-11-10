@@ -15,6 +15,8 @@
  *                 z = mu lambda (the solid's mu), w = 1; held by the face's feature vertices.
  *                 s < S is a static sample; S <= s < S + SB is the moving solid's sample s - S,
  *                 posed by the step's end pose.
+ *   hull-facet    x = v, y = slot | feature << 28 (the samples' hull facet: static below the header's capacity, else
+ *                 the moving solid's), z = mu lambda (the samples' mu), w = 2; held by v alone.
  * Feature: vertex k (0..2), edge (t[k], t[k+1]) (3..5), face interior (6), static solid (7).
  * Every entry is self-describing, so the gather never chases a second list.
  *
@@ -24,7 +26,8 @@
  * [3] (the moving solid's image word offset, 0 when none, its body-frame samples' vec4
  * offset, their count SB, the pose table's vec4 offset), [4..7] the step's start pose and
  * [8..11] its end pose (OGC_POSE_WORDS each: centre, then the rotation's columns), which the
- * step's begin copies from the table the frame's owner uploads.
+ * step's begin copies from the table the frame's owner uploads. [12] (the static hull facets' vec4 offset, their
+ * capacity, the moving solid's facets' vec4 offset, 0); facet k is (a, b, c, 0), local sample ids.
  */
 import { SOLID_CLEARANCE_CELLS, SOLID_HEADER_WORDS, SOLID_MU_SCALE, SOLID_MU_WORD } from "./solid-field";
 
@@ -114,12 +117,19 @@ export const OGC_COUNTER = {
    * then over the round's line-search filters their count, the largest plane-record demand and
    * the longest direction |d| (f32 bits). Rounds past OGC_ROUND_LOG go unlogged.
    */
-  roundLogCount: 58, roundLog: 72,
+  roundLogCount: 58,
+  /**
+   * Hull-facet contacts of the frame's rounds (cloth vertices within r of a sample-hull facet, static or moving), and
+   * the static representations the bound pass dropped for a nearer one (a vertex keeps one per solid: its field entry
+   * or its nearest facet entry, OGC_BOUND_WGSL).
+   */
+  frameHfPairs: 72, frameHfDropped: 73,
+  roundLog: 74,
 } as const;
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
-export const OGC_COUNTER_WORDS = 72 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 69];
+export const OGC_COUNTER_WORDS = OGC_COUNTER.roundLog + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 69, 72, 73];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
 /**
@@ -237,6 +247,8 @@ const OGC_F_REDOS = ${OGC_COUNTER.frameRedos}u;
 const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;
 const OGC_ENVELOPE_SUM = ${OGC_COUNTER.envelopeSum}u;
 const OGC_F_SF_PAIRS = ${OGC_COUNTER.frameSfPairs}u;
+const OGC_F_HF_PAIRS = ${OGC_COUNTER.frameHfPairs}u;
+const OGC_F_HF_DROPPED = ${OGC_COUNTER.frameHfDropped}u;
 const OGC_SOLID_INTERSECTIONS = ${OGC_COUNTER.solidIntersections}u;
 const OGC_SOLID_HIT_FACE = ${OGC_COUNTER.solidHitFace}u;
 const OGC_SOLID_HIT_PHI = ${OGC_COUNTER.solidHitPhi}u;
@@ -1260,6 +1272,13 @@ fn ogcSampleStart(i: u32) -> vec3<f32> {
   if (ogcSampleRel(i) < ogcContacts[2].z) { return ogcSampleLocal(i); }
   return ogcToWorld(ogcPose(0u), ogcSampleLocal(i));
 }
+// A hull-facet entry's samples (absolute ids, as a sample-facet entry's x): header vec4 12 is (the static facets' vec4
+// offset, their capacity, the moving solid's facets' offset, 0); a slot past the capacity is the moving solid's.
+fn ogcFacetSamples(slot: u32) -> vec3<u32> {
+  let fh = ogcContacts[12];
+  if (slot < fh.y) { return ogcContacts[fh.x + slot].xyz + vec3<u32>(ogcContacts[0].x); }
+  return ogcContacts[fh.z + slot - fh.y].xyz + vec3<u32>(ogcContacts[0].x + ogcContacts[2].z);
+}
 
 struct OgcPairEval { f: vec3<f32>, h: mat3x3<f32>, e: f32 }
 
@@ -1370,7 +1389,17 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
   var Xl: array<vec3<f32>, 4>;
   var cloth = vec4<f32>(1.0);
   let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
-  if ((ent.y & OGC_EE_BIT) == 0u) {
+  // A hull-facet entry: vertex v against a facet of the samples, carrying mu lambda as a sample-facet entry does.
+  let facet = ent.w == 2u && (ent.y & OGC_EE_BIT) == 0u;
+  if (facet) {
+    let feature = (ent.y >> 28u) & 7u;
+    ids = vec4<u32>(ent.x, ogcFacetSamples(ent.y & OGC_ID_MASK));
+    X[0] = select(ogcX(ids[0]), xv, ids[0] == v); Xl[0] = ogcXt(ids[0]);
+    for (var i = 1u; i < 4u; i++) { X[i] = ogcSamplePos(ids[i]); Xl[i] = ogcSampleStart(ids[i]); }
+    cloth = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    w = ogcVtWeights(feature, X[0], X[1], X[2], X[3]);
+    wl = ogcVtWeights(feature, Xl[0], Xl[1], Xl[2], Xl[3]);
+  } else if ((ent.y & OGC_EE_BIT) == 0u) {
     let feature = (ent.y >> 28u) & 7u;
     ids = vec4<u32>(ent.x, ogcTri(ent.y & OGC_ID_MASK));
     for (var i = 1u; i < 4u; i++) { X[i] = select(ogcX(ids[i]), xv, ids[i] == v); Xl[i] = ogcXt(ids[i]); }
@@ -1404,7 +1433,7 @@ fn ogcEntryLin(v: u32, xv: vec3<f32>, ent: vec4<u32>, params: vec4<f32>) -> OgcP
   var out = OgcPairLin(ids, cloth * w, cloth * wl, wr, wrl, -act.y * wr * n, act.z * mat3x3<f32>(n * n.x, n * n.y, n * n.z), OGC_Z3, act.x);
   // A sample-facet entry carries mu lambda with the solid's own mu; its sample's own
   // motion over the step is the solid's (none for a static one).
-  let ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled);
+  let ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled || facet);
   if (ml > 0.0) {
     var dx = vec3<f32>(0.0);
     var gl = vec3<f32>(0.0);

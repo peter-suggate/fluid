@@ -44,7 +44,7 @@ import {
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
-import { SOLID_HEADER_WORDS, SOLID_SAMPLE_WORDS, clothSolidSampleEdges, clothSolidSamples, type ClothSolidField } from "./solid-field";
+import { SOLID_HEADER_WORDS, SOLID_SAMPLE_WORDS, clothSolidSampleEdges, clothSolidSampleFacets, clothSolidSamples, type ClothSolidField } from "./solid-field";
 import { OGC_NONE } from "./ogc-topology";
 
 export interface OgcContactConfig {
@@ -172,6 +172,10 @@ export type OgcTravelBound = "on" | "off";
  *     (params.z) times lambda.
  *   sampleFace: as vf with the point a solid surface sample (sample: its index, body: the moving solid's, posed at
  *     the step's end and its start for friction) in place of a cloth vertex; muLambda is the entry's own.
+ *   hullFacet: vertex `vertex` against a hull facet of the samples (facet: its index in the static solid's or, body,
+ *     the moving solid's clothSolidSampleFacets; its corners those samples, posed as sampleFace's), the feature
+ *     the closest point's on the facet (as vf's), d = |gap|; muLambda is the entry's own (the samples' mu mixed
+ *     barycentrically at detection).
  *   ee: edges e0 against e1, the gap (1 - s) x_a + s x_b - (1 - t) x_c - t x_d at the detection's parameters (s, t)
  *     (unorm16), d = |gap|; muLambda = selfMu times lambda.
  * The certified gap is not stored: the energy recomputes it from the positions. Plane records and solid pieces are
@@ -182,10 +186,14 @@ export type OgcContactEntry =
   | { kind: "field" | "bodyField"; vertex: number; muLambda: number }
   | { kind: "vf"; vertex: number; face: number; feature: number; lambda: number }
   | { kind: "sampleFace"; sample: number; body: boolean; face: number; feature: number; muLambda: number }
+  | { kind: "hullFacet"; vertex: number; facet: number; body: boolean; feature: number; muLambda: number }
   | { kind: "ee"; e0: number; e1: number; s: number; t: number; lambda: number };
 
-/** Decode one entry's four words (raw from readContactEntries) for a detector with N vertices and S static samples. */
-export function decodeOgcContactEntry(w: ArrayLike<number>, N: number, S: number): OgcContactEntry {
+/**
+ * Decode one entry's four words (raw from readContactEntries) for a detector with N vertices, S static samples and
+ * facetCapacity static hull-facet slots (the detector's facetCapacity; a facet slot past it is the moving solid's).
+ */
+export function decodeOgcContactEntry(w: ArrayLike<number>, N: number, S: number, facetCapacity = 0): OgcContactEntry {
   const x = w[0]! >>> 0, y = w[1]! >>> 0, z = w[2]! >>> 0, ww = w[3]! >>> 0;
   const f = new Float32Array(new Uint32Array([z]).buffer)[0]!;
   if (y === 0x70000000) return { kind: "field", vertex: x, muLambda: f };
@@ -194,6 +202,7 @@ export function decodeOgcContactEntry(w: ArrayLike<number>, N: number, S: number
   const face = y & 0x0fffffff, feature = (y >>> 28) & 7;
   if (feature > 6) throw new Error(`OGC: unknown entry feature ${feature} (${x}, ${y}, ${z}, ${ww})`);
   if (ww === 1) { const i = x - N; if (i < 0) throw new Error(`OGC: sample entry with id ${x} < N`); return { kind: "sampleFace", sample: i < S ? i : i - S, body: i >= S, face, feature, muLambda: f }; }
+  if (ww === 2) return { kind: "hullFacet", vertex: x, facet: face < facetCapacity ? face : face - facetCapacity, body: face >= facetCapacity, feature, muLambda: f };
   if (ww !== 0) throw new Error(`OGC: unknown entry word ${ww} (${x}, ${y}, ${z})`);
   return { kind: "vf", vertex: x, face, feature, lambda: f };
 }
@@ -281,6 +290,9 @@ export interface OgcFrameCounters {
   cell: number;
   /** Sample-face contacts (static sharp-feature samples against cloth faces) over the frame's rounds. */
   sfPairs: number;
+  /** Hull-facet contacts of the frame's rounds, and the solid representations the bound pass dropped for a nearer one. */
+  hfPairs: number;
+  hfDropped: number;
   /** Cloth faces reaching inside a solid (static or moving) at the last intersection count. */
   solidIntersections: number;
   /** Vertices with a moving-solid entry over the frame's rounds, and truncations its bound made. */
@@ -332,6 +344,11 @@ const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, ins
 export const OGC_ROUND_KERNELS = Object.keys(DISPATCH) as (keyof typeof DISPATCH)[];
 /** Hull edges the contact buffer holds per authored surface sample (a sample's fan holds a few neighbours past it). */
 export const OGC_HULL_EDGES_PER_SAMPLE = 8;
+/**
+ * Hull facets (clothSolidSampleFacets, one vec4 each: the three local sample ids) the detector stores per authored
+ * sample; a scene's sample capacity covers its facets at this rate (scene-contact.ts sampleCapacity).
+ */
+export const OGC_HULL_FACETS_PER_SAMPLE = 2;
 const FLOAT32_EPS = 2 ** -23;
 
 export class OgcContactDetector {
@@ -439,7 +456,8 @@ export class OgcContactDetector {
     const entriesOff = Math.ceil((sums3Off + 1) / 8) * 8;
     if (4 * (entriesOff + 8 * config.gridCapacity) > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: gridCapacity exceeds one storage binding");
     this.grid = mk("grid", 4 * (entriesOff + 8 * config.gridCapacity));
-    const countsBase = 12, entriesBase = 12 + Math.ceil(N / 4);
+    // The header (vec4 0..3), the start and end poses (4..11), the hull facets' header (12), then the counts.
+    const countsBase = 13, entriesBase = 13 + Math.ceil(N / 4);
     const solidWords = config.solidCapacityWords ?? 0;
     if (!(Number.isSafeInteger(solidWords) && solidWords >= 0)) throw new Error("OGC: solidCapacityWords must be a whole number");
     if (solidWords > 0 && solidWords < SOLID_HEADER_WORDS + 4) throw new Error("OGC: solidCapacityWords cannot hold an empty solid image");
@@ -450,13 +468,18 @@ export class OgcContactDetector {
     // The samples' hull edges, two words each, OGC_HULL_EDGES_PER_SAMPLE per sample authored.
     const edgeVec4s = (cap: number) => Math.ceil(OGC_HULL_EDGES_PER_SAMPLE * cap / 2);
     this.edgeBase = this.sampleBase + sampleCap;
+    // The samples' hull facets, one vec4 each (local ids a, b, c, 0), OGC_HULL_FACETS_PER_SAMPLE per sample authored.
+    const facetVec4s = (cap: number) => OGC_HULL_FACETS_PER_SAMPLE * cap;
+    this.facetBase = this.edgeBase + edgeVec4s(sampleCap);
+    this.facetCapacity = facetVec4s(sampleCap);
     // The moving solid: its image (word offset), its body-frame samples, their hull edges and its pose table (vec4 offsets).
-    this.bodyBase = body ? 4 * (this.edgeBase + edgeVec4s(sampleCap)) : 0;
+    this.bodyBase = body ? 4 * (this.facetBase + this.facetCapacity) : 0;
     this.bodySampleBase = body ? Math.ceil((this.bodyBase + body.capacityWords) / 4) : 0;
     this.bodyEdgeBase = body ? this.bodySampleBase + bodySampleCap : 0;
-    this.poseTableBase = body ? this.bodyEdgeBase + edgeVec4s(bodySampleCap) : 0;
+    this.bodyFacetBase = body ? this.bodyEdgeBase + edgeVec4s(bodySampleCap) : 0;
+    this.poseTableBase = body ? this.bodyFacetBase + facetVec4s(bodySampleCap) : 0;
     this.poseCapacity = body?.poseCapacity ?? 0;
-    const solidVec4s = body ? this.poseTableBase + 1 + (OGC_POSE_WORDS / 4) * body.poseCapacity : this.edgeBase + edgeVec4s(sampleCap);
+    const solidVec4s = body ? this.poseTableBase + 1 + (OGC_POSE_WORDS / 4) * body.poseCapacity : this.facetBase + this.facetCapacity;
     // The filter's records for ogcProject (newton config): a sub-header, each vertex's fixed
     // records and segment (first, count), and the plane records.
     const recCap = config.newton ? config.planeRecordCapacity ?? 16 * N : 0;
@@ -498,6 +521,7 @@ export class OgcContactDetector {
     w[P.heldOff] = 7 * N + T + E; w[P.predict] = OGC_PREDICTION[prediction]; w[P.cellRule] = OGC_CELL_RULE[cellRule];
     w[P.bodyBase] = this.bodyBase; w[P.bodyOff] = body ? 8 * N + T + E : 0; w[P.SB] = 0; w[P.wgPrep] = Math.ceil(N / WG);
     w[P.edgeBase] = this.edgeBase; w[P.bodyEdgeBase] = this.bodyEdgeBase; w[P.SE] = 0; w[P.SEB] = 0;
+    w[P.facetBase] = this.facetBase; w[P.bodyFacetBase] = this.bodyFacetBase; w[P.SF] = 0; w[P.SFB] = 0; w[P.facetCap] = this.facetCapacity;
     // The per-axis deviations D of the solids' terms (OgcTerms) follow the body's terms.
     w[P.solidDevOff] = (body ? 16 : 8) * N + T + E; w[P.bodyDevOff] = body ? 20 * N + T + E : 0;
     // The least shift's words of the mandatory round's redos (OGC_SHIFT_WORDS).
@@ -516,13 +540,16 @@ export class OgcContactDetector {
     for (let v = 0; v < N; v++) pred0[4 * (N + v) + 3] = -1;
     writeBufferChunked(device.queue, this.pred, 0, pred0);
     writeBufferChunked(device.queue, this.topo, 0, topology.words);
-    const hdr = new Uint32Array(16 + 2 * OGC_POSE_WORDS), hf = new Float32Array(hdr.buffer);
+    const hdr = new Uint32Array(16 + 2 * OGC_POSE_WORDS + 4), hf = new Float32Array(hdr.buffer);
     hdr[0] = N; hdr[1] = config.contactCapacity; hdr[2] = countsBase; hdr[3] = entriesBase;
     hf[4] = config.r; hf[5] = config.kc; hf[6] = config.mu; hf[7] = config.epsV * config.dt;
     hdr[8] = this.solidBase; hdr[9] = this.sampleBase; hdr[10] = 0; hdr[11] = this.projBase;
     hdr[12] = this.bodyBase; hdr[13] = this.bodySampleBase; hdr[14] = 0; hdr[15] = this.poseTableBase;
     // Identity poses until the owner uploads some (no step runs on them: the pose table is empty).
     for (const k of [0, 1]) { hf[16 + OGC_POSE_WORDS * k + 4] = 1; hf[16 + OGC_POSE_WORDS * k + 9] = 1; hf[16 + OGC_POSE_WORDS * k + 14] = 1; }
+    // vec4 12: the static facets' vec4 offset and capacity (a facet entry's slot below it is static), the moving
+    // solid's facets' offset (its slot k - capacity), 0.
+    hdr[16 + 2 * OGC_POSE_WORDS] = this.facetBase; hdr[17 + 2 * OGC_POSE_WORDS] = this.facetCapacity; hdr[18 + 2 * OGC_POSE_WORDS] = this.bodyFacetBase;
     device.queue.writeBuffer(this.contacts, 0, hdr);
     if (this.projBase) device.queue.writeBuffer(this.contacts, 16 * this.projBase, new Uint32Array([fixedBase, 4 * segBase, recBase, recCap]));
     // No solid until one is set: one empty slot, no bricks, an unbounded band.
@@ -573,6 +600,8 @@ export class OgcContactDetector {
     this.bodySamples = SB;
     this.bodySampleEdges = this.uploadHullEdges(field, this.bodyEdgeBase, this.bodySampleCapacity, "the moving solid", "body.sampleCapacity");
     this.paramWords[OGC_PARAM.SEB] = this.bodySampleEdges;
+    this.bodySampleFacets = this.uploadHullFacets(field, this.bodyFacetBase, this.bodySampleCapacity, "the moving solid", "body.sampleCapacity");
+    this.paramWords[OGC_PARAM.SFB] = this.bodySampleFacets;
     this.bodyField = field;
     // Every stored brick lies within bodyReach of the body origin: a ball clear of it reads the band.
     const span = 8 * field.cell;
@@ -626,9 +655,23 @@ export class OgcContactDetector {
     return n;
   }
 
+  /** The samples' hull facets (clothSolidSampleFacets) into the contact buffer at vec4 `base`, one vec4 each; returns their count. */
+  private uploadHullFacets(field: ClothSolidField, base: number, sampleCapacity: number, what: string, knob: string): number {
+    const tri = clothSolidSampleFacets(field, { r: this.config.r, edge: this.topology.layout.maxEdgeLength });
+    const n = tri.length / 3;
+    if (n > OGC_HULL_FACETS_PER_SAMPLE * sampleCapacity)
+      throw new Error(`OGC: ${what}'s samples have ${n} hull facets, more than ${OGC_HULL_FACETS_PER_SAMPLE} per authored sample (${knob} ${sampleCapacity})`);
+    if (n) {
+      const words = new Uint32Array(4 * n);
+      for (let k = 0; k < n; k++) words.set(tri.subarray(3 * k, 3 * k + 3), 4 * k);
+      writeBufferChunked(this.device.queue, this.contacts, 16 * base, words);
+    }
+    return n;
+  }
+
   private writeDispatchSizes() {
-    const S = this.solidSamples, SB = this.bodySamples, SE = this.solidSampleEdges + this.bodySampleEdges;
-    if (Math.ceil((this.N + this.E + S + SB + SE) / WG) > 65535) throw new Error("OGC: vertices, edges, surface samples and their hull edges exceed one dispatch dimension");
+    const S = this.solidSamples, SB = this.bodySamples, SE = this.solidSampleEdges + this.bodySampleEdges + this.solidSampleFacets + this.bodySampleFacets;
+    if (Math.ceil((this.N + this.E + S + SB + SE) / WG) > 65535) throw new Error("OGC: vertices, edges, surface samples and their hull edges and facets exceed one dispatch dimension");
     this.paramWords[OGC_PARAM.wgNE] = Math.ceil((this.N + this.E + S + SB + SE) / WG);
     this.paramWords[OGC_PARAM.wgPrep] = Math.ceil((this.N + SB) / WG);
     this.device.queue.writeBuffer(this.params, 0, this.paramWords);
@@ -646,6 +689,12 @@ export class OgcContactDetector {
   readonly bodyEdgeBase: number;
   solidSampleEdges = 0;
   bodySampleEdges = 0;
+  /** The samples' hull facets: vec4 offsets in the contact buffer, the static ones' capacity, and the current counts. */
+  readonly facetBase: number;
+  readonly facetCapacity: number;
+  readonly bodyFacetBase: number;
+  solidSampleFacets = 0;
+  bodySampleFacets = 0;
 
   /**
    * Upload the static solid field (setup and solid edits only; never in a step
@@ -672,6 +721,8 @@ export class OgcContactDetector {
     this.solidSamples = S;
     this.solidSampleEdges = this.uploadHullEdges(field, this.edgeBase, this.solidSampleCapacity, "the solid field", "solidSampleCapacity");
     this.paramWords[OGC_PARAM.SE] = this.solidSampleEdges;
+    this.solidSampleFacets = this.uploadHullFacets(field, this.facetBase, this.solidSampleCapacity, "the solid field", "solidSampleCapacity");
+    this.paramWords[OGC_PARAM.SF] = this.solidSampleFacets;
     this.device.queue.writeBuffer(this.contacts, 40, new Uint32Array([S]));
     this.paramWords[OGC_PARAM.S] = S;
     this.writeDispatchSizes();
@@ -965,7 +1016,7 @@ export class OgcContactDetector {
       solidContacts: u[C.frameSolidContacts], solidCut: u[C.frameSolidCut],
       conflicts: u[C.frameConflicts], redos: u[C.frameRedos], held: u[C.frameHeld],
       peakGrid: u[C.peakGrid], intersections: u[C.intersections], cell: fl[C.cell],
-      sfPairs: u[C.frameSfPairs], solidIntersections: u[C.solidIntersections],
+      sfPairs: u[C.frameSfPairs], hfPairs: u[C.frameHfPairs], hfDropped: u[C.frameHfDropped], solidIntersections: u[C.solidIntersections],
       bodyContacts: u[C.frameBodyContacts], bodyCut: u[C.frameBodyCut],
       heldConflictPair: [u[C.heldConflictPair]!, u[C.heldConflictPair + 1]!, u[C.heldConflictPair + 2]!, u[C.heldConflictPair + 3]!],
       zoneVertices: u[C.frameZoneVertices]!, zonePeak: u[C.frameZonePeak]!,
@@ -1002,7 +1053,7 @@ export class OgcContactDetector {
    * header the contact buffer's vec4 0 (x = N, the first sample id; y the entries per vertex; z, w the counts' and
    * entries' vec4 offsets) and vec4 1 (params as f32 bits: r, kc, self mu, eps_v dt), counts per vertex (each
    * min(.., header.y), as ogcContactCount), entries N header.y raw vec4 words, vertex v's k-th at 4 (v header.y + k)
-   * (decodeOgcContactEntry, with N and solidSamples). With contactFreeze "mandatory" they are the mandatory round's.
+   * (decodeOgcContactEntry, with N, solidSamples and facetCapacity). With contactFreeze "mandatory" they are the mandatory round's.
    */
   async readContactEntries(): Promise<{ header: Uint32Array; counts: Uint32Array; entries: Uint32Array }> {
     const header = new Uint32Array(await this.readBuffer(this.contacts, 0, 32));
