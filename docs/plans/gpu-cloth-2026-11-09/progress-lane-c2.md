@@ -1983,3 +1983,54 @@ envelopeCap clears at ticks 7-14. Truncations rise by up to a quarter. Rounds ar
 - nwProject (the projected arc, ogcProject inside C1's dispatch) is 115-660 ms a step in the diverged
   states. Its cost is the longest plane-record segment a workgroup sweeps; it follows the direction.
 - Suites on item 3 (frozen 7809cbe1 + (a) + item 3): cloth-contact-body, -gpu and -solid, 38/38.
+
+## Interim plane-record capacities (restores HEAD, 2026-11-10)
+
+HEAD has failed the flat drop, the swing and the incline since ca462bbb. The cause is the projected
+arc's plane records: each is 16 B, and the default capacity is 16 per vertex. Past it the filter
+holds the vertex, so the free-fall sheet rested 101 mm above the floor.
+
+The plane records come from DAT pairs. Their number follows how many faces lie within the envelope
+plus the prediction spread. At impact that spread is up to 4 cm, and the old rule keeps every
+neighbour pair within it. This is the demand bug that the relative-motion test (item 2) removes.
+
+Until then, each scene authors its own capacity as a named setting:
+
+- the document's `solver.contactPlaneRecordsPerVertex` (types.ts, validated in topology.ts);
+- read by scene-contact.ts, with a default of 16;
+- the provenance of each value is "interim: demand bug, C2, to be removed with the relative-motion test".
+
+The global default is unchanged.
+
+**Measured peaks** (HEAD 8b58f374 with a 1600N capacity and a peak log, the analytic, system,
+body and GPU contact suites), per vertex:
+
+| scene | peak | authored |
+|---|---|---|
+| free fall onto the floor (flat / tilted 15 deg) | 1164 / 1013 at t = 0.533 s | FREE_FALL.planeRecords 1280 |
+| swinging sheet | 71.6 at t = 0.533 s | SWING.planeRecords 80 |
+| friction incline | 165.6 at t = 1.0 s | INCLINE.planeRecords 192 |
+| hanging curtain | 4.9 | default 16 |
+| Peirce cantilever | none logged | default 16 |
+| Bridson rotating sphere (150^2, scene test) | 911 at t = 0.333 s | SPHERE.planeRecords 1000 (360 MB) |
+| cloth-system moving-solid sheet (24^2) | 39.5 ride, 176 cut, 39.9 history | 200 in the test scene |
+| GPU tilted drop (cloth-contact-gpu, the free-fall document) | 220.8 | inherits 1280 |
+
+The body tests keep their explicit 32N, which passed at the measured demand.
+
+**Held-for-overflow counters (C1's ask).** The detector frame counters now include:
+
+- `planeRecordHeld`: the vertices the line-search filters held because their plane records
+  overflowed, summed over the frame's filters;
+- `planeRecordHeldMax`: the most held in any one filter.
+
+These are counters 59-61; the filter's running count restarts at each filter.
+
+**Gate (HEAD 277df0a1 plus only these hunks).** The run covered C1's analytic suite plus the
+cloth-system, contact-body, -gpu, -solid, -scene-solids, newton, gpu-solver, grab and oracle suites:
+96 pass, 0 fail, 4 todo. The four todos are the existing ones: incline item (5), the moving-solid
+ride, the cut of the moving solid, and the undo of a cut.
+
+The flat drop, tilted drop, swing and GPU tilted drop pass. rc 0, and the log shows no Metal abort.
+
+`npm run test:unit`: only the known foreign failure (merge cap).

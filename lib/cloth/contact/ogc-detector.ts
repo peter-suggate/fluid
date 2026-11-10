@@ -228,6 +228,10 @@ export interface OgcFrameCounters {
   /** Over the frame: the rounds' longest prediction |w| and the longest direction |d| a line-search filter took (m). */
   maxPrediction: number;
   maxDirection: number;
+  /** Over the frame: vertices the filters held because their plane records overflowed planeRecordCapacity, summed over
+   * the filters, and the most in one filter. */
+  planeRecordHeld: number;
+  planeRecordHeldMax: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -841,6 +845,7 @@ export class OgcContactDetector {
       zoneVertices: u[C.frameZoneVertices]!, zonePeak: u[C.frameZonePeak]!,
       filterRebound: u[C.frameRebound]!, framePeakPlaneRecords: u[C.framePeakPlaneRecords]!, peakPlaneRecords: u[C.peakPlaneRecords]!,
       maxPrediction: fl[C.frameMaxPrediction]!, maxDirection: fl[C.frameMaxDirection]!,
+      planeRecordHeld: u[C.framePlaneRecordHeld]!, planeRecordHeldMax: u[C.framePlaneRecordHeldMax]!,
     };
   }
 

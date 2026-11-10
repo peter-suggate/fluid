@@ -1227,6 +1227,7 @@ export const OGC_FILTER_BEGIN_WGSL = header([0, 9, 16]) + ROUND_LOG_FNS + /* wgs
 @compute @workgroup_size(1)
 fn main() {
   atomicStore(&alpha[P.N], bitcast<u32>(1.0)); atomicStore(&counters[OGC_PLANE_RECORDS], 0u);
+  atomicStore(&counters[OGC_PLANE_RECORD_HELD], 0u);
   let b = roundLogWord();
   if (b != 0xffffffffu) { atomicAdd(&counters[b + 5u], 1u); }
 }
@@ -1237,16 +1238,19 @@ fn main() {
  * filter's planes pass) get a contiguous segment (first, count) at segWord, a workgroup's
  * vertices in order after one allocation from OGC_PLANE_RECORDS, and its count goes back to 0
  * for the records pass to fill. Records past the authored capacity fail the step
- * (planeRecordOverflow) and hold their vertex (count OGC_NONE); the total's peak is kept.
+ * (planeRecordOverflow) and hold their vertex (count OGC_NONE), counted (framePlaneRecordHeld, and
+ * the most in one filter); the total's peak is kept.
  */
 export const OGC_FILTER_ALLOC_WGSL = header([0, 5, 8, 9]) + ROUND_LOG_FNS + /* wgsl */`
 var<workgroup> scan: array<u32, 256>;
 var<workgroup> base: u32;
+var<workgroup> wgOver: atomic<u32>;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let v = gid.x;
   var c = 0u;
   if (v < P.N) { c = atomicLoad(&work[P.recCountOff + v]); }
+  if (li == 0u) { atomicStore(&wgOver, 0u); }
   scan[li] = c;
   workgroupBarrier();
   for (var s = 1u; s < 256u; s <<= 1u) {
@@ -1268,10 +1272,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   if (v < P.N) {
     let first = base + scan[li] - c;
     var n = c;
-    if (c != 0u && first + c > P.recCap) { n = OGC_NONE; atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_PLANE_RECORD_OVERFLOW); }
+    if (c != 0u && first + c > P.recCap) { n = OGC_NONE; atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_PLANE_RECORD_OVERFLOW); atomicAdd(&wgOver, 1u); }
     atomicStore(&contacts[P.segWord + 2u * v], first);
     atomicStore(&contacts[P.segWord + 2u * v + 1u], n);
     atomicStore(&work[P.recCountOff + v], 0u);
+  }
+  workgroupBarrier();
+  // The vertices this filter holds for overflow: the frame's sum, and the filter's own count (the
+  // largest of its running totals is its final one).
+  let over = atomicLoad(&wgOver);
+  if (li == 0u && over != 0u) {
+    atomicAdd(&counters[OGC_F_PLANE_RECORD_HELD], over);
+    atomicMax(&counters[OGC_F_PLANE_RECORD_HELD_MAX], atomicAdd(&counters[OGC_PLANE_RECORD_HELD], over) + over);
   }
 }
 `;

@@ -379,7 +379,9 @@ const failureOf = (cloth: ClothSystem) => cloth.failure?.message;
 function movingSolidScene() {
   const R = 0.1, y = 0.76, scene = createEmptyScene({ sceneId: 'cloth-moving-solid-test', finestCellSize_m: 0.01, extents_m: { x: 1.2, y: 1.6, z: 1.2 } }), ticks = 36, end_s = ticks * CLOTH_SCENE_STEP_S;
   const data = clothGridData({ columns: 24, rows: 24, width_m: 0.4, height_m: 0.4, origin_m: [-0.2, 0.9, -0.2] });
-  scene.cloth = [{ schemaVersion: '2.0.0', id: 'sheet', geometry: { kind: 'inline', data }, materials: [cotton], solver: { integrator: 'bdf2' },
+  scene.cloth = [{ schemaVersion: '2.0.0', id: 'sheet', geometry: { kind: 'inline', data }, materials: [cotton],
+    // Interim: demand bug, C2, to be removed with the relative-motion test; measured peak 176 plane records per vertex (the cut test, t = 0.267 s) on 8b58f374.
+    solver: { integrator: 'bdf2', contactPlaneRecordsPerVertex: 200 },
     pendingSolids: [{ id: 'turner', start_s: 0 }] }];
   const body = trackedSphere(R, y, 0.03, 0.6, end_s);
   scene.rigidBodies = [body];

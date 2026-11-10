@@ -130,6 +130,8 @@ export function validateClothDocument(document: ClothDocument): string[] {
       else if ((n.pcgTolerance !== undefined && !(n.pcgTolerance >= 0)) || (n.residualTolerance !== undefined && !(n.residualTolerance >= 0)) || (n.velocityTolerance_m_s !== undefined && !(n.velocityTolerance_m_s >= 0 && Number.isFinite(n.velocityTolerance_m_s)))) errors.push("Cloth Newton tolerances must be non-negative");
     }
     if (solver.selfFriction !== undefined && !(solver.selfFriction >= 0 && Number.isFinite(solver.selfFriction))) errors.push("Cloth self friction must be a finite non-negative number");
+    if (solver.contactPlaneRecordsPerVertex !== undefined && !(Number.isInteger(solver.contactPlaneRecordsPerVertex) && solver.contactPlaneRecordsPerVertex >= 1))
+      errors.push("Cloth contact plane records per vertex must be a positive integer");
     // The VBD solver and its settings were removed (M4): every document runs Newton-PCG, and a document that names a
     // VBD setting is refused rather than silently ignored.
     for (const key of ["iterations", "chebyshevRho", "tier", "patchVertices", "patchIterations", "coarse"])

@@ -49,6 +49,8 @@ export const CLOTH_SCENE_CONTACT = {
   bucketCount: 1 << 18,
   roundCap: 4,
   pairSlotsPerVertex: 840,
+  // The contact filter's plane records per vertex unless the document authors its own (contactPlaneRecordsPerVertex).
+  planeRecordsPerVertex: 16,
 } as const;
 
 /** Status bits that halt the scene (as the M2 and M6 gates fail them). Envelope and round caps, and held pairs, are reported, not failures. */
@@ -168,6 +170,8 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction: 'target',
     contactCapacity: C.contactCapacity, pairCapacity: C.pairSlotsPerVertex * N, gridCapacity: C.gridEntriesPerPrimitive * (N + T + E),
     bucketCount: C.bucketCount, roundCap: C.roundCap, solidCapacityWords: field.words.length, newton,
+    // INTERIM (demand bug, C2): the document's authored plane records per vertex, until the relative-motion pair test.
+    ...(newton ? { planeRecordCapacity: (document.solver?.contactPlaneRecordsPerVertex ?? C.planeRecordsPerVertex) * N } : {}),
     solidSampleCapacity: sampleCapacity(field, r, edge),
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),

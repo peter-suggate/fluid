@@ -91,6 +91,8 @@ export const SPHERE = {
   frustumZ: P(0.65, "m", "physbam", "test 13 cut_pyramid frame t.z = 0.65"),
   frustumFriction: P(0.1, "1", "physbam", "test 13: cut_pyramid friction 0.1"),
   duration: P(213 / 24, "s", "video", "cloth1.avi: 213 frames at 24 fps"),
+  planeRecords: P(1000, "records/vertex", "assumption",
+    "interim: demand bug, C2, to be removed with the relative-motion test; measured peak 911 per vertex as the sheet lands on the sphere (t = 0.333 s), on 8b58f374"),
 } as const;
 
 /**

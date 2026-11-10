@@ -63,9 +63,10 @@ function sheetMaterial(id: string, hex: number, overrides: Partial<ClothMaterial
   };
 }
 
-function document(id: string, data: ClothTopologyData, material: ClothMaterial): ClothDocument {
+/** `planeRecords`: the scene's interim plane-record capacity per vertex (see parameters.ts), else the default. */
+function document(id: string, data: ClothTopologyData, material: ClothMaterial, planeRecords?: number): ClothDocument {
   return { schemaVersion: "2.0.0", id, geometry: { kind: "inline", data }, materials: [material],
-    solver: { integrator: "bdf2", newton: clothAnalyticNewton() } };
+    solver: { integrator: "bdf2", newton: clothAnalyticNewton(), ...(planeRecords ? { contactPlaneRecordsPerVertex: planeRecords } : {}) } };
 }
 
 /** The Newton-PCG settings every analytic document runs (the Bridson scenes'). */
@@ -94,7 +95,7 @@ export function clothAnalyticFreeFall(): ClothAnalyticScene {
     expectation: `An unpinned flat sheet falls as y = y₀ − g t²/2, flat and unstrained; BDF2 is exact for constant gravity after its implicit Euler start, which leaves a fixed ${mm(offset)} mm (3/4 g Δt²).`,
     gate: `centroid within 0.1 mm of the BE + BDF2 recurrence and its velocity within 1 mm/s of g t over the first ${FREE_FALL.gateSteps.value} steps; every vertex within 0.1 mm of the centroid plane; edge strain under 1e-4`,
     duration_s: FREE_FALL.duration.value, step_s: CLOTH_ANALYTIC_STEP_S, cell_m: 0.02, extents_m: { x: 1.6, y: 1.6, z: 1.6 },
-    cloth: [document("cloth-analytic-free-fall-sheet", data, sheetMaterial("free-fall-teal", 0x12a6a0))],
+    cloth: [document("cloth-analytic-free-fall-sheet", data, sheetMaterial("free-fall-teal", 0x12a6a0), FREE_FALL.planeRecords.value)],
     solids: [],
     camera: { azimuth_rad: 0.62, elevation_rad: 0.22, distance_m: 3.1, target_m: { x: 0, y: 0.72, z: 0 } },
     probe: { y0, gateSteps: FREE_FALL.gateSteps.value },
@@ -131,7 +132,7 @@ export function clothAnalyticSwingingSheet(): ClothAnalyticScene {
     expectation: "Pinned along one edge and released level, the sheet's still-flat outer part carries only in-plane tension, so its free edge falls exactly as y₀ − g t²/2 until the swing reaches it; then it whips down under the pin.",
     gate: `free edge within 1 mm of the BDF2 free-fall recurrence over the first ${SWING.gateSteps.value} steps (exact while flat); the time it passes under the pin within one step of the same scene at ${SWING.convergedFactor.value}K`,
     duration_s: SWING.duration.value, step_s: CLOTH_ANALYTIC_STEP_S, cell_m: 0.02, extents_m: { x: 2.4, y: 1.6, z: 1.6 },
-    cloth: [document("cloth-analytic-swinging-sheet-sheet", data, sheetMaterial("swing-amber", 0xf29c14))],
+    cloth: [document("cloth-analytic-swinging-sheet-sheet", data, sheetMaterial("swing-amber", 0xf29c14), SWING.planeRecords.value)],
     solids: [],
     camera: { azimuth_rad: 0.3, elevation_rad: 0.12, distance_m: 3.9, target_m: { x: 0, y: 0.78, z: 0 } },
     probe: { y0: y, columns: cols, rows, freeEdge, gateSteps: SWING.gateSteps.value },
@@ -181,7 +182,7 @@ export function clothAnalyticFrictionIncline(): ClothAnalyticScene {
     const n = nodes(p, h), down = [Math.cos(t), -Math.sin(t)], normal = [Math.sin(t), Math.cos(t)], a0 = 0.05, gap = INCLINE.gap.value;
     const flat = herringBoneSheet({ columns: n, rows: n, width_m: p, depth_m: p, origin_m: [0, 0, 0] });
     const data = placed(flat, (u, v) => [x0 + (a0 + u) * down[0]! + gap * normal[0]!, top + (a0 + u) * down[1]! + gap * normal[1]!, zc - p / 2 + v]);
-    cloth.push(document(`cloth-analytic-incline-patch-${s}`, data, sheetMaterial(`incline-patch-${s}`, hex)));
+    cloth.push(document(`cloth-analytic-incline-patch-${s}`, data, sheetMaterial(`incline-patch-${s}`, hex), INCLINE.planeRecords.value));
     probe[`slope${s}`] = [angle, inclineAcceleration_m_s2(angle, mu, g), Math.cos(t), -Math.sin(t)];
   });
   const a = (probe.slope1 as number[])[1]!;

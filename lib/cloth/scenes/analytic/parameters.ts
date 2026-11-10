@@ -60,6 +60,8 @@ export const FREE_FALL = {
   height: P(1.2, "m", "choice", "the sheet starts 1.2 m above the floor: 0.49 s of free fall, 29 steps"),
   gateSteps: P(24, "steps", "choice", "gated over the first 0.4 s, while the sheet is still 0.41 m above the floor (far outside any contact band)"),
   duration: P(2, "s", "choice", "falls, lands flat on the frictionless floor and rests"),
+  planeRecords: P(1280, "records/vertex", "choice",
+    "interim: demand bug, C2, to be removed with the relative-motion test; measured peak 1164 per vertex at the landing (t = 0.533 s, flat; 1013 tilted), on 8b58f374"),
 } as const;
 
 /** Scene 2: lane C1's hanging Bridson sheet, pinned along its whole top edge. */
@@ -82,6 +84,8 @@ export const SWING = {
     "the outer part of the sheet stays flat for about 22 steps (Float64 oracle at 41 x 41 nodes, K 8-256: free edge on free fall to 0.01 mm through step 22); gated over 20"),
   convergedFactor: P(4, "1", "choice", "the semi-analytic reference is the same scene at 4x the Newton and PCG caps and tolerances / 4^2"),
   duration: P(4, "s", "choice", "first swing and the following swings under the pinned edge"),
+  planeRecords: P(80, "records/vertex", "choice",
+    "interim: demand bug, C2, to be removed with the relative-motion test; measured peak 71.6 per vertex as the swing passes under the pin (t = 0.533 s), on 8b58f374"),
 } as const;
 
 /**
@@ -124,6 +128,8 @@ export const INCLINE = {
   gateEnd: P(1, "s", "choice", "before the sliding patch reaches the foot of its slope"),
   duration: P(3, "s", "choice", "the sliding patch runs off its slope onto the floor"),
   cell: P(0.01, "m", "choice", "1 cm voxels, as the Bridson solids"),
+  planeRecords: P(192, "records/vertex", "choice",
+    "interim: demand bug, C2, to be removed with the relative-motion test; measured peak 165.6 per vertex on the sliding patch (t = 1.0 s), on 8b58f374"),
 } as const;
 
 export const CLOTH_ANALYTIC_PARAMETERS = { GRAVITY: { g: GRAVITY }, SHEET, FREE_FALL, CURTAIN, SWING, PEIRCE, INCLINE } as const;

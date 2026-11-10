@@ -157,7 +157,7 @@ export function bridson2002RotatingSphere(options: { readonly nodesAcross?: numb
     caption: "The friction between a rotating sphere and a piece of cloth draped over it creates a complex structure of wrinkles and folds.",
     duration_s: end, step_s: BRIDSON_2002_STEP_S, videoStart_s: 0,
     cloth: { schemaVersion: "2.0.0", id: "bridson-2002-rotating-sphere-cloth", geometry: { kind: "inline", data: geometry },
-      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", newton: bridsonNewton(), selfFriction: CLOTH.selfFriction.value } },
+      materials: [material("bridson-2002-cloth")], solver: { integrator: "bdf2", newton: bridsonNewton(), selfFriction: CLOTH.selfFriction.value, contactPlaneRecordsPerVertex: SPHERE.planeRecords.value } },
     sheet: { columns, rows, width_m: side, depth_m: side },
     nodeMass_kg: equalNodeMass_kg(columns, rows, side, side, CLOTH.arealDensity.value),
     selfFriction: CLOTH.selfFriction.value,

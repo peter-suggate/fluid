@@ -125,6 +125,13 @@ export interface ClothSolverSettings {
   readonly newton?: ClothNewtonSettings;
   /** Coulomb friction of cloth on cloth (self contact); omitted means frictionless. */
   readonly selfFriction?: number;
+  /**
+   * INTERIM (demand bug, C2; to be removed with the relative-motion pair test): the plane records per
+   * vertex the contact line-search filter may hold for its projected arc, authored from the scene's
+   * measured peak (default 16). Past it the filter holds the vertex where it is and reports
+   * planeRecordOverflow, which is how 16 per vertex left the free-fall sheet in the air (ca462bbb).
+   */
+  readonly contactPlaneRecordsPerVertex?: number;
 }
 
 /** A solid the cloth would meet that the scene cannot carry yet (a moving

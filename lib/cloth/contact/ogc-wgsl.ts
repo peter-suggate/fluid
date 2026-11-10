@@ -79,6 +79,10 @@ export const OGC_COUNTER = {
   planeRecords: 53, peakPlaneRecords: 54, framePeakPlaneRecords: 55,
   /** Over the frame (f32 bits): the rounds' longest prediction |w|, and the longest direction |d| a line-search filter took. */
   frameMaxPrediction: 56, frameMaxDirection: 57,
+  /** Over the frame: vertices the line-search filters held because their plane records overflowed the
+   * authored planeRecordCapacity, summed over the filters, and the most in any one filter (the
+   * filter's running count, restarted by each filter, is planeRecordHeld). */
+  framePlaneRecordHeld: 59, framePlaneRecordHeldMax: 60, planeRecordHeld: 61,
   /**
    * The frame's round log (harness diagnosis): rounds logged so far, then OGC_ROUND_LOG entries of
    * OGC_ROUND_LOG_WORDS from roundLog: at the round's cell kernel its longest prediction |w| and
@@ -91,7 +95,7 @@ export const OGC_COUNTER = {
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 8;
 export const OGC_COUNTER_WORDS = 64 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, then (origin, q, D) per solid. */
 export const OGC_PROJECT_RECORD = 7;
 
@@ -165,6 +169,9 @@ const OGC_F_ENVELOPE_CAP = ${OGC_COUNTER.frameEnvelopeCapHits}u;
 const OGC_F_PEAK_ENVELOPE = ${OGC_COUNTER.framePeakEnvelope}u;
 const OGC_F_MAX_PREDICTION = ${OGC_COUNTER.frameMaxPrediction}u;
 const OGC_F_MAX_DIRECTION = ${OGC_COUNTER.frameMaxDirection}u;
+const OGC_F_PLANE_RECORD_HELD = ${OGC_COUNTER.framePlaneRecordHeld}u;
+const OGC_F_PLANE_RECORD_HELD_MAX = ${OGC_COUNTER.framePlaneRecordHeldMax}u;
+const OGC_PLANE_RECORD_HELD = ${OGC_COUNTER.planeRecordHeld}u;
 const OGC_ROUND_LOG_COUNT = ${OGC_COUNTER.roundLogCount}u;
 const OGC_ROUND_LOG_BASE = ${OGC_COUNTER.roundLog}u;
 const OGC_ROUND_LOG_N = ${OGC_ROUND_LOG}u;
