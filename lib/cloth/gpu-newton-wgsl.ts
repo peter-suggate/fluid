@@ -189,14 +189,30 @@ fn nwActiveSet(v: u32, g: vec3f, first: bool) -> mat3x3f {
   nw[nseg(NW_PROJ + 1u, v)] = vec4f(Pm[1][2], Pm[2][2], stored - f32(cnt), f32(cnt));
   return Pm;
 }
+// Whether a barrier acts on vertex v placed at xv (the projected trial point q the done rule accepts; the pairs' other
+// vertices where they are): one of its contact entries within r there (kappa'' > 0, the solids' fields included), or one
+// outside the barrier's domain (infinite energy). A held vertex never reads as travel by this test. A certificate binding a vertex no barrier acts on bounds travel, not contact,
+// whatever its pair's far bit. The filter's far test is conservative (each side's reach about the iterate, in a
+// levelled round up to the farthest anchor plus the cap), so it leaves pairs far apart not-far: at the Bridson sphere's
+// step 5 a vertex 8.4 mm over the sphere (r = 1 mm) ended Newton held on such a record.
+fn nwBarrierActs(v: u32, xv: vec3f) -> bool {
+  let header = ogcContacts[0]; let params = bitcast<vec4f>(ogcContacts[1]);
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y); let base = header.w + v * header.y;
+  for (var i = 0u; i < count; i++) {
+    let l = ogcEntryLin(v, xv, ogcContacts[base + i], params);
+    if (any(l.Mn[0] != vec3f(0.0)) || any(l.Mn[1] != vec3f(0.0)) || any(l.Mn[2] != vec3f(0.0)) || !(l.e < 3.0e38)) { return true; }
+  }
+  return false;
+}
 // The cap-aware done rule: whether a travel bound holds vertex v at its trial point Pi(y) (ogcProjectActive.travel: a
 // binding certificate there is the cap, a solid piece's ball, a solid face beyond r or a record its pair cannot close
-// within r - a bound of the round's certified set, not a contact) and the binding normals (the cap's included; a
+// within r - a bound of the round's certified set, not a contact; or any binding certificate where no barrier acts on v)
+// and the binding normals (the cap's included; a
 // held vertex: its direction) keep a positive KKT multiplier against the force -g at the iterate: Newton would move
 // v further were the bound lifted, so a small step there is no convergence.
 fn nwTravelHeld(v: u32, x: vec3f, y: vec3f, alpha: f32, g: vec3f) -> bool {
   let a = ogcProjectActive(v, x, y, alpha);
-  if (!a.travel) { return false; }
+  if (!a.travel && (a.held || nwBarrierActs(v, a.q))) { return false; }
   var s: NwSet;
   if (a.held) { if (any(y != x)) { nwAddIndependent(&s, normalize(y - x)); } }
   else {
@@ -692,10 +708,17 @@ ${contact ? `// The projected arc (contact): after the filter hook fixes the rou
   let v = id.x;
   if (v >= P.n.x || nw[nwControl()].x != 0.0) { return; }
   let x = pos(v); let d = nwD(v);
-  if (nwPinned(v) || all(d == vec3f(0.0))) { return; }
+  if (nwPinned(v)) { return; }
+  let hasActive = nw[nseg(NW_PROJ + 1u, v)].w > 0.0;
+  if (all(d == vec3f(0.0)) && !hasActive) { return; }
   var alpha = 1.0; var cut = false;
-  // The done rule's travel test (w = 1) runs only on a cut trial that could end Newton: alpha |d_v| <= tol h~ (nwChoose's
+  // The done rule's travel test (w = 1) runs only on a trial that could end Newton: alpha |d_v| <= tol h~ (nwChoose's
   // small step needs alpha max_v |d_v| <= tol h~), so it is exact wherever done is decided and costs nothing far from it.
+  // It runs on a cut trial, and on an uncut one of a vertex with active normals: the reduced direction d = P d runs
+  // along the certificates binding v, so the arc no longer cuts it while a travel bound still holds it there (a vertex
+  // pinned on a mandatory round's solid face beyond r, its multiplier positive, would otherwise end Newton far from
+  // the solid and arm no new round), as on a vertex its active normals hold whole (d = P d = 0). Such a vertex is
+  // marked as cut (w = 1); its stored moves are exactly alpha d.
   let tolMove = bitcast<f32>(P.newton3.w) * hEff(); let dl = length(d); let gv = nw[nseg(${S.g}u, v)].xyz;
   for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
     var m = alpha * d; var held = 0.0;
@@ -703,7 +726,7 @@ ${contact ? `// The projected arc (contact): after the filter hook fixes the rou
     if (any(q != y)) {
       m = q - x; cut = true;
       if (alpha * dl <= tolMove && nwTravelHeld(v, x, y, alpha, gv)) { held = 1.0; }
-    }
+    } else if (hasActive && alpha * dl <= tolMove && nwTravelHeld(v, x, y, alpha, gv)) { held = 1.0; cut = true; }
     nw[nseg(${S.moves}u + k, v)] = vec4f(m, held);
     alpha *= 0.5;
   }

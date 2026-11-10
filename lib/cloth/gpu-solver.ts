@@ -515,9 +515,11 @@ export class ClothGPUSolver {
     return { buffer: this.newtonWork, offset: 16 * CLOTH_NEWTON_SEGMENTS.d * this.tables.stride, size: 16 * this.tables.stride };
   }
 
-  /** Newton: the control record (vec4: done, PCG done, the accepted step alpha, Newton iterations of the step), which C2's re-detection reads after each step for its level. */
+  /** Newton: the control records C2's re-detection reads after each step: the first (vec4: done, PCG done, the accepted
+   * step alpha, Newton iterations of the step) for its level, and control + 2 (the active set, and in .w the vertices a
+   * travel bound holds at the accepted trial: the cap-aware done rule's signal for a new round). */
   get newtonControl(): GPUBufferBinding {
-    return { buffer: this.newtonWork, offset: 16 * (this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN), size: 16 };
+    return { buffer: this.newtonWork, offset: 16 * (this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN), size: 16 * 3 };
   }
 
   private async compile(): Promise<void> {

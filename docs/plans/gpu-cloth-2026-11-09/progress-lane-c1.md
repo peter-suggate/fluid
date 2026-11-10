@@ -2445,3 +2445,70 @@ radius, ogcContacts[1].x). Without contact the rule stays alpha = 1 twice.
 - On the GPU the hybrid is not a win (kc 9668 t15 121 against 68), so B stays the method for the acceptance.
 
 **Gate** (cloth-ladder with 1c, -gpu-solver, -analytic, contact ladder / gpu / body): 64 tests, 63 pass, 0 fail, 1 todo (C2's incline item 5).
+
+## 2026-11-10 RESULT (42): like-for-like at BDF2; the done rule was never armed (three defects); the sample-face pairs
+
+Claude's rulings on (41): first a like-for-like oracle (A, the Euclidean projection) at BDF2 and the same kc. Then C1
+leads the contact-gap attribution with C2. Land nwTravelHeld as soon as it gates and use it as the ablation's base.
+No 150^2 acceptance until the 32^2 GPU counts are within 1.5x of the oracle's, like-for-like.
+
+**Correction to (41): the oracle counts were iteration indices.** "CONVERGED at nK" is K + 1 iterations; the GPU's
+c[3] is a count. Every oracle entry in (41)'s tables is one low.
+
+**Like-for-like oracle at BDF2** (PROJ 2 mm, PSELF, stop at a 1 um move; counts):
+
+| method | kc 100 t5 / t15 / t25 | kc 9668 t5 / t15 / t25 |
+|---|---|---|
+| A (Euclidean projection, the GPU's) | 11 / 17 / no | 11 / 15 / 47 |
+| B (H_vv metric) | 11 / 17 / no | 11 / 15 / 44 |
+
+The metric is not the gap: A and B differ only on kc 9668 t25 (47 against 44).
+
+**The GPU's t5 "11" at kc 100 was a false convergence.** Before this commit, the end states were 4.4 mm (kc 100) and
+5.8 mm (kc 9668) from the oracle. The sphere-top vertices stopped on mandatory-round planes; no re-detection round ever
+released them. Three defects, all on C1's side, meant (38)'s cap-aware done rule never armed a round:
+
+1. **The travel test ran only on cut trials.** nwProject returned early on d = 0. A vertex whose active normals hold its
+   whole step (d = P d = 0), or whose trial is uncut, was never tested. Now the test also runs on an uncut trial of a
+   vertex with active normals (NW_PROJ + 1 .w > 0). Such a vertex is marked cut (w = 1); its stored moves are exactly
+   alpha d.
+2. **A binding plane record whose far bit was clear read as "a barrier acts".** C2's far bit is conservative (reach |d|,
+   or up to the farthest anchor plus the cap in a levelled round), so the vertex counted as neither travel nor held.
+   Example: the step-5 vertex 8.4 mm over the sphere. The new nwBarrierActs(v, q) evaluates the vertex's own entries at
+   the projected point q, with the energy's r and the solid fields (ogcEntryLin: any nonzero Mn or an infinite e). Per
+   C2's caveats, a held vertex never reads as travel. nwTravelHeld now returns false only when the vertex is not
+   travel-bound and is either held or under an acting barrier. So any binding certificate on a barrier-free vertex
+   counts as travel.
+3. **The newtonControl binding was 16 bytes.** C2's decide reads the held count at control + 2 .w only when
+   arrayLength(&nwctl) > 2, so it never saw it. The binding is now the 3 records (48 bytes).
+
+**After the fixes (t5, kc 9668 / kc 100):** the rounds fire and the GPU converges at 23 / 19.
+
+**The vertex-only oracle is not like-for-like.**
+- The GPU also holds sample-face pairs: the moving sphere's 9949 surface samples (clothSolidSamples) against cloth
+  faces. A 6-9 cm triangle sags about 3.7 mm over the sphere top, so samples hold faces whose vertices sit mm above it.
+- The scratch oracle now has SAMPLES=1 (vf pairs within rc of x0, mu per pair) and BODY=field (buildClothBodyField,
+  with the body anchor carried by the pose).
+- With them the oracle needs 16 (kc 9668, 4081 pairs, min pair d 963 um) and 15 (kc 100, 4165 pairs, min d 429 um).
+
+GPU end against this oracle (t5):
+
+| | median | max |
+|---|---|---|
+| kc 9668 | 2.9 um | 1.24 mm |
+| kc 100 | 1.75 um | 0.60 mm |
+
+- Before the fixes the max was 1.90 mm at kc 9668.
+- The kc 9668 max is vertices 560/463: phi 7.68 mm on the GPU against 6.72 mm in the oracle. The likely cause is a pair
+  the GPU holds and the oracle doesn't. That is the first item of ablation stage (i), the frozen set on both sides.
+- **t5 counts are now 23/16 = 1.44x (kc 9668) and 19/15 = 1.27x (kc 100), inside the 1.5x bar.** t15/t25 come next on
+  this base.
+
+**Not fixed by this commit: C2's H_vv sphere todo** (the ladder's 16^2 sphere in the metric, heldConflict at tick 46).
+It still halts with these fixes, so the todo's attribution to the C1 done rule doesn't hold. Reported to C2.
+
+**Incline (C2 item 5):** passes at HEAD. Its todo in tests/cloth-analytic.test.ts is removed (Claude's instruction).
+
+**Gate** (HEAD ad95092e plus this commit; cloth-ladder, -gpu-solver, -analytic, contact ladder / gpu / body):
+69 tests, 68 pass, 0 fail, 1 todo (C2's H_vv sphere). check:types clean. test:unit: 2 foreign failures
+(paused-rigid-publication, reservoir-particle-cost) and C2's face-360 todo.

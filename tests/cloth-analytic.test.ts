@@ -426,7 +426,7 @@ async function solverFor(device: GPUDevice, document: ClothDocument, newtonOverr
     gravity_m_s2: [0, -g, 0], integrator: 'bdf2', initialGuess: 'previous', newton });
 }
 
-test('friction on an incline: the patch below the friction angle sticks, the one above slides at g (sin - mu cos)', { skip: !runs('friction-incline'), todo: "C2 item (5): the sharp-edge solid samples refuse the incline's field (bulge 1.38e-3 m > h / 16); a HEAD failure, progress-lane-c2.md" }, async () => withDevice(async device => {
+test('friction on an incline: the patch below the friction angle sticks, the one above slides at g (sin - mu cos)', { skip: !runs('friction-incline') }, async () => withDevice(async device => {
   const source = clothAnalyticFrictionIncline(), t0 = Math.round(INCLINE.gateStart.value / h), t1 = Math.round(INCLINE.gateEnd.value / h);
   const scene = clothAnalyticSceneDescription(source, override(source));
   const { frames, ms } = await capture(device, scene, range(t0, t1));
