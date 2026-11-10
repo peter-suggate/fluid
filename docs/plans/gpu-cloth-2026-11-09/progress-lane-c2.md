@@ -2192,3 +2192,74 @@ case is still todo.
 
 **Sphere ladder case:** marked as the carried-stray soundness regression (item 2 without strayOf
 put a vertex inside the solid at tick 37). It checks every tick to 60.
+
+## 2026-11-10 item 1 LANDED: the exact per-vertex projection in ogcProjectTrial, and the deterministic list order
+
+**What changed.** `ogcProjectTrial` used to take three cyclic sweeps over the cap, the plane records
+and the solid pieces. It now computes the true Euclidean projection onto the vertex's convex set:
+the cap ball, the plane records, and each solid piece (8 orthant half-spaces of D.|u| - q.u <= 1, plus
+its ball; the moving solid's in its body frame). The method is constraint generation over a working set.
+
+- **Candidates.** The working set S holds at most 4 constraints. The candidates are the nearest
+  points to y on M_W, the intersection of the boundaries of W, for every W in S with |W| <= 3.
+  That is 14 candidates, which is enough by Carathéodory in R^3.
+  - Each M_W is in closed form. The first ball gives the sphere, and every other ball becomes its
+    radical plane with that sphere. Gram-Schmidt runs over the plane normals. M_W is then the
+    sphere of the affine set A about proj_A(c), with radius^2 = R^2 - |c - proj_A(c)|^2.
+- **Each round.** The nearest feasible candidate becomes S, and the most violated constraint is added.
+  - Ties go by the record's bits, and S is kept in key order. The result is therefore
+    bit-identical for any record append order, so the plane records need no sort.
+  - The distance strictly increases, so it terminates. OGC_PROJECT_ROUNDS = 32 bounds it under
+    rounding; the Float64 twin needs at most 7 rounds.
+- **Margin.** It projects onto the set with every certificate pulled in by 2 tau, where
+  tau = 2^-17 (R + |y - c|), 64 f32 ulps of the scale. This keeps the f32 point inside every
+  certificate. Without it, an anchor microns from a face turns a rounding overshoot into a
+  per-mille cut of the final segment.
+- **Final segment.** The step to the projected point (from the iterate, or from the anchor in a
+  levelled round) takes the exact piecewise-linear exit of each solid piece (`ogcPieceExit`).
+  `ogcPieceScale`'s subadditive bound is conservative across orthants, and it cut 448 of 2048 GPU
+  trials short of the projection.
+- **Fast path, unchanged.** A trial the filter's own `ogcArcScale` keeps whole still returns y bit
+  for bit.
+
+**Deterministic lists.** `OGC_BOUND_WGSL` insertion-sorts each vertex's contact entries by content,
+lexicographic on (y, x, w, z), because the solver sums their forces in slot order. The plane records
+need no sort (see above). `heldConflictPair` is excluded, and its doc comment says why: it is a
+report-only example, four plain stores by whichever conflicting thread wrote last, so its words may
+mix pairs. Nothing in a step reads it, and the ladder's determinism check skips it.
+
+**Verification.**
+
+- **Float64 oracle (`tests/cloth-contact-oracle.ts`).** `bruteForceProjection` takes every
+  |W| <= 3, then the nearest feasible point, and `projectionKkt` checks the KKT conditions (an NNLS
+  cone residual over the active subsets). `workingSetProjection` is the GPU algorithm in Float64.
+  - Results over 2817 random cases:
+    - KKT residual 5.0e-13;
+    - working set off the brute force by 2.3e-16;
+    - at most 7 rounds.
+  - The old three cyclic sweeps are off the projection in 2246 cases and order-dependent in 2421.
+  - `levelledProject`, which the levelled-ladder test uses, now uses the working-set projection on
+    the margin-shrunk set.
+- **GPU (`tests/cloth-contact-gpu.test.ts`, new).** 4096 synthetic trials: levelled and unlevelled,
+  one shared body rotation, anchors to 1.5 m, and the records reversed.
+  - 3806 trials are cut and 290 kept bit-exactly.
+  - The cut trials are off the Float64 projection by at most 1.06e-7 m (2.3e-5 of the scale), and
+    they leave the certificates by 0 m.
+  - Reversed record order gives a bit-identical result.
+- **Determinism (`tests/cloth-contact-ladder.test.ts`, new).** The flat 16^2 drop (50 ticks) and the
+  rotating 16^2 sphere (60 ticks) were each run 3 times. Positions, velocities, duals, xdet, pred,
+  rho, env, held and every counter (except heldConflictPair) are **bit-identical**.
+
+**Gate** (one combined round, rc 0): contact ladder, contact gpu/body/solid/scene-solids, oracle, C1's
+cloth-ladder, cloth-gpu-solver and cloth-analytic. 93 tests: 91 pass, 0 fail, 2 todo (the strip,
+which is item 2; the incline's sharp edge). check:types rc 0. test:unit: 1686 pass, 1 fail; the
+failure is the known reservoir-particle-cost test, from the foreign uncommitted file.
+
+| | before (cyclic sweeps) | after (exact) |
+|---|---|---|
+| distance to the true projection (oracle) | off in 2246 / 2817 | 2.3e-16 (Float64), 1.06e-7 m (GPU f32) |
+| record order | changes the result in 2421 / 2817 | bit-identical |
+| flat 16^2 and sphere 16^2, 3 runs | not checked bitwise (C1 saw 4-6.5 cm divergence in 7 ticks at a pile) | bit-identical, 50 / 60 ticks |
+| tilted 15 degree landing rebound | 0.0426 m/s once under contention (0.0018-0.0019 on reruns) | 0.0020 m/s in all 3 runs (the gate and two reruns; h/8 Euler 0.0017) |
+| 32^2 draped sphere (C1 ladder 3) | Newton 8 per step (cap) | Newton 8 per step (cap), 52 PCG per Newton: C1 to check |
+| strip at 16N (todo, item 2) | 306 held, lambda 9.1 N | 469 held, lambda peak 6.3 N (bound 1.04) |

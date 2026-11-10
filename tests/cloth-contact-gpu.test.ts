@@ -25,6 +25,7 @@ import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate,
+  bruteForceProjection, conViolation, projectionCase, projectionCaseCons, projectionKkt, shrinkCons, type ProjectionCase,
   type DatPair, type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
 
@@ -188,7 +189,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 /** ogcProject(v, X_v, Y_v) of the vertex block (the projected arc's projection) for every vertex. */
-async function evalProject(device: GPUDevice, det: OgcContactDetector, X: V3[], Y: V3[]): Promise<V3[]> {
+async function evalProject(device: GPUDevice, det: OgcContactDetector | GPUBuffer, X: V3[], Y: V3[]): Promise<V3[]> {
   const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y));
   const out = device.createBuffer({ size: 16 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const code = /* wgsl */`
@@ -208,7 +209,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   outBuf[v] = vec4<f32>(ogcProject(v, X[v].xyz, Y[v].xyz), 0.0);
 }`;
   const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], [3, out], [4, det.solverBuffer]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], [3, out], [4, 'solverBuffer' in det ? det.solverBuffer : det]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
   const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
   pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
   device.queue.submit([enc.finish()]);
@@ -594,6 +595,96 @@ test("GPU line-search filter: x + alpha d is certified for every alpha up to alp
       console.log(`projected arc at alpha ${k}: ${kept} of ${free} unbound vertices kept; the ${projected} bound ones move ${(keptArc / Math.max(projected, 1)).toFixed(3)} of their trial on average (the filter's alpha_v keeps ${(keptFilter / Math.max(projected, 1)).toFixed(3)})`);
     }
     positions.destroy(); velocities.destroy(); direction.destroy(); det.destroy();
+  });
+});
+
+/**
+ * A contact buffer holding only the filter's records for ogcProject (its sub-header at vec4 12, the
+ * level header, each vertex's fixed records, segments and plane records), one vertex per case, each
+ * case's anchor at c[v] in the world. The moving solid's end pose carries the frame of every body
+ * piece, so all the cases with one share it (bodyRb). order: each vertex's plane records reversed.
+ */
+function projectionBuffer(cases: ProjectionCase[], c: V3[], bodyRb: number[][], levelled: boolean, reversed = false): Uint32Array<ArrayBuffer> {
+  const N = cases.length, fixed = 14, segVec = fixed + 8 * N, recVec = segVec + Math.ceil(N / 2);
+  const total = recVec + cases.reduce((s, k) => s + k.planes.length, 0);
+  const u = new Uint32Array(4 * total), f = new Float32Array(u.buffer);
+  const put = (vec: number, q: number[]) => q.forEach((x, i) => { f[4 * vec + i] = x; });
+  u[2 * 4 + 3] = 12;
+  // Pose 1 (words 32..47): R = Rb^T, column j at word 36 + 4j is row j of Rb.
+  for (let j = 0; j < 3; j++) put(9 + j, bodyRb[j]!);
+  for (let j = 0; j < 3; j++) put(5 + j, bodyRb[j]!);
+  u[4 * 12] = fixed; u[4 * 12 + 1] = 4 * segVec; u[4 * 12 + 2] = recVec;
+  u[4 * 13 + 1] = levelled ? 1 : 0;
+  let next = 0;
+  cases.forEach((k, v) => {
+    const fb = fixed + 8 * v, cv = c[v]!;
+    put(fb, [...cv, k.R]);
+    for (const [slot, piece] of [[1, k.solid], [4, k.body]] as const) {
+      if (!piece) { put(fb + slot, [0, 0, 0, 0]); continue; }
+      put(fb + slot, [...add(cv, piece.o), 1]); put(fb + slot + 1, [...piece.q, piece.Rq]); put(fb + slot + 2, [...piece.D, 0]);
+    }
+    put(fb + 7, [0, 0, 0, 0]);
+    u[4 * segVec + 2 * v] = next; u[4 * segVec + 2 * v + 1] = k.planes.length;
+    const planes = reversed ? [...k.planes].reverse() : k.planes;
+    planes.forEach((p, i) => put(recVec + next + i, [...p.m, p.b]));
+    next += k.planes.length;
+  });
+  return u;
+}
+
+test("GPU exact projection (ogcProjectTrial): the Euclidean projection onto the cap, plane records and solid pieces, against the Float64 brute force with its KKT check; bit-identical for any record order", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const R = rng(77), N = 2048;
+    const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
+    // One frame for every moving piece (the end pose is the solid's, not the vertex's).
+    const a = unitRand(), th = 2.1, cs = Math.cos(th), sn = Math.sin(th), K = [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
+    const Rb = [0, 1, 2].map(i => [0, 1, 2].map(j => Math.fround((i === j ? cs : 0) + sn * K[i]![j]! + (1 - cs) * a[i]! * a[j]!)));
+    // The inputs as the GPU holds them (f32), the anchors up to 1.5 m from the origin.
+    const fr = (v: V3) => v.map(Math.fround) as V3;
+    const cases = Array.from({ length: N }, () => {
+      const k = projectionCase(R, Rb);
+      const piece = (p: typeof k.solid) => p && { o: fr(p.o), q: fr(p.q), Rq: Math.fround(p.Rq), D: fr(p.D), Rb: p.Rb };
+      return { R: Math.fround(k.R), planes: k.planes.map(p => ({ m: fr(p.m), b: Math.fround(p.b) })), solid: piece(k.solid), body: piece(k.body), y: k.y };
+    });
+    const c = cases.map(() => fr(scale(unitRand(), 1.5 * R())));
+    const Y = cases.map((k, v) => fr(add(c[v]!, k.y)));
+    let worst = 0, worstRel = 0, cut = 0, kept = 0, maxViol = 0, maxRes = 0;
+    const bad: string[] = [], rels: number[] = [];
+    for (const levelled of [false, true]) {
+      const buf = storage(device, projectionBuffer(cases, c, Rb, levelled));
+      const got = await evalProject(device, buf, c, Y);
+      const rev = storage(device, projectionBuffer(cases, c, Rb, levelled, true));
+      const back = await evalProject(device, rev, c, Y);
+      buf.destroy(); rev.destroy();
+      cases.forEach((k, v) => {
+        assert.ok(got[v]!.every((x, i) => Object.is(x, back[v]![i])), `vertex ${v}: the projection depends on the records' order (${got[v]} vs ${back[v]})`);
+        // The oracle on the GPU's own inputs: the anchor-relative trial as f32 holds it.
+        // ogcProjectExact's target: every certificate pulled in by 2 tau = 2^-16 (R + |y - c|).
+        const cons = projectionCaseCons(k), zy = sub(Y[v]!, c[v]!), s = k.R + norm(zy);
+        const ref = bruteForceProjection(shrinkCons(cons, 2 ** -16 * s), zy, 1e-13 * s)!;
+        const kkt = projectionKkt(shrinkCons(cons, 2 ** -16 * s), zy, ref.p, 1e-10 * s);
+        maxRes = Math.max(maxRes, kkt.residual);
+        assert.ok(kkt.residual < 1e-7 && kkt.violation <= 1e-12 * s, `vertex ${v}: the oracle's KKT ${JSON.stringify(kkt)}`);
+        const zg = sub(got[v]!, c[v]!);
+        const off = norm(sub(zg, ref.p));
+        if (ref.W.length) cut++; else if (Object.is(got[v]![0], Y[v]![0]) && Object.is(got[v]![1], Y[v]![1]) && Object.is(got[v]![2], Y[v]![2])) kept++;
+        worst = Math.max(worst, off); worstRel = Math.max(worstRel, off / s); rels.push(off / s);
+        // Certified: inside every certificate (to the f32 rounding of world positions).
+        const viol = Math.max(...cons.map(q => conViolation(q, zg)));
+        maxViol = Math.max(maxViol, viol);
+        if (viol > 4e-7) bad.push(`vertex ${v}: the projection leaves a certificate by ${viol.toExponential(2)}: ${cons.map(q => conViolation(q, zg)).map((x, i) => [i, x] as const).filter(([, x]) => x > 4e-7).map(([i, x]) => `${i}:${x.toExponential(1)}`).join(' ')} (planes ${k.planes.length} solid ${!!k.solid} body ${!!k.body})`);
+        // f32 rounding of the anchor-relative trial, amplified by the corners' conditioning (measured 1.1e-7 m).
+        if (off > 5e-7) {
+          bad.push(`vertex ${v} (levelled ${levelled}): ${off.toExponential(2)} m off the exact projection (scale ${s.toExponential(2)}, active ${JSON.stringify(ref.W)} of ${cons.length}; |y - p| GPU ${norm(sub(zg, zy)).toExponential(4)} vs ${norm(sub(ref.p, zy)).toExponential(4)}; GPU violations ${cons.map(q => conViolation(q, zg)).map((x, i) => [i, x] as const).filter(([, x]) => x > -1e-7).map(([i, x]) => `${i}:${x.toExponential(1)}`).join(' ')}; planes ${k.planes.length} solid ${!!k.solid} body ${!!k.body})`);
+        }
+      });
+    }
+    rels.sort((a, b) => a - b);
+    console.log(`off the projection over the scale R + |y - c|: median ${rels[rels.length >> 1]!.toExponential(2)}, 99 % ${rels[Math.floor(0.99 * rels.length)]!.toExponential(2)}, 99.9 % ${rels[Math.floor(0.999 * rels.length)]!.toExponential(2)}, max ${rels[rels.length - 1]!.toExponential(2)}`);
+    if (bad.length) console.log(`${bad.length} off the projection:\n${bad.slice(0, 12).join('\n')}`);
+    assert.equal(bad.length, 0, `${bad.length} trials off the exact projection by more than 0.5 um`);
+    console.log(`exact projection on the GPU: ${2 * N} trials, ${cut} cut, ${kept} kept bit-exactly; off the Float64 projection by ${worst.toExponential(2)} m at most (${worstRel.toExponential(2)} of the scale), certificates left by ${maxViol.toExponential(2)} m at most; oracle KKT residual ${maxRes.toExponential(2)}`);
+    assert.equal(kept + cut, 2 * N, "every trial the certificates keep comes back bit-exactly");
   });
 });
 

@@ -219,7 +219,12 @@ export interface OgcFrameCounters {
   /** Vertices with a moving-solid entry over the frame's rounds, and truncations its bound made. */
   bodyContacts: number;
   bodyCut: number;
-  /** A pair that conflicted in a held round (status heldConflict), ids as in the pair buffer. */
+  /**
+   * A pair that conflicted in a held round (status heldConflict), ids as in the pair buffer: a
+   * report-only example, four plain stores by whichever conflicting thread wrote last, so with
+   * several conflicts at once its words may mix two of them. Nothing in a step reads it, and it
+   * is the one counter outside the detector's bitwise determinism (the ladder's check skips it).
+   */
   heldConflictPair: [number, number, number, number];
   /**
    * Impact zones with the moving solid: cloth vertices a conflict carried rigidly with it, summed

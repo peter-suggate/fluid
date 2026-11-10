@@ -8,7 +8,7 @@
  * (bucket entries scanned, hash collisions, box rejections, candidates), DAT pairs, plane records
  * (per vertex and summed over the filters) and records held for overflow.
  *
- *   CLOTH_LADDER_ONLY=flat,stacked   run only these cases (flat, stacked, sliding, plate, sphere, strip)
+ *   CLOTH_LADDER_ONLY=flat,stacked   run only these cases (flat, stacked, sliding, plate, sphere, strip, determinism)
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -219,4 +219,63 @@ test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a led
   const settled = freeStrain.findIndex(s => s < 1.05 * limit);
   assert.ok(settled >= 0, `the free strip never settled to the strain limit: ${freeStrain.map(s => s.toFixed(3)).join(' ')}`);
   for (let k = settled; k < strain.length; k++) assert.ok(strain[k]! < 1.05 * limit, `tick ${k + 1}: strain ${strain[k]} past the limit ${limit} (free in space by tick ${settled + 1})`);
+}));
+
+/**
+ * Determinism: the same scene stepped `runs` times in one process must give the same contact decisions every
+ * tick. Per tick it keeps the cloth state (positions, velocities, edge duals), the detector's per-vertex state
+ * (pred, rho, envelope, held flags) and its integer counters, and reports the first tick and buffer where a
+ * rerun departs from the first run: for float buffers the largest difference, for counters the fields.
+ */
+async function determinism(device: GPUDevice, label: string, scene: SceneDescription, ticks: number, runs = 3) {
+  type Snap = { floats: Record<string, Float32Array | Float64Array>; ints: Record<string, Uint32Array>; counters: Record<string, number> };
+  const all: Snap[][] = [];
+  for (let r = 0; r < runs; r++) {
+    const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 });
+    const doc = scene.cloth![0]!, det = cloth.contactFor(doc.id)!, solver = cloth.solverFor(doc.id)!;
+    const track: Snap[] = [];
+    try {
+      for (let k = 1; k <= ticks; k++) {
+        const [pose] = (await cloth.capture([k * CLOTH_SCENE_STEP_S]))[0]!;
+        const c = await det.readCounters(), d = await det.readDiagnosis(), st = await solver.readState();
+        const counters: Record<string, number> = {};
+        // heldConflictPair is an example pair for the report, stored by whichever conflicting thread writes last.
+        for (const [key, v] of Object.entries(c)) {
+          if (key === 'heldConflictPair') continue;
+          if (typeof v === 'number' && Number.isInteger(v)) counters[key] = v;
+          else if (Array.isArray(v)) v.forEach((x, i) => { counters[`${key}[${i}]`] = x; });
+        }
+        track.push({
+          floats: { positions: Float64Array.from(pose!.positions_m), velocities: Float64Array.from(pose!.velocities_m_s!), duals: Float64Array.from(st.solverState.edgeDuals),
+            xdet: d.xdet, pred: d.pred, rho: d.rho, env: d.env },
+          ints: { held: d.held }, counters,
+        });
+        if (cloth.failure) break;
+      }
+    } finally { cloth.destroy(); }
+    all.push(track);
+  }
+  const diverged: string[] = [];
+  for (let r = 1; r < runs; r++) {
+    const a = all[0]!, b = all[r]!;
+    for (let k = 0; k < Math.min(a.length, b.length); k++) {
+      const out: string[] = [];
+      for (const [key, x] of Object.entries(a[k]!.ints)) { const y = b[k]!.ints[key]!; let n = 0; for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) n++; if (n) out.push(`${key}: ${n} words differ`); }
+      for (const [key, x] of Object.entries(a[k]!.counters)) if (b[k]!.counters[key] !== x) out.push(`counter ${key} ${x} vs ${b[k]!.counters[key]}`);
+      for (const [key, x] of Object.entries(a[k]!.floats)) {
+        const y = b[k]!.floats[key]!; let m = 0, n = 0;
+        for (let i = 0; i < x.length; i++) if (!Object.is(x[i], y[i])) { n++; m = Math.max(m, Math.abs(x[i]! - y[i]!)); }
+        if (n) out.push(`${key}: ${n} values differ, max ${m.toExponential(2)}`);
+      }
+      if (out.length) { diverged.push(`run ${r + 1} vs 1: first divergence at tick ${k + 1}: ${out.join('; ')}`); break; }
+    }
+  }
+  console.log(`  [${label}] determinism over ${runs} runs of ${ticks} ticks: ${diverged.length ? diverged.join(' | ') : 'bit-identical'}`);
+  return diverged;
+}
+
+test('ladder: the flat 16 x 16 drop and the 16 x 16 sphere are deterministic over three runs (the first diverging tick and buffer are reported)', { skip: !runs('determinism') }, async () => withDevice(async device => {
+  const flat = await determinism(device, 'flat 16^2', analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 50));
+  const sphere = await determinism(device, 'sphere 16^2', bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 60));
+  assert.deepEqual([...flat, ...sphere], []);
 }));

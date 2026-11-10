@@ -2109,6 +2109,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
  * with any entry (cloth or solid) is held for the rest of the step and the next.
  */
 export const OGC_BOUND_WGSL = header([0, 1, 4, 5, 8, 9, 12]) + /* wgsl */`
+// A vertex's contact entries in a deterministic order: they are appended atomically, and the
+// solver sums their forces in slot order, so the race's append order would otherwise reach the
+// cloth through f32 rounding. Its own thread insertion-sorts its c entries (vec4<u32>, at most
+// contactCap), lexicographic on (y, x, w, z).
+fn ldv4(b: u32) -> vec4<u32> { return vec4<u32>(atomicLoad(&contacts[b]), atomicLoad(&contacts[b + 1u]), atomicLoad(&contacts[b + 2u]), atomicLoad(&contacts[b + 3u])); }
+fn stv4(b: u32, e: vec4<u32>) { atomicStore(&contacts[b], e.x); atomicStore(&contacts[b + 1u], e.y); atomicStore(&contacts[b + 2u], e.z); atomicStore(&contacts[b + 3u], e.w); }
+fn v4Less(a: vec4<u32>, c: vec4<u32>) -> bool {
+  if (a.y != c.y) { return a.y < c.y; }
+  if (a.x != c.x) { return a.x < c.x; }
+  if (a.w != c.w) { return a.w < c.w; }
+  return a.z < c.z;
+}
+fn sortV4(b: u32, n: u32) {
+  for (var i = 1u; i < n; i++) {
+    let e = ldv4(b + 4u * i);
+    var j = i;
+    loop {
+      if (j == 0u) { break; }
+      let f = ldv4(b + 4u * (j - 1u));
+      if (!v4Less(e, f)) { break; }
+      stv4(b + 4u * j, f);
+      j--;
+    }
+    stv4(b + 4u * j, e);
+  }
+}
 var<workgroup> wgSum: atomic<u32>;
 var<workgroup> wgMax: atomic<u32>;
 fn dminAt(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&work[i])); }
@@ -2133,6 +2159,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     let x = xdet[v];
     xdet[v] = vec4<f32>(x.xyz, cap);
     let c = atomicLoad(&contacts[P.countsOff + v]);
+    if (c > 1u) { sortV4(P.entriesBase + 4u * v * P.contactCap, min(c, P.contactCap)); }
     if (c != 0u) { atomicOr(&work[P.heldOff + v], 1u); }
     atomicAdd(&wgSum, min(c, P.contactCap));
     atomicMax(&wgMax, c);

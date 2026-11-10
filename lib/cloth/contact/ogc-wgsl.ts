@@ -580,33 +580,42 @@ export interface OgcVertexBlockOptions {
  * has reached (u = 1 - a = U (1 - alpha), U = 1 - L in the level header); a vertex the filter
  * cannot move along (held, or no direction while it is predicted to move) freezes the level
  * for the iteration (a = L).
- * Three sweeps of alternating projections (the cap's radial one, a plane's orthogonal one, a
- * solid's along its active piece's gradient D o sign(u) - q, then its ball), and then,
- * since alternating projections only approach the intersection, the largest t <= 1 of the
- * segment from a point every certificate holds to that point that every certificate keeps,
- * exactly as the filter does: the iterate x, or in a levelled round the anchor c(a) (x lies in
- * S(L), not S(a)). A trial every certificate keeps whole (the filter's own test along the joint
- * path from x) is returned bit-exactly, since a solver reads q != y as a cut; a vertex held (an
- * inside marker, a pair with no plane, records past their capacity) does not move.
+ * The trial's Euclidean projection onto that convex set, exactly (no alternating sweeps: they
+ * stop at some point of the intersection that depends on the order the records are visited,
+ * not at the nearest one). The set is an intersection of balls (the cap, each solid piece's
+ * ball) and half-spaces (each plane record, each solid piece's orthant faces (D o s - q).u <= 1,
+ * s in {-1, 1}^3, whose intersection is f(u) <= 1). In R^3 the nearest point p of a convex set
+ * C = {g_i <= 0} has y - p in the cone of at most three active normals (Caratheodory), so p is
+ * the nearest point to y of the boundary intersection M_W of some W, |W| <= 3, and M_W lies in
+ * every C_i of W. The projection onto the intersection of a working set S is therefore the
+ * nearest point among the feasible candidates nearest(M_W), W in S, |W| <= 3 (a feasible
+ * candidate is in the set, so it is no nearer than the projection, which is one of them).
+ * M_W in closed form: the first ball of W is a sphere and every other ball its radical plane
+ * with it; the planes' affine set A (Gram-Schmidt on their normals) meets the sphere in the
+ * sphere of A about proj_A(c) with radius^2 R^2 - |c - proj_A(c)|^2, and the nearest point is
+ * radial from that centre through proj_A(y). Constraint generation over all the records: S
+ * starts empty at y; while some certificate is violated by more than the f32 tolerance tau,
+ * the most violated (ties by the record's bits) joins S and S becomes the active set W of the
+ * new projection (|W| <= 3, so |S| <= 4 and 14 candidates). Each round projects onto a smaller
+ * set than the last one's W, so the distance strictly increases and no W repeats: it ends in
+ * finitely many rounds (OGC_PROJECT_ROUNDS bounds them under rounding). The candidates of S
+ * are formed in the order of their records' bits, and every choice is a function of the
+ * records' values, so the result is bit-identical for any order the records were appended in.
+ * All of it is relative to the anchor c (the records' coordinates), so its rounding is that of
+ * the trial's size, not of the world's. It aims at the set with every certificate pulled in by
+ * 2 tau, tau = 2^-17 (R + |y - c|) (64 f32 ulps of the scale), and counts a candidate within tau
+ * of that as feasible, so the f32 point lands inside the certificates themselves: from an anchor
+ * microns off a face (b ~ 0 in contact), a point rounding past it would otherwise be cut back by
+ * the distance over the anchor's, not by the rounding. Then the largest t <= 1 of the segment from
+ * a point every certificate holds to that point that every certificate keeps (exactly, each
+ * solid piece's piecewise-linear f included: ogcArcExit): the iterate x, or in a levelled round the anchor c(a) (x lies in S(L), not S(a)), so
+ * the result is certified exactly. A trial every certificate keeps whole (the filter's own
+ * test along the joint path from x) is returned bit-exactly, since a solver reads q != y as a
+ * cut; a vertex held (an inside marker, a pair with no plane, records past their capacity)
+ * does not move.
  */
 const OGC_PROJECT_WGSL = /* wgsl */`
 fn ogcProj4(i: u32) -> vec4<f32> { return bitcast<vec4<f32>>(ogcContacts[i]); }
-// One solid's projection of p onto f(p - o) <= 1 within |p - o| <= R, with Rt to its frame.
-// A point the piece holds comes back bit-exactly (the round trip through the frame would not).
-fn ogcProjectPiece(p: vec3<f32>, o: vec3<f32>, q: vec4<f32>, D: vec3<f32>, Rt: mat3x3<f32>) -> vec3<f32> {
-  var u = Rt * (p - o);
-  var moved = false;
-  let f = dot(D, abs(u)) - dot(q.xyz, u);
-  if (f > 1.0) {
-    let g = D * sign(u) - q.xyz;
-    let gg = dot(g, g);
-    if (gg > 0.0) { u -= ((f - 1.0) / gg) * g; moved = true; }
-  }
-  let l = length(u);
-  if (l > q.w) { u *= q.w / l; moved = true; }
-  if (!moved) { return p; }
-  return o + transpose(Rt) * u;
-}
 // The largest t <= 1 keeping every certificate of the vertex's records at fb (and its n plane
 // records from first) along a motion: zc + t ec relative to the anchor (the cap and the planes),
 // xs + t es in the world (the solids). Each is evaluated exactly as the line-search filter
@@ -624,6 +633,196 @@ fn ogcArcScale(fb: u32, first: u32, n: u32, zc: vec3<f32>, ec: vec3<f32>, xs: ve
   let bo = ogcProj4(fb + 4u);
   if (bo.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb * (xs - bo.xyz), Rb * es)); }
   return t;
+}
+// The largest t <= 1 with base + t e inside a solid piece (f(u) = D.|u| - q.u <= 1 within
+// |u| <= R, q.w = R), exactly: f is convex and piecewise linear along the segment, linear between
+// the (at most three) points where a component of u changes sign, so the crossing is a linear
+// solve in the first piece past 1. (ogcPieceScale's subadditive f(base) + t f(e) bound, the
+// filter's test, is conservative across orthants: it cuts a point on the piece's face short.)
+fn ogcPieceF(q: vec4<f32>, D: vec3<f32>, u: vec3<f32>) -> f32 { return dot(D, abs(u)) - dot(q.xyz, u); }
+fn ogcPieceExit(q: vec4<f32>, D: vec3<f32>, base: vec3<f32>, e: vec3<f32>) -> f32 {
+  if (dot(base, base) > q.w * q.w * (1.0 + 1.0e-5)) { return 0.0; }
+  let tb = ogcBallExit(base, e, q.w);
+  var lo = 0.0;
+  var flo = ogcPieceF(q, D, base);
+  if (flo > 1.0) { return 0.0; }
+  if (ogcPieceF(q, D, base + tb * e) <= 1.0) { return tb; }
+  // The sign changes in (0, tb), ascending, then tb.
+  var bp = vec3<f32>(tb);
+  for (var i = 0u; i < 3u; i++) {
+    if (e[i] != 0.0) { let t = -base[i] / e[i]; if (t > 0.0 && t < tb) { bp[i] = t; } }
+  }
+  let b0 = min(bp.x, min(bp.y, bp.z));
+  let b2 = max(bp.x, max(bp.y, bp.z));
+  let b1 = bp.x + bp.y + bp.z - b0 - b2;
+  for (var i = 0u; i < 4u; i++) {
+    let b = select(select(select(b0, b1, i == 1u), b2, i == 2u), tb, i == 3u);
+    if (b <= lo) { continue; }
+    let fb = ogcPieceF(q, D, base + b * e);
+    if (fb > 1.0) { return lo + ((1.0 - flo) / (fb - flo)) * (b - lo); }
+    lo = b; flo = fb;
+  }
+  return tb;
+}
+// ogcArcScale with each solid piece's exact exit (the projection's last step, from a point every
+// certificate holds to the projected point, which the set holds to f32 rounding).
+fn ogcArcExit(fb: u32, first: u32, n: u32, zc: vec3<f32>, ec: vec3<f32>, xs: vec3<f32>, es: vec3<f32>, Rb: mat3x3<f32>) -> f32 {
+  let cap = ogcProj4(fb);
+  var t = ogcBallExit(zc, ec, cap.w);
+  for (var i = 0u; i < n; i++) {
+    let r = ogcProj4(first + i);
+    let s = dot(r.xyz, ec);
+    if (s < 0.0) { t = min(t, clamp((dot(r.xyz, zc) - r.w) / -s, 0.0, 1.0)); }
+  }
+  let so = ogcProj4(fb + 1u);
+  if (so.w != 0.0) { t = min(t, ogcPieceExit(ogcProj4(fb + 2u), ogcProj4(fb + 3u).xyz, xs - so.xyz, es)); }
+  let bo = ogcProj4(fb + 4u);
+  if (bo.w != 0.0) { t = min(t, ogcPieceExit(ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb * (xs - bo.xyz), Rb * es)); }
+  return t;
+}
+// The exact projection's constraints, relative to the anchor c: a ball |z - n| <= beta, or a
+// half-space n.z <= beta. Ids: a plane record's index (< n), else the cap, a solid's ball, or a
+// solid's orthant face (the static solid's from OGC_CON_SOLID, the moving one's from OGC_CON_BODY,
+// plus the orthant's sign bits).
+const OGC_CON_SOLID = 0xffffffe0u;
+const OGC_CON_BODY = 0xffffffe8u;
+const OGC_CON_CAP = 0xfffffff0u;
+const OGC_CON_SOLID_BALL = 0xfffffff1u;
+const OGC_CON_BODY_BALL = 0xfffffff2u;
+const OGC_PROJECT_ROUNDS = 32u;
+// A normal whose part orthogonal to the earlier ones is below 8 f32 ulps of it is dependent on them.
+const OGC_GS_FLOOR = 9.5367431640625e-7;
+struct OgcCon { ball: bool, n: vec3<f32>, beta: f32 }
+// The vertex's certificates: its plane records, the cap's radius, and each solid piece (origin
+// relative to the anchor, q with its ball, D; the moving one's in its end-pose frame Rb).
+struct OgcProjSet { first: u32, n: u32, R: f32, margin: f32, sOn: bool, so: vec3<f32>, sq: vec4<f32>, sD: vec3<f32>, bOn: bool, bo: vec3<f32>, bq: vec4<f32>, bD: vec3<f32>, Rb: mat3x3<f32> }
+fn ogcOrthant(s: u32) -> vec3<f32> { return select(vec3<f32>(-1.0), vec3<f32>(1.0), (vec3<u32>(s) & vec3<u32>(1u, 2u, 4u)) != vec3<u32>(0u)); }
+fn ogcOrthantOf(u: vec3<f32>) -> u32 { return select(0u, 1u, u.x >= 0.0) | select(0u, 2u, u.y >= 0.0) | select(0u, 4u, u.z >= 0.0); }
+// Each pulled in by the margin (the set the projection aims at; ogcProjectExact).
+fn ogcConOf(k: OgcProjSet, id: u32) -> OgcCon {
+  if (id < k.n) { let r = ogcProj4(k.first + id); return OgcCon(false, -r.xyz, -r.w - k.margin * length(r.xyz)); }
+  if (id == OGC_CON_CAP) { return OgcCon(true, vec3<f32>(0.0), max(k.R - k.margin, 0.0)); }
+  if (id == OGC_CON_SOLID_BALL) { return OgcCon(true, k.so, max(k.sq.w - k.margin, 0.0)); }
+  if (id == OGC_CON_BODY_BALL) { return OgcCon(true, k.bo, max(k.bq.w - k.margin, 0.0)); }
+  if (id >= OGC_CON_BODY) {
+    let g = transpose(k.Rb) * (k.bD * ogcOrthant(id - OGC_CON_BODY) - k.bq.xyz);
+    return OgcCon(false, g, 1.0 + dot(g, k.bo) - k.margin * length(g));
+  }
+  let g = k.sD * ogcOrthant(id - OGC_CON_SOLID) - k.sq.xyz;
+  return OgcCon(false, g, 1.0 + dot(g, k.so) - k.margin * length(g));
+}
+// The order of the working set: a record's bits, the fixed certificates after every record.
+fn ogcConKey(k: OgcProjSet, id: u32) -> vec4<u32> {
+  if (id < k.n) { return ogcContacts[k.first + id]; }
+  return vec4<u32>(0xffffffffu, 0xffffffffu, 0xffffffffu, id);
+}
+fn ogcKeyLess(a: vec4<u32>, b: vec4<u32>) -> bool {
+  if (a.x != b.x) { return a.x < b.x; }
+  if (a.y != b.y) { return a.y < b.y; }
+  if (a.z != b.z) { return a.z < b.z; }
+  return a.w < b.w;
+}
+// The distance by which z violates the constraint (<= 0 inside). A face with no normal holds everywhere.
+fn ogcConViol(c: OgcCon, z: vec3<f32>) -> f32 {
+  if (c.ball) { return length(z - c.n) - c.beta; }
+  let nn = dot(c.n, c.n);
+  if (nn == 0.0) { return -3.0e38; }
+  return (dot(c.n, z) - c.beta) * inverseSqrt(nn);
+}
+// The certificate z violates most by more than tau (ties by the record's bits), or OGC_NONE.
+struct OgcWorst { id: u32, viol: f32, key: vec4<u32> }
+fn ogcConsider(w: ptr<function, OgcWorst>, k: OgcProjSet, id: u32, viol: f32, tau: f32) {
+  if (!(viol > tau)) { return; }
+  let key = ogcConKey(k, id);
+  if ((*w).id == OGC_NONE || viol > (*w).viol || (viol == (*w).viol && ogcKeyLess(key, (*w).key))) { *w = OgcWorst(id, viol, key); }
+}
+fn ogcMostViolated(k: OgcProjSet, z: vec3<f32>, tau: f32) -> u32 {
+  var w = OgcWorst(OGC_NONE, 0.0, vec4<u32>(0u));
+  for (var i = 0u; i < k.n; i++) { ogcConsider(&w, k, i, ogcConViol(ogcConOf(k, i), z), tau); }
+  ogcConsider(&w, k, OGC_CON_CAP, ogcConViol(ogcConOf(k, OGC_CON_CAP), z), tau);
+  if (k.sOn) {
+    ogcConsider(&w, k, OGC_CON_SOLID_BALL, ogcConViol(ogcConOf(k, OGC_CON_SOLID_BALL), z), tau);
+    let id = OGC_CON_SOLID + ogcOrthantOf(z - k.so);
+    ogcConsider(&w, k, id, ogcConViol(ogcConOf(k, id), z), tau);
+  }
+  if (k.bOn) {
+    ogcConsider(&w, k, OGC_CON_BODY_BALL, ogcConViol(ogcConOf(k, OGC_CON_BODY_BALL), z), tau);
+    let id = OGC_CON_BODY + ogcOrthantOf(k.Rb * (z - k.bo));
+    ogcConsider(&w, k, id, ogcConViol(ogcConOf(k, id), z), tau);
+  }
+  return w.id;
+}
+// The nearest point to y of the intersection of the m (<= 3) boundaries cs[0..m) (w = 0: empty
+// or degenerate, which a smaller subset covers).
+fn ogcNearest(cons: array<OgcCon, 4>, mask: u32, y: vec3<f32>) -> vec4<f32> {
+  var cs = cons;
+  var sph = OGC_NONE;
+  for (var i = 0u; i < 4u; i++) { if ((mask & (1u << i)) != 0u && cs[i].ball && sph == OGC_NONE) { sph = i; } }
+  var c0 = vec3<f32>(0.0); var R0 = 0.0;
+  if (sph != OGC_NONE) { c0 = cs[sph].n; R0 = cs[sph].beta; }
+  var e: array<vec3<f32>, 3>; var g: array<f32, 3>; var j = 0u;
+  for (var i = 0u; i < 4u; i++) {
+    if ((mask & (1u << i)) == 0u || i == sph) { continue; }
+    var nn = cs[i].n; var bb = cs[i].beta;
+    // A second ball: its radical plane with the sphere, |z - c0|^2 - R0^2 = |z - ci|^2 - Ri^2.
+    if (cs[i].ball) { let d = cs[i].n - c0; nn = 2.0 * d; bb = dot(d, d) + 2.0 * dot(d, c0) + (R0 - cs[i].beta) * (R0 + cs[i].beta); }
+    let l0 = length(nn);
+    for (var l = 0u; l < j; l++) { let t = dot(nn, e[l]); nn -= t * e[l]; bb -= t * g[l]; }
+    let L = length(nn);
+    if (!(L > OGC_GS_FLOOR * l0)) { return vec4<f32>(0.0); }
+    e[j] = nn / L; g[j] = bb / L; j++;
+  }
+  var py = y; var pc = c0;
+  for (var l = 0u; l < j; l++) { py -= (dot(e[l], py) - g[l]) * e[l]; pc -= (dot(e[l], pc) - g[l]) * e[l]; }
+  if (sph == OGC_NONE) { return vec4<f32>(py, 1.0); }
+  let h = c0 - pc;
+  let r2 = R0 * R0 - dot(h, h);
+  let t = py - pc;
+  let tl = length(t);
+  if (r2 < 0.0 || !(tl > 0.0)) { return vec4<f32>(0.0); }
+  return vec4<f32>(pc + (sqrt(r2) / tl) * t, 1.0);
+}
+// The exact projection of zy (relative to the anchor) onto the vertex's certificates, each pulled
+// in by k.margin = 2 tau.
+fn ogcProjectExact(k: OgcProjSet, zy: vec3<f32>) -> vec3<f32> {
+  let tau = 0.5 * k.margin;
+  var z = zy;
+  var S: array<u32, 4>; var ns = 0u;
+  for (var it = 0u; it < OGC_PROJECT_ROUNDS; it++) {
+    let jn = ogcMostViolated(k, z, tau);
+    if (jn == OGC_NONE) { break; }
+    // Insert it in key order (one already in S, violated past tau, is rounding: stop there).
+    let kj = ogcConKey(k, jn);
+    var dup = false;
+    for (var i = 0u; i < ns; i++) { dup = dup || S[i] == jn; }
+    if (dup) { break; }
+    var at = ns;
+    while (at > 0u && ogcKeyLess(kj, ogcConKey(k, S[at - 1u]))) { S[at] = S[at - 1u]; at--; }
+    S[at] = jn; ns++;
+    var cs: array<OgcCon, 4>;
+    for (var i = 0u; i < ns; i++) { cs[i] = ogcConOf(k, S[i]); }
+    // The nearest feasible candidate (else the least violating one).
+    var best = vec4<f32>(0.0); var bestMask = 0u; var bestD = 0.0; var bestV = 0.0;
+    for (var mask = 1u; mask < (1u << ns); mask++) {
+      if (countOneBits(mask) > 3u) { continue; }
+      let q = ogcNearest(cs, mask, zy);
+      if (q.w == 0.0) { continue; }
+      var mv = -3.0e38;
+      for (var i = 0u; i < ns; i++) { mv = max(mv, ogcConViol(cs[i], q.xyz)); }
+      let dq = q.xyz - zy;
+      let dist = dot(dq, dq);
+      let ok = mv <= tau;
+      if (bestMask == 0u || (ok && (bestV > tau || dist < bestD)) || (!ok && bestV > tau && mv < bestV)) {
+        best = q; bestMask = mask; bestD = dist; bestV = mv;
+      }
+    }
+    if (bestMask == 0u) { break; }
+    z = best.xyz;
+    var m = 0u;
+    for (var i = 0u; i < ns; i++) { if ((bestMask & (1u << i)) != 0u) { S[m] = S[i]; m++; } }
+    ns = m;
+  }
+  return z;
 }
 // The projection of the trial y = x + alpha d (alpha the trial's step) onto its level's set.
 fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> {
@@ -652,26 +851,15 @@ fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> 
   let c = cap.xyz - u * w;
   // A trial every certificate keeps whole along the joint path from (x, L) (the filter's own test) is the point itself.
   if (ogcArcScale(fb, first, n, x - cx, (y - x) - (U - u) * w, x, y - x, Rb) >= 1.0) { return y; }
-  let sq = ogcProj4(fb + 2u); let sD = ogcProj4(fb + 3u).xyz;
-  let bq = ogcProj4(fb + 5u); let bD = ogcProj4(fb + 6u).xyz;
-  var p = y;
-  for (var sweep = 0u; sweep < 3u; sweep++) {
-    let z = p - c;
-    let l = length(z);
-    if (l > cap.w) { p = c + z * (cap.w / l); }
-    for (var i = 0u; i < n; i++) {
-      let r = ogcProj4(first + i);
-      let e = dot(r.xyz, p - c) - r.w;
-      if (e < 0.0) { p -= e * r.xyz; }
-    }
-    if (so.w != 0.0) { p = ogcProjectPiece(p, so.xyz, sq, sD, OGC_I3); }
-    if (bo.w != 0.0) { p = ogcProjectPiece(p, bo.xyz, bq, bD, Rb); }
-  }
+  let zy = y - c;
+  let cert = OgcProjSet(first, n, cap.w, 1.52587890625e-5 * (cap.w + length(zy)), so.w != 0.0, so.xyz - c, ogcProj4(fb + 2u), ogcProj4(fb + 3u).xyz,
+    bo.w != 0.0, bo.xyz - c, ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb);
+  let p = c + ogcProjectExact(cert, zy);
   // From the anchor c(a) in a levelled round (every certificate holds it: the cap's centre,
   // records with b <= 0, solids holding X and X + w), else from the iterate.
   let o = select(x, c, levelled);
   let e = p - o;
-  return o + ogcArcScale(fb, first, n, o - c, e, o, e, Rb) * e;
+  return o + ogcArcExit(fb, first, n, o - c, e, o, e, Rb) * e;
 }
 // The mandatory round's and an unlevelled round's projection (no level: the trial's alpha is unread).
 fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return ogcProjectTrial(v, x, y, 1.0); }

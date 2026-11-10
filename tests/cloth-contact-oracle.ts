@@ -889,22 +889,166 @@ export function levelledInside(V: LevelledVertex, solids: WorldHalfSpace[], y: V
 }
 
 /**
- * The projection of a trial y onto S_v(a), as ogcProject computes it: y itself when
- * every certificate keeps it; else three sweeps of alternating projections (the cap,
- * each record, each solid) and then the largest t of the segment from the anchor
- * c_v(a) (in every certificate) to that point that every certificate keeps.
+ * A certificate of the exact projection, relative to the anchor: the ball |z - c| <= R, or the
+ * half-space n.z <= beta.
+ */
+export type ProjCon = { ball: true; c: V3; R: number } | { ball: false; n: V3; beta: number };
+/** The distance by which z violates k (<= 0 inside); a half-space with no normal holds everywhere. */
+export const conViolation = (k: ProjCon, z: V3) => (k.ball ? norm(sub(z, k.c)) - k.R : norm(k.n) === 0 ? -Infinity : (dot(k.n, z) - k.beta) / norm(k.n));
+
+/**
+ * The nearest point to y of the intersection of the boundaries of cs (|cs| <= 3), or null when
+ * it is empty or degenerate: the first ball is a sphere, each other ball its radical plane with
+ * it, and the planes' affine set A meets the sphere in a sphere of A about proj_A(c).
+ */
+export function nearestOnBoundaries(cs: ProjCon[], y: V3): V3 | null {
+  const sph = cs.find(k => k.ball) as { ball: true; c: V3; R: number } | undefined;
+  const e: V3[] = [], g: number[] = [];
+  for (const k of cs) {
+    if (k === sph) continue;
+    let n: V3, b: number;
+    if (k.ball) { const d = sub(k.c, sph!.c); n = scale(d, 2); b = dot(d, d) + 2 * dot(d, sph!.c) + (sph!.R - k.R) * (sph!.R + k.R); }
+    else { n = k.n; b = k.beta; }
+    const l0 = norm(n);
+    for (let l = 0; l < e.length; l++) { const t = dot(n, e[l]); n = sub(n, scale(e[l], t)); b -= t * g[l]; }
+    const L = norm(n);
+    if (!(L > 1e-12 * l0)) return null;
+    e.push(scale(n, 1 / L)); g.push(b / L);
+  }
+  const proj = (w: V3) => e.reduce((p, el, l) => sub(p, scale(el, dot(el, p) - g[l])), w);
+  const py = proj(y);
+  if (!sph) return py;
+  const pc = proj(sph.c), r2 = sph.R * sph.R - dot(sub(sph.c, pc), sub(sph.c, pc)), t = sub(py, pc), tl = norm(t);
+  if (r2 < 0 || !(tl > 0)) return null;
+  return add(pc, scale(t, Math.sqrt(r2) / tl));
+}
+
+/**
+ * The Euclidean projection of y onto the intersection of cons, by brute force: the nearest of
+ * the feasible points nearest(M_W) over every W with |W| <= 3 (Caratheodory: the projection is
+ * one of them, and every feasible candidate is in the set). tol: the feasibility slack.
+ */
+export function bruteForceProjection(cons: ProjCon[], y: V3, tol: number): { p: V3; W: number[] } | null {
+  if (cons.every(k => conViolation(k, y) <= tol)) return { p: y, W: [] };
+  let best: { p: V3; W: number[]; d: number } | null = null;
+  const m = cons.length;
+  const tryW = (W: number[]) => {
+    const p = nearestOnBoundaries(W.map(i => cons[i]), y);
+    if (!p || cons.some(k => conViolation(k, p) > tol)) return;
+    const d = norm(sub(p, y));
+    if (!best || d < best.d) best = { p, W, d };
+  };
+  for (let i = 0; i < m; i++) {
+    tryW([i]);
+    for (let j = i + 1; j < m; j++) { tryW([i, j]); for (let k = j + 1; k < m; k++) tryW([i, j, k]); }
+  }
+  return best;
+}
+
+/**
+ * The GPU's algorithm (ogcProjectExact) in Float64: constraint generation from y, the most
+ * violated certificate joining the working set S, which becomes the active set of the nearest
+ * feasible candidate over S (|S| <= 4). Returns the point and the rounds it took (the GPU
+ * bounds them at OGC_PROJECT_ROUNDS = 32).
+ */
+export function workingSetProjection(cons: ProjCon[], y: V3, tol: number): { p: V3; rounds: number } {
+  let z = y, S: number[] = [], rounds = 0;
+  for (; rounds < 64; rounds++) {
+    let j = -1, jv = tol;
+    cons.forEach((k, i) => { const v = conViolation(k, z); if (v > jv) { j = i; jv = v; } });
+    if (j < 0 || S.includes(j)) break;
+    S = [...S, j].sort((a, b) => a - b);
+    let best: { p: V3; W: number[]; d: number; v: number } | null = null;
+    for (let mask = 1; mask < 1 << S.length; mask++) {
+      const W = S.filter((_, i) => mask & (1 << i));
+      if (W.length > 3) continue;
+      const q = nearestOnBoundaries(W.map(i => cons[i]), y);
+      if (!q) continue;
+      const v = Math.max(...S.map(i => conViolation(cons[i], q))), d = norm(sub(q, y)), ok = v <= tol;
+      if (!best || (ok && (best.v > tol || d < best.d)) || (!ok && best.v > tol && v < best.v)) best = { p: q, W, d, v };
+    }
+    if (!best) break;
+    z = best.p; S = best.W;
+  }
+  return { p: z, rounds };
+}
+
+/**
+ * The KKT conditions of p as the projection of y onto cons: its largest violation, and the
+ * residual of y - p in the cone of the normals of the certificates active at p (within
+ * activeTol), over |y - p|: the least-squares fit over every subset of at most three active
+ * normals with nonnegative multipliers (0 when p = y).
+ */
+export function projectionKkt(cons: ProjCon[], y: V3, p: V3, activeTol: number): { violation: number; residual: number; active: number } {
+  const violation = Math.max(...cons.map(k => conViolation(k, p)));
+  const r = sub(y, p), rn = norm(r);
+  const normals: V3[] = [];
+  for (const k of cons) {
+    if (conViolation(k, p) < -activeTol) continue;
+    normals.push(k.ball ? unit(sub(p, k.c)) : unit(k.n));
+  }
+  if (rn === 0) return { violation, residual: 0, active: normals.length };
+  let residual = 1;
+  const fit = (N: V3[]) => {
+    // Normal equations G lam = N^T r, solved by Cramer for |N| <= 3.
+    const k = N.length, G = N.map(a => N.map(b => dot(a, b))), h = N.map(a => dot(a, r));
+    let lam: number[];
+    if (k === 1) lam = [h[0] / G[0][0]];
+    else if (k === 2) { const det = G[0][0] * G[1][1] - G[0][1] * G[1][0]; if (Math.abs(det) < 1e-24) return; lam = [(h[0] * G[1][1] - G[0][1] * h[1]) / det, (G[0][0] * h[1] - h[0] * G[1][0]) / det]; }
+    else {
+      const det3 = (M: number[][]) => M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+      const det = det3(G);
+      if (Math.abs(det) < 1e-24) return;
+      lam = [0, 1, 2].map(c => det3(G.map((row, i) => row.map((v, j) => (j === c ? h[i] : v)))) / det);
+    }
+    if (lam.some(l => l < -1e-9 * rn)) return;
+    const res = N.reduce((q, a, i) => sub(q, scale(a, lam[i])), r);
+    residual = Math.min(residual, norm(res) / rn);
+  };
+  const n = normals.length;
+  for (let i = 0; i < n; i++) {
+    fit([normals[i]]);
+    for (let j = i + 1; j < n; j++) { fit([normals[i], normals[j]]); for (let k = j + 1; k < n; k++) fit([normals[i], normals[j], normals[k]]); }
+  }
+  return { violation, residual, active: n };
+}
+
+/** A solid piece's certificates relative to the anchor: its ball and its eight orthant faces, (D o s - q).Rb (z - o) <= 1. */
+export function solidPieceCons(o: V3, q: V3, R: number, D: V3, Rb: number[][] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]): ProjCon[] {
+  const out: ProjCon[] = [{ ball: true, c: o, R }];
+  for (let s = 0; s < 8; s++) {
+    const sg: V3 = [s & 1 ? 1 : -1, s & 2 ? 1 : -1, s & 4 ? 1 : -1];
+    const gb: V3 = [D[0] * sg[0] - q[0], D[1] * sg[1] - q[1], D[2] * sg[2] - q[2]];
+    // n = Rb^T gb.
+    const n: V3 = [0, 1, 2].map(j => Rb[0][j] * gb[0] + Rb[1][j] * gb[1] + Rb[2][j] * gb[2]) as V3;
+    if (norm(n) > 0) out.push({ ball: false, n, beta: 1 + dot(n, o) });
+  }
+  return out;
+}
+
+/** The certificates of S_v(a) (and the solids) relative to its anchor c_v(a). */
+export function levelledCons(V: LevelledVertex, solids: WorldHalfSpace[], a: number): { c: V3; cons: ProjCon[] } {
+  const c = add(V.X, scale(V.w, a));
+  const cons: ProjCon[] = [{ ball: true, c: [0, 0, 0], R: V.R }];
+  for (const r of V.planes) cons.push({ ball: false, n: scale(r.m, -1), beta: -r.b });
+  for (const s of solids) cons.push({ ball: false, n: scale(s.m, -1), beta: dot(s.m, c) - s.h });
+  return { c, cons };
+}
+
+/**
+ * The projection of a trial y onto S_v(a), as ogcProject computes it: y itself when every
+ * certificate keeps it; else its exact Euclidean projection (workingSetProjection), and then the largest t of the
+ * segment from the anchor c_v(a) (in every certificate) to that point that every certificate
+ * keeps.
  */
 export function levelledProject(V: LevelledVertex, solids: WorldHalfSpace[], y: V3, a: number): V3 {
-  const c = add(V.X, scale(V.w, a));
   if (levelledInside(V, solids, y, a)) return y;
-  let p = y;
-  for (let sweep = 0; sweep < 3; sweep++) {
-    const z = sub(p, c), l = norm(z);
-    if (l > V.R) p = add(c, scale(z, V.R / l));
-    for (const r of V.planes) { const e = dot(r.m, sub(p, c)) - r.b; if (e < 0) p = sub(p, scale(r.m, e)); }
-    for (const s of solids) { const e = dot(s.m, p) - s.h; if (e < 0) p = sub(p, scale(s.m, e)); }
-  }
-  const e = sub(p, c);
+  const { c, cons } = levelledCons(V, solids, a);
+  const zy = sub(y, c);
+  // The GPU's algorithm in Float64 (the brute force's equal on random sets: oracle test); records run to dozens a vertex here.
+  // Aimed, as on the GPU, at the set pulled in by 2^-16 (R + |y - c|).
+  const sc = V.R + norm(zy);
+  const e = workingSetProjection(shrinkCons(cons, 2 ** -16 * sc), zy, 1e-14 * sc).p;
   let t = ballExit([0, 0, 0], e, V.R);
   for (const r of V.planes) { const s = dot(r.m, e); if (s < 0) t = Math.min(t, Math.max(0, r.b / s)); }
   for (const s of solids) { const k = dot(s.m, e); if (k < 0) t = Math.min(t, Math.max(0, (s.h - dot(s.m, c)) / k)); }
@@ -924,3 +1068,54 @@ export function levelledLadder(round: LevelledRound, solids: WorldHalfSpace[], x
   }
   return out;
 }
+
+/**
+ * A random vertex certificate set as the filter records it, relative to its anchor (which every
+ * certificate holds): the cap radius R, plane records m.z >= b (b <= 0; some near-parallel to the
+ * one before, 1-10 degrees off), and optionally a static solid piece and a moving one (origin o,
+ * q, its ball Rq, D, and for the moving one its frame Rb: bodyRb, else random), each holding the
+ * anchor; and a trial y.
+ */
+export interface ProjectionPiece { o: V3; q: V3; Rq: number; D: V3; Rb: number[][] }
+export interface ProjectionCase { R: number; planes: { m: V3; b: number }[]; solid?: ProjectionPiece; body?: ProjectionPiece; y: V3 }
+export function projectionCase(R: () => number, bodyRb?: number[][]): ProjectionCase {
+  const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
+  const cap = 1e-3 + 19e-3 * R();
+  const planes: { m: V3; b: number }[] = [];
+  const count = Math.floor(R() * (R() < 0.2 ? 25 : 10));
+  for (let i = 0; i < count; i++) {
+    let m = unitRand();
+    if (i > 0 && R() < 0.4) { const prev = planes[i - 1].m, t = unitRand(), ang = (1 + 9 * R()) * Math.PI / 180; m = unit(add(prev, scale(unit(sub(t, scale(prev, dot(t, prev)))), Math.tan(ang)))); }
+    planes.push({ m, b: -0.5 * cap * R() * R() });
+  }
+  const piece = (rotated: boolean): ProjectionPiece => {
+    const o = scale(unitRand(), 0.5 * cap * R()), Rq = norm(o) + (0.2 + 2.8 * R()) * cap;
+    let q: V3 = [0, 0, 0], D: V3 = [0, 0, 0];
+    if (R() < 0.8) {
+      q = scale(unitRand(), 2 * R() / cap); D = [R() / cap, R() / cap, R() < 0.5 ? 0 : R() / cap];
+      // Hold the anchor: u0 = Rb (0 - o), f(u0) = D.|u0| - q.u0 < 1.
+      const u0 = scale(rb.map(row => dot(row as V3, o)) as V3, -1);
+      const f0 = dot(D, u0.map(Math.abs) as V3) - dot(q, u0);
+      if (f0 > 0.9) { q = scale(q, 0.9 / f0); D = scale(D, 0.9 / f0); }
+    }
+    return { o, q, Rq, D, Rb: rb };
+  };
+  const identity = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  let rb = identity;
+  const solid = R() < 0.5 ? piece(false) : undefined;
+  rb = bodyRb ?? (() => {
+    const a = unitRand(), th = Math.PI * R(), c = Math.cos(th), s = Math.sin(th), K = [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
+    return [0, 1, 2].map(i => [0, 1, 2].map(j => (i === j ? c : 0) + s * K[i][j] + (1 - c) * a[i] * a[j]));
+  })();
+  const body = R() < 0.35 ? piece(true) : undefined;
+  const y = scale(unitRand(), (0.3 + 2.7 * R()) * cap);
+  return { R: cap, planes, solid, body, y };
+}
+/** The case's certificates as ProjCon (anchor-relative). */
+export function projectionCaseCons(k: ProjectionCase): ProjCon[] {
+  const cons: ProjCon[] = [{ ball: true, c: [0, 0, 0], R: k.R }, ...k.planes.map(p => ({ ball: false as const, n: scale(p.m, -1), beta: -p.b }))];
+  for (const s of [k.solid, k.body]) if (s) cons.push(...solidPieceCons(s.o, s.q, s.Rq, s.D, s.Rb));
+  return cons;
+}
+/** cons with every certificate pulled in by margin (the set ogcProjectExact aims at, margin = 2^-16 (R + |y - c|)). */
+export const shrinkCons = (cons: ProjCon[], margin: number): ProjCon[] => cons.map(k => (k.ball ? { ...k, R: Math.max(k.R - margin, 0) } : { ...k, beta: k.beta - margin * norm(k.n) }));

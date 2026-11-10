@@ -13,6 +13,7 @@ import {
   bruteForcePredictedPairs, predictedConflict, predictedTruncate, predictionSpread, buildEdges,
   type ContactParams, type OracleContact, type OracleMesh, type V3,
   levelledInside, levelledLadder, levelledRound, type WorldHalfSpace,
+  bruteForceProjection, conViolation, projectionCase, projectionCaseCons, projectionKkt, workingSetProjection, type ProjCon,
 } from "./cloth-contact-oracle";
 import { buildOgcEdges, buildOgcTopology, OGC_NONE } from "../lib/cloth/contact/ogc-topology";
 
@@ -486,3 +487,41 @@ test("levelled re-detection: every trial of the ladder, projected onto its level
   assert.ok(cutTrials >= 2 * divided, `the projections act (${cutTrials} cut trials)`);
   assert.ok(wider >= divided - 1, `the levels keep more of the step than the cap about X (${wider}/${divided})`);
 });
+
+test("the exact per-vertex projection: brute force over working sets meets the KKT conditions, the GPU's working-set algorithm finds it, and cyclic sweeps do not (their point depends on the record order)", () => {
+  const R = rng(4242);
+  let maxRes = 0, maxViol = 0, maxDiff = 0, maxRounds = 0, cyclicFar = 0, orderDep = 0, cut = 0, n = 0;
+  for (let i = 0; i < 3000; i++) {
+    const k = projectionCase(R), cons = projectionCaseCons(k), scaleOf = k.R + norm(k.y);
+    if (cons.every(c => conViolation(c, k.y) <= 0)) continue;
+    n++;
+    const ref = bruteForceProjection(cons, k.y, 1e-13 * scaleOf);
+    assert.ok(ref, `case ${i}: a feasible candidate (the anchor is in the set)`);
+    const kkt = projectionKkt(cons, k.y, ref.p, 1e-10 * scaleOf);
+    maxRes = Math.max(maxRes, kkt.residual); maxViol = Math.max(maxViol, kkt.violation / scaleOf);
+    assert.ok(kkt.residual < 1e-7, `case ${i}: y - p outside the normal cone of the active certificates (residual ${kkt.residual}, ${kkt.active} active)`);
+    assert.ok(kkt.violation <= 1e-12 * scaleOf, `case ${i}: violation ${kkt.violation}`);
+    const ws = workingSetProjection(cons, k.y, 1e-13 * scaleOf);
+    maxRounds = Math.max(maxRounds, ws.rounds);
+    const diff = norm(sub(ws.p, ref.p)) / scaleOf;
+    maxDiff = Math.max(maxDiff, diff);
+    assert.ok(diff < 1e-9, `case ${i}: the working-set projection is ${diff} (relative) off the brute force after ${ws.rounds} rounds`);
+    assert.ok(ws.rounds <= 32, `case ${i}: ${ws.rounds} rounds`);
+    if (ref.W.length > 0) cut++;
+    // Three sweeps of alternating projections, in the records' order and reversed.
+    const sweep = (order: ProjCon[]) => {
+      let p = k.y;
+      for (let s = 0; s < 3; s++) for (const c of order) {
+        if (conViolation(c, p) <= 0) continue;
+        p = c.ball ? add(c.c, scale(unit3(sub(p, c.c)), c.R)) : sub(p, scale(c.n, (dot(c.n, p) - c.beta) / dot(c.n, c.n)));
+      }
+      return p;
+    };
+    const a = sweep(cons), b = sweep([...cons].reverse());
+    if (norm(sub(a, ref.p)) > 1e-6 * scaleOf) cyclicFar++;
+    if (norm(sub(a, b)) > 1e-6 * scaleOf) orderDep++;
+  }
+  console.log(`exact projection: ${n} cases (${cut} cut), KKT residual max ${maxRes.toExponential(2)}, violation max ${maxViol.toExponential(2)} (relative), working set off the brute force by ${maxDiff.toExponential(2)}, rounds max ${maxRounds}; three cyclic sweeps off the projection in ${cyclicFar}, order-dependent in ${orderDep}`);
+  assert.ok(n > 1000 && cut > 1000);
+});
+const unit3 = (a: V3): V3 => scale(a, 1 / norm(a));
