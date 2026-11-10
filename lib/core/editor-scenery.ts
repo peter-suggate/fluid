@@ -291,7 +291,7 @@ export function createSceneryNodeAt(
     };
   }
   const lift = normal.y > 0.1 ? { x: 0, y: 1, z: 0 } : normal;
-  const height = kind === "cylinder" ? extent : extent;
+  const height = extent;
   const place: SceneryPlacement = {
     units: "metres",
     position: add(point_m, { x: lift.x * height, y: lift.y * height, z: lift.z * height }),

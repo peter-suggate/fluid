@@ -730,9 +730,15 @@ So FLIP's delta is at the 4h band's resolution, but only in the h band's extrapo
 | drop16 | 15.7 | 14.86 (within noise; the drop kernels are lower) |
 
 - **Checks:** 16/17; the one failure is the known work-control test.
-- **Kernel medians as reported** (letters steps 116–119, then seep):
-  - letters extension 2.556 and 3.473; letters FLIP delta 0.590 and 0.852; seep extension 0.917 and 1.179.
-  - These are listed in the coordinator's column order (HEAD, then HEAD + E + T), which makes the combined tree higher. Lane E's own counters show the reverse: total 4.490 → 3.442 at letters and 1.160 → 0.901 at seep. The columns may be swapped; this is not yet confirmed.
+- **Kernel medians** (letters steps 116–119, then seep; HEAD + E + T against HEAD):
+
+  | kernel | HEAD + E + T | HEAD |
+  |---|---|---|
+  | letters extension | 2.556 | 3.473 |
+  | letters FLIP delta | 0.590 | 0.852 |
+  | seep extension | 0.917 | 1.179 |
+
+  - The combined tree is lower, the same direction as Lane E's counters (total 4.490 → 3.442 at letters, 1.160 → 0.901 at seep).
 - **NB-FLIP seed +0.39 ms and transfer +0.26 ms at letters (follow-up, by code reading):** neither comes from the keep or from the change to departure.
   - **Order:** the keep runs after `encodeParticleMomentum`, in the slot of HEAD's old-field extension. Within the frame, the transfer reads departure as momentum leaves it (`["transfer",f.departure,…]`), before the keep writes it.
   - **Cross-frame:** momentum rewrites departure ahead of the next transfer. A frozen quiet frame skips momentum, but even then the transfer would only read different values: neither kernel branches on velocity values.

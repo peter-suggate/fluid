@@ -20,7 +20,7 @@ import {
   UNIFORM_PARTICLE_STRIDE,
   type UniformView,
 } from "../../lib/physics-wasm/uniform-controller";
-import { NARROW_BAND_FINE_ADVECTION, NARROW_BAND_VOLUME_CONTROL } from "../../lib/methods/uniform/uniform-narrow-band-controls";
+import { NARROW_BAND_VOLUME_CONTROL } from "../../lib/methods/uniform/uniform-narrow-band-controls";
 import { PhysicsWasmWorkerRuntime } from "../../lib/physics-wasm/worker-runtime";
 import type { WorkerPort } from "../../lib/physics-wasm/client";
 import type {
@@ -31,13 +31,13 @@ import type { FluidWasmModule } from "../../lib/physics-wasm/module";
 {
   const defaults = uniformLabQuery.read(new URLSearchParams());
   assert.equal(defaults.volumeControlSeconds, NARROW_BAND_VOLUME_CONTROL.default, "volume control defaults as in 3D");
-  assert.equal(defaults.phiFineAdvection, NARROW_BAND_FINE_ADVECTION.default, "level-set advection defaults as in 3D");
+  assert.equal(defaults.phiFineAdvection, "cubic", "level-set advection opens on cubic: the native port has no adaptive");
   assert.equal(defaults.dt, 1 / 60, "the lab steps at the 3D method's default");
   const legacy = new URLSearchParams("method=uniform-volume&totalSurfaceVolume=0&phiDrain=1");
   assert.equal(uniformLabQuery.read(legacy).volumeControlSeconds, NARROW_BAND_VOLUME_CONTROL.default, "a Uniform Geometric link opens the method's defaults");
 }
 assert.equal(UNIFORM_LAB_VALUES.volumeControlSeconds, NARROW_BAND_VOLUME_CONTROL.default);
-assert.equal(UNIFORM_LAB_VALUES.phiFineAdvection, NARROW_BAND_FINE_ADVECTION.default);
+assert.equal(UNIFORM_LAB_VALUES.phiFineAdvection, "cubic");
 interface Receipt {
   volume: number; budget: number; controlRate: number; injectedVolume: number; outflowVolume: number;
   particles: number; reseedClipped: number; maxSpeed: number;

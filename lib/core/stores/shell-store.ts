@@ -28,6 +28,11 @@ interface ShellStore {
    * return to yet — a viewport showing a scene nobody chose is not a place.
    */
   studioEntered: boolean;
+  /**
+   * Whether the retained studio is the page on screen. Another route keeps it
+   * mounted but hidden, and its frame loops idle until it is shown again.
+   */
+  studioVisible: boolean;
   librarySearch: string;
   /**
    * A/B compare, which is a property of the *page* and not of either pane.
@@ -40,6 +45,7 @@ interface ShellStore {
   compare: CompareState;
   openLibrary: () => void;
   enterStudio: () => void;
+  setStudioVisible: (visible: boolean) => void;
   setLibrarySearch: (query: string) => void;
   /** Replace the compare record wholesale; the mirror is the only frequent caller. */
   setCompare: (next: CompareState | ((current: CompareState) => CompareState)) => void;
@@ -55,10 +61,12 @@ export const useShellStore = create<ShellStore>((set) => ({
   // The front door. The studio itself is lazy-mounted by AppShell.
   view: "library",
   studioEntered: false,
+  studioVisible: true,
   librarySearch: "",
   compare: INITIAL_COMPARE_STATE,
   openLibrary: () => set({ view: "library" }),
   enterStudio: () => set({ view: "studio", studioEntered: true, librarySearch: "" }),
+  setStudioVisible: (studioVisible) => set((state) => state.studioVisible === studioVisible ? state : { studioVisible }),
   setLibrarySearch: (librarySearch) => set({ librarySearch }),
   setCompare: (next) => set((state) => ({
     compare: typeof next === "function" ? next(state.compare) : next,

@@ -111,6 +111,8 @@ export function rigidMotorRecords(descriptions: readonly RigidBodyDescription[],
   });
   return motorData;
 }
+/** Position, orientation, both velocities and the held flag: what `commandSignatures` signs. */
+const SYNCED_COMMAND_FLOATS = 14;
 export const GPU_RIGID_STATE_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_STATE_FLOATS * 4;
 export const GPU_RIGID_RENDER_FLOATS = 16;
 export const GPU_RIGID_RENDER_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_RENDER_FLOATS * 4;
@@ -1074,7 +1076,47 @@ export class WebGPURigidBodySystem {
     // a scene without bodies builds none of them each step. The upload is its
     // own function: its closures would cost this one a context on every call.
     if (bodies.length === 0 && this.bodyIds.length === 0) return;
+    if (this.unchangedSinceSync(bodies)) return;
     this.uploadBodies(bodies);
+    this.recordSync(bodies);
+  }
+  /**
+   * The roster `uploadBodies` last signed, held as the description objects and
+   * the commanded numbers it read. Every advance re-offers the same roster, and
+   * signing it again was three JSON strings a body before the comparison could
+   * tell. Documents are replaced rather than mutated, so a description is
+   * compared by reference; the command fields are compared by value because
+   * the held-pose and prescribed-motion paths rewrite them in place. Equal here
+   * means the signatures, strengths and drives would all compare equal too.
+   */
+  private readonly syncedDescriptions: RigidBodyDescription[] = [];
+  private readonly syncedCommands = new Float64Array(GPU_RIGID_BODY_CAPACITY * SYNCED_COMMAND_FLOATS);
+  private unchangedSinceSync(bodies: readonly RigidBodyState[]): boolean {
+    const count = Math.min(bodies.length, GPU_RIGID_BODY_CAPACITY), described = this.syncedDescriptions, c = this.syncedCommands;
+    if (count !== described.length) return false;
+    for (let i = 0, o = 0; i < count; i++, o += SYNCED_COMMAND_FLOATS) {
+      const body = bodies[i]!, p = body.position_m, q = body.orientation, v = body.linearVelocity_m_s, w = body.angularVelocity_rad_s;
+      if (body.description !== described[i]
+        || p.x !== c[o] || p.y !== c[o + 1] || p.z !== c[o + 2]
+        || q.w !== c[o + 3] || q.x !== c[o + 4] || q.y !== c[o + 5] || q.z !== c[o + 6]
+        || v.x !== c[o + 7] || v.y !== c[o + 8] || v.z !== c[o + 9]
+        || w.x !== c[o + 10] || w.y !== c[o + 11] || w.z !== c[o + 12]
+        || (body.held ? 1 : 0) !== c[o + 13]) return false;
+    }
+    return true;
+  }
+  private recordSync(bodies: readonly RigidBodyState[]): void {
+    const count = Math.min(bodies.length, GPU_RIGID_BODY_CAPACITY), described = this.syncedDescriptions, c = this.syncedCommands;
+    described.length = count;
+    for (let i = 0, o = 0; i < count; i++, o += SYNCED_COMMAND_FLOATS) {
+      const body = bodies[i]!, p = body.position_m, q = body.orientation, v = body.linearVelocity_m_s, w = body.angularVelocity_rad_s;
+      described[i] = body.description;
+      c[o] = p.x; c[o + 1] = p.y; c[o + 2] = p.z;
+      c[o + 3] = q.w; c[o + 4] = q.x; c[o + 5] = q.y; c[o + 6] = q.z;
+      c[o + 7] = v.x; c[o + 8] = v.y; c[o + 9] = v.z;
+      c[o + 10] = w.x; c[o + 11] = w.y; c[o + 12] = w.z;
+      c[o + 13] = body.held ? 1 : 0;
+    }
   }
   private uploadBodies(bodies: readonly RigidBodyState[]) {
     const active = bodies.slice(0, GPU_RIGID_BODY_CAPACITY);

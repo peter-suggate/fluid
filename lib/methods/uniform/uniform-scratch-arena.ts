@@ -1,12 +1,11 @@
-/** Shared f32 backing of the pressure solve: the mixed pressure root, then
- * the levels its correction is solved on. Both follow the page pool: rows a
- * block. Hierarchy geometry/coefficient ranges are retained derived state;
- * only pressure setup writes them. Iterates, RHS and bounds remain scratch.
- * Persistent/published textures remain ordinary textures.
+/** Shared f32 backing of the pressure solve: the mixed pressure root, which
+ * follows the page pool (rows a block). Its correction is solved on the
+ * pressure arena's own levels (uniform-pressure-arena.ts), not here. Iterates,
+ * RHS and bounds remain scratch. Persistent/published textures remain
+ * ordinary textures.
  *
  * The scratch the non-pressure stages overlap follows the h-tile capacity
  * and is the mixed frame's own buffer (UniformMixedFrame.stageBytesAt). */
-import { planUniformPressureLevels, type UniformPressureLevelWords } from "./pressure-plan";
 import type { UniformLatticeAddress } from "./uniform-lattice-address";
 
 /** Allocation-free layout; different resolutions can share backing when their
@@ -18,8 +17,6 @@ export class UniformScratchLayout {
   readonly rootBytes: number;
   readonly sharpenBaseWords: number;
   readonly conditioningBytes: number;
-  /** The correction's levels, 4h first: arena words (planUniformPressureLevels). */
-  readonly levels: readonly UniformPressureLevelWords[];
   constructor(readonly address: UniformLatticeAddress, retainDiagnostics=false, rootBytes=0) {
     const tiles=address.tileKeys;
     this.sharpenBaseWords=Math.ceil((6*tiles+3)/4)*4;
@@ -30,8 +27,7 @@ export class UniformScratchLayout {
     if (!Number.isSafeInteger(rootBytes) || rootBytes < 0)
       throw new RangeError("Uniform scratch root bytes must be a nonnegative safe integer");
     this.rootOffset=0;this.rootBytes=Math.ceil(rootBytes/256)*256;
-    const plan=planUniformPressureLevels(address.blocks,(this.rootOffset+this.rootBytes)/4);
-    this.levels=plan.levels;this.byteLength=plan.end*4;
+    this.byteLength=this.rootOffset+this.rootBytes;
     if (!Number.isSafeInteger(this.byteLength))
       throw new RangeError("Uniform scratch layout exceeds safe integer addressing");
   }

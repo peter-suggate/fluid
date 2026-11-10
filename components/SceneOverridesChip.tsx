@@ -141,6 +141,11 @@ export function SceneOverridesChip() {
   // on an empty chip and the address is consulted only once they do.
   const mounted = useSyncExternalStore(subscribeNever, () => true, () => false);
   const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
 
   useEffect(() => {
     if (!open) return;
@@ -223,7 +228,6 @@ export function SceneOverridesChip() {
             onClick={() => {
               void navigator.clipboard?.writeText(new URL(cleanSceneLink(presetId), window.location.origin).href);
               setCopied(true);
-              window.setTimeout(() => setCopied(false), 1400);
             }}
             title="A link to this scene exactly as it was authored"
           >{copied ? "Copied" : "Copy clean link"}</button>

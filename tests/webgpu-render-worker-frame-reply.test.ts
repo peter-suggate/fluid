@@ -20,7 +20,7 @@ test("a draw that throws still answers its frame, so the window's frame pump can
   const send = (data: unknown) => scope.dispatchEvent(new MessageEvent("message", { data: data as WebGPURenderWorkerRequest }));
   send({ type: "attach", canvas: {} });
   // No scene was published under this revision: the draw throws before it reaches the GPU.
-  send({ type: "draw", frameId: 7, sceneRevision: 3, args: [0, undefined, undefined, undefined, { methodId: "test-method" }],
+  send({ type: "draw", frameId: 7, sceneRevision: 3, args: [0, undefined, undefined, { methodId: "test-method" }],
     instrumentationMode: "off", viewport: { width: 1, height: 1, devicePixelRatio: 1 } });
   await new Promise(resolve => setTimeout(resolve, 0));
   const status = posted.find(message => message.type === "status");

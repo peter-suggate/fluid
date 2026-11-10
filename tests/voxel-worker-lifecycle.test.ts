@@ -205,3 +205,28 @@ test("worker scalar asset handoff makes imported scenery pickable without loadin
     assert.equal(miss, null, "empty space within the bounds must not become a box-shaped pick");
   });
 });
+
+test("the body roster crosses to the worker when it changes, not with every frame", async () => {
+  await withClient(async (client, worker) => {
+    const canvas = { transferControlToOffscreen: () => ({}), getBoundingClientRect: () => ({ width: 4, height: 4 }) };
+    Object.assign(client, { canvas });
+    type Draw = Parameters<WebGPURenderWorkerClient["draw"]>;
+    const frame = (bodies: Draw[3]) => [0, defaultScene, {} as Draw[2], bodies, undefined, { methodId: "test" }] as unknown as Draw;
+    const roster: Draw[3] = [];
+    client.draw(...frame(roster));
+    client.draw(...frame(roster));
+    client.draw(...frame(roster));
+    const replaced: Draw[3] = [];
+    client.draw(...frame(replaced));
+    const published = worker.messages.filter(message => message.type === "set-render-bodies");
+    assert.equal(published.length, 2);
+    assert.ok(published[0]!.type === "set-render-bodies" && published[0]!.bodies === roster);
+    assert.ok(published[1]!.type === "set-render-bodies" && published[1]!.bodies === replaced);
+    const draws = worker.messages.filter(message => message.type === "draw");
+    assert.ok(draws.length > 0);
+    for (const draw of draws) if (draw.type === "draw") {
+      assert.equal(draw.args.length, 4, "a frame carries no roster");
+      assert.equal(draw.args[3].methodId, "test");
+    }
+  });
+});

@@ -50,12 +50,16 @@ export function FluidLab() {
   // The editor's index of the solids, built before the first pointer move asks for it.
   useEffect(() => startVoxelIndexPreparation(session.scene), [session]);
 
+  // Hidden behind another route, the studio does not tick; shown again, the
+  // clock restarts from that frame instead of owing the hidden interval.
+  const studioVisible = useShellStore((state) => state.studioVisible);
   useEffect(() => {
+    if (!studioVisible) return;
     let frame = 0;
     const tick = (now: number) => { simulation.tick(now); frame = requestAnimationFrame(tick); };
     frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, []);
+    return () => { cancelAnimationFrame(frame); simulation.suspendClock(); };
+  }, [studioVisible]);
 
   // Every pane of chrome authors and reads one realm. This is pane A's; compare
   // mode mounts a second provider around a second `.viewport-shell` inside the

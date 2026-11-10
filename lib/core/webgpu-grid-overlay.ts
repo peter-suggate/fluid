@@ -230,7 +230,7 @@ fn bodyDistance(ro: vec3f, rd: vec3f, body: BodyGPU) -> f32 {
 fn nearestBodyDistance(ro: vec3f, rd: vec3f) -> f32 {
   var nearest = 1e20;
   let bodyCount = u32(round(u.options.z));
-  for (var index = 0u; index < 12u; index += 1u) {
+  for (var index = 0u; index < ${GPU_RIGID_BODY_CAPACITY}u; index += 1u) {
     if (index >= bodyCount) { break; }
     nearest = min(nearest, bodyDistance(ro, rd, bodies[index]));
   }
@@ -464,7 +464,7 @@ fn gridBodySample(cellBounds: RepresentedCell) -> GridBodySample {
   var nearest = 1e20;
   var result = GridBodySample(false, 0.0);
   let bodyCount = u32(round(u.options.z));
-  for (var index = 0u; index < 12u; index += 1u) {
+  for (var index = 0u; index < ${GPU_RIGID_BODY_CAPACITY}u; index += 1u) {
     if (index >= bodyCount) { break; }
     // A represented cell is solid when its circumscribed volume reaches the
     // analytic primitive. This conservative voxelization keeps small bodies

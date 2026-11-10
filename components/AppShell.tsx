@@ -6,7 +6,7 @@
 // module the router reaches, and installing the catalog here is what makes
 // every method resolvable by id in the browser.
 import "../lib/methods";
-import type { ReactNode } from "react";
+import { useLayoutEffect, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 import { useShellStore } from "../lib/core/stores/shell-store";
 import { FluidLab } from "./FluidLab";
@@ -18,13 +18,16 @@ import { FluidLab } from "./FluidLab";
  * studio is kept as a sibling of the active route content. Hiding it leaves the
  * exact canvas mounted, which is the identity the OffscreenCanvas worker and
  * its WebGPU device are attached to. The studio is lazy so a first visit to the
- * library still does no GPU work.
+ * library still does no GPU work. Hidden, it keeps its device and resources but
+ * neither ticks, advances nor draws (`studioVisible`), so another route does
+ * not share the GPU with a background simulation.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const sceneVisible = pathname === "/scene" || pathname.startsWith("/scene/");
   const studioEntered = useShellStore((state) => state.studioEntered);
   const studioMounted = studioEntered || sceneVisible;
+  useLayoutEffect(() => { useShellStore.getState().setStudioVisible(sceneVisible); }, [sceneVisible]);
   return <>
     {studioMounted && (
       <div className="persistent-studio-host" hidden={!sceneVisible} aria-hidden={!sceneVisible || undefined}>

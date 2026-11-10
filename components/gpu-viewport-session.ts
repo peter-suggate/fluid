@@ -1,6 +1,7 @@
 import { createBrowserFrameBenchmark } from "../lib/core/browser-frame-benchmark";
 import { paneFrameCapture, type FrameInstrumentationInput } from "../lib/core/frame-instrumentation";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
+import { useShellStore } from "../lib/core/stores/shell-store";
 import type { PixelTraceConfig } from "../lib/core/webgpu-renderer";
 import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
 import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
@@ -102,7 +103,7 @@ const GPU_DEVELOPMENT_REBIND_GRACE_MS = 1_000;
 // render-stage ABIs; retaining a pre-change renderer made the next frame read
 // the new document through stale code and fail with an unrelated `height_m`
 // access. A cold page was sound because it never crossed that ABI boundary.
-export const GPU_VIEWPORT_RUNTIME_ABI = "scene-v3-solid-world-render-stages-v1";
+export const GPU_VIEWPORT_RUNTIME_ABI = "scene-v3-solid-world-render-stages-v1-roster-message";
 
 /**
  * Which open gestures the renderer is allowed to draw.
@@ -174,6 +175,8 @@ export class GPUViewportSession implements GPUViewportLifecycle {
   private frame = 0;
   private cleanupTimer?: number;
   private released = false;
+  /** The render loop stopped scheduling itself because the studio is hidden. */
+  private idle = false;
   private safeSimulationEpoch?: number;
   private readonly safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
   private readonly frameBenchmark = createBrowserFrameBenchmark();
@@ -248,6 +251,11 @@ export class GPUViewportSession implements GPUViewportLifecycle {
     window.addEventListener(GPU_MANUAL_START_EVENT, manualStart);
     window.addEventListener(GPU_MANUAL_STOP_EVENT, manualStop);
     window.addEventListener("pagehide", pageHide, { once: true });
+    this.detach.push(useShellStore.subscribe((state) => {
+      if (!state.studioVisible || !this.idle || this.currentPhase !== "rendering") return;
+      this.idle = false;
+      this.frame = requestAnimationFrame(this.render);
+    }));
     this.detach.push(
       () => window.removeEventListener(GPU_MANUAL_START_EVENT, manualStart),
       () => window.removeEventListener(GPU_MANUAL_STOP_EVENT, manualStop),
@@ -395,6 +403,8 @@ export class GPUViewportSession implements GPUViewportLifecycle {
 
   private readonly render = (raf_ms?: number) => {
     if (this.currentPhase !== "rendering") return;
+    // A hidden studio keeps its device and draws nothing; showing it again restarts this loop.
+    if (!useShellStore.getState().studioVisible) { this.idle = true; return; }
     this.frame = requestAnimationFrame(this.render);
     const { session, paneId } = this.options;
     const renderer = this.renderer;

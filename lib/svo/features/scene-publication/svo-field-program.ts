@@ -936,9 +936,8 @@ function warpPoint(point: Vec3, amplitude_m: number, frequency_mInv: number, see
 /**
  * Ellipsoid distance bound.
  *
- * The exact distance to an ellipsoid needs a root solve
- * (`lib/svo-implicit-reference.ts` bisects it in 128 iterations, which is the
- * ground truth, not a tracer step). This is the standard gradient-normalised
+ * The exact distance to an ellipsoid needs a root solve, which is a ground
+ * truth rather than a tracer step. This is the standard gradient-normalised
  * bound, which **under**estimates outside the solid — the direction that is
  * safe for a sphere trace. Its Lipschitz constant is declared as 1 and checked
  * by finite difference in the tests rather than asserted here.

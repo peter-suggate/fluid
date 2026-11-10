@@ -12,6 +12,7 @@ import { FluidLabRenderer } from "./webgpu-renderer";
 import { reuseSolidWorld } from "./solid-world";
 import { createWorkerSolidEditAcceptance, SolidEditBaseMismatchError, SolidEditReferenceError } from "./voxel-editor/worker-solid-edit-acceptance";
 import { markSceneRevision, type SceneDescription } from "./model";
+import type { RigidBodyState } from "./rigid-body";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import { LOAD_SAMPLE_INTERVAL_MS, observedGPUQueue, startThreadStallMeter } from "./system-load";
 import type {
@@ -73,6 +74,9 @@ let renderScene: {
   document: SceneDescription;
   terrainContentStamp: string;
 } | undefined;
+
+/** The window's body roster, kept from one `set-render-bodies` to the next so every frame draws the same objects. */
+let renderBodies: RigidBodyState[] = [];
 
 const post = (message: WebGPURenderWorkerResponse) => scope.postMessage(message);
 
@@ -240,8 +244,8 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       // whether to allocate a timestamp recorder for this frame.
       usePerformanceInstrumentationStore.getState().setMode(message.instrumentationMode);
       runtime.setViewportSize(message.viewport.width, message.viewport.height, message.viewport.devicePixelRatio);
-      const [time_s, ...args] = message.args;
-      const metrics = runtime.draw(time_s, renderScene.document, ...args);
+      const [time_s, camera, ...args] = message.args;
+      const metrics = runtime.draw(time_s, renderScene.document, camera, renderBodies, ...args);
       // A scene edit accepted meanwhile owns the next queued request; this
       // one only retires.
       if (renderer !== runtime || !renderScene || renderScene.revision !== message.sceneRevision) return metrics;
@@ -270,8 +274,10 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       return metrics;
     })().catch((error: unknown) => {
       runtime.stopAfterFailure(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
-      return { context: "webgpu-worker-failed", methodId: message.args[4].methodId, presentationSubmitted: false };
+      return { context: "webgpu-worker-failed", methodId: message.args[3].methodId, presentationSubmitted: false };
     }).then(metrics => post({ type: "frame", frameId: message.frameId, metrics, snapshot: snapshot(runtime, message.sceneRevision) }));
+  } else if (message.type === "set-render-bodies") {
+    renderBodies = message.bodies;
   } else if (message.type === "set-simulation-scene") {
     runtime.setSimulationScene(message.scene ? markSceneRevision(message.scene) : undefined);
   }

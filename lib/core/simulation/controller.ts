@@ -554,6 +554,8 @@ export class SimulationController {
       // check a solid edit again.
       const previousRuntime = this.paneRuntimes.get(paneId);
       previousRuntime?.interactionWatch?.();
+      previousRuntime?.holdWatch?.();
+      previousRuntime?.mirroredSolidEditWatch?.();
       void previousRuntime?.interaction?.dispose();
       const acceptLiveSolidEdit = previousRuntime?.acceptLiveSolidEdit;
       this.paneRuntimes.set(paneId, { ...createPaneRuntime(), acceptLiveSolidEdit, interactionFluid: previousRuntime?.interactionFluid });
@@ -569,8 +571,14 @@ export class SimulationController {
   }
 
   private detachPaneSession(paneId: PaneId): boolean {
-    this.paneRuntimes.get(paneId)?.interactionWatch?.();
-    void this.paneRuntimes.get(paneId)?.interaction?.dispose();
+    // Every store subscription the runtime holds ends with it: a watch left
+    // behind calls back into `runtime(paneId)`, which would recreate a runtime
+    // for the pane that was just detached.
+    const runtime = this.paneRuntimes.get(paneId);
+    runtime?.interactionWatch?.();
+    runtime?.holdWatch?.();
+    runtime?.mirroredSolidEditWatch?.();
+    void runtime?.interaction?.dispose();
     this.paneRuntimes.delete(paneId);
     const removed = this.paneSessions.delete(paneId);
     if (removed) this.refreshSharedPaneStep();
@@ -743,6 +751,16 @@ export class SimulationController {
     } finally {
       this.pendingCpuTickTrace = cpuTrace?.finish();
     }
+  }
+
+  /**
+   * The frame loop stops calling `tick` (the studio is hidden behind another
+   * route). The next tick starts the wall clock afresh, as one after a reset
+   * does, rather than owing the target the whole interval nobody watched.
+   */
+  suspendClock() {
+    this.lastClock = null;
+    this.rateWallClock = 0;
   }
 
   private applyBodyHold(paneId: PaneId = PRIMARY_PANE_ID) {

@@ -911,6 +911,31 @@ const CANOPY_HEAD_MAXIMUM_COUNT = 240;
  */
 const CANOPY_HEAD_FLATTEN = 0.85;
 
+/**
+ * The largest a floret may be as a fraction of its head.
+ *
+ * The ABI's containment budget, spent rather than derived: a seeded-lobes
+ * packing must keep `span + spanSpread + blend/shortest` under one or the hard
+ * `max` slices the lobes it exists to contain. This takes 0.46 of it, leaving
+ * {@link SEEDED_FLORET_SPAN_SPREAD} and {@link SEEDED_FLORET_BLEND_SHARE} to
+ * fill 0.32 and 0.10, for a margin of 0.12.
+ *
+ * It also bounds what a floret can *look* like. At 0.46 a head of eight florets
+ * is a cluster; at 0.7 the florets are the head and the record draws as one
+ * irregular ball. Measured on a 195 x 125 x 168 mm head, 4 000 rays, as the
+ * drawn surface's depth under the envelope:
+ *
+ *   span   0.40    0.48    0.56
+ *   p50   17.8 mm 14.3 mm 12.6 mm
+ *   p90   28.4 mm 21.7 mm 17.9 mm
+ *
+ * The spread between the two percentiles is the modulation the eye reads, and it
+ * halves from 0.40 to 0.56 — a wider floret fills its head more evenly and the
+ * head goes smooth. Rays through: zero at all three, which is the property that
+ * removed the closure core.
+ */
+const SEEDED_FLORET_MAXIMUM_SPAN = 0.46;
+
 export function bonsaiCanopyLadder(form: BonsaiForm, leafSize_m = BONSAI_DEFAULT_LEAF_SIZE_M): BonsaiCanopyLadder {
   if (!Number.isInteger(form.canopyGrainAcross) || form.canopyGrainAcross < 4) {
     throw new RangeError("Bonsai canopy grain must be an integer of at least four florets across");
@@ -995,31 +1020,6 @@ export function bonsaiCanopyLadder(form: BonsaiForm, leafSize_m = BONSAI_DEFAULT
 const CANOPY_BED_HEADS_PER_RECORD = 4;
 const CANOPY_BED_INSET_SHARE = 0.55;
 const CANOPY_BED_FILL = 1.55;
-
-/**
- * The largest a floret may be as a fraction of its head.
- *
- * The ABI's containment budget, spent rather than derived: a seeded-lobes
- * packing must keep `span + spanSpread + blend/shortest` under one or the hard
- * `max` slices the lobes it exists to contain. This takes 0.46 of it, leaving
- * {@link SEEDED_FLORET_SPAN_SPREAD} and {@link SEEDED_FLORET_BLEND_SHARE} to
- * fill 0.32 and 0.10, for a margin of 0.12.
- *
- * It also bounds what a floret can *look* like. At 0.46 a head of eight florets
- * is a cluster; at 0.7 the florets are the head and the record draws as one
- * irregular ball. Measured on a 195 x 125 x 168 mm head, 4 000 rays, as the
- * drawn surface's depth under the envelope:
- *
- *   span   0.40    0.48    0.56
- *   p50   17.8 mm 14.3 mm 12.6 mm
- *   p90   28.4 mm 21.7 mm 17.9 mm
- *
- * The spread between the two percentiles is the modulation the eye reads, and it
- * halves from 0.40 to 0.56 — a wider floret fills its head more evenly and the
- * head goes smooth. Rays through: zero at all three, which is the property that
- * removed the closure core.
- */
-const SEEDED_FLORET_MAXIMUM_SPAN = 0.46;
 
 /**
  * How much floret size varies within one head, as a fraction of the envelope.

@@ -332,6 +332,9 @@ export class UniformMixedSolid {
  bindGroup:GPUBindGroup;
  private readonly bodyCuts:GPUTexture;
  private bodyCutsKey="";
+ /** The descriptions `bodyCutsKey` was signed from: documents are replaced, not
+  * mutated, so the same objects are the same cuts and need no key. */
+ private readonly bodyCutsSigned:RigidBodyDescription[]=[];
  private readonly solidResources:()=>GPUBindGroupEntry[];
  readonly coupledTiles:number;
  private readonly bodySource:GPUBuffer;
@@ -453,10 +456,16 @@ export class UniformMixedSolid {
  /** Updates the same local cut list used by shared publication. The existing
   * solid rebuild invalidation is required because a cut changes apertures. */
  setBodyCuts(bodies:readonly RigidBodyDescription[]):boolean{
+  const signed=this.bodyCutsSigned;
+  if(bodies.length===signed.length&&bodies.every((b,i)=>b===signed[i]))return false;
   if(!this.features.plates){const plate=bodies.find(b=>b.shape==="rounded-plate"||(b.cuts?.length??0)>0);if(plate)throw new Error(`Rigid body ${plate.id}: rounded plates and body cuts need the plate integration, which this scene's solid library was compiled without (no rounded plate at construction)`);}
-  const key=JSON.stringify(bodies.map(b=>[b.id,b.cuts??[]]));if(key===this.bodyCutsKey)return false;
-  const values=packRigidBodyCutAtlas(bodies,GPU_RIGID_BODY_CAPACITY);
-  this.device.queue.writeTexture({texture:this.bodyCuts},values,{bytesPerRow:2048*16},[2048,1]);this.bodyCutsKey=key;this.full=true;return true;
+  const key=JSON.stringify(bodies.map(b=>[b.id,b.cuts??[]])),changed=key!==this.bodyCutsKey;
+  if(changed){
+   const values=packRigidBodyCutAtlas(bodies,GPU_RIGID_BODY_CAPACITY);
+   this.device.queue.writeTexture({texture:this.bodyCuts},values,{bytesPerRow:2048*16},[2048,1]);this.bodyCutsKey=key;this.full=true;
+  }
+  signed.length=0;signed.push(...bodies);
+  return changed;
  }
  get currentGeometryGroup():GPUBindGroup{
   return this.currentGeometryGroupValue??(this.currentGeometryGroupValue=this.device.createBindGroup({layout:this.currentGeometryLayout,

@@ -553,8 +553,6 @@ export class UniformMixedFrame {
   this.coarsePhi=new UniformCoarseVertexPhi(device,o,f.phi);
   // Domain placement: the published base is the phi field's own base block.
   if(f.detail?.layout.domain)f.detail.adoptBase(f.phi,this.coarsePhi.texture);
-  // The arena, low to high: the root, the levels its correction is solved on.
-  if(f.arena.rootOffset+f.arena.rootBytes>4*f.arena.levels[0]!.pressure[0])throw new Error("The mixed pressure root overlaps its correction's levels");
   const memory=planUniformMixedPressureMemory(coarseLayout,f.arena.address,f.arena.rootOffset,f.arena.rootBytes);
   const view=(r:{offset:number;size:number}):GPUBufferBinding=>({buffer:f.arena.buffer,...r});
   // Pressure phi, twice: the simulation authority's (simulation owners, at

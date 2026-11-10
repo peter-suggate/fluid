@@ -69,6 +69,12 @@ export interface WallProfile {
   readonly batter_rad: number;
 }
 
+/** Slots of `tangents`, the scratch record `wallProfileTangents` fills. */
+const TANGENT_BATTER = 0, TANGENT_COS = 1, TANGENT_SIN = 2, TANGENT_TAN = 3;
+const TANGENT_CREST = 4, TANGENT_FOOT = 5, TANGENT_CREST_CENTRE_Y = 6, TANGENT_CREST_D = 7, TANGENT_CREST_Y = 8;
+const TANGENT_FOOT_D = 9, TANGENT_FOOT_CENTRE_D = 10;
+const tangents = new Float64Array(11).fill(Number.NaN, TANGENT_BATTER, TANGENT_BATTER + 1);
+
 /**
  * Height above the outside ground at signed plan distance `d`, where `d = 0` is
  * the **crest line** — the edge of the plateau — and `d` runs positive outward.
@@ -111,10 +117,6 @@ export function wallProfile_m(profile: WallProfile, rise_m: number, d: number): 
  * The batter's three functions are held for the last batter asked for, which
  * over a bake is the only one.
  */
-const TANGENT_BATTER = 0, TANGENT_COS = 1, TANGENT_SIN = 2, TANGENT_TAN = 3;
-const TANGENT_CREST = 4, TANGENT_FOOT = 5, TANGENT_CREST_CENTRE_Y = 6, TANGENT_CREST_D = 7, TANGENT_CREST_Y = 8;
-const TANGENT_FOOT_D = 9, TANGENT_FOOT_CENTRE_D = 10;
-const tangents = new Float64Array(11).fill(Number.NaN, TANGENT_BATTER, TANGENT_BATTER + 1);
 function wallProfileTangents(profile: WallProfile, rise_m: number): void {
   const batter = Math.max(0.02, profile.batter_rad);
   if (batter !== tangents[TANGENT_BATTER]) {
@@ -901,6 +903,10 @@ const POND_VESSEL_PLAN_INDEX_SLACK = 1 + 1e-9;
 let lastPlanCurve: readonly (readonly [number, number])[] | undefined;
 let lastPlanIndex: PondVesselPlanIndex | undefined;
 const planIndexCache = new WeakMap<object, PondVesselPlanIndex | number>();
+const planIndexBuilds = new WeakMap<object, PondVesselPlanIndexBuild>();
+
+/** Cells a query adds to an index under construction: about ten of its own scans. */
+const POND_VESSEL_PLAN_INDEX_CELLS_PER_QUERY = 16;
 
 function pondVesselPlanIndex(
   curve: readonly (readonly [number, number])[],
@@ -930,9 +936,6 @@ function pondVesselPlanIndex(
   return lastPlanIndex = index;
 }
 
-/** Cells a query adds to an index under construction: about ten of its own scans. */
-const POND_VESSEL_PLAN_INDEX_CELLS_PER_QUERY = 16;
-
 /** An index part built: the grid's cells up to `cell`, and what the rest need. */
 interface PondVesselPlanIndexBuild {
   readonly points: Float64Array;
@@ -958,7 +961,6 @@ interface PondVesselPlanIndexBuild {
   cell: number;
   nearest: number;
 }
-const planIndexBuilds = new WeakMap<object, PondVesselPlanIndexBuild>();
 
 /**
  * The containment argument, which is the whole of why the index is exact.

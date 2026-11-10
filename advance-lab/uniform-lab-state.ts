@@ -26,7 +26,8 @@ export interface UniformLabState extends UniformLabControls {
 const stepQuery = queryRecord({
   dt: numberQuery("dt", 1 / 60, STEP_SIZES.at(-1)!.dt, STEP_SIZES[0].dt),
 });
-/** Defaults match the 3D narrow-band FLIP parameter schema. */
+/** Volume control defaults as in the 3D narrow-band FLIP schema; the level-set
+ * advection opens on cubic, since the native port has no "adaptive". */
 const controlQuery = combineQueryCodecs<UniformLabControls>([
   queryRecord({
     volumeControlSeconds: numberQuery(

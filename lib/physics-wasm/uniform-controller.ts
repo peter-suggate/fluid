@@ -15,7 +15,7 @@ import {
   uniformVolumeInitialPhi,
 } from "../methods/uniform/uniform-volume-initial";
 import { resolveUniformGeometricValues } from "../methods/uniform/uniform-geometric-parameters";
-import { NARROW_BAND_FINE_ADVECTION, narrowBandControlValues } from "../methods/uniform/uniform-narrow-band-controls";
+import { narrowBandControlValues } from "../methods/uniform/uniform-narrow-band-controls";
 import { scenerySliceFraction, uniformLabSlice } from "./scenery-slice";
 
 export const UNIFORM_LAB_METHOD = "uniform-narrow-band-flip";
@@ -31,7 +31,9 @@ export const UNIFORM_LAB_VALUES = Object.freeze({
   pressureVCycles: 4,
   pressureSweeps: 6,
   fineGridPadding: 0,
-  phiFineAdvection: NARROW_BAND_FINE_ADVECTION.default as "cubic" | "trilinear" | "adaptive",
+  // The 3D schema's default is "adaptive", which the native port does not
+  // implement and rejects (narrow_band_flip/options.rs); the lab opens on cubic.
+  phiFineAdvection: "cubic" as "cubic" | "trilinear",
   volumeControlSeconds: narrowBandControlValues().volumeControlSeconds,
 });
 /** The method controls the lab lets a viewer change. */

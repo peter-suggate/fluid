@@ -1066,6 +1066,9 @@ fn nbMergeCount(k:u32,n:u32){${narrowBandRetireCounting.splitX>=0?"":`atomicAdd(
 // crowdedCells "merge": the mass a sample may hold (the deposit's fixed-point
 // sums keep their headroom).
 const NB_MASS_MAX:f32=8.0;
+// The most mass a deep cell's samples keep: 2n units, n = 8 (Ferstl et al.
+// 2016 Section 3.3).
+const NB_CELL_MASS:f32=16.0;
 // The cap of a deep cell (centre depth): six in a graded band's cells past 1.5.
 fn nbCellCap(depth:f32)->u32{return select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);}
 // Rank r of a crowded run gathers ranks r+cap, r+2cap, ... (low, high: the
@@ -1338,14 +1341,28 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
   // (nbMergeRun); the excess gathered retire here, unmoved, and the excess
   // a full gatherer refused move on as samples. Every sample in the
   // cell reads the same centre depth, so all agree on the cell.
+  // Before the cap, the cell's mass: Ferstl et al. 2016 Section 3.3 keeps
+  // no more than 2n unit samples (n = 8) a resampled cell and removes the
+  // excess. Samples carrying mass hold that bound as mass (NB_CELL_MASS):
+  // the run's ranks past it retire, the level set holding the cell's liquid
+  // a cell deep. Without it the merge kept every sample's mass, the cells a
+  // cell under a churning surface held 18 to 23 units, and the splits that
+  // mass fed doubled the band's samples (a 128^3 dam break: 1.33M against
+  // 0.71M retired).
   if(params.activity.w>0.0){
    let cell=nbBinCell(umCellAt(vec3u(q)));
    if(cell!=NB_NO_BIN){
     let start=links[cell];let count=atomicLoad(&bins[cell]);
     if(i>=start&&i-start<count){
      let centre=floor(q)+0.5;let deep=nbMoveDepth(centre);let cap=nbCellCap(deep);
-     if(deep< -1.0&&count>cap){
-      if(i-start<cap){p=nbMergeRun(p,i+cap,start+count,cap);q=p.position.xyz-nbHeldShift();}
+     var end=start+count;
+     if(deep< -1.0){
+      var held=0.0;
+      for(var j=start;j<start+count;j++){let o=particles[j];if(!nbLive(o)){continue;}let m=nbParticleMass(o);if(held>0.0&&held+m>NB_CELL_MASS){end=j;break;}held+=m;}
+      if(i>=end){${narrowBandRetireCounting.on?"nbRetireCount(2u,deep,q.x,nbParticleMass(p));":""}return NbMoved(p,1u);}
+     }
+     if(deep< -1.0&&end-start>cap){
+      if(i-start<cap){p=nbMergeRun(p,i+cap,end,cap);q=p.position.xyz-nbHeldShift();}
       else if(nbMergeAbsorbed(start,i,cap)){${narrowBandRetireCounting.on?"nbRetireCount(2u,deep,q.x,1.0);":""}return NbMoved(p,1u);}
       ${narrowBandRetireCounting.on?"else{nbMergeCount(1u,1u);}":""}
      }
@@ -1543,8 +1560,9 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   // storage or enter a solid stay merged this step.
   let mass=nbParticleMass(p);
   if(mass>1.0&&!ballistic&&params.activity.w>0.0){
-   let cell=nbBinCell(umCellAt(vec3u(q)));let depth=nbMoveDepth(q);
-   if(depth> -1.0||cell==NB_NO_BIN||2u*atomicLoad(&bins[cell])<nbCellCap(depth)){
+   let cell=nbBinCell(umCellAt(vec3u(q)));let seeded=${narrowBandSeedTargetWGSL(this.collarDensity,"nbMoveDepth(floor(q)+0.5)","nbMoveHeat(q)","nbSourceCell(vec3u(floor(q)))")};
+   var held=0u;if(cell!=NB_NO_BIN){held=atomicLoad(&bins[cell]);}
+   if(held<seeded&&mass*f32(seeded)>8.0){
     let kept=ceil(0.5*mass);let moved=mass-kept;
     let bits=bitcast<vec3u>(q);let hash=(bits.x*73856093u)^(bits.y*19349663u)^(bits.z*83492791u);
     let along=normalize(vec3f(f32(hash&255u),f32((hash>>8u)&255u),f32((hash>>16u)&255u))-127.5);

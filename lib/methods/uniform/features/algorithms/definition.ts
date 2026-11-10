@@ -1,5 +1,4 @@
 import type { MethodParamSpec } from "../../../../core/method-contract";
-import { parameterVariantFeature } from "../../../../core/method-parameter-variants";
 const runtimeUpdate = {update:"runtime" as const};
 
 export const ALGORITHM_PARAMS: MethodParamSpec[] = [
@@ -109,5 +108,3 @@ export const ALGORITHM_PARAMS: MethodParamSpec[] = [
     hint: "Render-only: mass-proportional sheets against walls and solids are always reconstructed. Scene/On additionally enable the paper's Sec. 3.8 global reconstruction. Neither feeds simulation physics.",
   },
 ];
-
-export const algorithmFeature = parameterVariantFeature("simulation.uniform.algorithms", ALGORITHM_PARAMS, ["simulation.dense-grid"]);

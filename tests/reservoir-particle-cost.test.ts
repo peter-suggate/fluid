@@ -48,7 +48,11 @@ test("merge cap protects neither the outer layer nor mass-saturated deep runs", 
   assert.equal(unit.masses.length, 1024 - 6 * 7);
   assert.equal(mass(unit.masses), 1024);
   const shader = readFileSync(new URL("../lib/methods/uniform/uniform-narrow-band-flip.ts", import.meta.url), "utf8");
-  assert.ok(shader.includes("if(deep< -1.0&&count>cap)"));
+  // A deep cell first keeps at most NB_CELL_MASS of its run's mass (Ferstl et
+  // al. 2016 Section 3.3), then merges what is left past the cap.
+  assert.ok(shader.includes("const NB_CELL_MASS:f32=16.0;"));
+  assert.ok(shader.includes("if(held>0.0&&held+m>NB_CELL_MASS){end=j;break;}"));
+  assert.ok(shader.includes("if(deep< -1.0&&end-start>cap)"));
   assert.ok(shader.includes("for(var j=k+stride;j<i;j+=stride)"));
   assert.ok(shader.includes("if(m+mo>NB_MASS_MAX){continue;}"));
 });

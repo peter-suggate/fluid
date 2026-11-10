@@ -10,7 +10,7 @@ export default defineConfig([
      * Catch the temporal dead zone before it reaches a browser — in the one
      * place whose whole idiom invites it.
      *
-     * The generators under `lib/voxel-scenery/` build module-scope tables at
+     * The generators under `lib/core/voxel-scenery/` build module-scope tables at
      * import time, by calling helpers that read module-scope constants: a
      * layout freezes its entity list on load, and each entry's extent comes
      * from a shared budget. Move that budget below the table and the table is
@@ -29,10 +29,17 @@ export default defineConfig([
      * a rule that gets switched off. These modules are new, they are clean
      * under it today, and they are the ones being written fastest.
      */
-    files: ["lib/voxel-scenery/**/*.ts"],
+    files: ["lib/core/voxel-scenery/**/*.ts"],
     rules: {
       "no-use-before-define": ["error", { functions: false, classes: false, variables: true, allowNamedExports: true }],
     },
   },
-  globalIgnores([".next/**", "dist/**", ".wrangler/**", ".claude/**", "next-env.d.ts"])
+  // `artifacts/` and `scratchpad/` are gitignored and hold whole source
+  // snapshots; linting them took the run past ten minutes and buried the
+  // repository's own findings under ~13,000 foreign ones. `public/wasm/` is
+  // wasm-bindgen output.
+  globalIgnores([
+    ".next/**", "dist/**", ".wrangler/**", ".vinext/**", ".claude/**", "next-env.d.ts",
+    "artifacts/**", "scratchpad/**", "rust/target/**", "public/wasm/**",
+  ])
 ]);

@@ -1,13 +1,13 @@
 import type { UniformTexturePages } from "./uniform-texture-pages";
-import { UNIFORM_PRESSURE_PAGE_LEVELS } from "./pressure-plan";
 export * from "./pressure-policy";
-export * from "./pressure-plan";
+
+/** The hierarchy's levels from 4h: 4h, 8h, 16h and 32h, each a partition of a page. */
+const UNIFORM_PRESSURE_PAGE_LEVELS = 4;
 
 /**
- * What the mixed pressure solve's correction is solved on: the levels' words
- * of the shared scratch arena, the residual tolerance, and whether the root's
- * cycles run from a list. The kernels that fill and solve the levels are the
- * mixed pressure cycles' (UniformMixedPressureCycles).
+ * What the mixed pressure solve is handed beside its own arena: the shared
+ * scratch the root lies in, the residual tolerance, and whether the root's
+ * cycles run from a list.
  */
 export class WebGPUUniformPressureMultigrid {
   /** Levels of the whole hierarchy: the correction's and the two finer ones (h and 2h) it never visits. */
@@ -40,14 +40,12 @@ export class WebGPUUniformPressureMultigrid {
    * continuation prepared after a live edit introduces it has no cycle list. */
   setDepthSymmetry(symmetric: boolean): void { this.symmetric = symmetric; }
 
-  /** The correction's levels for a mixed solve: the arena and each level's
-   * words in it (4h first), and whether the root's per-cycle operators run
-   * from the list of its liquid-or-bounded jobs. The caller must populate
-   * every row of level 0 each solve. */
+  /** For a mixed solve: the arena the root lies in, and whether the root's
+   * per-cycle operators run from the list of its liquid-or-bounded jobs. */
   prepareMixedContinuation() {
     if (this.isDestroyed) throw new Error("Uniform CM11a hierarchy is destroyed");
     const scratch = this.scratchFields.scratch!;
-    return { arena: scratch.buffer, levels: scratch.levels, listed: this.listable && !this.symmetric };
+    return { arena: scratch.buffer, listed: this.listable && !this.symmetric };
   }
 
   destroy(): void { if (this.isDestroyed) return; this.isDestroyed = true; this.pressureTexture.destroy(); }

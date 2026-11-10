@@ -112,3 +112,34 @@ test("a stop during the start abandons it: no render loop, no later status", asy
   assert.match(session.diagnostics.getState().gpuStatus.label, /^Stopped by test/);
   await gpu.cleanupImmediately();
 });
+
+test("a hidden studio's render loop draws nothing and restarts when the studio is shown", async () => {
+  const { useShellStore } = await import("../lib/core/stores/shell-store");
+  const scheduled: FrameRequestCallback[] = [];
+  const requestBefore = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (callback: FrameRequestCallback) => scheduled.push(callback);
+  const { gpu } = startSession(fakeRenderer());
+  let drawn = 0;
+  Object.assign(gpu.renderer, { setSimulationScene: () => { drawn += 1; throw new Error("drawn"); } });
+  try {
+    for (const listener of listeners.get(GPU_MANUAL_START_EVENT) ?? []) listener(new Event(GPU_MANUAL_START_EVENT));
+    await new Promise(resolve => setTimeout(resolve));
+    assert.equal(gpu.phase, "rendering");
+    assert.equal(scheduled.length, 1, "the loop is scheduled once rendering");
+    useShellStore.getState().setStudioVisible(false);
+    scheduled.shift()!(0);
+    assert.equal(drawn, 0, "nothing is drawn while hidden");
+    assert.equal(scheduled.length, 0, "and the loop does not reschedule itself");
+    useShellStore.getState().setStudioVisible(false);
+    assert.equal(scheduled.length, 0);
+    useShellStore.getState().setStudioVisible(true);
+    assert.equal(scheduled.length, 1, "showing the studio restarts the loop once");
+    useShellStore.getState().setStudioVisible(true);
+    assert.equal(scheduled.length, 1);
+  } finally {
+    useShellStore.getState().setStudioVisible(true);
+    globalThis.requestAnimationFrame = requestBefore;
+    await gpu.stop();
+    await gpu.cleanupImmediately();
+  }
+});

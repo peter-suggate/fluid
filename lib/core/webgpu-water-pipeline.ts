@@ -3014,8 +3014,8 @@ export class RasterWaterPipeline {
     this.frontWorldReflections = undefined; this.rearWorldReflections = undefined;
     const depth = (label: string) => this.device.createTexture({ label, size: [width,height], format: WATER_INTERFACE_DEPTH.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
     this.frontDepth = depth("Water front depth"); this.backDepth = depth("Water back depth"); this.rearFrontDepth = depth("Water rear front depth"); this.rearBackDepth = depth("Water rear back depth");
-    this.causticTexture?.destroy(); this.causticTexture = this.device.createTexture({ label: "Refracted floor caustics", size: [384,384], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
-    this.causticsValid = false;
+    // The caustic map is in container texels, not the viewport's: a resize keeps it and what it holds.
+    this.causticTexture ??= this.device.createTexture({ label: "Refracted floor caustics", size: [CAUSTIC_MAP_RESOLUTION,CAUSTIC_MAP_RESOLUTION], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.dryInterfaceClearsEncoded = false;
     this.clearBackgroundEncoded = false;
     this.interfaceViews = { frontPosition: this.frontPosition.createView(), frontNormal: this.frontNormal.createView(),

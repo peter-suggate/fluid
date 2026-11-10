@@ -24,8 +24,9 @@ import { usePerformanceInstrumentationStore, type PerformanceInstrumentationMode
 import type { WorkerLoadSample } from "./system-load";
 
 type DrawArguments = Parameters<FluidLabRenderer["draw"]>;
-type DrawArgumentsWithoutScene = DrawArguments extends [infer Time, unknown, ...infer Rest]
-  ? [Time, ...Rest]
+/** A frame's arguments less the document and the body roster, which cross only when they change. */
+type DrawArgumentsWithoutScene = DrawArguments extends [infer Time, unknown, infer Camera, unknown, ...infer Rest]
+  ? [Time, Camera, ...Rest]
   : never;
 type PickArguments = Parameters<FluidLabRenderer["pickRigidBody"]>;
 type PickResult = Awaited<ReturnType<FluidLabRenderer["pickRigidBody"]>>;
@@ -91,6 +92,13 @@ export type WebGPURenderWorkerRequest =
   | { type: "adopt-render-scene"; revision: number }
   | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number }; instrumentationMode: PerformanceInstrumentationMode }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
+  /**
+   * The body roster later frames draw, until the next one. Posted when the
+   * window's roster object changes, not with every frame: a roster carried on
+   * each frame was cloned per frame, and a fresh clone is a new body to every
+   * consumer that knows an unchanged body by its objects.
+   */
+  | { type: "set-render-bodies"; bodies: DrawArguments[3] }
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   /** The viewport's cloth grab at pointer rate: a new id holds a region, the same id moves it, null lets go. */
   | { type: "set-cloth-grab"; grab: ClothGrab | null }
@@ -193,6 +201,7 @@ export class WebGPURenderWorkerClient {
   /** The last catalog the worker sent, which its next changes are over. */
   private sceneryCatalog?: EnvironmentProxyCatalog;
   private simulationScene?: SceneDescription;
+  private publishedBodies?: DrawArguments[3];
   private frameInFlight = false;
   /** Control edges fence frame dispatch until the worker has observed them. */
   private simulationControlRevision = 0;
@@ -253,14 +262,18 @@ export class WebGPURenderWorkerClient {
       presentationSubmitted: false,
     };
     this.completedMetrics = undefined;
-    const [time_s, scene, ...remainingArgs] = args;
+    const [time_s, scene, camera, bodies, ...remainingArgs] = args;
     const sceneRevision = this.publishRenderScene(scene);
+    if (bodies !== this.publishedBodies) {
+      this.publishedBodies = bodies;
+      this.post({ type: "set-render-bodies", bodies });
+    }
     const rect = this.canvas.getBoundingClientRect();
     const message: Extract<WebGPURenderWorkerRequest, { type: "draw" }> = {
       type: "draw",
       frameId: ++this.frameId,
       sceneRevision,
-      args: [time_s, ...remainingArgs] as DrawArgumentsWithoutScene,
+      args: [time_s, camera, ...remainingArgs] as DrawArgumentsWithoutScene,
       // Zustand stores are realm-local. The render panel changes the window's
       // store, while FluidLabRenderer reads the worker's copy; carrying the
       // mode on every latest-wins frame keeps those two copies one contract.

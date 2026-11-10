@@ -1,4 +1,4 @@
-import { UNIFORM_MOMENTUM_TRACE_SEGMENTS, uniformCachedMomentumSamplingWGSL, type UniformMomentumSampler, type UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
+import { uniformCachedMomentumSamplingWGSL, type UniformMomentumSampler, type UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
 import { uniformCoarseCacheExtent } from "./uniform-coarse-velocity-cache";
 import { uniformDetailBindLayout, uniformDetailClass, uniformDetailExtent, uniformDetailModule, uniformDetailPipeline, uniformDetailGroup, type UniformDetailGroup } from "./uniform-detail-fields";
 import {UNIFORM_DETAIL_4H_LOAD,UNIFORM_DETAIL_RING_4H_LOAD} from "../../core/uniform-detail-abi";
@@ -8,7 +8,6 @@ import { uniformMixedTopologyWGSL } from "./uniform-mixed-topology.wgsl";
 import { uniformMixedVelocitySamplingSource } from "./uniform-mixed-velocity-sampling.wgsl";
 import { UNIFORM_MIXED_CLAIMED_GRID, UNIFORM_MIXED_CLAIM_WORDS, uniformMixedClaimedEntriesWGSL, uniformMixedFaceAddressWGSL, uniformMixedFaceTileDispatchWGSL, uniformMixedFarAirWGSL } from "./uniform-mixed-face-dispatch.wgsl";
 import { UNIFORM_PARAMS_BYTES, uniformMixedSourceWGSL } from "./uniform-mixed-source.wgsl";
-import { uniformVelocityDepartureWGSL, uniformVelocitySegmentedDepartureWGSL } from "./uniform-velocity-departure.wgsl";
 import { UNIFORM_COLD_FREEZE, UniformColdFreeze } from "./uniform-cold-freeze";
 import { uniformTileContextSidesWGSL } from "./uniform-tile-context";
 

@@ -63,20 +63,25 @@ export function CompareHost() {
   // seam: a shared row rendered in this column must not reach pane A.
   const editorHostB = useMemo(() => studioEditorHost(sessionB), [sessionB]);
   const [splitFraction, setSplitFraction] = useState(0.5);
+  // One array per membership: the panels below subscribe per session, and a
+  // fresh array each render resubscribed them on every render.
+  const panes = useMemo(() => active ? [sessionA, sessionB] : [sessionA], [active, sessionA, sessionB]);
   const subscribeTransport = useCallback((notify: () => void) => {
-    const panes = active ? [sessionA, sessionB] : [sessionA];
     const unsubscribes = panes.flatMap((pane) => [pane.scene.subscribe(notify), pane.method.subscribe(notify), pane.diagnostics.subscribe(notify)]);
     return () => unsubscribes.forEach((unsubscribe) => unsubscribe());
-  }, [active, sessionA, sessionB]);
+  }, [panes]);
   const transportBlock = useSyncExternalStore(subscribeTransport,
-    () => hostTransportBlockReason(active ? [sessionA, sessionB] : [sessionA]), () => undefined);
+    () => hostTransportBlockReason(panes), () => undefined);
   const transportFailure = useSyncExternalStore(subscribeTransport,
-    () => hostTransportFailure(active ? [sessionA, sessionB] : [sessionA]), () => undefined);
+    () => hostTransportFailure(panes), () => undefined);
   useEffect(() => {
     if (transportFailure) simulation.setRunState("paused");
   }, [transportFailure]);
   const shellRef = useRef<HTMLElement>(null);
   const ghostRef = useRef<HTMLDivElement>(null);
+  /** Removes the window listeners of a split drag still in progress. */
+  const endSplitDrag = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => endSplitDrag.current?.(), []);
 
   // Pane B's one membership owner: realm and clock join and leave together,
   // here rather than in the ring's verb, so a compare *link* restores the pair
@@ -124,22 +129,26 @@ export function CompareHost() {
     ghost.dataset.dragging = "true";
     track(event.clientX);
     const move = (moved: PointerEvent) => track(moved.clientX);
-    const finish = () => {
+    const detach = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      endSplitDrag.current = undefined;
+    };
+    const finish = () => {
+      detach();
       delete ghost.dataset.dragging;
       // The one layout write of the whole gesture.
       setSplitFraction(fraction);
     };
+    endSplitDrag.current?.();
+    endSplitDrag.current = detach;
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
   };
 
   const runState = sessionA.runtime((state) => state.runState);
-  const simulationTime = sessionA.runtime((state) => state.simulationTime);
-  const bodies = sessionA.diagnostics((state) => state.bodies);
   const shellView = useShellStore((state) => state.view);
 
   return (
@@ -148,8 +157,6 @@ export function CompareHost() {
       className="lab-shell"
       data-run-state={runState}
       data-solver-mode="eulerian"
-      data-simulation-time={simulationTime.toFixed(6)}
-      data-body-count={bodies.length}
       data-shell-view={shellView}
       data-compare={active}
       style={active ? {
@@ -184,9 +191,9 @@ export function CompareHost() {
           <SceneOverlay />
         </div>
       </div>
-      <SimulationStopPanel sessions={active ? [sessionA, sessionB] : [sessionA]} message={transportFailure} />
+      <SimulationStopPanel sessions={panes} message={transportFailure} />
       <TransportBar hostBlockReason={transportBlock} viewSession={active && compare.focusedPane === "b" ? sessionB : sessionA}
-        sessions={active ? [sessionA, sessionB] : [sessionA]} />
+        sessions={panes} />
       <RecordingPlaybackModal />
     </main>
   );

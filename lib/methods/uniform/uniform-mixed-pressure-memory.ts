@@ -25,8 +25,7 @@ export function uniformMixedPressureRootBytes(address:UniformLatticeAddress):num
 /** The all-4h pressure root's arena fields: pressure, the RHS and a
  * Full-Cycle's correction RHS, the bound and its shifted copy, the residual
  * the acceptance reduces, and the Full-Cycle backup. The frozen workspace
- * is borrowed by authority. The correction's levels follow
- * the root in the arena (planUniformPressureLevels). Phi is the frame's own
+ * is borrowed by authority. The root is the whole arena. Phi is the frame's own
  * buffer, not arena scratch. `layout` is the all-4h pressure layout: the
  * root holds its live words only, whatever the simulation layout. `address`
  * is the lattice the arena range was sized on (uniformMixedPressureRootBytes). */
