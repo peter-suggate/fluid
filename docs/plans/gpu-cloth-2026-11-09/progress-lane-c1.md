@@ -2065,3 +2065,36 @@ grab): 81 pass, 1 fail, 4 todo, on both contact codes.
   fails (never passes the pin, at 8 x 200 and at 32 x 800). Plain HEAD 277df0a1 fails the swing identically (NaN at
   both). Both failures are the plane-record overflow holds of RESULT (29): C2's, the open deviation.
 - Incline: todo (C2 item 5), a = 0.574.
+
+## 2026-11-10 RESULT (31): the small-case ladder (tests/cloth-ladder.test.ts); the ledge strip's root cause is contact-side
+
+The ladder runs 16^2-128^2 cases in seconds against the Float64 oracle or an analytic answer (79 s in all): 0 the PCG
+iteration's latency attribution; 1a Newton on a corner-held 16^2 sheet against the converged oracle (Bridson 8 x 200:
+0.47 um off; 12 x 400: 0.08 um; |g|/|mg| floor about 2e-3, so the 1e-5 tolerance never stops Newton); 1b a 16^2 sheet
+dropped onto the floor; 2 the stretched strip on the ledge; 3 PCG cost and iterations per solve 16^2-128^2, 32^2 on a
+floor and on a sphere; 4 the analytic gates at small size (free fall and flat drop, swing, curtain, Peirce, incline).
+The 16^2 tilted drop is not in it: its h/8 reference resolves a slap the 1/60 s step cannot at that size; the 101^2
+suite gate stays. The step's PCG iterations are now counted in the Newton control record (control + 1 .w, reset in
+nwBeginStep; harness reads only, readNewtonControl()[7]).
+
+Ladder 2 (3 x 49 strip at 5 mm, limit 0.1, starting stretched 1.5x, 2/3 over the Peirce ledge), bisected at 147
+vertices (probe ~/code/me/fluid-scratch/cloth-c1/ladder/probe-strip.mts, logs m7/probe-strip1-2, bis1-2):
+- default 16 plane records/vertex: planeRecordOverflow every tick, ~500 vertex holds per frame through t25; lambda
+  17 -> 1.8e3 N, strain 61, the tip 493 mm under the ledge top. Frame peak 38148 records at t1 (260 per vertex).
+- (A) contact on, duals frozen: strain 0.5-2.7 for ~25 ticks while the holds last (free space: about 2 ticks), so the
+  holds alone block the contraction.
+- (B) duals on, arc cut off (q = y): lambda <= 0.09 N, strain exactly 0.100 at t1 as in free space (then refused for
+  penetration at t4, as it must be): k_c and the AL penalty do not fight.
+- (C) the dual step skipped in any iteration where any vertex is cut: lambda stays 0 through the held ticks, so
+  nwChosenCut sees C2's cuts and holds on the ClothSystem path.
+- 2000 records/vertex: no overflow; strain 0.002 by t9, lambda -> 0; tick 1 still hits the round cap (its redone round
+  holds all 147) and ~100 vertices are envelope-capped per tick for t2-t6, so lambda peaks at 25-31 N against the
+  strip's momentum bound 1.04 N (free space 0.044 N) before decaying.
+Reading: the per-edge rule is right; lambda ramps on free edges whose chain is blocked by held or capped vertices,
+where the step's strain-limit problem is infeasible and AL ascent diverges as the method must. No lambda clamp. Sent to
+C2 (the plane-record demand, holds that persist, the tick-1 round cap). Ladder 2 authors C2's interim measured
+capacity (288 = 260 + 10 %), gates planeRecordHeld == 0, the final strain and the duals' decay (pass: final strain
+2.09e-3, hanging 12 nodes 53 mm), and keeps the momentum bound as a todo naming C2.
+
+Gate: cloth-analytic + cloth-gpu-solver + cloth-ladder on HEAD 510e4bd8 + this, 25 tests, 23 pass, 0 fail, 2 todo
+(C2's incline item 5; ladder 2's bound).

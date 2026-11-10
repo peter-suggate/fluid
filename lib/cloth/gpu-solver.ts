@@ -620,7 +620,8 @@ export class ClothGPUSolver {
   }
 
   /** Newton-PCG control records (harness reads; never a step path): done flag, PCG done, last step, Newton iterations
-   * of the last step; then |g|^2 over free DOFs at its first and latest Newton iterate, and |m g|^2 for scale. */
+   * of the last step; then |g|^2 over free DOFs at its first and latest Newton iterate, |m g|^2 for scale (overwritten
+   * here), and the step's PCG iterations. */
   async readNewtonControl(): Promise<Float32Array> {
     const L = this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN;
     const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 32));

@@ -23,7 +23,7 @@
  * records), with contact the trial moves (one per trial), then 3 records per face, the assembled blocks and bending
  * entries, the line-search partials (W = workgroups of a per-vertex dispatch each, 7 arrays), the PCG partials (3 arrays of one record per patch), the PCG scalars
  * (gamma_0, then alpha by iteration mod 2), then the control record (Newton done, PCG done, accepted step, Newton
- * iteration), then |g|^2 at the first and latest Newton iterate.
+ * iteration), then |g|^2 at the first and latest Newton iterate and the step's PCG iterations (w).
  */
 import { CLOTH_LINE_SEARCH } from './oracle';
 
@@ -119,7 +119,7 @@ fn nwControlUniform(lane: u32) -> vec4f {
 fn wgIndex(wg: vec3u, nwg: vec3u) -> u32 { return wg.x + wg.y * nwg.x; }
 
 // Step start (one thread): Newton not done.
-@compute @workgroup_size(1) fn nwBeginStep() { nw[nwControl()] = vec4f(0.0); }
+@compute @workgroup_size(1) fn nwBeginStep() { nw[nwControl()] = vec4f(0.0); nw[nwControl() + 1u] = vec4f(0.0); }
 
 // Per face at the Newton iterate: f0, f1, the PSD-clamped stress (S11, S22, S12) and the softened tangent diagonal.
 @compute @workgroup_size(${workgroup}) fn nwFaces(@builtin(global_invocation_id) id: vec3u) {
@@ -336,7 +336,8 @@ fn pcgDir(j: u32) -> vec3f {
     // H is PSD by construction; a non-positive curvature (rounding at convergence) ends this solve with d so far.
     if (!(denom > 0.0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
     alpha = gam / denom;
-    if (lead) { nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(alpha); }
+    // The step's PCG iterations taken (control + 1 .w; harness reads only).
+    if (lead) { nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(alpha); nw[nwControl() + 1u].w += 1.0; }
   }
   pcgI = i; pcgAlpha = alpha; pcgBeta = beta;
   let tw = pcgTable(p);
