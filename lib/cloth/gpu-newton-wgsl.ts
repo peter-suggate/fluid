@@ -32,7 +32,19 @@
  * done, accepted step, Newton iteration), then |g|^2 at the first and latest Newton iterate, the latest PCG stop
  * tolerance^2 (z, the forcing's eta^2) and the step's PCG iterations (w), then with contact the latest iteration's
  * active set (control + 2: vertices with an active normal, normals kept, normals released by the KKT sign, and the
- * vertices a travel bound holds at the accepted trial - the cap-aware done rule, read by the contact hook's re-detection).
+ * vertices a travel bound holds at the accepted trial - the cap-aware done rule, read by the contact hook's re-detection),
+ * then the trust region (control + 3, control + 4, control + 5; nwTrust below).
+ *
+ * newton.trustRegion 'hybrid' (trustRegion): the line search above until two consecutive iterations of a step accept the
+ * full step, then trust-region iterations for the rest of the step (Steihaug-Toint): the model is H with the membrane's
+ * stress term unclamped (nwFaces; the exact membrane Hessian - the oracle's t15 count to 1 um falls from 46 to 16 with
+ * it, and to 46 again with the trust region on the PSD model, C1 RESULT 40), contact's terms and the preconditioner
+ * unchanged; PCG stops on the boundary ||d||_M = Delta or at negative curvature (Steihaug's step to the boundary along p),
+ * the norms by the CG recurrences (M the preconditioner's inverse, in the reduced space); the trial is the projected arc
+ * at alpha 1 (s, nwProject's trial 0), the model's decrease pred = -(g.s + s.H s / 2) with s.H s one more product
+ * (nwModel), accepted when the decrease is at least 1e-4 pred less the energy change's rounding floor, and Delta set from
+ * rho = ared / pred (rho < 0.25: Delta = ||d||_M / 4; rho > 0.75 on the boundary: 2 Delta; no update while the change is
+ * within rounding). Delta starts at ||d||_M of the line search's last (full) step.
  */
 import { CLOTH_LINE_SEARCH } from './oracle';
 
@@ -60,7 +72,7 @@ export interface ClothPCGLayout {
   readonly maxK2: number;
 }
 
-export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false): string {
+export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false): string {
   const S = CLOTH_NEWTON_SEGMENTS;
   // The PCG kernels' workgroup sum of the vec4 `part` into `total` (valid in lane 0; every lane has passed a barrier
   // after its last read of the staged u): with subgroups, subgroupAdd, the subgroups' partials through pcgRed and a
@@ -78,10 +90,18 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
 const NW_WG = ${workgroup}u;
+const NW_HYBRID = ${trustRegion};
 fn nseg(s: u32, v: u32) -> u32 { return s * P.state0.x + v; }
 fn nwFaceRecord(f: u32) -> u32 { return P.newton0.x + 3u * f; }
 fn nwPartial(k: u32) -> u32 { return P.newton0.y + k * P.newton0.z; }
 fn nwControl() -> u32 { return P.newton0.w; }
+// The trust region: mode (0 the line search, 1 trust-region iterations) and Delta (the preconditioner's norm), set by
+// nwChoose and read-only through the solve; this iteration's direction (written by the solve's lead: ||d||_M^2, 1 where the
+// solve ended on the boundary); the step's counts (consecutive full line-search steps, trust-region iterations, of them
+// rejected, the last rho; harness reads).
+fn nwTrust() -> u32 { return nwControl() + 3u; }
+fn nwTrustNorm() -> u32 { return nwControl() + 5u; }
+fn nwTrustCounts() -> u32 { return nwControl() + 4u; }
 fn nwPinned(v: u32) -> bool { return vertexGroup(v) > 0u; }
 // Trial k's move of vertex j (alpha = 2^-k): alpha d_j, or with contact the projected arc's move Pi_j(x_j + alpha d_j) - x_j
 // (nwProject; exactly alpha d_j where the projection keeps the trial point; d_j.w != 0 marks a vertex the arc cuts on some trial).
@@ -188,9 +208,11 @@ fn nwTravelHeld(v: u32, x: vec3f, y: vec3f, alpha: f32, g: vec3f) -> bool {
 var<workgroup> nwRed: array<vec4f, ${workgroup}>;
 var<workgroup> nwOut: vec4f;
 // The sum of partial array \`base\` (W records) by every workgroup, uniform across it.
-fn nwSum(lane: u32, base: u32) -> vec4f {
+fn nwSum(lane: u32, base: u32) -> vec4f { return nwSumN(lane, base, P.newton0.z); }
+// The sum of \`count\` records from \`base\`, uniform across the workgroup.
+fn nwSumN(lane: u32, base: u32, count: u32) -> vec4f {
   var a = vec4f(0.0);
-  for (var i = lane; i < P.newton0.z; i += NW_WG) { a += nw[base + i]; }
+  for (var i = lane; i < count; i += NW_WG) { a += nw[base + i]; }
   nwRed[lane] = a;
   workgroupBarrier();
   for (var s = NW_WG / 2u; s > 0u; s >>= 1u) { if (lane < s) { nwRed[lane] += nwRed[lane + s]; } workgroupBarrier(); }
@@ -235,10 +257,14 @@ fn nwControlUniform(lane: u32) -> vec4f {
 }
 fn wgIndex(wg: vec3u, nwg: vec3u) -> u32 { return wg.x + wg.y * nwg.x; }
 
-// Step start (one thread): Newton not done.
-@compute @workgroup_size(1) fn nwBeginStep() { nw[nwControl()] = vec4f(0.0); nw[nwControl() + 1u] = vec4f(0.0); }
+// Step start (one thread): Newton not done, the line search's mode (the active-set record, control + 2, is the contact hooks').
+@compute @workgroup_size(1) fn nwBeginStep() {
+  nw[nwControl()] = vec4f(0.0); nw[nwControl() + 1u] = vec4f(0.0);
+  nw[nwTrust()] = vec4f(0.0); nw[nwTrustCounts()] = vec4f(0.0); nw[nwTrustNorm()] = vec4f(0.0);
+}
 
-// Per face at the Newton iterate: f0, f1, the PSD-clamped stress (S11, S22, S12) and the softened tangent diagonal.
+// Per face at the Newton iterate: f0, f1, the stress (S11, S22, S12) - PSD-clamped, or in trust-region iterations as it
+// is (the exact membrane Hessian) - and the softened tangent diagonal.
 @compute @workgroup_size(${workgroup}) fn nwFaces(@builtin(global_invocation_id) id: vec3u) {
   let f = id.x;
   if (f >= P.n.y || nw[nwControl()].x != 0.0) { return; }
@@ -251,7 +277,7 @@ fn wgIndex(wg: vec3u, nwg: vec3u) -> u32 { return wg.x + wg.y * nwg.x; }
   // The 2x2 stress clamped PSD: S (x) I is the face's geometric stiffness; a compressive eigenvalue drops out.
   let tr = 0.5 * (s11 + s22); let df = length(vec2f(0.5 * (s11 - s22), tau)); let l1 = tr + df; let l2 = tr - df;
   var S = vec3f(s11, s22, tau);
-  if (l2 < 0.0) {
+  if (l2 < 0.0 && !(NW_HYBRID && nw[nwTrust()].x != 0.0)) {
     if (l1 <= 0.0) { S = vec3f(0.0); } else {
       var e = vec2f(l1 - s22, tau);
       if (dot(e, e) <= 0.0) { e = vec2f(tau, l1 - s11); }
@@ -400,6 +426,11 @@ var<workgroup> pcgUz: array<f32, PCG_SHARED>;
 var<workgroup> pcgRed: array<vec4f, PCG_PATCH>;
 var<workgroup> pcgOut: vec4f;
 var<workgroup> pcgScal: vec4f;
+var<workgroup> pcgNorm: vec4f;
+var<workgroup> pcgTrust: vec4f;
+// Where the product's far columns and contact partners read their vector: 0 the PCG's u, 1 the trust-region trial's
+// move (nwModel).
+var<private> pcgSrc: u32;
 var<private> pcgI: u32;
 var<private> pcgAlpha: f32;
 var<private> pcgBeta: f32;
@@ -422,10 +453,16 @@ fn pcgForcing(gg: f32, prior: vec4f, n: f32) -> f32 {
   }
   return max(e2, floor2);
 }
+// Steihaug's step to the trust boundary: the tau >= 0 with ||d + tau p||_M = Delta, from ||d||_M^2, <d, p>_M, ||p||_M^2
+// (||d||_M < Delta: the solve stops on reaching it, and the test and the recurrence evaluate the same expression).
+fn pcgBoundary(dd: f32, dp: f32, pp: f32, delta: f32) -> f32 {
+  return (sqrt(max(dp * dp + pp * (delta * delta - dd), 0.0)) - dp) / pp;
+}
 fn pcgMr(j: u32, r: vec3f) -> vec3f { return nwPrecondition(nw[nseg(${S.m0}u, j)], nw[nseg(${S.m1}u, j)], r); }
 // u = M^-1 r of this dispatch's iteration at vertex j from global memory: u_0 = M^-1 r_0; else r_i = r_{i-1} - alpha
 // s_{i-1} with s_{i-1} = w_{i-1} + beta s_{i-2}.
 fn pcgUGlobal(j: u32) -> vec3f {
+  if (pcgSrc == 1u) { return nwMove(j, 0u, 1.0); }
   if (pcgI == 0u) { return pcgMr(j, nw[nseg(${S.r0}u, j)].xyz); }
   let o = (pcgI + 1u) % 2u;
   let sv = nw[nseg(${S.w0}u + o, j)].xyz + pcgBeta * nw[nseg(${S.s0}u + pcgI % 2u, j)].xyz;
@@ -446,6 +483,21 @@ fn pcgDir(j: u32) -> vec3f {
   return pcgUGlobal(j);
 }
 
+// Row lane of the patch's assembled H (all but contact) times the staged vector (pcgU: staged rows and halo, else global).
+fn pcgRowProduct(lane: u32, K1: u32, K2: u32, blocks: u32, bends: u32) -> vec3f {
+  var w = vec3f(0.0);
+  for (var k = 0u; k < K1; k++) {
+    let b0 = nw[pcgBlock(blocks, k, 0u, lane)]; let b1 = nw[pcgBlock(blocks, k, 1u, lane)]; let b2 = nw[pcgBlock(blocks, k, 2u, lane)];
+    let uj = pcgU(bitcast<u32>(b0.w));
+    w += vec3f(dot(b0.xyz, uj), dot(b1.xyz, uj), dot(b2.xyz, uj));
+  }
+  for (var m = 0u; 2u * m < K2; m++) {
+    let e = nw[bends + m * PCG_PATCH + lane];
+    w += e.y * pcgU(bitcast<u32>(e.x)) + e.w * pcgU(bitcast<u32>(e.z));
+  }
+  return w;
+}
+
 // PCG dispatch i (R.range.z, from 0). i = 0: u_0 = M^-1 r_0, w_0 = H u_0 and the partials (r.u, w.u, |g|^2). i >= 1:
 // gamma = r.u and delta = w.u of iteration i - 1 (with i = 1 the Newton residual test), beta = gamma / gamma_{i-2},
 // alpha = gamma / (delta - beta gamma / alpha_{i-2}); then p_{i-1} = u_{i-1} + beta p_{i-2}, s_{i-1} = w_{i-1} + beta
@@ -463,9 +515,11 @@ fn pcgDir(j: u32) -> vec3f {
       a += vec4f(q1.xyz, select(0.0, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
     }
     ${reduce('a')}
-    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; pcgOut = total; pcgScal = vec4f(s0.x, nw[pcgScalar(1u + i % 2u)].x, s0.y, 0.0); }
+    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; let q = nw[pcgScalar(1u + i % 2u)]; pcgOut = total; pcgScal = vec4f(s0.x, q.x, s0.y, 0.0); pcgNorm = q; pcgTrust = nw[nwTrust()]; }
     let sums = workgroupUniformLoad(&pcgOut);
     let scal = workgroupUniformLoad(&pcgScal);
+    let nrm = workgroupUniformLoad(&pcgNorm);
+    let trust = workgroupUniformLoad(&pcgTrust);
     let gam = sums.x;
     var gamma0 = scal.x;
     if (i == 1u) {
@@ -479,15 +533,33 @@ fn pcgDir(j: u32) -> vec3f {
       }
       if (sums.z <= bitcast<f32>(P.newton1.z)) { if (lead) { nw[nwControl()].x = 1.0; } return; }
     }
+    // The last dispatch's step reached the trust boundary (its alpha record -1): the solve is done.
+    if (i >= 2u && scal.y < 0.0) { if (lead) { nw[nwControl()].y = 1.0; } return; }
     if (!(gam > select(scal.z, 0.0, i == 1u) * gamma0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
     var denom = sums.y;
     if (i >= 2u) { beta = gam / sums.w; denom = sums.y - beta * gam / scal.y; }
-    // H is PSD by construction; a non-positive curvature (rounding at convergence) ends this solve with d so far.
-    if (!(denom > 0.0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
-    alpha = gam / denom;
-    // The step's PCG iterations taken (control + 1 .w; harness reads only).
-    if (lead) { nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(alpha); nw[nwControl() + 1u].w += 1.0; }
-  }
+    // ||d||_M^2, <d, p>_M, ||p||_M^2 of d_{i-1} and p_{i-1} (M the preconditioner's inverse), by the Steihaug-Toint
+    // recurrences from those of i - 2 (the alpha record's yzw): r_{i-1} is orthogonal to d_{i-1} and p_{i-2}.
+    var dd = 0.0; var dp = 0.0; var pp = gam;
+    if (i >= 2u) { let a2 = scal.y; dd = nrm.y + a2 * (2.0 * nrm.z + a2 * nrm.w); dp = beta * (nrm.z + a2 * nrm.w); pp = gam + beta * beta * nrm.w; }
+    let tr = NW_HYBRID && trust.x != 0.0;
+    var edge = false;
+    if (!(denom > 0.0)) {
+      // The line search's H is PSD by construction: a non-positive curvature (rounding at convergence) ends this solve
+      // with d so far. The trust region's model (the exact membrane) can be indefinite: Steihaug's step to the boundary.
+      if (!tr) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+      edge = true;
+    } else {
+      alpha = gam / denom;
+      edge = tr && dd + alpha * (2.0 * dp + alpha * pp) >= trust.y * trust.y;
+    }
+    if (edge) { alpha = pcgBoundary(dd, dp, pp, trust.y); }
+    // The step's PCG iterations taken (control + 1 .w; harness reads only), and d's norm after this dispatch's update.
+    if (lead) {
+      nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(select(alpha, -1.0, edge), dd, dp, pp); nw[nwControl() + 1u].w += 1.0;
+      nw[nwTrustNorm()] = vec4f(dd + alpha * (2.0 * dp + alpha * pp), select(0.0, 1.0, edge), 0.0, 0.0);
+    }
+  } else if (lead) { nw[nwTrustNorm()] = vec4f(0.0); }
   pcgI = i; pcgAlpha = alpha; pcgBeta = beta;
   let tw = pcgTable(p);
   let K1 = topo[tw]; let K2 = topo[tw + 1u]; let haloN = min(topo[tw + 2u], PCG_SHARED - PCG_PATCH); let halo = topo[tw + 3u];
@@ -515,15 +587,7 @@ fn pcgDir(j: u32) -> vec3f {
   workgroupBarrier();
   var w = vec3f(0.0);
   if (own) {
-    for (var k = 0u; k < K1; k++) {
-      let b0 = nw[pcgBlock(blocks, k, 0u, lane)]; let b1 = nw[pcgBlock(blocks, k, 1u, lane)]; let b2 = nw[pcgBlock(blocks, k, 2u, lane)];
-      let uj = pcgU(bitcast<u32>(b0.w));
-      w += vec3f(dot(b0.xyz, uj), dot(b1.xyz, uj), dot(b2.xyz, uj));
-    }
-    for (var m = 0u; 2u * m < K2; m++) {
-      let e = nw[bends + m * PCG_PATCH + lane];
-      w += e.y * pcgU(bitcast<u32>(e.x)) + e.w * pcgU(bitcast<u32>(e.z));
-    }
+    w = pcgRowProduct(lane, K1, K2, blocks, bends);
     // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
     ${contact ? 'if (!nwPinned(v)) { w = nwProjectP(v, w + ogcVertexContactHvLanes(v, 0u, 1u)); }' : ''}
     nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
@@ -549,9 +613,13 @@ fn pcgDir(j: u32) -> vec3f {
   var pv = vec3f(0.0); var sv = vec3f(0.0); var d = vec3f(0.0); var w = vec3f(0.0);
   var gamma0 = 0.0; var gamPrev = 0.0; var alphaPrev = 0.0;
   var taken = 0.0; var stop = 0u;
-  // The step's residual record before this Newton iteration writes it (the forcing's |g_n-1| and eta_n-1).
-  if (lead) { pcgScal = nw[nwControl() + 1u]; }
+  // The step's residual record before this Newton iteration writes it (the forcing's |g_n-1| and eta_n-1), and the trust region.
+  if (lead) { pcgScal = nw[nwControl() + 1u]; pcgTrust = nw[nwTrust()]; }
   let prior = workgroupUniformLoad(&pcgScal);
+  let trust = workgroupUniformLoad(&pcgTrust);
+  let tr = NW_HYBRID && trust.x != 0.0;
+  // ||d||_M^2, <d, p>_M, ||p||_M^2 (the recurrences of pcgStep), d's norm after the last update, the boundary reached.
+  var dd = 0.0; var dp = 0.0; var pp = 0.0; var dn = 0.0; var edge = false;
   var tol2 = bitcast<f32>(P.newton1.y);
   for (var i = 0u; i <= cap; i++) {
     if (i > 0u) {
@@ -567,10 +635,22 @@ fn pcgDir(j: u32) -> vec3f {
       if (!(gam > tol2 * gamma0)) { stop = 1u; break; }
       var beta = 0.0; var denom = sums.y;
       if (i >= 2u) { beta = gam / gamPrev; denom = sums.y - beta * gam / alphaPrev; }
-      if (!(denom > 0.0)) { stop = 1u; break; }
-      let alpha = gam / denom;
+      if (i == 1u) { pp = gam; } else {
+        let ddN = dd + alphaPrev * (2.0 * dp + alphaPrev * pp); dp = beta * (dp + alphaPrev * pp); pp = gam + beta * beta * pp; dd = ddN;
+      }
+      var alpha = 0.0;
+      if (!(denom > 0.0)) {
+        if (!tr) { stop = 1u; break; }
+        edge = true;
+      } else {
+        alpha = gam / denom;
+        edge = tr && dd + alpha * (2.0 * dp + alpha * pp) >= trust.y * trust.y;
+      }
+      if (edge) { alpha = pcgBoundary(dd, dp, pp, trust.y); }
       taken += 1.0;
       pv = u + beta * pv; sv = w + beta * sv; d += alpha * pv; r -= alpha * sv;
+      dn = dd + alpha * (2.0 * dp + alpha * pp);
+      if (edge) { stop = 1u; break; }
       u = nwPrecondition(M0, M1, r);
       gamPrev = gam; alphaPrev = alpha;
     }
@@ -598,6 +678,7 @@ fn pcgDir(j: u32) -> vec3f {
   if (lead) {
     if (stop == 2u) { nw[nwControl()].x = 1.0; } else { nw[nwControl()].y = 1.0; }
     nw[nwControl() + 1u].w += taken;
+    nw[nwTrustNorm()] = vec4f(dn, select(0.0, 1.0, edge), 0.0, 0.0);
   }
 }
 
@@ -759,6 +840,36 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   nwPartialSum(lane, wgi, trav[1], base + 9u * P.newton0.z);` : ''}
 }
 
+// A trust-region iteration's model at its step s (the projected arc at alpha 1, nwMove trial 0): s.H s with the model's
+// H (the solve's operator before the active-set projection: the assembled rows with the exact membrane, and contact's
+// product), per patch into PCG partial array 2 (free once the solve is done: the next solve's dispatch 2 writes it
+// before dispatch 3 reads it). nwChoose takes pred = -(g.s + s.H s / 2). One workgroup per patch; a line-search
+// iteration returns at once.
+@compute @workgroup_size(256) fn nwModel(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u${sgArgs}) {
+  let ctl = nwControlUniform(lane);
+  if (!NW_HYBRID || ctl.x != 0.0) { return; }
+  if (lane == 0u) { pcgTrust = nw[nwTrust()]; }
+  if (workgroupUniformLoad(&pcgTrust).x == 0.0) { return; }
+  let p = wgIndex(wg, nwg);
+  let tw = pcgTable(p);
+  let K1 = topo[tw]; let K2 = topo[tw + 1u]; let haloN = min(topo[tw + 2u], PCG_SHARED - PCG_PATCH); let halo = topo[tw + 3u];
+  let blocks = topo[tw + 4u]; let bends = topo[tw + 5u]; let rows = topo[tw + 7u];
+  pcgPatchIndex = p; pcgSrc = 1u;
+  let own = lane < rows; let v = select(0u, pcgRowVertex(p * PCG_PATCH + lane), own);
+  var sv = vec3f(0.0);
+  if (own) { sv = nwMove(v, 0u, 1.0); }
+  pcgStage(lane, sv);
+  for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, nwMove(topo[halo + h], 0u, 1.0)); }
+  workgroupBarrier();
+  var w = vec3f(0.0);
+  if (own) {
+    w = pcgRowProduct(lane, K1, K2, blocks, bends);
+    ${contact ? 'if (!nwPinned(v)) { w += ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+  }
+  ${reduce('vec4f(dot(sv, w), 0.0, 0.0, 0.0)')}
+  if (lane == 0u) { nw[pcgPartial(2u, p)] = total; }
+}
+
 // One workgroup: the largest trial whose move descends (g.(x(alpha) - x) < 0) and passes Armijo along it, and the next
 // Newton iteration's PCG reset. If none does, Newton is done, unless the arc was cut (a vertex's certificates bound its
 // full step): then the iterate stays, Newton runs on, and the re-detection round that follows (afterNewtonStep) gives
@@ -773,13 +884,39 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   let sm = nwSumMax(lane, base + 6u * P.newton0.z);
   ${contact ? `let act = nwSum(lane, base + 7u * P.newton0.z);
   let T0 = nwSum(lane, base + 8u * P.newton0.z); let T1 = nwSum(lane, base + 9u * P.newton0.z);` : ''}
+  var sHs = 0.0;
+  if (NW_HYBRID) { sHs = nwSumN(lane, pcgPartial(2u, 0u), P.newton3.y).x; }
   if (lane != 0u) { return; }
   var chosen = 0.0; var alpha = 1.0; var held = 0.0;
-  for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-    let e = select(E1[k - 4u], E0[k], k < 4u); let fl = select(F1[k - 4u], F0[k], k < 4u); let sl = select(S1[k - 4u], S0[k], k < 4u);
-    if (sl < 0.0 && e <= ${CLOTH_LINE_SEARCH.armijo} * sl + 4.0 * EPS32 * fl) { chosen = alpha; ${contact ? 'held = select(T1[k - 4u], T0[k], k < 4u); ' : ''}break; }
-    alpha *= 0.5;
+  let trust = nw[nwTrust()]; let tn = nw[nwTrustNorm()]; var counts = nw[nwTrustCounts()];
+  let region = NW_HYBRID && trust.x != 0.0;
+  if (region) {
+    // A trust-region iteration: the step s against the model's decrease pred = -(g.s + s.H s / 2), accepted when the
+    // decrease is at least 1e-4 pred (Armijo's constant) less the energy change's rounding floor. Delta from rho =
+    // ared / pred: rho < 0.25 (or no model decrease) ||d||_M / 4, rho > 0.75 with the solve on the boundary 2 Delta; a
+    // change within rounding measures no rho and keeps Delta.
+    let e = E0[0]; let fl = F0[0]; let pred = -(S0[0] + 0.5 * sHs);
+    if (e <= 4.0 * EPS32 * fl - ${CLOTH_LINE_SEARCH.armijo} * max(pred, 0.0)) { chosen = 1.0; ${contact ? 'held = T0[0]; ' : ''}}
+    var radius = trust.y; var rho = -1.0; var measured = true;
+    if (pred > 0.0) { rho = -e / pred; measured = abs(e) > 4.0 * EPS32 * fl; }
+    if (measured) {
+      if (!(rho >= 0.25)) { radius = 0.25 * sqrt(tn.x); } else if (rho > 0.75 && tn.y != 0.0) { radius = 2.0 * radius; }
+    }
+    nw[nwTrust()] = vec4f(1.0, radius, 0.0, 0.0);
+    counts = vec4f(counts.x, counts.y + 1.0, counts.z + select(1.0, 0.0, chosen > 0.0), rho);
+  } else {
+    for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
+      let e = select(E1[k - 4u], E0[k], k < 4u); let fl = select(F1[k - 4u], F0[k], k < 4u); let sl = select(S1[k - 4u], S0[k], k < 4u);
+      if (sl < 0.0 && e <= ${CLOTH_LINE_SEARCH.armijo} * sl + 4.0 * EPS32 * fl) { chosen = alpha; ${contact ? 'held = select(T1[k - 4u], T0[k], k < 4u); ' : ''}break; }
+      alpha *= 0.5;
+    }
+    // The hybrid: two consecutive full steps start the trust region, Delta the last full step's ||d||_M.
+    if (NW_HYBRID) {
+      counts.x = select(0.0, counts.x + 1.0, chosen == 1.0);
+      if (counts.x >= 2.0) { nw[nwTrust()] = vec4f(1.0, sqrt(tn.x), 0.0, 0.0); }
+    }
   }
+  if (NW_HYBRID) { nw[nwTrustCounts()] = counts; }
   ${contact ? `// The active set, and the vertices a travel bound holds at the accepted trial (no step: 0, the stall is its own signal).
   nw[nwControl() + 2u] = vec4f(act.xyz, held);` : ''}
   // Converged: no descending step, or (velocity tolerance, newton3.w) the accepted step moves no vertex faster than
@@ -787,8 +924,11 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   let tolV = bitcast<f32>(P.newton3.w);
   // A small step is no convergence while a travel bound holds a vertex there (the cap-aware done rule): Newton runs on
   // and the contact hook's re-detection gives those vertices new certificates about the iterate.
-  let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0;
-  let stalled = chosen == 0.0 && !(sm.x > 0.0);
+  // In a trust-region iteration only an interior step (the solve ended inside the region, tn.y 0) measures the Newton
+  // step: a step on the boundary is as small as Delta, not as the iterate's distance to the solution.
+  let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0 && !(region && tn.y != 0.0);
+  // (A rejected trust-region step is no stall: Delta shrinks and Newton runs on.)
+  let stalled = chosen == 0.0 && !(sm.x > 0.0) && !region;
   nw[nwControl()] = vec4f(select(0.0, 1.0, stalled || small), 0.0, chosen, ctl.w + 1.0);
 }
 
@@ -825,8 +965,9 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
 // violation measures the projection, not the multiplier, and ascent would ramp lambda and k without bound.
 @compute @workgroup_size(${workgroup}) fn nwEdgeDuals(@builtin(global_invocation_id) id: vec3u) {
   let ctl = nw[nwControl()];
-  if (ctl.x != 0.0) { return; }${contact ? `
-  if (ctl.z == 0.0 || id.x >= P.n.z) { return; }
+  // Not after an iteration that moved nothing (a stall, or a rejected trust-region step).
+  if (ctl.x != 0.0 || ctl.z == 0.0) { return; }${contact ? `
+  if (id.x >= P.n.z) { return; }
   let ev = edges(id.x);
   if (nwChosenCut(ev.x, ctl.z) || nwChosenCut(ev.y, ctl.z)) { return; }` : ''}
   updateEdgeDual(id.x);

@@ -117,6 +117,11 @@ export interface ClothNewtonSettings {
    * eta_n = 0.9 (|g_n| / |g_n-1|)^2 (in place of pcgTolerance), capped at this and floored at pcgTolerance; the first
    * iteration of a step solves to this. In [0, 1); default 0, off (pcgTolerance in every iteration). */
   readonly forcingMax?: number;
+  /** The globalisation: 'off' (default), the Armijo line search on the PSD model in every iteration; 'hybrid', that line
+   * search until two consecutive iterations of a step accept the full step, then Steihaug-Toint trust-region iterations
+   * for the rest of the step, on the model with the membrane's stress term unclamped (its exact Hessian; contact's
+   * terms and the preconditioner as in the line search), the trust region in the preconditioner's norm. */
+  readonly trustRegion?: "off" | "hybrid";
 }
 
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per

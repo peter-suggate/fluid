@@ -53,6 +53,9 @@ const CONVERGED: ClothNewtonSettings = { iterations: 12, pcgIterations: 400, pcg
 // CLOTH_LADDER_EW=0.05,0.2 adds rows. Held to the converged rows' oracle bound.
 const FORCED = [0.1, ...(process.env.CLOTH_LADDER_EW ?? '').split(',').filter(Boolean).map(Number)]
   .map(eta => [`converged caps, stop at dx 1 um, forcing eta_max ${eta}`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 / h, forcingMax: eta }] as const);
+// The hybrid globalisation (newton.trustRegion 'hybrid': the line search, then trust-region iterations on the exact
+// membrane) at the converged caps with the dx = 1 um stop, held to the converged rows' bounds.
+const HYBRID = [['converged caps, stop at dx 1 um, hybrid trust region', { ...CONVERGED, velocityTolerance_m_s: 1e-6 / h, trustRegion: 'hybrid' }]] as const;
 
 async function withDevice(run: (device: GPUDevice) => Promise<void>) {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
@@ -321,7 +324,7 @@ test('ladder 1a: Newton on a corner-held 16^2 sheet matches the converged Float6
   // The displacement stop (newton3.w): done once the accepted step moves no vertex more than dx = tol h~.
   const stops = (process.env.CLOTH_LADDER_DX ?? '').split(',').filter(Boolean).map(Number)
     .map(dx => [`converged caps, stop at dx ${dx} um`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 * dx / h }] as const);
-  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops, ...FORCED] as const) {
+  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops, ...FORCED, ...HYBRID] as const) {
     const { solver } = await bareSolver(device, document, { dt_s: h, newton });
     const records: Awaited<ReturnType<typeof newtonOf>>[] = [];
     for (let s = 0; s < steps; s++) { solver.step(1); records.push(await newtonOf(solver)); }
@@ -354,7 +357,7 @@ test('ladder 1b: Newton with contact on a 16^2 sheet landing flat on the floor: 
   const lines: string[] = [];
   const stops = (process.env.CLOTH_LADDER_DX ?? '').split(',').filter(Boolean).map(Number)
     .map(dx => [`converged caps, stop at dx ${dx} um`, { ...CONVERGED, velocityTolerance_m_s: 1e-6 * dx / h }] as const);
-  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops, ...FORCED] as const) {
+  for (const [name, newton] of [['Bridson 8 x 200', BRIDSON], ['converged 12 x 400', CONVERGED], ...stops, ...FORCED, ...HYBRID] as const) {
     const scene = clothAnalyticSceneDescription(resized(source, sheet(n, y0)), { newton });
     const r = clothContactRadius(scene.cloth![0]!);
     const { cloth, solver, records } = await steppedScene(device, scene, ticks);

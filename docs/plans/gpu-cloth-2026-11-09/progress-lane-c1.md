@@ -2330,3 +2330,62 @@ move): the Newton count to 1 um, or \|g\| at n149 when it does not converge.
   still needs alpha 0.125 (uphill at 1, 0.5 and 0.25) with full steps of about 150 um. Both point to the barrier's
   model radius: the quadratic is valid only over distances comparable to the active gaps. Hypothesis, not yet
   measured: it needs the min active gap per stalled vertex.
+
+## 2026-11-10 RESULT (40): the hybrid on the GPU (newton.trustRegion 'hybrid', default 'off'); the barrier's model radius measured; kc 9668 in the oracle
+
+**What landed.** Setting `newton.trustRegion: 'off' | 'hybrid'` (validated, unknown values fail). With 'hybrid':
+
+- Newton runs PSD + Armijo line search until two consecutive full steps (alpha = 1).
+- It then runs Steihaug-Toint trust-region iterations for the rest of the step.
+- The model is H with the membrane's stress unclamped (nwFaces), contact's product and the PSD per-vertex preconditioner unchanged, in the preconditioner's norm.
+- The norms come from the CG recurrences in pcgStep / pcgSolve (no extra reductions).
+- The step's s.H s comes from one extra product (nwModel, after nwTrial).
+- Acceptance and the Delta update follow the oracle (Armijo's 1e-4 pred less the rounding floor; rho < 0.25 gives ||d||_M / 4; rho > 0.75 on the boundary gives 2 Delta).
+- Records: control + 3 (mode, Delta), + 4 (full-step run, trust-region iterations, rejected, last rho), + 5 (||d||^2_M, boundary flag).
+- **The done rule in trust-region iterations counts only an interior step.** A boundary step is as small as Delta, not as the iterate's distance to the solution. The oracle had this flaw: its t25 at kc 9668 with the 'move' switch "converged" at n42 with |g| 2.0 on a 0.43 um boundary step. With the rule it is n123 (|g| 9e-3).
+
+**Attribution of the hybrid's gain (oracle, t15).** The trust region on the PSD model's own product (TRH=model) gives n46, the line search's count. With the exact membrane only (TRH=elastic), n16. With the full finite-difference exact Hessian, n16. The whole gain is the unclamped membrane, so contact's model was left alone.
+
+**GPU replay of the 32^2 dumps** (one step from each state, 150 iterations, stop at a 1 um move, scene PCG tolerance 1e-4):
+
+| state | line search | hybrid | oracle B | oracle G |
+|---|---|---|---|---|
+| t5 | 11 | 9 | 9 | 9 |
+| t15 | 53 | 36 | 46 | 16 |
+| t25 | no (\|g\|/\|mg\| 9.95) | no (5.88) | no | no |
+
+- **t5 reproduces. t15 does not:** 36 against 14-16.
+- The per-iteration trace (caps 1..40 from the same state) is linear in the interior phase: \|g\| falls x0.82 per iteration, with rho 1.4-1.7 on interior steps and about 29 PCG each.
+- Ruled out, each by one replay:
+  - The PCG tolerance. The oracle at the GPU's r.z <= 1e-8 r0.z0 is still n16 with 22-35 PCG. The GPU at 1e-6 / 1e-8 (cap 600) gives 55 / 51.
+  - The per-iteration AVBD edge-dual updates (t15 has 52 active edges, t5 has 0). The oracle freezes the duals within the step. With them frozen on the GPU the line search is n47 (matches the oracle's 46-47) and the hybrid n54.
+  - The projected-Newton active set. Emptied, t15 is 66 (line search) and 71 (hybrid).
+- The row assembly matches the oracle's exact-membrane blocks term by term.
+- **Not yet measured, and the next step:** a fixed-state equivalence of the GPU trust-region product against the Float64 exact Hessian at the same iterate. It needs a product read-back hook.
+
+**Gate** (cloth-ladder with the hybrid row in 1a and 1b, -gpu-solver, -analytic, contact ladder / gpu / body; HEAD cb241148 plus this): 63 tests, 62 pass, 0 fail, 1 todo (C2's incline item 5).
+
+- **1a (corner-held, no contact):** hybrid Newton per step 4 4 4 4 4 4 4 5 6 8, off the oracle 0.49 um. The forcing row at the same stop gives 4-9.
+- **1b (floor contact):** the hybrid reaches the same rest (heights 0.990-0.998 mm, 0.01 mm/s). It leaves 19 steps unconverged at the 12 cap from tick 13 (the forcing row: 0), with about 10 PCG per iteration on boundary steps and step-end \|g\|/\|mg\| 7.1e-3 against 1.5e-3.
+- That is the resting-contact form of the barrier's model radius (below). **The hybrid is not accepted.** It stays 'off' by default and no scene uses it.
+
+**The barrier's model radius (t25 at kc 100, GAPDIAG).**
+
+- The vertices with the largest \|g\| sit at gaps of 23-91 um, in the barrier's log zone (d < r / 2).
+- Their PSD steps are 30 um to 2.8 mm, mostly tangential, and close the gap by up to 5.7x.
+- The trust region's rejected steps (0.46-0.59 mm) are infeasible or crossing.
+- With k2 = kc r^2 / 4 = 2.5e-5 N m, the equilibrium gap d* = k2 / F is 18-50 um at fold loads of 0.5-1.4 N. The quadratic model is valid only over about the gap, so both methods crawl.
+- C2's rule kc = 2 F_max / r (sphere-32: 9668 N/m) moves d* to about r / 2. That is a physical stiffness, not a tuned constant.
+
+**kc 9668 in the oracle,** on states a GPU run of sphere-32 at kc 9668 produced (scene caps 8 x 200, ticks 5 / 15 / 25):
+
+| state | B | G (switch: alpha = 1 twice) | G, switch also needing the full step to move no vertex more than r / 2 |
+|---|---|---|---|
+| t5 | 9 | 9 | 9 |
+| t15 | 35 | 13 | 12 |
+| t25 | 90 (\|g\| 2.6e-5) | no (\|g\| 2.18 at n149) | 57 (\|g\| 5.6e-2) |
+
+- kc 9668 makes every state converge under B. Barrier hypothesis (a) is confirmed.
+- On t25, the ruled switch fires at n0 / n1 on 1.6-2.6 cm inertial steps (\|g\| 2-3e3). The trust region then crawls with pcg-0 Cauchy steps and 37 rejections in 148 iterations.
+- Requiring the two full steps to lie inside the contact scale (max move <= r / 2, a stated quantity) rescues it. This is a proposal, not landed: the ruled form is unchanged in code.
+- On the kc 100 dumps the same switch gives t5 9 and t15 13. Requiring \|g\| to fall at both steps instead does not rescue t25.

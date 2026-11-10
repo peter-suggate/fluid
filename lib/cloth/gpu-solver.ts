@@ -88,7 +88,7 @@ export interface ClothGPUSolverOptions {
 
 export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
-export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0 });
+export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0, trustRegion: 'off' as 'off' | 'hybrid' });
 
 export interface ClothStatusSlot {
   readonly step: number;
@@ -413,7 +413,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
     pcg: { shared: pcg.shared, maxK1: pcg.maxK1, maxK2: pcg.maxK2, patches: pcg.patches, maxHalo: pcg.maxHalo } };
 }
 
-const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'pcgSolve', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
+const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'pcgSolve', 'nwTrial', 'nwModel', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
 /** With contact: the projected arc's trial moves (after the filter hook, before nwTrial). */
 const CONTACT_NEWTON_KERNELS = ['nwProject'] as const;
 /** With contact: the BDF2 restart's scans of C2's contact state. */
@@ -453,6 +453,7 @@ export class ClothGPUSolver {
     this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
     if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0 && this.newton.velocityTolerance_m_s >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
     if (!(this.newton.forcingMax >= 0 && this.newton.forcingMax < 1)) throw new Error(`Cloth Newton forcingMax must be in [0, 1), got ${this.newton.forcingMax}`);
+    if (this.newton.trustRegion !== 'off' && this.newton.trustRegion !== 'hybrid') throw new Error(`Unknown cloth Newton trustRegion ${String(this.newton.trustRegion)}`);
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
     if (options.contact && !(options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
       throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
@@ -538,7 +539,7 @@ export class ClothGPUSolver {
       ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : [])] });
     // The PCG reductions take two subgroupAdds where the device has subgroups of at least 16 lanes (256 / 16 partials).
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups }) });
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid' }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
@@ -615,6 +616,8 @@ export class ClothGPUSolver {
       this.hooks.filter?.(pass);
       if (this.options.contact) this.run(pass, 'nwProject', W);
       this.run(pass, 'nwTrial', W);
+      // Trust-region iterations (newton.trustRegion 'hybrid'): s.H s of the projected step for the model's decrease.
+      if (o.trustRegion === 'hybrid') this.run(pass, 'nwModel', this.tables.pcg.patches);
       this.run(pass, 'nwChoose', 1);
       this.run(pass, 'nwApply', W);
       this.hooks.afterNewtonStep?.(pass);
@@ -633,10 +636,13 @@ export class ClothGPUSolver {
   /** Newton-PCG control records (harness reads; never a step path): done flag, PCG done, last step, Newton iterations
    * of the last step; then |g|^2 over free DOFs at its first and latest Newton iterate, |m g|^2 for scale (overwritten
    * here), and the step's PCG iterations; then with contact the last Newton iteration's active set (vertices with an
-   * active normal, normals kept, normals released) and the vertices a travel bound held at its accepted trial. */
+   * active normal, normals kept, normals released) and the vertices a travel bound held at its accepted trial; then the
+   * trust region (control + 3: trust-region mode, radius, the last direction's squared preconditioner norm, whether its
+   * solve ended on the boundary) and the step's globalisation counts (control + 4: consecutive full line-search steps,
+   * trust-region iterations, of them rejected, the last ratio rho). */
   async readNewtonControl(): Promise<Float32Array> {
     const L = this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN;
-    const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 48));
+    const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 80));
     out[6] = new Float32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8)[6]! / this.newton.residualTolerance ** 2;
     return out;
   }
