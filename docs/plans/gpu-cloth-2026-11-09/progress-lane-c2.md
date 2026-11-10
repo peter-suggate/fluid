@@ -2091,3 +2091,43 @@ inside its set and penetration-free, both from X and from the iterate. 9 s, orac
 `ogcProjectTrial(v, x, y, alpha)`, and `control: solver.newtonControl` in the bind call in system.ts.
 Until then, rounds stay unlevelled and behave as HEAD. The interim capacities stay until item 2
 clears the strip.
+
+## 2026-11-10 (5) bound: C1's dual-bench states, before/after; item 2 measured on the strip (not landed)
+
+**Dual-bench** (rotating sphere 150^2, states ~/code/me/fluid-scratch/cloth-c1/dual-bench, 5 timed steps
+each, one timing run per variant). Tree: HEAD 0228c3e6 + c022831b's files. "Unbound" is as committed;
+"bound" adds C1's three edits (patch: fluid-scratch/c2/c1-three-on-0228c3e6.patch).
+
+| tick | fenced ms/step median, unbound -> bound | GPU span | redetection rounds levelled / fell back | plane records summed (step 1 -> 5) |
+|---|---|---|---|---|
+| 5 | 213 -> 210 | 198 -> 186 | 2-3 / 0-1 | 48-97 K -> 186-510 K |
+| 16 | 417 -> 430 | 408 -> 380 | 4 / 4 | 0.94-15.1 M -> 0.90-12.6 M |
+| 35 | 580 -> 469 | 572 -> 461 | 4 / 4 | 0.28-0.85 M -> 0.23-0.64 M |
+| 60 | 574 -> 434 | 543 -> 426 | 4 / 4 | 0.42-0.51 M -> 0.39-0.46 M |
+
+- **With sphere contact, every levelled round falls back** (ticks 16, 35 and 60: levelled 4 = fallback 4).
+  One conflicting pair anywhere sends the whole round back to w = 0. With ~10^4 conflicts a step on
+  the sphere, (5) never takes effect there. The time gained at ticks 35 and 60 comes from the step
+  after the first (DAT pairs 2-5x fewer from step 2 on). It is not the level itself.
+- **In free fall (tick 5)** the levels apply, but they summed 2.5-5x more plane records (peak 5.2 a
+  vertex, under 16) and up to 1.7x the truncations, at the same time per step.
+- Neither variant held anything. Statuses 4, 12 and 8204 are in both variants (unchanged).
+- Next for (5): a per-vertex fallback (w_v = 0 for the vertices of conflicting pairs, then a second
+  pass over their pairs) in place of the per-round one.
+
+**Item 2 (relative-motion path bounds, g1, ported onto (5)).** Patch: fluid-scratch/c2/item2-on-c022831b.patch.
+- **Oracle:** 16/16. The bounds never exceed the sampled closest approach, and the levelled ladder
+  test stays penetration-free with the bounds in the pairing.
+- **Soundness fix found on the GPU.** The bounds take world-straight paths, but a vertex moving with
+  the solid runs straight in the solid's frame, up to sigma_v off the world chord. Each side's bound
+  now subtracts its strayOf(i, false). Without that term, the 16^2 rotating sphere had a vertex in
+  the solid at tick 37 (1 run). With it the sphere passes (1 run).
+- **No effect on the strip:** DAT pairs at tick 1 went 10274 -> 10233, and plane records stayed at
+  40.9 a vertex. The free twin is the same (58-190 a vertex), and holds for overflow are 231-407
+  (run to run). So the strip's diagnosis above was wrong. Its pairs are not co-moving neighbours
+  whose paths stay apart; they are within the two envelopes' sum already at X (envelopes 6-40 mm
+  while the strip contracts from 1.5x), so no path bound can drop them. Item 2 is not landed: it
+  removes nothing measurable.
+- **The strip needs** envelopes or records sized to the mesh, not to the step's motion: either the
+  envelope from the relative motion of each pair's own vertices, or records merged per vertex
+  (near-parallel half-spaces). This is the next design item.
