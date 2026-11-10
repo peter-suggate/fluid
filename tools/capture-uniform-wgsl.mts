@@ -5,6 +5,7 @@
 // after a WGSL edit: a parse error costs nothing here.
 // Usage: node --import tsx tools/capture-uniform-wgsl.mts [scene] [outDir]
 //   env PAGE_POOL=<json> (the scene's page pool record, e.g. {"blocks":24,"permute":7});
+//   env VALUES=<json> (method values over the app defaults, e.g. {"collarSpread":"liquid"});
 //   env FRAMES=n (frames to encode; the mock's zero readbacks stop after frame 1's encode,
 //   reported as "did not converge ... 0 cycles" — expected).
 // Naga quirks that Dawn accepts: "already in scope", "read-write storage textures prior to MSL 1.2".
@@ -57,7 +58,7 @@ if(process.env.PAGE_POOL)scene.fluid.pagePool=JSON.parse(process.env.PAGE_POOL);
 const t0=performance.now();
 if(process.env.METHOD&&process.env.METHOD!=="narrow-band")throw new Error(`Unknown METHOD ${process.env.METHOD}`);
 const method=uniformNarrowBandMethod;
-const solver:any=await method.createSolverAsync!(device,scene,"balanced",{...method.appDefaults},undefined,()=>{});
+const solver:any=await method.createSolverAsync!(device,scene,"balanced",{...method.appDefaults,...(process.env.VALUES?JSON.parse(process.env.VALUES):{})},undefined,()=>{});
 console.log(JSON.stringify({modules,pipelines:pipes.length,ms:performance.now()-t0}));
 const by=new Map<string,{n:number,bytes:number,label:string}>();for(const [id,label,bytes] of pipes){const k=String(id);const e=by.get(k)??{n:0,bytes,label};e.n++;by.set(k,e);}
 const rows=[...by].map(([id,e])=>({id,...e,cost:e.n*e.bytes})).sort((a,b)=>b.cost-a.cost);let tot=0;for(const r of rows)tot+=r.cost;

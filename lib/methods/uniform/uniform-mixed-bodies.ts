@@ -5,6 +5,8 @@ import {UNIFORM_MIXED_COUNTED,uniformMixedCountedEntriesWGSL,uniformMixedTopolog
 import {uniformMixedSolidWGSL,type UniformMixedSolid,type UniformMixedSolidPool} from "./uniform-mixed-solid.wgsl";
 import {UNIFORM_LIVE_KEY_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
 import {GPU_RIGID_BODY_CAPACITY} from "../../core/rigid-capacity";
+import {SCENE_SHAPE_TABLE} from "../../core/scene-shape";
+import {uniformBodyTileBoundWGSL} from "./uniform-body-tile-bound";
 
 /** The rigid coupling kernel (couple) and its per-body face fraction, over
  * the solid library and the helpers its module defines: umBodyPressure,
@@ -183,6 +185,7 @@ fn umBodyOwnerWet(o:UMOwner)->f32{
 // and torque arm are evaluated. A positive-face sample biases impact forces
 // and spins a vertically falling sphere toward the positive grid diagonal.
 ${uniformMixedCoupleWGSL}
+${uniformBodyTileBoundWGSL}
 fn umBodyMarkTile(tile:u32){
  if(!umTileLive(tile)){return;}
  // bodyTiles is a bit per tile key (the census's body words).
@@ -195,11 +198,18 @@ fn umBodyMarkTile(tile:u32){
   let travel=length(b.linearVelocity.xyz)*bodyHorizon.x;
   if(distance(clamp(centre,low,high),centre)>radius+travel+cell){continue;}
   // Within the ball: the shape's own 1-Lipschitz distance bounds every point
-  // of the tile below by its centre's less the half diagonal. The surface
-  // moves at most (|v| + |w| radius) over the horizon. An inverted shape's
-  // solid lies outside its ball, so the ball alone decides.
+  // of the tile below by its centre's less the half diagonal. A box (cut or
+  // not: a cut only removes solid) also has the boxes' separating-axis gap
+  // (umBodyBoxTileGap, uniform-body-tile-bound.ts), a lower bound exact
+  // beside a face, where the half diagonal understates the gap by up to
+  // 1.46 h; the larger lower bound decides. The surface moves at most
+  // (|v| + |w| radius) over the horizon. An inverted shape's solid lies
+  // outside its ball, so the ball alone decides.
   let margin=(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*radius)*bodyHorizon.x+cell;
-  if(b.positionShape.w<0.0||umBodyDistance(i,middle)-half<=margin){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
+  if(b.positionShape.w<0.0){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
+  var lower=umBodyDistance(i,middle)-half;
+  if(lower<=margin&&i32(round(b.positionShape.w))==${SCENE_SHAPE_TABLE.box.code}){lower=max(lower,umBodyBoxTileGap(i,middle,2.0*h));}
+  if(lower<=margin){atomicOr(&bodyTiles[tile/32u],1u<<(tile%32u));return;}
  }
 }
 ${this.pool?/* wgsl */`@compute @workgroup_size(64) fn markTiles(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){

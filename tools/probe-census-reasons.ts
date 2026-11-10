@@ -6,9 +6,19 @@
  *   join:  the tile holds particles, or lies 1, 2 or 3+ tiles (Chebyshev) from one that does.
  * Also the particles, the h tiles and the pressure band, and the layout's churn: h tiles
  * entering and leaving between the last two steps.
+ * Per body (on the bodies' poses at the step): each solid tile by how it came to be solid (solidBody.*):
+ *   <boat>.<hull|blade|other>.<cut|inside|motion|ring>.<wet|dry|closed>: cut, the body's shape crosses
+ *   the tile (sampled on a 5^3 lattice); inside, the tile lies wholly in it; motion, the census marked the
+ *   tile for a body (its contact record) that does not reach it (the motion bound alone); ring, neither
+ *   (a promoted neighbour); static.* where no body is within 8 h. Join tiles: also body-marked or cut
+ *   (join.body.*). y histograms (tile rows) of join tiles and of particle tiles with zero heat (yHistogram).
+ * --report-at=12,300: report after each listed step (default: the last). --summary: one line a report,
+ *   "SUMMARY {label, scene, step, fine, particles, particleTiles, bandTiles, drift}", for A/B runs
+ *   (tools/gate-paddleboats-collar.ts); --label=NAME tags it. --values-file=PATH reads values from a file.
  * node --import tsx tools/probe-census-reasons.ts [--scene=paddleboats] [--steps=300] [--values={...}]
  * Run through tools/gpu/fluid-gpu-run.sh check. */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import "../lib/methods";
 import { createUniformSolver, readUniformFields, readUniformLiveAddress, withUniformDevice } from "../tests/helpers/uniform-geometric";
@@ -19,10 +29,15 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import type { MethodParamValues } from "../lib/core/method-contract";
 import { UNIFORM_STAGE_REASON } from "../lib/methods/uniform/uniform-stage-grids";
 import { mooredMotorBodies } from "./moored-motor-bodies";
+import { quaternionInverseRotate, type RigidBodyState } from "../lib/core/rigid-body";
+import { sceneShape } from "../lib/core/scene-shape";
 
 const option = (name: string) => process.argv.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 const sceneId = option("scene") ?? "paddleboats", steps = Number(option("steps") ?? 300);
-const values: MethodParamValues = JSON.parse(option("values") ?? "{}");
+const values: MethodParamValues = { ...JSON.parse(option("values-file") ? readFileSync(option("values-file")!, "utf8") : "{}"), ...JSON.parse(option("values") ?? "{}") };
+const reportAt = new Set((option("report-at") ?? String(steps)).split(",").map(Number));
+const summaryOnly = process.argv.includes("--summary"), label = option("label") ?? "";
+for (const s of reportAt) if (!(Number.isInteger(s) && s >= 1 && s <= steps)) throw new Error(`--report-at step ${s} is outside 1..${steps}`);
 process.env.WEBGPU_NODE_MODULE ??= resolve("node_modules/webgpu/index.js");
 paceDawnEventPolling();
 const definition = getSceneDefinition(sceneId), scene = structuredClone(sceneDocument(definition));
@@ -49,11 +64,15 @@ await withUniformDevice("census reasons probe", async device => {
   const churnSteps = Number(option("churn") ?? 0), churn: Record<string, number> = {}, lastLeft = new Map<number, number>(), lastEntered = new Map<number, number>();
   let changedFrames = 0, previousReasons: Uint32Array | undefined;
   const readReasons = async () => new Uint32Array(await read(internal.mixedDynamic.reasons.buffer, internal.mixedDynamic.reasons.offset, 4 * n));
+  const frame = internal.mixedFrame as unknown as { requestNarrowBandVolumeProbe?(): void };
   for (let step = 1; step <= steps; step++) {
-    const watching = churnSteps > 0 && step > steps - churnSteps;
-    if (step === steps || (watching && !before)) { before ??= await widths(); internal.mixedFrame.setLayoutViews(true); }
+    const watching = churnSteps > 0 && step > steps - churnSteps, reporting = reportAt.has(step);
+    if (reporting || (watching && !before)) { if (watching) before ??= await widths(); else before = await widths(); internal.mixedFrame.setLayoutViews(true); }
+    // The volume measurement is a diagnostic a step encodes only when asked.
+    if (reporting) frame.requestNarrowBandVolumeProbe?.();
     assert.ok(solver.advanceTo(step * scene.numerics.fixedDt_s, poseBodies(step * scene.numerics.fixedDt_s)));
     await solver.awaitFrameCompletion();
+    if (reporting) await report(step, poseBodies(step * scene.numerics.fixedDt_s));
     if (watching && step < steps) {
       const now = await widths(), reasonsNow = await readReasons(); let changed = 0;
       for (let t = 0; t < n; t++) {
@@ -68,6 +87,8 @@ await withUniformDevice("census reasons probe", async device => {
     }
   }
   if (churnSteps > 0) console.log(JSON.stringify({ churnSteps: churnSteps - 1, changedFrames, churn: Object.fromEntries(Object.entries(churn).sort((a, b) => a[0].localeCompare(b[0]))) }, null, 1));
+  solver.destroy();
+  async function report(step: number, bodies: readonly RigidBodyState[]): Promise<void> {
   await solver.awaitFrameCompletion();
   const stats = await solver.readStats();
   const after = await widths();
@@ -84,6 +105,24 @@ await withUniformDevice("census reasons probe", async device => {
   const address = await readUniformLiveAddress(device, solver);
   const { nx, ny, nz } = solver.info, tx = Math.ceil(nx / 4), ty = Math.ceil(ny / 4), tz = Math.ceil(nz / 4);
   const keyOf = (x: number, y: number, z: number) => x < 0 || y < 0 || z < 0 || x >= tx || y >= ty || z >= tz ? -1 : (() => { const k = uniformTileKey(address, x, y, z); return k >= 0 && k < n && uniformTileLive(address, k) ? k : -1; })();
+  // Tile (x, y, z) spans lattice cells [4x, 4x + 4); the lattice's corner is the tank's, centred in x and z, floor at y 0.
+  const world = (lx: number, ly: number, lz: number) => ({ x: lx * h - 0.5 * scene.container.width_m, y: ly * h, z: lz * h - 0.5 * scene.container.depth_m });
+  const shapes = bodies.map(b => ({ id: b.description.id, kind: sceneShape(b.description.shape), d: b.description.dimensions_m, at: b.position_m, q: b.orientation }));
+  const boatOf = (id: string) => /^(.*?)-(left|right)-paddle-\d+$/.exec(id)?.[1] ?? id, partOf = (id: string) => /-paddle-\d+$/.test(id) ? "blade" : /^paddleboat-\d+$/.test(id) ? "hull" : "other";
+  // The nearest body to tile (x, y, z) and how its shape meets the tile (a 5^3 lattice of points on it), in h.
+  const bodyAt = (x: number, y: number, z: number) => {
+    let best: { id: string; least: number; most: number } | undefined;
+    for (const b of shapes) {
+      let least = Infinity, most = -Infinity;
+      for (let c = 0; c <= 4; c++) for (let e = 0; e <= 4; e++) for (let a = 0; a <= 4; a++) {
+        const p = world(4 * x + a, 4 * y + e, 4 * z + c);
+        const v = b.kind.distance_m(b.d, quaternionInverseRotate(b.q, { x: p.x - b.at.x, y: p.y - b.at.y, z: p.z - b.at.z })) / h;
+        least = Math.min(least, v); most = Math.max(most, v);
+      }
+      if (!best || least < best.least) best = { id: b.id, least, most };
+    }
+    return best;
+  };
   // Particle tiles.
   const source = solver.particleSource!, h = scene.voxelDomain.finestCellSize_m;
   const live = new Uint32Array(await read(source.liveCount!.buffer, source.liveCount!.byteOffset ?? 0, 4))[0]!;
@@ -114,6 +153,7 @@ await withUniformDevice("census reasons probe", async device => {
   const criteria = ["shape", "thin", "strain", "rotation", "impact", "approach"];
   const triggers = (t: number) => activity ? criteria.filter((_, c) => ((activity[2 * t + 1]! >>> (16 + c)) & 1) === 1) : [];
   const counts: Record<string, number> = {}, add = (k: string) => { counts[k] = (counts[k] ?? 0) + 1; };
+  const yHistogram: Record<string, Record<number, number>> = {}, row = (k: string, y: number) => { const r = yHistogram[k] ??= {}; r[y] = (r[y] ?? 0) + 1; };
   if (activity) for (let z = 0; z < tz; z++) for (let y = 0; y < ty; y++) for (let x = 0; x < tx; x++) {
     const t = keyOf(x, y, z); if (t < 0) continue;
     const heat = heatOf(t), fired = triggers(t);
@@ -121,6 +161,7 @@ await withUniformDevice("census reasons probe", async device => {
     if (fired.length) add(`trigger.any${fired.length === 1 ? "." + fired[0] + ".only" : ""}`);
     if (particleTiles.has(t)) add(`particleTile.heat.${heat >= 2 ? "2" : heat > 1 ? "1-2" : heat > 0 ? "0-1" : "0"}${fired.length ? ".triggered" : ""}`);
     // A tile of heat 0 holds samples as the hot tiles' collar (target heat over 0, spread from a neighbour) or as heat they carried in.
+    if (particleTiles.has(t) && heat <= 0) row(`particleHeat0.${targetOf(t) > 0 ? "collar" : "carried"}`, y);
     if (particleTiles.has(t) && heat <= 0) { const w = sampleHeat.get(t)!; add(`particleTile.heat.0.${targetOf(t) > 0 ? "collar" : "carried"}.sample${w > 1 ? "1-2" : w >= 1 ? "1" : w > 0.5 ? "0.5-1" : "0-0.5"}`); }
   }
   // --terms: umSurfaceDisplacement's four terms (in h) at every h tile the shape criterion triggered,
@@ -191,6 +232,18 @@ await withUniformDevice("census reasons probe", async device => {
       add(`solid.${body(t) ? "body" : "static"}${capacity(t) === 0 ? ".closed" : ""}`);
       if (!active(t)) add(`solid.${cut(t) ? "cut" : "uncut"}.corner.${bucket(cornerMin(x, y, z))}.vertex.${bucket(vertexMin(x, y, z))}`);
       if (!active(t) && cut(t)) add(`solid.cutNeighbourAt.y${y}.cap${capacity(t) === 0 ? 0 : capacity(t) === 1 ? 1 : "p"}${body(t) ? ".body" : ""}${wet(t) ? ".wet" : ""}`);
+      const near = bodyAt(x, y, z), state = capacity(t) === 0 ? "closed" : wet(t) ? "wet" : "dry";
+      if (!near || near.least > 8) add(`solidBody.static.${cut(t) ? "cut" : "ring"}.${state}`);
+      else {
+        const how = near.most <= 0 ? "inside" : near.least <= 0 ? "cut" : body(t) ? "motion" : "ring";
+        add(`solidBody.${boatOf(near.id)}.${partOf(near.id)}.${how}.${state}`);
+        if (how === "motion" || how === "ring") add(`solidBody.${partOf(near.id)}.${how}.gap.${near.least < 1 ? "lt1" : near.least < 2 ? "lt2" : near.least < 4 ? "lt4" : "lt8"}`);
+      }
+    }
+    if (reason === "join") {
+      row("join", y);
+      const near = bodyAt(x, y, z), cutByBody = !!near && near.least <= 0 && near.most > 0;
+      add(`join.body.${body(t) ? "marked" : "unmarked"}${cutByBody ? ".cut" : near && near.least <= 4 ? ".within4h" : ""}${wet(t) ? "" : ".dry"}`);
     }
     if (reason === "join" || reason === "crossing" || reason === "travel" || reason === "closure") {
       let d = 9;
@@ -200,8 +253,9 @@ await withUniformDevice("census reasons probe", async device => {
       add(`${reason}.particles${d === 9 ? "3+" : d}${wet(t) ? "" : ".dry"}`);
     }
   }
-  console.log(JSON.stringify({ scene: sceneId, steps, fine, infoFine: solver.info.uniformMixedFineTiles, particles: live, particleTiles: particleTiles.size,
+  console.log(`SUMMARY ${JSON.stringify({ label, scene: sceneId, step, fine, particles: live, particleTiles: particleTiles.size, bandTiles: stats.uniformPressureBandTiles, drift: stats.volumeDrift })}`);
+  if (!summaryOnly) console.log(JSON.stringify({ scene: sceneId, steps: step, fine, infoFine: solver.info.uniformMixedFineTiles, particles: live, particleTiles: particleTiles.size,
     bandTiles: stats.uniformPressureBandTiles, churn: { entered, left }, drift: stats.volumeDrift,
-    reasons: Object.fromEntries(Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))) }, null, 1));
-  solver.destroy();
+    reasons: Object.fromEntries(Object.entries(counts).sort((a, b) => a[0].localeCompare(b[0]))), yHistogram }, null, 1));
+  }
 });

@@ -1,5 +1,6 @@
 import {UNIFORM_SURFACE_TRANSPORT_ERROR_H} from "./uniform-surface-transport.wgsl";
 import { UNIFORM_STAGE_IMPORTANCE as I } from "./uniform-stage-grids";
+import { narrowBandCollarSpreadWGSL, type NarrowBandCollarSpread } from "./uniform-narrow-band-collar";
 
 /** EXNB-style heat, driven by the existing resolution/error/contact census.
  * Heat is dimensionless; cooling is per second, not per accepted step. A
@@ -41,7 +42,8 @@ fn nbActivityTriggered(t:u32,criteria:u32)->bool{
  return changing&&(criteria&2u)!=0u;
 }`;}
 export const NARROW_BAND_ACTIVITY_WORDS_PER_TILE = 11;
-export const narrowBandActivityWGSL = /* wgsl */`
+/** The activity passes under collarSpread (uniform-narrow-band-collar.ts). */
+export const narrowBandActivityWGSLFor = (spread: NarrowBandCollarSpread): string => /* wgsl */`
 const NB_ACTIVITY_SCORES=NB_BAND_SEAM+NB_BAND_TILES;
 const NB_ACTIVITY_HEAT=NB_ACTIVITY_SCORES+2u*NB_BAND_TILES;
 const NB_ACTIVITY_TARGET=NB_ACTIVITY_HEAT+NB_BAND_TILES;
@@ -126,14 +128,11 @@ fn nbTransferBlend(q:vec3f,depth:f32,mass:f32)->f32{
  for(var j=gid.x;j<umLiveTileCount();j+=64u*groups.x){
   let t=umLiveTile(j);
   let p=vec3i(umTileCoord(t));var heat=0.0;
-  for(var z=-1;z<=1;z++){for(var y=-1;y<=1;y++){for(var x=-1;x<=1;x++){
-   let q=p+vec3i(x,y,z);if(!umTilePresent(q)){continue;}
-   let value=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_HEAT+umTileAt(vec3u(q))]));
-   heat=max(heat,value*select(0.5,1.0,x==0&&y==0&&z==0));
-  }}}
+  ${narrowBandCollarSpreadWGSL(spread,I.wet)}
   let old=bitcast<f32>(atomicLoad(&bins[NB_ACTIVITY_TARGET+t]));
   atomicStore(&bins[NB_ACTIVITY_NEW+t],u32(old==0.0&&heat>0.0));
   atomicStore(&bins[NB_ACTIVITY_TARGET+t],bitcast<u32>(heat));
  }
 }
 `;
+export const narrowBandActivityWGSL = narrowBandActivityWGSLFor("neighbours");

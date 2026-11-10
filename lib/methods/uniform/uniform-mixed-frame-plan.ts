@@ -12,12 +12,17 @@ import {UNIFORM_STAGE_CERTIFICATE} from "./uniform-stage-grids";
 import {uniformRegionHeatWGSL} from "./uniform-region-heat";
 import type {UniformPagePool} from "./uniform-page-pool";
 import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROUPS,uniformLiveListsWGSL} from "./uniform-live-lists";
+import {FRAME_PLAN_WINDOW,framePlanPass,framePlanWindowGroups,uniformFramePlanWindowWGSL,type FramePlanPass} from "./uniform-frame-plan-window";
 
 /** Owner entries: one lane per owner of every tier, GPU-counted. */
 const counted:readonly string[]=["seed","localSpeed"];
 /** The entries of the support census and of the certificate, in launch order. */
 const SUPPORT_ENTRIES:readonly string[]=["seed","dilate0","dilate1","dilate2"];
 const CERTIFICATE_ENTRIES:readonly string[]=["localSpeed","tileError","spread0","spread1","spread2","coarseBits","coarseBlocks","certify"];
+/** framePlanPass "window": the same passes' launches (uniform-frame-plan-window). */
+const WINDOW_SUPPORT_ENTRIES:readonly string[]=["seed","supportWindow"];
+const WINDOW_CERTIFICATE_ENTRIES:readonly string[]=["localSpeed","certifySpread","certifyTiles"];
+const WINDOW_ENTRIES:readonly string[]=["supportWindow","certifySpread","certifyTiles"];
 const PLAN_PASS:GPUComputePassDescriptor={label:"Uniform shared frame plan"},CERTIFICATE_PASS:GPUComputePassDescriptor={label:"Uniform local speed certificate"};
 /** The support policy of an encode given none. */
 const DEFAULT_POLICY:{fineReach:number;shellReach:number;twoLevel:boolean;shellOnly:boolean}={fineReach:RESIDENCY_STAGES[1].core,shellReach:1,twoLevel:true,shellOnly:true};
@@ -57,12 +62,17 @@ export class UniformMixedFramePlan {
    * each pass's launches: built at the first encode and replayed. */
   private policyWords?:Uint32Array<ArrayBuffer>;
   private stepWords?:Float32Array<ArrayBuffer>;
-  private launches?:{readonly support:readonly PlanLaunch[];readonly held:readonly PlanLaunch[];readonly certificate:readonly PlanLaunch[]};
+  private launches?:{readonly support:readonly PlanLaunch[];readonly held:readonly PlanLaunch[];readonly certificate:readonly PlanLaunch[];
+    /** framePlanPass "window": its support (a policy past its halo takes support/held) and certificate. */
+    readonly window?:{readonly support:readonly PlanLaunch[];readonly held:readonly PlanLaunch[];readonly certificate:readonly PlanLaunch[]}};
+  /** The support dilation and certificate tail (framePlanPass). */
+  readonly pass:FramePlanPass;
   private certificateView?:{readonly buffer:GPUBuffer;readonly offset:number};
   /** pool: the frame's page pool, whose resident list the per-tile entries stride. */
   constructor(private readonly device:GPUDevice,readonly ownership:UniformMixedOwnership,private readonly pool:UniformPagePool,volume:GPUTexture,phi:GPUTexture,
     /** The extended field every characteristic samples, valid at encodeCertificate. */
-    extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false,private readonly solid?:UniformMixedSolid){
+    extended:GPUTexture,extendedNegative:GPUBuffer,directionalCertificate=false,private readonly surfaceOnly=false,private readonly solid?:UniformMixedSolid,pass:FramePlanPass="chain"){
+    this.pass=framePlanPass(pass);
     if(!directionalCertificate)throw new Error("The mixed frame plan certifies signed per-axis reach only");
     if(ownership.capacity.tiles!==512*pool.layout.blocks)throw new Error(`Mixed frame plan: ${ownership.capacity.tiles} tile keys are not the page pool's ${pool.layout.blocks} blocks`);
     this.params=device.createBuffer({label:"Uniform shared support policy",size:32,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
@@ -433,20 +443,20 @@ var<workgroup> certifyBases:array<u32,2>;
  if(fine){atomicStore(&umSupport[(4u+list)*UM_TILES+16u+certifyBases[list-1u]+local],tile);}
  }
 }
-`,counted)});
+${this.pass==="window"?uniformFramePlanWindowWGSL(this.surfaceOnly):""}`,counted)});
     const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
     if(errors.length)throw new Error(errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n"));
     const layout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources]});
     const speedLayout=this.solid?this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources,this.solid.tileLayout]}):layout;
     const seedLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.ownership.bindLayout,this.resources,this.extendedResources,this.heldResources]});
-    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","tileError","spread0","spread1","spread2","coarseBits","coarseBlocks","certify"].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout:entryPoint==="seed"?seedLayout:entryPoint==="localSpeed"?speedLayout:layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
+    await Promise.all(["seed","dilate0","dilate1","dilate2","localSpeed","tileError","spread0","spread1","spread2","coarseBits","coarseBlocks","certify",...(this.pass==="window"?WINDOW_ENTRIES:[])].map(async entryPoint=>{this.pipelines.set(entryPoint,await uniformDetailPipeline(this.device,this.ownership,{layout:entryPoint==="seed"?seedLayout:entryPoint==="localSpeed"?speedLayout:layout,compute:{module,entryPoint,constants:{umDispatchX:this.ownership.dispatchX,...(counted.includes(entryPoint)?{umCountedJobs:entryPoint==="seed"?UNIFORM_MIXED_COUNTED.residentAll:UNIFORM_MIXED_COUNTED.all}:{})}}}));}));
     this.pipelines.set("seedHeld",await uniformDetailPipeline(this.device,this.ownership,{layout:seedLayout,compute:{module,entryPoint:"seed",constants:{umDispatchX:this.ownership.dispatchX,umCountedJobs:UNIFORM_MIXED_COUNTED.residentAll,planRetain:1}}}));
   }
   /** retain: the advance's own encodes after the frame head's heat encode
    * (seedHeld keeps COLD tiles' flags). Any other encode (a remap, an edit,
    * a host extension) seeds every tile and ends every held stretch. */
   encode(encoder:GPUCommandEncoder,policy=DEFAULT_POLICY,retain=false):void{
-    if(this.pipelines.size!==13)throw new Error("Mixed frame plan is not initialized");
+    if(this.pipelines.size!==(this.pass==="window"?16:13))throw new Error("Mixed frame plan is not initialized");
     if(!this.heldGroup)throw new Error("Mixed frame plan: no region work tiers are attached (attachHeat)");
     const s=this.supportSettings,words=this.policyWords??=new Uint32Array(4);
     s[0]=policy.fineReach;s[1]=policy.shellReach;s[2]=!policy.twoLevel?3:!policy.shellOnly?2:0;s[3]=0;
@@ -459,7 +469,9 @@ var<workgroup> certifyBases:array<u32,2>;
     const pass=encoder.beginComputePass(PLAN_PASS);
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
     pass.setBindGroup(3,this.heldGroup);
-    this.dispatch(pass,retain?this.launchesOf().held:this.launchesOf().support);
+    // The window holds fineReach + shellReach <= its halo; a wider policy takes the chain.
+    const launches=this.launchesOf(),window=launches.window&&s[0]+s[1]<=FRAME_PLAN_WINDOW.supportHalo?launches.window:launches;
+    this.dispatch(pass,retain?window.held:window.support);
     pass.end();
   }
   /** The advance's tail: the mid-frame plan's support planes stand for the
@@ -485,7 +497,7 @@ var<workgroup> certifyBases:array<u32,2>;
     pass.setBindGroup(0,this.ownership.bindGroup);pass.setBindGroup(1,this.group.group);pass.setBindGroup(2,this.extendedGroup.group);
     if(this.solid)pass.setBindGroup(3,this.solid.tileGroup);
     // Certified consumers read the list counts themselves (umCertifiedJobCount).
-    this.dispatch(pass,this.launchesOf().certificate);
+    const launches=this.launchesOf();this.dispatch(pass,(launches.window??launches).certificate);
     pass.end();
   }
   private dispatch(pass:GPUComputePassEncoder,launches:readonly PlanLaunch[]):void{
@@ -509,10 +521,15 @@ var<workgroup> certifyBases:array<u32,2>;
       const tiles=this.ownership.capacity.tiles;
       if(entry==="coarseBlocks")return {pipeline,counted:false,x:Math.min(UNIFORM_LIVE_LANE_GROUPS,Math.ceil(this.ownership.capacity.address.blocks/64)),y:1};
       if(entry==="coarseBits"||entry==="certify")return {pipeline,counted:false,x:Math.min(UNIFORM_LIVE_GROUP_GROUPS,tiles/64),y:1};
+      // The window entries: a workgroup a half page of the pool, striding past maxGroups.
+      if(WINDOW_ENTRIES.includes(entry))return {pipeline,counted:false,x:framePlanWindowGroups(tiles/512),y:1};
       return {pipeline,counted:false,x:Math.min(UNIFORM_LIVE_KEY_GROUPS,tiles/64),y:1};
     };
     const support=SUPPORT_ENTRIES.map(of);
-    return {support,held:[{...support[0]!,pipeline:this.pipelines.get("seedHeld")!},...support.slice(1)],certificate:CERTIFICATE_ENTRIES.map(of)};
+    const held=(launches:readonly PlanLaunch[])=>[{...launches[0]!,pipeline:this.pipelines.get("seedHeld")!},...launches.slice(1)];
+    const windowSupport=this.pass==="window"?WINDOW_SUPPORT_ENTRIES.map(of):undefined;
+    return {support,held:held(support),certificate:CERTIFICATE_ENTRIES.map(of),
+      ...(windowSupport?{window:{support:windowSupport,held:held(windowSupport),certificate:WINDOW_CERTIFICATE_ENTRIES.map(of)}}:{})};
   }
   destroy():void{this.params.destroy();this.coarse.destroy();this.held.destroy();this.updateErrors.destroy();}
 }

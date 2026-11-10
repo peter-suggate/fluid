@@ -1,0 +1,395 @@
+{
+ "source": "tools/probe-reservoir-bulk.ts --dispatches on the moored paddleboats (2026-11-10T03:23Z, cell 0.005, 300 steps, before the direct BULK16 launches): the last step's launches by pass label",
+ "dispatchesByLabel": {
+  "(unlabelled pass)": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1
+  },
+  "BULK16 publish live slots": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1
+  },
+  "BULK16 reclaim quarantine": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1
+  },
+  "Fluid particle display energy": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "GPU resident rigid-body integration and contacts": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1
+  },
+  "NB-FLIP surface pressure authority": {
+   "direct": 15,
+   "indirect": 1,
+   "workgroups": 7848
+  },
+  "Narrow-band FLIP activity": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 2048
+  },
+  "Narrow-band FLIP advectParticles": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1024
+  },
+  "Narrow-band FLIP coarse retirement": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 3072
+  },
+  "Narrow-band FLIP crossing search": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 2048
+  },
+  "Narrow-band FLIP delta": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 4096
+  },
+  "Narrow-band FLIP page words": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 32
+  },
+  "Narrow-band FLIP particle placement": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 2049
+  },
+  "Narrow-band FLIP particle slabs": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 2049
+  },
+  "Narrow-band FLIP particle sort": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1024
+  },
+  "Narrow-band FLIP regional air update": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 2048
+  },
+  "Narrow-band FLIP seed": {
+   "direct": 9,
+   "indirect": 0,
+   "workgroups": 6147
+  },
+  "Narrow-band FLIP surface arena search": {
+   "direct": 7,
+   "indirect": 0,
+   "workgroups": 7168
+  },
+  "Narrow-band FLIP surface canonical far metric": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1024
+  },
+  "Narrow-band FLIP surface canonical metric and publication": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 3072
+  },
+  "Narrow-band FLIP surface canonical view": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1024
+  },
+  "Narrow-band FLIP surface reconstruction": {
+   "direct": 7,
+   "indirect": 0,
+   "workgroups": 7168
+  },
+  "Narrow-band FLIP transfer": {
+   "direct": 7,
+   "indirect": 0,
+   "workgroups": 10240
+  },
+  "Uniform 16h work evidence page claims": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 32
+  },
+  "Uniform BULK16 page transfer": {
+   "direct": 8,
+   "indirect": 0,
+   "workgroups": 386
+  },
+  "Uniform block neighbours": {
+   "direct": 4,
+   "indirect": 0,
+   "workgroups": 12
+  },
+  "Uniform bulk tier selection": {
+   "direct": 1,
+   "indirect": 1,
+   "workgroups": 256
+  },
+  "Uniform cold freeze": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 293
+  },
+  "Uniform detail h slot claim": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 2325
+  },
+  "Uniform detail h slot init": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 96
+  },
+  "Uniform detail h slot release": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 5
+  },
+  "Uniform detail ring enter": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 768
+  },
+  "Uniform dynamic ownership census": {
+   "direct": 13,
+   "indirect": 0,
+   "workgroups": 7787
+  },
+  "Uniform dynamic ownership page words": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 32
+  },
+  "Uniform dynamic ownership residency": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 257
+  },
+  "Uniform frame bricks": {
+   "direct": 6,
+   "indirect": 0,
+   "workgroups": 1838
+  },
+  "Uniform frame extension": {
+   "direct": 15,
+   "indirect": 0,
+   "workgroups": 9472
+  },
+  "Uniform live block copy": {
+   "direct": 7,
+   "indirect": 0,
+   "workgroups": 1792
+  },
+  "Uniform local speed certificate": {
+   "direct": 8,
+   "indirect": 0,
+   "workgroups": 5637
+  },
+  "Uniform mixed 4h sampling cache": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "Uniform mixed all-4h solid record": {
+   "direct": 5,
+   "indirect": 0,
+   "workgroups": 4368
+  },
+  "Uniform mixed body forces": {
+   "direct": 4,
+   "indirect": 0,
+   "workgroups": 14056
+  },
+  "Uniform mixed geometric fill": {
+   "direct": 11,
+   "indirect": 0,
+   "workgroups": 26368
+  },
+  "Uniform mixed global surface volume": {
+   "direct": 17,
+   "indirect": 0,
+   "workgroups": 40524
+  },
+  "Uniform mixed hanging fine taps": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 13312
+  },
+  "Uniform mixed layout build": {
+   "direct": 12,
+   "indirect": 0,
+   "workgroups": 2311
+  },
+  "Uniform mixed momentum": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 2048
+  },
+  "Uniform mixed phi resolve": {
+   "direct": 5,
+   "indirect": 0,
+   "workgroups": 20480
+  },
+  "Uniform mixed phi twins": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 128
+  },
+  "Uniform mixed pressure bulk faces": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1024
+  },
+  "Uniform mixed pressure project": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1480
+  },
+  "Uniform mixed pressure rhs": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1480
+  },
+  "Uniform mixed remap": {
+   "direct": 9,
+   "indirect": 0,
+   "workgroups": 8448
+  },
+  "Uniform mixed remap adopt": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "Uniform mixed remap publish": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 2048
+  },
+  "Uniform mixed rigid body tiles": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "Uniform mixed rigid coupling": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 4096
+  },
+  "Uniform mixed solid record of claimed blocks": {
+   "direct": 4,
+   "indirect": 0,
+   "workgroups": 8704
+  },
+  "Uniform mixed solid simulation widths": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "Uniform mixed surface advect": {
+   "direct": 9,
+   "indirect": 0,
+   "workgroups": 15360
+  },
+  "Uniform mixed surface advect deferred": {
+   "direct": 12,
+   "indirect": 0,
+   "workgroups": 12288
+  },
+  "Uniform mixed transfer to pressure": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 5576
+  },
+  "Uniform mixed transfer to simulation": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 5576
+  },
+  "Uniform page initialise": {
+   "direct": 4,
+   "indirect": 0,
+   "workgroups": 4096
+  },
+  "Uniform page pool commit": {
+   "direct": 8,
+   "indirect": 0,
+   "workgroups": 4119
+  },
+  "Uniform page tile words": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 32
+  },
+  "Uniform pressure arena marks and rows": {
+   "direct": 8,
+   "indirect": 0,
+   "workgroups": 9860
+  },
+  "Uniform pressure arena projection": {
+   "direct": 5,
+   "indirect": 0,
+   "workgroups": 9025
+  },
+  "Uniform pressure arena solve": {
+   "direct": 107,
+   "indirect": 72,
+   "workgroups": 79749
+  },
+  "Uniform pressure arena unmark": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "Uniform pressure arena verdict": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 1
+  },
+  "Uniform pressure root owners": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  },
+  "Uniform region dynamics classify": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 293
+  },
+  "Uniform region dynamics publish": {
+   "direct": 3,
+   "indirect": 0,
+   "workgroups": 549
+  },
+  "Uniform region work heat": {
+   "direct": 6,
+   "indirect": 0,
+   "workgroups": 441
+  },
+  "Uniform shared frame plan": {
+   "direct": 8,
+   "indirect": 0,
+   "workgroups": 9728
+  },
+  "Uniform shared regional frame plan": {
+   "direct": 2,
+   "indirect": 0,
+   "workgroups": 293
+  },
+  "Uniform16h remap producer revisions": {
+   "direct": 1,
+   "indirect": 0,
+   "workgroups": 256
+  }
+ }
+}

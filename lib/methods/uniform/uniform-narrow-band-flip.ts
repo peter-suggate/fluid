@@ -6,7 +6,8 @@ import { narrowBandSparseWGSL } from "./uniform-narrow-band-sparse.wgsl";
 import { narrowBandAirWGSL, NARROW_BAND_AIR_CHANGED_WORD, NARROW_BAND_AIR_GATE_PLANE, NARROW_BAND_AIR_WORDS_PER_TILE } from "./uniform-narrow-band-air.wgsl";
 import { narrowBandParticleStride, narrowBandParticleWGSL, narrowBandApicMomentWGSL, type NarrowBandTransfer } from "./uniform-narrow-band-apic.wgsl";
 import { PARTICLE_RESIDENCY_WORDS } from "./uniform-local-residency";
-import { narrowBandActivityTriggerWGSL, narrowBandActivityWGSL, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
+import { narrowBandActivityTriggerWGSL, narrowBandActivityWGSLFor, NARROW_BAND_ACTIVITY_WORDS_PER_TILE } from "./uniform-narrow-band-activity.wgsl";
+import { narrowBandCollarArrivalWGSL, narrowBandCollarCheck, narrowBandCollarDensityWGSL, narrowBandSeedTargetWGSL, type NarrowBandCollarDensity, type NarrowBandCollarSpread } from "./uniform-narrow-band-collar";
 import {narrowBandReuseLayout,narrowBandReuseWGSL,type NarrowBandReuseLayout} from "./uniform-narrow-band-reuse.wgsl";
 import { narrowBandRedistanceWGSL } from "./uniform-narrow-band-redistance.wgsl";
 import { narrowBandMembershipWGSL } from "./uniform-narrow-band-membership.wgsl";
@@ -686,11 +687,20 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
    * (nbUncovered), and elsewhere as any heated tile; "band" seeds the whole
    * band of every newly heated cell under its target count, on top of the
    * samples already carrying its liquid. */
-  readonly activationSeeding:"band"|"uncovered"="band"){
+  readonly activationSeeding:"band"|"uncovered"="band",
+  /** collarSpread "liquid": the heat-one collar spreads only into tiles the
+   * census found wet, and every grid-supported arrival's heat is capped at
+   * its tile's (or one); "neighbours" spreads into all 26 (uniform-narrow-band-collar.ts). */
+  readonly collarSpread:NarrowBandCollarSpread="neighbours",
+  /** collarDensity "deep": collar cells (target heat in (0, 1]) seed four
+   * samples of two units at every depth; "band" seeds them as hot cells.
+   * Needs crowdedCells "merge" (uniform-narrow-band-collar.ts). */
+  readonly collarDensity:NarrowBandCollarDensity="band"){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   // The seed list packs a cell key in 30 bits below the source and deep flags.
   if(cells>0x40000000)throw new Error(`Narrow-band FLIP's seed list packs a cell key in 30 bits: ${cells} cell keys exceed 1073741824`);
   if(!(bandDepth>=2&&bandDepth<=4))throw new Error(`Narrow-band FLIP particle band depth ${bandDepth} is outside 2-4 cells`);
+  narrowBandCollarCheck(collarDensity,crowdedCells);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
   // The particle cell bins (counts in bins, starts in links): a word a cell
   // key; under a budget, 512 a particle brick slot (the sort's slab slot,
@@ -1097,7 +1107,7 @@ fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",th
 fn nbSeedTarget(depth:f32)->u32{return select(8u,4u,NB_GRADED&&depth<=-1.5);}
 // A graded deep cell's j-th site: the even sites of the 2x2x2 lattice.
 fn nbSeedSiteIndex(j:u32,depth:f32)->u32{if(nbSeedTarget(depth)==8u){return j;}return array<u32,4>(0u,3u,5u,6u)[j&3u];}
-${narrowBandActivityWGSL}
+${narrowBandCollarDensityWGSL(this.collarDensity)}${narrowBandActivityWGSLFor(this.collarSpread)}
 ${narrowBandAirWGSL}
 ${narrowBandSparseWGSL}
 // The same liquid/retained-mass owners used by velocity extrapolation.
@@ -1522,7 +1532,7 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   // sample that carried its heat into the collar eroded the unseeded liquid
   // beside it. Spray keeps its heat: nothing else erases what it leaves.
   var heat=p.position.w;
-  if(!ballistic){let arrived=nbMoveHeat(q);if(arrived>0.0){heat=min(heat,max(arrived,1.0));}}
+  if(!ballistic){let arrived=nbMoveHeat(q);${narrowBandCollarArrivalWGSL(this.collarSpread)}}
   p.position=vec4f(q,heat);
   ${this.crowdedCells==="merge"?`// crowdedCells "merge": a merged sample that ends shallow (under a cell
   // deep) or in a cell its run left under half the cap splits in two a
@@ -1683,9 +1693,10 @@ fn seedCell(c:vec3u,emit:bool){
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let d=particleDepth(vec3f(c)+0.5);if(d>0.9||d< -NB_BAND_DEPTH-0.5){return;}
  let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
- var seeds:array<vec4f,8>;var seedCount=0u;
- for(var j=0u;j<nbSeedTarget(d);j++){
-  let site=seedSite(c,nbSeedSiteIndex(j,d),true,activated);if(site.x<0.0){continue;}
+ var seeds:array<vec4f,8>;var seedCount=0u;${this.collarDensity==="band"?"":`
+ let count=${narrowBandSeedTargetWGSL(this.collarDensity,"d","heat","nbSourceCell(c)")};`}
+ for(var j=0u;j<${this.collarDensity==="band"?"nbSeedTarget(d)":"count"};j++){
+  let site=seedSite(c,${this.collarDensity==="band"?"nbSeedSiteIndex(j,d)":"nbSeedSiteAt(j,count)"},true,activated);if(site.x<0.0){continue;}
   seeds[seedCount]=site;seedCount++;
  }
  // Count first: each seed's brick takes it as demand and is listed, so the
@@ -1695,7 +1706,7 @@ fn seedCell(c:vec3u,emit:bool){
   // grid's velocity. Unmarked, a tail-recorded FLIP delta once read its
   // before.xyz (its velocity, the travel the residency prediction needs) as
   // a delta and doubled it: translation 0.75 -> 1.46 m/s in one step.
-  if(emit){var s=nbWithMass(nbSeedParticle(seeds[k],heat),f32(8u/nbSeedTarget(d)));${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleRestate(s,nbSeedFirst(),0.0);"}nbMoveAppend(s);continue;}
+  if(emit){var s=nbWithMass(nbSeedParticle(seeds[k],heat),f32(8u/${this.collarDensity==="band"?"nbSeedTarget(d)":"count"}));${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleRestate(s,nbSeedFirst(),0.0);"}nbMoveAppend(s);continue;}
   let id=ubBrickAt(vec3i(floor(seeds[k].xyz)));
   if(id!=UB_NONE){atomicAdd(&state[nbSlab(id,10u)],1u);ubMark(id,UB_PARTICLES_CORE);}
  }
@@ -1723,11 +1734,12 @@ fn nbSeedList()->u32{return NB_LINKS+4u*arrayLength(&particles);}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let depth=particleDepth(vec3f(c)+0.5);if(depth>0.9||depth< -NB_BAND_DEPTH-0.5){return;}
- if(nbBinCount(umCellAt(c))>=nbSeedTarget(depth)||nbCellMass(c)>=8.0){return;}
+ ${this.collarDensity==="band"?"":`let count=${narrowBandSeedTargetWGSL(this.collarDensity,"depth","heat","nbSourceCell(c)")};
+ `}if(nbBinCount(umCellAt(c))>=${this.collarDensity==="band"?"nbSeedTarget(depth)":"count"}||nbCellMass(c)>=8.0){return;}
  let slot=atomicAdd(&bins[NB_BAND+3u],1u);
  if(slot>=3u*arrayLength(&particles)){atomicStore(&state[3],7u);return;}
  // Bit 31 a source cell, bit 30 a graded band's deep cell (nbSeedTarget 4).
- links[nbSeedList()+slot]=umCellAt(c)|select(0u,0x80000000u,nbSourceCell(c))|select(0u,0x40000000u,nbSeedTarget(depth)==4u);
+ links[nbSeedList()+slot]=umCellAt(c)|select(0u,0x80000000u,nbSourceCell(c))|select(0u,0x40000000u,${this.collarDensity==="band"?"nbSeedTarget(depth)":"count"}==4u);
 }
 fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool,counting:bool)->Particle{
  var empty=Particle();empty.position.x=-1.0;

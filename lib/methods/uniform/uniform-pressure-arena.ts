@@ -20,6 +20,7 @@ import {UNIFORM_LIVE_GROUP_GROUPS,UNIFORM_LIVE_KEY_GROUPS,UNIFORM_LIVE_LANE_GROU
 import {uniformStageListsWGSL} from "./uniform-stage-lists";
 import {BULK16_PAGE,BULK16_PAGE_WORDS,bulk16FaceIndexWGSL} from "./uniform-bulk-pages-reference";
 import {BULK16_STATUS,type UniformBulkPages} from "./uniform-bulk-pages";
+import {UNIFORM_PRESSURE_ARENA_GROUPS,uniformPressureArenaCountWidths} from "./uniform-pressure-arena-launches";
 
 /** The composite pressure solve on the brick arena
  * (docs/plans/pressure-rfe-speed-of-light-2026-10-20.md §1.6, §1.9): one
@@ -131,14 +132,11 @@ export const UNIFORM_PRESSURE_KICK_RESOLVES=23;
 /** Workgroups of the band-tile mark at most (the simulation's buffered h tiles). */
 const LIST_GROUPS=4096;
 /** Brick, tile and page launches stride their lists from at most this many groups. */
-const BRICK_GROUPS=2048,TILE_GROUPS=4096,PAGE_GROUPS=1024,TABLE_GROUPS=1024;
-/** The BULK16 solve's indirect launches (pLaunch, a workgroup an item, at
- * most PAGE_GROUPS; every reader strides its count): the live slots; the
- * level 2 pages or the live slots, the larger (a loop over both lists); the
- * two lists' sum (the tail's items); the level 2 pages; the live slots eight
- * a workgroup; the items 64 a workgroup. Byte offsets in the launch buffer. */
-const LAUNCH={live:0,either:16,items:32,level2:48,live8:64,items64:80,bytes:96} as const;
-type UniformArenaLaunch=number|"tiles"|{indirect:number};
+const {brick:BRICK_GROUPS,tile:TILE_GROUPS,page:PAGE_GROUPS,table:TABLE_GROUPS}=UNIFORM_PRESSURE_ARENA_GROUPS;
+/** Workgroups, or the simulation's buffered fine-tile launch. Every launch is
+ * direct (uniform-pressure-arena-launches.ts: an indirect one costs Dawn's
+ * validation dispatch ahead of it). */
+type UniformArenaLaunch=number|"tiles";
 /** Fine slots: a share of the lattice's bricks (at least ARENA_SLOTS_MIN). The
  * band's bricks hug the surface: the pour at 1/60 s peaks at 2310 of 8320
  * (0.28, frame 410), letters at 1228 of 12416; 0.45 holds the pour with 1.6x
@@ -274,12 +272,7 @@ export class UniformPressureArena {
  /** Pool B's words of the Krylov dots' partials and of the BULK16 rows' Krylov vectors (schedule.krylov). */
  private readonly krylovDotWord:number=0;
  private readonly krylovBulkWord:number=0;
- /** The BULK16 solve's launches (LAUNCH), written by pLaunch from the
-  * counts: its own buffer, as an indirect buffer is no storage binding of
-  * the dispatch that reads it. */
- private readonly launch?:GPUBuffer;
- private launcher?:{pipeline:GPUComputePipeline;group:GPUBindGroup};
- get allocatedBytes():number{return this.index.size+this.pool.size+this.poolB.size+(this.launch?.size??0);}
+ get allocatedBytes():number{return this.index.size+this.pool.size+this.poolB.size;}
  private readonly tiles:number;
  private readonly maskWord:number;
  private readonly tileListWord:number;
@@ -305,6 +298,8 @@ export class UniformPressureArena {
  /** Header words: HEADER, and with diagnostics their DIAG_WORDS. */
  readonly header:number;
  private workBricks=1;private workLevel1=1;private level1Groups=1;private workLevel2=1;private workHeld=1;private pageGroups=PAGE_GROUPS;
+ /** The BULK16 live slots' launch width (observeBulk): the store's capacity until a receipt reports its live count. */
+ private workBulk=1;
  private workTiles=1;private tileGroups=1;private relaxGroups=1;
  private readonly recentCycles=new Uint32Array(BAND_CYCLE_WINDOW);
  private recentCount=0;
@@ -411,7 +406,7 @@ export class UniformPressureArena {
   this.poolB=device.createBuffer({label:"Uniform pressure arena pool B",size:4*poolWords[1]!,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   if(fields.bulk)this.bulkRecord={buffer:this.poolB,offset:4*this.bulkWord,size:4*UNIFORM_BULK_WORDS(fields.bulk.regions)};
   if(fields.bulkPages)this.bulkStore={buffer:this.poolB,offset:4*this.storeWord,size:fields.bulkPages.layout.bytes};
-  if(fields.bulkPages)this.launch=device.createBuffer({label:"Uniform pressure arena BULK16 launches",size:LAUNCH.bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.INDIRECT});
+  if(fields.bulkPages)this.workBulk=Math.max(1,Math.min(fields.bulkPages.layout.capacity,PAGE_GROUPS));
   for(const w of a.initialWrites(this.tableWord))device.queue.writeBuffer(this.index,w.offset,w.data as Uint32Array<ArrayBuffer>);
   this.restricts=Array.from({length:schedule.cycles},(_,k)=>`pRestrict0@${k}`);
   this.residuals=Array.from({length:schedule.cycles},(_,k)=>`pResidual2@${k}`);
@@ -488,6 +483,14 @@ export class UniformPressureArena {
   this.workHeld=uniformBufferedWork(this.workHeld,Math.min(held,blocks),blocks,blockReserve);this.pageGroups=Math.min(this.workHeld,PAGE_GROUPS);
   this.workTiles=uniformBufferedWork(this.workTiles,Math.min(tiles,this.slots),this.slots,reserve);
   this.tileGroups=Math.min(this.workTiles,TILE_GROUPS);this.relaxGroups=Math.min(groupsOf(this.workTiles,2),TILE_GROUPS);
+ }
+ /** Fixed-lag evidence of the BULK16 store's live slots (a receipt's
+  * BULK16_STATUS.live): the width of the launches that walk them. Launch
+  * width only: each reader strides the store's own count. reserve counts h
+  * tiles, as observeWork's: the slots (a page each) those tiles fill. */
+ observeBulk(live:number,reserve=0):void{
+  const capacity=this.fields.bulkPages?.layout.capacity;if(capacity===undefined)return;
+  this.workBulk=uniformBufferedWork(this.workBulk,Math.min(live,capacity),Math.max(1,Math.min(capacity,PAGE_GROUPS)),Math.ceil(reserve/512));
  }
  observeCycles(cycles:number):void{
   this.recentCycles[this.recentCount%BAND_CYCLE_WINDOW]=cycles;this.recentCount++;
@@ -3662,7 +3665,6 @@ fn sProlong6(g:vec3i)->f32{
    ...(W?{sGroup7:[["",{}],["C",{sList:0}]] as Variant[]}:{}),
   };
   this.verdict=await this.verdictPipeline();
-  if(this.launch)this.launcher=await this.launchPipeline();
   await Promise.all(Object.entries(sources).map(async([name,code])=>{
    const module=uniformDetailModule(this.device,{label:`Uniform pressure arena ${name}`,code});
    const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -3728,26 +3730,6 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
    {binding:3,resource:{buffer:f.acceptance,size:32}},{binding:4,resource:{buffer:f.params,size:64}}]});
   return {pipeline,group};
  }
- /** pLaunch: the BULK16 solve's launches (LAUNCH) from the level 2 page
-  * count (the table's, under its capacity) and the live slot count. */
- private async launchPipeline():Promise<{pipeline:GPUComputePipeline;group:GPUBindGroup}>{
-  const blocks=this.simulation.capacity.address.blocks;
-  const module=this.device.createShaderModule({label:"Uniform pressure arena BULK16 launches",code:/* wgsl */`
-@group(0) @binding(0) var<storage,read> state:array<u32>;
-@group(0) @binding(1) var<storage,read> store:array<u32>;
-@group(0) @binding(2) var<storage,read_write> launch:array<u32,${LAUNCH.bytes/4}>;
-fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1u;launch[at+2u]=1u;launch[at+3u]=0u;}
-@compute @workgroup_size(1) fn pLaunch(){
- let n2=min(state[${this.arena.pageCountWord(this.tableWord)}u],${blocks}u);let live=store[${BULK16_STATUS.live}u];
- put(${LAUNCH.live/4}u,live);put(${LAUNCH.either/4}u,max(n2,live));put(${LAUNCH.items/4}u,n2+live);put(${LAUNCH.level2/4}u,n2);put(${LAUNCH.live8/4}u,(live+7u)/8u);put(${LAUNCH.items64/4}u,(n2+live+63u)/64u);
-}`});
-  const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
-  if(errors.length)throw new Error(`Pressure arena launches: ${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
-  const pipeline=await this.device.createComputePipelineAsync({label:"Uniform pressure arena BULK16 launches",layout:"auto",compute:{module,entryPoint:"pLaunch"}});
-  const group=this.device.createBindGroup({label:"Uniform pressure arena BULK16 launches",layout:pipeline.getBindGroupLayout(0),entries:[
-   {binding:0,resource:{buffer:this.index}},{binding:1,resource:{buffer:this.poolB,offset:4*this.storeWord,size:4*BULK16_STATUS.words}},{binding:2,resource:{buffer:this.launch!}}]});
-  return {pipeline,group};
- }
  private bindLaunches():void{
   this.launches.clear();
   for(const [name,pipeline] of this.pipelines)this.launches.set(name,{pipeline,group:this.groups.get(this.pipelineGroups.get(name)!)!});
@@ -3759,7 +3741,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
   if(this.boundGroup!==bound.group){this.boundGroup=bound.group;pass.setBindGroup(1,bound.group.group);}
   if(launch==="tiles"){this.simulation.dispatchBuffered(pass,pipeline,"fine",LIST_GROUPS);return;}
   pass.setPipeline(uniformDetailPick(pipeline));
-  if(typeof launch==="number")pass.dispatchWorkgroups(launch);else pass.dispatchWorkgroupsIndirect(this.launch!,launch.indirect);
+  pass.dispatchWorkgroups(launch);
  }
  /** As the band's: no h tile, or a quiet frame under the freeze, lists none. */
  private get empty():boolean{
@@ -3816,18 +3798,17 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
   // The page launches stride the composite level 2 (every held block).
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,this.pageGroups),g=this.level1Groups;
   const W=this.super,BP=!!this.fields.bulkPages;
-  // With BULK16 rows the loops that walk the live slots launch from the
-  // counts (pLaunch): a workgroup a live slot, or a level 2 page or a live
-  // slot (a loop over both), not the held pages' (fewer than a vast pool's
-  // slots). Each reader strides its count, so any launch is the same solve.
-  const live:UniformArenaLaunch=BP?{indirect:LAUNCH.live}:pages,either:UniformArenaLaunch=BP?{indirect:LAUNCH.either}:pages;
-  const items:UniformArenaLaunch=BP?{indirect:LAUNCH.items}:pages,level2:UniformArenaLaunch=BP?{indirect:LAUNCH.level2}:pages;
+  // With BULK16 rows the loops that walk the live slots launch a workgroup
+  // a slot (observeBulk's width), or a level 2 page or a live slot (a loop
+  // over both), or the two lists' items. Each reader strides its count (the
+  // table's pages, the store's live list), so any width is the same solve.
+  const c=uniformPressureArenaCountWidths(pages,BP?this.workBulk:0);
+  const live=c.live,either=c.either,items=c.items,level2=c.level2;
   if(W)encoder.clearBuffer(this.index,4*W.index.count6,16);
   // The Krylov dots' partials (a launch past this solve's leaves its own) and header words.
   if(s.krylov){encoder.clearBuffer(this.poolB,4*this.krylovDotWord,4*KRYLOV_DOTS*KRYLOV_PARTIALS);encoder.clearBuffer(this.index,4*KRYLOV_ALPHA_WORD,4*(KRYLOV_RESTARTS_WORD+1-KRYLOV_ALPHA_WORD));}
   encoder.clearBuffer(this.index,4*KRYLOV_SPREAD_WORD,4);
   const pass=encoder.beginComputePass(SOLVE_PASS);
-  if(this.launcher){pass.setPipeline(this.launcher.pipeline);pass.setBindGroup(0,this.launcher.group);pass.dispatchWorkgroups(1);this.boundPass=undefined;}
   this.dispatch(pass,init,this.tileGroups);if(UNIFORM_PRESSURE_ARENA_NATIVE_RHS)this.dispatch(pass,"pRhs",pages);this.dispatch(pass,"pNative",pages);if(BP)this.dispatch(pass,init==="pInitP"?"pBulkRowsP":"pBulkRows",live);this.dispatch(pass,rebase,this.tileGroups);
   // One cycle past the most the solve ran lately; a frame needing more ends at its last.
   const cycles=Math.min(s.cycles,this.wideCycles+1);
@@ -3847,7 +3828,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    this.dispatch(pass,"pRebaseC",this.tileGroups);this.dispatch(pass,"pNativeOperator",pages);
    this.dispatch(pass,"pDownA@0",g);this.dispatch(pass,"pDownR",g);this.dispatch(pass,"pDownB@0",pages);this.dispatch(pass,"pDown2",either);
    // Refresh numeric coarse rows each cycle; super-block topology is frame-local.
-   if(W){if(first)this.dispatch(pass,"sGroup6",BP?{indirect:LAUNCH.items64}:Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,first?"sGroup7":"sGroup7C",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
+   if(W){if(first)this.dispatch(pass,"sGroup6",BP?c.items64:Math.min(groupsOf(this.simulation.capacity.address.blocks,64),TABLE_GROUPS));this.dispatch(pass,first?"sGroup7":"sGroup7C",groupsOf(W.capacity6,64));this.dispatch(pass,"sBake7",groupsOf(W.capacity7,64));}
    for(let m=0;m<s.tailCycles;m++){
     const y=m%2===1?"Y":"";this.dispatch(pass,"pDown3"+y,either);
     if(W){
@@ -3884,7 +3865,7 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
    }
   }
   this.dispatch(pass,"pResidual2F",either);this.dispatch(pass,"pFinal",this.tileGroups);this.dispatch(pass,"pWrite",pages);
-  if(BP){this.dispatch(pass,"pBulkProject",live);this.dispatch(pass,"pBulkCommit",{indirect:LAUNCH.live8});}
+  if(BP){this.dispatch(pass,"pBulkProject",live);this.dispatch(pass,"pBulkCommit",c.live8);}
   if(W)this.dispatch(pass,"sForget",groupsOf(W.capacity6,64));
   pass.end();
   const verdict=encoder.beginComputePass(VERDICT_PASS);
@@ -3924,5 +3905,5 @@ fn put(at:u32,groups:u32){launch[at]=min(groups,${PAGE_GROUPS}u);launch[at+1u]=1
  /** The overflow word's value when a row read a stale solid aperture record. */
  static readonly staleApertures=STALE_APERTURES;
  get slotCapacity():number{return this.arena.fineCapacity;}
- destroy():void{this.index.destroy();this.pool.destroy();this.launch?.destroy();}
+ destroy():void{this.index.destroy();this.pool.destroy();}
 }

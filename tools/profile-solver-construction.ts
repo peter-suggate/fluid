@@ -1,7 +1,7 @@
 /** Where an NB-FLIP solver's construction goes, and what it computes after.
  *
  * WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js node --import tsx tools/profile-solver-construction.ts
- *   [--scene=reservoir-seep] [--cell=0.005] [--steps=3] [--report=<path.json>] [--dump=<dir>]
+ *   [--scene=reservoir-seep] [--cell=0.005] [--steps=3] [--report=<path.json>] [--dump=<dir>] [--values={"framePlanPass":"window"}]
  *
  * Every native compilation call on the raw device is timed: createShaderModule
  * (WGSL parse and validation; generation is the caller's), and each
@@ -41,14 +41,14 @@ import { readUniformFields } from "../tests/helpers/uniform-geometric";
 
 const options = process.argv.slice(2);
 const option = (key: string) => options.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
-for (const a of options) assert.ok(/^--(?:scene|cell|steps|report|dump)=.+$/.test(a), `Unknown option: ${a}`);
+for (const a of options) assert.ok(/^--(?:scene|cell|steps|report|dump|values)=.+$/.test(a), `Unknown option: ${a}`);
 const sceneId = option("scene") ?? "reservoir-seep", steps = Number(option("steps") ?? 3);
 const cell = option("cell") === undefined ? undefined : Number(option("cell"));
 assert.ok(Number.isInteger(steps) && steps >= 0);
 const definition = getSceneDefinition(sceneId);
 assert.equal(definition.methodProfile?.methodId, method.id, `${sceneId} is not an NB-FLIP scene`);
 const quality = definition.methodProfile!.quality;
-const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile!.overrides });
+const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...definition.methodProfile!.overrides, ...JSON.parse(option("values") ?? "{}") });
 const scene = cell === undefined ? sceneDocument(definition) : sceneDocumentAtLattice(definition, { cellSize_m: cell, detailCellSize_m: cell }).scene;
 
 const t0 = performance.now(), now = () => performance.now() - t0;

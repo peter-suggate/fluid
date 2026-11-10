@@ -536,8 +536,8 @@ export class UniformMixedFrame {
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
-   capacity.particles,this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells,this.nearSettled.sampleSeparation,this.nearSettled.innerReseed,this.nearSettled.activationSeeding);
-  this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid);
+   capacity.particles,this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells,this.nearSettled.sampleSeparation,this.nearSettled.innerReseed,this.nearSettled.activationSeeding,this.nearSettled.collarSpread,this.nearSettled.collarDensity);
+  this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid,this.nearSettled.framePlanPass);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);
   // The census extension crosses a relayout in these instead of being
@@ -1069,7 +1069,7 @@ export class UniformMixedFrame {
    // A counted edit's build admits none but its own.
    const reserve=relayout&&!edit?UNIFORM_WORK_RELAYOUT_RESERVE:0;
    // The band's tiles are wet h tiles: an edit adds its own at most.
-   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0),Math.ceil((work.work[0]!+work.work[1]!+(edited?.reach??0))/512));this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);if(this.pressureOwnership!==this.ownership)this.pressureOwnership.observeResidency(work.work[7]!+Math.ceil((edited?.reach??0)/64),reserve);this.remap.observeWork(work.listed,reserve,edited?.reach);}
+   if(work){this.band.observeWork(work.bandTiles+(edited?.tiles??0),reserve,work.bandBricks+(edited?.tiles??0),work.bandLevel1+(edited?.tiles??0),work.bandLevel2+(edited?.tiles??0),Math.ceil((work.work[0]!+work.work[1]!+(edited?.reach??0))/512));if(this.bulkPages&&this.bulk16Info.frame>=0)this.band.observeBulk(this.bulk16Info.liveSlots,reserve);this.band.observeCycles(work.bandCycles);this.ownership.observeWork(work.work,reserve,edited);if(this.pressureOwnership!==this.ownership)this.pressureOwnership.observeResidency(work.work[7]!+Math.ceil((edited?.reach??0)/64),reserve);this.remap.observeWork(work.listed,reserve,edited?.reach);}
    // Only a census certifies residency: a frame without one must not skip a page the last one did.
    if(!kick||relayout){if(!relayout&&this.censused)this.ownership.resetResidency();this.censused=!!relayout;}
    // Only a census asks the pool for the liquid's pages: without one a live pool would advance into pages it never claimed.
