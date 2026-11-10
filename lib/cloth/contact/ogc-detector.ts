@@ -139,7 +139,13 @@ export interface OgcContactConfig {
    * peak (peakPlaneRecords). Overflow fails the step (planeRecordOverflow).
    */
   planeRecordCapacity?: number;
+  /**
+   * The metric of the solver's trial projection (solverContact; newton only): "off" (default) the exact Euclidean
+   * projection, "hvv" the Newton solver's vertex block H_vv (nwVertexInv; ogc-wgsl.ts OGC_PROJECT_METRIC_WGSL).
+   */
+  projectionMetric?: OgcProjectionMetric;
 }
+export type OgcProjectionMetric = "off" | "hvv";
 
 export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2, target: 3 } as const;
 
@@ -336,6 +342,9 @@ export class OgcContactDetector {
     const prediction = config.prediction ?? "inertial";
     if (!(prediction in OGC_PREDICTION)) throw new Error(`OGC: unknown prediction "${String(prediction)}"`);
     this.prediction = prediction;
+    const metric = config.projectionMetric ?? "off";
+    if (metric !== "off" && metric !== "hvv") throw new Error(`OGC: unknown projection metric "${String(metric)}"`);
+    if (metric !== "off" && !config.newton) throw new Error("OGC: a projection metric needs the Newton filter (newton)");
     const cellRule = config.cellRule ?? "largest";
     if (!(cellRule in OGC_CELL_RULE)) throw new Error(`OGC: unknown cell rule "${String(cellRule)}"`);
     const cell = config.cellSize ?? Math.max(L.meanEdgeLength, config.rqBase);
@@ -629,14 +638,17 @@ export class OgcContactDetector {
   /** The buffer the solver kernel binds for ogcVertexBlockWGSL. */
   get solverBuffer(): GPUBuffer { return this.contacts; }
 
-  static vertexBlockWGSL(group: number, binding: number, newton = false): string { return ogcVertexBlockWGSL({ group, binding, newton }); }
+  /** metric: the host's fn(v) -> mat3x3<f32> returning H_vv^-1, the projection's metric (OgcVertexBlockOptions.metric). */
+  static vertexBlockWGSL(group: number, binding: number, newton = false, metric?: string): string { return ogcVertexBlockWGSL({ group, binding, newton, ...(metric ? { metric } : {}) }); }
 
   /**
    * What the cloth solver's vertex kernel takes: the block at (group 0, binding) and the buffer it
-   * reads; with newton, the global forms too (ogcVertexContactHvLanes, ogcContactEnergyOwnedLanes).
+   * reads; with newton, the global forms too (ogcVertexContactHvLanes, ogcContactEnergyOwnedLanes), and the trial
+   * projection in the config's projectionMetric ("hvv": the solver's nwVertexInv).
    */
   solverContact(binding: number, newton = false): { wgsl: string; buffer: GPUBuffer } {
-    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton }), buffer: this.contacts };
+    const metric = newton && this.config.projectionMetric === "hvv" ? { metric: "nwVertexInv" } : {};
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric }), buffer: this.contacts };
   }
 
   /**

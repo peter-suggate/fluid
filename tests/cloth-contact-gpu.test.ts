@@ -25,7 +25,7 @@ import {
   activation, boxSdf, solidBallBound, solidContact, solidTruncate, solidKeep, solidTermScale, sphereSdf, bruteForceDatPairs, bruteForceDetection, contactEnergy, countIntersections, datSeparator, dot, globalFeature, merge,
   motionPenetrates, norm, planarTruncate, rng, scale, sheet, sub, vertexForceHessian, add,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate,
-  bruteForceProjection, conViolation, projectionCase, projectionCaseCons, projectionKkt, shrinkCons, solidPieceCons, type ProjectionCase,
+  bruteForceProjection, conViolation, metricProjection, projectionCase, projectionCaseCons, projectionKkt, randomMetric, shrinkCons, solidPieceCons, type ProjectionCase,
   type DatPair, type OracleContact, type OracleMesh, type V3,
 } from "./cloth-contact-oracle";
 
@@ -188,9 +188,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   return new Float32Array(await readBuffer(device, out));
 }
 
-/** ogcProject(v, X_v, Y_v) of the vertex block (the projected arc's projection) for every vertex. */
-async function evalProject(device: GPUDevice, det: OgcContactDetector | GPUBuffer, X: V3[], Y: V3[]): Promise<V3[]> {
-  const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y));
+/**
+ * The projection's metric as the Newton solver stores it (nwVertexInv: H_vv^-1, two vec4 per vertex, the upper
+ * triangle a = (m00, m01, m02, m11), b = (m12, m22)), the identity where Hinv is omitted; and the host function reading it.
+ */
+const METRIC_WGSL = /* wgsl */`
+@group(0) @binding(2) var<storage, read> Minv: array<vec4<f32>>;
+fn testMetricInv(v: u32) -> mat3x3<f32> { let a = Minv[2u * v]; let b = Minv[2u * v + 1u]; return mat3x3<f32>(a.x, a.y, a.z, a.y, a.w, b.x, a.z, b.x, b.y); }`;
+function metricBuffer(device: GPUDevice, N: number, Hinv?: number[][][]): GPUBuffer {
+  const f = new Float32Array(8 * N);
+  for (let v = 0; v < N; v++) {
+    const M = Hinv?.[v] ?? [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    f.set([M[0]![0]!, M[0]![1]!, M[0]![2]!, M[1]![1]!, M[1]![2]!, M[2]![2]!, 0, 0], 8 * v);
+  }
+  return storage(device, f);
+}
+
+/** ogcProject(v, X_v, Y_v) of the vertex block (the projected arc's projection) for every vertex; in the metric Hinv (H_vv^-1, OgcVertexBlockOptions.metric) where given. */
+async function evalProject(device: GPUDevice, det: OgcContactDetector | GPUBuffer, X: V3[], Y: V3[], Hinv?: number[][][]): Promise<V3[]> {
+  const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y)), mb = Hinv && metricBuffer(device, N, Hinv);
   const out = device.createBuffer({ size: 16 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const code = /* wgsl */`
 @group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
@@ -201,7 +217,7 @@ fn ogcXt(i: u32) -> vec3<f32> { return X[i].xyz; }
 // The projection reads no topology.
 fn ogcTri(t: u32) -> vec3<u32> { return vec3<u32>(t); }
 fn ogcEdgeVerts(e: u32) -> vec2<u32> { return vec2<u32>(e); }
-${OgcContactDetector.vertexBlockWGSL(0, 4)}
+${Hinv ? `${METRIC_WGSL}\n${OgcContactDetector.vertexBlockWGSL(0, 4, false, 'testMetricInv')}` : OgcContactDetector.vertexBlockWGSL(0, 4)}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v = gid.x;
@@ -209,12 +225,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   outBuf[v] = vec4<f32>(ogcProject(v, X[v].xyz, Y[v].xyz), 0.0);
 }`;
   const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], [3, out], [4, 'solverBuffer' in det ? det.solverBuffer : det]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], ...(mb ? [[2, mb] as const] : []), [3, out], [4, 'solverBuffer' in det ? det.solverBuffer : det]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
   const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
   pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
   device.queue.submit([enc.finish()]);
   const got = toV3(new Float32Array(await readBuffer(device, out)), N);
-  xb.destroy(); yb.destroy(); out.destroy();
+  xb.destroy(); yb.destroy(); mb?.destroy(); out.destroy();
   return got;
 }
 
@@ -744,9 +760,88 @@ test("GPU exact projection (ogcProjectTrial): the Euclidean projection onto the 
   });
 });
 
+test("GPU projection (ogcProjectTrial) in the H_vv metric: the exact metric projection onto the plane records and the solid pieces' faces, then the exit keeping the cap and the balls, against the Float64 brute force with its KKT check, identity and random metrics to condition 1e4; bit-identical for any record order", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const R = rng(77), N = 2048;
+    const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
+    // One frame for every moving piece (the end pose is the solid's, not the vertex's).
+    const a = unitRand(), th = 2.1, cs = Math.cos(th), sn = Math.sin(th), K = [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
+    const Rb = [0, 1, 2].map(i => [0, 1, 2].map(j => Math.fround((i === j ? cs : 0) + sn * K[i]![j]! + (1 - cs) * a[i]! * a[j]!)));
+    // The inputs as the GPU holds them (f32), the anchors up to 1.5 m from the origin.
+    const fr = (v: V3) => v.map(Math.fround) as V3;
+    const cases = Array.from({ length: N }, () => {
+      const k = projectionCase(R, Rb);
+      const piece = (p: typeof k.solid) => p && { o: fr(p.o), q: fr(p.q), Rq: Math.fround(p.Rq), D: fr(p.D), Rb: p.Rb };
+      return { R: Math.fround(k.R), planes: k.planes.map(p => ({ m: fr(p.m), b: Math.fround(p.b) })), solid: piece(k.solid), body: piece(k.body), y: k.y };
+    });
+    const c = cases.map(() => fr(scale(unitRand(), 1.5 * R())));
+    const Y = cases.map((k, v) => fr(add(c[v]!, k.y)));
+    // Every third vertex the identity (the Euclidean projection onto the half-spaces), the rest H_vv^-1 of condition
+    // 10^(4 u) (a contact's kc n n^T over the mass and membrane reaches 1e4), as f32 holds them.
+    const kappa = cases.map((_, v) => v % 3 === 0 ? 1 : 10 ** (4 * R()));
+    const Hinv = kappa.map(kp => kp === 1 ? [[1, 0, 0], [0, 1, 0], [0, 0, 1]] : randomMetric(R, kp).map(r => r.map(Math.fround)));
+    let worst = 0, worstRel = 0, cut = 0, kept = 0, maxViol = 0, maxRes = 0, capCut = 0, excessOver = -Infinity;
+    const bad: string[] = [], rels: number[] = [], bands = [[], [], [], [], []] as number[][], wBands = [[], [], [], [], []] as number[][], fBands = [[], [], [], [], []] as number[][];
+    for (const levelled of [false, true]) {
+      const buf = storage(device, projectionBuffer(cases, c, Rb, levelled));
+      const got = await evalProject(device, buf, c, Y, Hinv);
+      const rev = storage(device, projectionBuffer(cases, c, Rb, levelled, true));
+      const back = await evalProject(device, rev, c, Y, Hinv);
+      buf.destroy(); rev.destroy();
+      cases.forEach((k, v) => {
+        assert.ok(got[v]!.every((x, i) => Object.is(x, back[v]![i])), `vertex ${v}: the projection depends on the records' order (${got[v]} vs ${back[v]})`);
+        // The oracle on the GPU's own inputs: the anchor-relative trial as f32 holds it.
+        // ogcProjectExact's target: every half-space pulled in by 2 tau = 2^-16 (R + |y - c|), from the anchor (x = c here).
+        const cons = projectionCaseCons(k), zy = sub(Y[v]!, c[v]!), s = k.R + norm(zy);
+        const ref = metricProjection(cons, zy, Hinv[v]!, 2 ** -16 * s, 1e-13 * s * Math.sqrt(kappa[v]!));
+        maxRes = Math.max(maxRes, ref.kkt.residual);
+        assert.ok(ref.kkt.residual < 1e-7, `vertex ${v}: the oracle's KKT ${JSON.stringify(ref.kkt)}`);
+        const zg = sub(got[v]!, c[v]!);
+        const off = norm(sub(zg, ref.p));
+        // In the metric's own norm (w = K^-1 z, M = K K^T = 3 H^-1 / tr H^-1, |z| <= sqrt 3 |w|) and its objective.
+        const offW = norm(ref.toW(sub(zg, ref.p))), fG = norm(ref.toW(sub(zg, zy))), fR = norm(ref.toW(sub(ref.p, zy)));
+        wBands[Math.min(4, Math.floor(Math.log10(kappa[v]!)))]!.push(offW / s);
+        fBands[Math.min(4, Math.floor(Math.log10(kappa[v]!)))]!.push((fG - fR) / s);
+        if (ref.t < 1) capCut++;
+        if (ref.W.length || ref.t < 1) cut++; else if (Object.is(got[v]![0], Y[v]![0]) && Object.is(got[v]![1], Y[v]![1]) && Object.is(got[v]![2], Y[v]![2])) kept++;
+        worst = Math.max(worst, off); worstRel = Math.max(worstRel, off / s); rels.push(off / s);
+        bands[Math.min(4, Math.floor(Math.log10(kappa[v]!)))]!.push(off / s);
+        // Certified: inside every certificate (to the f32 rounding of world positions).
+        const viol = Math.max(...cons.map(q => conViolation(q, zg)));
+        maxViol = Math.max(maxViol, viol);
+        if (viol > 4e-7) bad.push(`vertex ${v}: the projection leaves a certificate by ${viol.toExponential(2)}: ${cons.map(q => conViolation(q, zg)).map((x, i) => [i, x] as const).filter(([, x]) => x > 4e-7).map(([i, x]) => `${i}:${x.toExponential(1)}`).join(' ')} (planes ${k.planes.length} solid ${!!k.solid} body ${!!k.body})`);
+        // The GPU solves to feasibility tau = 2^-17 s, so in a stiff metric it is the exact projection of a set moved by
+        // up to tau, which a wedge of near-parallel faces amplifies (its vertex moves by tau / sin(angle / 2)): the bound
+        // is then its objective, at most that of the exact projection onto the set pulled in by one more tau (3 tau),
+        // plus the metric norm of the output's f32 rounding, where it is not the exact point to 0.5 um (under the identity
+        // it always is).
+        const ref3 = metricProjection(cons, zy, Hinv[v]!, 3 * 2 ** -17 * s, 1e-13 * s * Math.sqrt(kappa[v]!));
+        const f3 = norm(ref3.toW(sub(ref3.p, zy)));
+        const ulp = 2 ** -23 * Math.max(...Y[v]!.map(Math.abs), ...c[v]!.map(Math.abs));
+        const allow = ulp * Math.max(...[0, 1, 2].map(i => norm(ref.toW([0, 1, 2].map(j => i === j ? 1 : 0) as V3))));
+        if (off > 5e-7) excessOver = Math.max(excessOver, (fG - f3) / Math.max(allow, 1e-30));
+        if (off > 5e-7 && (kappa[v] === 1 || fG > f3 + allow)) {
+          bad.push(`vertex ${v} (levelled ${levelled}, condition ${kappa[v]!.toExponential(1)}): objective ${fG.toExponential(4)} vs ${f3.toExponential(4)} at 3 tau; ${off.toExponential(2)} m off the exact projection (scale ${s.toExponential(2)}, active ${JSON.stringify(ref.W)} of ${cons.length}; |y - p| GPU ${norm(sub(zg, zy)).toExponential(4)} vs ${norm(sub(ref.p, zy)).toExponential(4)}; GPU violations ${cons.map(q => conViolation(q, zg)).map((x, i) => [i, x] as const).filter(([, x]) => x > -1e-7).map(([i, x]) => `${i}:${x.toExponential(1)}`).join(' ')}; planes ${k.planes.length} solid ${!!k.solid} body ${!!k.body})`);
+        }
+      });
+    }
+    rels.sort((a, b) => a - b);
+    bands.forEach((b, i) => { if (!b.length) return; b.sort((x, y) => x - y); console.log(`metric condition 1e${i}-1e${i + 1}: ${b.length} trials, off over the scale: median ${b[b.length >> 1]!.toExponential(2)}, 99 % ${b[Math.floor(0.99 * b.length)]!.toExponential(2)}, max ${b[b.length - 1]!.toExponential(2)}`); });
+    const st = (b: number[]) => { const x = [...b].sort((p, q) => p - q); return `median ${x[x.length >> 1]!.toExponential(2)}, 99 % ${x[Math.floor(0.99 * x.length)]!.toExponential(2)}, max ${x[x.length - 1]!.toExponential(2)}`; };
+    wBands.forEach((b, i) => { if (b.length) console.log(`metric condition 1e${i}-1e${i + 1}: off in the metric's norm over the scale ${st(b)}; objective excess over the scale ${st(fBands[i]!)}`); });
+    console.log(`the exit cut ${capCut} trials (a ball binding the plane projection)`);
+    console.log(`off the projection over the scale R + |y - c|: median ${rels[rels.length >> 1]!.toExponential(2)}, 99 % ${rels[Math.floor(0.99 * rels.length)]!.toExponential(2)}, 99.9 % ${rels[Math.floor(0.999 * rels.length)]!.toExponential(2)}, max ${rels[rels.length - 1]!.toExponential(2)}`);
+    if (bad.length) console.log(`${bad.length} off the projection:\n${bad.slice(0, 12).join('\n')}`);
+    console.log(`the GPU's metric objective over that of the exact projection onto the set pulled in by 3 tau, in units of the output's f32 rounding, where it is more than 0.5 um off the exact point: ${excessOver.toFixed(2)} at most (<= 1 passes)`);
+    assert.equal(bad.length, 0, `${bad.length} trials past the exact projection's objective at 3 tau (or, under the identity, 0.5 um off it)`);
+    console.log(`exact projection on the GPU: ${2 * N} trials, ${cut} cut, ${kept} kept bit-exactly; off the Float64 projection by ${worst.toExponential(2)} m at most (${worstRel.toExponential(2)} of the scale), certificates left by ${maxViol.toExponential(2)} m at most; oracle KKT residual ${maxRes.toExponential(2)}`);
+    assert.equal(kept + cut, 2 * N, "every trial the certificates keep comes back bit-exactly");
+  });
+});
+
 /** ogcProjectActive(v, X_v, Y_v, 1) for every vertex: q (w: count + 4 held + 8 capOn + 16 travel), n0..n2, nc. */
-async function evalActive(device: GPUDevice, det: GPUBuffer, X: V3[], Y: V3[]): Promise<Float32Array> {
-  const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y));
+async function evalActive(device: GPUDevice, det: GPUBuffer, X: V3[], Y: V3[], Hinv?: number[][][]): Promise<Float32Array> {
+  const N = X.length, xb = storage(device, vec4s(X)), yb = storage(device, vec4s(Y)), mb = Hinv && metricBuffer(device, N, Hinv);
   const out = device.createBuffer({ size: 80 * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   const code = /* wgsl */`
 @group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
@@ -756,7 +851,7 @@ fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
 fn ogcXt(i: u32) -> vec3<f32> { return X[i].xyz; }
 fn ogcTri(t: u32) -> vec3<u32> { return vec3<u32>(t); }
 fn ogcEdgeVerts(e: u32) -> vec2<u32> { return vec2<u32>(e); }
-${OgcContactDetector.vertexBlockWGSL(0, 4)}
+${Hinv ? `${METRIC_WGSL}\n${OgcContactDetector.vertexBlockWGSL(0, 4, false, 'testMetricInv')}` : OgcContactDetector.vertexBlockWGSL(0, 4)}
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let v = gid.x;
@@ -767,125 +862,132 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   outBuf[5u * v + 3u] = vec4<f32>(a.n2, 0.0); outBuf[5u * v + 4u] = vec4<f32>(a.nc, 0.0);
 }`;
   const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], [3, out], [4, det]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, xb], [1, yb], ...(mb ? [[2, mb] as const] : []), [3, out], [4, det]] as const).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
   const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
   pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); pass.end();
   device.queue.submit([enc.finish()]);
   const got = new Float32Array(await readBuffer(device, out));
-  xb.destroy(); yb.destroy(); out.destroy();
+  xb.destroy(); yb.destroy(); mb?.destroy(); out.destroy();
   return got;
 }
 
-test("GPU projection active set (ogcProjectActive): q is ogcProjectTrial's bit for bit, every reported normal is a non-cap certificate binding q, every certificate binding q lies in their span, travel is set exactly when a binding certificate is no contact at q (the cap, a piece's ball, an orthant face where the field is at least r, a record with its far bit), and the result is bit-identical for any record order", { skip: !gpu }, async () => {
-  await withContactDevice(async device => {
-    const R = rng(91), N = 2048;
-    const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
-    const a = unitRand(), th = 1.3, cs = Math.cos(th), sn = Math.sin(th), K = [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
-    const Rb = [0, 1, 2].map(i => [0, 1, 2].map(j => Math.fround((i === j ? cs : 0) + sn * K[i]![j]! + (1 - cs) * a[i]! * a[j]!)));
-    const fr = (v: V3) => v.map(Math.fround) as V3;
-    const cases = Array.from({ length: N }, () => {
-      const k = projectionCase(R, Rb);
-      const piece = (p: typeof k.solid) => p && { o: fr(p.o), q: fr(p.q), Rq: Math.fround(p.Rq), D: fr(p.D), Rb: p.Rb };
-      return { R: Math.fround(k.R), planes: k.planes.map(p => ({ m: fr(p.m), b: Math.fround(p.b) })), solid: piece(k.solid), body: piece(k.body), y: k.y };
-    });
-    const c = cases.map(() => fr(scale(unitRand(), 1.5 * R())));
-    const Y = cases.map((k, v) => fr(add(c[v]!, k.y)));
-    // Travel's inputs: a ball's field (radius 0.9 m, so the anchors straddle it) at r = 0.1 m, and a far bit on about half the records.
-    const field = buildClothSolidField({ sdf: p => Math.hypot(p[0], p[1], p[2]) - 0.9, lo: [-1.7, -1.7, -1.7], hi: [1.7, 1.7, 1.7], cell: 0.05, band: 0.3 });
-    const extra = { far: cases.map(k => k.planes.map(() => R() < 0.5)), field, r: 0.1 };
-    const counts = [0, 0, 0, 0];
-    let capOn = 0, worstNormal = 0, worstSpan = 0, binding = 0;
-    const travels = { cap: 0, ball: 0, faceFar: 0, faceNear: 0, recordFar: 0, recordNear: 0, set: 0 };
-    const bad: string[] = [];
-    for (const levelled of [false, true]) {
-      const buf = storage(device, projectionBuffer(cases, c, Rb, levelled, false, extra));
-      const qs = await evalProject(device, buf, c, Y);
-      const got = await evalActive(device, buf, c, Y);
-      const rev = storage(device, projectionBuffer(cases, c, Rb, levelled, true, extra));
-      const back = await evalActive(device, rev, c, Y);
-      buf.destroy(); rev.destroy();
-      const orderDep = got.findIndex((x, i) => !Object.is(x, back[i]));
-      if (orderDep >= 0) bad.push(`vertex ${Math.floor(orderDep / 20)} (levelled ${levelled}): the active set depends on the records' order`);
-      cases.forEach((k, v) => {
-        const at = (i: number): V3 => [got[20 * v + 4 * i]!, got[20 * v + 4 * i + 1]!, got[20 * v + 4 * i + 2]!];
-        const q = at(0), flags = got[20 * v + 3]!, count = flags % 4, held = (flags & 4) !== 0, cap = (flags & 8) !== 0;
-        if (!q.every((x, i) => Object.is(x, qs[v]![i]))) bad.push(`vertex ${v}: q ${q} is not ogcProjectTrial's ${qs[v]}`);
-        if (held) bad.push(`vertex ${v}: held with no inside marker`);
-        counts[count]!++; if (cap) capOn++;
-        const zq = sub(q, c[v]!), zy = sub(Y[v]!, c[v]!), am = (p: V3) => Math.max(...p.map(Math.abs));
-        // The GPU's binding slack: 4 tau + 2^-20 (|q|_inf + |c|_inf), tau = 2^-17 (R + |y - c|).
-        const tol = 2 ** -15 * (k.R + norm(zy)) + 2 ** -20 * (am(q) + am(c[v]!));
-        const cons = projectionCaseCons(k);
-        const outward = (j: number): V3 => { const q2 = cons[j]!; return q2.ball ? scale(sub(zq, q2.c), 1 / norm(sub(zq, q2.c))) : scale(q2.n, 1 / norm(q2.n)); };
-        const viol = cons.map(q2 => conViolation(q2, zq));
-        // Each normal's f32 rounding: a ball's (z - o)/|z - o| carries z = q - c's world rounding (|dz| <= sqrt(3)
-        // 2^-24 (|q|_inf + |c|_inf) < 2^-23 (...)) twice over |z - o|; an orthant face's D s - q (and its turn) a few
-        // ulps of |D| + |q| over |D s - q|; a plane's is the record's own.
-        const round = 2 ** -22 * (am(q) + am(c[v]!));
-        const normTol: number[] = [0, ...k.planes.map(() => 1e-6)];
-        for (const piece of [k.solid, k.body]) {
-          if (!piece) continue;
-          const pc = solidPieceCons(piece.o, piece.q, piece.Rq, piece.D, piece.Rb), dq = norm(piece.D) + norm(piece.q);
-          pc.forEach(q2 => normTol.push(q2.ball ? round / Math.max(norm(sub(zq, q2.c)), 1e-30) + 1e-6 : 16 * 2 ** -24 * dq / norm(q2.n) + 1e-6));
-        }
-        assert.equal(normTol.length, cons.length);
-        const ns = [1, 2, 3].slice(0, count).map(at);
-        // Reported: the outward normal of a non-cap certificate within the slack, to that normal's rounding.
-        ns.forEach((n, i) => {
-          let best = Infinity;
-          for (let j = 1; j < cons.length; j++) if (viol[j]! >= -1.5 * tol) best = Math.min(best, norm(sub(n, outward(j))) / normTol[j]!);
-          worstNormal = Math.max(worstNormal, best);
-          if (!(best <= 1)) bad.push(`vertex ${v}: normal ${i} ${n} is no binding certificate's (nearest at ${best.toFixed(2)} of its rounding)`);
-        });
-        // Every certificate binding q well inside the slack lies in the reported normals' span.
-        const basis: V3[] = [];
-        for (const n of ns) { let e = n; for (const b of basis) e = sub(e, scale(b, dot(e, b))); const l = norm(e); if (l > 1e-9) basis.push(scale(e, 1 / l)); }
-        for (let j = 1; j < cons.length; j++) {
-          if (!(viol[j]! >= -0.5 * tol)) continue;
-          binding++;
-          let e = outward(j); for (const b of basis) e = sub(e, scale(b, dot(e, b)));
-          worstSpan = Math.max(worstSpan, norm(e));
-          if (!(norm(e) <= 1e-4 + normTol[j]!)) bad.push(`vertex ${v} (levelled ${levelled}): certificate ${j} binds q (slack ${(-viol[j]!).toExponential(2)}, tol ${tol.toExponential(2)}) outside the ${count} normals' span by ${norm(e).toExponential(2)}`);
-        }
-        const capV = viol[0]!;
-        if (capV >= -0.5 * tol && !cap) bad.push(`vertex ${v}: the cap binds (slack ${(-capV).toExponential(2)}) but capOn is clear`);
-        if (capV < -1.5 * tol && cap) bad.push(`vertex ${v}: capOn with the cap's slack ${(-capV).toExponential(2)}`);
-        if (cap) { const nc = at(4); const off = norm(sub(nc, scale(zq, 1 / norm(zq)))); if (!(off <= 1e-5)) bad.push(`vertex ${v}: nc off the cap's normal by ${off.toExponential(2)}`); }
-        // Travel: each certificate's kind in cons order (the cap, the records, then per piece its ball and its faces).
-        const travel = (flags & 16) !== 0;
-        const phiAt = (p: V3) => sampleClothSolidField(field, p).phi;
-        const solidPhi = phiAt(q), bodyPhi = phiAt([0, 1, 2].map(i => dot(Rb[i] as V3, q)) as V3);
-        const kinds: ('cap' | 'recordFar' | 'recordNear' | 'ball' | 'face')[] = ['cap', ...k.planes.map((_, j) => extra.far[v]![j] ? 'recordFar' as const : 'recordNear' as const)];
-        const facePhi: number[] = new Array(kinds.length).fill(NaN);
-        for (const [piece, phi] of [[k.solid, solidPhi], [k.body, bodyPhi]] as const) {
-          if (!piece) continue;
-          solidPieceCons(piece.o, piece.q, piece.Rq, piece.D, piece.Rb).forEach(q2 => { kinds.push(q2.ball ? 'ball' : 'face'); facePhi.push(phi); });
-        }
-        assert.equal(kinds.length, cons.length);
-        // A face's field within f32 rounding of r is undecided.
-        const isTravel = (j: number) => kinds[j] === 'cap' || kinds[j] === 'ball' || kinds[j] === 'recordFar' || (kinds[j] === 'face' && facePhi[j]! >= 0.1);
-        const undecided = (j: number) => kinds[j] === 'face' && Math.abs(facePhi[j]! - 0.1) < 1e-5;
-        let sure = false, maybe = false;
-        for (let j = 0; j < cons.length; j++) {
-          const bindsSurely = viol[j]! >= -0.5 * tol, bindsMaybe = viol[j]! >= -1.5 * tol;
-          if (bindsSurely && kinds[j] === 'face') travels[facePhi[j]! >= 0.1 ? 'faceFar' : 'faceNear']++;
-          else if (bindsSurely) travels[kinds[j] as 'cap' | 'ball' | 'recordFar' | 'recordNear']++;
-          if (bindsMaybe && (isTravel(j) || undecided(j))) maybe = true;
-          if (bindsSurely && isTravel(j) && !undecided(j)) sure = true;
-        }
-        if (travel) travels.set++;
-        if (sure && !travel) bad.push(`vertex ${v} (levelled ${levelled}): a travel bound binds q, travel is clear (kinds ${kinds.filter((_, j) => viol[j]! >= -0.5 * tol).join(',')})`);
-        if (!maybe && travel) bad.push(`vertex ${v} (levelled ${levelled}): travel is set with only contacts binding q (kinds ${kinds.filter((_, j) => viol[j]! >= -1.5 * tol).join(',')})`);
+/** The active set's check, on the Euclidean projection or (metric) on the H_vv metric's. */
+function activeSetCheck(metric: boolean) {
+  return async () => {
+    await withContactDevice(async device => {
+      const R = rng(91), N = 2048;
+      const unitRand = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
+      const a = unitRand(), th = 1.3, cs = Math.cos(th), sn = Math.sin(th), K = [[0, -a[2], a[1]], [a[2], 0, -a[0]], [-a[1], a[0], 0]];
+      const Rb = [0, 1, 2].map(i => [0, 1, 2].map(j => Math.fround((i === j ? cs : 0) + sn * K[i]![j]! + (1 - cs) * a[i]! * a[j]!)));
+      const fr = (v: V3) => v.map(Math.fround) as V3;
+      const cases = Array.from({ length: N }, () => {
+        const k = projectionCase(R, Rb);
+        const piece = (p: typeof k.solid) => p && { o: fr(p.o), q: fr(p.q), Rq: Math.fround(p.Rq), D: fr(p.D), Rb: p.Rb };
+        return { R: Math.fround(k.R), planes: k.planes.map(p => ({ m: fr(p.m), b: Math.fround(p.b) })), solid: piece(k.solid), body: piece(k.body), y: k.y };
       });
-    }
-    if (bad.length) console.log(`${bad.length} active-set failures:\n${bad.slice(0, 12).join('\n')}`);
-    console.log(`projection active set: ${2 * N} trials, counts 0/1/2/3 = ${counts.join('/')}, cap binding ${capOn}; ${binding} binding certificates, all in the span to ${worstSpan.toExponential(2)}; reported normals off their certificate's by ${worstNormal.toFixed(2)} of its rounding at most`);
-    console.log(`projection active set travel: set on ${travels.set} trials; surely binding: cap ${travels.cap}, ball ${travels.ball}, faces with the field >= r ${travels.faceFar} / < r ${travels.faceNear}, records far ${travels.recordFar} / near ${travels.recordNear}`);
-    assert.equal(bad.length, 0, `${bad.length} active-set failures`);
-    assert.ok(counts[1]! + counts[2]! + counts[3]! > N / 4, "the cases bind certificates");
-    for (const [kind, n] of Object.entries(travels)) assert.ok(n > 20, `the cases exercise travel's ${kind} (${n})`);
-  });
-});
+      const c = cases.map(() => fr(scale(unitRand(), 1.5 * R())));
+      const Y = cases.map((k, v) => fr(add(c[v]!, k.y)));
+      // Travel's inputs: a ball's field (radius 0.9 m, so the anchors straddle it) at r = 0.1 m, and a far bit on about half the records.
+      const field = buildClothSolidField({ sdf: p => Math.hypot(p[0], p[1], p[2]) - 0.9, lo: [-1.7, -1.7, -1.7], hi: [1.7, 1.7, 1.7], cell: 0.05, band: 0.3 });
+      const extra = { far: cases.map(k => k.planes.map(() => R() < 0.5)), field, r: 0.1 };
+      // In the H_vv metric: identity on every third vertex, else condition up to 1e4 (the binding set is the metric point's).
+      const Hinv = metric ? cases.map((_, v) => v % 3 === 0 ? [[1, 0, 0], [0, 1, 0], [0, 0, 1]] : randomMetric(R, 10 ** (4 * R())).map(r => r.map(Math.fround))) : undefined;
+      const counts = [0, 0, 0, 0];
+      let capOn = 0, worstNormal = 0, worstSpan = 0, binding = 0;
+      const travels = { cap: 0, ball: 0, faceFar: 0, faceNear: 0, recordFar: 0, recordNear: 0, set: 0 };
+      const bad: string[] = [];
+      for (const levelled of [false, true]) {
+        const buf = storage(device, projectionBuffer(cases, c, Rb, levelled, false, extra));
+        const qs = await evalProject(device, buf, c, Y, Hinv);
+        const got = await evalActive(device, buf, c, Y, Hinv);
+        const rev = storage(device, projectionBuffer(cases, c, Rb, levelled, true, extra));
+        const back = await evalActive(device, rev, c, Y, Hinv);
+        buf.destroy(); rev.destroy();
+        const orderDep = got.findIndex((x, i) => !Object.is(x, back[i]));
+        if (orderDep >= 0) bad.push(`vertex ${Math.floor(orderDep / 20)} (levelled ${levelled}): the active set depends on the records' order`);
+        cases.forEach((k, v) => {
+          const at = (i: number): V3 => [got[20 * v + 4 * i]!, got[20 * v + 4 * i + 1]!, got[20 * v + 4 * i + 2]!];
+          const q = at(0), flags = got[20 * v + 3]!, count = flags % 4, held = (flags & 4) !== 0, cap = (flags & 8) !== 0;
+          if (!q.every((x, i) => Object.is(x, qs[v]![i]))) bad.push(`vertex ${v}: q ${q} is not ogcProjectTrial's ${qs[v]}`);
+          if (held) bad.push(`vertex ${v}: held with no inside marker`);
+          counts[count]!++; if (cap) capOn++;
+          const zq = sub(q, c[v]!), zy = sub(Y[v]!, c[v]!), am = (p: V3) => Math.max(...p.map(Math.abs));
+          // The GPU's binding slack: 4 tau + 2^-20 (|q|_inf + |c|_inf), tau = 2^-17 (R + |y - c|).
+          const tol = 2 ** -15 * (k.R + norm(zy)) + 2 ** -20 * (am(q) + am(c[v]!));
+          const cons = projectionCaseCons(k);
+          const outward = (j: number): V3 => { const q2 = cons[j]!; return q2.ball ? scale(sub(zq, q2.c), 1 / norm(sub(zq, q2.c))) : scale(q2.n, 1 / norm(q2.n)); };
+          const viol = cons.map(q2 => conViolation(q2, zq));
+          // Each normal's f32 rounding: a ball's (z - o)/|z - o| carries z = q - c's world rounding (|dz| <= sqrt(3)
+          // 2^-24 (|q|_inf + |c|_inf) < 2^-23 (...)) twice over |z - o|; an orthant face's D s - q (and its turn) a few
+          // ulps of |D| + |q| over |D s - q|; a plane's is the record's own.
+          const round = 2 ** -22 * (am(q) + am(c[v]!));
+          const normTol: number[] = [0, ...k.planes.map(() => 1e-6)];
+          for (const piece of [k.solid, k.body]) {
+            if (!piece) continue;
+            const pc = solidPieceCons(piece.o, piece.q, piece.Rq, piece.D, piece.Rb), dq = norm(piece.D) + norm(piece.q);
+            pc.forEach(q2 => normTol.push(q2.ball ? round / Math.max(norm(sub(zq, q2.c)), 1e-30) + 1e-6 : 16 * 2 ** -24 * dq / norm(q2.n) + 1e-6));
+          }
+          assert.equal(normTol.length, cons.length);
+          const ns = [1, 2, 3].slice(0, count).map(at);
+          // Reported: the outward normal of a non-cap certificate within the slack, to that normal's rounding.
+          ns.forEach((n, i) => {
+            let best = Infinity;
+            for (let j = 1; j < cons.length; j++) if (viol[j]! >= -1.5 * tol) best = Math.min(best, norm(sub(n, outward(j))) / normTol[j]!);
+            worstNormal = Math.max(worstNormal, best);
+            if (!(best <= 1)) bad.push(`vertex ${v}: normal ${i} ${n} is no binding certificate's (nearest at ${best.toFixed(2)} of its rounding)`);
+          });
+          // Every certificate binding q well inside the slack lies in the reported normals' span.
+          const basis: V3[] = [];
+          for (const n of ns) { let e = n; for (const b of basis) e = sub(e, scale(b, dot(e, b))); const l = norm(e); if (l > 1e-9) basis.push(scale(e, 1 / l)); }
+          for (let j = 1; j < cons.length; j++) {
+            if (!(viol[j]! >= -0.5 * tol)) continue;
+            binding++;
+            let e = outward(j); for (const b of basis) e = sub(e, scale(b, dot(e, b)));
+            worstSpan = Math.max(worstSpan, norm(e));
+            if (!(norm(e) <= 1e-4 + normTol[j]!)) bad.push(`vertex ${v} (levelled ${levelled}): certificate ${j} binds q (slack ${(-viol[j]!).toExponential(2)}, tol ${tol.toExponential(2)}) outside the ${count} normals' span by ${norm(e).toExponential(2)}`);
+          }
+          const capV = viol[0]!;
+          if (capV >= -0.5 * tol && !cap) bad.push(`vertex ${v}: the cap binds (slack ${(-capV).toExponential(2)}) but capOn is clear`);
+          if (capV < -1.5 * tol && cap) bad.push(`vertex ${v}: capOn with the cap's slack ${(-capV).toExponential(2)}`);
+          if (cap) { const nc = at(4); const off = norm(sub(nc, scale(zq, 1 / norm(zq)))); if (!(off <= 1e-5)) bad.push(`vertex ${v}: nc off the cap's normal by ${off.toExponential(2)}`); }
+          // Travel: each certificate's kind in cons order (the cap, the records, then per piece its ball and its faces).
+          const travel = (flags & 16) !== 0;
+          const phiAt = (p: V3) => sampleClothSolidField(field, p).phi;
+          const solidPhi = phiAt(q), bodyPhi = phiAt([0, 1, 2].map(i => dot(Rb[i] as V3, q)) as V3);
+          const kinds: ('cap' | 'recordFar' | 'recordNear' | 'ball' | 'face')[] = ['cap', ...k.planes.map((_, j) => extra.far[v]![j] ? 'recordFar' as const : 'recordNear' as const)];
+          const facePhi: number[] = new Array(kinds.length).fill(NaN);
+          for (const [piece, phi] of [[k.solid, solidPhi], [k.body, bodyPhi]] as const) {
+            if (!piece) continue;
+            solidPieceCons(piece.o, piece.q, piece.Rq, piece.D, piece.Rb).forEach(q2 => { kinds.push(q2.ball ? 'ball' : 'face'); facePhi.push(phi); });
+          }
+          assert.equal(kinds.length, cons.length);
+          // A face's field within f32 rounding of r is undecided.
+          const isTravel = (j: number) => kinds[j] === 'cap' || kinds[j] === 'ball' || kinds[j] === 'recordFar' || (kinds[j] === 'face' && facePhi[j]! >= 0.1);
+          const undecided = (j: number) => kinds[j] === 'face' && Math.abs(facePhi[j]! - 0.1) < 1e-5;
+          let sure = false, maybe = false;
+          for (let j = 0; j < cons.length; j++) {
+            const bindsSurely = viol[j]! >= -0.5 * tol, bindsMaybe = viol[j]! >= -1.5 * tol;
+            if (bindsSurely && kinds[j] === 'face') travels[facePhi[j]! >= 0.1 ? 'faceFar' : 'faceNear']++;
+            else if (bindsSurely) travels[kinds[j] as 'cap' | 'ball' | 'recordFar' | 'recordNear']++;
+            if (bindsMaybe && (isTravel(j) || undecided(j))) maybe = true;
+            if (bindsSurely && isTravel(j) && !undecided(j)) sure = true;
+          }
+          if (travel) travels.set++;
+          if (sure && !travel) bad.push(`vertex ${v} (levelled ${levelled}): a travel bound binds q, travel is clear (kinds ${kinds.filter((_, j) => viol[j]! >= -0.5 * tol).join(',')})`);
+          if (!maybe && travel) bad.push(`vertex ${v} (levelled ${levelled}): travel is set with only contacts binding q (kinds ${kinds.filter((_, j) => viol[j]! >= -1.5 * tol).join(',')})`);
+        });
+      }
+      if (bad.length) console.log(`${bad.length} active-set failures:\n${bad.slice(0, 12).join('\n')}`);
+      console.log(`projection active set: ${2 * N} trials, counts 0/1/2/3 = ${counts.join('/')}, cap binding ${capOn}; ${binding} binding certificates, all in the span to ${worstSpan.toExponential(2)}; reported normals off their certificate's by ${worstNormal.toFixed(2)} of its rounding at most`);
+      console.log(`projection active set travel: set on ${travels.set} trials; surely binding: cap ${travels.cap}, ball ${travels.ball}, faces with the field >= r ${travels.faceFar} / < r ${travels.faceNear}, records far ${travels.recordFar} / near ${travels.recordNear}`);
+      assert.equal(bad.length, 0, `${bad.length} active-set failures`);
+      assert.ok(counts[1]! + counts[2]! + counts[3]! > N / 4, "the cases bind certificates");
+      for (const [kind, n] of Object.entries(travels)) assert.ok(n > 20, `the cases exercise travel's ${kind} (${n})`);
+    });
+  };
+}
+test("GPU projection active set (ogcProjectActive): q is ogcProjectTrial's bit for bit, every reported normal is a non-cap certificate binding q, every certificate binding q lies in their span, travel is set exactly when a binding certificate is no contact at q (the cap, a piece's ball, an orthant face where the field is at least r, a record with its far bit), and the result is bit-identical for any record order", { skip: !gpu }, activeSetCheck(false));
+test("GPU projection active set in the H_vv metric (OgcVertexBlockOptions.metric): the same checks with ogcProjectActive on the metric projection, identity and random metrics to condition 1e4", { skip: !gpu }, activeSetCheck(true));
 
 /** Three sheets 4 mm apart, out of contact (r = 1 mm), lightly jittered. */
 function spacedStack(seed: number): OracleMesh {

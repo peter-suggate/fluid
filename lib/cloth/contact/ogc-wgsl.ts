@@ -543,6 +543,13 @@ export interface OgcVertexBlockOptions {
    * the host then defines fn ogcDir(i: u32) -> vec3<f32> too, the vector H multiplies.
    */
   newton?: boolean;
+  /**
+   * The projection's metric (the contact config's projectionMetric 'hvv'): the name of the host's fn(v: u32) ->
+   * mat3x3<f32> returning H_vv^-1 (nwVertexInv, C1's Newton solver). The trial's projection then minimises
+   * (q - y)^T H_vv (q - y) over the half-space certificates and the radial exit keeps the balls
+   * (OGC_PROJECT_METRIC_WGSL). Omitted: the exact Euclidean projection above, and the block is the one without it.
+   */
+  metric?: string;
 }
 
 /**
@@ -982,15 +989,188 @@ fn ogcProjectActive(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> OgcActive
 fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return ogcProjectTrial(v, x, y, 1.0); }
 `;
 
+/**
+ * The projection in the metric of Newton's vertex block (the contact config's projectionMetric 'hvv'; default 'off', the
+ * exact Euclidean projection of OGC_PROJECT_WGSL, emitted unchanged). The host defines fn ogcMetricInv(v) -> H_vv^-1
+ * (C1's nwVertexInv; a test its own). The trial's projection minimises (q - y)^T H_vv (q - y) over the vertex's
+ * half-space certificates (the plane records, every orthant face of each solid piece: in the metric's coordinates they
+ * stay half-spaces, the balls would not), the metric of Newton's own model for the vertex (C1's t25: the Euclidean
+ * projection zeroed v16's barrier escape, the H_vv one let it out); then the radial exit from o (ogcArcExit, as the
+ * Euclidean path's) keeps the balls (the cap, the pieces' balls) and certifies the point. It is the exact metric
+ * projection onto the whole set wherever no ball binds there (the set is convex and o in it, so the segment to a
+ * feasible point is kept whole), and continuous in alpha (the plane projection is continuous in y and in the anchor
+ * c(a), and so is the gauge of a convex set about an interior point). Deterministic for any record order: the working
+ * set is the Euclidean path's (constraint generation, ties by the records' bits, candidates in key order).
+ * Numerics: M = 3 H^-1 / tr H^-1 (the argmin is scale-free; lambda_max(M) <= tr M = 3). Every candidate is solved in
+ * z, never in M^-1's coordinates (that amplified the rounding by K^-1, M = K K^T, up to 100x at condition 1e4):
+ * z = y - M N lambda with (N^T M N) lambda = N^T y - beta by Cholesky, one refinement step on the residual N^T z - beta
+ * measured in z (a wedge of near-parallel faces in a stiff metric makes N^T M N ill-conditioned and z cancels the
+ * large lambda M n: unrefined, a candidate missed its own faces past tau and the working set stopped at a wrong point,
+ * up to 0.25 of the scale off at condition 1e3-1e4), and a candidate not on its own faces to tau after it is no
+ * candidate (past 1 / f32's epsilon the refinement no longer converges; a smaller or other subset stands in). Its
+ * metric distance is lambda . (N^T y - beta). Measured against the Float64 oracle (tests/cloth-contact-gpu.test.ts,
+ * 4096 trials to condition 1e4): within 0.5 um of the exact point, or (a stiff wedge, where tau-perturbed faces move
+ * the vertex by tau / sin(angle)) no worse in the metric's objective than the exact projection onto the set pulled
+ * in by one more tau; 5.6e-5 of the scale R + |y - c| at most. A metric not positive definite to f32 holds the vertex.
+ */
+const OGC_PROJECT_METRIC_WGSL = /* wgsl */`
+// The half-space certificate z violates most by more than tau (ties by the record's bits), or OGC_NONE: the plane
+// records and every orthant face of each solid piece (the balls are the exit's).
+fn ogcMostViolatedHalf(k: OgcProjSet, z: vec3<f32>, tau: f32) -> u32 {
+  var worst = OgcWorst(OGC_NONE, 0.0, vec4<u32>(0u));
+  for (var i = 0u; i < k.n; i++) { ogcConsider(&worst, k, i, ogcConViol(ogcConOf(k, i), z), tau); }
+  if (k.sOn) { for (var o = 0u; o < 8u; o++) { ogcConsider(&worst, k, OGC_CON_SOLID + o, ogcConViol(ogcConOf(k, OGC_CON_SOLID + o), z), tau); } }
+  if (k.bOn) { for (var o = 0u; o < 8u; o++) { ogcConsider(&worst, k, OGC_CON_BODY + o, ogcConViol(ogcConOf(k, OGC_CON_BODY + o), z), tau); } }
+  return worst.id;
+}
+// The nearest point to y in the metric M^-1 (argmin (z - y)^T M^-1 (z - y)) of the intersection of the m (<= 3) plane
+// boundaries cs[0..m) (ok false: empty or degenerate, a Cholesky pivot of N^T M N at or below OGC_GS_FLOOR^2 of its
+// diagonal, or the solve lost it; a smaller subset covers it), with its metric distance.
+struct OgcNear { ok: bool, z: vec3<f32>, dist: f32 }
+fn ogcNearestMetric(cons: array<OgcCon, 4>, mask: u32, y: vec3<f32>, M: mat3x3<f32>, tau: f32) -> OgcNear {
+  var none: OgcNear; none.ok = false;
+  var n: array<vec3<f32>, 3>; var b: array<f32, 3>; var r: array<f32, 3>; var mn: array<vec3<f32>, 3>; var m = 0u;
+  for (var i = 0u; i < 4u; i++) {
+    if ((mask & (1u << i)) == 0u) { continue; }
+    let l = length(cons[i].n);
+    if (!(l > 0.0)) { return none; }
+    n[m] = cons[i].n / l; b[m] = cons[i].beta / l; r[m] = dot(n[m], y) - b[m]; mn[m] = M * n[m]; m++;
+  }
+  // Cholesky of G = N^T M N (G_ij = n_i . M n_j), forward and back substitution.
+  var L: array<array<f32, 3>, 3>;
+  for (var i = 0u; i < m; i++) {
+    for (var j = 0u; j <= i; j++) {
+      var g = dot(n[i], mn[j]);
+      for (var q = 0u; q < j; q++) { g -= L[i][q] * L[j][q]; }
+      if (i == j) {
+        if (!(g > OGC_GS_FLOOR * OGC_GS_FLOOR * dot(n[i], mn[i]))) { return none; }
+        L[i][i] = sqrt(g);
+      } else { L[i][j] = g / L[j][j]; }
+    }
+  }
+  var u: array<f32, 3>;
+  for (var i = 0u; i < m; i++) { var e = r[i]; for (var q = 0u; q < i; q++) { e -= L[i][q] * u[q]; } u[i] = e / L[i][i]; }
+  var z = y;
+  ogcCholBack(L, &u, m);
+  for (var i = 0u; i < m; i++) { z -= u[i] * mn[i]; }
+  // One refinement step on the residual measured in z.
+  var lam = u;
+  for (var i = 0u; i < m; i++) { var e = dot(n[i], z) - b[i]; for (var q = 0u; q < i; q++) { e -= L[i][q] * u[q]; } u[i] = e / L[i][i]; }
+  ogcCholBack(L, &u, m);
+  for (var i = 0u; i < m; i++) { z -= u[i] * mn[i]; lam[i] += u[i]; }
+  // On its own faces to tau, or the solve has lost it.
+  for (var i = 0u; i < m; i++) { if (!(abs(dot(n[i], z) - b[i]) <= tau)) { return none; } }
+  // (z - y)^T M^-1 (z - y) = lambda^T G lambda = lambda . (N^T y - beta) on its faces.
+  var dist = 0.0;
+  for (var i = 0u; i < m; i++) { dist += lam[i] * r[i]; }
+  return OgcNear(true, z, dist);
+}
+// Back substitution L^T x = u in place.
+fn ogcCholBack(L: array<array<f32, 3>, 3>, u: ptr<function, array<f32, 3>>, m: u32) {
+  for (var ii = 0u; ii < m; ii++) {
+    let i = m - 1u - ii;
+    var e = (*u)[i]; for (var q = i + 1u; q < m; q++) { e -= L[q][i] * (*u)[q]; }
+    (*u)[i] = e / L[i][i];
+  }
+}
+// The exact projection in the metric M^-1 of zy (relative to the anchor) onto the vertex's half-space certificates,
+// each pulled in by k.margin = 2 tau, feasible to tau: the Euclidean path's working set (ogcProjectExact).
+fn ogcProjectExactMetric(k: OgcProjSet, zy: vec3<f32>, tau: f32, M: mat3x3<f32>) -> vec3<f32> {
+  var z = zy;
+  var S: array<u32, 4>; var ns = 0u;
+  for (var it = 0u; it < OGC_PROJECT_ROUNDS; it++) {
+    let jn = ogcMostViolatedHalf(k, z, tau);
+    if (jn == OGC_NONE) { break; }
+    // Insert it in key order (one already in S, violated past tau, is rounding: stop there).
+    let kj = ogcConKey(k, jn);
+    var dup = false;
+    for (var i = 0u; i < ns; i++) { dup = dup || S[i] == jn; }
+    if (dup) { break; }
+    var at = ns;
+    while (at > 0u && ogcKeyLess(kj, ogcConKey(k, S[at - 1u]))) { S[at] = S[at - 1u]; at--; }
+    S[at] = jn; ns++;
+    var cs: array<OgcCon, 4>;
+    for (var i = 0u; i < ns; i++) { cs[i] = ogcConOf(k, S[i]); }
+    // The nearest feasible candidate (else the least violating one).
+    var best = vec3<f32>(0.0); var bestMask = 0u; var bestD = 0.0; var bestV = 0.0;
+    for (var mask = 1u; mask < (1u << ns); mask++) {
+      if (countOneBits(mask) > 3u) { continue; }
+      let q = ogcNearestMetric(cs, mask, zy, M, tau);
+      if (!q.ok) { continue; }
+      var mv = -3.0e38;
+      for (var i = 0u; i < ns; i++) { mv = max(mv, ogcConViol(cs[i], q.z)); }
+      let ok = mv <= tau;
+      if (bestMask == 0u || (ok && (bestV > tau || q.dist < bestD)) || (!ok && bestV > tau && mv < bestV)) {
+        best = q.z; bestMask = mask; bestD = q.dist; bestV = mv;
+      }
+    }
+    if (bestMask == 0u) { break; }
+    z = best;
+    var m = 0u;
+    for (var i = 0u; i < ns; i++) { if ((bestMask & (1u << i)) != 0u) { S[m] = S[i]; m++; } }
+    ns = m;
+  }
+  return z;
+}
+// The metric at v: M = 3 H_vv^-1 / tr H_vv^-1; ok: M positive definite to f32 (its Cholesky pivots positive).
+struct OgcMetric { ok: bool, M: mat3x3<f32> }
+fn ogcMetricOf(v: u32) -> OgcMetric {
+  let H = ogcMetricInv(v);
+  var m: OgcMetric;
+  m.ok = false;
+  let tr = H[0][0] + H[1][1] + H[2][2];
+  if (!(tr > 0.0)) { return m; }
+  let M = (3.0 / tr) * H;
+  if (!(M[0][0] > 0.0)) { return m; }
+  let l10 = M[0][1] / sqrt(M[0][0]); let l20 = M[0][2] / sqrt(M[0][0]);
+  let a11 = M[1][1] - l10 * l10;
+  if (!(a11 > 0.0)) { return m; }
+  let l21 = (M[1][2] - l20 * l10) / sqrt(a11);
+  if (!(M[2][2] - l20 * l20 - l21 * l21 > 0.0)) { return m; }
+  m.M = M;
+  m.ok = true;
+  return m;
+}
+// The projected trial in the metric, w = 1 where the vertex holds (t.held, or its metric not positive definite: x).
+fn ogcProjectAtMetric(v: u32, t: OgcTrialCtx, x: vec3<f32>, y: vec3<f32>) -> vec4<f32> {
+  if (t.held) { return vec4<f32>(x, 1.0); }
+  // A trial every certificate keeps whole along the joint path from (x, L) (the filter's own test) is the point itself.
+  if (ogcArcScale(t.fb, t.first, t.n, x - t.cx, (y - x) - (t.U - t.u) * t.w, x, y - x, t.Rb) >= 1.0) { return vec4<f32>(y, 0.0); }
+  let met = ogcMetricOf(v);
+  if (!met.ok) { return vec4<f32>(x, 1.0); }
+  let zy = y - t.c;
+  // tau = 2^-17 (R + |y - c|).
+  let tau = 7.62939453125e-6 * (ogcProj4(t.fb).w + length(zy));
+  let p = t.c + ogcProjectExactMetric(ogcTrialSet(t, 2.0 * tau), zy, tau, met.M);
+  // From the anchor c(a) in a levelled round (every certificate holds it), else from the iterate.
+  let o = select(x, t.c, t.levelled);
+  let e = p - o;
+  return vec4<f32>(o + ogcArcExit(t.fb, t.first, t.n, o - t.c, e, o, e, t.Rb) * e, 0.0);
+}
+`;
+
+/** OGC_PROJECT_WGSL with its projection in the metric (OGC_PROJECT_METRIC_WGSL): its two call sites, each exactly once. */
+function ogcProjectMetricWGSL(): string {
+  let s = OGC_PROJECT_WGSL;
+  const swap = (from: string, to: string) => {
+    if (s.split(from).length !== 2) throw new Error(`ogcProjectMetricWGSL: expected one ${JSON.stringify(from)}`);
+    s = s.replace(from, to);
+  };
+  swap("{ return ogcProjectAt(ogcTrialCtx(v, alpha), x, y); }", "{ return ogcProjectAtMetric(v, ogcTrialCtx(v, alpha), x, y).xyz; }");
+  swap("  s.a.q = ogcProjectAt(t, x, y);\n  s.a.held = t.held;\n  if (t.held) { return s.a; }",
+    "  let pq = ogcProjectAtMetric(v, t, x, y);\n  s.a.q = pq.xyz;\n  s.a.held = pq.w != 0.0;\n  if (s.a.held) { return s.a; }");
+  return s + OGC_PROJECT_METRIC_WGSL;
+}
+
 export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
-  const { group, binding } = options;
+  const { group, binding, metric } = options;
   return /* wgsl */`
 ${OGC_COMMON_WGSL}
 @group(${group}) @binding(${binding}) var<storage, read> ogcContacts: array<vec4<u32>>;
 fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
 fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
 ${OGC_SOLID_WGSL}
-${OGC_PROJECT_WGSL}
+${metric ? `fn ogcMetricInv(v: u32) -> mat3x3<f32> { return ${metric}(v); }\n${ogcProjectMetricWGSL()}` : OGC_PROJECT_WGSL}
 // Surface sample at index i >= N (sample-facet entries): static below N + S, else the
 // moving solid's body-frame sample posed at the step's end, and where it started the step.
 fn ogcSampleRel(i: u32) -> u32 { return i - ogcContacts[0].x; }

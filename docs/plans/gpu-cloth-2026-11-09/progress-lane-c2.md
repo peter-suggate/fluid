@@ -2580,3 +2580,62 @@ so the solid's surface is represented consistently and the field needs no loweri
 - Gates: face 360, the frustum drape at zero true penetration, the incline and the full ladder.
 - Report: the extra pairs (only near convex features) and their cost.
 - Order: the H_vv metric first, then (C), then the least shift.
+
+## 2026-11-10 — The H_vv metric projection, landed behind solver.contactProjectionMetric (default 'off')
+
+Coordinator ruling: land the metric behind a switch that defaults off, so C1's like-for-like ablation can use it.
+
+**The switch.** `ClothSolverSettings.contactProjectionMetric?: 'off' | 'hvv'` (lib/cloth/types.ts; topology.ts rejects
+unknown values) -> `OgcContactConfig.projectionMetric` (scene-contact.ts) -> `OgcVertexBlockOptions.metric`
+(ogc-detector.ts passes `nwVertexInv`, the Newton block's inverse diagonal block).
+- Unknown metrics fail explicitly, and so does a metric without the Newton filter.
+- **Off is HEAD.** With the switch off, the vertex block is HEAD's WGSL string for string: all block variants and
+  every ogc-detector-wgsl export were compared against a HEAD export (15 same, 0 differ). That includes HEAD's exact
+  Euclidean projection onto the balls and HEAD's ogcNearest; the refinement lives only on the metric path.
+- **The metric path** (ogc-wgsl.ts OGC_PROJECT_METRIC_WGSL, swapped in by two exact-match substitutions that throw
+  if either is not found exactly once):
+  - M = 3 H_vv^-1 / tr. Minimise (z - y)^T M^-1 (z - y) over the half-spaces only: the plane records and the 8 orthant
+    faces of each solid piece.
+  - Candidates z = y - M N lambda, from a Cholesky of G = N^T M N with an OGC_GS_FLOOR^2 pivot floor.
+  - One refinement step on the residual N^T z - beta measured at z.
+  - A candidate that is not on its own faces to within tau is rejected.
+  - dist = lambda . (N^T y - beta).
+  - Then the radial exit (ogcArcExit) from o keeps the cap and the balls.
+  - The f32 error that remains is the problem's own conditioning: a wedge vertex moves by tau / sin(angle).
+
+**Projection accuracy (tests/cloth-contact-gpu.test.ts, new tests; HEAD's tests are unchanged).**
+
+| Check | Result |
+|---|---|
+| Euclidean (switch off), HEAD's test | 4096 trials, off the Float64 projection by 1.06e-7 m at most (2.33e-5 of the scale); certificates left by 0 |
+| Metric, every third vertex at the identity | every identity trial within 0.5 um of the exact point |
+| Metric, condition 1e0-1e1 / 1e1-1e2 / 1e2-1e3 / 1e3-1e4 | max off over the scale 2.18e-5 / 1.29e-5 / 1.72e-5 / 5.62e-5 |
+| Metric, all 4096 trials | off by 2.05e-6 m at most (5.62e-5 of the scale); certificates left by 6.45e-8 m at most |
+| Metric objective where a trial is > 0.5 um off | at most -0.11 output-ulp units over the exact projection at margin 3 tau (<= 1 passes) |
+| Metric active set (ogcProjectActive) | q is ogcProjectTrial's bit for bit; certificates in the reported span to 4.53e-5 |
+
+**Ladder with the switch on and off (tests/cloth-contact-ladder.test.ts: flat, sphere and determinism now each run both ways).**
+
+| Rung | off (HEAD) | hvv |
+|---|---|---|
+| Flat 16^2 | rebound 0.0009 m/s, rests at 0.999 mm, records peak 0 | the same |
+| Sphere 16^2, vy at tick 10 / 15 (free fall -1.635 / -2.453) | -1.215 / -1.632 | -1.363 / -1.825 |
+| Sphere 16^2, to tick 60 | passes | **todo:** halts on heldConflict at tick 46 |
+| Determinism, 3 runs | flat 50 and sphere 60 ticks bit-identical | flat 50 and sphere 45 ticks bit-identical |
+
+- The sphere's todo is named for C1's done-rule fix (nwTravelHeld). The sheet's fall depends on the projection, so
+  Newton's done fires while certificates pin vertices.
+- The tick-46 conflict is an unlevelled fallback round's no-plane pair (edge 119-136 against body samples), which is
+  the least shift's item. It is re-gated with the switch on once C1's fix lands.
+
+**Gates.**
+- The combined round on HEAD 24537a87 plus these files: stiffness, contact ladder/gpu/body/scene-solids/oracle,
+  cloth-ladder, -gpu-solver, -analytic, -system, -newton.
+  - 117 tests: 112 pass, 0 fail, 5 todo; rc 0.
+  - The todos are the 4 already open (the incline's stale todo, which passes; the moving-solid capture; two Newton
+    cut/undo items) and the new hvv sphere.
+- cost-16 (switch off): 74.1 ms/tick (HEAD 73.5; the off path is the same code).
+- check:types is clean.
+- test:unit fails 2, both foreign: the known reservoir-particle-cost test, and
+  paused-rigid-publication.test.ts, another lane's uncommitted test on webgpu-rigid-body.
+- The face-360 todo is unchanged.

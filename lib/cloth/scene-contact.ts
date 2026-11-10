@@ -220,6 +220,8 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     envelopeMeshCap: true,
     // INTERIM (demand bug, C2): the document's authored plane records per vertex, until the relative-motion pair test.
     ...(newton ? { planeRecordCapacity: (document.solver?.contactPlaneRecordsPerVertex ?? C.planeRecordsPerVertex) * N } : {}),
+    // The trial projection's metric: the document's (default 'off', the exact Euclidean projection).
+    ...(newton && document.solver?.contactProjectionMetric ? { projectionMetric: document.solver.contactProjectionMetric } : {}),
     solidSampleCapacity: sampleCapacity(field, r, edge),
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),

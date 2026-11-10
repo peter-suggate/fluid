@@ -1162,5 +1162,39 @@ export function projectionCaseCons(k: ProjectionCase): ProjCon[] {
   for (const s of [k.solid, k.body]) if (s) cons.push(...solidPieceCons(s.o, s.q, s.Rq, s.D, s.Rb));
   return cons;
 }
+/**
+ * The trial's projection as ogcProjectAt computes it, in Float64: the metric H = Hinv^-1 (C1's H_vv), trace-normalised
+ * (M = 3 Hinv / tr Hinv) and Cholesky-factored (M = K K^T), the exact projection in w = K^-1 z of the half-space
+ * certificates pulled in by margin (in z) - the Euclidean brute force there - and then the largest t <= 1 of the segment
+ * from o (inside every certificate) to that point that every certificate, the balls included, keeps. Also the KKT of the
+ * plane projection in w (its residual over |w_y - w_p|), and t.
+ */
+export function metricProjection(cons: ProjCon[], zy: V3, Hinv: number[][], margin: number, tol: number, o: V3 = [0, 0, 0]): { p: V3; plane: V3; W: number[]; t: number; kkt: { violation: number; residual: number; active: number }; toW: (z: V3) => V3 } {
+  const tr = Hinv[0]![0]! + Hinv[1]![1]! + Hinv[2]![2]!, M = Hinv.map(r => r.map(x => 3 * x / tr));
+  const l00 = Math.sqrt(M[0]![0]!), l10 = M[0]![1]! / l00, l20 = M[0]![2]! / l00, l11 = Math.sqrt(M[1]![1]! - l10 * l10);
+  const l21 = (M[1]![2]! - l20 * l10) / l11, l22 = Math.sqrt(M[2]![2]! - l20 * l20 - l21 * l21);
+  if (!(l00 > 0 && l11 > 0 && l22 > 0)) throw new Error("metricProjection: H_vv^-1 is not positive definite");
+  const Kz = (w: V3): V3 => [l00 * w[0], l10 * w[0] + l11 * w[1], l20 * w[0] + l21 * w[1] + l22 * w[2]];
+  const KT = (n: V3): V3 => [l00 * n[0] + l10 * n[1] + l20 * n[2], l11 * n[1] + l21 * n[2], l22 * n[2]];
+  const solve = (z: V3): V3 => { const w0 = z[0] / l00, w1 = (z[1] - l10 * w0) / l11; return [w0, w1, (z[2] - l20 * w0 - l21 * w1) / l22]; };
+  const planes = shrinkCons(cons.filter(k => !k.ball), margin).map(k => { const h = k as { n: V3; beta: number }; return { ball: false as const, n: KT(h.n), beta: h.beta }; });
+  const wy = solve(zy), bf = bruteForceProjection(planes, wy, tol);
+  if (!bf) throw new Error("metricProjection: no feasible candidate");
+  const plane = Kz(bf.p), e = sub(plane, o);
+  let t = 1;
+  for (const k of cons) {
+    if (k.ball) { t = Math.min(t, ballExit(sub(o, k.c), e, k.R)); continue; }
+    const sN = dot(k.n, e), room = k.beta - dot(k.n, o);
+    if (sN > room) t = Math.min(t, Math.max(0, room / sN));
+  }
+  return { p: add(o, scale(e, t)), plane, W: bf.W, t, kkt: projectionKkt(planes, wy, bf.p, 1e3 * tol), toW: solve };
+}
+/** A random symmetric positive definite H_vv^-1 with condition number kappa: Q diag(l) Q^T, l log-spaced over [1, kappa]. */
+export function randomMetric(R: () => number, kappa: number): number[][] {
+  const unitV = (): V3 => { for (;;) { const v: V3 = [2 * R() - 1, 2 * R() - 1, 2 * R() - 1]; const l = norm(v); if (l > 0.1 && l <= 1) return scale(v, 1 / l); } };
+  const a = unitV(), b0 = unitV(), b = unit(sub(b0, scale(a, dot(a, b0)))), c = cross(a, b);
+  const l = [1, kappa ** R(), kappa].map(x => x * (0.5 + R()));
+  return [0, 1, 2].map(i => [0, 1, 2].map(j => l[0]! * a[i]! * a[j]! + l[1]! * b[i]! * b[j]! + l[2]! * c[i]! * c[j]!));
+}
 /** cons with every certificate pulled in by margin (the set ogcProjectExact aims at, margin = 2^-16 (R + |y - c|)). */
 export const shrinkCons = (cons: ProjCon[], margin: number): ProjCon[] => cons.map(k => (k.ball ? { ...k, R: Math.max(k.R - margin, 0) } : { ...k, beta: k.beta - margin * norm(k.n) }));

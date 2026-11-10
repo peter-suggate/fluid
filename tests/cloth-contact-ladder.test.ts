@@ -206,9 +206,20 @@ const authored = (scene: SceneDescription, perVertex: number): SceneDescription 
 const peakRecords = (label: string, r: { track: TickReport[]; N: number }) =>
   console.log(`  ${label}: plane-record peak ${Math.round(Math.max(...r.track.map(t => t.records)) * r.N)} records in one filter (${Math.max(...r.track.map(t => t.records)).toFixed(2)} per vertex)`);
 
-test('ladder: a flat 16 x 16 sheet dropped from 1.2 m (the analytic free fall) lands on the floor, rests at the contact radius without a rebound, with few plane records', { skip: !runs('flat') }, async () => withDevice(async device => {
-  const scene = analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6), r = clothContactRadius(scene.cloth![0]!);
-  const out = await ladder(device, 'flat 16^2', scene, 50);
+/** The scene with every cloth's trial projection in Newton's H_vv metric (solver.contactProjectionMetric 'hvv'). */
+const hvv = (scene: SceneDescription): SceneDescription => ({ ...scene, cloth: scene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactProjectionMetric: 'hvv' as const } })) });
+/**
+ * The metric's known open failure: the falling sheet's motion depends on the projection (sphere 16^2: vy at tick 15
+ * -1.632 m/s Euclidean, -1.825 in the metric, free fall -2.45), so Newton's done fires while certificates pin vertices
+ * (C1's done-rule fix, nwTravelHeld), and in the metric the sphere halts on heldConflict at tick 46 (an unlevelled
+ * fallback round's no-plane pair, the least shift's item). Re-gated when the done-rule fix lands.
+ */
+const HVV_SPHERE_TODO = "C1 done-rule fix (nwTravelHeld: a binding certificate where no barrier acts is travel): in the H_vv metric the sphere halts on heldConflict at tick 46";
+
+for (const metric of [false, true])
+test(`ladder${metric ? ' (H_vv metric)' : ''}: a flat 16 x 16 sheet dropped from 1.2 m (the analytic free fall) lands on the floor, rests at the contact radius without a rebound, with few plane records`, { skip: !runs('flat') }, async () => withDevice(async device => {
+  const flat = analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6), scene = metric ? hvv(flat) : flat, r = clothContactRadius(scene.cloth![0]!);
+  const out = await ladder(device, `flat 16^2${metric ? ' hvv' : ''}`, scene, 50);
   clean('flat', out);
   const t = out.track;
   let k = 0;
@@ -313,8 +324,9 @@ test('ladder: an 8 x 8 sheet lands on a slowly moving large sphere (the plate) a
 // Soundness regression (envelope and pair-bound changes): a cloth-cloth pair bound taken on world-straight
 // paths without the stray sigma_v of the vertices moving with the solid left a vertex inside the solid at
 // tick 37 (item 2 without strayOf, 2026-11-10). Every tick to 60 is checked, faces and solid alike.
-test('ladder: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)', { skip: !runs('sphere') }, async () => withDevice(async device => {
-  const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }));
+for (const metric of [false, true])
+test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)`, { skip: !runs('sphere'), ...(metric ? { todo: HVV_SPHERE_TODO } : {}) }, async () => withDevice(async device => {
+  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), scene = metric ? hvv(base) : base;
   // CLOTH_LADDER_SPHEREDIAG=1: each tick, over every face (a 32-per-side barycentric lattice) and over the vertices, the
   // least value of the static field the detector holds, and of the true frustum's signed distance (scene frame).
   const faces = scene.cloth![0]!.geometry.data.triangles;
@@ -338,7 +350,7 @@ test('ladder: a 16 x 16 sheet lands on the rotating sphere: nothing intersects o
     }
     console.log(`    static field: vertices >= ${vField.toExponential(2)}, faces >= ${fField.toExponential(2)} m (face ${fAt}); true frustum: vertices >= ${vTrue.toExponential(2)}, faces >= ${fTrue.toExponential(2)} m`);
   } : undefined;
-  const out = await ladder(device, 'sphere 16^2', scene, 60, diag);
+  const out = await ladder(device, `sphere 16^2${metric ? ' hvv' : ''}`, scene, 60, diag);
   clean('sphere', out);
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
 }));
@@ -449,6 +461,12 @@ async function determinism(device: GPUDevice, label: string, scene: SceneDescrip
 test('ladder: the flat 16 x 16 drop and the 16 x 16 sphere are deterministic over three runs (the first diverging tick and buffer are reported)', { skip: !runs('determinism') }, async () => withDevice(async device => {
   const flat = await determinism(device, 'flat 16^2', analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 50));
   const sphere = await determinism(device, 'sphere 16^2', bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 60));
+  assert.deepEqual([...flat, ...sphere], []);
+}));
+// In the metric: the flat drop over its 50 ticks, the sphere to tick 45 (it halts at 46 there: HVV_SPHERE_TODO).
+test('ladder (H_vv metric): the flat 16 x 16 drop and the 16 x 16 sphere to tick 45 are deterministic over three runs', { skip: !runs('determinism') }, async () => withDevice(async device => {
+  const flat = await determinism(device, 'flat 16^2 hvv', hvv(analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6)), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 50));
+  const sphere = await determinism(device, 'sphere 16^2 hvv', hvv(bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }))), Math.min(45, Number(process.env.CLOTH_LADDER_DET_TICKS ?? 45)));
   assert.deepEqual([...flat, ...sphere], []);
 }));
 

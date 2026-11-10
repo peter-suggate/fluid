@@ -141,6 +141,12 @@ export interface ClothSolverSettings {
    * planeRecordOverflow, which is how 16 per vertex left the free-fall sheet in the air (ca462bbb).
    */
   readonly contactPlaneRecordsPerVertex?: number;
+  /**
+   * The metric of the contact filter's trial projection: 'off' (default) the exact Euclidean projection onto the
+   * certificates, 'hvv' Newton's own vertex block H_vv (the half-spaces in that metric, then the radial exit keeping
+   * the balls; ogc-wgsl.ts OGC_PROJECT_METRIC_WGSL).
+   */
+  readonly contactProjectionMetric?: 'off' | 'hvv';
 }
 
 /** A solid the cloth would meet that the scene cannot carry yet (a moving
