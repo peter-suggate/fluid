@@ -2037,3 +2037,31 @@ Suite on HEAD with ogcProject live (the overflow bit not failing): 86 tests, 80 
 Making the bit failing turns six tests red. It lands as failing when C2's demand fits an authored per-scene
 capacity. Until then the bit is reported in the system notes, and the held count goes into every gate and benchmark
 output once C2's counter exists.
+
+## 2026-11-10 RESULT (30): the dual rule (method of multipliers only where the primal can respond)
+
+Diagnosis (rotating sphere 150², 'inertial' start, HEAD + ogcProject): the huge directions (max |d| 6.3 mm at tick 14
+to 1.2 m at tick 20) are not a PCG failure. γ/γ0 ≈ 1e-8, there are no curvature exits, and the inertia gradient is
+tiny. They are AVBD duals ramping on strain-limit edges stretched to about 2x rest (25-33 mm against l0 12.75, limit
+14.03). The arc cuts both endpoints of such an edge (the certified set holds them), so the violation does not respond to
+the multiplier. Ascent still steps λ (0.6 -> 413 N) and k (2.8e3 -> 1.8e4), and the warm start
+(λ·αγ, max(γk, s)) carries the ramp into the next step, so |g| follows λ (18 -> 900 N) and |d| doubles each tick.
+
+Rule (nwEdgeDuals, with contact only): no dual or k update in an iteration that moved nothing (the stall, ctl.z = 0),
+and none on an edge an endpoint of which the arc cut at the chosen trial (its stored move is not alpha d). The
+multiplier method's ascent assumes the primal minimised for the current multiplier; where the projection fixed the
+endpoint, the violation measures the projection. The rule leaves the contact-free solver unchanged (the kernel is
+generated as before). A k/λ reset at the refusal was tried and dropped (no benefit); so was the 'previous' start (the
+detector's apply re-anchors at the prediction).
+
+Sphere 0 -> 60 with the rule (diagnostic run, plane capacity 400 N so overflow does not hold vertices): no failing
+status; max |d| 6-44 mm; λ <= 86 N; step-end tick 16 λ 10 N, k 5.3e3, C 9.7 mm; tick 60 λ 5.5 N, k 1.45e4, C 7.7 mm
+(maxC is held by roundCap / envelopeCap from tick 15 and failSafe from tick 28).
+
+Suite (86 tests: newton, gpu-solver, analytic, contact-body, system, contact-gpu, contact-scene-solids, contact-solid,
+grab): 81 pass, 1 fail, 4 todo, on both contact codes.
+- With 7809cbe1's contact: the swing passes (0.4974 s against 0.4960 s converged), and the flat drop fails (rebound 1.16 m/s).
+- With 8b58f374's contact (this commit's tree): the flat drop passes (0.0004 m/s, resting at 0.99 mm), and the swing
+  fails (never passes the pin, at 8 x 200 and at 32 x 800). Plain HEAD 277df0a1 fails the swing identically (NaN at
+  both). Both failures are the plane-record overflow holds of RESULT (29): C2's, the open deviation.
+- Incline: todo (C2 item 5), a = 0.574.

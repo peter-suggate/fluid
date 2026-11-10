@@ -570,9 +570,22 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
 
 // After each applied Newton iteration (not once Newton is done): the AVBD dual update of every strain-limit edge, so
 // the next iteration's gradient carries the new multipliers and the residual test sees any constraint still violated.
+// The method of multipliers steps a dual only where the primal could respond: with contact, not in an iteration that
+// moved nothing (the stall), and not on an edge an endpoint of which the arc cut (its chosen move is not alpha d), since
+// there the violation measures the projection, not the multiplier, and ascent would ramp lambda and k without bound.
 @compute @workgroup_size(${workgroup}) fn nwEdgeDuals(@builtin(global_invocation_id) id: vec3u) {
-  if (nw[nwControl()].x != 0.0) { return; }
+  let ctl = nw[nwControl()];
+  if (ctl.x != 0.0) { return; }${contact ? `
+  if (ctl.z == 0.0 || id.x >= P.n.z) { return; }
+  let ev = edges(id.x);
+  if (nwChosenCut(ev.x, ctl.z) || nwChosenCut(ev.y, ctl.z)) { return; }` : ''}
   updateEdgeDual(id.x);
-}
+}${contact ? `
+// Whether the arc cut vertex v's move at the chosen trial alpha (a power of two, as nwApply reads it).
+fn nwChosenCut(v: u32, alpha: f32) -> bool {
+  let D = nwD4(v);
+  if (D.w == 0.0) { return false; }
+  return any(nw[nseg(${S.moves}u + u32(round(-log2(alpha))), v)].xyz != alpha * D.xyz);
+}` : ''}
 `;
 }
