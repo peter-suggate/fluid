@@ -816,3 +816,111 @@ export function facesInsideSolid(field: ClothSolidField, x: ArrayLike<number>, f
   }
   return { inside, lower };
 }
+
+// Levelled re-detection (C2 item (5)): the certified family S_v(a), a in [0, 1], and the line search over it.
+export interface LevelledVertex { X: V3; w: V3; R: number; planes: { m: V3; b: number }[] }
+export interface LevelledRound { vertices: LevelledVertex[]; conflict: boolean; records: number }
+
+export function levelledRound(mesh: OracleMesh, W: V3[], pairs: DatPair[], cap: number[], gammaR: number, sepEps: number): LevelledRound {
+  const X = mesh.x;
+  const vertices: LevelledVertex[] = X.map((x, i) => ({ X: x, w: W[i], R: cap[i], planes: [] }));
+  let conflict = false, records = 0;
+  for (const p of pairs) {
+    const sep = datSeparator(p, X, sepEps);
+    const Y = p.ids.map(i => add(X[i], W[i]));
+    const moving = p.ids.some(i => norm(W[i]) !== 0);
+    let n: V3 | null = sep ? sep.n : null;
+    if (moving) {
+      const g1 = n ? supportGap(n, Y.slice(0, p.nA), Y.slice(p.nA)) : -Infinity;
+      if (!n || (g1 < sepEps && g1 < sep!.gap)) {
+        // The predicted primitives' own closest-point axis, when it divides both ends.
+        let n1: V3;
+        if (p.kind === "vt") {
+          const { bary } = closestPointTriangle(Y[0], Y[1], Y[2], Y[3]);
+          n1 = unit(sub(Y[0], add(add(scale(Y[1], bary[0]), scale(Y[2], bary[1])), scale(Y[3], bary[2]))));
+        } else {
+          const q = closestSegmentSegment(Y[0], Y[1], Y[2], Y[3]);
+          n1 = unit(sub(add(Y[0], scale(sub(Y[1], Y[0]), q.s)), add(Y[2], scale(sub(Y[3], Y[2]), q.t))));
+        }
+        const A0 = p.ids.slice(0, p.nA).map(i => X[i]), B0 = p.ids.slice(p.nA).map(i => X[i]);
+        const h0 = supportGap(n1, A0, B0), h1 = supportGap(n1, Y.slice(0, p.nA), Y.slice(p.nA));
+        if (norm(n1) > 0 && h0 > 0 && (h1 >= sepEps || h1 >= h0)) n = n1;
+        else { conflict = true; continue; }
+      }
+    }
+    if (!n) { conflict = true; continue; }
+    const nn = n;
+    const ends = [0, 1].map(level => {
+      const P = p.ids.map((i, k) => (level === 0 ? X[i] : Y[k]));
+      const proj = P.map(q => dot(nn, q));
+      const supA = Math.min(...proj.slice(0, p.nA)), supB = Math.max(...proj.slice(p.nA));
+      const plane = supB + 0.5 * (supA - supB);
+      return proj.map((q, k) => -gammaR * Math.max((k < p.nA ? q - plane : plane - q) - sepEps, 0));
+    });
+    p.ids.forEach((i, k) => {
+      const b = Math.max(ends[0][k], ends[1][k]);
+      // A half-space the cap keeps whole at every level is redundant.
+      if (-b >= cap[i]) return;
+      vertices[i].planes.push({ m: k < p.nA ? nn : scale(nn, -1), b });
+      records++;
+    });
+  }
+  return { vertices, conflict, records };
+}
+
+/** A world half-space m.y >= h (a static solid's convex certificate, holding every anchor). */
+export interface WorldHalfSpace { m: V3; h: number }
+
+const ballExit = (z: V3, e: V3, R: number) => {
+  // Largest t <= 1 with |z + t e| <= R, for |z| <= R.
+  const ee = dot(e, e);
+  if (ee === 0) return 1;
+  const ze = dot(z, e), zz = dot(z, z);
+  const t = (-ze + Math.sqrt(Math.max(ze * ze - ee * (zz - R * R), 0))) / ee;
+  return Math.min(1, Math.max(0, t));
+};
+
+/** Whether y lies in S_v(a) (and the solids), to within tol. */
+export function levelledInside(V: LevelledVertex, solids: WorldHalfSpace[], y: V3, a: number, tol = 0): boolean {
+  const c = add(V.X, scale(V.w, a)), z = sub(y, c);
+  if (norm(z) > V.R + tol) return false;
+  if (V.planes.some(r => dot(r.m, z) < r.b - tol)) return false;
+  return solids.every(s => dot(s.m, y) >= s.h - tol);
+}
+
+/**
+ * The projection of a trial y onto S_v(a), as ogcProject computes it: y itself when
+ * every certificate keeps it; else three sweeps of alternating projections (the cap,
+ * each record, each solid) and then the largest t of the segment from the anchor
+ * c_v(a) (in every certificate) to that point that every certificate keeps.
+ */
+export function levelledProject(V: LevelledVertex, solids: WorldHalfSpace[], y: V3, a: number): V3 {
+  const c = add(V.X, scale(V.w, a));
+  if (levelledInside(V, solids, y, a)) return y;
+  let p = y;
+  for (let sweep = 0; sweep < 3; sweep++) {
+    const z = sub(p, c), l = norm(z);
+    if (l > V.R) p = add(c, scale(z, V.R / l));
+    for (const r of V.planes) { const e = dot(r.m, sub(p, c)) - r.b; if (e < 0) p = sub(p, scale(r.m, e)); }
+    for (const s of solids) { const e = dot(s.m, p) - s.h; if (e < 0) p = sub(p, scale(s.m, e)); }
+  }
+  const e = sub(p, c);
+  let t = ballExit([0, 0, 0], e, V.R);
+  for (const r of V.planes) { const s = dot(r.m, e); if (s < 0) t = Math.min(t, Math.max(0, r.b / s)); }
+  for (const s of solids) { const k = dot(s.m, e); if (k < 0) t = Math.min(t, Math.max(0, (s.h - dot(s.m, c)) / k)); }
+  return add(c, scale(e, t));
+}
+
+/**
+ * One line search of the round: the iterate x at level L moves along d; trial k
+ * (alpha = 2^-k) is certified at level a_k = L + alpha (1 - L), each vertex's trial
+ * x + alpha d projected onto its S_v(a_k).
+ */
+export function levelledLadder(round: LevelledRound, solids: WorldHalfSpace[], x: V3[], d: V3[], L: number, trials = 8): { alpha: number; a: number; y: V3[] }[] {
+  const out: { alpha: number; a: number; y: V3[] }[] = [];
+  for (let k = 0, alpha = 1; k < trials; k++, alpha *= 0.5) {
+    const a = L + alpha * (1 - L);
+    out.push({ alpha, a, y: x.map((xv, i) => levelledProject(round.vertices[i], solids, add(xv, scale(d[i], alpha)), a)) });
+  }
+  return out;
+}

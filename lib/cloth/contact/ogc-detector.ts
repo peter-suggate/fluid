@@ -33,12 +33,12 @@
  */
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
-  OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, OGC_DECIDE_WGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
+  OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
   OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
-  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_ROUND_LOG, OGC_ROUND_LOG_WORDS, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
+  OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_ROUND_LOG, OGC_ROUND_LOG_WORDS, OGC_POSE_WORDS, OGC_LEVEL_VEC4S, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
   type OgcTruncationMode,
 } from "./ogc-wgsl";
 import { writeBufferChunked } from "../../methods/uniform/uniform-chunked-upload";
@@ -165,6 +165,13 @@ export interface OgcSolverInputs {
   /** vec4<f32> per vertex, metres: a Newton solver's direction d for encodeFilter (newton config only). */
   direction?: GPUBuffer | GPUBufferBinding;
   /**
+   * The Newton solver's control record (one vec4: done, PCG done, the accepted step alpha, the
+   * step's Newton iterations; newton config only). Bound, re-detection is levelled: a round
+   * predicts the rest of the Newton step it follows and its certificates move with the level
+   * (ogcProjectTrial, which the solver's projection must then call with each trial's alpha).
+   */
+  control?: GPUBufferBinding;
+  /**
    * vec4<f32> per vertex, cloth-local metres: the step's inertial target y (the minimizer
    * of the step's inertia term), in place when the mandatory round runs (prediction "target" only).
    */
@@ -232,6 +239,14 @@ export interface OgcFrameCounters {
    * the filters, and the most in one filter. */
   planeRecordHeld: number;
   planeRecordHeldMax: number;
+  /** Broad phase over the frame's rounds: bucket entries scanned, rejected for another cell's key (hash collisions),
+   * rejected by box (or owned by another cell), and the longest single query's scan. */
+  scanned: number; collisions: number; boxRejected: number; scanMax: number;
+  /** Plane records the frame's line-search filters asked for, summed (each read at every trial of the ladder). */
+  planeRecordsTotal: number;
+  /** Levelled re-detection over the frame: its rounds, and those a conflict sent back unlevelled (w = 0). */
+  levelled: number;
+  levelFallback: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -327,7 +342,7 @@ export class OgcContactDetector {
     this.bodySampleCapacity = bodySampleCap;
     this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
     this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
-    this.work = mk("work", 4 * ((body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E + (config.newton ? N : 0)));
+    this.work = mk("work", 4 * ((body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E + (config.newton ? 5 * N : 0)));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
@@ -358,7 +373,8 @@ export class OgcContactDetector {
     if (!(Number.isSafeInteger(recCap) && recCap >= 0)) throw new Error("OGC: planeRecordCapacity must be a whole number");
     this.planeRecordCapacity = recCap;
     this.projBase = config.newton ? solidVec4s : 0;
-    const fixedBase = this.projBase + 1, segBase = fixedBase + OGC_PROJECT_RECORD * N, recBase = segBase + Math.ceil(N / 2);
+    // The sub-header, then the level header (OGC_LEVEL), then the fixed records.
+    const fixedBase = this.projBase + 1 + OGC_LEVEL_VEC4S, segBase = fixedBase + OGC_PROJECT_RECORD * N, recBase = segBase + Math.ceil(N / 2);
     const contactVec4s = config.newton ? recBase + recCap : solidVec4s;
     this.contacts = mk("contacts", 16 * contactVec4s);
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
@@ -400,6 +416,9 @@ export class OgcContactDetector {
     // The filter's per-vertex plane-record counts follow the origins; its records are in the contact buffer.
     w[P.recCountOff] = (body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E;
     w[P.fixedWord] = 4 * fixedBase; w[P.segWord] = 4 * segBase; w[P.recWord] = 4 * recBase; w[P.recCap] = recCap; w[P.newton] = config.newton ? 1 : 0;
+    w[P.levelWord] = config.newton ? 4 * (this.projBase + 1) : 0; w[P.levelOn] = 0;
+    // The filter's Newton targets x + d (vec4 per vertex) follow the record counts.
+    w[P.targetOff] = config.newton ? w[P.recCountOff]! + N : 0;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
@@ -631,14 +650,14 @@ export class OgcContactDetector {
       ...OGC_QUERY_ROLES.map(role => [role, ogcQueryWGSL(role), [0, 1, 4, 5, 7, 8, 9, 11, 14]] as [string, string, number[]]),
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
-      ["decide", OGC_DECIDE_WGSL, [0, 9, 10]],
-      ["redo", OGC_REDO_WGSL, [0, 9, 10]],
+      ["decide", ogcDecideWGSL(!!this.config.newton), this.config.newton ? [0, 8, 9, 10, 19] : [0, 9, 10]],
+      ["redo", OGC_REDO_WGSL, [0, 8, 9, 10]],
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
       ["planes", ogcPlanesWGSL(!!this.config.newton, "truncate"), [0, 2, 4, 5, 9, 11, 14]],
       ...(this.config.newton ? [
-        ["filterBegin", OGC_FILTER_BEGIN_WGSL, [0, 9, 16]],
-        ["filterPlanes", ogcPlanesWGSL(true, "filter"), [0, 2, 4, 5, 9, 11, 14, 15]],
+        ["filterBegin", OGC_FILTER_BEGIN_WGSL, [0, 8, 9, 16]],
+        ["filterPlanes", ogcPlanesWGSL(true, "filter"), [0, 2, 4, 5, 8, 9, 11, 14, 15]],
         ["filterAlloc", OGC_FILTER_ALLOC_WGSL, [0, 5, 8, 9]],
         ["filterRecords", ogcPlanesWGSL(true, "records"), [0, 2, 4, 5, 8, 9, 11, 14, 15]],
         ["filter", OGC_FILTER_WGSL, [0, 2, 4, 5, 8, 9, 14, 15, 16]],
@@ -662,6 +681,7 @@ export class OgcContactDetector {
     if (this.inputs) throw new Error("OGC: the detector is already bound to a solver");
     if (this.config.newton && !inputs.direction) throw new Error("OGC: a newton detector needs the solver's direction buffer");
     if (!this.config.newton && inputs.direction) throw new Error("OGC: a direction is bound only with the newton config");
+    if (!this.config.newton && inputs.control) throw new Error("OGC: a Newton control record is bound only with the newton config");
     if (this.prediction === "guess" && !inputs.stepStart) throw new Error('OGC: prediction "guess" needs the solver\'s stepStart (x_t) with the guess in positions');
     if (this.prediction === "target" && !(inputs.stepStart && inputs.target)) throw new Error('OGC: prediction "target" needs the solver\'s stepStart (x_t) and its inertial target y');
     if (this.prediction !== "target" && inputs.target) throw new Error('OGC: a target is bound only with prediction "target"');
@@ -672,8 +692,12 @@ export class OgcContactDetector {
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
       13: res(inputs.stepStart ?? inputs.positions), 14: res(this.pred),
       15: res(inputs.direction ?? inputs.positions), 16: res(this.alpha), 17: res(inputs.target ?? inputs.positions),
-      18: res(this.contactState),
+      18: res(this.contactState), 19: res(inputs.control ?? this.alpha),
     };
+    // Levelled re-detection: with the solver's control, for planar predicted DAT (held or isotropic rounds predict 0).
+    const levelOn = !!inputs.control && this.paramWords[OGC_PARAM.mode] === OGC_TRUNCATION.planar && this.paramWords[OGC_PARAM.predict] !== 0;
+    this.paramWords[OGC_PARAM.levelOn] = levelOn ? 1 : 0;
+    this.device.queue.writeBuffer(this.params, 4 * OGC_PARAM.levelOn, new Uint32Array([this.paramWords[OGC_PARAM.levelOn]!]));
     for (const [name, k] of this.kernels) {
       k.bindGroup = this.device.createBindGroup({
         label: `ogc ${name}`, layout: k.pipeline.getBindGroupLayout(0),
@@ -798,7 +822,8 @@ export class OgcContactDetector {
    * its prep counted, then its line-search filters: their count, the largest plane-record demand
    * (records the filter asked for, before the capacity) and the longest direction |d|.
    */
-  async readRoundLog(): Promise<{ maxPrediction: number; maxEnvelope: number; candidates: number; datPairs: number; held: number; filters: number; planeRecords: number; maxDirection: number }[]> {
+  async readRoundLog(): Promise<{ maxPrediction: number; maxEnvelope: number; candidates: number; datPairs: number; held: number; filters: number; planeRecords: number; maxDirection: number;
+    scanned: number; collisions: number; boxRejected: number; planeRecordsTotal: number }[]> {
     const read = this.device.createBuffer({ size: 4 * OGC_COUNTER_WORDS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(this.counters, 0, read, 0, 4 * OGC_COUNTER_WORDS);
@@ -815,6 +840,8 @@ export class OgcContactDetector {
       candidates: next(i, 2, u[C.frameCandidates]!), datPairs: next(i, 3, u[C.frameDatPairs]!),
       held: u[at(i, 4)]! - (i ? u[at(i - 1, 4)]! : 0),
       filters: u[at(i, 5)]!, planeRecords: u[at(i, 6)]!, maxDirection: fl[at(i, 7)]!,
+      scanned: next(i, 8, u[C.frameScanned]!), collisions: next(i, 9, u[C.frameCollisions]!), boxRejected: next(i, 10, u[C.frameBoxRejected]!),
+      planeRecordsTotal: u[at(i, 11)]!,
     }));
   }
 
@@ -846,6 +873,9 @@ export class OgcContactDetector {
       filterRebound: u[C.frameRebound]!, framePeakPlaneRecords: u[C.framePeakPlaneRecords]!, peakPlaneRecords: u[C.peakPlaneRecords]!,
       maxPrediction: fl[C.frameMaxPrediction]!, maxDirection: fl[C.frameMaxDirection]!,
       planeRecordHeld: u[C.framePlaneRecordHeld]!, planeRecordHeldMax: u[C.framePlaneRecordHeldMax]!,
+      scanned: u[C.frameScanned]!, collisions: u[C.frameCollisions]!, boxRejected: u[C.frameBoxRejected]!, scanMax: u[C.frameScanMax]!,
+      planeRecordsTotal: u[C.framePlaneRecordsTotal]!,
+      levelled: u[C.frameLevelled]!, levelFallback: u[C.frameLevelFallback]!,
     };
   }
 

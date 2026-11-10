@@ -84,20 +84,41 @@ export const OGC_COUNTER = {
    * filter's running count, restarted by each filter, is planeRecordHeld). */
   framePlaneRecordHeld: 59, framePlaneRecordHeldMax: 60, planeRecordHeld: 61,
   /**
+   * Broad-phase attribution over the frame's rounds: grid entries the queries scanned in their
+   * cells' hash buckets, those rejected for another cell's key (hash collisions), those whose box
+   * missed the query's (or whose overlap another cell owns), and the longest scan of one query;
+   * then the plane records every line-search filter asked for, summed (each is read by the
+   * vertex's projection at every trial of the ladder).
+   */
+  frameScanned: 62, frameCollisions: 63, frameBoxRejected: 64, frameScanMax: 65, framePlaneRecordsTotal: 66,
+  /**
+   * Levelled re-detection (Newton with the solver's control bound): the frame's levelled rounds,
+   * and those a conflict sent back to the unlevelled round (w = 0), which never conflicts.
+   */
+  frameLevelled: 67, frameLevelFallback: 68,
+  /**
    * The frame's round log (harness diagnosis): rounds logged so far, then OGC_ROUND_LOG entries of
    * OGC_ROUND_LOG_WORDS from roundLog: at the round's cell kernel its longest prediction |w| and
    * largest envelope (f32 bits) and the frame's candidates, DAT pairs and held vertices so far;
    * then over the round's line-search filters their count, the largest plane-record demand and
    * the longest direction |d| (f32 bits). Rounds past OGC_ROUND_LOG go unlogged.
    */
-  roundLogCount: 58, roundLog: 64,
+  roundLogCount: 58, roundLog: 72,
 } as const;
 export const OGC_ROUND_LOG = 64;
-export const OGC_ROUND_LOG_WORDS = 8;
-export const OGC_COUNTER_WORDS = 64 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60];
-/** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, then (origin, q, D) per solid. */
-export const OGC_PROJECT_RECORD = 7;
+export const OGC_ROUND_LOG_WORDS = 12;
+export const OGC_COUNTER_WORDS = 72 + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68];
+/** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
+export const OGC_PROJECT_RECORD = 8;
+/**
+ * The level header (two vec4s after the projection sub-header): u = 1 - L (f32), flags, the Newton
+ * iteration it last read, alpha_c (f32), then the last round's u when this one was armed (f32).
+ */
+export const OGC_LEVEL = { u: 0, flags: 1, iteration: 2, alpha: 3, lastU: 4 } as const;
+export const OGC_LEVEL_VEC4S = 2;
+/** Level flags: the round is levelled; the filter froze the level this iteration (a vertex that cannot follow it). */
+export const OGC_LEVEL_FLAG = { levelled: 1, frozen: 2 } as const;
 
 /** Status bits: every one is an explicit failure of the step it was raised in. */
 export const OGC_STATUS = {
@@ -172,6 +193,15 @@ const OGC_F_MAX_DIRECTION = ${OGC_COUNTER.frameMaxDirection}u;
 const OGC_F_PLANE_RECORD_HELD = ${OGC_COUNTER.framePlaneRecordHeld}u;
 const OGC_F_PLANE_RECORD_HELD_MAX = ${OGC_COUNTER.framePlaneRecordHeldMax}u;
 const OGC_PLANE_RECORD_HELD = ${OGC_COUNTER.planeRecordHeld}u;
+const OGC_F_SCANNED = ${OGC_COUNTER.frameScanned}u;
+const OGC_F_COLLISIONS = ${OGC_COUNTER.frameCollisions}u;
+const OGC_F_BOX_REJECTED = ${OGC_COUNTER.frameBoxRejected}u;
+const OGC_F_SCAN_MAX = ${OGC_COUNTER.frameScanMax}u;
+const OGC_F_PLANE_RECORDS_TOTAL = ${OGC_COUNTER.framePlaneRecordsTotal}u;
+const OGC_F_LEVELLED = ${OGC_COUNTER.frameLevelled}u;
+const OGC_F_LEVEL_FALLBACK = ${OGC_COUNTER.frameLevelFallback}u;
+const OGC_LEVELLED = ${OGC_LEVEL_FLAG.levelled}u;
+const OGC_FROZEN = ${OGC_LEVEL_FLAG.frozen}u;
 const OGC_ROUND_LOG_COUNT = ${OGC_COUNTER.roundLogCount}u;
 const OGC_ROUND_LOG_BASE = ${OGC_COUNTER.roundLog}u;
 const OGC_ROUND_LOG_N = ${OGC_ROUND_LOG}u;
@@ -525,21 +555,32 @@ export interface OgcVertexBlockOptions {
  * Newton line search, Bertsekas' projected Newton): the intersection of the convex certificates
  * the detector's line-search filter recorded about the iterate x for this Newton iteration
  * (OGC_FILTER_WGSL and its plane records), each of which holds x. All are relative to the cap's
- * centre c = X + w:
+ * centre, the anchor c:
  *   the cap        |z| <= R;
  *   each DAT plane  m.z >= b, m = sigma n its side's unit normal and b = -gamma_r max(s0, 0)
  *                   (the slack keeps the truncation's own target); m = 0: no separating plane, held;
  *   each solid     f(u) = D.|u| - q.u <= 1 within |u| <= R (q.w), u = y - O (O its world
  *                   origin), in the moving solid's frame at the step's end pose for the moving
  *                   one (ogcPieceScale).
+ * In the mandatory round and an unlevelled re-detection the anchor is c = X + w. A levelled
+ * re-detection (OGC_DETECTOR_LEVEL) predicts the rest of the Newton direction it re-detected in,
+ * and its sets form a family over the level a in [0, 1]: anchor c(a) = X + a w, each record's b
+ * the larger of its placements at X and at X + w (so the plane at level a, linear in a between
+ * the two, divides the pair: a pair separated at both ends is separated between), the solids
+ * the world's (holding X and X + w, the prediction cut to them). {(a, y): y in S(a)} is
+ * jointly convex, so a straight move between certified points at their levels stays certified.
+ * Every vertex of a trial shares its level: a = L + alpha (1 - L) from the level L the iterate
+ * has reached (u = 1 - a = U (1 - alpha), U = 1 - L in the level header); a vertex the filter
+ * cannot move along (held, or no direction while it is predicted to move) freezes the level
+ * for the iteration (a = L).
  * Three sweeps of alternating projections (the cap's radial one, a plane's orthogonal one, a
  * solid's along its active piece's gradient D o sign(u) - q, then its ball), and then,
  * since alternating projections only approach the intersection, the largest t <= 1 of the
- * segment from x to that point that every certificate keeps exactly as the filter does: each
- * is convex and holds x, so x + t (p - x) is certified. A trial the filter's own test keeps
- * whole along y - x (ogcArcScale, the filter's operands in the filter's order) is returned
- * bit-exactly, since a solver reads q != y as a cut; a vertex held (an inside marker, a pair
- * with no plane, records past their capacity) does not move.
+ * segment from a point every certificate holds to that point that every certificate keeps,
+ * exactly as the filter does: the iterate x, or in a levelled round the anchor c(a) (x lies in
+ * S(L), not S(a)). A trial every certificate keeps whole (the filter's own test along the joint
+ * path from x) is returned bit-exactly, since a solver reads q != y as a cut; a vertex held (an
+ * inside marker, a pair with no plane, records past their capacity) does not move.
  */
 const OGC_PROJECT_WGSL = /* wgsl */`
 fn ogcProj4(i: u32) -> vec4<f32> { return bitcast<vec4<f32>>(ogcContacts[i]); }
@@ -559,25 +600,26 @@ fn ogcProjectPiece(p: vec3<f32>, o: vec3<f32>, q: vec4<f32>, D: vec3<f32>, Rt: m
   if (!moved) { return p; }
   return o + transpose(Rt) * u;
 }
-// The largest t <= 1 with x + t e inside every certificate of the vertex's records at fb (and its
-// n plane records from first), each evaluated exactly as the line-search filter evaluates it along
-// d (same operands, same order), so a trial the filter keeps whole is kept here bit for bit.
-fn ogcArcScale(fb: u32, first: u32, n: u32, x: vec3<f32>, e: vec3<f32>, Rb: mat3x3<f32>) -> f32 {
+// The largest t <= 1 keeping every certificate of the vertex's records at fb (and its n plane
+// records from first) along a motion: zc + t ec relative to the anchor (the cap and the planes),
+// xs + t es in the world (the solids). Each is evaluated exactly as the line-search filter
+// evaluates it, so a trial the filter keeps whole is kept here bit for bit.
+fn ogcArcScale(fb: u32, first: u32, n: u32, zc: vec3<f32>, ec: vec3<f32>, xs: vec3<f32>, es: vec3<f32>, Rb: mat3x3<f32>) -> f32 {
   let cap = ogcProj4(fb);
-  let zx = x - cap.xyz;
-  var t = ogcBallExit(zx, e, cap.w);
+  var t = ogcBallExit(zc, ec, cap.w);
   for (var i = 0u; i < n; i++) {
     let r = ogcProj4(first + i);
-    let s = dot(r.xyz, e);
-    if (s < 0.0) { t = min(t, clamp((dot(r.xyz, zx) - r.w) / -s, 0.0, 1.0)); }
+    let s = dot(r.xyz, ec);
+    if (s < 0.0) { t = min(t, clamp((dot(r.xyz, zc) - r.w) / -s, 0.0, 1.0)); }
   }
   let so = ogcProj4(fb + 1u);
-  if (so.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 2u), ogcProj4(fb + 3u).xyz, x - so.xyz, e)); }
+  if (so.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 2u), ogcProj4(fb + 3u).xyz, xs - so.xyz, es)); }
   let bo = ogcProj4(fb + 4u);
-  if (bo.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb * (x - bo.xyz), Rb * e)); }
+  if (bo.w != 0.0) { t = min(t, ogcPieceScale(ogcProj4(fb + 5u), ogcProj4(fb + 6u).xyz, Rb * (xs - bo.xyz), Rb * es)); }
   return t;
 }
-fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> {
+// The projection of the trial y = x + alpha d (alpha the trial's step) onto its level's set.
+fn ogcProjectTrial(v: u32, x: vec3<f32>, y: vec3<f32>, alpha: f32) -> vec3<f32> {
   let pb = ogcContacts[2].w;
   if (pb == 0u) { return x; }
   let ph = ogcContacts[pb];
@@ -590,28 +632,42 @@ fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> {
   for (var i = 0u; i < n; i++) {
     if (all(ogcProj4(first + i).xyz == vec3<f32>(0.0))) { return x; }
   }
+  // The level: the iterate's (U = 1 - L) and the trial's (u = U (1 - alpha), U when frozen).
+  let lh = ogcContacts[pb + 1u];
+  let levelled = (lh.y & ${OGC_LEVEL_FLAG.levelled}u) != 0u;
+  let U = select(0.0, bitcast<f32>(lh.x), levelled);
+  let u = select(U * (1.0 - alpha), U, (lh.y & ${OGC_LEVEL_FLAG.frozen}u) != 0u);
   let Rb = transpose(ogcPose(1u).R);
-  // A trial every certificate keeps whole (the filter's own test along y - x) is the point itself.
-  if (ogcArcScale(fb, first, n, x, y - x, Rb) >= 1.0) { return y; }
   let cap = ogcProj4(fb);
+  let w = ogcProj4(fb + 7u).xyz;
+  // The anchors at the iterate's level and the trial's: c1 - U w and c1 - u w (c1 = X + w).
+  let cx = cap.xyz - U * w;
+  let c = cap.xyz - u * w;
+  // A trial every certificate keeps whole along the joint path from (x, L) (the filter's own test) is the point itself.
+  if (ogcArcScale(fb, first, n, x - cx, (y - x) - (U - u) * w, x, y - x, Rb) >= 1.0) { return y; }
   let sq = ogcProj4(fb + 2u); let sD = ogcProj4(fb + 3u).xyz;
   let bq = ogcProj4(fb + 5u); let bD = ogcProj4(fb + 6u).xyz;
   var p = y;
   for (var sweep = 0u; sweep < 3u; sweep++) {
-    let z = p - cap.xyz;
+    let z = p - c;
     let l = length(z);
-    if (l > cap.w) { p = cap.xyz + z * (cap.w / l); }
+    if (l > cap.w) { p = c + z * (cap.w / l); }
     for (var i = 0u; i < n; i++) {
       let r = ogcProj4(first + i);
-      let e = dot(r.xyz, p - cap.xyz) - r.w;
+      let e = dot(r.xyz, p - c) - r.w;
       if (e < 0.0) { p -= e * r.xyz; }
     }
     if (so.w != 0.0) { p = ogcProjectPiece(p, so.xyz, sq, sD, OGC_I3); }
     if (bo.w != 0.0) { p = ogcProjectPiece(p, bo.xyz, bq, bD, Rb); }
   }
-  let e = p - x;
-  return x + ogcArcScale(fb, first, n, x, e, Rb) * e;
+  // From the anchor c(a) in a levelled round (every certificate holds it: the cap's centre,
+  // records with b <= 0, solids holding X and X + w), else from the iterate.
+  let o = select(x, c, levelled);
+  let e = p - o;
+  return o + ogcArcScale(fb, first, n, o - c, e, o, e, Rb) * e;
 }
+// The mandatory round's and an unlevelled round's projection (no level: the trial's alpha is unread).
+fn ogcProject(v: u32, x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return ogcProjectTrial(v, x, y, 1.0); }
 `;
 
 export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {

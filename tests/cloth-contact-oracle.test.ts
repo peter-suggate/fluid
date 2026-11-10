@@ -12,6 +12,7 @@ import {
   bruteForceDatPairs, isotropicTruncate, motionPenetrates, planarTruncate,
   bruteForcePredictedPairs, predictedConflict, predictedTruncate, predictionSpread, buildEdges,
   type ContactParams, type OracleContact, type OracleMesh, type V3,
+  levelledInside, levelledLadder, levelledRound, type WorldHalfSpace,
 } from "./cloth-contact-oracle";
 import { buildOgcEdges, buildOgcTopology, OGC_NONE } from "../lib/cloth/contact/ogc-topology";
 
@@ -429,4 +430,59 @@ test("predicted-motion DAT: layers falling together pair as at rest and move who
   assert.ok(pc.length > 0 && pc.some(p => predictedConflict(p, X, Wc, sepEps)), "a conflict sends the round back to Planar-DAT");
   // Held predictions are never conflicts: Planar-DAT is always available.
   assert.ok(pc.every(p => !predictedConflict(p, X, X.map(() => [0, 0, 0]), sepEps)));
+});
+
+test("levelled re-detection: every trial of the ladder, projected onto its level's sets, is penetration-free from X and from the iterate", () => {
+  const gammaR = 0.9, sepEps = 1e-6, r = 1e-3, T = 8;
+  let divided = 0, conflicted = 0, rawPenetrations = 0, cutTrials = 0, records = 0, wider = 0;
+  for (const seed of [1, 2, 3, 4]) {
+    const m = datScene(seed), X = m.x, R = rng(seed + 500);
+    const rv = (s: number): V3 => [(R() - 0.5) * s, (R() - 0.5) * s, (R() - 0.5) * s];
+    // The floor below the lowest layer, a static solid's certificate; the predictions are cut to it (prep).
+    const zf = Math.min(...X.map(x => x[2])) - 2e-3, floor: WorldHalfSpace[] = [{ m: [0, 0, 1], h: zf }];
+    const drift: V3[] = [[3e-3, -1e-3, -2.5e-3], [2e-3, 0, -3.5e-3], [1e-3, 1e-3, -3e-3]];
+    const layer = (i: number) => (i < 25 ? 0 : i < 50 ? 1 : 2);
+    const W = X.map((x, i) => {
+      const w = add(drift[layer(i)], rv(1e-3));
+      const z = x[2] + w[2];
+      return z >= zf ? w : scale(w, (zf - x[2]) / w[2]);
+    });
+    // The solver's next directions: the prediction plus a deviation the envelope covers in part.
+    const dev = X.map(() => rv(3e-3));
+    const d = W.map((w, i) => add(w, dev[i]));
+    const rq = X.map((_, i) => Math.min(2e-2, Math.max(1.5e-3, r + 2.5 * norm(dev[i]))));
+    const cap = rq.map(q => 0.5 * gammaR * q);
+    const { pairs } = bruteForcePredictedPairs(m, rq, W, 0);
+    const round = levelledRound(m, W, pairs, cap, gammaR, sepEps);
+    if (round.conflict) { conflicted++; continue; }
+    divided++; records += round.records;
+    const check = (x0: V3[], y: V3[], a: number, what: string) => {
+      y.forEach((p, i) => assert.ok(levelledInside(round.vertices[i], floor, p, a, 1e-15), `${what}: vertex ${i} outside its set at level ${a}`));
+      assert.equal(motionPenetrates(m, X, y, 32), false, `${what}: the round's motion from X penetrates`);
+      if (x0 !== X) assert.equal(motionPenetrates(m, x0, y, 32), false, `${what}: the line search's motion penetrates`);
+      assert.equal(countIntersections({ ...m, x: y }), 0, what);
+    };
+    const first = levelledLadder(round, floor, X, d, 0, T);
+    first.forEach(({ alpha, a, y }, k) => {
+      const raw = X.map((x, i) => add(x, scale(d[i], alpha)));
+      if (k === 0 && motionPenetrates(m, X, raw, 32)) rawPenetrations++;
+      if (y.some((p, i) => p !== raw[i])) cutTrials++;
+      check(X, y, a, `seed ${seed} trial ${k}`);
+    });
+    // The levels let the whole step through where a cap about X alone (w = 0) keeps at most R_v.
+    const keptLevelled = first[0].y.reduce((s, p, i) => s + norm(sub(p, X[i])), 0);
+    const keptStatic = X.reduce((s, _, i) => s + Math.min(cap[i], norm(d[i])), 0);
+    if (keptLevelled > 1.5 * keptStatic) wider++;
+    // A second Newton iteration from an accepted trial, at its level, along a new direction.
+    for (const k1 of [0, 5]) {
+      const { a: L, y: x1 } = first[k1];
+      const d2 = W.map((w, i) => add(scale(w, 1 - L), rv(2e-3)));
+      levelledLadder(round, floor, x1, d2, L, T).forEach(({ a, y }, k) => { if (k % 2 === 0 || k === T - 1) check(x1, y, a, `seed ${seed} from trial ${k1}, trial ${k}`); });
+    }
+  }
+  console.log(`levelled rounds: ${divided} divided (${records} records), ${conflicted} redone with w = 0; ${cutTrials} trials cut, raw penetrations ${rawPenetrations}, wider ${wider}`);
+  assert.ok(divided >= 3, `rounds divided (${divided}, ${conflicted} conflicts)`);
+  assert.ok(rawPenetrations >= 2, `the raw full steps penetrate (${rawPenetrations})`);
+  assert.ok(cutTrials >= 2 * divided, `the projections act (${cutTrials} cut trials)`);
+  assert.ok(wider >= divided - 1, `the levels keep more of the step than the cap about X (${wider}/${divided})`);
 });

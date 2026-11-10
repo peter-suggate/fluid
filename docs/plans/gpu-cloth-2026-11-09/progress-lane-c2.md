@@ -2034,3 +2034,60 @@ ride, the cut of the moving solid, and the undo of a cut.
 The flat drop, tilted drop, swing and GPU tilted drop pass. rc 0, and the log shows no Metal abort.
 
 `npm run test:unit`: only the known foreign failure (merge cap).
+
+## 2026-11-10 (5): levelled re-detection (a re-detection round certifies the path to the Newton target)
+
+**Cause.** A re-detection round predicted 0 about the iterate, so its certificates held only a ball of
+radius R_v about x. The Newton step to the target is mostly still ahead of it. Each round then
+truncated the step and asked for another round. The flat 16^2 drop from 1.2 m needed 884 plane
+records a vertex (23 after item 3), and the interim capacities of f70ebf74 exist for that reason.
+
+**Fix.** With the solver's control record bound, a re-detection round predicts w = (x_k + d_k) - x.
+That is the filter's stored Newton target, read at a new targetOff parameter, so OGC_PARAM_WORDS is
+now 84. The round certifies a family S_v(a), a in [0, 1], along X -> X + w:
+- the cap's centre and every record's anchor move with the level: c(a) = X + a w;
+- a record's offset is the larger of its two ends' offsets, so it holds at every level;
+- a record that the cap already keeps whole is dropped.
+
+The level header (OGC_LEVEL, two vec4s after the projection sub-header) carries U = 1 - L, flags, the
+Newton iteration and alpha. The filter's projection `ogcProjectTrial(v, x, y, alpha)` projects a trial
+onto its level's set: u = U (1 - alpha), or U when the level is frozen. It projects from the anchor
+c(u), which every certificate holds. A pair that no single axis divides at both ends is a conflict;
+that round is redone unlevelled (w = 0), which never conflicts. Counters: frameLevelled and
+frameLevelFallback (67, 68).
+
+**Fixed on the way.** The levelled conflict fallback (in the redo kernel and resolvePlane) also
+fired in unlevelled rounds. It is now gated on `levelled()`, so unlevelled rounds behave as HEAD, and
+a conflict in the redo itself takes HEAD's redo path.
+
+**Oracle.** `levelledRound` and `levelledLadder` are in tests/cloth-contact-oracle.ts (Float64, CPU).
+Over four seeds, every trial on every level, and a second Newton iteration from accepted trials, is
+inside its set and penetration-free, both from X and from the iterate. 9 s, oracle suite 15/15.
+
+**Ladder (tests/cloth-contact-ladder.test.ts, new; 16^2 at the default 16 records a vertex).**
+- flat drop from 1.2 m: lands within tick 30. Plane records 0.0 a vertex (HEAD 884, item 3 23),
+  rebound 0.013 m/s, resting at 0.991 mm for r = 1 mm;
+- stacked: 0 records from tick 1;
+- sliding, plate and sphere: pass. The bodySqueeze blocker did not reproduce on the sphere;
+- strip (C1's ladder 2, 3 x 49 starting stretched 1.5x, with a free-space twin): **todo**, not
+  cleared by (5). 315 vertices are held for overflow over ticks 1-4, lambda peaks at 16 N against the
+  1.0 N momentum bound, and strain is 1.8 at tick 1, settling by tick 5 (0.034). The free twin also
+  asks for 58-190 records a vertex in its first ticks. The envelopes follow absolute motion, so
+  co-moving contracting neighbours pair. Next: item 2, relative-motion path bounds.
+
+**Gates.**
+- With control bound (HEAD e34e7a37 + these files + C1's three edits, scene contact forced to 16N
+  for the run): C1's analytic suite with the six overflow scenes at 16N (flat and tilted drops, swing,
+  incline, the moving-solid sheet, the GPU tilted drop), plus the system, contact-gpu, -body, -solid,
+  -scene-solids, oracle, newton, gpu-solver and grab suites: 96 pass, 0 fail, 4 todo (the existing
+  ones). rc 0, no Metal abort.
+- Control unbound (HEAD e34e7a37 + these files only, so every round is unlevelled, as it stays until
+  C1's edits land): the analytic, contact-gpu, gpu-solver, contact-body and system suites, 56 pass,
+  0 fail, 4 todo (the existing ones). rc 0, no Metal abort.
+- `npm run check:types` clean; `npm run test:unit` has only the known foreign failure (merge cap,
+  from the uncommitted uniform-narrow-band-flip.ts; it passes on HEAD + these files).
+
+**C1 lands next (sent earlier):** the `newtonControl` getter in gpu-solver.ts, `nwProject` calling
+`ogcProjectTrial(v, x, y, alpha)`, and `control: solver.newtonControl` in the bind call in system.ts.
+Until then, rounds stay unlevelled and behave as HEAD. The interim capacities stay until item 2
+clears the strip.
