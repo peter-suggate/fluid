@@ -122,6 +122,10 @@ export interface ClothNewtonSettings {
    * for the rest of the step, on the model with the membrane's stress term unclamped (its exact Hessian; contact's
    * terms and the preconditioner as in the line search), the trust region in the preconditioner's norm. */
   readonly trustRegion?: "off" | "hybrid";
+  /** The projected-Newton active set with contact: 'on' (default), each iteration's direction projected off the
+   * outward normals of the certificates binding the accepted trial (with the KKT release); 'off', no active set (the
+   * projected line search alone). 'off' is the contact-gap ablation's (C1 RESULT 42) stage (i), not a scene setting. */
+  readonly activeSet?: "on" | "off";
 }
 
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per
@@ -147,6 +151,17 @@ export interface ClothSolverSettings {
    * the balls; ogc-wgsl.ts OGC_PROJECT_METRIC_WGSL).
    */
   readonly contactProjectionMetric?: 'off' | 'hvv';
+  /**
+   * Diagnosis only: 'mandatory' freezes each step's contact set after its mandatory round (no re-detection, levelled
+   * or fallback round: the pair set and every vertex's entries hold for all its Newton iterations; ogc-detector.ts
+   * contactFreeze). 'off' (default): unchanged.
+   */
+  readonly contactFreeze?: 'off' | 'mandatory';
+  /**
+   * Diagnosis only, and only with contactFreeze 'mandatory': 'off' drops the trial projection's travel bounds (the
+   * round's cap, the solid pieces' balls), keeping its half-spaces. 'on' (default): unchanged.
+   */
+  readonly contactTravelBound?: 'on' | 'off';
 }
 
 /** A solid the cloth would meet that the scene cannot carry yet (a moving

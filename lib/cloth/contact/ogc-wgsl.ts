@@ -550,6 +550,13 @@ export interface OgcVertexBlockOptions {
    * (OGC_PROJECT_METRIC_WGSL). Omitted: the exact Euclidean projection above, and the block is the one without it.
    */
   metric?: string;
+  /**
+   * Diagnosis only (the document's solver.contactTravelBound 'off', allowed only with contactFreeze 'mandatory'): false
+   * drops the projection's travel bounds, the round's cap and the solid pieces' balls, keeping only its half-spaces
+   * (the plane records and each solid piece's orthant faces; OGC_PROJECT_NO_TRAVEL_WGSL). Omitted or true: the block
+   * is the one without it.
+   */
+  travelBound?: boolean;
 }
 
 /**
@@ -1149,9 +1156,74 @@ fn ogcProjectAtMetric(v: u32, t: OgcTrialCtx, x: vec3<f32>, y: vec3<f32>) -> vec
 }
 `;
 
-/** OGC_PROJECT_WGSL with its projection in the metric (OGC_PROJECT_METRIC_WGSL): its two call sites, each exactly once. */
-function ogcProjectMetricWGSL(): string {
+/**
+ * Diagnosis only (stage (i) of C1's attribution: the frozen pair set with neither travel bounds nor the active set):
+ * the projection without its travel bounds. The cap |z| <= R and each solid piece's ball |u| <= R bound how far the
+ * round's certificates let a vertex travel, not a contact; without them the certified set is the intersection of the
+ * half-spaces alone (each plane record, each solid piece's eight orthant faces, f(u) = D.|u| - q.u <= 1 unbounded
+ * along any direction where it holds), still convex and holding the iterate, so the projection and its exit stay
+ * exact on it. A piece the filter reduced to its plain ball (q = D = 0) then certifies nothing: the field's Lipschitz
+ * ball is a travel bound too. ogcProjectActive reports no cap and never travel. Without the cap the re-detection's
+ * soundness argument is gone, so a document may ask for it only with contactFreeze 'mandatory' (no re-detection).
+ */
+const OGC_PROJECT_NO_TRAVEL_WGSL = /* wgsl */`
+// ogcPieceScale (the filter's subadditive bound) without the piece's ball.
+fn ogcPieceScaleFaces(q: vec4<f32>, D: vec3<f32>, base: vec3<f32>, delta: vec3<f32>) -> f32 {
+  let room = max(1.0 - (dot(D, abs(base)) - dot(q.xyz, base)), 0.0);
+  let den = dot(D, abs(delta)) - dot(q.xyz, delta);
+  return select(1.0, room / den, den > room);
+}
+// ogcPieceExit without the piece's ball: the largest t <= 1 with f(base + t e) <= 1, exactly.
+fn ogcPieceExitFaces(q: vec4<f32>, D: vec3<f32>, base: vec3<f32>, e: vec3<f32>) -> f32 {
+  var lo = 0.0;
+  var flo = ogcPieceF(q, D, base);
+  if (flo > 1.0) { return 0.0; }
+  if (ogcPieceF(q, D, base + e) <= 1.0) { return 1.0; }
+  var bp = vec3<f32>(1.0);
+  for (var i = 0u; i < 3u; i++) {
+    if (e[i] != 0.0) { let t = -base[i] / e[i]; if (t > 0.0 && t < 1.0) { bp[i] = t; } }
+  }
+  let b0 = min(bp.x, min(bp.y, bp.z));
+  let b2 = max(bp.x, max(bp.y, bp.z));
+  let b1 = bp.x + bp.y + bp.z - b0 - b2;
+  for (var i = 0u; i < 4u; i++) {
+    let b = select(select(select(b0, b1, i == 1u), b2, i == 2u), 1.0, i == 3u);
+    if (b <= lo) { continue; }
+    let fb = ogcPieceF(q, D, base + b * e);
+    if (fb > 1.0) { return lo + ((1.0 - flo) / (fb - flo)) * (b - lo); }
+    lo = b; flo = fb;
+  }
+  return 1.0;
+}
+`;
+
+/** OGC_PROJECT_WGSL without its travel bounds (OGC_PROJECT_NO_TRAVEL_WGSL): every swap at its expected count. */
+function ogcProjectNoTravelWGSL(): string {
   let s = OGC_PROJECT_WGSL;
+  const swap = (from: string, to: string, count: number) => {
+    if (s.split(from).length !== count + 1) throw new Error(`ogcProjectNoTravelWGSL: expected ${count} of ${JSON.stringify(from)}`);
+    s = s.split(from).join(to);
+  };
+  // The cap in the arc's scale and exit.
+  swap("  let cap = ogcProj4(fb);\n  var t = ogcBallExit(zc, ec, cap.w);\n", "  var t = 1.0;\n", 2);
+  // The pieces' balls in the arc's scale and exit.
+  swap("t = min(t, ogcPieceScale(", "t = min(t, ogcPieceScaleFaces(", 2);
+  swap("t = min(t, ogcPieceExit(", "t = min(t, ogcPieceExitFaces(", 2);
+  // The cap and the balls in the constraint generation.
+  swap("  ogcConsider(&w, k, OGC_CON_CAP, ogcConViol(ogcConOf(k, OGC_CON_CAP), z), tau);\n", "", 1);
+  swap("    ogcConsider(&w, k, OGC_CON_SOLID_BALL, ogcConViol(ogcConOf(k, OGC_CON_SOLID_BALL), z), tau);\n", "", 1);
+  swap("    ogcConsider(&w, k, OGC_CON_BODY_BALL, ogcConViol(ogcConOf(k, OGC_CON_BODY_BALL), z), tau);\n", "", 1);
+  // The active set: no ball, no cap, never travel.
+  swap("  if (ogcConViol(cb, z) >= -tol) { ogcActiveAdd(s, z - cb.n); (*s).a.travel = true; }\n", "", 1);
+  swap("{ ogcActiveAdd(s, c.n); (*s).a.travel = (*s).a.travel || far; }", "{ ogcActiveAdd(s, c.n); }", 1);
+  swap("    if (ogcConViol(ogcConOf(k, i), z) >= -tol && ogcRecordFar(k.first + i)) { s.a.travel = true; }\n", "", 1);
+  swap("  s.a.capOn = lz >= k.R - tol && lz > 0.0;\n", "  s.a.capOn = false;\n", 1);
+  return s + OGC_PROJECT_NO_TRAVEL_WGSL;
+}
+
+/** OGC_PROJECT_WGSL with its projection in the metric (OGC_PROJECT_METRIC_WGSL): its two call sites, each exactly once. */
+function ogcProjectMetricWGSL(base: string): string {
+  let s = base;
   const swap = (from: string, to: string) => {
     if (s.split(from).length !== 2) throw new Error(`ogcProjectMetricWGSL: expected one ${JSON.stringify(from)}`);
     s = s.replace(from, to);
@@ -1164,13 +1236,14 @@ function ogcProjectMetricWGSL(): string {
 
 export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
   const { group, binding, metric } = options;
+  const project = options.travelBound === false ? ogcProjectNoTravelWGSL() : OGC_PROJECT_WGSL;
   return /* wgsl */`
 ${OGC_COMMON_WGSL}
 @group(${group}) @binding(${binding}) var<storage, read> ogcContacts: array<vec4<u32>>;
 fn ogcSolidBase() -> u32 { return ogcContacts[2].x; }
 fn ogcSolidWord(i: u32) -> u32 { return ogcContacts[i >> 2u][i & 3u]; }
 ${OGC_SOLID_WGSL}
-${metric ? `fn ogcMetricInv(v: u32) -> mat3x3<f32> { return ${metric}(v); }\n${ogcProjectMetricWGSL()}` : OGC_PROJECT_WGSL}
+${metric ? `fn ogcMetricInv(v: u32) -> mat3x3<f32> { return ${metric}(v); }\n${ogcProjectMetricWGSL(project)}` : project}
 // Surface sample at index i >= N (sample-facet entries): static below N + S, else the
 // moving solid's body-frame sample posed at the step's end, and where it started the step.
 fn ogcSampleRel(i: u32) -> u32 { return i - ogcContacts[0].x; }

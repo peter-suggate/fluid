@@ -2639,3 +2639,37 @@ unknown values) -> `OgcContactConfig.projectionMetric` (scene-contact.ts) -> `Og
 - test:unit fails 2, both foreign: the known reservoir-particle-cost test, and
   paused-rigid-publication.test.ts, another lane's uncommitted test on webgpu-rigid-body.
 - The face-360 todo is unchanged.
+
+## 2026-11-10: C1's stage (i)/(ii) switches - the frozen contact set, no travel bounds, the entries read-back
+
+C1's attribution of the contact gap (its RESULT (42) counts: t15 GPU 72 against the oracle's 23, end states 22 um
+median apart) needs the GPU on the oracle's fixed pair set. Three diagnosis-only pieces, each default-off and the
+kernels string for string when off (a CPU test compares the WGSL).
+
+- **solver.contactFreeze 'off' | 'mandatory'.** With 'mandatory', ogcDecideWGSL's arming condition is `false`.
+  - The step's mandatory round (with its redos) is its only round. The pair set and every vertex's entries hold for
+    all its Newton iterations.
+  - Truncation, the filter's per-iteration plane records (re-placed about each iterate from that set) and the
+    projection are unchanged. A stall, a small step or the held count at control + 2 .w arms nothing.
+  - Without the Newton filter the detector fails explicitly.
+- **solver.contactTravelBound 'on' | 'off'.** With 'off', OGC_PROJECT_NO_TRAVEL_WGSL applies:
+  - The cap and the solid pieces' balls leave the arc scale and exit, the constraint generation and the active set.
+    capOn is false and travel is never set.
+  - A piece the filter reduced to its plain ball certifies nothing, since the ball is a travel bound too.
+  - Allowed only with contactFreeze 'mandatory' (validateScene and the detector). Without the cap, re-detection's
+    soundness argument is gone.
+  - The swaps are checked at their expected counts, so a drift in the source fails at build.
+- **OgcContactDetector.readContactEntries()** returns header vec4 0 and 1, the per-vertex counts and the raw entries.
+  It is a harness read only. decodeOgcContactEntry decodes field, bodyField, vf, sampleFace and ee entries: ids,
+  feature, (s, t), and lambda or mu lambda. Its doc comment gives the Float64 energy of each kind.
+
+**GPU check (sphere 16^2, 40 ticks each).**
+
+| Run | redetections | ends | entries read (field / bodyField / sampleFace / ee) | x (cloth / solid) |
+|---|---|---|---|---|
+| contactFreeze mandatory | 0 every tick | tick 40 | 1996 / 131 / 2455 / 0 | 0 / 0 |
+| + contactTravelBound off | 0 every tick | tick 40 | 110 / 615 / 1158 / 4 | 0 / 0 |
+
+- With travel bounds off, the plane records peak at 117 per vertex at tick 30 (frozen alone: 19), and none are
+  held for overflow.
+- check:types is clean. test:unit shows only the known foreign failures.

@@ -858,7 +858,13 @@ fn main() {
  * nothing. A round armed here is levelled: it predicts the rest of that step's direction,
  * w = (1 - alpha_c) d (prep), and starts at level 0 (u = 1).
  */
-export function ogcDecideWGSL(level: boolean): string {
+/**
+ * freeze (the document's solver.contactFreeze 'mandatory', diagnosis only): the decision never arms a round, so the
+ * step's mandatory round (with its redos) is its only one: its pair set and every vertex's entries hold for all the
+ * step's Newton iterations (the line-search filter still re-places the projection's records about each iterate from
+ * that set). The counters it consumes are consumed as before; a stall, a small step or a travel bound arms nothing.
+ */
+export function ogcDecideWGSL(level: boolean, freeze = false): string {
   return header(level ? [0, 8, 9, 10, 19] : [0, 9, 10]) + ARGS_FNS + /* wgsl */`
 @compute @workgroup_size(1)
 fn main() {
@@ -894,7 +900,7 @@ fn main() {
   atomicAdd(&counters[OGC_F_TRUNCATED], ex);
   atomicMax(&counters[OGC_F_TRUNCATED_MAX], ex);
   var on = false;
-  if ((ex > 0u && ex >= P.exceedThreshold) || stalled != 0u || noStep) {
+  if (${freeze ? "false" : "(ex > 0u && ex >= P.exceedThreshold) || stalled != 0u || noStep"}) {
     if (atomicLoad(&counters[OGC_ROUNDS]) < P.roundCap) {
       atomicAdd(&counters[OGC_ROUNDS], 1u);
       atomicAdd(&counters[OGC_F_REDETECTIONS], 1u);

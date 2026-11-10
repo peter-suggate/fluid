@@ -136,6 +136,12 @@ export function validateClothDocument(document: ClothDocument): string[] {
       errors.push("Cloth contact plane records per vertex must be a positive integer");
     if (solver.contactProjectionMetric !== undefined && solver.contactProjectionMetric !== "off" && solver.contactProjectionMetric !== "hvv")
       errors.push(`Unknown cloth contact projection metric ${String(solver.contactProjectionMetric)}`);
+    if (solver.contactFreeze !== undefined && solver.contactFreeze !== "off" && solver.contactFreeze !== "mandatory")
+      errors.push(`Unknown cloth contact freeze ${String(solver.contactFreeze)}`);
+    if (solver.contactTravelBound !== undefined && solver.contactTravelBound !== "on" && solver.contactTravelBound !== "off")
+      errors.push(`Unknown cloth contact travel bound ${String(solver.contactTravelBound)}`);
+    else if (solver.contactTravelBound === "off" && solver.contactFreeze !== "mandatory")
+      errors.push("Cloth contactTravelBound 'off' is diagnosis only and needs contactFreeze 'mandatory' (no re-detection)");
     // The VBD solver and its settings were removed (M4): every document runs Newton-PCG, and a document that names a
     // VBD setting is refused rather than silently ignored.
     for (const key of ["iterations", "chebyshevRho", "tier", "patchVertices", "patchIterations", "coarse"])

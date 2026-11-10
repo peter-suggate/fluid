@@ -222,6 +222,9 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     ...(newton ? { planeRecordCapacity: (document.solver?.contactPlaneRecordsPerVertex ?? C.planeRecordsPerVertex) * N } : {}),
     // The trial projection's metric: the document's (default 'off', the exact Euclidean projection).
     ...(newton && document.solver?.contactProjectionMetric ? { projectionMetric: document.solver.contactProjectionMetric } : {}),
+    // Diagnosis only: the frozen contact set and the projection without travel bounds (the document's; default off, on).
+    ...(document.solver?.contactFreeze ? { contactFreeze: document.solver.contactFreeze } : {}),
+    ...(document.solver?.contactTravelBound ? { travelBound: document.solver.contactTravelBound } : {}),
     solidSampleCapacity: sampleCapacity(field, r, edge),
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),

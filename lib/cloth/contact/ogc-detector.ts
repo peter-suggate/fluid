@@ -144,8 +144,59 @@ export interface OgcContactConfig {
    * projection, "hvv" the Newton solver's vertex block H_vv (nwVertexInv; ogc-wgsl.ts OGC_PROJECT_METRIC_WGSL).
    */
   projectionMetric?: OgcProjectionMetric;
+  /**
+   * Diagnosis only (newton only): "mandatory" freezes each step's contact set after its mandatory round (with its
+   * redos): the decision never arms another round (ogcDecideWGSL's freeze), so the pair set and every vertex's
+   * entries (readContactEntries) hold for all the step's Newton iterations. "off" (default): the kernels unchanged.
+   */
+  contactFreeze?: OgcContactFreeze;
+  /**
+   * Diagnosis only (newton only, and only with contactFreeze "mandatory"): "off" drops the trial projection's travel
+   * bounds (the cap, the solid pieces' balls; ogc-wgsl.ts OGC_PROJECT_NO_TRAVEL_WGSL). "on" (default): unchanged.
+   */
+  travelBound?: OgcTravelBound;
 }
 export type OgcProjectionMetric = "off" | "hvv";
+export type OgcContactFreeze = "off" | "mandatory";
+export type OgcTravelBound = "on" | "off";
+
+/**
+ * One per-vertex contact entry as ogcEntryLin reads it (readContactEntries), decoded. Every entry's energy is the
+ * barrier kappa(d; r, kc) (ogcActivation with params.x = r, params.y = kc) on a gap built from the current positions,
+ * plus lagged friction (weights, normal and slip origin at the step start x_t) with coefficient muLambda:
+ *   field / bodyField: vertex v against the static (moving) solid's field, d = phi(x_v) (the body's in its end-pose
+ *     frame); muLambda is the entry's own (the solid's mu at x_det times lambda).
+ *   vf: vertex `vertex` against face `face`'s Voronoi feature (`feature` 0-2 its vertex i, 3-5 its edge (i, i+1 mod 3)
+ *     for i = feature - 3, 6 the face): the gap is x_p minus the feature's point (the vertex itself, the projection on
+ *     the edge's line, or on the face's plane, unclamped barycentrics: ogcVtWeights), d = |gap|; muLambda = selfMu
+ *     (params.z) times lambda.
+ *   sampleFace: as vf with the point a solid surface sample (sample: its index, body: the moving solid's, posed at
+ *     the step's end and its start for friction) in place of a cloth vertex; muLambda is the entry's own.
+ *   ee: edges e0 against e1, the gap (1 - s) x_a + s x_b - (1 - t) x_c - t x_d at the detection's parameters (s, t)
+ *     (unorm16), d = |gap|; muLambda = selfMu times lambda.
+ * The certified gap is not stored: the energy recomputes it from the positions. Plane records and solid pieces are
+ * the projection's certificates, which the line-search filter re-places about each iterate from the round's pairs;
+ * they are not part of the energy.
+ */
+export type OgcContactEntry =
+  | { kind: "field" | "bodyField"; vertex: number; muLambda: number }
+  | { kind: "vf"; vertex: number; face: number; feature: number; lambda: number }
+  | { kind: "sampleFace"; sample: number; body: boolean; face: number; feature: number; muLambda: number }
+  | { kind: "ee"; e0: number; e1: number; s: number; t: number; lambda: number };
+
+/** Decode one entry's four words (raw from readContactEntries) for a detector with N vertices and S static samples. */
+export function decodeOgcContactEntry(w: ArrayLike<number>, N: number, S: number): OgcContactEntry {
+  const x = w[0]! >>> 0, y = w[1]! >>> 0, z = w[2]! >>> 0, ww = w[3]! >>> 0;
+  const f = new Float32Array(new Uint32Array([z]).buffer)[0]!;
+  if (y === 0x70000000) return { kind: "field", vertex: x, muLambda: f };
+  if (y === 0x70000001) return { kind: "bodyField", vertex: x, muLambda: f };
+  if (y & 0x80000000) return { kind: "ee", e0: x, e1: y & 0x0fffffff, s: (ww & 0xffff) / 65535, t: (ww >>> 16) / 65535, lambda: f };
+  const face = y & 0x0fffffff, feature = (y >>> 28) & 7;
+  if (feature > 6) throw new Error(`OGC: unknown entry feature ${feature} (${x}, ${y}, ${z}, ${ww})`);
+  if (ww === 1) { const i = x - N; if (i < 0) throw new Error(`OGC: sample entry with id ${x} < N`); return { kind: "sampleFace", sample: i < S ? i : i - S, body: i >= S, face, feature, muLambda: f }; }
+  if (ww !== 0) throw new Error(`OGC: unknown entry word ${ww} (${x}, ${y}, ${z})`);
+  return { kind: "vf", vertex: x, face, feature, lambda: f };
+}
 
 export const OGC_PREDICTION = { none: 0, inertial: 1, guess: 2, target: 3 } as const;
 
@@ -345,6 +396,11 @@ export class OgcContactDetector {
     const metric = config.projectionMetric ?? "off";
     if (metric !== "off" && metric !== "hvv") throw new Error(`OGC: unknown projection metric "${String(metric)}"`);
     if (metric !== "off" && !config.newton) throw new Error("OGC: a projection metric needs the Newton filter (newton)");
+    const freeze = config.contactFreeze ?? "off", travel = config.travelBound ?? "on";
+    if (freeze !== "off" && freeze !== "mandatory") throw new Error(`OGC: unknown contact freeze "${String(freeze)}"`);
+    if (travel !== "on" && travel !== "off") throw new Error(`OGC: unknown travel bound "${String(travel)}"`);
+    if (freeze !== "off" && !config.newton) throw new Error("OGC: a contact freeze needs the Newton filter (newton)");
+    if (travel === "off" && freeze !== "mandatory") throw new Error("OGC: travelBound off is diagnosis only and needs contactFreeze mandatory (no re-detection)");
     const cellRule = config.cellRule ?? "largest";
     if (!(cellRule in OGC_CELL_RULE)) throw new Error(`OGC: unknown cell rule "${String(cellRule)}"`);
     const cell = config.cellSize ?? Math.max(L.meanEdgeLength, config.rqBase);
@@ -648,7 +704,8 @@ export class OgcContactDetector {
    */
   solverContact(binding: number, newton = false): { wgsl: string; buffer: GPUBuffer } {
     const metric = newton && this.config.projectionMetric === "hvv" ? { metric: "nwVertexInv" } : {};
-    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric }), buffer: this.contacts };
+    const travel = newton && this.config.travelBound === "off" ? { travelBound: false } : {};
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel }), buffer: this.contacts };
   }
 
   /**
@@ -688,7 +745,7 @@ export class OgcContactDetector {
       ...OGC_QUERY_ROLES.map(role => [role, ogcQueryWGSL(role), [0, 1, 4, 5, 7, 8, 9, 11, 14]] as [string, string, number[]]),
       ["bound", OGC_BOUND_WGSL, [0, 1, 4, 5, 8, 9, 12]],
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
-      ["decide", ogcDecideWGSL(!!this.config.newton), this.config.newton ? [0, 8, 9, 10, 19] : [0, 9, 10]],
+      ["decide", ogcDecideWGSL(!!this.config.newton, this.config.contactFreeze === "mandatory"), this.config.newton ? [0, 8, 9, 10, 19] : [0, 9, 10]],
       ["redo", OGC_REDO_WGSL, [0, 8, 9, 10]],
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
@@ -939,6 +996,21 @@ export class OgcContactDetector {
     const all = new Uint32Array(raw), ids = new Uint32Array(4 * slots), planes = new Float32Array(4 * slots);
     for (let k = 0; k < slots; k++) { ids.set(all.subarray(8 * k, 8 * k + 4), 4 * k); planes.set(new Float32Array(all.buffer, 32 * k + 16, 4), 4 * k); }
     return { ids, planes, slots };
+  }
+  /**
+   * Every vertex's contact entries as the solver's energy reads them (harness reads after a step; never a step path):
+   * header the contact buffer's vec4 0 (x = N, the first sample id; y the entries per vertex; z, w the counts' and
+   * entries' vec4 offsets) and vec4 1 (params as f32 bits: r, kc, self mu, eps_v dt), counts per vertex (each
+   * min(.., header.y), as ogcContactCount), entries N header.y raw vec4 words, vertex v's k-th at 4 (v header.y + k)
+   * (decodeOgcContactEntry, with N and solidSamples). With contactFreeze "mandatory" they are the mandatory round's.
+   */
+  async readContactEntries(): Promise<{ header: Uint32Array; counts: Uint32Array; entries: Uint32Array }> {
+    const header = new Uint32Array(await this.readBuffer(this.contacts, 0, 32));
+    const N = this.N, K = header[1]!;
+    const raw = new Uint32Array(await this.readBuffer(this.contacts, 16 * header[2]!, 4 * N));
+    const counts = raw.map(c => Math.min(c, K));
+    const entries = new Uint32Array(await this.readBuffer(this.contacts, 16 * header[3]!, 16 * N * K));
+    return { header, counts, entries };
   }
   private async readBuffer(src: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer> {
     const read = this.device.createBuffer({ size: Math.ceil(size / 16) * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

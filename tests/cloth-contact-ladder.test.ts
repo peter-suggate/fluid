@@ -8,7 +8,7 @@
  * (bucket entries scanned, hash collisions, box rejections, candidates), DAT pairs, plane records
  * (per vertex and summed over the filters) and records held for overflow.
  *
- *   CLOTH_LADDER_ONLY=flat,stacked   run only these cases (flat, stacked, sliding, plate, sphere, strip, determinism)
+ *   CLOTH_LADDER_ONLY=flat,stacked   run only these cases (flat, stacked, sliding, plate, sphere, strip, determinism, frozen)
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -18,8 +18,9 @@ import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
 import { createEmptyScene } from '../lib/core/empty-scene';
 import { validateScene, type SceneDescription } from '../lib/core/model';
 import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
-import { OgcContactDetector } from '../lib/cloth/contact/ogc-detector';
-import { OGC_POSE_WORD, OGC_POSE_WORDS } from '../lib/cloth/contact/ogc-wgsl';
+import { OgcContactDetector, decodeOgcContactEntry } from '../lib/cloth/contact/ogc-detector';
+import { ogcDecideWGSL } from '../lib/cloth/contact/ogc-detector-wgsl';
+import { OGC_POSE_WORD, OGC_POSE_WORDS, ogcVertexBlockWGSL } from '../lib/cloth/contact/ogc-wgsl';
 import { SOLID_SAMPLE_WORDS, clothSolidSampleEdges, clothSolidSamples, sampleClothSolidField, type ClothSolidField } from '../lib/cloth/contact/solid-field';
 import { CLOTH_SCENE_CONTACT, clothContactRadius } from '../lib/cloth/scene-contact';
 import type { ClothTopologyData } from '../lib/cloth/types';
@@ -209,12 +210,11 @@ const peakRecords = (label: string, r: { track: TickReport[]; N: number }) =>
 /** The scene with every cloth's trial projection in Newton's H_vv metric (solver.contactProjectionMetric 'hvv'). */
 const hvv = (scene: SceneDescription): SceneDescription => ({ ...scene, cloth: scene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactProjectionMetric: 'hvv' as const } })) });
 /**
- * The metric's known open failure: the falling sheet's motion depends on the projection (sphere 16^2: vy at tick 15
- * -1.632 m/s Euclidean, -1.825 in the metric, free fall -2.45), so Newton's done fires while certificates pin vertices
- * (C1's done-rule fix, nwTravelHeld), and in the metric the sphere halts on heldConflict at tick 46 (an unlevelled
- * fallback round's no-plane pair, the least shift's item). Re-gated when the done-rule fix lands.
+ * The metric's known open failure. With the metric on, the sphere halts on heldConflict at tick 46, still after C1's
+ * done-rule fix (284149af). The conflict is an unlevelled fallback round's no-plane pair: edge 119-136 against the
+ * body's samples. That is the least shift's item (relative motion, conflict-only holds), which follows (C).
  */
-const HVV_SPHERE_TODO = "C1 done-rule fix (nwTravelHeld: a binding certificate where no barrier acts is travel): in the H_vv metric the sphere halts on heldConflict at tick 46";
+const HVV_SPHERE_TODO = "C2 least shift (relative motion, conflict-only holds): in the H_vv metric the sphere halts on heldConflict at tick 46, an unlevelled fallback round's no-plane pair (edge 119-136 against the body's samples)";
 
 for (const metric of [false, true])
 test(`ladder${metric ? ' (H_vv metric)' : ''}: a flat 16 x 16 sheet dropped from 1.2 m (the analytic free fall) lands on the floor, rests at the contact radius without a rebound, with few plane records`, { skip: !runs('flat') }, async () => withDevice(async device => {
@@ -469,6 +469,47 @@ test('ladder (H_vv metric): the flat 16 x 16 drop and the 16 x 16 sphere to tick
   const sphere = await determinism(device, 'sphere 16^2 hvv', hvv(bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }))), Math.min(45, Number(process.env.CLOTH_LADDER_DET_TICKS ?? 45)));
   assert.deepEqual([...flat, ...sphere], []);
 }));
+
+/** The scene with every cloth's contact set frozen after the mandatory round, and with travel 'off' its projection's travel bounds dropped. */
+const frozen = (scene: SceneDescription, travel: 'on' | 'off'): SceneDescription => ({ ...scene, cloth: scene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactFreeze: 'mandatory' as const, contactTravelBound: travel } })) });
+// C1's stage (i)/(ii) switches (diagnosis only): the contract, not the physics. Each tick runs its mandatory round and
+// nothing else, and the per-vertex entries read back and decode.
+for (const travel of ['on', 'off'] as const)
+test(`ladder (frozen contact set${travel === 'off' ? ', no travel bounds' : ''}): the 16 x 16 sphere runs on its mandatory rounds alone and its entries decode`, { skip: !runs('frozen') }, async () => withDevice(async device => {
+  const scene = frozen(bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), travel);
+  assert.deepEqual(validateScene(scene), []);
+  const kinds: Record<string, number> = {};
+  let checked = 0;
+  const out = await ladder(device, `sphere 16^2 frozen${travel === 'off' ? ' travel off' : ''}`, scene, Number(process.env.CLOTH_LADDER_FROZEN_TICKS ?? 40), async (cloth, c) => {
+    assert.equal(c.redetections, 0, 'no round after the mandatory one');
+    const det = cloth.contactFor(scene.cloth![0]!.id)!, { header, counts, entries } = await det.readContactEntries();
+    const N = header[0]!, K = header[1]!;
+    assert.equal(counts.length, N);
+    for (let v = 0; v < N; v++) for (let k = 0; k < counts[v]!; k++) {
+      const e = decodeOgcContactEntry(entries.subarray(4 * (v * K + k), 4 * (v * K + k) + 4), N, det.solidSamples);
+      kinds[e.kind] = (kinds[e.kind] ?? 0) + 1; checked++;
+    }
+  });
+  console.log(`  frozen: ${out.track.length} ticks${out.failure ? ` (halt: ${out.failure})` : ''}; entries over the ticks ${checked}: ${JSON.stringify(kinds)}`);
+  assert.ok(out.track.length > 0 && checked > 0, 'the sheet met the solid and its entries were read');
+}));
+
+test('the frozen-set switches validate: unknown values and travel bounds off without the freeze fail explicitly; off is the kernels unchanged', () => {
+  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 8 }));
+  const withSolver = (solver: Record<string, unknown>): SceneDescription => ({ ...base, cloth: base.cloth!.map(d => ({ ...d, solver: { ...d.solver!, ...solver } as never })) });
+  assert.deepEqual(validateScene(withSolver({ contactFreeze: 'mandatory', contactTravelBound: 'off' })), []);
+  assert.ok(validateScene(withSolver({ contactTravelBound: 'off' })).some(e => /needs contactFreeze 'mandatory'/.test(e)));
+  assert.ok(validateScene(withSolver({ contactFreeze: 'always' })).some(e => /Unknown cloth contact freeze/.test(e)));
+  assert.ok(validateScene(withSolver({ contactTravelBound: 'maybe' })).some(e => /Unknown cloth contact travel bound/.test(e)));
+  assert.equal(ogcDecideWGSL(true, false), ogcDecideWGSL(true));
+  assert.notEqual(ogcDecideWGSL(true, true), ogcDecideWGSL(true));
+  for (const metric of [{}, { metric: 'nwVertexInv' }]) {
+    const on = ogcVertexBlockWGSL({ group: 0, binding: 3, newton: true, ...metric });
+    assert.equal(ogcVertexBlockWGSL({ group: 0, binding: 3, newton: true, travelBound: true, ...metric }), on);
+    const off = ogcVertexBlockWGSL({ group: 0, binding: 3, newton: true, travelBound: false, ...metric });
+    assert.ok(!off.includes('ogcBallExit(zc, ec, cap.w)') && off.includes('fn ogcPieceExitFaces') && !off.includes('OGC_CON_CAP, ogcConViol'));
+  }
+});
 
 test('the scene round cap covers the Newton iteration cap: a re-detection round can follow every Newton iteration (the strip lagged at 4 against 8)', () => {
   assert.ok(CLOTH_SCENE_CONTACT.roundCap >= CLOTH_NEWTON_SCENE_DEFAULTS.iterations, `roundCap ${CLOTH_SCENE_CONTACT.roundCap} < Newton ${CLOTH_NEWTON_SCENE_DEFAULTS.iterations}`);
