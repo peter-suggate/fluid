@@ -98,17 +98,19 @@ test('one converged GPU step matches the converged oracle from every initial gue
   }
 }));
 
-test('newton.activeSet: the default is the active set\'s kernels exactly; \'off\' drops only nwApply\'s active-set write', () => {
+test('newton.activeSet: the default is the active set\'s kernels exactly; \'off\' drops only nwAccept\'s active-set write', () => {
   const pcg = { patches: 4, patchVertices: 64, coarse: 0, levels: 1 } as unknown as Parameters<typeof clothNewtonWGSL>[3];
   for (const subgroups of [false, true]) for (const trust of [false, true]) {
     const on = clothNewtonWGSL(3, 64, true, pcg, subgroups, trust), off = clothNewtonWGSL(3, 64, true, pcg, subgroups, trust, false);
     assert.equal(clothNewtonWGSL(3, 64, true, pcg, subgroups, trust, true), on);
     // Without contact the switch has nothing to drop.
     assert.equal(clothNewtonWGSL(3, 64, false, pcg, subgroups, trust, false), clothNewtonWGSL(3, 64, false, pcg, subgroups, trust));
-    const apply = (w: string) => w.slice(w.indexOf('fn nwApply('), w.indexOf('fn nwEdgeDuals('));
-    assert.match(apply(on), /ogcProjectActive/);
-    assert.doesNotMatch(apply(off), /ogcProjectActive|NW_ACTIVE/);
-    assert.equal(off.replace(apply(off), ''), on.replace(apply(on), ''), "'off' changes nothing outside nwApply");
+    const accept = (w: string) => w.slice(w.indexOf('fn nwAccept('), w.indexOf('fn nwApply('));
+    assert.match(accept(on), /NW_ACTIVE/);
+    assert.doesNotMatch(accept(off), /NW_ACTIVE/);
+    // Re-detection's arming stays (C1 RESULT 51), its projection then its own.
+    for (const w of [on, off]) assert.match(accept(w), /nwTravelHeldAt\(v, /);
+    assert.equal(off.replace(accept(off), ''), on.replace(accept(on), ''), "'off' changes nothing outside nwAccept");
   }
 });
 

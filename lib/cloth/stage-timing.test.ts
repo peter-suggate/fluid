@@ -13,6 +13,7 @@ test("cloth pipelines map to their stages by label", () => {
   assert.equal(clothStageOf("ogc filter"), "filter");
   assert.equal(clothStageOf("ogc verify"), "detect");
   assert.equal(clothStageOf("ogc decide"), "detect");
+  assert.equal(clothStageOf("Cloth nwAccept"), "line-search");
   assert.equal(clothStageOf("Cloth nwApply"), "line-search");
   assert.equal(clothStageOf("Cloth finishStep"), "finish");
   assert.equal(clothStageOf("ogc contactState"), "finish");

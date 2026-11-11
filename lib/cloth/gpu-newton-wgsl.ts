@@ -318,7 +318,7 @@ fn nwRelease(s: ptr<function, NwSet>, g: vec3f) {
     (*s).n = K; (*s).cnt = k;
   }
 }
-// Vertex v's active set at the Newton iterate with gradient g: the normals the last nwApply stored (the certificates
+// Vertex v's active set at the Newton iterate with gradient g: the normals the last nwAccept stored (the certificates
 // binding the iterate in the latest filter's set; none at the step's first iteration, whose certificates are the
 // step's own), reduced to an independent set, then released by the KKT sign (nwRelease). Writes P = I - Q Q^T
 // (projector records: xx, xy, xz, yy; yz, zz, the normals released, the count kept; count 0: P = I).
@@ -359,8 +359,9 @@ fn nwBarrierActs(v: u32, xv: vec3f) -> bool {
 // and the binding normals (the cap's included; a
 // held vertex: its direction) keep a positive KKT multiplier against the force -g at the iterate: Newton would move
 // v further were the bound lifted, so a small step there is no convergence.
-fn nwTravelHeld(v: u32, x: vec3f, y: vec3f, alpha: f32, g: vec3f) -> bool {
-  let a = ogcProjectActive(v, x, y, alpha);
+fn nwTravelHeld(v: u32, x: vec3f, y: vec3f, alpha: f32, g: vec3f) -> bool { return nwTravelHeldAt(v, ogcProjectActive(v, x, y, alpha), x, y, g); }
+// The same at Pi(y)'s certificates a = ogcProjectActive(v, x, y, alpha).
+fn nwTravelHeldAt(v: u32, a: OgcActive, x: vec3f, y: vec3f, g: vec3f) -> bool {
   if (!a.travel && (a.held || nwBarrierActs(v, a.q))) { return false; }
   var s: NwSet;
   if (a.held) { if (any(y != x)) { nwAddIndependent(&s, normalize(y - x)); } }
@@ -780,6 +781,7 @@ ${contact ? `// The projected arc (contact): after the filter hook fixes the rou
   var alpha = 1.0; var cut = false;
   // The done rule's travel test (w = 1) runs only on a trial that could end Newton: alpha |d_v| <= tol h~ (nwChoose's
   // small step needs alpha max_v |d_v| <= tol h~), so it is exact wherever done is decided and costs nothing far from it.
+  // Re-detection's arming reads the same test without the gate, at the accepted trial alone (nwAccept).
   // It runs on a cut trial, and on an uncut one of a vertex with active normals: the reduced direction d = P d runs
   // along the certificates binding v, so the arc no longer cuts it while a travel bound still holds it there (a vertex
   // pinned on a mandatory round's solid face beyond r, its multiplier positive, would otherwise end Newton far from
@@ -1025,7 +1027,8 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   }
   if (NW_HYBRID) { nw[nwTrustCounts()] = counts; }
   ${contact ? `// The active set, and in .w the vertices a travel bound holds at the accepted trial (no step: 0, the stall is its own
-  // signal) plus those pressed against the round's certificates at x (nwTrial, sm.z): either needs a new round.
+  // signal) plus those pressed against the round's certificates at x (nwTrial, sm.z): either needs a new round. The
+  // count is the done certificate's (gated, nwProject); nwAccept then arms the round for any vertex the ungated test holds.
   nw[nwControl() + 2u] = vec4f(act.xyz, held + sm.z);` : ''}
   // Converged: no descending step, or (velocity tolerance, newton3.w) the accepted step moves no vertex faster than
   // tol h~ / h~ (alpha |d_v| bounds the projected move too: each certified set holds x_v). nwApply still applies a converged step's move.
@@ -1046,6 +1049,37 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   nw[nwControl()] = vec4f(select(0.0, ${DONE}, stalled || small), 0.0, chosen, ctl.w + 1.0);
 }
 
+${contact ? `// After the line search and before the move (every position still x, the pairs' other vertices' too): what the
+// accepted trial tells the next iteration and the re-detection, from v's certificates at its trial point Pi_v(x + alpha d).
+@compute @workgroup_size(${workgroup}) fn nwAccept(@builtin(global_invocation_id) id: vec3u) {
+  let v = id.x;
+  let ctl = nw[nwControl()];
+  if (v >= P.n.x || ctl.x != 0.0 || nwPinned(v)) { return; }
+  let D = nwD4(v);
+  var a = exp2(-f32(${CLOTH_NEWTON_TRIALS - 1}u));
+  if (ctl.z > 0.0) { a = ctl.z; }
+  let x = pos(v); let y = x + a * D.xyz;
+  ${activeSet ? `let act = ogcProjectActive(v, x, y, a);
+  // The active set the next iteration starts from: the outward normals of the certificates binding the vertex's
+  // accepted trial point (at a stall, the smallest trial's: the iterate stays) in this iteration's filter's set
+  // (ogcProjectActive: up to three independent, the cap apart - the round's trust region bounds travel, not the set),
+  // replacing the last iteration's: a normal from an earlier certificate set is not a constraint of the next one
+  // (re-detection runs after nwApply and replaces the set). A held vertex (no move) blocks its whole direction d.
+  var N = array<vec3f, 3>(act.n0, act.n1, act.n2); var cnt = act.count;
+  if (act.held) { cnt = select(0u, 1u, any(D.xyz != vec3f(0.0))); N[0] = select(vec3f(0.0), normalize(D.xyz), cnt > 0u); }
+  for (var i = 0u; i < 3u; i++) { nw[nseg(NW_ACTIVE + i, v)] = select(vec4f(0.0), vec4f(N[i], 1.0), i < cnt); }
+` : ''}
+  // Re-detection's arming (control + 2 .w > 0, read by the contact hook after nwApply): a travel bound holds v at the
+  // accepted trial, its arc cut there, whatever |alpha d_v|. A vertex the round's travel cap pins (no active normals,
+  // its multiplier positive) far from a stationary point needs a round about the iterate; nwProject's test, gated to
+  // trials that could end Newton (alpha |d_v| <= tol h~, the done certificate's), never armed one for it (C1 RESULT 51:
+  // 32^2 t15 from one-ulp starts ended at the cap, |g|/|m g| 3.6, cut vertices pinned through 44-50 rounds that never
+  // re-centred on them). The done certificate keeps the gated count (nwChoose's small step). Every writer stores 1.
+  if (ctl.z > 0.0 && D.w != 0.0 && any(nw[nseg(${S.moves}u + u32(round(-log2(a))), v)].xyz != a * D.xyz)) {
+    if (nwTravelHeldAt(v, ${activeSet ? 'act' : 'ogcProjectActive(v, x, y, a)'}, x, y, nw[nseg(${S.g}u, v)].xyz)) { nw[nwControl() + 2u].w = 1.0; }
+  }
+}
+` : ''}
 @compute @workgroup_size(${workgroup}) fn nwApply(@builtin(global_invocation_id) id: vec3u) {
   let v = id.x;
   let ctl = nw[nwControl()];
@@ -1053,20 +1087,6 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   // The accepted trial's move (a converged step's too; once Newton is done d = 0 and this moves nothing). chosen = 2^-k exactly.
   // Newton done: d = 0 (its w too, so no stored move is read again), so the capped iterations left (all early exits, the
   // control record keeping its last step) move nothing and give the contact filter and re-detection nothing to act on.
-  ${contact && activeSet ? `// The active set the next iteration starts from: the outward normals of the certificates binding the vertex's
-  // accepted trial point (at a stall, the smallest trial's: the iterate stays) in this iteration's filter's set
-  // (ogcProjectActive: up to three independent, the cap apart - the round's trust region bounds travel, not the set),
-  // replacing the last iteration's: a normal from an earlier certificate set is not a constraint of the next one
-  // (re-detection runs after nwApply and replaces the set). A held vertex (no move) blocks its whole direction d.
-  if (ctl.x == 0.0 && !nwPinned(v)) {
-    let D = nwD4(v);
-    var a = exp2(-f32(${CLOTH_NEWTON_TRIALS - 1}u));
-    if (ctl.z > 0.0) { a = ctl.z; }
-    let x = pos(v); let act = ogcProjectActive(v, x, x + a * D.xyz, a);
-    var N = array<vec3f, 3>(act.n0, act.n1, act.n2); var cnt = act.count;
-    if (act.held) { cnt = select(0u, 1u, any(D.xyz != vec3f(0.0))); N[0] = select(vec3f(0.0), normalize(D.xyz), cnt > 0u); }
-    for (var i = 0u; i < 3u; i++) { nw[nseg(NW_ACTIVE + i, v)] = select(vec4f(0.0), vec4f(N[i], 1.0), i < cnt); }
-  }` : ''}
   if (ctl.z > 0.0) { positions[v] = vec4f(pos(v) + nwMove(v, u32(round(-log2(ctl.z))), ctl.z), positions[v].w); }
   if (ctl.x != 0.0) { nw[nseg(${S.d}u, v)] = vec4f(0.0); }
 }

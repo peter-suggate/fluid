@@ -607,6 +607,15 @@ test('ladder 1d: at a fixed iterate of a restarted contact step on the 16^2 sphe
   assert.ok(B.worst > 10, 'the restarted step\'s objective is not BDF2\'s (the frame matters at this iterate)');
 }));
 
+/** A one-ulp start (C1 RESULT 51, fluid-1e's repro): each coordinate moved by -1, 0 or +1 f32 ulp from a mulberry32
+ * stream seeded `seed` (0: the state as captured). */
+function ulpStart(values: readonly number[], seed: number): number[] {
+  if (!seed) return [...values];
+  let a = seed >>> 0;
+  const rnd = () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  return values.map(x => { const k = Math.floor(rnd() * 3) - 1; if (!k || x === 0) return x; const u = 2 ** (Math.floor(Math.log2(Math.abs(x))) - 23); return Math.fround(x + k * u); });
+}
+
 /** RESULT 46's 32^2 sphere state at tick 15 (tests/fixtures/cloth-sphere-32-t15.json: Float64 arrays in base64). */
 function sphere32Tick15() {
   const F = JSON.parse(readFileSync(new URL('./fixtures/cloth-sphere-32-t15.json', import.meta.url), 'utf8'));
@@ -616,7 +625,8 @@ function sphere32Tick15() {
     previousVelocities_m_s: f64(ss.previousVelocities_m_s), previousDisplacements_m: f64(ss.previousDisplacements_m), pinDuals: f64(ss.pinDuals), edgeDuals: f64(ss.edgeDuals) } };
 }
 
-test('ladder 1e: the 32^2 sphere contact step never stops with a certificate carrying load: done only where the Float64 objective is stationary at every vertex', { skip: !gpu }, async t => withDevice(async device => {
+for (const lin of ['off', 'factorized'] as const) for (const seed of [0, 1, 2, 3, 4])
+test(`ladder 1e (${lin}, start seed ${seed}): the 32^2 sphere contact step never stops with a certificate carrying load: done only where the Float64 objective is stationary at every vertex`, { skip: !gpu }, async t => withDevice(async device => {
   // RESULT 46: from this state (kc 9668, the scene's) the step ended done with vertices carrying 0.05-0.81 N of raw
   // gradient, the old stop projecting out the filter's certificates (travel bounds of conservative detection, not
   // constraints: every term is energy). RESULT 47 stops on the whole gradient. The step runs at a 150 cap (1 um velocity
@@ -626,10 +636,14 @@ test('ladder 1e: the 32^2 sphere contact step never stops with a certificate car
   // (the stop's 4 eps32 floor plus that agreement) at every free vertex: no false done. Every vertex left over 2 floors
   // must be one the filter holds with a kept certificate normal (|P g_v| within its floor): the residual a re-detection
   // keeps re-certifying (C2), which the todo below records.
+  // C1 RESULT 51: one-ulp starts (seeds 1-4, mulberry32, as fluid-1e's repro) under both contact linearizations. Seeds 1
+  // and 3 (off) ended at the cap, |g|/|m g| 3.6, with vertices the round's travel cap pinned far from stationarity and no
+  // re-detection armed for them (the travel test ran only where alpha |d_v| <= tol h~). Done's own count is the gated
+  // one wherever done can be declared: at the done iterate no vertex the travel test holds at the accepted trial.
   const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 32 })), doc = base.cloth![0]!, H = CLOTH_SCENE_STEP_S;
   if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
-  const start = sphere32Tick15(), capture = start as unknown as ClothCapture;
-  const scene = (iterations: number, residualTolerance?: number) => ({ ...base, cloth: [{ ...doc, solver: { ...doc.solver!, newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations, velocityTolerance_m_s: 1e-6 / (2 * H / 3), ...(residualTolerance === undefined ? {} : { residualTolerance }) } },
+  const start0 = sphere32Tick15(), start = { ...start0, positions_m: ulpStart(start0.positions_m, seed) }, capture = start as unknown as ClothCapture;
+  const scene = (iterations: number, residualTolerance?: number) => ({ ...base, cloth: [{ ...doc, solver: { ...doc.solver!, newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations, contactLinearization: lin, velocityTolerance_m_s: 1e-6 / (2 * H / 3), ...(residualTolerance === undefined ? {} : { residualTolerance }) } },
     geometry: { kind: 'inline' as const, data: { ...doc.geometry.data, initialPositions_m: start.positions_m, initialVelocities_m_s: start.velocities_m_s, solverState: start.solverState } } }] });
   type Reader = { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer; state: GPUBuffer; tables: { edgeDualRecord: number; stride: number }; E: number };
   const at = async (iterations: number, residualTolerance?: number) => {
@@ -648,7 +662,16 @@ test('ladder 1e: the 32^2 sphere contact step never stops with a certificate car
         const a = P0.subarray(4 * v, 4 * v + 4), b = P1.subarray(4 * v, 4 * v + 2);
         return Math.hypot(a[0]! * w[0]! + a[1]! * w[1]! + a[2]! * w[2]!, a[1]! * w[0]! + a[3]! * w[1]! + b[0]! * w[2]!, a[2]! * w[0]! + b[0]! * w[1]! + b[1]! * w[2]!);
       };
-      return { rec, restarts, g, run, projected };
+      // The done certificate's travel count: at the accepted trial (control .z = 2^-k), the vertices the travel test holds
+      // (cut, moves[k].w) and of them those whose alpha |d_v| exceeds tol h~ (the gate the done rule keeps).
+      const chosen = (await solver.readNewtonControl())[2]!, D = await seg(CLOTH_NEWTON_SEGMENTS.d), tolMove = 1e-6 / (2 * H / 3) * (restarts > 0 ? H : 2 * H / 3);
+      let heldAt = 0, heldOver = 0;
+      if (chosen > 0) {
+        const M = await seg(CLOTH_NEWTON_SEGMENTS.moves + Math.round(-Math.log2(chosen)));
+        for (let v = 0; v < N; v++) if (D[4 * v + 3] !== 0 && M[4 * v + 3] !== 0) { heldAt++; if (chosen * Math.hypot(D[4 * v]!, D[4 * v + 1]!, D[4 * v + 2]!) > tolMove) heldOver++; }
+      }
+      const counters = await det.readCounters();
+      return { rec, restarts, g, run, projected, heldAt, heldOver, chosen, redetections: counters.redetections, status: counters.status };
     } finally { cloth.destroy(); }
   };
   const end = await at(150), K = end.rec.newton, prev = await at(K - 1);
@@ -664,17 +687,25 @@ test('ladder 1e: the 32^2 sphere contact step never stops with a certificate car
   }
   console.log(`[ladder 1e] 32^2 tick ${start.tick} -> ${start.tick + 1} (${end.restarts > 0 ? 'implicit Euler, restarted' : 'BDF2'}): Newton ${K} (${end.rec.done ? 'done' : 'cap'}), |g|/|mg| ${end.rec.last.toExponential(2)}; `
     + `entries ${JSON.stringify(f64.seen)}; max |g_F64| / f32 floor ${worst.toFixed(3)} at v${at1} (GPU |g| there ${gpuAt.toExponential(2)} N), vertices over 2 floors ${over.length} (${over.length - loose.length} certificate-held: ${over.join(', ')}); |g_GPU - g_F64| ${agree.toFixed(3)} floors`);
+  let gw = 0; for (let v = 0; 4 * v < end.g.length; v++) gw = Math.max(gw, end.g[4 * v + 3]!);
+  console.log(`[ladder 1e] ${lin} seed ${seed}: detector status ${end.status}, re-detections ${end.redetections}; the last iteration's step ${end.chosen} (0: no trial descends), max g.w ${gw.toPrecision(3)}; at the ${end.rec.done ? 'done' : 'last'} iterate's accepted trial ${end.heldAt} travel-held vertices, ${end.heldOver} of them with alpha |d_v| over tol h~`);
+  assert.ok(!end.rec.done || end.heldAt === 0, `done with ${end.heldAt} travel-held vertices at the accepted trial (${end.heldOver} over the gate)`);
   assert.ok(agree <= 1, `the GPU gradient leaves the Float64 objective's by ${agree.toFixed(2)} f32 floors`);
   assert.ok(!end.rec.done || worst <= 2, `false done: |g_F64| is ${worst.toFixed(2)} f32 floors at v${at1}, ${over.length} vertices over 2`);
-  assert.deepEqual(loose, [], 'every vertex left over 2 floors is held by a kept certificate (else the solver itself has not converged)');
-  await t.test('the step converges within 150 Newton iterations', { todo: 'C2: re-detection keeps re-certifying the travel bound at the held vertices (C1 RESULT 47)' }, () => {
-    assert.ok(end.rec.done, `${over.length} certificate-held vertices, max ${worst.toFixed(1)} floors at v${at1}`);
+  // Off converges on every seed (C1 RESULT 51), factorized on seeds 0, 2 and 4. Not yet on seeds 1 and 3 (the cap at 0.22 and 2.33 floors):
+  // a linear tail, not a trap. On seed 3, v367 is free, uncut and at alpha 1 every late iteration, its residual falling ~0.82x per
+  // iteration (the AVBD strain duals' per-iteration step: with the duals held both arms are done at Newton 71), with two
+  // restarts (iterations 46 and 130) where neighbours' entry sets change. Open (C1), the reason its default stays held.
+  const open = lin === 'factorized' && (seed === 1 || seed === 3) ? { todo: 'C1 RESULT 51: factorized reaches the cap on seeds 1 and 3 (linear tail of the strain duals, not a trap)' } : {};
+  await t.test('every vertex left over 2 floors is held by a kept certificate, and the step converges within 150 Newton iterations', open, () => {
+    assert.deepEqual(loose, [], 'every vertex left over 2 floors is held by a kept certificate (else the solver itself has not converged)');
+    assert.ok(end.rec.done, `${over.length} vertices over 2 floors, max ${worst.toFixed(1)} floors at v${at1}`);
   });
   // PCG's stop at the iterate (|P g|^2 <= residualTolerance^2 |m g|^2, before the solve) is the third done path. At a
   // residual tolerance of 1 it passes wherever |P g| <= |m g|, so it alone would end the step at once, the certificates
   // carrying the rest of g (C1 RESULT 50: before the fix it declared done there): done must still mean every vertex's
   // whole gradient within its f32 floor at the done iterate.
-  await t.test('no false done through PCG\'s projected stop: at residualTolerance 1 the step is done only where every vertex is within its floor', async () => {
+  if (seed === 0) await t.test('no false done through PCG\'s projected stop: at residualTolerance 1 the step is done only where every vertex is within its floor', async () => {
     const loose = await at(150, 1);
     let kmax = 0, kat = -1; for (let v = 0; 4 * v < loose.g.length; v++) if (loose.g[4 * v + 3]! > kmax) { kmax = loose.g[4 * v + 3]!; kat = v; }
     console.log(`[ladder 1e] residualTolerance 1: Newton ${loose.rec.newton} (${loose.rec.done ? 'done' : 'cap'}), |g|/|mg| ${loose.rec.last.toExponential(2)}, max |g_v|^2 / floor_v^2 ${kmax.toPrecision(3)} at v${kat}`);

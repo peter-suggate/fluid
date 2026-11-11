@@ -32,7 +32,7 @@ export const CLOTH_STAGES: readonly { readonly id: ClothStageId; readonly label:
 const SETUP = new Set(['grabBegin', 'restartScan', 'beginStep', 'frameElements', 'frame', 'nwBeginStep', 'frameBegin', 'stepBegin']);
 const ASSEMBLE = new Set(['nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild']);
 const PCG = new Set(['pcgStep', 'pcgStepOverflow', 'pcgSolve']);
-const LINE_SEARCH = new Set(['nwProject', 'nwTrial', 'nwModel', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
+const LINE_SEARCH = new Set(['nwProject', 'nwTrial', 'nwModel', 'nwChoose', 'nwAccept', 'nwApply', 'nwEdgeDuals']);
 const FINISH = new Set(['diagnose', 'reduceDiagnostics', 'onsetScan', 'finishStep', 'contactState']);
 
 /** The stage a cloth pipeline belongs to, by its label. */

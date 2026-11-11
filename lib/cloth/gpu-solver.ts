@@ -463,7 +463,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
 
 const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'pcgSolve', 'nwTrial', 'nwModel', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
 /** With contact: the projected arc's trial moves (after the filter hook, before nwTrial). */
-const CONTACT_NEWTON_KERNELS = ['nwProject'] as const;
+const CONTACT_NEWTON_KERNELS = ['nwProject', 'nwAccept'] as const;
 /** With newton.contactLinearization: the compiled contact records' count and build (after nwGradient). */
 const CONTACT_LIN_KERNELS = ['nwLinCount', 'nwLinBuild'] as const;
 /** With newton.contactLinearization: the PCG iteration's rows of the patches the pool could not hold (after pcgStep). */
@@ -708,6 +708,8 @@ export class ClothGPUSolver {
       // Trust-region iterations (newton.trustRegion 'hybrid'): s.H s of the projected step for the model's decrease.
       if (o.trustRegion === 'hybrid') this.run(pass, 'nwModel', this.tables.pcg.patches);
       this.run(pass, 'nwChoose', 1);
+      // The accepted trial's active set and re-detection arming, at x (before the move).
+      if (this.options.contact) this.run(pass, 'nwAccept', W);
       this.run(pass, 'nwApply', W);
       this.hooks.afterNewtonStep?.(pass, n === o.iterations - 1);
       if (limited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
