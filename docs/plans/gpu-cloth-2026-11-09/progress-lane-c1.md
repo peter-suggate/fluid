@@ -2919,3 +2919,73 @@ separately: it passes, with the sliding todo. npm run check:types is clean; test
    49/60 and 52/60 restarted steps on the sphere, because the drape lands fresh vertices every step. The regression is
    a plane landing, resting and sliding, with exactly one restart.
 2. Then ruling 2.
+
+## 2026-11-11 RESULT (48): the impact restart criterion swept; the plane regression corrected; the dual schedule is no lever at the production cap
+
+**(1) The plane regression, corrected.**
+- RESULT 47's "37 sliding restarts" were the regression's own fault. The 1 m sheet sliding at 0.5 m/s reached a wall
+  of the 1.6 m domain. That is real new contact, and the sheet tilted on it: at tick 29 its vertices spanned y 43-77 mm.
+- The test now starts the sliding sheet back by half the distance it travels and runs 60 ticks.
+- With HEAD's onset criterion, resting and sliding each restart exactly once, at tick 32 (fastest fall at tick 29).
+  That is a hard assertion now; the todo is gone.
+
+**(2) The impact criterion (Claude's restarts ruling).**
+- Rule: restart when some vertex's normal approach over the step, against an entry of the last round, exceeds F r.
+  Here r = 1 mm.
+- Scratch prototype in C2's OGC_CONTACT_STATE_WGSL, not committed. The approach is measured per entry kind:
+  - solid field: -n . (x_{n+1} - x_t), with n the field normal at x_{n+1};
+  - moving body: the same, against the body point carried from x_t, so the body's own motion counts;
+  - cloth pair: the gap change sum w_c (x - x_t) along the Mn normal, but only while within r.
+- **"Within r at the end" cannot be the test.**
+  - The landing's velocity jump happens a step before any entry is within r. The conservative bound arrests the sheet
+    at y = 1.01 mm, just outside r, in step 30, from 52 mm at 4.74 m/s.
+  - The sheet then creeps into r in step 31 with an approach under 0.1 r.
+  - So with "within r", at F >= 0.1 the flat landing never restarts and rebounds at 2.96 m/s. The criterion therefore
+    takes every entry in the round's set (within the query range).
+
+**Sweep.** Production cap 8 for the landing tests (free fall, tilted 15 deg, resting, sliding). Restarted steps per 60
+ticks on the sphere.
+
+| F | flat landing rebound | tilted rebound (h/8 ref 0.0000) | resting / sliding restarts | sphere 16^2 | sphere 32^2 |
+|---|---|---|---|---|---|
+| HEAD criterion | 0.0010 | 0.0002 | 1 / 1 | 49 | 55 |
+| 0.25 | 0.0018 | 0.0002 | 1 / 1 | 46 | 58 |
+| 1 | 0.0018 | 0.0002 | 1 / 1 | 37 | 53 |
+| 2 | 0.0018 | 0.0002 | 1 / 1 | 26 | 41 |
+| 4 | 0.0018 | 0.0002 | 1 / 1 | 22 | 31 |
+| 8 | 0.0018 | 0.0002 | 1 / 1 | 13 | 13 |
+| 16 | 0.0018 | 0.0002 | 1 / 1 | 5 | 6 |
+| 24, 32, 48 | 0.0018 | **0.0385 (fails)** | 1 / 1 | 2 (F 32) | 3 (F 32) |
+| 64 | **2.96 (fails)** | **0.0385 (fails)** | 0 / - | | |
+| none (F 1e9) | 2.96 | **3.27** | 0 | | |
+
+Notes:
+- Rows F 0.25, 2 and 4 come from the earlier sweep, whose sliding case still hit the wall. Their resting results and
+  sphere counts are valid.
+- The tilted slap is fixed up to F = 16 and fails from F = 24. Its later-landing vertices approach at about 24 mm per
+  step.
+- **Proposed F = 8**, a factor 2 below the tilted failure. Restarts fall from 49/55 to 13/13 per 60 ticks.
+- The six 32^2 replay states (kc 9668 / 100, t5 / t15 / t25) carry no restart, so their Newton counts do not depend on
+  the criterion: unchanged from RESULT 47.
+- C2 owns the bit: spec sent, with the prototype's diff and its scope for pairs beyond r.
+
+**(3) Ruling 2: the dual schedule.**
+- New option newton.dualSchedule: 'every' (default), 'converged' (an outer AL loop), or k. With the default it
+  compiles string-for-string; there is a CPU test.
+- Not committed yet: it sits on the done handshake that C2 lands with (B).
+- Measured on one step of the 16^2 sphere from ladder 2c's published states (the end |g|/|mg|):
+
+| state | cap | every | converged | k 2 | k 4 | k 8 |
+|---|---|---|---|---|---|---|
+| t20 | 8 | 1.52 | 1.42 | 2.26 | 1.46 | 1.42 |
+| t20 | 150 (1 um) | **done at 135**, 2.9e-3 | 150, 8.7e-4 (1 outer update) | 150, 9.0e-3 | 150, 2.4e-2 | 150, 1.1e-2 |
+| t40 (restarted) | 8 | 10.5 | 10.3 | 10.4 | 10.3 | 10.3 |
+| t40 | 150 | 2.02 | 9.54 (0 updates) | 0.43 | 1.34 | 4.83 |
+
+- At the production cap the schedule moves the end residual by at most 7 % (10.5 against 10.3 at t40). 'converged'
+  and k 8 there are the inner solve at the step-start duals.
+- At 150, only 'every' converges at t20. The outer loop takes one update and then does not re-converge within the cap.
+- The oracle with the same outer schedule is not built yet. Given this null result I am holding it for Claude's
+  ruling.
+
+**Gate.** The landing regression on 67cb29fd passes (1 test). Full gate not rerun: only that test changed.

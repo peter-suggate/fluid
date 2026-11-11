@@ -296,7 +296,11 @@ test('a tilted sheet slaps down onto the floor as implicit Euler at h / 8 does (
  * each one ran), and the tick of its fastest mean fall. */
 async function landingRestarts(device: GPUDevice, slide: number, ticks: number) {
   const source = clothAnalyticFreeFall(), doc = source.cloth[0]!, data = doc.geometry.data, n = data.restPositions_m.length / 3;
-  const moving = { ...source, cloth: [{ ...doc, geometry: { kind: 'inline' as const, data: { ...data, initialVelocities_m_s: Array.from({ length: 3 * n }, (_, i) => i % 3 === 0 ? slide : 0) } } }] };
+  // A sliding sheet starts back from the middle by the distance it covers (the 1 m sheet has 0.3 m to the walls of the
+  // 1.6 m domain each side): it never reaches a wall, which would be a new contact of its own.
+  const back = -slide * ticks * CLOTH_SCENE_STEP_S / 2, shift = (p: readonly number[]) => p.map((u, i) => i % 3 === 0 ? u + back : u);
+  const moving = { ...source, cloth: [{ ...doc, geometry: { kind: 'inline' as const, data: { ...data, restPositions_m: shift(data.restPositions_m),
+    ...(data.initialPositions_m ? { initialPositions_m: shift(data.initialPositions_m) } : {}), initialVelocities_m_s: Array.from({ length: 3 * n }, (_, i) => i % 3 === 0 ? slide : 0) } } }] };
   const cloth = await ClothSystem.create(device, clothAnalyticSceneDescription(moving, override(moving)), { statusInterval: 1 }), solver = cloth.solverFor(doc.id)!;
   const at: number[] = [], vy: number[] = [];
   try {
@@ -315,16 +319,14 @@ async function landingRestarts(device: GPUDevice, slide: number, ticks: number) 
   return { ok: at.length === 1 && at[0]! > fall && at[0]! <= fall + 4, line };
 }
 
-test('a sheet landing on the floor and resting there restarts its BDF2 history exactly once, at the landing', { skip: !runs('free-fall') }, async t => withDevice(async device => {
+test('a sheet landing on the floor, resting or sliding along it, restarts its BDF2 history exactly once, at the landing', { skip: !runs('free-fall') }, async () => withDevice(async device => {
   // The restart (implicit Euler for the step after an onset) is for a velocity jump: contact arriving that was not in
-  // range at the step start. Contact that persists (resting) or slides (the frictionless floor at 0.5 m/s along x) is
-  // no new contact, so the history restarts once, the step after the landing (Claude's restarts ruling, C1 RESULT 47).
-  const rest = await landingRestarts(device, 0, 90);
-  assert.ok(rest.ok, rest.line);
-  const slide = await landingRestarts(device, 0.5, 90);
-  await t.test('sliding along the floor restarts it exactly once too', { todo: 'C2: the onset bit (OGC_CONTACT_STATE_WGSL) fires on sliding contact; 37 restarted steps on cab390d3 (C1 RESULT 47)' }, () => {
-    assert.ok(slide.ok, slide.line);
-  });
+  // range at the step start. Contact that persists (resting) or slides (the frictionless floor at 0.5 m/s along x, 60
+  // ticks) is no new contact, so the history restarts once, the step after the landing (Claude's restarts ruling, C1
+  // RESULTs 47-48; RESULT 47's 37 sliding restarts were the sheet reaching the domain's wall).
+  const fails: string[] = [];
+  for (const slide of [0, 0.5]) { const r = await landingRestarts(device, slide, 60); if (!r.ok) fails.push(r.line); }
+  assert.deepEqual(fails, []);
 }));
 
 /**
