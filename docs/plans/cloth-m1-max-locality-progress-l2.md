@@ -214,3 +214,12 @@ topology+geometry 456.3 / 706.5 ms at ticks 35 / 120 against off 537.2 / 862.8.
   `OgcContactDetector.defaultLocality`): off 91 pass / 0 fail, on 84 pass / 0 fail. The one `not ok` in both is the
   pre-existing TODO "a sheet lands on the moving solid and rides it" (C2, bodySqueeze at 0.45 s). Before the
   resolvePlane fix (67cb29fd) the on pass failed the two H_vv ladder sphere tests (section 3); after it they pass.
+
+## 8. Ruling (main, 2026-11-11): (b) and (a) kept, (c) removed
+
+Accepted: the round geometry records are the win; the face records stay for their extra ~5% of query time. The final
+bucket offsets (c) are removed from the code: the `locOffsets` pass, its words in binding 24 and the `offsets` token,
+which now fails like any other unknown value. Their measurement above (section 5: 230.6 / 464.1 ms of query alone
+against off's 231.4 / 462.1 at ticks 35 / 120; 158.0 / 313.4 on top of a+b against 156.9 / 311.2) stands as the
+finding: the three prefix-table loads per cell are not on the queries' critical path. With the offsets gone, binding
+24 holds the face records alone, from word 0 (8T words, 1.42 MB at 150^2).

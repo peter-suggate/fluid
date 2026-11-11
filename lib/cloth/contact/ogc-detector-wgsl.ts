@@ -288,21 +288,21 @@ fn bucketStart(h: u32) -> u32 {
  * The query kernels' locality switch (OgcContactConfig.locality; default off, the kernels above unchanged). Each part
  * replaces loads of the query roles and nothing else: the grid, the traversal, the tests and their order are the same,
  * and every value read is the same bits, from another place.
- *   topology  compiled face records (ogc-topology.ts buildOgcFaceRecords) in `loc` at word H + 8: a box-passing
+ *   topology  compiled face records (ogc-topology.ts buildOgcFaceRecords) in `loc`, 8 words a face: a box-passing
  *             record's owned edges, their endpoints (in the edge table's order) and its vertices' ownership come from
  *             one 8-word load in place of triEdges -> edge record and vtOff -> vtList.
  *   geometry  round geometry records in `geo`, two vec4<u32> per vertex and solid sample, written after prep by
  *             OGC_LOC_GEOMETRY_WGSL: (X.xyz, envelope), (w.xyz, sigma | moving-with-solid << 31), in place of
  *             x_det, pred and three regions of work.
- *   offsets   the round's final bucket offsets in `loc` at [0, H], written after the scans by OGC_LOC_OFFSETS_WGSL:
- *             bucketStart is one load in place of three prefix-table loads.
+ * (A third part, the round's final bucket offsets in place of bucketStart's three prefix-table loads, was measured
+ * and removed: no gain alone or on top; docs/plans/cloth-m1-max-locality-progress-l2.md.)
  */
-export const OGC_LOCALITY_PARTS = ["topology", "geometry", "offsets"] as const;
+export const OGC_LOCALITY_PARTS = ["topology", "geometry"] as const;
 export type OgcLocalityPart = (typeof OGC_LOCALITY_PARTS)[number];
 export type OgcLocalityFlags = Readonly<Record<OgcLocalityPart, boolean>>;
 /** "off", or parts joined by "+" (e.g. "topology+geometry"). Anything else fails. */
 export function parseOgcLocality(value: unknown): OgcLocalityFlags {
-  const flags = { topology: false, geometry: false, offsets: false };
+  const flags = { topology: false, geometry: false };
   if (value === undefined || value === "off") return flags;
   if (typeof value !== "string" || !value) throw new Error(`OGC: unknown locality "${String(value)}"`);
   for (const part of value.split("+")) {
@@ -314,21 +314,15 @@ export function parseOgcLocality(value: unknown): OgcLocalityFlags {
 }
 /** The bindings a query role uses under the switch (exactly: the pipelines' layouts are automatic). */
 export function ogcQueryBindings(L: OgcLocalityFlags): number[] {
-  return [0, 1, 4, 5, 7, 8, 9, 11, 14, ...(L.topology || L.offsets ? [24] : []), ...(L.geometry ? [25] : [])];
+  return [0, 1, 4, 5, 7, 8, 9, 11, 14, ...(L.topology ? [24] : []), ...(L.geometry ? [25] : [])];
 }
 const DECL_LOC = "\n@group(0) @binding(24) var<storage, read> loc: array<u32>;\n";
 const DECL_GEO = "\n@group(0) @binding(25) var<storage, read> geo: array<vec4<u32>>;\n";
-const DECL_LOC_RW = "\n@group(0) @binding(24) var<storage, read_write> loc: array<u32>;\n";
 const DECL_GEO_RW = "\n@group(0) @binding(25) var<storage, read_write> geo: array<vec4<u32>>;\n";
-const LOC_BUCKET_AT = GRID_READ_FNS.indexOf("fn bucketStart(");
-if (LOC_BUCKET_AT < 0) throw new Error("OGC locality: GRID_READ_FNS no longer ends with bucketStart");
-/** GRID_READ_FNS with the final offsets in place of the prefix tables (off[H] is the total). */
-const LOC_GRID_READ_FNS = GRID_READ_FNS.slice(0, LOC_BUCKET_AT) + /* wgsl */`fn bucketStart(h: u32) -> u32 { return loc[min(h, P.H)]; }
-`;
 const LOC_TOPO_FNS = /* wgsl */`
 const OGC_FACE_RECORD_WORDS = 8u;
 struct OgcFaceRec { v: vec3<u32>, flags: u32, e: vec3<u32> }
-fn faceRecBase(t: u32) -> u32 { return P.H + 8u + OGC_FACE_RECORD_WORDS * t; }
+fn faceRecBase(t: u32) -> u32 { return OGC_FACE_RECORD_WORDS * t; }
 fn faceRec(t: u32) -> OgcFaceRec {
   let b = faceRecBase(t);
   return OgcFaceRec(vec3<u32>(loc[b], loc[b + 1u], loc[b + 2u]), loc[b + 3u], vec3<u32>(loc[b + 4u], loc[b + 5u], loc[b + 6u]));
@@ -389,19 +383,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
     }
     geo[2u * i] = g0; geo[2u * i + 1u] = g1;
   }
-}
-`;
-
-/** locality "offsets": the final bucket offsets, after scan3 and on scan1's indirect slot (1024 buckets a workgroup). */
-export const OGC_LOC_OFFSETS_WGSL = header([0, 7]) + DECL_LOC_RW + /* wgsl */`
-@compute @workgroup_size(256)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-  let base = wg.x * 1024u + li * 4u;
-  for (var k = 0u; k < 4u; k++) {
-    let h = base + k;
-    if (h < P.H) { loc[h] = grid[P.local1Off + h] + grid[P.local2Off + (h >> 10u)] + grid[P.local3Off + (h >> 20u)]; }
-  }
-  if (base == 0u) { loc[P.H] = grid[P.sums3Off]; }
 }
 `;
 
@@ -1747,14 +1728,13 @@ export const OGC_QUERY_ROLES = ["queryVertex", "queryEdge", "querySample"] as co
 export type OgcQueryRole = (typeof OGC_QUERY_ROLES)[number];
 export function ogcQueryWGSL(role: OgcQueryRole, L: OgcLocalityFlags = parseOgcLocality("off")): string {
   // The locality switch (OGC_LOCALITY_PARTS): off, every fragment below is the baseline's own text.
-  const gridFns = L.offsets ? LOC_GRID_READ_FNS : GRID_READ_FNS;
   const vertexFns = L.geometry ? LOC_GEO_FNS : triBoxFns(false) + "\nfn xd(i: u32) -> vec3<f32> { return xdet[i].xyz; }\n";
   const pairFns = L.geometry ? bodyPairFns(LOC_BODY_ACCESS_FNS) : BODY_PAIR_FNS;
   const faceTri = L.topology ? "faceVerts(t)" : "triVerts(t)";
   const faceMask = L.topology ? "let fr = faceRec(t); let te = fr.flags;" : "let te = topo[P.triEdgesOff + 4u * t + 3u];";
   const lo = role === "queryVertex" ? "0u" : role === "queryEdge" ? "P.N" : "P.N + P.E";
   const hi = role === "queryVertex" ? "P.N" : role === "queryEdge" ? "P.N + P.E" : "P.N + P.E + P.S + P.SB + P.SE + P.SEB + P.SF + P.SFB";
-  return header(ogcQueryBindings(L).filter(b => b < 24)) + (L.topology || L.offsets ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS : "") + CELL_FNS + gridFns + vertexFns + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+  return header(ogcQueryBindings(L).filter(b => b < 24)) + (L.topology ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS : "") + CELL_FNS + GRID_READ_FNS + vertexFns + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 
 // ---- DAT division pairs: every non-adjacent pair whose swept boxes meet and that is
 // within the larger of the two primitives' envelopes (a face's or an edge's is its

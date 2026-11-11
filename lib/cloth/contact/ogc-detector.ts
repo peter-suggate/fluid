@@ -35,7 +35,7 @@
  */
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import { OGC_FACE_RECORD_WORDS, buildOgcFaceRecords } from "./ogc-topology";
-import { OGC_LOC_GEOMETRY_WGSL, OGC_LOC_OFFSETS_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
+import { OGC_LOC_GEOMETRY_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
   OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
@@ -160,8 +160,8 @@ export interface OgcContactConfig {
   /**
    * The query kernels' locality switch (ogc-detector-wgsl.ts OGC_LOCALITY_PARTS; cloth-m1-max-locality Experiment 2):
    * "off" (default: the kernels and buffers unchanged), or parts joined by "+": "topology" (compiled face records),
-   * "geometry" (round geometry records, one more pass a round), "offsets" (final bucket offsets, one more pass a
-   * round). The same grid, traversal, tests and results; only where the queries load from. Anything else fails.
+   * "geometry" (round geometry records, one more pass a round). The same grid, traversal, tests and results; only
+   * where the queries load from. Anything else fails.
    */
   locality?: string;
 }
@@ -358,8 +358,8 @@ const WG = 64;
 const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, insert: 6, queryVertex: 7, queryEdge: 7, querySample: 7, bound: 8 } as const;
 /** The detection round's kernels in dispatch order (for profiling). */
 export const OGC_ROUND_KERNELS = Object.keys(DISPATCH) as (keyof typeof DISPATCH)[];
-/** The locality switch's round passes and the indirect slot each shares (prep's, scan1's). */
-const LOC_DISPATCH = { locGeometry: DISPATCH.prep, locOffsets: DISPATCH.scan1 } as const;
+/** The locality switch's round pass and the indirect slot it shares (prep's). */
+const LOC_DISPATCH = { locGeometry: DISPATCH.prep } as const;
 type RoundKernel = keyof typeof DISPATCH | keyof typeof LOC_DISPATCH;
 /** Hull edges the contact buffer holds per authored surface sample (a sample's fan holds a few neighbours past it). */
 export const OGC_HULL_EDGES_PER_SAMPLE = 8;
@@ -402,12 +402,12 @@ export class OgcContactDetector {
    */
   readonly contactState: GPUBuffer;
   private kernels = new Map<string, Kernel>();
-  /** The locality switch in effect, and its buffers: bucket offsets and face records (binding 24), round geometry records (25). */
+  /** The locality switch in effect, and its buffers: face records (binding 24), round geometry records (25). */
   readonly locality: OgcLocalityFlags;
   readonly locBuffer?: GPUBuffer;
   readonly geoBuffer?: GPUBuffer;
-  /** Bytes the locality switch adds: [offset table, face records, round geometry records]. */
-  readonly localityBytes: readonly [number, number, number];
+  /** Bytes the locality switch adds: [face records, round geometry records]. */
+  readonly localityBytes: readonly [number, number];
   /** The detection round's kernels in dispatch order under the locality switch (OGC_ROUND_KERNELS when off). */
   readonly roundKernels: readonly RoundKernel[];
   /** The locality of a config that names none ("off"). Harness use only: a test run sets it to put every detector it builds under the switch. */
@@ -530,17 +530,16 @@ export class OgcContactDetector {
     this.verifyArgs = mk("verify args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.alpha = mk("filter alpha", config.newton ? 4 * (N + 1) : 4);
     this.contactState = mk("contact state", 4 * N);
-    // The locality switch: additive buffers, none when off. The offset table is [0, H], the face records start at H + 8.
+    // The locality switch: additive buffers, none when off.
     const loc = this.locality = parseOgcLocality(config.locality ?? OgcContactDetector.defaultLocality);
-    this.localityBytes = [loc.offsets ? 4 * (H + 1) : 0, loc.topology ? 4 * OGC_FACE_RECORD_WORDS * T : 0, loc.geometry ? 32 * (N + sampleCap + bodySampleCap) : 0];
-    if (loc.topology || loc.offsets) {
-      this.locBuffer = mk("locality", 4 * (H + 8 + (loc.topology ? OGC_FACE_RECORD_WORDS * T : 0)));
-      if (this.locBuffer.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the locality buffer exceeds one storage binding");
-      if (loc.topology) writeBufferChunked(device.queue, this.locBuffer, 4 * (H + 8), buildOgcFaceRecords(topology));
+    this.localityBytes = [loc.topology ? 4 * OGC_FACE_RECORD_WORDS * T : 0, loc.geometry ? 32 * (N + sampleCap + bodySampleCap) : 0];
+    if (loc.topology) {
+      this.locBuffer = mk("face records", Math.max(16, this.localityBytes[0]));
+      if (this.locBuffer.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the face records exceed one storage binding");
+      if (T) writeBufferChunked(device.queue, this.locBuffer, 0, buildOgcFaceRecords(topology));
     }
-    if (loc.geometry) this.geoBuffer = mk("round geometry", this.localityBytes[2]);
-    this.roundKernels = OGC_ROUND_KERNELS.flatMap((name): RoundKernel[] =>
-      name === "prep" && loc.geometry ? [name, "locGeometry"] : name === "scan3" && loc.offsets ? [name, "locOffsets"] : [name]);
+    if (loc.geometry) this.geoBuffer = mk("round geometry", this.localityBytes[1]);
+    this.roundKernels = OGC_ROUND_KERNELS.flatMap((name): RoundKernel[] => name === "prep" && loc.geometry ? [name, "locGeometry"] : [name]);
     const w = this.paramWords, f = new Float32Array(w.buffer), P = OGC_PARAM;
     w[P.N] = N; w[P.T] = T; w[P.E] = E; w[P.H] = H;
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
@@ -861,12 +860,11 @@ export class OgcContactDetector {
       ["xInsert", ogcGridInsertWGSL(true), [0, 1, 4, 6, 7, 9], { 4: "positions" }],
       ["xTest", OGC_INTERSECT_WGSL, [0, 1, 4, 7, 8, 9], { 4: "positions" }],
     ];
-    // The locality switch: the query roles' variants and its round passes (off: the specs above, untouched).
+    // The locality switch: the query roles' variants and its round pass (off: the specs above, untouched).
     const loc = this.locality;
-    if (loc.topology || loc.geometry || loc.offsets) {
+    if (loc.topology || loc.geometry) {
       for (const spec of specs) if ((OGC_QUERY_ROLES as readonly string[]).includes(spec[0])) { spec[1] = ogcQueryWGSL(spec[0] as (typeof OGC_QUERY_ROLES)[number], loc); spec[2] = ogcQueryBindings(loc); }
       if (loc.geometry) specs.push(["locGeometry", OGC_LOC_GEOMETRY_WGSL, [0, 4, 5, 14, 25]]);
-      if (loc.offsets) specs.push(["locOffsets", OGC_LOC_OFFSETS_WGSL, [0, 7, 24]]);
     }
     await Promise.all(specs.map(async ([name, code, bindings, override]) => {
       const module = this.device.createShaderModule({ label: `ogc ${name}`, code });

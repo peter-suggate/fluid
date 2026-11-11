@@ -1,6 +1,6 @@
 /**
  * The detector's locality switch (OgcContactConfig.locality; docs/plans/cloth-m1-max-locality-2026-11-11.md,
- * Experiment 2): compiled face records, per-round geometry records and the materialized bucket offsets only change
+ * Experiment 2): compiled face records and per-round geometry records only change
  * where the query kernels load the same bits from, so a round under any variant must equal the round with the switch
  * off: counters (scanned, key collisions, box rejections, candidates, pairs, rounds), every vertex's contact entries,
  * the DAT division pairs and the per-vertex round state, bit for bit. Also: the face records against the topology
@@ -28,7 +28,7 @@ import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/sc
 import { boxSdf, merge, rng, sheet, sphereSdf, type OracleMesh, type V3 } from './cloth-contact-oracle';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
-const VARIANTS = ['topology', 'geometry', 'offsets', 'topology+geometry', 'topology+geometry+offsets'];
+const VARIANTS = ['topology', 'geometry', 'topology+geometry'];
 
 const vec4s = (pts: V3[]) => new Float32Array(pts.flatMap(p => [p[0], p[1], p[2], 0]));
 const f32 = (pts: V3[]) => pts.map(p => p.map(Math.fround) as V3);
@@ -113,11 +113,12 @@ test('face records fail explicitly on topology words they cannot stand for', () 
 });
 
 test('the locality switch validates explicitly, and off leaves the query kernels and their bindings as they were', () => {
-  assert.deepEqual(parseOgcLocality(undefined), { topology: false, geometry: false, offsets: false });
+  assert.deepEqual(parseOgcLocality(undefined), { topology: false, geometry: false });
   assert.deepEqual(parseOgcLocality('off'), parseOgcLocality(undefined));
-  assert.deepEqual(parseOgcLocality('offsets+topology'), { topology: true, geometry: false, offsets: true });
-  assert.deepEqual(parseOgcLocality(OGC_LOCALITY_PARTS.join('+')), { topology: true, geometry: true, offsets: true });
-  for (const bad of ['', 'on', 'all', 'topology+', 'topology+topology', 'off+offsets', 'Topology', 'geometry,offsets', 3, null, true])
+  assert.deepEqual(parseOgcLocality('geometry+topology'), { topology: true, geometry: true });
+  assert.deepEqual(parseOgcLocality(OGC_LOCALITY_PARTS.join('+')), { topology: true, geometry: true });
+  // 'offsets' (the final bucket offsets) was measured and removed: it is an unknown value like any other.
+  for (const bad of ['', 'on', 'all', 'offsets', 'topology+offsets', 'topology+geometry+offsets', 'topology+', 'topology+topology', 'off+geometry', 'Topology', 'geometry,topology', 3, null, true])
     assert.throws(() => parseOgcLocality(bad as string), /OGC: unknown locality/, `locality ${JSON.stringify(bad)}`);
   const off = parseOgcLocality('off');
   for (const role of ['queryVertex', 'queryEdge', 'querySample'] as const) {
@@ -127,13 +128,13 @@ test('the locality switch validates explicitly, and off leaves the query kernels
     for (const variant of VARIANTS) {
       const L = parseOgcLocality(variant), source = ogcQueryWGSL(role, L);
       assert.notEqual(source, base, `${role} ${variant}`);
-      assert.equal(source.includes('@binding(24)'), L.topology || L.offsets);
+      assert.equal(source.includes('@binding(24)'), L.topology);
       assert.equal(source.includes('@binding(25)'), L.geometry);
       assert.equal(source.includes('faceRec('), L.topology);
     }
   }
   assert.ok(!ogcQueryBindings(off).some(b => b >= 24));
-  assert.deepEqual(ogcQueryBindings(parseOgcLocality('topology+geometry+offsets')).filter(b => b >= 24), [24, 25]);
+  assert.deepEqual(ogcQueryBindings(parseOgcLocality('topology+geometry')).filter(b => b >= 24), [24, 25]);
   // Additive: every variant keeps the baseline's bindings (the grid, the entries, the live buffers).
   for (const variant of VARIANTS) assert.deepEqual(ogcQueryBindings(parseOgcLocality(variant)).filter(b => b < 24), ogcQueryBindings(off), variant);
 });
@@ -205,22 +206,14 @@ export function assertSameRound(got: RoundSnapshot, want: RoundSnapshot, label: 
   for (const key of ['xdet', 'pred', 'env', 'held'] as const) assertSameArray(got[key], want[key], `${label}: ${key}`);
 }
 
-/** The locality buffers hold what they claim: the face records and, after a round (`round`), its final offsets and geometry. */
+/** The locality buffers hold what they claim: the face records and, after a round (`round`), its geometry. */
 async function assertLocalityBuffers(device: GPUDevice, det: OgcContactDetector, round: RoundSnapshot | undefined, label: string) {
   const L = det.locality, T = det.T, N = det.N;
-  assert.equal(det.locBuffer !== undefined, L.topology || L.offsets, `${label}: the offset and face table exists only when used`);
+  assert.equal(det.locBuffer !== undefined, L.topology, `${label}: the face records exist only when used`);
   assert.equal(det.geoBuffer !== undefined, L.geometry, `${label}: the geometry records exist only when used`);
   if (det.locBuffer) {
-    // The offsets alone carry no face records.
-    const words = await readWords(device, det.locBuffer), H = det.locBuffer.size / 4 - 8 - (L.topology ? OGC_FACE_RECORD_WORDS * T : 0);
-    assert.ok(Number.isInteger(H) && (H & (H - 1)) === 0, `${label}: ${H} buckets`);
-    if (L.topology) assert.deepEqual(words.subarray(H + 8), buildOgcFaceRecords(det.topology), `${label}: face records on the GPU`);
-    if (!round) return;
-    if (L.offsets) {
-      assert.equal(words[0], 0);
-      for (let h = 0; h < H; h++) if (words[h + 1]! < words[h]!) assert.fail(`${label}: bucket ${h} ends before it starts`);
-      assert.ok(words[H]! > 0 && words[H]! <= round.counters.peakGrid!, `${label}: ${words[H]} entries in the round's grid`);
-    } else assert.ok(words.subarray(0, H + 8).every(w => w === 0), `${label}: no offsets written without the variant`);
+    const words = await readWords(device, det.locBuffer, 0, 4 * OGC_FACE_RECORD_WORDS * T);
+    assert.deepEqual(words, buildOgcFaceRecords(det.topology), `${label}: face records on the GPU`);
   }
   if (det.geoBuffer && round) {
     const geo = await readWords(device, det.geoBuffer, 0, 32 * N);
@@ -300,11 +293,13 @@ export function roundCases(): RoundCase[] {
 test('GPU detection round: every locality variant leaves the counters, contact entries, DAT pairs and round state of the switch off', { skip: !gpu }, async () => withDevice(async device => {
   assert.equal(OgcContactDetector.defaultLocality, 'off');
   for (const c of roundCases()) {
-    const off = await runRound(device, c, undefined), k = off.counters;
+    const off = await runRound(device, c, 'off'), k = off.counters;
     const summary = `scanned ${k.scanned} key collisions ${k.collisions} box-rejected ${k.boxRejected} candidates ${k.candidates} DAT pairs ${off.pairs.length} entries ${off.lists.reduce((s, l) => s + l.length, 0)} `
       + `solid contacts ${k.solidContacts} sample-facet ${k.sfPairs} hull-facet ${k.hfPairs} detections ${k.detections} redetections ${k.redetections} redos ${k.redos} conflicts ${k.conflicts} truncated ${k.truncated} status ${k.status}`;
     assert.ok(k.scanned! > 0 && c.expect(k), `${c.label} exercises what it is for: ${summary}`);
     assertSameRound(await runRound(device, c, 'off'), off, `${c.label}, off again`);
+    // A config naming none takes the detector's default (OgcContactDetector.defaultLocality).
+    assertSameRound(await runRound(device, c, undefined), off, `${c.label}, the default`);
     for (const variant of VARIANTS) assertSameRound(await runRound(device, c, variant), off, `${c.label}, ${variant}`);
     console.log(`locality ${c.label}: ${summary}: equal under ${VARIANTS.length} variants`);
   }
@@ -362,7 +357,7 @@ test('GPU system on a moving solid: from one restored state in contact, the step
     const cloth = await ClothSystem.create(device, cloneScene(endpoint), { statusInterval: 1, ...(contactLocality ? { contactLocality } : {}) });
     try {
       const det = cloth.contactFor('sheet')!;
-      assert.deepEqual(det.locality, parseOgcLocality(contactLocality));
+      assert.deepEqual(det.locality, parseOgcLocality(contactLocality ?? OgcContactDetector.defaultLocality));
       const [later] = await cloth.capture([(tick + 1) * dt]);
       assert.equal(failureOf(cloth), undefined);
       assert.equal(later![0]!.tick, tick + 1);
@@ -371,9 +366,9 @@ test('GPU system on a moving solid: from one restored state in contact, the step
       return { rounds: await mandatoryRounds(det), counters: round.counters, status: round.counters.status };
     } finally { cloth.destroy(); }
   };
-  const off = await run();
+  const off = await run('off');
   assert.ok(off.counters.bodyContacts! > 0 && total(off.rounds, 'candidates') > 0 && total(off.rounds, 'datPairs') > 0, `the step is in contact with the solid: ${off.counters.bodyContacts} body contacts`);
-  assert.deepEqual((await run()).rounds, off.rounds, 'off again');
+  assert.deepEqual((await run('off')).rounds, off.rounds, 'off again');
   // The status is compared, not required clear: the envelope cap's bit is a report, and the step did not halt.
   for (const variant of VARIANTS) { const on = await run(variant); assert.deepEqual(on.rounds, off.rounds, variant); assert.equal(on.status, off.status, variant); }
   console.log(`locality moving solid, the step from tick ${tick}: ${off.rounds.length} mandatory round(s), scanned ${total(off.rounds, 'scanned')} key collisions ${total(off.rounds, 'collisions')} `
@@ -397,7 +392,7 @@ test('GPU cut, load and undo under the full switch: every rebuilt detector carri
     /** The document just built: its detector's records, then one step (to tick 5) and that step's mandatory detection. */
     const stage = async (label: string, step: boolean) => {
       const det = cloth.contactFor('sheet')!;
-      assert.deepEqual(det.locality, parseOgcLocality(contactLocality), `${label}: the rebuilt detector keeps the switch`);
+      assert.deepEqual(det.locality, parseOgcLocality(contactLocality ?? OgcContactDetector.defaultLocality), `${label}: the rebuilt detector keeps the switch`);
       if (contactLocality) await assertLocalityBuffers(device, det, undefined, label);
       let failure: string | undefined;
       if (step) {
@@ -436,7 +431,7 @@ test('GPU cut, load and undo under the full switch: every rebuilt detector carri
     } finally { cloth.destroy(); }
     return stages;
   };
-  const off = await run(), on = await run('topology+geometry+offsets');
+  const off = await run('off'), on = await run('topology+geometry');
   assert.deepEqual(on, off);
   assert.ok(off[2]!.rounds.length > 0 && total(off[2]!.rounds, 'scanned') > 0, 'the steps scan the grid');
   console.log(`locality edits: ${off.map(s => `${s.label} ${s.faces} faces${s.rounds.length ? `, scanned ${total(s.rounds, 'scanned')} candidates ${total(s.rounds, 'candidates')}` : ''}${s.failure ? ` (${s.failure})` : ''}`).join('; ')}`);
@@ -464,9 +459,9 @@ test('GPU trajectory: the deterministic 16 x 16 H_vv rotating sphere is bit-iden
     } finally { cloth.destroy(); }
     return track;
   };
-  const off = await run();
+  const off = await run('off');
   assert.ok(off.some(s => s.counters.redos! > 0) && off.some(s => s.counters.bodyContacts! > 0), 'the run redoes rounds and touches the moving solid');
-  for (const variant of ['geometry', 'topology+geometry+offsets']) {
+  for (const variant of ['geometry', 'topology+geometry']) {
     const on = await run(variant);
     for (let k = 0; k < off.length; k++) {
       assert.deepEqual(on[k]!.counters, off[k]!.counters, `${variant}: tick ${k + 1} counters`);

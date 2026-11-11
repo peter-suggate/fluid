@@ -14,7 +14,7 @@
  *
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js tools/gpu/fluid-gpu-run.sh timing \
  *     node --import tsx tools/benchmark-cloth-sphere.ts [--nodes 150] [--ticks 2,5,35,120] [--steps 10] [--profile 1] [--json out.json]
- *       [--locality off|topology+geometry+offsets]   the detector's locality switch (OgcContactConfig.locality)
+ *       [--locality off|topology+geometry]   the detector's locality switch (OgcContactConfig.locality)
  *       [--lin off|factorized|blocks] [--lin-records n]  newton.contactLinearization on the restored document (default:
  *         the document's own, off) and its pool (vec4 records per vertex); the run then also reports the compiled
  *         records' demand and replays the two build kernels (as a pair: the build reads the count's headers)
