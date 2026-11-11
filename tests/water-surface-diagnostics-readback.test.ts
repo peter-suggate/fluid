@@ -9,6 +9,8 @@ type Internals = {
   encodeSurfaceDiagnostics(encoder: GPUCommandEncoder, force?: boolean): boolean;
   completeSurfaceDiagnostics(submission?: Promise<void>): Promise<{ vertexCount: number } | undefined>;
   setFluidDomain(domain: unknown): void;
+  setSceneHasFluid(hasFluid: boolean): void;
+  extractedRevision: number;
   causticsValid: boolean;
   lastExtractionAt_ms: number;
   surfaceExtractionReason: string;
@@ -62,4 +64,20 @@ test("a domain change invalidates the extraction clock and the caustics with the
   assert.equal(water.causticsValid, false);
   assert.equal(water.lastExtractionAt_ms, -Infinity);
   assert.equal(water.surfaceExtractionReason, "domain changed");
+});
+
+test("losing or gaining fluid invalidates the retained mesh", () => {
+  const { water } = pipeline();
+  Object.assign(water, { sceneHasFluid: true });
+  for (const [hasFluid, reason] of [[false, "scene has no fluid"], [true, "scene gained fluid"]] as const) {
+    water.extractedRevision = 7;
+    water.causticsValid = true;
+    water.setSceneHasFluid(hasFluid);
+    assert.equal(water.extractedRevision, -1);
+    assert.equal(water.causticsValid, false);
+    assert.equal(water.surfaceExtractionReason, reason);
+    water.extractedRevision = 7;
+    water.setSceneHasFluid(hasFluid);
+    assert.equal(water.extractedRevision, 7, "an unchanged scene keeps its mesh");
+  }
 });

@@ -3064,6 +3064,9 @@ export class RasterWaterPipeline {
     if (this.sceneHasFluid === hasFluid) return;
     this.sceneHasFluid = hasFluid;
     this.dryInterfaceClearsEncoded = false;
+    // The mesh belongs to the scene that extracted it: a dry scene resets it
+    // to empty, a wet one extracts its own field.
+    this.invalidateExtraction(hasFluid ? "scene gained fluid" : "scene has no fluid");
   }
 
   /**
@@ -3244,16 +3247,22 @@ export class RasterWaterPipeline {
       // kernel sizes the indirect dispatch, and polygonise emits triangles for
       // just those cubes. The writable prepare binding and its later INDIRECT
       // use must occupy distinct WebGPU usage scopes.
-      let compute=encoder.beginComputePass({label:"Extract water isosurface"});compute.setBindGroup(0,this.extractBindGroup);
-      const prepareAndPolygonise=(pipeline:GPUComputePipeline,group:GPUBindGroup)=>{
-        compute.setPipeline(this.preparePipeline!);compute.setBindGroup(0,this.prepareBindGroup!);compute.dispatchWorkgroups(1);
+      // A fluid-less scene has no field to contour: its source hands the
+      // renderer a constant-zero stub, and a zero level set is a surface
+      // against the empty border on every container face. The reset above is
+      // the whole extraction, an empty mesh.
+      if (this.sceneHasFluid) {
+        let compute=encoder.beginComputePass({label:"Extract water isosurface"});compute.setBindGroup(0,this.extractBindGroup);
+        const prepareAndPolygonise=(pipeline:GPUComputePipeline,group:GPUBindGroup)=>{
+          compute.setPipeline(this.preparePipeline!);compute.setBindGroup(0,this.prepareBindGroup!);compute.dispatchWorkgroups(1);
+          compute.end();
+          compute=encoder.beginComputePass({label:"Polygonise water isosurface"});
+          compute.setPipeline(pipeline);compute.setBindGroup(0,group);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer!,0);
+        };
+        this.dispatchDenseClassify(compute, nx, ny, nz, this.surfaceClassify, false);
+        prepareAndPolygonise(this.polygonisePipeline,this.extractBindGroup);
         compute.end();
-        compute=encoder.beginComputePass({label:"Polygonise water isosurface"});
-        compute.setPipeline(pipeline);compute.setBindGroup(0,group);compute.dispatchWorkgroupsIndirect(this.polygoniseDispatchBuffer!,0);
-      };
-      this.dispatchDenseClassify(compute, nx, ny, nz, this.surfaceClassify, false);
-      prepareAndPolygonise(this.polygonisePipeline,this.extractBindGroup);
-      compute.end();
+      }
       this.surfaceDiagnosticsDirty = true;
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
       tracePhase?.("surface-extraction");
