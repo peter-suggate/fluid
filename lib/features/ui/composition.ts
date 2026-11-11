@@ -6,6 +6,7 @@ import { SVO_PIPELINE_FEATURES } from "../../svo/pipeline/composition";
 import { gravityFeature } from "../gravity/definition";
 import { simulationFeature } from "../simulation/definition";
 import { viewRailFeature } from "../view-rail/definition";
+import { clothFeature } from "../cloth/definition";
 import { visualLayersFeature } from "../field-view/definition";
 
 /** Installed methods supply their own features and resolved variation points. */
@@ -14,6 +15,7 @@ export function composeFeatureUI(
   fluid: boolean,
   selections: Readonly<Record<string, string>> = {},
   methodValues: MethodParamValues = {},
+  cloth = false,
 ) {
   const method = fluid ? getMethod(methodId).resolveComposition(methodValues) : undefined;
   // Only a method that publishes its field views as composed layers has a layer card to open.
@@ -23,6 +25,7 @@ export function composeFeatureUI(
       viewRailFeature,
       ...SVO_PIPELINE_FEATURES,
       ...(fluid ? [simulationFeature, gravityFeature, surfaceDisplayFeature] : []),
+      ...(cloth ? [clothFeature] : []),
       ...(layers ? [visualLayersFeature] : []),
       ...(method?.features ?? []),
     ],

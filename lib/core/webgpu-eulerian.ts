@@ -2,6 +2,7 @@ import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import type { SpatialPerformanceReport } from "./spatial-performance";
 import type { SimulationFailure } from "./simulation-failure";
 import type { PerformanceTrace } from "./performance-trace";
+import type { ClothPerformanceSample } from "../cloth/stage-timing";
 import type { GPUQuality } from "./gpu-quality";
 import type { SolverDetailDiagnostics } from "./solver-detail";
 export type GPUGridMethod = "octree";
@@ -90,6 +91,8 @@ export interface GPUEulerianInfo {
   simulationFailure?: SimulationFailure;
   /** Cloth scenes: reported (non-failing) status bits, e.g. a contact round or envelope cap taken, a step without the two-level correction. */
   clothNotes?: string[];
+  /** Cloth scenes, while measurement is on: the newest stage-timed cloth frame (`ClothSystem.performance`). */
+  clothPerformance?: ClothPerformanceSample;
   /** Latest compact activity census, weighted by represented liquid volume. */
   adaptivePhysicalWidthCensus?: readonly { width: number; leaves: number; liquidVolumeFineCells: number }[];
   adaptivePhysicalWidthCensusStep?: number;

@@ -10,6 +10,7 @@ import { SVO_FEATURE_VIEWS } from "../../svo/pipeline/ui-slots";
 import { GravityRow, GravityYRow } from "../gravity/ui";
 import { SimulationCostLines, SimulationMoreLines, SimulationStepLine } from "../simulation/ui";
 import { InstrumentLines, PerformanceLoadLines } from "../view-rail/ui";
+import { ClothConvergenceLines, ClothCostLines, ClothSettingsLines } from "../cloth/ui";
 import { FrameCostLines, FrameMoreLines } from "../../svo/pipeline/ui";
 import { composeFeatureUI } from "./composition";
 import type { FeatureComposition } from "../../framework/composition";
@@ -33,6 +34,9 @@ export const applicationViews: FeatureControlViews = {
   "simulation/step": SimulationStepLine,
   "simulation/cost": SimulationCostLines,
   "simulation/more": SimulationMoreLines,
+  "cloth/cost": ClothCostLines,
+  "cloth/convergence": ClothConvergenceLines,
+  "cloth/settings": ClothSettingsLines,
   "view.rail/frame": FrameCostLines,
   "view.rail/frame-more": FrameMoreLines,
   "view.rail/load": PerformanceLoadLines,
@@ -50,6 +54,7 @@ export function useFeatureComposition(): FeatureComposition {
   const lighting = session.ui(state => state.svoConeTracingMode);
   const reconstruction = session.ui(state => state.svoRenderTuning.coneRadianceReconstruction);
   const fluid = session.scene(state => state.scene.systems?.fluid !== false);
+  const cloth = session.scene(state => (state.scene.cloth?.length ?? 0) > 0);
   // Composing validates and deep-freezes the whole feature catalog, and its
   // inputs move with the method, not with the host. The scene toolstrip rides
   // the camera, so it re-renders on every orbit step: recomposing there was
@@ -58,8 +63,8 @@ export function useFeatureComposition(): FeatureComposition {
     "svo.primary-visibility": primary,
     "svo.lighting-visibility": lighting,
     "svo.radiance-reconstruction": reconstruction,
-  }, fluid ? resolvedMethodValues({ methodId, quality, overrides }) : {}),
-  [methodId, quality, overrides, fluid, primary, lighting, reconstruction]);
+  }, fluid ? resolvedMethodValues({ methodId, quality, overrides }) : {}, cloth),
+  [methodId, quality, overrides, fluid, cloth, primary, lighting, reconstruction]);
 }
 
 export function FeatureSlot({ slot }: { readonly slot: string }) {

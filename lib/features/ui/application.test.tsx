@@ -8,8 +8,8 @@ import { composeFeatureUI } from "./composition";
 
 test("every advertised application placement has a registered implementation", () => {
   for (const method of ["uniform-volume"]) {
-    for (const fluid of [true, false]) {
-      for (const placement of composeFeatureUI(method, fluid).placements) {
+    for (const [fluid, cloth] of [[true, false], [false, false], [false, true], [true, true]] as const) {
+      for (const placement of composeFeatureUI(method, fluid, {}, {}, cloth).placements) {
         assert.equal(typeof applicationViews[`${placement.feature}/${placement.control}`], "function",
           `${placement.feature}/${placement.control} in ${placement.slot}`);
       }
