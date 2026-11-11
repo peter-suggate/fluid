@@ -315,3 +315,150 @@ The pool stays at its default; a per-scene authored pool from the measured peak 
 - Every product form (pcgStep, pcgSolve, nwModel) and every entry kind is covered by an operator test.
 - Not decided here: the default (coordinator's call). Cost: pool 32 records a vertex = 11.5 MB at 150^2 (512 B a
   vertex); used peak 1.77 MB at tick 120. A per-scene authored pool from the measured peak is the follow-up.
+
+## 8. Phase B: where pcgStep's time goes, and the split
+
+### 8.1 Attribution (150^2 sphere, replay of pcgStep i = 1, `timing`, clean exports, us)
+
+Ablations are scratch WGSL edits of the factorized build (export-ablate, `L1_ABLATE`); each removes one part of the
+iteration and leaves the rest, so differences attribute cost. Ticks 35 | 120.
+
+| build | pcgStep i=1 |
+| --- | --- |
+| off (matrix-free contact) | 149 \| 177 |
+| factorized (records, matrix-free fallback branch present) | 89 \| 93 |
+| factorized, fallback branch removed | 54 \| 55 |
+| no contact product | 31 \| 31 |
+| contact: header loads only | 31 \| 32 |
+| contact: records, no partner gathers | 39 \| 39 |
+| contact: records, no global (out-of-patch) columns | 46 \| 50 |
+| contact-free: diagonal block only | 18 \| 18 |
+| contact-free: no bends | 28 \| 28 |
+| contact-free: no halo | 29 \| 29 |
+| empty dispatch | about 4-5 |
+
+Reading: the never-taken matrix-free fallback branch costs 35 us an iteration by its presence (registers, occupancy).
+Without it the contact product is 23-24 us: the record stream about 8, in-patch partner gathers 7-11, global
+columns 5-8. The contact-free 31 us is dispatch and own rows and reduction 18 (dispatch about 5), the off-diagonal
+stencil 9, bends 3, halo 2. The gathers are small shares, so Experiment 3 (PCG state in patch order) cannot pay for
+itself and is not built. Experiment 4 (transposed records) is bounded by the about 8 us record stream.
+
+### 8.2 The split: pcgStep (records only) + pcgStepOverflow (matrix-free)
+
+With compiled records, pcgStep's contact product is the records alone (`nwLinRecordsHv`); a patch with any row the
+pool could not hold returns after the lead's scalars and leaves its rows to `pcgStepOverflow`, dispatched after
+pcgStep in the same pass with the same record index. nwLinBuild marks the patch (`LIN_PATCH + p` .y = LIN_NONE iff
+its total does not fit; rows take records in prefix order, so a row of the patch overflows iff the patch's last
+does). pcgStepOverflow returns at once on an unmarked patch (one uniform load), and on a marked one runs the same
+iteration matrix-free with `lead = false`. Every value it reads (partials i-1, i-2, the alpha records, r/w/s of
+parity i-1) is one pcgStep does not write in dispatch i, so the order is safe. pcgSolve and nwModel keep the per-row
+fallback (`nwLinHv`). Off's WGSL is byte-identical (32 flag combinations). The empty overflow dispatch is a full
+early-exit grid (no indirect dispatch: that would need a new binding); its cost is measured in 8.3.
+
+Gate (export of 66ccc687 + the split, default 'off'; the linearization test and check:types again at 815f138a):
+check:types clean; test:unit 1753 pass, 0 fail (CPU only, WEBGPU_NODE_MODULE unset); tests/cloth-contact-linearization
+3/3. Its forced-overflow cases: pool 12 records a vertex sends 3 of 4 patches (293 rows) through pcgStepOverflow, pool 1
+all 4; every row over the pool is asserted bit-identical to the all-matrix-free reference, which holds only if its
+patch took pcgStepOverflow (a row left to pcgStep's records with the LIN_NONE header would read outside the pool).
+
+### 8.3 Time (150^2 sphere, `timing`, one run each, --lin factorized; HEAD 66ccc687 without the split vs with it)
+
+| tick | pcgStep i=1, without | pcgStep + pcgStepOverflow i=1 (pcgStep, overflow, i=2) | fenced ms/step without -> with |
+| --- | --- | --- | --- |
+| 35 | 89.1 us | 61.4 (54.3 + 6.1) | 399.2 -> 370.3 |
+| 120 | 94.2 | 62.5 (55.3 + 5.1) | 575.6 -> 545.5 |
+
+The same Newton and PCG counts (8 / 1548, 8 / 1600) and |g|^2; no patch overflowed (pool 32). The split takes 28-32 us
+off every PCG iteration (about 30 ms a step at 1550-1600 iterations); the empty overflow dispatch keeps 5-6 us of it.
+Off (149 | 177 us an iteration, 8.1) against the split: 2.4-2.8x on pcgStep.
+
+## 9. The factorized-default gate and ladder 1e (failure 4)
+
+### 9.1 The gate (fddccb2f + the flip, `check`, every tests/cloth-*.test.ts, concurrency 1)
+
+Every file passes as at the baseline (off at fddccb2f), except four tests, all C1/C2-owned and left unchanged:
+
+| test | file | off (baseline) | factorized |
+| --- | --- | --- | --- |
+| contact ladder 6: least true frustum distance | tests/cloth-contact-ladder.test.ts | +1.675e-4 m (t44) | -6.06e-5 m (t59) |
+| contact ladder 7 (H_vv) | tests/cloth-contact-ladder.test.ts | least +1.465e-4 m | heldConflict halt at tick 46 |
+| contact ladder 13 (H_vv determinism) | tests/cloth-contact-ladder.test.ts | passes | the same halt |
+| ladder 1e: every vertex over 2 floors certificate-held | tests/cloth-ladder.test.ts | cap, \|g\|/\|mg\| 4.32e-4, 2 over (both held) | cap, 5.58e-1, 14 over, worst 357.7 floors |
+
+The flip was not landed (coordinator's ruling: C1/C2 failures stop it). The default stays 'off' until ladder 1e passes
+deterministically; the split lands with it 'off' so the flip is then the one default in CLOTH_NEWTON_DEFAULTS.
+
+### 9.2 Ladder 1e diagnosis (tools/l1-ladder1e.ts, scratch; fddccb2f + flip)
+
+Off and factorized from the same fixture state, Newton capped at k iterations:
+
+| k | max \|x_off - x_fac\| | \|g\|^2 off / fac |
+| --- | --- | --- |
+| 1 | 5.96e-8 m | 1.641e4 / 1.641e4 |
+| 5 | 2.98e-7 | 352.7 / 352.7 (PCG counts first differ, 178 / 175) |
+| 11 | 1.06e-5 | 61.00 / 60.92 |
+| 15 | 1.57e-4 | 325.1 / 326.6 |
+| 20 | 2.11e-3 | 965.4 / 361.3 |
+| 45 | 1.90e-3 | 6.49 / 361.4 |
+| 80 | 1.87e-3 | 3.27e-3 / 1.51 |
+| 100 | 2.03e-3 | 2.39e-7 / 0.514 (factorized's last step 1/8) |
+| 150 | 2.03e-3 | 2.28e-7 / 0.381 (step 1/8) |
+
+The difference grows about 10x every 4 iterations from the first iterate's rounding (6e-8 m): exponential
+amplification, not a jump at one iterate. By k = 20 the two runs are 2 mm apart and take different contact
+histories; off reaches a stationary point, factorized stalls at a 1/8 step with 3 active vertices.
+
+At the start of iteration 11 (where they first part past 1e-5 m) and of iteration 100 (inside the stall), on
+identical vectors (pcgStep dispatch 0, the same u):
+
+- records rebuilt fresh vs the matrix-free product: max \|dw\| 9.5e-7 of 6.2 (k = 11), 6.3e-8 of 0.59 (k = 100),
+  about 1e-7 relative: f32 rounding;
+- records as built inside the run vs rebuilt fresh at the same iterate: 0 header words and 0 pool words differ;
+- no row over the pool (40 and 47 rows with entries; demand at most 90 records a row of 32 x 1024).
+
+So none of the three suspects holds at the parting iterate or in the stall: (a) no staleness, the as-built records
+are bit-identical to fresh ones; (b) the entry kinds in play (field, bodyField, sampleFace) give the matrix-free
+operator to rounding; (c) no row is over capacity. The build's place answers C2's checklist: nwLinCount and
+nwLinBuild run after nwGradient in every Newton iteration, under its gate, which is after every detection round
+(afterFrame's mandatory detection; afterNewtonStep's verify, decide and re-detection, which follow nwApply and so
+precede the next iteration's nwGradient) and before the PCG; nothing runs between the build and pcgStep. The records
+hold the entries' linearization only (ids, weights, Mn, Mf with the lagged friction of the entries): no projector,
+active set, strain duals, restart flag or trust radius, which the PCG reads live as in 'off'.
+
+### 9.3 The decisive controls: one-ulp perturbed 'off', and the operator switched mid-step
+
+The same tests (scratch copies; `L1_PERTURB` moves every start position by +-1 f32 ulp, mulberry32; seed 0 is
+unperturbed). Ladder 1e:
+
+| run | ladder 1e | \|g\|/\|mg\| at the 150 cap | vertices over 2 floors (certificate-held) |
+| --- | --- | --- | --- |
+| off, seed 0 | pass | 4.32e-4 | 2 (2) |
+| off, seed 1 | FAIL | 1.19e-1 | 27 (0) |
+| off, seed 2 | pass | 4.59e-4 | 2 (2) |
+| off, seed 3 | FAIL | 4.02 | 13 (0) |
+| factorized, seed 0 | FAIL | 5.58e-1 | 14 (2) |
+| factorized, seed 1 | FAIL | 4.26 | 18 (0) |
+| factorized, seed 2 | pass | 4.74e-4 | 2 (2) |
+| blocks, seed 0 | pass | 4.17e-4 | 1 (1) |
+
+The operator switched inside the one step (scratch `L1_SWITCH` in nwLinBuild: from Newton iteration K0 on, or before
+it, every row to the matrix-free product; '0:off' in the factorized build is bit-identical to true off at k = 20-150):
+- factorized's stall state at k = 100 continued with off stays in the stall (k = 150: step 1/8, \|g\|^2 0.381, active
+  3/3/2; true off from the fixture reaches 2.3e-7);
+- off's state at k = 20 continued with factorized converges as off does (k = 150: \|g\|^2 2.5e-7, step 1).
+
+So ladder 1e's failure is a non-stationary trap of the step that rounding chooses, not the operator: routed by the
+coordinator to fluid-60 (state: fluid-scratch/cloth-locality/l1/p/switch-100-off-k*.json).
+
+Contact ladder tests 6 and 7 (CLOTH_LADDER_ONLY=sphere; 13 is 7's determinism twin):
+
+| run | test 6: least true frustum distance | test 7 (H_vv) |
+| --- | --- | --- |
+| off, seed 0 | pass, +1.675e-4 m (t44) | pass, +1.465e-4 m (t32) |
+| off, seed 1 | pass, +1.984e-4 (t56) | pass, +3.958e-5 (t45) |
+| off, seed 2 | FAIL, -2.162e-4 (t39) | FAIL, heldConflict halt at tick 46, -7.761e-4 (t36) |
+| factorized, seed 0 | FAIL, -6.061e-5 (t59) | FAIL, heldConflict halt at tick 46 |
+| blocks, seed 0 | pass, +1.518e-4 (t47) | FAIL, heldConflict halt at tick 46, -9.875e-6 (t40) |
+
+A one-ulp perturbed off run reproduces both failures, deeper than factorized's: pre-existing sensitivity of the scene
+(C1/C2), as Phase A's 1-in-8 heldConflict halts of off on the 150^2 sphere already suggested.

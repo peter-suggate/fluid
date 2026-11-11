@@ -26,7 +26,7 @@ import { clothGridData } from "../lib/cloth/grid";
 import { prepareClothTopology, validateClothDocument } from "../lib/cloth/topology";
 import type { ClothDocument, ClothMaterial, ClothNewtonSettings, ClothTopologyData } from "../lib/cloth/types";
 import { buildClothSolverModel } from "../lib/cloth/oracle";
-import { ClothGPUSolver, CLOTH_PARAM_NEWTON, packClothGPUTables } from "../lib/cloth/gpu-solver";
+import { ClothGPUSolver, CLOTH_NEWTON_DEFAULTS, CLOTH_PARAM_NEWTON, packClothGPUTables } from "../lib/cloth/gpu-solver";
 import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN, CLOTH_STATE } from "../lib/cloth/gpu-solver-wgsl";
 import { CLOTH_NEWTON_SEGMENTS, clothNewtonWGSL } from "../lib/cloth/gpu-newton-wgsl";
 import { bridson2002RotatingSphere } from "../lib/cloth/scenes/bridson-2002";
@@ -54,12 +54,15 @@ function twoSheets() {
   return buildClothSolverModel(prepareClothTopology(concat([lower, upper]), [cotton]), [cotton], []);
 }
 
-test("newton.contactLinearization: 'off' is the module and the layout as they were; the pool sits before the control block; unknown values fail", () => {
+test("newton.contactLinearization: 'off' is the module and the layout as they were; the default is CLOTH_NEWTON_DEFAULTS.contactLinearization; the pool sits before the control block; unknown values fail", () => {
   const m = twoSheets(), N = m.topology.vertexCount;
   const base = { dt_s: DT, gravity_m_s2: [0, -9.81, 0] as const, integrator: "bdf2" as const, contact: {} };
-  const off = packClothGPUTables(m, [0, 0, 0], base), named = packClothGPUTables(m, [0, 0, 0], { ...base, newton: { contactLinearization: "off" } });
+  const off = packClothGPUTables(m, [0, 0, 0], { ...base, newton: { contactLinearization: "off" } });
   assert.equal(off.pcg.contactLin, undefined);
-  assert.deepEqual(named, off);
+  // The default is CLOTH_NEWTON_DEFAULTS' mode at its pool.
+  const { contactLinearization, contactLinearizationRecords } = CLOTH_NEWTON_DEFAULTS;
+  assert.deepEqual(packClothGPUTables(m, [0, 0, 0], base), packClothGPUTables(m, [0, 0, 0], { ...base, newton: { contactLinearization, contactLinearizationRecords } }));
+  assert.equal(packClothGPUTables(m, [0, 0, 0], base).pcg.contactLin?.mode, contactLinearization === "off" ? undefined : contactLinearization);
   // Without contact the switch has nothing to compile.
   assert.deepEqual(packClothGPUTables(m, [0, 0, 0], { ...base, contact: undefined, newton: { contactLinearization: "blocks" } }), packClothGPUTables(m, [0, 0, 0], { ...base, contact: undefined }));
   for (const mode of ["factorized", "blocks"] as const) {
@@ -73,9 +76,12 @@ test("newton.contactLinearization: 'off' is the module and the layout as they we
     const wgslOff = clothNewtonWGSL(CLOTH_BINDING.newton, 64, true, off.pcg), wgslOn = clothNewtonWGSL(CLOTH_BINDING.newton, 64, true, on.pcg);
     assert.doesNotMatch(wgslOff, /nwLin|LIN_/);
     assert.match(wgslOn, /fn nwLinCount\(/); assert.match(wgslOn, /fn nwLinBuild\(/);
-    // The three products (pcgStep, pcgSolve, nwModel) go through the records; the matrix-free product remains only as the fallback.
-    assert.equal(wgslOn.split("nwLinHv(v)").length - 1, 3);
-    assert.equal(wgslOn.split("ogcVertexContactHvLanes(v, 0u, 1u)").length - 1, 1);
+    // The three products (pcgStep, pcgSolve, nwModel) go through the records. pcgStep's has no matrix-free branch: the
+    // patches holding a row the pool could not hold are pcgStepOverflow's; pcgSolve and nwModel keep a per-row fallback.
+    assert.equal(wgslOn.split("nwLinRecordsHv(v)").length - 1, 1);
+    assert.equal(wgslOn.split("nwLinHv(v)").length - 1, 2);
+    assert.equal(wgslOn.split("ogcVertexContactHvLanes(v, 0u, 1u)").length - 1, 2);
+    assert.match(wgslOn, /fn pcgStepOverflow\(/); assert.doesNotMatch(wgslOff, /pcgStepOverflow|pcgLinOverflow/);
     assert.equal(wgslOff.split("ogcVertexContactHvLanes(v, 0u, 1u)").length - 1, 3);
     // No contact: nothing of it, whatever the layout says.
     assert.equal(clothNewtonWGSL(CLOTH_BINDING.newton, 64, false, on.pcg), clothNewtonWGSL(CLOTH_BINDING.newton, 64, false, off.pcg));
@@ -214,9 +220,14 @@ async function operatorCheck(device: GPUDevice, sc: Scenario, mode: Mode, record
 
   // One encoded sequence at the fixed state: Newton re-armed at its first iteration (no active set: P = I), so every
   // run assembles the same g, H, M^-1 and r_0; `build` compiles the records, else `headers` replaces them.
-  const sequence = async (build: boolean, headers: Uint32Array<ArrayBuffer> | undefined, then: (pass: GPUComputePassEncoder) => void) => {
+  // With headers, every patch's mark too (flag: LIN_NONE, the patch's rows to pcgStepOverflow; 0, to pcgStep's records).
+  const sequence = async (build: boolean, headers: Uint32Array<ArrayBuffer> | undefined, then: (pass: GPUComputePassEncoder) => void, flag = 0) => {
     device.queue.writeBuffer(S.newtonWork, control, new Float32Array(4));
-    if (headers) device.queue.writeBuffer(S.newtonWork, 16 * L.head, headers);
+    if (headers) {
+      device.queue.writeBuffer(S.newtonWork, 16 * L.head, headers);
+      const marks = new Uint32Array(4 * patches); for (let p = 0; p < patches; p++) marks[4 * p + 1] = flag;
+      device.queue.writeBuffer(S.newtonWork, 16 * L.patch, marks);
+    }
     const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
     S.run(pass, "nwFaces", S.threads(T)); S.run(pass, "nwGradient", W);
     if (build) { S.run(pass, "nwLinCount", patches); S.run(pass, "nwLinBuild", patches); }
@@ -225,8 +236,9 @@ async function operatorCheck(device: GPUDevice, sc: Scenario, mode: Mode, record
   };
   // The product: pcgStep dispatch 0 (w0 = P H M^-1 r_0), or with one patch pcgSolve capped at 3 iterations (d).
   const one = patches === 1, out = one ? CLOTH_NEWTON_SEGMENTS.d : CLOTH_NEWTON_SEGMENTS.w0;
-  const product = async (build: boolean, headers?: Uint32Array<ArrayBuffer>): Promise<Float32Array> => {
-    await sequence(build, headers, pass => { if (one) S.run(pass, "pcgSolve", 1, 3); else S.run(pass, "pcgStep", patches, 0); });
+  const pcg = (pass: GPUComputePassEncoder, i: number) => { S.run(pass, "pcgStep", patches, i); S.run(pass, "pcgStepOverflow", patches, i); };
+  const product = async (build: boolean, headers?: Uint32Array<ArrayBuffer>, flag = 0): Promise<Float32Array> => {
+    await sequence(build, headers, pass => { if (one) S.run(pass, "pcgSolve", 1, 3); else pcg(pass, 0); }, flag);
     return new Float32Array(await readBuffer(device, S.newtonWork, 16 * out * stride, 16 * N));
   };
   const compiled = await product(true);
@@ -250,7 +262,8 @@ async function operatorCheck(device: GPUDevice, sc: Scenario, mode: Mode, record
     if (head[4 * v + 2] === 0 || head[4 * v] === LIN_NONE) continue;
     for (let i = 0; i < head[4 * v + 1]!; i++) { const c = pool[4 * (head[4 * v]! - L.pool + 2 * i) + 3]!; if (c & 0x80000000) globalColumns++; else localColumns++; }
   }
-  const free = await product(false, allFree), empty = await product(false, none);
+  // The reference: every row matrix-free (with several patches, every patch through pcgStepOverflow); no contact.
+  const free = await product(false, allFree, LIN_NONE), empty = await product(false, none);
   // The f32 floor: rounding of contact's share and of the row's whole product it is added into. Three iterations of
   // the one-patch solve carry three products and two reductions over every row into each row: its bound is looser.
   const bound = one ? 4096 : 64;
@@ -263,20 +276,25 @@ async function operatorCheck(device: GPUDevice, sc: Scenario, mode: Mode, record
     }
     err = Math.sqrt(err); contact = Math.sqrt(contact); whole = Math.sqrt(whole);
     if (head[4 * v + 2] === 0 && !one) { assert.equal(err, 0, `row ${v} has no contact entry: the products are the same bits`); continue; }
+    // A row the pool could not hold: its patch went through pcgStepOverflow, the reference's kernel on the same inputs.
+    if (head[4 * v] === LIN_NONE && !one) assert.equal(err, 0, `row ${v} overflowed the pool: its patch took pcgStepOverflow (the matrix-free bits)`);
     if (head[4 * v + 2] !== 0) rows++;
     maxContact = Math.max(maxContact, contact); sumContact2 += contact ** 2; sumErr2 += err ** 2; worstAbs = Math.max(worstAbs, err);
     if (contact > 0) worstRel = Math.max(worstRel, err / (contact + whole));
     if (!(err <= bound * 1.1920929e-7 * (contact + whole))) bad++;
   }
-  log(`  ${stats.items} items in ${stats.usedRecords} records (${stats.usedBytes} B) of ${stats.poolRecords}, demand ${stats.demandRecords}; rows compiled ${compiledRows}, left matrix-free ${stats.fallbackRows}`
+  log(`  ${stats.items} items in ${stats.usedRecords} records (${stats.usedBytes} B) of ${stats.poolRecords}, demand ${stats.demandRecords}; rows compiled ${compiledRows}, left matrix-free ${stats.fallbackRows} (patches through pcgStepOverflow ${stats.fallbackPatches} of ${patches})`
     + `${mode === "blocks" ? `; columns ${localColumns} in the row's patch, ${globalColumns} global` : ""}`);
   log(`  ${one ? "pcgSolve (3 iterations), d" : "pcgStep 0, w"}: compiled vs matrix-free over ${rows} contact rows: max |dw| ${worstAbs.toExponential(2)}, rms ${Math.sqrt(sumErr2 / Math.max(rows, 1)).toExponential(2)}; contact's share max ${maxContact.toExponential(2)}, rms ${Math.sqrt(sumContact2 / Math.max(rows, 1)).toExponential(2)}; `
     + `worst |dw| / (|contact| + |w|) ${worstRel.toExponential(2)} (eps32 1.19e-7); rows past ${bound} eps ${bad}`);
   assert.ok(rows >= (one ? 5 : N / 4) && maxContact > 0, `contact acts on ${rows} rows`);
   assert.equal(stats.rows, rows);
   assert.equal(stats.fallbackRows + compiledRows, rows);
-  if (recordsPerVertex === 1) assert.ok(stats.fallbackRows > 0 && compiledRows > 0, `a short pool compiles some rows (${compiledRows}) and leaves others matrix-free (${stats.fallbackRows})`);
-  else assert.equal(stats.fallbackRows, 0, "the authored pool holds this scene");
+  if (recordsPerVertex < 32) {
+    assert.ok(stats.fallbackRows > 0 && compiledRows > 0, `a short pool compiles some rows (${compiledRows}) and leaves others matrix-free (${stats.fallbackRows})`);
+    assert.ok(stats.fallbackPatches > 0, `patches through pcgStepOverflow (${stats.fallbackPatches} of ${patches})`);
+    if (recordsPerVertex > 1) assert.ok(stats.fallbackPatches < patches, `some patches through pcgStep's records, the rest through pcgStepOverflow (${stats.fallbackPatches} of ${patches})`);
+  } else assert.ok(stats.fallbackRows === 0 && stats.fallbackPatches === 0, "the authored pool holds this scene");
   if (mode === "blocks" && !one) assert.ok(globalColumns > 0 && localColumns > 0, "partners in the row's patch and outside it");
   assert.equal(bad, 0, `every row within ${bound} eps32 of (|contact share| + |row product|); worst ${worstRel.toExponential(2)}`);
 
@@ -285,7 +303,7 @@ async function operatorCheck(device: GPUDevice, sc: Scenario, mode: Mode, record
     // once through the records): s.H s and contact's share of it, per patch into PCG partial array 2. Then nwModel
     // alone per variant, on that one d, with the trust record set so the kernel takes the iteration as a trust-region one.
     const partials = new Uint32Array(solver.tables.params.buffer, solver.tables.params.byteOffset)[CLOTH_PARAM_NEWTON + 12]!;
-    await sequence(true, undefined, pass => { for (let i = 0; i <= 8; i++) S.run(pass, "pcgStep", patches, i); });
+    await sequence(true, undefined, pass => { for (let i = 0; i <= 8; i++) pcg(pass, i); });
     const model = async (headers?: Uint32Array<ArrayBuffer>): Promise<Float32Array> => {
       device.queue.writeBuffer(S.newtonWork, control, new Float32Array(4));
       device.queue.writeBuffer(S.newtonWork, control + 16 * 3, new Float32Array([1, 1e3, 0, 0]));
@@ -312,7 +330,9 @@ test("GPU compiled contact linearization: the PCG product through the records is
     // This stack is dense in pair entries (about 5 a vertex, 8 on the rows that have any): a pool authored for it.
     await operatorCheck(device, stack("stack"), "factorized", 48, s => t.diagnostic(s));
     await operatorCheck(device, stack("stack"), "blocks", 48, s => t.diagnostic(s));
-    // A pool of one record a vertex: the first patches' rows compile, the rest keep the matrix-free product.
+    // A short pool (12 records a vertex against a demand near 31): the first patches compile, the rest go through
+    // pcgStepOverflow; and one record a vertex, where hardly a row compiles.
+    await operatorCheck(device, stack("stack"), "factorized", 12, s => t.diagnostic(s));
     await operatorCheck(device, stack("stack"), "factorized", 1, s => t.diagnostic(s));
   });
 });

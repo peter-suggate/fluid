@@ -240,8 +240,8 @@ type SolverInternals = { newtonWork: GPUBuffer; tables: { newtonRecords: number;
 const internals = (solver: ClothGPUSolver) => solver as unknown as SolverInternals;
 const controlOf = (solver: ClothGPUSolver) => ({ buffer: internals(solver).newtonWork, offset: 16 * (internals(solver).tables.newtonRecords - CLOTH_SEGMENT_ALIGN) });
 /** Solver kernels that exit on Newton done (control.x); pcgStep also on PCG done (control.y). */
-const NEWTON_GATED = new Set(['nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild', 'pcgStep', 'nwProject', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
-const PCG_GATED = new Set(['pcgStep']);
+const NEWTON_GATED = new Set(['nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild', 'pcgStep', 'pcgStepOverflow', 'nwProject', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
+const PCG_GATED = new Set(['pcgStep', 'pcgStepOverflow']);
 
 async function timed(tick: number): Promise<StepReport[]> {
   const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
@@ -300,14 +300,16 @@ async function replay(tick: number): Promise<{ kernel: string; us: number }[]> {
   const linKernels: [string, number, number][] = S.tables.pcg.contactLin ? [['nwLinCount', Wp, 0], ['nwLinBuild', Wp, 0]] : [];
   // Timed as a pair: nwLinBuild turns the headers nwLinCount wrote into pool addresses, so it cannot be repeated alone.
   const linPair: [string, number, number][] = linKernels.length ? [['nwLinCount+nwLinBuild', Wp, 0]] : [];
-  const plan: [string, number, number][] = [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linPair, ['pcgStep', Wp, 0], ['pcgStep', Wp, 1],
-    ['pcgStep', Wp, 2], ['nwProject', W, 0], ['nwTrial', W, 0], ['nwChoose', 1, 0], ['nwApply', W, 0]];
+  // A PCG iteration: pcgStep, and with compiled records pcgStepOverflow after it (the patches the pool could not hold).
+  const pcg = linKernels.length ? 'pcgStep+pcgStepOverflow' : 'pcgStep';
+  const plan: [string, number, number][] = [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linPair, [pcg, Wp, 0], [pcg, Wp, 1],
+    [pcg, Wp, 2], ...(linKernels.length ? [['pcgStep', Wp, 2], ['pcgStepOverflow', Wp, 2]] as [string, number, number][] : []), ['nwProject', W, 0], ['nwTrial', W, 0], ['nwChoose', 1, 0], ['nwApply', W, 0]];
   const set = device.createQuerySet({ type: 'timestamp', count: 2 * plan.length });
   const encoder = device.createCommandEncoder({ label: 'bench replay' });
   device.queue.writeBuffer(ctl.buffer, ctl.offset, new Float32Array(4));
   // Prime the PCG state (dispatches 0 and 1) so the timed dispatch 2 is a full iteration, then time each kernel.
   const prime = encoder.beginComputePass();
-  for (const [name, wg, record] of [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linKernels, ['pcgStep', Wp, 0], ['pcgStep', Wp, 1]] as [string, number, number][]) S.run(prime, name, wg, record);
+  for (const [name, wg, record] of [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linKernels, [pcg, Wp, 0], [pcg, Wp, 1]] as [string, number, number][]) for (const kernel of name.split('+')) S.run(prime, kernel, wg, record);
   prime.end();
   plan.forEach(([name, wg, record], k) => {
     const pass = encoder.beginComputePass({ timestampWrites: { querySet: set, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } });
@@ -327,7 +329,7 @@ async function replay(tick: number): Promise<{ kernel: string; us: number }[]> {
   // A replay whose control flags were set (converged, or a non-positive curvature) timed early exits: say so.
   if (c[0] !== 0 || c[1] !== 0) console.log(`  (replay control after: ${Array.from(c).join(', ')} - some replays exited early)`);
   cloth.destroy();
-  return plan.map(([name, , record], k) => ({ kernel: `${name}${PCG_GATED.has(name) ? ` i=${record}` : ''}`, us: Number(t[2 * k + 1]! - t[2 * k]!) / 1e3 / REPLAY }));
+  return plan.map(([name, , record], k) => ({ kernel: `${name}${PCG_GATED.has(name.split('+')[0]!) ? ` i=${record}` : ''}`, us: Number(t[2 * k + 1]! - t[2 * k]!) / 1e3 / REPLAY }));
 }
 
 const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s.length ? (s[(s.length - 1) >> 1]! + s[s.length >> 1]!) / 2 : NaN; };
@@ -346,7 +348,7 @@ for (const tick of TICKS) {
   console.log(`  Newton iterations used per step: ${steps.map(s => s.newton).join(' ')}; PCG iterations per step: ${steps.map(s => s.pcg).join(' ')}`);
   console.log(`  |g|^2 at the first / last Newton iteration per step: ${steps.map(s => `${s.g2[0].toExponential(4)}/${s.g2[1].toExponential(4)}`).join(' ')}; last step length ${steps.map(s => s.alpha).join(' ')}`);
   const lin = steps[steps.length - 1]!.lin;
-  if (lin) console.log(`  contact linearization '${lin.mode}' (last Newton iteration of the last step): ${lin.rows} rows, ${lin.items} items, ${lin.usedRecords} records used (${lin.usedBytes} B) of ${lin.poolRecords} (${lin.poolBytes} B), demand ${lin.demandRecords}; rows left matrix-free ${lin.fallbackRows}`);
+  if (lin) console.log(`  contact linearization '${lin.mode}' (last Newton iteration of the last step): ${lin.rows} rows, ${lin.items} items, ${lin.usedRecords} records used (${lin.usedBytes} B) of ${lin.poolRecords} (${lin.poolBytes} B), demand ${lin.demandRecords}; rows left matrix-free ${lin.fallbackRows} (patches through pcgStepOverflow ${lin.fallbackPatches})`);
   console.log(`  detector per step: candidates ${c.map(x => x.candidates).join(' ')}; pairs (vf+ee) ${c.map(x => x.vfPairs + x.eePairs).join(' ')}; `
     + `rounds (detections+redetections) ${c.map(x => x.detections + x.redetections).join(' ')}; solid contacts ${c.map(x => x.solidContacts).join(' ')}; held ${c.map(x => x.held).join(' ')}; held for plane-record overflow (sum/max) ${c.map(x => `${x.planeRecordHeld}/${x.planeRecordHeldMax}`).join(' ')}; plane-record peak ${c.map(x => x.framePeakPlaneRecords).join(' ')}; status ${c.map(x => x.status).join(' ')}`);
   if (prof) {

@@ -410,7 +410,7 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const pcgScalars = pcgPartials + CLOTH_PCG_PARTIALS * pcg.patches;
   // The compiled contact linearization (newton.contactLinearization, with contact): a header per vertex, a total per
   // patch, the pool; before the control block, which stays last.
-  const linMode = options.contact ? options.newton?.contactLinearization ?? 'off' : 'off';
+  const linMode = options.contact ? options.newton?.contactLinearization ?? CLOTH_NEWTON_DEFAULTS.contactLinearization : 'off';
   if (linMode !== 'off' && CLOTH_CONTACT_LIN_RECORDS[linMode] === undefined) throw new Error(`Unknown cloth Newton contactLinearization ${String(linMode)}`);
   const linPerVertex = options.newton?.contactLinearizationRecords ?? CLOTH_NEWTON_DEFAULTS.contactLinearizationRecords;
   if (!(Number.isInteger(linPerVertex) && linPerVertex >= 1)) throw new Error(`Cloth Newton contactLinearizationRecords must be a positive integer, got ${String(linPerVertex)}`);
@@ -434,9 +434,11 @@ const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'pcgS
 const CONTACT_NEWTON_KERNELS = ['nwProject'] as const;
 /** With newton.contactLinearization: the compiled contact records' count and build (after nwGradient). */
 const CONTACT_LIN_KERNELS = ['nwLinCount', 'nwLinBuild'] as const;
+/** With newton.contactLinearization: the PCG iteration's rows of the patches the pool could not hold (after pcgStep). */
+const CONTACT_LIN_PCG_KERNELS = ['pcgStepOverflow'] as const;
 /** With contact: the BDF2 restart's scans of C2's contact state. */
 const RESTART_KERNELS = ['restartScan', 'onsetScan'] as const;
-type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number] | typeof CONTACT_LIN_KERNELS[number];
+type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number] | typeof CONTACT_LIN_KERNELS[number] | typeof CONTACT_LIN_PCG_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'diagnose', 'reduceDiagnostics', 'finishStep', ...NEWTON_KERNELS];
 
 export class ClothGPUSolver {
@@ -564,7 +566,7 @@ export class ClothGPUSolver {
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
     const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? CONTACT_LIN_KERNELS : [])];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? [...CONTACT_LIN_KERNELS, ...CONTACT_LIN_PCG_KERNELS] : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
@@ -637,7 +639,11 @@ export class ClothGPUSolver {
       // PCG: dispatch 0 starts the solve, dispatch i >= 1 takes iteration i (one dispatch each, Chronopoulos-Gear).
       // One patch (every vertex a row of one workgroup): the whole solve in one dispatch, its stop a loop break.
       if (this.tables.pcg.patches === 1) this.run(pass, 'pcgSolve', 1, o.pcgIterations);
-      else for (let i = 0; i <= o.pcgIterations; i++) this.run(pass, 'pcgStep', this.tables.pcg.patches, i);
+      else for (let i = 0; i <= o.pcgIterations; i++) {
+        this.run(pass, 'pcgStep', this.tables.pcg.patches, i);
+        // With compiled records: the same iteration's rows of the patches they could not hold (matrix-free).
+        if (this.tables.pcg.contactLin) this.run(pass, 'pcgStepOverflow', this.tables.pcg.patches, i);
+      }
       this.hooks.filter?.(pass);
       if (this.options.contact) this.run(pass, 'nwProject', W);
       this.run(pass, 'nwTrial', W);
@@ -675,22 +681,23 @@ export class ClothGPUSolver {
 
   /** The compiled contact linearization as the last Newton iteration that ran left it (harness reads; never a step
    * path): the pool and what the rows asked of it, the items built (entries, or partner terms for 'blocks') and the
-   * rows left on the matrix-free product because their records did not fit. Undefined with the switch off. */
-  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; rows: number; fallbackRows: number; poolBytes: number; usedBytes: number } | undefined> {
+   * rows whose records did not fit, and the patches holding them (pcgStep leaves those patches' rows to the matrix-free
+   * pcgStepOverflow). Undefined with the switch off. */
+  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; rows: number; fallbackRows: number; fallbackPatches: number; poolBytes: number; usedBytes: number } | undefined> {
     const L = this.tables.pcg.contactLin;
     if (!L) return undefined;
     const per = CLOTH_CONTACT_LIN_RECORDS[L.mode];
     const [head, patch] = await Promise.all([this.readRange(this.newtonWork, 16 * L.head, 16 * this.N), this.readRange(this.newtonWork, 16 * L.patch, 16 * this.tables.pcg.patches)]);
     const h = new Uint32Array(head), t = new Uint32Array(patch);
-    let demandRecords = 0, items = 0, rows = 0, fallbackRows = 0;
-    for (let p = 0; p < this.tables.pcg.patches; p++) demandRecords += t[4 * p]!;
+    let demandRecords = 0, items = 0, rows = 0, fallbackRows = 0, fallbackPatches = 0;
+    for (let p = 0; p < this.tables.pcg.patches; p++) { demandRecords += t[4 * p]!; if (t[4 * p + 1] === 0x7f000000) fallbackPatches++; }
     for (let v = 0; v < this.N; v++) {
       if (h[4 * v + 2] === 0) continue;
       rows++;
       // A row left on the matrix-free product keeps its entry count in y; a compiled one holds its items there.
       if (h[4 * v] === 0x7f000000) fallbackRows++; else items += h[4 * v + 1]!;
     }
-    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, rows, fallbackRows, poolBytes: 16 * L.records, usedBytes: 16 * per * items };
+    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, rows, fallbackRows, fallbackPatches, poolBytes: 16 * L.records, usedBytes: 16 * per * items };
   }
 
   /** Encode `steps` steps in one compute pass of `encoder`. */

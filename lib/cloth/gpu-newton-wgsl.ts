@@ -112,6 +112,116 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   const lin = contact ? pcg.contactLin : undefined;
   if (lin && CLOTH_CONTACT_LIN_RECORDS[lin.mode] === undefined) throw new Error(`Unknown cloth contact linearization ${String(lin.mode)}`);
   const contactHv = lin ? 'nwLinHv(v)' : 'ogcVertexContactHvLanes(v, 0u, 1u)';
+  // pcgStep: 'single' the one kernel (matrix-free, or no contact); with compiled records 'compiled' (every patch's
+  // scalars, the rows of patches whose records all fit, through them alone) and 'overflow' (pcgStepOverflow, dispatched
+  // after it: the rows of the other patches, matrix-free). Keeping the matrix-free product out of the compiled kernel
+  // keeps its registers out too (one never-taken fallback branch cost 35 us an iteration at 150^2).
+  const pcgStepWGSL = (name: string, variant: 'single' | 'compiled' | 'overflow') => {
+    const hv = variant === 'compiled' ? 'nwLinRecordsHv(v)' : variant === 'overflow' ? 'ogcVertexContactHvLanes(v, 0u, 1u)' : contactHv;
+    return `// PCG dispatch i (R.range.z, from 0). i = 0: u_0 = M^-1 r_0, w_0 = H u_0 and the partials (r.u, w.u, |g|^2). i >= 1:
+// gamma = r.u and delta = w.u of iteration i - 1 (with i = 1 the Newton residual test), beta = gamma / gamma_{i-2},
+// alpha = gamma / (delta - beta gamma / alpha_{i-2}); then p_{i-1} = u_{i-1} + beta p_{i-2}, s_{i-1} = w_{i-1} + beta
+// s_{i-2}, d += alpha p_{i-1}, r_i = r_{i-1} - alpha s_{i-1}, u_i = M^-1 r_i, w_i = H u_i and the partials of iteration i.
+@compute @workgroup_size(256) fn ${name}(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u${sgArgs}) {
+  let ctl = nwControlUniform(lane);
+  if (ctl.x != 0.0 || ctl.y != 0.0) { return; }${variant === 'overflow' ? `
+  if (!pcgLinOverflow(lane, wgIndex(wg, nwg))) { return; }` : ''}
+  let i = R.range.z; let p = wgIndex(wg, nwg); let lead = ${variant === 'overflow' ? 'false' : 'p == 0u && lane == 0u'};
+  var alpha = 0.0; var beta = 0.0;
+  if (i > 0u) {
+    // Sums of the partials of iterations i - 1 and i - 2, and the scalars (gamma_0, alpha_{i-2}), uniform.
+    var a = vec4f(0.0);
+    for (var k = lane; k < P.newton3.y; k += PCG_PATCH) {
+      let q1 = nw[pcgPartial((i - 1u) % 3u, k)];
+      a += vec4f(q1.xyz, select(q1.w, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
+    }
+    ${reduce('a')}
+    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; let q = nw[pcgScalar(1u + i % 2u)]; pcgOut = total; pcgScal = vec4f(s0.x, q.x, s0.y, 0.0); pcgNorm = q; pcgTrust = nw[nwTrust()]; }
+    let sums = workgroupUniformLoad(&pcgOut);
+    let scal = workgroupUniformLoad(&pcgScal);
+    let nrm = workgroupUniformLoad(&pcgNorm);
+    let trust = workgroupUniformLoad(&pcgTrust);
+    let gam = sums.x;
+    var gamma0 = scal.x;
+    if (i == 1u) {
+      gamma0 = gam;
+      // Residual record (control + 1): |g|^2 over free DOFs at the step's first and latest Newton iterate.
+      // The lead reads the record before writing it (its forcing needs |g| of the last Newton iterate); at i = 1 the stop
+      // below passes for any tolerance < 1, so the other workgroups need the stop's tolerance only from dispatch 2 on.
+      if (lead) {
+        var rr = nw[nwControl() + 1u]; let e2 = pcgForcing(sums.z, rr, ctl.w);
+        if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = e2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, e2, 0.0, 0.0);
+      }
+      // Done at the iterate: |P g|^2 within the residual tolerance and (C1 RESULT 50, as for nwChoose's small step and
+      // stall) every vertex's whole gradient within its f32 floor (sums.w: the rows with g.w > 1). |P g| alone is the
+      // round's constrained residual: certificates carrying load hold the rest of g, and the step is not solved there.
+      if (sums.z <= bitcast<f32>(P.newton1.z) && sums.w == 0.0) { if (lead) { nwDoneAtSolve(); } return; }
+    }
+    // The last dispatch's step reached the trust boundary (its alpha record -1): the solve is done.
+    if (i >= 2u && scal.y < 0.0) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+    if (!(gam > select(scal.z, 0.0, i == 1u) * gamma0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+    var denom = sums.y;
+    if (i >= 2u) { beta = gam / sums.w; denom = sums.y - beta * gam / scal.y; }
+    // ||d||_M^2, <d, p>_M, ||p||_M^2 of d_{i-1} and p_{i-1} (M the preconditioner's inverse), by the Steihaug-Toint
+    // recurrences from those of i - 2 (the alpha record's yzw): r_{i-1} is orthogonal to d_{i-1} and p_{i-2}.
+    var dd = 0.0; var dp = 0.0; var pp = gam;
+    if (i >= 2u) { let a2 = scal.y; dd = nrm.y + a2 * (2.0 * nrm.z + a2 * nrm.w); dp = beta * (nrm.z + a2 * nrm.w); pp = gam + beta * beta * nrm.w; }
+    let tr = NW_HYBRID && trust.x != 0.0;
+    var edge = false;
+    if (!(denom > 0.0)) {
+      // The line search's H is PSD by construction: a non-positive curvature (rounding at convergence) ends this solve
+      // with d so far. The trust region's model (the exact membrane) can be indefinite: Steihaug's step to the boundary.
+      if (!tr) { if (lead) { nw[nwControl()].y = 1.0; } return; }
+      edge = true;
+    } else {
+      alpha = gam / denom;
+      edge = tr && dd + alpha * (2.0 * dp + alpha * pp) >= trust.y * trust.y;
+    }
+    if (edge) { alpha = pcgBoundary(dd, dp, pp, trust.y); }
+    // The step's PCG iterations taken (control + 1 .w; harness reads only), and d's norm after this dispatch's update.
+    if (lead) {
+      nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(select(alpha, -1.0, edge), dd, dp, pp); nw[nwControl() + 1u].w += 1.0;
+      nw[nwTrustNorm()] = vec4f(dd + alpha * (2.0 * dp + alpha * pp), select(0.0, 1.0, edge), 0.0, 0.0);
+    }
+  } else if (lead) { nw[nwTrustNorm()] = vec4f(0.0); }${variant === 'compiled' ? `
+  // A patch with a row the pool could not hold: its rows are pcgStepOverflow's (this dispatch's scalars above are the lead's).
+  if (pcgLinOverflow(lane, p)) { return; }` : ''}
+  pcgI = i; pcgAlpha = alpha; pcgBeta = beta;
+  let tw = pcgTable(p);
+  let K1 = topo[tw]; let K2 = topo[tw + 1u]; let haloN = min(topo[tw + 2u], PCG_SHARED - PCG_PATCH); let halo = topo[tw + 3u];
+  let blocks = topo[tw + 4u]; let bends = topo[tw + 5u]; let rows = topo[tw + 7u];
+  pcgPatchIndex = p;
+  let own = lane < rows; let v = select(0u, pcgRowVertex(p * PCG_PATCH + lane), own);
+  var r = vec3f(0.0); var u = vec3f(0.0);
+  if (own) {
+    let M0 = nw[nseg(${S.m0}u, v)]; let M1 = nw[nseg(${S.m1}u, v)];
+    if (i == 0u) { r = nw[nseg(${S.r0}u, v)].xyz; } else {
+      let o = (i + 1u) % 2u;
+      let rOld = nw[nseg(${S.r0}u + o, v)].xyz;
+      let sv = nw[nseg(${S.w0}u + o, v)].xyz + beta * nw[nseg(${S.s0}u + i % 2u, v)].xyz;
+      let pv = nwPrecondition(M0, M1, rOld) + beta * nw[nseg(${S.p}u, v)].xyz;
+      r = rOld - alpha * sv;
+      nw[nseg(${S.p}u, v)] = vec4f(pv, 0.0);
+      nw[nseg(${S.d}u, v)] = vec4f(nw[nseg(${S.d}u, v)].xyz + alpha * pv, 0.0);
+      nw[nseg(${S.s0}u + o, v)] = vec4f(sv, 0.0);
+      nw[nseg(${S.r0}u + i % 2u, v)] = vec4f(r, 0.0);
+    }
+    u = nwPrecondition(M0, M1, r);
+  }
+  pcgStage(lane, u);
+  for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, pcgUGlobal(topo[halo + h])); }
+  workgroupBarrier();
+  var w = vec3f(0.0);
+  if (own) {
+    w = pcgRowProduct(lane, K1, K2, blocks, bends);
+    // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
+    ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${hv}); }` : ''}
+    nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
+  }
+  ${reduce(`vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), select(0.0, f32(own && nw[nseg(${S.g}u, v)].w > 1.0), i == 0u))`)}
+  if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = total; }
+}`;
+  };
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
 const NW_WG = ${workgroup}u;
@@ -554,106 +664,10 @@ fn pcgRowProduct(lane: u32, K1: u32, K2: u32, blocks: u32, bends: u32) -> vec3f 
   return w;
 }
 ${lin ? clothContactLinWGSL(lin) : ''}
-// PCG dispatch i (R.range.z, from 0). i = 0: u_0 = M^-1 r_0, w_0 = H u_0 and the partials (r.u, w.u, |g|^2). i >= 1:
-// gamma = r.u and delta = w.u of iteration i - 1 (with i = 1 the Newton residual test), beta = gamma / gamma_{i-2},
-// alpha = gamma / (delta - beta gamma / alpha_{i-2}); then p_{i-1} = u_{i-1} + beta p_{i-2}, s_{i-1} = w_{i-1} + beta
-// s_{i-2}, d += alpha p_{i-1}, r_i = r_{i-1} - alpha s_{i-1}, u_i = M^-1 r_i, w_i = H u_i and the partials of iteration i.
-@compute @workgroup_size(256) fn pcgStep(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u${sgArgs}) {
-  let ctl = nwControlUniform(lane);
-  if (ctl.x != 0.0 || ctl.y != 0.0) { return; }
-  let i = R.range.z; let p = wgIndex(wg, nwg); let lead = p == 0u && lane == 0u;
-  var alpha = 0.0; var beta = 0.0;
-  if (i > 0u) {
-    // Sums of the partials of iterations i - 1 and i - 2, and the scalars (gamma_0, alpha_{i-2}), uniform.
-    var a = vec4f(0.0);
-    for (var k = lane; k < P.newton3.y; k += PCG_PATCH) {
-      let q1 = nw[pcgPartial((i - 1u) % 3u, k)];
-      a += vec4f(q1.xyz, select(q1.w, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
-    }
-    ${reduce('a')}
-    if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; let q = nw[pcgScalar(1u + i % 2u)]; pcgOut = total; pcgScal = vec4f(s0.x, q.x, s0.y, 0.0); pcgNorm = q; pcgTrust = nw[nwTrust()]; }
-    let sums = workgroupUniformLoad(&pcgOut);
-    let scal = workgroupUniformLoad(&pcgScal);
-    let nrm = workgroupUniformLoad(&pcgNorm);
-    let trust = workgroupUniformLoad(&pcgTrust);
-    let gam = sums.x;
-    var gamma0 = scal.x;
-    if (i == 1u) {
-      gamma0 = gam;
-      // Residual record (control + 1): |g|^2 over free DOFs at the step's first and latest Newton iterate.
-      // The lead reads the record before writing it (its forcing needs |g| of the last Newton iterate); at i = 1 the stop
-      // below passes for any tolerance < 1, so the other workgroups need the stop's tolerance only from dispatch 2 on.
-      if (lead) {
-        var rr = nw[nwControl() + 1u]; let e2 = pcgForcing(sums.z, rr, ctl.w);
-        if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = e2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, e2, 0.0, 0.0);
-      }
-      // Done at the iterate: |P g|^2 within the residual tolerance and (C1 RESULT 50, as for nwChoose's small step and
-      // stall) every vertex's whole gradient within its f32 floor (sums.w: the rows with g.w > 1). |P g| alone is the
-      // round's constrained residual: certificates carrying load hold the rest of g, and the step is not solved there.
-      if (sums.z <= bitcast<f32>(P.newton1.z) && sums.w == 0.0) { if (lead) { nwDoneAtSolve(); } return; }
-    }
-    // The last dispatch's step reached the trust boundary (its alpha record -1): the solve is done.
-    if (i >= 2u && scal.y < 0.0) { if (lead) { nw[nwControl()].y = 1.0; } return; }
-    if (!(gam > select(scal.z, 0.0, i == 1u) * gamma0)) { if (lead) { nw[nwControl()].y = 1.0; } return; }
-    var denom = sums.y;
-    if (i >= 2u) { beta = gam / sums.w; denom = sums.y - beta * gam / scal.y; }
-    // ||d||_M^2, <d, p>_M, ||p||_M^2 of d_{i-1} and p_{i-1} (M the preconditioner's inverse), by the Steihaug-Toint
-    // recurrences from those of i - 2 (the alpha record's yzw): r_{i-1} is orthogonal to d_{i-1} and p_{i-2}.
-    var dd = 0.0; var dp = 0.0; var pp = gam;
-    if (i >= 2u) { let a2 = scal.y; dd = nrm.y + a2 * (2.0 * nrm.z + a2 * nrm.w); dp = beta * (nrm.z + a2 * nrm.w); pp = gam + beta * beta * nrm.w; }
-    let tr = NW_HYBRID && trust.x != 0.0;
-    var edge = false;
-    if (!(denom > 0.0)) {
-      // The line search's H is PSD by construction: a non-positive curvature (rounding at convergence) ends this solve
-      // with d so far. The trust region's model (the exact membrane) can be indefinite: Steihaug's step to the boundary.
-      if (!tr) { if (lead) { nw[nwControl()].y = 1.0; } return; }
-      edge = true;
-    } else {
-      alpha = gam / denom;
-      edge = tr && dd + alpha * (2.0 * dp + alpha * pp) >= trust.y * trust.y;
-    }
-    if (edge) { alpha = pcgBoundary(dd, dp, pp, trust.y); }
-    // The step's PCG iterations taken (control + 1 .w; harness reads only), and d's norm after this dispatch's update.
-    if (lead) {
-      nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(select(alpha, -1.0, edge), dd, dp, pp); nw[nwControl() + 1u].w += 1.0;
-      nw[nwTrustNorm()] = vec4f(dd + alpha * (2.0 * dp + alpha * pp), select(0.0, 1.0, edge), 0.0, 0.0);
-    }
-  } else if (lead) { nw[nwTrustNorm()] = vec4f(0.0); }
-  pcgI = i; pcgAlpha = alpha; pcgBeta = beta;
-  let tw = pcgTable(p);
-  let K1 = topo[tw]; let K2 = topo[tw + 1u]; let haloN = min(topo[tw + 2u], PCG_SHARED - PCG_PATCH); let halo = topo[tw + 3u];
-  let blocks = topo[tw + 4u]; let bends = topo[tw + 5u]; let rows = topo[tw + 7u];
-  pcgPatchIndex = p;
-  let own = lane < rows; let v = select(0u, pcgRowVertex(p * PCG_PATCH + lane), own);
-  var r = vec3f(0.0); var u = vec3f(0.0);
-  if (own) {
-    let M0 = nw[nseg(${S.m0}u, v)]; let M1 = nw[nseg(${S.m1}u, v)];
-    if (i == 0u) { r = nw[nseg(${S.r0}u, v)].xyz; } else {
-      let o = (i + 1u) % 2u;
-      let rOld = nw[nseg(${S.r0}u + o, v)].xyz;
-      let sv = nw[nseg(${S.w0}u + o, v)].xyz + beta * nw[nseg(${S.s0}u + i % 2u, v)].xyz;
-      let pv = nwPrecondition(M0, M1, rOld) + beta * nw[nseg(${S.p}u, v)].xyz;
-      r = rOld - alpha * sv;
-      nw[nseg(${S.p}u, v)] = vec4f(pv, 0.0);
-      nw[nseg(${S.d}u, v)] = vec4f(nw[nseg(${S.d}u, v)].xyz + alpha * pv, 0.0);
-      nw[nseg(${S.s0}u + o, v)] = vec4f(sv, 0.0);
-      nw[nseg(${S.r0}u + i % 2u, v)] = vec4f(r, 0.0);
-    }
-    u = nwPrecondition(M0, M1, r);
-  }
-  pcgStage(lane, u);
-  for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, pcgUGlobal(topo[halo + h])); }
-  workgroupBarrier();
-  var w = vec3f(0.0);
-  if (own) {
-    w = pcgRowProduct(lane, K1, K2, blocks, bends);
-    // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
-    ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${contactHv}); }` : ''}
-    nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
-  }
-  ${reduce(`vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), select(0.0, f32(own && nw[nseg(${S.g}u, v)].w > 1.0), i == 0u))`)}
-  if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = total; }
-}
+${pcgStepWGSL('pcgStep', lin ? 'compiled' : 'single')}${lin ? `
+
+// The rows of patches the compiled records could not hold (pcgStep, 'overflow'): the same iteration, matrix-free.
+${pcgStepWGSL('pcgStepOverflow', 'overflow')}` : ''}
 
 // PCG in one dispatch (one patch: every vertex a row of workgroup 0, no halo): the iterations of pcgStep, each lane
 // keeping its row's r, s, p, d, u and w in registers, u shared through the staging arrays and gathered without the
@@ -1080,7 +1094,7 @@ fn nwChosenCut(v: u32, alpha: f32) -> bool {
  *   nwLinCount  each row's record demand, its exclusive prefix within the patch (a workgroup scan) and the patch total;
  *   nwLinBuild  the patch's base (the sum of the earlier patches' totals), then each row linearizes its entries with
  *               ogcEntryLin itself, at the iterate, and writes its records in entry order.
- * The pool is packed (the per-vertex capacity is 128 entries; a fixed slot per entry would be domain-sized). A row
+ * The pool is packed (a fixed slot per entry of the per-vertex contact capacity would be domain-sized). A row
  * whose records do not fit is marked (header.x = LIN_NONE) and keeps the matrix-free product.
  * 'factorized', 6 records an entry: the partners' columns (a lane of the row's own patch, else PCG_GLOBAL | vertex:
  * pcgU's encoding), wc, wlc, and the symmetric wr Mn and wrl Mf (xx, xy, xz, yy | yz, zz, xx, xy | xz, yy, yz, zz).
@@ -1110,10 +1124,20 @@ fn linCol(j: u32) -> u32 {
   return PCG_GLOBAL | j;
 }
 // Row v of the contact product from its compiled records, in entry order (ogcVertexContactHvLanes for a row the pool
-// could not hold).
+// could not hold: pcgSolve, nwModel; pcgStep leaves such a row's patch to pcgStepOverflow).
 fn nwLinHv(v: u32) -> vec3f {
   let h = bitcast<vec4u>(nw[LIN_HEAD + v]);
   if (h.x == LIN_NONE) { return ogcVertexContactHvLanes(v, 0u, 1u); }
+  return nwLinRecords(h);
+}
+fn nwLinRecordsHv(v: u32) -> vec3f { return nwLinRecords(bitcast<vec4u>(nw[LIN_HEAD + v])); }
+var<workgroup> linOver: u32;
+// Patch p holds a row the pool could not hold (nwLinBuild's mark in its total's .y), uniform over the workgroup.
+fn pcgLinOverflow(lane: u32, p: u32) -> bool {
+  if (lane == 0u) { linOver = bitcast<u32>(nw[LIN_PATCH + p].y); }
+  return workgroupUniformLoad(&linOver) == LIN_NONE;
+}
+fn nwLinRecords(h: vec4u) -> vec3f {
   var out = vec3f(0.0);
   for (var i = 0u; i < h.y; i++) {
     ${factorized ? `let b = h.x + 6u * i;
@@ -1169,6 +1193,8 @@ fn linDemand(ent: vec4u) -> u32 {
   workgroupBarrier();
   for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { linScan[lane] += linScan[lane + s]; } workgroupBarrier(); }
   let patchBase = linScan[0];
+  // The patch's mark (rows take records in prefix order: one does not fit iff the patch's last does not).
+  if (lane == 0u) { let total = bitcast<u32>(nw[LIN_PATCH + p].x); nw[LIN_PATCH + p].y = bitcast<f32>(select(0u, LIN_NONE, total > 0u && patchBase + total > LIN_RECORDS)); }
   if (lane >= rows) { return; }
   let v = pcgRowVertex(p * PCG_PATCH + lane);
   let h = bitcast<vec4u>(nw[LIN_HEAD + v]);
