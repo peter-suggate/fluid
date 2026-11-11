@@ -165,3 +165,44 @@ export function buildOgcFaceRecords(topology: OgcTopology): Uint32Array {
   }
   return out;
 }
+
+/** Bits per axis of the query order's Morton key (30-bit keys). */
+const OGC_ORDER_BITS = 10;
+/**
+ * The query order for the detector's locality switch (the "topology" part, after the face records): the query kernels' slots
+ * [0, N + E) mapped to the primitive each one queries, the vertices (ids 0 .. N - 1) then the edges (ids N .. N + E - 1),
+ * each role in the Morton order of its rest positions (an edge's midpoint), ties by id. A workgroup then queries a
+ * compact patch of the sheet instead of a strip of rows, so its threads visit neighbouring cells. Only the dispatch
+ * order changes: each primitive is queried once, by its own id, with its own role. Static, from the build's positions;
+ * rebuilt with the topology (a cut, load or undo).
+ */
+export function buildOgcQueryOrder(topology: OgcTopology, positions: Float32Array): Uint32Array {
+  const L = topology.layout, w = topology.words, N = L.vertexCount, E = L.edgeCount;
+  if (positions.length < 4 * N) throw new Error("OGC query order: positions must hold vec4<f32> per vertex");
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let v = 0; v < N; v++) for (let k = 0; k < 3; k++) {
+    const c = positions[4 * v + k]!;
+    if (!Number.isFinite(c)) throw new Error(`OGC query order: vertex ${v} has a non-finite position`);
+    lo[k] = Math.min(lo[k]!, c); hi[k] = Math.max(hi[k]!, c);
+  }
+  const span = Math.max(hi[0]! - lo[0]!, hi[1]! - lo[1]!, hi[2]! - lo[2]!, 1e-30), top = (1 << OGC_ORDER_BITS) - 1;
+  const spread = (q: number) => { let x = 0; for (let b = 0; b < OGC_ORDER_BITS; b++) x |= ((q >> b) & 1) << (3 * b); return x; };
+  const key = (p: readonly number[]) => {
+    let m = 0;
+    for (let k = 0; k < 3; k++) m |= spread(Math.min(top, Math.max(0, Math.floor((p[k]! - lo[k]!) / span * (top + 1))))) << k;
+    return m >>> 0;
+  };
+  const at = (v: number) => [positions[4 * v]!, positions[4 * v + 1]!, positions[4 * v + 2]!];
+  const order = (count: number, keyOf: (i: number) => number, base: number) => {
+    const keys = new Uint32Array(count), ids = Array.from({ length: count }, (_, i) => i);
+    for (let i = 0; i < count; i++) keys[i] = keyOf(i);
+    ids.sort((a, b) => keys[a]! - keys[b]! || a - b);
+    return ids.map(i => base + i);
+  };
+  const vertices = order(N, v => key(at(v)), 0);
+  const edges = order(E, e => {
+    const a = at(w[L.edgesOffset + 4 * e]!), b = at(w[L.edgesOffset + 4 * e + 1]!);
+    return key([0.5 * (a[0]! + b[0]!), 0.5 * (a[1]! + b[1]!), 0.5 * (a[2]! + b[2]!)]);
+  }, N);
+  return Uint32Array.from([...vertices, ...edges]);
+}

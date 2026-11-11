@@ -285,12 +285,15 @@ fn bucketStart(h: u32) -> u32 {
 // ------------------------------------------------------------------ locality switch (cloth-m1-max-locality, Experiment 2)
 
 /**
- * The query kernels' locality switch (OgcContactConfig.locality; default off, the kernels above unchanged). Each part
- * replaces loads of the query roles and nothing else: the grid, the traversal, the tests and their order are the same,
- * and every value read is the same bits, from another place.
+ * The query kernels' locality switch (OgcContactConfig.locality; default OGC_LOCALITY_DEFAULT; "off", the kernels
+ * above unchanged). Each part replaces loads of the query roles and nothing else: the grid, the traversal and the tests
+ * are the same, and every value read is the same bits, from another place.
  *   topology  compiled face records (ogc-topology.ts buildOgcFaceRecords) in `loc`, 8 words a face: a box-passing
  *             record's owned edges, their endpoints (in the edge table's order) and its vertices' ownership come from
- *             one 8-word load in place of triEdges -> edge record and vtOff -> vtList.
+ *             one 8-word load in place of triEdges -> edge record and vtOff -> vtList. After them, the query order
+ *             (buildOgcQueryOrder: each role's primitives in the Morton order of their rest positions): query slot s
+ *             of the vertex and edge roles queries primitive loc[8T + s], with the same role, so a workgroup queries a
+ *             compact patch of the sheet. Every primitive is still queried once, by its own id.
  *   geometry  round geometry records in `geo`, two vec4<u32> per vertex and solid sample, written after prep by
  *             OGC_LOC_GEOMETRY_WGSL: (X.xyz, envelope), (w.xyz, sigma | moving-with-solid << 31), in place of
  *             x_det, pred and three regions of work.
@@ -338,6 +341,13 @@ fn faceEdge(f: OgcFaceRec, k: u32) -> vec4<u32> {
   let a = f.v[k]; let b = f.v[(k + 1u) % 3u];
   let rev = (f.flags & (8u << k)) != 0u;
   return vec4<u32>(select(a, b, rev), select(b, a, rev), OGC_NONE, OGC_NONE);
+}
+`;
+/** The query slot's primitive under "topology" (the vertices' and edges' slots; the solids' samples keep theirs). */
+const LOC_ORDER_FNS = /* wgsl */`
+fn querySlot(s: u32) -> u32 {
+  if (s < P.N + P.E) { return loc[OGC_FACE_RECORD_WORDS * P.T + s]; }
+  return s;
 }
 `;
 /** The query's per-vertex reads from the round geometry records (in place of xd, PRED_FNS and triBoxFns' envelopes). */
@@ -1739,7 +1749,7 @@ export function ogcQueryWGSL(role: OgcQueryRole, L: OgcLocalityFlags = parseOgcL
   const faceMask = L.topology ? "let fr = faceRec(t); let te = fr.flags;" : "let te = topo[P.triEdgesOff + 4u * t + 3u];";
   const lo = role === "queryVertex" ? "0u" : role === "queryEdge" ? "P.N" : "P.N + P.E";
   const hi = role === "queryVertex" ? "P.N" : role === "queryEdge" ? "P.N + P.E" : "P.N + P.E + P.S + P.SB + P.SE + P.SEB + P.SF + P.SFB";
-  return header(ogcQueryBindings(L).filter(b => b < 24)) + (L.topology ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS : "") + CELL_FNS + GRID_READ_FNS + vertexFns + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+  return header(ogcQueryBindings(L).filter(b => b < 24)) + (L.topology ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS + LOC_ORDER_FNS : "") + CELL_FNS + GRID_READ_FNS + vertexFns + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 
 // ---- DAT division pairs: every non-adjacent pair whose swept boxes meet and that is
 // within the larger of the two primitives' envelopes (a face's or an edge's is its
@@ -2416,8 +2426,10 @@ fn tally(o: RoleOut) {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>) {
   let roleLo = ${lo}; let roleHi = ${hi};
   if (64u * wg.x + 64u <= roleLo || 64u * wg.x >= roleHi) { return; }
-  let i = gid.x;
-  if (i >= roleLo && i < roleHi) {
+  ${L.topology ? `let s = gid.x;
+  if (s >= roleLo && s < roleHi) {
+    let i = querySlot(s);` : `let i = gid.x;
+  if (i >= roleLo && i < roleHi) {`}
     ${role === "queryVertex" ? `let o = vertexFacet(i);
     tally(o); atomicAdd(&wgVf, o.pairs);`
     : role === "queryEdge" ? `let o = edgeEdge(i - P.N);

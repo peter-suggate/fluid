@@ -34,7 +34,7 @@
  * set the status word (OGC_STATUS), which the frame's owner reads off the step path.
  */
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
-import { OGC_FACE_RECORD_WORDS, buildOgcFaceRecords } from "./ogc-topology";
+import { OGC_FACE_RECORD_WORDS, buildOgcFaceRecords, buildOgcQueryOrder } from "./ogc-topology";
 import { OGC_LOCALITY_DEFAULT, OGC_LOC_GEOMETRY_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
@@ -159,8 +159,9 @@ export interface OgcContactConfig {
   travelBound?: OgcTravelBound;
   /**
    * The query kernels' locality switch (ogc-detector-wgsl.ts OGC_LOCALITY_PARTS; cloth-m1-max-locality Experiment 2):
-   * "off" (the kernels and buffers of the baseline), or parts joined by "+": "topology" (compiled face records),
-   * "geometry" (round geometry records, one more pass a round). Default OGC_LOCALITY_DEFAULT ("topology+geometry").
+   * "off" (the kernels and buffers of the baseline), or parts joined by "+": "topology" (compiled face records and
+   * the query slots in the Morton order of the rest positions), "geometry" (round geometry records, one more pass a
+   * round). Default OGC_LOCALITY_DEFAULT ("topology+geometry").
    * The same grid, traversal, tests and results; only where the queries load from. Anything else fails.
    */
   locality?: string;
@@ -402,12 +403,12 @@ export class OgcContactDetector {
    */
   readonly contactState: GPUBuffer;
   private kernels = new Map<string, Kernel>();
-  /** The locality switch in effect, and its buffers: face records (binding 24), round geometry records (25). */
+  /** The locality switch in effect, and its buffers: face records then the query order (binding 24), round geometry records (25). */
   readonly locality: OgcLocalityFlags;
   readonly locBuffer?: GPUBuffer;
   readonly geoBuffer?: GPUBuffer;
-  /** Bytes the locality switch adds: [face records, round geometry records]. */
-  readonly localityBytes: readonly [number, number];
+  /** Bytes the locality switch adds: [face records, round geometry records, query order]. */
+  readonly localityBytes: readonly [number, number, number];
   /** The detection round's kernels in dispatch order under the locality switch (OGC_ROUND_KERNELS when off). */
   readonly roundKernels: readonly RoundKernel[];
   /** The locality of a config that names none (OGC_LOCALITY_DEFAULT). Harness use only: a test run may set it to put every detector it builds under one value. */
@@ -420,7 +421,7 @@ export class OgcContactDetector {
 
   private inputs?: OgcSolverInputs;
 
-  private constructor(private readonly device: GPUDevice, topology: OgcTopology, readonly config: OgcContactConfig, coordinateScale: number) {
+  private constructor(private readonly device: GPUDevice, topology: OgcTopology, readonly config: OgcContactConfig, coordinateScale: number, restPositions?: Float32Array) {
     const L = topology.layout;
     this.topology = topology;
     this.N = L.vertexCount; this.T = L.triangleCount; this.E = L.edgeCount;
@@ -532,11 +533,13 @@ export class OgcContactDetector {
     this.contactState = mk("contact state", 4 * N);
     // The locality switch: additive buffers, none when off.
     const loc = this.locality = parseOgcLocality(config.locality ?? OgcContactDetector.defaultLocality);
-    this.localityBytes = [loc.topology ? 4 * OGC_FACE_RECORD_WORDS * T : 0, loc.geometry ? 32 * (N + sampleCap + bodySampleCap) : 0];
+    this.localityBytes = [loc.topology ? 4 * OGC_FACE_RECORD_WORDS * T : 0, loc.geometry ? 32 * (N + sampleCap + bodySampleCap) : 0, loc.topology ? 4 * (N + E) : 0];
     if (loc.topology) {
-      this.locBuffer = mk("face records", Math.max(16, this.localityBytes[0]));
-      if (this.locBuffer.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the face records exceed one storage binding");
+      this.locBuffer = mk("face records and query order", Math.max(16, this.localityBytes[0] + this.localityBytes[2]));
+      if (this.locBuffer.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the locality buffer exceeds one storage binding");
       if (T) writeBufferChunked(device.queue, this.locBuffer, 0, buildOgcFaceRecords(topology));
+      if (!restPositions) throw new Error("OGC: the locality switch's query order needs the build's positions");
+      if (N + E) writeBufferChunked(device.queue, this.locBuffer, this.localityBytes[0], buildOgcQueryOrder(topology, restPositions));
     }
     if (loc.geometry) this.geoBuffer = mk("round geometry", this.localityBytes[1]);
     this.roundKernels = OGC_ROUND_KERNELS.flatMap((name): RoundKernel[] => name === "prep" && loc.geometry ? [name, "locGeometry"] : [name]);
@@ -778,7 +781,7 @@ export class OgcContactDetector {
   static async create(device: GPUDevice, mesh: OgcMeshTopology, restPositions: Float32Array, config: OgcContactConfig, inputs?: OgcSolverInputs): Promise<OgcContactDetector> {
     let scale = 1;
     for (const c of restPositions) scale = Math.max(scale, Math.abs(c));
-    const d = new OgcContactDetector(device, buildOgcTopology(mesh, restPositions), config, scale);
+    const d = new OgcContactDetector(device, buildOgcTopology(mesh, restPositions), config, scale, restPositions);
     await d.compile();
     if (inputs) d.bind(inputs);
     return d;

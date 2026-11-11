@@ -245,3 +245,89 @@ TODOs are the same in both (ladder 2c, C1; the moving-solid ride, C2's bodySquee
 (556 lines of `#` output) is identical between base and flip except microbenchmark wall times (the verification
 query's us at an end state); so no C1/C2 test failed or shifted. `npm run check:types` clean; `npm run test:unit`
 2151 tests, 1753 pass, 0 fail, 398 skipped (flip export, GPU module unset).
+
+## 10. Experiment 5: query scheduling (main's rulings, 2026-11-11/12)
+
+### 10.1 Static Morton query order, folded into `topology`
+
+`buildOgcQueryOrder` (`ogc-topology.ts`) maps the query slots `[0, N + E)` to primitives: the vertices, then the edges
+by midpoint, each role in the Morton order (10 bits an axis, over the rest bounding box) of the build's positions, ties
+by id. It is written after the face records in binding 24 (4(N + E) bytes, 357,604 at 150^2) and read by
+`querySlot(s)` in the vertex and edge query roles only; the samples keep their slots. It is built with the topology in
+`OgcContactDetector.create`, so a cut, load or undo rebuilds it (the edits test checks every rebuilt detector's order
+against its own topology). Per main's ruling it has no switch of its own: `"order"` is not a part, and
+`"order"`/`"topology+geometry+order"` fail as unknown values. It costs nothing a step (one extra load a query thread).
+
+Equivalence (fixed states, ticks 2/35/120, every variant against `off`): 0 differing rounds, status and whole-step
+counters. Timing (one run each, profiled step, t120): qE 208.8 -> 191.3 ms, qV and qS unchanged, step 703.8 -> 689.8;
+t35 unchanged.
+
+### 10.2 Attribution of the scan (shadow kernels, t120, `topology+geometry`, ms)
+
+Shadow copies of each query role ran before it with their tallies gated off and the skipped code behind a run-time
+flag, so the bindings matched. Every shadow's counters equal the real scan's.
+
+| role | cell visits only | the entry scan (box test) | full kernel |
+| --- | ---: | ---: | ---: |
+| queryVertex | 1.5 | 50.3 | 65.0 |
+| queryEdge | 3.4 | 120.9 | 203.8 |
+| querySample | 1.4 | 18.2 | 38.5 |
+
+The 32-byte entry stream is about 60% of query time (183 of 307 ms), cell visits and hashing about 2%, and the pass path
+(narrow phase, DAT and the writes) about 38%; t35 has the same shape. Changing bytes, caching or ALU barely moves the
+edge scan (120.9 ms): read-only grid 122; batched loads 111 (-7%); cache warming no effect; with the order 107.2; exact
+ownership rewrite 110.6; vec4 grid 99.2 (-7.5%), both together 101.5. A flat response to bytes, caching and ALU means
+the scan is bound by latency and occupancy, not by bandwidth.
+
+### 10.3 Bucket tiles: no-go (finding)
+
+Workgroup tiles of the grid's cells, loaded once to shared memory and scanned by every thread that visits the cell:
+v1 (one shared pool) 239.9 ms against 107.2 for the scan; v2 (per-cell offsets) 168.6 against 107.9. Cause: unique
+cells per workgroup / buckets visited is 29 at t120 (32 at t35), so a tile is shared by about two threads at best. The
+tile load and its barriers cost more than the reuse saves; 81,920 threads took the fallback path, and 12.8 M cells
+overflowed. Main accepted the no-go. The compact 16 B side-stream was dropped with it, since bytes don't pay (10.2).
+
+### 10.4 Round cell-size probe (h <- k h in `OGC_CELL_WGSL`; scratch export only; pending main and C2)
+
+The probe used an export of 7ab0815e plus the fold, with the cell multiplied by k for count, insert, the queries,
+verify and xTest. The k = 1 cell is 1.45 cm on the 150^2 sphere. Pairs and contacts are the same at every k by the
+ownership rule, and they were: on all 10 steps at both ticks, every k matches k = 1 in detections and redetections
+(24 + 8 at t35, 30 + 8 at t120), redos (7, 13), verifies (1), missingPairs (0), status, conflicts, DAT pairs and contacts.
+Each k had one timing run (10 steps a tick, profiled step); the per-role counters came from separate counter runs.
+
+| k | step t35 | step t120 | qV/qE/qS t120 | query t35 | count+insert t120 | peak entries t35/t120 | entries MB t120 | scanMax t120 |
+| --- | ---: | ---: | --- | ---: | ---: | --- | ---: | ---: |
+| 1 | 458.5 | 696.9 | 65.5/192.6/40.0 | 159.3 | 9.2 | 631,029/1,088,163 | 34.8 | 4091 |
+| 1.5 | 429.1 | 622.5 | 52.2/139.2/39.5 | 140.1 | 5.4 | 320,179/499,721 | 16.0 | 2810 |
+| 2 | 433.7 | 630.4 | 59.8/132.8/44.5 | 143.0 | | 223,250/332,516 | 10.6 | 2211 |
+| 2.5 | 441.4 | 637.7 | 62.7/129.2/47.6 | 151.5 | | -/218,202 | 7.0 | 1735 |
+| 3 | 450.3 | 644.9 | 67.0/135.3/52.3 | 152.2 | 3.0 | 145,932/200,416 | 6.4 | 1766 |
+
+Scanned and boxRejected by role (M), with the mean scan per thread per round (scanned / (threads x (detections +
+redetections)); N = 22,500 vertices, E = 66,901 edges):
+
+| k | t35 qV | t35 qE | t35 qS | t120 qV | t120 qE | t120 qS | mean qV/qE t35 | mean qV/qE t120 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 45.7/24.1 | 269.8/188.3 | 22.9/12.7 | 100.5/54.6 | 582.7/407.6 | 51.5/27.3 | 63/126 | 118/229 |
+| 1.5 | 42.6/26.5 | 218.0/154.2 | 27.0/18.5 | 84.6/51.4 | 436.8/305.8 | 54.4/34.0 | 59/102 | 99/172 |
+| 2 | 49.3/33.6 | 229.2/165.0 | 35.2/25.8 | 91.7/60.7 | 432.5/307.4 | 65.0/45.1 | 68/107 | 107/170 |
+| 3 | 73.6/54.7 | 299.8/222.4 | 59.4/46.2 | 126.4/89.1 | 526.8/374.3 | 100.1/73.4 | 102/140 | 148/207 |
+
+The best is k = 1.5: the step drops 10.7% at t120 and 6.4% at t35, query time 22.5% and 12%, peak entries 54%, and the
+edge role's longest scan 31%. The sample role gets slower at every k > 1, because its boxes are points. Verify stays at
+1.6-2.2 ms at every k. This is a tuning of the existing grid with no new machinery. Because it also sets the verification
+pass's cell, any change goes to main and then C2; nothing is landed. The authored `gridCapacity` could shrink with it.
+
+### 10.5 Gate of the fold (exports of HEAD 7ab0815e as is, and with only this lane's fold hunks)
+
+| export | tests | pass | fail | skipped | todo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| base | 197 | 187 | 0 | 5 | 5 |
+| fold | 198 | 188 | 0 | 5 | 5 |
+
+The extra test is the order's CPU test. The TODO `not ok` lines are the same in both (ladder 2c from C1, the
+moving-solid ride from C2). Every C1/C2 `#` diagnostic line is identical apart from wall times. Every locality test
+passes, including the 16 x 16 H_vv trajectory being bit-identical to `off` over 60 ticks. The fixed-state tool shows
+0 differing for `topology`, `geometry` and `topology+geometry` at t2/35/120. `check:types` is clean; `test:unit` gives
+2152 tests, 1754 pass, 0 fail, 398 skipped. After the gate the order's doc comment was corrected and the locality
+buffer kept its 16-byte minimum, as before the fold.

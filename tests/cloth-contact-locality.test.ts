@@ -21,7 +21,7 @@ import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import type { ClothDocument, ClothMaterial } from '../lib/cloth/types';
 import { OgcContactDetector, type OgcContactConfig } from '../lib/cloth/contact/ogc-detector';
 import { OGC_LOCALITY_DEFAULT, OGC_LOCALITY_PARTS, ogcQueryBindings, ogcQueryWGSL, parseOgcLocality } from '../lib/cloth/contact/ogc-detector-wgsl';
-import { OGC_FACE_RECORD_WORDS, OGC_NONE, buildOgcEdges, buildOgcFaceRecords, buildOgcTopology, type OgcTopology } from '../lib/cloth/contact/ogc-topology';
+import { OGC_FACE_RECORD_WORDS, OGC_NONE, buildOgcEdges, buildOgcFaceRecords, buildOgcQueryOrder, buildOgcTopology, type OgcTopology } from '../lib/cloth/contact/ogc-topology';
 import { buildClothSolidField, type ClothSolidField } from '../lib/cloth/contact/solid-field';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/scene-description';
@@ -104,6 +104,34 @@ test('face records stand for the topology chain exactly: vertices, edge ids, end
   assert.ok(edgeOwners.every(c => c === 1) && vertexOwners.every(c => c === 1));
 });
 
+/** A query order is a permutation of the slots that keeps every slot in its role (vertices [0, N), edges [N, N + E)). */
+function assertQueryOrder(order: Uint32Array, N: number, E: number, label: string) {
+  assert.equal(order.length, N + E, `${label}: one slot per vertex and edge`);
+  const seen = new Uint8Array(N + E);
+  for (let s = 0; s < N + E; s++) {
+    const i = order[s]!;
+    assert.ok(s < N ? i < N : i >= N && i < N + E, `${label}: slot ${s} queries ${i}, outside its role`);
+    assert.equal(seen[i]++, 0, `${label}: ${i} queried twice`);
+  }
+}
+
+test('the query order is a role-preserving permutation in Morton order of the rest positions, failing on non-finite input', () => {
+  const m = stack(5), topology = buildOgcTopology(meshTopology(m), vec4s(m.x)), N = m.x.length, E = topology.layout.edgeCount;
+  const order = buildOgcQueryOrder(topology, vec4s(m.x));
+  assertQueryOrder(order, N, E, 'stack');
+  // Morton order: along the vertex slots, consecutive keys never decrease (recomputed here with the same grid).
+  const lo = [0, 1, 2].map(k => Math.min(...m.x.map(p => Math.fround(p[k]!)))), hi = [0, 1, 2].map(k => Math.max(...m.x.map(p => Math.fround(p[k]!))));
+  const span = Math.max(...hi.map((h, k) => h - lo[k]!)), key = (p: V3) => {
+    let x = 0;
+    for (let k = 0; k < 3; k++) { const q = Math.min(1023, Math.floor((Math.fround(p[k]!) - lo[k]!) / span * 1024)); for (let b = 0; b < 10; b++) x += ((q >> b) & 1) * 2 ** (3 * b + k); }
+    return x;
+  };
+  for (let s = 1; s < N; s++) assert.ok(key(m.x[order[s - 1]!]!) <= key(m.x[order[s]!]!), `vertex slot ${s} out of Morton order`);
+  assert.notDeepEqual(Array.from(order.subarray(0, N)), Array.from({ length: N }, (_, i) => i), 'the order is not the identity on this mesh');
+  const bad = vec4s(m.x); bad[5] = NaN;
+  assert.throws(() => buildOgcQueryOrder(topology, bad), /non-finite position/);
+});
+
 test('face records fail explicitly on topology words they cannot stand for', () => {
   const mesh = sheet(3, 3, 0.01), topology = buildOgcTopology(meshTopology(mesh), vec4s(mesh.x)), L = topology.layout;
   const corrupt = (edit: (w: Uint32Array) => void): OgcTopology => { const words = topology.words.slice(); edit(words); return { layout: L, words }; };
@@ -117,8 +145,9 @@ test('the locality switch validates explicitly, and off leaves the query kernels
   assert.deepEqual(parseOgcLocality('off'), parseOgcLocality(undefined));
   assert.deepEqual(parseOgcLocality('geometry+topology'), { topology: true, geometry: true });
   assert.deepEqual(parseOgcLocality(OGC_LOCALITY_PARTS.join('+')), { topology: true, geometry: true });
-  // 'offsets' (the final bucket offsets) was measured and removed: it is an unknown value like any other.
-  for (const bad of ['', 'on', 'all', 'offsets', 'topology+offsets', 'topology+geometry+offsets', 'topology+', 'topology+topology', 'off+geometry', 'Topology', 'geometry,topology', 3, null, true])
+  // 'offsets' (the final bucket offsets) was measured and removed, and 'order' (the query order) folded into
+  // 'topology': both are unknown values like any other.
+  for (const bad of ['', 'on', 'all', 'offsets', 'topology+offsets', 'topology+geometry+offsets', 'order', 'topology+geometry+order', 'topology+', 'topology+topology', 'off+geometry', 'Topology', 'geometry,topology', 3, null, true])
     assert.throws(() => parseOgcLocality(bad as string), /OGC: unknown locality/, `locality ${JSON.stringify(bad)}`);
   // The default (main's ruling on Experiment 2) is both parts, and a detector naming none takes it.
   assert.equal(OGC_LOCALITY_DEFAULT, 'topology+geometry');
@@ -133,6 +162,7 @@ test('the locality switch validates explicitly, and off leaves the query kernels
       const L = parseOgcLocality(variant), source = ogcQueryWGSL(role, L);
       assert.notEqual(source, base, `${role} ${variant}`);
       assert.equal(source.includes('@binding(24)'), L.topology);
+      assert.equal(source.includes('querySlot('), L.topology);
       assert.equal(source.includes('@binding(25)'), L.geometry);
       assert.equal(source.includes('faceRec('), L.topology);
     }
@@ -210,14 +240,17 @@ export function assertSameRound(got: RoundSnapshot, want: RoundSnapshot, label: 
   for (const key of ['xdet', 'pred', 'env', 'held'] as const) assertSameArray(got[key], want[key], `${label}: ${key}`);
 }
 
-/** The locality buffers hold what they claim: the face records and, after a round (`round`), its geometry. */
+/** The locality buffers hold what they claim: the face records and query order of the detector's own topology and, after a round (`round`), its geometry. */
 async function assertLocalityBuffers(device: GPUDevice, det: OgcContactDetector, round: RoundSnapshot | undefined, label: string) {
   const L = det.locality, T = det.T, N = det.N;
-  assert.equal(det.locBuffer !== undefined, L.topology, `${label}: the face records exist only when used`);
   assert.equal(det.geoBuffer !== undefined, L.geometry, `${label}: the geometry records exist only when used`);
+  assert.equal(det.locBuffer !== undefined, L.topology, `${label}: binding 24 exists only when used`);
   if (det.locBuffer) {
+    assert.deepEqual(det.localityBytes.filter((_, k) => k !== 1), [4 * OGC_FACE_RECORD_WORDS * T, 4 * (N + det.E)], `${label}: binding 24's regions`);
     const words = await readWords(device, det.locBuffer, 0, 4 * OGC_FACE_RECORD_WORDS * T);
     assert.deepEqual(words, buildOgcFaceRecords(det.topology), `${label}: face records on the GPU`);
+    const order = await readWords(device, det.locBuffer, det.localityBytes[0], 4 * (N + det.E));
+    assertQueryOrder(order, N, det.E, label);
   }
   if (det.geoBuffer && round) {
     const geo = await readWords(device, det.geoBuffer, 0, 32 * N);
@@ -378,7 +411,7 @@ test('GPU system on a moving solid: from one restored state in contact, the step
     + `box-rejected ${total(off.rounds, 'boxRejected')} candidates ${total(off.rounds, 'candidates')} DAT pairs ${total(off.rounds, 'datPairs')}; body contacts in the step ${off.counters.bodyContacts}: equal under ${VARIANTS.length} variants`);
 }));
 
-test('GPU cut, load and undo under the full switch: every rebuilt detector carries the face records of its own topology and its first step detects as the switch off does', { skip: !gpu }, async () => withDevice(async device => {
+test('GPU cut, load and undo under the full switch: every rebuilt detector carries the face records and query order of its own topology and its first step detects as the switch off does', { skip: !gpu }, async () => withDevice(async device => {
   const dt = CLOTH_SCENE_STEP_S;
   const sheetScene = () => {
     const scene = createEmptyScene({ sceneId: 'cloth-locality-edit-test' });
