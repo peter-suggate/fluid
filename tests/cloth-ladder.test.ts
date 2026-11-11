@@ -19,6 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { createProcessRetainedDawnGPU } from '../lib/harness/node-dawn-provider';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
@@ -30,13 +31,13 @@ import { prepareClothTopology } from '../lib/cloth/topology';
 import { CLOTH_AVBD, buildClothSolverModel, clothAddBendDamping, clothAddBending, clothAddFaceDamping, clothMembraneBlock, clothOracleStep, clothStepFrame, clothWarmStartDuals, createClothOracleState, type ClothSolverModel, type ClothStepOptions } from '../lib/cloth/oracle';
 import { buildClothCoarseSpace, ClothCoarseCorrection, clothObjective } from '../lib/cloth/oracle-coarse';
 import { ClothGPUSolver, type ClothGPUSolverOptions } from '../lib/cloth/gpu-solver';
-import { CLOTH_NEWTON_SEGMENTS } from '../lib/cloth/gpu-newton-wgsl';
+import { CLOTH_NEWTON_ACTIVE, CLOTH_NEWTON_SEGMENTS } from '../lib/cloth/gpu-newton-wgsl';
 import { CLOTH_BINDING, CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 import { CLOTH_NEWTON_SCENE_DEFAULTS, CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import { buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactRadius, createClothSceneContact } from '../lib/cloth/scene-contact';
 import { decodeOgcContactEntry } from '../lib/cloth/contact/ogc-detector';
 import { clothSolidSamples, sampleClothSolidField } from '../lib/cloth/contact/solid-field';
-import type { ClothDocument, ClothNewtonSettings, ClothTopologyData } from '../lib/cloth/types';
+import type { ClothDocument, ClothNewtonSettings, ClothTopologyData, ClothVector } from '../lib/cloth/types';
 import {
   CLOTH_ANALYTIC_STEP_S, GRAVITY, bdf2FreeFall, clothAnalyticFreeFall, clothAnalyticFrictionIncline, clothAnalyticHangingCurtain,
   clothAnalyticPeirceCantilever, clothAnalyticSceneDescription, clothAnalyticSwingingSheet, hangingBandStrain, type ClothAnalyticScene,
@@ -443,6 +444,112 @@ function vtWeights(feature: number, p: V3, a: V3, b: V3, c: V3): number[] {
   return w;
 }
 
+/** The GPU's step objective in Float64 at a GPU iterate `run` (its positions, edge duals and decoded contact entries) of the
+ * step from the published state `start` of `base`'s first cloth (RESULT 45): per free vertex, the gradient's terms under
+ * each integrator's step frame and the f32 floor 64 eps32 (sum |terms| + (m / h~^2 + contact stiffness) max |x - origin|). */
+type ClothCapture = Awaited<ReturnType<typeof captureScene>>['frames'][number][number];
+type GpuIterate = { x: Float64Array; duals: Float32Array; entries: { header: Uint32Array; counts: Uint32Array; entries: Uint32Array };
+  S: number; facets: number; edge: number; origin: ClothVector };
+function float64Objective(base: SceneDescription, start: ClothCapture, run: GpuIterate) {
+  const doc = base.cloth![0]!, H = CLOTH_SCENE_STEP_S;
+  if (doc.geometry.kind !== 'inline' || !start.velocities_m_s || !start.solverState) throw new Error('an inline document and a publication with velocities and solver state');
+  // Float64 at x_{K-1}: the step frame of each integrator, the GPU's duals.
+  const model = buildClothSolverModel(prepareClothTopology(doc.geometry.data, doc.materials), doc.materials, doc.scripts ?? []), t = model.topology, N = t.vertexCount, ss = start.solverState;
+  const frameOf = (integrator: 'implicit-euler' | 'bdf2') => {
+    const st = createClothOracleState(model, start.positions_m, start.velocities_m_s);
+    st.vPrev.set(ss.previousVelocities_m_s); st.dxPrev.set(ss.previousDisplacements_m); st.previousStep_s = Math.fround(ss.previousStep_s) === Math.fround(H) ? H : ss.previousStep_s;
+    const gv = base.fluid.gravity_m_s2;
+    return clothStepFrame(model, st, { dt_s: H, gravity_m_s2: [gv.x, gv.y, gv.z], integrator, iterations: 1, initialGuess: 'inertial' }).frame;
+  };
+  const euler = frameOf('implicit-euler'), bdf2 = frameOf('bdf2'), x = run.x, o = run.origin;
+  const pos = (i: number): V3 => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
+  const elastic = (frame: typeof euler, v: number) => {
+    const w = t.mass_kg[v]! / (frame.hEff * frame.hEff), inertia = [0, 1, 2].map(c => w * (x[3 * v + c]! - frame.y[3 * v + c]!)) as V3, Hs = new Array(9).fill(0) as never;
+    const membrane: V3 = [0, 0, 0], damping: V3 = [0, 0, 0], bending: V3 = [0, 0, 0], limit: V3 = [0, 0, 0];
+    for (let j = t.vertexFaceOffsets[v]!; j < t.vertexFaceOffsets[v + 1]!; j++) {
+      const f = t.vertexFaces[j]! >> 2, k = t.vertexFaces[j]! & 3;
+      const b = clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, k, pos(t.faces[3 * f]!), pos(t.faces[3 * f + 1]!), pos(t.faces[3 * f + 2]!));
+      for (let c = 0; c < 3; c++) membrane[c] += b.gradient[c]!;
+      clothAddFaceDamping(model, frame, f, k, pos, damping, Hs);
+    }
+    for (let j = t.vertexBendOffsets[v]!; j < t.vertexBendOffsets[v + 1]!; j++) { clothAddBending(t, t.vertexBends[j]!, pos, bending, Hs); clothAddBendDamping(model, frame, t.vertexBends[j]!, pos, bending, Hs); }
+    for (let j = t.vertexEdgeOffsets[v]!; j < t.vertexEdgeOffsets[v + 1]!; j++) {
+      const e = t.vertexEdges[j]! >> 2, eps = model.edgeStrainLimit[e]!; if (!(eps > 0)) continue;
+      const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, d = sub3(pos(v), pos(a === v ? b : a)), len = Math.hypot(...d), L = t.edgeRestLength_m[e]!;
+      const C0 = Math.hypot(...sub3([frame.x0[3 * a]!, frame.x0[3 * a + 1]!, frame.x0[3 * a + 2]!], [frame.x0[3 * b]!, frame.x0[3 * b + 1]!, frame.x0[3 * b + 2]!])) - (1 + eps) * L;
+      const force = Math.max(run.duals[4 * e + 1]! * (len - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(C0, 0)) + run.duals[4 * e]!, 0);
+      for (let c = 0; c < 3; c++) limit[c] += force * d[c]! / len;
+    }
+    return { inertia, membrane, damping, bending, limit, stiffness: w };
+  };
+  // Contact, cloth frame (x - origin), from the entries.
+  const { header, counts, entries } = run.entries, KE = header[1]!, pf = new Float32Array(Uint32Array.from(header.slice(4, 8)).buffer);
+  const [rc, kc, selfMu, epsV] = [pf[0]!, pf[1]!, pf[2]!, pf[3]!];
+  const act = (d: number): V3 => { if (d >= rc) return [0, 0, 0]; const tau = rc / 2; if (d >= tau) return [0.5 * kc * (rc - d) ** 2, -kc * (rc - d), kc]; const k2 = kc * tau * (rc - tau); return [0, -k2 / d, k2 / (d * d)]; };
+  const f1y = (y: number) => y >= epsV ? 1 / y : 2 / epsV - y / (epsV * epsV);
+  const r = clothContactRadius(doc), field = buildClothSceneField(base, o, r), statics = clothSolidSamples(field, { r: rc, edge: run.edge });
+  assert.equal(statics.length / 4, run.S, 'the static samples rebuild as the detector holds them');
+  const body = base.rigidBodies[0]!, bodyField = buildClothBodyField(base, body, r), bodySamples = clothSolidSamples(bodyField, { r: rc, edge: run.edge });
+  const poses = clothBodyPoses(body, o, ss.time_s, 1, H), R = poses.map(p => rot3(p.orientation)), C = poses.map(p => p.position);
+  const X = (v: number): V3 => [x[3 * v]! - o[0], x[3 * v + 1]! - o[1], x[3 * v + 2]! - o[2]];
+  const Xt = (v: number): V3 => [start.positions_m[3 * v]! - o[0], start.positions_m[3 * v + 1]! - o[1], start.positions_m[3 * v + 2]! - o[2]];
+  const sample = (i: number, body: boolean, k: number): V3 => {
+    if (!body) return [statics[4 * i]!, statics[4 * i + 1]!, statics[4 * i + 2]!];
+    const p = mulR(R[k]!, [bodySamples[4 * i]!, bodySamples[4 * i + 1]!, bodySamples[4 * i + 2]!]); return [p[0] + C[k]![0], p[1] + C[k]![1], p[2] + C[k]![2]];
+  };
+  const KINDS = ['field', 'bodyField', 'vf', 'sampleFace', 'ee'] as const, seen: Record<string, number> = {};
+  const contact = Array.from({ length: N }, () => ({ g: KINDS.map(() => [0, 0, 0] as V3), magnitude: 0, stiffness: 0 }));
+  const fieldTerm = (out: V3, phi: number, grad: readonly number[], slip: V3, nl: V3, ml: number) => {
+    const a = act(phi); let m = 0; for (let c = 0; c < 3; c++) { out[c] += a[1] * grad[c]; m += Math.abs(a[1] * grad[c]); }
+    if (ml > 0) { const u = sub3(slip, nl.map(q => q * dot3(nl, slip))), fy = f1y(Math.hypot(...u)); for (let c = 0; c < 3; c++) { out[c] += ml * fy * u[c]!; m += Math.abs(ml * fy * u[c]!); } }
+    return { m, k: a[2] * dot3(grad, grad) };
+  };
+  for (let v = 0; v < N; v++) for (let k = 0; k < counts[v]!; k++) {
+    const e = decodeOgcContactEntry(entries.subarray(4 * (v * KE + k), 4 * (v * KE + k) + 4), N, run.S, run.facets), q = KINDS.indexOf(e.kind as never);
+    if (q < 0) throw new Error(`the Float64 objective has no form for a ${e.kind} entry`);
+    seen[e.kind] = (seen[e.kind] ?? 0) + 1;
+    const out = contact[v]!.g[q]!; let term: { m: number; k: number };
+    if (e.kind === 'field') {
+      const s = sampleClothSolidField(field, X(v)), st = sampleClothSolidField(field, Xt(v));
+      term = fieldTerm(out, s.phi, s.grad, sub3(X(v), Xt(v)), unit3(st.grad, unit3(s.grad, [0, 0, 0])), e.muLambda);
+    } else if (e.kind === 'bodyField') {
+      const s = sampleClothSolidField(bodyField, mulRT(R[1]!, sub3(X(v), C[1]!))), yt = mulRT(R[0]!, sub3(Xt(v), C[0]!)), carried = mulR(R[1]!, yt);
+      term = fieldTerm(out, s.phi, mulR(R[1]!, s.grad), sub3(X(v), [carried[0] + C[1]![0], carried[1] + C[1]![1], carried[2] + C[1]![2]]), mulR(R[1]!, unit3(sampleClothSolidField(bodyField, yt).grad, unit3(s.grad, [0, 0, 0]))), e.muLambda);
+    } else if (e.kind === 'ee' || e.kind === 'vf' || e.kind === 'sampleFace') {
+      let ids: number[], P: V3[], Pt: V3[], w: number[], wl: number[], ml: number;
+      if (e.kind === 'ee') {
+        ids = [t.edges[4 * e.e0]!, t.edges[4 * e.e0 + 1]!, t.edges[4 * e.e1]!, t.edges[4 * e.e1 + 1]!]; P = ids.map(X); Pt = ids.map(Xt);
+        w = [1 - e.s, e.s, -(1 - e.t), -e.t]; wl = w; ml = selfMu * e.lambda;
+      } else {
+        const tri = [t.faces[3 * e.face]!, t.faces[3 * e.face + 1]!, t.faces[3 * e.face + 2]!];
+        if (e.kind === 'sampleFace') { ids = [-1, ...tri]; P = [sample(e.sample, e.body, 1), ...tri.map(X)]; Pt = [sample(e.sample, e.body, 0), ...tri.map(Xt)]; ml = e.muLambda; }
+        else { ids = [e.vertex, ...tri]; P = ids.map(X); Pt = ids.map(Xt); ml = selfMu * e.lambda; }
+        w = vtWeights(e.feature, P[0]!, P[1]!, P[2]!, P[3]!); wl = vtWeights(e.feature, Pt[0]!, Pt[1]!, Pt[2]!, Pt[3]!);
+      }
+      const gap = [0, 1, 2].map(c => w.reduce((s, wi, i) => s + wi * P[i]![c]!, 0)) as V3, d = Math.hypot(...gap), n = gap.map(z => z / d) as V3, a = act(d);
+      const wr = ids.reduce((s, id, i) => s + (id === v ? w[i]! : 0), 0), wrl = ids.reduce((s, id, i) => s + (id === v ? wl[i]! : 0), 0);
+      let m = 0; for (let c = 0; c < 3; c++) { out[c] += a[1] * wr * n[c]; m += Math.abs(a[1] * wr * n[c]); }
+      if (ml > 0) {
+        const slip = [0, 1, 2].map(c => wl.reduce((s, wi, i) => s + wi * (P[i]![c]! - Pt[i]![c]!), 0)) as V3, nl = unit3([0, 1, 2].map(c => wl.reduce((s, wi, i) => s + wi * Pt[i]![c]!, 0)), n);
+        const u = sub3(slip, nl.map(z => z * dot3(nl, slip))), fy = f1y(Math.hypot(...u)); for (let c = 0; c < 3; c++) { out[c] += ml * wrl * fy * u[c]!; m += Math.abs(ml * wrl * fy * u[c]!); }
+      }
+      term = { m, k: a[2] * wr * wr };
+    } else throw new Error(`the Float64 objective has no form for a ${e.kind} entry`);
+    contact[v]!.magnitude += term.m; contact[v]!.stiffness += term.k;
+  }
+  // Per vertex: |g_GPU - g_F64| within the f32 floor of the terms' sum and of the positions the terms read,
+  // 64 eps32 (sum |terms| + (m / h~^2 + contact stiffness) max |x - origin|).
+  let Xmax = 0; for (let v = 0; v < N; v++) Xmax = Math.max(Xmax, Math.hypot(...X(v)));
+  /** Vertex v's Float64 gradient (the sum of its terms) and f32 floor under `frame`. */
+  const at = (frame: typeof euler, v: number) => {
+    const el = elastic(frame, v), terms = [el.inertia, el.membrane, el.damping, el.bending, el.limit, ...contact[v]!.g];
+    const total = [0, 1, 2].map(c => terms.reduce((s, q) => s + q[c]!, 0)) as V3;
+    const floor = 64 * 2 ** -23 * (terms.reduce((s, q) => s + Math.abs(q[0]!) + Math.abs(q[1]!) + Math.abs(q[2]!), 0) + contact[v]!.magnitude + (el.stiffness + contact[v]!.stiffness) * Xmax);
+    return { total, floor };
+  };
+  return { N, free: (v: number) => !(t.groups[v]! > 0), euler, bdf2, at, seen };
+}
+
 test('ladder 1d: at a fixed iterate of a restarted contact step on the 16^2 sphere, the GPU gradient is the Float64 implicit-Euler objective\'s, term by term (inertia, membrane, damping, bending, strain limit, each contact kind)', { skip: !gpu }, async () => withDevice(async device => {
   const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), doc = base.cloth![0]!, H = CLOTH_SCENE_STEP_S, K = 6;
   if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
@@ -471,109 +578,86 @@ test('ladder 1d: at a fixed iterate of a restarted contact step on the 16^2 sphe
   };
   const prev = await at(K - 1), cur = await at(K);
   assert.deepEqual([prev.rec.newton, cur.rec.newton, prev.restarts, cur.restarts], [K - 1, K, 1, 1], 'both runs restart and run to their caps');
-  // Float64 at x_{K-1}: the step frame of each integrator, the GPU's duals.
-  const model = buildClothSolverModel(prepareClothTopology(doc.geometry.data, doc.materials), doc.materials, doc.scripts ?? []), t = model.topology, N = t.vertexCount, ss = start.solverState;
-  const frameOf = (integrator: 'implicit-euler' | 'bdf2') => {
-    const st = createClothOracleState(model, start.positions_m, start.velocities_m_s);
-    st.vPrev.set(ss.previousVelocities_m_s); st.dxPrev.set(ss.previousDisplacements_m); st.previousStep_s = Math.fround(ss.previousStep_s) === Math.fround(H) ? H : ss.previousStep_s;
-    const gv = base.fluid.gravity_m_s2;
-    return clothStepFrame(model, st, { dt_s: H, gravity_m_s2: [gv.x, gv.y, gv.z], integrator, iterations: 1, initialGuess: 'inertial' }).frame;
-  };
-  const euler = frameOf('implicit-euler'), bdf2 = frameOf('bdf2'), x = prev.x, o = prev.origin;
-  const pos = (i: number): V3 => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
-  const elastic = (frame: typeof euler, v: number) => {
-    const w = t.mass_kg[v]! / (frame.hEff * frame.hEff), inertia = [0, 1, 2].map(c => w * (x[3 * v + c]! - frame.y[3 * v + c]!)) as V3, Hs = new Array(9).fill(0) as never;
-    const membrane: V3 = [0, 0, 0], damping: V3 = [0, 0, 0], bending: V3 = [0, 0, 0], limit: V3 = [0, 0, 0];
-    for (let j = t.vertexFaceOffsets[v]!; j < t.vertexFaceOffsets[v + 1]!; j++) {
-      const f = t.vertexFaces[j]! >> 2, k = t.vertexFaces[j]! & 3;
-      const b = clothMembraneBlock(model.membrane[t.faceMaterial[f]!]!, t.faceDmInv, 4 * f, t.faceArea_m2[f]!, k, pos(t.faces[3 * f]!), pos(t.faces[3 * f + 1]!), pos(t.faces[3 * f + 2]!));
-      for (let c = 0; c < 3; c++) membrane[c] += b.gradient[c]!;
-      clothAddFaceDamping(model, frame, f, k, pos, damping, Hs);
-    }
-    for (let j = t.vertexBendOffsets[v]!; j < t.vertexBendOffsets[v + 1]!; j++) { clothAddBending(t, t.vertexBends[j]!, pos, bending, Hs); clothAddBendDamping(model, frame, t.vertexBends[j]!, pos, bending, Hs); }
-    for (let j = t.vertexEdgeOffsets[v]!; j < t.vertexEdgeOffsets[v + 1]!; j++) {
-      const e = t.vertexEdges[j]! >> 2, eps = model.edgeStrainLimit[e]!; if (!(eps > 0)) continue;
-      const a = t.edges[4 * e]!, b = t.edges[4 * e + 1]!, d = sub3(pos(v), pos(a === v ? b : a)), len = Math.hypot(...d), L = t.edgeRestLength_m[e]!;
-      const C0 = Math.hypot(...sub3([frame.x0[3 * a]!, frame.x0[3 * a + 1]!, frame.x0[3 * a + 2]!], [frame.x0[3 * b]!, frame.x0[3 * b + 1]!, frame.x0[3 * b + 2]!])) - (1 + eps) * L;
-      const force = Math.max(prev.duals[4 * e + 1]! * (len - (1 + eps) * L - CLOTH_AVBD.edgeAlpha * Math.max(C0, 0)) + prev.duals[4 * e]!, 0);
-      for (let c = 0; c < 3; c++) limit[c] += force * d[c]! / len;
-    }
-    return { inertia, membrane, damping, bending, limit, stiffness: w };
-  };
-  // Contact, cloth frame (x - origin), from the entries.
-  const { header, counts, entries } = prev.entries, KE = header[1]!, pf = new Float32Array(Uint32Array.from(header.slice(4, 8)).buffer);
-  const [rc, kc, selfMu, epsV] = [pf[0]!, pf[1]!, pf[2]!, pf[3]!];
-  const act = (d: number): V3 => { if (d >= rc) return [0, 0, 0]; const tau = rc / 2; if (d >= tau) return [0.5 * kc * (rc - d) ** 2, -kc * (rc - d), kc]; const k2 = kc * tau * (rc - tau); return [0, -k2 / d, k2 / (d * d)]; };
-  const f1y = (y: number) => y >= epsV ? 1 / y : 2 / epsV - y / (epsV * epsV);
-  const r = clothContactRadius(doc), field = buildClothSceneField(base, o, r), statics = clothSolidSamples(field, { r: rc, edge: prev.edge });
-  assert.equal(statics.length / 4, prev.S, 'the static samples rebuild as the detector holds them');
-  const body = base.rigidBodies[0]!, bodyField = buildClothBodyField(base, body, r), bodySamples = clothSolidSamples(bodyField, { r: rc, edge: prev.edge });
-  const poses = clothBodyPoses(body, o, ss.time_s, 1, H), R = poses.map(p => rot3(p.orientation)), C = poses.map(p => p.position);
-  const X = (v: number): V3 => [x[3 * v]! - o[0], x[3 * v + 1]! - o[1], x[3 * v + 2]! - o[2]];
-  const Xt = (v: number): V3 => [start.positions_m[3 * v]! - o[0], start.positions_m[3 * v + 1]! - o[1], start.positions_m[3 * v + 2]! - o[2]];
-  const sample = (i: number, body: boolean, k: number): V3 => {
-    if (!body) return [statics[4 * i]!, statics[4 * i + 1]!, statics[4 * i + 2]!];
-    const p = mulR(R[k]!, [bodySamples[4 * i]!, bodySamples[4 * i + 1]!, bodySamples[4 * i + 2]!]); return [p[0] + C[k]![0], p[1] + C[k]![1], p[2] + C[k]![2]];
-  };
-  const KINDS = ['field', 'bodyField', 'vf', 'sampleFace', 'ee'] as const, seen: Record<string, number> = {};
-  const contact = Array.from({ length: N }, () => ({ g: KINDS.map(() => [0, 0, 0] as V3), magnitude: 0, stiffness: 0 }));
-  const fieldTerm = (out: V3, phi: number, grad: readonly number[], slip: V3, nl: V3, ml: number) => {
-    const a = act(phi); let m = 0; for (let c = 0; c < 3; c++) { out[c] += a[1] * grad[c]; m += Math.abs(a[1] * grad[c]); }
-    if (ml > 0) { const u = sub3(slip, nl.map(q => q * dot3(nl, slip))), fy = f1y(Math.hypot(...u)); for (let c = 0; c < 3; c++) { out[c] += ml * fy * u[c]!; m += Math.abs(ml * fy * u[c]!); } }
-    return { m, k: a[2] * dot3(grad, grad) };
-  };
-  for (let v = 0; v < N; v++) for (let k = 0; k < counts[v]!; k++) {
-    const e = decodeOgcContactEntry(entries.subarray(4 * (v * KE + k), 4 * (v * KE + k) + 4), N, prev.S, prev.facets), q = KINDS.indexOf(e.kind as never);
-    if (q < 0) throw new Error(`ladder 1d: no Float64 form for a ${e.kind} entry`);
-    seen[e.kind] = (seen[e.kind] ?? 0) + 1;
-    const out = contact[v]!.g[q]!; let term: { m: number; k: number };
-    if (e.kind === 'field') {
-      const s = sampleClothSolidField(field, X(v)), st = sampleClothSolidField(field, Xt(v));
-      term = fieldTerm(out, s.phi, s.grad, sub3(X(v), Xt(v)), unit3(st.grad, unit3(s.grad, [0, 0, 0])), e.muLambda);
-    } else if (e.kind === 'bodyField') {
-      const s = sampleClothSolidField(bodyField, mulRT(R[1]!, sub3(X(v), C[1]!))), yt = mulRT(R[0]!, sub3(Xt(v), C[0]!)), carried = mulR(R[1]!, yt);
-      term = fieldTerm(out, s.phi, mulR(R[1]!, s.grad), sub3(X(v), [carried[0] + C[1]![0], carried[1] + C[1]![1], carried[2] + C[1]![2]]), mulR(R[1]!, unit3(sampleClothSolidField(bodyField, yt).grad, unit3(s.grad, [0, 0, 0]))), e.muLambda);
-    } else if (e.kind === 'ee' || e.kind === 'vf' || e.kind === 'sampleFace') {
-      let ids: number[], P: V3[], Pt: V3[], w: number[], wl: number[], ml: number;
-      if (e.kind === 'ee') {
-        ids = [t.edges[4 * e.e0]!, t.edges[4 * e.e0 + 1]!, t.edges[4 * e.e1]!, t.edges[4 * e.e1 + 1]!]; P = ids.map(X); Pt = ids.map(Xt);
-        w = [1 - e.s, e.s, -(1 - e.t), -e.t]; wl = w; ml = selfMu * e.lambda;
-      } else {
-        const tri = [t.faces[3 * e.face]!, t.faces[3 * e.face + 1]!, t.faces[3 * e.face + 2]!];
-        if (e.kind === 'sampleFace') { ids = [-1, ...tri]; P = [sample(e.sample, e.body, 1), ...tri.map(X)]; Pt = [sample(e.sample, e.body, 0), ...tri.map(Xt)]; ml = e.muLambda; }
-        else { ids = [e.vertex, ...tri]; P = ids.map(X); Pt = ids.map(Xt); ml = selfMu * e.lambda; }
-        w = vtWeights(e.feature, P[0]!, P[1]!, P[2]!, P[3]!); wl = vtWeights(e.feature, Pt[0]!, Pt[1]!, Pt[2]!, Pt[3]!);
-      }
-      const gap = [0, 1, 2].map(c => w.reduce((s, wi, i) => s + wi * P[i]![c]!, 0)) as V3, d = Math.hypot(...gap), n = gap.map(z => z / d) as V3, a = act(d);
-      const wr = ids.reduce((s, id, i) => s + (id === v ? w[i]! : 0), 0), wrl = ids.reduce((s, id, i) => s + (id === v ? wl[i]! : 0), 0);
-      let m = 0; for (let c = 0; c < 3; c++) { out[c] += a[1] * wr * n[c]; m += Math.abs(a[1] * wr * n[c]); }
-      if (ml > 0) {
-        const slip = [0, 1, 2].map(c => wl.reduce((s, wi, i) => s + wi * (P[i]![c]! - Pt[i]![c]!), 0)) as V3, nl = unit3([0, 1, 2].map(c => wl.reduce((s, wi, i) => s + wi * Pt[i]![c]!, 0)), n);
-        const u = sub3(slip, nl.map(z => z * dot3(nl, slip))), fy = f1y(Math.hypot(...u)); for (let c = 0; c < 3; c++) { out[c] += ml * wrl * fy * u[c]!; m += Math.abs(ml * wrl * fy * u[c]!); }
-      }
-      term = { m, k: a[2] * wr * wr };
-    } else throw new Error(`ladder 1d: no Float64 form for a ${e.kind} entry`);
-    contact[v]!.magnitude += term.m; contact[v]!.stiffness += term.k;
-  }
-  // Per vertex: |g_GPU - g_F64| within the f32 floor of the terms' sum and of the positions the terms read,
-  // 64 eps32 (sum |terms| + (m / h~^2 + contact stiffness) max |x - origin|).
-  let Xmax = 0; for (let v = 0; v < N; v++) Xmax = Math.max(Xmax, Math.hypot(...X(v)));
-  const compare = (frame: typeof euler) => {
+  const f64 = float64Objective(base, start, prev);
+  const compare = (frame: typeof f64.euler) => {
     let worst = 0, at = -1;
-    for (let v = 0; v < N; v++) {
-      if (t.groups[v]! > 0) continue;
-      const el = elastic(frame, v), terms = [el.inertia, el.membrane, el.damping, el.bending, el.limit, ...contact[v]!.g];
-      const total = [0, 1, 2].map(c => terms.reduce((s, q) => s + q[c]!, 0)), gv = [cur.g[4 * v]!, cur.g[4 * v + 1]!, cur.g[4 * v + 2]!];
-      const floor = 64 * 2 ** -23 * (terms.reduce((s, q) => s + Math.abs(q[0]!) + Math.abs(q[1]!) + Math.abs(q[2]!), 0) + contact[v]!.magnitude + (el.stiffness + contact[v]!.stiffness) * Xmax);
+    for (let v = 0; v < f64.N; v++) {
+      if (!f64.free(v)) continue;
+      const { total, floor } = f64.at(frame, v), gv = [cur.g[4 * v]!, cur.g[4 * v + 1]!, cur.g[4 * v + 2]!];
       const ratio = Math.hypot(...sub3(gv, total)) / floor; if (ratio > worst) { worst = ratio; at = v; }
     }
     return { worst, at };
   };
-  const E = compare(euler), B = compare(bdf2);
+  const E = compare(f64.euler), B = compare(f64.bdf2), seen = f64.seen;
   console.log(`[ladder 1d] restart at step ${restartTick}, iterate ${K - 1}: entries ${JSON.stringify(seen)}; max |g_GPU - g_F64| / f32 floor: implicit Euler ${E.worst.toFixed(3)} (v${E.at}), BDF2 ${B.worst.toExponential(2)} (v${B.at})`);
   assert.ok(Object.keys(seen).length > 0, 'the iterate holds contact entries');
   assert.ok(E.worst <= 1, `the GPU gradient leaves the Float64 implicit-Euler objective's at v${E.at} by ${E.worst} f32 floors`);
   assert.ok(B.worst > 10, 'the restarted step\'s objective is not BDF2\'s (the frame matters at this iterate)');
+}));
+
+/** RESULT 46's 32^2 sphere state at tick 15 (tests/fixtures/cloth-sphere-32-t15.json: Float64 arrays in base64). */
+function sphere32Tick15() {
+  const F = JSON.parse(readFileSync(new URL('./fixtures/cloth-sphere-32-t15.json', import.meta.url), 'utf8'));
+  const f64 = (b: string) => Array.from(new Float64Array(Uint8Array.from(Buffer.from(b, 'base64')).buffer));
+  const ss = F.solverState;
+  return { tick: F.tick as number, positions_m: f64(F.positions_m), velocities_m_s: f64(F.velocities_m_s), solverState: { ...ss, time_s: ss.time_s as number,
+    previousVelocities_m_s: f64(ss.previousVelocities_m_s), previousDisplacements_m: f64(ss.previousDisplacements_m), pinDuals: f64(ss.pinDuals), edgeDuals: f64(ss.edgeDuals) } };
+}
+
+test('ladder 1e: the 32^2 sphere contact step never stops with a certificate carrying load: done only where the Float64 objective is stationary at every vertex', { skip: !gpu }, async t => withDevice(async device => {
+  // RESULT 46: from this state (kc 9668, the scene's) the step ended done with vertices carrying 0.05-0.81 N of raw
+  // gradient, the old stop projecting out the filter's certificates (travel bounds of conservative detection, not
+  // constraints: every term is energy). RESULT 47 stops on the whole gradient. The step runs at a 150 cap (1 um velocity
+  // tolerance) to K iterations; the end's g segment is g(x_{K-1}), so a second, deterministic run to K - 1 gives x_{K-1}
+  // with its entries and duals (as ladder 1d). The GPU's g must be the Float64 objective's (float64Objective, the step's
+  // frame) within 1 f32 floor at every free vertex; if the step is done, the Float64 gradient must be within 2 floors
+  // (the stop's 4 eps32 floor plus that agreement) at every free vertex: no false done. Every vertex left over 2 floors
+  // must be one the filter holds with a kept certificate normal (|P g_v| within its floor): the residual a re-detection
+  // keeps re-certifying (C2), which the todo below records.
+  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 32 })), doc = base.cloth![0]!, H = CLOTH_SCENE_STEP_S;
+  if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
+  const start = sphere32Tick15(), capture = start as unknown as ClothCapture;
+  const scene = (iterations: number) => ({ ...base, cloth: [{ ...doc, solver: { ...doc.solver!, newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations, velocityTolerance_m_s: 1e-6 / (2 * H / 3) } },
+    geometry: { kind: 'inline' as const, data: { ...doc.geometry.data, initialPositions_m: start.positions_m, initialVelocities_m_s: start.velocities_m_s, solverState: start.solverState } } }] });
+  type Reader = { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer; state: GPUBuffer; tables: { edgeDualRecord: number; stride: number }; E: number };
+  const at = async (iterations: number) => {
+    const cloth = await ClothSystem.create(device, scene(iterations) as SceneDescription, { statusInterval: 1 }), solver = cloth.solverFor(doc.id)!, r = solver as unknown as Reader;
+    try {
+      assert.ok(cloth.stepTo(start.solverState.time_s + H), `the step from tick ${start.tick} was refused: ${cloth.failure?.message ?? 'pending'}`);
+      const rec = await newtonOf(solver), restarts = (await solver.readStatus()).restarts, x = Float64Array.from(await solver.readPositions()), N = x.length / 3;
+      const seg = async (k: number) => new Float32Array(await r.readRange(r.newtonWork, 16 * k * r.tables.stride, 16 * N));
+      const g = await seg(CLOTH_NEWTON_SEGMENTS.g), P0 = await seg(CLOTH_NEWTON_ACTIVE.projector), P1 = await seg(CLOTH_NEWTON_ACTIVE.projector + 1);
+      const duals = new Float32Array(await r.readRange(r.state, 16 * r.tables.edgeDualRecord, 16 * r.E)), det = cloth.contactFor(doc.id)!;
+      const run: GpuIterate = { x, duals, entries: await det.readContactEntries(), S: det.solidSamples, facets: det.facetCapacity, edge: det.topology.layout.maxEdgeLength, origin: cloth.renderSources[0]!.origin_m };
+      assert.equal(cloth.failure, undefined, cloth.failure?.message);
+      // P g_v under the vertex's kept certificate normals (nwProject's symmetric projector, NW_PROJ / NW_PROJ + 1).
+      const projected = (v: number, w: number[]) => {
+        if (!(P1[4 * v + 3]! > 0)) return undefined;
+        const a = P0.subarray(4 * v, 4 * v + 4), b = P1.subarray(4 * v, 4 * v + 2);
+        return Math.hypot(a[0]! * w[0]! + a[1]! * w[1]! + a[2]! * w[2]!, a[1]! * w[0]! + a[3]! * w[1]! + b[0]! * w[2]!, a[2]! * w[0]! + b[0]! * w[1]! + b[1]! * w[2]!);
+      };
+      return { rec, restarts, g, run, projected };
+    } finally { cloth.destroy(); }
+  };
+  const end = await at(150), K = end.rec.newton, prev = await at(K - 1);
+  assert.deepEqual([prev.rec.newton, prev.rec.done, prev.restarts], [K - 1, false, end.restarts], 'the run to K - 1 stops at its cap on the same frame');
+  const f64 = float64Objective(base, capture, prev.run), frame = end.restarts > 0 ? f64.euler : f64.bdf2;
+  let worst = 0, at1 = -1, gpuAt = 0, agree = 0; const over: number[] = [], loose: number[] = [];
+  for (let v = 0; v < f64.N; v++) {
+    if (!f64.free(v)) continue;
+    const { total, floor } = f64.at(frame, v), ratio = Math.hypot(...total) / floor, gv = [end.g[4 * v]!, end.g[4 * v + 1]!, end.g[4 * v + 2]!];
+    agree = Math.max(agree, Math.hypot(...sub3(gv, total)) / floor);
+    if (ratio > 2) { over.push(v); const pg = end.projected(v, total); if (pg === undefined || pg > 2 * floor) loose.push(v); }
+    if (ratio > worst) { worst = ratio; at1 = v; gpuAt = Math.hypot(...gv); }
+  }
+  console.log(`[ladder 1e] 32^2 tick ${start.tick} -> ${start.tick + 1} (${end.restarts > 0 ? 'implicit Euler, restarted' : 'BDF2'}): Newton ${K} (${end.rec.done ? 'done' : 'cap'}), |g|/|mg| ${end.rec.last.toExponential(2)}; `
+    + `entries ${JSON.stringify(f64.seen)}; max |g_F64| / f32 floor ${worst.toFixed(3)} at v${at1} (GPU |g| there ${gpuAt.toExponential(2)} N), vertices over 2 floors ${over.length} (${over.length - loose.length} certificate-held: ${over.join(', ')}); |g_GPU - g_F64| ${agree.toFixed(3)} floors`);
+  assert.ok(agree <= 1, `the GPU gradient leaves the Float64 objective's by ${agree.toFixed(2)} f32 floors`);
+  assert.ok(!end.rec.done || worst <= 2, `false done: |g_F64| is ${worst.toFixed(2)} f32 floors at v${at1}, ${over.length} vertices over 2`);
+  assert.deepEqual(loose, [], 'every vertex left over 2 floors is held by a kept certificate (else the solver itself has not converged)');
+  await t.test('the step converges within 150 Newton iterations', { todo: 'C2: re-detection keeps re-certifying the travel bound at the held vertices (C1 RESULT 47)' }, () => {
+    assert.ok(end.rec.done, `${over.length} certificate-held vertices, max ${worst.toFixed(1)} floors at v${at1}`);
+  });
 }));
 
 // ---------------------------------------------------------------- 2. the dual rule
@@ -664,11 +748,11 @@ test('ladder 2b: the cap-aware done rule: with a velocity tolerance so loose tha
   assert.ok(records[0]!.newton > 1, `tick 1 ended after ${records[0]!.newton} Newton iteration: the travel bounds binding there did not keep Newton running`);
 }));
 
-/** Ladder 2c's open defect (C1 RESULTs 43-44). With the KKT stop test (RESULT 44) neither run converges at tick 20:
- * after 150 iterations the largest |P g_v| is 14x its f32 floor, and the ends are 0.96 mm apart. The Float64 objective
+/** Ladder 2c's open defect (C1 RESULTs 43-44). With RESULT 44's projected stop test neither run converged at tick 20:
+ * after 150 iterations the largest |P g_v| was 14x its f32 floor (RESULT 47 stops on the whole |g_v|), and the ends are 0.96 mm apart. The Float64 objective
  * (the oracle's frozen pairs, the sample-face pairs included) has one minimiser from x0 and from both GPU ends (within
  * 0.41 um), 15.8 mm from them. So the GPU stalls short of a unique solution: there are not several minima. */
-const METRIC_TODO = "C1 open: on the 16^2 sphere Newton stalls 14x above the f32 KKT floor at tick 20 (ends 0.96 mm apart); with the duals frozen both converge; the Float64 implicit-Euler minimiser (the step restarts) is 0.96 mm from them (RESULT 45)";
+const METRIC_TODO = "C1 open: on the 16^2 sphere Newton stalls 14x above the f32 stop floor at tick 20 (ends 0.96 mm apart); with the duals frozen both converge; the Float64 implicit-Euler minimiser (the step restarts) is 0.96 mm from them (RESULT 45)";
 
 /** One step of the 16^2 rotating sphere from the published state at `tick`, under `solver` (caps and tolerances
  * replaced); the result and the step's Newton record. */
@@ -683,7 +767,7 @@ async function sphereStepFrom(device: GPUDevice, tick: number, solver: (doc: Clo
   try {
     assert.ok(cloth.stepTo(start.time_s + CLOTH_SCENE_STEP_S), `the step from tick ${tick} was refused: ${cloth.failure?.message ?? 'pending'}`);
     const record = await newtonOf(gpuSolver), x = await gpuSolver.readPositions();
-    // The stop test's KKT residual at the last iterate (nwGradient's g.w): the largest |P g_v|^2 / floor_v^2.
+    // The stop test's residual at the last iterate (nwGradient's g.w): the largest |g_v|^2 / floor_v^2 (RESULT 47: the whole gradient).
     const reader = gpuSolver as unknown as { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer };
     const g4 = new Float32Array(await reader.readRange(reader.newtonWork, 0, 16 * (x.length / 3)));
     let kkt = 0; for (let v = 3; v < g4.length; v += 4) kkt = Math.max(kkt, g4[v]!);
@@ -708,7 +792,7 @@ test('ladder 2c: on the 16^2 sphere a step\'s result is independent of the trial
       if (d > 2 * tol) over++;
       if (d > gap) { gap = d; at = v; }
     }
-    lines.push(`tick ${tick}: Newton identity ${off.record.newton} (done ${+off.record.done}), H_vv ${hvv.record.newton} (done ${+hvv.record.done}); |g|/|mg| ${off.record.last.toExponential(2)} / ${hvv.record.last.toExponential(2)}; max |P g_v| / floor_v ${off.kkt.toFixed(2)} / ${hvv.kkt.toFixed(2)}; ends ${(1e6 * gap).toFixed(3)} um apart at vertex ${at}, ${over} vertices past 2 tol`);
+    lines.push(`tick ${tick}: Newton identity ${off.record.newton} (done ${+off.record.done}), H_vv ${hvv.record.newton} (done ${+hvv.record.done}); |g|/|mg| ${off.record.last.toExponential(2)} / ${hvv.record.last.toExponential(2)}; max |g_v| / floor_v ${off.kkt.toFixed(2)} / ${hvv.kkt.toFixed(2)}; ends ${(1e6 * gap).toFixed(3)} um apart at vertex ${at}, ${over} vertices past 2 tol`);
     console.log(`[ladder 2c] ${lines.at(-1)}`);
     assert.ok(off.record.done && hvv.record.done, `tick ${tick}: a run did not converge in 150 iterations (identity ${off.record.newton}, H_vv ${hvv.record.newton})`);
     if (!(gap <= 2 * tol)) fails.push(`tick ${tick}: the identity and H_vv ends are ${(1e6 * gap).toFixed(3)} um apart at vertex ${at} (bound 2 um)`);

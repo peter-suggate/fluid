@@ -341,7 +341,7 @@ fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u
     let s = vertexSystem(v, pos(v));
     g = s.g;
     let H = s.H; let det = determinant(H);
-    // The f32 floor of g_v (the stop test's KKT tolerance): the rounding of the terms' sum, eps |terms|, and of the
+    // The f32 floor of g_v (the stop test's tolerance): the rounding of the terms' sum, eps |terms|, and of the
     // position the iterate can hold, |H_vv| eps |x_v| (the largest column of the vertex block bounds |H_vv|).
     gFloor = 4.0 * EPS32 * (length(gTerms) + max(length(H[0]), max(length(H[1]), length(H[2]))) * length(pos(v)));
     if (det > 0.0 && abs(det) <= 3.0e38) {
@@ -363,9 +363,12 @@ fn pcgBlock(blocks: u32, k: u32, c: u32, lane: u32) -> u32 { return blocks + (3u
       M0 = vec4f(Mt[0][0], Mt[0][1], Mt[0][2], Mt[1][1]); M1 = vec4f(Mt[1][2], Mt[2][2], 0.0, 0.0);
     }
   } else { nw[nseg(NW_PROJ + 1u, v)] = vec4f(0.0); }` : ''}
-  // g.w: the KKT residual against the floor, |P g_v|^2 / floor^2 (P g_v the gradient on v's free directions, the active
-  // set's normals kept by the KKT sign); at most 1 at every vertex is the stop test's stationarity (nwChoose).
-  nw[nseg(${S.g}u, v)] = vec4f(g, select(0.0, dot(r0, r0) / (gFloor * gFloor), gFloor > 0.0)); nw[nseg(${S.r0}u, v)] = vec4f(r0, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
+  // g.w: the stationarity residual against the floor, |g_v|^2 / floor^2, the whole gradient: at most 1 at every vertex
+  // is the stop test (nwChoose). The active normals are the filter's certificates, travel bounds of conservative
+  // detection, not constraints (every term of the model is energy), so a load a certificate carries is residual: the
+  // step goes on until a re-detection releases the bound (C1 RESULT 47; RESULT 46 found 32^2 t15 ends held at
+  // 0.05-0.81 N by certificates under |P g_v|). r0 = -P g_v stays the reduced system's right-hand side.
+  nw[nseg(${S.g}u, v)] = vec4f(g, select(0.0, dot(g, g) / (gFloor * gFloor), gFloor > 0.0)); nw[nseg(${S.r0}u, v)] = vec4f(r0, 0.0); nw[nseg(${S.s1}u, v)] = vec4f(0.0);
   nw[nseg(${S.d}u, v)] = vec4f(0.0); nw[nseg(${S.p}u, v)] = vec4f(0.0);
   nw[nseg(${S.m0}u, v)] = M0; nw[nseg(${S.m1}u, v)] = M1;
   // The row in sliced-ELL order (a pinned row and the patch's padding slots: zero blocks on a valid column).
@@ -968,8 +971,8 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   // In a trust-region iteration only an interior step (the solve ended inside the region, tn.y 0) measures the Newton
   // step: a step on the boundary is as small as Delta, not as the iterate's distance to the solution.
   // Nor is a small step convergence while the iterate is not stationary (Claude's ruling on RESULT 43: stiff barriers
-  // keep steps short at |g| far above the f32 floor): every vertex's KKT residual (sm.w, nwGradient's g.w: the gradient
-  // on its free directions, the multipliers of its kept normals positive) within the f32 floor of its gradient.
+  // keep steps short at |g| far above the f32 floor): every vertex's gradient (sm.w, nwGradient's g.w: the whole
+  // gradient, a certificate's load counted as residual) within the f32 floor of its gradient.
   let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0 && sm.w <= 1.0 && !(region && tn.y != 0.0);
   // (A rejected trust-region step is no stall: Delta shrinks and Newton runs on.)
   let stalled = chosen == 0.0 && !(sm.x > 0.0) && !region;

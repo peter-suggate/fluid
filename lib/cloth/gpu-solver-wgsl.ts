@@ -293,7 +293,7 @@ fn augmented(k: f32, lambda: f32, C: f32, inequality: bool) -> f32 {
 struct System { g: vec3f, H: mat3x3f }
 // The magnitudes of the force terms the last vertexSystem call summed into g, per component (inertia, each face's
 // membrane and damping, the bending stencil, each strain-limit edge, then pins and contact together): the first-order
-// rounding of the f32 sum, which the Newton stop test's KKT tolerance takes (nwGradient, gpu-newton-wgsl.ts).
+// rounding of the f32 sum, which the Newton stop test's tolerance takes (nwGradient, gpu-newton-wgsl.ts).
 var<private> gTerms: vec3f;
 
 // Vertex v's local objective at xv (other vertices at their current positions):

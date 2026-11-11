@@ -2830,3 +2830,92 @@ ruling 2. No GPU code changed.
 **Next.** Ruling 2 (the dual schedule), measured on ladder 2c's 16^2 state, where the attribution is complete (7 um with
 the GPU's lambda). Also, per Claude: the end-of-step \|g\|/\|mg\| at the production cap (8 iterations, 60 ticks) against
 the converged reference, and the drape error at 8 iterations.
+
+## 2026-11-11 RESULT (47): the production cap measured; the stop test takes the whole gradient (ruling 3b); certificates stay binding through re-detection (C2)
+
+**(1) The production cap (8 Newton iterations), 60 ticks of the rotating sphere.** The reference is the same scene at a
+150 cap. "p" is a run perturbed by 0.1 um at the start, which sets the chaos floor.
+
+End-of-step log10 \|g\|/\|mg\| (median / p90 / max):
+
+| run | 16^2 | 32^2 |
+|---|---|---|
+| prod (cap 8) | 0.85 / 1.39 / 2.73 | 1.64 / 3.01 / 3.31 |
+| conv (cap 150) | -0.52 / 1.23 / 3.33 | 0.76 / 1.63 / 3.34 |
+
+- The 150-cap reference itself converges on only 22/60 (16^2) and 15/60 (32^2) steps.
+- Drape, 32^2, max / median vertex distance in mm:
+
+  | tick | prod vs conv | prod vs prodp (chaos floor) |
+  |---|---|---|
+  | 10 | 12.1 / 10.6 | 2.95 / 0.03 |
+  | 20 | 96 / 38 | 27 / 3.7 |
+  | 60 | 355 / 114 | 128 / 28 |
+
+- 16^2 prod vs conv, median: 4.3 / 13.7 / 36 mm at ticks 10 / 20 / 60.
+- Restarted steps: 49/60 (16^2), 55/60 (32^2).
+- 16^2 prodp and 16^2 conv both stop at tick 47 on C2's heldConflict (passed to C2 by Claude).
+- Per Claude, the table is repeated after ruling 2: positions for t <= 20, and past the chaotic horizon, statistics
+  (energy, mean height, contact counts).
+
+**(2) The stop test is now the whole gradient (Claude's ruling 3b).**
+- What changed: nwGradient writes g.w = \|g_v\|^2 / floor_v^2, where it used to write \|P g_v\|^2 / floor_v^2.
+- Why: the active normals are the filter's certificates. They are travel bounds of conservative detection, not
+  constraints (every term of the model is energy), so a load a certificate carries counts as residual and the step
+  goes on.
+- Unchanged: r0 = -P g_v stays the reduced system's right-hand side, and the filter, projector and release are as
+  they were.
+
+**Ladder 1e** (new; RESULT 46's 32^2 tick-15 state, tests/fixtures/cloth-sphere-32-t15.json, scene kc):
+- Method: a 150-cap run with a 1 um tolerance, then a deterministic run to K - 1. The Float64 objective
+  (float64Objective, extracted from ladder 1d) is evaluated at x_{K-1} with the GPU's entries and duals.
+- Hard checks:
+  - the GPU's g equals the Float64 one within 1 f32 floor at every free vertex;
+  - if done, every free vertex is within 2 floors (no false done);
+  - every vertex left over 2 floors is held by a kept certificate (\|P g\| within 2 floors).
+- Todo (C2): convergence within 150.
+- Old stop (HEAD cab390d3): done at 91, with \|g_F64\| 5.19 floors at v525 (GPU \|g\| 1.32e-2 N) and 2 vertices over
+  2 floors. A false done, so it fails.
+- New stop: cap 150, not done, max 5.20 floors at v525, the same 2 vertices (525 and 561), both certificate-held.
+  Agreement 0.019 floors. Passes, with the todo.
+
+**(3) Steps that end with a certificate still binding after re-detection.**
+- Six 32^2 states (RESULT 46), live duals, 150 cap, re-detection every iteration.
+- "Held" means \|g_v\| over its floor while \|P g_v\| under the vertex's kept normals is within it.
+
+| state | Newton | done | vertices over the floor | certificate-held | largest held \|g\| |
+|---|---|---|---|---|---|
+| kc 9668 t5 | 150 | no | 1 | 1 (v464) | 1.8e-3 N, 33 floors |
+| kc 9668 t15 | 150 | no | 4 | 4 (v561, v525, v590, v527) | 0.23 N, 753 floors |
+| kc 9668 t25 | 150 | no | 198 | 1 | (unconverged: 97 N at v177, no kept normal) |
+| kc 100 t5 | 25 | yes | 0 | 0 | - |
+| kc 100 t15 | 150 | no | 9 | 9 (v806, v902, v496, v803, ...) | 0.39 N, 1252 floors |
+| kc 100 t25 | 150 | no | 195 | 0 | (unconverged: 8.8 N at v803) |
+
+- At kc 9668, 2 of the 3 steps end with a certificate binding (t5, t15). At kc 100 it is 1 of 3 (t15). In every one
+  of them every residual vertex is certificate-held: \|P g\| is 1e-6 to 1e-4 N while \|g\| is up to 0.39 N, and alpha
+  is 1 throughout.
+- So re-detection re-certifies the same bound on every iteration for 150 iterations, and the step cannot finish.
+  Per Claude's ruling this is a detection defect, C2's. Sent to C2 with the states.
+- The two t25 states are a different case: they are unconverged with no kept normals, and were unconverged under the
+  old stop too (RESULT 46).
+- What the old stop did instead: it ended these steps "done", with the load sitting on the certificates.
+
+**Restarts regression (new, tests/cloth-analytic.test.ts).** The free-fall sheet lands on the frictionless floor and is
+run for 90 ticks. On this commit, resting gives 1 restarted step: tick 32, with the fastest fall at tick 29. That
+passes. Sliding at 0.5 m/s along x gives 37 restarted steps, ticks 31-72. That is a todo, and it is C2's onset bit
+(OGC_CONTACT_STATE_WGSL); C2 takes the change after its RESULT 46 (1).
+
+**Gate** (the six cloth GPU files, through the runner, on 47d65a8a plus this change): 78 tests, 76 pass, 0 fail, 2
+todo (ladder 1e's convergence subtest and ladder 2c). One earlier run returned rc 77 and was discarded: two full gates
+ran side by side, C1's and C2's. Full gates now run at --test-concurrency=1. The new restarts regression ran
+separately: it passes, with the sliding todo. npm run check:types is clean; test:unit gives 2135 tests, 1747 pass,
+0 fail.
+
+**Next.**
+1. The restarts ruling. The census is in the C2 message: under the current criterion, flicker (vertices that had
+   touched before) is 58 % of onsets, 254/436 on 16^2 and 910/1593 on 32^2. The "pair absent at the step start"
+   criterion (bit 8 = has an entry at the step's end, in C2's OGC_CONTACT_STATE_WGSL, spec sent to C2) still leaves
+   49/60 and 52/60 restarted steps on the sphere, because the drape lands fresh vertices every step. The regression is
+   a plane landing, resting and sliding, with exactly one restart.
+2. Then ruling 2.
