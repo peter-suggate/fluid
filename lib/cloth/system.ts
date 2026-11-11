@@ -43,7 +43,10 @@ import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS
   clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
 import { sceneClothSurface } from './scene-geometry';
 import { prepareClothTopology } from './topology';
-import type { ClothContactStateData, ClothDocument, ClothGrab, ClothNewtonSettings, ClothSurfacePublication, ClothVector } from './types';
+import type { ClothContactStateData, ClothDocument, ClothGrab, ClothSurfacePublication, ClothVector } from './types';
+import { CLOTH_NEWTON_SCENE_DEFAULTS } from './newton-defaults';
+import { ClothFrameTimer, ClothStagePasses, type ClothConvergence, type ClothDocumentFacts, type ClothPerformanceSample } from './stage-timing';
+import { usePerformanceInstrumentationStore } from '../core/stores/performance-instrumentation-store';
 
 /** One implicit cloth step per 1/60 s frame. */
 export const CLOTH_SCENE_STEP_S = 1 / 60;
@@ -52,8 +55,9 @@ export const CLOTH_CATCH_UP_STEPS = 4;
 if (CLOTH_CATCH_UP_STEPS + 1 > CLOTH_BODY_POSES_PER_FRAME) throw new Error('A frame of cloth steps needs more moving-solid poses than the detector is authored for');
 /** Steps between status-word reads (the non-finite watchdog; never the pose). */
 export const CLOTH_STATUS_INTERVAL_STEPS = 4;
-/** Newton-PCG caps and tolerances of a document that names none: the Bridson scenes' (CLOTH.newton*, C1 RESULT 21). */
-export const CLOTH_NEWTON_SCENE_DEFAULTS: ClothNewtonSettings = Object.freeze({ iterations: 8, pcgIterations: 200, pcgTolerance: 1e-4, residualTolerance: 1e-5 });
+/** Least time between stage-timed frames (`ClothSystem.timing`): each costs a pass per stage change and a readback. */
+export const CLOTH_TIMING_INTERVAL_MS = 250;
+export { CLOTH_NEWTON_SCENE_DEFAULTS } from './newton-defaults';
 
 let systemGenerations = 0, renderRevisions = 0;
 
@@ -70,6 +74,9 @@ function ogcCarriedState(data: ClothContactStateData, origin: ClothVector, verte
   return { reference: Float32Array.from(data.reference, (q, i) => (i & 3) === 3 ? q : q - origin[i & 3]!), held: Uint32Array.from(data.held) };
 }
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
+/** A document's content apart from its Newton-PCG settings (the Cloth card's tuning knobs). */
+const documentKeyBesidesNewton = (document: ClothDocument) =>
+  clothDocumentsKey([{ ...document, solver: { ...document.solver, newton: undefined } }]);
 
 /** Asynchronous copy of the status words and, on request, the full dynamic state (pose, BDF2 history, duals, clock); one map in flight. */
 class PoseMirror {
@@ -176,6 +183,16 @@ export class ClothSystem {
   /** The held mouse grab: its press id and the entry it holds (none: that press was refused). */
   private grab?: { readonly id: number; readonly entry?: Entry };
   private destroyed = false;
+  /**
+   * Stage timing (the Cloth card): while on, a frame at most every `CLOTH_TIMING_INTERVAL_MS` is encoded one pass per
+   * stage with pass timestamps, and its stage totals and last-step convergence land in `performance`. Measurement only.
+   */
+  timing = false;
+  /** The newest stage-timed frame. */
+  performance?: ClothPerformanceSample;
+  private timingPending = false;
+  private lastTimingAt_ms = -Infinity;
+  private timingSamples = 0;
 
   private constructor(private readonly device: GPUDevice, private scene: SceneDescription, private readonly options: ClothSystemOptions) {
     this.statusInterval = options.statusInterval ?? CLOTH_STATUS_INTERVAL_STEPS;
@@ -295,8 +312,12 @@ export class ClothSystem {
   stepTo(target_s: number, maxSteps = 1): boolean {
     if (this.failure || this.destroyed || this.pending) return false;
     if (maxSteps + 1 > CLOTH_BODY_POSES_PER_FRAME) throw new Error(`Cloth frames take at most ${CLOTH_BODY_POSES_PER_FRAME - 1} steps`);
-    const encoder = this.device.createCommandEncoder({ label: 'Cloth system step' }), watched: Entry[] = [];
-    let stepped = false;
+    const raw = this.device.createCommandEncoder({ label: 'Cloth system step' }), watched: Entry[] = [];
+    const now = performance.now();
+    const timer = this.timing && !this.timingPending && now - this.lastTimingAt_ms >= CLOTH_TIMING_INTERVAL_MS && ClothFrameTimer.supported(this.device)
+      ? new ClothFrameTimer(this.device, raw) : undefined;
+    const encoder = timer?.encoder ?? raw, timed: Entry[] = [];
+    let stepped = false, steps = 0;
     for (const e of this.entries.values()) {
       let owed = Math.min(maxSteps, Math.floor((target_s - this.entryTime(e)) / CLOTH_SCENE_STEP_S + 0.5));
       if (owed <= 0) continue;
@@ -312,17 +333,51 @@ export class ClothSystem {
       // The moving solid's poses at this frame's step boundaries, uploaded before the frame's commands run.
       if (e.body) e.contact.setBodyPoses(clothBodyPoses(e.body, e.origin, this.entryTime(e), owed, CLOTH_SCENE_STEP_S));
       // One pass per frame: the detector's frame statistics restart, then the steps (its hooks run inside each).
-      const pass = encoder.beginComputePass({ label: 'Cloth step' });
+      // A timed frame splits the pass at each stage change (ClothStagePasses), so each stage carries its own timestamps.
+      const pass = timer ? new ClothStagePasses(encoder).pass : encoder.beginComputePass({ label: 'Cloth step' });
       e.contact.encodeFrameBegin(pass);
       for (let s = 0; s < owed; s++) e.solver.encodeStep(pass);
       pass.end();
-      e.steps += owed; e.sinceStatus += owed; stepped = true;
+      e.steps += owed; e.sinceStatus += owed; stepped = true; steps += owed; timed.push(e);
       if (e.sinceStatus >= this.statusInterval && e.mirror.encodeStatus(encoder)) { e.sinceStatus = 0; watched.push(e); }
     }
-    if (!stepped) return false;
-    this.device.queue.submit([encoder.finish()]);
+    if (!stepped) { if (timer) timer.resolve(raw); return false; }
+    const sampled = !!timer && timer.resolve(raw);
+    this.device.queue.submit([raw.finish()]);
     for (const e of watched) void this.watch(e);
+    if (sampled) void this.publishTiming(timer!, timed, steps, now);
     return true;
+  }
+
+  /** Read a timed frame's stage totals and its documents' last-step convergence into `performance`. */
+  private async publishTiming(timer: ClothFrameTimer, entries: Entry[], steps: number, requested_ms: number): Promise<void> {
+    this.timingPending = true; this.lastTimingAt_ms = requested_ms;
+    try {
+      const [reading, controls] = await Promise.all([timer.read(), Promise.all(entries.map(e => e.solver.readNewtonControl().catch(() => undefined)))]);
+      if (this.destroyed) return;
+      const documents = entries.map((e, k) => this.facts(e, controls[k]));
+      const base = { sampleId: ++this.timingSamples, capturedAt_ms: performance.now(), steps, documents };
+      this.performance = reading ? { ...base, ...reading }
+        : { ...base, span_ms: 0, sum_ms: 0, stages: [], unavailable: 'The GPU returned no usable pass timestamps for the sampled frame.' };
+    } catch (error) {
+      if (!this.destroyed) this.performance = { sampleId: ++this.timingSamples, capturedAt_ms: performance.now(), steps, span_ms: 0, sum_ms: 0, stages: [], documents: [],
+        unavailable: `Cloth stage timing failed: ${error instanceof Error ? error.message : String(error)}` };
+    } finally { this.timingPending = false; }
+  }
+
+  /** What a document runs with, and (from its Newton control record) how its last step converged. */
+  private facts(e: Entry, control?: Float32Array): ClothDocumentFacts {
+    const newton = e.document.solver?.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS;
+    const convergence: ClothConvergence | undefined = control && {
+      newtonIterations: control[3]!, pcgIterations: control[7]!,
+      residual: control[6]! > 0 ? Math.sqrt(control[5]! / control[6]!) : NaN, alpha: control[2]!,
+    };
+    return { id: e.document.id, vertices: e.solver.N, triangles: e.solver.T, edges: e.solver.E,
+      integrator: e.document.solver?.integrator ?? 'bdf2', newtonIterations: newton.iterations, pcgIterations: newton.pcgIterations,
+      ...(newton.pcgTolerance !== undefined ? { pcgTolerance: newton.pcgTolerance } : {}),
+      ...(newton.residualTolerance !== undefined ? { residualTolerance: newton.residualTolerance } : {}),
+      trustRegion: newton.trustRegion ?? 'off', activeSet: newton.activeSet ?? 'on', contactRadius_m: clothContactRadius(e.document),
+      ...(convergence ? { convergence } : {}) };
   }
 
   private async watch(e: Entry): Promise<void> {
@@ -414,7 +469,9 @@ export class ClothSystem {
     for (const document of scene.cloth ?? []) {
       const live = this.entries.get(document.id), key = this.entryKey(document);
       if (this.building.get(document.id)?.key === key || (!this.building.has(document.id) && live?.key === key)) continue;
-      const solidOnly = !!live && !this.building.has(document.id) && live.documentKey === clothDocumentsKey([document]);
+      // An edit of the moving solid alone, or of the Newton-PCG settings alone, carries on from the live pose.
+      const solidOnly = !!live && !this.building.has(document.id) && (live.documentKey === clothDocumentsKey([document])
+        || documentKeyBesidesNewton(live.document) === documentKeyBesidesNewton(document));
       const topologyRevision = solidOnly ? live.topologyRevision
         : Math.max(sceneClothSurface(scene, document.id)?.topologyRevision ?? 0, live ? live.topologyRevision + 1 : 0);
       // `building` is set below, before any await, so no step is encoded between the edit and the pose read.
@@ -514,9 +571,13 @@ export function withClothSystem(base: GPUSolverInstance, cloth: ClothSystem, flu
   const latch = () => {
     if (cloth.failure && !base.info.simulationFailure) base.info.simulationFailure = cloth.failure;
     base.info.clothNotes = [...cloth.notes].map(([name, t]) => `${name} since ${t.toFixed(3)} s`);
+    if (cloth.performance) base.info.clothPerformance = cloth.performance;
   };
+  // Stage timing rides the page's measurement switch (the Cloth card turns it on while open).
+  const timing = () => { cloth.timing = usePerformanceInstrumentationStore.getState().enabled; };
   const overrides: Partial<GPUSolverInstance> & Record<string, unknown> = {
     advanceTo(time_s, bodies) {
+      timing();
       if (fluid) {
         const advanced = base.advanceTo(time_s, bodies);
         cloth.stepTo(base.info.submittedTime_s ?? 0, CLOTH_CATCH_UP_STEPS);
