@@ -12,6 +12,7 @@
  */
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { createProcessRetainedDawnGPU } from '../lib/harness/node-dawn-provider';
 import { requiredFluidDeviceLimits } from '../lib/core/webgpu-device-limits';
@@ -100,7 +101,8 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
   const doc = scene.cloth![0]!, det = cloth.contactFor(doc.id)!, solver = cloth.solverFor(doc.id)!;
   const N = doc.geometry.data.restPositions_m.length / 3;
   const track: TickReport[] = [];
-  let failure: string | undefined;
+  let failure: string | undefined, peakContacts = 0, newtonSum = 0, verifyMs = NaN;
+  const ver = { verifies: 0, verifyMissing: 0, missingPairs: 0, lagPairs: 0, lagSteps: 0, uncovered: 0 };
   console.log(`[${label}] ${N} vertices; per tick: rounds (mandatory+re), alpha (last Newton step), env, scanned / collisions / box-rejected / candidates (longest scan), DAT pairs, plane records peak per vertex / summed over filters, held for overflow, conflicts`);
   try {
     for (let k = 1; k <= ticks; k++) {
@@ -114,18 +116,154 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
       let y = 0, vy = 0, minY = Infinity;
       for (let i = 0; i < N; i++) { y += x[3 * i + 1]! / N; vy += v[3 * i + 1]! / N; minY = Math.min(minY, x[3 * i + 1]!); }
       const status = [OgcContactDetector.describeStatus(c.status)].flat().join(",");
+      peakContacts = Math.max(peakContacts, c.peakContacts); newtonSum += Number(ctl[3]);
+      for (const key of Object.keys(ver) as (keyof typeof ver)[]) ver[key] += c[key];
       track.push({ tick: k, y, vy, minY, intersections, solidIntersections, records: c.framePeakPlaneRecords / N, recordsTotal: c.planeRecordsTotal, held: c.planeRecordHeld, heldVertices: c.held, conflicts: c.conflicts, datPairs: c.datPairs, rounds: c.detections, status });
       console.log(`  tick ${k}: y ${(1000 * y).toFixed(2)} mm vy ${vy.toFixed(3)}; rounds ${c.detections - c.redetections}+${c.redetections} (levelled ${c.levelled}, fallback ${c.levelFallback}; conflicts no plane / closing ${c.levelConflicts.map(w => `${w & 0xffff} (${w >>> 16} solid)`).join(' / ')}) alpha ${+Number(ctl[2]).toPrecision(3)} newton ${ctl[3]} |g|/|mg| ${Math.sqrt(ctl[5]! / ctl[6]!).toExponential(1)} travel-held ${ctl[11]} env ${e2(c.peakEnvelope)}; `
         + `scan ${c.scanned}/${c.collisions}/${c.boxRejected}/${c.candidates} (max ${c.scanMax}); dat ${c.datPairs}; records ${(c.framePeakPlaneRecords / N).toFixed(1)}/v, ${c.planeRecordsTotal} summed; held ${c.held} (overflow ${c.planeRecordHeld}); conflicts ${c.conflicts}; facets ${c.hfPairs}/${c.hfDropped} dropped; `
-        + `x ${intersections}/${solidIntersections}; ${status}`);
+        + `verify ${c.verifies} (missing ${c.verifyMissing}: ${c.missingPairs} pairs; lag ${c.lagPairs}; uncovered ${c.uncovered}); x ${intersections}/${solidIntersections}; ${status}`);
       if (each) await each(cloth, c);
       if (rounds) for (const [i, r] of (await det.readRoundLog()).entries())
         console.log(`    round ${i}: |w| ${e2(r.maxPrediction)} env ${e2(r.maxEnvelope)} scan ${r.scanned}/${r.collisions}/${r.boxRejected}/${r.candidates} dat ${r.datPairs} held ${r.held} filters ${r.filters} records ${r.planeRecords} (summed ${r.planeRecordsTotal}) |d| ${e2(r.maxDirection)}`);
       if (cloth.failure) { failure = `tick ${k}: ${cloth.failure.message}`; break; }
     }
+    if (!failure && track.length) verifyMs = await verifyCost(device, cloth, doc.id);
   } finally { cloth.destroy(); }
+  console.log(`  [${label}] ${track.length} ticks; verification query ${(1000 * verifyMs).toFixed(1)} us at the end state; Newton iterations ${newtonSum}; verifications ${ver.verifies}, ${ver.verifyMissing} found ${ver.missingPairs} missing pairs, lag ${ver.lagPairs} pairs in ${ver.lagSteps} steps, uncovered ${ver.uncovered}; most entries on one vertex in any round ${peakContacts} (capacity ${CLOTH_SCENE_CONTACT.contactCapacity})`);
   if (failure) console.log(`  HALT ${failure}`);
   return { track, failure, N };
+}
+/**
+ * The end-of-step verification's own cost at the current state (ms per query): K queries (arming and the pass) in one
+ * submission against an empty one, with the solver's done word set to a candidate and restored after.
+ */
+async function verifyCost(device: GPUDevice, cloth: ClothSystem, id: string, K = 200): Promise<number> {
+  const det = cloth.contactFor(id)!, ctl = cloth.solverFor(id)!.newtonControl, off = ctl.offset ?? 0;
+  const wall = async (queries: number) => {
+    const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+    for (let k = 0; k < queries; k++) det.encodeVerify(pass);
+    pass.end(); const t0 = performance.now(); device.queue.submit([enc.finish()]); await device.queue.onSubmittedWorkDone(); return performance.now() - t0;
+  };
+  const saved = new Float32Array(await (det as unknown as { readBuffer(b: GPUBuffer, o: number, n: number): Promise<ArrayBuffer> }).readBuffer(ctl.buffer, off, 16));
+  device.queue.writeBuffer(ctl.buffer, off, new Float32Array([2, saved[1]!, saved[2]!, saved[3]!]));
+  await wall(K);
+  const ms = (Math.min(await wall(K), await wall(K)) - Math.min(await wall(0), await wall(0))) / K;
+  device.queue.writeBuffer(ctl.buffer, off, saved);
+  return ms;
+}
+type V3 = [number, number, number];
+/** The closest point of triangle abc to p (Ericson) and its feature: 0..2 a vertex, 3 ab, 4 bc, 5 ca, 6 the face. */
+function closestOnTriangle(p: V3, a: V3, b: V3, c: V3): [V3, number] {
+  const sub = (u: V3, v: V3): V3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]], dot = (u: V3, v: V3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const along = (o: V3, e: V3, t: number): V3 => [o[0] + t * e[0], o[1] + t * e[1], o[2] + t * e[2]];
+  const ab = sub(b, a), ac = sub(c, a), ap = sub(p, a), d1 = dot(ab, ap), d2 = dot(ac, ap);
+  if (d1 <= 0 && d2 <= 0) return [a, 0];
+  const bp = sub(p, b), d3 = dot(ab, bp), d4 = dot(ac, bp);
+  if (d3 >= 0 && d4 <= d3) return [b, 1];
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return [along(a, ab, d1 / (d1 - d3)), 3];
+  const cp = sub(p, c), d5 = dot(ab, cp), d6 = dot(ac, cp);
+  if (d6 >= 0 && d5 <= d6) return [c, 2];
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return [along(a, ac, d2 / (d2 - d6)), 5];
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) return [along(b, sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))), 4];
+  const den = 1 / (va + vb + vc), q = along(a, ab, vb * den);
+  return [[q[0] + ac[0] * vc * den, q[1] + ac[1] * vc * den, q[2] + ac[2] * vc * den], 6];
+}
+/**
+ * Ruling B's soundness at one step's end, from the Float64 mirror's missing pairs `m`: a step the verification let end
+ * done (the done word 1) has none, and a step that ended at the Newton cap has no more than the verification counted as
+ * its one-step lag (lagPairs, which also counts edge-edge and hull-facet pairs).
+ */
+interface Soundness { missing: string[]; unsound: string[]; lag: number }
+const soundness = () => ({ missing: [], unsound: [], lag: 0 }) as Soundness;
+function judge(out: Soundness, tick: number, m: string[], done: boolean, lag: number) {
+  for (const x of m) out.missing.push(`tick ${tick}: ${x}`);
+  out.lag += lag;
+  if (done && m.length) out.unsound.push(`tick ${tick}: verified done with ${m.length} pairs within r without an entry: ${m.slice(0, 4).join('; ')}`);
+  if (!done && m.length > lag) out.unsound.push(`tick ${tick}: ${m.length} pairs within r without an entry at the cap, the verification's lag ${lag}: ${m.slice(0, 4).join('; ')}`);
+}
+const doneOf = async (cloth: ClothSystem, id: string) => Number((await cloth.solverFor(id)!.readNewtonControl() as ArrayLike<number>)[0]) === 1;
+/**
+ * OGC's completeness at a step's end (C1's RESULT 46), in Float64: the exact mirror of the end-of-step verification's
+ * vertex-face and sample-face queries (OGC_VERIFY_WGSL pointFaces). Every pair of a cloth vertex (not on the face) or a
+ * solid sample (static, or the moving solid's at its end pose) with a face, within r of the end iterate and accepted by
+ * Algorithm 1 there (vfAccept's ownership and Voronoi blocks), must be held by an entry of the step's last round whose
+ * feature contains the pair's closest feature: the vertex's own (vertex-face) entry, or the sample's in the list of
+ * that feature's first vertex. Edge-edge and hull-facet pairs are not checked (the GPU's lag counts them too, so it
+ * bounds this count from above). Returns the missing pairs.
+ */
+async function missingEntries(cloth: ClothSystem, doc: { id: string; geometry: { data: ClothTopologyData } }, x: ArrayLike<number>, r: number): Promise<string[]> {
+  const det = cloth.contactFor(doc.id)! as unknown as { det: GPUBuffer; pred: GPUBuffer; solidSamples: number; bodySamples: number; facetCapacity: number; readBuffer(b: GPUBuffer, o: number, n: number): Promise<ArrayBuffer>; readContactEntries(): ReturnType<OgcContactDetector['readContactEntries']> };
+  const origin = (cloth as unknown as { entries: Map<string, { origin: readonly number[] }> }).entries.get(doc.id)!.origin;
+  const tris = doc.geometry.data.triangles, N = x.length / 3, T = tris.length / 3, S = det.solidSamples, SB = det.bodySamples;
+  const xd = new Float32Array(await det.readBuffer(det.det, 0, 16 * (N + S + SB))), pr = new Float32Array(await det.readBuffer(det.pred, 0, 32 * N + 16 * SB));
+  const P = (v: number): V3 => [x[3 * v]! - origin[0]!, x[3 * v + 1]! - origin[1]!, x[3 * v + 2]! - origin[2]!];
+  const sub = (u: V3, v: V3): V3 => [u[0] - v[0], u[1] - v[1], u[2] - v[2]], dot = (u: V3, v: V3) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  // Points: the cloth vertices (0..N-1), the static samples, then the moving solid's at its end pose (x_det plus its prediction).
+  const pts: V3[] = [];
+  for (let v = 0; v < N; v++) pts.push(P(v));
+  for (let s = 0; s < S; s++) pts.push([xd[4 * (N + s)]!, xd[4 * (N + s) + 1]!, xd[4 * (N + s) + 2]!]);
+  for (let s = 0; s < SB; s++) { const i = N + S + s; pts.push([xd[4 * i]! + pr[8 * N + 4 * s]!, xd[4 * i + 1]! + pr[8 * N + 4 * s + 1]!, xd[4 * i + 2]! + pr[8 * N + 4 * s + 2]!]); }
+  const tri = (t: number) => [tris[3 * t]!, tris[3 * t + 1]!, tris[3 * t + 2]!];
+  const featVerts = (tv: number[], f: number) => f < 3 ? [tv[f]!] : f < 6 ? [tv[f - 3]!, tv[(f - 2) % 3]!] : tv;
+  // Each list's vertex-face and sample-face entries: the point id and the feature's vertices.
+  const ce = await det.readContactEntries(), K = ce.header[1]!, lists: { id: number; w: number; f: number[] }[][] = Array.from({ length: N }, () => []);
+  for (let v = 0; v < N; v++) for (let k = 0; k < ce.counts[v]!; k++) {
+    const e = decodeOgcContactEntry(ce.entries.subarray(4 * (v * K + k), 4 * (v * K + k) + 4), N, S, det.facetCapacity);
+    if (e.kind === 'sampleFace') lists[v]!.push({ id: N + (e.body ? S : 0) + e.sample, w: 1, f: featVerts(tri(e.face), e.feature) });
+    else if (e.kind === 'vf') lists[v]!.push({ id: e.vertex, w: 0, f: featVerts(tri(e.face), e.feature) });
+  }
+  const facesOf: number[][] = Array.from({ length: N }, () => []), ring: Set<number>[] = Array.from({ length: N }, () => new Set()), edgeFaces = new Map<string, number[]>();
+  const ek = (a: number, b: number) => a < b ? `${a},${b}` : `${b},${a}`;
+  for (let t = 0; t < T; t++) for (let k = 0; k < 3; k++) {
+    const a = tris[3 * t + k]!, b = tris[3 * t + (k + 1) % 3]!;
+    facesOf[a]!.push(t); ring[a]!.add(b); ring[b]!.add(a);
+    const fs = edgeFaces.get(ek(a, b)); if (fs) fs.push(t); else edgeFaces.set(ek(a, b), [t]);
+  }
+  // vfAcceptAt: a vertex feature belongs to the lowest face at it not holding v, and v must be in its Voronoi cone; an edge
+  // feature to the lower of its faces not holding v, with v within its slab and on the outside of both faces' planes.
+  const accept = (v: number, q: V3, t: number, tv: number[], f: number) => {
+    if (f === 6) return true;
+    if (f < 3) {
+      const k = tv[f]!, xk = P(k);
+      if (facesOf[k]!.some(u => u < t && !tri(u).includes(v))) return false;
+      for (const o of ring[k]!) if (dot(sub(q, xk), sub(xk, P(o))) < 0) return false;
+      return true;
+    }
+    const i = tv[f - 3]!, j = tv[(f - 2) % 3]!, fs = edgeFaces.get(ek(i, j))!;
+    const other = fs.find(u => u !== t);
+    if (other !== undefined && other < t && !tri(other).includes(v)) return false;
+    const xi = P(i), xj = P(j), dir = sub(xj, xi);
+    if (dot(sub(q, xi), dir) <= 0 || dot(sub(q, xj), [-dir[0], -dir[1], -dir[2]]) <= 0) return false;
+    for (const u of fs) {
+      const o = tri(u).find(w => w !== i && w !== j)!, xo = P(o), s = dot(sub(xo, xi), dir) / dot(dir, dir);
+      const pp: V3 = [xi[0] + dir[0] * s, xi[1] + dir[1] * s, xi[2] + dir[2] * s];
+      if (dot(sub(q, pp), sub(pp, xo)) < 0) return false;
+    }
+    return true;
+  };
+  // A uniform grid over the points, the cell the longest face edge.
+  let cell = 0;
+  for (let t = 0; t < T; t++) for (let k = 0; k < 3; k++) { const a = P(tris[3 * t + k]!), b = P(tris[3 * t + (k + 1) % 3]!); cell = Math.max(cell, Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])); }
+  const key = (i: number, j: number, k: number) => `${i},${j},${k}`, grid = new Map<string, number[]>();
+  pts.forEach((p, i) => { const k = key(Math.floor(p[0] / cell), Math.floor(p[1] / cell), Math.floor(p[2] / cell)); let g = grid.get(k); if (!g) grid.set(k, g = []); g.push(i); });
+  const missing: string[] = [];
+  for (let t = 0; t < T; t++) {
+    const tv = tri(t), [a, b, c] = tv.map(P) as [V3, V3, V3];
+    const lo = [0, 1, 2].map(k => Math.floor((Math.min(a[k]!, b[k]!, c[k]!) - r) / cell)), hi = [0, 1, 2].map(k => Math.floor((Math.max(a[k]!, b[k]!, c[k]!) + r) / cell));
+    for (let i = lo[0]!; i <= hi[0]!; i++) for (let j = lo[1]!; j <= hi[1]!; j++) for (let k = lo[2]!; k <= hi[2]!; k++) for (const p of grid.get(key(i, j, k)) ?? []) {
+      if (p < N && tv.includes(p)) continue;
+      const [q, f] = closestOnTriangle(pts[p]!, a, b, c), d = Math.hypot(pts[p]![0] - q[0], pts[p]![1] - q[1], pts[p]![2] - q[2]);
+      if (!(d > 0) || !(d < r) || !accept(p < N ? p : -1, pts[p]!, t, tv, f)) continue;
+      const fv = featVerts(tv, f), list = lists[p < N ? p : fv[0]!]!;
+      if (list.some(e => e.id === p && e.w === (p < N ? 0 : 1) && fv.every(u => e.f.includes(u)))) continue;
+      const what = p < N ? `vertex ${p}` : p < N + S ? `static sample ${p - N}` : `moving sample ${p - N - S}`;
+      missing.push(`${what} - face ${t} (${tv.join('/')}) ${(1e6 * d).toFixed(0)} um, feature ${f}`);
+    }
+  }
+  return missing;
 }
 /**
  * The intersection count's first face inside a solid: its vertices, the GPU's phi, and the CPU field (the entry's static
@@ -330,7 +468,8 @@ test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rota
   const trueFr = (q: readonly number[]) => bridsonSolidDistance(frustum, { x: q[0]! - t.x, y: q[1]! - t.y, z: q[2]! - t.z }, 0);
   const print = process.env.CLOTH_LADDER_SPHEREDIAG === '1';
   let leastTrue = Infinity, leastTick = 0;
-  const diag = async (cloth: ClothSystem) => {
+  const sound = soundness();
+  const diag = async (cloth: ClothSystem, c: Awaited<ReturnType<OgcContactDetector['readCounters']>>) => {
     const id = scene.cloth![0]!.id, x = (await cloth.capture([cloth.time_s]))[0]![0]!.positions_m;
     const e = (cloth as unknown as { entries: Map<string, { field: ClothSolidField; origin: readonly number[] }> }).entries.get(id)!;
     const P = (i: number) => [x[3 * i]!, x[3 * i + 1]!, x[3 * i + 2]!];
@@ -346,13 +485,62 @@ test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rota
       }
     }
     if (Math.min(vTrue, fTrue) < leastTrue) { leastTrue = Math.min(vTrue, fTrue); leastTick = Math.round(cloth.time_s / CLOTH_SCENE_STEP_S); }
+    judge(sound, Math.round(cloth.time_s / CLOTH_SCENE_STEP_S), await missingEntries(cloth, scene.cloth![0]! as never, x, clothContactRadius(scene.cloth![0]!)), await doneOf(cloth, id), c.lagPairs);
     if (print) console.log(`    static field: vertices >= ${vField.toExponential(2)}, faces >= ${fField.toExponential(2)} m (face ${fAt}); true frustum: vertices >= ${vTrue.toExponential(2)}, faces >= ${fTrue.toExponential(2)} m`);
   };
   const out = await ladder(device, `sphere 16^2${metric ? ' hvv' : ''}`, scene, 60, diag);
-  console.log(`  sphere: the cloth's least true frustum distance ${leastTrue.toExponential(3)} m (tick ${leastTick})`);
+  console.log(`  sphere: the cloth's least true frustum distance ${leastTrue.toExponential(3)} m (tick ${leastTick}); pairs within r without an entry at a step's end ${sound.missing.length} (the verification's lag ${sound.lag})${sound.missing.length ? `: ${sound.missing.slice(0, 8).join('; ')}` : ''}`);
   clean('sphere', out);
+  assert.deepEqual(sound.unsound, [], 'a verified step ends with every pair within r held, and the cap lag counts every one it leaves');
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
   assert.ok(leastTrue > 0, `the cloth reaches ${leastTrue} m into the true frustum at tick ${leastTick}`);
+}));
+
+// OGC's completeness on the 32 x 32 sphere (C1's RESULT 46): its faces are 60 to 87 mm across, so a face's interior
+// sags onto the rotating body between vertices the field holds 6 mm off, and the body's samples carry that contact.
+// At 32^2 kc 9668 t5 the last round paired 5 of them 1.0 to 1.3 mm from face 464/496/465, which the round's plane
+// let close to 0.76 to 0.99 mm with no entry. Each step's end, every sample-face and vertex-face pair within r has one.
+test('ladder: the 32 x 32 sheet on the rotating sphere: a verified step ends with every pair within r held, and the cap lag counts the pairs it leaves (OGC completeness, the first 12 ticks)', { skip: !runs('complete') }, async () => withDevice(async device => {
+  const scene = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 32 })), doc = scene.cloth![0]!, r = clothContactRadius(doc);
+  const sound = soundness();
+  let entries = 0;
+  const out = await ladder(device, 'sphere 32^2 complete', scene, Number(process.env.CLOTH_LADDER_COMPLETE_TICKS ?? 12), async (cloth, c) => {
+    const x = (await cloth.capture([cloth.time_s]))[0]![0]!.positions_m, tick = Math.round(cloth.time_s / CLOTH_SCENE_STEP_S);
+    const ce = await cloth.contactFor(doc.id)!.readContactEntries();
+    entries = Math.max(entries, ...Array.from(ce.counts));
+    judge(sound, tick, await missingEntries(cloth, doc as never, x, r), await doneOf(cloth, doc.id), c.lagPairs);
+  });
+  console.log(`  sphere 32^2: ${out.track.length} ticks, most entries on one vertex ${entries}; pairs within r without an entry at a step's end ${sound.missing.length} (the verification's lag ${sound.lag})${sound.missing.length ? `: ${sound.missing.slice(0, 12).join('; ')}` : ''}`);
+  clean('sphere 32^2', out);
+  assert.deepEqual(sound.unsound, [], 'a verified step ends with every pair within r held, and the cap lag counts every one it leaves');
+}));
+
+// C1's RESULT 46 (1) repro: one step from the 32^2 sphere at tick 5 (and at tick 15, ladder 1e's state), kc 9668. At
+// HEAD before the end-of-step verification the t5 step ended with 10 body samples within r of faces 464/496/465 and no
+// entry. The verification (ruling B) runs one radius-r query whenever Newton would declare done and re-detects about
+// the iterate where a pair has none, so the step ends with every pair within r held, or at the Newton cap counts the
+// pairs it leaves as a one-step lag (OGC's guarantee is no penetration, not completeness within r at a step's end).
+for (const tick of [5, 15]) test(`ladder: one step from the 32 x 32 sphere at tick ${tick} (C1's RESULT 46 (1) repro): verified done with every pair within r held, or the cap lag counts the pairs it leaves`, { skip: !runs('complete') }, async () => withDevice(async device => {
+  const F = JSON.parse(readFileSync(new URL(`./fixtures/cloth-sphere-32-t${tick}.json`, import.meta.url), 'utf8'));
+  const f64 = (b: string) => Array.from(new Float64Array(Uint8Array.from(Buffer.from(b, 'base64')).buffer)), ss = F.solverState;
+  const solverState = { ...ss, previousVelocities_m_s: f64(ss.previousVelocities_m_s), previousDisplacements_m: f64(ss.previousDisplacements_m), pinDuals: f64(ss.pinDuals), edgeDuals: f64(ss.edgeDuals) };
+  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 32 })), doc = base.cloth![0]!;
+  if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
+  const scene = { ...base, cloth: [{ ...doc, geometry: { kind: 'inline' as const, data: { ...doc.geometry.data, initialPositions_m: f64(F.positions_m), initialVelocities_m_s: f64(F.velocities_m_s), solverState } } }] } as SceneDescription;
+  const cloth = await ClothSystem.create(device, scene, { statusInterval: 1 });
+  try {
+    assert.ok(cloth.stepTo(solverState.time_s + CLOTH_SCENE_STEP_S), `the step from tick ${tick} was refused: ${cloth.failure?.message ?? 'pending'}`);
+    const x = (await cloth.capture([cloth.time_s]))[0]![0]!.positions_m;
+    const c = await cloth.contactFor(doc.id)!.readCounters(), ctl = Array.from(await cloth.solverFor(doc.id)!.readNewtonControl() as ArrayLike<number>);
+    const missing = await missingEntries(cloth, doc as never, x, clothContactRadius(doc)), sound = soundness();
+    judge(sound, tick + 1, missing, await doneOf(cloth, doc.id), c.lagPairs);
+    console.log(`  32^2 t${tick}: newton ${ctl[3]} done ${ctl[0]}; rounds ${c.detections - c.redetections}+${c.redetections}; verifications ${c.verifies}, ${c.verifyMissing} found ${c.missingPairs} missing pairs, lag ${c.lagPairs}, uncovered ${c.uncovered}; `
+      + `pairs within r without an entry at the end ${missing.length}${missing.length ? `: ${missing.slice(0, 8).join('; ')}` : ''}; ${[OgcContactDetector.describeStatus(c.status)].flat().join(',')}`);
+    const ms = await verifyCost(device, cloth, doc.id);
+    console.log(`  32^2 t${tick}: one verification query ${(1000 * ms).toFixed(1)} us (200 in one submission, less an empty one)`);
+    assert.equal(cloth.failure, undefined, cloth.failure?.message);
+    assert.deepEqual(sound.unsound, [], 'the verified step ends with every pair within r held, or the cap lag counts every one it leaves');
+  } finally { cloth.destroy(); }
 }));
 
 test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity, its free twin at its authored capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip') }, async () => withDevice(async device => {

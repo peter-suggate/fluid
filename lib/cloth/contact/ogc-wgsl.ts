@@ -99,8 +99,9 @@ export const OGC_COUNTER = {
    * and those a conflict sent back to the unlevelled round (w = 0), which never conflicts.
    */
   frameLevelled: 67, frameLevelFallback: 68,
-  /** Free (was the levelled conflicts' first word, whose second overlapped solidHitFace). */
-  unused69: 69,
+  /** The end-of-step verification (OGC_VERIFY_WGSL): the pairs within r its query found with no entry (and the vertices
+   * outside the round's grid boxes), consumed by the decision. */
+  verifyMissing: 69,
   /**
    * The intersection count's first face found inside a solid (report only): its id + 1, bit 31 set
    * when it is the moving solid's (0: none), and the field value at the lattice point that found it (f32 bits).
@@ -126,12 +127,22 @@ export const OGC_COUNTER = {
    * word's high 16 bits count those with a solid's sample or hull primitive in the pair.
    */
   frameLevelConflicts: 74,
-  roundLog: 76,
+  /**
+   * The end-of-step verification over the frame (OGC_VERIFY_WGSL): queries run (at a candidate done, and at a step's
+   * last iteration when Newton is not done), those that found a pair within r with no entry at a candidate done (each
+   * armed a re-detection), the missing pairs they found, the missing pairs accepted as a one-step lag (at the last
+   * iteration, or with the contact set frozen) and the steps with any, and the vertices found outside their round's grid
+   * boxes (counted as missing: the hash does not cover them). verifyMode is the decision's mode word of the query in flight
+   * (0 none, 1 a candidate done, 2 the last iteration not done, 3 a candidate done at the last iteration).
+   */
+  frameVerifies: 76, frameVerifyMissing: 77, frameMissingPairs: 78, frameLagPairs: 79, frameLagSteps: 80, frameUncovered: 81,
+  verifyMode: 82,
+  roundLog: 84,
 } as const;
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
 export const OGC_COUNTER_WORDS = OGC_COUNTER.roundLog + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
 /**
@@ -224,6 +235,14 @@ const OGC_F_PLANE_RECORDS_TOTAL = ${OGC_COUNTER.framePlaneRecordsTotal}u;
 const OGC_F_LEVELLED = ${OGC_COUNTER.frameLevelled}u;
 const OGC_F_LEVEL_FALLBACK = ${OGC_COUNTER.frameLevelFallback}u;
 const OGC_F_LEVEL_CONFLICTS = ${OGC_COUNTER.frameLevelConflicts}u;
+const OGC_VERIFY_MISSING = ${OGC_COUNTER.verifyMissing}u;
+const OGC_VERIFY_MODE = ${OGC_COUNTER.verifyMode}u;
+const OGC_F_VERIFIES = ${OGC_COUNTER.frameVerifies}u;
+const OGC_F_VERIFY_MISSING = ${OGC_COUNTER.frameVerifyMissing}u;
+const OGC_F_MISSING_PAIRS = ${OGC_COUNTER.frameMissingPairs}u;
+const OGC_F_LAG_PAIRS = ${OGC_COUNTER.frameLagPairs}u;
+const OGC_F_LAG_STEPS = ${OGC_COUNTER.frameLagSteps}u;
+const OGC_F_UNCOVERED = ${OGC_COUNTER.frameUncovered}u;
 const OGC_LEVELLED = ${OGC_LEVEL_FLAG.levelled}u;
 const OGC_FROZEN = ${OGC_LEVEL_FLAG.frozen}u;
 const OGC_ROUND_LOG_COUNT = ${OGC_COUNTER.roundLogCount}u;

@@ -37,7 +37,7 @@ import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
   OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
-  ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
+  ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL, ogcVerifyArgsWGSL, OGC_VERIFY_WGSL,
 } from "./ogc-detector-wgsl";
 import {
   OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_ROUND_LOG, OGC_ROUND_LOG_WORDS, OGC_POSE_WORDS, OGC_LEVEL_VEC4S, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
@@ -333,6 +333,13 @@ export interface OgcFrameCounters {
   levelFallback: number;
   /** Levelled rounds' conflicts: no plane at X, predictions closing (high 16 bits: with a solid in the pair). */
   levelConflicts: number[];
+  /**
+   * The end-of-step verification over the frame (newton config; OGC_VERIFY_WGSL): radius-r queries run, those at a
+   * candidate done that found a pair within r with no entry (each armed a re-detection), their missing pairs, the
+   * missing pairs accepted as a one-step lag at a step's last iteration (and the steps with any), and the vertices found
+   * outside their round's grid boxes.
+   */
+  verifies: number; verifyMissing: number; missingPairs: number; lagPairs: number; lagSteps: number; uncovered: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -369,6 +376,8 @@ export class OgcContactDetector {
   readonly counters: GPUBuffer; readonly args: GPUBuffer;
   /** The planes dispatch's indirect args, written by the round's bound pass. */
   readonly planesArgs: GPUBuffer;
+  /** The end-of-step verification's indirect args (newton config). */
+  readonly verifyArgs: GPUBuffer;
   /**
    * The line-search filter's output (newton config): N + 1 f32 words, alpha_v of each vertex
    * and then alpha_min = min_v alpha_v. A 4-byte placeholder otherwise.
@@ -496,6 +505,7 @@ export class OgcContactDetector {
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
     this.args = mk("args", 4 * OGC_ARGS_WORDS, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.planesArgs = mk("planes args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
+    this.verifyArgs = mk("verify args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.alpha = mk("filter alpha", config.newton ? 4 * (N + 1) : 4);
     this.contactState = mk("contact state", 4 * N);
     const w = this.paramWords, f = new Float32Array(w.buffer), P = OGC_PARAM;
@@ -753,10 +763,10 @@ export class OgcContactDetector {
    * reads; with newton, the global forms too (ogcVertexContactHvLanes, ogcContactEnergyOwnedLanes), and the trial
    * projection in the config's projectionMetric ("hvv": the solver's nwVertexInv).
    */
-  solverContact(binding: number, newton = false): { wgsl: string; buffer: GPUBuffer } {
+  solverContact(binding: number, newton = false): { wgsl: string; buffer: GPUBuffer; verifies: boolean } {
     const metric = newton && this.config.projectionMetric === "hvv" ? { metric: "nwVertexInv" } : {};
     const travel = newton && this.config.travelBound === "off" ? { travelBound: false } : {};
-    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel }), buffer: this.contacts };
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel }), buffer: this.contacts, verifies: newton && this.verifies };
   }
 
   /**
@@ -778,7 +788,7 @@ export class OgcContactDetector {
       afterCoarse: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); },
       // A Newton solver (newton config): filter its direction, then after its step re-detect.
       filter: (pass: GPUComputePassEncoder) => { this.encodeFilter(pass); },
-      afterNewtonStep: (pass: GPUComputePassEncoder) => { this.encodeAfterNewtonStep(pass); },
+      afterNewtonStep: (pass: GPUComputePassEncoder, last = false) => { this.encodeAfterNewtonStep(pass, last); },
       // Once per step, after the last position update and before velocities and history.
       stepEnd: (pass: GPUComputePassEncoder) => { this.encodeContactState(pass); },
     };
@@ -807,6 +817,9 @@ export class OgcContactDetector {
         ["filterAlloc", OGC_FILTER_ALLOC_WGSL, [0, 5, 8, 9]],
         ["filterRecords", ogcPlanesWGSL(true, "records"), [0, 2, 4, 5, 8, 9, 11, 14, 15]],
         ["filter", OGC_FILTER_WGSL, [0, 2, 4, 5, 8, 9, 14, 15, 16]],
+        ["verifyArgs", ogcVerifyArgsWGSL(false), [0, 9, 19, 20]],
+        ["verifyArgsLast", ogcVerifyArgsWGSL(true), [0, 9, 19, 20]],
+        ["verify", OGC_VERIFY_WGSL, [0, 1, 2, 4, 5, 7, 8, 9, 14]],
       ] as [string, string, number[]][] : []),
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 8, 9, 14]],
       ["contactState", OGC_CONTACT_STATE_WGSL, [0, 1, 2, 5, 8, 13, 18]],
@@ -838,7 +851,7 @@ export class OgcContactDetector {
       6: res(this.counts), 7: res(this.grid), 8: res(this.contacts), 9: res(this.counters), 10: res(this.args), 11: res(this.pairs), 12: res(this.planesArgs),
       13: res(inputs.stepStart ?? inputs.positions), 14: res(this.pred),
       15: res(inputs.direction ?? inputs.positions), 16: res(this.alpha), 17: res(inputs.target ?? inputs.positions),
-      18: res(this.contactState), 19: res(inputs.control ?? this.alpha),
+      18: res(this.contactState), 19: res(inputs.control ?? this.alpha), 20: res(this.verifyArgs),
     };
     // Levelled re-detection: with the solver's control, for planar predicted DAT (held or isotropic rounds predict 0).
     const levelOn = !!inputs.control && this.paramWords[OGC_PARAM.mode] === OGC_TRUNCATION.planar && this.paramWords[OGC_PARAM.predict] !== 0;
@@ -940,9 +953,27 @@ export class OgcContactDetector {
    */
   /** The step's contact state (contactState), once per step after its final positions. */
   encodeContactState(pass: GPUComputePassEncoder) { this.run(pass, "contactState", Math.ceil(this.N / WG)); }
-  encodeAfterNewtonStep(pass: GPUComputePassEncoder) {
+  encodeAfterNewtonStep(pass: GPUComputePassEncoder, last = false) {
+    if (this.config.newton) this.encodeVerify(pass, last);
     this.encodeDecide(pass); this.encodeDetection(pass, false); this.encodeTruncate(pass);
   }
+  /**
+   * The end-of-step verification (newton config; Claude's ruling B on C2 RESULT 46 (1)): at a candidate done (the
+   * solver's done word 2), and at the step's last iteration (`last`) when Newton is not done, one radius-r query at the
+   * iterate over the round's grid (indirect: zero workgroups otherwise). The decision then writes done 1 (complete) or
+   * 0 and arms a re-detection round (a pair within r with no entry); at the last iteration a missing pair is a counted
+   * one-step lag (lagPairs), never done.
+   */
+  encodeVerify(pass: GPUComputePassEncoder, last = false) {
+    this.run(pass, last ? "verifyArgsLast" : "verifyArgs", 1);
+    const k = this.kernel("verify");
+    pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.verifyArgs, 0);
+  }
+  /**
+   * The solver verifies a candidate done through this detector (ClothSolverContact.verifies; newton config): Newton
+   * writes done 2 and afterNewtonStep's decision turns it into 1 or 0.
+   */
+  get verifies(): boolean { return !!this.config.newton; }
   /** Count intersecting non-adjacent face pairs of the current positions (counter `intersections`). */
   encodeIntersectionCount(pass: GPUComputePassEncoder) {
     const H = this.config.bucketCount, B1 = Math.ceil(H / 1024), B2 = Math.ceil(B1 / 1024), wgT = Math.ceil(this.T / WG);
@@ -1027,6 +1058,8 @@ export class OgcContactDetector {
       scanned: u[C.frameScanned]!, collisions: u[C.frameCollisions]!, boxRejected: u[C.frameBoxRejected]!, scanMax: u[C.frameScanMax]!,
       planeRecordsTotal: u[C.framePlaneRecordsTotal]!,
       levelled: u[C.frameLevelled]!, levelFallback: u[C.frameLevelFallback]!,
+      verifies: u[C.frameVerifies]!, verifyMissing: u[C.frameVerifyMissing]!, missingPairs: u[C.frameMissingPairs]!,
+      lagPairs: u[C.frameLagPairs]!, lagSteps: u[C.frameLagSteps]!, uncovered: u[C.frameUncovered]!,
     };
   }
 
@@ -1124,6 +1157,6 @@ export class OgcContactDetector {
   }
 
   destroy() {
-    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs, this.alpha, this.contactState]) buffer.destroy();
+    for (const buffer of [this.params, this.topo, this.det, this.pred, this.work, this.counts, this.grid, this.contacts, this.pairs, this.counters, this.args, this.planesArgs, this.verifyArgs, this.alpha, this.contactState]) buffer.destroy();
   }
 }

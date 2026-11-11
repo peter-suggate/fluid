@@ -2813,3 +2813,46 @@ the shift, and it passes with the shift off at 674ed83c.
 The t25 restart starts from the dump's positions, velocities and solver state, but not its contact carried state, so
 tick 26 is 10.6 mm (off) and 9.4 mm (on) from the dump's own next step. The shift does not lower the step's
 gradient. It moves the folds by up to 17 mm by tick 35. The t25 list peak was 6514 (6.4 per vertex, under its 8).
+
+## 2026-11-11: B, the end-of-step verification (main's rulings (i) and (ii))
+
+At a candidate done (Newton writes done 2, C1's done hook) and at the Newton cap, one radius-r query at the iterate
+checks that every pair within r has an entry of the step's last round (OGC_VERIFY_WGSL). Coverage follows Algorithm 1:
+- a vertex-face pair is held by v's entry on any face whose feature contains the pair's closest feature (vfAcceptAt's
+  ownership and Voronoi blocks at the iterate);
+- a sample-face pair by the sample's entry (w = 1) in the list of that feature's first vertex;
+- an edge-edge pair from the lower edge;
+- a hull facet by any entry of the facet's solid.
+A vertex found outside its own round box counts as uncovered. At a candidate done, a missing pair arms a re-detection
+round and Newton runs on (done 0); a clean query writes done 1. At the cap, the missing pairs are counted as the
+one-step lag (lagPairs, lagSteps). Arming a round after the cap was rejected. A step that ends at done 2 fails
+(CLOTH_STATUS.unverifiedDone). The counters are 69 and 76-82; 83 is reserved.
+
+OGC's guarantee is no penetration, not completeness within r: a pair left out of a round's DAT list only stays apart.
+The verification is what makes a done step complete within r.
+
+**The regression** (cloth-contact-ladder.test.ts): an exact Float64 mirror of the verification's vertex-face and
+sample-face queries (the ownership and Voronoi rules, and feature-superset coverage) checks each step's end:
+- (i) a step that ends verified done has no pair within r without an entry;
+- (ii) a step that ends at the cap has no more such pairs than the verification counted as its lag.
+The earlier oracle had neither the ownership and Voronoi rules nor the superset coverage; that is why t15 read 28
+missing against the GPU's 27. With the mirror, the per-step counts match the GPU: t5 10 missing against a lag of 10, t15 27 against 27; over the runs, sphere 16^2 5 against a lag of 436, H_vv 14 against 381, 32^2 29 against 52. Every remaining pair is a solid's sample (all but one the moving solid's) 0.74 to 1.0 r from a face interior, at a step that ended at the cap.
+
+**Measured** (ladder on 3cd15237 plus B; Newton counts and the per-tick reports are identical to HEAD, and the
+determinism tests pass). No candidate done anywhere found a missing pair.
+
+| Case | Lag pairs / cap steps | Verify query (us) |
+|---|---|---|
+| flat 16^2 | 0 | 100 |
+| sliding 2 x 8^2 | 195 / 5 | 13 |
+| plate 8^2 | 71 / 36 | 101 |
+| sphere 16^2 | 436 / 46 | 67 |
+| sphere 16^2, H_vv | 381 / 46 | 167 |
+| sphere 32^2, 12 ticks | 52 / 5 | 215 |
+| 32^2 from t5 / t15 | 10 / 27 | 137 |
+| strip | 7 / 5 | 129 / 162 |
+| frozen, travel bounds off | 3631 / 28 (3131 uncovered) | 277 |
+
+**Gate:** 114 tests, 109 pass, 0 fail, 5 todo. cost-16: 69.3 ms/tick (a 0.2-0.3 % query cost); log10 |g|/|mg| 0.50;
+Newton 7.7 and rounds 15.6 per tick. Landed on da0acf8e (L1, default off) with C1's done-hook files 3-way merged onto
+L1's gpu-newton-wgsl.ts and gpu-solver.ts; check:types clean, test:unit 1750 pass, 0 fail.

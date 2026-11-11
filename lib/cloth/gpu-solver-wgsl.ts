@@ -15,7 +15,7 @@ export const CLOTH_STATE_SEGMENTS = 10;
 /** Segment padding in vec4 records: 16 records = 256 B, the storage binding offset alignment. */
 export const CLOTH_SEGMENT_ALIGN = 16;
 /** Status words: [0] status bits (sticky), [1] steps completed; slots start at CLOTH_STATUS_RING_BASE. */
-export const CLOTH_STATUS = { nonFinite: 1 } as const;
+export const CLOTH_STATUS = { nonFinite: 1, unverifiedDone: 2 } as const;
 export const CLOTH_STATUS_RING_BASE = 16;
 /** Status words below the ring: 0 status flags, 1 steps; the contact restart's words (Newton with contact): this step's
  * onset, the next step's restart, and restarts since the state was uploaded. */
@@ -43,6 +43,9 @@ export interface ClothSolverWGSLOptions {
   readonly trustRegion?: boolean;
   /** newton.activeSet: false (only 'off') drops the projected-Newton active set; omitted, on (gpu-newton-wgsl.ts). */
   readonly activeSet?: boolean;
+  /** The contact detector verifies a candidate done (ClothSolverContact.verifies): Newton's done word is 2 until the
+   * contact hook writes 1 or 0, and a step that ends at 2 fails (CLOTH_STATUS.unverifiedDone). */
+  readonly verifies?: boolean;
 }
 
 export function clothSolverWGSL(options: ClothSolverWGSLOptions): string {
@@ -585,7 +588,9 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   let v = id.x;
   if (v == 0u) {
     let step = clockStep() + 1u;
-    state[P.state0.w].x = f32(step); state[P.state0.w].y = P.gravity.w; atomicStore(&status[1], step);
+    state[P.state0.w].x = f32(step); state[P.state0.w].y = P.gravity.w; atomicStore(&status[1], step);${contact && options.verifies ? `
+    // A candidate done the contact hook never verified (it writes 1 or 0): explicit, never counted as done.
+    if (nw[nwControl()].x == 2.0) { atomicOr(&status[0], ${CLOTH_STATUS.unverifiedDone}u); }` : ''}
   }
   if (v >= P.n.x) { return; }
   let x = pos(v); let xt = state[seg(S_XT, v)].xyz;
@@ -609,5 +614,5 @@ var<workgroup> partial: array<vec4f, ${2 * CLOTH_WORKGROUP}>;
   state[seg(S_NORMAL, v)] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / ln, ln > 0.0), 0.0);
   if (!finite3(x) || !finite3(vNew)) { atomicOr(&status[0], ${CLOTH_STATUS.nonFinite}u); }
 }
-${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups, !!options.trustRegion, options.activeSet ?? true)}`;
+${clothNewtonWGSL(CLOTH_BINDING.newton, CLOTH_WORKGROUP, contact, options.pcg, !!options.subgroups, !!options.trustRegion, options.activeSet ?? true, contact && !!options.verifies)}`;
 }

@@ -322,6 +322,7 @@ export class ClothSystem {
     try { status = await e.mirror.readStatus(); } catch { return; } // device lost or destroyed
     if (this.destroyed || this.entries.get(e.document.id) !== e) return;
     if (status.solver & CLOTH_STATUS.nonFinite) this.fail('cloth-non-finite', ClothGPUSolver.describeStatus(status.solver & CLOTH_STATUS.nonFinite).join('; '), 'finishStep', e, [status.solver]);
+    if (status.solver & CLOTH_STATUS.unverifiedDone) this.fail('cloth-unverified-done', ClothGPUSolver.describeStatus(status.solver & CLOTH_STATUS.unverifiedDone).join('; '), 'finishStep', e, [status.solver]);
     const notes = OgcContactDetector.describeStatus(status.contact & ~CLOTH_CONTACT_FAILING);
     for (const name of notes) if (!this.notes.has(name)) this.notes.set(name, this.entryTime(e));
     if (status.contact & CLOTH_CONTACT_FAILING)

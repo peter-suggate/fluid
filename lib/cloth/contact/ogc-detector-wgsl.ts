@@ -139,15 +139,19 @@ const DECL: Record<number, string> = {
   17: "@group(0) @binding(17) var<storage, read> tgt: array<vec4<f32>>;",
   /** The Newton solver's control record (vec4: done, PCG done, the accepted step alpha, the step's Newton iterations). */
   19: "@group(0) @binding(19) var<storage, read> nwctl: array<vec4<f32>>;",
+  /** The end-of-step verification's indirect args (OGC_VERIFY_ARGS_WGSL writes them; the verify pass is dispatched from them). */
+  20: "@group(0) @binding(20) var<storage, read_write> vargs: array<u32>;",
 };
+/** The decision writes the Newton control's done word (the end-of-step verification's verdict). */
+const DECL_CTL_RW = "@group(0) @binding(19) var<storage, read_write> nwctl: array<vec4<f32>>;";
 /** Truncation writes the solver's positions; prep writes the predictions. */
 const DECL_POS_RW = "@group(0) @binding(2) var<storage, read_write> pos: array<vec4<f32>>;";
 const DECL_PRED_RW = "@group(0) @binding(14) var<storage, read_write> pred: array<vec4<f32>>;";
 
-/** The kernel's declarations; `rw` names the bindings among 2 and 14 it writes. */
+/** The kernel's declarations; `rw` names the bindings among 2, 14 and 19 it writes. */
 function header(bindings: readonly number[], rw: readonly number[] = []): string {
   return [PARAMS_STRUCT, OGC_COUNTERS_WGSL, OGC_COMMON_WGSL,
-    ...bindings.map(b => rw.includes(b) ? (b === 2 ? DECL_POS_RW : DECL_PRED_RW) : DECL[b])].join("\n");
+    ...bindings.map(b => rw.includes(b) ? (b === 2 ? DECL_POS_RW : b === 19 ? DECL_CTL_RW : DECL_PRED_RW) : DECL[b])].join("\n");
 }
 
 /**
@@ -866,8 +870,16 @@ fn main() {
  * step's Newton iterations (the line-search filter still re-places the projection's records about each iterate from
  * that set). The counters it consumes are consumed as before; a stall, a small step or a travel bound arms nothing.
  */
+/**
+ * With the Newton solver (level) the decision also takes the end-of-step verification's verdict (OGC_VERIFY_WGSL) and
+ * writes the solver's done word: a candidate done (2) that the radius-r query found complete becomes done (1); one with a
+ * pair within r and no entry becomes 0 and arms a re-detection round at the iterate, and Newton runs on (as after a
+ * stall). At the step's last iteration a missing pair cannot be re-detected: it is accepted as a one-step lag, counted
+ * (frameLagPairs, frameLagSteps) and never written as done. With the contact set frozen the same holds at every
+ * candidate (the frozen set is the step's by definition).
+ */
 export function ogcDecideWGSL(level: boolean, freeze = false): string {
-  return header(level ? [0, 8, 9, 10, 19] : [0, 9, 10]) + ARGS_FNS + /* wgsl */`
+  return header(level ? [0, 8, 9, 10, 19] : [0, 9, 10], level ? [19] : []) + ARGS_FNS + /* wgsl */`
 @compute @workgroup_size(1)
 fn main() {
   // A Newton iteration whose line search took no step on a cut arc (nwChoose: alpha 0, not done)
@@ -894,6 +906,25 @@ fn main() {
       }
     }
   }` : ""}
+  var verifyArm = false;
+  ${level ? `{
+    let mode = atomicExchange(&counters[OGC_VERIFY_MODE], 0u);
+    let missing = atomicExchange(&counters[OGC_VERIFY_MISSING], 0u);
+    if (mode != 0u) {
+      atomicAdd(&counters[OGC_F_VERIFIES], 1u);
+      if (mode == 1u && missing != 0u && ${freeze ? "false" : "true"}) {
+        atomicAdd(&counters[OGC_F_VERIFY_MISSING], 1u);
+        atomicAdd(&counters[OGC_F_MISSING_PAIRS], missing);
+        verifyArm = true;
+        nwctl[0].x = 0.0;
+      } else {
+        if (missing != 0u) { atomicAdd(&counters[OGC_F_LAG_PAIRS], missing); atomicAdd(&counters[OGC_F_LAG_STEPS], 1u); }
+        // A candidate: done when complete (or frozen); at the last iteration a lagged one stays not done.
+        if (mode == 1u) { nwctl[0].x = 1.0; }
+        else if (mode == 3u) { nwctl[0].x = select(0.0, 1.0, missing == 0u); }
+      }
+    }
+  }` : ""}
   atomicStore(&counters[OGC_FORCE_HELD], 0u);
   let ex = atomicExchange(&counters[OGC_EXCEED], 0u);
   // A vertex the line-search filter held at alpha 0 would hold the whole Newton step: re-detect.
@@ -902,7 +933,7 @@ fn main() {
   atomicAdd(&counters[OGC_F_TRUNCATED], ex);
   atomicMax(&counters[OGC_F_TRUNCATED_MAX], ex);
   var on = false;
-  if (${freeze ? "false" : "(ex > 0u && ex >= P.exceedThreshold) || stalled != 0u || noStep"}) {
+  if (${freeze ? "false" : "(ex > 0u && ex >= P.exceedThreshold) || stalled != 0u || noStep || verifyArm"}) {
     if (atomicLoad(&counters[OGC_ROUNDS]) < P.roundCap) {
       atomicAdd(&counters[OGC_ROUNDS], 1u);
       atomicAdd(&counters[OGC_F_REDETECTIONS], 1u);
@@ -2303,6 +2334,252 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
 }
 `;
 }
+
+// ------------------------------------------------------------------ end-of-step verification
+
+/**
+ * The end-of-step verification's arming (one thread, after each Newton iteration; Claude's ruling B on C2 RESULT 46 (1)).
+ * OGC's certificates guarantee no penetration over the round, not that every pair that comes within r at the iterate has
+ * an entry: a pair beyond r at the round's x_det can close inside r within the two caps. So whenever Newton would declare
+ * done (its done word 2, a candidate) the verify pass runs one radius-r query at the iterate; and at the step's last
+ * iteration (`last`: the solver's flag to afterNewtonStep, n = newton.iterations - 1) it runs when Newton is not done, to count the pairs a
+ * capped step leaves without an entry. The mode word tells the decision which (OGC_VERIFY_MODE).
+ */
+export function ogcVerifyArgsWGSL(last: boolean): string {
+  return header([0, 9, 19, 20]) + /* wgsl */`
+@compute @workgroup_size(1)
+fn main() {
+  let done = nwctl[0].x;
+  var mode = 0u;
+  if (done == 2.0) { mode = ${last ? "3u" : "1u"}; }
+  ${last ? "else if (done == 0.0) { mode = 2u; }" : ""}
+  atomicStore(&counters[OGC_VERIFY_MODE], mode);
+  atomicStore(&counters[OGC_VERIFY_MISSING], 0u);
+  vargs[0] = select(0u, P.wgNE, mode != 0u); vargs[1] = 1u; vargs[2] = 1u;
+}
+`;
+}
+
+/**
+ * The end-of-step verification: one query over the round's grid at radius r, at the iterate (the solver's positions; a
+ * sample at its round's predicted end x_det + w, exact: the moving solid's end pose), with no DAT pair, plane or entry.
+ * Each pair within r (0 < d < r) that OGC's detection at the iterate would record (Algorithm 1's blocks and ownership
+ * at the iterate; Algorithm 2's interior edge-edge pairs, counted once from the lower edge) must have an entry in the
+ * round's lists that Newton evaluates at a distance no larger than the pair's own:
+ *   vertex-face   an entry (v, t', feature F) of v with the iterate's closest feature f of t a subset of F's vertices
+ *                 (an entry is evaluated against its feature's affine hull, so F containing f is never further than f);
+ *   sample-face   likewise (the sample, w = 1), in the list of f's first vertex (every feature vertex holds it);
+ *   edge-edge     the entry (e, e2) of e's first vertex;
+ *   hull facet    any entry of the facet's solid in the vertex's list (one representation per solid: its field entry or
+ *                 its nearest facet, OGC_BOUND_WGSL ownSolids).
+ * Field entries are taken for every vertex within reach of the solid's band at detection (roundBound), and need none.
+ * The grid holds each face's round box, its swept box X -> X + w grown by its envelope; the round's cap keeps every
+ * cloth vertex within 0.45 of its envelope of its chord, so a face within r of a primitive is reached by the
+ * primitive's box grown by r. A vertex found outside its own swept box grown by its envelope (the hash does not cover
+ * it) counts as missing (frameUncovered), so the decision re-detects about it. Hull edges have DAT pairs only: none.
+ */
+export const OGC_VERIFY_WGSL = header([0, 1, 2, 4, 5, 7, 8, 9, 14]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+// The iterate: a cloth vertex's position, a sample's predicted end.
+fn cur(i: u32) -> vec3<f32> { if (i < P.N) { return pos[i].xyz; } return anchored(i); }
+fn ldEnt(u: u32, k: u32) -> vec4<u32> {
+  let b = P.entriesBase + 4u * (u * P.contactCap + k);
+  return vec4<u32>(atomicLoad(&contacts[b]), atomicLoad(&contacts[b + 1u]), atomicLoad(&contacts[b + 2u]), atomicLoad(&contacts[b + 3u]));
+}
+fn entCount(u: u32) -> u32 { return min(atomicLoad(&contacts[P.countsOff + u]), P.contactCap); }
+// A feature of a face as its vertices (unused slots OGC_NONE): vertex k < 3, edge 3 + k (k, k + 1), the face.
+fn featVerts(tri: vec3<u32>, f: u32) -> vec3<u32> {
+  if (f < 3u) { return vec3<u32>(tri[f], OGC_NONE, OGC_NONE); }
+  if (f < OGC_FACE) { let li = f - 3u; return vec3<u32>(tri[li], tri[(li + 1u) % 3u], OGC_NONE); }
+  return tri;
+}
+fn within(a: vec3<u32>, b: vec3<u32>) -> bool {
+  for (var k = 0u; k < 3u; k++) { if (a[k] != OGC_NONE && a[k] != b.x && a[k] != b.y && a[k] != b.z) { return false; } }
+  return true;
+}
+// An entry of u's list for the point p (a cloth vertex, w = 0; a sample, w = 1) against the feature f of a cloth face.
+fn hasFeatureEntry(u: u32, p: u32, w: u32, f: vec3<u32>) -> bool {
+  for (var k = 0u; k < entCount(u); k++) {
+    let e = ldEnt(u, k);
+    if (e.x != p || e.w != w || (e.y & OGC_EE_BIT) != 0u || e.y == OGC_SOLID_Y || e.y == OGC_BODY_Y) { continue; }
+    if (within(f, featVerts(triVerts(e.y & OGC_ID_MASK), (e.y >> 28u) & 7u))) { return true; }
+  }
+  return false;
+}
+// Algorithm 1's blocks and ownership (vfAccept) at the iterate.
+fn vfAcceptAt(v: u32, x: vec3<f32>, t: u32, tri: vec3<u32>, feature: u32) -> bool {
+  if (feature == OGC_FACE) { return true; }
+  if (feature < 3u) {
+    let k = tri[feature];
+    let xk = cur(k);
+    for (var i = topo[P.vtOffOff + k]; i < topo[P.vtOffOff + k + 1u]; i++) {
+      let f = topo[P.vtListOff + i];
+      if (f < t && !hasVertex(triVerts(f), v)) { return false; }
+    }
+    for (var i = topo[P.veOffOff + k]; i < topo[P.veOffOff + k + 1u]; i++) {
+      let er = edgeRec(topo[P.veListOff + i]);
+      let o = select(er.x, er.y, er.x == k);
+      if (dot(x - xk, xk - cur(o)) < 0.0) { return false; }
+    }
+    return true;
+  }
+  let li = feature - 3u;
+  let i = tri[li]; let j = tri[(li + 1u) % 3u];
+  let er = edgeRec(topo[P.triEdgesOff + 4u * t + li]);
+  let other = select(er.z, er.w, er.z == t);
+  if (other != OGC_NONE && other < t && !hasVertex(triVerts(other), v)) { return false; }
+  let xi = cur(i); let xj = cur(j); let dir = xj - xi;
+  if (dot(x - xi, dir) <= 0.0 || dot(x - xj, -dir) <= 0.0) { return false; }
+  for (var s = 0u; s < 2u; s++) {
+    let f = select(er.z, er.w, s == 1u);
+    if (f == OGC_NONE) { continue; }
+    let fv = triVerts(f);
+    var o = fv.x;
+    if (o == i || o == j) { o = fv.y; }
+    if (o == i || o == j) { o = fv.z; }
+    let xo = cur(o);
+    let p = xi + dir * (dot(xo - xi, dir) / dot(dir, dir));
+    if (dot(x - p, p - xo) < 0.0) { return false; }
+  }
+  return true;
+}
+// A point (cloth vertex v, or sample p with v = OGC_NONE) against the faces its r-box reaches.
+fn pointFaces(p: u32, v: u32) -> u32 {
+  var missing = 0u;
+  let x = cur(p);
+  let q = OgcBox(x - vec3<f32>(P.r), x + vec3<f32>(P.r));
+  let inv = invCell();
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
+  for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+    let c = vec3<i32>(cx, cy, cz);
+    let key = cellKey(c); let h = cellHash(c);
+    let end = min(bucketStart(h + 1u), P.gridCap);
+    for (var j = bucketStart(h); j < end; j++) {
+      if (entryKey(j) != key) { continue; }
+      let t = entryFace(j);
+      let tri = triVerts(t);
+      if (v != OGC_NONE && hasVertex(tri, v)) { continue; }
+      let box = entryBox(j);
+      if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+      let a = cur(tri.x); let b = cur(tri.y); let cc = cur(tri.z);
+      let cl = ogcClosestTriangle(x, a, b, cc);
+      let d = length(x - (cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc));
+      if (!(d > 0.0) || !(d < P.r) || !vfAcceptAt(v, x, t, tri, cl.feature)) { continue; }
+      let f = featVerts(tri, cl.feature);
+      var ok = false;
+      if (v != OGC_NONE) { ok = hasFeatureEntry(v, v, 0u, f); } else { ok = hasFeatureEntry(f.x, p, 1u, f); }
+      if (!ok) { missing++; }
+    }
+  } } }
+  return missing;
+}
+// Algorithm 2 at the iterate: interior edge-edge pairs within r, each counted from its lower edge.
+fn edgeEdges(e: u32) -> u32 {
+  var missing = 0u;
+  let er = edgeRec(e);
+  let p0 = cur(er.x); let p1 = cur(er.y);
+  let q = OgcBox(min(p0, p1) - vec3<f32>(P.r), max(p0, p1) + vec3<f32>(P.r));
+  let inv = invCell();
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
+  for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+    let c = vec3<i32>(cx, cy, cz);
+    let key = cellKey(c); let h = cellHash(c);
+    let end = min(bucketStart(h + 1u), P.gridCap);
+    for (var j = bucketStart(h); j < end; j++) {
+      if (entryKey(j) != key) { continue; }
+      let t = entryFace(j);
+      let box = entryBox(j);
+      if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+      let te = topo[P.triEdgesOff + 4u * t + 3u];
+      for (var k = 0u; k < 3u; k++) {
+        if ((te & (1u << k)) == 0u) { continue; }
+        let e2 = topo[P.triEdgesOff + 4u * t + k];
+        if (e2 <= e) { continue; }
+        let r2 = edgeRec(e2);
+        if (r2.x == er.x || r2.x == er.y || r2.y == er.x || r2.y == er.y) { continue; }
+        let st = ogcSegmentSegment(p0, p1, cur(r2.x), cur(r2.y));
+        if (!(st.z > 0.0) || !(st.z < P.r) || !(st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0)) { continue; }
+        var ok = false;
+        for (var m = 0u; m < entCount(er.x); m++) {
+          let ent = ldEnt(er.x, m);
+          if (ent.x == e && ent.y == (e2 | OGC_EE_BIT)) { ok = true; break; }
+        }
+        if (!ok) { missing++; }
+      }
+    }
+  } } }
+  return missing;
+}
+// A hull facet of the samples (hullFacetAt's slot k) against the cloth vertices its r-box reaches, each from its owner face.
+fn facetVertices(k: u32) -> u32 {
+  var missing = 0u;
+  var b = 4u * (P.facetBase + k); var off = P.N; var g = 0u;
+  if (k >= P.SF) { b = 4u * (P.bodyFacetBase + k - P.SF); off = P.N + P.S; g = 1u; }
+  let ids = vec3<u32>(atomicLoad(&contacts[b]), atomicLoad(&contacts[b + 1u]), atomicLoad(&contacts[b + 2u])) + vec3<u32>(off);
+  let a = cur(ids.x); let bb = cur(ids.y); let cc = cur(ids.z);
+  let q = OgcBox(min(min(a, bb), cc) - vec3<f32>(P.r), max(max(a, bb), cc) + vec3<f32>(P.r));
+  let inv = invCell();
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
+  for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+    let c = vec3<i32>(cx, cy, cz);
+    let key = cellKey(c); let h = cellHash(c);
+    let end = min(bucketStart(h + 1u), P.gridCap);
+    for (var j = bucketStart(h); j < end; j++) {
+      if (entryKey(j) != key) { continue; }
+      let box = entryBox(j);
+      if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+      let t = entryFace(j);
+      let tri = triVerts(t);
+      for (var m = 0u; m < 3u; m++) {
+        let v = tri[m];
+        if (topo[P.vtListOff + topo[P.vtOffOff + v]] != t) { continue; }
+        let x = cur(v);
+        let cl = ogcClosestTriangle(x, a, bb, cc);
+        let d = length(x - (cl.bary.x * a + cl.bary.y * bb + cl.bary.z * cc));
+        if (!(d > 0.0) || !(d < P.r)) { continue; }
+        var ok = false;
+        for (var n = 0u; n < entCount(v); n++) {
+          let e = ldEnt(v, n);
+          if ((g == 0u && e.y == OGC_SOLID_Y) || (g == 1u && e.y == OGC_BODY_Y)) { ok = true; break; }
+          if (e.w == 2u && (e.y & OGC_EE_BIT) == 0u && e.y != OGC_SOLID_Y && e.y != OGC_BODY_Y
+              && select(0u, 1u, (e.y & OGC_ID_MASK) >= P.facetCap) == g) { ok = true; break; }
+        }
+        if (!ok) { missing++; }
+      }
+    }
+  } } }
+  return missing;
+}
+// A cloth vertex outside its round box (its swept box X -> X + w grown by its envelope): the grid does not cover it.
+fn uncovered(v: u32) -> bool {
+  let x = xdet[v].xyz; let x1 = x + predOf(v); let e = vec3<f32>(envOf(v)); let y = cur(v);
+  return any(y < min(x, x1) - e) || any(y > max(x, x1) + e);
+}
+var<workgroup> wgMissing: atomic<u32>;
+var<workgroup> wgUncovered: atomic<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let i = gid.x;
+  var missing = 0u;
+  if (i < P.N) {
+    if (uncovered(i)) { atomicAdd(&wgUncovered, 1u); missing = 1u; }
+    else { missing = pointFaces(i, i); }
+  } else if (i < P.N + P.E) {
+    missing = edgeEdges(i - P.N);
+  } else if (i < P.N + P.E + P.S + P.SB) {
+    missing = pointFaces(i - P.E, OGC_NONE);
+  } else if (i >= P.N + P.E + P.S + P.SB + P.SE + P.SEB && i < P.N + P.E + P.S + P.SB + P.SE + P.SEB + P.SF + P.SFB) {
+    missing = facetVertices(i - P.N - P.E - P.S - P.SB - P.SE - P.SEB);
+  }
+  if (missing != 0u) { atomicAdd(&wgMissing, missing); }
+  workgroupBarrier();
+  if (li == 0u) {
+    let m = atomicLoad(&wgMissing);
+    if (m != 0u) { atomicAdd(&counters[OGC_VERIFY_MISSING], m); }
+    let u = atomicLoad(&wgUncovered);
+    if (u != 0u) { atomicAdd(&counters[OGC_F_UNCOVERED], u); }
+  }
+}
+`;
 
 /**
  * The per-vertex displacement cap in x_det.w. Isotropic: OGC's

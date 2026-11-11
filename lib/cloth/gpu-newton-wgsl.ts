@@ -89,7 +89,11 @@ export interface ClothContactLinLayout {
 /** Records per item: an entry ('factorized'), a partner term ('blocks'). */
 export const CLOTH_CONTACT_LIN_RECORDS = { factorized: 6, blocks: 2 } as const;
 
-export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false, activeSet = true): string {
+export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false, activeSet = true, verifies = false): string {
+  // The done word Newton writes when it stops: 1, done; with a verifying detector (ClothSolverContact.verifies) 2, a
+  // candidate done, which the contact hook's end-of-step radius-r query turns into 1 (every pair within r has an entry)
+  // or 0 (a missing pair: a re-detection round is armed and Newton runs on). Every kernel skips on a nonzero done.
+  const DONE = verifies ? '2.0' : '1.0';
   const S = CLOTH_NEWTON_SEGMENTS;
   // The PCG kernels' workgroup sum of the vec4 `part` into `total` (valid in lane 0; every lane has passed a barrier
   // after its last read of the staged u): with subgroups, subgroupAdd, the subgroups' partials through pcgRed and a
@@ -580,7 +584,7 @@ ${lin ? clothContactLinWGSL(lin) : ''}
         var rr = nw[nwControl() + 1u]; let e2 = pcgForcing(sums.z, rr, ctl.w);
         if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = e2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, e2, 0.0, 0.0);
       }
-      if (sums.z <= bitcast<f32>(P.newton1.z)) { if (lead) { nw[nwControl()].x = 1.0; } return; }
+      if (sums.z <= bitcast<f32>(P.newton1.z)) { if (lead) { nw[nwControl()].x = ${DONE}; } return; }
     }
     // The last dispatch's step reached the trust boundary (its alpha record -1): the solve is done.
     if (i >= 2u && scal.y < 0.0) { if (lead) { nw[nwControl()].y = 1.0; } return; }
@@ -725,7 +729,7 @@ ${lin ? clothContactLinWGSL(lin) : ''}
   }
   if (own) { nw[nseg(${S.d}u, v)] = vec4f(d, 0.0); }
   if (lead) {
-    if (stop == 2u) { nw[nwControl()].x = 1.0; } else { nw[nwControl()].y = 1.0; }
+    if (stop == 2u) { nw[nwControl()].x = ${DONE}; } else { nw[nwControl()].y = 1.0; }
     nw[nwControl() + 1u].w += taken;
     nw[nwTrustNorm()] = vec4f(dn, select(0.0, 1.0, edge), 0.0, 0.0);
   }
@@ -996,7 +1000,7 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0 && sm.w <= 1.0 && !(region && tn.y != 0.0);
   // (A rejected trust-region step is no stall: Delta shrinks and Newton runs on.)
   let stalled = chosen == 0.0 && !(sm.x > 0.0) && !region;
-  nw[nwControl()] = vec4f(select(0.0, 1.0, stalled || small), 0.0, chosen, ctl.w + 1.0);
+  nw[nwControl()] = vec4f(select(0.0, ${DONE}, stalled || small), 0.0, chosen, ctl.w + 1.0);
 }
 
 @compute @workgroup_size(${workgroup}) fn nwApply(@builtin(global_invocation_id) id: vec3u) {

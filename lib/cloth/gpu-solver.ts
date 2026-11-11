@@ -44,6 +44,9 @@ export interface ClothSolverContact {
   /** The detector's per-vertex contact state (OgcContactDetector.contactState; bit 1, the contact switched on in the
    * last step), which restarts the cloth's BDF2 history (finishStep, and the step after). */
   readonly state: GPUBuffer;
+  /** The detector verifies a candidate done at the end of the step (C2's radius-r query, OgcContactDetector.verifies):
+   * Newton writes done 2 and the contact hook (afterNewtonStep) 1 (clean) or 0 (a missing pair, re-detection armed). */
+  readonly verifies?: boolean;
 }
 
 /** Points inside one step where another lane encodes work into the solver's
@@ -57,7 +60,9 @@ export interface ClothStepHooks {
   /** After the PCG solve wrote the direction d (`newtonDirection`), before the line search; C2 writes the filter's alpha here. */
   filter?(pass: GPUComputePassEncoder): void;
   /** After each Newton iteration moved the iterate; C2 decides and runs re-detection rounds here. */
-  afterNewtonStep?(pass: GPUComputePassEncoder): void;
+  /** `last`: this is the step's final Newton iteration (n === newton.iterations - 1), where a verifying detector counts
+   * a missing pair as the one-step lag instead of arming a round (ClothSolverContact.verifies). */
+  afterNewtonStep?(pass: GPUComputePassEncoder, last: boolean): void;
   /** With contact: once per step after the last position update (and the diagnostics), before finishStep forms the
    * velocities and the BDF2 history; C2 writes the step's contact state here. */
   stepEnd?(pass: GPUComputePassEncoder): void;
@@ -555,7 +560,7 @@ export class ClothGPUSolver {
       ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : [])] });
     // The PCG reductions take two subgroupAdds where the device has subgroups of at least 16 lanes (256 / 16 partials).
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on' }) });
+    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? CONTACT_LIN_KERNELS : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
@@ -638,7 +643,7 @@ export class ClothGPUSolver {
       if (o.trustRegion === 'hybrid') this.run(pass, 'nwModel', this.tables.pcg.patches);
       this.run(pass, 'nwChoose', 1);
       this.run(pass, 'nwApply', W);
-      this.hooks.afterNewtonStep?.(pass);
+      this.hooks.afterNewtonStep?.(pass, n === o.iterations - 1);
       if (limited) this.run(pass, 'nwEdgeDuals', this.threads(this.E));
     }
     this.hooks.beforeFinish?.(pass);
@@ -819,7 +824,10 @@ export class ClothGPUSolver {
   }
 
   static describeStatus(status: number): string[] {
-    return status & CLOTH_STATUS.nonFinite ? ['A cloth position or velocity became non-finite'] : [];
+    const out: string[] = [];
+    if (status & CLOTH_STATUS.nonFinite) out.push('A cloth position or velocity became non-finite');
+    if (status & CLOTH_STATUS.unverifiedDone) out.push('Newton ended a step at a candidate done the contact detector never verified');
+    return out;
   }
 
   destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.newtonWork]) b.destroy(); }

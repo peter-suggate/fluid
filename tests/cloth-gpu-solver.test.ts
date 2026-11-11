@@ -112,6 +112,21 @@ test('newton.activeSet: the default is the active set\'s kernels exactly; \'off\
   }
 });
 
+test('a verifying contact detector: Newton writes a candidate done (2) at each of its stops and nothing else changes; the default compiles as before', () => {
+  // C2's end-of-step verification (Claude's ruling B on C2 RESULT 46 (1)): the contact hook turns a candidate done into
+  // 1 (every pair within r has an entry) or 0 (re-detection armed, Newton runs on).
+  const pcg = { patches: 4, patchVertices: 64, coarse: 0, levels: 1 } as unknown as Parameters<typeof clothNewtonWGSL>[3];
+  for (const subgroups of [false, true]) for (const trust of [false, true]) {
+    const plain = clothNewtonWGSL(3, 64, true, pcg, subgroups, trust);
+    assert.equal(clothNewtonWGSL(3, 64, true, pcg, subgroups, trust, true, false), plain);
+    const verifying = clothNewtonWGSL(3, 64, true, pcg, subgroups, trust, true, true);
+    const stops = (w: string, done: string) => [`nw[nwControl()].x = ${done};`, `select(0.0, ${done}, stalled || small)`].map(q => w.split(q).length - 1);
+    assert.deepEqual(stops(verifying, '2.0'), stops(plain, '1.0'));
+    assert.deepEqual(stops(verifying, '1.0'), [0, 0]);
+    assert.equal(verifying.replaceAll('2.0', '1.0'), plain.replaceAll('2.0', '1.0'), 'only the done value changes');
+  }
+});
+
 test('the bending stencil is the per-row bending: gradient, zero row sums, and a stiff fold against the oracle', async t => {
   const stiff: ClothMaterial = { ...cotton, id: 'stiff', bending_N_m: 2e-3, damping_s: 0.01 };
   const data = clothGridData({ columns: 7, rows: 7, width_m: 0.5, height_m: 0.5, origin_m: [0, 1, 0], group: (i, j) => j === 0 && (i === 0 || i === 6) ? 1 : 0 });
