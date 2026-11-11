@@ -14,6 +14,10 @@
  *
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js tools/gpu/fluid-gpu-run.sh timing \
  *     node --import tsx tools/benchmark-cloth-sphere.ts [--nodes 150] [--ticks 2,5,35,120] [--steps 10] [--profile 1] [--json out.json]
+ *       [--lin off|factorized|blocks] [--lin-records n]  newton.contactLinearization on the restored document (default:
+ *         the document's own, off) and its pool (vec4 records per vertex); the run then also reports the compiled
+ *         records' demand and replays the two build kernels (as a pair: the build reads the count's headers)
+ *       [--newton-iterations n]   the restored document's Newton cap (fixed-state comparisons: 1 or 2 iterations from one state)
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -38,6 +42,8 @@ const REBUILD = args.includes('--rebuild');
 const CACHE = opt('cache', join(homedir(), 'code/me/fluid-scratch/cloth-bench'));
 /** A dispatch at or under this GPU time is an early exit (measured: ~1-2 us for an exiting per-vertex dispatch). */
 const REPLAY = Number(opt('replay', '64'));
+/** newton.contactLinearization for the run ('' keeps the document's), and its pool. */
+const LIN = opt('lin', ''), LIN_RECORDS = opt('lin-records', ''), NEWTON_ITERATIONS = opt('newton-iterations', '');
 
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
 Object.assign(globalThis, dawn.globals);
@@ -197,7 +203,9 @@ function restored(tick: number): SceneDescription {
   const saved = JSON.parse(readFileSync(statePath(tick), 'utf8')) as { nodes: number; tick: number; document: ClothDocument };
   if (saved.nodes !== NODES || saved.tick !== tick) throw new Error(`${statePath(tick)} is not the ${NODES}-node state at tick ${tick}`);
   const scene = cloneScene(baseScene);
-  scene.cloth = [saved.document];
+  const d = saved.document, newton = d.solver?.newton ?? baseScene.cloth![0]!.solver!.newton!;
+  scene.cloth = [LIN || LIN_RECORDS || NEWTON_ITERATIONS ? { ...d, solver: { ...d.solver, newton: { ...newton, ...(LIN ? { contactLinearization: LIN as 'off' } : {}), ...(LIN_RECORDS ? { contactLinearizationRecords: Number(LIN_RECORDS) } : {}),
+    ...(NEWTON_ITERATIONS ? { iterations: Number(NEWTON_ITERATIONS) } : {}) } } } : d];
   return scene;
 }
 
@@ -216,18 +224,18 @@ async function stepOnce(cloth: ClothSystem): Promise<number> {
   return performance.now() - t;
 }
 
-interface StepReport { ms: number; spanMs: number; newton: number; counters: Awaited<ReturnType<NonNullable<ReturnType<ClothSystem['contactFor']>>['readCounters']>> }
+interface StepReport { ms: number; spanMs: number; newton: number; pcg: number; /** |g|^2 at the step's first and last Newton iteration, the last accepted step length. */ g2: [number, number]; alpha: number; lin?: Awaited<ReturnType<ClothGPUSolver['readContactLinearization']>>; counters: Awaited<ReturnType<NonNullable<ReturnType<ClothSystem['contactFor']>>['readCounters']>> }
 interface ProfileReport {
   steps: number; dispatches: number; worked: number; newtonWorked: number; pcgWorked: number; sumMs: number;
   groups: { group: string; dispatches: number; worked: number; ms: number }[];
 }
 /** Solver internals the profile reads (harness only). */
-type SolverInternals = { newtonWork: GPUBuffer; tables: { newtonRecords: number; pcg: { patches: number } }; N: number; T: number; E: number;
+type SolverInternals = { newtonWork: GPUBuffer; tables: { newtonRecords: number; pcg: { patches: number; contactLin?: unknown } }; N: number; T: number; E: number;
   run(pass: GPUComputePassEncoder, name: string, workgroups: number, record?: number): void; threads(n: number): number };
 const internals = (solver: ClothGPUSolver) => solver as unknown as SolverInternals;
 const controlOf = (solver: ClothGPUSolver) => ({ buffer: internals(solver).newtonWork, offset: 16 * (internals(solver).tables.newtonRecords - CLOTH_SEGMENT_ALIGN) });
 /** Solver kernels that exit on Newton done (control.x); pcgStep also on PCG done (control.y). */
-const NEWTON_GATED = new Set(['nwFaces', 'nwGradient', 'pcgStep', 'nwProject', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
+const NEWTON_GATED = new Set(['nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild', 'pcgStep', 'nwProject', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
 const PCG_GATED = new Set(['pcgStep']);
 
 async function timed(tick: number): Promise<StepReport[]> {
@@ -241,7 +249,7 @@ async function timed(tick: number): Promise<StepReport[]> {
     const spans = await stamps.collect();
     const control = await solver.readNewtonControl(), counters = await contact.readCounters();
     if (cloth.failure) throw new Error(`tick ${tick}+${s + 1}: ${cloth.failure.message}`);
-    out.push({ ms, spanMs: spans.reduce((a, r) => a + r.ns, 0) / 1e6, newton: control[3]!, counters });
+    out.push({ ms, spanMs: spans.reduce((a, r) => a + r.ns, 0) / 1e6, newton: control[3]!, pcg: control[7]!, g2: [control[4]!, control[5]!], alpha: control[2]!, lin: await solver.readContactLinearization(), counters });
   }
   cloth.destroy();
   return out;
@@ -284,18 +292,21 @@ async function replay(tick: number): Promise<{ kernel: string; us: number }[]> {
   const cloth = await ClothSystem.create(device, restored(tick), { statusInterval: 1 });
   await stepOnce(cloth);
   const solver = cloth.solverFor(documentId)!, S = internals(solver), W = S.threads(S.N), ctl = controlOf(solver), Wp = S.tables.pcg.patches;
-  const plan: [string, number, number][] = [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ['pcgStep', Wp, 0], ['pcgStep', Wp, 1],
+  const linKernels: [string, number, number][] = S.tables.pcg.contactLin ? [['nwLinCount', Wp, 0], ['nwLinBuild', Wp, 0]] : [];
+  // Timed as a pair: nwLinBuild turns the headers nwLinCount wrote into pool addresses, so it cannot be repeated alone.
+  const linPair: [string, number, number][] = linKernels.length ? [['nwLinCount+nwLinBuild', Wp, 0]] : [];
+  const plan: [string, number, number][] = [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linPair, ['pcgStep', Wp, 0], ['pcgStep', Wp, 1],
     ['pcgStep', Wp, 2], ['nwProject', W, 0], ['nwTrial', W, 0], ['nwChoose', 1, 0], ['nwApply', W, 0]];
   const set = device.createQuerySet({ type: 'timestamp', count: 2 * plan.length });
   const encoder = device.createCommandEncoder({ label: 'bench replay' });
   device.queue.writeBuffer(ctl.buffer, ctl.offset, new Float32Array(4));
   // Prime the PCG state (dispatches 0 and 1) so the timed dispatch 2 is a full iteration, then time each kernel.
   const prime = encoder.beginComputePass();
-  for (const [name, wg, record] of [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ['pcgStep', Wp, 0], ['pcgStep', Wp, 1]] as const) S.run(prime, name, wg, record);
+  for (const [name, wg, record] of [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linKernels, ['pcgStep', Wp, 0], ['pcgStep', Wp, 1]] as [string, number, number][]) S.run(prime, name, wg, record);
   prime.end();
   plan.forEach(([name, wg, record], k) => {
     const pass = encoder.beginComputePass({ timestampWrites: { querySet: set, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } });
-    for (let r = 0; r < REPLAY; r++) S.run(pass, name, wg, record);
+    for (let r = 0; r < REPLAY; r++) for (const kernel of name.split('+')) S.run(pass, kernel, wg, record);
     pass.end();
   });
   const resolve = device.createBuffer({ size: 16 * plan.length, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
@@ -318,7 +329,7 @@ const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return
 
 await buildStates();
 const vertices = baseScene.cloth![0]!.geometry.data.restPositions_m.length / 3;
-console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}`);
+console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}${LIN ? `, contactLinearization ${LIN}` : ''}`);
 const report: Record<string, unknown>[] = [];
 for (const tick of TICKS) {
   const steps = await timed(tick), prof = PROFILE_STEPS > 0 ? await profile(tick) : undefined;
@@ -327,7 +338,10 @@ for (const tick of TICKS) {
   console.log(`\n== from tick ${tick}: ${STEPS} steps`);
   console.log(`  fenced ms/step median ${median(steps.map(s => s.ms)).toFixed(2)} (min ${Math.min(...steps.map(s => s.ms)).toFixed(2)}, max ${Math.max(...steps.map(s => s.ms)).toFixed(2)}); `
     + `GPU span median ${median(steps.map(s => s.spanMs)).toFixed(2)} ms`);
-  console.log(`  Newton iterations used per step: ${steps.map(s => s.newton).join(' ')}`);
+  console.log(`  Newton iterations used per step: ${steps.map(s => s.newton).join(' ')}; PCG iterations per step: ${steps.map(s => s.pcg).join(' ')}`);
+  console.log(`  |g|^2 at the first / last Newton iteration per step: ${steps.map(s => `${s.g2[0].toExponential(4)}/${s.g2[1].toExponential(4)}`).join(' ')}; last step length ${steps.map(s => s.alpha).join(' ')}`);
+  const lin = steps[steps.length - 1]!.lin;
+  if (lin) console.log(`  contact linearization '${lin.mode}' (last Newton iteration of the last step): ${lin.rows} rows, ${lin.items} items, ${lin.usedRecords} records used (${lin.usedBytes} B) of ${lin.poolRecords} (${lin.poolBytes} B), demand ${lin.demandRecords}; rows left matrix-free ${lin.fallbackRows}`);
   console.log(`  detector per step: candidates ${c.map(x => x.candidates).join(' ')}; pairs (vf+ee) ${c.map(x => x.vfPairs + x.eePairs).join(' ')}; `
     + `rounds (detections+redetections) ${c.map(x => x.detections + x.redetections).join(' ')}; solid contacts ${c.map(x => x.solidContacts).join(' ')}; held ${c.map(x => x.held).join(' ')}; held for plane-record overflow (sum/max) ${c.map(x => `${x.planeRecordHeld}/${x.planeRecordHeldMax}`).join(' ')}; plane-record peak ${c.map(x => x.framePeakPlaneRecords).join(' ')}; status ${c.map(x => x.status).join(' ')}`);
   if (prof) {

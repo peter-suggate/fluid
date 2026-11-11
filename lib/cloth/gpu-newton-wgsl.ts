@@ -71,7 +71,23 @@ export interface ClothPCGLayout {
   /** Largest blocks per row and bending entries per row over the patches. */
   readonly maxK1: number;
   readonly maxK2: number;
+  /** newton.contactLinearization other than 'off' (with contact): the compiled contact records' layout; omitted, the
+   * matrix-free product and no kernel of this. */
+  readonly contactLin?: ClothContactLinLayout;
 }
+
+/** The compiled contact linearization in `nw` (vec4 records; gpu-solver.ts lays it out before the control block): one
+ * header per vertex (first record, items, records asked, 0; u32 bits), one total per PCG patch, then the pool. */
+export interface ClothContactLinLayout {
+  readonly mode: 'factorized' | 'blocks';
+  readonly head: number;
+  readonly patch: number;
+  readonly pool: number;
+  /** Pool size, vec4 records. */
+  readonly records: number;
+}
+/** Records per item: an entry ('factorized'), a partner term ('blocks'). */
+export const CLOTH_CONTACT_LIN_RECORDS = { factorized: 6, blocks: 2 } as const;
 
 export function clothNewtonWGSL(binding: number, workgroup: number, contact: boolean, pcg: ClothPCGLayout, subgroups = false, trustRegion = false, activeSet = true): string {
   const S = CLOTH_NEWTON_SEGMENTS;
@@ -88,6 +104,10 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   workgroupBarrier();
   for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { pcgRed[lane] += pcgRed[lane + s]; } workgroupBarrier(); }
   let total = pcgRed[0];`;
+  // The contact product of row v: matrix-free, or through the compiled records (nwLinHv).
+  const lin = contact ? pcg.contactLin : undefined;
+  if (lin && CLOTH_CONTACT_LIN_RECORDS[lin.mode] === undefined) throw new Error(`Unknown cloth contact linearization ${String(lin.mode)}`);
+  const contactHv = lin ? 'nwLinHv(v)' : 'ogcVertexContactHvLanes(v, 0u, 1u)';
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
 const NW_WG = ${workgroup}u;
@@ -526,7 +546,7 @@ fn pcgRowProduct(lane: u32, K1: u32, K2: u32, blocks: u32, bends: u32) -> vec3f 
   }
   return w;
 }
-
+${lin ? clothContactLinWGSL(lin) : ''}
 // PCG dispatch i (R.range.z, from 0). i = 0: u_0 = M^-1 r_0, w_0 = H u_0 and the partials (r.u, w.u, |g|^2). i >= 1:
 // gamma = r.u and delta = w.u of iteration i - 1 (with i = 1 the Newton residual test), beta = gamma / gamma_{i-2},
 // alpha = gamma / (delta - beta gamma / alpha_{i-2}); then p_{i-1} = u_{i-1} + beta p_{i-2}, s_{i-1} = w_{i-1} + beta
@@ -618,7 +638,7 @@ fn pcgRowProduct(lane: u32, K1: u32, K2: u32, blocks: u32, bends: u32) -> vec3f 
   if (own) {
     w = pcgRowProduct(lane, K1, K2, blocks, bends);
     // Contact pairs (C2), matrix-free: the sum over v's entries of w_v M (sum_j w_j u_j), linearized at the iterate.
-    ${contact ? 'if (!nwPinned(v)) { w = nwProjectP(v, w + ogcVertexContactHvLanes(v, 0u, 1u)); }' : ''}
+    ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${contactHv}); }` : ''}
     nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
   }
   ${reduce('vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0)')}
@@ -696,7 +716,7 @@ fn pcgRowProduct(lane: u32, K1: u32, K2: u32, blocks: u32, bends: u32) -> vec3f 
         let e = nw[bends + m * PCG_PATCH + lane];
         w += e.y * pcgULocal(bitcast<u32>(e.x)) + e.w * pcgULocal(bitcast<u32>(e.z));
       }
-      ${contact ? 'if (!nwPinned(v)) { w = nwProjectP(v, w + ogcVertexContactHvLanes(v, 0u, 1u)); }' : ''}
+      ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${contactHv}); }` : ''}
     }
     // The reduction's barriers also order this iteration's reads of the staged u before the next one overwrites it;
     // pcgOut is read after the next iteration's uniform load (a barrier).
@@ -900,7 +920,7 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   var w = vec3f(0.0); var wc = vec3f(0.0);
   if (own) {
     w = pcgRowProduct(lane, K1, K2, blocks, bends);
-    ${contact ? 'if (!nwPinned(v)) { wc = ogcVertexContactHvLanes(v, 0u, 1u); }' : ''}
+    ${contact ? `if (!nwPinned(v)) { wc = ${contactHv}; }` : ''}
   }
   // s.H s, and of it contact's share (the model record, control + 6, reads both).
   ${reduce('vec4f(dot(sv, w + wc), dot(sv, wc), 0.0, 0.0)')}
@@ -1027,5 +1047,137 @@ fn nwChosenCut(v: u32, alpha: f32) -> bool {
   if (D.w == 0.0) { return false; }
   return any(nw[nseg(${S.moves}u + u32(round(-log2(alpha))), v)].xyz != alpha * D.xyz);
 }` : ''}
+`;
+}
+
+/**
+ * The compiled contact linearization (newton.contactLinearization; plan cloth-m1-max-locality-2026-11-11, experiment 1).
+ * The matrix-free product re-derives every entry's linearization (ogcEntryLin: ids, weights, Mn, Mf) in every PCG
+ * dispatch, though within one Newton iteration only the multiplied vector changes: the iterate, x_t, the entries and
+ * their lagged friction, the solids' poses and fields are all fixed from nwGradient to nwApply (detection rounds and
+ * position updates run in afterFrame, nwApply and afterNewtonStep only). So once per Newton iteration, after
+ * nwGradient and under its gate, two dispatches of one workgroup per PCG patch compile them:
+ *   nwLinCount  each row's record demand, its exclusive prefix within the patch (a workgroup scan) and the patch total;
+ *   nwLinBuild  the patch's base (the sum of the earlier patches' totals), then each row linearizes its entries with
+ *               ogcEntryLin itself, at the iterate, and writes its records in entry order.
+ * The pool is packed (the per-vertex capacity is 128 entries; a fixed slot per entry would be domain-sized). A row
+ * whose records do not fit is marked (header.x = LIN_NONE) and keeps the matrix-free product.
+ * 'factorized', 6 records an entry: the partners' columns (a lane of the row's own patch, else PCG_GLOBAL | vertex:
+ * pcgU's encoding), wc, wlc, and the symmetric wr Mn and wrl Mf (xx, xy, xz, yy | yz, zz, xx, xy | xz, yy, yz, zz).
+ * 'blocks', 2 records a partner term: B = wc_k wr Mn + wlc_k wrl Mf as (xx, xy, xz, column), (yy, yz, zz, 0).
+ * Mn and Mf are symmetric by construction (ogcEntryLin: scaled n n^T, scaled I - nl nl^T).
+ */
+function clothContactLinWGSL(lin: ClothContactLinLayout): string {
+  const factorized = lin.mode === 'factorized';
+  return /* wgsl */`
+// ---------------------------------------------------------------- compiled contact linearization
+const LIN_HEAD = ${lin.head}u;
+const LIN_PATCH = ${lin.patch}u;
+const LIN_POOL = ${lin.pool}u;
+const LIN_RECORDS = ${lin.records}u;
+// No record index: a finite f32 pattern (the headers live in a vec4f buffer).
+const LIN_NONE = 0x7f000000u;
+var<workgroup> linScan: array<u32, PCG_PATCH>;
+// The symmetric matrix (xx, xy, xz), (yy, yz, zz) times p.
+fn linSym(a: vec3f, b: vec3f, p: vec3f) -> vec3f {
+  return vec3f(a.x * p.x + a.y * p.y + a.z * p.z, a.y * p.x + b.x * p.y + b.y * p.z, a.z * p.x + b.y * p.y + b.z * p.z);
+}
+// Vertex j as a column of the patch in flight (pcgPatchIndex): its lane there, else global.
+fn linCol(j: u32) -> u32 {
+  if (j >= P.n.x) { return 0u; }
+  let slot = pcgVertexSlot(j);
+  if (slot / PCG_PATCH == pcgPatchIndex) { return slot % PCG_PATCH; }
+  return PCG_GLOBAL | j;
+}
+// Row v of the contact product from its compiled records, in entry order (ogcVertexContactHvLanes for a row the pool
+// could not hold).
+fn nwLinHv(v: u32) -> vec3f {
+  let h = bitcast<vec4u>(nw[LIN_HEAD + v]);
+  if (h.x == LIN_NONE) { return ogcVertexContactHvLanes(v, 0u, 1u); }
+  var out = vec3f(0.0);
+  for (var i = 0u; i < h.y; i++) {
+    ${factorized ? `let b = h.x + 6u * i;
+    let ids = bitcast<vec4u>(nw[b]); let wc = nw[b + 1u]; let wl = nw[b + 2u];
+    var q = vec3f(0.0); var ql = vec3f(0.0);
+    for (var k = 0u; k < 4u; k++) {
+      if (wc[k] != 0.0 || wl[k] != 0.0) { let p = pcgU(ids[k]); q += wc[k] * p; ql += wl[k] * p; }
+    }
+    let m0 = nw[b + 3u]; let m1 = nw[b + 4u]; let m2 = nw[b + 5u];
+    out += linSym(m0.xyz, vec3f(m0.w, m1.x, m1.y), q) + linSym(vec3f(m1.z, m1.w, m2.x), m2.yzw, ql);` : `let b = h.x + 2u * i;
+    let r0 = nw[b]; let r1 = nw[b + 1u];
+    out += linSym(r0.xyz, r1.xyz, pcgU(bitcast<u32>(r0.w)));`}
+  }
+  return out;
+}
+// Records an entry may take: 6; or two per partner term, of which a field entry has one and a pair at most four.
+fn linDemand(ent: vec4u) -> u32 {
+  return ${factorized ? '6u' : 'select(8u, 2u, ent.y == OGC_SOLID_Y || ent.y == OGC_BODY_Y)'};
+}
+@compute @workgroup_size(256) fn nwLinCount(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
+  let ctl = nwControlUniform(lane);
+  if (ctl.x != 0.0) { return; }
+  let p = wgIndex(wg, nwg); let rows = topo[pcgTable(p) + 7u];
+  let own = lane < rows; let v = select(0u, pcgRowVertex(p * PCG_PATCH + lane), own);
+  var c = 0u; var n = 0u;
+  if (own && !nwPinned(v)) {
+    let header = ogcContacts[0];
+    n = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+    let base = header.w + v * header.y;
+    for (var i = 0u; i < n; i++) { c += linDemand(ogcContacts[base + i]); }
+  }
+  // The inclusive prefix of the demands over the patch's lanes (Hillis-Steele: every lane reads, then every lane writes).
+  linScan[lane] = c;
+  workgroupBarrier();
+  for (var d = 1u; d < PCG_PATCH; d <<= 1u) {
+    var a = linScan[lane];
+    if (lane >= d) { a += linScan[lane - d]; }
+    workgroupBarrier();
+    linScan[lane] = a;
+    workgroupBarrier();
+  }
+  if (own) { nw[LIN_HEAD + v] = bitcast<vec4f>(vec4u(linScan[lane] - c, n, c, 0u)); }
+  if (lane == PCG_PATCH - 1u) { nw[LIN_PATCH + p] = bitcast<vec4f>(vec4u(linScan[lane], 0u, 0u, 0u)); }
+}
+@compute @workgroup_size(256) fn nwLinBuild(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
+  let ctl = nwControlUniform(lane);
+  if (ctl.x != 0.0) { return; }
+  let p = wgIndex(wg, nwg); let rows = topo[pcgTable(p) + 7u];
+  // The patch's base: the earlier patches' totals.
+  var a = 0u;
+  for (var k = lane; k < p; k += PCG_PATCH) { a += bitcast<u32>(nw[LIN_PATCH + k].x); }
+  linScan[lane] = a;
+  workgroupBarrier();
+  for (var s = PCG_PATCH / 2u; s > 0u; s >>= 1u) { if (lane < s) { linScan[lane] += linScan[lane + s]; } workgroupBarrier(); }
+  let patchBase = linScan[0];
+  if (lane >= rows) { return; }
+  let v = pcgRowVertex(p * PCG_PATCH + lane);
+  let h = bitcast<vec4u>(nw[LIN_HEAD + v]);
+  if (h.y == 0u) { return; }
+  let first = patchBase + h.x;
+  if (first + h.z > LIN_RECORDS) { nw[LIN_HEAD + v] = bitcast<vec4f>(vec4u(LIN_NONE, h.y, h.z, 0u)); return; }
+  pcgPatchIndex = p;
+  let header = ogcContacts[0]; let params = bitcast<vec4f>(ogcContacts[1]);
+  let eb = header.w + v * header.y; let xv = ogcX(v);
+  var at = LIN_POOL + first; var items = 0u;
+  for (var i = 0u; i < h.y; i++) {
+    let l = ogcEntryLin(v, xv, ogcContacts[eb + i], params);
+    let A = l.wr * l.Mn; let F = l.wrl * l.Mf;
+    ${factorized ? `var ids = vec4u(0u);
+    for (var k = 0u; k < 4u; k++) { if (l.wc[k] != 0.0 || l.wlc[k] != 0.0) { ids[k] = linCol(l.ids[k]); } }
+    nw[at] = bitcast<vec4f>(ids); nw[at + 1u] = l.wc; nw[at + 2u] = l.wlc;
+    nw[at + 3u] = vec4f(A[0][0], A[1][0], A[2][0], A[1][1]);
+    nw[at + 4u] = vec4f(A[2][1], A[2][2], F[0][0], F[1][0]);
+    nw[at + 5u] = vec4f(F[2][0], F[1][1], F[2][1], F[2][2]);
+    at += 6u; items++;` : `for (var k = 0u; k < 4u; k++) {
+      if (l.wc[k] != 0.0 || l.wlc[k] != 0.0) {
+        let B = l.wc[k] * A + l.wlc[k] * F;
+        nw[at] = vec4f(B[0][0], B[1][0], B[2][0], bitcast<f32>(linCol(l.ids[k])));
+        nw[at + 1u] = vec4f(B[1][1], B[2][1], B[2][2], 0.0);
+        at += 2u; items++;
+      }
+    }`}
+  }
+  nw[LIN_HEAD + v] = bitcast<vec4f>(vec4u(LIN_POOL + first, items, h.z, 0u));
+}
 `;
 }

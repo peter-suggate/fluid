@@ -126,6 +126,16 @@ export interface ClothNewtonSettings {
    * outward normals of the certificates binding the accepted trial (with the KKT release); 'off', no active set (the
    * projected line search alone). 'off' is the contact-gap ablation's (C1 RESULT 42) stage (i), not a scene setting. */
   readonly activeSet?: "on" | "off";
+  /** The contact product H_c p of the PCG solve (and the trust region's model): 'off' (default), matrix-free, every
+   * entry re-linearized in every product (ogcVertexContactHvLanes); 'factorized' or 'blocks', the same linearization
+   * compiled once per Newton iteration into packed records the product streams through (gpu-newton-wgsl.ts,
+   * nwLinBuild): 'factorized' six vec4 an entry (columns, both weight sets, wr Mn, wrl Mf), 'blocks' two vec4 a
+   * partner term (the symmetric block and its column). The same operator to f32 rounding; an A/B switch. */
+  readonly contactLinearization?: "off" | "factorized" | "blocks";
+  /** vec4 records of the compiled contact pool per vertex (default 32, 512 B a vertex), authored from the scene's
+   * measured demand (ClothGPUSolver.readContactLinearization). A row whose records do not fit keeps the matrix-free
+   * product, so an undersized pool costs time, never the operator. */
+  readonly contactLinearizationRecords?: number;
 }
 
 /** Per-scene solver authoring. The cloth takes exactly one implicit step per

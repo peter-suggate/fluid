@@ -24,7 +24,7 @@
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothNewtonSettings, ClothSolverStateData, ClothVector } from './types';
 import { CLOTH_INITIAL_GUESS, type ClothInitialGuess, type ClothSolverModel } from './oracle';
-import { clothNewtonSegmentCount, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, type ClothPCGLayout } from './gpu-newton-wgsl';
+import { clothNewtonSegmentCount, CLOTH_CONTACT_LIN_RECORDS, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, type ClothPCGLayout } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
   CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
@@ -88,7 +88,8 @@ export interface ClothGPUSolverOptions {
 
 export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
-export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0, trustRegion: 'off' as 'off' | 'hybrid', activeSet: 'on' as 'on' | 'off' });
+export const CLOTH_NEWTON_DEFAULTS = Object.freeze({ pcgTolerance: 1e-3, residualTolerance: 1e-4, velocityTolerance_m_s: 0, forcingMax: 0, trustRegion: 'off' as 'off' | 'hybrid', activeSet: 'on' as 'on' | 'off',
+  contactLinearization: 'off' as 'off' | 'factorized' | 'blocks', contactLinearizationRecords: 32 });
 
 export interface ClothStatusSlot {
   readonly step: number;
@@ -330,7 +331,7 @@ export function compileClothPCGPatches(model: ClothSolverModel, stencil: ReturnT
   return { patches, shared, rows, vertexSlot, table, halo, columns, faceSlots, edgeSlots, stencilDest, blockRecords, bendRecords, maxK1, maxK2, maxHalo };
 }
 
-export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess'> & { readonly contact?: unknown }, time_s = 0, workgroupStorageBytes = 16384): ClothGPUTables {
+export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess'> & { readonly contact?: unknown; readonly newton?: Pick<ClothNewtonSettings, 'contactLinearization' | 'contactLinearizationRecords'> }, time_s = 0, workgroupStorageBytes = 16384): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, M = model.materials.length, S = model.scripts.length;
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
@@ -400,7 +401,15 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const newtonBends = newtonBlocks + pcg.blockRecords, newtonPartials = align(newtonBends + pcg.bendRecords, CLOTH_SEGMENT_ALIGN);
   const pcgPartials = align(newtonPartials + CLOTH_NEWTON_TRIAL_RECORDS * workgroups, CLOTH_SEGMENT_ALIGN);
   const pcgScalars = pcgPartials + CLOTH_PCG_PARTIALS * pcg.patches;
-  const newtonControl = align(pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN);
+  // The compiled contact linearization (newton.contactLinearization, with contact): a header per vertex, a total per
+  // patch, the pool; before the control block, which stays last.
+  const linMode = options.contact ? options.newton?.contactLinearization ?? 'off' : 'off';
+  if (linMode !== 'off' && CLOTH_CONTACT_LIN_RECORDS[linMode] === undefined) throw new Error(`Unknown cloth Newton contactLinearization ${String(linMode)}`);
+  const linPerVertex = options.newton?.contactLinearizationRecords ?? CLOTH_NEWTON_DEFAULTS.contactLinearizationRecords;
+  if (!(Number.isInteger(linPerVertex) && linPerVertex >= 1)) throw new Error(`Cloth Newton contactLinearizationRecords must be a positive integer, got ${String(linPerVertex)}`);
+  const linHead = align(pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN), linPatch = linHead + stride, linPool = align(linPatch + pcg.patches, CLOTH_SEGMENT_ALIGN);
+  const contactLin = linMode === 'off' ? undefined : { mode: linMode, head: linHead, patch: linPatch, pool: linPool, records: linPerVertex * N };
+  const newtonControl = align(contactLin ? linPool + contactLin.records : pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN);
   // The patch table's relative offsets become absolute: halo and columns (topo words), blocks and bending entries (nw records).
   for (let p = 0; p < pcg.patches; p++) {
     const w = topoBase[10]! + CLOTH_PCG_PATCH_WORDS * p;
@@ -410,15 +419,17 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   params.set([topoBase[10]!, topoBase[13]!, topoBase[14]!, topoBase[15]!, pcgPartials, pcg.patches, pcgScalars, 0, topoBase[16]!, topoBase[17]!, 0, 0], PARAM_NEWTON + 8);
   return { topo, rest, trianglesWord: topoBase[6]!, edgesWord: topoBase[7]!, params, strainLimited, damped, stride, edgeDualRecord,
     dampFaceRecord, partialRecord, clockRecord, stateRecords, newtonRecords: newtonControl + CLOTH_SEGMENT_ALIGN,
-    pcg: { shared: pcg.shared, maxK1: pcg.maxK1, maxK2: pcg.maxK2, patches: pcg.patches, maxHalo: pcg.maxHalo } };
+    pcg: { shared: pcg.shared, maxK1: pcg.maxK1, maxK2: pcg.maxK2, patches: pcg.patches, maxHalo: pcg.maxHalo, ...(contactLin ? { contactLin } : {}) } };
 }
 
 const NEWTON_KERNELS = ['nwBeginStep', 'nwFaces', 'nwGradient', 'pcgStep', 'pcgSolve', 'nwTrial', 'nwModel', 'nwChoose', 'nwApply', 'nwEdgeDuals'] as const;
 /** With contact: the projected arc's trial moves (after the filter hook, before nwTrial). */
 const CONTACT_NEWTON_KERNELS = ['nwProject'] as const;
+/** With newton.contactLinearization: the compiled contact records' count and build (after nwGradient). */
+const CONTACT_LIN_KERNELS = ['nwLinCount', 'nwLinBuild'] as const;
 /** With contact: the BDF2 restart's scans of C2's contact state. */
 const RESTART_KERNELS = ['restartScan', 'onsetScan'] as const;
-type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number];
+type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number] | typeof CONTACT_LIN_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'diagnose', 'reduceDiagnostics', 'finishStep', ...NEWTON_KERNELS];
 
 export class ClothGPUSolver {
@@ -455,6 +466,8 @@ export class ClothGPUSolver {
     if (!(this.newton.forcingMax >= 0 && this.newton.forcingMax < 1)) throw new Error(`Cloth Newton forcingMax must be in [0, 1), got ${this.newton.forcingMax}`);
     if (this.newton.trustRegion !== 'off' && this.newton.trustRegion !== 'hybrid') throw new Error(`Unknown cloth Newton trustRegion ${String(this.newton.trustRegion)}`);
     if (this.newton.activeSet !== 'on' && this.newton.activeSet !== 'off') throw new Error(`Unknown cloth Newton activeSet ${String(this.newton.activeSet)}`);
+    if (this.newton.contactLinearization !== 'off' && this.newton.contactLinearization !== 'factorized' && this.newton.contactLinearization !== 'blocks')
+      throw new Error(`Unknown cloth Newton contactLinearization ${String(this.newton.contactLinearization)}`);
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
     if (options.contact && !(options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
       throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
@@ -544,7 +557,7 @@ export class ClothGPUSolver {
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
     const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on' }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
-    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : [])];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? CONTACT_LIN_KERNELS : [])];
     const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
@@ -612,6 +625,8 @@ export class ClothGPUSolver {
     for (let n = 0; n < o.iterations; n++) {
       this.run(pass, 'nwFaces', this.threads(this.T));
       this.run(pass, 'nwGradient', W);
+      // The contact linearization at this iterate, compiled for every product of the iteration (pcgStep, nwModel).
+      if (this.tables.pcg.contactLin) for (const name of CONTACT_LIN_KERNELS) this.run(pass, name, this.tables.pcg.patches);
       // PCG: dispatch 0 starts the solve, dispatch i >= 1 takes iteration i (one dispatch each, Chronopoulos-Gear).
       // One patch (every vertex a row of one workgroup): the whole solve in one dispatch, its stop a loop break.
       if (this.tables.pcg.patches === 1) this.run(pass, 'pcgSolve', 1, o.pcgIterations);
@@ -649,6 +664,27 @@ export class ClothGPUSolver {
     const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 112));
     out[6] = new Float32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 8)[6]! / this.newton.residualTolerance ** 2;
     return out;
+  }
+
+  /** The compiled contact linearization as the last Newton iteration that ran left it (harness reads; never a step
+   * path): the pool and what the rows asked of it, the items built (entries, or partner terms for 'blocks') and the
+   * rows left on the matrix-free product because their records did not fit. Undefined with the switch off. */
+  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; entries: number; rows: number; fallbackRows: number; poolBytes: number; usedBytes: number } | undefined> {
+    const L = this.tables.pcg.contactLin;
+    if (!L) return undefined;
+    const per = CLOTH_CONTACT_LIN_RECORDS[L.mode];
+    const [head, patch] = await Promise.all([this.readRange(this.newtonWork, 16 * L.head, 16 * this.N), this.readRange(this.newtonWork, 16 * L.patch, 16 * this.tables.pcg.patches)]);
+    const h = new Uint32Array(head), t = new Uint32Array(patch);
+    let demandRecords = 0, items = 0, entries = 0, rows = 0, fallbackRows = 0;
+    for (let p = 0; p < this.tables.pcg.patches; p++) demandRecords += t[4 * p]!;
+    for (let v = 0; v < this.N; v++) {
+      if (h[4 * v + 2] === 0) continue;
+      rows++;
+      // A row left on the matrix-free product keeps its entry count in y; a compiled one holds its items there.
+      if (h[4 * v] === 0x7f000000) fallbackRows++; else items += h[4 * v + 1]!;
+      entries += L.mode === 'factorized' || h[4 * v] === 0x7f000000 ? h[4 * v + 1]! : 0;
+    }
+    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, entries, rows, fallbackRows, poolBytes: 16 * L.records, usedBytes: 16 * per * items };
   }
 
   /** Encode `steps` steps in one compute pass of `encoder`. */
