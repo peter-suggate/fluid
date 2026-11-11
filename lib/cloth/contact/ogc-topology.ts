@@ -133,3 +133,35 @@ export function buildOgcEdges(triangles: Uint32Array): Uint32Array {
   }
   return Uint32Array.from(out);
 }
+
+/** Words of a compiled face record (buildOgcFaceRecords). */
+export const OGC_FACE_RECORD_WORDS = 8;
+
+/**
+ * Compiled face records for the detector's locality switch (OgcContactConfig.locality "topology"), 8 words a face:
+ *   v0 v1 v2 flags e0 e1 e2 0
+ * flags bits 0-2: the face owns edge k (it is the edge's face0; triEdges' mask); bits 3-5: edge k's table order is
+ * reversed against the face's (the edge's v0 is the face's vertex k + 1), so a query rebuilds the edge's endpoints in
+ * the edge table's own order; bits 6-8: the face is the owner of its vertex k (the first of the vertex's ascending
+ * face list). One load then stands for the chain triEdges -> edge record, and for vtOff -> vtList.
+ * Derived from the topology words alone, so it is rebuilt whenever they are (a cut, load or undo rebuilds both).
+ */
+export function buildOgcFaceRecords(topology: OgcTopology): Uint32Array {
+  const L = topology.layout, w = topology.words, T = L.triangleCount;
+  const out = new Uint32Array(OGC_FACE_RECORD_WORDS * T);
+  for (let t = 0; t < T; t++) {
+    const b = OGC_FACE_RECORD_WORDS * t;
+    let flags = w[L.triEdgesOffset + 4 * t + 3]!;
+    if (flags > 7) throw new Error(`OGC face records: face ${t} has an unknown ownership mask ${flags}`);
+    for (let k = 0; k < 3; k++) {
+      const v = w[L.trisOffset + 4 * t + k]!, next = w[L.trisOffset + 4 * t + (k + 1) % 3]!;
+      const e = w[L.triEdgesOffset + 4 * t + k]!, e0 = w[L.edgesOffset + 4 * e]!, e1 = w[L.edgesOffset + 4 * e + 1]!;
+      if (e0 === next && e1 === v) flags |= 8 << k;
+      else if (!(e0 === v && e1 === next)) throw new Error(`OGC face records: edge ${e} is not face ${t}'s edge ${k}`);
+      if (w[L.vtListOffset + w[L.vtOffOffset + v]!] === t) flags |= 64 << k;
+      out[b + k] = v; out[b + 4 + k] = e;
+    }
+    out[b + 3] = flags;
+  }
+  return out;
+}

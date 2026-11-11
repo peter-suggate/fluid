@@ -209,7 +209,7 @@ function meshOf(model: ClothSolverModel, origin: ClothVector): { mesh: OgcMeshTo
  * the field.
  */
 export async function createClothSceneContact(device: GPUDevice, model: ClothSolverModel, document: ClothDocument, origin: ClothVector,
-  field: ClothSolidField, dt_s: number, gravity_m_s2: readonly [number, number, number], bodyField?: ClothSolidField, newton = false): Promise<OgcContactDetector> {
+  field: ClothSolidField, dt_s: number, gravity_m_s2: readonly [number, number, number], bodyField?: ClothSolidField, newton = false, locality?: string): Promise<OgcContactDetector> {
   const r = clothContactRadius(document), { mesh, rest } = meshOf(model, origin), C = CLOTH_SCENE_CONTACT;
   const { vertexCount: N, faceCount: T, edgeCount: E } = model.topology;
   const edge = buildOgcTopology(mesh, rest).layout.maxEdgeLength;
@@ -228,6 +228,8 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     ...(document.solver?.contactFreeze ? { contactFreeze: document.solver.contactFreeze } : {}),
     ...(document.solver?.contactTravelBound ? { travelBound: document.solver.contactTravelBound } : {}),
     solidSampleCapacity: sampleCapacity(field, r, edge),
+    // The query kernels' locality switch (the system's option; default off).
+    ...(locality !== undefined ? { locality } : {}),
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),
   };

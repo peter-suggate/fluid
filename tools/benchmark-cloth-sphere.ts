@@ -14,6 +14,7 @@
  *
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js tools/gpu/fluid-gpu-run.sh timing \
  *     node --import tsx tools/benchmark-cloth-sphere.ts [--nodes 150] [--ticks 2,5,35,120] [--steps 10] [--profile 1] [--json out.json]
+ *       [--locality off|topology+geometry+offsets]   the detector's locality switch (OgcContactConfig.locality)
  *       [--lin off|factorized|blocks] [--lin-records n]  newton.contactLinearization on the restored document (default:
  *         the document's own, off) and its pool (vec4 records per vertex); the run then also reports the compiled
  *         records' demand and replays the two build kernels (as a pair: the build reads the count's headers)
@@ -39,6 +40,9 @@ const opt = (name: string, fallback: string) => { const i = args.indexOf(`--${na
 const NODES = Number(opt('nodes', '150')), TICKS = opt('ticks', '2,5,35,120').split(',').map(Number);
 const STEPS = Number(opt('steps', '10')), PROFILE_STEPS = Number(opt('profile', '1')), JSON_OUT = opt('json', '');
 const REBUILD = args.includes('--rebuild');
+/** The detector's locality switch for the timed, profiled and replayed systems (states are always built with it off). */
+const LOCALITY = opt('locality', 'off');
+const SYSTEM = { statusInterval: 1, ...(LOCALITY !== 'off' ? { contactLocality: LOCALITY } : {}) };
 const CACHE = opt('cache', join(homedir(), 'code/me/fluid-scratch/cloth-bench'));
 /** A dispatch at or under this GPU time is an early exit (measured: ~1-2 us for an exiting per-vertex dispatch). */
 const REPLAY = Number(opt('replay', '64'));
@@ -239,7 +243,7 @@ const NEWTON_GATED = new Set(['nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild
 const PCG_GATED = new Set(['pcgStep']);
 
 async function timed(tick: number): Promise<StepReport[]> {
-  const cloth = await ClothSystem.create(device, restored(tick), { statusInterval: 1 });
+  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
   const solver = cloth.solverFor(documentId)!, contact = cloth.contactFor(documentId)!;
   const out: StepReport[] = [];
   for (let s = 0; s < STEPS; s++) {
@@ -256,7 +260,7 @@ async function timed(tick: number): Promise<StepReport[]> {
 }
 
 async function profile(tick: number): Promise<ProfileReport> {
-  const cloth = await ClothSystem.create(device, restored(tick), { statusInterval: 1 });
+  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
   stamps.control = controlOf(cloth.solverFor(documentId)!);
   stamps.mode = 'split';
   for (let s = 0; s < PROFILE_STEPS; s++) await stepOnce(cloth);
@@ -289,7 +293,7 @@ async function profile(tick: number): Promise<ProfileReport> {
 /** Exact cost of one working dispatch of each hot solver kernel: after a step, Newton is re-armed and each kernel is
  * dispatched REPLAY times in one timestamped pass (the timestamp clock is 65.5 us coarse; this resolves it). */
 async function replay(tick: number): Promise<{ kernel: string; us: number }[]> {
-  const cloth = await ClothSystem.create(device, restored(tick), { statusInterval: 1 });
+  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
   await stepOnce(cloth);
   const solver = cloth.solverFor(documentId)!, S = internals(solver), W = S.threads(S.N), ctl = controlOf(solver), Wp = S.tables.pcg.patches;
   const linKernels: [string, number, number][] = S.tables.pcg.contactLin ? [['nwLinCount', Wp, 0], ['nwLinBuild', Wp, 0]] : [];
@@ -329,7 +333,7 @@ const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return
 
 await buildStates();
 const vertices = baseScene.cloth![0]!.geometry.data.restPositions_m.length / 3;
-console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}${LIN ? `, contactLinearization ${LIN}` : ''}`);
+console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}, locality ${LOCALITY}${LIN ? `, contactLinearization ${LIN}` : ''}`);
 const report: Record<string, unknown>[] = [];
 for (const tick of TICKS) {
   const steps = await timed(tick), prof = PROFILE_STEPS > 0 ? await profile(tick) : undefined;
@@ -354,6 +358,6 @@ for (const tick of TICKS) {
   report.push({ tick, steps, profile: prof, replay: costs });
 }
 await device.queue.onSubmittedWorkDone();
-if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify({ nodes: NODES, vertices, report }, null, 1));
+if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify({ nodes: NODES, vertices, locality: LOCALITY, report }, null, 1));
 if (errors.length) { console.error(`${errors.length} WebGPU errors`); process.exitCode = 1; }
 device.destroy();

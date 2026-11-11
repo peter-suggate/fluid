@@ -210,9 +210,11 @@ fn redoCap() -> u32 { return select(${OGC_REDO_ROUNDS + 1}u, ${OGC_REDO_MANDATOR
 // The fail-safe: every prediction held (and, with a moving solid, its impact zones carried).
 fn failSafeRound() -> bool { return atomicLoad(&counters[OGC_FORCE_HELD]) > ${OGC_REDO_ROUNDS}u; }
 `;
-const BODY_PAIR_FNS = REDO_CAP_FN + /* wgsl */`
+const BODY_ACCESS_FNS = /* wgsl */`
 fn withSolid(i: u32) -> bool { return (atomicLoad(&work[P.heldOff + i]) & 64u) != 0u; }
-fn sigmaOf(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&work[P.bodyOff + 8u * i + 7u])); }
+fn sigmaOf(i: u32) -> f32 { return bitcast<f32>(atomicLoad(&work[P.bodyOff + 8u * i + 7u])); }`;
+/** `access`: withSolid and sigmaOf (BODY_ACCESS_FNS, or the locality switch's round geometry records). */
+const bodyPairFns = (access: string) => REDO_CAP_FN + access + /* wgsl */`
 fn turnedPair(ids: vec4<u32>) -> bool {
   if (P.bodyBase == 0u || atomicLoad(&counters[OGC_ROUNDS]) != 0u) { return false; }
   var body = false;
@@ -241,6 +243,7 @@ fn pairStray(ids: vec4<u32>, nA: u32) -> vec2<f32> {
   return st;
 }
 `;
+const BODY_PAIR_FNS = bodyPairFns(BODY_ACCESS_FNS);
 
 const TOPO_FNS = /* wgsl */`
 fn triVerts(t: u32) -> vec3<u32> { let b = P.trisOff + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
@@ -276,6 +279,129 @@ fn entryBox(j: u32) -> OgcBox {
 fn bucketStart(h: u32) -> u32 {
   if (h >= P.H) { return grid[P.sums3Off]; }
   return grid[P.local1Off + h] + grid[P.local2Off + (h >> 10u)] + grid[P.local3Off + (h >> 20u)];
+}
+`;
+
+// ------------------------------------------------------------------ locality switch (cloth-m1-max-locality, Experiment 2)
+
+/**
+ * The query kernels' locality switch (OgcContactConfig.locality; default off, the kernels above unchanged). Each part
+ * replaces loads of the query roles and nothing else: the grid, the traversal, the tests and their order are the same,
+ * and every value read is the same bits, from another place.
+ *   topology  compiled face records (ogc-topology.ts buildOgcFaceRecords) in `loc` at word H + 8: a box-passing
+ *             record's owned edges, their endpoints (in the edge table's order) and its vertices' ownership come from
+ *             one 8-word load in place of triEdges -> edge record and vtOff -> vtList.
+ *   geometry  round geometry records in `geo`, two vec4<u32> per vertex and solid sample, written after prep by
+ *             OGC_LOC_GEOMETRY_WGSL: (X.xyz, envelope), (w.xyz, sigma | moving-with-solid << 31), in place of
+ *             x_det, pred and three regions of work.
+ *   offsets   the round's final bucket offsets in `loc` at [0, H], written after the scans by OGC_LOC_OFFSETS_WGSL:
+ *             bucketStart is one load in place of three prefix-table loads.
+ */
+export const OGC_LOCALITY_PARTS = ["topology", "geometry", "offsets"] as const;
+export type OgcLocalityPart = (typeof OGC_LOCALITY_PARTS)[number];
+export type OgcLocalityFlags = Readonly<Record<OgcLocalityPart, boolean>>;
+/** "off", or parts joined by "+" (e.g. "topology+geometry"). Anything else fails. */
+export function parseOgcLocality(value: unknown): OgcLocalityFlags {
+  const flags = { topology: false, geometry: false, offsets: false };
+  if (value === undefined || value === "off") return flags;
+  if (typeof value !== "string" || !value) throw new Error(`OGC: unknown locality "${String(value)}"`);
+  for (const part of value.split("+")) {
+    if (!(OGC_LOCALITY_PARTS as readonly string[]).includes(part) || flags[part as OgcLocalityPart])
+      throw new Error(`OGC: unknown locality "${value}" (off, or ${OGC_LOCALITY_PARTS.join(", ")} joined by +)`);
+    flags[part as OgcLocalityPart] = true;
+  }
+  return flags;
+}
+/** The bindings a query role uses under the switch (exactly: the pipelines' layouts are automatic). */
+export function ogcQueryBindings(L: OgcLocalityFlags): number[] {
+  return [0, 1, 4, 5, 7, 8, 9, 11, 14, ...(L.topology || L.offsets ? [24] : []), ...(L.geometry ? [25] : [])];
+}
+const DECL_LOC = "\n@group(0) @binding(24) var<storage, read> loc: array<u32>;\n";
+const DECL_GEO = "\n@group(0) @binding(25) var<storage, read> geo: array<vec4<u32>>;\n";
+const DECL_LOC_RW = "\n@group(0) @binding(24) var<storage, read_write> loc: array<u32>;\n";
+const DECL_GEO_RW = "\n@group(0) @binding(25) var<storage, read_write> geo: array<vec4<u32>>;\n";
+const LOC_BUCKET_AT = GRID_READ_FNS.indexOf("fn bucketStart(");
+if (LOC_BUCKET_AT < 0) throw new Error("OGC locality: GRID_READ_FNS no longer ends with bucketStart");
+/** GRID_READ_FNS with the final offsets in place of the prefix tables (off[H] is the total). */
+const LOC_GRID_READ_FNS = GRID_READ_FNS.slice(0, LOC_BUCKET_AT) + /* wgsl */`fn bucketStart(h: u32) -> u32 { return loc[min(h, P.H)]; }
+`;
+const LOC_TOPO_FNS = /* wgsl */`
+const OGC_FACE_RECORD_WORDS = 8u;
+struct OgcFaceRec { v: vec3<u32>, flags: u32, e: vec3<u32> }
+fn faceRecBase(t: u32) -> u32 { return P.H + 8u + OGC_FACE_RECORD_WORDS * t; }
+fn faceRec(t: u32) -> OgcFaceRec {
+  let b = faceRecBase(t);
+  return OgcFaceRec(vec3<u32>(loc[b], loc[b + 1u], loc[b + 2u]), loc[b + 3u], vec3<u32>(loc[b + 4u], loc[b + 5u], loc[b + 6u]));
+}
+fn faceVerts(t: u32) -> vec3<u32> { let b = faceRecBase(t); return vec3<u32>(loc[b], loc[b + 1u], loc[b + 2u]); }
+// Edge k of the face as its edge record's (v0, v1), in the edge table's order; the record's faces (zw) are not carried.
+fn faceEdge(f: OgcFaceRec, k: u32) -> vec4<u32> {
+  let a = f.v[k]; let b = f.v[(k + 1u) % 3u];
+  let rev = (f.flags & (8u << k)) != 0u;
+  return vec4<u32>(select(a, b, rev), select(b, a, rev), OGC_NONE, OGC_NONE);
+}
+`;
+/** The query's per-vertex reads from the round geometry records (in place of xd, PRED_FNS and triBoxFns' envelopes). */
+const LOC_GEO_FNS = /* wgsl */`
+fn xd(i: u32) -> vec3<f32> { return bitcast<vec3<f32>>(geo[2u * i].xyz); }
+fn envOf(i: u32) -> f32 { return bitcast<f32>(geo[2u * i].w); }
+fn triEnv(v: vec3<u32>) -> f32 { return max(envOf(v.x), max(envOf(v.y), envOf(v.z))); }
+fn predOf(i: u32) -> vec3<f32> { return bitcast<vec3<f32>>(geo[2u * i + 1u].xyz); }
+fn anchored(i: u32) -> vec3<f32> { return xd(i) + predOf(i); }
+fn invCell() -> f32 { return bitcast<f32>(atomicLoad(&counters[OGC_INV_CELL])); }
+// The least-shift bisection (shiftGap) and resolvePlane's support projection keep PRED_FNS' reads of the live buffers,
+// text for text: the compiler contracts x + a + t (w - a), and folds (x + w) - o against the live o, differently when
+// x comes from the record, and a last-bit difference there moves a shift or flips a conflict test at a tie.
+fn predLive(i: u32) -> vec3<f32> {
+  if (i < P.N) { return pred[i].xyz; }
+  if (i < P.N + P.S) { return vec3<f32>(0.0); }
+  return pred[P.N + i - P.S].xyz;
+}
+fn anchoredLive(i: u32) -> vec3<f32> { return xdet[i].xyz + predLive(i); }
+`;
+const LOC_BODY_ACCESS_FNS = /* wgsl */`
+fn withSolid(i: u32) -> bool { return (geo[2u * i + 1u].w & 0x80000000u) != 0u; }
+fn sigmaOf(i: u32) -> f32 { return bitcast<f32>(geo[2u * i + 1u].w & 0x7fffffffu); }`;
+
+/**
+ * locality "geometry": the round's geometry record of every vertex and solid sample, after prep and on prep's
+ * indirect slot (its threads stride over the ids, so the static samples are covered whatever the slot's size).
+ * Copies, bit for bit: x_det, the envelope, the prediction (0 for a static sample, the exact one of a moving solid's)
+ * and, with a moving solid, sigma_v with held bit 6 in its sign bit (sigma_v >= 0; a non-finite one already fails
+ * the step as nonFinite). Nothing between prep and the query writes any of them.
+ */
+export const OGC_LOC_GEOMETRY_WGSL = header([0, 4, 5, 14]) + DECL_GEO_RW + /* wgsl */`
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let total = P.N + P.S + P.SB;
+  for (var i = gid.x; i < total; i += 64u * nwg.x) {
+    var g0 = vec4<u32>(bitcast<vec3<u32>>(xdet[i].xyz), 0u);
+    var g1 = vec4<u32>(0u);
+    if (i < P.N) {
+      g0.w = atomicLoad(&work[P.envOff + i]);
+      var tail = 0u;
+      if (P.bodyBase != 0u) {
+        tail = (atomicLoad(&work[P.bodyOff + 8u * i + 7u]) & 0x7fffffffu) | ((atomicLoad(&work[P.heldOff + i]) & 64u) << 25u);
+      }
+      g1 = vec4<u32>(bitcast<vec3<u32>>(pred[i].xyz), tail);
+    } else if (i >= P.N + P.S) {
+      g1 = vec4<u32>(bitcast<vec3<u32>>(pred[P.N + i - P.S].xyz), 0u);
+    }
+    geo[2u * i] = g0; geo[2u * i + 1u] = g1;
+  }
+}
+`;
+
+/** locality "offsets": the final bucket offsets, after scan3 and on scan1's indirect slot (1024 buckets a workgroup). */
+export const OGC_LOC_OFFSETS_WGSL = header([0, 7]) + DECL_LOC_RW + /* wgsl */`
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+  let base = wg.x * 1024u + li * 4u;
+  for (var k = 0u; k < 4u; k++) {
+    let h = base + k;
+    if (h < P.H) { loc[h] = grid[P.local1Off + h] + grid[P.local2Off + (h >> 10u)] + grid[P.local3Off + (h >> 20u)]; }
+  }
+  if (base == 0u) { loc[P.H] = grid[P.sums3Off]; }
 }
 `;
 
@@ -1619,11 +1745,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  */
 export const OGC_QUERY_ROLES = ["queryVertex", "queryEdge", "querySample"] as const;
 export type OgcQueryRole = (typeof OGC_QUERY_ROLES)[number];
-export function ogcQueryWGSL(role: OgcQueryRole): string {
+export function ogcQueryWGSL(role: OgcQueryRole, L: OgcLocalityFlags = parseOgcLocality("off")): string {
+  // The locality switch (OGC_LOCALITY_PARTS): off, every fragment below is the baseline's own text.
+  const gridFns = L.offsets ? LOC_GRID_READ_FNS : GRID_READ_FNS;
+  const vertexFns = L.geometry ? LOC_GEO_FNS : triBoxFns(false) + "\nfn xd(i: u32) -> vec3<f32> { return xdet[i].xyz; }\n";
+  const pairFns = L.geometry ? bodyPairFns(LOC_BODY_ACCESS_FNS) : BODY_PAIR_FNS;
+  const faceTri = L.topology ? "faceVerts(t)" : "triVerts(t)";
+  const faceMask = L.topology ? "let fr = faceRec(t); let te = fr.flags;" : "let te = topo[P.triEdgesOff + 4u * t + 3u];";
   const lo = role === "queryVertex" ? "0u" : role === "queryEdge" ? "P.N" : "P.N + P.E";
   const hi = role === "queryVertex" ? "P.N" : role === "queryEdge" ? "P.N + P.E" : "P.N + P.E + P.S + P.SB + P.SE + P.SEB + P.SF + P.SFB";
-  return header([0, 1, 4, 5, 7, 8, 9, 11, 14]) + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + BODY_PAIR_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
-fn xd(i: u32) -> vec3<f32> { return xdet[i].xyz; }
+  return header(ogcQueryBindings(L).filter(b => b < 24)) + (L.topology || L.offsets ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS : "") + CELL_FNS + gridFns + vertexFns + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 
 // ---- DAT division pairs: every non-adjacent pair whose swept boxes meet and that is
 // within the larger of the two primitives' envelopes (a face's or an edge's is its
@@ -1690,7 +1821,7 @@ fn resolvePlane(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> vec4<f32> {
     let o = xdet[ids[nA]].xyz;
     var supA = 3.4e38; var supB = -3.4e38;
     for (var k = 0u; k < 4u; k++) {
-      let pr = dot(pl.xyz, anchored(ids[k]) - o);
+      let pr = dot(pl.xyz, ${L.geometry ? "anchoredLive" : "anchored"}(ids[k]) - o);
       if (k < nA) { supA = min(supA, pr); } else { supB = max(supB, pr); }
     }
     let g1 = supA - supB;
@@ -1766,8 +1897,8 @@ fn shiftGap(ids: vec4<u32>, nA: u32, n: vec3<f32>, anc: array<vec3<f32>, 4>, t: 
   var sa = 3.4e38; var sb = -3.4e38;
   for (var k = 0u; k < 4u; k++) {
     let i = ids[k];
-    var y = anchored(i);
-    if (i < P.N) { y = xdet[i].xyz + anc[k] + t * (predOf(i) - anc[k]); }
+    var y = ${L.geometry ? "anchoredLive" : "anchored"}(i);
+    if (i < P.N) { y = xdet[i].xyz + anc[k] + t * (${L.geometry ? "predLive" : "predOf"}(i) - anc[k]); }
     let pr = dot(n, y - o);
     if (k < nA) { sa = min(sa, pr); } else { sb = max(sb, pr); }
   }
@@ -2031,7 +2162,7 @@ fn vertexFacet(v: u32) -> RoleOut {
       out.scanned++;
       if (entryKey(j) != key) { out.collisions++; continue; }
       let t = entryFace(j);
-      let tri = triVerts(t);
+      let tri = ${faceTri};
       if (hasVertex(tri, v)) { continue; }
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
@@ -2087,7 +2218,7 @@ fn sampleFacet(i: u32) -> RoleOut {
     let box = entryBox(j);
     if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
     let t = entryFace(j);
-    let tri = triVerts(t);
+    let tri = ${faceTri};
     out.candidates++;
     let a = xd(tri.x); let b = xd(tri.y); let cc = xd(tri.z);
     let cl = ogcClosestTriangle(x, a, b, cc);
@@ -2138,11 +2269,10 @@ fn edgeEdge(e: u32) -> RoleOut {
       let t = entryFace(j);
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
-      let te = topo[P.triEdgesOff + 4u * t + 3u];
+      ${faceMask}
       for (var k = 0u; k < 3u; k++) {
         if ((te & (1u << k)) == 0u) { continue; }
-        let e2 = topo[P.triEdgesOff + 4u * t + k];
-        let r2 = edgeRec(e2);
+        ${L.topology ? "let e2 = fr.e[k]; let r2 = faceEdge(fr, k);" : "let e2 = topo[P.triEdgesOff + 4u * t + k];\n        let r2 = edgeRec(e2);"}
         if (r2.x == er.x || r2.x == er.y || r2.y == er.x || r2.y == er.y) { continue; }
         out.candidates++;
         let q0 = xd(r2.x); let q1 = xd(r2.y);
@@ -2200,10 +2330,10 @@ fn hullEdge(k: u32) -> RoleOut {
       let t = entryFace(j);
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
-      let te = topo[P.triEdgesOff + 4u * t + 3u];
+      ${faceMask}
       for (var m = 0u; m < 3u; m++) {
         if ((te & (1u << m)) == 0u) { continue; }
-        let r2 = edgeRec(topo[P.triEdgesOff + 4u * t + m]);
+        let r2 = ${L.topology ? "faceEdge(fr, m)" : "edgeRec(topo[P.triEdgesOff + 4u * t + m])"};
         out.candidates++;
         let q0 = xd(r2.x); let q1 = xd(r2.y);
         let st = ogcSegmentSegment(q0, q1, p0, p1);
@@ -2257,10 +2387,10 @@ fn hullFacet(k: u32) -> RoleOut {
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
       let t = entryFace(j);
-      let tri = triVerts(t);
+      ${L.topology ? "let fr = faceRec(t); let tri = fr.v;" : "let tri = triVerts(t);"}
       for (var m = 0u; m < 3u; m++) {
         let v = tri[m];
-        if (topo[P.vtListOff + topo[P.vtOffOff + v]] != t) { continue; }
+        if (${L.topology ? "(fr.flags & (64u << m)) == 0u" : "topo[P.vtListOff + topo[P.vtOffOff + v]] != t"}) { continue; }
         out.candidates++;
         let x = xd(v);
         let cl = ogcClosestTriangle(x, a, b, cc);

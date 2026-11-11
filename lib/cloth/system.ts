@@ -149,6 +149,11 @@ export interface ClothSystemOptions {
   readonly label?: string;
   /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
   readonly statusInterval?: number;
+  /**
+   * The contact detector's locality switch for every document (OgcContactConfig.locality; evaluation only, default
+   * "off"). An unknown value fails when the detector is built.
+   */
+  readonly contactLocality?: string;
 }
 
 export class ClothSystem {
@@ -244,7 +249,7 @@ export class ClothSystem {
       this.bodyFields.set(key, bodyField);
     }
     const newton = settings.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS;
-    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField, true);
+    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField, true, this.options.contactLocality);
     const hooks = contact.stepHooks;
     let solver: ClothGPUSolver;
     try {
