@@ -2989,3 +2989,49 @@ Notes:
   ruling.
 
 **Gate.** The landing regression on 67cb29fd passes (1 test). Full gate not rerun: only that test changed.
+
+## 2026-11-11 RESULT (49): a stall is never done at a non-stationary iterate (condition 1); t40's period-2 entry cycle attributed
+
+**(1) t40 on HEAD (and on B, identically).** One step of the 16^2 sphere from tick 40 at cap 150 (1 um):
+- 150 iterations, not done, end |g|/|mg| 2.02.
+- 72 vertices are over the floor, none certificate-held; the top 8 carry 13 % of |g|^2. The top rows are cloth
+  self-contact (vf, ee), not body samples.
+- Alpha is 1 on 132 of 150 iterations, and the entry set changes after 132 of 149.
+- The cause is a period-2 cycle: vf 22-f14 and ee 64-25 enter 46 times and leave 45. They are added at d/r 0.80 / 0.88
+  and dropped at 1.04 / 1.03.
+- The trial energy is the entries' own. A pair that leaves the set takes its barrier out of the line search's energy
+  while the iterate is still inside the DAT band, so the energy the line search minimises changes with the set.
+- Ruling: no new entries. The trial energy also covers the DAT pairs no entry covers (C2's band v2,
+  solver.contactTrialEnergy 'band', default off; joint commit to follow).
+
+**(2) Band v1 declared done at |g|/|mg| 0.156 (0.0805 with the factorized product). Condition 1 traced it.**
+
+| iteration | start (max \|x - x_det\|) | outcome |
+|---|---|---|
+| 76 | 1.82 mm | stalled |
+| 77 | re-detected | dx -> 0 |
+| 78 | on x_det | full step |
+| 79 | 0.955 mm | alpha 1/64 |
+| 80 | 0.959 mm | stalled: e > 0 against slope < 0 at every trial |
+| 81 | on x_det | full step |
+| 82 | 0.601 mm | alpha 0.25 |
+| 83 | 0.601 mm | stalled; declared done; nothing re-detects after it |
+
+- Off x_det the contact's g is not the gradient of the trial energy, so the line search can find no descent along a
+  direction that g calls descending.
+- nwChoose counted any stall as done (chosen 0, the arc not cut, no trust region), whatever the residual.
+- Fix: a stall is done only at a stationary iterate, `sm.w <= 1`: every vertex's whole gradient is within its f32
+  floor, the same test as for a small step. Elsewhere Newton runs on and the contact hook re-detects about the iterate.
+- Not the path that fired, and left as it is: the PCG first-dispatch stop declares done on |Pg|^2 <= tol^2 |mg|^2.
+  Where certificates carry load, that is a projected test and could be a false done.
+
+**Gate** (81a179a6 + the fix, concurrency 1, cloth-ladder / gpu-solver / analytic / contact-ladder / contact-gpu /
+contact-body): 83 tests, 81 pass, 0 fail, 2 todo. Both todos were open before the fix:
+- ladder 1e, C2: re-detection re-certifies the travel bound.
+- ladder 2c, C1: RESULT 45.
+
+Ladder 2c's TODO now fails at tick 20, where before B it failed at tick 40. The ladder 2c A/B on 81a179a6, with and
+without the fix, is identical at tick 20: 150 / 150, not done, |g|/|mg| 2.65e-2 / 1.82e-1. The change came with B, not
+with this fix.
+
+test:unit: 2143 tests, 1750 pass, 0 fail, 393 skipped. check:types clean.

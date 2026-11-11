@@ -998,8 +998,11 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   // keep steps short at |g| far above the f32 floor): every vertex's gradient (sm.w, nwGradient's g.w: the whole
   // gradient, a certificate's load counted as residual) within the f32 floor of its gradient.
   let small = chosen > 0.0 && chosen * sqrt(sm.y) <= tolV * hEff() && held == 0.0 && sm.w <= 1.0 && !(region && tn.y != 0.0);
-  // (A rejected trust-region step is no stall: Delta shrinks and Newton runs on.)
-  let stalled = chosen == 0.0 && !(sm.x > 0.0) && !region;
+  // (A rejected trust-region step is no stall: Delta shrinks and Newton runs on.) A stall is convergence only at a
+  // stationary iterate (every vertex's whole gradient within its f32 floor, as for a small step): elsewhere no trial
+  // descending is no answer (C1 RESULT 49: off the detection point the contact's g was not the trial energy's gradient,
+  // and the stall read as done at |g| 0.16 |m g|), so Newton runs on and the contact hook re-detects about the iterate.
+  let stalled = chosen == 0.0 && !(sm.x > 0.0) && !region && sm.w <= 1.0;
   nw[nwControl()] = vec4f(select(0.0, ${DONE}, stalled || small), 0.0, chosen, ctl.w + 1.0);
 }
 
