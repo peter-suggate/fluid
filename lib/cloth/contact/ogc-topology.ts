@@ -34,12 +34,6 @@ export interface OgcTopologyLayout {
   vtListOffset: number;
   veOffOffset: number;
   veListOffset: number;
-  /**
-   * Each vertex's lumped rest area weight (f32 bits, N words): a third of its triangles' rest areas, over
-   * the largest vertex's, so in (0, 1]. For a cloth of one areal density it is the vertex's lumped mass
-   * over the largest (the levelled least shift's mass-weighted mean motion, OGC_LEVEL_SHIFT_WGSL).
-   */
-  weightOffset: number;
   words: number;
   /** Mean rest edge length at build time (metres), for the grid cell floor. */
   meanEdgeLength: number;
@@ -101,12 +95,10 @@ export function buildOgcTopology(mesh: OgcMeshTopology, positions: Float32Array)
     sum += l; max = Math.max(max, l);
   }
   let minAlt = Infinity;
-  const area = new Float64Array(N);
   for (let t = 0; t < T; t++) {
     const P3 = [0, 1, 2].map(k => { const v = mesh.triangles[4 * t + k]; return [positions[4 * v], positions[4 * v + 1], positions[4 * v + 2]]; });
     const u = P3[1].map((c, i) => c - P3[0][i]), w = P3[2].map((c, i) => c - P3[0][i]);
     const cr = Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]);
-    for (let k = 0; k < 3; k++) area[mesh.triangles[4 * t + k]] += cr / 6;
     const lmax = Math.max(Math.hypot(...u), Math.hypot(...w), Math.hypot(...P3[2].map((c, i) => c - P3[1][i])));
     if (lmax > 0) minAlt = Math.min(minAlt, cr / lmax);
   }
@@ -115,8 +107,7 @@ export function buildOgcTopology(mesh: OgcMeshTopology, positions: Float32Array)
     trisOffset: 0, edgesOffset: 4 * T, triEdgesOffset: 4 * T + 4 * E,
     vtOffOffset: 8 * T + 4 * E, vtListOffset: 8 * T + 4 * E + N + 1,
     veOffOffset: 11 * T + 4 * E + N + 1, veListOffset: 11 * T + 4 * E + 2 * N + 2,
-    weightOffset: 11 * T + 6 * E + 2 * N + 2,
-    words: 11 * T + 6 * E + 3 * N + 2,
+    words: 11 * T + 6 * E + 2 * N + 2,
     meanEdgeLength: E ? sum / E : 0, maxEdgeLength: max, minAltitude: minAlt,
   };
   const words = new Uint32Array(Math.ceil(layout.words / 4) * 4);
@@ -127,12 +118,6 @@ export function buildOgcTopology(mesh: OgcMeshTopology, positions: Float32Array)
   words.set(vtList, layout.vtListOffset);
   words.set(veCount, layout.veOffOffset);
   words.set(veList, layout.veListOffset);
-  let amax = 0;
-  for (let v = 0; v < N; v++) amax = Math.max(amax, area[v]);
-  // A vertex on no triangle (or a degenerate mesh) has no area: it weighs as the largest.
-  const weight = new Float32Array(N);
-  for (let v = 0; v < N; v++) weight[v] = amax > 0 && area[v] > 0 ? area[v] / amax : 1;
-  words.set(new Uint32Array(weight.buffer), layout.weightOffset);
   return { layout, words };
 }
 

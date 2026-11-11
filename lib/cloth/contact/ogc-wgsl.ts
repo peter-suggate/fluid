@@ -121,25 +121,17 @@ export const OGC_COUNTER = {
    */
   frameHfPairs: 72, frameHfDropped: 73,
   /**
-   * Levelled rounds' conflicts by cause: no plane at X (or none past the pair's strays), and the
-   * predictions closing a pair below sepEps (two words). Each word's high 16 bits count those with a
-   * solid's sample or hull primitive in the pair.
+   * Levelled rounds' conflicts by cause (each sends its round back unlevelled): no plane at X (or
+   * none past the pair's strays), and the predictions closing a pair below sepEps (two words). Each
+   * word's high 16 bits count those with a solid's sample or hull primitive in the pair.
    */
   frameLevelConflicts: 74,
-  /**
-   * The levelled least shift (OGC_LEVEL_SHIFT_WGSL): the frame's shift passes and hold passes (each a
-   * levelled round redone), the vertices the hold passes held, the conflicts its list could not hold
-   * (held at once instead), and the largest list a round filled.
-   */
-  frameLevelShifts: 76, frameLevelHolds: 77, frameLevelHeld: 78, frameLevelListOverflow: 79, frameLevelListPeak: 80,
-  /** The round's levelled conflict list's fill (reset by each round's prep). */
-  levelListCount: 81,
-  roundLog: 82,
+  roundLog: 76,
 } as const;
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
 export const OGC_COUNTER_WORDS = OGC_COUNTER.roundLog + OGC_ROUND_LOG * OGC_ROUND_LOG_WORDS;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76, 77, 78, 79, 80];
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
 /**
@@ -232,12 +224,6 @@ const OGC_F_PLANE_RECORDS_TOTAL = ${OGC_COUNTER.framePlaneRecordsTotal}u;
 const OGC_F_LEVELLED = ${OGC_COUNTER.frameLevelled}u;
 const OGC_F_LEVEL_FALLBACK = ${OGC_COUNTER.frameLevelFallback}u;
 const OGC_F_LEVEL_CONFLICTS = ${OGC_COUNTER.frameLevelConflicts}u;
-const OGC_F_LEVEL_SHIFTS = ${OGC_COUNTER.frameLevelShifts}u;
-const OGC_F_LEVEL_HOLDS = ${OGC_COUNTER.frameLevelHolds}u;
-const OGC_F_LEVEL_HELD = ${OGC_COUNTER.frameLevelHeld}u;
-const OGC_F_LEVEL_LIST_OVERFLOW = ${OGC_COUNTER.frameLevelListOverflow}u;
-const OGC_F_LEVEL_LIST_PEAK = ${OGC_COUNTER.frameLevelListPeak}u;
-const OGC_LEVEL_LIST_COUNT = ${OGC_COUNTER.levelListCount}u;
 const OGC_LEVELLED = ${OGC_LEVEL_FLAG.levelled}u;
 const OGC_FROZEN = ${OGC_LEVEL_FLAG.frozen}u;
 const OGC_ROUND_LOG_COUNT = ${OGC_COUNTER.roundLogCount}u;

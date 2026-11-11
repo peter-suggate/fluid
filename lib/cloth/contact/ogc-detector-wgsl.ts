@@ -46,7 +46,7 @@
  */
 import { OGC_COMMON_WGSL, OGC_COUNTERS_WGSL, OGC_POSE_WORD, OGC_POSE_WORDS, OGC_PROJECT_RECORD, OGC_SOLID_WGSL, ogcVertexBlockWGSL } from "./ogc-wgsl";
 
-export const OGC_PARAM_WORDS = 92;
+export const OGC_PARAM_WORDS = 88;
 /**
  * The redos of a step's mandatory round (OGC_REDO_WGSL). A conflicting pair moves its cloth's
  * predictions only as far as it needs (least shift, resolvePlane): towards X (scale s_v), or with
@@ -66,32 +66,8 @@ export const OGC_REDO_ROUNDS = 8;
 export const OGC_REDO_MANDATORY = 32;
 /** Per vertex at scaleOff, the least shift's words: the next redo's scale (atomicMin) and this round's. */
 export const OGC_SHIFT_WORDS = 2;
-/**
- * The levelled least shift (a levelled re-detection's conflicts, Newton config). Per vertex at
- * levelOff, OGC_LEVEL_WORDS words: its conflicting partners' mass-weighted predictions summed in
- * fixed point (x, y, z at 2^-22 m, OGC_LEVEL_FIX_W), their weights summed (2^-20, OGC_LEVEL_FIX_M),
- * flags (1: a solid in one of its conflicting pairs; 2: held by a hold pass), the round's envelope
- * deviation (f32), the next pass's scale s (f32, atomicMin) and its own weight (f32, stored when it is listed). Integer sums are exact
- * and order-free, so the mean is the same whatever order the pairs arrive in (no float atomics).
- * Their range: a vertex's weighted partner predictions to 2^9 m and weights to 2^11 (2048 partners
- * of the largest weight), far past any round's motion (the envelope cap) and any vertex's pairs.
- * The conflict list follows the vertices: OGC_LEVEL_ENTRY words an entry (the pair's ids with the
- * edge-edge bit, its plane, then the pair's strays sg and its side size nA).
- */
-export const OGC_LEVEL_WORDS = 8;
-export const OGC_LEVEL_ENTRY = 12;
 const SHIFT_CONSTS = /* wgsl */`
 const OGC_SHIFT_WORDS = ${OGC_SHIFT_WORDS}u;
-const OGC_LEVEL_WORDS = ${OGC_LEVEL_WORDS}u;
-const OGC_LEVEL_ENTRY = ${OGC_LEVEL_ENTRY}u;
-const OGC_LEVEL_FIX_W = 4194304.0;
-const OGC_LEVEL_FIX_M = 1048576.0;
-fn levelBase(i: u32) -> u32 { return P.levelOff + OGC_LEVEL_WORDS * i; }
-`;
-// The vertex weights are in the topology (the query and the shift kernel bind it; the prep reads a
-// listed vertex's own weight from its level words, word 7, which levelConflict stores).
-const WEIGHT_FN = /* wgsl */`
-fn vertexWeight(i: u32) -> f32 { return bitcast<f32>(topo[P.weightOff + i]); }
 `;
 /** Indirect-args slots, three u32 each, in dispatch order. */
 export const OGC_DETECT_DISPATCHES = ["prep", "cell", "count", "scan1", "scan2", "scan3", "insert", "query", "bound"] as const;
@@ -122,8 +98,7 @@ struct OgcParams {
   fixedWord: u32, segWord: u32, recWord: u32, recCap: u32,
   recCountOff: u32, newton: u32, levelWord: u32, levelOn: u32,
   targetOff: u32, rqTop: f32, SF: u32, bodyFacetBase: u32,
-  SFB: u32, facetCap: u32, weightOff: u32, levelOff: u32,
-  listCap: u32, shiftPasses: u32, holdPasses: u32, pad13: u32,
+  SFB: u32, facetCap: u32, pad11: u32, pad12: u32,
 }
 `;
 
@@ -138,8 +113,7 @@ export const OGC_PARAM = {
   bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62, facetBase: 63,
   edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67, solidDevOff: 68, bodyDevOff: 69, scaleOff: 70, originOff: 71,
   fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76, newton: 77, levelWord: 78, levelOn: 79, targetOff: 80, rqTop: 81,
-  SF: 82, bodyFacetBase: 83, SFB: 84, facetCap: 85, weightOff: 86, levelOff: 87,
-  listCap: 88, shiftPasses: 89, holdPasses: 90,
+  SF: 82, bodyFacetBase: 83, SFB: 84, facetCap: 85,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -544,7 +518,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   // shift) or, in the fail-safe, every prediction held; only the first measures.
   let fresh = mandatory && redone == 0u;
   let failSafe = redone > ${OGC_REDO_ROUNDS}u;
-  if (v == 0u) { atomicStore(&counters[OGC_PAIR_SLOTS], 0u); atomicStore(&counters[OGC_CONFLICTS], 0u); atomicStore(&counters[OGC_LEVEL_LIST_COUNT], 0u); }
+  if (v == 0u) { atomicStore(&counters[OGC_PAIR_SLOTS], 0u); atomicStore(&counters[OGC_CONFLICTS], 0u); }
   wgCube[li] = 0.0;
   if (v >= P.N && v < P.N + P.SB) {
     // The moving solid's sample: x_det at the detection pose, predicted exactly to the end pose.
@@ -621,13 +595,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     // and its 40 mm envelope paired the 16 x 16 sheet's every vertex with its neighbours in the
     // plane (877 plane records per vertex). Nor the step's rho, the inertial prediction's miss.
     // (Its unlevelled redo predicts 0.)
-    let lev = !mandatory && levelled();
+    let lev = !mandatory && levelled() && redone == 0u;
     if (!mandatory) {
       let d = dir[v].xyz;
-      let lb = levelBase(v);
-      // The least shift's words exist only with its passes (P.shiftPasses + P.holdPasses > 0).
-      let lp = P.shiftPasses + P.holdPasses > 0u;
-      if (lev && redone == 0u) {
+      if (lev) {
         // The rest of the step to the full Newton point x_k + d (the filter's target): (1 - alpha_c) d
         // where the projection kept the trial, and also what it withheld where it cut it (a vertex
         // stopped by its cap 22 mm above the floor would otherwise predict 0 and close the gap a
@@ -636,39 +607,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
         let wp = pred[v].xyz;
         dev = length(x - (xdet[v].xyz + wp - Up * wp));
         w = work4(P.targetOff + 4u * v).xyz - x;
-        // The least shift's words start clear (OGC_LEVEL_WORDS), and the deviation is kept for the passes.
-        if (lp) {
-          for (var k = 0u; k < 5u; k++) { atomicStore(&work[lb + k], 0u); }
-          atomicStore(&work[lb + 5u], bitcast<u32>(dev));
-          atomicStore(&work[lb + 6u], bitcast<u32>(1.0));
-        }
-      } else if (lev && lp) {
-        // A levelled pass after a conflict (OGC_LEVEL_SHIFT_WGSL): the vertex's last prediction W
-        // moves towards the mean motion c of it and its conflicting partners by its scale s,
-        // W' = c + s (W - c), or to 0 when a hold pass held it. Every other vertex keeps W. The
-        // solve does not follow the shift, so the envelope grows by it: the solve's path strays
-        // from X + a W' by at most its stray from X + a W plus a |W - W'| <= |W - W'|.
-        let W = pred[v].xyz;
-        let fl = atomicLoad(&work[lb + 4u]);
-        let sv = bitcast<f32>(atomicLoad(&work[lb + 6u]));
-        dev = bitcast<f32>(atomicLoad(&work[lb + 5u]));
-        w = W;
-        if ((fl & 2u) != 0u) { w = vec3<f32>(0.0); }
-        else if (sv < 1.0) {
-          var c = vec3<f32>(0.0);
-          if ((fl & 1u) == 0u) {
-            let A = vec3<f32>(vec3<i32>(bitcast<i32>(atomicLoad(&work[lb])), bitcast<i32>(atomicLoad(&work[lb + 1u])), bitcast<i32>(atomicLoad(&work[lb + 2u])))) / OGC_LEVEL_FIX_W;
-            let M = f32(atomicLoad(&work[lb + 3u])) / OGC_LEVEL_FIX_M;
-            let m = bitcast<f32>(atomicLoad(&work[lb + 7u]));
-            c = (m * W + A) / (m + M);
-          }
-          w = c + sv * (W - c);
-        }
-        dev += length(W - w);
-        for (var k = 0u; k < 4u; k++) { atomicStore(&work[lb + k], 0u); }
-        atomicStore(&work[lb + 4u], fl & 2u);
-        atomicStore(&work[lb + 5u], bitcast<u32>(dev));
-        atomicStore(&work[lb + 6u], bitcast<u32>(1.0));
       } else {
         let left = length(yref.xyz - x) + yref.w;
         dev = select(left, min(left, length(d)), P.newton != 0u);
@@ -1001,27 +939,12 @@ fn main() {
   atomicMax(&counters[OGC_F_ZONE_PEAK], atomicLoad(&counters[OGC_STEP_ZONE]));
   let c = atomicExchange(&counters[OGC_CONFLICTS], 0u);
   let progress = atomicExchange(&counters[OGC_REDO_PROGRESS], 0u);
-  if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) {
-    atomicMax(&counters[OGC_F_LEVEL_LIST_PEAK], atomicLoad(&counters[OGC_LEVEL_LIST_COUNT]));
-  }
   if (c == 0u) { writeArgs(false); return; }
   if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) {
     // A levelled re-detection with a conflict (predictions that cross, or no plane at X while a
-    // vertex is predicted to move) is redone levelled: its conflicts' cloth shifted towards their
-    // mean motion for P.shiftPasses passes (OGC_LEVEL_SHIFT_WGSL), then held while that holds
-    // more, up to P.holdPasses passes; every other vertex keeps its prediction. Past them, or
-    // when a shift pass's conflicts overflow its list (the fail-safe, counted) it is redone unlevelled: every prediction 0 about the iterate, which
-    // never conflicts without a moving solid. Counted apart from the mandatory round's; a
-    // conflict in the unlevelled redo takes the path below, as unlevelled.
-    let k = atomicLoad(&counters[OGC_FORCE_HELD]);
-    let overflow = atomicLoad(&counters[OGC_LEVEL_LIST_COUNT]) > P.listCap;
-    if (!overflow && k < P.shiftPasses + P.holdPasses && (k < P.shiftPasses || progress != 0u)) {
-      atomicStore(&counters[OGC_FORCE_HELD], k + 1u);
-      atomicAdd(&counters[select(OGC_F_LEVEL_HOLDS, OGC_F_LEVEL_SHIFTS, k < P.shiftPasses)], 1u);
-      atomicAdd(&counters[OGC_F_DETECTIONS], 1u);
-      writeArgs(true);
-      return;
-    }
+    // vertex is predicted to move) is redone at once unlevelled: every prediction 0 about the
+    // iterate, which never conflicts without a moving solid. Counted apart from the mandatory
+    // round's; the redo is unlevelled, so a conflict in it takes the path below, as unlevelled.
     atomicStore(&counters[OGC_FORCE_HELD], 1u);
     atomicStore(&contacts[P.levelWord], 0u);
     atomicStore(&contacts[P.levelWord + 1u], 0u);
@@ -1063,77 +986,6 @@ fn main() {
     atomicAdd(&counters[OGC_F_CONFLICTS], c);
   }
   writeArgs(false);
-}
-`;
-
-/**
- * The levelled least shift (after a levelled round with conflicts, before its redo decision; the
- * conflict list of levelConflict, one thread an entry). For each cloth vertex i of a conflicting
- * pair: its mean motion c_i, the weighted mean of its own prediction W_i and its conflicting
- * partners' (its sums, which are complete once the round's query has run), or 0 with a solid in
- * one of its pairs (the solid's motion after the mandatory round); and the largest s in [0, 1]
- * for which the pair clears with i at c_i + s (W_i - c_i) and its partners at their W: the pair's
- * support gap along its plane is concave in s (the least of linear functions less the largest),
- * so it is a bisection to the same goal as the mandatory round's least shift (leastShift). Each
- * vertex keeps the least s of its pairs (atomicMin of non-negative f32 bits, order-free); the next
- * pass's prep applies it. A pair with no plane at X takes s = 0. Relative motion, not motion
- * towards X: a fold whose layers move together keeps their common motion (the mean) and loses
- * only what closes the pair.
- */
-export const OGC_LEVEL_SHIFT_WGSL = header([0, 1, 4, 5, 8, 9, 14]) + LEVEL_FNS + SHIFT_CONSTS + WEIGHT_FN + PRED_FNS + /* wgsl */`
-fn meanMotion(i: u32) -> vec3<f32> {
-  let lb = levelBase(i);
-  if ((atomicLoad(&work[lb + 4u]) & 1u) != 0u) { return vec3<f32>(0.0); }
-  let A = vec3<f32>(vec3<i32>(bitcast<i32>(atomicLoad(&work[lb])), bitcast<i32>(atomicLoad(&work[lb + 1u])), bitcast<i32>(atomicLoad(&work[lb + 2u])))) / OGC_LEVEL_FIX_W;
-  let M = f32(atomicLoad(&work[lb + 3u])) / OGC_LEVEL_FIX_M;
-  let m = vertexWeight(i);
-  return (m * predOf(i) + A) / (m + M);
-}
-fn levelGap(ids: vec4<u32>, nA: u32, n: vec3<f32>, a: u32, c: vec3<f32>, t: f32) -> f32 {
-  let o = xdet[ids[nA]].xyz;
-  var sa = 3.4e38; var sb = -3.4e38;
-  for (var k = 0u; k < 4u; k++) {
-    let i = ids[k];
-    var y = anchored(i);
-    if (k == a) { y = xdet[i].xyz + c + t * (predOf(i) - c); }
-    let pr = dot(n, y - o);
-    if (k < nA) { sa = min(sa, pr); } else { sb = max(sb, pr); }
-  }
-  return sa - sb;
-}
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (atomicLoad(&counters[OGC_ROUNDS]) == 0u || !levelled() || atomicLoad(&counters[OGC_FORCE_HELD]) >= P.shiftPasses) { return; }
-  let e = gid.x;
-  // An overflowed list is not shifted (its round falls back, OGC_REDO_WGSL).
-  let listed = atomicLoad(&counters[OGC_LEVEL_LIST_COUNT]);
-  if (listed > P.listCap || e >= listed) { return; }
-  let b = P.levelOff + OGC_LEVEL_WORDS * P.N + OGC_LEVEL_ENTRY * e;
-  let id0 = atomicLoad(&work[b]);
-  let ids = vec4<u32>(id0 & ~OGC_EE_BIT, atomicLoad(&work[b + 1u]), atomicLoad(&work[b + 2u]), atomicLoad(&work[b + 3u]));
-  let pl = bitcast<vec4<f32>>(vec4<u32>(atomicLoad(&work[b + 4u]), atomicLoad(&work[b + 5u]), atomicLoad(&work[b + 6u]), atomicLoad(&work[b + 7u])));
-  let sg = bitcast<f32>(atomicLoad(&work[b + 8u]));
-  let nA = atomicLoad(&work[b + 9u]);
-  let t0 = P.sepEps + sg;
-  let goal = 0.5 * (t0 + min(pl.w, 2.0 * P.sepEps + sg));
-  var lowered = false;
-  for (var a = 0u; a < 4u; a++) {
-    let i = ids[a];
-    if (i >= P.N) { continue; }
-    let c = meanMotion(i);
-    var s = 0.0;
-    if (pl.w > t0 && levelGap(ids, nA, pl.xyz, a, c, 0.0) >= goal) {
-      var lo = 0.0; var hi = 1.0;
-      for (var it = 0u; it < 24u; it++) {
-        let mid = 0.5 * (lo + hi);
-        if (levelGap(ids, nA, pl.xyz, a, c, mid) >= goal) { lo = mid; } else { hi = mid; }
-      }
-      s = lo;
-    }
-    let sn = bitcast<u32>(s);
-    if (atomicMin(&work[levelBase(i) + 6u], sn) > sn) { lowered = true; }
-  }
-  if (lowered) { atomicAdd(&counters[OGC_REDO_PROGRESS], 1u); }
 }
 `;
 
@@ -1739,7 +1591,7 @@ export type OgcQueryRole = (typeof OGC_QUERY_ROLES)[number];
 export function ogcQueryWGSL(role: OgcQueryRole): string {
   const lo = role === "queryVertex" ? "0u" : role === "queryEdge" ? "P.N" : "P.N + P.E";
   const hi = role === "queryVertex" ? "P.N" : role === "queryEdge" ? "P.N + P.E" : "P.N + P.E + P.S + P.SB + P.SE + P.SEB + P.SF + P.SFB";
-  return header([0, 1, 4, 5, 7, 8, 9, 11, 14]) + LEVEL_FNS + SHIFT_CONSTS + WEIGHT_FN + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + BODY_PAIR_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+  return header([0, 1, 4, 5, 7, 8, 9, 11, 14]) + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + BODY_PAIR_FNS + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 fn xd(i: u32) -> vec3<f32> { return xdet[i].xyz; }
 
 // ---- DAT division pairs: every non-adjacent pair whose swept boxes meet and that is
@@ -1818,14 +1670,11 @@ fn resolvePlane(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> vec4<f32> {
   let alt = predictedAxis(ids, nA, sg);
   if (alt.w > 0.0) { return alt; }
   atomicAdd(&counters[OGC_CONFLICTS], 1u);
-  // A levelled re-detection's conflict: its pair's cloth shifts towards their mean motion in the
-  // next pass, or a hold pass holds it (levelConflict); past the passes its round is redone
-  // unlevelled (OGC_REDO_WGSL).
+  // A levelled re-detection's conflict redoes its round unlevelled (OGC_REDO_WGSL).
   if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) {
     var solid = false;
     for (var k = 0u; k < 4u; k++) { if (ids[k] >= P.N) { solid = true; } }
     atomicAdd(&counters[OGC_F_LEVEL_CONFLICTS + cause], select(1u, 65537u, solid));
-    levelConflict(ids, nA, pl, sg);
     return pl;
   }
   let redone = atomicLoad(&counters[OGC_FORCE_HELD]);
@@ -1864,55 +1713,6 @@ fn resolvePlane(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> vec4<f32> {
     recordHeldConflict(select(ids, vec4<u32>(ids.x | OGC_EE_BIT, ids.yzw), nA == 2u));
   }
   return pl;
-}
-// A levelled pass's conflict (pass k = OGC_FORCE_HELD of the round). Before the shift passes run
-// out, the pair goes on the round's conflict list for OGC_LEVEL_SHIFT_WGSL, and each of its cloth
-// vertices adds its partners' weighted predictions to its sums (a solid partner flags it: the
-// solid's motion, 0 after the mandatory round, is then its mean); one the list cannot take
-// (levelListOverflow) makes the round fall back. A hold pass's conflict holds its cloth
-// (prediction 0) in the next pass.
-fn levelConflict(ids: vec4<u32>, nA: u32, pl: vec4<f32>, sg: f32) {
-  let k = atomicLoad(&counters[OGC_FORCE_HELD]);
-  if (k < P.shiftPasses) {
-    let slot = atomicAdd(&counters[OGC_LEVEL_LIST_COUNT], 1u);
-    if (slot < P.listCap) {
-      for (var a = 0u; a < 4u; a++) {
-        let i = ids[a];
-        if (i >= P.N) { continue; }
-        let lb = levelBase(i);
-        atomicStore(&work[lb + 7u], bitcast<u32>(vertexWeight(i)));
-        for (var b = 0u; b < 4u; b++) {
-          let j = ids[b];
-          if (b == a) { continue; }
-          if (j >= P.N) { atomicOr(&work[lb + 4u], 1u); continue; }
-          let m = vertexWeight(j);
-          let q = vec3<i32>(round(m * predOf(j) * OGC_LEVEL_FIX_W));
-          atomicAdd(&work[lb], bitcast<u32>(q.x)); atomicAdd(&work[lb + 1u], bitcast<u32>(q.y)); atomicAdd(&work[lb + 2u], bitcast<u32>(q.z));
-          atomicAdd(&work[lb + 3u], u32(round(m * OGC_LEVEL_FIX_M)));
-        }
-      }
-      let e = P.levelOff + OGC_LEVEL_WORDS * P.N + OGC_LEVEL_ENTRY * slot;
-      let id0 = select(ids.x, ids.x | OGC_EE_BIT, nA == 2u);
-      atomicStore(&work[e], id0); atomicStore(&work[e + 1u], ids.y); atomicStore(&work[e + 2u], ids.z); atomicStore(&work[e + 3u], ids.w);
-      let pb = bitcast<vec4<u32>>(pl);
-      atomicStore(&work[e + 4u], pb.x); atomicStore(&work[e + 5u], pb.y); atomicStore(&work[e + 6u], pb.z); atomicStore(&work[e + 7u], pb.w);
-      atomicStore(&work[e + 8u], bitcast<u32>(sg)); atomicStore(&work[e + 9u], nA);
-      return;
-    }
-    // Past the list's capacity the pass is not shifted at all and its round falls back (OGC_REDO_WGSL): which
-    // pairs found a slot depends on the threads' order, so a partial shift would not be deterministic.
-    atomicAdd(&counters[OGC_F_LEVEL_LIST_OVERFLOW], 1u);
-    return;
-  }
-  if (k < P.shiftPasses + P.holdPasses) {
-    var progress = false;
-    for (var a = 0u; a < 4u; a++) {
-      let i = ids[a];
-      if (i >= P.N) { continue; }
-      if ((atomicOr(&work[levelBase(i) + 4u], 2u) & 2u) == 0u) { progress = true; atomicAdd(&counters[OGC_F_LEVEL_HELD], 1u); }
-    }
-    if (progress) { atomicAdd(&counters[OGC_REDO_PROGRESS], 1u); }
-  }
 }
 // The least shift of a conflicting pair: its cloth's predictions move back along straight paths
 // towards an anchor c, Y(t) = X + c + t (w - c), only as far as the pair needs: c = a_v (moving

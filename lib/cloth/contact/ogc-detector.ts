@@ -36,7 +36,7 @@
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, OGC_LEVEL_WORDS, OGC_LEVEL_ENTRY, OGC_LEVEL_SHIFT_WGSL, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
   ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL,
 } from "./ogc-detector-wgsl";
 import {
@@ -155,27 +155,7 @@ export interface OgcContactConfig {
    * bounds (the cap, the solid pieces' balls; ogc-wgsl.ts OGC_PROJECT_NO_TRAVEL_WGSL). "on" (default): unchanged.
    */
   travelBound?: OgcTravelBound;
-  /**
-   * The levelled least shift (newton only; OGC_LEVEL_SHIFT_WGSL): a levelled re-detection's conflicts move their
-   * cloth's predictions towards their mean motion for this many passes, then hold the cloth of the conflicts left
-   * for up to levelHoldPasses passes while that holds more; past them the round is redone unlevelled
-   * (levelFallback). Each pass is a detection round. 0 and 0 (the default): every conflict falls back at once, and
-   * the least shift's words and list are not allocated. The document's solver.contactLeastShift 'on' asks for 2
-   * and 4: at 8 Newton iterations it removed the fallbacks but not the end-of-step gradient (progress log).
-   */
-  levelShiftPasses?: number;
-  levelHoldPasses?: number;
-  /**
-   * Conflicts a levelled pass lists for its shift (default OGC_LEVEL_LIST_PER_VERTEX per vertex with shift passes, else
-   * 0); one past it makes the round fall back unlevelled (levelListOverflow), deterministically.
-   */
-  levelListCapacity?: number;
 }
-/**
- * The least shift's conflict list per vertex: the 16^2 rotating sphere's measured peak is 7.43 (1903 conflicts in one
- * pass at tick 57, nearly all cloth against the solid's samples), so 8.
- */
-export const OGC_LEVEL_LIST_PER_VERTEX = 8;
 export type OgcProjectionMetric = "off" | "hvv";
 export type OgcContactFreeze = "off" | "mandatory";
 export type OgcTravelBound = "on" | "off";
@@ -353,8 +333,6 @@ export interface OgcFrameCounters {
   levelFallback: number;
   /** Levelled rounds' conflicts: no plane at X, predictions closing (high 16 bits: with a solid in the pair). */
   levelConflicts: number[];
-  /** The levelled least shift: shift and hold passes run, vertices held, conflicts past the list (held), the largest list. */
-  levelShifts: number; levelHolds: number; levelHeld: number; levelListOverflow: number; levelListPeak: number;
 }
 
 interface Kernel { pipeline: GPUComputePipeline; bindGroup?: GPUBindGroup; bindings: number[]; override?: Record<number, "positions"> }
@@ -406,10 +384,6 @@ export class OgcContactDetector {
   private readonly paramWords = new Uint32Array(OGC_PARAM_WORDS);
   /** The envelope cap in effect: rqMax, or with envelopeMeshCap the smaller of it and gamma_r h_min. */
   readonly rqTop: number;
-  /** The levelled least shift's passes and conflict list (0 without the Newton filter). */
-  readonly levelShiftPasses: number;
-  readonly levelHoldPasses: number;
-  readonly levelListCapacity: number;
   /** The truncation ratio gamma_r and the separation sepEps in effect (the DAT test's caps and margin). */
   readonly gammaR: number; readonly sepEps: number;
 
@@ -475,14 +449,7 @@ export class OgcContactDetector {
     this.bodySampleCapacity = bodySampleCap;
     this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
     this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
-    const shiftPasses = config.levelShiftPasses ?? 0, holdPasses = config.levelHoldPasses ?? 0, listCap = config.levelListCapacity ?? (shiftPasses > 0 ? OGC_LEVEL_LIST_PER_VERTEX * N : 0);
-    for (const [k, v] of [["levelShiftPasses", shiftPasses], ["levelHoldPasses", holdPasses], ["levelListCapacity", listCap]] as const)
-      if (!(Number.isSafeInteger(v) && v >= 0)) throw new Error(`OGC: ${k} must be a whole number`);
-    if (shiftPasses + holdPasses >= OGC_REDO_ROUNDS) throw new Error(`OGC: levelShiftPasses + levelHoldPasses must stay below ${OGC_REDO_ROUNDS} (a later pass reads as the fail-safe, every prediction held)`);
-    if (!config.newton && (config.levelShiftPasses !== undefined || config.levelHoldPasses !== undefined || config.levelListCapacity !== undefined)) throw new Error("OGC: the levelled least shift needs the Newton filter (newton)");
-    this.levelShiftPasses = config.newton ? shiftPasses : 0; this.levelHoldPasses = config.newton ? holdPasses : 0; this.levelListCapacity = config.newton ? listCap : 0;
-    const levelWords = config.newton && shiftPasses + holdPasses > 0 ? OGC_LEVEL_WORDS * N + OGC_LEVEL_ENTRY * listCap : 0;
-    this.work = mk("work", 4 * ((body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E + (config.newton ? 5 * N : 0) + levelWords));
+    this.work = mk("work", 4 * ((body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E + (config.newton ? 5 * N : 0)));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
@@ -567,9 +534,6 @@ export class OgcContactDetector {
     w[P.levelWord] = config.newton ? 4 * (this.projBase + 1) : 0; w[P.levelOn] = 0;
     // The filter's Newton targets x + d (vec4 per vertex) follow the record counts.
     w[P.targetOff] = config.newton ? w[P.recCountOff]! + N : 0;
-    // The levelled least shift's words and conflict list follow the targets (OGC_LEVEL_WORDS); the vertex weights are in the topology.
-    w[P.levelOff] = config.newton ? w[P.targetOff]! + 4 * N : 0; w[P.weightOff] = L.weightOffset;
-    w[P.listCap] = this.levelListCapacity; w[P.shiftPasses] = this.levelShiftPasses; w[P.holdPasses] = this.levelHoldPasses;
     device.queue.writeBuffer(this.params, 0, w);
     // No step has measured a residual yet (w < 0): the first uses the inertial displacement.
     const pred0 = new Float32Array(8 * N);
@@ -834,7 +798,6 @@ export class OgcContactDetector {
       ["stepBegin", OGC_STEP_BEGIN_WGSL, [0, 8, 9, 10]],
       ["decide", ogcDecideWGSL(!!this.config.newton, this.config.contactFreeze === "mandatory"), this.config.newton ? [0, 8, 9, 10, 19] : [0, 9, 10]],
       ["redo", OGC_REDO_WGSL, [0, 8, 9, 10]],
-      ...(this.config.newton ? [["levelShift", OGC_LEVEL_SHIFT_WGSL, [0, 1, 4, 5, 8, 9, 14]] as [string, string, number[]]] : []),
       ["redoLast", OGC_REDO_LAST_WGSL, [0, 9, 10]],
       ["frameBegin", ogcFrameBeginWGSL(OGC_FRAME_COUNTERS), [9]],
       ["planes", ogcPlanesWGSL(!!this.config.newton, "truncate"), [0, 2, 4, 5, 9, 11, 14]],
@@ -924,12 +887,8 @@ export class OgcContactDetector {
     // impact zones too (redoCap, as the kernel counts it). A later round predicts 0 about the
     // iterate, the moving solid at rest at its end pose (a_v = 0 exactly): only its levelled form
     // can conflict, and its one redo (unlevelled) cannot; a conflict there fails as heldConflict.
-    // With the Newton filter a later round's levelled form has its least-shift and hold passes first
-    // (OGC_LEVEL_SHIFT_WGSL; the shift kernel after each round a shift pass follows), then the unlevelled redo.
-    const later = this.config.newton ? this.levelShiftPasses + this.levelHoldPasses + 1 : 1;
-    const slots = !mandatory ? later : this.bodyField ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS + 1;
+    const slots = !mandatory ? 1 : this.bodyField ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS + 1;
     for (let k = 0; k < slots; k++) {
-      if (!mandatory && k < this.levelShiftPasses) this.run(pass, "levelShift", Math.ceil(this.levelListCapacity / WG));
       this.run(pass, "redo", 1);
       for (const name of OGC_ROUND_KERNELS) this.runIndirect(pass, name);
     }
@@ -1068,8 +1027,6 @@ export class OgcContactDetector {
       scanned: u[C.frameScanned]!, collisions: u[C.frameCollisions]!, boxRejected: u[C.frameBoxRejected]!, scanMax: u[C.frameScanMax]!,
       planeRecordsTotal: u[C.framePlaneRecordsTotal]!,
       levelled: u[C.frameLevelled]!, levelFallback: u[C.frameLevelFallback]!,
-      levelShifts: u[C.frameLevelShifts]!, levelHolds: u[C.frameLevelHolds]!, levelHeld: u[C.frameLevelHeld]!,
-      levelListOverflow: u[C.frameLevelListOverflow]!, levelListPeak: u[C.frameLevelListPeak]!,
     };
   }
 

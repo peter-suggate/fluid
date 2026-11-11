@@ -2783,3 +2783,33 @@ mechanism is landed as a switch for C1's oracle comparisons and the t25 folds, n
   and unknown values fail.
 - cost-16 (off): 71.5 ms/tick (71.2 at 850ebfff).
 - check:types is clean. test:unit: 2136 tests, 0 fail.
+
+## 2026-11-11: the least shift removed (main's ruling), and its target cases
+
+Main ruled that a default-off switch which failed its experiment does not stay. The mechanism of 674ed83c is removed:
+the levelled shift and hold passes, the conflict list, the topology weights, `solver.contactLeastShift`, and their
+counters and tests. The patch is kept in `~/code/me/fluid-scratch/c2/least-shift-674ed83c.patch` so it can come back.
+
+**Kept:**
+- the frameLevelConflicts counter at words 74/75 (it overlapped solidHitFace at 70);
+- the |g|/|mg| and travel-held lines in the ladder and cost logs;
+- the H_vv sphere re-gate (no todo; determinism over all 60 ticks).
+
+The H_vv sphere's pass does not depend on the shift. It already passed as a todo in the 850ebfff gate, which predates
+the shift, and it passes with the shift off at 674ed83c.
+
+**The target cases, shift off and on.** Both runs used the 674ed83c export.
+
+| Case | Off | On |
+|---|---|---|
+| Sliding 2 x 8^2: plane-record peak | 8436 records (65.91/v; 81.65/v before the relative-motion test) | 8338 (65.14/v) |
+| 32^2 sphere from C1's t25 dump, ticks 26-35: levelled fallbacks | 8 per tick (every levelled round) | 1 in 10 ticks (14 shift passes and up to 9 hold passes per tick) |
+| t25: rounds per tick | 19 to 26 | 26 to 36 |
+| t25: end-of-step log10 \|g\|/\|mg\|, mean of 10 ticks | 1.71 | 2.20 (worse on 6 of 10 ticks, by up to 1.83; better on 4, by 0.04 to 0.35) |
+| t25: Newton iterations | 8 | 8 |
+| t25: intersections | 0 | 0 |
+| t25: folds v508 / v46 at tick 35 (scene m) | (0.5489, 0.1768, -0.0256) / (-0.0035, 0.0884, -0.6925) | (0.5501, 0.1696, -0.0089) / (0.0061, 0.0834, -0.6974) |
+
+The t25 restart starts from the dump's positions, velocities and solver state, but not its contact carried state, so
+tick 26 is 10.6 mm (off) and 9.4 mm (on) from the dump's own next step. The shift does not lower the step's
+gradient. It moves the folds by up to 17 mm by tick 35. The t25 list peak was 6514 (6.4 per vertex, under its 8).
