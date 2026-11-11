@@ -223,3 +223,25 @@ which now fails like any other unknown value. Their measurement above (section 5
 against off's 231.4 / 462.1 at ticks 35 / 120; 158.0 / 313.4 on top of a+b against 156.9 / 311.2) stands as the
 finding: the three prefix-table loads per cell are not on the queries' critical path. With the offsets gone, binding
 24 holds the face records alone, from word 0 (8T words, 1.42 MB at 150^2).
+
+## 9. `topology+geometry` made the default (main's ruling; C2 approved)
+
+`OGC_LOCALITY_DEFAULT = "topology+geometry"` (`ogc-detector-wgsl.ts`) is `OgcContactDetector.defaultLocality`, so
+every detector built without `contact.locality` (every test, scene and benchmark) runs the face and geometry records;
+`"off"` stays the A/B baseline and is what the locality test's baselines pass explicitly. The benchmark's
+`--locality` now defaults to the detector's default. Nothing else changed: no test was set to `"off"`.
+
+Gate, the same as L1's flip: exports of HEAD 17d4d4a9 as is (base) and with only this commit's hunks (flip); every
+`tests/cloth-*.test.ts` through `tools/gpu/fluid-gpu-run.sh check` at `--test-concurrency=1`.
+
+| export | tests | pass | fail | skipped | todo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| base | 197 | 187 | 0 | 5 | 5 |
+| flip | 197 | 187 | 0 | 5 | 5 |
+
+The flip's first run failed one test, this lane's own: the locality test still asserted the old default `'off'`
+(removed; rerun of `tests/cloth-contact-locality.test.ts` in the flip export: all pass). The `not ok` lines that are
+TODOs are the same in both (ladder 2c, C1; the moving-solid ride, C2's bodySqueeze). Every C1/C2 diagnostic line
+(556 lines of `#` output) is identical between base and flip except microbenchmark wall times (the verification
+query's us at an end state); so no C1/C2 test failed or shifted. `npm run check:types` clean; `npm run test:unit`
+2151 tests, 1753 pass, 0 fail, 398 skipped (flip export, GPU module unset).

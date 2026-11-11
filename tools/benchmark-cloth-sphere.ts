@@ -14,7 +14,7 @@
  *
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js tools/gpu/fluid-gpu-run.sh timing \
  *     node --import tsx tools/benchmark-cloth-sphere.ts [--nodes 150] [--ticks 2,5,35,120] [--steps 10] [--profile 1] [--json out.json]
- *       [--locality off|topology+geometry]   the detector's locality switch (OgcContactConfig.locality)
+ *       [--locality off|topology+geometry]   the detector's locality switch (OgcContactConfig.locality; default the detector's)
  *       [--lin off|factorized|blocks] [--lin-records n]  newton.contactLinearization on the restored document (default:
  *         the document's own, off) and its pool (vec4 records per vertex); the run then also reports the compiled
  *         records' demand and replays the two build kernels (as a pair: the build reads the count's headers)
@@ -33,6 +33,7 @@ import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/scene-description';
 import type { ClothDocument } from '../lib/cloth/types';
 import type { ClothGPUSolver } from '../lib/cloth/gpu-solver';
+import { OgcContactDetector } from '../lib/cloth/contact/ogc-detector';
 import { CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 
 const args = process.argv.slice(2);
@@ -40,9 +41,9 @@ const opt = (name: string, fallback: string) => { const i = args.indexOf(`--${na
 const NODES = Number(opt('nodes', '150')), TICKS = opt('ticks', '2,5,35,120').split(',').map(Number);
 const STEPS = Number(opt('steps', '10')), PROFILE_STEPS = Number(opt('profile', '1')), JSON_OUT = opt('json', '');
 const REBUILD = args.includes('--rebuild');
-/** The detector's locality switch for the timed, profiled and replayed systems (states are always built with it off). */
-const LOCALITY = opt('locality', 'off');
-const SYSTEM = { statusInterval: 1, ...(LOCALITY !== 'off' ? { contactLocality: LOCALITY } : {}) };
+/** The detector's locality switch for the timed, profiled and replayed systems (states are built with the detector's default). */
+const LOCALITY = opt('locality', OgcContactDetector.defaultLocality);
+const SYSTEM = { statusInterval: 1, contactLocality: LOCALITY };
 const CACHE = opt('cache', join(homedir(), 'code/me/fluid-scratch/cloth-bench'));
 /** A dispatch at or under this GPU time is an early exit (measured: ~1-2 us for an exiting per-vertex dispatch). */
 const REPLAY = Number(opt('replay', '64'));

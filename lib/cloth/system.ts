@@ -150,8 +150,8 @@ export interface ClothSystemOptions {
   /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
   readonly statusInterval?: number;
   /**
-   * The contact detector's locality switch for every document (OgcContactConfig.locality; evaluation only, default
-   * "off"). An unknown value fails when the detector is built.
+   * The contact detector's locality switch for every document (OgcContactConfig.locality; default the detector's,
+   * OGC_LOCALITY_DEFAULT "topology+geometry"; "off" is the A/B baseline). An unknown value fails when the detector is built.
    */
   readonly contactLocality?: string;
 }

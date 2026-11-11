@@ -298,6 +298,11 @@ fn bucketStart(h: u32) -> u32 {
  * and removed: no gain alone or on top; docs/plans/cloth-m1-max-locality-progress-l2.md.)
  */
 export const OGC_LOCALITY_PARTS = ["topology", "geometry"] as const;
+/**
+ * The locality of a config that names none: both parts (main's ruling on Experiment 2: the geometry records cut the
+ * query time 29% at the 150^2 sphere's ticks 35 and 120, the face records about 5% more). "off" stays the A/B baseline.
+ */
+export const OGC_LOCALITY_DEFAULT = "topology+geometry";
 export type OgcLocalityPart = (typeof OGC_LOCALITY_PARTS)[number];
 export type OgcLocalityFlags = Readonly<Record<OgcLocalityPart, boolean>>;
 /** "off", or parts joined by "+" (e.g. "topology+geometry"). Anything else fails. */

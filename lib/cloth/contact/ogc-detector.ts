@@ -35,7 +35,7 @@
  */
 import { buildOgcTopology, type OgcMeshTopology, type OgcTopology } from "./ogc-topology";
 import { OGC_FACE_RECORD_WORDS, buildOgcFaceRecords } from "./ogc-topology";
-import { OGC_LOC_GEOMETRY_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
+import { OGC_LOCALITY_DEFAULT, OGC_LOC_GEOMETRY_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
   OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
@@ -159,9 +159,9 @@ export interface OgcContactConfig {
   travelBound?: OgcTravelBound;
   /**
    * The query kernels' locality switch (ogc-detector-wgsl.ts OGC_LOCALITY_PARTS; cloth-m1-max-locality Experiment 2):
-   * "off" (default: the kernels and buffers unchanged), or parts joined by "+": "topology" (compiled face records),
-   * "geometry" (round geometry records, one more pass a round). The same grid, traversal, tests and results; only
-   * where the queries load from. Anything else fails.
+   * "off" (the kernels and buffers of the baseline), or parts joined by "+": "topology" (compiled face records),
+   * "geometry" (round geometry records, one more pass a round). Default OGC_LOCALITY_DEFAULT ("topology+geometry").
+   * The same grid, traversal, tests and results; only where the queries load from. Anything else fails.
    */
   locality?: string;
 }
@@ -410,8 +410,8 @@ export class OgcContactDetector {
   readonly localityBytes: readonly [number, number];
   /** The detection round's kernels in dispatch order under the locality switch (OGC_ROUND_KERNELS when off). */
   readonly roundKernels: readonly RoundKernel[];
-  /** The locality of a config that names none ("off"). Harness use only: a test run sets it to put every detector it builds under the switch. */
-  static defaultLocality = "off";
+  /** The locality of a config that names none (OGC_LOCALITY_DEFAULT). Harness use only: a test run may set it to put every detector it builds under one value. */
+  static defaultLocality: string = OGC_LOCALITY_DEFAULT;
   private readonly paramWords = new Uint32Array(OGC_PARAM_WORDS);
   /** The envelope cap in effect: rqMax, or with envelopeMeshCap the smaller of it and gamma_r h_min. */
   readonly rqTop: number;

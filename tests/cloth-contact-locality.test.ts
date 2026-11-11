@@ -20,7 +20,7 @@ import { publishSceneClothSurfaces, snapshotSceneClothPose } from '../lib/cloth/
 import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import type { ClothDocument, ClothMaterial } from '../lib/cloth/types';
 import { OgcContactDetector, type OgcContactConfig } from '../lib/cloth/contact/ogc-detector';
-import { OGC_LOCALITY_PARTS, ogcQueryBindings, ogcQueryWGSL, parseOgcLocality } from '../lib/cloth/contact/ogc-detector-wgsl';
+import { OGC_LOCALITY_DEFAULT, OGC_LOCALITY_PARTS, ogcQueryBindings, ogcQueryWGSL, parseOgcLocality } from '../lib/cloth/contact/ogc-detector-wgsl';
 import { OGC_FACE_RECORD_WORDS, OGC_NONE, buildOgcEdges, buildOgcFaceRecords, buildOgcTopology, type OgcTopology } from '../lib/cloth/contact/ogc-topology';
 import { buildClothSolidField, type ClothSolidField } from '../lib/cloth/contact/solid-field';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
@@ -120,6 +120,10 @@ test('the locality switch validates explicitly, and off leaves the query kernels
   // 'offsets' (the final bucket offsets) was measured and removed: it is an unknown value like any other.
   for (const bad of ['', 'on', 'all', 'offsets', 'topology+offsets', 'topology+geometry+offsets', 'topology+', 'topology+topology', 'off+geometry', 'Topology', 'geometry,topology', 3, null, true])
     assert.throws(() => parseOgcLocality(bad as string), /OGC: unknown locality/, `locality ${JSON.stringify(bad)}`);
+  // The default (main's ruling on Experiment 2) is both parts, and a detector naming none takes it.
+  assert.equal(OGC_LOCALITY_DEFAULT, 'topology+geometry');
+  assert.equal(OgcContactDetector.defaultLocality, OGC_LOCALITY_DEFAULT);
+  assert.deepEqual(parseOgcLocality(OGC_LOCALITY_DEFAULT), { topology: true, geometry: true });
   const off = parseOgcLocality('off');
   for (const role of ['queryVertex', 'queryEdge', 'querySample'] as const) {
     const base = ogcQueryWGSL(role);
@@ -291,7 +295,6 @@ export function roundCases(): RoundCase[] {
 }
 
 test('GPU detection round: every locality variant leaves the counters, contact entries, DAT pairs and round state of the switch off', { skip: !gpu }, async () => withDevice(async device => {
-  assert.equal(OgcContactDetector.defaultLocality, 'off');
   for (const c of roundCases()) {
     const off = await runRound(device, c, 'off'), k = off.counters;
     const summary = `scanned ${k.scanned} key collisions ${k.collisions} box-rejected ${k.boxRejected} candidates ${k.candidates} DAT pairs ${off.pairs.length} entries ${off.lists.reduce((s, l) => s + l.length, 0)} `

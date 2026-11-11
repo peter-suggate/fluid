@@ -228,7 +228,7 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     ...(document.solver?.contactFreeze ? { contactFreeze: document.solver.contactFreeze } : {}),
     ...(document.solver?.contactTravelBound ? { travelBound: document.solver.contactTravelBound } : {}),
     solidSampleCapacity: sampleCapacity(field, r, edge),
-    // The query kernels' locality switch (the system's option; default off).
+    // The query kernels' locality switch (the system's option; default OGC_LOCALITY_DEFAULT).
     ...(locality !== undefined ? { locality } : {}),
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),
