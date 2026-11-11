@@ -2900,3 +2900,33 @@ not at all.
 - The GPU evaluates the energy from f32 coordinates, so each vertex's energy carries about |f| times an ulp of error.
   The CPU Float64 vertex energy along the f32 path is a sawtooth of 4.5e-6 per ulp step. The check's floor is now
   sum |f|_1 ulp(x) at both ends, and its stencil is up to 1 um, a quarter of the room to the neighbouring hand-off.
+
+## 2026-11-11: the per-vertex contact list authored from its measured peak (128 -> 83 entries, 2048 -> 1328 B/vertex)
+
+Main's ruling: author the list's capacity from the measured peak over gate 2's scenes, with a 10 % margin, on both paths.
+Lower it if the default path's peak + 10 % is below 128. An overflow still fails explicitly (OGC_STATUS.contactOverflow).
+
+The peaks were measured with a probe that ran each scene with 1024 slots of room. Entries per vertex:
+
+| Scene | Default path | Band-pair trial energy |
+|---|---|---|
+| Bridson sphere 16^2 | 60 | 73 |
+| Bridson sphere 32^2 | 75 | 75 |
+| Bridson sphere 64^2 | 53 (120 ticks) | 51 (30 ticks) |
+| Bridson sphere 150^2 | 36 (120 ticks) | not run |
+| C2 ladder (flat, sliding, plate, strip) | at most 20 | at most 17 |
+
+Notes on the table:
+- Logged scenes outside the ladder peak at 33 or below.
+- The band's 64^2 run covers only 30 ticks, and the band's 150^2 was not run. On the default path the peak falls with
+  resolution.
+
+**The capacity:** 75 * 1.1 = 82.5, so 83 entries. At 16 B each that is 1328 B per vertex, down from 2048: 720 B per
+vertex saved (35 %). On the 150^2 sphere (22.5k vertices) that is 16.2 MB.
+
+**Gate:** check:types clean, test:unit as below. The probe also logs each sticky status bit's first tick:
+- 64^2 default: envelopeCap at t5, failSafe at t30.
+- 150^2 default: envelopeCap at t6, failSafe at t27.
+
+So failSafe is not only a band-path finding. It is queued for attribution: what makes the moving sphere's least-shift
+redos stop making progress.

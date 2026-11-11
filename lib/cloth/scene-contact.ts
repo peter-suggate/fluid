@@ -46,7 +46,11 @@ export const CLOTH_SCENE_CONTACT = {
   rqBase_m: 3e-3,
   rqMax_m: 0.04,
   envelopeScale: 2.5,
-  contactCapacity: 128,
+  // Entries per vertex list (16 B each): the measured peak over gate 2's scenes plus 10 % (main's ruling, 2026-11-11).
+  // Peaks, default path / band-pair trial energy: the Bridson sphere 16^2 60 / 73, 32^2 75 / 75, 64^2 53 (120 ticks) /
+  // 51 (30 ticks), 150^2 36 (120 ticks); the ladder at most 33. 75 * 1.1 = 82.5: 83, 1328 B per vertex (was 128, 2048 B).
+  // A list past it still fails explicitly (OGC_STATUS.contactOverflow).
+  contactCapacity: 83,
   gridEntriesPerPrimitive: 32,
   bucketCount: 1 << 18,
   // Re-detection rounds per step: at least the Newton iteration cap (CLOTH_NEWTON_SCENE_DEFAULTS.iterations, 8; a
