@@ -589,7 +589,13 @@ export interface OgcVertexBlockOptions {
    * (the plane records and each solid piece's orthant faces; OGC_PROJECT_NO_TRAVEL_WGSL). Omitted or true: the block
    * is the one without it.
    */
-  travelBound?: boolean;
+  travelBound?: boolean;  /**
+   * The line search's contact energy (C1's newton.contactEnergyDifference; needs newton). 'move': the block adds
+   * ogcContactEnergyDeltasOwnedLanes, each owned entry's energy change at every trial formed from the trial moves
+   * themselves (OGC_ENERGY_DELTAS_WGSL; the host defines OGC_NEWTON_TRIALS, ogcXBase and ogcMove). Omitted or
+   * 'absolute': the block is the one without it (the solver differences two absolute energies).
+   */
+  energyDifference?: 'absolute' | 'move';
 }
 
 /**
@@ -1269,6 +1275,10 @@ function ogcProjectMetricWGSL(base: string): string {
 
 export function ogcVertexBlockWGSL(options: OgcVertexBlockOptions): string {
   const { group, binding, metric } = options;
+  const difference = options.energyDifference ?? 'absolute';
+  if (difference !== 'absolute' && difference !== 'move') throw new Error(`Unknown OGC contact energy difference ${String(difference)}`);
+  if (difference === 'move' && !options.newton) throw new Error("OGC contact energy difference 'move' needs the Newton forms (newton)");
+  const energyDeltas = difference === 'move';
   const project = options.travelBound === false ? ogcProjectNoTravelWGSL() : OGC_PROJECT_WGSL;
   return /* wgsl */`
 ${OGC_COMMON_WGSL}
@@ -1504,7 +1514,7 @@ fn ogcAccumulateVertexContact(v: u32, xv: vec3<f32>, f: ptr<function, vec3<f32>>
 }
 
 fn ogcVertexContactEnergy(v: u32, xv: vec3<f32>) -> f32 { return ogcVertexContactEnergyLanes(v, xv, 0u, 1u); }
-${options.newton ? OGC_NEWTON_BLOCK_WGSL : ""}`;
+${options.newton ? OGC_NEWTON_BLOCK_WGSL : ""}${energyDeltas ? OGC_ENERGY_DELTAS_WGSL : ""}`;
 }
 
 /**
@@ -1562,5 +1572,310 @@ fn ogcContactEnergyOwnedLanes(v: u32, first: u32, stride: u32) -> f32 {
     if (ogcEntryOwned(v, ent)) { e += ogcEvalEntry(v, xv, ent, params).e; }
   }
   return e;
+}
+`;
+
+/**
+ * newton.contactEnergyDifference 'move' (C1's line search): each owned entry's energy change at every trial, formed
+ * from the trial moves m_i(k) (the host's ogcMove(i, k), x(k) = ogcXBase(i) + m_i(k)) instead of as the difference of
+ * two absolute energies, whose f32 rounding (an ulp of E, of the field coordinates, of the 0.5 m positions) swamps
+ * the change of a short trial. Per kind, in exact arithmetic the same change as ogcEntryLin's energy at x(k) less its
+ * energy at x:
+ *   field (static, moving)   phi's change along the move in the field's cell coordinates u = (x - lo) / h, fixed once
+ *                            at the base (the moving solid's in its body frame: R1^T m), the trilinear difference
+ *                            within each cell the path crosses as a telescoping product difference (each factor's
+ *                            change is +-du exactly), and the band's jump where the path enters or leaves an unstored brick;
+ *   pairs (VT, sample-face, hull facet, EE)   the gap in coordinates relative to an anchor vertex's base, so its
+ *                            rounding is the pair's extent's, not the scene's; the weights' change through the feature's
+ *                            free parameters (ogcPairWeightShift); |g| changes by dg (2 g0 + dg) / (|g0| + |g1|);
+ *   barrier                  b(d0 + dd) - b(d0) in difference form: the quadratic stage -dd (2 r - d0 - d1) k / 2,
+ *                            the log stage -k2 log1p(dd / d0) (a series below |x| 1/4), split at tau = r / 2 and r;
+ *   friction                 the slip u0 + T m (the lagged T, weights and normal are x-independent), |u| changing by
+ *                            du (2 u0 + du) / (|u0| + |u1|), f0's change in the same split form at eps.
+ * A trial outside the barrier's domain (phi or d not above 0) is +infinity; a base outside it, NaN (as the absolute
+ * difference inf - inf).
+ *   ogcContactEnergyDeltasOwnedLanes(v, first, stride) -> array<vec2<f32>, OGC_NEWTON_TRIALS>
+ *       per trial k (dE_k, |E0| + |E0 + dE_k|): the change of the energy of the entries v owns (ogcEntryOwned) over
+ *       entries first, first + stride, ... and the absolute difference's rounding floor
+ */
+const OGC_ENERGY_DELTAS_WGSL = /* wgsl */`
+fn ogcInfAt(word: u32) -> f32 { return bitcast<f32>(0x7f800000u | (word & 0u)); }
+// log(1 + x): 2 atanh(x / (2 + x)) as a series where |x| < 1/4 (|s| < 1/7: 8 terms reach f32), else log.
+fn ogcLog1p(x: f32) -> f32 {
+  if (abs(x) >= 0.25) { return log(1.0 + x); }
+  let s = x / (2.0 + x); let s2 = s * s;
+  var t = 1.0 / 15.0;
+  t = 1.0 / 13.0 + s2 * t; t = 1.0 / 11.0 + s2 * t; t = 1.0 / 9.0 + s2 * t; t = 1.0 / 7.0 + s2 * t;
+  t = 1.0 / 5.0 + s2 * t; t = 1.0 / 3.0 + s2 * t; t = 1.0 + s2 * t;
+  return 2.0 * s * t;
+}
+// b(d0 + dd) - b(d0), OGC's two-stage activation (ogcActivation), with d1 = d0 + dd > 0 and d0 > 0.
+fn ogcActivationDelta(d0: f32, dd: f32, r: f32, k: f32) -> f32 {
+  let d1 = d0 + dd;
+  let tau = 0.5 * r;
+  // The quadratic stage over [tau, r]: the clamped ends, the move itself where neither end is clamped.
+  let a = clamp(d0, tau, r); let b = clamp(d1, tau, r);
+  let qd = select(b - a, dd, a == d0 && b == d1);
+  var e = -0.5 * k * qd * (2.0 * r - a - b);
+  // The log stage below tau.
+  let la = min(d0, tau); let lb = min(d1, tau);
+  let ld = select(lb - la, dd, la == d0 && lb == d1);
+  if (ld != 0.0) { e -= k * tau * (r - tau) * ogcLog1p(ld / la); }
+  return e;
+}
+// f0(y0 + dy) - f0(y0) (ogcFrictionF0), split at eps likewise.
+fn ogcFrictionF0Delta(y0: f32, dy: f32, eps: f32) -> f32 {
+  let y1 = y0 + dy;
+  let a = min(y0, eps); let b = min(y1, eps);
+  let ld = select(b - a, dy, a == y0 && b == y1);
+  var e = ld * ((a + b) / eps - (a * a + a * b + b * b) / (3.0 * eps * eps));
+  let ua = max(y0, eps); let ub = max(y1, eps);
+  e += select(ub - ua, dy, ua == y0 && ub == y1);
+  return e;
+}
+// |u0 + du| - |u0|, both lengths known.
+fn ogcLengthDelta(u0: vec3<f32>, du: vec3<f32>, l0: f32, l1: f32) -> f32 {
+  let s = l0 + l1;
+  if (!(s > 0.0)) { return 0.0; }
+  return dot(du, 2.0 * u0 + du) / s;
+}
+// The brick holding global cell c (all eight of its nodes: a brick's 9^3 nodes span its 8^3 cells), or OGC_NONE.
+fn ogcSolidCellRec(h: OgcSolidHeader, c: vec3<i32>) -> u32 { return ogcSolidBrick(h, c >> vec3<u32>(3u)); }
+// phi at cell-local t in cell c, as ogcSolidSample reads it: trilinear in its brick, the band where none is stored.
+fn ogcSolidCellValue(h: OgcSolidHeader, rec: u32, c: vec3<i32>, t: vec3<f32>) -> f32 {
+  if (rec == OGC_NONE) { return h.band; }
+  let ci = vec3<u32>(c - 8 * (c >> vec3<u32>(3u)));
+  var e = 0.0;
+  for (var j = 0u; j < 8u; j++) {
+    let b = vec3<u32>(j & 1u, (j >> 1u) & 1u, j >> 2u);
+    let w = mix(1.0 - t, t, vec3<f32>(b));
+    e += ogcSolidNode(rec, ci + b) * w.x * w.y * w.z;
+  }
+  return e;
+}
+// The trilinear phi's change within cell c from t0 to t0 + dt (cell-local coordinates), as a telescoping product
+// difference: per corner, w'x w'y w'z - wx wy wz = dwx w'y w'z + wx dwy w'z + wx wy dwz, each dw = +-dt exactly.
+// None where no brick is stored (the band is constant).
+fn ogcSolidCellDelta(h: OgcSolidHeader, rec: u32, c: vec3<i32>, t0: vec3<f32>, dt: vec3<f32>) -> f32 {
+  if (rec == OGC_NONE) { return 0.0; }
+  let ci = vec3<u32>(c - 8 * (c >> vec3<u32>(3u)));
+  let t1 = t0 + dt;
+  var e = 0.0;
+  for (var j = 0u; j < 8u; j++) {
+    let b = vec3<u32>(j & 1u, (j >> 1u) & 1u, j >> 2u);
+    let bf = vec3<f32>(b);
+    let w0 = mix(1.0 - t0, t0, bf); let w1 = mix(1.0 - t1, t1, bf);
+    let dw = (2.0 * bf - 1.0) * dt;
+    e += ogcSolidNode(rec, ci + b) * (dw.x * w1.y * w1.z + w0.x * dw.y * w1.z + w0.x * w0.y * dw.z);
+  }
+  return e;
+}
+// phi(q0 + dq) - phi(q0) in the field's cell coordinates q (q0 = (p - lo) / h at the base), segment by segment over
+// every cell the straight path crosses. Stored bricks share their face nodes, so the segments telescope; where the
+// path enters or leaves a brick that is not stored (the field reads band there) the jump at the crossing is added.
+fn ogcSolidPhiDelta(h: OgcSolidHeader, q0: vec3<f32>, dq: vec3<f32>) -> f32 {
+  var c = vec3<i32>(floor(q0));
+  let c1 = vec3<i32>(floor(q0 + dq));
+  let crossings = u32(abs(c1.x - c.x) + abs(c1.y - c.y) + abs(c1.z - c.z));
+  let st = vec3<i32>(sign(dq));
+  var rec = ogcSolidCellRec(h, c);
+  var lam = 0.0;
+  var e = 0.0;
+  for (var s = 0u; s <= crossings; s++) {
+    // Where the path leaves cell c along each axis (1: it ends in c).
+    var next = vec3<f32>(1.0);
+    for (var a = 0u; a < 3u; a++) {
+      if (st[a] > 0) { next[a] = min(1.0, (f32(c[a] + 1) - q0[a]) / dq[a]); }
+      else if (st[a] < 0) { next[a] = min(1.0, (f32(c[a]) - q0[a]) / dq[a]); }
+    }
+    var ln = min(min(next.x, next.y), next.z);
+    if (s == crossings) { ln = 1.0; }
+    let t0 = select(q0 + lam * dq, q0, lam == 0.0) - vec3<f32>(c);
+    e += ogcSolidCellDelta(h, rec, c, t0, select((ln - lam) * dq, dq, lam == 0.0 && ln == 1.0));
+    if (s == crossings) { break; }
+    // Step into the next cell along the axis that leaves first (one axis per crossing).
+    var ax = 0u;
+    if (next.y < next[ax]) { ax = 1u; }
+    if (next.z < next[ax]) { ax = 2u; }
+    let cOld = c;
+    c[ax] += st[ax];
+    var recNew = rec;
+    if (any((c >> vec3<u32>(3u)) != (cOld >> vec3<u32>(3u)))) { recNew = ogcSolidCellRec(h, c); }
+    if ((rec == OGC_NONE) != (recNew == OGC_NONE)) {
+      let at = q0 + ln * dq;
+      var tOld = at - vec3<f32>(cOld); var tNew = at - vec3<f32>(c);
+      tOld[ax] = select(0.0, 1.0, st[ax] > 0); tNew[ax] = select(1.0, 0.0, st[ax] > 0);
+      e += ogcSolidCellValue(h, recNew, c, tNew) - ogcSolidCellValue(h, rec, cOld, tOld);
+    }
+    rec = recNew;
+    lam = ln;
+  }
+  return e;
+}
+// One field entry's base (phi0 at the base, the solid's sample header and the base point in its cell coordinates).
+struct OgcFieldBase { h: OgcSolidHeader, q0: vec3<f32>, phi0: f32, R: mat3x3<f32>, u0: vec3<f32>, nl: vec3<f32>, y0: f32, ml: f32 }
+fn ogcFieldBaseOf(v: u32, ent: vec4<u32>) -> OgcFieldBase {
+  let xb = ogcXBase(v);
+  var h: OgcSolidHeader; var p: vec3<f32>; var R = OGC_I3; var dx: vec3<f32>; var nl = vec3<f32>(0.0);
+  let ml = bitcast<f32>(ent.z);
+  if (ent.y == OGC_SOLID_Y) {
+    h = ogcSolidHeader(); p = xb;
+    let xt = ogcXt(v);
+    dx = xb - xt;
+    if (ml > 0.0) { nl = ogcUnitOr(ogcSolidSample(h, xt).grad, ogcUnitOr(ogcSolidSample(h, xb).grad, vec3<f32>(0.0))); }
+  } else {
+    let p1 = ogcPose(1u);
+    h = ogcSolidHeaderAt(ogcBodyBase()); p = ogcToBody(p1, xb); R = p1.R;
+    let yt = ogcToBody(ogcPose(0u), ogcXt(v));
+    dx = xb - ogcToWorld(p1, yt);
+    if (ml > 0.0) { nl = p1.R * ogcUnitOr(ogcSolidSample(h, yt).grad, ogcUnitOr(ogcSolidSample(h, p).grad, vec3<f32>(0.0))); }
+  }
+  let u0 = dx - nl * dot(nl, dx);
+  return OgcFieldBase(h, (p - h.origin) / h.cell, ogcSolidSample(h, p).phi, R, u0, nl, length(u0), ml);
+}
+// A pair entry's base: its ids, the recorded feature, its points relative to the anchor (the first cloth vertex's
+// base), the lagged weights' slip and normal.
+struct OgcPairBase { ids: vec4<u32>, kind: u32, feature: u32, st: vec2<f32>, R0: array<vec3<f32>, 4>, cloth: vec4<f32>, wl: vec4<f32>, u0: vec3<f32>, nl: vec3<f32>, y0: f32, ml: f32 }
+// kind: 0 VT (cloth vertex, cloth face), 1 sample-face, 2 hull facet, 3 EE.
+fn ogcPairWeights(b: OgcPairBase, X: array<vec3<f32>, 4>) -> vec4<f32> {
+  if (b.kind == 3u) { return vec4<f32>(1.0 - b.st.x, b.st.x, -(1.0 - b.st.y), -b.st.y); }
+  return ogcVtWeights(b.feature, X[0], X[1], X[2], X[3]);
+}
+// The closest point's free parameters on the recorded feature of face (a, b, c) for point p (ogcVtWeights' own): an
+// edge's s (x), the face's barycentrics (bv, bw); none for a vertex feature.
+fn ogcVtBary(feature: u32, p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> vec2<f32> {
+  var X = array<vec3<f32>, 3>(a, b, c);
+  if (feature < 3u) { return vec2<f32>(0.0); }
+  if (feature < OGC_FACE) {
+    let i = feature - 3u; let j = (i + 1u) % 3u;
+    let dir = X[j] - X[i];
+    return vec2<f32>(dot(p - X[i], dir) / dot(dir, dir), 0.0);
+  }
+  let v0 = b - a; let v1 = c - a; let v2 = p - a;
+  let d00 = dot(v0, v0); let d01 = dot(v0, v1); let d11 = dot(v1, v1);
+  let d20 = dot(v2, v0); let d21 = dot(v2, v1);
+  let den = d00 * d11 - d01 * d01;
+  return vec2<f32>((d11 * d20 - d01 * d21) / den, (d00 * d21 - d01 * d20) / den);
+}
+// sum_i (w1_i - w0_i) R0_i, the gap's change from the weights' own change, formed from the change of the feature's free
+// parameters along the feature's in-plane differences (an edge: ds (R_i - R_j); the face: dbv (R_a - R_b) + dbw (R_a - R_c)),
+// so the weights' f32 rounding, which need not sum to the exact -1, cannot put d0 times an ulp into the normal change.
+fn ogcPairWeightShift(b: OgcPairBase, R1: array<vec3<f32>, 4>) -> vec3<f32> {
+  if (b.kind == 3u || b.feature < 3u) { return vec3<f32>(0.0); }
+  let q0 = ogcVtBary(b.feature, b.R0[0], b.R0[1], b.R0[2], b.R0[3]);
+  let q1 = ogcVtBary(b.feature, R1[0], R1[1], R1[2], R1[3]);
+  let dq = q1 - q0;
+  if (b.feature < OGC_FACE) { let i = b.feature - 3u; let j = (i + 1u) % 3u; return dq.x * (b.R0[1u + i] - b.R0[1u + j]); }
+  return dq.x * (b.R0[1] - b.R0[2]) + dq.y * (b.R0[1] - b.R0[3]);
+}
+fn ogcPairBaseOf(ent: vec4<u32>, params: vec4<f32>) -> OgcPairBase {
+  var b: OgcPairBase;
+  var Xb: array<vec3<f32>, 4>;
+  var Xl: array<vec3<f32>, 4>;
+  b.feature = (ent.y >> 28u) & 7u;
+  b.cloth = vec4<f32>(1.0);
+  b.st = vec2<f32>(0.0);
+  let sampled = ent.w == 1u && (ent.y & OGC_EE_BIT) == 0u;
+  let facet = ent.w == 2u && (ent.y & OGC_EE_BIT) == 0u;
+  if (facet) {
+    b.kind = 2u; b.ids = vec4<u32>(ent.x, ogcFacetSamples(ent.y & OGC_ID_MASK)); b.cloth = vec4<f32>(1.0, 0.0, 0.0, 0.0);
+    Xb[0] = ogcXBase(b.ids[0]); Xl[0] = ogcXt(b.ids[0]);
+    for (var i = 1u; i < 4u; i++) { Xb[i] = ogcSamplePos(b.ids[i]); Xl[i] = ogcSampleStart(b.ids[i]); }
+  } else if ((ent.y & OGC_EE_BIT) == 0u) {
+    b.kind = select(0u, 1u, sampled); b.ids = vec4<u32>(ent.x, ogcTri(ent.y & OGC_ID_MASK));
+    for (var i = 1u; i < 4u; i++) { Xb[i] = ogcXBase(b.ids[i]); Xl[i] = ogcXt(b.ids[i]); }
+    if (sampled) { Xb[0] = ogcSamplePos(ent.x); Xl[0] = ogcSampleStart(ent.x); b.cloth.x = 0.0; }
+    else { Xb[0] = ogcXBase(ent.x); Xl[0] = ogcXt(ent.x); }
+  } else {
+    b.kind = 3u; b.ids = vec4<u32>(ogcEdgeVerts(ent.x), ogcEdgeVerts(ent.y & OGC_ID_MASK));
+    for (var i = 0u; i < 4u; i++) { Xb[i] = ogcXBase(b.ids[i]); Xl[i] = ogcXt(b.ids[i]); }
+    b.st = unpack2x16unorm(ent.w);
+  }
+  // The anchor: the first cloth point's base (a sample-face pair's first face vertex).
+  let A = Xb[select(0u, 1u, b.kind == 1u)];
+  for (var i = 0u; i < 4u; i++) { b.R0[i] = Xb[i] - A; }
+  // The lagged slip (x-independent weights wl and normal at the step start) at the base.
+  let w0 = ogcPairWeights(b, b.R0);
+  var g0 = vec3<f32>(0.0);
+  for (var i = 0u; i < 4u; i++) { g0 += w0[i] * b.R0[i]; }
+  b.wl = select(ogcVtWeights(b.feature, Xl[0], Xl[1], Xl[2], Xl[3]), w0, b.kind == 3u);
+  b.ml = select(params.z * bitcast<f32>(ent.z), bitcast<f32>(ent.z), sampled || facet);
+  var dx = vec3<f32>(0.0); var gl = vec3<f32>(0.0);
+  for (var i = 0u; i < 4u; i++) { dx += b.wl[i] * (Xb[i] - Xl[i]); gl += b.wl[i] * Xl[i]; }
+  b.nl = ogcUnitOr(gl, ogcUnitOr(g0, vec3<f32>(0.0)));
+  b.u0 = dx - b.nl * dot(b.nl, dx);
+  b.y0 = length(b.u0);
+  return b;
+}
+fn ogcContactEnergyDeltasOwnedLanes(v: u32, first: u32, stride: u32) -> array<vec2<f32>, OGC_NEWTON_TRIALS> {
+  let header = ogcContacts[0];
+  let params = bitcast<vec4<f32>>(ogcContacts[1]);
+  let count = min(ogcContacts[header.z + (v >> 2u)][v & 3u], header.y);
+  let base = header.w + v * header.y;
+  let N = header.x;
+  var dE = array<f32, OGC_NEWTON_TRIALS>();
+  var E0 = 0.0;
+  for (var i = first; i < count; i += stride) {
+    let ent = ogcContacts[base + i];
+    if (!ogcEntryOwned(v, ent)) { continue; }
+    if (ent.y == OGC_SOLID_Y || ent.y == OGC_BODY_Y) {
+      let f = ogcFieldBaseOf(v, ent);
+      let ok0 = f.phi0 > 0.0;
+      let e0 = select(ogcInfAt(ent.w), ogcActivation(f.phi0, params.x, params.y).x, ok0) + select(0.0, f.ml * ogcFrictionF0(f.y0, params.w), f.ml > 0.0);
+      E0 += e0;
+      for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) {
+        let m = ogcMove(v, k);
+        let dphi = ogcSolidPhiDelta(f.h, f.q0, (transpose(f.R) * m) / f.h.cell);
+        var de: f32;
+        if (!ok0) { de = e0 - e0; }
+        else if (!(f.phi0 + dphi > 0.0)) { de = ogcInfAt(ent.w); }
+        else { de = ogcActivationDelta(f.phi0, dphi, params.x, params.y); }
+        if (f.ml > 0.0) {
+          let du = m - f.nl * dot(f.nl, m);
+          let y1 = length(f.u0 + du);
+          de += f.ml * ogcFrictionF0Delta(f.y0, ogcLengthDelta(f.u0, du, f.y0, y1), params.w);
+        }
+        dE[k] += de;
+      }
+      continue;
+    }
+    let b = ogcPairBaseOf(ent, params);
+    let w0 = ogcPairWeights(b, b.R0);
+    var g0 = vec3<f32>(0.0);
+    for (var j = 0u; j < 4u; j++) { g0 += w0[j] * b.R0[j]; }
+    let d0 = length(g0);
+    let ok0 = d0 > 0.0;
+    let e0 = select(ogcInfAt(ent.w), ogcActivation(d0, params.x, params.y).x, ok0) + select(0.0, b.ml * ogcFrictionF0(b.y0, params.w), b.ml > 0.0);
+    E0 += e0;
+    for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) {
+      var M: array<vec3<f32>, 4>;
+      var R1: array<vec3<f32>, 4>;
+      for (var j = 0u; j < 4u; j++) {
+        M[j] = select(vec3<f32>(0.0), ogcMove(b.ids[j], k), b.cloth[j] != 0.0 && b.ids[j] < N);
+      }
+      // Relative to the anchor's own move: the anchor stays at the origin.
+      let mA = M[select(0u, 1u, b.kind == 1u)];
+      for (var j = 0u; j < 4u; j++) { R1[j] = b.R0[j] + (M[j] - mA); }
+      let w1 = ogcPairWeights(b, R1);
+      var dg = ogcPairWeightShift(b, R1);
+      for (var j = 0u; j < 4u; j++) { dg += w1[j] * (M[j] - mA); }
+      let d1 = length(g0 + dg);
+      var de: f32;
+      if (!ok0) { de = e0 - e0; }
+      else if (!(d1 > 0.0)) { de = ogcInfAt(ent.w); }
+      else { de = ogcActivationDelta(d0, ogcLengthDelta(g0, dg, d0, d1), params.x, params.y); }
+      if (b.ml > 0.0) {
+        var dx = vec3<f32>(0.0);
+        for (var j = 0u; j < 4u; j++) { dx += b.wl[j] * M[j]; }
+        let du = dx - b.nl * dot(b.nl, dx);
+        let y1 = length(b.u0 + du);
+        de += b.ml * ogcFrictionF0Delta(b.y0, ogcLengthDelta(b.u0, du, b.y0, y1), params.w);
+      }
+      dE[k] += de;
+    }
+  }
+  var out: array<vec2<f32>, OGC_NEWTON_TRIALS>;
+  for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) { out[k] = vec2<f32>(dE[k], abs(E0) + abs(E0 + dE[k])); }
+  return out;
 }
 `;

@@ -796,12 +796,15 @@ export class OgcContactDetector {
   /**
    * What the cloth solver's vertex kernel takes: the block at (group 0, binding) and the buffer it
    * reads; with newton, the global forms too (ogcVertexContactHvLanes, ogcContactEnergyOwnedLanes), and the trial
-   * projection in the config's projectionMetric ("hvv": the solver's nwVertexInv).
+   * projection in the config's projectionMetric ("hvv": the solver's nwVertexInv). options.energyDifference 'move'
+   * (newton.contactEnergyDifference) adds ogcContactEnergyDeltasOwnedLanes, the entries' energy changes formed from the
+   * trial moves (the solver defines OGC_NEWTON_TRIALS, ogcXBase and ogcMove); 'absolute' (the default) leaves it out.
    */
-  solverContact(binding: number, newton = false): { wgsl: string; buffer: GPUBuffer; verifies: boolean } {
+  solverContact(binding: number, newton = false, options: { energyDifference?: "absolute" | "move" } = {}): { wgsl: string; buffer: GPUBuffer; verifies: boolean } {
     const metric = newton && this.config.projectionMetric === "hvv" ? { metric: "nwVertexInv" } : {};
     const travel = newton && this.config.travelBound === "off" ? { travelBound: false } : {};
-    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel }), buffer: this.contacts, verifies: newton && this.verifies };
+    const difference = options.energyDifference === undefined ? {} : { energyDifference: options.energyDifference };
+    return { wgsl: ogcVertexBlockWGSL({ group: 0, binding, newton, ...metric, ...travel, ...difference }), buffer: this.contacts, verifies: newton && this.verifies };
   }
 
   /**

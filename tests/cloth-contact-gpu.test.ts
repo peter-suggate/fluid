@@ -16,7 +16,7 @@ import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider"
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { OgcContactDetector, type OgcContactConfig } from "../lib/cloth/contact/ogc-detector";
 import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
-import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
+import { OGC_STATUS, ogcVertexBlockWGSL } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, clothSolidClearance, clothSolidSampleFacets, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import { CLOTH_SCENE_STEP_S, ClothSystem } from "../lib/cloth/system";
 import { clothAnalyticFreeFall } from "../lib/cloth/scenes/analytic/scenes";
@@ -1296,26 +1296,34 @@ async function detectWithSolid(device: GPUDevice, mesh: OracleMesh, vel: V3[], c
   return { det, positions, oracle };
 }
 
+/**
+ * A box turned 30 degrees about y, so its edges along y lie off the lattice and the field (cell 5 mm) rounds them
+ * in by 1.65 mm: the samples stand on the true edge and their hull facets span it. A flat sheet across the
+ * top-front edge's bisector, 1.0-1.4 mm off it (r = 2 mm), its rows 1.25 mm apart across the edge. R: the scene's
+ * generator, continued.
+ */
+function edgeBoxScene() {
+  const th = Math.PI / 6, C = Math.cos(th), Sn = Math.sin(th), ctr: V3 = [0.05, 0.04, 0.02], hb: V3 = [0.03, 0.025, 0.015];
+  const local = boxSdf([-hb[0], -hb[1], -hb[2]], hb);
+  const sdf = (p: readonly number[]) => { const d = [p[0]! - ctr[0], p[1]! - ctr[1], p[2]! - ctr[2]]; return local([C * d[0]! - Sn * d[2]!, d[1]!, Sn * d[0]! + C * d[2]!]); };
+  const field = buildClothSolidField({ parts: [{ kind: "sdf", sdf, lo: [0.0, 0.01, -0.02], hi: [0.09, 0.07, 0.06], mu: 0.3 }], lo: [-0.02, -0.02, -0.03], hi: [0.18, 0.12, 0.1], cell: 0.005, band: 0.06 });
+  // The bisector of the edge's two face normals (C, 0, -S) and (S, 0, C), and the direction across the edge.
+  const nb: V3 = [(C + Sn) / Math.SQRT2, 0, (C - Sn) / Math.SQRT2], tb: V3 = [(C - Sn) / Math.SQRT2, 0, (-Sn - C) / Math.SQRT2];
+  const base = sheet(8, 4, 0.01), R = rng(31), N = base.x.length;
+  const mesh: OracleMesh = { ...base, x: f32(base.x.map((_, k) => {
+    const i = k % 9, j = Math.floor(k / 9), s = (j - 2) * 1.25e-3, off = 1.0e-3 + 4e-4 * R();
+    const e: V3 = [ctr[0] + C * hb[0] + Sn * hb[2], ctr[1] - 0.01 + 0.0025 * i, ctr[2] - Sn * hb[0] + C * hb[2]];
+    return [0, 1, 2].map(a => e[a]! + off * nb[a]! + s * tb[a]!) as unknown as V3;
+  })) };
+  // The samples stand about a cell apart along the rounded edge and the reach (4 mm) takes in several hull edges and
+  // facets per vertex: the pair slots are authored for that.
+  const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.004, pairCapacity: 4096 * N, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 };
+  return { field, mesh, N, config, R };
+}
+
 test("GPU hull facets: vertices across an off-lattice box edge keep the nearest of their field and facet entries, and the vertex block matches the oracle", { skip: !gpu }, async () => {
   await withContactDevice(async device => {
-    // A box turned 30 degrees about y, so its edges along y lie off the lattice and the field (cell 5 mm) rounds them
-    // in by 1.65 mm: the samples stand on the true edge and their hull facets span it. A flat sheet across the
-    // top-front edge's bisector, 1.0-1.4 mm off it (r = 2 mm), its rows 1.25 mm apart across the edge.
-    const th = Math.PI / 6, C = Math.cos(th), Sn = Math.sin(th), ctr: V3 = [0.05, 0.04, 0.02], hb: V3 = [0.03, 0.025, 0.015];
-    const local = boxSdf([-hb[0], -hb[1], -hb[2]], hb);
-    const sdf = (p: readonly number[]) => { const d = [p[0]! - ctr[0], p[1]! - ctr[1], p[2]! - ctr[2]]; return local([C * d[0]! - Sn * d[2]!, d[1]!, Sn * d[0]! + C * d[2]!]); };
-    const field = buildClothSolidField({ parts: [{ kind: "sdf", sdf, lo: [0.0, 0.01, -0.02], hi: [0.09, 0.07, 0.06], mu: 0.3 }], lo: [-0.02, -0.02, -0.03], hi: [0.18, 0.12, 0.1], cell: 0.005, band: 0.06 });
-    // The bisector of the edge's two face normals (C, 0, -S) and (S, 0, C), and the direction across the edge.
-    const nb: V3 = [(C + Sn) / Math.SQRT2, 0, (C - Sn) / Math.SQRT2], tb: V3 = [(C - Sn) / Math.SQRT2, 0, (-Sn - C) / Math.SQRT2];
-    const base = sheet(8, 4, 0.01), R = rng(31), N = base.x.length;
-    const mesh: OracleMesh = { ...base, x: f32(base.x.map((_, k) => {
-      const i = k % 9, j = Math.floor(k / 9), s = (j - 2) * 1.25e-3, off = 1.0e-3 + 4e-4 * R();
-      const e: V3 = [ctr[0] + C * hb[0] + Sn * hb[2], ctr[1] - 0.01 + 0.0025 * i, ctr[2] - Sn * hb[0] + C * hb[2]];
-      return [0, 1, 2].map(a => e[a]! + off * nb[a]! + s * tb[a]!) as unknown as V3;
-    })) };
-    // The samples stand about a cell apart along the rounded edge and the reach (4 mm) takes in several hull edges and
-    // facets per vertex: the pair slots are authored for that.
-    const config: OgcContactConfig = { ...baseConfig(N), rqBase: 0.004, pairCapacity: 4096 * N, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 };
+    const { field, mesh, N, config, R } = edgeBoxScene();
     const { det, positions, oracle } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
     const c0 = await det.readCounters();
     assert.equal(c0.status, 0, `status ${OgcContactDetector.describeStatus(c0.status)}`);
@@ -1734,5 +1742,192 @@ test("GPU contact state: touching is a normal force at the step's end, onset its
     await runPass(device, pass => det.stepHooks.stepEnd(pass));
     assert.deepEqual(await state(), s1, "set down: onset again");
     det.destroy();
+  });
+});
+
+// ------------------------------------------------------------------ newton.contactEnergyDifference 'move'
+
+test("contact energy difference: 'absolute' (the default) leaves the vertex block as it was; 'move' only appends the deltas; unknown kinds fail", () => {
+  const options = { group: 0, binding: 4, newton: true };
+  const plain = ogcVertexBlockWGSL(options);
+  assert.equal(ogcVertexBlockWGSL({ ...options, energyDifference: "absolute" }), plain);
+  assert.ok(!plain.includes("ogcContactEnergyDeltasOwnedLanes"));
+  const move = ogcVertexBlockWGSL({ ...options, energyDifference: "move" });
+  assert.ok(move.startsWith(plain) && move.includes("fn ogcContactEnergyDeltasOwnedLanes("), "the deltas follow the unchanged block");
+  assert.throws(() => ogcVertexBlockWGSL({ ...options, energyDifference: "relative" as never }), /Unknown OGC contact energy difference/);
+  assert.throws(() => ogcVertexBlockWGSL({ ...options, newton: false, energyDifference: "move" }), /needs the Newton forms/);
+});
+
+const DELTA_TRIALS = 8;
+/** An f32 ulp at the points' largest coordinate. */
+const extentUlp = (P: V3[]) => 2 ** (Math.floor(Math.log2(Math.max(...P.flatMap(p => p.map(Math.abs))))) - 23);
+
+/**
+ * The solver's view of the 'move' deltas (det.solverContact(.., { energyDifference: 'move' })): the base X, trial k's
+ * move 2^-k m_i (as C1's ogcMove), the deltas over two lanes summed. Per vertex: dE_k and the floor |E0| + |E0 + dE_k|
+ * per trial, then the owned absolute energy and the vertex block's force at X.
+ */
+async function evalEnergyDeltas(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, xt: GPUBuffer, move: GPUBuffer, N: number) {
+  const L = det.topology.layout, K = DELTA_TRIALS, W = K + 1;
+  const out = device.createBuffer({ size: 16 * W * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const block = det.solverContact(4, true, { energyDifference: "move" }).wgsl;
+  const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> Xt: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> topo: array<u32>;
+@group(0) @binding(3) var<storage, read_write> outBuf: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> Mv: array<vec4<f32>>;
+const OGC_NEWTON_TRIALS: u32 = ${K}u;
+fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcXBase(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcMove(i: u32, k: u32) -> vec3<f32> { return exp2(-f32(k)) * Mv[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return Xt[i].xyz; }
+fn ogcDir(i: u32) -> vec3<f32> { return Mv[i].xyz; }
+fn ogcTri(t: u32) -> vec3<u32> { let b = ${L.trisOffset}u + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = ${L.edgesOffset}u + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
+${block}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= ${N}u) { return; }
+  let a = ogcContactEnergyDeltasOwnedLanes(v, 0u, 2u);
+  let b = ogcContactEnergyDeltasOwnedLanes(v, 1u, 2u);
+  for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) { outBuf[${W}u * v + k] = vec4<f32>(a[k] + b[k], 0.0, 0.0); }
+  var f = vec3<f32>(0.0); var H = mat3x3<f32>(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
+  _ = ogcVertexContactLanes(v, ogcX(v), 0u, 1u, &f, &H);
+  outBuf[${W}u * v + ${K}u] = vec4<f32>(f, ogcContactEnergyOwnedLanes(v, 0u, 2u) + ogcContactEnergyOwnedLanes(v, 1u, 2u));
+}`;
+  const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, positions], [1, xt], [2, det.topo], [3, out], [4, det.solverBuffer], [5, move]] as [number, GPUBuffer][]).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  await runPass(device, pass => { pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); });
+  const res = new Float32Array(await readBuffer(device, out));
+  out.destroy();
+  return {
+    dE: (v: number, k: number) => res[4 * (W * v + k)]!, floor: (v: number, k: number) => res[4 * (W * v + k) + 1]!,
+    f: (v: number): V3 => [res[4 * (W * v + K)]!, res[4 * (W * v + K) + 1]!, res[4 * (W * v + K) + 2]!], e: (v: number) => res[4 * (W * v + K) + 3]!,
+  };
+}
+
+/** ogcEntryOwned on the host: the one list among the entry's holders that counts it. */
+function entryOwned(v: number, e: Entry, mesh: OracleMesh): boolean {
+  if (e.y === 0x70000000 || e.y === 0x70000001) return true;
+  if (e.y & 0x80000000) return e.x < (e.y & 0x0fffffff) && v === mesh.edges[e.x]![0];
+  if (e.w !== 1) return v === e.x;
+  const tri = mesh.tris[e.y & 0x0fffffff]!, feature = (e.y >>> 28) & 7;
+  if (feature < 3) return v === tri[feature];
+  if (feature < 6) { const i = feature - 3; return v === Math.min(tri[i]!, tri[(i + 1) % 3]!); }
+  return v === Math.min(tri[0]!, tri[1]!, tri[2]!);
+}
+
+/**
+ * Check the deltas against the Float64 oracle: per vertex and trial, the owned entries' E(X + 2^-k m) - E(X) (energy(ent,
+ * v, Y) the oracle's energy of entry ent at cloth positions Y); the shortest trial's slope against -f.m; and the
+ * absolute f32 difference of the owned energies (positions rounded to f32) for contrast. Returns the kinds seen.
+ */
+async function checkEnergyDeltas(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, mesh: OracleMesh, X: V3[], Xt: V3[], M: V3[],
+  energy: (ent: Entry, v: number, Y: V3[]) => number, ulp: number, what: string) {
+  const N = X.length, K = DELTA_TRIALS;
+  const lists = listsOf(new Uint32Array(await readBuffer(device, det.contacts)), N);
+  device.queue.writeBuffer(positions, 0, vec4s(X));
+  const xt = storage(device, vec4s(Xt)), move = storage(device, vec4s(M));
+  const gpu = await evalEnergyDeltas(device, det, positions, xt, move, N);
+  const kinds = new Map<string, number>();
+  const kindOf = (e: Entry) => e.y === 0x70000000 ? "field" : e.y === 0x70000001 ? "body" : e.y & 0x80000000 ? "EE" : e.w === 1 ? "sample-face" : e.w === 2 ? "facet" : "VT";
+  const trial = (k: number) => X.map((x, v) => [x[0] + 2 ** -k * M[v]![0], x[1] + 2 ** -k * M[v]![1], x[2] + 2 ** -k * M[v]![2]] as V3);
+  const trials = Array.from({ length: K }, (_, k) => trial(k));
+  // The f32 base itself: the GPU forms the deltas from coordinates rounded to f32 (the field's cell coordinates, a moving
+  // solid's body frame), each within an ulp of the scene's extent of the oracle's. Two bases shifted by that ulp, each
+  // coordinate's sign at random, bound how far the exact change itself moves within that rounding.
+  const RS = rng(4242), shifted = [0, 1].map(() => X.map(x => x.map(c => c + (RS() < 0.5 ? -ulp : ulp)) as V3));
+  const shiftedTrials = shifted.map(B => Array.from({ length: K }, (_, k) => B.map((x, v) => [x[0] + 2 ** -k * M[v]![0], x[1] + 2 ** -k * M[v]![1], x[2] + 2 ** -k * M[v]![2]] as V3)));
+  let ratio = 0, worst = 0, fm = 0, moveErr = 0, total = Array(K).fill(0), e0 = 0, floor = 0;
+  for (let v = 0; v < N; v++) {
+    const owned = lists[v]!.filter(e => entryOwned(v, e, mesh));
+    for (const e of owned) kinds.set(kindOf(e), (kinds.get(kindOf(e)) ?? 0) + 1);
+    const base = owned.map(e => energy(e, v, X));
+    e0 += base.reduce((s, x) => s + x, 0);
+    fm -= dot(gpu.f(v), M[v]!);
+    const shiftedBase = shifted.map(B => owned.map(e => energy(e, v, B)));
+    for (let k = 0; k < K; k++) {
+      const d = owned.map((e, i) => energy(e, v, trials[k]!) - base[i]!);
+      const want = d.reduce((s, x) => s + x, 0), mag = d.reduce((s, x) => s + Math.abs(x), 0);
+      const spread = Math.max(...shifted.map((_, j) => Math.abs(owned.reduce((s, e, i) => s + energy(e, v, shiftedTrials[j]![k]!) - shiftedBase[j]![i]!, 0) - want)));
+      const err = Math.abs(gpu.dE(v, k) - want), tol = 4 * spread + 1e-4 * mag + 1e-15;
+      assert.ok(err <= tol, `${what}: vertex ${v} trial ${k}: dE ${gpu.dE(v, k)} vs ${want} (|terms| ${mag}, base-rounding spread ${spread}; ${owned.map(kindOf).join(", ")})`);
+      if (mag > 0) worst = Math.max(worst, err / mag);
+      ratio = Math.max(ratio, err / tol);
+      total[k] += want;
+      if (k === K - 1) moveErr += err;
+      floor += k === K - 1 ? gpu.floor(v, k) : 0;
+    }
+  }
+  // The floor is |E0| + |E0 + dE| summed over the lanes: 2 E0 + dE for a barrier's non-negative energy.
+  assert.ok(Math.abs(floor - (2 * e0 + total[K - 1])) <= 1e-4 * floor, `${what}: floor ${floor} vs 2 E0 + dE ${2 * e0 + total[K - 1]}`);
+  // The line search's slope: dE / alpha at the shortest trial tends to -f.m.
+  const alpha = 2 ** -(K - 1), slope = total[K - 1] / alpha;
+  assert.ok(Math.abs(fm) > 0 && Math.abs(slope - fm) <= 1e-2 * Math.abs(fm), `${what}: dE/alpha ${slope} vs -f.m ${fm}`);
+  // The absolute form at the same trial: the owned energies at the f32-rounded trial positions, less those at X.
+  let eBase = 0, eTrial = 0;
+  for (let v = 0; v < N; v++) eBase += gpu.e(v);
+  device.queue.writeBuffer(positions, 0, vec4s(f32(trials[K - 1]!)));
+  const atTrial = await evalEnergyDeltas(device, det, positions, xt, move, N);
+  for (let v = 0; v < N; v++) eTrial += atTrial.e(v);
+  const absErr = Math.abs(eTrial - eBase - total[K - 1]);
+  console.log(`  ${what}: ${[...kinds].map(([k, n]) => `${n} ${k}`).join(", ")}; worst relative error ${worst.toExponential(2)} (at most ${ratio.toFixed(2)} of the tolerance); trial ${K - 1}: dE ${total[K - 1].toExponential(4)}, move form off by ${moveErr.toExponential(2)}, absolute f32 difference off by ${absErr.toExponential(2)}; dE/alpha ${slope.toExponential(5)} vs -f.m ${fm.toExponential(5)}`);
+  assert.ok(absErr > 10 * moveErr, `${what}: the absolute difference (off by ${absErr}) is what the move form beats (${moveErr})`);
+  device.queue.writeBuffer(positions, 0, vec4s(X));
+  xt.destroy(); move.destroy();
+  return kinds;
+}
+
+test("GPU contact energy deltas ('move'): every kind's change at each trial matches the Float64 oracle, dE/alpha tends to -f.m, and the absolute f32 difference cannot resolve the short trials", { skip: !gpu }, async () => {
+  await withContactDevice(async device => {
+    const P = (config: OgcContactConfig) => ({ r: config.r, k: config.kc, mu: config.mu, epsV: config.epsV, dt: config.dt });
+    const lambdaOf = (e: Entry) => new Float32Array(new Uint32Array([e.z]).buffer)[0]!;
+    // Moves of up to 1 um a component: the shortest trial (1/128) moves a vertex a few f32 ulps of its position.
+    const moves = (R: () => number, N: number) => f32(Array.from({ length: N }, () => [(R() - 0.5) * 2e-6, (R() - 0.5) * 2e-6, (R() - 0.5) * 2e-6] as V3));
+    const seen = new Set<string>();
+    {
+      // Cloth-cloth: VT and EE, friction on a step-start offset across the transition width eps (1.67e-4).
+      const mesh = stackScene(5), N = mesh.x.length, R = rng(93);
+      const config: OgcContactConfig = { ...baseConfig(N), truncation: "isotropic" };
+      const { det, positions, oracle } = await detect(device, mesh, mesh.x.map(() => [0, 0, 0]), config);
+      const xdet = new Float32Array(await readBuffer(device, det.det));
+      const X = f32(mesh.x.map((p, v) => { const b = xdet[4 * v + 3]! * 0.9; return [p[0] + (R() - 0.5) * b, p[1] + (R() - 0.5) * b, p[2] + (R() - 0.5) * b] as V3; }));
+      const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 4e-4, p[1] + (R() - 0.5) * 4e-4, p[2]] as V3));
+      const kinds = await checkEnergyDeltas(device, det, positions, oracle, X, Xt, moves(R, N), (e, _v, Y) => contactEnergy(asOracleContact(e, oracle), Y, Xt, P(config)), extentUlp(X), "cloth stack");
+      for (const k of kinds.keys()) seen.add(k);
+      det.destroy();
+    }
+    for (const scene of ["static solid", "edge box"] as const) {
+      // The static field and its sample-face pairs (the box and ball), and the hull facets over an off-lattice edge.
+      const s = scene === "static solid"
+        ? (() => { const field = solidField(), mesh = solidSheet(21), N = mesh.x.length; return { field, mesh, N, R: rng(94), config: { ...baseConfig(N), rqBase: 0.012, gridCapacity: 256 * N, solidCapacityWords: field.words.length + 64, solidSampleCapacity: 8192 } as OgcContactConfig }; })()
+        : edgeBoxScene();
+      const { field, mesh, N, config, R } = s;
+      const { det, positions, oracle } = await detectWithSolid(device, mesh, mesh.x.map(() => [0, 0, 0]), config, field);
+      const c0 = await det.readCounters();
+      assert.equal(c0.status, 0, `${scene}: status ${OgcContactDetector.describeStatus(c0.status)}`);
+      const xdet = new Float32Array(await readBuffer(device, det.det));
+      const S = det.solidSamples, samples: V3[] = [];
+      for (let k = 0; k < S; k++) samples.push([xdet[4 * (N + k)]!, xdet[4 * (N + k) + 1]!, xdet[4 * (N + k) + 2]!]);
+      const facets = clothSolidSampleFacets(field, { r: config.r, edge: det.topology.layout.maxEdgeLength });
+      const X = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 1e-4, p[1] + (R() - 0.5) * 1e-4, p[2] + (R() - 0.5) * 1e-4] as V3));
+      const Xt = f32(mesh.x.map(p => [p[0] + (R() - 0.5) * 4e-4, p[1] + (R() - 0.5) * 4e-4, p[2]] as V3));
+      const XtS = [...Xt, ...samples];
+      const energy = (e: Entry, v: number, Y: V3[]) => {
+        if (e.y === 0x70000000) return solidContact(field, Y[v]!, Xt[v]!, lambdaOf(e), P(config)).e;
+        const k = e.y & 0x0fffffff;
+        const c: OracleContact = e.w === 2 && (e.y & 0x80000000) === 0
+          ? { kind: "vf", ids: [v, N + facets[3 * k]!, N + facets[3 * k + 1]!, N + facets[3 * k + 2]!], feature: (e.y >>> 28) & 7, s: 0, t: 0, lambda: lambdaOf(e) / config.mu }
+          : asOracleContact(e, oracle);
+        if (e.w === 1 && (e.y & 0x80000000) === 0) c.lambda /= config.mu;
+        return contactEnergy(c, [...Y, ...samples], XtS, P(config));
+      };
+      const kinds = await checkEnergyDeltas(device, det, positions, oracle, X, Xt, moves(R, N), energy, Math.max(extentUlp(X), extentUlp(X.map(x => sub(x, [...field.origin] as V3)))), scene);
+      for (const k of kinds.keys()) seen.add(k);
+      det.destroy();
+    }
+    for (const k of ["VT", "EE", "field", "sample-face", "facet"]) assert.ok(seen.has(k), `the scenes hold ${k} entries (${[...seen].join(", ")})`);
   });
 });

@@ -2930,3 +2930,170 @@ vertex saved (35 %). On the 150^2 sphere (22.5k vertices) that is 16.2 MB.
 
 So failSafe is not only a band-path finding. It is queued for attribution: what makes the moving sphere's least-shift
 redos stop making progress.
+
+## 2026-11-12: the line search's energy changes formed from the trial moves (contact side of newton.contactEnergyDifference 'move')
+
+**Why.** C1's line search compared the contact energy at each trial with the energy at the base: two absolute f32
+energies, each summed from f32 coordinates. On a short trial the change is a few position ulps. The census put the
+t20 factorized stalls on this, with moves of 0.0 to 0.2 position ulps at k7 and every ΔE exactly 0. Lands first and
+unused by default (main's ruling B); C1's solver side follows in its own commit.
+
+**What.** `det.solverContact(binding, newton, { energyDifference })`:
+- 'absolute', or no option, returns the block byte for byte as before (a CPU regression checks the string).
+- 'move' appends `ogcContactEnergyDeltasOwnedLanes(v, first, stride) -> array<vec2<f32>, OGC_NEWTON_TRIALS>`. It gives
+  per trial k (dE_k, |E0| + |E0 + dE_k|) over the entries v owns, the same ownership as `ogcContactEnergyOwnedLanes`.
+  The solver defines OGC_NEWTON_TRIALS, ogcXBase(i) and ogcMove(i, k).
+- 'move' without the Newton forms fails, and so does an unknown kind.
+
+Per kind, each is in exact arithmetic the same change as ogcEntryLin's energy at x(k) less its energy at the base:
+- **Field (static, moving):** phi's change along the move in the field's cell coordinates, fixed once at the base (the
+  moving solid's in its body frame, R1^T m). Each cell the path crosses contributes a telescoping product difference,
+  read from the brick it looks up once. Where the path enters or leaves a brick that is not stored, the band's jump is
+  added.
+- **Pairs (VT, sample-face, hull facet, EE):** the gap in coordinates relative to an anchor vertex's base. The weights'
+  change goes through the feature's free parameters along in-plane differences (an edge: ds (R_i - R_j); the face:
+  dbv (R_a - R_b) + dbw (R_a - R_c)).
+  - The first version took (w1 - w0) R0 directly. The f32 weights need not sum to the exact -1, and that put d0 times
+    an ulp into the normal change. The per-entry diagnosis found it as a constant 2.45e-9 on one VT entry, at some
+    trials and not others.
+- **Barrier:** b(d0 + dd) - b(d0) split at tau and r. The quadratic stage is -k dd (2r - d0 - d1)/2; the log stage
+  -k2 log1p(dd/d0), with a series below 1/4.
+- **Friction:** the slip u0 + T m. |u| changes by du (2 u0 + du)/(|u0| + |u1|), and f0 changes in the same split form
+  at eps.
+- A trial outside the barrier's domain is +inf; a base outside it is NaN.
+
+**Regressions.** GPU, against the Float64 oracle. Per vertex and per trial (2^-k m, |m| up to 1 um a component, eight
+trials), the owned entries' change is checked to 4x the spread from shifting the f32 base by one ulp of the scene's
+extent, plus 1e-4 of the terms. The rows are the shortest trial, k = 7:
+
+| Scene | Entries owned | Exact dE | Absolute f32 difference off by | Move form off by | dE/alpha vs -f.m |
+|---|---|---|---|---|---|
+| Cloth stack | 200 VT, 663 EE | -1.5654e-5 | 1.76e-6 (11 %) | 5.9e-11 | -2.00374e-3 / -2.00395e-3 |
+| Static solid (box, ball) | 60 field, 27 sample-face | -2.1172e-6 | 6.09e-7 (29 %) | 9.1e-12 | -2.71002e-4 / -2.71010e-4 |
+| Off-lattice edge box | 21 field, 31 sample-face, 24 facet, 11 EE | 4.8746e-6 | 5.29e-7 (11 %) | 3.5e-12 | 6.23945e-4 / 6.23922e-4 |
+| Moving plate | 78 body, 29 plate-sample | not printed | not measured | within 0.10 of tolerance | -2.80771e-4 / -2.80783e-4 |
+
+Worst per-vertex relative error: 2.5e-5 for the stack, 3.1e-5 for the static solid and 5.9e-6 for the edge box. Each
+is at most 0.03 of its tolerance.
+
+**Gate.**
+- check:types is clean, on HEAD 5865112a with these four files.
+- test:unit: 1755 pass, 0 fail (on 5865112a; 1754 pass, 0 fail on 7ab0815e).
+- The GPU regressions pass on 7ab0815e and on 5865112a: the CPU string check, the four scenes above, and the
+  moving-solid test with its delta block.
+- The default path does not change, because the block's string is identical to before.
+
+## 2026-11-12: RESULT, the C2 handoff (main's wrap-up)
+
+Main's wrap-up order: finish the per-entry diagnosis of the move form's 2.5e-9 offset, record it, start no new GPU
+work, and hand off. This section is the handoff. All scratch paths are under ~/code/me/fluid-scratch/c2/.
+
+**The per-entry diagnosis (done).** The q13 regressions missed by 1.2e-3 to 1.8e-3 relative (cloth stack vertex 9,
+body vertex 41). One ulp of the base moves the oracle by only 3e-10 there, so the 2.5e-9 was real (q14). The per-entry
+dump (q15) put all of it on one VT entry: a constant 2.4546e-9 at k3, k5 and k6, nothing on the EE entries. Its cause
+was the weights' change taken as (w1 - w0) R0: the f32 weights need not sum to the exact -1, so d0 times an ulp went
+into the normal change. `ogcPairWeightShift` takes the change through the feature's free parameters instead (see the
+section above). q16, q17 and q18 pass, on 7ab0815e and on 5865112a. On 5865112a, test:unit is 1755 pass, 0 fail, and check:types is clean.
+
+### The scratch trees
+
+| Tree | Base | What it holds | State |
+|---|---|---|---|
+| `moveh2/` | 5865112a | The contact side of `newton.contactEnergyDifference 'move'`: ogc-wgsl.ts, ogc-detector.ts, cloth-contact-gpu.test.ts, cloth-contact-body.test.ts | Landed in this commit, unused by default (main's ruling B). check:types clean, test:unit 1755 / 0, GPU regressions pass (q18). |
+| `moveh/` | 7ab0815e | The same four files one HEAD earlier | test:unit 1754 pass, 0 fail; GPU regressions pass. Superseded by moveh2. |
+| `band-r/` | the band v3 tree (default off) | v3 band plus the edge side-test fix below | Not fixed, not committed (q19). Its test still carries the C2_FIXTURE and C2_DUMP hooks: drop them before any commit. Pre-fix backup: `ff/band-wgsl.pre-side.ts`. |
+| `r3-lambda-lag.patch`, `r3/` | 2026-11-11 (pre-L1) | Cloth-cloth friction lambda lagged to the step start x_n, as the solid entries already are (the "Open" item of the lagged-lambda section) | Unlanded. Its gate (r3-gate.log) passed the 108 contact tests, but the ladder traded failures with its r46 base rather than removing them: r46 failed 6, 7 and 8 (sphere strays, 32^2 completeness); r3 failed 7, 8 (the 3 x 49 ledge strip) and 10 (H_vv determinism). Needs a rebase onto L1/L2 and an attribution of the strip and determinism failures before it can be judged. |
+
+The joint ΔE commit (C1's solver side, `m15/src` in cloth-c1) stays held, per main. Prepared but not run (no new GPU
+work): `rp/inflate.py` adds a Catmull-Rom 64-read stencil to ogcSolidSample for the price, and `rp/price-incline.mts`
+times the incline with the linearization set explicitly.
+
+### The field census and options A-D
+
+The census (C1's dumps, Float64 replay; the total first-order miss sum dE_k - sum(-f.m_k)):
+
+| Dump | alpha = 1 | 2^-6 | 2^-7 | Class |
+|---|---|---|---|---|
+| t45 off | 6.27e-6 (v144 field 99 %) | 1.02e-7 (v144 81 %) | 9.5e-8 (v144 73 %) | cell-face field kink, then quantization |
+| t45 factorized | 6.76e-6 (v144 99 %) | 1.64e-7 (EE 42 %, v144 40 %) | 7.1e-8 (v144 59 %) | cell-face field kink, then quantization |
+| t20 factorized | 1.5e-7 (sample-face only) | 6.7e-9 | 2.2e-10: every dE exactly 0 | quantization |
+| incline t30 v72 | dump in cloth-c1/m12/tog/replay-incline-t30-off.json, not replayed | | | field-coordinate quantization (constant +3.18e-11, k3 to k7) |
+
+The move form removes the quantization class. A C1-continuous field is what removes the kink class. The trilinear
+gradient jumps across cell faces by up to h/R (0.04 on the R = 0.25 m sphere; v144's jump is 0.059), so the kink is
+generic, not v144's alone. Go/no-go at v144 (rp/gonogo*.mts, outputs gonogo-1.out, gonogo4.out, gonogo5.out; h = 10 mm,
+r = 1 mm):
+
+| Option | dE/alpha, alpha 1 -> 2^-12, vs slope | Fidelity on the true surface | Verdict |
+|---|---|---|---|
+| Trilinear (today) | +3.09e-6 ... -3.105e-6 only at 2^-12 | flat exact; convex edges rounded in to 2.28 mm; crease 0.96 mm; sphere 0.10 mm | the kink |
+| (A) triquadratic B-spline | consistent (1.177e-5 -> 1.134e-5) | a 2.5 mm air gap along every concave crease, edges 0.8 mm out, sphere +0.10 mm everywhere | no-go on fidelity |
+| (B) a barrier per authored part | consistent | removes the crease let-in on authored parts | no-go for edited voxel solids: coplanar seams double-count, decomposition changes non-locally on edits |
+| (C) Catmull-Rom | consistent (-9.08e-7 -> -9.648e-7) | flat +-0.05 mm, edges -1.28 / +1.39 mm, crease 1.46 mm, sphere +-0.001 mm | the only candidate. Needs a certified Lipschitz bound (|grad| reaches 1.41; certified per axis 2.34 x node difference / h), a one-node apron (11^3 vs 9^3, 1.83x field memory) and 64 reads a sample vs 8 |
+| (D) prefiltered B-spline | consistent | close to C | ruled out by main: non-local coefficients, a prefilter on every edit |
+
+**C is pending:** the census re-run with the move form in place (to see what kink-class miss remains once quantization
+is gone) and C's price on the incline. Neither has been run. No smooth interpolant removes the crease let-in (3.75 mm
+for clothSolidConcaveRounding; A 3.22, C 3.78 at the probe); that needs the crease/edge representation below.
+
+### The band face-fixture defect
+
+The v3 band's "feature transitions" face fixture jumped +0.0398 at s = 6.97e-5 with the entries and OGC's barrier
+continuous. Lane 30's slot 13035 is sample 1106 against face 26, on edge 15-23. ogcBandAccept's edge case decided
+"the point is past face 27's side" with its own side dot dot(x - p, p - xo) (f32 -5.6e-11; Float64 -1.6e-12), while face
+27's own entry still classified the point as face 27's interior with ogcClosestTriangle. Two f32 predicates for one
+Voronoi plane, so both counted. In Float64 the hand-off at s + 5e-8 is consistent. Mirror and dump: `rp/face-mirror.cjs`,
+`rp/face-mirror2.cjs`, `rp/face-handoff.json`.
+
+The fix in `band-r/lib/cloth/contact/ogc-wgsl.ts` takes the other face's decision from the same predicate its entry
+uses: cf = ogcClosestTriangle(x, face's corners).feature, and the band pair is rejected unless cf is the shared edge.
+One predicate decides each plane, so the partition is exact by construction.
+
+**q19 (band-r, both band tests, the last GPU run):** the edge fixture passes. The face fixture no longer fails at
+s = 6.97e-5: that region now reads as OGC's own jump (+0.0421 at s = 7.37e-5, matched to 5.4e-5). But it fails at a
+new hand-off: at s = -1.07828e-3 the band drops 0.0379 (2.3401 -> 2.3023) while the entries and OGC's sample
+barrier stay continuous (2.61547 -> 2.61549, no oracle pair changes). This is 0.29 um after a matched OGC jump of
+-0.0470 at s = -1.07857e-3. My reading, not yet confirmed: the band now drops a slot at a point where no entry picks it
+up, so the predicate a slot's acceptance uses and the one its owner's entry uses still disagree somewhere. The likely
+place is the vertex case of ogcBandAccept, or the edge case for a face whose entry the fix does not consult. The next
+step is the same per-slot dump (C2_DUMP at s = -1.07828e-3) and the CPU mirror. The band stays default-off and
+unlanded.
+
+### Open items (not started unless stated)
+
+- **t46 heldConflict / failSafe (main's top item).** The 16^2 sphere ladder, linearization off, +-1 ulp starts, seeds
+  0-4: every failure is heldConflict at tick 46, none a penetration. Probably the same mechanism as the 150^2 1-in-8
+  heldConflict halts and the 64^2 / 150^2 default-path failSafe at t30 / t27 (the least-shift redos stop making
+  progress). Not attributed; t46 is the small repro. The first step is one dumping run per seed through the runner,
+  then a Float64 replay of the redo rounds.
+- **EE 1-hop exclusion gap.** Edges of adjacent faces that share no vertex (e.g. v7-v23 / v8-v24 at d/r 0.49): when
+  such a pair leaves the edge interior it drops its whole b(d), and no VT entry takes over (the VT candidates are
+  incident to the endpoint, or the point is outside the edge's block). Rare: 9 / 21 at t30, 5 / 2 at t40. Not a blocker.
+- **Per-scene capacity.** The contact list is authored at 83 from the gate scenes' peak + 10 %. The band's 64^2 ran 30
+  ticks and its 150^2 was not run. A scene outside the measured set needs its own peak (no runtime growth); the
+  probe is ready, the per-scene authoring is not done.
+- **Impact bit 8.** C1's spec: bit 8 = "an entry within r at the last round's x_det" (the held bit 0's near test), so
+  that a restart fires only on genuine new contact. Measured 436 -> 182 onset vertices (16^2) and 1593 -> 683 (32^2) on
+  the old HEAD. After RESULT 46 (1) the entry set holds pairs beyond r, so the old census no longer carries; C1 owns the
+  re-measure. My side (OGC_CONTACT_STATE_WGSL) is not changed.
+- **Crease/edge representation.** The trilinear field rounds the frustum's convex vertical edges in by up to 2.26 mm
+  (170 of 4883 surface probes over 1 mm); the hull facets hold this only while ownSolids' choice at x_det holds to the
+  end of the step. Concave creases let the cloth in by 3.2-3.8 mm under every interpolant. The fix is facets on the
+  true surface on both sides of a crease, inside the min (owned by the nearest-representation rule, ownSolids /
+  ogcBandSolid), not a sum of parts. The authoring check excludes creases today (convexAt). Main's architecture call.
+
+### The top three contact challenges (ranked)
+
+1. **Rounds that stop making progress: t46 heldConflict and failSafe.** It halts the sphere ladder on 3 of 5 seeds
+   and appears on the 64^2 and 150^2 default path. It is the only open item that stops scenes outright, it has no
+   attribution yet, and it may share a cause with the redo/least-shift design rather than a single bad pair.
+2. **The solid's geometry: a C1 field plus a crease/edge representation.** The trilinear kink stalls the line search
+   (t45, 99 % of the miss on one field entry), edges read up to 2.3 mm in and creases 3.8 mm in. Catmull-Rom fixes
+   the kink and the sphere but not creases or edges, costs 8x the reads and 1.83x the memory, and needs a certified
+   Lipschitz bound for the ball/clearance bounds. Creases need real facets inside the min. This decides how much
+   fidelity solids have where cloth drapes over them, and it is an architecture choice.
+3. **Exact partition of every pair across representations.** Each hand-off between owners (field entry, sample-face,
+   facet, VT, EE, band) must count a closest feature exactly once. Found so far: the band's two-predicate defect (one
+   instance fixed in band-r, a second open per q19), the accepted f32 classification gap, OGC's own jump at concave folds, and the EE 1-hop gap. Each is
+   small and rare, but each is a jump the line search cannot descend through. The rule to apply: one predicate
+   decides each plane, and every representation calls it.

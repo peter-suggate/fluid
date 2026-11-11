@@ -69,6 +69,7 @@ const f32 = (pts: V3[]) => pts.map(p => p.map(Math.fround) as V3);
 const toV3 = (a: Float32Array, N: number, at = 0) => Array.from({ length: N }, (_, v) => [a[4 * (at + v)]!, a[4 * (at + v) + 1]!, a[4 * (at + v) + 2]!] as V3);
 const add3 = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const scale3 = (a: V3, s: number): V3 => [a[0] * s, a[1] * s, a[2] * s];
+const dot3 = (a: ArrayLike<number>, b: V3) => a[0]! * b[0] + a[1]! * b[1] + a[2]! * b[2];
 const cross = (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 
 // ---- poses, as the GPU holds them (rotation entries rounded to f32)
@@ -139,6 +140,44 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   await runPass(device, pass => { pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); });
   const res = new Float32Array(await readBuffer(device, out));
   xt.destroy(); out.destroy();
+  return res;
+}
+
+/**
+ * newton.contactEnergyDifference 'move' as the solver reads it (det.solverContact(.., { energyDifference: 'move' })): base
+ * at the current positions, trial k's move 2^-k m_i; per vertex the K owned deltas over two lanes summed.
+ */
+async function evalEnergyDeltas(device: GPUDevice, det: OgcContactDetector, positions: GPUBuffer, Xt: V3[], M: V3[], N: number, K: number): Promise<Float32Array> {
+  const xt = storage(device, vec4s(Xt)), mv = storage(device, vec4s(M)), L = det.topology.layout;
+  const out = device.createBuffer({ size: 4 * K * N, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const code = /* wgsl */`
+@group(0) @binding(0) var<storage, read> X: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> Xt: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> topo: array<u32>;
+@group(0) @binding(3) var<storage, read_write> outBuf: array<f32>;
+@group(0) @binding(5) var<storage, read> Mv: array<vec4<f32>>;
+const OGC_NEWTON_TRIALS: u32 = ${K}u;
+fn ogcX(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcXBase(i: u32) -> vec3<f32> { return X[i].xyz; }
+fn ogcMove(i: u32, k: u32) -> vec3<f32> { return exp2(-f32(k)) * Mv[i].xyz; }
+fn ogcXt(i: u32) -> vec3<f32> { return Xt[i].xyz; }
+fn ogcDir(i: u32) -> vec3<f32> { return Mv[i].xyz; }
+fn ogcTri(t: u32) -> vec3<u32> { let b = ${L.trisOffset}u + 4u * t; return vec3<u32>(topo[b], topo[b + 1u], topo[b + 2u]); }
+fn ogcEdgeVerts(e: u32) -> vec2<u32> { let b = ${L.edgesOffset}u + 4u * e; return vec2<u32>(topo[b], topo[b + 1u]); }
+${det.solverContact(4, true, { energyDifference: "move" }).wgsl}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let v = gid.x;
+  if (v >= ${N}u) { return; }
+  let a = ogcContactEnergyDeltasOwnedLanes(v, 0u, 2u);
+  let b = ogcContactEnergyDeltasOwnedLanes(v, 1u, 2u);
+  for (var k = 0u; k < OGC_NEWTON_TRIALS; k++) { outBuf[${K}u * v + k] = a[k].x + b[k].x; }
+}`;
+  const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+  const bg = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ([[0, positions], [1, xt], [2, det.topo], [3, out], [4, det.solverBuffer], [5, mv]] as [number, GPUBuffer][]).map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
+  await runPass(device, pass => { pass.setPipeline(pipeline); pass.setBindGroup(0, bg); pass.dispatchWorkgroups(Math.ceil(N / 64)); });
+  const res = new Float32Array(await readBuffer(device, out));
+  xt.destroy(); mv.destroy(); out.destroy();
   return res;
 }
 
@@ -323,6 +362,52 @@ test("GPU moving solid: pushed predictions, body entries and terms, posed sample
         assert.ok(Math.abs(res[16 * v + 4 * (col + 1) + row]! - H[row]![col]!) <= 2e-3 * hs, `vertex ${v} H`);
     }
     assert.ok(checked > 30, `${checked} vertices with contact checked`);
+
+    // newton.contactEnergyDifference 'move': the body entries' and the posed samples' energy changes along short trial
+    // moves (2^-k m, |m| up to 1 um a component) against the Float64 contact in the body frame at the end pose.
+    {
+      const RM = rng(37), K = 8;
+      const M = f32(mesh.x.map(() => [(RM() - 0.5) * 2e-6, (RM() - 0.5) * 2e-6, (RM() - 0.5) * 2e-6] as V3));
+      const dE = await evalEnergyDeltas(device, det, positions, Xt, M, N, K);
+      const ownedBy = (v: number, e: Entry) => {
+        if (e.y === BODY_Y) return true;
+        const tri = oracle.tris[e.y & 0x0fffffff]!, feature = (e.y >>> 28) & 7;
+        if (feature < 3) return v === tri[feature];
+        if (feature < 6) { const i = feature - 3; return v === Math.min(tri[i]!, tri[(i + 1) % 3]!); }
+        return v === Math.min(tri[0]!, tri[1]!, tri[2]!);
+      };
+      const energy = (e: Entry, v: number, Y: V3[]) => {
+        if (e.y === BODY_Y) return solidContact(field, toBody(p1, Y[v]!), toBody(p0, Xt[v]!), lambdaOf(e), P).e;
+        const t = e.y & 0x0fffffff, tri = oracle.tris[t]!;
+        const c: OracleContact = { kind: "vf", ids: [e.x, tri[0], tri[1], tri[2]], feature: (e.y >>> 28) & 7, s: 0, t: 0, lambda: lambdaOf(e) / config.mu };
+        return contactEnergy(c, [...Y, ...XS.slice(N)], XtS, P);
+      };
+      // The f32 base: the deltas start from coordinates rounded to f32 (world, and the end pose's body frame), each within
+      // an ulp of the scene's extent of the oracle's. Two bases shifted by that ulp, each coordinate's sign at random, bound
+      // how far the exact change itself moves within that rounding.
+      const ulp = 2 ** (Math.floor(Math.log2(Math.max(...X.flatMap(x => [...x, ...toBody(p1, x)].map(Math.abs))))) - 23);
+      const RS = rng(4242), shifted = [0, 1].map(() => X.map(x => x.map(c => c + (RS() < 0.5 ? -ulp : ulp)) as V3));
+      let bodyOwned = 0, sampleOwned = 0, slope = 0, fm = 0, ratio = 0;
+      for (let v = 0; v < N; v++) {
+        const owned = lists[v]!.filter(e => ownedBy(v, e));
+        bodyOwned += owned.filter(e => e.y === BODY_Y).length; sampleOwned += owned.filter(e => e.y !== BODY_Y).length;
+        const base = owned.map(e => energy(e, v, X)), shiftedBase = shifted.map(B => owned.map(e => energy(e, v, B)));
+        fm -= dot3(res.subarray(16 * v, 16 * v + 3), M[v]!);
+        for (let k = 0; k < K; k++) {
+          const Y = X.map((x, i) => add3(x, scale3(M[i]!, 2 ** -k)));
+          const d = owned.map((e, i) => energy(e, v, Y) - base[i]!);
+          const want = d.reduce((a, b) => a + b, 0), mag = d.reduce((a, b) => a + Math.abs(b), 0);
+          const spread = Math.max(...shifted.map((B, j) => Math.abs(owned.reduce((acc, e, i) => acc + energy(e, v, B.map((x, q) => add3(x, scale3(M[q]!, 2 ** -k)))) - shiftedBase[j]![i]!, 0) - want)));
+          const err = Math.abs(dE[K * v + k]! - want), tol = 4 * spread + 1e-4 * mag + 1e-15;
+          assert.ok(err <= tol, `vertex ${v} trial ${k}: dE ${dE[K * v + k]} vs ${want} (|terms| ${mag}, base-rounding spread ${spread}; ${owned.map(e => e.y === BODY_Y ? "body" : "sample-face").join(", ")})`);
+          ratio = Math.max(ratio, err / tol);
+          if (k === K - 1) slope += dE[K * v + k]! * 2 ** (K - 1);
+        }
+      }
+      console.log(`  move deltas: ${bodyOwned} body and ${sampleOwned} plate-sample entries owned, at most ${ratio.toFixed(2)} of the tolerance; dE/alpha ${slope.toExponential(5)} vs -f.m ${fm.toExponential(5)}`);
+      assert.ok(bodyOwned > 30 && sampleOwned > 0, `${bodyOwned} body, ${sampleOwned} sample-face entries`);
+      assert.ok(Math.abs(slope - fm) <= 1e-2 * Math.abs(fm), `dE/alpha ${slope} vs -f.m ${fm}`);
+    }
 
     // A step's motion that drives the sheet down into the rising plate: the truncation holds
     // phi_body >= (1 - gamma_r) phi0 at the end pose, and r for a vertex the plate cannot reach.
