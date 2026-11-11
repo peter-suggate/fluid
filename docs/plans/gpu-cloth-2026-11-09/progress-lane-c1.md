@@ -2739,3 +2739,94 @@ live duals, is ruling 2's question.
 
 **Gate** (HEAD 850ebfff plus this commit): 76 tests, 74 pass, 0 fail, 2 todo (ladder 2c; C2's H_vv sphere).
 `npm run check:types` is clean. `npm run test:unit`: 2134 tests, 0 fail.
+
+## 2026-11-11 RESULT (46): the baselines restated; the 1 mm max is the friction lag point; the 32^2 converged ends are held by certificates
+
+Claude's follow-ups on (45): (1) redo the oracle baselines behind gate (b) with the static sample-face pairs and the right
+integrator, and restate GPU / oracle; (2) say which vertices carry (45)'s 1 mm max and why; (3) the marginal stop, with
+ruling 2. No GPU code changed.
+
+**Method.**
+- GPU: HEAD 9a831b20 replays of the m7 32^2 dumps; one step at a 150-iteration cap, velocityTolerance 1e-6 / h~.
+  - The dumps carry no solverState.contact, so every replay runs BDF2 (restarts 0). The Float64 oracle runs BDF2 as well:
+    like-for-like.
+  - "frozen": a scratch-only compile switch that skips nwEdgeDuals. The oracle holds the step-start duals fixed, so
+    frozen is the like-for-like schedule.
+- Oracle: scratch-newton-contact with static and body samples, PROJ 2 mm, stop at a 1 um move.
+  - "CONVERGED at nK" is K + 1 iterations (the (42) correction). Every count below is a count.
+  - New scratch hooks:
+    - SAMPLIB: the samples built by HEAD's clothSolidSamples(field, { r, edge }). That is 9949 body and 4821 static, the
+      GPU's own sets.
+    - LAMGPU: the sample-face pairs' mu lambda taken from the GPU's decoded end entries (0 for a pair it holds none for).
+    - DROPSAMP: drop the pairs the GPU holds no entry for.
+
+**(1) Counts** (GPU at HEAD; oracle with static samples, lambda lagged at the step start x0):
+
+| state | oracle | GPU live duals | GPU frozen | GPU frozen, KKT off (1 um move only) | ratio, live / frozen / KKT off |
+|---|---|---|---|---|---|
+| kc 9668 t5 | 16 | 140 | 140 | 47 | 8.8x / 8.8x / 2.9x |
+| kc 9668 t15 | 23 | 91 | 89 | 82 | 4.0x / 3.9x / 3.6x |
+| kc 9668 t25 | 48 | no (150, KKT 1.2e4) | no (150) | | >3.1x |
+| kc 100 t5 | 15 | 25 | 25 | 19 | 1.7x / 1.7x / 1.3x |
+| kc 100 t15 | 46 | 103 | 51 | 35 | 2.2x / 1.1x / 0.76x |
+| kc 100 t25 | no (150, \|g\| 6.4, moving ~100 um/iteration) | no (150) | no (150) | | neither converges |
+
+- Against (43) (284149af, before the KKT stop, oracle without static samples, 16 / 23 / 43 and 15 / 33): the oracle's t5
+  and t15 at kc 9668 are unchanged. kc 9668 t25 is 43 -> 48 and kc 100 t15 33 -> 46.
+- **The counts are not yet like-for-like in their ends.**
+  - The converged GPU ends are 0.60-0.75 mm (t5) and 2.1-4.9 mm (t15) from the oracle's minimiser.
+  - The two stops differ. The oracle stops on a 1 um move. The GPU requires that and KKT <= 1.
+  - With KKT off, the GPU stops 7-93 iterations earlier. Its ends move 1.1-3.8 um, except kc 9668 t5, where the end
+    moves 1.29 mm. There the KKT stop is doing real work: the 1 um-move stop at 47 was premature.
+- Freezing the duals halves kc 100 t15 (103 -> 51) and changes nothing else.
+
+**(2) The 1 mm max on the 16^2 tick-20 state is where friction's normal force is lagged.**
+- It sits on v193 (0.955 mm), v194 (0.72 mm), v209, v192 and v177.
+- The pairs are the same on both sides. The GPU's end entries on v193 are static samples 4, 3342 and 3581 on face 362
+  (193/210/194), all face interior. The oracle's pairs within r at the GPU end are the same three samples on the same face.
+- The difference is the friction's lambda.
+  - The oracle lags lambda at the step start, where those samples are beyond r: lambda 0, no friction.
+  - The GPU's pair entries take lambda from d at the detection round's iterate (sampleFacet's
+    lambda = -kappa'(d) mu at x_det; the vf and ee paths alike), so mu lambda is 0.21, 0.03 and 0.15.
+  - The GPU's field entries take lambda at the step start xs instead (boundTerms; C2's comment there: a lambda from an
+    iterate stuck a patch on a 35 degree slope).
+- **With LAMGPU, the Float64 minimiser is 7.0 um from the GPU's identity end (was 955 um).** It converges in 38.
+- It is not the stall: the two fd ends are 0.18 mm apart, and both converged under KKT.
+- Each re-detection moves this lambda, so the objective moves inside the step, like the duals do.
+- The convention is C2's, sent to C2 for a ruling.
+
+**(2b) The 32^2 gaps have two more causes.**
+- **Missing in-range pairs (kc 9668 t5, v465).**
+  - At the GPU's converged end, face 464/496/465 lies within 758-994 um of 5 body samples (s4788, 8242, 8411, 8519,
+    8617), all face interior. The GPU's end set holds no entry for any of them.
+  - The body field at v465 itself reads 6457 um. The 32^2 triangles are 60-87 mm long, so over the sphere a face's
+    middle sits mm closer than its corners.
+  - On exactly the GPU's set (LAMGPU + DROPSAMP), the oracle lands 22 um from the GPU end. On its own set it lands
+    696 um away.
+  - The smooth sphere's samples therefore carry contact the vertex field cannot. C2's planned removal of the 9949 body
+    samples is on hold; C2 takes it to Claude. Whether detection or the re-detect certificate drops the 5 is C2's,
+    with reproduction paths sent.
+- **Certificate-held "converged" ends (both t15 states).**
+  - The oracle started at the GPU's frozen end with the GPU's own set (LAMGPU + DROPSAMP + SAMPLIB) still moves
+    2.4 mm (kc 9668) and 6.0 mm (kc 100). The GPU's g at that end (its newtonWork g segment) matches the oracle's to
+    4 digits, e.g. v465 (0.1711, 0.6855, -0.3877) against (0.1711, 0.6856, -0.3877).
+  - At kc 9668 t15, six vertices (465, 432, 494, 462, 498, 463) carry a raw \|g\| of 0.05-0.81 N, with KKT/floor
+    0.03-0.84 there. The median vertex \|g\| is 1.1e-5.
+  - The KKT test projects out the stored active normals, which are the filter's certificates. nwBarrierActs is true at
+    those vertices (v465 holds s8519 at 975 um, a barrier force of about 0.24 N), so the hold counts as contact
+    (held 0). The certificate, a motion bound, carries the rest.
+  - So the GPU's end is a stationary point of the energy plus hard certificate planes, not of the energy. The oracle's
+    working set has no active constraint there.
+  - **This is C1's stop test (1bc56288, ruling 1's "multipliers of the kept normals positive").** A certificate is a
+    travel bound, not a physical constraint. Proposed: a positive multiplier on a certificate, beyond the floor, is
+    residual, not stationarity; the step continues, and the next re-detection releases the bound. Ruling requested.
+
+**(3) The marginal stop, for ruling 2.**
+- On the 32^2 replays the KKT end-of-step values are 0.60-0.98: inside 1, but close.
+- Part of what passes the test is certificate-held (2b), so the floor factor is not the question yet.
+- Ruling 2's measurements need the certificate question settled first. Otherwise a dual schedule that converges
+  "better" may only be held better.
+
+**Next.** Ruling 2 (the dual schedule), measured on ladder 2c's 16^2 state, where the attribution is complete (7 um with
+the GPU's lambda). Also, per Claude: the end-of-step \|g\|/\|mg\| at the production cap (8 iterations, 60 ticks) against
+the converged reference, and the drape error at 8 iterations.
