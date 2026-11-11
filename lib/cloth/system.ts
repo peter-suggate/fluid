@@ -33,7 +33,7 @@ import type { GPUSolverInstance } from '../core/method-contract';
 import type { RigidBodyDescription, SceneDescription } from '../core/model';
 import type { SimulationFailure } from '../core/simulation-failure';
 import { clothDocumentsKey } from './content-stamp';
-import { ClothGPUSolver, type ClothGPUState } from './gpu-solver';
+import { ClothGPUSolver, type ClothContactLinAB, type ClothGPUState } from './gpu-solver';
 import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
 import { OgcContactDetector, type OgcCarriedState } from './contact/ogc-detector';
 import type { ClothSolidField } from './contact/solid-field';
@@ -154,6 +154,8 @@ export interface ClothSystemOptions {
    * OGC_LOCALITY_DEFAULT "topology+geometry"; "off" is the A/B baseline). An unknown value fails when the detector is built.
    */
   readonly contactLocality?: string;
+  /** Benchmark A/B only: the compiled contact linearization's pieces (ClothGPUSolverOptions.contactLinearizationAB). */
+  readonly contactLinearizationAB?: ClothContactLinAB;
 }
 
 export class ClothSystem {
@@ -263,6 +265,7 @@ export class ClothSystem {
         // Contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
         contact: { ...contact.solverContact(CLOTH_BINDING.contact, true), alpha: contact.alpha, state: contact.contactState },
         hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
+        ...(this.options.contactLinearizationAB ? { contactLinearizationAB: this.options.contactLinearizationAB } : {}),
       });
       contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, direction: solver.newtonDirection, control: solver.newtonControl });
       contact.setSolidField(field);

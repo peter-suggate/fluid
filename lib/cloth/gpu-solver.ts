@@ -24,7 +24,7 @@
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothNewtonSettings, ClothSolverStateData, ClothVector } from './types';
 import { CLOTH_INITIAL_GUESS, type ClothInitialGuess, type ClothSolverModel } from './oracle';
-import { clothNewtonSegmentCount, CLOTH_CONTACT_LIN_RECORDS, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, type ClothPCGLayout } from './gpu-newton-wgsl';
+import { clothNewtonSegmentCount, CLOTH_CONTACT_LIN_RECORDS, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, CLOTH_CONTACT_LIN_ARGS, type ClothContactLinLayout, type ClothPCGLayout } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
   CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
@@ -89,7 +89,24 @@ export interface ClothGPUSolverOptions {
   readonly label?: string;
   /** 'newton', the only method (VBD and its two-level correction were removed in M4); any other value fails. */
   readonly method?: ClothSolverMethod;
+  /** Benchmark and test A/B only, never a document setting: the compiled contact linearization's pieces against their
+   * baselines (CLOTH_CONTACT_LIN_AB_DEFAULTS, the compiled modes' own). */
+  readonly contactLinearizationAB?: ClothContactLinAB;
 }
+
+/** The compiled contact linearization's A/B knob (ClothGPUSolverOptions.contactLinearizationAB). */
+export interface ClothContactLinAB {
+  /** pcgStepOverflow: 'indirect' (default), exactly the patches from the first one the pool could not hold; 'grid',
+   * every patch, the others exiting. */
+  readonly overflow?: 'grid' | 'indirect';
+  /** A partner outside the row's patch: 'staged' (default), nwLinBuild gives the patch's outside partners a slot each
+   * and the product stages u there once a dispatch (a partner the table could not hold stays global); 'global', u
+   * recomputed from the PCG segments at every use. */
+  readonly partners?: 'global' | 'staged';
+  /** Staged slots per PCG patch (default 256): a power of two from 4 to 512. */
+  readonly stageSlots?: number;
+}
+export const CLOTH_CONTACT_LIN_AB_DEFAULTS = Object.freeze({ overflow: 'indirect' as 'grid' | 'indirect', partners: 'staged' as 'global' | 'staged', stageSlots: 256 });
 
 export type ClothSolverMethod = 'newton';
 export type ClothNewtonOptions = ClothNewtonSettings;
@@ -338,7 +355,7 @@ export function compileClothPCGPatches(model: ClothSolverModel, stencil: ReturnT
   return { patches, shared, rows, vertexSlot, table, halo, columns, faceSlots, edgeSlots, stencilDest, blockRecords, bendRecords, maxK1, maxK2, maxHalo };
 }
 
-export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess'> & { readonly contact?: unknown; readonly newton?: Pick<ClothNewtonSettings, 'contactLinearization' | 'contactLinearizationRecords'> }, time_s = 0, workgroupStorageBytes = 16384): ClothGPUTables {
+export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector, options: Pick<ClothGPUSolverOptions, 'dt_s' | 'gravity_m_s2' | 'integrator' | 'initialGuess' | 'contactLinearizationAB'> & { readonly contact?: unknown; readonly newton?: Pick<ClothNewtonSettings, 'contactLinearization' | 'contactLinearizationRecords'> }, time_s = 0, workgroupStorageBytes = 16384): ClothGPUTables {
   const t = model.topology, N = t.vertexCount, T = t.faceCount, E = t.edgeCount, M = model.materials.length, S = model.scripts.length;
   const triangles = new Uint32Array(4 * T);
   for (let f = 0; f < T; f++) triangles.set([t.faces[3 * f]!, t.faces[3 * f + 1]!, t.faces[3 * f + 2]!, t.faceMaterial[f]!], 4 * f);
@@ -350,7 +367,24 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const R = t.bendRowCount;
   const bendOffsets = Uint32Array.from(t.bendOffsets, (o, r) => o - Math.min(r, R)), bendEntries = new Uint32Array(2 * Math.max(t.bendVertices.length - R, 1)), bendF = new Float32Array(bendEntries.buffer);
   for (let r = 0, q = 0; r < R; r++) for (let o = t.bendOffsets[r]! + 1; o < t.bendOffsets[r + 1]!; o++, q++) { bendEntries[2 * q] = t.bendVertices[o]!; bendF[2 * q + 1] = t.bendWeights[o]!; }
-  const pcg = compileClothPCGPatches(model, stencil, clothPCGSharedCap(workgroupStorageBytes));
+  // The compiled contact linearization (newton.contactLinearization, with contact) and its pieces (the A/B knob's
+  // defaults). Staged partners take 12 B of workgroup storage a slot in the kernels that read the records, out of the
+  // PCG halo's budget.
+  const linMode = options.contact ? options.newton?.contactLinearization ?? CLOTH_NEWTON_DEFAULTS.contactLinearization : 'off';
+  if (linMode !== 'off' && CLOTH_CONTACT_LIN_RECORDS[linMode] === undefined) throw new Error(`Unknown cloth Newton contactLinearization ${String(linMode)}`);
+  const linPerVertex = options.newton?.contactLinearizationRecords ?? CLOTH_NEWTON_DEFAULTS.contactLinearizationRecords;
+  if (!(Number.isInteger(linPerVertex) && linPerVertex >= 1)) throw new Error(`Cloth Newton contactLinearizationRecords must be a positive integer, got ${String(linPerVertex)}`);
+  const ab = options.contactLinearizationAB ?? {};
+  for (const key of Object.keys(ab)) if (!(key in CLOTH_CONTACT_LIN_AB_DEFAULTS)) throw new Error(`Unknown cloth contactLinearizationAB key ${key}`);
+  const linOverflow = ab.overflow ?? CLOTH_CONTACT_LIN_AB_DEFAULTS.overflow;
+  if (linOverflow !== 'grid' && linOverflow !== 'indirect') throw new Error(`Unknown cloth contactLinearizationAB.overflow ${String(linOverflow)}`);
+  const linPartners = ab.partners ?? CLOTH_CONTACT_LIN_AB_DEFAULTS.partners;
+  if (linPartners !== 'global' && linPartners !== 'staged') throw new Error(`Unknown cloth contactLinearizationAB.partners ${String(linPartners)}`);
+  const linSlots = ab.stageSlots ?? CLOTH_CONTACT_LIN_AB_DEFAULTS.stageSlots;
+  if (!(Number.isInteger(linSlots) && linSlots >= 4 && linSlots <= 512 && (linSlots & (linSlots - 1)) === 0))
+    throw new Error(`Cloth contactLinearizationAB.stageSlots must be a power of two from 4 to 512, got ${String(linSlots)}`);
+  const staged = linMode !== 'off' && linPartners === 'staged';
+  const pcg = compileClothPCGPatches(model, stencil, clothPCGSharedCap(workgroupStorageBytes - (staged ? 12 * linSlots : 0)));
   const parts = [t.vertexFaceOffsets, t.vertexFaces, bendOffsets, bendEntries, t.vertexEdgeOffsets, t.vertexEdges, triangles, t.edges, stencil.offsets, stencilRecords,
     pcg.table, pcg.halo, pcg.columns, pcg.faceSlots, pcg.edgeSlots, pcg.stencilDest, pcg.rows, pcg.vertexSlot];
   const topoBase: number[] = [];
@@ -408,14 +442,12 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const newtonBends = newtonBlocks + pcg.blockRecords, newtonPartials = align(newtonBends + pcg.bendRecords, CLOTH_SEGMENT_ALIGN);
   const pcgPartials = align(newtonPartials + CLOTH_NEWTON_TRIAL_RECORDS * workgroups, CLOTH_SEGMENT_ALIGN);
   const pcgScalars = pcgPartials + CLOTH_PCG_PARTIALS * pcg.patches;
-  // The compiled contact linearization (newton.contactLinearization, with contact): a header per vertex, a total per
-  // patch, the pool; before the control block, which stays last.
-  const linMode = options.contact ? options.newton?.contactLinearization ?? CLOTH_NEWTON_DEFAULTS.contactLinearization : 'off';
-  if (linMode !== 'off' && CLOTH_CONTACT_LIN_RECORDS[linMode] === undefined) throw new Error(`Unknown cloth Newton contactLinearization ${String(linMode)}`);
-  const linPerVertex = options.newton?.contactLinearizationRecords ?? CLOTH_NEWTON_DEFAULTS.contactLinearizationRecords;
-  if (!(Number.isInteger(linPerVertex) && linPerVertex >= 1)) throw new Error(`Cloth Newton contactLinearizationRecords must be a positive integer, got ${String(linPerVertex)}`);
-  const linHead = align(pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN), linPatch = linHead + stride, linPool = align(linPatch + pcg.patches, CLOTH_SEGMENT_ALIGN);
-  const contactLin = linMode === 'off' ? undefined : { mode: linMode, head: linHead, patch: linPatch, pool: linPool, records: linPerVertex * N };
+  // The compiled contact linearization: a header per vertex, a total per patch, with staged partners the patches' slot
+  // keys (four a record), the pool; before the control block, which stays last.
+  const linHead = align(pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN), linPatch = linHead + stride;
+  const linKeys = linPatch + pcg.patches, linPool = align(linKeys + (staged ? pcg.patches * linSlots / 4 : 0), CLOTH_SEGMENT_ALIGN);
+  const contactLin: ClothContactLinLayout | undefined = linMode === 'off' ? undefined : { mode: linMode, head: linHead, patch: linPatch, pool: linPool, records: linPerVertex * N,
+    overflow: linOverflow, ...(staged ? { staged: { keys: linKeys, slots: linSlots } } : {}) };
   const newtonControl = align(contactLin ? linPool + contactLin.records : pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN);
   // The patch table's relative offsets become absolute: halo and columns (topo words), blocks and bending entries (nw records).
   for (let p = 0; p < pcg.patches; p++) {
@@ -454,6 +486,10 @@ export class ClothGPUSolver {
   readonly tables: ClothGPUTables;
   private pipelines!: Record<Kernel, GPUComputePipeline>;
   private bindGroup!: GPUBindGroup;
+  /** The indirect overflow (the compiled modes' own): pcgStepOverflow's dispatch (16 B: workgroups, 1, 1, 0; copies for
+   * harness reads and writes only) and its group. */
+  private readonly linArgs?: GPUBuffer;
+  private linArgsGroup?: GPUBindGroup;
   /** Scene time at clock step 0 (load and undo restart the step count). */
   private timeBase = 0;
   diagnostics: boolean;
@@ -480,7 +516,8 @@ export class ClothGPUSolver {
     // Contact enters Newton as global terms: its line-search filter bounds every direction and re-detection runs between iterations.
     if (options.contact && !(options.contact.state && options.hooks?.filter && options.hooks.afterNewtonStep && options.hooks.stepEnd))
       throw new Error('Cloth Newton solver with contact needs the contact state (contact.state) and hooks.filter, hooks.afterNewtonStep and hooks.stepEnd');
-    // With contact: the contact records and the contact state (the per-stage limit is 10 storage buffers).
+    // With contact: the contact records and the contact state (the per-stage limit is 10 storage buffers; nwLinCount and
+    // nwLinBuild with the indirect overflow bind 7 + 2 + the args, within it).
     this.restarts = !!options.contact;
     const need = CLOTH_SOLVER_STORAGE_BUFFERS + (options.contact ? 3 : 0);
     if (device.limits.maxStorageBuffersPerShaderStage < need)
@@ -496,6 +533,12 @@ export class ClothGPUSolver {
     this.rest = make('rest data', 4 * this.tables.rest.length);
     this.params = make('params', 4 * PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.newtonWork = make('newton work', 16 * this.tables.newtonRecords);
+    if (this.tables.pcg.contactLin?.overflow === 'indirect') {
+      // One dimension of workgroups: the count is at most the patches.
+      if (this.tables.pcg.patches > device.limits.maxComputeWorkgroupsPerDimension)
+        throw new Error(`Cloth contact linearization's indirect overflow needs at most ${device.limits.maxComputeWorkgroupsPerDimension} PCG patches, got ${this.tables.pcg.patches}`);
+      this.linArgs = device.createBuffer({ label: `${label} contact linearization args`, size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    }
     {
       const P = new Uint32Array(this.tables.params.buffer, 4 * PARAM_NEWTON, 20), F = new Float32Array(P.buffer, P.byteOffset, 20);
       const g = options.gravity_m_s2, gg = g[0] ** 2 + g[1] ** 2 + g[2] ** 2;
@@ -566,8 +609,18 @@ export class ClothGPUSolver {
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
     const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies }) });
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
+    // The indirect overflow: group 1 (the linearization's) holds pcgStepOverflow's dispatch
+    // count, bound by nwLinCount and nwLinBuild alone; pcgStepOverflow keeps the group-0 layout, so the args, its
+    // indirect buffer, are outside its dispatch's usage scope.
+    let linLayout = pipelineLayout;
+    if (this.linArgs) {
+      const group1 = d.createBindGroupLayout({ label: 'Cloth contact linearization args', entries: [storage(CLOTH_CONTACT_LIN_ARGS.binding)] });
+      linLayout = d.createPipelineLayout({ bindGroupLayouts: [layout, group1] });
+      this.linArgsGroup = d.createBindGroup({ label: 'Cloth contact linearization args', layout: group1, entries: [buffer(CLOTH_CONTACT_LIN_ARGS.binding, this.linArgs)] });
+    }
     const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? [...CONTACT_LIN_KERNELS, ...CONTACT_LIN_PCG_KERNELS] : [])];
-    const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: pipelineLayout, compute: { module, entryPoint } })));
+    const lin = new Set<Kernel>(CONTACT_LIN_KERNELS);
+    const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: lin.has(entryPoint) ? linLayout : pipelineLayout, compute: { module, entryPoint } })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
 
@@ -575,6 +628,11 @@ export class ClothGPUSolver {
     if (workgroups <= 0) return;
     pass.setPipeline(this.pipelines[name]);
     pass.setBindGroup(0, this.bindGroup, [CLOTH_DISPATCH_STRIDE * record]);
+    if (this.linArgs) {
+      if (name === 'nwLinCount' || name === 'nwLinBuild') pass.setBindGroup(CLOTH_CONTACT_LIN_ARGS.group, this.linArgsGroup!);
+      // The patches from the first one the pool could not hold, as nwLinBuild counted them (none: no workgroup).
+      else if (name === 'pcgStepOverflow') { pass.dispatchWorkgroupsIndirect(this.linArgs, 0); return; }
+    }
     // One workgroup per vertex can exceed a dimension's limit; the kernel folds (x, y) back into one index.
     const x = Math.min(workgroups, this.device.limits.maxComputeWorkgroupsPerDimension);
     pass.dispatchWorkgroups(x, Math.ceil(workgroups / x));
@@ -682,22 +740,24 @@ export class ClothGPUSolver {
   /** The compiled contact linearization as the last Newton iteration that ran left it (harness reads; never a step
    * path): the pool and what the rows asked of it, the items built (entries, or partner terms for 'blocks') and the
    * rows whose records did not fit, and the patches holding them (pcgStep leaves those patches' rows to the matrix-free
-   * pcgStepOverflow). Undefined with the switch off. */
-  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; rows: number; fallbackRows: number; fallbackPatches: number; poolBytes: number; usedBytes: number } | undefined> {
+   * pcgStepOverflow; with the indirect overflow, the workgroups it dispatched). Undefined with the switch off. */
+  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; rows: number; fallbackRows: number; fallbackPatches: number; poolBytes: number; usedBytes: number; overflowWorkgroups?: number } | undefined> {
     const L = this.tables.pcg.contactLin;
     if (!L) return undefined;
-    const per = CLOTH_CONTACT_LIN_RECORDS[L.mode];
-    const [head, patch] = await Promise.all([this.readRange(this.newtonWork, 16 * L.head, 16 * this.N), this.readRange(this.newtonWork, 16 * L.patch, 16 * this.tables.pcg.patches)]);
+    const per = CLOTH_CONTACT_LIN_RECORDS[L.mode], patches = this.tables.pcg.patches;
+    const [head, patch, args] = await Promise.all([this.readRange(this.newtonWork, 16 * L.head, 16 * this.N), this.readRange(this.newtonWork, 16 * L.patch, 16 * patches),
+      this.linArgs ? this.readRange(this.linArgs, 0, 16) : undefined]);
     const h = new Uint32Array(head), t = new Uint32Array(patch);
     let demandRecords = 0, items = 0, rows = 0, fallbackRows = 0, fallbackPatches = 0;
-    for (let p = 0; p < this.tables.pcg.patches; p++) { demandRecords += t[4 * p]!; if (t[4 * p + 1] === 0x7f000000) fallbackPatches++; }
+    for (let p = 0; p < patches; p++) { demandRecords += t[4 * p]!; if (t[4 * p + 1] === 0x7f000000) fallbackPatches++; }
     for (let v = 0; v < this.N; v++) {
       if (h[4 * v + 2] === 0) continue;
       rows++;
       // A row left on the matrix-free product keeps its entry count in y; a compiled one holds its items there.
       if (h[4 * v] === 0x7f000000) fallbackRows++; else items += h[4 * v + 1]!;
     }
-    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, rows, fallbackRows, fallbackPatches, poolBytes: 16 * L.records, usedBytes: 16 * per * items };
+    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, rows, fallbackRows, fallbackPatches, poolBytes: 16 * L.records, usedBytes: 16 * per * items,
+      ...(args ? { overflowWorkgroups: new Uint32Array(args)[0]! } : {}) };
   }
 
   /** Encode `steps` steps in one compute pass of `encoder`. */
@@ -838,5 +898,5 @@ export class ClothGPUSolver {
     return out;
   }
 
-  destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.newtonWork]) b.destroy(); }
+  destroy(): void { for (const b of [this.positions, this.state, this.status, this.topo, this.rest, this.params, this.dispatch, this.newtonWork, ...(this.linArgs ? [this.linArgs] : [])]) b.destroy(); }
 }

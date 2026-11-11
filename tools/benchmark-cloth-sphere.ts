@@ -18,6 +18,9 @@
  *       [--lin off|factorized|blocks] [--lin-records n]  newton.contactLinearization on the restored document (default:
  *         the document's own, off) and its pool (vec4 records per vertex); the run then also reports the compiled
  *         records' demand and replays the two build kernels (as a pair: the build reads the count's headers)
+ *       [--lin-overflow grid|indirect] [--lin-partners global|staged] [--lin-slots n]  the compiled modes' pieces
+ *         against their baselines (ClothSystemOptions.contactLinearizationAB, the A/B knob; default the modes' own:
+ *         indirect, staged, 256)
  *       [--newton-iterations n]   the restored document's Newton cap (fixed-state comparisons: 1 or 2 iterations from one state)
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -32,7 +35,7 @@ import { CLOTH_SCENE_STEP_S, ClothSystem } from '../lib/cloth/system';
 import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
 import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/scene-description';
 import type { ClothDocument } from '../lib/cloth/types';
-import type { ClothGPUSolver } from '../lib/cloth/gpu-solver';
+import type { ClothContactLinAB, ClothGPUSolver } from '../lib/cloth/gpu-solver';
 import { OgcContactDetector } from '../lib/cloth/contact/ogc-detector';
 import { CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 
@@ -43,12 +46,14 @@ const STEPS = Number(opt('steps', '10')), PROFILE_STEPS = Number(opt('profile', 
 const REBUILD = args.includes('--rebuild');
 /** The detector's locality switch for the timed, profiled and replayed systems (states are built with the detector's default). */
 const LOCALITY = opt('locality', OgcContactDetector.defaultLocality);
-const SYSTEM = { statusInterval: 1, contactLocality: LOCALITY };
 const CACHE = opt('cache', join(homedir(), 'code/me/fluid-scratch/cloth-bench'));
 /** A dispatch at or under this GPU time is an early exit (measured: ~1-2 us for an exiting per-vertex dispatch). */
 const REPLAY = Number(opt('replay', '64'));
 /** newton.contactLinearization for the run ('' keeps the document's), and its pool. */
 const LIN = opt('lin', ''), LIN_RECORDS = opt('lin-records', ''), NEWTON_ITERATIONS = opt('newton-iterations', '');
+const LIN_AB = Object.fromEntries(([['overflow', opt('lin-overflow', '')], ['partners', opt('lin-partners', '')], ['stageSlots', opt('lin-slots', '')]] as const)
+  .filter(([, v]) => v !== '').map(([k, v]) => [k, k === 'stageSlots' ? Number(v) : v])) as ClothContactLinAB;
+const SYSTEM = { statusInterval: 1, contactLocality: LOCALITY, ...(Object.keys(LIN_AB).length ? { contactLinearizationAB: LIN_AB } : {}) };
 
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
 Object.assign(globalThis, dawn.globals);
@@ -336,7 +341,7 @@ const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return
 
 await buildStates();
 const vertices = baseScene.cloth![0]!.geometry.data.restPositions_m.length / 3;
-console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}, locality ${LOCALITY}${LIN ? `, contactLinearization ${LIN}` : ''}`);
+console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}, locality ${LOCALITY}${LIN ? `, contactLinearization ${LIN}` : ''}${Object.keys(LIN_AB).length ? `, A/B ${JSON.stringify(LIN_AB)}` : ''}`);
 const report: Record<string, unknown>[] = [];
 for (const tick of TICKS) {
   const steps = await timed(tick), prof = PROFILE_STEPS > 0 ? await profile(tick) : undefined;
@@ -348,7 +353,7 @@ for (const tick of TICKS) {
   console.log(`  Newton iterations used per step: ${steps.map(s => s.newton).join(' ')}; PCG iterations per step: ${steps.map(s => s.pcg).join(' ')}`);
   console.log(`  |g|^2 at the first / last Newton iteration per step: ${steps.map(s => `${s.g2[0].toExponential(4)}/${s.g2[1].toExponential(4)}`).join(' ')}; last step length ${steps.map(s => s.alpha).join(' ')}`);
   const lin = steps[steps.length - 1]!.lin;
-  if (lin) console.log(`  contact linearization '${lin.mode}' (last Newton iteration of the last step): ${lin.rows} rows, ${lin.items} items, ${lin.usedRecords} records used (${lin.usedBytes} B) of ${lin.poolRecords} (${lin.poolBytes} B), demand ${lin.demandRecords}; rows left matrix-free ${lin.fallbackRows} (patches through pcgStepOverflow ${lin.fallbackPatches})`);
+  if (lin) console.log(`  contact linearization '${lin.mode}' (last Newton iteration of the last step): ${lin.rows} rows, ${lin.items} items, ${lin.usedRecords} records used (${lin.usedBytes} B) of ${lin.poolRecords} (${lin.poolBytes} B), demand ${lin.demandRecords}; rows left matrix-free ${lin.fallbackRows} (patches through pcgStepOverflow ${lin.fallbackPatches}${lin.overflowWorkgroups !== undefined ? `, indirect workgroups ${lin.overflowWorkgroups}` : ''})`);
   console.log(`  detector per step: candidates ${c.map(x => x.candidates).join(' ')}; pairs (vf+ee) ${c.map(x => x.vfPairs + x.eePairs).join(' ')}; `
     + `rounds (detections+redetections) ${c.map(x => x.detections + x.redetections).join(' ')}; solid contacts ${c.map(x => x.solidContacts).join(' ')}; held ${c.map(x => x.held).join(' ')}; held for plane-record overflow (sum/max) ${c.map(x => `${x.planeRecordHeld}/${x.planeRecordHeldMax}`).join(' ')}; plane-record peak ${c.map(x => x.framePeakPlaneRecords).join(' ')}; status ${c.map(x => x.status).join(' ')}`);
   if (prof) {
