@@ -3035,3 +3035,70 @@ without the fix, is identical at tick 20: 150 / 150, not done, |g|/|mg| 2.65e-2 
 with this fix.
 
 test:unit: 2143 tests, 1750 pass, 0 fail, 393 skipped. check:types clean.
+
+## 2026-11-11 RESULT (50): the pressed rule (a round's certificates holding the residual arm re-detection); PCG's projected stop needs the whole gradient too; band v2 on t20-t45
+
+**(1) The pressed rule.** With band v2 and the uncovered-pair flag (C2; control + 7, default off), t40 crawled for its
+last ~70 iterations at alpha 1/16 against a stale round. It ended at |g|/|mg| 1.39e-2, not done:
+- v247 and v229 (ee rows) had |g_v| 0.099 / 0.048 N, but |P g_v| only 8.9e-4 / 1.6e-3: the round's kept active
+  normals held the residual.
+- No round armed. control + 2 .w counts only vertices a travel bound holds at the accepted trial, and at alpha 1/16 no
+  bound is reached.
+
+Rule (C2's proposal, approved as a default-path change): nwTrial counts v as pressed when kept >= 1, g.w > 1 and
+|P g_v|^2 g.w <= |g_v|^2. That is, v's whole gradient is over its floor while its projection is within it. nwChoose
+writes held + pressed to control + 2 .w, and the contact hook's decide re-detects (at most one round per iteration).
+The count is taken at x_k, so it lags the accepted trial by one iteration.
+
+**(2) PCG's first-dispatch stop.** Done fired on |P g|^2 <= residualTolerance^2 |m g|^2, a projected test that can pass
+while certificates carry load. Both the chain and pcgSolve now carry, in partial .w of dispatch 0, the count of rows
+with g.w > 1, and done at the solve also requires that count to be 0. That path also zeroes control + 2 .w: the done
+iterate needs no round.
+
+New tests:
+- steppedScene: on every step, done implies max g.w <= 1, whichever stop declared it.
+- Ladder 1e subtest: the same 32^2 step at residualTolerance 1, which lets PCG's stop pass at once.
+
+On 73346b75 the subtest fails as expected: done at Newton 85 with |g|/|mg| 0.986 and v527 at 7.6e6 floors^2. That is a
+false done. After the fix the step runs to its cap: 149 iterations, |g|/|mg| 1.67e-3, 19.5 floors^2.
+
+**Ladder before / after** (cloth-ladder on 73346b75's solver with the new tests, then the full gate):
+
+| case | before | after |
+|---|---|---|
+| 1e 32^2 t15 | 150 cap, 4.32e-4, 2 vertices over 2 F64 floors (both certificate-held), max 5.20 | 150 cap, 1.67e-3, **0 over 2 floors**, max 1.90 |
+| 1e at residualTolerance 1 | **done at 85, 7.6e6 floors^2 (false done)** | 149 cap, 1.67e-3 |
+| 2c t20 identity / H_vv | 150 / 150 not done; 7.55 / 60.9 floors; ends 115 um apart | 150 not done / **147 done**; 1.57 / 0.89 floors; 21.9 um apart |
+| 2b ledge strip | 12 12 12, not done; held 7 1 0 | unchanged |
+| all other ladder lines | | unchanged except ms/tick (see the timing note) |
+
+Timing note: ladder 4's ms/tick, two interleaved timing runs per arm (before / after): 4a 17.5, 225 (an outlier) / 14.6, 16.4;
+4c 24.7, 15.7 / 15.7, 18.4; 4e (incline, contact) 27.8, 31.6 / 50.4, 35.5. Inside the noise except possibly 4e, which may run more rounds
+under the pressed rule; it is not measured here.
+
+Gate (concurrency 1): 84 tests, 82 pass, 0 fail, 2 todo, both open before: 1e convergence within 150 (C2) and 2c (C1,
+RESULT 45). test:unit: 1750 pass, 0 fail. check:types clean.
+
+**(3) Band v2 + flag + pressed rule (ex-band4, default off).** One step on 16^2 at cap 150 (1 um), linearization set
+explicitly on each arm:
+
+| tick | lin | Newton | done | end \|g\|/\|mg\| | redetections / iteration | status |
+|---|---|---|---|---|---|---|
+| 20 | off | 92 | 1 | 1.99e-3 | 0.20 | 0 |
+| 20 | factorized | 78 | 1 | 1.17e-3 | 0.19 | 0 |
+| 30 | off | 150 | 0 | 1.76 | 0.97 | envelopeCap |
+| 30 | factorized | 150 | 0 | 13.3 | 1.00 | envelopeCap |
+| 40 | off | 101 | 1 | 2.57e-3 | 0.56 | 0 |
+| 40 | factorized | 150 | 0 | 0.283 | 0.60 | 0 |
+| 45 | off | 150 | 0 | 4.83e-2 | 0.37 | 0 |
+| 45 | factorized | 150 | 0 | 8.11 | 0.47 | 0 |
+
+roundCapHits is 0 in every run. For comparison, t40 on entries (HEAD) gives 150, not done, 2.02; with the pressed rule,
+0.961.
+
+- At t40 under factorized the entry set cycles at the body rows. Body sample 2077's entry hops between neighbouring
+  faces f287 / f289 (feature 5 / 6), with no entry in between: 11 changes in 28 iterations. Samples 385 and 1232 on f259
+  enter and leave in phase. No field / hull-facet swap.
+- This confirms C2's diagnosis: band coverage keyed on (point, face) beside an entry with a frozen feature. C2's band
+  v3 evaluates every entry at its closest feature at x and covers a slot only when the entry holds that feature.
+- The joint band commit waits until t20-t45 converge on both arms.

@@ -82,6 +82,14 @@ async function newtonOf(solver: ClothGPUSolver) {
   return { newton: c[3]!, pcg: c[7]!, first: Math.sqrt(c[4]!) / scale, last: Math.sqrt(c[5]!) / scale, done: c[0] === 1, travelHeld: c[11]! };
 }
 
+/** The stop test's residual at the solver's last Newton iterate: the largest g.w = |g_v|^2 / floor_v^2 and its vertex. */
+async function stationarityOf(solver: ClothGPUSolver) {
+  const reader = solver as unknown as { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer; N: number };
+  const g4 = new Float32Array(await reader.readRange(reader.newtonWork, 0, 16 * reader.N));
+  let max = 0, at = -1; for (let v = 0; v < reader.N; v++) if (g4[4 * v + 3]! > max) { max = g4[4 * v + 3]!; at = v; }
+  return { max, at };
+}
+
 type Internals = { newtonWork: GPUBuffer; tables: { newtonRecords: number; pcg: { patches: number } }; N: number; T: number;
   pipelines: Record<string, GPUComputePipeline>; run(pass: GPUComputePassEncoder, name: string, workgroups: number, record?: number): void; threads(n: number): number };
 
@@ -275,6 +283,10 @@ async function steppedScene(device: GPUDevice, scene: SceneDescription, ticks: n
     const rec = await newtonOf(solver); records.push(rec);
     // The cap-aware done rule: Newton never ends done on a step a travel bound holds a vertex at.
     assert.ok(!(rec.done && rec.travelHeld > 0), `step ${t}: Newton done while a travel bound holds ${rec.travelHeld} vertices`);
+    // No false done (C1 RESULTs 49-50): whichever stop declared it (PCG's |P g| at the iterate, a small step, a stall),
+    // Newton is done only where every vertex's whole gradient is within its f32 floor (nwGradient's g.w <= 1 at the
+    // done iterate: once done no kernel rewrites g).
+    if (rec.done) { const k = await stationarityOf(solver); assert.ok(k.max <= 1, `step ${t}: Newton done with vertex ${k.at}'s |g_v|^2 ${k.max.toPrecision(3)} floors^2`); }
     await after?.(cloth, t);
   }
   assert.equal(cloth.failure, undefined, cloth.failure?.message);
@@ -617,11 +629,11 @@ test('ladder 1e: the 32^2 sphere contact step never stops with a certificate car
   const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 32 })), doc = base.cloth![0]!, H = CLOTH_SCENE_STEP_S;
   if (doc.geometry.kind !== 'inline') throw new Error('the Bridson sphere document is inline');
   const start = sphere32Tick15(), capture = start as unknown as ClothCapture;
-  const scene = (iterations: number) => ({ ...base, cloth: [{ ...doc, solver: { ...doc.solver!, newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations, velocityTolerance_m_s: 1e-6 / (2 * H / 3) } },
+  const scene = (iterations: number, residualTolerance?: number) => ({ ...base, cloth: [{ ...doc, solver: { ...doc.solver!, newton: { ...(doc.solver!.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS), iterations, velocityTolerance_m_s: 1e-6 / (2 * H / 3), ...(residualTolerance === undefined ? {} : { residualTolerance }) } },
     geometry: { kind: 'inline' as const, data: { ...doc.geometry.data, initialPositions_m: start.positions_m, initialVelocities_m_s: start.velocities_m_s, solverState: start.solverState } } }] });
   type Reader = { readRange(b: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer>; newtonWork: GPUBuffer; state: GPUBuffer; tables: { edgeDualRecord: number; stride: number }; E: number };
-  const at = async (iterations: number) => {
-    const cloth = await ClothSystem.create(device, scene(iterations) as SceneDescription, { statusInterval: 1 }), solver = cloth.solverFor(doc.id)!, r = solver as unknown as Reader;
+  const at = async (iterations: number, residualTolerance?: number) => {
+    const cloth = await ClothSystem.create(device, scene(iterations, residualTolerance) as SceneDescription, { statusInterval: 1 }), solver = cloth.solverFor(doc.id)!, r = solver as unknown as Reader;
     try {
       assert.ok(cloth.stepTo(start.solverState.time_s + H), `the step from tick ${start.tick} was refused: ${cloth.failure?.message ?? 'pending'}`);
       const rec = await newtonOf(solver), restarts = (await solver.readStatus()).restarts, x = Float64Array.from(await solver.readPositions()), N = x.length / 3;
@@ -657,6 +669,16 @@ test('ladder 1e: the 32^2 sphere contact step never stops with a certificate car
   assert.deepEqual(loose, [], 'every vertex left over 2 floors is held by a kept certificate (else the solver itself has not converged)');
   await t.test('the step converges within 150 Newton iterations', { todo: 'C2: re-detection keeps re-certifying the travel bound at the held vertices (C1 RESULT 47)' }, () => {
     assert.ok(end.rec.done, `${over.length} certificate-held vertices, max ${worst.toFixed(1)} floors at v${at1}`);
+  });
+  // PCG's stop at the iterate (|P g|^2 <= residualTolerance^2 |m g|^2, before the solve) is the third done path. At a
+  // residual tolerance of 1 it passes wherever |P g| <= |m g|, so it alone would end the step at once, the certificates
+  // carrying the rest of g (C1 RESULT 50: before the fix it declared done there): done must still mean every vertex's
+  // whole gradient within its f32 floor at the done iterate.
+  await t.test('no false done through PCG\'s projected stop: at residualTolerance 1 the step is done only where every vertex is within its floor', async () => {
+    const loose = await at(150, 1);
+    let kmax = 0, kat = -1; for (let v = 0; 4 * v < loose.g.length; v++) if (loose.g[4 * v + 3]! > kmax) { kmax = loose.g[4 * v + 3]!; kat = v; }
+    console.log(`[ladder 1e] residualTolerance 1: Newton ${loose.rec.newton} (${loose.rec.done ? 'done' : 'cap'}), |g|/|mg| ${loose.rec.last.toExponential(2)}, max |g_v|^2 / floor_v^2 ${kmax.toPrecision(3)} at v${kat}`);
+    assert.ok(!loose.rec.done || kmax <= 1, `false done through PCG's |P g| stop: vertex ${kat}'s |g_v|^2 is ${kmax.toPrecision(3)} floors^2`);
   });
 }));
 

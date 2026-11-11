@@ -129,6 +129,9 @@ fn nwTrust() -> u32 { return nwControl() + 3u; }
 fn nwTrustNorm() -> u32 { return nwControl() + 5u; }
 fn nwTrustCounts() -> u32 { return nwControl() + 4u; }
 fn nwTrustModel() -> u32 { return nwControl() + 6u; }
+// PCG's stop at the iterate (|P g| within tolerance, no vertex over its floor): Newton done; no vertex needs a new round
+// there (control + 2 .w, the last accepted trial's count, is of the iterate before).
+fn nwDoneAtSolve() { nw[nwControl()].x = ${DONE}; nw[nwControl() + 2u].w = 0.0; }
 fn nwPinned(v: u32) -> bool { return vertexGroup(v) > 0u; }
 // Trial k's move of vertex j (alpha = 2^-k): alpha d_j, or with contact the projected arc's move Pi_j(x_j + alpha d_j) - x_j
 // (nwProject; exactly alpha d_j where the projection keeps the trial point; d_j.w != 0 marks a vertex the arc cuts on some trial).
@@ -565,7 +568,7 @@ ${lin ? clothContactLinWGSL(lin) : ''}
     var a = vec4f(0.0);
     for (var k = lane; k < P.newton3.y; k += PCG_PATCH) {
       let q1 = nw[pcgPartial((i - 1u) % 3u, k)];
-      a += vec4f(q1.xyz, select(0.0, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
+      a += vec4f(q1.xyz, select(q1.w, nw[pcgPartial((i + 1u) % 3u, k)].x, i >= 2u));
     }
     ${reduce('a')}
     if (lane == 0u) { let s0 = nw[pcgScalar(0u)]; let q = nw[pcgScalar(1u + i % 2u)]; pcgOut = total; pcgScal = vec4f(s0.x, q.x, s0.y, 0.0); pcgNorm = q; pcgTrust = nw[nwTrust()]; }
@@ -584,7 +587,10 @@ ${lin ? clothContactLinWGSL(lin) : ''}
         var rr = nw[nwControl() + 1u]; let e2 = pcgForcing(sums.z, rr, ctl.w);
         if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = e2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, e2, 0.0, 0.0);
       }
-      if (sums.z <= bitcast<f32>(P.newton1.z)) { if (lead) { nw[nwControl()].x = ${DONE}; } return; }
+      // Done at the iterate: |P g|^2 within the residual tolerance and (C1 RESULT 50, as for nwChoose's small step and
+      // stall) every vertex's whole gradient within its f32 floor (sums.w: the rows with g.w > 1). |P g| alone is the
+      // round's constrained residual: certificates carrying load hold the rest of g, and the step is not solved there.
+      if (sums.z <= bitcast<f32>(P.newton1.z) && sums.w == 0.0) { if (lead) { nwDoneAtSolve(); } return; }
     }
     // The last dispatch's step reached the trust boundary (its alpha record -1): the solve is done.
     if (i >= 2u && scal.y < 0.0) { if (lead) { nw[nwControl()].y = 1.0; } return; }
@@ -645,7 +651,7 @@ ${lin ? clothContactLinWGSL(lin) : ''}
     ${contact ? `if (!nwPinned(v)) { w = nwProjectP(v, w + ${contactHv}); }` : ''}
     nw[nseg(${S.w0}u + i % 2u, v)] = vec4f(w, 0.0);
   }
-  ${reduce('vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0)')}
+  ${reduce(`vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), select(0.0, f32(own && nw[nseg(${S.g}u, v)].w > 1.0), i == 0u))`)}
   if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = total; }
 }
 
@@ -683,7 +689,7 @@ ${lin ? clothContactLinWGSL(lin) : ''}
         gamma0 = gam;
         tol2 = pcgForcing(sums.z, prior, ctl.w);
         if (lead) { var rr = prior; if (ctl.w == 0.0) { rr.x = sums.z; } rr.y = sums.z; rr.z = tol2; nw[nwControl() + 1u] = rr; nw[pcgScalar(0u)] = vec4f(gam, tol2, 0.0, 0.0); }
-        if (sums.z <= bitcast<f32>(P.newton1.z)) { stop = 2u; break; }
+        if (sums.z <= bitcast<f32>(P.newton1.z) && sums.w == 0.0) { stop = 2u; break; }
       }
       if (!(gam > tol2 * gamma0)) { stop = 1u; break; }
       var beta = 0.0; var denom = sums.y;
@@ -724,12 +730,12 @@ ${lin ? clothContactLinWGSL(lin) : ''}
     }
     // The reduction's barriers also order this iteration's reads of the staged u before the next one overwrites it;
     // pcgOut is read after the next iteration's uniform load (a barrier).
-    ${reduce('vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), 0.0)')}
+    ${reduce(`vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), select(0.0, f32(own && nw[nseg(${S.g}u, v)].w > 1.0), i == 0u))`)}
     if (lane == 0u) { pcgOut = total; }
   }
   if (own) { nw[nseg(${S.d}u, v)] = vec4f(d, 0.0); }
   if (lead) {
-    if (stop == 2u) { nw[nwControl()].x = ${DONE}; } else { nw[nwControl()].y = 1.0; }
+    if (stop == 2u) { nwDoneAtSolve(); } else { nw[nwControl()].y = 1.0; }
     nw[nwControl() + 1u].w += taken;
     nw[nwTrustNorm()] = vec4f(dn, select(0.0, 1.0, edge), 0.0, 0.0);
   }
@@ -779,11 +785,17 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   if (ctl.x != 0.0) { return; }
   let wgi = wgIndex(wg, nwg); let v = wgi * NW_WG + lane;
   nwE = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwF = array<vec4f, 2>(vec4f(0.0), vec4f(0.0)); nwS = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
-  var dmax = 0.0; var cut = 0.0; var kkt = 0.0; var act = vec4f(0.0); var trav = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
+  var dmax = 0.0; var cut = 0.0; var kkt = 0.0; var pressed = 0.0; var act = vec4f(0.0); var trav = array<vec4f, 2>(vec4f(0.0), vec4f(0.0));
   if (v < P.n.x) {
     let h = hEff(); let xv = pos(v); let dv = nwD(v); let g4 = nw[nseg(${S.g}u, v)]; let gv = g4.xyz;
     dmax = dot(dv, dv); kkt = g4.w;
-    ${contact ? `let pr = nw[nseg(NW_PROJ + 1u, v)]; act = vec4f(select(0.0, 1.0, pr.w > 0.0), pr.w, pr.z, 0.0);` : ''}
+    ${contact ? `let pr = nw[nseg(NW_PROJ + 1u, v)]; act = vec4f(select(0.0, 1.0, pr.w > 0.0), pr.w, pr.z, 0.0);
+    // Pressed against the round: v's whole gradient over its floor (g.w > 1) while its projection off the active
+    // normals is within it (|P g_v|^2 g.w <= |g_v|^2): the kept certificates (positive multipliers, nwActiveSet) hold
+    // all of v's residual. The iterate is then stationary only for this round's constrained problem, not for the
+    // step's, whatever the step length (C1 RESULT 50: at t40 the band trial energy crawled 70 iterations at alpha
+    // 1/16 against a stale round), so nwChoose counts v into control + 2 .w and the contact hook re-detects.
+    if (pr.w > 0.0 && kkt > 1.0) { let pg = nwProjectP(v, gv); if (dot(pg, pg) * kkt <= dot(gv, gv)) { pressed = 1.0; } }` : ''}
     // The arc cuts v's full step (its certificates bound it): a stall of the whole arc is then no convergence.
     ${contact ? `cut = select(0.0, 1.0, nw[nseg(${S.d}u, v)].w != 0.0);
     // Per trial, whether a travel bound holds v there (nwProject; its moves are this iteration's only when cut).
@@ -894,7 +906,7 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
   nwPartialSum(lane, wgi, nwF[1], base + 3u * P.newton0.z);
   nwPartialSum(lane, wgi, nwS[0], base + 4u * P.newton0.z);
   nwPartialSum(lane, wgi, nwS[1], base + 5u * P.newton0.z);
-  nwPartialSumMax(lane, wgi, vec4f(cut, dmax, 0.0, kkt), base + 6u * P.newton0.z);
+  nwPartialSumMax(lane, wgi, vec4f(cut, dmax, pressed, kkt), base + 6u * P.newton0.z);
   ${contact ? `nwPartialSum(lane, wgi, act, base + 7u * P.newton0.z);
   nwPartialSum(lane, wgi, trav[0], base + 8u * P.newton0.z);
   nwPartialSum(lane, wgi, trav[1], base + 9u * P.newton0.z);` : ''}
@@ -985,8 +997,9 @@ fn nwAdd(k: u32, e: vec2f) { nwE[k / 4u][k % 4u] += e.x; nwF[k / 4u][k % 4u] += 
     }
   }
   if (NW_HYBRID) { nw[nwTrustCounts()] = counts; }
-  ${contact ? `// The active set, and the vertices a travel bound holds at the accepted trial (no step: 0, the stall is its own signal).
-  nw[nwControl() + 2u] = vec4f(act.xyz, held);` : ''}
+  ${contact ? `// The active set, and in .w the vertices a travel bound holds at the accepted trial (no step: 0, the stall is its own
+  // signal) plus those pressed against the round's certificates at x (nwTrial, sm.z): either needs a new round.
+  nw[nwControl() + 2u] = vec4f(act.xyz, held + sm.z);` : ''}
   // Converged: no descending step, or (velocity tolerance, newton3.w) the accepted step moves no vertex faster than
   // tol h~ / h~ (alpha |d_v| bounds the projected move too: each certified set holds x_v). nwApply still applies a converged step's move.
   let tolV = bitcast<f32>(P.newton3.w);
