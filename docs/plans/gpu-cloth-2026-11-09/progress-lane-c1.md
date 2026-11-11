@@ -3072,9 +3072,19 @@ false done. After the fix the step runs to its cap: 149 iterations, |g|/|mg| 1.6
 | 2b ledge strip | 12 12 12, not done; held 7 1 0 | unchanged |
 | all other ladder lines | | unchanged except ms/tick (see the timing note) |
 
-Timing note: ladder 4's ms/tick, two interleaved timing runs per arm (before / after): 4a 17.5, 225 (an outlier) / 14.6, 16.4;
-4c 24.7, 15.7 / 15.7, 18.4; 4e (incline, contact) 27.8, 31.6 / 50.4, 35.5. Inside the noise except possibly 4e, which may run more rounds
-under the pressed rule; it is not measured here.
+Timing note (corrected): the first ladder-4 table was taken while peer sessions ran GPU tests outside the runner (16:42-19:00
+NZDT), so it is void. Repeated through the runner (timing, interleaved; before / after, ms/tick):
+- 4a: 10.3, 10.7 / 10.7, 10.6.
+- 4c: 10.9, 11.2 / 11.0, 11.2.
+- 4e: 22.0, 22.0, 25.8, 22.6, 22.1 / 21.7, 22.2, 28.0, 22.3, 23.0.
+
+There is no slowdown. On the incline, per patch over its 60 steps, the counts are identical before and after:
+- Newton 480 (8 per step, never done).
+- Redetections 62 (sticking) and 67 (sliding).
+- control + 2 .w is 0 on every step, and a CPU recount of pressed vertices at each step's last iterate is 0. The pressed
+  rule never fires on the sticking patch.
+- Side finding: at the production cap the sticking patch ends each step with a median max g.w of 1.27e3 (about 36
+  floors), not converged. The sliding patch ends at 0.76.
 
 Gate (concurrency 1): 84 tests, 82 pass, 0 fail, 2 todo, both open before: 1e convergence within 150 (C2) and 2c (C1,
 RESULT 45). test:unit: 1750 pass, 0 fail. check:types clean.
