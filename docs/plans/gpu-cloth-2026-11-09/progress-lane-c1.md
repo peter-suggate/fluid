@@ -3112,3 +3112,126 @@ roundCapHits is 0 in every run. For comparison, t40 on entries (HEAD) gives 150,
 - This confirms C2's diagnosis: band coverage keyed on (point, face) beside an entry with a frozen feature. C2's band
   v3 evaluates every entry at its closest feature at x and covers a slot only when the entry holds that feature.
 - The joint band commit waits until t20-t45 converge on both arms.
+
+## 2026-11-12 RESULT (51): re-detection armed at the accepted trial (nwAccept, landed); one-ulp 1e converges under off; the factorized tail is the strain duals' linear rate; C1 handoff
+
+**What landed: 24add627.** It is merged onto L1's 5967bdc1 (clean three-way merge) and is the only C1 code commit this
+round.
+- **The bug.** fluid-1e's one-ulp starts of the Bridson sphere at tick 15 (mulberry32 seeds 1-4) ended off at the 150
+  cap with |g|/|m g| 2.8-3.6 (up to 2587 f32 floors). The cause: vertices the round's travel cap pinned far from
+  stationarity never armed re-detection.
+  - The arming read nwProject's travel flag.
+  - nwProject runs the travel test only where alpha |d_v| <= tol h~.
+  - A vertex the cap cuts far from stationarity has a large alpha |d_v|, so it never armed.
+- **v1 (not landed).** It ran the ungated test on all 8 trials of every cut vertex. It was correct, but timing (exclusive)
+  showed +15 to +22 ms/step mean (+11-62% median), with PCG totals equal.
+- **v2 (landed).**
+  - nwProject is unchanged; its gated flag still feeds done's count. Gating is exact there: small needs chosen * max|d|
+    <= tol h~ at the same trial, so every vertex at a trial that can end Newton passes the gate.
+  - A new full-width kernel, nwAccept (between nwChoose and nwApply, at x before the move), writes the accepted trial's
+    active set (moved from nwApply).
+  - nwAccept also runs the ungated travel test at the accepted trial for vertices cut there, and arms re-detection.
+  - It cannot fold into nwApply: nwBarrierActs reads partner positions that nwApply moves.
+  - stage-timing's line-search set names nwAccept.
+- **Ladder 1e** runs off and factorized on start seeds 0-4, with contactLinearization set explicitly on each arm. It
+  asserts that done sees 0 travel-held vertices at the accepted trial.
+
+**Gate** (gate.sh, v2 on 7ab0815e, concurrency 1): 103 tests, 97 pass, 0 fail, 6 todo.
+- The todos are the factorized 1e subtest on its five seeds, plus 2c (C1, RESULT 45).
+- The commit then makes factorized seeds 0, 2 and 4 hard; only seeds 1 and 3 stay todo.
+- The merged tree's GPU recheck (1e plus the solver tests, m14/sess65.sh) was still queued behind an exclusive
+  timing at landing. The merged hunks are byte-identical to the gated ones and disjoint from L1's changes. Read
+  m14/sess65.log; if it fails, revert 24add627.
+- On the main checkout after landing: check:types is clean; test:unit gives 1757 pass, 0 fail.
+
+| 1e from a one-ulp start | off: Newton, \|g\|/\|m g\|, max floors | factorized | HEAD before (off / factorized) |
+|---|---|---|---|
+| seed 0 | 134 done, 5.8e-4, 0.22 | 143 done, 6.4e-4, 0.50 | cap 1.9 floors / cap |
+| seed 1 | 70 done, 5.3e-4, 0.30 | 150 cap, 1.1e-3, 0.22 | cap, \|g\|/\|m g\| 2.8-3.6 / done |
+| seed 2 | 106 done, 6.2e-4, 0.34 | 120 done, 6.4e-4, 0.41 | cap / done |
+| seed 3 | 148 done, 6.1e-4, 0.41 | 150 cap, 2.3e-3, 2.33 (v367) | cap / cap |
+| seed 4 | 100 done, 6.0e-4, 0.40 | 106 done, 6.1e-4, 0.34 | cap / cap |
+
+All rows report 0 travel-held vertices at the accepted trial. On HEAD (sess57), the factorized arm fails seeds 0, 3
+and 4, at 8.5-88 floors.
+
+**Sphere contact ladder, off from one-ulp starts (C2's failures, listed separately).**
+- v2: seeds 0 and 1 pass. Seed 2 fails test 7, seed 3 fails tests 6 and 7, seed 4 fails test 7.
+- HEAD: the same, except that seed 3 fails only test 6. Seed 3's test 7 is therefore newly failing. A one-ulp start is
+  chaotic over 30 contact ticks, so it is listed, not attributed.
+- Every failure is "contact failed: heldConflict" at tick 46, with no penetration.
+
+**Timing** (fluid-gpu-run timing, exclusive, ticks 5-35; mean / median ms per step):
+
+| config | HEAD | v2 | change (mean) |
+|---|---|---|---|
+| off 16^2 | 56.4 / 53.6 | 61.2 / 59.4 | +4.8 (+8.6%) |
+| off 32^2 | 132.7 / 116.7 | 126.6 / 109.7 | -6.0 |
+| factorized 16^2 | 40.6 / 41.7 | 42.1 / 43.5 | +1.5 |
+| factorized 32^2 | 103.8 / 95.8 | 103.0 / 95.6 | -0.8 |
+
+- PCG totals are equal within 0.4%.
+- Re-detections over the 30 steps rise from 200/197/187/196 to 211/219/201/216.
+- Trajectory divergence alone moves a config by up to 6 ms.
+- Off 16^2's +4.8 ms is the largest increase. The structural cost is one more full-width launch per Newton iteration.
+- Kernel time, 64 replays at the last state: nwAccept 586/398/186/586 us and v2's nwApply 3.07 us, against HEAD's nwApply
+  (with the active-set write) 2526/748/970/1042 us. The timer repeats exact values, so these are indicative only.
+- tools/benchmark-cloth-sphere.ts (L1's) does not list nwAccept in its kernel profile yet.
+
+**Open (1): factorized 1e seeds 1 and 3 are a linear tail, not a trap** (sess62/63, v367 history on seed 3).
+- v367 is free: no entries and no kept normals. It was cut only at iteration 1 (travel cap, armed). Through the late
+  iterations it is uncut, at alpha 1.
+- Its residual falls about 0.82x per iteration over iterations 136-149, from 6.1e-3 to 7.1e-4 N. |d| ends at 1.19 um,
+  against the 1 um tolerance.
+- There are two restarts, at iterations 46 and 130: jumps of 10^3-10^4x when the entry sets of neighbours v495, v496
+  and v528 change.
+- Off on the same seed shows the same tail at about 0.73x (iterations 108-119), and is done at 148.
+
+**Open (2): the strain duals cause the tail** (sess64).
+- Unheld: 42 edges lie within 2 rings of v367. Five carry lambda != 0 (max 1.02-1.08) and five sit at the 10% limit.
+  e1080 (367-399) has lambda 0.42 (factorized) / 0.45 (off), from 0. Cloth-wide, 54-55 of 2945 edges have lambda != 0.
+- With nwEdgeDuals skipped from iteration 0, the duals are held at their warm-start values (33 edges nonzero):
+  - both arms are done at Newton 71, with |g|/|m g| 5.30e-4 / 5.12e-4, against 150 cap / 148;
+  - v367's residual falls to about 1e-5 N by iterations 58-69;
+  - the price is a max strain of 1.04e-1 within 2 rings: the penalty alone, 4% over the limit.
+- AVBD's method of multipliers steps lambda <- clamp(k C + lambda) every Newton iteration, with k ramping. That is a
+  linear-rate outer loop interleaved with Newton, so Newton's own rate is lost wherever a dual is moving.
+- RESULT 45 is consistent with this: the frozen-dual oracle converged in 46 iterations.
+
+Options, for the user's decision (production runs a cap of 8 iterations):
+
+| option | cost per Newton iteration | 1e / RESULT 45 / ladders |
+|---|---|---|
+| (a) Outer ALM rounds: hold lambda through an inner Newton solve, update once per round | none (nwEdgeDuals once per round) | the inner solve is done at 71; each round restarts from a warm start. At cap 8 it is one round per step: the duals then move once per step, so strain overshoot persists for a step. 2a/2c need a round count. |
+| (b) Primal-dual Newton (lambda_e unknowns, semismooth on active edges; condense per edge into the row) | per-edge condensation in nwGradient and in PCG (about E active, small); the system stays SPD after condensation if the active set is fixed within an iteration | removes the linear rate, and the active set changes like contact. Most work; the most exact. |
+| (c) Strain limit as a primal barrier (log barrier near l_max, an edge-length feasibility cap in the trial) | per-edge energy, gradient and Hessian like the membrane, plus one feasibility check per trial | quadratic convergence, strain strictly under the limit. Changes the physics within the barrier band. A start already at the limit (1e's e1080 at 0.100) needs a feasible start. |
+
+**Open (3): the incline sticking patch** (RESULT 50). At the production cap it ends each step with a median max g.w of
+1.27e3 (about 36 floors): not converged. The sliding patch ends at 0.76.
+
+**Open (4): Delta E ('move')**. C2's contact side landed as 2742e4ca, unused by default.
+- My side is in ~/code/me/fluid-scratch/cloth-c1/m15/src, on 7ab0815e with C2's pre-fix files.
+- It needs a rebase onto this commit and 2742e4ca, which carries ogcPairWeightShift.
+- It is held per main.
+
+**Scratch** (~/code/me/fluid-scratch/cloth-c1/):
+- m14/src: v2 on 7ab0815e. m14/landtree: v2 merged onto 05fc3eaf, which is what landed. m14/run: the gate tree (src plus
+  fluid-1e's L1_LIN/L1_PERTURB contact-ladder hooks). m14/base: HEAD plus the new tests.
+- m14/probe: the nwAccept r1/s0 trace (C1_PROBE) and the dual hold (globalThis.__C1_HOLD).
+- m14/tick.mts: the per-step timing probe, with re-detections, PCG and kernel timestamps. m14/v367.mts: the per-iteration
+  vertex history and dual census.
+- Logs: m14/sess57 (v1 gate), sess58 (v1 timing), sess60 + gate-v2.log + sphere-v2-*.log (v2 gate), sess61 (v2 timing),
+  sess62/63 (v367 history), sess64 (held duals), sess65 (merged recheck). Dumps: m12/tog/replay-*.json.
+- m15/src: Delta E.
+
+**Top three solver challenges (ranked):**
+1. The strain-limit dual scheme. AVBD's per-iteration multiplier step sets a linear tail wherever an edge sits at its
+   limit: 1e from 71 to 150 iterations. Choose (a), (b) or (c) above. Every converged ladder and the 100x target depend
+   on Newton keeping its rate.
+2. Contact-set churn during a solve.
+   - Re-detection changes neighbours' entry sets and restarts Newton (seed 3: 10^3-10^4x jumps at iterations 46 and 130).
+   - The entry cycling found in RESULT 50 (t40 f287/f289) is C2's band v3.
+   - C2's heldConflict halts the sphere at tick 46 on three of five one-ulp seeds.
+3. The production cap of 8 is far from converged. The sticking patch ends at about 36 floors every step, and t30/t45 do
+   not converge in 150 (RESULT 50). With (1) and (2) fixed, the question becomes how many iterations the scenes need for
+   matched quality at 8, and what each costs. Fewer, better iterations are the only path to the frame-rate target.
