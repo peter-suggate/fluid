@@ -142,6 +142,8 @@ export function validateClothDocument(document: ClothDocument): string[] {
       errors.push(`Unknown cloth contact travel bound ${String(solver.contactTravelBound)}`);
     else if (solver.contactTravelBound === "off" && solver.contactFreeze !== "mandatory")
       errors.push("Cloth contactTravelBound 'off' is diagnosis only and needs contactFreeze 'mandatory' (no re-detection)");
+    if (solver.contactLeastShift !== undefined && solver.contactLeastShift !== "off" && solver.contactLeastShift !== "on")
+      errors.push(`Unknown cloth contact least shift ${String(solver.contactLeastShift)}`);
     // The VBD solver and its settings were removed (M4): every document runs Newton-PCG, and a document that names a
     // VBD setting is refused rather than silently ignored.
     for (const key of ["iterations", "chebyshevRho", "tier", "patchVertices", "patchIterations", "coarse"])

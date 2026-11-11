@@ -162,6 +162,12 @@ export interface ClothSolverSettings {
    * round's cap, the solid pieces' balls), keeping its half-spaces. 'on' (default): unchanged.
    */
   readonly contactTravelBound?: 'on' | 'off';
+  /**
+   * The levelled least shift (Newton only; ogc-detector.ts levelShiftPasses): 'on' moves a levelled re-detection's
+   * conflicting cloth towards its mean motion for 2 passes, then holds the conflicts left for up to 4, before the
+   * unlevelled fallback. 'off' (default): every levelled conflict falls back at once, unchanged.
+   */
+  readonly contactLeastShift?: 'off' | 'on';
 }
 
 /** A solid the cloth would meet that the scene cannot carry yet (a moving

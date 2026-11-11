@@ -72,7 +72,7 @@ test("cost: the rotating-sphere sheet's detection, round by round and kernel by 
   const doc = scene.cloth![0]!, det = cloth.contactFor(doc.id)!, solver = cloth.solverFor(doc.id)!;
   const N = doc.geometry.data.restPositions_m.length / 3;
   log(`cost: sphere ${NODES}^2 (${N} vertices), ${HELD ? "held" : "moving"} sphere, ${TICKS} ticks`);
-  const sum = { ms: 0, newton: 0, rounds: 0, re: 0, redos: 0, levelled: 0, fallback: 0, scanned: 0, collisions: 0, rejected: 0, candidates: 0, dat: 0 };
+  const sum = { ms: 0, newton: 0, rounds: 0, re: 0, redos: 0, levelled: 0, shifts: 0, holds: 0, fallback: 0, relG: 0, travelHeld: 0, scanned: 0, collisions: 0, rejected: 0, candidates: 0, dat: 0 };
   let failure: string | undefined, maxRedos = 0, maxRounds = 0;
   try {
     for (let k = 1; k <= TICKS; k++) {
@@ -81,18 +81,20 @@ test("cost: the rotating-sphere sheet's detection, round by round and kernel by 
       const ms = performance.now() - t0;
       const c = await det.readCounters(), ctl = Array.from(await solver.readNewtonControl() as ArrayLike<number>), rl = await det.readRoundLog();
       sum.ms += ms; sum.newton += ctl[3]!; sum.rounds += c.detections; sum.re += c.redetections; sum.redos += c.redos;
-      sum.levelled += c.levelled; sum.fallback += c.levelFallback; sum.scanned += c.scanned; sum.collisions += c.collisions;
+      sum.levelled += c.levelled; sum.shifts += c.levelShifts; sum.holds += c.levelHolds; sum.fallback += c.levelFallback;
+      // Convergence at the step's end: log10 |g| / |m g| at its latest Newton iterate (control + 1 .y / .z), and the vertices a travel bound held (control + 2 .w).
+      sum.relG += 0.5 * Math.log10(Math.max(ctl[5]!, 1e-30) / Math.max(ctl[6]!, 1e-30)); sum.travelHeld += ctl[11]!; sum.scanned += c.scanned; sum.collisions += c.collisions;
       sum.rejected += c.boxRejected; sum.candidates += c.candidates; sum.dat += c.datPairs;
       maxRedos = Math.max(maxRedos, c.redos); maxRounds = Math.max(maxRounds, c.detections);
       if (k % EVERY === 0 || k === TICKS) {
-        log(`  tick ${k}: ${ms.toFixed(1)} ms, newton ${ctl[3]}; rounds ${c.detections} (re ${c.redetections}, redos ${c.redos}, levelled ${c.levelled}, fallback ${c.levelFallback}); `
+        log(`  tick ${k}: ${ms.toFixed(1)} ms, newton ${ctl[3]}; rounds ${c.detections} (re ${c.redetections}, redos ${c.redos}, levelled ${c.levelled}, shifts ${c.levelShifts}, holds ${c.levelHolds}, fallback ${c.levelFallback}); `
           + `scan ${c.scanned}/${c.collisions}/${c.boxRejected}/${c.candidates} dat ${c.datPairs}; status [${OgcContactDetector.describeStatus(c.status).join(",")}]`);
         for (const [i, r] of rl.entries()) log(`    round ${i}: |w| ${r.maxPrediction.toExponential(2)} env ${r.maxEnvelope.toExponential(2)} scan ${r.scanned}/${r.collisions}/${r.boxRejected}/${r.candidates} dat ${r.datPairs}`);
       }
       if (cloth.failure) { failure = `tick ${k}: ${cloth.failure.message}`; break; }
     }
     const n = TICKS, per = (x: number) => (x / n).toFixed(1);
-    log(`cost per tick (mean of ${n}): ${per(sum.ms)} ms wall, newton ${per(sum.newton)}, rounds ${per(sum.rounds)} (re ${per(sum.re)}, redos ${per(sum.redos)}, levelled ${per(sum.levelled)}, fallback ${per(sum.fallback)}); `
+    log(`cost per tick (mean of ${n}): ${per(sum.ms)} ms wall, newton ${per(sum.newton)}, rounds ${per(sum.rounds)} (re ${per(sum.re)}, redos ${per(sum.redos)}, levelled ${per(sum.levelled)}, shifts ${per(sum.shifts)}, holds ${per(sum.holds)}, fallback ${per(sum.fallback)}); end of step: log10 |g|/|m g| ${(sum.relG / n).toFixed(2)}, travel-held ${per(sum.travelHeld)} vertices; `
       + `scanned ${per(sum.scanned)}, collisions ${per(sum.collisions)}, box-rejected ${per(sum.rejected)}, candidates ${per(sum.candidates)}, DAT pairs ${per(sum.dat)}; most in one tick: rounds ${maxRounds}, redos ${maxRedos}`);
     if (device.features.has("timestamp-query")) {
       const names = [...OGC_ROUND_KERNELS, "redo"] as const;

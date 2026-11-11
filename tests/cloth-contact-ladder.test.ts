@@ -115,7 +115,7 @@ async function ladder(device: GPUDevice, label: string, scene: SceneDescription,
       for (let i = 0; i < N; i++) { y += x[3 * i + 1]! / N; vy += v[3 * i + 1]! / N; minY = Math.min(minY, x[3 * i + 1]!); }
       const status = [OgcContactDetector.describeStatus(c.status)].flat().join(",");
       track.push({ tick: k, y, vy, minY, intersections, solidIntersections, records: c.framePeakPlaneRecords / N, recordsTotal: c.planeRecordsTotal, held: c.planeRecordHeld, heldVertices: c.held, conflicts: c.conflicts, datPairs: c.datPairs, rounds: c.detections, status });
-      console.log(`  tick ${k}: y ${(1000 * y).toFixed(2)} mm vy ${vy.toFixed(3)}; rounds ${c.detections - c.redetections}+${c.redetections} (levelled ${c.levelled}, fallback ${c.levelFallback}; conflicts no plane / closing ${c.levelConflicts.map(w => `${w & 0xffff} (${w >>> 16} solid)`).join(' / ')}) alpha ${+Number(ctl[2]).toPrecision(3)} newton ${ctl[3]} env ${e2(c.peakEnvelope)}; `
+      console.log(`  tick ${k}: y ${(1000 * y).toFixed(2)} mm vy ${vy.toFixed(3)}; rounds ${c.detections - c.redetections}+${c.redetections} (levelled ${c.levelled}, shifts ${c.levelShifts}, holds ${c.levelHolds} (${c.levelHeld} v), fallback ${c.levelFallback}, list peak ${c.levelListPeak} over ${c.levelListOverflow}; conflicts no plane / closing ${c.levelConflicts.map(w => `${w & 0xffff} (${w >>> 16} solid)`).join(' / ')}) alpha ${+Number(ctl[2]).toPrecision(3)} newton ${ctl[3]} |g|/|mg| ${Math.sqrt(ctl[5]! / ctl[6]!).toExponential(1)} travel-held ${ctl[11]} env ${e2(c.peakEnvelope)}; `
         + `scan ${c.scanned}/${c.collisions}/${c.boxRejected}/${c.candidates} (max ${c.scanMax}); dat ${c.datPairs}; records ${(c.framePeakPlaneRecords / N).toFixed(1)}/v, ${c.planeRecordsTotal} summed; held ${c.held} (overflow ${c.planeRecordHeld}); conflicts ${c.conflicts}; facets ${c.hfPairs}/${c.hfDropped} dropped; `
         + `x ${intersections}/${solidIntersections}; ${status}`);
       if (each) await each(cloth, c);
@@ -210,11 +210,13 @@ const peakRecords = (label: string, r: { track: TickReport[]; N: number }) =>
 /** The scene with every cloth's trial projection in Newton's H_vv metric (solver.contactProjectionMetric 'hvv'). */
 const hvv = (scene: SceneDescription): SceneDescription => ({ ...scene, cloth: scene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactProjectionMetric: 'hvv' as const } })) });
 /**
- * The metric's known open failure. With the metric on, the sphere halts on heldConflict at tick 46, still after C1's
- * done-rule fix (284149af). The conflict is an unlevelled fallback round's no-plane pair: edge 119-136 against the
- * body's samples. That is the least shift's item (relative motion, conflict-only holds), which follows (C).
+ * The scene with every cloth's levelled least shift on (solver.contactLeastShift 'on': a levelled re-detection's
+ * conflicting cloth moves towards its mean motion for 2 passes, then up to 4 hold passes, before the fallback).
  */
-const HVV_SPHERE_TODO = "C2 least shift (relative motion, conflict-only holds): in the H_vv metric the sphere halts on heldConflict at tick 46, an unlevelled fallback round's no-plane pair (edge 119-136 against the body's samples)";
+const leastShift = (scene: SceneDescription): SceneDescription => ({ ...scene, cloth: scene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactLeastShift: 'on' as const } })) });
+type SphereMode = 'euclid' | 'hvv' | 'shift';
+const sphereMode = (mode: SphereMode, scene: SceneDescription) => mode === 'hvv' ? hvv(scene) : mode === 'shift' ? leastShift(scene) : scene;
+const MODE_LABEL: Record<SphereMode, string> = { euclid: '', hvv: ' (H_vv metric)', shift: ' (least shift)' };
 
 for (const metric of [false, true])
 test(`ladder${metric ? ' (H_vv metric)' : ''}: a flat 16 x 16 sheet dropped from 1.2 m (the analytic free fall) lands on the floor, rests at the contact radius without a rebound, with few plane records`, { skip: !runs('flat') }, async () => withDevice(async device => {
@@ -324,9 +326,12 @@ test('ladder: an 8 x 8 sheet lands on a slowly moving large sphere (the plate) a
 // Soundness regression (envelope and pair-bound changes): a cloth-cloth pair bound taken on world-straight
 // paths without the stray sigma_v of the vertices moving with the solid left a vertex inside the solid at
 // tick 37 (item 2 without strayOf, 2026-11-10). Every tick to 60 is checked, faces and solid alike.
-for (const metric of [false, true])
-test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)`, { skip: !runs('sphere'), ...(metric ? { todo: HVV_SPHERE_TODO } : {}) }, async () => withDevice(async device => {
-  const base = bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), scene = metric ? hvv(base) : base;
+// The least shift's run also holds its passes to their purpose: no levelled round falls back unlevelled.
+for (const mode of ['euclid', 'hvv', 'shift'] as const)
+test(`ladder${MODE_LABEL[mode]}: a 16 x 16 sheet lands on the rotating sphere: nothing intersects or enters the solid to tick 60 (the carried stray regression)${mode === 'shift' ? ', and no levelled round falls back' : ''}`, { skip: !runs('sphere') }, async () => withDevice(async device => {
+  const scene = sphereMode(mode, bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })));
+  assert.deepEqual(validateScene(scene), []);
+  let fallbacks = 0, shifts = 0;
   // Each tick, over every face (a 32-per-side barycentric lattice) and over the vertices, the least value of the static
   // field the detector holds, and of the true frustum's signed distance (scene frame); printed with
   // CLOTH_LADDER_SPHEREDIAG=1. The true distance is the (C) gate: the cloth stays out of the true frustum, not only out
@@ -355,11 +360,13 @@ test(`ladder${metric ? ' (H_vv metric)' : ''}: a 16 x 16 sheet lands on the rota
     if (Math.min(vTrue, fTrue) < leastTrue) { leastTrue = Math.min(vTrue, fTrue); leastTick = Math.round(cloth.time_s / CLOTH_SCENE_STEP_S); }
     if (print) console.log(`    static field: vertices >= ${vField.toExponential(2)}, faces >= ${fField.toExponential(2)} m (face ${fAt}); true frustum: vertices >= ${vTrue.toExponential(2)}, faces >= ${fTrue.toExponential(2)} m`);
   };
-  const out = await ladder(device, `sphere 16^2${metric ? ' hvv' : ''}`, scene, 60, diag);
-  console.log(`  sphere: the cloth's least true frustum distance ${leastTrue.toExponential(3)} m (tick ${leastTick})`);
+  const out = await ladder(device, `sphere 16^2${mode === 'euclid' ? '' : ` ${mode}`}`, scene, 60, async (cloth, c) => { fallbacks += c.levelFallback; shifts += c.levelShifts; await diag(cloth); });
+  console.log(`  sphere: the cloth's least true frustum distance ${leastTrue.toExponential(3)} m (tick ${leastTick}); levelled fallbacks ${fallbacks}, shift passes ${shifts}`);
   clean('sphere', out);
   assert.equal(out.track.length, 60, 'sphere: every tick to 60 is checked');
   assert.ok(leastTrue > 0, `the cloth reaches ${leastTrue} m into the true frustum at tick ${leastTick}`);
+  if (mode === 'shift') { assert.ok(shifts > 0, 'the least shift ran'); assert.equal(fallbacks, 0, 'no levelled round fell back unlevelled'); }
+  else assert.equal(shifts, 0, 'off is no shift pass');
 }));
 
 test('ladder: a 3 x 49 strip starting stretched 1.5x lands two thirds over a ledge (C1 ladder 2) at the default capacity, its free twin at its authored capacity: no holds, the duals within the momentum bound, the strain settling as in free space', { skip: !runs('strip') }, async () => withDevice(async device => {
@@ -470,10 +477,11 @@ test('ladder: the flat 16 x 16 drop and the 16 x 16 sphere are deterministic ove
   const sphere = await determinism(device, 'sphere 16^2', bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 })), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 60));
   assert.deepEqual([...flat, ...sphere], []);
 }));
-// In the metric: the flat drop over its 50 ticks, the sphere to tick 45 (it halts at 46 there: HVV_SPHERE_TODO).
-test('ladder (H_vv metric): the flat 16 x 16 drop and the 16 x 16 sphere to tick 45 are deterministic over three runs', { skip: !runs('determinism') }, async () => withDevice(async device => {
-  const flat = await determinism(device, 'flat 16^2 hvv', hvv(analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6)), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 50));
-  const sphere = await determinism(device, 'sphere 16^2 hvv', hvv(bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }))), Math.min(45, Number(process.env.CLOTH_LADDER_DET_TICKS ?? 45)));
+// In the metric, and with the least shift: the flat drop over its 50 ticks and the sphere over its 60.
+for (const mode of ['hvv', 'shift'] as const)
+test(`ladder${MODE_LABEL[mode]}: the flat 16 x 16 drop and the 16 x 16 sphere are deterministic over three runs`, { skip: !runs('determinism') }, async () => withDevice(async device => {
+  const flat = await determinism(device, `flat 16^2 ${mode}`, sphereMode(mode, analyticWith(square(16, 0.01, [-0.075, 1.2, -0.075]), 1, 1.6)), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 50));
+  const sphere = await determinism(device, `sphere 16^2 ${mode}`, sphereMode(mode, bridson2002SceneDescription(bridson2002RotatingSphere({ nodesAcross: 16 }))), Number(process.env.CLOTH_LADDER_DET_TICKS ?? 60));
   assert.deepEqual([...flat, ...sphere], []);
 }));
 
@@ -508,6 +516,8 @@ test('the frozen-set switches validate: unknown values and travel bounds off wit
   assert.ok(validateScene(withSolver({ contactTravelBound: 'off' })).some(e => /needs contactFreeze 'mandatory'/.test(e)));
   assert.ok(validateScene(withSolver({ contactFreeze: 'always' })).some(e => /Unknown cloth contact freeze/.test(e)));
   assert.ok(validateScene(withSolver({ contactTravelBound: 'maybe' })).some(e => /Unknown cloth contact travel bound/.test(e)));
+  assert.deepEqual(validateScene(withSolver({ contactLeastShift: 'on' })), []);
+  assert.ok(validateScene(withSolver({ contactLeastShift: 'maybe' })).some(e => /Unknown cloth contact least shift/.test(e)));
   assert.equal(ogcDecideWGSL(true, false), ogcDecideWGSL(true));
   assert.notEqual(ogcDecideWGSL(true, true), ogcDecideWGSL(true));
   for (const metric of [{}, { metric: 'nwVertexInv' }]) {

@@ -2722,3 +2722,64 @@ authoring check excludes probes there (`convexAt`) and `clothSolidConcaveRoundin
 facet covers them; the fix is a concave-crease representation, not hull facets.
 
 check:types is clean. test:unit: 2133 tests, 0 fail (the two foreign failures are gone at 50bc0d0d).
+
+## 2026-11-11: the levelled least shift (relative motion, conflict-only holds), landed default off
+
+**What it is.** A levelled re-detection that finds a conflict no longer falls straight back to the unlevelled round
+(every prediction 0). Instead, behind `solver.contactLeastShift: 'on'` (detector `levelShiftPasses` 2,
+`levelHoldPasses` 4), the round is redone in up to 6 passes, then falls back.
+- **Shift passes.** Each conflicting pair's cloth vertices move their predictions towards their mean motion: c_i is
+  the weighted mean of W_i and its conflicting partners' W, or 0 with a solid partner (the solid's motion after the
+  mandatory round). The move is W' = c + s (W - c).
+  - s is the largest value in [0, 1] for which the pair's support gap along its plane reaches the mandatory round's
+    goal. The gap is concave in s, so this is a 24-step bisection.
+  - A vertex keeps the least s over its pairs (atomicMin of f32 bits).
+  - The weights are the lumped rest area normalised to max 1 (ogc-topology.ts weightOffset). The sums are fixed-point
+    integer atomics (2^-22 m, 2^-20), so the mean is order-free, with no float atomics.
+- **Hold passes.** The conflicts left hold their cloth (prediction 0) while that holds more; only conflicting cloth
+  is held.
+- **Bounds.** The pass bound is stated: shift + hold < OGC_REDO_ROUNDS. Past the passes, the unlevelled fallback
+  runs as before (levelFallback, counted). Each pass's shift |W - W'| is added to the vertex's envelope deviation.
+- **The conflict list.** It holds OGC_LEVEL_LIST_PER_VERTEX = 8 entries per vertex. That is the 16^2 sphere's measured
+  peak of 7.43, with overflow holds, rounded up; without them the peak is 4.34.
+  - A pass that overflows is not shifted, and its round falls back. This is deterministic and counted
+    (levelListOverflow).
+  - The first version held the overflowed pairs. Which pairs found a slot depended on thread order, so three runs
+    diverged at ticks 8 and 15 (levelHeld 4 vs 5). That is fixed.
+- **Off.** Off is the default and allocates nothing: no level words and no list.
+
+**Also fixed (found on the way).** The OGC frame counter `frameLevelConflicts` sat at word 69, and its second word
+(cause 1) overlapped `solidHitFace` at word 70. It now sits at 74 and 75. New counters: levelShifts, levelHolds,
+levelHeld, levelListOverflow and levelListPeak. The ladder and cost logs also print |g|/|mg| at the end of each step
+and the vertices held by a travel bound.
+
+**The A/B (Newton at 8 iterations).** The shift removes every fallback but buys no convergence, at +12 to +40 % per
+tick:
+
+| Sphere, 60 ticks | Off (HEAD's behaviour) | Least shift on |
+|---|---|---|
+| 16^2: levelled fallbacks (Euclidean / H_vv metric) | 370 / 391 | 0 (485 shift passes) |
+| 16^2: least true frustum distance | +1.675e-4 m | +3.09e-4 m |
+| 16^2: detection rounds | 933 | 1072 |
+| 16^2: ms/tick | 68.7 | 95.9 |
+| 16^2: end-of-step log10 \|g\|/\|mg\|, mean | 0.50 | 0.92 |
+| 32^2: ms/tick | 166 | 187 |
+| 32^2: end-of-step log10 \|g\|/\|mg\|, mean | 1.34 | 1.24 |
+| Newton iterations | 7.7 to 8 | unchanged |
+| Travel-held vertices | 0 | 0 |
+
+(1, 2) passes on 16^2 gave 93.9 ms with log10 0.81. Plane records about double with the shift. The fallback's zero
+predictions are not what limits the step at 8 iterations; the 16^2 gradient is even worse with the shift on. So the
+mechanism is landed as a switch for C1's oracle comparisons and the t25 folds, not as the default.
+
+**The H_vv sphere re-gate.** The H_vv metric's sphere now runs clean to tick 60 at HEAD (least true distance
++1.465e-4 m). HVV_SPHERE_TODO is removed, and its determinism test runs the full 60 ticks (bit-identical).
+
+**Gate** (combined, the shift off by default, plus the least-shift sphere and its determinism rerun at 8 N):
+- 122 pass, 0 fail, 4 todo (126 tests). The todos are ladder 2c (C1), the moving-solid bodySqueeze, and the two
+  Newton cut and undo tests.
+- New tests: the sphere with the least shift (nothing intersects, true distance > 0, no fallback, shift passes > 0)
+  and the flat and sphere determinism with the shift on (bit-identical over three runs). The switch also validates,
+  and unknown values fail.
+- cost-16 (off): 71.5 ms/tick (71.2 at 850ebfff).
+- check:types is clean. test:unit: 2136 tests, 0 fail.
