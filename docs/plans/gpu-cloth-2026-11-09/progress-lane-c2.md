@@ -2856,3 +2856,47 @@ determinism tests pass). No candidate done anywhere found a missing pair.
 **Gate:** 114 tests, 109 pass, 0 fail, 5 todo. cost-16: 69.3 ms/tick (a 0.2-0.3 % query cost); log10 |g|/|mg| 0.50;
 Newton 7.7 and rounds 15.6 per tick. Landed on da0acf8e (L1, default off) with C1's done-hook files 3-way merged onto
 L1's gpu-newton-wgsl.ts and gpu-solver.ts; check:types clean, test:unit 1750 pass, 0 fail.
+
+## 2026-11-11: v3 band findings - OGC's own jump at concave folds, and an f32 classification gap
+
+These were found while gating v3 (each entry is OGC's pair at x). The band covers what the entries leave out. The gate
+reads: "entries + band = OGC's barrier everywhere, and they jump only where OGC's does, by the same amount" (main's
+ruling (A)). The fixture is a sheet 1.0-1.4 mm off a box edge's samples, sliding along u (cloth-contact-gpu.test.ts,
+"feature transitions").
+
+**OGC's barrier is itself discontinuous at a concave fold.** Algorithm 1 counts a point-face pair on its face's closest
+feature, an edge only inside its block (edgeFeasible). On the concave side of a fold, two faces' blocks overlap and the
+shared edge's block is empty. When the point crosses one face's block side plane inside the overlap, that face's pair
+appears or goes with its whole b(d).
+- Float64 repro (CPU, Algorithm 1 by brute force, f32 positions):
+  - sample 258 (point N + 258) on t34 goes edge e39 (19-20, local 4) -> face at s = -1.42453e-3;
+  - edgeFeasible is false on both sides, because the point is inside t36's block, 1228.8 um away;
+  - OGC's sample barrier goes 0.38972 -> 0.41898 (+0.02926);
+  - v3's entries + band jump +0.02923.
+- Run 6 matched all 13 such jumps against OGC's Float64 jump; the largest miss is 2.9e-5, which is f32.
+- The test asserts each hand-off is one of: continuous; an f32 gap that closes within 2e-7; or OGC's own jump within
+  allow + 1e-3 |jump|.
+- Whether these jumps are what keeps the t40 step from converging is decided by C1's runs.
+  ~/code/me/fluid-scratch/c2/ogc-concave-classifier.ts is a CPU classifier: for each toggle between two rounds'
+  x_det, it reports OGC's own jump (|jump| / b(d) about 1, measured over 1 nm either side) or a continuous hand-off.
+
+**Known f32 gap (accepted as-is, main's ruling 1).** The region test of ogcClosestTriangle and the projection
+half-space test of ogcBandAccept switch a few ulps apart. On a band about 1e-8 m wide, one pair is counted twice or
+not at all.
+- Repro: sample 297 on t33 -> e58, owned by t32. OGC's Float64 barrier is continuous there (jump 6e-6).
+- On the GPU, the band drops the pair within 2.6e-8 m and the entry (s297, t32) takes it within 2e-7 m. Measured
+  over +-2e-7 m, entries + band move 4.1e-4, against 1.6e-3 allowed.
+- The test reports each gap's jump and its closing distance. If t40 or a ladder case stalls on a hand-off pair, the
+  exact fix comes back with a proof that it still partitions every closest feature exactly once.
+- The Float64 tests switch a few ulps apart too. That is why the classifier measures 1 nm either side of the flip.
+
+**Test numerics (not v3 defects).**
+- The invariant test's slopes are compared with the Float64 derivative at h = 1e-9, not a central difference at
+  2e-6. At 2e-6, a pair the trial brings to microns has E''' h^2 of the order of its slope. Per vertex, |f + g| was at
+  most 0.7 % of |g|.
+- The transitions test's side-slope check compares the energy change with the forces' work over the vertices' actual
+  f32 displacement (trapezoid rule). At 0.05 m an f32 ulp is 3.7e-9 m, 4 % of a 1e-7 stencil: -f.u times the nominal
+  step missed by 4.4 % (-855 against -894).
+- The GPU evaluates the energy from f32 coordinates, so each vertex's energy carries about |f| times an ulp of error.
+  The CPU Float64 vertex energy along the f32 path is a sawtooth of 4.5e-6 per ulp step. The check's floor is now
+  sum |f|_1 ulp(x) at both ends, and its stencil is up to 1 um, a quarter of the room to the neighbouring hand-off.
