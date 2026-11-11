@@ -155,6 +155,8 @@ const PARAM_GRAVITY = 36, PARAM_TIME = 40;
 const PARAM_GRAB = 48;
 /** u32 words of the Newton block (Params.newton0 .. newton4). */
 const PARAM_NEWTON = 52;
+/** The Newton words' base in the params (harness reads of the layout: +12, the PCG partials' first record). */
+export const CLOTH_PARAM_NEWTON = PARAM_NEWTON;
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 
 /**
@@ -674,22 +676,21 @@ export class ClothGPUSolver {
   /** The compiled contact linearization as the last Newton iteration that ran left it (harness reads; never a step
    * path): the pool and what the rows asked of it, the items built (entries, or partner terms for 'blocks') and the
    * rows left on the matrix-free product because their records did not fit. Undefined with the switch off. */
-  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; entries: number; rows: number; fallbackRows: number; poolBytes: number; usedBytes: number } | undefined> {
+  async readContactLinearization(): Promise<{ mode: 'factorized' | 'blocks'; poolRecords: number; demandRecords: number; usedRecords: number; items: number; rows: number; fallbackRows: number; poolBytes: number; usedBytes: number } | undefined> {
     const L = this.tables.pcg.contactLin;
     if (!L) return undefined;
     const per = CLOTH_CONTACT_LIN_RECORDS[L.mode];
     const [head, patch] = await Promise.all([this.readRange(this.newtonWork, 16 * L.head, 16 * this.N), this.readRange(this.newtonWork, 16 * L.patch, 16 * this.tables.pcg.patches)]);
     const h = new Uint32Array(head), t = new Uint32Array(patch);
-    let demandRecords = 0, items = 0, entries = 0, rows = 0, fallbackRows = 0;
+    let demandRecords = 0, items = 0, rows = 0, fallbackRows = 0;
     for (let p = 0; p < this.tables.pcg.patches; p++) demandRecords += t[4 * p]!;
     for (let v = 0; v < this.N; v++) {
       if (h[4 * v + 2] === 0) continue;
       rows++;
       // A row left on the matrix-free product keeps its entry count in y; a compiled one holds its items there.
       if (h[4 * v] === 0x7f000000) fallbackRows++; else items += h[4 * v + 1]!;
-      entries += L.mode === 'factorized' || h[4 * v] === 0x7f000000 ? h[4 * v + 1]! : 0;
     }
-    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, entries, rows, fallbackRows, poolBytes: 16 * L.records, usedBytes: 16 * per * items };
+    return { mode: L.mode, poolRecords: L.records, demandRecords, usedRecords: per * items, items, rows, fallbackRows, poolBytes: 16 * L.records, usedBytes: 16 * per * items };
   }
 
   /** Encode `steps` steps in one compute pass of `encoder`. */

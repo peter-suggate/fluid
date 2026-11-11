@@ -201,3 +201,117 @@ vector loads), and equal on the step. factorized is the one whose cost per entry
   vertex in 'blocks' (8 allocated per pair entry). The equivalence still held; the test now authors its pool (48).
 - Not done: tightening the blocks allocation to the actual term count; a smaller authored pool for the sphere scene;
   a hull-facet entry in the operator test.
+
+## 7. Phase A: what stands between 'factorized' and default-on (HEAD da0acf8e export)
+
+All runs from `export-da0acf8e` (clean archive plus this lane's hunks), 150^2 rotating sphere, one run each.
+Tool: `tools/probe-cloth-linearization.ts` (modes iterates / quality / compare).
+
+### 7.1 The full-step divergence, measured
+
+Method: from the saved state at ticks 35 and 120, one step is rerun under a (Newton cap, PCG cap) ladder: PCG caps
+1, 2, 5, 10, 20, 50, 100 at one Newton iteration, then Newton 1..8 at the scene's cap (200). The positions after each
+are compared between off, factorized, blocks (a reordered-but-equal sum: the same terms assembled per column), and
+two controls: off from the same state with every saved position coordinate moved by -1/0/+1 f32 ulp (seeds 1, 2).
+
+Off vs factorized, tick 35 (tick 120 in brackets):
+
+| Newton, PCG cap | max dx (m) | rms dx (m) | vertices past 1e-6 m |
+| --- | --- | --- | --- |
+| 1, 1 | 0 (0) | 0 | 0: bit-identical |
+| 1, 2 | 6.1e-8 | 1.2e-9 | 0 |
+| 1, 20 | 1.6e-7 | 1.0e-8 | 0 |
+| 1, 50 | 5.2e-6 | 6.3e-8 | 6 |
+| 1, 100 | 1.35e-3 | 1.3e-5 | 5223 (151) |
+| 1, 200 (one full Newton iteration) | 1.9e-6 | 3.1e-7 (3.5e-6) | 256 |
+| 8, 200 (the step) | 2.0e-3 | 3.5e-4 (1.4e-4) | all |
+
+The first PCG iteration is exact; the difference then grows from one ulp (6e-8 m) smoothly through twenty iterations
+and reaches the micrometre between iterations 20 and 50. The 1.35 mm single-vertex jumps are discrete contact
+decisions flipping (a truncation or a hold of one vertex); the ulp control shows the same 1.35 mm jump after ONE PCG
+iteration (174 vertices past 1e-6 m), so they are a property of the step, not of the records.
+
+Against the controls, rms dx after the step (8 Newton iterations), tick 35 / tick 120:
+
+| pair | rms dx (m) | PCG iterations (tick 35) | pairs (tick 35) |
+| --- | --- | --- | --- |
+| off - factorized | 3.5e-4 / 1.4e-4 | 1490 / 1548 | 7532 / 8304 |
+| off - blocks | 4.6e-4 / 1.1e-4 | 1490 / 1384 | 7532 / 7924 |
+| off - off+ulp (seed 1) | 4.6e-4 / 1.85e-4 | 1490 / 1548 | 7532 / 8018 |
+| off - off+ulp (seed 2) | 3.8e-4 / 2.0e-4 | 1490 / 1541 | 7532 / 7996 |
+| factorized - blocks | 3.3e-4 / 1.6e-4 | | |
+| off+ulp 1 - off+ulp 2 | 3.3e-4 / 1.4e-4 | | |
+
+After one Newton iteration the records differ from off by LESS than a one-ulp input perturbation does (rms 3.1e-7 vs
+3.3e-5 at tick 35, 3.5e-6 vs 1.8e-5 at tick 120); after the step every pair, including off against itself from a
+one-ulp different state, is at the same 1e-4 m scale with the same spread of PCG iterations (1384..1548) and pairs
+(7532..8304). At tick 120 all five runs use 1600 PCG iterations (the cap, every Newton iteration) and 57108..57742
+pairs. Verdict: the step's sensitivity (a capped, unconverged PCG and discrete contact decisions) turns ANY one-ulp
+difference into 1e-4 m in one step; the records' difference is inside that and starts later. No bug found.
+
+### 7.2 Trajectory quality over 120 steps (ticks 35 -> 155, about 2 minutes of GPU a run)
+
+Sixteen runs: off and factorized unperturbed, off with ulp seeds 1..7, factorized with ulp seeds 1..6, blocks
+unperturbed. The seeds measure the simulation's own run-to-run spread, against which on is judged.
+
+| | off (8 runs) | factorized (7 runs) | blocks (1) |
+| --- | --- | --- | --- |
+| halted (`heldConflict`) | 1 (seed 4, tick 153) | 1 (unperturbed, tick 140) | 0 |
+| cloth-cloth intersections, faces in solid | 0 | 0 | 0 |
+| held / travel-held / overflow-held vertices | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| fallback rows, record overflow | n/a | 0 | 0 |
+| Newton iterations | 8 every step | 8 every step | 8 |
+| PCG iterations a step, mean (range over runs) | 1538..1564 | 1552..1572 | 1558 |
+| detection rounds, mean / max | 33.8..36.1 / 41..52 | 33.5..34.7 / 39..57 | 33.5 / 39 |
+| pairs, mean | 46.8k..63.1k | 45.1k..55.4k | 51.7k |
+| g / mg at the last Newton iteration, median | 152..208 | 158..182 | 164 |
+| same, 90th percentile | 356..1920 | 269..1700 | 1680 |
+| max edge strain over the run | 0.274..0.402 | 0.263..0.458 | 0.369 |
+| steps with an edge past 1.05 x limit | 41..69 | 54..70 | 72 |
+| plane-record peak | 394k..711k | 394k..854k | 394k |
+| least true distance, runs with a negative sample | 6 of 8 (to -5.4e-4 m) | 2 of 7 (to -5.8e-4 m) | 0 |
+| status flags | envelopeCap, failSafe | same | same |
+
+Reading. Every distribution of factorized lies inside or overlaps the off seeds'; halts are 1 of 8 against 1 of 7.
+The unperturbed factorized halt (strain 0.458 and 57 rounds in its last three ticks) has the same signature as off
+seed 4's (52 rounds): the scene itself halts with `heldConflict` in roughly one run in eight on this range, with the
+records or without. That is a pre-existing robustness defect of the scene/solver at 150^2 (C2's area), not something
+the records add; the sample is too small to say the rates are equal to better than "1 in 8 vs 1 in 7".
+
+Caveats, stated plainly: g is the gradient at the START of the last Newton iteration (the solver's word), not a
+recomputed end-of-step residual; "least true distance" is this tool's metric (scene solids at cloth time, vertices
+plus a 4-per-side face lattice) and goes slightly negative in off as often as in on; the large g/mg (median ~160)
+is the unconverged 8 x 200 solve, common to all runs.
+
+### 7.3 Operator-test gaps closed
+
+`tests/cloth-contact-linearization.test.ts` now covers: the trust region's model (`nwModel` under `trustRegion:
+'hybrid'`), compiled against matrix-free on the same direction; the one-patch solve (`pcgSolve`) through the records;
+and a hull-facet (w = 2) entry, from a sheet set 1.2 mm off the edge of a box turned 30 degrees. Results in 7.5.
+
+### 7.4 readContactLinearization().entries
+
+Removed (it was only right for 'factorized'); the reader returns records, items, rows, fallback rows and bytes.
+The pool stays at its default; a per-scene authored pool from the measured peak is a follow-up.
+
+### 7.5 Operator equivalence, new forms (export-da0acf8e, `check`, one run, 3/3 pass)
+
+| scenario | mode | entries (kinds) | worst relative difference |
+| --- | --- | --- | --- |
+| stack, pcgStep 0 | factorized / blocks / factorized pool 1 (537 rows fall back) | solid, body, VT, EE, sample | 2.6e-7 / 3.2e-7 / 6.6e-8 of (contact + w) |
+| stack, hybrid: pcgStep 0 | factorized / blocks | same | 1.8e-7 / 2.3e-7 |
+| stack, hybrid: nwModel s.H s per patch | factorized / blocks | same | 1.1e-7 / 1.5e-8 of the largest s.H s |
+| facet sheet, pcgSolve (one patch, 3 iterations) | factorized / blocks | 24 hull-facet (w = 2), 23 sample, 21 solid | 2.9e-7 / 1.4e-7 |
+
+(The facet sheet's field needed a band of 0.1 m: the detector refuses a band below r + 1.5 L_max rqMax.)
+
+### 7.6 Evidence for the default, summarized
+
+- Rounding only: the first PCG iterate is bit-identical; the difference then grows like rounding in an unconverged
+  capped PCG and is, after one Newton iteration, 10-100x smaller than a one-ulp input perturbation's; after the step
+  on-vs-off equals off-vs-off(ulp).
+- Trajectory: over 120 steps and 15 seeded runs, every quality measure of factorized lies within the off seeds' spread;
+  halts 1/7 vs 1/8, both heldConflict (a pre-existing scene/solver robustness defect).
+- Every product form (pcgStep, pcgSolve, nwModel) and every entry kind is covered by an operator test.
+- Not decided here: the default (coordinator's call). Cost: pool 32 records a vertex = 11.5 MB at 150^2 (512 B a
+  vertex); used peak 1.77 MB at tick 120. A per-scene authored pool from the measured peak is the follow-up.
