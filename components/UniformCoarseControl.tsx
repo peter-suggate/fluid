@@ -194,7 +194,7 @@ export function UniformTunePanel() {
     <RailRange label="Budget" value={activityValues[budget.key]} min={budget.min} max={budget.max} step={budget.step} digits={budget.digits}
       unit={budget.unit} hint={BUDGET_HINT} testId="scene-detail-tune-budget"
       onInput={value => set(budget.key, value)} onChange={value => set(budget.key, value)} />
-    <RailChoice label="Surface particles" value={resolved.surfaceSamples === "64" ? "64" : "8"}
+    <RailChoice label="Surface particles" value={String(resolved.surfaceSamples) === "64" ? "64" : "8"}
       options={[{ value: "8", label: "8" }, { value: "64", label: "64" }]}
       hint="Particles a cell in the top cell and a half, where they define the surface. 64 gives a smoother, less biased surface (nothing finer than a cell) at more particle work; deeper particles are unchanged. Restarts the solver."
       testId="scene-detail-surface-samples" onChange={value => set("surfaceSamples", value)} />
