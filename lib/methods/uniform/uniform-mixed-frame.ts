@@ -536,7 +536,7 @@ export class UniformMixedFrame {
   this.violationByte=4*uniformMixedDetailViolationWord(o.capacity.tiles);
   this.cache=new UniformMixedMomentumCache(device,o,solid);
   this.narrowBandFlip=new UniformNarrowBandFlip(device,o,solid,f.sourceParams,this.cache,this.pagePool,capacity.particleTransfer,this.nearSettled.particleSeeding,this.nearSettled.surfaceSplat!=="separate",this.nearSettled.sourceSeeding,this.nearSettled.redistanceSearch,this.nearSettled.surfaceRedistanceReach,this.nearSettled.crossingGuard==="previous",this.nearSettled.particleBandDepth,this.nearSettled.particleDensity==="graded",
-   capacity.particles,this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells,this.nearSettled.sampleSeparation,this.nearSettled.innerReseed,this.nearSettled.activationSeeding,this.nearSettled.collarSpread,this.nearSettled.collarDensity);
+   capacity.particles,this.nearSettled.outerSeeding,this.nearSettled.heatExpiry,this.nearSettled.sampleBound,this.nearSettled.crowdedCells,this.nearSettled.sampleSeparation,this.nearSettled.innerReseed,this.nearSettled.activationSeeding,this.nearSettled.collarSpread,this.nearSettled.collarDensity,this.nearSettled.surfaceSamples);
   this.plan=new UniformMixedFramePlan(device,o,this.pagePool,f.volume,f.phi,f.velocityScratch,f.negativeScratch,true,true,solid,this.nearSettled.framePlanPass);
   this.narrowBandFlip.attachUpdateErrors(this.plan.updateErrors);
   this.remap=new UniformMixedRemap(device,o,{volume:f.volume,velocity:f.velocity,phi:f.phi,negative:f.negative},{volume:f.volumeScratch,velocity:f.velocityScratch,phi:f.phiScratch,negative:f.negativeScratch},solid,true);

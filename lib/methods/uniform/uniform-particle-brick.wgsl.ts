@@ -23,7 +23,8 @@ export const PARTICLE_DEPOSIT_WORDS_PER_CELL = 6;
 export interface ParticleRefineWords {readonly joins:number;readonly allocation:number}
 /** separation: the most a coupled sample's pair separation moves it along an
  * axis, in cells (narrowBandSeparationReach; 0 without separation). */
-export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins", merge = false, separation = 0): string {
+export function particleBrickDepositWGSL(apic: boolean, refine: ParticleRefineWords, deposit = "bins", merge = false, separation = 0, massBits = 3): string {
+ const massMask = (1 << massBits) - 1, heatBits = `0x${((0x7fffffff & ~massMask) >>> 0).toString(16)}u`;
   return /* wgsl */`
 ${particleResidencyTravelWGSL}
 // A coupled sample's move adds its pair separation to the accepted motion:
@@ -199,7 +200,7 @@ fn pbScatter(p:vec3f,u:vec3f${apic?",c:array<vec3f,3>":""}${merge?",mass:f32":""
    if(census){let d=bandPhi(q);outside=max(outside,d);counts+=vec3u(u32(d>0.5),0u,u32(particleDepth(q)<-4.0));}
    particles[i].before.w=nbParticleRestate(s,nbParticleAge(s),select(1.0,0.0,supported));
    let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let v=bitcast<vec3u>(s.velocity.xyz);links[a]=v.x;links[a+1u]=v.y;links[a+2u]=v.z;
-   links[NB_LINKS+4u*i+3u]=${merge?"(bitcast<u32>(s.position.w)&0x7ffffff8u)|(u32(nbParticleMass(s))-1u)":"(bitcast<u32>(s.position.w)&0x7fffffffu)"}|select(0x80000000u,0u,supported);
+   links[NB_LINKS+4u*i+3u]=${merge?`(bitcast<u32>(s.position.w)&${heatBits})|(u32(nbParticleMass(s))-1u)`:"(bitcast<u32>(s.position.w)&0x7fffffffu)"}|select(0x80000000u,0u,supported);
    // Sorted samples lie in their tile; the clamp only bounds the window.
    if(fits&&supported){pbScatter(clamp(q-vec3f(origin),vec3f(0.0),vec3f(3.9999998)),s.velocity.xyz${apic?",array<vec3f,3>(s.cx.xyz,s.cy.xyz,s.cz.xyz)":""}${merge?",nbParticleMass(s)":""});}
   }

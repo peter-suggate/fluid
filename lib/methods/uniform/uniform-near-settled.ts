@@ -2,6 +2,7 @@ import type { MethodParamValues } from "../../core/method-contract";
 import type { UniformMomentumSampler, UniformMomentumTrace } from "./uniform-cached-momentum.wgsl";
 import { framePlanPass, type FramePlanPass } from "./uniform-frame-plan-window";
 import { narrowBandCollarCheck, narrowBandCollarDensity, narrowBandCollarSpread, type NarrowBandCollarDensity, type NarrowBandCollarSpread } from "./uniform-narrow-band-collar";
+import { narrowBandSurfaceSamples, narrowBandSurfaceSamplesCheck, type NarrowBandSurfaceSamples } from "./uniform-narrow-band-sites";
 
 /** The NB-FLIP near-settled settings (method params regionTiering,
  * warmResolution, particleSeeding, bandExit, bandCycles, rootReserve, rootCoarse, rootTiles, surfaceSplat), fixed for a solver's life (update
@@ -128,11 +129,14 @@ import { narrowBandCollarCheck, narrowBandCollarDensity, narrowBandCollarSpread,
  * - collarDensity: "band" seeds collar cells as any band cell; "deep" seeds
  *   four samples of two units in every collar cell (target heat in (0, 1]).
  *   "deep" needs crowdedCells "merge". Unknown values throw.
+ * - surfaceSamples: the surface layer's samples a cell, 8 (default) or 64;
+ *   the deep band keeps its density (uniform-narrow-band-sites.ts). 64 needs
+ *   crowdedCells "merge". Unknown values throw.
  * - framePlanPass: "chain" runs the frame plan's support dilation and
  *   certificate tail as per-axis launches; "window" as half-page tile windows
  *   in threadgroup memory (uniform-frame-plan-window.ts). Unknown values throw.
  */
-export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge";readonly sampleSeparation:"off"|"pairs";readonly innerReseed:"sites"|"cells";readonly activationSeeding:"band"|"uncovered";readonly collarSpread:NarrowBandCollarSpread;readonly collarDensity:NarrowBandCollarDensity;readonly framePlanPass:FramePlanPass}
+export interface UniformNearSettled{readonly regionTiering:"error"|"motion";readonly warmResolution:"4h"|"h";readonly particleSeeding:"need"|"activity";readonly sourceSeeding:"need"|"always";readonly bandExit:"returns"|"strict";readonly surfaceSplat:"fused"|"separate";readonly rootTiles:"page"|"octant";readonly rootCoarse:"fused"|"tiled";readonly rootReserve:"fused"|"parallel";readonly bandCycles:number;readonly pressureTail:"auto"|"superblocks";readonly traceSubsteps:"gradient"|"travel";readonly wallTrace:"clip"|"retrace";readonly surfaceVelocitySampler:"texture32"|"software";readonly surfaceRedistanceReach:1|2|3;readonly surfaceTraceSubsteps:"off"|"legacy";readonly redistanceSearch:"shared"|"fresh";readonly crossingGuard:"previous"|"search";readonly momentumSampler:UniformMomentumSampler;readonly momentumTrace:UniformMomentumTrace;readonly particleBandDepth:number;readonly particleDensity:"uniform"|"graded";readonly bulkTier:"off"|"16h";readonly coldSurface:"budget"|"warm"|"still";readonly seedScoring:"unshaped"|"every";readonly outerSeeding:"retain"|"uncovered";readonly heatExpiry:"anywhere"|"held";readonly sampleBound:"centred"|"walls";readonly nativeSmoothing:"coarse"|"composite";readonly crowdedCells:"retire"|"merge";readonly sampleSeparation:"off"|"pairs";readonly innerReseed:"sites"|"cells";readonly activationSeeding:"band"|"uncovered";readonly collarSpread:NarrowBandCollarSpread;readonly collarDensity:NarrowBandCollarDensity;readonly surfaceSamples:NarrowBandSurfaceSamples;readonly framePlanPass:FramePlanPass}
 
 export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled=>{const settled:UniformNearSettled={
  regionTiering:values.regionTiering==="motion"?"motion":"error",
@@ -170,5 +174,6 @@ export const uniformNearSettled=(values:MethodParamValues={}):UniformNearSettled
  activationSeeding:values.activationSeeding==="band"?"band":"uncovered",
  collarSpread:narrowBandCollarSpread(values.collarSpread),
  collarDensity:narrowBandCollarDensity(values.collarDensity),
+ surfaceSamples:narrowBandSurfaceSamples(values.surfaceSamples),
  framePlanPass:framePlanPass(values.framePlanPass),
-};narrowBandCollarCheck(settled.collarDensity,settled.crowdedCells);return settled;};
+};narrowBandCollarCheck(settled.collarDensity,settled.crowdedCells);narrowBandSurfaceSamplesCheck(settled.surfaceSamples,settled.crowdedCells);return settled;};

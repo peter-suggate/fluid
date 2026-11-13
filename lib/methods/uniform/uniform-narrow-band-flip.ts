@@ -2,7 +2,8 @@ import { particleDepositStorage } from "./uniform-particle-deposit-storage";
 import {uniformSolidPointOpenWGSL,uniformSolidSlideStartWGSL,uniformSolidPointCellWGSL} from "./uniform-solid-point-open.wgsl";
 import type { UniformRegionalFramePlan } from "./uniform-regional-frame-plan";
 import { GPUFluidParticleMotion } from "../../core/webgpu-particle-motion";
-import { narrowBandSparseWGSL } from "./uniform-narrow-band-sparse.wgsl";
+import { narrowBandSparseWGSLFor } from "./uniform-narrow-band-sparse.wgsl";
+import { narrowBandMassBits, narrowBandSampleRadiusWGSL, narrowBandSiteAxis, narrowBandSurfaceSampleScale, narrowBandSurfaceSamplesCheck, type NarrowBandSurfaceSamples } from "./uniform-narrow-band-sites";
 import { narrowBandAirWGSL, NARROW_BAND_AIR_CHANGED_WORD, NARROW_BAND_AIR_GATE_PLANE, NARROW_BAND_AIR_WORDS_PER_TILE } from "./uniform-narrow-band-air.wgsl";
 import { narrowBandParticleStride, narrowBandParticleWGSL, narrowBandApicMomentWGSL, type NarrowBandTransfer } from "./uniform-narrow-band-apic.wgsl";
 import { PARTICLE_RESIDENCY_WORDS } from "./uniform-local-residency";
@@ -22,7 +23,7 @@ import { narrowBandBodyWindowWGSL } from "./uniform-particle-body-window.wgsl";
 import { narrowBandClearWalkWGSL } from "./uniform-particle-clear-walk.wgsl";
 import { uniformMixedSourceWGSL, UNIFORM_PARAMS_BYTES } from "./uniform-mixed-source.wgsl";
 import { NB_MOVE_TICKET_WORD, NB_SLAB_SEEDS_WORD, particleSlabSpill, particleSlabWGSL, particleSlabWords } from "./uniform-particle-slab.wgsl";
-import { NARROW_BAND_CENTRED_BOUND_WGSL, NARROW_BAND_WALL_BOUND_WGSL, narrowBandSurfaceWGSL, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
+import { narrowBandSurfaceWGSLFor, narrowBandExpectedMassWGSL, narrowBandFineTransferSource, narrowBandTransferPropertiesSource } from "./uniform-narrow-band-surface.wgsl";
 import { particleBrickDepositWGSL } from "./uniform-particle-brick.wgsl";
 import { UNIFORM_DETAIL_4H_LOAD } from "../../core/uniform-detail-abi";
 import { UNIFORM_DETAIL_H_STORE, UNIFORM_DETAIL_MERGED_SLOTS, uniformDetailBindLayout, uniformDetailGroup, uniformDetailModule, uniformDetailPipeline, uniformDetailPick, type UniformDetailGroup } from "./uniform-detail-fields";
@@ -284,8 +285,8 @@ export function narrowBandSeedRankShape(cells:number,tiles:number):NarrowBandSee
  * finds the digit where the count passes the room left. It reads the seed
  * list (seedCells), seedCandidate, the sorted records' count (state[1]) and
  * the step's seeds so far (the source seeds). */
-export function narrowBandSeedRankWGSL(rank:NarrowBandSeedRank,budget:number):string{
- const {bits,levels,keyBits}=rank;
+export function narrowBandSeedRankWGSL(rank:NarrowBandSeedRank,budget:number,samples:NarrowBandSurfaceSamples=8):string{
+ const {bits,levels,keyBits}=rank,fine=samples!==8;
  return /* wgsl */`
 const NB_SEED_RANK:u32=NB_BAND_SEAM;const NB_SEED_BITS:u32=${bits}u;const NB_SEED_LEVELS:u32=${levels}u;const NB_SEED_BUCKETS:u32=${1<<bits}u;
 // The cut's key prefix, the room left inside it, and whether the budget binds.
@@ -296,13 +297,13 @@ var<workgroup> nbSeedKept:array<u32,64>;
 // The records' rule: sorted records and this step's source seeds count first.
 fn nbSeedRoom()->u32{let used=atomicLoad(&state[1])+atomicLoad(&state[${NB_SLAB_SEEDS_WORD}u]);return select(0u,${budget}u-used,used<${budget}u);}
 // No rank is needed where every list entry's eight sites fit (most frames).
-fn nbSeedRankIdle()->bool{return 8u*min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))<=nbSeedRoom();}
+fn nbSeedRankIdle()->bool{return 8u*min(atomicLoad(&bins[NB_BAND+3u]),${fine?"nbSeedLimit()":"3u*arrayLength(&particles)"})<=nbSeedRoom();}
 // An overlap candidate's rank key (one for the eight lanes of its entry), or NB_NO_BIN.
 fn nbSeedRankKey(group:vec3u,lane:u32)->u32{
- let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),3u*arrayLength(&particles))){return NB_NO_BIN;}
+ let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),${fine?"nbSeedLimit()":"3u*arrayLength(&particles)"})){return NB_NO_BIN;}
  let entry=links[nbSeedList()+slot];if((entry&0x80000000u)!=0u){return NB_NO_BIN;}
  var h=params.live.z*0x9e3779b9u;h^=h>>16u;h*=0x7feb352du;h^=h>>15u;
- return ((entry&0x3fffffffu)^h)&${((2**keyBits)-1)>>>0}u;
+ return (${fine?"(((entry&0x3fffffffu)<<3u)|(links[nbSeedList()+nbSeedLimit()+slot]&7u))":"(entry&0x3fffffffu)"}^h)&${((2**keyBits)-1)>>>0}u;
 }
 @compute @workgroup_size(64) fn seedRank(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let key=nbSeedRankKey(group,lane);if(key==NB_NO_BIN){return;}
@@ -357,7 +358,9 @@ fn nbSeedJitter(c:vec3u,k:u32,salt:u32)->vec3f{
  return r;
 }
 `;
-export function narrowBandSeparationReach(separation:"off"|"pairs",merge:boolean):number{
+export function narrowBandSeparationReach(separation:"off"|"pairs",merge:boolean,samples:NarrowBandSurfaceSamples=8):number{
+ // Twice the heaviest sample's radius cbrt(S)/(2n) (uniform-narrow-band-sites.ts).
+ if(samples!==8)return separation==="pairs"?Math.cbrt(samples)/narrowBandSiteAxis(samples):0;
  return separation==="pairs"?0.5*Math.cbrt(merge?8:1):0;
 }
 export const narrowBandRetireCounting={on:false,splitX:-1,splitY:0};
@@ -423,7 +426,7 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
  get particleSource():GPUFluidParticleSource{
   const h=this.ownership.capacity.lattice.cellSize_m;
   return {buffer:this.activeParticles,strideFloats:this.particleStride,capacity:this.capacity,positionScale_m:[h[0]!,h[1]!,h[2]!],
-   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h),liveCount:{buffer:this.state,byteOffset:0},motionEnergy:this.displayMotion.energy,
+   frame:{buffer:this.sourceParams,size:48},radius_m:0.22*Math.min(...h)*2/narrowBandSiteAxis(this.surfaceSamples),liveCount:{buffer:this.state,byteOffset:0},motionEnergy:this.displayMotion.energy,
    grid:{velocityFloat:8,depthFloat:7,ballisticFloat:11,ballisticSignBit:!this.apic,surfaceDepth:2}};
  }
  private readonly bins:GPUBuffer;
@@ -695,12 +698,18 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   /** collarDensity "deep": collar cells (target heat in (0, 1]) seed four
    * samples of two units at every depth; "band" seeds them as hot cells.
    * Needs crowdedCells "merge" (uniform-narrow-band-collar.ts). */
-  readonly collarDensity:NarrowBandCollarDensity="band"){
+  readonly collarDensity:NarrowBandCollarDensity="band",
+  /** surfaceSamples: the surface layer's samples a full cell, 8 or 64 (on a
+   * 2x2x2 or 4x4x4 jittered lattice); the deep band keeps eight (or four)
+   * samples of S/8 (S/4) units. Past 8 it needs crowdedCells "merge"
+   * (uniform-narrow-band-sites.ts). */
+  readonly surfaceSamples:NarrowBandSurfaceSamples=8){
   const address=this.address=ownership.capacity.address,cells=address.cellKeys,vertices=Math.max(address.vertexKeys,address.cellKeys/2);
   // The seed list packs a cell key in 30 bits below the source and deep flags.
   if(cells>0x40000000)throw new Error(`Narrow-band FLIP's seed list packs a cell key in 30 bits: ${cells} cell keys exceed 1073741824`);
   if(!(bandDepth>=2&&bandDepth<=4))throw new Error(`Narrow-band FLIP particle band depth ${bandDepth} is outside 2-4 cells`);
   narrowBandCollarCheck(collarDensity,crowdedCells);
+  narrowBandSurfaceSamplesCheck(surfaceSamples,crowdedCells);
   if(pool&&512*pool.layout.blocks!==address.tileKeys)throw new Error(`Narrow-band FLIP: the page pool has ${pool.layout.blocks} blocks, the lattice ${address.tileKeys/512}`);
   // The particle cell bins (counts in bins, starts in links): a word a cell
   // key; under a budget, 512 a particle brick slot (the sort's slab slot,
@@ -719,9 +728,18 @@ export class UniformNarrowBandFlip implements UniformPageInitBlocks {
   this.particleStride=narrowBandParticleStride(this.apic);const particleBytes=4*this.particleStride;
   const deviceRecords=Math.floor(device.limits.maxStorageBufferBindingSize/(this.apic?112:64));
   if(budget&&!(Number.isInteger(budget.fineTiles)&&budget.fineTiles>0&&budget.perFineCell>0))throw new Error(`Narrow-band FLIP particle budget ${JSON.stringify(budget)} needs a positive integer of fine tiles and a positive density`);
-  if(budget&&narrowBandBudgetCapacity(budget,address.blocks)>deviceRecords)throw new Error(`Narrow-band FLIP: fluid.tiers (${budget.records!==undefined?`${budget.records} records by rule`:`${budget.fineTiles} h tiles at ${budget.perFineCell} particles a fine cell`}) needs ${narrowBandBudgetCapacity(budget,address.blocks)} particle records; the device's binding limit holds ${deviceRecords}`);
-  this.seedBudget=budget?.records??0;
-  this.capacity=budget?narrowBandBudgetCapacity(budget,address.blocks):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
+  // surfaceSamples past 8: the band's records grow by the surface layer's
+  // share (narrowBandSurfaceSampleScale), the budget's density and rule with them.
+  const sampleScale=narrowBandSurfaceSampleScale(surfaceSamples,bandDepth);
+  const sized=budget&&sampleScale!==1?{...budget,perFineCell:budget.perFineCell*sampleScale,records:budget.records!==undefined?Math.ceil(budget.records*sampleScale):undefined}:budget;
+  const scaled=sampleScale!==1?` (surfaceSamples ${surfaceSamples}: x${sampleScale.toFixed(3)} the records at eight)`:"";
+  if(sized&&narrowBandBudgetCapacity(sized,address.blocks)>deviceRecords)throw new Error(`Narrow-band FLIP: fluid.tiers (${sized.records!==undefined?`${sized.records} records by rule`:`${sized.fineTiles} h tiles at ${sized.perFineCell} particles a fine cell`})${scaled} needs ${narrowBandBudgetCapacity(sized,address.blocks)} particle records; the device's binding limit holds ${deviceRecords}`);
+  this.seedBudget=sized?.records??0;
+  if(!sized&&sampleScale!==1){
+   const want=Math.min(cells*surfaceSamples,Math.ceil(sampleScale*Math.max(2_097_152,cells)));
+   if(want>deviceRecords)throw new Error(`Narrow-band FLIP: ${want} particle records${scaled} exceed the device's binding limit of ${deviceRecords}`);
+  }
+  this.capacity=sized?narrowBandBudgetCapacity(sized,address.blocks):sampleScale!==1?Math.min(cells*surfaceSamples,Math.ceil(sampleScale*Math.max(2_097_152,cells))):Math.min(cells*8,Math.max(2_097_152,cells),deviceRecords);
   const buffer=(label:string,size:number,uniform=false)=>device.createBuffer({label:`Narrow-band FLIP ${label}`,size,usage:(uniform?GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE:GPUBufferUsage.STORAGE)|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
   this.recordBytes=this.capacity*particleBytes;const bankBytes=this.bankBytes=Math.max(this.recordBytes,budget?.bankBytes??0);
   this.particles=[buffer("particles A",bankBytes),buffer("particles B",bankBytes)];
@@ -877,7 +895,7 @@ ${uniformPageInitBlocksWGSL(this.pool.layout,"nbInitBlocks",512,`bins[${heat}u+k
   const sourceCode=(unitTaps:boolean,delta=false)=>uniformMixedCertifiedEntriesWGSL((this.device.features.has("subgroups")?"enable subgroups;\n":"")+uniformMixedTopologyWGSL(this.ownership.capacity,0)+uniformStageListsWGSL+/* wgsl */`
 const nbSparseBins:bool=true;
 const NB_PREVIOUS_CROSSINGS:bool=${this.previousCrossings};
-${narrowBandParticleWGSL(this.apic,this.crowdedCells==="merge")}
+${narrowBandParticleWGSL(this.apic,this.crowdedCells==="merge",narrowBandMassBits(this.surfaceSamples))}
 @group(1) @binding(0) var<storage,read_write> source:array<Particle>;
 // Disjoint entry points alias binding 0: only transferClear/Deposit/Properties
 // access the atomic view, after SORT consumed source and before tail extension.
@@ -955,7 +973,7 @@ const NB_DEPOSIT:u32=${this.depositWord}u;const NB_DEPOSIT_TILES:u32=${this.depo
 fn nbSurfaceParticleHot(i:u32)->bool{return bitcast<f32>(links[NB_LINKS+4u*i+3u]&0x7fffffffu)>1.0;}
 fn nbPosition(i:u32)->vec3f{let a=NB_LINKS+4u*i;return bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u]));}
 // A sample's mass from the compact flag word (the deposit writes it).
-fn nbStreamMass(i:u32)->f32{return ${this.crowdedCells==="merge"?"f32((links[NB_LINKS+4u*i+3u]&7u)+1u)":"1.0"};}
+fn nbStreamMass(i:u32)->f32{return ${this.crowdedCells==="merge"?`f32((links[NB_LINKS+4u*i+3u]&${this.surfaceSamples-1}u)+1u)`:"1.0"};}
 fn nbMotion(i:u32)->vec4f{let a=NB_LINKS+4u*arrayLength(&particles)+3u*i;let mode=links[NB_LINKS+4u*i+3u]>>31u;return vec4f(bitcast<vec3f>(vec3u(links[a],links[a+1u],links[a+2u])),f32(mode));}
 // Live particle counts per tile drive sparse cell-bin clearing.
 const NB_COVERAGE:u32=${this.binSlots?`${this.binCells}u+64u*UM_BLOCKS`:"2u*UM_CELL_KEYS"};
@@ -1065,12 +1083,14 @@ const NB_GRADED:bool=${this.gradedDensity};${narrowBandRetireCounting.on?`
 fn nbMergeCount(k:u32,n:u32){${narrowBandRetireCounting.splitX>=0?"":`atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+k],n);`}}`:""}${this.crowdedCells==="merge"?`
 // crowdedCells "merge": the mass a sample may hold (the deposit's fixed-point
 // sums keep their headroom).
-const NB_MASS_MAX:f32=8.0;
-// The most mass a deep cell's samples keep: 2n units, n = 8 (Ferstl et al.
+const NB_MASS_MAX:f32=${this.surfaceSamples.toFixed(1)};
+// The most mass a deep cell's samples keep: 2n units, n = ${this.surfaceSamples} (Ferstl et al.
 // 2016 Section 3.3).
-const NB_CELL_MASS:f32=16.0;
-// The cap of a deep cell (centre depth): six in a graded band's cells past 1.5.
-fn nbCellCap(depth:f32)->u32{return select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);}
+${this.surfaceSamples===8?"const NB_CELL_MASS:f32=16.0;":`const NB_CELL_MASS:f32=${(2*this.surfaceSamples).toFixed(1)};`}
+${this.surfaceSamples===8?`// The cap of a deep cell (centre depth): six in a graded band's cells past 1.5.
+fn nbCellCap(depth:f32)->u32{return select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED&&depth<=-1.5);}`:`// The cap of a deep cell (centre depth): in the surface layer (above 1.5)
+// particleCellCap at ${this.surfaceSamples} a cell (x ${this.surfaceSamples/8}), past it the rail's (six in a graded band).
+fn nbCellCap(depth:f32)->u32{return select(select(u32(params.activity.w),min(u32(params.activity.w),6u),NB_GRADED),${this.surfaceSamples/8}u*u32(params.activity.w),depth> -1.5);}`}
 // Rank r of a crowded run gathers ranks r+cap, r+2cap, ... (low, high: the
 // first and the run's end; stride: the cap) as one sample of their summed
 // mass at their mass-weighted position, velocity and FLIP delta (a
@@ -1104,15 +1124,21 @@ fn nbMergeAbsorbed(start:u32,i:u32,stride:u32)->bool{
  }
  return m+nbParticleMass(particles[i])<=NB_MASS_MAX;
 }`:""}
-fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity,this.crowdedCells==="merge")};}
-// The samples a cell holds when seeded full: four of the eight sites in a
+fn nbExpectedMass(depth:f32)->f32{return ${narrowBandExpectedMassWGSL("depth",this.gradedDensity,this.crowdedCells==="merge",this.surfaceSamples)};}
+${this.surfaceSamples===8?`// The samples a cell holds when seeded full: four of the eight sites in a
 // graded band's deep cells (centre depth), else eight.
 fn nbSeedTarget(depth:f32)->u32{return select(8u,4u,NB_GRADED&&depth<=-1.5);}
 // A graded deep cell's j-th site: the even sites of the 2x2x2 lattice.
-fn nbSeedSiteIndex(j:u32,depth:f32)->u32{if(nbSeedTarget(depth)==8u){return j;}return array<u32,4>(0u,3u,5u,6u)[j&3u];}
+fn nbSeedSiteIndex(j:u32,depth:f32)->u32{if(nbSeedTarget(depth)==8u){return j;}return array<u32,4>(0u,3u,5u,6u)[j&3u];}`:`// surfaceSamples ${this.surfaceSamples}: the samples a cell holds when seeded full: ${this.surfaceSamples} unit
+// samples on the ${narrowBandSiteAxis(this.surfaceSamples)}^3 lattice in the surface layer (centre above 1.5
+// cells deep), past it eight of ${this.surfaceSamples/8} units (four of ${this.surfaceSamples/4} in a graded band) on the 2x2x2.
+fn nbSeedTarget(depth:f32)->u32{return select(${this.surfaceSamples}u,select(8u,4u,NB_GRADED),depth<=-1.5);}
+// Site j of a cell seeded \`count\` full: the fine lattice's j-th (count ${this.surfaceSamples}),
+// the 2x2x2's j-th (8), or its even sites (4).
+fn nbSeedSiteOf(j:u32,count:u32)->u32{if(count!=4u){return j;}return array<u32,4>(0u,3u,5u,6u)[j&3u];}`}
 ${narrowBandCollarDensityWGSL(this.collarDensity)}${narrowBandActivityWGSLFor(this.collarSpread)}
 ${narrowBandAirWGSL}
-${narrowBandSparseWGSL}
+${narrowBandSparseWGSLFor(this.surfaceSamples)}
 // The same liquid/retained-mass owners used by velocity extrapolation.
 // Negative phi at a particle is insufficient: a sub-cell droplet may have
 // no resolved cell at all, so the grid cannot evolve its momentum.
@@ -1164,7 +1190,7 @@ fn markSurfaceTiles(position:vec3f,heat:f32){
   atomicMax(&bins[NB_ACTIVITY_THETA+tile],bitcast<u32>(max(heat,0.0)));
  }}}
 }
-${particleSlabWGSL(this.capacity-this.spill,this.spill,this.binSlots,this.seedBudget)}
+${particleSlabWGSL(this.capacity-this.spill,this.spill,this.binSlots,this.seedBudget,narrowBandMassBits(this.surfaceSamples))}
 override nbAdvectScalarCollision:bool=false;
 // With a static solid in the scene the move skips the collision walk of a
 // sample whose trace has no closed cell and no cell the procedural field
@@ -1266,8 +1292,7 @@ struct NbMoved{p:Particle,status:u32}
 // procedural field, terrain and bodies (their contacts). A sample on a wall
 // plane would sit where the grid's normal velocity is zero, carried along the
 // face and never off it, its mass in the union's cells beside the wall.
-const NB_SAMPLE_RADIUS=array<f32,9>(0.0,0.25,0.31498,0.36056,0.39685,0.42750,0.45428,0.47823,0.5);
-fn nbSampleRadius(m:f32)->f32{return NB_SAMPLE_RADIUS[min(u32(m),8u)];}
+${narrowBandSampleRadiusWGSL(this.surfaceSamples)}
 ${this.sampleSeparation==="pairs"?`// sampleSeparation "pairs": Sato et al. 2018 Section 3.2.2 (after Ando et al. 2012): two samples
 // closer than the sum of their radii push apart, each by the other's share
 // of their mass, d_ij = m_j/(m_i+m_j)(r_i+r_j-|p_i-p_j|) along p_i-p_j.
@@ -1299,7 +1324,7 @@ fn nbSeparation(i:u32,q:vec3f,m:f32)->vec3f{
     let other=particles[j].position;if(other.w<=0.0){continue;}
     let x=q-(other.xyz-shift);let l2=dot(x,x);
     if(l2>=far||l2<=1e-12){continue;}
-    let mj=${this.crowdedCells!=="merge"?"1.0":this.apic?"particles[j].lifetime.y+1.0":"f32((bitcast<u32>(particles[j].before.w)&7u)+1u)"};let reach=ri+nbSampleRadius(mj);
+    let mj=${this.crowdedCells!=="merge"?"1.0":this.apic?"particles[j].lifetime.y+1.0":`f32((bitcast<u32>(particles[j].before.w)&${this.surfaceSamples-1}u)+1u)`};let reach=ri+nbSampleRadius(mj);
     if(l2<reach*reach){let l=sqrt(l2);d+=mj/(m+mj)*(reach-l)*x/l;n+=1.0;}
    }
   }
@@ -1411,7 +1436,7 @@ fn nbSurfaceShift(q:vec3f,d:vec3f)->vec3f{
    }
    ${this.apic?"if(!all(abs(p.cx.xyz)<vec3f(1e10))||!all(abs(p.cy.xyz)<vec3f(1e10))||!all(abs(p.cz.xyz)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}":""}
    if(!all(abs(v)<vec3f(1e10))){atomicStore(&state[3],2u);return NbMoved(p,1u);}
-   let age=nbSparseAge(i,q,nbParticleAge(p));let depth=nbMoveDepth(q);
+   let age=nbSparseAge(i,q,nbParticleAge(p)${this.surfaceSamples===8?"":",nbParticleMass(p)"});let depth=nbMoveDepth(q);
    ${this.apic?"p.lifetime.x=age;":"p.before.w=nbParticleRestate(p,age,mode);"}
    p.velocity=vec4f(v,depth);p.position.w=max(p.position.w,nbMoveHeat(q));
    // The accepted grid motion: the next head's residency prediction.
@@ -1562,7 +1587,7 @@ fn nbFinish(record:Particle,start:vec3f,end:vec3f,endpoint:vec3f,ballistic:bool,
   if(mass>1.0&&!ballistic&&params.activity.w>0.0){
    let cell=nbBinCell(umCellAt(vec3u(q)));let seeded=${narrowBandSeedTargetWGSL(this.collarDensity,"nbMoveDepth(floor(q)+0.5)","nbMoveHeat(q)","nbSourceCell(vec3u(floor(q)))")};
    var held=0u;if(cell!=NB_NO_BIN){held=atomicLoad(&bins[cell]);}
-   if(held<seeded&&mass*f32(seeded)>8.0){
+   if(held<seeded&&mass*f32(seeded)>${this.surfaceSamples.toFixed(1)}){
     let kept=ceil(0.5*mass);let moved=mass-kept;
     let bits=bitcast<vec3u>(q);let hash=(bits.x*73856093u)^(bits.y*19349663u)^(bits.z*83492791u);
     let along=normalize(vec3f(f32(hash&255u),f32((hash>>8u)&255u),f32((hash>>16u)&255u))-127.5);
@@ -1684,8 +1709,11 @@ fn nbUncovered(c:vec3u)->bool{
  }
  return true;
 }
-`:""}fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool)->vec4f{
-  let q=vec3f(c)+0.5*vec3f(umCorner(k,2u))+0.5*nbJitter(c,k);let distance=particleDepth(q);
+`:""}fn seedSite(c:vec3u,k:u32,initial:bool,activated:bool${this.surfaceSamples!==8?",fine:bool":""})->vec4f{
+  ${this.surfaceSamples!==8?`// fine: site k of the surface layer's ${narrowBandSiteAxis(this.surfaceSamples)}^3 lattice, else of the 2x2x2.
+  var q=vec3f(c)+0.5*vec3f(umCorner(k,2u))+0.5*nbJitter(c,k);
+  if(fine){q=vec3f(c)+${(1/narrowBandSiteAxis(this.surfaceSamples)).toFixed(2)}*vec3f(umCorner(k,${narrowBandSiteAxis(this.surfaceSamples)}u))+${(1/narrowBandSiteAxis(this.surfaceSamples)).toFixed(2)}*nbJitter(c,k);}
+  let distance=particleDepth(q);`:"let q=vec3f(c)+0.5*vec3f(umCorner(k,2u))+0.5*nbJitter(c,k);let distance=particleDepth(q);"}
   if(distance>0.0||distance< -NB_BAND_DEPTH||nbParticleBlocked(q)){return vec4f(-1,0,0,0);}
   // Paper Section 3.3: replenish only the inner [-R,-h] band. The outer
   // layer keeps its transported samples instead of being recreated; a change
@@ -1704,7 +1732,7 @@ fn nbUncovered(c:vec3u)->bool{
 }
 // The mass of cell c's filed samples, in units (eight a cell).
 fn nbCellMass(c:vec3u)->f32{let run=nbCellRun(vec3i(c));var m=0.0;for(var i=run.x;i<run.y;i++){m+=nbParticleMass(particles[i]);}return m;}
-fn seedCell(c:vec3u,emit:bool){
+${this.surfaceSamples===8?`fn seedCell(c:vec3u,emit:bool){
  // No tile past the reach is within six cells of the surface.
  if((nbBandReach(c)&1u)==0u){return;}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
@@ -1729,7 +1757,25 @@ fn seedCell(c:vec3u,emit:bool){
   if(id!=UB_NONE){atomicAdd(&state[nbSlab(id,10u)],1u);ubMark(id,UB_PARTICLES_CORE);}
  }
 }
-// Seed the geometric particle band, including its overlap on 4h owners: one
+`:`fn seedCell(c:vec3u,emit:bool){
+ // No tile past the reach is within six cells of the surface.
+ if((nbBandReach(c)&1u)==0u){return;}
+ let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
+ if(!nbParticleCellOpen(vec3i(c))){return;}
+ let d=particleDepth(vec3f(c)+0.5);if(d>0.9||d< -NB_BAND_DEPTH-0.5){return;}
+ let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
+ // A full cell holds ${this.surfaceSamples} units: count samples of ${this.surfaceSamples}/count each, on
+ // the fine lattice where count is ${this.surfaceSamples} (nbSeedTarget). A site is a function of
+ // the cell and its index, so the count pass and the emit pass agree.
+ let count=${this.collarDensity==="band"?"nbSeedTarget(d)":narrowBandSeedTargetWGSL(this.collarDensity,"d","heat","nbSourceCell(c)")};let fine=count==${this.surfaceSamples}u;let mass=f32(${this.surfaceSamples}u/count);
+ for(var j=0u;j<count;j++){
+  let site=seedSite(c,nbSeedSiteOf(j,count),true,activated,fine);if(site.x<0.0){continue;}
+  if(emit){var s=nbWithMass(nbSeedParticle(site,heat),mass);${this.apic?"s.lifetime.x=nbSeedFirst();":"s.before.w=nbParticleRestate(s,nbSeedFirst(),0.0);"}nbMoveAppend(s);continue;}
+  let id=ubBrickAt(vec3i(floor(site.xyz)));
+  if(id!=UB_NONE){atomicAdd(&state[nbSlab(id,10u)],1u);ubMark(id,UB_PARTICLES_CORE);}
+ }
+}
+`}// Seed the geometric particle band, including its overlap on 4h owners: one
 // workgroup for each tile of the band search's list, the only ones seedCell
 // passes.
 fn nbSeedCell(group:vec3u,lane:u32)->vec3u{
@@ -1746,13 +1792,15 @@ fn nbSourceCell(c:vec3u)->bool{return nbSourcePhi(vec3f(c)+0.5,1.0)<1.0;}
 // reads from the transfer to the next deposit (the move reads the cell
 // starts). A list past them stops the run (state[3] = 7).
 fn nbSeedList()->u32{return NB_LINKS+4u*arrayLength(&particles);}
-@compute @workgroup_size(64) fn seedCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
+${this.surfaceSamples!==8?`// Entries the list holds at two words each (the motion words: three a record).
+fn nbSeedLimit()->u32{return (3u*arrayLength(&particles))/2u;}
+`:""}@compute @workgroup_size(64) fn seedCells(@builtin(workgroup_id) group:vec3u,@builtin(local_invocation_index) lane:u32){
  let c=nbSeedCell(group,lane);
  if((nbBandReach(c)&1u)==0u){return;}
  let heat=nbTargetHeat(vec3f(c)+0.5);if(heat<=0.0){return;}
  if(!nbParticleCellOpen(vec3i(c))){return;}
  let depth=particleDepth(vec3f(c)+0.5);if(depth>0.9||depth< -NB_BAND_DEPTH-0.5){return;}
- ${this.collarDensity==="band"?"":`let count=${narrowBandSeedTargetWGSL(this.collarDensity,"depth","heat","nbSourceCell(c)")};
+${this.surfaceSamples===8?` ${this.collarDensity==="band"?"":`let count=${narrowBandSeedTargetWGSL(this.collarDensity,"depth","heat","nbSourceCell(c)")};
  `}if(nbBinCount(umCellAt(c))>=${this.collarDensity==="band"?"nbSeedTarget(depth)":"count"}||nbCellMass(c)>=8.0){return;}
  let slot=atomicAdd(&bins[NB_BAND+3u],1u);
  if(slot>=3u*arrayLength(&particles)){atomicStore(&state[3],7u);return;}
@@ -1782,7 +1830,44 @@ fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool,counting:bool)->Particle{
  // reads them as the cell once they rise and split into a film.
  return nbWithMass(nbSeedParticle(site,heat),select(1.0,2.0,deep));
 }
-// The step's seeds act from the next step, as the tail seeds did before
+`:` // surfaceSamples ${this.surfaceSamples}: a cell short of ${this.surfaceSamples} units (Paper Section 3.3,
+ // by mass) lists its candidates as entries of eight sites, each two words:
+ // the cell (bit 31 a source cell) and, nbSeedLimit() words on, its kind:
+ // an octant 0-7 of a surface-layer cell's ${this.surfaceSamples} fine sites (sites 8 kind to
+ // 8 kind + 7), 8 a deep cell's eight 2x2x2 sites, 9 its four even ones.
+ let count=${this.collarDensity==="band"?"nbSeedTarget(depth)":narrowBandSeedTargetWGSL(this.collarDensity,"depth","heat","nbSourceCell(c)")};
+ let n0=nbBinCount(umCellAt(c));let held=nbCellMass(c);if(held>=${this.surfaceSamples.toFixed(1)}){return;}
+ // A fine cell's sites from its record count n0 to n0 + the units short.
+ var kind=select(8u,9u,count==4u);var entries=1u;
+ if(count==${this.surfaceSamples}u){kind=n0/8u;entries=(min(n0+u32(${this.surfaceSamples.toFixed(1)}-held),${this.surfaceSamples}u)-1u)/8u-kind+1u;}
+ let slot=atomicAdd(&bins[NB_BAND+3u],entries);
+ if(slot+entries>nbSeedLimit()){atomicStore(&state[3],7u);return;}
+ let entry=umCellAt(c)|select(0u,0x80000000u,nbSourceCell(c));
+ for(var k=0u;k<entries;k++){links[nbSeedList()+slot+k]=entry;links[nbSeedList()+nbSeedLimit()+slot+k]=kind+select(0u,k,kind<8u);}
+}
+fn seedCandidate(group:vec3u,lane:u32,sourcePass:bool,counting:bool)->Particle{
+ var empty=Particle();empty.position.x=-1.0;
+ let slot=8u*group.x+lane/8u;if(slot>=min(atomicLoad(&bins[NB_BAND+3u]),nbSeedLimit())){return empty;}
+ let entry=links[nbSeedList()+slot];if(((entry&0x80000000u)!=0u)!=sourcePass){return empty;}
+ let kind=links[nbSeedList()+nbSeedLimit()+slot];
+ let c=umCellCoord(entry&0x3fffffffu);let n0=nbBinCount(umCellAt(c));let held=nbCellMass(c);
+ // A fine site j seeds a unit while the cell is short of ${this.surfaceSamples} (sites from n0 on);
+ // a deep cell's lane l a sample of ${this.surfaceSamples}/count units while the cell's mass stays
+ // within half of one of ${this.surfaceSamples}, at site n0 + l of its count.
+ let fine=kind<8u;var k=8u*kind+lane%8u;var mass=1.0;
+ if(fine){if(k<n0||held+f32(k-n0)>=${this.surfaceSamples.toFixed(1)}){return empty;}}
+ else{let count=select(8u,4u,kind==9u);mass=f32(${this.surfaceSamples}u/count);if(held+(f32(lane%8u)+0.5)*mass>${this.surfaceSamples.toFixed(1)}){return empty;}k=nbSeedSiteOf((lane%8u+n0)%count,count);}
+ let activated=atomicLoad(&bins[NB_ACTIVITY_NEW+nbBandTile(c)])!=0u;
+ // Each frame salts its sites (the frame index, params.live.z), so a cell
+ // reseeded again does not reuse them; nothing of the list's fill order
+ // (the slot) or its count enters a site.
+ nbSeedSalt=params.live.z;
+ let site=seedSite(c,k,false,activated,fine);if(site.x<0.0){return empty;}
+ ${narrowBandRetireCounting.splitX>=0?`if(counting&&f32(c.x)>=${narrowBandRetireCounting.splitX.toFixed(1)}){atomicAdd(&state[${NARROW_BAND_RETIRE_WORD+8}u+select(select(select(3u,2u,site.w<= -1.0),1u,c.y>=${(narrowBandRetireCounting.splitY+8)}u),0u,activated)],1u);}`:""}
+ let heat=nbTargetHeat(vec3f(c)+0.5);
+ return nbWithMass(nbSeedParticle(site,heat),mass);
+}
+`}// The step's seeds act from the next step, as the tail seeds did before
 // the fused move: seeded at the transfer's head (the step's band, phi and
 // counts), a seed joins its brick's slab in the current bank after the
 // records SORT filed, which no transfer, splat or seam gather reads (only
@@ -1835,9 +1920,9 @@ fn transferFace(face:UMFace)->f32{
  }}}
  if(total<1e-5){return original;}return mix(original,momentum/total+umThawFaceTerm(face.anchor,face.axis,face.width),blend*nbTransferBlend(q,depth,total));
 }
-${narrowBandTransferPropertiesSource(this.gradedDensity,this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge")}
-${narrowBandFineTransferSource(subgroups,this.apic,this.gradedDensity,this.crowdedCells==="merge")}
-${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords},this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge",narrowBandSeparationReach(this.sampleSeparation,this.crowdedCells==="merge"))}
+${narrowBandTransferPropertiesSource(this.gradedDensity,this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge",this.surfaceSamples)}
+${narrowBandFineTransferSource(subgroups,this.apic,this.gradedDensity,this.crowdedCells==="merge",this.surfaceSamples)}
+${particleBrickDepositWGSL(this.apic,{joins:this.refineWord,allocation:this.refineWord+this.refineJoinWords},this.sharedDeposit?"depositScratch":"bins",this.crowdedCells==="merge",narrowBandSeparationReach(this.sampleSeparation,this.crowdedCells==="merge",this.surfaceSamples),narrowBandMassBits(this.surfaceSamples))}
 // The 4h owners, one a lane. An owner whose whole stencil is 4h has one
 // patch a face, and a face centred in a tile past the reach lies more than
 // two cells from the surface: it keeps its velocity without a gather. The
@@ -1915,7 +2000,7 @@ var<workgroup> nbSeam:array<vec2f,64>;
  }
  atomicMax(&state[4],bitcast<u32>(outside));
 }
-${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_BOUND_WGSL,NARROW_BAND_WALL_BOUND_WGSL):narrowBandSurfaceWGSL}
+${narrowBandSurfaceWGSLFor(this.surfaceSamples,this.sampleBound==="walls")}
 
 `,[]);
   // Advection borrows the exact extended-field unit taps Uniform already
@@ -1992,8 +2077,8 @@ ${this.sampleBound==="walls"?narrowBandSurfaceWGSL.replace(NARROW_BAND_CENTRED_B
   this.crossingSearches.set(this.batches.searchReconstruct,this.compile(listedSearch.map(n=>n==="depthTiles"||n==="depthSeeds"?`${n}@cold`:n),"reconstruct","crossing search"));
  }
  /** The seed budget's canonical admission (narrowBandSeedRankWGSL). */
- private get seedRank():NarrowBandSeedRank|undefined{return this.seedBudget?narrowBandSeedRankShape(this.cells,this.tiles):undefined;}
- private seedRankWGSL():string{const rank=this.seedRank;return rank?narrowBandSeedRankWGSL(rank,this.seedBudget):"";}
+ private get seedRank():NarrowBandSeedRank|undefined{return this.seedBudget?narrowBandSeedRankShape(this.surfaceSamples===8?this.cells:8*this.cells,this.tiles):undefined;}
+ private seedRankWGSL():string{const rank=this.seedRank;return rank?narrowBandSeedRankWGSL(rank,this.seedBudget,this.surfaceSamples):"";}
  /** The seed batch's rank steps: seedRank@level and seedCut@level. */
  private get seedRankEntries():string[]{const rank=this.seedRank;return rank?Array.from({length:rank.levels},(_,l)=>[`seedRank@${l}`,`seedCut@${l}`]).flat():[];}
  private compile(entries:readonly string[],groupName:string|undefined,label:string):NarrowBandBatch{

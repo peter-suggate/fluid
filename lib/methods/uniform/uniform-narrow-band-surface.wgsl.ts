@@ -1,5 +1,6 @@
 import { narrowBandSplatWGSL } from "./uniform-narrow-band-splat.wgsl";
 import { uniformMixedCertifiedEntriesWGSL } from "./uniform-mixed-topology.wgsl";
+import { narrowBandSiteAxis, narrowBandUnionShape, type NarrowBandSurfaceSamples } from "./uniform-narrow-band-sites";
 
 /** Particle geometry enters the canonical simulation phi before pressure. */
 export const NARROW_BAND_SURFACE_RADIUS=0.875;
@@ -9,24 +10,28 @@ export const NARROW_BAND_SEED_DEPTH=Math.sqrt(NARROW_BAND_SURFACE_RADIUS**2-0.12
  * its samples cover it: eight a cell, or with particleDensity "graded" four
  * below a cell deep (seeding fills four sites a cell below 1.5 cells). A
  * face short of it blends in the grid's velocity. In merge mode the four
- * graded seeds carry two units each, so their expected mass stays eight. */
-export function narrowBandExpectedMassWGSL(depth:string,graded:boolean,merge=false):string{
+ * graded seeds carry two units each, so their expected mass stays eight.
+ * samples (surfaceSamples): the units of a full cell, S (always merge past 8):
+ * the expected mass is S, at least S/8, the same liquid at any S. */
+export function narrowBandExpectedMassWGSL(depth:string,graded:boolean,merge=false,samples:NarrowBandSurfaceSamples=8):string{
+ if(samples!==8)return `max(${(samples/8).toFixed(1)},${samples.toFixed(1)}*clamp(0.5-${depth},0.0,1.0))`;
  return graded&&!merge?`max(1.0,select(8.0,4.0,${depth}< -1.0)*clamp(0.5-${depth},0.0,1.0))`:`max(1.0,8.0*clamp(0.5-${depth},0.0,1.0))`;
 }
 /** The samples' mass bound at vertex q (particleSurfaceFinish), sampleBound
  * "centred": a plane through the open cells around q as if q were their
  * centre. At a wall or floor (closed cells on one side) that plane is a cell
  * too high: a floor film half a cell deep held phi 0 at the floor and no liquid. */
-export const NARROW_BAND_CENTRED_BOUND_WGSL=/* wgsl */` if(particle<bulk){
+export const narrowBandCentredBoundWGSL=(samples:NarrowBandSurfaceSamples=8)=>/* wgsl */` if(particle<bulk){
   var held=0u;var open=0u;
   for(var k=0u;k<8u;k++){
    let c=q+vec3i(umCorner(k,2u))-1;
    if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
-   open++;held+=min(nbBinCount(umCellAt(vec3u(c))),8u);
+   open++;held+=min(nbBinCount(umCellAt(vec3u(c))),${samples}u);
   }
-  if(open>0u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
+  if(open>0u){particle=max(particle,min(bulk,1.0-f32(held)/(${(samples/2).toFixed(1)}*f32(open))));}
  }
 `;
+export const NARROW_BAND_CENTRED_BOUND_WGSL=narrowBandCentredBoundWGSL();
 /** sampleBound "walls": the same plane where all eight cells are open (the
  * same expression). Elsewhere, along the axis whose two layers of four cells
  * differ most in held fraction (a closed layer reads as full), the liquid
@@ -34,22 +39,22 @@ export const NARROW_BAND_CENTRED_BOUND_WGSL=/* wgsl */` if(particle<bulk){
  * or against it where that layer is closed (a wall), phi -f_sparse. Either
  * holds exactly the samples' mass (f: held over eight a cell, over a layer's
  * open cells; a closed sparse layer holds none). */
-export const NARROW_BAND_WALL_BOUND_WGSL=/* wgsl */` if(particle<bulk){
+export const narrowBandWallBoundWGSL=(samples:NarrowBandSurfaceSamples=8)=>/* wgsl */` if(particle<bulk){
   var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
   for(var k=0u;k<8u;k++){
    let bit=umCorner(k,2u);let c=q+vec3i(bit)-1;
    if(!umCellPresent(c)||!nbParticleCellOpen(c)){continue;}
-   let n=min(nbBinCount(umCellAt(vec3u(c))),8u);open++;held+=n;
+   let n=min(nbBinCount(umCellAt(vec3u(c))),${samples}u);open++;held+=n;
    let high=bit!=vec3u(0u);
    heldHigh+=select(vec3u(0u),vec3u(n),high);openHigh+=select(vec3u(0u),vec3u(1u),high);
    heldLow+=select(vec3u(n),vec3u(0u),high);openLow+=select(vec3u(1u),vec3u(0u),high);
   }
-  if(open==8u){particle=max(particle,min(bulk,1.0-f32(held)/(4.0*f32(open))));}
+  if(open==8u){particle=max(particle,min(bulk,1.0-f32(held)/(${(samples/2).toFixed(1)}*f32(open))));}
   else if(open>0u){
    var gap=-1.0;var bound=1.0;
    for(var a=0u;a<3u;a++){
-    let low=select(1.0,f32(heldLow[a])/(8.0*f32(openLow[a])),openLow[a]>0u);
-    let high=select(1.0,f32(heldHigh[a])/(8.0*f32(openHigh[a])),openHigh[a]>0u);
+    let low=select(1.0,f32(heldLow[a])/(${samples.toFixed(1)}*f32(openLow[a])),openLow[a]>0u);
+    let high=select(1.0,f32(heldHigh[a])/(${samples.toFixed(1)}*f32(openHigh[a])),openHigh[a]>0u);
     if(abs(low-high)<=gap){continue;}
     gap=abs(low-high);let lowDense=low>=high;
     let denseOpen=select(openHigh[a],openLow[a],lowDense)>0u;let sparseOpen=select(openLow[a],openHigh[a],lowDense)>0u;
@@ -60,15 +65,19 @@ export const NARROW_BAND_WALL_BOUND_WGSL=/* wgsl */` if(particle<bulk){
   }
  }
 `;
-export const narrowBandParticleSurfaceWGSL=/* wgsl */`
+export const NARROW_BAND_WALL_BOUND_WGSL=narrowBandWallBoundWGSL();
+/** n: sites an axis of the surface sub-lattice (narrowBandSiteAxis): the
+ * union's sphere and shell follow its spacing (narrowBandUnionShape); 2 is
+ * the solver as it was. */
+export const narrowBandParticleSurfaceWGSLFor=(n:2|4=2)=>{const shape=narrowBandUnionShape(n);return /* wgsl */`
 // Ferstl et al. 2016, Eq. 4: phi <- min(phi' + h, phi_p). The advected level
 // set, shrunk by one cell, is united with the surface of the samples, so the
 // samples overrule it: a sheet or droplet they carry is liquid whatever grid
 // advection made of it, and liquid they have left is not. phi_p is the union
 // of one sphere per sample, and adds no more liquid than the samples count. A tile no sample reaches has no phi_p and keeps
 // phi' as it is; liquid a source adds this step joins after the union.
-const NB_SURFACE_RADIUS=${NARROW_BAND_SURFACE_RADIUS};
-const NB_SEED_DEPTH=${NARROW_BAND_SEED_DEPTH};
+const NB_SURFACE_RADIUS=${n===2?NARROW_BAND_SURFACE_RADIUS:shape.radius};
+const NB_SEED_DEPTH=${n===2?NARROW_BAND_SEED_DEPTH:shape.seedDepth};
 // q: a vertex of the tile of key own and first cell origin, its upper
 // faces with it. The cell and the tiles it is read in are held in the tile's
 // page where a wall lies across a face. z: the vertex's heat (nbThetaFrom),
@@ -103,11 +112,11 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32,tiled
  // the side): a level set between the two stands. Read as the sphere alone, a
  // resting bath's surface fell 0.04h in its hot tiles and rose 0.006h in their
  // collar, a head the band's pressure solve turned into flow.
- let sphere=sqrt(nearest2)-NB_SURFACE_RADIUS;let shell=sqrt(max(nearest2-0.125,0.0))-NB_SEED_DEPTH;
+ let sphere=sqrt(nearest2)-NB_SURFACE_RADIUS;let shell=sqrt(max(nearest2-${shape.offset2},0.0))-NB_SEED_DEPTH;
  var excess=bulk-clamp(bulk,min(sphere,shell),max(sphere,shell));
  // A sample within the lattice's own spacing: seeded liquid, as deep as its
  // sphere at least. How much deeper the samples do not measure.
- if(nearest2<=0.25){excess=max(bulk-sphere,0.0);}
+ if(nearest2<=${shape.spacing2}){excess=max(bulk-sphere,0.0);}
  // The spheres ripple NB_SURFACE_RADIUS-NB_SEED_DEPTH over a flat shell: the
  // samples say nothing finer. The collar adds and does not erase, and without
  // this slack it made surface of every sample's jitter.
@@ -121,7 +130,7 @@ fn particleSurfaceFinish(home:vec3i,q:vec3i,bulk:f32,nearest2:f32,heat:f32,tiled
  // samples were sparse (spray, a spreading sheet): trough +2.2% at step 40,
  // open ground +6.5% at 120. A cell counts eight at most, so the samples a
  // converging surface keeps do not loosen it.
-${NARROW_BAND_CENTRED_BOUND_WGSL} // A transported particle may add liquid throughout its sphere support.
+${narrowBandCentredBoundWGSL(n===2?8:64)} // A transported particle may add liquid throughout its sphere support.
  // Erasure needs the complete seeded footprint, inside the overlap collar.
  var theta=heat;
  if(particle>bulk){
@@ -130,7 +139,8 @@ ${NARROW_BAND_CENTRED_BOUND_WGSL} // A transported particle may add liquid throu
  }
  return nbSourcePhi(vec3f(q),mix(bulk,particle,theta));
 }
-`;
+`;};
+export const narrowBandParticleSurfaceWGSL=narrowBandParticleSurfaceWGSLFor();
 /** Enumerate the 64 positive vertices directly with the compiled incidence
  * mask. On page boundary tiles, preserve the full authority walk: diagonal AIR
  * holes can expose coarse owners that a positive-only recipe cannot name. */
@@ -205,7 +215,7 @@ fn nbCoupleFineVertex(t:NBCoupleFine,lane:u32,round:u32)->vec4i{
 
 /** Reconstruction first scatters occupied-cell distances into the expired
  * metric bank, then each canonical vertex reads one nearest-distance word. */
-export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandTiledSurfaceWGSL+narrowBandSplatWGSL+uniformMixedCertifiedEntriesWGSL(/* wgsl */`
+const narrowBandSurfaceRestWGSL=narrowBandTiledSurfaceWGSL+narrowBandSplatWGSL+uniformMixedCertifiedEntriesWGSL(/* wgsl */`
 // Whether couple reconstructs a 4h owner's corner k. A low corner is the
 // tile's to write only where nothing is stored below it.
 fn nbCoupleCorner(owner:UMOwner,origin:vec3u,regular:bool,low:vec3<bool>,k:u32)->bool{
@@ -295,12 +305,19 @@ fn nbCoarseRetires(origin:vec3u,regular:bool,low:vec3<bool>,corners:u32,k:u32)->
  }
 }
 `,["surfaceClear"],"umCounts.x+(min(atomicLoad(&bins[NB_COARSE_LIST]),NB_COARSE_CAP)+63u)/64u");
+export const narrowBandSurfaceWGSL=narrowBandParticleSurfaceWGSL+narrowBandSurfaceRestWGSL;
+/** The reconstruction at surfaceSamples S (sites an axis n = cbrt S): the
+ * union's sphere and shell at n, its mass bound at S a cell. At 8 the text above. */
+export function narrowBandSurfaceWGSLFor(samples:NarrowBandSurfaceSamples=8,walls=false):string{
+ const base=samples===8?narrowBandSurfaceWGSL:narrowBandParticleSurfaceWGSLFor(narrowBandSiteAxis(samples))+narrowBandSurfaceRestWGSL;
+ return walls?base.replace(narrowBandCentredBoundWGSL(samples),narrowBandWallBoundWGSL(samples)):base;
+}
 
 /** FIN: each fine tile the deposit reached (its NB_DEPOSITED flag) prepares
  * its face blend once, sharing the 5³ metric vertices, and finishes its
  * cells from their six deposit words; any other tile copies its velocity.
  * FIN zeroes the words and flag it read, ready for the next deposit. */
-export function narrowBandTransferPropertiesSource(graded=false,deposit="bins",merge=false):string{return /* wgsl */`
+export function narrowBandTransferPropertiesSource(graded=false,deposit="bins",merge=false,samples:NarrowBandSurfaceSamples=8):string{return /* wgsl */`
 // The deposit's six words a fine cell and a flag a fine tile (NB_DEPOSIT),
 // sized for every h tile the pool stores. A layout past them (a device whose
 // buffer limit holds fewer) takes the general gather (transfer).
@@ -362,7 +379,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
    // The positive MAC face has fraction zero along its normal. Preserve the
    // eight-corner accumulation order while skipping its four zero terms.
    for(var k=0u;k<8u;k++){let bit=umCorner(k,2u);if(bit[axis]!=0u){continue;}let q=low+bit;depth+=0.25*nbTransferDepth[q.x+5u*(q.y+5u*q.z)];}
-   if(depth<=1.5&&depth>=-2.0){var q=vec3f(local)+0.5;q[axis]+=0.5;near=nbTransferTheta(q);expected=${narrowBandExpectedMassWGSL("depth",graded,merge)};}
+   if(depth<=1.5&&depth>=-2.0){var q=vec3f(local)+0.5;q[axis]+=0.5;near=nbTransferTheta(q);expected=${narrowBandExpectedMassWGSL("depth",graded,merge,samples)};}
   }
   needed=needed||near.x>0.0;
   properties[axis]=vec3f(near,expected);
@@ -389,7 +406,7 @@ fn nbTransferTheta(local:vec3f)->vec2f{
  * gathers the union of two neighboring x cells' quadratic MAC supports and
  * accumulates both results in registers. Spatial order makes each x row at
  * most two runs, without a per-bin particle limit. */
-export function narrowBandFineTransferSource(subgroups:boolean,apic=false,graded=false,merge=false):string{return /* wgsl */`
+export function narrowBandFineTransferSource(subgroups:boolean,apic=false,graded=false,merge=false,samples:NarrowBandSurfaceSamples=8):string{return /* wgsl */`
 var<workgroup> nbMomentum:array<vec3f,64>;
 var<workgroup> nbMass:array<vec3f,64>;
 var<workgroup> nbMomentumNext:array<vec3f,64>;
@@ -415,7 +432,7 @@ var<workgroup> nbRuns:array<vec2u,128>;
   var near=vec2f(0.0);var expected=1.0;
   if(width==1u&&umAcrossKind(vec3i(o),axis,1)==UM_RESIDENT&&!umFrozenFace(vec3i(o),axis,1u)){
    var q=vec3f(o)+0.5;q[axis]+=0.5;let depth=particleDepth(q);
-   if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=${narrowBandExpectedMassWGSL("depth",graded,merge)};}
+   if(depth<=1.5&&depth>=-2.0){near=vec2f(nbTheta(q),nbSurfaceTheta(q));expected=${narrowBandExpectedMassWGSL("depth",graded,merge,samples)};}
   }
   nbBlend[6u*team+member]=near.x;nbHot[6u*team+member]=near.y;nbExpected[6u*team+member]=expected;
  }

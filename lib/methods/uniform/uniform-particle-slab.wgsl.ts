@@ -53,7 +53,7 @@ export function particleSlabSpill(capacity:number):number{return Math.max(4096,M
 /** limit: the slabs' bound; spill: minimum tail headroom. Unused slab space also spills.
  * binSlots: the cell bins' brick slots (nbBinTile), the sort's slab slots;
  * 0 keys them by cell key. */
-export function particleSlabWGSL(limit:number,spill:number,binSlots=0,seedBudget=0):string{return /* wgsl */`
+export function particleSlabWGSL(limit:number,spill:number,binSlots=0,seedBudget=0,massBits=3):string{return /* wgsl */`
 const NB_SLAB_LIMIT:u32=${limit}u;
 const NB_PARTICLE_CAPACITY:u32=${limit+spill}u;
 const NB_SLAB_MIN:u32=32u;
@@ -67,8 +67,9 @@ fn nbExtent()->u32{return min(atomicLoad(&state[0]),NB_SLAB_LIMIT);}
 fn nbLive(p:Particle)->bool{return p.position.w>0.0;}
 // A deferred step seed's age until its first move (the largest finite f32
 // less seven ulps, its low three bits clear for a merge's mass: no age
-// reaches it, ages are capped at the sparse lifetime).
-const NB_SEED_FIRST:u32=0x7f7ffff8u;
+// reaches it, ages are capped at the sparse lifetime).${massBits===3?"":`
+// surfaceSamples: its low ${massBits} bits clear for a mass of up to ${1<<massBits} units.`}
+const NB_SEED_FIRST:u32=0x${((0x7f7fffff&~((1<<massBits)-1))>>>0).toString(16)}u;
 fn nbSeedFirst()->f32{return bitcast<f32>(NB_SEED_FIRST);}
 fn nbDead()->Particle{var p=Particle();p.position=vec4f(-1.0,0.0,0.0,0.0);return p;}
 // The brick has slabs this move.
