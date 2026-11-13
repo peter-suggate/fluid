@@ -12,7 +12,7 @@ import { IMPORTANCE_LEGEND } from "../lib/core/visual-layers";
 import { uniformDetailRequestKey } from "../lib/methods/uniform/uniform-detail-requests";
 import { NARROW_BAND_ACTIVITY_CONTROLS, NARROW_BAND_PARTICLE_CAP_CONTROL as CAP, NARROW_BAND_SPARSE_CONTROL, NARROW_BAND_SPARSE_NEIGHBOURS_CONTROL, NARROW_BAND_SURFACE_ADVECTION as ADVECTION, NARROW_BAND_TUNE_CONTROLS, narrowBandControlValues, narrowBandSurfaceAdvection, type NarrowBandSurfaceAdvection } from "../lib/methods/uniform/uniform-narrow-band-controls";
 import { NARROW_BAND_TUNE_DIALS, narrowBandTunePosition, narrowBandTuneValues, type NarrowBandTuneDial } from "../lib/methods/uniform/uniform-narrow-band-tuning";
-import { RailLink, RailRange, RailReadout, RailRule } from "./rail";
+import { RailChoice, RailLink, RailRange, RailReadout, RailRule } from "./rail";
 import { ChoiceField, Facts, Field, FieldList, NumberInput, RangeField, Swatch, Switch, SwitchField } from "./ui";
 
 const SHAPE_DISPLACEMENT_HINT = "Shape measures how far the surface moves at 4h, not the error in phi beside it. Off: value error.";
@@ -194,6 +194,10 @@ export function UniformTunePanel() {
     <RailRange label="Budget" value={activityValues[budget.key]} min={budget.min} max={budget.max} step={budget.step} digits={budget.digits}
       unit={budget.unit} hint={BUDGET_HINT} testId="scene-detail-tune-budget"
       onInput={value => set(budget.key, value)} onChange={value => set(budget.key, value)} />
+    <RailChoice label="Surface particles" value={resolved.surfaceSamples === "64" ? "64" : "8"}
+      options={[{ value: "8", label: "8" }, { value: "64", label: "64" }]}
+      hint="Particles a cell in the top cell and a half, where they define the surface. 64 gives a smoother, less biased surface (nothing finer than a cell) at more particle work; deeper particles are unchanged. Restarts the solver."
+      testId="scene-detail-surface-samples" onChange={value => set("surfaceSamples", value)} />
     <RailRule />
     <RailLink label="All controls…" hint="Every detail control on its own, grouped as the solver reads them. Changes apply live."
       testId="scene-detail-all-controls" onClick={() => setEverything(true)} />
