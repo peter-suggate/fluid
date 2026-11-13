@@ -647,7 +647,7 @@ function uiQueryState(query: URLSearchParams, preset: ScenePreset): UIQueryState
   const sliceOnlyVolume = parsedGridAxis === "volume" && isSliceOnlyGridOverlayMode(parsedGridMode);
   const features = uiFeatureQuery.read(query);
   if (preset.renderProfile) {
-    if (preset.renderProfile.fluidParticleDisplay && !["off", "motion", "speed", "fine"].includes(query.get("fluidParticles") ?? "")) {
+    if (preset.renderProfile.fluidParticleDisplay && !["off", "motion", "speed", "fine", "water"].includes(query.get("fluidParticles") ?? "")) {
       features.fluidParticleDisplay = preset.renderProfile.fluidParticleDisplay;
     }
     const surface = query.get("fluidSurface");

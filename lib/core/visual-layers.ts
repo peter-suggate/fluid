@@ -29,7 +29,7 @@ export type ImportanceView = "all" | UniformDetailCriterion;
 /** How the particle layer paints a sphere: opaque on the speed ramp,
  * translucent with agitation as its opacity and whiteness, or as the fine
  * particle surface's spray (the skin itself is drawn by the water). */
-export type ParticleView = "speed" | "motion" | "fine";
+export type ParticleView = "speed" | "motion" | "fine" | "water";
 export type LayerView = "slice" | "3d";
 export type PageView = LayerView;
 export interface VisualLayerState {
@@ -154,7 +154,7 @@ export function readVisualLayers(raw: string | null, fallback = visualLayers()):
     if (value.performance) state.performance = readPerformanceView(value.performance);
     if (value.pages === "3d") state.pages = "3d";
     if (value.heat === "3d") state.heat = "3d";
-    if (value.particles === "motion") state.particles = "motion";
+    if (value.particles === "motion" || value.particles === "water") state.particles = value.particles;
     for (const layer of VISUAL_LAYERS) {
       if (value.views?.[layer.id] === "3d") state = setLayerView(state, layer.id, "3d");
     }
@@ -267,6 +267,7 @@ export const PARTICLE_DISPLAY_OPTIONS: ReadonlyArray<{ value: ParticleDisplay; l
   { value: "motion", label: "Motion", hint: `Soft overlapping samples, whiter and more opaque where the liquid would be white: by the kinetic energy of a sample's velocity about the grid's (full scale at ${LAYER_PARTICLE_ENERGY_SCALE} J/kg, a difference of ${LAYER_PARTICLE_AGITATION_SCALE} m/s). Liquid moving as one body stays transparent however fast it goes; below a quarter of full scale nothing shows and the rest whitens steeply, fading out just under the surface. Even a thick cloud of strongly colliding, shearing or breaking liquid lets some of the surface show through.` },
   { value: "speed", label: "Speed", hint: `Opaque spheres, coloured by each particle's own speed: violet at rest, pale at ${LAYER_PARTICLE_SPEED_SCALE / 2} m/s, orange from ${LAYER_PARTICLE_SPEED_SCALE} m/s.` },
   { value: "fine", label: "Fine", hint: "A fine liquid skin meshed from the particles every frame, at half a cell, drawn with the surface beside the level set. Where particles cluster densely they are liquid; what the skin does not enclose is spray, drawn as Motion's samples at a smaller footprint. Presentation only." },
+  { value: "water", label: "Water", hint: "Particles out of the liquid drawn as water droplets: each a small clear lens that reflects the sky at its rim (Fresnel), shows the world refracted and inverted through it, and catches the sun. Agitated samples are aerated and turn white. Particles under the water's surface are not drawn. Presentation only." },
 ];
 export function scalarLayerPaint(id: VisualLayerId, value: number): { color: readonly number[]; alpha: number } {
   const p = LAYER_PALETTE;

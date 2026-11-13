@@ -5,7 +5,7 @@ export type FluidSurfaceRenderMode = "shaded" | "wireframe" | "simple";
 export type WaterReflectionMode = "screen-space" | "world-space" | "environment";
 export const WATER_REFLECTION_OPTIONS = [{ value: "screen-space", label: "Scene" }, { value: "world-space", label: "World" }, { value: "environment", label: "Sky" }] as const;
 /** The liquid's own particles over the surface (core/visual-layers ParticleDisplay). */
-export type FluidParticleDisplay = "off" | "motion" | "speed" | "fine";
+export type FluidParticleDisplay = "off" | "motion" | "speed" | "fine" | "water";
 /** The Fine display's sliders (core/webgpu-particle-surface ParticleSurfaceSettings). */
 export interface FineSurfaceState {
   fineSurfaceGreed: number; fineSurfaceSmoothing: number; fineSurfaceThickness: number;
@@ -18,7 +18,7 @@ export const surfaceDisplayQuery = queryRecord<SurfaceDisplayState>({
   waterReflectionMode: choiceQuery<WaterReflectionMode>("waterReflections", "screen-space", ["screen-space", "world-space", "environment"]),
   waterWorldRefractionEnabled: booleanQuery("waterWorldRefraction", false),
   // On by default: a method that keeps particles shows where they are agitated.
-  fluidParticleDisplay: choiceQuery<FluidParticleDisplay>("fluidParticles", "motion", ["off", "motion", "speed", "fine"]),
+  fluidParticleDisplay: choiceQuery<FluidParticleDisplay>("fluidParticles", "motion", ["off", "motion", "speed", "fine", "water"]),
   fineSurfaceGreed: numberQuery("fineGreed", FINE.greed, 0, 1),
   fineSurfaceSmoothing: numberQuery("fineSmooth", FINE.smoothing, ...PARTICLE_SURFACE_SMOOTHING_RANGE),
   fineSurfaceThickness: numberQuery("fineThick", FINE.thickness, ...PARTICLE_SURFACE_THICKNESS_RANGE),
