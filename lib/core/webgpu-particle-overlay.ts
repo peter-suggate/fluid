@@ -171,8 +171,8 @@ struct ParticleOverlayUniforms {
   // xyz the unit direction of gravity, zero where there is none, w full-scale fluctuation in m/s
   gravity:vec4f,
   // x record stride in floats, y record capacity, z one in the Motion view, two
-  // in the Fine view (Motion samples outside the fine skin), three in the Water
-  // view (droplets); w one when binding 9 holds Motion energy
+  // in the Fine view (Motion samples outside the fine skin); w one when binding 9
+  // holds Motion energy
   records:vec4u,
   // Float offsets into a record: x the grid's velocity, y depth, z the ballistic
   // flag; w the depth a sample counts to in full, zero where records keep none
@@ -263,8 +263,6 @@ fn particleAgitation(at:u32,velocity:vec3f)->f32 {
 
 fn particleColor(at:u32,velocity:vec3f)->vec4f {
   let scale=max(overlay.scale.w,1e-6);
-  // A droplet's colour is its optics; r carries how aerated it is.
-  if (overlay.records.z==3u) { return vec4f(particleAgitation(at,velocity),0.0,0.0,1.0); }
   if (overlay.records.z>=1u) {
     let t=particleAgitation(at,velocity);
     // Suppress the low-energy tint that reveals particle residency: past the
@@ -300,9 +298,6 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   let spray=overlay.records.z==2u;
   // The fine skin encloses it: it is drawn as liquid, not as a droplet.
   if (spray && !(sprayField[instance]>=0.0)) { return output; }
-  // The Water view draws droplets, not the bulk: a sample more than half a
-  // cell inside the level set is the surface's to draw.
-  if (overlay.records.z==3u && overlay.grid.w>0u && particles[at+overlay.grid.y]< -0.5) { return output; }
   let local=vec3f(particles[at],particles[at+1u],particles[at+2u]);
   let velocity=vec3f(particles[at+4u],particles[at+5u],particles[at+6u]);
   let origin=select(overlay.origin.xyz,particleFrame.origin.xyz,overlay.origin.w>0.5);
@@ -314,7 +309,7 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   let tangent=max(overlay.cameraPosition.w,1e-4);
   let viewport=max(overlay.viewport.xy,vec2f(1.0));
   let pixelsPerMetre=0.5*viewport.y/(max(view.z,near)*tangent);
-  let reach=select(1.0,PARTICLE_MOTION_REACH*select(1.0,overlay.water.y,spray),overlay.records.z==1u||spray);
+  let reach=select(1.0,PARTICLE_MOTION_REACH*select(1.0,overlay.water.y,spray),overlay.records.z>=1u);
   let radius=max(overlay.cameraUp.w*reach,PARTICLE_MINIMUM_PIXELS/pixelsPerMetre);
   // The whole sphere stays in front of the near plane, so its depth is valid.
   if (!(view.z-radius>near)) { return output; }
@@ -357,46 +352,6 @@ struct SphereSample {
   viewDepth_m:f32,
 }
 
-// The world a droplet sees in direction d: the sky above the horizon, the
-// water body below it.
-fn dropletEnvironment(d:vec3f)->vec3f {
-  let sky=mix(vec3f(.93,.95,1.0),vec3f(.62,.76,.98),clamp(d.y,0.0,1.0));
-  return mix(SIMPLE_WATER_BODY*.55,sky,smoothstep(-.12,.08,d.y));
-}
-// A water droplet: a clear sphere (n = 1.333) seen along rd at outward normal
-// n. Schlick's Fresnel mixes the reflected world with the world seen through
-// it, refracted in at n and out where the chord meets the far side (so it is
-// inverted, bright below and dark above, as a real drop is), plus the sun.
-// An aerated sample (foam, 0 to 1) scatters instead and turns white.
-fn waterDroplet(n:vec3f,rd:vec3f,foam:f32)->vec3f {
-  let cosine=clamp(dot(n,-rd),0.0,1.0);
-  let grazing=1.0-cosine;
-  let fresnel=.02+.98*grazing*grazing*grazing*grazing*grazing;
-  let mirrored=reflect(rd,n);
-  let inside=refract(rd,n,1.0/1.333);
-  let chord=max(-2.0*dot(n,inside),0.0);
-  let far=n+inside*chord;
-  var out=refract(inside,-far,1.333);
-  if (dot(out,out)<1e-6) { out=reflect(inside,-far); }
-  // A drop is clear: only a faint blue from the water it is made of.
-  let tint=mix(vec3f(1.0),SIMPLE_WATER_BODY*1.25,.18*chord);
-  var color=mix(dropletEnvironment(normalize(out))*tint,dropletEnvironment(mirrored),fresnel);
-  let sun=max(dot(mirrored,SIMPLE_WATER_KEY),0.0);
-  color+=vec3f(2.0*pow(sun,240.0)+.15*pow(sun,16.0));
-  let wrap=.5+.5*dot(n,SIMPLE_WATER_KEY);
-  let foamColor=vec3f(.96,.97,1.0)*(.55+.45*wrap*wrap)+vec3f(.25*pow(sun,8.0));
-  return mix(color,foamColor,.85*clamp(foam,0.0,1.0));
-}
-
-// The view ray through a fragment of the overlay.
-fn fragmentRay(position:vec2f)->vec3f {
-  let viewport=max(overlay.viewport.xy,vec2f(1.0));
-  let screen=position/viewport;
-  let tangent=overlay.cameraPosition.w;
-  return normalize(overlay.cameraForward.xyz+overlay.cameraRight.xyz*((2.0*screen.x-1.0)*overlay.cameraForward.w*tangent)
-    +overlay.cameraUp.xyz*((1.0-2.0*screen.y)*tangent));
-}
-
 // One fragment of a sphere, discarded off its disc and behind the scenery.
 fn sphereSample(input:VertexOut)->SphereSample {
   let radial=dot(input.disc,input.disc);
@@ -422,8 +377,7 @@ fn sphereSample(input:VertexOut)->SphereSample {
   let highlight=pow(max(dot(normal,normalize(SIMPLE_WATER_KEY-forward)),0.0),40.0);
   var color=input.color.rgb*light+vec3f(0.20*highlight);
   // Motion spheres are unlit, so a fast one is white on every side.
-  if (overlay.records.z==1u||overlay.records.z==2u) { color=input.color.rgb; }
-  if (overlay.records.z==3u) { color=waterDroplet(normal,fragmentRay(input.position.xy),input.color.r); }
+  if (overlay.records.z>=1u) { color=input.color.rgb; }
   // The cap of a sphere breaking the surface stays dry; the rest goes under.
   let travel=input.water.x-input.sphere.y*towardCamera;
   if (input.water.y>0.5 && travel>0.0) {
@@ -718,6 +672,8 @@ export class ParticleOverlay {
     if (!this.ready || !source || source.capacity === 0) return false;
     const spray = frame.view === "fine" ? frame.spray : undefined;
     if (frame.view === "fine" && !spray) return false;
+    // The Water view's particles are drawn by the water itself (webgpu-particle-water-interface).
+    if (frame.view === "water") return false;
     const { camera } = frame;
     const width = Math.max(1, Math.round(frame.viewportWidth));
     const height = Math.max(1, Math.round(frame.viewportHeight));
@@ -729,15 +685,13 @@ export class ParticleOverlay {
     f.set([width, height, Math.max(1e-6, frame.depthNear_m), sceneDepth ? 1 : 0], 16);
     f.set([...source.positionScale_m, LAYER_PARTICLE_SPEED_SCALE], 20);
     f.set([-0.5 * frame.container_m[0], 0, -0.5 * frame.container_m[2], source.frame ? 1 : 0], 24);
-    // Droplets, like spray, hide behind the water's front interface.
-    const droplets = frame.view === "water";
     f.set([frame.water ? simpleWaterMurkLength_m(frame.container_m) : 0, spray?.radiusScale ?? 1, spray?.opacity ?? 1,
-      (spray || droplets) && frame.waterFront ? 1 : 0], 28);
+      spray && frame.waterFront ? 1 : 0], 28);
     const gravity = frame.gravity_m_s2 ?? [0, 0, 0], pull = Math.hypot(...gravity) || 1;
     f.set([gravity[0] / pull, gravity[1] / pull, gravity[2] / pull, LAYER_PARTICLE_AGITATION_SCALE], 32);
     // Spray is Motion's samples: the accumulation and the composite.
     const motion = frame.view === "motion" || spray !== undefined, grid = source.grid;
-    u.set([source.strideFloats, source.capacity, spray ? 2 : frame.view === "motion" ? 1 : droplets ? 3 : 0, source.motionEnergy ? 1 : 0], 36);
+    u.set([source.strideFloats, source.capacity, spray ? 2 : frame.view === "motion" ? 1 : 0, source.motionEnergy ? 1 : 0], 36);
     u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat+(grid.ballisticSignBit?0x80000000:0), grid.surfaceDepth] : [0, 0, 0, 0], 40);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
@@ -757,7 +711,7 @@ export class ParticleOverlay {
       },
     });
     pass.setPipeline(motion ? this.motionPipeline! : this.pipeline!);
-    pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth, frame.water ?? (spray || droplets ? frame.waterFront : undefined), spray?.field));
+    pass.setBindGroup(0, this.bindGroupFor(source.buffer, sceneDepth, frame.water ?? (spray ? frame.waterFront : undefined), spray?.field));
     if (source.liveCount) pass.drawIndirect(this.indirect!, 0);
     else pass.draw(4, source.capacity);
     pass.end();

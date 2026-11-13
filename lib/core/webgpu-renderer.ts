@@ -3222,6 +3222,9 @@ export class FluidLabRenderer {
       revision: gpuInfo?.surfaceRevision ?? gpuInfo?.encodedSteps ?? 0,
     }) ? this.particleSurfacePipeline : undefined;
     this.waterPipeline.setExtraSurface(fineSurface?.geometry);
+    // The Water view: the records themselves join the water's interfaces.
+    this.waterPipeline.setParticleWater(particlesVisible && composedLayers && particleView(composedLayers) === "water" ? this.gpuFluid?.particleSource : undefined,
+      [scene.container.width_m, scene.container.height_m, scene.container.depth_m]);
     this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
     // Who draws the bodies. A full-scene presentation rasters them into the SVO
     // dry G-buffer; a fluid-only one runs no dry scene at all, so the water

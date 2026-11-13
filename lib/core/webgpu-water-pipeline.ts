@@ -21,6 +21,8 @@ import type { FluidSurfaceRenderMode, WaterReflectionMode } from "../features/su
 import { environmentShaderLibrary } from "./webgpu-environments";
 import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
+import { ParticleWaterInterface } from "./webgpu-particle-water-interface";
+import type { GPUFluidParticleSource } from "./webgpu-particle-overlay";
 import type { GPUSolverInstance } from "./method-contract";
 import {
   packWaterSceneOptics,
@@ -2415,6 +2417,9 @@ export class RasterWaterPipeline {
   private dryInterfaceClearsEncoded = false;
   private disabledStages: DisabledRenderStages = NO_DISABLED_RENDER_STAGES;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
+  /** The particle display's Water view: the solver's records as spheres in the interfaces. */
+  private particleWater?: ParticleWaterInterface;
+  private particleWaterReady = false;
   /** A cosmetic mesh in the same SurfaceVertex layout, drawn after the level set's in every interface pass. */
   private extraSurface?: { group: GPUBindGroup; vertices: GPUBuffer; indirect: GPUBuffer; offset: number };
   private fluidDomain?: FluidDomain;
@@ -3100,6 +3105,20 @@ export class RasterWaterPipeline {
   get simpleWaterInterfaces(): SimpleWaterInterfaces | undefined { return this.interfaceViews; }
 
   /**
+   * The particle display's Water view: every live record of a particle method
+   * joins the interfaces as a smoothed screen-space surface, so the surface
+   * mode shades the particles as it shades the liquid. Absent draws none.
+   */
+  setParticleWater(source: GPUFluidParticleSource | undefined, container_m: readonly [number, number, number]) {
+    if (source && !this.particleWater) {
+      const interfaces = this.particleWater = new ParticleWaterInterface(this.device, this.uniformBuffer);
+      interfaces.initialize().then(() => { if (this.particleWater === interfaces) this.particleWaterReady = true; },
+        (error) => console.error("[water] particle water interfaces failed", error));
+    }
+    this.particleWater?.setSource(source, container_m);
+  }
+
+  /**
    * A second mesh the interfaces take beside the level set's: the Fine particle
    * surface. The nearest front and back faces win, so it adds detail wherever it
    * lies on or above the body and every surface mode shades it. Absent draws
@@ -3408,7 +3427,8 @@ export class RasterWaterPipeline {
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:WATER_INTERFACE_DEPTH.clearValue,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.drawExtraSurface(pass);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
+    const particleWater=this.particleWaterReady&&!!this.frontPosition&&!!this.particleWater?.prepare(encoder,this.frontPosition.width,this.frontPosition.height);
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:WATER_INTERFACE_DEPTH.clearValue,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);this.drawExtraSurface(pass);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);if(particleWater){this.particleWater!.encode(pass,side);}}pass.end();};
     // Withheld, a fluid scene takes the same once-only clears a dry one does:
     // the compositor reads these attachments unconditionally, so leaving them
     // holding the last drawn interface would keep compositing water that this
@@ -3537,6 +3557,7 @@ export class RasterWaterPipeline {
     this.fallbackRigidSurfaceCuts?.destroy();
     this.lensCamera?.destroy();
     this.frontWorldReflections?.destroy(); this.rearWorldReflections?.destroy();
+    this.particleWater?.destroy(); this.particleWater = undefined;
     for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.polygoniseDispatchBuffer,this.bulkWindowsDispatchBuffer,this.reflectionBounds,this.frontReflections,this.rearReflections,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparseControl,this.fallbackField,this.fallbackSolidTerrain,this.fallbackSolidUniform,this.surfaceWindows,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }
