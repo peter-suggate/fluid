@@ -198,6 +198,10 @@ export function UniformTunePanel() {
       options={[{ value: "8", label: "8" }, { value: "64", label: "64" }]}
       hint="Particles a cell in the top cell and a half, where they define the surface. 64 gives a smoother, less biased surface (nothing finer than a cell) at more particle work; deeper particles are unchanged. Restarts the solver."
       testId="scene-detail-surface-samples" onChange={value => set("surfaceSamples", value)} />
+    <RailChoice label="Transfer" value={resolved.particleTransfer === "apic" ? "apic" : "flip"}
+      options={[{ value: "flip", label: "FLIP" }, { value: "apic", label: "APIC" }]}
+      hint="How particles and grid exchange velocity. FLIP (95%) carries the particles' residual velocity; APIC (experimental) replaces it with quadratic affine transfers (Sato 2018). Restarts the solver."
+      testId="scene-detail-particle-transfer" onChange={value => set("particleTransfer", value)} />
     <RailRule />
     <RailLink label="All controls…" hint="Every detail control on its own, grouped as the solver reads them. Changes apply live."
       testId="scene-detail-all-controls" onClick={() => setEverything(true)} />
