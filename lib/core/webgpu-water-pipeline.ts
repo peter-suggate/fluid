@@ -669,6 +669,79 @@ fn uniformPhiNormal(lattice:vec3f, fallback:vec3f) -> vec3f {
   return select(fallback,normalize(gradient),weightSum>1e-8&&length(gradient)>1e-8);
 }
 
+// Wall contact lines. A wall closes the contour between a lattice point and
+// its closed neighbour (a SOLID halo cell reads 0; an obstacle's cell is
+// clipped below 0.5), so no edge of the closed column crosses and the liquid's
+// wall face ends at the last edge across the wall whose open end is liquid:
+// at that end's cell centre. The contact line on a wall then stepped by whole
+// cells as the free surface moved, and the wall face rounded half a cell off
+// below it. A contact vertex instead lies on the wall and slides along it
+// as far as the free surface beside its open end: where that neighbour is
+// air, by the neighbour edge's own crossing, so the free surface and the
+// wall face meet at one height; where it is closed (a second wall), into the
+// corner. Only along a flat wall (the neighbour's own wall cell closed, its
+// clearance the same) does it slide; elsewhere it keeps its edge crossing.
+//
+// Clearance in cells, negative in a closed cell: a SOLID halo cell (the
+// dense field's out-of-domain x/z/upper halo) is -0.5, its open neighbour 0.5.
+fn surfaceHaloClearance(p:vec3i)->f32{
+  if(umPresentationEnabled()){return select(0.5,-0.5,umCellKind(uniformSurfaceCell(p))==UM_SOLID);}
+  let dims=vec3i(u.gridInfo.xyz);
+  return select(0.5,-0.5,p.x<=0||p.z<=0||p.x>=dims.x+1||p.z>=dims.z+1||p.y>=dims.y+1);
+}
+// With obstacles, the nearer of the halo and the obstacle's face.
+fn surfaceLatticeClearance(p:vec3i)->f32{
+  let halo=surfaceHaloClearance(p);
+  if(halo<0.0||!surfaceHasSolids()){return halo;}
+  return surfaceSolidClearance(vec3f(uniformSurfaceCell(p))+0.5)/(u.container.y/u.gridInfo.y);
+}
+// The liquid level the edge crossings interpolate (positive in liquid):
+// latticeValue's, unclipped (the obstacle path interpolates freeFieldCell).
+fn surfaceContactLevel(p:vec3i)->f32{
+  var cell=vec3i(p.x-1,max(p.y-1,0),p.z-1);
+  if(umPresentationEnabled()){
+    cell=uniformSurfaceCell(p);
+    if(umCellKind(cell)==UM_BULK16){return 0.5;}
+  }
+  return freeFieldCell(cell)-0.5;
+}
+// ends: the clearances of a and b. Probe 0 is the open end, 1..4 its
+// neighbours along the wall. Where a neighbour is air the level falls toward
+// it by lo - ln (both sides air: their mean); one Newton step down that
+// gradient, lo D/|D|^2, puts the vertex on the linear free surface. Along
+// one axis it is the neighbour edge's own crossing lo/(lo - ln), so a level
+// free surface meets the wall at its own height; no component passes that
+// crossing, so the vertex stays inside its cells. Each sampler has one call
+// site behind an opaque bound: inlined per probe, the level's sampler
+// tripled the polygonise pipeline's compile time.
+fn surfaceContactLattice(a:vec3f,b:vec3f,t:f32,cubeScale:f32,ends:vec2f)->vec3f{
+  let lattice=mix(a,b,t);
+  if((ends.x<0.0)==(ends.y<0.0)){return lattice;}
+  let aClosed=ends.x<0.0;
+  let o=select(vec3i(a),vec3i(b),aClosed);let c=select(vec3i(b),vec3i(a),aClosed);
+  let co=select(ends.x,ends.y,aClosed);let cc=select(ends.y,ends.x,aClosed);
+  let across=c-o;let step=max(i32(cubeScale),1);
+  let normal=select(select(2u,1u,across.y!=0),0u,across.x!=0);
+  var p=mix(vec3f(o),vec3f(c),clamp(co/(co-cc),0.0,1.0));
+  var lo=0.0;var fall=vec3f(0.0);var airs=vec3f(0.0);
+  for(var k=0u;k<min(arrayLength(&umTopology)+5u,5u);k++){
+    var n=o;var axis=0u;var side=0.0;
+    if(k>0u){
+      axis=(normal+1u+((k-1u)>>1u))%3u;side=select(-1.0,1.0,((k-1u)&1u)!=0u);
+      n[axis]+=i32(side)*step;
+      let cn=surfaceLatticeClearance(n);
+      if(cn<0.0){p[axis]+=side*f32(step)*clamp(co/(co-cn),0.0,1.0);continue;}
+      if(abs(cn-co)>1e-3||surfaceLatticeClearance(n+across)>=0.0){continue;}
+    }
+    let level=surfaceContactLevel(n);
+    if(k==0u){if(level<=0.0){return lattice;}lo=level;continue;}
+    if(level<0.0){fall[axis]+=side*(lo-level);airs[axis]+=1.0;}
+  }
+  let down=fall/max(airs,vec3f(1.0));let slope=dot(down,down);
+  if(slope>1e-12){p+=clamp(lo*down/slope,vec3f(-1.0),vec3f(1.0))*f32(step);}
+  return p;
+}
+
 // Liquid and obstacle constraints retain independent linear edge crossings.
 // The cube arrays travel by pointer because WGSL passes arrays by value.
 fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f32, cubeValue: ptr<function, array<f32, 8>>, dims:vec3f) -> SurfaceVertex {
@@ -677,6 +750,7 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
   if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
   var contact=false;
   var solidValues:array<f32,8>;
+  var ends=vec2f(surfaceHaloClearance(vec3i(a)),surfaceHaloClearance(vec3i(b)));
   if(surfaceHasSolids()){
     let ca=uniformSurfaceCell(vec3i(a));let cb=uniformSurfaceCell(vec3i(b));
     let sa=surfaceSolidClearance(vec3f(ca)+0.5);let sb=surfaceSolidClearance(vec3f(cb)+0.5);
@@ -685,6 +759,7 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
     // of the edge, not from its arbitrary buried padding sentinel.
     if(sa<0.0&&umCellOpen(ca)<=1e-5){la=lb;}
     if(sb<0.0&&umCellOpen(cb)<=1e-5){lb=la;}
+    ends=min(ends,vec2f(sa,sb)/(u.container.y/u.gridInfo.y));
     let range=surfaceEdgeInterval(-sa,-sb,surfaceEdgeInterval(la,lb,vec2f(0,1)));
     t=select(range.x,range.y,va>=0.5);
     contact=(sa<=0.0||sb<=0.0)&&abs(mix(sa,sb,t))<1e-5*(u.container.y/u.gridInfo.y);
@@ -695,7 +770,7 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
       }
     }
   }
-  let lattice = mix(a, b, t);
+  let lattice = surfaceContactLattice(a, b, t, cubeScale, ends);
   if(contact){return SurfaceVertex(vec4f(latticeWorld(lattice,dims),1),vec4f(surfaceNormal(lattice,cubeBase,cubeScale,&solidValues,dims),0));}
   return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0),
     vec4f(uniformPhiNormal(lattice,surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims)), 0.0));
@@ -730,24 +805,17 @@ fn cubeEdgeVertex(edgeId:u32,p:ptr<function,array<vec3f,8>>,value:ptr<function,a
 // A crossing is evaluated once per cube and reused by every triangle of the
 // cube that meets at it, in the same emission order. Off, every triangle
 // corner evaluates its own: the reference the extraction lane compares against.
+// Both take one loop, so the crossing (and its wall-contact probes) is
+// inlined at a single site.
 override shareCubeVertices = true;
 fn polygoniseCube(p:ptr<function,array<vec3f,8>>,value:ptr<function,array<f32,8>>,cubeBase:vec3f,cubeScale:f32,dims:vec3f){
   let cubeCase=mcCase(value);let indexCount=mcIndexCount(cubeCase);
-  if(shareCubeVertices){
-    var edge:array<SurfaceVertex,12>;var corner:array<SurfaceVertex,3>;var have=0u;
-    for(var index=0u;index<indexCount;index+=1u){
-      let id=mcEdge(cubeCase,index);
-      if((have&(1u<<id))==0u){edge[id]=cubeEdgeVertex(id,p,value,cubeBase,cubeScale,dims);have|=1u<<id;}
-      corner[index%3u]=edge[id];
-      if(index%3u==2u){emitTriangle(corner[0],corner[1],corner[2]);}
-    }
-    return;
-  }
-  for(var index=0u;index<indexCount;index+=3u){
-    emitTriangle(
-      cubeEdgeVertex(mcEdge(cubeCase,index),p,value,cubeBase,cubeScale,dims),
-      cubeEdgeVertex(mcEdge(cubeCase,index+1u),p,value,cubeBase,cubeScale,dims),
-      cubeEdgeVertex(mcEdge(cubeCase,index+2u),p,value,cubeBase,cubeScale,dims));
+  var edge:array<SurfaceVertex,12>;var corner:array<SurfaceVertex,3>;var have=0u;
+  for(var index=0u;index<indexCount;index+=1u){
+    let id=mcEdge(cubeCase,index);
+    if(!shareCubeVertices||(have&(1u<<id))==0u){edge[id]=cubeEdgeVertex(id,p,value,cubeBase,cubeScale,dims);have|=1u<<id;}
+    corner[index%3u]=edge[id];
+    if(index%3u==2u){emitTriangle(corner[0],corner[1],corner[2]);}
   }
 }
 
