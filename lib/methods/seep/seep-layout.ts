@@ -53,8 +53,11 @@ export const CLASS_DEAD = 1, CLASS_DEEP = 2, CLASS_PARTICLE = 4, CLASS_CHAMBER =
  * Every BULK brick is DEEP (wholly below DEEP_ROW_LIMIT, x < 240).
  */
 export const BULK_BX1 = WALL_X0 / BRICK, BULK_BY1 = DEEP_ROW_LIMIT / BRICK;
+/** Inclusive brick bounds of the throat approach block kept fine inside the BULK box. */
+export const THROAT_BLOCK_LO = [27, 6, 2] as const, THROAT_BLOCK_HI = [29, 10, 5] as const;
 export function throatBlockBrick(bx: number, by: number, bz: number): boolean {
-  return bx >= 27 && bx <= 29 && by >= 6 && by <= 10 && bz >= 2 && bz <= 5;
+  return bx >= THROAT_BLOCK_LO[0] && bx <= THROAT_BLOCK_HI[0] && by >= THROAT_BLOCK_LO[1] && by <= THROAT_BLOCK_HI[1]
+    && bz >= THROAT_BLOCK_LO[2] && bz <= THROAT_BLOCK_HI[2];
 }
 export function bulkBrick(bx: number, by: number, bz: number): boolean {
   return bx >= 0 && by >= 0 && bz >= 0 && bx < BULK_BX1 && by < BULK_BY1 && bz < BZ && !throatBlockBrick(bx, by, bz);

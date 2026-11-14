@@ -160,3 +160,46 @@ Fenced median 17.2 ms (check slot): 1.96x NB-FLIP.
 
 Until the gates are re-based, I am continuing S2 speed work on this conservative build. Each change is gated on the
 ledger and the 1200-step run.
+
+## 2026-11-14 MILESTONE S2c: 13.3 ms fenced over 1200 steps (2.53x NB-FLIP), gates unchanged at 5/8
+
+These are speed changes on the conservative build (75cab37b), with the physics the same. Each one leaves every value
+anything reads unchanged, or only reorders the same reads:
+
+- **Velocity, 2.9 to 1.4 ms.** In the chamber, a face with no particle weight between two all-air cells now gets no
+  backtrace. Nothing read those values: the projection reads only faces of liquid cells, and G2P's FLIP difference
+  reads the trilinear stencil around a particle. That stencil lies inside the particle's own B-spline P2G support, so
+  every face it reads carries weight. Standard FLIP keeps no grid-advected velocity where particles carry the liquid
+  (Zhu & Bridson 2005). These traces through the jet's air band were half the kernel. Its level-set reads now come
+  from one staged 10^3 vertex tile.
+- **advectPhi, 0.72 to 0.39 ms.** Chamber vertices that the particle surface overwrites are no longer traced.
+- **velocityBulk, 0.92 to 0.26 ms.** One workgroup per 8^3 coarse block, with a staged coarse-velocity tile, using the
+  same interpolation.
+- **redistInit, 0.52 to 0.13 ms.** The 26-neighbour sign test reads a staged sign tile, instead of 27 scattered loads
+  and 216 cell-open tests per vertex.
+- **Level-2 multigrid.** mgDown1 (BULK), mgDown2 and mgUp2 pack 8 bricks into a 64-thread workgroup, instead of one
+  8-thread workgroup per brick.
+- **Smaller fixes.** PCG dot sums load their 64 partial slots in parallel. coarseSolve clears its set with 192
+  threads. BULK membership is computed in closed form (the bake equals bulkBrick, as the layout test pins).
+- **Mass fit and emission.** The mass fit skips idle bricks and emission runs in parallel (both uncommitted after
+  75cab37b).
+
+Ledger, 1200 steps (cells): chamber phi vs delivered is +0.6 / +0.5 / +0.75 / +0.5% at 300 / 600 / 900 / 1200.
+Total drift is +5e-5, with no deletions.
+
+seep-bench 1200 vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2c.md), check slot:
+
+| gate | verdict | detail |
+|---|---|---|
+| G1 | pass | q_left -4.24% |
+| G2 | pass | -3.4 / -4.3 / -4.3 / -4.0% |
+| G3 | FAIL (300 only) | 1.291 vs bound 1.282 L (reference-bound; see DECISION NEEDED) |
+| G4 | pass | throat u 2.588 vs 2.639 |
+| G5 | pass | 90% wet at 336 vs 299 |
+| G6 | FAIL (1200) | centroid 386.5 vs 369.8 (was 392.7); L1 0.230 vs limit 0.226 (was 0.315) |
+| G7 | pass | drift 0.01% |
+| G8 | FAIL | jet 0.0367 vs 0.0770 L (ballistic ~0.036 L) |
+
+Fenced median 13.33 ms over the 1200-step check run (thirds 12.0 / 13.5 / 14.2 ms). In the s2b run it was 17.2 ms.
+The 3x target (11.2 ms) is still ahead. What is left: PCG at ~7.4 cycles (~0.6 ms per cycle), extension (0.98 ms),
+redistance sweeps, and the mass fit.

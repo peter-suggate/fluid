@@ -14,14 +14,14 @@ import {
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
   countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
-  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, type KernelSource,
+  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, BULK_CBLOCKS, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
 import { ARGS_WORDS, B, BULK_WG, C, COARSE_CELLS, COARSE_LATTICE, FAIL, MAX_CYCLES, MG_STRIDE, NSHADOW, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
 
 export const SEEP_METHOD_ID = "seep-m1max";
 /** Mass-fit passes over the chamber surface (even: they ping-pong phiT -> phi -> phiT). */
-const MASS_FIT_PASSES = 6;
+const MASS_FIT_PASSES = 4;
 
 export interface SeepSolverOptions { readonly onProgress?: (progress: { stage: string; fraction: number }) => void; readonly signal?: AbortSignal }
 
@@ -239,7 +239,7 @@ export class SeepSolver implements GPUSolverInstance {
         d(redistSweepKernel, [N, 0, 1, 0], { indirect: W(C.ARG_SURF) }, "seep.redistSweep.2"),
         d(separateKernel, p, { direct: [capGroups] }),
         d(p2gKernel, p, { indirect: W(C.ARG_PART) }),
-        d(velocityBulkKernel, undefined, { direct: [BULK_WG] }),
+        d(velocityBulkKernel, undefined, { direct: [BULK_CBLOCKS] }),
         d(velocityKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
         d(operatorKernel, undefined, { indirect: W(C.ARG_ACTB) }),
         d(coarsenBrickKernel, undefined, { indirect: W(C.ARG_ACTBB) }),
