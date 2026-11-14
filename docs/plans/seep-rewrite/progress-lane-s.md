@@ -412,3 +412,100 @@ seep-bench 1200 vs NB-FLIP, check slot (artifacts/seep-rewrite/lane-s/compare-s2
 - **G8 as written** (jet column volume, now report-only): 0.0331 vs 0.0770 L.
 
 Fenced median 10.74 ms on the check slot (thirds 9.96 / 10.91 / 11.34, p95 12.11), with lane H sharing the GPU.
+
+## 2026-11-14 (late): G6 far-wall investigation, jet impact offset, and the S2i speed batch (not landed)
+
+### G6: Seep conserves; NB-FLIP's lost 1.74 L is the gap
+
+All numbers are at step 1200, from five Seep runs and NB-FLIP check-c/d. The Seep runs are: s2h (mine), lane H's check,
+timing-fenced and timing-pipelined runs of bbc7828d, and s2i (below). Script: g6prof.mjs in lane S's scratch.
+
+**Particles vs phi:** they agree per 16-cell bin. There is no near-wall reconstruction excess and no particle stacking.
+Phi in the chamber matches delivered volume within 0.5%.
+
+**Film momentum:** the pool at 1200 is close to rest, with |u_x| < 0.14 m/s in the film away from the impact. The far
+bins show no bore at the sample.
+
+**Volume:** Seep's right chamber holds 5.19-5.21 L, against the 5.17 L it delivered. NB's holds 3.39 L, against the
+5.37 L it delivered. NB's total drift is -1.71 / -1.77 L, which is the whole right-chamber gap (1.82 L). NB's deficit
+is far-weighted. Per bin, Seep minus NB is 0.05-0.10 L at x < 400 and 0.13-0.24 L at x >= 400. NB's far bins are its
+lowest (0.13-0.15 L, against 0.24-0.27 L near), even though the jet drives liquid toward the far wall.
+
+| run | centroid | L1 vs NB | L1 vs NB + lost 1.74 L, uniform | L1 vs NB + lost 1.74 L, levelled |
+|---|---|---|---|---|
+| s2h | 380.0 | 0.174 | 0.117 | 0.112 |
+| H check | 385.8 | **0.227** | 0.160 | 0.148 |
+| H timing-fenced | 380.9 | 0.170 | 0.103 | 0.118 |
+| H timing-pipelined | 386.5 | 0.211 | 0.139 | 0.098 |
+| s2i | 388.2 | **0.272** | 0.205 | 0.159 |
+| NB (binned) | 370.4 | - | centroid 375.0 | centroid 384.0 |
+
+The limit is 0.214 (3 x NB repeat 0.071). "Levelled" water-fills NB's lowest bins with its lost volume, which is what a
+conserving pool would do with it.
+
+With NB's lost liquid restored, every Seep run passes both L1 and centroid: L1 0.10-0.16 and centroid within 5 cells of
+384. Against NB as measured, the systematic part alone, the mean Seep profile vs NB, is L1 0.196 of the 0.214 limit.
+
+Seep's own run-to-run L1 is 0.10-0.14, against NB's 0.07. The pool is deeper (2.5 vs 1.7 cells), so sloshing is less
+damped and its phase at the 1200 sample varies. Seep's centroid has sat 8-16 cells beyond NB's at every sample since
+step 660. As a result, G6 at 1200 passes or fails on sample noise: 3 of 5 runs pass L1, and s2i also fails the centroid
+(17.8 > 16).
+
+I found no Seep defect behind the far-wall share. The gap is NB-FLIP's film loss plus Seep's larger, less damped pool.
+G6 as written cannot pass reliably for a conserving solver. This needs the coordinator's ruling. I have not changed G6.
+
+### Jet impact 4-5 cells short: decomposed, no defect specific to Seep
+
+Audit of s2h and s2i, steps 300 and 600. The jet core stays thin (the separate step's displacement is 0 there), and
+its volume matches the ballistic column exactly (0.0331 vs 0.0320 L).
+
+**Throat speed:** u0 is 2.60-2.61 m/s, against NB's 2.64-2.65 (G4 -1.6%). Ballistic impact moves from 383.9 to 381.3,
+**2.6 cells**.
+
+**Sag below ballistic:** it grows linearly with x in both solvers, so it acts as a constant downward velocity.
+- Seep: 5.1 cells over 112 cells, about 0.12 m/s.
+- NB: 3.8 cells, about 0.09 m/s.
+- Most of this is the first-order time error of advecting supported particles with u^{n+1} (symplectic Euler: ½ g dt =
+  0.082 m/s). NB's coupled samples share it.
+- Seep's extra 0.03 m/s is the outlet cell's vertical face velocity carried at emission, worth about **1.3 cells**.
+
+The two parts sum to the 4 cells measured (375.5 vs 379.2). G8 passes (±8).
+
+Removing the ½ g dt error would need trapezoidal advection with the pre-force velocity. That averages a field that is
+not divergence-free into particle motion everywhere, and it would move impact and centroid further out, making G6 worse.
+Not done.
+
+### S2i speed batch: Jacobi initial guess + exact coarsest solve (gated, NOT landed)
+
+Two changes:
+- **pcgGuess:** one Jacobi sweep from the warm start before PCG (Saad 2003 §4.1). The bulk is copied.
+- **Exact coarsest solve:** the L6 32x32 operator is inverted once per step in coarsenTop by Gauss-Jordan (SPD, no
+  pivoting, FAIL_PIVOT on a non-positive pivot). coarseSolve applies it with one mat-vec in place of 41 red-black
+  sweeps (Trottenberg et al. 2001; Golub & Van Loan 2013 §4.2).
+
+The tolerance is unchanged.
+
+**A/B, 600 steps, check slot, interleaved x3** (HEAD from a scratch tree via SEEP_IMPL; nothing written to
+lib/methods/seep):
+
+| | HEAD | S2i | change |
+|---|---|---|---|
+| fenced ms | 10.14-10.22 | 9.73-9.81 | -0.42 |
+| mean cycles | 6.29-6.30 | 5.47-5.50 | |
+
+u and q are identical at 600.
+
+**seep-bench 1200, check slot** (artifacts/seep-rewrite/lane-s/compare-s2i.md; audit audit-s2i):
+- G1-G5, G7 and G8 (trajectory) pass. Impact 375.8 / 375.5 vs 380.8 / 382.8; RMS 0.74 / 1.34.
+- G6 fails at 1200: centroid 388.2 vs 370.4, and L1 0.272 > 0.214.
+- Fenced median 11.75 ms (p95 17.1, max 43.9). The check slot was contended during this run; the interleaved A/B is
+  the comparison.
+
+Under "every speed change keeps G6 passing", S2i is not landed. Its patch is saved at
+~/code/me/fluid-scratch/lane-s/s2i-pcgguess-exactcoarsest.patch, and the working tree still holds it.
+
+### Scratch workflow
+
+The old ab.sh, which swapped HEAD files into lib/methods/seep, is deleted; that swap is what lane H saw at 21:42.
+ab2.sh builds the A side in ~/code/me/fluid-scratch/lane-s/ab-tree and loads it through SEEP_IMPL, and it never writes
+the checkout.
