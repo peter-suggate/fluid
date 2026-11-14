@@ -235,8 +235,24 @@ change stays visible.
     x ∈ [256, 352) within max(3 cells, 3·S).
 
   The raw jet-column volume is still reported, but not gated.
-- G1, G2, G4–G7 are unchanged. G6 stays as written, even though part of its gap comes
-  from NB-FLIP's floor-film loss (1.95 L, 36% of delivered, by step 1200).
+- G1, G2, G4, G5 and G7 are unchanged.
+- **G6, right-chamber profile (ruled 2026-11-14 after lane S's far-wall check).**
+  §4's opening principle applies: where NB-FLIP's own conservation error dominates an
+  observable, the tolerance band includes that measured error. NB-FLIP loses 1.71–1.77 L
+  of the 5.37 L it delivers, 33% of the chamber, and the loss is weighted toward the far
+  wall (Seep − NB is 0.05–0.10 L per bin at x < 400, 0.13–0.24 L at x ≥ 400).
+  - Lane S checked Seep for wall bias in five runs and found none. Particles and phi agree
+    per bin, nothing stacks at the wall, and the film is close to rest.
+  - Corrected G6 uses NB_restored: the NB-FLIP profile with its measured lost volume
+    (left loss − open wall change − right volume) added back uniformly over the 16 bins.
+    Uniform is the neutral choice; restoring the volume into the lowest bins first would
+    be more lenient.
+  - L1 pass rule: the candidate's normalised L1 against NB_restored is within the
+    unchanged limit, 3× NB-FLIP's repeat L1 with a floor of 0.15.
+  - Centroid pass rule: the candidate's centroid is within ±16 cells of the interval
+    between NB's centroid and NB_restored's.
+  - G6 as written is still reported, not gated. At bbc7828d it passed in 3 of 5 Seep runs
+    against NB-FLIP as measured.
 
 ## 5. Performance acceptance
 
