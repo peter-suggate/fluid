@@ -31,7 +31,7 @@ export const RESERVOIR_TOP = 192;
 /** Level-set magnitude clamp, in cells. */
 export const PHI_MAX = 6;
 /** DEEP bricks: reservoir brick rows wholly below this cell row (see bake). */
-export const DEEP_ROW_LIMIT = 176;
+export const DEEP_ROW_LIMIT = 184;
 /** Particle-capable region: the right chamber, x >= 256. As in the reference, the jet leaves the
  * throat as level set only; the throat's momentum is grid (semi-Lagrangian) momentum. */
 export const PARTICLE_X0 = WALL_X1;
@@ -48,13 +48,16 @@ export const CLASS_DEAD = 1, CLASS_DEEP = 2, CLASS_PARTICLE = 4, CLASS_CHAMBER =
  * brick is 2x2x2 coarse cells of 4 cells a side) as a composite h/4h grid
  * (plan §2.3): coarse MAC velocities and one pressure per coarse cell, and
  * conservative flux sums over the 16 fine faces where a coarse cell meets
- * fine cells (Losasso et al. 2004). The throat's approach, a block of 3x5x4
- * bricks in front of it, stays fine, as the reference pins the throat at h.
+ * fine cells (Losasso et al. 2004). The throat's approach, a block of 2x2x2
+ * bricks in front of it (16 cells upstream, 6-8 cells beside the 2x2
+ * throat), stays fine, as the reference pins the throat (+-4 cells) at h.
+ * The flow there converges radially: 8 cells from the throat it is about 1%
+ * of the throat speed, which the 4h cells resolve.
  * Every BULK brick is DEEP (wholly below DEEP_ROW_LIMIT, x < 240).
  */
 export const BULK_BX1 = WALL_X0 / BRICK, BULK_BY1 = DEEP_ROW_LIMIT / BRICK;
 /** Inclusive brick bounds of the throat approach block kept fine inside the BULK box. */
-export const THROAT_BLOCK_LO = [27, 6, 2] as const, THROAT_BLOCK_HI = [29, 10, 5] as const;
+export const THROAT_BLOCK_LO = [28, 7, 3] as const, THROAT_BLOCK_HI = [29, 8, 4] as const;
 export function throatBlockBrick(bx: number, by: number, bz: number): boolean {
   return bx >= THROAT_BLOCK_LO[0] && bx <= THROAT_BLOCK_HI[0] && by >= THROAT_BLOCK_LO[1] && by <= THROAT_BLOCK_HI[1]
     && bz >= THROAT_BLOCK_LO[2] && bz <= THROAT_BLOCK_HI[2];
@@ -194,10 +197,13 @@ export function bakeSeep(): SeepBake {
           if (cellOpen(x - (c & 1), y - ((c >> 1) & 1), z - ((c >> 2) & 1))) touches = true;
     let cls = touches ? 0 : CLASS_DEAD;
     // DEEP: reservoir bricks (and the slab's face column) wholly below
-    // DEEP_ROW_LIMIT. The free surface starts at row 192 and the measured
-    // reservoir drop over the scene's 20 s is 15 mm (3 cells), so these
-    // bricks sit >= 12 cells below any reachable surface: more than the
-    // level-set band (PHI_MAX = 6). Asserted on the GPU every step.
+    // DEEP_ROW_LIMIT = 184. The free surface starts at row 192 and the
+    // reservoir drops 14-15 mm (2.8-3 cells) over the scene's 20 s (NB-FLIP
+    // and Seep alike), so the surface stays above row 189 and every DEEP
+    // vertex (rows <= 183) lies at least PHI_MAX = 6 cells below it: its
+    // band-clamped distance is -PHI_MAX for the whole run, exactly the value
+    // it is frozen at. Asserted on the GPU every step (the bottom vertex row
+    // of the level-set bricks above, row 184, must stay liquid).
     if (!touches) { /* dead */ } else if (bx <= WALL_X0 / BRICK && by * 8 + 8 <= DEEP_ROW_LIMIT && !throatBrick(bx, by, bz)) cls |= CLASS_DEEP;
     if ((cls & CLASS_DEEP) !== 0 && bulkBrick(bx, by, bz)) cls |= CLASS_BULK;
     if (bx >= PBX0) cls |= CLASS_PARTICLE;

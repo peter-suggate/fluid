@@ -6,7 +6,7 @@ import {
 } from "../lib/methods/seep/seep-layout";
 
 test("seep BULK (4h composite) bricks are deep reservoir bricks clear of the throat approach", () => {
-  assert.equal(NBULK, 5220);
+  assert.equal(NBULK, 30 * 23 * 8 - 8);
   assert.equal(new Set(BULK_LISTS.bulk).size, NBULK);
   for (const b of BULK_LISTS.bulk) {
     const bx = b % BX, by = Math.floor(b / BX) % BY, bz = Math.floor(b / (BX * BY));
@@ -14,14 +14,16 @@ test("seep BULK (4h composite) bricks are deep reservoir bricks clear of the thr
     assert.ok(bx * 8 + 8 <= WALL_X0 && by * 8 + 8 <= DEEP_ROW_LIMIT, `brick ${b} outside the deep reservoir`);
     assert.ok(!throatBlockBrick(bx, by, bz));
   }
-  // The throat's own brick row and its approach stay fine (h), as the reference pins the throat at h.
+  // The throat's approach stays fine (h), as the reference pins the throat (+-4 cells) at h: no cell
+  // within 6 cells of the 2x2 mouth (x 240, y 64..65, z 32..33), nor 16 cells upstream of it, is BULK.
   const tby = THROAT_Y0 >> 3, tbz = THROAT_Z0 >> 3;
-  for (let bx = 27; bx < WALL_X0 / 8; bx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++)
-    assert.ok(!bulkBrick(bx, tby + dy, tbz + dz), `throat approach brick ${bx},${tby + dy},${tbz + dz} is BULK`);
+  for (let x = WALL_X0 - 16; x < WALL_X0; x++) for (let y = THROAT_Y0 - 6; y < THROAT_Y0 + 8; y++)
+    for (let z = THROAT_Z0 - 6; z < THROAT_Z0 + 8; z++)
+      assert.ok(!bulkBrick(x >> 3, y >> 3, z >> 3), `throat approach cell ${x},${y},${z} is BULK`);
   // Shadow bricks (fine velocity copies next to fine cells) are a subset of BULK.
   const bulk = new Set(BULK_LISTS.bulk);
   assert.ok(BULK_LISTS.shadow.length > 0 && BULK_LISTS.shadow.every(b => bulk.has(b)));
-  assert.ok(BULK_LISTS.shadow.includes(brickId(26, tby, tbz)), "the brick facing the throat block keeps a shadow");
+  assert.ok(BULK_LISTS.shadow.includes(brickId(27, tby, tbz)), "the brick facing the throat block keeps a shadow");
   assert.ok(!BULK_LISTS.shadow.includes(brickId(0, 0, 0)), "an interior corner brick needs no shadow");
 });
 

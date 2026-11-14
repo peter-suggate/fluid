@@ -647,3 +647,38 @@ for U2+U1 only.
 
 Item 2 (reservoir traces, about 0.7 ms of the velocity kernel's 1.11 ms, plus reservoir rows in every pressure pass) has
 the larger headroom of the two.
+
+## 2026-11-14 (night, lane S second agent): S2k, BULK raised to row 184 and a smaller throat block (-1.2 ms)
+
+**What S2k changes** (seep-layout.ts only; the composite h/4h machinery of S2a is unchanged and was already general in
+its extent):
+- **DEEP_ROW_LIMIT 176 -> 184.** Brick row 22 (rows 176-183) becomes DEEP and BULK: 240 more 4h bricks. The reservoir
+  drops 2.8-3 cells over 20 s, so the surface stays above row 189 and every DEEP vertex (rows <= 183) lies at least
+  PHI_MAX = 6 cells below it. Its band-clamped distance is -6 for the whole run, exactly the value it is frozen at.
+  The GPU invariant (row 184 stays liquid) still latches FAIL_DEEP; it never fired.
+- **Throat approach block 3x5x4 -> 2x2x2 bricks** (x 224-239, y 56-71, z 24-39): 16 cells upstream and 6-8 cells
+  beside the 2x2 mouth, against the reference's +-4 cells pinned at h. Radial convergence puts the speed 8 cells out at
+  about 1% of the throat's. A 4-brick block (8 cells upstream) measured the same time, so the 8-brick block is kept.
+- NBULK 5220 -> 5512. The fine reservoir is now brick row 23 (the surface) and row 24 (air band), plus the 8 throat
+  bricks. tests/seep-layout.test.ts pins the new count and checks that no cell within 6 of the mouth, or 16 upstream,
+  is BULK.
+
+**A/B, 600 steps, check slot, interleaved x3** (HEAD d5d3ae2c from the scratch tree via SEEP_IMPL):
+
+| | HEAD | S2k |
+|---|---|---|
+| fenced ms | 8.93-9.03 | 7.73-7.83 |
+| mean cycles | 5.35-5.40 | 5.15-5.22 |
+
+That is **-1.2 ms**. Row 22 alone gave -1.0 ms (8.99-9.01 vs 7.99-8.16); the throat block -0.25 ms more. u 2.599 is
+identical at 600 and q rises 0.258 -> 0.259.
+
+**seep-bench 1200, check slot** (artifacts/seep-rewrite/lane-s/compare-s2k.md, audit-s2k): all gates pass.
+- G1 -3.98% (s2j -3.9%); G2 -2.6 / -3.7 / -3.7 / -3.6%; G4 2.597 vs 2.639 (-1.56%); G5 90% at 267 vs 296.
+- G3 corrected: 1.286 / 2.600 / 3.889 / 5.183 L, all inside their bands.
+- G6 corrected: 600 centroid 369.6, L1 0.051; 1200 centroid 380.2, L1 0.109. G6 as written passes too (L1 0.152).
+- G7 drift 0.00%. G8: impact 375.8 / 375.5 vs 380.8 / 382.8; RMS 0.80 / 1.29.
+- Bench timing: fenced median 8.49 ms (thirds 7.54 / 8.50 / 9.01, p95 9.46), check slot.
+
+**Ledger, 1200 steps, check slot:** chamber phi vs delivered is -0.03 / +0.01 / +0.44 / -0.11% at 300 / 600 / 900 / 1200.
+No deletions; total drift within 1e-6 at every checkpoint (bench drift 0.00%).
