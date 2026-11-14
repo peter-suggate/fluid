@@ -782,3 +782,67 @@ iterations to 1e-4 are:
 The first-iteration reduction goes from 0.16 to 0.01. On the GPU, AB costs one more L0 pass each way per cycle (about
 +0.16 ms a cycle, +2 empty dispatches per tail cycle). The shifted pass also needs a shifted-block list that skips
 BULK bricks' coarse slots. It pays if cycles fall from 5.2 to about 3.5 or fewer.
+
+## S2m: staggered L0 smoother (overlapping/staggered block Schwarz)
+
+**Method:** Smith, Bjørstad & Gropp 1996, "Domain Decomposition", the multiplicative Schwarz method over two
+staggered partitions.
+- Pre-smoothing runs the brick partition (X_k), then a partition shifted by (4, 0, 4) cells (D0B, `pcgShiftDown`).
+- Post-smoothing runs the exact reverse: the shifted partition with its colour passes reversed (U0B, `pcgShiftUp`),
+  then the bricks reversed (U0). Each pass is e <- e + M^-1 (b - A e) with the halo frozen, so the V-cycle stays
+  symmetric.
+- Shifted blocks are listed by operatorKernel: every liquid L0 brick stamps the 4 xz-shifted blocks that overlap it
+  (an atomicExchange flag on a 65 x 32 x 9 table). coarsenTop publishes the count to indirect-args slot 5.
+- A 3D shift (y as well) took the same cycles over twice the blocks, most of them air, so the shift is in xz only.
+- Two sweeps in the shifted passes give 3.35-3.44 mean cycles and no gain (7.25 / 7.30 / 7.32 against 3 sweeps at
+  7.27 / 7.29 / 7.31). One sweep gives 3.96 cycles and is slower (7.38-7.50). Three sweeps stay.
+- MAX_CYCLES 12 -> 9.
+
+**Unit test `seep-smoother.test.ts`:** the mgmodel2 structure as a Float64 model on a 32 x 16 x 32 film-plus-pool mask
+(aggregation with OC 1.6, block red-black GS, zero and frozen halos, the staggered L0 pair).
+- The V-cycle is symmetric to 1e-12 and positive, with and without the staggered partition.
+- It converges a thin film in fewer PCG iterations (3 against 4).
+- A mutated post order (shifted pass not reversed) fails the symmetry check.
+
+**Cycles (1200 steps, probe tree v/abmax9 at MAX 9):**
+- Mean 5.17 -> 3.32. Max 12 -> 7, one step at 7; the histogram for k = 1..7 is 8 / 63 / 767 / 283 / 63 / 15 / 1.
+- No capped step.
+
+**A/B, 600 steps, check slot, 4 interleaved rounds (the GPU is shared with other sessions' tests):**
+
+| variant | rounds | median |
+|---|---|---|
+| S2l | 7.68 / 7.65 / 7.58 / 7.66 | 7.655 |
+| shift, MAX 12 | 7.51 / 7.47 / 7.45 / 7.45 | 7.46 |
+| S2m (shift, MAX 9) | 7.35 / 7.43 / 7.32 / 7.28 | 7.335 |
+
+That is -0.32 ms. The sweep-count rounds above add three more S2m-equivalent samples: 7.27 / 7.29 / 7.31.
+
+**Gates, seep-bench 1200 on the check slot (compare-s2m.md, audit-s2m): all pass.**
+- G1 -4.01%. G2 -2.81 / -3.86 / -3.79 / -3.73%. G4 2.597 (-1.56%). G5 90% wet at step 277 vs 296.
+- G3 corrected: 1.275 / 2.595 / 3.914 / 5.198 L, all in band. The 300-step value now also passes G3 as written
+  (1.275 <= 1.279; S2l was 1.282).
+- G6 corrected: 600 centroid 372.1, L1 0.098; 1200 centroid 385.0, L1 0.140.
+- G7 drift 0.01%. G8: impact 375.8 / 375.7, RMS 0.80 / 1.28.
+- The bench median, 7.81 ms (thirds 7.04 / 7.88 / 8.24), is not a speed figure: it was run on the check slot with the
+  GPU shared.
+
+**Ledger, 1200 steps:** chamber phi against delivered is -0.13 / +0.31 / +0.89 / +0.51% at 300 / 600 / 900 / 1200.
+There are no deletions, and drift is at most 9.3e-5.
+
+**Profile at 600 steps (fenced 7.28, kernel sum 8.31 ms):**
+
+| kernel | ms | kernel | ms |
+|---|---|---|---|
+| velocity | 0.90 | pcgDirection | 0.33 |
+| massFit | 0.74 | velocityBulk | 0.31 |
+| redistSweep | 0.59 | mgDown1 | 0.31 |
+| pcgUpdate | 0.48 | pcgShiftDown | 0.30 |
+| extend | 0.46 | pcgShiftUp | 0.30 |
+| separate | 0.38 | p2g | 0.25 |
+| coarseSolve | 0.38 | g2p | 0.23 |
+
+The shifted passes cost about 0.09 ms per call. The time they save comes from fewer cycles: about 1.85 fewer cycles,
+each with its 13 gated dispatches.
+
+**Next:** the per-particle cost (separate, g2p, p2g), the late-run growth from 166k to 332k particles.

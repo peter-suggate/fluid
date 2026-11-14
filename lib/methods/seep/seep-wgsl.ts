@@ -18,8 +18,10 @@ export const PARTICLE_RADIUS = 0.265;
 export const THETA_MIN = 1e-3;
 /** Pressure tolerance: L-inf divergence 0.05 s^-1, in flux units (m/s): 0.05 * h. */
 export const PRESSURE_TOLERANCE = 0.05 * CELL_M;
-/** Multigrid cycle cap per step. */
-export const MAX_CYCLES = 12;
+/** Multigrid cycle cap per step. With the staggered L0 partition the largest count over the 1200-step seep is 7
+ *  (3.33 a step on average; it was 12 with bricks alone), so 9 leaves two cycles of margin and no step is capped
+ *  (capHits counts any). Every cycle slot costs its gated dispatches even when empty. */
+export const MAX_CYCLES = 9;
 /** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). A
  *  preconditioner parameter only (the converged solution is the same). Measured on the seep at
  *  1200 steps: OC 1.8 takes 7.6 cycles a step and OC 1.6 takes 6.7. The chamber's free-surface rows
@@ -38,6 +40,8 @@ export const C = {
   /** In the args buffer: the level-4 blocks (2x2x2 level-3 cells) holding a level-3 unknown, in groups of
    *  eight (ARG_L4), and one by one (ARG_L4U). */
   ARG_L4: 36, ARG_L4U: 40,
+  /** In the args buffer: the shifted fine blocks (the second L0 smoothing partition, see B.LIST_SHIFT). */
+  ARG_SHIFT: 44,
   STEP: 16, FAIL: 17, PCOUNT: 18 /* 18,19 */, DELETED: 20, SEEDED: 21,
   RES: 22, CONV: 23, PARITY: 24, CYCLES: 25, FIRST_RES: 26, LAST_RES: 27, CAP_HITS: 28, CYCLES_TOTAL: 29,
   MAX_SEG: 30, OVERFLOW: 31,
@@ -55,8 +59,10 @@ export const C = {
   L4_COUNT: 67, N_L4: 68,
   /** Outlet emission: the swept length (f32 cells) not yet emitted, per throat face (4); particles emitted (cumulative). */
   EMIT_ACC: 69, EMITTED: 73,
+  /** Shifted fine blocks: the operator's append counter, and their number this step. */
+  SHIFT_COUNT: 74, N_SHIFT: 75,
   RED: 256,
-  /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1). */
+  /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1); slot 5 the shifted fine blocks. */
   MG_ARGS: 64,
   WORDS: 256 + 2 * 192,
 } as const;
@@ -78,7 +84,10 @@ export const B = {
   L4_FLAG: 12, L4_LIST: 13,
   /** Bit a set when G2P or emission left a particle in the brick moving more than FAST_CELLS a step along axis a (reset with PCOUNT). */
   FAST: 14,
-  COUNT: 15,
+  /** Shifted fine blocks (the second L0 smoothing partition: 8^3 cells at origin 8 s - (4, 0, 4), s in 65 x 32 x 9): the step
+   *  that listed each (two regions, index s.x + 65 (s.y + 33 s.z)), and their list (two regions, s packed x | y << 8 | z << 16). */
+  SHIFT_FLAG: 15, LIST_SHIFT: 17,
+  COUNT: 19,
 } as const;
 /** BULK work: 64 bricks (512 coarse cells) per 512-thread workgroup; these workgroups come first in the dispatches that include BULK. */
 export const BULK_WG = Math.ceil(NBULK / 64);
@@ -132,6 +141,7 @@ const C_ARG_ACTB: u32 = ${C.ARG_ACTB}u; const C_ARG_ACTBB: u32 = ${C.ARG_ACTBB}u
 const C_N_LIQ: u32 = ${C.N_LIQ}u; const C_LIQ_COUNT: u32 = ${C.LIQ_COUNT}u; const C_L4_COUNT: u32 = ${C.L4_COUNT}u; const C_N_L4: u32 = ${C.N_L4}u;
 const C_EMIT_ACC: u32 = ${C.EMIT_ACC}u; const C_EMITTED: u32 = ${C.EMITTED}u;
 const C_ARG_L4: u32 = ${C.ARG_L4}u; const C_ARG_L4U: u32 = ${C.ARG_L4U}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
+const B_SFLAG: u32 = ${B.SHIFT_FLAG * BRICKS}u; const B_LSHIFT: u32 = ${B.LIST_SHIFT * BRICKS}u; const C_SHIFT_COUNT: u32 = ${C.SHIFT_COUNT}u; const C_N_SHIFT: u32 = ${C.N_SHIFT}u; const C_ARG_SHIFT: u32 = ${C.ARG_SHIFT}u;
 const B_LBULK2: u32 = ${B.LIST_BULK2 * BRICKS}u; const B_LLIQ: u32 = ${B.LIST_BULK2 * BRICKS + NBULK}u;
 /** Composite h/4h: a fine face against a coarse cell couples over 2.5 cells (half a fine and half a coarse cell). */
 const SUBC: f32 = 0.4;

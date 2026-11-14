@@ -1290,6 +1290,17 @@ fn bulkOperator(j: u32) {
   if (l == 0u && atomicLoad(&anyLiquid) != 0u) {
     let j = atomicAdd(&ctrl[C_LIQ_COUNT], 1u);
     atomicStore(&bricks[B_LLIQ + j], b);
+    // The shifted blocks (origin 8 s - (4, 0, 4)) overlapping this brick: s = brick + {0, 1} x {0} x {0, 1}, listed once a step.
+    let stamp = atomicLoad(&ctrl[C_STEP]);
+    let lbc = brickCoord(b);
+    for (var q = 0u; q < 4u; q++) {
+      let sb = lbc + vec3i(i32(q & 1u), 0, i32(q >> 1u));
+      let f = u32(sb.x + 65 * (sb.y + 33 * sb.z));
+      if (atomicExchange(&bricks[B_SFLAG + f], stamp) != stamp) {
+        let e = atomicAdd(&ctrl[C_SHIFT_COUNT], 1u);
+        atomicStore(&bricks[B_LSHIFT + e], u32(sb.x) | (u32(sb.y) << 8u) | (u32(sb.z) << 16u));
+      }
+    }
   }
   if (!liquid) {
     op[DIAG_OFF + i] = 0.0; op[RHS_OFF + i] = 0.0; bits[MASK_OFF + i] = 0u; pres[i] = 0.0;
@@ -1512,6 +1523,9 @@ var<workgroup> sInv: array<f32, ${COARSEST_CELLS * COARSEST_CELLS}>;
     let n = atomicExchange(&ctrl[C_LIQ_COUNT], 0u);
     atomicStore(&ctrl[C_N_LIQ], n);
     atomicStore(&args[C_ARG_LIQ], n); atomicStore(&args[C_ARG_LIQB], BULK_WG + n); atomicStore(&args[C_ARG_LIQBB], NBULK + n);
+    let ns = atomicExchange(&ctrl[C_SHIFT_COUNT], 0u);
+    atomicStore(&ctrl[C_N_SHIFT], ns);
+    atomicStore(&args[C_ARG_SHIFT], ns); atomicStore(&args[C_ARG_SHIFT + 1u], 1u); atomicStore(&args[C_ARG_SHIFT + 2u], 1u);
     let n4 = atomicExchange(&ctrl[C_L4_COUNT], 0u);
     atomicStore(&ctrl[C_N_L4], n4);
     // The level-3 block passes take eight level-4 blocks a workgroup.
@@ -1775,11 +1789,72 @@ ${bulkWGSL(false)}
 }
 `);
 
+/**
+ * D0B / U0B: the second fine smoothing partition. The L0 smoother is two block
+ * Gauss-Seidel passes over two staggered partitions: the bricks (X_k pre, U0
+ * post) and blocks shifted by half a brick along x and z (origin 8 s - (4, 0, 4),
+ * these passes; a shift along y as well took the same cycles over twice the
+ * blocks, since the film lies along x and z), the
+ * overlapping/staggered block Schwarz smoother of Smith, Bjorstad & Gropp 1996
+ * (Domain Decomposition, ch. 1-2; multiplicative Schwarz over two coverings).
+ * Each pass is e <- e + M^-1 (b - A e) with the halo frozen at the current
+ * iterate; post-smoothing applies the adjoints in the reverse order (U0B with
+ * the colour passes reversed, then U0), so the V-cycle stays symmetric
+ * (lib/methods/seep/seep-smoother.test.ts checks the model). A film one or two
+ * cells thick otherwise converges slowest across the brick faces, where both
+ * brick-aligned passes freeze the halo. BULK cells are not fine unknowns
+ * (their brick slots hold coarse cells): skipped, and their coupling enters as
+ * in the brick passes (none before the coarse correction, the final coarse
+ * values after it). One workgroup per listed shifted block.
+ */
+function shiftSmoothKernel(post: boolean): KernelSource {
+  return kernel(post ? "seep.pcgShiftUp" : "seep.pcgShiftDown", [ctrlRW, bricksRO, opRO, bitsRO, presRW, coarseRW, cfgU], /* wgsl */ `
+${levelWGSL()}
+${PCG_WGSL}
+${bulkWGSL(false)}
+@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  let e = bricks[B_LSHIFT + wg.x];
+  let o = 8 * vec3i(i32(e & 255u), i32((e >> 8u) & 255u), i32(e >> 16u)) - vec3i(4, 0, 4);
+  for (var t = l; t < 1000u; t += 512u) {
+    let c = o + tileCoord(t);
+    var v = 0.0;
+    if (inBox(c) && !cellBulk(c)) {
+      let ci = cidx(c);
+      if (op[DIAG_OFF + ci] > 0.0) { v = ${post ? "pres[Z_OFF + ci] + coarse[CE + lidx(1u, c / 2)]" : "pres[Z1_OFF + ci]"}; }
+    }
+    tp[t] = v;
+  }
+  workgroupBarrier();
+  let lc = localCoord(l);
+  let c = o + lc;
+  let own = inBox(c) && !cellBulk(c);
+  let i = cidx(clampV(c));
+  var diag = 0.0; var m = 0u; var rs = 0.0;
+  if (own) {
+    diag = op[DIAG_OFF + i]; m = bits[MASK_OFF + i]; rs = pres[R_OFF + i];
+    ${post ? `if ((m >> 6u) != 0u) {
+      for (var kk = 0u; kk < 6u; kk++) {
+        if (((m >> (kk + 6u)) & 1u) == 0u) { continue; }
+        rs += SUBC * coarse[CE + lidx(2u, (c + select(-1, 1, (kk & 1u) == 1u) * unitAxis(kk >> 1u)) / 4)];
+      }
+    }` : ""}
+  }
+  let ti = tileIndex(lc);
+  fineSmooth(c, ti, diag, m, rs, ${post});
+  // D0B: the pre-smoothed iterate into Z (free until U0); U0B: its iterate into Z1 for U0.
+  if (own && diag > 0.0) { pres[${post ? "Z1_OFF" : "Z_OFF"} + i] = tp[ti]; }
+}
+`);
+}
+export const pcgShiftDownKernel = shiftSmoothKernel(false);
+export const pcgShiftUpKernel = shiftSmoothKernel(true);
+
 /** D0 (see 15). */
 export const mgDown0Kernel = kernel("seep.mgDown0", [bricksRO, opRO, bitsRO, presRO, coarseRW], /* wgsl */ `
 ${levelWGSL()}
 ${blockWGSL(1)}
-const X_OFF: u32 = 0u; const R_OFF: u32 = N; const Z1_OFF: u32 = 5u * N;
+// The fine pre-smoothed iterate after both partitions (D0B wrote it into Z).
+const X_OFF: u32 = 0u; const R_OFF: u32 = N; const Z1_OFF: u32 = 2u * N;
 var<workgroup> sr: array<f32, 512>;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LLIQ + wg.x];
@@ -1825,7 +1900,8 @@ export const mgDown1Kernel = kernel("seep.mgDown1", [bricksRO, coarseRW, opRO, b
 ${levelWGSL()}
 ${blockWGSL(1)}
 ${blockWGSL(2, 8)}
-const R_OFF: u32 = N; const Z1_OFF: u32 = 5u * N;
+// The fine pre-smoothed iterate after both partitions (D0B wrote it into Z).
+const R_OFF: u32 = N; const Z1_OFF: u32 = 2u * N;
 ${BULK_APPLY_WGSL}
 var<workgroup> sr: array<f32, 64>;
 var<workgroup> sN: u32;
@@ -1914,13 +1990,14 @@ fn redSlot(rs: u32, which: u32) -> u32 { return C_RED + rs * 192u + which * 64u;
 var<workgroup> sGo: u32;
 var<workgroup> sRS: array<f32, 64>;
 /** Iteration k's gated arguments: slot 0 the liquid bricks, slot 1 [BULK bricks, liquid], slot 2 [BULK workgroups, liquid],
- *  slot 3 the level-4 blocks; all 0 once converged. */
+ *  slot 3 the level-4 blocks / 8, slot 4 the level-4 blocks, slot 5 the shifted fine blocks; all 0 once converged. */
 fn gate(k: u32, nAct: u32, go: bool) {
-  for (var s = 0u; s < 5u; s++) {
+  for (var s = 0u; s < 6u; s++) {
     let o = C_MG_ARGS + ${MG_STRIDE}u * k + 4u * s;
     var x = nAct + select(select(0u, NBULK, s == 1u), BULK_WG, s == 2u);
     if (s == 3u) { x = atomicLoad(&args[C_ARG_L4]); }
     if (s == 4u) { x = atomicLoad(&args[C_ARG_L4U]); }
+    if (s == 5u) { x = atomicLoad(&args[C_ARG_SHIFT]); }
     atomicStore(&args[o], select(0u, x, go)); atomicStore(&args[o + 1u], 1u); atomicStore(&args[o + 2u], 1u);
   }
 }
@@ -2272,7 +2349,8 @@ ${bulkWGSL(false)}
     var v = 0.0;
     if (inBox(c)) {
       let ci = cidx(c);
-      if (op[DIAG_OFF + ci] > 0.0) { v = pres[Z1_OFF + ci] + coarse[CE + lidx(1u, c / 2)]; }
+      // U0B's iterate: the pre-smoothed values plus the level-1 correction, post-smoothed on the shifted partition.
+      if (op[DIAG_OFF + ci] > 0.0) { v = pres[Z1_OFF + ci]; }
     }
     tp[t] = v;
   }
@@ -2621,7 +2699,7 @@ var<workgroup> red: array<f32, 512>;
 
 export const ALL_KERNELS: readonly KernelSource[] = [
   classifyKernel, clearKernel, countKernel, emitKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel, massFitKernel,
-  redistInitKernel, redistSweepKernel, p2gKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
+  redistInitKernel, redistSweepKernel, p2gKernel, pcgShiftDownKernel, pcgShiftUpKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
   pcgGuessKernel, pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
   pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,
 ];
