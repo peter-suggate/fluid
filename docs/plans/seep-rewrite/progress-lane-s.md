@@ -609,3 +609,41 @@ none is kept.
    cell's ~8 particles shares each loaded neighbour. The target is the separate kernel's growth with particle count.
 3. **Reservoir traces:** widen the coarse BULK treatment toward the throat-free walls, so that fewer deep non-bulk fine
    bricks trace every face.
+
+## 2026-11-14 (late night): item 1 scoping, upward MG chain fusion (no code yet)
+
+I read the up-chain kernels: mgUp3, upKernel(2), upKernel(1) and pcgPrecond (U0).
+
+Each up-level post-smooths its block by block Gauss-Seidel, with the halo frozen at the current iterate
+e_pre + P e_(l+1)^post. That makes it e <- e + M^-T (b - A e) with M = blockdiag(M_GS), the exact adjoint of the
+zero-halo pre-smoothing. Two consequences:
+- The residual b - A e at a block's boundary needs the neighbours' current iterate.
+- The halo at level l needs the post-smoothed parents at level l+1 of the cells next to the block. Those belong to
+  neighbouring level-(l+1) blocks, which other workgroups smooth.
+
+There are therefore two exact options.
+
+**(a) Recomputation cone.** One workgroup per brick fuses U_(l+1) into U_l by recomputing U_(l+1) for the 26 neighbour
+blocks before smoothing its own.
+- For U2+U1: 27 level-2 blocks (216 cells, each with its 4^3 halo) per brick, BULK neighbours included.
+- The adjoint is unchanged, so symmetry is exact by construction.
+- Saving: one dispatch per cycle slot (13 a step: about 0.04 ms empty, plus the U2 pass of about 0.05 ms a cycle),
+  against roughly 27x the U2 loads. Estimate -0.1 to -0.2 ms. Fusing U3 as well extends the cone to level 4 blocks.
+
+**(b) Symmetric additive multigrid** (BPX form): z = sum_l P_l S_l R_l r, with P_l = R_l^T piecewise constant, and each
+S_l a zero-halo block symmetric Gauss-Seidel (forward then reverse, so block-diagonal SPD).
+- M^-1 is SPD by construction.
+- The up chain collapses into U0: each fine cell gathers its parents' corrections. The down chain becomes restriction
+  of r plus independent smoothing.
+- A cycle could drop from 11 passes to about 5: X + fine SGS, the restriction/smoothing chain, the coarse solve,
+  U0 + dot, direction. This is also item 4's lever.
+- Additive MG usually needs 1.5-2x the PCG iterations of the multiplicative V-cycle. A CPU Float64 model must show the
+  cycle count before any GPU work. The same model gives the symmetry oracle the coordinator asked for:
+  z^T M^-1 y = y^T M^-1 z on random vectors over a small baked mask.
+
+**Recommendation:** build the CPU Float64 oracle first, modelling the current V-cycle and (b). It proves symmetry for
+any variant and prices (b)'s cycle count cheaply. Take (b) if the cycle count stays under about 8. Otherwise take (a)
+for U2+U1 only.
+
+Item 2 (reservoir traces, about 0.7 ms of the velocity kernel's 1.11 ms, plus reservoir rows in every pressure pass) has
+the larger headroom of the two.
