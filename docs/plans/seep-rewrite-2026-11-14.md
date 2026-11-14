@@ -37,6 +37,7 @@ Lanes:
 | Corrected G6 (§4.1, 70351e00) in seep-compare | done (4d90be9e); bbc7828d gated run re-judged: **G6 passes** (L1 0.155 vs NB_restored, centroid 385.9 in [354.4, 391.4]) |
 | **Acceptance at bbc7828d** | **both requirements demonstrated**: G1–G8 pass under §4/§4.1 on lane H's independent run; §5 PASS at 3.23x fenced, 3.28x pipelined. As-written G6/G8 rows are reported (not gated). Stretch 5x (≤6.7 / 6.4 ms) not reached; speed work continues (S2i held for landing) |
 | Gate round, S2j (d5d3ae2c; run at 7ebdc7a6, lib identical) | lane H, `artifacts/seep-rewrite/final-d5d3ae2c/`: G1–G8 all pass (G6 L1 0.093 vs NB_restored; G6 as written also passes, 0.154); §5 PASS at **3.58x fenced** (9.61 vs 34.42 ms) and **3.63x pipelined** (8.87 vs 32.19 ms, both NB-FLIP modes rerun). Stretch 5x needs ≤6.88 / 6.44 ms against this round's NB-FLIP: −2.73 ms (−28%) fenced, −2.43 ms (−27%) pipelined to go |
+| Gate round, S2k+S2l (979d770b) | lane H, `artifacts/seep-rewrite/final-979d770b/`: G1–G8 all pass (G6 L1 0.118 vs NB_restored; as written 0.198); §5 PASS at **4.28x fenced** (8.15 vs 34.92 ms) and **4.61x pipelined** (7.42 vs 34.22 ms; 4.34x against the previous rounds' 32.2 ms NB-FLIP pipelined). Stretch 5x: −1.17 ms (14%) fenced to ≤6.98, −0.58 ms pipelined to ≤6.84 (−1.02 to the plan's 6.4). The first timing set was contended (NB-FLIP 53.9 ms) and was rerun on a quiet GPU |
 
 ## 1. The reference: NB-FLIP on the seep, as measured
 

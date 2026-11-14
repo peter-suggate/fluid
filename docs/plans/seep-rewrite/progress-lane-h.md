@@ -437,3 +437,57 @@ At step 600, all three pass G6 (L1 0.049 / 0.073 / 0.107 against 0.327). With th
 PASS. Measured against this round's NB-FLIP, the 5x stretch needs ≤6.88 ms fenced and ≤6.44 ms pipelined, so Seep is 2.73 ms (28%) and 2.43 ms (27%) short. Against the plan's 6.7 / 6.4 ms figures, it is 2.91 / 2.47 ms short.
 
 Seep's fenced step time grows through the run: the medians of the three thirds are 8.75 / 9.66 / 10.11 ms, rising with particle count (166k at step 600, 332k at step 1200). NB-FLIP's thirds are 29.4 / 34.3 / 38.0 ms. My 9.61 ms is a 1200-step timing-slot median, which is slower than lane S's interleaved check-slot estimate of about 9.05 ms.
+
+## 2026-11-15 MILESTONE H10: gate round on S2k + S2l (979d770b)
+
+**Build provenance.**
+- The check run used the main tree at 979d770b (`dirtyLibOrTools: false`, 08:29:49-08:30:01).
+- Lane S then started uncommitted `lib/methods/seep` edits. The first changed file is stamped 08:32:39, after the first timing set.
+- So the rerun timing set (r2) ran from a read-only `git archive 979d770b` export (`~/code/me/fluid-scratch/lane-h/tree-979d770b`, with my tools at HEAD identical). It used the main repo's runner, so its meta commit reads "unknown".
+- All runs exited rc 0. The system log has no Metal command-buffer errors or GPU restarts.
+- Same-build cross-check at step 1200 (left L / particles / centroid):
+
+  | Seep run | left L | particles | centroid |
+  |---|---|---|---|
+  | check | 363.4611 | 332336 | 382.5 |
+  | r2 timing fenced | 363.4623 | 332336 | 385.4 |
+  | r2 timing pipelined | 363.4603 | 332336 | 377.9 |
+  | contended timing fenced | 363.4623 | 332336 | 382.9 |
+
+**Contention.**
+- The first timing set (moved to `contended/`) gave NB-FLIP fenced 53.91 ms and pipelined 38.27 ms. NB-FLIP's code is unchanged, and it measured 33.6-34.7 ms in every earlier round. So the GPU was shared.
+- A 2 s `ps` sampler saw no other harness or node GPU job, so the load came from outside node, most likely a Chrome tab (its GPU helper was busy).
+- Seep in that set measured 8.12 ms fenced and 7.42 ms pipelined, the same as the rerun.
+- The rerun (`fluid-scratch/lane-h/timing-round.sh`) starts each run only after the device has been under 15% utilisation (ioreg) for 5 s, and logs utilisation and other jobs every second.
+- During the rerun, lane S's check-slot A/B jobs were interleaved. Their guard windows were 08:34:23-44, 08:35:01-10, 08:35:25-44 and 08:36:43-52. My bench windows were Seep fenced 08:34:46-57, Seep pipelined 08:35:11-22, NB-FLIP fenced 08:35:45-36:39 and NB-FLIP pipelined 08:36:58-37:50. They did not overlap, because the timing slot holds every check lock.
+
+| gate | check run (gated) | r2 timing-fenced (informational) |
+|---|---|---|
+| G1 | pass, -3.98%, windows 18/18 | pass, -4.00% |
+| G2 | pass, -2.61 / -3.67 / -3.72 / -3.63% | pass |
+| G3 | pass, 1.295 / 2.592 / 3.905 / 5.174 L in band | pass |
+| G3 (as written) | fail, not gated (1.295 > 1.279 at 300) | fail, not gated |
+| G4 | pass, 2.597 vs 2.639 m/s | pass |
+| G5 | pass, step 275 vs 296 | pass, step 268 |
+| G6 | pass: at 1200, L1 vs restored 0.118 <= 0.214, centroid 382.5; at 600, L1 0.122 | pass: at 1200, 0.113, centroid 385.4 |
+| G6 (as written) | pass, not gated (L1 0.198) | pass (0.181) |
+| G7 | pass, -0.00% | pass, 0.01% |
+| G8 | pass: impact 376.0 / 375.6 vs 380.8 / 382.8; RMS 0.79 / 1.29 | pass |
+| G8 (as written) | fail, not gated | fail, not gated |
+
+§5 (timing slot, r2, quiet GPU):
+
+| | NB-FLIP | Seep | ratio |
+|---|---|---|---|
+| fenced median ms | 34.92 | 8.15 | **4.28x** |
+| fenced p95 ms | 38.48 | 9.12 | |
+| fenced mean ms | 34.34 | 8.05 | |
+| pipelined ms/step | 34.22 | 7.42 | **4.61x** |
+| construction ms | 11435 | 1865 | |
+| peak GPU bytes | 1244173500 | 1049379540 | |
+
+PASS.
+- NB-FLIP pipelined at 34.22 ms is 6% above the earlier rounds' 32.19-32.40. Against 32.19 the pipelined ratio would be 4.34x.
+- The 5x stretch against this round's NB-FLIP is ≤6.98 ms fenced and ≤6.84 ms pipelined. Seep is 1.17 ms (14%) and 0.58 ms (8%) short.
+- Against the plan's 6.7 / 6.4 ms it is 1.45 / 1.02 ms short.
+- Seep's fenced thirds are 7.34 / 8.16 / 8.63 ms, still rising with particle count. Lane S's check-slot A/B figure was 7.6-7.9 ms.
