@@ -1215,3 +1215,16 @@ with no deletions.
   coordinator's call; the pools follow the same measured-peak rule.
 - **Fewer dispatches a slot:** folding mgRestrict3 into coarseSolve's start would remove one dispatch a slot, about
   35 us a step. Its sum order can be kept so the result stays bit-identical.
+
+## Capped-step failure bit (2026-11-15)
+
+A step whose pressure solve stops at MAX_CYCLES above tolerance used to be counted (`capHits`) but not reported as a
+failure, so the bench and `assertSimulationHealthy` passed it silently. pcgCheck now also latches
+`FAIL.PRESSURE_CAP = 16`, and the failure text carries the capped-step count (`seep-diagnostics.test.ts`).
+- **Forced-cap run** (scratch tree with tolerance 1e-12, 30 steps, check slot): latched at step 1, "Seep solver
+  latched PRESSURE_CAP (max backtrace segments 0, pool overflow 0, capped steps 1)", so the bench's
+  simulationPipelineError check halts it.
+- **Normal run** (`seep-bench --method=seep --steps=1200 --every=60 --name=seep-check`, check slot, rc 0): no failure
+  bit. At step 1200, left 363.468 / right 5.194 / total 368.670 L against lane H's 2be18980 run at 363.472 / 5.203 /
+  368.683; throat u 2.5825 against 2.5825 m/s; particles 332340 against 332336. The step time (13.3 ms median) came
+  from a shared check slot and is not a timing measurement.

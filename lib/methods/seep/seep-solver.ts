@@ -416,7 +416,7 @@ export class SeepSolver implements GPUSolverInstance {
     this.info.volumeDrift = drift;
     this.info.pressureIterationsExecuted = ctrl[C.CYCLES];
     if (failures.length && !this.failureText) {
-      this.failureText = `Seep solver latched ${failures.join(", ")} (max backtrace segments ${ctrl[C.MAX_SEG]}, pool overflow ${ctrl[C.OVERFLOW]})`;
+      this.failureText = `Seep solver latched ${failures.join(", ")} (max backtrace segments ${ctrl[C.MAX_SEG]}, pool overflow ${ctrl[C.OVERFLOW]}, capped steps ${ctrl[C.CAP_HITS]})`;
       this.info.simulationPipelineError = this.failureText;
     }
     return {

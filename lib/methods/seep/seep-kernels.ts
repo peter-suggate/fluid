@@ -2067,7 +2067,8 @@ fn gate(k: u32, nAct: u32, go: bool) {
         atomicStore(&ctrl[C_CONV], 1u);
         atomicStore(&ctrl[C_CYCLES], k);
         atomicAdd(&ctrl[C_CYCLES_TOTAL], k);
-        if (res > TOL) { atomicAdd(&ctrl[C_CAP_HITS], 1u); }
+        // Capped: the pressure is not converged. Latched as a failure, not only counted.
+        if (res > TOL) { atomicAdd(&ctrl[C_CAP_HITS], 1u); atomicOr(&ctrl[C_FAIL], FAIL_CAP); }
         // The later iterations' dispatches (coarseSolve included) do not run: close all their gates now.
         for (var j = k; j <= MAXC; j++) { gate(j, 0u, false); if (j > k) { atomicStore(&ctrl[C_RES_HIST + j], 0u); } }
       } else {

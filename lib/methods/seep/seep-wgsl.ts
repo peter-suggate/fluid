@@ -19,8 +19,9 @@ export const THETA_MIN = 1e-3;
 /** Pressure tolerance: L-inf divergence 0.05 s^-1, in flux units (m/s): 0.05 * h. */
 export const PRESSURE_TOLERANCE = 0.05 * CELL_M;
 /** Multigrid cycle cap per step. With the staggered L0 partition the largest count over the 1200-step seep is 7
- *  (3.33 a step on average; it was 12 with bricks alone), so 9 leaves two cycles of margin and no step is capped
- *  (capHits counts any). Every cycle slot costs its gated dispatches even when empty. */
+ *  (3.33 a step on average; it was 12 with bricks alone), so 9 leaves two cycles of margin and no step is capped.
+ *  A capped step (the residual still above tolerance at the cap) leaves an unconverged pressure: it latches
+ *  FAIL.PRESSURE_CAP and capHits counts it. Every cycle slot costs its gated dispatches even when empty. */
 export const MAX_CYCLES = 9;
 /** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). A
  *  preconditioner parameter only (the converged solution is the same). Measured on the seep at
@@ -73,7 +74,7 @@ export const C = {
 /** Words per PCG iteration in the args buffer, and the args buffer's size in words. */
 export const MG_STRIDE = 32;
 export const ARGS_WORDS = C.MG_ARGS + MG_STRIDE * (MAX_CYCLES + 1);
-export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4, COARSEST_PIVOT: 8 } as const;
+export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4, COARSEST_PIVOT: 8, PRESSURE_CAP: 16 } as const;
 
 /** bricks table offsets (each BRICKS long). */
 export const B = {
@@ -164,7 +165,7 @@ const C_SEEDED: u32 = ${C.SEEDED}u; const C_RES: u32 = ${C.RES}u; const C_CONV: 
 const C_CYCLES: u32 = ${C.CYCLES}u; const C_FIRST_RES: u32 = ${C.FIRST_RES}u; const C_LAST_RES: u32 = ${C.LAST_RES}u;
 const C_CAP_HITS: u32 = ${C.CAP_HITS}u; const C_CYCLES_TOTAL: u32 = ${C.CYCLES_TOTAL}u; const C_MAX_SEG: u32 = ${C.MAX_SEG}u;
 const C_OVERFLOW: u32 = ${C.OVERFLOW}u; const C_MG_ARGS: u32 = ${C.MG_ARGS}u; const C_N_ACTIVE: u32 = ${C.N_ACTIVE}u; const C_RES_HIST: u32 = ${C.RES_HIST}u; const C_ALPHA: u32 = ${C.ALPHA}u; const C_RHO: u32 = ${C.RHO}u; const C_RED: u32 = ${C.RED}u;
-const FAIL_DEEP: u32 = ${FAIL.DEEP_SURFACE}u; const FAIL_POOL: u32 = ${FAIL.POOL}u; const FAIL_SEG: u32 = ${FAIL.SEGMENTS}u; const FAIL_PIVOT: u32 = ${FAIL.COARSEST_PIVOT}u;
+const FAIL_DEEP: u32 = ${FAIL.DEEP_SURFACE}u; const FAIL_POOL: u32 = ${FAIL.POOL}u; const FAIL_SEG: u32 = ${FAIL.SEGMENTS}u; const FAIL_PIVOT: u32 = ${FAIL.COARSEST_PIVOT}u; const FAIL_CAP: u32 = ${FAIL.PRESSURE_CAP}u;
 const DEAD_PARTICLE: u32 = 0xffffffffu;
 
 fn brickCoord(b: u32) -> vec3i { return vec3i(i32(b & 63u), i32((b >> 6u) & 31u), i32(b >> 11u)); }

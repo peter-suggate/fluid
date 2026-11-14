@@ -359,15 +359,17 @@ needs its solver-specific hooks retargeted at NB-FLIP.
 
 ---
 
-## 10. Open items left by lane S (not landed)
-- **Capped-step failure bit.**
-  - **Today:** the pressure cap is counted in diagnostics (`capHits`, C_CAP_HITS) but is not a failure, so the bench
-    and `assertSimulationHealthy` would pass a capped step silently.
-  - **Prepared, in scratch tree `v/cap`:** `FAIL.PRESSURE_CAP = 16`, latched by pcgCheck in the cap branch; the
-    failure text includes the capped-step count; and the unit test `seep-diagnostics.test.ts`. It passes on the fix
-    and fails on HEAD.
-  - **Still to do:** one forced-cap GPU run (tree `v/capp`, tolerance 1e-12) and the gate round. NB-FLIP should get the
-    same treatment.
+## 10. Open items left by lane S
+- **Capped-step failure bit: landed for the seep; open for NB-FLIP (port lane P1).**
+  - **Before:** the pressure cap was counted in diagnostics (`capHits`, C_CAP_HITS) but was not a failure, so the
+    bench and `assertSimulationHealthy` passed a capped step silently, with an unconverged pressure.
+  - **Seep now:** `FAIL.PRESSURE_CAP = 16` is latched by pcgCheck when it stops at MAX_CYCLES above tolerance, and the
+    failure text carries the capped-step count. The unit test is `lib/methods/seep/seep-diagnostics.test.ts`.
+  - **Checked on the GPU:** with tolerance 1e-12 the solver latches at step 1 ("Seep solver latched PRESSURE_CAP
+    (..., capped steps 1)"), which is the halt condition seep-bench throws on. A normal 1200-step check run latches
+    nothing; left tank 363.468 L against lane H's 363.472 L for 2be18980.
+  - **For P1:** NB-FLIP's pressure solve should treat its iteration cap the same way: a latched failure bit, not only a
+    counter. Not ported by lane S.
 - **mgRestrict3 folded into coarseSolve:** prototype in `v/r3` (8 threads a block, 128 blocks a round, same sum
   order). It is untested on the GPU, and S2f's similar attempt cost +0.1 ms (see 2).
 - **coarseSolve fixed cost:** the 17.5 µs empty 1024-thread dispatch, possibly a smaller workgroup. Not started.
