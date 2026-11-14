@@ -52,7 +52,7 @@ const sample = async (step: number) => {
   console.log(JSON.stringify({
     step, L: { total: r(row.liquid_L.total), left: r(row.liquid_L.left), wall: r(row.liquid_L.wall), right: r(row.liquid_L.right), floor: r(row.liquid_L.rightFloorBand) },
     q: r(row.qLeft_Lps), qR: r(row.qRight_Lps), u: r(row.throatU_m_s), wet: row.wetFloor_cells, cx: r(row.rightCentroid_x, 1), drift: Number(row.drift.toExponential(3)),
-    solverDrift: Number(d.volumeDrift.toExponential(3)), particles: d.particles, seeded: d.seeded, deleted: d.deleted,
+    solverDrift: Number(d.volumeDrift.toExponential(3)), particles: d.particles, seeded: d.seeded, deleted: d.deleted, by: d.deletedBy,
     cycles: d.cycles, meanCycles: r(d.cyclesTotal / Math.max(1, d.step), 2), capHits: d.capHits,
     res0: Number(d.firstResidual.toExponential(2)), res: Number(d.lastResidual.toExponential(2)), maxSeg: d.maxSegments, lists: d.lists,
     hist: d.residualHistory.map(x => Number(x.toExponential(2))),

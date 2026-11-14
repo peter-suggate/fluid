@@ -46,3 +46,38 @@ The solver files are committed (this commit): `createSeepSolver(device, scene, {
 `observation` (= `observationSource`), `surfaceFieldTexture` 513x257x65 r32float nodal phi in metres (negative liquid,
 +PHI_MAX h in solid), `volumeTexture` 512x256x64. You can commit the method registration now. The 0xFFFFFF00 segment count you
 saw came from the 7.7 m/s throat runaway (fixed above); SEGMENTS/POOL/DEEP_SURFACE latch in `info.simulationPipelineError`.
+
+## 2026-11-14 MILESTONE S1b: chamber physics to 6/8 gates (1200 steps, check slot)
+
+Supersedes the S1 notes on seeding and the union above. Changes, each a published treatment cited in the kernel comments:
+- Surface = NB-FLIP's: nearest-sphere union (radius 0.875h) bounded by the particles' own volume (sampleBound "walls"
+  axis rule at solids), with erasure toward the spheres at most h a step (Ferstl 2016 Eq. 4).
+- Seeding after redistance (level set and survivors at the same instant): inner band topped up to 8; outer layer only
+  where no survivor lies in the 27 cells; inflow liquid (one-step departure point behind x = 256) seeded in every octant.
+  Seeds carry the semi-Lagrangian velocity u^n(departure) (Stam 1999). Sampling u^n at the landing point handed the
+  jet the stale velocity already there: the exit jet ran at 1.1 m/s, falling at 45 degrees, instead of 2.6 m/s.
+- Particle separation (Sato 2018 pairs, constraint-averaged, tangential within h of the surface) and ballistic flight
+  for particles with no liquid cell in their 2x2x2 neighbourhood.
+- Particle centres keep a quarter cell from solids. On the wall plane the floor film's particles were held at v = 0
+  and packed 9-41 per cell into the bottom row, under liquid they no longer described: -1.2% drift by step 1200.
+- Redistance freezes every cut-cell corner at its value (Adalsteinsson & Sethian 1995). Re-initialising cut corners
+  from axis crossings added 0.2% of the film's volume a step (measured per stage with the tetrahedral fill: SL advection
+  -300 cells/step, union +330, redistance now exactly 0).
+- The crowding cap (16 a cell) applies only deeper than h; deletions are counted by reason (deep / cap / out).
+
+seep-bench 1200 steps vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s-m3.md):
+
+| gate | verdict | detail |
+|---|---|---|
+| G1 | pass | q_left mean 0.2596 vs 0.2697 L/s (-3.75%) |
+| G2 | pass | left loss within -3.9% at 300-1200 |
+| G3 | FAIL | right 1.721 / 3.199 / 4.644 / 5.694 L at 300/600/900/1200; upper bounds 1.282 / 2.705 / 4.117 / 5.518 |
+| G4 | pass | throat u 2.589 vs 2.639 m/s |
+| G5 | pass | 90% wet at step 286 vs 299; 16384 vs 16361 at 1200 |
+| G6 | pass | centroid 372.7 / 378.5 vs 368.9 / 369.8; L1 0.177 / 0.155 within limits |
+| G7 | pass | drift +0.14% vs NB-FLIP -0.50% |
+| G8 | FAIL | jet column 0.0571 vs 0.0770 L (-25.9%, limit 25%) |
+
+G3: the chamber gains ~10 cells a step over delivery during the jet and splash phase (steps 0-360; the union restores
+4% more than SL advection removes there), then tracks delivery (q_right ~ q_left). Fenced median 45.8 ms/step
+(NB-FLIP 33.7): S2 speed work is next.

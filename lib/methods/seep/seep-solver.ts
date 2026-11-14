@@ -14,7 +14,7 @@ import {
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
   countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgUp1Kernel, mgUp2Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
-  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, seedKernel, velocityKernel, volumeKernel, type KernelSource,
+  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, seedKernel, separateKernel, velocityKernel, volumeKernel, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
 import { ARGS_WORDS, B, C, COARSE_CELLS, FAIL, MAX_CYCLES, MG_STRIDE, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
@@ -33,6 +33,7 @@ export interface SeepDiagnostics {
   readonly particles: number;
   readonly seeded: number;
   readonly deleted: number;
+  readonly deletedBy: { readonly deep: number; readonly cap: number; readonly out: number };
   readonly cycles: number;
   readonly cyclesTotal: number;
   readonly capHits: number;
@@ -209,7 +210,6 @@ export class SeepSolver implements GPUSolverInstance {
         d(classifyKernel, undefined, { direct: [Math.ceil(BRICKS / 64)] }),
         d(clearKernel, undefined, { indirect: W(C.ARG_CLEAR) }),
         d(countKernel, p, { direct: [capGroups] }),
-        d(seedKernel, p, { indirect: W(C.ARG_PART) }),
         d(scanKernel, p, { indirect: W(C.ARG_PART) }),
         d(scatterKernel, p, { direct: [capGroups] }),
         d(advectPhiKernel, undefined, { indirect: W(C.ARG_SURF) }),
@@ -217,6 +217,8 @@ export class SeepSolver implements GPUSolverInstance {
         d(redistInitKernel, undefined, { indirect: W(C.ARG_SURF) }),
         d(redistSweepKernel, [0, N, 0, 0], { indirect: W(C.ARG_SURF) }, "seep.redistSweep.1"),
         d(redistSweepKernel, [N, 0, 1, 0], { indirect: W(C.ARG_SURF) }, "seep.redistSweep.2"),
+        d(seedKernel, p, { indirect: W(C.ARG_PART) }),
+        d(separateKernel, p, { direct: [capGroups] }),
         d(p2gKernel, p, { indirect: W(C.ARG_PART) }),
         d(velocityKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
         d(operatorKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
@@ -351,6 +353,7 @@ export class SeepSolver implements GPUSolverInstance {
     return {
       step: ctrl[C.STEP], volumeCells: volume, initialVolumeCells: this.initialVolumeCells, volumeDrift: drift, failures,
       particles: ctrl[C.PCOUNT] + ctrl[C.PCOUNT + 1], seeded: ctrl[C.SEEDED], deleted: ctrl[C.DELETED],
+      deletedBy: { deep: ctrl[C.DEL_DEEP], cap: ctrl[C.DEL_CAP], out: ctrl[C.DEL_OUT] },
       cycles: ctrl[C.CYCLES], cyclesTotal: ctrl[C.CYCLES_TOTAL], capHits: ctrl[C.CAP_HITS],
       firstResidual: f[C.FIRST_RES], lastResidual: f[C.LAST_RES], maxSegments: ctrl[C.MAX_SEG],
       residualHistory: Array.from(f.subarray(C.RES_HIST, C.RES_HIST + MAX_CYCLES + 1)),
@@ -358,14 +361,15 @@ export class SeepSolver implements GPUSolverInstance {
     };
   }
 
-  /** Development aid: encode the next step only up to and including dispatch `label`, then stop (the solver is then mid-step). */
-  debugPartialStep(label: string): void {
+  /** Development aid: encode the next step only up to and including dispatch `label` (from just after `after`, else from its start), then stop (the solver is then mid-step). */
+  debugPartialStep(label: string, after?: string): void {
     const list = this.steps[this.stepIndex & 1];
     const end = list.findIndex(x => x.label === label);
-    if (end < 0) throw new Error(`seep: no dispatch ${label}`);
+    const begin = after === undefined ? 0 : list.findIndex(x => x.label === after) + 1;
+    if (end < 0 || begin < 0) throw new Error(`seep: no dispatch ${label}`);
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    for (const x of list.slice(0, end + 1)) this.encode(pass, x);
+    for (const x of list.slice(begin, end + 1)) this.encode(pass, x);
     pass.end();
     this.device.queue.submit([encoder.finish()]);
   }

@@ -22,8 +22,8 @@ export const PRESSURE_TOLERANCE = 0.05 * CELL_M;
 export const MAX_CYCLES = 12;
 /** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). */
 export const AGGREGATION_OC = 1.8;
-/** Backtrace segment cap (24 cells per step = 7.2 m/s at 1-cell segments; exceeding latches a flag). */
-export const MAX_SEGMENTS = 24;
+/** Backtrace segment cap: 48 cells a step (14 m/s) at 1-cell segments; beyond it segments lengthen (recorded in maxSegments, not fatal). */
+export const MAX_SEGMENTS = 48;
 
 /** ctrl word offsets. */
 export const C = {
@@ -36,7 +36,10 @@ export const C = {
   /** The last step's residual (f32 bits) measured before each cycle k = 0..MAX_CYCLES (0 once converged). */
   RES_HIST: 36,
   /** PCG scalars alpha_(k-1), rho_(k-1) (f32 bits), and the dot-product slots (2 sets x [r.z, z.q, p.q] x 64). */
-  ALPHA: 60, RHO: 61, RED: 256,
+  ALPHA: 60, RHO: 61,
+  /** Cumulative particle retirements by reason: deeper than the band, over the cell cap, out of the particle region. */
+  DEL_DEEP: 62, DEL_CAP: 63, DEL_OUT: 64,
+  RED: 256,
   /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1). */
   MG_ARGS: 64,
   WORDS: 256 + 2 * 192,
@@ -89,7 +92,7 @@ const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_LACT: u32 = ${B.LIST_ACTIVE
 const B_LPART: u32 = ${B.LIST_PART * BRICKS}u; const B_LCLEAR: u32 = ${B.LIST_CLEAR * BRICKS}u;
 const B_PSTART: u32 = ${B.PSTART * BRICKS}u; const B_PNUM: u32 = ${B.PNUM * BRICKS}u;
 const C_ARG_ACTIVE: u32 = ${C.ARG_ACTIVE}u; const C_ARG_SURF: u32 = ${C.ARG_SURF}u; const C_ARG_PART: u32 = ${C.ARG_PART}u; const C_ARG_CLEAR: u32 = ${C.ARG_CLEAR}u;
-const C_STEP: u32 = ${C.STEP}u; const C_FAIL: u32 = ${C.FAIL}u; const C_PCOUNT: u32 = ${C.PCOUNT}u; const C_DELETED: u32 = ${C.DELETED}u;
+const C_STEP: u32 = ${C.STEP}u; const C_FAIL: u32 = ${C.FAIL}u; const C_PCOUNT: u32 = ${C.PCOUNT}u; const C_DELETED: u32 = ${C.DELETED}u; const C_DEL_DEEP: u32 = ${C.DEL_DEEP}u; const C_DEL_CAP: u32 = ${C.DEL_CAP}u; const C_DEL_OUT: u32 = ${C.DEL_OUT}u;
 const C_SEEDED: u32 = ${C.SEEDED}u; const C_RES: u32 = ${C.RES}u; const C_CONV: u32 = ${C.CONV}u; const C_PARITY: u32 = ${C.PARITY}u;
 const C_CYCLES: u32 = ${C.CYCLES}u; const C_FIRST_RES: u32 = ${C.FIRST_RES}u; const C_LAST_RES: u32 = ${C.LAST_RES}u;
 const C_CAP_HITS: u32 = ${C.CAP_HITS}u; const C_CYCLES_TOTAL: u32 = ${C.CYCLES_TOTAL}u; const C_MAX_SEG: u32 = ${C.MAX_SEG}u;
