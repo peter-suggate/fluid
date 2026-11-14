@@ -593,3 +593,64 @@ PASS.
 - Against 6fbe1174 (H11), Seep is 0.72 ms faster fenced (7.75 to 7.03) and 0.59 ms faster pipelined (6.91 to 6.32). This is about lane S's -0.65 ms.
 - My fenced 7.03 ms matches lane S's check-slot A/B figure of about 7.03 ms.
 - Seep's fenced thirds are 6.30 / 7.07 / 7.39 ms.
+
+## 2026-11-15 MILESTONE H13: gate round on S2q (2be18980)
+
+**Fenced timing with the two-buffer submit.**
+- seep-bench calls `SeepSolver.advanceTo` directly; `createSolverAsync` returns `createSeepSolver` with no wrapper.
+- `advanceTo` submits both prebuilt command buffers synchronously, `for (const cb of cbs) queue.submit([cb])`, before it returns. It then encodes the next step's buffers.
+- The bench then awaits `awaitFrameCompletion`, which is `queue.onSubmittedWorkDone()` and covers everything submitted, both buffers included.
+- So each fenced step is timed from before the first submit to the completion of the second buffer. The next step's encoding is inside that window, as it was before S2q. The fence covers the whole step.
+- Consistent with that, fenced 6.83 ms stays above pipelined 6.24 ms per step.
+
+**Build provenance.**
+- All five runs used a read-only `git archive 2be18980` export and the main repo's runner, so the meta commit reads "unknown". `dirtyLibOrTools` is false.
+- The coordinator committed 46a2ba94 (a docs-only plan) during the round, which did not affect `lib/`.
+- Every run exited rc 0, and the system log has no Metal command-buffer errors or GPU restarts.
+- Same-build cross-check at step 1200:
+
+  | Seep run | left L | particles | centroid |
+  |---|---|---|---|
+  | check | 363.4719 | 332336 | 381.9 |
+  | timing fenced | 363.4684 | 332340 | 385.0 |
+  | timing pipelined | 363.4692 | 332340 | 384.6 |
+
+**GPU contention.**
+- The check run (11:04:05-17) started with the GPU at 34% and its median is 7.33 ms. The check run is only for the gates, so this does not affect any result.
+- From 11:04:20 to 11:05:28 the GPU sat at 35-45% from a source the sampler could not identify. Its only catch was a 1-2 s lane S node test at 11:04:52 (`fluid-scratch/lane-s/v/cap/.../seep-diagnostics.test.ts`).
+- The quiet-GPU gate held Seep fenced for 68 s until utilisation stayed under 15%. The other three runs passed the gate in 5 s.
+- Between runs, utilisation was 0-7%.
+
+Timing runs: Seep fenced 11:05:30-41, Seep pipelined 11:05:49-58, NB-FLIP fenced 11:06:06-59, NB-FLIP pipelined 11:07:07-58.
+
+| gate | check run (gated) | timing-fenced (informational) |
+|---|---|---|
+| G1 | pass, -4.11%, windows 18/18 | pass, -4.04% |
+| G2 | pass, -3.00 / -3.98 / -3.89 / -3.83% | pass |
+| G3 | pass, 1.274 / 2.591 / 3.907 / 5.203 L in band | pass |
+| G3 (as written) | pass, not gated (1.274) | fail, not gated (1.285) |
+| G4 | pass, 2.597 vs 2.639 m/s | pass |
+| G5 | pass, step 277 vs 296 | pass, step 270 |
+| G6 | pass: at 1200, L1 vs restored 0.155 <= 0.214, centroid 381.9; at 600, 0.050 | pass: at 1200, 0.133, centroid 385.0 |
+| G6 (as written) | pass, not gated (L1 0.205) | pass (0.190) |
+| G7 | pass, 0.01% | pass, 0.01% |
+| G8 | pass: impact 375.9 / 375.4 vs 380.8 / 382.8; RMS 0.80 / 1.29 | pass |
+| G8 (as written) | fail, not gated | fail, not gated |
+
+§5 (timing slot, quiet GPU):
+
+| | NB-FLIP | Seep | ratio |
+|---|---|---|---|
+| fenced median ms | 34.59 | 6.83 | **5.06x** |
+| fenced p95 ms | 38.64 | 7.67 | |
+| fenced mean ms | 34.11 | 6.76 | |
+| pipelined ms/step | 32.99 | 6.24 | **5.28x** |
+| construction ms | 11269 | 1973 | |
+| peak GPU bytes | 1244173500 | 1049640836 | |
+
+PASS (stretch >= 5x).
+- Against this round's NB-FLIP, 5x needs ≤6.92 ms fenced and ≤6.60 ms pipelined. Seep is 0.09 ms and 0.36 ms under, so it meets both.
+- Against the plan's fixed 6.7 / 6.4 ms, pipelined is met by 0.16 ms and fenced is 0.13 ms over.
+- NB-FLIP fenced has measured 33.6-34.9 ms across rounds, so the fenced 5x margin, 0.09 ms, is within NB-FLIP's round-to-round noise.
+- Against 1209eb14 (H12), Seep is 0.20 ms faster fenced (7.03 to 6.83) and 0.08 ms faster pipelined (6.32 to 6.24). Lane S estimated about -0.3 ms.
+- Seep's fenced thirds are 6.11 / 6.90 / 7.26 ms.
