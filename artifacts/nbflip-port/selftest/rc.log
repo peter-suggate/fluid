@@ -1,0 +1,35 @@
+start c 11:34:01
+dam-ref-c rc=1 11:34:25
+seep-ref-c rc=0 11:35:01
+letters-ref-c rc=0 11:35:39
+paddleboats-ref-c rc=0 11:35:40
+start p 11:35:40
+dam-ref-p rc=0 11:36:11
+seep-ref-p rc=0 11:36:42
+letters-ref-p rc=77 11:37:02
+paddleboats-ref-p rc=77 11:37:12
+letters-residual0.5 try 1 rc=0 11:42:22
+paddleboats-residual0.5 try 1 rc=0 11:42:48
+dam-base-e try 1 rc=0 11:43:19
+seep-base-e try 1 rc=0 11:44:15
+letters-base-e try 1 rc=0 11:44:48
+paddleboats-base-e try 1 rc=0 11:45:16
+dam-base-f try 1 rc=0 11:46:00
+seep-base-f try 1 rc=0 11:46:55
+letters-base-f try 1 rc=0 11:47:24
+paddleboats-base-f try 1 rc=0 11:47:52
+dam-cycles1 rc=1 11:48:24
+letters-cycles1 rc=0 11:48:59
+paddleboats-cycles1 rc=0 11:49:26
+dam-tol50 rc=0 11:51:06
+letters-tol50 rc=0 11:53:14
+paddleboats-tol50 rc=0 11:55:41
+dam-cubicoff rc=1 11:59:08
+letters-cubicoff rc=0 12:00:12
+paddleboats-cubicoff rc=0 12:01:19
+dam-volctl1 rc=0 12:03:37
+letters-volctl1 rc=0 12:04:50
+paddleboats-volctl1 rc=0 12:06:22
+dam-cellcap8 rc=0 12:07:15
+letters-cellcap8 rc=0 12:08:11
+paddleboats-cellcap8 rc=0 12:09:08

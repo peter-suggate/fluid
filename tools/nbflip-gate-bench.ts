@@ -86,6 +86,8 @@ const scene = sceneDocument(definition);
 const profile = definition.methodProfile;
 const quality = profile?.methodId === METHOD ? profile.quality : "balanced";
 const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), ...sets });
+// A --set the method pins (NB-FLIP fixes pressureFullCycles, for one) would otherwise be dropped without a word.
+for (const [key, value] of Object.entries(sets)) assert.equal(values[key], value, `--set=${key}=${value}: ${METHOD} resolves ${key} to ${String(values[key])} (a fixed parameter); refusing to run`);
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 assert.ok(steps * dt <= scene.duration_s + 1e-9, "Stay within the authored take");
 const geometry = boxGeometry(scene, sceneKey);

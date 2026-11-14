@@ -1,0 +1,5 @@
+2026-11-15 12:00:00.652 E  WindowServer[45693:19ba1c0] (Metal) Execution of the command buffer was aborted due to an error during execution. Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)
+2026-11-15 12:00:00.652 Df WindowServer[45693:19ba1c0] [com.apple.SkyLight:default] Flushing display space to aid GPU restart recovery.
+2026-11-15 12:00:00.652 E  WindowServer[45693:19ba1c0] [com.apple.coreanimation:Metal] MTLCommandBuffer 0x893c21880, protection 0x0, label (null), error = Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)
+2026-11-15 12:00:00.652 E  node[45667:19ba6f6] (Metal) Execution of the command buffer was aborted due to an error during execution. Discarded (victim of GPU error/recovery) (00000005:kIOGPUCommandBufferCallbackErrorInnocentVictim)
+2026-11-15 12:00:01.509 E  node[45667:19ba5bb] (Metal) Execution of the command buffer was aborted due to an error during execution. Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)

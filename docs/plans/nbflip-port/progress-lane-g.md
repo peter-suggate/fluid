@@ -33,3 +33,78 @@ Smoke checks (check slot, HEAD 46a2ba94 lib):
 - The first dam run was invalid: another process's GPU hang (kIOGPUCommandBufferCallbackErrorHang,
   11:19:31) discarded its command buffers, and it then failed a residency closure at step 30.
   The rerun was clean and passed step 60.
+
+## 2026-11-15 MILESTONE G2: references, gates, self-test
+
+Files:
+- `tools/nbflip-gates.ts`: the referee. It judges per-scene gate tables (C0, then plan §4.1),
+  prints the timing-slot table beside each verdict, offers `--timing-only` for the timing
+  round, and exits 1 on FAIL.
+- `tools/nbflip-timing-round.sh`: the timing round for all four scenes. It runs baseline
+  and candidate, fenced and pipelined, back to back on the timing slot, each after a quiet
+  GPU (under 15% for 5 s). It logs provenance, utilisation and contention, checks Metal, and
+  writes OUT/timing.md.
+- `tools/nbflip-export.sh`: makes a read-only export of a commit, with an optional patch and
+  a PROVENANCE file.
+- `tools/nbflip-gate-bench.ts`: now refuses a `--set` that the method does not resolve to
+  the given value.
+
+References: five runs per scene at 33b78ebb (four for the dam), in
+`artifacts/nbflip-port/ref/`. Two references were not enough:
+- With two, a pure-noise row falls outside 3S in 18% of cases (model), and the data agreed.
+- Run c judged on a and b failed paddleboats P2x.
+- b judged against a failed the dam (D5k, D7t) and letters (L2, L2t).
+
+Gates rebuilt from measurement, before any port landed:
+- **Highest-wet-top profiles were dropped after step 16.** They measure a droplet maximum:
+  RMS between baseline runs was 10–40 cells. They were replaced by mean-depth maps.
+- **Dam rows after the impact became window means** over 30–90 and 105–165. At step 60 a
+  baseline run's E was 2.7% low, and the sloshing phase splits the runs into two groups.
+- **KE floors gained an absolute floor** of 2 J (0.3% of E0), because slosh minima are
+  2–5 J.
+
+**Baseline defect.** The NB-FLIP dam at 33b78ebb fails a residency audit ("liquid outside the
+resident pages, or a reader outside the closure") at steps 178–192:
+- 2 of 7 baseline runs failed this way, and so did the ignored-`--set` run;
+- the GPU was clean.
+
+So the dam's gated rows end at 165 (C0), and C0f (300 steps) is informational until the
+defect is fixed. It needs an owner who may touch `lib/methods/uniform`.
+
+Self-test:
+- Leave-one-out over a–e: all PASS.
+- Sixth baseline run f against a–e: PASS on all four scenes; worst margin 0.47.
+- residual 0.5 tree: FAIL. The seep fails G1, G1w, G2 and G7; paddleboats fails P1. The dam
+  and letters are insensitive to it.
+- `--set=pressureFullCycles=1` was a no-op: NB-FLIP fixes the value at 3. The runs were
+  discarded and the bench was fixed.
+
+Invalid runs:
+- Letters and paddleboats on the residual tree returned rc 77: another process's GPU hang,
+  and the guard caught it. They were rerun one at a time and kept as `*-rc77` evidence.
+
+More perturbations, all `--set` on the baseline export:
+- `volumeControlSeconds=1` FAILs the dam: drift −18%, D4 margin 8.9.
+- `pressureResidualTolerance=50` and `particleCellCap=8` match the baseline.
+- `pressureFullCycles=1` and `phiCubicAdvection=off` were ignored by the method. The bench now
+  refuses such a `--set`.
+
+The dam defect is worse than first counted:
+- 6 of 11 fenced 300-step runs at baseline physics stopped, at steps 178–247.
+- Both timing-slot fenced runs were among them, so contention is not the cause.
+- The dam is therefore timed over its 165 gated steps.
+
+## 2026-11-15 MILESTONE G3: baseline timing round (A/A, timing slot, quiet GPU)
+
+Results are in `artifacts/nbflip-port/timing-base/` and `timing-base-dam/`. Fenced median and
+pipelined ms/step, A / A:
+
+| scene (steps) | fenced median ms | pipelined ms/step |
+|---|---|---|
+| seep (1200) | 34.23 / 35.00 | 33.12 / 32.86 |
+| dam (165) | 45.12 / 46.25 | 50.29 / 49.18 |
+| letters (240) | 83.05 / 85.10 | 68.42 / 69.26 |
+| paddleboats (300) | 49.26 / 50.22 | 43.66 / 44.46 |
+
+The A/A spread is about 2.5%. A first round failed because the script wrote OUT through a
+relative path from inside the tree; OUT and the trees are now absolute.

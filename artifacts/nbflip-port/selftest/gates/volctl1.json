@@ -1,0 +1,1169 @@
+{
+ "overall": "FAIL",
+ "references": [
+  "dam-ref-a",
+  "dam-ref-b",
+  "dam-ref-d",
+  "dam-base-e",
+  "letters-ref-a",
+  "letters-ref-b",
+  "letters-ref-c",
+  "letters-ref-d",
+  "letters-base-e",
+  "paddleboats-ref-a",
+  "paddleboats-ref-b",
+  "paddleboats-ref-c",
+  "paddleboats-ref-d",
+  "paddleboats-base-e",
+  "seep-ref-a",
+  "seep-ref-b",
+  "seep-ref-c",
+  "seep-ref-d",
+  "seep-base-e"
+ ],
+ "verdicts": [
+  {
+   "scene": "dam",
+   "candidate": "dam-volctl1",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/selftest/dam-volctl1.jsonl",
+   "pass": false,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 165 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "300",
+       "ref": null,
+       "S": 0,
+       "candidate": 300,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "C0f",
+     "observable": "completed 300 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": true,
+     "rows": [
+      {
+       "at": "300",
+       "ref": null,
+       "S": 0,
+       "candidate": 300,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "D1",
+     "observable": "front x_f, furthest wet floor x (cells; Z = x_f / 80)",
+     "rule": "|c - ref| <= max(4 cells, 3S)",
+     "rows": [
+      {
+       "at": "2",
+       "ref": 84,
+       "S": 0,
+       "candidate": 84,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "4",
+       "ref": 88,
+       "S": 0,
+       "candidate": 88,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "6",
+       "ref": 96,
+       "S": 0,
+       "candidate": 96,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "8",
+       "ref": 107.75,
+       "S": 1,
+       "candidate": 108,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.0625
+      },
+      {
+       "at": "10",
+       "ref": 121,
+       "S": 0,
+       "candidate": 121,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D2",
+     "observable": "residual column height at the back wall, highest wet top (cells; eta = h / 117.8)",
+     "rule": "|c - ref| <= max(4 cells, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 114.75,
+       "S": 0,
+       "candidate": 114.75,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "8",
+       "ref": 106.0625,
+       "S": 0,
+       "candidate": 106.0625,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "12",
+       "ref": 93.1875,
+       "S": 0,
+       "candidate": 93.1875,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "16",
+       "ref": 78.75,
+       "S": 0,
+       "candidate": 78.625,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.03125
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D4c",
+     "observable": "volume drift at the far-wall impact (fraction of t = 0)",
+     "rule": "|c - ref| <= max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "16",
+       "ref": -0.04434783731346559,
+       "S": 0.007784590242403078,
+       "candidate": -0.04425201468256179,
+       "tol": 0.023353770727209233,
+       "pass": true,
+       "margin": 0.004103090332738211
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5c",
+     "observable": "collapse kinetic energy (J)",
+     "rule": "|c - ref| <= max(10% | 2 J, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 36.08475017212801,
+       "S": 0.00015323243870568604,
+       "candidate": 36.08467375894057,
+       "tol": 3.6084750172128013,
+       "pass": true,
+       "margin": 0.000021176033387743347
+      },
+      {
+       "at": "8",
+       "ref": 119.50217759372617,
+       "S": 0.018482212771033346,
+       "candidate": 119.5060420616816,
+       "tol": 11.950217759372618,
+       "pass": true,
+       "margin": 0.000323380546968938
+      },
+      {
+       "at": "12",
+       "ref": 228.68826500489124,
+       "S": 0.105454304456714,
+       "candidate": 228.72734164888865,
+       "tol": 22.868826500489124,
+       "pass": true,
+       "margin": 0.0017087297416237266
+      },
+      {
+       "at": "16",
+       "ref": 274.29471620257505,
+       "S": 2.178365643906602,
+       "candidate": 273.7924152745486,
+       "tol": 27.429471620257505,
+       "pass": true,
+       "margin": 0.018312453662267362
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5ce",
+     "observable": "collapse total mechanical energy (J)",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 669.1673528971204,
+       "S": 0.0033113809647602466,
+       "candidate": 669.1681405442861,
+       "tol": 13.383347057942409,
+       "pass": true,
+       "margin": 0.00005885277892517887
+      },
+      {
+       "at": "8",
+       "ref": 670.793447221674,
+       "S": 0.019064982357690496,
+       "candidate": 670.798268346632,
+       "tol": 13.41586894443348,
+       "pass": true,
+       "margin": 0.00035935987284455457
+      },
+      {
+       "at": "12",
+       "ref": 664.098256472567,
+       "S": 0.15626681790581642,
+       "candidate": 664.1954305415807,
+       "tol": 13.28196512945134,
+       "pass": true,
+       "margin": 0.007316241841219025
+      },
+      {
+       "at": "16",
+       "ref": 590.0085571315433,
+       "S": 4.198211769732325,
+       "candidate": 589.0612566613089,
+       "tol": 12.594635309196974,
+       "pass": true,
+       "margin": 0.07521460105658119
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D6",
+     "observable": "wet floor cells",
+     "rule": "|c - ref| <= max(5%, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 7624,
+       "S": 0,
+       "candidate": 7623,
+       "tol": 381.20000000000005,
+       "pass": true,
+       "margin": 0.0026232948583420775
+      },
+      {
+       "at": "8",
+       "ref": 10765,
+       "S": 9,
+       "candidate": 10773,
+       "tol": 538.25,
+       "pass": true,
+       "margin": 0.014862981885740827
+      },
+      {
+       "at": "12",
+       "ref": 14937.75,
+       "S": 5,
+       "candidate": 14940,
+       "tol": 746.8875,
+       "pass": true,
+       "margin": 0.0030125018828136767
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D7t",
+     "observable": "collapse surface profile: highest wet top per 8-cell x bin, RMS (cells)",
+     "rule": "d(c, ref) <= max(4 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "8",
+       "ref": 0,
+       "S": 0.14490028899212037,
+       "candidate": 0.036225072248030094,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.009056268062007523
+      },
+      {
+       "at": "12",
+       "ref": 0,
+       "S": 0.41369382171480396,
+       "candidate": 0.10618966577397021,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.026547416443492552
+      },
+      {
+       "at": "16",
+       "ref": 0,
+       "S": 1.6789424219579419,
+       "candidate": 0.9153636572423006,
+       "tol": 5.036827265873826,
+       "pass": true,
+       "margin": 0.18173417687840773
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D8c",
+     "observable": "particles at 16",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "16",
+       "ref": 350920.75,
+       "S": 9091,
+       "candidate": 351383,
+       "tol": 35092.075000000004,
+       "pass": true,
+       "margin": 0.013172489800047446
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D3",
+     "observable": "back-wall column mean depth (cells), window mean",
+     "rule": "|c - ref| <= max(5% | 2 cells, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 44.796301879882805,
+       "S": 0.9606809997558514,
+       "candidate": 37.9937629699707,
+       "tol": 2.8820429992675543,
+       "pass": false,
+       "margin": 2.3603183268399905
+      },
+      {
+       "at": "105-165",
+       "ref": 46.75536964416504,
+       "S": 1.3522854614257795,
+       "candidate": 43.184549255371095,
+       "tol": 4.056856384277339,
+       "pass": true,
+       "margin": 0.8801939360320811
+      }
+     ],
+     "pass": false,
+     "informational": false
+    },
+    {
+     "id": "D4",
+     "observable": "volume drift (fraction of t = 0), window mean",
+     "rule": "|c - ref| <= max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": -0.03935450537315637,
+       "S": 0.005527663691900983,
+       "candidate": -0.18422160751882594,
+       "tol": 0.01658299107570295,
+       "pass": false,
+       "margin": 8.735884948881496
+      },
+      {
+       "at": "105-165",
+       "ref": -0.011113346238404565,
+       "S": 0.0013994583940901018,
+       "candidate": -0.09958837006356121,
+       "tol": 0.01,
+       "pass": false,
+       "margin": 8.847502382515664
+      }
+     ],
+     "pass": false,
+     "informational": false
+    },
+    {
+     "id": "D5k",
+     "observable": "kinetic energy (J), window mean",
+     "rule": "|c - ref| <= max(10% | 2 J, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 46.211443390784275,
+       "S": 2.358717219729421,
+       "candidate": 39.24938612315656,
+       "tol": 7.0761516591882625,
+       "pass": true,
+       "margin": 0.9838762088412281
+      },
+      {
+       "at": "105-165",
+       "ref": 15.036715100212101,
+       "S": 2.6635050652027115,
+       "candidate": 12.488681956963543,
+       "tol": 7.990515195608134,
+       "pass": true,
+       "margin": 0.31888220982910415
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5p",
+     "observable": "potential energy (J), window mean",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 280.77633880272816,
+       "S": 2.3033025722811544,
+       "candidate": 207.89629464803852,
+       "tol": 6.909907716843463,
+       "pass": false,
+       "margin": 10.547180532822253
+      },
+      {
+       "at": "105-165",
+       "ref": 265.81808194307155,
+       "S": 4.172739092063807,
+       "candidate": 221.01900973760513,
+       "tol": 12.518217276191422,
+       "pass": false,
+       "margin": 3.57871022822638
+      }
+     ],
+     "pass": false,
+     "informational": false
+    },
+    {
+     "id": "D5e",
+     "observable": "total mechanical energy (J), window mean",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 326.98778219351243,
+       "S": 2.668184370298718,
+       "candidate": 247.14568077119506,
+       "tol": 8.004553110896154,
+       "pass": false,
+       "margin": 9.974585753404865
+      },
+      {
+       "at": "105-165",
+       "ref": 280.8547970432836,
+       "S": 6.836244157266549,
+       "candidate": 233.50769169456868,
+       "tol": 20.508732471799647,
+       "pass": false,
+       "margin": 2.308631477533736
+      }
+     ],
+     "pass": false,
+     "informational": false
+    },
+    {
+     "id": "D7d",
+     "observable": "surface profile: mean depth per 8-cell x bin, window mean, normalised L1",
+     "rule": "d(c, ref) <= max(0.05, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 0,
+       "S": 0.006091074154856428,
+       "candidate": 0.004502082822036027,
+       "tol": 0.05,
+       "pass": true,
+       "margin": 0.09004165644072054
+      },
+      {
+       "at": "105-165",
+       "ref": 0,
+       "S": 0.007527421756480128,
+       "candidate": 0.006037393007438718,
+       "tol": 0.05,
+       "pass": true,
+       "margin": 0.12074786014877437
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D8",
+     "observable": "particles, window mean",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 623243.5,
+       "S": 41605.19999999995,
+       "candidate": 614780,
+       "tol": 124815.59999999986,
+       "pass": true,
+       "margin": 0.06780803040645568
+      },
+      {
+       "at": "105-165",
+       "ref": 382690.45,
+       "S": 30040.399999999965,
+       "candidate": 371521.8,
+       "tol": 90121.1999999999,
+       "pass": true,
+       "margin": 0.12392921976183224
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D3+",
+     "observable": "back-wall column mean depth (cells), window mean",
+     "rule": "|c - ref| <= max(5% | 2 cells, 3S)",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": 46.652121692233614,
+       "S": 1.1030954149034216,
+       "candidate": 45.26048617892795,
+       "tol": 3.3092862447102647,
+       "pass": true,
+       "margin": 0.42052437002998094
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D4+",
+     "observable": "volume drift (fraction of t = 0), window mean",
+     "rule": "|c - ref| <= max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": -0.009954278652533895,
+       "S": 0.0023131120446192727,
+       "candidate": -0.03370706874220967,
+       "tol": 0.01,
+       "pass": false,
+       "margin": 2.3752790089675773
+      }
+     ],
+     "pass": false,
+     "informational": true
+    },
+    {
+     "id": "D5k+",
+     "observable": "kinetic energy (J), window mean",
+     "rule": "|c - ref| <= max(10% | 2 J, 3S)",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": 8.872635195466547,
+       "S": 3.4880272708283533,
+       "candidate": 9.891956462812427,
+       "tol": 10.464081812485059,
+       "pass": true,
+       "margin": 0.0974114390170089
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D5p+",
+     "observable": "potential energy (J), window mean",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": 262.6590841015226,
+       "S": 5.340393444212964,
+       "candidate": 250.998426710922,
+       "tol": 16.02118033263889,
+       "pass": true,
+       "margin": 0.7278276099823372
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D5e+",
+     "observable": "total mechanical energy (J), window mean",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": 271.5317192969891,
+       "S": 8.828420715041318,
+       "candidate": 260.8903831737345,
+       "tol": 26.485262145123954,
+       "pass": true,
+       "margin": 0.4017833036707809
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D7d+",
+     "observable": "surface profile: mean depth per 8-cell x bin, window mean, normalised L1",
+     "rule": "d(c, ref) <= max(0.05, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": 0,
+       "S": 0.00717161982371449,
+       "candidate": 0.004818619695656438,
+       "tol": 0.05,
+       "pass": true,
+       "margin": 0.09637239391312877
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D8+",
+     "observable": "particles, window mean",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "180-300",
+       "ref": 346681.44444444444,
+       "S": 32964.22222222225,
+       "candidate": 345991.8888888889,
+       "tol": 98892.66666666674,
+       "pass": true,
+       "margin": 0.006972767332483988
+      }
+     ],
+     "pass": true,
+     "informational": true
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  },
+  {
+   "scene": "letters",
+   "candidate": "letters-volctl1",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/selftest/letters-volctl1.jsonl",
+   "pass": true,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 240 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "240",
+       "ref": null,
+       "S": 0,
+       "candidate": 240,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "L1",
+     "observable": "volume drift against the t = 0 pool plus the drops (fraction)",
+     "rule": "|c - ref| <= max(0.005, 3S)",
+     "rows": [
+      {
+       "at": "120",
+       "ref": -0.008442680585596874,
+       "S": 0.001788405670520521,
+       "candidate": -0.009786126941898399,
+       "tol": 0.005365217011561563,
+       "pass": true,
+       "margin": 0.2503992575522142
+      },
+      {
+       "at": "180",
+       "ref": -0.009439046092040737,
+       "S": 0.0003702075175070485,
+       "candidate": -0.012248438320540012,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.5618784456998548
+      },
+      {
+       "at": "240",
+       "ref": -0.010923744474425212,
+       "S": 0.0005416427071031071,
+       "candidate": -0.014121271942406755,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.6395054935963086
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L2",
+     "observable": "shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; 1106 L dropped by 240)",
+     "rule": "d(c, ref) <= max(1 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 0,
+       "S": 0.0683564341332803,
+       "candidate": 0.02686913161417227,
+       "tol": 1,
+       "pass": true,
+       "margin": 0.02686913161417227
+      },
+      {
+       "at": "90",
+       "ref": 0,
+       "S": 0.19751157781833198,
+       "candidate": 0.06980483580131099,
+       "tol": 1,
+       "pass": true,
+       "margin": 0.06980483580131099
+      },
+      {
+       "at": "120",
+       "ref": 0,
+       "S": 0.8754818157719113,
+       "candidate": 0.2587576069431395,
+       "tol": 2.626445447315734,
+       "pass": true,
+       "margin": 0.0985200767096052
+      },
+      {
+       "at": "180",
+       "ref": 0,
+       "S": 0.9908050681166766,
+       "candidate": 0.6949949915733235,
+       "tol": 2.9724152043500296,
+       "pass": true,
+       "margin": 0.23381490935594115
+      },
+      {
+       "at": "240",
+       "ref": 0,
+       "S": 1.3390608059912008,
+       "candidate": 0.7250754404696149,
+       "tol": 4.017182417973602,
+       "pass": true,
+       "margin": 0.18049353129335027
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L3",
+     "observable": "kinetic energy (J)",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 1945.244607096276,
+       "S": 13.877063884719973,
+       "candidate": 1949.302741722309,
+       "tol": 194.52446070962762,
+       "pass": true,
+       "margin": 0.020861821753567274
+      },
+      {
+       "at": "120",
+       "ref": 2276.20418153223,
+       "S": 197.06110836357584,
+       "candidate": 2318.2599802914447,
+       "tol": 591.1833250907275,
+       "pass": true,
+       "margin": 0.07113833725394819
+      },
+      {
+       "at": "180",
+       "ref": 3076.0931187160077,
+       "S": 169.78267429964944,
+       "candidate": 3038.4792027536905,
+       "tol": 509.34802289894833,
+       "pass": true,
+       "margin": 0.0738471816347455
+      },
+      {
+       "at": "240",
+       "ref": 3049.896658687817,
+       "S": 167.69530957106917,
+       "candidate": 3043.4770270267823,
+       "tol": 503.0859287132075,
+       "pass": true,
+       "margin": 0.01276050729038422
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L4",
+     "observable": "liquid centroid height (cells)",
+     "rule": "|c - ref| <= max(0.25 cells, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 19.894702792737128,
+       "S": 0.010892337765383786,
+       "candidate": 19.893132575688142,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.006280868195943867
+      },
+      {
+       "at": "120",
+       "ref": 20.577644533152863,
+       "S": 0.23292746917297436,
+       "candidate": 20.580118163695875,
+       "tol": 0.6987824075189231,
+       "pass": true,
+       "margin": 0.003539915310396198
+      },
+      {
+       "at": "180",
+       "ref": 21.710791836379858,
+       "S": 0.053620337981854505,
+       "candidate": 21.622893218392083,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.3515944719511026
+      },
+      {
+       "at": "240",
+       "ref": 20.487415898046425,
+       "S": 0.02498344163804589,
+       "candidate": 20.409884727922897,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.3101246804941127
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L5",
+     "observable": "particles",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 500262.6,
+       "S": 8558,
+       "candidate": 503841,
+       "tol": 50026.26,
+       "pass": true,
+       "margin": 0.07153043221700009
+      },
+      {
+       "at": "120",
+       "ref": 893204.6,
+       "S": 22398,
+       "candidate": 902817,
+       "tol": 89320.46,
+       "pass": true,
+       "margin": 0.10761700062897149
+      },
+      {
+       "at": "180",
+       "ref": 907473.4,
+       "S": 19212,
+       "candidate": 901085,
+       "tol": 90747.34000000001,
+       "pass": true,
+       "margin": 0.07039765573293964
+      },
+      {
+       "at": "240",
+       "ref": 872585.8,
+       "S": 17601,
+       "candidate": 868658,
+       "tol": 87258.58000000002,
+       "pass": true,
+       "margin": 0.04501333851639628
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "Ln",
+     "observable": "NB-FLIP's own volume drift (readStats)",
+     "rule": "|c - ref| <= max(0.005, 3S)",
+     "rows": [
+      {
+       "at": "120",
+       "ref": -0.008445839543962047,
+       "S": 0.001788458593567732,
+       "candidate": -0.009789311212197211,
+       "tol": 0.005365375780703196,
+       "pass": true,
+       "margin": 0.2503965655242672
+      },
+      {
+       "at": "180",
+       "ref": -0.009418605734244087,
+       "S": 0.00037026263199935357,
+       "candidate": -0.012228077567242451,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.5618943665996727
+      },
+      {
+       "at": "240",
+       "ref": -0.01090470786701052,
+       "S": 0.0005416098599490167,
+       "candidate": -0.014102202932715096,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.6394990131409151
+      }
+     ],
+     "pass": true,
+     "informational": true
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  },
+  {
+   "scene": "paddleboats",
+   "candidate": "paddleboats-volctl1",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/selftest/paddleboats-volctl1.jsonl",
+   "pass": true,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 300 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "300",
+       "ref": null,
+       "S": 0,
+       "candidate": 300,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "P1",
+     "observable": "volume drift (fraction of t = 0)",
+     "rule": "|c - ref| <= max(0.0025, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": -0.0029543142972721093,
+       "S": 0.00020143493182134264,
+       "candidate": -0.002991617760724541,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.014921385380972652
+      },
+      {
+       "at": "300",
+       "ref": -0.009842790911595012,
+       "S": 0.000727369450032711,
+       "candidate": -0.009573326032194851,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.10778595176006434
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P2",
+     "observable": "surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells)",
+     "rule": "d(c, ref) <= max(0.25 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 0,
+       "S": 0.021459666289746805,
+       "candidate": 0.00772652630343377,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.03090610521373508
+      },
+      {
+       "at": "300",
+       "ref": 0,
+       "S": 0.04492403671813405,
+       "candidate": 0.022160435826553554,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.08864174330621422
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P3",
+     "observable": "kinetic energy, the wheels' wake (J)",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 95.10794797698978,
+       "S": 3.555912339782722,
+       "candidate": 95.85308563385013,
+       "tol": 10.667737019348166,
+       "pass": true,
+       "margin": 0.06984964622851952
+      },
+      {
+       "at": "120",
+       "ref": 109.55321613555911,
+       "S": 2.0263143188476533,
+       "candidate": 109.10231870422366,
+       "tol": 10.955321613555911,
+       "pass": true,
+       "margin": 0.04115784522268305
+      },
+      {
+       "at": "180",
+       "ref": 142.22179688751223,
+       "S": 1.2921416915893644,
+       "candidate": 143.82441996459966,
+       "tol": 14.222179688751224,
+       "pass": true,
+       "margin": 0.1126847721066972
+      },
+      {
+       "at": "240",
+       "ref": 141.91740041564947,
+       "S": 4.033932188415548,
+       "candidate": 142.46795639495855,
+       "tol": 14.191740041564948,
+       "pass": true,
+       "margin": 0.03879411387867913
+      },
+      {
+       "at": "300",
+       "ref": 167.69309914398198,
+       "S": 3.379472691345228,
+       "candidate": 166.93089326629644,
+       "tol": 16.7693099143982,
+       "pass": true,
+       "margin": 0.04545242956188151
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P4",
+     "observable": "particles",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 262965.8,
+       "S": 11716,
+       "candidate": 268794,
+       "tol": 35148,
+       "pass": true,
+       "margin": 0.16581882326163683
+      },
+      {
+       "at": "300",
+       "ref": 296881.6,
+       "S": 23924,
+       "candidate": 334317,
+       "tol": 71772,
+       "pass": true,
+       "margin": 0.5215878058295718
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "Pn",
+     "observable": "NB-FLIP's own volume drift (readStats)",
+     "rule": "|c - ref| <= max(0.0025, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": -0.0082805421617296,
+       "S": 0.0002085367838541661,
+       "candidate": -0.008317311604817709,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.014707777235243441
+      },
+      {
+       "at": "300",
+       "ref": -0.015165985955132378,
+       "S": 0.0007395214504665789,
+       "candidate": -0.01489310794406467,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.10915120442708329
+      }
+     ],
+     "pass": true,
+     "informational": true
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  }
+ ]
+}

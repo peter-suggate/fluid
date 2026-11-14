@@ -1,0 +1,15 @@
+start a 11:27:56
+dam-ref-a rc=0 11:28:29
+seep-ref-a rc=0 11:29:16
+letters-ref-a rc=0 11:29:56
+paddleboats-ref-a rc=0 11:30:09
+start b 11:30:09
+dam-ref-b rc=0 11:30:41
+seep-ref-b rc=0 11:31:18
+letters-ref-b rc=0 11:33:31
+paddleboats-ref-b rc=0 11:33:33
+dam-ref-c try 1 rc=1 11:38:41
+dam-ref-d try 1 rc=0 11:39:06
+seep-ref-d try 1 rc=0 11:40:32
+letters-ref-d try 1 rc=0 11:41:01
+paddleboats-ref-d try 1 rc=0 11:41:41
