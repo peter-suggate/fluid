@@ -8,7 +8,8 @@
 | Phase 1A: NB-FLIP cost attribution across scenes, ranked port list (lane A) | done (6b06703f): `nbflip-port/attribution.md`; no hot spot (8 areas of 6–22%), occupancy 12–17%, ranked items 1–12 total about 10–20% a step |
 | Phase 1G: cross-scene gates and NB-FLIP references, dam break added (lane G) | done (2026-11-15): §4 gates, 5 refs a scene at 33b78ebb, self-test passed; dam residency defect found (§4.0) |
 | Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | in progress |
-| Phase 2: port lanes P1 (pressure: items 13, 3, 10, 8, 5) and P2 (move, submit, kernel shape: items 1, 2, 4+, 6, 7, 11, 9, 12) | in progress (2026-11-15) |
+| Phase 2: port lanes P1 (pressure: items 13, 3, 10, 8, 5) and P2 (move, submit, kernel shape: items 1, 2, 4+, 6, 7, 11, 9, 12) | **redirected** (2026-11-15): the user asked for NB-FLIP to be restructured toward seep-m1max's architecture, not tweaked item by item. P2's tweak list is stopped; P1 continues on a seep-structured multigrid. |
+| Lane X: structural redesign of NB-FLIP (`docs/plans/nbflip-structural-2026-11-15.md`): target architecture, strategy, migration milestones, lane split | in progress |
 | Combined cross-scene round | todo |
 
 ## 1. Goal and contract
