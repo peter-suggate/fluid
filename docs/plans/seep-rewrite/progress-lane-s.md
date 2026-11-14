@@ -262,3 +262,28 @@ trend from this change.
 
 Fenced median 11.43 ms (thirds 10.60 / 11.70 / 11.93, p95 12.60) against NB-FLIP's 33.69 ms. The 3x target is
 11.23 ms.
+
+## 2026-11-14 MILESTONE S2f: 10.93 ms fenced over 1200 steps (3.08x NB-FLIP; gates 5/8 unchanged)
+
+- **The next step is encoded ahead.** Encoding and submitting the ~200 dispatches cost 0.70 ms of CPU a step,
+  measured with a temporary timer around advanceTo. This came before the GPU could start and was serial with it.
+  A step's commands depend only on its parity: the records are fixed, and every data-dependent count is an
+  indirect argument. So advanceTo now submits a command buffer built during the previous step, and then encodes
+  the next one while the GPU runs. If another path advances the step (profileStep or the ledger) and the parity
+  no longer matches, the buffer is rebuilt. The GPU still runs one fenced step at a time; only the CPU encoding
+  overlaps it. Paired 1200-step runs measured 11.49 / 11.49 ms before and 10.91 / 10.94 ms after.
+
+Ledger, 1200 steps (cells): chamber phi vs delivered is +0.6 / +0.5 / 0.0 / +0.6%. There are no deletions.
+
+seep-bench 1200 vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2f.md). The verdicts are unchanged:
+G1, G2, G4, G5 and G7 pass. G3 fails at 300 only (1.290 vs 1.282). G8 fails (jet 0.0371 vs 0.0770).
+G6 fails, with 1200 centroid 389.9 and L1 0.262, inside the s2b-s2e spread.
+
+Fenced median 10.93 ms (thirds 10.12 / 11.20 / 11.47, p95 12.14) against NB-FLIP's 33.69 ms: 3.08x, under the
+11.23 ms target. The stretch target is 6.7 ms.
+
+Measured and not kept:
+- Restricting red L3 blocks inside coarseSolve to drop mgRestrict3 (+0.1 ms; single-workgroup work is dear).
+- Subgroup-shuffle coarsest sweeps (+0.2 ms, unexplained).
+- Staging separate's neighbours in workgroup memory (no gain; the loop is not load-bound).
+- Fewer coarsest sweeps (more cycles). More coarsest sweeps (41 is saturated).

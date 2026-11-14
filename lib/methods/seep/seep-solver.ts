@@ -67,6 +67,8 @@ export class SeepSolver implements GPUSolverInstance {
   private readonly readback: GPUBuffer;
   private initialVolumeCells = 0;
   private stepIndex = 0;
+  /** The next step's command buffer, encoded ahead by advanceTo (used when the parity still matches). */
+  private prebuilt: { parity: number; cb: GPUCommandBuffer } | null = null;
   private destroyed = false;
   private failureText?: string;
 
@@ -305,15 +307,30 @@ export class SeepSolver implements GPUSolverInstance {
     this.stepIndex++;
   }
 
+  /** A step's command buffer: its commands depend only on the step's parity (the records are fixed and every
+   *  data-dependent count is an indirect argument on the GPU). */
+  private buildStep(parity: number): GPUCommandBuffer {
+    const encoder = this.device.createCommandEncoder({ label: "seep.step" });
+    const pass = encoder.beginComputePass({ label: "seep.step" });
+    for (const x of this.steps[parity & 1]) this.encode(pass, x);
+    pass.end();
+    return encoder.finish();
+  }
+
   advanceTo(time_s: number): boolean {
     if (this.destroyed) return false;
     const submitted = this.info.submittedTime_s ?? 0;
     if (time_s + 1e-9 < submitted + DT) return false;
-    const encoder = this.device.createCommandEncoder({ label: "seep.step" });
-    this.encodeStep(encoder);
-    this.device.queue.submit([encoder.finish()]);
+    const parity = this.stepIndex & 1;
+    const cb = this.prebuilt?.parity === parity ? this.prebuilt.cb : this.buildStep(parity);
+    this.prebuilt = null;
+    this.device.queue.submit([cb]);
+    this.stepIndex++;
     this.info.submittedTime_s = submitted + DT;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
+    // Encode the next step's ~200 dispatches now, while the GPU runs this one (CPU work off the GPU's
+    // critical path; the next advanceTo only submits it).
+    this.prebuilt = { parity: this.stepIndex & 1, cb: this.buildStep(this.stepIndex & 1) };
     return true;
   }
 
@@ -468,6 +485,7 @@ export class SeepSolver implements GPUSolverInstance {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.prebuilt = null;
     for (const b of Object.values(this.buffers)) b.destroy();
     for (const u of this.uniforms.values()) u.destroy();
     this.readback.destroy();
