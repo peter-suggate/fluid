@@ -1,0 +1,174 @@
+Narrow-band FLIP advectParticles / advectParticlesDeferred   57.276 ms  excl 100%  Occupancy 12.3  ALU 20.7  Read Bandwidth 14.5  Write Bandwidth 5.2  | GPU Last Level Cache 27.3, ALU 21.0, Buffer Read 6.1
+Uniform frame extension / ufxH   31.121 ms  excl  99%  Occupancy 17.1  ALU 26.5  Read Bandwidth 5.5  Write Bandwidth 2.0  | ALU 29.6, GPU Last Level Cache 8.2, Threadgroup/Imageblock Load 3.3
+Narrow-band FLIP surface canonical metric and publication / arenaDistance   25.252 ms  excl 100%  Occupancy 17.1  ALU 32.3  Read Bandwidth 5.7  Write Bandwidth 0.1  | ALU 35.8, GPU Last Level Cache 8.3, MMU 2.9
+Narrow-band FLIP surface canonical metric and publication / arenaPublishCanonical   21.455 ms  excl 100%  Occupancy 10.8  ALU 11.4  Read Bandwidth 2.0  Write Bandwidth 0.3  | ALU 11.6, GPU Last Level Cache 5.4, Threadgroup/Imageblock Load 1.0
+Uniform dynamic ownership census / classify   19.935 ms  excl 100%  Occupancy 13.4  ALU 21.0  Read Bandwidth 2.8  Write Bandwidth 0.1  | ALU 21.6, GPU Last Level Cache 17.2, Texture Sample 2.7
+Uniform mixed phi resolve / resolve   19.324 ms  excl 100%  Occupancy 24.9  ALU 36.8  Read Bandwidth 4.9  Write Bandwidth 1.6  | ALU 41.5, GPU Last Level Cache 12.3, MMU 2.0
+Narrow-band FLIP transfer / transferSeams   17.809 ms  excl 100%  Occupancy 12.9  ALU 18.8  Read Bandwidth 5.4  Write Bandwidth 1.1  | ALU 19.3, GPU Last Level Cache 14.3, MMU 2.1
+Uniform pressure arena solve / pRelax   17.642 ms  excl 100%  Occupancy 16.2  ALU 12.9  Read Bandwidth 37.9  Write Bandwidth 2.8  | GPU Last Level Cache 25.2, Buffer Read 18.7, MMU 14.8
+Uniform frame extension / ufx4   17.496 ms  excl 100%  Occupancy 19.1  ALU 16.8  Read Bandwidth 15.8  Write Bandwidth 11.2  | ALU 18.3, GPU Last Level Cache 16.1, MMU 9.4
+Uniform mixed geometric fill / geometryRegional   15.825 ms  excl 100%  Occupancy 8.6  ALU 14.9  Read Bandwidth 28.0  Write Bandwidth 0.9  | GPU Last Level Cache 24.6, MMU 23.0, ALU 15.7
+Narrow-band FLIP surface reconstruction / coupleFine   13.017 ms  excl 100%  Occupancy 10.3  ALU 20.0  Read Bandwidth 3.7  Write Bandwidth 0.5  | ALU 20.3, GPU Last Level Cache 14.8, MMU 1.6
+Uniform dynamic ownership census / classifyCoarse   12.807 ms  excl 100%  Occupancy 9.4  ALU 25.1  Read Bandwidth 7.2  Write Bandwidth 0.1  | GPU Last Level Cache 26.4, ALU 25.9, MMU 10.3
+Uniform local speed certificate / localSpeed   12.676 ms  excl 100%  Occupancy 13.8  ALU 28.6  Read Bandwidth 7.7  Write Bandwidth 1.7  | ALU 30.4, GPU Last Level Cache 13.1, MMU 10.2
+Uniform mixed all-4h solid record / buildRegions   12.247 ms  excl 100%  Occupancy 3.5  ALU 8.0  Read Bandwidth 0.0  Write Bandwidth 0.2  | ALU 8.0, GPU Last Level Cache 3.7, Buffer Read 0.5
+Uniform mixed remap / remapFaces   12.164 ms  excl  98%  Occupancy 8.9  ALU 11.4  Read Bandwidth 2.0  Write Bandwidth 3.5  | ALU 12.1, GPU Last Level Cache 10.7, MMU 1.8
+Narrow-band FLIP seed / seed   11.721 ms  excl 100%  Occupancy 14.0  ALU 25.6  Read Bandwidth 9.5  Write Bandwidth 0.2  | ALU 26.7, GPU Last Level Cache 15.8, MMU 3.1
+Narrow-band FLIP transfer / transferDeposit   11.038 ms  excl 100%  Occupancy 14.9  ALU 37.2  Read Bandwidth 10.0  Write Bandwidth 11.5  | ALU 42.3, GPU Last Level Cache 28.8, MMU 24.0
+Uniform frame extension / ufxR   10.486 ms  excl  99%  Occupancy 22.2  ALU 24.1  Read Bandwidth 57.1  Write Bandwidth 9.5  | GPU Last Level Cache 34.3, MMU 30.6, ALU 25.8
+Uniform mixed surface advect deferred / advectDeferred   10.294 ms  excl 100%  Occupancy 10.8  ALU 16.7  Read Bandwidth 13.4  Write Bandwidth 6.0  | GPU Last Level Cache 28.3, ALU 16.8, MMU 6.0
+Uniform pressure arena solve / pNativeRelax   10.116 ms  excl 100%  Occupancy 19.6  ALU 7.0  Read Bandwidth 20.5  Write Bandwidth 1.1  | GPU Last Level Cache 11.3, MMU 8.2, ALU 8.0
+NB-FLIP surface pressure authority / surfaceHeld    9.867 ms  excl 100%  Occupancy 10.9  ALU 17.6  Read Bandwidth 5.8  Write Bandwidth 10.0  | ALU 17.9, GPU Last Level Cache 16.9, MMU 5.0
+Uniform mixed surface advect deferred / advectStagedTail    9.124 ms  excl 100%  Occupancy 9.2  ALU 17.4  Read Bandwidth 9.9  Write Bandwidth 1.9  | GPU Last Level Cache 21.1, ALU 17.7, MMU 4.6
+Narrow-band FLIP surface arena search / arenaNearest    8.924 ms  excl 100%  Occupancy 16.1  ALU 43.6  Read Bandwidth 5.3  Write Bandwidth 0.1  | ALU 51.5, GPU Last Level Cache 6.9, Threadgroup/Imageblock Load 5.9
+Uniform mixed surface advect / advectFine    8.843 ms  excl 100%  Occupancy 12.0  ALU 25.2  Read Bandwidth 3.1  Write Bandwidth 3.1  | ALU 25.8, GPU Last Level Cache 18.0, Buffer Read 3.2
+Uniform mixed surface advect / advectCubic    8.769 ms  excl 100%  Occupancy 6.4  ALU 18.3  Read Bandwidth 2.1  Write Bandwidth 0.3  | ALU 19.0, GPU Last Level Cache 6.8, Texture Sample 4.0
+Uniform pressure arena marks and rows / pRows    8.672 ms  excl 100%  Occupancy 10.9  ALU 18.6  Read Bandwidth 5.4  Write Bandwidth 10.0  | ALU 18.9, GPU Last Level Cache 18.3, MMU 5.0
+Uniform pressure arena projection / pProject    8.225 ms  excl 100%  Occupancy 11.0  ALU 19.9  Read Bandwidth 12.6  Write Bandwidth 4.6  | GPU Last Level Cache 21.2, ALU 20.4, MMU 5.5
+Uniform pressure arena solve / pRebase    8.198 ms  excl 100%  Occupancy 20.4  ALU 28.0  Read Bandwidth 26.1  Write Bandwidth 6.0  | ALU 31.0, GPU Last Level Cache 23.0, MMU 10.1
+Narrow-band FLIP transfer / transferProperties    7.941 ms  excl 100%  Occupancy 15.4  ALU 21.5  Read Bandwidth 11.8  Write Bandwidth 2.6  | GPU Last Level Cache 29.9, ALU 22.6, MMU 22.4
+Uniform dynamic ownership census / decide    7.761 ms  excl 100%  Occupancy 4.9  ALU 8.9  Read Bandwidth 5.3  Write Bandwidth 0.1  | GPU Last Level Cache 10.2, ALU 9.0, MMU 4.6
+Uniform mixed body forces / forces    7.696 ms  excl 100%  Occupancy 11.4  ALU 17.6  Read Bandwidth 1.3  Write Bandwidth 2.0  | GPU Last Level Cache 25.3, ALU 18.8, Buffer Write 6.9
+Uniform pressure arena solve / pNative    7.528 ms  excl 100%  Occupancy 10.8  ALU 5.8  Read Bandwidth 4.0  Write Bandwidth 3.2  | ALU 6.1, GPU Last Level Cache 5.0, MMU 2.3
+Uniform pressure arena solve / pTail    7.446 ms  excl 100%  Occupancy 1.2  ALU 0.9  Read Bandwidth 0.7  Write Bandwidth 0.2  | ALU 1.0, GPU Last Level Cache 0.5, MMU 0.3
+Uniform frame extension / ufxRH    7.220 ms  excl  99%  Occupancy 24.3  ALU 53.9  Read Bandwidth 6.3  Write Bandwidth 0.4  | ALU 61.6, GPU Last Level Cache 7.9, Texture Sample 6.4
+Narrow-band FLIP surface canonical metric and publication / arenaPublishFinish    7.135 ms  excl 100%  Occupancy 11.7  ALU 7.8  Read Bandwidth 1.5  Write Bandwidth 0.1  | ALU 7.9, GPU Last Level Cache 2.2, Buffer Read 1.4
+Narrow-band FLIP regional air update / airPlanPropagate    6.931 ms  excl 100%  Occupancy 19.1  ALU 20.4  Read Bandwidth 40.5  Write Bandwidth 0.1  | ALU 21.6, GPU Last Level Cache 18.4, MMU 13.1
+Uniform mixed surface advect deferred / advectStagedCell    6.731 ms  excl  98%  Occupancy 7.5  ALU 14.5  Read Bandwidth 10.2  Write Bandwidth 2.1  | GPU Last Level Cache 15.0, ALU 14.8, MMU 4.0
+Uniform mixed body forces / forcesRegularCoarse    6.484 ms  excl 100%  Occupancy 10.3  ALU 21.9  Read Bandwidth 6.2  Write Bandwidth 8.8  | ALU 24.0, GPU Last Level Cache 15.8, MMU 4.7
+Narrow-band FLIP coarse retirement / depthCoarse    6.332 ms  excl 100%  Occupancy 3.1  ALU 6.8  Read Bandwidth 3.3  Write Bandwidth 0.2  | GPU Last Level Cache 7.8, ALU 6.8, MMU 1.3
+Uniform pressure arena solve / pUp3    6.245 ms  excl 100%  Occupancy 13.7  ALU 10.6  Read Bandwidth 1.9  Write Bandwidth 0.1  | ALU 12.0, GPU Last Level Cache 2.2, Buffer Read 1.3
+Uniform mixed hanging fine taps / unitVelocityTaps    6.231 ms  excl 100%  Occupancy 26.0  ALU 35.8  Read Bandwidth 5.0  Write Bandwidth 6.6  | ALU 41.4, Texture Sample 14.8, Texture Filtering 12.0
+Uniform mixed geometric fill / geometryChanged    6.213 ms  excl 100%  Occupancy 10.1  ALU 22.5  Read Bandwidth 2.4  Write Bandwidth 1.1  | ALU 25.0, GPU Last Level Cache 9.2, Texture Sample 2.7
+Uniform mixed momentum / advectMomentum    6.145 ms  excl 100%  Occupancy 14.2  ALU 22.1  Read Bandwidth 3.7  Write Bandwidth 2.6  | ALU 23.4, GPU Last Level Cache 7.8, Texture Filtering 7.7
+Uniform pressure arena solve / pUp4    6.029 ms  excl 100%  Occupancy 10.4  ALU 5.1  Read Bandwidth 1.0  Write Bandwidth 0.1  | ALU 6.2, GPU Last Level Cache 1.3, Buffer Read 0.5
+Uniform mixed surface advect / advectFinish    5.874 ms  excl  98%  Occupancy 10.9  ALU 22.1  Read Bandwidth 6.7  Write Bandwidth 2.6  | ALU 22.6, GPU Last Level Cache 21.8, MMU 4.9
+Uniform mixed surface advect deferred / advectStagedTrace    5.849 ms  excl 100%  Occupancy 10.4  ALU 20.5  Read Bandwidth 29.0  Write Bandwidth 4.5  | GPU Last Level Cache 32.1, ALU 21.3, MMU 13.8
+Narrow-band FLIP surface reconstruction / surfaceSplatOccupied    5.834 ms  excl 100%  Occupancy 31.3  ALU 54.4  Read Bandwidth 5.5  Write Bandwidth 0.1  | ALU 66.9, GPU Last Level Cache 5.9, MMU 5.7
+Uniform shared frame schedule    5.707 ms  excl 100%  Occupancy 25.2  ALU 14.1  Read Bandwidth 7.8  Write Bandwidth 6.6  | ALU 19.9, MMU 8.4, GPU Last Level Cache 7.0
+Narrow-band FLIP particle sort / slabSort    5.495 ms  excl 100%  Occupancy 18.8  ALU 17.3  Read Bandwidth 15.5  Write Bandwidth 20.2  | GPU Last Level Cache 19.3, ALU 18.0, MMU 13.4
+Uniform mixed remap / planeSums    5.312 ms  excl 100%  Occupancy 2.3  ALU 1.9  Read Bandwidth 0.1  Write Bandwidth 0.1  | ALU 2.0, Threadgroup/Imageblock Store 1.1, GPU Last Level Cache 0.3
+Uniform pressure arena solve / pDownB    5.294 ms  excl 100%  Occupancy 20.9  ALU 15.3  Read Bandwidth 5.6  Write Bandwidth 0.3  | ALU 16.8, GPU Last Level Cache 10.0, Buffer Read 8.8
+Narrow-band FLIP transfer / transferRefine    5.274 ms  excl 100%  Occupancy 16.0  ALU 24.9  Read Bandwidth 19.4  Write Bandwidth 0.1  | ALU 26.0, GPU Last Level Cache 19.2, MMU 6.1
+Uniform pressure arena solve / pDown3    5.224 ms  excl 100%  Occupancy 6.7  ALU 4.1  Read Bandwidth 2.7  Write Bandwidth 0.2  | ALU 4.4, GPU Last Level Cache 2.3, MMU 0.9
+Uniform mixed hanging fine taps / fillUnitHalo    5.035 ms  excl  95%  Occupancy 26.2  ALU 53.4  Read Bandwidth 22.8  Write Bandwidth 16.9  | ALU 59.8, GPU Last Level Cache 22.8, MMU 12.1
+Uniform mixed pressure rhs / buildRhs    4.936 ms  excl 100%  Occupancy 11.1  ALU 26.4  Read Bandwidth 7.8  Write Bandwidth 1.8  | ALU 28.4, GPU Last Level Cache 14.5, MMU 3.1
+Uniform mixed pressure project / project    4.936 ms  excl 100%  Occupancy 11.5  ALU 15.2  Read Bandwidth 15.2  Write Bandwidth 22.7  | GPU Last Level Cache 28.5, ALU 15.7, MMU 11.5
+Uniform dynamic ownership residency / pageMark    4.786 ms  excl 100%  Occupancy 12.6  ALU 20.7  Read Bandwidth 25.2  Write Bandwidth 0.1  | ALU 21.0, GPU Last Level Cache 9.2, MMU 7.6
+Uniform pressure arena solve / pResidual2    4.769 ms  excl 100%  Occupancy 20.4  ALU 7.3  Read Bandwidth 18.5  Write Bandwidth 0.7  | GPU Last Level Cache 9.8, ALU 7.9, MMU 5.9
+Uniform shared frame plan / seed    4.762 ms  excl 100%  Occupancy 14.2  ALU 28.8  Read Bandwidth 8.5  Write Bandwidth 0.4  | ALU 30.7, GPU Last Level Cache 8.3, Texture Sample 5.1
+Uniform bulk tier selection / bulkSelect    4.761 ms  excl 100%  Occupancy 11.2  ALU 22.7  Read Bandwidth 13.5  Write Bandwidth 0.1  | ALU 23.9, GPU Last Level Cache 12.7, MMU 4.2
+Uniform mixed body forces / forcesFine    4.750 ms  excl 100%  Occupancy 10.8  ALU 22.0  Read Bandwidth 6.0  Write Bandwidth 4.5  | ALU 23.5, GPU Last Level Cache 7.8, MMU 3.7
+Uniform compute copy        4.705 ms  excl  96%  Occupancy 34.3  ALU 18.8  Read Bandwidth 14.9  Write Bandwidth 8.9  | ALU 25.4, MMU 15.1, GPU Last Level Cache 13.4
+Uniform mixed 4h sampling cache / cache    4.696 ms  excl 100%  Occupancy 12.9  ALU 28.0  Read Bandwidth 31.8  Write Bandwidth 2.8  | ALU 31.2, GPU Last Level Cache 22.6, MMU 11.0
+Uniform pressure arena solve / kApplyNB    4.663 ms  excl 100%  Occupancy 22.5  ALU 17.4  Read Bandwidth 7.9  Write Bandwidth 0.4  | ALU 19.8, GPU Last Level Cache 6.8, MMU 2.6
+Uniform mixed surface advect / advectWalls    4.644 ms  excl  87%  Occupancy 16.6  ALU 25.1  Read Bandwidth 2.6  Write Bandwidth 0.3  | ALU 26.0, GPU Last Level Cache 15.6, Buffer Read 1.8
+Narrow-band FLIP surface canonical view / arenaGather    4.599 ms  excl 100%  Occupancy 25.1  ALU 50.3  Read Bandwidth 3.5  Write Bandwidth 6.7  | ALU 56.5, GPU Last Level Cache 13.9, Threadgroup/Imageblock Load 4.1
+Narrow-band FLIP surface arena search / arenaGather    4.448 ms  excl 100%  Occupancy 23.4  ALU 54.2  Read Bandwidth 5.8  Write Bandwidth 8.1  | ALU 61.8, GPU Last Level Cache 10.1, Threadgroup/Imageblock Load 4.5
+NB-FLIP surface pressure authority / cutRegions    4.392 ms  excl 100%  Occupancy 7.4  ALU 11.1  Read Bandwidth 2.3  Write Bandwidth 0.1  | ALU 11.3, GPU Last Level Cache 1.3, Threadgroup/Imageblock Load 1.1
+Narrow-band FLIP delta / recordDelta    4.319 ms  excl 100%  Occupancy 25.4  ALU 46.9  Read Bandwidth 30.2  Write Bandwidth 17.8  | ALU 55.7, GPU Last Level Cache 30.0, MMU 14.6
+Uniform mixed rigid coupling / couple    4.252 ms  excl 100%  Occupancy 14.7  ALU 31.8  Read Bandwidth 1.0  Write Bandwidth 0.1  | ALU 33.5, GPU Last Level Cache 8.9, Buffer Read 1.5
+Uniform mixed surface advect / advect    4.240 ms  excl  99%  Occupancy 16.5  ALU 31.0  Read Bandwidth 14.4  Write Bandwidth 2.4  | ALU 31.9, GPU Last Level Cache 21.6, MMU 5.3
+Narrow-band FLIP surface reconstruction / couple    4.239 ms  excl 100%  Occupancy 9.2  ALU 20.6  Read Bandwidth 12.1  Write Bandwidth 3.1  | ALU 21.0, GPU Last Level Cache 17.0, MMU 5.1
+Narrow-band FLIP seed / seedCells    4.106 ms  excl 100%  Occupancy 14.9  ALU 28.1  Read Bandwidth 26.8  Write Bandwidth 0.4  | ALU 29.3, GPU Last Level Cache 12.2, MMU 8.4
+Uniform pressure arena projection / pProjectNative    4.052 ms  excl 100%  Occupancy 15.2  ALU 17.7  Read Bandwidth 10.0  Write Bandwidth 2.5  | ALU 18.2, GPU Last Level Cache 17.0, MMU 4.3
+Uniform pressure arena solve / pUpB    3.768 ms  excl 100%  Occupancy 26.1  ALU 20.6  Read Bandwidth 9.7  Write Bandwidth 0.3  | ALU 23.5, GPU Last Level Cache 14.0, Buffer Read 8.3
+NB-FLIP surface pressure authority / wetRegions    3.738 ms  excl 100%  Occupancy 4.0  ALU 8.4  Read Bandwidth 3.4  Write Bandwidth 1.4  | ALU 8.7, GPU Last Level Cache 4.5, MMU 2.1
+Narrow-band FLIP surface canonical far metric / arenaFar    3.470 ms  excl 100%  Occupancy 18.7  ALU 24.9  Read Bandwidth 5.8  Write Bandwidth 0.1  | ALU 26.0, GPU Last Level Cache 6.1, Texture Sample 3.5
+Uniform pressure arena solve / pDownA    3.415 ms  excl 100%  Occupancy 21.1  ALU 17.5  Read Bandwidth 7.5  Write Bandwidth 0.9  | ALU 19.9, GPU Last Level Cache 9.5, Buffer Read 5.8
+Narrow-band FLIP surface arena search / arenaCross    3.334 ms  excl 100%  Occupancy 18.1  ALU 23.9  Read Bandwidth 9.9  Write Bandwidth 0.1  | ALU 25.0, GPU Last Level Cache 5.7, MMU 3.5
+Uniform dynamic ownership census / solidPromote    3.193 ms  excl 100%  Occupancy 14.2  ALU 37.4  Read Bandwidth 3.2  Write Bandwidth 0.1  | ALU 38.8, GPU Last Level Cache 12.6, MMU 8.7
+Uniform pressure arena solve / pDown2    2.972 ms  excl 100%  Occupancy 18.2  ALU 7.0  Read Bandwidth 6.0  Write Bandwidth 0.2  | ALU 8.3, GPU Last Level Cache 3.5, Buffer Read 2.1
+Uniform pressure arena solve / kApplyT    2.772 ms  excl 100%  Occupancy 26.4  ALU 27.3  Read Bandwidth 26.3  Write Bandwidth 2.4  | ALU 29.7, GPU Last Level Cache 25.8, Buffer Read 16.1
+Uniform pressure arena solve / pRestrict0    2.722 ms  excl 100%  Occupancy 14.3  ALU 14.9  Read Bandwidth 23.1  Write Bandwidth 2.1  | ALU 17.7, GPU Last Level Cache 14.8, MMU 8.5
+Uniform pressure arena solve / pUpA    2.711 ms  excl 100%  Occupancy 18.7  ALU 17.2  Read Bandwidth 9.9  Write Bandwidth 1.0  | ALU 20.4, GPU Last Level Cache 7.6, MMU 3.6
+Narrow-band FLIP surface reconstruction / surfaceClear    2.638 ms  excl 100%  Occupancy 25.3  ALU 58.2  Read Bandwidth 2.2  Write Bandwidth 0.1  | ALU 65.6, GPU Last Level Cache 17.3, MMU 10.4
+Uniform pressure arena solve / pNativeOperator    2.602 ms  excl 100%  Occupancy 17.7  ALU 8.7  Read Bandwidth 23.2  Write Bandwidth 4.1  | Buffer Read 17.2, GPU Last Level Cache 17.1, ALU 9.8
+Uniform pressure arena projection / pCopyNative    2.582 ms  excl 100%  Occupancy 22.5  ALU 32.3  Read Bandwidth 18.5  Write Bandwidth 38.7  | MMU 38.5, ALU 37.3, GPU Last Level Cache 31.2
+Narrow-band FLIP seed / seedRank    2.459 ms  excl 100%  Occupancy 7.3  ALU 4.7  Read Bandwidth 1.2  Write Bandwidth 0.1  | ALU 4.8, Buffer Read 1.5, GPU Last Level Cache 1.3
+Uniform mixed layout build / mirror    2.320 ms  excl 100%  Occupancy 14.9  ALU 50.9  Read Bandwidth 5.6  Write Bandwidth 0.5  | ALU 54.6, GPU Last Level Cache 9.2, Buffer Read 6.9
+Narrow-band FLIP regional air update / airPlanSeeds    2.299 ms  excl 100%  Occupancy 12.0  ALU 20.6  Read Bandwidth 12.4  Write Bandwidth 0.1  | ALU 21.5, GPU Last Level Cache 10.9, MMU 5.5
+Uniform mixed surface advect / advectTrace    2.253 ms  excl  99%  Occupancy 14.1  ALU 29.0  Read Bandwidth 29.0  Write Bandwidth 7.9  | GPU Last Level Cache 41.0, ALU 30.4, Texture Filtering 30.1
+Uniform pressure arena solve / kStart    2.117 ms  excl 100%  Occupancy 26.2  ALU 13.7  Read Bandwidth 28.9  Write Bandwidth 18.4  | GPU Last Level Cache 26.0, MMU 16.1, ALU 15.2
+Uniform mixed remap / remapCells    2.115 ms  excl  85%  Occupancy 6.2  ALU 9.4  Read Bandwidth 1.1  Write Bandwidth 0.5  | ALU 9.7, GPU Last Level Cache 6.4, MMU 0.8
+Uniform mixed remap publish / copyFaces    2.071 ms  excl 100%  Occupancy 9.3  ALU 12.5  Read Bandwidth 1.7  Write Bandwidth 0.5  | ALU 13.6, GPU Last Level Cache 5.6, MMU 1.5
+Uniform mixed transfer to pressure / toPressureFine    2.034 ms  excl 100%  Occupancy 13.3  ALU 23.8  Read Bandwidth 6.7  Write Bandwidth 1.3  | ALU 25.2, GPU Last Level Cache 6.3, MMU 3.4
+Uniform pressure root owners / roKeys    1.997 ms  excl 100%  Occupancy 10.4  ALU 38.5  Read Bandwidth 2.1  Write Bandwidth 1.0  | ALU 44.8, Buffer Read 2.4, GPU Last Level Cache 2.2
+Uniform dynamic ownership census / importance    1.960 ms  excl 100%  Occupancy 7.1  ALU 16.6  Read Bandwidth 5.5  Write Bandwidth 0.1  | ALU 16.8, GPU Last Level Cache 4.6, MMU 2.2
+Uniform pressure arena solve / kReduce    1.932 ms  excl 100%  Occupancy 1.7  ALU 0.6  Read Bandwidth 0.8  Write Bandwidth 0.3  | GPU Last Level Cache 1.3, ALU 0.7, Buffer Read 0.5
+Uniform mixed transfer to simulation / toSimulationCoarse    1.854 ms  excl 100%  Occupancy 11.3  ALU 23.0  Read Bandwidth 8.1  Write Bandwidth 19.6  | ALU 25.0, MMU 14.5, GPU Last Level Cache 14.5
+Narrow-band FLIP surface reconstruction / coarseCorners    1.808 ms  excl 100%  Occupancy 22.8  ALU 44.8  Read Bandwidth 9.0  Write Bandwidth 0.1  | ALU 49.6, GPU Last Level Cache 10.0, MMU 3.8
+Uniform dynamic ownership census / pageRequest    1.799 ms  excl 100%  Occupancy 1.7  ALU 5.4  Read Bandwidth 0.7  Write Bandwidth 0.1  | ALU 5.4, GPU Last Level Cache 1.8, MMU 0.9
+Uniform detail ring enter / enter    1.776 ms  excl 100%  Occupancy 4.1  ALU 2.3  Read Bandwidth 8.7  Write Bandwidth 0.3  | GPU Last Level Cache 3.7, MMU 3.7, ALU 2.4
+Uniform dynamic ownership census / pageSeed    1.684 ms  excl 100%  Occupancy 1.2  ALU 3.4  Read Bandwidth 4.6  Write Bandwidth 0.1  | ALU 3.4, GPU Last Level Cache 3.4, MMU 2.7
+Uniform mixed all-4h solid record / cutsRegions    1.633 ms  excl 100%  Occupancy 10.3  ALU 14.5  Read Bandwidth 2.2  Write Bandwidth 0.9  | ALU 14.7, GPU Last Level Cache 3.3, Buffer Read 2.6
+Uniform pressure arena solve / kStep    1.629 ms  excl 100%  Occupancy 31.4  ALU 7.3  Read Bandwidth 33.1  Write Bandwidth 7.9  | Buffer Read 20.1, GPU Last Level Cache 18.0, MMU 14.9
+Narrow-band FLIP transfer / transferOwners    1.558 ms  excl 100%  Occupancy 16.6  ALU 18.6  Read Bandwidth 24.0  Write Bandwidth 13.5  | MMU 26.1, GPU Last Level Cache 24.6, ALU 19.5
+Uniform mixed transfer to pressure / toPressureCoarse    1.534 ms  excl 100%  Occupancy 12.4  ALU 22.6  Read Bandwidth 13.5  Write Bandwidth 19.2  | ALU 24.1, GPU Last Level Cache 16.2, MMU 15.6
+Uniform pressure arena solve / pProlong0    1.522 ms  excl 100%  Occupancy 13.3  ALU 10.3  Read Bandwidth 10.9  Write Bandwidth 1.3  | ALU 11.8, GPU Last Level Cache 6.8, Buffer Read 5.3
+Uniform mixed phi resolve / resolveListed    1.519 ms  excl 100%  Occupancy 18.7  ALU 20.5  Read Bandwidth 3.9  Write Bandwidth 0.2  | ALU 22.5, GPU Last Level Cache 7.2, MMU 2.0
+NB-FLIP surface pressure authority / bodyRegions    1.446 ms  excl 100%  Occupancy 9.0  ALU 14.0  Read Bandwidth 2.3  Write Bandwidth 0.6  | ALU 14.1, GPU Last Level Cache 5.9, Buffer Read 2.4
+Uniform region work heat / heat    1.443 ms  excl 100%  Occupancy 12.8  ALU 7.5  Read Bandwidth 16.7  Write Bandwidth 0.2  | Buffer Read 17.1, GPU Last Level Cache 14.8, MMU 11.7
+Narrow-band FLIP coarse retirement / redistanceCoarse    1.430 ms  excl 100%  Occupancy 11.4  ALU 16.9  Read Bandwidth 12.0  Write Bandwidth 0.4  | ALU 17.7, GPU Last Level Cache 9.0, MMU 4.1
+Uniform pressure arena solve / pDownR    1.430 ms  excl 100%  Occupancy 12.1  ALU 4.3  Read Bandwidth 4.6  Write Bandwidth 0.1  | ALU 5.2, GPU Last Level Cache 2.5, MMU 1.4
+GPU resident rigid-body integration and contacts / integrate    1.372 ms  excl 100%  Occupancy 0.1  ALU 0.1  Read Bandwidth 0.2  Write Bandwidth 2.1  | GPU Last Level Cache 2.5, MMU 1.5, Buffer Write 1.2
+Uniform pressure arena solve / pInit    1.372 ms  excl 100%  Occupancy 8.6  ALU 13.0  Read Bandwidth 12.1  Write Bandwidth 8.0  | ALU 13.4, GPU Last Level Cache 12.4, MMU 6.8
+Uniform block neighbours / bnRows    1.315 ms  excl 100%  Occupancy 0.1  ALU 0.3  Read Bandwidth 0.1  Write Bandwidth 0.3  | GPU Last Level Cache 0.4, Buffer Write 0.4, ALU 0.3
+Narrow-band FLIP particle slabs / slabAllocate    1.275 ms  excl 100%  Occupancy 0.2  ALU 0.1  Read Bandwidth 4.2  Write Bandwidth 0.1  | GPU Last Level Cache 2.4, MMU 2.4, Buffer Read 1.2
+Uniform mixed rigid body tiles / markTiles    1.238 ms  excl 100%  Occupancy 10.7  ALU 25.1  Read Bandwidth 0.2  Write Bandwidth 0.2  | ALU 28.4, Buffer Read 2.9, GPU Last Level Cache 1.0
+Narrow-band FLIP activity / activitySpread    1.235 ms  excl 100%  Occupancy 21.9  ALU 39.2  Read Bandwidth 58.3  Write Bandwidth 0.1  | ALU 44.7, GPU Last Level Cache 21.2, MMU 20.5
+NB-FLIP surface pressure authority / bodyFine    1.199 ms  excl 100%  Occupancy 10.5  ALU 17.8  Read Bandwidth 3.0  Write Bandwidth 1.4  | ALU 19.6, GPU Last Level Cache 4.1, MMU 2.1
+Uniform mixed all-4h solid record / surfaceClear    1.192 ms  excl 100%  Occupancy 4.5  ALU 7.3  Read Bandwidth 3.8  Write Bandwidth 0.2  | GPU Last Level Cache 8.7, ALU 7.4, Buffer Read 4.4
+Narrow-band FLIP surface arena search / arenaMark    1.173 ms  excl 100%  Occupancy 13.9  ALU 5.6  Read Bandwidth 7.6  Write Bandwidth 3.5  | ALU 6.4, MMU 5.3, GPU Last Level Cache 3.8
+Uniform shared frame plan / dilate2    1.166 ms  excl 100%  Occupancy 7.0  ALU 16.7  Read Bandwidth 8.6  Write Bandwidth 0.1  | ALU 17.3, GPU Last Level Cache 4.3, MMU 3.8
+Uniform mixed layout build / classify    1.117 ms  excl 100%  Occupancy 27.3  ALU 47.3  Read Bandwidth 1.9  Write Bandwidth 0.1  | ALU 63.0, Buffer Read 11.4, GPU Last Level Cache 7.6
+Uniform mixed transfer to simulation / toSimulationFine    1.088 ms  excl 100%  Occupancy 19.1  ALU 38.9  Read Bandwidth 1.7  Write Bandwidth 6.3  | ALU 47.2, Texture Filtering 7.9, Texture Sample 6.9
+Uniform mixed geometric fill / mirror    1.042 ms  excl 100%  Occupancy 24.4  ALU 22.6  Read Bandwidth 13.7  Write Bandwidth 7.4  | ALU 27.1, MMU 17.6, GPU Last Level Cache 15.0
+Uniform shared frame plan / dilate0    1.035 ms  excl 100%  Occupancy 4.8  ALU 9.3  Read Bandwidth 3.5  Write Bandwidth 0.5  | ALU 9.7, GPU Last Level Cache 2.2, MMU 2.1
+Uniform local speed certificate / tileError    1.035 ms  excl  95%  Occupancy 8.6  ALU 11.3  Read Bandwidth 21.5  Write Bandwidth 12.9  | Buffer Read 37.4, GPU Last Level Cache 34.6, MMU 15.0
+Uniform shared frame plan / dilate1    1.000 ms  excl 100%  Occupancy 6.4  ALU 16.0  Read Bandwidth 4.0  Write Bandwidth 0.1  | ALU 16.6, GPU Last Level Cache 2.9, MMU 2.4
+Uniform mixed hanging fine taps / markUnitHalo    0.950 ms  excl 100%  Occupancy 7.5  ALU 18.2  Read Bandwidth 5.2  Write Bandwidth 0.1  | ALU 18.7, GPU Last Level Cache 2.1, MMU 1.6
+GPU resident rigid-body contact tables / rigidTables    0.942 ms  excl 100%  Occupancy 3.6  ALU 1.2  Read Bandwidth 0.3  Write Bandwidth 0.1  | ALU 1.2, GPU Last Level Cache 0.6, Buffer Read 0.2
+Uniform mixed geometric fill / mirrorRegional    0.918 ms  excl 100%  Occupancy 23.7  ALU 20.8  Read Bandwidth 13.1  Write Bandwidth 9.4  | ALU 24.9, MMU 17.3, GPU Last Level Cache 13.9
+Uniform dynamic ownership census / interfaceBlocks    0.910 ms  excl 100%  Occupancy 0.2  ALU 0.3  Read Bandwidth 0.4  Write Bandwidth 0.1  | Buffer Read 1.0, GPU Last Level Cache 0.4, ALU 0.3
+Narrow-band FLIP particle placement / slabPlace    0.906 ms  excl 100%  Occupancy 0.1  ALU 0.1  Read Bandwidth 2.4  Write Bandwidth 0.1  | GPU Last Level Cache 1.7, MMU 1.7, Buffer Read 0.9
+Uniform page pool commit / upPublish    0.877 ms  excl 100%  Occupancy 0.0  ALU 0.1  Read Bandwidth 0.1  Write Bandwidth 0.7  | MMU 0.7, GPU Last Level Cache 0.1, ALU 0.1
+Uniform mixed all-4h solid record / bodyMask    0.870 ms  excl 100%  Occupancy 19.4  ALU 36.5  Read Bandwidth 3.2  Write Bandwidth 0.9  | ALU 41.7, Buffer Read 14.7, GPU Last Level Cache 6.3
+Uniform region dynamics classify / regionDecide    0.830 ms  excl 100%  Occupancy 1.2  ALU 2.8  Read Bandwidth 1.6  Write Bandwidth 0.2  | Buffer Read 3.1, ALU 2.8, GPU Last Level Cache 1.9
+Narrow-band FLIP seed / seedSources    0.829 ms  excl 100%  Occupancy 6.8  ALU 5.8  Read Bandwidth 1.2  Write Bandwidth 0.1  | ALU 5.9, GPU Last Level Cache 1.4, Buffer Read 0.7
+Uniform mixed remap / planeFinish    0.818 ms  excl 100%  Occupancy 7.6  ALU 1.3  Read Bandwidth 0.2  Write Bandwidth 0.1  | ALU 1.4, Threadgroup/Imageblock Store 0.8, GPU Last Level Cache 0.4
+Uniform region dynamics publish / publishPressure    0.797 ms  excl 100%  Occupancy 7.1  ALU 9.8  Read Bandwidth 11.4  Write Bandwidth 0.1  | GPU Last Level Cache 13.9, ALU 10.0, MMU 9.1
+Uniform mixed global surface volume / measureInitial    0.753 ms  excl 100%  Occupancy 15.0  ALU 13.0  Read Bandwidth 3.4  Write Bandwidth 0.1  | ALU 16.1, GPU Last Level Cache 3.1, MMU 2.4
+Fluid particle display energy / capture    0.710 ms  excl 100%  Occupancy 18.7  ALU 2.3  Read Bandwidth 46.2  Write Bandwidth 2.9  | Buffer Read 61.5, MMU 37.0, GPU Last Level Cache 28.3
+Uniform mixed surface advect / wallReach    0.708 ms  excl 100%  Occupancy 4.7  ALU 3.8  Read Bandwidth 3.3  Write Bandwidth 0.1  | ALU 4.1, MMU 2.6, GPU Last Level Cache 2.5
+Uniform mixed layout build / dilate    0.694 ms  excl 100%  Occupancy 1.2  ALU 1.0  Read Bandwidth 0.1  Write Bandwidth 0.9  | ALU 1.0, MMU 0.8, GPU Last Level Cache 0.5
+Uniform mixed layout build / scan    0.677 ms  excl 100%  Occupancy 1.0  ALU 0.6  Read Bandwidth 0.6  Write Bandwidth 0.1  | ALU 0.7, GPU Last Level Cache 0.6, MMU 0.4
+Uniform pressure arena projection / pCopy    0.669 ms  excl 100%  Occupancy 13.4  ALU 17.0  Read Bandwidth 4.5  Write Bandwidth 0.9  | ALU 19.9, GPU Last Level Cache 3.3, MMU 3.1
+Narrow-band FLIP transfer / transfer    0.649 ms  excl 100%  Occupancy 3.5  ALU 2.7  Read Bandwidth 0.3  Write Bandwidth 0.1  | ALU 2.7, Threadgroup/Imageblock Store 1.2, GPU Last Level Cache 0.7
+NB-FLIP surface pressure authority / surface    0.614 ms  excl 100%  Occupancy 12.9  ALU 8.1  Read Bandwidth 15.9  Write Bandwidth 1.1  | Buffer Read 13.0, MMU 10.5, GPU Last Level Cache 10.4
+Uniform local speed certificate / spread2    0.611 ms  excl 100%  Occupancy 5.0  ALU 13.8  Read Bandwidth 1.5  Write Bandwidth 0.4  | ALU 15.0, GPU Last Level Cache 3.1, Buffer Read 1.1
+Uniform mixed layout build / widths    0.606 ms  excl 100%  Occupancy 4.8  ALU 3.8  Read Bandwidth 0.5  Write Bandwidth 0.2  | ALU 3.9, GPU Last Level Cache 1.4, Buffer Read 0.9
+Uniform local speed certificate / spread0    0.600 ms  excl  98%  Occupancy 5.1  ALU 13.9  Read Bandwidth 3.6  Write Bandwidth 0.5  | ALU 15.1, GPU Last Level Cache 1.8, Buffer Read 1.6
+Uniform local speed certificate / spread1    0.599 ms  excl 100%  Occupancy 4.9  ALU 13.8  Read Bandwidth 1.8  Write Bandwidth 0.5  | ALU 14.8, Buffer Read 1.3, GPU Last Level Cache 1.3
+Uniform detail h slot init / init    0.598 ms  excl 100%  Occupancy 0.7  ALU 0.4  Read Bandwidth 0.1  Write Bandwidth 11.0  | GPU Last Level Cache 6.1, MMU 4.6, Texture Write 3.6
+Uniform mixed surface advect / advectOwners    0.595 ms  excl 100%  Occupancy 5.4  ALU 2.6  Read Bandwidth 0.3  Write Bandwidth 0.3  | GPU Last Level Cache 8.7, Buffer Write 3.1, ALU 2.6
+Uniform mixed remap adopt / adopt    0.580 ms  excl 100%  Occupancy 4.9  ALU 1.6  Read Bandwidth 12.6  Write Bandwidth 7.4  | GPU Last Level Cache 9.0, MMU 7.0, Buffer Write 2.9
+Uniform local speed certificate / certify    0.560 ms  excl 100%  Occupancy 3.9  ALU 3.2  Read Bandwidth 2.0  Write Bandwidth 0.2  | ALU 3.3, GPU Last Level Cache 1.4, MMU 0.7
+Uniform shared regional frame plan / expand    0.555 ms  excl 100%  Occupancy 5.8  ALU 4.0  Read Bandwidth 2.6  Write Bandwidth 0.1  | ALU 4.2, GPU Last Level Cache 3.7, MMU 2.7
+Narrow-band FLIP crossing search / depthPlanExpand    0.550 ms  excl 100%  Occupancy 16.1  ALU 14.5  Read Bandwidth 18.0  Write Bandwidth 0.1  | ALU 16.3, GPU Last Level Cache 12.1, MMU 11.6
+Narrow-band FLIP coarse retirement / coarseBuilds    0.546 ms  excl 100%  Occupancy 10.0  ALU 9.9  Read Bandwidth 11.3  Write Bandwidth 0.1  | ALU 12.1, GPU Last Level Cache 5.5, MMU 3.8
+Uniform dynamic ownership census / regionList    0.543 ms  excl 100%  Occupancy 0.2  ALU 0.2  Read Bandwidth 0.1  Write Bandwidth 0.2  | GPU Last Level Cache 0.2, ALU 0.2, MMU 0.1
+Uniform mixed remap / markListed    0.538 ms  excl 100%  Occupancy 2.0  ALU 0.6  Read Bandwidth 0.6  Write Bandwidth 0.1  | GPU Last Level Cache 1.0, ALU 0.7, Buffer Read 0.5
+Narrow-band FLIP activity / activity    0.508 ms  excl 100%  Occupancy 15.3  ALU 7.6  Read Bandwidth 25.2  Write Bandwidth 5.5  | Buffer Read 19.5, MMU 19.2, GPU Last Level Cache 14.0
+Uniform region work heat / spread    0.507 ms  excl 100%  Occupancy 0.5  ALU 1.2  Read Bandwidth 1.1  Write Bandwidth 0.1  | Buffer Read 1.6, GPU Last Level Cache 1.2, ALU 1.2
+Uniform pressure arena solve / pFinal    0.507 ms  excl 100%  Occupancy 32.9  ALU 29.5  Read Bandwidth 36.0  Write Bandwidth 0.2  | ALU 33.0, GPU Last Level Cache 25.1, Buffer Read 16.6
+Uniform pressure arena marks and rows / pClear2    0.503 ms  excl 100%  Occupancy 8.9  ALU 8.4  Read Bandwidth 0.9  Write Bandwidth 5.7  | ALU 8.6, GPU Last Level Cache 6.0, MMU 3.3
+Uniform dynamic ownership census / boundCubes    0.495 ms  excl 100%  Occupancy 3.9  ALU 1.6  Read Bandwidth 31.8  Write Bandwidth 0.1  | Buffer Read 23.9, MMU 13.1, GPU Last Level Cache 11.2
+Narrow-band FLIP transfer / transferClear    0.485 ms  excl 100%  Occupancy 43.5  ALU 4.7  Read Bandwidth 0.1  Write Bandwidth 0.1  | MMU 22.1, GPU Last Level Cache 21.2, ALU 5.3
+Uniform mixed surface advect deferred / advectCubicDeferred    0.469 ms  excl 100%  Occupancy 2.9  ALU 1.2  Read Bandwidth 0.3  Write Bandwidth 0.2  | ALU 1.2, GPU Last Level Cache 0.7, Buffer Write 0.5
+Uniform pressure arena marks and rows / ubaUpdate    0.455 ms  excl 100%  Occupancy 14.4  ALU 17.9  Read Bandwidth 7.9  Write Bandwidth 0.1  | ALU 21.4, GPU Last Level Cache 4.3, MMU 3.4
+Uniform mixed remap / planeList    0.454 ms  excl 100%  Occupancy 4.0  ALU 1.1  Read Bandwidth 0.3  Write Bandwidth 0.6  | ALU 1.2, GPU Last Level Cache 0.7, MMU 0.6
+Uniform mixed geometric fill / mirrorListed    0.436 ms  excl 100%  Occupancy 7.7  ALU 5.5  Read Bandwidth 2.0  Write Bandwidth 1.1  | ALU 6.3, GPU Last Level Cache 1.9, MMU 1.6
+Uniform mixed pressure bulk faces / bulkFaces    0.429 ms  excl 100%  Occupancy 3.3  ALU 1.6  Read Bandwidth 0.3  Write Bandwidth 0.7  | GPU Last Level Cache 2.4, ALU 1.6, Buffer Write 1.1
+Uniform mixed layout build / scatter    0.425 ms  excl 100%  Occupancy 15.3  ALU 8.6  Read Bandwidth 2.3  Write Bandwidth 0.1  | ALU 10.7, GPU Last Level Cache 2.3, Threadgroup/Imageblock Load 2.0
+Uniform pressure arena marks and rows / pMark    0.402 ms  excl 100%  Occupancy 10.9  ALU 9.8  Read Bandwidth 4.0  Write Bandwidth 1.3  | ALU 11.7, MMU 2.7, GPU Last Level Cache 2.7

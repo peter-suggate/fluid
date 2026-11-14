@@ -1,0 +1,21 @@
+/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1425
+  }catch(error){this.phase="failed";throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
+                                          ^
+
+Error: Uniform mixed frame 196: Departure travel gives a closure of 255 tiles, over the cap of 32 (commit 197, page (1, 2, 1)): a sample is moving faster than the residency certificate covers.
+    at UniformMixedFrame.receive (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1425:43)
+    at accept (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1366:20)
+    ... 2 lines matching cause stack trace ...
+    at async <anonymous> (/Users/petersuggate/code/me/fluid/tools/nbflip-attribution.ts:215:34) {
+  [cause]: Error: Departure travel gives a closure of 255 tiles, over the cap of 32 (commit 197, page (1, 2, 1)): a sample is moving faster than the residency certificate covers.
+      at UniformMixedFrame.receive (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1400:101)
+      at accept (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1366:20)
+      at async WebGPUUniformReferenceSolver.awaitFrameCompletion (/Users/petersuggate/code/me/fluid/lib/methods/uniform/webgpu-uniform-reference.ts:3042:5)
+      at async fenced (/Users/petersuggate/code/me/fluid/tools/nbflip-attribution.ts:204:3)
+      at async <anonymous> (/Users/petersuggate/code/me/fluid/tools/nbflip-attribution.ts:215:34)
+}
+
+Node.js v22.22.1
+fluid-gpu-run: GPU memory in use 1.10 GB at start, peak 10.90 GB; 1 process(es) in the tree
+fluid-gpu-run: warning: 1 Metal command-buffer abort(s) in other processes during this run
+fluid-gpu-run: 2 Metal command-buffer abort(s) in this run's processes: its results are invalid (command rc 1)

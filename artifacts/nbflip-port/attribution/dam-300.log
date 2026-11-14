@@ -1,0 +1,19 @@
+/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1425
+  }catch(error){this.phase="failed";throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
+                                          ^
+
+Error: Uniform mixed frame 246: GPU failure record: invalid support (layout build 247: residency audit: liquid outside the resident pages, or a reader outside the closure) at frame 246, layout generation 246; last accepted frame 245; residency audit 1 (1: absent near, 2: closure); projection withheld
+    at UniformMixedFrame.receive (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1425:43)
+    at accept (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1366:20)
+    ... 2 lines matching cause stack trace ...
+    at async <anonymous> (/Users/petersuggate/code/me/fluid/tools/nbflip-attribution.ts:209:34) {
+  [cause]: Error: GPU failure record: invalid support (layout build 247: residency audit: liquid outside the resident pages, or a reader outside the closure) at frame 246, layout generation 246; last accepted frame 245; residency audit 1 (1: absent near, 2: closure); projection withheld
+      at UniformMixedFrame.receive (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1409:21)
+      at accept (/Users/petersuggate/code/me/fluid/lib/methods/uniform/uniform-mixed-frame.ts:1366:20)
+      at async WebGPUUniformReferenceSolver.awaitFrameCompletion (/Users/petersuggate/code/me/fluid/lib/methods/uniform/webgpu-uniform-reference.ts:3042:5)
+      at async fenced (/Users/petersuggate/code/me/fluid/tools/nbflip-attribution.ts:198:3)
+      at async <anonymous> (/Users/petersuggate/code/me/fluid/tools/nbflip-attribution.ts:209:34)
+}
+
+Node.js v22.22.1
+fluid-gpu-run: GPU memory in use 0.91 GB at start, peak 3.96 GB; 1 process(es) in the tree
