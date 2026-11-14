@@ -1,0 +1,225 @@
+/**
+ * Seep solver: shared WGSL (constants, brick-major addressing, the baked solid
+ * geometry and the field samplers). Lane S, docs/plans/seep-rewrite-2026-11-14.md.
+ */
+import { BRICKS, CELLS, DT, CELL_M, PHI_MAX, PARTICLE_CELLS, PBX, PBX0, PARTICLE_X0 } from "./seep-layout";
+
+/** Particle pool capacity (each pool), from the measured NB-FLIP peak (216k) with ample margin. */
+export const PARTICLE_CAPACITY = 1 << 20;
+/** FLIP fraction (Ferstl 2016 uses a FLIP/PIC blend; the reference runs 0.95). */
+export const FLIP_RATIO = 0.95;
+/** Narrow band width R (cells): particles deeper than this are retired (Ferstl 2016 §3.3). */
+export const BAND = 3;
+/** Eq. (3) combination band r = R - 1 (Ferstl 2016 §3.1). */
+export const COMBINE_BAND = 2;
+/** Zhu-Bridson particle radius (cells), calibrated so a stratified slab reproduces its own volume. */
+export const PARTICLE_RADIUS = 0.265;
+/** Ghost-fluid theta clamp (as the reference). */
+export const THETA_MIN = 1e-3;
+/** Pressure tolerance: L-inf divergence 0.05 s^-1, in flux units (m/s): 0.05 * h. */
+export const PRESSURE_TOLERANCE = 0.05 * CELL_M;
+/** Multigrid cycle cap per step. */
+export const MAX_CYCLES = 12;
+/** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). */
+export const AGGREGATION_OC = 1.8;
+/** Backtrace segment cap (24 cells per step = 7.2 m/s at 1-cell segments; exceeding latches a flag). */
+export const MAX_SEGMENTS = 24;
+
+/** ctrl word offsets. */
+export const C = {
+  ARG_ACTIVE: 0, ARG_SURF: 4, ARG_PART: 8, ARG_CLEAR: 12,
+  STEP: 16, FAIL: 17, PCOUNT: 18 /* 18,19 */, DELETED: 20, SEEDED: 21,
+  RES: 22, CONV: 23, PARITY: 24, CYCLES: 25, FIRST_RES: 26, LAST_RES: 27, CAP_HITS: 28, CYCLES_TOTAL: 29,
+  MAX_SEG: 30, OVERFLOW: 31,
+  /** List sizes of the last completed step (copied by g2p before it resets the arguments). */
+  N_ACTIVE: 32, N_SURF: 33, N_PART: 34, N_CLEAR: 35,
+  /** The last step's residual (f32 bits) measured before each cycle k = 0..MAX_CYCLES (0 once converged). */
+  RES_HIST: 36,
+  /** PCG scalars alpha_(k-1), rho_(k-1) (f32 bits), and the dot-product slots (2 sets x [r.z, z.q, p.q] x 64). */
+  ALPHA: 60, RHO: 61, RED: 256,
+  /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1). */
+  MG_ARGS: 64,
+  WORDS: 256 + 2 * 192,
+} as const;
+/** Words per PCG iteration in the args buffer, and the args buffer's size in words. */
+export const MG_STRIDE = 32;
+export const ARGS_WORDS = C.MG_ARGS + MG_STRIDE * (MAX_CYCLES + 1);
+export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4 } as const;
+
+/** bricks table offsets (each BRICKS long). */
+export const B = {
+  CLASS: 0, FLAGS: 1, MINPHI: 2, PCOUNT: 3, LIST_ACTIVE: 4, LIST_SURF: 5, LIST_PART: 6, LIST_CLEAR: 7, PSTART: 8, PNUM: 9,
+  COUNT: 10,
+} as const;
+
+/** Coarse multigrid levels 1..6 (L0 is the fine brick-major lattice). */
+export const LEVELS = 6;
+export function levelDims(l: number): [number, number, number] { return [512 >> l, 256 >> l, 64 >> l]; }
+export const LEVEL_OFFSET: number[] = (() => {
+  const off = [0, 0];
+  for (let l = 1; l <= LEVELS; l++) { const [x, y, z] = levelDims(l); off.push(off[l] + x * y * z); }
+  return off;
+})();
+export const COARSE_CELLS = LEVEL_OFFSET[LEVELS + 1];
+
+const f = (x: number) => { const s = String(x); return s.includes(".") || s.includes("e") ? s : s + ".0"; };
+
+export const COMMON_WGSL = /* wgsl */ `
+const NX: i32 = 512; const NY: i32 = 256; const NZ: i32 = 64;
+const NV: vec3i = vec3i(512, 256, 64);
+const N: u32 = ${CELLS}u;
+const BRICKS: u32 = ${BRICKS}u;
+const CFL: f32 = ${f(DT / CELL_M)};
+const GDT: f32 = ${f(9.80665 * DT)};
+const PHI_MAX: f32 = ${f(PHI_MAX)};
+const UNKNOWN_PHI: f32 = ${f(PHI_MAX + 1)};
+const PX0: i32 = ${PARTICLE_X0};
+const PBX0: u32 = ${PBX0}u;
+const PN: u32 = ${PARTICLE_CELLS}u;
+const CAP: u32 = ${PARTICLE_CAPACITY}u;
+const BAND: f32 = ${f(BAND)};
+const RCOMB: f32 = ${f(COMBINE_BAND)};
+const RP: f32 = ${f(PARTICLE_RADIUS)};
+const THETA_MIN: f32 = ${f(THETA_MIN)};
+const FLIP: f32 = ${f(FLIP_RATIO)};
+const MAXSEG: f32 = ${f(MAX_SEGMENTS)};
+const CLASS_DEAD: u32 = 1u; const CLASS_DEEP: u32 = 2u; const CLASS_PARTICLE: u32 = 4u; const CLASS_CHAMBER: u32 = 8u;
+const B_CLASS: u32 = ${B.CLASS * BRICKS}u; const B_FLAGS: u32 = ${B.FLAGS * BRICKS}u; const B_MINPHI: u32 = ${B.MINPHI * BRICKS}u;
+const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_LACT: u32 = ${B.LIST_ACTIVE * BRICKS}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
+const B_LPART: u32 = ${B.LIST_PART * BRICKS}u; const B_LCLEAR: u32 = ${B.LIST_CLEAR * BRICKS}u;
+const B_PSTART: u32 = ${B.PSTART * BRICKS}u; const B_PNUM: u32 = ${B.PNUM * BRICKS}u;
+const C_ARG_ACTIVE: u32 = ${C.ARG_ACTIVE}u; const C_ARG_SURF: u32 = ${C.ARG_SURF}u; const C_ARG_PART: u32 = ${C.ARG_PART}u; const C_ARG_CLEAR: u32 = ${C.ARG_CLEAR}u;
+const C_STEP: u32 = ${C.STEP}u; const C_FAIL: u32 = ${C.FAIL}u; const C_PCOUNT: u32 = ${C.PCOUNT}u; const C_DELETED: u32 = ${C.DELETED}u;
+const C_SEEDED: u32 = ${C.SEEDED}u; const C_RES: u32 = ${C.RES}u; const C_CONV: u32 = ${C.CONV}u; const C_PARITY: u32 = ${C.PARITY}u;
+const C_CYCLES: u32 = ${C.CYCLES}u; const C_FIRST_RES: u32 = ${C.FIRST_RES}u; const C_LAST_RES: u32 = ${C.LAST_RES}u;
+const C_CAP_HITS: u32 = ${C.CAP_HITS}u; const C_CYCLES_TOTAL: u32 = ${C.CYCLES_TOTAL}u; const C_MAX_SEG: u32 = ${C.MAX_SEG}u;
+const C_OVERFLOW: u32 = ${C.OVERFLOW}u; const C_MG_ARGS: u32 = ${C.MG_ARGS}u; const C_N_ACTIVE: u32 = ${C.N_ACTIVE}u; const C_RES_HIST: u32 = ${C.RES_HIST}u; const C_ALPHA: u32 = ${C.ALPHA}u; const C_RHO: u32 = ${C.RHO}u; const C_RED: u32 = ${C.RED}u;
+const FAIL_DEEP: u32 = ${FAIL.DEEP_SURFACE}u; const FAIL_POOL: u32 = ${FAIL.POOL}u; const FAIL_SEG: u32 = ${FAIL.SEGMENTS}u;
+const DEAD_PARTICLE: u32 = 0xffffffffu;
+
+fn brickCoord(b: u32) -> vec3i { return vec3i(i32(b & 63u), i32((b >> 6u) & 31u), i32(b >> 11u)); }
+fn brickOfCell(c: vec3i) -> u32 { return u32(c.x >> 3u) | (u32(c.y >> 3u) << 6u) | (u32(c.z >> 3u) << 11u); }
+fn cidx(c: vec3i) -> u32 { return (brickOfCell(c) << 9u) | u32((c.x & 7) | ((c.y & 7) << 3u) | ((c.z & 7) << 6u)); }
+fn localCoord(l: u32) -> vec3i { return vec3i(i32(l & 7u), i32((l >> 3u) & 7u), i32(l >> 6u)); }
+fn inBox(c: vec3i) -> bool { return all(c >= vec3i(0)) && all(c < NV); }
+fn clampV(c: vec3i) -> vec3i { return clamp(c, vec3i(0), NV - vec3i(1)); }
+fn dimOf(a: u32) -> i32 { return select(select(NZ, NY, a == 1u), NX, a == 0u); }
+fn unitAxis(a: u32) -> vec3i { return vec3i(select(0, 1, a == 0u), select(0, 1, a == 1u), select(0, 1, a == 2u)); }
+/** Baked solids: the box, and the middle wall x in [240,256) pierced by the 2x2 throat. */
+fn cellOpen(c: vec3i) -> bool {
+  if (!inBox(c)) { return false; }
+  if (c.x >= 240 && c.x < 256) { return c.y >= 64 && c.y < 66 && c.z >= 32 && c.z < 34; }
+  return true;
+}
+/** The lower face of c along a (between c - e_a and c) carries flow when both sides are open. */
+fn faceOpen(c: vec3i, a: u32) -> bool { return cellOpen(c) && cellOpen(c - unitAxis(a)); }
+/** Closed: a wall face with a fixed zero normal velocity (exactly one side open). */
+fn faceClosed(c: vec3i, a: u32) -> bool { return cellOpen(c) != cellOpen(c - unitAxis(a)); }
+/** Index in the particle-region arrays (x >= PX0), for a cell with x >= PX0. */
+fn pidx(c: vec3i) -> u32 {
+  let pb = (u32(c.x >> 3u) - PBX0) + ${PBX}u * (u32(c.y >> 3u) + 32u * u32(c.z >> 3u));
+  return (pb << 9u) | u32((c.x & 7) | ((c.y & 7) << 3u) | ((c.z & 7) << 6u));
+}
+fn hash32(x: u32) -> u32 {
+  var h = x * 747796405u + 2891336453u;
+  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+  return (h >> 22u) ^ h;
+}
+fn hashUnit(a: u32, b: u32, c: u32) -> f32 { return f32(hash32(a ^ hash32(b ^ hash32(c))) >> 8u) / 16777216.0; }
+`;
+
+/**
+ * Staggered trilinear velocity sampler over a packed f32 buffer `buf`, whose
+ * component a starts at `base + a*N`. Positions in cells. Faces beyond the box
+ * along their own axis are walls (zero); tangentially the sample clamps
+ * (free slip). Inactive bricks hold zero.
+ */
+export function velocitySampler(name: string, buf: string, base: string): string {
+  return /* wgsl */ `
+fn ${name}Face(a: u32, c: vec3i) -> f32 {
+  if (c[a] < 0 || c[a] >= dimOf(a)) { return 0.0; }
+  return ${buf}[${base} + a * N + cidx(clampV(c))];
+}
+fn ${name}Comp(a: u32, p: vec3f) -> f32 {
+  let q = p - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
+  let b = vec3i(floor(q));
+  let t = q - floor(q);
+  let c000 = ${name}Face(a, b);
+  let c100 = ${name}Face(a, b + vec3i(1, 0, 0));
+  let c010 = ${name}Face(a, b + vec3i(0, 1, 0));
+  let c110 = ${name}Face(a, b + vec3i(1, 1, 0));
+  let c001 = ${name}Face(a, b + vec3i(0, 0, 1));
+  let c101 = ${name}Face(a, b + vec3i(1, 0, 1));
+  let c011 = ${name}Face(a, b + vec3i(0, 1, 1));
+  let c111 = ${name}Face(a, b + vec3i(1, 1, 1));
+  let x00 = mix(c000, c100, t.x); let x10 = mix(c010, c110, t.x);
+  let x01 = mix(c001, c101, t.x); let x11 = mix(c011, c111, t.x);
+  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
+}
+fn ${name}(p: vec3f) -> vec3f { return vec3f(${name}Comp(0u, p), ${name}Comp(1u, p), ${name}Comp(2u, p)); }
+`;
+}
+
+/** Vertex level-set samplers (trilinear, and monotone Catmull-Rom tricubic) over `buf` at `base`. */
+export function phiSampler(name: string, buf: string, base: string): string {
+  return /* wgsl */ `
+fn ${name}At(v: vec3i) -> f32 { return ${buf}[${base} + cidx(clampV(v))]; }
+fn ${name}Tri(p: vec3f) -> f32 {
+  let b = vec3i(floor(p)); let t = p - floor(p);
+  let x00 = mix(${name}At(b), ${name}At(b + vec3i(1, 0, 0)), t.x);
+  let x10 = mix(${name}At(b + vec3i(0, 1, 0)), ${name}At(b + vec3i(1, 1, 0)), t.x);
+  let x01 = mix(${name}At(b + vec3i(0, 0, 1)), ${name}At(b + vec3i(1, 0, 1)), t.x);
+  let x11 = mix(${name}At(b + vec3i(0, 1, 1)), ${name}At(b + vec3i(1, 1, 1)), t.x);
+  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
+}
+fn ${name}CRw(t: f32) -> vec4f {
+  let t2 = t * t; let t3 = t2 * t;
+  return vec4f(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+}
+/** Catmull-Rom tricubic, clamped to the range of the 8 enclosing vertices (monotone). */
+fn ${name}Cubic(p: vec3f) -> f32 {
+  let b = vec3i(floor(p)); let t = p - floor(p);
+  let wx = ${name}CRw(t.x); let wy = ${name}CRw(t.y); let wz = ${name}CRw(t.z);
+  var acc = 0.0; var lo = 1e30; var hi = -1e30;
+  for (var k = 0; k < 4; k++) {
+    var accY = 0.0;
+    for (var j = 0; j < 4; j++) {
+      let r = b + vec3i(-1, j - 1, k - 1);
+      let v0 = ${name}At(r); let v1 = ${name}At(r + vec3i(1, 0, 0));
+      let v2 = ${name}At(r + vec3i(2, 0, 0)); let v3 = ${name}At(r + vec3i(3, 0, 0));
+      if ((j == 1 || j == 2) && (k == 1 || k == 2)) { lo = min(lo, min(v1, v2)); hi = max(hi, max(v1, v2)); }
+      accY += wy[j] * dot(wx, vec4f(v0, v1, v2, v3));
+    }
+    acc += wz[k] * accY;
+  }
+  return clamp(acc, lo, hi);
+}
+`;
+}
+
+export type BindingKind = "rw" | "ro" | "uniform" | "volume";
+export interface BindingSpec { readonly name: string; readonly kind: BindingKind; readonly type?: string }
+
+/** WGSL declarations for a binding list (group 0, binding = index). */
+export function declare(bindings: readonly BindingSpec[]): string {
+  return bindings.map((b, i) => {
+    switch (b.kind) {
+      case "rw": return `@group(0) @binding(${i}) var<storage, read_write> ${b.name}: ${b.type};`;
+      case "ro": return `@group(0) @binding(${i}) var<storage, read> ${b.name}: ${b.type};`;
+      case "uniform": return `@group(0) @binding(${i}) var<uniform> ${b.name}: ${b.type};`;
+      case "volume": return `@group(0) @binding(${i}) var ${b.name}: texture_storage_3d<r32float, write>;`;
+    }
+  }).join("\n");
+}
+
+export function bindGroupLayoutEntries(bindings: readonly BindingSpec[]): GPUBindGroupLayoutEntry[] {
+  return bindings.map((b, i): GPUBindGroupLayoutEntry => {
+    const base = { binding: i, visibility: 4 /* GPUShaderStage.COMPUTE */ };
+    switch (b.kind) {
+      case "rw": return { ...base, buffer: { type: "storage" } };
+      case "ro": return { ...base, buffer: { type: "read-only-storage" } };
+      case "uniform": return { ...base, buffer: { type: "uniform" } };
+      case "volume": return { ...base, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } };
+    }
+  });
+}
