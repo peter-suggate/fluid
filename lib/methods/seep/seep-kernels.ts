@@ -1469,7 +1469,9 @@ ${COARSE_COMMON}
     atomicStore(&args[C_ARG_LIQ], n); atomicStore(&args[C_ARG_LIQB], BULK_WG + n); atomicStore(&args[C_ARG_LIQBB], NBULK + n);
     let n4 = atomicExchange(&ctrl[C_L4_COUNT], 0u);
     atomicStore(&ctrl[C_N_L4], n4);
-    atomicStore(&args[C_ARG_L4], n4); atomicStore(&args[C_ARG_L4 + 1u], 1u); atomicStore(&args[C_ARG_L4 + 2u], 1u);
+    // The level-3 block passes take eight level-4 blocks a workgroup.
+    atomicStore(&args[C_ARG_L4], (n4 + 7u) / 8u); atomicStore(&args[C_ARG_L4 + 1u], 1u); atomicStore(&args[C_ARG_L4 + 2u], 1u);
+    atomicStore(&args[C_ARG_L4U], n4); atomicStore(&args[C_ARG_L4U + 1u], 1u); atomicStore(&args[C_ARG_L4U + 2u], 1u);
   }
   for (var l = 4u; l <= 6u; l++) {
     for (var i = t; i < levelCount(l); i += 1024u) { aggregate(l, cellOfLevel(l, i)); }
@@ -1800,27 +1802,7 @@ const NB8: u32 = (NBULK + 7u) / 8u;
 `);
 
 /** D2 (see 15): 8 threads, one per level-2 cell of the brick. */
-export const mgDown2Kernel = kernel("seep.mgDown2", [bricksRO, coarseRW, ctrlRO], /* wgsl */ `
-${COARSE_COMMON}
-var<workgroup> sr: array<f32, 64>;
-var<workgroup> sN: u32;
-// Eight bricks of [BULK, liquid] a workgroup, 8 threads each (launched over NBULK + n).
-@compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  if (t == 0u) { sN = NBULK + ctrl[C_N_LIQ]; }
-  let n = workgroupUniformLoad(&sN);
-  if (wg.x * 8u >= n) { return; }
-  let slot = t >> 3u; let q = t & 7u;
-  let e = wg.x * 8u + slot;
-  let bc = brickCoord(bricks[B_LBULK2 + min(e, n - 1u)]);
-  sr[t] = residC(2u, bc * 2 + vec3i(i32(q & 1u), i32((q >> 1u) & 1u), i32(q >> 2u)), CEP);
-  workgroupBarrier();
-  if (q == 0u && e < n) {
-    var s = 0.0;
-    for (var k = 0u; k < 8u; k++) { s += sr[t + k]; }
-    coarse[CB + lidx(3u, bc)] = s;
-  }
-}
-`);
+
 
 /**
  * C_k: convergence gate plus the V(2,2)-cycle on levels 3..6, one workgroup.
@@ -1837,10 +1819,11 @@ var<workgroup> sRS: array<f32, 64>;
 /** Iteration k's gated arguments: slot 0 the liquid bricks, slot 1 [BULK bricks, liquid], slot 2 [BULK workgroups, liquid],
  *  slot 3 the level-4 blocks; all 0 once converged. */
 fn gate(k: u32, nAct: u32, go: bool) {
-  for (var s = 0u; s < 4u; s++) {
+  for (var s = 0u; s < 5u; s++) {
     let o = C_MG_ARGS + ${MG_STRIDE}u * k + 4u * s;
     var x = nAct + select(select(0u, NBULK, s == 1u), BULK_WG, s == 2u);
     if (s == 3u) { x = atomicLoad(&args[C_ARG_L4]); }
+    if (s == 4u) { x = atomicLoad(&args[C_ARG_L4U]); }
     atomicStore(&args[o], select(0u, x, go)); atomicStore(&args[o + 1u], 1u); atomicStore(&args[o + 2u], 1u);
   }
 }
@@ -1984,95 +1967,112 @@ const L4_BLOCK_WGSL = /* wgsl */ `
 fn l4Origin(q4: u32) -> vec3i { return 2 * vec3i(i32(q4 % 32u), i32((q4 / 32u) % 16u), i32(q4 / 512u)); }
 `;
 /**
- * D3_k / U3_k: level-3 block Gauss-Seidel over the level-4 blocks (2x2x2
- * level-3 cells, 4 red-black sweeps inside), the blocks in two colours by the
- * parity of their level-4 cell (the 7-point stencil couples only opposite
- * colours). Pre-smoothing from zero: red blocks (halo zero), then black blocks
- * (halo: the red result); then the residual restricted to level 4. Post-
- * smoothing in the adjoint order: black blocks (halo: pre-smoothed plus
- * prolonged), then red (halo: black's result). cfg.a = colour.
+ * D3_k / U3_k: level-3 block smoothing over the level-4 blocks (2x2x2 level-3
+ * cells, 4 red-black sweeps inside), all blocks at once (block Jacobi, the
+ * additive Schwarz smoother: Smith, Bjorstad & Gropp 1996, Domain Decomposition
+ * ch. 1; eight blocks a 64-thread workgroup). Pre-smoothing from zero has a zero
+ * halo, so each block is independent, and D3 also forms its own rhs (the level-2
+ * residual restricted to the block's level-3 cells) in the same workgroup; then
+ * the residual is restricted to level 4.
+ * Post-smoothing reads every neighbour at its pre-smoothed plus prolonged value,
+ * with the inner sweeps in the adjoint order, so the cycle stays symmetric.
+ * (Two block colours, multiplicative, took 0.15 fewer cycles a step but two
+ * more dispatches per cycle each way: a net loss.)
  */
 const L3_BLOCK_WGSL = /* wgsl */ `
 ${levelWGSL()}
+${blockWGSL(3, 8)}
+${L4_BLOCK_WGSL}
+fn cop3(c: vec3i) -> vec4f { let g = lidx(3u, c); return vec4f(coarse[COP + 4u * g], coarse[COP + 4u * g + 1u], coarse[COP + 4u * g + 2u], coarse[COP + 4u * g + 3u]); }
+var<workgroup> sN: u32;
+/** The level-4 block of slot (eight a workgroup), clamped to the list (n = its length). */
+fn blockOrigin(wgx: u32, slot: u32, n: u32) -> vec3i { return l4Origin(bricks[B_L4LIST + min(wgx * 8u + slot, n - 1u)]); }
+`;
+export const mgDown3Kernel = kernel("seep.mgDown3", [bricksRO, coarseRW], /* wgsl */ `
+${COARSE_COMMON}
 ${blockWGSL(3)}
 ${L4_BLOCK_WGSL}
-fn colour4(origin: vec3i) -> u32 { let q = origin / 2; return u32(q.x + q.y + q.z) & 1u; }
-fn cop3(c: vec3i) -> vec4f { let g = lidx(3u, c); return vec4f(coarse[COP + 4u * g], coarse[COP + 4u * g + 1u], coarse[COP + 4u * g + 2u], coarse[COP + 4u * g + 3u]); }
-`;
-export const mgDown3Kernel = kernel("seep.mgDown3", [bricksRO, coarseRW, cfgU], /* wgsl */ `
-${L3_BLOCK_WGSL}
-@compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
+fn cop3(c: vec3i) -> vec4f { return cop(3u, c); }
+var<workgroup> sr: array<f32, 64>;
+var<workgroup> sb: array<f32, 8>;
+// D2 + D3 by level-4 block (one workgroup each): the level-2 residuals of the block's eight bricks (eight
+// level-2 cells each) restricted to their level-3 cells, then the block's level-3 pre-smoothing from zero.
+@compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
   let origin = l4Origin(bricks[B_L4LIST + wg.x]);
-  if (colour4(origin) != cfg.a) { return; }
-  for (var j = t; j < 64u; j += 8u) {
-    let c = origin + bhalo3(j);
-    var e = 0.0;
-    if (cfg.a == 1u && linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)]; }
-    tb3[j] = e;
+  let slot = t >> 3u; let q = t & 7u;
+  let c3 = origin + bq3(slot);
+  sr[t] = residC(2u, c3 * 2 + vec3i(i32(q & 1u), i32((q >> 1u) & 1u), i32(q >> 2u)), CEP);
+  tb3[t] = 0.0;
+  workgroupBarrier();
+  if (q == 0u) {
+    var s = 0.0;
+    for (var k = 0u; k < 8u; k++) { s += sr[t + k]; }
+    coarse[CB + lidx(3u, c3)] = s;
+    sb[slot] = s;
   }
   workgroupBarrier();
-  let q = bq3(t);
-  let c = origin + q;
+  let own = t < 8u;
+  let qq = bq3(t & 7u);
+  let c = origin + qq;
   let g = lidx(3u, c);
   let o = cop3(c);
-  let ti = bti3(q);
-  tb3[ti] = 0.0;
-  workgroupBarrier();
-  bsmooth3(true, c, ti, o, bw3(c), coarse[CB + g], false);
-  coarse[CEP + g] = select(0.0, tb3[ti], o.x > 0.0);
+  let ti = bti3(qq);
+  bsmooth3(own, c, ti, o, bw3(c), sb[t & 7u], false);
+  if (own) { coarse[CEP + g] = select(0.0, tb3[ti], o.x > 0.0); }
 }
 `);
-/** D3r_k: level-3 residual of each level-4 block restricted to level 4 (after both colours). */
-export const mgRestrict3Kernel = kernel("seep.mgRestrict3", [bricksRO, coarseRW], /* wgsl */ `
+/** D3r_k: level-3 residual of each level-4 block restricted to level 4. */
+export const mgRestrict3Kernel = kernel("seep.mgRestrict3", [bricksRO, coarseRW, ctrlRO], /* wgsl */ `
 ${L3_BLOCK_WGSL}
-var<workgroup> sr: array<f32, 8>;
-@compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let origin = l4Origin(bricks[B_L4LIST + wg.x]);
-  for (var j = t; j < 64u; j += 8u) {
-    let c = origin + bhalo3(j);
+var<workgroup> sr: array<f32, 64>;
+@compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
+  if (t == 0u) { sN = ctrl[C_N_L4]; }
+  let n = workgroupUniformLoad(&sN);
+  if (wg.x * 8u >= n) { return; }
+  for (var j = t; j < 512u; j += 64u) {
+    let c = blockOrigin(wg.x, j / 64u, n) + bhalo3(j % 64u);
     var e = 0.0;
     if (linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)]; }
     tb3[j] = e;
   }
   workgroupBarrier();
-  let q = bq3(t);
+  let slot = t >> 3u;
+  let origin = blockOrigin(wg.x, slot, n);
+  let q = bq3(t & 7u);
   let c = origin + q;
   let o = cop3(c);
-  let ti = bti3(q);
+  let ti = bti3(q) + 64u * slot;
   sr[t] = select(0.0, coarse[CB + lidx(3u, c)] - (o.x * tb3[ti] - bsum3(ti, o, bw3(c))), o.x > 0.0);
   workgroupBarrier();
-  if (t == 0u) {
+  if ((t & 7u) == 0u && wg.x * 8u + slot < n) {
     var s = 0.0;
-    for (var k = 0u; k < 8u; k++) { s += sr[k]; }
+    for (var k = 0u; k < 8u; k++) { s += sr[t + k]; }
     coarse[CB + lidx(4u, origin / 2)] = s;
   }
 }
 `);
-export const mgUp3Kernel = kernel("seep.mgUp3", [bricksRO, coarseRW, cfgU], /* wgsl */ `
+export const mgUp3Kernel = kernel("seep.mgUp3", [bricksRO, coarseRW, ctrlRO], /* wgsl */ `
 ${L3_BLOCK_WGSL}
-@compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let origin = l4Origin(bricks[B_L4LIST + wg.x]);
-  let mine = colour4(origin);
-  // Black (1) first; red (0) then sees black's final values.
-  if (mine != cfg.a) { return; }
-  for (var j = t; j < 64u; j += 8u) {
-    let c = origin + bhalo3(j);
+@compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
+  if (t == 0u) { sN = ctrl[C_N_L4]; }
+  let n = workgroupUniformLoad(&sN);
+  if (wg.x * 8u >= n) { return; }
+  for (var j = t; j < 512u; j += 64u) {
+    let c = blockOrigin(wg.x, j / 64u, n) + bhalo3(j % 64u);
     var e = 0.0;
-    if (linBox(3u, c) && cop3(c).x > 0.0) {
-      let g = lidx(3u, c);
-      let inside = all(c >= origin) && all(c < origin + vec3i(2));
-      if (inside || mine == 1u) { e = coarse[CEP + g] + coarse[CE + lidx(4u, c / 2)]; } else { e = coarse[CE + g]; }
-    }
+    if (linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)] + coarse[CE + lidx(4u, c / 2)]; }
     tb3[j] = e;
   }
   workgroupBarrier();
-  let q = bq3(t);
-  let c = origin + q;
+  let slot = t >> 3u;
+  let own = wg.x * 8u + slot < n;
+  let q = bq3(t & 7u);
+  let c = blockOrigin(wg.x, slot, n) + q;
   let g = lidx(3u, c);
   let o = cop3(c);
-  let ti = bti3(q);
-  bsmooth3(true, c, ti, o, bw3(c), coarse[CB + g], true);
-  coarse[CE + g] = select(0.0, tb3[ti], o.x > 0.0);
+  let ti = bti3(q) + 64u * slot;
+  bsmooth3(own, c, ti, o, bw3(c), coarse[CB + g], true);
+  if (own) { coarse[CE + g] = select(0.0, tb3[ti], o.x > 0.0); }
 }
 `);
 
@@ -2517,6 +2517,6 @@ var<workgroup> red: array<f32, 512>;
 export const ALL_KERNELS: readonly KernelSource[] = [
   classifyKernel, clearKernel, countKernel, emitKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel, massFitKernel,
   redistInitKernel, redistSweepKernel, p2gKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
-  pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
+  pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
   pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,
 ];

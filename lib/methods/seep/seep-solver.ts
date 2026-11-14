@@ -13,7 +13,7 @@ import {
 } from "./seep-layout";
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
-  countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
+  countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
   redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, BULK_CBLOCKS, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
@@ -252,11 +252,11 @@ export class SeepSolver implements GPUSolverInstance {
         d(coarsenTopKernel, undefined, { direct: [1] }),
       ];
       for (let k = 0; k <= MAX_CYCLES; k++) {
-        // Gated counts per row (coarseSolve): slot 0 liquid bricks, 1 [BULK bricks, liquid], 2 [BULK workgroups, liquid], 3 level-4 blocks.
+        // Gated counts per row (coarseSolve): slot 0 liquid bricks, 1 [BULK bricks, liquid], 2 [BULK workgroups, liquid], 3 level-4 blocks / 8.
         const mg = (row: number, slot: number) => W(C.MG_ARGS + MG_STRIDE * row + 4 * slot);
         const kc = [k, 0, 0, 0];
         // X_k and D0..D2_k run under C_(k-1)'s gate.
-        const prev = (slot: 0 | 1 | 2 | 3) => k === 0 ? W([C.ARG_LIQ, C.ARG_LIQBB, C.ARG_LIQB, C.ARG_L4][slot]) : mg(k - 1, slot);
+        const prev = (slot: 0 | 1 | 2 | 3 | 4) => k === 0 ? W([C.ARG_LIQ, C.ARG_LIQBB, C.ARG_LIQB, C.ARG_L4, C.ARG_L4U][slot]) : mg(k - 1, slot);
         list.push(d(pcgUpdateKernel, kc, { indirect: prev(2) }, `seep.pcgUpdate.${k}`));
         // Iteration 0's always runs; later ones only while unconverged (slot 4 of the previous record).
         list.push(d(coarseSolveKernel, kc, k === 0 ? { direct: [1] } : { indirect: W(4 * (k - 1)), from: `cgate${(k - 1) & 1}` }, `seep.coarseSolve.${k}`));
@@ -264,13 +264,10 @@ export class SeepSolver implements GPUSolverInstance {
           list.splice(list.length - 1, 0,
             d(mgDown0Kernel, undefined, { indirect: prev(0) }, `seep.mgDown0.${k}`),
             d(mgDown1Kernel, undefined, { indirect: prev(1) }, `seep.mgDown1.${k}`),
-            d(mgDown2Kernel, undefined, { indirect: prev(1) }, `seep.mgDown2.${k}`),
-            d(mgDown3Kernel, [0, 0, 0, 0], { indirect: prev(3) }, `seep.mgDown3r.${k}`),
-            d(mgDown3Kernel, [1, 0, 0, 0], { indirect: prev(3) }, `seep.mgDown3b.${k}`),
+            d(mgDown3Kernel, undefined, { indirect: prev(4) }, `seep.mgDown3.${k}`),
             d(mgRestrict3Kernel, undefined, { indirect: prev(3) }, `seep.mgRestrict3.${k}`));
           list.push(
-            d(mgUp3Kernel, [1, 0, 0, 0], { indirect: mg(k, 3) }, `seep.mgUp3b.${k}`),
-            d(mgUp3Kernel, [0, 0, 0, 0], { indirect: mg(k, 3) }, `seep.mgUp3r.${k}`),
+            d(mgUp3Kernel, undefined, { indirect: mg(k, 3) }, `seep.mgUp3.${k}`),
             d(mgUp2Kernel, undefined, { indirect: mg(k, 1) }, `seep.mgUp2.${k}`),
             d(mgUp1Kernel, undefined, { indirect: mg(k, 0) }, `seep.mgUp1.${k}`),
             d(pcgPrecondKernel, kc, { indirect: mg(k, 2) }, `seep.pcgPrecond.${k}`),

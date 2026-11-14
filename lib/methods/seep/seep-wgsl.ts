@@ -35,8 +35,9 @@ export const C = {
   ARG_ACTB: 16, ARG_ACTBB: 20,
   /** In the args buffer: the liquid bricks (built by the operator), plus BULK_WG leading workgroups, and plus NBULK leading. */
   ARG_LIQ: 24, ARG_LIQB: 28, ARG_LIQBB: 32,
-  /** In the args buffer: the level-4 blocks (2x2x2 level-3 cells) holding a level-3 unknown. */
-  ARG_L4: 36,
+  /** In the args buffer: the level-4 blocks (2x2x2 level-3 cells) holding a level-3 unknown, in groups of
+   *  eight (ARG_L4), and one by one (ARG_L4U). */
+  ARG_L4: 36, ARG_L4U: 40,
   STEP: 16, FAIL: 17, PCOUNT: 18 /* 18,19 */, DELETED: 20, SEEDED: 21,
   RES: 22, CONV: 23, PARITY: 24, CYCLES: 25, FIRST_RES: 26, LAST_RES: 27, CAP_HITS: 28, CYCLES_TOTAL: 29,
   MAX_SEG: 30, OVERFLOW: 31,
@@ -122,7 +123,7 @@ const NCL: u32 = ${COARSE_LATTICE}u; const BU_OFF: u32 = 0u; const BUS_OFF: u32 
 const C_ARG_ACTB: u32 = ${C.ARG_ACTB}u; const C_ARG_ACTBB: u32 = ${C.ARG_ACTBB}u;
 const C_N_LIQ: u32 = ${C.N_LIQ}u; const C_LIQ_COUNT: u32 = ${C.LIQ_COUNT}u; const C_L4_COUNT: u32 = ${C.L4_COUNT}u; const C_N_L4: u32 = ${C.N_L4}u;
 const C_EMIT_ACC: u32 = ${C.EMIT_ACC}u; const C_EMITTED: u32 = ${C.EMITTED}u;
-const C_ARG_L4: u32 = ${C.ARG_L4}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
+const C_ARG_L4: u32 = ${C.ARG_L4}u; const C_ARG_L4U: u32 = ${C.ARG_L4U}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
 const B_LBULK2: u32 = ${B.LIST_BULK2 * BRICKS}u; const B_LLIQ: u32 = ${B.LIST_BULK2 * BRICKS + NBULK}u;
 /** Composite h/4h: a fine face against a coarse cell couples over 2.5 cells (half a fine and half a coarse cell). */
 const SUBC: f32 = 0.4;

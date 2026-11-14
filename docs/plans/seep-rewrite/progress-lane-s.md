@@ -287,3 +287,27 @@ Measured and not kept:
 - Subgroup-shuffle coarsest sweeps (+0.2 ms, unexplained).
 - Staging separate's neighbours in workgroup memory (no gain; the loop is not load-bound).
 - Fewer coarsest sweeps (more cycles). More coarsest sweeps (41 is saturated).
+
+## 2026-11-14 MILESTONE S2g: 10.65 ms fenced over 1200 steps (3.16x NB-FLIP; gates 5/8 unchanged)
+
+- **Level-3 smoothing is block Jacobi.** Before, two colours of level-4 blocks ran multiplicatively, with a red
+  dispatch and a black dispatch each way. Now every block smooths at once, as additive Schwarz.
+  - Eight blocks share a 64-thread workgroup, and the dispatch count is n4 / 8.
+  - Pre-smoothing from zero has a zero halo, so the blocks are independent. Post-smoothing reads each
+    neighbour's pre-smoothed plus prolonged value, so the cycle stays symmetric.
+  - Cycles rose 6.26 -> 6.35 a step, and the cycle lost two dispatches each way.
+  - Paired 1200-step runs: 10.92 -> 10.69 ms.
+- **D2 is fused into D3.** The level-2 residual restricted to level 3 is now formed per level-4 block, in the
+  same workgroup that pre-smooths that block. This drops one dispatch per PCG cycle.
+  - The indirect count is a new slot, ARG_L4U = n4. The coarseSolve gate zeroes it with the others once
+    converged.
+  - Same 300-step state: 6.62 vs 6.67 cycles, and 9.76 vs 9.94 ms.
+- Paired 1200-step runs of the batch against S2f: 10.87 / 10.93 ms (A) vs 10.48 / 10.60 ms (B).
+
+Ledger, 1200 steps (cells): chamber phi vs delivered is +0.1 / +0.1 / +0.6 / +0.5%. There are no deletions.
+
+seep-bench 1200 vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2g.md). The verdicts are unchanged:
+G1, G2, G4, G5 and G7 pass. G3 fails at 300 only (1.290 vs 1.282). G8 fails (jet 0.0371 vs 0.0770).
+G6 fails, with 1200 centroid 392.3 and L1 0.285, inside the s2b-s2f spread.
+
+Fenced median 10.65 ms (thirds 9.77 / 10.85 / 11.10, p95 11.87) against NB-FLIP's 33.69 ms: 3.16x.
