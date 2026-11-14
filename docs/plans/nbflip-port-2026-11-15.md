@@ -5,8 +5,8 @@
 | item | state |
 |---|---|
 | Phase 0: close out the seep rewrite (S2q gate round, technique catalogue) | in progress |
-| Phase 1A: NB-FLIP cost attribution across scenes, ranked port list (lane A) | todo |
-| Phase 1G: cross-scene gates and NB-FLIP references, dam break added (lane G) | todo |
+| Phase 1A: NB-FLIP cost attribution across scenes, ranked port list (lane A) | in progress (2026-11-15) |
+| Phase 1G: cross-scene gates and NB-FLIP references, dam break added (lane G) | in progress (2026-11-15) |
 | Phase 2: port lanes P1 (pressure) and P2 (submission, dispatch, kernels) | todo |
 | Combined cross-scene round | todo |
 
