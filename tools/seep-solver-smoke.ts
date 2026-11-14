@@ -87,7 +87,11 @@ for (let step = 1; step <= steps; step++) {
 const sorted = walls.slice(5).sort((a, b) => a - b);
 console.log(JSON.stringify({ kind: "timing", fencedMedian_ms: sorted.length ? Number(sorted[sorted.length >> 1].toFixed(2)) : null, max_ms: Number(Math.max(...walls).toFixed(2)) }));
 if (profile && !errors.length) {
-  const t = await solver.profileStep();
+  // --profile-steps=K: K consecutive profiled steps, averaged (the timestamps are coarse).
+  const K = Number(option("profile-steps") ?? 1);
+  const runs: { label: string; ms: number }[][] = [];
+  for (let k = 0; k < K; k++) runs.push(await solver.profileStep());
+  const t = runs[0].map((x, j) => ({ label: x.label, ms: runs.reduce((s, r) => s + (r[j]?.ms ?? 0), 0) / K }));
   const groups = new Map<string, number>();
   for (const { label, ms } of t) { const k = label.replace(/\.\d+$/, ""); groups.set(k, (groups.get(k) ?? 0) + ms); }
   const total = t.reduce((s, x) => s + x.ms, 0);

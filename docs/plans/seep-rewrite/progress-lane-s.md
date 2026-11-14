@@ -203,3 +203,34 @@ seep-bench 1200 vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2c.md), check
 Fenced median 13.33 ms over the 1200-step check run (thirds 12.0 / 13.5 / 14.2 ms). In the s2b run it was 17.2 ms.
 The 3x target (11.2 ms) is still ahead. What is left: PCG at ~7.4 cycles (~0.6 ms per cycle), extension (0.98 ms),
 redistance sweeps, and the mass fit.
+
+## 2026-11-14 MILESTONE S2d: 12.2 ms fenced over 1200 steps (2.76x NB-FLIP, gates 5/8 unchanged)
+
+Gate-neutral speed work on top of acfee28b. Each change keeps the arithmetic the same.
+
+- **Reductions.** pcgUpdate, pcgPrecond, pcgDirection and the velocity kernel's minphi/far reduction use a
+  two-level fold (2 barriers, a conflict-free stride) instead of 512-thread trees.
+- **Extension.** One barrier per sweep for all three components, with UNK/SHUT sentinels in the tile, instead of
+  per-component passes. The semantics are unchanged.
+- **Velocity.** The face loop runs in two passes. The first handles zero/transfer faces and counts the traces. The
+  velocity tile is staged only when a brick has 96 or more traced faces, and sparse bricks read global memory.
+- **Particles.** Each pool stores positions contiguously, with velocities at +CAP. separate, count and scatter
+  then stream half the bytes. redistSweep sets its mixed flag once.
+- `tools/seep-solver-smoke.ts --profile-steps=K` averages K profiled steps (the timestamps are coarse).
+
+Ledger, 1200 steps (cells): chamber phi vs delivered is -0.5 / +0.2 / +0.3 / +0.6% at 300 / 600 / 900 / 1200.
+Total drift is +7e-5, with no deletions.
+
+seep-bench 1200 vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2d.md), check slot. The verdicts match s2c:
+G1, G2, G4, G5 and G7 pass. G3 fails at 300 only (1.297 vs bound 1.282 L). G6 fails (1200 centroid 387.8 vs
+369.8, L1 0.241 vs limit 0.226). G8 fails (jet 0.0370 vs 0.0770 L).
+
+Fenced median 12.21 ms (thirds 11.15 / 12.39 / 13.11, p95 14.05) against NB-FLIP's 33.69 ms. The 3x target is
+11.2 ms.
+
+The plateau is in the pressure solve: about 7.5 cycles at ~0.8 ms each. A per-region residual probe (not
+committed) shows every region below TOL by cycle 3-4 except chamber surface cells. Those are ghost-fluid rows with
+small theta and diagonals up to 1/THETA_MIN, which converge about 3x per cycle. Three experiments did not pay:
+- Capping the Dirichlet part of the coarse diagonal made no difference.
+- More fine sweeps (8 instead of 4) cut 0.6 cycles but saved only ~0.1 ms.
+- THETA_MIN 0.05 cut 1 cycle but changes the discretisation (the plan fixes 1e-3).

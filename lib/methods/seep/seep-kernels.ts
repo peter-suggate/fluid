@@ -39,6 +39,8 @@ const bitsRO: BindingSpec = { name: "bits", kind: "ro", type: "array<u32>" };
 const presRW: BindingSpec = { name: "pres", kind: "rw", type: "array<f32>" };
 const presRO: BindingSpec = { name: "pres", kind: "ro", type: "array<f32>" };
 const coarseRW: BindingSpec = { name: "coarse", kind: "rw", type: "array<f32>" };
+/** Two pools (parity) of CAP particles, each CAP positions then CAP velocities (positions contiguous:
+ *  the separation and P2G neighbour reads touch no velocity). */
 const partsRW: BindingSpec = { name: "parts", kind: "rw", type: "array<vec4f>" };
 const partsRO: BindingSpec = { name: "parts", kind: "ro", type: "array<vec4f>" };
 const pcellRW: BindingSpec = { name: "pcell", kind: "rw", type: "array<u32>" };
@@ -305,7 +307,7 @@ export const countKernel = kernel("seep.count", [ctrlRW, partsRO, pcellRW, pgrid
   let i = g.x;
   let n = min(atomicLoad(&ctrl[C_PCOUNT + cfg.a]), CAP);
   if (i >= n) { return; }
-  let p = parts[cfg.a * CAP * 2u + 2u * i].xyz;
+  let p = parts[cfg.a * CAP * 2u + i].xyz;
   let c = vec3i(floor(p));
   if (c.x < PX0 || !cellOpen(c)) { pcell[i] = DEAD_PARTICLE; atomicAdd(&ctrl[C_DELETED], 1u); atomicAdd(&ctrl[C_DEL_OUT], 1u); return; }
   let pc = pidx(c);
@@ -413,8 +415,8 @@ var<workgroup> sTotal: array<f32, 4>;
     let x = collide(p0 + (dist / uf.x) * uf);
     let k = atomicAdd(&ctrl[C_PCOUNT + 1u - cfg.a], 1u);
     if (k >= CAP) { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); continue; }
-    parts[base + 2u * k] = vec4f(x, 0.0);
-    parts[base + 2u * k + 1u] = vec4f(ue, 0.0);
+    parts[base + k] = vec4f(x, 0.0);
+    parts[base + CAP + k] = vec4f(ue, 0.0);
     atomicAdd(&ctrl[C_EMITTED], 1u);
     atomicAdd(&bricks[B_PCOUNT + brickOfCell(vec3i(floor(x)))], 1u);
   }
@@ -472,8 +474,8 @@ export const scatterKernel = kernel("seep.scatter", [ctrlRW, partsRW, pcellRO, p
   let slot = atomicLoad(&pgrid[PN + pc]) + (atomicAdd(&pgrid[pc], 1u) & 0xffffu);
   if (slot >= CAP) { return; }
   let src = cfg.a * CAP * 2u; let dst = (1u - cfg.a) * CAP * 2u;
-  parts[dst + 2u * slot] = parts[src + 2u * i];
-  parts[dst + 2u * slot + 1u] = parts[src + 2u * i + 1u];
+  parts[dst + slot] = parts[src + i];
+  parts[dst + CAP + slot] = parts[src + CAP + i];
 }
 `);
 
@@ -497,7 +499,7 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
   let n = min(ctrl[C_PCOUNT + 1u - cfg.a], CAP);
   if (i >= n) { return; }
   let base = (1u - cfg.a) * CAP * 2u;
-  let x = parts[base + 2u * i].xyz;
+  let x = parts[base + i].xyz;
   let bv = vec3i(floor(x - vec3f(0.5)));
   var d = vec3f(0.0); var m = 0.0;
   for (var k = 0u; k < 8u; k++) {
@@ -507,7 +509,7 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
     let start = pgrid[PN + pc]; let cnt = pgrid[pc] & 0xffffu;
     for (var j = start; j < start + cnt; j++) {
       if (j == i) { continue; }
-      let e = x - parts[base + 2u * j].xyz;
+      let e = x - parts[base + j].xyz;
       let l2 = dot(e, e);
       if (l2 < 0.25 && l2 > 1e-12) { let len = sqrt(l2); d += 0.5 * (0.5 - len) * e / len; m += 1.0; }
     }
@@ -520,7 +522,7 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
     let gl = length(gr);
     if (gl > 1e-6) { let nn = gr / gl; d -= dot(d, nn) * nn; }
   }
-  parts[cfg.a * CAP * 2u + 2u * i] = vec4f(d, 0.0);
+  parts[cfg.a * CAP * 2u + i] = vec4f(d, 0.0);
 }
 `);
 
@@ -816,12 +818,14 @@ fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
   let o = brickCoord(b) * 8;
   if (l == 0u) { atomicStore(&sMixed, 0u); }
   workgroupBarrier();
+  var mixed = false;
   for (var t = l; t < 1000u; t += 512u) {
     let q = clampV(o + tileCoord(t));
     let val = phis[cfg.a + cidx(q)];
     tA[t] = val; tB[t] = val; tOpen[t] = select(0u, 1u, vertexOpen(q));
-    if (val != PHI_MAX) { atomicStore(&sMixed, 1u); }
+    mixed = mixed || val != PHI_MAX;
   }
+  if (mixed) { atomicStore(&sMixed, 1u); }
   workgroupBarrier();
   if (l == 0u) { sMixedU = atomicLoad(&sMixed); }
   let lc = localCoord(l);
@@ -885,7 +889,7 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
   workgroupBarrier();
   let base = (1u - cfg.a) * CAP * 2u;
   for (var k = start + l; k < start + num; k += 256u) {
-    let xp = parts[base + 2u * k].xyz; let vp = parts[base + 2u * k + 1u].xyz;
+    let xp = parts[base + k].xyz; let vp = parts[base + CAP + k].xyz;
     for (var a = 0u; a < 3u; a++) {
       let q = xp - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
       let bi = vec3i(floor(q - vec3f(0.5)));
@@ -1039,11 +1043,13 @@ var<workgroup> sFar: u32;
 const VT: i32 = 12;
 var<workgroup> vt: array<f32, 5184>;
 var<private> tileOrigin: vec3i;
+var<private> useTile: bool;
+const TILE_MIN: f32 = 96.0;
 fn velTComp(a: u32, p: vec3f) -> f32 {
   let q = p - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
   let fb = floor(q);
   let lb = vec3i(fb) - tileOrigin;
-  if (any(lb < vec3i(0)) || any(lb > vec3i(VT - 2))) { return velUComp(a, p); }
+  if (!useTile || any(lb < vec3i(0)) || any(lb > vec3i(VT - 2))) { return velUComp(a, p); }
   let t = q - fb;
   let k = u32(i32(a) * VT * VT * VT + lb.x + VT * (lb.y + VT * lb.z));
   let sy = u32(VT); let sz = u32(VT * VT);
@@ -1091,22 +1097,23 @@ fn velT(p: vec3f) -> vec3f { return vec3f(velTComp(0u, p), velTComp(1u, p), velT
   red[l] = select(-PHI_MAX, ph(c), !deep);
   redFar[l] = far;
   workgroupBarrier();
-  for (var d = 256u; d > 0u; d = d >> 1u) {
-    if (l < d) { red[l] = min(red[l], red[l + d]); redFar[l] = min(redFar[l], redFar[l + d]); }
-    workgroupBarrier();
-  }
-  if (l == 0u && !deep) { atomicStore(&bricks[B_MINPHI + b], bitcast<u32>(red[0])); }
-  if (l == 0u) { sFar = select(0u, 1u, redFar[0] > FAR_AIR); }
-  let allFar = workgroupUniformLoad(&sFar) != 0u;
-  if (!allFar) {
-    for (var t = l; t < 5184u; t += 512u) {
-      let a = t / 1728u; let r = t % 1728u;
-      let q = tileOrigin + vec3i(i32(r % 12u), i32((r / 12u) % 12u), i32(r / 144u));
-      vt[t] = velUFace(a, q);
-    }
+  // Two-level fold (32 threads fold 16 each, then thread 0 the 32): two barriers, not ten.
+  if (l < 32u) {
+    var m0 = PHI_MAX; var m1 = PHI_MAX;
+    for (var j = 0u; j < 16u; j++) { m0 = min(m0, red[j * 32u + l]); m1 = min(m1, redFar[j * 32u + l]); }
+    red[l] = m0; redFar[l] = m1;
   }
   workgroupBarrier();
+  if (l == 0u) {
+    var m0 = PHI_MAX; var m1 = PHI_MAX;
+    for (var j = 0u; j < 32u; j++) { m0 = min(m0, red[j]); m1 = min(m1, redFar[j]); }
+    if (!deep) { atomicStore(&bricks[B_MINPHI + b], bitcast<u32>(m0)); }
+    sFar = select(0u, 1u, m1 > FAR_AIR);
+  }
+  let allFar = workgroupUniformLoad(&sFar) != 0u;
+  // Pass 1: each face is zero, a particle transfer, or a backtrace (bit a of need).
   let part = c.x >= PX0;
+  var need = 0u;
   for (var a = 0u; a < 3u; a++) {
     var mom = 0; var wsum = 0;
     if (part) {
@@ -1138,10 +1145,30 @@ fn velT(p: vec3f) -> vec3f { return vec3f(velTComp(0u, p), velTComp(1u, p), velT
       let phiF = 0.25 * (ph(c) + ph(c + t1) + ph(c + t2) + ph(c + t1 + t2));
       transfer = phiF >= -RCOMB;
     }
+    if (transfer) { vel[US_OFF + a * N + i] = (f32(mom) / SM) / (f32(wsum) / SW) + gravityOn(a, c); continue; }
+    need |= 1u << a;
+  }
+  // The velocity tile pays for itself only with enough traces to read it (a chamber brick's
+  // faces are mostly transfers or skipped): below TILE_MIN traces the samples read the buffer.
+  red[l] = f32(countOneBits(need));
+  workgroupBarrier();
+  if (l < 32u) { var n = 0.0; for (var j = 0u; j < 16u; j++) { n += red[j * 32u + l]; } redFar[l] = n; }
+  workgroupBarrier();
+  if (l == 0u) { var n = 0.0; for (var j = 0u; j < 32u; j++) { n += redFar[j]; } sFar = select(0u, 1u, n >= TILE_MIN); }
+  useTile = workgroupUniformLoad(&sFar) != 0u;
+  if (useTile) {
+    for (var t = l; t < 5184u; t += 512u) {
+      let a = t / 1728u; let r = t % 1728u;
+      let q = tileOrigin + vec3i(i32(r % 12u), i32((r / 12u) % 12u), i32(r / 144u));
+      vt[t] = velUFace(a, q);
+    }
+  }
+  workgroupBarrier();
+  // Pass 2: the backtraces.
+  for (var a = 0u; a < 3u; a++) {
+    if (((need >> a) & 1u) == 0u) { continue; }
     var val = 0.0;
-    if (transfer) {
-      val = (f32(mom) / SM) / (f32(wsum) / SW);
-    } else {
+    {
       let e = unitAxis(a);
       let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(e);
       let u0 = velT(pos);
@@ -1514,6 +1541,25 @@ fn applyA(c: vec3i, i: u32, f: u32) -> f32 {
 ${BULK_APPLY_WGSL}
 var<workgroup> sRedA: array<f32, 512>;
 var<workgroup> sRedB: array<f32, 512>;
+var<workgroup> sRed2: array<f32, 32>;
+/** Workgroup fold of sRedA (sum) / sRedB (max), all 512 written before the call: 32 threads fold 16
+ *  each (conflict-free stride), thread 0 the 32; two barriers, not ten. The result is thread 0's. */
+fn foldSumA(l: u32) -> f32 {
+  workgroupBarrier();
+  if (l < 32u) { var s = 0.0; for (var j = 0u; j < 16u; j++) { s += sRedA[j * 32u + l]; } sRed2[l] = s; }
+  workgroupBarrier();
+  var s = 0.0;
+  if (l == 0u) { for (var j = 0u; j < 32u; j++) { s += sRed2[j]; } }
+  return s;
+}
+fn foldMaxB(l: u32) -> f32 {
+  workgroupBarrier();
+  if (l < 32u) { var s = 0.0; for (var j = 0u; j < 16u; j++) { s = max(s, sRedB[j * 32u + l]); } sRed2[l] = s; }
+  workgroupBarrier();
+  var s = 0.0;
+  if (l == 0u) { for (var j = 0u; j < 32u; j++) { s = max(s, sRed2[j]); } }
+  return s;
+}
 var<workgroup> tp: array<f32, 1000>;
 /** Fine block Gauss-Seidel on the staged brick tile tp (rhs per thread), 2 sweeps; black-first when rev. */
 fn fineSmooth(c: vec3i, ti: u32, diag: f32, m: u32, rhs: f32, rev: bool) {
@@ -1601,12 +1647,8 @@ ${bulkWGSL(false)}
       pres[R_OFF + sl] = r;
     }
     sRedB[l] = abs(r) / 64.0;
-    workgroupBarrier();
-    for (var d = 256u; d > 0u; d = d >> 1u) {
-      if (l < d) { sRedB[l] = max(sRedB[l], sRedB[l + d]); }
-      workgroupBarrier();
-    }
-    if (l == 0u) { atomicMax(&ctrl[C_RES], bitcast<u32>(sRedB[0])); }
+    let resMax = foldMaxB(l);
+    if (l == 0u) { atomicMax(&ctrl[C_RES], bitcast<u32>(resMax)); }
     return;
   }
   let b = bricks[B_LLIQ + wg.x - BULK_WG];
@@ -1625,12 +1667,8 @@ ${bulkWGSL(false)}
   pres[R_OFF + i] = r;
   sRedB[l] = abs(r);
   for (var t = l; t < 1000u; t += 512u) { tp[t] = 0.0; }
-  workgroupBarrier();
-  for (var d = 256u; d > 0u; d = d >> 1u) {
-    if (l < d) { sRedB[l] = max(sRedB[l], sRedB[l + d]); }
-    workgroupBarrier();
-  }
-  if (l == 0u) { atomicMax(&ctrl[C_RES], bitcast<u32>(sRedB[0])); }
+  let resMax = foldMaxB(l);
+  if (l == 0u) { atomicMax(&ctrl[C_RES], bitcast<u32>(resMax)); }
   let ti = tileIndex(lc);
   fineSmooth(c, ti, diag, bits[MASK_OFF + i], r, false);
   pres[Z1_OFF + i] = select(0.0, tp[ti], diag > 0.0);
@@ -2112,12 +2150,8 @@ ${bulkWGSL(false)}
       rz = pres[R_OFF + sl] * z;
     }
     sRedA[l] = rz;
-    workgroupBarrier();
-    for (var d = 256u; d > 0u; d = d >> 1u) {
-      if (l < d) { sRedA[l] += sRedA[l + d]; }
-      workgroupBarrier();
-    }
-    if (l == 0u) { redAdd(k & 1u, ${RZ}u, wg.x, sRedA[0]); }
+    let dot = foldSumA(l);
+    if (l == 0u) { redAdd(k & 1u, ${RZ}u, wg.x, dot); }
     return;
   }
   let b = bricks[B_LLIQ + wg.x - BULK_WG];
@@ -2151,12 +2185,8 @@ ${bulkWGSL(false)}
   let z = select(0.0, tp[ti], diag > 0.0);
   pres[Z_OFF + i] = z;
   sRedA[l] = r * z;
-  workgroupBarrier();
-  for (var d = 256u; d > 0u; d = d >> 1u) {
-    if (l < d) { sRedA[l] += sRedA[l + d]; }
-    workgroupBarrier();
-  }
-  if (l == 0u) { redAdd(k & 1u, ${RZ}u, wg.x, sRedA[0]); }
+  let dot = foldSumA(l);
+  if (l == 0u) { redAdd(k & 1u, ${RZ}u, wg.x, dot); }
 }
 `);
 
@@ -2196,12 +2226,8 @@ ${bulkWGSL(false)}
   } else { pres[PP_OFF + i] = 0.0; pres[Q_OFF + i] = 0.0; }
   }
   sRedA[l] = pq;
-  workgroupBarrier();
-  for (var d = 256u; d > 0u; d = d >> 1u) {
-    if (l < d) { sRedA[l] += sRedA[l + d]; }
-    workgroupBarrier();
-  }
-  if (l == 0u) { redAdd(k & 1u, ${PQ}u, wg.x, sRedA[0]); }
+  let dot = foldSumA(l);
+  if (l == 0u) { redAdd(k & 1u, ${PQ}u, wg.x, dot); }
 }
 `);
 
@@ -2305,69 +2331,69 @@ ${COARSE_SAMPLER_WGSL}
 //     cfg.d = out known shift. DEEP neighbours (never extended) are read from U.
 // ---------------------------------------------------------------------------
 export const extendKernel = kernel("seep.extend", [bricksRO, velRW, bitsRW, cfgU], /* wgsl */ `
-var<workgroup> vA: array<f32, 1000>;
-var<workgroup> vB: array<f32, 1000>;
-var<workgroup> kA: array<u32, 1000>;
-var<workgroup> kB: array<u32, 1000>;
+// The three components' tiles side by side (3 x 1000), ping-pong A/B, one barrier a sweep for all
+// three. A face's state rides in its value: UNK (not yet known) and SHUT (closed, never a source)
+// are sentinels no velocity takes; any other value is known.
+const UNK: f32 = -3.0e38;
+const SHUT: f32 = 3.0e38;
+var<workgroup> vA: array<f32, 3000>;
+var<workgroup> vB: array<f32, 3000>;
 var<workgroup> sKnown: atomic<u32>;
 var<workgroup> sKnownU: u32;
+fn isKnown(v: f32) -> bool { return v > UNK && v < SHUT; }
+fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
+  let v = (*src)[k];
+  if (v != UNK) { return v; }
+  var sum = 0.0; var n = 0.0;
+  let nb = array<u32, 6>(k - 1u, k + 1u, k - 10u, k + 10u, k - 100u, k + 100u);
+  for (var q = 0u; q < 6u; q++) { let w = (*src)[nb[q]]; if (isKnown(w)) { sum += w; n += 1.0; } }
+  return select(UNK, sum / max(n, 1.0), n > 0.0);
+}
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LSURF + wg.x];
   let o = brickCoord(b) * 8;
   let lc = localCoord(l);
-  let c = o + lc;
   let i = (b << 9u) | l;
   let ti = tileIndex(lc);
+  if (l == 0u) { atomicStore(&sKnown, 0u); }
+  workgroupBarrier();
+  var anyKnown = false;
+  for (var t = l; t < 1000u; t += 512u) {
+    let q = o + tileCoord(t);
+    var info = 0u; var deep = false; var qi = 0u;
+    let inside = inBox(q);
+    if (inside) {
+      qi = cidx(q);
+      deep = (bricks[B_CLASS + brickOfCell(q)] & CLASS_DEEP) != 0u;
+      info = bits[KNOWN_OFF + qi];
+    }
+    for (var a = 0u; a < 3u; a++) {
+      var v = SHUT;
+      if (inside && !faceClosed(q, a)) {
+        let k = (info >> select(cfg.c + a, a, deep)) & 1u;
+        v = select(UNK, vel[select(cfg.a, U_OFF, deep) + a * N + qi], k == 1u);
+        anyKnown = anyKnown || k == 1u;
+      }
+      vA[a * 1000u + t] = v;
+    }
+  }
+  if (anyKnown) { atomicStore(&sKnown, 1u); }
+  workgroupBarrier();
+  if (l == 0u) { sKnownU = atomicLoad(&sKnown); }
+  // Without a known face in the tile the sweeps change nothing.
+  let sweeps = select(0u, 8u, workgroupUniformLoad(&sKnownU) != 0u);
+  for (var s = 0u; s < sweeps; s += 2u) {
+    for (var a = 0u; a < 3u; a++) { vB[a * 1000u + ti] = relax(&vA, a * 1000u + ti); }
+    workgroupBarrier();
+    for (var a = 0u; a < 3u; a++) { vA[a * 1000u + ti] = relax(&vB, a * 1000u + ti); }
+    workgroupBarrier();
+  }
   var outBits = 0u;
   for (var a = 0u; a < 3u; a++) {
-    if (l == 0u) { atomicStore(&sKnown, 0u); }
-    workgroupBarrier();
-    for (var t = l; t < 1000u; t += 512u) {
-      let q = o + tileCoord(t);
-      var v = 0.0; var k = 0u;
-      if (inBox(q)) {
-        let qi = cidx(q);
-        let deep = (bricks[B_CLASS + brickOfCell(q)] & CLASS_DEEP) != 0u;
-        if (faceClosed(q, a)) { k = 2u; }
-        else if (deep) { v = vel[U_OFF + a * N + qi]; k = (bits[KNOWN_OFF + qi] >> a) & 1u; }
-        else { v = vel[cfg.a + a * N + qi]; k = (bits[KNOWN_OFF + qi] >> (cfg.c + a)) & 1u; }
-      } else { k = 2u; }
-      vA[t] = v; vB[t] = v; kA[t] = k; kB[t] = k;
-      if (k == 1u) { atomicStore(&sKnown, 1u); }
-    }
-    workgroupBarrier();
-    if (l == 0u) { sKnownU = atomicLoad(&sKnown); }
-    // Without a known face in the tile the sweeps change nothing.
-    let sweeps = select(0u, 8u, workgroupUniformLoad(&sKnownU) != 0u);
-    for (var s = 0u; s < sweeps; s++) {
-      if ((s & 1u) == 0u) {
-        if (kA[ti] == 0u) {
-          var sum = 0.0; var n = 0.0;
-          if (kA[ti - 1u] == 1u) { sum += vA[ti - 1u]; n += 1.0; }
-          if (kA[ti + 1u] == 1u) { sum += vA[ti + 1u]; n += 1.0; }
-          if (kA[ti - 10u] == 1u) { sum += vA[ti - 10u]; n += 1.0; }
-          if (kA[ti + 10u] == 1u) { sum += vA[ti + 10u]; n += 1.0; }
-          if (kA[ti - 100u] == 1u) { sum += vA[ti - 100u]; n += 1.0; }
-          if (kA[ti + 100u] == 1u) { sum += vA[ti + 100u]; n += 1.0; }
-          if (n > 0.0) { vB[ti] = sum / n; kB[ti] = 1u; }
-        } else { vB[ti] = vA[ti]; kB[ti] = kA[ti]; }
-      } else {
-        if (kB[ti] == 0u) {
-          var sum = 0.0; var n = 0.0;
-          if (kB[ti - 1u] == 1u) { sum += vB[ti - 1u]; n += 1.0; }
-          if (kB[ti + 1u] == 1u) { sum += vB[ti + 1u]; n += 1.0; }
-          if (kB[ti - 10u] == 1u) { sum += vB[ti - 10u]; n += 1.0; }
-          if (kB[ti + 10u] == 1u) { sum += vB[ti + 10u]; n += 1.0; }
-          if (kB[ti - 100u] == 1u) { sum += vB[ti - 100u]; n += 1.0; }
-          if (kB[ti + 100u] == 1u) { sum += vB[ti + 100u]; n += 1.0; }
-          if (n > 0.0) { vA[ti] = sum / n; kA[ti] = 1u; }
-        } else { vA[ti] = vB[ti]; kA[ti] = kB[ti]; }
-      }
-      workgroupBarrier();
-    }
-    vel[cfg.b + a * N + i] = select(vA[ti], 0.0, kA[ti] == 2u);
-    outBits |= select(0u, 1u, kA[ti] == 1u) << (cfg.d + a);
-    workgroupBarrier();
+    let v = vA[a * 1000u + ti];
+    let known = isKnown(v);
+    vel[cfg.b + a * N + i] = select(0.0, v, known);
+    outBits |= select(0u, 1u, known) << (cfg.d + a);
   }
   let keep = bits[KNOWN_OFF + i] & ~(7u << cfg.d);
   bits[KNOWN_OFF + i] = keep | outBits;
@@ -2396,8 +2422,8 @@ ${PARTICLE_MOVE_WGSL}
   let n = min(atomicLoad(&ctrl[C_PCOUNT + 1u - cfg.a]), CAP);
   if (i >= n) { return; }
   let base = (1u - cfg.a) * CAP * 2u;
-  var x = parts[base + 2u * i].xyz;
-  var v = parts[base + 2u * i + 1u].xyz;
+  var x = parts[base + i].xyz;
+  var v = parts[base + CAP + i].xyz;
   // Supported: a liquid cell among the 2x2x2 whose centres enclose x (the
   // cells the interpolation reads). Unsupported particles (spray, a film away
   // from any liquid cell) have no pressure acting on them and move
@@ -2425,9 +2451,9 @@ ${PARTICLE_MOVE_WGSL}
     for (var a = 0u; a < 3u; a++) { if (push[a] != 0.0 && v[a] * push[a] > 0.0) { v[a] = 0.0; } }
     x = xc;
   }
-  x = collide(x + parts[cfg.a * CAP * 2u + 2u * i].xyz);
-  parts[base + 2u * i] = vec4f(x, 0.0);
-  parts[base + 2u * i + 1u] = vec4f(v, 0.0);
+  x = collide(x + parts[cfg.a * CAP * 2u + i].xyz);
+  parts[base + i] = vec4f(x, 0.0);
+  parts[base + CAP + i] = vec4f(v, 0.0);
   atomicAdd(&bricks[B_PCOUNT + brickOfCell(vec3i(floor(x)))], 1u);
 }
 `);
