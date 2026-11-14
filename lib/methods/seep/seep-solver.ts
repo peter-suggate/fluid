@@ -12,7 +12,7 @@ import {
   BRICKS, BULK_LISTS, CELLS, CELL_M, CLASS_BULK, DT, NBULK, NX, NY, NZ, PARTICLE_CELLS, PBX0, RESERVOIR_TOP, assertSeepScene, bakeSeep, cellIndex, cellOpen,
 } from "./seep-layout";
 import {
-  ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
+  ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, pcgCheckKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
   countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgGuessKernel, pcgPrecondKernel, pcgShiftDownKernel, pcgShiftUpKernel, pcgUpdateKernel, projectKernel,
   redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, velocityTraceKernel, volumeKernel, BULK_CBLOCKS, type KernelSource,
 } from "./seep-kernels";
@@ -49,6 +49,9 @@ export interface SeepDiagnostics {
 
 interface Dispatch { readonly label: string; readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly direct?: readonly [number, number?]; readonly indirect?: number; readonly from?: string }
 
+/** Dispatches in a step's first submitted command buffer (classify, clear, count and scan; see buildStep). */
+const SUBMIT_PREFIX = 4;
+
 export class SeepSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
@@ -70,8 +73,8 @@ export class SeepSolver implements GPUSolverInstance {
   private readbackQueue: Promise<unknown> = Promise.resolve();
   private initialVolumeCells = 0;
   private stepIndex = 0;
-  /** The next step's command buffer, encoded ahead by advanceTo (used when the parity still matches). */
-  private prebuilt: { parity: number; cb: GPUCommandBuffer } | null = null;
+  /** The next step's command buffers, encoded ahead by advanceTo (used when the parity still matches). */
+  private prebuilt: { parity: number; cbs: GPUCommandBuffer[] } | null = null;
   private destroyed = false;
   private failureText?: string;
 
@@ -82,10 +85,6 @@ export class SeepSolver implements GPUSolverInstance {
     const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     buffer("ctrl", C.WORDS * 4, S | GPUBufferUsage.COPY_SRC);
     buffer("args", ARGS_WORDS * 4, S | GPUBufferUsage.INDIRECT);
-    // coarseSolve k's launch argument, written by coarseSolve k - 1: alternating buffers (k & 1), as a
-    // dispatch may not read its indirect arguments from a buffer it binds writable.
-    buffer("cgate0", 4 * (MAX_CYCLES + 1) * 4, S | GPUBufferUsage.INDIRECT);
-    buffer("cgate1", 4 * (MAX_CYCLES + 1) * 4, S | GPUBufferUsage.INDIRECT);
     buffer("bricks", B.COUNT * BRICKS * 4, S | GPUBufferUsage.COPY_SRC);
     buffer("phis", 3 * CELLS * 4, S);
     buffer("vel", 9 * CELLS * 4, S);
@@ -178,7 +177,7 @@ export class SeepSolver implements GPUSolverInstance {
         return { binding, resource: { buffer: u } };
       }
       if (spec.kind === "volume") return { binding, resource: (spec.name === "surf" ? this.surfaceFieldTexture : this.volumeTexture).createView() };
-      const buffer = this.buffers[spec.name === "cgate" ? `cgate${(cfg[0] ?? 0) & 1}` : spec.name];
+      const buffer = this.buffers[spec.name];
       if (!buffer) throw new Error(`seep: no buffer ${spec.name}`);
       return { binding, resource: { buffer } };
     });
@@ -257,22 +256,24 @@ export class SeepSolver implements GPUSolverInstance {
       ];
       list.push(d(pcgGuessKernel, undefined, { indirect: W(C.ARG_LIQB) }));
       for (let k = 0; k <= MAX_CYCLES; k++) {
-        // Gated counts per row (coarseSolve): slot 0 liquid bricks, 1 [BULK bricks, liquid], 2 [BULK workgroups, liquid], 3 level-4 blocks / 8,
+        // Gated counts per row (pcgCheck): slot 0 liquid bricks, 1 [BULK bricks, liquid], 2 [BULK workgroups, liquid], 3 level-4 blocks / 8,
         // 4 level-4 blocks, 5 shifted fine blocks.
         const mg = (row: number, slot: number) => W(C.MG_ARGS + MG_STRIDE * row + 4 * slot);
         const kc = [k, 0, 0, 0];
-        // X_k and D0..D2_k run under C_(k-1)'s gate.
+        // X_k runs under P_(k-1)'s record.
         const prev = (slot: 0 | 1 | 2 | 3 | 4 | 5) => k === 0 ? W([C.ARG_LIQ, C.ARG_LIQBB, C.ARG_LIQB, C.ARG_L4, C.ARG_L4U, C.ARG_SHIFT][slot]) : mg(k - 1, slot);
         list.push(d(pcgUpdateKernel, kc, { indirect: prev(2) }, `seep.pcgUpdate.${k}`));
-        // Iteration 0's always runs; later ones only while unconverged (slot 4 of the previous record).
-        list.push(d(coarseSolveKernel, kc, k === 0 ? { direct: [1] } : { indirect: W(4 * (k - 1)), from: `cgate${(k - 1) & 1}` }, `seep.coarseSolve.${k}`));
+        // P_k, the convergence test of X_k's residual, launched directly (after convergence it only closes record k).
+        // It writes record k, which gates the rest of iteration k and X_(k+1).
+        list.push(d(pcgCheckKernel, kc, { direct: [1] }, `seep.pcgCheck.${k}`));
         if (k < MAX_CYCLES) {
-          list.splice(list.length - 1, 0,
-            d(pcgShiftDownKernel, kc, { indirect: prev(5) }, `seep.pcgShiftDown.${k}`),
-            d(mgDown0Kernel, undefined, { indirect: prev(0) }, `seep.mgDown0.${k}`),
-            d(mgDown1Kernel, undefined, { indirect: prev(1) }, `seep.mgDown1.${k}`),
-            d(mgDown3Kernel, undefined, { indirect: prev(4) }, `seep.mgDown3.${k}`),
-            d(mgRestrict3Kernel, undefined, { indirect: prev(3) }, `seep.mgRestrict3.${k}`));
+          list.push(
+            d(pcgShiftDownKernel, kc, { indirect: mg(k, 5) }, `seep.pcgShiftDown.${k}`),
+            d(mgDown0Kernel, undefined, { indirect: mg(k, 0) }, `seep.mgDown0.${k}`),
+            d(mgDown1Kernel, undefined, { indirect: mg(k, 1) }, `seep.mgDown1.${k}`),
+            d(mgDown3Kernel, undefined, { indirect: mg(k, 4) }, `seep.mgDown3.${k}`),
+            d(mgRestrict3Kernel, undefined, { indirect: mg(k, 3) }, `seep.mgRestrict3.${k}`),
+            d(coarseSolveKernel, undefined, { direct: [1] }, `seep.coarseSolve.${k}`));
           list.push(
             d(mgUp3Kernel, undefined, { indirect: mg(k, 3) }, `seep.mgUp3.${k}`),
             d(mgUp2Kernel, undefined, { indirect: mg(k, 1) }, `seep.mgUp2.${k}`),
@@ -312,14 +313,20 @@ export class SeepSolver implements GPUSolverInstance {
     this.stepIndex++;
   }
 
-  /** A step's command buffer: its commands depend only on the step's parity (the records are fixed and every
-   *  data-dependent count is an indirect argument on the GPU). */
-  private buildStep(parity: number): GPUCommandBuffer {
-    const encoder = this.device.createCommandEncoder({ label: "seep.step" });
-    const pass = encoder.beginComputePass({ label: "seep.step" });
-    for (const x of this.steps[parity & 1]) this.encode(pass, x);
-    pass.end();
-    return encoder.finish();
+  /** A step's command buffers: their commands depend only on the step's parity (the records are fixed and every
+   *  data-dependent count is an indirect argument on the GPU). The step is split after its first SUBMIT_PREFIX
+   *  dispatches and submitted in two parts: the implementation translates a command buffer for the GPU when it
+   *  is submitted (~0.15 ms for a step's ~200 dispatches), so the GPU runs the short prefix while the rest is
+   *  translated instead of waiting for the whole step. */
+  private buildStep(parity: number): GPUCommandBuffer[] {
+    const list = this.steps[parity & 1];
+    return [list.slice(0, SUBMIT_PREFIX), list.slice(SUBMIT_PREFIX)].map(part => {
+      const encoder = this.device.createCommandEncoder({ label: "seep.step" });
+      const pass = encoder.beginComputePass({ label: "seep.step" });
+      for (const x of part) this.encode(pass, x);
+      pass.end();
+      return encoder.finish();
+    });
   }
 
   advanceTo(time_s: number): boolean {
@@ -327,15 +334,15 @@ export class SeepSolver implements GPUSolverInstance {
     const submitted = this.info.submittedTime_s ?? 0;
     if (time_s + 1e-9 < submitted + DT) return false;
     const parity = this.stepIndex & 1;
-    const cb = this.prebuilt?.parity === parity ? this.prebuilt.cb : this.buildStep(parity);
+    const cbs = this.prebuilt?.parity === parity ? this.prebuilt.cbs : this.buildStep(parity);
     this.prebuilt = null;
-    this.device.queue.submit([cb]);
+    for (const cb of cbs) this.device.queue.submit([cb]);
     this.stepIndex++;
     this.info.submittedTime_s = submitted + DT;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
     // Encode the next step's ~200 dispatches now, while the GPU runs this one (CPU work off the GPU's
     // critical path; the next advanceTo only submits it).
-    this.prebuilt = { parity: this.stepIndex & 1, cb: this.buildStep(this.stepIndex & 1) };
+    this.prebuilt = { parity: this.stepIndex & 1, cbs: this.buildStep(this.stepIndex & 1) };
     return true;
   }
 

@@ -2029,14 +2029,12 @@ const NB8: u32 = (NBULK + 7u) / 8u;
 
 
 /**
- * C_k: convergence gate plus the V(2,2)-cycle on levels 3..6, one workgroup.
- * cfg.a = iteration k. If the residual measured by X_k is within tolerance
- * (or the cap is reached) iteration k's remaining passes and every later
- * iteration are disabled through their indirect arguments.
+ * P_k: iteration k's convergence test, right after X_k measured its residual (one workgroup). It
+ * opens iteration k's V-cycle (D0..D3, C, U3..U0, precond, direction) and X_(k+1) / P_(k+1) only
+ * while the residual exceeds the tolerance, so the step's last iteration runs no V-cycle (standard
+ * PCG: the test precedes the preconditioner solve, Saad 2003 Alg. 9.1). cfg.a = k.
  */
-const cgateRW: BindingSpec = { name: "cgate", kind: "rw", type: "array<u32>" };
-export const coarseSolveKernel = kernel("seep.coarseSolve", [ctrlRW, coarseRW, cfgU, argsRW, bricksRO, cgateRW], /* wgsl */ `
-${COARSE_COMMON}
+export const pcgCheckKernel = kernel("seep.pcgCheck", [ctrlRW, cfgU, argsRW], /* wgsl */ `
 fn redSlot(rs: u32, which: u32) -> u32 { return C_RED + rs * 192u + which * 64u; }
 var<workgroup> sGo: u32;
 var<workgroup> sRS: array<f32, 64>;
@@ -2052,6 +2050,54 @@ fn gate(k: u32, nAct: u32, go: bool) {
     atomicStore(&args[o], select(0u, x, go)); atomicStore(&args[o + 1u], 1u); atomicStore(&args[o + 2u], 1u);
   }
 }
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) t: u32) {
+  let k = cfg.a;
+  // rho_(k-1)'s 64 partial slots, loaded at once (summed in slot order by thread 0).
+  if (t < 64u && k > 0u) { sRS[t] = bitcast<f32>(atomicLoad(&ctrl[redSlot((k - 1u) & 1u, ${RZ}u) + t])); }
+  workgroupBarrier();
+  if (t == 0u) {
+    sGo = 0u;
+    if (atomicLoad(&ctrl[C_CONV]) == 0u) {
+      let res = bitcast<f32>(atomicLoad(&ctrl[C_RES]));
+      atomicStore(&ctrl[C_RES], 0u);
+      atomicStore(&ctrl[C_LAST_RES], bitcast<u32>(res));
+      atomicStore(&ctrl[C_RES_HIST + k], bitcast<u32>(res));
+      if (k == 0u) { atomicStore(&ctrl[C_FIRST_RES], bitcast<u32>(res)); }
+      if (res <= TOL || k >= MAXC) {
+        atomicStore(&ctrl[C_CONV], 1u);
+        atomicStore(&ctrl[C_CYCLES], k);
+        atomicAdd(&ctrl[C_CYCLES_TOTAL], k);
+        if (res > TOL) { atomicAdd(&ctrl[C_CAP_HITS], 1u); }
+        // The later iterations' dispatches (coarseSolve included) do not run: close all their gates now.
+        for (var j = k; j <= MAXC; j++) { gate(j, 0u, false); if (j > k) { atomicStore(&ctrl[C_RES_HIST + j], 0u); } }
+      } else {
+        if (k > 0u) {
+          var rho = 0.0;
+          for (var j = 0u; j < 64u; j++) { rho += sRS[j]; }
+          atomicStore(&ctrl[C_RHO], bitcast<u32>(rho));
+        }
+        gate(k, atomicLoad(&args[C_ARG_LIQ]), true);
+        sGo = 1u;
+      }
+    } else {
+      atomicStore(&ctrl[C_RES_HIST + k], 0u);
+      gate(k, 0u, false);
+    }
+  }
+  let go = workgroupUniformLoad(&sGo);
+  if (go == 0u) { return; }
+  // Clear dot set k & 1 for iteration k's sums (three slots a thread). Set k & 1 was last read by
+  // X_(k-1); X_k (before this) read set (k - 1) & 1.
+  for (var j = t; j < 192u; j += 64u) { atomicStore(&ctrl[redSlot(k & 1u, 0u) + j], 0u); }
+}
+`);
+
+/**
+ * C_k: the V(2,2)-cycle on levels 4..6, one workgroup, launched directly: it returns at once
+ * unless P_k left iteration k open (C_CONV still 0).
+ */
+export const coarseSolveKernel = kernel("seep.coarseSolve", [coarseRW, bricksRO, ctrlRO], /* wgsl */ `
+${COARSE_COMMON}
 fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
 var<workgroup> sE: array<f32, 2336>;
 var<workgroup> sR: array<f32, 2048>;
@@ -2081,48 +2127,10 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   return s;
 }
 const SW4: u32 = 2u; const SW5: u32 = 2u;
+var<workgroup> sConv: u32;
 @compute @workgroup_size(1024) fn main(@builtin(local_invocation_index) t: u32) {
-  let k = cfg.a;
-  // rho_(k-1)'s 64 partial slots, loaded at once (summed in slot order by thread 0).
-  if (t < 64u && k > 0u) { sRS[t] = bitcast<f32>(atomicLoad(&ctrl[redSlot((k - 1u) & 1u, ${RZ}u) + t])); }
-  workgroupBarrier();
-  if (t == 0u) {
-    sGo = 0u;
-    if (atomicLoad(&ctrl[C_CONV]) == 0u) {
-      let res = bitcast<f32>(atomicLoad(&ctrl[C_RES]));
-      atomicStore(&ctrl[C_RES], 0u);
-      atomicStore(&ctrl[C_LAST_RES], bitcast<u32>(res));
-      atomicStore(&ctrl[C_RES_HIST + k], bitcast<u32>(res));
-      if (k == 0u) { atomicStore(&ctrl[C_FIRST_RES], bitcast<u32>(res)); }
-      if (res <= TOL || k >= MAXC) {
-        atomicStore(&ctrl[C_CONV], 1u);
-        atomicStore(&ctrl[C_CYCLES], k);
-        atomicAdd(&ctrl[C_CYCLES_TOTAL], k);
-        if (res > TOL) { atomicAdd(&ctrl[C_CAP_HITS], 1u); }
-        // The later iterations' dispatches (coarseSolve included) do not run: close all their gates now.
-        for (var j = k; j <= MAXC; j++) { gate(j, 0u, false); if (j > k) { atomicStore(&ctrl[C_RES_HIST + j], 0u); } }
-        cgate[4u * k] = 0u; cgate[4u * k + 1u] = 1u; cgate[4u * k + 2u] = 1u;
-      } else {
-        if (k > 0u) {
-          var rho = 0.0;
-          for (var j = 0u; j < 64u; j++) { rho += sRS[j]; }
-          atomicStore(&ctrl[C_RHO], bitcast<u32>(rho));
-        }
-        gate(k, atomicLoad(&args[C_ARG_LIQ]), true);
-        // coarseSolve k + 1 runs (its argument, in the other buffer of the pair).
-        cgate[4u * k] = 1u; cgate[4u * k + 1u] = 1u; cgate[4u * k + 2u] = 1u;
-        sGo = 1u;
-      }
-    } else {
-      atomicStore(&ctrl[C_RES_HIST + k], 0u);
-      gate(k, 0u, false);
-      cgate[4u * k] = 0u; cgate[4u * k + 1u] = 1u; cgate[4u * k + 2u] = 1u;
-    }
-  }
-  let go = workgroupUniformLoad(&sGo);
-  if (go == 0u) { return; }
-  // Clear dot set k & 1 for iteration k's sums (one slot a thread).
-  if (t < 192u) { atomicStore(&ctrl[redSlot(k & 1u, 0u) + t], 0u); }
+  if (t == 0u) { sConv = ctrl[C_CONV]; }
+  if (workgroupUniformLoad(&sConv) != 0u) { return; }
   // Levels 4..6 (2336 cells) live in workgroup memory for the whole V-cycle:
   // each sweep is one workgroup barrier, not a device-memory fence. Each
   // thread keeps its own cells' couplings (+ and -), rhs and pre-smoothed
@@ -2756,6 +2764,6 @@ var<workgroup> red: array<f32, 512>;
 export const ALL_KERNELS: readonly KernelSource[] = [
   classifyKernel, clearKernel, countKernel, emitKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel, massFitKernel,
   redistInitKernel, redistSweepKernel, p2gKernel, pcgShiftDownKernel, pcgShiftUpKernel, velocityBulkKernel, velocityKernel, velocityTraceKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
-  pcgGuessKernel, pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
+  pcgGuessKernel, pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, pcgCheckKernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
   pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,
 ];

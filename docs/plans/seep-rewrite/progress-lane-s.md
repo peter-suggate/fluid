@@ -1118,3 +1118,100 @@ That is -0.31 ms. Mean cycles are unchanged (3.30-3.34).
 **Ledger, 1200 / 300, two runs (ledger-s2p.txt, ledger-s2p-b.txt):** chamber phi at g2p against delivered is
 -0.55 / +0.57 / +0.58 / -0.01% in the first run and +0.21 / +0.07 / +0.65 / +0.86% in the second. Both are within 1%,
 with no deletions.
+
+## S2q: the empty cycle tail is Dawn's indirect validation; the convergence test before the V-cycle, and a two-part submit (-0.30 ms fenced)
+
+**The tail, measured (check slot, 1200 steps, interleaved fenced medians, ab-mcyc-1200.txt).**
+
+| MAX_CYCLES | round 1 | round 2 | round 3 |
+|---|---|---|---|
+| 9 (HEAD) | 7.02 | 6.98 | 7.02 |
+| 12 | 7.15 | 7.15 | 7.11 |
+| 15 | 7.30 | 7.24 | 7.34 |
+
+- **Per empty slot:** about 50 us (13 dispatches), so HEAD's 5.7 empty slots a step cost about 0.28 ms.
+- **Cycle histogram over 1200 steps (probe build):** 1: 5, 2: 70, 3: 762, 4: 284, 5: 71, 6: 7, 7: 1. There are no cap
+  hits.
+
+**What an empty slot costs.**
+- **CPU:** queue.submit takes 0.152 ms with 9 slots and 0.228 ms with 15, about 13 us a slot. The implementation
+  translates the command buffer for the GPU at submit, and a fenced step's GPU work waits for all of it.
+- **GPU:** the rest is Dawn's indirect-dispatch validation.
+  - **What Dawn does:** with validation on, every dispatchWorkgroupsIndirect is preceded by a one-workgroup
+    validation dispatch that copies and checks the arguments.
+  - **Diagnostic** (toggle `skip_validation`, smoke runner only, 600 steps): MAX_CYCLES 9 runs 6.15 / 6.17 ms and
+    MAX_CYCLES 15 runs 6.14 / 6.19 ms. Empty slots become free, and the whole step is 0.4 ms faster than with
+    validation.
+  - **The toggle is not usable:** browsers validate, and the device is not ours.
+- **Each slot dispatch costs about 3.5 us whatever its form.** Launching pcgCheck and coarseSolve directly (one
+  workgroup that returns at once) instead of indirectly changed nothing: 6.86 / 6.87 / 6.82 against 6.84 / 6.84 /
+  6.87 (ab-chkd-1200.txt). A tiny real dispatch costs what the validation dispatch costs.
+  - **So with validation on, a slot's floor is its dispatch count.** Neither zeroing a later slot's arguments nor a
+    GPU-computed budget removes that cost; only fewer encoded dispatches or fewer slots would. A dispatchWorkgroups(0)
+    is free, but only the CPU could choose it, and that needs a readback.
+- **Dispatch microbench (dispatch-bench.ts, 200 dispatches over 13 pipelines):**
+
+  | dispatch | validation on | skip_validation |
+  |---|---|---|
+  | indirect, 0 workgroups | 12.8 us | 7.2 us |
+  | direct, 1 workgroup | 4.6 us | 4.6 us |
+
+**Landed (S2q):**
+- **pcgCheck:** the convergence test is now its own one-workgroup kernel, `seep.pcgCheck` (P_k), run right after
+  X_k.
+  - **The waste removed:** before, coarseSolve.k held the test after iteration k's down sweep. That sweep (D0B, D0,
+    D1, D3, D3r) ran under the previous iteration's gate, so the converged iteration still ran it.
+  - **New order:** P_k opens record k, which gates the whole of iteration k (D0B..U0, direction) and X_(k+1), only
+    while the residual exceeds the tolerance. This is the standard PCG order: the test comes before the
+    preconditioner solve (Saad 2003, Alg. 9.1).
+  - **Launch:** P_k and coarseSolve.k are launched directly with one workgroup. P_k (64 threads) only closes record k
+    once C_CONV is set. coarseSolve returns at once when C_CONV is set.
+  - **What this removes:** the cgate buffer pair and its binding rule, since no dispatch reads its arguments from a
+    buffer it writes.
+  - **Unchanged:** the math and the record layout.
+- **Two-part submit:** buildStep returns two command buffers, the first SUBMIT_PREFIX = 4 dispatches (classify,
+  clear, count, scan) and the rest, and advanceTo submits them one after the other. The GPU starts the prefix while
+  the rest is translated.
+
+  | split (600 steps, fenced) | ms |
+  |---|---|
+  | unsplit | 6.57 / 6.57 |
+  | 4 | 6.46 / 6.41 / 6.37 / 6.43 |
+  | 2 | 6.43 / 6.46 |
+  | 16 | 6.50 / 6.46 |
+  | 4 and 24 | 6.45 / 6.48 |
+  | 60 | 6.57 / 6.57 (a long first part delays the GPU's start) |
+
+  It changes nothing in pipelined mode, where the next step is already encoded and queued.
+
+**A/B, check slot, 1200 steps, fenced median, interleaved (ab-s2q-1200.txt):**
+
+| run | HEAD 1209eb14 (S2p) | S2q |
+|---|---|---|
+| round 1 | 7.10 | 6.76 |
+| round 2 | 7.08 | 6.80 |
+| round 3 | 7.10 | 6.80 |
+
+- That is -0.30 ms: the check split is about -0.09 (ab-chk-1200.txt) and the split submit the rest.
+- Mean cycles 3.29-3.30 against 3.31-3.33, with no cap hits.
+- One pipelined bench run on the check slot gave 6.22 ms a step. This is not an A/B; lane H's figure for 1209eb14 is
+  6.32.
+
+**Gates, seep-bench 1200 on the check slot (compare-s2q.md, audit-s2q): all pass.**
+- G1 -4.04%. G2 -2.84 / -3.95 / -3.86 / -3.76%. G4 -1.55%. G5 90% wet at step 279.
+- G3 corrected: 1.289 / 2.591 / 3.923 / 5.183 L.
+- G6 corrected: centroid 373.4 / 382.2, L1 0.099 / 0.089 (limits 0.327 / 0.214).
+- G7 0.00%. G8: impact 375.5 / 375.6.
+- The bench's fenced median is 6.76 ms.
+- The audit matches S2p's.
+
+**Ledger, 1200 / 300, two runs (ledger-s2q.txt, ledger-s2q-b.txt):** chamber phi at g2p against delivered is
++0.33 / +0.45 / +0.40 / +0.43% in the first run and -0.06 / +0.63 / +0.67 / +0.34% in the second. Both are within 1%,
+with no deletions.
+
+**What is left of the tail.**
+- **The cost:** each empty slot is now 14 dispatches at about 3.5 us, about 0.28 ms a step.
+- **Fewer slots:** MAX_CYCLES is 9 against a measured peak of 7, and each slot removed saves about 50 us. This is the
+  coordinator's call; the pools follow the same measured-peak rule.
+- **Fewer dispatches a slot:** folding mgRestrict3 into coarseSolve's start would remove one dispatch a slot, about
+  35 us a step. Its sum order can be kept so the result stays bit-identical.
