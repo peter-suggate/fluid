@@ -9,15 +9,15 @@ import type { GPUSolverInstance } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import {
-  BRICKS, CELLS, CELL_M, DT, NX, NY, NZ, PARTICLE_CELLS, RESERVOIR_TOP, assertSeepScene, bakeSeep, cellIndex, cellOpen,
+  BRICKS, BULK_LISTS, CELLS, CELL_M, CLASS_BULK, DT, NBULK, NX, NY, NZ, PARTICLE_CELLS, RESERVOIR_TOP, assertSeepScene, bakeSeep, cellIndex, cellOpen,
 } from "./seep-layout";
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
-  countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgUp1Kernel, mgUp2Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
-  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, seedKernel, separateKernel, velocityKernel, volumeKernel, type KernelSource,
+  countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
+  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, seedKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
-import { ARGS_WORDS, B, C, COARSE_CELLS, FAIL, MAX_CYCLES, MG_STRIDE, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
+import { ARGS_WORDS, B, BULK_WG, C, COARSE_CELLS, COARSE_LATTICE, FAIL, MAX_CYCLES, MG_STRIDE, NSHADOW, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
 
 export const SEEP_METHOD_ID = "seep-m1max";
 
@@ -41,7 +41,7 @@ export interface SeepDiagnostics {
   readonly lastResidual: number;
   readonly maxSegments: number;
   readonly residualHistory: number[];
-  readonly lists: { readonly active: number; readonly surf: number; readonly part: number; readonly clear: number };
+  readonly lists: { readonly active: number; readonly surf: number; readonly part: number; readonly clear: number; readonly liquid: number };
 }
 
 interface Dispatch { readonly label: string; readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly direct?: readonly [number, number?]; readonly indirect?: number }
@@ -80,6 +80,7 @@ export class SeepSolver implements GPUSolverInstance {
     buffer("bits", 2 * CELLS * 4, S);
     buffer("pres", 6 * CELLS * 4, S);
     buffer("coarse", 7 * COARSE_CELLS * 4, S);
+    buffer("bulk", 6 * COARSE_LATTICE * 4, S);
     buffer("parts", 2 * PARTICLE_CAPACITY * 2 * 16, S);
     buffer("pcell", PARTICLE_CAPACITY * 4, S);
     buffer("pgrid", 2 * PARTICLE_CELLS * 4, S);
@@ -175,6 +176,14 @@ export class SeepSolver implements GPUSolverInstance {
     const q = this.device.queue, b = this.buffers;
     const bricks = new Uint32Array(B.COUNT * BRICKS);
     bricks.set(bake.brickClass, B.CLASS * BRICKS);
+    bricks.set(BULK_LISTS.bulk, B.LIST_BULK * BRICKS);
+    bricks.set(BULK_LISTS.bulk, B.LIST_BULK2 * BRICKS);
+    bricks.set(BULK_LISTS.shadow, B.LIST_SHADOW * BRICKS);
+    for (const id of BULK_LISTS.bulk) if (!(bake.brickClass[id]! & CLASS_BULK)) throw new Error(`seep: BULK brick ${id} is not baked BULK`);
+    const args = new Uint32Array(ARGS_WORDS);
+    args.set([BULK_WG, 1, 1], C.ARG_ACTB); args.set([NBULK, 1, 1], C.ARG_ACTBB);
+    args.set([0, 1, 1], C.ARG_LIQ); args.set([BULK_WG, 1, 1], C.ARG_LIQB); args.set([NBULK, 1, 1], C.ARG_LIQBB);
+    q.writeBuffer(b.args, 0, args);
     const minPhi = new Float32Array(bricks.buffer, B.MINPHI * BRICKS * 4, BRICKS);
     for (let k = 0; k < BRICKS; k++) {
       let m = Infinity;
@@ -193,6 +202,12 @@ export class SeepSolver implements GPUSolverInstance {
     for (let z = 0; z < NZ; z++) for (let y = 0; y < NY; y++) for (let x = 0; x < NX; x++) {
       const i = cellIndex(x, y, z);
       if (cellOpen(x, y, z) && bake.phiCell[i] < 0) pres[i] = gdt * Math.max(0, RESERVOIR_TOP - y - 0.5);
+    }
+    // BULK coarse cells (4h): the same hydrostatic start at their centres, in
+    // their bricks' first eight slots.
+    for (const id of BULK_LISTS.bulk) {
+      const by = (id >> 6) & 31;
+      for (let r = 0; r < 8; r++) pres[(id << 9) | r] = gdt * (RESERVOIR_TOP - (by * 8 + ((r >> 1) & 1) * 4 + 2));
     }
     q.writeBuffer(b.pres, 0, pres);
   }
@@ -220,32 +235,40 @@ export class SeepSolver implements GPUSolverInstance {
         d(seedKernel, p, { indirect: W(C.ARG_PART) }),
         d(separateKernel, p, { direct: [capGroups] }),
         d(p2gKernel, p, { indirect: W(C.ARG_PART) }),
+        d(velocityBulkKernel, undefined, { direct: [BULK_WG] }),
         d(velocityKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
-        d(operatorKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
-        d(coarsenBrickKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
+        d(operatorKernel, undefined, { indirect: W(C.ARG_ACTB) }),
+        d(coarsenBrickKernel, undefined, { indirect: W(C.ARG_ACTBB) }),
         d(coarsenTopKernel, undefined, { direct: [1] }),
       ];
       for (let k = 0; k <= MAX_CYCLES; k++) {
-        const mg = (slot: number) => W(C.MG_ARGS + MG_STRIDE * k + 4 * slot);
+        // Gated counts per row (coarseSolve): slot 0 liquid bricks, 1 [BULK bricks, liquid], 2 [BULK workgroups, liquid], 3 level-4 blocks.
+        const mg = (row: number, slot: number) => W(C.MG_ARGS + MG_STRIDE * row + 4 * slot);
         const kc = [k, 0, 0, 0];
-        // X_k and D0..D2_k run under C_(k-1)'s gate (every slot of a row carries the same count).
-        const prev = k === 0 ? W(C.ARG_ACTIVE) : W(C.MG_ARGS + MG_STRIDE * (k - 1) + 28);
-        list.push(d(pcgUpdateKernel, kc, { indirect: prev }, `seep.pcgUpdate.${k}`));
+        // X_k and D0..D2_k run under C_(k-1)'s gate.
+        const prev = (slot: 0 | 1 | 2 | 3) => k === 0 ? W([C.ARG_LIQ, C.ARG_LIQBB, C.ARG_LIQB, C.ARG_L4][slot]) : mg(k - 1, slot);
+        list.push(d(pcgUpdateKernel, kc, { indirect: prev(2) }, `seep.pcgUpdate.${k}`));
         list.push(d(coarseSolveKernel, kc, { direct: [1] }, `seep.coarseSolve.${k}`));
         if (k < MAX_CYCLES) {
           list.splice(list.length - 1, 0,
-            d(mgDown0Kernel, undefined, { indirect: prev }, `seep.mgDown0.${k}`),
-            d(mgDown1Kernel, undefined, { indirect: prev }, `seep.mgDown1.${k}`),
-            d(mgDown2Kernel, undefined, { indirect: prev }, `seep.mgDown2.${k}`));
+            d(mgDown0Kernel, undefined, { indirect: prev(0) }, `seep.mgDown0.${k}`),
+            d(mgDown1Kernel, undefined, { indirect: prev(1) }, `seep.mgDown1.${k}`),
+            d(mgDown2Kernel, undefined, { indirect: prev(1) }, `seep.mgDown2.${k}`),
+            d(mgDown3Kernel, [0, 0, 0, 0], { indirect: prev(3) }, `seep.mgDown3r.${k}`),
+            d(mgDown3Kernel, [1, 0, 0, 0], { indirect: prev(3) }, `seep.mgDown3b.${k}`),
+            d(mgRestrict3Kernel, undefined, { indirect: prev(3) }, `seep.mgRestrict3.${k}`));
           list.push(
-            d(mgUp2Kernel, undefined, { indirect: mg(3) }, `seep.mgUp2.${k}`),
-            d(mgUp1Kernel, undefined, { indirect: mg(4) }, `seep.mgUp1.${k}`),
-            d(pcgPrecondKernel, kc, { indirect: mg(5) }, `seep.pcgPrecond.${k}`),
-            d(pcgDirectionKernel, kc, { indirect: mg(6) }, `seep.pcgDirection.${k}`));
+            d(mgUp3Kernel, [1, 0, 0, 0], { indirect: mg(k, 3) }, `seep.mgUp3b.${k}`),
+            d(mgUp3Kernel, [0, 0, 0, 0], { indirect: mg(k, 3) }, `seep.mgUp3r.${k}`),
+            d(mgUp2Kernel, undefined, { indirect: mg(k, 1) }, `seep.mgUp2.${k}`),
+            d(mgUp1Kernel, undefined, { indirect: mg(k, 0) }, `seep.mgUp1.${k}`),
+            d(pcgPrecondKernel, kc, { indirect: mg(k, 2) }, `seep.pcgPrecond.${k}`),
+            d(pcgDirectionKernel, kc, { indirect: mg(k, 2) }, `seep.pcgDirection.${k}`));
         }
       }
       list.push(
-        d(projectKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
+        d(projectKernel, undefined, { indirect: W(C.ARG_ACTB) }),
+        d(shadowKernel, undefined, { direct: [NSHADOW] }),
         d(extendKernel, [0, 6 * N, 0, 3], { indirect: W(C.ARG_SURF) }, "seep.extend.1"),
         d(extendKernel, [6 * N, 0, 3, 0], { indirect: W(C.ARG_SURF) }, "seep.extend.2"),
         d(g2pKernel, p, { direct: [capGroups] }),
@@ -357,7 +380,7 @@ export class SeepSolver implements GPUSolverInstance {
       cycles: ctrl[C.CYCLES], cyclesTotal: ctrl[C.CYCLES_TOTAL], capHits: ctrl[C.CAP_HITS],
       firstResidual: f[C.FIRST_RES], lastResidual: f[C.LAST_RES], maxSegments: ctrl[C.MAX_SEG],
       residualHistory: Array.from(f.subarray(C.RES_HIST, C.RES_HIST + MAX_CYCLES + 1)),
-      lists: { active: ctrl[C.N_ACTIVE], surf: ctrl[C.N_ACTIVE + 1], part: ctrl[C.N_ACTIVE + 2], clear: ctrl[C.N_ACTIVE + 3] },
+      lists: { active: ctrl[C.N_ACTIVE], surf: ctrl[C.N_ACTIVE + 1], part: ctrl[C.N_ACTIVE + 2], clear: ctrl[C.N_ACTIVE + 3], liquid: ctrl[C.N_LIQ] },
     };
   }
 

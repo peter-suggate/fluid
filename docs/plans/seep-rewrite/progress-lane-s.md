@@ -81,3 +81,22 @@ seep-bench 1200 steps vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s-m3.md)
 G3: the chamber gains ~10 cells a step over delivery during the jet and splash phase (steps 0-360; the union restores
 4% more than SL advection removes there), then tracks delivery (q_right ~ q_left). Fenced median 45.8 ms/step
 (NB-FLIP 33.7): S2 speed work is next.
+
+## 2026-11-14 MILESTONE S2a: 4h composite reservoir, liquid-only PCG, 45.8 -> 18.1 ms/step
+
+Speed work, every mechanism a published treatment cited in the kernels:
+- BULK: 5220 deep reservoir bricks (away from a 3x5x4-brick throat approach) run as a composite h/4h grid (Losasso,
+  Gibou & Fedkiw 2004): coarse MAC velocity with RK2 semi-Lagrangian advection, one pressure per 4h cell, conservative
+  coarse-fine flux sums over the fine faces, interface coupling at distance 2.5h, and hydrostatically well-balanced
+  gravity across the interface. The coarse pressure is the MG level-2 cell, so level 2 on BULK is exact. Fine shadow
+  velocities (trilinear in the coarse field) feed backtraces that start in fine cells.
+- PCG and MG run over a liquid-brick list (~620 of ~2600 active bricks), built by the operator pass and published to
+  indirect args by a direct-dispatch pass. Level 3 is red/black block Gauss-Seidel over level-4 blocks with a
+  sparse block list; levels 4-6 stay in the one coarse solve.
+- Exact shortcuts: velocity skips faces far in air (US = 0 there regardless), redistance and extension skip tiles
+  with nothing to do.
+- Level-set advection: one Ralston RK3 step per dt, as the reference's surfaceTraceSubsteps "off".
+
+Step 120 (check slot): fenced median 18.1 ms (from 45.8), mean 7.7 PCG cycles, q 0.253 L/s, throat u 2.58 m/s,
+drift 9e-4. Profile: coarse solve 3.1, velocity 3.1, level set (advect/redistance/extend) 3.3, PCG fine passes ~6.
+Still above the 11.2 ms 3x target; next up are the coarse solve, velocity, and the level-set passes.

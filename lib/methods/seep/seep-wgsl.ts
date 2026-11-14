@@ -2,7 +2,7 @@
  * Seep solver: shared WGSL (constants, brick-major addressing, the baked solid
  * geometry and the field samplers). Lane S, docs/plans/seep-rewrite-2026-11-14.md.
  */
-import { BRICKS, CELLS, DT, CELL_M, PHI_MAX, PARTICLE_CELLS, PBX, PBX0, PARTICLE_X0 } from "./seep-layout";
+import { BRICKS, BULK_LISTS, CELLS, DT, CELL_M, NBULK, PHI_MAX, PARTICLE_CELLS, PBX, PBX0, PARTICLE_X0 } from "./seep-layout";
 
 /** Particle pool capacity (each pool), from the measured NB-FLIP peak (216k) with ample margin. */
 export const PARTICLE_CAPACITY = 1 << 20;
@@ -28,6 +28,12 @@ export const MAX_SEGMENTS = 48;
 /** ctrl word offsets. */
 export const C = {
   ARG_ACTIVE: 0, ARG_SURF: 4, ARG_PART: 8, ARG_CLEAR: 12,
+  /** In the args buffer: the active list plus BULK_WG leading workgroups, and plus NBULK leading (one per BULK brick). */
+  ARG_ACTB: 16, ARG_ACTBB: 20,
+  /** In the args buffer: the liquid bricks (built by the operator), plus BULK_WG leading workgroups, and plus NBULK leading. */
+  ARG_LIQ: 24, ARG_LIQB: 28, ARG_LIQBB: 32,
+  /** In the args buffer: the level-4 blocks (2x2x2 level-3 cells) holding a level-3 unknown. */
+  ARG_L4: 36,
   STEP: 16, FAIL: 17, PCOUNT: 18 /* 18,19 */, DELETED: 20, SEEDED: 21,
   RES: 22, CONV: 23, PARITY: 24, CYCLES: 25, FIRST_RES: 26, LAST_RES: 27, CAP_HITS: 28, CYCLES_TOTAL: 29,
   MAX_SEG: 30, OVERFLOW: 31,
@@ -39,6 +45,10 @@ export const C = {
   ALPHA: 60, RHO: 61,
   /** Cumulative particle retirements by reason: deeper than the band, over the cell cap, out of the particle region. */
   DEL_DEEP: 62, DEL_CAP: 63, DEL_OUT: 64,
+  /** Liquid bricks of the current step (published by coarsenTop), and the operator's append counter. */
+  N_LIQ: 65, LIQ_COUNT: 66,
+  /** Level-4 block list: its append counter, and its size this step. */
+  L4_COUNT: 67, N_L4: 68,
   RED: 256,
   /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1). */
   MG_ARGS: 64,
@@ -51,9 +61,22 @@ export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4 } as const;
 
 /** bricks table offsets (each BRICKS long). */
 export const B = {
-  CLASS: 0, FLAGS: 1, MINPHI: 2, PCOUNT: 3, LIST_ACTIVE: 4, LIST_SURF: 5, LIST_PART: 6, LIST_CLEAR: 7, PSTART: 8, PNUM: 9,
-  COUNT: 10,
+  CLASS: 0, FLAGS: 1, MINPHI: 2, PCOUNT: 3,
+  /** A second copy of the BULK list immediately followed by the liquid bricks (active bricks with a pressure unknown), for the pressure solve. */
+  LIST_BULK2: 4, LIST_SURF: 5, LIST_PART: 6, LIST_CLEAR: 7, PSTART: 8, PNUM: 9,
+  /** The BULK bricks (static, NBULK) immediately followed by the active list, so that one index serves
+   *  dispatches over [BULK, active] (B_LBULK + i) and over the active list alone (B_LACT = B_LBULK + NBULK).
+   *  The active list holds no BULK brick, so the region (BRICKS words) has room. Then the static shadow list. */
+  LIST_BULK: 10, LIST_SHADOW: 11,
+  /** Level-4 block stamps (the step that listed it; 2048 words used) and the level-4 block list. */
+  L4_FLAG: 12, L4_LIST: 13,
+  COUNT: 14,
 } as const;
+/** BULK work: 64 bricks (512 coarse cells) per 512-thread workgroup; these workgroups come first in the dispatches that include BULK. */
+export const BULK_WG = Math.ceil(NBULK / 64);
+export const NSHADOW = BULK_LISTS.shadow.length;
+/** The dense 4h lattice (128 x 64 x 16) of the BULK buffer: U (3 components) then Us (3). */
+export const COARSE_LATTICE = 128 * 64 * 16;
 
 /** Coarse multigrid levels 1..6 (L0 is the fine brick-major lattice). */
 export const LEVELS = 6;
@@ -86,9 +109,21 @@ const RP: f32 = ${f(PARTICLE_RADIUS)};
 const THETA_MIN: f32 = ${f(THETA_MIN)};
 const FLIP: f32 = ${f(FLIP_RATIO)};
 const MAXSEG: f32 = ${f(MAX_SEGMENTS)};
-const CLASS_DEAD: u32 = 1u; const CLASS_DEEP: u32 = 2u; const CLASS_PARTICLE: u32 = 4u; const CLASS_CHAMBER: u32 = 8u;
+const CLASS_DEAD: u32 = 1u; const CLASS_DEEP: u32 = 2u; const CLASS_PARTICLE: u32 = 4u; const CLASS_CHAMBER: u32 = 8u; const CLASS_BULK: u32 = 16u;
+const NBULK: u32 = ${NBULK}u; const BULK_WG: u32 = ${BULK_WG}u; const NSHADOW: u32 = ${NSHADOW}u;
+const B_LBULK: u32 = ${B.LIST_BULK * BRICKS}u; const B_LSHADOW: u32 = ${B.LIST_SHADOW * BRICKS}u;
+const NCL: u32 = ${COARSE_LATTICE}u; const BU_OFF: u32 = 0u; const BUS_OFF: u32 = ${3 * COARSE_LATTICE}u;
+const C_ARG_ACTB: u32 = ${C.ARG_ACTB}u; const C_ARG_ACTBB: u32 = ${C.ARG_ACTBB}u;
+const C_N_LIQ: u32 = ${C.N_LIQ}u; const C_LIQ_COUNT: u32 = ${C.LIQ_COUNT}u; const C_L4_COUNT: u32 = ${C.L4_COUNT}u; const C_N_L4: u32 = ${C.N_L4}u;
+const C_ARG_L4: u32 = ${C.ARG_L4}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
+const B_LBULK2: u32 = ${B.LIST_BULK2 * BRICKS}u; const B_LLIQ: u32 = ${B.LIST_BULK2 * BRICKS + NBULK}u;
+/** Composite h/4h: a fine face against a coarse cell couples over 2.5 cells (half a fine and half a coarse cell). */
+const SUBC: f32 = 0.4;
+fn clIndex(k: vec3i) -> u32 { return u32(k.x + 128 * (k.y + 64 * k.z)); }
+/** pres/op slot of coarse cell k: its BULK brick's first eight slots. */
+fn bulkSlot(k: vec3i) -> u32 { return (brickOfCell(k * 4) << 9u) | u32((k.x & 1) | ((k.y & 1) << 1u) | ((k.z & 1) << 2u)); }
 const B_CLASS: u32 = ${B.CLASS * BRICKS}u; const B_FLAGS: u32 = ${B.FLAGS * BRICKS}u; const B_MINPHI: u32 = ${B.MINPHI * BRICKS}u;
-const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_LACT: u32 = ${B.LIST_ACTIVE * BRICKS}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
+const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_LACT: u32 = ${B.LIST_BULK * BRICKS + NBULK}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
 const B_LPART: u32 = ${B.LIST_PART * BRICKS}u; const B_LCLEAR: u32 = ${B.LIST_CLEAR * BRICKS}u;
 const B_PSTART: u32 = ${B.PSTART * BRICKS}u; const B_PNUM: u32 = ${B.PNUM * BRICKS}u;
 const C_ARG_ACTIVE: u32 = ${C.ARG_ACTIVE}u; const C_ARG_SURF: u32 = ${C.ARG_SURF}u; const C_ARG_PART: u32 = ${C.ARG_PART}u; const C_ARG_CLEAR: u32 = ${C.ARG_CLEAR}u;

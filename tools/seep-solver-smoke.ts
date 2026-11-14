@@ -78,6 +78,8 @@ if (profile && !errors.length) {
   const total = t.reduce((s, x) => s + x.ms, 0);
   console.log(JSON.stringify({ kind: "profile", total_ms: Number(total.toFixed(3)), dispatches: t.length,
     byKernel: Object.fromEntries([...groups].sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, Number(v.toFixed(3))])) }));
+  const pick = option("dispatches");
+  if (pick) console.log(JSON.stringify({ kind: "dispatches", list: t.filter(x => x.label.includes(pick)).map(x => [x.label, Number(x.ms.toFixed(3))]) }));
 }
 observer.destroy(); solver.destroy();
 await device.queue.onSubmittedWorkDone().catch(() => {});

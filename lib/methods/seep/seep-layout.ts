@@ -41,7 +41,41 @@ export const PARTICLE_BRICKS = PBX * BY * BZ;
 export const PARTICLE_CELLS = PARTICLE_BRICKS * 512;
 
 /** Brick class bits (static). */
-export const CLASS_DEAD = 1, CLASS_DEEP = 2, CLASS_PARTICLE = 4, CLASS_CHAMBER = 8;
+export const CLASS_DEAD = 1, CLASS_DEEP = 2, CLASS_PARTICLE = 4, CLASS_CHAMBER = 8, CLASS_BULK = 16;
+
+/**
+ * BULK bricks: the DEEP reservoir away from the throat, held at 4h (each
+ * brick is 2x2x2 coarse cells of 4 cells a side) as a composite h/4h grid
+ * (plan §2.3): coarse MAC velocities and one pressure per coarse cell, and
+ * conservative flux sums over the 16 fine faces where a coarse cell meets
+ * fine cells (Losasso et al. 2004). The throat's approach, a block of 3x5x4
+ * bricks in front of it, stays fine, as the reference pins the throat at h.
+ * Every BULK brick is DEEP (wholly below DEEP_ROW_LIMIT, x < 240).
+ */
+export const BULK_BX1 = WALL_X0 / BRICK, BULK_BY1 = DEEP_ROW_LIMIT / BRICK;
+export function throatBlockBrick(bx: number, by: number, bz: number): boolean {
+  return bx >= 27 && bx <= 29 && by >= 6 && by <= 10 && bz >= 2 && bz <= 5;
+}
+export function bulkBrick(bx: number, by: number, bz: number): boolean {
+  return bx >= 0 && by >= 0 && bz >= 0 && bx < BULK_BX1 && by < BULK_BY1 && bz < BZ && !throatBlockBrick(bx, by, bz);
+}
+/** Brick ids of the BULK bricks (ascending), and of those with a fine open neighbour in their 26 (they keep a fine velocity shadow). */
+export function bulkLists(): { bulk: number[]; shadow: number[] } {
+  const bulk: number[] = [], shadow: number[] = [];
+  const fineOpen = (bx: number, by: number, bz: number) => bx >= 0 && by >= 0 && bz >= 0 && bx < BX && by < BY && bz < BZ
+    && !bulkBrick(bx, by, bz) && (bx * 8 < WALL_X0 || bx * 8 >= WALL_X1 || (by === THROAT_Y0 >> 3 && bz === THROAT_Z0 >> 3));
+  for (let bz = 0; bz < BZ; bz++) for (let by = 0; by < BY; by++) for (let bx = 0; bx < BX; bx++) {
+    if (!bulkBrick(bx, by, bz)) continue;
+    bulk.push(brickId(bx, by, bz));
+    let edge = false;
+    for (let d = 0; d < 27 && !edge; d++) if (fineOpen(bx + (d % 3) - 1, by + ((d / 3 | 0) % 3) - 1, bz + (d / 9 | 0) - 1)) edge = true;
+    if (edge) shadow.push(brickId(bx, by, bz));
+  }
+  bulk.sort((a, b) => a - b); shadow.sort((a, b) => a - b);
+  return { bulk, shadow };
+}
+export const BULK_LISTS = bulkLists();
+export const NBULK = BULK_LISTS.bulk.length;
 
 export function brickId(bx: number, by: number, bz: number): number { return bx + BX * (by + BY * bz); }
 export function cellIndex(x: number, y: number, z: number): number {
@@ -162,6 +196,7 @@ export function bakeSeep(): SeepBake {
     // bricks sit >= 12 cells below any reachable surface: more than the
     // level-set band (PHI_MAX = 6). Asserted on the GPU every step.
     if (!touches) { /* dead */ } else if (bx <= WALL_X0 / BRICK && by * 8 + 8 <= DEEP_ROW_LIMIT && !throatBrick(bx, by, bz)) cls |= CLASS_DEEP;
+    if ((cls & CLASS_DEEP) !== 0 && bulkBrick(bx, by, bz)) cls |= CLASS_BULK;
     if (bx >= PBX0) cls |= CLASS_PARTICLE;
     if (bx * 8 >= WALL_X1) cls |= CLASS_CHAMBER;
     brickClass[brickId(bx, by, bz)] = cls;

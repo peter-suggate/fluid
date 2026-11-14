@@ -48,6 +48,95 @@ const pgridRO: BindingSpec = { name: "pgrid", kind: "ro", type: "array<u32>" };
 const accRW: BindingSpec = { name: "acc", kind: "rw", type: "array<atomic<i32>>" };
 const cfgU: BindingSpec = { name: "cfg", kind: "uniform", type: "Cfg" };
 const volW: BindingSpec = { name: "vol", kind: "volume" };
+const bulkRW: BindingSpec = { name: "bulk", kind: "rw", type: "array<f32>" };
+const bulkRO: BindingSpec = { name: "bulk", kind: "ro", type: "array<f32>" };
+
+/**
+ * BULK (composite h/4h) helpers. A coarse cell k (4h, on the 128x64x16
+ * lattice) covers fine cells 4k..4k+3; its MAC faces are the low faces of the
+ * lattice (face (a, k) at 4 k[a] along a). Where a coarse cell meets fine
+ * cells, the 16 fine faces between them are the interface: fine faces, stored
+ * at their fine position (also when that is inside a BULK brick), coupled to
+ * the coarse pressure over 2.5 cells (Losasso et al. 2004).
+ */
+function bulkWGSL(bricksAtomic: boolean): string {
+  const rd = (e: string) => bricksAtomic ? `atomicLoad(&bricks[${e}])` : `bricks[${e}]`;
+  return /* wgsl */ `
+fn brickBulk(id: u32) -> bool { return (${rd("B_CLASS + id")} & CLASS_BULK) != 0u; }
+fn cellBulk(c: vec3i) -> bool { return inBox(c) && brickBulk(brickOfCell(c)); }
+fn coarseBulk(k: vec3i) -> bool { return all(k >= vec3i(0)) && all(k < vec3i(128, 64, 16)) && brickBulk(brickOfCell(k * 4)); }
+/** Coarse cell j of the BULK list (eight a brick, in its octant order); NBULK * 8 of them. */
+fn bulkCell(j: u32) -> vec3i {
+  let b = ${rd("B_LBULK + (j >> 3u)")};
+  let r = j & 7u;
+  return brickCoord(b) * 2 + vec3i(i32(r & 1u), i32((r >> 1u) & 1u), i32(r >> 2u));
+}
+/** Fine cell open and not BULK (a fine pressure unknown when liquid). */
+fn fineOpen(c: vec3i) -> bool { return cellOpen(c) && !cellBulk(c); }
+/** Centre height (cells) of the pressure owner of fine cell c: its coarse cell's if BULK. */
+fn ownerY(c: vec3i) -> f32 { return select(f32(c.y) + 0.5, f32((c.y >> 2u) * 4) + 2.0, cellBulk(c)); }
+`;
+}
+/** Coarse MAC sampling (needs bulk and vel bound): coarse faces between two BULK cells read the bulk buffer at off; others the mean of their 16 fine faces at fineOff. */
+const COARSE_SAMPLER_WGSL = /* wgsl */ `
+fn cface(a: u32, k0: vec3i, off: u32, fineOff: u32) -> f32 {
+  let dims = vec3i(128, 64, 16);
+  if (k0[a] <= 0 || k0[a] >= dims[a]) { return 0.0; }
+  var k = clamp(k0, vec3i(0), dims - vec3i(1)); k[a] = k0[a];
+  if (coarseBulk(k) && coarseBulk(k - unitAxis(a))) { return bulk[off + a * NCL + clIndex(k)]; }
+  let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+  var s = 0.0;
+  for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) { s += vel[fineOff + a * N + cidx(4 * k + u * t1 + v * t2)]; } }
+  return s * 0.0625;
+}
+fn cvelComp(a: u32, p: vec3f, off: u32, fineOff: u32) -> f32 {
+  let q = p * 0.25 - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
+  let fb = floor(q); let t = q - fb; let b = vec3i(fb);
+  let x00 = mix(cface(a, b, off, fineOff), cface(a, b + vec3i(1, 0, 0), off, fineOff), t.x);
+  let x10 = mix(cface(a, b + vec3i(0, 1, 0), off, fineOff), cface(a, b + vec3i(1, 1, 0), off, fineOff), t.x);
+  let x01 = mix(cface(a, b + vec3i(0, 0, 1), off, fineOff), cface(a, b + vec3i(1, 0, 1), off, fineOff), t.x);
+  let x11 = mix(cface(a, b + vec3i(0, 1, 1), off, fineOff), cface(a, b + vec3i(1, 1, 1), off, fineOff), t.x);
+  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
+}
+fn cvel(p: vec3f, off: u32, fineOff: u32) -> vec3f { return vec3f(cvelComp(0u, p, off, fineOff), cvelComp(1u, p, off, fineOff), cvelComp(2u, p, off, fineOff)); }
+`;
+/** Fine cell next to coarse cell k across side kk (0..5 = -x,+x,-y,+y,-z,+z), the (u, v)-th of the 16 on that face. */
+const BULK_NBR_WGSL = /* wgsl */ `
+fn subNbr(k: vec3i, kk: u32, u: i32, v: i32) -> vec3i {
+  let a = kk >> 1u;
+  let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+  let e = unitAxis(a);
+  return 4 * k + select(-e, 4 * e, (kk & 1u) == 1u) + u * t1 + v * t2;
+}
+`;
+/** Composite operator rows (needs pres, op, bits): the fine liquid cells across the
+ *  non-BULK sides of coarse cell k, and A applied at k. Coarse-coarse coupling 16/4,
+ *  coarse-fine per fine face 1/2.5 (SUBC); symmetric (Losasso et al. 2004). */
+const BULK_APPLY_WGSL = /* wgsl */ `
+${BULK_NBR_WGSL}
+fn subSum(k: vec3i, m: u32, f: u32) -> f32 {
+  var s = 0.0;
+  for (var kk = 0u; kk < 6u; kk++) {
+    if (((m >> kk) & 1u) != 0u) { continue; }
+    for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) {
+      let c = subNbr(k, kk, u, v);
+      if (!inBox(c)) { continue; }
+      let ci = cidx(c);
+      if (op[DIAG_OFF + ci] > 0.0) { s += SUBC * pres[f + ci]; }
+    } }
+  }
+  return s;
+}
+fn applyBulk(k: vec3i, sl: u32, f: u32) -> f32 {
+  let m = bits[MASK_OFF + sl];
+  var s = subSum(k, m, f);
+  for (var kk = 0u; kk < 6u; kk++) {
+    if (((m >> kk) & 1u) == 0u) { continue; }
+    s += 4.0 * pres[f + bulkSlot(k + select(-1, 1, (kk & 1u) == 1u) * unitAxis(kk >> 1u))];
+  }
+  return op[DIAG_OFF + sl] * pres[f + sl] - s;
+}
+`;
 const surfW: BindingSpec = { name: "surf", kind: "volume" };
 
 /**
@@ -129,10 +218,17 @@ fn liquidish(n: vec3i) -> bool {
     atomicStore(&args[C_ARG_SURF + 1u], 1u); atomicStore(&args[C_ARG_SURF + 2u], 1u);
     atomicStore(&args[C_ARG_PART + 1u], 1u); atomicStore(&args[C_ARG_PART + 2u], 1u);
     atomicStore(&args[C_ARG_CLEAR + 1u], 1u); atomicStore(&args[C_ARG_CLEAR + 2u], 1u);
+    atomicStore(&args[C_ARG_ACTB + 1u], 1u); atomicStore(&args[C_ARG_ACTB + 2u], 1u);
+    atomicStore(&args[C_ARG_ACTBB + 1u], 1u); atomicStore(&args[C_ARG_ACTBB + 2u], 1u);
+    atomicStore(&args[C_ARG_LIQ + 1u], 1u); atomicStore(&args[C_ARG_LIQ + 2u], 1u);
+    atomicStore(&args[C_ARG_LIQB + 1u], 1u); atomicStore(&args[C_ARG_LIQB + 2u], 1u);
+    atomicStore(&args[C_ARG_LIQBB + 1u], 1u); atomicStore(&args[C_ARG_LIQBB + 2u], 1u);
   }
   if (b >= BRICKS) { return; }
   let cls = atomicLoad(&bricks[B_CLASS + b]);
-  if ((cls & CLASS_DEAD) != 0u) { return; }
+  // BULK bricks are never fine work: their coarse cells ride in the leading
+  // workgroups of the dispatches that include them.
+  if ((cls & (CLASS_DEAD | CLASS_BULK)) != 0u) { return; }
   let bc = brickCoord(b);
   // Activation reach: one brick (8 cells a step, 2.4 m/s) in the reservoir; two
   // in the chamber, where the falling jet and its splash move up to ~16 cells
@@ -145,6 +241,7 @@ fn liquidish(n: vec3i) -> bool {
   let prev = (atomicLoad(&bricks[B_FLAGS + b]) & 1u) != 0u;
   if (act) {
     let i = atomicAdd(&args[C_ARG_ACTIVE], 1u); atomicStore(&bricks[B_LACT + i], b);
+    atomicAdd(&args[C_ARG_ACTB], 1u); atomicAdd(&args[C_ARG_ACTBB], 1u);
     if ((cls & CLASS_DEEP) == 0u) { let j = atomicAdd(&args[C_ARG_SURF], 1u); atomicStore(&bricks[B_LSURF + j], b); }
     if ((cls & CLASS_PARTICLE) != 0u) { let k = atomicAdd(&args[C_ARG_PART], 1u); atomicStore(&bricks[B_LPART + k], b); }
   } else if (prev) {
@@ -447,8 +544,9 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
 `);
 
 // ---------------------------------------------------------------------------
-// 7. Level-set advection: semi-Lagrangian, Ralston RK3 backtrace split into
-//    <= 1-cell segments, monotone Catmull-Rom tricubic. phi -> phiT. Also the
+// 7. Level-set advection: semi-Lagrangian, one Ralston RK3 backtrace of the
+//    whole step (three velocity samples, any length; as the reference's
+//    surfaceTraceSubsteps "off"), monotone Catmull-Rom tricubic. phi -> phiT. Also the
 //    DEEP invariant: the bottom vertex layer of a level-set brick standing on
 //    a DEEP brick must stay liquid (a violation latches a failure).
 // ---------------------------------------------------------------------------
@@ -466,18 +564,16 @@ fn cornerOfOpen(v: vec3i) -> bool {
   let v = bc * 8 + lc;
   let p = vec3f(v);
   var u = velU(p);
-  let segs = ceil(length(u) * CFL);
-  if (segs > 12.0) { atomicMax(&ctrl[C_MAX_SEG], u32(segs)); }
-  let n = clamp(segs, 1.0, MAXSEG);
-  let tau = CFL / n;
-  var x = p;
-  for (var s = 0.0; s < n; s += 1.0) {
-    let k1 = select(velU(x), u, s == 0.0);
-    let k2 = velU(x - 0.5 * tau * k1);
-    let k3 = velU(x - 0.75 * tau * k2);
-    x = x - tau * (2.0 * k1 + 3.0 * k2 + 4.0 * k3) / 9.0;
+  var phi0 = 0.0;
+  if (all(u == vec3f(0.0))) {
+    // At rest (air beyond the extension): the departure point is the vertex itself, where the
+    // interpolant returns the vertex value; the same result without the trace.
+    phi0 = clamp(phiAt(v), -PHI_MAX, PHI_MAX);
+  } else {
+    let k2 = velU(p - 0.5 * CFL * u);
+    let k3 = velU(p - 0.75 * CFL * k2);
+    phi0 = clamp(phiCubic(p - CFL * (2.0 * u + 3.0 * k2 + 4.0 * k3) / 9.0), -PHI_MAX, PHI_MAX);
   }
-  let phi0 = clamp(phiCubic(x), -PHI_MAX, PHI_MAX);
   phis[PHIT_OFF + ((b << 9u) | l)] = phi0;
   if (lc.y == 0 && bc.y > 0) {
     let below = b - 64u;
@@ -620,6 +716,8 @@ ${VERTEX_OPEN_WGSL}
 var<workgroup> tA: array<f32, 1000>;
 var<workgroup> tB: array<f32, 1000>;
 var<workgroup> tOpen: array<u32, 1000>;
+var<workgroup> sMixed: atomic<u32>;
+var<workgroup> sMixedU: u32;
 /** Sign of the neighbour nearest the interface (extension into solid-interior vertices). */
 fn nearSign(t: ptr<workgroup, array<f32, 1000>>, ti: u32) -> f32 {
   var m = abs((*t)[ti - 1u]); var s = (*t)[ti - 1u];
@@ -645,14 +743,24 @@ fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LSURF + wg.x];
   let o = brickCoord(b) * 8;
+  if (l == 0u) { atomicStore(&sMixed, 0u); }
+  workgroupBarrier();
   for (var t = l; t < 1000u; t += 512u) {
     let q = clampV(o + tileCoord(t));
     let val = phis[cfg.a + cidx(q)];
     tA[t] = val; tB[t] = val; tOpen[t] = select(0u, 1u, vertexOpen(q));
+    if (val != PHI_MAX) { atomicStore(&sMixed, 1u); }
   }
   workgroupBarrier();
+  if (l == 0u) { sMixedU = atomicLoad(&sMixed); }
   let lc = localCoord(l);
   let ti = tileIndex(lc);
+  // A tile that is all air at the band limit is a fixed point of the sweeps.
+  if (workgroupUniformLoad(&sMixedU) == 0u) {
+    phis[cfg.b + ((b << 9u) | l)] = PHI_MAX;
+    if (cfg.c == 1u) { publishSurf(o + lc, PHI_MAX); }
+    return;
+  }
   let me = tA[ti];
   let neg = me < 0.0;
   let open = tOpen[ti] == 1u;
@@ -745,24 +853,118 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
 //     y face. Also publishes the cell-centre level set, the fill fraction and
 //     the brick's minimum phi for the next classification.
 // ---------------------------------------------------------------------------
+export const velocityBulkKernel = kernel("seep.velocityBulk", [bricksRO, velRW, bulkRW], /* wgsl */ `
+${velocitySampler("velU", "vel", "U_OFF")}
+${bulkWGSL(false)}
+${COARSE_SAMPLER_WGSL}
+/** Semi-Lagrangian RK2 backtrace (segments of at most one cell) of the fine face (a, c) through the fine velocity. */
+fn fineFaceSL(a: u32, c: vec3i) -> f32 {
+  let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(unitAxis(a));
+  let u0 = velU(pos);
+  let n = clamp(ceil(length(u0) * CFL), 1.0, MAXSEG);
+  let tau = CFL / n;
+  var x = pos; var q = pos; var kk = u0;
+  let last = u32(n) * 2u - 1u;
+  for (var j = 0u; j <= last; j++) {
+    if ((j & 1u) == 0u) { q = x - 0.5 * tau * kk; } else { x = x - tau * kk; q = x; }
+    if (j == last) { break; }
+    kk = velU(q);
+  }
+  return velUComp(a, x);
+}
+/** Gravity on face (a, c): -g dt (y_hi - y_lo) / d between the centres of its two pressure owners, d their distance along a
+ *  (1 between fine cells, 2.5 across the h/4h interface). Equals -g dt on vertical faces and 0 on horizontal fine faces; on a
+ *  horizontal interface face it is the hydrostatic difference the coarse/fine centre offset implies, so the resting reservoir
+ *  stays exactly at rest (a well-balanced body force, cf. Audusse et al. 2004). */
+fn gravityOn(a: u32, c: vec3i) -> f32 {
+  let lo = c - unitAxis(a);
+  let d = select(1.0, 2.5, cellBulk(lo) != cellBulk(c));
+  return -GDT * (ownerY(c) - ownerY(lo)) / d;
+}
+/** BULK coarse cell j: SL advection of its coarse low faces at 4h; the fine interface faces stored in it (fine cell below along a) as fine faces. */
+fn bulkVelocity(j: u32) {
+  let k = bulkCell(j);
+  for (var a = 0u; a < 3u; a++) {
+    let e = unitAxis(a);
+    let kn = k - e;
+    if (coarseBulk(kn)) {
+      let pos = vec3f(4 * k) + vec3f(2.0) - 2.0 * vec3f(e);
+      let u0 = cvel(pos, BU_OFF, U_OFF);
+      let n = clamp(ceil(length(u0) * CFL * 0.25), 1.0, MAXSEG);
+      let tau = CFL / n;
+      var x = pos;
+      for (var s = 0.0; s < n; s += 1.0) {
+        let k1 = select(cvel(x, BU_OFF, U_OFF), u0, s == 0.0);
+        x = x - tau * cvel(x - 0.5 * tau * k1, BU_OFF, U_OFF);
+      }
+      bulk[BUS_OFF + a * NCL + clIndex(k)] = cvelComp(a, x, BU_OFF, U_OFF) - select(0.0, GDT, a == 1u);
+    } else {
+      let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+      for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) {
+        let c = 4 * k + u * t1 + v * t2;
+        var val = 0.0;
+        if (fineOpen(c - e)) { val = fineFaceSL(a, c) + gravityOn(a, c); }
+        vel[US_OFF + a * N + cidx(c)] = val;
+      } }
+    }
+  }
+}
+@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  let j = wg.x * 512u + l;
+  if (j < NBULK * 8u) { bulkVelocity(j); }
+}
+`);
+
 export const velocityKernel = kernel("seep.velocity", [ctrlRW, bricksRW, phisRW, velRW, accRW, volW], /* wgsl */ `
 ${levelSetFillWGSL}
 ${velocitySampler("velU", "vel", "U_OFF")}
+${bulkWGSL(true)}
+fn gravityOn(a: u32, c: vec3i) -> f32 {
+  let lo = c - unitAxis(a);
+  let d = select(1.0, 2.5, cellBulk(lo) != cellBulk(c));
+  return -GDT * (ownerY(c) - ownerY(lo)) / d;
+}
 fn ph(v: vec3i) -> f32 { return phis[PHI_OFF + cidx(clampV(v))]; }
+const FAR_AIR: f32 = 4.0;
 var<workgroup> red: array<f32, 512>;
+var<workgroup> sFar: u32;
+// Velocity tile: the brick's faces and a two-cell halo of each component,
+// staged once; backtrace samples whose eight corners fall inside it read the
+// tile, the rest (fast liquid, a few cells a step) read the buffer. Same
+// values, same interpolation.
+const VT: i32 = 12;
+var<workgroup> vt: array<f32, 5184>;
+var<private> tileOrigin: vec3i;
+fn velTComp(a: u32, p: vec3f) -> f32 {
+  let q = p - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
+  let fb = floor(q);
+  let lb = vec3i(fb) - tileOrigin;
+  if (any(lb < vec3i(0)) || any(lb > vec3i(VT - 2))) { return velUComp(a, p); }
+  let t = q - fb;
+  let k = u32(i32(a) * VT * VT * VT + lb.x + VT * (lb.y + VT * lb.z));
+  let sy = u32(VT); let sz = u32(VT * VT);
+  let x00 = mix(vt[k], vt[k + 1u], t.x); let x10 = mix(vt[k + sy], vt[k + sy + 1u], t.x);
+  let x01 = mix(vt[k + sz], vt[k + sz + 1u], t.x); let x11 = mix(vt[k + sz + sy], vt[k + sz + sy + 1u], t.x);
+  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
+}
+fn velT(p: vec3f) -> vec3f { return vec3f(velTComp(0u, p), velTComp(1u, p), velTComp(2u, p)); }
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = atomicLoad(&bricks[B_LACT + wg.x]);
   let cls = atomicLoad(&bricks[B_CLASS + b]);
   let deep = (cls & CLASS_DEEP) != 0u;
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
+  tileOrigin = brickCoord(b) * 8 - vec3i(2);
   if (l == 0u) { atomicStore(&bricks[B_PCOUNT + b], 0u); }
+  var vmin = -PHI_MAX;
   if (!deep) {
     var v: array<f32, 8>;
     var s = 0.0;
+    vmin = PHI_MAX;
     for (var k = 0u; k < 8u; k++) {
       v[k] = ph(c + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u)));
       s += v[k];
+      vmin = min(vmin, v[k]);
     }
     phis[PHIC_OFF + i] = s * 0.125;
     textureStore(vol, c, vec4f(select(0.0, fill(v), cellOpen(c)), 0.0, 0.0, 0.0));
@@ -774,6 +976,30 @@ var<workgroup> red: array<f32, 512>;
     workgroupBarrier();
   }
   if (l == 0u && !deep) { atomicStore(&bricks[B_MINPHI + b], bitcast<u32>(red[0])); }
+  // A brick whose vertices, and the layer below each axis, all lie beyond FAR_AIR has only faces
+  // the per-face test below would skip: no tile, no traces (same values).
+  var far = 0.0;
+  if (!deep) {
+    far = PHI_MAX;
+    for (var t = l; t < 1000u; t += 512u) { far = min(far, ph(brickCoord(b) * 8 + tileCoord(t))); }
+  }
+  workgroupBarrier();
+  red[l] = far;
+  workgroupBarrier();
+  for (var d = 256u; d > 0u; d = d >> 1u) {
+    if (l < d) { red[l] = min(red[l], red[l + d]); }
+    workgroupBarrier();
+  }
+  if (l == 0u) { sFar = select(0u, 1u, red[0] > FAR_AIR); }
+  let allFar = workgroupUniformLoad(&sFar) != 0u;
+  if (!allFar) {
+    for (var t = l; t < 5184u; t += 512u) {
+      let a = t / 1728u; let r = t % 1728u;
+      let q = tileOrigin + vec3i(i32(r % 12u), i32((r / 12u) % 12u), i32(r / 144u));
+      vt[t] = velUFace(a, q);
+    }
+  }
+  workgroupBarrier();
   let part = c.x >= PX0;
   for (var a = 0u; a < 3u; a++) {
     var mom = 0; var wsum = 0;
@@ -782,27 +1008,44 @@ var<workgroup> red: array<f32, 512>;
       mom = atomicExchange(&acc[a * PN + pc], 0);
       wsum = atomicExchange(&acc[(3u + a) * PN + pc], 0);
     }
-    if (!faceOpen(c, a)) { vel[US_OFF + a * N + i] = 0.0; continue; }
-    let e = unitAxis(a);
-    let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(e);
-    let u0 = velU(pos);
-    let segs = ceil(length(u0) * CFL);
-    if (segs > 12.0) { atomicMax(&ctrl[C_MAX_SEG], u32(segs)); }
-    let n = clamp(segs, 1.0, MAXSEG);
-    let tau = CFL / n;
-    var x = pos;
-    for (var s = 0.0; s < n; s += 1.0) {
-      let k1 = select(velU(x), u0, s == 0.0);
-      let k2 = velU(x - 0.5 * tau * k1);
-      x = x - tau * k2;
+    if (!faceOpen(c, a) || allFar) { vel[US_OFF + a * N + i] = 0.0; continue; }
+    // Faces whose two cells lie wholly more than FAR_AIR cells into the air are read by nothing
+    // (projection, FLIP and particle support read faces next to liquid cells; advection and
+    // extension read U, which projection zeroes there): no backtrace.
+    if (vmin > FAR_AIR) {
+      let o = c - unitAxis(a);
+      let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+      if (min(min(ph(o), ph(o + t1)), min(ph(o + t2), ph(o + t1 + t2))) > FAR_AIR) { vel[US_OFF + a * N + i] = 0.0; continue; }
     }
-    var val = velUComp(a, x);
+    var transfer = false;
     if (wsum > 0) {
       let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
       let phiF = 0.25 * (ph(c) + ph(c + t1) + ph(c + t2) + ph(c + t1 + t2));
-      if (phiF >= -RCOMB) { val = (f32(mom) / SM) / (f32(wsum) / SW); }
+      transfer = phiF >= -RCOMB;
     }
-    if (a == 1u) { val -= GDT; }
+    var val = 0.0;
+    if (transfer) {
+      val = (f32(mom) / SM) / (f32(wsum) / SW);
+    } else {
+      let e = unitAxis(a);
+      let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(e);
+      let u0 = velT(pos);
+      let segs = ceil(length(u0) * CFL);
+      if (segs > 12.0) { atomicMax(&ctrl[C_MAX_SEG], u32(segs)); }
+      let n = clamp(segs, 1.0, MAXSEG);
+      let tau = CFL / n;
+      // RK2 midpoint segments, one velocity evaluation site: even half-steps
+      // locate the midpoint from k1, odd ones advance with k2.
+      var x = pos; var q = pos; var kk = u0;
+      let last = u32(n) * 2u - 1u;
+      for (var j = 0u; j <= last; j++) {
+        if ((j & 1u) == 0u) { q = x - 0.5 * tau * kk; } else { x = x - tau * kk; q = x; }
+        if (j == last) { break; }
+        kk = velT(q);
+      }
+      val = velTComp(a, x);
+    }
+    val += gravityOn(a, c);
     vel[US_OFF + a * N + i] = val;
   }
 }
@@ -815,18 +1058,61 @@ var<workgroup> red: array<f32, 512>;
 //     the liquid). Also resets
 //     the particle-cell counts once every consumer has read them.
 // ---------------------------------------------------------------------------
-export const operatorKernel = kernel("seep.operator", [bricksRO, phisRO, velRO, opRW, bitsRW, presRW, pgridRW], /* wgsl */ `
+export const operatorKernel = kernel("seep.operator", [bricksRW, phisRO, velRO, opRW, bitsRW, presRW, pgridRW, bulkRO, ctrlRW], /* wgsl */ `
+${bulkWGSL(true)}
+var<workgroup> anyLiquid: atomic<u32>;
+${BULK_NBR_WGSL}
 fn us(a: u32, c: vec3i) -> f32 {
   if (c[a] >= dimOf(a)) { return 0.0; }
   return vel[US_OFF + a * N + cidx(c)];
 }
+/** Flux (fine face areas) through coarse face (a, k), the low face of k: 16 Us between two BULK cells, else its 16 fine faces. */
+fn cflux(a: u32, k: vec3i) -> f32 {
+  if (k[a] <= 0 || k[a] >= dimOf(a) / 4) { return 0.0; }
+  if (coarseBulk(k) && coarseBulk(k - unitAxis(a))) { return 16.0 * bulk[BUS_OFF + a * NCL + clIndex(k)]; }
+  let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+  var s = 0.0;
+  for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) { s += us(a, 4 * k + u * t1 + v * t2); } }
+  return s;
+}
+/** BULK coarse cell j: its composite row. A fine neighbour in air is a Dirichlet p = 0 at its centre. */
+fn bulkOperator(j: u32) {
+  let k = bulkCell(j);
+  let sl = bulkSlot(k);
+  var diag = 0.0; var mask = 0u;
+  for (var kk = 0u; kk < 6u; kk++) {
+    let kn = k + select(-1, 1, (kk & 1u) == 1u) * unitAxis(kk >> 1u);
+    if (coarseBulk(kn)) { mask |= 1u << kk; diag += 4.0; continue; }
+    for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) {
+      if (fineOpen(subNbr(k, kk, u, v))) { diag += SUBC; }
+    } }
+  }
+  var div = 0.0;
+  for (var a = 0u; a < 3u; a++) { div += cflux(a, k + unitAxis(a)) - cflux(a, k); }
+  op[DIAG_OFF + sl] = diag; op[RHS_OFF + sl] = -div; bits[MASK_OFF + sl] = mask;
+}
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
-  let b = bricks[B_LACT + wg.x];
+  if (wg.x < BULK_WG) {
+    let j = wg.x * 512u + l;
+    if (j < NBULK * 8u) { bulkOperator(j); }
+    return;
+  }
+  let b = atomicLoad(&bricks[B_LACT + wg.x - BULK_WG]);
+  if (l == 0u) { atomicStore(&anyLiquid, 0u); }
+  workgroupBarrier();
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
   if (c.x >= PX0) { atomicStore(&pgrid[pidx(c)], 0u); }
   let pc = phis[PHIC_OFF + i];
-  if (!cellOpen(c) || pc >= 0.0) {
+  let liquid = cellOpen(c) && pc < 0.0;
+  if (liquid) { atomicStore(&anyLiquid, 1u); }
+  // The pressure solve visits the liquid bricks only (append once per brick).
+  workgroupBarrier();
+  if (l == 0u && atomicLoad(&anyLiquid) != 0u) {
+    let j = atomicAdd(&ctrl[C_LIQ_COUNT], 1u);
+    atomicStore(&bricks[B_LLIQ + j], b);
+  }
+  if (!liquid) {
     op[DIAG_OFF + i] = 0.0; op[RHS_OFF + i] = 0.0; bits[MASK_OFF + i] = 0u; pres[i] = 0.0;
     return;
   }
@@ -840,6 +1126,7 @@ fn us(a: u32, c: vec3i) -> f32 {
       if (!(a == 1u && s > 0)) { continue; }
     } else {
       if (!cellOpen(n)) { continue; }
+      if (cellBulk(n)) { mask |= 1u << (k + 6u); diag += SUBC; continue; }
       pn = phis[PHIC_OFF + cidx(n)];
     }
     if (pn < 0.0) { mask |= 1u << k; diag += 1.0; }
@@ -856,13 +1143,72 @@ fn us(a: u32, c: vec3i) -> f32 {
 //     P and R = P^T (Braess 1995), levels 1..3 per brick (brick-local), 4..6 in
 //     one small workgroup. Couplings are stored on the lower cell (+x,+y,+z).
 // ---------------------------------------------------------------------------
-export const coarsenBrickKernel = kernel("seep.coarsenBrick", [bricksRO, opRO, bitsRO, coarseRW], /* wgsl */ `
+export const coarsenBrickKernel = kernel("seep.coarsenBrick", [bricksRW, opRO, bitsRO, coarseRW, ctrlRW], /* wgsl */ `
 ${levelWGSL()}
+${bulkWGSL(true)}
+/** List the level-4 block (2x2x2 bricks) of brick bc once per step: it holds a level-3 unknown. */
+fn markL4(bc: vec3i) {
+  let q = bc / 2;
+  let q4 = u32(q.x + 32 * (q.y + 16 * q.z));
+  let stamp = atomicLoad(&ctrl[C_STEP]);
+  if (atomicExchange(&bricks[B_L4FLAG + q4], stamp) != stamp) {
+    let j = atomicAdd(&ctrl[C_L4_COUNT], 1u);
+    atomicStore(&bricks[B_L4LIST + j], q4);
+  }
+}
+${BULK_NBR_WGSL}
 var<workgroup> s1: array<vec4f, 64>;
 var<workgroup> s2: array<vec4f, 8>;
+/** Level-2 coupling between coarse cell k (BULK, native at level 2) and the fine level-2 cell across side kk:
+ *  the fine-face couplings SUBC of its liquid fine cells, scaled as the fine side's two aggregation levels
+ *  (1 / OC^2), so that the fine level-2 rows stay balanced (their diagonals carry SUBC / OC^2 per face). */
+fn subCoupling(k: vec3i, kk: u32) -> f32 {
+  var w = 0.0;
+  for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) {
+    let c = subNbr(k, kk, u, v);
+    if (inBox(c) && op[DIAG_OFF + cidx(c)] > 0.0) { w += SUBC; }
+  } }
+  return w / (OC * OC);
+}
+fn storeCop(l: u32, c: vec3i, o: vec4f) {
+  let g = lidx(l, c);
+  coarse[COP + 4u * g] = o.x; coarse[COP + 4u * g + 1u] = o.y; coarse[COP + 4u * g + 2u] = o.z; coarse[COP + 4u * g + 3u] = o.w;
+}
 @compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let b = bricks[B_LACT + wg.x];
+  let b = atomicLoad(&bricks[B_LBULK + wg.x]);
   let bc = brickCoord(b);
+  if (wg.x < NBULK) {
+    // BULK brick: its eight coarse cells are level-2 cells with native rows (coarse-coarse 4) and the
+    // level-2 couplings to fine neighbours; the diagonal is the coupling sum. Level 1 stays empty.
+    if (t < 8u) {
+      let k = bc * 2 + vec3i(i32(t & 1u), i32((t >> 1u) & 1u), i32(t >> 2u));
+      var o = vec4f(0.0);
+      for (var kk = 0u; kk < 6u; kk++) {
+        let kn = k + select(-1, 1, (kk & 1u) == 1u) * unitAxis(kk >> 1u);
+        let w = select(subCoupling(k, kk), 4.0, coarseBulk(kn));
+        o.x += w;
+        if ((kk & 1u) == 1u) { o[1u + (kk >> 1u)] = w; }
+      }
+      storeCop(2u, k, o);
+      s2[t] = o;
+    }
+    workgroupBarrier();
+    if (t == 0u) {
+      var ds = 0.0; var it = 0.0; var ax = 0.0; var ay = 0.0; var az = 0.0;
+      for (var k = 0u; k < 8u; k++) {
+        let d = vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
+        let o = s2[k];
+        ds += o.x;
+        if (d.x == 0) { it += o.y; } else { ax += o.y; }
+        if (d.y == 0) { it += o.z; } else { ay += o.z; }
+        if (d.z == 0) { it += o.w; } else { az += o.w; }
+      }
+      let o3 = vec4f(ds - 2.0 * it, ax, ay, az) / OC;
+      storeCop(3u, bc, o3);
+      if (o3.x > 0.0) { markL4(bc); }
+    }
+    return;
+  }
   let q = vec3i(i32(t & 3u), i32((t >> 2u) & 3u), i32(t >> 4u));
   var dsum = 0.0; var internal = 0.0; var cx = 0.0; var cy = 0.0; var cz = 0.0;
   for (var k = 0u; k < 8u; k++) {
@@ -893,7 +1239,12 @@ var<workgroup> s2: array<vec4f, 8>;
       if (d.y == 0) { it += o.z; } else { ay += o.z; }
       if (d.z == 0) { it += o.w; } else { az += o.w; }
     }
-    let o2 = vec4f(ds - 2.0 * it, ax, ay, az) / OC;
+    var o2 = vec4f(ds - 2.0 * it, ax, ay, az) / OC;
+    // A BULK level-2 cell above (+x, +y, +z): the coupling is stored here, on the lower cell.
+    for (var a = 0u; a < 3u; a++) {
+      let kn = bc * 2 + r + unitAxis(a);
+      if (coarseBulk(kn)) { o2[1u + a] = subCoupling(kn, 2u * a); }
+    }
     let g2 = lidx(2u, bc * 2 + r);
     coarse[COP + 4u * g2] = o2.x; coarse[COP + 4u * g2 + 1u] = o2.y; coarse[COP + 4u * g2 + 2u] = o2.z; coarse[COP + 4u * g2 + 3u] = o2.w;
     s2[t] = o2;
@@ -912,6 +1263,7 @@ var<workgroup> s2: array<vec4f, 8>;
     let o3 = vec4f(ds - 2.0 * it, ax, ay, az) / OC;
     let g3 = lidx(3u, bc);
     coarse[COP + 4u * g3] = o3.x; coarse[COP + 4u * g3 + 1u] = o3.y; coarse[COP + 4u * g3 + 2u] = o3.z; coarse[COP + 4u * g3 + 3u] = o3.w;
+    if (o3.x > 0.0) { markL4(bc); }
   }
 }
 `);
@@ -965,9 +1317,18 @@ fn residC(l: u32, c: vec3i, eo: u32) -> f32 {
 }
 `;
 
-export const coarsenTopKernel = kernel("seep.coarsenTop", [coarseRW], /* wgsl */ `
+export const coarsenTopKernel = kernel("seep.coarsenTop", [coarseRW, ctrlRW, argsRW], /* wgsl */ `
 ${COARSE_COMMON}
 @compute @workgroup_size(1024) fn main(@builtin(local_invocation_index) t: u32) {
+  if (t == 0u) {
+    // Publish the operator's liquid list as the pressure solve's dispatch arguments.
+    let n = atomicExchange(&ctrl[C_LIQ_COUNT], 0u);
+    atomicStore(&ctrl[C_N_LIQ], n);
+    atomicStore(&args[C_ARG_LIQ], n); atomicStore(&args[C_ARG_LIQB], BULK_WG + n); atomicStore(&args[C_ARG_LIQBB], NBULK + n);
+    let n4 = atomicExchange(&ctrl[C_L4_COUNT], 0u);
+    atomicStore(&ctrl[C_N_L4], n4);
+    atomicStore(&args[C_ARG_L4], n4); atomicStore(&args[C_ARG_L4 + 1u], 1u); atomicStore(&args[C_ARG_L4 + 2u], 1u);
+  }
   for (var l = 4u; l <= 6u; l++) {
     for (var i = t; i < levelCount(l); i += 1024u) { aggregate(l, cellOfLevel(l, i)); }
     storageBarrier(); workgroupBarrier();
@@ -1020,8 +1381,15 @@ fn applyA(c: vec3i, i: u32, f: u32) -> f32 {
     if (((m >> k) & 1u) == 0u) { continue; }
     s += pres[f + cidx(c + select(-1, 1, (k & 1u) == 1u) * unitAxis(k >> 1u))];
   }
+  if ((m >> 6u) != 0u) {
+    for (var k = 0u; k < 6u; k++) {
+      if (((m >> (k + 6u)) & 1u) == 0u) { continue; }
+      s += SUBC * pres[f + bulkSlot((c + select(-1, 1, (k & 1u) == 1u) * unitAxis(k >> 1u)) / 4)];
+    }
+  }
   return op[DIAG_OFF + i] * pres[f + i] - s;
 }
+${BULK_APPLY_WGSL}
 var<workgroup> sRedA: array<f32, 512>;
 var<workgroup> sRedB: array<f32, 512>;
 var<workgroup> tp: array<f32, 1000>;
@@ -1050,7 +1418,7 @@ const RZ = 0, PQ = 2;
  * Block Gauss-Seidel on a per-brick block of level L (side s cells, tile with a
  * one-cell halo). Thread t < s^3 owns cell t of the block.
  */
-function blockWGSL(L: 1 | 2): string {
+function blockWGSL(L: 1 | 2 | 3): string {
   const s = L === 1 ? 4 : 2, T = s + 2;
   return /* wgsl */ `
 const BS${L}: i32 = ${s}; const BT${L}: u32 = ${T}u;
@@ -1084,13 +1452,10 @@ fn bsmooth${L}(own: bool, c: vec3i, ti: u32, o: vec4f, w: vec3f, b: f32, rev: bo
 /** X_k (see 15). cfg.a = k. */
 export const pcgUpdateKernel = kernel("seep.pcgUpdate", [ctrlRW, bricksRO, opRO, bitsRO, presRW, cfgU], /* wgsl */ `
 ${PCG_WGSL}
+${bulkWGSL(false)}
 var<workgroup> sAlpha: f32;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let k = cfg.a;
-  let b = bricks[B_LACT + wg.x];
-  let lc = localCoord(l);
-  let c = brickCoord(b) * 8 + lc;
-  let i = (b << 9u) | l;
   if (l == 0u) {
     sAlpha = 0.0;
     if (k > 0u) {
@@ -1099,6 +1464,34 @@ var<workgroup> sAlpha: f32;
     }
   }
   let alpha = workgroupUniformLoad(&sAlpha);
+  if (wg.x < BULK_WG) {
+    // BULK coarse cells: no fine smoothing (their preconditioner is level 2). The residual of a coarse
+    // row sums 64 fine cells' divergence: measured per fine cell (/ 64).
+    let j = wg.x * 512u + l;
+    var r = 0.0;
+    if (j < NBULK * 8u) {
+      let kc = bulkCell(j);
+      let sl = bulkSlot(kc);
+      if (k == 0u) { r = op[RHS_OFF + sl] - applyBulk(kc, sl, X_OFF); }
+      else {
+        pres[X_OFF + sl] += alpha * pres[PP_OFF + sl];
+        r = pres[R_OFF + sl] - alpha * pres[Q_OFF + sl];
+      }
+      pres[R_OFF + sl] = r;
+    }
+    sRedB[l] = abs(r) / 64.0;
+    workgroupBarrier();
+    for (var d = 256u; d > 0u; d = d >> 1u) {
+      if (l < d) { sRedB[l] = max(sRedB[l], sRedB[l + d]); }
+      workgroupBarrier();
+    }
+    if (l == 0u) { atomicMax(&ctrl[C_RES], bitcast<u32>(sRedB[0])); }
+    return;
+  }
+  let b = bricks[B_LLIQ + wg.x - BULK_WG];
+  let lc = localCoord(l);
+  let c = brickCoord(b) * 8 + lc;
+  let i = (b << 9u) | l;
   let diag = op[DIAG_OFF + i];
   var r = 0.0;
   if (diag > 0.0) {
@@ -1130,7 +1523,7 @@ ${blockWGSL(1)}
 const X_OFF: u32 = 0u; const R_OFF: u32 = N; const Z1_OFF: u32 = 5u * N;
 var<workgroup> sr: array<f32, 512>;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
-  let b = bricks[B_LACT + wg.x];
+  let b = bricks[B_LLIQ + wg.x];
   let bc = brickCoord(b);
   let c = bc * 8 + localCoord(l);
   let i = (b << 9u) | l;
@@ -1169,14 +1562,38 @@ var<workgroup> sr: array<f32, 512>;
 `);
 
 /** D1 (see 15). */
-export const mgDown1Kernel = kernel("seep.mgDown1", [bricksRO, coarseRW], /* wgsl */ `
+export const mgDown1Kernel = kernel("seep.mgDown1", [bricksRO, coarseRW, opRO, bitsRO, presRO], /* wgsl */ `
 ${levelWGSL()}
 ${blockWGSL(1)}
 ${blockWGSL(2)}
+const R_OFF: u32 = N; const Z1_OFF: u32 = 5u * N;
+${BULK_APPLY_WGSL}
 var<workgroup> sr: array<f32, 64>;
 @compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let b = bricks[B_LACT + wg.x];
+  let b = bricks[B_LBULK2 + wg.x];
   let bc = brickCoord(b);
+  if (wg.x < NBULK) {
+    // BULK brick: its coarse cells are level-2 cells. Their residual after the fine pre-smoothing
+    // r - A z1 (z1 = 0 on coarse cells), then level-2 pre-smoothing like any brick block.
+    if (t < 64u) { tb2[t] = 0.0; }
+    workgroupBarrier();
+    let own = t < 8u;
+    let q2 = bq2(t);
+    let c2 = bc * 2 + q2;
+    var b2 = 0.0; var o2 = vec4f(0.0); var w2 = vec3f(0.0);
+    if (own) {
+      let sl = bulkSlot(c2);
+      b2 = pres[R_OFF + sl] + subSum(c2, bits[MASK_OFF + sl], Z1_OFF);
+      let g2 = lidx(2u, c2);
+      coarse[CB + g2] = b2;
+      o2 = vec4f(coarse[COP + 4u * g2], coarse[COP + 4u * g2 + 1u], coarse[COP + 4u * g2 + 2u], coarse[COP + 4u * g2 + 3u]);
+      w2 = bw2(c2);
+    }
+    let ti2 = bti2(q2);
+    bsmooth2(own, c2, ti2, o2, w2, b2, false);
+    if (own) { coarse[CEP + lidx(2u, c2)] = select(0.0, tb2[ti2], o2.x > 0.0); }
+    return;
+  }
   for (var j = t; j < ${6 * 6 * 6}u; j += 64u) {
     let c = bc * 4 + bhalo1(j);
     var e = 0.0;
@@ -1218,7 +1635,7 @@ export const mgDown2Kernel = kernel("seep.mgDown2", [bricksRO, coarseRW], /* wgs
 ${COARSE_COMMON}
 var<workgroup> sr: array<f32, 8>;
 @compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let b = bricks[B_LACT + wg.x];
+  let b = bricks[B_LBULK2 + wg.x];
   let bc = brickCoord(b);
   sr[t] = residC(2u, bc * 2 + vec3i(i32(t & 1u), i32((t >> 1u) & 1u), i32(t >> 2u)), CEP);
   workgroupBarrier();
@@ -1236,7 +1653,7 @@ var<workgroup> sr: array<f32, 8>;
  * (or the cap is reached) iteration k's remaining passes and every later
  * iteration are disabled through their indirect arguments.
  */
-export const coarseSolveKernel = kernel("seep.coarseSolve", [ctrlRW, coarseRW, cfgU, argsRW], /* wgsl */ `
+export const coarseSolveKernel = kernel("seep.coarseSolve", [ctrlRW, coarseRW, cfgU, argsRW, bricksRO], /* wgsl */ `
 ${COARSE_COMMON}
 fn redSlot(rs: u32, which: u32) -> u32 { return C_RED + rs * 192u + which * 64u; }
 fn redSum(rs: u32, which: u32) -> f32 {
@@ -1245,10 +1662,13 @@ fn redSum(rs: u32, which: u32) -> f32 {
   return s;
 }
 var<workgroup> sGo: u32;
-fn gate(k: u32, x: u32) {
-  for (var s = 0u; s < 8u; s++) {
+/** Iteration k's gated arguments: slot 0 the liquid bricks, slot 1 [BULK bricks, liquid], slot 2 [BULK workgroups, liquid], slot 3 the level-4 blocks; all 0 once converged. */
+fn gate(k: u32, nAct: u32, go: bool) {
+  for (var s = 0u; s < 4u; s++) {
     let o = C_MG_ARGS + ${MG_STRIDE}u * k + 4u * s;
-    atomicStore(&args[o], x); atomicStore(&args[o + 1u], 1u); atomicStore(&args[o + 2u], 1u);
+    var x = nAct + select(select(0u, NBULK, s == 1u), BULK_WG, s == 2u);
+    if (s == 3u) { x = atomicLoad(&args[C_ARG_L4]); }
+    atomicStore(&args[o], select(0u, x, go)); atomicStore(&args[o + 1u], 1u); atomicStore(&args[o + 2u], 1u);
   }
 }
 fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
@@ -1267,22 +1687,23 @@ fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
         atomicStore(&ctrl[C_CYCLES], k);
         atomicAdd(&ctrl[C_CYCLES_TOTAL], k);
         if (res > TOL) { atomicAdd(&ctrl[C_CAP_HITS], 1u); }
-        gate(k, 0u);
+        gate(k, 0u, false);
       } else {
         if (k > 0u) { atomicStore(&ctrl[C_RHO], bitcast<u32>(redSum((k - 1u) & 1u, ${RZ}u))); }
         for (var j = 0u; j < 192u; j++) { atomicStore(&ctrl[redSlot(k & 1u, 0u) + j], 0u); }
-        gate(k, atomicLoad(&args[C_ARG_ACTIVE]));
+        gate(k, atomicLoad(&args[C_ARG_LIQ]), true);
         sGo = 1u;
       }
     } else {
       atomicStore(&ctrl[C_RES_HIST + k], 0u);
-      gate(k, 0u);
+      gate(k, 0u, false);
     }
   }
   let go = workgroupUniformLoad(&sGo);
   if (go == 0u) { return; }
-  // Down: pre-smooth from zero (red first), restrict the residual.
-  for (var l = 3u; l <= 5u; l++) {
+  // Down: pre-smooth from zero (red first), restrict the residual. Level 3
+  // is block-smoothed across the GPU by D3 / U3 (level-4 blocks); here 4..6.
+  for (var l = 4u; l <= 5u; l++) {
     for (var i = t; i < levelCount(l); i += 1024u) { coarse[CEP + loff(l) + i] = 0.0; }
     storageBarrier(); workgroupBarrier();
     for (var s = 0u; s < 4u; s++) {
@@ -1305,7 +1726,7 @@ fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
     storageBarrier(); workgroupBarrier();
   }
   // Up: prolong (piecewise constant) onto the pre-smoothed values, post-smooth black first.
-  for (var l = 5u; l >= 3u; l--) {
+  for (var l = 5u; l >= 4u; l--) {
     for (var i = t; i < levelCount(l); i += 1024u) {
       let c = cellOfLevel(l, i);
       coarse[CE + loff(l) + i] = select(0.0, coarse[CEP + loff(l) + i] + coarse[CE + lidx(l + 1u, c / 2)], cop(l, c).x > 0.0);
@@ -1319,14 +1740,111 @@ fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
 }
 `);
 
-/** U2 / U1: post-smoothing of level L on the brick's block after prolongation from L+1. */
+/** Level-4 block q4 (2x2x2 level-3 cells) of the level-4 block list. */
+const L4_BLOCK_WGSL = /* wgsl */ `
+fn l4Origin(q4: u32) -> vec3i { return 2 * vec3i(i32(q4 % 32u), i32((q4 / 32u) % 16u), i32(q4 / 512u)); }
+`;
+/**
+ * D3_k / U3_k: level-3 block Gauss-Seidel over the level-4 blocks (2x2x2
+ * level-3 cells, 4 red-black sweeps inside), the blocks in two colours by the
+ * parity of their level-4 cell (the 7-point stencil couples only opposite
+ * colours). Pre-smoothing from zero: red blocks (halo zero), then black blocks
+ * (halo: the red result); then the residual restricted to level 4. Post-
+ * smoothing in the adjoint order: black blocks (halo: pre-smoothed plus
+ * prolonged), then red (halo: black's result). cfg.a = colour.
+ */
+const L3_BLOCK_WGSL = /* wgsl */ `
+${levelWGSL()}
+${blockWGSL(3)}
+${L4_BLOCK_WGSL}
+fn colour4(origin: vec3i) -> u32 { let q = origin / 2; return u32(q.x + q.y + q.z) & 1u; }
+fn cop3(c: vec3i) -> vec4f { let g = lidx(3u, c); return vec4f(coarse[COP + 4u * g], coarse[COP + 4u * g + 1u], coarse[COP + 4u * g + 2u], coarse[COP + 4u * g + 3u]); }
+`;
+export const mgDown3Kernel = kernel("seep.mgDown3", [bricksRO, coarseRW, cfgU], /* wgsl */ `
+${L3_BLOCK_WGSL}
+@compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
+  let origin = l4Origin(bricks[B_L4LIST + wg.x]);
+  if (colour4(origin) != cfg.a) { return; }
+  for (var j = t; j < 64u; j += 8u) {
+    let c = origin + bhalo3(j);
+    var e = 0.0;
+    if (cfg.a == 1u && linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)]; }
+    tb3[j] = e;
+  }
+  workgroupBarrier();
+  let q = bq3(t);
+  let c = origin + q;
+  let g = lidx(3u, c);
+  let o = cop3(c);
+  let ti = bti3(q);
+  tb3[ti] = 0.0;
+  workgroupBarrier();
+  bsmooth3(true, c, ti, o, bw3(c), coarse[CB + g], false);
+  coarse[CEP + g] = select(0.0, tb3[ti], o.x > 0.0);
+}
+`);
+/** D3r_k: level-3 residual of each level-4 block restricted to level 4 (after both colours). */
+export const mgRestrict3Kernel = kernel("seep.mgRestrict3", [bricksRO, coarseRW], /* wgsl */ `
+${L3_BLOCK_WGSL}
+var<workgroup> sr: array<f32, 8>;
+@compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
+  let origin = l4Origin(bricks[B_L4LIST + wg.x]);
+  for (var j = t; j < 64u; j += 8u) {
+    let c = origin + bhalo3(j);
+    var e = 0.0;
+    if (linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)]; }
+    tb3[j] = e;
+  }
+  workgroupBarrier();
+  let q = bq3(t);
+  let c = origin + q;
+  let o = cop3(c);
+  let ti = bti3(q);
+  sr[t] = select(0.0, coarse[CB + lidx(3u, c)] - (o.x * tb3[ti] - bsum3(ti, o, bw3(c))), o.x > 0.0);
+  workgroupBarrier();
+  if (t == 0u) {
+    var s = 0.0;
+    for (var k = 0u; k < 8u; k++) { s += sr[k]; }
+    coarse[CB + lidx(4u, origin / 2)] = s;
+  }
+}
+`);
+export const mgUp3Kernel = kernel("seep.mgUp3", [bricksRO, coarseRW, cfgU], /* wgsl */ `
+${L3_BLOCK_WGSL}
+@compute @workgroup_size(8) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
+  let origin = l4Origin(bricks[B_L4LIST + wg.x]);
+  let mine = colour4(origin);
+  // Black (1) first; red (0) then sees black's final values.
+  if (mine != cfg.a) { return; }
+  for (var j = t; j < 64u; j += 8u) {
+    let c = origin + bhalo3(j);
+    var e = 0.0;
+    if (linBox(3u, c) && cop3(c).x > 0.0) {
+      let g = lidx(3u, c);
+      let inside = all(c >= origin) && all(c < origin + vec3i(2));
+      if (inside || mine == 1u) { e = coarse[CEP + g] + coarse[CE + lidx(4u, c / 2)]; } else { e = coarse[CE + g]; }
+    }
+    tb3[j] = e;
+  }
+  workgroupBarrier();
+  let q = bq3(t);
+  let c = origin + q;
+  let g = lidx(3u, c);
+  let o = cop3(c);
+  let ti = bti3(q);
+  bsmooth3(true, c, ti, o, bw3(c), coarse[CB + g], true);
+  coarse[CE + g] = select(0.0, tb3[ti], o.x > 0.0);
+}
+`);
+
+/** U2 / U1: post-smoothing of level L on the brick's block after prolongation from L+1 (U2 over [BULK, active]). */
 function upKernel(L: 1 | 2): KernelSource {
   const s = L === 1 ? 4 : 2, T = s + 2, threads = s * s * s;
   return kernel(`seep.mgUp${L}`, [bricksRO, coarseRW], /* wgsl */ `
 ${levelWGSL()}
 ${blockWGSL(L)}
 @compute @workgroup_size(${threads}) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let b = bricks[B_LACT + wg.x];
+  let b = bricks[${L === 2 ? "B_LBULK2" : "B_LLIQ"} + wg.x];
   let origin = brickCoord(b) * ${s};
   for (var j = t; j < ${T * T * T}u; j += ${threads}u) {
     let c = origin + bhalo${L}(j);
@@ -1355,9 +1873,30 @@ export const mgUp1Kernel = upKernel(1);
 export const pcgPrecondKernel = kernel("seep.pcgPrecond", [ctrlRW, bricksRO, opRO, bitsRO, presRW, coarseRW, cfgU], /* wgsl */ `
 ${levelWGSL()}
 ${PCG_WGSL}
+${bulkWGSL(false)}
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let k = cfg.a;
-  let b = bricks[B_LACT + wg.x];
+  if (wg.x < BULK_WG) {
+    // BULK coarse cells: z is their level-2 correction.
+    let j = wg.x * 512u + l;
+    var rz = 0.0;
+    if (j < NBULK * 8u) {
+      let kc = bulkCell(j);
+      let sl = bulkSlot(kc);
+      let z = coarse[CE + lidx(2u, kc)];
+      pres[Z_OFF + sl] = z;
+      rz = pres[R_OFF + sl] * z;
+    }
+    sRedA[l] = rz;
+    workgroupBarrier();
+    for (var d = 256u; d > 0u; d = d >> 1u) {
+      if (l < d) { sRedA[l] += sRedA[l + d]; }
+      workgroupBarrier();
+    }
+    if (l == 0u) { redAdd(k & 1u, ${RZ}u, wg.x, sRedA[0]); }
+    return;
+  }
+  let b = bricks[B_LLIQ + wg.x - BULK_WG];
   let o = brickCoord(b) * 8;
   for (var t = l; t < 1000u; t += 512u) {
     let c = o + tileCoord(t);
@@ -1373,9 +1912,18 @@ ${PCG_WGSL}
   let c = o + lc;
   let i = (b << 9u) | l;
   let diag = op[DIAG_OFF + i];
-  let r = pres[R_OFF + i];
+  let m = bits[MASK_OFF + i];
+  // Post-smoothing against the final coarse values of BULK neighbours (fixed during the sweeps).
+  var r = pres[R_OFF + i];
+  var rs = r;
+  if ((m >> 6u) != 0u) {
+    for (var kk = 0u; kk < 6u; kk++) {
+      if (((m >> (kk + 6u)) & 1u) == 0u) { continue; }
+      rs += SUBC * coarse[CE + lidx(2u, (c + select(-1, 1, (kk & 1u) == 1u) * unitAxis(kk >> 1u)) / 4)];
+    }
+  }
   let ti = tileIndex(lc);
-  fineSmooth(c, ti, diag, bits[MASK_OFF + i], r, true);
+  fineSmooth(c, ti, diag, m, rs, true);
   let z = select(0.0, tp[ti], diag > 0.0);
   pres[Z_OFF + i] = z;
   sRedA[l] = r * z;
@@ -1391,12 +1939,10 @@ ${PCG_WGSL}
 /** P_k (see 15). cfg.a = k. */
 export const pcgDirectionKernel = kernel("seep.pcgDirection", [ctrlRW, bricksRO, opRO, bitsRO, presRW, cfgU], /* wgsl */ `
 ${PCG_WGSL}
+${bulkWGSL(false)}
 var<workgroup> sBeta: f32;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let k = cfg.a;
-  let b = bricks[B_LACT + wg.x];
-  let c = brickCoord(b) * 8 + localCoord(l);
-  let i = (b << 9u) | l;
   if (l == 0u) {
     sBeta = 0.0;
     if (k > 0u) {
@@ -1406,6 +1952,21 @@ var<workgroup> sBeta: f32;
   }
   let beta = workgroupUniformLoad(&sBeta);
   var pq = 0.0;
+  if (wg.x < BULK_WG) {
+    let j = wg.x * 512u + l;
+    if (j < NBULK * 8u) {
+      let kc = bulkCell(j);
+      let sl = bulkSlot(kc);
+      var p = pres[Z_OFF + sl];
+      var q = applyBulk(kc, sl, Z_OFF);
+      if (k > 0u) { p += beta * pres[PP_OFF + sl]; q += beta * pres[Q_OFF + sl]; }
+      pres[PP_OFF + sl] = p; pres[Q_OFF + sl] = q;
+      pq = p * q;
+    }
+  } else {
+  let b = bricks[B_LLIQ + wg.x - BULK_WG];
+  let c = brickCoord(b) * 8 + localCoord(l);
+  let i = (b << 9u) | l;
   if (op[DIAG_OFF + i] > 0.0) {
     var p = pres[Z_OFF + i];
     var q = applyA(c, i, Z_OFF);
@@ -1413,6 +1974,7 @@ var<workgroup> sBeta: f32;
     pres[PP_OFF + i] = p; pres[Q_OFF + i] = q;
     pq = p * q;
   } else { pres[PP_OFF + i] = 0.0; pres[Q_OFF + i] = 0.0; }
+  }
   sRedA[l] = pq;
   workgroupBarrier();
   for (var d = 256u; d > 0u; d = d >> 1u) {
@@ -1427,9 +1989,38 @@ var<workgroup> sBeta: f32;
 // 16. Projection: U = Us - grad P on liquid faces (ghost-fluid gradient at
 //     liquid/air faces); other faces become unknown (zero) for extension.
 // ---------------------------------------------------------------------------
-export const projectKernel = kernel("seep.project", [bricksRO, phisRO, velRW, presRO, bitsRW], /* wgsl */ `
+export const projectKernel = kernel("seep.project", [bricksRO, phisRO, velRW, presRO, bitsRW, bulkRW], /* wgsl */ `
+${bulkWGSL(false)}
+/** Pressure of fine cell f for an interface face: its own when liquid, the atmosphere's (0) in air. */
+fn pFine(f: vec3i) -> f32 { let fi = cidx(f); return select(0.0, pres[fi], phis[PHIC_OFF + fi] < 0.0); }
+/** BULK coarse cell j: its coarse low faces (between two BULK cells, over 4 cells) and the fine interface faces stored in it (over 2.5). */
+fn bulkProject(j: u32) {
+  let k = bulkCell(j);
+  let pk = pres[bulkSlot(k)];
+  for (var a = 0u; a < 3u; a++) {
+    let e = unitAxis(a);
+    let kn = k - e;
+    if (coarseBulk(kn)) {
+      let ci = a * NCL + clIndex(k);
+      bulk[BU_OFF + ci] = bulk[BUS_OFF + ci] - (pk - pres[bulkSlot(kn)]) * 0.25;
+    } else {
+      let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+      for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) {
+        let c = 4 * k + u * t1 + v * t2;
+        var val = 0.0;
+        if (fineOpen(c - e)) { val = vel[US_OFF + a * N + cidx(c)] - (pk - pFine(c - e)) / 2.5; }
+        vel[U_OFF + a * N + cidx(c)] = val;
+      } }
+    }
+  }
+}
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
-  let b = bricks[B_LACT + wg.x];
+  if (wg.x < BULK_WG) {
+    let j = wg.x * 512u + l;
+    if (j < NBULK * 8u) { bulkProject(j); }
+    return;
+  }
+  let b = bricks[B_LACT + wg.x - BULK_WG];
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
   let po = 0u;
@@ -1438,7 +2029,12 @@ export const projectKernel = kernel("seep.project", [bricksRO, phisRO, velRW, pr
   var known = 0u;
   for (var a = 0u; a < 3u; a++) {
     var u = 0.0;
-    if (faceOpen(c, a)) {
+    if (faceOpen(c, a) && cellBulk(c - unitAxis(a))) {
+      // Interface face below/behind a BULK coarse cell (the composite gradient over 2.5 cells).
+      let pb = select(0.0, pres[po + i], lb);
+      u = vel[US_OFF + a * N + i] - (pb - pres[bulkSlot((c - unitAxis(a)) / 4)]) / 2.5;
+      known |= 1u << a;
+    } else if (faceOpen(c, a)) {
       let ca = c - unitAxis(a);
       let ia = cidx(ca);
       let phA = phis[PHIC_OFF + ia];
@@ -1461,6 +2057,27 @@ export const projectKernel = kernel("seep.project", [bricksRO, phisRO, velRW, pr
 `);
 
 // ---------------------------------------------------------------------------
+// 16b. Fine velocity shadow of the BULK bricks next to fine ones: every fine
+//      face inside them between two BULK cells takes the trilinear
+//      interpolation of the coarse MAC velocity, so fine samplers (advection,
+//      extension) read a velocity field there. Interface faces keep their own
+//      projected values.
+// ---------------------------------------------------------------------------
+export const shadowKernel = kernel("seep.shadow", [bricksRO, velRW, bulkRO], /* wgsl */ `
+${bulkWGSL(false)}
+${COARSE_SAMPLER_WGSL}
+@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  let b = bricks[B_LSHADOW + wg.x];
+  let c = brickCoord(b) * 8 + localCoord(l);
+  let i = (b << 9u) | l;
+  for (var a = 0u; a < 3u; a++) {
+    if (!cellBulk(c - unitAxis(a))) { continue; }
+    vel[U_OFF + a * N + i] = cvelComp(a, vec3f(c) + vec3f(0.5) - 0.5 * vec3f(unitAxis(a)), BU_OFF, U_OFF);
+  }
+}
+`);
+
+// ---------------------------------------------------------------------------
 // 17. Velocity extension into air and solid-interior faces: layered averaging
 //     of known neighbours (Bridson 2015 §4.3), 8 sweeps per launch on a staged
 //     brick + halo, per component. Closed faces stay zero and are not sources.
@@ -1472,6 +2089,8 @@ var<workgroup> vA: array<f32, 1000>;
 var<workgroup> vB: array<f32, 1000>;
 var<workgroup> kA: array<u32, 1000>;
 var<workgroup> kB: array<u32, 1000>;
+var<workgroup> sKnown: atomic<u32>;
+var<workgroup> sKnownU: u32;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LSURF + wg.x];
   let o = brickCoord(b) * 8;
@@ -1481,6 +2100,8 @@ var<workgroup> kB: array<u32, 1000>;
   let ti = tileIndex(lc);
   var outBits = 0u;
   for (var a = 0u; a < 3u; a++) {
+    if (l == 0u) { atomicStore(&sKnown, 0u); }
+    workgroupBarrier();
     for (var t = l; t < 1000u; t += 512u) {
       let q = o + tileCoord(t);
       var v = 0.0; var k = 0u;
@@ -1492,9 +2113,13 @@ var<workgroup> kB: array<u32, 1000>;
         else { v = vel[cfg.a + a * N + qi]; k = (bits[KNOWN_OFF + qi] >> (cfg.c + a)) & 1u; }
       } else { k = 2u; }
       vA[t] = v; vB[t] = v; kA[t] = k; kB[t] = k;
+      if (k == 1u) { atomicStore(&sKnown, 1u); }
     }
     workgroupBarrier();
-    for (var s = 0u; s < 8u; s++) {
+    if (l == 0u) { sKnownU = atomicLoad(&sKnown); }
+    // Without a known face in the tile the sweeps change nothing.
+    let sweeps = select(0u, 8u, workgroupUniformLoad(&sKnownU) != 0u);
+    for (var s = 0u; s < sweeps; s++) {
       if ((s & 1u) == 0u) {
         if (kA[ti] == 0u) {
           var sum = 0.0; var n = 0.0;
@@ -1545,6 +2170,7 @@ ${PARTICLE_MOVE_WGSL}
     for (var k = 0u; k < 4u; k++) { atomicStore(&ctrl[C_N_ACTIVE + k], atomicLoad(&args[4u * k])); }
     atomicStore(&args[C_ARG_ACTIVE], 0u); atomicStore(&args[C_ARG_SURF], 0u);
     atomicStore(&args[C_ARG_PART], 0u); atomicStore(&args[C_ARG_CLEAR], 0u);
+    atomicStore(&args[C_ARG_ACTB], BULK_WG); atomicStore(&args[C_ARG_ACTBB], NBULK);
     atomicStore(&ctrl[C_PCOUNT + cfg.a], 0u);
   }
   let n = min(atomicLoad(&ctrl[C_PCOUNT + 1u - cfg.a]), CAP);
@@ -1618,7 +2244,7 @@ var<workgroup> red: array<f32, 512>;
 
 export const ALL_KERNELS: readonly KernelSource[] = [
   classifyKernel, clearKernel, countKernel, seedKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel,
-  redistInitKernel, redistSweepKernel, p2gKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
-  pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, coarseSolveKernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
-  pcgDirectionKernel, projectKernel, extendKernel, g2pKernel, volumeKernel,
+  redistInitKernel, redistSweepKernel, p2gKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
+  pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
+  pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,
 ];
