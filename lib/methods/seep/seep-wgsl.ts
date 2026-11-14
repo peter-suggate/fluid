@@ -76,7 +76,9 @@ export const B = {
   LIST_BULK: 10, LIST_SHADOW: 11,
   /** Level-4 block stamps (the step that listed it; 2048 words used) and the level-4 block list. */
   L4_FLAG: 12, L4_LIST: 13,
-  COUNT: 14,
+  /** Bit a set when G2P or emission left a particle in the brick moving more than FAST_CELLS a step along axis a (reset with PCOUNT). */
+  FAST: 14,
+  COUNT: 15,
 } as const;
 /** BULK work: 64 bricks (512 coarse cells) per 512-thread workgroup; these workgroups come first in the dispatches that include BULK. */
 export const BULK_WG = Math.ceil(NBULK / 64);
@@ -105,6 +107,9 @@ const NV: vec3i = vec3i(512, 256, 64);
 const N: u32 = ${CELLS}u;
 const BRICKS: u32 = ${BRICKS}u;
 const CFL: f32 = ${f(DT / CELL_M)};
+/** Particle speed (cells a step) along an axis beyond which a chamber brick is marked fast along it (bricks FAST bit a): reach two. */
+const FAST_CELLS: f32 = 6.0;
+fn fastBits(v: vec3f) -> u32 { let f = abs(v) * CFL > vec3f(FAST_CELLS); return select(0u, 1u, f.x) | select(0u, 2u, f.y) | select(0u, 4u, f.z); }
 const GDT: f32 = ${f(9.80665 * DT)};
 const PHI_MAX: f32 = ${f(PHI_MAX)};
 const UNKNOWN_PHI: f32 = ${f(PHI_MAX + 1)};
@@ -134,7 +139,7 @@ fn clIndex(k: vec3i) -> u32 { return u32(k.x + 128 * (k.y + 64 * k.z)); }
 /** pres/op slot of coarse cell k: its BULK brick's first eight slots. */
 fn bulkSlot(k: vec3i) -> u32 { return (brickOfCell(k * 4) << 9u) | u32((k.x & 1) | ((k.y & 1) << 1u) | ((k.z & 1) << 2u)); }
 const B_CLASS: u32 = ${B.CLASS * BRICKS}u; const B_FLAGS: u32 = ${B.FLAGS * BRICKS}u; const B_MINPHI: u32 = ${B.MINPHI * BRICKS}u;
-const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_LACT: u32 = ${B.LIST_BULK * BRICKS + NBULK}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
+const B_PCOUNT: u32 = ${B.PCOUNT * BRICKS}u; const B_FAST: u32 = ${B.FAST * BRICKS}u; const B_LACT: u32 = ${B.LIST_BULK * BRICKS + NBULK}u; const B_LSURF: u32 = ${B.LIST_SURF * BRICKS}u;
 const B_LPART: u32 = ${B.LIST_PART * BRICKS}u; const B_LCLEAR: u32 = ${B.LIST_CLEAR * BRICKS}u;
 const B_PSTART: u32 = ${B.PSTART * BRICKS}u; const B_PNUM: u32 = ${B.PNUM * BRICKS}u;
 const C_ARG_ACTIVE: u32 = ${C.ARG_ACTIVE}u; const C_ARG_SURF: u32 = ${C.ARG_SURF}u; const C_ARG_PART: u32 = ${C.ARG_PART}u; const C_ARG_CLEAR: u32 = ${C.ARG_CLEAR}u;

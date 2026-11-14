@@ -240,13 +240,21 @@ fn liquidish(n: vec3i) -> bool {
   // workgroups of the dispatches that include them.
   if ((cls & (CLASS_DEAD | CLASS_BULK)) != 0u) { return; }
   let bc = brickCoord(b);
-  // Activation reach: one brick (8 cells a step, 2.4 m/s) in the reservoir; two
-  // in the chamber, where the falling jet and its splash move up to ~16 cells
-  // a step (the SL traces and particles must land in active bricks).
-  let r = select(1, 2, bc.x >= i32(PBX0));
+  // Activation reach, the CFL band of a narrow-band method (the active set
+  // holds everything the step's motion reaches: Bridson 2015 §6.3 narrow
+  // bands; Ferstl 2016 §3), per axis: one brick along an axis from liquid
+  // moving at most FAST_CELLS a step along it (6 cells: a particle leaving the
+  // brick lands inside the next one with its 1.5h P2G support), two along the
+  // axes G2P marked fast in a chamber brick (the falling jet and its splash, up
+  // to ~16 cells a step; the impact's film runs fast along x and z, not y).
+  // The reservoir's liquid moves at most 8 cells a step and keeps reach one.
+  let r = select(1, 2, bc.x >= i32(PBX0) - 2);
   var act = false;
   for (var dz = -r; dz <= r; dz++) { for (var dy = -r; dy <= r; dy++) { for (var dx = -r; dx <= r; dx++) {
-    if (liquidish(bc + vec3i(dx, dy, dz))) { act = true; }
+    let n = bc + vec3i(dx, dy, dz);
+    // Axes along which this neighbour lies two bricks away; its particles must move fast along each.
+    let far2 = select(0u, 1u, abs(dx) == 2) | select(0u, 2u, abs(dy) == 2) | select(0u, 4u, abs(dz) == 2);
+    if (liquidish(n) && (far2 == 0u || (n.x >= i32(PBX0) && (atomicLoad(&bricks[B_FAST + (u32(n.x) | (u32(n.y) << 6u) | (u32(n.z) << 11u))]) & far2) == far2))) { act = true; }
   } } }
   let prev = (atomicLoad(&bricks[B_FLAGS + b]) & 1u) != 0u;
   if (act) {
@@ -427,7 +435,9 @@ var<workgroup> sTotal: array<f32, 4>;
     parts[base + k] = vec4f(x, 0.0);
     parts[base + CAP + k] = vec4f(uf, 0.0);
     atomicAdd(&ctrl[C_EMITTED], 1u);
-    atomicAdd(&bricks[B_PCOUNT + brickOfCell(vec3i(floor(x)))], 1u);
+    let eb = brickOfCell(vec3i(floor(x)));
+    atomicAdd(&bricks[B_PCOUNT + eb], 1u);
+    let fb = fastBits(uf); if (fb != 0u) { atomicOr(&bricks[B_FAST + eb], fb); }
   }
 }
 `);
@@ -1074,7 +1084,7 @@ fn velT(p: vec3f) -> vec3f { return vec3f(velTComp(0u, p), velTComp(1u, p), velT
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
   tileOrigin = brickCoord(b) * 8 - vec3i(2);
-  if (l == 0u) { atomicStore(&bricks[B_PCOUNT + b], 0u); }
+  if (l == 0u) { atomicStore(&bricks[B_PCOUNT + b], 0u); atomicStore(&bricks[B_FAST + b], 0u); }
   phOrigin = brickCoord(b) * 8;
   // DEEP bricks read no level set (always liquid, never far, no particles).
   var far = 0.0;
@@ -1917,6 +1927,7 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   if (c.z > 0) { s += m.z * sE[sIdx(l, c - vec3i(0, 0, 1))]; }
   return s;
 }
+const SW4: u32 = 2u; const SW5: u32 = 2u;
 @compute @workgroup_size(1024) fn main(@builtin(local_invocation_index) t: u32) {
   let k = cfg.a;
   // rho_(k-1)'s 64 partial slots, loaded at once (summed in slot order by thread 0).
@@ -1977,7 +1988,7 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   if (t < 288u) { sE[2048u + t] = 0.0; }
   workgroupBarrier();
   // Down, level 4: pre-smooth from zero (red first), restrict the residual.
-  for (var s = 0u; s < 4u; s++) {
+  for (var s = 0u; s < SW4; s++) {
     let col = s & 1u;
     if (colourOf(c40) == col && o40.x > 0.0) { sE[i0] = (b40 + offS(4u, c40, o40, m40)) / o40.x; }
     if (colourOf(c41) == col && o41.x > 0.0) { sE[i1] = (b41 + offS(4u, c41, o41, m41)) / o41.x; }
@@ -1990,7 +2001,7 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   var b5 = 0.0;
   if (has5) { for (var q = 0u; q < 8u; q++) { b5 += sR[sIdx(4u, 2 * c5 + octI(q))]; } }
   workgroupBarrier();
-  for (var s = 0u; s < 4u; s++) {
+  for (var s = 0u; s < SW5; s++) {
     if (has5 && colourOf(c5) == (s & 1u) && o5.x > 0.0) { sE[2048u + t] = (b5 + offS(5u, c5, o5, m5)) / o5.x; }
     workgroupBarrier();
   }
@@ -2012,14 +2023,14 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   // Up: prolong (piecewise constant) onto the pre-smoothed values, post-smooth black first.
   if (has5) { sE[2048u + t] = select(0.0, ep5 + sE[sIdx(6u, c5 / 2)], o5.x > 0.0); }
   workgroupBarrier();
-  for (var s = 0u; s < 4u; s++) {
+  for (var s = 0u; s < SW5; s++) {
     if (has5 && colourOf(c5) == 1u - (s & 1u) && o5.x > 0.0) { sE[2048u + t] = (b5 + offS(5u, c5, o5, m5)) / o5.x; }
     workgroupBarrier();
   }
   sE[i0] = select(0.0, ep40 + sE[sIdx(5u, c40 / 2)], o40.x > 0.0);
   sE[i1] = select(0.0, ep41 + sE[sIdx(5u, c41 / 2)], o41.x > 0.0);
   workgroupBarrier();
-  for (var s = 0u; s < 4u; s++) {
+  for (var s = 0u; s < SW4; s++) {
     let col = 1u - (s & 1u);
     if (colourOf(c40) == col && o40.x > 0.0) { sE[i0] = (b40 + offS(4u, c40, o40, m40)) / o40.x; }
     if (colourOf(c41) == col && o41.x > 0.0) { sE[i1] = (b41 + offS(4u, c41, o41, m41)) / o41.x; }
@@ -2546,7 +2557,9 @@ ${PARTICLE_MOVE_WGSL}
   x = collide(x + parts[cfg.a * CAP * 2u + i].xyz);
   parts[base + i] = vec4f(x, 0.0);
   parts[base + CAP + i] = vec4f(v, 0.0);
-  atomicAdd(&bricks[B_PCOUNT + brickOfCell(vec3i(floor(x)))], 1u);
+  let pb = brickOfCell(vec3i(floor(x)));
+  atomicAdd(&bricks[B_PCOUNT + pb], 1u);
+  let fb = fastBits(v); if (fb != 0u) { atomicOr(&bricks[B_FAST + pb], fb); }
 }
 `);
 

@@ -531,3 +531,44 @@ There are no deletions, drift is at most 8e-5, and no step is capped.
 and the tolerance stays.
 
 **Speed:** -0.42 ms fenced in the interleaved A/B above (check slot).
+
+## 2026-11-14 (night): S2j, per-axis CFL activation band + lighter level-4 smoothing (-0.75 ms)
+
+**What S2j changes:**
+- **Activation band.** The chamber activated every brick within two bricks of any liquid or particle brick, in all
+  directions. Most of that band was the floor film's layers 1-2, which a horizontally moving film never reaches.
+  - G2P and emission now mark, per brick and per axis, any particle moving more than FAST_CELLS = 6 cells a step along
+    that axis (bricks FAST, 3 bits; reset with PCOUNT).
+  - Classification reaches two bricks along an axis only from a brick marked fast along it, and one brick otherwise.
+  - Six cells keeps a particle leaving its brick inside the next brick together with its 1.5h P2G support.
+  - This is the CFL band of a narrow-band method (Bridson 2015 §6.3; Ferstl 2016 §3). The reservoir is unchanged at
+    reach one.
+- **Smoothing.** Level 4 and level 5 in coarseSolve use 2+2 red-black sweeps instead of 4+4. The pairs stay
+  symmetric (R,B pre; B,R post). Mean cycles go from 5.50 to 5.39: the aggregated level-4 correction was over-smoothed.
+
+**Effect at step 600:**
+- Active chamber bricks: 1451 -> about 906 (floor layer 2 goes from 232 to 126).
+- Active list: 2432 -> about 2260.
+- Particles whose trilinear stencil touches a brick inactive that step are unchanged against HEAD: 41.4k vs 40.7k, summed
+  over 60 samples in 1200 steps. Most of these touch the solid wall bricks.
+
+**A/B, 600 steps, check slot, interleaved x3** (HEAD 434fbdff from the scratch tree via SEEP_IMPL):
+
+| | HEAD | S2j |
+|---|---|---|
+| fenced ms | 9.81-9.83 | 9.04-9.13 |
+
+That is **-0.75 ms**.
+
+**seep-bench 1200, check slot** (artifacts/seep-rewrite/lane-s/compare-s2j.md, audit-s2j): all gates pass.
+- **G3 corrected:** 1.289 / 2.596 / 3.921 / 5.214 L.
+- **G6 corrected:**
+  - 600: centroid 373.4 in [351.0, 386.2]; L1 0.096.
+  - 1200: centroid 378.6 in [354.4, 391.4]; L1 0.088.
+  - G6 as written passes too on this run (L1 0.114).
+- **G8:** impact 375.8 / 375.5 vs 380.8 / 382.8; RMS 0.78 / 1.36.
+- **Bench timing:** fenced median 9.79 ms (thirds 8.89 / 9.83 / 11.73). The slot was contended late in the run, so the
+  A/B is the comparison.
+
+**Ledger, 1200 steps:** chamber phi vs delivered is -0.7 / -0.3 / +0.8 / +0.6%. There are no deletions, drift is at most
+8e-5, and no step is capped.
