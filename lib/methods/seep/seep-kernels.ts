@@ -691,56 +691,97 @@ const GAIN: f32 = 1.5;
 var<workgroup> tv: array<f32, 1000>;
 var<workgroup> tm: array<f32, 729>;
 var<workgroup> sBusy: u32;
-fn srcPhi(v: vec3i) -> f32 {
+// Chamber flags of the brick and its 26 neighbours (srcPhi's source choice), staged with the busy test,
+// so each tile vertex is one device load, not a class load and then a phi load.
+var<workgroup> sCh: array<u32, 27>;
+var<workgroup> sCut: atomic<u32>;
+var<workgroup> sCutU: u32;
+var<workgroup> sCutList: array<u32, 729>;
+fn srcPhi(v: vec3i, ob: vec3i) -> f32 {
   let w = clampV(v);
-  let chamber = (bricks[B_CLASS + brickOfCell(w)] & CLASS_CHAMBER) != 0u;
+  let n = (w >> vec3u(3u)) - ob + vec3i(1);
+  let chamber = sCh[u32(n.x + 3 * (n.y + 3 * n.z))] != 0u;
   return phis[select(PHIT_OFF, cfg.a, chamber) + cidx(w)];
 }
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LPART + wg.x];
   if ((bricks[B_CLASS + b] & CLASS_CHAMBER) == 0u) { return; }
-  let o = brickCoord(b) * 8;
+  let ob = brickCoord(b);
+  let o = ob * 8;
   // No particle in the brick or its 26 neighbours: every cell the brick's vertices touch has
   // F = 0 and (the plane being >= 0 there) fill 0, so nothing moves; copy through.
   if (l < 27u) {
-    let n = brickCoord(b) + vec3i(i32(l % 3u), i32((l / 3u) % 3u), i32(l / 9u)) - vec3i(1);
-    if (all(n >= vec3i(0)) && n.x < 64 && n.y < 32 && n.z < 8 && bricks[B_PCOUNT + (u32(n.x) | (u32(n.y) << 6u) | (u32(n.z) << 11u))] > 0u) { sBusy = 1u; }
+    let n = ob + vec3i(i32(l % 3u), i32((l / 3u) % 3u), i32(l / 9u)) - vec3i(1);
+    var ch = 0u;
+    if (all(n >= vec3i(0)) && n.x < 64 && n.y < 32 && n.z < 8) {
+      let nb = u32(n.x) | (u32(n.y) << 6u) | (u32(n.z) << 11u);
+      ch = bricks[B_CLASS + nb] & CLASS_CHAMBER;
+      if (bricks[B_PCOUNT + nb] > 0u) { sBusy = 1u; }
+    }
+    sCh[l] = ch;
+  }
+  // The tile's particle counts, loaded at once alongside the busy test (count / 8, or -1 for a closed
+  // or upstream cell); the column carry below then reads workgroup memory.
+  for (var t = l; t < 729u; t += 512u) {
+    let c = o - vec3i(1) + vec3i(i32(t % 9u), i32((t / 9u) % 9u), i32(t / 81u));
+    var r = -1.0;
+    if (cellOpen(c) && c.x >= PX0) { r = f32(pgrid[pidx(c)] & 0xffffu) / 8.0; }
+    tm[t] = r;
   }
   if (workgroupUniformLoad(&sBusy) == 0u) {
-    phis[cfg.b + ((b << 9u) | l)] = srcPhi(o + localCoord(l));
+    phis[cfg.b + ((b << 9u) | l)] = srcPhi(o + localCoord(l), ob);
     return;
   }
   for (var t = l; t < 1000u; t += 512u) {
-    tv[t] = srcPhi(o - vec3i(1) + vec3i(i32(t % 10u), i32((t / 10u) % 10u), i32(t / 100u)));
+    tv[t] = srcPhi(o - vec3i(1) + vec3i(i32(t % 10u), i32((t / 10u) % 10u), i32(t / 100u)), ob);
   }
-  workgroupBarrier();
   // Target volume fractions: F = count / 8, a cell's excess over full carried up its column
   // (liquid settles from the dense side, the bound's own rule), so every target is one a cell
   // can hold; the carry out of the tile's top row stays in it (only liquid deeper than a brick).
   if (l < 81u) {
-    let qx = i32(l % 9u); let qz = i32(l / 9u);
     var carry = 0.0;
-    for (var qy = 0; qy < 9; qy++) {
-      let c = o - vec3i(1) + vec3i(qx, qy, qz);
+    for (var qy = 0u; qy < 9u; qy++) {
+      let t = l % 9u + 9u * qy + 81u * (l / 9u);
+      let r = tm[t];
       var F = 0.0;
-      if (cellOpen(c) && c.x >= PX0) { F = f32(pgrid[pidx(c)] & 0xffffu) / 8.0 + carry; carry = max(F - 1.0, 0.0); if (qy < 8) { F = min(F, 1.0); } }
-      tm[u32(qx + 9 * (qy + 9 * qz))] = F;
+      if (r >= 0.0) { F = r + carry; carry = max(F - 1.0, 0.0); if (qy < 8u) { F = min(F, 1.0); } }
+      tm[t] = F;
     }
   }
   workgroupBarrier();
+  // Mismatch F - fill(phi) of each open cell. Only cells with a band corner (|phi| < 1.5) are read
+  // below; a cell with no negative corner fills 0, one with only negative corners 1 (as every
+  // tetrahedron of it does; a tetrahedron of zeros counts as empty); the cut cells,
+  // a few per tile, are compacted so whole SIMD groups run the tetrahedral fill together.
   for (var t = l; t < 729u; t += 512u) {
     let q = vec3i(i32(t % 9u), i32((t / 9u) % 9u), i32(t / 81u));
     let c = o - vec3i(1) + q;
     var m = 0.0;
     if (cellOpen(c) && c.x >= PX0) {
-      var v: array<f32, 8>;
+      var lo = PHI_MAX + 1.0; var hi = -PHI_MAX - 1.0; var band = false;
       for (var k = 0u; k < 8u; k++) {
         let r = q + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
-        v[k] = tv[u32(r.x + 10 * (r.y + 10 * r.z))];
+        let x = tv[u32(r.x + 10 * (r.y + 10 * r.z))];
+        lo = min(lo, x); hi = max(hi, x); band = band || abs(x) < 1.5;
       }
-      m = tm[t] - fill(v);
+      if (band) {
+        if (lo >= 0.0) { m = tm[t]; } else if (hi < 0.0) { m = tm[t] - 1.0; } else { m = tm[t]; sCutList[atomicAdd(&sCut, 1u)] = t; }
+      }
     }
     tm[t] = m;
+  }
+  workgroupBarrier();
+  if (l == 0u) { sCutU = atomicLoad(&sCut); }
+  let nCut = workgroupUniformLoad(&sCutU);
+  for (var j = l; j < nCut; j += 512u) {
+    let t = sCutList[j];
+    let q = vec3i(i32(t % 9u), i32((t / 9u) % 9u), i32(t / 81u));
+    var v: array<f32, 8>;
+    for (var k = 0u; k < 8u; k++) {
+      let r = q + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
+      v[k] = tv[u32(r.x + 10 * (r.y + 10 * r.z))];
+    }
+    tm[t] = tm[t] - fill(v);
   }
   workgroupBarrier();
   let lc = localCoord(l);
@@ -784,11 +825,24 @@ fn vertexOpen(v: vec3i) -> bool {
   return false;
 }
 `;
+/** Whether tile entry ti (code own != 0) has a 26-neighbour coded open with the other sign (0 = not open,
+ *  1 = open, phi >= 0, 2 = open, phi < 0): the cut-corner test, at constant tile offsets. */
+const cutTest = (tile: string) => /* wgsl */ `
+fn cutAt(ti: u32, own: u32) -> bool {
+  var cut = false;
+  for (var dz = -100; dz <= 100; dz += 100) { for (var dy = -10; dy <= 10; dy += 10) { for (var dx = -1; dx <= 1; dx++) {
+    let sg = ${tile}[u32(i32(ti) + dx + dy + dz)];
+    cut = cut || (sg != 0u && sg != own);
+  } } }
+  return cut;
+}
+`;
 export const redistInitKernel = kernel("seep.redistInit", [bricksRO, phisRW], /* wgsl */ `
 ${VERTEX_OPEN_WGSL}
 // The brick's vertices and a one-vertex halo, staged once: 0 = not an open vertex in the box
 // (ignored), 1 = phiT >= 0, 2 = phiT < 0; the 26-neighbour sign test then reads the tile.
 var<workgroup> tsgn: array<u32, 1000>;
+${cutTest("tsgn")}
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LSURF + wg.x];
   let o = brickCoord(b) * 8;
@@ -804,11 +858,7 @@ var<workgroup> tsgn: array<u32, 1000>;
   if (tsgn[ti] == 0u) { phis[PHI_OFF + ((b << 9u) | l)] = UNKNOWN_PHI; return; }
   let a = phis[PHIT_OFF + ((b << 9u) | l)];
   let own = tsgn[ti];
-  var cut = false;
-  for (var k = 0u; k < 27u; k++) {
-    let sg = tsgn[ti + (k % 3u) + 10u * ((k / 3u) % 3u) + 100u * (k / 9u) - 111u];
-    if (sg != 0u && sg != own) { cut = true; }
-  }
+  let cut = cutAt(ti, own);
   let out = select(select(PHI_MAX, -PHI_MAX, own == 2u), a, cut);
   phis[PHI_OFF + ((b << 9u) | l)] = out;
 }
@@ -826,6 +876,7 @@ ${VERTEX_OPEN_WGSL}
 var<workgroup> tA: array<f32, 1000>;
 var<workgroup> tB: array<f32, 1000>;
 var<workgroup> tOpen: array<u32, 1000>;
+${cutTest("tOpen")}
 var<workgroup> sMixed: atomic<u32>;
 var<workgroup> sMixedU: u32;
 /** Sign of the neighbour nearest the interface (extension into solid-interior vertices). */
@@ -855,32 +906,35 @@ fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
   let o = brickCoord(b) * 8;
   if (l == 0u) { atomicStore(&sMixed, 0u); }
   workgroupBarrier();
-  var mixed = false;
+  var notAir = false; var notLiquid = false;
   for (var t = l; t < 1000u; t += 512u) {
     let q = clampV(o + tileCoord(t));
     let val = phis[cfg.a + cidx(q)];
-    tA[t] = val; tB[t] = val; tOpen[t] = select(0u, 1u, vertexOpen(q));
-    mixed = mixed || val != PHI_MAX;
+    tA[t] = val; tB[t] = val; tOpen[t] = select(0u, select(1u, 2u, val < 0.0), vertexOpen(q));
+    notAir = notAir || val != PHI_MAX;
+    notLiquid = notLiquid || val != -PHI_MAX;
   }
-  if (mixed) { atomicStore(&sMixed, 1u); }
+  if (notAir) { atomicOr(&sMixed, 1u); }
+  if (notLiquid) { atomicOr(&sMixed, 2u); }
   workgroupBarrier();
   if (l == 0u) { sMixedU = atomicLoad(&sMixed); }
   let lc = localCoord(l);
   let ti = tileIndex(lc);
-  // A tile that is all air at the band limit is a fixed point of the sweeps.
-  if (workgroupUniformLoad(&sMixedU) == 0u) {
-    phis[cfg.b + ((b << 9u) | l)] = PHI_MAX;
-    if (cfg.c == 1u) { publishSurf(o + lc, PHI_MAX); }
+  // A tile that is all air, or all liquid, at the band limit is a fixed point of the sweeps (no
+  // vertex is frozen, and every update is sgn * min(PHI_MAX, eik(PHI_MAX, PHI_MAX, PHI_MAX) > PHI_MAX)).
+  let mixedU = workgroupUniformLoad(&sMixedU);
+  if (mixedU != 3u) {
+    let limit = select(-PHI_MAX, PHI_MAX, mixedU == 2u);
+    phis[cfg.b + ((b << 9u) | l)] = limit;
+    if (cfg.c == 1u) { publishSurf(o + lc, limit); }
     return;
   }
   let me = tA[ti];
   let neg = me < 0.0;
-  let open = tOpen[ti] == 1u;
-  var frozen = false;
-  for (var k = 0u; k < 27u; k++) {
-    let j = tileIndex(lc + vec3i(i32(k % 3u), i32((k / 3u) % 3u), i32(k / 9u)) - vec3i(1));
-    if (open && k != 13u && tOpen[j] == 1u && (tA[j] < 0.0) != neg) { frozen = true; }
-  }
+  // tOpen codes open vertices by sign (as redistInit's tile): frozen = open with an opposite-signed
+  // open neighbour.
+  let open = tOpen[ti] != 0u;
+  let frozen = open && cutAt(ti, tOpen[ti]);
   let sgn = select(1.0, -1.0, neg);
   for (var s = 0u; s < 8u; s++) {
     if (!frozen) {
@@ -2566,7 +2620,7 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
   let ti = tileIndex(lc);
   if (l == 0u) { atomicStore(&sKnown, 0u); }
   workgroupBarrier();
-  var anyKnown = false;
+  var anyKnown = false; var anyUnknown = false;
   for (var t = l; t < 1000u; t += 512u) {
     let q = o + tileCoord(t);
     var info = 0u; var deep = false; var qi = 0u;
@@ -2582,15 +2636,18 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
         let k = (info >> select(cfg.c + a, a, deep)) & 1u;
         v = select(UNK, vel[select(cfg.a, U_OFF, deep) + a * N + qi], k == 1u);
         anyKnown = anyKnown || k == 1u;
+        anyUnknown = anyUnknown || k == 0u;
       }
       vA[a * 1000u + t] = v;
     }
   }
-  if (anyKnown) { atomicStore(&sKnown, 1u); }
+  if (anyKnown) { atomicOr(&sKnown, 1u); }
+  if (anyUnknown) { atomicOr(&sKnown, 2u); }
   workgroupBarrier();
   if (l == 0u) { sKnownU = atomicLoad(&sKnown); }
-  // Without a known face in the tile the sweeps change nothing.
-  let sweeps = select(0u, 8u, workgroupUniformLoad(&sKnownU) != 0u);
+  // Without a known face in the tile, or without an unknown one (relax keeps every known or
+  // closed value), the sweeps change nothing.
+  let sweeps = select(0u, 8u, workgroupUniformLoad(&sKnownU) == 3u);
   for (var s = 0u; s < sweeps; s += 2u) {
     for (var a = 0u; a < 3u; a++) { vB[a * 1000u + ti] = relax(&vA, a * 1000u + ti); }
     workgroupBarrier();

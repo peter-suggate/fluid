@@ -912,3 +912,94 @@ scales with particles.
 The candidate loop costs about 100 lane-cycles a candidate, and neither bytes, cache lines nor ALU explain it; that
 looks like latency with limited occupancy, which needs hardware counters to confirm. The paired U/US sampler at x in
 g2p was neutral (0.41).
+
+## S2o: counter profile of the whole step at 1100, then the level-set cut (-0.34 ms fenced)
+
+**Counters (gpu-frame-profile regime).** Tools are in ~/code/me/fluid-scratch/lane-s/tools: seep-xctrace.ts and
+seep-xctrace-worker.ts.
+- **Method:** xctrace attaches to a worker warmed to step 1100. The window is 94 steps, captured after a quiet-GPU
+  wait (device utilisation under 15% for 5 s). Each dispatch is its own labelled pass in its own encoder, and GPU
+  intervals are joined to encoders by encoder-id.
+- **Coverage:** exclusive coverage is at least 98% for every stage.
+- **Caveat:** split passes serialise the step (16.15 ms a step against 7.75 fenced). Read the occupancy and limiter
+  columns, not the times. The capture is in xctrace/s2n-1100/summary.txt.
+
+| stage | split us/step | occupancy | ALU | top limiter | reading |
+|---|---|---|---|---|---|
+| velocity | 665 | 22 | 35 | ALU 38 | latency, at low (register-limited) occupancy |
+| g2p | 376 | 28 | 70 | ALU 82 | ALU |
+| separate | 298 | 17 | 48 | ALU 61, LLC 29 | latency, at low occupancy |
+| extend.2 / .1 | 247 / 81 | 31 / 28 | 53 / 41 | ALU 56 / 44, LLC 26 | mixed |
+| redistSweep.2 / .1 | 166 / 114 | 41 | 59 | ALU 69 | ALU |
+| massFit x4 | 98-104 each | 40-44 | 37-40 | ALU 42-45 | nothing saturated |
+| coarseSolve.k | 58-79 per cycle | 1 | 1 | - | one workgroup, latency |
+| velocityBulk | 228 | 5 | 13 | - | 96 workgroups, a tail |
+
+**Attribution with a kernel microbench.** The tool is kbench.ts with the wrapper kb.sh.
+- **Method:** the solver runs to step 1100 and then up to the dispatch before the target. The target dispatch (same
+  cfg and launch) and its variants are then timed on that frozen state: 30 back-to-back dispatches a timestamped
+  pass, 7 interleaved rounds, medians.
+- **Output check:** for idempotent stages each variant's output is compared bitwise with the baseline's.
+- **Knockout probes** (scratch only) split each kernel:
+  - **massFit:** 148 us a pass. The tetrahedral fill was about 68 of them; the whole-tile copy-through costs 46, an
+    early return 17.
+  - **redistSweep.2:** 275 us. The 27-neighbour frozen test was about 96 of them (index arithmetic in a k/3, k/9 loop:
+    ALU), eik 30, nearSign 20. The sweeps without the test cost 72, staging alone 57.
+  - **extend:** about 125 us of staging and output, plus 2-110 us of sweeps, depending on the state.
+  - **velocity:** about 830 us in the microbench. Traces take 475 of them; the reservoir has 302k traced faces (1
+    segment each), the chamber 17k. The volume fill takes 70.
+
+**Landed (S2o, seep-kernels.ts):**
+- **massFit:**
+  - The 27 neighbour bricks' chamber flags are staged with the busy test. Each tile vertex is then one device load,
+    where it was a class load followed by a phi load.
+  - The 9^3 particle counts are loaded at once, with the busy test. The column carry then reads workgroup memory, not
+    81 threads making 9 serial device loads.
+  - The mismatch is computed only for cells with a band corner (|phi| < 1.5), the only cells the vertex update reads.
+    A cell with no negative corner fills 0, and one with all corners negative fills 1, as each of its tetrahedra
+    does. A tetrahedron of zeros counts as empty in `tetra`, so a cell whose top corner is 0 takes the full path.
+  - The cut cells are compacted into a workgroup list, so whole SIMD groups run `fill` together.
+  - Against the baseline the output differs by at most 1 ulp (1.2e-7) in 0.17% of words: the shortcut gives exactly
+    F - 0 or F - 1, where the full path rounded.
+  - 148 to 109 us a pass, four passes a step.
+- **redistInit and redistSweep:**
+  - The cut test (an open vertex with an opposite-signed open 26-neighbour) reads a packed code tile at constant
+    offsets: 0 not open, 1 open phi >= 0, 2 open phi < 0. The sweep's frozen test is the same test on its staged
+    tile. Signs and openness are unchanged by the sweeps.
+  - A tile that is all -PHI_MAX is skipped, as all-+PHI_MAX tiles already were. It is a fixed point:
+    eik(6, 6, 6) = 6.58 > 6, so no vertex moves, and nearSign keeps the solid-interior signs.
+  - Bit-identical outputs. sweep.2 275 to 223 us, sweep.1 173 to 140, init 100 to 92.
+- **extend:** the sweeps are also skipped when the tile has no unknown face, since relax returns every known or
+  closed value as it is. Bit-identical.
+
+**Tried and rejected:**
+- **extend:** staging the 27 neighbour DEEP flags made it slower, 238 to 255 us.
+- **velocity:** issuing the 11 tile loads per thread up front saved 9 of 812 us.
+- **velocity:** skipping reservoir air faces whose Us nothing reads saved 24 of 828 us. It is exact, but the argument
+  is subtle; not landed.
+
+**A/B, check slot, fenced median of the run, interleaved:**
+
+| run | HEAD 6fbe1174 | S2o |
+|---|---|---|
+| 1100 steps, 3 rounds | 7.67 / 7.71 / 7.67 | 7.34 / 7.31 / 7.30 |
+| 1200 steps, 3 rounds | 7.72 / 7.75 / 7.74 | 7.40 / 7.42 / 7.36 |
+
+That is -0.37 ms at 1100 and -0.34 ms at 1200. Mean cycles are unchanged (3.30-3.31).
+
+**Gates, seep-bench 1200 on the check slot (compare-s2o.md, audit-s2o): all pass.**
+- G1 -4.19%. G2 -3.25 / -4.16 / -4.04 / -3.96%. G4 -1.55%. G5 90% wet at step 274.
+- G3 corrected: 1.280 / 2.588 / 3.893 / 5.198 L.
+- G6 corrected: L1 0.063 / 0.047.
+- G7 0.01%. G8: impact 375.8 / 375.6.
+- The bench's fenced median is 7.385 ms.
+
+**Ledger, 1200 / 300, two runs:** chamber phi against delivered is +0.12 / +0.30 / +1.02 / +0.83% in the first and
+-0.31 / +0.46 / +0.60 / +0.26% in the second. The first run's step-900 point is the run-to-run spread; S2n's two
+runs differed by up to 0.9 points at a step. There are no deletions.
+
+**Next (from the counters):**
+- **velocity trace phase:** 475 us, about 20x its ALU count. It is latency-bound at 22% occupancy, and register
+  pressure is the suspect; tools/experiments/lane-n/dump-msl.mts can dump the MSL.
+- **coarseSolve:** about 75 us per cycle in one workgroup.
+- **velocityBulk:** 5% occupancy over 96 workgroups.
