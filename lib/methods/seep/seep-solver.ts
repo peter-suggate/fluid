@@ -65,6 +65,9 @@ export class SeepSolver implements GPUSolverInstance {
   private volumeMeasure?: Dispatch;
   private volumeMeasureT?: Dispatch;
   private readonly readback: GPUBuffer;
+  /** Readbacks share one MAP_READ buffer, so they run one at a time: the app
+   * polls readStats while an earlier poll may still hold the map pending. */
+  private readbackQueue: Promise<unknown> = Promise.resolve();
   private initialVolumeCells = 0;
   private stepIndex = 0;
   /** The next step's command buffer, encoded ahead by advanceTo (used when the parity still matches). */
@@ -367,7 +370,13 @@ export class SeepSolver implements GPUSolverInstance {
     return list.map((x, i) => ({ label: x.label, ms: Number(t[2 * i + 1] - t[2 * i]) / 1e6 }));
   }
 
-  private async measure(publish: boolean, phiT = false): Promise<{ volume: number; chamber: number; ctrl: Uint32Array }> {
+  private measure(publish: boolean, phiT = false): Promise<{ volume: number; chamber: number; ctrl: Uint32Array }> {
+    const run = this.readbackQueue.then(() => this.measureNow(publish, phiT));
+    this.readbackQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async measureNow(publish: boolean, phiT: boolean): Promise<{ volume: number; chamber: number; ctrl: Uint32Array }> {
     const encoder = this.device.createCommandEncoder({ label: "seep.measure" });
     const pass = encoder.beginComputePass({ label: "seep.measure" });
     this.encode(pass, publish ? this.volumeInit! : phiT ? this.volumeMeasureT! : this.volumeMeasure!);
@@ -469,7 +478,16 @@ export class SeepSolver implements GPUSolverInstance {
     return out;
   }
 
-  async readStats(): Promise<GPUEulerianInfo> {
+  private pendingStats?: Promise<GPUEulerianInfo>;
+
+  /** Polls that arrive while one is in flight share it rather than queueing
+   * another measurement behind it. */
+  readStats(): Promise<GPUEulerianInfo> {
+    this.pendingStats ??= this.readStatsNow().finally(() => { this.pendingStats = undefined; });
+    return this.pendingStats;
+  }
+
+  private async readStatsNow(): Promise<GPUEulerianInfo> {
     const d = await this.readDiagnostics();
     return { ...this.info, volumeCellSum: d.volumeCells, initialVolumeCellSum: d.initialVolumeCells, volumeDrift: d.volumeDrift, maxDivergence_s: d.lastResidual / CELL_M };
   }
