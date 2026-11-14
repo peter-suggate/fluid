@@ -202,3 +202,34 @@ Notes for lane S:
 - Step time (check slot, not a fair timing; another process held 2.0 GB of GPU memory at start): median 50.4 ms,
   thirds 88 / 50 / 49 ms. Construction 2.7 s, 1.05 GB requested. A timing-slot run waits until the gates pass or
   S2 lands.
+
+## 2026-11-14 MILESTONE H4: verdict on bef5feb6 (S2a speed), 1200 steps, check slot: physics regressed
+
+Same commands as H3 with `--out=artifacts/seep-rewrite/seep-bef5feb6` (rc 0; the committed tree was clean for lane S's files).
+
+| gate | ed896292 | **bef5feb6** | detail (bef5feb6 vs NB-FLIP mean) |
+|---|---|---|---|
+| G1 | pass | pass | q_left 0.2570 vs 0.2697 L/s (-4.69%, limit 5%: close to the edge) |
+| G2 | pass | pass | left loss -3.95 / -4.75 / -4.73 / -4.47% |
+| G3 | FAIL | **FAIL** | right 2.005 / 3.647 / 5.350 / **6.629** L; upper bounds 1.282 / 2.705 / 4.117 / 5.518 |
+| G4 | pass | pass | throat u 2.582 vs 2.639 |
+| G5 | pass | **FAIL** | 90% wet at step 209 vs 299 (-30%, limit 25%) |
+| G6 | FAIL | **FAIL** | centroid 379.9 / 385.4 vs 368.9 / 369.8; L1 0.308 (limit 0.202) / 0.232 (limit 0.226) |
+| G7 | pass | pass | drift **+0.41%** at 1200 (+0.29% at 600), against NB-FLIP's 0.50% |
+| G8 | FAIL | pass | jet 0.0756 vs 0.0770 L |
+
+Verdict: **FAIL (4/8; ed896292 was 5/8)**.
+
+**COORDINATION for lane S:** the chamber now *creates* liquid all the way through. At 1200 the right
+chamber holds 6.63 L against 5.13 L delivered (+1.5 L, +29%), and total volume rises steadily: +0.29%
+at 600, +0.41% at 1200. So q_right (0.218 L/s at 1200) runs well ahead of what the throat supplies. The
+gain wets the floor 90 steps early and pushes the profile right. Your step-120 check could not see it,
+because the gain accumulates over the run. G7 still passes only because NB-FLIP loses 0.50%; at this
+rate it fails just past 1200. The left side is unaffected: left loss and q_left sit 4-5% under
+NB-FLIP, as before. So it is the chamber or the coarse/fine interface, not the reservoir. Suggest a
+per-stage volume ledger over 600 steps (you had one for S1b).
+
+Speed (check slot, GPU otherwise idle: 0.02 GB in use at start; indicative only): fenced median **21.2 ms**,
+p95 24.0, thirds 19.7 / 21.1 / 22.4. Construction 1.8 s, 1.05 GB. That is 1.59x NB-FLIP's 33.69 ms timing
+median (3x needs 11.2 ms). No timing-slot run yet: a timing run of a gate-failing build would only
+measure a solver that does not yet match.
