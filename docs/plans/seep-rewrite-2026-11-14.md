@@ -26,9 +26,11 @@ Lanes:
 | item | state |
 |---|---|
 | NB-FLIP baseline, 1200 steps (`artifacts/seep-rewrite/baseline-table.txt`) | done, HEAD 095d2518 |
-| H1: common observer and bench harness | todo |
-| S1: uniform-h correctness milestone | todo |
-| S2: speed milestone | todo |
+| H1: common observer and bench harness | done (7fdf4bac..358ea7b5); NB refs in artifacts/seep-rewrite/nbflip-ref |
+| S1: correctness milestone | partial: particle-carried chamber (75cab37b) conserves (ledger within 0.6%, drift +0.01% at 1200) |
+| S2: speed milestone | e20a907a: 10.65 ms fenced, 3.16x on lane S's check-slot run; lane H independent timing-slot check pending |
+| Gates at e20a907a (lane S run) | G1 G2 G4 G5 G7 pass; G3 fails at step 300 only (1.290 vs 1.282); G6 centroid 392 vs 370; G8 jet 0.037 vs 0.077 L |
+| Measurement audit (lane H) | in progress: NB wall zone counts solid ghost phi (0.140 to 0.248 L, throat holds 0.008 L); NB jet vs ballistic trajectory |
 | Combined gate round | todo |
 
 ## 1. The reference: NB-FLIP on the seep, as measured
