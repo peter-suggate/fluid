@@ -120,3 +120,34 @@ now honours `?method=<registered id>` (unknown or retired ids still fall back to
 are not serialised) and writes `method=` back only for a non-default method;
 `lib/core/compare/compare-model.ts` keeps the pane's method. Opening a scene card still resets
 to NB-FLIP. The seep under the new solver will be `?scene=reservoir-seep&method=seep-m1max`.
+
+## 2026-11-14 COORDINATION for lane S: first seep-bench of the uncommitted solver (16:32)
+
+`tools/gpu/fluid-gpu-run.sh check node --import tsx tools/seep-bench.ts --method=seep --steps=120 --every=60 --out=artifacts/seep-rewrite/dev --name=seep-dev-120`
+(log artifacts/seep-rewrite/dev/seep-dev-120.log; working tree as of 16:30, not a judged run)
+
+- The observer contract works against your source as is. t = 0: total 368.648 L, left 368.640
+  (NB-FLIP 368.640, exact), open wall cells 0.008 L (as predicted), right 0. `wallAll` (every wall-zone
+  cell, solids included) is 0.395 L against NB-FLIP's 0.140, so your vertex phi inside the wall is
+  negative over more of it: harmless for the observer, but worth a look if the renderer or
+  extrapolation reads phi in solids.
+- Construction 2.6 s; 915 MB allocated (NB-FLIP 1.24 GB).
+- **Failed at step 60**: `Seep solver latched DEEP_SURFACE, POOL, SEGMENTS (max backtrace segments
+  4294967040, pool overflow 171020823)`. 4294967040 is 0xFFFFFF00, which looks like an uninitialised or
+  negative counter rather than a real count. Step times while it ran: median 64 ms, thirds
+  276 / 116 / 61 ms (the early steps are slow).
+- Method wrapper `lib/methods/seep-method.ts` (`seep-m1max`, "Seep · M1 Max (experimental)") is
+  registered in `lib/methods/index.ts` in the working tree. NB-FLIP stays the default; the wrapper
+  refuses any scene but reservoir-seep before touching the device, and maps your onProgress stages
+  to the app's phases. Types and unit tests are green with your files. **I cannot commit the
+  registration until your `lib/methods/seep/*.ts` are committed** (HEAD would import untracked
+  files). Please post a COORDINATION line when they land, and I will commit it straight after.
+- App switch: `?scene=reservoir-seep&method=seep-m1max` (landed in fb671839).
+
+## 2026-11-14 MILESTONE H2: `seep-m1max` registered (after lane S's 75bf4433)
+
+`lib/methods/seep-method.ts` wraps `createSeepSolver`, and `lib/methods/index.ts` installs it beside NB-FLIP, which stays
+the default. `tests/seep-method.test.ts` covers registration and the default, refusal of any other scene (before the
+device is touched), and the `?scene=reservoir-seep&method=seep-m1max` parse/serialise round trip. Host gates:
+`takesScheduledDrops` and `takesLiveSolidEdits` both test `methodId === "uniform-narrow-band-flip"`, so both are false
+under Seep. The solver also declares no optional edit or injection members, so the host declines those features.
