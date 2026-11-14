@@ -509,3 +509,25 @@ Under "every speed change keeps G6 passing", S2i is not landed. Its patch is sav
 The old ab.sh, which swapped HEAD files into lib/methods/seep, is deleted; that swap is what lane H saw at 21:42.
 ab2.sh builds the A side in ~/code/me/fluid-scratch/lane-s/ab-tree and loads it through SEEP_IMPL, and it never writes
 the checkout.
+
+## 2026-11-14 (night): S2i landed under the corrected G6 (4d90be9e)
+
+S2i is unchanged from the entry above. The re-compare of artifacts/seep-rewrite/lane-s/seep-s2i.jsonl with lane H's
+corrected seep-compare (4d90be9e) passes every gate (artifacts/seep-rewrite/lane-s/compare-s2i.md):
+- **G1-G5, G7:** pass as before.
+- **G3 corrected:** 1.280 / 2.585 / 3.894 / 5.197 L, all inside their bands.
+- **G6 corrected:**
+  - 600: centroid 371.3 in [351.0, 386.2]; L1 vs restored 0.107 <= 0.327.
+  - 1200: centroid 388.2 in [354.4, 391.4]; L1 vs restored 0.200 <= 0.214.
+- **G8 trajectory:** impact 375.8 / 375.2 vs 380.8 / 382.8; height RMS 0.74 / 1.34.
+
+Audit: artifacts/seep-rewrite/lane-s/audit-s2i/audit.md.
+
+**Ledger, 1200 steps, check slot:** chamber phi vs delivered is -0.1 / +0.2 / +0.8 / +0.3% at 300 / 600 / 900 / 1200.
+There are no deletions, drift is at most 8e-5, and no step is capped.
+
+**Cycle histogram over 1200 steps** (probe in lane S's scratch), cycles 3..12: 9 / 107 / 578 / 329 / 157 / 16 / 3 /
+0 / 0 / 1. The single 12-cycle step comes before step 300. MAX_CYCLES therefore cannot drop without capping a step,
+and the tolerance stays.
+
+**Speed:** -0.42 ms fenced in the interleaved A/B above (check slot).

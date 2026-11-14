@@ -13,11 +13,11 @@ import {
 } from "./seep-layout";
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
-  countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
+  countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgGuessKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
   redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, BULK_CBLOCKS, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
-import { ARGS_WORDS, B, BULK_WG, C, COARSE_CELLS, COARSE_LATTICE, FAIL, MAX_CYCLES, MG_STRIDE, NSHADOW, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
+import { ARGS_WORDS, B, BULK_WG, C, COARSE_CELLS, COARSEST_CELLS, COARSE_LATTICE, FAIL, MAX_CYCLES, MG_STRIDE, NSHADOW, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
 
 export const SEEP_METHOD_ID = "seep-m1max";
 /** Mass-fit passes over the chamber surface (even: they ping-pong phiT -> phi -> phiT). */
@@ -89,7 +89,7 @@ export class SeepSolver implements GPUSolverInstance {
     buffer("op", 2 * CELLS * 4, S);
     buffer("bits", 2 * CELLS * 4, S);
     buffer("pres", 6 * CELLS * 4, S);
-    buffer("coarse", 7 * COARSE_CELLS * 4, S);
+    buffer("coarse", (7 * COARSE_CELLS + COARSEST_CELLS * COARSEST_CELLS) * 4, S);
     buffer("bulk", 6 * COARSE_LATTICE * 4, S);
     buffer("parts", 2 * PARTICLE_CAPACITY * 2 * 16, S);
     buffer("pcell", PARTICLE_CAPACITY * 4, S);
@@ -251,6 +251,7 @@ export class SeepSolver implements GPUSolverInstance {
         d(coarsenBrickKernel, undefined, { indirect: W(C.ARG_ACTBB) }),
         d(coarsenTopKernel, undefined, { direct: [1] }),
       ];
+      list.push(d(pcgGuessKernel, undefined, { indirect: W(C.ARG_LIQB) }));
       for (let k = 0; k <= MAX_CYCLES; k++) {
         // Gated counts per row (coarseSolve): slot 0 liquid bricks, 1 [BULK bricks, liquid], 2 [BULK workgroups, liquid], 3 level-4 blocks / 8.
         const mg = (row: number, slot: number) => W(C.MG_ARGS + MG_STRIDE * row + 4 * slot);

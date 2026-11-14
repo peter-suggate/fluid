@@ -63,7 +63,7 @@ export const C = {
 /** Words per PCG iteration in the args buffer, and the args buffer's size in words. */
 export const MG_STRIDE = 32;
 export const ARGS_WORDS = C.MG_ARGS + MG_STRIDE * (MAX_CYCLES + 1);
-export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4 } as const;
+export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4, COARSEST_PIVOT: 8 } as const;
 
 /** bricks table offsets (each BRICKS long). */
 export const B = {
@@ -93,6 +93,9 @@ export const LEVEL_OFFSET: number[] = (() => {
   return off;
 })();
 export const COARSE_CELLS = LEVEL_OFFSET[LEVELS + 1];
+/** Cells of the coarsest level (8 x 4 x 1), solved exactly through its explicit inverse; its 32 x 32 entries are one per thread of a 1024-wide workgroup. */
+export const COARSEST_CELLS = levelDims(LEVELS).reduce((a, b) => a * b, 1);
+if (COARSEST_CELLS * COARSEST_CELLS !== 1024) throw new Error(`seep: coarsest level of ${COARSEST_CELLS} cells, the inverse needs 32`);
 
 const f = (x: number) => { const s = String(x); return s.includes(".") || s.includes("e") ? s : s + ".0"; };
 
@@ -140,7 +143,7 @@ const C_SEEDED: u32 = ${C.SEEDED}u; const C_RES: u32 = ${C.RES}u; const C_CONV: 
 const C_CYCLES: u32 = ${C.CYCLES}u; const C_FIRST_RES: u32 = ${C.FIRST_RES}u; const C_LAST_RES: u32 = ${C.LAST_RES}u;
 const C_CAP_HITS: u32 = ${C.CAP_HITS}u; const C_CYCLES_TOTAL: u32 = ${C.CYCLES_TOTAL}u; const C_MAX_SEG: u32 = ${C.MAX_SEG}u;
 const C_OVERFLOW: u32 = ${C.OVERFLOW}u; const C_MG_ARGS: u32 = ${C.MG_ARGS}u; const C_N_ACTIVE: u32 = ${C.N_ACTIVE}u; const C_RES_HIST: u32 = ${C.RES_HIST}u; const C_ALPHA: u32 = ${C.ALPHA}u; const C_RHO: u32 = ${C.RHO}u; const C_RED: u32 = ${C.RED}u;
-const FAIL_DEEP: u32 = ${FAIL.DEEP_SURFACE}u; const FAIL_POOL: u32 = ${FAIL.POOL}u; const FAIL_SEG: u32 = ${FAIL.SEGMENTS}u;
+const FAIL_DEEP: u32 = ${FAIL.DEEP_SURFACE}u; const FAIL_POOL: u32 = ${FAIL.POOL}u; const FAIL_SEG: u32 = ${FAIL.SEGMENTS}u; const FAIL_PIVOT: u32 = ${FAIL.COARSEST_PIVOT}u;
 const DEAD_PARTICLE: u32 = 0xffffffffu;
 
 fn brickCoord(b: u32) -> vec3i { return vec3i(i32(b & 63u), i32((b >> 6u) & 31u), i32(b >> 11u)); }

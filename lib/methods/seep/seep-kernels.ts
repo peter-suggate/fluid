@@ -16,7 +16,7 @@
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 import { BULK_BX1, BULK_BY1, BZ, CELL_M, THROAT_BLOCK_HI, THROAT_BLOCK_LO } from "./seep-layout";
 import {
-  AGGREGATION_OC, COARSE_CELLS, COMMON_WGSL, LEVEL_OFFSET, MAX_CYCLES, MG_STRIDE, PRESSURE_TOLERANCE,
+  AGGREGATION_OC, COARSE_CELLS, COARSEST_CELLS, COMMON_WGSL, LEVEL_OFFSET, MAX_CYCLES, MG_STRIDE, PRESSURE_TOLERANCE,
   declare, levelDims, phiSampler, velocitySampler, type BindingSpec,
 } from "./seep-wgsl";
 
@@ -173,6 +173,8 @@ const U_OFF: u32 = 0u; const US_OFF: u32 = 3u * N; const UT_OFF: u32 = 6u * N;
 const DIAG_OFF: u32 = 0u; const RHS_OFF: u32 = N;
 const MASK_OFF: u32 = 0u; const KNOWN_OFF: u32 = N;
 const TC: u32 = ${TC}u; const COP: u32 = 0u; const CE: u32 = ${4 * TC}u; const CB: u32 = ${5 * TC}u; const CEP: u32 = ${6 * TC}u;
+// The coarsest level's explicit inverse (row-major, NC6 x NC6), rebuilt each step by coarsenTop.
+const NC6: u32 = ${COARSEST_CELLS}u; const CINV: u32 = ${7 * TC}u;
 const OC: f32 = ${AGGREGATION_OC};
 const TOL: f32 = ${PRESSURE_TOLERANCE};
 const MAXC: u32 = ${MAX_CYCLES}u;
@@ -1468,6 +1470,7 @@ fn residC(l: u32, c: vec3i, eo: u32) -> f32 {
 
 export const coarsenTopKernel = kernel("seep.coarsenTop", [coarseRW, ctrlRW, argsRW], /* wgsl */ `
 ${COARSE_COMMON}
+var<workgroup> sInv: array<f32, ${COARSEST_CELLS * COARSEST_CELLS}>;
 @compute @workgroup_size(1024) fn main(@builtin(local_invocation_index) t: u32) {
   if (t == 0u) {
     // Publish the operator's liquid list as the pressure solve's dispatch arguments.
@@ -1484,6 +1487,35 @@ ${COARSE_COMMON}
     for (var i = t; i < levelCount(l); i += 1024u) { aggregate(l, cellOfLevel(l, i)); }
     storageBarrier(); workgroupBarrier();
   }
+  // The coarsest level is solved exactly (Trottenberg, Oosterlee & Schuller 2001, Multigrid, sec. 2.5):
+  // its NC6 x NC6 operator is inverted here once a step by Gauss-Jordan elimination without pivoting
+  // (the operator is SPD: Golub & Van Loan 2013, sec. 4.2), thread t holding entry (t / NC6, t % NC6),
+  // and each cycle's coarsest solve is one product with the inverse. Inactive cells are identity rows.
+  let i = t / NC6; let j = t % NC6;
+  let ci = cellOfLevel(6u, i); let cj = cellOfLevel(6u, j);
+  let oi = cop(6u, ci); let oj = cop(6u, cj);
+  var a = 0.0;
+  if (i == j) { a = select(1.0, oi.x, oi.x > 0.0); }
+  else if (oi.x > 0.0 && oj.x > 0.0) {
+    let d = cj - ci;
+    if (all(d == vec3i(1, 0, 0))) { a = -oi.y; } else if (all(d == vec3i(0, 1, 0))) { a = -oi.z; } else if (all(d == vec3i(0, 0, 1))) { a = -oi.w; }
+    else if (all(d == vec3i(-1, 0, 0))) { a = -oj.y; } else if (all(d == vec3i(0, -1, 0))) { a = -oj.z; } else if (all(d == vec3i(0, 0, -1))) { a = -oj.w; }
+  }
+  sInv[t] = a;
+  workgroupBarrier();
+  for (var p = 0u; p < NC6; p++) {
+    let app = sInv[p * NC6 + p]; let aip = sInv[i * NC6 + p]; let apj = sInv[p * NC6 + j];
+    workgroupBarrier();
+    if (app <= 0.0) { if (t == 0u) { atomicOr(&ctrl[C_FAIL], FAIL_PIVOT); } }
+    let r = 1.0 / app;
+    if (i == p && j == p) { sInv[t] = r; }
+    else if (i == p) { sInv[t] = apj * r; }
+    else if (j == p) { sInv[t] = -aip * r; }
+    else { sInv[t] = a - aip * apj * r; }
+    workgroupBarrier();
+    a = sInv[t];
+  }
+  coarse[CINV + t] = a;
 }
 `);
 
@@ -1630,6 +1662,29 @@ fn bsmooth${L}(own: bool, c: vec3i, ti: u32, o: vec4f, w: vec3f, b: f32, rev: bo
 `;
 }
 
+/** X_-1: the initial guess, the warm start (last step's pressure) after one Jacobi sweep on the fine rows
+ *  (Saad 2003, Iterative Methods for Sparse Linear Systems, sec. 4.1), into Z (free until U0_0): x0 + D^-1 (b - A x0).
+ *  A row whose ghost-fluid diagonal changed (theta near THETA_MIN) otherwise starts with a residual of
+ *  d * x0 there. BULK rows copy. X_0 takes Z as its x. */
+export const pcgGuessKernel = kernel("seep.pcgGuess", [ctrlRW, bricksRO, opRO, bitsRO, presRW], /* wgsl */ `
+${PCG_WGSL}
+${bulkWGSL(false)}
+@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  if (wg.x < BULK_WG) {
+    let j = wg.x * 512u + l;
+    if (j < NBULK * 8u) { let sl = bulkSlot(bulkCell(j)); pres[Z_OFF + sl] = pres[X_OFF + sl]; }
+    return;
+  }
+  let b = bricks[B_LLIQ + wg.x - BULK_WG];
+  let c = brickCoord(b) * 8 + localCoord(l);
+  let i = (b << 9u) | l;
+  let diag = op[DIAG_OFF + i];
+  var x = 0.0;
+  if (diag > 0.0) { x = pres[X_OFF + i] + (op[RHS_OFF + i] - applyA(c, i, X_OFF)) / diag; }
+  pres[Z_OFF + i] = x;
+}
+`);
+
 /** X_k (see 15). cfg.a = k. */
 export const pcgUpdateKernel = kernel("seep.pcgUpdate", [ctrlRW, bricksRO, opRO, bitsRO, presRW, cfgU], /* wgsl */ `
 ${PCG_WGSL}
@@ -1649,7 +1704,7 @@ ${bulkWGSL(false)}
     if (j < NBULK * 8u) {
       let kc = bulkCell(j);
       let sl = bulkSlot(kc);
-      if (k == 0u) { r = op[RHS_OFF + sl] - applyBulk(kc, sl, X_OFF); }
+      if (k == 0u) { r = op[RHS_OFF + sl] - applyBulk(kc, sl, Z_OFF); pres[X_OFF + sl] = pres[Z_OFF + sl]; }
       else {
         pres[X_OFF + sl] += alpha * pres[PP_OFF + sl];
         r = pres[R_OFF + sl] - alpha * pres[Q_OFF + sl];
@@ -1668,7 +1723,7 @@ ${bulkWGSL(false)}
   let diag = op[DIAG_OFF + i];
   var r = 0.0;
   if (diag > 0.0) {
-    if (k == 0u) { r = op[RHS_OFF + i] - applyA(c, i, X_OFF); }
+    if (k == 0u) { r = op[RHS_OFF + i] - applyA(c, i, Z_OFF); pres[X_OFF + i] = pres[Z_OFF + i]; }
     else {
       pres[X_OFF + i] += alpha * pres[PP_OFF + i];
       r = pres[R_OFF + i] - alpha * pres[Q_OFF + i];
@@ -1944,11 +1999,16 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   workgroupBarrier();
   var b6 = 0.0;
   if (has6) { for (var q = 0u; q < 8u; q++) { b6 += sR[sIdx(5u, 2 * c6 + octI(q)) - 2048u]; } }
-  // Coarsest: palindromic red-black sweeps from zero (red, black, ..., red).
-  for (var s = 0u; s < 41u; s++) {
-    if (has6 && colourOf(c6) == (s & 1u) && o6.x > 0.0) { sE[2304u + t] = (b6 + offS(6u, c6, o6, m6)) / o6.x; }
-    workgroupBarrier();
+  // Coarsest: the exact solve, one product with the inverse coarsenTop built (inactive rows give 0: b6 = 0).
+  workgroupBarrier();
+  if (has6) { sR[t] = b6; }
+  workgroupBarrier();
+  if (has6) {
+    var e6 = 0.0;
+    for (var q = 0u; q < NC6; q++) { e6 += coarse[CINV + t * NC6 + q] * sR[q]; }
+    sE[2304u + t] = e6;
   }
+  workgroupBarrier();
   // Up: prolong (piecewise constant) onto the pre-smoothed values, post-smooth black first.
   if (has5) { sE[2048u + t] = select(0.0, ep5 + sE[sIdx(6u, c5 / 2)], o5.x > 0.0); }
   workgroupBarrier();
@@ -2524,6 +2584,6 @@ var<workgroup> red: array<f32, 512>;
 export const ALL_KERNELS: readonly KernelSource[] = [
   classifyKernel, clearKernel, countKernel, emitKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel, massFitKernel,
   redistInitKernel, redistSweepKernel, p2gKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
-  pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
+  pcgGuessKernel, pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
   pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,
 ];
