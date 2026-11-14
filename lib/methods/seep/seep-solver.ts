@@ -14,7 +14,7 @@ import {
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
   countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgGuessKernel, pcgPrecondKernel, pcgShiftDownKernel, pcgShiftUpKernel, pcgUpdateKernel, projectKernel,
-  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, BULK_CBLOCKS, type KernelSource,
+  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, velocityTraceKernel, volumeKernel, BULK_CBLOCKS, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
 import { ARGS_WORDS, B, BULK_WG, C, COARSE_CELLS, COARSEST_CELLS, COARSE_LATTICE, FAIL, MAX_CYCLES, MG_STRIDE, NSHADOW, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
@@ -250,6 +250,7 @@ export class SeepSolver implements GPUSolverInstance {
         d(p2gKernel, p, { indirect: W(C.ARG_PART) }),
         d(velocityBulkKernel, undefined, { direct: [BULK_CBLOCKS] }),
         d(velocityKernel, undefined, { indirect: W(C.ARG_ACTIVE) }),
+        d(velocityTraceKernel, undefined, { indirect: W(C.ARG_TRACE) }),
         d(operatorKernel, undefined, { indirect: W(C.ARG_ACTB) }),
         d(coarsenBrickKernel, undefined, { indirect: W(C.ARG_ACTBB) }),
         d(coarsenTopKernel, undefined, { direct: [1] }),

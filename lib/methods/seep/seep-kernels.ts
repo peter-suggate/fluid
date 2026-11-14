@@ -225,6 +225,7 @@ fn liquidish(n: vec3i) -> bool {
     atomicStore(&ctrl[C_CONV], 0u); atomicStore(&ctrl[C_CYCLES], 0u);
     atomicStore(&ctrl[C_RES], 0u);
     atomicStore(&args[C_ARG_ACTIVE + 1u], 1u); atomicStore(&args[C_ARG_ACTIVE + 2u], 1u);
+    atomicStore(&args[C_ARG_TRACE + 1u], TRACE_SLABS); atomicStore(&args[C_ARG_TRACE + 2u], 1u);
     atomicStore(&args[C_ARG_SURF + 1u], 1u); atomicStore(&args[C_ARG_SURF + 2u], 1u);
     atomicStore(&args[C_ARG_PART + 1u], 1u); atomicStore(&args[C_ARG_PART + 2u], 1u);
     atomicStore(&args[C_ARG_CLEAR + 1u], 1u); atomicStore(&args[C_ARG_CLEAR + 2u], 1u);
@@ -259,6 +260,7 @@ fn liquidish(n: vec3i) -> bool {
   let prev = (atomicLoad(&bricks[B_FLAGS + b]) & 1u) != 0u;
   if (act) {
     let i = atomicAdd(&args[C_ARG_ACTIVE], 1u); atomicStore(&bricks[B_LACT + i], b);
+    atomicAdd(&args[C_ARG_TRACE], 1u);
     atomicAdd(&args[C_ARG_ACTB], 1u); atomicAdd(&args[C_ARG_ACTBB], 1u);
     if ((cls & CLASS_DEEP) == 0u) { let j = atomicAdd(&args[C_ARG_SURF], 1u); atomicStore(&bricks[B_LSURF + j], b); }
     if ((cls & CLASS_PARTICLE) != 0u) { let k = atomicAdd(&args[C_ARG_PART], 1u); atomicStore(&bricks[B_LPART + k], b); }
@@ -1022,18 +1024,17 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
 //     y face. Also publishes the cell-centre level set, the fill fraction and
 //     the brick's minimum phi for the next classification.
 // ---------------------------------------------------------------------------
-/** Coarse-lattice 8^3 blocks covering the BULK box (2 coarse cells a brick). */
-const CB_DIM = [Math.ceil(BULK_BX1 / 4), Math.ceil(BULK_BY1 / 4), Math.ceil(BZ / 4)] as const;
-export const BULK_CBLOCKS = CB_DIM[0] * CB_DIM[1] * CB_DIM[2];
-export const velocityBulkKernel = kernel("seep.velocityBulk", [bricksRO, velRW, bulkRW], /* wgsl */ `
-${velocitySampler("velU", "vel", "U_OFF")}
-${bulkWGSL(false)}
-${COARSE_SAMPLER_WGSL}
-/** Semi-Lagrangian RK2 backtrace (segments of at most one cell) of the fine face (a, c) through the fine velocity. */
+/** The fine face backtrace and its gravity, shared by velocityBulk (interface faces) and velocityTrace. */
+const FACE_SL_WGSL = /* wgsl */ `
+/** Semi-Lagrangian RK2 backtrace (segments of at most one cell) of the fine face (a, c) through the fine velocity
+ *  (velU: velocitySampler over U); slSegs keeps the unclamped segment count. RK2 midpoint segments, one velocity
+ *  evaluation site: even half-steps locate the midpoint from k1, odd ones advance with k2. */
+var<private> slSegs: f32;
 fn fineFaceSL(a: u32, c: vec3i) -> f32 {
   let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(unitAxis(a));
   let u0 = velU(pos);
-  let n = clamp(ceil(length(u0) * CFL), 1.0, MAXSEG);
+  slSegs = ceil(length(u0) * CFL);
+  let n = clamp(slSegs, 1.0, MAXSEG);
   let tau = CFL / n;
   var x = pos; var q = pos; var kk = u0;
   let last = u32(n) * 2u - 1u;
@@ -1053,6 +1054,15 @@ fn gravityOn(a: u32, c: vec3i) -> f32 {
   let d = select(1.0, 2.5, cellBulk(lo) != cellBulk(c));
   return -GDT * (ownerY(c) - ownerY(lo)) / d;
 }
+`;
+/** Coarse-lattice 8^3 blocks covering the BULK box (2 coarse cells a brick). */
+const CB_DIM = [Math.ceil(BULK_BX1 / 4), Math.ceil(BULK_BY1 / 4), Math.ceil(BZ / 4)] as const;
+export const BULK_CBLOCKS = CB_DIM[0] * CB_DIM[1] * CB_DIM[2];
+export const velocityBulkKernel = kernel("seep.velocityBulk", [bricksRO, velRW, bulkRW], /* wgsl */ `
+${velocitySampler("velU", "vel", "U_OFF")}
+${bulkWGSL(false)}
+${COARSE_SAMPLER_WGSL}
+${FACE_SL_WGSL}
 // Coarse velocity tile: the block's coarse faces with a two-cell halo, per component, staged once
 // (cface: the coarse face, or its 16 fine faces' mean next to fine cells); samples whose eight
 // corners fall inside read it, the rest read through cface. Same values, same interpolation.
@@ -1072,8 +1082,13 @@ fn ctComp(a: u32, p: vec3f) -> f32 {
   return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
 }
 fn ctVel(p: vec3f) -> vec3f { return vec3f(ctComp(0u, p), ctComp(1u, p), ctComp(2u, p)); }
-/** BULK coarse cell k: SL advection of its coarse low faces at 4h; the fine interface faces stored in it (fine cell below along a) as fine faces. */
-fn bulkVelocity(k: vec3i) {
+// The block's interface faces (coarse cell l's low face along a, fine cells below): listed, then their
+// 16 fine faces each traced by 16 threads, not one thread's serial 16 (the kernel's long tail).
+var<workgroup> sIf: array<u32, 1536>;
+var<workgroup> sIfN: atomic<u32>;
+var<workgroup> sIfU: u32;
+/** BULK coarse cell k (thread l): SL advection of its coarse low faces at 4h; the fine interface faces stored in it (fine cell below along a) are listed. */
+fn bulkVelocity(k: vec3i, l: u32) {
   for (var a = 0u; a < 3u; a++) {
     let e = unitAxis(a);
     let kn = k - e;
@@ -1089,13 +1104,7 @@ fn bulkVelocity(k: vec3i) {
       }
       bulk[BUS_OFF + a * NCL + clIndex(k)] = ctComp(a, x) - select(0.0, GDT, a == 1u);
     } else {
-      let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
-      for (var u = 0; u < 4; u++) { for (var v = 0; v < 4; v++) {
-        let c = 4 * k + u * t1 + v * t2;
-        var val = 0.0;
-        if (fineOpen(c - e)) { val = fineFaceSL(a, c) + gravityOn(a, c); }
-        vel[US_OFF + a * N + cidx(c)] = val;
-      } }
+      sIf[atomicAdd(&sIfN, 1u)] = l | (a << 9u);
     }
   }
 }
@@ -1109,19 +1118,27 @@ fn bulkVelocity(k: vec3i) {
   }
   workgroupBarrier();
   let k = blk * 8 + localCoord(l);
-  if (coarseBulk(k)) { bulkVelocity(k); }
+  if (coarseBulk(k)) { bulkVelocity(k, l); }
+  workgroupBarrier();
+  if (l == 0u) { sIfU = atomicLoad(&sIfN); }
+  let nf = workgroupUniformLoad(&sIfU) * 16u;
+  for (var t = l; t < nf; t += 512u) {
+    let f = sIf[t >> 4u];
+    let a = f >> 9u; let e = unitAxis(a);
+    let t1 = unitAxis((a + 1u) % 3u); let t2 = unitAxis((a + 2u) % 3u);
+    let c = 4 * (blk * 8 + localCoord(f & 511u)) + i32((t >> 2u) & 3u) * t1 + i32(t & 3u) * t2;
+    var val = 0.0;
+    if (fineOpen(c - e)) { val = fineFaceSL(a, c) + gravityOn(a, c); }
+    vel[US_OFF + a * N + cidx(c)] = val;
+  }
 }
 `);
 
-export const velocityKernel = kernel("seep.velocity", [ctrlRW, bricksRW, phisRW, velRW, accRW, volW], /* wgsl */ `
+export const velocityKernel = kernel("seep.velocity", [ctrlRW, bricksRW, phisRW, velRW, accRW, volW, bitsRW], /* wgsl */ `
 ${levelSetFillWGSL}
 ${velocitySampler("velU", "vel", "U_OFF")}
 ${bulkWGSL(true)}
-fn gravityOn(a: u32, c: vec3i) -> f32 {
-  let lo = c - unitAxis(a);
-  let d = select(1.0, 2.5, cellBulk(lo) != cellBulk(c));
-  return -GDT * (ownerY(c) - ownerY(lo)) / d;
-}
+${FACE_SL_WGSL}
 // The brick's vertices and a one-vertex halo (every vertex this kernel reads), staged once.
 var<workgroup> tph: array<f32, 1000>;
 var<private> phOrigin: vec3i;
@@ -1130,35 +1147,12 @@ const FAR_AIR: f32 = 4.0;
 var<workgroup> red: array<f32, 512>;
 var<workgroup> redFar: array<f32, 512>;
 var<workgroup> sFar: u32;
-// Velocity tile: the brick's faces and a two-cell halo of each component,
-// staged once; backtrace samples whose eight corners fall inside it read the
-// tile, the rest (fast liquid, a few cells a step) read the buffer. Same
-// values, same interpolation.
-const VT: i32 = 12;
-var<workgroup> vt: array<f32, 5184>;
-var<private> tileOrigin: vec3i;
-var<private> useTile: bool;
-const TILE_MIN: f32 = 96.0;
-fn velTComp(a: u32, p: vec3f) -> f32 {
-  let q = p - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
-  let fb = floor(q);
-  let lb = vec3i(fb) - tileOrigin;
-  if (!useTile || any(lb < vec3i(0)) || any(lb > vec3i(VT - 2))) { return velUComp(a, p); }
-  let t = q - fb;
-  let k = u32(i32(a) * VT * VT * VT + lb.x + VT * (lb.y + VT * lb.z));
-  let sy = u32(VT); let sz = u32(VT * VT);
-  let x00 = mix(vt[k], vt[k + 1u], t.x); let x10 = mix(vt[k + sy], vt[k + sy + 1u], t.x);
-  let x01 = mix(vt[k + sz], vt[k + sz + 1u], t.x); let x11 = mix(vt[k + sz + sy], vt[k + sz + sy + 1u], t.x);
-  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
-}
-fn velT(p: vec3f) -> vec3f { return vec3f(velTComp(0u, p), velTComp(1u, p), velTComp(2u, p)); }
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = atomicLoad(&bricks[B_LACT + wg.x]);
   let cls = atomicLoad(&bricks[B_CLASS + b]);
   let deep = (cls & CLASS_DEEP) != 0u;
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
-  tileOrigin = brickCoord(b) * 8 - vec3i(2);
   if (l == 0u) { atomicStore(&bricks[B_PCOUNT + b], 0u); atomicStore(&bricks[B_FAST + b], 0u); }
   phOrigin = brickCoord(b) * 8;
   // DEEP bricks read no level set (always liquid, never far, no particles).
@@ -1242,47 +1236,47 @@ fn velT(p: vec3f) -> vec3f { return vec3f(velTComp(0u, p), velTComp(1u, p), velT
     if (transfer) { vel[US_OFF + a * N + i] = (f32(mom) / SM) / (f32(wsum) / SW) + gravityOn(a, c); continue; }
     need |= 1u << a;
   }
-  // The velocity tile pays for itself only with enough traces to read it (a chamber brick's
-  // faces are mostly transfers or skipped): below TILE_MIN traces the samples read the buffer.
-  red[l] = f32(countOneBits(need));
-  workgroupBarrier();
-  if (l < 32u) { var n = 0.0; for (var j = 0u; j < 16u; j++) { n += red[j * 32u + l]; } redFar[l] = n; }
-  workgroupBarrier();
-  if (l == 0u) { var n = 0.0; for (var j = 0u; j < 32u; j++) { n += redFar[j]; } sFar = select(0u, 1u, n >= TILE_MIN); }
-  useTile = workgroupUniformLoad(&sFar) != 0u;
-  if (useTile) {
-    for (var t = l; t < 5184u; t += 512u) {
-      let a = t / 1728u; let r = t % 1728u;
-      let q = tileOrigin + vec3i(i32(r % 12u), i32((r / 12u) % 12u), i32(r / 144u));
-      vt[t] = velUFace(a, q);
-    }
+  // The backtraces run in velocityTrace (a lean kernel: this one's registers and workgroup memory
+  // held a brick a core). The need mask rides in the KNOWN word, free until projection rewrites it.
+  bits[KNOWN_OFF + i] = need;
+}
+`);
+
+// ---------------------------------------------------------------------------
+// 12b. The velocity's backtraces (see 12): the faces pass 1 left to trace (the
+//      need mask in the KNOWN word), fineFaceSL plus gravity. Split from 12 and
+//      run as TRACE_SLABS (8) 64-cell slabs a brick, each compacting its traced faces
+//      into a dense list: a brick with a handful of traces (most of the chamber)
+//      holds two warps, not a 512-thread workgroup a core while its few long
+//      traces run, and every warp runs full. Same values (each face's trace and
+//      store are independent of the others).
+// ---------------------------------------------------------------------------
+export const velocityTraceKernel = kernel("seep.velocityTrace", [ctrlRW, bricksRW, velRW, bitsRO], /* wgsl */ `
+${velocitySampler("velU", "vel", "U_OFF")}
+${bulkWGSL(true)}
+${FACE_SL_WGSL}
+var<workgroup> sFaces: array<u32, 192>;
+var<workgroup> sTraces: atomic<u32>;
+var<workgroup> sTracesU: u32;
+// Workgroup (x, y): slab y of LACT brick x.
+@compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  let b = atomicLoad(&bricks[B_LACT + wg.x]);
+  let lc = wg.y * 64u + l;
+  let need = bits[KNOWN_OFF + ((b << 9u) | lc)] & 7u;
+  if (need != 0u) {
+    var s = atomicAdd(&sTraces, countOneBits(need));
+    for (var a = 0u; a < 3u; a++) { if (((need >> a) & 1u) != 0u) { sFaces[s] = lc | (a << 9u); s++; } }
   }
   workgroupBarrier();
-  // Pass 2: the backtraces.
-  for (var a = 0u; a < 3u; a++) {
-    if (((need >> a) & 1u) == 0u) { continue; }
-    var val = 0.0;
-    {
-      let e = unitAxis(a);
-      let pos = vec3f(c) + vec3f(0.5) - 0.5 * vec3f(e);
-      let u0 = velT(pos);
-      let segs = ceil(length(u0) * CFL);
-      if (segs > 12.0) { atomicMax(&ctrl[C_MAX_SEG], u32(segs)); }
-      let n = clamp(segs, 1.0, MAXSEG);
-      let tau = CFL / n;
-      // RK2 midpoint segments, one velocity evaluation site: even half-steps
-      // locate the midpoint from k1, odd ones advance with k2.
-      var x = pos; var q = pos; var kk = u0;
-      let last = u32(n) * 2u - 1u;
-      for (var j = 0u; j <= last; j++) {
-        if ((j & 1u) == 0u) { q = x - 0.5 * tau * kk; } else { x = x - tau * kk; q = x; }
-        if (j == last) { break; }
-        kk = velT(q);
-      }
-      val = velTComp(a, x);
-    }
-    val += gravityOn(a, c);
-    vel[US_OFF + a * N + i] = val;
+  if (l == 0u) { sTracesU = atomicLoad(&sTraces); }
+  let traces = workgroupUniformLoad(&sTracesU);
+  for (var k = l; k < traces; k += 64u) {
+    let f = sFaces[k];
+    let cl = f & 511u; let a = f >> 9u;
+    let c = brickCoord(b) * 8 + localCoord(cl);
+    let val = fineFaceSL(a, c);
+    if (slSegs > 12.0) { atomicMax(&ctrl[C_MAX_SEG], u32(slSegs)); }
+    vel[US_OFF + a * N + ((b << 9u) | cl)] = val + gravityOn(a, c);
   }
 }
 `);
@@ -2680,7 +2674,7 @@ ${PARTICLE_MOVE_WGSL}
   let i = g.x;
   if (i == 0u) {
     for (var k = 0u; k < 4u; k++) { atomicStore(&ctrl[C_N_ACTIVE + k], atomicLoad(&args[4u * k])); }
-    atomicStore(&args[C_ARG_ACTIVE], 0u); atomicStore(&args[C_ARG_SURF], 0u);
+    atomicStore(&args[C_ARG_ACTIVE], 0u); atomicStore(&args[C_ARG_SURF], 0u); atomicStore(&args[C_ARG_TRACE], 0u);
     atomicStore(&args[C_ARG_PART], 0u); atomicStore(&args[C_ARG_CLEAR], 0u);
     atomicStore(&args[C_ARG_ACTB], BULK_WG); atomicStore(&args[C_ARG_ACTBB], (NBULK + 7u) / 8u);
     atomicStore(&ctrl[C_PCOUNT + cfg.a], 0u);
@@ -2761,7 +2755,7 @@ var<workgroup> red: array<f32, 512>;
 
 export const ALL_KERNELS: readonly KernelSource[] = [
   classifyKernel, clearKernel, countKernel, emitKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel, massFitKernel,
-  redistInitKernel, redistSweepKernel, p2gKernel, pcgShiftDownKernel, pcgShiftUpKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
+  redistInitKernel, redistSweepKernel, p2gKernel, pcgShiftDownKernel, pcgShiftUpKernel, velocityBulkKernel, velocityKernel, velocityTraceKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
   pcgGuessKernel, pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
   pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,
 ];

@@ -1003,3 +1003,118 @@ runs differed by up to 0.9 points at a step. There are no deletions.
   pressure is the suspect; tools/experiments/lane-n/dump-msl.mts can dump the MSL.
 - **coarseSolve:** about 75 us per cycle in one workgroup.
 - **velocityBulk:** 5% occupancy over 96 workgroups.
+
+## S2p: velocity backtraces as their own slab kernel, velocityBulk's interface faces spread (-0.31 ms fenced)
+
+**Register pressure, confirmed from the compiled MSL.** Dawn dumps the MSL (dump_shaders,
+disable_symbol_renaming). The `max_total_threads_per_threadgroup` attribute is stripped and the result is compiled
+with Metal, so the pipeline's maxTotalThreadsPerThreadgroup shows the register limit. The tools are
+~/code/me/fluid-scratch/lane-s/tools/mstat.sh and mtlstat.
+- **velocity (HEAD):** the register limit is 832 threads, and the kernel also uses 28.7 KB of workgroup memory. One
+  512-thread brick a core.
+- **velocity pass 1 alone:** 1024.
+- **Traces alone:** 704-832 in every form tried: tile or none, compacted, sorted, components in a loop.
+  - The trilinear vec3 sample itself holds the registers (24 loads in flight).
+  - Knockouts reach 1024 only with no sampling at all.
+- **Counters for the split trace kernel:** occupancy 16%, ALU 36%, nothing saturated. It is latency-bound.
+
+**Attribution (kbench).**
+- **Method:**
+  - Acc-preserving copies of pass 1 (atomicLoad in place of atomicExchange) make the pair rerunnable.
+  - kbench now takes multi-kernel variants (`a+b`), and a y-split indirect launch (`k@y8`).
+  - The checked slice is poisoned before each checked run.
+- **Trace counts at 1100:** the reservoir has 485.5k traced faces (486.7k segments, max 9) on 3908 64-cell slabs. The
+  chamber has 17.2k faces (26.6k segments, max 11) on 1315 slabs.
+- **Costs:**
+  - The trace kernel with no sampling costs 144 us (launch, compaction, stores).
+  - Chamber sampling costs 146 us for 17k faces. Each chamber brick held a 512-thread workgroup a core while its few
+    long traces ran.
+
+**Landed (S2p):**
+- **velocity, split:**
+  - **Pass 1** stays in `seep.velocity`: PHIC, fill, B_MINPHI, zero, far-skip and particle transfers. It writes each
+    cell's need mask into its KNOWN word. Projection rewrites that word for every LACT brick, and nothing reads it in
+    between.
+  - **`seep.velocityTrace`** runs the backtraces:
+    - Each brick is TRACE_SLABS = 8 slabs of 64 cells (indirect x = active bricks, y = 8, from the new args slot
+      ARG_TRACE, counted by classify and reset by g2p).
+    - Each slab compacts its traced faces into a workgroup list, and full warps run `fineFaceSL` plus gravity.
+    - There is no velocity tile. Without the 20.7 KB tile and with 64-thread workgroups, the global-read samples are
+      as fast, and light bricks no longer hold a core.
+  - **Shared code:** `fineFaceSL` and `gravityOn` are now one WGSL block (FACE_SL_WGSL) shared with velocityBulk.
+    `slSegs` keeps the unclamped segment count for C_MAX_SEG.
+  - **Check:** US (vel 3N..6N) is bit-identical to HEAD on frozen state.
+  - **Time:** velocity plus trace takes 812 to 618 us at 1100 (interleaved kbench, 7 rounds).
+- **velocityBulk:**
+  - **Before:** an interface coarse face (fine cells below) made one thread trace its 16 fine faces serially, which
+    was the kernel's tail.
+  - **Now:** the block lists its interface faces, and 16 threads trace each one.
+  - **Check:** US and the coarse BUS faces are bit-identical.
+  - **Time:** 264 to 157 us.
+  - **What is left:** staging the coarse tile costs about 45 us beyond the launch (cface reads 16 fine faces next to
+    fine cells, with one workgroup a core), and the coarse traces about 70 us.
+
+**Tried and rejected (velocity traces), velocity plus trace in us, same session:**
+
+| variant | us |
+|---|---|
+| HEAD, merged | 812-852 |
+| Split, per-brick 512 threads, with tile | 692-705 |
+| Same, no tile | 795 |
+| Compacted per brick, with tile | 645-655 |
+| Compacted per brick, 256 threads, no tile | 633-649 |
+| Compacted per brick, sorted by axis | 677-686 |
+| Slabs of 32 / 64 / 128 threads | 655 / 618-636 / 636-638 |
+
+- **Slabs:** 64 was chosen.
+- **Sampling the components in a non-unrolled loop:** this did not lower the register limit (704).
+
+**coarseSolve, attributed (not changed).** The 32x32 matvec is only 1024 MACs, as noted.
+- **Method:** a probe keeps C_RES and never converges, so it is rerunnable at seep.coarseSolve.1.
+
+| part | us |
+|---|---|
+| Whole call | 83-103 (kbench is noisy here) |
+| Empty dispatch of the 1024-thread workgroup | 17.5 |
+| Thread-0 preamble and gates | about 5 (dropping the gate writes changed nothing) |
+| Each level-4 red-black sweep | about 8 |
+| Level-5 sweeps | about 15 |
+| Top solve | about 10 |
+
+- **The sweep cost is the work:** with the sweep's offS replaced by a diagonal-only update, the cost falls to that of
+  having no sweeps, so the cost is offS, not the barriers. Halving the cells per sweep halves it.
+- **Spill hypothesis:** the kernel needs 704 threads' worth of registers and runs 1024. I moved level 4's x and y
+  couplings to workgroup memory, which brought the uncapped limit to 896 threads.
+  - **Speed:** 72 against 83 us (minimums 63 against 65) in noisy runs.
+  - **Values:** they differ by 1 ulp (fma contraction).
+  - **Verdict:** not landed; spilling is not the main cost.
+- **Next candidate:** fold the solve into mgRestrict3's last workgroup. This needs a device-scope fence, which WGSL
+  lacks.
+
+**Not landed: the reservoir air-face skip (-24 us).** Projection reads Us when either cell's PHIC is negative. A
+DEEP or inactive neighbour's PHIC is not written by this step's velocity (DEEP bricks skip it; inactive ones keep
+clear's or an older value). So all 12 corners being non-negative is not on its own proof that projection skips the
+face. It needs the neighbour brick's class in the predicate, plus a test, before it can land.
+
+**A/B, check slot, 1200 steps, fenced median, interleaved (ab-s2p-1200.txt):**
+
+| run | HEAD 307be056 (S2o) | S2p |
+|---|---|---|
+| round 1 | 7.39 | 7.03 |
+| round 2 | 7.34 | 7.03 |
+| round 3 | 7.32 | 7.03 |
+
+That is -0.31 ms. Mean cycles are unchanged (3.30-3.34).
+
+**Gates, seep-bench 1200 on the check slot (compare-s2p.md, audit-s2p): all pass.**
+- G1 -4.04%. G2 -2.88 / -3.92 / -3.84 / -3.75%. G4 -1.55%. G5 90% wet at step 277.
+- G3 corrected: 1.286 / 2.588 / 3.898 / 5.197 L.
+- G6 corrected: centroid 372.6 / 387.0, L1 0.100 / 0.150. The limits are 0.327 / 0.214; the run-to-run spread of the
+  chamber profile is seen at S2o too.
+- G7 0.01%. G8: impact 375.8 / 375.4.
+- The bench's fenced median is 7.08 ms.
+- The audit matches S2o's (wall zone, G3 as written fails at 300 as before, ungated).
+
+**Ledger, 1200 / 300, two runs (ledger-s2p.txt, ledger-s2p-b.txt):** chamber phi at g2p against delivered is
+-0.55 / +0.57 / +0.58 / -0.01% in the first run and +0.21 / +0.07 / +0.65 / +0.86% in the second. Both are within 1%,
+with no deletions.

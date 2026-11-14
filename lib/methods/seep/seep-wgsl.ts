@@ -29,6 +29,8 @@ export const MAX_CYCLES = 9;
 export const AGGREGATION_OC = 1.6;
 /** Backtrace segment cap: 48 cells a step (14 m/s) at 1-cell segments; beyond it segments lengthen (recorded in maxSegments, not fatal). */
 export const MAX_SEGMENTS = 48;
+/** velocityTrace's 64-cell slabs a brick (its dispatch's y). */
+export const TRACE_SLABS = 8;
 
 /** ctrl word offsets. */
 export const C = {
@@ -42,6 +44,8 @@ export const C = {
   ARG_L4: 36, ARG_L4U: 40,
   /** In the args buffer: the shifted fine blocks (the second L0 smoothing partition, see B.LIST_SHIFT). */
   ARG_SHIFT: 44,
+  /** In the args buffer: the active list by TRACE_SLABS (velocityTrace's slabs along y). */
+  ARG_TRACE: 48,
   STEP: 16, FAIL: 17, PCOUNT: 18 /* 18,19 */, DELETED: 20, SEEDED: 21,
   RES: 22, CONV: 23, PARITY: 24, CYCLES: 25, FIRST_RES: 26, LAST_RES: 27, CAP_HITS: 28, CYCLES_TOTAL: 29,
   MAX_SEG: 30, OVERFLOW: 31,
@@ -143,7 +147,7 @@ const C_ARG_ACTB: u32 = ${C.ARG_ACTB}u; const C_ARG_ACTBB: u32 = ${C.ARG_ACTBB}u
 const C_N_LIQ: u32 = ${C.N_LIQ}u; const C_LIQ_COUNT: u32 = ${C.LIQ_COUNT}u; const C_L4_COUNT: u32 = ${C.L4_COUNT}u; const C_N_L4: u32 = ${C.N_L4}u;
 const C_EMIT_ACC: u32 = ${C.EMIT_ACC}u; const C_EMITTED: u32 = ${C.EMITTED}u;
 const C_ARG_L4: u32 = ${C.ARG_L4}u; const C_ARG_L4U: u32 = ${C.ARG_L4U}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
-const B_SFLAG: u32 = ${B.SHIFT_FLAG * BRICKS}u; const B_LSHIFT: u32 = ${B.LIST_SHIFT * BRICKS}u; const C_SHIFT_COUNT: u32 = ${C.SHIFT_COUNT}u; const C_N_SHIFT: u32 = ${C.N_SHIFT}u; const C_ARG_SHIFT: u32 = ${C.ARG_SHIFT}u;
+const B_SFLAG: u32 = ${B.SHIFT_FLAG * BRICKS}u; const B_LSHIFT: u32 = ${B.LIST_SHIFT * BRICKS}u; const C_SHIFT_COUNT: u32 = ${C.SHIFT_COUNT}u; const C_N_SHIFT: u32 = ${C.N_SHIFT}u; const C_ARG_SHIFT: u32 = ${C.ARG_SHIFT}u; const C_ARG_TRACE: u32 = ${C.ARG_TRACE}u; const TRACE_SLABS: u32 = ${TRACE_SLABS}u;
 const B_LBULK2: u32 = ${B.LIST_BULK2 * BRICKS}u; const B_LLIQ: u32 = ${B.LIST_BULK2 * BRICKS + NBULK}u;
 /** Composite h/4h: a fine face against a coarse cell couples over 2.5 cells (half a fine and half a coarse cell). */
 const SUBC: f32 = 0.4;
