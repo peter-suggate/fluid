@@ -51,7 +51,7 @@ export async function createNBFlipZoneObserver(device: GPUDevice, solver: GPUSol
 fn corner(p:vec3u,w:u32)->f32{return ${C}textureLoad(phi,vec3i(p),0).x;}
 fn faceU(a:vec3i)->f32{return ${C}textureLoad(velocity,a,0).x;}
 ${levelSetFillWGSL}
-${seepZoneWGSL(g)}
+${seepZoneWGSL(g, 64)}
 fn ownerFill(q:vec3u,w:u32)->f32{
  var c:array<f32,8>;
  for(var k=0u;k<8u;k++){c[k]=corner(q+umCorner(k,2u)*w,w);}
@@ -67,7 +67,10 @@ fn boxOrigin()->vec3i{return 32*(umWorldLow()-umFramePage());}
  let owner=umAllOwner(gid);
  if(owner.width!=0u){
   let window=umOrigin(owner);let q=vec3u(vec3i(window)-boxOrigin());let w=owner.width;
-  zoneAdd(q,w,ownerFill(window,w));
+  let liquid=ownerFill(window,w);
+  // Mean x-face u, read only where a jet slice uses it (right of the wall, above the floor band).
+  var u=0.0;if(liquid>0.0&&q.x>=ZONE_WALL_HIGH&&q.y>=ZONE_FLOOR_BAND){u=0.5*(faceU(umFace(owner,0u,-1,0u).anchor)+faceU(umFace(owner,0u,1,0u).anchor));}
+  zoneAdd(q,w,liquid,u);
   if(w==1u&&all(vec3i(q)==ZONE_THROAT)){
    atomicStore(&zoneWords[${ZONE_WORD.throatU}],bitcast<u32>(faceU(umFace(owner,0u,1,0u).anchor)));atomicStore(&zoneWords[${ZONE_WORD.throatFound}],1u);
   }

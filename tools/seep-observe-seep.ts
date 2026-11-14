@@ -19,7 +19,7 @@ ${source.declarations(GROUP)}
 ${source.wgsl}
 @group(${GROUP + 1}) @binding(0) var<storage,read_write> zoneWords:array<atomic<u32>>;
 ${levelSetFillWGSL}
-${seepZoneWGSL(g)}
+${seepZoneWGSL(g, WORKGROUP)}
 const OBS_DIMS:vec3u=vec3u(${g.nx}u,${g.ny}u,${g.nz}u);
 @compute @workgroup_size(${WORKGROUP}) fn observe(@builtin(global_invocation_id) gid:vec3u,@builtin(local_invocation_index) lane:u32){
  zoneBegin(lane);
@@ -31,7 +31,10 @@ const OBS_DIMS:vec3u=vec3u(${g.nx}u,${g.ny}u,${g.nz}u);
   var liquid=0.0;if(hi<0.0){liquid=1.0;}else if(lo<0.0){liquid=fill(v);}
   let q=vec3u(c);
   if(q.x+1u>ZONE_WALL_LOW&&q.x<ZONE_WALL_HIGH){zoneAddWallAll(liquid);}
-  if(liquid>0.0&&seepCellOpen(c)){zoneAdd(q,1u,liquid);}
+  if(liquid>0.0&&seepCellOpen(c)){
+   var u=0.0;if(q.x>=ZONE_WALL_HIGH&&q.y>=ZONE_FLOOR_BAND){u=0.5*(seepFaceU(c-vec3i(1,0,0),0u)+seepFaceU(c,0u));}
+   zoneAdd(q,1u,liquid,u);
+  }
  }
  if(all(gid==vec3u(0u))){
   atomicStore(&zoneWords[${ZONE_WORD.throatU}],bitcast<u32>(seepFaceU(ZONE_THROAT,0u)));atomicStore(&zoneWords[${ZONE_WORD.throatFound}],1u);

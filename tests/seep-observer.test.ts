@@ -20,6 +20,12 @@ function phi(x: number, y: number, z: number): number {
   if (x < 256) return y >= 4 && y <= 6 && z >= 2 && z <= 4 ? -0.5 : 1;
   return y - FILM - (x - 256) / 32 + 0.25 * Math.sin(0.7 * z + 0.3 * x);
 }
+/** The same scene plus a descending jet: a tube of radius 1.5 from y = 12 at the wall to y = 8 at x = 320, at z = 2. */
+function phiJet(x: number, y: number, z: number): number {
+  const base = phi(x, y, z);
+  if (x < 256) return base;
+  return Math.min(base, Math.hypot(y - (12 - (x - 256) / 16), z - 2) - 1.5);
+}
 const faceU = (x: number, y: number, z: number, axis: number) => axis === 0 ? 0.01 * x + y + 0.1 * z : -1;
 
 test("level-set fill is exact for planes", () => {
@@ -43,6 +49,9 @@ test("seep zone oracle matches closed forms", () => {
   assert.equal(s.wetFloor, 64 * g.nz);
   assert.ok(s.wall > 0 && s.wall <= 16 * 4, `wall ${s.wall}`);
   assert.equal(s.throatU, faceU(248, 4, 2, 0));
+  // Every open wall cell is a throat cell; nothing is above the floor band, so no jet slice holds liquid.
+  assert.equal(s.wallOpen, s.wall);
+  assert.ok(s.slices.length === 24 && s.slices.every(sl => sl.liquid === 0));
   const row = seepObservation(g, 60, 1 / 60, s, undefined, undefined);
   assert.ok(Math.abs(row.level_m - LEVEL * g.cell_m) < 1e-12);
   assert.ok(Math.abs(row.head_m - (LEVEL - 5) * g.cell_m) < 1e-12);
@@ -53,8 +62,22 @@ test("seep zone oracle matches closed forms", () => {
   assert.ok(Math.abs(next.drift - (-400 * 1.25e-4) / row.liquid_L.total) < 1e-12);
 });
 
+test("seep zone oracle jet slices follow a descending jet", () => {
+  const s = seepZoneOracle(g, phiJet, open, faceU, 0);
+  const row = seepObservation(g, 60, 1 / 60, s, undefined, undefined);
+  const slices = row.jetSlices!;
+  assert.equal(slices[0]!.x0, 256); assert.equal(slices[8]!.jet_L, 0);
+  // Slices 0-6 hold the jet's ~pi 1.5^2 x 8 cells (less where the tube meets z = 0, y = 8 or another liquid region).
+  for (let i = 0; i < 7; i++) {
+    const sl = slices[i]!, centre = 12 - (8 * i + 4) / 16;
+    assert.ok(sl.jet_L > 0 && sl.meanY !== null && Math.abs(sl.meanY - centre) < 0.75, `slice ${i}: mean y ${sl.meanY} vs ${centre}`);
+    // u = 0.01 x + y + 0.1 z by cell index on x faces, averaged over a cell's two: near 0.01 (x_c - 1/2) + (y_c - 1/2) + 0.1 (z_c - 1/2).
+    assert.ok(Math.abs(sl.meanU! - (0.01 * (256 + 8 * i + 3.5) + sl.meanY! - 0.5 + 0.1 * 1.5)) < 0.1, `slice ${i}: mean u ${sl.meanU}`);
+  }
+});
+
 /** The synthetic fields as a SeepObservationSource. */
-function syntheticSource(device: GPUDevice): SeepObservationSource {
+function syntheticSource(device: GPUDevice, phi: (x: number, y: number, z: number) => number): SeepObservationSource {
   const X = g.nx + 1, Y = g.ny + 1, Z = g.nz + 1, cells = g.nx * g.ny * g.nz;
   const phiData = new Float32Array(X * Y * Z), openData = new Uint32Array(cells), uData = new Float32Array(3 * cells);
   for (let z = 0; z < Z; z++) for (let y = 0; y < Y; y++) for (let x = 0; x < X; x++) phiData[x + X * (y + Y * z)] = phi(x, y, z);
@@ -84,11 +107,12 @@ fn seepParticleCount()->u32{return obsCount[0];}`,
   };
 }
 
-test("seep observer WGSL matches the CPU oracle", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
+for (const [label, field] of [["film", phi], ["film and jet", phiJet]] as const)
+test(`seep observer WGSL matches the CPU oracle (${label})`, { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice("seep observer", async device => {
-    const observer = await createSeepZoneObserver(device, syntheticSource(device), g);
+    const observer = await createSeepZoneObserver(device, syntheticSource(device, field), g);
     const gpu = await observer.observe(); observer.destroy();
-    const cpu = seepZoneOracle(g, phi, open, faceU, 7);
+    const cpu = seepZoneOracle(g, field, open, faceU, 7);
     // Fixed point rounds each cell to 1/4096 (moment 1/64 cell-cell): bound by the cell count.
     const cells = g.nx * g.ny * g.nz, near = (a: number, b: number, tol: number, what: string) => assert.ok(Math.abs(a - b) <= tol, `${what}: gpu ${a} cpu ${b}`);
     for (const k of ["total", "left", "wall", "right", "floorBand", "jet", "wallAll"] as const) near(gpu[k]!, cpu[k]!, cells / 8192 + 1e-3 * Math.abs(cpu[k]!) * 1e-3, k);
@@ -96,5 +120,12 @@ test("seep observer WGSL matches the CPU oracle", { skip: !process.env.WEBGPU_NO
     gpu.bins.forEach((b, i) => near(b, cpu.bins[i]!, cells / 8192, `bin ${i}`));
     assert.equal(gpu.wetFloor, cpu.wetFloor); assert.equal(gpu.particles, 7);
     near(gpu.throatU!, cpu.throatU!, 1e-6, "throat u");
+    near(gpu.wallOpen, cpu.wallOpen, cells / 8192, "open wall");
+    gpu.slices.forEach((sl, i) => {
+      const c = cpu.slices[i]!;
+      near(sl.liquid, c.liquid, cells / 8192, `slice ${i} liquid`);
+      near(sl.yMoment, c.yMoment, cells / 128 + 1e-6 * c.yMoment, `slice ${i} y moment`);
+      near(sl.uMoment, c.uMoment, cells / 2048 + 1e-5 * Math.abs(c.uMoment), `slice ${i} u moment`);
+    });
   });
 });

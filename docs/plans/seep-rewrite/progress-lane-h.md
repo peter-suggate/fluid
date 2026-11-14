@@ -286,3 +286,34 @@ tools/seep-audit-cells.ts); report `tools/seep-audit-report.ts`, written to `art
 - Where NB-FLIP actually loses liquid cannot be located from these observables, so its film loss explains somewhere between about a fifth and all of the gap.
 - The shape at step 1200: NB-FLIP's film is about 2 cells deep out to x = 400, then thins to about 1 cell. Seep's is 2.0-2.5 cells deep, then **piles at the far wall**: 3.7-4.4 cells at x = 464-512, which is +1.20 L of its +1.77 L excess.
 - Seep's jet lands *short* of NB-FLIP's (354 vs 380), which by itself would pull Seep's centroid left. So the centroid gap is not where the jet lands; it is the far-wall pile, NB-FLIP's thinning film, or both.
+
+## 2026-11-14 MILESTONE H6: corrected G3 and G8 (plan §4.1) in seep-compare; e20a907a re-judged
+
+The observer (`tools/seep-observables.ts`, both observers) now also records, at every sample step:
+- `wallOpen_L`: wall-zone h owners inside the throat patch;
+- `jetSlices`: 24 slices of 8 cells from x = 256, right owners at y >= 8 only. Each slice gives liquid, the liquid-weighted owner-centre y, and the liquid-weighted mean x-face u.
+
+These sums are computed in the same fixed-point pass as before. The observer runs only at sample steps, which timing excludes, so it costs nothing in timed steps. A GPU test checks them against the CPU oracle, including a synthetic descending jet. seep-compare changes:
+- G3 now uses open-cell delivered. G8 is the trajectory gate at 300 and 600: impact x within max(8, 3S), and RMS height over x 256-352 within max(3, 3S).
+- The §4 forms print as informational rows, "G3 (as written)" and "G8 (as written)".
+- Runs that predate §4.1 are refused.
+
+**Definition note (please confirm).** The slices hold only liquid at y >= 8, so NB-FLIP's slice mean y often ends at
+10.5-11.0 in its last jet slice and never falls below 10. That happened in 3 of the 4 reference realisations;
+the audit run happened to reach 9.9. Where no slice crosses 10, the impact is taken from the last two slices' line
+extended to y = 10, by at most one slice. The report says when this happens ("k of n extended").
+
+**New references** (`artifacts/seep-rewrite/nbflip-ref2/nbflip-check-{c,d}`): check-a/b predate the new fields. Both are 1200-step `--nb-stats`
+check runs. NB-FLIP's code is identical between check-a/b's commit and e20a907a. To avoid lane S's uncommitted
+`seep-kernels.ts`, these runs and the e20a907a re-run used a read-only export of e20a907a's lib/ and tools/ (plus the new
+harness files) in ~/code/me/fluid-scratch/lane-h/tree-e20a907a. Their meta commit therefore reads "unknown".
+
+e20a907a re-judged (`artifacts/seep-rewrite/seep-e20a907a/compare-g8.md`): G1, G2, **G3 (corrected)**, G4, G5, G7 pass.
+G6 fails: centroid 384.1 / 396.8 vs 367.0 / 370.4. **G8 (corrected) fails**: impact x 354.3 / 354.1 vs NB-FLIP 380.8 / 382.8, and
+RMS 9.97 / 10.43 cells against a limit of 3. G3 (as written) and G8 (as written) fail, informational only.
+
+Explaining Seep's jet beyond x = 320 (lane S's 6bc9a3fa self-check vs H5):
+- There is no discrepancy and no contamination: the slices exclude y < 8, and Seep's jet volume per slice stays flat at about 0.004 L through x = 352.
+- A parabola fitted to Seep's slices at x < 320 implies u_x = 2.26-2.30 m/s from its curvature, matching the measured 2.25. It also implies an exit vertical velocity of -0.31 to -0.34 m/s.
+- Extended past 320, that parabola predicts the measured heights to within 1.3 cells (e.g. 12.2-12.7 at x 344-352, measured 13.1-13.5).
+- So Seep's e20a907a jet is ballistic for its own exit state (slow, angled down). H5's "falls faster than g" is withdrawn: H5 compared it against the parabola from the throat's u0 with a level exit.
