@@ -358,3 +358,57 @@ found, so item 2 (speed) continues.
     exact 2-halo tile changes the column carry.
   - Pipelined or Chronopoulos-Gear CG to merge pcgPrecond with pcgDirection: z on the halo is not available
     inside the dispatch.
+
+## 2026-11-14 MILESTONE S2h: jet trajectory fixed at the outlet (emission velocity); 7/8 gates as written, G8 passes as amended
+
+**The defect was in emission.** Instrumenting mean particle u and v per 8-cell slice of the jet showed:
+- Along the flight, the slice-to-slice change was already (0, -g dt): u_y fell by 0.18 m/s per slice at
+  u_x 2.1 m/s. So G2P, P2G, pressure and separate were not changing the flight.
+- The jet *left* the outlet wrong: u_x 1.98 m/s against the throat face's 2.59 m/s, and u_y about -0.1 m/s.
+
+emit gave each new particle velU(p0), a trilinear sample on the outlet plane x = 256. This has two effects:
+- **u_x is diluted by the wall.** Across the 2x2 throat, half the samples took a 25% weight from the closed
+  wall faces next to it (u = 0) on each axis. The mean weight on throat faces is 0.875^2 = 0.766, and
+  2.59 x 0.766 = 1.98 m/s, which is the measured exit speed.
+- **u_y is fed back from the jet.** The v and w samples took half their weight from the first chamber
+  column, where the jet is already falling.
+
+**Fix (emit only).** A particle crossing outlet face (256, fy, fz) now takes:
+- the face's own MAC normal velocity (Harlow & Welch 1965);
+- the tangential velocity of the upstream throat cell it leaves (donor cell; Courant, Isaacson & Rees 1952).
+
+This is the same velocity whose u_x already set the swept volume and the placement, so the emitted mass is
+unchanged. There are no clamps and no jet special case.
+
+**After the fix** (300 steps, check slot): u_x is 2.55-2.61 m/s along the whole flight and u_y starts at -0.03 m/s.
+The mean height per slice is within 1-5 cells of the ballistic parabola.
+
+Audit (artifacts/seep-rewrite/lane-s/audit-s2h/audit.md; tools at HEAD e5239022, because the working-tree
+observer was mid-edit by lane H):
+
+| | NB-FLIP | Seep S2g | Seep S2h |
+|---|---|---|---|
+| impact x, step 300 / 600 | 379.8 / 379.2 | 354.1 / 353.7 | 375.8 / 375.3 |
+| RMS mean-y difference vs NB, slices in [256, 352), step 300 / 600 | - | ~9 | 1.43 / 1.19 cells |
+
+The amended G8 limits are impact within 8 cells and RMS within 3 cells.
+
+**Far-wall pile, depth at x 448-512:**
+- step 1200: 2.3-3.1 cells, against NB 1.0-1.8 (S2g: 3.7-4.4);
+- step 600: 0.85-2.2 cells, against NB 0.68-1.69.
+
+Ledger, 1200 steps (cells): chamber phi vs delivered is +0.0 / +0.4 / +0.5 / +0.4%. There are no deletions.
+Drift is at most 6e-5.
+
+seep-bench 1200 vs NB-FLIP, check slot (artifacts/seep-rewrite/lane-s/compare-s2h.md):
+- **G1:** pass, q_left -3.91% (was -4.24%).
+- **G2:** pass, all checkpoints within 4%.
+- **G3:** pass even as written; 300: 1.281 vs bound 1.282.
+- **G4:** pass, 2.597 vs 2.639 m/s.
+- **G5:** pass, 90% wet at step 277 vs 299.
+- **G6:** pass, now inside the limits. 600: centroid 370.6 vs 368.9, L1 0.092. 1200: centroid 380.1 vs 369.8,
+  L1 0.178 (limit 0.226).
+- **G7:** pass, drift 0.01%.
+- **G8 as written** (jet column volume, now report-only): 0.0331 vs 0.0770 L.
+
+Fenced median 10.74 ms on the check slot (thirds 9.96 / 10.91 / 11.34, p95 12.11), with lane H sharing the GPU.

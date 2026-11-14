@@ -388,7 +388,15 @@ var<workgroup> sTotal: array<f32, 4>;
 @compute @workgroup_size(512) fn main(@builtin(local_invocation_index) l: u32) {
   let t = l >> 7u; let s = l & 127u;
   let fy = THROAT_Y0 + i32(t & 1u); let fz = THROAT_Z0 + i32(t >> 1u);
-  let uf = velU(vec3f(f32(PX0), f32(fy) + 0.5, f32(fz) + 0.5));
+  // The liquid crossing outlet face (PX0, fy, fz) carries the face's own normal velocity (MAC, Harlow &
+  // Welch 1965) and the tangential velocity of the upstream throat cell it leaves (donor cell, Courant,
+  // Isaacson & Rees 1952). Trilinear samples on the outlet plane would mix in the closed wall faces
+  // around the 2x2 throat (u = 0: 23% slow on average) and, tangentially, the chamber column the jet is
+  // already falling through.
+  let up = vec3i(PX0 - 1, fy, fz);
+  let uf = vec3f(velUFace(0u, vec3i(PX0, fy, fz)),
+    0.5 * (velUFace(1u, up) + velUFace(1u, up + vec3i(0, 1, 0))),
+    0.5 * (velUFace(2u, up) + velUFace(2u, up + vec3i(0, 0, 1))));
   if (s == 0u) {
     // Wetted fraction of the face, from the level set on the plane (4x4 bilinear samples).
     var wet = 0.0;
@@ -411,12 +419,11 @@ var<workgroup> sTotal: array<f32, 4>;
     let jit = 0.2 * (vec2f(hashUnit(step, 64u * t + j, q), hashUnit(step, 64u * t + j, q + 4u)) - vec2f(0.5));
     let off = vec2f(0.25 + 0.5 * f32(q & 1u), 0.25 + 0.5 * f32(q >> 1u)) + jit;
     let p0 = vec3f(f32(PX0), f32(fy) + off.x, f32(fz) + off.y);
-    let ue = velU(p0);
     let x = collide(p0 + (dist / uf.x) * uf);
     let k = atomicAdd(&ctrl[C_PCOUNT + 1u - cfg.a], 1u);
     if (k >= CAP) { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); continue; }
     parts[base + k] = vec4f(x, 0.0);
-    parts[base + CAP + k] = vec4f(ue, 0.0);
+    parts[base + CAP + k] = vec4f(uf, 0.0);
     atomicAdd(&ctrl[C_EMITTED], 1u);
     atomicAdd(&bricks[B_PCOUNT + brickOfCell(vec3i(floor(x)))], 1u);
   }
