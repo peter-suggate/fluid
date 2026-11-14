@@ -173,7 +173,7 @@ function judge(c: Obs): Gate[] {
       const nbC = nbMean(o => o.centroid[i]!), dc = c.centroid[i]! - nbC, L1 = l1(c.profile[i]!, meanProfile(i)), rep = repeatL1(i), limit = Math.max(3 * rep, 0.15);
       return { step: k, centroid: c.centroid[i], nbCentroid: nbC, centroidS: nbS(o => o.centroid[i]!), L1, repeatL1: rep, limit, pass: Math.abs(dc) <= 16 && L1 <= limit };
     });
-    gates.push({ id: "G6", pass: rows.every(r => r.pass), rows, detail: rows.map(r => `${r.step}: centroid ${f(r.centroid, 1)} vs ${f(r.nbCentroid, 1)} (limit 16); L1 ${f(r.L1)} <= ${f(r.limit)}`).join("; ") });
+    gates.push({ id: "G6", pass: rows.every(r => r.pass), rows, detail: rows.map(r => `${r.step}: centroid ${f(r.centroid, 1)} vs ${f(r.nbCentroid, 1)} (limit 16); L1 ${f(r.L1)} ${r.L1 <= r.limit ? "<=" : ">"} ${f(r.limit)}`).join("; ") });
   }
   { // G7
     const nb = mean(across(o => Math.abs(o.drift))), v = c.drift;

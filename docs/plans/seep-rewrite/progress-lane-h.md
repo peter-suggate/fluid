@@ -317,3 +317,53 @@ Explaining Seep's jet beyond x = 320 (lane S's 6bc9a3fa self-check vs H5):
 - A parabola fitted to Seep's slices at x < 320 implies u_x = 2.26-2.30 m/s from its curvature, matching the measured 2.25. It also implies an exit vertical velocity of -0.31 to -0.34 m/s.
 - Extended past 320, that parabola predicts the measured heights to within 1.3 cells (e.g. 12.2-12.7 at x 344-352, measured 13.1-13.5).
 - So Seep's e20a907a jet is ballistic for its own exit state (slow, angled down). H5's "falls faster than g" is withdrawn: H5 compared it against the parabola from the throat's u0 with a level exit.
+
+## 2026-11-14 MILESTONE H7: combined gate round on S2h (bbc7828d)
+
+Build: HEAD dd8cd428, whose lib/ is identical to bbc7828d (dd8cd428 adds only the lane H tools). The tree was clean at the check run
+(`dirtyLibOrTools: false`). The timing runs read dirty only because of a one-line formatting fix in `tools/seep-compare.ts`
+(G6 now prints ">" when L1 exceeds its limit), which the bench does not load. Lane S's current uncommitted
+`lib/methods/seep` edits are all stamped 21:38:18 (+13), 20 s after the last timing run ended (21:37:58). The Seep timing runs
+also end within 0.003 L and 1 particle of the check run at step 1200, so all runs measured bbc7828d.
+
+Runs (all rc 0, no Metal aborts in the log), in `artifacts/seep-rewrite/final-bbc7828d/`:
+- check: `seep-bench --method=seep --steps=1200 --every=60 --name=seep-check`
+- timing, back to back: `seep-bench --method=seep --mode=fenced`, `--method=seep --mode=pipelined`, `--method=nbflip --mode=fenced`
+  (`--slot=timing --steps=1200 --every=60`). NB-FLIP pipelined is reused from timing-e20a907a (32.40 ms; NB-FLIP code unchanged).
+- `seep-compare artifacts/seep-rewrite/nbflip-ref2 timing-e20a907a/nbflip-timing-pipelined.jsonl final-bbc7828d/*.jsonl --candidate=seep-check`
+  gives `compare.md`. The same judged on the timing-fenced run gives `compare-sensitivity-timing-fenced.md` (informational).
+
+| gate | verdict | detail |
+|---|---|---|
+| G1 | pass | q_left 0.2590 vs 0.2700 L/s (-4.07%); windows 18/18 |
+| G2 | pass | -2.76% / -3.87% / -3.92% / -3.74% at 300/600/900/1200 |
+| G3 | pass | 1.278 in [1.111, 1.394]; 2.589 in [2.071, 2.821]; 3.902 in [2.779, 4.237]; 5.187 in [3.215, 5.643] L |
+| G3 (as written) | pass, not gated | 1.278 in [1.111, 1.279] (0.001 under the bound) |
+| G4 | pass | throat u 2.597 vs 2.639 m/s (-1.57%) |
+| G5 | pass | 90% wet at step 271 vs 296; 16379 vs 16369 wet at 1200 |
+| G6 | **FAIL** | 600: centroid 370.7 vs 367.0, L1 0.094 <= 0.327; 1200: centroid 385.9 vs 370.4 (limit 16), **L1 0.227 > 0.214** |
+| G7 | pass | drift 0.00% vs NB-FLIP 0.51% |
+| G8 | pass | 300: impact 375.8 vs 380.8 (limit 8), RMS 0.78 (limit 3); 600: impact 375.3 vs 382.8, RMS 1.40 |
+| G8 (as written) | fail, not gated | jet column 0.0331 vs 0.0765 L (Seep is at the free-jet 0.032 L) |
+
+§5 (timing slot):
+
+| | NB-FLIP | Seep | ratio |
+|---|---|---|---|
+| fenced median ms | 34.72 | 10.74 | **3.23x** |
+| fenced p95 ms | 38.90 | 11.98 | |
+| pipelined ms/step | 32.40 (timing-e20a907a) | 9.88 | **3.28x** |
+| construction ms | 11242 | 2140 | |
+| peak GPU bytes | 1244173500 | 1049314004 | |
+
+Performance: PASS (stretch 5x not reached). NB-FLIP's fenced median is 3% slower than at e20a907a (33.62 ms), which is run-to-run noise.
+
+G6 reading:
+- G6 is borderline, not a clear failure. Seep's own run-to-run spread at 1200 is a centroid of 381.0-386.6 and an L1 of 0.170-0.227. The timing-fenced run passes G6.
+- The limit is narrow because NB-FLIP's two references agree closely (repeat L1 0.071, times 3 is 0.214).
+- The profile difference at 1200, normalised:
+  - Seep holds less in bins 4-8 (x 320-400): -0.015 to -0.026 per bin;
+  - Seep holds more in bins 10-15, mostly at the far wall: bin 15 is +0.035, bin 14 +0.029.
+- Seep's right chamber also holds 5.19 L where NB-FLIP's holds 3.39 L, because NB-FLIP loses about 1.8 L of floor film (plan §4.1 notes this part of the gap).
+- More liquid in the film carries more momentum to the far wall, where it piles up. This would shift the profile even with an identical jet.
+- Whether G6 should count NB-FLIP's film loss (as G3 now does) is the coordinator's call. Under G6 as written, S2h fails narrowly and nondeterministically at step 1200.

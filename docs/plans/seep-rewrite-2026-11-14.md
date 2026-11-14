@@ -32,7 +32,8 @@ Lanes:
 | Gates at e20a907a (lane S run) | G1 G2 G4 G5 G7 pass; G3 fails at step 300 only (1.290 vs 1.282); G6 centroid 392 vs 370; G8 jet 0.037 vs 0.077 L |
 | Lane H independent check (e5239022) | 3.18x fenced (10.58 vs 33.62 ms), 3.27x pipelined (9.91 vs 32.40); gates match lane S |
 | Measurement audit H5 | done: G3 and G8 corrected (§4.1); Seep jet exits about 2.0 m/s and lands 27 cells short, sent to lane S |
-| Combined gate round | todo |
+| Corrected §4.1 G3/G8 in seep-compare | done (dd8cd428); new NB refs nbflip-ref2 (check-c/d); e20a907a re-judged: G3 passes, G6 and G8 fail |
+| Combined gate round, S2h (bbc7828d; run at dd8cd428, lib identical) | G1–G5, G7, G8 (corrected) pass; **G6 fails at 1200 on L1 only** (0.227 > 0.214; centroid 385.9 vs 370.4, limit 16); the timing-fenced Seep run passes G6 (L1 0.170, centroid 381.0), so it is borderline. §5 PASS: fenced 3.23x (10.74 vs 34.72 ms), pipelined 3.28x (9.88 vs 32.40, NB-FLIP pipelined reused from timing-e20a907a). `artifacts/seep-rewrite/final-bbc7828d/` |
 
 ## 1. The reference: NB-FLIP on the seep, as measured
 
