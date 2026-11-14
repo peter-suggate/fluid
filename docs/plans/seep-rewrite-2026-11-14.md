@@ -30,7 +30,8 @@ Lanes:
 | S1: correctness milestone | partial: particle-carried chamber (75cab37b) conserves (ledger within 0.6%, drift +0.01% at 1200) |
 | S2: speed milestone | e20a907a: 10.65 ms fenced, 3.16x on lane S's check-slot run; lane H independent timing-slot check pending |
 | Gates at e20a907a (lane S run) | G1 G2 G4 G5 G7 pass; G3 fails at step 300 only (1.290 vs 1.282); G6 centroid 392 vs 370; G8 jet 0.037 vs 0.077 L |
-| Measurement audit (lane H) | in progress: NB wall zone counts solid ghost phi (0.140 to 0.248 L, throat holds 0.008 L); NB jet vs ballistic trajectory |
+| Lane H independent check (e5239022) | 3.18x fenced (10.58 vs 33.62 ms), 3.27x pipelined (9.91 vs 32.40); gates match lane S |
+| Measurement audit H5 | done: G3 and G8 corrected (§4.1); Seep jet exits about 2.0 m/s and lands 27 cells short, sent to lane S |
 | Combined gate round | todo |
 
 ## 1. The reference: NB-FLIP on the seep, as measured
@@ -209,6 +210,32 @@ The tolerance is measured, not invented:
 
 Every report carries the full table at both checkpoints, plus step time. A gate
 loosened after the fact is a failure, not a pass.
+
+### 4.1 Measurement corrections after audit H5 (2026-11-14)
+
+Lane H's audit (e5239022, `artifacts/seep-rewrite/audit-s2g/audit.md`) found that two
+gates measured NB-FLIP artefacts instead of physics. Both are corrected below. Every
+report still prints the original definitions next to the corrected ones, so each
+change stays visible.
+
+- **G3, delivered volume.** NB-FLIP's observer counts solid cells in the wall zone.
+  Its wall-zone growth (+0.109 L by step 120) lies entirely in 4h owners that overlap
+  solid wall, which is ghost phi. The open throat holds a constant 0.008 L, all 64
+  cells full. Corrected rule: NB_delivered = NB left loss − change in **open-cell**
+  wall liquid. The band's intent is unchanged: from NB-FLIP's result up to NB-FLIP
+  without its measured volume loss.
+- **G8, jet.** NB-FLIP's jet follows the ballistic curve, but its level set holds
+  about 2.4× the volume its flux can carry: 0.076 L in the 64-cell column, against
+  0.032 L for a free jet carrying the throat flow. Matching that volume would mean
+  copying the bloat. Corrected G8 tests what NB-FLIP does get right, the trajectory,
+  at steps 300 and 600:
+  - impact x (where the liquid-weighted mean y reaches y = 10) within ±max(8 cells, 3·S);
+  - RMS difference in liquid-weighted mean height per 8-cell x-slice over
+    x ∈ [256, 352) within max(3 cells, 3·S).
+
+  The raw jet-column volume is still reported, but not gated.
+- G1, G2, G4–G7 are unchanged. G6 stays as written, even though part of its gap comes
+  from NB-FLIP's floor-film loss (1.95 L, 36% of delivered, by step 1200).
 
 ## 5. Performance acceptance
 
