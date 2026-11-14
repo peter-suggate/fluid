@@ -408,6 +408,9 @@ export interface SimulationMethod {
   /** Hide the generic quality selector when the method exposes its relevant
    * scientific trade-offs directly. */
   showQualityControl?: boolean;
+  /** Scene ids (`SceneDescription.sceneId`) this method can run. Absent means
+   * every scene; the solver picker disables the method elsewhere. */
+  scenes?: readonly string[];
   /**
    * Field-visualization modes (`GridOverlayMode` strings) whose data this
    * method's solver actually publishes. Pickers narrow the visualization

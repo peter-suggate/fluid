@@ -1356,6 +1356,23 @@ export class SimulationController {
     this.session(paneId).runtime.getState().setNotice(`Quality ${quality} · simulation reset`);
   }
 
+  /** Install another registered solver for this pane's scene, from t = 0. */
+  setMethod(methodId: string, paneId: PaneId = PRIMARY_PANE_ID) {
+    const session = this.session(paneId), state = session.method.getState();
+    if (methodId === state.methodId) return;
+    const method = getMethod(methodId), sceneId = session.scene.getState().scene.sceneId ?? "";
+    if (method.id !== methodId) throw new Error(`Unknown simulation method ${methodId}`);
+    if (method.scenes && !method.scenes.includes(sceneId)) {
+      session.runtime.getState().setNotice(`${method.shortLabel} runs only ${method.scenes.join(", ")}`, "warn");
+      return;
+    }
+    validateMethodConfiguration(methodId, state.quality, state.overrides[methodId] ?? {});
+    session.method.getState().setMethod(methodId);
+    this.announceGPURebuild(`Switch solver to ${method.shortLabel}`, paneId);
+    this.reset(undefined, undefined, paneId);
+    session.runtime.getState().setNotice(`Solver ${method.shortLabel} · simulation reset`);
+  }
+
   /** Structural settings start from a defined t=0 state. Runtime-safe settings
    * are applied to the live GPU solver without changing the simulation clock. */
   private announceGPURebuild(operation: string, paneId: PaneId = PRIMARY_PANE_ID) {

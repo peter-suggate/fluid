@@ -8,7 +8,8 @@ import { TANK_SELECTION_ID, tankExtentFields } from "../lib/core/editor-tank";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
-import { getMethod } from "../lib/core/method-registry";
+import { getMethod, registeredSimulationMethods } from "../lib/core/method-registry";
+import { Select } from "./ui";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { isEditableOak } from "../lib/core/oak-tree-controls";
@@ -115,16 +116,32 @@ function TankRow() {
   />;
 }
 
-/** The installed fluid solver, shown beside the scene controls. */
+/** The installed fluid solver, and the picker onto the others registered for
+ * this scene; a method that declares `scenes` is listed but disabled elsewhere. */
 function SolverRow() {
   const session = useSession();
-  const method = getMethod(session.method(state => state.methodId));
+  const methodId = session.method(state => state.methodId);
+  const sceneId = session.scene(state => state.scene.sceneId) ?? "";
+  const method = getMethod(methodId);
+  const methods = registeredSimulationMethods();
   return <ToolstripRow
     icon={<Sigma width={14} height={14} strokeWidth={1.7} aria-hidden />}
     name="Fluid solver"
     hint={method.description}
     testId="scene-solver-row"
-    after={<span className="toolstrip-name">{method.shortLabel}</span>}
+    after={methods.length > 1
+      ? <Select<string>
+        ariaLabel="Fluid solver"
+        testId="scene-solver-select"
+        value={methodId}
+        options={methods.map((candidate) => {
+          const runs = !candidate.scenes || candidate.scenes.includes(sceneId);
+          return { value: candidate.id, label: candidate.shortLabel, disabled: !runs,
+            hint: runs ? candidate.description : `${candidate.description} Runs only ${candidate.scenes!.join(", ")}.` };
+        })}
+        onChange={(id) => simulation.setMethod(id, session.id)}
+      />
+      : <span className="toolstrip-name">{method.shortLabel}</span>}
   />;
 }
 

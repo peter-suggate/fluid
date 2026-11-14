@@ -39,6 +39,7 @@ export const seepMethod: SimulationMethod = {
   },
   qualityLabels: { balanced: "Fixed numerics", high: "Fixed numerics", ultra: "Fixed numerics" },
   showQualityControl: false,
+  scenes: SEEP_METHOD_SCENES,
   params: [],
   pressureMapping: "Warm-started multigrid V-cycles until the divergence tolerance, capped.",
   presetFor: () => ({}),

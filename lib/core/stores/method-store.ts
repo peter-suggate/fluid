@@ -12,6 +12,7 @@ interface MethodStore {
   quality: GPUQuality;
   overrides: Record<string, MethodParamValues>;
   setQuality: (quality: GPUQuality) => void;
+  setMethod: (methodId: string) => void;
   setParam: (methodId: string, key: string, value: MethodParamValue) => void;
   resetParam: (methodId: string, key: string) => void;
   resetParams: (methodId: string) => void;
@@ -33,6 +34,10 @@ export const createMethodStore = () => create<MethodStore>((set) => ({
   setQuality: (quality) => set(state => {
     validateMethodConfiguration(state.methodId, quality, state.overrides[state.methodId] ?? {});
     return { quality };
+  }),
+  setMethod: (methodId) => set(state => {
+    validateMethodConfiguration(methodId, state.quality, state.overrides[methodId] ?? {});
+    return { methodId };
   }),
   setParam: (methodId, key, value) => set(state => {
     const overrides = { ...state.overrides[methodId], [key]: value };
