@@ -233,3 +233,56 @@ Speed (check slot, GPU otherwise idle: 0.02 GB in use at start; indicative only)
 p95 24.0, thirds 19.7 / 21.1 / 22.4. Construction 1.8 s, 1.05 GB. That is 1.59x NB-FLIP's 33.69 ms timing
 median (3x needs 11.2 ms). No timing-slot run yet: a timing run of a gate-failing build would only
 measure a solver that does not yet match.
+
+## 2026-11-14 MILESTONE H5: independent verdict on e20a907a (S2g), section 5 timing, and the S2g audit
+
+**Gates** (my own 1200-step check run, committed tree: `seep-bench --method=seep --steps=1200 --every=60 --out=artifacts/seep-rewrite/seep-e20a907a --name=seep-check`; report `artifacts/seep-rewrite/seep-e20a907a/compare.md`). This reproduces lane S's compare-s2g to the third digit.
+
+| gate | verdict | detail |
+|---|---|---|
+| G1 | pass | q_left 0.2580 vs 0.2697 L/s (-4.33%, limit 5%); 18/18 windows |
+| G2 | pass | left loss -3.43 / -4.30 / -4.31 / -4.09% |
+| G3 | **FAIL** | step 300 only: 1.293 against an upper bound of 1.282; 600/900/1200 pass |
+| G4 | pass | throat u 2.588 vs 2.639 (-1.95%) |
+| G5 | pass | 90% wet at step 366 vs 299 (+22%, limit 25%) |
+| G6 | **FAIL** | centroid 384.5 / 395.0 vs 368.9 / 369.8; L1 0.277 / 0.342 (limits 0.202 / 0.226) |
+| G7 | pass | drift +0.01% |
+| G8 | **FAIL** | jet column 0.0371 vs 0.0770 L (-51.9%) |
+
+**Section 5 timing.** Timing slot, the four runs back to back, all rc 0; dir `artifacts/seep-rewrite/timing-e20a907a`:
+
+| | NB-FLIP | Seep | ratio | pass (>= 3x) |
+|---|---|---|---|---|
+| fenced median ms | 33.62 | **10.58** | **3.18x** | yes (5x stretch: no) |
+| fenced p95 / mean ms | 37.38 / 32.97 | 11.76 / 10.56 | | |
+| fenced thirds ms | 29.2 / 33.6 / 36.1 | 9.8 / 10.8 / 11.1 | | |
+| pipelined ms/step | 32.40 | **9.91** | **3.27x** | yes |
+| construction ms | 10768 | 1796 | | |
+| peak GPU bytes requested | 1.244e9 | 1.049e9 | | |
+
+NB-FLIP's rerun reproduces H1b to within 0.6% (33.69 fenced / 32.22 pipelined). Lane S's compare showed '-' for NB-FLIP pipelined only because it was not given the pipelined run.
+
+**Audit.** Runs `seep-bench --steps=600 --every=60 --audit=0,60,120,300,600` for both methods (new `--audit` option,
+tools/seep-audit-cells.ts); report `tools/seep-audit-report.ts`, written to `artifacts/seep-rewrite/audit-s2g/audit.md`.
+
+(a) G3's "delivered".
+- NB-FLIP's open throat cells hold 0.0080 L at every audit step (0 to 600), which is the full 64 cells, all h owners.
+- Its h solid cells hold about 0.002 L and do not grow.
+- The whole wall-zone growth (+0.109 L by step 120, +0.115 by 600) is in **4h owners overlapping the wall zone**. No throat cell is a 4h owner, so that growth is phi inside solid cells.
+- Redefining delivered as left loss minus the change in open-cell wall liquid moves G3's upper bound at step 300 from 1.282 to 1.397 L. Seep's 1.293 then passes at every checkpoint (upper bounds 1.397 / 2.823 / 4.238 / 5.641). The gate is unchanged pending your decision.
+- Seep, for contrast: its solid wall cells carry 0.39 L at step 0 and 0.87 L from step 60 of negative extrapolated phi. That is uncounted, and harmless to the gates.
+
+(b) Jet trajectory. NB-FLIP: throat u0 2.64. Seep: throat u0 2.60; its jet's horizontal u is 2.0-2.25.
+- **NB-FLIP's jet is ballistic.** Its mean y follows the parabola to within about 2 cells down to y = 30, then falls 2-4 cells below it. Its horizontal u stays at 2.3-2.8, which is u0. It reaches y = 10 at x = 380, against a ballistic floor at 383.
+- **But NB-FLIP's jet carries about 2.4x its flux in volume.** A free jet with constant horizontal u holds Q/u per unit length, so 0.032 L over 64 cells. NB-FLIP's level set holds 0.076 L there, about 0.010 L per 8-cell slice moving at 2.5 m/s, which is about 0.6 L/s against the 0.26 L/s the throat delivers. So the excess is a fat level set around a sub-resolved 2x2 jet, not a slowed and thickened jet. The hypothesis that NB-FLIP's jet slows, thickens and lands short is refuted.
+- **Seep's jet volume is flux-consistent:** about 0.0045 L a slice at 2.2 m/s is about 0.25 L/s, equal to Q. Its 0.037 L is close to the 0.032 L ballistic column.
+- **But Seep's jet lands short.** It leaves the throat face at about 2.0 m/s rather than 2.6, and falls faster than g. At x = 344-352 its mean y is 13.5, where the parabola gives 34 from u0, or about 26 from its own 2.2 m/s. It reaches the floor at x = 354, against 381 ballistic. Both steps 300 and 600 agree.
+- So, plainly: G8 as written rewards NB-FLIP's level-set bloat. Seep's trajectory is wrong in the other direction: too slow at the exit and too steep a fall.
+
+(c) Right-chamber profile, Seep minus NB-FLIP.
+- NB-FLIP's chamber is missing 0.60 L of its delivered volume at step 600 (22%) and 1.95 L at step 1200 (36%), with delivered computed as in (a).
+- If that liquid is restored evenly over the floor, NB-FLIP's centroid moves 369.7 to 374.9 at step 1200, which closes **21%** of the 25.3-cell gap (22% at step 600).
+- If it is restored only where NB-FLIP's film thins (x >= 400), it closes **124%**.
+- Where NB-FLIP actually loses liquid cannot be located from these observables, so its film loss explains somewhere between about a fifth and all of the gap.
+- The shape at step 1200: NB-FLIP's film is about 2 cells deep out to x = 400, then thins to about 1 cell. Seep's is 2.0-2.5 cells deep, then **piles at the far wall**: 3.7-4.4 cells at x = 464-512, which is +1.20 L of its +1.77 L excess.
+- Seep's jet lands *short* of NB-FLIP's (354 vs 380), which by itself would pull Seep's centroid left. So the centroid gap is not where the jet lands; it is the far-wall pile, NB-FLIP's thinning film, or both.

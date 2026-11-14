@@ -4,6 +4,8 @@
  * node --import tsx tools/seep-bench.ts --method=nbflip|seep [--steps=1200] [--every=60]
  *   [--out=artifacts/seep-rewrite/runs] [--name=NAME] [--mode=fenced|pipelined] [--from=13] [--nb-stats]
  *   [--slot=check|timing]   (the fluid-gpu-run.sh mode; seep-compare takes speed from timing runs only)
+ *   [--audit=0,120,300,600] (fenced only: at these sample steps also dump every owner at x >= wall.low and log
+ *                            an `audit` row: wall zone split open/solid, jet slices; tools/seep-audit-cells.ts)
  *
  * Both solvers are built through the method registry (lib/methods, getMethod)
  * on the same sceneDocument("reservoir-seep"), on the same Dawn device setup
@@ -48,12 +50,13 @@ import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { seepGeometry, seepObservation, type SeepObservation } from "./seep-observables";
 import { createNBFlipZoneObserver, type ZoneObserver } from "./seep-observe-nbflip";
 import { createSeepZoneObserver } from "./seep-observe-seep";
+import { auditCells, createNBFlipCellDump, createSeepCellDump, type CellDump } from "./seep-audit-cells";
 
 export const SEEP_BENCH_METHODS = { nbflip: "uniform-narrow-band-flip", seep: "seep-m1max" } as const;
 const SCENE_ID = "reservoir-seep";
 
 const args = process.argv.slice(2);
-for (const a of args) assert.ok(/^(--(?:method|steps|every|out|name|mode|from|slot)=.+|--nb-stats)$/.test(a), `Unknown option: ${a}`);
+for (const a of args) assert.ok(/^(--(?:method|steps|every|out|name|mode|from|slot|audit)=.+|--nb-stats)$/.test(a), `Unknown option: ${a}`);
 const option = (key: string) => args.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const methodKey = option("method") as keyof typeof SEEP_BENCH_METHODS | undefined;
 assert.ok(methodKey && methodKey in SEEP_BENCH_METHODS, "--method=nbflip|seep");
@@ -66,6 +69,9 @@ const nbStats = args.includes("--nb-stats");
 /** The fluid-gpu-run.sh slot the run holds: only `timing` (exclusive GPU) runs count for §5 speed. */
 const slot = option("slot") ?? "check";
 assert.ok(slot === "check" || slot === "timing", "--slot=check|timing (the fluid-gpu-run.sh mode this run holds)");
+const auditSteps = new Set((option("audit") ?? "").split(",").filter(Boolean).map(Number));
+for (const a of auditSteps) assert.ok(Number.isInteger(a) && a >= 0 && a <= steps && (a % every === 0 || a === steps), `--audit step ${a} must be a sample step`);
+assert.ok(!auditSteps.size || mode === "fenced", "--audit needs --mode=fenced");
 const out = resolve(option("out") ?? "artifacts/seep-rewrite/runs");
 const name = option("name") ?? `${methodKey}-${mode}-${steps}`;
 assert.match(name, /^[A-Za-z0-9._-]+$/);
@@ -105,7 +111,7 @@ const median = (v: number[]) => { const s = [...v].sort((a, b) => a - b); return
 const quantile = (v: number[], p: number) => { const s = [...v].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.ceil(s.length * p) - 1)]! : null; };
 const mean = (v: number[]) => v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
 
-let solver: GPUSolverInstance | undefined, observer: ZoneObserver | undefined, failure: string | undefined;
+let solver: GPUSolverInstance | undefined, observer: ZoneObserver | undefined, cellDump: CellDump | undefined, failure: string | undefined;
 const walls: { step: number; ms: number; kind: "timed" | "warmup" | "sample" | "afterSample" }[] = [];
 let construction: Record<string, number> = {}, pipelined: Record<string, number> | undefined, stepReached = 0;
 const samples: SeepObservation[] = [];
@@ -123,6 +129,8 @@ try {
     return createSeepZoneObserver(device, source, geometry);
   })();
   const s = solver;
+  if (auditSteps.size) cellDump = methodKey === "nbflip" ? await createNBFlipCellDump(device, s, geometry)
+    : await createSeepCellDump(device, (s as unknown as { observation: SeepObservationSource }).observation, geometry);
   const sample = async (step: number) => {
     await s.assertSimulationHealthy?.();
     const sums = await observer!.observe();
@@ -131,6 +139,7 @@ try {
     if (sums.wallAll !== undefined) extra = { ...extra, wallAll_L: sums.wallAll * geometry.cell_m ** 3 * 1000 };
     const row = seepObservation(geometry, step, dt, sums, samples.at(-1), samples[0]?.liquid_L.total, extra);
     samples.push(row); log(row as unknown as Record<string, unknown>);
+    if (cellDump && auditSteps.has(step)) log(auditCells(geometry, step, await cellDump.dump(), row.throatU_m_s ?? 0) as unknown as Record<string, unknown>);
   };
   const admit = async (step: number) => {
     // A full receipt ring (framePending) defers admission: yield to Dawn's event loop, as the app's next frame would.
@@ -181,7 +190,7 @@ const summary = {
 };
 log(summary);
 writeFileSync(`${out}/${name}-summary.json`, JSON.stringify({ ...summary, walls }, null, 1) + "\n");
-observer?.destroy(); solver?.destroy();
+observer?.destroy(); cellDump?.destroy(); solver?.destroy();
 await device.queue.onSubmittedWorkDone().catch(() => {});
 raw.destroy();
 process.exit(failure ? 1 : 0);
