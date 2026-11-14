@@ -389,3 +389,51 @@ Re-judged without new GPU runs:
 | lane-s/seep-s2i | 0.200 | 388.2 | pass | fail (0.272) | all pass (`final-bbc7828d/compare-g6-s2i.md`) |
 
 At step 600, all three pass G6 (L1 0.049 / 0.073 / 0.107 against 0.327). With this G6, bbc7828d's gate round passes every gate and §5.
+
+## 2026-11-14 MILESTONE H9: gate round on S2j (d5d3ae2c)
+
+**Build provenance.**
+- Every run used HEAD 7ebdc7a6. Its lib/ is identical to d5d3ae2c, since 7ebdc7a6 is docs only. The tree was clean and every run reports `dirtyLibOrTools: false`.
+- Lane S committed b5d7ea2d (docs only) at 22:22:01, during the NB-FLIP fenced run. That is why the NB-FLIP pipelined meta reads b5d7ea2d. lib/ is unchanged.
+- All runs exited rc 0, and the system log shows no Metal aborts.
+- Same-build cross-check, at step 1200:
+
+  | Seep run | left L | particles | centroid |
+  |---|---|---|---|
+  | check | 363.4749 | 332248 | 382.0 |
+  | timing fenced | 363.4737 | 332248 | 381.1 |
+  | timing pipelined | 363.4745 | 332248 | 382.5 |
+
+**Runs**, in `artifacts/seep-rewrite/final-d5d3ae2c/`:
+- check: `seep-bench --method=seep --steps=1200 --every=60 --name=seep-check`;
+- timing slot, back to back (22:21–22:23), `--slot=timing --steps=1200 --every=60`: Seep fenced, Seep pipelined, NB-FLIP fenced, NB-FLIP pipelined. This time both NB-FLIP modes were rerun.
+- `compare.md` is the gated report against nbflip-ref2, including §5. `compare-sensitivity-timing-fenced.md` is informational.
+
+| gate | check run | timing-fenced run (informational) |
+|---|---|---|
+| G1 | pass, -4.23%, windows 18/18 | pass, -4.21% |
+| G2 | pass, -2.90 / -3.92 / -3.98 / -3.89% | pass |
+| G3 | pass, 1.278 / 2.579 / 3.906 / 5.198 L in band | pass |
+| G3 (as written) | pass, not gated (1.278 vs 1.279) | pass |
+| G4 | pass, 2.597 vs 2.639 m/s | pass |
+| G5 | pass, step 271 vs 296 | pass, step 268 |
+| G6 | pass: at 1200, L1 vs restored 0.093 <= 0.214, centroid 382.0 in [354.4, 391.4]; at 600, 0.075 | pass: at 1200, 0.098, centroid 381.1 |
+| G6 (as written) | pass, not gated (L1 0.154) | pass (0.163) |
+| G7 | pass, 0.01% | pass, 0.00% |
+| G8 | pass: impact 375.8 / 375.4 vs 380.8 / 382.8; RMS 0.74 / 1.33 | pass |
+| G8 (as written) | fail, not gated (0.0331 vs 0.0765 L) | fail, not gated |
+
+§5 (timing slot):
+
+| | NB-FLIP | Seep | ratio |
+|---|---|---|---|
+| fenced median ms | 34.42 | 9.61 | **3.58x** |
+| fenced p95 ms | 39.24 | 10.75 | |
+| fenced mean ms | 33.89 | 9.51 | |
+| pipelined ms/step | 32.19 | 8.87 | **3.63x** |
+| construction ms | 10794 | 1848 | |
+| peak GPU bytes | 1244173500 | 1049379540 | |
+
+PASS. Measured against this round's NB-FLIP, the 5x stretch needs ≤6.88 ms fenced and ≤6.44 ms pipelined, so Seep is 2.73 ms (28%) and 2.43 ms (27%) short. Against the plan's 6.7 / 6.4 ms figures, it is 2.91 / 2.47 ms short.
+
+Seep's fenced step time grows through the run: the medians of the three thirds are 8.75 / 9.66 / 10.11 ms, rising with particle count (166k at step 600, 332k at step 1200). NB-FLIP's thirds are 29.4 / 34.3 / 38.0 ms. My 9.61 ms is a 1200-step timing-slot median, which is slower than lane S's interleaved check-slot estimate of about 9.05 ms.
