@@ -521,13 +521,31 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
   let x = parts[base + i].xyz;
   let bv = vec3i(floor(x - vec3f(0.5)));
   var d = vec3f(0.0); var m = 0.0;
-  for (var k = 0u; k < 8u; k++) {
-    let c = bv + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
-    if (!inBox(c) || c.x < PX0) { continue; }
-    let pc = pidx(c);
-    let start = pgrid[PN + pc]; let cnt = pgrid[pc] & 0xffffu;
-    for (var j = start; j < start + cnt; j++) {
-      if (j == i) { continue; }
+  // The four x-rows of the 2x2x2 cells: their (start, count) loaded up front (independent loads). Within a
+  // brick the pool is sorted by local cell index (x fastest), so a row's two cells are one contiguous range,
+  // visited in the same order as cell by cell.
+  var rs: array<u32, 4>; var re: array<u32, 4>; var rs1: array<u32, 4>; var re1: array<u32, 4>;
+  for (var r = 0u; r < 4u; r++) {
+    let c0 = bv + vec3i(0, i32(r & 1u), i32(r >> 1u));
+    let c1 = c0 + vec3i(1, 0, 0);
+    var s0 = 0u; var e0 = 0u; var s1 = 0u; var e1 = 0u;
+    if (inBox(c0) && c0.x >= PX0) { let pc = pidx(c0); s0 = pgrid[PN + pc]; e0 = s0 + (pgrid[pc] & 0xffffu); }
+    if (inBox(c1) && c1.x >= PX0) { let pc = pidx(c1); s1 = pgrid[PN + pc]; e1 = s1 + (pgrid[pc] & 0xffffu); }
+    if (e0 > s0 && e1 > s1 && s1 == e0) { e0 = e1; s1 = e1; }
+    rs[r] = s0; re[r] = e0; rs1[r] = s1; re1[r] = e1;
+  }
+  for (var q = 0u; q < 8u; q++) {
+    let r = q >> 1u;
+    let lo = select(rs[r], rs1[r], (q & 1u) == 1u); let hi = select(re[r], re1[r], (q & 1u) == 1u);
+    var j = lo;
+    // Two neighbours per iteration (both loads in flight), accumulated in order.
+    for (; j + 1u < hi; j += 2u) {
+      let ea = x - parts[base + j].xyz; let eb = x - parts[base + j + 1u].xyz;
+      let la = dot(ea, ea); let lb = dot(eb, eb);
+      if (j != i && la < 0.25 && la > 1e-12) { let len = sqrt(la); d += 0.5 * (0.5 - len) * ea / len; m += 1.0; }
+      if (j + 1u != i && lb < 0.25 && lb > 1e-12) { let len = sqrt(lb); d += 0.5 * (0.5 - len) * eb / len; m += 1.0; }
+    }
+    if (j < hi && j != i) {
       let e = x - parts[base + j].xyz;
       let l2 = dot(e, e);
       if (l2 < 0.25 && l2 > 1e-12) { let len = sqrt(l2); d += 0.5 * (0.5 - len) * e / len; m += 1.0; }
@@ -1335,14 +1353,19 @@ fn storeCop(l: u32, c: vec3i, o: vec4f) {
   let g = lidx(l, c);
   coarse[COP + 4u * g] = o.x; coarse[COP + 4u * g + 1u] = o.y; coarse[COP + 4u * g + 2u] = o.z; coarse[COP + 4u * g + 3u] = o.w;
 }
+const NB8: u32 = (NBULK + 7u) / 8u;
+// Workgroups [0, NB8): eight BULK bricks each (8 threads a brick, one per coarse cell); then one active brick each
+// (launched over NB8 + n, C_ARG_ACTBB).
 @compute @workgroup_size(64) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) t: u32) {
-  let b = atomicLoad(&bricks[B_LBULK + wg.x]);
-  let bc = brickCoord(b);
-  if (wg.x < NBULK) {
+  if (wg.x < NB8) {
     // BULK brick: its eight coarse cells are level-2 cells with native rows (coarse-coarse 4) and the
     // level-2 couplings to fine neighbours; the diagonal is the coupling sum. Level 1 stays empty.
-    if (t < 8u) {
-      let k = bc * 2 + vec3i(i32(t & 1u), i32((t >> 1u) & 1u), i32(t >> 2u));
+    let e = wg.x * 8u + (t >> 3u);
+    let own = e < NBULK;
+    let bb = brickCoord(atomicLoad(&bricks[B_LBULK + min(e, NBULK - 1u)]));
+    if (own) {
+      let j = t & 7u;
+      let k = bb * 2 + vec3i(i32(j & 1u), i32((j >> 1u) & 1u), i32(j >> 2u));
       var o = vec4f(0.0);
       for (var kk = 0u; kk < 6u; kk++) {
         let kn = k + select(-1, 1, (kk & 1u) == 1u) * unitAxis(kk >> 1u);
@@ -1351,25 +1374,27 @@ fn storeCop(l: u32, c: vec3i, o: vec4f) {
         if ((kk & 1u) == 1u) { o[1u + (kk >> 1u)] = w; }
       }
       storeCop(2u, k, o);
-      s2[t] = o;
+      s1[t] = o;
     }
     workgroupBarrier();
-    if (t == 0u) {
+    if (own && (t & 7u) == 0u) {
       var ds = 0.0; var it = 0.0; var ax = 0.0; var ay = 0.0; var az = 0.0;
       for (var k = 0u; k < 8u; k++) {
         let d = vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
-        let o = s2[k];
+        let o = s1[t + k];
         ds += o.x;
         if (d.x == 0) { it += o.y; } else { ax += o.y; }
         if (d.y == 0) { it += o.z; } else { ay += o.z; }
         if (d.z == 0) { it += o.w; } else { az += o.w; }
       }
       let o3 = vec4f(ds - 2.0 * it, ax, ay, az) / OC;
-      storeCop(3u, bc, o3);
-      if (o3.x > 0.0) { markL4(bc); }
+      storeCop(3u, bb, o3);
+      if (o3.x > 0.0) { markL4(bb); }
     }
     return;
   }
+  let b = atomicLoad(&bricks[B_LACT + wg.x - NB8]);
+  let bc = brickCoord(b);
   let q = vec3i(i32(t & 3u), i32((t >> 2u) & 3u), i32(t >> 4u));
   var dsum = 0.0; var internal = 0.0; var cx = 0.0; var cy = 0.0; var cz = 0.0;
   for (var k = 0u; k < 8u; k++) {
@@ -2519,7 +2544,7 @@ ${PARTICLE_MOVE_WGSL}
     for (var k = 0u; k < 4u; k++) { atomicStore(&ctrl[C_N_ACTIVE + k], atomicLoad(&args[4u * k])); }
     atomicStore(&args[C_ARG_ACTIVE], 0u); atomicStore(&args[C_ARG_SURF], 0u);
     atomicStore(&args[C_ARG_PART], 0u); atomicStore(&args[C_ARG_CLEAR], 0u);
-    atomicStore(&args[C_ARG_ACTB], BULK_WG); atomicStore(&args[C_ARG_ACTBB], NBULK);
+    atomicStore(&args[C_ARG_ACTB], BULK_WG); atomicStore(&args[C_ARG_ACTBB], (NBULK + 7u) / 8u);
     atomicStore(&ctrl[C_PCOUNT + cfg.a], 0u);
   }
   let n = min(atomicLoad(&ctrl[C_PCOUNT + 1u - cfg.a]), CAP);

@@ -194,7 +194,7 @@ export class SeepSolver implements GPUSolverInstance {
     bricks.set(BULK_LISTS.shadow, B.LIST_SHADOW * BRICKS);
     for (const id of BULK_LISTS.bulk) if (!(bake.brickClass[id]! & CLASS_BULK)) throw new Error(`seep: BULK brick ${id} is not baked BULK`);
     const args = new Uint32Array(ARGS_WORDS);
-    args.set([BULK_WG, 1, 1], C.ARG_ACTB); args.set([NBULK, 1, 1], C.ARG_ACTBB);
+    args.set([BULK_WG, 1, 1], C.ARG_ACTB); args.set([Math.ceil(NBULK / 8), 1, 1], C.ARG_ACTBB);
     args.set([0, 1, 1], C.ARG_LIQ); args.set([BULK_WG, 1, 1], C.ARG_LIQB); args.set([NBULK, 1, 1], C.ARG_LIQBB);
     q.writeBuffer(b.args, 0, args);
     const minPhi = new Float32Array(bricks.buffer, B.MINPHI * BRICKS * 4, BRICKS);

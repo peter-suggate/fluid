@@ -31,7 +31,7 @@ export const MAX_SEGMENTS = 48;
 /** ctrl word offsets. */
 export const C = {
   ARG_ACTIVE: 0, ARG_SURF: 4, ARG_PART: 8, ARG_CLEAR: 12,
-  /** In the args buffer: the active list plus BULK_WG leading workgroups, and plus NBULK leading (one per BULK brick). */
+  /** In the args buffer: the active list plus BULK_WG leading workgroups, and plus ceil(NBULK / 8) leading (eight BULK bricks each). */
   ARG_ACTB: 16, ARG_ACTBB: 20,
   /** In the args buffer: the liquid bricks (built by the operator), plus BULK_WG leading workgroups, and plus NBULK leading. */
   ARG_LIQ: 24, ARG_LIQB: 28, ARG_LIQBB: 32,

@@ -682,3 +682,103 @@ identical at 600 and q rises 0.258 -> 0.259.
 
 **Ledger, 1200 steps, check slot:** chamber phi vs delivered is -0.03 / +0.01 / +0.44 / -0.11% at 300 / 600 / 900 / 1200.
 No deletions; total drift within 1e-6 at every checkpoint (bench drift 0.00%).
+
+## 2026-11-14 (night, lane S second agent): after S2k, attribution at 600 and 1100, item 2 rejected, small wins
+
+**Cost attribution at S2k** (check slot, profile per step; the 600-step run fenced 7.77 ms and its profile sums to 8.34;
+the 1100-step run fenced 8.27 and sums to 9.32):
+
+| kernel | 600 | 1100 |
+|---|---|---|
+| velocity | 0.90 | 0.90 |
+| massFit | 0.67 | 0.66 |
+| redistSweep | 0.52 | 0.46 |
+| coarseSolve | 0.52 | 0.64 |
+| separate | 0.51 | 0.77 |
+| pcgUpdate | 0.51 | 0.56 |
+| extend | 0.46 | 0.46 |
+| pcgPrecond | 0.41 | 0.38 |
+| mgDown1 / pcgDirection | 0.33 / 0.33 | 0.39 / 0.38 |
+| velocityBulk / coarsenBrick | 0.31 / 0.30 | 0.30 / 0.28 |
+| advectPhi / p2g | 0.28 / 0.26 | 0.28 / 0.34 |
+| mgDown0 / g2p | 0.25 / 0.23 | 0.33 / 0.44 |
+
+Pressure totals about 3.6 ms at 600, roughly 0.55 ms a cycle. Between 600 and 1100 the growth is almost all
+per-particle work: separate +0.26, g2p +0.21, p2g +0.08, count/scatter +0.05. The grid-side kernels stay flat.
+
+**coarseSolve is mostly fixed cost.** Running its V-cycle body twice gives an identical result at twice the work. That
+variant costs +0.11 ms fenced (7.59 / 7.60 -> 7.70 / 7.72), so the body is about 21 us a call. The rest of the profile's
+~85 us a call is the serialization point: a one-workgroup dispatch between two full-GPU ones. Only fewer cycles or fewer
+passes reduce it.
+
+**Item 2 (cycle structure): additive and hybrid multigrid rejected on a CPU Float64 model.**
+`~/code/me/fluid-scratch/lane-s/mgmodel.mts` models our hierarchy on 64x32x32 and 128x64x32 masks with a free surface,
+using aggregation at OC = 1.6, the same smoothers and the exact coarsest solve. It counts PCG iterations to residual
+reductions of 1e-2 / 1e-3 / 1e-4 for three right-hand sides: white noise, smooth, and surface-concentrated (- = not
+reached in 40 iterations).
+
+| preconditioner | white | smooth | surface |
+|---|---|---|---|
+| V-cycle (ours) | 5 / 7 / 9 (128-grid 7 / 8 / 10) | 7 / 8 / 10 | 1 / 2 / 3 |
+| BPX additive, OC 1.6 | - / - / - | - / - / - | 8 / 15 / 27 |
+| BPX additive, OC 1.0 | 33 / 40 / - | 40 / - / - | 5 / 8 / 20 |
+| brick-local V + additive coarse | 29 / 40 / - (128: 37 / - / -) | 40 / - / - | 3 / 7 / 14 |
+| zero-halo S3 + V4 hybrid | - / - / - | - / - / - | 4 / 12 / 23 |
+
+Every variant is symmetric to 1e-14 (z^T M^-1 y = y^T M^-1 z). Additive forms need 30-40 or more iterations against
+the V-cycle's 7-10, so cutting a cycle from 11 passes to 5 cannot pay. The V-cycle stays. Option (a), the U2+U1
+recomputation cone, is still open at an estimated -0.1 to -0.2 ms.
+
+**Probes (wrong physics or rejected, none kept):**
+- **BULK through row 23 (the surface row):** cycles 5.2 -> 11.8 and 8.65 ms. The composite coupling at the free surface
+  ruins the preconditioner as well as the physics. Row 184 is the ceiling.
+- **Separation without neighbour loads:** 0.377 -> 0.197 ms at 600. The loads are about half its cost, and the pair math
+  and the pgrid lookups the other half.
+- **Tiled per-brick G2P** (a workgroup per brick, the brick's 9^3 velocity faces in workgroup memory): 7.87 / 7.76 vs
+  7.81 / 7.74, slower. Crowded bricks unbalance it. Reverted.
+
+**Small wins (working tree, check slot, 600 steps, interleaved x2):** base 7.81 / 7.74; coarsenBrick packing eight BULK
+bricks a 64-thread workgroup (was one brick per workgroup, 8 of 64 lanes live) 7.77 / 7.59; plus the separation
+restructure (load the four x-rows' (start, end) up front, merge a row's two contiguous cells, two neighbours per
+iteration, same accumulation order) 7.71 / 7.58. That is about -0.1 ms.
+
+**S2l landed** (the coarsenBrick packing plus the separation restructure above; results are unchanged by construction,
+since both keep every value and the accumulation order).
+- A/B, 600 steps, check slot, 5 interleaved rounds: base 7.81 / 7.74 / 7.93 / 7.90 / 8.84 against S2l 7.71 / 7.58 /
+  7.63 / 9.31 / 8.44. Two rounds were disturbed by other lanes' GPU tests sharing the GPU. Clean rounds give -0.1 to
+  -0.3 ms.
+- Gates, seep-bench 1200 on the check slot (compare-s2l.md, audit-s2l): all pass.
+  - G1 -3.96%. G2 -2.56 / -3.67 / -3.69 / -3.61%. G4 2.597 (-1.56%). G5 90% wet at step 274 vs 296.
+  - G3 corrected: 1.282 / 2.583 / 3.898 / 5.199 L, all in band.
+  - G6 corrected: 600 centroid 370.5, L1 0.100; 1200 centroid 383.1, L1 0.104. G6 as written passes too.
+  - G7 drift 0.01%. G8: impact 375.8 / 375.3, RMS 0.80 / 1.30.
+  - The bench median, 9.06 ms (thirds 8.66 / 9.14 / 9.66), ran under GPU contention from other lanes' tests, so it is
+    not a speed figure.
+- Ledger, 1200 steps: chamber phi against delivered is -0.57 / -0.32 / +0.19 / +0.82% at 300 / 600 / 900 / 1200, with
+  no deletions and drift at most 1.2e-4. HEAD's code (S2k), rerun the same hour, gives -0.60 / -0.15 / +0.82 / +0.52%
+  with drift 8.7e-5, so the spread is run-to-run variance.
+
+**Rejected or neutral (probes, check slot, 600 steps):**
+- velocityBulk folded into the velocity dispatch as leading workgroups (its tile aliased onto vt): 7.68 / 7.73 vs
+  7.59 / 7.77, no gain.
+- Velocity tile halo 2 -> 1 (VT 12 -> 10), or red/redFar aliased into vt: within noise.
+- Doubled dispatches, to price each kernel's marginal cost: velocityBulk about 0.26 ms, separate 0.2, advectPhi 0.24,
+  one redistSweep pass 0.17. Inside velocityBulk, neither the coarse traces (-0.07) nor the throat-interface fine traces
+  (-0.06) dominate. The rest is staging and the three one-workgroup-per-core waves.
+
+**Lead for the next pressure round: the late cycles are spent on chamber-film cells at brick boundaries.** I recorded
+every fine row with |r| > TOL at cycles k >= 3 (probe tree v/rloc). The 29-505 cells per step are almost all film
+cells at y = 0-4. Their x and z sit at brick faces (x = 7 or 0 mod 8, z = 7 or 0 mod 8) or at the chamber walls. The
+L0, L1 and L2 smoothers are all brick-aligned block Jacobi with a zero or frozen halo, so a 1-2 cell film converges
+slowest across the brick faces. On the CPU model (mgmodel2.mts, a chamber-only film 1-2 cells thick, film rhs), the
+iterations to 1e-4 are:
+
+| L0 smoother | iterations to 1e-4 |
+|---|---|
+| block Jacobi, 3 or 6 sweeps (6 is identical to 3) | 4 |
+| two-colour multiplicative bricks | 4 |
+| a second, half-brick-shifted partition after the first ("AB"; adjoint order in post-smoothing, symmetric to 1e-15) | 2 |
+
+The first-iteration reduction goes from 0.16 to 0.01. On the GPU, AB costs one more L0 pass each way per cycle (about
++0.16 ms a cycle, +2 empty dispatches per tail cycle). The shifted pass also needs a shifted-block list that skips
+BULK bricks' coarse slots. It pays if cycles fall from 5.2 to about 3.5 or fewer.
