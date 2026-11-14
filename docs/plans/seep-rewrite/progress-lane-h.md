@@ -93,3 +93,30 @@ Notes:
   else is green. Not lane H's files; left alone.
 - The main index shows the plan/progress files as staged deletions plus untracked (the
   coordinator's commit used a private index). Harmless; lane H commits with a private index.
+
+## 2026-11-14 MILESTONE H1b: NB-FLIP timing reference (timing slot, exclusive GPU)
+
+`tools/gpu/fluid-gpu-run.sh timing node --import tsx tools/seep-bench.ts --method=nbflip --steps=1200 --every=60 --mode=<fenced|pipelined> --slot=timing --out=artifacts/seep-rewrite/nbflip-ref --name=nbflip-timing-<mode>` (rc 0 both)
+
+| NB-FLIP, reservoir-seep, 1200 steps | value |
+|---|---|
+| fenced median / p95 / mean / max ms (21 sample steps and their successors excluded) | **33.69** / 37.65 / 33.34 / 42.17 |
+| fenced median by thirds (steps 13-408 / -804 / -1200) | 29.7 / 33.7 / 36.5 ms (cost grows with the right chamber's particles) |
+| pipelined, submit all then one fence | **32.22 ms/step** (38664 ms total) |
+| construction (pipeline cache warm) | 10880 ms fenced run, 10809 ms pipelined run |
+| peak GPU bytes requested (profile proxy) | 1,244,171,964 (runner saw 2.80-2.97 GB process peak) |
+
+So §5's 3x pass needs Seep fenced median <= 11.2 ms and pipelined <= 10.7 ms/step; 5x stretch
+<= 6.7 / 6.4 ms. The fenced timing run's observables (right 3.388 L, particles 213990 at 1200)
+sit just outside the two check runs' S on right L (S 0.011, the third run is -0.032 from the mean)
+but well inside every gate's 5% term: two runs understate the noise a little. seep-compare now
+takes S from check-slot runs only, as the plan says, so a timing run never widens it.
+Report: artifacts/seep-rewrite/nbflip-ref/nbflip-reference.md (performance verdict "incomplete"
+until Seep timing runs exist).
+
+URL method switch (for the coming `seep-m1max` method): the app had no method picker and every
+path forced `defaultMethodId()`, so `?method=` was parsed but discarded. `lib/core/url-state.ts`
+now honours `?method=<registered id>` (unknown or retired ids still fall back to the default and
+are not serialised) and writes `method=` back only for a non-default method;
+`lib/core/compare/compare-model.ts` keeps the pane's method. Opening a scene card still resets
+to NB-FLIP. The seep under the new solver will be `?scene=reservoir-seep&method=seep-m1max`.

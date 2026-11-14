@@ -4,7 +4,7 @@
  * node --import tsx tools/seep-compare.ts RUN... [--out=DIR] [--name=NAME] [--candidate=NAME]
  *
  * RUN is a run's .jsonl or a directory of them. Runs are sorted by role:
- *  - reference: NB-FLIP fenced runs reaching 1200 steps with samples every 60
+ *  - reference: NB-FLIP check-slot fenced runs reaching 1200 steps with samples every 60
  *    steps (at least two: their repeat spread S is the noise floor);
  *  - candidate: Seep runs of the same shape (each judged on its own), or, with
  *    --candidate=NAME, that run (an NB-FLIP run then is judged against the other
@@ -47,7 +47,8 @@ function load(file: string): Run | undefined {
 const runs = files.map(load).filter((r): r is Run => !!r);
 const complete = (r: Run) => r.mode === "fenced" && r.every === 60 && !r.summary?.failure && r.samples.some(s => s.step === 1200) && r.samples.some(s => s.step === 0);
 const candidateName = option("candidate");
-const references = runs.filter(r => r.method === NB && complete(r) && r.name !== candidateName);
+// Only check-slot runs set S: the plan names the two check runs, and a timing run must not widen it.
+const references = runs.filter(r => r.method === NB && r.slot === "check" && complete(r) && r.name !== candidateName);
 const candidates = candidateName ? runs.filter(r => r.name === candidateName) : runs.filter(r => r.method === SEEP && complete(r));
 // A self-check (an NB-FLIP candidate) may judge against one remaining reference: its S is then 0.
 const selfCheck = candidates.length > 0 && candidates.every(c => c.method === NB);

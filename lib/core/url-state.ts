@@ -450,7 +450,9 @@ function numberParam(query: URLSearchParams, key: string, fallback: number, min 
 
 /** Parameters and quality for the retained solver, shared with compare mode. */
 function methodQueryState(query: URLSearchParams): SerializableMethodState {
-  const methodId = defaultMethodId(), method = getMethod(methodId);
+  // `method` names a registered non-default (experimental) solver; a retired
+  // or unknown id falls back to the default, as before.
+  const methodId = exactMethod(query.get("method"))?.id ?? defaultMethodId(), method = getMethod(methodId);
   const authored = findSceneDefinition(exactPreset(query.get("scene"))?.id ?? defaultScenePresetId)?.methodProfile;
   const profile = authored?.methodId === methodId ? authored : undefined;
   const qualityCandidate = query.get("quality") as GPUQuality | null;
@@ -816,6 +818,7 @@ export function serializeQueryState(
 
   for (const [key, value] of preparedSceneEntries ?? sceneQueryEntries(sceneState)) query.set(key, value);
 
+  if (methodState.methodId !== defaultMethodId() && exactMethod(methodState.methodId)) query.set("method", methodState.methodId);
   for (const method of registeredSimulationMethods()) {
     const values = methodState.overrides[method.id] ?? {};
     const profileValues = authoredProfile?.methodId === method.id ? authoredProfile.overrides ?? {} : {};
@@ -847,7 +850,7 @@ export function serializeQueryState(
 export function applyQueryStateToSession(session: PaneSession, search: string): void {
   const state = parseQueryState(search);
   session.method.setState({
-    methodId: defaultMethodId(),
+    methodId: state.methodId,
     quality: state.quality,
     overrides: state.overrides,
   });
@@ -974,7 +977,7 @@ function startPreparedQueryStateSync(
           : INITIAL_COMPARE_STATE,
         ...(restoredShell.view === "studio" ? { librarySearch: "" } : {}),
       });
-      session.method.setState({ methodId: defaultMethodId(), quality: state.quality, overrides: state.overrides });
+      session.method.setState({ methodId: state.methodId, quality: state.quality, overrides: state.overrides });
       session.scene.getState().setScene(state.scene, state.presetId);
       session.ui.setState(state.ui);
       onHydrated(state.presetId);

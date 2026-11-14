@@ -1,4 +1,3 @@
-import { defaultMethodId } from "../method-registry";
 import type { PaneSession } from "../session/session";
 import { sameSolidPatchList } from "../solid-patch-list";
 import { useShellStore } from "../stores/shell-store";
@@ -128,7 +127,7 @@ function applyLayers(
   }
   if (changed.some(isMethodKey)) {
     const method = parseMethodQueryState(search);
-    session.method.setState({ methodId: defaultMethodId(), quality: method.quality, overrides: method.overrides });
+    session.method.setState({ methodId: method.methodId, quality: method.quality, overrides: method.overrides });
   }
   // After the document, so a camera that falls back to a preset framing falls
   // back to the preset this pane is now actually holding.
