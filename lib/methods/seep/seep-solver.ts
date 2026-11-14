@@ -47,7 +47,7 @@ export interface SeepDiagnostics {
   readonly lists: { readonly active: number; readonly surf: number; readonly part: number; readonly clear: number; readonly liquid: number };
 }
 
-interface Dispatch { readonly label: string; readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly direct?: readonly [number, number?]; readonly indirect?: number }
+interface Dispatch { readonly label: string; readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly direct?: readonly [number, number?]; readonly indirect?: number; readonly from?: string }
 
 export class SeepSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
@@ -77,6 +77,10 @@ export class SeepSolver implements GPUSolverInstance {
     const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     buffer("ctrl", C.WORDS * 4, S | GPUBufferUsage.COPY_SRC);
     buffer("args", ARGS_WORDS * 4, S | GPUBufferUsage.INDIRECT);
+    // coarseSolve k's launch argument, written by coarseSolve k - 1: alternating buffers (k & 1), as a
+    // dispatch may not read its indirect arguments from a buffer it binds writable.
+    buffer("cgate0", 4 * (MAX_CYCLES + 1) * 4, S | GPUBufferUsage.INDIRECT);
+    buffer("cgate1", 4 * (MAX_CYCLES + 1) * 4, S | GPUBufferUsage.INDIRECT);
     buffer("bricks", B.COUNT * BRICKS * 4, S | GPUBufferUsage.COPY_SRC);
     buffer("phis", 3 * CELLS * 4, S);
     buffer("vel", 9 * CELLS * 4, S);
@@ -169,7 +173,7 @@ export class SeepSolver implements GPUSolverInstance {
         return { binding, resource: { buffer: u } };
       }
       if (spec.kind === "volume") return { binding, resource: (spec.name === "surf" ? this.surfaceFieldTexture : this.volumeTexture).createView() };
-      const buffer = this.buffers[spec.name];
+      const buffer = this.buffers[spec.name === "cgate" ? `cgate${(cfg[0] ?? 0) & 1}` : spec.name];
       if (!buffer) throw new Error(`seep: no buffer ${spec.name}`);
       return { binding, resource: { buffer } };
     });
@@ -219,7 +223,7 @@ export class SeepSolver implements GPUSolverInstance {
   private record(): void {
     const N = CELLS;
     const P = this.pipelines;
-    const d = (k: KernelSource, cfg: number[] | undefined, launch: { direct?: [number, number?]; indirect?: number }, label = k.label): Dispatch =>
+    const d = (k: KernelSource, cfg: number[] | undefined, launch: { direct?: [number, number?]; indirect?: number; from?: string }, label = k.label): Dispatch =>
       ({ label, pipeline: P.get(k)!, group: this.group(k, cfg), ...launch });
     const capGroups = Math.ceil(PARTICLE_CAPACITY / 256);
     const W = (word: number) => word * 4;
@@ -252,7 +256,8 @@ export class SeepSolver implements GPUSolverInstance {
         // X_k and D0..D2_k run under C_(k-1)'s gate.
         const prev = (slot: 0 | 1 | 2 | 3) => k === 0 ? W([C.ARG_LIQ, C.ARG_LIQBB, C.ARG_LIQB, C.ARG_L4][slot]) : mg(k - 1, slot);
         list.push(d(pcgUpdateKernel, kc, { indirect: prev(2) }, `seep.pcgUpdate.${k}`));
-        list.push(d(coarseSolveKernel, kc, { direct: [1] }, `seep.coarseSolve.${k}`));
+        // Iteration 0's always runs; later ones only while unconverged (slot 4 of the previous record).
+        list.push(d(coarseSolveKernel, kc, k === 0 ? { direct: [1] } : { indirect: W(4 * (k - 1)), from: `cgate${(k - 1) & 1}` }, `seep.coarseSolve.${k}`));
         if (k < MAX_CYCLES) {
           list.splice(list.length - 1, 0,
             d(mgDown0Kernel, undefined, { indirect: prev(0) }, `seep.mgDown0.${k}`),
@@ -288,7 +293,7 @@ export class SeepSolver implements GPUSolverInstance {
   private encode(pass: GPUComputePassEncoder, x: Dispatch): void {
     pass.setPipeline(x.pipeline);
     pass.setBindGroup(0, x.group);
-    if (x.indirect !== undefined) pass.dispatchWorkgroupsIndirect(this.buffers.args, x.indirect);
+    if (x.indirect !== undefined) pass.dispatchWorkgroupsIndirect(this.buffers[x.from ?? "args"]!, x.indirect);
     else pass.dispatchWorkgroups(x.direct![0], x.direct![1] ?? 1);
   }
 

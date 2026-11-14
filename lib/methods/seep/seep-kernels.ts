@@ -1561,10 +1561,11 @@ fn foldMaxB(l: u32) -> f32 {
   return s;
 }
 var<workgroup> tp: array<f32, 1000>;
-/** Fine block Gauss-Seidel on the staged brick tile tp (rhs per thread), 2 sweeps; black-first when rev. */
+/** Fine block Gauss-Seidel on the staged brick tile tp (rhs per thread), 3 red-black sweeps (6 colour passes; 2 took
+ *  0.5 more cycles a step, a net loss); black-first when rev. */
 fn fineSmooth(c: vec3i, ti: u32, diag: f32, m: u32, rhs: f32, rev: bool) {
   let red = (u32(c.x + c.y + c.z)) & 1u;
-  for (var s = 0u; s < 4u; s++) {
+  for (var s = 0u; s < 6u; s++) {
     let colour = select(s & 1u, 1u - (s & 1u), rev);
     if (diag > 0.0 && red == colour) {
       var sum = rhs;
@@ -1827,12 +1828,14 @@ var<workgroup> sN: u32;
  * (or the cap is reached) iteration k's remaining passes and every later
  * iteration are disabled through their indirect arguments.
  */
-export const coarseSolveKernel = kernel("seep.coarseSolve", [ctrlRW, coarseRW, cfgU, argsRW, bricksRO], /* wgsl */ `
+const cgateRW: BindingSpec = { name: "cgate", kind: "rw", type: "array<u32>" };
+export const coarseSolveKernel = kernel("seep.coarseSolve", [ctrlRW, coarseRW, cfgU, argsRW, bricksRO, cgateRW], /* wgsl */ `
 ${COARSE_COMMON}
 fn redSlot(rs: u32, which: u32) -> u32 { return C_RED + rs * 192u + which * 64u; }
 var<workgroup> sGo: u32;
 var<workgroup> sRS: array<f32, 64>;
-/** Iteration k's gated arguments: slot 0 the liquid bricks, slot 1 [BULK bricks, liquid], slot 2 [BULK workgroups, liquid], slot 3 the level-4 blocks; all 0 once converged. */
+/** Iteration k's gated arguments: slot 0 the liquid bricks, slot 1 [BULK bricks, liquid], slot 2 [BULK workgroups, liquid],
+ *  slot 3 the level-4 blocks; all 0 once converged. */
 fn gate(k: u32, nAct: u32, go: bool) {
   for (var s = 0u; s < 4u; s++) {
     let o = C_MG_ARGS + ${MG_STRIDE}u * k + 4u * s;
@@ -1887,7 +1890,9 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
         atomicStore(&ctrl[C_CYCLES], k);
         atomicAdd(&ctrl[C_CYCLES_TOTAL], k);
         if (res > TOL) { atomicAdd(&ctrl[C_CAP_HITS], 1u); }
-        gate(k, 0u, false);
+        // The later iterations' dispatches (coarseSolve included) do not run: close all their gates now.
+        for (var j = k; j <= MAXC; j++) { gate(j, 0u, false); if (j > k) { atomicStore(&ctrl[C_RES_HIST + j], 0u); } }
+        cgate[4u * k] = 0u; cgate[4u * k + 1u] = 1u; cgate[4u * k + 2u] = 1u;
       } else {
         if (k > 0u) {
           var rho = 0.0;
@@ -1895,11 +1900,14 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
           atomicStore(&ctrl[C_RHO], bitcast<u32>(rho));
         }
         gate(k, atomicLoad(&args[C_ARG_LIQ]), true);
+        // coarseSolve k + 1 runs (its argument, in the other buffer of the pair).
+        cgate[4u * k] = 1u; cgate[4u * k + 1u] = 1u; cgate[4u * k + 2u] = 1u;
         sGo = 1u;
       }
     } else {
       atomicStore(&ctrl[C_RES_HIST + k], 0u);
       gate(k, 0u, false);
+      cgate[4u * k] = 0u; cgate[4u * k + 1u] = 1u; cgate[4u * k + 2u] = 1u;
     }
   }
   let go = workgroupUniformLoad(&sGo);
@@ -2312,13 +2320,30 @@ fn bulkProject(j: u32) {
 export const shadowKernel = kernel("seep.shadow", [bricksRO, velRW, bulkRO], /* wgsl */ `
 ${bulkWGSL(false)}
 ${COARSE_SAMPLER_WGSL}
+// The brick's samples read the coarse faces [2 bc - 1, 2 bc + 2]^3 per component: staged once (cface),
+// then interpolated as cvelComp does (same values, same order).
+var<workgroup> sf: array<f32, 192>;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LSHADOW + wg.x];
+  let kb = brickCoord(b) * 2 - vec3i(1);
+  if (l < 192u) {
+    let r = l & 63u;
+    sf[l] = cface(l >> 6u, kb + vec3i(i32(r & 3u), i32((r >> 2u) & 3u), i32(r >> 4u)), BU_OFF, U_OFF);
+  }
+  workgroupBarrier();
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
   for (var a = 0u; a < 3u; a++) {
     if (!cellBulk(c - unitAxis(a))) { continue; }
-    vel[U_OFF + a * N + i] = cvelComp(a, vec3f(c) + vec3f(0.5) - 0.5 * vec3f(unitAxis(a)), BU_OFF, U_OFF);
+    let q = (vec3f(c) + vec3f(0.5) - 0.5 * vec3f(unitAxis(a))) * 0.25 - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
+    let fb = floor(q); let t = q - fb;
+    let lb = vec3i(fb) - kb;
+    let k = a * 64u + u32(lb.x + 4 * (lb.y + 4 * lb.z));
+    let x00 = mix(sf[k], sf[k + 1u], t.x);
+    let x10 = mix(sf[k + 4u], sf[k + 5u], t.x);
+    let x01 = mix(sf[k + 16u], sf[k + 17u], t.x);
+    let x11 = mix(sf[k + 20u], sf[k + 21u], t.x);
+    vel[U_OFF + a * N + i] = mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
   }
 }
 `);

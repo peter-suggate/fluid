@@ -20,8 +20,11 @@ export const THETA_MIN = 1e-3;
 export const PRESSURE_TOLERANCE = 0.05 * CELL_M;
 /** Multigrid cycle cap per step. */
 export const MAX_CYCLES = 12;
-/** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). */
-export const AGGREGATION_OC = 1.8;
+/** Aggregation over-correction: A_c = R A P / OC (Braess 1995; piecewise-constant aggregation). A
+ *  preconditioner parameter only (the converged solution is the same). Measured on the seep at
+ *  1200 steps: OC 1.8 takes 7.6 cycles a step and OC 1.6 takes 6.7. The chamber's free-surface rows
+ *  are what converge last, and they favour the weaker scaling. 1.4 and 2.1 are both slower. */
+export const AGGREGATION_OC = 1.6;
 /** Backtrace segment cap: 48 cells a step (14 m/s) at 1-cell segments; beyond it segments lengthen (recorded in maxSegments, not fatal). */
 export const MAX_SEGMENTS = 48;
 

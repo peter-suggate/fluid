@@ -234,3 +234,31 @@ small theta and diagonals up to 1/THETA_MIN, which converge about 3x per cycle. 
 - Capping the Dirichlet part of the coarse diagonal made no difference.
 - More fine sweeps (8 instead of 4) cut 0.6 cycles but saved only ~0.1 ms.
 - THETA_MIN 0.05 cut 1 cycle but changes the discretisation (the plan fixes 1e-3).
+
+## 2026-11-14 MILESTONE S2e: 11.43 ms fenced over 1200 steps (2.95x NB-FLIP, gates 5/8 unchanged)
+
+- **Shadow, 0.25 to 0.02 ms.** Each shadow brick's samples read 4^3 coarse faces per component. These are now
+  staged once (192 cface calls instead of 12k) and interpolated in the same order.
+- **Converged coarseSolve no longer launches.** coarseSolve k (k >= 1) is indirect. Its argument is written by
+  coarseSolve k - 1 into alternating buffers (cgate0/1), because a dispatch may not read indirect arguments from
+  a buffer it binds writable. On convergence the solve closes every later gate at once. An idle coarseSolve
+  cost about 50 us, so this saves ~0.25 ms a step.
+- **Preconditioner settings.** These change the convergence path only; the solution meets the same tolerance.
+  - Aggregation over-correction 1.8 -> 1.6: 7.6 -> 6.7 cycles a step over 1200 steps. 1.4, 1.5 and 2.1 were
+    measured too.
+  - Fine smoother 2 -> 3 red-black sweeps: 6.8 -> 6.3 cycles. Net -0.15 ms in paired runs.
+- **Measured: an empty gated PCG iteration costs ~0.09 ms** (14 zero-workgroup dispatches at ~6 us each).
+  MAX_CYCLES 24 instead of 12 costs +1.05 ms. With ~6.4 cycles a step, the unused tail is still ~0.5 ms.
+  Sampling every 10 steps over 1200 saw at most 9-10 cycles and no cap hits, so 12 stays.
+
+Ledger, 1200 steps (cells): chamber phi vs delivered is +0.7 / 0.0 / +0.6 / +0.7% at 300 / 600 / 900 / 1200.
+Mass (count / 8) is within 0.3% of delivered. There are no deletions, and G7 drift is 0.01%.
+
+seep-bench 1200 vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2e.md). The verdicts are the same as s2c/s2d:
+G1, G2, G4, G5 and G7 pass. G3 fails at 300 only (1.291 vs 1.282). G8 fails (jet 0.0370 vs 0.0770).
+G6 fails as before, with 1200 centroid 393.7 and L1 0.305. Run to run, G6's 1200 values have been 392.7/0.315
+(s2b), 386.5/0.230 (s2c), 387.8/0.241 (s2d) and 393.7/0.305 (s2e). This is the spread of the late film, not a
+trend from this change.
+
+Fenced median 11.43 ms (thirds 10.60 / 11.70 / 11.93, p95 12.60) against NB-FLIP's 33.69 ms. The 3x target is
+11.23 ms.
