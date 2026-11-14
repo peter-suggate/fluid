@@ -339,3 +339,22 @@ The thin-jet reconstruction is not losing volume locally.
 NB-FLIP's 0.077 L at a similar q (0.270 L/s) implies its liquid moves at about half the speed through the zone,
 or takes a longer path, which is consistent with lane H's slowing/thickening hypothesis. No Seep defect was
 found, so item 2 (speed) continues.
+
+## 2026-11-14 Stretch speed (item 2): measurements so far, nothing landed
+
+- **Fine smoother passes**, 300 steps on the check slot (FINE_PASSES env experiment, reverted):
+  - 6 passes: 6.56 cycles
+  - 10 passes: 6.29 cycles
+  - 16 passes: 6.15 cycles
+
+  The fine level does not limit convergence. The ~3 tail cycles a step (L-inf going from ~1e-3 to 2.5e-4)
+  come from small-theta ghost rows near the jet impact and the far-wall films (diag 200-1300, x 440-506,
+  y 0-3).
+- **Gated empty cycles still cost ~0.5 ms a step** (12 - 6.4 cycles x 11 zero-workgroup dispatches).
+- **Fusions examined and not taken:**
+  - redistInit into redistSweep.1: one more phi buffer is needed to avoid the PHIT read/write race, for
+    ~0.1 ms.
+  - Multi-iteration massFit in one tile: either the frozen halo over-corrects at brick-boundary cells, or an
+    exact 2-halo tile changes the column carry.
+  - Pipelined or Chronopoulos-Gear CG to merge pcgPrecond with pcgDirection: z on the halo is not available
+    inside the dispatch.
