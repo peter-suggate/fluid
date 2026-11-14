@@ -572,3 +572,40 @@ That is **-0.75 ms**.
 
 **Ledger, 1200 steps:** chamber phi vs delivered is -0.7 / -0.3 / +0.8 / +0.6%. There are no deletions, drift is at most
 8e-5, and no step is capped.
+
+## 2026-11-14 (night): cost attribution after S2j, and what did not pay
+
+All runs are on the check slot, 600 steps, at d5d3ae2c (fenced 9.04-9.13 ms in the A/B). Profile per step:
+
+| kernel group | ms |
+|---|---|
+| velocity | 1.11 |
+| pressure | 4.49 (pcgUpdate 0.75, coarseSolve 0.66, pcgPrecond 0.51, pcgDirection 0.51, mgDown0/1 0.44 each, mgUp2 0.33, mgDown3 0.28, mgUp1 0.21, mgUp3 0.20, mgRestrict3 0.16) |
+| massFit (4 passes) | 0.67 |
+| redistSweep | 0.66 |
+| extend | 0.54 |
+| separate | 0.52 |
+| advectPhi | 0.39 |
+
+**Measured probes.** Each change below is a deliberately wrong-physics or capped variant, used only to price a cost;
+none is kept.
+- **Empty gated cycles:** MAX_CYCLES 12 -> 8 saves 0.28 ms fenced (44 dispatches, about 6.4 us per empty indirect
+  dispatch). The empty tail is therefore about 0.46 ms a step. The cycle histogram has one 12-cycle step and three
+  10-cycle steps, so the cap cannot drop without capping a step. Only fewer dispatches per cycle (fusion) reduce it.
+- **Separation:** skipping the neighbour loop takes separate from 0.52 to 0.05 ms, so the pair search is the whole cost.
+  It grows with the particle count, which doubles by step 1200. The phi-gradient projection costs nothing.
+  - I tried staging the workgroup's neighbour box in workgroup memory: a box of up to 512 cells and 1536 particles,
+    filled by a scan. It was slower (0.72 ms), because about 29 KB of workgroup memory leaves one workgroup per core.
+    Reverted.
+- **Velocity:** skipping the backtraces takes velocity from 1.11 to 0.38 ms, so the RK2 traces cost about 0.7 ms. They
+  are mostly in the reservoir: the surface layer, the deep non-bulk bricks next to the throat and walls, and air faces
+  next to liquid.
+
+**Directions that look worth the next round:**
+1. **Fuse the upward MG chain** (U3 -> U2 -> U1) into one tile-local pass per level-4 block. This saves 2 dispatches per
+   cycle slot (26 a step, about 0.17 ms empty plus the full ones) and a round trip of the corrections. The open question
+   is whether post-smoothing stays the adjoint of pre-smoothing, so that the preconditioner stays symmetric.
+2. **Pair search** with a smaller footprint: f16-packed relative positions, or a per-cell walk in which a subgroup of a
+   cell's ~8 particles shares each loaded neighbour. The target is the separate kernel's growth with particle count.
+3. **Reservoir traces:** widen the coarse BULK treatment toward the throat-free walls, so that fewer deep non-bulk fine
+   bricks trace every face.
