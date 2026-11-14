@@ -7,6 +7,7 @@
 | Phase 0: close out the seep rewrite (S2q gate round, technique catalogue) | done: S2q 5.06x fenced / 5.28x pipelined, all gates (9fef519b); catalogue `nbflip-port/seep-techniques.md` (dd896664); seep PRESSURE_CAP failure bit (24b48036) |
 | Phase 1A: NB-FLIP cost attribution across scenes, ranked port list (lane A) | in progress (2026-11-15) |
 | Phase 1G: cross-scene gates and NB-FLIP references, dam break added (lane G) | done (2026-11-15): §4 gates, 5 refs a scene at 33b78ebb, self-test passed; dam residency defect found (§4.0) |
+| Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | in progress |
 | Phase 2: port lanes P1 (pressure) and P2 (submission, dispatch, kernels) | todo |
 | Combined cross-scene round | todo |
 
