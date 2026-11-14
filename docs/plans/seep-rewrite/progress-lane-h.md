@@ -367,3 +367,25 @@ G6 reading:
 - Seep's right chamber also holds 5.19 L where NB-FLIP's holds 3.39 L, because NB-FLIP loses about 1.8 L of floor film (plan §4.1 notes this part of the gap).
 - More liquid in the film carries more momentum to the far wall, where it piles up. This would shift the profile even with an identical jet.
 - Whether G6 should count NB-FLIP's film loss (as G3 now does) is the coordinator's call. Under G6 as written, S2h fails narrowly and nondeterministically at step 1200.
+
+## 2026-11-14 MILESTONE H8: corrected G6 (plan §4.1 at 70351e00) in seep-compare
+
+- `restoreLostVolume` and `normaliseProfile` (tools/seep-observables.ts, unit-tested):
+  - each NB-FLIP reference's step-600/1200 right bins get lost = left loss − open-wall change − right volume, added uniformly over the 16 bins;
+  - the restored centroid is the volume-weighted mean of the measured centroid and the chamber centre (x = 384).
+- G6 now gates on two things:
+  - L1 of the candidate's normalised profile against the mean of the references' normalised restored profiles, with the unchanged limit max(3× repeat L1, 0.15);
+  - the centroid within 16 cells of [NB, NB_restored] (each the mean over references).
+- "G6 (as written)" is printed and informational.
+
+The plan's formula gives NB-FLIP losses of 0.50/0.51 L at step 600 and 1.96/2.02 L at 1200. That is more than lane S's 1.71/1.77 L, which is NB-FLIP's total drift. The difference is the roughly 0.25 L of ghost wall-zone liquid outside the open cells, which the open-wall term counts as lost.
+
+Re-judged without new GPU runs:
+
+| run | G6 1200: L1 vs restored (limit 0.214) | centroid in [354.4, 391.4] | G6 | as written | other gates |
+|---|---|---|---|---|---|
+| final-bbc7828d/seep-check | 0.155 | 385.9 | pass | fail (L1 0.227) | all pass, §5 PASS (`compare-g6.md`) |
+| final-bbc7828d/seep-timing-fenced | 0.100 | 381.0 | pass | pass (0.170) | all pass (`compare-g6-sensitivity-timing-fenced.md`) |
+| lane-s/seep-s2i | 0.200 | 388.2 | pass | fail (0.272) | all pass (`final-bbc7828d/compare-g6-s2i.md`) |
+
+At step 600, all three pass G6 (L1 0.049 / 0.073 / 0.107 against 0.327). With this G6, bbc7828d's gate round passes every gate and §5.

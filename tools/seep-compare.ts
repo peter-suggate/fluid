@@ -17,15 +17,19 @@
  * G5's 90% step interpolates linearly between samples (60-step resolution).
  * G3 and G8 follow §4.1 (audit H5): G3's delivered volume subtracts the change
  * in open-cell wall liquid (wallOpen_L); G8 judges the jet trajectory from the
- * observer's jet slices at steps 300 and 600. The §4 definitions are still
- * printed, as informational rows "G3 (as written)" and "G8 (as written)" that
- * do not enter the verdict. Runs written before §4.1 lack wallOpen_L and
+ * observer's jet slices at steps 300 and 600. G6 (§4.1, ruled after lane S's
+ * far-wall check) compares against NB_restored: each reference's chamber with
+ * its lost volume (left loss - open-wall change - right) added back uniformly
+ * over the 16 bins; L1 against the mean restored profile, centroid within 16
+ * cells of the interval between NB's and NB_restored's. The §4 definitions are
+ * still printed, as informational rows "G3/G6/G8 (as written)" that do not
+ * enter the verdict. Runs written before §4.1 lack wallOpen_L and
  * jetSlices and are refused, not judged.
  * Writes NAME.md and NAME.json (default compare-<candidate>). */
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import type { SeepJetSlice, SeepObservation } from "./seep-observables";
+import { normaliseProfile, restoreLostVolume, type SeepJetSlice, type SeepObservation } from "./seep-observables";
 
 interface Run {
   file: string; name: string; method: string; mode: string; slot: string; every: number;
@@ -87,12 +91,17 @@ function extract(r: Run) {
     if (i === 1 && a.wetFloor_cells >= target) { wet90 = a.step; break; }
   }
   const openChange = (k: number) => at(r, k).wallOpen_L! - s0.wallOpen_L!;
-  const profile = (k: number) => { const b = at(r, k).rightBins_L, t = b.reduce((x, y) => x + y, 0); return b.map(v => t > 0 ? v / t : 0); };
+  const profile = (k: number) => normaliseProfile(at(r, k).rightBins_L);
+  // G6 (§4.1): the chamber with this run's lost volume restored uniformly (meaningful for NB-FLIP references).
+  const restored = (k: number) => {
+    const o = at(r, k), lost = leftLoss(k) - openChange(k) - o.liquid_L.right, x = restoreLostVolume(r.geometry.wall.high, o.rightBins_L, o.liquid_L.right, o.rightCentroid_x ?? NaN, lost);
+    return { lost, centroid: x.centroid_x, profile: normaliseProfile(x.bins_L) };
+  };
   return {
     q, leftLoss: CHECK.map(leftLoss), right: CHECK.map(k => at(r, k).liquid_L.right),
     delivered: CHECK.map(k => leftLoss(k) - openChange(k)), deliveredAsWritten: CHECK.map(k => leftLoss(k) - wallChange(k)),
     throatU: median(MEDIAN_STEPS.map(k => at(r, k).throatU_m_s ?? NaN)), wet90, wet1200: at(r, 1200).wetFloor_cells,
-    centroid: [600, 1200].map(k => at(r, k).rightCentroid_x ?? NaN), profile: [600, 1200].map(profile),
+    centroid: [600, 1200].map(k => at(r, k).rightCentroid_x ?? NaN), profile: [600, 1200].map(profile), restored: [600, 1200].map(restored),
     drift: at(r, 1200).drift, jet: median(MEDIAN_STEPS.map(k => at(r, k).jet_L)),
     trajectory: TRAJECTORY_STEPS.map(k => trajectory(at(r, k).jetSlices!)),
   };
@@ -128,6 +137,7 @@ const across = <T>(f: (o: Obs) => T) => refs.map(f);
 const nbMean = (f: (o: Obs) => number) => mean(across(f)), nbS = (f: (o: Obs) => number) => spread(across(f));
 const l1 = (a: number[], b: number[]) => a.reduce((s, v, i) => s + Math.abs(v - b[i]!), 0);
 const meanProfile = (k: number) => refs[0]!.profile[k]!.map((_, i) => mean(refs.map(o => o.profile[k]![i]!)));
+const meanRestored = (k: number) => refs[0]!.restored[k]!.profile.map((_, i) => mean(refs.map(o => o.restored[k]!.profile[i]!)));
 /** NB-FLIP's repeat L1: the largest pairwise L1 between reference profiles. */
 const repeatL1 = (k: number) => refs.length < 2 ? 0 : Math.max(...refs.flatMap((a, i) => refs.slice(i + 1).map(b => l1(a.profile[k]!, b.profile[k]!))));
 
@@ -168,12 +178,21 @@ function judge(c: Obs): Gate[] {
     const nbFinal = nbMean(o => o.wet1200), finalOK = Math.abs(c.wet1200 - nbFinal) <= 0.05 * nbFinal;
     gates.push({ id: "G5", pass: stepOK && finalOK, detail: `90% wet (${(0.9 * floorCells).toFixed(0)} of ${floorCells} cells) at step ${f(v, 0)} vs NB ${f(nb, 0)} (S ${f(nb === null ? null : spread(w as number[]), 0)}; limit 25%); wet at 1200 ${c.wet1200} vs NB ${f(nbFinal, 0)} (limit 5%)` });
   }
-  { // G6
+  { // G6 (§4.1): against NB_restored, NB-FLIP with its measured lost volume added back uniformly
+    const rows = [600, 1200].map((k, i) => {
+      const nbC = nbMean(o => o.centroid[i]!), resC = nbMean(o => o.restored[i]!.centroid), lo = Math.min(nbC, resC), hi = Math.max(nbC, resC), v = c.centroid[i]!;
+      const L1 = l1(c.profile[i]!, meanRestored(i)), rep = repeatL1(i), limit = Math.max(3 * rep, 0.15), lost = across(o => o.restored[i]!.lost);
+      return { step: k, centroid: v, nbCentroid: nbC, restoredCentroid: resC, centroidS: nbS(o => o.centroid[i]!), nbLost_L: lost, L1, repeatL1: rep, limit,
+        pass: v >= lo - 16 && v <= hi + 16 && L1 <= limit };
+    });
+    gates.push({ id: "G6", pass: rows.every(r => r.pass), rows, detail: rows.map(r => `${r.step}: centroid ${f(r.centroid, 1)} in [${f(Math.min(r.nbCentroid, r.restoredCentroid) - 16, 1)}, ${f(Math.max(r.nbCentroid, r.restoredCentroid) + 16, 1)}] (NB ${f(r.nbCentroid, 1)}, restored ${f(r.restoredCentroid, 1)}; NB lost ${r.nbLost_L.map(x => f(x, 2)).join(", ")} L); L1 vs restored ${f(r.L1)} ${r.L1 <= r.limit ? "<=" : ">"} ${f(r.limit)}`).join("; ") });
+  }
+  { // G6 as written (§4): against NB-FLIP as measured
     const rows = [600, 1200].map((k, i) => {
       const nbC = nbMean(o => o.centroid[i]!), dc = c.centroid[i]! - nbC, L1 = l1(c.profile[i]!, meanProfile(i)), rep = repeatL1(i), limit = Math.max(3 * rep, 0.15);
       return { step: k, centroid: c.centroid[i], nbCentroid: nbC, centroidS: nbS(o => o.centroid[i]!), L1, repeatL1: rep, limit, pass: Math.abs(dc) <= 16 && L1 <= limit };
     });
-    gates.push({ id: "G6", pass: rows.every(r => r.pass), rows, detail: rows.map(r => `${r.step}: centroid ${f(r.centroid, 1)} vs ${f(r.nbCentroid, 1)} (limit 16); L1 ${f(r.L1)} ${r.L1 <= r.limit ? "<=" : ">"} ${f(r.limit)}`).join("; ") });
+    gates.push({ id: "G6 (as written)", informational: true, pass: rows.every(r => r.pass), rows, detail: rows.map(r => `${r.step}: centroid ${f(r.centroid, 1)} vs ${f(r.nbCentroid, 1)} (limit 16); L1 ${f(r.L1)} ${r.L1 <= r.limit ? "<=" : ">"} ${f(r.limit)}`).join("; ") });
   }
   { // G7
     const nb = mean(across(o => Math.abs(o.drift))), v = c.drift;

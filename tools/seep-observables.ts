@@ -184,6 +184,22 @@ export function seepObservation(g: SeepGeometry, step: number, dt_s: number, sum
 /** CPU oracle of the zone sums over dense cells: `phi(x, y, z)` at vertices
  * (cells, negative in liquid), `open(x, y, z)` per cell. Float64, the same
  * rules and fill as the WGSL observers (tests/seep-observer.test.ts). */
+/** G6 (plan §4.1): NB-FLIP's right chamber with its measured lost volume
+ * (left loss - open-wall change - right volume, in litres) added back
+ * uniformly over the 16 bins. The added volume's centroid is the chamber
+ * centre, wall.high + 128 cells, so the restored centroid is the
+ * volume-weighted mean of the measured one and the centre. */
+export function restoreLostVolume(wallHigh: number, bins_L: readonly number[], right_L: number, centroid_x: number, lost_L: number) {
+  const add = lost_L / bins_L.length, centre = wallHigh + bins_L.length * SEEP_BIN_CELLS / 2;
+  return { bins_L: bins_L.map(v => v + add), right_L: right_L + lost_L, centroid_x: (centroid_x * right_L + centre * lost_L) / (right_L + lost_L) };
+}
+
+/** A bin profile normalised to unit sum (all zero when empty). */
+export function normaliseProfile(bins: readonly number[]) {
+  const t = bins.reduce((a, b) => a + b, 0);
+  return bins.map(v => t > 0 ? v / t : 0);
+}
+
 export function seepZoneOracle(g: SeepGeometry, phi: (x: number, y: number, z: number) => number, open: (x: number, y: number, z: number) => boolean,
   faceU?: (x: number, y: number, z: number, axis: number) => number, particles = 0): ZoneSums {
   const s: ZoneSums = { total: 0, left: 0, wall: 0, right: 0, floorBand: 0, jet: 0, moment: 0, bins: new Array<number>(SEEP_RIGHT_BINS).fill(0), wetFloor: 0, wallAll: 0, particles,

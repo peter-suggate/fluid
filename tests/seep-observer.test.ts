@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SeepObservationSource } from "../lib/methods/seep/seep-observation";
-import { levelSetFill, seepObservation, seepZoneOracle, type SeepGeometry } from "../tools/seep-observables";
+import { levelSetFill, normaliseProfile, restoreLostVolume, seepObservation, seepZoneOracle, type SeepGeometry } from "../tools/seep-observables";
 import { createSeepZoneObserver } from "../tools/seep-observe-seep";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
@@ -128,4 +128,25 @@ test(`seep observer WGSL matches the CPU oracle (${label})`, { skip: !process.en
       near(sl.uMoment, c.uMoment, cells / 2048 + 1e-5 * Math.abs(c.uMoment), `slice ${i} u moment`);
     });
   });
+});
+
+test("G6 restoration adds the lost volume uniformly and moves the centroid toward the chamber centre", () => {
+  // 2 L piled in the first bin (x 256-272, centroid 264) with 1.6 L lost.
+  const bins = Array.from({ length: 16 }, (_, b) => b === 0 ? 2 : 0);
+  const r = restoreLostVolume(256, bins, 2, 264, 1.6);
+  assert.equal(r.bins_L.length, 16);
+  assert.ok(Math.abs(r.bins_L[0]! - 2.1) < 1e-12 && r.bins_L.slice(1).every(v => Math.abs(v - 0.1) < 1e-12));
+  assert.ok(Math.abs(r.right_L - 3.6) < 1e-12);
+  // The added volume centres at 256 + 128 = 384: (264*2 + 384*1.6) / 3.6.
+  assert.ok(Math.abs(r.centroid_x - (264 * 2 + 384 * 1.6) / 3.6) < 1e-12);
+  // The centroid formula agrees with the restored bins' own centroid (bin centres 264, 280, ...).
+  const fromBins = r.bins_L.reduce((a, v, b) => a + v * (256 + 16 * b + 8), 0) / r.right_L;
+  assert.ok(Math.abs(fromBins - r.centroid_x) < 1e-9);
+  const p = normaliseProfile(r.bins_L);
+  assert.ok(Math.abs(p.reduce((a, v) => a + v, 0) - 1) < 1e-12 && Math.abs(p[0]! - 2.1 / 3.6) < 1e-12);
+  // Nothing lost: unchanged.
+  const same = restoreLostVolume(256, bins, 2, 264, 0);
+  assert.deepEqual(same.bins_L, bins);
+  assert.equal(same.centroid_x, 264);
+  assert.deepEqual(normaliseProfile(new Array(16).fill(0)), new Array(16).fill(0));
 });
