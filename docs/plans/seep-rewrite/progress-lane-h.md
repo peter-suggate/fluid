@@ -151,3 +151,54 @@ the default. `tests/seep-method.test.ts` covers registration and the default, re
 device is touched), and the `?scene=reservoir-seep&method=seep-m1max` parse/serialise round trip. Host gates:
 `takesScheduledDrops` and `takesLiveSolidEdits` both test `methodId === "uniform-narrow-band-flip"`, so both are false
 under Seep. The solver also declares no optional edit or injection members, so the host declines those features.
+
+## 2026-11-14 COORDINATION for lane S: 1200-step check run of 75bf4433 stops at step 180
+
+`tools/gpu/fluid-gpu-run.sh check node --import tsx tools/seep-bench.ts --method=seep --steps=1200 --every=60 --out=artifacts/seep-rewrite/seep-75bf4433 --name=seep-check`
+
+**Failed at step 180**: `Seep solver latched SEGMENTS (max backtrace segments 478, pool overflow 0)`. No verdict
+is possible, because seep-compare judges only complete runs. Observables up to that point (lane H observer; NB-FLIP mean in brackets where sampled):
+
+| step | left L | right L | floor band L | throat u m/s | q_left L/s | wet cells | jet L | particles | drift |
+|---|---|---|---|---|---|---|---|---|---|
+| 60 | 368.396 [368.40] | 0.288 | 0.232 | 2.52 [2.65] | 0.244 | 7373 [3559] | 0.0554 | 132k | +0.012% |
+| 120 | 368.145 [368.14] | 0.297 | 0.218 | 2.56 | 0.252 | 9287 | 0.0788 | 368k | -0.054% |
+
+- Right L barely rises from 60 to 120 (0.288 to 0.297) while the left loses 0.25 L. Your smoke run reported 0.396 at
+  120. Total drift is only -0.05%, so the liquid is not lost. It may be sitting in cells my right zone does not count
+  (x >= 256 open cells with vertex-fill > 0), or in particles that the surface field does not show. Worth a check.
+- The open-cell wall zone stays at 0.008 L. That is the throat full (2x2x16 cells, 64 x 0.125 mL), as expected.
+- Step time: median 46 ms, thirds 34 / 46 / 63 ms (rising with particles, 368k at 120 against NB-FLIP's ~30k).
+  Construction 1.8 s, 1.05 GB.
+
+## 2026-11-14 MILESTONE H3: independent verdict on lane S's ed896292 (S1b), 1200 steps, check slot
+
+`tools/gpu/fluid-gpu-run.sh check node --import tsx tools/seep-bench.ts --method=seep --steps=1200 --every=60 --out=artifacts/seep-rewrite/seep-ed896292 --name=seep-check` (rc 0)
+`node --import tsx tools/seep-compare.ts artifacts/seep-rewrite/nbflip-ref artifacts/seep-rewrite/seep-ed896292 --out=artifacts/seep-rewrite/seep-ed896292 --name=compare`
+
+This run is of the committed tree. Lane S's compare-s-m3 ran on a dirty bc78ac9c.
+
+| gate | verdict | detail (Seep vs NB-FLIP mean) |
+|---|---|---|
+| G1 | pass | q_left mean 0.2596 vs 0.2697 L/s (-3.74%); 18/18 windows |
+| G2 | pass | left loss -2.99 / -3.81 / -3.79 / -3.51% at 300/600/900/1200 |
+| G3 | **FAIL** | right 1.756 / 3.160 / 4.416 / 5.237 L; upper bounds 1.282 / 2.705 / 4.117 / 5.518 (1200 passes) |
+| G4 | pass | throat u 2.581 vs 2.639 m/s (-2.2%) |
+| G5 | pass | 90% wet at step 277 vs 299; 16384 vs 16361 at 1200 |
+| G6 | **FAIL** | 600: centroid 375.1 vs 368.9 ok, **L1 0.213 > 0.202**; 1200: centroid 378.6 vs 369.8, L1 0.173 <= 0.226 |
+| G7 | pass | drift +0.01% at 1200 |
+| G8 | **FAIL** | jet column 0.0541 vs 0.0770 L (-29.7%, limit 25%) |
+
+Verdict: **FAIL (5/8)**. Lane S's own run had G6 pass at 600 (L1 0.177), so G6 at 600 sits on the noise edge.
+
+Notes for lane S:
+- **G7 passes by cancellation.** Total drift is +0.16% at 600 (369.222 L, the chamber 0.57 L above
+  delivery) and +0.01% at 1200. The chamber first gains about 0.6 L, then loses it back. It does not
+  "track delivery" after step 360: q_right at 1200 is 0.174 against q_left 0.257 L/s. So both the early
+  gain and the later loss are real volume errors. G7 judges only step 1200, as written.
+- Jet column: 0.054 L against NB-FLIP's 0.077, while q_left and throat u match to within 4%. So the
+  falling sheet is thinner or faster (more of it already on the floor) than NB-FLIP's.
+- Particles 205k at 600 and 407k at 1200 (NB-FLIP 129k / 220k).
+- Step time (check slot, not a fair timing; another process held 2.0 GB of GPU memory at start): median 50.4 ms,
+  thirds 88 / 50 / 49 ms. Construction 2.7 s, 1.05 GB requested. A timing-slot run waits until the gates pass or
+  S2 lands.
