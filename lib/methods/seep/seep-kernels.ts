@@ -289,13 +289,12 @@ ${SURF_WGSL}
 `);
 
 // ---------------------------------------------------------------------------
-// 3. Particle census (cfg.a = parity: src pool). Band retirement (Ferstl 2016
-//    §3.3): chamber particles deeper than R = 3h are retired, the level set
-//    holds that liquid. Particles that leave the particle region (the right
-//    chamber, x >= PX0) are retired into the level set.
+// 3. Particle census (cfg.a = parity: src pool). The particles carry the
+//    chamber's liquid, so none is retired for depth. Particles that leave the
+//    particle region (the right chamber, x >= PX0) are retired (counted), as
+//    are those over the crowding cap below.
 // ---------------------------------------------------------------------------
-export const countKernel = kernel("seep.count", [ctrlRW, partsRO, pcellRW, pgridRW, phisRO, cfgU], /* wgsl */ `
-${phiSampler("phi", "phis", "PHI_OFF")}
+export const countKernel = kernel("seep.count", [ctrlRW, partsRO, pcellRW, pgridRW, cfgU], /* wgsl */ `
 @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x;
   let n = min(atomicLoad(&ctrl[C_PCOUNT + cfg.a]), CAP);
@@ -303,16 +302,13 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
   let p = parts[cfg.a * CAP * 2u + 2u * i].xyz;
   let c = vec3i(floor(p));
   if (c.x < PX0 || !cellOpen(c)) { pcell[i] = DEAD_PARTICLE; atomicAdd(&ctrl[C_DELETED], 1u); atomicAdd(&ctrl[C_DEL_OUT], 1u); return; }
-  let depth = phiTri(p);
-  if (depth < -BAND) { pcell[i] = DEAD_PARTICLE; atomicAdd(&ctrl[C_DELETED], 1u); atomicAdd(&ctrl[C_DEL_DEEP], 1u); return; }
   let pc = pidx(c);
   let f = p - floor(p);
   let o = select(0u, 1u, f.x >= 0.5) | select(0u, 2u, f.y >= 0.5) | select(0u, 4u, f.z >= 0.5);
-  // Resampling cap (Ferstl 2016 §3.3): a cell keeps at most 2n = 16 particles,
-  // applied where the level set holds the liquid (a cell deep or more, as the
-  // reference's deep overlap); at the surface the particles are the liquid.
-  let before = atomicAdd(&pgrid[pc], 1u);
-  if ((before & 0xffffu) >= 16u && depth < -1.0) { atomicSub(&pgrid[pc], 1u); pcell[i] = DEAD_PARTICLE; atomicAdd(&ctrl[C_DELETED], 1u); atomicAdd(&ctrl[C_DEL_CAP], 1u); return; }
+  // No crowding cap: the particles carry the chamber's liquid, and a crowded
+  // cell's excess shows in the surface (combine's unclipped mass bound), where
+  // the pressure it implies spreads it.
+  atomicAdd(&pgrid[pc], 1u);
   atomicOr(&pgrid[pc], 1u << (16u + o));
   pcell[i] = pc;
 }
@@ -360,83 +356,57 @@ fn moveParticle(x: ptr<function, vec3f>, v: ptr<function, vec3f>, k1: vec3f) {
 `;
 
 // ---------------------------------------------------------------------------
-// 4. Band seeding (Ferstl 2016 §3.3 re-sampling), after the level set's
-//    advection, particle combination and redistance, so the level set and the
-//    census (the survivors after last step's G2P) describe the same instant.
-//    A candidate is the jittered centre of an octant no survivor occupies, in
-//    an open particle-region cell, inside the liquid (an octant is an eighth
-//    of the cell, the volume a particle carries in the combine's bound) and
-//    within the band. Inner band (cell centre deeper than 1.5h): the cell is
-//    topped up to eight. Inflow (liquid whose one-step departure point lies
-//    behind the throat exit x = PX0, the only way liquid enters the particle
-//    region): every octant, as a source seeds its whole band. Elsewhere in
-//    the outer layer only where no survivor lies in the cell or its 26
-//    neighbours; where particles are present they carry the surface. Seeds take the grid velocity, are
-//    appended to the sorted pool past its cell ranges (this step's P2G does
-//    not see them) and move in this step's G2P like every particle.
-//    cfg.a = parity (sorted pool = dst).
+// 4. Outlet emission: the particles are the conserved carrier of the chamber's
+//    liquid, and the only liquid entering the chamber crosses the throat's
+//    outlet plane x = PX0. Each step every outlet face emits exactly the
+//    volume it passed, u_x dt h^2 times its wetted fraction, as particles at
+//    eight per cell volume: layers of 2x2 particles h/2 apart along x, the
+//    swept length not yet emitted carried to the next step, so the emitted
+//    mass equals the outflow to within one layer per face over the whole run
+//    (a flux-conservative inflow boundary for particle methods: Ferstl et al.
+//    2016 §4 sources; Bridson 2015 §7.6 particle emission). Each layer sits at
+//    the centre of the slab it represents, displaced from the plane along the
+//    face velocity it carries (the projected u^{n+1}, the velocity that swept
+//    it). Runs after G2P, appending to the pool the next census reads.
+//    cfg.a = parity (the moved pool is 1 - parity).
 // ---------------------------------------------------------------------------
-export const seedKernel = kernel("seep.seed", [ctrlRW, bricksRO, partsRW, pgridRO, phisRO, velRO, cfgU], /* wgsl */ `
+export const emitKernel = kernel("seep.emit", [ctrlRW, bricksRW, partsRW, velRO, phisRO, cfgU], /* wgsl */ `
 ${phiSampler("phi", "phis", "PHI_OFF")}
 ${velocitySampler("velU", "vel", "U_OFF")}
-// One-step departure point of x (RK2 midpoint, segments of at most one cell,
-// as the velocity and level-set advection use).
-fn departure(x0: vec3f) -> vec3f {
-  let u0 = velU(x0);
-  let n = clamp(ceil(length(u0) * CFL), 1.0, MAXSEG);
-  let tau = CFL / n;
-  var x = x0;
-  for (var s = 0.0; s < n; s += 1.0) {
-    let k1 = select(velU(x), u0, s == 0.0);
-    x = x - tau * velU(x - 0.5 * tau * k1);
+${PARTICLE_MOVE_WGSL}
+const SPACING: f32 = 0.5;
+@compute @workgroup_size(4) fn main(@builtin(local_invocation_index) t: u32) {
+  let fy = THROAT_Y0 + i32(t & 1u); let fz = THROAT_Z0 + i32(t >> 1u);
+  // Wetted fraction of the face, from the level set on the plane (4x4 bilinear samples).
+  var wet = 0.0;
+  for (var s = 0u; s < 16u; s++) {
+    let q = vec3f(f32(PX0), f32(fy) + (f32(s & 3u) + 0.5) * 0.25, f32(fz) + (f32(s >> 2u) + 0.5) * 0.25);
+    if (phiTri(q) < 0.0) { wet += 1.0 / 16.0; }
   }
-  return x;
-}
-@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
-  let b = bricks[B_LPART + wg.x];
-  let c = brickCoord(b) * 8 + localCoord(l);
-  if (!cellOpen(c) || c.x < PX0) { return; }
-  let cphi = phiTri(vec3f(c) + vec3f(0.5));
-  if (cphi < -BAND || cphi >= 1.0) { return; }
-  let word = pgrid[pidx(c)];
-  let occ = (word >> 16u) & 0xffu;
-  let have = word & 0xffffu;
-  if (have >= 8u || occ == 0xffu) { return; }
-  var budget = 8u - have;
-  var uncovered = true;
-  for (var dz = -1; dz <= 1; dz++) { for (var dy = -1; dy <= 1; dy++) { for (var dx = -1; dx <= 1; dx++) {
-    let n = c + vec3i(dx, dy, dz);
-    if (inBox(n) && n.x >= PX0 && ((pgrid[pidx(n)] >> 16u) & 0xffu) != 0u) { uncovered = false; }
-  } } }
-  let inner = cphi < -1.5;
-  // Inflow: the only liquid entering the particle region crosses x = PX0 (the
-  // throat exit) this step; its octants are seeded whatever particles are
-  // near (a source band, as the reference adds a source's whole band).
-  let inflowCell = c.x < PX0 + 16;
-  let step = atomicLoad(&ctrl[C_STEP]);
-  let pc = pidx(c);
+  let uf = velU(vec3f(f32(PX0), f32(fy) + 0.5, f32(fz) + 0.5));
+  let swept = max(uf.x, 0.0) * CFL * wet;
+  let total = bitcast<f32>(atomicLoad(&ctrl[C_EMIT_ACC + t])) + swept;
+  let n = u32(floor(total / SPACING));
   let base = (1u - cfg.a) * CAP * 2u;
-  for (var o = 0u; o < 8u; o++) {
-    if (((occ >> o) & 1u) != 0u || budget == 0u) { continue; }
-    let j = vec3f(hashUnit(step, pc, o), hashUnit(step, pc, o + 8u), hashUnit(step, pc, o + 16u)) - vec3f(0.5);
-    let x = vec3f(c) + vec3f(0.25) + 0.5 * octOffset(o) + 0.2 * j;
-    let px = phiTri(x);
-    if (px >= 0.0 || px < -BAND) { continue; }
-    let xd = departure(x);
-    let inflow = inflowCell && xd.x < f32(PX0);
-    if (!inflow && !inner && !uncovered) { continue; }
-    budget -= 1u;
-    let k = atomicAdd(&ctrl[C_PCOUNT + 1u - cfg.a], 1u);
-    if (k >= CAP) { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); continue; }
-    parts[base + 2u * k] = vec4f(x, 0.0);
-    // The seed carries the semi-Lagrangian advected velocity u^n(departure),
-    // i.e. the grid velocity at t_{n+1} the liquid it samples would have had
-    // without particles (Stam 1999; new NB-FLIP particles take the advected
-    // grid velocity, Ferstl et al. 2016 §4). Sampling u^n at the landing point
-    // instead would hand jet liquid the stale velocity of whatever was there.
-    parts[base + 2u * k + 1u] = vec4f(velU(xd), 0.0);
-    atomicAdd(&ctrl[C_SEEDED], 1u);
+  let step = atomicLoad(&ctrl[C_STEP]);
+  for (var j = 1u; j <= n; j++) {
+    // Layer j holds the slab [total - j SPACING, total - (j - 1) SPACING] of swept length; its centre is this far downstream.
+    let dist = total - SPACING * (f32(j) - 0.5);
+    for (var q = 0u; q < 4u; q++) {
+      let jit = 0.2 * (vec2f(hashUnit(step, 64u * t + j, q), hashUnit(step, 64u * t + j, q + 4u)) - vec2f(0.5));
+      let off = vec2f(0.25 + 0.5 * f32(q & 1u), 0.25 + 0.5 * f32(q >> 1u)) + jit;
+      let p0 = vec3f(f32(PX0), f32(fy) + off.x, f32(fz) + off.y);
+      let ue = velU(p0);
+      let x = collide(p0 + (dist / uf.x) * uf);
+      let k = atomicAdd(&ctrl[C_PCOUNT + 1u - cfg.a], 1u);
+      if (k >= CAP) { atomicOr(&ctrl[C_FAIL], FAIL_POOL); atomicAdd(&ctrl[C_OVERFLOW], 1u); continue; }
+      parts[base + 2u * k] = vec4f(x, 0.0);
+      parts[base + 2u * k + 1u] = vec4f(ue, 0.0);
+      atomicAdd(&ctrl[C_EMITTED], 1u);
+      atomicAdd(&bricks[B_PCOUNT + brickOfCell(vec3i(floor(x)))], 1u);
+    }
   }
+  atomicStore(&ctrl[C_EMIT_ACC + t], bitcast<u32>(total - SPACING * f32(n)));
 }
 `);
 
@@ -583,59 +553,41 @@ fn cornerOfOpen(v: vec3i) -> bool {
 `);
 
 // ---------------------------------------------------------------------------
-// 8. Particle surface in chamber bricks (Ferstl 2016 Eq. 4 as a union, with
-//    the mass-based bound the plan §2.2 allows): phi = min(phi0, phi_p).
-//    phi_p is the union of one sphere of radius RS per particle (the nearest
-//    particle in the 8 cells sharing the vertex; Enright et al. 2002 /
-//    Foster-Fedkiw 2001 particle spheres), bounded below by the particles'
-//    own volume: eight particles fill a cell, so where the open cells around a
-//    vertex hold a fraction f of that, the liquid they carry is a plane 1 - 2f
-//    cells above the vertex, and phi_p is no lower (the union adds no more
-//    liquid than the particles are). At a solid (closed cells on one side,
-//    which read as full) the plane fills from the wall instead: along the axis
-//    whose two layers of cells differ most in held fraction, phi_p >= -f_sparse
-//    against a closed dense layer, 1 - f_dense - f_sparse otherwise; both hold
-//    exactly the particles' volume. This is NB-FLIP's surface (sphere 0.875h,
-//    sampleBound "walls"), the reference the gates compare with: a floor film
-//    of one particle layer holds its h/8 a particle, where a Zhu-Bridson
-//    surface (radius ~h/4) read the same layer as almost no liquid and the
-//    grid's advection thinned the film every step. No shrink of phi0: the
-//    particles restore liquid grid advection erodes, never erase what the
-//    level set holds. A vertex with no particle in its 8 cells keeps phi0.
-//    cfg.a = parity (sorted pool = dst).
+// 8. Chamber surface from the particles alone (they carry its liquid): the
+//    particles' mass plane. Eight particles fill a cell, so where the open
+//    cells around a vertex hold a fraction f of that, the liquid they carry is
+//    a plane 1 - 2f cells above the vertex. At a solid (closed cells on one
+//    side, which read as full) the plane fills from the wall instead: along
+//    the axis whose two layers of cells differ most in held fraction, phi =
+//    -f_sparse against a closed dense layer, 1 - f_dense - f_sparse otherwise;
+//    both hold exactly the particles' volume (NB-FLIP's sampleBound "walls",
+//    the mass plane of the plan §2.2). Crowded cells count in full, so their
+//    excess shows. The semi-Lagrangian phi is not unioned in (it only ever
+//    adds liquid there), nor are particle spheres (Ferstl 2016 Eq. 4's union
+//    can only remove liquid from the plane: 17% of a 0.6h film). The mass fit
+//    (8b) then matches the cells' fill to their particle mass. The throat's
+//    exit vertices (corners of an open cell upstream of PX0) keep the grid's
+//    level set, which holds the channel.
 // ---------------------------------------------------------------------------
-export const combineKernel = kernel("seep.combine", [bricksRO, phisRW, partsRO, pgridRO, cfgU], /* wgsl */ `
-const RS: f32 = 0.875;
+export const combineKernel = kernel("seep.combine", [bricksRO, phisRW, pgridRO], /* wgsl */ `
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = bricks[B_LPART + wg.x];
   if ((bricks[B_CLASS + b] & CLASS_CHAMBER) == 0u) { return; }
   let v = brickCoord(b) * 8 + localCoord(l);
-  let vf = vec3f(v);
-  let base = (1u - cfg.a) * CAP * 2u;
-  var near2 = 4.0; var gathered = 0u;
-  var held = 0u; var open = 0u;
+  var held = 0u; var open = 0u; var upstream = false;
   var heldLo = vec3u(0u); var heldHi = vec3u(0u); var openLo = vec3u(0u); var openHi = vec3u(0u);
   for (var k = 0u; k < 8u; k++) {
     let bit = vec3u(k & 1u, (k >> 1u) & 1u, k >> 2u);
     let c = v - vec3i(1) + vec3i(bit);
     if (!cellOpen(c)) { continue; }
-    var cnt = 0u;
-    if (c.x >= PX0) {
-      let pc = pidx(c);
-      let start = pgrid[PN + pc]; cnt = pgrid[pc] & 0xffffu;
-      for (var j = start; j < start + cnt; j++) {
-        let d = parts[base + 2u * j].xyz - vf;
-        near2 = min(near2, dot(d, d));
-      }
-    }
-    gathered += cnt;
-    let n = min(cnt, 8u);
+    var n = 0u;
+    if (c.x >= PX0) { n = pgrid[pidx(c)] & 0xffffu; } else { upstream = true; }
     open += 1u; held += n;
     let hi = bit != vec3u(0u);
     heldHi += select(vec3u(0u), vec3u(n), hi); openHi += select(vec3u(0u), vec3u(1u), hi);
     heldLo += select(vec3u(n), vec3u(0u), hi); openLo += select(vec3u(1u), vec3u(0u), hi);
   }
-  if (gathered == 0u) { return; }
+  if (open == 0u || upstream) { return; }
   var bound = 1.0 - f32(held) / (4.0 * f32(open));
   if (open < 8u) {
     var gap = -1.0;
@@ -651,14 +603,90 @@ const RS: f32 = 0.875;
       bound = select(-sparse, 1.0 - max(lo, hi) - sparse, denseOpen);
     }
   }
-  let i = PHIT_OFF + ((b << 9u) | l);
-  let phi0 = phis[i];
-  if (phi0 <= -RCOMB) { return; }
-  let phiS = sqrt(near2) - RS;
-  // Particles deeper than the grid: add, up to their volume. Grid deeper than
-  // the particles: erase towards the particle spheres, at most h a step (Eq. 4).
-  let phi = select(min(phiS, phi0 + 1.0), max(phiS, min(phi0, bound)), phi0 > phiS);
-  phis[i] = clamp(phi, -PHI_MAX, PHI_MAX);
+  phis[PHIT_OFF + ((b << 9u) | l)] = clamp(bound, -PHI_MAX, PHI_MAX);
+}
+`);
+
+// ---------------------------------------------------------------------------
+// 8b. Mass fit of the chamber surface (the mass-conserving level set of van
+//    der Pijl et al. 2005, with the particles' volume fraction F = count / 8
+//    in place of an advected VOF field; cf. CLSVOF, Sussman & Puckett 2000):
+//    Jacobi passes move each surface-band vertex (|phi| < 1.5: the plane's
+//    empty-side value 1 included) by -GAIN times the mean mismatch F - fill(phi)
+//    of its open cells, so the cells' tetrahedral fill matches the particle
+//    mass they hold, including in features thinner than the 2x2x2 window of
+//    the plane (the 2h jet). A crowded cell's excess over full is first carried
+//    up its column (no fill can hold it in place). Interior and far-air
+//    vertices stay fixed (no bubbles, no spray halos). GAIN = 1.5
+//    closes a plane film's mismatch in one pass (a floor vertex moves the
+//    whole fill, a vertex above it half). Upstream (throat) and solid-only
+//    vertices are left alone. cfg.a = source offset for chamber bricks (others
+//    read phiT), cfg.b = destination offset; an even number of passes
+//    ping-pongs phiT -> phi -> ... -> phiT, which redistance then reads.
+// ---------------------------------------------------------------------------
+export const massFitKernel = kernel("seep.massFit", [bricksRO, phisRW, pgridRO, cfgU], /* wgsl */ `
+${levelSetFillWGSL}
+const GAIN: f32 = 1.5;
+var<workgroup> tv: array<f32, 1000>;
+var<workgroup> tm: array<f32, 729>;
+fn srcPhi(v: vec3i) -> f32 {
+  let w = clampV(v);
+  let chamber = (bricks[B_CLASS + brickOfCell(w)] & CLASS_CHAMBER) != 0u;
+  return phis[select(PHIT_OFF, cfg.a, chamber) + cidx(w)];
+}
+@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  let b = bricks[B_LPART + wg.x];
+  if ((bricks[B_CLASS + b] & CLASS_CHAMBER) == 0u) { return; }
+  let o = brickCoord(b) * 8;
+  for (var t = l; t < 1000u; t += 512u) {
+    tv[t] = srcPhi(o - vec3i(1) + vec3i(i32(t % 10u), i32((t / 10u) % 10u), i32(t / 100u)));
+  }
+  workgroupBarrier();
+  // Target volume fractions: F = count / 8, a cell's excess over full carried up its column
+  // (liquid settles from the dense side, the bound's own rule), so every target is one a cell
+  // can hold; the carry out of the tile's top row stays in it (only liquid deeper than a brick).
+  if (l < 81u) {
+    let qx = i32(l % 9u); let qz = i32(l / 9u);
+    var carry = 0.0;
+    for (var qy = 0; qy < 9; qy++) {
+      let c = o - vec3i(1) + vec3i(qx, qy, qz);
+      var F = 0.0;
+      if (cellOpen(c) && c.x >= PX0) { F = f32(pgrid[pidx(c)] & 0xffffu) / 8.0 + carry; carry = max(F - 1.0, 0.0); if (qy < 8) { F = min(F, 1.0); } }
+      tm[u32(qx + 9 * (qy + 9 * qz))] = F;
+    }
+  }
+  workgroupBarrier();
+  for (var t = l; t < 729u; t += 512u) {
+    let q = vec3i(i32(t % 9u), i32((t / 9u) % 9u), i32(t / 81u));
+    let c = o - vec3i(1) + q;
+    var m = 0.0;
+    if (cellOpen(c) && c.x >= PX0) {
+      var v: array<f32, 8>;
+      for (var k = 0u; k < 8u; k++) {
+        let r = q + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
+        v[k] = tv[u32(r.x + 10 * (r.y + 10 * r.z))];
+      }
+      m = tm[t] - fill(v);
+    }
+    tm[t] = m;
+  }
+  workgroupBarrier();
+  let lc = localCoord(l);
+  let vtx = o + lc;
+  var phi = tv[u32((lc.x + 1) + 10 * ((lc.y + 1) + 10 * (lc.z + 1)))];
+  if (abs(phi) < 1.5) {
+    var sum = 0.0; var open = 0u; var upstream = false;
+    for (var k = 0u; k < 8u; k++) {
+      let d = vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
+      let c = vtx - vec3i(1) + d;
+      if (!cellOpen(c)) { continue; }
+      if (c.x < PX0) { upstream = true; }
+      open += 1u;
+      sum += tm[u32((lc.x + d.x) + 9 * ((lc.y + d.y) + 9 * (lc.z + d.z)))];
+    }
+    if (open > 0u && !upstream) { phi = clamp(phi - GAIN * sum / f32(open), -PHI_MAX, PHI_MAX); }
+  }
+  phis[cfg.b + ((b << 9u) | l)] = phi;
 }
 `);
 
@@ -1672,6 +1700,33 @@ fn gate(k: u32, nAct: u32, go: bool) {
   }
 }
 fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
+var<workgroup> sE: array<f32, 2336>;
+var<workgroup> sR: array<f32, 2048>;
+fn octI(q: u32) -> vec3i { return vec3i(i32(q & 1u), i32((q >> 1u) & 1u), i32(q >> 2u)); }
+/** Workgroup index of (l, c), levels 4..6 at 0 / 2048 / 2304. */
+fn sIdx(l: u32, c: vec3i) -> u32 {
+  let d = ldims(l);
+  return select(select(2304u, 2048u, l == 5u), 0u, l == 4u) + u32(c.x + d.x * (c.y + d.y * c.z));
+}
+/** Couplings to the -x, -y, -z neighbours (stored on those neighbours). */
+fn minusC(l: u32, c: vec3i) -> vec3f {
+  var m = vec3f(0.0);
+  if (c.x > 0) { m.x = coarse[COP + 4u * lidx(l, c - vec3i(1, 0, 0)) + 1u]; }
+  if (c.y > 0) { m.y = coarse[COP + 4u * lidx(l, c - vec3i(0, 1, 0)) + 2u]; }
+  if (c.z > 0) { m.z = coarse[COP + 4u * lidx(l, c - vec3i(0, 0, 1)) + 3u]; }
+  return m;
+}
+fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
+  let d = ldims(l);
+  var s = 0.0;
+  if (c.x + 1 < d.x) { s += o.y * sE[sIdx(l, c + vec3i(1, 0, 0))]; }
+  if (c.y + 1 < d.y) { s += o.z * sE[sIdx(l, c + vec3i(0, 1, 0))]; }
+  if (c.z + 1 < d.z) { s += o.w * sE[sIdx(l, c + vec3i(0, 0, 1))]; }
+  if (c.x > 0) { s += m.x * sE[sIdx(l, c - vec3i(1, 0, 0))]; }
+  if (c.y > 0) { s += m.y * sE[sIdx(l, c - vec3i(0, 1, 0))]; }
+  if (c.z > 0) { s += m.z * sE[sIdx(l, c - vec3i(0, 0, 1))]; }
+  return s;
+}
 @compute @workgroup_size(1024) fn main(@builtin(local_invocation_index) t: u32) {
   let k = cfg.a;
   if (t == 0u) {
@@ -1701,42 +1756,68 @@ fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
   }
   let go = workgroupUniformLoad(&sGo);
   if (go == 0u) { return; }
-  // Down: pre-smooth from zero (red first), restrict the residual. Level 3
-  // is block-smoothed across the GPU by D3 / U3 (level-4 blocks); here 4..6.
-  for (var l = 4u; l <= 5u; l++) {
-    for (var i = t; i < levelCount(l); i += 1024u) { coarse[CEP + loff(l) + i] = 0.0; }
-    storageBarrier(); workgroupBarrier();
-    for (var s = 0u; s < 4u; s++) {
-      for (var i = t; i < levelCount(l); i += 1024u) { let c = cellOfLevel(l, i); if (colourOf(c) == (s & 1u)) { relaxC(l, c, CEP); } }
-      storageBarrier(); workgroupBarrier();
-    }
-    for (var i = t; i < levelCount(l + 1u); i += 1024u) {
-      let c = cellOfLevel(l + 1u, i);
-      var s = 0.0;
-      for (var q = 0u; q < 8u; q++) { s += residC(l, 2 * c + vec3i(i32(q & 1u), i32((q >> 1u) & 1u), i32(q >> 2u)), CEP); }
-      coarse[CB + lidx(l + 1u, c)] = s;
-    }
-    storageBarrier(); workgroupBarrier();
+  // Levels 4..6 (2336 cells) live in workgroup memory for the whole V-cycle:
+  // each sweep is one workgroup barrier, not a device-memory fence. Each
+  // thread keeps its own cells' couplings (+ and -), rhs and pre-smoothed
+  // values in registers. Level 3 is block-smoothed across the GPU by D3 / U3.
+  let i0 = t; let i1 = t + 1024u;
+  let c40 = cellOfLevel(4u, i0); let c41 = cellOfLevel(4u, i1);
+  let o40 = cop(4u, c40); let o41 = cop(4u, c41);
+  let m40 = minusC(4u, c40); let m41 = minusC(4u, c41);
+  let b40 = coarse[CB + L4O + i0]; let b41 = coarse[CB + L4O + i1];
+  let has5 = t < 256u; let has6 = t < 32u;
+  let c5 = cellOfLevel(5u, min(t, 255u)); let c6 = cellOfLevel(6u, min(t, 31u));
+  var o5 = vec4f(0.0); var m5 = vec3f(0.0); var o6 = vec4f(0.0); var m6 = vec3f(0.0);
+  if (has5) { o5 = cop(5u, c5); m5 = minusC(5u, c5); }
+  if (has6) { o6 = cop(6u, c6); m6 = minusC(6u, c6); }
+  sE[i0] = 0.0; sE[i1] = 0.0;
+  if (t < 288u) { sE[2048u + t] = 0.0; }
+  workgroupBarrier();
+  // Down, level 4: pre-smooth from zero (red first), restrict the residual.
+  for (var s = 0u; s < 4u; s++) {
+    let col = s & 1u;
+    if (colourOf(c40) == col && o40.x > 0.0) { sE[i0] = (b40 + offS(4u, c40, o40, m40)) / o40.x; }
+    if (colourOf(c41) == col && o41.x > 0.0) { sE[i1] = (b41 + offS(4u, c41, o41, m41)) / o41.x; }
+    workgroupBarrier();
   }
+  let ep40 = sE[i0]; let ep41 = sE[i1];
+  sR[i0] = select(0.0, b40 - (o40.x * ep40 - offS(4u, c40, o40, m40)), o40.x > 0.0);
+  sR[i1] = select(0.0, b41 - (o41.x * ep41 - offS(4u, c41, o41, m41)), o41.x > 0.0);
+  workgroupBarrier();
+  var b5 = 0.0;
+  if (has5) { for (var q = 0u; q < 8u; q++) { b5 += sR[sIdx(4u, 2 * c5 + octI(q))]; } }
+  workgroupBarrier();
+  for (var s = 0u; s < 4u; s++) {
+    if (has5 && colourOf(c5) == (s & 1u) && o5.x > 0.0) { sE[2048u + t] = (b5 + offS(5u, c5, o5, m5)) / o5.x; }
+    workgroupBarrier();
+  }
+  var ep5 = 0.0;
+  if (has5) { ep5 = sE[2048u + t]; sR[t] = select(0.0, b5 - (o5.x * ep5 - offS(5u, c5, o5, m5)), o5.x > 0.0); }
+  workgroupBarrier();
+  var b6 = 0.0;
+  if (has6) { for (var q = 0u; q < 8u; q++) { b6 += sR[sIdx(5u, 2 * c6 + octI(q)) - 2048u]; } }
   // Coarsest: palindromic red-black sweeps from zero (red, black, ..., red).
-  if (t < 32u) { coarse[CE + L6O + t] = 0.0; }
-  storageBarrier(); workgroupBarrier();
   for (var s = 0u; s < 41u; s++) {
-    if (t < 32u) { let c = cellOfLevel(6u, t); if (colourOf(c) == (s & 1u)) { relaxC(6u, c, CE); } }
-    storageBarrier(); workgroupBarrier();
+    if (has6 && colourOf(c6) == (s & 1u) && o6.x > 0.0) { sE[2304u + t] = (b6 + offS(6u, c6, o6, m6)) / o6.x; }
+    workgroupBarrier();
   }
   // Up: prolong (piecewise constant) onto the pre-smoothed values, post-smooth black first.
-  for (var l = 5u; l >= 4u; l--) {
-    for (var i = t; i < levelCount(l); i += 1024u) {
-      let c = cellOfLevel(l, i);
-      coarse[CE + loff(l) + i] = select(0.0, coarse[CEP + loff(l) + i] + coarse[CE + lidx(l + 1u, c / 2)], cop(l, c).x > 0.0);
-    }
-    storageBarrier(); workgroupBarrier();
-    for (var s = 0u; s < 4u; s++) {
-      for (var i = t; i < levelCount(l); i += 1024u) { let c = cellOfLevel(l, i); if (colourOf(c) == 1u - (s & 1u)) { relaxC(l, c, CE); } }
-      storageBarrier(); workgroupBarrier();
-    }
+  if (has5) { sE[2048u + t] = select(0.0, ep5 + sE[sIdx(6u, c5 / 2)], o5.x > 0.0); }
+  workgroupBarrier();
+  for (var s = 0u; s < 4u; s++) {
+    if (has5 && colourOf(c5) == 1u - (s & 1u) && o5.x > 0.0) { sE[2048u + t] = (b5 + offS(5u, c5, o5, m5)) / o5.x; }
+    workgroupBarrier();
   }
+  sE[i0] = select(0.0, ep40 + sE[sIdx(5u, c40 / 2)], o40.x > 0.0);
+  sE[i1] = select(0.0, ep41 + sE[sIdx(5u, c41 / 2)], o41.x > 0.0);
+  workgroupBarrier();
+  for (var s = 0u; s < 4u; s++) {
+    let col = 1u - (s & 1u);
+    if (colourOf(c40) == col && o40.x > 0.0) { sE[i0] = (b40 + offS(4u, c40, o40, m40)) / o40.x; }
+    if (colourOf(c41) == col && o41.x > 0.0) { sE[i1] = (b41 + offS(4u, c41, o41, m41)) / o41.x; }
+    workgroupBarrier();
+  }
+  coarse[CE + L4O + i0] = sE[i0]; coarse[CE + L4O + i1] = sE[i1];
 }
 `);
 
@@ -2215,12 +2296,13 @@ ${PARTICLE_MOVE_WGSL}
 // ---------------------------------------------------------------------------
 // Diagnostics (on demand, never per step): per-brick liquid volume from the
 // six-tetrahedron fill over open cells; optional texture publication (init).
-// cfg.a = 1 to also write the fill and render textures for every brick.
+// cfg.a = 1 to also write the fill and render textures for every brick;
+// cfg.b = 1 to measure phiT (the ledger's mid-step stages) instead of phi.
 // ---------------------------------------------------------------------------
 export const volumeKernel = kernel("seep.volume", [bricksRO, phisRO, { name: "vsum", kind: "rw", type: "array<f32>" }, volW, cfgU, surfW], /* wgsl */ `
 ${levelSetFillWGSL}
 ${SURF_WGSL}
-fn ph(v: vec3i) -> f32 { return phis[PHI_OFF + cidx(clampV(v))]; }
+fn ph(v: vec3i) -> f32 { return phis[select(PHI_OFF, PHIT_OFF, cfg.b == 1u) + cidx(clampV(v))]; }
 var<workgroup> red: array<f32, 512>;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
   let b = wg.x + 128u * wg.y;
@@ -2243,7 +2325,7 @@ var<workgroup> red: array<f32, 512>;
 `);
 
 export const ALL_KERNELS: readonly KernelSource[] = [
-  classifyKernel, clearKernel, countKernel, seedKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel,
+  classifyKernel, clearKernel, countKernel, emitKernel, scanKernel, scatterKernel, separateKernel, advectPhiKernel, combineKernel, massFitKernel,
   redistInitKernel, redistSweepKernel, p2gKernel, velocityBulkKernel, velocityKernel, operatorKernel, coarsenBrickKernel, coarsenTopKernel,
   pcgUpdateKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, coarseSolveKernel, mgUp3Kernel, mgUp2Kernel, mgUp1Kernel, pcgPrecondKernel,
   pcgDirectionKernel, projectKernel, shadowKernel, extendKernel, g2pKernel, volumeKernel,

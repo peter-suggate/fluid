@@ -9,17 +9,19 @@ import type { GPUSolverInstance } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import {
-  BRICKS, BULK_LISTS, CELLS, CELL_M, CLASS_BULK, DT, NBULK, NX, NY, NZ, PARTICLE_CELLS, RESERVOIR_TOP, assertSeepScene, bakeSeep, cellIndex, cellOpen,
+  BRICKS, BULK_LISTS, CELLS, CELL_M, CLASS_BULK, DT, NBULK, NX, NY, NZ, PARTICLE_CELLS, PBX0, RESERVOIR_TOP, assertSeepScene, bakeSeep, cellIndex, cellOpen,
 } from "./seep-layout";
 import {
   ALL_KERNELS, advectPhiKernel, classifyKernel, clearKernel, coarseSolveKernel, coarsenBrickKernel, coarsenTopKernel, combineKernel,
   countKernel, extendKernel, g2pKernel, operatorKernel, p2gKernel, mgDown0Kernel, mgDown1Kernel, mgDown2Kernel, mgDown3Kernel, mgRestrict3Kernel, mgUp1Kernel, mgUp2Kernel, mgUp3Kernel, pcgDirectionKernel, pcgPrecondKernel, pcgUpdateKernel, projectKernel,
-  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, seedKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, type KernelSource,
+  redistInitKernel, redistSweepKernel, scanKernel, scatterKernel, emitKernel, massFitKernel, separateKernel, shadowKernel, velocityBulkKernel, velocityKernel, volumeKernel, type KernelSource,
 } from "./seep-kernels";
 import type { SeepObservationSource } from "./seep-observation";
 import { ARGS_WORDS, B, BULK_WG, C, COARSE_CELLS, COARSE_LATTICE, FAIL, MAX_CYCLES, MG_STRIDE, NSHADOW, PARTICLE_CAPACITY, bindGroupLayoutEntries } from "./seep-wgsl";
 
 export const SEEP_METHOD_ID = "seep-m1max";
+/** Mass-fit passes over the chamber surface (even: they ping-pong phiT -> phi -> phiT). */
+const MASS_FIT_PASSES = 6;
 
 export interface SeepSolverOptions { readonly onProgress?: (progress: { stage: string; fraction: number }) => void; readonly signal?: AbortSignal }
 
@@ -31,6 +33,7 @@ export interface SeepDiagnostics {
   readonly volumeDrift: number;
   readonly failures: string[];
   readonly particles: number;
+  /** Particles emitted at the outlet plane (cumulative; the only source of chamber particles). */
   readonly seeded: number;
   readonly deleted: number;
   readonly deletedBy: { readonly deep: number; readonly cap: number; readonly out: number };
@@ -60,6 +63,7 @@ export class SeepSolver implements GPUSolverInstance {
   private steps: [Dispatch[], Dispatch[]] = [[], []];
   private volumeInit?: Dispatch;
   private volumeMeasure?: Dispatch;
+  private volumeMeasureT?: Dispatch;
   private readonly readback: GPUBuffer;
   private initialVolumeCells = 0;
   private stepIndex = 0;
@@ -228,11 +232,11 @@ export class SeepSolver implements GPUSolverInstance {
         d(scanKernel, p, { indirect: W(C.ARG_PART) }),
         d(scatterKernel, p, { direct: [capGroups] }),
         d(advectPhiKernel, undefined, { indirect: W(C.ARG_SURF) }),
-        d(combineKernel, p, { indirect: W(C.ARG_PART) }),
+        d(combineKernel, undefined, { indirect: W(C.ARG_PART) }),
+        ...Array.from({ length: MASS_FIT_PASSES }, (_, k) => k).map(k => d(massFitKernel, [k % 2 === 0 ? N : 0, k % 2 === 0 ? 0 : N, 0, 0], { indirect: W(C.ARG_PART) }, `seep.massFit.${k}`)),
         d(redistInitKernel, undefined, { indirect: W(C.ARG_SURF) }),
         d(redistSweepKernel, [0, N, 0, 0], { indirect: W(C.ARG_SURF) }, "seep.redistSweep.1"),
         d(redistSweepKernel, [N, 0, 1, 0], { indirect: W(C.ARG_SURF) }, "seep.redistSweep.2"),
-        d(seedKernel, p, { indirect: W(C.ARG_PART) }),
         d(separateKernel, p, { direct: [capGroups] }),
         d(p2gKernel, p, { indirect: W(C.ARG_PART) }),
         d(velocityBulkKernel, undefined, { direct: [BULK_WG] }),
@@ -272,11 +276,13 @@ export class SeepSolver implements GPUSolverInstance {
         d(extendKernel, [0, 6 * N, 0, 3], { indirect: W(C.ARG_SURF) }, "seep.extend.1"),
         d(extendKernel, [6 * N, 0, 3, 0], { indirect: W(C.ARG_SURF) }, "seep.extend.2"),
         d(g2pKernel, p, { direct: [capGroups] }),
+        d(emitKernel, p, { direct: [1] }),
       );
       this.steps[parity] = list;
     }
     this.volumeInit = d(volumeKernel, [1, 0, 0, 0], { direct: [128, BRICKS / 128] }, "seep.volume.init");
     this.volumeMeasure = d(volumeKernel, [0, 0, 0, 0], { direct: [128, BRICKS / 128] });
+    this.volumeMeasureT = d(volumeKernel, [0, 1, 0, 0], { direct: [128, BRICKS / 128] }, "seep.volume.phiT");
   }
 
   private encode(pass: GPUComputePassEncoder, x: Dispatch): void {
@@ -341,10 +347,10 @@ export class SeepSolver implements GPUSolverInstance {
     return list.map((x, i) => ({ label: x.label, ms: Number(t[2 * i + 1] - t[2 * i]) / 1e6 }));
   }
 
-  private async measure(publish: boolean): Promise<{ volume: number; ctrl: Uint32Array }> {
+  private async measure(publish: boolean, phiT = false): Promise<{ volume: number; chamber: number; ctrl: Uint32Array }> {
     const encoder = this.device.createCommandEncoder({ label: "seep.measure" });
     const pass = encoder.beginComputePass({ label: "seep.measure" });
-    this.encode(pass, publish ? this.volumeInit! : this.volumeMeasure!);
+    this.encode(pass, publish ? this.volumeInit! : phiT ? this.volumeMeasureT! : this.volumeMeasure!);
     pass.end();
     encoder.copyBufferToBuffer(this.buffers.vsum, 0, this.readback, 0, BRICKS * 4);
     encoder.copyBufferToBuffer(this.buffers.ctrl, 0, this.readback, BRICKS * 4, C.WORDS * 4);
@@ -353,9 +359,9 @@ export class SeepSolver implements GPUSolverInstance {
     const raw = this.readback.getMappedRange().slice(0);
     this.readback.unmap();
     const sums = new Float32Array(raw, 0, BRICKS);
-    let volume = 0;
-    for (let i = 0; i < BRICKS; i++) volume += sums[i];
-    return { volume, ctrl: new Uint32Array(raw, BRICKS * 4, C.WORDS) };
+    let volume = 0, chamber = 0;
+    for (let i = 0; i < BRICKS; i++) { volume += sums[i]; if ((i & 63) >= PBX0) chamber += sums[i]; }
+    return { volume, chamber, ctrl: new Uint32Array(raw, BRICKS * 4, C.WORDS) };
   }
 
   private async measureVolume(publish: boolean): Promise<number> { return (await this.measure(publish)).volume; }
@@ -375,13 +381,44 @@ export class SeepSolver implements GPUSolverInstance {
     }
     return {
       step: ctrl[C.STEP], volumeCells: volume, initialVolumeCells: this.initialVolumeCells, volumeDrift: drift, failures,
-      particles: ctrl[C.PCOUNT] + ctrl[C.PCOUNT + 1], seeded: ctrl[C.SEEDED], deleted: ctrl[C.DELETED],
+      particles: ctrl[C.PCOUNT] + ctrl[C.PCOUNT + 1], seeded: ctrl[C.EMITTED], deleted: ctrl[C.DELETED],
       deletedBy: { deep: ctrl[C.DEL_DEEP], cap: ctrl[C.DEL_CAP], out: ctrl[C.DEL_OUT] },
       cycles: ctrl[C.CYCLES], cyclesTotal: ctrl[C.CYCLES_TOTAL], capHits: ctrl[C.CAP_HITS],
       firstResidual: f[C.FIRST_RES], lastResidual: f[C.LAST_RES], maxSegments: ctrl[C.MAX_SEG],
       residualHistory: Array.from(f.subarray(C.RES_HIST, C.RES_HIST + MAX_CYCLES + 1)),
       lists: { active: ctrl[C.N_ACTIVE], surf: ctrl[C.N_ACTIVE + 1], part: ctrl[C.N_ACTIVE + 2], clear: ctrl[C.N_ACTIVE + 3], liquid: ctrl[C.N_LIQ] },
     };
+  }
+
+  /**
+   * Development aid (lane S ledger): run the next step in segments, measuring
+   * after each the chamber's (x >= PX0) tetrahedral-fill volume of the field
+   * that stage wrote (phiT after advection and combination, phi otherwise),
+   * the whole domain's phi volume, and the particle census. Completes the step.
+   */
+  async debugLedgerStep(): Promise<{ stage: string; chamber: number; total: number; particles: number; emitted: number; deleted: { deep: number; cap: number; out: number } }[]> {
+    const parity = this.stepIndex & 1;
+    const list = this.steps[parity];
+    const stops: [string, boolean][] = [["seep.scatter", false], ["seep.advectPhi", true], ["seep.combine", true], [`seep.massFit.${MASS_FIT_PASSES - 1}`, true], ["seep.redistSweep.2", false], ["seep.g2p", false], [list[list.length - 1].label, false]];
+    const rows = [];
+    let begin = 0;
+    for (const [label, phiT] of stops) {
+      const end = list.findIndex(x => x.label === label);
+      if (end < begin) throw new Error(`seep ledger: no dispatch ${label} after ${begin}`);
+      const encoder = this.device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      for (const x of list.slice(begin, end + 1)) this.encode(pass, x);
+      pass.end();
+      this.device.queue.submit([encoder.finish()]);
+      begin = end + 1;
+      const m = await this.measure(false, phiT);
+      rows.push({ stage: label.replace("seep.", ""), chamber: m.chamber, total: m.volume, particles: m.ctrl[C.PCOUNT + 1 - parity], emitted: m.ctrl[C.EMITTED],
+        deleted: { deep: m.ctrl[C.DEL_DEEP], cap: m.ctrl[C.DEL_CAP], out: m.ctrl[C.DEL_OUT] } });
+    }
+    this.stepIndex++;
+    this.info.submittedTime_s = (this.info.submittedTime_s ?? 0) + DT;
+    this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
+    return rows;
   }
 
   /** Development aid: encode the next step only up to and including dispatch `label` (from just after `after`, else from its start), then stop (the solver is then mid-step). */

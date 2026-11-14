@@ -2,13 +2,13 @@
  * Seep solver: shared WGSL (constants, brick-major addressing, the baked solid
  * geometry and the field samplers). Lane S, docs/plans/seep-rewrite-2026-11-14.md.
  */
-import { BRICKS, BULK_LISTS, CELLS, DT, CELL_M, NBULK, PHI_MAX, PARTICLE_CELLS, PBX, PBX0, PARTICLE_X0 } from "./seep-layout";
+import { BRICKS, BULK_LISTS, CELLS, DT, CELL_M, NBULK, PHI_MAX, PARTICLE_CELLS, PBX, PBX0, PARTICLE_X0, THROAT_Y0, THROAT_Z0 } from "./seep-layout";
 
 /** Particle pool capacity (each pool), from the measured NB-FLIP peak (216k) with ample margin. */
 export const PARTICLE_CAPACITY = 1 << 20;
 /** FLIP fraction (Ferstl 2016 uses a FLIP/PIC blend; the reference runs 0.95). */
 export const FLIP_RATIO = 0.95;
-/** Narrow band width R (cells): particles deeper than this are retired (Ferstl 2016 §3.3). */
+/** Narrow band width R (cells) of the reference (Ferstl 2016 §3.3); the chamber keeps every particle (they carry its liquid). */
 export const BAND = 3;
 /** Eq. (3) combination band r = R - 1 (Ferstl 2016 §3.1). */
 export const COMBINE_BAND = 2;
@@ -49,6 +49,8 @@ export const C = {
   N_LIQ: 65, LIQ_COUNT: 66,
   /** Level-4 block list: its append counter, and its size this step. */
   L4_COUNT: 67, N_L4: 68,
+  /** Outlet emission: the swept length (f32 cells) not yet emitted, per throat face (4); particles emitted (cumulative). */
+  EMIT_ACC: 69, EMITTED: 73,
   RED: 256,
   /** In the args buffer: gated arguments per PCG iteration k, records of 4 words: U2, U1, U0, P, X(k+1). */
   MG_ARGS: 64,
@@ -100,6 +102,7 @@ const GDT: f32 = ${f(9.80665 * DT)};
 const PHI_MAX: f32 = ${f(PHI_MAX)};
 const UNKNOWN_PHI: f32 = ${f(PHI_MAX + 1)};
 const PX0: i32 = ${PARTICLE_X0};
+const THROAT_Y0: i32 = ${THROAT_Y0}; const THROAT_Z0: i32 = ${THROAT_Z0};
 const PBX0: u32 = ${PBX0}u;
 const PN: u32 = ${PARTICLE_CELLS}u;
 const CAP: u32 = ${PARTICLE_CAPACITY}u;
@@ -115,6 +118,7 @@ const B_LBULK: u32 = ${B.LIST_BULK * BRICKS}u; const B_LSHADOW: u32 = ${B.LIST_S
 const NCL: u32 = ${COARSE_LATTICE}u; const BU_OFF: u32 = 0u; const BUS_OFF: u32 = ${3 * COARSE_LATTICE}u;
 const C_ARG_ACTB: u32 = ${C.ARG_ACTB}u; const C_ARG_ACTBB: u32 = ${C.ARG_ACTBB}u;
 const C_N_LIQ: u32 = ${C.N_LIQ}u; const C_LIQ_COUNT: u32 = ${C.LIQ_COUNT}u; const C_L4_COUNT: u32 = ${C.L4_COUNT}u; const C_N_L4: u32 = ${C.N_L4}u;
+const C_EMIT_ACC: u32 = ${C.EMIT_ACC}u; const C_EMITTED: u32 = ${C.EMITTED}u;
 const C_ARG_L4: u32 = ${C.ARG_L4}u; const B_L4FLAG: u32 = ${B.L4_FLAG * BRICKS}u; const B_L4LIST: u32 = ${B.L4_LIST * BRICKS}u; const C_ARG_LIQ: u32 = ${C.ARG_LIQ}u; const C_ARG_LIQB: u32 = ${C.ARG_LIQB}u; const C_ARG_LIQBB: u32 = ${C.ARG_LIQBB}u;
 const B_LBULK2: u32 = ${B.LIST_BULK2 * BRICKS}u; const B_LLIQ: u32 = ${B.LIST_BULK2 * BRICKS + NBULK}u;
 /** Composite h/4h: a fine face against a coarse cell couples over 2.5 cells (half a fine and half a coarse cell). */

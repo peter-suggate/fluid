@@ -100,3 +100,63 @@ Speed work, every mechanism a published treatment cited in the kernels:
 Step 120 (check slot): fenced median 18.1 ms (from 45.8), mean 7.7 PCG cycles, q 0.253 L/s, throat u 2.58 m/s,
 drift 9e-4. Profile: coarse solve 3.1, velocity 3.1, level set (advect/redistance/extend) 3.3, PCG fine passes ~6.
 Still above the 11.2 ms 3x target; next up are the coarse solve, velocity, and the level-set passes.
+
+## 2026-11-14 MILESTONE S2b: particles carry the chamber's liquid (conservative to <1%), 5/8 gates
+
+Per the coordinator's ruling, the chamber now uses particles as its conserved carrier. Each mechanism is cited in the kernels:
+- **Outlet emission** is the only source of chamber particles. Each step, every throat face at x = 256 emits
+  u_x dt h^2 times its wetted fraction, as layers of 2x2 particles h/2 apart (8 per cell volume). The unemitted swept
+  length carries to the next step. Particles are placed along the projected face velocity and carry it. The seed
+  kernel is gone: nothing seeds from phi.
+- **No deletions.** There is no depth retirement and no crowding cap. Deletions are counted by reason, and all of
+  them are 0 over 1200 steps.
+- **Chamber phi comes from the particles alone.** It starts from their mass plane, NB-FLIP's sampleBound with crowded
+  cells counted in full. There is no SL union and no sphere union: the 0.875h sphere cap removed 17% of a 0.6h film.
+  Then six Jacobi passes of a mass-conserving level-set fit (van der Pijl et al. 2005; CLSVOF) match each cell's
+  tetrahedral fill to its particle mass F = count/8. Before fitting, a crowded cell's excess over full is carried up
+  its column. Interior and far-air vertices stay fixed. The throat-exit vertices keep the grid phi.
+- **Ledger.** `tools/seep-solver-smoke.ts --ledger` runs sampled steps in stages and prints the chamber tetra-fill
+  volume after census, advection, combine, fit, redistance, G2P and emission, beside the particle mass, the emitted
+  mass, deletions and the delivered volume.
+
+Ledger, 1200 steps (cells; delivered = left loss - wall change):
+
+| step | delivered | emitted | particle mass | chamber phi | phi vs delivered | total drift |
+|---|---|---|---|---|---|---|
+| 300 | 10276 | 10365 | 10330 | 10359 | +0.8% | +2.8e-5 |
+| 600 | 20581 | 20741 | 20706 | 20718 | +0.7% | +4.6e-5 |
+| 900 | 30904 | 31084 | 31049 | 31024 | +0.4% | +4.0e-5 |
+| 1200 | 41247 | 41395 | 41361 | 41388 | +0.3% | +4.8e-5 |
+
+seep-bench 1200 steps vs NB-FLIP (artifacts/seep-rewrite/lane-s/compare-s2b.md), check slot:
+
+| gate | verdict | detail |
+|---|---|---|
+| G1 | pass | q_left 0.2582 vs 0.2697 L/s (-4.3%) |
+| G2 | pass | left loss -3.4 / -4.3 / -4.3 / -4.0% |
+| G3 | FAIL (300 only) | right 1.295 / 2.573 / 3.883 / 5.165 L; upper bounds 1.282 / 2.705 / 4.117 / 5.518 |
+| G4 | pass | throat u 2.588 vs 2.639 |
+| G5 | pass | 90% wet at step 334 vs 299 (+12%); 16383 at 1200 |
+| G6 | FAIL (1200) | centroid 380.4 / 392.7 vs 368.9 / 369.8; L1 0.178 ok / 0.315 > 0.226 |
+| G7 | pass | drift 0.00% at 1200 (and within 5e-5 at every checkpoint) |
+| G8 | FAIL | jet column 0.0371 vs 0.0770 L |
+
+Fenced median 17.2 ms (check slot): 1.96x NB-FLIP.
+
+## 2026-11-14 DECISION NEEDED (coordinator, lane H): the remaining fails are set by the reference's own volume errors
+
+- **G8 (jet).** The particles in the jet zone (right, y >= 8, x < 320) carry 0.037 L, and so does phi (the fit matches
+  them). Ballistics give the same figure. At 2.6 m/s the jet leaves x < 320 after ~0.12 s. Q/u = 1e-4 m^2 (the 2x2
+  throat), and the ~0.36 m path in the zone holds ~0.036 L. NB-FLIP's 0.077 L is about 2.1x that: its 0.875h particle
+  spheres, unioned onto a 2h jet, fatten it. bef5feb6 "passed" G8 the same way, while creating liquid. A conservative
+  surface cannot match it. Suggest judging G8 on the jet's flux or mass (Q times the zone's flight time), or within 25%
+  of the ballistic 0.036 L.
+- **G3 at 300.** Our throat delivers 1.285 L by step 300. NB-FLIP delivers 1.221 L, its left loss less 0.11 L parked
+  in its wall zone (ours stays at 0.008 L). An exactly conservative chamber would hold 1.2845 L, already above the
+  1.282 L upper bound (NB delivered x 1.05). 600-1200 pass.
+- **G6 at 1200.** NB-FLIP's chamber holds 3.42 L of the 5.11 L it delivered (-33%). Ours holds 5.17 L of 5.16 L.
+  The near-flat profile of a conserved 2.5-cell pool (centroid of a uniform layer: 384) differs from a reference that
+  has lost a third of its liquid. The L1 of the normalised profile fails at 1200 only.
+
+Until the gates are re-based, I am continuing S2 speed work on this conservative build. Each change is gated on the
+ledger and the 1200-step run.

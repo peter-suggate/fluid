@@ -2,6 +2,9 @@
  * headless run on the default reservoir-seep scene, printing lane H's zone
  * observables (tools/seep-observables.ts) with the solver's own diagnostics,
  * fenced step times and, with --profile, one timestamp-attributed step.
+ * --ledger: at each sample the step runs in stages, printing the chamber's
+ * volume (cells, x >= 256) after each stage with the particle mass (count / 8)
+ * and the liquid delivered (left loss less the wall's gain since step 0).
  *
  *   tools/gpu/fluid-gpu-run.sh check env WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
  *     node --import tsx tools/seep-solver-smoke.ts --steps=120 --every=30 [--profile]
@@ -23,6 +26,7 @@ const args = process.argv.slice(2);
 const option = (key: string) => args.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const steps = Number(option("steps") ?? 60), every = Number(option("every") ?? 30);
 const profile = args.includes("--profile");
+const ledger = args.includes("--ledger");
 
 paceDawnEventPolling();
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href);
@@ -50,7 +54,7 @@ const sample = async (step: number) => {
   rows.push(row);
   const r = (x: number | null, n = 3) => x === null ? null : Number(x.toFixed(n));
   console.log(JSON.stringify({
-    step, L: { total: r(row.liquid_L.total), left: r(row.liquid_L.left), wall: r(row.liquid_L.wall), right: r(row.liquid_L.right), floor: r(row.liquid_L.rightFloorBand) },
+    step, L: { total: r(row.liquid_L.total), left: r(row.liquid_L.left), wall: r(row.liquid_L.wall), right: r(row.liquid_L.right), floor: r(row.liquid_L.rightFloorBand), jet: r(row.jet_L, 4) },
     q: r(row.qLeft_Lps), qR: r(row.qRight_Lps), u: r(row.throatU_m_s), wet: row.wetFloor_cells, cx: r(row.rightCentroid_x, 1), drift: Number(row.drift.toExponential(3)),
     solverDrift: Number(d.volumeDrift.toExponential(3)), particles: d.particles, seeded: d.seeded, deleted: d.deleted, by: d.deletedBy,
     cycles: d.cycles, meanCycles: r(d.cyclesTotal / Math.max(1, d.step), 2), capHits: d.capHits,
@@ -62,6 +66,17 @@ const sample = async (step: number) => {
 await sample(0);
 const walls: number[] = [];
 for (let step = 1; step <= steps; step++) {
+  if (ledger && step % every === 0) {
+    const stages = await solver.debugLedgerStep();
+    await sample(step);
+    const cell_L = geometry.cell_m ** 3 * 1000;
+    const r0 = rows[0], last = rows.at(-1)!;
+    const delivered = ((r0.liquid_L.left - last.liquid_L.left) - (last.liquid_L.wall - r0.liquid_L.wall)) / cell_L;
+    console.log(JSON.stringify({ kind: "ledger", step, deliveredCells: Math.round(delivered), stages: stages.map(x => ({
+      stage: x.stage, chamber: Math.round(x.chamber), mass: Math.round(x.particles / 8), total: Math.round(x.total), emitted: Math.round(x.emitted / 8),
+      del: Math.round((x.deleted.cap + x.deleted.out + x.deleted.deep) / 8), delCap: Math.round(x.deleted.cap / 8), delOut: Math.round(x.deleted.out / 8) })) }));
+    continue;
+  }
   const t0 = performance.now();
   solver.advanceTo(step / 60);
   await solver.awaitFrameCompletion();
