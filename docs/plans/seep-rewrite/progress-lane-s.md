@@ -311,3 +311,31 @@ G1, G2, G4, G5 and G7 pass. G3 fails at 300 only (1.290 vs 1.282). G8 fails (jet
 G6 fails, with 1200 centroid 392.3 and L1 0.285, inside the s2b-s2f spread.
 
 Fenced median 10.65 ms (thirds 9.77 / 10.85 / 11.10, p95 11.87) against NB-FLIP's 33.69 ms: 3.16x.
+
+## 2026-11-14 Jet self-check (coordinator item 1): the particles and phi agree, and the jet is ballistic
+
+**Method.** A check-slot run of the S2g build, using tools/seep-observe-seep.ts plus a particle readback (script
+kept at ~/code/me/fluid-scratch/lane-s/jetcheck.mts). It compares two volumes in the G8 zone (right chamber,
+x 256-319, y >= 8):
+- the particle-carried liquid (count / 8 cells);
+- the harness's phi-fill volume (jet_L).
+
+| step | harness phi jet_L | particles | phiC fill (approx.) | mean particle u_x | throat u |
+|---|---|---|---|---|---|
+| 300 | 0.0370 L | 0.0380 L | 0.0379 L | 2.13 m/s | 2.60 m/s |
+| 600 | 0.0370 L | 0.0377 L | 0.0380 L | 2.12 m/s | 2.59 m/s |
+
+**The volumes agree slab by slab.** Each 8-cell x slab holds 34-42 particle cells against 35-41 phiC cells.
+The thin-jet reconstruction is not losing volume locally.
+
+**The jet is ballistic.** Down the zone, the mean u_y falls by 0.18 m/s per 8 cells (0.04 m).
+- At u_x ~ 2.1 m/s, the flight time per slab is 0.019 s, and g dt = 0.187 m/s, which matches.
+- The jet centre falls from y 64.6 to 40.0.
+- u_x is 1.98 m/s at x 256 and rises to 2.21 m/s by x 319. It is below the throat u because the throat value is
+  measured inside the wall.
+
+**The jet volume is what its flux implies.** For a steady jet, the volume per length is q / u_x =
+0.258e-3 / 2.1 = 1.23e-4 m^3/m, or 39 cells per 8-cell slab, as measured. So the jet holds about 0.037 L.
+NB-FLIP's 0.077 L at a similar q (0.270 L/s) implies its liquid moves at about half the speed through the zone,
+or takes a longer path, which is consistent with lane H's slowing/thickening hypothesis. No Seep defect was
+found, so item 2 (speed) continues.
