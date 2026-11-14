@@ -73,7 +73,9 @@ export const FAIL = { DEEP_SURFACE: 1, POOL: 2, SEGMENTS: 4, COARSEST_PIVOT: 8 }
 
 /** bricks table offsets (each BRICKS long). */
 export const B = {
-  CLASS: 0, FLAGS: 1, MINPHI: 2, PCOUNT: 3,
+  CLASS: 0, FLAGS: 1, MINPHI: 2,
+  /** Nonzero when G2P or emission left a particle in the brick (read only as nonzero; G2P sets 1, emission counts). */
+  PCOUNT: 3,
   /** A second copy of the BULK list immediately followed by the liquid bricks (active bricks with a pressure unknown), for the pressure solve. */
   LIST_BULK2: 4, LIST_SURF: 5, LIST_PART: 6, LIST_CLEAR: 7, PSTART: 8, PNUM: 9,
   /** The BULK bricks (static, NBULK) immediately followed by the active list, so that one index serves

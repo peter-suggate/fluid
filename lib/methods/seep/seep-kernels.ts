@@ -326,8 +326,8 @@ export const countKernel = kernel("seep.count", [ctrlRW, partsRO, pcellRW, pgrid
   // No crowding cap: the particles carry the chamber's liquid, and a crowded
   // cell's excess shows in the surface (combine's unclipped mass bound), where
   // the pressure it implies spreads it.
-  atomicAdd(&pgrid[pc], 1u);
-  atomicOr(&pgrid[pc], 1u << (16u + o));
+  let old = atomicAdd(&pgrid[pc], 1u);
+  if ((old & (1u << (16u + o))) == 0u) { atomicOr(&pgrid[pc], 1u << (16u + o)); }
   pcell[i] = pc;
 }
 `);
@@ -925,7 +925,10 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
   for (var t = l; t < 3300u; t += 256u) { atomicStore(&sMom[t], 0); atomicStore(&sW[t], 0); }
   workgroupBarrier();
   let base = (1u - cfg.a) * CAP * 2u;
-  for (var k = start + l; k < start + num; k += 256u) {
+  // Lane l of SIMD group l / 32 takes every eighth particle: lanes of one group sit in different cells, so
+  // their shared atomics (one stencil per cell and half) seldom hit one address together.
+  let tl = (l & 31u) * 8u + (l >> 5u);
+  for (var k = start + tl; k < start + num; k += 256u) {
     let xp = parts[base + k].xyz; let vp = parts[base + CAP + k].xyz;
     for (var a = 0u; a < 3u; a++) {
       let q = xp - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
@@ -2661,8 +2664,10 @@ ${PARTICLE_MOVE_WGSL}
   parts[base + i] = vec4f(x, 0.0);
   parts[base + CAP + i] = vec4f(v, 0.0);
   let pb = brickOfCell(vec3i(floor(x)));
-  atomicAdd(&bricks[B_PCOUNT + pb], 1u);
-  let fb = fastBits(v); if (fb != 0u) { atomicOr(&bricks[B_FAST + pb], fb); }
+  // B_PCOUNT is read only as nonzero (classify, combine): set it once rather than counting every particle on one
+  // contended word; likewise OR fast bits only when one is missing.
+  if (atomicLoad(&bricks[B_PCOUNT + pb]) == 0u) { atomicStore(&bricks[B_PCOUNT + pb], 1u); }
+  let fb = fastBits(v); if (fb != 0u && (atomicLoad(&bricks[B_FAST + pb]) & fb) != fb) { atomicOr(&bricks[B_FAST + pb], fb); }
 }
 `);
 

@@ -846,3 +846,69 @@ The shifted passes cost about 0.09 ms per call. The time they save comes from fe
 each with its 13 gated dispatches.
 
 **Next:** the per-particle cost (separate, g2p, p2g), the late-run growth from 166k to 332k particles.
+
+## S2n: per-particle batch (count, p2g, g2p atomics)
+
+**Attribution at step 1100 (S2m, check slot):** separate 0.56, g2p 0.41, p2g 0.33, count 0.08, scatter 0.07 ms
+(fenced 7.64). At step 600 the same three kernels sum to 0.85 ms; at 1100 they sum to 1.30 ms (166k -> 310k
+particles).
+
+Probe kernels (tree v/pp) split the time. Each is a reduced duplicate dispatched just before its kernel. It writes
+only the free half of the source pool, so the state is unchanged, and it carries its own label:
+
+| kernel | ms | breakdown |
+|---|---|---|
+| separate | 0.52 | candidate loop 0.41; range lookups 0.07; one candidate a cell 0.07; phi projection 0.03 |
+| g2p | 0.39 | no brick atomics 0.34; RK k2/k3 and collide 0.15; support check 0.03 |
+| p2g | 0.31 | shared-atomic splat 0.25; global flush ~0 |
+
+**Landed (S2n):**
+- **p2g:** lane l of SIMD group l/32 takes every eighth particle, so the lanes of one group fall in different cells.
+  A cell's particles share one stencil per axis-half, so with the sorted order lanes in one cell hit the same
+  shared-memory word at once. The fixed-point integer sums are order-independent.
+- **g2p:** B_PCOUNT is read only as nonzero (classify, combine), so G2P now sets it to 1 once (load, then store)
+  rather than an atomicAdd from every particle on one contended word per brick. Fast bits are OR'd only when one is
+  missing.
+- **count:** the octant atomicOr is skipped when the count's atomicAdd already returned that bit.
+
+| kernel at 1100 | S2m ms | S2n ms |
+|---|---|---|
+| p2g | 0.33 | 0.23 |
+| g2p | 0.41 | 0.36 |
+| count | 0.08 | 0.07 |
+
+**A/B, check slot, 1100 steps, 4 interleaved rounds (fenced median of the run):**
+
+| variant | rounds | median |
+|---|---|---|
+| S2m | 7.80 / 7.76 / 7.82 / 7.73 | 7.78 |
+| S2n | 7.74 / 7.70 / 7.73 / 7.69 | 7.715 |
+
+That is -0.065 ms over the whole run, and S2n is faster in every round. The gain is larger late in the run, since it
+scales with particles.
+
+**Gates, seep-bench 1200 on the check slot (compare-s2n.md, audit-s2n): all pass.**
+- G1 -4.09%. G2 -2.82 / -3.94 / -3.84 / -3.80%. G4 -1.55%. G5 90% wet at step 275.
+- G3 corrected: 1.283 / 2.583 / 3.897 / 5.181 L.
+- G6 corrected: L1 0.078 / 0.092; G6 as written passes too.
+- G7 0.00%. G8: impact 375.5 / 375.7.
+
+**Ledger, 1200 steps, two runs:** chamber phi against delivered is -0.99 / +0.43 / +0.56 / +0.21% in one and
+-0.10 / +0.28 / +0.60 / +0.85% in the other. The step-300 spread is run-to-run. There are no deletions.
+
+**Separate: tried and rejected (check slot, separate's kernel ms at 1100 against 0.52-0.56):**
+
+| variant | ms | result |
+|---|---|---|
+| shared-memory tiles (workgroup a brick, eight 4^3 tiles each staging its 6^3-cell region; 30 KB) | 1.72 | serial tile phases at about one workgroup a core |
+| one flattened loop over the eight ranges | 0.66 | worse |
+| eight cells in lock step (masked loads, unrolled) | 0.64-0.89 | worse |
+| the 3^3 cells around the own cell, so a cell's lanes share addresses (bit-identical) | 0.82 | worse |
+| workgroup 64 / 128 | 0.59 / 0.54 | no gain |
+| inverseSqrt form | 0.54 | no gain |
+| candidates' x only, strided (4-byte loads) | 0.39 vs 0.41 | bytes don't matter |
+| candidates' x only, packed contiguously | 0.54 | lines don't matter |
+
+The candidate loop costs about 100 lane-cycles a candidate, and neither bytes, cache lines nor ALU explain it; that
+looks like latency with limited occupancy, which needs hardware counters to confirm. The paired U/US sampler at x in
+g2p was neutral (0.41).
