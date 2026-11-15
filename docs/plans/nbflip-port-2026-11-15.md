@@ -702,6 +702,43 @@ d and base-e", and 1.12 against "a and b". The answers to the three questions fo
      high, look at seeding or counting; if only the post-impact windows are high, look at the
      retirement of splash particles.
 
+**Ruling on D8's count (2026-11-16, coordinator; recorded by lane F).** The references' `particles`
+is the old engine's receipt word state[1]. The candidate's count is made definitionally identical
+to it. This corrects the measurement; it does not change a tolerance, and the references are
+untouched.
+- **What state[1] counts:**
+  - It is zeroed in slabAllocate before the move (uniform-particle-slab.wgsl.ts:220).
+  - It then counts the records slabSort files (:400) and the records slabOverflow re-spills (:264).
+  - That is after the move's retirements and before transfer's seeds of the same step: the move
+    and sort are at uniform-narrow-band-flip.ts:2155-2157, the seeds at :2226.
+  - noteReceipt takes state[1] as the count (:2331).
+- **The candidate's count:** live records less this step's seeds. A seed keeps the age
+  NB_SEED_FIRST until its first move (particles-formulas.wgsl.ts:48). The count is taken at the
+  same fence. Step 0 counts every record, because the old bootstrap sorts its initial band.
+- **Checked on the old engine.** One dam-300 at 2761350a with UNIFORM_COLD_FREEZE false (the
+  run below) read the census, the receipt and the seed-age records at all 35 samples. At every
+  sample, census records less this step's seeds equals the receipt exactly. So the definition is
+  reproduced, not approximated.
+- **Where it lives.** The count is computed by the candidate's dam runner (lane F's
+  brick-dam-l.mts). The runner also logs `particlesAll`, `liveRecords` and `seedsStep`, so the
+  earlier all-live count stays printed in the run. The gate tool reads `particles` unchanged.
+- **Re-scored** (dam-300 each, check slot, HEAD cc86c9dc plus lane E's lcCouple; sx adds
+  x4Support verbatim, sh adds sx plus the HEAT4 heat):
+
+  | tree | D8 (all live) | D8 (receipt) | 30–90 | D8c (all live) | D8c (receipt) | particles at 16 |
+  |---|---|---|---|---|---|---|
+  | g1 | 1.08 | **0.83** | 6.834e5 | 0.88 | **1.68 (low)** | 2.926e5 |
+  | sx | 1.13 | **0.85** | 6.847e5 | 1.05 | **1.95 (low)** | 2.829e5 |
+  | sh | 1.19 | **0.57** | 6.666e5 | 1.19 | **2.14 (low)** | 2.765e5 |
+  | old, no cold freeze | – | 0.13 | 6.374e5 | – | 0.02 | 3.525e5 |
+
+  The all-live columns are from separate runs; on identical trees D8 has ranged 1.12–1.34.
+  Counted as the receipt, the window rows pass. D8c fails low: we hold 18% fewer records at 16
+  (320k live against 390k), because our seeding before the impact lags. See lane F's log for
+  the per-step seeds.
+- **Cold freeze.** The old engine with UNIFORM_COLD_FREEZE false reads D8 0.13 and D8c 0.02. The
+  freeze is not what separates us on D8.
+
 ### 4.7 Step-time baselines at 2761350a
 
 These rounds ran on the timing slot, with baseline 33b78ebb and candidate 2761350a back to back

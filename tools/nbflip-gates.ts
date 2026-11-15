@@ -238,6 +238,10 @@ function damGates(refs: Box[], c: Box): Gate[] {
     ...boxBand("D5ce", "collapse total mechanical energy (J)", { rel: 0.02 }, " J", refs, c, collapse, s => s.energy_J),
     boxScalar("D6", "wet floor cells", { rel: 0.05 }, "", refs, c, [4, 8, 12], s => s.wetFloor_cells),
     ...boxBandDistance("D7t", "collapse surface profile: highest wet top per 8-cell x bin, RMS (cells)", 4, " cells", rms, refs, c, [8, 12, 16], s => s.profileTop_cells),
+    // D8c and D8 count the old receipt's state[1] (plan §4.6, ruling 2026-11-16): zeroed in slabAllocate before the move
+    // (uniform-particle-slab.wgsl.ts:220), it counts slabSort's filed records (:400) and slabOverflow's re-spilled ones
+    // (:264), after the move's retirements and before transfer's seeds (uniform-narrow-band-flip.ts:2155-2157, :2226),
+    // and noteReceipt takes it (:2331). A candidate's `particles` must be its live records less this step's seeds.
     boxScalar("D8c", "particles at 16", { rel: 0.10 }, "", refs, c, [16], s => s.particles),
     ...boxWindowBand("D3", "back-wall column mean depth (cells), window mean", { rel: 0.05, abs: 2 }, " cells", refs, c, windows, s => s.columnDepth_cells ?? NaN),
     ...boxWindowDrift("D4", "volume drift (fraction of t = 0), window mean", { abs: 0.01 }, refs, c, windows, s => s.drift),

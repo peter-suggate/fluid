@@ -1234,3 +1234,60 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
 
   - D8c (particles at step 16) moves from 3.674e5 to 3.206e5, against 3.516e5, and passes.
   - lUnion alone, frozen tiered step 20, timing slot: 1.24 -> 1.03 ms.
+
+## D8 counted as the old receipt; the cold freeze measured; the pre-impact seeding lag (2026-11-16)
+
+**Count.** Per the coordinator's ruling (plan §4.6, "Ruling on D8's count"), the dam runner now counts D8's
+`particles` as live records less this step's seeds (age NB_SEED_FIRST). That is the old receipt state[1]. On
+the old engine, census records less seed-age records equals the receipt at all 35 samples of a dam-300.
+
+**Cold freeze.** tree-cf0 is the old engine at 2761350a with UNIFORM_COLD_FREEZE false. It reads D8 0.13 and
+D8c 0.02 against ref-2761350a, so the freeze is not what separates us.
+
+**Re-scored** (one run each, check slot): D8 g1 0.83, sx 0.85, sh 0.57, all passing. D8c fails low: 1.68, 1.95
+and 2.14.
+
+Live records, this step's seeds, and the receipt, per step (old = tree-cf0):
+
+| step | old live / seeds / receipt | g1 | sx | sh |
+|---|---|---|---|---|
+| 1 | 79135 / 3448 / 75687 | 71578 / 40395 / 31183 | 71578 / 40395 / 31183 | 74624 / 74624 / 0 |
+| 5 | 103657 / 12453 / 91204 | 93918 / 9199 / 84719 | 93889 / 9216 / 84673 | 96046 / 8717 / 87329 |
+| 7 | 140191 / 27550 / 112641 | 115182 / 14319 / 100863 | 114087 / 12939 / 101148 | 115252 / 12040 / 103212 |
+| 8 | 165292 / 18100 / 147192 | 127727 / 10327 / 117400 | 126427 / 10085 / 116342 | 127558 / 9924 / 117634 |
+| 9 | 189178 / 17399 / 171779 | 165739 / 35015 / 130724 | 143672 / 14260 / 129412 | 165117 / 34544 / 130573 |
+| 10 | 218901 / 22904 / 195997 | 192489 / 14702 / 177787 | 172424 / 23298 / 149126 | 185975 / 8626 / 177349 |
+| 12 | 288652 / 28103 / 260549 | 241131 / 18870 / 222261 | 225504 / 20538 / 204966 | 231345 / 19921 / 211424 |
+| 14 | 342309 / 33002 / 309307 | 279588 / 23810 / 255778 | 267673 / 29055 / 238618 | 262741 / 26771 / 235970 |
+| 16 | 390320 / 37870 / 352450 | 320360 / 27781 / 292579 | 316826 / 33942 / 282884 | 311217 / 34756 / 276461 |
+| 30 | 832874 / 37705 / 795169 | 883769 / 37294 / 846475 | 879760 / 39665 / 840095 | 862655 / 45227 / 817428 |
+| 60 | 629782 / 33425 / 596357 | 641517 / 32112 / 609405 | 664115 / 30879 / 633236 | 608282 / 31508 / 576774 |
+| 90 | 432906 / 14519 / 418387 | 495345 / 10822 / 484523 | 491902 / 11069 / 480833 | 497580 / 11760 / 485820 |
+
+- **The old engine seeds its burst at step 7** (27.5k), then about 18k a step. Ours seeds about 10–14k at 7–8 and
+  bursts at 9 (35k in g1 and sh). By 16 we hold 18% fewer records.
+- **Before the window the excess flips.** From about 30 on we hold more, as before. Retirement and seeding after
+  the impact still differ, but inside the band.
+- **Step 1 is a convention.** The old bootstrap files the initial band, while ours seeds it at step 1 as deferred
+  seeds. So sh, whose HEAT4 is 0 at step 0, counts 0 at step 0.
+- **Next** (the coordinator's rule 1, side-by-side): the per-tile support, heat and seeds at steps 1–20, old
+  against g1, sx and sh (td-round.sh). The 7-against-9 burst timing is what to explain.
+
+**Side-by-side per tile, steps 1–20** (td-round.sh; the old engine at 2761350a against g1, sx and sh; every
+live tile's support word, heat, target and this step's seeds; td-cmp.py and td-cmp2.py):
+- **Support (sx).** Through step 17, old and ours disagree on at most about 1% of supported tiles (for example at
+  16: 17,532 agree, 118 old only, 214 ours only). g1's rule (FT_DIST field 2 ≤ 3, F tiles only) supports 2–6%
+  more tiles than the old engine. So sx moves support to the old engine's and is verbatim. At 18–20, about
+  1,000 column-top tiles are ours only: the column top falls through tiles, and the old engine's head φ_n
+  against our post-level-set φ_{n+1} is the stated timing deviation.
+- **Heat (sh).** FT_H equals HEAT4 on every F tile at every step. On C-only tiles HEAT4 matches the old heat (at
+  most 2.4% of tiles off by more than 0.05, at 20). On F tiles all three trees run below the old heat and the
+  gap grows (9% of tiles off at 16).
+  - The examples are front tiles the old engine triggers that the census never triggers: at x tile 23 by the
+    z = 0 wall, the old heat is 1.93 at step 9, cooling at 4 dt a step, and HEAT4 is 0.
+  - So the heat deficit is the census trigger (lane E's item 4, tuDeformation), not the read. sh is verbatim in
+    what it changes.
+- **D8c's deficit is the floor ahead of the front.** At step 7 the old engine seeds 9.3k and 7.3k in floor tiles
+  y 0 and 1; 9.6k of its low-region seeds fall in tiles that are C-only in ours. At 8 it seeds 9.4k in y 2,
+  8.4k of them in C-only tiles. Ours seeds that floor at step 9 (9.3k, 10.6k and 9.0k in y 0–2), two steps
+  late. The tiles are not h in time, the same census trigger and refinement.
