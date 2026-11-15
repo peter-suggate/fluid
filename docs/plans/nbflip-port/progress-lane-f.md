@@ -648,3 +648,53 @@ Test coverage:
   - Every travel word is at least the oracle's bound: |v|·dt/h for a ballistic record, the reach for a coupled one.
   - No word is set in a slot without a mask, no supported brick is absent, and FAIL stays 0.
   - On tiered at step 24 there are 662k records (7,017 ballistic) in 1,872 supported slots, and the largest travel is 34.13 cells, equal to the oracle's ballistic |v|·dt/h.
+
+## Gate, timing, profile and D8 attribution at 5233e246 (2026-11-15)
+
+**Gate.** Tiered dam-300, composite, with poolF 4913 (runs/dam-300th.jsonl, gates/dam-300th.md). The authored pool (f 3968) latches POOL_F at step 20.
+- Every row passes except D8 for the 30–90 window: 7.108e5 against 6.383e5, tolerance 63.8k, margin 1.14.
+- D8 for the 105–165 window passes, and so does D8c at step 16.
+- Peaks: liveF 4811 (HIGH_F 4844), pages 125 and particles 1.01M. E recorded these in ead56e59.
+
+**Timing.** Tiered composite, timing slot, 165 steps.
+- Fenced median 134.6 ms (p95 199.8; by third 179 / 134 / 120); pipelined 135.4 ms/step.
+- That is about 3x the old engine's 45.45 / 50.61 ms and about 7.5x design §6's 18 ms dam budget.
+
+**Profile, steps 13–24, ms per step** (tiered 148 summed; all-h 107):
+
+| area | ms | launches |
+|---|---|---|
+| grid velocity | 50.5 | 8 |
+| pressure solve (P) | 31.7 | 181 |
+| level set | 20.8 | 23 |
+| pressure setup and projection (P) | 18.0 | 5 |
+| layout, census and residency (E) | 16.4 | 38 |
+| move | 6.0 | 5 |
+| transfer and seeding | 4.7 | 2 |
+
+**Kernels.** ns per workgroup, tiered against all-h:
+- uAdvect: 4131 against 2927
+- uExtend: 2642 against 702
+- uTransfer: 2323 against 628
+- lDistance: 1397 against 279
+- uViscous: 855 against 130
+- lTiles: 699 against 50
+- uExt4Seed: 52.7 µs per page
+
+The tiered per-brick cost is 2–13x all-h. The cause is owner resolution per sample, through foVertexPhi/nbVertexCoarse and the fgFaceOwned/foCellOwnerH lookups, which happens inside the inner loops.
+
+pMove, pScatter, pDelta and pJoin are direct dispatches over the particle cap.
+
+There are 262 dispatches per step against all-h's 244; 182 of them are pmg.
+
+**D8 attribution.** Two differences from the old engine:
+
+1. **The trigger rule (missing).** E's census TRIG sets heat for any criterion. The old activity uses nbActivityTriggered in "need" mode, where thin triggers only while deforming (dt·tuDeformation/h > 0.02), and it excludes dropped tiles.
+   - From step 8 on we have more hot tiles. At step 30: T2 3785 against 3119 (+21%) and T1 5743 against 3193 (+80%).
+   - That gives +19% cells, +24% particles and +30% mass.
+   - Seeds and deletions per hot cell match.
+   - E is porting the rule verbatim, with the update-error deformation certificate.
+2. **Boot ordering.** The initial seed reads the boot census at U=0: 351 hot tiles against the old 1177, which the old reads after frame 1's activity on the kicked state.
+   - Agreed with E: kick = {force, after, seed}, with a census that sets TRIG only between after and seed.
+
+Both are physics rules, so both are ported verbatim, and D8 gets re-gated once E's hash lands.
