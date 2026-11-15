@@ -173,8 +173,9 @@ export function mgLayout(L: BrickLayout) {
   // RKU (pmgF): an h cell's upper couplings as pRow reads them (KU[a] to a native row, else the h neighbour's K[a]),
   // 3 x 512 a slot, written once a step by pmgSetupF over F_ALL's live bricks; every L0 pass's pRow then loads its
   // row in one round of independent loads instead of the neighbour slot's chain.
-  const STG = L1 + CH.N * 64 * F, RKU = STG + 81 * F, QSTG = SEAMN + C;
-  return { W0, W1, L1, STG, RKU, fWords: RKU + 3 * BRICK_STRIDE * F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
+  // FC (pmgF): the face cache of pressure-composite.wgsl.ts (rowsF writes, projectF reads), 7 x BRICK_STRIDE a slot.
+  const STG = L1 + CH.N * 64 * F, RKU = STG + 81 * F, FC = RKU + 3 * BRICK_STRIDE * F, QSTG = SEAMN + C;
+  return { W0, W1, L1, STG, RKU, FC, fWords: FC + 7 * BRICK_STRIDE * F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };

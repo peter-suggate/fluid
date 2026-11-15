@@ -19,10 +19,12 @@
  */
 import type { BrickLayout } from "./brick-abi";
 import { pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { mgLayout } from "./pressure-mgpcg";
 
 /** `operator` and `project` (WGSL reserves `operator`: its entry point is nbOperator). `tiered` is the engine's
- * (BrickStages.tiered); the default keeps the tiered engine's absent-page guard. */
-export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
-  const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, opt);
+ * (BrickStages.tiered); the default keeps the tiered engine's absent-page guard. `faces`: the solver binds pmgF
+ * (lane P's MGPCG), so rowsF writes its face cache (mgLayout FC) and project reads it. */
+export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly faces?: boolean } = {}) {
+  const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { tiered: opt.tiered, faces: opt.faces ? mgLayout(L).FC : undefined });
   return { operator: K.rowsF, project: K.projectF };
 }

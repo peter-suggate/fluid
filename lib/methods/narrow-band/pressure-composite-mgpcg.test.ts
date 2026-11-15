@@ -65,8 +65,9 @@ async function readComposite(e: BrickEngine, bricks: Map<number, number>, pages:
 async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: boolean) {
   const fx = await compositeFixture(device, L => poolMGPCG(L, mg));
   const { e } = fx, solver = e.solver;
-  const K = pressureCompositeKernels(e.layout);
-  await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
+  // KF: the engine's kernels with the face cache (rowsF writes pmgF FC, projectF reads it); K the formula's.
+  const K = pressureCompositeKernels(e.layout), KF = pressureCompositeKernels(e.layout, {}, { faces: mgLayout(e.layout).FC });
+  await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: KF.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
   const before = await readComposite(e, fx.s.bricks, fx.pages, fx.dir, mg.fineOrder);
   const run = vcycleOnly ? [...solver.setup, ...solver.slot(0).filter(p => !SOLVE.includes(p.kernel.label))]
     : [...solver.setup, ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(), ...solver.finish];
@@ -74,7 +75,7 @@ async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: b
   const header = await e.read("set", 0, 256);
   assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
   const after = await readComposite(e, fx.s.bricks, fx.pages, fx.dir, mg.fineOrder);
-  return { e, before, after, header, h: fx.h, fx, K };
+  return { e, before, after, header, h: fx.h, fx, K, KF };
 }
 
 for (const fineOrder of ["BS", "BSB"] as const) test(`composite MGPCG (GPU): r0 and one V-cycle on both tiers match the Float64 model's (L0 ${fineOrder})`, GPU, async t => {
@@ -122,7 +123,7 @@ test("composite MGPCG (GPU): the converged X on both tiers is the Float64 PCG's"
 
 test("composite project (GPU): every liquid row's projected divergence is its residual, on both tiers", GPU, async t => {
   await withDevice("composite project", async device => {
-    const { e, after, h, fx, K } = await solveComposite(device, { slots: 40, tolerance: 1e-3, walls: true }, false);
+    const { e, after, h, fx, K, KF } = await solveComposite(device, { slots: 40, tolerance: 1e-3, walls: true }, false);
     const L = e.layout, N = COMPOSITE_N;
     const pagesG1 = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 }, liq = { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 };
     const xBefore = new Float32Array((await e.read("pres", L.base("pres", "F", "X"), L.cap.f * BRICK_STRIDE)).buffer);
@@ -224,6 +225,21 @@ test("composite project (GPU): every liquid row's projected divergence is its re
     assert.ok(rel.faces > 0);
     assert.equal(rel.bad, 0, "release bits as umRelease");
     assert.ok(meanErr < 1e-6, `h tiles' C X mean ${meanErr}`);
+    // The face cache: projectF from the same solved state (FLAGS back to the solve's) gives every h face's U and every
+    // cell's FLAGS bit for bit, so the cache changes no value.
+    e.write("phi", L.base("phi", "F", "FLAGS"), stateF);
+    await e.run([{ kernel: KF.projectF, dispatch: liq }]);
+    const UF2 = await Promise.all([0, 1, 2].map(a => readF("vel", `U${a}`)));
+    const flags2 = new Uint32Array(await e.read("phi", L.base("phi", "F", "FLAGS"), L.cap.f * BRICK_STRIDE));
+    let uBits = 0, flagBits = 0;
+    for (let a = 0; a < 3; a++) {
+      const x = new Uint32Array(UF[a]!.buffer), y = new Uint32Array(UF2[a]!.buffer);
+      for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) uBits++;
+    }
+    for (let i = 0; i < flags.length; i++) if (flags[i] !== flags2[i]) flagBits++;
+    t.diagnostic(`face cache: U words differing ${uBits}, FLAGS words differing ${flagBits}`);
+    assert.equal(uBits, 0, "the cached projectF's U is the formula's, bit for bit");
+    assert.equal(flagBits, 0, "the cached projectF's FLAGS are the formula's");
     void XF;
     e.destroy();
   });
