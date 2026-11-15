@@ -1037,8 +1037,33 @@ var<workgroup> wR:array<f32,64>;var<workgroup> wE:array<f32,8>;
   if(lid<8u){pmgC[pL4(CH_B,cs,lid)]=b4;pmgC[pL4(CH_EPRE,cs,lid)]=wE[lid];}
 }`);
 
-  // The compact levels' red-black passes (one workgroup; frozen halo = F array, or 0 when pre).
-  const topPasses = (lv: 5 | 6, rev: boolean, n: string, parOf: string) => /* wgsl */`
+  // The compact levels' red-black passes (one workgroup; frozen halo = F array, or 0 when pre). When every row of
+  // L5 and L6 has its own lane (C and MG_ROWS6 <= 1024), the lane holds its row's links (D, colour, the six
+  // neighbours, couplings and same-parent bits; topLinks) in registers for the whole cycle, so a pass reads only the
+  // vectors; the sums are the uncached loop's, term for term.
+  const topCached = L.cap.c <= 1024 && MG_ROWS6 <= 1024;
+  const topLinks = (lv: 5 | 6, n: string, parOf: string) => !topCached ? "" : /* wgsl */`
+  var l${lv}D=0.0;var l${lv}c=2u;var l${lv}j=array<u32,6>(NB_NONE,NB_NONE,NB_NONE,NB_NONE,NB_NONE,NB_NONE);var l${lv}w=array<f32,6>();var l${lv}m=0u;
+  if(t<${n}){
+    let i=t;l${lv}D=tF(T_D${lv}+i);l${lv}c=${parOf};let pi=pmgTop[T_PAR${lv}+i];
+    for(var f=0u;f<6u;f++){
+      let j=pmgTop[T_NBR${lv}+6u*i+f];l${lv}j[f]=j;
+      if(j!=NB_NONE){l${lv}w[f]=tF(T_C${lv}+6u*i+f);if(pmgTop[T_PAR${lv}+j]==pi){l${lv}m|=1u<<f;}}
+    }
+  }`;
+  const topPasses = (lv: 5 | 6, rev: boolean, n: string, parOf: string) => topCached ? /* wgsl */`
+  for(var ps=0u;ps<P_CS2;ps++){
+    let colour=${rev ? "1u-(ps&1u)" : "ps&1u"};
+    if(l${lv}D>0.0&&l${lv}c==colour){
+      var s=tF(T_B${lv}+t);
+      for(var f=0u;f<6u;f++){
+        let j=l${lv}j[f];if(j==NB_NONE){continue;}
+        if((l${lv}m&(1u<<f))!=0u){s+=l${lv}w[f]*tF(T_E${lv}+j);}${rev ? `else{s+=l${lv}w[f]*tF(T_F${lv}+j);}` : ""}
+      }
+      tS(T_E${lv}+t,s/l${lv}D);
+    }
+    tbar();
+  }` : /* wgsl */`
   for(var ps=0u;ps<P_CS2;ps++){
     let colour=${rev ? "1u-(ps&1u)" : "ps&1u"};
     for(var i=t;i<${n};i+=1024u){
@@ -1053,16 +1078,23 @@ var<workgroup> wR:array<f32,64>;var<workgroup> wE:array<f32,8>;
         tS(T_E${lv}+i,s/D);
       }
     }
-    sbwb();
+    tbar();
   }`;
-  const topResidual = (lv: 5 | 6, n: string) => /* wgsl */`
+  const topResidual = (lv: 5 | 6, n: string) => topCached ? /* wgsl */`
+  if(t<${n}){
+    let e=tF(T_E${lv}+t);tS(T_P${lv}+t,e);
+    var r=tF(T_B${lv}+t)-l${lv}D*e;
+    for(var f=0u;f<6u;f++){let j=l${lv}j[f];if(j!=NB_NONE){r+=l${lv}w[f]*tF(T_E${lv}+j);}}
+    tS(T_R${lv}+t,r);
+  }
+  tbar();` : /* wgsl */`
   for(var i=t;i<${n};i+=1024u){
     let e=tF(T_E${lv}+i);tS(T_P${lv}+i,e);
     var r=tF(T_B${lv}+i)-tF(T_D${lv}+i)*e;
     for(var f=0u;f<6u;f++){let j=pmgTop[T_NBR${lv}+6u*i+f];if(j!=NB_NONE){r+=tF(T_C${lv}+6u*i+f)*tF(T_E${lv}+j);}}
     tS(T_R${lv}+i,r);
   }
-  sbwb();`;
+  tbar();`;
 
   // Top (one workgroup): L4's residual into L5, L5..L7 (exact), and L4's post-smoothing. The compact levels' vectors
   // (B, E, F, P, R of L5 and L6; B, E of L7) live only inside this kernel, so they are held in workgroup memory
@@ -1072,8 +1104,9 @@ var<workgroup> wR:array<f32,64>;var<workgroup> wE:array<f32,8>;
   const wvAt: Record<string, number> = {};
   ["B", "E", "F", "P", "R"].forEach((x, k) => { wvAt[`${x}5`] = k * C; wvAt[`${x}6`] = 5 * C + k * MG_ROWS6; });
   wvAt.B7 = 5 * C + 5 * MG_ROWS6; wvAt.E7 = wvAt.B7 + MG_ROWS7;
-  const topVectors = (code: string) => !wvFits ? code : /* wgsl */`
+  const topVectors = (code: string) => !wvFits ? "fn tbar(){storageBarrier();workgroupBarrier();}" + code : /* wgsl */`
 var<workgroup> wv:array<f32,${wvWords}>;
+fn tbar(){workgroupBarrier();}
 fn vF(i:u32)->f32{return wv[i];}
 fn vS(i:u32,v:f32){wv[i]=v;}
 ${Object.entries(wvAt).map(([n, v]) => `const V_${n}:u32=${u(v)};`).join("")}
@@ -1085,15 +1118,19 @@ ${Object.entries(wvAt).map(([n, v]) => `const V_${n}:u32=${u(v)};`).join("")}
 var<workgroup> wN5:u32;var<workgroup> wN6:u32;var<workgroup> wN7:u32;
 fn par5(i:u32)->u32{return pPar(tPage(pmgTop[T_SLOT5+i]));}
 fn par6(r:u32)->u32{return pPar(nbKeyCoord(pmgTop[T_KEY6+r]));}
-// L4 cell k of page cs: the page holding the neighbour across (a, up), and its local index.
+// L4 cell k of page cs: the page holding the neighbour across (a, up) (from the page's stage cache, QSTG, whose
+// index steps 1, 3, 9 along x, y, z are nbNeighbourOffset's), and its local index.
 fn l4Nbr(cs:u32,k:u32,a:u32,up:bool)->vec2u{
   let c=pC4(k);var d=c;if(up){d[a]+=1;}else{d[a]-=1;}
   if(d[a]>=0&&d[a]<=1){return vec2u(cs,pI4(d));}
-  return vec2u(tNbr(cs,a,up),pI4(d));
+  let st=select(select(9u,3u,a==1u),1u,a==0u);let v=pmgC[P_QSTG+27u*cs+select(13u-st,13u+st,up)];
+  return vec2u(select(u32(v),NB_NONE,v<0.0),pI4(d));
 }
 @compute @workgroup_size(1024) fn pmgTopCycle(@builtin(local_invocation_index) t:u32){
   if(t==0u){wN5=atomicLoad(&nbSet[PH_N5]);wN6=atomicLoad(&nbSet[PH_N6]);wN7=atomicLoad(&nbSet[PH_N7]);}
   let n5=workgroupUniformLoad(&wN5);let n6=workgroupUniformLoad(&wN6);let n7=workgroupUniformLoad(&wN7);
+${topLinks(5, "n5", "par5(i)")}
+${topLinks(6, "n6", "par6(i)")}
   // L4 residual summed into each L5 row.
   for(var i=t;i<n5;i+=1024u){
     let cs=pmgTop[T_SLOT5+i];var sum=0.0;
@@ -1136,7 +1173,7 @@ fn l4Nbr(cs:u32,k:u32,a:u32,up:bool)->vec2u{
     for(var w=t;w<8u*n5;w+=1024u){
       let i=w/8u;let k=w%8u;let cs=pmgTop[T_SLOT5+i];
       let D4=pmgC[pL4(CH_D,cs,k)];
-      if(D4>0.0&&pPar(2*tPage(cs)+pC4(k))==colour){
+      if(D4>0.0&&pPar(pC4(k))==colour){
         var s=pmgC[pL4(CH_B,cs,k)];
         for(var a=0u;a<3u;a++){
           for(var up=0u;up<2u;up++){

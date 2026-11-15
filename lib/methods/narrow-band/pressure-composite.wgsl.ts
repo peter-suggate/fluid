@@ -179,7 +179,8 @@ fn poFacePlane(c:vec3i,a:u32)->f32{
   return nbCFace(c>>vec3u(2u),a);
 }
 // Called in uniform control flow by every lane of the brick's workgroup.
-fn poStage(o:vec3i,lid:u32){
+// n: the workgroup's lanes.
+fn poStage(o:vec3i,lid:u32,n:u32){
   poSO=o;
   {
     if(lid<8u){poSP[lid]=u32(nbCSlotOfPage((o>>vec3u(5u))+poCoord(lid,2u))!=NB_NONE);}
@@ -189,10 +190,10 @@ fn poStage(o:vec3i,lid:u32){
     if(lid<27u){let b=(o>>vec3u(3u))-vec3i(1)+poCoord(lid,3u);poSB[lid]=select(nbFSlotOfBrick(b),NB_NONE,any(b<vec3i(0)));}
     workgroupBarrier();
   }
-  for(var i=lid;i<1331u;i+=256u){poSV[i]=poVertexS(o-vec3i(1)+poCoord(i,11u),o);}
+  for(var i=lid;i<1331u;i+=n){poSV[i]=poVertexS(o-vec3i(1)+poCoord(i,11u),o);}
   if(lid<64u){poST[lid]=u32(nbTileOwnerH((o>>vec3u(2u))-vec3i(1)+poCoord(lid,4u)));}
   workgroupBarrier();
-  for(var i=lid;i<1000u;i+=256u){
+  for(var i=lid;i<1000u;i+=n){
     let d=poCoord(i,10u);var v:array<f32,8>;
     for(var j=0u;j<8u;j++){v[j]=poSV[poIndex(d+poCorner(j),11)];}
     poSC[i]=poMean8(v);
@@ -463,11 +464,12 @@ var<workgroup> trP:array<f32,200>;
   }
 }`);
 
-  // rowsF: a workgroup a brick of F_ALL (G1), a lane two cells.
+  // rowsF: a workgroup a brick of F_ALL (G1), a lane a cell (two cells a lane of 256 before: each lane's chain of
+  // face formulas twice over, at the same staged memory a workgroup).
   const rowsF = k(rowsLabel, /* wgsl */`
 var<workgroup> poGo:u32;
 var<workgroup> poCold:atomic<u32>;
-@compute @workgroup_size(256) fn ${rowsEntry}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+@compute @workgroup_size(512) fn ${rowsEntry}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let g=nbGroup(wid);if(lid==0u){poGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&poGo)==0u){return;}
   let slot=nbListSlot(NB_LIST_F_ALL,g);
   if(lid==0u){atomicStore(&poCold,0u);}
@@ -479,16 +481,16 @@ var<workgroup> poCold:atomic<u32>;
   if(lid==0u){poGo=atomicLoad(&poCold);atomicStore(&poCold,0u);}
   if(workgroupUniformLoad(&poGo)==0u){
     if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
-    for(var j=0u;j<2u;j++){
-      let at=NB_STRIDE*slot+lid+256u*j;
+    for(var j=0u;j<1u;j++){
+      let at=NB_STRIDE*slot+lid+512u*j;
       pres[NB_PRES_F_B+at]=0.0;pres[NB_PRES_F_X+at]=0.0;pres[NB_PRES_F_RHS+at]=0.0;pres[NB_PRES_F_DIAG+at]=0.0;pres[NB_PRES_F_PPHI+at]=0.0;
       pres[NB_PRES_F_K0+at]=0.0;pres[NB_PRES_F_K1+at]=0.0;pres[NB_PRES_F_K2+at]=0.0;pres[NB_PRES_F_KU0+at]=0.0;pres[NB_PRES_F_KU1+at]=0.0;pres[NB_PRES_F_KU2+at]=0.0;
     }
     return;
   }
-  poStage(nbFOrigin(slot),lid);
-  for(var j=0u;j<2u;j++){
-    let c=nbFOrigin(slot)+nbLocalCoord(lid+256u*j);
+  poStage(nbFOrigin(slot),lid,512u);
+  for(var j=0u;j<1u;j++){
+    let c=nbFOrigin(slot)+nbLocalCoord(lid+512u*j);
     if(nbInLattice(c)&&poOwnerH(c)){if(poWet(poCentre(c),1.0)&&(poFlagsF(c)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
   }
   workgroupBarrier();
@@ -497,8 +499,8 @@ var<workgroup> poCold:atomic<u32>;
   if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
   let o=nbFOrigin(slot);let r=cfg.x;let h=nbRingF(r,NB_RING_H);
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
-  for(var j=0u;j<2u;j++){
-    let l=lid+256u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
+  for(var j=0u;j<1u;j++){
+    let l=lid+512u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
     var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var ku=vec3f(0.0);
     let owned=nbInLattice(c)&&poOwnerH(c);
     var own=NB_PHI_AIR;if(owned){own=poCentre(c);}
@@ -631,7 +633,8 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
   pres[NB_PRES_C_K0+at]=kk.x;pres[NB_PRES_C_K1+at]=kk.y;pres[NB_PRES_C_K2+at]=kk.z;
 }`);
 
-  // projectF: a workgroup a brick (G1 of the engine's project list, F_ALL), a lane two cells' lower faces.
+  // projectF: a workgroup a brick (G1 of the engine's project list, F_ALL), a lane two cells' lower faces (a cell a
+  // lane of 512 measured 1584 -> 1911 us a call on the tiered dam).
   // Writes U on every h face (a face with an h-owned cell on either side, stored at its upper cell), raises
   // BOUND_F, and writes the WARM bit (FLAGS bit 7) of every cell: an h-owned cell that held a liquid row.
   const projectF = k(projectLabel, PROJECT_WGSL + /* wgsl */`
@@ -653,7 +656,7 @@ var<workgroup> poGo:u32;
     for(var j=0u;j<2u;j++){let at=NB_STRIDE*slot+lid+256u*j;phi[NB_PHI_F_FLAGS+at]&=~(PO_WARM|PO_WALLS);}
     return;
   }
-  poStage(o,lid);
+  poStage(o,lid,256u);
   var speed=0.0;
   {
     let h=nbRingF(cfg.x,NB_RING_H);
