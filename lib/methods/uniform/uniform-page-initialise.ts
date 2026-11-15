@@ -1,5 +1,6 @@
-/** Page initialise: a block is written in full when a commit claims it and
- * never touched when it retires.
+/** Page initialise: a block is written in full when a commit claims it, and
+ * a block a commit retires hands each vertex it held to the stored block
+ * that holds that vertex next (the retire handoff below).
  *
  * UniformPageInitialise writes the AIR value of every field of a detail
  * storage over every texel the storage holds for each block of the pool's
@@ -20,9 +21,17 @@
  * field created later throws at the next encode. A vertex block is written
  * whole, its low skirt and high planes included, whichever of them hold a
  * vertex now: a vertex's slot moves between a page's high plane and its
- * neighbours' skirts as pages are claimed and retired, with no copy, so
- * every vertex texel of a stored block is far air (at least options.near)
- * unless a kernel has written it since.
+ * neighbours' skirts as pages are claimed and retired. A claim makes no
+ * copy: a vertex that enters a claimed block reads its AIR image. The texel
+ * it left (a neighbour's skirt or high plane) keeps whatever a kernel last
+ * stored there while it held the vertex, so a retire hands every vertex the
+ * retired block held to the texel that holds it next, as a BULK16 demote
+ * does (uniform-bulk-page-transfer.ts). Without that handoff the vertex
+ * would read the stale value: on the 128^3 dam break, a column page's
+ * skirt kept the deep phi (-0.117 m) a demote had handed it at t = 0, and
+ * when the page below retired at about step 180, that phi surfaced as
+ * liquid in far air, outside every resident page (the census's absent-near
+ * residency audit).
  *
  * Launch: one compute pass; one pipeline per four fields (two storage
  * textures a field: its h store, or a 1^3 stand-in while it has none, and its
@@ -32,13 +41,27 @@
  * claimed every lane reads the count and returns. encodeAll runs the same
  * pipelines over every block, the sentinels included (setup only).
  *
+ * Retire handoff: a pipeline per batch of vertex fields, in the same pass
+ * after the field pipelines, a workgroup per block of the commit's retired
+ * list (the quarantine keeps its texels until the next commit). For each
+ * texel on the block's faces, the block held the vertex before the commit
+ * when no page ahead of it in the vertex's slot walk (umVertexSlot) was
+ * stored before the commit: stored now and not claimed by this commit, or
+ * retired by it. Its next holder is the first page of the walk stored now.
+ * The handoff writes the block's texel there, in the base and, where the
+ * holder has an h slot, in the h store (the field's AIR where the retired
+ * block had none). It writes nothing to a holder this commit claimed (the
+ * AIR image of a claim stands, as above) nor for a block a demote retired
+ * (the demote handed its vertices before the commit). Two retired blocks
+ * never write one texel: a vertex has one holder before the commit.
+ *
  * Per-key buffers of other owners are written by those owners: each
  * implements UniformPageInitBlocks over an entry built with
  * uniformPageInitBlocksWGSL, and encode calls them in the order given.
  * UniformPageTileWords is that hook for the tile words of the topologies. */
 import { uniformDetailField, type UniformDetailGroup, type UniformDetailStorage } from "./uniform-detail-fields";
 import type { UniformMixedOwnership } from "./uniform-mixed-ownership";
-import { uniformPagePoolWGSL, type UniformPagePool, type UniformPagePoolLayout } from "./uniform-page-pool";
+import { UNIFORM_PAGE_POOL_RECORD, UNIFORM_PAGE_POOL_STATUS, uniformPagePoolWGSL, type UniformPagePool, type UniformPagePoolLayout } from "./uniform-page-pool";
 
 /** Keys of one block in each dense key space: key = keys*block + local. */
 export const UNIFORM_PAGE_INIT_KEYS={tile:512,cell:32768,vertex:35937,lowFace:3072} as const;
@@ -125,6 +148,101 @@ ${rows.map((r,j)=>`  for(var r=lane+64u*chunk;r<${UNIFORM_PAGE_INIT_KEYS.lowFace
 }`;
 }
 
+/** The retire handoff's rule (prNext) on the host: the texel that holds,
+ * after the commit, vertex `l` of the block that held page `page` (world
+ * pages, `bits` 5 for the h lattice or 3 for the 4h one, l 0..2^bits on
+ * each axis), or undefined where that block did not hold the vertex before
+ * the commit (`before(q)`: page q was stored before it), no page holds it
+ * now (`now(q)`: the block that stores q, or -1) or the holder is a block
+ * this commit claimed (`fresh(b)`). */
+export function uniformPageRetireNext(page:readonly number[],l:readonly number[],bits:number,before:(q:readonly number[])=>boolean,now:(q:readonly number[])=>number,fresh:(block:number)=>boolean):{readonly block:number;readonly local:readonly number[]}|undefined{
+ const mask=(1<<bits)-1,v=[0,1,2].map(a=>(page[a]!<<bits)+l[a]!),own=v.map(x=>(x-1)>>bits),local=v.map(x=>((x-1)&mask)+1),plane=v.map(x=>(x&mask)===0);
+ const walk=(k:number)=>[0,1,2].some(a=>((k>>a)&1)!==0&&!plane[a])?undefined:own.map((q,a)=>q+((k>>a)&1));
+ for(let k=0;k<8;k++){
+  const q=walk(k);if(!q)continue;
+  if(q.every((x,a)=>x===page[a]))break;
+  if(before(q))return undefined;
+ }
+ for(let k=0;k<8;k++){
+  const q=walk(k);if(!q)continue;
+  const block=now(q);if(block<0)continue;
+  return fresh(block)?undefined:{block,local:local.map((x,a)=>((k>>a)&1)?0:x)};
+ }
+ return undefined;
+}
+
+/** The retire handoff's module (see the header): group 0 the pool state and
+ * the h slots, group 1 two read-write storage textures a vertex field (2i
+ * its h store, 2i+1 its base). */
+export function uniformPageRetireWGSL(layout:UniformPagePoolLayout,blockBits:number,fields:readonly UniformPageInitialiseField[]):string{
+ if(fields.some(f=>f.kind!=="vertex"))throw new Error("Uniform page retire handoff: only vertex fields move with residency");
+ return /* wgsl */`${uniformPagePoolWGSL(layout,0,0)}
+@group(0) @binding(1) var<storage,read> prSlots:array<u32>;
+${fields.map((_,i)=>`@group(1) @binding(${2*i}) var prH${i}:texture_storage_3d<r32float,read_write>;@group(1) @binding(${2*i+1}) var prBase${i}:texture_storage_3d<r32float,read_write>;`).join("\n")}
+const PR_SLOTS:u32=${uniformPageInitSlots(layout)}u;const PR_BITS:u32=${blockBits}u;
+fn prBlockCoord(b:u32)->vec3i{let m=(1u<<PR_BITS)-1u;return vec3i(vec3u(b&m,(b>>PR_BITS)&m,b>>(2u*PR_BITS)));}
+// Claimed by this commit.
+fn prFresh(b:u32)->bool{return upState[UP_AT_RECORDS+8u*b+${UNIFORM_PAGE_POOL_RECORD.generation}u]==upGeneration();}
+// Bit of page + d (d in -1..1 an axis) in the 3^3 mask around a retired block's page.
+fn prBit(d:vec3i)->u32{let e=vec3u(d+vec3i(1));return 1u<<(e.x+3u*e.y+9u*e.z);}
+// uniformPageRetireNext: xyz the holder's local texel, w the holder, UP_NONE for none.
+fn prNext(page:vec3i,l:vec3u,bits:u32,before:u32)->vec4u{
+ let mask=(1<<bits)-1;let v=(page<<vec3u(bits))+vec3i(l);let c=v-vec3i(1);
+ let own=c>>vec3u(bits);let local=vec3u(c&vec3i(mask))+vec3u(1u);let plane=(v&vec3i(mask))==vec3i(0);
+ for(var k=0u;k<8u;k++){
+  let step=vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u);if(any(step&!plane)){continue;}
+  let q=own+select(vec3i(0),vec3i(1),step);
+  if(all(q==page)){break;}
+  if((before&prBit(q-page))!=0u){return vec4u(0u,0u,0u,UP_NONE);}
+ }
+ for(var k=0u;k<8u;k++){
+  let step=vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u);if(any(step&!plane)){continue;}
+  let b=upBlockOf(own+select(vec3i(0),vec3i(1),step));if(b==UP_NONE){continue;}
+  if(prFresh(b)){break;}
+  return vec4u(select(local,vec3u(0u),step),b);
+ }
+ return vec4u(0u,0u,0u,UP_NONE);
+}
+var<workgroup> prBefore:atomic<u32>;var<workgroup> prShared:u32;
+@compute @workgroup_size(64) fn prRetired(@builtin(workgroup_id) w:vec3u,@builtin(local_invocation_index) lane:u32){
+ if(lane==0u){prShared=upState[${UNIFORM_PAGE_POOL_STATUS.pending}u];}
+ let count=workgroupUniformLoad(&prShared);
+ for(var i=w.x;i<count;i+=PR_SLOTS){
+  if(lane==0u){atomicStore(&prBefore,0u);}
+  workgroupBarrier();
+  let b=upState[UP_AT_RETIRED+i];let page=upPageOf(b);
+  // The 3^3 pages around it that were stored before the commit: stored now
+  // and not claimed by it, or retired by it (the list, all lanes).
+  if(lane<27u){let n=upBlockOf(page+vec3i(i32(lane%3u),i32((lane/3u)%3u),i32(lane/9u))-vec3i(1));if(n!=UP_NONE&&!prFresh(n)){atomicOr(&prBefore,1u<<lane);}}
+  for(var j=lane;j<count;j+=64u){let d=upPageOf(upState[UP_AT_RETIRED+j])-page;if(all(abs(d)<=vec3i(1))){atomicOr(&prBefore,prBit(d));}}
+  workgroupBarrier();
+  let before=atomicLoad(&prBefore);
+  // A demote left the page its BULK16 word, and handed its vertices before the commit.
+  if(!upBulkWord(upWord(page))){
+   // The base: 9^3 texels, those on the block's faces (an interior vertex has no other holder).
+   for(var t=lane;t<729u;t+=64u){
+    let l=vec3u(t%9u,(t/9u)%9u,t/81u);if(all(l>=vec3u(1u))&&all(l<=vec3u(7u))){continue;}
+    let next=prNext(page,l,3u,before);if(next.w==UP_NONE){continue;}
+    let src=prBlockCoord(b)*9+vec3i(l);let to=prBlockCoord(next.w)*9+vec3i(next.xyz);
+${fields.map((_,i)=>`    textureStore(prBase${i},to,textureLoad(prBase${i},src));`).join("\n")}
+   }
+   // The h store (absent: a 1^3 stand-in), 33^3 texels at each block's h slot.
+   if(${fields.map((_,i)=>`textureDimensions(prH${i}).x>1u`).join("||")}){
+    let held=prSlots[b];
+    for(var t=lane;t<35937u;t+=64u){
+     let l=vec3u(t%33u,(t/33u)%33u,t/1089u);if(all(l>=vec3u(1u))&&all(l<=vec3u(31u))){continue;}
+     let next=prNext(page,l,5u,before);if(next.w==UP_NONE){continue;}
+     let slot=prSlots[next.w];if(slot==0u){continue;}
+     let at=prBlockCoord(held)*33+vec3i(l);let to=prBlockCoord(slot)*33+vec3i(next.xyz);
+${fields.map((f,i)=>`     if(textureDimensions(prH${i}).x>1u){textureStore(prH${i},to,select(vec4f(${literal(f.value)},0.0,0.0,0.0),textureLoad(prH${i},at),held!=0u));}`).join("\n")}
+    }
+   }
+  }
+  workgroupBarrier();
+ }
+}`;
+}
+
 async function compile(device:GPUDevice,label:string,code:string):Promise<GPUShaderModule>{
  const module=device.createShaderModule({label,code});
  const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
@@ -197,16 +315,24 @@ export class UniformPageInitialise{
   if(per<1||most<1)throw new RangeError("Uniform page initialise: the device binds no storage texture pair or no second storage buffer in a stage");
   const count=Math.max(Math.ceil(this.fields.length/per),Math.ceil(rows.length/most));
   for(let i=0;i<count;i++)this.batches.push({fields:this.fields.slice(per*i,per*i+per),rows:rows.slice(most*i,most*i+most),held:{} as UniformDetailGroup});
+  const vertices=this.fields.filter(f=>f.kind==="vertex");
+  for(let i=0;i<vertices.length;i+=per)this.retires.push({fields:vertices.slice(i,i+per),rows:[],held:{} as UniformDetailGroup});
  }
+ /** The retire handoff's batches: the vertex fields, two read-write textures each. */
+ private readonly retires:Batch[]=[];
+ private retireLayouts:GPUBindGroupLayout[]=[];
+ private retireGroups:GPUBindGroup[]=[];
+ private retirePipelines:GPUComputePipeline[]=[];
  /** The texture group of a batch over the fields' textures as they are now. */
- private bind(i:number):GPUBindGroup{
+ private bind(i:number,retire=false):GPUBindGroup{
+  const batch=retire?this.retires[i]!:this.batches[i]!,layout=retire?this.retireLayouts[i]!:this.textureLayouts[i]!;
   const s=this.storage,G=s.layout.address.blockGrid;
   // An h store's depth is its slots' (whole blocks; the block grid's while every block is its own slot).
   const shaped=(t:GPUTexture,e:readonly [number,number,number],what:string,slots=false)=>{
    if(t.width!==e[0]*G[0]||t.height!==e[1]*G[1]||(slots?t.depthOrArrayLayers%e[2]!==0||t.depthOrArrayLayers>e[2]*G[2]:t.depthOrArrayLayers!==e[2]*G[2]))throw new Error(`Uniform page initialise: ${t.label} ${what} is ${t.width}x${t.height}x${t.depthOrArrayLayers}, not ${e.join("x")} texels for each of ${G.join("x")} blocks`);
    return t;
   };
-  return this.device.createBindGroup({label:`Uniform page initialise fields ${i}`,layout:this.textureLayouts[i]!,entries:this.batches[i]!.fields.flatMap((f,k)=>{
+  return this.device.createBindGroup({label:`Uniform page ${retire?"retire":"initialise"} fields ${i}`,layout,entries:batch.fields.flatMap((f,k)=>{
    const shape=UNIFORM_PAGE_INIT_SHAPES[f.kind],base=s.baseOf(f.handle),h=s.physical(f.handle);
    if(!base)throw new Error(`Uniform page initialise: ${f.handle.label} has no base block`);
    // A per-tile field, and every field while no h generation is resident, is its base alone.
@@ -233,6 +359,18 @@ export class UniformPageInitialise{
    return device.createComputePipelineAsync({label:`Uniform page initialise ${i}`,layout:device.createPipelineLayout({bindGroupLayouts:[buffers,textures]}),compute:{module,entryPoint:"piFields"}});
   }));
   this.pipelines=pipelines;
+  // The retire handoff: the pool state and the h slots, then each vertex field's h store and base, read-write.
+  const state=device.createBindGroupLayout({label:"Uniform page retire state",entries:[0,1].map(binding=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"read-only-storage" as const}}))});
+  const stateGroup=device.createBindGroup({label:"Uniform page retire state",layout:state,entries:[{binding:0,resource:{buffer:this.pool.state}},{binding:1,resource:{buffer:this.storage.slotState,size:4*l.blocks}}]});
+  this.retirePipelines=await Promise.all(this.retires.map(async(b,i)=>{
+   const module=await compile(device,`Uniform page retire ${i}`,uniformPageRetireWGSL(l,bits,b.fields));
+   const textures=this.retireLayouts[i]=device.createBindGroupLayout({label:`Uniform page retire fields ${i}`,entries:b.fields.flatMap((_,k)=>[0,1].map(t=>({binding:2*k+t,visibility:GPUShaderStage.COMPUTE,
+    storageTexture:{access:"read-write" as const,format:"r32float" as GPUTextureFormat,viewDimension:"3d" as const}})))});
+   this.retireGroups[i]=stateGroup;
+   let last:GPUBindGroup|undefined;const build=(base?:boolean)=>base&&last?last:last=this.bind(i,true);
+   b.held.group=b.held.base=build();this.storage.track(b.held,build);
+   return device.createComputePipelineAsync({label:`Uniform page retire ${i}`,layout:device.createPipelineLayout({bindGroupLayouts:[state,textures]}),compute:{module,entryPoint:"prRetired"}});
+  }));
  }
  private started=false;
  private launch(encoder:GPUCommandEncoder,buffers:readonly GPUBindGroup[]):void{
@@ -241,10 +379,13 @@ export class UniformPageInitialise{
   if(this.storage.fieldTextures.length!==this.fields.length)throw new Error(`Uniform page initialise: the detail storage holds ${this.storage.fieldTextures.length} fields, ${this.fields.length} when the initialise was built`);
   const pass=encoder.beginComputePass(UniformPageInitialise.PASS);
   for(let i=0;i<pipelines.length;i++){pass.setPipeline(pipelines[i]!);pass.setBindGroup(0,buffers[i]!);pass.setBindGroup(1,this.batches[i]!.held.group);pass.dispatchWorkgroups(this.groups);}
+  // After the claims' AIR image: a retired block's vertices pass to their next holders (none at setup).
+  if(buffers===this.listed)for(let i=0;i<this.retirePipelines.length;i++){pass.setPipeline(this.retirePipelines[i]!);pass.setBindGroup(0,this.retireGroups[i]!);pass.setBindGroup(1,this.retires[i]!.held.group);pass.dispatchWorkgroups(uniformPageInitSlots(this.pool.layout));}
   pass.end();
  }
  /** After a commit, before any reader of its new blocks: the AIR image over
-  * every field texel and low-face row of each, then every owner's hook. */
+  * every field texel and low-face row of each, the retire handoff of the
+  * blocks it retired, then every owner's hook. */
  encode(encoder:GPUCommandEncoder):void{
   this.launch(encoder,this.listed);
   for(let i=0;i<this.owners.length;i++)this.owners[i]!.encodeInitBlocks(encoder);

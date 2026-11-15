@@ -47,7 +47,7 @@ run() { # tree role scene mode
   if [ $s = seep ]; then
     (cd $t && WEBGPU_NODE_MODULE=$t/node_modules/webgpu/index.js $R timing node --import tsx tools/seep-bench.ts --method=nbflip --steps=1200 --every=60 --mode=$m --slot=timing --out=$out --name=$name > $out/$name.log 2>&1)
   else
-    # The dam is timed over its 165 gated steps (nbflip-gates.ts GATED_STEPS): the baseline fails a residency audit near step 178.
+    # The dam is timed over 165 steps (nbflip-gates.ts TIMED_STEPS): a baseline from before lane D's fix fails a residency audit near step 178.
     local steps=(); [ $s = dam ] && steps=(--steps=165)
     (cd $t && WEBGPU_NODE_MODULE=$t/node_modules/webgpu/index.js $R timing node --import tsx tools/nbflip-gate-bench.ts --scene=$s $steps --mode=$m --slot=timing --out=$out --name=$name > $out/$name.log 2>&1)
   fi

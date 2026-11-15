@@ -29,10 +29,13 @@ type SceneKey = "seep" | "dam" | "letters" | "paddleboats";
 const SCENES: SceneKey[] = ["seep", "dam", "letters", "paddleboats"];
 /** Full-length run steps a scene (the seep: 1200, plan §1; the others: tools/nbflip-gate-bench.ts defaults). */
 export const GATE_STEPS: Record<SceneKey, number> = { seep: 1200, dam: 300, letters: 240, paddleboats: 300 };
-/** The steps a candidate must reach with no solver failure for its gated rows to be judged (C0). The dam's
- * rows after 165 are informational: the frozen baseline itself fails a residency audit near step 178 in
- * some runs (plan §4). Raise this to 300 once that is fixed; never lower it. */
-export const GATED_STEPS: Record<SceneKey, number> = { seep: 1200, dam: 165, letters: 240, paddleboats: 300 };
+/** The steps a candidate must reach with no solver failure for its gated rows to be judged (C0): every
+ * scene's full run. The dam's was 165 until lane D's retire handoff (uniform-page-initialise.ts) fixed the
+ * baseline's residency-audit failure near step 178 (plan §4); never lower it. */
+export const GATED_STEPS: Record<SceneKey, number> = { seep: 1200, dam: 300, letters: 240, paddleboats: 300 };
+/** Steps a timing run covers (tools/nbflip-timing-round.sh): the dam's 165, so a baseline from before lane D's
+ * fix (which stops near step 178 in some runs) times over the same steps as its candidate. */
+export const TIMED_STEPS: Record<SceneKey, number> = { ...GATED_STEPS, dam: 165 };
 
 interface Run<S = unknown> {
   file: string; name: string; scene: SceneKey; mode: string; slot: string; meta: Record<string, unknown>; samples: S[];
@@ -245,8 +248,8 @@ const judges: Record<SceneKey, (refs: Run[], c: Run) => Gate[]> = {
 };
 
 // ---------------------------------------------------------------- timing
-/** Timing runs cover GATED_STEPS (the dam: 165, short of its baseline's residency failure near 178), or all GATE_STEPS. */
-const timingRuns = (dirs: string[]) => filesOf(dirs).map(load).filter((r): r is Run => !!r && r.slot === "timing" && !r.summary?.failure && (r.summary?.steps === GATED_STEPS[r.scene] || r.summary?.steps === GATE_STEPS[r.scene]));
+/** Timing runs cover TIMED_STEPS (the dam: 165, short of the old baseline's residency failure near 178), or all GATE_STEPS. */
+const timingRuns = (dirs: string[]) => filesOf(dirs).map(load).filter((r): r is Run => !!r && r.slot === "timing" && !r.summary?.failure && (r.summary?.steps === TIMED_STEPS[r.scene] || r.summary?.steps === GATE_STEPS[r.scene]));
 const latest = (runs: Run[], scene: SceneKey, mode: string) => runs.filter(r => r.scene === scene && r.mode === mode).sort((a, b) => String(a.meta.date).localeCompare(String(b.meta.date))).at(-1);
 const baseTiming = timingRuns(option("ref-timing")), candTiming = timingRuns(option("candidate-timing"));
 function timingTable(scene: SceneKey) {
@@ -273,7 +276,7 @@ if (timingOnly) {
   for (const scene of sceneFilter) {
     if (!baseTiming.some(r => r.scene === scene) && !candTiming.some(r => r.scene === scene)) continue;
     const t = timingTable(scene); data[scene] = t.data;
-    lines.push(`## ${scene} (${GATED_STEPS[scene]} steps)`, "", ...t.lines, "");
+    lines.push(`## ${scene} (${TIMED_STEPS[scene]} steps)`, "", ...t.lines, "");
   }
   const out = resolve(option("out")[0] ?? "artifacts/nbflip-port/timing"), name = option("name")[0] ?? "timing";
   mkdirSync(out, { recursive: true });

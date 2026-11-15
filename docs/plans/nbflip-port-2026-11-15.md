@@ -7,7 +7,7 @@
 | Phase 0: close out the seep rewrite (S2q gate round, technique catalogue) | done: S2q 5.06x fenced / 5.28x pipelined, all gates (9fef519b); catalogue `nbflip-port/seep-techniques.md` (dd896664); seep PRESSURE_CAP failure bit (24b48036) |
 | Phase 1A: NB-FLIP cost attribution across scenes, ranked port list (lane A) | done (6b06703f): `nbflip-port/attribution.md`; no hot spot (8 areas of 6–22%), occupancy 12–17%, ranked items 1–12 total about 10–20% a step |
 | Phase 1G: cross-scene gates and NB-FLIP references, dam break added (lane G) | done (2026-11-15): §4 gates, 5 refs a scene at 33b78ebb, self-test passed; dam residency defect found (§4.0) |
-| Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | in progress |
+| Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | done (2026-11-15): root cause a retire with no vertex handoff (stale skirt phi); retire handoff in uniform-page-initialise.ts, 15 of 15 dam runs complete, GATED_STEPS.dam 300; `nbflip-port/progress-lane-d.md` |
 | Phase 2: port lanes P1 (pressure: items 13, 3, 10, 8, 5) and P2 (move, submit, kernel shape: items 1, 2, 4+, 6, 7, 11, 9, 12) | **redirected** (2026-11-15): the user asked for NB-FLIP to be restructured toward seep-m1max's architecture, not tweaked item by item. P2's tweak list is stopped; P1 continues on a seep-structured multigrid. |
 | Lane X: structural redesign of NB-FLIP (`docs/plans/nbflip-structural-2026-11-15.md`) | done (2f29b9d1), approved (§7.1): a new brick engine in `lib/methods/narrow-band/` behind the NB-FLIP id; milestones M0–M6; target about 2.5–2.9x on all four scenes |
 | Structural lanes E (engine core), F (fluid kernels), P (pressure and bodies, continuing P1) | M0 in progress |
@@ -166,7 +166,7 @@ tree bef61da162 and `lib/core` tree e398dc5508. It runs from the read-only expor
 | scene | run | samples | gated steps |
 |---|---|---|---|
 | seep | `tools/seep-bench.ts --method=nbflip --steps=1200 --every=60 --nb-stats` | every 60 | 1200 |
-| dam | `tools/nbflip-gate-bench.ts --scene=dam`: 300 steps, every 15, dense 0–16 | every 15 | 165 (C0); 180–300 informational |
+| dam | `tools/nbflip-gate-bench.ts --scene=dam`: 300 steps, every 15, dense 0–16 | every 15 | 300 (C0, since lane D's fix; 165 before); 180–300 rows informational |
 | letters | `tools/nbflip-gate-bench.ts --scene=letters`: 240 steps | every 30 | 240 |
 | paddleboats | `tools/nbflip-gate-bench.ts --scene=paddleboats`: 300 steps, moored hulls, wheels at 1/3 throttle | every 30 | 300 |
 
@@ -187,8 +187,10 @@ not gate.
 
 **C0.** The candidate must reach GATED_STEPS (seep 1200, dam 165, letters 240, paddleboats 300)
 with no solver failure record. Otherwise the scene fails and nothing else is judged.
-`C0f` (all 300 dam steps) is informational until the defect below is fixed. After that,
-GATED_STEPS.dam is raised to 300, which tightens the gate and never loosens it.
+`C0f` (all 300 dam steps) was informational until the defect below was fixed. Lane D fixed it
+(the retire handoff, `nbflip-port/progress-lane-d.md`) and GATED_STEPS.dam is now 300, which
+tightens the gate. Timing runs still cover the dam's first 165 steps (TIMED_STEPS), so a
+baseline from before the fix stays comparable.
 
 **Known baseline defect (dam).**
 - At baseline physics, 6 of 11 fenced 300-step dam runs stopped with `GPU failure record:
