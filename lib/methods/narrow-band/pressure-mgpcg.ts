@@ -1922,7 +1922,9 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
       { kernel: top, dispatch: { indirect: MG_GATE.ONE }, z: k },
       gC(up3, k), gC(up2, k), gC(nativePost1, k), gF(up1, k), gC(nativePost0, k), ...(bsb ? [gF(postU, k)] : []), gS(postS, k), gF(postZ, k),
       gFC(direction, k), gFC(update, k),
-      ...(walls ? [{ kernel: wallGate, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits } as BrickPlacement,
+      // A slot that can never decide encodes no walls: with wallLoose Infinity, slot k decides exactly when k < wallDecisions
+      // (every open slot before it decided; a closed slot k closes every later one).
+      ...(walls && (Number.isFinite(wallLoose) || k < wallDecisions) ? [{ kernel: wallGate, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits } as BrickPlacement,
         { kernel: wallsF, dispatch: { indirect: MG_GATE.WF }, z: k }, { kernel: wallsC, dispatch: { indirect: MG_GATE.WC }, z: k }] : []),
       { kernel: check, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits },
     ],

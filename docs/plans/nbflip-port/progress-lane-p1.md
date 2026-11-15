@@ -800,3 +800,58 @@ state differs from X + lift ≥ 0 at the end, summed over steps 13–24):
 - Converged X against the Float64 PCG: h 7.7e-6, native 8.3e-6.
 - Walls default policy: 349 of 2141 h faces inconsistent, against the build's 998.
 - GPU pressure suite: 21/0. Unit: 1842/0. Types are clean apart from the 3 lane-n errors.
+
+## 2026-11-16 — the guess's dam-300 gate; the slots' launches measured; walls only in the deciding slots
+
+**dam-300 on 9b39ae68** (check slot, tiered composite, poolF 4913, lane F's brick-dam-l.mts with D8 counted as the
+receipt; judged on ref-2761350a; `fluid-scratch/lane-p1/gate300/`). rc 0, no 00000206 aborts. Against lane F's g1
+run (259e2e59 + lUnion/lcCouple, the same runner, `lane-f/logs/rc/gates-g1`):
+
+| | C0 | D1 | D2 | D3 | D4 | D4c | D5c | D5ce | D5k | D5p | D5e | D6 | D7t | D7d | D8c | D8 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| g1 | 0.00 | 0.80 | 0.10 | 0.38 | 0.05 | 0.00 | 0.17 | 0.10 | 0.19 | 0.03 | 0.01 | 0.57 | 0.35 | 0.12 | 1.68 F | 0.83 |
+| guess | 0.00 | 0.80 | 0.10 | 0.49 | 0.04 | 0.00 | 0.17 | 0.10 | 0.22 | 0.01 | 0.00 | 0.58 | 0.35 | 0.13 | 1.59 F | 0.77 |
+
+- No row moves by more than 0.1 (D3 +0.10: 30-90 window 43.91 against 44.40, ref 45.30, tol 2.85).
+- D8 window means: 6.792e5 / 4.062e5 / 3.750e5 against g1's 6.834e5 / 4.072e5 / 3.761e5 (ref 6.309e5 / 3.838e5 / 3.484e5).
+- D8c fails as before, the pre-existing low count: 2.957e5 against g1 2.926e5 (ref 3.516e5, tol 3.52e4).
+- Drift at 300: -1.03% (g1 -0.99%).
+
+**What a closed slot costs, unprofiled.** The 0.28 ms a closed slot above came from the profiled floor run, which
+puts every dispatch in its own timestamped pass. Unprofiled (one timing hold, tiered dam, 36 steps, fenced median of
+steps 18-35 less the samples, n 18; `runs5/T1-*`):
+
+| | slots 8 | slots 16 |
+|---|---|---|
+| HEAD 9b39ae68 | 74.59, 76.17 | 75.71 |
+| walls in the deciding slots only | 75.51, 74.53 | 76.81 |
+
+- Iterations are 6-8 a step (1 closed slot at 8, 9 at 16), so slots 16 adds 8 closed slots a step.
+- +8 closed slots: about +1.1 ms over the four pairs (-0.5 to +1.8 run to run), so a closed slot is about 0.13 ms
+  (0.07-0.2), about 5.5 µs a launch of its 24. That is half the profiled figure. On the dam window it is about
+  0.13 ms a step in all.
+
+**Walls in the deciding slots only (this commit).** With wallLoose Infinity a slot k decides exactly when
+k < wallDecisions, so slots 1-7 now encode no wallGate, wallsF and wallsC: 24 launches a slot to 21, 189 a solve
+to 168 at 8 slots. Bitwise by construction (those slots' WF and WC gates were 0). Unmeasurable in the hold above:
+slots 8, 75.0 against 75.4 mean of the two medians.
+
+**The native passes' order (Float64 model, six dumped states, the Jacobi start; `cmodel.ts` NAT).** Merging a
+native pass into an h launch needs the two halves independent:
+
+| native passes at L0 and L1 | mean its |
+|---|---|
+| multiplicative, h then native in pre (the GPU's) | 6.17 |
+| additive at both levels (-4 launches a slot) | 6.67 |
+| additive at L0 only, or L1 only (-2) | 6.67, 6.67 |
+| native first in pre at L0 (-1: nativePre0 into pmgUpdate's C half) | 6.67 |
+| none | 8.67 |
+
+- Each costs about 0.5 iterations (about 0.9 ms a step) for at most about 0.1 ms of launches a slot: no-go.
+
+**What is left.** The slot is a chain of about 19 global dependencies: L0 S, U, the native L0 pass, D0, the native L1
+pass, D1, D1C, D2, D3, top, U3, U2, the native L1 post, U1, the native L0 post, U, S, Z, then direction, update and
+check. Without changing the cycle, the remaining fusions are page kernels that recompute a neighbour's values:
+- D1 into D1C (a page computes its bricks' L1 residuals);
+- U3 into U2 (a page also post-smooths the 24 face-adjacent L3 blocks it reads).
+- At about 5.5 µs a launch plus the tail, these are worth about 0.1-0.2 ms a step together.
