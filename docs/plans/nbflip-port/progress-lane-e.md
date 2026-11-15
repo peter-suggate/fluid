@@ -1528,3 +1528,47 @@ pMove alone was 5.56 of that. Every figure below is from the timing slot. The fr
 
   - Unprofiled fenced mean: head 66.8, cand 67.6. That is one run each, and the kernel sums do not show the difference.
   - In the step, pMove gains 1.14 ms against 2.34 frozen. The net move-area gain is 0.45 ms. Most of what remains of pLiquid's 0.70 is bricks with no record within one brick, which pLiquid could skip; that is the next step.
+
+## 2026-11-16: tiered against all-h on the dam (measurement; coordinator's ruling: tiered stays)
+
+HEAD 617f9291 (lUnion cc86c9dc and lcCouple 617f9291 in), composite solver, pools as authored (f = 4913, every one of
+the 17^3 bricks: all-h cannot latch F; its liveF peak is the whole box). One run each, rc 0, no 00000206 aborts, FAIL
+word 0 at every sample. Runner ~/code/me/fluid-scratch/lane-e/floor/tools/brick-dam-floor.mts (`--tiered` or not);
+runs, gates and logs in ~/code/me/fluid-scratch/lane-e/tier-vs-h/runs/.
+
+Fenced step (timing slot, unprofiled, 165 steps, steps 13-165, n = 150), ms:
+
+| | tiered | all-h |
+|---|---|---|
+| median | 56.2 | 58.6 (+4%) |
+| mean | 62.0 | 60.5 |
+| p95 | 90.4 | 73.2 |
+| thirds | 78.4 / 57.9 / 49.8 | 68.9 / 59.1 / 53.5 |
+
+Per area (profiled, rowsWindow steps 19-22, ms (launches); §6 dam budget):
+
+| area | tiered | all-h | budget |
+|---|---|---|---|
+| velocity | 20.86 (7) | 19.33 (5) | 1.6 |
+| level set | 14.09 (24) | 10.50 (17) | 2.0 |
+| pressure solve | 9.22 (169) | 14.43 (169) | 3.0 |
+| move | 7.42 (9) | 4.54 (8) | 1.5 |
+| pressure setup and projection | 3.64 (39) | 6.80 (39) | 1.0 |
+| transfer and seeding | 3.60 | 2.41 | 1.0 |
+| brick set | 3.42 (35) | 4.59 (27) | 0.6 |
+| certificate and region kernels | 0.68 | - | - |
+| window kernel mean | 62.9 | 62.6 | ~18 |
+| launches per step | 291 | 267 | |
+
+liveF (check run, 36 samples 0-300): tiered mean 2458, peak 4703; all-h mean 3937, peak 4913.
+
+Gates on ref-2761350a (check run, 300 steps), D1/D2/D3/D4/D4c/D5c/D5ce/D6/D7t/D8/D8c:
+- tiered: 0.80/0.10/0.49/0.05/0.00/0.17/0.10/0.57/0.35/**1.16**/0.94 (D8 30-90 7.038e5 vs 6.309e5, limit 6.94e5);
+- all-h: 0.70/0.01/0.45/0.35/0.85/0.28/0.32/**1.12**/0.50/0.66/**1.17** (D6 wet floor 10162 vs 10767 at 8 and 14154 vs
+  14936 at 12; D8c 3.928e5 vs 3.516e5 at 16).
+
+Reading: a speed tie (all-h +4% median, better mean and tail). All-h moves about 8.4 ms into pressure (solve and
+setup) and takes 3.6 out of the level set, 2.9 out of the move and 1.2 out of transfer. Tiering's per-sample cost
+about cancels all-h's 1.6x live set here. So the gap to the seep is the passes' per-brick cost, not tiering. The
+coordinator ruled that tiered stays the engine's mode. A lead for later: tiered's early third is 78.4 ms against
+all-h's 68.9, the early collapse where the tiered census and transfer work peaks.
