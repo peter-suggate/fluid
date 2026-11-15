@@ -122,7 +122,7 @@ test("composite project (GPU): every liquid row's projected divergence is its re
   await withDevice("composite project", async device => {
     const { e, after, h, fx, K } = await solveComposite(device, { slots: 40, tolerance: 1e-3, walls: true }, false);
     const L = e.layout, N = COMPOSITE_N;
-    const pagesG1 = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 }, liq = { indirect: ARGS.PER_LIST * LIST.F_LIQ + ARGS.G1 };
+    const pagesG1 = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 }, liq = { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 };
     const xBefore = new Float32Array((await e.read("pres", L.base("pres", "F", "X"), L.cap.f * BRICK_STRIDE)).buffer);
     const stateF = new Uint32Array(await e.read("phi", L.base("phi", "F", "FLAGS"), L.cap.f * BRICK_STRIDE));
     const stateC = new Uint32Array(await e.read("phi", L.base("phi", "C", "FLAGS"), L.cap.c * BRICK_STRIDE));
