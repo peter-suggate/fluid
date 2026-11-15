@@ -172,3 +172,75 @@ kernel. The dam runner (scratch: `fluid-scratch/lane-f/tools/brick-dam.mts`) use
 - E: at all-h the authored f = 3968 runs out (POOL_F at step 20). setMark keeps every liquid brick at h, and the
   splash claims the whole 17³ lattice. Tiers fix this (`tiered: true` once F reads through `brickOwnerWGSL`).
 - P: the volume RHS term.
+
+## M2: the dam gate, all-h (2026-11-15)
+
+Run: `dam-300a`, 300 steps on the check slot at 7b0df874 + P's RHS (6b06ae15), with `--poolF=4913`.
+- rc 0, with no FAIL bits and no Metal aborts.
+- Judged by `tools/nbflip-gates.ts` against the five 2761350a references (`fluid-scratch/lane-f/gates/dam-300a.md`).
+
+**Overall: FAIL.** Every failing row sits at steps 2–16 of the collapse. Every window row passes.
+
+| gate | result | worst margin |
+|---|---|---|
+| C0 300 steps | pass | 0 |
+| D2, D3, D4, D4c, D5k, D5p, D5e, D5ce, D7t, D7d, D8 | pass | ≤ 0.77 |
+| D1 front | **FAIL** | 1.30 (step 8: 103 vs 108; step 10: 116 vs 121) |
+| D5c collapse KE | **FAIL** | 1.82 (step 4: 29.5 vs 36.1 J; step 16 within) |
+| D6 wet floor | **FAIL** | 1.85 (steps 8 and 12: 9,954 vs 10,767; 13,553 vs 14,936) |
+| D8c particles at 16 | **FAIL** | 5.12 (531,645 vs 351,600) |
+
+**Cause: the TRIG stand-in.** It marks every tile with a crossing cell, so the whole surface seeds at boot. The
+old census triggers by shape, strain, rotation, impact and approach
+(`uniform-narrow-band-activity.wgsl.ts`), so at rest only the column's edges seed:
+
+| step | particles (ours) | particles (ref) | front (ours/ref) | wet floor (ours/ref) |
+|---|---|---|---|---|
+| 0 | 412,608 | 0 | 80 / 80 | 6,400 / 6,400 |
+| 1 | 419,500 | 75,687 | 81 / 84 | 6,405 / 6,993 |
+| 8 | 535,009 | 146,197 | 103 / 108 | 9,954 / 10,765 |
+| 16 | 531,645 | 350,675 | 128 / 128 | 15,831 / 16,144 |
+
+With the whole surface hot, the faces follow the particles' FLIP keep instead of the grid. That slows the foot of
+the collapse by about 5 cells, and the gap closes once the old run's surface heats (step 16). E's census
+(`setCensus`, TRIG in `set`) replaces the stand-in. F adds the join bits (`TILE_OCC` 8–15) it reads.
+
+Volume control is live and tracks the references. Drift against the reference mean:
+- window 30–90: -4.7% vs -4.0%;
+- window 105–165: -1.4% vs -1.0%;
+- window 180–300: -1.1% vs -0.7%.
+
+### Timing against the 2761350a baseline
+
+Timing slot, 165 steps, clean tree at da593216, MGPCG, `--poolF=4913` (`fluid-scratch/lane-f/timing-7b0df874/`):
+
+| | brick engine (all-h) | 2761350a |
+|---|---|---|
+| fenced median | 69.44 ms (p95 82.5, mean 68.4) | 45.45 ms |
+| fenced thirds | 79.3 / 69.4 / 56.4 | 67.1 / 43.5 / 43.9 |
+| pipelined | 67.32 ms/step | 50.61 ms/step |
+| construction | 468 ms | 9,045 ms |
+| GPU memory | 663 MB | 2,015 MB |
+
+The step is 1.5x slower, while construction is 19x faster and memory is 3x smaller. All-h is the wrong shape to
+time. The old engine runs the deep interior at 4h, and here every liquid cell is at h.
+
+Attribution: `prof-60` puts each dispatch in its own timestamped pass, which inflates the step to 86.5 ms; the
+kernels sum to 76.0 ms/step.
+
+| group | ms/step | kernels |
+|---|---|---|
+| MGPCG (P) | 29.2 | 7.8 iterations; pmgUpdate/PostS/PreS about 4.4 each |
+| grid transfer (F) | 27.9 | uAdvect 8.6, pMove 7.1, uTransfer 6.4, uExtend 5.7 |
+| level set (F) | 10.9 | lAdvect 4.9, lDistance 1.7, lNear 1.1 |
+| particles (F) | 5.2 | pSeed 2.2, pDeposit 1.7 |
+| rest | 2.8 | project 1.1, operator 0.7, uViscous 0.5, vGauge 0.3, set* 0.15 |
+
+The four transfer kernels and MGPCG run over every interior cell at h, so this is the cost the tiers remove.
+uAdvect and uExtend visit every face of every brick. pMove carries the 412k particles that the TRIG stand-in
+over-seeds, against the reference's 76k–146k at the same steps. Re-time after E's census and tiers land.
+
+Composed kernels: an ulp-scale comparison against the old engine is not meaningful at all-h. The old engine's
+pressure runs on a 4h interior, so the two engines solve different systems. Each formula stays bitwise in isolation
+(`velocity-formulas.test.ts`, `levelset-formulas.test.ts`, `particles-formulas.test.ts`), and the gates judge the
+composition.
