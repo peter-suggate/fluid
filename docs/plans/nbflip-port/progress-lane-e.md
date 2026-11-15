@@ -416,3 +416,14 @@ and leaves don't touch it. An absent brick is now h air (NB_PHI_FAR, 0 faces), a
 tiles as the identity without a TIER failure. Test: the all-h column boot gives all-ones CMASK on every
 page with absent bricks, and a step keeps it. GPU tests: census, dam census, set-tiers, engine, transfer,
 transfer-dam and owner pass 27/27.
+
+## 2026-11-15: T4 exits ruling (coordinator, on 633f2255)
+
+The early identity, cheap affine and Euler exits (umEarlyFarAdvected, umCheapAdvected, umEulerAdvected)
+run only with UniformSurfaceWorkControl.surfaceEvidence. That control defaults to false and is turned on
+only in its own test, so these exits are not part of the reference NB-FLIP. Deviation 2 in
+levelset-coarse.wgsl.ts now records them as "old-engine opt-in experiment, not ported", including at M3.
+The BULK16 latch (FAIL.UNSUPPORTED 0x4c430003) stays for a different reason: until M3, nbCSlotOfPage
+reads a BULK16 page as absent, so a vertex on such a page would silently get a wrong value. The M3 list
+gains the COLD-seed deviation (deviation 6: the previous step's seed for a COLD tile), to land with COLD
+(deviation 5).

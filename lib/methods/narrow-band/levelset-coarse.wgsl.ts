@@ -34,7 +34,7 @@
  *    path with the one-step trace and the wall contact ("clip", UM_WALL_CLIP);
  * 2. otherwise COLD hold (umVertexTier COLD: every incident open cell COLD, or none open);
  * 3. kept far air (umFarAirKept: last step's gate bit clear at the vertex's cell's tile, and φ ≥ 16·max h);
- * 4. kept deep air, early identity, cheap affine, Euler: see deviations 2 and 3;
+ * 4. kept deep air: see deviation 3 (early identity, cheap affine and Euler are not in the reference: deviation 2);
  * 5. the full path: the foot (|φ| < 2w), the RK3 surface trace through the extended velocity, the departure cell at
  *    its tile's width (C corners in a 4h tile, resolved vertices in an h tile), the limited Catmull-Rom cubic where
  *    |value| < 2w (umCubicAt at width 4 is mode < 4: the coarse default is cubic), the wall contact, plus the
@@ -62,14 +62,14 @@
  * Stated deviations (each a stand-in until its owner lands the input, or a mapping onto the brick's state):
  * 1. Velocity: lane F's fgSampleVel (FG_SAMPLE_WGSL, 52186c51), the old blended h/4h sampler (umUnitSample /
  *    umFastVelocity) of US. No deviation of this file's; F's own statements apply.
- * 2. Early identity, cheap affine and Euler (umEarlyFarAdvected, umCheapAdvected, umEulerAdvected) exist only
- *    with UniformSurfaceWorkControl.surfaceEvidence (uniform-surface-work-control.ts, default false, on only in its
- *    own test); without it they are stubs returning no result (the resolved dam WGSL), so every vertex takes the
- *    full path. With it they read the umSurfaceEvidence 16h-region model (8 words a 16^3 h region: coverage over the
- *    region's 3^3, g, rho, local rho, support and Lipschitz words), which in the brick ABI is BULK16 state (B pages,
- *    M3). They are not ported (M3). The latch: lcAdvect fails FAIL.UNSUPPORTED (info 0x4c430003) where B_ALL lists a
- *    page or a page word about the workgroup's page is BULK16, so a live 16h state never silently takes the full
- *    path (nbCSlotOfPage reads a BULK16 page as absent).
+ * 2. Early identity, cheap affine and Euler (umEarlyFarAdvected, umCheapAdvected, umEulerAdvected): old-engine
+ *    opt-in experiment, not ported. They exist only with UniformSurfaceWorkControl.surfaceEvidence
+ *    (uniform-surface-work-control.ts, default false, on only in its own test); without it they are stubs returning
+ *    no result (the resolved dam WGSL), so in the reference NB-FLIP every vertex takes the full path, as here. They
+ *    are not part of the reference and are not ported at M3 either. The BULK16 latch is separate: until M3 the brick
+ *    engine has no BULK16 state, and nbCSlotOfPage reads a BULK16 page as absent, so a vertex there would be silently
+ *    wrong. lcAdvect therefore fails FAIL.UNSUPPORTED (info 0x4c430003) where B_ALL lists a page or a page word about
+ *    the workgroup's page is BULK16.
  * 3. Kept deep air (umDeepAirKept) needs the census's per-tile spread-reach words (5-bit reaches an axis each way)
  *    and the release bits; neither is published in the brick ABI. As lane F's lAdvect states, those vertices are
  *    transported instead.
@@ -79,7 +79,8 @@
  *    i.e. page granularity. umVertexTier and nbVertexCold read it at every incident in-lattice cell of a resident
  *    page.
  * 6. The gate's seeds: the old COLD tile keeps its previous seed (nbAirSeed: last plane 0 OR NB_SURFACE_TILES);
- *    here a COLD tile's seed is this step's (a second plane would hold it; COLD is never set at M2). Sample support
+ *    here a COLD tile's seed is this step's (a second plane would hold it; COLD is never set at M2; on the M3 list
+ *    with deviation 5, to land with COLD). Sample support
  *    is lane F's SURFACE_TILE flag, so a 4h tile outside every F slot has none. The gate's tile is the vertex's cell
  *    (held off the upper wall), umFarAirKept's umPointCell. Before the first lcClear the gate is clear (zeroed).
  * 7. Couple: heat (FT_THETA, FT_SURF) and splat keys (FC_KEY, FC_HOT) are lane F's words. Where no F slot holds a
