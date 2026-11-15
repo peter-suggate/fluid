@@ -685,7 +685,17 @@ writes nothing outside `pres` and its own buffers, apart from the gates below.
 **Warm start.** X as `operator` leaves it, which is:
 - the last step's solution in bricks that stayed live;
 - 0 in entering bricks (`setUpdate` zeroes their channels);
+- 0 in entering C slots: `setInit` zeroes every `pres` channel of C_ENTER, X included (d769d9d0);
 - 0 in this step's non-liquid cells.
+
+At a tier change (M2), `setTransfer` carries no `pres` channel (NB-FLIP's remap carries φ, U and the
+extension velocity only):
+- A tile that coarsens starts from its C cell's X. That X is either the solution from the last step
+  the tile was 4h-owned in a resident page, or 0 if the page entered since.
+- A tile that refines starts from its F cells' X. That X is either the solution from the last step
+  the cells were h-owned, or 0 if the brick entered since.
+- In both cases the value is any valid start; whether P prolongs or restricts X at the change is P's
+  choice.
 
 Any starting value is valid. The warm start affects only the iteration count.
 

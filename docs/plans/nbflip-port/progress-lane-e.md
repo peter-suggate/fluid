@@ -318,3 +318,19 @@ the CMASK and LIQUID_TILES counts, and FAIL 0.
 Coordinator (2026-11-15): before the M2 gate, check the transfer's listing and tile flow against
 real old-engine output. Take a pre-remap state from a real dam step and compare it with the old
 engine's post-remap state. Pending, after setCensus.
+
+## 2026-11-15: setTransfer against the old engine's real remap (08a59dac)
+
+This is the coordinator's pre-M2-gate check. tools/nbflip-remap-capture.ts takes a frozen capture of
+the old engine's frame-head remap at dam step 22, in a 64^3 window at lo = 0. It wraps the device,
+with no hook in the old engine. brick-transfer-dam.test.ts then loads the old state into the brick
+storage, runs brickTransferSchedule, and compares the result with the old post-remap state:
+- Listing: 262 tiles compared (81 refine, 12 coarsen, 169 neighbour), identical, flags included.
+- CMASK and word 28: exact.
+- U and US (F, C, plane-0 wall rows): bitwise.
+- C φ: bitwise.
+- F φ: bitwise except 3 words, 1 ulp each. They are new h vertices interpolated on one refined tile's
+  face, from compiler rounding.
+
+The window's top tile layer is excluded, because there the brick engine has an artificial wall. No
+setTransfer bug was found.
