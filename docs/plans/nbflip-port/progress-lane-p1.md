@@ -331,3 +331,46 @@ Metal clean.
   proportional control). The native rows get the same term (buildRhs:
   `−ρ(div − z·open)/dt`) when they land. A rate of 0 changes nothing. brick-engine and
   pressure-mgpcg pass on the GPU.
+
+## 2026-11-15 — the composite rows on the tiers, at frozen-state parity with a Float64 oracle
+
+- `lib/methods/narrow-band/pressure-composite.wgsl.ts` holds `rowsF` (F_ALL: the h rows of h-owned
+  tiles) and `rowsC` (C_ALL: the native 4h rows). They put pressure-rows.wgsl.ts's formulas on E's tier
+  storage through the owner readers (brick-owner.wgsl.ts). They write X (the start), RHS, DIAG,
+  PPHI, K0..2, and KU0..2 (the seam to a native row above, on F only).
+- Units: the slot contract's X = p·dt/ρ, so each old row is multiplied by h²·dt/ρ. The couplings
+  are:
+  - an h face: V/θ;
+  - a seam: V/(2.5θ'), with θ' = 1 on a liquid band cell;
+  - native–native: 4V;
+  - a native ghost: 4V/θ (the marched umFaceSurfaceTheta);
+  - a native wall: 4·0.5;
+  - a band wall: V = 0.5;
+  - K_OPEN: 1/θ(own, 0.5).
+- The rows are written in total variables. The start enters only through the seam heads (an RHS
+  shift that keeps the matrix symmetric: the band sees X_n + head, the native sees X_b − head) and
+  through the walls' initial state (attached when start + lift ≥ 0; N_HELD always attached).
+- Starts:
+  - A warm h cell (FLAGS bit 7) starts from X.
+  - A cold h cell prolongs the tiles' starts with bCoarse and bCoarseCarry, ported verbatim.
+  - A tile's start is its C cell's X, which holds the tile's last pressure. The solve's finish
+    must write it: the native solution, or an h tile's mean over its liquid rows (083's band-tile
+    mean).
+  - A first version averaged the warm h rows' X on the fly. That raced with rowsF's own X writes
+    (a warm but dry h cell is zeroed while a neighbour workgroup averages it), and the RHS was off
+    by 2e-6. Reading C X removes the race, because rowsF writes only F X, and rowsC, which runs
+    after rowsF, writes C X only on dry native rows.
+- `pressure-composite.test.ts` (GPU) uses a 32³ mixed-tier frozen state: a 4h block from the floor
+  through a rippled surface beside h tiles, a 4h block on the x = 0 wall, and 70% warm h cells.
+  Every written channel matches a Float64 oracle of the same rules within 2e-4 relative. Coverage:
+  9046 F rows, 35 C rows, 701/52 seams (F/C) with 701 heads, 1999 attached and 146 separated walls,
+  13 N_HELD, 9 native ghosts, 132 native links, 4571 cold starts and 745 surface carries.
+  `H.FAIL` stays 0.
+- Open deviations, measured later on the dam:
+  - Non-resident ghosts use PHI_AIR in place of the old RO_FAR (0.1 m).
+  - The h centre φ is the 8-vertex mean (bCentrePhi), not 036's umPressurePhiCell.
+  - The owner readers and the cold-start prolongation run on the fly; their cost is unmeasured.
+- Still to do:
+  - The finish kernels: set and clear WARM, and write the tile's C X.
+  - Wall-state bits 8–10, for the active-set outer loop.
+  - The composite MGPCG.
