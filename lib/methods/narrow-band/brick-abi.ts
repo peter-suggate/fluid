@@ -112,7 +112,7 @@ export const FOLD = 32768;
 export const POOLS = {
   vel: ["U0", "U1", "U2", "UP0", "UP1", "UP2", "US0", "US1", "US2"],
   phi: ["PHI", "PHI1", "FLAGS"],
-  pres: ["X", "R", "Z", "D", "Q", "RHS", "DIAG", "K0", "K1", "K2", "KU0", "KU1", "KU2", "PPHI"],
+  pres: ["X", "R", "Z", "D", "Q", "RHS", "DIAG", "K0", "K1", "K2", "KU0", "KU1", "KU2", "PPHI", "B"],
   cut: ["FRAC", "AP0", "AP1", "AP2"],
 } as const;
 export type PoolName = keyof typeof POOLS;

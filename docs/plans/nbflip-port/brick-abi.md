@@ -109,6 +109,7 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | `pres` | 0–9 | `X R Z D Q RHS DIAG K0 K1 K2` | cell; `K_a` the coupling across the lower face along `a` (on C rows: native–native only) | `operator`, solver | P; `project` |
 | `pres` | 10–12 | `KU0 KU1 KU2` | cell, h rows only (unused in C): the seam coupling V/(2.5h²θ) across the upper face along `a` when the upper neighbour is a 4h row, else 0 (amended at M2, lane P) | `operator` | P |
 | `pres` | 13 | `PPHI` | cell: the pressure authority's centre φ (`rootPhi`, uniform-mixed-pressure-authority.ts), for the liquid test and ghost θ of native and seam rows (amended at M2) | P's setup | P |
+| `pres` | 14 | `B` | cell: the row's start (pInit/P_BASE), for the seam heads in `project` (amended at M2, lane P) | `operator`, P's setup | P |
 | `cut` | 0 | `FRAC` | cell | `solidStamp` | `operator`, F's solid paths |
 | `cut` | 1–3 | `AP0 AP1 AP2` | lower face | `solidStamp` | as above |
 
