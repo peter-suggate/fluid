@@ -297,11 +297,13 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
   uncovered=pUncovered(c);
  }
  let salt=select(nbRing(cfg.x,NB_RING_STEP)+1u,0u,initial);
+ // The outer shell (a site above -1 cell) seeds only in an h owner's cell (seedSite: umOwnerAt(c).width == 1).
+ let fine=fgCellOwned(c);
  var n=0u;
  for(var j=n0;j<goal;j++){
   if(!initial&&held+f32(j-n0)*mass>=8.0){continue;}
   let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=fgDepth(site);
-  if(!nbfSeedSiteOk(distance,false,initial,d,1.0,uncovered,true)){continue;}
+  if(!nbfSeedSiteOk(distance,false,initial,d,1.0,uncovered,fine)){continue;}
   if(write){
    let u=fgSampleVel(site,0u,3u);
    var p=Particle();p.position=vec4f(site,heat);p.velocity=vec4f(u,distance);
@@ -335,7 +337,7 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
 }`);
 
   // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none.
-  const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
+  const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
 // The delta of face axis a at window index r: the +face of old anchor cell r - 1, the ABI face of cell r - 1 + e_a.
 // NONE where the anchor's tile lacks support (umTileSupport bit 2) or the face is a low wall face.
 fn nbxDelta(axis:u32,r:vec3u)->f32{
@@ -344,8 +346,12 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
  if(fgDist(fgTileDist(anchor),2u)>3u){return NB_DELTA_NONE;}
  // The anchor's +face: a high box wall reads 0 (the old engine's wall row), as does a face closed across.
  let c=anchor+fgUnit(axis);if(!fgFaceOpen(c,axis)){return 0.0;}
- // Tiered: a face F does not own takes none until the 4h deltas land (ndFaceDelta's 4h rows, T3).
- if(!fgFaceOwned(c,axis)){return NB_DELTA_NONE;}
+ // Tiered, an anchor in a 4h tile (ndFaceDelta): on its +plane, the subface's delta where the cell across is h (F's
+ // face, uExt4's seam publication), else the 4h face's (the C face's UP); off it, none.
+ if(!fgFaceOwned(c,axis)){
+  if((c[axis]&3)!=0){return NB_DELTA_NONE;}
+  return foPCFace(c>>vec3u(2u),axis);
+ }
  let s=fgSlot(c);if(s==NB_NONE){return NB_DELTA_NONE;}
  return vel[NB_VEL_F_UP0+NB_STRIDE*(s+axis*NB_FCAP)+nbLocal(c)];
 }

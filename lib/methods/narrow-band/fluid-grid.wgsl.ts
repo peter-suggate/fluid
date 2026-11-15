@@ -53,7 +53,12 @@ export interface FluidLayout {
   readonly fdep: { readonly words: number };
   readonly fpart: { readonly RANK: number; readonly words: number };
   readonly fmoved: { readonly words: number };
+  /** The 4h extension's state (tiered only; one word all h): per C slot, SEEDS then STATE, each 512 tiles x 3 axes
+   * x (value, prior, distance), FX4_WORDS a slot. */
+  readonly fext4: { readonly words: number };
 }
+/** Words a C slot holds in fext4: seeds and state, 512 tiles x 3 axes x 3 words each. */
+export const FX4_WORDS = 2 * 512 * 3 * 3;
 
 export function fluidLayout(L: BrickLayout, options: { readonly tiered?: boolean } = {}): FluidLayout {
   const f = L.cap.f, cells = f * BRICK_CELLS, p = L.cap.particles;
@@ -63,7 +68,8 @@ export function fluidLayout(L: BrickLayout, options: { readonly tiered?: boolean
   const MASK = take(16 * f), TILE = take(8 * FT.WORDS * f), SLOT = take(f), BOUND = take(f);
   const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, words: at };
   const fpart = { RANK: 0, words: 2 * p };
-  return { tiered: options.tiered === true, cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p } };
+  const tiered = options.tiered === true;
+  return { tiered, cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p }, fext4: { words: tiered ? FX4_WORDS * L.cap.c : 1 } };
 }
 
 /** Bindings lane F's kernels use. */
@@ -80,6 +86,7 @@ export const FB = {
   fdep: { name: "fdep", kind: "rw", type: "array<atomic<u32>>" },
   fpart: { name: "fpart", kind: "rw", type: "array<u32>" },
   fmoved: { name: "fmoved", kind: "rw", type: "array<Particle>" },
+  fext4: { name: "fext4", kind: "rw", type: "array<f32>" },
 } as const satisfies Record<string, BrickBinding>;
 
 const u = (n: number) => `${n >>> 0}u`;
@@ -156,6 +163,8 @@ ${FO_TILE_WGSL}
 fn fgVertexOwned(v:vec3i)->bool{return !FG_TIERED||foVertexOwnerH(v);}
 fn fgFaceOwned(c:vec3i,a:u32)->bool{return !FG_TIERED||foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a));}
 fn fgCellOwned(c:vec3i)->bool{return !FG_TIERED||foCellOwnerH(c);}
+// Tiered: a lattice cell whose tile is 4h-owned (the old engine's cell of a width-4 owner).
+fn fgCellCoarse(c:vec3i)->bool{return FG_TIERED&&nbInLattice(c)&&!foCellOwnerH(c);}
 `;
 
 /** Slot lookup and cell addressing (needs `dir`): every lookup reads the directory. */
@@ -223,6 +232,16 @@ fn fgPhiAtOf(base:u32,p:vec3f)->f32{
  return mix(mix(x00,x10,t.y),mix(x01,x11,t.y),t.z);
 }
 fn fgPhiAt(p:vec3f)->f32{return fgPhiAtOf(NB_PHI_F_PHI,p);}
+// A 4h tile as one cell of width 4 (the old engine's width-4 owner): its eight C corners in corner order, its centre
+// φ (their mean, fgCentrePhi's sum: the old 4h centre cache) and its phase (the authority's -0.001 of a cell).
+fn fgTileCorners4(t:vec3i)->array<f32,8>{
+ var v:array<f32,8>;
+ for(var k=0u;k<8u;k++){v[k]=foCVertex(t+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
+ return v;
+}
+fn fgTileCentre4(t:vec3i)->f32{let v=fgTileCorners4(t);var s=0.0;for(var k=0u;k<8u;k++){s+=v[k];}return 0.125*s;}
+// A cell's phase at its owner's width: its own (fgLiquidCell) in an h tile, its 4h tile's in a 4h one.
+fn fgLiquidOwner(c:vec3i)->bool{if(fgCellCoarse(c)){return fgTileCentre4(c>>vec3u(2u))< -0.001;}return fgLiquidCell(c);}
 `;
 
 /** Face velocity reads (needs `vel`): base is a channel's first word (NB_VEL_F_U0, _UP0 or _US0). */

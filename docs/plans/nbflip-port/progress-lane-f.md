@@ -499,3 +499,63 @@ its own file `levelset-coarse.wgsl.ts`.
 
 - All 46 kernels (both modes) pass naga validation. The only exception is naga's known false positive on
   loop-only returns, which Tint accepts.
+
+## M2 tiered, T3 and T5: the 4h faces in the h passes, the 4h extension, tiered on the dam (2026-11-15)
+
+**T3** (`velocity-kernels.wgsl.ts`): the old 4h formulas verbatim, run in the h passes over FC_G1 (F_ALL's bricks,
+then C_ALL's pages, the split by `workgroupUniformLoad`; the page bodies hold no barrier).
+- uAdvect: a C page's faces trace from the face centre (umUnitMomentumValue at width 4), culled where neither
+  owner is live. The live test at 4h is vLive4: a corner below 0 or the centre below 0.
+- uViscous: the 4h Laplacian (umLaplacian at width 4, spacing 4h) over the 4h cache of UP, into C US. An h tap that
+  F does not own reads the 4h cache's trilinear of UP (the resolved h tap).
+- uTransfer: the 4h gather (transferFace, umTransferFace's verbatim weights, depth window and blend with
+  nbInterpolatedHeat), then forces. These are viscosity where O holds liquid, and gravity where either owner is
+  occupied or has coarse mass (umCoarseMass: fill·64 > 0.05).
+- uKick: the 4h half kick under the same gravity test.
+- The 4h extension: uExt4Seed (ufxRestrict4) and uExt4 (the 12³ 4h window, (U, UP) swept jointly) on C_ALL, before
+  uExtend. uExtend is ufxFinishH verbatim, with prolongation (ufxProlong) where the cell below is coarse.
+- The 4h FLIP deltas: on a 4h tile's +plane, pDelta reads the C face's UP, or the seam subface F publishes.
+
+**T5:** the outer seed shell seeds only h-owned cells. vGauge adds each 4h tile's fill·64.
+
+**T4 wiring (lane E's kernels):** lcAdvect, lcCouple, lcClear, lcRetire and lcPublish run on C_ALL beside their h twins.
+
+**Level set:** lUnion counts a tile with no F slot with heat 0 (lcCouple's rule).
+
+**Dispatches against all-h:**
+- 7 C_ALL dispatches are added: uExt4Seed, uExt4, and lc{Advect, Couple, Clear, Retire, Publish}.
+- uAdvect, uViscous, uTransfer, uKick and vGauge moved to FC_G1 and cost no extra dispatch.
+
+**Stated deviations:**
+- A tile with no F slot counts as supported where it is occupied, and with heat 0.
+- umFarAirOwner, the thaw term and the dust control are not ported.
+- Seam h faces take the deposit path rather than the 4h gather; the two agree at the fixed point.
+- Every C page is seeded, which is a superset of the old active set.
+- lTiles and lDilate see no tile that no F slot holds. Beyond the census ring this changes only distances of 3 or
+  more tiles.
+
+**All h unchanged** (`runs/allh-pd`, 16 steps, composite MGPCG, HEAD 9c98ac9b plus this patch):
+
+| step | KE J | total L | particles |
+|---|---|---|---|
+| 16 | 282.28 | 173.40 | 393,327 |
+
+The T1 base, for comparison, was 282.01 / 173.34 / 392,228, so the run is within run-to-run spread.
+
+**Tiered dam** (`runs/tiered-c16`, `tiered-pd`, `dam-300t`; composite MGPCG; the solver must be composite, since the
+pool MGPCG alone does not project C faces):
+
+| step | tiered L / KE | all-h L / KE |
+|---|---|---|
+| 8 | 182.50 / 119.6 | 182.62 / 121.0 |
+| 13 | 180.37 / 248.7 | 178.36 / 250.7 |
+| 16 | 175.97 / 272.0 | 173.40 / 282.3 |
+
+**Open:**
+- FAIL.REACH, seen once in two runs at step 14. A run-up jet climbs the z = 127 wall, going from 3.4 to 7.5 m/s in
+  one step, which is about 20 cells. The reach is the stale bound plus 7 cells, about 16.5. This is lane E's,
+  ported from the old reach rule.
+- POOL_F at step 21 on the authored f = 3968. The F residency is about 7x the h-owned cells.
+- The cost of the tiered sampler. In the profile at steps 11–13, uAdvect takes 176 ms and lAdvect 61 ms;
+  pressureRowsC (lane P) takes 543 ms. fgSampleVel resolves every tap through the owners, and the 4h cache of a seam
+  plane is a 16-face mean per read. The old engine reads precomputed caches (the unit and 4h velocity textures).

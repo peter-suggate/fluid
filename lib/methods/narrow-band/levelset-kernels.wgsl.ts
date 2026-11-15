@@ -220,13 +220,15 @@ var<workgroup> sCount:u32;
   const lUnion = k("lUnion", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [base, nbfLevelSetConstantsWGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
 var<private> lHome:vec3i;
 // The 3^3 tile stage about the vertex's tile (nbCoupleHeat): θ heat, or the surface heat less one; -1 where it
-// does not count (no slot, outside the box, or a dry tile for the surface heat).
+// does not count (no slot, outside the box, or a dry tile for the surface heat). Tiered, a tile no F slot holds
+// counts with heat 0 (the old engine's tiles outside the band: nbCoupleHeat reads their zero heat; lcCouple's rule).
 fn nbxCoupleHeat(tile:u32,surface:bool)->f32{
  let t=lHome+vec3i(i32(tile%3u),i32((tile/3u)%3u),i32(tile/9u))-vec3i(1);
  let c=4*t;if(!nbInLattice(c)){return -1.0;}
- if(!surface){let i=fgTileAt(c,FT_THETA);if(i==NB_NONE){return -1.0;}return clamp(fcLoadF(i),0.0,1.0);}
- let i=fgTileAt(c,FT_SURF);if(i==NB_NONE){return -1.0;}
- let own=fcLoadF(i);if(own<=0.0&&lPhi1(c+vec3i(2))>=0.0){return -1.0;}
+ if(!surface){let i=fgTileAt(c,FT_THETA);if(i==NB_NONE){return select(-1.0,0.0,FG_TIERED);}return clamp(fcLoadF(i),0.0,1.0);}
+ let i=fgTileAt(c,FT_SURF);
+ var own=0.0;if(i!=NB_NONE){own=fcLoadF(i);}else if(!FG_TIERED){return -1.0;}
+ if(own<=0.0&&lPhi1(c+vec3i(2))>=0.0){return -1.0;}
  return clamp(own-1.0,0.0,1.0);
 }
 fn nbxHeatCorner(base:vec3i,k:u32,surface:bool)->vec2f{return vec2f(0.0);}
