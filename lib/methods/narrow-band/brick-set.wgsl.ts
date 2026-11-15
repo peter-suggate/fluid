@@ -80,43 +80,36 @@ export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
   const tiered = opt.tiered === true;
 
-  // setMark: one workgroup a brick of F_ALL (G1). The brick's liquid vertices'
-  // box (or the whole brick for a non-empty bin), grown by the reach, keeps
-  // the live bricks it overlaps and lists the others as candidates.
-  // Tiered (§2.5): the class scan reads h-owned tiles only (a 4h tile's F cells
-  // hold no state). A core brick (an h-owned tile, F record word 28 bits 0-7)
-  // keeps itself and its in-range 27-neighbours (the ring); a non-empty bin's
-  // brick keeps its reach box; liquid vertices alone keep no F brick (4h liquid
-  // keeps C pages: setMarkPages).
+  // setMark: one workgroup a brick of F_ALL (G1), in part 2 after F's move. The brick's class word (SURFACE,
+  // PARTICLES, SKIRT) and the residency check below; the bound word clears. Residency itself is the head's
+  // (brick-residency.wgsl.ts, brick-abi.md §5.4): setMark keeps and requests nothing. Tiered (§2.5): the scan reads
+  // h-owned tiles only (a 4h tile's F cells hold no state).
   const setMark = k("setMark", [CFG, setRW, dirRW, phiRO], /* wgsl */`
 var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
-var<workgroup> wLo:array<atomic<u32>,3>;
-var<workgroup> wHi:array<atomic<u32>,3>;
 var<workgroup> wNb:array<u32,27>;
 @compute @workgroup_size(64) fn setMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);for(var a=0u;a<3u;a++){atomicStore(&wLo[a],8u);atomicStore(&wHi[a],0u);}}
+  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);}
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
   var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);}
   // The brick's 27 neighbour words (F record words 0-26), for the residency check below.
   if(live&&lid<27u){wNb[lid]=atomicLoad(&dir[NB_D_FREC+32u*slot+lid]);}
   workgroupBarrier();
-  var o=vec3i(0);var bound=0.0;
+  var o=vec3i(0);
   if(live){
     o=nbFOrigin(slot);
-    bound=bitcast<f32>(nbSetWord(NB_S_BOUND_F+slot));
     let tiles=${tiered ? "atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_MASK])&0xffu" : "0xffu"};
-    var neg=0u;var pos=0u;var lo=vec3u(8u);var hi=vec3u(0u);
+    var neg=0u;var pos=0u;
     for(var j=0u;j<8u;j++){
       let l=lid+64u*j;let c=nbLocalCoord(l);
       if(any(o+c>NB_LATTICE)){continue;}
       if(((tiles>>u32((c.x>>2u)|((c.y>>2u)<<1u)|((c.z>>2u)<<2u)))&1u)==0u){continue;}
       let p=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
-      if(p<0.0){neg++;lo=min(lo,vec3u(c));hi=max(hi,vec3u(c));}else{pos=1u;}
+      if(p<0.0){neg++;}else{pos=1u;}
       // The residency check (brick-abi.md §5.4, §8): a liquid vertex's 1-ring (every vertex of the cells it bounds)
-      // is resident. φ is the last level set's, which this step's directory served, so a miss is a reach defect of
-      // the last step: FAIL.REACH with the absent brick's key, never read as air. Only the brick's face vertices
-      // reach a neighbour.
+      // is resident. φ is this step's advected level set on the directory the head committed, so a miss is a reach
+      // defect of this step's head: FAIL.REACH with the absent brick's key, never read as air. Only the brick's face
+      // vertices reach a neighbour.
       if(p<0.0&&(any(c==vec3i(0))||any(c==vec3i(7)))){
         for(var n=0u;n<27u;n++){
           let d=nbNeighbourOffset(n);
@@ -127,119 +120,56 @@ var<workgroup> wNb:array<u32,27>;
         }
       }
     }
-    if(neg>0u){atomicAdd(&wNeg,neg);for(var a=0u;a<3u;a++){atomicMin(&wLo[a],lo[a]);atomicMax(&wHi[a],hi[a]);}}
+    if(neg>0u){atomicAdd(&wNeg,neg);}
     if(pos!=0u){atomicOr(&wPos,1u);}
   }
   workgroupBarrier();
-  if(!live){return;}
-  let neg=atomicLoad(&wNeg);let parts=nbSetWord(NB_S_BIN_COUNT+slot)>0u;
-  if(lid==0u){
-    var cls=0u;
-    if(neg>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
-    if(parts){cls|=NB_CLASS_PARTICLES;}
-    if(any(o>=NB_LATTICE)){cls|=NB_CLASS_SKIRT;}
-    atomicStore(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS],cls);
-    atomicStore(&nbSet[NB_S_BOUND_F+slot],0u);
-  }
-  ${tiered ? `if((atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_MASK])&0xffu)!=0u&&lid<27u){
-    let nb=(o>>vec3u(3u))+nbNeighbourOffset(lid);
-    if(nbBrickInRange(nb)){
-      let s=nbFSlotOfBrick(nb);
-      if(s<NB_SEAM){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}
-      else if(s==NB_NONE){
-        let e=atomicAdd(&nbSet[NB_H_N_CAND],1u);
-        if(e<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+e],nbKey(nb));}else{nbFail(NB_FAIL_LIST,nbKey(nb));}
-      }
-      else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
-    }
-  }
-  if(!parts){return;}` : "if(neg==0u&&!parts){return;}"}
-  var lo=vec3f(f32(atomicLoad(&wLo[0])),f32(atomicLoad(&wLo[1])),f32(atomicLoad(&wLo[2])));
-  var hi=vec3f(f32(atomicLoad(&wHi[0])),f32(atomicLoad(&wHi[1])),f32(atomicLoad(&wHi[2])));
-  if(parts){lo=vec3f(0.0);hi=vec3f(7.0);}
-  let r=cfg.x;let dt=nbRingF(r,NB_RING_DT);let h=nbRingF(r,NB_RING_H);
-  let gv=vec3f(nbRingF(r,NB_RING_GRAVITY),nbRingF(r,NB_RING_GRAVITY+1u),nbRingF(r,NB_RING_GRAVITY+2u));
-  let reach=(bound+length(gv)*dt)*dt/h+NB_REACH_MARGIN;
-  let b0=max(vec3i(floor((vec3f(o)+lo-reach)/8.0)),vec3i(0));
-  let b1=min(vec3i(floor((vec3f(o)+hi+reach)/8.0)),NB_BRICKS-vec3i(1));
-  let ext=b1-b0+vec3i(1);let total=u32(ext.x*ext.y*ext.z);
-  for(var i=lid;i<total;i+=64u){
-    let nb=b0+vec3i(i32(i%u32(ext.x)),i32((i/u32(ext.x))%u32(ext.y)),i32(i/u32(ext.x*ext.y)));
-    let s=nbFSlotOfBrick(nb);
-    if(s<NB_SEAM){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}
-    else if(s==NB_NONE){
-      let e=atomicAdd(&nbSet[NB_H_N_CAND],1u);
-      if(e<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+e],nbKey(nb));}else{nbFail(NB_FAIL_LIST,nbKey(nb));}
-    }
-    else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
-  }
+  if(!live||lid!=0u){return;}
+  var cls=0u;
+  if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
+  if(nbSetWord(NB_S_BIN_COUNT+slot)>0u){cls|=NB_CLASS_PARTICLES;}
+  if(any(o>=NB_LATTICE)){cls|=NB_CLASS_SKIRT;}
+  atomicStore(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS],cls);
+  atomicStore(&nbSet[NB_S_BOUND_F+slot],0u);
 }`);
 
-  // setMarkPages (tiered only): one workgroup a page of C_ALL (G1), a lane 8
-  // tiles. The box of its 4h-owned tiles with a liquid corner (a C vertex
-  // phi < 0), grown by setMark's reach with the page's largest 4h face speed
-  // (|U|, the velocity the step ends with) for BOUND, keeps the live pages it
-  // overlaps and lists the others as page candidates (key | NB_KEY_PAGE). The
-  // count of those tiles is the C record's LIQUID_TILES (C_LIQ).
+  // setMarkPages (tiered only): one workgroup a page of C_ALL (G1), a lane 8 tiles. The count of its 4h-owned tiles
+  // with a liquid corner (a C vertex phi < 0) is the C record's LIQUID_TILES (C_LIQ). It keeps and requests nothing
+  // (the head's residency does).
   const setMarkPages = k("setMarkPages", [CFG, setRW, dirRW, phiRO, velRO], brickOwnerWGSL({ phi: "phi", vel: "vel" }) + /* wgsl */`
 var<workgroup> wN:atomic<u32>;
-var<workgroup> wBound:atomic<u32>;
-var<workgroup> wLo:array<atomic<u32>,3>;
-var<workgroup> wHi:array<atomic<u32>,3>;
 @compute @workgroup_size(64) fn setMarkPages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){atomicStore(&wN,0u);atomicStore(&wBound,0u);for(var a=0u;a<3u;a++){atomicStore(&wLo[a],8u);atomicStore(&wHi[a],0u);}}
+  if(lid==0u){atomicStore(&wN,0u);}
   workgroupBarrier();
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ALL);
-  var cs=0u;var P=vec3i(0);
+  var cs=0u;
   if(live){
-    cs=nbListSlot(NB_LIST_C_ALL,g);P=nbKeyCoord(atomicLoad(&dir[NB_D_CREC+32u*cs+NB_REC_KEY]));
-    var n=0u;var bound=0.0;var lo=vec3u(8u);var hi=vec3u(0u);
+    cs=nbListSlot(NB_LIST_C_ALL,g);let P=nbKeyCoord(atomicLoad(&dir[NB_D_CREC+32u*cs+NB_REC_KEY]));
+    var n=0u;
     for(var j=0u;j<8u;j++){
       let i=lid+64u*j;let t=vec3u(i&7u,(i>>3u)&7u,i>>6u);let T=8*P+vec3i(t);
       if(!nbTileInLattice(T)||nbTileH(cs,i)){continue;}
       var m=NB_PHI_AIR;
       for(var q=0u;q<8u;q++){m=min(m,nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u))));}
-      for(var a=0u;a<3u;a++){bound=max(bound,abs(vel[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+i]));}
-      if(m<0.0){n++;lo=min(lo,t);hi=max(hi,t);}
+      if(m<0.0){n++;}
     }
-    if(n>0u){atomicAdd(&wN,n);for(var a=0u;a<3u;a++){atomicMin(&wLo[a],lo[a]);atomicMax(&wHi[a],hi[a]);}}
-    atomicMax(&wBound,bitcast<u32>(bound));
+    if(n>0u){atomicAdd(&wN,n);}
   }
   workgroupBarrier();
-  if(!live){return;}
-  let n=atomicLoad(&wN);
-  if(lid==0u){atomicStore(&dir[NB_D_CREC+32u*cs+NB_REC_C_LIQUID_TILES],n);}
-  if(n==0u){return;}
-  let r=cfg.x;let dt=nbRingF(r,NB_RING_DT);let h=nbRingF(r,NB_RING_H);
-  let gv=vec3f(nbRingF(r,NB_RING_GRAVITY),nbRingF(r,NB_RING_GRAVITY+1u),nbRingF(r,NB_RING_GRAVITY+2u));
-  let reach=(bitcast<f32>(atomicLoad(&wBound))+length(gv)*dt)*dt/h+NB_REACH_MARGIN;
-  let o=vec3f(32*P);
-  let lo=o+4.0*vec3f(f32(atomicLoad(&wLo[0])),f32(atomicLoad(&wLo[1])),f32(atomicLoad(&wLo[2])));
-  let hi=o+4.0*vec3f(f32(atomicLoad(&wHi[0])),f32(atomicLoad(&wHi[1])),f32(atomicLoad(&wHi[2])))+4.0;
-  let pages=(NB_BRICKS+vec3i(3))/4;
-  let p0=max(vec3i(floor((lo-reach)/32.0)),vec3i(0));
-  let p1=min(vec3i(floor((hi+reach)/32.0)),pages-vec3i(1));
-  let ext=p1-p0+vec3i(1);let total=u32(ext.x*ext.y*ext.z);
-  for(var i=lid;i<total;i+=64u){
-    let p=p0+vec3i(i32(i%u32(ext.x)),i32((i/u32(ext.x))%u32(ext.y)),i32(i/u32(ext.x*ext.y)));
-    let w=nbPageWord(p);
-    if(w<NB_SEAM){atomicOr(&nbSet[NB_S_MARK_C+w],1u);}
-    else if(w==NB_NONE){
-      let e=atomicAdd(&nbSet[NB_H_N_CAND],1u);let key=nbKey(4*p)|NB_KEY_PAGE;
-      if(e<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+e],key);}else{nbFail(NB_FAIL_LIST,key);}
-    }
-    else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(4*p));}
-  }
+  if(live&&lid==0u){atomicStore(&dir[NB_D_CREC+32u*cs+NB_REC_C_LIQUID_TILES],atomicLoad(&wN));}
 }`);
 
-  // setClaimPages: a candidate's page takes a C slot (NONE -> CLAIM -> cslot), once.
+  // setClaimPages: a candidate's page takes a C slot (NONE -> CLAIM -> cslot), once. A KEY_CLAIMED page key's word
+  // is already CLAIM (resRequest's winner); a KEY_CLAIMED brick key's page is resident.
   const setClaimPages = k("setClaimPages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setClaimPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) nw:vec3u){
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
   for(var e=gid.x;e<n;e+=64u*nw.x){
     let key=atomicLoad(&nbSet[NB_S_CAND+e]);let p=nbKeyCoord(key)>>vec3u(2u);
+    let claimed=(key&NB_KEY_CLAIMED)!=0u;let page=(key&NB_KEY_PAGE)!=0u;
+    if(claimed&&!page){continue;}
     let pi=NB_D_PAGE+nbPageIndex(p);
-    if(!nbClaim(pi)){continue;}
+    if(!claimed&&!nbClaim(pi)){continue;}
     let cs=nbPop(NB_H_TOP_C,NB_S_FREE_C,NB_CCAP,NB_H_HIGH_C,NB_H_REFUSED_C,NB_FAIL_POOL_C,key);
     if(cs==NB_NONE){atomicStore(&dir[pi],NB_NONE);continue;}
     for(var j=0u;j<64u;j++){atomicStore(&dir[NB_D_CHILD+64u*cs+j],NB_NONE);}
@@ -258,7 +188,8 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   }
 }`);
 
-  // setClaimBricks: a candidate brick takes an F slot under its page's C slot, once.
+  // setClaimBricks: a candidate brick takes an F slot under its page's C slot, once. A KEY_CLAIMED key's child word
+  // is already CLAIM (resRequest's winner). An entering brick's particle support (PSUPPORT) starts empty.
   const setClaimBricks = k("setClaimBricks", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setClaimBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) nw:vec3u){
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
@@ -268,14 +199,15 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     let cs=atomicLoad(&dir[NB_D_PAGE+nbPageIndex(b>>vec3u(2u))]);
     if(cs>=NB_SEAM){continue;}
     let bl=nbBrickLocal(b);let ci=NB_D_CHILD+64u*cs+bl;
-    if(!nbClaim(ci)){continue;}
+    if((key&NB_KEY_CLAIMED)==0u&&!nbClaim(ci)){continue;}
     let fs=nbPop(NB_H_TOP_F,NB_S_FREE_F,NB_FCAP,NB_H_HIGH_F,NB_H_REFUSED_F,NB_FAIL_POOL_F,key);
     if(fs==NB_NONE){atomicStore(&dir[ci],NB_NONE);continue;}
     let r=NB_D_FREC+32u*fs;
     for(var j=0u;j<27u;j++){atomicStore(&dir[r+j],NB_NONE);}
     let h=${tiered ? "cfg.z==1u" : "true"};
     atomicStore(&dir[r+NB_REC_PARENT],cs);atomicStore(&dir[r+NB_REC_MASK],select(0u,0xffu,h)|(bl<<8u));
-    atomicStore(&dir[r+NB_REC_KEY],key);atomicStore(&dir[r+NB_REC_CUT],NB_NONE);
+    atomicStore(&dir[r+NB_REC_KEY],key&~NB_KEY_CLAIMED);atomicStore(&dir[r+NB_REC_CUT],NB_NONE);
+    for(var j=0u;j<NB_PSUPPORT_WORDS;j++){atomicStore(&nbSet[NB_S_PSUPPORT+NB_PSUPPORT_WORDS*fs+j],0u);}
     atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_ENTERING|select(0u,NB_CLASS_SKIRT,any(8*b>=NB_LATTICE)));
     atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);atomicStore(&nbSet[NB_S_BOUND_F+fs],0u);atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
     atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);
@@ -303,7 +235,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   nbAppend(NB_LIST_F_LEAVE,s);
 }`);
 
-  // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (setMarkPages) leaves.
+  // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (resRequest) leaves.
   const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setLeavePages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_C_ALL)){return;}
@@ -448,9 +380,12 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
     fold(NB_ARGS_FC_G1,nF+nC);fold(NB_ARGS_FC_G8,(nF+nC+7u)/8u);fold(NB_ARGS_FC_G64,(nF+nC+63u)/64u);
     atomicStore(&nbSet[NB_H_LIVE_F],nF);atomicStore(&nbSet[NB_H_LIVE_C],nC);
     atomicMax(&nbSet[NB_H_PEAK_F],nF);atomicMax(&nbSet[NB_H_PEAK_C],nC);
-    atomicStore(&nbSet[NB_H_N_ENTER_F],count(NB_LIST_F_ENTER));atomicStore(&nbSet[NB_H_N_LEAVE_F],count(NB_LIST_F_LEAVE));
-    atomicStore(&nbSet[NB_H_N_ENTER_C],count(NB_LIST_C_ENTER));atomicStore(&nbSet[NB_H_N_LEAVE_C],count(NB_LIST_C_LEAVE));
-    atomicMax(&nbSet[NB_H_PEAK_CAND],atomicLoad(&nbSet[NB_H_N_CAND]));
+    // cfg.z = 1 (part 2): no churn (the head's counts stay for the receipt).
+    if(cfg.z==0u){
+      atomicStore(&nbSet[NB_H_N_ENTER_F],count(NB_LIST_F_ENTER));atomicStore(&nbSet[NB_H_N_LEAVE_F],count(NB_LIST_F_LEAVE));
+      atomicStore(&nbSet[NB_H_N_ENTER_C],count(NB_LIST_C_ENTER));atomicStore(&nbSet[NB_H_N_LEAVE_C],count(NB_LIST_C_LEAVE));
+      atomicMax(&nbSet[NB_H_PEAK_CAND],atomicLoad(&nbSet[NB_H_N_CAND]));
+    }
   }
 }`);
 

@@ -8,8 +8,8 @@
  *
  * GPU (WEBGPU_NODE_MODULE):
  * - every kernel compiles cold in under 30 s;
- * - enter and leave match the CPU oracle, with the directory, records, child
- *   counts, free stack and lists consistent;
+ * - enter and leave match the head's residency oracle (records and set), with the
+ *   directory, records, child counts, free stack and lists consistent;
  * - FAIL.POOL_F latches when the reach needs more bricks than the pool;
  * - a static box is hydrostatic: X matches a Float64 solve of the same system
  *   and the analytic p = rho |g| depth, and the projected velocity is ~0;
@@ -32,7 +32,10 @@ import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, createBrickSolver, nbEngine } from "./brick-method";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
-import { brickField, brickSetOracle, pressureOracle } from "./brick-oracle";
+import { brickField, pressureOracle, recordRadii, residencyOracle } from "./brick-oracle";
+import { CENSUS } from "./brick-census.wgsl";
+import { RES_STAGES } from "./brick-residency.wgsl";
+import { RESIDENCY_STAGES } from "../uniform/uniform-local-residency";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
 import { validateScene, type SceneDescription } from "../../core/model";
 import { createReservoirSeepScene } from "../../core/reservoir-seep-scene";
@@ -78,7 +81,7 @@ test("brick engine: every kernel binds at most 8 storage buffers, and the layout
   assert.throws(() => bindGroupLayoutEntries(nine), /9 storage buffers/);
 });
 
-test("brick engine: the reach rule keeps a one-brick ring at rest and widens with the velocity bound", () => {
+test("brick engine: the boot's reach rule keeps a one-brick ring at rest and widens with the velocity bound", () => {
   const lattice: Vec3 = [64, 64, 64], one = [[2, 2, 2] as Vec3];
   const at = (bound: number) => reachSet(lattice, one, () => ({ lo: [3, 3, 3], hi: [4, 4, 4] }), () => bound, () => false, DT, H_M, [0, -G, 0]);
   assert.equal(at(0).size, 27);
@@ -218,7 +221,7 @@ async function withDevice(label: string, run: (device: GPUDevice) => Promise<voi
 test("brick engine (GPU): every kernel compiles cold in under 30 s", GPU, async () => {
   await withDevice("brick compile", async device => {
     const e = await BrickEngine.create(device, options([32, 32, 32], [sheet(33, 10.3, 33)], 200, 8));
-    const kernels = new Set([...e.schedule.boot, ...e.schedule.part2].map(p => p.kernel.label));
+    const kernels = new Set([...e.schedule.boot, ...e.schedule.part1, ...e.schedule.part2].map(p => p.kernel.label));
     assert.deepEqual(new Set(Object.keys(e.compileMs)), kernels);
     for (const [label, ms] of Object.entries(e.compileMs)) assert.ok(ms < 30_000, `${label} compiled in ${ms.toFixed(0)} ms`);
     await e.assertHealthy();
@@ -226,7 +229,7 @@ test("brick engine (GPU): every kernel compiles cold in under 30 s", GPU, async 
   });
 });
 
-test("brick engine (GPU): bricks enter and leave as the CPU reach oracle says, and the set stays consistent", GPU, async () => {
+test("brick engine (GPU): bricks enter and leave as the head's residency oracle says, and the set stays consistent", GPU, async () => {
   await withDevice("brick enter/leave", async device => {
     const lattice: Vec3 = [64, 32, 64], o = options(lattice, [sheet(20, 10.3, 20)], 400, 16);
     const e = await BrickEngine.create(device, o);
@@ -236,43 +239,70 @@ test("brick engine (GPU): bricks enter and leave as the CPU reach oracle says, a
     e.advance(1);
     s = await snapshot(e);
     assertConsistent(e, s);
-    // Narrower and taller: x and z brick 3 leave, y brick row 3 enters.
+    // Narrower and taller: the next head's census sees the new surface, and residency follows it.
     writePhi(e, s, sheet(12, 18, 12));
-    const before = await snapshot(e), L = e.layout;
-    const phi = brickField(before, asF32(await e.read("phi")), L.base("phi", "F", "PHI"), PHI_AIR);
-    const bound = (slot: number) => asF32(before.set.subarray(L.set.boundF + slot, L.set.boundF + slot + 1))[0]!;
-    const bins = (slot: number) => before.set[L.set.binCount + slot]!;
-    const want = brickSetOracle(before, phi, bound, bins, lattice, DT, H_M, [0, -G, 0]);
-    e.advance(1);
-    const after = await snapshot(e);
-    assertConsistent(e, after);
-    const keys = (m: Map<number, number>) => new Set(m.keys());
-    assert.deepEqual(keys(after.bricks), want);
-    const entered = [...want].filter(k => !before.bricks.has(k)), left = [...before.bricks.keys()].filter(k => !want.has(k));
-    assert.ok(entered.length > 0 && left.length > 0, `entered ${entered.length}, left ${left.length}`);
-    assert.ok(entered.every(k => brickKeyCoord(k)[1] === 3) && left.every(k => brickKeyCoord(k)[0] === 3 || brickKeyCoord(k)[2] === 3));
-    assert.equal(after.header[H.N_ENTER_F], entered.length);
-    assert.equal(after.header[H.N_LEAVE_F], left.length);
-    const enterList = Array.from(after.set.subarray(L.set.lists[LIST.F_ENTER]!, L.set.lists[LIST.F_ENTER]! + entered.length));
-    assert.deepEqual(new Set(enterList), new Set(entered.map(k => after.bricks.get(k)!)));
-    const leaveList = Array.from(after.set.subarray(L.set.lists[LIST.F_LEAVE]!, L.set.lists[LIST.F_LEAVE]! + left.length));
-    assert.deepEqual(new Set(leaveList), new Set(left.map(k => before.bricks.get(k)!)));
-    // Entering bricks start as air (setInit), and the set holds still after (phi is not advected in M1).
-    const phiNow = brickField(after, asF32(await e.read("phi")), L.base("phi", "F", "PHI"), -1);
-    for (const k of entered) { const b = brickKeyCoord(k); assert.equal(phiNow([8 * b[0] + 3, 8 * b[1] + 3, 8 * b[2] + 3]), PHI_AIR); }
-    e.advance(1);
-    const still = await snapshot(e);
-    assertConsistent(e, still);
-    assert.deepEqual(keys(still.bricks), want);
-    assert.equal(still.header[H.N_ENTER_F], 0); assert.equal(still.header[H.N_LEAVE_F], 0);
+    const first = await headMatchesOracle(e, await snapshot(e));
+    assert.ok(first.entered.length > 0 && first.left.length > 0, `entered ${first.entered.length}, left ${first.left.length}`);
+    // Entering bricks start as air (setInit).
+    const L = e.layout, phiNow = brickField(first.after, asF32(await e.read("phi")), L.base("phi", "F", "PHI"), -1);
+    for (const k of first.entered) { const b = brickKeyCoord(k); assert.equal(phiNow([8 * b[0] + 3, 8 * b[1] + 3, 8 * b[2] + 3]), PHI_AIR); }
+    // The next head follows the flow the projection left (it is not still: no hysteresis), again as the oracle says.
+    const next = await headMatchesOracle(e, first.after);
+    console.log(`all-h residency: ${first.after.bricks.size} F (${first.entered.length} entered, ${first.left.length} left), radius ${first.radius} tiles; next ${next.after.bricks.size} F (${next.entered.length} entered, ${next.left.length} left), radius ${next.radius}`);
     e.destroy();
   });
 });
 
-test("brick engine (GPU): FAIL.POOL_F latches when the reach needs more bricks than the pool", GPU, async () => {
+/**
+ * One step, with its head's residency checked against the CPU oracle: records (masks exact; radii the stage margin
+ * plus at most the global flow's travel in tiles, exactly the margin where the flow is 0 that way; no particles in
+ * bring-up), the F and C sets, the churn counts and lists, and RES_RADIUS / RES_CLAIMED_F.
+ */
+async function headMatchesOracle(e: BrickEngine, before: BrickSnapshot) {
+  const L = e.layout, extreme = [0, 0, 0, 0, 0, 0];
+  // The flow the head's census samples: the completed step's US. Its global extremes bound every region's flow.
+  for (let a = 0; a < 3; a++) {
+    const us = await readChannel(e, "vel", `US${a}`);
+    for (const slot of before.bricks.values()) for (const v of us(slot)) { extreme[a] = Math.max(extreme[a]!, -v); extreme[a + 3] = Math.max(extreme[a + 3]!, v); }
+  }
+  e.advance(1);
+  const after = await snapshot(e), census = await e.read("census");
+  assertConsistent(e, after);
+  const want = residencyOracle(L, before, census, after.set, (cs, r, st) => recordRadii(census, cs, r, st), false);
+  let radius = 0;
+  for (const [cs, m] of want.masks) for (let r = 0; r < 8; r++) for (let st = 0; st < RES_STAGES; st++) {
+    const at = CENSUS.STRIDE * cs + CENSUS.RES + 4 * (RES_STAGES * r + st), on = (m[2 * (RES_STAGES * r + st)]! | m[2 * (RES_STAGES * r + st) + 1]!) !== 0;
+    assert.deepEqual([census[at], census[at + 1]], [m[2 * (RES_STAGES * r + st)], m[2 * (RES_STAGES * r + st) + 1]], `page slot ${cs} region ${r} stage ${st} mask`);
+    const margin = on && st !== 0 ? RESIDENCY_STAGES[st]!.margin : 0, got = recordRadii(census, cs, r, st);
+    got.forEach((v, k) => {
+      const most = margin === 0 ? 0 : margin + Math.ceil(Math.fround(extreme[k]! * DT / H_M) / 4);
+      assert.ok(v >= margin && v <= most, `page slot ${cs} region ${r} stage ${st} radius ${k}: ${v} in [${margin}, ${most}]`);
+    });
+    radius = Math.max(radius, ...got);
+  }
+  assert.equal(after.header[H.RES_RADIUS], radius);
+  const keys = (m: Map<number, number>) => new Set(m.keys());
+  assert.deepEqual(keys(after.bricks), want.bricks);
+  assert.deepEqual(keys(after.pages), want.pages);
+  const entered = [...want.bricks].filter(k => !before.bricks.has(k)), left = [...before.bricks.keys()].filter(k => !want.bricks.has(k));
+  assert.equal(after.header[H.N_ENTER_F], entered.length);
+  assert.equal(after.header[H.N_LEAVE_F], left.length);
+  assert.equal(after.header[H.RES_CLAIMED_F], entered.length, "all-h: every entry is the residency's claim");
+  const enterList = Array.from(after.set.subarray(L.set.lists[LIST.F_ENTER]!, L.set.lists[LIST.F_ENTER]! + entered.length));
+  assert.deepEqual(new Set(enterList), new Set(entered.map(k => after.bricks.get(k)!)));
+  const leaveList = Array.from(after.set.subarray(L.set.lists[LIST.F_LEAVE]!, L.set.lists[LIST.F_LEAVE]! + left.length));
+  assert.deepEqual(new Set(leaveList), new Set(left.map(k => before.bricks.get(k)!)));
+  return { after, entered, left, radius };
+}
+
+test("brick engine (GPU): FAIL.POOL_F latches when the residency needs more bricks than the pool", GPU, async () => {
   await withDevice("brick pool fail", async device => {
     const lattice: Vec3 = [64, 32, 64], liquid = [sheet(20, 10.3, 20)];
-    const f = bootBricks(options(lattice, liquid, 1, 1)).length;
+    // The pool: exactly the set the first head leaves (measured on a roomy pool), at least the boot's.
+    const roomy = await BrickEngine.create(device, options(lattice, liquid, 400, 16));
+    roomy.advance(1);
+    const f = Math.max((await snapshot(roomy)).bricks.size, bootBricks(options(lattice, liquid, 1, 1)).length);
+    roomy.destroy();
     const e = await BrickEngine.create(device, options(lattice, liquid, f, 16));
     e.advance(1);
     await e.assertHealthy();
@@ -377,7 +407,7 @@ test("brick engine (GPU): the app adapter steps, reports, and presents the pool 
     await solver.awaitFrameCompletion();
     await solver.assertSimulationHealthy();
     const info = await solver.readStats();
-    assert.equal(info.brickEngine?.liveF, bootBricks(setup).length);
+    assert.equal(info.brickEngine?.liveF, (await snapshot(solver.brickEngine)).bricks.size);
     assert.equal(info.brickEngine?.step, 1);
     assert.ok(info.pressureIterations > 0);
     assert.deepEqual(solver.fluidDomain?.dimensions, [64, 32, 64]);
@@ -387,14 +417,19 @@ test("brick engine (GPU): the app adapter steps, reports, and presents the pool 
     const surface = vol(8, 10);
     assert.ok(Math.abs(surface - 0.3) < 0.02, `the surface cell holds 0.3: ${surface}`);
     assert.equal(phi(60, 4), far, "no brick there: far phi");
-    // Narrower: bricks with x >= 3 leave, and their texels go back to far.
-    const e = solver.brickEngine;
-    writePhi(e, await snapshot(e), sheet(12, 10.3, 20));
+    // Narrower: the bricks the head's residency retires go back to far (those on the z = 8 slice are checked).
+    const e = solver.brickEngine, wide = await snapshot(e);
+    writePhi(e, wide, sheet(12, 10.3, 20));
     assert.equal(solver.advanceTo(2 * DT, []), true);
     await solver.awaitFrameCompletion();
+    const narrow = await snapshot(e);
+    const left = [...wide.bricks.keys()].filter(k => !narrow.bricks.has(k)).map(k => brickKeyCoord(k)).filter(b => b[2] === 1 && 8 * b[1] + 3 < 32);
+    assert.ok(left.length > 0, "bricks on the slice leave");
     phi = await readSlice(device, solver.denseLevelSetVolumeSource.vertexPhi, 8); vol = await readSlice(device, solver.volumeTexture, 8);
-    assert.equal(phi(26, 4), far, "a brick that left reads far");
-    assert.equal(vol(26, 4), 0);
+    for (const b of left) {
+      assert.equal(phi(8 * b[0] + 3, 8 * b[1] + 3), far, `brick ${b} left: far phi`);
+      assert.equal(vol(8 * b[0] + 3, 8 * b[1] + 3), 0);
+    }
     assert.ok(Math.abs(phi(8, 4) - boxDistance([8, 4, 8], sheet(12, 10.3, 20)) * H_M) < 1e-6);
     assert.equal(solver.presentations, 3);
     solver.destroy();

@@ -20,6 +20,7 @@ import { type PressureSolver, type PressureSolverFactory, validatePressureSolver
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule } from "./brick-census.wgsl";
+import { brickResidencyKernels } from "./brick-residency.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
@@ -157,13 +158,14 @@ export class BrickEngine {
     // The release port's producers (levelset-release.wgsl.ts), where a stage set advects φ: the tile reach words at
     // the old frame plan's point (part 1, after the head, before move), the wall reach before the surface advect.
     const release = stages.levelSet.length ? levelSetReleaseSchedule(layout) : { part1: [], part2: [] };
+    // Part 2: the class words and the residency check (setMark), C_LIQ (setMarkPages), the lists rebuilt from them
+    // (setArgs with cfg.z = 1 keeps the head's churn counts), then F's level set, velocity, the solve and F's tail.
     const part2: BrickPlacement[] = [
       { kernel: set.setMark, dispatch: list(LIST.F_ALL, "G1") },
       ...(tiered ? [{ kernel: set.setMarkPages, dispatch: list(LIST.C_ALL, "G1") }] : []),
-      ...update(0),
-      { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
-      { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
-      ...tail, ...lists,
+      { kernel: set.setRecords, dispatch: direct(churnGroups(f, 1)) },
+      { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)) },
+      { kernel: set.setArgs, dispatch: direct(1), z: 1 },
       ...release.part2,
       ...stages.levelSet,
       ...stages.velocity,
@@ -171,27 +173,44 @@ export class BrickEngine {
       ...stages.tail,
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
-    // Part 1's head: NB-FLIP's frame-head census and (tiered) remap, brick-abi.md §2.5, on the last step's lists and
-    // state. The census runs all-h too, for F's TRIG; only a tiered engine commits WANT and requests bricks. Tiered:
-    // the census lists the bricks its band tiles' rings lack, the head claims them (records, init, lists), censusWant
-    // checks every ring (a refused pool latches FAIL.TIER), the transfer commits, and the churn counts clear for
-    // part 2 (stepEnd with cfg.z = 1: no step). The boot runs the census before F's boot stages (the seeding reads
-    // TRIG) and commits without the remap: bootPhi writes one analytic φ to F and C, and U = 0.
+    // Part 1's head (brick-abi.md §2.5, §5.4), on the completed step's lists and state, in both engines:
+    // - NB-FLIP's frame-head census (all-h too: F's TRIG, and WANT seeds residency);
+    // - the residency (brick-residency.wgsl.ts, the old pageSeed and lrAsk): resSeed's records, resRequest's keeps
+    //   and claims (pass 0 pages and the bricks of resident pages, setClaimPages, pass 1 the bricks of the pages it
+    //   entered), setClaimBricks, then setLeave and setLeavePages retire what no record reached (no hysteresis);
+    // - records, init and lists for the new set;
+    // - tiered: censusWant checks every WANT ring (a refused pool latches FAIL.TIER) and the transfer commits;
+    // - the churn lists clear for part 2 (stepEnd with cfg.z = 1: no step).
+    // The boot runs the census before F's boot stages (the seeding reads TRIG) and commits without the remap:
+    // bootPhi writes one analytic φ to F and C, and U = 0. Its set is the CPU reach set (bootBricks).
     const g1 = (k: number) => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 });
     // A bring-up stage set reads no TRIG: on a lattice of partial pages (P's synthetic blocks) it runs without the
-    // census, which needs whole pages (every scene's fluid lattice is, sceneFluidBox) and refuses others.
+    // census, which needs whole pages (every scene's fluid lattice is, sceneFluidBox) and refuses others. With no
+    // census there are no residency records, so such a set stays the boot's (stated: no scene runs one).
     const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
-    const census = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [], transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
+    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep) : [];
+    const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: g1(LIST.C_ALL) }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
     const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes };
-    const head = tiered ? [...census, ...update(0), ...tail, ...lists, ...want, ...transfer, churnClear] : census;
+    const res = brickResidencyKernels(layout, { tiered });
+    const residency: BrickPlacement[] = [
+      { kernel: res.resSeed, dispatch: g1(LIST.C_ALL) },
+      { kernel: res.resRequest, dispatch: g1(LIST.C_ALL), z: 0 },
+      { kernel: set.setClaimPages, dispatch: direct(churnGroups(f, 64)) },
+      { kernel: res.resRequest, dispatch: g1(LIST.C_ALL), z: 1 },
+      { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)), z: 0 },
+      { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
+      { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
+    ];
+    const head = censused ? [...census(true), ...residency, ...tail, ...lists, ...want, ...(tiered ? transfer : []), churnClear] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
-    const bootHead = tiered ? [...census, ...update(0), ...tail, bootPhi, ...lists, ...want, ...commit] : census;
+    const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists, ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve.
     const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after] : [];
     const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
-    // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census and remap), then F's move and rebin.
+    // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census, residency and remap), then the release
+    // port's reach words (after every head claim, before move), F's move and rebin.
     return { part1: [...head, ...release.part1, ...stages.move, ...stages.rebin], part2, boot };
   }
 

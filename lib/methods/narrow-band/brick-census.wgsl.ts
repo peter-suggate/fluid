@@ -44,7 +44,9 @@
  *   resident appends the missing bricks as candidates (setMark's append; counted in CENSUS_CLAMPED and
  *   CENSUS_CAND), and WANT keeps the band bit. The part 1 head claims them before the transfer, and
  *   censusWant then checks every WANT bit's ring: a miss (a refused pool) latches FAIL.TIER. So WANT is
- *   exactly the old decision.
+ *   exactly the old decision. At a step's head (tiered) the band tile's present ring also gets its keep mark:
+ *   the old engine's h storage of a band tile is resident by construction, ours is the ring. The residency rule
+ *   itself (pageSeed and lrAsk) is brick-residency.wgsl.ts, which reads this census's NEAR, FIN and WANT words.
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BrickLayout, H, LIST, brickAbiWGSL } from "./brick-abi";
@@ -75,9 +77,11 @@ export const CENSUS_POLICY = {
 } as const;
 
 /** Scratch words a C slot (the lane buffer `census`): per tile its velocity keys, classify's importance words,
- * the final word 1, its crossing cells and gap; per page its bound cubes and interface bits. */
+ * the final word 1, its crossing cells and gap; per page its bound cubes and interface bits; per tile its near word
+ * (classify's near, uniform-mixed-dynamic.ts l.1277: h-owned, or a 4h corner within 4 tiles' cells of the surface);
+ * per page the residency records (brick-residency.wgsl.ts: 4 words a 16-cell region and stage, the old pageSeed's). */
 export const CENSUS = {
-  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, STRIDE: 6656,
+  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, NEAR: 6656, RES: 7168, STRIDE: 7328,
 } as const;
 /** The lane buffers setCensus binds: `census`, CENSUS.STRIDE words a C slot. */
 export const brickCensusBuffers = (L: BrickLayout): Record<string, number> => ({ census: CENSUS.STRIDE * L.cap.c });
@@ -742,19 +746,22 @@ fn xTileOf(cs:u32,i:u32)->vec3i{return 8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i
 `;
 
 const OWNER = brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" });
+/** The census's storage hooks, owner readers and kernel builder, for the head's residency (brick-residency.wgsl.ts). */
+export const CENSUS_HOOKS = HOOKS, CENSUS_OWNER = OWNER, censusKernel = kernel;
 
 /** The tile's words, stored by the one lane that finishes it. */
 const STORE = /* wgsl */`
-fn ncStore(cs:u32,i:u32,keys:array<u32,6>,w0:u32,w1:u32,cross:vec2u,gap:u32){
-  let o=NC_S*cs;
+fn ncStore(cs:u32,i:u32,keys:array<u32,6>,w0:u32,w1:u32,cross:vec2u,gap:u32,near:bool){
+  let o=NC_S*cs;census[o+${CENSUS.NEAR}u+i]=select(0u,1u,near);
   for(var k=0u;k<6u;k++){census[o+${CENSUS.KEYS}u+6u*i+k]=keys[k];}
   census[o+${CENSUS.W0}u+i]=w0;census[o+${CENSUS.W1}u+i]=w1;census[o+${CENSUS.FIN}u+i]=w1;
   census[o+${CENSUS.CROSS}u+2u*i]=cross.x;census[o+${CENSUS.CROSS}u+2u*i+1u]=cross.y;
   census[o+${CENSUS.GAP}u+i]=gap;
 }
-fn ncStoreIdentity(cs:u32,i:u32){ncStore(cs,i,ncIdentityKeys(),0u,0u,vec2u(0u),0xffffffffu);}
-fn ncStoreClass(cs:u32,i:u32,c:NcClass,r:NcFinish){
-  ncStore(cs,i,array<u32,6>(c.low[0],c.low[1],c.low[2],c.high[0],c.high[1],c.high[2]),r.w0,r.w1,c.crossing,r.gap);
+fn ncStoreIdentity(cs:u32,i:u32){ncStore(cs,i,ncIdentityKeys(),0u,0u,vec2u(0u),0xffffffffu,false);}
+// near: classify's near flag (l.1277), width == 1 or a corner within 4 width cells of the surface (class flag 8).
+fn ncStoreClass(cs:u32,i:u32,c:NcClass,r:NcFinish,width:u32){
+  ncStore(cs,i,array<u32,6>(c.low[0],c.low[1],c.low[2],c.high[0],c.high[1],c.high[2]),r.w0,r.w1,c.crossing,r.gap,width==1u||(c.flags&8u)!=0u);
 }
 var<workgroup> wgReach:atomic<u32>;
 var<workgroup> wgCrossing:atomic<u32>;
@@ -774,6 +781,7 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
   const censusBegin = k("censusBegin", [CFG, setRW], /* wgsl */`
 @compute @workgroup_size(1) fn censusBegin(){
   for(var w=NB_H_CENSUS_CLAMPED;w<=NB_H_CENSUS_TRIGGERED;w++){atomicStore(&nbSet[w],0u);}
+  for(var w=NB_H_RES_RADIUS;w<=NB_H_RES_CLAIMED_C;w++){atomicStore(&nbSet[w],0u);}
   let flags=nbRing(cfg.x,NB_RING_FLAGS)&(NB_RING_FLAG_SOLID_EDIT|NB_RING_FLAG_BODIES);
   if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u){nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
 }`);
@@ -827,7 +835,7 @@ var<workgroup> mixedTile:atomic<u32>;
       c.crossing=vec2u(atomicLoad(&tileCrossing[0]),atomicLoad(&tileCrossing[1]));
       c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
       let r=ncFinishTile(t,1u,c);
-      ncStoreClass(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),c,r);
+      ncStoreClass(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),c,r,1u);
       atomicMax(&wgReach,r.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
     }
   }
@@ -922,7 +930,7 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
       }
       if((c.flags&2u)!=0u){c.deep=vec2u(atomicLoad(&cqDeepest[lane][0]),atomicLoad(&cqDeepest[lane][1]));}
       let f=ncFinishTile(t,4u,c);
-      ncStoreClass(cs,i,c,f);
+      ncStoreClass(cs,i,c,f,4u);
       atomicMax(&wgReach,f.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
     }
     workgroupBarrier();
@@ -1034,7 +1042,9 @@ var<workgroup> wgGo:u32;
     let b=t>>vec3u(1u);var clamped=false;
     for(var n=0u;n<27u;n++){
       let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
-      let s=nbFSlotOfBrick(nb);if(s<NB_SEAM){continue;}
+      let s=nbFSlotOfBrick(nb);
+      // Tiered, at a step's head (cfg.w = 1): the band tile's present ring is kept (the brick storage's h ring, §5.4).
+      if(s<NB_SEAM){if(cfg.z==1u&&cfg.w==1u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
       clamped=true;
       if(s==NB_NONE){let l=nb-base;atomicOr(&wgCand[u32(l.x+6*l.y+36*l.z)>>5u],1u<<(u32(l.x+6*l.y+36*l.z)&31u));}
       else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
@@ -1097,7 +1107,9 @@ var<workgroup> wgGo:u32;
 }
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true) {
+/** `keep`: a step's head, where censusDecide's band rings join the residency marks (brick-residency.wgsl.ts); the boot
+ * has no leave to consume them. */
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false) {
   const c = brickCensusKernels(L, { tiered });
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
@@ -1105,7 +1117,7 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
     { kernel: c.censusCoarse, dispatch: list(cAll, "G1") },
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
     { kernel: c.censusImportance, dispatch: list(cAll, "G1") },
-    { kernel: c.censusDecide, dispatch: list(cAll, "G1"), z: tiered ? 1 : 0 },
+    { kernel: c.censusDecide, dispatch: list(cAll, "G1"), z: tiered ? 1 : 0, w: keep ? 1 : 0 },
   ];
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */

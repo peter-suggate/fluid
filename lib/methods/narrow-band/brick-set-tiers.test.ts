@@ -1,13 +1,17 @@
-// The tiered brick set (brick-abi.md §2.5, brick-set.wgsl.ts with `tiered`) on a frozen state: after a tier
-// commit, setMark keeps F bricks by core and ring only (no bins here), setMarkPages keeps the pages that 4h
-// liquid reaches and lists the missing ones as page candidates, bricks entered in a step start 4h, and
-// entering pages start as air. GPU only.
+// The tiered brick set (brick-abi.md §2.5 and §5.4, brick-set.wgsl.ts and brick-residency.wgsl.ts with `tiered`)
+// on a frozen state: after a tier commit, the head's census and residency keep and request F bricks (ownership and
+// particle records, and WANT's rings) and C pages (every stage's records) as the CPU residency oracle says, bricks
+// entered in a step start 4h, entering pages start as air, and setMarkPages counts LIQUID_TILES. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, REC, brickKeyCoord, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
+import { CENSUS } from "./brick-census.wgsl";
+import { recordRadii, residencyOracle } from "./brick-oracle";
+import { RES_STAGES } from "./brick-residency.wgsl";
+import { RESIDENCY_STAGES } from "../uniform/uniform-local-residency";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { bringUpStages } from "./brick-stages";
 import { brickTransferKernels } from "./brick-transfer.wgsl";
@@ -22,7 +26,7 @@ const wantH = (T: V3) => (T[0] <= 5 && T[1] >= 4 && T[1] <= 5 && T[2] <= 5) || (
 /** C φ (h units): liquid below 26 cells, so 4h tiles up to y = 6 hold a liquid corner and their reach (7.17 cells) crosses into page row y = 1. */
 const cPhi = (T: V3) => 4 * T[1] - 26;
 
-test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests pages, entries start 4h and air", GPU, async () => {
+test("tiered brick set (GPU): the head's residency keeps and requests F and C as the oracle says, entries start 4h and air", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("brick set tiers", async device => {
     const stages = (c: Parameters<typeof bringUpStages>[0]) => ({ ...bringUpStages(c), tiered: true });
@@ -44,28 +48,27 @@ test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests p
     }
     const listC = { indirect: 12 * LIST.C_ALL };
     await e.run([{ kernel: brickTransferKernels(L).setCommitMask, dispatch: listC }]);
-    const part2 = e.schedule.part2, setArgs = brickSetKernels(L, { tiered: true }).setArgs.label;
-    const update = part2.slice(0, part2.findIndex(p => p.kernel.label === setArgs) + 1);
-    assert.deepEqual(update.slice(0, 2).map(p => p.kernel.label), ["setMark", "setMarkPages"]);
-    await e.run(update);
-    const s = await snapshot(e);
+    // The head up to its lists: census, residency (seed, request, claims, leaves), records, init, lists.
+    const before = await snapshot(e), part1 = e.schedule.part1;
+    const head = part1.slice(0, part1.findIndex(p => p.kernel.label === "censusWant"));
+    assert.deepEqual(head.slice(-2).map(p => p.kernel.label), ["setLists", "setArgs"]);
+    await e.run(head);
+    const s = await snapshot(e), census = await e.read("census");
     assert.equal(s.header[H.FAIL], 0, `FAIL ${s.header[H.FAIL]} info ${s.header[H.FAIL_INFO]}`);
-    // ---- The oracle.
-    const nb = Math.floor(N / 8) + 1, np = Math.ceil(nb / 4);
-    const coreA = (b: V3) => b[0] <= 2 && b[1] === 2 && b[2] <= 2, coreB = (b: V3) => b[0] === 7 && b[1] === 3 && b[2] === 7;
-    const ring = (core: (b: V3) => boolean, b: V3) => {
-      for (let d = 0; d < 27; d++) { const n = [b[0] + (d % 3) - 1, b[1] + (Math.floor(d / 3) % 3) - 1, b[2] + Math.floor(d / 9) - 1] as V3; if (n.every(v => v >= 0 && v < nb) && core(n)) return true; }
-      return false;
-    };
-    const kept = new Set<number>();
-    for (let z = 0; z < nb; z++) for (let y = 0; y < nb; y++) for (let x = 0; x < nb; x++) if (ring(coreA, [x, y, z]) || ring(coreB, [x, y, z])) kept.add(key([x, y, z]));
-    assert.deepEqual([...s.bricks.keys()].sort((a, b) => a - b), [...kept].sort((a, b) => a - b), "F residency is core + ring");
-    const entered = [...kept].filter(k => !s0.bricks.has(k));
-    assert.equal(entered.length, 9, "the ring of B above row 3 enters");
-    // Pages: every page row y = 0 page stays (4h liquid, or a neighbour's reach), row y = 1 enters (page candidates and B's ring).
-    const wantPages = new Set<number>();
-    for (let z = 0; z < np; z++) for (let x = 0; x < np; x++) for (const y of [0, 1]) wantPages.add(key([x, y, z]));
-    assert.deepEqual([...s.pages.keys()].sort((a, b) => a - b), [...wantPages].sort((a, b) => a - b), "C residency");
+    // ---- The oracle: masks exact, radii the stage margins (US = 0, no particles), the set.
+    const want = residencyOracle(L, before, census, s.set, (cs, r, st) => recordRadii(census, cs, r, st), true);
+    for (const [cs, m] of want.masks) for (let r = 0; r < 8; r++) for (let st = 0; st < RES_STAGES; st++) {
+      const at = CENSUS.STRIDE * cs + CENSUS.RES + 4 * (RES_STAGES * r + st), w = [m[2 * (RES_STAGES * r + st)]!, m[2 * (RES_STAGES * r + st) + 1]!];
+      assert.deepEqual([census[at], census[at + 1]], w, `page slot ${cs} region ${r} stage ${st} mask`);
+      assert.deepEqual(recordRadii(census, cs, r, st), Array(6).fill((w[0]! | w[1]!) !== 0 && st !== 0 ? RESIDENCY_STAGES[st]!.margin : 0));
+    }
+    assert.deepEqual([...s.bricks.keys()].sort((a, b) => a - b), [...want.bricks].sort((a, b) => a - b), "F residency");
+    assert.deepEqual([...s.pages.keys()].sort((a, b) => a - b), [...want.pages].sort((a, b) => a - b), "C residency");
+    const entered = [...want.bricks].filter(k => !s0.bricks.has(k));
+    assert.ok(entered.length > 0 && [...want.pages].some(k => !pages0.has(k)), "bricks and pages enter");
+    // C_LIQ: part 2's setMarkPages on the new set.
+    await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMarkPages"));
+    const liq = await snapshot(e);
     // Masks: committed pages keep WANT; entered pages and bricks hold no h tile.
     for (const [pk, cs] of s.pages) {
       const m = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
@@ -84,6 +87,7 @@ test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests p
       return pages0.has(pk) ? Math.fround(cPhi(T)) : phiFar([N, N, N]);
     };
     for (const [pk, cs] of pages0) {
+      if (!liq.pages.has(pk)) continue;
       const P = brickKeyCoord(pk) as unknown as V3;
       let n = 0;
       for (let i = 0; i < 512; i++) {
@@ -93,7 +97,7 @@ test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests p
         for (let q = 0; q < 8; q++) m = Math.min(m, cVertex([T[0] + (q & 1), T[1] + ((q >> 1) & 1), T[2] + (q >> 2)]));
         if (m < 0) n++;
       }
-      assert.equal(s.dir[L.dir.crec + 32 * cs + REC.C_LIQUID_TILES], n, `LIQUID_TILES page ${P}`);
+      assert.equal(liq.dir[L.dir.crec + 32 * cs + REC.C_LIQUID_TILES], n, `LIQUID_TILES page ${P}`);
     }
     // Entered pages start as air: φ AIR, every velocity 0, FLAGS open on in-lattice tiles.
     for (const [pk, cs] of s.pages) {
@@ -108,7 +112,7 @@ test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests p
         assert.equal(flags[i], T.every(v => 4 * v < N) ? FLAG.OPEN : 0);
       }
     }
-    console.log(`tiered set: ${s.bricks.size} F (${entered.length} entered, ${s0.bricks.size + entered.length - s.bricks.size} left), ${s.pages.size} C (${s.pages.size - pages0.size} entered)`);
+    console.log(`tiered set: ${s.bricks.size} F (${entered.length} entered, ${s0.bricks.size + entered.length - s.bricks.size} left), ${s.pages.size} C (${s.pages.size - pages0.size} entered), claimed F ${s.header[H.RES_CLAIMED_F]} C ${s.header[H.RES_CLAIMED_C]}`);
   });
 });
 
@@ -158,7 +162,11 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
       const a = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1)), b = s2.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
       assert.deepEqual([...b], [...a], `page ${brickKeyCoord(pk)}: a still column keeps its tiers`);
     }
-    assert.equal(s2.bricks.size, s.bricks.size, "no brick enters or leaves in the head");
+    // The head's residency replaces the boot's reach set with the residency oracle's (the ring of every band tile kept).
+    const census = await e.read("census"), res = residencyOracle(L, s, census, s2.set, (cs, r, st) => recordRadii(census, cs, r, st), true);
+    assert.deepEqual([...s2.bricks.keys()].sort((a, b) => a - b), [...res.bricks].sort((a, b) => a - b), "F residency after the head");
+    assert.deepEqual([...s2.pages.keys()].sort((a, b) => a - b), [...res.pages].sort((a, b) => a - b), "C residency after the head");
+    console.log(`tiered head residency: boot ${s.bricks.size} F -> ${s2.bricks.size} F, ${s.pages.size} C -> ${s2.pages.size} C`);
     console.log(`tiered head: listed ${s2.header[H.N_TLIST_RUN]} (neighbour-only listing), clamped ${s2.header[H.CENSUS_CLAMPED]}, cand ${s2.header[H.CENSUS_CAND]}`);
   });
 });

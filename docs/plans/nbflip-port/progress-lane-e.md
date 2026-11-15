@@ -484,3 +484,83 @@ readers (prefix `nbr`), the producers, and the schedule. Each formula cites its 
   The fixture retires four F bricks under h tiles to cover the absent-brick reduction.
 - GPU suites pass: levelset-coarse, brick-engine, brick-set-tiers, brick-census, brick-transfer and
   brick-owner. Unit tests pass.
+
+## 2026-11-15: the old residency rule at the head, both engines (brick-residency.wgsl.ts)
+
+Option (a), verbatim: the old pageSeedOf (uniform-mixed-dynamic.ts 2097–2148) and lrAsk
+(uniform-local-residency.ts 140–158), at part 1's head after the census and before move. Part 2's
+BOUND_F reach box is gone; no second bound was added. brick-abi.md §2.5 and §5.4 hold the rule.
+
+- Kernels and placement.
+  - `resSeed` (C_ALL G1) writes per 16-cell region and stage two seed-mask words and the lrRadii
+    radii into `CENSUS.RES`. Seeds come from classify's near (new `CENSUS.NEAR`, stored by
+    ncStore), WANT, the census's FIN (NC_WET, NC_CROSSES), tiered CMASK and F's PSUPPORT (925a9454),
+    which it reads and zeroes. The flow is sampledFlow over the region grown by departureTravel
+    (`CENSUS_REACH`) plus RESIDENCY_MARGIN_TILES = 5. PSUPPORT's travel joins stages ≥ 2, each
+    stage with its RESIDENCY_STAGES margin.
+  - `resRequest` ×2 (pass 0 pages and the bricks of resident pages, pass 1 the bricks of the pages
+    pass 0 entered). Candidates come from each record's own box. Present destinations get MARK_F or
+    MARK_C; absent ones go NONE → CLAIM and are appended with KEY_CLAIMED. `rqSettled` skips a
+    destination that is already kept or claimed before the meets loop.
+  - The claims use the existing kernels with KEY_CLAIMED. `setLeave` and `setLeavePages` move to the
+    head: no hysteresis.
+  - Tiered `censusDecide` keeps its band rings (cfg.w = 1, at a step's head only).
+  - Part 2 keeps `setMark` (class words, the 1-ring FAIL.REACH latch, the BOUND_F clear),
+    `setMarkPages` (LIQUID_TILES only) and the lists, with setArgs at z = 1 so the head's churn
+    counts stay.
+- Stated deviations (kernel header):
+  - All-h ownership seeds are WANT alone. The old engine has no all-h mode; every tile is h by
+    construction there, and a verbatim seed would keep every brick.
+  - Granularity:
+    - tiered pages are requested by every stage, and bricks by ownership and particles;
+    - all-h, every stage requests at F granularity;
+    - condition (a) holds: the old 32³ blocks keep cells resident beyond the footprints, where our
+      owner readers return far or air. If a dam row moves for that reason, revisit the
+      granularity, not the gate.
+  - There is no closure cap or window failure.
+  - Only resident pages seed.
+  - A bring-up stage set on a partial-page lattice (no census) keeps the boot's set.
+- Tests:
+  - brick-engine's enter/leave test now checks two consecutive heads against `residencyOracle`
+    (brick-oracle.ts):
+    - masks are exact against the CPU seeds;
+    - radii are bounded by the margin plus the global US travel;
+    - the F and C sets, churn counts and lists, RES_RADIUS and RES_CLAIMED_F all match.
+  - The tiered set test runs the head on the frozen state against the same oracle. Bricks enter at
+    4h, pages enter as air, and LIQUID_TILES is still checked.
+  - The tiered boot test checks the first head's set against the oracle.
+  - The pool test sizes its pool from the first head's set.
+  - The adapter test checks the bricks that actually left.
+- Gates (tree = 925a9454 + these files only):
+  - Tiered dam to 30 (g1, and g4 after the rqSettled change): no FAIL, past both F repros (step 14
+    brick (3,5,15); step 15 (4,5,15)).
+  - All-h dam to 200 (g2, g5): no FAIL. Drift −0.051 at step 60 and −0.0105 at step 200, the same
+    as the baselines b2 and r6. Tiered drift −0.0655 at step 20, against the baseline's −0.0647.
+  - GPU suites engine, set-tiers, census, transfer, owner and levelset-release: 27/27.
+  - check:types: only lane n's 3 errors. test:unit: 1832 pass.
+- Resident set and churn, mean per step, base (acd355ec/925a9454) → port:
+
+  | run, steps | liveF | liveC | enterF | leaveF | enterC | leaveC |
+  |---|---|---|---|---|---|---|
+  | tiered, 1–20 | 2070 → 2159 | 71 → 80 | 226 → 248 | 133 → 134 | 5.3 → 4.9 | 1.2 → 0.7 |
+  | all-h, 1–60 | 4268 → 4372 | 107 → 110 | 68.7 → 66.9 | 19.1 → 17.3 | 1.9 → 1.7 | 0.5 → 0.2 |
+
+  All-h at steps 61–200: liveF 4176, enterF 25, leaveF 39 per step; 3048 bricks at step 200. The
+  old reach box held 4913 (the whole domain) from step 28. Pages enter at step 1 by page request
+  (36 → 69).
+- Timing, timing mode, all-h, steps 35–45 profiled, steady state at 4913 bricks:
+  - set update per step: 0.381 ms → 0.55 ms;
+    - resSeed 0.060;
+    - resRequest 0.143 for two passes (0.471 before rqSettled);
+    - setMark 0.304 → 0.244;
+    - claims and leaves under 0.02 each;
+  - passes per step in the census and set work: about 16 → 23;
+  - step median 114.1 → 115.8 ms, which is noise.
+- Outliers, as found:
+  - All-h: departureTravel peaked at 81.2 cells at step 23 (the baseline's was 57.9 at step 23). RES_RADIUS
+    peaked at 24 tiles, from the surface record +y of region cells (96–112, 32–48, 64–80).
+  - Tiered: 47 cells and 15 tiles at step 23. At step 14 the top region is at cells (96–128, 0–16, 0–16),
+    surface, +z 15.
+  - Isotropic 12–14-tile records are ballistic particle travel through PSUPPORT (about 34 cells).
+  - Effect: the all-h set at step 23 is 4817 against the baseline's 4775 (+0.9%). Tiered steps 13–15
+    hold 2629–3057 against 2249–2430 (+17–30%), and steps 20 onward match (4273 against 4214).

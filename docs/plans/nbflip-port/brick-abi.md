@@ -165,24 +165,20 @@ leave leaves CMASK alone. So a tile whose brick isn't resident is an h region wi
 `NB_PHI_FAR` and 0 faces, which is air, and censusCoarse stores it as the identity. C φ is never an
 authority all-h. Before this rule, CMASK was set per brick, and an absent brick's tiles read bootPhi's
 stale C vertices: lane P's phantom 4h liquid, 296 wet tiles on the dam, 2026-11-15.
-- *C (a page).* Resident while any F child lives, or while `setMarkPages` (C_ALL, G1) marks it
-  (`MARK_C`):
-  - the box of a page's 4h-owned in-lattice tiles that have a liquid corner (a C vertex with φ < 0)
-    is grown by §5.4's reach, with the page's largest 4h face |U| as the bound;
-  - every page that box overlaps is kept (`MARK_C`), and the missing ones become page candidates:
-    key `nbKey(4p) | NB_KEY_PAGE` (bit 30), which `setClaimPages` claims and `setClaimBricks` skips;
-  - the count of those tiles is the C record's `LIQUID_TILES`, which feeds `C_LIQ`.
-  A non-resident page reads as AIR (P's V rule).
-- *F (a brick).* Resident when any of these holds:
-  - one of its tiles is h-owned (a *core* brick);
-  - it is a 27-neighbour of a core brick (a *ring* brick);
-  - it overlaps the §5.4 reach box of a brick with a non-empty bin (lane F, 2026-11-15). A
-    collapsing column moves about 10 cells a step, more than a ring. BOUND_F is raised by
-    `pScatter`. Bricks entered this way hold 4h tiles until the census says otherwise.
-
-  Liquid vertices' reach boxes keep or enter C pages, and F bricks only through the three rules
-  above. `setMark` reads core as the F record's word 28 bits 0–7. Its class scan (SURFACE) reads
-  h-owned tiles only.
+- *C (a page).* Resident while any F child lives, or while the head's residency (§5.4) marks it
+  (`MARK_C`): tiered, a page is requested at page granularity by every stage's records (the old 4h
+  storage); all-h, a page is requested only as the parent of a requested brick. A missing page becomes
+  a page candidate, key `nbKey(4p) | NB_KEY_PAGE` (bit 30), which `setClaimPages` claims and
+  `setClaimBricks` skips. `setMarkPages` (part 2, C_ALL, G1) counts the page's 4h-owned in-lattice
+  tiles with a liquid corner (a C vertex with φ < 0) into the C record's `LIQUID_TILES`, which feeds
+  `C_LIQ`; it keeps nothing. A non-resident page reads as AIR (P's V rule).
+- *F (a brick).* Resident when the head's residency (§5.4) keeps it:
+  - tiered, the ownership records (an h tile now, or a band tile) and the particle records, at F
+    granularity, plus the 27-brick ring of every band tile (censusDecide: present ring bricks get
+    their keep mark at a step's head, absent ones become candidates);
+  - all-h, every stage's records at F granularity (the brick is the h storage).
+  Bricks entered at a tiered head hold 4h tiles until the census and transfer say otherwise.
+  `setMark`'s class scan (SURFACE) reads h-owned tiles only.
   - Bricks claimed in a step start 4h (word 28 tile bits 0, CMASK untouched). The boot's bricks
     (`setClaimBricks` with `cfg.z = 1`) start h, because `bootPhi` writes F; the first census
     coarsens them.
@@ -271,8 +267,8 @@ rules above through the directory and masks:
     analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
     injection at the corners.
   - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
-- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 6656 words
-  a C slot.
+- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 7328 words
+  a C slot (with the near words and the residency records, §5.4).
 
 **The tier change, within a step** (§7, amended):
 1. `setCensus` (brick-census.wgsl.ts, landed fb17d41e at the part 1 head; this was planned as part
@@ -516,10 +512,10 @@ its `TOP_*` word.
 
 | region | words | content |
 |---|---|---|
-| `MARK_F` | `FCAP` | `setMark`'s keep bits for live F slots: bit 0 keep, bit 1 h-owned wanted (M2); cleared by `setUpdate` |
+| `MARK_F` | `FCAP` | the head's keep bits for live F slots (`resRequest`, and tiered `censusDecide`'s band rings): bit 0 keep; consumed (exchanged to 0) by the head's `setLeave` |
 | `MARK_C` | `CCAP` | the same for C slots |
 | `CAND` | `CAND_CAP = FCAP` | enter candidates: brick keys (§4.1 word 29), `NB_KEY_PAGE` (bit 30) for a page key. Duplicates allowed; `setUpdate` dedupes by compare-exchange on the directory. Bit 31 (`KEY_CLAIMED`): the head's residency request already took the key's directory word NONE → CLAIM, so the claim pops without the exchange. Overflow latches `FAIL.LIST`. |
-| `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` reads it, then clears it |
+| `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` clears it. No residency reads it since the head's residency (2026-11-15). |
 | `BOUND_C` | `CCAP` | the same for C slots (4h faces) |
 | `AIR_GATE` | `16 * CCAP` | per C slot, 512 bits: bit `t` (the tile's C local) set where the far-air gate holds (umFarAirKept's plane 4: the 3³ about tile `t` meets the collar, the seeds dilated 4 tiles an axis over live tiles). Written by `lcClear` every step, read by the next step's `lcAdvect`: a C vertex with φ ≥ 16 h whose cell's tile has the bit clear keeps φ untraced. Zeroed at `setClaimPages`, like `WANT`. |
 | `REACH0`, `REACH1` | `512 * CCAP` each | per C slot, a word a tile (the tile's C local): the tile's signed reach, umPackReach (5 bits an axis each way, 31 saturated), in tiles. `nrReach` (part 1, after the head, before move: the old frame plan's localSpeed) writes the local word into `REACH0` from the US faces its owners read, F's bricks for h tiles and the page for 4h tiles. `nrSpread`'s three passes (x: 0→1, y: 1→0, z: 0→1) take the separable maximum over ±radius tiles. An AIR tile saturates, the box contributes 0. The final word is `REACH1`, read by umDeepAirKept (`nbrDeepAirKept`). |
@@ -527,40 +523,66 @@ its `TOP_*` word.
 | `WALL_TILE` | `384 * CCAP` | per C slot, 64 words a face direction f (umFaceTile: u + 8v of the tile in the face's plane): a wall face tile's largest released dt·away / h (cells, f32 bits; 0 where none). Written by `nrWallReach` (part 2, before `stages.levelSet`: the old wallReach) for each of the page's wall faces, the box across. umReleasedMayChange reads it. The other faces' words are not written or read. |
 | `PSUPPORT` | `8 * FCAP` | per F slot (`NB_S_PSUPPORT + 8·slot`), the particle support the head's residency reads (§5.4; the old DEPB refine prediction, uniform-particle-brick.wgsl.ts 33–38, 240–262): word 0 bit j = tile j of the brick (tx \| ty<<1 \| tz<<2) is in some live record's support (the 2³ tiles from floor((x − 2)/4)); words 1–3 and 4–6 the −xyz and +xyz travel maxima of those records (f32 bits, cells, `atomicMax`: ballistic \|v\|·dt/h all six ways, coupled max(∓before, 0)·dt/h + NB_SEPARATION_REACH); word 7 pad. F's `pJoin` accumulates it in part 2 for every live record of bank dst (an absent support brick latches `FAIL.REACH`); the head's `resSeed` reads and zeroes it; `setClaimBricks` zeroes a new slot's. |
 
-**The reach rule** (`setMark`, amended at M1). A brick holding a liquid vertex (φ < 0) or a
-non-empty bin keeps or enters every brick that overlaps its **reach box**. In cells, that box is
+**The boot's reach rule** (`bootBricks`, the CPU, M1). The boot's set is every brick that overlaps
+a **reach box** of a brick holding a liquid vertex (φ < 0) of the boot boxes. In cells, that box is
 
 ```
 [origin + lo - R, origin + hi + R],   R = (bound + |g| dt) * dt / h + REACH_MARGIN
 ```
 
-- `lo` and `hi` bound the brick's liquid vertices. A non-empty bin takes the whole brick.
+- `lo` and `hi` bound the brick's liquid vertices; at boot `bound` = 0.
 - R is real-valued, and the box's ends are floored to bricks. `REACH_MARGIN` is 7 cells.
-- With no travel this is the design's one-brick ring, and it never exceeds the design's
-  `ceil(bound·dt / 8h) + 1` bricks.
-- The `|g| dt` term covers a step of gravitational acceleration.
-- The frozen form `ceil((bound + |g| dt) dt / 8h) + 1` gave two rings at rest, because the
-  ceiling of any travel is at least 1. That is 2.6x a slab's bricks, so M1 replaced it.
-- A particle that still lands outside a resident brick latches `FAIL.REACH`. It is a defect to
-  root-cause, never clamped.
-- So does a liquid vertex whose 1-ring is not resident: `setMark`'s scan checks every φ < 0 vertex
-  on its brick's faces against the brick's neighbour words (staged once a workgroup) and latches
-  `FAIL.REACH` with the absent brick's key. The φ it reads is the last level set's, which the
-  current directory served, so this checks the last step's level set and operator.
-- Open (2026-11-15, lane F's tiered repro: FAIL.REACH at step 14, brick (3,5,15)): `setMark` runs
-  in part 2 before the project, so its BOUND_F misses step n's projected velocity, which pMove
-  n + 1 traces. A jet went from 3.44 to 7.48 m/s, about 20 cells of travel at h = 6.25 mm, while the
-  stale reach was about 16.5. The old engine has no such hole. Its census runs at the frame head,
-  after the completed frame (uniform-mixed-dynamic.ts:2353-2355). It bounds each tile by the
-  extended face speeds the next trace samples (l.1149-1174, l.442 "extended"), and turns them into
-  `departureTravel` plus the stage margins (l.1761-1796; uniform-local-residency.ts:28-35, 57-70,
-  99-103). With 7.48 m/s that gives (7.48 + 9.81/60)/60/0.00625 + 7, about 27.4 cells, which covers
-  the 20. The port is to decide the move's reach from the post-tail velocity. Either a part-1 head
-  pass bounds with max |US| (the old census's timing), or lane F's pDelta raises BOUND_F with the
-  post-project |U| of the brick's faces.
-- The cell precision is `NB_REACH_MARGIN` and the brick range is `NB_BRICKS` (`floor(n/8) + 1` an
-  axis, skirts included), both in the prelude.
-- Lane F states the band margin its kernels need, and E sets `REACH_MARGIN` from it.
+- With no travel this is the design's one-brick ring. The first step's head replaces the set with
+  the residency rule's.
+
+**The residency rule** (the head's, lane E, 2026-11-15; brick-residency.wgsl.ts). NB-FLIP's local
+residency, ported verbatim on the brick storage: the old pageSeedOf (uniform-mixed-dynamic.ts
+2097–2148) and lrAsk (uniform-local-residency.ts 140–158).
+
+- *Timing.* Part 1's head, in both engines, after the census and before `stages.move`, so it reads
+  the completed step's projected and extended velocity (US), as the old frame-head census does. Every
+  head claim lands before `nrReach` (the release port's tile reach words).
+- *Records* (`resSeed`, a workgroup a page of C_ALL, G1). Per 16-cell region (4³ tiles, 8 a page) and
+  stage (RESIDENCY_STAGES: ownership, transport, pressure, surface, particles), two seed-mask words and
+  the −xyz/+xyz radii in tiles (lrRadii), in the page's census scratch (`CENSUS.RES`):
+  - a tile is considered when it is near (classify's near, `CENSUS.NEAR`), band (`WANT`) or a sample
+    (`PSUPPORT`);
+  - seeds: ownership = h now (tiered) or band; transport and pressure = wet or sample; surface =
+    crossing or sample; particles = sample;
+  - flow: sampledFlow (SAMPLE_REACH 2.5, shift 0) over the region grown by departureTravel
+    (`H.CENSUS_REACH`) plus RESIDENCY_MARGIN_TILES (5) tiles; particle travel (`PSUPPORT`'s maxima
+    over the region's bricks) joins stages ≥ 2; stage 0's radii are 0;
+  - `H.RES_RADIUS` is the largest radius of the census.
+- *Requests* (`resRequest`, a workgroup a page of C_ALL, lanes over each region's candidate box):
+  a destination is kept when a stage's record meets it (lrStageMeets). The candidates come from each
+  record's own box, so the work scales with the sources and their reach, never with the lattice.
+  - A present destination gets its keep mark (`MARK_F`, `MARK_C`).
+  - An absent one's directory word goes NONE → CLAIM, and the one winner appends its key with
+    `KEY_CLAIMED`.
+  - Pass 0 (cfg.z = 0) takes pages and the bricks of resident pages; a brick of an absent page takes
+    its page. `setClaimPages` follows. Pass 1 (cfg.z = 1) takes the bricks of the pages pass 0 entered.
+    `setClaimBricks` follows.
+  - A destination already kept or claimed is skipped before the meets (rqSettled).
+- *Leaving* follows the old rule: whatever no record reached retires at this head (`setLeave`,
+  `setLeavePages`), with no hysteresis (idleSteps 1).
+- *Deviations, stated in the kernel header.*
+  - All-h has no old counterpart (the old engine has no all-h mode; every tile is h by
+    construction there, and a verbatim seed would keep every brick): all-h ownership seeds are the
+    band tiles (WANT) alone, and every stage is requested at F granularity.
+  - Destinations are F bricks (8 cells) and C pages (32 cells), not 32³ blocks. The old blocks keep
+    cells resident beyond the footprints, and old stages may read or propagate into them, while our
+    owner readers return far or air there. If a dam gate row moves for that reason, revisit the
+    granularity, not the gate.
+  - No closure-cap or window failure (there is no window to outgrow). Only resident pages have
+    census words, so only they seed; a sample's support in an absent brick is latched by F's hook.
+- The checks stay: a particle that lands outside a resident brick (`pScatter`, `pJoin`'s support)
+  and a liquid vertex whose 1-ring is not resident (`setMark`'s scan of the φ < 0 vertices on its
+  brick's faces against the neighbour words, part 2 after the move) latch `FAIL.REACH` with the
+  absent brick's key. They are defects to root-cause, never clamped.
+- The step-14 tiered repro (2026-11-15, lane F: FAIL.REACH at brick (3,5,15); step 15 at (4,5,15),
+  info 0xf01404) came from part 2's reach box reading a BOUND_F that missed step n's projected
+  velocity. The head's residency reads the completed step's US, as the old census does.
+- The brick range is `NB_BRICKS` (`floor(n/8) + 1` an axis, skirts included), in the prelude.
 
 ### 5.5 Lists and their indirect arguments
 
@@ -692,10 +714,10 @@ indirect argument that can be zero.
 
 | part | stage | kernels (owner) |
 |---|---|---|
-| 1 | head | `bodyStamp` (P, bodies only), `solidStamp` (E, gated by ring flag bit 0) |
+| 1 | head | `bodyStamp` (P, bodies only), `solidStamp` (E, gated by ring flag bit 0); the census, the residency (`resSeed`, `resRequest` ×2, the claims, `setLeave`, `setLeavePages`, records, init, lists; §5.4) and, tiered, `censusWant` and the transfer (E) |
 | 1 | move | `pTrace`, `pBand`, `pSolid` (F) |
 | 1 | rebin | `pCount`, `pScan`, `pScatter` (F) |
-| 2 | brick set | `setMark`, `setUpdate`, `setTransfer` [gated], `setLists` (E) |
+| 2 | brick set | `setMark` (class words, the 1-ring check), `setMarkPages` (tiered, `LIQUID_TILES`), `setLists` (E) |
 | 2 | level set | `phiAdvect`, `phiSolid`, `phiUnion`, `pSeed`, `redistInit`, `redistSweep` ×2 (F) |
 | 2 | velocity | `p2g`, `uAdvect`, `uExtendPre` (F) |
 | 2 | pressure setup | `operator`, `coarsen`, `coarsenTop`, `pcgGuess` (P) |
@@ -759,8 +781,8 @@ with X = 0 at air (the Dirichlet ghost):
 
 **Neighbours across bricks.** These go through the record's neighbour words:
 - An `F` slot is read directly.
-- `NONE` is air. setMark keeps a ring of bricks around liquid, so a liquid cell never borders
-  `NONE`, and if one does, that is `FAIL.REACH`.
+- `NONE` is air. The head's residency keeps the stages' footprints around liquid (§5.4), so a liquid
+  cell never borders `NONE`, and if one does, that is `FAIL.REACH`.
 - `SEAM` and `BULK` neighbours, and a C or B row, raise `FAIL.UNSUPPORTED` in M1 (there are no
   tiers). P extends the contract here.
 
@@ -869,11 +891,11 @@ The method (`brick-method.ts`) refuses a scene and names every gap: the scene's 
 
 ## 7. The brick-set update in words
 
-1. `setMark` (one lane per tile of `F_ALL`, then `C_ALL`; 64 lanes):
-   - reads FLAGS, φ, `BIN_COUNT` and `BOUND_*`;
-   - sets `MARK_*` keep bits on live slots in reach of liquid or particles;
-   - appends the keys of non-resident bricks in reach to `CAND`;
-   - M2 adds the tier criteria and sets `CHANGED`.
+1. The head's residency (§5.4; part 1, since 2026-11-15; `setMark` in part 2 keeps only the class
+   words and the 1-ring check):
+   - `resSeed` writes the records from the census words, `WANT` and `PSUPPORT`;
+   - `resRequest` sets `MARK_*` keep bits on live slots its records meet and claims the absent ones
+     into `CAND` (`KEY_CLAIMED`); tiered, `censusDecide` keeps and lists its band rings.
 2. `setUpdate`:
    - claims each candidate: page word `NONE → CLAIM → cslot` (C pop), then child `NONE → fslot`
      (F pop), each by compare-exchange, so duplicates enter once;
@@ -899,7 +921,7 @@ The method (`brick-method.ts`) refuses a scene and names every gap: the scene's 
 | 2 | `POOL_B` | B free stack exhausted |
 | 3 | `POOL_K` | cut free stack exhausted |
 | 4 | `PARTICLES` | particle bank capacity exceeded |
-| 5 | `REACH` | a particle, or a liquid vertex's 1-ring (`setMark`), outside the resident bricks |
+| 5 | `REACH` | a particle (`pScatter`), a particle's support (`pJoin`), or a liquid vertex's 1-ring (`setMark`), outside the resident bricks |
 | 6 | `LIST` | a list or the candidate buffer overflowed |
 | 7 | `WINDOW` | a key outside the window |
 | 8 | `UNSUPPORTED` | a kernel met a feature it does not implement |
