@@ -710,3 +710,63 @@ On the dam, F_ACT ≈ F_ALL:
 F_LIQ:
 - setLists no longer ORs LIQUID onto every live brick. F_LIQ is setMark's class (an h-owned φ < 0 vertex), since lane P reads no F_LIQ (04298677, b9315489).
 - brick-engine.test.ts checks F_LIQ against the records' LIQUID bit.
+
+
+## 2026-11-15: the head restructure, round 1 (task 3): censusFine fills the GPU, setTransferList X8
+
+Changes (WANT and TRIG bitwise):
+- `censusFine` now runs on F_ALL's X8 triple: eight workgroups a brick, workgroup j taking tile j when it is h-owned, a lane a cell. Before, one workgroup took a brick's h tiles one after another.
+  - Each tile's 5^3 raw vertices (ncLoadFine, into ncTileRaw) and its 240 US faces (nbFacePlane on planes 4t..4t+4 of each axis, cfFaces) are staged once.
+  - The cells' classify, owner bounds and plan extents (cfClassify, cfOwnerBounds1, cfExtent1) and the surface displacement (ncSmoothTile) read the staged values: the same loads, each made once a tile instead of up to 8x a cell.
+- `setTransferList` runs on C_ALL's X8: eight workgroups a page, a lane a tile. Its entries append by atomicAdd, so their order was never the tiles'.
+- Checks:
+  - brick-census-x8.test.ts compares against the frozen G1 census (which includes the frozen censusFine) on every census and set word (all 3 states, tiered boot, head and all-h). brick-census.test.ts covers the oracle, TRIG and DEF, and brick-census-dam.test.ts the frames 14 and 43 fixtures.
+  - brick-transfer.test.ts, brick-transfer-dam.test.ts and brick-engine.test.ts: 27/27 at 84b98c2b.
+  - check:types (the 3 lane-n errors only), test:unit 1833 pass 0 fail (84b98c2b plus this change).
+- brick-abi.md: 84b98c2b carried this change's doc hunks with the fused transfer's wording; this commit restores the transfer text to the two face jobs (cfg.z = U or US) and the separate setTransferCells.
+
+Tried and reverted: setTransferFaces taking both channels in one workgroup, and setTransferCells folded into it (lanes 0..63).
+- That gave 8 → 5 transfer launches, but faces went 1.02 (2 launches) + cells 0.15 → 1.89 ms in one launch: longer workgroups, more registers and workgroup memory.
+- Launches cost ~4 µs here, so the fusion lost 0.6 ms.
+
+Timing slot (exclusive, tiered dam composite, profile steps 13–24, ms/step kernel time):
+- Before is bbcc5fc2 (tm-head); after is 84b98c2b plus this change (tm-c).
+
+| head kernel | before | after | launches |
+|---|---|---|---|
+| censusFine | 3.233 | 1.682 | 1 (37.5k wg, was 3.4k) |
+| censusCoarse | 0.557 | 0.513 | 1 |
+| censusDecide | 0.481 | 0.448 | 1 |
+| censusImportance | 0.197 | 0.202 | 1 |
+| censusCubes, censusBegin, censusWant | 0.027 | 0.049 | 3 |
+| setTransferList | 0.240 | 0.066 | 1 |
+| setTransferFaces (U, US) | 1.021 | 1.256 | 2 |
+| setTransferCells, Commit (x2), Args, CommitMask | 0.295 | 0.355 | 5 |
+| residency (resSeed, resRequest x2, claims, leave) | 0.448 | 0.530 | 7 |
+| set tail (setRecords, setInit, setLists, setArgs, stepEnd) | 0.142 | 0.158 | ~7 |
+| **head sum** | **6.64** | **5.26** | ~29 |
+
+- The faces and commit moved up with no code change; that is run-to-run spread of about ±0.2 ms.
+- Against design §6's brick-set budget (0.6 ms in 4 kernels), the head is 8.8x over.
+- What is left: censusFine 1.68 (the per-cell classify and the crossing tiles' shape error), the transfer's face jobs 1.3, and the C passes 1.2.
+- The residency rows are a5599629's: resMark replaces resSeed and resRequest.
+
+censusFine's inputs as F's side outputs: spec sent to lane F, with the recommendation not to do it yet.
+- Movable bitwise: KEYS and DEF's span words. They are order-free min/max of US faces. uExtend would publish per h tile, per axis, a plane-4t partial and a planes 4t+1..4t+3 partial (12 words a tile), and uExt4 the same for 4h owners. The census combines t's partials with t + e's plane-4t partial.
+- Not movable bitwise:
+  - DEF's mean (the lane-order sum);
+  - every φ-derived word: CROSS, GAP, reach, flags, shape error, depth. Their last writers are lPublish and then lcPublish, the +4 vertex layer is another workgroup's, and the shape and depth stencils reach into neighbour tiles.
+- Estimated gain: the face half of the staging, about 0.3–0.5 ms.
+
+Per area (tm-c, 84b98c2b plus this change; kernel sum 100.8 ms, fenced median 124.7 ms; ~270 launches):
+
+| area | ms | launches | §6 dam budget (seep-scaled) |
+|---|---|---|---|
+| grid velocity (uAdvect, uViscous, uTransfer, uExtend, uExt4Seed, uExt4, vGauge) | 42.5 | 6.4 | 1.6 |
+| level set (l*, lc*) | 18.3 | 20 | 2.0 |
+| pressure solve (pmg*) | 12.2 | 169 | 3.0 |
+| move (uCache, pMove, pScan, pScatter, pTiles, pDelta, pJoin, pArgs) | 10.0 | 6.4 | 1.5 |
+| pressure setup and projection (operator, rowsC, setup, walls, project) | 7.9 | 32 | 1.0 |
+| brick set (census, residency, set, transfer, nr*, setMark) | 5.8 | 35 | 0.6 |
+| transfer and seeding (pDeposit, pSeed) | 4.3 | 1.8 | 1.0 |
+| floor (launches at ~3.5 µs, plus fenced minus kernel sum) | ~0.9 + 23.9 | | 1.0 |

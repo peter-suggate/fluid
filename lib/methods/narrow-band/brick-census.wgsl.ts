@@ -8,7 +8,8 @@
  *
  * Passes (brickCensusSchedule), each the old kernel of the same rule:
  * - censusBegin: the census header words (H 224..231) clear; unsupported state fails.
- * - censusFine: classify (l.2091), a workgroup an F brick (F_ALL, G1), its h tiles one after another, a lane a cell.
+ * - censusFine: classify (l.2091), eight workgroups an F brick (F_ALL, X8): workgroup j takes the brick's tile j when
+ *   it is h-owned, a lane a cell (the G1 pass took the brick's h tiles one after another).
  * - censusCoarse: classifyCoarse (l.2175), eight workgroups a C page (C_ALL, X8): workgroup r takes the page's
  *   64-tile slab 64r..64r+63 (tile z = r), a lane a tile, with the slab's queued face, error and depth jobs.
  * - censusCubes: boundCubes (l.2625), a workgroup a C page (G1).
@@ -175,10 +176,9 @@ fn ncSmoothCurvature(p:vec3u,centre:f32)->vec2f{
  let ghg=dot(g*g,d)+2.0*(g.x*g.y*m.x+g.y*g.z*m.y+g.z*g.x*m.z);
  return vec2f((gg*(d.x+d.y+d.z)-ghg)/(gg*sqrt(gg)),1.0);
 }
-// umStageSmoothTile (l.1313), every cell open: no buried taps.
-fn ncStageSmoothTile(origin:vec3i,lane:u32){
- for(var i=lane;i<125u;i+=64u){ncTileRaw[i]=ncLoadFine(origin+vec3i(ncCorner(i,5u)));}
- workgroupBarrier();
+// umStageSmoothTile (l.1313), every cell open: no buried taps. The raw vertices (ncTileRaw, ncLoadFine at the tile's
+// 5^3 vertices) are the caller's: censusFine stages them once a tile, for its classify too.
+fn ncSmoothTile(lane:u32){
  for(var i=lane;i<125u;i+=64u){
   let v=ncCorner(i,5u);
   let r=select(vec3u(0u),vec3u(1u),(v>vec3u(0u))&(v<vec3u(4u)));
@@ -256,10 +256,11 @@ fn ncCornerDistance(v:vec3u,a:u32,f:f32,low:vec4f,high:vec4f,dx:vec4f)->f32{
  let gradient=vec3f(mix(gx.x,gx.y,t.z),mix(x0.y-x0.x,x0.w-x0.z,t.z),y0.y-y0.x);
  return 4.0*mix(y0.x,y0.y,t.z)/max(length(gradient),4.0e-3*ncH());
 }
-// umSurfaceDisplacement (l.1481) of the h tile at tile coordinate t, every cell open. Every lane calls it.
+// umSurfaceDisplacement (l.1481) of the h tile at tile coordinate t, every cell open, its raw vertices staged.
+// Every lane calls it.
 fn ncSurfaceDisplacement(t:vec3i,lane:u32)->f32{
- let origin=4*t;let h=ncH();
- ncStageSmoothTile(origin,lane);
+ let h=ncH();
+ ncSmoothTile(lane);
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  // The tile's corners are its staged raw vertices (4·corner): the same nbVertexPhi read, once a tile, not once a lane.
  for(var k=0u;k<8u;k++){c[k]=ncRawAt(4*vec3i(ncCorner(k,2u)));}
@@ -894,7 +895,8 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
   if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u){nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
 }`);
 
-  // censusFine: classify (l.2091), a workgroup an F brick of F_ALL, each of its h tiles in turn, a lane a cell.
+  // censusFine: classify (l.2091), eight workgroups an F brick of F_ALL (X8), workgroup j its tile j (ncCorner(j, 2))
+  // when h-owned, a lane a cell. Every workgroup word is the tile's; the brick's tiles run side by side.
   const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + /* wgsl */`
 var<workgroup> wgFlag:u32;
 // The frame plan's motion (PLAN): each cell's mean face velocity, and the tile's tileVelocity words.
@@ -909,33 +911,97 @@ var<workgroup> tileReach:array<atomic<u32>,6>;
 var<workgroup> tileError:atomic<u32>;
 var<workgroup> tileDeep:array<atomic<u32>,2>;
 var<workgroup> mixedTile:atomic<u32>;
+// The tile's faces (US), staged once: axis a, plane p (0..4, 4t[a] + p), and the cell across (u = a + 1, v = a + 2):
+// 80a + 16p + 4v + u. Every face a cell of the tile reads (its low face, plane p, and its high face, plane p + 1).
+var<workgroup> cfFaces:array<f32,240>;
+// The tile's 5^3 raw vertices (ncTileRaw) and its faces, each read once (ncLoadFine and nbFacePlane as the cells read
+// them): the cells' classify, bounds and extents and the surface displacement then read the same values from here.
+fn cfStage(t:vec3i,lane:u32){
+  let origin=4*t;
+  for(var i=lane;i<125u;i+=64u){ncTileRaw[i]=ncLoadFine(origin+vec3i(ncCorner(i,5u)));}
+  for(var i=lane;i<240u;i+=64u){
+    let a=i/80u;let r=i%80u;var q=origin;q[a]+=i32(r/16u);q[(a+1u)%3u]+=i32(r%4u);q[(a+2u)%3u]+=i32((r/4u)%4u);
+    cfFaces[i]=nbFacePlane(q,a);
+  }
+}
+// ncFace at the cell of local coordinate l with plane p along a (p = l[a] its low face, l[a] + 1 its high face).
+fn cfFace(l:vec3u,a:u32,p:u32)->f32{return cfFaces[80u*a+16u*p+l[(a+1u)%3u]+4u*l[(a+2u)%3u]];}
+// ncExtent1 on the staged faces.
+fn cfExtent1(origin:vec3i,l:vec3u,a:u32)->vec3f{
+  var e=vec3f(NC_PLAN_MAX,-NC_PLAN_MAX,1.0);ncExtentAdd(&e,cfFace(l,a,l[a]+1u));
+  if(ncLowOpen(origin,a)){ncExtentAdd(&e,cfFace(l,a,l[a]));}
+  return vec3f(e.x,e.y,select(0.0,1.0,e.z!=0.0&&e.x<=e.y));
+}
+// ncOwnerBounds1 on the staged faces.
+fn cfOwnerBounds1(origin:vec3i,l:vec3u,c:ptr<function,NcClass>){
+ for(var axis=0u;axis<3u;axis++){
+  var low=3.0e38;var high=-3.0e38;
+  for(var sign=-1;sign<=1;sign+=2){
+   var anchor=origin;if(sign<0){anchor[axis]-=1;}
+   if(ncFaceLow(anchor,axis)){continue;}
+   let u=cfFace(l,axis,select(l[axis]+1u,l[axis],sign<0));
+   let finite=abs(u)<=3.0e38;
+   low=min(low,select(-3.0e38,u,finite));high=max(high,select(3.0e38,u,finite));
+  }
+  (*c).low[axis]=min((*c).low[axis],ncOrderKey(low));(*c).high[axis]=max((*c).high[axis],ncOrderKey(high));
+ }
+}
+// ncClassifyOwner(t, 1, lane, c, true) on the staged vertices and faces.
+fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
+ let h=ncH();let l=ncCorner(lane,4u);
+ let origin=4*t+vec3i(l);
+ var inside=0u;var lowPhi=3.0e38;var highPhi=-3.0e38;
+ for(var k=0u;k<8u;k++){
+  let v=l+ncCorner(k,2u);let value=ncTileRaw[v.x+5u*v.y+25u*v.z];
+  lowPhi=min(lowPhi,value);highPhi=max(highPhi,value);
+  if(value<0.0){inside++;}
+  if(value<4.0*h){(*c).flags|=8u;}
+ }
+ cfOwnerBounds1(origin,l,c);
+ let local=l;
+ let epsilon=1e-6*h;
+ let crosses=lowPhi<=epsilon&&highPhi>=-epsilon&&lowPhi<highPhi;
+ if(crosses){
+  (*c).crossing[lane/32u]|=1u<<(lane%32u);
+  for(var a=0u;a<3u;a++){(*c).gap[a]=min((*c).gap[a],local[a]);(*c).gap[3u+a]=min((*c).gap[3u+a],3u-local[a]);}
+ }
+ let interior=!crosses&&inside==8u;
+ let air=!crosses&&inside==0u;
+ if(!air){(*c).flags|=4u;}
+ if(!interior&&!air){
+  for(var a=0u;a<3u;a++){(*c).reach[a]=min((*c).reach[a],local[a]);(*c).reach[3u+a]=min((*c).reach[3u+a],3u-local[a]);}
+  (*c).flags|=select(1u,3u,crosses);
+ }
+}
 @compute @workgroup_size(64) fn censusFine(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   ncInit();
-  let g=nbGroup(wid);
-  if(lane==0u){wgFlag=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);}
+  let g=nbGroup(wid);let entry=g>>3u;let j=g&7u;
+  if(lane==0u){
+    wgFlag=0u;atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);
+    if(entry<nbListCount(NB_LIST_F_ALL)){wgFlag=select(0u,1u,nbTileOwnerH(2*nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY))+vec3i(ncCorner(j,2u))));}
+  }
   if(workgroupUniformLoad(&wgFlag)==0u){return;}
-  let fs=nbListSlot(NB_LIST_F_ALL,g);let brick=nbKeyCoord(nbFRec(fs,NB_REC_KEY));
-  for(var j=0u;j<8u;j++){
+  let brick=nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY));
+  {
     let t=2*brick+vec3i(ncCorner(j,2u));
-    if(lane==0u){wgFlag=select(0u,1u,nbTileOwnerH(t));}
-    if(workgroupUniformLoad(&wgFlag)==0u){continue;}
     if(lane==0u){
       atomicStore(&mixedTile,0u);for(var q=0u;q<2u;q++){atomicStore(&tileCrossing[q],0u);atomicStore(&tileDeep[q],0u);}
       for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}
       atomicStore(&tileError,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);
       for(var a=0u;a<3u;a++){atomicStore(&planHigh[a],0u);atomicStore(&planLow[a],0u);}
     }
+    cfStage(t,lane);
     workgroupBarrier();
     {
       // localSpeed (l.283): the cell's extent on each axis, its mean, and the tile's velocity words.
-      let origin=4*t+vec3i(ncCorner(lane,4u));
+      let l=ncCorner(lane,4u);let origin=4*t+vec3i(l);
       for(var a=0u;a<3u;a++){
-        let e=ncExtent1(origin,a);planValues[lane][a]=0.5*e.x+0.5*e.y;
+        let e=cfExtent1(origin,l,a);planValues[lane][a]=0.5*e.x+0.5*e.y;
         atomicMax(&planHigh[a],ncPlanHigh(e));atomicMax(&planLow[a],ncPlanLow(e));
       }
     }
     {
-      var c=ncEmptyClass();ncClassifyOwner(t,1u,lane,&c,true);
+      var c=ncEmptyClass();cfClassify(t,lane,&c);
       for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}
       for(var q=0u;q<6u;q++){atomicMin(&tileGap[q],c.gap[q]);atomicMin(&tileReach[q],c.reach[q]);}
       atomicOr(&mixedTile,c.flags);
@@ -1278,14 +1344,14 @@ var<workgroup> wgGo:u32;
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
 /** `keep`: a step's head, where censusDecide's band rings join the residency marks (brick-residency.wgsl.ts); the boot
- * has no leave to consume them. censusFine and censusCubes take `list`'s G1 triple; the C passes censusCoarse,
- * censusImportance and censusDecide take list cAll's X8 triple (eight workgroups a page, censusListArgs). */
+ * has no leave to consume them. censusCubes takes `list`'s G1 triple; censusFine takes list fAll's X8 triple (eight
+ * workgroups a brick) and the C passes censusCoarse, censusImportance and censusDecide list cAll's (eight a page). */
 export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false) {
   const c = brickCensusKernels(L, { tiered });
   const slabs = censusListArgs(cAll, "X8");
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
-    { kernel: c.censusFine, dispatch: list(fAll, "G1") },
+    { kernel: c.censusFine, dispatch: censusListArgs(fAll, "X8") },
     { kernel: c.censusCoarse, dispatch: slabs },
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
     { kernel: c.censusImportance, dispatch: slabs },

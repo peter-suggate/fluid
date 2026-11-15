@@ -1,5 +1,6 @@
-// setCensus's C passes on eight workgroups a page (X8) against the frozen G1 passes (parity/census-g1-frozen.ts, the
-// census at 5233e246: a workgroup a page, each lane 8 tiles in turn). Both schedules run on the same state, from
+// setCensus's C passes on eight workgroups a page (X8), and censusFine on eight a brick (a workgroup a tile, its
+// vertices and faces staged once), against the frozen G1 passes (parity/census-g1-frozen.ts, the census at 5233e246:
+// a workgroup a page, each lane 8 tiles in turn; censusFine a workgroup a brick, its h tiles in turn). Both schedules run on the same state, from
 // the same set buffer and a zeroed census buffer, and every word must be identical: the whole census buffer, and
 // the whole set buffer (the census words, WANT, TRIG, MARK_F, the counters, FAIL), except the candidate list, whose
 // order the appending lanes' race sets (compared as a sorted list, so a duplicate counts), and X8's own candidate

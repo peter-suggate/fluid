@@ -4,7 +4,7 @@
  * (lib/methods/uniform/uniform-mixed-remap.ts) on the brick storage.
  *
  * - setTransferList: markTile and listedFlags verbatim (l.710–760), over the
- *   tiles of C_ALL. An entry is (C slot << 9 | tile, flags): bit 31 the
+ *   tiles of C_ALL (X8: eight workgroups a page, a lane a tile). An entry is (C slot << 9 | tile, flags): bit 31 the
  *   tile's width changed, 30 it refined, 27..29 its +x/+y/+z neighbour's
  *   width changed, 26 it stays h and takes over a vertex.
  * - setTransferFaces: remapTileFaces (l.975), with remapBeside, remapSlope
@@ -115,27 +115,28 @@ fn xFaceWidth(c:vec3i,a:u32)->u32{
 export function brickTransferKernels(L: BrickLayout) {
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
 
-  // setTransferList: a workgroup a page of C_ALL (G1), 8 tiles a lane. markTile verbatim.
+  // setTransferList: eight workgroups a page of C_ALL (X8), workgroup r the page's tiles 64r..64r+63, a lane a tile.
+  // markTile verbatim. Entries append by atomicAdd, so their order was never the tiles' (the jobs are independent).
   const setTransferList = k("setTransferList", [CFG, setRW, dirRO, velRO, phiRO], READERS + /* wgsl */`
 @compute @workgroup_size(64) fn setTransferList(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);
-  for(var j=0u;j<8u;j++){
-    let i=lid+64u*j;let t=xTileOf(cs,i);
-    if(!nbTileInLattice(t)){continue;}
+  let g=nbGroup(wid);if((g>>3u)>=nbListCount(NB_LIST_C_ALL)){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,g>>3u);
+  {
+    let i=lid+64u*(g&7u);let t=xTileOf(cs,i);
+    if(!nbTileInLattice(t)){return;}
     let oldH=nbTileH(cs,i);let newH=nbWantH(cs,i);let fine=newH&&oldH;
     var flags=select(0u,XL_CHANGED,newH!=oldH)|select(0u,XL_REFINED,newH&&!oldH);
     for(var a=0u;a<3u;a++){var q=t;q[a]+=1;if(xChanged(q)){flags|=1u<<(27u+a);}}
     let faces=(flags&XL_FACES)!=0u;
     // A 4h tile that stays 4h beside no changed +x/+y/+z neighbour has no job.
-    if(!newH&&!faces){continue;}
+    if(!newH&&!faces){return;}
     if(fine){
       if(xRefined(t+vec3i(1,0,0))||xRefined(t+vec3i(0,1,0))||xRefined(t+vec3i(0,0,1))||xRefined(t+vec3i(1,1,0))||xRefined(t+vec3i(1,0,1))||xRefined(t+vec3i(0,1,1))){flags|=XL_VERTICES;}
-      if(!faces&&(flags&XL_VERTICES)==0u){continue;}
+      if(!faces&&(flags&XL_VERTICES)==0u){return;}
     }
     var listed=false;
     for(var n=0u;n<27u;n++){let q=t+nbNeighbourOffset(n);if(select(xChanged(q),xRefined(q),fine)){listed=true;break;}}
-    if(!listed){continue;}
+    if(!listed){return;}
     let e=atomicAdd(&nbSet[NB_H_N_TLIST],1u);
     if(e<NB_TCAP){atomicStore(&nbSet[NB_S_TLIST+2u*e],(cs<<9u)|i);atomicStore(&nbSet[NB_S_TLIST+2u*e+1u],flags);}
     else{nbFail(NB_FAIL_LIST,0x70000000u|e);}
@@ -363,7 +364,7 @@ fn xWantBit(cs:u32,t:u32)->u32{return (nbSetWord(NB_S_WANT+16u*cs+(t>>5u))>>(t&3
 export function brickTransferSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number) {
   const t = brickTransferKernels(L), xfer = { indirect: ARGS.XFER_G1 };
   return [
-    { kernel: t.setTransferList, dispatch: list(cAll, "G1") },
+    { kernel: t.setTransferList, dispatch: { indirect: ARGS.PER_LIST * cAll + ARGS.X8 } },
     { kernel: t.setTransferArgs, dispatch: { direct: [1, 1, 1] as const } },
     { kernel: t.setTransferFaces, dispatch: xfer, z: 0 },
     { kernel: t.setTransferFaces, dispatch: xfer, z: 1 },

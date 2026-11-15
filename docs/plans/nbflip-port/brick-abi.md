@@ -302,13 +302,12 @@ rules above through the directory and masks:
      `TLIST` (`set.tlist`, 2 words an entry: `cs << 9 | tile`, flags; `cap.t` entries, default
      2 FCAP, over it `FAIL.LIST`). It counts into `H.N_TLIST`. `setTransferArgs` moves the count
      to `N_TLIST_RUN` and writes `ARGS.XFER_G1`.
-   - `setTransferFaces` (192 lanes a job, channel U then US in the same workgroup; UP is not carried) is
+   - `setTransferFaces` (192 lanes a job, `cfg.z` = U or US; UP is not carried) is
      `remapTileFaces` with `remapBeside`, `remapSlope`, `remapSample` and `remapFace`, the
      low-wall rows included. Old faces are read through CMASK, new placement through WANT. Values
-     go to the `xfer` scratch (`2 · 384 · cap.t` floats). `setTransferCommit` then stores them (both channels): an h face in F at its upper
+     go to the `xfer` scratch (`2 · 384 · cap.t` floats). `setTransferCommit` then stores them: an h face in F at its upper
      cell, a 4h face in C at its upper tile. That is the old remap's second texture.
-   - `setTransferFaces`' lanes 0..63 then take `remapTileCells`' vertices (surfaceOnly) in place, φ = `PHI`
-     (the separate `setTransferCells` pass until 2026-11-15; the face jobs read no φ). A
+   - `setTransferCells` handles `remapTileCells`' vertices (surfaceOnly) in place, φ = `PHI`. A
      vertex the old layout stored keeps its value and moves to its new storage when that
      changes. A refining tile moves its own corners to F, because their new authority tile may
      not be listed.
