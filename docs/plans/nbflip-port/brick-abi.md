@@ -279,20 +279,25 @@ rules above through the directory and masks:
     analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
     injection at the corners.
   - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
-- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 18368 words
-  a C slot (with the near words, the moving-shape bits MOV, the residency records, §5.4, and the
-  plan words DEF: 4 a tile, the old frame plan's mean extended face velocity xyz and face span,
+- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 19744 words
+  a C slot (with the near words, the moving-shape bits MOV, and the plan words DEF (7168): 4 a tile, the old frame plan's mean extended face velocity xyz and face span,
   localSpeed's, written by censusFine and censusCoarse and read by censusDecide's deformation).
   After DEF, the real D's words (brick-region-heat.wgsl.ts, `CENSUS` and `RG` in brick-census.wgsl.ts):
-  - `TC` (9376), 16 words a tile: the certificate the post-transfer `certCoarse` (4h tiles) and `certFine`
+  - `TC` (9216), 16 words a tile: the certificate the post-transfer `certCoarse` (4h tiles) and `certFine`
     (h tiles) write: mean xyz, defect (−1 dry), speed, owner width, span, normal surface rate, bits (1 the
     support seed, 2 a corner set not all below −(7h + 3 dt speed)), the six tileVelocity order words;
-  - `HEAT4` (17568), a word a tile: the activity heat (the old particleHeat), censusDecide's at the head;
-  - `REG` (18080), 32 words a region (an octant of the page, r = x | y << 1 | z << 2 of its 4³ tile block):
+  - `HEAT4` (17408), a word a tile: the activity heat (the old particleHeat), censusDecide's at the head;
+  - `REG` (17920), 32 words a region (an octant of the page, r = x | y << 1 | z << 2 of its 4³ tile block):
     0 heat, 1 displacement, 2 identity (page key + 1), 3 pending, 4 trigger bits, 5 holds, 6 still sum,
-    7 tier, 8 deep, 9 epoch, 10 deep epoch, 11 stamp; 16 the certificate's page key + 1, 17–22 the region
-    velocity words, 23 normal rate, 24 acceleration, 25 error, 26 relevant count, 27 reader class, 28 fine;
-  - `DEC` (18336) and `STAT` (18352), 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits.
+    7 tier, 8 deep, 9 epoch, 10 deep epoch, 11 the replay stamp (the deep epoch + 1 at the region's last
+    classification while deep, else 0), 12 the replay mode (1 replayed, 2 classified; regionDeep's),
+    13 the stamp's page key + 1, 14–15 its tiles' h bits; 16 the certificate's page key + 1, 17–22 the
+    region velocity words, 23 normal rate, 24 acceleration, 25 error, 26 relevant count, 27 reader class,
+    28 fine, 29 the stamp's residency of the 27 pages about the region's page;
+  - `DEC` (18176) and `STAT` (18192), 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits;
+  - `RCROSS` (18208, 2 a tile) and `RGAP` (19232, 1 a tile): the crossing cells and gap as classification
+    stored them, before censusImportance edits CROSS and GAP in place (the old CC_RECORD words); a
+    replayed tile publishes them.
   setTransferList binds `census` too (the WARM promotion of a listed tile's region, cfg.w = 1).
 
 **The tier change, within a step** (§7, amended):
@@ -501,7 +506,7 @@ in words from its start. Regions are laid out in this order, each a multiple of 
 | 250 | `STILL_EXTENT` | coldSurface "still": the liquid's extent along gravity at the last spread, in regions (persistent, 0 before any), `regionSpread`'s. |
 | 251, 252 | `STILL_HIGH STILL_LOW` | this step's highest and lowest liquid region along gravity, `atomicMax` of 32768 ± the projection (`regionHeat`). Cleared by `censusBegin`. |
 | 253 | `STILL_TRAVEL` | this step's fastest liquid travel, h a step (f32 bits, `atomicMax`, `regionHeat`). Cleared by `censusBegin`. |
-| 254 | `HEAT_DEEP` | deep COLD regions at the head's deep pass (censusCoarse, cfg.w = 1). Cleared by `censusBegin`. |
+| 254 | `HEAT_DEEP` | deep COLD regions at the head's deep pass (regionDeep). Cleared by `censusBegin`. |
 | 255 | `HEAT_COLD` | COLD regions at the head's spread. Cleared by `censusBegin`. |
 
 ### 5.2 Param ring (words 256–1279)
@@ -619,7 +624,7 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
   hysteresis.
 - *Deviation from the old NB-FLIP residency, stated.* The old pageSeed and lrAsk
   (uniform-mixed-dynamic.ts 2097–2148, uniform-local-residency.ts 140–158) are retired with their
-  per-stage seed records (`CENSUS.RES` is unused), the global departureTravel and sampledFlow
+  per-stage seed records (the census's old RES section was dropped), the global departureTravel and sampledFlow
   envelope, and the 5-tile RESIDENCY_MARGIN_TILES. The reach is each source's own. All-h: the census's
   `WANT` does not seed (all-h WANT is not committed). Tiered: `censusDecide` keeps each band tile's
   present 27-brick ring and lists its missing bricks, as before.

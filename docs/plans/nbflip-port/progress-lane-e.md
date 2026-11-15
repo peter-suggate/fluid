@@ -1045,3 +1045,74 @@ Results:
 | This rule, 0be9d9f4 base | 3878 | 4851 | 98 |
 
 Peak liveC is 125 in both. The 12-cell margin on every source costs about +22% mean resident F; the per-source attribution and the margin's read-by justification are the next item.
+
+## 2026-11-16: census replay (task 4, item 3, the rest of the real D)
+
+The old regionList and replay (063 census l.1971–2089) are built as one launch, `regionDeep` (C_ALL X8: a workgroup
+a region, a lane a tile). It runs after regionSpread and before censusFine. The head's deep pass moved into it from
+censusCoarse, since replay needs deep before classification. A region replays (RG MODE 1) when it is deep COLD and
+its stamp is unbroken:
+- STAMP is the deep epoch + 1, which the old rule also uses;
+- GEN is the page key, the old generation;
+- two checks the old certificate covered as "widths and masks": OWN, its 64 tiles' h bits, and PAGES, the
+  residency of the 27 pages about its page.
+
+Then comes the fresh velocity-key check:
+- a 4h tile's face jobs run serially on its lane;
+- an h tile's 64 cells run on the workgroup, one tile at a time, until a key differs;
+- any change demotes the whole region (MODE 2).
+
+A replayed region's tiles publish their stored words: CROSS and GAP from the new RCROSS and RGAP, FIN from W1, the
+crossing count, and the reach from the stored keys at this step's dt. W0, W1, KEYS, NEAR and DEF stand. censusFine
+skips a replayed tile, and censusCoarse skips a whole slab when its four regions replay and a tile otherwise.
+
+- RCROSS and RGAP are needed because censusImportance edits CROSS and GAP in place; the old engine stored its
+  records apart (CC_RECORD).
+- CENSUS.RES is dropped: resMark has not read it since 258aae94. Every word after it moves down 160, and the stride
+  is now 19744 with RCROSS and RGAP (brick-abi.md §2.5; x8 compares the frozen words below FROZEN.RES).
+- Stated, as the old replay: the records are the last classification's at that step's dt (GAP's speed byte, the
+  fast test), and DEF is stored.
+
+Gates (check slot, HEAD 258aae94 + this; rc 0, no 00000206):
+- **The fixture gate** (brick-census-dam.test.ts, the real D's head on the old engine's captured states):
+  - The old replayed regions go in deep COLD, with stamp, records and decidedPrev. Tiers are COLD on them and their
+    neighbours, HOT elsewhere, which reproduces the old deep set.
+  - Frame 14: 17 of 17 regions replay and no other does; WANT is the old WANT on all 32768 tiles, the 1088 replayed
+    tiles included.
+  - Frame 43: 3 of 3 regions (192 tiles), with the same result.
+- **The reservoir under gravity** (brick-region-heat.test.ts, 50 steps): none of the 64 deep regions replays. Every
+  one holds its stamp, and every one has a moved key: the projection's residual moves its faces' bits each step,
+  largest 8.9e-6 m/s. Exact keys never hold in a liquid interior under gravity. The old fixture's replays were
+  regions whose keys were bit-identical.
+- **The reservoir at g = 0** (velocity exactly at rest):
+  - 256 of 400 regions replay, and censusCoarse skips 256 slab workgroups. No h tile is deep, so censusFine skips
+    none.
+  - The stored words stand.
+  - A fresh classification of the same state (every stamp cleared) differs in 0 of 114688 replayed record words,
+    with equal keys and WANT.
+  - A stored key moved on one 4h tile demotes that region alone, which takes the key afresh; 255 others replay.
+  - save/restore across the replay reproduces the modes, the records and WANT.
+- census 3/3 (D ≠ 0 and the oracle), x8 3/3, dam fixtures 2/2, engine 17/17, tiers 2/2, region heat 3/3, and the
+  replay test, which passed on its own run after the g = 0 split (a test-only change); unit 1836/0; types clean except
+  lane N's 3.
+
+Timing slot (`replay/tm/`, one run each; kernel ms/step over the fenced median's window):
+
+| | base 258aae94 | replay |
+|---|---|---|
+| reservoir, g: censusFine / censusCoarse / regionDeep | 0.000 / 0.408 / – | 0.015 / 0.495 / 0.109 |
+| reservoir, g: census total | 0.66 | 1.06 |
+| reservoir, g = 0: censusFine / censusCoarse / regionDeep | 0.022 / 0.517 / – | 0.007 / 0.066 / 0.138 |
+| reservoir, g = 0: census total | 0.71 | 0.31 |
+| dam: censusFine / censusCoarse / regionDeep | 1.223 / 0.306 / – | 1.245 / 0.284 / 0.066 |
+| dam: census total, window kernel mean | 1.98, 96.9 | 2.08, 96.2 |
+| dam unprofiled fenced median / mean / p95 | 100.0 / 97.1 / 104.1 | 100.8 / 97.9 / 101.8 |
+
+Replay saves 0.45 ms of censusCoarse where it fires and costs regionDeep's launch, 0.07–0.14 ms. On the dam and on a
+reservoir under gravity it does not fire. The reservoir's censusDecide moved 0.09 → 0.34 ms in this one run, and
+that kernel's code did not change.
+
+**Open (for the coordinator):** exact-key replay only pays where the velocity is bitwise still. A tolerant key
+check is the one change that would make it fire in a liquid interior. It would compare each velocity word's effect
+on the records (the reach, GAP's speed byte, the fast test, the approach and boundary scores) against the move. That
+is a new certificate and a ruling, not a port.

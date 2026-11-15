@@ -38,13 +38,15 @@
  *
  * Deviations, all stated:
  * - Deep COLD (the real D, brick-region-heat.wgsl.ts; tiered only, all-h keeps D = 0): the region heat, spread and
- *   deep passes run at the head (regionHeat and regionSpread after censusBegin, the deep pass in censusCoarse) and
+ *   deep passes run at the head (regionHeat and regionSpread after censusBegin, then regionDeep) and
  *   again after the claims (certError; the census scheduled alone, `heat` false, keeps D = 0); censusDecide keeps a deep tile's CC_DECIDED and CC_STATIC bits (DEC, STAT) unless
- *   it is joined, as decideTile (l.2849), and every other tile's bits are its band and its join. Replay is not ported:
- *   every tile is classified every census, so a deep tile's records are this census's, where the old replay published
- *   the ones its last classification stored (a deep COLD region's φ, widths and masks are the same; its velocity keys
- *   are checked, l.2014). The dam's real census (brick-census-dam.test.ts, frames 14 and 43): every deep tile replayed
- *   decidedPrev = 0. Rulings (coordinator, 2026-11-15): no cold freeze (its terms umColdError, umColdTermOf are
+ *   it is joined, as decideTile (l.2849), and every other tile's bits are its band and its join. Replay (regionList
+ *   and replay, l.1971-2089) is regionDeep's: a deep COLD region whose stamp is unbroken replays its tiles' stored
+ *   words unless a velocity key moved, and censusFine and censusCoarse skip it. Its stamp holds, beside the old deep
+ *   epoch and generation (here the page key), the region's h bits and the residency of the 27 pages about its page,
+ *   which the old certificate covered as widths and masks. Its records are the last classification's, at that
+ *   step's dt (the speed byte of GAP, the fast test), as the old replay's. DEF is stored too. The dam's real census
+ *   (brick-census-dam.test.ts, frames 14 and 43): every deep tile replayed decidedPrev = 0. Rulings (coordinator, 2026-11-15): no cold freeze (its terms umColdError, umColdTermOf are
  *   identically 0: nothing is omitted), and lcAdvect's COLD φ hold stays off; pressureDelta is lane P's per-region
  *   max |Δ∇p| (pmgC PDELTA, +Inf where not published: unknown fails HOT); a 4h tile with no F slot keeps its own heat
  *   word (HEAT4, here every tile's), updated in censusDecide by the old rule. M3 question, to be measured, not
@@ -106,14 +108,13 @@ export const CENSUS_POLICY = {
 /** Scratch words a C slot (the lane buffer `census`): per tile its velocity keys, classify's importance words,
  * the final word 1, its crossing cells and gap; per page its bound cubes and interface bits; per tile its near word
  * (classify's near, uniform-mixed-dynamic.ts l.1277: h-owned, or a 4h corner within 4 tiles' cells of the surface);
- * per page the residency records (brick-residency.wgsl.ts: 4 words a 16-cell region and stage, the old pageSeed's);
  * per page its moving-shape bits (MOV, 16 words as REQ's: bit i, tile i's FIN holds crossing, required and the shape
  * trigger and its keys' speed is moving, movingShapeNear's tile test; censusImportance's); per tile its frame-plan
  * motion (DEF, 4 words: the mean extended face velocity, xyz, and the face span, f32; localSpeed's, PLAN below),
  * which censusFine (h tiles) and censusCoarse (4h tiles) write and censusDecide's deformation reads. */
 export const CENSUS = {
-  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, RES: 7168, DEF: 7328,
-  TC: 9376, HEAT4: 17568, REG: 18080, DEC: 18336, STAT: 18352, STRIDE: 18368,
+  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, DEF: 7168,
+  TC: 9216, HEAT4: 17408, REG: 17920, DEC: 18176, STAT: 18192, RCROSS: 18208, RGAP: 19232, STRIDE: 19744,
 } as const;
 /** The real D's words (brick-region-heat.wgsl.ts), in the census buffer after DEF:
  * - TC, 16 words a tile: the frame plan's certificate (localSpeed, uniform-mixed-frame-plan.ts l.269), written after
@@ -122,10 +123,13 @@ export const CENSUS = {
  *   owner whose corners are not all below -(7h + 3 dt speed): tuReaderClass 2), 9..14 the tileVelocity order words;
  * - HEAT4, a word a tile: the activity heat (f32; the old particleHeat, NB_ACTIVITY_HEAT), every tile's, censusDecide's;
  * - REG, 32 words a region (RG below), the old region heat state and its certificate's reductions;
- * - DEC and STAT, 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits, carried between censuses. */
+ * - DEC and STAT, 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits, carried between censuses;
+ * - RCROSS and RGAP, as CROSS and GAP: the tile's crossing cells and gap as its classification stored them (the old
+ *   CC_RECORD words), before censusImportance edits CROSS and GAP in place. A replayed tile publishes them. */
 export const RG = {
   HEAT: 0, DISP: 1, KEY: 2, PENDING: 3, BITS: 4, HOLDS: 5, STILL: 6, TIER: 7, DEEP: 8, EPOCH: 9, DEEP_EPOCH: 10, STAMP: 11,
-  CKEY: 16, VEL: 17, RATE: 23, ACCEL: 24, ERROR: 25, RELEVANT: 26, CLASS: 27, FINE: 28, WORDS: 32,
+  MODE: 12, GEN: 13, OWN: 14, CKEY: 16, VEL: 17, RATE: 23, ACCEL: 24, ERROR: 25, RELEVANT: 26, CLASS: 27, FINE: 28, PAGES: 29,
+  WORDS: 32,
 } as const;
 /** The lane buffers setCensus binds: `census`, CENSUS.STRIDE words a C slot. */
 export const brickCensusBuffers = (L: BrickLayout): Record<string, number> => ({ census: CENSUS.STRIDE * L.cap.c });
@@ -857,6 +861,7 @@ fn ncStore(cs:u32,i:u32,keys:array<u32,6>,w0:u32,w1:u32,cross:vec2u,gap:u32,near
   census[o+${CENSUS.W0}u+i]=w0;census[o+${CENSUS.W1}u+i]=w1;census[o+${CENSUS.FIN}u+i]=w1;
   census[o+${CENSUS.CROSS}u+2u*i]=cross.x;census[o+${CENSUS.CROSS}u+2u*i+1u]=cross.y;
   census[o+${CENSUS.GAP}u+i]=gap;
+  census[o+${CENSUS.RCROSS}u+2u*i]=cross.x;census[o+${CENSUS.RCROSS}u+2u*i+1u]=cross.y;census[o+${CENSUS.RGAP}u+i]=gap;
 }
 fn ncStoreIdentity(cs:u32,i:u32){ncStore(cs,i,ncIdentityKeys(),0u,0u,vec2u(0u),0xffffffffu,false);}
 // near: classify's near flag (l.1277), width == 1 or a corner within 4 width cells of the surface (class flag 8).
@@ -967,7 +972,7 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
 
   // censusFine: classify (l.2091), eight workgroups an F brick of F_ALL (X8), workgroup j its tile j (ncCorner(j, 2))
   // when h-owned, a lane a cell. Every workgroup word is the tile's; the brick's tiles run side by side.
-  const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + /* wgsl */`
+  const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + REGION + /* wgsl */`
 var<workgroup> wgFlag:u32;
 // The frame plan's motion (PLAN): each cell's mean face velocity, and the tile's tileVelocity words.
 var<workgroup> planValues:array<vec3f,64>;
@@ -1048,7 +1053,12 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
   let g=nbGroup(wid);let entry=g>>3u;let j=g&7u;
   if(lane==0u){
     wgFlag=0u;atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);
-    if(entry<nbListCount(NB_LIST_F_ALL)){wgFlag=select(0u,1u,nbTileOwnerH(2*nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY))+vec3i(ncCorner(j,2u))));}
+    if(entry<nbListCount(NB_LIST_F_ALL)){
+      let t=2*nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY))+vec3i(ncCorner(j,2u));
+      wgFlag=select(0u,1u,nbTileOwnerH(t));
+      // A replayed region's tile (regionDeep, cfg.w = 1) keeps its stored words.
+      if(wgFlag!=0u&&cfg.w==1u&&census[rgAt(nbCSlotOfPage(t>>vec3u(3u)),rgOfTile(nbTileIndex(t)))+RG_MODE]==1u){wgFlag=0u;}
+    }
   }
   if(workgroupUniformLoad(&wgFlag)==0u){return;}
   let brick=nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY));
@@ -1145,7 +1155,15 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
 @compute @workgroup_size(64) fn censusCoarse(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   ncInit();
   let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
-  if(lane==0u){wgFlag=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);}
+  if(lane==0u){
+    wgFlag=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);
+    // A slab whose four regions all replay (regionDeep, cfg.w = 1) keeps its stored words.
+    if(wgFlag!=0u&&cfg.w==1u){
+      let at=rgAt(nbListSlot(NB_LIST_C_ALL,e),4u*((r>>2u)&1u));var whole=true;
+      for(var q=0u;q<4u;q++){whole=whole&&census[at+RG_WORDS*q+RG_MODE]==1u;}
+      if(whole){wgFlag=0u;}
+    }
+  }
   if(workgroupUniformLoad(&wgFlag)==0u){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);
   {
@@ -1159,6 +1177,7 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
     let i=lane+64u*r;let t=xTileOf(cs,i);
     var c=ncEmptyClass();var classified=false;
     if(!nbTileInLattice(t)){ncStoreIdentity(cs,i);}
+    else if(cfg.w==1u&&census[rgAt(cs,rgOfTile(i))+RG_MODE]==1u){}
     else if(nbTileH(cs,i)){
       let b=t>>vec3u(1u);
       if(nbFSlotOfBrick(b)>=NB_SEAM){${tiered ? "nbFail(NB_FAIL_TIER,nbKey(b));" : ""}ncStoreIdentity(cs,i);}
@@ -1231,10 +1250,6 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
     workgroupBarrier();
   }
   if(lane==0u){ncFlush();}
-  // The head's deep pass (rhDeep, cfg.w = 1: a tiered step's head with the real D), region r of the page: its own launch in the old
-  // engine; here the spread's barrier before it is the one censusCoarse already follows, and the census's first
-  // reader of the deep flags (censusDecide) follows censusCoarse's barrier.
-  if(lane==0u&&cfg.w==1u){rgDeep(cs,r,true);}
 }`);
 
   // censusCubes: boundCubes (l.2625), a workgroup a page of C_ALL.
@@ -1437,7 +1452,125 @@ var<workgroup> wgGo:u32;
   }
 }`);
 
-  return { censusBegin, censusFine, censusCoarse, censusCubes, censusImportance, censusDecide, censusWant };
+  // regionDeep: the head's deep pass (rhDeep) and the replay mode (regionList and replay, l.1971-2089), eight
+  // workgroups a page of C_ALL (X8), workgroup r its region r, a lane a tile (rgTile). Its own launch: the deep
+  // pass reads every neighbour's tier after the spread's barrier, and censusFine and censusCoarse read the mode.
+  // A region replays (RG_MODE 1) when it is deep COLD and the words its last classification stamped are this
+  // census's: STAMP the deep epoch + 1 (unbroken since), GEN its page key, OWN its tiles' h bits, PAGES the
+  // residency of the 27 pages about its page. Otherwise it classifies (mode 2) and stamps them (STAMP 0 unless
+  // deep). Then the key check (l.1999): the deep epoch certifies φ, widths and masks, not the velocity, so a
+  // candidate's tiles' keys are taken afresh as classification takes them (a 4h tile's face jobs, a lane serially;
+  // an h tile's cells, the workgroup one tile at a time until a key differs), and any change demotes the region.
+  // A replayed region's tiles publish their stored words as classification left them: CROSS and GAP from RCROSS
+  // and RGAP, FIN from W1 (W0, W1, KEYS, NEAR and DEF stand), with the crossing count and the reach, the reach
+  // from the stored keys at this step's dt, as ncFinishTile takes it.
+  const regionDeep = k("regionDeep", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + REGION + /* wgsl */`
+var<workgroup> wgFlag:u32;
+var<workgroup> rpGo:u32;
+var<workgroup> rpCount:u32;
+var<workgroup> rpOwn:array<atomic<u32>,2>;
+var<workgroup> rpStale:atomic<u32>;
+var<workgroup> rpFine:atomic<u32>;
+var<workgroup> rpFineTile:array<u32,64>;
+var<workgroup> rpLow:array<atomic<u32>,3>;
+var<workgroup> rpHigh:array<atomic<u32>,3>;
+fn rpPages(cs:u32)->u32{
+  let p=ncSlotPage(cs);var m=0u;
+  for(var k=0u;k<27u;k++){if(ncPageSlot(p+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1))!=NB_NONE){m|=1u<<k;}}
+  return m;
+}
+fn rpMoved(cs:u32,i:u32,low:array<u32,3>,high:array<u32,3>)->bool{
+  let k=ncKeys(cs,i);
+  return k[0]!=low[0]||k[1]!=low[1]||k[2]!=low[2]||k[3]!=high[0]||k[4]!=high[1]||k[5]!=high[2];
+}
+// cqBound, serially.
+fn rpBound(anchor:vec3i,axis:u32,low:ptr<function,array<u32,3>>,high:ptr<function,array<u32,3>>){
+  if(ncFaceLow(anchor,axis)){return;}
+  let u=ncFace(anchor,axis);let finite=abs(u)<=3.0e38;
+  (*low)[axis]=min((*low)[axis],ncOrderKey(select(-3.0e38,u,finite)));(*high)[axis]=max((*high)[axis],ncOrderKey(select(3.0e38,u,finite)));
+}
+// A 4h tile's keys as censusCoarse's face jobs take them (cqFaceProbe; one patch, or sixteen beside an h cell).
+fn rpMoved4(cs:u32,i:u32)->bool{
+  let top=ncOrderKey(3.0e38);let bottom=ncOrderKey(-3.0e38);
+  var low=array<u32,3>(top,top,top);var high=array<u32,3>(bottom,bottom,bottom);
+  let origin=4*xTileOf(cs,i);
+  for(var j=0u;j<6u;j++){
+    let axis=j/2u;let up=(j&1u)!=0u;
+    var probe=origin;probe[axis]+=select(-1,4,up);
+    var nw=0u;if(ncCellKind(probe)==0u){nw=select(4u,1u,ncCellOwnerH(probe));}
+    var anchor=probe;anchor[axis]-=select(0,1,up);
+    if(nw!=1u){rpBound(anchor,axis,&low,&high);}
+    else{for(var part=0u;part<16u;part++){var a=anchor;a[(axis+1u)%3u]+=i32(part%4u);a[(axis+2u)%3u]+=i32(part/4u);rpBound(a,axis,&low,&high);}}
+  }
+  return rpMoved(cs,i,low,high);
+}
+@compute @workgroup_size(64) fn regionDeep(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  ncInit();
+  let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
+  if(lane==0u){wgFlag=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));}
+  if(workgroupUniformLoad(&wgFlag)==0u){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,e);let at=rgAt(cs,r);let i=rgTile(r,lane);let h=nbTileH(cs,i);
+  if(lane<2u){atomicStore(&rpOwn[lane],0u);}
+  if(lane==0u){atomicStore(&rpStale,0u);atomicStore(&rpFine,0u);atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);}
+  workgroupBarrier();
+  if(h){atomicOr(&rpOwn[lane>>5u],1u<<(lane&31u));}
+  workgroupBarrier();
+  if(lane==0u){
+    var mode=2u;
+    if(rgInLattice(rgCoord(cs,r))){
+      rgDeep(cs,r,true);
+      let deep=census[at+RG_DEEP]!=0u;let stamp=select(0u,census[at+RG_DEEP_EPOCH]+1u,deep);
+      let own0=atomicLoad(&rpOwn[0]);let own1=atomicLoad(&rpOwn[1]);let pages=rpPages(cs);let gen=rgKey(cs);
+      if(deep&&census[at+RG_STAMP]==stamp&&census[at+RG_GEN]==gen&&census[at+RG_OWN]==own0&&census[at+RG_OWN+1u]==own1&&census[at+RG_PAGES]==pages){mode=1u;}
+      else{census[at+RG_STAMP]=stamp;census[at+RG_GEN]=gen;census[at+RG_OWN]=own0;census[at+RG_OWN+1u]=own1;census[at+RG_PAGES]=pages;}
+    }
+    wgFlag=mode;
+  }
+  if(workgroupUniformLoad(&wgFlag)==1u){
+    // The key check. An h tile with no F brick stored the identity (censusCoarse).
+    if(h){
+      if(nbFSlotOfBrick(xTileOf(cs,i)>>vec3u(1u))>=NB_SEAM){if(rpMoved(cs,i,array<u32,3>(0xffffffffu,0xffffffffu,0xffffffffu),array<u32,3>(0u,0u,0u))){atomicStore(&rpStale,1u);}}
+      else{rpFineTile[atomicAdd(&rpFine,1u)]=i;}
+    }else if(rpMoved4(cs,i)){atomicStore(&rpStale,1u);}
+    workgroupBarrier();
+    if(lane==0u){rpCount=atomicLoad(&rpFine);}
+    let fine=workgroupUniformLoad(&rpCount);
+    for(var q=0u;q<fine;q++){
+      if(lane==0u){rpGo=atomicLoad(&rpStale);}
+      if(workgroupUniformLoad(&rpGo)!=0u){break;}
+      if(lane<3u){atomicStore(&rpLow[lane],0xffffffffu);atomicStore(&rpHigh[lane],0u);}
+      workgroupBarrier();
+      let ti=rpFineTile[q];var c=ncEmptyClass();ncOwnerBounds1(xTileOf(cs,ti),lane,&c);
+      for(var a=0u;a<3u;a++){atomicMin(&rpLow[a],c.low[a]);atomicMax(&rpHigh[a],c.high[a]);}
+      workgroupBarrier();
+      if(lane==0u){
+        let low=array<u32,3>(atomicLoad(&rpLow[0]),atomicLoad(&rpLow[1]),atomicLoad(&rpLow[2]));
+        let high=array<u32,3>(atomicLoad(&rpHigh[0]),atomicLoad(&rpHigh[1]),atomicLoad(&rpHigh[2]));
+        if(rpMoved(cs,ti,low,high)){atomicStore(&rpStale,1u);}
+      }
+    }
+    workgroupBarrier();
+    if(lane==0u){wgFlag=select(1u,2u,atomicLoad(&rpStale)!=0u);}
+  }
+  let mode=workgroupUniformLoad(&wgFlag);
+  if(lane==0u){census[at+RG_MODE]=mode;}
+  if(mode!=1u){return;}
+  let o=NC_S*cs;
+  census[o+${CENSUS.CROSS}u+2u*i]=census[o+${CENSUS.RCROSS}u+2u*i];census[o+${CENSUS.CROSS}u+2u*i+1u]=census[o+${CENSUS.RCROSS}u+2u*i+1u];
+  census[o+${CENSUS.GAP}u+i]=census[o+${CENSUS.RGAP}u+i];
+  let w1=ncW1(cs,i);census[o+${CENSUS.FIN}u+i]=w1;
+  if((w1&NC_CROSSES)!=0u){atomicAdd(&wgCrossing,1u);}
+  let keys=ncKeys(cs,i);let scale=ncDt()/ncH();var reach=0.0;
+  for(var a=0u;a<3u;a++){
+    if(keys[a]!=0xffffffffu){reach=max(reach,abs(ncOrderValue(keys[a])*scale));}
+    if(keys[3u+a]!=0u){reach=max(reach,abs(ncOrderValue(keys[3u+a])*scale));}
+  }
+  atomicMax(&wgReach,bitcast<u32>(reach));
+  workgroupBarrier();
+  if(lane==0u){ncFlush();}
+}`);
+
+  return { censusBegin, regionDeep, censusFine, censusCoarse, censusCubes, censusImportance, censusDecide, censusWant };
 }
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
@@ -1448,12 +1581,14 @@ var<workgroup> wgGo:u32;
  * deep pass and decide's deep keep and activity heat. Without it D = 0 (the census alone, as the frozen passes). */
 export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false) {
   const c = brickCensusKernels(L, { tiered });
-  const slabs = censusListArgs(cAll, "X8");
+  const slabs = censusListArgs(cAll, "X8"), replay = tiered && keep && heat;
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
-    { kernel: c.censusFine, dispatch: censusListArgs(fAll, "X8") },
-    // cfg.w = 1 (a tiered step's head with the real D): censusCoarse also runs the head's deep pass (rgDeep).
-    { kernel: c.censusCoarse, dispatch: slabs, w: tiered && keep && heat ? 1 : 0 },
+    // A tiered step's head with the real D: the deep pass and the replay mode (regionDeep), and censusFine and
+    // censusCoarse keep a replayed region's words (cfg.w = 1).
+    ...(replay ? [{ kernel: c.regionDeep, dispatch: slabs }] : []),
+    { kernel: c.censusFine, dispatch: censusListArgs(fAll, "X8"), w: replay ? 1 : 0 },
+    { kernel: c.censusCoarse, dispatch: slabs, w: replay ? 1 : 0 },
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
     { kernel: c.censusImportance, dispatch: slabs },
     { kernel: c.censusDecide, dispatch: slabs, z: tiered ? 1 : 0, w: keep ? (tiered && heat ? 3 : 1) : 0 },

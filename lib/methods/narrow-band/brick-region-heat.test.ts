@@ -1,7 +1,7 @@
 // The real D on the engine (lane E, brick-region-heat.wgsl.ts): the tiered dam and a still reservoir on lane F's
 // tiered stages and lane P's composite MGPCG.
 //
-// CPU: the head runs regionHeat and regionSpread between censusBegin and censusCoarse (which takes the head's deep),
+// CPU: the head runs regionHeat and regionSpread between censusBegin and regionDeep (the head's deep and replay mode),
 // and the certificate (certCoarse, certFine, certError) after the transfer; without P's PDELTA the heat binds no pmgC.
 //
 // GPU (WEBGPU_NODE_MODULE):
@@ -12,12 +12,17 @@
 //   regions appear, the census keeps their tiles' CC_DECIDED and CC_STATIC words, and no region next to a non-COLD
 //   one is deep;
 // - save and restore: a restored engine's buffers equal the saved words, and the steps after a restore reproduce the
-//   heat, tier and deep words of the same steps run straight on.
+//   heat, tier and deep words of the same steps run straight on;
+// - replay on the reservoir: under gravity every deep region holds its stamp and is demoted (the projection's
+//   residual moves its faces' bits each step); without gravity (velocity exactly at rest) deep regions replay
+//   (censusFine and censusCoarse skip their workgroups) with their stored words standing, a fresh classification of
+//   the same state has the same keys and WANT, a stored key moved (an h tile's, a 4h tile's) demotes its region,
+//   which takes the key afresh, and a restored step replays the same.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BrickLayout } from "./brick-abi";
+import { BrickLayout, LIST } from "./brick-abi";
 import { BrickEngine, type BrickEngineState } from "./brick-engine";
-import { CENSUS, REGION_H, RG } from "./brick-census.wgsl";
+import { CENSUS, REGION_H, RG, brickCensusSchedule } from "./brick-census.wgsl";
 import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
 import { fluidStagesAt } from "./brick-fluid-stages";
 import { compositeMGPCG } from "./brick-pressure-solver";
@@ -39,6 +44,10 @@ test("region heat: without P's PDELTA the heat binds no pmgC; the head and certi
   assert.deepEqual(s.head.map(p => p.kernel.label), ["regionHeat", "regionSpread"]);
   assert.deepEqual(s.cert.map(p => p.kernel.label), ["certCoarse", "certFine", "certError"]);
   assert.ok(!s.kernels.regionHeat.bindings.some(b => b.name === "pmgC"));
+  const g1 = (k: number) => ({ indirect: k });
+  assert.deepEqual(brickCensusSchedule(L, g1, LIST.C_ALL, LIST.F_ALL, true, true, true).slice(0, 4).map(p => [p.kernel.label, p.w ?? 0]),
+    [["censusBegin", 0], ["regionDeep", 0], ["censusFine", 1], ["censusCoarse", 1]]);
+  assert.ok(!brickCensusSchedule(L, g1, LIST.C_ALL, LIST.F_ALL, true, true, false).some(p => p.kernel.label === "regionDeep"));
   const withP = brickRegionHeatSchedule(L, { pdelta: 0 });
   assert.ok(withP.kernels.regionHeat.bindings.some(b => b.name === "pmgC"));
 });
@@ -180,5 +189,114 @@ test("region heat (GPU): a still reservoir goes deep, the census keeps its decid
     assert.equal(replay.regions.size, straight.regions.size);
     assert.equal(tierDiff, 0); assert.equal(heatDiff, 0);
     e.destroy();
+  });
+});
+
+test("census replay (GPU): under gravity a still reservoir's deep regions hold their stamps and demote on the velocity's moved keys; without it they replay their stored words, a moved key demotes its region, and save/restore carries the mode", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("census replay reservoir", async device => {
+   for (const g of [9.81, 0]) {
+    const { setup: dam, values } = damSetup();
+    const N = dam.lattice;
+    const setup: BrickSceneSetup = { ...dam, gravity_mps2: g ? dam.gravity_mps2 : [0, 0, 0], liquid: [{ lo: [-8, -8, -8], hi: [N[0] + 8, 40, N[2] + 8] }] };
+    const e = await engineFor(device, setup, values);
+    e.advance(50); await e.assertHealthy();
+    const saved: BrickEngineState = await e.save(), census0 = saved.buffers.get("census")!;
+    const S = CENSUS.STRIDE, reg = (cs: number, r: number) => S * cs + CENSUS.REG + RG.WORDS * r;
+    const tileOf = (r: number, l: number) => ((l & 3) + 4 * (r & 1)) | ((((l >> 2) & 3) + 4 * ((r >> 1) & 1)) << 3) | (((l >> 4) + 4 * (r >> 2)) << 6);
+    const runFrom = async (state: BrickEngineState) => {
+      await e.restore(state); e.advance(1); await e.assertHealthy();
+      return { census: await e.read("census"), s: await snapshot(e) };
+    };
+    const wantOf = (s: Awaited<ReturnType<typeof snapshot>>) => [...s.pages.values()].sort((a, b) => a - b).map(cs => [...s.set.subarray(e.layout.set.want + 16 * cs, e.layout.set.want + 16 * cs + 16)]);
+    const cmask = (cs: number, i: number, dir: Uint32Array) => (dir[e.layout.dir.cmask + 16 * cs + (i >> 5)]! >>> (i & 31)) & 1;
+    const A = await runFrom(saved);
+    const replayed: [number, number][] = [];
+    let hTiles = 0, slabs = 0;
+    for (const cs of A.s.pages.values()) {
+      for (let r = 0; r < 8; r++) if (A.census[reg(cs, r) + RG.MODE] === 1) {
+        replayed.push([cs, r]);
+        for (let l = 0; l < 64; l++) hTiles += cmask(cs, tileOf(r, l), A.s.dir);
+      }
+      for (let z = 0; z < 8; z++) if ([0, 1, 2, 3].every(q => A.census[reg(cs, 4 * (z >> 2) + q) + RG.MODE] === 1)) slabs++;
+    }
+    console.log(`census replay, g = ${g}: ${replayed.length} replayed regions of ${8 * A.s.pages.size} (deep ${A.s.header[REGION_H.HEAT_DEEP]}); censusFine skips ${hTiles} h-tile workgroups, censusCoarse ${slabs} slab workgroups`);
+    // Why a deep region classifies: its stamp broke (deep epoch, page, h bits or pages), or a key moved (the
+    // velocity's bits since the last classification; the largest move in m/s).
+    const ov = (k: number) => { const b = k & 0x80000000 ? k & 0x7fffffff : ~k >>> 0; return f32(b); };
+    let deepRegions = 0, stampHeld = 0, keyMoved = 0, moveMax = 0;
+    for (const cs of A.s.pages.values()) for (let r = 0; r < 8; r++) {
+      const at = reg(cs, r);
+      if (A.census[at + RG.DEEP] !== 1 || A.census[at + RG.MODE] === 1) continue;
+      deepRegions++;
+      if (census0[at + RG.DEEP] === 1 && census0[at + RG.STAMP] === census0[at + RG.DEEP_EPOCH]! + 1 && A.census[at + RG.DEEP_EPOCH] === census0[at + RG.DEEP_EPOCH]
+        && [RG.GEN, RG.OWN, RG.OWN + 1, RG.PAGES].every(w => A.census[at + w] === census0[at + w])) stampHeld++;
+      let moved = false;
+      for (let l = 0; l < 64; l++) for (let k = 0; k < 6; k++) {
+        const w = S * cs + CENSUS.KEYS + 6 * tileOf(r, l) + k, a = census0[w]!, b = A.census[w]!;
+        if (a !== b) { moved = true; const d = Math.abs(ov(a) - ov(b)); if (Number.isFinite(d)) moveMax = Math.max(moveMax, d); }
+      }
+      if (moved) keyMoved++;
+    }
+    console.log(`census replay, g = ${g}: ${deepRegions} deep regions classify: stamp held ${stampHeld}, a key moved ${keyMoved} (largest move ${moveMax.toExponential(2)} m/s)`);
+    if (g) {
+      // The projection's residual moves every interior face's bits each step: every deep region is demoted.
+      assert.ok(deepRegions > 0); assert.equal(stampHeld, deepRegions); assert.equal(keyMoved, deepRegions); assert.equal(replayed.length, 0);
+      e.destroy(); continue;
+    }
+    assert.ok(replayed.length > 0, "a still reservoir replays");
+    // A replayed tile's stored words stand, and it publishes RCROSS and RGAP's words before the importance.
+    for (const [cs, r] of replayed) {
+      assert.equal(A.census[reg(cs, r) + RG.DEEP], 1);
+      for (let l = 0; l < 64; l++) {
+        const i = tileOf(r, l), o = S * cs;
+        for (const [w, n] of [[CENSUS.KEYS, 6], [CENSUS.W0, 1], [CENSUS.W1, 1], [CENSUS.NEAR, 1], [CENSUS.DEF, 4], [CENSUS.RCROSS, 2], [CENSUS.RGAP, 1]] as const)
+          for (let k = 0; k < n; k++) assert.equal(A.census[o + w + n * i + k], census0[o + w + n * i + k], `replayed tile ${cs}.${i} word ${w}`);
+      }
+    }
+    // Fresh: every stamp cleared, every region classifies. The keys are the replay's; WANT is the same.
+    const fresh = new Uint32Array(census0);
+    for (const cs of A.s.pages.values()) for (let r = 0; r < 8; r++) fresh[reg(cs, r) + RG.STAMP] = 0;
+    const B = await runFrom({ ...saved, buffers: new Map([...saved.buffers, ["census", fresh]]) });
+    let differ = 0, words = 0;
+    for (const [cs, r] of replayed) {
+      assert.equal(B.census[reg(cs, r) + RG.MODE], 2, "a cleared stamp classifies");
+      for (let l = 0; l < 64; l++) {
+        const i = tileOf(r, l), o = S * cs;
+        for (let k = 0; k < 6; k++) assert.equal(B.census[o + CENSUS.KEYS + 6 * i + k], A.census[o + CENSUS.KEYS + 6 * i + k], `fresh keys of tile ${cs}.${i}`);
+        for (const [w, n] of [[CENSUS.W0, 1], [CENSUS.W1, 1], [CENSUS.FIN, 1], [CENSUS.CROSS, 2], [CENSUS.GAP, 1], [CENSUS.NEAR, 1]] as const)
+          for (let k = 0; k < n; k++) { words++; if (B.census[o + w + n * i + k] !== A.census[o + w + n * i + k]) differ++; }
+      }
+    }
+    console.log(`census replay: against a fresh classification, ${differ} of ${words} replayed record words differ`);
+    assert.deepEqual(wantOf(B.s), wantOf(A.s), "WANT with replay is the fresh classification's");
+    // Demotion: a replayed region with one tile's stored key moved (an h tile's when one replays, and a 4h tile's)
+    // classifies, and its keys are fresh again; the other replayed regions replay.
+    const pick = (h: number) => {
+      for (const [cs, r] of replayed) for (let l = 0; l < 64; l++) if (cmask(cs, tileOf(r, l), A.s.dir) === h) return { cs, r, i: tileOf(r, l) };
+      return undefined;
+    };
+    const moved = [pick(0), pick(1)].filter(p => p !== undefined).filter((p, k, a) => a.findIndex(q => q.cs === p.cs && q.r === p.r) === k);
+    const bent = new Uint32Array(census0);
+    for (const p of moved) bent[S * p.cs + CENSUS.KEYS + 6 * p.i] ^= 1;
+    const D = await runFrom({ ...saved, buffers: new Map([...saved.buffers, ["census", bent]]) });
+    for (const p of moved) {
+      assert.equal(D.census[reg(p.cs, p.r) + RG.MODE], 2, `the moved key's region ${p.cs}.${p.r} (${cmask(p.cs, p.i, A.s.dir) ? "h" : "4h"}) is demoted`);
+      assert.equal(D.census[S * p.cs + CENSUS.KEYS + 6 * p.i], A.census[S * p.cs + CENSUS.KEYS + 6 * p.i], "its classification takes the key afresh");
+    }
+    const others = replayed.filter(([cs, r]) => !moved.some(p => p.cs === cs && p.r === r));
+    assert.ok(others.every(([cs, r]) => D.census[reg(cs, r) + RG.MODE] === 1), "the other regions replay");
+    console.log(`census replay: demoted ${moved.map(p => `${p.cs}.${p.r} (${cmask(p.cs, p.i, A.s.dir) ? "h" : "4h"})`).join(", ")}; ${others.length} others replay`);
+    // Save/restore across replay: the restored step replays the same regions with the same words and WANT.
+    const C = await runFrom(saved);
+    for (const cs of A.s.pages.values()) for (let r = 0; r < 8; r++) assert.equal(C.census[reg(cs, r) + RG.MODE], A.census[reg(cs, r) + RG.MODE]);
+    for (const [cs, r] of replayed) for (let l = 0; l < 64; l++) {
+      const i = tileOf(r, l), o = S * cs;
+      for (const [w, n] of [[CENSUS.KEYS, 6], [CENSUS.W1, 1], [CENSUS.FIN, 1], [CENSUS.CROSS, 2], [CENSUS.GAP, 1]] as const)
+        for (let k = 0; k < n; k++) assert.equal(C.census[o + w + n * i + k], A.census[o + w + n * i + k]);
+    }
+    assert.deepEqual(wantOf(C.s), wantOf(A.s));
+    e.destroy();
+   }
   });
 });

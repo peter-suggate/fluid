@@ -44,8 +44,9 @@ async function compareSchedules(e: BrickEngine, L: BrickLayout, tiered: boolean,
   const neu = await runOne(brickCensusSchedule(L, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep));
   const diff: string[] = [];
   const note = (s: string) => { if (diff.length < 20) diff.push(s); };
-  // The frozen census's words at its own stride; the live census adds the plan words (DEF) after them.
-  for (let cs = 0; cs < L.cap.c; cs++) for (let k = 0; k < FROZEN.STRIDE; k++) {
+  // The frozen census's words before its RES (the residency's old words, gone since resMark); the live census puts
+  // the plan words (DEF) there.
+  for (let cs = 0; cs < L.cap.c; cs++) for (let k = 0; k < FROZEN.RES; k++) {
     if (k >= CENSUS.MOV && k < CENSUS.MOV + 16) continue;
     const a = old.census[FROZEN.STRIDE * cs + k]!, b = neu.census[CENSUS.STRIDE * cs + k]!;
     if (a !== b) note(`census slot ${cs} +${k}: ${a.toString(16)} vs ${b.toString(16)}`);

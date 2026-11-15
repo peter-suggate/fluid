@@ -16,7 +16,9 @@
 // - Deep COLD (D = 0, a stated deviation): the old census replays a deep COLD region's records
 //   and keeps its tiles' last decision (decidedPrev); setCensus classifies and decides them anew.
 //   Their WANT and TRIG are reported, and kept out of the verdict; a non-deep tile whose stencil
-//   reads a deep tile is reported with its distance to it.
+//   reads a deep tile is reported with its distance to it. Then the replay (regionDeep, D on): the
+//   old replayed regions go in deep COLD with their stamps, records and decidedPrev, every region's
+//   mode must be the old one, and WANT the old WANT on every tile.
 // - Split vertices: the old engine holds a 4-aligned vertex of an h tile's closure twice, in the h
 //   store (umLoadFine reads it) and the base (umLoadCorner); at a few vertices the two disagree
 //   (fixture split/splitPhi), and an h tile's scores read both. The brick storage holds one value,
@@ -33,8 +35,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, REC, RING } from "./brick-abi";
-import { CENSUS, CENSUS_H, brickCensusSchedule } from "./brick-census.wgsl";
+import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, REC, RING } from "./brick-abi";
+import { CENSUS, CENSUS_H, RG, brickCensusSchedule } from "./brick-census.wgsl";
 import { decodeCensusFixture, type CensusFixtureMeta } from "./parity/census-fixture";
 import { ownerOf, storedFaces, storedVertices, type V3 } from "./parity/remap-fixture";
 
@@ -262,8 +264,66 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       variants: results.map(({ variant, tallies, counters, wantNew, wantOld, thinAlone }) => ({ variant, want: { new: wantNew, old: wantOld }, thinAlone, counters,
         fields: Object.fromEntries([...tallies].map(([k, t]) => [k, { compared: t.compared, equal: t.equal, deep: t.deep, nonDeep: t.nonDeep, splitNear: t.split, examples: t.examples.length ? t.examples : undefined }])) })),
     };
-    console.log(JSON.stringify(report, null, 1));
+    // ---- Replay (regionDeep, the real D's head): the old engine's replayed regions (mode 1) go in deep COLD with
+    // their last classification's stamp and records, and replay. Tiers: COLD on the deep regions and their
+    // neighbours (an old deep region's neighbours were COLD, and a region the old engine held not deep had a
+    // neighbour that was not, so the deep set is the old one), HOT elsewhere. Records: W0, KEYS, CROSS and GAP are the
+    // old engine's (its replay published them; CROSS and GAP after its importance, which a replay's importance edits
+    // to the same words); W1 before the importance, NEAR and DEF are not in the fixture and are this census's
+    // plain classification. DEC is the old decidedPrev. Every region's mode must be the old one and WANT the old WANT.
+    const S = CENSUS.STRIDE, R4 = W / 16, pageKeys = new Map([...s.pages].map(([k, cs]) => [cs, k]));
+    const regionOf = (t: V3) => shr(t, 2), rKey = (R: V3) => R[0] + R4 * (R[1] + R4 * R[2]);
+    const deepR = new Set<number>(), modeR = new Set<number>();
+    for (let i = 0; i < n; i++) { const R = regionOf(coord(i)); if (fx.deep[i]) deepR.add(rKey(R)); if (fx.mode[i] === 1) modeR.add(rKey(R)); }
+    const coldR = (R: V3) => { for (let k = 0; k < 27; k++) { const q: V3 = [R[0] + (k % 3) - 1, R[1] + (Math.floor(k / 3) % 3) - 1, R[2] + Math.floor(k / 9) - 1]; if (q.every(v => v >= 0 && v < R4) && deepR.has(rKey(q))) return true; } return false; };
+    const cens = new Uint32Array(variants.get("plain")!.census);
+    for (const [cs, page] of pageOf) for (let r = 0; r < 8; r++) {
+      const at = S * cs + CENSUS.REG + RG.WORDS * r, R: V3 = [2 * page[0] + (r & 1), 2 * page[1] + ((r >> 1) & 1), 2 * page[2] + (r >> 2)];
+      cens.fill(0, at, at + RG.WORDS);
+      if (!R.every(v => v < R4)) continue;
+      cens[at + RG.TIER] = coldR(R) ? 0 : 2;
+      cens[at + RG.STAMP] = modeR.has(rKey(R)) ? 1 : 0; cens[at + RG.GEN] = pageKeys.get(cs)! + 1;
+      for (let l = 0; l < 64; l++) {
+        const t: V3 = [8 * page[0] + (l & 3) + 4 * (r & 1), 8 * page[1] + ((l >> 2) & 3) + 4 * ((r >> 1) & 1), 8 * page[2] + (l >> 4) + 4 * (r >> 2)];
+        if (hOld(t)) cens[at + RG.OWN + (l >> 5)] = (cens[at + RG.OWN + (l >> 5)]! | (1 << (l & 31))) >>> 0;
+      }
+      let pages = 0;
+      for (let k = 0; k < 27; k++) { const q: V3 = [page[0] + (k % 3) - 1, page[1] + (Math.floor(k / 3) % 3) - 1, page[2] + Math.floor(k / 9) - 1]; if (q.every(v => v >= 0 && 32 * v < W) && s.pages.has(key(q))) pages |= 1 << k; }
+      cens[at + RG.PAGES] = pages >>> 0;
+    }
+    for (let i = 0; i < n; i++) {
+      const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t), o = S * cs;
+      if (fx.decidedPrev[i]) cens[o + CENSUS.DEC + (l >> 5)] = (cens[o + CENSUS.DEC + (l >> 5)]! | (1 << (l & 31))) >>> 0;
+      if (fx.mode[i] !== 1) continue;
+      cens[o + CENSUS.W0 + l] = fx.w0[i]!;
+      for (let k = 0; k < 6; k++) cens[o + CENSUS.KEYS + 6 * l + k] = fx.keys[6 * i + k]!;
+      cens[o + CENSUS.RCROSS + 2 * l] = fx.cross[2 * i]!; cens[o + CENSUS.RCROSS + 2 * l + 1] = fx.cross[2 * i + 1]!; cens[o + CENSUS.RGAP + l] = fx.gap[i]!;
+    }
+    for (const cs of s.pages.values()) cens.fill(0, S * cs + CENSUS.STAT, S * cs + CENSUS.STAT + 16);
+    e.write("census", 0, cens);
+    await e.run(brickCensusSchedule(L, k => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 }), LIST.C_ALL, LIST.F_ALL, true, true, true));
+    const rSet = await e.read("set"), rCensus = await e.read("census");
+    assert.equal(rSet[H.FAIL], 0, `replay FAIL ${rSet[H.FAIL]} info ${rSet[H.FAIL_INFO]?.toString(16)}`);
+    let modeWrong = 0, replayedRegions = 0, wantWrong = 0, deepWant = 0;
+    const wantMiss: string[] = [];
+    for (const [cs, page] of pageOf) for (let r = 0; r < 8; r++) {
+      const R: V3 = [2 * page[0] + (r & 1), 2 * page[1] + ((r >> 1) & 1), 2 * page[2] + (r >> 2)];
+      if (!R.every(v => v < R4)) continue;
+      const m = rCensus[S * cs + CENSUS.REG + RG.WORDS * r + RG.MODE]!;
+      if (m === 1) replayedRegions++;
+      if ((m === 1) !== modeR.has(rKey(R))) modeWrong++;
+    }
+    for (let i = 0; i < n; i++) {
+      const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t);
+      const want = (rSet[L.set.want + 16 * cs + (l >> 5)]! >>> (l & 31)) & 1;
+      if (want !== fx.decided[i]) { wantWrong++; if (wantMiss.length < 16) wantMiss.push(`${t}${fx.deep[i] ? " deep" : ""}${splitTiles.has(i) ? " split-near" : ""}: ${want} vs ${fx.decided[i]}`); }
+      else if (fx.mode[i] === 1) deepWant++;
+    }
+    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss };
+    console.log(JSON.stringify({ ...report, replay }, null, 1));
     e.destroy();
+    assert.equal(modeWrong, 0, "every region replays as the old engine's did");
+    assert.equal(wantWrong, 0, `WANT with replay is the old WANT: ${wantMiss.join("; ")}`);
     // ---- Verdicts: on the tiles that are not deep COLD, every field exact under one φ choice or the other (or near a split vertex), and the reach.
     for (const [k, v] of hard) assert.equal(v.length, 0, `${k}: ${v.length} non-deep tiles differ under both φ choices, away from a split vertex: ${v.slice(0, 16).map(i => coord(i).join(",")).join("; ")}`);
     for (const r of results) assert.equal(r.counters.reach[0], r.counters.reach[1], `the reach (${r.variant})`);
