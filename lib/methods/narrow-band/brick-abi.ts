@@ -135,11 +135,13 @@ export const ARGS_LIST_END = ARGS.FA_G64 + 3;
  * - NOW: F_ACT(t), set by setMark on every resident brick within ACT_DILATION tiles (Chebyshev, at tile precision) of
  *   an ACTIVE tile;
  * - PREV: F_ACT(t - 1), the head's setLists moving NOW down (and clearing TILES, NOW and RES);
- * - RES (bits 10..17): the head residency's brick sources (resMark), the ACTIVE tiles less those ACTIVE only by their
- *   4h corners (tiered: 4h storage, requested by page); all-h, TILES.
+ * - RES (bits 10..17): the head residency's owner sources (resMark): the tiles with an h owner (tiered), a φ < 0
+ *   vertex or a particle;
+ * - SEED (bits 18..25): the head residency's seed sources: the tiles with heat or the census's TRIG bit. A tile
+ *   ACTIVE only by its 4h corners is in neither (4h storage, which the residency requests by page).
  * F_ACT lists NOW | PREV (part 2) and, at the head, NOW | PREV or an entering brick.
  */
-export const ACT = { TILES: 0xff, NOW: 1 << 8, PREV: 1 << 9, RES: 0xff << 10 } as const;
+export const ACT = { TILES: 0xff, NOW: 1 << 8, PREV: 1 << 9, RES: 0xff << 10, SEED: 0xff << 18 } as const;
 /** F_ACT's dilation of the ACTIVE tiles, in 4h tiles (12 cells; brick-abi.md §5.5). */
 export const ACT_DILATION = 3;
 /** Workgroups a dimension under the fold rule: x = min(n, FOLD), y = ceil(n / FOLD). */

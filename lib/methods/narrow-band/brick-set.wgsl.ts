@@ -101,9 +101,10 @@ var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
 var<workgroup> wTiles:atomic<u32>;
 var<workgroup> wRes:atomic<u32>;
+var<workgroup> wSeed:atomic<u32>;
 var<workgroup> wNb:array<u32,27>;
 @compute @workgroup_size(64) fn setMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);atomicStore(&wRes,0u);}
+  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);atomicStore(&wRes,0u);atomicStore(&wSeed,0u);}
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
   var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);}
   // The brick's 27 neighbour words (F record words 0-26), for the residency check below.
@@ -137,15 +138,17 @@ var<workgroup> wNb:array<u32,27>;
     }
     if(neg>0u){atomicAdd(&wNeg,neg);}
     if(pos!=0u){atomicOr(&wPos,1u);}
+    // ACT.RES's liquid tiles (an h-owned φ < 0 vertex; tiered they are h-owned tiles, listed below).
+    if(wet!=0u){atomicOr(&wRes,wet);}
     // The ACTIVE tiles (brick-abi.md §5.5): lane t < 8 tests tile t's particles, heat${tiered ? ", h ownership and 4h corners" : ""}.
     if(lid<8u){
       let t=lid;var on=(nbSetWord(NB_S_TILE_OCC+slot)>>t)&1u;
-      if(((nbSetWord(NB_S_TRIG+slot)>>t)&1u)!=0u||${heat}){on=1u;}
-      ${tiered ? `if(((tiles>>t)&1u)!=0u){on=1u;}
-      // The residency's brick sources (ACT.RES) are these: h-owned, particles, heat. A tile ACTIVE only by its 4h
-      // corners is 4h storage, which the residency requests by page (resMark's page sources), not by brick.
-      if(on!=0u){atomicOr(&wRes,1u<<t);}
-      else{
+      // The residency's brick sources (brick-residency.wgsl.ts): ACT.RES, the h-owned${tiered ? "" : " (liquid)"} tiles and the tiles
+      // with particles; ACT.SEED, the tiles with heat or the census's trigger (the seeds' sources). A tile ACTIVE only
+      // by its 4h corners is 4h storage, which the residency requests by page (resMark's page sources), not by brick.
+      if(on!=0u${tiered ? "||((tiles>>t)&1u)!=0u" : ""}){on=1u;atomicOr(&wRes,1u<<t);}
+      if(((nbSetWord(NB_S_TRIG+slot)>>t)&1u)!=0u||${heat}){on=1u;atomicOr(&wSeed,1u<<t);}
+      ${tiered ? `if(on==0u){
         let T=(o>>vec3u(2u))+vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));
         for(var q=0u;q<8u;q++){if(nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)))<0.0){on=1u;}}
       }` : ""}
@@ -175,9 +178,8 @@ var<workgroup> wNb:array<u32,27>;
     }
   }
   if(!live||lid!=0u){return;}
-  // ACT.RES (bits 10..17): the residency's brick sources; all-h, every ACTIVE tile (all tiles are h).
-  let rs=${tiered ? "atomicLoad(&wRes)" : "m"};
-  atomicOr(&nbSet[NB_S_ACT+slot],m|(rs<<10u));
+  // ACT.RES (bits 10..17) and ACT.SEED (bits 18..25): the residency's brick sources.
+  atomicOr(&nbSet[NB_S_ACT+slot],m|(atomicLoad(&wRes)<<10u)|(atomicLoad(&wSeed)<<18u));
   var cls=0u;
   if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}

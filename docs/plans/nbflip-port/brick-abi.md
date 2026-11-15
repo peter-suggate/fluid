@@ -579,39 +579,50 @@ per-axis reach: seep's S2j (the per-axis CFL activation band, seep-techniques.md
 Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep-m1max.
 
 - *Timing.* Part 1's head, in both engines, after the census and before `stages.move`. It reads the
-  completed step's `ACT` tiles (`setMark`'s, §5.5), `PSUPPORT` (F's `pJoin`) and `BOUND_F` (`project`'s
-  faces, `pScatter`'s particle speeds). Every head claim lands before `nrReach`. The boot runs `setMark`
+  completed step's `ACT` tiles (`setMark`'s, §5.5), `PSUPPORT` (F's `pJoin`) and `BOUND_F` (at the head,
+  `project`'s face maximum only: `setMark` clears `pCount`'s particle speeds before `project` raises it).
+  Every head claim lands before `nrReach`. The boot runs `setMark`
   once after F's boot stages (before the kick), so step 1's head has its ACTIVE tiles.
-- *Brick sources* (`resMark`, a workgroup a brick of F_ALL, G1; tiered FC_G1): a brick with residency
-  tiles (`ACT.RES`, bits 10–17: the ACTIVE tiles less those ACTIVE only by their 4h corners; all-h, every
-  ACTIVE tile), particle support (`PSUPPORT` word 0) or this head's census trigger (`TRIG` bits 0–7,
-  `censusDecide`'s, which runs before it). Its source box is the vertex box of those tiles.
-  - Why `TRIG` (the seed reach): `pSeed` seeds a cell whose tile heat `FT_T` is above 0, and its deep
-    sites (depth below −1 cell) in any owner's cell, 4h included (seedSite restricts only the outer
-    shell to h owners). `FT_T` is the larger of the tile's heat and half its 27-tile neighbourhood's
-    (`lDilate`), and the heat is the last one cooled or 2 where this head's census triggered the tile
-    (`lHeatNow`). A tile that had heat at the last `setMark` is ACTIVE (`ACT.RES`), so a seed's tile is
-    within one tile of a source, and its 2-cell support (`pJoin`'s `pSupport`) is within 6 cells of the
-    source box, inside the 12-cell margin. A tile triggered at this head is not: `ACT` sees the
-    previous head's `TRIG`.
-  - This is the cause of the tiered dam's `FAIL.REACH` at the far walls (lane F's 165-step timing
-    runs, all with the old rule; reproduced on ddfecfc5): the latching record was a fresh seed (age
-    `SEED_FIRST`) at depth −1.76 cells in a 4h-owned tile whose brick held no particles at the last
-    `setMark`. Its support reached the neighbour brick, which no seed of the old rule kept. The old rule
-    seeded bricks from h ownership (margin 0) and the previous step's particle support only, and seeds
-    have no previous support.
+- *Brick sources* (`resMark`, a workgroup a brick of F_ALL, G1; tiered FC_G1): up to three source
+  classes a brick, each a box: the vertex box of the class's tiles, grown per axis and side by the
+  class's move and its margin (`RES_MARGIN`). Each margin is the largest distance a stage reads past
+  the class's tiles (lane E's read table, progress-lane-e.md 2026-11-16, every row with its file and line):
+  - *Owners*, `ACT.RES` (bits 10–17: a tile with an h owner (tiered), a φ < 0 vertex or a particle):
+    `flow + 20`. 20 cells is `lDilate`'s reach (R = 5 tiles, separable, its intermediates stored a
+    brick; an absent brick is "no source"), read by the collar (air distance ≤ 4 tiles, `lProtected`)
+    and the kept far air (> 5 tiles, `lAdvected`). Every other stage reads less: `lcRetire` 9, the
+    DEPTH chain through `lDistance` and `lNear` 7, `uExtend` 3, the sampler's UNIT taps 3, the faces,
+    vertex rows, tile-word stencils and `setMark`'s 1-ring 1.
+  - *Support*, `PSUPPORT` word 0: `max(travel, flow) + 0`. Every read of the next move is within 1.5
+    cells of the moved particle, inside the ±2 support `pJoin` records about it; a shortfall latches
+    `pJoin`'s `REACH`.
+  - *Seeds*, `ACT.SEED` (bits 18–25: a tile with heat at the last `setMark` or the previous head's
+    `TRIG`) and this head's `TRIG` (`censusDecide`'s, before `resMark`, not yet in `ACT`): `+ 6`, no
+    move. `pSeed` seeds a cell whose tile has `FT_T > 0`, deep sites in 4h owners too (seedSite
+    restricts only the outer shell to h owners). `FT_T` is half the 27-tile max of `lHeatNow`, the
+    last `FT_H` cooled by 4 dt or 2 on this head's `TRIG`, its only source. So a seed's cell is within
+    a tile (4 cells) of a seed tile, its site is in the cell, and its first `pJoin`, before any move,
+    records the ±2 support about it: 6 cells.
+  - The seed class is the cause of the tiered dam's `FAIL.REACH` at the far walls (lane F's 165-step
+    timing runs, all with the old rule; reproduced on ddfecfc5): the latching record was a fresh seed
+    (age `SEED_FIRST`) at depth −1.76 cells in a 4h-owned tile whose brick held no particles at the
+    last `setMark`. Its support reached the neighbour brick, which no source of the old rule kept: it
+    seeded bricks from h ownership (margin 0) and the previous step's particle support, and seeds have
+    no previous support. 258aae94 made this head's `TRIG` a source.
 - *Page sources* (tiered, pass 0, a workgroup a page of C_ALL after F_ALL's bricks): a page with
   4h-owned liquid tiles (a C corner φ < 0, as `setMarkPages` counts them) at the head. Its box is those
   tiles' box; its flow's speed is the largest |u| on their C plane faces (the completed step's 4h
   velocity; the 4h interpolant inside a tile is bounded by its planes). It requests pages only: 4h
   liquid is C storage. Requesting bricks for it made the deep 4h interior h storage (the tiered dam
   filled its 4913-brick pool by step 42, 2026-11-15).
-- *Reach*, per axis a and side, in cells: `max(travel, flow) + 4·ACT_DILATION` (12), where travel is
+- *Reach*, per axis a and side, in cells: the class's move plus its margin, where travel is
   `PSUPPORT`'s particle travel that way and `flow = (BOUND_F + |g| dt) dt / h` (the reach rule's
-  velocity term, as `bootBricks`). The 12-cell margin is F_ACT's dilation: a brick F_ACT may list is
-  resident. `H.RES_RADIUS` is the largest reach of the head, in tiles (rounded up).
-- *Requests*: a brick source's grown box takes every brick it covers and, tiered, every page (page
-  granularity, the same box); a page source's (flow + 12 cells, no particle travel) every page it covers.
+  velocity term, as `bootBricks`). `H.RES_RADIUS` is the largest class reach of the head, in tiles
+  (rounded up).
+- *Requests*: each of a brick source's grown boxes takes every brick it covers and, tiered, every page
+  (page granularity, the same box); a page source's (flow + 16 cells, no particle travel) every page it covers. 16 is
+  `lcAdvect`'s reach past the 4h liquid tiles' box: its band (|φ| < 8) lies within 8 cells of the box and its
+  foot stencil and cubic taps read 8 past that (levelset-coarse.wgsl.ts l.300-303, 333-340).
   - A present destination gets its keep mark (`MARK_F`, `MARK_C`).
   - An absent one's directory word goes NONE → CLAIM, and the one winner appends its key with
     `KEY_CLAIMED`.
@@ -663,8 +674,10 @@ Lists live in `set` at `LIST[k]`, each `LIST_CAP[k]` words of slots, with the co
   - bit 8 (`NOW`, F_ACT(t)): set by `setMark` on every resident brick within `ACT_DILATION = 3` tiles (12 cells,
     Chebyshev, at tile precision) of an ACTIVE tile, a lane an offset of the 5³ bricks about the source;
   - bit 9 (`PREV`, F_ACT(t − 1)): the head's `setLists` (cfg.z = 1) moves `NOW` down and clears the rest;
-  - bits 10–17 (`RES`): the head residency's brick-source tiles (`resMark`, §5.4), `setMark`'s ACTIVE tiles
-    less those ACTIVE only by their 4h corners (tiered); all-h, bits 0–7.
+  - bits 10–17 (`RES`): the head residency's owner tiles (`resMark`, §5.4): h-owned (tiered), a φ < 0 vertex or a
+    particle;
+  - bits 18–25 (`SEED`): the head residency's seed tiles: heat or the census's `TRIG` bit. A tile ACTIVE only by its
+    4h corners is in neither (4h storage, which the residency requests by page).
   `F_ACT` lists `NOW | PREV`. At the head it also lists the bricks entering this step (no class yet). The boot
   (`setLists` cfg.z = 2) ORs `NOW` onto every live brick. Its last lists run after the boot's class pass (`setMark`,
   after F's boot stages, before the kick), so they keep its ACTIVE tiles for step 1's head residency, and the kick's

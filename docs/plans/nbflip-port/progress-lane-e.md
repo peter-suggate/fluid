@@ -1124,3 +1124,155 @@ that kernel's code did not change.
 check is the one change that would make it fire in a liquid interior. It would compare each velocity word's effect
 on the records (the reach, GAP's speed byte, the fast test, the approach and boundary scores) against the move. That
 is a new certificate and a ruling, not a port.
+
+## 2026-11-16: residency margins from a read table (owners 20, support 0, seeds 6, pages 16)
+
+The coordinator's ruling: each source class's margin has to be what some stage reads past that class's tiles. The table gives every row with its file and line, and each margin is the largest row for its class. The 12-cell margin on every source (F_ACT's dilation, 258aae94) is retired.
+
+**Margins** (brick-residency.wgsl.ts `RES_MARGIN`, `resMark` builds one box per class; brick-abi.md §5.4):
+
+| class | tiles | move | margin (cells) |
+|---|---|---|---|
+| owners `ACT.RES` (bits 10..17) | an h owner (tiered), a φ < 0 vertex, a particle | flow | 20 |
+| support `PSUPPORT` word 0 | pJoin's support tiles | max(travel, flow) | 0 |
+| seeds `ACT.SEED` (new, bits 18..25) plus this head's `TRIG` | heat at the last setMark, previous head's `TRIG` | none | 6 |
+| pages (tiered) | 4h-owned liquid tiles | flow (C plane faces) | 16 |
+
+- flow is `(BOUND_F + |g| dt) dt / h`.
+- Heat tiles used to be in `ACT.RES` with the owners' 12. setMark now splits them out into `ACT.SEED`.
+
+**The read table.** Distances are in cells past the class's tiles. Files: L levelset-kernels, C levelset-coarse, P particles-kernels, F particles-formulas, V velocity-kernels, VF velocity-formulas, G fluid-grid; all are .wgsl.ts.
+
+Owners, reads past an h tile:
+
+| reach | stage | file:line |
+|---|---|---|
+| 20 | lDilate's kept far air (> 5 tiles, lAdvected) | L 137, 344, 368-393 |
+| 16 | lDilate's collar (≤ 4 tiles, lProtected) | L 400-407 |
+| 12 | lDilate's reach2/ext (≤ 3 tiles) | L 498, 547 |
+| 8 | lDilate's reach1 (≤ 2 tiles) | L 498, 547 |
+| 9 | lcRetire | C 491-494, 546-553 |
+| 7 | the DEPTH chain through lDistance and lNear | G 498-507, P 120-124 |
+| 5 | lNear's 11³ box | L 459-470 |
+| 5 | lDistance and lPublish | L 490-531 |
+| 3 | uExtend | V 695-762 |
+| 3 | the sampler's UNIT taps | G 450-453 |
+| ≤ 2 | the sampler's fine weight | G 466-479 |
+| 1 | the + faces | V 304, 501, 664, 772, 831 |
+| 1 | setMark's 1-ring | brick-set 124-135 |
+| 1 | tile-word stencils (lUnion, uTransfer, pTiles, lDilate's heat, lClear) | L 250-290, 378-407; V 475-489; P 287-301 |
+
+- lDilate is separable (x, then y, then z), and each pass stores its intermediates per brick.
+- An absent brick counts as "no source" (L 370). So anything within R = 5 tiles has to be resident, intermediates included.
+- That makes 20 the owners' margin. It equals the retired RESIDENCY_MARGIN_TILES (5 tiles).
+
+Support: every read of the next move lies within 1.5 cells of the particle, inside the ±2 support pJoin records (P 417-426). So the margin past the move is 0.
+
+| reach | read | file:line |
+|---|---|---|
+| ≤ 1.5 | G2P taps | P 173, G 456-463 |
+| ≤ 1.5 | pDeposit, quadratic B-spline | VF 33-48 |
+| ≤ 1.5 | pSupported | P 76-82 |
+| ≤ 1.5 | separation | P 108-119 |
+| ≤ D + 1.5 | Heun samples | P 175-195, F 68-73 |
+| e ± 0.25 | split | P 210 |
+| ≤ 1 past e | endpoint reads | P 203-208 |
+| ≤ 1.25 | surface shift | P 120-124 |
+
+Seeds:
+
+| reach | reason | file:line |
+|---|---|---|
+| ≤ 4 | pSeed's cell needs FT_T > 0, half the 27-tile max of lHeatNow, which is FT_T's only source; so the cell is within a tile of a seed tile | P 320; L 354-357, 378-393 |
+| 0 | the site is inside the cell | F 229-235 |
+| 2 | the first pJoin, before any move, records ±2 support | P 417-426 |
+| = 6 | total | |
+
+In brick-abi.md the bound had read "within 6 cells", and 258aae94's progress entry said 8. The table confirms 6.
+
+Pages: lcAdvect's band (|φ| < 8) lies within 8 cells of the 4h liquid tiles' box. Its foot stencil and cubic taps read 8 past that, which gives 16.
+
+| reach | stage | file:line |
+|---|---|---|
+| 16 | lcAdvect foot stencil | C 300-303 |
+| 16 | lcAdvect cubic | C 333-340 |
+| 16 | lcClear's collar | C 231 |
+| 12 | lcRetire | C 548-553 |
+| 12 | uExt4Seed writes | V 787-842 |
+| 8 | uExt4 | V 868-915 |
+| 8 | pressure rows, by storage | pressure-composite 569-590 |
+| travel + 4 | vcAdvectPage | V 272-289 |
+
+The old 12 was 4 short.
+
+**Caveats, stated.**
+- **BOUND_F.** At the head, BOUND_F holds only project's face maximum. setMark clears pCount's particle speeds (setMark's last store) before project raises the word again. The brick-abi.md and header text that said otherwise are corrected.
+- **Travel.** The recorded travel and the flow bound the next move only as far as the extended field stays under the brick's face maximum. Support 0 rests on that.
+- **A shortfall fails explicitly.** pJoin's REACH latches, and none fired in the runs below.
+
+**Gates.** The tree c7 is 258aae94 plus these files. Every run is rc 0, with no 00000206.
+- Zero latches on all four runs:
+  - tiered dam, 300 steps;
+  - all-h, 200 steps;
+  - the 165-step fenced and pipelined timing runs.
+- GPU suites 37/37:
+  - The first round failed brick-engine's enter/leave and POOL_F tests. Their 64×32×64 lattice is all inside a 20-cell reach, so no brick could enter.
+  - The lattice is now 128×64×128, and brick-engine then passes 17/17.
+  - headMatchesOracle and the tiers test check `residencyOracle`'s per-class rule bitwise.
+- Unit tests 1836/0; check:types has only the lane-n errors.
+- Drift on the tiered dam: −0.0532 at step 20 and −0.0100 at step 300, against −0.0504 and −0.0098 for c6 (258aae94). All-h: −0.0107 at step 200, against −0.0108.
+- I rebased onto d02947dc (after lane P's 1bea686f, lane F's 5f2717bc and the census replay) as tree c8 and ran it again:
+  - zero latches on all four runs;
+  - tiered dam 300: mean F 4408, peak 4913, churn 62/step, drift −0.0537 at 20 and −0.0101 at 300;
+  - all-h 200: mean 4531, peak 4913, drift −0.0105;
+  - fenced median 72.3 ms, pipelined 71.7 ms a step;
+  - suites 36/37. The miss is brick-region-heat.test.ts aborting the process (SIGABRT, no 00000206, after "kept 128 of 128"). It aborts the same way on d02947dc alone (tree h2), so it predates this change.
+
+**Residency** (F bricks; the pool and the lattice are both 4913):
+
+| | tiered 300: mean | peak | churn/step | all-h 200: mean | peak | churn/step |
+|---|---|---|---|---|---|---|
+| bT300, old rule (resSeed/resRequest on 04298677 + F_LIQ) | 3170 | 4820 | 138 | | | |
+| 258aae94, 12 on every source | 3878 | 4851 | 98 | 4220 | 4913 | 59 |
+| this commit | 4419 | 4913 | 66 | 4508 | 4913 | 48 |
+
+**Attribution** on the tiered dam. Each resident F brick after head N goes to the first class that covers it:
+1. owner: an h-owned tile;
+2. ring: censusDecide's 27-ring;
+3. reach: a box without the margin;
+4. margin: covered only through a margin.
+
+| step | 258aae94: live | owner | ring | reach | margin | this commit: live | owner | ring | reach | margin |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20 | 4194 | 921 | 1178 | 1105 | 990 | 4156 | 934 | 1193 | 1082 | 947 |
+| 60 | 4843 | 1573 | 2121 | 644 | 505 | 4909 | 1574 | 2090 | 625 | 620 |
+| 150 | 4203 | 831 | 1614 | 460 | 1298 | 4630 | 756 | 1524 | 332 | 2018 |
+| 300 | 3279 | 543 | 1286 | 35 | 1415 | 4341 | 546 | 1354 | 12 | 2429 |
+
+- The trig and heat classes are 0 in both: they are inside the owners' and the support boxes.
+- The owners' 20-cell margin is the whole increase. Memory does not scale here: the tiered dam reaches the full lattice from step 21 to 60.
+- The cheapest cut is an lDilate that resolves an absent brick through its owner (C) instead of "no source". That is lane F's kernel. Each of its intermediates would also need to be covered or read from C. With that, the owners' largest row is lcRetire's 9.
+
+**Head and step** (timing slot, the tiered dam):
+- Residency kernels:
+  - resMark: 0.19 + 0.14 ms (2 passes), against 0.15 + 0.13 on 258aae94;
+  - claims and leaves: about 0.08 ms.
+- Window kernel sum, steps 18-23: 97.0 ms against 95.4.
+- Fenced step, 165 steps: median 87.7 ms against 85.4.
+- Pipelined: 100.2 ms per step against 88.2. The extra resident bricks over steps 21-100 cost about 12 ms per step in F_ALL's stages.
+
+Per area (rowsWindow, steps 18-23), ms per step:
+
+| area | 258aae94 | this commit | §6 budget |
+|---|---|---|---|
+| velocity | 40.49 | 40.88 | 1.6 |
+| level set | 16.83 | 17.03 | 2.0 |
+| pressure solve | 13.11 | 13.54 | 3.0 |
+| pressure setup and projection | 9.02 | 9.25 | 1.0 |
+| move | 8.57 | 8.61 | 1.5 |
+| brick set | 3.35 | 3.59 | 0.6 |
+| transfer and seeding | 3.39 | 3.47 | 1.0 |
+| region D | 0.60 | 0.65 | - |
+| total | 95.4 | 97.0 | ~18 |
+
+Letters and seep do not run on the brick engine yet (brick-scene.ts `BRICK_ENGINE_SCENES = ["high-resolution-dam-break"]`), so this commit has no cross-scene check.

@@ -29,7 +29,7 @@ import { bindGroupLayoutEntries, MAX_STORAGE_BINDINGS } from "./brick-kernel";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, createBrickSolver, nbEngine } from "./brick-method";
+import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine } from "./brick-method";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
@@ -112,7 +112,7 @@ test("brick engine: a pressure solver's indirect words must be the lists' or P's
   validatePressureSolver({ ...cg, setup: [{ kernel, dispatch: { indirect: PRESSURE_ARGS.FIRST } }] });
 });
 
-test("brick engine: the engine switch refuses unknown engines, and every scene until F and P register", async () => {
+test("brick engine: the engine switch refuses unknown engines, and every scene but the dam", async () => {
   assert.equal(nbEngine(undefined), "uniform");
   assert.equal(nbEngine("brick"), "brick");
   assert.throws(() => nbEngine("bricks"), /unknown engine "bricks"/);
@@ -120,7 +120,8 @@ test("brick engine: the engine switch refuses unknown engines, and every scene u
   assert.ok(seep.fluid?.brickPools, "seep authors brickPools");
   const refusal = brickEngineRefusal(seep, { timeStep: "sixtieth" });
   assert.match(refusal.message, /not enabled on the brick engine/);
-  assert.match(refusal.message, /lane F's stages/);
+  // Each lane's line is there exactly while its registration is missing (F registers the tiered set, P compositeMGPCG).
+  assert.equal(/lane F's stages/.test(refusal.message), brickEngineLanes().some(l => /lane F/.test(l)));
   // Lane P's line is there exactly while P's solver is unregistered (it registers compositeMGPCG at M2).
   assert.equal(/lane P's pressure solver/.test(refusal.message), brickEngineLanes().some(l => /lane P/.test(l)));
   assert.match(refusal.message, /engine "uniform"/);
@@ -128,7 +129,7 @@ test("brick engine: the engine switch refuses unknown engines, and every scene u
   // The dam: no scene gap, only the lanes'.
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
   assert.deepEqual(brickEngineGaps(dam, { timeStep: "sixtieth" }), brickEngineLanes());
-  await assert.rejects(createBrickSolver({} as GPUDevice, dam, { timeStep: "sixtieth" }, "balanced"), /lane F's stages/);
+  assert.deepEqual(brickEngineLanes(), [], "F and P are registered: the dam runs (opt-in, engine \"brick\")");
   assert.deepEqual(brickEngineLanes(bringUpStages, L => bringUpCG(L)), []);
 });
 
@@ -229,7 +230,9 @@ test("brick engine (GPU): every kernel compiles cold in under 30 s", GPU, async 
 
 test("brick engine (GPU): bricks enter and leave as the head's residency oracle says, and the set stays consistent", GPU, async () => {
   await withDevice("brick enter/leave", async device => {
-    const lattice: Vec3 = [64, 32, 64], o = options(lattice, [sheet(20, 10.3, 20)], 400, 16);
+    // 128 wide and 64 tall: the owners' 20-cell margin (RES_MARGIN.own) past the sheet reaches brick 5 of 16 in x and
+    // z and brick 4 of 8 in y, so the residency has room to grow and shrink.
+    const lattice: Vec3 = [128, 64, 128], o = options(lattice, [sheet(20, 10.3, 20)], 400, 16);
     const e = await BrickEngine.create(device, o);
     let s = await snapshot(e);
     assert.deepEqual([...s.bricks.keys()].sort((a, b) => a - b), bootBricks(o));
@@ -237,8 +240,8 @@ test("brick engine (GPU): bricks enter and leave as the head's residency oracle 
     e.advance(1);
     s = await snapshot(e);
     assertConsistent(e, s);
-    // Narrower and taller: the class pass sees the new surface, and the next head's residency follows it (the reach
-    // is 12 cells plus the flow past the source tiles, so x and z bricks 3 and up leave).
+    // Narrower and taller: the class pass sees the new surface, and the next head's residency follows it (the owners'
+    // reach is 20 cells plus the flow past the source tiles, so y brick 5 enters and x and z bricks 4 and up leave).
     writePhi(e, s, sheet(4, 18, 4));
     // The class pass of the written state (part 2's setMark): the next head's sources are its ACTIVE tiles.
     await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMark"));
@@ -284,7 +287,8 @@ async function headMatchesOracle(e: BrickEngine, before: BrickSnapshot) {
 
 test("brick engine (GPU): FAIL.POOL_F latches when the residency needs more bricks than the pool", GPU, async () => {
   await withDevice("brick pool fail", async device => {
-    const lattice: Vec3 = [64, 32, 64], liquid = [sheet(20, 10.3, 20)];
+    // As the enter/leave test: the taller sheet's reach then needs bricks the first head's set lacks.
+    const lattice: Vec3 = [128, 64, 128], liquid = [sheet(20, 10.3, 20)];
     // The pool: exactly the set the first head leaves (measured on a roomy pool), at least the boot's.
     const roomy = await BrickEngine.create(device, options(lattice, liquid, 400, 16));
     roomy.advance(1);

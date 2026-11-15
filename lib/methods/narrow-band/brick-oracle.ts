@@ -11,7 +11,7 @@
 import { ACT, BRICK_STRIDE, CMASK_WORDS, PHI_AIR, PSUPPORT_WORDS, type BrickLayout, brickKey, brickKeyCoord, bricksPerAxis, cellLocal } from "./brick-abi";
 import { reachSet, type Vec3 } from "./brick-engine";
 import type { BrickSnapshot } from "./brick-readback";
-import { RES_MARGIN_CELLS } from "./brick-residency.wgsl";
+import { RES_MARGIN } from "./brick-residency.wgsl";
 
 const THETA_MIN = 1e-3;
 const liquidPhi = (p: number) => p < -THETA_MIN;
@@ -70,21 +70,29 @@ export function residencyOracle(L: BrickLayout, before: BrickSnapshot, want: Uin
   let radius = 0;
   for (const [key, slot] of before.bricks) {
     const at = L.set.psupport + PSUPPORT_WORDS * slot;
-    const m = ((before.set[L.set.act + slot]! & ACT.RES) >>> 10) | (before.set[at]! & 0xff) | (want[L.set.trig + slot]! & 0xff);
-    if (m === 0) continue;
-    const tlo = [1, 1, 1], thi = [0, 0, 0];
-    for (let t = 0; t < 8; t++) if ((m >> t) & 1) for (let a = 0; a < 3; a++) { const v = (t >> a) & 1; tlo[a] = Math.min(tlo[a]!, v); thi[a] = Math.max(thi[a]!, v); }
+    const act = before.set[L.set.act + slot]!, ps = before.set[at]! & 0xff;
     const flow = f(f(f(asF(before.set[L.set.boundF + slot]!) + f(g * ring.dt)) * ring.dt) / ring.h), o = brickKeyCoord(key).map(v => 8 * v);
-    const b0: number[] = [], b1: number[] = [];
-    for (let a = 0; a < 3; a++) {
-      const rl = f(Math.max(asF(before.set[at + 1 + a]!), flow) + RES_MARGIN_CELLS), rh = f(Math.max(asF(before.set[at + 4 + a]!), flow) + RES_MARGIN_CELLS);
-      const lo = Math.floor(f(o[a]! + 4 * tlo[a]! - rl)), hi = Math.ceil(f(o[a]! + 4 * thi[a]! + 4 + rh));
-      b0.push(Math.max(lo >> 3, 0)); b1.push(Math.min(hi >> 3, nb[a]! - 1));
-      radius = Math.max(radius, Math.ceil(Math.max(rl, rh) / 4));
+    // The classes: owners (ACT.RES), support (PSUPPORT word 0), seeds (ACT.SEED | this census's TRIG).
+    const classes: [number, (a: number, side: 0 | 1) => number][] = [
+      [(act & ACT.RES) >>> 10, () => f(RES_MARGIN.own + flow)],
+      [ps, (a, side) => f(RES_MARGIN.support + Math.max(asF(before.set[at + 1 + 3 * side + a]!), flow))],
+      [((act & ACT.SEED) >>> 18) | (want[L.set.trig + slot]! & 0xff), () => RES_MARGIN.seed],
+    ];
+    for (const [m, reach] of classes) {
+      if (m === 0) continue;
+      const tlo = [1, 1, 1], thi = [0, 0, 0];
+      for (let t = 0; t < 8; t++) if ((m >> t) & 1) for (let a = 0; a < 3; a++) { const v = (t >> a) & 1; tlo[a] = Math.min(tlo[a]!, v); thi[a] = Math.max(thi[a]!, v); }
+      const b0: number[] = [], b1: number[] = [];
+      for (let a = 0; a < 3; a++) {
+        const rl = reach(a, 0), rh = reach(a, 1);
+        const lo = Math.floor(f(o[a]! + 4 * tlo[a]! - rl)), hi = Math.ceil(f(o[a]! + 4 * thi[a]! + 4 + rh));
+        b0.push(Math.max(lo >> 3, 0)); b1.push(Math.min(hi >> 3, nb[a]! - 1));
+        radius = Math.max(radius, Math.ceil(Math.max(rl, rh) / 4));
+      }
+      for (let z = b0[2]!; z <= b1[2]!; z++) for (let y = b0[1]!; y <= b1[1]!; y++) for (let x = b0[0]!; x <= b1[0]!; x++) bricks.add(brickKey(x, y, z));
+      if (tiered) for (let z = b0[2]! >> 2; z <= Math.min(b1[2]! >> 2, np[2]! - 1); z++) for (let y = b0[1]! >> 2; y <= Math.min(b1[1]! >> 2, np[1]! - 1); y++)
+        for (let x = b0[0]! >> 2; x <= Math.min(b1[0]! >> 2, np[0]! - 1); x++) pages.add(brickKey(x, y, z));
     }
-    for (let z = b0[2]!; z <= b1[2]!; z++) for (let y = b0[1]!; y <= b1[1]!; y++) for (let x = b0[0]!; x <= b1[0]!; x++) bricks.add(brickKey(x, y, z));
-    if (tiered) for (let z = b0[2]! >> 2; z <= Math.min(b1[2]! >> 2, np[2]! - 1); z++) for (let y = b0[1]! >> 2; y <= Math.min(b1[1]! >> 2, np[1]! - 1); y++)
-      for (let x = b0[0]! >> 2; x <= Math.min(b1[0]! >> 2, np[0]! - 1); x++) pages.add(brickKey(x, y, z));
   }
   // The page sources (tiered; resMark's pass 0 over C_ALL after F_ALL).
   if (tiered) {
@@ -113,7 +121,7 @@ export function residencyOracle(L: BrickLayout, before: BrickSnapshot, want: Uin
         }
       }
       if (!any) continue;
-      const r = f(f(f(f(speed + f(g * ring.dt)) * ring.dt) / ring.h) + RES_MARGIN_CELLS);
+      const r = f(f(f(f(speed + f(g * ring.dt)) * ring.dt) / ring.h) + RES_MARGIN.page);
       radius = Math.max(radius, Math.ceil(r / 4));
       const p0: number[] = [], p1: number[] = [];
       for (let a = 0; a < 3; a++) {
