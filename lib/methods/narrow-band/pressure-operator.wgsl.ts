@@ -19,8 +19,9 @@
 import type { BrickLayout } from "./brick-abi";
 import { pressureCompositeKernels } from "./pressure-composite.wgsl";
 
-/** `operator` and `project` (WGSL reserves `operator`: its entry point is nbOperator). */
-export function pressureOperatorKernels(L: BrickLayout) {
-  const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] });
+/** `operator` and `project` (WGSL reserves `operator`: its entry point is nbOperator). `tiered` is the engine's
+ * (BrickStages.tiered); the default keeps the tiered engine's absent-page guard. */
+export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
+  const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, opt);
   return { operator: K.rowsF, project: K.projectF };
 }

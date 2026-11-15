@@ -523,3 +523,54 @@ Metal clean.
 - The t = 0 seam-head Picard iterations.
 - The dam gate on the composite rows at 300 steps, and ns per row per iteration against seep-m1max (about 0.55 ms a
   cycle over about 620 liquid bricks, so roughly 1.7 ns per row per iteration).
+
+## 2026-11-15 — staged rows and project, the dam gate on the composite solver, ns per row per iteration
+
+**Staging** (pressure-composite.wgsl.ts; values unchanged, so the composite tests print the same numbers to the last digit):
+- rowsF and projectF stage their brick's halo in workgroup memory once per brick:
+  - vertices o−1..o+9 (1,331), computed by nbVertexPhi;
+  - centres o−1..o+8 (1,000), from poMean8 of the staged vertices;
+  - the tile owner bits of tiles 2B−1..2B+2 (64).
+- Readers go through poVertex, poCentre and poOwnerH, which fall back to the direct reader outside the window.
+- If a brick has a cold row (liquid without WARM), rowsF also stages the root φ and start of the 4×6×4 tiles that
+  poStart and the carry read (poRootPhi and poTileStart, one lane a tile).
+- The absent-page guard becomes tiered-only. All-h, an absent page is h air, the same as an absent brick
+  (brick-abi.md §2.5 Residency, E's 27852ac1), so the old guard caught only the page half of that case.
+  `pressureOperatorKernels(L, { tiered })` takes the engine's flag; the default keeps the guard. All-h, it latched
+  TIER intermittently: 2 of 4 runs, at steps 127 and 179. The 179 run's vertex (40, 64, 31) sits on the page-y-2
+  boundary under the spray. Residency there is E's and F's question (reported). F's dam-300c ran the same states
+  without a guard.
+
+**Dam profile** (HEAD 27852ac1 with E's all-h CMASK, so natives 0 and wet4 0; 60 steps, per-dispatch passes, steps 13–60):
+
+| kernel | before | after |
+|---|---|---|
+| pressureRowsC | 448 ms | 0.04 ms (no 4h tiles all-h) |
+| operator (rowsF) | 85–110 ms | 9.1 ms |
+| project (projectF) | 8.0 ms | 2.7 ms |
+| profiled step median | 200 ms | 110 ms |
+
+- About 21k cold rows a step (3% of about 687k), measured by a set difference of DIAG > 0 across steps 20–23.
+  Their prolongation was the operator's cost.
+
+**Dam gate** (`dam-p-300c`, fluid-scratch/lane-p1/gates; 300 steps on the check slot, rc 0, no Metal aborts; judged by
+tools/nbflip-gates.ts against the five ref-2761350a references):
+- C0, D1, D2, D3, D4, D4c, D5c, D5ce, D5k, D5p, D5e, D7t, D7d and D8 pass.
+- D6 (wet floor at 8 and 12) fails at 1.12 and D8c (particles at 16) at 1.16, the same rows and margins as
+  F's dam-300c (1.10, 1.19). F attributes D6 to the extension's reach and D8c to the seeding, so neither is the
+  pressure.
+- The fenced check-slot median is 75.0 ms (references 46–68 ms, informational).
+
+**ns per row per iteration** (the profile, MGPCG kernels only, 7.83 iterations a step): 5.08 ms an iteration.
+- Per liquid row (about 687k): 7.4 ns, against seep-m1max's about 1.7 ns (0.55 ms a cycle over 620 liquid bricks,
+  about 317k cells).
+- Per brick cell (4,685 bricks × 512): 2.1 ns, against seep-m1max's 1.7 ns.
+- So the gap is mostly occupancy: all-h, the dam's bricks are 29% liquid rows. Tiers (4h bulk, the band at h)
+  close it, or a row-compacted level 0.
+- The heaviest per-iteration kernels are pmgPostS and pmgPreS (0.78 ms each) and pmgUpdate (0.75 ms).
+
+**Open:**
+- The wall state's outer re-decision (Chentanez & Müller 2012).
+- The t = 0 seam-head Picard iterations.
+- The engine passing `{ tiered }` to pressureOperatorKernels (E's brick-engine.ts).
+- MGPCG level-0 occupancy.
