@@ -13,20 +13,26 @@ import { resolveMethodValues } from "../../core/method-contract";
 import { sceneDocument } from "../../core/scene-definition";
 import { getSceneDefinition } from "../../core/scenes";
 import { canQueuePreparedGPUAdvance, submitNextPreparedGPUAdvance, BROWSER_GPU_THROUGHPUT_DEPTH } from "../../core/webgpu-renderer";
-import { H } from "./brick-abi";
+import { H, brickAbiWGSL } from "./brick-abi";
+import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import type { BrickNBFlipSolver } from "./brick-solver";
 import { createBrickSolver } from "./brick-method";
 import "../index";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 
+async function damSolver(device: GPUDevice): Promise<BrickNBFlipSolver> {
+  const METHOD = "uniform-narrow-band-flip";
+  const method = getMethod(METHOD), definition = getSceneDefinition("high-resolution-dam-break"), scene = sceneDocument(definition);
+  const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
+  const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
+  return createBrickSolver(device, scene, values as Record<string, unknown>, quality);
+}
+
 test("brick solver (GPU): the app's ledger advances the dam one step a frame, bounded, and t retires", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("brick solver app", async device => {
-    const METHOD = "uniform-narrow-band-flip";
-    const method = getMethod(METHOD), definition = getSceneDefinition("high-resolution-dam-break"), scene = sceneDocument(definition);
-    const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
-    const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
-    const solver = await createBrickSolver(device, scene, values as Record<string, unknown>, quality);
+    const solver = await damSolver(device);
     try {
       const dt = 1 / 60, frames = 30;
       let pending = 0, accounted = 0, maxPending = 0;
@@ -60,6 +66,76 @@ test("brick solver (GPU): the app's ledger advances the dam one step a frame, bo
       assert.equal(solver.info.simulationFailure, undefined, "no latched failure");
       const header = await solver.brickEngine.read("set", 0, 4);
       assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info 0x${header[H.FAIL_INFO]!.toString(16)}`);
+    } finally { solver.destroy(); }
+  });
+});
+
+/**
+ * The presentation shows the tier authority's phi (brick-owner nbVertexPhi) at every vertex, bitwise, on the tiered
+ * dam at t = 70 dt, where 4h-owned regions hold no F brick. The old copy read F bricks only: the probe counts the
+ * vertices where that reading's sign differs (grey holes along the floor, stair banding on the side faces in the app).
+ */
+test("brick solver (GPU): the presentation is the tier authority's phi at every vertex", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("brick presentation", async device => {
+    const solver = await damSolver(device);
+    try {
+      const e = solver.brickEngine, L = e.layout, N = L.lattice, dt = e.options.dt_s, steps = 70;
+      for (let i = 1; i <= steps; i++) solver.advanceTo(i * dt, []);
+      await solver.assertSimulationHealthy();
+      const V = N.map(n => n + 1), count = V[0]! * V[1]! * V[2]!;
+      const code = `${brickAbiWGSL(L, { set: { name: "nbSet", atomic: false }, dir: { name: "dir", atomic: false } })}
+@group(0) @binding(0) var<storage,read> nbSet:array<u32>;
+@group(0) @binding(1) var<storage,read> dir:array<u32>;
+@group(0) @binding(2) var<storage,read> phi:array<u32>;
+@group(0) @binding(3) var<storage,read> vel:array<f32>;
+@group(0) @binding(4) var<storage,read_write> out:array<f32>;
+${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
+@compute @workgroup_size(64) fn probe(@builtin(global_invocation_id) g:vec3u,@builtin(num_workgroups) n:vec3u){
+  let i=g.x+64u*n.x*g.y;if(i>=${count}u){return;}
+  if(i==0xffffffffu){out[0]=vel[0]+f32(nbSet[0]+dir[0]);} // every binding in the auto layout
+  let V=vec3u(${V.join(",")});let v=vec3i(vec3u(i%V.x,(i/V.x)%V.y,i/(V.x*V.y)));
+  out[2u*i]=nbVertexPhi(v);
+  let s=nbFSlotOfBrick(v>>vec3u(3u));
+  out[2u*i+1u]=select(NB_PHI_AIR,bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]),s<NB_SEAM);
+}`;
+      const module = device.createShaderModule({ code });
+      const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
+      assert.equal(errors.length, 0, errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("; "));
+      const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "probe" } });
+      const out = device.createBuffer({ size: 8 * count, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: ["set", "dir", "phi", "vel"].map((name, binding) => ({ binding, resource: { buffer: e.buffer(name) } })).concat([{ binding: 4, resource: { buffer: out } }]) });
+      const rowBytes = Math.ceil((4 * V[0]!) / 256) * 256;
+      const tex = device.createBuffer({ size: rowBytes * V[1]! * V[2]!, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const probe = device.createBuffer({ size: 8 * count, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const groups = Math.ceil(count / 64), gx = Math.min(groups, 32768), gy = Math.ceil(groups / gx);
+      device.pushErrorScope("validation");
+      const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+      pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(gx, gy); pass.end();
+      enc.copyBufferToBuffer(out, 0, probe, 0, 8 * count);
+      enc.copyTextureToBuffer({ texture: solver.brickPresentation.vertexPhi }, { buffer: tex, bytesPerRow: rowBytes, rowsPerImage: V[1]! }, V);
+      device.queue.submit([enc.finish()]);
+      const invalid = await device.popErrorScope();
+      assert.equal(invalid, null, `probe: ${invalid?.message}`);
+      await Promise.all([tex.mapAsync(GPUMapMode.READ), probe.mapAsync(GPUMapMode.READ)]);
+      const shown = new Float32Array(tex.getMappedRange()), want = new Float32Array(probe.getMappedRange());
+      const h = Math.fround(e.options.h_m), farM = (solver as unknown as { options: { farPhi_m: number } }).options.farPhi_m;
+      const FAR_H = farM / h;
+      let mismatch = 0, first = "", liquid = 0, oldWrong = 0, minQ = Infinity, minOld = Infinity, finite = 0, minShown = Infinity;
+      const rowFloats = rowBytes / 4;
+      for (let z = 0; z < V[2]!; z++) for (let y = 0; y < V[1]!; y++) for (let x = 0; x < V[0]!; x++) {
+        const i = x + V[0]! * (y + V[1]! * z), q = want[2 * i]!, old = want[2 * i + 1]!;
+        const expect = q < FAR_H - 1e-3 ? Math.fround(q * h) : Math.fround(farM);
+        const got = shown[x + rowFloats * (y + V[1]! * z)]!;
+        if (got !== expect && !(got === Math.fround(farM) && q >= FAR_H - 1e-3)) { if (!mismatch) first = `(${x},${y},${z}) shown ${got} want ${expect} (q ${q})`; mismatch++; }
+        if (q < 0) liquid++;
+        minQ = Math.min(minQ, q); minOld = Math.min(minOld, old); minShown = Math.min(minShown, got); if (q < FAR_H - 1e-3) finite++;
+        if ((q < 0) !== (old < 0)) oldWrong++;
+      }
+      tex.unmap(); probe.unmap(); tex.destroy(); probe.destroy(); out.destroy();
+      console.log(`brick presentation at step ${steps}: min q ${minQ} old ${minOld} shown ${minShown}, ${finite} finite of ${count}, FAR_H ${FAR_H}; ${liquid} liquid vertices; the old F-only copy's sign differs at ${oldWrong}; mismatches ${mismatch}`);
+      assert.equal(mismatch, 0, `presentation differs from the tier authority at ${mismatch} vertices, first ${first}`);
+      assert.ok(liquid > 0, "the dam has liquid vertices");
     } finally { solver.destroy(); }
   });
 });
