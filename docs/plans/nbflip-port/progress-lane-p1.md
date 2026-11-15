@@ -181,3 +181,35 @@ Metal clean.
   in reverse order (Smith, Bjørstad & Gropp 1996, ch. 1–2).
 - **Its gate:** the Float64 symmetry oracle and the thin-film test (the seep-smoother.test.ts model), then
   capped counts on the probe windows.
+
+## 2026-11-15 M0(d) go/no-go: staggered Schwarz on the arena — convergence go, step time no-go, not landed
+
+- **Candidate:** pSchwarz, one 512-lane workgroup per 8³ block: the brick (U), the block shifted by (4, 0, 4)
+  (S), then U again, 3 red-black sweeps each in a 10³ staged tile, halo frozen at the pass entry, colours
+  reversed in post-smoothing (Smith, Bjørstad & Gropp 1996, ch. 1–2). Default `schwarz: true, schwarzSweeps: 3`.
+  Float64 oracle: tests/uniform-pressure-schwarz.test.ts (symmetric, beats the brick partition on the film).
+- **Convergence (probe windows, default schedule):**
+
+  | scene | capped steps base → cand | median r base → cand | deep floor (log10) | mean cycles |
+  |---|---|---|---|---|
+  | dam | 29/61, 27/61 → 1/61 | 0.047 → 0.020 | −2.24 → −2.42 | 4.00 → 3.95 |
+  | letters | 15/141, 19/141 → 0/141 | 0.030 → 0.0155 | −2.49 → −2.88 | 3.82 → 3.62 |
+
+- **Four-scene gates** (98b96d2c + patch, ~/code/me/fluid-scratch/lane-p1/gates/xcand11): Overall PASS
+  (seep, dam, letters, paddleboats); seep G7 drift −0.0050 against −0.0051.
+- **Interleaved timing A/B** (timing/schwarz11, every run rc 0, no Metal aborts 14:28–14:45):
+
+  | scene | fenced median ms base → cand | pipelined ms/step base → cand |
+  |---|---|---|
+  | seep | 35.76 → 38.59 (+7.9%) | 32.57 → 35.26 (+8.3%) |
+  | dam | 45.55 → 50.57 (+11.0%) | 51.69 → 56.51 (+9.3%) |
+  | letters | 88.75 → 102.16 (+15.1%) | 70.99 → 83.84 (+18.1%) |
+  | paddleboats | 52.51 → 51.97 (−1.0%) | 45.68 → 47.18 (+3.3%) |
+
+- **Decision: not landed.** The cap is nearly gone, but cycles a step barely fall (the schedule stops at the
+  target, not the floor), so the 3× smoother cost is paid in full: +5 to +13 ms on three scenes, far outside the
+  2.5% noise. The checkout is reverted; the patch and its test are kept at
+  ~/code/me/fluid-scratch/lane-p1/schwarz.patch and uniform-pressure-schwarz.test.ts.
+- **What it settles for the pool MGPCG:** the staggered partition is what removes the band floor, so the pool
+  solver keeps it at level 0. Its price is paid back there only if it cuts PCG iterations, which the pool
+  gates must show. A cheaper arena variant (1 sweep a pass, or U·S only) was not tried, to keep the time box.
