@@ -20,7 +20,8 @@
  * - pDelta: a lane a record of bank dst: recordDelta (the FLIP delta the next G2P takes).
  * - pDeposit (velocity-kernels) reclassifies the mode bit and deposits.
  *
- * Stand-ins, stated (lane E's census lands them): the tile's "thin" bit is false; the trigger is a crossing tile.
+ * Stand-in, stated: the tile's "thin" bit is false (the census publishes only the OR of its triggers, NB_S_TRIG,
+ * which the level set's heat reads).
  * Sparse retirement is off (sparseNeighbours 0, as the old method's default).
  */
 import type { BrickLayout } from "./brick-abi";

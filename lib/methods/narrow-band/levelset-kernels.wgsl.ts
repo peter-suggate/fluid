@@ -25,7 +25,8 @@
  * - lPublish: φ ← bank A off the interface; the six-cell sentinel past the reach (nbfFarSentinel).
  *
  * Stated differences from the old engine at this milestone (each a stand-in until its owner lands it):
- * - the activity trigger is "the tile holds a crossing cell" (lane E's census bits, NB_S_TRIG, replace it);
+ * - the activity trigger is the census's (NB_S_TRIG, setCensus at the part 1 head). In the all-h engine the census
+ *   classifies every tile as an h tile, where the old engine classified the deep interior at 4h;
  * - the crossing guard's certified travel is the brick's velocity bound over the step, in whole tiles (the
  *   census's spread-reach words replace it);
  * - the deep-air keep (a still tile's φ ≥ 9) is not applied: such vertices are transported;
@@ -319,9 +320,11 @@ fn lSource(word:u32,flags:u32,pz:u32,round:u32)->u32{
  else{if((flags&FTF_AIR_SEED)!=0u){d&=~(15u<<4u);}if((flags&FTF_OCCUPIED)!=0u){d&=~(15u<<8u);}}
  return d;
 }
-fn lHeatNow(i:u32,dt:f32)->f32{
- let h=fcLoadF(i+FT_H);let trig=(fcLoad(i+FT_FLAGS)&FTF_CROSSING)!=0u;
- return max(max(0.0,h-4.0*dt),select(0.0,2.0,trig));
+// The census heat this step (activitySpread): the last heat cooled at 4/s, or 2 where the census triggered the
+// tile (NB_S_TRIG, setCensus at the part 1 head). c is a cell of the tile, i its tile word.
+fn lHeatNow(c:vec3i,i:u32,dt:f32)->f32{
+ let h=fcLoadF(i+FT_H);
+ return max(max(0.0,h-4.0*dt),select(0.0,2.0,fgTileTrig(c)));
 }
 @compute @workgroup_size(64) fn lDilate(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let e=8u*nbGroup(wid)+(lid>>3u);if(e>=nbListCount(NB_LIST_F_ALL)){return;}
@@ -345,7 +348,7 @@ fn lHeatNow(i:u32,dt:f32)->f32{
   }
   if(round==2u&&abs(off)<=1){
    var hv=0.0;
-   if(pz==0u){hv=lHeatNow(i,dt);}else{hv=fcLoadF(i+select(FT_HB,FT_HA,pz==1u));}
+   if(pz==0u){hv=lHeatNow(4*tq,i,dt);}else{hv=fcLoadF(i+select(FT_HB,FT_HA,pz==1u));}
    hmax=max(hmax,hv);
   }
  }
@@ -353,7 +356,7 @@ fn lHeatNow(i:u32,dt:f32)->f32{
  if(pz<2u){
   let to=select(FT_DB,FT_DA,pz==0u);
   fcStore(own+to,best);
-  if(round==2u){fcStoreF(own+select(FT_HB,FT_HA,pz==0u),hmax);if(pz==0u){fcStoreF(own+FT_HN,lHeatNow(own,dt));}}
+  if(round==2u){fcStoreF(own+select(FT_HB,FT_HA,pz==0u),hmax);if(pz==0u){fcStoreF(own+FT_HN,lHeatNow(4*tc,own,dt));}}
   return;
  }
  let old=fcLoad(own+FT_DIST);

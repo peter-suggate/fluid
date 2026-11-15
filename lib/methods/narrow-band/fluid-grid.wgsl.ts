@@ -4,8 +4,9 @@
  *
  * Box rule, in the ABI's units (cells, φ in h, m/s):
  * - A cell or vertex outside the bricks a slot can hold (any coordinate below 0, or past the skirt) has no slot.
- * - A brick no slot holds is air (§2.3: a non-resident brick is air outside the reach): φ reads PHI_AIR and a face
- *   reads 0.
+ * - A brick no slot holds is air (§2.3: a non-resident brick is air outside the reach): φ reads NB_PHI_FAR (the old
+ *   vertex field's empty value, the lattice's largest extent in h; brick-abi.md §2.3), the particle depth reads
+ *   NB_PHI_AIR, and a face reads 0.
  * - A face on a box wall (index 0 or N along its axis) or outside the lattice across it is closed and reads 0.
  *   Readers never clamp an index into the box.
  *
@@ -120,6 +121,8 @@ fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;return nbInLattice(t)&&c[a]>0&
 fn fgTileOf(c:vec3i)->u32{return u32(((c.x>>2u)&1)|(((c.y>>2u)&1)<<1u)|(((c.z>>2u)&1)<<2u));}
 fn fgTileWord(slot:u32,t:u32,w:u32)->u32{return FC_TILE+FT_WORDS*(8u*slot+t)+w;}
 fn fgCell(slot:u32,c:vec3i)->u32{return 512u*slot+nbLocal(c);}
+// The census's importance trigger (NB_S_TRIG, bit j tile j) of the tile holding cell c; none where no slot holds it.
+fn fgTileTrig(c:vec3i)->bool{let s=fgSlot(c);if(s==NB_NONE){return false;}return ((nbSetWord(NB_S_TRIG+s)>>fgTileOf(c))&1u)!=0u;}
 // The tile word w of the tile holding cell c (NB_NONE where no slot holds it).
 fn fgTileAt(c:vec3i,w:u32)->u32{let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fgTileWord(s,fgTileOf(c),w);}
 fn fgPack(c:vec3i)->u32{return u32(c.x)|(u32(c.y)<<10u)|(u32(c.z)<<20u);}
@@ -166,7 +169,7 @@ fn fgTileHeat(c:vec3i)->f32{let i=fgTileAt(c,FT_T);if(i==NB_NONE){return 0.0;}re
 
 /** Vertex φ (needs `phi`). */
 export const FG_PHI_WGSL = /* wgsl */`
-fn fgPhiWord(base:u32,v:vec3i)->f32{let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
+fn fgPhiWord(base:u32,v:vec3i)->f32{let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_FAR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
 fn fgPhi(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI,v);}
 // The eight vertex φ of cell c in corner order x + 2y + 4z.
 fn fgCornersOf(base:u32,c:vec3i)->array<f32,8>{
