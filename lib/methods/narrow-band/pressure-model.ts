@@ -67,6 +67,9 @@ export interface ModelOptions {
   readonly coarseSweeps?: number;
   /** false: level 0 takes the bricks alone (one covering). */
   readonly staggered?: boolean;
+  /** A fixed level count (L0 .. L(levels-1)), as the GPU solver builds it; its coarsest must hold at most
+   * `coarsestRows` rows. 0 (the default): the first level with at most `coarsestRows` rows is the coarsest. */
+  readonly levels?: number;
 }
 
 /** Level 0 from per-cell rows: diag, the three lower couplings and RHS, keyed by packed cell. */
@@ -162,21 +165,28 @@ export class PressureModel {
   readonly inverse: Float64Array;
   readonly options: Required<ModelOptions>;
   constructor(fine: FineRows, options: ModelOptions = {}) {
-    this.options = { coarsestRows: MAX_COARSEST_ROWS, fineSweeps: 3, coarseSweeps: 2, staggered: true, ...options };
+    this.options = { coarsestRows: MAX_COARSEST_ROWS, fineSweeps: 3, coarseSweeps: 2, staggered: true, levels: 0, ...options };
     if (this.options.coarsestRows > MAX_COARSEST_ROWS) throw new Error(`Pressure model: a coarsest level of ${this.options.coarsestRows} rows, over ${MAX_COARSEST_ROWS}`);
     const L0 = makeLevel(0, [...fine.keys]);
     fine.keys.forEach((key, s) => { const i = L0.index.get(key)!; (L0.diag as Float64Array)[i] = fine.diag[s]!; for (let a = 0; a < 3; a++) (L0.k[a] as Float64Array)[i] = fine.k[a]![s]!; });
     this.levels = [L0];
-    while (this.levels.at(-1)!.keys.length > this.options.coarsestRows || this.levels.length < 2) this.levels.push(coarsenLevel(this.levels.at(-1)!));
+    const fixed = this.options.levels;
+    if (fixed) {
+      if (!Number.isInteger(fixed) || fixed < 2) throw new Error(`Pressure model: ${fixed} levels`);
+      while (this.levels.length < fixed) this.levels.push(coarsenLevel(this.levels.at(-1)!));
+      const top = this.levels.at(-1)!.keys.length;
+      if (top > this.options.coarsestRows) throw new Error(`Pressure model: a coarsest level of ${top} rows at ${fixed} levels, over ${this.options.coarsestRows}`);
+    } else while (this.levels.at(-1)!.keys.length > this.options.coarsestRows || this.levels.length < 2) this.levels.push(coarsenLevel(this.levels.at(-1)!));
     const inv = denseInverse(this.levels.at(-1)!);
     if (!inv) throw new Error("Pressure model: the coarsest operator has a non-positive pivot");
     this.inverse = inv;
   }
   get fine(): ModelLevel { return this.levels[0]!; }
   /** One V-cycle from zero: z ≈ A^-1 r. */
-  vcycle(r: Float64Array, l = 0): Float64Array {
+  vcycle(r: Float64Array, l = 0, trace?: (level: number, stage: "b" | "pre" | "post", v: Float64Array) => void): Float64Array {
     const L = this.levels[l]!, top = this.levels.length - 1;
     if (l === top) { const m = L.keys.length, z = new Float64Array(m); for (let i = 0; i < m; i++) { let s = 0; for (let j = 0; j < m; j++) s += this.inverse[i * m + j]! * r[j]!; z[i] = s; } return z; }
+    trace?.(l, "b", Float64Array.from(r));
     const e = new Float64Array(r.length), o = this.options;
     const smooth = (post: boolean) => {
       if (l === 0) {
@@ -185,13 +195,15 @@ export class PressureModel {
       } else blockGS(L, e, r, Math.max(2, 8 >> l), ZERO, rb(o.coarseSweeps, post));
     };
     smooth(false);
+    trace?.(l, "pre", Float64Array.from(e));
     const Ae = applyLevel(L, e), res = r.map((v, i) => v - Ae[i]!);
     const C = this.levels[l + 1]!, rc = new Float64Array(C.keys.length);
     const parent = L.keys.map(k => { const [x, y, z] = unpackCell(k); return C.index.get(packCell(x >> 1, y >> 1, z >> 1))!; });
     for (let i = 0; i < res.length; i++) rc[parent[i]!]! += res[i]!;
-    const ec = this.vcycle(rc, l + 1);
+    const ec = this.vcycle(rc, l + 1, trace);
     for (let i = 0; i < e.length; i++) e[i]! += ec[parent[i]!]!;
     smooth(true);
+    trace?.(l, "post", Float64Array.from(e));
     return e;
   }
   /** MGPCG (check before the V-cycle). Returns the iterate and the iterations whose V-cycle ran. */

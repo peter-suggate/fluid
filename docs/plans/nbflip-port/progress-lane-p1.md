@@ -213,3 +213,23 @@ Metal clean.
 - **What it settles for the pool MGPCG:** the staggered partition is what removes the band floor, so the pool
   solver keeps it at level 0. Its price is paid back there only if it cuts PCG iterations, which the pool
   gates must show. A cheaper arena variant (1 sweep a pass, or U·S only) was not tried, to keep the time box.
+
+## 2026-11-15 M1: pool MGPCG at the slot — oracles pass
+
+- lib/methods/narrow-band/pressure-mgpcg.ts, `poolMGPCG(L, {slots 8, tolerance 1e-3 1/s, fineSweeps 3,
+  coarseSweeps 2})`, a `PressureSolver` for brick-abi.md §6.1:
+  - 8 levels fixed at build: L0 (pres), L1 (pmgF), L2–L5 (pmgC, a C slot's tiles to the page), L6/L7
+    compact (pmgTop, ≤ 512 / ≤ 64 rows, FAIL.UNSUPPORTED over), Galerkin P^T A P / 1.6 (Braess 1995);
+  - L7 inverted once a step by Gauss-Jordan without pivoting (FAIL.PIVOT on a pivot ≤ 0);
+  - L0 staggered Schwarz (U, S(4,0,4), U; Smith, Bjørstad & Gropp 1996), coarse block red-black GS;
+  - PCG (Saad Alg. 9.1), the check before every V-cycle, the true residual every iteration;
+  - setup 4 dispatches, 16 a slot, finish 1; header 128–139, gates at args 512/515/518.
+- C records' neighbour words are not maintained in M1 (all NONE), so neighbour pages come from the
+  directory with a key check (`pPageSlot`). That was the one bug the trace oracle found.
+- Oracles (lib/methods/narrow-band/pressure-mgpcg.test.ts, GPU):
+  - one V-cycle against `PressureModel({levels: 8}).vcycle`: 8.1e-7 (corner block, 31 640 rows, top
+    rows 4/1/1) and 7.8e-7 (wide sheet, 168 000 rows, top rows 35/12/4);
+  - hydrostatic box: 5 iterations, |X − X64|/|X| 1.0e-5, analytic 1.8e-5, air X = 0;
+  - corner block converged: 6 iterations to 1e-3 h², against Float64 MGPCG 1.9e-5, air X = 0.
+- Not yet registered in brick-pressure-solver.ts: per the composite-system ruling an all-h solve is
+  bring-up only, so it registers with the C rows and seams.
