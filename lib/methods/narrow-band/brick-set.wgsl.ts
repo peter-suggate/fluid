@@ -227,6 +227,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     if(cs==NB_NONE){atomicStore(&dir[pi],NB_NONE);continue;}
     for(var j=0u;j<64u;j++){atomicStore(&dir[NB_D_CHILD+64u*cs+j],NB_NONE);}
     for(var j=0u;j<16u;j++){atomicStore(&dir[NB_D_CMASK+16u*cs+j],0u);}
+    for(var j=0u;j<16u;j++){atomicStore(&nbSet[NB_S_WANT+16u*cs+j],0u);}
     let r=NB_D_CREC+32u*cs;
     for(var j=0u;j<27u;j++){atomicStore(&dir[r+j],NB_NONE);}
     atomicStore(&dir[r+NB_REC_C_CHILDREN],0u);atomicStore(&dir[r+NB_REC_C_LIQUID_TILES],0u);
@@ -257,6 +258,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     atomicStore(&dir[r+NB_REC_KEY],key);atomicStore(&dir[r+NB_REC_CUT],NB_NONE);
     atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_ENTERING|select(0u,NB_CLASS_SKIRT,any(8*b>=NB_LATTICE)));
     atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);atomicStore(&nbSet[NB_S_BOUND_F+fs],0u);atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
+    atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);
     atomicAdd(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
     if(h){nbTileMask(cs,bl,true);}
     atomicStore(&dir[ci],fs);

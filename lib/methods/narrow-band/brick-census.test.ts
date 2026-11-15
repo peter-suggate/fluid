@@ -1,7 +1,7 @@
 // setCensus (brick-census.wgsl.ts) on a frozen state against a CPU oracle transcribed from the old census
 // (fluid-scratch/lane-f/wgsl-dam/063-Uniform_dynamic_ownership_census.wgsl: classify, classifyCoarse,
 // boundCubes, importanceTile, publishImportance, interfaceBits, decideTile) on the brick storage
-// (brick-abi.md §2.5), with the residency clamp. The oracle runs in f64 over the stored f32 words, rounding
+// (brick-abi.md §2.5), with the residency request (WANT keeps the band; the missing ring bricks are candidates). The oracle runs in f64 over the stored f32 words, rounding
 // where the kernel's f32 arithmetic decides a comparison (fr). Exact: velocity keys, crossing cells, every
 // flag, trigger and required bit, WANT, TRIG and the candidates. Tolerance-checked (the GPU may fuse a multiply
 // and add, and scores are bytes of f32 products): score bytes, within 1; the winner bits of FIN follow the
@@ -525,7 +525,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       counters.CENSUS_BAND++; if (!tileH(t)) counters.CENSUS_REFINED++;
       const b = shr(t, 1); let clamped = false;
       for (let n = 0; n < 27; n++) { const nb = add(b, [(n % 3) - 1, (Math.floor(n / 3) % 3) - 1, Math.floor(n / 9) - 1]); if (!inRange(nb) || fSlot(nb) !== undefined) continue; clamped = true; pageCand.add(key(nb)); }
-      if (clamped) { counters.CENSUS_CLAMPED++; continue; }
+      if (clamped) counters.CENSUS_CLAMPED++;
       w[i >> 5] = (w[i >> 5]! | (1 << (i & 31))) >>> 0;
     }
     want.set(cs, w);
@@ -534,8 +534,8 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     for (let bl = 0; bl < 64; bl++) {
       const fs = s.bricks.get(key(add(scale3(pk, 4), corner(bl, 4)))); if (fs === undefined) continue;
       let bits = 0;
-      for (let j = 0; j < 8; j++) { const q = add(scale3(corner(bl, 4), 2), corner(j, 2)); if (((sc.fin[tileIndex(q)]! >>> 16) & 63) !== 0) bits |= 1 << j; }
-      trigOut.set(fs, bits); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
+      for (let j = 0; j < 8; j++) { const q = add(scale3(corner(bl, 4), 2), corner(j, 2)); const w1 = sc.fin[tileIndex(q)]!; if (((w1 >>> 16) & 63) !== 0) bits |= 1 << j; if ((w1 >>> 17) & 1) bits |= 1 << (8 + j); }
+      trigOut.set(fs, bits >>> 0); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
     }
   }
   return { scratch, want, trig: trigOut, cand, band, counters, failed };

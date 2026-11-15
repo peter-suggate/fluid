@@ -4,7 +4,7 @@
  * (fluid-scratch/lane-f/wgsl-dam/063-Uniform_dynamic_ownership_census.wgsl; line numbers below are that
  * file's), ported on the brick storage. It reads PHI, US, CMASK and TILE_OCC, and writes WANT (16 words a C
  * slot, h iff the tile is band) and TRIG (a word an F slot, bit j: tile j's importance triggers, word 1 bits
- * 16-21, nbActivityTriggered).
+ * 16-21, nbActivityTriggered; bit 8 + j: its thin trigger alone, word 1 bit 17).
  *
  * Passes (brickCensusSchedule), each the old kernel of the same rule:
  * - censusBegin: the census header words (H 224..231) clear; unsupported state fails.
@@ -36,9 +36,11 @@
  * - Dead under the dam's policy and not ported: forwardFine (fastTravel 0) and its travel words, holds,
  *   the budget, reasons, strain and rotation, sources, regions, and the volume-fraction branches (surface
  *   authority). umResolutionError's h-tile branch is dead under shapeDisplacement.
- * - Residency clamp (lane E): a tile may be h in WANT only when its F brick and every in-range
- *   27-neighbour of it are resident. A clamped tile appends its missing bricks as candidates (setMark's
- *   append) and refines one census late.
+ * - Residency (lane E; storage, not a decision): a band tile whose F brick or an in-range 27-neighbour is not
+ *   resident appends the missing bricks as candidates (setMark's append; counted in CENSUS_CLAMPED and
+ *   CENSUS_CAND), and WANT keeps the band bit. The part 1 head claims them before the transfer, and
+ *   censusWant then checks every WANT bit's ring: a miss (a refused pool) latches FAIL.TIER. So WANT is
+ *   exactly the old decision.
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BrickLayout, H, LIST, brickAbiWGSL } from "./brick-abi";
@@ -748,7 +750,7 @@ fn ncFlush(){
 
 export function brickCensusKernels(L: BrickLayout) {
   if (L.lattice.some(n => n % 32 !== 0)) throw new Error(`setCensus: the lattice ${L.lattice.join("x")} is not whole pages (32 cells an axis)`);
-  if (L.cap.b > 0) throw new Error("setCensus: BULK16 pages are not supported at M2");
+  // BULK16 (B slots) is M3: a pool may be authored, but a live B slot fails on the GPU (censusBegin, LIVE_B).
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
 
   // censusBegin: one lane. The header words clear; a body or solid edit, or a B or K brick, fails.
@@ -1019,16 +1021,21 @@ var<workgroup> wgGo:u32;
       if(s==NB_NONE){let l=nb-base;atomicOr(&wgCand[u32(l.x+6*l.y+36*l.z)>>5u],1u<<(u32(l.x+6*l.y+36*l.z)&31u));}
       else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
     }
-    if(clamped){atomicAdd(&wgCount[2],1u);continue;}
+    if(clamped){atomicAdd(&wgCount[2],1u);}
     atomicOr(&wgWant[i>>5u],1u<<(i&31u));
   }
   // TRIG: an F child's bit j is its tile j's importance triggers (final word 1 bits 16..21).
   let fs=nbChild(cs,lane);
   if(fs<NB_SEAM){
     let b=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);var bits=0u;
-    for(var j=0u;j<8u;j++){let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);bits|=select(0u,1u<<j,((ncFin(cs,q.x|(q.y<<3u)|(q.z<<6u))>>16u)&63u)!=0u);}
+    for(var j=0u;j<8u;j++){
+      let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let w1=ncFin(cs,q.x|(q.y<<3u)|(q.z<<6u));
+      bits|=select(0u,1u<<j,((w1>>16u)&63u)!=0u);
+      // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
+      bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
+    }
     atomicStore(&nbSet[NB_S_TRIG+fs],bits);
-    if(bits!=0u){atomicAdd(&wgCount[3],countOneBits(bits));}
+    if((bits&0xffu)!=0u){atomicAdd(&wgCount[3],countOneBits(bits&0xffu));}
   }
   workgroupBarrier();
   if(lane<16u){atomicStore(&nbSet[NB_S_WANT+16u*cs+lane],atomicLoad(&wgWant[lane]));}
@@ -1050,7 +1057,25 @@ var<workgroup> wgGo:u32;
   }
 }`);
 
-  return { censusBegin, censusFine, censusCoarse, censusCubes, censusImportance, censusDecide };
+  // censusWant (tiered, after the part 1 head's claims): every WANT bit's brick and in-range 27-neighbours must be
+  // resident now. The claims took the candidates censusDecide listed, so a miss means a pool refused (POOL_F/C is
+  // latched): the bit clears and FAIL.TIER latches with the brick, never a silent coarser tier.
+  const censusWant = k("censusWant", [CFG, setRW, dirRO], /* wgsl */`
+@compute @workgroup_size(64) fn censusWant(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,g);
+  for(var j=0u;j<8u;j++){
+    let i=lane+64u*j;let w=NB_S_WANT+16u*cs+(i>>5u);let bit=1u<<(i&31u);
+    if((atomicLoad(&nbSet[w])&bit)==0u){continue;}
+    let b=(8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u)))>>vec3u(1u);
+    for(var n=0u;n<27u;n++){
+      let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
+      if(nbFSlotOfBrick(nb)>=NB_SEAM){atomicAnd(&nbSet[w],~bit);nbFail(NB_FAIL_TIER,nbKey(nb));break;}
+    }
+  }
+}`);
+
+  return { censusBegin, censusFine, censusCoarse, censusCubes, censusImportance, censusDecide, censusWant };
 }
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */

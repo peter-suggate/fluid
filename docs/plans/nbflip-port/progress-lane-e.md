@@ -361,3 +361,22 @@ brick-set-tiers.test.ts adds a tiered boot of a 30x40x30 column on a 64^3 lattic
 - C φ equals bootPhi's analytic distance;
 - census counts: crossing 214, band 70, clamped 28.
 The GPU suite passes 23/23 (engine, census, transfer, transfer-dam, set-tiers, owner).
+
+## 2026-11-15: the residency clamp removed (coordinator's question)
+
+The old clamp held a band tile at 4h when its brick or 27-ring was not resident. That is storage
+timing, not a decision: the old engine stores every tile at both widths, so it never needed a clamp.
+Now WANT is the old band decision exactly. The part 1 head claims the missing ring bricks before the
+transfer. A refused pool latches POOL_F/C, and then censusWant latches FAIL.TIER; the tier never
+silently stays coarse. Test: a tiered column boot gives 70 h tiles = the census band of 70, with 0
+clamped, and a second head on the same state lists no change.
+
+The real old-census capture (WANT/TRIG at dam collapse and splash steps, plus a deep-COLD count) is
+delegated to the remap-capture agent.
+
+F's two requests (the same commit):
+- The census no longer refuses an authored B pool (the dam's b:16) on the host. A live B slot still
+  latches FAIL.UNSUPPORTED on the GPU (censusBegin).
+- TRIG bits 8-15 are each tile's thin trigger alone (word 1 bit 17), beside the OR in bits 0-7
+  (brick-abi.md §2.5). The census test's oracle checks both.
+- GPU: census, set-tiers and engine pass 20/20, with 0 Metal aborts. Unit tests: 1828 pass.

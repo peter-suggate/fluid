@@ -19,7 +19,7 @@ import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type Bric
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickCensusBuffers, brickCensusSchedule } from "./brick-census.wgsl";
+import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule } from "./brick-census.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 
@@ -161,15 +161,24 @@ export class BrickEngine {
       ...stages.tail,
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
-    // Part 1's head (tiered: NB-FLIP's frame-head census and remap, brick-abi.md §2.5) on the last step's lists and
-    // state. The census runs all-h too, for F's TRIG; only a tiered engine commits WANT (the transfer) and requests
-    // the clamp's bricks. The boot runs it before F's boot stages (the seeding reads TRIG).
+    // Part 1's head: NB-FLIP's frame-head census and (tiered) remap, brick-abi.md §2.5, on the last step's lists and
+    // state. The census runs all-h too, for F's TRIG; only a tiered engine commits WANT and requests bricks. Tiered:
+    // the census lists the bricks its band tiles' rings lack, the head claims them (records, init, lists), censusWant
+    // checks every ring (a refused pool latches FAIL.TIER), the transfer commits, and the churn counts clear for
+    // part 2 (stepEnd with cfg.z = 1: no step). The boot runs the census before F's boot stages (the seeding reads
+    // TRIG) and commits without the remap: bootPhi writes one analytic φ to F and C, and U = 0.
     const g1 = (k: number) => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 });
-    const census = brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered), transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
-    const head = [...census, ...(tiered ? transfer : [])];
-    // The boot commits its census without the remap: bootPhi writes one analytic φ to F and C, and U = 0.
-    const bootHead = [...census, ...(tiered ? transfer.filter(p => p.kernel.label === "setCommitMask") : [])];
-    const boot: BrickPlacement[] = [...update(1), ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, ...bootHead, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    // A bring-up stage set reads no TRIG: on a lattice of partial pages (P's synthetic blocks) it runs without the
+    // census, which needs whole pages (every scene's fluid lattice is, sceneFluidBox) and refuses others.
+    const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
+    const census = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [], transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
+    const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: g1(LIST.C_ALL) }] : [];
+    const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
+    const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes };
+    const head = tiered ? [...census, ...update(0), ...tail, ...lists, ...want, ...transfer, churnClear] : census;
+    const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
+    const bootHead = tiered ? [...census, ...update(0), ...tail, bootPhi, ...lists, ...want, ...commit] : census;
+    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census and remap), then F's move and rebin.
     return { part1: [...head, ...stages.move, ...stages.rebin], part2, boot };
   }

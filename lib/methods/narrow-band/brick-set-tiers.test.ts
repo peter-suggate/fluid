@@ -144,5 +144,21 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
     console.log(`tiered boot: ${nH} h tiles, ${n4} 4h; edge column h ${edgeH}; deep h ${deepH}; census crossing ${s.header[H.CENSUS_CROSSING]} required ${s.header[H.CENSUS_REQUIRED]} band ${s.header[H.CENSUS_BAND]} clamped ${s.header[H.CENSUS_CLAMPED]} triggered ${s.header[H.CENSUS_TRIGGERED]}`);
     assert.ok(nH > 0 && n4 > 0, "both tiers at boot");
     assert.equal(deepH, 0, "the still interior (more than 8 cells deep) is 4h");
+    // The boot claimed every band tile's ring, so nothing is clamped at 4h.
+    for (const [pk, cs] of s.pages) {
+      const P = brickKeyCoord(pk) as unknown as V3, want = s.set.subarray(L.set.want + CMASK_WORDS * cs, L.set.want + CMASK_WORDS * (cs + 1));
+      const m = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
+      assert.deepEqual([...m], [...want], `page ${P}: CMASK = WANT (the census's band, unclamped)`);
+    }
+    // Part 1's head again on the unchanged state: the same decisions, so the transfer lists no change.
+    await e.run(e.schedule.part1);
+    const s2 = await snapshot(e);
+    assert.equal(s2.header[H.FAIL], 0, `FAIL ${s2.header[H.FAIL]} info ${s2.header[H.FAIL_INFO]}`);
+    for (const [pk, cs] of s.pages) {
+      const a = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1)), b = s2.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
+      assert.deepEqual([...b], [...a], `page ${brickKeyCoord(pk)}: a still column keeps its tiers`);
+    }
+    assert.equal(s2.bricks.size, s.bricks.size, "no brick enters or leaves in the head");
+    console.log(`tiered head: listed ${s2.header[H.N_TLIST_RUN]} (neighbour-only listing), clamped ${s2.header[H.CENSUS_CLAMPED]}, cand ${s2.header[H.CENSUS_CAND]}`);
   });
 });

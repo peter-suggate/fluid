@@ -183,9 +183,11 @@ CMASK is set at claim, the M1 engine).
     coarsens them.
   - `setInit` also sets entering C slots to air: φ AIR, every velocity and pres channel 0, and FLAGS
     OPEN on in-lattice tiles.
-  - The census allows an h tile only when its brick and every in-range 27-neighbour are resident.
-    It lists the missing bricks as candidates, which are claimed in the same step's part 2, so a
-    tile in new territory refines one step late (a storage deviation).
+  - The census keeps WANT as the old decision. A band tile whose brick or in-range 27-neighbour is
+    not resident lists the missing bricks as candidates. The part 1 head claims them right away
+    (claims, records, init, lists), before the transfer. `censusWant` then checks every WANT bit's
+    ring. A miss, which can only be a refused pool, latches FAIL.TIER and never yields a silently
+    coarser tier. The head then clears the churn counts for part 2 (`stepEnd`, cfg.z = 1).
   - Test: brick-set-tiers.test.ts.
   - A ring brick's tiles are all 4h-owned. It exists to hold the interface faces and the
     vertices of the h tiles beside it, so that every h stencil resolves within the 27-neighbour
@@ -235,8 +237,15 @@ rules above through the directory and masks:
 
 **Schedule** (`BrickEngine.scheduleFor`, landed 2026-11-15):
 - Part 1 opens with the head. This is `setCensus` (`brickCensusSchedule`: censusBegin, censusFine
-  on F_ALL, then censusCoarse, censusCubes, censusImportance and censusDecide on C_ALL), then,
-  when tiered, `brickTransferSchedule`. After the head come F's `move` and `rebin`.
+  on F_ALL, then censusCoarse, censusCubes, censusImportance and censusDecide on C_ALL). When
+  tiered, the claims of the census's ring bricks follow, then `censusWant`, then
+  `brickTransferSchedule`, then the churn clear. After the head come F's `move` and `rebin`.
+- A bring-up stage set reads no TRIG. On a lattice that isn't whole pages (P's synthetic blocks) it
+  runs without the census, which refuses such lattices. Every scene's fluid lattice is whole pages
+  (`sceneFluidBox`).
+- TRIG is one word per F slot. Bit j (0-7) is set when tile j has any importance trigger (final
+  word 1 bits 16-21, `nbActivityTriggered`). Bit 8 + j is tile j's thin trigger alone (word 1
+  bit 17), which F's thin move path reads (F's request, 2026-11-15). Bits 16-31 are zero.
 - The census runs in the all-h engine too, because F reads TRIG. There it neither commits WANT
   (no transfer) nor requests bricks (censusDecide's `cfg.z` = 0).
 - The boot runs the census after its lists and before F's boot stages, since F's seeding reads
