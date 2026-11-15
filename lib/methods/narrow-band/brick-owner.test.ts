@@ -61,6 +61,7 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
         const corner = [k & 1, (k >> 1) & 1, k >> 2];
         if (corner.some((c, a) => inside[a] && c === 0)) continue;
         const t = tA.map((x, a) => x + corner[a]! - 1) as Vec3;
+        // page 0 holds every in-lattice tile here (a non-resident page's tile is no candidate: the next test).
         if (t.every(x => x >= 0 && 4 * x < N) && !tileH(t)) return t;
       }
       return undefined;
@@ -145,6 +146,66 @@ ${brickOwnerWGSL()}
       }
     });
     assert.ok(hanging > 0 && corners > 0 && hPlane > 0 && walls > 0, `hanging ${hanging}, corners ${corners}, interface faces ${hPlane}, wall faces ${walls}`);
+    for (const b of [pb, out, rd]) b.destroy();
+    e.destroy();
+  });
+});
+
+// A tile of a non-resident page holds no corners: it is air, never a vertex's authority (brick-abi.md §2.5). All-h,
+// the vertices on an absent page's upper face (x = 32 here, the absent page below at x < 32) are F's. Taking the
+// absent tile as 4h read the resident page's C corners, which all-h hold bootPhi's stale φ: lane P's absent-page
+// guard hits on the all-h dam (2026-11-15).
+test("brick owner (GPU): a non-resident page's tile is no vertex authority (all-h: no stale C)", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("brick owner absent page", async device => {
+    const M = 64, FAR64 = phiFar([M, M, M]);
+    const e = await BrickEngine.create(device, { lattice: [M, M, M], h_m: 1 / 64, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
+      capacities: { f: 500, c: 32, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [40, -1, -1], hi: [65, 20.3, 65] }], solver: L => bringUpCG(L), stages: bringUpStages });
+    const s = await snapshot(e), L = e.layout;
+    const pageKey = (p: Vec3) => (p[0] | (p[1] << 10) | (p[2] << 20)) >>> 0;
+    assert.equal(s.pages.get(pageKey([0, 0, 0])), undefined, "page (0,0,0) is not resident");
+    assert.ok(s.pages.get(pageKey([1, 0, 0])) !== undefined, "page (1,0,0) is resident");
+    // Stale C φ: every resident page's C vertices deep liquid, which no all-h reader may take.
+    for (const cs of s.pages.values()) e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, new Float32Array(512).fill(-5));
+    const fphi = await readChannel(e, "phi", "PHI");
+    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : FAR64; };
+    const probes: Vec3[] = [];
+    for (let z = 0; z <= 12; z++) for (let y = 0; y <= 12; y++) for (const x of [31, 32, 33]) probes.push([x, y, z]);
+    const code = `${brickAbiWGSL(L, { dir: { name: "dir", atomic: false } })}
+@group(0) @binding(0) var<storage,read> dir:array<u32>;
+@group(0) @binding(1) var<storage,read> phi:array<u32>;
+@group(0) @binding(2) var<storage,read> vel:array<f32>;
+@group(0) @binding(3) var<storage,read> probe:array<i32>;
+@group(0) @binding(4) var<storage,read_write> outp:array<f32>;
+${brickOwnerWGSL()}
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) gid:vec3u){
+  let i=gid.x;if(i>=${probes.length}u){return;}
+  let v=vec3i(probe[3u*i],probe[3u*i+1u],probe[3u*i+2u]);
+  outp[2u*i]=nbVertexPhi(v);outp[2u*i+1u]=select(0.0,1.0,nbVertexOwnerH(v));
+  _=vel[0];
+}`;
+    const module = device.createShaderModule({ code });
+    const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
+    assert.deepEqual(errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`), []);
+    const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "main" } });
+    const pb = device.createBuffer({ size: 12 * probes.length, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(pb, 0, new Int32Array(probes.flat()));
+    const out = device.createBuffer({ size: 8 * probes.length, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const rd = device.createBuffer({ size: 8 * probes.length, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: e.buffer("dir") } }, { binding: 1, resource: { buffer: e.buffer("phi") } }, { binding: 2, resource: { buffer: e.buffer("vel") } },
+      { binding: 3, resource: { buffer: pb } }, { binding: 4, resource: { buffer: out } }] });
+    const enc = device.createCommandEncoder(); const pass = enc.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(Math.ceil(probes.length / 64)); pass.end();
+    enc.copyBufferToBuffer(out, 0, rd, 0, 8 * probes.length); device.queue.submit([enc.finish()]);
+    await rd.mapAsync(GPUMapMode.READ); const got = new Float32Array(rd.getMappedRange().slice(0)); rd.unmap();
+    let onFace = 0;
+    probes.forEach((v, i) => {
+      assert.equal(got[2 * i + 1], 1, `vertex ${v} is F's (all-h: no 4h authority)`);
+      assert.equal(got[2 * i], fVertex(v), `phi at ${v}`);
+      if (v[0] === 32 && fVertex(v) > 0) onFace++;
+    });
+    // The absent page's upper face, where the old candidate (tile x = 7) would have read the stale -5.
+    assert.ok(onFace > 0, `probes on the absent page's face: ${onFace}`);
     for (const b of [pb, out, rd]) b.destroy();
     e.destroy();
   });

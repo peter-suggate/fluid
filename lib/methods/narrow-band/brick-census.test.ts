@@ -75,7 +75,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       const c = [k & 1, (k >> 1) & 1, k >> 2];
       if (c.some((x, a) => inside[a] && x === 0)) continue;
       const t = tA.map((x, a) => x + c[a]! - 1) as V3;
-      if (tileInLattice(t) && !tileH(t)) return t;
+      if (tileInLattice(t) && s.pages.get(pageKey(shr(t, 3))) !== undefined && !tileH(t)) return t; // a non-resident page's tile is no authority
     }
     return undefined;
   };

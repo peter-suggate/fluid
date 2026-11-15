@@ -427,3 +427,24 @@ The BULK16 latch (FAIL.UNSUPPORTED 0x4c430003) stays for a different reason: unt
 reads a BULK16 page as absent, so a vertex on such a page would silently get a wrong value. The M3 list
 gains the COLD-seed deviation (deviation 6: the previous step's seed for a COLD tile), to land with COLD
 (deviation 5).
+
+## 2026-11-15: the all-h absent-page guard hits (reader bug, not reach)
+
+Lane P's absent-page guard fired on 2 of 4 all-h dam runs (step 127, page (1,2,1); step 179, vertex (40,64,31),
+page (1,2,0)). The cause was hypothesis 3, a reader bug. `nbVertexCoarse` took a tile of a non-resident page as
+the 4h authority, so a vertex on that page's upper face interpolated the next page's C corners. All-h, those
+corners still hold bootPhi's stale φ (a cell at (63,63,62) read -1.58 where F's corners give 67): a phantom
+liquid row. The other two hypotheses were ruled out by instrumented runs: 461 all-h steps over three runs, no
+liquid vertex with an absent brick in its 1-ring, least slack 7 cells, and no FAIL.REACH.
+- Fix: `nbVertexCoarse` skips a tile whose page has no slot. The oracles in brick-owner, levelset-coarse,
+  brick-census, brick-transfer and pressure-composite tests take the same rule. New test: brick-owner, "a
+  non-resident page's tile is no vertex authority".
+- Latch: `setMark`'s φ scan checks every face vertex with φ < 0 against its 1-ring's neighbour words, which it
+  stages once per workgroup. If one is absent it latches FAIL.REACH with that brick's key. No new pass.
+- P's guard is now on in both engines (`pressureOperatorKernels(layout)`).
+- Validation: 200-step all-h dam (composite, poolF 4913) runs to the end, drift -1.05%, no guard or latch hit.
+  GPU suites 29/29 pass; unit tests pass, 0 failed.
+- Open, the tiered reach timing (F's step-14 repro). `setMark` bounds before the project, but the old census
+  bounds at the frame head with the extended velocity the next trace samples. The old rule would have covered
+  the 7.48 m/s jet (about 27 cells against 20 of travel). The port is a part-1 head bound on max |US|, or F's
+  pDelta raising BOUND_F with the post-project |U| (brick-abi.md §5.4 "Open").

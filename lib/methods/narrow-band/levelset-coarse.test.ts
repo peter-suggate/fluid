@@ -97,7 +97,8 @@ class World {
       const b = corner(k);
       if (b.some((x, a) => inside[a] && x === 0)) continue;
       const t = sub(add(tA, b), [1, 1, 1]);
-      if (this.tileInLattice(t) && !this.tileOwnerH(t)) return t;
+      // A tile of a non-resident page is no authority (nbVertexCoarse: no slot stores its corners).
+      if (this.tileInLattice(t) && this.cslotOfPage(shr(t, 3)) !== NONE && !this.tileOwnerH(t)) return t;
     }
     return undefined;
   }

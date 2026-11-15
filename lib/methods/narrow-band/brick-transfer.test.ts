@@ -97,7 +97,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
         const corner = [k & 1, (k >> 1) & 1, k >> 2];
         if (corner.some((c, a) => inside[a] && c === 0)) continue;
         const t = tA.map((x, a) => x + corner[a]! - 1) as V3;
-        if (tileInLattice(t) && !tileH(m, t)) return t;
+        if (tileInLattice(t) && cSlot(t) !== undefined && !tileH(m, t)) return t; // a non-resident page's tile is no authority
       }
       return undefined;
     };

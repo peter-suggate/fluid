@@ -39,7 +39,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     const fVertex = (v: V3) => { const sl = fSlot(v); return sl === undefined ? FAR : F.PHI[BRICK_STRIDE * sl + local(v)]!; };
     const vertexCoarse = (v: V3): V3 | undefined => {
       const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
-      for (let k = 0; k < 8; k++) { const cc = corner(k); if (cc.some((c, a) => inside[a] && c === 0)) continue; const t = add(add(tA, cc), [-1, -1, -1]); if (tileInLattice(t) && !tileH(t)) return t; }
+      for (let k = 0; k < 8; k++) { const cc = corner(k); if (cc.some((c, a) => inside[a] && c === 0)) continue; const t = add(add(tA, cc), [-1, -1, -1]); if (tileInLattice(t) && pageSlot(shr(t, 3)) !== NONE && !tileH(t)) return t; } // a non-resident page's tile is no authority
       return undefined;
     };
     const vertexPhi = (v: V3) => {

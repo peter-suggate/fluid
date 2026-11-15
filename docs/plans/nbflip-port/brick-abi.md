@@ -239,6 +239,12 @@ rules above through the directory and masks:
     (setMarkPages' margin) and 8 cells from h liquid (the core ring).
   - The old engine's 33³ page boxes store their upper-face vertices; here they belong to page
     p + 1. So the two engines differ only there, and only in arithmetic that far from any liquid.
+  - A tile of a non-resident page is no vertex authority (`nbVertexCoarse` skips it): no slot stores
+    its corners. Taking it as 4h made a vertex on an absent page's upper face the interpolant of the
+    next page's C corners, which all-h hold bootPhi's stale φ. That was lane P's absent-page guard on
+    the all-h dam (2026-11-15: a cell at (63,63,62) read φ -1.58 where F's corners give 67). It was
+    not a reach defect: in 461 instrumented all-h steps (three runs), no F liquid vertex had an absent
+    brick in its 1-ring, and the least slack between liquid and an absent brick was 7 cells.
 
 **Schedule** (`BrickEngine.scheduleFor`, landed 2026-11-15):
 - Part 1 opens with the head. This is `setCensus` (`brickCensusSchedule`: censusBegin, censusFine
@@ -529,6 +535,21 @@ non-empty bin keeps or enters every brick that overlaps its **reach box**. In ce
   ceiling of any travel is at least 1. That is 2.6x a slab's bricks, so M1 replaced it.
 - A particle that still lands outside a resident brick latches `FAIL.REACH`. It is a defect to
   root-cause, never clamped.
+- So does a liquid vertex whose 1-ring is not resident: `setMark`'s scan checks every φ < 0 vertex
+  on its brick's faces against the brick's neighbour words (staged once a workgroup) and latches
+  `FAIL.REACH` with the absent brick's key. The φ it reads is the last level set's, which the
+  current directory served, so this checks the last step's level set and operator.
+- Open (2026-11-15, lane F's tiered repro: FAIL.REACH at step 14, brick (3,5,15)): `setMark` runs
+  in part 2 before the project, so its BOUND_F misses step n's projected velocity, which pMove
+  n + 1 traces. A jet went from 3.44 to 7.48 m/s, about 20 cells of travel at h = 6.25 mm, while the
+  stale reach was about 16.5. The old engine has no such hole. Its census runs at the frame head,
+  after the completed frame (uniform-mixed-dynamic.ts:2353-2355). It bounds each tile by the
+  extended face speeds the next trace samples (l.1149-1174, l.442 "extended"), and turns them into
+  `departureTravel` plus the stage margins (l.1761-1796; uniform-local-residency.ts:28-35, 57-70,
+  99-103). With 7.48 m/s that gives (7.48 + 9.81/60)/60/0.00625 + 7, about 27.4 cells, which covers
+  the 20. The port is to decide the move's reach from the post-tail velocity. Either a part-1 head
+  pass bounds with max |US| (the old census's timing), or lane F's pDelta raises BOUND_F with the
+  post-project |U| of the brick's faces.
 - The cell precision is `NB_REACH_MARGIN` and the brick range is `NB_BRICKS` (`floor(n/8) + 1` an
   axis, skirts included), both in the prelude.
 - Lane F states the band margin its kernels need, and E sets `REACH_MARGIN` from it.
@@ -870,7 +891,7 @@ The method (`brick-method.ts`) refuses a scene and names every gap: the scene's 
 | 2 | `POOL_B` | B free stack exhausted |
 | 3 | `POOL_K` | cut free stack exhausted |
 | 4 | `PARTICLES` | particle bank capacity exceeded |
-| 5 | `REACH` | a particle or liquid cell outside the resident bricks |
+| 5 | `REACH` | a particle, or a liquid vertex's 1-ring (`setMark`), outside the resident bricks |
 | 6 | `LIST` | a list or the candidate buffer overflowed |
 | 7 | `WINDOW` | a key outside the window |
 | 8 | `UNSUPPORTED` | a kernel met a feature it does not implement |

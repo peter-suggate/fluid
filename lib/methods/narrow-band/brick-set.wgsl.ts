@@ -93,13 +93,17 @@ var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
 var<workgroup> wLo:array<atomic<u32>,3>;
 var<workgroup> wHi:array<atomic<u32>,3>;
+var<workgroup> wNb:array<u32,27>;
 @compute @workgroup_size(64) fn setMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);for(var a=0u;a<3u;a++){atomicStore(&wLo[a],8u);atomicStore(&wHi[a],0u);}}
-  workgroupBarrier();
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
-  var slot=0u;var o=vec3i(0);var bound=0.0;
+  var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);}
+  // The brick's 27 neighbour words (F record words 0-26), for the residency check below.
+  if(live&&lid<27u){wNb[lid]=atomicLoad(&dir[NB_D_FREC+32u*slot+lid]);}
+  workgroupBarrier();
+  var o=vec3i(0);var bound=0.0;
   if(live){
-    slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);
+    o=nbFOrigin(slot);
     bound=bitcast<f32>(nbSetWord(NB_S_BOUND_F+slot));
     let tiles=${tiered ? "atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_MASK])&0xffu" : "0xffu"};
     var neg=0u;var pos=0u;var lo=vec3u(8u);var hi=vec3u(0u);
@@ -109,6 +113,19 @@ var<workgroup> wHi:array<atomic<u32>,3>;
       if(((tiles>>u32((c.x>>2u)|((c.y>>2u)<<1u)|((c.z>>2u)<<2u)))&1u)==0u){continue;}
       let p=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
       if(p<0.0){neg++;lo=min(lo,vec3u(c));hi=max(hi,vec3u(c));}else{pos=1u;}
+      // The residency check (brick-abi.md §5.4, §8): a liquid vertex's 1-ring (every vertex of the cells it bounds)
+      // is resident. φ is the last level set's, which this step's directory served, so a miss is a reach defect of
+      // the last step: FAIL.REACH with the absent brick's key, never read as air. Only the brick's face vertices
+      // reach a neighbour.
+      if(p<0.0&&(any(c==vec3i(0))||any(c==vec3i(7)))){
+        for(var n=0u;n<27u;n++){
+          let d=nbNeighbourOffset(n);
+          if(any((d<vec3i(0))&(c!=vec3i(0)))||any((d>vec3i(0))&(c!=vec3i(7)))||n==NB_REC_SELF){continue;}
+          let w=o+c+d;let nb=(o>>vec3u(3u))+d;
+          if(any(w<vec3i(0))||any(w>NB_LATTICE)||!nbBrickInRange(nb)){continue;}
+          if(wNb[n]>=NB_SEAM){nbFail(NB_FAIL_REACH,nbKey(nb));}
+        }
+      }
     }
     if(neg>0u){atomicAdd(&wNeg,neg);for(var a=0u;a<3u;a++){atomicMin(&wLo[a],lo[a]);atomicMax(&wHi[a],hi[a]);}}
     if(pos!=0u){atomicOr(&wPos,1u);}

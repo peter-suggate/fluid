@@ -7,7 +7,7 @@
  *
  * - Tiles are 4^3 h, in global tile coordinates t (cell >> 2). A tile in no
  *   resident page, or outside the lattice, is not h-owned.
- * - Vertices: NB-FLIP's authority rule, verbatim. A coarse incident tile wins
+ * - Vertices: NB-FLIP's authority rule, verbatim. A coarse incident tile of a resident page wins
  *   (umVertexAuthority, uniform-mixed-vertex-sampling.wgsl.ts l.78). A vertex
  *   with no 4h-owned incident tile is F's. Every other vertex is its 4h
  *   tile's interpolant, umVertexFrom4's arithmetic (l.95: the weight
@@ -56,14 +56,18 @@ fn nbCellOwnerH(c:vec3i)->bool{return nbTileOwnerH(c>>vec3u(2u));}
 // The 4h-owned tile that holds vertex v's authority, in umVertexAuthority's order, or (-1,-1,-1) when no incident
 // tile is 4h-owned. Candidate k is tile tA + corner(k) - 1 (umCoarseIncident, the lowest k first: tA the tile
 // of v's cell above); an axis on which v lies inside tA (local != 0) admits only corner 1. A tile outside the
-// lattice is no candidate (the old cell-above walk steps off the solid shell, which gives the same tiles).
+// lattice is no candidate (the old cell-above walk steps off the solid shell, which gives the same tiles). Nor is a
+// tile of a non-resident page: no slot stores its corners, so it is air (NB_PHI_FAR), never an authority. Taking it
+// as 4h made a vertex on an absent page's upper face the interpolant of the next page's C corners, which all-h hold
+// bootPhi's stale analytic φ: lane P's absent-page guard hits on the all-h dam (2026-11-15, a cell at (63,63,62)
+// read -1.58 against F's 67).
 fn nbVertexCoarse(v:vec3i)->vec3i{
   let tA=v>>vec3u(2u);let inside=(v-4*tA)!=vec3i(0);
   for(var k=0u;k<8u;k++){
     let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);
     if(any(inside&(corner==vec3u(0u)))){continue;}
     let t=tA+vec3i(corner)-vec3i(1);
-    if(nbTileInLattice(t)&&!nbTileOwnerH(t)){return t;}
+    if(nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE&&!nbTileOwnerH(t)){return t;}
   }
   return vec3i(-1);
 }
