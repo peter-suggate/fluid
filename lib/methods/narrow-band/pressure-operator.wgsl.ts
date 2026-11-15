@@ -19,12 +19,20 @@
  */
 import type { BrickLayout } from "./brick-abi";
 import { pressureCompositeKernels } from "./pressure-composite.wgsl";
-import { mgLayout } from "./pressure-mgpcg";
+import { mgLayout, mgLive, poolMGPCG } from "./pressure-mgpcg";
 
 /** `operator` and `project` (WGSL reserves `operator`: its entry point is nbOperator). `tiered` is the engine's
  * (BrickStages.tiered); the default keeps the tiered engine's absent-page guard. `faces`: the solver binds pmgF
- * (lane P's MGPCG), so rowsF writes its face cache (mgLayout FC) and project reads it. */
+ * (lane P's MGPCG), so rowsF writes its face cache (mgLayout FC) and project reads it; and with the live lists
+ * (mgLive) the MGPCG itself places rowsF over HB and projectF over HP (pressure-mgpcg.ts), so `operator` is the lean
+ * pressureRowsList over F_ALL (the lists and the zero rows off them) and `project` pressureProjectRest (the FLAGS of
+ * the bricks off HP). */
 export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly faces?: boolean } = {}) {
+  if (opt.faces && mgLive(L)) {
+    const M = mgLayout(L), live = poolMGPCG(L).live!;
+    const K = pressureCompositeKernels(L, {}, { tiered: opt.tiered, faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN } });
+    return { operator: live.rowsList, project: K.projectRest! };
+  }
   const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { tiered: opt.tiered, faces: opt.faces ? mgLayout(L).FC : undefined });
   return { operator: K.rowsF, project: K.projectF };
 }

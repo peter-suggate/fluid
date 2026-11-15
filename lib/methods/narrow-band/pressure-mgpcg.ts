@@ -78,15 +78,17 @@
  * - A native row's z is its L2 EPOST. Its PCG vectors (X R Z D Q) are pres C's,
  *   run by page kernels beside the brick kernels; their dots share pmgRed.
  */
-import { ARGS, BRICK_STRIDE, BrickLayout, LIST, brickAbiWGSL } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, BrickLayout, FOLD, LIST, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, type BrickPlacement, declareBindings } from "./brick-kernel";
 import type { PressureSolver } from "./brick-pressure-slot";
 import { FINE_ORDER, OC } from "./pressure-model";
-import { P_FLAG, P_WALL_C } from "./pressure-composite.wgsl";
+import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
 
 const P_WALL0 = P_FLAG.WALL0, WALL_F = P_WALL_C.F.toFixed(1), WALL_C = P_WALL_C.C.toFixed(1);
 
-export const MG_GATE = { F: ARGS.LANE_P, C: ARGS.LANE_P + 3, ONE: ARGS.LANE_P + 6, WF: ARGS.LANE_P + 9, WC: ARGS.LANE_P + 12, S: ARGS.LANE_P + 15, FC: ARGS.LANE_P + 18 } as const;
+export const MG_GATE = { F: ARGS.LANE_P, C: ARGS.LANE_P + 3, ONE: ARGS.LANE_P + 6, WF: ARGS.LANE_P + 9, WC: ARGS.LANE_P + 12, S: ARGS.LANE_P + 15, FC: ARGS.LANE_P + 18,
+  /** The live lists' indirect arguments (pmgListArgs, from pressureRowsList's counts): HB, HP, ZL (pmgF HBL, HPL, ZLL). */
+  HB: ARGS.LANE_P + 21, HP: ARGS.LANE_P + 24, ZL: ARGS.LANE_P + 27 } as const;
 /** P's header words (set 128..191). */
 export const MG_HEADER = {
   OPEN: 128, RMAX: 129, RZ: 130, ALPHA: 131, ITERATIONS: 132, CAPPED: 133, RMAX0: 134, TOTAL: 135,
@@ -149,6 +151,14 @@ export function mgTopLayout(C: number, F: number) {
     KEY6: take(r6), PAR6: take(r6), NBR6: take(6 * r6), C6: take(6 * r6), D6: take(r6), B6: take(r6), E6: take(r6), F6: take(r6), P6: take(r6), R6: take(r6), CH6: take(8 * r6),
     KEY7: take(r7), CH7: take(8 * r7), B7: take(r7), E7: take(r7), INV: take(r7 * r7),
     RBN: take(1), RB: take(F), RBF: take(F), SBN: take(1), SB: take(4 * F),
+    /** The live lists' counts HB, HP, ZL, RL (pressureRowsList appends, pmgListArgs moves them on and zeroes them). */
+    HBN: take(4),
+    /**
+     * The live lists' certificates, a slot each (pressureRowsList): the brick's key and parent C slot at its last
+     * pass, and step + 2 of the last step it left with its zero rows written (ZS) or its FLAGS bits 7-10 clear (FS),
+     * 0 when its rows or flags may since be written (it was on HB / HP); the next step (step + 1) finds them so.
+     */
+    ZK: take(F), ZC: take(F), ZS: take(F), FS: take(F),
     /** pmgPressureDelta's history, a C slot each step parity: the page key and step + 1 of its last publish. */
     PHW: take(4 * C),
   };
@@ -174,8 +184,14 @@ export function mgLayout(L: BrickLayout) {
   // 3 x 512 a slot, written once a step by pmgSetupF over F_ALL's live bricks; every L0 pass's pRow then loads its
   // row in one round of independent loads instead of the neighbour slot's chain.
   // FC (pmgF): the face cache of pressure-composite.wgsl.ts (rowsF writes, projectF reads), 7 x BRICK_STRIDE a slot.
+  // The live lists (pressureRowsList over F_ALL, once a step, before the solve's setup; mgLive), F slots as exact f32
+  // integers in append order: HBL the bricks with an h-owned tile (the h rows' bricks: tileRoots, rowsF, setupF and
+  // finish run over it), HPL those with an h-owned tile in the brick or across its lower faces (an h face stored
+  // there: projectF runs over it), ZLL the bricks off HB whose zero rows are not certified (pressureRowsZero), RLL
+  // those off HP whose FLAGS bits are not (pressureProjectRest), and RLN RL's count.
   const STG = L1 + CH.N * 64 * F, RKU = STG + 81 * F, FC = RKU + 3 * BRICK_STRIDE * F, QSTG = SEAMN + C;
-  return { W0, W1, L1, STG, RKU, FC, fWords: FC + 7 * BRICK_STRIDE * F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
+  const HBL = FC + 7 * BRICK_STRIDE * F, HPL = HBL + F, ZLL = HPL + F, RLL = ZLL + F, RLN = RLL + F;
+  return { W0, W1, L1, STG, RKU, FC, HBL, HPL, ZLL, RLL, RLN, fWords: RLN + 1, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -222,9 +238,34 @@ export interface MGPCGOptions {
   readonly wallLoose?: number;
   /** Count the end's inconsistent wall faces into MG_HEADER.AUDIT (a diagnostic pass in the finish). */
   readonly audit?: boolean;
+  /**
+   * The live lists (default mgLive(L)): the h rows' kernels over HB / HP instead of F_ALL. The engine pairs a solver
+   * with a face cache with pressureOperatorKernels' live operator and project, so false is for tests (the F_ALL path).
+   */
+  readonly live?: boolean;
 }
 
-export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver & { readonly publish: readonly BrickPlacement[] } {
+/**
+ * The live lists need one indirect dimension (an append's count is the x word): F's capacity within the fold.
+ * Above it the h rows' kernels stay on F_ALL.
+ */
+export const mgLive = (L: BrickLayout) => L.cap.f <= FOLD;
+
+/** The live path's parts, for the composite (brick-pressure-solver.ts) to place around its native rows. */
+export interface MGPCGLive {
+  /** The lists' arguments from rowsList's counts and the zero rows off HB (the setup's head). */
+  readonly args: readonly BrickPlacement[];
+  /** tileRoots over HB (the composite's: before rowsF). */
+  readonly tileRoots: readonly BrickPlacement[];
+  /** rowsF over HB (the setup's head). */
+  readonly rows: readonly BrickPlacement[];
+  /** projectF over HP (the finish's tail). */
+  readonly project: readonly BrickPlacement[];
+  /** pressureRowsList: the engine's operator (pressureOperatorKernels), F_ALL G1. */
+  readonly rowsList: BrickKernel;
+}
+
+export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver & { readonly publish: readonly BrickPlacement[]; readonly live?: MGPCGLive; readonly core: { readonly setup: readonly BrickPlacement[]; readonly finish: readonly BrickPlacement[] } } {
   const slots = options.slots ?? 8, tol = options.tolerance ?? MG_TOLERANCE, bsb = (options.fineOrder ?? MG_FINE_ORDER) === "BSB";
   if (options.fineOrder !== undefined && options.fineOrder !== "BS" && options.fineOrder !== "BSB") throw new Error(`Pool MGPCG: fine order ${String(options.fineOrder)}`);
   // The h rows' pre-smoothed plane: W0 after BSB's last brick pass (pmgPreU), W1 after BS's shifted pass (pmgPreS).
@@ -236,6 +277,12 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
   if (!(wallDecisions >= 0) || !(wallLoose >= 1) || !Number.isFinite(wallLoose)) throw new Error(`Pool MGPCG: walls policy ${wallDecisions}/${wallLoose}`);
   const M = mgLayout(L), T = M.top;
   const u = (n: number) => `${n >>> 0}u`;
+  const live = options.live ?? mgLive(L);
+  if (live && !mgLive(L)) throw new Error(`Pool MGPCG: live lists with ${L.cap.f} F slots (fold ${FOLD})`);
+  // A brick kernel's head over F_ALL, or (live) over HB's exact arguments: no count test.
+  const fHead = (wcount = "") => live
+    ? `${wcount ? `if(lid==0u){${wcount}}` : ""}let g=nbGroup(wid);let slot=u32(pmgF[P_HBL+g]);`
+    : `if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);${wcount}}\n  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}\n  let slot=nbListSlot(NB_LIST_F_ALL,g);`;
 
   const COMMON = [
     ...Object.entries(MG_HEADER).map(([n, v]) => `const PH_${n}:u32=${u(v)};`),
@@ -246,6 +293,7 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
     `const P_W0:u32=${u(M.W0)};const P_W1:u32=${u(M.W1)};const P_L1:u32=${u(M.L1)};`,
     `const P_SEAMT:u32=${u(M.SEAMT)};const P_SEAML:u32=${u(M.SEAML)};const P_SEAMF:u32=${u(M.SEAMF)};const P_SEAMN:u32=${u(M.SEAMN)};`,
     `const P_STG:u32=${u(M.STG)};const P_RKU:u32=${u(M.RKU)};const P_QSTG:u32=${u(M.QSTG)};`,
+    `const P_HBL:u32=${u(M.HBL)};const P_HPL:u32=${u(M.HPL)};const P_ZLL:u32=${u(M.ZLL)};const P_RLL:u32=${u(M.RLL)};const P_RLN:u32=${u(M.RLN)};`,
     `const P_L2:u32=${u(M.L2)};const P_L3:u32=${u(M.L3)};const P_L4:u32=${u(M.L4)};const P_L5:u32=${u(M.L5)};`,
     `const P_FS2:u32=${u(2 * fineSweeps)};const P_CS2:u32=${u(2 * coarseSweeps)};const P_NS2:u32=${u(2 * nativeSweeps)};const P_SLOTS:u32=${u(slots)};`,
     `const P_ROWS6:u32=${u(MG_ROWS6)};const P_ROWS7:u32=${u(MG_ROWS7)};`,
@@ -596,9 +644,7 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
 var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;var<workgroup> wKU:array<vec3f,512>;var<workgroup> w1D:array<f32,64>;var<workgroup> w1K:array<vec3f,64>;var<workgroup> w1KU:array<vec3f,64>;
 var<workgroup> wLive:u32;
 @compute @workgroup_size(512) fn pmgSetupF(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);}
-  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+  ${fHead()}let o=nbFOrigin(slot);let b=o>>vec3u(3u);
   let l=lid;let d=pDiag(slot,l);
   let kl=vec3f(pK(0u,slot,l),pK(1u,slot,l),pK(2u,slot,l));let kh=vec3f(pKU(0u,slot,l),pKU(1u,slot,l),pKU(2u,slot,l));
   let rows=pMax512(lid,select(0.0,1.0,d>0.0));
@@ -659,6 +705,97 @@ var<workgroup> wLive:u32;
     pmgC[pL2(CH_D,cs,i2)]=D;for(var a=0u;a<3u;a++){pmgC[pL2(CH_K+a,cs,i2)]=K[a];pmgC[pL2(CH_KU+a,cs,i2)]=KU[a];}
   }
 }`);
+
+  // ---- the live lists (mgLive) -------------------------------------------------------------------------------------
+  // On the tiered dam 2879 of F_ALL's 3492 bricks hold no h-owned tile (the native interior), yet each launched a
+  // workgroup of rowsF (512 lanes, 30 KB of shared memory), setupF and projectF, which returned at once: those
+  // kernels' residency held a core to a few workgroups, so the empty ones cost 296 / 171 / 202 us a step (measured,
+  // the kernels returning at their heads over F_ALL), and their zero rows were rewritten every step.
+  // pressureRowsList (the engine's operator over F_ALL G1: a lane a brick, so 1 in 64 workgroups works) appends
+  // - HB: a brick with an h-owned tile (the h rows' kernels' own test, nbTileOwnerH);
+  // - HP: one with an h-owned tile among the 3^3 from its origin tile - 1 (projectF's: HB is a subset);
+  // - ZL: off HB without a certificate that its zero rows hold since the last step: rowsF's B X RHS DIAG PPHI K KU,
+  //   setupF's D Q R, the L1 rows and the 8 L2 rows (pressureRowsZero writes them, the values the F_ALL path's heads
+  //   wrote). Only lane P writes these rows of a brick (setInit zeroes an entering one's pres), and off HB none of P's
+  //   kernels does, so a brick that was off HB the step before (same key, same parent C slot) still holds them;
+  // - RL: off HP without a certificate that its FLAGS bits 7-10 are clear since the last step (pressureProjectRest
+  //   clears them, the engine's project; only projectF on HP and the rows on HB write them);
+  // and writes the CUT latch and RBF 0 off HB. HB's bricks run the h rows' kernels unchanged, so the rows, the solve
+  // and the projection are the F_ALL path's bit for bit (the composite live lists' GPU test). The append order varies;
+  // no reduction reads it (RB is coarsenTop's).
+  // The counts go through pmgTop, not the arguments: rowsList is dispatched from the arguments buffer (F_ALL G1), which
+  // a dispatch may not also bind writable. pmgListArgs (one lane, after rowsList) moves them on and zeroes the counts
+  // for the next step's appends (a step's operator and setup always run together, so the counts are 0 between steps).
+  const topA: BrickBinding = { name: "pmgTop", kind: "rw", type: "array<atomic<u32>>" };
+  const listArgs = kernel("pmgListArgs", [CFG, setRW, fRW, argsRW, topA], [], /* wgsl */`
+@compute @workgroup_size(1) fn pmgListArgs(){
+  for(var k=0u;k<4u;k++){
+    let n=atomicLoad(&pmgTop[T_HBN+k]);atomicStore(&pmgTop[T_HBN+k],0u);
+    if(k==3u){pmgF[P_RLN]=f32(n);continue;}
+    let a=P_GATE_HB+3u*k;args[a]=n;args[a+1u]=1u;args[a+2u]=1u;
+  }
+}`);
+  const rowsList = kernel("pressureRowsList", [CFG, setRW, dirRO, fRW, topA], [], /* wgsl */`
+var<workgroup> wCount:u32;var<workgroup> wN:array<atomic<u32>,4>;var<workgroup> wB:array<u32,4>;
+// nbTileOwnerH (brick-owner.wgsl.ts), the h rows' kernels' test: a lattice tile of a resident page, h-owned.
+fn pOwnerT(t:vec3i)->bool{
+  if(!(all(t>=vec3i(0))&&all(4*t<NB_LATTICE))){return false;}
+  let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}
+  let q=vec3u(t&vec3i(7));return nbTileH(cs,q.x|(q.y<<3u)|(q.z<<6u));
+}
+@compute @workgroup_size(64) fn pressureRowsList(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);}
+  if(lid<4u){atomicStore(&wN[lid],0u);}
+  let n=workgroupUniformLoad(&wCount);let e0=64u*nbGroup(wid);if(e0>=n){return;}
+  let e=e0+lid;var bits=0u;var slot=0u;
+  if(e<n){
+    slot=nbListSlot(NB_LIST_F_ALL,e);let T0=nbFOrigin(slot)>>vec3u(2u);
+    // Bit 0 HB (the brick's own tiles, d in 1..2), bit 1 HP.
+    for(var i=0u;i<27u;i++){
+      let d=vec3i(i32(i%3u),i32((i/3u)%3u),i32(i/9u));
+      if(pOwnerT(T0-vec3i(1)+d)){bits|=2u;if(all(d>=vec3i(1))){bits|=1u;}}
+    }
+    let key=nbFRec(slot,NB_REC_KEY);let cs=nbFRec(slot,NB_REC_PARENT);let step=nbRing(cfg.x,NB_RING_STEP);
+    let same=atomicLoad(&pmgTop[T_ZK+slot])==key&&atomicLoad(&pmgTop[T_ZC+slot])==cs;
+    atomicStore(&pmgTop[T_ZK+slot],key);atomicStore(&pmgTop[T_ZC+slot],cs);
+    if((bits&1u)==0u){
+      if(nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,key);}
+      atomicStore(&pmgTop[T_RBF+slot],0u);
+      if(!(same&&atomicLoad(&pmgTop[T_ZS+slot])==step+1u)){bits|=4u;}
+      atomicStore(&pmgTop[T_ZS+slot],step+2u);
+    } else {atomicStore(&pmgTop[T_ZS+slot],0u);}
+    if((bits&2u)==0u){
+      if(!(same&&atomicLoad(&pmgTop[T_FS+slot])==step+1u)){bits|=8u;}
+      atomicStore(&pmgTop[T_FS+slot],step+2u);
+    } else {atomicStore(&pmgTop[T_FS+slot],0u);}
+  }
+  var at=vec4u(0u);
+  for(var k=0u;k<4u;k++){if(((bits>>k)&1u)!=0u){at[k]=atomicAdd(&wN[k],1u);}}
+  workgroupBarrier();
+  if(lid<4u){wB[lid]=atomicAdd(&pmgTop[T_HBN+lid],atomicLoad(&wN[lid]));}
+  workgroupBarrier();
+  var lists=array<u32,4>(P_HBL,P_HPL,P_ZLL,P_RLL);
+  for(var k=0u;k<4u;k++){if(((bits>>k)&1u)!=0u){pmgF[lists[k]+wB[k]+at[k]]=f32(slot);}}
+}`);
+  // pressureRowsZero: a workgroup a brick of ZL (setup, before the rows): the zero rows off HB.
+  const rowsZero = kernel("pressureRowsZero", [CFG, setRW, dirRO, presRW, fRW, cRW], [], /* wgsl */`
+@compute @workgroup_size(64) fn pressureRowsZero(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let slot=u32(pmgF[P_ZLL+nbGroup(wid)]);
+  for(var j=0u;j<8u;j++){
+    let at=NB_STRIDE*slot+lid+64u*j;
+    pres[NB_PRES_F_B+at]=0.0;pres[NB_PRES_F_X+at]=0.0;pres[NB_PRES_F_RHS+at]=0.0;pres[NB_PRES_F_DIAG+at]=0.0;pres[NB_PRES_F_PPHI+at]=0.0;
+    pres[NB_PRES_F_K0+at]=0.0;pres[NB_PRES_F_K1+at]=0.0;pres[NB_PRES_F_K2+at]=0.0;pres[NB_PRES_F_KU0+at]=0.0;pres[NB_PRES_F_KU1+at]=0.0;pres[NB_PRES_F_KU2+at]=0.0;
+    pres[NB_PRES_F_D+at]=0.0;pres[NB_PRES_F_Q+at]=0.0;pres[NB_PRES_F_R+at]=0.0;
+  }
+  pmgF[pL1(CH_D,slot,lid)]=0.0;for(var a=0u;a<3u;a++){pmgF[pL1(CH_K+a,slot,lid)]=0.0;pmgF[pL1(CH_KU+a,slot,lid)]=0.0;}
+  if(lid<8u){
+    let cs=nbFRec(slot,NB_REC_PARENT);let i2=nbLocal((nbFOrigin(slot)>>vec3u(2u))+pC4(lid));
+    pmgC[pL2(CH_D,cs,i2)]=0.0;for(var a=0u;a<3u;a++){pmgC[pL2(CH_K+a,cs,i2)]=0.0;pmgC[pL2(CH_KU+a,cs,i2)]=0.0;}
+  }
+}`);
+  // The h rows' kernels over the lists (labels "operator" and "project", the F_ALL path's areas): rowsF and
+  // tileRoots on HB, projectF on HP.
+  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN } }) : undefined;
 
   // A live F slot holds the brick of tile T (seen from page p), so setupF (over F_ALL) wrote T's L2 row.
   const LIQUID_TILE = /* wgsl */`
@@ -1628,13 +1765,11 @@ var<workgroup> wOpen:u32;
 }`);
 
   // Finish: the last update's x += alpha p.
-  const finish = kernel("pmgFinish", [CFG, setRW, dirRO, presRW], ["pres", "stage"], /* wgsl */`
+  const finish = kernel("pmgFinish", live ? [CFG, setRW, dirRO, presRW, fRW] : [CFG, setRW, dirRO, presRW], ["pres", "stage"], /* wgsl */`
 var<workgroup> wAlpha:f32;
 @compute @workgroup_size(512) fn pmgFinish(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   // No neighbour is read: no stage.
-  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));}
-  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=nbListSlot(NB_LIST_F_ALL,g);
+  ${fHead("wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));")}
   let alpha=workgroupUniformLoad(&wAlpha);
   let at=NB_STRIDE*slot+lid;
   if(pDiag(slot,lid)>0.0){pres[NB_PRES_F_X+at]+=alpha*pres[NB_PRES_F_D+at];}
@@ -1699,16 +1834,31 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
   if(lid==0u){pmgTop[pHistW(par,cs,0u)]=nbCRec(cs,NB_REC_KEY);pmgTop[pHistW(par,cs,1u)]=step+1u;}
 }`);
 
+  const hb = { indirect: MG_GATE.HB }, fRows = live ? hb : list(LIST.F_ALL);
+  const lv: MGPCGLive | undefined = KL && {
+    args: [{ kernel: listArgs, dispatch: { direct: [1, 1, 1] } }, { kernel: rowsZero, dispatch: { indirect: MG_GATE.ZL } }],
+    tileRoots: [{ kernel: KL.tileRoots, dispatch: hb }],
+    rows: [{ kernel: KL.rowsF, dispatch: hb }],
+    project: [{ kernel: KL.projectF, dispatch: { indirect: MG_GATE.HP } }],
+    rowsList,
+  };
+  const core = {
+    setup: [
+      { kernel: setupClear, dispatch: { direct: [1, 1, 1] } },
+      { kernel: setupF, dispatch: fRows },
+      { kernel: coarsenC, dispatch: list(LIST.C_ALL) },
+      { kernel: coarsenTop, dispatch: { direct: [1, 1, 1] }, w: tolBits },
+    ] as BrickPlacement[],
+    finish: [...(audit && walls ? [{ kernel: wallsFKernel(true), dispatch: list(LIST.F_ALL) }, { kernel: wallsCKernel(true), dispatch: list(LIST.C_ALL) }] : []),
+      { kernel: finish, dispatch: fRows }, { kernel: finishC, dispatch: list(LIST.C_ALL) }] as BrickPlacement[],
+  };
   return {
     label: "pool MGPCG (lane P)",
     bringUp: false,
     slots,
-    setup: [
-      { kernel: setupClear, dispatch: { direct: [1, 1, 1] } },
-      { kernel: setupF, dispatch: list(LIST.F_ALL) },
-      { kernel: coarsenC, dispatch: list(LIST.C_ALL) },
-      { kernel: coarsenTop, dispatch: { direct: [1, 1, 1] }, w: tolBits },
-    ],
+    // Live: after the engine's operator (pressureRowsList) the lists' arguments and rowsF open the setup, and projectF
+    // closes the finish (before the engine's project, pressureProjectRest: the F_ALL path's order).
+    setup: lv ? [...lv.args, ...lv.rows, ...core.setup] : core.setup,
     slot: (k: number) => [
       gS(preS, k), ...(bsb ? [gF(preU, k)] : []), gC(nativePre0, k), gF(down0, k), gC(nativePre1, k), gF(down1, k), gC(down1C, k), gC(down2, k), gC(down3, k),
       { kernel: top, dispatch: { indirect: MG_GATE.ONE }, z: k },
@@ -1718,8 +1868,9 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
         { kernel: wallsF, dispatch: { indirect: MG_GATE.WF }, z: k }, { kernel: wallsC, dispatch: { indirect: MG_GATE.WC }, z: k }] : []),
       { kernel: check, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits },
     ],
-    finish: [...(audit && walls ? [{ kernel: wallsFKernel(true), dispatch: list(LIST.F_ALL) }, { kernel: wallsCKernel(true), dispatch: list(LIST.C_ALL) }] : []),
-      { kernel: finish, dispatch: list(LIST.F_ALL) }, { kernel: finishC, dispatch: list(LIST.C_ALL) }],
+    finish: lv ? [...core.finish, ...lv.project] : core.finish,
+    live: lv,
+    core,
     // After the composite's native projection (pmgProjectC writes an h tile's C X): compositeMGPCG places it.
     publish: [{ kernel: pressureDelta, dispatch: list(LIST.C_ALL) }],
     buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 128 },
