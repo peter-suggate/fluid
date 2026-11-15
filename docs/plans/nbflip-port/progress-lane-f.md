@@ -1156,3 +1156,21 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
   - not halo 3 (32.9 KB) or halo 4 (48 KB) in f32.
   - Halo 4 fits only at f16 (24.6 KB), which changes the physics' precision.
 - At halo 2, 22% of the taps still go to global memory, behind a per-tap inside/outside branch. Tools: tools/samp-halo.sh; log: logs/samp/halo.log.
+
+**The step-9 seed burst: the old engine's own seeds (2026-11-16).** One 12-step check run of the old engine (tools/d9-old.mts, d8old/d9-old-12.jsonl).
+- **How seeds were counted.** No kernel edit: at each fence it counts the live records still at the deferred seed age (NB_SEED_FIRST, before.w's age bits 0x7f7ffff8). No moved record reaches that age, so the count is that step's seeds.
+- **Ours** is the pSeed counters (d9-12.jsonl).
+
+| step | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|
+| old seeds | 11.8k | 6.4k | 27.6k | 18.1k | **17.1k** | 23.6k | 26.4k | 28.7k |
+| our seeds | 9.6k | 7.7k | 32.5k | 15.5k | **53.7k** | 21.4k | 21.9k | 18.3k |
+
+- **Step 9 is ours alone: 3.1x the old engine's seeds.** The other steps are within 0.6-1.3x. Cumulative over 5-12: ours 180.6k, old 159.7k.
+- **Where, at step 9 (old / ours):**
+  - floor, y 0-15: 13.2k / 30.8k;
+  - column top, y 96-111: 1.2k / 19.6k;
+  - surge front, max(x, z) 96-111: 6.5k / 24.1k.
+  - At step 7 the column top is 8.0k / 26.3k.
+- **So the old engine does not burst.** Ours reseeds liquid φ in particle-free cells at the falling column's top and at the front on the floor. There, in the old engine, either the particles still cover the φ < 0 cells, or φ is no longer liquid.
+- **Next step for the cause:** compare φ against the particle positions at the column top, steps 7-9, in both engines. Either φ lags the particles (lAdvect, lUnion), or the particles leave φ early (pMove, now lane E's).
