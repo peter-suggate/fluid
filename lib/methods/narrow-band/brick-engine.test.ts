@@ -20,8 +20,8 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, LIST, NONE, PHI_AIR, REC, ARGS, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
-import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, boxDistance, reachSet } from "./brick-engine";
+import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, LIST, NONE, PHI_AIR, REC, ARGS, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
+import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
 import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
@@ -101,6 +101,21 @@ test("brick engine: the boot bricks are the reach set of the boxes' liquid verti
   assert.ok(keys.every(k => brickKeyCoord(k)[1] <= 2));
   assert.equal(boxDistance([16, 10, 16], sheet(33, 10.3, 33)) < 0, true);
   assert.equal(boxDistance([16, 11, 16], sheet(33, 10.3, 33)) > 0, true);
+});
+
+test("brick engine: a tiered boot also claims the pages holding its pages' high corner planes", () => {
+  // The sheet's boot bricks lie in page (0, 0, 0): its seven high neighbours hold its high-plane C vertices.
+  const o = options([128, 64, 128], [sheet(20, 10.3, 20)], 400, 16), bricks = bootBricks(o);
+  assert.ok(bricks.every(k => brickKeyCoord(k).every(v => v < 4)));
+  const pages = bootCornerPages(o.lattice, bricks);
+  assert.equal(pages.length, 7);
+  for (const k of pages) {
+    assert.equal(k & KEY_PAGE, KEY_PAGE);
+    const p = brickKeyCoord(k & ~KEY_PAGE).map(v => v >> 2);
+    assert.ok(p.every(v => v <= 1) && p.some(v => v === 1), `page ${p}`);
+  }
+  // A page past the lattice is not claimed: on one 32^3 page there is none.
+  assert.deepEqual(bootCornerPages([32, 32, 32], bootBricks(options([32, 32, 32], [sheet(33, 10.3, 33)], 200, 8))), []);
 });
 
 test("brick engine: a pressure solver's indirect words must be the lists' or P's", () => {
@@ -202,7 +217,7 @@ function assertConsistent(e: BrickEngine, s: BrickSnapshot, fail = 0) {
   assert.deepEqual(new Set(s.list(LIST.C_ALL)), new Set(s.pages.values()));
 }
 
-/** Overwrite PHI and PHI1 of every live brick with a box's distance (clamped to PHI_AIR), as bootPhi writes it. */
+/** Overwrite PHI and PHI1 of every live brick with a box's distance, clamped to PHI_AIR (a test state; bootPhi writes it uncapped). */
 function writePhi(e: BrickEngine, s: BrickSnapshot, box: BrickLiquidBox) {
   const L = e.layout, phi = L.base("phi", "F", "PHI"), phi1 = L.base("phi", "F", "PHI1");
   for (const [key, slot] of s.bricks) {

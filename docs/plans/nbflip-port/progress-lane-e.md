@@ -1572,3 +1572,64 @@ setup) and takes 3.6 out of the level set, 2.9 out of the move and 1.2 out of tr
 about cancels all-h's 1.6x live set here. So the gap to the seep is the passes' per-brick cost, not tiering. The
 coordinator ruled that tiered stays the engine's mode. A lead for later: tiered's early third is 78.4 ms against
 all-h's 68.9, the early collapse where the tiered census and transfer work peaks.
+
+## 2026-11-16: D8c, B (census deformation from the certificate) and the boot φ
+
+The old engine and ours were compared side by side (old-census-dump --phidump/--phitiles against brick-census-e0
+--from0, steps 1-9; ~/code/me/fluid-scratch/lane-e/cold/sbs, boot/phi5). D8c's early lag had two causes, and B is
+not one of them:
+- bootPhi capped air at PHI_AIR (6 h), where the old t = 0 φ is the uncapped analytic distance
+  (initialLiquidVertexPhi);
+- C vertex 96, tile 23's high corner, lives in page 3. That page was absent at boot and entered at 6, where the old
+  engine kept 16 in page 2's high plane.
+- Flattened taps give lcFullAdvected's foot gradient g_x = 0.69 against 1.94, so the foot sits deeper in slower flow:
+  US read at the foot was 3.8 against 4.6 h/step, and the front lagged about 0.8 h/step. US itself matched within
+  3% (census 6, faces 84-96).
+
+Landed:
+- **B (item 4, verbatim):**
+  - certError writes census DEF (deformation, error, page key + 1, width);
+  - ncDeformation saturates on a missing tile, a stale key or a width of 0;
+  - ncPlanStore is gone;
+  - all-h also runs certFine + certError at w = 1.
+- **Boot:**
+  - bootPhi is uncapped (NB_PHI_FAR, as initialLiquidVertexPhi);
+  - a tiered boot also claims the pages that hold its pages' high corner planes (bootCornerPages, KEY_PAGE only);
+  - entering C slots take PHI_AIR_C = 16.
+- After the fix the front tracks the old engine (x old/ours): census 5 87.46/87.55, 6 91.78/91.91, 7 96.92/97.47.
+
+Stated deviations (also in brick-abi.md):
+1. Entering C takes PHI_AIR_C = 16 h. That is the old stored far-air value (nbAirStore, lcClear) and the least AIR
+   an old claim takes (UniformPageInitialiseOptions.near). The old claim's own AIR is the box's far φ. With
+   NB_PHI_FAR, the 4x-wider dam failed "residency follows the fluid" (step 3 liveF 958 against 866); 16 passes.
+   The magnitude reader is the foot projection in lcFullAdvected (levelset-coarse.wgsl.ts:303-306) and lAdvect
+   (levelset-kernels.wgsl.ts:155): offset = -c g/|g|^2 with g a +-4h (+-h) difference whose taps include air
+   vertices, so the foot distance scales as 1/(air value). This is verbatim old behaviour, with the old engine's own
+   box-dependent AIR.
+2. Page retirement: from census 8 our front leads slightly (x 100/104 hold 20/24 against the old engine's 128). The
+   old engine retires the corner page's interior at the next head, while the brick residency keeps a page it claims
+   at step 1.
+3. Absent vertices (nbCVertex on an absent page, nbFVertex on an absent brick, brick-owner.wgsl.ts:78/82) still read
+   NB_PHI_FAR at this commit. Converting them to PHI_AIR_C, together with lane F's fsetinit-airc and fgphi-airc and
+   the composite mirror (pressure-composite.wgsl.ts:153), was gated as "airc" (~/code/me/fluid-scratch/lane-e/airc):
+   both wide tests pass, but D8 30-90 reads 7.01e5 against 6.31e5 (1.11). It is held until the retirement item.
+   Out-of-lattice reads (:77, :86, composite :144) stay FAR.
+
+Gates, dam-300 check on ref-2761350a (runs in ~/code/me/fluid-scratch/lane-e/{bgate,land,airc,oldair}/g). D8 and D8c
+are upper bounds since 29c8dab8.
+
+| tree | D1 | D6 | D8 | D8c (particles at 16) | wide 2/2 |
+|---|---|---|---|---|---|
+| HEAD + f-sh + B | 0.30 | 0.10 | 0.87 | low, 281.6k | yes |
+| + boot, entering C FAR | 1.00 | 0.11 | 0.80 | 0.11, 347.8k | no (step 3 958/866) |
+| + boot, entering C 16 (landed) | 1.00 | 0.11 | 0.86 | low, 303.3k | yes |
+| + airc | 1.00 | 0.12 | 1.11 | low, 302.9k | yes |
+| old engine, empty 16 h | 1.00 | 0.05 | 0.18 | low, 287.9k | - |
+
+D1's step-6 front is 100 against 96 in every row from the boot on, the old engine at 16 h included (plan §4.6).
+
+The wide-dam flake (dd405e3c): the engine is not bitwise reproducible. The boot's pressure solve differs first:
+pressure-mgpcg.ts pRedAdd adds workgroup partials into 64 bins by float CAS in arrival order (RHS and DIAG are
+identical; X is about 4e-10 apart). That reaches one splash particle's speed, the max BOUND_F (2.08 or 2.67 m/s at
+step 6), and the residency's ceil of the flow then holds one more brick plane or not (step 7 liveF 1575/1579 or
+1604). The test compares the residency at an equal ceil(flow) of the step's starting bound. pRedAdd is lane P's.

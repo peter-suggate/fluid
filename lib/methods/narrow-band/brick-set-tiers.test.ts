@@ -4,7 +4,7 @@
 // entered in a step start 4h, entering pages start as air, and setMarkPages counts LIQUID_TILES. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, REC, brickKeyCoord, phiFar } from "./brick-abi";
+import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, PHI_AIR_C, REC, brickKeyCoord, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -96,7 +96,7 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
       }
       assert.equal(liq.dir[L.dir.crec + 32 * cs + REC.C_LIQUID_TILES], n, `LIQUID_TILES page ${P}`);
     }
-    // Entered pages start as air: φ AIR, every velocity 0, FLAGS open on in-lattice tiles.
+    // Entered pages start as air: φ PHI_AIR_C, every velocity 0, FLAGS open on in-lattice tiles.
     for (const [pk, cs] of s.pages) {
       if (pages0.has(pk)) continue;
       const P = brickKeyCoord(pk) as unknown as V3;
@@ -105,7 +105,7 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
       const u = new Float32Array((await e.read("vel", L.base("vel", "C", "US1") + BRICK_STRIDE * cs, 512)).buffer);
       for (let i = 0; i < 512; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3;
-        assert.equal(phi[i], PHI_AIR); assert.equal(u[i], 0);
+        assert.equal(phi[i], PHI_AIR_C); assert.equal(u[i], 0);
         assert.equal(flags[i], T.every(v => 4 * v < N) ? FLAG.OPEN : 0);
       }
     }
@@ -129,9 +129,9 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
       for (let i = 0; i < 512; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3, c = T.map(v => 4 * v) as V3;
         if (T.every(v => 4 * v <= N)) {
-          // bootPhi's C vertex: the box distance at h vertex 4T, as F holds it.
+          // bootPhi's C vertex: the box distance at h vertex 4T, as F holds it (uncapped: the old t = 0 φ).
           const q = c.map((v, a) => Math.abs(v - 0.5 * (hi[a]! - 1)) - 0.5 * (hi[a]! + 1));
-          const d = Math.min(Math.hypot(...q.map(v => Math.max(v, 0))) + Math.min(Math.max(...q), 0), PHI_AIR);
+          const d = Math.min(Math.hypot(...q.map(v => Math.max(v, 0))) + Math.min(Math.max(...q), 0), phiFar(e.layout.lattice));
           assert.ok(Math.abs(phi[i]! - d) <= 1e-5 * Math.max(1, Math.abs(d)), `C φ at ${T}: ${phi[i]} vs ${d}`);
         }
         if (!T.every(v => 4 * v < N)) continue;

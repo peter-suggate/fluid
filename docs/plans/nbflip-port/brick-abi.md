@@ -117,7 +117,9 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
   words never pass through a float register: a denormal pattern could be flushed.
 - **Entering bricks** are initialised by `setInit`:
   - vel and pres: 0;
-  - `PHI` and `PHI1`: `PHI_AIR` (6, in h);
+  - `PHI` and `PHI1`: `PHI_AIR` (6, in h) on F; `PHI_AIR_C` (16, in h) on C: the old far-air value (nbAirStore) and
+    the least AIR an old page claim takes. The old claim's own AIR is the box's far φ (uniform-page-initialise.ts
+    5-24); a box-dependent value would make the residency depend on the box (brick-wide-dam.test.ts). Stated;
   - FLAGS: OPEN inside the lattice, and OWNER_H.
 - **The `pres` list is lane P's.** P may replace it (more vectors, MG scratch), as long as it stays
   a pool indexed by F and C slots at stride 520. P announces the final list to E before M1 lands.
@@ -182,8 +184,13 @@ stale C vertices: lane P's phantom 4h liquid, 296 wet tiles on the dam, 2026-11-
   - Bricks claimed in a step start 4h (word 28 tile bits 0, CMASK untouched). The boot's bricks
     (`setClaimBricks` with `cfg.z = 1`) start h, because `bootPhi` writes F; the first census
     coarsens them.
-  - `setInit` also sets entering C slots to air: φ AIR, every velocity and pres channel 0, and FLAGS
-    OPEN on in-lattice tiles.
+  - `setInit` also sets entering C slots to air: φ `PHI_AIR_C` (16), every velocity and pres
+    channel 0, and FLAGS OPEN on in-lattice tiles.
+  - `bootPhi` writes the uncapped analytic distance (the old t = 0 φ, initialLiquidVertexPhi) to F and C. Tiered,
+    the boot also claims the pages that hold its pages' high corner planes (`bootCornerPages`, page-only
+    candidates): the old page block stores its 33^3 vertices, high planes included, so those vertices hold the
+    distance from t = 0. Stated difference: the old engine retires such a page's interior at the next head (its
+    vertices read the far φ) while the brick residency keeps the page it claims at step 1.
   - The census keeps WANT as the old decision. A band tile whose brick or in-range 27-neighbour is
     not resident lists the missing bricks as candidates. The part 1 head claims them right away
     (claims, records, init, lists), before the transfer. `censusWant` then checks every WANT bit's
@@ -229,7 +236,7 @@ rules above through the directory and masks:
 - a 4h-owned tile reads C, with the interpolant at the vertices;
 - a vertex that no slot stores, or that lies outside the lattice, reads `NB_PHI_FAR`. That is the old
   vertex field's empty value, `fluidLatticeFarPhi`, in h: the lattice's largest extent (`phiFar`).
-  It differs from stored air (`NB_PHI_AIR` = 6, which `setInit` writes). This was P's finding,
+  It differs from stored F air (`NB_PHI_AIR` = 6, which `setInit` writes on F). This was P's finding,
   2026-11-15.
   - Residency guarantees that an absent page's vertices are at least 7 cells from 4h liquid
     (setMarkPages' margin) and 8 cells from h liquid (the core ring).

@@ -32,9 +32,14 @@ export const SLOT_MASK = 0x1fffffff;
 /** The window's most pages an axis (keys carry 10 bits an axis). */
 export const WINDOW_MAX_PAGES = 1024;
 
-/** Vertex phi (h) of a brick that enters as air, beyond every band (the old
- * engine's "past the reach a vertex keeps its sign at six cells"). */
+/** Vertex phi (h) of an F brick that enters as air, beyond every band (the old
+ * engine's "past the reach a vertex keeps its sign at six cells"). Entering C
+ * pages take PHI_AIR_C, and the boot the uncapped analytic distance (bootPhi). */
 export const PHI_AIR = 6;
+/** Vertex phi (h) of a C page that enters as air: the old far-air value, nbAirStore's 16 max h (which lcClear also
+ * writes) and the least AIR an old page claim takes (UniformPageInitialiseOptions.near, 16 MAX_H). The old claim's AIR
+ * itself is the field's empty value, the box's far φ; this one does not depend on the box (the 4x-wider dam). */
+export const PHI_AIR_C = 16;
 /** φ (h) where no slot stores a vertex: the old vertex field's empty value, fluidLatticeFarPhi in h (the lattice's largest extent). */
 export const phiFar = (lattice: readonly number[]) => Math.max(...lattice);
 /** The reach box's stencil margin in cells (brick-abi.md §5.4): with no travel
@@ -43,6 +48,8 @@ export const phiFar = (lattice: readonly number[]) => Math.max(...lattice);
 export const REACH_MARGIN = 7;
 /** A candidate key's flag (bit 31): the residency request already took its directory word NONE -> CLAIM. */
 export const KEY_CLAIMED = 0x80000000;
+/** A candidate key's page-only flag: setClaimPages claims the key's page and setClaimBricks skips it. */
+export const KEY_PAGE = 0x40000000;
 /** Words an F slot of the particle support (NB_S_PSUPPORT, brick-abi.md §5.4): the support mask of the brick's 8
  * tiles, then six travel maxima (-xyz, +xyz; f32 bits, cells), then a pad. */
 export const PSUPPORT_WORDS = 8;
@@ -323,11 +330,12 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_LATTICE:vec3i=vec3i(${L.lattice.join(",")});`);
   lines.push(`const NB_BRICKS:vec3i=vec3i(${bricksPerAxis(L.lattice).join(",")});`);
   lines.push(`const NB_PHI_AIR:f32=${PHI_AIR.toFixed(1)};`);
+  lines.push(`const NB_PHI_AIR_C:f32=${PHI_AIR_C.toFixed(1)};`);
   // φ (h) where nothing is stored: the old vertex field's empty value, fluidLatticeFarPhi (the lattice's largest
-  // extent; lib/core/initial-liquid-lattice.ts), in h. Stored air is NB_PHI_AIR (setInit).
+  // extent; lib/core/initial-liquid-lattice.ts), in h. Stored air is NB_PHI_AIR on F, NB_PHI_AIR_C on C (setInit).
   lines.push(`const NB_PHI_FAR:f32=${phiFar(L.lattice).toFixed(1)};`);
   lines.push(`const NB_REACH_MARGIN:f32=${REACH_MARGIN.toFixed(1)};`);
-  lines.push("const NB_KEY_PAGE:u32=0x40000000u;");
+  c("NB_KEY_PAGE", KEY_PAGE);
   lines.push(`const NB_WINDOW:vec3u=vec3u(${L.window.map(n => u(n)).join(",")});`);
   lines.push(`const NB_WINDOW_BITS:vec3u=vec3u(${L.windowBits.map(n => u(n)).join(",")});`);
   for (const [name, v] of Object.entries(H)) c(`NB_H_${name}`, v);

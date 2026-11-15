@@ -14,7 +14,7 @@
  * - Every dispatch is either indirect from a list or sized from a capacity.
  * - Nothing is sized from the lattice.
  */
-import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, PHI_AIR, REACH_MARGIN, type BrickCapacities } from "./brick-abi";
+import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, type BrickCapacities } from "./brick-abi";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
@@ -102,6 +102,25 @@ export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "liquid" | "d
     return hi[0]! < 0 ? undefined : { lo: lo as unknown as Vec3, hi: hi as unknown as Vec3 };
   };
   return [...reachSet(o.lattice, candidates.values(), liquid, () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2)].sort((a, b) => a - b);
+}
+
+/**
+ * Tiered: the page-only candidates (KEY_PAGE) the boot claims besides its bricks' pages: the pages that hold those
+ * pages' high corner planes. The old engine's page block stores its 33^3 vertices (uniform-page-initialise.ts: a vertex
+ * field's 33^3 texels, high planes included), so a boot page's high-plane vertices hold the analytic φ from t = 0
+ * (initialLiquidVertexPhi). Here C vertex T is stored in page T >> 3, so the plane x = 32(P+1) is page P + x's: without
+ * it the vertex reads NB_PHI_FAR until that page enters, and enters as AIR, where the old engine kept the distance.
+ */
+export function bootCornerPages(lattice: Vec3, bricks: readonly number[]): number[] {
+  const page = (k: number) => [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023].map(v => v >> 2);
+  const own = new Set(bricks.map(k => brickKey(...(page(k) as [number, number, number]))));
+  const extra = new Set<number>();
+  for (const pk of own) for (let j = 1; j < 8; j++) {
+    const P = [pk & 1023, (pk >>> 10) & 1023, (pk >>> 20) & 1023].map((v, a) => v + ((j >> a) & 1));
+    if (P.some((v, a) => 32 * v >= lattice[a]!) || own.has(brickKey(P[0]!, P[1]!, P[2]!))) continue;
+    extra.add((brickKey(4 * P[0]!, 4 * P[1]!, 4 * P[2]!) | KEY_PAGE) >>> 0);
+  }
+  return [...extra].sort((a, b) => a - b);
 }
 
 /** A saved engine state (BrickEngine.save): every buffer's words and the step clock. */
@@ -272,7 +291,7 @@ export class BrickEngine {
       compileMs[k.label] = performance.now() - t0;
     }));
     const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
-    engine.allocate(initial);
+    engine.allocate(stages.tiered === true ? [...initial, ...bootCornerPages(options.lattice, initial)] : initial);
     engine.record();
     engine.boot();
     engine.encodeAhead();

@@ -345,7 +345,10 @@ var<workgroup> wN:atomic<u32>;
       phi[NB_PHI_F_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+nbLocalCoord(l)))|NB_FLAG_OWNER_H;
     }
   }
-  // Entering C slots: a cell a tile (C local = tile index), open inside the lattice.
+  // Entering C slots: a cell a tile (C local = tile index), open inside the lattice. φ is NB_PHI_AIR_C (16 max h, the
+  // old far-air value and the least AIR an old claim takes; the old claim's own AIR is the box's far φ,
+  // uniform-page-initialise.ts 5-24, which would make the residency depend on the box). F's entering bricks keep
+  // NB_PHI_AIR (lane F's rule).
   let nC=nbListCount(NB_LIST_C_ENTER);
   for(var e=wid.x;e<nC;e+=nw.x){
     let s=nbListSlot(NB_LIST_C_ENTER,e);let o=nbCOrigin(s);
@@ -353,14 +356,15 @@ var<workgroup> wN:atomic<u32>;
       let l=lid+128u*j;let at=NB_STRIDE*s+l;
       ${zeroC("vel")}
       ${zeroC("pres")}
-      phi[NB_PHI_C_PHI+at]=bitcast<u32>(NB_PHI_AIR);phi[NB_PHI_C_PHI1+at]=bitcast<u32>(NB_PHI_AIR);
+      phi[NB_PHI_C_PHI+at]=bitcast<u32>(NB_PHI_AIR_C);phi[NB_PHI_C_PHI1+at]=bitcast<u32>(NB_PHI_AIR_C);
       phi[NB_PHI_C_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+4*nbLocalCoord(l)));
     }
   }
 }`);
 
   // bootPhi: the initial liquid's signed distance (in h) on the entering bricks.
-  // boot holds cfg.z boxes of 6 floats (lo xyz, hi xyz, in cells); the union is the min.
+  // boot holds cfg.z boxes of 6 floats (lo xyz, hi xyz, in cells); the union is the min. Uncapped, as the old engine's
+  // t = 0 φ (initialLiquidVertexPhi: the analytic distance, its empty value the lattice's far φ, NB_PHI_FAR).
   const bootPhi = k("bootPhi", [CFG, setRO, dirRO, phiRW, bootRO], /* wgsl */`
 fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
 @compute @workgroup_size(128) fn bootPhi(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32,@builtin(num_workgroups) nw:vec3u){
@@ -369,7 +373,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
     let s=nbListSlot(NB_LIST_F_ENTER,e);let o=nbFOrigin(s);
     for(var j=0u;j<4u;j++){
       let l=lid+128u*j;let p=vec3f(o+nbLocalCoord(l));
-      var d=NB_PHI_AIR;
+      var d=NB_PHI_FAR;
       for(var i=0u;i<cfg.z;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
       phi[NB_PHI_F_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_F_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
     }
@@ -381,7 +385,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
     let s=nbListSlot(NB_LIST_C_ENTER,e);let o=nbCOrigin(s);
     for(var j=0u;j<4u;j++){
       let l=lid+128u*j;let p=vec3f(o+4*nbLocalCoord(l));
-      var d=NB_PHI_AIR;
+      var d=NB_PHI_FAR;
       for(var i=0u;i<cfg.z;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
       phi[NB_PHI_C_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_C_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
     }
