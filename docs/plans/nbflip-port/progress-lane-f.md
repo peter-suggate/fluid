@@ -190,7 +190,7 @@ Run: `dam-300a`, 300 steps on the check slot at 7b0df874 + P's RHS (6b06ae15), w
 | D6 wet floor | **FAIL** | 1.85 (steps 8 and 12: 9,954 vs 10,767; 13,553 vs 14,936) |
 | D8c particles at 16 | **FAIL** | 5.12 (531,645 vs 351,600) |
 
-**Cause: the TRIG stand-in.** It marks every tile with a crossing cell, so the whole surface seeds at boot. The
+**Cause: the TRIG stand-in.** (Superseded: the census TRIG fixed D8c only; see "M2: the census TRIG and the step-1 oracle" below.) It marks every tile with a crossing cell, so the whole surface seeds at boot. The
 old census triggers by shape, strain, rotation, impact and approach
 (`uniform-narrow-band-activity.wgsl.ts`), so at rest only the column's edges seed:
 
@@ -342,3 +342,65 @@ The observables stay within run-to-run spread. For example, at step 165, drift i
 Note: at steps 30-60 F_ALL holds 4,907-4,913 bricks, the scratch pool's 4,913. No FAIL bit is raised, and a refusal
 would latch FAIL_POOL_F, so nothing was refused. All-h simply makes almost the whole box resident once the splash
 spreads, which is why the per-face kernels' item count is the box.
+
+## M2: the census TRIG and the step-1 oracle (2026-11-15)
+
+**Landed:**
+- 1bf829a0: `lHeatNow` takes its trigger from lane E's census (`NB_S_TRIG`, bit tile), replacing the crossing-cell
+  stand-in. An absent slot's φ reads `NB_PHI_FAR`, as `brickOwnerWGSL` does.
+- c553d1a6: pMove's thin trigger reads TRIG bit 8 + tile (`fgTileThin`, lane E's 5abc3cc4), replacing `false`.
+  It moved nothing outside run-to-run spread over 60 steps.
+
+**Re-gate, `dam-300b`** (5abc3cc4 + the thin patch, the authored B pool, `--poolF=4913`, check slot):
+- rc 0, no FAIL bits, no Metal aborts. Report: `fluid-scratch/lane-f/gates/dam-300b.md`.
+- **Overall: FAIL** on two rows. The census fixed D8c and D1.
+
+| gate | dam-300a (stand-in) | dam-300b (census) |
+|---|---|---|
+| D1 front | FAIL 1.30 | pass 1.00 (step 8: 104 vs 108) |
+| D5c collapse KE | FAIL 1.82 | **FAIL 1.88**, step 4 only (29.3 vs 36.1 J); steps 8–16 pass |
+| D6 wet floor | FAIL 1.85 | **FAIL 1.78** (step 8: 9,809 vs 10,767; step 12: 13,743 vs 14,936) |
+| D8c particles at 16 | FAIL 5.12 | pass 1.00 (386.7k vs 351.6k) |
+| every window row | pass | pass (D8 0.67, D5p 0.40, D4 0.27) |
+
+Boot particles: 31,183. The old run reports 0 at step 0 and 75,687 at step 1.
+
+**Timing slot, 165 steps** (`fluid-scratch/lane-f/timing-thin/`, the same tree):
+- fenced median **69.84 ms** (p95 84.3; thirds 81.2 / 70.0 / 60.9);
+- pipelined **68.62 ms/step**;
+- construction 500 ms.
+Against M2's 63.81 / 62.48 ms (60309e55 plus the staging), this is about 6 ms a step slower. The differences are
+E's census head, which runs every step and, at all-h, computes WANT without committing it, and the census's
+particle population. I have not attributed the split; the next profile run will. The reference is 45.45 / 50.61 ms.
+
+**The step-1 oracle.** The KE deficit is already present at step 1: ours is 1.887 J, the references' is 4.133 J. I
+checked step 1 against a Float64 CPU oracle (`fluid-scratch/lane-f/oracle/dam-step1.mjs`, test oracle only). It is
+one MAC projection of g·dt on the dam column (80 x 117.76 x 80 cells, free-slip box, ghost-fluid free surface
+θ = φ_l/(φ_l − φ_a)), with KE measured as `boxAdd` measures it.
+- **Oracle: 1.8868 J** (faces: 1.8918 J); the brick engine gives **1.887 J**, equal to four digits.
+- A projection cannot add energy, so from rest the step-1 KE is at most 0.5·M·(g·dt)² = **2.453 J**.
+  The references' 4.133 J exceeds that bound by 68%.
+- The old engine therefore puts about 1.5 steps' worth of gravity into its first step. That is not a projection of
+  g·dt. Our sqrt(KE) climbs at the references' rate (1.36 against 1.34 J^½ a step), but sits a constant 0.40–0.55
+  steps behind them from step 1 to step 12.
+- The front lags by the same 0.35–0.5 steps at steps 4–10.
+- D5c step 4 is that offset. **Ruling needed:** D5c's early rows (and D1 and D6's early rows) are measured against a
+  first step that exceeds the projection bound.
+
+**D6 is partly real.** The wet-floor lag grows: 0.6 steps at step 4, 1.15 at 8, 2.05 at 12. The KE offset is
+constant, so the extra lag is not the reference's first step.
+- Our early volume loss is larger. Drift is −0.63% against −0.14% at step 8, and −2.3% against −0.6% at step 12.
+- The loss is in the spreading sheet. At step 12 the x bins 10–15 hold 3.5 L less than the references, and the column
+  holds 0.4 L more. The sheet's tops are also lower (bin 15: 1 against 8 cells).
+- Volume control is idle there in both engines (inside the 1% dead band).
+- So the sheet loses about 0.1% of the volume a step to the level set and particle transport at the thin foot.
+- All-h is the main structural difference left: the census tiles every tile h, and E notes the particle population
+  matches only with tiers. It is the next thing to rule out.
+
+**Open, F (in order):**
+- `tiered: true`. This means reading every F stage through `brickOwnerWGSL` (`nbVertexPhi`, `nbFaceU` and
+  `nbFacePlane`, including the walls' velocities) and writing only owned storage.
+- The join bits (TILE_OCC 8–15): the old `transferRefine` box (x ± 0.875, or the crossing cell when the home tile
+  has REACH and depth ≤ 0, swept by dt·before/h plus the activity padding, then divided into tiles). They matter
+  only once the census commits WANT, so they land with tiers.
+- pDeposit's workgroup memory, and the D6 sheet loss if tiers don't close it.
