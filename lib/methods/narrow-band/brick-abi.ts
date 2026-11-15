@@ -35,6 +35,8 @@ export const WINDOW_MAX_PAGES = 1024;
 /** Vertex phi (h) of a brick that enters as air, beyond every band (the old
  * engine's "past the reach a vertex keeps its sign at six cells"). */
 export const PHI_AIR = 6;
+/** φ (h) where no slot stores a vertex: the old vertex field's empty value, fluidLatticeFarPhi in h (the lattice's largest extent). */
+export const phiFar = (lattice: readonly number[]) => Math.max(...lattice);
 /** The reach box's stencil margin in cells (brick-abi.md §5.4): with no travel
  * it gives the design's one-brick ring, and never more than
  * ceil(bound dt / 8h) + 1 bricks. */
@@ -61,6 +63,9 @@ export const H = {
   LIST_COUNT: 32,
   LANE_F: 64, LANE_P: 128,
   PEAK_F: 192, PEAK_C: 193, PEAK_B: 194, PEAK_K: 195, PEAK_PARTICLES: 196, PEAK_CAND: 197,
+  /** setCensus's counters (brick-abi.md §5.1; brick-census.wgsl.ts CENSUS_H). */
+  CENSUS_CLAMPED: 224, CENSUS_CAND: 225, CENSUS_REACH: 226, CENSUS_CROSSING: 227,
+  CENSUS_REQUIRED: 228, CENSUS_BAND: 229, CENSUS_REFINED: 230, CENSUS_TRIGGERED: 231,
 } as const;
 
 /** Latched failure bits (H.FAIL), brick-abi.md §8. */
@@ -257,6 +262,9 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_LATTICE:vec3i=vec3i(${L.lattice.join(",")});`);
   lines.push(`const NB_BRICKS:vec3i=vec3i(${bricksPerAxis(L.lattice).join(",")});`);
   lines.push(`const NB_PHI_AIR:f32=${PHI_AIR.toFixed(1)};`);
+  // φ (h) where nothing is stored: the old vertex field's empty value, fluidLatticeFarPhi (the lattice's largest
+  // extent; lib/core/initial-liquid-lattice.ts), in h. Stored air is NB_PHI_AIR (setInit).
+  lines.push(`const NB_PHI_FAR:f32=${phiFar(L.lattice).toFixed(1)};`);
   lines.push(`const NB_REACH_MARGIN:f32=${REACH_MARGIN.toFixed(1)};`);
   lines.push("const NB_KEY_PAGE:u32=0x40000000u;");
   lines.push(`const NB_WINDOW:vec3u=vec3u(${L.window.map(n => u(n)).join(",")});`);

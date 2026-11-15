@@ -12,7 +12,8 @@
  *   with no 4h-owned incident tile is F's. Every other vertex is its 4h
  *   tile's interpolant, umVertexFrom4's arithmetic (l.95: the weight
  *   w.x*w.y*w.z times the corner, zero weights skipped, umVertexSum8's order),
- *   which at a corner is the C vertex itself. φ is in h units in F and C alike.
+ *   which at a corner is the C vertex itself. φ is in h units in F and C alike. A vertex no slot stores (or
+ *   outside the lattice) reads NB_PHI_FAR, the old vertex field's empty value (fluidLatticeFarPhi in h).
  * - Faces: a lower face with an h-owned cell on either side is an h face,
  *   stored in F at its upper cell. A face between two 4h-owned tiles on a
  *   tile plane is the C face of the upper tile. Inside a 4h tile, nbFaceU is
@@ -67,18 +68,18 @@ fn nbVertexCoarse(v:vec3i)->vec3i{
   return vec3i(-1);
 }
 fn nbVertexOwnerH(v:vec3i)->bool{return nbVertexCoarse(v).x<0;}
-// The C vertex at tile coordinate T (h vertex 4T); PHI_AIR where no page holds it.
+// The C vertex at tile coordinate T (h vertex 4T); NB_PHI_FAR where no page holds it (the old empty value).
 fn nbCVertex(T:vec3i)->f32{
-  if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_PHI_AIR;}
-  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_AIR;}
+  if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_PHI_FAR;}
+  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_FAR;}
   return bitcast<f32>(${n.phi}[NB_PHI_C_PHI+NB_STRIDE*cs+nbTileIndex(T)]);
 }
 fn nbFVertex(v:vec3i)->f32{
-  let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_AIR;}
+  let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_FAR;}
   return bitcast<f32>(${n.phi}[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
 }
 fn nbVertexPhi(v:vec3i)->f32{
-  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_AIR;}
+  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}
   let T=nbVertexCoarse(v);
   if(T.x<0){return nbFVertex(v);}
   let o=4*T;let t=vec3f(v-o)/4.0;var values:array<f32,8>;

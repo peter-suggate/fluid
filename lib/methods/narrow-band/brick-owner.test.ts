@@ -3,7 +3,7 @@
 // a block of tiles 4h-owned, with known C corners and C faces. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, CMASK_WORDS, PHI_AIR, brickAbiWGSL } from "./brick-abi";
+import { BRICK_STRIDE, CMASK_WORDS, brickAbiWGSL, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
@@ -13,6 +13,7 @@ import { bringUpStages } from "./brick-stages";
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type Vec3 = [number, number, number];
 const N = 32;
+const FAR = phiFar([N, N, N]);
 const tileIndex = (t: Vec3) => (t[0] & 7) | ((t[1] & 7) << 3) | ((t[2] & 7) << 6);
 /** The block made 4h-owned: tiles x 2..3, y 0..1, every z. */
 const coarse = (t: Vec3) => t[0] >= 2 && t[0] <= 3 && t[1] <= 1;
@@ -52,8 +53,8 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
     const fphi = await readChannel(e, "phi", "PHI");
     // The CPU oracle.
     const inLattice = (c: Vec3) => c.every(v => v >= 0 && v < N);
-    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : PHI_AIR; };
-    const cVertex = (T: Vec3) => T.some(v => v < 0 || 4 * v > N) || T.some(v => v >= 8) ? PHI_AIR : Math.fround(cPhi(T));
+    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : FAR; };
+    const cVertex = (T: Vec3) => T.some(v => v < 0 || 4 * v > N) || T.some(v => v >= 8) ? FAR : Math.fround(cPhi(T));
     const vertexCoarse = (v: Vec3): Vec3 | undefined => {
       const tA = v.map(x => x >> 2) as Vec3, inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) {
@@ -65,7 +66,7 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
       return undefined;
     };
     const vertexPhi = (v: Vec3) => {
-      if (v.some(x => x < 0 || x > N)) return PHI_AIR;
+      if (v.some(x => x < 0 || x > N)) return FAR;
       const T = vertexCoarse(v);
       if (!T) return fVertex(v);
       const t = v.map((x, a) => Math.fround((x - 4 * T[a]!) / 4)), values = new Array<number>(8).fill(0);

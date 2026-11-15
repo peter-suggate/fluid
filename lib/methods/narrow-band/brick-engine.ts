@@ -19,6 +19,8 @@ import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type Bric
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
+import { brickCensusBuffers, brickCensusSchedule } from "./brick-census.wgsl";
+import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 
 export type Vec3 = readonly [number, number, number];
@@ -159,9 +161,17 @@ export class BrickEngine {
       ...stages.tail,
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
-    const boot: BrickPlacement[] = [...update(1), ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
-    // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5), then F's move and rebin.
-    return { part1: [...stages.move, ...stages.rebin], part2, boot };
+    // Part 1's head (tiered: NB-FLIP's frame-head census and remap, brick-abi.md §2.5) on the last step's lists and
+    // state. The census runs all-h too, for F's TRIG; only a tiered engine commits WANT (the transfer) and requests
+    // the clamp's bricks. The boot runs it before F's boot stages (the seeding reads TRIG).
+    const g1 = (k: number) => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 });
+    const census = brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered), transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
+    const head = [...census, ...(tiered ? transfer : [])];
+    // The boot commits its census without the remap: bootPhi writes one analytic φ to F and C, and U = 0.
+    const bootHead = [...census, ...(tiered ? transfer.filter(p => p.kernel.label === "setCommitMask") : [])];
+    const boot: BrickPlacement[] = [...update(1), ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, ...bootHead, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census and remap), then F's move and rebin.
+    return { part1: [...head, ...stages.move, ...stages.rebin], part2, boot };
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
@@ -229,6 +239,7 @@ export class BrickEngine {
     for (const pool of ["vel", "phi", "pres", "cut"] as const) make(pool, L.poolWords[pool]);
     make("parts", L.partsWords);
     make("xfer", L.xferWords);
+    make("census", brickCensusBuffers(L).census);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);

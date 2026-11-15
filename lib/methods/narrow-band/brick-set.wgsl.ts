@@ -361,6 +361,18 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
       phi[NB_PHI_F_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_F_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
     }
   }
+  // The entering pages' C vertices (h vertex 4T), the same distance: a tiered boot commits the census's tiers
+  // without a remap (U = 0, and F and C hold one analytic φ, which is the remap's injection at a corner).
+  let nC=nbListCount(NB_LIST_C_ENTER);
+  for(var e=wid.x;e<nC;e+=nw.x){
+    let s=nbListSlot(NB_LIST_C_ENTER,e);let o=nbCOrigin(s);
+    for(var j=0u;j<4u;j++){
+      let l=lid+128u*j;let p=vec3f(o+4*nbLocalCoord(l));
+      var d=NB_PHI_AIR;
+      for(var i=0u;i<cfg.z;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
+      phi[NB_PHI_C_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_C_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
+    }
+  }
 }`);
 
   // setLists: a thread a slot below the high-water mark. A live slot (key not

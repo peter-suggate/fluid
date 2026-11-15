@@ -223,10 +223,34 @@ CMASK is set at claim, the M1 engine).
 `nbTileOwnerH(cell)`, `nbVertexOwnerH(v)`, `nbVertexPhi(v)` and `nbFaceU(c, a)`, which apply the
 rules above through the directory and masks:
 - an h tap in an h-owned tile reads F;
-- a 4h-owned tile reads C, with the interpolant at the vertices.
+- a 4h-owned tile reads C, with the interpolant at the vertices;
+- a vertex that no slot stores, or that lies outside the lattice, reads `NB_PHI_FAR`. That is the old
+  vertex field's empty value, `fluidLatticeFarPhi`, in h: the lattice's largest extent (`phiFar`).
+  It differs from stored air (`NB_PHI_AIR` = 6, which `setInit` writes). This was P's finding,
+  2026-11-15.
+  - Residency guarantees that an absent page's vertices are at least 7 cells from 4h liquid
+    (setMarkPages' margin) and 8 cells from h liquid (the core ring).
+  - The old engine's 33³ page boxes store their upper-face vertices; here they belong to page
+    p + 1. So the two engines differ only there, and only in arithmetic that far from any liquid.
+
+**Schedule** (`BrickEngine.scheduleFor`, landed 2026-11-15):
+- Part 1 opens with the head. This is `setCensus` (`brickCensusSchedule`: censusBegin, censusFine
+  on F_ALL, then censusCoarse, censusCubes, censusImportance and censusDecide on C_ALL), then,
+  when tiered, `brickTransferSchedule`. After the head come F's `move` and `rebin`.
+- The census runs in the all-h engine too, because F reads TRIG. There it neither commits WANT
+  (no transfer) nor requests bricks (censusDecide's `cfg.z` = 0).
+- The boot runs the census after its lists and before F's boot stages, since F's seeding reads
+  TRIG.
+  - A tiered boot then commits with `setCommitMask` alone and runs no remap: `bootPhi` writes one
+    analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
+    injection at the corners.
+  - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
+- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 6656 words
+  a C slot.
 
 **The tier change, within a step** (§7, amended):
-1. `setMark` decides each tile's next owner (the NB-FLIP census, verbatim) into `WANT`: 512 bits
+1. `setCensus` (brick-census.wgsl.ts, landed fb17d41e at the part 1 head; this was planned as part
+   of `setMark`) decides each tile's next owner (the NB-FLIP census, verbatim) into `WANT`: 512 bits
    a C slot, `16 * CCAP` words in `set`. It also marks the bricks that the new h tiles and their
    ring need (`CAND`, `MARK_F` bit 0). A brick whose tiles change owner gets `MARK_F` bit 1
    (`CHANGED`). The census reads lane F's `TILE_OCC` (FCAP words in `set`): bits 0–7 the
@@ -257,8 +281,11 @@ rules above through the directory and masks:
      exterior. The deviations come from the storage: there are no released bits or cut weights
      until solids land (M3), and a face toward a non-resident (deep-air) page has no storage and
      reads 0.
-   - It runs as `BrickEngine.run` on a frozen state (brick-transfer.test.ts). Its place in the
-     step comes with the census: NB-FLIP remaps at the frame head, before the particle move.
+   - Its frozen-state tests are brick-transfer.test.ts and brick-transfer-dam.test.ts. The
+     second matches the old engine's real dam step-22 remap bitwise, apart from 3 φ words at
+     1 ulp.
+   - It is placed at the part 1 head after the census (Schedule, above), as in NB-FLIP, which
+     remaps at the frame head before the particle move.
 4. The frees run last, after `setTransfer` (a phase of `setLists`). A slot never leaves and
    enters in the same step, so each pool's measured peak includes one step of churn.
 
@@ -409,7 +436,15 @@ in words from its start. Regions are laid out in this order, each a multiple of 
 | 64–127 | F's | lane F's counters and receipts |
 | 128–191 | P's | lane P's counters, residuals, cycle records, PCG scalars |
 | 192–223 | `PEAK_*` | running maxima by `atomicMax`: 192 live F, 193 live C, 194 live B, 195 live K, 196 particles, 197 enter candidates |
-| 224–255 | reserved, E | |
+| 224 | `CENSUS_CLAMPED` | band tiles the residency clamp held at 4h this census |
+| 225 | `CENSUS_CAND` | candidate bricks the clamp appended (once per brick per page) |
+| 226 | `CENSUS_REACH` | largest tile travel, h per step, f32 bits by atomicMax (old census[18]) |
+| 227 | `CENSUS_CROSSING` | crossing tiles (old census[0]) |
+| 228 | `CENSUS_REQUIRED` | required tiles (old census[12]) |
+| 229 | `CENSUS_BAND` | band tiles (old census[2]) |
+| 230 | `CENSUS_REFINED` | band tiles that are 4h now (old census[4]) |
+| 231 | `CENSUS_TRIGGERED` | tiles with a trigger bit (sum of TRIG bits) |
+| 232–255 | reserved, E | |
 
 ### 5.2 Param ring (words 256–1279)
 
@@ -740,7 +775,9 @@ one iteration per slot, written against this contract, so that M1's tests have a
 ### 6.2 The fluid stage contract and the registration files (amended at M2)
 
 Lane F writes its kernels against `BrickStages` (`brick-stages.ts`), as P writes against §6.1:
-- `move` and `rebin` sit in part 1, after the head.
+- `move` and `rebin` sit in part 1, after the head (the census, and when tiered the transfer).
+- `tiered` (default false) says the stages read through the owners and write only owned storage.
+  It turns on the transfer and the §2.5 residency.
 - `levelSet` and `velocity` sit in part 2, after the brick set and before `operator`.
   `velocity` writes `US`.
 - `tail` sits after `project` and before `stepEnd`.

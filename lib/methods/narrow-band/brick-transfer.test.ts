@@ -7,7 +7,7 @@
 // and that storage no job writes is untouched. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, PHI_AIR } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { readChannel, snapshot } from "./brick-readback";
@@ -17,6 +17,7 @@ import { brickTransferSchedule } from "./brick-transfer.wgsl";
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type V3 = [number, number, number];
 const N = 32;
+const FAR = phiFar([N, N, N]);
 const f = Math.fround;
 const add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const unit = (a: number): V3 => [a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0];
@@ -88,8 +89,8 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
     const fRead = (name: string, c: V3) => { const sl = fSlot(c); return sl === undefined ? undefined : fBefore.get(name)!.get(sl)![local8(c)]!; };
     const cSlot = (T: V3) => T.some(v => v < 0) ? undefined : s.pages.get(key(shr(T, 3)));
     const cRead = (name: string, T: V3) => { const pc = cSlot(T); return pc === undefined ? undefined : cBefore.get(name)!.get(pc)![tileIndex(T)]!; };
-    const fVertex = (v: V3) => fRead("PHI", v) ?? PHI_AIR;
-    const cVertex = (T: V3) => (T.some(x => x < 0) || T.some(x => 4 * x > N)) ? PHI_AIR : cRead("PHI", T) ?? PHI_AIR;
+    const fVertex = (v: V3) => fRead("PHI", v) ?? FAR;
+    const cVertex = (T: V3) => (T.some(x => x < 0) || T.some(x => 4 * x > N)) ? FAR : cRead("PHI", T) ?? FAR;
     const vertexCoarse = (m: Uint32Array, v: V3): V3 | undefined => {
       const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) {
@@ -101,7 +102,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
       return undefined;
     };
     const vertexPhiOld = (v: V3) => {
-      if (v.some(x => x < 0 || x > N)) return PHI_AIR;
+      if (v.some(x => x < 0 || x > N)) return FAR;
       const T = vertexCoarse(oldMask, v);
       if (!T) return fVertex(v);
       const t = v.map((x, a) => f((x - 4 * T[a]!) / 4)), values = new Array<number>(8).fill(0);

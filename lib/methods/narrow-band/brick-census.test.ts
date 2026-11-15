@@ -8,7 +8,7 @@
 // bytes and are not compared. The deep COLD test (D = 0) is CPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, RING, SEAM, bricksPerAxis } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, RING, SEAM, bricksPerAxis, phiFar } from "./brick-abi";
 import { CENSUS, CENSUS_H, CENSUS_POLICY, brickCensusBuffers, brickCensusSchedule } from "./brick-census.wgsl";
 
 type V3 = [number, number, number];
@@ -67,8 +67,8 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   const cellH = (c: V3) => tileH(shr(c, 2));
   const brickRange = bricksPerAxis(N);
   const fSlot = (b: V3) => { if (b.some(v => v < 0)) return undefined; const cs = s.pages.get(pageKey(shr(b, 2))); if (cs === undefined) return undefined; const fs = s.bricks.get(key(b)); return fs; };
-  const fVertex = (v: V3) => { const fs = fSlot(shr(v, 3)); return fs === undefined ? PHI_AIR : s.fPhi(fs)[local8(v)]!; };
-  const cVertex = (T: V3) => { if (T.some((x, a) => x < 0 || 4 * x > N[a]!)) return PHI_AIR; const cs = anySlot(shr(T, 3)); return cs === undefined ? PHI_AIR : s.cPhi(cs)[tileIndex(T)]!; };
+  const fVertex = (v: V3) => { const fs = fSlot(shr(v, 3)); return fs === undefined ? FAR : s.fPhi(fs)[local8(v)]!; };
+  const cVertex = (T: V3) => { if (T.some((x, a) => x < 0 || 4 * x > N[a]!)) return FAR; const cs = anySlot(shr(T, 3)); return cs === undefined ? FAR : s.cPhi(cs)[tileIndex(T)]!; };
   const vertexCoarse = (v: V3): V3 | undefined => {
     const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
     for (let k = 0; k < 8; k++) {
@@ -80,7 +80,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     return undefined;
   };
   const vertexPhi = (v: V3) => {
-    if (v.some((x, a) => x < 0 || x > N[a]!)) return PHI_AIR;
+    if (v.some((x, a) => x < 0 || x > N[a]!)) return FAR;
     const T = vertexCoarse(v);
     if (!T) return fVertex(v);
     const t = v.map((x, a) => fr((x - 4 * T[a]!) / 4)), vals = new Array<number>(8).fill(0);
@@ -544,6 +544,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
 // ---- The frozen scene: a pool whose surface rolls across h and 4h tiles, a falling drop above it, a run-out
 // against the low x wall; the h region is a box of resident bricks, so the band's edge meets the clamp.
 const N: V3 = [64, 32, 64];
+const FAR = phiFar(N);
 const H_M = 1 / 32, DT = 1 / 60;
 const phiOf = (p: V3) => {
   const pool = p[1] - 9.3 + 0.9 * Math.sin(0.31 * p[0] + 0.2 * p[2]) + 0.4 * Math.cos(0.23 * p[2]);
@@ -569,7 +570,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     const e = await BrickEngine.create(device, {
       lattice: N, h_m: H_M, dt_s: DT, gravity_mps2: [0, -9.81, 0],
       capacities: { f: 700, c: 16, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [40, 12, 22] }], solver: L => bringUpCG(L),
-      stages: ctx => { const st = bringUpStages(ctx); return { ...st, buffers: { ...st.buffers, ...brickCensusBuffers(ctx.layout) } }; },
+      stages: bringUpStages,
     });
     const L = e.layout, snap = await snapshot(e);
     const cAll = snap.list(LIST.C_ALL);

@@ -334,3 +334,30 @@ storage, runs brickTransferSchedule, and compares the result with the old post-r
 
 The window's top tile layer is excluded, because there the brick engine has an artificial wall. No
 setTransfer bug was found.
+
+## 2026-11-15: setCensus (fb17d41e) and the part 1 head
+
+The setCensus sub-agent ported the old Uniform_dynamic_ownership_census verbatim on the brick
+storage: classify, classifyCoarse, boundCubes, importance, interfaceBits and decideTile, with the
+dam policy baked in. It matches a CPU oracle transcribed from the old census on a GPU frozen state,
+and everything is exact except score bytes, which are within 1 (f32 fma). It writes WANT and TRIG,
+plus the counters in H 224..231. Deviations:
+- deep COLD is taken as D = 0 (a CPU test shows the non-deep decisions are unchanged);
+- there are no solids;
+- the residency clamp (§2.5) applies.
+
+The part 1 head is wired (BrickEngine.scheduleFor):
+- the census runs every step, the all-h engine included, because F reads TRIG;
+- when tiered, it is followed by setTransfer;
+- then F's move and rebin;
+- the boot runs the census before F's boot stages, and a tiered boot commits WANT with
+  setCommitMask alone. bootPhi now also writes the boot pages' C vertices.
+
+The readers return NB_PHI_FAR (the old empty value, fluidLatticeFarPhi in h) for vertices that no
+slot stores, as P found.
+
+brick-set-tiers.test.ts adds a tiered boot of a 30x40x30 column on a 64^3 lattice:
+- 42 h tiles (at the column's edges) and 4054 4h tiles; no deep tile is h;
+- C φ equals bootPhi's analytic distance;
+- census counts: crossing 214, band 70, clamped 28.
+The GPU suite passes 23/23 (engine, census, transfer, transfer-dam, set-tiers, owner).

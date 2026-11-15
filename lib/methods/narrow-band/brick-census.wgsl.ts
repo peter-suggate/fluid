@@ -1032,7 +1032,9 @@ var<workgroup> wgGo:u32;
   }
   workgroupBarrier();
   if(lane<16u){atomicStore(&nbSet[NB_S_WANT+16u*cs+lane],atomicLoad(&wgWant[lane]));}
-  for(var e=lane;e<216u;e+=64u){
+  // cfg.z = 1 (tiered): the clamp's missing bricks become candidates. All-h (cfg.z = 0): WANT is not committed,
+  // so nothing is requested (setMark's reach keeps the all-h set).
+  for(var e=lane;e<216u*cfg.z;e+=64u){
     if(((atomicLoad(&wgCand[e>>5u])>>(e&31u))&1u)==0u){continue;}
     let nb=base+vec3i(i32(e%6u),i32((e/6u)%6u),i32(e/36u));let key=nbKey(nb);
     let a=atomicAdd(&nbSet[NB_H_N_CAND],1u);
@@ -1052,7 +1054,7 @@ var<workgroup> wgGo:u32;
 }
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL) {
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true) {
   const c = brickCensusKernels(L);
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
@@ -1060,7 +1062,7 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
     { kernel: c.censusCoarse, dispatch: list(cAll, "G1") },
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
     { kernel: c.censusImportance, dispatch: list(cAll, "G1") },
-    { kernel: c.censusDecide, dispatch: list(cAll, "G1") },
+    { kernel: c.censusDecide, dispatch: list(cAll, "G1"), z: tiered ? 1 : 0 },
   ];
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */

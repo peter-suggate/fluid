@@ -4,7 +4,7 @@
 // entering pages start as air. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, REC, brickKeyCoord } from "./brick-abi";
+import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, REC, brickKeyCoord, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -79,9 +79,9 @@ test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests p
     for (const k of entered) assert.equal(s.dir[L.dir.frec + 32 * s.bricks.get(k)! + REC.MASK]! & 0xff, 0, "an entered brick starts 4h");
     // LIQUID_TILES: 4h-owned tiles in the lattice with a liquid corner (corners in non-resident pages read air).
     const cVertex = (T: V3) => {
-      if (T.some(v => v < 0 || 4 * v > N)) return PHI_AIR;
+      if (T.some(v => v < 0 || 4 * v > N)) return phiFar([N, N, N]);
       const pk = key(T.map(v => v >> 3) as V3);
-      return pages0.has(pk) ? Math.fround(cPhi(T)) : PHI_AIR;
+      return pages0.has(pk) ? Math.fround(cPhi(T)) : phiFar([N, N, N]);
     };
     for (const [pk, cs] of pages0) {
       const P = brickKeyCoord(pk) as unknown as V3;
@@ -109,5 +109,40 @@ test("tiered brick set (GPU): core + ring keep F, 4h liquid keeps and requests p
       }
     }
     console.log(`tiered set: ${s.bricks.size} F (${entered.length} entered, ${s0.bricks.size + entered.length - s.bricks.size} left), ${s.pages.size} C (${s.pages.size - pages0.size} entered)`);
+  });
+});
+
+test("tiered boot (GPU): the census commits without a remap; a column's edges are h, its still interior 4h", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("brick tiered boot", async device => {
+    const stages = (c: Parameters<typeof bringUpStages>[0]) => ({ ...bringUpStages(c), tiered: true });
+    const hi: V3 = [30.3, 40.3, 30.3];
+    const e = await BrickEngine.create(device, { lattice: [N, N, N], h_m: 1 / N, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
+      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi }], solver: L => bringUpCG(L), stages });
+    const L = e.layout, s = await snapshot(e);
+    assert.equal(s.header[H.FAIL], 0, `FAIL ${s.header[H.FAIL]} info ${s.header[H.FAIL_INFO]}`);
+    let nH = 0, n4 = 0, edgeH = 0, deepH = 0;
+    for (const [pk, cs] of s.pages) {
+      const P = brickKeyCoord(pk) as unknown as V3, m = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
+      const phi = new Float32Array((await e.read("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, 512)).buffer);
+      for (let i = 0; i < 512; i++) {
+        const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3, c = T.map(v => 4 * v) as V3;
+        if (T.every(v => 4 * v <= N)) {
+          // bootPhi's C vertex: the box distance at h vertex 4T, as F holds it.
+          const q = c.map((v, a) => Math.abs(v - 0.5 * (hi[a]! - 1)) - 0.5 * (hi[a]! + 1));
+          const d = Math.min(Math.hypot(...q.map(v => Math.max(v, 0))) + Math.min(Math.max(...q), 0), PHI_AIR);
+          assert.ok(Math.abs(phi[i]! - d) <= 1e-5 * Math.max(1, Math.abs(d)), `C φ at ${T}: ${phi[i]} vs ${d}`);
+        }
+        if (!T.every(v => 4 * v < N)) continue;
+        const h = ((m[i >> 5]! >>> (i & 31)) & 1) === 1;
+        if (h) nH++; else n4++;
+        const inside = c.every((v, a) => v + 4 <= hi[a]! - 8);
+        if (h && inside) deepH++;
+        if (h && T[0] === 7 && T[2] === 7 && T[1] < 9) edgeH++;
+      }
+    }
+    console.log(`tiered boot: ${nH} h tiles, ${n4} 4h; edge column h ${edgeH}; deep h ${deepH}; census crossing ${s.header[H.CENSUS_CROSSING]} required ${s.header[H.CENSUS_REQUIRED]} band ${s.header[H.CENSUS_BAND]} clamped ${s.header[H.CENSUS_CLAMPED]} triggered ${s.header[H.CENSUS_TRIGGERED]}`);
+    assert.ok(nH > 0 && n4 > 0, "both tiers at boot");
+    assert.equal(deepH, 0, "the still interior (more than 8 cells deep) is 4h");
   });
 });
