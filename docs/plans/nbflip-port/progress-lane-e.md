@@ -805,3 +805,75 @@ Build plan, with the old frame's order (heat.encode, then the census, then plan.
 - **regionSpread**, then **regionDeep:** a lane a region. Each is separated by a grid-wide barrier: spread reads every region's level, deep reads every region's tier.
 - **regionDeep again** after the claims.
 - **Census:** decide's deep keep of CC_DECIDED and CC_STATIC, regionList and replay, and censusFine/censusCoarse skipping the replayed regions.
+
+## 2026-11-15: the "26 ms floor" attributed (floor task)
+
+**Brief.** tm-x2 gave a profiled fenced median of 126.3 ms/step against a kernel sum of 100.2 ms/step (tiered dam, composite).
+Design §6 budgets the floor at about 1 ms. The gap is attributed below.
+
+**Finding: there is no 26 ms floor in the engine.** The gap is three things:
+- (a) a window mismatch in the profile tool;
+- (b) the profiler's own pass splitting;
+- (c) about 1 ms of real host round trip.
+
+The unprofiled step is the GPU's two encoders plus about 1.0 ms.
+
+Runs, all on the timing slot on a HEAD 94577aa0 tree (`~/code/me/fluid-scratch/lane-e/floor/tree`), each rc 0 with no 00000206. The tool is
+`floor/tools/brick-dam-floor.mts`, lane F's brick-dam.mts plus the following:
+- `--cpu`: performance.now around submit, writeBuffer, advance, encodeAhead, collect, fence and the harness awaits;
+- `--spans`;
+- `--xcwait`;
+- the profile's `window` and `rowsWindow`;
+- per-step `profspan` rows.
+
+| run | what | fenced median / mean (ms, steps 18–23) |
+|---|---|---|
+| `floor/runs/base-cpu` | unprofiled, CPU timing only | 117.2 / 116.7 |
+| `floor/xc-att` | unprofiled; Metal System Trace attached at step 17 (`xc-attach.sh`, reduced by `xc-reduce.mts`) | 114.6 / 113.4 |
+| `floor/runs/win-prof` | brick-dam's per-dispatch profile (`--profile=13`) | 125.6 / 122.1 |
+| `floor/runs/base-spans` | one timestamp pair on each part's single pass | 237.2 / 232.5 |
+
+**Decomposition of tm-x2's 26 ms**, using win-prof as the same measurement (kernel sum 99.9 over all profiled steps; fenced mean 122.1):
+- **Window, 12.3 ms.** The profile row averages steps 14–25 (engine ≥ 13). The fenced median covers steps 18–23 only, because steps ≤ 16, 24 and the step after each are samples. The cost grows by about 3.5 ms a step: the kernel sum at steps 18–23 is 102.8 → 119.3, with a mean of 112.2 and a median of 115.5. Over the same window, the kernel sum is 112.2, not 99.9.
+- **The profiler's passes, 8.9 ms.** It puts each dispatch in its own timestamped pass, with an args copy before each indirect pass: 293 passes, and about 115 gaps over 50 µs a step. Span minus kernel sum is 121.1 − 112.2.
+- **Host, 1.0 ms.** Profiled fenced wall minus GPU span: 122.1 − 121.1.
+- These add up to 22.2 = 122.1 − 99.9. The rest of tm-x2's 26 comes from quoting a median (125.6) where the decomposition uses a mean (122.1).
+
+**The unprofiled step** (xc-att, same run, median per step): the part 1 encoder is 13.4 ms, the gap to part 2 is 0.055 ms and the part 2 encoder is 100.2 ms. The time from part 2's end to the next step's part 1 is 1.0 ms: the fence notify, the harness, the ring write, the submit and the 0.25 ms from submit to GPU start. Wall = 114.6. The encoders sum to a mean of 112.4, against a profiled kernel mean of 112.2 (cross-run). So the cost inside the passes, from dispatch boundaries and Dawn's one-thread indirect-validation dispatch before each indirect launch, is within cross-run noise (±4 ms; see the trajectories).
+
+| item | ms/step | source |
+|---|---|---|
+| 1. CPU encode | encodeAhead 0.90, after the step's submits (overlaps GPU). Encode-ahead is live: step N+1 is encoded before N's fence. Critical-path CPU before part 1 is on the queue: 0.16 (ring writeBuffer 0.03 + part 1 submit). Whole admit 1.40. | base-cpu |
+| 2. submit → GPU start | 0.25 (submission start to part 1 encoder start). Both submits' translation 0.43 CPU; part 2's overlaps part 1's 13 ms. No pipeline or bind-group creation on the step path (record() at create). | xc-att, base-cpu |
+| 3. GPU idle | part 1 → part 2: 0.055; between steps: 1.0 (fenced round trip; absent when pipelined). A step is 2 compute passes, 2 command buffers and 2 submits, plus 2 Dawn blits (the ring writeBuffer and the receipt copy, 0.003 ms each); 4 Metal encoders. Launches: 34 + 259 = 293. | xc-att, win-prof |
+| 4. writes and readbacks | engine: 1 writeBuffer (0.03), 1 receipt copy and 1 mapAsync (lagged, never awaited), no onSubmittedWorkDone. Harness: 1 fence a step (fenced mode by design); presentation off; sample() readbacks only on sample steps, outside the window. | base-cpu |
+| 5. profiler inflation | per-dispatch profile: fenced +8.4 median (125.6 vs 117.2), of which 8.9 is pass gaps (span − kernel). One timestamp pair on each recorded part: 2.0x (237 vs 117; the part 2 encoder takes 180–210 ms instead of 100). Never put timestampWrites on the recorded parts. | win-prof, base-spans, base-cpu |
+
+**Fix.** The cause is the measurement, not the host path. The seep levers are already live in brick-engine.ts:
+- encode-ahead;
+- the two-part submit;
+- one ring write;
+- lagged receipts with no per-step readback;
+- no CPU round trip.
+
+So the engine is unchanged. The tool fix is in `floor/tools/brick-dam-floor.mts`:
+- The profile row carries `window`, the kernel sum's median and mean over the fenced median's own steps, and the profiled GPU span.
+- It carries `rowsWindow`, the per-kernel rows over those steps.
+- `floor/tools/areas-window.py` reduces per area on that window, and takes the fenced figure from an unprofiled run.
+- Same-run GPU idle comes from `xc-attach.sh` (attach mode; launch-mode xctrace hung at "ending recording" for 10+ min and was killed) and `xc-reduce.mts`.
+
+Before: 126.3 fenced (profiled) vs 100.2 kernel sum, a "floor" of 26.1. After, same run (xc-att): 113.4 fenced mean vs 112.4 GPU encoders, a floor of 1.0. Cross-run unprofiled vs the window kernel sum: 1.7 (medians) to 4.5 (means).
+
+Per area, win-prof's `rowsWindow` (steps 18–23, ms/step), against design §6's dam budget:
+
+| area | ms | launches | budget |
+|---|---|---|---|
+| velocity | 49.17 | 7 | 1.6 |
+| level set | 21.16 | 22 | 2.0 |
+| pressure solve | 13.78 | 184 | 3.0 |
+| move | 10.52 | 7 | 1.5 |
+| pressure setup and projection (incl. pressureTileRoots) | 8.75 | 35 | 1.0 |
+| transfer and seeding | 5.13 | 2 | 1.0 |
+| brick set | 3.68 | 36 | 0.6 |
+| floor (same-run GPU idle, xc-att) | 1.0 | – | 1.0 |
+| **total** | 112.2 kernel + 1.0 | 293 | – |
