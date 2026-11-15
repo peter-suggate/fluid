@@ -682,9 +682,22 @@ var<workgroup> wLiq:array<atomic<u32>,69>;
 // and whether each brick of the window has a supported h tile (ufxRH's mode bit 0).
 var<workgroup> wS4:array<vec4f,${F.tiered ? 375 : 1}>;
 var<workgroup> wSwept:array<atomic<u32>,27>;
+// vLiquidOwner's inputs, staged once: the 4^3 tiles about the window (tiles xBase4-1..xBase4+2; bit 0 4h-owned,
+// bit 1 its tile centre φ under -0.001) and the FC_LIQ words of the 27 bricks about the brick (16 a brick).
+var<workgroup> wTile4:array<u32,64>;
+var<workgroup> wLiqW:array<u32,432>;
 var<private> xLow:vec3i;
 var<private> xBase4:vec3i;
 var<private> xBrick:vec3i;
+// vLiquidOwner from the staged tiles and words (the same tests in the same order).
+fn xLiquidStaged(c:vec3i)->bool{
+ let r=vec3u((c>>vec3u(2u))-xBase4+vec3i(1));let t=wTile4[r.x+4u*r.y+16u*r.z];
+ if(FG_TIERED&&nbInLattice(c)&&(t&1u)!=0u){return (t&2u)!=0u;}
+ if(!nbInLattice(c)){return false;}
+ let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
+ let n=vec3u((c>>vec3u(3u))-xBrick+vec3i(1));let l=nbLocal(c);
+ return ((wLiqW[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;
+}
 fn xLiquid(c:vec3i)->bool{let r=c-xLow;let i=u32(r.x+13*(r.y+13*r.z));return ((atomicLoad(&wLiq[i>>5u])>>(i&31u))&1u)!=0u;}
 fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}
 fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}
@@ -734,6 +747,17 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();
  if(lid<69u){atomicStore(&wLiq[lid],0u);}
  if(lid<27u){atomicStore(&wSwept[lid],0u);}
+ if(live&&lid<432u){
+  let n=lid>>4u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
+  let s=fgBrickSlot(b);var w=0u;if(s!=NB_NONE){w=fcLoad(FC_LIQ+16u*s+(lid&15u));}
+  wLiqW[lid]=w;
+ }
+ if(FG_TIERED&&live&&lid>=448u){
+  let j=lid-448u;let T=xBase4+vec3i(i32(j&3u),i32((j>>2u)&3u),i32(j>>4u))-vec3i(1);
+  var bits=0u;
+  if(nbInLattice(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
+  wTile4[j]=bits;
+ }
  if(FG_TIERED&&live&&lid<375u){
   let d=lid%125u;let a=lid/125u;let C=xBase4+vec3i(vec3u(d%5u,(d/5u)%5u,d/25u))-vec3i(2);let T=C+fgUnit(a);
   let cs=x4Slot(T);var st=vec3f(0.0,0.0,-1.0);if(cs!=NB_NONE){st=x4Load(cs,1u,foTileIndex(T),a);}
@@ -742,7 +766,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  workgroupBarrier();
  if(live){
   for(var j=lid;j<2197u;j+=512u){
-   if(vLiquidOwner(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));}
+   if(xLiquidStaged(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));}
   }
   // A lane a tile of the 27 bricks about the brick (216 lanes).
   if(FG_TIERED&&lid<216u){
