@@ -112,13 +112,34 @@ export const LIST = {
   F_ENTER: 8, F_LEAVE: 9, F_CHANGED: 10,
   C_ALL: 11, C_LIQ: 12, C_SEAM: 13, C_ENTER: 14, C_LEAVE: 15,
   B_ALL: 16,
+  /** The active F bricks (brick-abi.md §5.5): F_ACT(t) ∪ F_ACT(t - 1), the dilated active class (ACT below). */
+  F_ACT: 17,
 } as const;
 export const LIST_SLOTS = 32;
 export type ListName = keyof typeof LIST;
 const listKind = (k: number): "F" | "C" | "B" => k <= 10 ? "F" : k <= 15 ? "C" : k === 16 ? "B" : "F";
+/** The last list index with entries (F_ACT); list slots above it have capacity 0. */
+const LAST_LIST = 17;
 
-/** Indirect arguments: 12 words a list (G1, G8, G64, X8: eight workgroups an entry), then FC_* at 384. Lanes: P from 512, F from 2048. */
-export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+/** Indirect arguments: 12 words a list (G1, G8, G64, X8: eight workgroups an entry), then FC_* at 384 (F_ALL's bricks, then
+ * C_ALL's pages) and FA_* at 400 (F_ACT's bricks, then C_ALL's pages). Lanes: P from 512, F from 2048. */
+export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+/** The end of the list arguments a stage may dispatch from, below the lanes' regions (FA_G64's last word + 1). */
+export const ARGS_LIST_END = ARGS.FA_G64 + 3;
+
+/**
+ * The active class (brick-abi.md §5.5), a word an F slot (set region ACT):
+ * - TILES (bits 0..7, bit j tile j): setMark's ACTIVE tiles of this step: an h-owned tile (tiered; all-h every tile
+ *   is h, so the criterion is dropped), a φ < 0 vertex through the tier authority, a particle in the tile (TILE_OCC
+ *   bits 0..7, this step's rebin), or heat (F's FT_H or FT_T nonzero, or the census's TRIG bit: lHeatNow's max);
+ * - NOW: F_ACT(t), set by setMark on every resident brick within ACT_DILATION tiles (Chebyshev, at tile precision) of
+ *   an ACTIVE tile;
+ * - PREV: F_ACT(t - 1), the head's setLists moving NOW down (and clearing TILES and NOW).
+ * F_ACT lists NOW | PREV (part 2) and, at the head, NOW | PREV or an entering brick.
+ */
+export const ACT = { TILES: 0xff, NOW: 1 << 8, PREV: 1 << 9 } as const;
+/** F_ACT's dilation of the ACTIVE tiles, in 4h tiles (12 cells; brick-abi.md §5.5). */
+export const ACT_DILATION = 3;
 /** Workgroups a dimension under the fold rule: x = min(n, FOLD), y = ceil(n / FOLD). */
 export const FOLD = 32768;
 
@@ -193,6 +214,8 @@ export class BrickLayout {
     /** censusDecide's candidate bricks a page (CAND_MASK_WORDS a C slot, bit e of the 6^3 bricks about it): set by atomicOr, so
      * each is listed once a page across the page's eight workgroups; cleared by censusImportance. */
     readonly candMask: number;
+    /** The active class (ACT): a word an F slot, written by setMark and the head's setLists, zeroed by setClaimBricks. */
+    readonly act: number;
     readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -224,14 +247,15 @@ export class BrickLayout {
     const want = take(CMASK_WORDS * c), tileOcc = take(f), trig = take(f), tlist = take(2 * t);
     const listCap: number[] = [], lists: number[] = [];
     for (let j = 0; j < LIST_SLOTS; j++) {
-      const kind = listKind(j), n = j > 16 ? 0 : kind === "F" ? f : kind === "C" ? c : b;
+      const kind = listKind(j), n = j > LAST_LIST ? 0 : kind === "F" ? f : kind === "C" ? c : b;
       listCap.push(n); lists.push(take(Math.max(n, 1)));
     }
     const airGate = take(CMASK_WORDS * c);
     const reach0 = take(512 * c), reach1 = take(512 * c), reachStep = take(c), wallTile = take(384 * c);
     const psupport = take(PSUPPORT_WORDS * f);
     const candMask = take(CAND_MASK_WORDS * c);
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, words: at };
+    const act = take(f);
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, act, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -316,6 +340,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);
   c("NB_S_PSUPPORT", s.psupport); c("NB_S_CAND_MASK", s.candMask); c("NB_CAND_MASK_WORDS", CAND_MASK_WORDS); c("NB_PSUPPORT_WORDS", PSUPPORT_WORDS); c("NB_KEY_CLAIMED", KEY_CLAIMED);
+  c("NB_S_ACT", s.act); for (const [name, v] of Object.entries(ACT)) c(`NB_ACT_${name}`, v); c("NB_ACT_DILATION", ACT_DILATION);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);

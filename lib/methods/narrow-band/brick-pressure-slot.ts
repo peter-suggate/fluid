@@ -24,7 +24,7 @@
  *   when the solve stops above tolerance.
  */
 import type { BrickLayout } from "./brick-abi";
-import { ARGS } from "./brick-abi";
+import { ARGS, ARGS_LIST_END } from "./brick-abi";
 import type { BrickPlacement } from "./brick-kernel";
 
 /** P's args region (brick-abi.md §5.5). */
@@ -36,6 +36,9 @@ export interface PressureSolver {
   readonly bringUp: boolean;
   /** Encoded slots record() allots. */
   readonly slots: number;
+  /** Placed once, just before `operator` (optional): passes the operator reads, e.g. a tile pass once a step instead of
+   * a recomputation in every brick that reads the tile. */
+  readonly before?: readonly BrickPlacement[];
   /** Placed once, after `operator`. Opens slot 0 and closes the rest. */
   readonly setup: readonly BrickPlacement[];
   /** Slot k's placements, ending in its check. */
@@ -53,12 +56,12 @@ export type PressureSolverFactory = (layout: BrickLayout) => PressureSolver;
 /** Checks that a solver's gated dispatches stay in its args region. */
 export function validatePressureSolver(s: PressureSolver): void {
   if (!Number.isInteger(s.slots) || s.slots < 1) throw new Error(`Brick engine: pressure solver ${s.label} declares ${s.slots} slots`);
-  const all = [...s.setup, ...s.finish, ...Array.from({ length: s.slots }, (_, k) => s.slot(k)).flat()];
+  const all = [...(s.before ?? []), ...s.setup, ...s.finish, ...Array.from({ length: s.slots }, (_, k) => s.slot(k)).flat()];
   for (const p of all) {
     if ("indirect" in p.dispatch) {
       const w = p.dispatch.indirect;
-      // List arguments (words 0..392) are also valid sources: an ungated list-wide kernel.
-      if (!(w >= 0 && w + 3 <= ARGS.FC_G64 + 3) && !(w >= PRESSURE_ARGS.FIRST && w + 3 <= PRESSURE_ARGS.END))
+      // List arguments (words 0..408: the lists, FC_* and FA_*) are also valid sources: an ungated list-wide kernel.
+      if (!(w >= 0 && w + 3 <= ARGS_LIST_END) && !(w >= PRESSURE_ARGS.FIRST && w + 3 <= PRESSURE_ARGS.END))
         throw new Error(`Brick engine: ${p.kernel.label} dispatches from args word ${w}, outside the lists and P's region`);
     }
   }

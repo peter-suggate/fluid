@@ -12,14 +12,14 @@
  *
  * Rules:
  * - Placements are BrickPlacements (brick-kernel.ts). Gated dispatches read
- *   list arguments (words 0..392) or F's region (2048..4095).
+ *   list arguments (words 0..408: the lists, FC_* and FA_*) or F's region (2048..4095).
  * - F's buffers are named in `buffers` and allocated zeroed; their names may
  *   not shadow an engine buffer.
  * - F owns header words 64..127 and the class bits 16..23.
  * - A bring-up stage set (`bringUp: true`) is for E's tests only. The method
  *   refuses every scene on it (brick-method.ts).
  */
-import { ARGS, type BrickLayout } from "./brick-abi";
+import { ARGS, ARGS_LIST_END, type BrickLayout } from "./brick-abi";
 import { ENGINE_BUFFERS, type BrickPlacement } from "./brick-kernel";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 
@@ -58,6 +58,12 @@ export interface BrickStages {
   readonly kick?: { readonly force: readonly BrickPlacement[]; readonly after: readonly BrickPlacement[]; readonly seed?: readonly BrickPlacement[] };
   /** Lane-owned buffers by name, in words. */
   readonly buffers: Readonly<Record<string, number>>;
+  /**
+   * Where the stage set keeps its tiles' heat, for E's active class (brick-abi.md §5.5, ACT): a buffer of `buffers`,
+   * the word of slot 0's tile 0, the words a tile (a slot's 8 tiles in order, slot-major), and the heat words of a
+   * tile (f32; a nonzero word makes the tile ACTIVE). Absent: no heat criterion (E's bring-up stages hold none).
+   */
+  readonly activity?: { readonly buffer: string; readonly tile: number; readonly words: number; readonly heat: readonly number[] };
 }
 
 /** What a stage factory gets: the layout and the scene's resolved stage parameters. */
@@ -82,9 +88,14 @@ export function validateBrickStages(s: BrickStages): void {
   for (const p of stageLists(s)) {
     if ("indirect" in p.dispatch) {
       const w = p.dispatch.indirect;
-      if (!(w >= 0 && w + 3 <= ARGS.FC_G64 + 3) && !(w >= FLUID_ARGS.FIRST && w + 3 <= FLUID_ARGS.END))
+      if (!(w >= 0 && w + 3 <= ARGS_LIST_END) && !(w >= FLUID_ARGS.FIRST && w + 3 <= FLUID_ARGS.END))
         throw new Error(`Brick engine: ${p.kernel.label} dispatches from args word ${w}, outside the lists and F's region`);
     }
+  }
+  if (s.activity) {
+    const a = s.activity, n = s.buffers[a.buffer];
+    if (n === undefined) throw new Error(`Brick engine: the activity buffer ${a.buffer} is not a stage buffer`);
+    if (!(a.words >= 1) || a.heat.some(w => !(w >= 0 && w < a.words)) || !(a.tile >= 0 && a.tile + a.words * 8 <= n)) throw new Error(`Brick engine: the activity words of ${a.buffer} are outside its tiles`);
   }
   for (const name of Object.keys(s.buffers))
     if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot") throw new Error(`Brick engine: stage buffer ${name} shadows an engine buffer`);

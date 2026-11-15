@@ -132,7 +132,7 @@ export class BrickEngine {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
-    const set = brickSetKernels(layout, { tiered }), pres = pressureOperatorKernels(layout), f = layout.cap.f, c = layout.cap.c;
+    const set = brickSetKernels(layout, { tiered, activity: stages.activity }), pres = pressureOperatorKernels(layout), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
     // cfg.z = 1 at boot: the boot's bricks enter h-owned (bootPhi writes F); tiered steps enter 4h (§2.5).
@@ -144,16 +144,20 @@ export class BrickEngine {
       { kernel: set.setRecords, dispatch: direct(churnGroups(f, 1)) },
       { kernel: set.setInit, dispatch: direct(churnGroups(f, 1)) },
     ];
-    const lists: BrickPlacement[] = [
-      { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)) },
+    // setLists' cfg.z (brick-abi.md §5.5, ACT): 1 at the head (F_ACT adds the entering bricks, then NOW moves to
+    // PREV), 2 at the boot (every live brick is NOW), 0 in part 2.
+    const lists = (z: number): BrickPlacement[] => [
+      { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)), z },
       { kernel: set.setArgs, dispatch: direct(1) },
     ];
     const solve: BrickPlacement[] = [
+      ...(solver.before ?? []),
       { kernel: pres.operator, dispatch: list(LIST.F_ALL, "G1") },
       ...solver.setup,
       ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(),
       ...solver.finish,
-      { kernel: pres.project, dispatch: list(LIST.F_LIQ, "G1") },
+      // project on F_ALL (lane P's contract, 2026-11-15: WARM and the WALLS bits on every F brick; P reads no F_LIQ).
+      { kernel: pres.project, dispatch: list(LIST.F_ALL, "G1") },
     ];
     // The release port's producers (levelset-release.wgsl.ts), where a stage set advects φ: the tile reach words at
     // the old frame plan's point (part 1, after the head, before move), the wall reach before the surface advect.
@@ -203,14 +207,14 @@ export class BrickEngine {
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
     ];
-    const head = censused ? [...census(true), ...residency, ...tail, ...lists, ...want, ...(tiered ? transfer : []), churnClear] : [];
+    const head = censused ? [...census(true), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? transfer : []), churnClear] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
-    const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists, ...want, ...commit] : census(false);
+    const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
     const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [];
     const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after, ...(stages.kick.seed ? [...trigCensus, ...stages.kick.seed] : [])] : [];
-    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists(2), ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census, residency and remap), then the release
     // port's reach words (after every head claim, before move), F's move and rebin.
     return { part1: [...head, ...release.part1, ...stages.move, ...stages.rebin], part2, boot };

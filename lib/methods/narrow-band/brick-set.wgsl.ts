@@ -12,6 +12,7 @@
 import { BrickLayout, LIST, POOLS, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import type { BrickStages } from "./brick-stages";
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const setRO: BrickBinding = { name: "set", kind: "ro", type: "array<u32>" };
@@ -74,22 +75,34 @@ fn nbTileMask(cs:u32,bl:u32,set_:bool){
 
 /** The brick set's options. `tiered`: the tier census and transfer run (brick-abi.md §2.5); F bricks are kept by
  * core, ring and bin reach, 4h liquid keeps C pages, and bricks entered in a step start 4h. Off: every brick is h. */
-export interface BrickSetOptions { readonly tiered?: boolean }
+export interface BrickSetOptions {
+  readonly tiered?: boolean;
+  /** The stage set's tile heat (BrickStages.activity): setMark's heat criterion of the ACTIVE tiles. */
+  readonly activity?: BrickStages["activity"];
+}
 
 export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
   const tiered = opt.tiered === true;
 
-  // setMark: one workgroup a brick of F_ALL (G1), in part 2 after F's move. The brick's class word (SURFACE,
-  // PARTICLES, SKIRT) and the residency check below; the bound word clears. Residency itself is the head's
-  // (brick-residency.wgsl.ts, brick-abi.md §5.4): setMark keeps and requests nothing. Tiered (§2.5): the scan reads
-  // h-owned tiles only (a 4h tile's F cells hold no state).
-  const setMark = k("setMark", [CFG, setRW, dirRW, phiRO], /* wgsl */`
+  // setMark: one workgroup a brick of F_ALL (G1), in part 2 after F's move and rebin. It writes:
+  // - the brick's class word: LIQUID (an h-owned φ < 0 vertex: the brick holds pressure rows), SURFACE, PARTICLES, SKIRT;
+  // - the active class (brick-abi.md §5.5, ACT): the ACTIVE tiles of this step into its own word, and NOW into every
+  //   resident brick within ACT_DILATION tiles of one (a lane an offset of the 5^3 about it, at tile precision);
+  // - the residency check below; the bound word clears.
+  // Residency itself is the head's (brick-residency.wgsl.ts, brick-abi.md §5.4): setMark keeps and requests nothing.
+  // Tiered (§2.5): the scan reads h-owned tiles only (a 4h tile's F cells hold no state); a 4h tile's φ is its C
+  // corners' (the tier authority's interpolant, whose minimum over the tile is a corner's).
+  const act = opt.activity;
+  const heat = act ? act.heat.map(w => `${act.buffer}[${act.tile}u+${act.words}u*(8u*slot+t)+${w}u]!=0u`).join("||") : "false";
+  const markBindings: BrickBinding[] = [CFG, setRW, dirRW, phiRO, ...(tiered ? [velRO] : []), ...(act ? [{ name: act.buffer, kind: "ro", type: "array<u32>" } as BrickBinding] : [])];
+  const setMark = k("setMark", markBindings, (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel" }) : "") + /* wgsl */`
 var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
+var<workgroup> wTiles:atomic<u32>;
 var<workgroup> wNb:array<u32,27>;
 @compute @workgroup_size(64) fn setMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);}
+  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);}
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
   var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);}
   // The brick's 27 neighbour words (F record words 0-26), for the residency check below.
@@ -99,13 +112,14 @@ var<workgroup> wNb:array<u32,27>;
   if(live){
     o=nbFOrigin(slot);
     let tiles=${tiered ? "atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_MASK])&0xffu" : "0xffu"};
-    var neg=0u;var pos=0u;
+    var neg=0u;var pos=0u;var wet=0u;
     for(var j=0u;j<8u;j++){
       let l=lid+64u*j;let c=nbLocalCoord(l);
       if(any(o+c>NB_LATTICE)){continue;}
-      if(((tiles>>u32((c.x>>2u)|((c.y>>2u)<<1u)|((c.z>>2u)<<2u)))&1u)==0u){continue;}
+      let t=u32((c.x>>2u)|((c.y>>2u)<<1u)|((c.z>>2u)<<2u));
+      if(((tiles>>t)&1u)==0u){continue;}
       let p=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
-      if(p<0.0){neg++;}else{pos=1u;}
+      if(p<0.0){neg++;wet|=1u<<t;}else{pos=1u;}
       // The residency check (brick-abi.md §5.4, §8): a liquid vertex's 1-ring (every vertex of the cells it bounds)
       // is resident. φ is this step's advected level set on the directory the head committed, so a miss is a reach
       // defect of this step's head: FAIL.REACH with the absent brick's key, never read as air. Only the brick's face
@@ -122,10 +136,44 @@ var<workgroup> wNb:array<u32,27>;
     }
     if(neg>0u){atomicAdd(&wNeg,neg);}
     if(pos!=0u){atomicOr(&wPos,1u);}
+    // The ACTIVE tiles (brick-abi.md §5.5): lane t < 8 tests tile t's particles, heat${tiered ? ", h ownership and 4h corners" : ""}.
+    if(lid<8u){
+      let t=lid;var on=(nbSetWord(NB_S_TILE_OCC+slot)>>t)&1u;
+      if(((nbSetWord(NB_S_TRIG+slot)>>t)&1u)!=0u||${heat}){on=1u;}
+      ${tiered ? `if(((tiles>>t)&1u)!=0u){on=1u;}
+      else{
+        let T=(o>>vec3u(2u))+vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));
+        for(var q=0u;q<8u;q++){if(nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)))<0.0){on=1u;}}
+      }` : ""}
+      if(on!=0u){wet|=1u<<t;}
+    }
+    if(wet!=0u){atomicOr(&wTiles,wet);}
   }
   workgroupBarrier();
+  let m=atomicLoad(&wTiles);
+  // NOW on the bricks within ACT_DILATION tiles: offset d (a lane each of the 5^3) is covered when an ACTIVE tile t
+  // (brick-local tile coordinate in {0,1}^3) lies within the dilation of the brick's tiles on every axis,
+  // 2d - ACT_DILATION <= t <= 2d + 1 + ACT_DILATION (with ACT_DILATION 3: t - 2 <= d <= t + 1).
+  if(live&&m!=0u){
+    let b=o>>vec3u(3u);
+    for(var e=lid;e<125u;e+=64u){
+      let d=vec3i(i32(e%5u),i32((e/5u)%5u),i32(e/25u))-vec3i(2);
+      var hit=false;
+      for(var t=0u;t<8u;t++){
+        if(((m>>t)&1u)==0u){continue;}
+        let tt=vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));
+        if(all(2*d-i32(NB_ACT_DILATION)<=tt)&&all(tt<=2*d+1+i32(NB_ACT_DILATION))){hit=true;}
+      }
+      if(!hit){continue;}
+      let nb=b+d;if(!nbBrickInRange(nb)){continue;}
+      let s2=nbFSlotOfBrick(nb);
+      if(s2<NB_SEAM){atomicOr(&nbSet[NB_S_ACT+s2],NB_ACT_NOW);}
+    }
+  }
   if(!live||lid!=0u){return;}
+  atomicOr(&nbSet[NB_S_ACT+slot],m);
   var cls=0u;
+  if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
   if(nbSetWord(NB_S_BIN_COUNT+slot)>0u){cls|=NB_CLASS_PARTICLES;}
   if(any(o>=NB_LATTICE)){cls|=NB_CLASS_SKIRT;}
@@ -210,7 +258,7 @@ var<workgroup> wN:atomic<u32>;
     for(var j=0u;j<NB_PSUPPORT_WORDS;j++){atomicStore(&nbSet[NB_S_PSUPPORT+NB_PSUPPORT_WORDS*fs+j],0u);}
     atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_ENTERING|select(0u,NB_CLASS_SKIRT,any(8*b>=NB_LATTICE)));
     atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);atomicStore(&nbSet[NB_S_BOUND_F+fs],0u);atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
-    atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);
+    atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);atomicStore(&nbSet[NB_S_ACT+fs],0u);
     atomicAdd(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
     if(${tiered ? "h" : "false"}){nbTileMask(cs,bl,true);}
     atomicStore(&dir[ci],fs);
@@ -329,9 +377,11 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
   }
 }`);
 
-  // setLists: a thread a slot below the high-water mark. A live slot (key not
-  // NONE, not leaving) joins its lists; a leaving slot's key clears. M1: every
-  // live F brick is LIQUID (F_LIQ = F_ALL, brick-abi.md §5.5).
+  // setLists: a thread a slot below the high-water mark. A live slot (key not NONE, not leaving) joins its lists from
+  // its class word (setMark's; F_LIQ: the bricks with an h-owned liquid vertex) and its active class; a leaving
+  // slot's key clears. F_ACT (brick-abi.md §5.5) lists NOW | PREV; at the head (cfg.z = 1) also an entering brick
+  // (its first step's part 1 has no class yet), and the word then moves NOW to PREV for this step's setMark. The
+  // boot (cfg.z = 2) has no class yet: every live brick is NOW, so step 1 runs the moved stages on all of F_ALL.
   const fLists: [number, string][] = [[LIST.F_LIQ, "LIQUID"], [LIST.F_SURF, "SURFACE"], [LIST.F_PART, "PARTICLES"], [LIST.F_SEAM, "SEAM"], [LIST.F_SOLID, "NEAR_SOLID"], [LIST.F_BODY, "NEAR_BODY"], [LIST.F_COLD, "COLD"], [LIST.F_CHANGED, "CHANGED"]];
   const setLists = k("setLists", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setLists(@builtin(global_invocation_id) gid:vec3u){
@@ -342,8 +392,14 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
       let cls=atomicLoad(&dir[r+NB_REC_CLASS]);
       if((cls&NB_CLASS_LEAVING)!=0u){atomicStore(&dir[r+NB_REC_KEY],NB_NONE);}
       else{
+        // F_LIQ = F_ALL until lane P's row list lands (P then reads no F_LIQ; 2026-11-15): setMark's LIQUID bit is the
+        // real class, ORed here for every live brick meanwhile.
         let c=(cls&~NB_CLASS_ENTERING)|NB_CLASS_LIQUID;atomicStore(&dir[r+NB_REC_CLASS],c);
         nbAppend(NB_LIST_F_ALL,i);
+        var a=atomicLoad(&nbSet[NB_S_ACT+i]);
+        if(cfg.z==2u){a=NB_ACT_NOW;atomicStore(&nbSet[NB_S_ACT+i],a);}
+        if((a&(NB_ACT_NOW|NB_ACT_PREV))!=0u||(cfg.z==1u&&(cls&NB_CLASS_ENTERING)!=0u)){nbAppend(NB_LIST_F_ACT,i);}
+        if(cfg.z==1u){atomicStore(&nbSet[NB_S_ACT+i],select(0u,NB_ACT_PREV,(a&NB_ACT_NOW)!=0u));}
         ${fLists.map(([j, bit]) => `if((c&NB_CLASS_${bit})!=0u){nbAppend(${j}u,i);}`).join("\n        ")}
       }
     }
@@ -364,7 +420,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
 }`);
 
   // setArgs: one workgroup. Each list's G1, G8, G64 and X8 (eight workgroups an entry: setCensus's
-  // C passes, a workgroup a 64-tile slab of a page) under the fold rule, the FC triples, and the
+  // C passes, a workgroup a 64-tile slab of a page) under the fold rule, the FC and FA triples, and the
   // live, churn and peak counters.
   const setArgs = k("setArgs", [CFG, setRW, argsRW], /* wgsl */`
 fn fold(at:u32,n:u32){args[at]=min(n,NB_FOLD);args[at+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[at+2u]=1u;}
@@ -375,8 +431,9 @@ fn count(k:u32)->u32{
 }
 fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold(at+NB_ARGS_G64,(n+63u)/64u);fold(at+NB_ARGS_X8,8u*n);}
 @compute @workgroup_size(64) fn setArgs(@builtin(local_invocation_index) lid:u32){
-  if(lid<17u){triple(NB_ARGS_PER_LIST*lid,count(lid));}
-  if(lid==17u){
+  if(lid<=NB_LIST_F_ACT){triple(NB_ARGS_PER_LIST*lid,count(lid));}
+  if(lid==NB_LIST_F_ACT+2u){let nA=count(NB_LIST_F_ACT)+count(NB_LIST_C_ALL);fold(NB_ARGS_FA_G1,nA);fold(NB_ARGS_FA_G8,(nA+7u)/8u);fold(NB_ARGS_FA_G64,(nA+63u)/64u);}
+  if(lid==NB_LIST_F_ACT+1u){
     let nF=count(NB_LIST_F_ALL);let nC=count(NB_LIST_C_ALL);
     fold(NB_ARGS_FC_G1,nF+nC);fold(NB_ARGS_FC_G8,(nF+nC+7u)/8u);fold(NB_ARGS_FC_G64,(nF+nC+63u)/64u);
     atomicStore(&nbSet[NB_H_LIVE_F],nF);atomicStore(&nbSet[NB_H_LIVE_C],nC);

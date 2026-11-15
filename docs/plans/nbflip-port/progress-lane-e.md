@@ -665,3 +665,24 @@ brick-engine.test.ts (the seeded boot is the unseeded one plus the six census pa
 censusDecide at z = 2, no set/res/transfer kernel among them; all-h and tiered), and brick-census.test.ts (on the
 synthetic state the TRIG-only census writes the full census's TRIG words, CENSUS_TRIGGERED, and no WANT word,
 candidate or keep mark).
+
+## 2026-11-15 — the active class and F_ACT (ABI; no stage dispatches from it yet)
+
+setMark (part 2, after the rebin) writes the active class (brick-abi.md §5.5, ACT, a set word an F slot): the
+ACTIVE tiles (an h-owned tile, tiered; a φ < 0 vertex through the tier authority, a 4h tile's C corners; TILE_OCC;
+the census's TRIG or a nonzero heat word of the stage set's `activity` tiles), and NOW on every resident brick within
+ACT_DILATION = 3 tiles of one (a lane an offset of the 5^3, at tile precision). The head's setLists lists F_ACT =
+NOW | PREV, plus an entering brick, then moves NOW to PREV; the boot lists every live brick. LIST.F_ACT = 17, args
+FA_G1/G8/G64 at 400 (F_ACT's bricks, then C_ALL's pages), ARGS_LIST_END = 409 for the stage and solver validators.
+setMark's LIQUID bit is now the class (an h-owned φ < 0 vertex); setLists ORs LIQUID onto every live brick until
+lane P's row list lands, so F_LIQ = F_ALL still. pres.project dispatches on F_ALL (P's contract);
+PressureSolver.before is placed just before the operator. Nothing dispatches from F_ACT yet: lane F's moved
+kernels wait on the gate below.
+
+Gate status (per-kernel, frozen F_ALL trajectory, tiered dam, 30 steps): every moved kernel writes bitwise the same
+words on its F_ACT bricks. With stale words on the bricks outside F_ACT poisoned (two poisons), lTiles, lDilate,
+lNear and lDistance on 4h-only bricks read words that F_ALL refreshes every step from C (TILE FLAGS/DA/DB/DIST,
+NEAR, DEPTH; reach 5 tiles in lDilate, beyond the 3-tile dilation). Open: whether the stale values differ from
+F_ALL's (a shadow-value trajectory, not poison), before F moves its dispatches.
+Checks: check:types (the 3 lane-n errors), test:unit 1833 pass 0 fail, brick-set, brick-set-tiers and
+brick-engine GPU suites 20/20 (rc 0, no 00000206).

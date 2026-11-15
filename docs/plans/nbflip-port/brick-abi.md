@@ -530,6 +530,7 @@ its `TOP_*` word.
 | `CAND` | `CAND_CAP = FCAP` | enter candidates: brick keys (§4.1 word 29), `NB_KEY_PAGE` (bit 30) for a page key. Duplicates allowed; `setUpdate` dedupes by compare-exchange on the directory. Bit 31 (`KEY_CLAIMED`): the head's residency request already took the key's directory word NONE → CLAIM, so the claim pops without the exchange. Overflow latches `FAIL.LIST`. |
 | `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` clears it. No residency reads it since the head's residency (2026-11-15). |
 | `BOUND_C` | `CCAP` | the same for C slots (4h faces) |
+| `ACT` | `FCAP` | the active class (§5.5, brick-abi.ts `ACT`): bits 0–7 this step's ACTIVE tiles, bit 8 `NOW` (F_ACT(t)), bit 9 `PREV` (F_ACT(t − 1)). `setMark` raises the tiles and, by `atomicOr`, `NOW` on every resident brick within 3 tiles of one; the head's `setLists` moves `NOW` to `PREV`; `setClaimBricks` zeroes it. |
 | `AIR_GATE` | `16 * CCAP` | per C slot, 512 bits: bit `t` (the tile's C local) set where the far-air gate holds (umFarAirKept's plane 4: the 3³ about tile `t` meets the collar, the seeds dilated 4 tiles an axis over live tiles). Written by `lcClear` every step, read by the next step's `lcAdvect`: a C vertex with φ ≥ 16 h whose cell's tile has the bit clear keeps φ untraced. Zeroed at `setClaimPages`, like `WANT`. |
 | `REACH0`, `REACH1` | `512 * CCAP` each | per C slot, a word a tile (the tile's C local): the tile's signed reach, umPackReach (5 bits an axis each way, 31 saturated), in tiles. `nrReach` (part 1, after the head, before move: the old frame plan's localSpeed) writes the local word into `REACH0` from the US faces its owners read, F's bricks for h tiles and the page for 4h tiles. `nrSpread`'s three passes (x: 0→1, y: 1→0, z: 0→1) take the separable maximum over ±radius tiles. An AIR tile saturates, the box contributes 0. The final word is `REACH1`, read by umDeepAirKept (`nbrDeepAirKept`). |
 | `REACH_STEP` | `CCAP` | the ring step + 1 that the slot's reach words were made for (`nrReach`). A slot claimed after part 1 (setClaimPages in part 2) has no words for this step, and its tiles read saturated, as the spread's AIR. |
@@ -610,6 +611,27 @@ Lists live in `set` at `LIST[k]`, each `LIST_CAP[k]` words of slots, with the co
 - **M1:** `F_LIQ = F_ALL`. Every live brick lies within the reach of liquid or a particle, so any
   of them may hold a pressure row by the time pressure runs. M2 narrows `F_LIQ` with the tier
   criteria.
+- **(2026-11-15)** `setMark` writes the real `LIQUID` bit: the brick has an h-owned vertex with φ < 0, so it holds
+  pressure rows. Until lane P's row list lands (P then reads no `F_LIQ` and no `LIQUID`), `setLists` still ORs
+  `LIQUID` into every live brick, so `F_LIQ = F_ALL`. `project` runs over `F_ALL` (P's contract: `WARM` and the
+  `WALLS` bits on every F brick).
+- **`F_ACT` (2026-11-15, seep-techniques.md §1–6: work follows the active set, not the resident set).** The active
+  class is a word an F slot, `ACT` in `set` (brick-abi.ts `ACT`):
+  - bits 0–7 (`TILES`, bit j tile j): `setMark`'s ACTIVE tiles this step (part 2's head, after the rebin). A tile is
+    ACTIVE when it is h-owned (tiered only: all-h every tile is h, so the criterion is dropped there), has a φ < 0
+    vertex through the tier authority (F's vertices on an h tile, the C corners on a 4h tile: the trilinear
+    interpolant's minimum over the tile is a corner's), holds a particle (`TILE_OCC` bits 0–7, this step's
+    `pScan`), or is hot (the stage set's tile heat words, `BrickStages.activity`: F's `FT_H` or `FT_T` nonzero, or
+    the census's `TRIG` bit, `lHeatNow`'s max);
+  - bit 8 (`NOW`, F_ACT(t)): set by `setMark` on every resident brick within `ACT_DILATION = 3` tiles (12 cells,
+    Chebyshev, at tile precision) of an ACTIVE tile, a lane an offset of the 5³ bricks about the source;
+  - bit 9 (`PREV`, F_ACT(t − 1)): the head's `setLists` (cfg.z = 1) moves `NOW` down and clears the rest.
+  `F_ACT` lists `NOW | PREV`. At the head it also lists the bricks entering this step (no class yet). The boot
+  (`setLists` cfg.z = 2) makes every live brick `NOW`. `setClaimBricks` zeroes the word.
+  The moved stages (lane F: the level set, the velocity and the extension, all but `lInit`, `pScan` and `pTiles`)
+  dispatch over `F_ACT` (G1, G8) or `FA_*` (`F_ACT` then `C_ALL`). The gate is the per-kernel frozen comparison
+  of lane E's progress log (2026-11-15): every word each moved kernel writes is bitwise the F_ALL kernel's, and the
+  words F_ALL would write on an idle brick are never read.
 
 | k | name | kind | entries |
 |---|---|---|---|
@@ -630,7 +652,8 @@ Lists live in `set` at `LIST[k]`, each `LIST_CAP[k]` words of slots, with the co
 | 14 | `C_ENTER` | C | (`setUpdate`) |
 | 15 | `C_LEAVE` | C | (`setUpdate`) |
 | 16 | `B_ALL` | B | live B slots (M3) |
-| 17–23 | reserved, F | | |
+| 17 | `F_ACT` | F | `ACT` `NOW | PREV` (and, at the head, entering bricks) |
+| 18–23 | reserved, F | | |
 | 24–29 | reserved, P | | |
 | 30–31 | reserved, E | | |
 
@@ -648,7 +671,9 @@ by the owning lane's gated slots). For list `k`, at word `12 * k`:
 | `12k + 6..8` | `G64` | one per 64 entries |
 | `12k + 9..11` | `X8` | eight per entry (setCensus's C passes: a workgroup a 64-tile slab of a page) |
 
-Then `FC_G1`, `FC_G8` and `FC_G64` at words 384–392, and `XFER_G1` (setTransfer's jobs) at 396. Words 512 and up belong to the lanes: P from
+Then `FC_G1`, `FC_G8` and `FC_G64` at words 384–392, `XFER_G1` (setTransfer's jobs) at 396, and `FA_G1`, `FA_G8`
+and `FA_G64` at 400–408 (`F_ACT`'s bricks, then `C_ALL`'s pages: entry `e < count(F_ACT)` is `F_ACT[e]`). A stage or
+solver may dispatch from any of words 0–408 (`ARGS_LIST_END`). Words 512 and up belong to the lanes: P from
 512 (the gated solver slots), F from 2048.
 
 **The fold rule.** A count `n` of workgroups is written as `x = min(n, 32768)`,
@@ -827,6 +852,8 @@ Any starting value is valid. The warm start affects only the iteration count.
 - A face with no liquid side gets `U = US`, which F's extension then overwrites.
 
 **Recording.** A `PressureSolver` declares:
+- `before` (optional, 2026-11-15, lane P's request): kernels placed once, just before `operator` (a pass the operator
+  reads, such as a tile pass once a step), in the step and in the boot's kick;
 - `setup`: kernels placed once, after `operator`;
 - `slots`: the number of encoded slots, which `record()` allots. P's MGPCG declares 8 (§6's
   schedule). The bring-up solver below declares its own count.
