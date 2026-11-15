@@ -2,15 +2,18 @@
 // Float64 reference (pressure-composite-model.ts), on the frozen mixed-tier state of parity/composite-fixture.ts:
 // - the setup residual r0 = b - A x0 on both tiers (seams read across, natives over the gathered seams);
 // - one V-cycle: Z on the h rows and on the native rows is the model's V-cycle of the same r0;
-// - the converged X on both tiers is the Float64 PCG's.
+// - the converged X on both tiers is the Float64 PCG's;
+// - the projection (projectC, then projectF, the engine's project) leaves on every liquid row, h and native,
+//   the divergence the row's residual says (-h sum sign V U + h^2 rate = r, and 16x on a 4h row with its seam
+//   faces' 16 h patches), writes the WARM bit and the h tiles' C X mean.
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ARGS, BRICK_STRIDE, H, LIST, STATE } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
-import { add, compositeFixture, keyCoord, scale, type V3 } from "./parity/composite-fixture";
+import { add, coarseTile, compositeFixture, COMPOSITE_N, keyCoord, scale, type V3 } from "./parity/composite-fixture";
 import { CompositePressureModel, type CompositeRows } from "./pressure-composite-model";
-import { pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
 import { MG_HEADER, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -67,7 +70,7 @@ async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: b
   const header = await e.read("set", 0, 256);
   assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
   const after = await readComposite(e, fx.s.bricks, fx.pages, fx.dir);
-  return { e, before, after, header, h: fx.h };
+  return { e, before, after, header, h: fx.h, fx, K };
 }
 
 test("composite MGPCG (GPU): r0 and one V-cycle on both tiers match the Float64 model's", GPU, async t => {
@@ -109,6 +112,87 @@ test("composite MGPCG (GPU): the converged X on both tiers is the Float64 PCG's"
     assert.equal(header[H.STATE]! & STATE.PRESSURE_CAP, 0, "converged inside the slots");
     assert.ok(hf[MG_HEADER.RLAST]! <= tol * h * h);
     assert.ok(errF / sc < 1e-3 && errN / sc < 1e-3, `GPU X against Float64: h ${errF / sc}, native ${errN / sc}`);
+    e.destroy();
+  });
+});
+
+test("composite project (GPU): every liquid row's projected divergence is its residual, on both tiers", GPU, async t => {
+  await withDevice("composite project", async device => {
+    const { e, after, h, fx, K } = await solveComposite(device, { slots: 40, tolerance: 1e-3 }, false);
+    const L = e.layout, N = COMPOSITE_N;
+    const pagesG1 = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 }, liq = { indirect: ARGS.PER_LIST * LIST.F_LIQ + ARGS.G1 };
+    const xBefore = new Float32Array((await e.read("pres", L.base("pres", "F", "X"), L.cap.f * BRICK_STRIDE)).buffer);
+    await e.run([{ kernel: K.projectC, dispatch: pagesG1 }, { kernel: K.projectF, dispatch: liq }]);
+    const header = await e.read("set", 0, 256);
+    assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
+    const readF = async (pool: "vel" | "pres" | "phi", ch: string) => new Float32Array((await e.read(pool, L.base(pool, "F", ch), L.cap.f * BRICK_STRIDE)).buffer);
+    const readC = async (pool: "vel" | "pres", ch: string) => new Float32Array((await e.read(pool, L.base(pool, "C", ch), L.cap.c * BRICK_STRIDE)).buffer);
+    const UF = await Promise.all([0, 1, 2].map(a => readF("vel", `U${a}`))), UC = await Promise.all([0, 1, 2].map(a => readC("vel", `U${a}`)));
+    const DIAG = await readF("pres", "DIAG"), XF = await readF("pres", "X"), XC = await readC("pres", "X");
+    const flags = new Uint32Array(await e.read("phi", L.base("phi", "F", "FLAGS"), L.cap.f * BRICK_STRIDE));
+    const inLattice = (c: V3) => c.every(v => v >= 0 && v < N);
+    const tileH = (T: V3) => T.every(v => v >= 0 && 4 * v < N) && !coarseTile(T);
+    const fAt = (c: V3) => { const s = fx.fSlot(c); return s === undefined ? undefined : BRICK_STRIDE * s + ((c[0] & 7) | ((c[1] & 7) << 3) | ((c[2] & 7) << 6)); };
+    const cAt = (T: V3) => { if (T.some(v => v < 0)) return undefined; const cs = fx.pageSlot([T[0] >> 3, T[1] >> 3, T[2] >> 3] as V3); return cs === 0xffffffff ? undefined : BRICK_STRIDE * cs + ((T[0] & 7) | ((T[1] & 7) << 3) | ((T[2] & 7) << 6)); };
+    const unit = (a: number): V3 => [a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0];
+    const M = after.model, X = after.vec("X"), b = after.vec("RHS"), AX = M.apply(X);
+    let worst = 0, worstN = 0, rows = 0, natives = 0, skipped = 0, scaleU = 0;
+    for (let i = 0; i < M.fine.keys.length; i++) {
+      const native = M.isNative(i), at = M.fine.coords[i]! as V3; // a cell, or a tile
+      const r = b[i]! - AX[i]!;
+      let div = 0, missing = false;
+      for (let f = 0; f < 6; f++) {
+        const a = f >> 1, sign = f & 1 ? 1 : -1, e1 = unit(a);
+        if (!native) {
+          const c = at as V3, cf = sign > 0 ? add(c, e1) : c, V = cf[a] === 0 || cf[a] === N ? 0.5 : 1;
+          const w = fAt(cf); if (w === undefined) { missing = true; continue; }
+          div += sign * V * UF[a]![w]!; scaleU = Math.max(scaleU, Math.abs(UF[a]![w]!));
+        } else {
+          const T = at as V3, Tn = add(T, scale(sign, e1)), Tf = sign > 0 ? Tn : T;
+          if (tileH(Tn)) {
+            const u = unit((a + 1) % 3), v = unit((a + 2) % 3); let sum = 0;
+            for (let s = 0; s < 16; s++) {
+              const cf = add(add(scale(4, Tf), scale(s & 3, u)), scale(s >> 2, v));
+              const w = fAt(cf); if (w === undefined) { missing = true; continue; }
+              sum += UF[a]![w]!;
+            }
+            div += sign * sum / 16;
+          } else {
+            const V = Tf[a] === 0 || 4 * Tf[a]! === N ? 0.5 : 1;
+            const w = cAt(Tf); if (w === undefined) { missing = true; continue; }
+            div += sign * V * UC[a]![w]!;
+          }
+        }
+      }
+      if (missing) { skipped++; continue; }
+      const lhs = native ? -16 * h * div + 64 * h * h * fx.rate : -h * div + h * h * fx.rate;
+      const err = Math.abs(lhs - r) / (native ? 16 : 1);
+      if (native) { natives++; worstN = Math.max(worstN, err); } else { rows++; worst = Math.max(worst, err); }
+    }
+    // The WARM bit: every h-owned cell's, set exactly on the liquid rows; the h tiles' C X: their liquid rows' mean X.
+    let warmBad = 0, meanErr = 0;
+    for (const [key, slot] of fx.s.bricks) {
+      const o = scale(8, keyCoord(key));
+      for (let l = 0; l < 512; l++) {
+        const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]), w = BRICK_STRIDE * slot + l;
+        const row = inLattice(c) && tileH([c[0] >> 2, c[1] >> 2, c[2] >> 2]) && DIAG[w]! > 0;
+        if (((flags[w]! & P_FLAG.WARM) !== 0) !== row) warmBad++;
+      }
+    }
+    for (let z = 0; z < N / 4; z++) for (let y = 0; y < N / 4; y++) for (let x = 0; x < N / 4; x++) {
+      const T: V3 = [x, y, z]; if (!tileH(T)) continue;
+      let sum = 0, n = 0;
+      for (let m = 0; m < 64; m++) { const w = fAt(add(scale(4, T), [m & 3, (m >> 2) & 3, m >> 4]))!; if (DIAG[w]! > 0) { sum += xBefore[w]!; n++; } }
+      meanErr = Math.max(meanErr, Math.abs(XC[cAt(T)!]! - (n ? sum / n : 0)));
+    }
+    const tolU = h * Math.max(scaleU, 1);
+    t.diagnostic(`h rows ${rows}, native rows ${natives}, skipped ${skipped}; |div - r| h ${(worst / tolU).toExponential(2)} native ${(worstN / tolU).toExponential(2)} (of h max|U| ${tolU.toExponential(2)}); WARM wrong ${warmBad}; h tile mean err ${meanErr.toExponential(2)}`);
+    assert.ok(rows > 0 && natives > 0);
+    assert.equal(skipped, 0, "every liquid row's faces are stored");
+    assert.ok(worst / tolU < 1e-5 && worstN / tolU < 1e-5, `projected divergence against the residual: h ${worst / tolU}, native ${worstN / tolU}`);
+    assert.equal(warmBad, 0);
+    assert.ok(meanErr < 1e-6, `h tiles' C X mean ${meanErr}`);
+    void XF;
     e.destroy();
   });
 });

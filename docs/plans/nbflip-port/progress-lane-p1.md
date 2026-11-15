@@ -427,7 +427,7 @@ Metal clean.
   - The GPU solver follows this design. It is saved in
     ~/code/me/fluid-scratch/lane-p1/composite-mgpcg-design.txt.
 
-### 2026-11-15: the composite MGPCG on the GPU (pressure-mgpcg.ts)
+## 2026-11-15 — the composite MGPCG on the GPU (pressure-mgpcg.ts)
 
 - **poolMGPCG now solves the composite rows: h rows in pres F, native 4h rows in pres C.** The
   all-h solve is unchanged: the pool MGPCG tests give the same V-cycle errors, iteration counts and
@@ -467,3 +467,59 @@ Metal clean.
     preconditioner). The fixed version matches.
 - **Next:** the finish (WARM, the h tiles' C X mean, dry X = 0), project with seam faces and the
   Neumann hand-back, the wall outer loop, and registration.
+
+## 2026-11-15 — operator and project in place, the native rows and faces, the solver registered
+
+**In place** (brick-abi.md §6: operator and project are P's, extended in place):
+- `operator` (nbOperator, F_ALL) is now the composite h rows, rowsF. It also writes B, the row's start, which is a
+  pres channel E added for this (37893df6). On every cell that is not a row (dry cells, cells of 4h-owned tiles,
+  and the skirt), X is 0: the slot contract's zero rows.
+- `project` (F_LIQ, which today equals F_ALL) is the composite h-face projection, umProject's bFace in the slot
+  units:
+  - U = US − sign·(c/V)·(ghost − X)/h, evaluated from the liquid side, with the ghost set by the face kind:
+    - band: the neighbour's X;
+    - seam: the native X plus the head. The head comes from bSeamHead on the stored starts B and PPHI, so it
+      is the head the row's RHS carried.
+    - OPEN and air: 0;
+    - separating wall: X + lift while attached in the state the row took (start + lift ≥ 0), otherwise 0.
+  - Neumann keeps US.
+  - From a dry h cell, only a seam to a liquid native row moves: the native row's zero ghost.
+  - It raises BOUND_F and writes FLAGS.WARM (bit 7) on every cell: set on h-owned liquid rows, cleared
+    elsewhere, so a refined tile's rows start cold.
+- The native rows (rowsC, C_ALL) open the registered solver's setup, because the engine places one operator.
+- `projectC` (C_ALL) closes its finish:
+  - it writes every 4h face stored at a page's tiles: native–native gives the 4h gradient (c/(16hV) = 1/(4h));
+    native–air or a non-resident page gives the marched θ ghost; a native wall separates in the rows' state,
+    or N_HELD; a face with no liquid side gets U = US;
+  - it writes each h tile's C X as the mean X of its liquid rows (083), which is next step's tile start.
+- Registered: `brickPressureSolver = compositeMGPCG()` (brick-pressure-solver.ts), which is poolMGPCG with those
+  two placements.
+
+**Consistency on the composite fixture** (pressure-composite-mgpcg.test.ts, new test):
+- On every liquid row, −h Σ sign·V·U + h²·rate equals the row's Float64 residual b − A X: 9,046 h rows to
+  1.45e-7 and 35 native rows to 3.74e-7, relative to h·max|U|. A native row uses 16× that, with its seam faces'
+  16 h patches.
+- WARM is exact, and the h tiles' C X mean is within 2e-8.
+- E's engine tests (hydrostatic with the bring-up CG, the zero rows, tiers, transfer, owner, census) and the pool
+  MGPCG tests pass on the composite operator: 25/25 plus 27/28 earlier. The 28th was zero X on the skirt, now
+  fixed.
+
+**First dam runs** (all-h, which is what F's stages support today; f 4913; scratch tree tree-reg):
+- Drift, KE, front and wet floor match F's dam-300c to 3 digits through step 60. At step 16: drift −0.0576 vs
+  −0.0570, KE 282.4 vs 281.3 J, wet floor 15,943 vs 15,917.
+- Profile (per-dispatch passes, steps 13–60):
+  - pressureRowsC is 448 ms and operator 85 ms.
+  - The MGPCG kernels sum to 48.5 ms at 7.8 iterations, about 6.0 ms an iteration over about 690k rows: 8.7 ns
+    per row per iteration under the per-dispatch profile.
+- rowsC's cost comes from 296 phantom native rows. In the all-h engine, 4h-owned tiles of non-resident bricks
+  read C φ, which is still bootPhi's column after the bricks leave. Reported to E with a proposal: all-h CMASK
+  all-ones.
+- operator's cost comes from owner-resolved vertex reads. A cold row's prolongation alone reads 125 vertices a
+  tile, and the seam heads prolong their neighbours. Next: stage the brick's halo vertices and its 4×6×4 tiles'
+  root φ and starts in workgroup memory, which changes no values.
+
+**Open:**
+- The wall state's outer re-decision (Chentanez & Müller 2012), as the census sized it.
+- The t = 0 seam-head Picard iterations.
+- The dam gate on the composite rows at 300 steps, and ns per row per iteration against seep-m1max (about 0.55 ms a
+  cycle over about 620 liquid bricks, so roughly 1.7 ns per row per iteration).
