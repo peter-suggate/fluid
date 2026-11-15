@@ -11,6 +11,7 @@
  */
 import { BrickLayout, LIST, POOLS, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
+import { brickOwnerWGSL } from "./brick-owner.wgsl";
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const setRO: BrickBinding = { name: "set", kind: "ro", type: "array<u32>" };
@@ -20,6 +21,7 @@ const argsRW: BrickBinding = { name: "args", kind: "rw", type: "array<u32>" };
 const velRW: BrickBinding = { name: "vel", kind: "rw", type: "array<f32>" };
 const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
 const phiRO: BrickBinding = { name: "phi", kind: "ro", type: "array<u32>" };
+const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 const presRW: BrickBinding = { name: "pres", kind: "rw", type: "array<f32>" };
 const bootRO: BrickBinding = { name: "boot", kind: "ro", type: "array<f32>" };
 
@@ -70,12 +72,22 @@ fn nbTileMask(cs:u32,bl:u32,set_:bool){
 }
 `;
 
-export function brickSetKernels(L: BrickLayout) {
+/** The brick set's options. `tiered`: the tier census and transfer run (brick-abi.md §2.5); F bricks are kept by
+ * core, ring and bin reach, 4h liquid keeps C pages, and bricks entered in a step start 4h. Off: every brick is h. */
+export interface BrickSetOptions { readonly tiered?: boolean }
+
+export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
+  const tiered = opt.tiered === true;
 
   // setMark: one workgroup a brick of F_ALL (G1). The brick's liquid vertices'
   // box (or the whole brick for a non-empty bin), grown by the reach, keeps
   // the live bricks it overlaps and lists the others as candidates.
+  // Tiered (§2.5): the class scan reads h-owned tiles only (a 4h tile's F cells
+  // hold no state). A core brick (an h-owned tile, F record word 28 bits 0-7)
+  // keeps itself and its in-range 27-neighbours (the ring); a non-empty bin's
+  // brick keeps its reach box; liquid vertices alone keep no F brick (4h liquid
+  // keeps C pages: setMarkPages).
   const setMark = k("setMark", [CFG, setRW, dirRW, phiRO], /* wgsl */`
 var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
@@ -89,10 +101,12 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   if(live){
     slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);
     bound=bitcast<f32>(nbSetWord(NB_S_BOUND_F+slot));
+    let tiles=${tiered ? "atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_MASK])&0xffu" : "0xffu"};
     var neg=0u;var pos=0u;var lo=vec3u(8u);var hi=vec3u(0u);
     for(var j=0u;j<8u;j++){
       let l=lid+64u*j;let c=nbLocalCoord(l);
       if(any(o+c>NB_LATTICE)){continue;}
+      if(((tiles>>u32((c.x>>2u)|((c.y>>2u)<<1u)|((c.z>>2u)<<2u)))&1u)==0u){continue;}
       let p=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
       if(p<0.0){neg++;lo=min(lo,vec3u(c));hi=max(hi,vec3u(c));}else{pos=1u;}
     }
@@ -110,7 +124,19 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     atomicStore(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS],cls);
     atomicStore(&nbSet[NB_S_BOUND_F+slot],0u);
   }
-  if(neg==0u&&!parts){return;}
+  ${tiered ? `if((atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_MASK])&0xffu)!=0u&&lid<27u){
+    let nb=(o>>vec3u(3u))+nbNeighbourOffset(lid);
+    if(nbBrickInRange(nb)){
+      let s=nbFSlotOfBrick(nb);
+      if(s<NB_SEAM){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}
+      else if(s==NB_NONE){
+        let e=atomicAdd(&nbSet[NB_H_N_CAND],1u);
+        if(e<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+e],nbKey(nb));}else{nbFail(NB_FAIL_LIST,nbKey(nb));}
+      }
+      else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
+    }
+  }
+  if(!parts){return;}` : "if(neg==0u&&!parts){return;}"}
   var lo=vec3f(f32(atomicLoad(&wLo[0])),f32(atomicLoad(&wLo[1])),f32(atomicLoad(&wLo[2])));
   var hi=vec3f(f32(atomicLoad(&wHi[0])),f32(atomicLoad(&wHi[1])),f32(atomicLoad(&wHi[2])));
   if(parts){lo=vec3f(0.0);hi=vec3f(7.0);}
@@ -129,6 +155,63 @@ var<workgroup> wHi:array<atomic<u32>,3>;
       if(e<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+e],nbKey(nb));}else{nbFail(NB_FAIL_LIST,nbKey(nb));}
     }
     else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
+  }
+}`);
+
+  // setMarkPages (tiered only): one workgroup a page of C_ALL (G1), a lane 8
+  // tiles. The box of its 4h-owned tiles with a liquid corner (a C vertex
+  // phi < 0), grown by setMark's reach with the page's largest 4h face speed
+  // (|U|, the velocity the step ends with) for BOUND, keeps the live pages it
+  // overlaps and lists the others as page candidates (key | NB_KEY_PAGE). The
+  // count of those tiles is the C record's LIQUID_TILES (C_LIQ).
+  const setMarkPages = k("setMarkPages", [CFG, setRW, dirRW, phiRO, velRO], brickOwnerWGSL({ phi: "phi", vel: "vel" }) + /* wgsl */`
+var<workgroup> wN:atomic<u32>;
+var<workgroup> wBound:atomic<u32>;
+var<workgroup> wLo:array<atomic<u32>,3>;
+var<workgroup> wHi:array<atomic<u32>,3>;
+@compute @workgroup_size(64) fn setMarkPages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){atomicStore(&wN,0u);atomicStore(&wBound,0u);for(var a=0u;a<3u;a++){atomicStore(&wLo[a],8u);atomicStore(&wHi[a],0u);}}
+  workgroupBarrier();
+  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ALL);
+  var cs=0u;var P=vec3i(0);
+  if(live){
+    cs=nbListSlot(NB_LIST_C_ALL,g);P=nbKeyCoord(atomicLoad(&dir[NB_D_CREC+32u*cs+NB_REC_KEY]));
+    var n=0u;var bound=0.0;var lo=vec3u(8u);var hi=vec3u(0u);
+    for(var j=0u;j<8u;j++){
+      let i=lid+64u*j;let t=vec3u(i&7u,(i>>3u)&7u,i>>6u);let T=8*P+vec3i(t);
+      if(!nbTileInLattice(T)||nbTileH(cs,i)){continue;}
+      var m=NB_PHI_AIR;
+      for(var q=0u;q<8u;q++){m=min(m,nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u))));}
+      for(var a=0u;a<3u;a++){bound=max(bound,abs(vel[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+i]));}
+      if(m<0.0){n++;lo=min(lo,t);hi=max(hi,t);}
+    }
+    if(n>0u){atomicAdd(&wN,n);for(var a=0u;a<3u;a++){atomicMin(&wLo[a],lo[a]);atomicMax(&wHi[a],hi[a]);}}
+    atomicMax(&wBound,bitcast<u32>(bound));
+  }
+  workgroupBarrier();
+  if(!live){return;}
+  let n=atomicLoad(&wN);
+  if(lid==0u){atomicStore(&dir[NB_D_CREC+32u*cs+NB_REC_C_LIQUID_TILES],n);}
+  if(n==0u){return;}
+  let r=cfg.x;let dt=nbRingF(r,NB_RING_DT);let h=nbRingF(r,NB_RING_H);
+  let gv=vec3f(nbRingF(r,NB_RING_GRAVITY),nbRingF(r,NB_RING_GRAVITY+1u),nbRingF(r,NB_RING_GRAVITY+2u));
+  let reach=(bitcast<f32>(atomicLoad(&wBound))+length(gv)*dt)*dt/h+NB_REACH_MARGIN;
+  let o=vec3f(32*P);
+  let lo=o+4.0*vec3f(f32(atomicLoad(&wLo[0])),f32(atomicLoad(&wLo[1])),f32(atomicLoad(&wLo[2])));
+  let hi=o+4.0*vec3f(f32(atomicLoad(&wHi[0])),f32(atomicLoad(&wHi[1])),f32(atomicLoad(&wHi[2])))+4.0;
+  let pages=(NB_BRICKS+vec3i(3))/4;
+  let p0=max(vec3i(floor((lo-reach)/32.0)),vec3i(0));
+  let p1=min(vec3i(floor((hi+reach)/32.0)),pages-vec3i(1));
+  let ext=p1-p0+vec3i(1);let total=u32(ext.x*ext.y*ext.z);
+  for(var i=lid;i<total;i+=64u){
+    let p=p0+vec3i(i32(i%u32(ext.x)),i32((i/u32(ext.x))%u32(ext.y)),i32(i/u32(ext.x*ext.y)));
+    let w=nbPageWord(p);
+    if(w<NB_SEAM){atomicOr(&nbSet[NB_S_MARK_C+w],1u);}
+    else if(w==NB_NONE){
+      let e=atomicAdd(&nbSet[NB_H_N_CAND],1u);let key=nbKey(4*p)|NB_KEY_PAGE;
+      if(e<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+e],key);}else{nbFail(NB_FAIL_LIST,key);}
+    }
+    else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(4*p));}
   }
 }`);
 
@@ -160,6 +243,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
   for(var e=gid.x;e<n;e+=64u*nw.x){
     let key=atomicLoad(&nbSet[NB_S_CAND+e]);let b=nbKeyCoord(key);
+    if((key&NB_KEY_PAGE)!=0u){continue;}
     let cs=atomicLoad(&dir[NB_D_PAGE+nbPageIndex(b>>vec3u(2u))]);
     if(cs>=NB_SEAM){continue;}
     let bl=nbBrickLocal(b);let ci=NB_D_CHILD+64u*cs+bl;
@@ -168,12 +252,13 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     if(fs==NB_NONE){atomicStore(&dir[ci],NB_NONE);continue;}
     let r=NB_D_FREC+32u*fs;
     for(var j=0u;j<27u;j++){atomicStore(&dir[r+j],NB_NONE);}
-    atomicStore(&dir[r+NB_REC_PARENT],cs);atomicStore(&dir[r+NB_REC_MASK],0xffu|(bl<<8u));
+    let h=${tiered ? "cfg.z==1u" : "true"};
+    atomicStore(&dir[r+NB_REC_PARENT],cs);atomicStore(&dir[r+NB_REC_MASK],select(0u,0xffu,h)|(bl<<8u));
     atomicStore(&dir[r+NB_REC_KEY],key);atomicStore(&dir[r+NB_REC_CUT],NB_NONE);
     atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_ENTERING|select(0u,NB_CLASS_SKIRT,any(8*b>=NB_LATTICE)));
     atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);atomicStore(&nbSet[NB_S_BOUND_F+fs],0u);atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
     atomicAdd(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
-    nbTileMask(cs,bl,true);
+    if(h){nbTileMask(cs,bl,true);}
     atomicStore(&dir[ci],fs);
     nbAppend(NB_LIST_F_ENTER,fs);
   }
@@ -196,13 +281,13 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   nbAppend(NB_LIST_F_LEAVE,s);
 }`);
 
-  // setLeavePages: a live page of last step's C_ALL with no F child left leaves (M1: pages are containers).
+  // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (setMarkPages) leaves.
   const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setLeavePages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_C_ALL)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);let r=NB_D_CREC+32u*cs;
-  atomicStore(&nbSet[NB_S_MARK_C+cs],0u);
-  if(atomicLoad(&dir[r+NB_REC_C_CHILDREN])!=0u){return;}
+  let kept=atomicExchange(&nbSet[NB_S_MARK_C+cs],0u)!=0u;
+  if(kept||atomicLoad(&dir[r+NB_REC_C_CHILDREN])!=0u){return;}
   atomicStore(&dir[NB_D_PAGE+nbPageIndex(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))],NB_NONE);
   atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_LEAVING);
   nbPush(NB_H_TOP_C,NB_S_FREE_C,cs);
@@ -231,8 +316,9 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   }
 }`);
 
-  // setInit: entering bricks' channels to air (brick-abi.md §2.3).
+  // setInit: entering bricks' and pages' channels to air (brick-abi.md §2.3).
   const zero = (pool: "vel" | "pres") => POOLS[pool].map(ch => `${pool}[NB_${pool.toUpperCase()}_F_${ch}+at]=0.0;`).join("");
+  const zeroC = (pool: "vel" | "pres") => POOLS[pool].map(ch => `${pool}[NB_${pool.toUpperCase()}_C_${ch}+at]=0.0;`).join("");
   const setInit = k("setInit", [CFG, setRO, dirRO, velRW, phiRW, presRW], /* wgsl */`
 @compute @workgroup_size(128) fn setInit(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32,@builtin(num_workgroups) nw:vec3u){
   let n=nbListCount(NB_LIST_F_ENTER);
@@ -244,6 +330,18 @@ var<workgroup> wHi:array<atomic<u32>,3>;
       ${zero("pres")}
       phi[NB_PHI_F_PHI+at]=bitcast<u32>(NB_PHI_AIR);phi[NB_PHI_F_PHI1+at]=bitcast<u32>(NB_PHI_AIR);
       phi[NB_PHI_F_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+nbLocalCoord(l)))|NB_FLAG_OWNER_H;
+    }
+  }
+  // Entering C slots: a cell a tile (C local = tile index), open inside the lattice.
+  let nC=nbListCount(NB_LIST_C_ENTER);
+  for(var e=wid.x;e<nC;e+=nw.x){
+    let s=nbListSlot(NB_LIST_C_ENTER,e);let o=nbCOrigin(s);
+    for(var j=0u;j<4u;j++){
+      let l=lid+128u*j;let at=NB_STRIDE*s+l;
+      ${zeroC("vel")}
+      ${zeroC("pres")}
+      phi[NB_PHI_C_PHI+at]=bitcast<u32>(NB_PHI_AIR);phi[NB_PHI_C_PHI1+at]=bitcast<u32>(NB_PHI_AIR);
+      phi[NB_PHI_C_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+4*nbLocalCoord(l)));
     }
   }
 }`);
@@ -332,6 +430,6 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
   atomicStore(&nbSet[NB_H_LIST_COUNT+NB_LIST_C_ENTER],0u);atomicStore(&nbSet[NB_H_LIST_COUNT+NB_LIST_C_LEAVE],0u);
 }`);
 
-  return { setMark, setClaimPages, setClaimBricks, setLeave, setLeavePages, setRecords, setInit, bootPhi, setLists, setArgs, stepEnd };
+  return { setMark, setMarkPages, setClaimPages, setClaimBricks, setLeave, setLeavePages, setRecords, setInit, bootPhi, setLists, setArgs, stepEnd };
 }
 

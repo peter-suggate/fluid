@@ -291,3 +291,30 @@ old-kernel-vs-new.
 
 Not yet scheduled in the step. NB-FLIP remaps at the frame head before the move, so the transfer's
 place comes with setCensus (part 1 head).
+
+## 2026-11-15: M2 part 2c, tiered residency (behind BrickStages.tiered)
+
+Lane F's all-h dam runs end to end on fluidStages and P's MGPCG (165 steps). It hits POOL_F at the
+authored f = 3968 because all-h keeps every liquid brick at h. Tiers fix that, so residency now
+follows §2.5 when a stage set sets `tiered: true`. F will set it once its stages read through the
+owners. With the flag off, the engine is the M1 all-h engine, unchanged.
+
+- `setMark` keeps F bricks by core (record word 28) plus the in-range 27-ring, plus the reach of a
+  non-empty bin. Its SURFACE scan reads h-owned tiles only.
+- `setMarkPages` (new, C_ALL G1):
+  - 4h liquid tiles, meaning 4h-owned tiles with a corner φ < 0, keep the pages within setMark's
+    reach, using the page's largest 4h |U| as the bound;
+  - missing pages become page candidates (`NB_KEY_PAGE`, bit 30);
+  - it writes `LIQUID_TILES`.
+  `setLeavePages` keeps marked pages.
+- Bricks claimed in a step start 4h. The boot's claims (cfg.z = 1) start h, because bootPhi writes F.
+- `setInit` sets entering C slots to air.
+
+brick-set-tiers.test.ts (GPU, 64^3) is a frozen state after a commit. Two core blocks, one of whose
+rings crosses into page row 1. C φ puts liquid 4h tiles whose reach crosses into row 1. The result
+matches the oracle exactly: 75 F bricks (9 entered at 4h, 258 left), 18 C pages (9 entered as air),
+the CMASK and LIQUID_TILES counts, and FAIL 0.
+
+Coordinator (2026-11-15): before the M2 gate, check the transfer's listing and tile flow against
+real old-engine output. Take a pre-remap state from a real dam step and compare it with the old
+engine's post-remap state. Pending, after setCensus.

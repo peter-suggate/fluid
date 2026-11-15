@@ -258,6 +258,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_BRICKS:vec3i=vec3i(${bricksPerAxis(L.lattice).join(",")});`);
   lines.push(`const NB_PHI_AIR:f32=${PHI_AIR.toFixed(1)};`);
   lines.push(`const NB_REACH_MARGIN:f32=${REACH_MARGIN.toFixed(1)};`);
+  lines.push("const NB_KEY_PAGE:u32=0x40000000u;");
   lines.push(`const NB_WINDOW:vec3u=vec3u(${L.window.map(n => u(n)).join(",")});`);
   lines.push(`const NB_WINDOW_BITS:vec3u=vec3u(${L.windowBits.map(n => u(n)).join(",")});`);
   for (const [name, v] of Object.entries(H)) c(`NB_H_${name}`, v);

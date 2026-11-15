@@ -125,12 +125,14 @@ export class BrickEngine {
 
   /** Every placement of one step and the boot, in order (record()'s input). */
   static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number): BrickStageSchedule {
-    const set = brickSetKernels(layout), pres = pressureOperatorKernels(layout), f = layout.cap.f, c = layout.cap.c;
+    const tiered = stages.tiered === true;
+    const set = brickSetKernels(layout, { tiered }), pres = pressureOperatorKernels(layout), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
-    const update: BrickPlacement[] = [
+    // cfg.z = 1 at boot: the boot's bricks enter h-owned (bootPhi writes F); tiered steps enter 4h (§2.5).
+    const update = (z: number): BrickPlacement[] => [
       { kernel: set.setClaimPages, dispatch: direct(churnGroups(f, 64)) },
-      { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)) },
+      { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)), z },
     ];
     const tail: BrickPlacement[] = [
       { kernel: set.setRecords, dispatch: direct(churnGroups(f, 1)) },
@@ -142,7 +144,8 @@ export class BrickEngine {
     ];
     const part2: BrickPlacement[] = [
       { kernel: set.setMark, dispatch: list(LIST.F_ALL, "G1") },
-      ...update,
+      ...(tiered ? [{ kernel: set.setMarkPages, dispatch: list(LIST.C_ALL, "G1") }] : []),
+      ...update(0),
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
       ...tail, ...lists,
@@ -156,7 +159,7 @@ export class BrickEngine {
       ...stages.tail,
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
-    const boot: BrickPlacement[] = [...update, ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    const boot: BrickPlacement[] = [...update(1), ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5), then F's move and rebin.
     return { part1: [...stages.move, ...stages.rebin], part2, boot };
   }

@@ -153,9 +153,16 @@ kept exactly).
 - All three are written only by `setTransfer`'s commit, so every stage of a step sees one
   ownership.
 
-**Residency.**
-- *C (a page).* Resident while any brick of the page holds liquid or particles in reach (§5.4),
-  or any F child lives.
+**Residency** (implemented 2026-11-15 behind `BrickStages.tiered`; off, every resident brick is h and
+CMASK is set at claim, the M1 engine).
+- *C (a page).* Resident while any F child lives, or while `setMarkPages` (C_ALL, G1) marks it
+  (`MARK_C`):
+  - the box of a page's 4h-owned in-lattice tiles that have a liquid corner (a C vertex with φ < 0)
+    is grown by §5.4's reach, with the page's largest 4h face |U| as the bound;
+  - every page that box overlaps is kept (`MARK_C`), and the missing ones become page candidates:
+    key `nbKey(4p) | NB_KEY_PAGE` (bit 30), which `setClaimPages` claims and `setClaimBricks` skips;
+  - the count of those tiles is the C record's `LIQUID_TILES`, which feeds `C_LIQ`.
+  A non-resident page reads as AIR (P's V rule).
 - *F (a brick).* Resident when any of these holds:
   - one of its tiles is h-owned (a *core* brick);
   - it is a 27-neighbour of a core brick (a *ring* brick);
@@ -164,7 +171,17 @@ kept exactly).
     `pScatter`. Bricks entered this way hold 4h tiles until the census says otherwise.
 
   Liquid vertices' reach boxes keep or enter C pages, and F bricks only through the three rules
-  above.
+  above. `setMark` reads core as the F record's word 28 bits 0–7. Its class scan (SURFACE) reads
+  h-owned tiles only.
+  - Bricks claimed in a step start 4h (word 28 tile bits 0, CMASK untouched). The boot's bricks
+    (`setClaimBricks` with `cfg.z = 1`) start h, because `bootPhi` writes F; the first census
+    coarsens them.
+  - `setInit` also sets entering C slots to air: φ AIR, every velocity and pres channel 0, and FLAGS
+    OPEN on in-lattice tiles.
+  - The census allows an h tile only when its brick and every in-range 27-neighbour are resident.
+    It lists the missing bricks as candidates, which are claimed in the same step's part 2, so a
+    tile in new territory refines one step late (a storage deviation).
+  - Test: brick-set-tiers.test.ts.
   - A ring brick's tiles are all 4h-owned. It exists to hold the interface faces and the
     vertices of the h tiles beside it, so that every h stencil resolves within the 27-neighbour
     record.

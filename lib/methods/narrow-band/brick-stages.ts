@@ -30,6 +30,9 @@ export interface BrickStages {
   readonly label: string;
   /** True for E's bring-up stand-ins: tests only, never a gate or a timing claim. */
   readonly bringUp: boolean;
+  /** True when the stages read through the tier owners (brick-owner.wgsl.ts) and write only owned storage: the
+   * engine then runs the census and the transfer at the part 1 head (brick-abi.md §2.5). Default false: all-h. */
+  readonly tiered?: boolean;
   /** Part 1, after the head: the particle move. */
   readonly move: readonly BrickPlacement[];
   /** Part 1: the rebin (counts, scan, scatter; raises BOUND_F from particle speeds). */
