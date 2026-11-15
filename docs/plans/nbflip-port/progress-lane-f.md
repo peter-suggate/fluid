@@ -1201,3 +1201,14 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
   - The records' own depth at a given layer is 0.1-0.25 cells deeper in ours (y 100 at step 9: -0.94 against -0.69). That depth is read from the h field the extra h tiles carry. Deep sites then seed whatever their cover: step 9, y 100, deep seeds 1.45 against 0.04 per column.
   - It feeds itself: a step's seeds are the next step's records at the top (y 100 at step 9: 1.60 records against 0.95).
 - **So the burst follows the census's h set at the column top.** That is lane E's residency and census. The tiers match at step 5 and part from step 6. The heat inputs (lHeatNow and FT_T, levelset-kernels) are lane F's and are not ruled out yet; the next check is a TRIG/heat census of the top tiles at steps 5-7, both engines.
+
+**Item 3, uExtend (2026-11-16).** Frozen tiered dam, step 20. Times are on the timing slot; bitwise equality was checked on the check slot.
+- **Attribution.** Each variant removes one part and times the kernel without it:
+  - seed reads: 1.5 ms;
+  - wSwept staging: 0.6;
+  - xCode: 0.35;
+  - tile distance: 0.2;
+  - a second round on 9f3f417e: the wLiq staging 1.7, wS4 0.35, xFinish 0.2, the sweeps 0.45.
+- **9f3f417e:** wSwept staged one lane per tile (216 lanes). 5.88 -> 5.48 ms, bitwise.
+- **This commit:** vLiquidOwner's inputs staged once: the 4^3 tiles' 4h bit and centre phase, and the 27 bricks' FC_LIQ words. A coarse cell had re-read its tile's 8 C corners for each of the tile's 64 cells. 5.32 -> 4.23 ms (HEAD and the change in the same run), bitwise. All h: 4.34 against 4.27.
+- **Next in uExtend:** the per-axis seed reads (fgCellCoarse, fgSlot, fgFace, xCode), staged per window cell once for all three axes.
