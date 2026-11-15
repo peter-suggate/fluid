@@ -396,6 +396,13 @@ fn nbxHeatCorner(base:vec3i,k:u32,surface:bool)->vec2f{
 }
 fn nbxCoupleHeat(tile:u32,surface:bool)->f32{return -1.0;}
 fn lcBinCount(c:vec3i)->u32{let r=fgRun(c);return r.y-r.x;}
+// nbrTileReach (levelset-release.wgsl.ts): tile t's spread reach word, the old candidate word measureBand copies
+// (nbCrossingTravel's input); saturated where no page holds t or the page's words are not this step's.
+fn lcTileReach(t:vec3i)->u32{
+ let cs=nbCSlotOfPage(t>>vec3u(3u));
+ if(cs==NB_NONE||nbSetWord(NB_S_REACH_STEP+cs)!=nbRing(cfg.x,NB_RING_STEP)+1u){return 0x3fffffffu;}
+ return nbSetWord(NB_S_REACH1+512u*cs+nbTileIndex(t))&0x3fffffffu;
+}
 // couple's value at C vertex v (h units): particleSurfaceBulk then particleSurfaceFinish, tiled = false.
 fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
  let q=vec3f(v);
@@ -403,8 +410,8 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
  let band=lcSample(1u,q);
  if(theta<=0.0){return band;}
  let c=lcCellOf(v);let s=fgSlot(c);
- var travel=0.0;
- if(s!=NB_NONE){let cells=fcLoadF(FC_BOUND+s)*dt/hm;if(cells>0.0){travel=4.0*ceil(cells/4.0);}}
+ // particleSurfaceBulk's travel: nbCrossingTravel of the tile's candidate word (the spread reach word).
+ let travel=nbfCrossingTravel(lcTileReach(c>>vec3u(2u)));
  let reached=fgReach1(c);
  var nearest=NB_NONE;if(reached&&s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
  let bulk=nbfBulkDepth(band,q,reached,nearest!=NB_NONE,vec3f(fgUnpack(nearest)),travel);
