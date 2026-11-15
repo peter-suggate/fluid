@@ -21,7 +21,7 @@ import { MG_HEADER, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const asF32 = (u: Uint32Array) => new Float32Array(u.buffer, u.byteOffset, u.length);
 const maxAbs = (v: ArrayLike<number>) => { let m = 0; for (let i = 0; i < v.length; i++) m = Math.max(m, Math.abs(v[i]!)); return m; };
-const SOLVE = ["pmgDirection", "pmgDirectionC", "pmgUpdate", "pmgUpdateC", "pmgCheck"];
+const SOLVE = ["pmgDirection", "pmgUpdate", "pmgCheck"];
 
 async function withDevice(label: string, run: (device: GPUDevice) => Promise<void>) {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
@@ -227,10 +227,14 @@ test("composite project (GPU): every liquid row's projected divergence is its re
   });
 });
 
-// Converged (40 slots), and capped (3 slots: the last slot decides at the final iterate).
-for (const slots of [40, 3]) test(`composite MGPCG walls (GPU, ${slots} slots): at the end every wall face's state is its ghost's complementarity, on both tiers`, GPU, async t => {
+// Exact (every converged solve decides): converged (40 slots), and capped (3 slots: the last slot decides at the final
+// iterate). The default policy (MG_WALL_DECISIONS re-decisions within MG_WALL_LOOSE x tolerance): converged on its fixed
+// system, the audit counting its inconsistent faces as this test does, and fewer of them than the build's state alone
+// leaves (wallDecisions 0). The scene bar (the old engine's 9-11%, the dam's 1.5%) is MG_WALL_LOOSE's measurement; this
+// fixture's start is far from its solution (half its h wall faces change from the build).
+for (const [slots, exact] of [[40, true], [3, true], [40, false]] as const) test(`composite MGPCG walls (GPU, ${slots} slots, ${exact ? "exact" : "default policy"}): ${exact ? "at the end every wall face's state is its ghost's complementarity" : "one re-decision, the end's inconsistent faces bounded and audited"}, on both tiers`, GPU, async t => {
   await withDevice("composite mgpcg walls", async device => {
-    const { e, header, h, fx } = await solveComposite(device, { slots, tolerance: 1e-3, walls: true }, false);
+    const { e, header, h, fx } = await solveComposite(device, { slots, tolerance: 1e-3, walls: true, ...(exact ? { wallDecisions: Infinity, wallLoose: 1 } : { audit: true }) }, false);
     const L = e.layout, N = COMPOSITE_N, NT = N / 4;
     const f32 = async (pool: "vel" | "pres", tier: "F" | "C", ch: string) => new Float32Array((await e.read(pool, L.base(pool, tier, ch), (tier === "F" ? L.cap.f : L.cap.c) * BRICK_STRIDE)).buffer);
     const u32 = async (tier: "F" | "C") => new Uint32Array(await e.read("phi", L.base("phi", tier, "FLAGS"), (tier === "F" ? L.cap.f : L.cap.c) * BRICK_STRIDE));
@@ -280,7 +284,20 @@ for (const slots of [40, 3]) test(`composite MGPCG walls (GPU, ${slots} slots): 
     else assert.ok(header[MG_HEADER.DECIDES]! >= 1, "the capped solve decided at its last slot");
     assert.equal(tally.missing + tallyN.missing, 0, "every wall face's storage is resident");
     assert.ok(tally.faces > 0 && tallyN.faces > 0, "both tiers have wall faces");
-    assert.equal(tally.wrong + tallyN.wrong, 0, `wall state against X + lift: h ${tally.wrong} native ${tallyN.wrong}`);
+    if (exact) assert.equal(tally.wrong + tallyN.wrong, 0, `wall state against X + lift: h ${tally.wrong} native ${tallyN.wrong}`);
+    else {
+      const audit = Array.from(header.slice(MG_HEADER.AUDIT, MG_HEADER.AUDIT + 4));
+      t.diagnostic(`audit (h wrong/faces, native wrong/faces) ${audit.join(" ")}`);
+      assert.ok(header[MG_HEADER.DECIDES]! <= 1, "at most one re-decision");
+      assert.equal(audit[1], tally.faces, "the audit's h wall faces are the rows'");
+      assert.equal(audit[3], tallyN.faces, "the audit's native wall faces are the rows'");
+      assert.ok(Math.abs(audit[0]! - tally.wrong) <= Math.max(2, 0.01 * tally.faces), `the audit's inconsistent h faces ${audit[0]} against ${tally.wrong}`);
+      const build = await solveComposite(device, { slots, tolerance: 1e-3, walls: true, wallDecisions: 0, audit: true }, false);
+      const buildWrong = build.header[MG_HEADER.AUDIT]! + build.header[MG_HEADER.AUDIT + 2]!;
+      t.diagnostic(`the build's state alone: ${buildWrong} inconsistent, ${build.header[MG_HEADER.ITERATIONS]} its`);
+      assert.ok(tally.wrong + tallyN.wrong < buildWrong, `one re-decision leaves fewer inconsistent faces (${tally.wrong + tallyN.wrong}) than the build alone (${buildWrong})`);
+      build.e.destroy();
+    }
     e.destroy();
   });
 });
