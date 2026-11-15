@@ -545,7 +545,9 @@ export function createHighResolutionDamBreakScene(): SceneDescription {
   // f and c at 1.5x the peak h-tile ring and page count (rounded up), b at the BULK16
   // peak plus slack, particles at 1.25-1.5x the old engine's peak bank; k (cut
   // bricks) is measured when solidStamp lands (M3).
-  scene.fluid.brickPools = { f: 3968, c: 192, b: 16, k: 0, particles: 1_250_000 };
+  // f: the brick engine's measured peak (progress-lane-e.md, tiered 300: 4913, the whole lattice) until
+  // lane E's local reach lowers it; 3968 latched POOL_F at step 20.
+  scene.fluid.brickPools = { f: 4913, c: 192, b: 16, k: 0, particles: 1_250_000 };
   return scene;
 }
 

@@ -29,7 +29,7 @@ import { bindGroupLayoutEntries, MAX_STORAGE_BINDINGS } from "./brick-kernel";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, createBrickSolver, nbEngine } from "./brick-method";
+import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine } from "./brick-method";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
@@ -112,7 +112,7 @@ test("brick engine: a pressure solver's indirect words must be the lists' or P's
   validatePressureSolver({ ...cg, setup: [{ kernel, dispatch: { indirect: PRESSURE_ARGS.FIRST } }] });
 });
 
-test("brick engine: the engine switch refuses unknown engines, and every scene until F and P register", async () => {
+test("brick engine: the engine switch refuses unknown engines, and every scene but the dam", async () => {
   assert.equal(nbEngine(undefined), "uniform");
   assert.equal(nbEngine("brick"), "brick");
   assert.throws(() => nbEngine("bricks"), /unknown engine "bricks"/);
@@ -120,7 +120,8 @@ test("brick engine: the engine switch refuses unknown engines, and every scene u
   assert.ok(seep.fluid?.brickPools, "seep authors brickPools");
   const refusal = brickEngineRefusal(seep, { timeStep: "sixtieth" });
   assert.match(refusal.message, /not enabled on the brick engine/);
-  assert.match(refusal.message, /lane F's stages/);
+  // Each lane's line is there exactly while its registration is missing (F registers the tiered set, P compositeMGPCG).
+  assert.equal(/lane F's stages/.test(refusal.message), brickEngineLanes().some(l => /lane F/.test(l)));
   // Lane P's line is there exactly while P's solver is unregistered (it registers compositeMGPCG at M2).
   assert.equal(/lane P's pressure solver/.test(refusal.message), brickEngineLanes().some(l => /lane P/.test(l)));
   assert.match(refusal.message, /engine "uniform"/);
@@ -128,7 +129,7 @@ test("brick engine: the engine switch refuses unknown engines, and every scene u
   // The dam: no scene gap, only the lanes'.
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
   assert.deepEqual(brickEngineGaps(dam, { timeStep: "sixtieth" }), brickEngineLanes());
-  await assert.rejects(createBrickSolver({} as GPUDevice, dam, { timeStep: "sixtieth" }, "balanced"), /lane F's stages/);
+  assert.deepEqual(brickEngineLanes(), [], "F and P are registered: the dam runs (opt-in, engine \"brick\")");
   assert.deepEqual(brickEngineLanes(bringUpStages, L => bringUpCG(L)), []);
 });
 

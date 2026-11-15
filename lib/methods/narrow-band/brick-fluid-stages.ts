@@ -91,5 +91,6 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
 /** The all-h stage set. */
 export const fluidStages: BrickStagesFactory = fluidStagesAt(false);
 
-/** The registration brick-method.ts reads: undefined until the dam gates pass on fluidStages. */
-export const brickFluidStages: BrickStagesFactory | undefined = undefined;
+/** The registration brick-method.ts reads: the tiered set, opt-in only (engine "brick"; the default stays
+ * "uniform" until the M2 gates pass), so the dam can be tried in the app. */
+export const brickFluidStages: BrickStagesFactory | undefined = fluidStagesAt(true);
