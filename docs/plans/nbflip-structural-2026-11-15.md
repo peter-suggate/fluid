@@ -750,3 +750,21 @@ stays:
    - p1b is invalid until its cause is known.
    - `item2-census-split.patch` is not needed: the new schedule has no census, and its submit split is §2.11. It
      should not be landed on the old engine.
+
+### 7.1 Coordinator rulings (2026-11-15, before any engine code lands)
+
+The design is **approved**: strategy C, the §2 architecture, the §4.2 milestones and the §5 lanes E, F and P.
+
+1. **Drift gates are one-sided on |drift|** (G7, L1, P1, D4). The candidate passes if its |drift| ≤ |ref mean drift| + max(floor, 3S).
+   - This is registered now, before any landing, so it is not a loosening after the fact.
+   - Basis: the seep rewrite's §4 principle (the G6 ruling, 70351e00). NB-FLIP's measured volume loss is a defect the candidate need not reproduce.
+   - **Rows that move with volume** (depth maps, column depth, PE, G3, G6) are judged against the union of two bands:
+     - the reference band;
+     - the reference with its own measured loss restored uniformly, as seep G6's NB_restored.
+
+     Lane G implements both bands before M2's first gate.
+   - The user is told and may veto.
+2. **Iterate-changing pressure is accepted as the same physics.** It means converging to the same tolerance where today's solver caps out, and it is judged by the trajectory gates.
+3. **The presentation texture copy may stay until M6.** It must be outside the simulation step's timing, or counted in it and reported.
+4. **Lane D finishes.** The old engine's dam references must reach step 300 for M2's 300-step gate. If lane D's fix changes the old engine's physics, lane G re-takes the dam references at the fixed commit.
+5. **P2's parked work is ruled as §7.5 recommends.** p1a is kept as data; p1b stays invalid until F explains it; the census-split patch is not landed.

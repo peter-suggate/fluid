@@ -9,7 +9,8 @@
 | Phase 1G: cross-scene gates and NB-FLIP references, dam break added (lane G) | done (2026-11-15): §4 gates, 5 refs a scene at 33b78ebb, self-test passed; dam residency defect found (§4.0) |
 | Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | in progress |
 | Phase 2: port lanes P1 (pressure: items 13, 3, 10, 8, 5) and P2 (move, submit, kernel shape: items 1, 2, 4+, 6, 7, 11, 9, 12) | **redirected** (2026-11-15): the user asked for NB-FLIP to be restructured toward seep-m1max's architecture, not tweaked item by item. P2's tweak list is stopped; P1 continues on a seep-structured multigrid. |
-| Lane X: structural redesign of NB-FLIP (`docs/plans/nbflip-structural-2026-11-15.md`): target architecture, strategy, migration milestones, lane split | in progress |
+| Lane X: structural redesign of NB-FLIP (`docs/plans/nbflip-structural-2026-11-15.md`) | done (2f29b9d1), approved (§7.1): a new brick engine in `lib/methods/narrow-band/` behind the NB-FLIP id; milestones M0–M6; target about 2.5–2.9x on all four scenes |
+| Structural lanes E (engine core), F (fluid kernels), P (pressure and bodies, continuing P1) | M0 in progress |
 | Combined cross-scene round | todo |
 
 ## 1. Goal and contract
