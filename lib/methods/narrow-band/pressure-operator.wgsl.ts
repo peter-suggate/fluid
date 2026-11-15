@@ -7,7 +7,11 @@
  *
  * The surface rule and the ghost-fluid theta are NB-FLIP's (BRICK_CELLS_WGSL:
  * Gibou et al. 2002, the ghost-fluid Dirichlet condition; Enright et al. 2003
- * for its use in free-surface projection). M1 rows are all-h; the composite
+ * for its use in free-surface projection). The RHS carries NB-FLIP's volume
+ * control (pRows' control term, uniform-mixed-pressure-velocity.ts): a target
+ * divergence, the rate lane F's gauge writes to its header word FH.RATE, times
+ * the cell's open capacity (1 with no solids; Kim et al. 2007's proportional
+ * volume control). So RHS = -h (sum A US - rate h capacity). M1 rows are all-h; the composite
  * rows (native 4h, BULK16, seams over 2.5h, the active set) are ported here
  * next, from uniform-pressure-arena.ts with frozen-state parity.
  */
@@ -48,6 +52,8 @@ export function pressureOperatorKernels(L: BrickLayout) {
   if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
   let rowed=(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_LIQUID)!=0u;
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);let h=nbRingF(cfg.x,NB_RING_H);
+  // The volume control's divergence (1/s): lane F's FH.RATE, the first word of F's header (velocity-kernels.wgsl.ts).
+  let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
   for(var j=0u;j<2u;j++){
     let l=lid+256u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
     var diag=0.0;var div=0.0;var kk=vec3f(0.0);
@@ -64,7 +70,7 @@ export function pressureOperatorKernels(L: BrickLayout) {
         div+=au*nbUS(b,c+e,a)-al*nbUS(b,c,a);
       }
     }else{pres[NB_PRES_F_X+at]=0.0;}
-    pres[NB_PRES_F_RHS+at]=select(0.0,-h*div,liquid);
+    pres[NB_PRES_F_RHS+at]=select(0.0,-h*(div-rate*h*capacity),liquid);
     pres[NB_PRES_F_DIAG+at]=diag;
     pres[NB_PRES_F_K0+at]=kk.x;pres[NB_PRES_F_K1+at]=kk.y;pres[NB_PRES_F_K2+at]=kk.z;
   }

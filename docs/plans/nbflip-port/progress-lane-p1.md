@@ -321,3 +321,13 @@ Metal clean.
 - Next: the composite operator kernel in pressure-operator.wgsl.ts on E's tier ABI (6f319a55:
   stored wall faces through nbFacePlane; setTransfer to reach a real 4h state), then frozen-state
   row parity on the dam.
+
+## 2026-11-15 — the operator's RHS carries the volume control
+
+- At lane F's request (relayed by E), the M1 operator's RHS reads the volume-control rate, which
+  F's gauge writes to header word 64 (FH.RATE). The RHS is now `−h(Σ A US − rate·h·capacity)`,
+  with capacity 1 and no solids. This is pRows' `control = authority.z·open`, with the old
+  authority.z being the same rate (uniform-mixed-surface-volume.ts; Kim et al. 2007's
+  proportional control). The native rows get the same term (buildRhs:
+  `−ρ(div − z·open)/dt`) when they land. A rate of 0 changes nothing. brick-engine and
+  pressure-mgpcg pass on the GPU.
