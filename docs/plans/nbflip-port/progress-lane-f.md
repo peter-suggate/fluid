@@ -1037,3 +1037,45 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
   - brick-fluid-stages.ts (the placements);
   - levelset-kernels.test.ts (the corner rule, DIL4's layout and the schedule order).
 - **Tools:** ~/code/me/fluid-scratch/lane-f/tools/{frozen.mts --seq/--seqsub/--inspect/--time, dil-seq.sh, probe-dil*.sh, dil-time.sh}. Logs are in logs/dil/.
+
+## Item 2, the tiered sampler: attribution, and fcell read-only (2026-11-16)
+
+**Where uAdvect's tiered sampler spends its time.** Frozen tiered dam, step 20, timing slot, `--time=6`. The variants keep the trajectory: each computes one component a second time at p + 0.001 and keeps it only on an impossible value, so the added time is that component's marginal cost in place.
+- **Samples (counting variant):**
+  - 6.97M in all, 19.86M axis components (2.85 a sample);
+  - fine weight 1: 6.21M (89%);
+  - fine weight 0: 0.27M (3.8%);
+  - blended: 0.50M (7.2%).
+- **Marginal cost against 12.4-13.0 ms for the kernel:**
+  - fsFineWeight +1.4 ms (0.2 ns a sample);
+  - fsFine +8.6 ms (about 0.4 ns for each axis component on the 7.47M samples with fine > 0);
+  - fsCoarse +1.6 ms (on the 0.77M samples with coarse > 0).
+- **So the fine interpolant is the cost.** Its 8 taps are UNIT reads (fsUnit: fgFaceOpen, the slot through the window or the directory, then the load), and the weight and the coarse path are secondary.
+- **A one-brick path for fsFine is a loss.** All 8 taps in one F slot means one slot lookup and direct UNIT loads. It was slower (12.62 against 11.64 ms) and not bitwise (167k vel words; probably the compiler's contraction of the reshaped lerp), so it is dropped. Slot lookups are not the limiter.
+
+**fcell read-only where a kernel writes none of it (bitwise).**
+- **The change.** fluidKernel now binds fcell as read-only `array<u32>`, read with plain loads (FG_FCELL_RO_WGSL), in place of `atomicLoad` on `array<atomic<u32>>`. It does this for every kernel whose code has no fcStore and no `&fcell[` atomic.
+- **Which kernels.**
+  - Tiered: pScatter, lAdvect, lcAdvect, lUnion, lcCouple, lcClear, lcRetire, lPublish, lcPublish, pSeed, uAdvect, uExt4Seed, uExt4, uExtend, pJoin and pDelta.
+  - All h: the same less the C kernels.
+- **Gates.**
+  - Frozen step 20, every placement, tiered and all h: bitwise. The only differences are pMove, pSeed and pScatter, which also differ old against old (atomic order).
+  - Test: levelset-kernels.test.ts checks every kernel's binding against its code.
+- **Timing (timing slot, ms, new against old, two runs):**
+
+| kernel | run 1 | run 2 |
+|---|---|---|
+| uAdvect | 11.59 / 12.56 | 11.64 / 12.54 |
+| lAdvect | 3.59 / 3.40 | 3.33 / 3.52 |
+| lUnion | 1.69 / 1.21 | 1.17 / 1.14 |
+| uExt4Seed | 0.64 / 0.79 | |
+| uExt4 | 0.33 / 0.37 | |
+| uExtend | 6.38 / 6.28 | |
+| pSeed | 1.81 / 1.90 | |
+| lPublish | 0.49 / 0.60 | |
+| lcCouple | 0.38 / 0.46 | |
+| lcAdvect | 1.48 / 1.53 | |
+
+- **Reading the table.** uAdvect is down 0.9 ms (7%) in both runs. lAdvect and lUnion moved within run-to-run spread.
+- **Next for the sampler:** a GPU profile of uAdvect, tiered against all h (limiter, occupancy), before any further restructuring of fsFine.
+- **Tools:** ~/code/me/fluid-scratch/lane-f/tools/{samp-attr.sh, ro-gate.sh, samp-v1.sh}, with frozen.mts `--setwords` in per-kernel mode. Logs are in logs/samp/.

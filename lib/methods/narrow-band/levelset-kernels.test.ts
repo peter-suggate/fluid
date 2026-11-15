@@ -93,3 +93,21 @@ test("lDilateC: each round's runs after its sources' writers and before the roun
     }
   }
 });
+
+test("fcell binds read-only, with plain loads, in every kernel that writes none of it", () => {
+  const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
+  for (const tiered of [false, true]) {
+    const stages = fluidStagesAt(tiered)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s: 0, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
+    type K = { label: string; code: string; bindings: { name: string; kind: string; type: string }[] };
+    const kernels = new Map<string, K>();
+    const walk = (x: unknown): void => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === "object") { const k = (x as { kernel?: K }).kernel; if (k) kernels.set(k.label, k); else Object.values(x).forEach(walk); } };
+    walk(stages);
+    for (const k of kernels.values()) {
+      const b = k.bindings.find(x => x.name === "fcell"); if (!b) continue;
+      const writes = /fcStore|atomic\w*\(&fcell\[/.test(k.code);
+      assert.equal(b.kind, writes ? "rw" : "ro", `${k.label} (tiered ${tiered})`);
+      if (!writes) assert.ok(b.type === "array<u32>" && !k.code.includes("&fcell["), `${k.label}: plain loads`);
+    }
+    for (const label of ["uAdvect", "lAdvect", "uExtend", "pSeed"]) assert.equal(kernels.get(label)?.bindings.find(x => x.name === "fcell")?.kind, "ro", `${label} (tiered ${tiered})`);
+  }
+});

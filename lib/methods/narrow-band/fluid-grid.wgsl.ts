@@ -99,6 +99,8 @@ export const FB = {
   parts: { name: "parts", kind: "rw", type: "array<Particle>" },
   partsRO: { name: "parts", kind: "ro", type: "array<Particle>" },
   fcell: { name: "fcell", kind: "rw", type: "array<atomic<u32>>" },
+  /** fcell where the kernel writes none of it (fluidKernel picks it). */
+  fcellRO: { name: "fcell", kind: "ro", type: "array<u32>" },
   fdep: { name: "fdep", kind: "rw", type: "array<atomic<u32>>" },
   fpart: { name: "fpart", kind: "rw", type: "array<u32>" },
   fmoved: { name: "fmoved", kind: "rw", type: "array<Particle>" },
@@ -119,6 +121,12 @@ export function fluidConstantsWGSL(F: FluidLayout): string {
 
 /** A lane F kernel: the ABI prelude (set atomic as nbSet, dir plain), F's constants, its bindings, then the body. */
 export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindings: readonly BrickBinding[], body: string, entry = label): BrickKernel {
+  // A kernel that never writes fcell binds it read-only and reads it with plain loads (FG_FCELL_RO_WGSL): the same
+  // words (no lane of the dispatch writes them), without a device atomic a read.
+  if (bindings.includes(FB.fcell) && body.includes(FG_FCELL_WGSL) && !/fcStore|&fcell\[/.test(body.split(FG_FCELL_WGSL).join(""))) {
+    bindings = bindings.map(b => b === FB.fcell ? FB.fcellRO : b);
+    body = body.split(FG_FCELL_WGSL).join(FG_FCELL_RO_WGSL);
+  }
   // A module with vertex φ and no staged ring (FG_RING_WGSL) reads every vertex through its owner.
   const ring = (body.includes("fn fgPhiWord") && !body.includes("fn fgRingAt") ? FG_NO_RING_WGSL : "")
     + (body.includes("fn fsCacheOf") && !body.includes("fn fsCacheRawStaged") ? "\nfn fsCacheRawStaged(T:vec3i,a:u32)->f32{return fsCacheRaw(T,a);}" : "");
@@ -300,11 +308,13 @@ fn fgWindowStage(centre:vec3i,lid:u32,lanes:u32){fgWindowStageAt(centre-vec3i(1)
 export const FG_SLOT_WINDOW_WGSL = fgSlotWindowWGSL(3);
 
 /** fcell reads (needs `fcell`, atomic). */
-export const FG_FCELL_WGSL = /* wgsl */`
+const FG_FCELL_RW_WGSL = /* wgsl */`
 fn fcLoad(i:u32)->u32{return atomicLoad(&fcell[i]);}
 fn fcLoadF(i:u32)->f32{return bitcast<f32>(atomicLoad(&fcell[i]));}
 fn fcStore(i:u32,v:u32){atomicStore(&fcell[i],v);}
 fn fcStoreF(i:u32,v:f32){atomicStore(&fcell[i],bitcast<u32>(v));}
+`;
+const FG_FCELL_READS_WGSL = /* wgsl */`
 // A tile word of cell c's tile, or the default where no slot holds it.
 fn fgTileLoad(c:vec3i,w:u32,otherwise:u32)->u32{let i=fgTileAt(c,w);if(i==NB_NONE){return otherwise;}return fcLoad(i);}
 fn fgTileFlags(c:vec3i)->u32{return fgTileLoad(c,FT_FLAGS,0u);}
@@ -316,6 +326,12 @@ fn fgReach1(c:vec3i)->bool{return fgDist(fgTileDist(c),0u)<=2u;}
 fn fgReach2(c:vec3i)->bool{return fgDist(fgTileDist(c),0u)<=3u;}
 fn fgTileHeat(c:vec3i)->f32{let i=fgTileAt(c,FT_T);if(i==NB_NONE){return 0.0;}return fcLoadF(i);}
 `;
+export const FG_FCELL_WGSL = FG_FCELL_RW_WGSL + FG_FCELL_READS_WGSL;
+/** The same reads from a read-only fcell (FB.fcellRO: plain loads, no stores). */
+const FG_FCELL_RO_WGSL = /* wgsl */`
+fn fcLoad(i:u32)->u32{return fcell[i];}
+fn fcLoadF(i:u32)->f32{return bitcast<f32>(fcell[i]);}
+` + FG_FCELL_READS_WGSL;
 
 /** Vertex φ (needs `phi`). */
 export const FG_PHI_WGSL = FO_PHI_WGSL + FG_WIN_VERTEX_WGSL + /* wgsl */`
