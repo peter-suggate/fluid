@@ -124,6 +124,50 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     fx.phi.forEach((x, i) => storePhi(i, x));
     faces.forEach(({ c, a, kind }, i) => store(`US${a}`, kind, c, fx.US[i]!));
     upload(["PHI", "US0", "US1", "US2"]);
+    // ---- localSpeed (uniform-mixed-frame-plan.ts l.269, umSignedFaceExtent l.241) on the old texels: each tile's
+    // mean extended face velocity and span (setCensus's DEF words). The old texel of cell q on axis a is the stored
+    // lower face of q + e_a (0 outside the lattice, nbFacePlane's); every page is resident, so low-open is the lattice's low face.
+    const faceBase = (a: number) => a * (W + 1) * W * W;
+    const faceIndex = (c: readonly number[], a: number) => { const d = [W, W, W]; d[a] = W + 1; return faceBase(a) + c[0]! + d[0]! * (c[1]! + d[1]! * c[2]!); };
+    const dense = new Float32Array(3 * (W + 1) * W * W).fill(NaN);
+    faces.forEach(({ c, a }, i) => { dense[faceIndex(c, a)] = fx.US[i]!; });
+    let unstored = 0;
+    const texel = (q: readonly number[], a: number) => {
+      const c = [...q]; c[a]!++;
+      if (!c.every((v, b) => v >= 0 && v < (b === a ? W + 1 : W))) return 0;
+      const v = dense[faceIndex(c, a)]!; if (Number.isNaN(v)) unstored++; return v;
+    };
+    const PLAN_MAX = fr(3.402823e38);
+    const orderKey = (x: number) => { const b = bitsOf(x); return ((b & 0x80000000) !== 0 ? ~b : b | 0x80000000) >>> 0; };
+    const orderValue = (k: number) => fromBits((k & 0x80000000) !== 0 ? k & 0x7fffffff : ~k);
+    const extent = (o: V3, a: number, values: number[]) => {
+      let lo = PLAN_MAX, hi = -PLAN_MAX, finite = true;
+      if (o[a] === 0) { const q: V3 = [...o]; q[a]!--; values.push(texel(q, a)); }
+      for (const v of values) { if (!(Math.abs(v) <= PLAN_MAX)) finite = false; lo = Math.min(lo, v); hi = Math.max(hi, v); }
+      return { lo, hi, finite: finite && lo <= hi };
+    };
+    const planOld: number[][] = [];
+    for (let i = 0; i < n; i++) {
+      const t = coord(i), mean = [0, 0, 0], hiK = [0, 0, 0], loK = [0, 0, 0];
+      const add = (e: { lo: number; hi: number; finite: boolean }, a: number, m: number) => {
+        mean[a] = fr(mean[a]! + fr(fr(fr(0.5 * e.lo) + fr(0.5 * e.hi)) / m));
+        hiK[a] = Math.max(hiK[a]!, e.finite ? orderKey(e.hi) : 0xffffffff); loK[a] = Math.max(loK[a]!, e.finite ? orderKey(-e.lo) : 0xffffffff);
+      };
+      if (hOld(t)) for (let lane = 0; lane < 64; lane++) {
+        const o: V3 = [4 * t[0] + (lane & 3), 4 * t[1] + ((lane >> 2) & 3), 4 * t[2] + (lane >> 4)];
+        for (let a = 0; a < 3; a++) add(extent(o, a, [texel(o, a)]), a, 64);
+      } else for (let a = 0; a < 3; a++) {
+        const o: V3 = [4 * t[0], 4 * t[1], 4 * t[2]], probe: V3 = [...o]; probe[a]! += 4;
+        const anchor: V3 = [...probe]; anchor[a]!--;
+        const fine = probe[a]! < W && hOld(shr(probe, 2)), values: number[] = [];
+        for (let part = 0; part < (fine ? 16 : 1); part++) { const q: V3 = [...anchor]; q[(a + 1) % 3]! += part % 4; q[(a + 2) % 3]! += Math.floor(part / 4); values.push(texel(q, a)); }
+        add(extent(o, a, values), a, 1);
+      }
+      let span = 0;
+      for (let a = 0; a < 3; a++) span = hiK[a] === 0xffffffff || loK[a] === 0xffffffff ? PLAN_MAX : fr(span + Math.max(0, fr(orderValue(hiK[a]!) + orderValue(loK[a]!))));
+      planOld.push([...mean, span]);
+    }
+    assert.equal(unstored, 0, "localSpeed reads stored texels only");
     // The old engine's split vertices (4-aligned h-closure vertices whose base disagrees with the h
     // store): the tiles within a tile of one may read either value.
     const splitTiles = new Set<number>();
@@ -155,6 +199,25 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     };
     const hex = (x: number) => (x >>> 0).toString(16);
     let wantNew = 0, wantOld = 0, deepBandNew = 0;
+    // TRIG is the old need rule (nbActivityTriggered) over the old FIN's criteria, its thin term reading the
+    // deformation (tileErrorOf) of the plan words (DEF), which are checked here against localSpeed transcribed on the
+    // old engine's own extension texels (planOld). The old engine's own deformation was its last frame's certificate,
+    // which the fixture does not hold: so this pins the rule on the frame's state, and counts the thin-alone tiles it heats.
+    const planAt = (t: V3) => planOld[ti(t)]!;
+    const deformation = (t: V3) => {
+      const own = planAt(t); let gradient = 0;
+      for (let a = 0; a < 3; a++) {
+        const lo: V3 = [...t], hi: V3 = [...t]; lo[a]!--; hi[a]!++;
+        if (![lo, hi].every(q => q.every(v => v >= 0 && v < T))) continue;
+        const below = planAt(lo), above = planAt(hi);
+        let v = 0; for (let c = 0; c < 3; c++) v = Math.max(v, Math.abs(fr(above[c]! - own[c]!)), Math.abs(fr(own[c]! - below[c]!)));
+        gradient = fr(gradient + fr(v / fr(4 * h)));
+      }
+      const d = Math.max(fr(fr(4 * h) * gradient), own[3]!);
+      return d < fr(3e38) ? d : fr(3.402823e38);
+    };
+    const need = (t: V3, criteria: number) => (criteria & 0x3c) !== 0 || (criteria & 1) !== 0 || ((criteria & 2) !== 0 && fr(fr(dt * deformation(t)) / h) > fr(0.02));
+    const thinAlone = { tiles: 0, heated: 0 };
     const deepDecided: string[] = [];
     for (let i = 0; i < n; i++) {
       const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t), o = CENSUS.STRIDE * cs;
@@ -171,8 +234,12 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       wantNew += want; wantOld += fx.decided[i]!;
       check("WANT", i, want === fx.decided[i], () => `${want} vs ${fx.decided[i]} (${fx.owner[i] === 1 ? "h" : "4h"} now; fin ${hex(fin)} vs ${hex(ow1)})`);
       const fs = s.bricks.get(key(shr(t, 1)))!, j = (t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2);
-      const trig = (set[L.set.trig + fs]! >>> j) & 1, oldTrig = ((ow1 >>> 16) & 63) !== 0 ? 1 : 0;
-      check("TRIG", i, trig === oldTrig, () => `${trig} vs ${oldTrig}`);
+      const criteria = (ow1 >>> 16) & 63, trig = (set[L.set.trig + fs]! >>> j) & 1, oldTrig = need(t, criteria) ? 1 : 0;
+      if (criteria === 2) { thinAlone.tiles++; thinAlone.heated += oldTrig; }
+      check("TRIG", i, trig === oldTrig, () => `${trig} vs ${oldTrig} (criteria ${criteria})`);
+      check("TRIG thin alone", i, ((set[L.set.trig + fs]! >>> (8 + j)) & 1) === ((ow1 >>> 17) & 1), () => `thin bit`);
+      const gp = [0, 1, 2, 3].map(k => fromBits(census[o + CENSUS.DEF + 4 * l + k]!)), xp = planOld[i]!;
+      check("plan", i, gp.every((g, k) => (k === 3 ? g === xp[k] : Math.abs(g - xp[k]!) <= 1e-6 * (1 + Math.abs(xp[k]!)))), () => `${gp} vs ${xp}`);
       check("band = decided (old)", i, fx.band[i] === fx.decided[i], () => `band ${fx.band[i]} decided ${fx.decided[i]}`);
       if (fx.deep[i]) { if (want) { deepBandNew++; if (deepDecided.length < 8) deepDecided.push(`${t}`); } }
     }
@@ -182,7 +249,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       crossing: [cH(CENSUS_H.CENSUS_CROSSING), hdr[0]], required: [cH(CENSUS_H.CENSUS_REQUIRED), hdr[12]], band: [cH(CENSUS_H.CENSUS_BAND), hdr[2]],
       refined: [cH(CENSUS_H.CENSUS_REFINED), hdr[4]], reach: [fromBits(cH(CENSUS_H.CENSUS_REACH)), fromBits(meta.reachBits)], clamped: [cH(CENSUS_H.CENSUS_CLAMPED), 0],
     };
-    return { variant, tallies, counters, deepBandNew, deepDecided, wantNew, wantOld };
+    return { variant, tallies, counters, deepBandNew, deepDecided, wantNew, wantOld, thinAlone };
     });
     const deepTiles = deepList.length, deepFromPrev = deepList.filter(t => !fx.joined[ti(t)]).length, deepPrevBand = deepList.filter(t => !fx.joined[ti(t)] && fx.decidedPrev[ti(t)]).length;
     // A tile that differs under both φ choices and holds no split vertex within a tile: a mismatch of the port.
@@ -192,7 +259,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       step, window: W, tiles: n, excluded: 0, phiWithoutPreimage: noPreimage, splitVertices: fx.split.length, splitTiles: splitTiles.size,
       deepCold: { tiles: deepTiles, regions: deepTiles / 64, decidedFromPrev: deepFromPrev, prevBand: deepPrevBand, bandAnew: results.map(r => r.deepBandNew), bandAnewTiles: results[0]!.deepDecided },
       hard: Object.fromEntries([...hard].filter(([, v]) => v.length).map(([k, v]) => [k, v.map(i => coord(i).join(","))])),
-      variants: results.map(({ variant, tallies, counters, wantNew, wantOld }) => ({ variant, want: { new: wantNew, old: wantOld }, counters,
+      variants: results.map(({ variant, tallies, counters, wantNew, wantOld, thinAlone }) => ({ variant, want: { new: wantNew, old: wantOld }, thinAlone, counters,
         fields: Object.fromEntries([...tallies].map(([k, t]) => [k, { compared: t.compared, equal: t.equal, deep: t.deep, nonDeep: t.nonDeep, splitNear: t.split, examples: t.examples.length ? t.examples : undefined }])) })),
     };
     console.log(JSON.stringify(report, null, 1));

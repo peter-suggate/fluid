@@ -63,6 +63,7 @@
 import { ARGS, BrickLayout, H, LIST, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
 
 /** The census header words (set buffer, brick-abi.md §5.1). */
 export const CENSUS_H = {
@@ -92,9 +93,11 @@ export const CENSUS_POLICY = {
  * (classify's near, uniform-mixed-dynamic.ts l.1277: h-owned, or a 4h corner within 4 tiles' cells of the surface);
  * per page the residency records (brick-residency.wgsl.ts: 4 words a 16-cell region and stage, the old pageSeed's);
  * per page its moving-shape bits (MOV, 16 words as REQ's: bit i, tile i's FIN holds crossing, required and the shape
- * trigger and its keys' speed is moving, movingShapeNear's tile test; censusImportance's). */
+ * trigger and its keys' speed is moving, movingShapeNear's tile test; censusImportance's); per tile its frame-plan
+ * motion (DEF, 4 words: the mean extended face velocity, xyz, and the face span, f32; localSpeed's, PLAN below),
+ * which censusFine (h tiles) and censusCoarse (4h tiles) write and censusDecide's deformation reads. */
 export const CENSUS = {
-  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, RES: 7168, STRIDE: 7328,
+  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, RES: 7168, DEF: 7328, STRIDE: 9376,
 } as const;
 /** The lane buffers setCensus binds: `census`, CENSUS.STRIDE words a C slot. */
 export const brickCensusBuffers = (L: BrickLayout): Record<string, number> => ({ census: CENSUS.STRIDE * L.cap.c });
@@ -793,9 +796,86 @@ fn ncStoreClass(cs:u32,i:u32,c:NcClass,r:NcFinish,width:u32){
 }
 var<workgroup> wgReach:atomic<u32>;
 var<workgroup> wgCrossing:atomic<u32>;
+fn ncPlanStore(cs:u32,i:u32,mean:vec3f,span:f32){
+  let o=NC_S*cs+${CENSUS.DEF}u+4u*i;
+  census[o]=bitcast<u32>(mean.x);census[o+1u]=bitcast<u32>(mean.y);census[o+2u]=bitcast<u32>(mean.z);census[o+3u]=bitcast<u32>(span);
+}
 fn ncFlush(){
   let reach=atomicLoad(&wgReach);if(reach!=0u){atomicMax(&nbSet[NB_H_CENSUS_REACH],reach);}
   let n=atomicLoad(&wgCrossing);if(n!=0u){atomicAdd(&nbSet[NB_H_CENSUS_CROSSING],n);}
+}
+`;
+
+/** The old frame plan's per-tile motion and the need trigger's deformation (uniform-mixed-frame-plan.ts localSpeed
+ * l.269-345, umSignedFaceExtent l.241, tileErrorOf l.357-404; tuDeformation, uniform-narrow-band-flip.ts l.940;
+ * nbActivityTriggered, uniform-narrow-band-activity.wgsl.ts l.28). The formulas run as written on the census's own
+ * velocity (US, the census's ncFace), at the head, where the old activity read the certificate its frame plan had
+ * built from the last frame's extension (the "when" is the census's; the rule is the old one). Two terms drop, stated:
+ * - The reader class (planSurface.y, tuReaderClass): its zero clears the deformation, but only the thin trigger reads
+ *   the deformation, thin needs a crossing tile, and a crossing tile is open, holds a corner within 1e-6 h of the
+ *   surface (support-seeded: a 4h corner below 16 h, an h vertex below 0) and so is a reader of class 2. The one
+ *   exception, an h tile touching φ = 0 from above with no liquid vertex in its support reach, is not ported.
+ * - The error's saturation (tileErrorOf's !(error < 3e38)): error saturates exactly when the speed does, which is when
+ *   the span does (a nonfinite face), and the span saturates the deformation itself. */
+const PLAN = /* wgsl */`
+const NC_PLAN_MAX:f32=3.402823e38;
+// umLowOpen (uniform-lattice-address.ts l.311): an origin on a page's low face with nothing stored below it.
+fn ncLowOpen(origin:vec3i,a:u32)->bool{if((origin[a]&31)!=0){return false;}var q=origin;q[a]-=1;return ncCellKind(q)!=0u;}
+// umSignedFaceExtent (l.241): (lo, hi, finite && lo <= hi) over an owner's canonical faces along axis a and, where it
+// is low-open, its low face (the old extendedNegative). e: (lo, hi, finite so far).
+fn ncExtentAdd(e:ptr<function,vec3f>,v:f32){if(!(abs(v)<=NC_PLAN_MAX)){(*e).z=0.0;}(*e).x=min((*e).x,v);(*e).y=max((*e).y,v);}
+fn ncExtentEnd(origin:vec3i,a:u32,e0:vec3f)->vec3f{
+  var e=e0;if(ncLowOpen(origin,a)){var q=origin;q[a]-=1;ncExtentAdd(&e,ncFace(q,a));}
+  return vec3f(e.x,e.y,select(0.0,1.0,e.z!=0.0&&e.x<=e.y));
+}
+// An h owner (a unit tile's cell): its own texel.
+fn ncExtent1(origin:vec3i,a:u32)->vec3f{var e=vec3f(NC_PLAN_MAX,-NC_PLAN_MAX,1.0);ncExtentAdd(&e,ncFace(origin,a));return ncExtentEnd(origin,a,e);}
+// A 4h owner: its high face (umFace(owner, a, 1)), one 4h patch, or sixteen h patches beside an h tile.
+fn ncExtent4(origin:vec3i,a:u32)->vec3f{
+  var e=vec3f(NC_PLAN_MAX,-NC_PLAN_MAX,1.0);
+  var probe=origin;probe[a]+=4;var anchor=probe;anchor[a]-=1;
+  let parts=select(1u,16u,ncCellKind(probe)==0u&&ncCellOwnerH(probe));
+  for(var part=0u;part<parts;part++){var q=anchor;q[(a+1u)%3u]+=i32(part%4u);q[(a+2u)%3u]+=i32(part/4u);ncExtentAdd(&e,ncFace(q,a));}
+  return ncExtentEnd(origin,a,e);
+}
+// localSpeed's tileVelocity words of one owner's extent: max order(e.hi) (word a) and max order(-e.lo) (word 3 + a),
+// 0xffffffff where it is not finite.
+fn ncPlanHigh(e:vec3f)->u32{return select(0xffffffffu,ncOrderKey(e.y),e.z!=0.0);}
+fn ncPlanLow(e:vec3f)->u32{return select(0xffffffffu,ncOrderKey(-e.x),e.z!=0.0);}
+// localSpeed's span (l.330): the sum over axes of the tile's face velocity range, saturated by a nonfinite face.
+fn ncPlanSpan(hi:vec3u,lo:vec3u)->f32{
+  var span=0.0;
+  for(var a=0u;a<3u;a++){
+    if(hi[a]==0xffffffffu||lo[a]==0xffffffffu){span=NC_PLAN_MAX;}
+    else{span+=max(0.0,ncOrderValue(hi[a])+ncOrderValue(lo[a]));}
+  }
+  return span;
+}
+fn ncPlan(s:u32,i:u32)->vec4f{let o=NC_S*s+${CENSUS.DEF}u+4u*i;return vec4f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]),bitcast<f32>(census[o+3u]));}
+// tileErrorOf (l.357): the velocity change across tile t, m/s, from its mean against each axis's two stored
+// neighbours (umKeyStored: a resident page's tile) and its span.
+fn ncDeformation(t:vec3i,own:vec4f)->f32{
+  let centre=own.xyz;var gradient=0.0;
+  for(var axis=0u;axis<3u;axis++){
+    var d=vec3i(0);d[axis]=1;let lo=t-d;let hi=t+d;
+    if(ncTileState(lo)!=0u||ncTileState(hi)!=0u){continue;}
+    let below=ncPlan(ncPageSlot(lo>>vec3u(3u)),ncTileLocal(lo)).xyz;let above=ncPlan(ncPageSlot(hi>>vec3u(3u)),ncTileLocal(hi)).xyz;
+    let variation=max(abs(above-centre),abs(centre-below));
+    gradient+=max(variation.x,max(variation.y,variation.z))/(4.0*ncH());
+  }
+  var deformation=max(4.0*ncH()*gradient,own.w);
+  if(!(deformation<3.0e38)){deformation=NC_PLAN_MAX;}
+  return deformation;
+}
+// nbActivityTriggered, "need" (the dam's particleSeeding): strain, rotation, impact, approach or shape; thin only
+// where the step's deformation exceeds the transport budget (UNIFORM_SURFACE_TRANSPORT_ERROR_H of h). The budget's
+// drop (UNIFORM_STAGE_IMPORTANCE.dropped) never fires on the dam (detailBudgetPercent 100: policy.activity.x = 100,
+// nbBudgetOn() false), so it is not ported.
+fn ncNeedTriggered(t:vec3i,s:u32,i:u32,criteria:u32)->bool{
+  if((criteria&0x3cu)!=0u){return true;}
+  if((criteria&1u)!=0u){return true;}
+  if((criteria&2u)==0u){return false;}
+  return ncDt()*ncDeformation(t,ncPlan(s,i))/ncH()>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
 }
 `;
 
@@ -815,8 +895,12 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
 }`);
 
   // censusFine: classify (l.2091), a workgroup an F brick of F_ALL, each of its h tiles in turn, a lane a cell.
-  const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + /* wgsl */`
+  const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + /* wgsl */`
 var<workgroup> wgFlag:u32;
+// The frame plan's motion (PLAN): each cell's mean face velocity, and the tile's tileVelocity words.
+var<workgroup> planValues:array<vec3f,64>;
+var<workgroup> planHigh:array<atomic<u32>,3>;
+var<workgroup> planLow:array<atomic<u32>,3>;
 var<workgroup> tileCrossing:array<atomic<u32>,2>;
 var<workgroup> tileLow:array<atomic<u32>,3>;
 var<workgroup> tileHigh:array<atomic<u32>,3>;
@@ -839,8 +923,17 @@ var<workgroup> mixedTile:atomic<u32>;
       atomicStore(&mixedTile,0u);for(var q=0u;q<2u;q++){atomicStore(&tileCrossing[q],0u);atomicStore(&tileDeep[q],0u);}
       for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}
       atomicStore(&tileError,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);
+      for(var a=0u;a<3u;a++){atomicStore(&planHigh[a],0u);atomicStore(&planLow[a],0u);}
     }
     workgroupBarrier();
+    {
+      // localSpeed (l.283): the cell's extent on each axis, its mean, and the tile's velocity words.
+      let origin=4*t+vec3i(ncCorner(lane,4u));
+      for(var a=0u;a<3u;a++){
+        let e=ncExtent1(origin,a);planValues[lane][a]=0.5*e.x+0.5*e.y;
+        atomicMax(&planHigh[a],ncPlanHigh(e));atomicMax(&planLow[a],ncPlanLow(e));
+      }
+    }
     {
       var c=ncEmptyClass();ncClassifyOwner(t,1u,lane,&c,true);
       for(var a=0u;a<3u;a++){atomicMin(&tileLow[a],c.low[a]);atomicMax(&tileHigh[a],c.high[a]);}
@@ -864,6 +957,11 @@ var<workgroup> mixedTile:atomic<u32>;
       c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
       let r=ncFinishTile(t,1u,c);
       ncStoreClass(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),c,r,1u);
+      // localSpeed's tile mean (l.320, the 64 cells in lane order) and span.
+      var average=vec3f(0.0);for(var q=0u;q<64u;q++){average+=planValues[q]/64.0;}
+      let hi=vec3u(atomicLoad(&planHigh[0]),atomicLoad(&planHigh[1]),atomicLoad(&planHigh[2]));
+      let lo=vec3u(atomicLoad(&planLow[0]),atomicLoad(&planLow[1]),atomicLoad(&planLow[2]));
+      ncPlanStore(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),average,ncPlanSpan(hi,lo));
       atomicMax(&wgReach,r.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
     }
   }
@@ -874,7 +972,7 @@ var<workgroup> mixedTile:atomic<u32>;
   // (tile z = r), a lane a tile; every workgroup word is the 64-tile slab's, so the slabs run side by side.
   // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER) when tiered,
   // and is air all-h (CMASK all-ones a resident page: no slot reads NB_PHI_FAR), so it stores the identity.
-  const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + /* wgsl */`
+  const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + /* wgsl */`
 var<workgroup> wgFlag:u32;
 var<workgroup> cqErrors:atomic<u32>;
 var<workgroup> cqError:array<u32,64>;
@@ -988,6 +1086,10 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
       if((c.flags&2u)!=0u){c.deep=vec2u(atomicLoad(&cqDeepest[lane][0]),atomicLoad(&cqDeepest[lane][1]));}
       let f=ncFinishTile(t,4u,c);
       ncStoreClass(cs,i,c,f,4u);
+      // localSpeed (l.283) of the tile's one 4h owner: its mean (n = 1) and span.
+      var mean=vec3f(0.0);var hi=vec3u(0u);var lo=vec3u(0u);
+      for(var a=0u;a<3u;a++){let x=ncExtent4(4*t,a);mean[a]=0.5*x.x+0.5*x.y;hi[a]=ncPlanHigh(x);lo[a]=ncPlanLow(x);}
+      var average=vec3f(0.0);average+=mean/1.0;ncPlanStore(cs,i,average,ncPlanSpan(hi,lo));
       atomicMax(&wgReach,f.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
     }
     workgroupBarrier();
@@ -1077,7 +1179,7 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   // page's F children 8r..8r+7). A band tile is h only when its F brick and each in-range 27-neighbour of it are
   // resident; a clamped tile's missing bricks are appended as candidates, once a page (the page's bit of the 6^3
   // bricks about it in CAND_MASK, whose atomicOr names the one lane that lists it), and it refines one census late.
-  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRO], OWNER + HOOKS + CENSUS_FORMULAS + /* wgsl */`
+  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRO], OWNER + HOOKS + CENSUS_FORMULAS + PLAN + /* wgsl */`
 var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
 fn ncJoined(t:vec3i)->bool{
@@ -1124,15 +1226,16 @@ var<workgroup> wgGo:u32;
   let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
   let base=4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))-vec3i(1);
   cdTile(cs,lane+64u*r,lane,reach,base);
-  // TRIG: an F child's bit j is its tile j's importance triggers (final word 1 bits 16..21).
+  // TRIG: an F child's bit j is whether its tile j's importance triggers (final word 1 bits 16..21) heat it, the old
+  // need rule (nbActivityTriggered, PLAN's ncNeedTriggered).
   let child=8u*r+lane;
   if(lane<8u){
     let fs=nbChild(cs,child);
     if(fs<NB_SEAM){
       let b=vec3u(child&3u,(child>>2u)&3u,child>>4u);var bits=0u;
       for(var j=0u;j<8u;j++){
-        let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let w1=ncFin(cs,q.x|(q.y<<3u)|(q.z<<6u));
-        bits|=select(0u,1u<<j,((w1>>16u)&63u)!=0u);
+        let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let qi=q.x|(q.y<<3u)|(q.z<<6u);let w1=ncFin(cs,qi);
+        bits|=select(0u,1u<<j,ncNeedTriggered(xTileOf(cs,qi),cs,qi,(w1>>16u)&63u));
         // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
         bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
       }

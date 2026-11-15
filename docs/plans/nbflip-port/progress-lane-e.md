@@ -625,3 +625,33 @@ Tiered dam, steps 13-24 (`brick-dam.mts --tiered --solver=composite --steps=24 -
 
 The kernel sum's non-census rows move by ±0.5 ms a kernel run to run (my three X8 runs summed 126.9, 131.5 and
 129.2 ms); the census rows are the change.
+
+## 2026-11-15 — TRIG bits 0..7: the old need trigger
+
+TRIG bit j is now the old `nbActivityTriggered` in need mode (uniform-narrow-band-activity.wgsl.ts l.28, the
+dam's particleSeeding): criteria & 0x3c, or shape, or thin with dt · tuDeformation(t) / h > 0.02. Before, any
+trigger bit set it. The deformation (tuDeformation, uniform-narrow-band-flip.ts l.940) is the frame plan's
+tileErrorOf (uniform-mixed-frame-plan.ts l.357-404): max(4h · gradient, span), where the gradient sums, over each
+axis with both neighbours stored, the largest component of max(|above − centre|, |centre − below|) of the tiles'
+mean extended face velocity, over 4h; and the span is localSpeed's (l.269-345) sum over axes of the tile's face
+velocity range (umSignedFaceExtent l.241: an h owner's own texel, a 4h owner's high face, one patch or sixteen
+beside an h tile, plus the low face where low-open; nonfinite saturates). The means and spans are per-tile side
+outputs of the census passes that already read those faces (census words DEF, 4 a tile: censusFine for h tiles,
+censusCoarse for 4h), and censusDecide's TRIG lanes compute the gradient only for a tile whose criteria are thin
+alone. Stated: the plan reads the census's velocity at the head, where the old activity read the certificate its
+last frame plan built; the reader-class zero and the error saturation drop (thin needs a crossing tile, which is a
+reader; the error saturates only with the span).
+
+Dropped: the old budget (uniform-narrow-band-budget.wgsl.ts activityAdmit, bit 27) runs only when
+policy.activity.x < 100 (nbBudgetOn). The dam sets no detailBudgetPercent (default 100); the old engine's probe
+(tools/nbflip-census-capture.ts, now printing a dropped count) prints the policy word 24 = 100. So no dam tile is
+ever dropped, and the rule is not missing for the dam. The seeps (detailBudgetPercent 5) do run it: a missing rule
+there, not ported.
+
+Tests: brick-census.test.ts's oracle transcribes localSpeed, tileErrorOf and the need rule (plan words checked:
+span exact, an h tile's 64-term mean within 1e-6, since the compiler reassociates the sum; TRIG exact). The
+synthetic scene has no thin-alone tile; brick-census-dam.test.ts transcribes localSpeed on the old engine's own
+extension texels and checks every plan word and TRIG of the 32768 tiles of frames 14 and 43 (frame 43: 874
+thin-alone tiles, 664 heated, 210 no longer heated). brick-census-x8.test.ts keeps comparing every other word
+with the frozen G1 kernels. Tiered dam profile (contended: other GPU processes ran): censusFine 3.10, censusCoarse
+0.60, censusDecide 0.45 ms/step (0.12, 0.11 and 0.05 above the X8 run).

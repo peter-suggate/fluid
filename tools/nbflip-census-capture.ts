@@ -226,7 +226,7 @@ for (let step = 1; step <= steps; step++) {
     const hostJoins = join[census.joinWords]!;
     // Per lattice tile.
     const pageKinds = [0, 0, 0, 0], windowNonResident = new Map<number, number>();
-    let unvisited = 0, replayedT = 0, notLive = 0, badCoord = 0, unvisitedH = 0, unvisitedChanged = 0, hTiles = 0, deepTiles = 0, deepRegions = 0, joined = 0, decided = 0, changes = 0, refine = 0, coarsen = 0, triggered = 0, deepUsedPrev = 0, deepPrevBand = 0;
+    let unvisited = 0, replayedT = 0, notLive = 0, badCoord = 0, unvisitedH = 0, unvisitedChanged = 0, hTiles = 0, deepTiles = 0, deepRegions = 0, joined = 0, decided = 0, changes = 0, refine = 0, coarsen = 0, triggered = 0, deepUsedPrev = 0, deepPrevBand = 0, dropped = 0, droppedTriggered = 0;
     const deepList: string[] = [];
     for (let i = 0; i < tileCount; i++) {
       const word = owners[2 * i]!, width = word & 255, kind = (word >>> 8) & 255, k = owners[2 * i + 1]!, t = coordOf(i);
@@ -245,6 +245,8 @@ for (let step = 1; step <= steps; step++) {
       if (d) decided++;
       if (d !== (width === 1)) { changes++; if (d) refine++; else coarsen++; }
       if (((after[census.importanceOffset + 2 * k + 1]! >>> 16) & 63) !== 0) triggered++;
+      // The budget's drop (UNIFORM_STAGE_IMPORTANCE.dropped, bit 27): triggered, but dropped by the budget.
+      if ((after[census.importanceOffset + 2 * k + 1]! >>> 27) & 1) { dropped++; if (((after[census.importanceOffset + 2 * k + 1]! >>> 16) & 63) !== 0) droppedTriggered++; }
       if (deep) {
         deepTiles++;
         if (!j) { deepUsedPrev++; if (bitAt(before, census.decidedOffset, k)) deepPrevBand++; }
@@ -253,7 +255,7 @@ for (let step = 1; step <= steps; step++) {
     }
     for (let r = 0; r < census.pages; r++) if (deepWords[r]) deepRegions++;
     const reach = f32(after)[18]!;
-    console.log(JSON.stringify({ kind: "census", step, pass, pageKinds: { resident: pageKinds[0], air: pageKinds[1], solid: pageKinds[2], bulk16: pageKinds[3] }, windowNonResidentTiles: Object.fromEntries(windowNonResident), hTiles, decided, changes, refine, coarsen, triggered, joined, hostJoins, reach, regions: { classified: nClass, replayed: nReplay, unvisitedTiles: unvisited, unvisitedH, unvisitedDecidedChanged: unvisitedChanged, replayedTiles: replayedT, notLive, badCoord }, deep: { regions: deepRegions, tiles: deepTiles, decidedFromPrev: deepUsedPrev, prevBand: deepPrevBand, first: deepList } }));
+    console.log(JSON.stringify({ kind: "census", step, pass, pageKinds: { resident: pageKinds[0], air: pageKinds[1], solid: pageKinds[2], bulk16: pageKinds[3] }, windowNonResidentTiles: Object.fromEntries(windowNonResident), hTiles, decided, changes, refine, coarsen, triggered, dropped, droppedTriggered, joined, hostJoins, reach, regions: { classified: nClass, replayed: nReplay, unvisitedTiles: unvisited, unvisitedH, unvisitedDecidedChanged: unvisitedChanged, replayedTiles: replayedT, notLive, badCoord }, deep: { regions: deepRegions, tiles: deepTiles, decidedFromPrev: deepUsedPrev, prevBand: deepPrevBand, first: deepList } }));
     if (!p.images) continue;
 
     // ---- Decode the capture to the fixture over the window.

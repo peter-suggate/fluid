@@ -3,7 +3,9 @@
 // the same set buffer and a zeroed census buffer, and every word must be identical: the whole census buffer, and
 // the whole set buffer (the census words, WANT, TRIG, MARK_F, the counters, FAIL), except the candidate list, whose
 // order the appending lanes' race sets (compared as a sorted list, so a duplicate counts), and X8's own candidate
-// mask (CAND_MASK) and censusImportance's moving-shape bits (census MOV), which the G1 passes do not have. Two states: brick-census.test.ts's synthetic scene (h and
+// mask (CAND_MASK) and censusImportance's moving-shape bits (census MOV), which the G1 passes do not have. Since
+// the need trigger (TRIG bits 0..7 and CENSUS_TRIGGERED, and the census's plan words DEF) the frozen passes are the
+// older rule there, so those words are left to brick-census.test.ts's oracle. Two states: brick-census.test.ts's synthetic scene (h and
 // 4h tiles, the clamp and its candidates) and the old engine's dam census at frames 14 and 43 (every page
 // resident). Each runs tiered at the boot, tiered at a step's head (the ring keep marks) and all-h. GPU only.
 import assert from "node:assert/strict";
@@ -14,7 +16,7 @@ import { gunzipSync } from "node:zlib";
 import { ARGS, BRICK_STRIDE, CAND_MASK_WORDS, CMASK_WORDS, H, LIST, REC, RING, type BrickLayout } from "./brick-abi";
 import { CENSUS, brickCensusSchedule } from "./brick-census.wgsl";
 import type { BrickEngine } from "./brick-engine";
-import { brickCensusSchedule as frozenCensusSchedule } from "./parity/census-g1-frozen";
+import { CENSUS as FROZEN, CENSUS_H, brickCensusSchedule as frozenCensusSchedule } from "./parity/census-g1-frozen";
 import { decodeCensusFixture, type CensusFixtureMeta } from "./parity/census-fixture";
 import { ownerOf, storedFaces, storedVertices } from "./parity/remap-fixture";
 
@@ -41,13 +43,20 @@ async function compareSchedules(e: BrickEngine, L: BrickLayout, tiered: boolean,
   const neu = await runOne(brickCensusSchedule(L, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep));
   const diff: string[] = [];
   const note = (s: string) => { if (diff.length < 20) diff.push(s); };
-  const movOnly = (w: number) => { const k = w % CENSUS.STRIDE; return k >= CENSUS.MOV && k < CENSUS.MOV + 16; };
-  for (let w = 0; w < old.census.length; w++) if (!movOnly(w) && old.census[w] !== neu.census[w]) note(`census word ${w} (slot ${Math.floor(w / CENSUS.STRIDE)}, +${w % CENSUS.STRIDE}): ${old.census[w]!.toString(16)} vs ${neu.census[w]!.toString(16)}`);
+  // The frozen census's words at its own stride; the live census adds the plan words (DEF) after them.
+  for (let cs = 0; cs < L.cap.c; cs++) for (let k = 0; k < FROZEN.STRIDE; k++) {
+    if (k >= CENSUS.MOV && k < CENSUS.MOV + 16) continue;
+    const a = old.census[FROZEN.STRIDE * cs + k]!, b = neu.census[CENSUS.STRIDE * cs + k]!;
+    if (a !== b) note(`census slot ${cs} +${k}: ${a.toString(16)} vs ${b.toString(16)}`);
+  }
   const c0 = set0[H.N_CAND]!, cOld = old.set[H.N_CAND]!, cNew = neu.set[H.N_CAND]!;
   const candEnd = L.set.cand + L.cap.f, maskAt = L.set.candMask, maskEnd = maskAt + CAND_MASK_WORDS * L.cap.c;
+  // TRIG bits 0..7 (and their count) are the need rule since the frozen passes (brick-census.test.ts checks them); bits 8..15 are compared.
+  const trigAt = L.set.trig, trigEnd = trigAt + L.cap.f;
   for (let w = 0; w < old.set.length; w++) {
-    if ((w >= L.set.cand + c0 && w < candEnd) || (w >= maskAt && w < maskEnd)) continue;
-    if (old.set[w] !== neu.set[w]) note(`set word ${w}: ${old.set[w]!.toString(16)} vs ${neu.set[w]!.toString(16)}`);
+    if ((w >= L.set.cand + c0 && w < candEnd) || (w >= maskAt && w < maskEnd) || w === CENSUS_H.CENSUS_TRIGGERED) continue;
+    const m = w >= trigAt && w < trigEnd ? 0xffffff00 : 0xffffffff;
+    if (((old.set[w]! & m) >>> 0) !== ((neu.set[w]! & m) >>> 0)) note(`set word ${w}: ${old.set[w]!.toString(16)} vs ${neu.set[w]!.toString(16)}`);
   }
   const list = (s: Uint32Array, n: number) => [...s.subarray(L.set.cand + c0, L.set.cand + Math.min(n, L.cap.f))].sort((a, b) => a - b);
   assert.deepEqual(list(neu.set, cNew), list(old.set, cOld), "the candidate list (sorted)");

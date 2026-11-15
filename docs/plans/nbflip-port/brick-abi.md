@@ -251,8 +251,13 @@ rules above through the directory and masks:
 - A bring-up stage set reads no TRIG. On a lattice that isn't whole pages (P's synthetic blocks) it
   runs without the census, which refuses such lattices. Every scene's fluid lattice is whole pages
   (`sceneFluidBox`).
-- TRIG is one word per F slot. Bit j (0-7) is set when tile j has any importance trigger (final
-  word 1 bits 16-21, `nbActivityTriggered`). Bit 8 + j is tile j's thin trigger alone (word 1
+- TRIG is one word per F slot. Bit j (0-7) is set when tile j's importance triggers heat it: the
+  old need rule (`nbActivityTriggered`, particleSeeding "need"), over the final word 1 bits 16-21.
+  Shape, impact or approach heat (strain and rotation too, dead under the dam's policy); thin heats
+  only where dt · deformation / h > 0.02 (UNIFORM_SURFACE_TRANSPORT_ERROR_H), the deformation being
+  tileErrorOf's max(4h · gradient, span) of the tile's plan words (census DEF). The budget's drop
+  (`dropped`) is not ported: no scene but the seeps sets detailBudgetPercent < 100, and on the dam
+  the old policy word is 100 (budget off). Bit 8 + j is tile j's thin trigger alone (word 1
   bit 17), which F's thin move path reads (F's request, 2026-11-15). Bits 16-31 are zero.
 - The census runs in the all-h engine too, because F reads TRIG. There it neither commits WANT
   (no transfer) nor requests bricks (censusDecide's `cfg.z` = 0).
@@ -268,8 +273,10 @@ rules above through the directory and masks:
     analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
     injection at the corners.
   - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
-- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 7328 words
-  a C slot (with the near words, the moving-shape bits MOV and the residency records, §5.4).
+- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 9376 words
+  a C slot (with the near words, the moving-shape bits MOV, the residency records, §5.4, and the
+  plan words DEF: 4 a tile, the old frame plan's mean extended face velocity xyz and face span,
+  localSpeed's, written by censusFine and censusCoarse and read by censusDecide's deformation).
 
 **The tier change, within a step** (§7, amended):
 1. `setCensus` (brick-census.wgsl.ts, landed fb17d41e at the part 1 head; this was planned as part

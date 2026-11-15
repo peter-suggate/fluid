@@ -5,7 +5,7 @@
 // where the kernel's f32 arithmetic decides a comparison (fr). Exact: velocity keys, crossing cells, every
 // flag, trigger and required bit, WANT, TRIG and the candidates. Tolerance-checked (the GPU may fuse a multiply
 // and add, and scores are bytes of f32 products): score bytes, within 1; the winner bits of FIN follow the
-// bytes and are not compared. The deep COLD test (D = 0) is CPU only.
+// bytes and are not compared; an h tile's plan mean (a 64-term sum the compiler may reassociate), within 1e-6. The deep COLD test (D = 0) is CPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, RING, SEAM, bricksPerAxis, phiFar } from "./brick-abi";
@@ -47,9 +47,10 @@ export interface CensusState {
 interface Class { low: number[]; high: number[]; gap: number[]; reach: number[]; flags: number; error: number; crossing: [number, number]; deep: [number, number] }
 const emptyClass = (): Class => ({ low: [0xffffffff, 0xffffffff, 0xffffffff], high: [0, 0, 0], gap: [15, 15, 15, 15, 15, 15], reach: [15, 15, 15, 15, 15, 15], flags: 0, error: 0, crossing: [0, 0], deep: [0, 0] });
 const identityKeys = () => [0xffffffff, 0xffffffff, 0xffffffff, 0, 0, 0];
-interface Scratch { keys: number[][]; w0: number[]; w1: number[]; fin: number[]; cross: [number, number][]; gap: number[]; req: number[]; cubes: number[][] }
+interface Scratch { keys: number[][]; w0: number[]; w1: number[]; fin: number[]; cross: [number, number][]; gap: number[]; req: number[]; cubes: number[][]; plan: number[][] }
 export interface CensusResult {
   scratch: Map<number, Scratch>; want: Map<number, Uint32Array>; trig: Map<number, number>; cand: Set<number>;
+  /** Thin-alone tiles of F bricks (FIN's criteria exactly the thin bit), and those the need rule heats. */ thinAlone: { tiles: number; heated: number };
   band: Map<number, boolean>; counters: Record<keyof typeof CENSUS_H, number>; failed: number;
 }
 
@@ -304,7 +305,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   for (const [k, cs] of s.pages) pageOfSlot.set(cs, [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023]);
   for (const cs of s.cAll) {
     const pk = pageOfSlot.get(cs)!;
-    const sc: Scratch = { keys: [], w0: [], w1: [], fin: [], cross: [], gap: [], req: new Array(16).fill(0), cubes: [] };
+    const sc: Scratch = { keys: [], w0: [], w1: [], fin: [], cross: [], gap: [], req: new Array(16).fill(0), cubes: [], plan: [] };
     scratch.set(cs, sc);
     for (let i = 0; i < 512; i++) {
       const t = tileOf(cs, i, pk);
@@ -356,6 +357,55 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       }
     }
   }
+  // ---- The frame plan's motion (localSpeed, umSignedFaceExtent): a tile's mean face velocity and span (PLAN).
+  const PLAN_MAX = fr(3.402823e38);
+  const lowOpen = (o: V3, a: number) => (o[a]! & 31) === 0 && cellKind(add(o, unit(a, -1))) !== 0;
+  type Extent = { lo: number; hi: number; finite: boolean };
+  const extentAdd = (e: Extent, v: number) => { if (!(Math.abs(v) <= PLAN_MAX)) e.finite = false; e.lo = Math.min(e.lo, v); e.hi = Math.max(e.hi, v); };
+  const extentEnd = (o: V3, a: number, e: Extent): Extent => { if (lowOpen(o, a)) extentAdd(e, face(add(o, unit(a, -1)), a)); return { lo: e.lo, hi: e.hi, finite: e.finite && e.lo <= e.hi }; };
+  const extent1 = (o: V3, a: number) => { const e = { lo: PLAN_MAX, hi: -PLAN_MAX, finite: true }; extentAdd(e, face(o, a)); return extentEnd(o, a, e); };
+  const extent4 = (o: V3, a: number) => {
+    const e = { lo: PLAN_MAX, hi: -PLAN_MAX, finite: true }, probe = add(o, unit(a, 4)), anchor = add(probe, unit(a, -1));
+    const parts = cellKind(probe) === 0 && cellH(probe) ? 16 : 1;
+    for (let part = 0; part < parts; part++) { const q: V3 = [...anchor]; q[(a + 1) % 3]! += part % 4; q[(a + 2) % 3]! += Math.floor(part / 4); extentAdd(e, face(q, a)); }
+    return extentEnd(o, a, e);
+  };
+  const planHigh = (e: Extent) => (e.finite ? orderKey(e.hi) : 0xffffffff), planLow = (e: Extent) => (e.finite ? orderKey(-e.lo) : 0xffffffff);
+  const planSpan = (hi: number[], lo: number[]) => {
+    let span = 0;
+    for (let a = 0; a < 3; a++) span = hi[a] === 0xffffffff || lo[a] === 0xffffffff ? PLAN_MAX : fr(span + Math.max(0, fr(orderValue(hi[a]!) + orderValue(lo[a]!))));
+    return span;
+  };
+  const meanOf = (e: Extent) => fr(fr(0.5 * e.lo) + fr(0.5 * e.hi));
+  for (const cs of s.cAll) {
+    const pk = pageOfSlot.get(cs)!, sc = scratch.get(cs)!;
+    for (let i = 0; i < 512; i++) {
+      const t = tileOf(cs, i, pk); if (!tileInLattice(t)) continue;
+      const mean = [0, 0, 0], hi = [0, 0, 0], lo = [0, 0, 0];
+      if (tileH(t)) {
+        for (let lane = 0; lane < 64; lane++) {
+          const o = add(scale3(t, 4), corner(lane, 4));
+          for (let a = 0; a < 3; a++) { const e = extent1(o, a); mean[a] = fr(mean[a]! + fr(meanOf(e) / 64)); hi[a] = Math.max(hi[a]!, planHigh(e)); lo[a] = Math.max(lo[a]!, planLow(e)); }
+        }
+      } else for (let a = 0; a < 3; a++) { const e = extent4(scale3(t, 4), a); mean[a] = fr(0 + meanOf(e)); hi[a] = planHigh(e); lo[a] = planLow(e); }
+      sc.plan[i] = [...mean, planSpan(hi, lo)];
+    }
+  }
+  // tileErrorOf's deformation and nbActivityTriggered's need rule (PLAN's ncDeformation, ncNeedTriggered).
+  const planAt = (q: V3) => { const st = scratch.get(pageSlot(shr(q, 3))!)!; return st.plan[tileIndex(q)]!; };
+  const deformation = (t: V3) => {
+    const own = planAt(t); let gradient = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      const lo = add(t, unit(axis, -1)), hi = add(t, unit(axis, 1));
+      if (tileState(lo) !== 0 || tileState(hi) !== 0) continue;
+      const below = planAt(lo), above = planAt(hi);
+      let v = 0; for (let c = 0; c < 3; c++) v = Math.max(v, Math.max(Math.abs(fr(above[c]! - own[c]!)), Math.abs(fr(own[c]! - below[c]!))));
+      gradient = fr(gradient + fr(v / fr(4 * h)));
+    }
+    const d = Math.max(fr(fr(4 * h) * gradient), own[3]!);
+    return d < fr(3e38) ? d : PLAN_MAX;
+  };
+  const needTriggered = (t: V3, criteria: number) => (criteria & 0x3c) !== 0 || (criteria & 1) !== 0 || ((criteria & 2) !== 0 && fr(fr(dt * deformation(t)) / h) > fr(0.02));
   // ---- boundCubes.
   for (const sc of scratch.values()) {
     const merge = (into: number[], k: number[]) => { for (let a = 0; a < 3; a++) { into[a] = Math.min(into[a]!, k[a]!); into[3 + a] = Math.max(into[3 + a]!, k[3 + a]!); } };
@@ -514,6 +564,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     return fine;
   };
   const want = new Map<number, Uint32Array>(), trigOut = new Map<number, number>(), cand = new Set<number>(), band = new Map<number, boolean>();
+  const thinAlone = { tiles: 0, heated: 0 };
   const counters = { CENSUS_CLAMPED: 0, CENSUS_CAND: 0, CENSUS_REACH: bitsOf(reachMax), CENSUS_CROSSING: crossingCount, CENSUS_REQUIRED: required, CENSUS_BAND: 0, CENSUS_REFINED: 0, CENSUS_TRIGGERED: 0 };
   const inRange = (b: V3) => b.every((x, a) => x >= 0 && x < brickRange[a]!);
   for (const cs of s.cAll) {
@@ -534,11 +585,16 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     for (let bl = 0; bl < 64; bl++) {
       const fs = s.bricks.get(key(add(scale3(pk, 4), corner(bl, 4)))); if (fs === undefined) continue;
       let bits = 0;
-      for (let j = 0; j < 8; j++) { const q = add(scale3(corner(bl, 4), 2), corner(j, 2)); const w1 = sc.fin[tileIndex(q)]!; if (((w1 >>> 16) & 63) !== 0) bits |= 1 << j; if ((w1 >>> 17) & 1) bits |= 1 << (8 + j); }
+      for (let j = 0; j < 8; j++) {
+        const q = add(scale3(corner(bl, 4), 2), corner(j, 2)), w1 = sc.fin[tileIndex(q)]!, criteria = (w1 >>> 16) & 63, heat = needTriggered(add(scale3(pk, 8), q), criteria);
+        if (heat) bits |= 1 << j;
+        if ((w1 >>> 17) & 1) bits |= 1 << (8 + j);
+        if (criteria === 2) { thinAlone.tiles++; if (heat) thinAlone.heated++; }
+      }
       trigOut.set(fs, bits >>> 0); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
     }
   }
-  return { scratch, want, trig: trigOut, cand, band, counters, failed };
+  return { scratch, want, trig: trigOut, cand, band, counters, failed, thinAlone };
 }
 
 // ---- The frozen scene: a pool whose surface rolls across h and 4h tiles, a falling drop above it, a run-out
@@ -634,6 +690,8 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
         check(((gfin & FLAG_BITS & ~(7 << 22)) >>> 0) === ((sc.fin[i]! & FLAG_BITS & ~(7 << 22)) >>> 0) && byteNear(gfin, sc.fin[i]!, 0) && byteNear(gfin, sc.fin[i]!, 8), `${at} fin ${gfin.toString(16)} vs ${sc.fin[i]!.toString(16)}`);
         check(census[o + CENSUS.CROSS + 2 * i] === sc.cross[i]![0] && census[o + CENSUS.CROSS + 2 * i + 1] === sc.cross[i]![1], `${at} crossing cells`);
         check(census[o + CENSUS.GAP + i] === sc.gap[i], `${at} gap ${census[o + CENSUS.GAP + i]!.toString(16)} vs ${sc.gap[i]!.toString(16)}`);
+        // The plan words: the span exact (a max of sums of two faces), an h tile's mean within the reassociation of its 64-term sum.
+        if (sc.plan[i]) for (let k = 0; k < 4; k++) { const g = fromBits(census[o + CENSUS.DEF + 4 * i + k]!), x = sc.plan[i]![k]!; check(k === 3 ? g === x : Math.abs(g - x) <= 1e-6 * (1 + Math.abs(x)), `${at} plan ${k}: ${g} vs ${x}`); }
         tiles++;
       }
       for (let w = 0; w < 16; w++) check(census[o + CENSUS.REQ + w] === sc.req[w], `page ${cs} required word ${w}`);
@@ -654,7 +712,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     const fins = [...want.scratch.values()].flatMap(sc => sc.fin);
     const has = (b: number) => fins.filter(x => (x & b) !== 0).length;
     const c = want.counters, bandH = [...want.band.values()].filter(Boolean).length;
-    const report = { tiles, crossing: c.CENSUS_CROSSING, required: c.CENSUS_REQUIRED, band: c.CENSUS_BAND, refined: c.CENSUS_REFINED, clamped: c.CENSUS_CLAMPED, cand: c.CENSUS_CAND, shape: has(trig(0)), thin: has(trig(1)), impact: has(trig(4)), approach: has(trig(5)), approachScored: fins.filter(x => ((x >>> 8) & 255) !== 0 && (x & CROSSES) !== 0).length, bandH };
+    const report = { tiles, thinAlone: want.thinAlone, crossing: c.CENSUS_CROSSING, required: c.CENSUS_REQUIRED, band: c.CENSUS_BAND, refined: c.CENSUS_REFINED, clamped: c.CENSUS_CLAMPED, cand: c.CENSUS_CAND, shape: has(trig(0)), thin: has(trig(1)), impact: has(trig(4)), approach: has(trig(5)), approachScored: fins.filter(x => ((x >>> 8) & 255) !== 0 && (x & CROSSES) !== 0).length, bandH };
     console.log("setCensus:", JSON.stringify(report));
     assert.ok(report.shape > 0 && report.thin > 0 && report.impact > 0 && report.approachScored > 0 && report.clamped > 0 && report.refined > 0 && report.band > report.required, JSON.stringify(report));
     e.destroy();
