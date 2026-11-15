@@ -121,7 +121,8 @@ test("brick engine: the engine switch refuses unknown engines, and every scene u
   const refusal = brickEngineRefusal(seep, { timeStep: "sixtieth" });
   assert.match(refusal.message, /not enabled on the brick engine/);
   assert.match(refusal.message, /lane F's stages/);
-  assert.match(refusal.message, /lane P's pressure solver/);
+  // Lane P's line is there exactly while P's solver is unregistered (it registers compositeMGPCG at M2).
+  assert.equal(/lane P's pressure solver/.test(refusal.message), brickEngineLanes().some(l => /lane P/.test(l)));
   assert.match(refusal.message, /engine "uniform"/);
   assert.ok(!brickEngineGaps(seep).some(g => /brickPools/.test(g)));
   // The dam: no scene gap, only the lanes'.

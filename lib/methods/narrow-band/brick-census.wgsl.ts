@@ -27,7 +27,11 @@
  * Deviations, all stated:
  * - Deep COLD is taken as D = 0 (no replay, no CC_DECIDED or CC_STATIC carried between censuses): every
  *   tile is classified and decided every census. brick-census.test.ts checks that the decisions of tiles
- *   that are not deep are the same with D = 0 (they never read D).
+ *   that are not deep are the same with D = 0 (they never read D). The dam's real census (brick-census-dam.test.ts,
+ *   frames 14 and 43, whole lattice): every deep tile replayed decidedPrev = 0 and D = 0 bands none of them, so
+ *   WANT is identical; in the old run's frames 1-150 no deep tile ever had prevBand = 1 (1088 deep tiles at
+ *   frame 14, up to 5952). Accepted for M2 (coordinator, 2026-11-15); the real D (decidedPrev and region heat)
+ *   lands with the tiers and before M3 (seep's reservoir is mostly deep).
  * - No solids at M2: every census open mask is all cells (umCensusOpenCells), so the cut branches
  *   (umPlaneBuriedCorners, buried taps, closed edges) drop, and umObstacleAt is false. A body or solid edit
  *   fails explicitly (NB_FAIL_UNSUPPORTED).
@@ -212,7 +216,8 @@ fn ncSurfaceDisplacement(t:vec3i,lane:u32)->f32{
  let origin=4*t;let h=ncH();
  ncStageSmoothTile(origin,lane);
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
- for(var k=0u;k<8u;k++){c[k]=ncLoadCorner(origin+4*vec3i(ncCorner(k,2u)));}
+ // The tile's corners are its staged raw vertices (4·corner): the same nbVertexPhi read, once a tile, not once a lane.
+ for(var k=0u;k<8u;k++){c[k]=ncRawAt(4*vec3i(ncCorner(k,2u)));}
  let held=c;ncMetricCorners(lane,&c);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
