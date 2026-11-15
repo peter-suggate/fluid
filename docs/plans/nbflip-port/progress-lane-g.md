@@ -164,3 +164,15 @@ Plan §4.5 (amendment), §4.6 (references) and §4.7 (timing).
   - P1 at 300: 1.32%, down from 1.54%.
 - **Self-test.** LOO a–e and f pass on both sets; the worst drift margin is 0.73. residual 0.5
   fails the seep only (G1, G1w, G2). volctl1 fails the dam (D4 13.6).
+
+## 2026-11-16 Referee note: D8 (plan §4.6)
+
+- **Canonical set.** It is `ref-2761350a/dam-ref-{a..e}` (2761350a). "base-e" belongs to the
+  superseded 33b78ebb set.
+- **Why the margins differ.** At 30–90 the five canonical references agree within 2.7% (mean
+  630.8k, S 17.3k), so the 10% floor binds (tol 63.1k). The old set's d (600.0k) gives S 41.6k,
+  and 3S = 124.8k binds there.
+- **One candidate.** The reported margins 1.25, 0.69 and 1.12 all fit one candidate at about
+  709–710k. The 1.12 used the old set's a and b.
+- **D8 stays gated,** as §4.1 registered it. A counting defect may be corrected with evidence;
+  otherwise seeding or retirement must match NB-FLIP's.

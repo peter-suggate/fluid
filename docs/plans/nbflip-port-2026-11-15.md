@@ -629,6 +629,60 @@ Where the new S makes 3S binding where the floor bound before:
 - **volctl1** (`volumeControlSeconds=1`): **FAIL** on the dam: D4 5.20, D5p 5.46, D5e 6.91,
   D3 2.67 and D5k 1.62. Letters and paddleboats pass, as before.
 
+**Referee note on D8 (2026-11-16, before the M2 gate).** Lanes E and F reported different D8
+margins for the same kind of candidate: 1.24 or 1.25 against "the five refs", 0.69 against "a, b,
+d and base-e", and 1.12 against "a and b". The answers to the three questions follow.
+
+1. **The canonical dam references are `artifacts/nbflip-port/ref-2761350a/dam-ref-{a,b,c,d,e}.jsonl`.**
+   - They are at 2761350a, the read-only export `tree-2761350a` (`lib/methods/uniform` 1abb07aafa,
+     `lib/core` a7863039f6).
+   - They are the referee's default, and M2 is judged against them alone.
+   - **"base-e" is not one of them.** `dam-base-e` is the meta name of run e in the superseded
+     33b78ebb set (`artifacts/nbflip-port/ref/dam-ref-e.jsonl`, §4.0). "a, b, d and base-e" is
+     that whole old dam set; it never had a c.
+   - The two sets share every bench setting except the tree, so they differ only in commit:
+     before and after lane D's retire handoff. Mixing them, or judging M2 against the old set,
+     is not valid. The old set is evidence, not a gate.
+2. **More references do not shrink the band. The old set's spread widens it.** D8's
+   per-reference window means (thousands of particles):
+
+   | set | a | b | c | d | e | mean | S | 3S | 10% floor | tol (binding term) |
+   |---|---|---|---|---|---|---|---|---|---|---|
+   | 2761350a, 30–90 | 623.0 | 635.3 | 633.0 | 640.1 | 622.8 | 630.8 | 17.3 | 51.9 | 63.1 | **63.1 (floor)** |
+   | 2761350a, 105–165 | 397.3 | 382.3 | 380.9 | 387.1 | 371.2 | 383.8 | 26.1 | 78.3 | 38.4 | 78.3 (3S) |
+   | 2761350a, 180–300 | 342.9 | 348.1 | 366.2 | 349.0 | 336.0 | 348.4 | 30.2 | 90.6 | 34.8 | 90.6 (3S) |
+   | 33b78ebb, 30–90 | 634.9 | 641.6 | – | 600.0 | 616.5 ("base-e") | 623.3 | 41.6 | 124.8 | 62.3 | 124.8 (3S) |
+
+   - At 30–90 the canonical five agree within 2.7%, so the 10% floor binds, exactly as §4.1
+     registered it. The old set's ref d (600.0k) gives S = 41.6k, so its band is twice as wide.
+   - Ref d is not an outlier by provenance: same commit and settings as its set. It is the
+     pre-fix code's run-to-run variation.
+   - All three reported margins fit one candidate at about 709–710k:
+     - (709.7 − 630.8) / 63.1 = 1.25 against the canonical five;
+     - (709.1 − 623.3) / 124.8 = 0.69 against the old four;
+     - (709.7 − 638.3) / 63.8 = 1.12 against the **old** set's a and b (634.9, 641.6). Against
+       the canonical a and b (mean 629.2, tol 62.9, the floor) it would be 1.28.
+   - A sixth baseline run at 2761350a (base-f) reads 657.9k, margin 0.43. The candidate is
+     +12.5% over the canonical mean, about three times the baseline's own repeat.
+3. **D8 stays gated.** It does not become an as-written row.
+   - §4.1 registered D8, D8c, L5 and P4 as gated rows with 10% floors before any port. Only the
+     seep's Gp was registered informational ("cost proxy only").
+   - Moving D8 to informational now, after a candidate fails it, is the loosening after the fact
+     that §4 forbids.
+   - It is also a real observable. NB-FLIP's particles live in the narrow band (R = 4h, r = 2h),
+     and the structural plan keeps the band as NB-FLIP's method (structural §1.4). So the
+     particle count through the splash measures the band's volume: surface extent times seeding
+     density. A candidate holding 12.5% more particles through the impact seeds, keeps or
+     counts particles differently from NB-FLIP, and that cost also lands in step time.
+   - The way open under §4 is evidence, not a wider tolerance:
+     - If the candidate's `particles` counts something NB-FLIP's does not (spill-reserve slots,
+       not-yet-retired particles, overflow tails), that is a measurement defect. It may be
+       corrected with evidence, as in seep §4.1, with the original row kept printed.
+     - Otherwise the engine's seeding or retirement must match NB-FLIP's.
+   - A first discriminator: D8c (particles at step 16, before the impact). If it is already
+     high, look at seeding or counting; if only the post-impact windows are high, look at the
+     retirement of splash particles.
+
 ### 4.7 Step-time baselines at 2761350a
 
 These rounds ran on the timing slot, with baseline 33b78ebb and candidate 2761350a back to back
