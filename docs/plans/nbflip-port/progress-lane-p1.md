@@ -233,3 +233,70 @@ Metal clean.
   - corner block converged: 6 iterations to 1e-3 h², against Float64 MGPCG 1.9e-5, air X = 0.
 - Not yet registered in brick-pressure-solver.ts: per the composite-system ruling an all-h solve is
   bring-up only, so it registers with the C rows and seams.
+
+## 2026-11-15 Census of the old engine's active set and seam heads (measure before porting)
+
+- Instrumented the old arena, compiled in only when `UniformPressureArena.diagnostics` is true. It has
+  72 census words after the per-class block (`UNIFORM_PRESSURE_CENSUS`) at these sites:
+  - the band row build (pRows) and the native row build (pNative);
+  - the MG active-set update for band rows (pRestrict0) and native rows (residual);
+  - the Krylov start (kStart).
+
+  The Krylov layer's joins, hits and restarts are the arena's own header words. The probe is
+  tools/probe-pressure-active-set.ts. Runs were seep 300, dam 200, letters 220 and paddleboats 300
+  steps (bodies driven), all rc 0 with no Metal aborts. The raw output is in
+  ~/code/me/fluid-scratch/lane-p1/census/*.json.
+- Values are means per step (MG and Krylov words are summed over a step's cycles), with the largest
+  step in brackets.
+
+  | state | seep | dam | letters | paddleboats |
+  |---|---|---|---|---|
+  | band rows | 1.7k | 103k | 153k | 62k |
+  | K_WALL faces (separating wall) | 456 | 5.2k | 4.5k | 1.5k |
+  | K_WALL binds (halo clamped at total 0), MG | 127 (429) | 1743 (11.3k) | 1694 (5.6k) | 4.6 (47) |
+  | K_WALL binds at Krylov start | 44 | 437 | 425 | 1.2 |
+  | K_SEAM faces / with nonzero bSeamHead | 460 / 427 | 23.3k / 23.3k | 38.6k / 38.6k | 19.5k / 19.5k |
+  | largest \|bSeamHead\| (mean of step max) | 361 | 351 | 1296 | 595 |
+  | bounded band rows (bInside) | 300 | 0 | 0 | 4457 |
+  | band rows at bound (closed clamp), MG | 59 | 0 | 0 | 462 (2274) |
+  | band rows frozen (no P_CORRECT), cycles 0/1/2/3 | 19/21/14/4 | 0 | 0 | 111/120/121/110 |
+  | P_CORRECT changes, cycles 0/1/2/3 | 19/5.1/1.7/0.09 | 0 | 0 | 111/15/2.2/0.57 |
+  | cycle-0 frozen set vs last step's end: flips | 3.2 | 0 | 0 | 82 |
+  | bInside flips since the last step | 0 | 0 | 0 | 587 |
+  | K_CLOSED / K_NEUMANN / K_OPEN faces | 1487 / 0 / 0 | 0 / 307 / 0 | 0 / 118 / 0 | 6372 / 2.7 / 0 |
+  | native rows | 34k | 9.8k | 17k | 36k |
+  | N_WALL / N_HELD faces | 512 / 3968 | 47 / 2198 | 64 / 3635 | 265 / 7901 |
+  | N_WALL binds, MG / Krylov start / init | 0 | 41 (418) / 10 / 8.7 | 0 | 0 |
+  | N_CLOSED rows / at bound, MG | 373 / 0.84 | 0 | 0 | 0 |
+  | N_CORRECT changes, cycles 0/1/2 | 0.22/0.06/0.07 | 0 | 0 | 0 |
+  | wall/held/closed state changes since the last step | 0 | 9.1 | 2.5 | 0.26 |
+  | N_SEAM / N_BULKN faces | 30 / 4096 | 1464 / 16 | 2411 / 0 | 1223 / 0 |
+  | Krylov joins / hits / restarts | 2.0 / 0.05 / 0.017 | 0 | 0 | 1.1 / 2.0 / 0.57 |
+  | final complementarity (at bound, asking to leave) | 0.37 (29) | 0 | 0 | 0.03 (8) |
+
+- **What binds, and therefore gets ported:**
+  - *The separating wall (K_WALL, N_WALL).* It binds on every scene: thousands of face-cycles a
+    step on dam and letters, where no row is bounded. A face into a non-resident page (the box
+    exterior; a SOLID or BULK16 page) is a one-cell halo at max(x + lift, −base). It carries the
+    wall's flux until the halo's total pressure would go negative, and then the liquid separates.
+    This is the unilateral solid condition (Batty, Bertails & Bridson 2007; Chentanez & Müller
+    2012). M1's brick operator closes box faces as Neumann, so this mechanism is missing there today.
+  - *Bounded rows (bInside, N_CLOSED) and the P_CORRECT/N_CORRECT active set.*
+    - Seep: 300 band rows and 373 native rows.
+    - Paddleboats: the hulls, with 4.5k band rows. A hundred of them are frozen per cycle, and the
+      set moves with the bodies (587 inside flips a step, 82 flips against the last step's end).
+    - The per-cycle changes fall by about 10x a cycle (paddleboats 111 → 15 → 2.2 → 0.57). So the
+      outer loop around the MGPCG has to re-decide the set, at least every cycle.
+    - The Krylov layer's feasible step (Polyak 1969; O'Leary 1980) hits and joins a few rows a step.
+      Its final complementarity is met on all but 0.37 and 0.03 rows a step.
+  - *N_HELD.* Thousands of faces on every scene, as flux-only wall slots: an RHS term with no
+    diagonal entry.
+  - *The seam head.* It is nonzero on 92–100% of seam subfaces, up to |head| 4.8k (letters), so it is
+    in the system everywhere a seam exists.
+- **What never bound on any gate scene:**
+  - K_OPEN, a band face into a non-resident AIR page. It is a ghost-fluid formula, so I'll port it
+    rather than cut it, at no cost.
+  - Band K_WALL masks changing between steps (0 everywhere).
+  - Krylov crosses and rows under their bound at the final measure (0 everywhere).
+
+  Nothing is proposed for cutting. Everything else binds on at least one gate scene.

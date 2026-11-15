@@ -177,8 +177,13 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena proje
 const DIAG_CLASSES=8,DIAG_CYCLES=8;
 /** Diagnostics: then the tail's rows with a positive diagonal (pTail's
  * count, the most any call saw): 32h, 16h, resident 8h, BULK16 items. */
-const DIAG_ROWS=2*DIAG_CLASSES*DIAG_CYCLES,DIAG_WORDS=DIAG_ROWS+4;
+/** Diagnostics: then the active-set and seam-head census (UNIFORM_PRESSURE_CENSUS, a frame's
+ * counts; tools/probe-pressure-active-set.ts names the words). */
+const DIAG_CENSUS_WORDS=72;
+const DIAG_ROWS=2*DIAG_CLASSES*DIAG_CYCLES,DIAG_WORDS=DIAG_ROWS+4+DIAG_CENSUS_WORDS;
 const HEADER=63,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
+/** The census's header words (diagnostics only): first word and count. */
+export const UNIFORM_PRESSURE_CENSUS={word:63+2*DIAG_CLASSES*DIAG_CYCLES+4,words:DIAG_CENSUS_WORDS} as const;
 /** Header words 27 and 28: the native rows' largest initial and final residual (diagnostics). */
 const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29;
 /** Header words 37..57, the Krylov steps' (schedule.krylov): the step's
@@ -566,6 +571,12 @@ struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u,gravity:vec
 fn pIndex(i:u32)->u32{return atomicLoad(&state[i]);}
 // Diagnostics: a measured row's class and band-equivalent magnitude (UniformPressureArena.diagnostics).
 fn pDiag(cycle:u32,cls:u32,mag:u32){${UniformPressureArena.diagnostics?`let w=${HEADER}u+${DIAG_CLASSES}u*min(cycle,${DIAG_CYCLES-1}u)+cls;atomicMax(&state[w],mag);if(bitcast<f32>(mag)>params.solve.x){atomicAdd(&state[w+${DIAG_CLASSES*DIAG_CYCLES}u],1u);}`:""}}
+// The census (diagnostics): a frame's counts of rows and faces by state.
+const P_WASFROZEN:u32=1u<<25u;
+fn pCensus(i:u32,n:u32){${UniformPressureArena.diagnostics?`if(n!=0u){atomicAdd(&state[${UNIFORM_PRESSURE_CENSUS.word}u+i],n);}`:""}}
+fn pCensusMax(i:u32,v:f32){${UniformPressureArena.diagnostics?`atomicMax(&state[${UNIFORM_PRESSURE_CENSUS.word}u+i],bitcast<u32>(abs(v)));`:""}}
+fn pFaceMask(kinds:u32,kind:u32)->u32{var n=0u;for(var f=0u;f<6u;f++){if(bFaceKind(kinds,f)==kind){n|=1u<<f;}}return n;}
+fn pFaces(kinds:u32,kind:u32)->u32{return countOneBits(pFaceMask(kinds,kind));}
 fn pDiagClass(kinds:u32)->u32{var c=select(0u,3u,bInside(kinds));for(var f=0u;f<6u;f++){let k=bFaceKind(kinds,f);if(k==K_WALL){return 2u;}if(k==K_SEAM){c=1u;}if((k==K_OPEN||k==K_GHOST||(k==K_BAND&&!bUnit(kinds,f)))&&c==0u){c=7u;}}if(!bLiquid(kinds)&&c==0u){c=3u;}return c;}
 fn bLocal(lane:u32)->vec3u{return vec3u(lane%4u,(lane/4u)%4u,lane/16u);}
 fn bUnit(kinds:u32,f:u32)->bool{return (kinds&(1u<<(18u+f)))!=0u;}
@@ -1261,7 +1272,9 @@ fn kCounts(lane:u32)->vec3u{
     else if(kind==K_WALL){let c=pF(P_C+f*PLANE,at);let g=pLift(at,f);off+=c*max(x+g,-base);if(x+g>=-base){d-=c;}}
    }
    r=pF(P_RHS,at)+off-pF(P_DIAG,at)*x;
-   d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree(bInside(kinds),x+base,r));
+${UniformPressureArena.diagnostics?`   if(d>0.0&&!pCorrectionFree(bInside(kinds),x+base,r)){pCensus(30u,1u);}
+   for(var f=0u;f<6u;f++){if(bFaceKind(kinds,f)==K_WALL&&x+pLift(at,f)< -base){pCensus(32u,1u);}}
+`:""}   d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree(bInside(kinds),x+base,r));
   }
   pSet(P_KX,at,x);pSet(P_KQ,at,0.0);pSet(P_KZ,at,0.0);pSet(P_KP,at,0.0);pSet(P_KR,at,r);pSet(P_KD,at,d);
  }
@@ -1277,7 +1290,9 @@ fn kCounts(lane:u32)->vec3u{
     else if(kind==N_WALL){let g=bitcast<f32>(link);r+=c*max(x+g,-base);if(x+g>=-base){d-=c;}}${BP?`
     else if(kind==N_BULKN){r+=c*bsF(baSlot(link),BS_N+(link&15u));}`:""}
    }
-   d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));
+${UniformPressureArena.diagnostics?`   if(d>0.0&&!pCorrectionFree((m&N_CLOSED)!=0u,x+base,r)){pCensus(31u,1u);}
+   for(var f=0u;f<6u;f++){if(nKind(m,f)==N_WALL&&x+bitcast<f32>(poolB[PN_L+f*PLANE2+at2])< -base){pCensus(33u,1u);}}
+`:""}   d=select(-max(d,0.0),d,d>0.0&&pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));
   }
   qSet(PN_KX,at2,x);qSet(PN_KQ,at2,0.0);qSet(PN_KZ,at2,0.0);qSet(PN_KP,at2,0.0);qSet(PN_KR,at2,r);qSet(PN_KD,at2,d);
  }${BP?`
@@ -1604,7 +1619,16 @@ var<workgroup> pRoute:atomic<u32>;var<workgroup> pNeed:atomic<u32>;var<workgroup
   }
   let control=authority.z*${S?"select(1.0,open,umSolidEnabled())":"1.0"};
   kinds|=select(0u,P_ACTIVE,liquid&&diagonal>0.0)|select(0u,P_WARM,warm);
-  pSet(P_RHS,at,select(0.0,-params.policy.x*(divergence-control)/params.hDt.w,liquid));pool[P_KINDS+at]=kinds;pSet(P_X,at,own);
+${UniformPressureArena.diagnostics?`  if(pActive(kinds)){
+   let old=select(0u,pool[P_KINDS+at],(ubaClass(slot)&UBA_ENTERING)==0u);
+   pCensus(0u,1u);pCensus(1u,pFaces(kinds,K_WALL));pCensus(2u,pFaces(kinds,K_SEAM));pCensus(3u,select(0u,1u,bInside(kinds)));
+   pCensus(4u,pFaces(kinds,K_OPEN));pCensus(5u,pFaces(kinds,K_NEUMANN));pCensus(6u,pFaces(kinds,K_CLOSED));pCensus(7u,select(0u,1u,pFaces(kinds,K_WALL)>0u));
+   if(pActive(old)){
+    pCensus(8u,select(0u,1u,pFaceMask(kinds,K_WALL)!=pFaceMask(old,K_WALL)));pCensus(9u,select(0u,1u,bInside(kinds)!=bInside(old)));
+    if(bInside(old)&&(old&P_CORRECT)==0u){pCensus(10u,1u);kinds|=P_WASFROZEN;}
+   }
+  }
+`:""}  pSet(P_RHS,at,select(0.0,-params.policy.x*(divergence-control)/params.hDt.w,liquid));pool[P_KINDS+at]=kinds;pSet(P_X,at,own);
  }
 }`,
    init:header(true)+poolWGSL+wet+UniformColdFreeze.wgsl(this.cold,1,14)+/* wgsl */`
@@ -1800,7 +1824,7 @@ ${BP?`     let bslot=bsWordSlot(across);var t=l;t[axis]=select(7u,0u,side==1u);l
      }else `:""}     if(fraction>1e-6){
       let w=fraction/(h4*h4);let lift=rootArena[R_RHS+s]/w;c=64.0*w;
       if(rootArena[R_MINIMUM+s]<-1e38){kind=N_HELD;rhs+=c*lift;}
-      else{kind=N_WALL;diagonal+=c;walls+=c;lifted+=c*max(lift,-start);link=bitcast<u32>(lift);}
+      else{kind=N_WALL;diagonal+=c;walls+=c;lifted+=c*max(lift,-start);link=bitcast<u32>(lift);${UniformPressureArena.diagnostics?"if(lift< -start){pCensus(20u,1u);}":""}}
      }
     }else{
      let volume=${S?"select(rootTopology[n][axis+1u],rootTopology[k][axis+1u],side==1u)":"1.0"};
@@ -1812,8 +1836,8 @@ ${BP?`     let bslot=bsWordSlot(across);var t=l;t[axis]=select(7u,0u,side==1u);l
        for(var j=0u;j<16u;j++){
         let at=first+(j&3u)*u+(j>>2u)*v;
         if(bFaceKind(pool[P_KINDS+at],g)==K_SEAM){
-         let ch=pF(P_C+g*PLANE,at);c+=ch;rhs+=ch*(pF(P_BASE,at)-bSeamHead(at,g)-start);
-         // An air subface contributes a zero-pressure boundary to the
+         let ch=pF(P_C+g*PLANE,at);c+=ch;let head=bSeamHead(at,g);rhs+=ch*(pF(P_BASE,at)-head-start);
+${UniformPressureArena.diagnostics?"         pCensus(16u,1u);if(head!=0.0){pCensus(17u,1u);pCensusMax(18u,head);pCensusMax(36u,ch*head);}\n":""}         // An air subface contributes a zero-pressure boundary to the
          // diagonal, not a coupling to the band's liquid aggregate.
          if(pActive(pool[P_KINDS+at])){level2+=ch;}
         }
@@ -1830,7 +1854,16 @@ ${BP?`     let bslot=bsWordSlot(across);var t=l;t[axis]=select(7u,0u,side==1u);l
    }
    if(diagonal${B?"+bulkDelta":""}>0.0){m|=N_ACTIVE;atomicOr(&nFlags,3u);}
    if(rootArena[R_MINIMUM+k]>-1e38){m|=N_CLOSED;}
-${B?"   if(member){m|=N_BULK;}\n":""}  }
+${UniformPressureArena.diagnostics?`   if((m&N_ACTIVE)!=0u){
+    var nw=0u;var nh=0u;var ns=0u;var nb=0u;var sig=0u;var was=0u;let old=poolB[PN_M+at2];
+    for(var f=0u;f<6u;f++){let kk=nKind(m,f);let ko=nKind(old,f);if(kk==N_WALL){nw++;sig|=1u<<f;}if(kk==N_HELD){nh++;sig|=64u<<f;}if(kk==N_SEAM){ns++;}if(kk==6u){nb++;}
+     if(ko==N_WALL){was|=1u<<f;}if(ko==N_HELD){was|=64u<<f;}}
+    if((m&N_CLOSED)!=0u){sig|=4096u;}if((old&N_CLOSED)!=0u){was|=4096u;}
+    pCensus(11u,1u);pCensus(12u,nw);pCensus(13u,nh);pCensus(14u,select(0u,1u,(m&N_CLOSED)!=0u));pCensus(15u,ns);pCensus(19u,nb);pCensus(23u,select(0u,1u,nw>0u));
+    if((old&N_ACTIVE)!=0u&&sig!=was){pCensus(22u,1u);}
+    if((m&N_CLOSED)!=0u&&start<=0.0&&rhs+lifted<0.0){pCensus(21u,1u);}
+   }
+`:""}${B?"   if(member){m|=N_BULK;}\n":""}  }
   poolB[PN_M+at2]=m;qSet(PN_X,at2,0.0);qSet(PN_B,at2,start);qSet(PN_R,at2,rhs);qSet(PN_D,at2,diagonal);
   if((m&N_ACTIVE)!=0u){
    // Level 2's correction operator: the walls follow their row.
@@ -2086,7 +2119,11 @@ fn nSeamSum(first:u32,f:u32)->f32{
     }
     // Bulk members are fully open (bulkSelect rejects closed/cut cells),
     // hence unbounded: every member lane stays correction-active together.
-    if(!pLast){poolB[PN_M+at2]=(m&~N_CORRECT)|select(0u,N_CORRECT,pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));}
+${UniformPressureArena.diagnostics?`    if(!pLast){let free=pCorrectionFree((m&N_CLOSED)!=0u,x+base,r);let was=select((m&N_CORRECT)!=0u,true,pCycle==0u);let cy=min(pCycle,7u);
+     if(!free){pCensus(56u+cy,1u);}if(free!=was){pCensus(64u+cy,1u);}
+     if((m&N_CLOSED)!=0u&&x+base<=0.0){pCensus(29u,1u);if(r<0.0){pCensus(27u,1u);}}
+     for(var f=0u;f<6u;f++){if(nKind(m,f)==N_WALL&&x+bitcast<f32>(poolB[PN_L+f*PLANE2+at2])< -base){pCensus(25u,1u);}}}
+`:""}    if(!pLast){poolB[PN_M+at2]=(m&~N_CORRECT)|select(0u,N_CORRECT,pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));}
     if(pLast&&(m&N_CLOSED)!=0u){
      if(x+base<0.0){atomicAdd(&state[${KRYLOV_BOUND_WORD}u],1u);}
      if(x+base<=0.0&&r*nScale()*nStopScale()>params.solve.x){atomicAdd(&state[${KRYLOV_SIGN_WORD}u],1u);}
@@ -2352,7 +2389,12 @@ var<workgroup> rRes:array<f32,64>;
     else if(kind==K_WALL){off+=pF(P_C+f*PLANE,at)*max(x+pLift(at,f),-base);}
    }
    r=pF(P_RHS,at)+off-pF(P_DIAG,at)*x;
-   pool[P_KINDS+at]=(kinds&~P_CORRECT)|select(0u,P_CORRECT,pCorrectionFree(bInside(kinds),x+base,r));
+${UniformPressureArena.diagnostics?`   {let free=pCorrectionFree(bInside(kinds),x+base,r);let was=select((kinds&P_CORRECT)!=0u,true,pCycle==0u);let cy=min(pCycle,7u);
+    pCensus(35u,1u);if(!free){pCensus(40u+cy,1u);}if(free!=was){pCensus(48u+cy,1u);}
+    if(bInside(kinds)&&x+base<=0.0){pCensus(28u,1u);if(r<0.0){pCensus(26u,1u);}}
+    if(pCycle==0u&&bInside(kinds)&&((kinds&P_WASFROZEN)!=0u)!=!free){pCensus(34u,1u);}
+    for(var f=0u;f<6u;f++){if(bFaceKind(kinds,f)==K_WALL&&x+pLift(at,f)< -base){pCensus(24u,1u);}}}
+`:""}   pool[P_KINDS+at]=(kinds&~P_CORRECT)|select(0u,P_CORRECT,pCorrectionFree(bInside(kinds),x+base,r));
    if(bInside(kinds)&&x+base<=0.0&&bResidualMagnitude(r)<0x7f800000u){r=max(r,0.0);}
    atomicMax(&worst,bResidualMagnitude(r*params.policy.z));pDiag(pCycle,pDiagClass(kinds),bResidualMagnitude(r*params.policy.z));
   }
