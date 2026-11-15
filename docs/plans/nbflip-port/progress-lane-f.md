@@ -1291,3 +1291,53 @@ live tile's support word, heat, target and this step's seeds; td-cmp.py and td-c
   y 0 and 1; 9.6k of its low-region seeds fall in tiles that are C-only in ours. At 8 it seeds 9.4k in y 2,
   8.4k of them in C-only tiles. Ours seeds that floor at step 9 (9.3k, 10.6k and 9.0k in y 0–2), two steps
   late. The tiles are not h in time, the same census trigger and refinement.
+
+## 2026-11-16: velocity redesign diagnostic and experiment A (packed trace): no-go, not landed
+
+Frozen dam at step 20, poolF 4913, timing slot, one run each, no 00000206 aborts. Scratch:
+~/code/me/fluid-scratch/lane-f (trees tree-vc, tree-vn, tree-v1, tree-v1l, tree-vdup, tree-pa, tree-pf, base-h1;
+logs logs/vd, va, vb, vdup, pa, kt).
+
+**The trace, per sample** (a sample is one 3-axis trilinear, 24 taps; a face of n segments takes 2n samples plus a
+last 1-axis one; fixed part from a no-trace knockout, the per-face and per-sample parts from full against
+one-segment traces):
+
+| | seep reservoir (step 1100) | all-h | tiered |
+|---|---|---|---|
+| traced faces | 503k (17k chamber) | 2.06M | 497k F + 24.5k C |
+| segments a face | 1.0 | 3.7 | 6.1 |
+| trace kernel, ms | 0.41 | 11.1 | 8.9 |
+| fixed (no trace), ms | 0.14 | 0.60 | 1.70 |
+| ns a sample | 0.22 overall: about 0.1 in the reservoir, about 2.5 in the chamber | 0.63 | 1.08 |
+
+- SIMD divergence is 92% (tiered) and 95% (all-h) lane-busy in active warps; 0.2% of samples leave the 3^3 slot
+  window; the fine weight and the per-tap checks are 25% of the tiered sample.
+- **Correction (two claims).** The 2026-11-1x entry above says our per-segment cost is at or below the seep's: wrong
+  as stated, since it compared totals at the seep's one segment a face. And the seep's per-sample figure is not a
+  like-for-like target: its reservoir is at rest (one segment a face, taps in cache); its chamber's long traces cost
+  about 2.5 ns a sample, more than ours.
+- **The duplicate test was flattered.** Tracing every face twice raised tiered uAdvect only 63%, which read as idle
+  lanes. But each duplicate sat beside its twin and read the same cache lines, so the marginal sample was cheap for
+  locality, not for idle capacity.
+
+**Experiment A, packed trace (tree-pa): no-go.** uAdvect classifies and appends its traced faces to a global list
+(an atomic range a brick, NB_FAIL_LIST 'TR' on overflow); uTrace, 1024 workgroups of 64 lanes, takes 64 entries at
+a time from a cursor, stages the slot window when the chunk's brick changes, and traces with the unchanged sampler.
+UP bitwise equal to HEAD (45356bb8) in both modes.
+
+| | HEAD uAdvect | classify + uTrace | classify alone |
+|---|---|---|---|
+| tiered | 9.37 ms | 8.52 (-0.85) | 1.68 |
+| all-h | 10.75 ms | 11.00 (+0.25) | 0.65 |
+
+Under the 2 ms gate; dropped (the coordinator's ruling). With every lane busy the tiered sample still costs about
+1.05 ns: idle lanes were about 11% of the trace, not the 40% estimated. The trace is latency-bound on distinct taps,
+and the cost grows with the travel (6.1 segments a face tiered against 3.7 all-h).
+
+**Fast taps (tree-pf): no-go.** One slot lookup a 2x2x2 tap block where the block lies in one brick: slower
+(tiered 11.7 ms, all-h 16.1) and not bitwise (123k and 460k vel words differ, probably the inlined lerp's fma
+contraction, not verified). About a third of the samples take the slow path, so nearly every warp runs both.
+
+**uTransfer knockout (tiered):** 4.48 ms as is; 4.20 without the C pages' body (vcTransferPage, about 0.3); 2.66
+staging and LIQ only (per-face loop skipped). Staging is about 2.4 ms of it (0.64 us an F brick), the per-face
+loop about 1.8. Next: step 3, the staging skeleton and an apron's price.
