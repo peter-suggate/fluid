@@ -24,7 +24,7 @@ import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "n
 import { basename, join, resolve } from "node:path";
 import { restoreLostVolume, type SeepJetSlice, type SeepObservation } from "./seep-observables";
 import type { BoxGeometry, BoxObservation } from "./nbflip-observables";
-import { bandDistanceGate, bandScalarGate, binDepths, distanceGate, driftGate, l1, mean, normalise, restoreBox, rms, scalarGate,
+import { bandDistanceGate, bandScalarGate, binDepths, distanceGate, driftGate, driftMeanGate, l1, mean, normalise, restoreBox, rms, scalarGate,
   type Floor, type Gate, type RestoredBox } from "./nbflip-gate-rules";
 
 type SceneKey = "seep" | "dam" | "letters" | "paddleboats";
@@ -77,6 +77,8 @@ const f = (v: number | null | undefined, d = 3) => v === null || v === undefined
 const pct = (v: number | null | undefined, d = 2) => v === null || v === undefined || !Number.isFinite(v) ? "-" : `${(100 * v).toFixed(d)}%`;
 /** §4.5 (3): a row as §4 wrote it (two-sided, no restored band), printed beside its amended row and not gated. */
 const asWritten = (g: Gate): Gate => ({ ...g, id: `${g.id} (as written)`, informational: true });
+/** §4.5 (1): a drift row under the first ruling (|ref mean| + max(floor, 3S)), superseded by the envelope and printed, not gated. */
+const firstRuling = (g: Gate): Gate => ({ ...g, id: `${g.id} (first ruling)`, informational: true });
 
 // ---------------------------------------------------------------- seep (G1-G8, plan §4 and §4.1, NB-FLIP against NB-FLIP)
 const SEEP_CHECK = [300, 600, 900, 1200], SEEP_WINDOWS = Array.from({ length: 18 }, (_, i) => 180 + 60 * i), SEEP_MEDIAN = Array.from({ length: 19 }, (_, i) => 120 + 60 * i);
@@ -142,7 +144,8 @@ function seepGates(refs: Run<SeepObservation>[], c: Run<SeepObservation>): Gate[
     asWritten(scalarGate("G6c", "right-chamber centroid x (cells)", { abs: 16 }, " cells", [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.centroid[i]!), candidate: C.centroid[i]! })))),
     bandDistanceGate("G6", "right-chamber 16-bin profile, normalised L1; band to the restored references", 0.15, "", l1, [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.profile[i]!), restored: R.map(o => o.restored[k]!.profile), candidate: C.profile[i]! }))),
     asWritten(distanceGate("G6", "right-chamber 16-bin profile, normalised L1", 0.15, "", l1, [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.profile[i]!), candidate: C.profile[i]! })))),
-    driftGate("G7", "total drift at 1200 (fraction), one-sided on |drift|", { abs: 0.001 }, [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }]),
+    driftGate("G7", "total drift at 1200 (fraction), one-sided: within NB-FLIP's worst reference", { abs: 0.001 }, [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }]),
+    firstRuling(driftMeanGate("G7", "total drift at 1200 (fraction), one-sided on |drift|", { abs: 0.001 }, [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }])),
     asWritten(scalarGate("G7", "total drift at 1200 (fraction)", { abs: 0.001 }, "", [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }])),
     scalarGate("G8", "jet impact x (cells)", { abs: 8 }, " cells", SEEP_TRAJECTORY.map((k, i) => ({ at: String(k), refs: R.map(o => o.trajectory[i]!.impact), candidate: C.trajectory[i]!.impact }))),
     distanceGate("G8h", "jet mean height per 8-cell slice over x 256-352, RMS (cells)", 3, " cells", rms, SEEP_TRAJECTORY.map((k, i) => ({ at: String(k), refs: R.map(o => o.trajectory[i]!.heights), candidate: C.trajectory[i]!.heights }))),
@@ -179,7 +182,9 @@ function boxDistance(id: string, observable: string, floor: number, unit: string
 }
 /** §4.5 (1): one-sided drift, with the two-sided original printed. */
 function boxDrift(id: string, observable: string, fl: Floor, refs: Box[], c: Box, steps: number[], get: Get<number | null>, informational = false) {
-  return [driftGate(id, `${observable}, one-sided on |drift|`, fl, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })), informational),
+  const points = steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) }));
+  return [driftGate(id, `${observable}, one-sided: within NB-FLIP's worst reference`, fl, points, informational),
+    firstRuling(driftMeanGate(id, `${observable}, one-sided on |drift|`, fl, points, informational)),
     asWritten(boxScalar(id, observable, fl, "", refs, c, steps, get, informational))];
 }
 /** §4.5 (2): a volume-coupled scalar against [refs, refs restored], with the two-sided original printed. */
@@ -201,7 +206,9 @@ function boxWindowScalar(id: string, observable: string, fl: Floor, unit: string
   return scalarGate(id, observable, fl, unit, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) })), informational);
 }
 function boxWindowDrift(id: string, observable: string, fl: Floor, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
-  return [driftGate(id, `${observable}, one-sided on |drift|`, fl, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) })), informational),
+  const points = windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) }));
+  return [driftGate(id, `${observable}, one-sided: within NB-FLIP's worst reference`, fl, points, informational),
+    firstRuling(driftMeanGate(id, `${observable}, one-sided on |drift|`, fl, points, informational)),
     asWritten(boxWindowScalar(id, observable, fl, "", refs, c, windows, get, informational))];
 }
 function boxWindowBand(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
@@ -309,7 +316,7 @@ if (timingOnly) {
 const md: string[] = [`# NB-FLIP port gates: ${candidates.map(c => c.name).join(", ")}`, "",
   `Generated ${new Date().toISOString()} by tools/nbflip-gates.ts. References: ${SCENES.map(s => `${s} ${refRuns.filter(r => r.scene === s).map(r => r.name).join(" + ") || "(none)"}`).join("; ")}.`,
   "Each row passes when |candidate - reference mean| <= max(floor, 3S), S the references' spread; distance rows when d <= max(floor, 3S), S the references' largest pairwise d. Margin = |difference| / tolerance (<= 1 passes).",
-  "Amended (plan §4.5): drift rows are one-sided, |c| <= |ref| + max(floor, 3S) (margin = excess / tolerance); volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.", ""];
+  "Amended (plan §4.5): drift rows are one-sided against NB-FLIP's envelope, |c| <= max_i |ref_i| + floor (ref prints max_i |ref_i|, tol the floor; margin = excess / floor), with the first ruling's |c| <= |ref mean| + max(floor, 3S) printed as (first ruling), not gated; volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.", ""];
 const verdicts: Record<string, unknown>[] = [];
 let failed = false;
 for (const scene of sceneFilter) {

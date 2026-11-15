@@ -563,6 +563,24 @@
     },
     {
      "id": "G7",
+     "observable": "total drift at 1200 (fraction), one-sided: within NB-FLIP's worst reference",
+     "rule": "|c| <= max |ref_i| + 0.001",
+     "rows": [
+      {
+       "at": "1200",
+       "ref": 0.004906591691231421,
+       "S": 0.00046340354409546425,
+       "candidate": -0.0050917933464752485,
+       "tol": 0.001,
+       "pass": true,
+       "margin": 0.18520165524382737
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G7 (first ruling)",
      "observable": "total drift at 1200 (fraction), one-sided on |drift|",
      "rule": "|c| <= |ref| + max(0.001, 3S)",
      "rows": [
@@ -577,7 +595,7 @@
       }
      ],
      "pass": true,
-     "informational": false
+     "informational": true
     },
     {
      "id": "G7 (as written)",
@@ -888,6 +906,24 @@
     },
     {
      "id": "D4c",
+     "observable": "volume drift at the far-wall impact (fraction of t = 0), one-sided: within NB-FLIP's worst reference",
+     "rule": "|c| <= max |ref_i| + 0.01",
+     "rows": [
+      {
+       "at": "16",
+       "ref": 0.0490927411639277,
+       "S": 0.006819130575886678,
+       "candidate": -0.042691072076780356,
+       "tol": 0.01,
+       "pass": true,
+       "margin": 0
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D4c (first ruling)",
      "observable": "volume drift at the far-wall impact (fraction of t = 0), one-sided on |drift|",
      "rule": "|c| <= |ref| + max(0.01, 3S)",
      "rows": [
@@ -902,7 +938,7 @@
       }
      ],
      "pass": true,
-     "informational": false
+     "informational": true
     },
     {
      "id": "D4c (as written)",
@@ -1297,6 +1333,42 @@
     },
     {
      "id": "D4",
+     "observable": "volume drift (fraction of t = 0), window mean, one-sided: within NB-FLIP's worst reference",
+     "rule": "|c| <= max |ref_i| + 0.01",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 0.044561760791516705,
+       "S": 0.008994756637351435,
+       "candidate": -0.04093834264543046,
+       "tol": 0.01,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "105-165",
+       "ref": 0.011931984265051265,
+       "S": 0.00819754501479859,
+       "candidate": -0.01014965738228366,
+       "tol": 0.01,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "180-300",
+       "ref": 0.01138808897436314,
+       "S": 0.014993364290130146,
+       "candidate": -0.010235297475478208,
+       "tol": 0.01,
+       "pass": true,
+       "margin": 0
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D4 (first ruling)",
      "observable": "volume drift (fraction of t = 0), window mean, one-sided on |drift|",
      "rule": "|c| <= |ref| + max(0.01, 3S)",
      "rows": [
@@ -1329,7 +1401,7 @@
       }
      ],
      "pass": true,
-     "informational": false
+     "informational": true
     },
     {
      "id": "D4 (as written)",
@@ -1723,6 +1795,42 @@
     },
     {
      "id": "L1",
+     "observable": "volume drift against the t = 0 pool plus the drops (fraction), one-sided: within NB-FLIP's worst reference",
+     "rule": "|c| <= max |ref_i| + 0.005",
+     "rows": [
+      {
+       "at": "120",
+       "ref": 0.008944810441900652,
+       "S": 0.000363504292678396,
+       "candidate": -0.008779616467078921,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "180",
+       "ref": 0.009546939056821913,
+       "S": 0.0003854880350377954,
+       "candidate": -0.00818071601081638,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "240",
+       "ref": 0.0110149540940222,
+       "S": 0.00040023152575197063,
+       "candidate": -0.010122565569702369,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L1 (first ruling)",
      "observable": "volume drift against the t = 0 pool plus the drops (fraction), one-sided on |drift|",
      "rule": "|c| <= |ref| + max(0.005, 3S)",
      "rows": [
@@ -1755,7 +1863,7 @@
       }
      ],
      "pass": true,
-     "informational": false
+     "informational": true
     },
     {
      "id": "L1 (as written)",
@@ -2185,6 +2293,33 @@
     },
     {
      "id": "P1",
+     "observable": "volume drift (fraction of t = 0), one-sided: within NB-FLIP's worst reference",
+     "rule": "|c| <= max |ref_i| + 0.0025",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 0.0031338324770331383,
+       "S": 0.0002563719948133203,
+       "candidate": -0.003025564985970619,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "300",
+       "ref": 0.01066930861108828,
+       "S": 0.0017018649313184087,
+       "candidate": -0.010722163029842857,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.021141767501831055
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P1 (first ruling)",
      "observable": "volume drift (fraction of t = 0), one-sided on |drift|",
      "rule": "|c| <= |ref| + max(0.0025, 3S)",
      "rows": [
@@ -2208,7 +2343,7 @@
       }
      ],
      "pass": true,
-     "informational": false
+     "informational": true
     },
     {
      "id": "P1 (as written)",

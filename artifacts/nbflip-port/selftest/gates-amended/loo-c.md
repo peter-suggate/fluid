@@ -1,10 +1,10 @@
 # NB-FLIP port gates: letters-ref-c, paddleboats-ref-c, seep-ref-c
 
-Generated 2026-11-15T00:35:57.381Z by tools/nbflip-gates.ts. References: seep seep-ref-a + seep-ref-b + seep-ref-d + seep-base-e; dam dam-ref-a + dam-ref-b + dam-ref-d + dam-base-e; letters letters-ref-a + letters-ref-b + letters-ref-d + letters-base-e; paddleboats paddleboats-ref-a + paddleboats-ref-b + paddleboats-ref-d + paddleboats-base-e.
+Generated 2026-11-15T01:40:27.418Z by tools/nbflip-gates.ts. References: seep seep-ref-a + seep-ref-b + seep-ref-d + seep-base-e; dam dam-ref-a + dam-ref-b + dam-ref-d + dam-base-e; letters letters-ref-a + letters-ref-b + letters-ref-d + letters-base-e; paddleboats paddleboats-ref-a + paddleboats-ref-b + paddleboats-ref-d + paddleboats-base-e.
 **Overall: PASS** (seep pass, letters pass, paddleboats pass)
 
 Each row passes when |candidate - reference mean| <= max(floor, 3S), S the references' spread; distance rows when d <= max(floor, 3S), S the references' largest pairwise d. Margin = |difference| / tolerance (<= 1 passes).
-Amended (plan §4.5): drift rows are one-sided, |c| <= |ref| + max(floor, 3S) (margin = excess / tolerance); volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.
+Amended (plan §4.5): drift rows are one-sided against NB-FLIP's envelope, |c| <= max_i |ref_i| + floor (ref prints max_i |ref_i|, tol the floor; margin = excess / floor), with the first ruling's |c| <= |ref mean| + max(floor, 3S) printed as (first ruling), not gated; volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.
 
 ## seep: seep-ref-c: PASS
 
@@ -25,7 +25,8 @@ References seep-ref-a.jsonl, seep-ref-b.jsonl, seep-ref-d.jsonl, seep-ref-e.json
 | G6c (as written) | right-chamber centroid x (cells) | |c - ref| <= max(16 cells, 3S) | (pass, not gated) | 0.04 | 600: 367.6459 vs 367.6384 ± 2.7158, tol 16.0000; 1200: 369.2464 vs 368.4765 ± 6.6246, tol 19.8737 |
 | G6 | right-chamber 16-bin profile, normalised L1; band to the restored references | d(c, [ref, ref restored]) <= max(0.15, 3S) | pass | 0.19 | 600: 0.0832 vs 0.0832 ± 0.1428, tol 0.4283 (restored 0.1396 ± 0.1145, tol 0.3435); 1200: 0.0324 vs 0.0324 ± 0.0992, tol 0.2977 (restored 0.0851 ± 0.0598, tol 0.1793) |
 | G6 (as written) | right-chamber 16-bin profile, normalised L1 | d(c, ref) <= max(0.15, 3S), S the largest pairwise d between references | (pass, not gated) | 0.19 | 600: 0.0832 vs 0.0000 ± 0.1428, tol 0.4283; 1200: 0.0324 vs 0.0000 ± 0.0992, tol 0.2977 |
-| G7 | total drift at 1200 (fraction), one-sided on |drift| | |c| <= |ref| + max(0.001, 3S) | pass | 0.00 | 1200: -0.0049 vs 0.0051 ± 0.0003, tol 0.0010 |
+| G7 | total drift at 1200 (fraction), one-sided: within NB-FLIP's worst reference | |c| <= max |ref_i| + 0.001 | pass | 0.00 | 1200: -0.0049 vs 0.0054 ± 0.0003, tol 0.0010 |
+| G7 (first ruling) | total drift at 1200 (fraction), one-sided on |drift| | |c| <= |ref| + max(0.001, 3S) | (pass, not gated) | 0.00 | 1200: -0.0049 vs 0.0051 ± 0.0003, tol 0.0010 |
 | G7 (as written) | total drift at 1200 (fraction) | |c - ref| <= max(0.001, 3S) | (pass, not gated) | 0.17 | 1200: -0.0049 vs -0.0051 ± 0.0003, tol 0.0010 |
 | G8 | jet impact x (cells) | |c - ref| <= max(8 cells, 3S) | pass | 0.27 | 300: 383.1081 vs 380.9434 ± 2.6155, tol 8.0000; 600: 380.7702 vs 380.8662 ± 3.5712, tol 10.7137 |
 | G8h | jet mean height per 8-cell slice over x 256-352, RMS (cells) | d(c, ref) <= max(3 cells, 3S), S the largest pairwise d between references | pass | 0.20 | 300: 0.8044 vs 0.0000 ± 1.3104, tol 3.9311; 600: 0.6346 vs 0.0000 ± 1.0738, tol 3.2214 |
@@ -54,7 +55,8 @@ References letters-ref-a.jsonl, letters-ref-b.jsonl, letters-ref-d.jsonl, letter
 | gate | observable | rule | verdict | worst margin | checkpoints (at: candidate vs ref ± S, tol) |
 |---|---|---|---|---|---|
 | C0 | completed 240 steps with no solver failure | required | pass | 0.00 | 240: 240.0000 vs - ± 0.0000, tol 0.0000 |
-| L1 | volume drift against the t = 0 pool plus the drops (fraction), one-sided on |drift| | |c| <= |ref| + max(0.005, 3S) | pass | 0.03 | 120: -0.0073 vs 0.0087 ± 0.0005, tol 0.0050; 180: -0.0096 vs 0.0094 ± 0.0003, tol 0.0050; 240: -0.0107 vs 0.0110 ± 0.0005, tol 0.0050 |
+| L1 | volume drift against the t = 0 pool plus the drops (fraction), one-sided: within NB-FLIP's worst reference | |c| <= max |ref_i| + 0.005 | pass | 0.01 | 120: -0.0073 vs 0.0091 ± 0.0005, tol 0.0050; 180: -0.0096 vs 0.0095 ± 0.0003, tol 0.0050; 240: -0.0107 vs 0.0112 ± 0.0005, tol 0.0050 |
+| L1 (first ruling) | volume drift against the t = 0 pool plus the drops (fraction), one-sided on |drift| | |c| <= |ref| + max(0.005, 3S) | (pass, not gated) | 0.03 | 120: -0.0073 vs 0.0087 ± 0.0005, tol 0.0050; 180: -0.0096 vs 0.0094 ± 0.0003, tol 0.0050; 240: -0.0107 vs 0.0110 ± 0.0005, tol 0.0050 |
 | L1 (as written) | volume drift against the t = 0 pool plus the drops (fraction) | |c - ref| <= max(0.005, 3S) | (pass, not gated) | 0.29 | 120: -0.0073 vs -0.0087 ± 0.0005, tol 0.0050; 180: -0.0096 vs -0.0094 ± 0.0003, tol 0.0050; 240: -0.0107 vs -0.0110 ± 0.0005, tol 0.0050 |
 | L2 | shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; 1106 L dropped by 240); band to the restored references | d(c, [ref, ref restored]) <= max(1 cells, 3S) | pass | 0.31 | 60: 0.0564 vs 0.0564 ± 0.0498, tol 1.0000 (restored 0.2589 ± 0.0497, tol 1.0000); 90: 0.1018 vs 0.1018 ± 0.1918, tol 1.0000 (restored 0.4490 ± 0.1917, tol 1.0000); 120: 0.6638 vs 0.6638 ± 0.7039, tol 2.1116 (restored 0.7198 ± 0.7039, tol 2.1116); 180: 0.6635 vs 0.6635 ± 0.9908, tol 2.9724 (restored 0.7675 ± 0.9908, tol 2.9724); 240: 1.0759 vs 1.0759 ± 1.2762, tol 3.8286 (restored 1.1593 ± 1.2761, tol 3.8282) |
 | L2 (as written) | shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; 1106 L dropped by 240) | d(c, ref) <= max(1 cells, 3S), S the largest pairwise d between references | (pass, not gated) | 0.31 | 60: 0.0564 vs 0.0000 ± 0.0498, tol 1.0000; 90: 0.1018 vs 0.0000 ± 0.1918, tol 1.0000; 120: 0.6638 vs 0.0000 ± 0.7039, tol 2.1116; 180: 0.6635 vs 0.0000 ± 0.9908, tol 2.9724; 240: 1.0759 vs 0.0000 ± 1.2762, tol 3.8286 |
@@ -87,7 +89,8 @@ References paddleboats-ref-a.jsonl, paddleboats-ref-b.jsonl, paddleboats-ref-d.j
 | gate | observable | rule | verdict | worst margin | checkpoints (at: candidate vs ref ± S, tol) |
 |---|---|---|---|---|---|
 | C0 | completed 300 steps with no solver failure | required | pass | 0.00 | 300: 300.0000 vs - ± 0.0000, tol 0.0000 |
-| P1 | volume drift (fraction of t = 0), one-sided on |drift| | |c| <= |ref| + max(0.0025, 3S) | pass | 0.08 | 150: -0.0030 vs 0.0029 ± 0.0002, tol 0.0025; 300: -0.0100 vs 0.0098 ± 0.0007, tol 0.0025 |
+| P1 | volume drift (fraction of t = 0), one-sided: within NB-FLIP's worst reference | |c| <= max |ref_i| + 0.0025 | pass | 0.00 | 150: -0.0030 vs 0.0031 ± 0.0002, tol 0.0025; 300: -0.0100 vs 0.0102 ± 0.0007, tol 0.0025 |
+| P1 (first ruling) | volume drift (fraction of t = 0), one-sided on |drift| | |c| <= |ref| + max(0.0025, 3S) | (pass, not gated) | 0.08 | 150: -0.0030 vs 0.0029 ± 0.0002, tol 0.0025; 300: -0.0100 vs 0.0098 ± 0.0007, tol 0.0025 |
 | P1 (as written) | volume drift (fraction of t = 0) | |c - ref| <= max(0.0025, 3S) | (pass, not gated) | 0.08 | 150: -0.0030 vs -0.0029 ± 0.0002, tol 0.0025; 300: -0.0100 vs -0.0098 ± 0.0007, tol 0.0025 |
 | P2 | surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells); band to the restored references | d(c, [ref, ref restored]) <= max(0.25 cells, 3S) | pass | 0.11 | 150: 0.0121 vs 0.0121 ± 0.0215, tol 0.2500 (restored 0.0723 ± 0.0209, tol 0.2500); 300: 0.0270 vs 0.0270 ± 0.0449, tol 0.2500 (restored 0.2417 ± 0.0435, tol 0.2500) |
 | P2 (as written) | surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells) | d(c, ref) <= max(0.25 cells, 3S), S the largest pairwise d between references | (pass, not gated) | 0.11 | 150: 0.0121 vs 0.0000 ± 0.0215, tol 0.2500; 300: 0.0270 vs 0.0000 ± 0.0449, tol 0.2500 |

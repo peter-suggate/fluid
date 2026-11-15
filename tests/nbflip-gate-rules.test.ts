@@ -3,27 +3,37 @@
  * oracle (tools/nbflip-observables.ts boxOracle) on pools whose depth is raised by exactly the lost volume. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bandDistanceGate, bandScalarGate, binDepths, driftGate, l1, restoreBox, scalarGate } from "../tools/nbflip-gate-rules";
+import { bandDistanceGate, bandScalarGate, binDepths, driftGate, driftMeanGate, l1, restoreBox, scalarGate } from "../tools/nbflip-gate-rules";
 import { boxObservation, boxOracle, type BoxGeometry } from "../tools/nbflip-observables";
 
 const close = (a: number, b: number, eps = 1e-9, what = "") => assert.ok(Math.abs(a - b) <= eps * Math.max(1, Math.abs(b)), `${what}: ${a} vs ${b}`);
 const allClose = (a: readonly number[], b: readonly number[], eps = 1e-9, what = "") => { assert.equal(a.length, b.length, what); a.forEach((v, i) => close(v, b[i]!, eps, `${what}[${i}]`)); };
 
-test("drift is one-sided on |drift|: |c| <= |mean ref| + max(floor, 3S)", () => {
-  // refs -0.010 and -0.012: |ref| 0.011, S 0.002, tol max(0.001, 0.006) = 0.006, so |c| <= 0.017.
+test("drift is one-sided against NB-FLIP's envelope: |c| <= max |ref_i| + floor", () => {
+  // refs -0.010 and -0.012: envelope 0.012, floor 0.001, so |c| <= 0.013 whatever the spread.
   const gate = (c: number) => driftGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.010, -0.012], candidate: c }]);
-  for (const c of [0, -0.003, 0.003, -0.0169, 0.0169]) assert.ok(gate(c).pass, `${c} passes`);
-  for (const c of [-0.0171, 0.0171, -0.05]) assert.ok(!gate(c).pass, `${c} fails`);
-  close(gate(-0.0145).rows[0]!.margin, 0.0035 / 0.006, 1e-12, "margin is the excess over |ref| / tol");
+  for (const c of [0, -0.003, 0.003, -0.0129, 0.0129]) assert.ok(gate(c).pass, `${c} passes`);
+  for (const c of [-0.0131, 0.0131, -0.05]) assert.ok(!gate(c).pass, `${c} fails`);
+  const row = gate(-0.0125).rows[0]!;
+  close(row.ref!, 0.012); close(row.tol, 0.001); close(row.margin, 0.5, 1e-9, "margin is the excess over the envelope / floor");
   assert.equal(gate(-0.002).rows[0]!.margin, 0);
+  // A reference that gained volume widens S but not the bound: refs -0.010 and +0.008 (S 0.018).
+  const mixed = (c: number) => driftGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.010, 0.008], candidate: c }]);
+  assert.ok(mixed(-0.0109).pass); assert.ok(!mixed(-0.0111).pass);
+  // The first ruling (|ref mean| + max(floor, 3S)) would pass that loss of 5.5%; the envelope does not.
+  assert.ok(driftMeanGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.010, 0.008], candidate: -0.055 }]).pass);
+  assert.ok(!mixed(-0.055).pass);
   // The two-sided original fails a candidate that simply drifts less.
   assert.ok(!scalarGate("D", "", { abs: 0.001 }, "", [{ at: "1", refs: [-0.010, -0.012], candidate: 0.003 }]).pass);
-  // The floor binds when the references agree.
-  assert.ok(driftGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.004, -0.004], candidate: 0.0049 }]).pass);
-  assert.ok(!driftGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.004, -0.004], candidate: 0.0051 }]).pass);
   // Missing values: both sides missing passes, one side missing fails.
   assert.ok(driftGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [null, null], candidate: null }]).pass);
   assert.ok(!driftGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.01, -0.01], candidate: null }]).pass);
+});
+
+test("the first ruling's drift bound (printed, not gated): |c| <= |mean ref| + max(floor, 3S)", () => {
+  const gate = (c: number) => driftMeanGate("D", "", { abs: 0.001 }, [{ at: "1", refs: [-0.010, -0.012], candidate: c }]);
+  assert.ok(gate(-0.0169).pass); assert.ok(!gate(-0.0171).pass);
+  close(gate(-0.0145).rows[0]!.margin, 0.0035 / 0.006, 1e-12);
 });
 
 test("a volume-coupled scalar passes anywhere between the reference band and the restored band", () => {

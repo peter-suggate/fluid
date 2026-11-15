@@ -412,6 +412,49 @@ A row passes when |c| ≤ |mean(refs)| + max(floor, 3S), with the floor and S un
 margin is the excess over |mean(refs)| divided by the tolerance. A candidate that drifts less,
 or the other way by no more than the reference does, passes.
 
+**(1a) Second ruling (2026-11-15, before any M2 gate; tightens (1)): drift is bounded by NB-FLIP's
+envelope.** The coordinator ruled that a one-sided bound must not carry 3S from a two-sided
+spread.
+- **Why the first ruling was too loose.** At 2761350a, dam ref c gains volume late (§4.6). That
+  widened D4's S to 0.015, so the 180–300 bound became 0.73% + 4.5 points, which would pass a 5.2%
+  loss. In a one-sided test, a spread that includes a run gaining volume says nothing about how
+  much loss is acceptable.
+- **The new rule** for G7, L1, P1, D4c and the D4 windows: pass when |c| ≤ max_i |ref_i| + floor.
+  That is the worst loss NB-FLIP itself showed in any reference, plus the §4.1 floor. S plays no
+  part.
+- **How it prints.** The row's `ref` is the envelope max_i |ref_i| and its `tol` is the floor. The
+  margin is the excess over the envelope divided by the floor.
+- **The earlier rules stay printed, not gated.** The first ruling's bound, |mean| + max(floor,
+  3S), prints as "ID (first ruling)", and the §4 two-sided row as "ID (as written)". The code is
+  `driftGate` (gated) and `driftMeanGate` (printed) in `tools/nbflip-gate-rules.ts`, and the unit
+  test includes the case the first ruling missed.
+
+Drift bounds at the 2761350a references (envelope + floor), against the first ruling's:
+
+| row | at | envelope max_i \|ref_i\| | floor | bound | first ruling (\|mean\| + max(floor, 3S)) |
+|---|---|---|---|---|---|
+| G7 | 1200 | 0.51% | 0.10 | **0.61%** | 0.48% + 0.19 = 0.67% |
+| D4c | 16 | 4.91% | 1.00 | **5.91%** | 4.38% + 2.05 = 6.42% |
+| D4 | 30–90 | 4.46% | 1.00 | **5.46%** | 4.04% + 2.70 = 6.74% |
+| D4 | 105–165 | 1.19% | 1.00 | **2.19%** | 0.96% + 2.46 = 3.42% |
+| D4 | 180–300 | 1.14% | 1.00 | **2.14%** | 0.73% + 4.50 = 5.22% |
+| L1 | 120 / 180 / 240 | 0.89 / 0.95 / 1.10% | 0.50 | **1.39 / 1.45 / 1.60%** | 1.38 / 1.41 / 1.57% |
+| P1 | 150 / 300 | 0.31 / 1.07% | 0.25 | **0.56 / 1.32%** | 0.55 / 1.54% |
+
+What changes:
+- The rule tightens every dam drift row, most of all D4 late, which falls from 5.22% to 2.14%.
+  It also tightens P1 at 300 and G7.
+- L1 and P1 at 150 widen by 0.01–0.03 points. There the floor bound in both rules, and the
+  envelope sits slightly above the mean. That is the ruled definition, so it is kept as ruled.
+
+Self-test under the second ruling (both reference sets):
+- **LOO a–e and run f pass on every scene.** The worst drift margin is 0.64 at 2761350a (D4c,
+  LOO-d) and 0.73 at 33b78ebb (D4c, LOO-a).
+- **residual 0.5** still FAILs the seep only, on G1, G1w and G2. Its drift rows pass, because it
+  loses less.
+- **volctl1** still FAILs the dam. D4 rises to 13.6 at 2761350a (5.20 under the first ruling) and
+  14.2 at 33b78ebb.
+
 **(2) Volume-coupled rows pass between two bands.** These are the rows whose value moves with
 the liquid volume:
 - seep: G3, G6c and G6;
@@ -432,13 +475,13 @@ a restored S as the spread of the restored references. Then:
 
 The rule is evaluated at 201 values of α. The candidate is never restored.
 
-*Note for the coordinator:* this is the hull of the two bands. It is a superset of the ruled
+*Ruled 2026-11-15: the hull is accepted* (it follows seep §4.1's G6 interval). This is the hull of the two bands. It is a superset of the ruled
 "either band" (the union): it also accepts a candidate between the two bands when they do not
 overlap, for example one that loses half NB-FLIP's volume. That follows seep §4.1's G6 centroid
 interval between NB and NB_restored. The report marks any such row "between the bands, outside
 both", and the JSON carries `unionMargin`. No self-test row (§4.5 and §4.6 below) needed the
-hull: every band row that passes also passes the strict union. If the union is preferred, the
-change is one line in `segmentMargin`.
+hull: every band row that passes also passes the strict union. Rows that pass only between the
+bands stay flagged.
 
 **Restoration, per scene** (`restoreBox` and `restoreLostVolume`, both unit-tested against the
 observer's Float64 oracle):

@@ -3,7 +3,9 @@
  *
  * - Two-sided scalar and distance rows: |c - mean(refs)| <= max(floor, 3S), S the references' range
  *   (distance rows: the largest pairwise distance).
- * - One-sided drift rows (§4.5 (1)): |c| <= |mean(refs)| + max(floor, 3S).
+ * - One-sided drift rows (§4.5 (1), tightened by the second ruling): |c| <= max_i |ref_i| + floor, the
+ *   worst loss NB-FLIP showed in any reference plus the floor. The first ruling's |c| <= |mean(refs)| +
+ *   max(floor, 3S) (driftMeanGate) is printed, not gated.
  * - Volume-coupled rows (§4.5 (2)): the candidate passes inside the band around the references, or
  *   inside the band around the references with each run's own measured volume loss restored, or
  *   anywhere between them: the segment ref + alpha (restored - ref), alpha in [0, 1], each point's
@@ -27,6 +29,8 @@ export interface Gate { id: string; observable: string; rule: string; rows: Row[
 export interface Floor { rel?: number; abs?: number }
 export const floorOf = (fl: Floor, ref: number) => Math.max((fl.rel ?? 0) * Math.abs(ref), fl.abs ?? 0);
 export const ruleText = (fl: Floor, unit = "") => `max(${[fl.rel !== undefined ? `${100 * fl.rel}%` : "", fl.abs !== undefined ? `${fl.abs}${unit}` : ""].filter(Boolean).join(" | ")}, 3S)`;
+/** A floor alone, as text: `0.01`, or `max(2% | 1)` when it has both parts. */
+export const floorText = (fl: Floor, unit = "") => { const parts = [fl.rel !== undefined ? `${100 * fl.rel}%` : "", fl.abs !== undefined ? `${fl.abs}${unit}` : ""].filter(Boolean); return parts.length > 1 ? `max(${parts.join(" | ")})` : parts[0] ?? "0"; };
 const known = (v: readonly (number | null)[]) => v.filter((x): x is number => x !== null && Number.isFinite(x));
 /** A row whose references are missing on some runs: passes only when every side is missing. */
 function missingRow(at: string, refs: (number | null)[], candidate: number | null): Row | undefined {
@@ -49,8 +53,22 @@ export function scalarGate(id: string, observable: string, fl: Floor, unit: stri
   return { id, observable, rule: `|c - ref| <= ${ruleText(fl, unit)}`, rows, pass: rows.every(r => r.pass), informational };
 }
 
-/** §4.5 (1): a one-sided drift gate. Passes when |c| <= |mean(refs)| + max(floor, 3S); `ref` prints |mean(refs)|. */
+/** §4.5 (1), the second ruling: a one-sided drift gate against NB-FLIP's envelope. Passes when
+ * |c| <= max_i |ref_i| + floor (S plays no part: a spread that includes a run gaining volume says nothing
+ * about how much loss is acceptable). `ref` prints the envelope max_i |ref_i|, `tol` the floor, and the
+ * margin is the excess over the envelope / floor. */
 export function driftGate(id: string, observable: string, fl: Floor, points: ScalarPoint[], informational = false): Gate {
+  const rows = points.map(p => {
+    const missing = missingRow(p.at, p.refs, p.candidate); if (missing) return missing;
+    const v = p.refs as number[], ref = Math.max(...v.map(Math.abs)), S = spread(v), tol = floorOf(fl, ref);
+    if (p.candidate === null || !Number.isFinite(p.candidate)) return { at: p.at, ref, S, candidate: p.candidate, tol, pass: false, margin: Infinity };
+    const over = Math.max(0, Math.abs(p.candidate) - ref);
+    return { at: p.at, ref, S, candidate: p.candidate, tol, pass: over <= tol, margin: tol > 0 ? over / tol : over > 0 ? Infinity : 0 };
+  });
+  return { id, observable, rule: `|c| <= max |ref_i| + ${floorText(fl)}`, rows, pass: rows.every(r => r.pass), informational };
+}
+/** §4.5 (1), the first ruling (superseded, printed): |c| <= |mean(refs)| + max(floor, 3S); `ref` prints |mean(refs)|. */
+export function driftMeanGate(id: string, observable: string, fl: Floor, points: ScalarPoint[], informational = false): Gate {
   const rows = points.map(p => {
     const missing = missingRow(p.at, p.refs, p.candidate); if (missing) return missing;
     const v = p.refs as number[], ref = Math.abs(mean(v)), S = spread(v), tol = Math.max(floorOf(fl, ref), 3 * S);

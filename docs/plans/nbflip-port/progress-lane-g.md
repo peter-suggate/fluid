@@ -151,3 +151,16 @@ Plan §4.5 (amendment), §4.6 (references) and §4.7 (timing).
 - **Letters' +1 ms is noise.** Two rounds give −1.1 and −3.6 ms fenced mean. 33b78ebb itself
   spans 71.1–74.3 ms over four runs.
 - **Other scenes.** All are within the about 2.5% A/A spread.
+
+## 2026-11-15 MILESTONE G6: second drift ruling, drift bounded by NB-FLIP's envelope (plan §4.5 (1a))
+
+- **Rule.** Drift rows now pass when |c| ≤ max_i |ref_i| + floor (`driftGate`). The first
+  ruling's |mean| + max(floor, 3S) prints as "(first ruling)" (`driftMeanGate`), not gated.
+  The hull ruling is accepted.
+- **Bounds at 2761350a.**
+  - D4: 5.46 / 2.19 / 2.14%, down from 6.74 / 3.42 / 5.22%.
+  - D4c: 5.91%, down from 6.42%.
+  - G7: 0.61%, down from 0.67%.
+  - P1 at 300: 1.32%, down from 1.54%.
+- **Self-test.** LOO a–e and f pass on both sets; the worst drift margin is 0.73. residual 0.5
+  fails the seep only (G1, G1w, G2). volctl1 fails the dam (D4 13.6).
