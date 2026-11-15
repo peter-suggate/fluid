@@ -315,7 +315,9 @@ slabs, overflow tail and spill.
 | 3 | `pSolid` | Indirect over the compact near-solid and near-body list from `pTrace`. Runs `nbFinish`'s solid walk and `nbRigidContact`, verbatim. | The other two cap setters, paid only by the particles that need them | 64 lanes |
 | 4–6 | `pCount`, `pScan`, `pScatter` | The seep's per-brick counting sort into the new bins. `pCount` also marks bricks to enter for `setMark`. Retirement (age, sparse) and the cell cap merge happen at `pScatter`. | – | 3 launches, high occupancy |
 
-**The p1b hazard.**
+**The p1b hazard: closed (lane F, 7371f768).** The collapse was a wrong-scene run: an unknown `--scene=letters` fell back to the dam break. p1b is bitwise identical to the base on letters, so `pBand` may compute the surface shift and separation from the pre-move bank in its own pass. The original note follows.
+
+**The p1b hazard (original note).**
 - Splitting the move changes when `nbSurfaceShift` reads positions: after the trace, from the compact stream, rather
   than inside the same thread.
 - P2's p1b, which made that move, collapsed letters to 7.9k particles with its check off.

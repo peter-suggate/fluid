@@ -2681,8 +2681,16 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
 ]);
 
+/**
+ * Lookup for an id the caller knows is authored here: an unknown id throws.
+ * The old fallback to the first catalog scene let a tool's mistyped
+ * `--scene=letters` run the dam break silently (lane F, 7371f768).
+ * Callers that need to hear "no" use findSceneDefinition.
+ */
 export function getSceneDefinition(id: string): SceneDefinition {
-  return findSceneDefinition(id) ?? SCENE_CATALOG[0];
+  const definition = findSceneDefinition(id);
+  if (!definition) throw new Error(`Unknown scene id "${id}"`);
+  return definition;
 }
 
 /**
