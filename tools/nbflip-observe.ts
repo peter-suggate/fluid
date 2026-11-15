@@ -19,6 +19,8 @@ import { BULK16_STATUS, type UniformBulkPages } from "../lib/methods/uniform/uni
 import { BULK16_PAGE, BULK16_PAGE_WORDS } from "../lib/methods/uniform/uniform-bulk-pages-reference";
 import type { GPUSolverInstance } from "../lib/core/method-contract";
 import { boxAddRegion, boxObserverWGSL, boxWords, decodeBoxWords, type BoxGeometry, type BoxSums } from "./nbflip-observables";
+import { createBrickBoxObserver } from "./nbflip-observe-brick";
+import type { BrickNBFlipSolver } from "../lib/methods/narrow-band/brick-solver";
 
 interface NBInternals {
   device: GPUDevice;
@@ -35,6 +37,8 @@ export interface BoxObserver {
 }
 
 export async function createNBFlipBoxObserver(device: GPUDevice, solver: GPUSolverInstance, _scene: SceneDescription, g: BoxGeometry): Promise<BoxObserver> {
+  // The brick engine (engine: "brick") has its own traversal, with the same measure.
+  if ("brickEngine" in solver) return createBrickBoxObserver(device, solver as BrickNBFlipSolver, g);
   const nb = solver as unknown as NBInternals;
   const frame = nb.mixedFrame;
   if (!frame?.ownership || !nb.vertexPhiField || !nb.velocityA) throw new Error("NB-FLIP box observer: the solver has no mixed-ownership frame");

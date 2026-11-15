@@ -2,7 +2,8 @@
  * The pressure slot contract (brick-abi.md §6.1): what sits between E's
  * `operator` and `project` and lane P's solver.
  *
- * Inputs (written by `operator` on every cell of every F_LIQ brick):
+ * Inputs (written by `operator` on every cell of every live F brick, F_ALL;
+ * outside F_LIQ the rows are zero: K, DIAG, RHS and X are 0):
  * - `pres.RHS`: -h * sum_a (A u*)(c+e_a) - (A u*)(c), m^2/s;
  * - `pres.DIAG`: the sum over the six faces of A (liquid neighbour),
  *   A/theta (air neighbour), or 0 (closed);
@@ -43,6 +44,8 @@ export interface PressureSolver {
   readonly finish: readonly BrickPlacement[];
   /** Lane-owned buffers by name, in words; the engine allocates them zeroed. */
   readonly buffers: Readonly<Record<string, number>>;
+  /** Header words (in P's 128..191) the receipt reports: this step's iterations, and the cumulative capped steps. */
+  readonly receipt?: { readonly iterations?: number; readonly capped?: number };
 }
 
 export type PressureSolverFactory = (layout: BrickLayout) => PressureSolver;

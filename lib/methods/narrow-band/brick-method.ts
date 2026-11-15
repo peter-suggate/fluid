@@ -4,15 +4,24 @@
  * - "uniform" (the default) runs the old engine;
  * - "brick" runs the brick engine in lib/methods/narrow-band/.
  *
- * Until each stage lands, a scene the brick engine cannot run fails
- * explicitly, naming what is missing, and the uniform engine runs it.
- *
- * M1 has the brick set, the lists, the schedule and the pressure slot (with
- * the bring-up solver). Particle transport, the level set and the velocity
- * stage are lane F's, and bodies are lane P's. So every authored NB-FLIP scene
- * fails here today, as it must; the engine itself runs under its tests.
+ * A scene the brick engine cannot run fails explicitly, naming every gap,
+ * and its user runs it on engine "uniform". The gaps are:
+ * - the scene's (brick-scene.ts: M2 enables the dam only, without solids,
+ *   bodies or sources);
+ * - the lanes': F's stages and P's solver register in their own files
+ *   (brick-fluid-stages.ts, brick-pressure-solver.ts). The bring-up CG never
+ *   registers.
  */
 import type { SceneDescription } from "../../core/model";
+import type { GPUQuality } from "../../core/gpu-quality";
+import { fluidLatticeFarPhi } from "../../core/initial-liquid-lattice";
+import { BrickLayout } from "./brick-abi";
+import { brickFluidStages } from "./brick-fluid-stages";
+import { brickPressureSolver } from "./brick-pressure-solver";
+import type { PressureSolverFactory } from "./brick-pressure-slot";
+import { brickSceneSetup } from "./brick-scene";
+import { BrickNBFlipSolver } from "./brick-solver";
+import type { BrickStagesFactory } from "./brick-stages";
 
 export const NB_ENGINES = ["uniform", "brick"] as const;
 export type NBEngine = typeof NB_ENGINES[number];
@@ -23,24 +32,31 @@ export const nbEngine = (value: unknown): NBEngine => {
   throw new Error(`NB-FLIP: unknown engine ${JSON.stringify(value)} (expected ${NB_ENGINES.join(" or ")})`);
 };
 
-/** The brick engine's stages that have landed (M1). */
-export const BRICK_ENGINE_LANDED = { brickSet: true, pressureSlot: true, particles: false, levelSet: false, velocity: false, bodies: false, solids: false, sources: false } as const;
-
-/** Why the brick engine cannot run this scene yet; empty when it can. */
-export function brickEngineGaps(scene: SceneDescription): string[] {
+/** The registered lane stages and solver (lane-owned registration files), or what is missing. */
+export function brickEngineLanes(fluid: BrickStagesFactory | undefined = brickFluidStages, pressure: PressureSolverFactory | undefined = brickPressureSolver): string[] {
   const gaps: string[] = [];
-  if (!scene.fluid?.brickPools) gaps.push("scene.fluid.brickPools is not authored (brick-abi.md §9)");
-  if (!BRICK_ENGINE_LANDED.particles) gaps.push("particle transport (lane F: pTrace, rebin) has not landed");
-  if (!BRICK_ENGINE_LANDED.levelSet) gaps.push("the level set (lane F: phiAdvect, union, redistance) has not landed");
-  if (!BRICK_ENGINE_LANDED.velocity) gaps.push("the velocity stage (lane F: p2g, uAdvect, extension) has not landed");
-  if ((scene.rigidBodies?.length ?? 0) > 0 && !BRICK_ENGINE_LANDED.bodies) gaps.push("rigid bodies (lane P) have not landed");
-  if (scene.voxelDomain && !BRICK_ENGINE_LANDED.solids) gaps.push("static solids (solidStamp, M3) have not landed");
-  if ((scene.fluid?.inflow || scene.fluid?.scheduledDrops?.length) && !BRICK_ENGINE_LANDED.sources) gaps.push("sources (lane F) have not landed");
+  if (!fluid) gaps.push("lane F's stages (particles, level set, velocity) are not registered (brick-fluid-stages.ts)");
+  if (!pressure) gaps.push("lane P's pressure solver is not registered (brick-pressure-solver.ts)");
   return gaps;
 }
 
-/** The refusal for a scene the brick engine cannot run, naming every gap. M1 has no host adapter, so it refuses every scene. */
-export function brickEngineRefusal(scene: SceneDescription): Error {
-  const gaps = brickEngineGaps(scene);
-  return new Error(`NB-FLIP brick engine cannot run scene "${scene.sceneId ?? "(unnamed)"}": ${[...gaps, "its host adapter (M1) has not landed"].join("; ")}. Run it with engine "uniform".`);
+/** Why the brick engine cannot run this scene yet; empty when it can. */
+export function brickEngineGaps(scene: SceneDescription, values: Readonly<Record<string, unknown>> = {}): string[] {
+  return [...brickSceneSetup(scene, values).gaps, ...brickEngineLanes()];
+}
+
+/** The refusal for a scene the brick engine cannot run, naming every gap. */
+export function brickEngineRefusal(scene: SceneDescription, values: Readonly<Record<string, unknown>> = {}): Error {
+  const gaps = brickEngineGaps(scene, values);
+  return new Error(`NB-FLIP brick engine cannot run scene "${scene.sceneId ?? "(unnamed)"}": ${gaps.join("; ")}. Run it with engine "uniform".`);
+}
+
+/** The app's brick solver for a scene, or the explicit refusal. */
+export async function createBrickSolver(device: GPUDevice, scene: SceneDescription, values: Readonly<Record<string, unknown>>, quality: GPUQuality): Promise<BrickNBFlipSolver> {
+  const { setup, gaps } = brickSceneSetup(scene, values), lanes = brickEngineLanes();
+  if (!setup || gaps.length || lanes.length || !brickFluidStages || !brickPressureSolver) throw brickEngineRefusal(scene, values);
+  const stages = brickFluidStages, solver = brickPressureSolver;
+  const probe = solver(new BrickLayout({ lattice: setup.lattice, ...setup.capacities }));
+  if (probe.bringUp) throw new Error("NB-FLIP brick engine: the registered pressure solver is the bring-up CG, which no scene may run (coordinator ruling, 2026-11-15)");
+  return BrickNBFlipSolver.create(device, { setup, stages, solver, values, quality, farPhi_m: fluidLatticeFarPhi(scene) });
 }

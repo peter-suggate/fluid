@@ -121,6 +121,8 @@ export interface GPUEulerianInfo {
    * Reporting is asynchronous and never feeds simulation state. */
   gpuValidationError?: string;
   quality: GPUQuality;
+  /** NB-FLIP's brick engine (engine "brick"): the newest receipt's set counts and the presentation copies. */
+  brickEngine?: { liveF: number; liveC: number; peakF: number; pressureCapNow?: boolean; step: number; presentations: number; lastPresentationMs?: number; particles?: number };
   volumeCellSum?: number;
   representedVolumeCellSum?: number;
   representedVolumeDrift?: number;

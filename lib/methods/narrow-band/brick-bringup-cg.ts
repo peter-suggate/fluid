@@ -209,5 +209,6 @@ var<workgroup> wOpen:u32;
       { kernel: cgCheck, dispatch: { direct: [1, 1, 1] }, z: s, w: tolBits }],
     finish: [],
     buffers: { cgPart: 4 * L.cap.f },
+    receipt: { iterations: CG_HEADER.ITERATIONS, capped: CG_HEADER.CAPPED },
   };
 }

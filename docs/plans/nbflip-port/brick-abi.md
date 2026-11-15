@@ -493,7 +493,7 @@ m²/s. DIAG and K are dimensionless. h is ring word `H` (m).
 (`uniformMixedPressureLiquidWGSL`, verbatim). In M1 the centre φ is the mean of the cell's 8
 vertex φ. If F later supplies a centre channel, E changes that one helper.
 
-**Inputs.** `operator` writes them on every cell of every `F_LIQ` brick, before the solver's
+**Inputs.** `operator` writes them on every cell of every live (`F_ALL`) brick, before the solver's
 first kernel:
 - `operator` is a pure function of the channels. It reads `PHI` and `FLAGS` (OPEN, box rule),
   `US0..2`, and the cut's `FRAC` and `AP*` (an aperture of 1 where there is no cut). It writes
@@ -512,6 +512,10 @@ first kernel:
 - `RHS(c) = −h Σ_a (A_a(c + e_a) US_a(c + e_a) − A_a(c) US_a(c))`, that is −h² times the
   discrete divergence of u*.
 - On non-liquid cells, DIAG, K and RHS are 0 and X is 0.
+- (Amended at M2.) `operator` runs over F_ALL, not F_LIQ, so this holds in every live brick. A
+  live brick outside F_LIQ holds zero rows, and a solver that reads a neighbour's `K` or `X`
+  through a neighbour word never sees a stale value. A liquid cell in a brick outside F_LIQ would
+  have no row in the solve, so `operator` latches `FAIL.LIST` (info: the brick's key).
 
 **Sign convention.** The system is `DIAG(c) X(c) − Σ_nbr K X(nbr) = RHS(c)` over the liquid cells,
 with X = 0 at air (the Dirichlet ghost):
@@ -573,6 +577,49 @@ one iteration per slot, written against this contract, so that M1's tests have a
 - It is labelled as such in its code and in `progress-lane-e.md`.
 - No M2 gate and no timing claim runs on it.
 - P's MGPCG replaces it at the same slot before any scene is gated.
+
+### 6.2 The fluid stage contract and the registration files (amended at M2)
+
+Lane F writes its kernels against `BrickStages` (`brick-stages.ts`), as P writes against §6.1:
+- `move` and `rebin` sit in part 1, after the head.
+- `levelSet` and `velocity` sit in part 2, after the brick set and before `operator`.
+  `velocity` writes `US`.
+- `tail` sits after `project` and before `stepEnd`.
+- `boot` runs once, after E's boot phi and lists.
+
+Each entry is a `BrickPlacement` (`brick-kernel.ts`). The rules:
+- A gated dispatch reads list arguments (words 0–392) or F's region (2048–4095).
+- F's buffers are named in `buffers`, in words, and allocated zeroed. Their names may not shadow
+  an engine buffer.
+- `validateBrickStages` checks both rules at build.
+- F owns header words 64–127 and class bits 16–23.
+
+A stage factory receives a `BrickStageContext`:
+- the layout;
+- dt, h and gravity, as the ring carries them;
+- the method's resolved values;
+- the fluid's constants (density, dynamic viscosity, surface tension), which F's forces apply,
+  or whose scene F refuses.
+
+**Registration files.** Each lane owns one file, and E imports from it. Its export stays
+`undefined` until the lane lands:
+- `brick-fluid-stages.ts` exports `brickFluidStages` (F);
+- `brick-pressure-solver.ts` exports `brickPressureSolver` (P).
+
+The method (`brick-method.ts`) refuses a scene and names every gap: the scene's own gaps
+(`brick-scene.ts`), each unregistered lane, and a registered bring-up solver. A bring-up stage set
+(`bringUp: true`, `bringUpStages`, `uGravity`) is for E's tests only.
+
+**The host adapter.** `BrickNBFlipSolver` (`brick-solver.ts`) is the app's `GPUSolverInstance`:
+- `advanceTo` runs whole steps of dt, with no substeps.
+- The interim presentation (`brick-present.ts`, ruling 7.1(3)) copies the pool into dense
+  `vertexPhi`, `volume` and `openFraction` textures:
+  - It runs as its own submission after the steps, never inside one.
+  - It dispatches one workgroup a pool slot, and clears the bricks that left.
+  - `setPresentationEnabled(false)` turns it off for benches.
+  - `info.brickEngine.presentations` and `lastPresentationMs` report it.
+- Observers read `brickEngine` after a fence. `tools/nbflip-observe-brick.ts` is the box
+  observer, and `createNBFlipBoxObserver` routes a brick solver to it.
 
 ## 7. The brick-set update in words
 

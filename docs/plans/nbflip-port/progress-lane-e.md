@@ -158,3 +158,81 @@ Not in M1:
 - the scene host, contract and presentation adapters (the refusal names them);
 - C and B rows in `operator` and the seam (P extends them in place);
 - page-local slot order (a locality measurement).
+
+## M2, part 1 (2026-11-15): the host, contract and presentation adapters, the stage contract, the observer
+
+**The stage contract** (`brick-stages.ts`, brick-abi.md §6.2):
+- Lane F's kernels plug in as `BrickStages`: `move` and `rebin` (part 1); `levelSet` and
+  `velocity` (part 2, before `operator`); `tail` (after `project`); `boot`; and F's buffers.
+- `validateBrickStages` checks the args regions and buffer names.
+- **Registration files.** F owns `brick-fluid-stages.ts`, P owns `brick-pressure-solver.ts`. Both
+  export `undefined` until their lane lands.
+- The bring-up stage set (`uGravity`) stays for E's tests only.
+
+**The scene adapter** (`brick-scene.ts`). `brickSceneSetup(scene, values)` gives the setup or every
+gap. M2 enables high-resolution-dam-break only. For the dam:
+- 128³, h = 0.00625 m, dt = 1/60 s, 1936 boot bricks, no scene gaps.
+- The box faces on closed walls are continued 2·max(n) cells through the wall, so φ equals
+  `damBreakSignedDistanceAtNode` (tested at 6 nodes).
+- Density, viscosity (0.001002 Pa·s) and tension pass to F's stage context.
+
+Letters, seep and paddleboats each name their gaps: open top, solids, bodies, sources, initial
+volumes.
+
+**The method** (`brick-method.ts`). `engine: "brick"` now calls `createBrickSolver`. It refuses
+with the scene gaps plus each unregistered lane, and refuses a bring-up pressure solver.
+Today the dam is refused for "lane F's stages" and "lane P's pressure solver" only. Every refusal
+says to run the scene with engine "uniform".
+
+**The host adapter** (`brick-solver.ts`, `BrickNBFlipSolver`, a `GPUSolverInstance`):
+- whole steps of dt (a partial step returns false), with no substeps;
+- `readStats` reads the header (liveF, liveC, peakF, step, PRESSURE_CAP, P's receipt words);
+- `assertSimulationHealthy` latches FAIL;
+- `info.brickEngine` reports the presentation count and the time of the last copy.
+
+`PressureSolver.receipt` names the header words of iterations and capped counts.
+
+**The presentation** (`brick-present.ts`, ruling 7.1(3)):
+- dense `vertexPhi` ((n+1)³, metres), `volume` (six-tet fill) and `openFraction` (1), allocated
+  once;
+- one workgroup a pool slot, as its own submission after the steps;
+- `presentClear` writes the far φ over the bricks a slot showed and no longer holds.
+
+The GPU test steps a [64,32,64] sheet and checks φ, fill (0.3 in the surface cell) and far φ. It
+then narrows the sheet and checks that the bricks that left read far φ and fill 0.
+
+**Operator zero rows** (lane P's report, slot contract §6.1, amended). `operator` now runs over
+F_ALL, not F_LIQ:
+- a live brick outside F_LIQ holds K, DIAG, RHS, X = 0, so the CG's upper-neighbour K read (and
+  MGPCG's) never sees a stale value;
+- a liquid cell in a brick outside F_LIQ latches FAIL.LIST.
+
+The GPU test seeds 7.5 in every row, steps, and checks 0 at every non-liquid cell (including the
+extra vertex row of bricks beyond the lattice).
+
+**The observer** (`tools/nbflip-observe-brick.ts`). The box observer runs over the pool, one
+workgroup a slot:
+- owners are the h cells of live F bricks;
+- liquid is the six-tet fill of the corner φ times the cells;
+- u is the mean of the two faces, with walls 0, and a face in a non-resident brick drops out.
+
+`createNBFlipBoxObserver` routes a solver with `brickEngine` to it, a 2-line change to lane G's
+file. The bench runs the dam with `--set=engine=brick` once F and P register. The GPU test
+matches `boxOracle` over the read-back pool (total, moments, ke, bins, tops, front, wet floor,
+column) to fixed-point rounding. `readStats` does not yet give `volumeDrift`/`volumeCellSum`: the
+observer's total is the measure.
+
+Tests: brick-engine.test.ts has 9 CPU and 6 GPU tests, and nbflip-observe-brick.test.ts has 1 GPU
+test. All 16 GPU tests pass on the check slot (rc 0, no Metal aborts).
+
+**For P (physics parity).** The old engine solves pressure on an all-4h ownership every frame
+(`UniformMixedOwnershipTransfer`, uniform-mixed-remap.ts l.319–645). The brick engine solves at h
+on F bricks. Matching the old engine's pressure needs either P's coarse level or an explicit
+ruling.
+
+**Next (M2, part 2).**
+- Tiers: the ABI amendment for h|4h storage, `setMark`'s census criteria (verbatim from
+  uniform-mixed-dynamic.ts) and `setTransfer`'s h↔4h remap (verbatim from
+  uniform-mixed-remap.ts), with frozen-state parity.
+- The dam end to end on F's stages and P's MGPCG.
+- Letters' peak re-measured before M4.

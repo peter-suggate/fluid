@@ -11,7 +11,7 @@ import { uniformGeometricSolverOptions } from "./uniform-geometric-options";
 import { resolveUniformGeometricValues } from "./uniform-geometric-parameters";
 import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
 import { uniformNearSettled } from "./uniform-near-settled";
-import { brickEngineRefusal, nbEngine } from "../narrow-band/brick-method";
+import { createBrickSolver, nbEngine } from "../narrow-band/brick-method";
 
 /** A 4h particle overlap, with either fixed or activity-driven surface coverage. */
 const fixed:MethodParamValues={sharpeningSweeps:0,sharpeningDistance:0,totalSurfaceVolume:"on",surfaceVolumeRounds:2,surfaceDeficitBalancing:"off",volumeDustThreshold:0,orphanDustThreshold:0,phiDrain:"off",detailPolicy:"dynamic",adaptiveSurface:"on",coarseParticleMode:"off",pressureFullCycles:3,pressureVCycles:4,pressureSweeps:6};
@@ -133,7 +133,7 @@ export const uniformNarrowBandMethod:SimulationMethod={
  runtimeParamKeys:params.filter(p=>p.update==="runtime").map(p=>p.key),
  appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
- createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>nbEngine(values.engine)==="brick"?Promise.reject(brickEngineRefusal(scene)):WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
+ createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>nbEngine(values.engine)==="brick"?createBrickSolver(device,scene,values,quality):WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
   {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).fine,phiCoarseAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).coarse,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

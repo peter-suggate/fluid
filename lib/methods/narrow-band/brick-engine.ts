@@ -19,6 +19,7 @@ import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type Bric
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
+import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 
 export type Vec3 = readonly [number, number, number];
 /** A box of initial liquid, in cells (vertex coordinates of the lattice). */
@@ -34,6 +35,11 @@ export interface BrickEngineOptions {
   readonly liquid: readonly BrickLiquidBox[];
   /** The pressure solver at the slot (brick-abi.md §6.1). */
   readonly solver: PressureSolverFactory;
+  /** F's stages (brick-abi.md §6.2; brick-stages.ts). */
+  readonly stages: BrickStagesFactory;
+  /** The method's resolved values and the fluid's constants, passed to the stage factory. */
+  readonly values?: Readonly<Record<string, unknown>>;
+  readonly fluid?: { readonly density_kg_m3: number; readonly viscosity_Pa_s: number; readonly surfaceTension_N_m: number };
   readonly label?: string;
 }
 
@@ -97,6 +103,7 @@ interface Recorded { readonly pipeline: GPUComputePipeline; readonly group: GPUB
 export class BrickEngine {
   readonly layout: BrickLayout;
   readonly solver: PressureSolver;
+  readonly stages: BrickStages;
   readonly schedule: BrickStageSchedule;
   /** Pipeline compile times (ms), by kernel label, from this engine's creation. */
   readonly compileMs: Readonly<Record<string, number>>;
@@ -111,13 +118,13 @@ export class BrickEngine {
   receipt?: { step: number; header: Uint32Array };
   failure?: string;
 
-  private constructor(readonly device: GPUDevice, readonly options: BrickEngineOptions, layout: BrickLayout, solver: PressureSolver,
+  private constructor(readonly device: GPUDevice, readonly options: BrickEngineOptions, layout: BrickLayout, solver: PressureSolver, stages: BrickStages,
     schedule: BrickStageSchedule, private readonly pipelines: Map<BrickKernel, GPUComputePipeline>, compileMs: Record<string, number>) {
-    this.layout = layout; this.solver = solver; this.schedule = schedule; this.compileMs = compileMs;
+    this.layout = layout; this.solver = solver; this.stages = stages; this.schedule = schedule; this.compileMs = compileMs;
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, boxes: number): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number): BrickStageSchedule {
     const set = brickSetKernels(layout), pres = brickPressureKernels(layout), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
@@ -139,27 +146,30 @@ export class BrickEngine {
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
       ...tail, ...lists,
-      // Velocity stage: F's p2g and uAdvect land here. M1's bring-up body force stands in.
-      { kernel: pres.uGravity, dispatch: list(LIST.F_ALL, "G1") },
-      { kernel: pres.operator, dispatch: list(LIST.F_LIQ, "G1") },
+      ...stages.levelSet,
+      ...stages.velocity,
+      { kernel: pres.operator, dispatch: list(LIST.F_ALL, "G1") },
       ...solver.setup,
       ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(),
       ...solver.finish,
       { kernel: pres.project, dispatch: list(LIST.F_LIQ, "G1") },
+      ...stages.tail,
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
-    const boot: BrickPlacement[] = [...update, ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
-    // Part 1 (head, move, rebin) holds F's and P's kernels; M1 has none of them.
-    return { part1: [], part2, boot };
+    const boot: BrickPlacement[] = [...update, ...tail, { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes }, ...lists, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5), then F's move and rebin.
+    return { part1: [...stages.move, ...stages.rebin], part2, boot };
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
     const layout = new BrickLayout({ lattice: options.lattice, ...options.capacities, apic: options.apic });
     const solver = options.solver(layout);
     validatePressureSolver(solver);
+    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid });
+    validateBrickStages(stages);
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
-    const schedule = BrickEngine.scheduleFor(layout, solver, options.liquid.length);
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.liquid.length);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
@@ -178,7 +188,7 @@ export class BrickEngine {
       pipelines.set(k, await device.createComputePipelineAsync({ label: `nb-brick.${k.label}`, layout: layout_, compute: { module, entryPoint: k.entry } }));
       compileMs[k.label] = performance.now() - t0;
     }));
-    const engine = new BrickEngine(device, options, layout, solver, schedule, pipelines, compileMs);
+    const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
     engine.allocate(initial);
     engine.record();
     engine.boot();
@@ -200,8 +210,8 @@ export class BrickEngine {
     make("args", ARGS.WORDS, U.INDIRECT);
     for (const pool of ["vel", "phi", "pres", "cut"] as const) make(pool, L.poolWords[pool]);
     make("parts", L.partsWords);
-    for (const [name, words] of Object.entries(this.solver.buffers)) {
-      if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot") throw new Error(`Brick engine: solver buffer ${name} shadows an engine buffer`);
+    for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
+      if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
     }
     const boxes = new Float32Array(Math.max(6 * this.options.liquid.length, 4));
@@ -321,6 +331,13 @@ export class BrickEngine {
     await staging.mapAsync(GPUMapMode.READ);
     const out = new Uint32Array(staging.getMappedRange().slice(0)); staging.unmap(); staging.destroy();
     return out;
+  }
+
+  /** An engine buffer, for adapters that bind it outside the recorded step (presentation, observers). */
+  buffer(name: string): GPUBuffer {
+    const b = this.buffers.get(name);
+    if (!b) throw new Error(`Brick engine: no buffer ${name}`);
+    return b;
   }
 
   /** Write words into an engine buffer (tests: perturb a field between steps). */

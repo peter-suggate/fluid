@@ -102,21 +102,26 @@ export function brickPressureKernels(L: BrickLayout) {
   }
 }`);
 
-  // operator: a workgroup a brick of F_LIQ (G1), a lane two cells. Writes
-  // RHS, DIAG, K0..2 and zeroes X off the liquid (brick-abi.md §6.1).
+  // operator: a workgroup a brick of F_ALL (G1), a lane two cells. Writes
+  // RHS, DIAG, K0..2 and zeroes X off the liquid (brick-abi.md §6.1), on every
+  // live brick, so a brick outside F_LIQ holds zero rows (K, DIAG, RHS, X = 0)
+  // and no solver reads a stale coupling through a neighbour word. A liquid
+  // cell in a brick outside F_LIQ has no row in the solve: FAIL.LIST.
   const operator = k("operator", [CFG, setRW, dirRO, velRO, phiRO, presRW, cutRO], BRICK_CELLS_WGSL + velAt + /* wgsl */`
 @compute @workgroup_size(256) fn nbOperator(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_LIQ);
-  var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_LIQ,g);nbStage(slot,lid);}
+  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
+  var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);nbStage(slot,lid);}
   workgroupBarrier();
   if(!live){return;}
   if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
+  let rowed=(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_LIQUID)!=0u;
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);let h=nbRingF(cfg.x,NB_RING_H);
   for(var j=0u;j<2u;j++){
     let l=lid+256u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
     var diag=0.0;var div=0.0;var kk=vec3f(0.0);
     var liquid=false;var pc=0.0;
     if(nbInLattice(c)){pc=nbCentrePhi(b,c);liquid=nbLiquid(pc);}
+    if(liquid&&!rowed){nbFail(NB_FAIL_LIST,nbFRec(slot,NB_REC_KEY));liquid=false;}
     if(liquid){
       for(var a=0u;a<3u;a++){
         let e=nbUnit(a);

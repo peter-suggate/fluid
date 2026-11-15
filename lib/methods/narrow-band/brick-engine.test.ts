@@ -23,29 +23,35 @@ import test from "node:test";
 import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, LIST, NONE, PHI_AIR, REC, ARGS, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
+import { bringUpStages } from "./brick-stages";
 import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
 import { bindGroupLayoutEntries, MAX_STORAGE_BINDINGS } from "./brick-kernel";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
-import { brickEngineGaps, brickEngineRefusal, nbEngine } from "./brick-method";
+import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, createBrickSolver, nbEngine } from "./brick-method";
+import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
+import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, brickSetOracle, pressureOracle } from "./brick-oracle";
-import { snapshot, type BrickSnapshot } from "./brick-readback";
+import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
 import { validateScene, type SceneDescription } from "../../core/model";
 import { createReservoirSeepScene } from "../../core/reservoir-seep-scene";
+import { getSceneDefinition } from "../../core/scenes";
+import { sceneDocument } from "../../core/scene-definition";
+import { damBreakSignedDistanceAtNode } from "../../core/initial-fluid";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const H_M = 1 / 32, DT = 1 / 60, G = 9.81;
 const asF32 = (u: Uint32Array) => new Float32Array(u.buffer, u.byteOffset, u.length);
 
 function options(lattice: Vec3, liquid: BrickLiquidBox[], f: number, c: number, label?: string): BrickEngineOptions {
-  return { lattice, h_m: H_M, dt_s: DT, gravity_mps2: [0, -G, 0], capacities: { f, c, b: 0, k: 0, particles: 1024 }, liquid, solver: L => bringUpCG(L), label };
+  return { lattice, h_m: H_M, dt_s: DT, gravity_mps2: [0, -G, 0], capacities: { f, c, b: 0, k: 0, particles: 1024 }, liquid, solver: L => bringUpCG(L), stages: bringUpStages, label };
 }
 
 const sheet = (hiX: number, hiY: number, hiZ: number): BrickLiquidBox => ({ lo: [-1, -1, -1], hi: [hiX, hiY, hiZ] });
 
 /** The direct dispatches and indirect words of a schedule, in order. */
 const dispatches = (L: BrickLayout) => {
-  const s = BrickEngine.scheduleFor(L, bringUpCG(L), 1);
+  const s = BrickEngine.scheduleFor(L, bringUpCG(L), bringUpStages({ layout: L, dt_s: DT, h_m: H_M, gravity_mps2: [0, -G, 0], values: {} }), 1);
   return [...s.boot, ...s.part1, ...s.part2].map(p => `${p.kernel.label}:${JSON.stringify(p.dispatch)}:${p.z ?? 0}`);
 };
 
@@ -105,16 +111,45 @@ test("brick engine: a pressure solver's indirect words must be the lists' or P's
   validatePressureSolver({ ...cg, setup: [{ kernel, dispatch: { indirect: PRESSURE_ARGS.FIRST } }] });
 });
 
-test("brick engine: the engine switch refuses unknown engines and every scene until the host adapter lands", () => {
+test("brick engine: the engine switch refuses unknown engines, and every scene until F and P register", async () => {
   assert.equal(nbEngine(undefined), "uniform");
   assert.equal(nbEngine("brick"), "brick");
   assert.throws(() => nbEngine("bricks"), /unknown engine "bricks"/);
-  const scene = createReservoirSeepScene();
-  assert.ok(scene.fluid?.brickPools, "seep authors brickPools");
-  const refusal = brickEngineRefusal(scene);
-  assert.match(refusal.message, /host adapter \(M1\) has not landed/);
+  const seep = createReservoirSeepScene();
+  assert.ok(seep.fluid?.brickPools, "seep authors brickPools");
+  const refusal = brickEngineRefusal(seep, { timeStep: "sixtieth" });
+  assert.match(refusal.message, /not enabled on the brick engine/);
+  assert.match(refusal.message, /lane F's stages/);
+  assert.match(refusal.message, /lane P's pressure solver/);
   assert.match(refusal.message, /engine "uniform"/);
-  assert.ok(!brickEngineGaps(scene).some(g => /brickPools/.test(g)));
+  assert.ok(!brickEngineGaps(seep).some(g => /brickPools/.test(g)));
+  // The dam: no scene gap, only the lanes'.
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
+  assert.deepEqual(brickEngineGaps(dam, { timeStep: "sixtieth" }), brickEngineLanes());
+  await assert.rejects(createBrickSolver({} as GPUDevice, dam, { timeStep: "sixtieth" }, "balanced"), /lane F's stages/);
+  assert.deepEqual(brickEngineLanes(bringUpStages, L => bringUpCG(L)), []);
+});
+
+test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued through the closed walls)", () => {
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
+  const { setup, gaps } = brickSceneSetup(dam, { timeStep: "sixtieth" });
+  assert.deepEqual(gaps, []);
+  assert.ok(setup);
+  assert.deepEqual(setup.lattice, [128, 128, 128]);
+  assert.equal(setup.dt_s, 1 / 60);
+  assert.equal(setup.h_m, 0.8 / 128);
+  assert.deepEqual(setup.capacities, dam.fluid.brickPools);
+  // The reservoir's three wall faces drop out (damBreakSignedDistanceAtNode): its box runs past them.
+  const box = setup.liquid[0]!, n = 128;
+  for (let a = 0; a < 3; a++) assert.ok(box.lo[a]! <= -n, `lo ${a}`);
+  for (const [x, y, z] of [[0, 0, 0], [40, 60, 40], [79, 100, 30], [100, 10, 10], [10, 120, 10], [64, 64, 127]] as const) {
+    const want = damBreakSignedDistanceAtNode(dam, x, y, z, [n, n, n])! / setup.h_m;
+    assert.ok(Math.abs(boxDistance([x, y, z], box) - want) < 1e-6 * n, `phi at ${[x, y, z]}: ${boxDistance([x, y, z], box)} against ${want}`);
+  }
+  assert.ok(bootBricks(setup).length <= setup.capacities.f);
+  // An unenabled scene, and a dam with a body, are refused with their gaps.
+  assert.match(brickSceneSetup(createReservoirSeepScene(), {}).gaps.join(";"), /open top/);
+  assert.match(brickSceneSetup({ ...dam, rigidBodies: [{} as never] }, { timeStep: "sixtieth" }).gaps.join(";"), /rigid bodies/);
 });
 
 test("brick engine: brickPools must be integers, f/c/particles at least 1", () => {
@@ -316,5 +351,77 @@ test("brick engine (GPU): a 4x-wider box holds the same bricks and list counts",
     assert.deepEqual(b.keys, a.keys);
     assert.deepEqual(b.counts, a.counts);
     assert.equal(b.bytes - a.bytes, 4 * (b.dir - a.dir), "only the directory's page window grows");
+  });
+});
+
+/** One z slice of an r32float 3D texture. */
+async function readSlice(device: GPUDevice, texture: GPUTexture, z: number): Promise<(x: number, y: number) => number> {
+  const w = texture.width, h = texture.height, row = Math.ceil(4 * w / 256) * 256;
+  const buf = device.createBuffer({ size: row * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const enc = device.createCommandEncoder(); enc.copyTextureToBuffer({ texture, origin: [0, 0, z] }, { buffer: buf, bytesPerRow: row, rowsPerImage: h }, [w, h, 1]);
+  device.queue.submit([enc.finish()]); await buf.mapAsync(GPUMapMode.READ);
+  const f = new Float32Array(buf.getMappedRange().slice(0)); buf.unmap(); buf.destroy();
+  return (x, y) => f[(row / 4) * y + x]!;
+}
+
+test("brick engine (GPU): the app adapter steps, reports, and presents the pool (and clears bricks that leave)", GPU, async () => {
+  await withDevice("brick adapter", async device => {
+    const setup: BrickSceneSetup = { sceneId: "test", lattice: [64, 32, 64], h_m: H_M, dt_s: DT, gravity_mps2: [0, -G, 0], density_kg_m3: 1000, viscosity_Pa_s: 0, surfaceTension_N_m: 0,
+      capacities: { f: 400, c: 16, b: 0, k: 0, particles: 1024 }, liquid: [sheet(20, 10.3, 20)], origin_m: [0, 0, 0] };
+    const far = 2;
+    const solver = await BrickNBFlipSolver.create(device, { setup, stages: bringUpStages, solver: L => bringUpCG(L), values: {}, quality: "balanced", farPhi_m: far });
+    assert.equal(solver.advanceTo(0.5 * DT, []), false, "no partial step");
+    assert.equal(solver.advanceTo(DT, []), true);
+    await solver.awaitFrameCompletion();
+    await solver.assertSimulationHealthy();
+    const info = await solver.readStats();
+    assert.equal(info.brickEngine?.liveF, bootBricks(setup).length);
+    assert.equal(info.brickEngine?.step, 1);
+    assert.ok(info.pressureIterations > 0);
+    assert.deepEqual(solver.fluidDomain?.dimensions, [64, 32, 64]);
+    let phi = await readSlice(device, solver.denseLevelSetVolumeSource.vertexPhi, 8), vol = await readSlice(device, solver.volumeTexture, 8);
+    assert.ok(Math.abs(phi(8, 4) - boxDistance([8, 4, 8], sheet(20, 10.3, 20)) * H_M) < 1e-6, `phi ${phi(8, 4)}`);
+    assert.equal(vol(8, 4), 1); assert.equal(vol(8, 20), 0);
+    const surface = vol(8, 10);
+    assert.ok(Math.abs(surface - 0.3) < 0.02, `the surface cell holds 0.3: ${surface}`);
+    assert.equal(phi(60, 4), far, "no brick there: far phi");
+    // Narrower: bricks with x >= 3 leave, and their texels go back to far.
+    const e = solver.brickEngine;
+    writePhi(e, await snapshot(e), sheet(12, 10.3, 20));
+    assert.equal(solver.advanceTo(2 * DT, []), true);
+    await solver.awaitFrameCompletion();
+    phi = await readSlice(device, solver.denseLevelSetVolumeSource.vertexPhi, 8); vol = await readSlice(device, solver.volumeTexture, 8);
+    assert.equal(phi(26, 4), far, "a brick that left reads far");
+    assert.equal(vol(26, 4), 0);
+    assert.ok(Math.abs(phi(8, 4) - boxDistance([8, 4, 8], sheet(12, 10.3, 20)) * H_M) < 1e-6);
+    assert.equal(solver.presentations, 3);
+    solver.destroy();
+  });
+});
+
+test("brick engine (GPU): operator leaves zero rows (K, DIAG, RHS, X) off the liquid in every live brick", GPU, async () => {
+  await withDevice("brick zero rows", async device => {
+    const e = await BrickEngine.create(device, options([32, 32, 32], [sheet(33, 10.3, 33)], 200, 8));
+    let s = await snapshot(e);
+    // Stale values everywhere, as a reused slot would hold.
+    const junk = new Float32Array(512).fill(7.5);
+    for (const slot of s.bricks.values()) for (const ch of ["X", "RHS", "DIAG", "K0", "K1", "K2"]) e.write("pres", e.layout.base("pres", "F", ch) + BRICK_STRIDE * slot, junk);
+    e.advance(1);
+    s = await snapshot(e);
+    const ch = Object.fromEntries(await Promise.all(["X", "RHS", "DIAG", "K0", "K1", "K2"].map(async c => [c, await readChannel(e, "pres", c)] as const)));
+    let air = 0, rows = 0;
+    for (const [key, slot] of s.bricks) {
+      const b = keyOf(key), diag = ch.DIAG!(slot);
+      for (let l = 0; l < 512; l++) {
+        const x = 8 * b[0] + (l & 7), y = 8 * b[1] + ((l >> 3) & 7), z = 8 * b[2] + (l >> 6);
+        // The last brick row holds the vertices at n (bricksPerAxis); its cells are outside the lattice: no rows.
+        const outside = x >= 32 || y >= 32 || z >= 32;
+        if (y >= 11 || outside) { air++; for (const c of ["X", "RHS", "DIAG", "K0", "K1", "K2"]) assert.equal(ch[c]!(slot)[l], 0, `${c} at air`); }
+        else if (y <= 9) { rows++; assert.ok(diag[l]! > 0 && diag[l] !== 7.5, `DIAG ${diag[l]} at brick ${b} local ${l} (slot ${slot}), X ${ch.X!(slot)[l]}`); }
+      }
+    }
+    assert.ok(air > 0 && rows > 0);
+    await e.assertHealthy();
+    e.destroy();
   });
 });
