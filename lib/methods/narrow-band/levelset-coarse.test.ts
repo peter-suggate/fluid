@@ -10,7 +10,7 @@
 // positions are F's, and runs the same chain.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -18,6 +18,7 @@ import { bringUpStages } from "./brick-stages";
 import { brickTransferKernels } from "./brick-transfer.wgsl";
 import { FT, FTF, fluidLayout } from "./fluid-grid.wgsl";
 import { levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { velocityKernels } from "./velocity-kernels.wgsl";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type V = [number, number, number];
@@ -675,6 +676,13 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     }
     e.write("phi", 0, phiWords); e.write("vel", 0, velWords); e.write("fcell", 0, fcell); e.write("set", 0, set); e.write("dir", 0, dir);
     const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL };
+    // Lane F's uCache (488c4ebf): fgSampleVel reads the caches it builds from the opening velocity, as the engine runs
+    // it before lcAdvect every step. The fixture's velocity never changes, so one pass serves the whole chain; the
+    // caches are fcell words, so "fcell untouched" below is against fcell after it.
+    const uCache = velocityKernels(L, F).uCache;
+    assert.ok(uCache, "tiered velocity kernels define uCache");
+    await e.run([{ kernel: uCache, dispatch: { indirect: ARGS.FC_G1 } }]);
+    const fcellCached = new Uint32Array(await e.read("fcell"));
     console.log(`levelset-coarse: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${lanes(W, slots).length} C vertices, COLD pages ${coldSlots.map(cs => brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!).join(",")).join(" ")}; poisoned ${poisonF} F and ${poisonC} C copies (${poisonCIn} of them lattice vertices F owns)`);
 
     // ---- one kernel: run, then the φ pool differs from before only at the expected C words, by the oracle's values,
@@ -733,7 +741,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     cover("retire", tR, ["cold", "no h stencil", "hot", "rebuilt", "crossing cell", "newton", "sentinel"]);
     // ---- nothing else moved.
     assert.equal(words(await e.read("vel"), velWords), 0, "vel untouched");
-    assert.equal(words(await e.read("fcell"), fcell), 0, "fcell untouched");
+    assert.equal(words(await e.read("fcell"), fcellCached), 0, "fcell untouched");
     assert.equal(words(await e.read("dir"), dir), 0, "dir untouched");
     if (!fx.full) return { poisonCIn };
     // ---- the BULK16 latch (deviation 2): a BULK16 page word beside the pages (the skirt page (2, 0, 0)) fails lcAdvect.
