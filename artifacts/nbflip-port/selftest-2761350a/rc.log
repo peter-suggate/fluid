@@ -1,0 +1,11 @@
+dam-base-f try 1 rc=0 13:40:17
+seep-base-f try 1 rc=0 13:42:32
+letters-base-f try 1 rc=0 13:43:21
+paddleboats-base-f try 1 rc=0 13:44:09
+dam-volctl1 rc=0 13:44:37
+letters-volctl1 rc=0 13:45:12
+paddleboats-volctl1 rc=0 13:45:54
+dam-residual0.5 try 1 rc=0 13:46:13
+seep-residual0.5 try 1 rc=0 13:47:24
+letters-residual0.5 try 1 rc=0 13:47:53
+paddleboats-residual0.5 try 1 rc=0 13:48:19

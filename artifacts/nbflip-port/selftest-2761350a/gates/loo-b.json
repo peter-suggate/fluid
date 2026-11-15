@@ -1,0 +1,2417 @@
+{
+ "overall": "PASS",
+ "references": [
+  "dam-ref-a",
+  "dam-ref-c",
+  "dam-ref-d",
+  "dam-ref-e",
+  "letters-ref-a",
+  "letters-ref-c",
+  "letters-ref-d",
+  "letters-ref-e",
+  "paddleboats-ref-a",
+  "paddleboats-ref-c",
+  "paddleboats-ref-d",
+  "paddleboats-ref-e",
+  "seep-ref-a",
+  "seep-ref-c",
+  "seep-ref-d",
+  "seep-ref-e"
+ ],
+ "verdicts": [
+  {
+   "scene": "seep",
+   "candidate": "seep-ref-b",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/ref-2761350a/seep-ref-b.jsonl",
+   "pass": true,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 1200 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "1200",
+       "ref": null,
+       "S": 0,
+       "candidate": 1200,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "G1",
+     "observable": "q_left, mean over 60-step windows 120-1200 (L/s)",
+     "rule": "|c - ref| <= max(5%, 3S)",
+     "rows": [
+      {
+       "at": "mean",
+       "ref": 0.26906381013658315,
+       "S": 0.0018795454237192644,
+       "candidate": 0.2698893788655583,
+       "tol": 0.013453190506829159,
+       "pass": true,
+       "margin": 0.061366017864392726
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G1w",
+     "observable": "q_left per 60-step window (L/s)",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "120-180",
+       "ref": 0.2697385787963924,
+       "S": 0.002191589355504675,
+       "candidate": 0.26919805908204353,
+       "tol": 0.02697385787963924,
+       "pass": true,
+       "margin": 0.020038650635765272
+      },
+      {
+       "at": "180-240",
+       "ref": 0.27090686035154476,
+       "S": 0.003242950439471315,
+       "candidate": 0.2723745117187377,
+       "tol": 0.02709068603515448,
+       "pass": true,
+       "margin": 0.054175496526313344
+      },
+      {
+       "at": "240-300",
+       "ref": 0.27118317413331283,
+       "S": 0.0022800903320217003,
+       "candidate": 0.2707329711913644,
+       "tol": 0.027118317413331285,
+       "pass": true,
+       "margin": 0.016601433454979046
+      },
+      {
+       "at": "300-360",
+       "ref": 0.2720208206176835,
+       "S": 0.0025585632324123253,
+       "candidate": 0.27341390991216485,
+       "tol": 0.027202082061768353,
+       "pass": true,
+       "margin": 0.05121259804003327
+      },
+      {
+       "at": "360-420",
+       "ref": 0.2721803436279089,
+       "S": 0.00353149414058862,
+       "candidate": 0.27188046264643617,
+       "tol": 0.02721803436279089,
+       "pass": true,
+       "margin": 0.01101773101891116
+      },
+      {
+       "at": "420-480",
+       "ref": 0.2713370513916118,
+       "S": 0.002896026611324487,
+       "candidate": 0.27281103515628047,
+       "tol": 0.02713370513916118,
+       "pass": true,
+       "margin": 0.054322981587255535
+      },
+      {
+       "at": "480-540",
+       "ref": 0.26947342681884834,
+       "S": 0.0033541564941970137,
+       "candidate": 0.2708635864257758,
+       "tol": 0.026947342681884836,
+       "pass": true,
+       "margin": 0.051588003438349406
+      },
+      {
+       "at": "540-600",
+       "ref": 0.27138694000244357,
+       "S": 0.004356719970644463,
+       "candidate": 0.2703228759765466,
+       "tol": 0.027138694000244358,
+       "pass": true,
+       "margin": 0.0392083725873987
+      },
+      {
+       "at": "600-660",
+       "ref": 0.2689005050659148,
+       "S": 0.0033817138672134206,
+       "candidate": 0.2705461120605719,
+       "tol": 0.02689005050659148,
+       "pass": true,
+       "margin": 0.06119761635455901
+      },
+      {
+       "at": "660-720",
+       "ref": 0.2689816818237176,
+       "S": 0.003633819580045383,
+       "candidate": 0.26938458251953534,
+       "tol": 0.026898168182371764,
+       "pass": true,
+       "margin": 0.014978741046082438
+      },
+      {
+       "at": "720-780",
+       "ref": 0.2681538543701265,
+       "S": 0.0027905883789571817,
+       "candidate": 0.2697525329589894,
+       "tol": 0.026815385437012652,
+       "pass": true,
+       "margin": 0.05961796046594387
+      },
+      {
+       "at": "780-840",
+       "ref": 0.26844017028810185,
+       "S": 0.0037761230468618123,
+       "candidate": 0.2683413391113163,
+       "tol": 0.026844017028810188,
+       "pass": true,
+       "margin": 0.003681683582583117
+      },
+      {
+       "at": "840-900",
+       "ref": 0.2679123001098418,
+       "S": 0.0034646606445107864,
+       "candidate": 0.2703161010742292,
+       "tol": 0.02679123001098418,
+       "pass": true,
+       "margin": 0.08972342678562635
+      },
+      {
+       "at": "900-960",
+       "ref": 0.2675205993652554,
+       "S": 0.003761718750070031,
+       "candidate": 0.26871716308590976,
+       "tol": 0.026752059936525543,
+       "pass": true,
+       "margin": 0.04472790968222384
+      },
+      {
+       "at": "960-1020",
+       "ref": 0.26669835662842445,
+       "S": 0.004093658447231974,
+       "candidate": 0.26776934814455444,
+       "tol": 0.026669835662842447,
+       "pass": true,
+       "margin": 0.040157409654463835
+      },
+      {
+       "at": "1020-1080",
+       "ref": 0.26674170684813703,
+       "S": 0.0022200622558443683,
+       "candidate": 0.267889984130818,
+       "tol": 0.026674170684813703,
+       "pass": true,
+       "margin": 0.043048284284043704
+      },
+      {
+       "at": "1080-1140",
+       "ref": 0.26657906341552007,
+       "S": 0.003086242675806261,
+       "candidate": 0.2668087768554983,
+       "tol": 0.026657906341552007,
+       "pass": true,
+       "margin": 0.008617084816604056
+      },
+      {
+       "at": "1140-1200",
+       "ref": 0.26499314880371116,
+       "S": 0.002771606445321595,
+       "candidate": 0.2668854675292778,
+       "tol": 0.02649931488037112,
+       "pass": true,
+       "margin": 0.07141010000104987
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G2",
+     "observable": "left tank loss (L)",
+     "rule": "|c - ref| <= max(5%, 3S)",
+     "rows": [
+      {
+       "at": "300",
+       "ref": 1.3196666946411284,
+       "S": 0.004923400878908524,
+       "candidate": 1.3193025512695158,
+       "tol": 0.06598333473205642,
+       "pass": true,
+       "margin": 0.005518717310837924
+      },
+      {
+       "at": "600",
+       "ref": 2.6760652770996245,
+       "S": 0.014840820312485903,
+       "candidate": 2.6785944213867197,
+       "tol": 0.13380326385498123,
+       "pass": true,
+       "margin": 0.018901962584681818
+      },
+      {
+       "at": "900",
+       "ref": 4.018453788757327,
+       "S": 0.025938262939405377,
+       "candidate": 4.026935089111362,
+       "tol": 0.20092268943786637,
+       "pass": true,
+       "margin": 0.04221176004443981
+      },
+      {
+       "at": "1200",
+       "ref": 5.350986663818375,
+       "S": 0.03554498291015307,
+       "candidate": 5.36500582885742,
+       "tol": 0.2675493331909188,
+       "pass": true,
+       "margin": 0.05239843012070239
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G3",
+     "observable": "right tank volume (L); band to the restored references",
+     "rule": "c within max(5%, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "300",
+       "ref": 1.1502543869018558,
+       "S": 0.029824127197265682,
+       "candidate": 1.1561442565917972,
+       "tol": 0.08947238159179705,
+       "restored": 1.3196944122314604,
+       "restoredS": 0.004953399658205404,
+       "restoredTol": 0.06598472061157303,
+       "pass": true,
+       "margin": 0.000457203082696226,
+       "unionMargin": 0.06582891374025324
+      },
+      {
+       "at": "600",
+       "ref": 2.118361251831055,
+       "S": 0.06783355712890637,
+       "candidate": 2.157075775146485,
+       "tol": 0.20350067138671912,
+       "restored": 2.67609008789064,
+       "restoredS": 0.014835052490220324,
+       "restoredTol": 0.133804504394532,
+       "pass": true,
+       "margin": 0.0016438023374363473,
+       "unionMargin": 0.19024273016701618
+      },
+      {
+       "at": "900",
+       "ref": 2.9645331039428715,
+       "S": 0.13412350463867195,
+       "candidate": 2.900057281494141,
+       "tol": 0.40237051391601586,
+       "restored": 4.018470558166507,
+       "restoredS": 0.02592889404292098,
+       "restoredTol": 0.20092352790832535,
+       "pass": true,
+       "margin": 0.1602399286697929,
+       "unionMargin": 0.1602399286697929
+      },
+      {
+       "at": "1200",
+       "ref": 3.5022649154663092,
+       "S": 0.1355120849609377,
+       "candidate": 3.3708190612792976,
+       "tol": 0.4065362548828131,
+       "restored": 5.351005996704117,
+       "restoredS": 0.035554321289059665,
+       "restoredTol": 0.2675502998352059,
+       "pass": true,
+       "margin": 0.32333119766870927,
+       "unionMargin": 0.32333119766870927
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G3 (as written)",
+     "observable": "right tank volume (L)",
+     "rule": "|c - ref| <= max(5%, 3S)",
+     "rows": [
+      {
+       "at": "300",
+       "ref": 1.1502543869018558,
+       "S": 0.029824127197265682,
+       "candidate": 1.1561442565917972,
+       "tol": 0.08947238159179705,
+       "pass": true,
+       "margin": 0.06582891374025324
+      },
+      {
+       "at": "600",
+       "ref": 2.118361251831055,
+       "S": 0.06783355712890637,
+       "candidate": 2.157075775146485,
+       "tol": 0.20350067138671912,
+       "pass": true,
+       "margin": 0.19024273016701618
+      },
+      {
+       "at": "900",
+       "ref": 2.9645331039428715,
+       "S": 0.13412350463867195,
+       "candidate": 2.900057281494141,
+       "tol": 0.40237051391601586,
+       "pass": true,
+       "margin": 0.1602399286697929
+      },
+      {
+       "at": "1200",
+       "ref": 3.5022649154663092,
+       "S": 0.1355120849609377,
+       "candidate": 3.3708190612792976,
+       "tol": 0.4065362548828131,
+       "pass": true,
+       "margin": 0.32333119766870927
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "G4",
+     "observable": "throat u, median over samples 120-1200 (m/s)",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "median",
+       "ref": 2.6429173946380615,
+       "S": 0.012485742568969727,
+       "candidate": 2.638498306274414,
+       "tol": 0.2642917394638062,
+       "pass": true,
+       "margin": 0.016720493696143836
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G5",
+     "observable": "step at which wet floor reaches 90%",
+     "rule": "|c - ref| <= max(25%, 3S)",
+     "rows": [
+      {
+       "at": "90%",
+       "ref": 288.47121761986955,
+       "S": 17.862791163112945,
+       "candidate": 287.51549295774646,
+       "tol": 72.11780440496739,
+       "pass": true,
+       "margin": 0.013252270642577406
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G5f",
+     "observable": "wet floor cells at 1200",
+     "rule": "|c - ref| <= max(5%, 3S)",
+     "rows": [
+      {
+       "at": "1200",
+       "ref": 16370.75,
+       "S": 12,
+       "candidate": 16367,
+       "tol": 818.5375,
+       "pass": true,
+       "margin": 0.004581341722279065
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G6c",
+     "observable": "right-chamber centroid x (cells); band to the restored references",
+     "rule": "c within max(16 cells, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "600",
+       "ref": 368.96434383850305,
+       "S": 2.5899273380072714,
+       "candidate": 366.5040744770257,
+       "tol": 16,
+       "restored": 372.0909889797781,
+       "restoredS": 2.232352124817851,
+       "restoredTol": 16,
+       "pass": true,
+       "margin": 0.15376683509233402,
+       "unionMargin": 0.15376683509233402
+      },
+      {
+       "at": "1200",
+       "ref": 370.5224857729782,
+       "S": 4.081734160559108,
+       "candidate": 368.87351309468573,
+       "tol": 16,
+       "restored": 375.1717130780781,
+       "restoredS": 2.7713562488798402,
+       "restoredTol": 16,
+       "pass": true,
+       "margin": 0.10306079239327914,
+       "unionMargin": 0.10306079239327914
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G6c (as written)",
+     "observable": "right-chamber centroid x (cells)",
+     "rule": "|c - ref| <= max(16 cells, 3S)",
+     "rows": [
+      {
+       "at": "600",
+       "ref": 368.96434383850305,
+       "S": 2.5899273380072714,
+       "candidate": 366.5040744770257,
+       "tol": 16,
+       "pass": true,
+       "margin": 0.15376683509233402
+      },
+      {
+       "at": "1200",
+       "ref": 370.5224857729782,
+       "S": 4.081734160559108,
+       "candidate": 368.87351309468573,
+       "tol": 16,
+       "pass": true,
+       "margin": 0.10306079239327914
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "G6",
+     "observable": "right-chamber 16-bin profile, normalised L1; band to the restored references",
+     "rule": "d(c, [ref, ref restored]) <= max(0.15, 3S)",
+     "rows": [
+      {
+       "at": "600",
+       "ref": 0.06459498343237413,
+       "S": 0.16160768298122302,
+       "candidate": 0.06459498343237413,
+       "tol": 0.48482304894366907,
+       "restored": 0.1388772854510703,
+       "restoredS": 0.1320800501217574,
+       "restoredTol": 0.39624015036527216,
+       "pass": true,
+       "margin": 0.13323414299941697,
+       "unionMargin": 0.13323414299941697
+      },
+      {
+       "at": "1200",
+       "ref": 0.04165306895113974,
+       "S": 0.07215520978072673,
+       "candidate": 0.04165306895113974,
+       "tol": 0.2164656293421802,
+       "restored": 0.09954179141038362,
+       "restoredS": 0.050030922078052556,
+       "restoredTol": 0.15009276623415768,
+       "pass": true,
+       "margin": 0.192423476547846,
+       "unionMargin": 0.192423476547846
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G6 (as written)",
+     "observable": "right-chamber 16-bin profile, normalised L1",
+     "rule": "d(c, ref) <= max(0.15, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "600",
+       "ref": 0,
+       "S": 0.16160768298122302,
+       "candidate": 0.06459498343237413,
+       "tol": 0.48482304894366907,
+       "pass": true,
+       "margin": 0.13323414299941697
+      },
+      {
+       "at": "1200",
+       "ref": 0,
+       "S": 0.07215520978072673,
+       "candidate": 0.04165306895113974,
+       "tol": 0.2164656293421802,
+       "pass": true,
+       "margin": 0.192423476547846
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "G7",
+     "observable": "total drift at 1200 (fraction), one-sided on |drift|",
+     "rule": "|c| <= |ref| + max(0.001, 3S)",
+     "rows": [
+      {
+       "at": "1200",
+       "ref": 0.004695835293743816,
+       "S": 0.00046340354409546425,
+       "candidate": -0.0050917933464752485,
+       "tol": 0.0013902106322863927,
+       "pass": true,
+       "margin": 0.2848187487102042
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G7 (as written)",
+     "observable": "total drift at 1200 (fraction)",
+     "rule": "|c - ref| <= max(0.001, 3S)",
+     "rows": [
+      {
+       "at": "1200",
+       "ref": -0.004695835293743816,
+       "S": 0.00046340354409546425,
+       "candidate": -0.0050917933464752485,
+       "tol": 0.0013902106322863927,
+       "pass": true,
+       "margin": 0.2848187487102042
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "G8",
+     "observable": "jet impact x (cells)",
+     "rule": "|c - ref| <= max(8 cells, 3S)",
+     "rows": [
+      {
+       "at": "300",
+       "ref": 380.3954825417372,
+       "S": 1.6943235780712484,
+       "candidate": 379.97320634509595,
+       "tol": 8,
+       "pass": true,
+       "margin": 0.05278452458015437
+      },
+      {
+       "at": "600",
+       "ref": 380.1165147244022,
+       "S": 3.3330684842994174,
+       "candidate": 383.0943781421479,
+       "tol": 9.999205452898252,
+       "pass": true,
+       "margin": 0.2978100041821404
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "G8h",
+     "observable": "jet mean height per 8-cell slice over x 256-352, RMS (cells)",
+     "rule": "d(c, ref) <= max(3 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "300",
+       "ref": 0,
+       "S": 1.306215407650958,
+       "candidate": 0.9057886246478964,
+       "tol": 3.918646222952874,
+       "pass": true,
+       "margin": 0.23114835407758358
+      },
+      {
+       "at": "600",
+       "ref": 0,
+       "S": 1.2469661748593692,
+       "candidate": 0.7488521847799391,
+       "tol": 3.7408985245781077,
+       "pass": true,
+       "margin": 0.20017976426248915
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "Gp",
+     "observable": "particles",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "300",
+       "ref": 69211.5,
+       "S": 2891,
+       "candidate": 69125,
+       "tol": 8673,
+       "pass": true,
+       "margin": 0.009973480917790845
+      },
+      {
+       "at": "600",
+       "ref": 129893.25,
+       "S": 6052,
+       "candidate": 131196,
+       "tol": 18156,
+       "pass": true,
+       "margin": 0.0717531394580304
+      },
+      {
+       "at": "900",
+       "ref": 186728.75,
+       "S": 9143,
+       "candidate": 185005,
+       "tol": 27429,
+       "pass": true,
+       "margin": 0.06284407014473732
+      },
+      {
+       "at": "1200",
+       "ref": 223385,
+       "S": 5282,
+       "candidate": 215242,
+       "tol": 22338.5,
+       "pass": true,
+       "margin": 0.3645276092844193
+      }
+     ],
+     "pass": true,
+     "informational": true
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  },
+  {
+   "scene": "dam",
+   "candidate": "dam-ref-b",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/ref-2761350a/dam-ref-b.jsonl",
+   "pass": true,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 300 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "300",
+       "ref": null,
+       "S": 0,
+       "candidate": 300,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "D1",
+     "observable": "front x_f, furthest wet floor x (cells; Z = x_f / 80)",
+     "rule": "|c - ref| <= max(4 cells, 3S)",
+     "rows": [
+      {
+       "at": "2",
+       "ref": 84,
+       "S": 0,
+       "candidate": 84,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "4",
+       "ref": 88,
+       "S": 0,
+       "candidate": 88,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "6",
+       "ref": 96,
+       "S": 0,
+       "candidate": 96,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "8",
+       "ref": 108,
+       "S": 0,
+       "candidate": 108,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "10",
+       "ref": 121,
+       "S": 0,
+       "candidate": 122,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.25
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D2",
+     "observable": "residual column height at the back wall, highest wet top (cells; eta = h / 117.8); band to the restored references",
+     "rule": "c within max(4 cells, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 114.75,
+       "S": 0,
+       "candidate": 114.75,
+       "tol": 4,
+       "restored": 114.8221497217814,
+       "restoredS": 0.0001321156819784619,
+       "restoredTol": 4,
+       "pass": true,
+       "margin": 0,
+       "unionMargin": 0
+      },
+      {
+       "at": "8",
+       "ref": 106.0625,
+       "S": 0,
+       "candidate": 106.0625,
+       "tol": 4,
+       "restored": 106.16813863434407,
+       "restoredS": 0.0027402084066210364,
+       "restoredTol": 4,
+       "pass": true,
+       "margin": 0,
+       "unionMargin": 0
+      },
+      {
+       "at": "12",
+       "ref": 93.1875,
+       "S": 0,
+       "candidate": 93.1875,
+       "tol": 4,
+       "restored": 93.50529448057861,
+       "restoredS": 0.0859418424283831,
+       "restoredTol": 4,
+       "pass": true,
+       "margin": 0,
+       "unionMargin": 0
+      },
+      {
+       "at": "16",
+       "ref": 78.765625,
+       "S": 0.0625,
+       "candidate": 78.75,
+       "tol": 4,
+       "restored": 80.81675616551601,
+       "restoredS": 0.38896087212337704,
+       "restoredTol": 4,
+       "pass": true,
+       "margin": 0.00390625,
+       "unionMargin": 0.00390625
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D2 (as written)",
+     "observable": "residual column height at the back wall, highest wet top (cells; eta = h / 117.8)",
+     "rule": "|c - ref| <= max(4 cells, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 114.75,
+       "S": 0,
+       "candidate": 114.75,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "8",
+       "ref": 106.0625,
+       "S": 0,
+       "candidate": 106.0625,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "12",
+       "ref": 93.1875,
+       "S": 0,
+       "candidate": 93.1875,
+       "tol": 4,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "16",
+       "ref": 78.765625,
+       "S": 0.0625,
+       "candidate": 78.75,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.00390625
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D4c",
+     "observable": "volume drift at the far-wall impact (fraction of t = 0), one-sided on |drift|",
+     "rule": "|c| <= |ref| + max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "16",
+       "ref": 0.04401941772965037,
+       "S": 0.006819130575886678,
+       "candidate": -0.042691072076780356,
+       "tol": 0.020457391727660035,
+       "pass": true,
+       "margin": 0
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D4c (as written)",
+     "observable": "volume drift at the far-wall impact (fraction of t = 0)",
+     "rule": "|c - ref| <= max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "16",
+       "ref": -0.04401941772965037,
+       "S": 0.006819130575886678,
+       "candidate": -0.042691072076780356,
+       "tol": 0.020457391727660035,
+       "pass": true,
+       "margin": 0.06493230762521826
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D5c",
+     "observable": "collapse kinetic energy (J)",
+     "rule": "|c - ref| <= max(10% | 2 J, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 36.084798001434436,
+       "S": 0.0002813112900952319,
+       "candidate": 36.08480685068209,
+       "tol": 3.608479800143444,
+       "pass": true,
+       "margin": 0.0000024523478435646464
+      },
+      {
+       "at": "8",
+       "ref": 119.49617662054824,
+       "S": 0.02369950374971097,
+       "candidate": 119.50187031196234,
+       "tol": 11.949617662054825,
+       "pass": true,
+       "margin": 0.00047647477727883576
+      },
+      {
+       "at": "12",
+       "ref": 228.5832901598812,
+       "S": 0.42298384199142447,
+       "candidate": 228.69066616945273,
+       "tol": 22.85832901598812,
+       "pass": true,
+       "margin": 0.004697456646828169
+      },
+      {
+       "at": "16",
+       "ref": 275.1136606632532,
+       "S": 1.158164949440959,
+       "candidate": 274.58309741997726,
+       "tol": 27.511366066325323,
+       "pass": true,
+       "margin": 0.019285238035684438
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5ce",
+     "observable": "collapse total mechanical energy (J); band to the restored references",
+     "rule": "c within max(2%, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 669.1684485797514,
+       "S": 0.0007863762302804389,
+       "candidate": 669.1683599895507,
+       "tol": 13.383368971595027,
+       "restored": 669.9803344012294,
+       "restoredS": 0.0008731156912062943,
+       "restoredTol": 13.399606688024587,
+       "pass": true,
+       "margin": 0.000006619424515888179,
+       "unionMargin": 0.000006619424515888179
+      },
+      {
+       "at": "8",
+       "ref": 670.7833285274274,
+       "S": 0.04289589192205767,
+       "candidate": 670.7927032711491,
+       "tol": 13.415666570548549,
+       "restored": 671.9704304543948,
+       "restoredS": 0.028035715782493753,
+       "restoredTol": 13.439408609087895,
+       "pass": true,
+       "margin": 0.00018606838194847465,
+       "unionMargin": 0.0006987907512721809
+      },
+      {
+       "at": "12",
+       "ref": 663.946912819726,
+       "S": 0.7325878283182874,
+       "candidate": 664.1584168830775,
+       "tol": 13.27893825639452,
+       "restored": 667.5123418036013,
+       "restoredS": 0.22804694882245258,
+       "restoredTol": 13.350246836072026,
+       "pass": true,
+       "margin": 0.0001823109358788578,
+       "unionMargin": 0.01592778423001371
+      },
+      {
+       "at": "16",
+       "ref": 591.0129070989101,
+       "S": 0.9253200091596909,
+       "candidate": 590.7427118054303,
+       "tol": 11.820258141978202,
+       "restored": 613.5916599646546,
+       "restoredS": 3.244397458165963,
+       "restoredTol": 12.271833199293091,
+       "pass": true,
+       "margin": 0.022858662664922837,
+       "unionMargin": 0.022858662664922837
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5ce (as written)",
+     "observable": "collapse total mechanical energy (J)",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 669.1684485797514,
+       "S": 0.0007863762302804389,
+       "candidate": 669.1683599895507,
+       "tol": 13.383368971595027,
+       "pass": true,
+       "margin": 0.000006619424515888179
+      },
+      {
+       "at": "8",
+       "ref": 670.7833285274274,
+       "S": 0.04289589192205767,
+       "candidate": 670.7927032711491,
+       "tol": 13.415666570548549,
+       "pass": true,
+       "margin": 0.0006987907512721809
+      },
+      {
+       "at": "12",
+       "ref": 663.946912819726,
+       "S": 0.7325878283182874,
+       "candidate": 664.1584168830775,
+       "tol": 13.27893825639452,
+       "pass": true,
+       "margin": 0.01592778423001371
+      },
+      {
+       "at": "16",
+       "ref": 591.0129070989101,
+       "S": 0.9253200091596909,
+       "candidate": 590.7427118054303,
+       "tol": 11.820258141978202,
+       "pass": true,
+       "margin": 0.022858662664922837
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D6",
+     "observable": "wet floor cells",
+     "rule": "|c - ref| <= max(5%, 3S)",
+     "rows": [
+      {
+       "at": "4",
+       "ref": 7623.5,
+       "S": 2,
+       "candidate": 7624,
+       "tol": 381.175,
+       "pass": true,
+       "margin": 0.0013117334557617892
+      },
+      {
+       "at": "8",
+       "ref": 10767.25,
+       "S": 4,
+       "candidate": 10768,
+       "tol": 538.3625000000001,
+       "pass": true,
+       "margin": 0.001393113376210267
+      },
+      {
+       "at": "12",
+       "ref": 14936,
+       "S": 10,
+       "candidate": 14937,
+       "tol": 746.8000000000001,
+       "pass": true,
+       "margin": 0.001339046598821639
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D7t",
+     "observable": "collapse surface profile: highest wet top per 8-cell x bin, RMS (cells); band to the restored references",
+     "rule": "d(c, [ref, ref restored]) <= max(4 cells, 3S)",
+     "rows": [
+      {
+       "at": "8",
+       "ref": 0.0078125,
+       "S": 0.015625,
+       "candidate": 0.0078125,
+       "tol": 4,
+       "restored": 0.0976770031166357,
+       "restoredS": 0.015516612655899664,
+       "restoredTol": 4,
+       "pass": true,
+       "margin": 0.001953125,
+       "unionMargin": 0.001953125
+      },
+      {
+       "at": "12",
+       "ref": 0.12197261715621871,
+       "S": 0.43805768027738085,
+       "candidate": 0.12197261715621871,
+       "tol": 4,
+       "restored": 0.2965459419762199,
+       "restoredS": 0.4252497302533528,
+       "restoredTol": 4,
+       "pass": true,
+       "margin": 0.0284455915610866,
+       "unionMargin": 0.030493154289054678
+      },
+      {
+       "at": "16",
+       "ref": 0.9534291266839791,
+       "S": 2.298468834762612,
+       "candidate": 0.9534291266839791,
+       "tol": 6.895406504287836,
+       "restored": 2.55152785048921,
+       "restoredS": 2.245712265223303,
+       "restoredTol": 6.737136795669909,
+       "pass": true,
+       "margin": 0.13827018408430297,
+       "unionMargin": 0.13827018408430297
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D7t (as written)",
+     "observable": "collapse surface profile: highest wet top per 8-cell x bin, RMS (cells)",
+     "rule": "d(c, ref) <= max(4 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "8",
+       "ref": 0,
+       "S": 0.015625,
+       "candidate": 0.0078125,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.001953125
+      },
+      {
+       "at": "12",
+       "ref": 0,
+       "S": 0.43805768027738085,
+       "candidate": 0.12197261715621871,
+       "tol": 4,
+       "pass": true,
+       "margin": 0.030493154289054678
+      },
+      {
+       "at": "16",
+       "ref": 0,
+       "S": 2.298468834762612,
+       "candidate": 0.9534291266839791,
+       "tol": 6.895406504287836,
+       "pass": true,
+       "margin": 0.13827018408430297
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D8c",
+     "observable": "particles at 16",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "16",
+       "ref": 351639.5,
+       "S": 5756,
+       "candidate": 351311,
+       "tol": 35163.950000000004,
+       "pass": true,
+       "margin": 0.009341953904495938
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D3",
+     "observable": "back-wall column mean depth (cells), window mean; band to the restored references",
+     "rule": "c within max(5% | 2 cells, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 45.39226249694825,
+       "S": 0.9511483764648432,
+       "candidate": 44.93432968139649,
+       "tol": 2.8534451293945295,
+       "restored": 47.243627470135685,
+       "restoredS": 0.7512555336952218,
+       "restoredTol": 2.3621813735067843,
+       "pass": true,
+       "margin": 0.1604841848313115,
+       "unionMargin": 0.1604841848313115
+      },
+      {
+       "at": "105-165",
+       "ref": 47.03934288024902,
+       "S": 0.7294012451171881,
+       "candidate": 47.3057470703125,
+       "tol": 2.3519671440124514,
+       "restored": 47.48417152911425,
+       "restoredS": 0.6038271719217363,
+       "restoredTol": 2.3742085764557124,
+       "pass": true,
+       "margin": 0.0002084288478380846,
+       "unionMargin": 0.07515113060037348
+      },
+      {
+       "at": "180-300",
+       "ref": 46.74573798709445,
+       "S": 0.20490841335720233,
+       "candidate": 47.17728958129882,
+       "tol": 2.3372868993547224,
+       "restored": 47.0872777806388,
+       "restoredS": 0.584118362598943,
+       "restoredTol": 2.3543638890319403,
+       "pass": true,
+       "margin": 0.038231898254705694,
+       "unionMargin": 0.038231898254705694
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D3 (as written)",
+     "observable": "back-wall column mean depth (cells), window mean",
+     "rule": "|c - ref| <= max(5% | 2 cells, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 45.39226249694825,
+       "S": 0.9511483764648432,
+       "candidate": 44.93432968139649,
+       "tol": 2.8534451293945295,
+       "pass": true,
+       "margin": 0.1604841848313115
+      },
+      {
+       "at": "105-165",
+       "ref": 47.03934288024902,
+       "S": 0.7294012451171881,
+       "candidate": 47.3057470703125,
+       "tol": 2.3519671440124514,
+       "pass": true,
+       "margin": 0.11326866990539276
+      },
+      {
+       "at": "180-300",
+       "ref": 46.74573798709445,
+       "S": 0.20490841335720233,
+       "candidate": 47.17728958129882,
+       "tol": 2.3372868993547224,
+       "pass": true,
+       "margin": 0.1846378355705987
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D4",
+     "observable": "volume drift (fraction of t = 0), window mean, one-sided on |drift|",
+     "rule": "|c| <= |ref| + max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 0.040247840684464804,
+       "S": 0.008994756637351435,
+       "candidate": -0.04093834264543046,
+       "tol": 0.026984269912054305,
+       "pass": true,
+       "margin": 0.025589054779547662
+      },
+      {
+       "at": "105-165",
+       "ref": 0.009417130194228813,
+       "S": 0.00819754501479859,
+       "candidate": -0.01014965738228366,
+       "tol": 0.02459263504439577,
+       "pass": true,
+       "margin": 0.02978644568719276
+      },
+      {
+       "at": "180-300",
+       "ref": 0.006523602457276203,
+       "S": 0.014993364290130146,
+       "candidate": -0.010235297475478208,
+       "tol": 0.04498009287039044,
+       "pass": true,
+       "margin": 0.08251861615531135
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D4 (as written)",
+     "observable": "volume drift (fraction of t = 0), window mean",
+     "rule": "|c - ref| <= max(0.01, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": -0.040247840684464804,
+       "S": 0.008994756637351435,
+       "candidate": -0.04093834264543046,
+       "tol": 0.026984269912054305,
+       "pass": true,
+       "margin": 0.025589054779547662
+      },
+      {
+       "at": "105-165",
+       "ref": -0.009417130194228813,
+       "S": 0.00819754501479859,
+       "candidate": -0.01014965738228366,
+       "tol": 0.02459263504439577,
+       "pass": true,
+       "margin": 0.02978644568719276
+      },
+      {
+       "at": "180-300",
+       "ref": -0.006523602457276203,
+       "S": 0.014993364290130146,
+       "candidate": -0.010235297475478208,
+       "tol": 0.04498009287039044,
+       "pass": true,
+       "margin": 0.08251861615531135
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D5k",
+     "observable": "kinetic energy (J), window mean",
+     "rule": "|c - ref| <= max(10% | 2 J, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 46.683159155370014,
+       "S": 0.8133360018730187,
+       "candidate": 45.890934273238194,
+       "tol": 4.6683159155370015,
+       "pass": true,
+       "margin": 0.16970250010183568
+      },
+      {
+       "at": "105-165",
+       "ref": 16.897289436064966,
+       "S": 4.330458706955913,
+       "candidate": 15.648465705122954,
+       "tol": 12.991376120867738,
+       "pass": true,
+       "margin": 0.09612713228555185
+      },
+      {
+       "at": "180-300",
+       "ref": 10.552411194474834,
+       "S": 4.33768346036805,
+       "candidate": 9.742718661965267,
+       "tol": 13.013050381104149,
+       "pass": true,
+       "margin": 0.06222157824619636
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5p",
+     "observable": "potential energy (J), window mean; band to the restored references",
+     "rule": "c within max(2%, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 281.63005793645107,
+       "S": 4.4589946727978145,
+       "candidate": 280.6283422023523,
+       "tol": 13.376984018393443,
+       "restored": 301.9022608552786,
+       "restoredS": 0.8506319992394538,
+       "restoredTol": 6.038045217105572,
+       "pass": true,
+       "margin": 0.07488352626581496,
+       "unionMargin": 0.07488352626581496
+      },
+      {
+       "at": "105-165",
+       "ref": 268.461968773292,
+       "S": 7.562919546272269,
+       "candidate": 267.2201601497662,
+       "tol": 22.688758638816807,
+       "restored": 273.44079956048336,
+       "restoredS": 4.577942150084937,
+       "restoredTol": 13.73382645025481,
+       "pass": true,
+       "margin": 0.05473232993017614,
+       "unionMargin": 0.05473232993017614
+      },
+      {
+       "at": "180-300",
+       "ref": 265.91844742344705,
+       "S": 10.428786718189656,
+       "candidate": 263.8715535230488,
+       "tol": 31.286360154568968,
+       "restored": 269.74336949879836,
+       "restoredS": 5.346021708985347,
+       "restoredTol": 16.03806512695604,
+       "pass": true,
+       "margin": 0.065424481796081,
+       "unionMargin": 0.065424481796081
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5p (as written)",
+     "observable": "potential energy (J), window mean",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 281.63005793645107,
+       "S": 4.4589946727978145,
+       "candidate": 280.6283422023523,
+       "tol": 13.376984018393443,
+       "pass": true,
+       "margin": 0.07488352626581496
+      },
+      {
+       "at": "105-165",
+       "ref": 268.461968773292,
+       "S": 7.562919546272269,
+       "candidate": 267.2201601497662,
+       "tol": 22.688758638816807,
+       "pass": true,
+       "margin": 0.05473232993017614
+      },
+      {
+       "at": "180-300",
+       "ref": 265.91844742344705,
+       "S": 10.428786718189656,
+       "candidate": 263.8715535230488,
+       "tol": 31.286360154568968,
+       "pass": true,
+       "margin": 0.065424481796081
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D5e",
+     "observable": "total mechanical energy (J), window mean; band to the restored references",
+     "rule": "c within max(2%, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 328.31321709182106,
+       "S": 3.8834104165446206,
+       "candidate": 326.5192764755905,
+       "tol": 11.650231249633862,
+       "restored": 348.5854200106486,
+       "restoredS": 1.3346813185474957,
+       "restoredTol": 6.971708400212972,
+       "pass": true,
+       "margin": 0.1539832624598694,
+       "unionMargin": 0.1539832624598694
+      },
+      {
+       "at": "105-165",
+       "ref": 285.35925820935694,
+       "S": 11.89337825322815,
+       "candidate": 282.8686258548891,
+       "tol": 35.68013475968445,
+       "restored": 290.33808899654827,
+       "restoredS": 8.908400857040874,
+       "restoredTol": 26.725202571122622,
+       "pass": true,
+       "margin": 0.06980445481058102,
+       "unionMargin": 0.06980445481058102
+      },
+      {
+       "at": "180-300",
+       "ref": 276.47085861792186,
+       "S": 14.403856513226003,
+       "candidate": 273.61427218501404,
+       "tol": 43.21156953967801,
+       "restored": 280.2957806932732,
+       "restoredS": 9.683705169353345,
+       "restoredTol": 29.051115508060036,
+       "pass": true,
+       "margin": 0.06610698161021031,
+       "unionMargin": 0.06610698161021031
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D5e (as written)",
+     "observable": "total mechanical energy (J), window mean",
+     "rule": "|c - ref| <= max(2%, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 328.31321709182106,
+       "S": 3.8834104165446206,
+       "candidate": 326.5192764755905,
+       "tol": 11.650231249633862,
+       "pass": true,
+       "margin": 0.1539832624598694
+      },
+      {
+       "at": "105-165",
+       "ref": 285.35925820935694,
+       "S": 11.89337825322815,
+       "candidate": 282.8686258548891,
+       "tol": 35.68013475968445,
+       "pass": true,
+       "margin": 0.06980445481058102
+      },
+      {
+       "at": "180-300",
+       "ref": 276.47085861792186,
+       "S": 14.403856513226003,
+       "candidate": 273.61427218501404,
+       "tol": 43.21156953967801,
+       "pass": true,
+       "margin": 0.06610698161021031
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D7d",
+     "observable": "surface profile: mean depth per 8-cell x bin, window mean, normalised L1; band to the restored references",
+     "rule": "d(c, [ref, ref restored]) <= max(0.05, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 0.003991380822940725,
+       "S": 0.0059361364376455325,
+       "candidate": 0.003991380822940725,
+       "tol": 0.05,
+       "restored": 0.006711012227149191,
+       "restoredS": 0.005527717563876794,
+       "restoredTol": 0.05,
+       "pass": true,
+       "margin": 0.0798276164588145,
+       "unionMargin": 0.0798276164588145
+      },
+      {
+       "at": "105-165",
+       "ref": 0.0044708943063246215,
+       "S": 0.011379613656694286,
+       "candidate": 0.0044708943063246215,
+       "tol": 0.05,
+       "restored": 0.004304788618851731,
+       "restoredS": 0.011346837801674232,
+       "restoredTol": 0.05,
+       "pass": true,
+       "margin": 0.08609577237703461,
+       "unionMargin": 0.08609577237703461
+      },
+      {
+       "at": "180-300",
+       "ref": 0.004733699943041486,
+       "S": 0.008035133482038603,
+       "candidate": 0.004733699943041486,
+       "tol": 0.05,
+       "restored": 0.004788516578260904,
+       "restoredS": 0.00797145539313062,
+       "restoredTol": 0.05,
+       "pass": true,
+       "margin": 0.09467399886082972,
+       "unionMargin": 0.09467399886082972
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "D7d (as written)",
+     "observable": "surface profile: mean depth per 8-cell x bin, window mean, normalised L1",
+     "rule": "d(c, ref) <= max(0.05, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 0,
+       "S": 0.0059361364376455325,
+       "candidate": 0.003991380822940725,
+       "tol": 0.05,
+       "pass": true,
+       "margin": 0.0798276164588145
+      },
+      {
+       "at": "105-165",
+       "ref": 0,
+       "S": 0.011379613656694286,
+       "candidate": 0.0044708943063246215,
+       "tol": 0.05,
+       "pass": true,
+       "margin": 0.08941788612649243
+      },
+      {
+       "at": "180-300",
+       "ref": 0,
+       "S": 0.008035133482038603,
+       "candidate": 0.004733699943041486,
+       "tol": 0.05,
+       "pass": true,
+       "margin": 0.09467399886082972
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "D8",
+     "observable": "particles, window mean",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "30-90",
+       "ref": 629745.1,
+       "S": 17318.600000000093,
+       "candidate": 635329.4,
+       "tol": 62974.51,
+       "pass": true,
+       "margin": 0.08867556095315464
+      },
+      {
+       "at": "105-165",
+       "ref": 384128.8,
+       "S": 26100.599999999977,
+       "candidate": 382327.2,
+       "tol": 78301.79999999993,
+       "pass": true,
+       "margin": 0.02300841104546739
+      },
+      {
+       "at": "180-300",
+       "ref": 348524.4166666667,
+       "S": 30193.333333333314,
+       "candidate": 348080.3333333333,
+       "tol": 90579.99999999994,
+       "pass": true,
+       "margin": 0.004902664311474634
+      }
+     ],
+     "pass": true,
+     "informational": false
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  },
+  {
+   "scene": "letters",
+   "candidate": "letters-ref-b",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/ref-2761350a/letters-ref-b.jsonl",
+   "pass": true,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 240 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "240",
+       "ref": null,
+       "S": 0,
+       "candidate": 240,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "L1",
+     "observable": "volume drift against the t = 0 pool plus the drops (fraction), one-sided on |drift|",
+     "rule": "|c| <= |ref| + max(0.005, 3S)",
+     "rows": [
+      {
+       "at": "120",
+       "ref": 0.008758775327830842,
+       "S": 0.000363504292678396,
+       "candidate": -0.008779616467078921,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.004168227849615791
+      },
+      {
+       "at": "180",
+       "ref": 0.009384664848221952,
+       "S": 0.0003854880350377954,
+       "candidate": -0.00818071601081638,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0
+      },
+      {
+       "at": "240",
+       "ref": 0.01084808815128141,
+       "S": 0.00040023152575197063,
+       "candidate": -0.010122565569702369,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L1 (as written)",
+     "observable": "volume drift against the t = 0 pool plus the drops (fraction)",
+     "rule": "|c - ref| <= max(0.005, 3S)",
+     "rows": [
+      {
+       "at": "120",
+       "ref": -0.008758775327830842,
+       "S": 0.000363504292678396,
+       "candidate": -0.008779616467078921,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.004168227849615791
+      },
+      {
+       "at": "180",
+       "ref": -0.009384664848221952,
+       "S": 0.0003854880350377954,
+       "candidate": -0.00818071601081638,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.24078976748111436
+      },
+      {
+       "at": "240",
+       "ref": -0.01084808815128141,
+       "S": 0.00040023152575197063,
+       "candidate": -0.010122565569702369,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.14510451631580823
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "L2",
+     "observable": "shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; 1106 L dropped by 240); band to the restored references",
+     "rule": "d(c, [ref, ref restored]) <= max(1 cells, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 0.01738552700769044,
+       "S": 0.036371630202431705,
+       "candidate": 0.01738552700769044,
+       "tol": 1,
+       "restored": 0.26071968964674924,
+       "restoredS": 0.0363149777308944,
+       "restoredTol": 1,
+       "pass": true,
+       "margin": 0.01716625565802672,
+       "unionMargin": 0.01738552700769044
+      },
+      {
+       "at": "90",
+       "ref": 0.08046971743810144,
+       "S": 0.14444503508980203,
+       "candidate": 0.08046971743810144,
+       "tol": 1,
+       "restored": 0.449568830864362,
+       "restoredS": 0.14443724138834113,
+       "restoredTol": 1,
+       "pass": true,
+       "margin": 0.08044266481058032,
+       "unionMargin": 0.08046971743810144
+      },
+      {
+       "at": "120",
+       "ref": 0.30468485866464917,
+       "S": 0.7009901992660581,
+       "candidate": 0.30468485866464917,
+       "tol": 2.1029705977981745,
+       "restored": 0.45888949711528276,
+       "restoredS": 0.7009621240064141,
+       "restoredTol": 2.1028863720192423,
+       "pass": true,
+       "margin": 0.1448830806211254,
+       "unionMargin": 0.1448830806211254
+      },
+      {
+       "at": "180",
+       "ref": 0.5680410100577088,
+       "S": 0.9631035146556833,
+       "candidate": 0.5680410100577088,
+       "tol": 2.88931054396705,
+       "restored": 0.6550062469524983,
+       "restoredS": 0.9630794757157508,
+       "restoredTol": 2.8892384271472524,
+       "pass": true,
+       "margin": 0.1958829901935382,
+       "unionMargin": 0.1966008850255962
+      },
+      {
+       "at": "240",
+       "ref": 0.6197877929967714,
+       "S": 1.140210251490093,
+       "candidate": 0.6197877929967714,
+       "tol": 3.4206307544702788,
+       "restored": 0.7425225952633353,
+       "restoredS": 1.1401972084725864,
+       "restoredTol": 3.4205916254177593,
+       "pass": true,
+       "margin": 0.18098764399329315,
+       "unionMargin": 0.18119108359965388
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L2 (as written)",
+     "observable": "shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; 1106 L dropped by 240)",
+     "rule": "d(c, ref) <= max(1 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 0,
+       "S": 0.036371630202431705,
+       "candidate": 0.01738552700769044,
+       "tol": 1,
+       "pass": true,
+       "margin": 0.01738552700769044
+      },
+      {
+       "at": "90",
+       "ref": 0,
+       "S": 0.14444503508980203,
+       "candidate": 0.08046971743810144,
+       "tol": 1,
+       "pass": true,
+       "margin": 0.08046971743810144
+      },
+      {
+       "at": "120",
+       "ref": 0,
+       "S": 0.7009901992660581,
+       "candidate": 0.30468485866464917,
+       "tol": 2.1029705977981745,
+       "pass": true,
+       "margin": 0.1448830806211254
+      },
+      {
+       "at": "180",
+       "ref": 0,
+       "S": 0.9631035146556833,
+       "candidate": 0.5680410100577088,
+       "tol": 2.88931054396705,
+       "pass": true,
+       "margin": 0.1966008850255962
+      },
+      {
+       "at": "240",
+       "ref": 0,
+       "S": 1.140210251490093,
+       "candidate": 0.6197877929967714,
+       "tol": 3.4206307544702788,
+       "pass": true,
+       "margin": 0.18119108359965388
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "L3",
+     "observable": "kinetic energy (J)",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 1948.7572689312801,
+       "S": 2.2087112766453174,
+       "candidate": 1948.031003750973,
+       "tol": 194.87572689312802,
+       "pass": true,
+       "margin": 0.003726811911805728
+      },
+      {
+       "at": "120",
+       "ref": 2245.8356677093416,
+       "S": 101.62554955053747,
+       "candidate": 2214.472992087645,
+       "tol": 304.8766486516124,
+       "pass": true,
+       "margin": 0.1028700484619123
+      },
+      {
+       "at": "180",
+       "ref": 3079.2707574657,
+       "S": 186.6584835385479,
+       "candidate": 2950.818292773571,
+       "tol": 559.9754506156437,
+       "pass": true,
+       "margin": 0.2293894572537187
+      },
+      {
+       "at": "240",
+       "ref": 3036.469200388104,
+       "S": 33.238100089647105,
+       "candidate": 3064.0236786849377,
+       "tol": 303.64692003881044,
+       "pass": true,
+       "margin": 0.09074512691685384
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L4",
+     "observable": "liquid centroid height (cells); band to the restored references",
+     "rule": "c within max(0.25 cells, 3S) of [ref, ref restored]",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 19.89225910683581,
+       "S": 0.00201660715726959,
+       "candidate": 19.89350413131928,
+       "tol": 0.25,
+       "restored": 20.017388383499277,
+       "restoredS": 0.0017021462728195047,
+       "restoredTol": 0.25,
+       "pass": true,
+       "margin": 0.000025073132661646014,
+       "unionMargin": 0.004980097933881211
+      },
+      {
+       "at": "120",
+       "ref": 20.55906704476126,
+       "S": 0.13232574712373335,
+       "candidate": 20.50373866023538,
+       "tol": 0.39697724137120005,
+       "restored": 20.71982917957206,
+       "restoredS": 0.12826363342551517,
+       "restoredTol": 0.3847909002765455,
+       "pass": true,
+       "margin": 0.1393741977116095,
+       "unionMargin": 0.1393741977116095
+      },
+      {
+       "at": "180",
+       "ref": 21.723563483295457,
+       "S": 0.04074582348780709,
+       "candidate": 21.744246153145134,
+       "tol": 0.25,
+       "restored": 21.896168847712723,
+       "restoredS": 0.03901455960777511,
+       "restoredTol": 0.25,
+       "pass": true,
+       "margin": 0.00011989552157842809,
+       "unionMargin": 0.08273067939870771
+      },
+      {
+       "at": "240",
+       "ref": 20.496321531335287,
+       "S": 0.0097483751927534,
+       "candidate": 20.5151223465767,
+       "tol": 0.25,
+       "restored": 20.710934868942125,
+       "restoredS": 0.001812566413871508,
+       "restoredTol": 0.25,
+       "pass": true,
+       "margin": 0.0020575405728067153,
+       "unionMargin": 0.075203260965651
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "L4 (as written)",
+     "observable": "liquid centroid height (cells)",
+     "rule": "|c - ref| <= max(0.25 cells, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 19.89225910683581,
+       "S": 0.00201660715726959,
+       "candidate": 19.89350413131928,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.004980097933881211
+      },
+      {
+       "at": "120",
+       "ref": 20.55906704476126,
+       "S": 0.13232574712373335,
+       "candidate": 20.50373866023538,
+       "tol": 0.39697724137120005,
+       "pass": true,
+       "margin": 0.1393741977116095
+      },
+      {
+       "at": "180",
+       "ref": 21.723563483295457,
+       "S": 0.04074582348780709,
+       "candidate": 21.744246153145134,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.08273067939870771
+      },
+      {
+       "at": "240",
+       "ref": 20.496321531335287,
+       "S": 0.0097483751927534,
+       "candidate": 20.5151223465767,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.075203260965651
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "L5",
+     "observable": "particles",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 500655.25,
+       "S": 6307,
+       "candidate": 500945,
+       "tol": 50065.525,
+       "pass": true,
+       "margin": 0.005787415591866858
+      },
+      {
+       "at": "120",
+       "ref": 891178.5,
+       "S": 11988,
+       "candidate": 889398,
+       "tol": 89117.85,
+       "pass": true,
+       "margin": 0.01997916242368953
+      },
+      {
+       "at": "180",
+       "ref": 903774,
+       "S": 18947,
+       "candidate": 894822,
+       "tol": 90377.40000000001,
+       "pass": true,
+       "margin": 0.09905131150044147
+      },
+      {
+       "at": "240",
+       "ref": 878721.75,
+       "S": 7187,
+       "candidate": 874461,
+       "tol": 87872.175,
+       "pass": true,
+       "margin": 0.04848804527713124
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "Ln",
+     "observable": "NB-FLIP's own volume drift (readStats)",
+     "rule": "|c - ref| <= max(0.005, 3S)",
+     "rows": [
+      {
+       "at": "120",
+       "ref": -0.008761952821240326,
+       "S": 0.0003634697556453969,
+       "candidate": -0.008782742041957961,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.004157844143527073
+      },
+      {
+       "at": "180",
+       "ref": -0.009364197381993365,
+       "S": 0.0003855009458418636,
+       "candidate": -0.00816029960250109,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.24077955589845504
+      },
+      {
+       "at": "240",
+       "ref": -0.010828995518240604,
+       "S": 0.0004003203312666643,
+       "candidate": -0.010103520884966286,
+       "tol": 0.005,
+       "pass": true,
+       "margin": 0.14509492665486373
+      }
+     ],
+     "pass": true,
+     "informational": true
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  },
+  {
+   "scene": "paddleboats",
+   "candidate": "paddleboats-ref-b",
+   "file": "/Users/petersuggate/code/me/fluid/artifacts/nbflip-port/ref-2761350a/paddleboats-ref-b.jsonl",
+   "pass": true,
+   "gates": [
+    {
+     "id": "C0",
+     "observable": "completed 300 steps with no solver failure",
+     "rule": "required",
+     "pass": true,
+     "informational": false,
+     "rows": [
+      {
+       "at": "300",
+       "ref": null,
+       "S": 0,
+       "candidate": 300,
+       "tol": 0,
+       "pass": true,
+       "margin": 0
+      }
+     ]
+    },
+    {
+     "id": "P1",
+     "observable": "volume drift (fraction of t = 0), one-sided on |drift|",
+     "rule": "|c| <= |ref| + max(0.0025, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 0.0030112792479081163,
+       "S": 0.0002563719948133203,
+       "candidate": -0.003025564985970619,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.005714295225001109
+      },
+      {
+       "at": "300",
+       "ref": 0.010049375576070607,
+       "S": 0.0017018649313184087,
+       "candidate": -0.010722163029842857,
+       "tol": 0.005105594793955226,
+       "pass": true,
+       "margin": 0.13177454947439177
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P1 (as written)",
+     "observable": "volume drift (fraction of t = 0)",
+     "rule": "|c - ref| <= max(0.0025, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": -0.0030112792479081163,
+       "S": 0.0002563719948133203,
+       "candidate": -0.003025564985970619,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.005714295225001109
+      },
+      {
+       "at": "300",
+       "ref": -0.010049375576070607,
+       "S": 0.0017018649313184087,
+       "candidate": -0.010722163029842857,
+       "tol": 0.005105594793955226,
+       "pass": true,
+       "margin": 0.13177454947439177
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "P2",
+     "observable": "surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells); band to the restored references",
+     "rule": "d(c, [ref, ref restored]) <= max(0.25 cells, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 0.009784745955432246,
+       "S": 0.017558987637364753,
+       "candidate": 0.009784745955432246,
+       "tol": 0.25,
+       "restored": 0.07326904359260776,
+       "restoredS": 0.016445653693538193,
+       "restoredTol": 0.25,
+       "pass": true,
+       "margin": 0.039138983821728986,
+       "unionMargin": 0.039138983821728986
+      },
+      {
+       "at": "300",
+       "ref": 0.03275473384974511,
+       "S": 0.05370006516275798,
+       "candidate": 0.03275473384974511,
+       "tol": 0.25,
+       "restored": 0.25890512460741166,
+       "restoredS": 0.03632193913175132,
+       "restoredTol": 0.25,
+       "pass": true,
+       "margin": 0.13101893539898044,
+       "unionMargin": 0.13101893539898044
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P2 (as written)",
+     "observable": "surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells)",
+     "rule": "d(c, ref) <= max(0.25 cells, 3S), S the largest pairwise d between references",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 0,
+       "S": 0.017558987637364753,
+       "candidate": 0.009784745955432246,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.039138983821728986
+      },
+      {
+       "at": "300",
+       "ref": 0,
+       "S": 0.05370006516275798,
+       "candidate": 0.03275473384974511,
+       "tol": 0.25,
+       "pass": true,
+       "margin": 0.13101893539898044
+      }
+     ],
+     "pass": true,
+     "informational": true
+    },
+    {
+     "id": "P3",
+     "observable": "kinetic energy, the wheels' wake (J)",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "60",
+       "ref": 95.17812477569584,
+       "S": 1.7659043853759755,
+       "candidate": 95.42575562896731,
+       "tol": 9.517812477569583,
+       "pass": true,
+       "margin": 0.026017622626528947
+      },
+      {
+       "at": "120",
+       "ref": 109.1191512203217,
+       "S": 1.1784474792480495,
+       "candidate": 109.03670216369632,
+       "tol": 10.91191512203217,
+       "pass": true,
+       "margin": 0.007555874079235303
+      },
+      {
+       "at": "180",
+       "ref": 141.86059976501468,
+       "S": 1.5890077972412087,
+       "candidate": 141.60461453094487,
+       "tol": 14.186059976501468,
+       "pass": true,
+       "margin": 0.018044843634796325
+      },
+      {
+       "at": "240",
+       "ref": 141.86978996467596,
+       "S": 1.9409122894286952,
+       "candidate": 142.37279108734134,
+       "tol": 14.186978996467596,
+       "pass": true,
+       "margin": 0.035455125632498856
+      },
+      {
+       "at": "300",
+       "ref": 167.65175562095646,
+       "S": 1.3225814910888687,
+       "candidate": 165.66769870452887,
+       "tol": 16.765175562095646,
+       "pass": true,
+       "margin": 0.11834393914211916
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "P4",
+     "observable": "particles",
+     "rule": "|c - ref| <= max(10%, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": 261331.75,
+       "S": 13333,
+       "candidate": 239317,
+       "tol": 39999,
+       "pass": true,
+       "margin": 0.550382509562739
+      },
+      {
+       "at": "300",
+       "ref": 299272.75,
+       "S": 69580,
+       "candidate": 258412,
+       "tol": 208740,
+       "pass": true,
+       "margin": 0.19574949698189134
+      }
+     ],
+     "pass": true,
+     "informational": false
+    },
+    {
+     "id": "Pn",
+     "observable": "NB-FLIP's own volume drift (readStats)",
+     "rule": "|c - ref| <= max(0.0025, 3S)",
+     "rows": [
+      {
+       "at": "150",
+       "ref": -0.008332252502441406,
+       "S": 0.0002589755588107631,
+       "candidate": -0.008347829182942709,
+       "tol": 0.0025,
+       "pass": true,
+       "margin": 0.006230672200521065
+      },
+      {
+       "at": "300",
+       "ref": -0.015366103914048936,
+       "S": 0.0016909705268012137,
+       "candidate": -0.01602956983778212,
+       "tol": 0.005072911580403641,
+       "pass": true,
+       "margin": 0.13078602164013897
+      }
+     ],
+     "pass": true,
+     "informational": true
+    }
+   ],
+   "timing": {
+    "baseline": {},
+    "candidate": {}
+   }
+  }
+ ]
+}

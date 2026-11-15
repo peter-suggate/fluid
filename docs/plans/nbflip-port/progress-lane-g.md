@@ -108,3 +108,31 @@ pipelined ms/step, A / A:
 
 The A/A spread is about 2.5%. A first round failed because the script wrote OUT through a
 relative path from inside the tree; OUT and the trees are now absolute.
+
+## 2026-11-15 MILESTONE G4: §7.1 drift amendment and references at 2761350a
+
+Plan §4.5 (amendment), §4.6 (references) and §4.7 (timing).
+- **Rules.** `tools/nbflip-gate-rules.ts` holds the rules, tested by
+  `tests/nbflip-gate-rules.test.ts`:
+  - one-sided drift;
+  - the restored-volume band, as the hull of the two bands, reporting `unionMargin`;
+  - `restoreBox`, checked against `boxOracle` on pools raised by exactly the lost volume.
+- **Rows.** Drift rows G7, L1, P1, D4c and D4 are one-sided. Volume-coupled rows G3, G6c, G6, D2,
+  D3, D5p, D5e, D5ce, D7t, D7d, L2, L4 and P2 use the band. The §4 originals print as
+  "(as written)", not gated. The dam's 180–300 window is gated now.
+- **Default references.** The referee defaults to `artifacts/nbflip-port/ref-2761350a`. The old
+  set stays at `artifacts/nbflip-port/ref`.
+- **Old references, amended rule.**
+  - LOO a–e, run f, tol50 and cellcap8 pass.
+  - residual 0.5 still fails the seep (G1, G1w, G2). Its G7 and P1 pass now: both are smaller
+    losses.
+  - volctl1 still fails the dam.
+- **New references** (20 runs, all complete; reruns after rc 77 for letters a and d and seep c).
+  - LOO a–e and run f pass; the worst margin is 0.68.
+  - residual 0.5 fails the seep (G1 2.12, G1w 3.03, G2 1.92).
+  - volctl1 fails the dam (D4 5.20, D5p 5.46, D5e 6.91, D3 2.67, D5k 1.62).
+- **Finding.** Dam ref c at 2761350a conserves late volume (+0.8% at 300, against about −0.9% for
+  the others).
+  - D4's late S is 0.015, so its 180–300 tolerance is 4.5 points. 3S also binds P1 at 300
+    (tol 0.53 points).
+  - LOO-c's dam passes only under the amendment; as written it fails D4, D5p and D5e.

@@ -22,8 +22,10 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import type { SeepJetSlice, SeepObservation } from "./seep-observables";
-import type { BoxObservation } from "./nbflip-observables";
+import { restoreLostVolume, type SeepJetSlice, type SeepObservation } from "./seep-observables";
+import type { BoxGeometry, BoxObservation } from "./nbflip-observables";
+import { bandDistanceGate, bandScalarGate, binDepths, distanceGate, driftGate, l1, mean, normalise, restoreBox, rms, scalarGate,
+  type Floor, type Gate, type RestoredBox } from "./nbflip-gate-rules";
 
 type SceneKey = "seep" | "dam" | "letters" | "paddleboats";
 const SCENES: SceneKey[] = ["seep", "dam", "letters", "paddleboats"];
@@ -61,56 +63,20 @@ function load(file: string): Run | undefined {
 }
 const complete = (r: Run) => r.mode === "fenced" && r.slot === "check" && !r.summary?.failure && r.summary?.steps === GATE_STEPS[r.scene];
 const candidateFiles = new Set(filesOf(option("candidate")));
-assert.ok(timingOnly || (option("ref").length && candidateFiles.size), "usage: nbflip-gates.ts --ref=DIR --candidate=PATH [--ref-timing=DIR] [--candidate-timing=DIR]");
-const refRuns = filesOf(option("ref")).filter(f => !candidateFiles.has(f)).map(load).filter((r): r is Run => !!r && complete(r));
+/** The default reference set (plan §4.6): five runs a scene at 2761350a, lane D's dam residency fix. */
+export const DEFAULT_REF = "artifacts/nbflip-port/ref-2761350a";
+const refDirs = option("ref").length ? option("ref") : [DEFAULT_REF];
+assert.ok(timingOnly || candidateFiles.size, `usage: nbflip-gates.ts --candidate=PATH [--ref=DIR (default ${DEFAULT_REF})] [--ref-timing=DIR] [--candidate-timing=DIR]`);
+const refRuns = (timingOnly ? [] : filesOf(refDirs)).filter(f => !candidateFiles.has(f)).map(load).filter((r): r is Run => !!r && complete(r));
 const candidates = [...candidateFiles].map(load).filter((r): r is Run => !!r);
 for (const c of candidates) assert.ok(c.mode === "fenced" && c.slot === "check", `Candidate ${c.name} is not a check-slot fenced run`);
 const sceneFilter = option("scenes").length ? option("scenes") as SceneKey[] : SCENES;
 
-const mean = (v: number[]) => v.reduce((a, b) => a + b, 0) / v.length;
 const median = (v: number[]) => { const s = [...v].sort((a, b) => a - b); return s.length % 2 ? s[s.length >> 1]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2; };
-const spread = (v: number[]) => Math.max(...v) - Math.min(...v);
 const f = (v: number | null | undefined, d = 3) => v === null || v === undefined || !Number.isFinite(v) ? "-" : Math.abs(v) >= 1e5 ? v.toExponential(3) : v.toFixed(d);
 const pct = (v: number | null | undefined, d = 2) => v === null || v === undefined || !Number.isFinite(v) ? "-" : `${(100 * v).toFixed(d)}%`;
-
-/** One checkpoint of a gate. */
-interface Row { at: string; ref: number | null; S: number; candidate: number | null; tol: number; pass: boolean; margin: number }
-interface Gate { id: string; observable: string; rule: string; rows: Row[]; pass: boolean; informational?: boolean }
-/** A floor: `rel` of |ref| or `abs`, whichever is larger. */
-interface Floor { rel?: number; abs?: number }
-const floorOf = (fl: Floor, ref: number) => Math.max((fl.rel ?? 0) * Math.abs(ref), fl.abs ?? 0);
-const ruleText = (fl: Floor, unit = "") => `max(${[fl.rel !== undefined ? `${100 * fl.rel}%` : "", fl.abs !== undefined ? `${fl.abs}${unit}` : ""].filter(Boolean).join(" | ")}, 3S)`;
-/** A scalar gate: per checkpoint, the references' values and the candidate's. A null on both sides passes; on one side fails. */
-function scalarGate(id: string, observable: string, fl: Floor, unit: string, points: { at: string; refs: (number | null)[]; candidate: number | null }[], informational = false): Gate {
-  const rows = points.map(p => {
-    const known = p.refs.filter((v): v is number => v !== null && Number.isFinite(v));
-    if (known.length !== p.refs.length) {
-      const pass = known.length === 0 && p.candidate === null;
-      return { at: p.at, ref: known.length ? mean(known) : null, S: known.length ? spread(known) : 0, candidate: p.candidate, tol: 0, pass, margin: pass ? 0 : Infinity };
-    }
-    const ref = mean(known), S = spread(known), tol = Math.max(floorOf(fl, ref), 3 * S);
-    if (p.candidate === null || !Number.isFinite(p.candidate)) return { at: p.at, ref, S, candidate: p.candidate, tol, pass: false, margin: Infinity };
-    const d = Math.abs(p.candidate - ref);
-    return { at: p.at, ref, S, candidate: p.candidate, tol, pass: d <= tol, margin: tol > 0 ? d / tol : d > 0 ? Infinity : 0 };
-  });
-  return { id, observable, rule: `|c - ref| <= ${ruleText(fl, unit)}`, rows, pass: rows.every(r => r.pass), informational };
-}
-/** A distance gate: per checkpoint, d(candidate, mean of references) within max(floor, 3 x the largest pairwise reference distance). */
-function distanceGate(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number,
-  points: { at: string; refs: number[][]; candidate: number[] }[], informational = false): Gate {
-  const rows = points.map(p => {
-    const m = p.refs[0]!.map((_, i) => mean(p.refs.map(r => r[i]!)));
-    const S = Math.max(0, ...p.refs.flatMap((a, i) => p.refs.slice(i + 1).map(b => distance(a, b))));
-    const d = distance(p.candidate, m), tol = Math.max(floor, 3 * S);
-    return { at: p.at, ref: 0, S, candidate: d, tol, pass: d <= tol, margin: d / tol };
-  });
-  return { id, observable, rule: `d(c, ref) <= max(${floor}${unit}, 3S), S the largest pairwise d between references`, rows, pass: rows.every(r => r.pass), informational };
-}
-const l1 = (a: number[], b: number[]) => a.reduce((s, v, i) => s + Math.abs(v - b[i]!), 0);
-const rms = (a: number[], b: number[]) => Math.sqrt(mean(a.map((v, i) => (v - b[i]!) ** 2)));
-/** A box run's mean liquid depth per (x, z) bin (cells): its bin litres over the bin footprint's litres per cell of height. */
-const binDepth = (r: Run, litres: number[]) => { const g = r.meta.geometry as { cell_m: number; binCells: [number, number] }; return litres.map(v => v / (1000 * g.cell_m ** 3 * g.binCells[0] * g.binCells[1])); };
-const normalise = (v: number[]) => { const t = v.reduce((a, b) => a + b, 0); return v.map(x => t > 0 ? x / t : 0); };
+/** §4.5 (3): a row as §4 wrote it (two-sided, no restored band), printed beside its amended row and not gated. */
+const asWritten = (g: Gate): Gate => ({ ...g, id: `${g.id} (as written)`, informational: true });
 
 // ---------------------------------------------------------------- seep (G1-G8, plan §4 and §4.1, NB-FLIP against NB-FLIP)
 const SEEP_CHECK = [300, 600, 900, 1200], SEEP_WINDOWS = Array.from({ length: 18 }, (_, i) => 180 + 60 * i), SEEP_MEDIAN = Array.from({ length: 19 }, (_, i) => 120 + 60 * i);
@@ -136,13 +102,23 @@ function trajectory(slices: readonly SeepJetSlice[]) {
 function seepGates(refs: Run<SeepObservation>[], c: Run<SeepObservation>): Gate[] {
   const at = (r: Run<SeepObservation>, k: number) => { const s = r.samples.find(x => x.step === k); if (!s) throw new Error(`${r.name} has no sample at step ${k}`); return s; };
   const obs = (r: Run<SeepObservation>) => {
-    const s0 = at(r, 0), floorCells = (Number((r.meta.geometry as { nx: number }).nx) - Number((r.meta.geometry as { wall: { high: number } }).wall.high)) * Number((r.meta.geometry as { nz: number }).nz);
+    const wallHigh = Number((r.meta.geometry as { wall: { high: number } }).wall.high);
+    const s0 = at(r, 0), floorCells = (Number((r.meta.geometry as { nx: number }).nx) - wallHigh) * Number((r.meta.geometry as { nz: number }).nz);
     let wet90: number | null = null;
     for (let i = 1; i < r.samples.length; i++) {
       const a = r.samples[i - 1]!, b = r.samples[i]!, target = 0.9 * floorCells;
       if (a.wetFloor_cells < target && b.wetFloor_cells >= target) { wet90 = a.step + (b.step - a.step) * (target - a.wetFloor_cells) / (b.wetFloor_cells - a.wetFloor_cells); break; }
     }
+    // §4.5 (2), the seep's restoration (seep §4.1's NB_restored, tools/seep-compare.ts): the run's lost volume, its left
+    // loss less the open-wall change less the right chamber's volume (litres; none when negative), added back uniformly
+    // over the right chamber's 16 bins, its centroid at the chamber centre.
+    const restored = (k: number) => {
+      const o = at(r, k), lost = Math.max(0, s0.liquid_L.left - o.liquid_L.left - (o.wallOpen_L! - s0.wallOpen_L!) - o.liquid_L.right);
+      const x = restoreLostVolume(wallHigh, o.rightBins_L, o.liquid_L.right, o.rightCentroid_x ?? NaN, lost);
+      return { lost, right: x.right_L, centroid: x.centroid_x, profile: normalise(x.bins_L) };
+    };
     return {
+      restored: Object.fromEntries(SEEP_CHECK.map(k => [k, restored(k)])) as Record<number, ReturnType<typeof restored>>,
       q: SEEP_WINDOWS.map(k => at(r, k - 60).liquid_L.left - at(r, k).liquid_L.left),
       leftLoss: SEEP_CHECK.map(k => s0.liquid_L.left - at(r, k).liquid_L.left), right: SEEP_CHECK.map(k => at(r, k).liquid_L.right),
       throatU: median(SEEP_MEDIAN.map(k => at(r, k).throatU_m_s ?? NaN)), wet90, wet1200: at(r, 1200).wetFloor_cells,
@@ -157,13 +133,17 @@ function seepGates(refs: Run<SeepObservation>[], c: Run<SeepObservation>): Gate[
     scalarGate("G1", "q_left, mean over 60-step windows 120-1200 (L/s)", { rel: 0.05 }, "", [{ at: "mean", refs: R.map(qMean), candidate: qMean(C) }]),
     scalarGate("G1w", "q_left per 60-step window (L/s)", { rel: 0.10 }, "", SEEP_WINDOWS.map((k, i) => ({ at: `${k - 60}-${k}`, refs: R.map(o => o.q[i]!), candidate: C.q[i]! }))),
     scalarGate("G2", "left tank loss (L)", { rel: 0.05 }, "", SEEP_CHECK.map((k, i) => ({ at: String(k), refs: R.map(o => o.leftLoss[i]!), candidate: C.leftLoss[i]! }))),
-    scalarGate("G3", "right tank volume (L)", { rel: 0.05 }, "", SEEP_CHECK.map((k, i) => ({ at: String(k), refs: R.map(o => o.right[i]!), candidate: C.right[i]! }))),
+    bandScalarGate("G3", "right tank volume (L); band to the restored references", { rel: 0.05 }, "", SEEP_CHECK.map((k, i) => ({ at: String(k), refs: R.map(o => o.right[i]!), restored: R.map(o => o.restored[k]!.right), candidate: C.right[i]! }))),
+    asWritten(scalarGate("G3", "right tank volume (L)", { rel: 0.05 }, "", SEEP_CHECK.map((k, i) => ({ at: String(k), refs: R.map(o => o.right[i]!), candidate: C.right[i]! })))),
     scalarGate("G4", "throat u, median over samples 120-1200 (m/s)", { rel: 0.10 }, "", [{ at: "median", refs: R.map(o => o.throatU), candidate: C.throatU }]),
     scalarGate("G5", "step at which wet floor reaches 90%", { rel: 0.25 }, "", [{ at: "90%", refs: R.map(o => o.wet90), candidate: C.wet90 }]),
     scalarGate("G5f", "wet floor cells at 1200", { rel: 0.05 }, "", [{ at: "1200", refs: R.map(o => o.wet1200), candidate: C.wet1200 }]),
-    scalarGate("G6c", "right-chamber centroid x (cells)", { abs: 16 }, " cells", [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.centroid[i]!), candidate: C.centroid[i]! }))),
-    distanceGate("G6", "right-chamber 16-bin profile, normalised L1", 0.15, "", l1, [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.profile[i]!), candidate: C.profile[i]! }))),
-    scalarGate("G7", "total drift at 1200 (fraction)", { abs: 0.001 }, "", [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }]),
+    bandScalarGate("G6c", "right-chamber centroid x (cells); band to the restored references", { abs: 16 }, " cells", [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.centroid[i]!), restored: R.map(o => o.restored[k]!.centroid), candidate: C.centroid[i]! }))),
+    asWritten(scalarGate("G6c", "right-chamber centroid x (cells)", { abs: 16 }, " cells", [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.centroid[i]!), candidate: C.centroid[i]! })))),
+    bandDistanceGate("G6", "right-chamber 16-bin profile, normalised L1; band to the restored references", 0.15, "", l1, [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.profile[i]!), restored: R.map(o => o.restored[k]!.profile), candidate: C.profile[i]! }))),
+    asWritten(distanceGate("G6", "right-chamber 16-bin profile, normalised L1", 0.15, "", l1, [600, 1200].map((k, i) => ({ at: String(k), refs: R.map(o => o.profile[i]!), candidate: C.profile[i]! })))),
+    driftGate("G7", "total drift at 1200 (fraction), one-sided on |drift|", { abs: 0.001 }, [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }]),
+    asWritten(scalarGate("G7", "total drift at 1200 (fraction)", { abs: 0.001 }, "", [{ at: "1200", refs: R.map(o => o.drift), candidate: C.drift }])),
     scalarGate("G8", "jet impact x (cells)", { abs: 8 }, " cells", SEEP_TRAJECTORY.map((k, i) => ({ at: String(k), refs: R.map(o => o.trajectory[i]!.impact), candidate: C.trajectory[i]!.impact }))),
     distanceGate("G8h", "jet mean height per 8-cell slice over x 256-352, RMS (cells)", 3, " cells", rms, SEEP_TRAJECTORY.map((k, i) => ({ at: String(k), refs: R.map(o => o.trajectory[i]!.heights), candidate: C.trajectory[i]!.heights }))),
     scalarGate("Gp", "particles", { rel: 0.10 }, "", SEEP_CHECK.map((k, i) => ({ at: String(k), refs: R.map(o => o.particles[i]!), candidate: C.particles[i]! })), true),
@@ -172,51 +152,93 @@ function seepGates(refs: Run<SeepObservation>[], c: Run<SeepObservation>): Gate[
 
 // ---------------------------------------------------------------- box scenes (dam, letters, paddleboats)
 type Box = Run<BoxObservation>;
+type Get<T> = (s: BoxObservation, r: Box) => T;
 const boxAt = (r: Box, k: number) => { const s = r.samples.find(x => x.step === k); if (!s) throw new Error(`${r.name} has no sample at step ${k}`); return s; };
-function boxScalar(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, steps: number[], get: (s: BoxObservation, r: Box) => number | null, informational = false) {
+const geometryOf = (r: Box) => r.meta.geometry as BoxGeometry;
+/** A box run's mean liquid depth per (x, z) bin (cells). */
+const binDepth = (r: Box, litres: number[]) => binDepths(geometryOf(r), litres);
+/** §4.5 (2): a reference sample with its own measured loss restored (tools/nbflip-gate-rules.ts restoreBox),
+ * as a sample, so every observable reads it the way it reads a measured one. */
+const restoredCache = new WeakMap<BoxObservation, BoxObservation & { restoration: RestoredBox }>();
+function restored(r: Box, s: BoxObservation) {
+  let x = restoredCache.get(s);
+  if (!x) {
+    const b = restoreBox(geometryOf(r), s);
+    x = { ...s, bins_L: b.bins_L, profileDepth_cells: b.profileDepth_cells, binTops_cells: b.binTops_cells, profileTop_cells: b.profileTop_cells,
+      columnDepth_cells: b.columnDepth_cells, columnTop_cells: b.columnTop_cells, pe_J: b.pe_J, energy_J: b.energy_J,
+      centroid: s.centroid && b.centroidY_cells !== null ? [s.centroid[0], b.centroidY_cells, s.centroid[2]] : s.centroid, restoration: b };
+    restoredCache.set(s, x);
+  }
+  return x;
+}
+function boxScalar(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, steps: number[], get: Get<number | null>, informational = false) {
   return scalarGate(id, observable, fl, unit, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })), informational);
 }
-function boxDistance(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number, refs: Box[], c: Box, steps: number[], get: (s: BoxObservation, r: Box) => number[], informational = false) {
+function boxDistance(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number, refs: Box[], c: Box, steps: number[], get: Get<number[]>, informational = false) {
   return distanceGate(id, observable, floor, unit, distance, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })), informational);
+}
+/** §4.5 (1): one-sided drift, with the two-sided original printed. */
+function boxDrift(id: string, observable: string, fl: Floor, refs: Box[], c: Box, steps: number[], get: Get<number | null>, informational = false) {
+  return [driftGate(id, `${observable}, one-sided on |drift|`, fl, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })), informational),
+    asWritten(boxScalar(id, observable, fl, "", refs, c, steps, get, informational))];
+}
+/** §4.5 (2): a volume-coupled scalar against [refs, refs restored], with the two-sided original printed. */
+function boxBand(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, steps: number[], get: Get<number | null>, informational = false) {
+  return [bandScalarGate(id, `${observable}; band to the restored references`, fl, unit, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)),
+    restored: refs.map(r => get(restored(r, boxAt(r, k)), r)), candidate: get(boxAt(c, k), c) })), informational),
+    asWritten(boxScalar(id, observable, fl, unit, refs, c, steps, get, informational))];
+}
+function boxBandDistance(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number, refs: Box[], c: Box, steps: number[], get: Get<number[]>, informational = false) {
+  return [bandDistanceGate(id, `${observable}; band to the restored references`, floor, unit, distance, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)),
+    restored: refs.map(r => get(restored(r, boxAt(r, k)), r)), candidate: get(boxAt(c, k), c) })), informational),
+    asWritten(boxDistance(id, observable, floor, unit, distance, refs, c, steps, get, informational))];
 }
 /** Window means: per window, each run's mean of `get` over the window's samples (a scalar) or its mean profile. */
 type Windows = [label: string, steps: number[]][];
-const windowMean = (r: Box, steps: number[], get: (s: BoxObservation, r: Box) => number) => mean(steps.map(k => get(boxAt(r, k), r)));
-const windowProfile = (r: Box, steps: number[], get: (s: BoxObservation, r: Box) => number[]) => { const v = steps.map(k => get(boxAt(r, k), r)); return v[0]!.map((_, i) => mean(v.map(p => p[i]!))); };
-function boxWindowScalar(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, windows: Windows, get: (s: BoxObservation, r: Box) => number, informational = false) {
+const windowMean = (r: Box, steps: number[], get: Get<number>, restore = false) => mean(steps.map(k => { const s = boxAt(r, k); return get(restore ? restored(r, s) : s, r); }));
+const windowProfile = (r: Box, steps: number[], get: Get<number[]>, restore = false) => { const v = steps.map(k => { const s = boxAt(r, k); return get(restore ? restored(r, s) : s, r); }); return v[0]!.map((_, i) => mean(v.map(p => p[i]!))); };
+function boxWindowScalar(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
   return scalarGate(id, observable, fl, unit, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) })), informational);
 }
-function boxWindowDistance(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number, refs: Box[], c: Box, windows: Windows, get: (s: BoxObservation, r: Box) => number[], informational = false) {
-  return distanceGate(id, observable, floor, unit, distance, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowProfile(r, steps, get)), candidate: windowProfile(c, steps, get) })), informational);
+function boxWindowDrift(id: string, observable: string, fl: Floor, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
+  return [driftGate(id, `${observable}, one-sided on |drift|`, fl, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) })), informational),
+    asWritten(boxWindowScalar(id, observable, fl, "", refs, c, windows, get, informational))];
+}
+function boxWindowBand(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
+  return [bandScalarGate(id, `${observable}; band to the restored references`, fl, unit, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)),
+    restored: refs.map(r => windowMean(r, steps, get, true)), candidate: windowMean(c, steps, get) })), informational),
+    asWritten(boxWindowScalar(id, observable, fl, unit, refs, c, windows, get, informational))];
+}
+function boxWindowBandDistance(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number, refs: Box[], c: Box, windows: Windows, get: Get<number[]>, informational = false) {
+  return [bandDistanceGate(id, `${observable}; band to the restored references`, floor, unit, distance, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowProfile(r, steps, get)),
+    restored: refs.map(r => windowProfile(r, steps, get, true)), candidate: windowProfile(c, steps, get) })), informational),
+    asWritten(distanceGate(id, observable, floor, unit, distance, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowProfile(r, steps, get)), candidate: windowProfile(c, steps, get) })), informational))];
 }
 const every15 = (from: number, to: number) => Array.from({ length: (to - from) / 15 + 1 }, (_, i) => from + 15 * i);
 function damGates(refs: Box[], c: Box): Gate[] {
   // The collapse (steps <= 16, the front reaches the far wall at 11) repeats run to run: its rows are instantaneous.
   // After the wall impact (about step 30) the splash is chaotic run to run (energy lost at impact differs by up to
   // 3%, the slosh phase by a sample), so those rows are means over windows of the 15-step samples: the impact and
-  // first return (30-90), the second slosh (105-165) and, informational on a complete run (GATED_STEPS), 180-300.
+  // first return (30-90), the second slosh (105-165) and the decay (180-300, gated since GATED_STEPS.dam is 300).
+  // Volume-coupled rows (§4.5): column height and depth, PE, E, the depth and collapse-top profiles.
   const early = [2, 4, 6, 8, 10], collapse = [4, 8, 12, 16];
-  const late: Windows = [["30-90", every15(30, 90)], ["105-165", every15(105, 165)]], tail: Windows = [["180-300", every15(180, 300)]];
-  const rows = (windows: Windows, informational: boolean, suffix: string): Gate[] => [
-    boxWindowScalar(`D3${suffix}`, "back-wall column mean depth (cells), window mean", { rel: 0.05, abs: 2 }, " cells", refs, c, windows, s => s.columnDepth_cells ?? NaN, informational),
-    boxWindowScalar(`D4${suffix}`, "volume drift (fraction of t = 0), window mean", { abs: 0.01 }, "", refs, c, windows, s => s.drift, informational),
-    boxWindowScalar(`D5k${suffix}`, "kinetic energy (J), window mean", { rel: 0.10, abs: 2 }, " J", refs, c, windows, s => s.ke_J, informational),
-    boxWindowScalar(`D5p${suffix}`, "potential energy (J), window mean", { rel: 0.02 }, " J", refs, c, windows, s => s.pe_J, informational),
-    boxWindowScalar(`D5e${suffix}`, "total mechanical energy (J), window mean", { rel: 0.02 }, " J", refs, c, windows, s => s.energy_J, informational),
-    boxWindowDistance(`D7d${suffix}`, "surface profile: mean depth per 8-cell x bin, window mean, normalised L1", 0.05, "", l1, refs, c, windows, s => normalise(s.profileDepth_cells), informational),
-    boxWindowScalar(`D8${suffix}`, "particles, window mean", { rel: 0.10 }, "", refs, c, windows, s => s.particles, informational),
-  ];
+  const windows: Windows = [["30-90", every15(30, 90)], ["105-165", every15(105, 165)], ["180-300", every15(180, 300)]];
   return [
     boxScalar("D1", "front x_f, furthest wet floor x (cells; Z = x_f / 80)", { abs: 4 }, " cells", refs, c, early, s => s.front_cells),
-    boxScalar("D2", "residual column height at the back wall, highest wet top (cells; eta = h / 117.8)", { abs: 4 }, " cells", refs, c, collapse, s => s.columnTop_cells),
-    boxScalar("D4c", "volume drift at the far-wall impact (fraction of t = 0)", { abs: 0.01 }, "", refs, c, [16], s => s.drift),
+    ...boxBand("D2", "residual column height at the back wall, highest wet top (cells; eta = h / 117.8)", { abs: 4 }, " cells", refs, c, collapse, s => s.columnTop_cells),
+    ...boxDrift("D4c", "volume drift at the far-wall impact (fraction of t = 0)", { abs: 0.01 }, refs, c, [16], s => s.drift),
     boxScalar("D5c", "collapse kinetic energy (J)", { rel: 0.10, abs: 2 }, " J", refs, c, collapse, s => s.ke_J),
-    boxScalar("D5ce", "collapse total mechanical energy (J)", { rel: 0.02 }, " J", refs, c, collapse, s => s.energy_J),
+    ...boxBand("D5ce", "collapse total mechanical energy (J)", { rel: 0.02 }, " J", refs, c, collapse, s => s.energy_J),
     boxScalar("D6", "wet floor cells", { rel: 0.05 }, "", refs, c, [4, 8, 12], s => s.wetFloor_cells),
-    boxDistance("D7t", "collapse surface profile: highest wet top per 8-cell x bin, RMS (cells)", 4, " cells", rms, refs, c, [8, 12, 16], s => s.profileTop_cells),
+    ...boxBandDistance("D7t", "collapse surface profile: highest wet top per 8-cell x bin, RMS (cells)", 4, " cells", rms, refs, c, [8, 12, 16], s => s.profileTop_cells),
     boxScalar("D8c", "particles at 16", { rel: 0.10 }, "", refs, c, [16], s => s.particles),
-    ...rows(late, false, ""),
-    ...(complete(c) ? rows(tail, true, "+") : []),
+    ...boxWindowBand("D3", "back-wall column mean depth (cells), window mean", { rel: 0.05, abs: 2 }, " cells", refs, c, windows, s => s.columnDepth_cells ?? NaN),
+    ...boxWindowDrift("D4", "volume drift (fraction of t = 0), window mean", { abs: 0.01 }, refs, c, windows, s => s.drift),
+    boxWindowScalar("D5k", "kinetic energy (J), window mean", { rel: 0.10, abs: 2 }, " J", refs, c, windows, s => s.ke_J),
+    ...boxWindowBand("D5p", "potential energy (J), window mean", { rel: 0.02 }, " J", refs, c, windows, s => s.pe_J),
+    ...boxWindowBand("D5e", "total mechanical energy (J), window mean", { rel: 0.02 }, " J", refs, c, windows, s => s.energy_J),
+    ...boxWindowBandDistance("D7d", "surface profile: mean depth per 8-cell x bin, window mean, normalised L1", 0.05, "", l1, refs, c, windows, s => normalise(s.profileDepth_cells)),
+    boxWindowScalar("D8", "particles, window mean", { rel: 0.10 }, "", refs, c, windows, s => s.particles),
   ];
 }
 /** The litres the letters have added since t = 0 (the drops landed by sample s). */
@@ -224,10 +246,10 @@ const dropped = (r: Box, s: BoxObservation) => s.expected_L - boxAt(r, 0).expect
 function lettersGates(refs: Box[], c: Box): Gate[] {
   const checks = [120, 180, 240], energy = [60, 120, 180, 240], shape = [60, 90, 120, 180, 240];
   return [
-    boxScalar("L1", "volume drift against the t = 0 pool plus the drops (fraction)", { abs: 0.005 }, "", refs, c, checks, s => s.drift),
-    boxDistance("L2", `shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; ${f(mean(refs.map(r => dropped(r, boxAt(r, 240)))), 0)} L dropped by 240)`, 1, " cells", rms, refs, c, shape, (s, r) => binDepth(r, s.bins_L)),
+    ...boxDrift("L1", "volume drift against the t = 0 pool plus the drops (fraction)", { abs: 0.005 }, refs, c, checks, s => s.drift),
+    ...boxBandDistance("L2", `shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; ${f(mean(refs.map(r => dropped(r, boxAt(r, 240)))), 0)} L dropped by 240)`, 1, " cells", rms, refs, c, shape, (s, r) => binDepth(r, s.bins_L)),
     boxScalar("L3", "kinetic energy (J)", { rel: 0.10 }, " J", refs, c, energy, s => s.ke_J),
-    boxScalar("L4", "liquid centroid height (cells)", { abs: 0.25 }, " cells", refs, c, energy, s => s.centroid?.[1] ?? null),
+    ...boxBand("L4", "liquid centroid height (cells)", { abs: 0.25 }, " cells", refs, c, energy, s => s.centroid?.[1] ?? null),
     boxScalar("L5", "particles", { rel: 0.10 }, "", refs, c, energy, s => s.particles),
     boxScalar("Ln", "NB-FLIP's own volume drift (readStats)", { abs: 0.005 }, "", refs, c, checks, s => (s.extra?.nbDrift as number | undefined) ?? null, true),
   ];
@@ -235,8 +257,8 @@ function lettersGates(refs: Box[], c: Box): Gate[] {
 function paddleboatsGates(refs: Box[], c: Box): Gate[] {
   const checks = [60, 120, 180, 240, 300];
   return [
-    boxScalar("P1", "volume drift (fraction of t = 0)", { abs: 0.0025 }, "", refs, c, [150, 300], s => s.drift),
-    boxDistance("P2", "surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells)", 0.25, " cells", rms, refs, c, [150, 300], (s, r) => binDepth(r, s.bins_L)),
+    ...boxDrift("P1", "volume drift (fraction of t = 0)", { abs: 0.0025 }, refs, c, [150, 300], s => s.drift),
+    ...boxBandDistance("P2", "surface: mean depth per 32 x 32-cell (x, z) bin, RMS (cells)", 0.25, " cells", rms, refs, c, [150, 300], (s, r) => binDepth(r, s.bins_L)),
     boxScalar("P3", "kinetic energy, the wheels' wake (J)", { rel: 0.10 }, " J", refs, c, checks, s => s.ke_J),
     boxScalar("P4", "particles", { rel: 0.10 }, "", refs, c, [150, 300], s => s.particles),
     boxScalar("Pn", "NB-FLIP's own volume drift (readStats)", { abs: 0.0025 }, "", refs, c, [150, 300], s => (s.extra?.nbDrift as number | undefined) ?? null, true),
@@ -286,7 +308,8 @@ if (timingOnly) {
 }
 const md: string[] = [`# NB-FLIP port gates: ${candidates.map(c => c.name).join(", ")}`, "",
   `Generated ${new Date().toISOString()} by tools/nbflip-gates.ts. References: ${SCENES.map(s => `${s} ${refRuns.filter(r => r.scene === s).map(r => r.name).join(" + ") || "(none)"}`).join("; ")}.`,
-  "Each row passes when |candidate - reference mean| <= max(floor, 3S), S the references' spread; distance rows when d <= max(floor, 3S), S the references' largest pairwise d. Margin = |difference| / tolerance (<= 1 passes).", ""];
+  "Each row passes when |candidate - reference mean| <= max(floor, 3S), S the references' spread; distance rows when d <= max(floor, 3S), S the references' largest pairwise d. Margin = |difference| / tolerance (<= 1 passes).",
+  "Amended (plan §4.5): drift rows are one-sided, |c| <= |ref| + max(floor, 3S) (margin = excess / tolerance); volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.", ""];
 const verdicts: Record<string, unknown>[] = [];
 let failed = false;
 for (const scene of sceneFilter) {
@@ -308,7 +331,7 @@ for (const scene of sceneFilter) {
       "| gate | observable | rule | verdict | worst margin | checkpoints (at: candidate vs ref ± S, tol) |", "|---|---|---|---|---|---|",
       ...gates.map(g => {
         const worst = g.rows.reduce((a, r) => Math.max(a, r.margin), 0);
-        const pts = g.rows.map(r => `${r.at}: ${f(r.candidate, 4)} vs ${f(r.ref, 4)} ± ${f(r.S, 4)}, tol ${f(r.tol, 4)}${r.pass ? "" : " **x**"}`).join("; ");
+        const pts = g.rows.map(r => `${r.at}: ${f(r.candidate, 4)} vs ${f(r.ref, 4)} ± ${f(r.S, 4)}, tol ${f(r.tol, 4)}${r.restored !== undefined ? ` (restored ${f(r.restored, 4)} ± ${f(r.restoredS, 4)}, tol ${f(r.restoredTol, 4)}${r.pass && (r.unionMargin ?? 0) > 1 ? "; between the bands, outside both" : ""})` : ""}${r.pass ? "" : " **x**"}`).join("; ");
         return `| ${g.id} | ${g.observable} | ${g.rule} | ${g.informational ? `(${g.pass ? "pass" : "fail"}, not gated)` : g.pass ? "pass" : "**FAIL**"} | ${f(worst, 2)} | ${pts} |`;
       }), "");
     const t = timingTable(scene);

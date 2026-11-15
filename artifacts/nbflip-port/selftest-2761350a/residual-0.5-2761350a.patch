@@ -1,0 +1,11 @@
+--- a/lib/methods/uniform/uniform-pressure-arena.ts
++++ b/lib/methods/uniform/uniform-pressure-arena.ts
+@@ -120,7 +120,7 @@
+  * band stops at it or at the cycle cap; the strict exit keeps the frame's
+  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
+  * the 4h root accepts up to 5. */
+-export const UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL=0.05;
++export const UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL=0.5;
+ /** A frame whose band solve ran the cycle cap and ended above its target:
+  * counted in the frame status record's pressure cap words (a reported
+  * state, uniform-mixed-frame-status) and, with this on, latched as cause 2
