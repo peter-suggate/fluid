@@ -764,7 +764,8 @@ fn ncFlush(){
 }
 `;
 
-export function brickCensusKernels(L: BrickLayout) {
+export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
+  const tiered = opt.tiered ?? true;
   if (L.lattice.some(n => n % 32 !== 0)) throw new Error(`setCensus: the lattice ${L.lattice.join("x")} is not whole pages (32 cells an axis)`);
   // BULK16 (B slots) is M3: a pool may be authored, but a live B slot fails on the GPU (censusBegin, LIVE_B).
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
@@ -834,7 +835,8 @@ var<workgroup> mixedTile:atomic<u32>;
 }`);
 
   // censusCoarse: classifyCoarse (l.2175), a workgroup a page of C_ALL, its tiles 64 at a time, a lane a tile.
-  // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER).
+  // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER) when tiered,
+  // and is air all-h (CMASK all-ones a resident page: no slot reads NB_PHI_FAR), so it stores the identity.
   const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + /* wgsl */`
 var<workgroup> wgFlag:u32;
 var<workgroup> cqErrors:atomic<u32>;
@@ -872,7 +874,7 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
     if(!nbTileInLattice(t)){ncStoreIdentity(cs,i);}
     else if(nbTileH(cs,i)){
       let b=t>>vec3u(1u);
-      if(nbFSlotOfBrick(b)>=NB_SEAM){nbFail(NB_FAIL_TIER,nbKey(b));ncStoreIdentity(cs,i);}
+      if(nbFSlotOfBrick(b)>=NB_SEAM){${tiered ? "nbFail(NB_FAIL_TIER,nbKey(b));" : ""}ncStoreIdentity(cs,i);}
     }else{
       classified=true;cqBounded[lane]=1u;
       ncClassifyOwner(t,4u,0u,&c,false);
@@ -1096,7 +1098,7 @@ var<workgroup> wgGo:u32;
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
 export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true) {
-  const c = brickCensusKernels(L);
+  const c = brickCensusKernels(L, { tiered });
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
     { kernel: c.censusFine, dispatch: list(fAll, "G1") },

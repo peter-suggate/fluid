@@ -406,3 +406,13 @@ Landed (bitwise: census and dam-census GPU tests pass 5/5):
 - The tile's corners are read from the staged 5³ raw instead of 8 reads a lane: 8.2 to 7.9 ms.
 - The corner Laplacian runs on 24 lanes (corner by axis), summed in axis order by the corner's lane:
   7.9 to 6.8 ms.
+
+## 2026-11-15: all-h CMASK is page-wide (lane P's phantom 4h liquid)
+
+Lane P saw 25,832 tiles in resident pages read 4h on the all-h dam (CMASK clear where a brick was absent or
+had left), and 296 of them were wet: bootPhi's analytic C φ, which nothing updates all-h. These made rowsC
+build native rows and seams. The fix: when not tiered, setClaimPages sets CMASK all-ones, and brick claims
+and leaves don't touch it. An absent brick is now h air (NB_PHI_FAR, 0 faces), and censusCoarse stores its
+tiles as the identity without a TIER failure. Test: the all-h column boot gives all-ones CMASK on every
+page with absent bricks, and a step keeps it. GPU tests: census, dam census, set-tiers, engine, transfer,
+transfer-dam and owner pass 27/27.

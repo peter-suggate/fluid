@@ -162,3 +162,30 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
     console.log(`tiered head: listed ${s2.header[H.N_TLIST_RUN]} (neighbour-only listing), clamped ${s2.header[H.CENSUS_CLAMPED]}, cand ${s2.header[H.CENSUS_CAND]}`);
   });
 });
+
+test("all-h brick set (GPU): every tile of a resident page is h-owned, so an absent brick is air, never stale C", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("brick all-h cmask", async device => {
+    // Lane P's finding (2026-11-15): with CMASK per brick, an all-h page's absent bricks read 4h, i.e. bootPhi's
+    // C vertices, which nothing updates all-h. A column that fills a page only partly leaves such bricks.
+    const hi: V3 = [30.3, 40.3, 30.3];
+    const e = await BrickEngine.create(device, { lattice: [N, N, N], h_m: 1 / N, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
+      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi }], solver: L => bringUpCG(L), stages: bringUpStages });
+    const L = e.layout, s = await snapshot(e);
+    assert.equal(s.header[H.FAIL], 0, `FAIL ${s.header[H.FAIL]} info ${s.header[H.FAIL_INFO]}`);
+    let absent = 0;
+    for (const [pk, cs] of s.pages) {
+      const P = brickKeyCoord(pk) as unknown as V3, m = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
+      assert.ok(m.every(w => w === 0xffffffff), `page ${P}: CMASK all-ones`);
+      for (let bl = 0; bl < 64; bl++) {
+        const b: V3 = [4 * P[0]! + (bl & 3), 4 * P[1]! + ((bl >> 2) & 3), 4 * P[2]! + (bl >> 4)];
+        if (!s.bricks.has(key(b))) absent++;
+      }
+    }
+    assert.ok(absent > 0, "the column leaves absent bricks in its pages");
+    // One full step: the census classifies the absent bricks' tiles as air (no TIER failure) and CMASK stays.
+    e.advance(1); await e.fence(); const s2 = await snapshot(e);
+    assert.equal(s2.header[H.FAIL], 0, `FAIL ${s2.header[H.FAIL]} info ${s2.header[H.FAIL_INFO]}`);
+    for (const [, cs] of s2.pages) assert.ok(s2.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1)).every(w => w === 0xffffffff));
+  });
+});

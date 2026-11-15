@@ -226,7 +226,9 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     let cs=nbPop(NB_H_TOP_C,NB_S_FREE_C,NB_CCAP,NB_H_HIGH_C,NB_H_REFUSED_C,NB_FAIL_POOL_C,key);
     if(cs==NB_NONE){atomicStore(&dir[pi],NB_NONE);continue;}
     for(var j=0u;j<64u;j++){atomicStore(&dir[NB_D_CHILD+64u*cs+j],NB_NONE);}
-    for(var j=0u;j<16u;j++){atomicStore(&dir[NB_D_CMASK+16u*cs+j],0u);}
+    // All-h: every tile of a resident page is h-owned, so a tile whose brick is not resident is an h region with
+    // no slot (NB_PHI_FAR, faces 0: air) and C is never an authority. Tiered: CMASK is the bricks' (§2.5).
+    for(var j=0u;j<16u;j++){atomicStore(&dir[NB_D_CMASK+16u*cs+j],${tiered ? "0u" : "0xffffffffu"});}
     for(var j=0u;j<16u;j++){atomicStore(&nbSet[NB_S_WANT+16u*cs+j],0u);}
     let r=NB_D_CREC+32u*cs;
     for(var j=0u;j<27u;j++){atomicStore(&dir[r+j],NB_NONE);}
@@ -260,7 +262,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);atomicStore(&nbSet[NB_S_BOUND_F+fs],0u);atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
     atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);
     atomicAdd(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
-    if(h){nbTileMask(cs,bl,true);}
+    if(${tiered ? "h" : "false"}){nbTileMask(cs,bl,true);}
     atomicStore(&dir[ci],fs);
     nbAppend(NB_LIST_F_ENTER,fs);
   }
@@ -277,7 +279,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
   let r=NB_D_FREC+32u*s;let cs=atomicLoad(&dir[r+NB_REC_PARENT]);let bl=(atomicLoad(&dir[r+NB_REC_MASK])>>8u)&63u;
   atomicStore(&dir[NB_D_CHILD+64u*cs+bl],NB_NONE);
   atomicSub(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
-  nbTileMask(cs,bl,false);
+  ${tiered ? "nbTileMask(cs,bl,false);" : "// All-h: CMASK stays all-ones (setClaimPages)."}
   atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_LEAVING);
   nbPush(NB_H_TOP_F,NB_S_FREE_F,s);
   nbAppend(NB_LIST_F_LEAVE,s);

@@ -159,8 +159,12 @@ kept exactly).
 - All three are written only by `setTransfer`'s commit, so every stage of a step sees one
   ownership.
 
-**Residency** (implemented 2026-11-15 behind `BrickStages.tiered`; off, every resident brick is h and
-CMASK is set at claim, the M1 engine).
+**Residency** (implemented 2026-11-15 behind `BrickStages.tiered`). With it off (the M1 engine, all-h),
+every tile of a resident page is h-owned: `setClaimPages` sets CMASK all-ones, and a brick's claim or
+leave leaves CMASK alone. So a tile whose brick isn't resident is an h region with no slot. It reads
+`NB_PHI_FAR` and 0 faces, which is air, and censusCoarse stores it as the identity. C φ is never an
+authority all-h. Before this rule, CMASK was set per brick, and an absent brick's tiles read bootPhi's
+stale C vertices: lane P's phantom 4h liquid, 296 wet tiles on the dam, 2026-11-15.
 - *C (a page).* Resident while any F child lives, or while `setMarkPages` (C_ALL, G1) marks it
   (`MARK_C`):
   - the box of a page's 4h-owned in-lattice tiles that have a liquid corner (a C vertex with φ < 0)
