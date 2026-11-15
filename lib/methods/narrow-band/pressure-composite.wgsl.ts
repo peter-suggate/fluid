@@ -413,10 +413,19 @@ fn poHeadB(c:vec3i,own:f32,base:f32,f:u32)->f32{
 // (the native row's zero ghost); every other face keeps US.
 fn poProjectFace(m:vec3i,own:f32,liquid:bool,f:u32,us:f32,h:f32,separated:bool)->f32{
   let face=poBandFace(m,own,liquid,f).face;
-  return poProjectFaceK(m,own,liquid,f,us,h,separated,face.kind,face.coefficient/face.fraction);
+  var head=0.0;if(face.kind==NP_K_SEAM&&liquid){head=poHeadB(m,own,poBF(m),f);}
+  return poProjectFaceK(m,own,liquid,f,us,h,separated,face.kind,face.coefficient/face.fraction,head);
+}
+// A liquid h row's seam ratio (coefficient / fraction): npBandFace's native face from a liquid side, θ unused (1),
+// volume 1 (the native tile is resident, so in the lattice). rowsF's face cache holds a seam face's head in its
+// ratio word, so projectF takes the ratio from here.
+fn poSeamRatio()->f32{
+  let face=npBandFace(NP_ACROSS_RESIDENT,-1.0,true,1.0,1.0,false,true,NpCell(-1.0,true,true),0.0,1.0,true,false,false,1.0,true,false,1.0);
+  return face.coefficient/face.fraction;
 }
 // poProjectFace on a face's kind and coefficient / fraction (rowsF's face cache, or the formula's).
-fn poProjectFaceK(m:vec3i,own:f32,liquid:bool,f:u32,us:f32,h:f32,separated:bool,kind:u32,ratio:f32)->f32{
+// head: a liquid side's seam head (rowsF's poHeadS, cached; poHeadB from the stored rows on the formula's path).
+fn poProjectFaceK(m:vec3i,own:f32,liquid:bool,f:u32,us:f32,h:f32,separated:bool,kind:u32,ratio:f32,head:f32)->f32{
   let a=f/2u;let sign=npSign(f);
   if(kind==NP_K_NEUMANN){return us;}
   if(kind==NP_K_CLOSED){return 0.0;}
@@ -425,7 +434,7 @@ fn poProjectFaceK(m:vec3i,own:f32,liquid:bool,f:u32,us:f32,h:f32,separated:bool,
   var ghost=0.0;
   if(kind==NP_K_WALL){let lift=npLift(f,1.0,us,h,1.0);if(!separated){ghost=x+lift;}}
   else if(kind==NP_K_BAND){ghost=poXF(q);}
-  else if(kind==NP_K_SEAM){ghost=poXT(q>>vec3u(2u));if(liquid){ghost+=poHeadB(m,own,poBF(m),f);}}
+  else if(kind==NP_K_SEAM){ghost=poXT(q>>vec3u(2u));if(liquid){ghost+=head;}}
   return us-f32(sign)*ratio*(ghost-x)/h;
 }
 // The old umRelease (uniform-mixed-pressure-velocity.ts) of a lattice wall face with owner width w (1 or 4 cells):
@@ -576,7 +585,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
       for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}
       for(var f=0u;f<6u;f++){
         let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;${faces === undefined ? "" : `
-        kinds|=(face.kind+1u)<<(4u*f);pmgF[poFcAt(slot,f,l)]=face.coefficient/face.fraction;`}
+        kinds|=(face.kind+1u)<<(4u*f);if(face.kind!=NP_K_SEAM){pmgF[poFcAt(slot,f,l)]=face.coefficient/face.fraction;}`}
         var fc=c;if(sign>0){fc[a]+=1;}
         let us=poFacePlane(fc,a);
         if(face.kind!=NP_K_CLOSED){div+=f32(sign)*face.fraction*us;}
@@ -592,7 +601,8 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
         if(face.kind==NP_K_BAND&&pf.qWet&&sign<0){kk[a]=face.coefficient;}
         if(face.kind==NP_K_SEAM){
           if(sign<0){kk[a]=face.coefficient;}else{ku[a]=face.coefficient;}
-          extra+=face.coefficient*poHeadS(c,own,start,f);
+          let head=poHeadS(c,own,start,f);extra+=face.coefficient*head;${faces === undefined ? "" : `
+          pmgF[poFcAt(slot,f,l)]=head;`}
         }
       }
     }
@@ -631,6 +641,7 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
   var root=0.0;if(owned){root=poRootPhi4(T);}
   rcR[i]=root;
   let liquid=owned&&poWet(root,4.0);
+  var seams=0u;
   if(liquid){
     for(var j=0u;j<8u;j++){poGuardVertex(4*(T+poCorner(j)));}
     start=poTileStart(T);
@@ -653,12 +664,16 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
         let c=4.0/poNativeTheta(low,high,a);diag+=c;div+=f32(sign)*nbFacePlane(plane,a);continue;
       }
       // A seam (the 16 h cells of Tn beside the face): listed, summed below.
-      if(nbTileOwnerH(Tn)){rcE[atomicAdd(&rcN,1u)]=(i<<3u)|f;continue;}
+      if(nbTileOwnerH(Tn)){seams|=1u<<f;continue;}
       let un=nbFacePlane(plane,a);div+=f32(sign)*un;
       if(poWet(poRootPhi4(Tn),4.0)){let c=4.0;diag+=c;if(side==0u){kk[a]=c;}}
       else{diag+=4.0/poNativeTheta(low,high,a);}
     }
   }
+  // The tile's seam faces, listed contiguously in face order (one atomic a tile), so that its lane sums exactly its
+  // own entries of each chunk below instead of scanning the chunk's 32.
+  let sCount=countOneBits(seams);var sBase=0u;
+  if(sCount>0u){sBase=atomicAdd(&rcN,sCount);var e=sBase;for(var f=0u;f<6u;f++){if(((seams>>f)&1u)!=0u){rcE[e]=(i<<3u)|f;e++;}}}
   workgroupBarrier();
   if(lid==0u){rcCount=atomicLoad(&rcN);}
   let n=workgroupUniformLoad(&rcCount);
@@ -680,9 +695,9 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
     rcD[lid]=dc;rcX[lid]=xc;rcP[lid]=pc;
     workgroupBarrier();
     // No break or continue: the barrier below stays in uniform control flow.
-    for(var q=0u;q<32u;q++){
-      let e=c0+q;
-      if(e<n&&(rcE[e]>>3u)==i){
+    for(var e=max(sBase,c0);e<min(sBase+sCount,c0+32u);e++){
+      let q=e-c0;
+      {
         let wv=rcE[e];var sd=0.0;var sx=0.0;var sp=0.0;
         for(var sq=0u;sq<16u;sq++){sd+=rcD[16u*q+sq];sx+=rcX[16u*q+sq];sp+=rcP[16u*q+sq];}
         diag+=sd;extra-=sx;div+=f32(npSign(wv&7u))*(sp/16.0);
@@ -760,13 +775,13 @@ var<workgroup> poGo:u32;
         if(lc){u=poProjectFace(c,pc,true,2u*a,us,h,separated);}
         else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h,separated);}` : `
         if(lc){
-          let kind=((u32(pmgF[poFcAt(slot,6u,l)])>>(8u*a))&15u)-1u;
-          u=poProjectFaceK(c,pc,true,2u*a,us,h,separated,kind,pmgF[poFcAt(slot,2u*a,l)]);
+          let kind=((u32(pmgF[poFcAt(slot,6u,l)])>>(8u*a))&15u)-1u;let word=pmgF[poFcAt(slot,2u*a,l)];
+          u=poProjectFaceK(c,pc,true,2u*a,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
         else if(ln){
           let sn=poSlotOfCell(n);let lnl=nbLocal(n);
-          let kind=((u32(pmgF[poFcAt(sn,6u,lnl)])>>(8u*a+4u))&15u)-1u;
-          u=poProjectFaceK(n,pn,true,2u*a+1u,us,h,separated,kind,pmgF[poFcAt(sn,2u*a+1u,lnl)]);
+          let kind=((u32(pmgF[poFcAt(sn,6u,lnl)])>>(8u*a+4u))&15u)-1u;let word=pmgF[poFcAt(sn,2u*a+1u,lnl)];
+          u=poProjectFaceK(n,pn,true,2u*a+1u,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
         else if(hc&&!hn){u=poProjectDry(c,pc,2u*a,us,h,separated,n);}
         else if(hn&&!hc){u=poProjectDry(n,pn,2u*a+1u,us,h,separated,c);}`}
