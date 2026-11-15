@@ -64,7 +64,7 @@ async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: b
   const fx = await compositeFixture(device, L => poolMGPCG(L, mg));
   const { e } = fx, solver = e.solver;
   const K = pressureCompositeKernels(e.layout);
-  await e.run([{ kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
+  await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
   const before = await readComposite(e, fx.s.bricks, fx.pages, fx.dir);
   const run = vcycleOnly ? [...solver.setup, ...solver.slot(0).filter(p => !SOLVE.includes(p.kernel.label))]
     : [...solver.setup, ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(), ...solver.finish];

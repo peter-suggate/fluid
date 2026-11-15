@@ -3,7 +3,8 @@
  * engine's slot (brick-pressure-slot.ts, brick-abi.md §6.1).
  *
  * The registered solver is the pool MGPCG (pressure-mgpcg.ts) on NB-FLIP's
- * composite rows: the native 4h rows (rowsC) open its setup, after the
+ * composite rows: the h tiles' root φ (tileRoots) runs before the engine's
+ * operator, the native 4h rows (rowsC) open its setup, after the
  * engine's operator (the h rows), and the native faces' projection with the
  * h tiles' C X mean (projectC) closes its finish, before the engine's
  * project (the h faces). The separating walls' outer loop (MGPCGOptions.walls)
@@ -22,6 +23,8 @@ export const compositeMGPCG = (options: MGPCGOptions = {}): PressureSolverFactor
   return {
     ...mg,
     label: "composite MGPCG (lane P)",
+    // The h tiles' held fit (root φ) once a step, before the operator's cold starts read it.
+    before: [{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }],
     setup: [{ kernel: K.rowsC, dispatch: pages }, ...mg.setup],
     finish: [...mg.finish, { kernel: K.projectC, dispatch: pages }],
   };

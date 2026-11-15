@@ -26,7 +26,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     for (const cs of pages) for (let i = 0; i < 512; i++) assert.equal(enteredX[BRICK_STRIDE * cs + i], 0, `C X at entry, slot ${cs}`);
     // ---- Run the rows.
     const K = pressureCompositeKernels(L);
-    await e.run([{ kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
+    await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
     const header = await e.read("set", 0, 256);
     assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
     const readF = async (ch: string) => new Float32Array((await e.read("pres", L.base("pres", "F", ch), L.cap.f * BRICK_STRIDE)).buffer);
@@ -168,7 +168,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
       }
       return hd;
     };
-    const stats = { rowsF: 0, rowsC: 0, seamsF: 0, seamsC: 0, wallsAttached: 0, wallsSeparated: 0, held: 0, ghosts4: 0, natives: 0, heads: 0 };
+    const stats = { rowsF: 0, rowsC: 0, seamsF: 0, seamsC: 0, wallsAttached: 0, wallsSeparated: 0, held: 0, ghosts4: 0, natives: 0, heads: 0, heldFits: 0 };
     const tol = (got: number, want: number, sc: number, what: string) => assert.ok(Math.abs(got - want) <= 2e-4 * (Math.abs(want) + sc), `${what}: ${got} against ${want}`);
     // F rows.
     const fx = await readF("X"), frhs = await readF("RHS"), fdiag = await readF("DIAG"), fk = [await readF("K0"), await readF("K1"), await readF("K2")], fku = [await readF("KU0"), await readF("KU1"), await readF("KU2")];
@@ -232,7 +232,9 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
         }
         const sc = Math.abs(diag) + 1e-3;
         tol(cx[at]!, owned ? st : C.X[at]!, 1e-3, `C X ${T}`); tol(crhs[at]!, liquid ? -16 * h * div + 64 * h * h * rate + extra : 0, 1e-3 * sc, `C RHS ${T}`);
-        tol(cdiag[at]!, diag, 1e-3, `C DIAG ${T}`); tol(cpphi[at]!, root, 1e-3, `C PPHI ${T}`);
+        tol(cdiag[at]!, diag, 1e-3, `C DIAG ${T}`); // An h tile of a live brick holds tileRoots' held fit (rowsC keeps it).
+        if (!(tileInLattice(T) && tileH(T))) tol(cpphi[at]!, root, 1e-3, `C PPHI ${T}`);
+        else if (fSlot(scale(4, T)) !== undefined) { tol(cpphi[at]!, rootPhi(T), 1e-3, `C PPHI held fit ${T}`); stats.heldFits++; }
         for (let a = 0; a < 3; a++) tol(ck[a]![at]!, kk[a]!, 1e-3, `C K${a} ${T}`);
       }
     }

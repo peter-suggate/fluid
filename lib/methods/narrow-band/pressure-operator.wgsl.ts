@@ -1,12 +1,13 @@
 /**
  * Lane P's pressure rows and projection on the brick pool (brick-abi.md §6): the engine's
- * `operator` (entry nbOperator, F_ALL) and `project` (F_LIQ), extended in place to NB-FLIP's
+ * `operator` (entry nbOperator, F_ALL) and `project` (F_ALL), extended in place to NB-FLIP's
  * composite system (pressure-composite.wgsl.ts):
  * - `operator` is the composite h rows (rowsF): band faces at the face φ's θ (Gibou et al. 2002;
  *   Enright et al. 2003), seams to native 4h rows with their heads, separating lattice walls
  *   (Batty, Bertails & Bridson 2007; Chentanez & Müller 2012), K_OPEN toward non-resident pages,
- *   and NB-FLIP's volume control in the RHS (Kim et al. 2007). It keeps the entry point, the
- *   FAIL.LIST zero-row rule over F_ALL and the cut's FAIL.UNSUPPORTED check. It writes X (the
+ *   and NB-FLIP's volume control in the RHS (Kim et al. 2007). It keeps the entry point, zero
+ *   rows on every F_ALL brick off the liquid (P owns its row list, so no class bit gates a row and
+ *   there is no FAIL.LIST check) and the cut's FAIL.UNSUPPORTED check. It writes X (the
  *   start), the start again in B (the seam heads' and the walls' state for `project`), and PPHI.
  * - The native rows (rowsC, C_ALL) run at the head of the registered solver's setup, after
  *   `operator` (brick-pressure-solver.ts), because the engine places one operator over F_ALL.

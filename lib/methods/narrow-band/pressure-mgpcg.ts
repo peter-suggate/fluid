@@ -46,7 +46,7 @@
  * - Dot products are float sums over 64 slots by compare-exchange, read in
  *   slot order by every reader, so they all see the same value.
  *
- * Gates (P's args region): F at 512 (F_LIQ's G1 or 0), C at 515 (C_ALL's
+ * Gates (P's args region): F at 512 (the row bricks' G1 or 0), C at 515 (C_ALL's
  * G1 or 0), ONE at 518. Header words: MG_HEADER.
  *
  * The tolerance is a divergence bound in 1/s: the solve stops when
@@ -113,8 +113,12 @@ const HS6 = 1024, HS7 = 256;
  */
 const CH = { D: 0, K: 1, B: 4, EPRE: 5, EPOST: 6, KU: 7, N: 10, N0: 10, R1: 11, N1: 12, N1P: 13, N0P: 14, NC: 15 } as const;
 
-/** pmgTop's words. */
-export function mgTopLayout(C: number) {
+/**
+ * pmgTop's words. RBN, RB and RBF are the row bricks: the F slots holding an h row (RBF[slot] 1, set by pmgSetupF
+ * over F_ALL), listed in RB (RBN of them) by pmgCoarsenTop. P owns this list and reads no F_LIQ: on the tiered
+ * dam 613 of 3492 F bricks hold an h row (the rest are the native tiles' bricks).
+ */
+export function mgTopLayout(C: number, F: number) {
   let at = 0;
   const take = (n: number) => { const o = at; at += n; return o; };
   const r6 = MG_ROWS6, r7 = MG_ROWS7;
@@ -122,6 +126,7 @@ export function mgTopLayout(C: number) {
     SLOT5: take(C), IDX5: take(C), PAR5: take(C), NBR5: take(6 * C), C5: take(6 * C), D5: take(C), B5: take(C), E5: take(C), F5: take(C), P5: take(C), R5: take(C),
     KEY6: take(r6), PAR6: take(r6), NBR6: take(6 * r6), C6: take(6 * r6), D6: take(r6), B6: take(r6), E6: take(r6), F6: take(r6), P6: take(r6), R6: take(r6), CH6: take(8 * r6),
     KEY7: take(r7), CH7: take(8 * r7), B7: take(r7), E7: take(r7), INV: take(r7 * r7),
+    RBN: take(1), RB: take(F), RBF: take(F),
   };
   return { ...t, words: at };
 }
@@ -131,7 +136,7 @@ export function mgLayout(L: BrickLayout) {
   const F = L.cap.f, C = L.cap.c;
   const W0 = 0, W1 = BRICK_STRIDE * F, L1 = 2 * BRICK_STRIDE * F;
   const L2 = 0, L3 = L2 + CH.NC * 512 * C, L4 = L3 + CH.N * 64 * C, L5 = L4 + CH.N * 8 * C;
-  return { W0, W1, L1, fWords: L1 + CH.N * 64 * F, L2, L3, L4, L5, cWords: L5 + CH.N * C, top: mgTopLayout(C) };
+  return { W0, W1, L1, fWords: L1 + CH.N * 64 * F, L2, L3, L4, L5, cWords: L5 + CH.N * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -223,7 +228,8 @@ fn pP(ch:u32,s:u32,l:u32)->f32{return pres[ch+NB_STRIDE*s+l];}
     return select(cs,NB_NONE,nbTileH(cs,nbLocal(t)));
   }
   `;
-  // A brick's 27 neighbours, NONE unless a live, liquid F slot; and each one's native tiles
+  // A brick's 27 neighbours, NONE unless a live F slot (every live slot holds rows: the operator's zero rows off the
+  // liquid, so P reads no F_LIQ or LIQUID class); and each one's native tiles
   // (8 bits, pI4 order) with its page's C slot.
   const STAGE = /* wgsl */`
 var<workgroup> pN:array<u32,27>;
@@ -232,7 +238,7 @@ var<workgroup> pNM:array<u32,27>;
 var<workgroup> wCount:u32;
 fn pStage(slot:u32,lid:u32){
   if(lid<27u){
-    let n=nbFRec(slot,lid);var s=NB_NONE;if(n<NB_SEAM){if((nbFRec(n,NB_REC_CLASS)&NB_CLASS_LIQUID)!=0u){s=n;}}pN[lid]=s;
+    let n=nbFRec(slot,lid);pN[lid]=select(NB_NONE,n,n<NB_SEAM);
     let bn=nbKeyCoord(nbFRec(slot,NB_REC_KEY))+nbNeighbourOffset(lid);
     var cs=NB_NONE;var m=0u;
     if(all(bn>=vec3i(0))){cs=pPageSlot(bn>>vec3u(2u));}
@@ -268,9 +274,10 @@ fn pSum512(lid:u32,v:f32)->f32{wRed[lid]=v;workgroupBarrier();for(var w=256u;w>0
 fn pMax512(lid:u32,v:f32)->f32{wRed[lid]=v;workgroupBarrier();for(var w=256u;w>0u;w>>=1u){if(lid<w){wRed[lid]=max(wRed[lid],wRed[lid+w]);}workgroupBarrier();}let r=wRed[0];workgroupBarrier();return r;}
 `;
   const GATE = /* wgsl */`
+// The F gate runs the row bricks (pmgTop RB, RBN of them) under the fold rule.
 fn pGate(open:bool){
-  let f=NB_ARGS_PER_LIST*NB_LIST_F_LIQ+NB_ARGS_G1;let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;
-  args[P_GATE_F]=select(0u,args[f],open);args[P_GATE_F+1u]=args[f+1u];args[P_GATE_F+2u]=1u;
+  let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=pmgTop[T_RBN];
+  args[P_GATE_F]=select(0u,min(n,NB_FOLD),open&&n>0u);args[P_GATE_F+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[P_GATE_F+2u]=1u;
   args[P_GATE_C]=select(0u,args[c],open);args[P_GATE_C+1u]=args[c+1u];args[P_GATE_C+2u]=1u;
   args[P_GATE_ONE]=select(0u,1u,open);args[P_GATE_ONE+1u]=1u;args[P_GATE_ONE+2u]=1u;
   atomicStore(&nbSet[PH_OPEN],select(0u,1u,open));
@@ -316,7 +323,6 @@ fn ${name}(T:vec3i)->f32{
     var layer=4*Tn;if(!up){layer[a]+=3;}
     let fs=nbChild(cn,nbBrickLocal(layer>>vec3u(3u)));
     if(fs>=NB_SEAM){continue;}
-    if((nbFRec(fs,NB_REC_CLASS)&NB_CLASS_LIQUID)==0u){continue;}
     let u=pUnit((a+1u)%3u);let w=pUnit((a+2u)%3u);
     for(var q=0u;q<16u;q++){
       let m=layer+i32(q&3u)*u+i32(q>>2u)*w;let l=nbLocal(m);
@@ -368,9 +374,15 @@ fn pSmooth(row:PRow,c:vec3i,ti:u32,rhs:f32,rev:bool){
 fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier();}
 `;
   const brickHead = /* wgsl */`
-  if(lid==0u){wCount=nbListCount(NB_LIST_F_LIQ);}
+  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=nbListSlot(NB_LIST_F_LIQ,g);pStage(slot,lid);workgroupBarrier();
+  let slot=nbListSlot(NB_LIST_F_ALL,g);pStage(slot,lid);workgroupBarrier();
+  let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
+  // A row brick (pmgTop RB): the slot's brick kernels.
+  const rowHead = /* wgsl */`
+  if(lid==0u){wCount=pmgTop[T_RBN];}
+  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
+  let slot=pmgTop[T_RB+g];pStage(slot,lid);workgroupBarrier();
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A page of C_ALL. "all" keeps every page; "rows" returns when the page has no rows (L5 D 0);
   // "native" when it has no native rows (L5 KU0, the count coarsenC writes).
@@ -391,6 +403,7 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
     return { label, entry: label, bindings, code: [abi, declareBindings(bindings), COMMON, ...page, ...parts.map(p => src[p]), body].join("\n") };
   };
   const FB = [CFG, setRW, dirRO, presRW, fRW, cRW]; // brick kernels
+  const FBT = [...FB, topRW]; // brick kernels over the row bricks
   const CB = [CFG, setRW, dirRO, cRW]; // page kernels
   const CBP = [CFG, setRW, dirRO, presRW, cRW]; // page kernels on the native rows
 
@@ -408,12 +421,12 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
 
   // r = b - A (x + alpha p), max|r|, and the first brick pass from zero into W0.
   // setup: alpha = 0, D and Q cleared, and the brick's L1..L3 rows aggregated.
-  const residualKernel = (setup: boolean) => kernel(setup ? "pmgSetupF" : "pmgUpdate", setup ? FB : [...FB, redRW], ["pres", "stage", "reduce", "tile", ...(setup ? [] : ["red" as const])],
+  const residualKernel = (setup: boolean) => kernel(setup ? "pmgSetupF" : "pmgUpdate", setup ? FBT : [...FBT, redRW], ["pres", "stage", "reduce", "tile", ...(setup ? [] : ["red" as const])],
     (setup ? fineApply("pApplyR", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`)
       : `var<private> pAlpha:f32;\nvar<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`,
         (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`)) + /* wgsl */`
 ${setup ? `var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;var<workgroup> wKU:array<vec3f,512>;var<workgroup> w1D:array<f32,64>;var<workgroup> w1K:array<vec3f,64>;var<workgroup> w1KU:array<vec3f,64>;` : ""}
-@compute @workgroup_size(512) fn ${setup ? "pmgSetupF" : "pmgUpdate"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(512) fn ${setup ? "pmgSetupF" : "pmgUpdate"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${setup ? brickHead : rowHead}
   ${setup ? "" : `if(lid==0u){let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);}pAlpha=workgroupUniformLoad(&wAlpha);`}
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   let d=pDiag(slot,l);var r=0.0;
@@ -422,6 +435,7 @@ ${setup ? `var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;v
   ${setup ? "pres[NB_PRES_F_D+NB_STRIDE*slot+l]=0.0;pres[NB_PRES_F_Q+NB_STRIDE*slot+l]=0.0;" : ""}
   let rmax=pMax512(lid,abs(r));
   if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}
+  ${setup ? "let rows=pMax512(lid,select(0.0,1.0,d>0.0));if(lid==0u){pmgTop[T_RBF+slot]=select(0u,1u,rows>0.0);}" : ""}
   // The first brick pass of the next V-cycle: from zero, so its halo is zero.
   pTileZero(lid);
   let row=pRow(b,c);
@@ -463,12 +477,11 @@ ${setup ? `var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;v
 }`);
   const setupF = residualKernel(true), update = residualKernel(false);
 
-  // A liquid F slot holds the brick of tile T (seen from page p), so setupF wrote T's L2 row.
+  // A live F slot holds the brick of tile T (seen from page p), so setupF (over F_ALL) wrote T's L2 row.
   const LIQUID_TILE = /* wgsl */`
 fn pLiquidTile(p:vec3i,T:vec3i)->bool{
   let s=qPage(p,T,3u);if(s==NB_NONE){return false;}
-  let f=nbChild(s,nbBrickLocal(T>>vec3u(1u)));if(f>=NB_SEAM){return false;}
-  return (nbFRec(f,NB_REC_CLASS)&NB_CLASS_LIQUID)!=0u;
+  return nbChild(s,nbBrickLocal(T>>vec3u(1u)))<NB_SEAM;
 }`;
   // Per page, a lane a tile: a native row's setup residual r = b - A x (max |r|/64), D = Q = 0, and its
   // L2 row (DIAG and the native K, or the F2 tile below's KU); an h tile without a liquid F brick is
@@ -553,10 +566,17 @@ var<workgroup> hk6:array<atomic<u32>,${HS6}>;var<workgroup> hv6:array<u32,${HS6}
 var<workgroup> hk7:array<atomic<u32>,${HS7}>;var<workgroup> hv7:array<u32,${HS7}>;
 var<workgroup> cN:array<atomic<u32>,4>;
 var<workgroup> gA:array<f32,${MG_ROWS7 * MG_ROWS7}>;
-var<workgroup> wNC:u32;var<workgroup> wN5:u32;var<workgroup> wN6:u32;var<workgroup> wN7:u32;
+var<workgroup> wNC:u32;var<workgroup> wN5:u32;var<workgroup> wN6:u32;var<workgroup> wN7:u32;var<workgroup> wRB:atomic<u32>;
 ${hashInsert("hIns6", "hk6", HS6)}
 ${hashInsert("hIns7", "hk7", HS7)}
 @compute @workgroup_size(1024) fn pmgCoarsenTop(@builtin(local_invocation_index) t:u32){
+  // The row bricks: F_ALL's slots with an h row (RBF, pmgSetupF's), listed for the slot's brick kernels.
+  if(t==0u){atomicStore(&wRB,0u);}
+  workgroupBarrier();
+  let nF=nbListCount(NB_LIST_F_ALL);
+  for(var e=t;e<nF;e+=1024u){let sl=nbListSlot(NB_LIST_F_ALL,e);if(pmgTop[T_RBF+sl]!=0u){pmgTop[T_RB+atomicAdd(&wRB,1u)]=sl;}}
+  workgroupBarrier();
+  if(t==0u){pmgTop[T_RBN]=atomicLoad(&wRB);}
   for(var j=t;j<${HS6}u;j+=1024u){atomicStore(&hk6[j],NB_NONE);}
   if(t<${HS7}u){atomicStore(&hk7[t],NB_NONE);}
   if(t<4u){atomicStore(&cN[t],0u);}
@@ -666,16 +686,16 @@ ${hashInsert("hIns7", "hk7", HS7)}
     const plane = (p: "W0" | "W1") => p === "W0" ? "P_W0" : "P_W1";
     const read = `pmgF[${plane(o.src)}+NB_STRIDE*s+l]` + (o.prolong ? `+pmgF[pL1(CH_EPOST,s,pI1(q>>vec3u(1u)))]` : "");
     const write = o.dst === "Z" ? `pres[NB_PRES_F_Z+NB_STRIDE*s+nbLocal(c)]` : `pmgF[${plane(o.dst)}+NB_STRIDE*s+nbLocal(c)]`;
-    return kernel(label, o.dot ? [...FB, redRW] : FB, ["pres", "stage", "tile", ...(o.dot ? ["reduce" as const, "red" as const] : [])], /* wgsl */`
+    return kernel(label, o.dot ? [...FBT, redRW] : FBT, ["pres", "stage", "tile", ...(o.dot ? ["reduce" as const, "red" as const] : [])], /* wgsl */`
 var<workgroup> wOwn:u32;
-@compute @workgroup_size(512) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(512) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${rowHead}
   let lc=nbLocalCoord(lid);let ti=pTi(lc);var dotv=0.0;
   for(var k=0u;k<${o.shift ? 4 : 1}u;k++){
     var ob=o;
     ${o.shift ? /* wgsl */`
-    // Block q (origin 8q - (4,0,4)) holds bricks (qx-1..qx, b.y, qz-1..qz); its first liquid one runs it.
+    // Block q (origin 8q - (4,0,4)) holds bricks (qx-1..qx, b.y, qz-1..qz); its first row brick runs it.
     let qx=b.x+i32(k&1u);let qz=b.z+i32(k>>1u);
-    if(lid==0u){var own=0u;for(var m=0u;m<4u;m++){let d=vec3i(qx-1+i32(m&1u)-b.x,0,qz-1+i32(m>>1u)-b.z);if(pN[nbNeighbourIndex(d)]!=NB_NONE){own=select(0u,1u,all(d==vec3i(0)));break;}}wOwn=own;}
+    if(lid==0u){var own=0u;for(var m=0u;m<4u;m++){let d=vec3i(qx-1+i32(m&1u)-b.x,0,qz-1+i32(m>>1u)-b.z);let n=pN[nbNeighbourIndex(d)];if(n!=NB_NONE){if(pmgTop[T_RBF+n]!=0u){own=select(0u,1u,all(d==vec3i(0)));break;}}}wOwn=own;}
     if(workgroupUniformLoad(&wOwn)==0u){continue;}
     ob=8*vec3i(qx,b.y,qz)-vec3i(4,0,4);` : ""}
     // A native cell holds its row's carried value: 0 before its own pass (pmgNativePre0), N0P after (pmgNativePost0).
@@ -712,9 +732,9 @@ var<workgroup> wOwn:u32;
 
   // D0: the level 0 residual restricted to L1 (the native rows at their pass's N0), and L1's pre-smoothing (the
   // brick, zero halo; the native rows carried at 0).
-  const down0 = kernel("pmgDown0", FB, ["pres", "stage"], fineApply("pApplyW0", (s, l) => `pmgF[P_W0+NB_STRIDE*${s}+${l}]`, (cs, i) => `pmgC[pL2(CH_N0,${cs},${i})]`) + /* wgsl */`
+  const down0 = kernel("pmgDown0", FBT, ["pres", "stage"], fineApply("pApplyW0", (s, l) => `pmgF[P_W0+NB_STRIDE*${s}+${l}]`, (cs, i) => `pmgC[pL2(CH_N0,${cs},${i})]`) + /* wgsl */`
 var<workgroup> wD:array<f32,512>;var<workgroup> wE:array<f32,64>;
-@compute @workgroup_size(512) fn pmgDown0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(512) fn pmgDown0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${rowHead}
   let l=lid;let c=o+nbLocalCoord(l);
   var res=0.0;if(pDiag(slot,l)>0.0){res=pP(NB_PRES_F_R,slot,l)-pApplyW0(b,c,slot,l);}
   wD[l]=res;
@@ -736,11 +756,11 @@ var<workgroup> wD:array<f32,512>;var<workgroup> wE:array<f32,64>;
 
   // D1: the L1 residual restricted to the brick's 8 tiles' L2 B (a native row's is pmgDown1C's); a native
   // neighbour at its L1 pass's N1, across the aggregate's K (below) or KU (above).
-  const down1 = kernel("pmgDown1", FB, ["stage"], /* wgsl */`
+  const down1 = kernel("pmgDown1", FBT, ["stage"], /* wgsl */`
 var<workgroup> wR:array<f32,64>;
 // The L1 row c (global 2h) lives in the brick holding fine cell 2c.
 fn pV1(b:vec3i,c:vec3i,ch:u32)->f32{let s=pSlotAt(b,2*c);if(s==NB_NONE){return 0.0;}return pmgF[pL1(ch,s,pI1(c))];}
-@compute @workgroup_size(64) fn pmgDown1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(64) fn pmgDown1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${rowHead}
   let c1=(o>>vec3u(1u))+pC1(lid);let D1=pmgF[pL1(CH_D,slot,lid)];
   var r=0.0;
   if(D1>0.0){
@@ -993,7 +1013,7 @@ fn pEntry2(p:vec3i,c:vec3i)->f32{return pV2(p,c,CH_EPRE)+pV3(p,c>>vec3u(1u),CH_E
 }`);
 
   // U1 (a brick): L1 post-smoothing, the brick a block; the frozen halo is EPRE + the parent's L2 EPOST.
-  const up1 = kernel("pmgUp1", FB, ["stage"], /* wgsl */`
+  const up1 = kernel("pmgUp1", FBT, ["stage"], /* wgsl */`
 var<workgroup> wE:array<f32,64>;
 fn pV1(b:vec3i,c:vec3i,ch:u32)->f32{let s=pSlotAt(b,2*c);if(s==NB_NONE){return 0.0;}return pmgF[pL1(ch,s,pI1(c))];}
 // An L1 row's entry value: EPRE + the parent's L2 EPOST; a native row's carried value, its L1 post pass's N1P.
@@ -1001,7 +1021,7 @@ fn pEntry1(b:vec3i,c:vec3i)->f32{
   let n=pNatAt(b,2*c);if(n!=NB_NONE){return pmgC[pL2(CH_N1P,n,nbLocal(c>>vec3u(1u)))];}
   let s=pSlotAt(b,2*c);if(s==NB_NONE){return 0.0;}return pmgF[pL1(CH_EPRE,s,pI1(c))]+pmgC[pL2(CH_EPOST,nbFRec(s,NB_REC_PARENT),nbLocal(c>>vec3u(1u)))];
 }
-@compute @workgroup_size(64) fn pmgUp1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(64) fn pmgUp1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${rowHead}
   let c1l=pC1(lid);let c1=(o>>vec3u(1u))+c1l;let par=pPar(c1);
   let D=pmgF[pL1(CH_D,slot,lid)];let b1=pmgF[pL1(CH_B,slot,lid)];
   wE[lid]=pEntry1(b,c1);
@@ -1089,9 +1109,9 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
 }`);
 
   // Direction: x += alpha_(k-1) p (deferred from the last update), p = z + beta p, q = A z + beta q, p.q.
-  const direction = kernel("pmgDirection", [...FB, redRW], ["pres", "stage", "reduce", "red"], fineApply("pApplyZ", (s, l) => `pres[NB_PRES_F_Z+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_Z+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
+  const direction = kernel("pmgDirection", [...FBT, redRW], ["pres", "stage", "reduce", "red"], fineApply("pApplyZ", (s, l) => `pres[NB_PRES_F_Z+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_Z+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
 var<workgroup> wBeta:f32;var<workgroup> wAlphaOld:f32;
-@compute @workgroup_size(512) fn pmgDirection(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+@compute @workgroup_size(512) fn pmgDirection(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${rowHead}
   if(lid==0u){
     let rz=pRedSum(0u);var beta=0.0;
     if(cfg.z>0u){let old=bitcast<f32>(atomicLoad(&nbSet[PH_RZ]));beta=select(0.0,rz/old,old!=0.0);}
@@ -1176,12 +1196,12 @@ var<workgroup> wAlpha:f32;
   // A row's wall side along a (-1 plane 0, +1 plane N, 0 none) on n rows an axis; the tolerance (cfg.w, as pTolR).
   const wallSign = /* wgsl */`fn pWallFace(c:vec3i,a:u32,n:i32)->i32{if(c[a]==0){return -1;}if(c[a]==n-1){return 1;}return 0;}
 fn pWallTol()->f32{let h=nbRingF(cfg.x,NB_RING_H);return bitcast<f32>(cfg.w)*h*h;}`;
-  const wallsF = kernel("pmgWallsF", [...FB, redRW, phiRW, velRO], ["pres", "stage", "reduce", "tile", "red"], wallSign + /* wgsl */`
+  const wallsF = kernel("pmgWallsF", [CFG, setRW, dirRO, presRW, fRW, topRW, redRW, phiRW, velRO], /* 8 storage: no pmgC */ ["pres", "stage", "reduce", "tile", "red"], wallSign + /* wgsl */`
 var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u32>;
 @compute @workgroup_size(512) fn pmgWallsF(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){wCount=nbListCount(NB_LIST_F_LIQ);}
+  if(lid==0u){wCount=pmgTop[T_RBN];}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=nbListSlot(NB_LIST_F_LIQ,g);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+  let slot=pmgTop[T_RB+g];let o=nbFOrigin(slot);let b=o>>vec3u(3u);
   if(lid==0u){
     let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_LATTICE);
     wGo=select(0u,1u,edge);
@@ -1272,19 +1292,19 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   if(lid==0u){atomicMax(&nbSet[PH_RMAXW],bitcast<u32>(rmax));}
 }`);
 
-  // The walls' gate (one workgroup, after updateC): WF and WC carry F_LIQ's and C_ALL's G1 when this slot decides
+  // The walls' gate (one workgroup, after updateC): WF and WC carry the row bricks' and C_ALL's G1 when this slot decides
   // (open, and max|r| within tolerance or the last slot), else 0, so a slot that doesn't decide launches nothing.
-  const wallGate = kernel("pmgWallGate", [CFG, setRW, argsRW], [], wallSign + /* wgsl */`
+  const wallGate = kernel("pmgWallGate", [CFG, setRW, argsRW, topRW], [], wallSign + /* wgsl */`
 @compute @workgroup_size(1) fn pmgWallGate(){
   let decide=atomicLoad(&nbSet[PH_OPEN])!=0u&&(bitcast<f32>(atomicLoad(&nbSet[PH_RMAX]))<=pWallTol()||cfg.z+1u>=P_SLOTS);
   if(decide){atomicAdd(&nbSet[PH_DECIDES],1u);}
-  let f=NB_ARGS_PER_LIST*NB_LIST_F_LIQ+NB_ARGS_G1;let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;
-  args[P_GATE_WF]=select(0u,args[f],decide);args[P_GATE_WF+1u]=args[f+1u];args[P_GATE_WF+2u]=1u;
+  let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=pmgTop[T_RBN];
+  args[P_GATE_WF]=select(0u,min(n,NB_FOLD),decide&&n>0u);args[P_GATE_WF+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[P_GATE_WF+2u]=1u;
   args[P_GATE_WC]=select(0u,args[c],decide);args[P_GATE_WC+1u]=args[c+1u];args[P_GATE_WC+2u]=1u;
 }`);
 
   // Check: one workgroup, every slot; a closed slot's writes nothing.
-  const check = kernel("pmgCheck", [CFG, setRW, redRW, argsRW], ["red", "gate"], /* wgsl */`
+  const check = kernel("pmgCheck", [CFG, setRW, redRW, argsRW, topRW], ["red", "gate"], /* wgsl */`
 var<workgroup> wOpen:u32;
 @compute @workgroup_size(64) fn pmgCheck(@builtin(local_invocation_index) lid:u32){
   if(lid==0u){wOpen=atomicLoad(&nbSet[PH_OPEN]);}
@@ -1327,7 +1347,7 @@ var<workgroup> wAlpha:f32;
     slots,
     setup: [
       { kernel: setupClear, dispatch: { direct: [1, 1, 1] } },
-      { kernel: setupF, dispatch: list(LIST.F_LIQ) },
+      { kernel: setupF, dispatch: list(LIST.F_ALL) },
       { kernel: coarsenC, dispatch: list(LIST.C_ALL) },
       { kernel: coarsenTop, dispatch: { direct: [1, 1, 1] }, w: tolBits },
     ],
@@ -1340,7 +1360,7 @@ var<workgroup> wAlpha:f32;
         { kernel: wallsF, dispatch: { indirect: MG_GATE.WF }, z: k }, { kernel: wallsC, dispatch: { indirect: MG_GATE.WC }, z: k }] : []),
       { kernel: check, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits },
     ],
-    finish: [{ kernel: finish, dispatch: list(LIST.F_LIQ) }, { kernel: finishC, dispatch: list(LIST.C_ALL) }],
+    finish: [{ kernel: finish, dispatch: list(LIST.F_ALL) }, { kernel: finishC, dispatch: list(LIST.C_ALL) }],
     buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 128 },
     receipt: { iterations: MG_HEADER.ITERATIONS, capped: MG_HEADER.CAPPED },
   };

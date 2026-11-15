@@ -95,6 +95,9 @@ fn poCentre(c:vec3i)->f32{return poCentreG(c);}
 fn poOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
 fn poRootPhi(T:vec3i)->f32{return poRootPhiG(T);}
 fn poTileStart(T:vec3i)->f32{return poTileStartG(T);}
+fn poSlotOfCell(c:vec3i)->u32{return nbFSlotOfCell(c);}
+fn poGuardVertex(v:vec3i){poGuardVertexG(v);}
+fn poFacePlane(c:vec3i,a:u32)->f32{return nbFacePlane(c,a);}
 `;
 const STAGE_BRICK = /* wgsl */`
 var<workgroup> poSV:array<f32,1331>;
@@ -126,10 +129,67 @@ fn poTiles(lid:u32,cold:bool){
   }
   poRC=cold;
 }
+// nbVertexPhi over the brick's vertex window with its lookups staged once (lane F's remedy for owner resolution per
+// sample): the 5^3 tiles T0-2..T0+2 that can hold a vertex's authority (in the lattice, resident, 4h-owned), the C
+// vertices of the 6^3 tiles T0-2..T0+3 an authority's corners reach, and the F slots of the 27 bricks around. The
+// same candidate order and arithmetic as nbVertexPhi, so the stage changes no value.
+var<workgroup> poSK:array<u32,125>;
+var<workgroup> poSQ:array<f32,216>;
+var<workgroup> poSB:array<u32,27>;
+fn poVertexS(v:vec3i,o:vec3i)->f32{
+  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}
+  let T0=o>>vec3u(2u);let tA=v>>vec3u(2u);let inside=(v-4*tA)!=vec3i(0);var T=vec3i(-1);
+  for(var k=0u;k<8u;k++){
+    let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);
+    if(any(inside&(corner==vec3u(0u)))){continue;}
+    let t=tA+vec3i(corner)-vec3i(1);
+    if(poSK[poIndex(t-T0+vec3i(2),5)]!=0u){T=t;break;}
+  }
+  if(T.x<0){
+    let s=poSB[poIndex((v>>vec3u(3u))-(o>>vec3u(3u))+vec3i(1),3)];if(s>=NB_SEAM){return NB_PHI_FAR;}
+    return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
+  }
+  let t=vec3f(v-4*T)/4.0;var values:array<f32,8>;
+  for(var k=0u;k<8u;k++){
+    let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));let weight=w.x*w.y*w.z;
+    if(weight>0.0){values[k]=weight*poSQ[poIndex(T+vec3i(corner)-T0+vec3i(2),6)];}
+  }
+  return ((values[0]+values[5])+(values[1]+values[4]))+((values[2]+values[7])+(values[3]+values[6]));
+}
+// The F slot of cell c from the staged bricks (nbFSlotOfCell outside them or at a negative brick).
+fn poSlotOfCell(c:vec3i)->u32{
+  let b=c>>vec3u(3u);let d=b-(poSO>>vec3u(3u))+vec3i(1);
+  if(all(b>=vec3i(0))&&all(d>=vec3i(0))&&all(d<vec3i(3))){return poSB[poIndex(d,3)];}
+  return nbFSlotOfCell(c);
+}
+// poGuardVertexG with the pages of the brick's vertices (o..o+9: pages o>>5 + {0,1}^3) staged.
+var<workgroup> poSP:array<u32,8>;
+fn poGuardVertex(v:vec3i){
+  if(PO_TIERED&&all(v>vec3i(0))&&all(v<NB_LATTICE)){
+    let d=(v>>vec3u(5u))-(poSO>>vec3u(5u));
+    var held=false;if(all(d>=vec3i(0))&&all(d<vec3i(2))){held=poSP[poIndex(d,2)]!=0u;}else{held=nbCSlotOfPage(v>>vec3u(5u))!=NB_NONE;}
+    if(!held){nbFail(NB_FAIL_TIER,nbKey(v>>vec3u(5u)));}
+  }
+}
+// nbFacePlane with the owners (poOwnerH) and F slots (poSlotOfCell) staged.
+fn poFacePlane(c:vec3i,a:u32)->f32{
+  if(!nbFaceInLattice(c,a)){return 0.0;}
+  var e=vec3i(0);e[a]=1;
+  if(poOwnerH(c)||poOwnerH(c-e)){let s=poSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}return vel[NB_VEL_F_US0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];}
+  return nbCFace(c>>vec3u(2u),a);
+}
 // Called in uniform control flow by every lane of the brick's workgroup.
 fn poStage(o:vec3i,lid:u32){
   poSO=o;
-  for(var i=lid;i<1331u;i+=256u){poSV[i]=nbVertexPhi(o-vec3i(1)+poCoord(i,11u));}
+  {
+    if(lid<8u){poSP[lid]=u32(nbCSlotOfPage((o>>vec3u(5u))+poCoord(lid,2u))!=NB_NONE);}
+    let T0=o>>vec3u(2u);
+    if(lid<125u){let t=T0-vec3i(2)+poCoord(lid,5u);poSK[lid]=u32(nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE&&!nbTileOwnerH(t));}
+    if(lid<216u){poSQ[lid]=nbCVertex(T0-vec3i(2)+poCoord(lid,6u));}
+    if(lid<27u){let b=(o>>vec3u(3u))-vec3i(1)+poCoord(lid,3u);poSB[lid]=select(nbFSlotOfBrick(b),NB_NONE,any(b<vec3i(0)));}
+    workgroupBarrier();
+  }
+  for(var i=lid;i<1331u;i+=256u){poSV[i]=poVertexS(o-vec3i(1)+poCoord(i,11u),o);}
   if(lid<64u){poST[lid]=u32(nbTileOwnerH((o>>vec3u(2u))-vec3i(1)+poCoord(lid,4u)));}
   workgroupBarrier();
   for(var i=lid;i<1000u;i+=256u){
@@ -146,7 +206,7 @@ const PO_WARM:u32=${P_FLAG.WARM}u;const PO_WALL0:u32=${P_FLAG.WALL0}u;const PO_W
 // The wall state's storage word: h cell c's FLAGS (a cell, or the skirt cell at plane N), tile T's C FLAGS (T
 // up to N/4). A liquid row's wall storage is always resident (the residency dilates the skirt); missing, it
 // latches FAIL.UNSUPPORTED.
-fn poFlagsWordF(c:vec3i)->u32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,0xa0000000u);return NB_NONE;}return NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c);}
+fn poFlagsWordF(c:vec3i)->u32{let s=poSlotOfCell(c);if(s>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,0xa0000000u);return NB_NONE;}return NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c);}
 fn poFlagsWordC(T:vec3i)->u32{let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,0xa1000000u);return NB_NONE;}return NB_PHI_C_FLAGS+NB_STRIDE*cs+nbTileIndex(T);}
 // Writes the separated bit of the wall on axis a at FLAGS word w (one writer a word: the face's liquid row).
 fn poSetWall(w:u32,a:u32,separated:bool){if(w==NB_NONE){return;}let bit=PO_WALL0<<a;phi[w]=(phi[w]&~bit)|select(0u,bit,separated);}
@@ -170,17 +230,20 @@ fn poWet(phi:f32,width:f32)->bool{return npWet(phi,width,1.0);}
 // row's own corner vertices are never in an absent page. If one is, the stencil read FAR: FAIL.TIER.
 // All-h (PO_TIERED false), an absent page is h air like an absent brick (brick-abi.md §2.5 Residency): no check.
 // Vertices on the lattice's faces (the wall skirt) are not checked.
-fn poGuardVertex(v:vec3i){if(PO_TIERED&&all(v>vec3i(0))&&all(v<NB_LATTICE)){if(nbCSlotOfPage(v>>vec3u(5u))==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(v>>vec3u(5u)));}}}
+fn poGuardVertexG(v:vec3i){if(PO_TIERED&&all(v>vec3i(0))&&all(v<NB_LATTICE)){if(nbCSlotOfPage(v>>vec3u(5u))==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(v>>vec3u(5u)));}}}
 fn poPageHeld(p:vec3i)->bool{return any(p<vec3i(0))||any(32*p>=NB_LATTICE);}
 fn poTileOpen(t:vec3i)->bool{return nbTileInLattice(t);}
 // A tile's root φ (umAuthority): a 4h tile's corner mean (d4Sum8 of vertices·0.125); an h tile's
 // held fit, the mean of its 64 h centres (pcHeldFit: weights 1/2 on the tile's faces, /64);
 // RO_FAR off the lattice or in a non-resident page.
 fn poRootPhi4(T:vec3i)->f32{var v:array<f32,8>;for(var j=0u;j<8u;j++){v[j]=nbCVertex(T+poCorner(j));}return poMean8(v);}
+// An h tile's held fit is computed once a step by tileRoots (before the operator) into its C PPHI, which rowsC
+// keeps; a tile whose brick holds no F slot (never on a resident h tile) sums its vertices here.
 fn poRootPhiG(T:vec3i)->f32{
   if(!nbTileInLattice(T)){return PO_RO_FAR;}
-  if(nbCSlotOfPage(T>>vec3u(3u))==NB_NONE){return PO_RO_FAR;}
-  if(!nbTileOwnerH(T)){return poRootPhi4(T);}
+  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return PO_RO_FAR;}
+  if(!nbTileH(cs,nbTileIndex(T))){return poRootPhi4(T);}
+  if(nbFSlotOfBrick(T>>vec3u(1u))<NB_SEAM){return pres[NB_PRES_C_PPHI+NB_STRIDE*cs+nbTileIndex(T)];}
   var total=0.0;
   for(var z=0;z<=4;z++){for(var y=0;y<=4;y++){for(var x=0;x<=4;x++){
     let g=vec3i(x,y,z);let w=select(vec3f(1.0),vec3f(0.5),(g==vec3i(0))|(g==vec3i(4)));
@@ -188,8 +251,8 @@ fn poRootPhiG(T:vec3i)->f32{
   }}}
   return total/64.0;
 }
-fn poFlagsF(c:vec3i)->u32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0u;}return phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)];}
-fn poXF(c:vec3i)->f32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}return pres[NB_PRES_F_X+NB_STRIDE*s+nbLocal(c)];}
+fn poFlagsF(c:vec3i)->u32{let s=poSlotOfCell(c);if(s>=NB_SEAM){return 0u;}return phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)];}
+fn poXF(c:vec3i)->f32{let s=poSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}return pres[NB_PRES_F_X+NB_STRIDE*s+nbLocal(c)];}
 // A tile's start (R_PRESSURE, clamped as buildRhs: air 0): its C cell's X, which the solve's finish
 // leaves as the tile's last pressure (a native row's solution; an h tile's mean over its liquid rows,
 // 083's band-tile mean). No row pass writes it while another reads it.
@@ -310,8 +373,8 @@ fn poHead(c:vec3i,own:f32,base:f32,f:u32)->f32{
 
 /** The projection's readers: the rows' stored φ and start, and an h face's projected velocity. */
 const PROJECT_WGSL = /* wgsl */`
-fn poPhiF(c:vec3i)->f32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return NB_PHI_AIR;}return pres[NB_PRES_F_PPHI+NB_STRIDE*s+nbLocal(c)];}
-fn poBF(c:vec3i)->f32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}return pres[NB_PRES_F_B+NB_STRIDE*s+nbLocal(c)];}
+fn poPhiF(c:vec3i)->f32{let s=poSlotOfCell(c);if(s>=NB_SEAM){return NB_PHI_AIR;}return pres[NB_PRES_F_PPHI+NB_STRIDE*s+nbLocal(c)];}
+fn poBF(c:vec3i)->f32{let s=poSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}return pres[NB_PRES_F_B+NB_STRIDE*s+nbLocal(c)];}
 fn poXT(T:vec3i)->f32{
   if(!nbTileInLattice(T)){return 0.0;}
   let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
@@ -363,6 +426,37 @@ export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [strin
   const [rowsLabel, rowsEntry] = names.rowsF ?? ["pressureRowsF", "pressureRowsF"];
   const [projectLabel, projectEntry] = names.projectF ?? ["pressureProjectF", "pressureProjectF"];
 
+  // tileRoots: a workgroup a brick of F_ALL (G1), before the operator (PressureSolver.before). The held fit of each
+  // h tile of the brick (umAuthority's h root, pcHeldFit: the mean of its 64 h centres, the vertices 4T..4T+4 at
+  // weights 1/2 on the tile's faces, /64) into its C PPHI, from the brick's 9^3 vertices staged once. It was summed
+  // by every cold brick for each of the 96 tiles its starts read (up to 12 bricks a tile, 125 vertices each: 7 of
+  // the tiered dam operator's 8.7 ms, 2026-11-15).
+  const tileRoots = k("pressureTileRoots", /* wgsl */`
+var<workgroup> trGo:u32;
+var<workgroup> trV:array<f32,729>;
+var<workgroup> trP:array<f32,200>;
+@compute @workgroup_size(256) fn pressureTileRoots(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let g=nbGroup(wid);if(lid==0u){trGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&trGo)==0u){return;}
+  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);let T0=o>>vec3u(2u);
+  if(lid==0u){var m=0u;for(var j=0u;j<8u;j++){if(nbTileOwnerH(T0+poCorner(j))){m|=1u<<j;}}trGo=m;}
+  let mask=workgroupUniformLoad(&trGo);if(mask==0u){return;}
+  for(var i=lid;i<729u;i+=256u){trV[i]=nbVertexPhi(o+vec3i(i32(i%9u),i32((i/9u)%9u),i32(i/81u)));}
+  workgroupBarrier();
+  // A lane a row of 5 vertices along x of tile j (25 rows a tile), then a lane a tile.
+  if(lid<200u){
+    let j=lid/25u;let y=i32((lid%25u)%5u);let z=i32((lid%25u)/5u);let base=4*poCorner(j);
+    var row=0.0;
+    for(var x=0;x<=4;x++){let d=base+vec3i(x,y,z);row+=select(1.0,0.5,x==0||x==4)*trV[u32(d.x+9*(d.y+9*d.z))];}
+    trP[lid]=select(1.0,0.5,y==0||y==4)*select(1.0,0.5,z==0||z==4)*row;
+  }
+  workgroupBarrier();
+  if(lid<8u&&((mask>>lid)&1u)!=0u){
+    var total=0.0;for(var r=0u;r<25u;r++){total+=trP[25u*lid+r];}
+    let T=T0+poCorner(lid);
+    pres[NB_PRES_C_PPHI+NB_STRIDE*nbCSlotOfPage(T>>vec3u(3u))+nbTileIndex(T)]=total/64.0;
+  }
+}`);
+
   // rowsF: a workgroup a brick of F_ALL (G1), a lane two cells.
   const rowsF = k(rowsLabel, /* wgsl */`
 var<workgroup> poGo:u32;
@@ -371,6 +465,21 @@ var<workgroup> poCold:atomic<u32>;
   let g=nbGroup(wid);if(lid==0u){poGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&poGo)==0u){return;}
   let slot=nbListSlot(NB_LIST_F_ALL,g);
   if(lid==0u){atomicStore(&poCold,0u);}
+  // A brick of 4h-owned tiles only (the tiered dam's native interior: 5 in 6 of F_ALL) holds no h row: its zero rows
+  // are written without staging the brick's phi (the same rows the full path writes for cells it does not own).
+  workgroupBarrier();
+  if(lid<8u){if(nbTileOwnerH((nbFOrigin(slot)>>vec3u(2u))+poCorner(lid))){atomicOr(&poCold,2u);}}
+  workgroupBarrier();
+  if(lid==0u){poGo=atomicLoad(&poCold);atomicStore(&poCold,0u);}
+  if(workgroupUniformLoad(&poGo)==0u){
+    if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
+    for(var j=0u;j<2u;j++){
+      let at=NB_STRIDE*slot+lid+256u*j;
+      pres[NB_PRES_F_B+at]=0.0;pres[NB_PRES_F_X+at]=0.0;pres[NB_PRES_F_RHS+at]=0.0;pres[NB_PRES_F_DIAG+at]=0.0;pres[NB_PRES_F_PPHI+at]=0.0;
+      pres[NB_PRES_F_K0+at]=0.0;pres[NB_PRES_F_K1+at]=0.0;pres[NB_PRES_F_K2+at]=0.0;pres[NB_PRES_F_KU0+at]=0.0;pres[NB_PRES_F_KU1+at]=0.0;pres[NB_PRES_F_KU2+at]=0.0;
+    }
+    return;
+  }
   poStage(nbFOrigin(slot),lid);
   for(var j=0u;j<2u;j++){
     let c=nbFOrigin(slot)+nbLocalCoord(lid+256u*j);
@@ -380,7 +489,6 @@ var<workgroup> poCold:atomic<u32>;
   if(lid==0u){poGo=atomicLoad(&poCold);}
   poTiles(lid,workgroupUniformLoad(&poGo)!=0u);
   if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
-  let rowed=(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_LIQUID)!=0u;
   let o=nbFOrigin(slot);let r=cfg.x;let h=nbRingF(r,NB_RING_H);
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
   for(var j=0u;j<2u;j++){
@@ -388,8 +496,7 @@ var<workgroup> poCold:atomic<u32>;
     var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var ku=vec3f(0.0);
     let owned=nbInLattice(c)&&poOwnerH(c);
     var own=NB_PHI_AIR;if(owned){own=poCentre(c);}
-    var liquid=owned&&poWet(own,1.0);
-    if(liquid&&!rowed){nbFail(NB_FAIL_LIST,nbFRec(slot,NB_REC_KEY));liquid=false;}
+    let liquid=owned&&poWet(own,1.0);
     var start=0.0;
     if(liquid){
       for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}
@@ -397,7 +504,7 @@ var<workgroup> poCold:atomic<u32>;
       for(var f=0u;f<6u;f++){
         let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;
         var fc=c;if(sign>0){fc[a]+=1;}
-        let us=nbFacePlane(fc,a);
+        let us=poFacePlane(fc,a);
         if(face.kind!=NP_K_CLOSED){div+=f32(sign)*face.fraction*us;}
         if(face.kind==NP_K_NEUMANN||face.kind==NP_K_CLOSED){continue;}
         if(face.kind==NP_K_WALL){
@@ -488,12 +595,14 @@ var<workgroup> poCold:atomic<u32>;
     if(owned&&!liquid){pres[NB_PRES_C_X+at]=0.0;}
     pres[NB_PRES_C_B+at]=start;
     pres[NB_PRES_C_RHS+at]=select(0.0,-16.0*h*div+64.0*h*h*rate*capacity+extra,liquid);
-    pres[NB_PRES_C_DIAG+at]=diag;pres[NB_PRES_C_PPHI+at]=root;
+    pres[NB_PRES_C_DIAG+at]=diag;
+    // An h tile's PPHI is tileRoots' held fit, which this pass's seams read across tiles: kept.
+    if(!(nbTileInLattice(T)&&nbTileH(cs,i))){pres[NB_PRES_C_PPHI+at]=root;}
     pres[NB_PRES_C_K0+at]=kk.x;pres[NB_PRES_C_K1+at]=kk.y;pres[NB_PRES_C_K2+at]=kk.z;
   }
 }`);
 
-  // projectF: a workgroup a brick (G1 of the engine's project list, F_LIQ = F_ALL), a lane two cells' lower faces.
+  // projectF: a workgroup a brick (G1 of the engine's project list, F_ALL), a lane two cells' lower faces.
   // Writes U on every h face (a face with an h-owned cell on either side, stored at its upper cell), raises
   // BOUND_F, and writes the WARM bit (FLAGS bit 7) of every cell: an h-owned cell that held a liquid row.
   const projectF = k(projectLabel, PROJECT_WGSL + /* wgsl */`
@@ -501,10 +610,21 @@ var<workgroup> wSpeed:atomic<u32>;
 var<workgroup> poGo:u32;
 @compute @workgroup_size(256) fn ${projectEntry}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let g=nbGroup(wid);
-  if(lid==0u){atomicStore(&wSpeed,0u);poGo=select(0u,1u,g<nbListCount(NB_LIST_F_LIQ));}
+  if(lid==0u){atomicStore(&wSpeed,0u);poGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}
   if(workgroupUniformLoad(&poGo)==0u){return;}
-  let slot=nbListSlot(NB_LIST_F_LIQ,g);
-  let o=nbFOrigin(slot);poStage(o,lid);
+  let slot=nbListSlot(NB_LIST_F_ALL,g);
+  let o=nbFOrigin(slot);
+  // No h-owned tile in the brick or across its lower faces (the 3^3 tiles from its origin tile - 1): no h face is
+  // stored here, so only the cells' FLAGS change (WARM and the wall bits cleared, as the full path for cells it does
+  // not own), without staging the brick's phi.
+  if(lid<27u){if(nbTileOwnerH((o>>vec3u(2u))-vec3i(1)+poCoord(lid,3u))){atomicOr(&wSpeed,1u);}}
+  workgroupBarrier();
+  if(lid==0u){poGo=atomicLoad(&wSpeed);atomicStore(&wSpeed,0u);}
+  if(workgroupUniformLoad(&poGo)==0u){
+    for(var j=0u;j<2u;j++){let at=NB_STRIDE*slot+lid+256u*j;phi[NB_PHI_F_FLAGS+at]&=~(PO_WARM|PO_WALLS);}
+    return;
+  }
+  poStage(o,lid);
   var speed=0.0;
   {
     let h=nbRingF(cfg.x,NB_RING_H);
@@ -616,5 +736,5 @@ fn poNativeX(T:vec3i)->vec2f{
   }
 }`, "pressureProjectC", PROJECT);
 
-  return { rowsF, rowsC, projectF, projectC };
+  return { tileRoots, rowsF, rowsC, projectF, projectC };
 }
