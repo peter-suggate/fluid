@@ -404,3 +404,48 @@ constant, so the extra lag is not the reference's first step.
   has REACH and depth ≤ 0, swept by dt·before/h plus the activity padding, then divided into tiles). They matter
   only once the census commits WANT, so they land with tiers.
 - pDeposit's workgroup memory, and the D6 sheet loss if tiers don't close it.
+
+## M2: the half kick, and D6 attributed (2026-11-15)
+
+**Correction.** The references' step-1 surplus is not an artifact. The old host kicks U ← P(U + g·dt/2) before
+its first frame (webgpu-uniform-reference.ts `kickMixedFrame`, uniform-mixed-frame.ts `kick`), so step 1 carries
+1.5·g·dt; lane E found it. My bound argument stands for a single g·dt step, but that is not what the old engine
+integrates.
+
+**Landed, e6fcbec4: the kick, through E's `BrickStages.kick` (5600d180).**
+- force, `uKick`: UP = U, then US = U = U + g·dt/2 on the faces uTransfer applies gravity to;
+- then E's operator, solve and project;
+- after: `uExtend`, then the initial seeding (from the kicked, extended US) and its rebin into bank 0.
+- Step-1 KE is now 4.22 J against the references' 4.13 J.
+
+**Re-gate, `dam-300c`** (HEAD 4054ad7e + the kick, the authored B pool, `--poolF=4913`, check slot):
+- rc 0, no FAIL bits, no Metal aborts. Report: `fluid-scratch/lane-f/gates/dam-300c.md`. **Overall: FAIL.**
+
+| gate | dam-300b | dam-300c (kick) |
+|---|---|---|
+| D1 front | pass 1.00 | pass 0.70 |
+| D5c collapse KE | FAIL 1.88 | **pass 0.23** (step 4: 36.8 vs 36.1 J) |
+| D6 wet floor | FAIL 1.78 | **FAIL 1.10** (step 8: 10,178 vs 10,767; step 12: 14,111 vs 14,936) |
+| D8c particles at 16 | pass 1.00 | **FAIL 1.19** (393.4k vs 351.6k, tol 35.2k) |
+| window rows | pass | pass (D8 0.54, D4 0.23, D5k 0.20) |
+
+**D6 and the early volume loss: the all-h extension's reach.**
+- With the kick, the remaining deficit sits only in the nose: the outermost 2–3 bins in x and in z (up to 0.09 L
+  a bin at step 12). Everything behind it matches.
+- The old h extension is the same two Jacobi sweeps as ours, so it reaches two cells from the liquid. But a face no
+  h sweep reached takes the 4h band's extended value (`ufxFinishH` and `ufxProlong` in the old extension pair),
+  which reaches far into the air. All-h has no 4h band, so our faces beyond two cells keep the unextended U (about 0).
+  The level set and the particles ahead of a nose moving several cells a step then see no velocity.
+- **Diagnostic** (`fluid-scratch/lane-f/tree-extx`, scratch only, not for landing). Two more extension passes after
+  `uExtend`, each seeded from the last pass's extended faces, reach about six cells:
+
+| step | wet floor: deeper / kick / ref | drift %: deeper / kick / ref | particles: deeper / ref |
+|---|---|---|---|
+| 8 | 11,171 / 10,199 / 10,759 | −0.11 / −0.75 / −0.14 | 164.7k / 148.3k |
+| 12 | 14,920 / 14,088 / 14,936 | −0.36 / −2.54 / −0.61 | 260.8k / 261.8k |
+| 16 | 16,155 / 15,917 / 16,145 | −2.88 / −5.73 / −5.00 | 319.2k / 345.4k |
+
+  The deeper reach closes the drift, the wet floor and the particle count together, so D8c's surplus has the same
+  cause. The variant is not the old formula, and it races across bricks.
+- **The port:** the 4h band extension, prolonged into the h faces no sweep reached (`ufxProlong`), lands with the
+  tiers. The interim alternative is a deeper all-h extension, which would be a stated deviation and needs a ruling.
