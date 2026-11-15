@@ -1453,3 +1453,24 @@ Wide 512 x 128^2, step 45:
 - the latch gates were not run.
 
 The spray cloud's fixed margins are the bigger lever, next.
+
+## 2026-11-16: the spray cloud's owner margin (attribution only, not built)
+
+**The question.** Does a particle-only owner tile need the tiered owner margin of 9? That margin is lcRetire's row, and lcRetire builds only within lcStencilFine's 1 tile of an h-owned tile (levelset-coarse l.537-553). A particle owner's own rows are smaller: lcCouple 7 (4 + 2 + 1 past a particle's tile, C l.389-436) and pTiles 4 (P l.285-301).
+
+**The what-if.** tools/attrib2.mts adds an own7 cover:
+- owner tiles neither h-owned nor within a tile of one take margin 7;
+- every other box is as the rule has it.
+
+saved7 counts the live bricks only that change would drop: not owner, not ring, outside every remaining box. Runs: base 09135ed0, tiered, composite solver, signed/aw4m and signed/an1m.
+
+| box, step | live F | owner tiles near h / particle-only | saved7 |
+|---|---|---|---|
+| wide 25 | 5558 | 8329 / 277 | 0 |
+| wide 35 | 9160 | 12933 / 824 | 70 (0.8%) |
+| wide 45 | 13838 | 18056 / 2314 | 26 (0.2%) |
+| narrow 25 | 4320 | 7265 / 461 | 7 |
+| narrow 35 | 4379 | 8537 / 672 | 16 |
+| narrow 45 | 4581 | 11932 / 1688 | 0 |
+
+**Not built.** The bar was 15% of live bricks; the saving is under 1%. The census makes the spray h-owned, so 89% of the wide owner tiles at step 45 are within a tile of an h-owned tile, and the 9 applies to them. The wide residency is the h-owned spray's own 9-cell shell (owner 21%, ring 28%, the margin boxes the rest; moveOnly 819, 6%). The lever there is the spray's tier, the census's WANT, not the residency's margins.
