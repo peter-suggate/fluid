@@ -24,6 +24,7 @@
 <br>• T4 4h corner φ (d3c2b5b4).
 <br>**Open:** F's T1–T3/T5, then flip tiered (critical path); P's active-set probe table and outer loop; L0 occupancy (7.4 vs 1.7 ns/row); E's liquid-beyond-reach residency defect.
 <br>**Timing (all-h, informational):** 69–75 ms fenced against 45.45. |
+| M6 list (the moving window; items deferred to it) | • The app's brick presentation (brick-present.ts) is lattice-sized, the structural §2.10 interim: three r32float 3D textures (vertexPhi (n+1)^3, volume, openFraction; 25.6 MB on the 128^3 dam, 101 MB at 512 x 128^2), `shown` (a word a lattice brick) and two lattice-brick dispatches a presented frame (each workgroup exits early off the fluid). Measured by lane E's 4x-wider dam (d2f6edf3).<br>• The directory's page window (a word a page of a power-of-two window, 6 KB more at 4x width). |
 | Combined cross-scene round | todo |
 
 ## 1. Goal and contract
