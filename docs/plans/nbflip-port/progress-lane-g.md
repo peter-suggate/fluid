@@ -136,3 +136,18 @@ Plan §4.5 (amendment), §4.6 (references) and §4.7 (timing).
   - D4's late S is 0.015, so its 180–300 tolerance is 4.5 points. 3S also binds P1 at 300
     (tol 0.53 points).
   - LOO-c's dam passes only under the amendment; as written it fails D4, D5p and D5e.
+
+## 2026-11-15 MILESTONE G5: step-time baselines at 2761350a (plan §4.7)
+
+- **Rounds.** Timing slot, 33b78ebb against 2761350a, in `artifacts/nbflip-port/timing-2761350a{,-seep2,-letters2}/`.
+  - The first round's seep pair is void: another agent's CPU-heavy unit tests ran during it,
+    plus another process's Metal aborts at 13:53:40.
+  - The seep was re-run clean in `timing-2761350a-seep2/`.
+- **Baselines at 2761350a**, fenced median and pipelined:
+  - seep: 35.09 and 32.30 ms;
+  - dam (165): 45.45 and 50.61 ms;
+  - letters: 84.81 / 83.44 and 69.57 / 69.18 ms, with fenced mean 71.81 / 70.70;
+  - paddleboats: 50.50 and 45.22 ms.
+- **Letters' +1 ms is noise.** Two rounds give −1.1 and −3.6 ms fenced mean. 33b78ebb itself
+  spans 71.1–74.3 ms over four runs.
+- **Other scenes.** All are within the about 2.5% A/A spread.

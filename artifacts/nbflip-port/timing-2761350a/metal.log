@@ -1,0 +1,3 @@
+2026-11-15 13:53:40.661 E  node[19953:1a734eb] (Metal) Execution of the command buffer was aborted due to an error during execution. Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+2026-11-15 13:53:40.662 E  node[20068:1a73d62] (Metal) Execution of the command buffer was aborted due to an error during execution. Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)
+2026-11-15 13:53:41.413 E  node[19953:1a734eb] (Metal) Execution of the command buffer was aborted due to an error during execution. Impacting Interactivity (0000000e:kIOGPUCommandBufferCallbackErrorImpactingInteractivity)

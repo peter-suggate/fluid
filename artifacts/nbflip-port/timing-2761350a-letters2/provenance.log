@@ -1,0 +1,4 @@
+round start 2026-11-15 14:26:14
+base: commit 33b78ebb (lane G's tools commit; NB-FLIP identical to 46a2ba94) lib/methods/uniform tree bef61da162, lib/core tree e398dc5508 exported 2026-11-15 11:27 (by hand, before tools/nbflip-export.sh existed) 
+candidate: commit 2761350a (2026-11-15 13:27:30 +1300) lib/methods/uniform tree 1abb07aafa, lib/core tree a7863039f6 exported 2026-11-15 13:29:20 
+main checkout HEAD 98b96d2c, dirty lib/tools: 26 files

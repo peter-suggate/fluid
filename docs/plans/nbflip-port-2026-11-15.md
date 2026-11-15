@@ -576,8 +576,42 @@ Where the new S makes 3S binding where the floor bound before:
 
 ### 4.7 Step-time baselines at 2761350a
 
-TIMING_PENDING: a timing round of 33b78ebb against 2761350a, with a second letters round, is
-running on the timing slot. Its table lands here.
+These rounds ran on the timing slot, with baseline 33b78ebb and candidate 2761350a back to back
+per scene (`tools/nbflip-timing-round.sh`). Every run returned rc 0.
+- **The four-scene round** is in `artifacts/nbflip-port/timing-2761350a/`. Its seep pair is
+  void:
+  - another agent's unit-test run loaded the CPU from 13:51 to 13:53, during the baseline fenced
+    run;
+  - another process's Metal aborts came at 13:53:40, as the candidate fenced run started;
+  - the result was a 38.35 ms baseline median, a 32 s construction and a 48.8 ms candidate
+    pipelined.
+- **The seep was re-run alone** in `timing-2761350a-seep2/`, clean, with no Metal abort.
+- **Letters was repeated** in `timing-2761350a-letters2/`, with no Metal abort.
+- Other lanes' check jobs queued on the lock between runs. None ran during a timed run.
+
+**Baselines at 2761350a** (the candidate column; 33b78ebb in brackets, from the same round):
+
+| scene (steps) | fenced median ms | fenced p95 ms | fenced mean ms | pipelined ms/step | peak GPU MB |
+|---|---|---|---|---|---|
+| seep (1200) | 35.09 (35.19) | 39.0 (39.9) | 34.45 (34.70) | 32.30 (32.42) | 1187 |
+| dam (165) | 45.45 (44.50) | 76.9 (67.8) | 51.49 (49.20) | 50.61 (49.66) | 1922 |
+| letters (240), round 1 / round 2 | 84.81 / 83.44 (86.50 / 88.60) | 96.7 / 94.1 | 71.81 / 70.70 (72.93 / 74.25) | 69.57 / 69.18 (67.82 / 71.18) | 2023 |
+| paddleboats (300) | 50.50 (50.37) | 55.5 (53.6) | 48.78 (48.15) | 45.22 (44.15) | 3228 |
+
+What the rounds show:
+- **Lane D's letters +1 ms (fenced mean) is noise.** The two rounds give −1.1 and −3.6 ms against
+  33b78ebb. Across four runs, 33b78ebb's own fenced mean spans 71.1–74.3 ms (§4.4's A/A pair
+  and these two rounds), a 4.5% range. 2761350a's two runs (71.8 and 70.7) sit inside it.
+  Pipelined letters is 69.6 / 69.2 against 67.8 / 71.2: no change.
+- **The other scenes match within the §4.4 A/A spread** (about 2.5%):
+  - seep −0.3% fenced, −0.4% pipelined;
+  - dam +2.1% fenced median, +1.9% pipelined;
+  - paddleboats +0.2% fenced median, +2.4% pipelined.
+- **Dam p95 and its first third** (76.9 against 67.8 ms; 67.1 against 61.8 ms) are the splash
+  peak. 33b78ebb's p95 has read 67.8–74.5 ms over three runs, so 76.9 is 2.4 ms above its
+  highest. That is a single run, and the median and pipelined figures do not move.
+- **Lane D's handoff costs no measurable step time.** These numbers are the step-time baseline
+  for the rebuild's gates from now on.
 
 ## 5. Phase 2: port lanes
 Two implementation lanes take items from lane A's ranked list:

@@ -1,0 +1,118 @@
+base seep fenced start 13:48:32 (quiet after 5s)
+base seep fenced rc=0 end 13:53:09
+  fluid-gpu-run: GPU memory in use 0.74 GB at start, peak 3.48 GB; 2 process(es) in the tree
+candidate seep fenced start 13:53:30 (quiet after 20s)
+candidate seep fenced rc=0 end 14:00:20
+  fluid-gpu-run: GPU memory in use 1.21 GB at start, peak 3.47 GB; 1 process(es) in the tree
+base seep pipelined start 14:00:25 (quiet after 5s)
+base seep pipelined rc=0 end 14:05:56
+  fluid-gpu-run: GPU memory in use 6.14 GB at start, peak 6.77 GB; 1 process(es) in the tree
+candidate seep pipelined start 14:06:17 (quiet after 20s)
+candidate seep pipelined rc=0 end 14:17:29
+  fluid-gpu-run: GPU memory in use 1.37 GB at start, peak 8.92 GB; 1 process(es) in the tree
+base dam fenced start 14:17:35 (quiet after 5s)
+base dam fenced rc=0 end 14:18:05
+  fluid-gpu-run: GPU memory in use 1.11 GB at start, peak 4.12 GB; 1 process(es) in the tree
+candidate dam fenced start 14:18:10 (quiet after 5s)
+candidate dam fenced rc=0 end 14:18:39
+  fluid-gpu-run: GPU memory in use 1.20 GB at start, peak 4.09 GB; 1 process(es) in the tree
+base dam pipelined start 14:18:44 (quiet after 5s)
+base dam pipelined rc=0 end 14:19:19
+  fluid-gpu-run: GPU memory in use 1.23 GB at start, peak 4.04 GB; 1 process(es) in the tree
+candidate dam pipelined start 14:19:24 (quiet after 5s)
+candidate dam pipelined rc=0 end 14:20:13
+  fluid-gpu-run: GPU memory in use 1.14 GB at start, peak 4.12 GB; 1 process(es) in the tree
+base letters fenced start 14:20:18 (quiet after 5s)
+base letters fenced rc=0 end 14:21:02
+  fluid-gpu-run: GPU memory in use 0.91 GB at start, peak 4.23 GB; 1 process(es) in the tree
+candidate letters fenced start 14:21:12 (quiet after 10s)
+candidate letters fenced rc=0 end 14:22:00
+  fluid-gpu-run: GPU memory in use 1.08 GB at start, peak 4.15 GB; 1 process(es) in the tree
+base letters pipelined start 14:22:05 (quiet after 5s)
+base letters pipelined rc=0 end 14:22:34
+  fluid-gpu-run: GPU memory in use 1.16 GB at start, peak 4.14 GB; 1 process(es) in the tree
+candidate letters pipelined start 14:22:39 (quiet after 5s)
+candidate letters pipelined rc=0 end 14:23:08
+  fluid-gpu-run: GPU memory in use 1.26 GB at start, peak 4.16 GB; 1 process(es) in the tree
+base paddleboats fenced start 14:23:14 (quiet after 5s)
+base paddleboats fenced rc=0 end 14:23:41
+  fluid-gpu-run: GPU memory in use 1.25 GB at start, peak 5.75 GB; 1 process(es) in the tree
+candidate paddleboats fenced start 14:23:46 (quiet after 5s)
+candidate paddleboats fenced rc=0 end 14:24:13
+  fluid-gpu-run: GPU memory in use 1.25 GB at start, peak 5.72 GB; 1 process(es) in the tree
+base paddleboats pipelined start 14:24:18 (quiet after 5s)
+base paddleboats pipelined rc=0 end 14:24:44
+  fluid-gpu-run: GPU memory in use 1.10 GB at start, peak 5.64 GB; 1 process(es) in the tree
+candidate paddleboats pipelined start 14:24:49 (quiet after 5s)
+candidate paddleboats pipelined rc=0 end 14:26:10
+  fluid-gpu-run: GPU memory in use 1.21 GB at start, peak 5.55 GB; 1 process(es) in the tree
+Metal aborts / GPU restarts in the round's window: 3 (OUT/metal.log)
+round end 2026-11-15 14:26:14
+# NB-FLIP port timing round
+
+Generated 2026-11-15T01:26:14.939Z by tools/nbflip-gates.ts --timing-only. Baseline /Users/petersuggate/code/me/fluid/artifacts/nbflip-port/timing-2761350a/base; candidate /Users/petersuggate/code/me/fluid/artifacts/nbflip-port/timing-2761350a/candidate.
+
+## seep (1200 steps)
+
+| step time (timing slot) | baseline | candidate | change ms | change |
+|---|---|---|---|---|
+| fenced median ms | 38.35 | 35.55 | -2.79 | -7.3% |
+| fenced p95 ms | 57.57 | 39.91 | -17.66 | -30.7% |
+| fenced mean ms | 40.58 | 34.94 | -5.64 | -13.9% |
+| pipelined ms/step | 39.46 | 48.84 | 9.38 | 23.8% |
+| fenced thirds ms (first) | 38.16 | 30.63 | -7.53 | -19.7% |
+| fenced thirds ms (middle) | 40.10 | 35.80 | -4.29 | -10.7% |
+| fenced thirds ms (last) | 43.49 | 38.39 | -5.10 | -11.7% |
+| construction ms (fenced run) | 31941.01 | 10938.41 | -21002.60 | -65.8% |
+| peak GPU MB requested | 1186.54 | 1186.54 | 0.00 | 0.0% |
+
+Timing runs: baseline seep-timing-fenced, seep-timing-pipelined; candidate seep-timing-fenced, seep-timing-pipelined.
+
+## dam (165 steps)
+
+| step time (timing slot) | baseline | candidate | change ms | change |
+|---|---|---|---|---|
+| fenced median ms | 44.50 | 45.45 | 0.95 | 2.1% |
+| fenced p95 ms | 67.83 | 76.88 | 9.05 | 13.3% |
+| fenced mean ms | 49.20 | 51.49 | 2.29 | 4.6% |
+| pipelined ms/step | 49.66 | 50.61 | 0.95 | 1.9% |
+| fenced thirds ms (first) | 61.80 | 67.06 | 5.26 | 8.5% |
+| fenced thirds ms (middle) | 44.44 | 43.54 | -0.90 | -2.0% |
+| fenced thirds ms (last) | 41.37 | 43.86 | 2.49 | 6.0% |
+| construction ms (fenced run) | 8789.37 | 9045.43 | 256.06 | 2.9% |
+| peak GPU MB requested | 1921.80 | 1921.80 | 0.00 | 0.0% |
+
+Timing runs: baseline dam-timing-fenced, dam-timing-pipelined; candidate dam-timing-fenced, dam-timing-pipelined.
+
+## letters (240 steps)
+
+| step time (timing slot) | baseline | candidate | change ms | change |
+|---|---|---|---|---|
+| fenced median ms | 86.50 | 84.81 | -1.69 | -1.9% |
+| fenced p95 ms | 95.82 | 96.70 | 0.88 | 0.9% |
+| fenced mean ms | 72.93 | 71.81 | -1.12 | -1.5% |
+| pipelined ms/step | 67.82 | 69.57 | 1.74 | 2.6% |
+| fenced thirds ms (first) | 41.94 | 40.50 | -1.44 | -3.4% |
+| fenced thirds ms (middle) | 84.89 | 83.07 | -1.82 | -2.1% |
+| fenced thirds ms (last) | 91.96 | 91.87 | -0.09 | -0.1% |
+| construction ms (fenced run) | 8964.61 | 9303.97 | 339.36 | 3.8% |
+| peak GPU MB requested | 2022.78 | 2022.78 | 0.00 | 0.0% |
+
+Timing runs: baseline letters-timing-fenced, letters-timing-pipelined; candidate letters-timing-fenced, letters-timing-pipelined.
+
+## paddleboats (300 steps)
+
+| step time (timing slot) | baseline | candidate | change ms | change |
+|---|---|---|---|---|
+| fenced median ms | 50.37 | 50.50 | 0.12 | 0.2% |
+| fenced p95 ms | 53.59 | 55.47 | 1.88 | 3.5% |
+| fenced mean ms | 48.15 | 48.78 | 0.63 | 1.3% |
+| pipelined ms/step | 44.15 | 45.22 | 1.07 | 2.4% |
+| fenced thirds ms (first) | 41.27 | 41.53 | 0.25 | 0.6% |
+| fenced thirds ms (middle) | 51.32 | 50.98 | -0.34 | -0.7% |
+| fenced thirds ms (last) | 51.77 | 53.74 | 1.97 | 3.8% |
+| construction ms (fenced run) | 9094.86 | 9090.59 | -4.27 | -0.0% |
+| peak GPU MB requested | 3228.47 | 3228.47 | 0.00 | 0.0% |
+
+Timing runs: baseline paddleboats-timing-fenced, paddleboats-timing-pipelined; candidate paddleboats-timing-fenced, paddleboats-timing-pipelined.
+
