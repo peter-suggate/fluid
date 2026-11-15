@@ -170,8 +170,11 @@ export function mgLayout(L: BrickLayout) {
   // STG (pmgF) and QSTG (pmgC): a brick's 27-neighbour stage (pStage: F slots, their pages' C slots, native-tile masks)
   // and a page's 27 neighbour pages (qStage), as exact f32 integers (-1 none), written once a step by pmgSetupF over
   // F_ALL and pmgCoarsenC over C_ALL; every slot pass then stages in one load instead of the directory chain.
-  const STG = L1 + CH.N * 64 * F, QSTG = SEAMN + C;
-  return { W0, W1, L1, STG, fWords: STG + 81 * F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
+  // RKU (pmgF): an h cell's upper couplings as pRow reads them (KU[a] to a native row, else the h neighbour's K[a]),
+  // 3 x 512 a slot, written once a step by pmgSetupF over F_ALL's live bricks; every L0 pass's pRow then loads its
+  // row in one round of independent loads instead of the neighbour slot's chain.
+  const STG = L1 + CH.N * 64 * F, RKU = STG + 81 * F, QSTG = SEAMN + C;
+  return { W0, W1, L1, STG, RKU, fWords: RKU + 3 * BRICK_STRIDE * F, L2, L3, L4, L5, PDELTA, PH, SEAMT, SEAML, SEAMF, SEAMN, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -241,7 +244,7 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
     `const P_OC:f32=${OC.toFixed(6)};const P_SOC:f32=${Math.sqrt(OC).toFixed(7)};`,
     `const P_W0:u32=${u(M.W0)};const P_W1:u32=${u(M.W1)};const P_L1:u32=${u(M.L1)};`,
     `const P_SEAMT:u32=${u(M.SEAMT)};const P_SEAML:u32=${u(M.SEAML)};const P_SEAMF:u32=${u(M.SEAMF)};const P_SEAMN:u32=${u(M.SEAMN)};`,
-    `const P_STG:u32=${u(M.STG)};const P_QSTG:u32=${u(M.QSTG)};`,
+    `const P_STG:u32=${u(M.STG)};const P_RKU:u32=${u(M.RKU)};const P_QSTG:u32=${u(M.QSTG)};`,
     `const P_L2:u32=${u(M.L2)};const P_L3:u32=${u(M.L3)};const P_L4:u32=${u(M.L4)};const P_L5:u32=${u(M.L5)};`,
     `const P_FS2:u32=${u(2 * fineSweeps)};const P_CS2:u32=${u(2 * coarseSweeps)};const P_NS2:u32=${u(2 * nativeSweeps)};const P_SLOTS:u32=${u(slots)};`,
     `const P_ROWS6:u32=${u(MG_ROWS6)};const P_ROWS7:u32=${u(MG_ROWS7)};`,
@@ -385,7 +388,33 @@ fn pHist(k:u32,rmax:u32){
 `;
   // (A v)(c) at a fine row, v given by an expression of (slot, local); a native neighbour's value
   // by nat(C slot, tile index), or 0 when nat is omitted (pre-smoothing: native rows are carried at 0).
-  const fineApply = (name: string, v: (s: string, l: string) => string, nat?: (cs: string, i: string) => string) => /* wgsl */`
+  // (A v)(c) at h row c (slot s, local l). eager (pmgUpdate): every coupling (K, and RKU, pmgSetupF's upper
+  // couplings) and every neighbour value is loaded in one round, before any test on a loaded value, so a lane's chain
+  // is one load deep rather than D, then K, then the value (Update 218 -> 183 us a call on the tiered dam). The other
+  // callers keep the tested form: eager in pmgSetupF and pmgDown0, heavier kernels, measured 852 -> 1453 and 90 -> 128
+  // us. Both forms sum the same terms in the same order (a zero coupling or a missing neighbour adds nothing).
+  const fineApply = (name: string, v: (s: string, l: string) => string, nat?: (cs: string, i: string) => string, eager = false) => eager ? /* wgsl */`
+fn ${name}(b:vec3i,c:vec3i,s:u32,l:u32)->f32{
+  let d=pDiag(s,l);let v0=${v("s", "l")};let ra=P_RKU+3u*NB_STRIDE*s+l;
+  var kl=vec3f(0.0);var ku=vec3f(0.0);var vl=vec3f(0.0);var vu=vec3f(0.0);var hl=vec3<bool>(false);var hu=vec3<bool>(false);
+  for(var a=0u;a<3u;a++){
+    let e=pUnit(a);
+    kl[a]=pK(a,s,l);
+    let cn=c-e;let nn=pNatAt(b,cn);
+    if(nn!=NB_NONE){${nat ? `hl[a]=true;vl[a]=${nat("nn", "nbLocal(cn>>vec3u(2u))")};` : ""}}
+    else{let sn=pSlotAt(b,cn);if(sn!=NB_NONE){let ln=nbLocal(cn);hl[a]=true;vl[a]=${v("sn", "ln")};}}
+    let cu=c+e;let nu=pNatAt(b,cu);
+    if(nu!=NB_NONE){${nat ? `hu[a]=true;ku[a]=pmgF[ra+a*NB_STRIDE];vu[a]=${nat("nu", "nbLocal(cu>>vec3u(2u))")};` : ""}}
+    else{let su=pSlotAt(b,cu);if(su!=NB_NONE){let lu=nbLocal(cu);hu[a]=true;ku[a]=pmgF[ra+a*NB_STRIDE];vu[a]=${v("su", "lu")};}}
+  }
+  if(d<=0.0){return 0.0;}
+  var r=d*v0;
+  for(var a=0u;a<3u;a++){
+    if(kl[a]!=0.0&&hl[a]){r-=kl[a]*vl[a];}
+    if(hu[a]&&ku[a]!=0.0){r-=ku[a]*vu[a];}
+  }
+  return r;
+}` : /* wgsl */`
 fn ${name}(b:vec3i,c:vec3i,s:u32,l:u32)->f32{
   let d=pDiag(s,l);if(d<=0.0){return 0.0;}
   var r=d*(${v("s", "l")});
@@ -476,15 +505,24 @@ var<workgroup> tp:array<f32,1000>;
 fn pTi(lc:vec3i)->u32{return u32(lc.x+1)+10u*(u32(lc.y+1)+10u*u32(lc.z+1));}
 fn pTileQ(o:vec3i,t:u32)->vec3i{return o-vec3i(1)+vec3i(i32(t%10u),i32((t/10u)%10u),i32(t/100u));}
 struct PRow{d:f32,kl:vec3f,ku:vec3f}
+// The upper couplings of h cell c (slot s, local l): KU[a] to a native row, else the h neighbour's K[a] (pmgSetupF
+// writes them to RKU, which pRow reads).
+fn pRowKU(b:vec3i,c:vec3i,s:u32,l:u32)->vec3f{
+  var ku=vec3f(0.0);
+  for(var a=0u;a<3u;a++){
+    let cu=c+pUnit(a);
+    if(pNatAt(b,cu)!=NB_NONE){ku[a]=pKU(a,s,l);}
+    else{let su=pSlotAt(b,cu);if(su!=NB_NONE){ku[a]=pK(a,su,nbLocal(cu));}}
+  }
+  return ku;
+}
 fn pRow(b:vec3i,c:vec3i)->PRow{
   var r=PRow(0.0,vec3f(0.0),vec3f(0.0));let s=pSlotAt(b,c);if(s==NB_NONE){return r;}
-  let l=nbLocal(c);let d=pDiag(s,l);if(d<=0.0){return r;}
-  r.d=d;
-  for(var a=0u;a<3u;a++){
-    r.kl[a]=pK(a,s,l);let cu=c+pUnit(a);
-    if(pNatAt(b,cu)!=NB_NONE){r.ku[a]=pKU(a,s,l);}
-    else{let su=pSlotAt(b,cu);if(su!=NB_NONE){r.ku[a]=pK(a,su,nbLocal(cu));}}
-  }
+  let l=nbLocal(c);let d=pDiag(s,l);
+  let kl=vec3f(pK(0u,s,l),pK(1u,s,l),pK(2u,s,l));
+  let at=P_RKU+3u*NB_STRIDE*s+l;let ku=vec3f(pmgF[at],pmgF[at+NB_STRIDE],pmgF[at+2u*NB_STRIDE]);
+  if(d<=0.0){return r;}
+  r.d=d;r.kl=kl;r.ku=ku;
   return r;
 }
 // Red-black Gauss-Seidel on tp, the halo frozen; black first when rev (the adjoint).
@@ -577,6 +615,7 @@ var<workgroup> wLive:u32;
   pStage(slot,lid);workgroupBarrier();
   pStageW(slot,lid);
   let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
+  {let ku=pRowKU(b,c,slot,l);let ra=P_RKU+3u*NB_STRIDE*slot+l;pmgF[ra]=ku.x;pmgF[ra+NB_STRIDE]=ku.y;pmgF[ra+2u*NB_STRIDE]=ku.z;}
   var r=0.0;
   if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l);}
   pres[NB_PRES_F_R+at]=r;
@@ -1399,7 +1438,7 @@ ${cBody}
   const xF = (s: string, l: string) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`;
   const xN = (cs: string, i: string) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`;
   const update = fusedFC("pmgUpdate",
-    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN) + nativeApply("pApplyNR", "pSeamR", xN, xF), alphaHead + /* wgsl */`
+    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + nativeApply("pApplyNR", "pSeamR", xN, xF), alphaHead + /* wgsl */`
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   let d=pDiag(slot,l);var r=0.0;
   if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l);}
