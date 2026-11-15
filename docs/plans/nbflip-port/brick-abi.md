@@ -256,12 +256,16 @@ rules above through the directory and masks:
   old need rule (`nbActivityTriggered`, particleSeeding "need"), over the final word 1 bits 16-21.
   Shape, impact or approach heat (strain and rotation too, dead under the dam's policy); thin heats
   only where dt · deformation / h > 0.02 (UNIFORM_SURFACE_TRANSPORT_ERROR_H), the deformation being
-  tileErrorOf's max(4h · gradient, span) of the tile's plan words (census DEF). The budget's drop
+  tuDeformation of the last certificate's packed copy (census DEF, certError's tileErrorOf: max(4h · gradient,
+  span), 0 for a reader of class 0, saturated with the error; 3.4e38 where the tile is not stored, the copy's
+  key is not its page's + 1, or its width is ≤ 0, as at the boot and the kick). The budget's drop
   (`dropped`) is not ported: no scene but the seeps sets detailBudgetPercent < 100, and on the dam
   the old policy word is 100 (budget off). Bit 8 + j is tile j's thin trigger alone (word 1
   bit 17), which F's thin move path reads (F's request, 2026-11-15). Bits 16-31 are zero.
 - The census runs in the all-h engine too, because F reads TRIG. There it neither commits WANT
-  (no transfer) nor requests bricks (censusDecide's `cfg.z` = 0).
+  (no transfer) nor requests bricks (censusDecide's `cfg.z` = 0). The all-h head runs `certFine` and
+  `certError` (`cfg.w` = 1: the packed copy alone, no region reductions or deep pass) where the tiered head
+  runs the transfer and its certificate, so the need rule reads the same certificate in both engines.
 - The boot runs the census after its lists and before F's boot stages, since F's seeding reads
   TRIG.
   - After F's boot stages comes the first frame's projected half kick, U ← P(U + g dt/2), when
@@ -280,8 +284,10 @@ rules above through the directory and masks:
     injection at the corners.
   - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
 - The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 19744 words
-  a C slot (with the near words, the moving-shape bits MOV, and the plan words DEF (7168): 4 a tile, the old frame plan's mean extended face velocity xyz and face span,
-  localSpeed's, written by censusFine and censusCoarse and read by censusDecide's deformation).
+  a C slot (with the near words, the moving-shape bits MOV, and the certificate copy DEF (7168): 4 a tile, the
+  old NB_UPDATE_ERRORS copy: tileErrorOf's deformation and error (f32), the page key + 1 (the old block word) and
+  the owner width (f32), written by the post-transfer `certError` and read by the next step's censusDecide,
+  tuDeformation).
   After DEF, the real D's words (brick-region-heat.wgsl.ts, `CENSUS` and `RG` in brick-census.wgsl.ts):
   - `TC` (9216), 16 words a tile: the certificate the post-transfer `certCoarse` (4h tiles) and `certFine`
     (h tiles) write: mean xyz, defect (−1 dry), speed, owner width, span, normal surface rate, bits (1 the

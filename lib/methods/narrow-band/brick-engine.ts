@@ -204,6 +204,13 @@ export class BrickEngine {
     // pressureDelta is lane P's PDELTA where the solver publishes it (pmgC), else +Inf.
     const pdelta = "pmgC" in solver.buffers ? mgLayout(layout).PDELTA : undefined;
     const heat = tiered && censused ? brickRegionHeatSchedule(layout, { pdelta }) : undefined;
+    // All-h (no heat, D = 0): the certificate alone, for the census's need rule (tuDeformation reads its packed copy,
+    // CENSUS.DEF): certFine on every h tile, certError with cfg.w = 1 (the copy, no region reductions or deep pass),
+    // where the tiered head runs the transfer and its certificate.
+    const certificate: BrickPlacement[] = !tiered && censused ? (() => { const k = brickRegionHeatSchedule(layout).kernels; return [
+      { kernel: k.certFine, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 } },
+      { kernel: k.certError, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.X8 }, w: 1 },
+    ]; })() : [];
     const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
     const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL).map(p => (heat && p.kernel.label === "setTransferList" ? { ...p, w: 1 } : p));
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
@@ -219,7 +226,7 @@ export class BrickEngine {
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
     ];
-    const head = censused ? [...headCensus(), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? [...transfer, ...(heat?.cert ?? [])] : []), churnClear] : [];
+    const head = censused ? [...headCensus(), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate), churnClear] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,

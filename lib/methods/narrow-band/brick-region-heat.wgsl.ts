@@ -20,9 +20,11 @@
  *   list (one launch would need an F-then-C X8 triple).
  * - certFine: localSpeed of the h tiles, a workgroup a tile (F_ALL X8), a lane a cell (its 125 vertices staged once).
  * - certError: the support closure (seedJob's liquid seed and the three separable dilations, here on a region's
- *   10^3-tile neighbourhood in workgroup memory), tileErrorOf and the heat's per-region reductions (a workgroup a
- *   region, C_ALL X8, a lane a tile), then the deep pass after the claims (lane 0). Separate: it reads its neighbours'
- *   certFine and certCoarse words.
+ *   10^3-tile neighbourhood in workgroup memory), tileErrorOf with its packed copy (CENSUS.DEF: the deformation and
+ *   error, the page key + 1 as the block word, the width; the next step's census reads it, tuDeformation) and the
+ *   heat's per-region reductions (a workgroup a region, C_ALL X8, a lane a tile), then the deep pass after the claims
+ *   (lane 0). Separate: it reads its neighbours' certFine and certCoarse words.
+ * All-h (no heat, D = 0) runs certFine and certError with cfg.w = 1 at the transfer's place: the packed copy alone.
  * setTransferList (cfg.w = 1) promotes each listed tile's region WARM (the remap's rhPromoteWarm).
  *
  * Verbatim: every rule and its arithmetic. Deviations, all stated:
@@ -47,7 +49,7 @@
  */
 import { ARGS, BrickLayout, LIST } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel } from "./brick-kernel";
-import { CENSUS_FORMULAS, CENSUS_HOOKS, CENSUS_OWNER, CENSUS_REGION, censusKernel, censusPlanWGSL } from "./brick-census.wgsl";
+import { CENSUS, CENSUS_FORMULAS, CENSUS_HOOKS, CENSUS_OWNER, CENSUS_REGION, censusKernel, censusPlanWGSL } from "./brick-census.wgsl";
 import { uniformTileFineDefectWGSL, uniformTileSurfaceRateWGSL } from "../uniform/uniform-tile-update-error";
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -398,13 +400,20 @@ fn ceMean(T:vec3i)->vec3f{
     }
     if(!(error>=0.0&&error<3.0e38)||!(speed<3.0e38)){error=3.402823e38;}
     let span=bitcast<f32>(census[o+6u]);
-    if(cls==0u){error=0.0;gradient=0.0;}else{gradient=max(gradient,span/h);}
+    // The velocity change across one tile (m/s), cleared for a reader of class 0, saturated with the error.
+    var deformation=max(4.0*h*gradient,span);
+    if(cls==0u){error=0.0;gradient=0.0;deformation=0.0;}else{gradient=max(gradient,span/h);}
+    if(!(error<3.0e38)||!(deformation<3.0e38)){deformation=3.402823e38;}
+    // The packed copy (the old NB_UPDATE_ERRORS): deformation, error, the block word (the page key + 1), the width.
+    {let d=NC_S*cs+${CENSUS.DEF}u+4u*i;census[d]=bitcast<u32>(deformation);census[d+1u]=bitcast<u32>(error);census[d+2u]=rgKey(cs);census[d+3u]=bitcast<u32>(f32(width));}
     // The heat's rhBulkAcceleration with no frozen speed: acceleration + 0 x gradient.
     let acceleration=carried*gradient+0.0*gradient;
     atomicMax(&eErr,bitcast<u32>(error));atomicMax(&eRate,census[o+7u]);atomicMax(&eAcc,bitcast<u32>(acceleration));
     if(cls>0u){atomicAdd(&eRel,1u);}atomicMax(&eClass,cls);if(cls>0u&&width==1u){atomicStore(&eFine,1u);}
     for(var k=0u;k<6u;k++){atomicMax(&eVel[k],census[o+9u+k]);}
   }
+  // cfg.w = 1 (all-h: no region heat, D = 0): the certificate's packed copy alone, for the census's need rule.
+  if(cfg.w==1u){return;}
   workgroupBarrier();
   if(lane==0u){
     let at=rgAt(cs,r);

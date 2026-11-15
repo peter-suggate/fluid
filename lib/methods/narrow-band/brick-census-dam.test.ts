@@ -127,7 +127,7 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     faces.forEach(({ c, a, kind }, i) => store(`US${a}`, kind, c, fx.US[i]!));
     upload(["PHI", "US0", "US1", "US2"]);
     // ---- localSpeed (uniform-mixed-frame-plan.ts l.269, umSignedFaceExtent l.241) on the old texels: each tile's
-    // mean extended face velocity and span (setCensus's DEF words). The old texel of cell q on axis a is the stored
+    // mean extended face velocity and span (the certificate's TC words), for the need rule's input below. The old texel of cell q on axis a is the stored
     // lower face of q + e_a (0 outside the lattice, nbFacePlane's); every page is resident, so low-open is the lattice's low face.
     const faceBase = (a: number) => a * (W + 1) * W * W;
     const faceIndex = (c: readonly number[], a: number) => { const d = [W, W, W]; d[a] = W + 1; return faceBase(a) + c[0]! + d[0]! * (c[1]! + d[1]! * c[2]!); };
@@ -170,6 +170,39 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       planOld.push([...mean, span]);
     }
     assert.equal(unstored, 0, "localSpeed reads stored texels only");
+    // ---- The need rule's input. TRIG's thin term reads tuDeformation of the last certificate's packed copy (DEF:
+    // deformation, error, page key + 1, width), which certError writes after the last step's transfer. The old
+    // engine's was its frame n - 1 certificate, which the fixture does not hold (it captures the census pass alone),
+    // so the test supplies DEF: tileErrorOf's deformation, max(4h gradient, span), transcribed on this frame's
+    // extension texels (planOld; the reader class is not transcribed), under each tile's page key, with tuDeformation's
+    // saturating cases hashed over the tiles (a fifth: width 0, width -4, or a stale key, another page's + 1). This
+    // pins the census's rule (tuDeformation and nbActivityTriggered) on that input, and counts the thin-alone tiles it
+    // heats and the tuDeformation branch each took.
+    const planAt = (t: V3) => planOld[ti(t)]!;
+    const SAT = fr(3.402823e38);
+    const defCase = (i: number) => { const u = (Math.imul(i + 1, 0x9e3779b1) >>> 8) / 2 ** 24; return u < 0.08 ? "width" : u < 0.12 ? "negative" : u < 0.2 ? "key" : "valid"; };
+    const planDeformation = (t: V3) => {
+      const own = planAt(t); let gradient = 0;
+      for (let a = 0; a < 3; a++) {
+        const lo: V3 = [...t], hi: V3 = [...t]; lo[a]!--; hi[a]!++;
+        if (![lo, hi].every(q => q.every(v => v >= 0 && v < T))) continue;
+        const below = planAt(lo), above = planAt(hi);
+        let v = 0; for (let c = 0; c < 3; c++) v = Math.max(v, Math.abs(fr(above[c]! - own[c]!)), Math.abs(fr(own[c]! - below[c]!)));
+        gradient = fr(gradient + fr(v / fr(4 * h)));
+      }
+      const d = Math.max(fr(fr(4 * h) * gradient), own[3]!);
+      return d < fr(3e38) ? d : SAT;
+    };
+    // tuDeformation of the written words (uniform-narrow-band-flip.ts l.938): 3.4e38 for a stale key or width <= 0.
+    const deformation = (t: V3) => defCase(ti(t)) === "valid" ? planDeformation(t) : SAT;
+    const need = (t: V3, criteria: number) => (criteria & 0x3c) !== 0 || (criteria & 1) !== 0 || ((criteria & 2) !== 0 && fr(fr(dt * deformation(t)) / h) > fr(0.02));
+    const defWords = new Uint32Array(await e.read("census"));
+    for (let i = 0; i < n; i++) {
+      const t = coord(i), k = key(shr(t, 3)), cs = s.pages.get(k)!, at = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * local8(t), c = defCase(i);
+      defWords[at] = bitsOf(planDeformation(t)); defWords[at + 1] = 0; defWords[at + 2] = (c === "key" ? k + 2 : k + 1) >>> 0;
+      defWords[at + 3] = bitsOf(c === "width" ? 0 : c === "negative" ? -4 : hOld(t) ? 1 : 4);
+    }
+    e.write("census", 0, defWords);
     // The old engine's split vertices (4-aligned h-closure vertices whose base disagrees with the h
     // store): the tiles within a tile of one may read either value.
     const splitTiles = new Set<number>();
@@ -202,24 +235,8 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     const hex = (x: number) => (x >>> 0).toString(16);
     let wantNew = 0, wantOld = 0, deepBandNew = 0;
     // TRIG is the old need rule (nbActivityTriggered) over the old FIN's criteria, its thin term reading the
-    // deformation (tileErrorOf) of the plan words (DEF), which are checked here against localSpeed transcribed on the
-    // old engine's own extension texels (planOld). The old engine's own deformation was its last frame's certificate,
-    // which the fixture does not hold: so this pins the rule on the frame's state, and counts the thin-alone tiles it heats.
-    const planAt = (t: V3) => planOld[ti(t)]!;
-    const deformation = (t: V3) => {
-      const own = planAt(t); let gradient = 0;
-      for (let a = 0; a < 3; a++) {
-        const lo: V3 = [...t], hi: V3 = [...t]; lo[a]!--; hi[a]!++;
-        if (![lo, hi].every(q => q.every(v => v >= 0 && v < T))) continue;
-        const below = planAt(lo), above = planAt(hi);
-        let v = 0; for (let c = 0; c < 3; c++) v = Math.max(v, Math.abs(fr(above[c]! - own[c]!)), Math.abs(fr(own[c]! - below[c]!)));
-        gradient = fr(gradient + fr(v / fr(4 * h)));
-      }
-      const d = Math.max(fr(fr(4 * h) * gradient), own[3]!);
-      return d < fr(3e38) ? d : fr(3.402823e38);
-    };
-    const need = (t: V3, criteria: number) => (criteria & 0x3c) !== 0 || (criteria & 1) !== 0 || ((criteria & 2) !== 0 && fr(fr(dt * deformation(t)) / h) > fr(0.02));
-    const thinAlone = { tiles: 0, heated: 0 };
+    // supplied DEF (above).
+    const thinAlone = { tiles: 0, heated: 0, branches: { width: 0, negative: 0, key: 0, heated: 0, cool: 0 } };
     const deepDecided: string[] = [];
     for (let i = 0; i < n; i++) {
       const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t), o = CENSUS.STRIDE * cs;
@@ -237,11 +254,10 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       check("WANT", i, want === fx.decided[i], () => `${want} vs ${fx.decided[i]} (${fx.owner[i] === 1 ? "h" : "4h"} now; fin ${hex(fin)} vs ${hex(ow1)})`);
       const fs = s.bricks.get(key(shr(t, 1)))!, j = (t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2);
       const criteria = (ow1 >>> 16) & 63, trig = (set[L.set.trig + fs]! >>> j) & 1, oldTrig = need(t, criteria) ? 1 : 0;
-      if (criteria === 2) { thinAlone.tiles++; thinAlone.heated += oldTrig; }
+      if (criteria === 2) { thinAlone.tiles++; thinAlone.heated += oldTrig; const c = defCase(i); thinAlone.branches[c === "valid" ? (oldTrig ? "heated" : "cool") : c]++; }
       check("TRIG", i, trig === oldTrig, () => `${trig} vs ${oldTrig} (criteria ${criteria})`);
       check("TRIG thin alone", i, ((set[L.set.trig + fs]! >>> (8 + j)) & 1) === ((ow1 >>> 17) & 1), () => `thin bit`);
-      const gp = [0, 1, 2, 3].map(k => fromBits(census[o + CENSUS.DEF + 4 * l + k]!)), xp = planOld[i]!;
-      check("plan", i, gp.every((g, k) => (k === 3 ? g === xp[k] : Math.abs(g - xp[k]!) <= 1e-6 * (1 + Math.abs(xp[k]!)))), () => `${gp} vs ${xp}`);
+      check("DEF untouched", i, [0, 1, 2, 3].every(q => census[o + CENSUS.DEF + 4 * l + q] === defWords[CENSUS.STRIDE * cs + CENSUS.DEF + 4 * l + q]), () => `the census wrote DEF`);
       check("band = decided (old)", i, fx.band[i] === fx.decided[i], () => `band ${fx.band[i]} decided ${fx.decided[i]}`);
       if (fx.deep[i]) { if (want) { deepBandNew++; if (deepDecided.length < 8) deepDecided.push(`${t}`); } }
     }
@@ -264,13 +280,15 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       variants: results.map(({ variant, tallies, counters, wantNew, wantOld, thinAlone }) => ({ variant, want: { new: wantNew, old: wantOld }, thinAlone, counters,
         fields: Object.fromEntries([...tallies].map(([k, t]) => [k, { compared: t.compared, equal: t.equal, deep: t.deep, nonDeep: t.nonDeep, splitNear: t.split, examples: t.examples.length ? t.examples : undefined }])) })),
     };
+    // tuDeformation's branches: every one reached on a frame with thin-alone tiles (frame 43; frame 14 has none).
+    for (const r of results) if (r.thinAlone.tiles > 0) for (const [b, k] of Object.entries(r.thinAlone.branches)) assert.ok(k > 0, `${r.variant}: tuDeformation branch ${b} on a thin-alone tile`);
     // ---- Replay (regionDeep, the real D's head): the old engine's replayed regions (mode 1) go in deep COLD with
     // their last classification's stamp and records, and replay. Tiers: COLD on the deep regions and their
     // neighbours (an old deep region's neighbours were COLD, and a region the old engine held not deep had a
     // neighbour that was not, so the deep set is the old one), HOT elsewhere. Records: W0, KEYS, CROSS and GAP are the
     // old engine's (its replay published them; CROSS and GAP after its importance, which a replay's importance edits
-    // to the same words); W1 before the importance, NEAR and DEF are not in the fixture and are this census's
-    // plain classification. DEC is the old decidedPrev. Every region's mode must be the old one and WANT the old WANT.
+    // to the same words); W1 before the importance and NEAR are not in the fixture and are this census's
+    // plain classification, DEF the supplied input above. DEC is the old decidedPrev. Every region's mode must be the old one and WANT the old WANT.
     const S = CENSUS.STRIDE, R4 = W / 16, pageKeys = new Map([...s.pages].map(([k, cs]) => [cs, k]));
     const regionOf = (t: V3) => shr(t, 2), rKey = (R: V3) => R[0] + R4 * (R[1] + R4 * R[2]);
     const deepR = new Set<number>(), modeR = new Set<number>();

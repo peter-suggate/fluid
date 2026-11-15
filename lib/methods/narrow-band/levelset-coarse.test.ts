@@ -10,7 +10,7 @@
 // positions are F's, and runs the same chain.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, RING, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -142,6 +142,13 @@ class World {
   // tiers
   tileCold(t: V) { const cs = this.cslotOfPage(shr(t, 3)); return cs !== NONE && (this.dir[this.L.dir.crec + 32 * cs + REC.CLASS]! & F_CLASS.COLD) !== 0; }
   cellStored(c: V) { return inLattice(c) && this.cslotOfPage(shr(c, 5)) !== NONE; }
+  /** nbrTileReach: tile t's spread reach word (REACH1), saturated where no page holds t or REACH_STEP is not the run's
+   * ring step's (e.run binds ring slot 0). */
+  tileReach(t: V) {
+    const cs = this.cslotOfPage(shr(t, 3));
+    if (cs === NONE || this.set[this.L.set.reachStep + cs] !== this.set[this.L.set.ring + RING.STEP]! + 1) return 0x3fffffff;
+    return (this.set[this.L.set.reach1 + 512 * cs + this.tileIndex(t)]! & 0x3fffffff) >>> 0;
+  }
   tierCold(v: V) { for (let k = 0; k < 8; k++) { const c = sub(v, corner(k)); if (!this.cellStored(c)) continue; if (!this.tileCold(shr(c, 2))) return false; } return true; }
   vertexCold(v: V) { for (let k = 0; k < 8; k++) { const c = sub(v, corner(k)); if (this.cellStored(c) && this.tileCold(shr(c, 2))) return true; } return false; }
   // sampling
@@ -348,6 +355,13 @@ function lanes(W: World, slots: number[]): Lane[] {
 }
 /** The page's live tiles and seeds (19^3 about it), the collar (the seeds dilated 4 tiles an axis, x then y then z,
  * each axis held to the live tiles) and the gate words of its own 512 tiles (a live tile with the collar in its 3^3). */
+/** nbCrossingTravel (brick-residency): the tile's bulk-depth travel from its spread reach word, 4 (max(reach, 2) - 2)
+ * an axis, unbounded where a reach saturates. */
+function crossingTravel(w: number) {
+  const travel = [0, 0, 0];
+  for (let a = 0; a < 3; a++) { const reach = Math.max((w >>> (5 * a)) & 31, (w >>> (15 + 5 * a)) & 31); if (reach >= 31) return 3e38; travel[a] = 4 * (Math.max(reach, 2) - 2); }
+  return Math.fround(Math.hypot(...travel));
+}
 function seedsOf(W: World, cs: number) {
   const P = brickKeyCoord(W.dir[W.L.dir.crec + 32 * cs + REC.KEY]!) as V, T0 = sub(mul(P, 8), [6, 6, 6]);
   const n = 19 ** 3, ix = (r: V) => r[0] + 19 * (r[1] + 19 * r[2]), at = (t: V) => { const r = sub(t, T0); return r.every(x => x >= 0 && x < 19) ? ix(r) : -1; };
@@ -475,8 +489,8 @@ function coupleOracle(W: World, slots: number[], tally: Tally): Map<string, numb
     const key = `${cs}:${l}`, q = v, theta = interpolatedHeat(W, q, false), band = W.sample("PHI1", q);
     if (theta <= 0) { out.set(key, band); bump(tally, "no heat"); continue; }
     const c = W.cellOf(v), s = W.fgSlot(c);
-    let travel = 0;
-    if (s !== NONE) { const cells = bitsf(W.fcell[W.F.fcell.BOUND + s]!) * dt / hm; if (cells > 0) travel = 4 * Math.ceil(cells / 4); }
+    // particleSurfaceBulk's travel: nbCrossingTravel of the tile's spread reach word (617f9291's lcTileReach).
+    const travel = crossingTravel(W.tileReach(shr(c, 2)));
     const reached = W.reach1(c);
     let nearest = NONE; if (reached && s !== NONE) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!;
     const bulk = bulkDepth(band, q, reached, nearest !== NONE, [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], travel);

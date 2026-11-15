@@ -101,6 +101,37 @@ function checkDeep(rs: Map<string, { tier: number; deep: number; words: number[]
   }
 }
 
+/** The certificate's packed copy (CENSUS.DEF, certError's tileErrorOf), on every certified region (RG_CKEY its page
+ * key + 1; a page claimed after the last certificate has none): each lattice tile carries the page key + 1 and its TC
+ * width (f32); its deformation is 0 with error 0 (a reader of class 0) or at least its span (max(4h gradient, span)),
+ * and saturated where the error is; the region's error is the max of its tiles'. */
+function checkCertificateCopy(s: Awaited<ReturnType<typeof snapshot>>, census: Uint32Array, N: readonly number[]) {
+  const SAT = new Float32Array([3.402823e38])[0]!, bits = (x: number) => new Uint32Array(new Float32Array([x]).buffer)[0]!;
+  const tally = { tiles: 0, cleared: 0, saturated: 0, regions: 0 };
+  for (const [key, cs] of s.pages) for (let r = 0; r < 8; r++) {
+    const at = CENSUS.STRIDE * cs + CENSUS.REG + RG.WORDS * r;
+    if (census[at + RG.CKEY] !== key + 1) continue;
+    tally.regions++;
+    let errorMax = 0;
+    for (let l = 0; l < 64; l++) {
+      const i = ((l & 3) + 4 * (r & 1)) | ((((l >> 2) & 3) + 4 * ((r >> 1) & 1)) << 3) | (((l >> 4) + 4 * (r >> 2)) << 6);
+      const t = [8 * (key & 1023) + (i & 7), 8 * ((key >>> 10) & 1023) + ((i >> 3) & 7), 8 * ((key >>> 20) & 1023) + (i >> 6)];
+      if (t.some((v, a) => 4 * v >= N[a]!)) continue;
+      const d = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i, o = CENSUS.STRIDE * cs + CENSUS.TC + 16 * i;
+      const deformation = f32(census[d]!), error = f32(census[d + 1]!), span = f32(census[o + 6]!), id = `tile ${t} (page ${key}.${r})`;
+      assert.equal(census[d + 2], key + 1, `${id}: DEF's key`);
+      assert.equal(census[d + 3], bits(census[o + 5]!), `${id}: DEF's width is TC's (${census[o + 5]})`);
+      assert.ok((deformation === 0 && error === 0) || deformation >= span, `${id}: deformation ${deformation} below the span ${span}`);
+      if (!(error < 3e38)) assert.equal(deformation, SAT, `${id}: error ${error} saturates the deformation`);
+      tally.tiles++; if (deformation === 0 && error === 0) tally.cleared++; if (deformation === SAT) tally.saturated++;
+      errorMax = Math.max(errorMax, census[d + 1]!);
+    }
+    assert.equal(errorMax, census[at + RG.ERROR], `page ${key}.${r}: the region's error is its tiles' max`);
+  }
+  assert.ok(tally.regions > 0 && tally.tiles > 0, "certified tiles");
+  return tally;
+}
+
 test("region heat (GPU): the tiered dam runs 40 steps without a latch, every region's tier and heat in range", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("region heat dam", async device => {
@@ -119,6 +150,7 @@ test("region heat (GPU): the tiered dam runs 40 steps without a latch, every reg
       // HEAT_COLD is the spread's count: the claims and the transfer promote regions after it, never cool them.
       assert.ok(h[REGION_H.HEAT_COLD]! >= tiers[0]!, `HEAT_COLD ${h[REGION_H.HEAT_COLD]} below the ${tiers[0]} tier-0 regions`);
       checkDeep(rs);
+      const def = checkCertificateCopy(s, census, e.layout.lattice);
       assert.equal(h[REGION_H.HEAT_FORCED], 1);
       // The deep tiles' kept decisions: band (DEC set) or not.
       let deepTiles = 0, deepBand = 0;
@@ -130,7 +162,7 @@ test("region heat (GPU): the tiered dam runs 40 steps without a latch, every reg
           deepTiles++; if ((census[CENSUS.STRIDE * cs + CENSUS.DEC + (i >> 5)]! >>> (i & 31)) & 1) deepBand++;
         }
       }
-      tally.push(`step ${step + 10}: ${s.bricks.size} F, ${deepTiles} deep tiles (${deepBand} kept band), ${rs.size} regions, tiers ${tiers.join("/")}, deep ${h[REGION_H.HEAT_DEEP]}, extent ${h[REGION_H.STILL_EXTENT]}, travel ${f32(h[REGION_H.STILL_TRAVEL]!).toExponential(2)}`);
+      tally.push(`step ${step + 10}: DEF ${JSON.stringify(def)}, ${s.bricks.size} F, ${deepTiles} deep tiles (${deepBand} kept band), ${rs.size} regions, tiers ${tiers.join("/")}, deep ${h[REGION_H.HEAT_DEEP]}, extent ${h[REGION_H.STILL_EXTENT]}, travel ${f32(h[REGION_H.STILL_TRAVEL]!).toExponential(2)}`);
     }
     console.log(`region heat dam: ${tally.join("; ")}`);
     e.destroy();
@@ -260,7 +292,7 @@ test("census replay (GPU): under gravity a still reservoir's deep regions hold t
       assert.equal(A.census[reg(cs, r) + RG.DEEP], 1);
       for (let l = 0; l < 64; l++) {
         const i = tileOf(r, l), o = S * cs;
-        for (const [w, n] of [[CENSUS.KEYS, 6], [CENSUS.W0, 1], [CENSUS.W1, 1], [CENSUS.NEAR, 1], [CENSUS.DEF, 4], [CENSUS.RCROSS, 2], [CENSUS.RGAP, 1]] as const)
+        for (const [w, n] of [[CENSUS.KEYS, 6], [CENSUS.W0, 1], [CENSUS.W1, 1], [CENSUS.NEAR, 1], [CENSUS.RCROSS, 2], [CENSUS.RGAP, 1]] as const)
           for (let k = 0; k < n; k++) assert.equal(A.census[o + w + n * i + k], census0[o + w + n * i + k], `replayed tile ${cs}.${i} word ${w}`);
       }
     }
