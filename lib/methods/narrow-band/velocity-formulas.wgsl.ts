@@ -1,0 +1,223 @@
+/** NB-FLIP's velocity formulas as pure WGSL (lane F; design docs/plans/nbflip-structural-2026-11-15.md §2.6).
+ *
+ * Ported verbatim from the uniform engine's resolved WGSL for the dam (a22d512d), with the addressing taken out, as
+ * particles-formulas.wgsl.ts. Nothing here reads a binding; `velocity-formulas.test.ts` checks each against the old
+ * text. Units: velocities m/s, positions in cells.
+ *
+ * - p2g: the quadratic B-spline deposit (Steffen et al. 2008's quadratic kernel, as Zhu and Bridson 2005's P2G
+ *   uses), fixed-point accumulation (so the atomics' order cannot change the bits), and the FLIP keep: the face
+ *   takes the deposit's velocity by the overlap heat θ, scaled by the deposit's mass against the mass a face at
+ *   its depth expects (narrowBandExpectedMassWGSL), and fully where the surface heat holds it.
+ * - uAdvect: the semi-Lagrangian momentum trace (Stam 1999) by midpoint segments of at most one cell of travel.
+ * - forces: gravity on a face either of whose cells holds liquid (occupancy, the smoothed Heaviside of φ over two
+ *   cells). The gate scenes are inviscid and have no surface tension; a scene with either fails at build.
+ * - uExtend: fast sweeping (Zhao 2005) of the velocity outward from the liquid, the eikonal update over the three
+ *   axes' upwind minima (Sethian 1999 §6) and the value as the upwind faces' weighted mean (Adalsteinsson and
+ *   Sethian 1999's velocity extension).
+ * - uDelta: the FLIP delta sampled at a sample from the faces that hold one, the trilinear weights renormalised. */
+
+/** Throws where a scene's physics needs a force the brick engine's uAdvect does not implement. */
+export function nbfVelocitySupported(physics: { readonly viscosity?: number; readonly surfaceTension?: number }): void {
+  if ((physics.viscosity ?? 0) !== 0) throw new Error(`NB-FLIP brick engine: viscosity ${physics.viscosity} is not implemented (inviscid only)`);
+  if ((physics.surfaceTension ?? 0) !== 0) throw new Error(`NB-FLIP brick engine: surface tension ${physics.surfaceTension} is not implemented`);
+}
+
+/** p2g: the deposit and its resolve. The kernel defines nbxDeposit(axis, node, momentum, weight) (adds a node's
+ * fixed-point words), nbxTransferHeat(tile) (vec2f: heat, surface heat; each negative where its tile does not
+ * count) and nbxTransferDepth(vertex) (the depth at a 5^3 window vertex). */
+export const nbfP2GWGSL = /* wgsl */`
+const PB_MOMENTUM:f32=8192.0;const PB_WEIGHT:f32=65536.0;
+fn pbQuadratic(f:f32)->vec3f{return vec3f(0.5*(1.5-f)*(1.5-f),0.75-(f-1.0)*(f-1.0),0.5*(f-0.5)*(f-0.5));}
+// The 3^3 nodes of face axis a about p (pbScatter): the lowest node, and p's fraction from it.
+fn nbfP2GBase(p:vec3f,axis:u32)->vec3i{var offset=vec3f(0.5);offset[axis]=1.0;return vec3i(floor(p-offset-0.5));}
+fn nbfP2GFraction(p:vec3f,axis:u32,base:vec3i)->vec3f{var offset=vec3f(0.5);offset[axis]=1.0;return p-offset-vec3f(base);}
+// A node's share (w = wx wyz m) as the fixed-point words pbAdd adds: momentum (i32) and weight (u32).
+fn nbfP2GMomentumWord(w:f32,u:f32)->i32{return i32(round(w*u*PB_MOMENTUM));}
+fn nbfP2GWeightWord(w:f32)->u32{return u32(round(w*PB_WEIGHT));}
+// A sample's deposit (pbScatter): mass m at p (cells) with velocity u, onto each axis' 3^3 face nodes.
+fn nbfP2GScatter(p:vec3f,u:vec3f,mass:f32){
+ for(var axis=0u;axis<3u;axis++){
+  let base=nbfP2GBase(p,axis);let f=nbfP2GFraction(p,axis,base);
+  let wx=pbQuadratic(f.x);let wy=pbQuadratic(f.y);let wz=pbQuadratic(f.z);
+  for(var z=0;z<3;z++){for(var y=0;y<3;y++){let wyz=wy[y]*wz[z];for(var x=0;x<3;x++){
+   let node=base+vec3i(x,y,z);let w=wx[x]*wyz*mass;
+   nbxDeposit(axis,node,nbfP2GMomentumWord(w,u[axis]),nbfP2GWeightWord(w));
+  }}}
+ }
+}
+// A +face's depth: the four corners on its plane (corner bit along axis clear), in the eight-corner order.
+fn nbfFaceDepth(low:vec3u,axis:u32)->f32{
+ var depth=0.0;
+ for(var k=0u;k<8u;k++){let bit=vec3u(k%2u,(k/2u)%2u,k/4u);if(bit[axis]!=0u){continue;}depth+=0.25*nbxTransferDepth(low+bit);}
+ return depth;
+}
+// The window of depths a face blends in, and the mass it expects there.
+fn nbfP2GWindow(depth:f32)->bool{return depth<=1.5&&depth>=-2.0;}
+fn nbfP2GExpected(depth:f32)->f32{return max(1.0,8.0*clamp(0.5-depth,0.0,1.0));}
+// The overlap heat and the surface heat at a face (nbTransferTheta: local, cells from the tile origin).
+fn nbfTransferTheta(local:vec3f)->vec2f{
+ let q=local/4.0+0.5;let base=vec3u(floor(q));let f=fract(q);var theta=0.0;var hot=0.0;var covered=0.0;var openWeight=0.0;
+ for(var k=0u;k<8u;k++){
+  let bit=vec3u(k%2u,(k/2u)%2u,k/4u);let at=base+bit;let w=select(1.0-f,f,bit!=vec3u(0));let share=w.x*w.y*w.z;let tile=at.x+3u*(at.y+3u*at.z);
+  let heat=nbxTransferHeat(tile);
+  if(heat.x>=0.0){openWeight+=share;theta+=share*heat.x;}
+  if(heat.y>=0.0){covered+=share;hot+=share*heat.y;}
+ }
+ return clamp(vec2f(theta/max(openWeight,1e-20),hot/max(covered,1e-20)),vec2f(0.0),vec2f(1.0));
+}
+// The face's new velocity (transferPropertiesJob): near = (θ, surface heat, expected mass); thaw: a thawing
+// region's term. A face with no deposit mass keeps original.
+fn nbfP2GResolve(original:f32,momentumWord:u32,weightWord:u32,near:vec3f,thaw:f32)->f32{
+ let mass=f32(weightWord)/PB_WEIGHT;
+ if(mass<1e-5){return original;}
+ let momentum=f32(bitcast<i32>(momentumWord))/PB_MOMENTUM;
+ let transition=near.x*mix(min(1.0,mass/near.z),1.0,near.y);
+ return mix(original,momentum/mass+thaw,transition);
+}
+`;
+
+/** uAdvect: the momentum trace and the forces. The kernel defines nbxMomentumSample(p, lo, hi) (the field's axes
+ * lo..hi-1 at p, m/s), nbxMomentumHeld(p) (the walls' hold) and nbxTraceCapped(). */
+export const nbfMomentumWGSL = /* wgsl */`
+const UM_TRACE_SEGMENTS:u32=128u;
+// The face's departure value (umUnitTrace): back along the field over dt from position, by segments of at most a
+// cell of travel at their start velocity, each sampled at its midpoint; past UM_TRACE_SEGMENTS the last segment
+// takes the rest (counted).
+fn nbfMomentumTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32{
+ var at=position;var p=position;var left=abs(dt);let sign=select(-1.0,1.0,dt>=0.0);
+ var span=0.0;var segments=0u;var middle=false;var last=left<=1e-7;
+ loop{
+  let v=nbxMomentumSample(at,select(0u,axis,last),select(3u,axis+1u,last));
+  if(last){return v[axis];}
+  let cells=v/h;
+  if(!middle){
+   let speed=max(abs(cells.x),max(abs(cells.y),abs(cells.z)));segments++;
+   span=min(left,1.0/max(speed,1e-30));
+   if(segments>=UM_TRACE_SEGMENTS&&span<left){span=left;nbxTraceCapped();}
+   at=nbxMomentumHeld(p-0.5*sign*span*cells);middle=true;
+  }else{
+   p=nbxMomentumHeld(p-sign*span*cells);left=left-span;at=p;middle=false;
+   last=left<=1e-7*abs(dt);
+  }
+ }
+}
+// A cell's occupancy (umOccupancy): φ (m) smoothed over two cells of h (hy, m) at width w.
+fn nbfOccupancy(phi:f32,hy:f32,width:u32)->f32{if(width==0u){return 0.0;}return clamp(0.5-phi/(4.0*hy*f32(width)),0.0,1.0);}
+// Gravity acts on a +face where either cell holds liquid (or the neighbour is a coarse owner with mass).
+fn nbfGravityFace(occupancy:f32,neighbour:f32,coarseMass:bool)->bool{return occupancy>1e-5||neighbour>1e-5||coarseMass;}
+fn nbfGravityKick(value:f32,dt:f32,g:f32)->f32{return value+dt*g;}
+`;
+
+/** uExtend: the fast-sweeping update (ufxCombine and its terms) and the 4h prolongation (no accessors). */
+export const nbfExtensionWGSL = /* wgsl */`
+alias UfxV=f32;
+// A face's state: its value and its distance (0 a source, negative blocked, 1e20 unreached).
+struct Ufx{v:UfxV,d:f32}
+fn ufxReached(d:f32)->bool{return d>=0.0&&d<5e+19;}
+// A seed's distance from its code: 1 a source (0), 2 or 3 blocked (-1), 0 unreached.
+fn ufxSeedCode(c:u32)->f32{return select(select(1e+20,-1.0,c>=2u),0.0,c==1u);}
+fn ufxTerm(m:f32,lo:Ufx,hi:Ufx,spacing:f32,root:f32,epsilon:f32)->Ufx{
+ if(m>=root-epsilon){return Ufx(UfxV(0.0),0.0);}
+ var value=UfxV(0.0);var count=0.0;
+ if(abs(lo.d-m)<=epsilon){value+=lo.v;count+=1.0;}
+ if(abs(hi.d-m)<=epsilon){value+=hi.v;count+=1.0;}
+ let weight=(root-m)/(spacing*spacing);return Ufx(weight*value/max(count,1.0),weight);
+}
+// The update of old from its six upwind neighbours (l, h a low and high one an axis): the eikonal root over the
+// ascending minima, within two cells; the value their weighted mean.
+fn ufxCombine(old:Ufx,l0:Ufx,h0:Ufx,l1:Ufx,h1:Ufx,l2:Ufx,h2:Ufx,h:vec3f)->Ufx{
+ let m0=min(l0.d,h0.d);let m1=min(l1.d,h1.d);let m2=min(l2.d,h2.d);
+ var s0=m0;var s1=m1;var s2=m2;var g0=h.x;var g1=h.y;var g2=h.z;
+ if(s1<s0){let d=s0;s0=s1;s1=d;let g=g0;g0=g1;g1=g;}
+ if(s2<s0){let d=s0;s0=s2;s2=d;let g=g0;g0=g2;g2=g;}
+ if(s2<s1){let d=s1;s1=s2;s2=d;let g=g1;g1=g2;g2=g;}
+ if(s0>=5e+19){return old;}
+ var root=s0+g0;
+ if(s1<5e+19&&root>s1){
+  let w0=1.0/(g0*g0);let w1=1.0/(g1*g1);
+  var a=w0+w1;var b=s0*w0+s1*w1;var c=-1.0+s0*s0*w0+s1*s1*w1;
+  root=(b+sqrt(max(b*b-a*c,0.0)))/a;
+  if(s2<5e+19&&root>s2){
+   let w2=1.0/(g2*g2);a=a+w2;b=b+s2*w2;c=c+s2*s2*w2;
+   root=(b+sqrt(max(b*b-a*c,0.0)))/a;
+  }
+ }
+ let cut=2.0*min(h.x,min(h.y,h.z));
+ if(root>cut||root>old.d){return old;}
+ let epsilon=max(root,cut)*1.1920929e-7;
+ let t0=ufxTerm(m0,l0,h0,h.x,root,epsilon);let t1=ufxTerm(m1,l1,h1,h.y,root,epsilon);let t2=ufxTerm(m2,l2,h2,h.z,root,epsilon);
+ let value=t0.v+t1.v+t2.v;let weight=t0.d+t1.d+t2.d;
+ return Ufx(select(UfxV(0.0),value/weight,weight>0.0),root);
+}
+// An h face's value from the 4h band (ufxProlong): hi the 4h face at or above, lo the one below, q the face's
+// offset above lo (1..3 quarter-widths; 4 is hi itself).
+fn nbfExtProlong(lo:Ufx,hi:Ufx,q:i32)->Ufx{
+ let khi=ufxReached(hi.d);let own=Ufx(hi.v,select(1e+20,hi.d,khi));
+ if(q==4){return own;}
+ if(!ufxReached(lo.d)){return own;}
+ if(khi){let f=f32(q)*0.25;return Ufx(mix(lo.v,hi.v,UfxV(f)),mix(lo.d,hi.d,f));}
+ return lo;
+}
+`;
+
+/** uDelta: the FLIP delta at a sample (ndSample). The kernel defines nbxDelta(axis, r) (the axis' face delta at
+ * window index r, NB_DELTA_NONE where none). p: the sample, cells from its tile's origin. */
+export const nbfDeltaWGSL = /* wgsl */`
+const NB_DELTA_NONE:f32=3e38;
+fn nbfDeltaSample(p:vec3f)->vec3f{
+ var d=vec3f(NB_DELTA_NONE);
+ for(var axis=0u;axis<3u;axis++){
+  var g=p-0.5;g[axis]=p[axis]-1.0;
+  let base=vec3i(floor(g))+1;let f=g-floor(g);
+  var sum=0.0;var total=0.0;
+  for(var k=0u;k<8u;k++){
+   let bit=vec3u(k%2u,(k/2u)%2u,k/4u);let w3=select(vec3f(1)-f,f,bit!=vec3u(0));let w=w3.x*w3.y*w3.z;
+   let value=nbxDelta(axis,vec3u(base+vec3i(bit)));
+   if(w>0.0&&value<1e30){sum+=w*value;total+=w;}
+  }
+  if(total>0.0){d[axis]=sum/total;}
+ }
+ return d;
+}
+`;
+
+/** The conservative remap at a width change (uniform-mixed-remap: remapTileCells, remapSlope, remapSample,
+ * remapFace), for setTransfer: φ prolonged trilinearly from a 4h tile's corners onto its 5^3 h vertices; an h face
+ * sampled from the 4h faces below and above it, linear along the axis and corrected across by the 4h face's slopes:
+ * the centred difference of the faces beside, held to REMAP_SLOPE_LIMIT (4/3) of each one-sided difference and to
+ * zero where they disagree in sign (a monotonised central limiter, van Leer 1977, with the tighter bound that keeps
+ * each patch a convex combination of its face and the nearer face beside it); the sixteen offsets sum to zero, so
+ * the patches carry the 4h face's flux. A 4h face is restricted as the open-weighted mean of the h faces under it.
+ * No accessors. */
+export const nbfRemapWGSL = /* wgsl */`
+const REMAP_SLOPE_LIMIT:f32=4.0/3.0;
+fn nbfRemapSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+// Vertex v (0..124, x fastest) of the 5^3 h vertices of a 4h tile with corner values c (corner order x + 2y + 4z).
+fn nbfRemapRefine(c:array<f32,8>,v:u32)->f32{
+ let t=vec3f(vec3u(v%5u,(v/5u)%5u,v/25u))*0.25;var values:array<f32,8>;
+ for(var k=0u;k<8u;k++){let w=select(vec3f(1)-t,t,vec3u(k%2u,(k/2u)%2u,k/4u)!=vec3u(0));values[k]=c[k]*w.x*w.y*w.z;}
+ return nbfRemapSum8(values);
+}
+// A 4h face's slope across (value its own; below, above: the sums (value, open count) of the 16 h faces of the
+// tiles beside it), where the face and its 16 h faces are open; zero where the differences disagree in sign.
+fn nbfRemapSlope(value:f32,below:vec2f,above:vec2f)->f32{
+ var slope=0.0;
+ let lower=select(0.0,value-below.x/16.0,below.y==16.0);
+ let upper=select(0.0,above.x/16.0-value,above.y==16.0);
+ if(lower*upper>0.0){slope=sign(lower)*min(abs(lower+upper)/8.0,REMAP_SLOPE_LIMIT*min(abs(lower),abs(upper))/4.0);}
+ return slope;
+}
+// The fraction along the axis of an h face plane between its owner's faces (origin and width the owner's).
+fn nbfRemapAlong(plane:i32,origin:u32,width:u32)->f32{return f32(plane+1-i32(origin))/f32(width);}
+// Across: the h cell's offset in the 4h owner (u, v), centred.
+fn nbfRemapAcross(p:vec2u,origin:vec2u)->vec2f{return vec2f(f32(p.x-origin.x),f32(p.y-origin.y))-vec2f(1.5);}
+// The sample between the owner's low and high faces; a 4h owner's slopes (low face u, v; high face u, v) apply.
+fn nbfRemapSample(lowFace:f32,highFace:f32,t:f32,coarse:bool,slopes:vec4f,across:vec2f)->f32{
+ var low=lowFace;var high=highFace;
+ if(coarse){low+=dot(slopes.xy,across);high+=dot(slopes.zw,across);}
+ return mix(low,high,t);
+}
+// The restriction's sum (value, weight) and its mean.
+fn nbfRemapFaceAdd(acc:vec2f,w:f32,sample:f32)->vec2f{var value=acc.x;var weight=acc.y;value+=w*sample;weight+=w;return vec2f(value,weight);}
+fn nbfRemapFaceMean(acc:vec2f)->f32{var value=acc.x;if(acc.y>0.0){value/=acc.y;}return value;}
+`;
