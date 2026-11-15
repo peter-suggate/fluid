@@ -770,3 +770,22 @@ Per area (tm-c, 84b98c2b plus this change; kernel sum 100.8 ms, fenced median 12
 | brick set (census, residency, set, transfer, nr*, setMark) | 5.8 | 35 | 0.6 |
 | transfer and seeding (pDeposit, pSeed) | 4.3 | 1.8 | 1.0 |
 | floor (launches at ~3.5 µs, plus fenced minus kernel sum) | ~0.9 + 23.9 | | 1.0 |
+
+## 2026-11-15: the transfer's face jobs (task 4, item 1)
+
+- The list was already restricted: setTransferList is markTile verbatim ("within one tile of a width change"). brick-transfer-dam.test.ts matches the old engine's listing bitwise, and the old dam lists 2648 tiles at frame 22; the brick dam lists about 3.5k a step at steps 13–24.
+- So the cost was attributed instead. Before, setTransferFaces cost 180 ns/wg × 3.8k wg × 2 launches (U, US). Each launch repeated the same ownership and address chains. Every face read walked the directory page word → CMASK → child slot → vel, in each of 4 barrier phases (beside, slope, sample, mean).
+- The fix (bitwise; brick-transfer.test.ts and brick-transfer-dam.test.ts pass, brick-engine.test.ts 17/17):
+  - One launch takes both channels a lane (vec2 values).
+  - The job stages its tile's 3^3 tile neighbourhood (page slot, CMASK and WANT owner bits) and its 2^3 F bricks once. A read outside them falls back to the global readers.
+  - Every global face read (beside, slope face, sample faces) is issued in a single phase; slopes, samples and means then run on workgroup memory.
+  - setTransferCommit also takes both channels in one launch.
+- Timing slot (tiered dam composite, steps 13–24, ms/step):
+
+| kernel | before (tm-c) | both channels, staged (tm-x1) | one read phase (tm-x2) |
+|---|---|---|---|
+| setTransferFaces | 1.256 (2 launches) | 0.754 (1) | 0.650 (1, 187 ns/wg) |
+| setTransferCommit | 0.153 (2) | 0.076 (1) | 0.071 (1) |
+| head sum | 5.26 | 4.72 | 4.50 |
+
+- Checks: test:unit 1833 pass 0 fail; check:types shows the 3 lane-n errors only.

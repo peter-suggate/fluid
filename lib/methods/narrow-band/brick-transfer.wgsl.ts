@@ -12,7 +12,11 @@
  *   ports). The old ownership's faces are read through the owner readers
  *   (nbFacePlane), the new ones' placement through the WANT readers. Values
  *   go to the xfer scratch; setTransferCommit stores them, after every
- *   read (the old remap's second texture).
+ *   read (the old remap's second texture). A job takes both face channels
+ *   (U, US) a lane, and stages its tile's 3^3 tile neighbourhood (page
+ *   slots, old and new owners) and 2^3 F bricks once; every global face read
+ *   is issued in one phase, then the slopes, samples and means run on
+ *   workgroup memory.
  * - setTransferCells: remapTileCells' vertices (l.1263, surfaceOnly). A
  *   vertex is written by its new authority tile only; one the old layout
  *   stored keeps its value, moved to its new storage (F for an h vertex, C
@@ -30,7 +34,7 @@
  * - No cuts and no released bits (no solids, M3), so every weight is 1.
  * - A face toward a page that is not resident (deep air) has no storage,
  *   and reads 0 where the old engine read its stored value.
- * The face channels carried are U and US (cfg.z 0 and 1; lane F,
+ * The face channels carried are U and US (both in one job; lane F,
  * 2026-11-15: US carries the step, U is read at step end); UP is not
  * carried. φ is PHI.
  */
@@ -151,112 +155,204 @@ export function brickTransferKernels(L: BrickLayout) {
   args[NB_ARGS_XFER_G1]=min(n,NB_FOLD);args[NB_ARGS_XFER_G1+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[NB_ARGS_XFER_G1+2u]=1u;
 }`);
 
-  // setTransferFaces: a workgroup of 192 a listed tile (lane = axis * 64 + cell), on face channel cfg.z.
+  // setTransferFaces: a workgroup of 192 a listed tile (lane = axis * 64 + cell), both face channels (U, US) a lane.
+  // The tile's 3^3 tile neighbourhood (page slots, old and new owners) and its 2^3 F bricks are staged once; every
+  // read of the remap lies in them (a read outside falls back to the global readers).
   const setTransferFaces = k("setTransferFaces", [CFG, setRO, dirRO, velRO, phiRO, xferRW], READERS + JOBS + nbfRemapWGSL + /* wgsl */`
-// Per axis: the low face's slopes along the two tangential axes, then the high face's (remapSlope).
-var<workgroup> tileSlopes:array<f32,12>;
-// Lane (axis, beside, footprint cell): the face beside the tile (-u, +u, -v, +v) on the low (xy) and high (zw) plane.
+// Per axis: the low face's slopes along the two tangential axes, then the high face's (remapSlope); U and US.
+var<workgroup> tileSlopes:array<vec2f,12>;
+// Lane (axis, beside, footprint cell): the face beside the tile (-u, +u, -v, +v) on the low (xy) and high (zw) plane,
+// U (tileBeside) and US (tileBesideS).
 var<workgroup> tileBeside:array<vec4f,192>;
+var<workgroup> tileBesideS:array<vec4f,192>;
 var<workgroup> tileOpenFaces:array<vec2f,48>;
-var<workgroup> tileSamples:array<f32,192>;
-var<workgroup> wallSamples:array<f32,192>;
+var<workgroup> tileSamples:array<vec2f,192>;
+var<workgroup> wallSamples:array<vec2f,192>;
+// The staged neighbourhood: tile t + o (o in -1..1): its page's C slot, and bit 0 its old owner, bit 1 its new.
+var<workgroup> sCs:array<u32,27>;
+var<workgroup> sOwn:array<u32,27>;
+// The F slots of bricks sB0 + (0..1)^3, the bricks of cells 4t - 4 .. 4t + 7.
+var<workgroup> sF:array<u32,8>;
+var<private> sT:vec3i;
+var<private> sB0:vec3i;
+fn sTi(T:vec3i)->i32{let o=T-sT+vec3i(1);if(any(o<vec3i(0))||any(o>vec3i(2))){return -1;}return o.x+3*o.y+9*o.z;}
+fn sStage(t:vec3i,lane:u32){
+  if(lane<27u){
+    let T=t+nbNeighbourOffset(lane);
+    sCs[lane]=nbCSlotOfPage(T>>vec3u(3u));
+    sOwn[lane]=select(0u,1u,nbTileOwnerH(T))|select(0u,2u,nbNewTileOwnerH(T));
+  }else if(lane>=32u&&lane<40u){
+    let j=lane-32u;let b=sB0+vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));
+    sF[j]=nbFSlotOfBrick(b);
+  }
+}
+fn sTileH(T:vec3i)->bool{let i=sTi(T);if(i>=0){return (sOwn[i]&1u)!=0u;}return nbTileOwnerH(T);}
+fn sNewTileH(T:vec3i)->bool{let i=sTi(T);if(i>=0){return (sOwn[i]&2u)!=0u;}return nbNewTileOwnerH(T);}
+fn sCellH(c:vec3i)->bool{return sTileH(c>>vec3u(2u));}
+fn sNewCellH(c:vec3i)->bool{return sNewTileH(c>>vec3u(2u));}
+// nbCSlotOfPage of tile T's page.
+fn sCSlot(T:vec3i)->u32{let i=sTi(T);if(i>=0){return sCs[i];}return nbCSlotOfPage(T>>vec3u(3u));}
+fn sPresent(c:vec3i)->bool{return nbInLattice(c)&&sCSlot(c>>vec3u(2u))!=NB_NONE;}
+fn sFSlotOfCell(c:vec3i)->u32{
+  let o=(c>>vec3u(3u))-sB0;
+  if(any(o<vec3i(0))||any(o>vec3i(1))){return nbFSlotOfCell(c);}
+  return sF[u32(o.x)|(u32(o.y)<<1u)|(u32(o.z)<<2u)];
+}
+// nbFFace, nbCFace and nbFacePlane on both channels (U, US).
+fn sFFace(c:vec3i,a:u32)->vec2f{
+  let s=sFSlotOfCell(c);if(s>=NB_SEAM){return vec2f(0.0);}
+  let i=NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c);
+  return vec2f(vel[NB_VEL_F_U0+i],vel[NB_VEL_F_US0+i]);
+}
+fn sCFace(T:vec3i,a:u32)->vec2f{
+  if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return vec2f(0.0);}
+  let cs=sCSlot(T);if(cs==NB_NONE){return vec2f(0.0);}
+  let i=NB_STRIDE*(cs+a*NB_CCAP)+nbTileIndex(T);
+  return vec2f(vel[NB_VEL_C_U0+i],vel[NB_VEL_C_US0+i]);
+}
+fn sFacePlane(c:vec3i,a:u32)->vec2f{
+  if(!nbFaceInLattice(c,a)){return vec2f(0.0);}
+  var e=vec3i(0);e[a]=1;
+  if(sCellH(c)||sCellH(c-e)){return sFFace(c,a);}
+  return sCFace(c>>vec3u(2u),a);
+}
 // remapBesideFace: the old face at cell q on side sign of its owner (the plane's stored face at q), where q and the
-// face's low cell are present and the face is open.
-fn xBesideFace(q:vec3i,axis:u32,sign:i32,V:f32)->vec2f{
-  if(!xPresent(q)){return vec2f(0);}
+// face's low cell are present and the face is open: (U, US, weight).
+fn xBesideFace(q:vec3i,axis:u32,sign:i32,V:f32)->vec3f{
+  if(!sPresent(q)){return vec3f(0);}
   var e=vec3i(0);e[axis]=1;var id=q;if(sign<0){id-=e;}
-  if(!xPresent(id)||V<1.0){return vec2f(0);}
-  return vec2f(nbFacePlane(select(q+e,q,sign<0),axis),1.0);
+  if(!sPresent(id)||V<1.0){return vec3f(0);}
+  return vec3f(sFacePlane(select(q+e,q,sign<0),axis),1.0);
 }
 // remapBeside.
 fn xBeside(t:vec3i,flags:u32,lane:u32){
   let axis=lane/64u;let cell=lane%64u;let own=(flags&XL_CHANGED)!=0u;
-  var beside=vec4f(0);var open=vec2f(0);
-  if(!nbTileOwnerH(t)&&(own||(flags&(1u<<(27u+axis)))!=0u)){
+  var beside=vec4f(0);var besideS=vec4f(0);var open=vec2f(0);
+  if(!sTileH(t)&&(own||(flags&(1u<<(27u+axis)))!=0u)){
     let k=cell/16u;let d=(axis+1u+k/2u)%3u;let u=(axis+1u)%3u;let v=(axis+2u)%3u;
     var q=4*t;q[u]+=i32(cell%4u);q[v]+=i32((cell/4u)%4u);
     var low=q;var high=q;high[axis]+=3;
     let step=select(-4,4,(k&1u)!=0u);var lowB=low;var highB=high;lowB[d]+=step;highB[d]+=step;
     var e=vec3i(0);e[axis]=1;
     var V=vec4f(-1.0);
-    if(k==0u&&own&&xPresent(low-e)){V.x=xV(low-e,axis);}
+    if(k==0u&&own&&sPresent(low-e)){V.x=xV(low-e,axis);}
     if(k==0u){V.y=xV(high,axis);}
-    if(own&&xPresent(lowB)&&xPresent(lowB-e)){V.z=xV(lowB-e,axis);}
-    if(xPresent(highB)){V.w=xV(highB,axis);}
+    if(own&&sPresent(lowB)&&sPresent(lowB-e)){V.z=xV(lowB-e,axis);}
+    if(sPresent(highB)){V.w=xV(highB,axis);}
     open=vec2f(select(0.0,1.0,V.x>=1.0),select(0.0,1.0,V.y>=1.0));
-    if(own){beside=vec4f(xBesideFace(lowB,axis,-1,V.z),0.0,0.0);}
-    beside=vec4f(beside.xy,xBesideFace(highB,axis,1,V.w));
+    var lo=vec3f(0);if(own){lo=xBesideFace(lowB,axis,-1,V.z);}
+    let hi=xBesideFace(highB,axis,1,V.w);
+    beside=vec4f(lo.x,lo.z,hi.x,hi.z);besideS=vec4f(lo.y,lo.z,hi.y,hi.z);
   }
-  tileBeside[lane]=beside;
+  tileBeside[lane]=beside;tileBesideS[lane]=besideS;
   if(cell<16u){tileOpenFaces[16u*axis+cell]=open;}
 }
-// remapSlope: lane (axis, side, tangential axis) of the first four cells.
-fn xSlope(t:vec3i,lane:u32){
+// remapSlope's 4h face (P1, before the beside faces are summed): lane (axis, side, tangential axis) of the first
+// four cells, where the tile and the tile across are 4h-owned (umFaceFirst: the face is 4h when the tile across is
+// 4h-owned or not present).
+fn xSlopeFace(t:vec3i,lane:u32)->vec2f{
+  let cell=lane%64u;if(cell>=4u){return vec2f(0.0);}
+  let axis=lane/64u;let high=cell>=2u;
+  var across=t;across[axis]+=select(-1,1,high);
+  if(sTileH(t)||sTileH(across)){return vec2f(0.0);}
+  var plane=4*t;if(high){plane[axis]+=4;}
+  return sFacePlane(plane,axis);
+}
+// remapSlope: lane (axis, side, tangential axis) of the first four cells; f its xSlopeFace.
+fn xSlope(t:vec3i,lane:u32,f:vec2f){
   let cell=lane%64u;if(cell>=4u){return;}
   let axis=lane/64u;let high=cell>=2u;let k=cell%2u;
-  var slope=0.0;
-  if(!nbTileOwnerH(t)){
-    // umFaceFirst: the face is 4h when the tile across is 4h-owned or not present.
+  var slope=vec2f(0.0);
+  if(!sTileH(t)){
     var across=t;across[axis]+=select(-1,1,high);
-    var open=0.0;var below=vec2f(0);var above=vec2f(0);
+    var open=0.0;var below=vec2f(0);var above=vec2f(0);var belowS=vec2f(0);var aboveS=vec2f(0);
     for(var i=0u;i<16u;i++){
       let a=tileBeside[64u*axis+32u*k+i];let b=tileBeside[64u*axis+32u*k+16u+i];let c=tileOpenFaces[16u*axis+i];
+      let aS=tileBesideS[64u*axis+32u*k+i];let bS=tileBesideS[64u*axis+32u*k+16u+i];
       open+=select(c.x,c.y,high);below+=select(a.xy,a.zw,high);above+=select(b.xy,b.zw,high);
+      belowS+=select(aS.xy,aS.zw,high);aboveS+=select(bS.xy,bS.zw,high);
     }
-    if(!nbTileOwnerH(across)&&open==16.0){
-      var plane=4*t;if(high){plane[axis]+=4;}
-      slope=nbfRemapSlope(nbFacePlane(plane,axis),below,above);
+    if(!sTileH(across)&&open==16.0){
+      slope=vec2f(nbfRemapSlope(f.x,below,above),nbfRemapSlope(f.y,belowS,aboveS));
     }
   }
   tileSlopes[4u*axis+cell]=slope;
 }
-// remapSample: the old owner's two faces on the axis at p's place across, interpolated at the plane.
-fn xSample(p:vec3i,plane:i32,axis:u32)->f32{
-  let fine=nbCellOwnerH(p);let w=select(4,1,fine);let origin=select(4*(p>>vec3u(2u)),p,fine);
+// remapSample's two faces: the old owner's faces on the axis at p's place across (U, US low; U, US high).
+fn xSampleFaces(p:vec3i,axis:u32)->vec4f{
+  let fine=sCellH(p);let w=select(4,1,fine);let origin=select(4*(p>>vec3u(2u)),p,fine);
   var lo=p;lo[axis]=origin[axis];var hi=p;hi[axis]=origin[axis]+w;
+  return vec4f(sFacePlane(lo,axis),sFacePlane(hi,axis));
+}
+// remapSample: the old owner's two faces (xSampleFaces) interpolated at the plane (U, US).
+fn xSample(p:vec3i,plane:i32,axis:u32,faces:vec4f)->vec2f{
+  let fine=sCellH(p);let w=select(4,1,fine);let origin=select(4*(p>>vec3u(2u)),p,fine);
   let u=(axis+1u)%3u;let v=(axis+2u)%3u;
   let along=nbfRemapAlong(plane,u32(origin[axis]),u32(w));
   let across=nbfRemapAcross(vec2u(u32(p[u]),u32(p[v])),vec2u(u32(origin[u]),u32(origin[v])));
-  let slopes=vec4f(tileSlopes[4u*axis],tileSlopes[4u*axis+1u],tileSlopes[4u*axis+2u],tileSlopes[4u*axis+3u]);
-  return nbfRemapSample(nbFacePlane(lo,axis),nbFacePlane(hi,axis),along,!fine,slopes,across);
+  let s0=tileSlopes[4u*axis];let s1=tileSlopes[4u*axis+1u];let s2=tileSlopes[4u*axis+2u];let s3=tileSlopes[4u*axis+3u];
+  let fl=faces.xy;let fh=faces.zw;
+  return vec2f(nbfRemapSample(fl.x,fh.x,along,!fine,vec4f(s0.x,s1.x,s2.x,s3.x),across),
+    nbfRemapSample(fl.y,fh.y,along,!fine,vec4f(s0.y,s1.y,s2.y,s3.y),across));
+}
+// xFaceWidth on the staged neighbourhood.
+fn sFaceWidth(c:vec3i,a:u32)->u32{
+  var e=vec3i(0);e[a]=1;
+  let wall=c[a]+1==NB_LATTICE[a];
+  if(!wall&&!sPresent(c+e)){return 0u;}
+  if(sNewCellH(c)){return 1u;}
+  let local=c-4*(c>>vec3u(2u));if(local[a]!=3){return 0u;}
+  if(!wall&&sNewCellH(c+e)){return 1u;}
+  let u=(a+1u)%3u;let v=(a+2u)%3u;
+  return select(0u,4u,local[u]==0&&local[v]==0);
 }
 @compute @workgroup_size(192) fn setTransferFaces(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let g=nbGroup(wid);let live=g<xCount();
   var entry=vec2u(0u);if(live){entry=xEntry(g);}
   let faces=live&&(entry.y&XL_FACES)!=0u;let t=xEntryTile(entry);
-  if(faces){xBeside(t,entry.y,lane);}
+  sT=t;sB0=(4*t-vec3i(4))>>vec3u(3u);
+  if(faces){sStage(t,lane);}
   workgroupBarrier();
-  if(faces){xSlope(t,lane);}
-  workgroupBarrier();
+  // P1: every global face read of the job (the beside faces, the slope faces, the sample faces), then ALU only.
   let axis=lane/64u;let local=xCorner4(lane%64u);let anchor=4*t+local;
   let texel=faces&&xTexel(entry.y,local);
-  let fine=nbNewCellOwnerH(anchor);let w=select(4,1,fine);let origin=select(4*t,anchor,fine);
+  var fine=false;if(faces){fine=sNewCellH(anchor);}
+  let w=select(4,1,fine);let origin=select(4*t,anchor,fine);
   let plane=origin[axis]+w-1;
-  if(texel&&anchor[axis]==plane){tileSamples[lane]=xSample(anchor,plane,axis);}
+  let sampled=texel&&anchor[axis]==plane;
   // The low-wall row's footprint: a changed tile's cells on the wall, sampled at the plane below (t = 0).
   let wall=faces&&(entry.y&XL_CHANGED)!=0u&&anchor[axis]==0;
-  if(wall){wallSamples[lane]=xSample(anchor,-1,axis);}
+  var slopeFace=vec2f(0.0);var sampleFaces=vec4f(0.0);
+  if(faces){xBeside(t,entry.y,lane);slopeFace=xSlopeFace(t,lane);}
+  if(sampled||wall){sampleFaces=xSampleFaces(anchor,axis);}
+  workgroupBarrier();
+  if(faces){xSlope(t,lane,slopeFace);}
+  workgroupBarrier();
+  if(sampled){tileSamples[lane]=xSample(anchor,plane,axis,sampleFaces);}
+  if(wall){wallSamples[lane]=xSample(anchor,-1,axis,sampleFaces);}
   workgroupBarrier();
   let u=(axis+1u)%3u;let v=(axis+2u)%3u;
   // remapFace of the new owner's negative face at its origin lane: the mean over its footprint, y over v, x over u.
   if(wall&&all(anchor==origin)){
-    var acc=vec2f(0.0);
+    var acc=vec2f(0.0);var accS=vec2f(0.0);
     for(var y=0;y<w;y++){for(var x=0;x<w;x++){
-      var q=vec3u(local);q[u]+=u32(x);q[v]+=u32(y);acc=nbfRemapFaceAdd(acc,1.0,wallSamples[q.x+4u*(q.y+4u*q.z)+64u*axis]);
+      var q=vec3u(local);q[u]+=u32(x);q[v]+=u32(y);let sample=wallSamples[q.x+4u*(q.y+4u*q.z)+64u*axis];
+      acc=nbfRemapFaceAdd(acc,1.0,sample.x);accS=nbfRemapFaceAdd(accS,1.0,sample.y);
     }}
-    xfer[384u*(2u*g+cfg.z)+192u+lane]=nbfRemapFaceMean(acc);
+    xfer[384u*(2u*g)+192u+lane]=nbfRemapFaceMean(acc);xfer[384u*(2u*g+1u)+192u+lane]=nbfRemapFaceMean(accS);
   }
   if(!texel){return;}
-  let fw=xFaceWidth(anchor,axis);if(fw==0u){return;}
+  let fw=sFaceWidth(anchor,axis);if(fw==0u){return;}
   // remapFace: the mean over the face's footprint, y over v, x over u.
-  var acc=vec2f(0.0);
+  var acc=vec2f(0.0);var accS=vec2f(0.0);
   for(var y=0u;y<fw;y++){for(var x=0u;x<fw;x++){
-    var q=vec3u(local);q[u]+=x;q[v]+=y;acc=nbfRemapFaceAdd(acc,1.0,tileSamples[q.x+4u*(q.y+4u*q.z)+64u*axis]);
+    var q=vec3u(local);q[u]+=x;q[v]+=y;let sample=tileSamples[q.x+4u*(q.y+4u*q.z)+64u*axis];
+    acc=nbfRemapFaceAdd(acc,1.0,sample.x);accS=nbfRemapFaceAdd(accS,1.0,sample.y);
   }}
-  xfer[384u*(2u*g+cfg.z)+lane]=nbfRemapFaceMean(acc);
+  xfer[384u*(2u*g)+lane]=nbfRemapFaceMean(acc);xfer[384u*(2u*g+1u)+lane]=nbfRemapFaceMean(accS);
 }`);
 
-  // setTransferCommit: the same lanes; each face the faces pass wrote goes to its new storage.
+  // setTransferCommit: the same lanes; each face the faces pass wrote goes to its new storage, both channels.
   const setTransferCommit = k("setTransferCommit", [CFG, setRW, dirRO, velRW, phiRO, xferRO], READERS + JOBS + /* wgsl */`
 @compute @workgroup_size(192) fn setTransferCommit(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let g=nbGroup(wid);if(g>=xCount()){return;}
@@ -266,28 +362,32 @@ fn xSample(p:vec3i,plane:i32,axis:u32)->f32{
   // The low-wall row at a new owner's origin: its lower face (F at the cell, or C at the tile).
   let fine=nbNewCellOwnerH(anchor);let origin=select(4*t,anchor,fine);
   if((entry.y&XL_CHANGED)!=0u&&anchor[axis]==0&&all(anchor==origin)){
-    let value=xfer[384u*(2u*g+cfg.z)+192u+lane];
+    let value=vec2f(xfer[384u*(2u*g)+192u+lane],xfer[384u*(2u*g+1u)+192u+lane]);
     if(fine){
       let s=nbFSlotOfCell(anchor);
-      if(s>=NB_SEAM){nbFail(NB_FAIL_TIER,nbKey(anchor>>vec3u(3u)));}else{vel[xFaceF()+NB_STRIDE*(s+axis*NB_FCAP)+nbLocal(anchor)]=value;}
+      if(s>=NB_SEAM){nbFail(NB_FAIL_TIER,nbKey(anchor>>vec3u(3u)));}else{
+        let i=NB_STRIDE*(s+axis*NB_FCAP)+nbLocal(anchor);vel[NB_VEL_F_U0+i]=value.x;vel[NB_VEL_F_US0+i]=value.y;
+      }
     }else{
       let cs=nbCSlotOfPage(t>>vec3u(3u));
-      if(cs==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(t>>vec3u(3u)));}else{vel[xFaceC()+NB_STRIDE*(cs+axis*NB_CCAP)+nbTileIndex(t)]=value;}
+      if(cs==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(t>>vec3u(3u)));}else{
+        let i=NB_STRIDE*(cs+axis*NB_CCAP)+nbTileIndex(t);vel[NB_VEL_C_U0+i]=value.x;vel[NB_VEL_C_US0+i]=value.y;
+      }
     }
   }
   if(!xTexel(entry.y,local)){return;}
   let fw=xFaceWidth(anchor,axis);if(fw==0u){return;}
-  let value=xfer[384u*(2u*g+cfg.z)+lane];
+  let value=vec2f(xfer[384u*(2u*g)+lane],xfer[384u*(2u*g+1u)+lane]);
   if(fw==1u){
     // An h face: the F brick of its upper cell.
     let s=nbFSlotOfCell(anchor+e);
     if(s>=NB_SEAM){nbFail(NB_FAIL_TIER,nbKey((anchor+e)>>vec3u(3u)));return;}
-    vel[xFaceF()+NB_STRIDE*(s+axis*NB_FCAP)+nbLocal(anchor+e)]=value;
+    let i=NB_STRIDE*(s+axis*NB_FCAP)+nbLocal(anchor+e);vel[NB_VEL_F_U0+i]=value.x;vel[NB_VEL_F_US0+i]=value.y;
   }else{
     // A 4h face: the C brick of its upper tile.
     let T=t+e;let cs=nbCSlotOfPage(T>>vec3u(3u));
     if(cs==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(T>>vec3u(3u)));return;}
-    vel[xFaceC()+NB_STRIDE*(cs+axis*NB_CCAP)+nbTileIndex(T)]=value;
+    let i=NB_STRIDE*(cs+axis*NB_CCAP)+nbTileIndex(T);vel[NB_VEL_C_U0+i]=value.x;vel[NB_VEL_C_US0+i]=value.y;
   }
 }`);
 
@@ -366,11 +466,9 @@ export function brickTransferSchedule(L: BrickLayout, list: (k: number, g: "G1")
   return [
     { kernel: t.setTransferList, dispatch: { indirect: ARGS.PER_LIST * cAll + ARGS.X8 } },
     { kernel: t.setTransferArgs, dispatch: { direct: [1, 1, 1] as const } },
-    { kernel: t.setTransferFaces, dispatch: xfer, z: 0 },
-    { kernel: t.setTransferFaces, dispatch: xfer, z: 1 },
+    { kernel: t.setTransferFaces, dispatch: xfer },
     { kernel: t.setTransferCells, dispatch: xfer },
-    { kernel: t.setTransferCommit, dispatch: xfer, z: 0 },
-    { kernel: t.setTransferCommit, dispatch: xfer, z: 1 },
+    { kernel: t.setTransferCommit, dispatch: xfer },
     { kernel: t.setCommitMask, dispatch: list(cAll, "G1") },
   ];
 }
