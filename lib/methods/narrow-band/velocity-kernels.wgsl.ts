@@ -64,6 +64,23 @@ fn vCentreStage(o:vec3i,lid:u32){
 }
 // Cell c of the staged range (o-1..o+7 on every axis).
 fn vCentre(c:vec3i)->f32{let r=c-vCentreLow;return wCentre[u32(r.x+9*(r.y+9*r.z))];}
+// FC_LIQ of the brick at o (slot): fgLiquidCell of its cells from the staged centres (after the staging's barrier).
+fn vLiquidStore(slot:u32,o:vec3i,lid:u32){
+ if(lid>=16u){return;}
+ var bits=0u;
+ for(var k=0u;k<32u;k++){let c=o+nbLocalCoord(32u*lid+k);if(nbInLattice(c)&&vCentre(c)< -0.001){bits|=1u<<k;}}
+ fcStore(FC_LIQ+16u*slot+lid,bits);
+}
+`;
+/** fgLiquidOwner from FC_LIQ (this step's, uTransfer's; needs FG_PHI_WGSL and FG_FCELL_WGSL): a cell of a 4h tile
+ * its tile's phase, an h cell its bit, a cell no slot holds its corners (fgLiquidCell). */
+const V_LIQUID_WGSL = /* wgsl */`
+fn vLiquidOwner(c:vec3i)->bool{
+ if(fgCellCoarse(c)){return fgTileCentre4(c>>vec3u(2u))< -0.001;}
+ if(!nbInLattice(c)){return false;}
+ let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
+ let l=nbLocal(c);return ((fcLoad(FC_LIQ+16u*s+(l>>5u))>>(l&31u))&1u)!=0u;
+}
 `;
 
 /** Tiered: the 4h owner as the old engine's width-4 cell (needs FG_PHI_WGSL and the fill: levelSetFillWGSL,
@@ -215,19 +232,22 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   const base = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL].join("\n");
   const windowBase = [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL].join("\n");
   const fill = [levelSetFillWGSL, geometricPlaneBoxWGSL].join("\n");
+  // uAdvect's lanes a brick (its 512 cells and its traced-face list). On the dam's frozen step 20 (tiered / all h,
+  // ms): 64 lanes 21.8 / 17.5, 128 13.5 / 10.3, 256 11.7 / 10.2, 512 12.3 / 11.0.
+  const A_LANES = 256;
   const brickHead = /* wgsl */`
  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_F_ALL)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);`;
   // The staged head (seep S2c): a C page of an FC pass runs page and returns; an F brick stages its owner window
   // (FG_SLOT_WINDOW_WGSL) and, with ring, the vertex φ ring from o + ring (FG_RING_WGSL), then barriers. Every
-  // branch is workgroup-uniform (the split by workgroupUniformLoad).
-  const stagedHead = (page: string, ring?: number) => /* wgsl */`
+  // branch is workgroup-uniform (the split and the C count by workgroupUniformLoad), so a page may barrier.
+  const stagedHead = (page: string, ring?: number, lanes = 256) => /* wgsl */`
  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
  let split=workgroupUniformLoad(&sSplit);let g=nbGroup(wid);
- if(g>=split){${page ? `if(FG_TIERED&&g-split<nbListCount(NB_LIST_C_ALL)){${page}(nbListSlot(NB_LIST_C_ALL,g-split),lid);}` : ""}return;}
+ if(g>=split){${page ? `if(FG_TIERED){if(lid==0u){sSplit=nbListCount(NB_LIST_C_ALL);}if(g-split<workgroupUniformLoad(&sSplit)){${page}(nbListSlot(NB_LIST_C_ALL,g-split),lid);}}` : ""}return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
- fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();${ring === undefined ? "" : `
- fgRingStage(o+vec3i(${ring}),lid,256u);workgroupBarrier();`}`;
+ fgWindowStage(o>>vec3u(3u),lid,${lanes}u);workgroupBarrier();${ring === undefined ? "" : `
+ fgRingStage(o+vec3i(${ring}),lid,${lanes}u);workgroupBarrier();`}`;
 
   // uAdvect: a workgroup a brick, a lane two cells' three lower faces.
   // Lane 0 of the first brick also turns this step's gauge into the volume control's rate (vGauge ran in the level
@@ -242,43 +262,58 @@ fn nbxTraceCapped(){atomicAdd(&nbSet[FH_TRACE_CAPPED],1u);}
 fn vLive(c:vec3i)->bool{if(fgCellCoarse(c)){return vLive4(c>>vec3u(2u));}return nbInLattice(c)&&fgCentrePhi(c)<0.0;}
 // A C page (tiered, FC list): the departure of each whole 4h face (umUnitMomentumValue at width 4: culled where
 // neither owner is live, else the trace from the face's centre, umFaceCenter), into UP.
+// The traced faces of a workgroup (S2p's compaction): a lane marks its faces, culled ones take 0 at once, and the
+// traces run from the list, so whole SIMD groups trace instead of the lanes whose cells hold liquid.
+const A_LANES:u32=${A_LANES}u;
+var<workgroup> wTrace:array<u32,1536>;
+var<workgroup> wTraced:atomic<u32>;
+var<workgroup> sTraced:u32;
+fn vTraceAdd(e:u32){wTrace[atomicAdd(&wTraced,1u)]=e;}
 fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
- for(var r=0u;r<2u;r++){
-  let j=lid+256u*r;let T=vcTile(slot,j);let live=vLive4(T);
+ for(var r=0u;r<512u/A_LANES;r++){
+  let j=lid+A_LANES*r;let T=vcTile(slot,j);let live=vLive4(T);
   for(var a=0u;a<3u;a++){
    if(!vcFace(T,a)){continue;}
-   var value=0.0;
-   if(fgFaceOpen(4*T,a)&&(live||vLive4(T-fgUnit(a)))){
-    var centre=vec3f(4*T)+vec3f(2.0);centre[a]=f32(4*T[a]);
-    value=nbfMomentumTrace(centre,a,dt,h);
-   }
-   vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=value;
+   if(fgFaceOpen(4*T,a)&&(live||vLive4(T-fgUnit(a)))){vTraceAdd(j|(a<<9u));continue;}
+   vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=0.0;
   }
+ }
+ workgroupBarrier();
+ if(lid==0u){sTraced=atomicLoad(&wTraced);}
+ let n=workgroupUniformLoad(&sTraced);
+ for(var k=lid;k<n;k+=A_LANES){
+  let e=wTrace[k];let j=e&511u;let a=e>>9u;let T=vcTile(slot,j);
+  var centre=vec3f(4*T)+vec3f(2.0);centre[a]=f32(4*T[a]);
+  vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=nbfMomentumTrace(centre,a,dt,h);
  }
 }
 var<workgroup> sSplit:u32;
 fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
-@compute @workgroup_size(256) fn uAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+@compute @workgroup_size(${A_LANES}) fn uAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let dt=vDt();let h=vH();
-${stagedHead("vcAdvectPageOf", -1)}
+${stagedHead("vcAdvectPageOf", -1, A_LANES)}
  if(g==0u&&lid==0u){
   let filled=vVolume(FH_VOL_SUM+2u*(cfg.y&1u));
   atomicStore(&nbSet[FH_VOL_FILLED],bitcast<u32>(filled));
   atomicStore(&nbSet[FH_RATE],bitcast<u32>(nbfVolumeRate(filled,vVolume(FH_VOL_BUDGET),dt,V_CONTROL,atomicLoad(&nbSet[FH_VOL_CAPTURED])!=0u)));
  }
- for(var r=0u;r<2u;r++){
-  let l=lid+256u*r;let c=o+nbLocalCoord(l);
+ for(var r=0u;r<512u/A_LANES;r++){
+  let l=lid+A_LANES*r;let c=o+nbLocalCoord(l);
   let live=vLive(c);
   for(var a=0u;a<3u;a++){
    if(!fgFaceOwned(c,a)){continue;}
-   var value=0.0;
-   // A closed face holds 0; a face between two dead cells is culled (umCullAir).
-   if(fgFaceOpen(c,a)&&(live||vLive(c-fgUnit(a)))){
-    var centre=vec3f(c)+vec3f(0.5);centre[a]=f32(c[a]);
-    value=nbfMomentumTrace(centre,a,dt,h);
-   }
-   vel[vAt(NB_VEL_F_UP0,slot,a,l)]=value;
+   // A closed face holds 0; a face between two dead cells is culled (umCullAir); the rest are traced from the list.
+   if(fgFaceOpen(c,a)&&(live||vLive(c-fgUnit(a)))){vTraceAdd(l|(a<<9u));continue;}
+   vel[vAt(NB_VEL_F_UP0,slot,a,l)]=0.0;
   }
+ }
+ workgroupBarrier();
+ if(lid==0u){sTraced=atomicLoad(&wTraced);}
+ let n=workgroupUniformLoad(&sTraced);
+ for(var k=lid;k<n;k+=A_LANES){
+  let e=wTrace[k];let l=e&511u;let a=e>>9u;let c=o+nbLocalCoord(l);
+  var centre=vec3f(c)+vec3f(0.5);centre[a]=f32(c[a]);
+  vel[vAt(NB_VEL_F_UP0,slot,a,l)]=nbfMomentumTrace(centre,a,dt,h);
  }
 }`);
 
@@ -455,6 +490,7 @@ ${stagedHead("vcTransferPage", -1)}
  }
  workgroupBarrier();
  if(!live){return;}
+ vLiquidStore(slot,o,lid);
  let dt=vDt();let h=vH();let gravity=vGravity();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
@@ -525,6 +561,7 @@ var<workgroup> sSplit:u32;
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);vCentreStage(o,lid);}
  workgroupBarrier();
  if(!live){return;}
+ vLiquidStore(slot,o,lid);
  let lead=0.5*vDt();let h=vH();let gravity=vGravity();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
@@ -634,10 +671,10 @@ ${stagedHead("vcViscousPage")}
   // uExtend (the extension pair at h): a workgroup a brick, 512 lanes, one axis at a time over the 12^3 window
   // (cells o-2..o+9). Seeds (ufxSeedCodeOf): 3 a closed face, 1 a source (liquid either side), 2 blocked (the
   // tile of the old texel, the cell below the face, lacks support: occupied distance over 3 tiles), 0 unreached.
-  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + FG_RING_WGSL(14, { write: (j, x) => `xRingWrite(${j},${x})`, read: j => `xRingRead(${j})` }) + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
+  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + V_LIQUID_WGSL + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
 var<workgroup> wV:array<f32,1728>;
 var<workgroup> wD:array<f32,1728>;
-// fgLiquidOwner of cells o-3..o+9 (13^3 bits), staged once for the three axes.
+// fgLiquidOwner of cells o-3..o+9 (13^3 bits, from FC_LIQ: vLiquidOwner), staged once for the three axes.
 var<workgroup> wLiq:array<atomic<u32>,69>;
 // Tiered: the 4h state about the brick (ufxStage4: old 4h faces C in base-2..base+2, C's +face the C face C + e_a)
 // and whether each brick of the window has a supported h tile (ufxRH's mode bit 0).
@@ -646,9 +683,6 @@ var<workgroup> wSwept:array<u32,27>;
 var<private> xLow:vec3i;
 var<private> xBase4:vec3i;
 var<private> xBrick:vec3i;
-// The vertex φ ring of o-3..o+10 (14^3) for the liquid bits, in wV and wD before the sweeps use them.
-fn xRingWrite(j:u32,x:f32){if(j<1728u){wV[j]=x;}else{wD[j-1728u]=x;}}
-fn xRingRead(j:u32)->f32{if(j<1728u){return wV[j];}return wD[j-1728u];}
 fn xLiquid(c:vec3i)->bool{let r=c-xLow;let i=u32(r.x+13*(r.y+13*r.z));return ((atomicLoad(&wLiq[i>>5u])>>(i&31u))&1u)!=0u;}
 fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}
 fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}
@@ -703,11 +737,9 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   wS4[lid]=vec4f(st,0.0);
  }
  workgroupBarrier();
- fgRingStage(o-vec3i(3),lid,512u);
- workgroupBarrier();
  if(live){
   for(var j=lid;j<2197u;j+=512u){
-   if(fgLiquidOwner(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));}
+   if(vLiquidOwner(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));}
   }
   if(FG_TIERED&&lid<27u){
    let b=xBrick+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u))-vec3i(1);var swept=0u;
@@ -719,7 +751,6 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   }
  }
  workgroupBarrier();
- fgRingClose();
  for(var a=0u;a<3u;a++){
   if(live){
    for(var r=0u;r<4u;r++){
@@ -750,38 +781,68 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
 }
 fn fsBit4(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}`);
 
-  // uExt4Seed (ufxR's restriction, V_EXT4_WGSL): a workgroup a C page, a lane two tiles' three faces. It reads the
-  // directory: a page's 6^3-brick owner window (1944 staged entries) measured 3.2 ms slower on the dam's frozen state.
-  const uExt4Seed = k("uExt4Seed", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fext4], base + V_EXT4_WGSL + /* wgsl */`
-fn x4Seed(T:vec3i,a:u32)->vec3f{
- let e=fgUnit(a);let O=T-e;
- if(!foTileInLattice(O)||fgTileCSlot(O)==NB_NONE){return vec3f(0.0,0.0,-1.0);}
- var value=vec2f(0.0);var source=false;
- if(!foTileOwnerH(O)&&!foTileOwnerH(T)){value=vec2f(foUCFace(T,a),foPCFace(T,a));source=fgLiquidOwner(4*O)||fgLiquidOwner(4*T);}
- else{
-  let u=(a+1u)%3u;let v=(a+2u)%3u;var all=vec2f(0.0);var liquid=vec2f(0.0);var count=0.0;
-  for(var i=0u;i<16u;i++){
-   var c=4*T;c[u]+=i32(i&3u);c[v]+=i32(i>>2u);
-   let f=vec2f(foUFFace(c,a),foPFFace(c,a));all+=f;
-   if(fgLiquidOwner(c-e)||fgLiquidOwner(c)){liquid+=f;count+=1.0;}
-  }
-  value=select(all/16.0,liquid/count,count>0.0);source=count>0.0;
- }
+  // uExt4Seed (ufxR's restriction, V_EXT4_WGSL): a workgroup a C page, a lane two tiles' three faces; a face with an
+  // h owner either side is listed and spread over 16 lanes. It reads the directory: a page's 6^3-brick owner window
+  // (1944 staged entries) measured 3.2 ms slower on the dam's frozen state.
+  const uExt4Seed = k("uExt4Seed", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fext4], base + V_EXT4_WGSL + V_LIQUID_WGSL + /* wgsl */`
+// The seed's word from the face's value and whether it is a source.
+fn x4Close(T:vec3i,a:u32,value:vec2f,source:bool)->vec3f{
  if(!fgFaceOpen(4*T,a)){return vec3f(value,-1.0);}
  if(source){return vec3f(value,0.0);}
- return vec3f(value,select(-1.0,1e+20,x4Support(O)));
+ return vec3f(value,select(-1.0,1e+20,x4Support(T-fgUnit(a))));
 }
+// The faces with an h owner either side (j | a << 9), whose 16 subfaces' liquid tests were the kernel's cost: listed,
+// then 16 lanes a face (seep S2p's spread of an interface face), each lane one subface's two faces and liquid test,
+// and the face's lane sums them in the subface order.
+var<workgroup> wHeavy:array<u32,1536>;
+var<workgroup> wHeavies:atomic<u32>;
+var<workgroup> sHeavy:u32;
+var<workgroup> wSub:array<vec2f,256>;
+var<workgroup> wSubLiquid:array<u32,256>;
+var<workgroup> sCount:u32;
 @compute @workgroup_size(256) fn uExt4Seed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
+ let g=nbGroup(wid);
+ if(lid==0u){sCount=nbListCount(NB_LIST_C_ALL);}
+ if(g>=workgroupUniformLoad(&sCount)){return;}
  let slot=nbListSlot(NB_LIST_C_ALL,g);let P=nbCOrigin(slot)>>vec3u(2u);
  for(var r=0u;r<2u;r++){
   let j=lid+256u*r;let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));
-  for(var a=0u;a<3u;a++){x4Store(slot,0u,j,a,x4Seed(T,a));}
+  for(var a=0u;a<3u;a++){
+   let O=T-fgUnit(a);
+   if(!foTileInLattice(O)||fgTileCSlot(O)==NB_NONE){x4Store(slot,0u,j,a,vec3f(0.0,0.0,-1.0));continue;}
+   if(!foTileOwnerH(O)&&!foTileOwnerH(T)){
+    let value=vec2f(foUCFace(T,a),foPCFace(T,a));
+    x4Store(slot,0u,j,a,x4Close(T,a,value,vLiquidOwner(4*O)||vLiquidOwner(4*T)));continue;
+   }
+   wHeavy[atomicAdd(&wHeavies,1u)]=j|(a<<9u);
+  }
+ }
+ workgroupBarrier();
+ if(lid==0u){sHeavy=atomicLoad(&wHeavies);}
+ let n=workgroupUniformLoad(&sHeavy);
+ let i=lid&15u;
+ for(var b=0u;b<n;b+=16u){
+  let f=b+(lid>>4u);
+  var j=0u;var a=0u;var T=vec3i(0);
+  if(f<n){
+   let w=wHeavy[f];j=w&511u;a=w>>9u;T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));
+   let e=fgUnit(a);let u=(a+1u)%3u;let v=(a+2u)%3u;
+   var c=4*T;c[u]+=i32(i&3u);c[v]+=i32(i>>2u);
+   wSub[lid]=vec2f(foUFFace(c,a),foPFFace(c,a));
+   wSubLiquid[lid]=select(0u,1u,vLiquidOwner(c-e)||vLiquidOwner(c));
+  }
+  workgroupBarrier();
+  if(f<n&&i==0u){
+   var all=vec2f(0.0);var liquid=vec2f(0.0);var count=0.0;
+   for(var k=0u;k<16u;k++){let x=wSub[lid+k];all+=x;if(wSubLiquid[lid+k]!=0u){liquid+=x;count+=1.0;}}
+   x4Store(slot,0u,j,a,x4Close(T,a,select(all/16.0,liquid/count,count>0.0),count>0.0));
+  }
+  workgroupBarrier();
  }
 }`);
 
   // uExt4 (ufx4 and ufxPublish4, V_EXT4_WGSL): a workgroup a C page, a lane a tile, the 12^3 window of faces.
-  const uExt4 = k("uExt4", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fext4], base + nbfExtensionWGSL.replace("alias UfxV=f32;", "alias UfxV=vec2f;") + V_CADDR_WGSL + V_EXT4_WGSL + /* wgsl */`
+  const uExt4 = k("uExt4", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fext4], base + nbfExtensionWGSL.replace("alias UfxV=f32;", "alias UfxV=vec2f;") + V_CADDR_WGSL + V_EXT4_WGSL + V_LIQUID_WGSL + /* wgsl */`
 var<workgroup> wV:array<vec2f,1728>;
 var<workgroup> wD:array<f32,1728>;
 var<workgroup> wPage:array<u32,27>;
@@ -839,13 +900,13 @@ fn ySeed(T:vec3i,a:u32)->vec3f{
   let O=T-fgUnit(a);
   if(!foTileOwnerH(T)||!foTileInLattice(O)||foTileOwnerH(O)||fgTileCSlot(O)==NB_NONE){continue;}
   // ufxPublish4's seam: the 16 subfaces of O's face toward the h tile T.
-  let u=(a+1u)%3u;let v=(a+2u)%3u;let owner=fgLiquidOwner(4*O);let reached=ufxReached(s.z);
+  let u=(a+1u)%3u;let v=(a+2u)%3u;let owner=vLiquidOwner(4*O);let reached=ufxReached(s.z);
   for(var i=0u;i<16u;i++){
    var c=4*T;c[u]+=i32(i&3u);c[v]+=i32(i>>2u);
    let fs=fgSlot(c);if(fs==NB_NONE){continue;}
    let iu=vAt(NB_VEL_F_UP0,fs,a,nbLocal(c));
    let own=fgFace(NB_VEL_F_U0,c,a);let kept=vel[iu];
-   let source=!fgFaceOpen(c,a)||owner||fgLiquidOwner(c);
+   let source=!fgFaceOpen(c,a)||owner||vLiquidOwner(c);
    let take=!source&&reached;
    let value=select(own,s.x,take);
    vel[vAt(NB_VEL_F_US0,fs,a,nbLocal(c))]=value;vel[iu]=value-select(kept,s.y,take);

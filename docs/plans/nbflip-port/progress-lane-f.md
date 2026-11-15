@@ -761,3 +761,113 @@ Tiered is at or below all-h only in lAdvect. In all-h the window and rings cost 
 - Against the default references (now dam-ref-a..e): margin 1.25, 7.095e5 against 6.309e5.
 - Against a + b only: margin 1.12, against 6.383e5.
 - D8c passes, at 0.46.
+
+## Items 2-3 (first round): traced-work compaction and the per-step liquid cache (2026-11-16)
+
+Measured on tree-s6 (0be9d9f4 plus exactly the committed lane F files) against tree-h1 (0be9d9f4). The commit lands on 258aae94 (lane E residency (b)), which touches none of these files. Every change is
+bitwise on the dam's frozen step 20, tiered and all-h (frozen.mts: uAdvect, uTransfer, lDistance, uExt4Seed, uExt4
+and uExtend all `same`).
+
+**What changed.**
+- **uAdvect (S2p's compaction).** A lane marks its cells' faces: a culled face (closed, or umCullAir's two dead
+  cells) takes 0 at once, and a traced face goes to a workgroup list (`l | a << 9`). All 256 lanes then trace from the
+  list, so whole SIMD groups run the RK trace. A C page does the same. The C page branch is now workgroup-uniform (the
+  C count by workgroupUniformLoad), so a page may barrier.
+- **Lanes a brick, frozen ms (tiered / all-h):** 64 lanes 21.8 / 17.5, 128 13.5 / 10.3, 256 11.7 / 10.2, 512
+  12.3 / 11.0. 256 is kept.
+- **Not done: the separate slab kernel.**
+  - Seep's own table puts per-brick compaction (633-655 µs) within 3% of the 64-cell slabs (618-636).
+  - Our sampler also reads the staged owner window. Slabs would stage it eight times a brick, or go back to the
+    directory.
+- **lDistance.** The (vertex, nearest crossing cell) pairs of each half brick go to a workgroup list (`lid | k << 8`,
+  k the first of the vertex's 8 cells to name the crossing cell). The lanes run nbfCellDistance from the list into
+  the vertex's minimum: atomicMin on the bits, since a distance is a length, at least +0, and the bits order as the
+  values.
+- **Pairs on the frozen state:**
+  - All-h: 1.44M pairs. The tiered count was not probed separately.
+  - Before the change the tiered kernel took 5.58 ms against all-h's 1.58: 3.5x for a similar band. The cost was
+    the serial per-lane loop of owner-resolved corner reads.
+  - A flat-corner probe took the tiered kernel from 5.0 to 2.3 ms. That probe reads F directly; it gives different
+    results and is timing only.
+- **FC_LIQ, a new fcell channel.**
+  - Contents: each cell's liquid phase this step (fgLiquidCell), 16 words a slot.
+  - Writer: uTransfer writes it from its staged centres. uKick writes it at boot.
+  - Readers: vLiquidOwner, used by uExt4Seed, uExt4 and uExtend in place of the eight-corner recomputation. An h
+    cell reads its bit, a 4h cell its tile's phase, and a cell no slot holds computes its corners.
+  - No φ writer runs between the writer and the readers in either schedule. The new fluid-staging.test.ts case checks
+    this.
+  - uExtend drops its 14^3 vertex ring, which only fed the liquid bits.
+- **uExt4Seed.**
+  - The knockout showed the cost: removing the liquid tests took the kernel from 6.2 ms to 0.16 ms. The kernel ran
+    19,077 faces with an h owner, and each made 32 liquid tests, 4.9M directory vertex resolutions in all.
+  - Change: those faces are now listed and spread over 16 lanes a face, one subface a lane. The face's lane sums in
+    the subface order.
+  - With FC_LIQ the liquid tests are a bit read.
+
+**Register limits (mstat: Dawn MSL, `max_total_threads` stripped, Metal maxTotalThreadsPerThreadgroup), before → after.**
+
+| kernel | tiered | all-h |
+|---|---|---|
+| uAdvect | 576 → 576 | 640 → 704 |
+| uExtend | 640 → 640 | 1024 → 1024 |
+| lDistance | 768 → 832 | 832 → 1024 |
+| uExt4Seed | 576 → 576 | - |
+
+The trace holds the registers, at 576 tiered: the blended sampler. Compaction does not lower them. Seep's split
+trace kernel sat at 704-832.
+
+**Frozen step 20 (timing slot, min of 5, ms), h1 → s6.**
+
+| kernel | tiered | all-h |
+|---|---|---|
+| uAdvect | 16.1 → 12.2 | 12.3 → 10.9 |
+| uExtend | 10.2 → 6.6 | 3.17 → 2.64 |
+| uExt4Seed | 4.99 → 0.48 | - |
+| uExt4 | 1.03 → 0.51 | - |
+| lDistance | 5.58 → 3.59 | 1.58 → 1.40 |
+
+**Profile, timing slot, steps 13-24.**
+- Tiered: 93.7 → 79.1 ms/step. Grid velocity 38.8 → 26.1, level set 15.9 → 13.9.
+- All-h: 73.9 → 72.5.
+
+**Per brick (ns/wg, timing slot profile) against seep-m1max.**
+- **Seep's figures, from its own logs (progress-lane-s.md, step 1100, about 2600 active bricks):**
+  - Velocity plus trace: 618 µs (S2p kbench), 0.24 µs a brick. The 0.25 estimate holds.
+  - Extend: 247 + 81 µs before S2o's sweep skip, at most 0.13 µs a brick.
+  - Redistance: init 92 + sweeps 223 + 140 µs after S2o, 0.175 µs a brick.
+- **Workloads at the measured step** (traced faces and segments counted by probe):
+  - Seep at 1100: 503k traced faces, 513k segments (about 1 a face).
+  - Our dam at step 20, all-h: 2.06M faces, 7.61M segments (3.7 a face).
+  - Our dam at step 20, tiered: 0.53M faces, 3.22M segments (6.05 a face).
+  - So our dam does 4-10x seep's sampling work per brick.
+
+| kernel (seep's equivalent) | tiered h1 | tiered s6 | all-h h1 | all-h s6 | seep a brick |
+|---|---|---|---|---|---|
+| uAdvect (+ uTransfer, pDeposit: velocity + trace) | 3822 (+1222+362) | 2811 (+1198+357) | 3105 (+587+232) | 2793 (+590+229) | 240 |
+| uExtend (+ uExt4Seed, uExt4 over the F bricks: extend) | 2363 (+1860) | 1522 (+195) | 685 | 570 | ≤130 |
+| lDistance (redistance) | 1469 | 912 | 360 | 312 | 175 |
+
+- **Per traced sample:**
+  - uAdvect tiered: 1.49 ns (6.98M momentum samples on the frozen state).
+  - uAdvect all-h: 0.64 ns (17.27M samples, 2.27 a segment).
+  - Seep velocity plus trace: about 0.40 ns. This is an upper bound: 618 µs, its pass 1 included, over about 1.53M
+    samples. The sample count assumes three samples a segment; seep's log gives only the 513k segments.
+  - So all-h is 1.6x seep per sample, and tiered is 3.7x.
+- **Remaining gap:** the tiered sampler (fsFineWeight, 24 fine taps, 24 coarse taps) costs 2.3x the all-h sampler
+  per sample.
+- **Target not met:** tiered within 1.5x of seep per brick. The per-brick gap is mostly the dam's workload, and
+  second the tiered sampler.
+
+**Timing, timing slot, 165 steps, tiered.**
+- Fenced median: s6 70.7 ms, h1 85.3 ms.
+- Pipelined: s6 72.8 ms/step, h1 87.3 ms/step.
+- No run latched a failure.
+
+**D8, the dam-300 gate on s6 (check slot), against the default refs a-e.**
+- Every row passes except D8, which fails at margin 1.34 (7.152e5 against 6.309e5 in 30-90). D8c passes, at 0.45.
+- The frozen checks are bitwise, so the margin change from st7's 1.25 comes from HEAD (lane E's region heat) or
+  run-to-run spread.
+- **Per sample, against the refs' mean (st7 run):** the excess starts at step 7 (1.22x), where the refs' particles
+  rise slower. It holds at 1.1-1.2x afterwards.
+- The references record only particles, so the T1/T2 tiles, seeds and deletions per step need an instrumented
+  old-engine run.

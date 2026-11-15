@@ -478,26 +478,58 @@ fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
 }`);
 
   const lDistance = k("lDistance", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [staged(12), nbfRedistanceWGSL].join("\n") + /* wgsl */`
+// The (vertex, nearest crossing cell) pairs of a half brick (seep S2p's compaction): a lane lists its vertex's
+// distinct cells (lid | k << 8, k the first of the 8 cells about the vertex to name it), the lanes then run the
+// distances from the list into the vertex's minimum (atomicMin on the bits: every distance is a length, at least
+// +0, where the bits order as the values), and the lane stores its vertex.
+var<workgroup> wPair:array<u32,2048>;
+var<workgroup> wPairs:atomic<u32>;
+var<workgroup> sPairs:u32;
+var<workgroup> wFound:array<atomic<u32>,256>;
+fn dCell(p:vec3i,k:u32)->vec3i{return p-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
+fn dNear(c:vec3i)->u32{
+ if(!nbInLattice(c)||!fgReach1(c)){return NB_NONE;}
+ let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}
+ return fcLoad(FC_NEAR+fgCell(s,c));
+}
 @compute @workgroup_size(256) fn lDistance(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${stagedHead(-2)}
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let p=o+nbLocalCoord(l);
-  if(!lVertexIn(p)||!fgReach2(lCellBelow(p))){continue;}
-  let initial=fgPhi(p);var value=initial;
-  if(abs(initial)>1e-8){
-   var found=3e38;var seen:array<u32,8>;var n=0u;
-   for(var k=0u;k<8u;k++){
-    let c=p-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));
-    if(!nbInLattice(c)||!fgReach1(c)){continue;}
-    let s=fgSlot(c);if(s==NB_NONE){continue;}
-    let w=fcLoad(FC_NEAR+fgCell(s,c));if(w==NB_NONE){continue;}
-    var dup=false;for(var j=0u;j<n;j++){if(seen[j]==w){dup=true;}}if(dup){continue;}
-    seen[n]=w;n++;
-    let cell=fgUnpack(w);if(fgSlot(cell)==NB_NONE){continue;}
-    let d=nbfCellDistance(vec3f(p-cell),fgCorners(cell));if(d>=0.0){found=min(found,d);}
+  let inReach=lVertexIn(p)&&fgReach2(lCellBelow(p));
+  var initial=0.0;
+  atomicStore(&wFound[lid],bitcast<u32>(3e38));
+  if(lid==0u){atomicStore(&wPairs,0u);}
+  workgroupBarrier();
+  if(inReach){
+   initial=fgPhi(p);
+   if(abs(initial)>1e-8){
+    var seen:array<u32,8>;var n=0u;
+    for(var k=0u;k<8u;k++){
+     let w=dNear(dCell(p,k));if(w==NB_NONE){continue;}
+     var dup=false;for(var j=0u;j<n;j++){if(seen[j]==w){dup=true;}}if(dup){continue;}
+     seen[n]=w;n++;
+     if(fgSlot(fgUnpack(w))==NB_NONE){continue;}
+     wPair[atomicAdd(&wPairs,1u)]=lid|(k<<8u);
+    }
    }
-   if(found<3e38){value=sign(initial)*max(found,1e-8);}else{value=sign(initial)*max(abs(initial),5.0);}
   }
-  fcStoreF(FC_DEPTH+512u*slot+l,value);
+  workgroupBarrier();
+  if(lid==0u){sPairs=atomicLoad(&wPairs);}
+  let count=workgroupUniformLoad(&sPairs);
+  for(var i=lid;i<count;i+=256u){
+   let e=wPair[i];let v=e&255u;let q=o+nbLocalCoord(v+256u*r);
+   let cell=fgUnpack(dNear(dCell(q,e>>8u)));
+   let d=nbfCellDistance(vec3f(q-cell),fgCorners(cell));if(d>=0.0){atomicMin(&wFound[v],bitcast<u32>(d));}
+  }
+  workgroupBarrier();
+  if(inReach){
+   var value=initial;
+   if(abs(initial)>1e-8){
+    let found=bitcast<f32>(atomicLoad(&wFound[lid]));
+    if(found<3e38){value=sign(initial)*max(found,1e-8);}else{value=sign(initial)*max(abs(initial),5.0);}
+   }
+   fcStoreF(FC_DEPTH+512u*slot+l,value);
+  }
  }
 }`);
 
