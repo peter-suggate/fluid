@@ -999,3 +999,49 @@ Results:
   moves with the trajectory. The profiled fenced medians are 106.7 / 107.1 for base and 107.7 / 106.2 for cand. The
   difference does not reproduce in the kernel sums.
 - The earlier +16 ms (08dac85d, one run each) was trajectory divergence and does not reproduce.
+
+## 2026-11-16: residency (b), seep S2j's local per-axis reach; the far-wall REACH latch's cause
+
+**Rule** (brick-residency.wgsl.ts `resMark`; brick-abi.md §5.4). This retires resSeed's per-stage records (`CENSUS.RES` is now unused), the global departureTravel/sampledFlow envelope and the 5-tile margin.
+- A brick source is any of three:
+  - `ACT.RES` tiles (setMark's ACTIVE tiles, less those ACTIVE only by their 4h corners);
+  - `PSUPPORT` word 0;
+  - this head's census `TRIG` bits 0..7.
+- The source's tile box is grown per axis and side by max(travel, (BOUND_F + |g| dt) dt / h) + 12 cells. It takes the bricks it covers and, tiered, their pages.
+- Tiered page sources (4h liquid tiles) take pages only, grown by flow + 12 cells.
+- The run is two `resMark` passes over F_ALL; tiered pass 0 runs FC_G1.
+- The boot runs part 2's class pass after F's boot stages, so step 1's head has its ACTIVE tiles.
+- The kept latches are setMark's 1-ring, pScatter's and pJoin's. A new one: setLeavePages latches a leaving page that held 4h liquid tiles.
+
+**The far-wall FAIL.REACH latch (lane F's 165-step timing runs, all on the old rule).**
+- Instrumented on ddfecfc5, the latching site is pJoin's `pSupport`.
+  - Pipelined: 2 of 3 runs latched, at steps 70 and 115. Separately, a 300-step check run of the old rule latched at step 121.
+  - The record was a fresh seed: age `SEED_FIRST`, depth −1.76 cells, coupled.
+  - It sat in a 4h-owned tile whose brick held no particles at the last setMark. Its 2-cell support reached the absent neighbour brick: (14,0,0) beside the x = 127 wall, (0,0,15) beside the z = 127 wall.
+- How such a seed arises:
+  - pSeed seeds wherever the tile heat `FT_T` is above 0, deep sites in 4h owners included (seedSite restricts only the outer shell to h owners).
+  - `FT_T` is the larger of the tile's heat and half its 27-tile maximum (lDilate).
+  - That heat is 2 on this head's triggered tiles (lHeatNow).
+- Why the old rule missed it: it seeded bricks only from h ownership (margin 0) and from the previous step's particle support. A seed has no previous support.
+- The fix: this head's `TRIG` is a brick source. Every other seed tile is within one tile of a tile with heat at the last setMark, which is in `ACT.RES`. A seed's support tiles then lie within 8 cells of a source box, inside the margin. This is not a margin change.
+
+**Gates** on 0be9d9f4 plus this change. All runs rc 0, with no 00000206.
+- Zero latches on:
+  - the tiered dam, 300 steps (check slot);
+  - all-h, 200 steps;
+  - the 165-step fenced and pipelined timing runs.
+- The fix was also clean on the ddfecfc5 base, in the same four runs.
+- GPU suites, 37/37:
+  - brick-engine, brick-set-tiers, brick-census, census-x8, brick-transfer, brick-owner, levelset-release, levelset-coarse, brick-region-heat;
+  - headMatchesOracle and the tiers test check `residencyOracle`'s new rule bitwise.
+- Unit tests 1836/0; check:types shows only the 3 lane-n errors.
+- Drift on the tiered dam: −0.0504 at step 20, −0.0098 at step 300. Before: −0.0555 and −0.0099 (bT300, the old rule on 04298677 + F_LIQ). All-h: −0.0108 at step 200 against −0.0108.
+
+**Residency**, tiered dam over 300 steps:
+
+| | mean liveF | peak liveF | churn (enter+leave)/step |
+|---|---|---|---|
+| bT300, old rule (04298677 + F_LIQ) | 3170 | 4820 | 138 |
+| This rule, 0be9d9f4 base | 3878 | 4851 | 98 |
+
+Peak liveC is 125 in both. The 12-cell margin on every source costs about +22% mean resident F; the per-source attribution and the margin's read-by justification are the next item.

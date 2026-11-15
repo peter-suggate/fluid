@@ -184,9 +184,10 @@ export class BrickEngine {
     ];
     // Part 1's head (brick-abi.md §2.5, §5.4), on the completed step's lists and state, in both engines:
     // - NB-FLIP's frame-head census (all-h too: F's TRIG, and WANT seeds residency);
-    // - the residency (brick-residency.wgsl.ts, the old pageSeed and lrAsk): resSeed's records, resRequest's keeps
-    //   and claims (pass 0 pages and the bricks of resident pages, setClaimPages, pass 1 the bricks of the pages it
-    //   entered), setClaimBricks, then setLeave and setLeavePages retire what no record reached (no hysteresis);
+    // - the residency (brick-residency.wgsl.ts: seep S2j's local per-axis reach of each source brick, ACTIVE tiles or
+    //   particle support): resMark's keeps and claims (pass 0 pages and the bricks of resident pages, setClaimPages,
+    //   pass 1 the bricks of the pages it entered), setClaimBricks, then setLeave and setLeavePages retire what no
+    //   source reached (no hysteresis);
     // - records, init and lists for the new set;
     // - tiered: censusWant checks every WANT ring (a refused pool latches FAIL.TIER) and the transfer commits;
     // - the churn lists clear for part 2 (stepEnd with cfg.z = 1: no step).
@@ -210,10 +211,10 @@ export class BrickEngine {
     const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes };
     const res = brickResidencyKernels(layout, { tiered });
     const residency: BrickPlacement[] = [
-      { kernel: res.resSeed, dispatch: g1(LIST.C_ALL) },
-      { kernel: res.resRequest, dispatch: g1(LIST.C_ALL), z: 0 },
+      // Tiered, pass 0 also runs the page sources: a workgroup a page of C_ALL after F_ALL's bricks (FC_G1).
+      { kernel: res.resMark, dispatch: tiered ? { indirect: ARGS.FC_G1 } : g1(LIST.F_ALL), z: 0 },
       { kernel: set.setClaimPages, dispatch: direct(churnGroups(f, 64)) },
-      { kernel: res.resRequest, dispatch: g1(LIST.C_ALL), z: 1 },
+      { kernel: res.resMark, dispatch: g1(LIST.F_ALL), z: 1 },
       { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)), z: 0 },
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
@@ -225,7 +226,12 @@ export class BrickEngine {
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
     const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [];
     const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after, ...(stages.kick.seed ? [...trigCensus, ...stages.kick.seed] : [])] : [];
-    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists(2), ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    // The boot's class pass, as part 2's (setMark after F's boot stages, before the kick raises BOUND_F; C_LIQ;
+    // setRecords clears the rebuilt counts), then the lists from its classes (cfg.z = 2 ORs NOW onto every live brick
+    // and keeps the ACTIVE tiles): step 1's head residency reads them (brick-residency.wgsl.ts), and the kick's lists
+    // (F_LIQ) are the boot state's.
+    const bootMark: BrickPlacement[] = [...part2.slice(0, part2.findIndex(p => p.kernel === set.setLists)), ...lists(2)];
+    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists(2), ...bootHead, ...stages.boot, ...bootMark, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census, residency and remap), then the release
     // port's reach words (after every head claim, before move), F's move and rebin.
     return { part1: [...head, ...release.part1, ...stages.move, ...stages.rebin], part2, boot };

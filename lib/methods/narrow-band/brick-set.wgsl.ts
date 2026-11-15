@@ -100,9 +100,10 @@ export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
 var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
 var<workgroup> wTiles:atomic<u32>;
+var<workgroup> wRes:atomic<u32>;
 var<workgroup> wNb:array<u32,27>;
 @compute @workgroup_size(64) fn setMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);}
+  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);atomicStore(&wRes,0u);}
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
   var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);}
   // The brick's 27 neighbour words (F record words 0-26), for the residency check below.
@@ -141,6 +142,9 @@ var<workgroup> wNb:array<u32,27>;
       let t=lid;var on=(nbSetWord(NB_S_TILE_OCC+slot)>>t)&1u;
       if(((nbSetWord(NB_S_TRIG+slot)>>t)&1u)!=0u||${heat}){on=1u;}
       ${tiered ? `if(((tiles>>t)&1u)!=0u){on=1u;}
+      // The residency's brick sources (ACT.RES) are these: h-owned, particles, heat. A tile ACTIVE only by its 4h
+      // corners is 4h storage, which the residency requests by page (resMark's page sources), not by brick.
+      if(on!=0u){atomicOr(&wRes,1u<<t);}
       else{
         let T=(o>>vec3u(2u))+vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));
         for(var q=0u;q<8u;q++){if(nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)))<0.0){on=1u;}}
@@ -171,7 +175,9 @@ var<workgroup> wNb:array<u32,27>;
     }
   }
   if(!live||lid!=0u){return;}
-  atomicOr(&nbSet[NB_S_ACT+slot],m);
+  // ACT.RES (bits 10..17): the residency's brick sources; all-h, every ACTIVE tile (all tiles are h).
+  let rs=${tiered ? "atomicLoad(&wRes)" : "m"};
+  atomicOr(&nbSet[NB_S_ACT+slot],m|(rs<<10u));
   var cls=0u;
   if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
@@ -208,7 +214,7 @@ var<workgroup> wN:atomic<u32>;
 }`);
 
   // setClaimPages: a candidate's page takes a C slot (NONE -> CLAIM -> cslot), once. A KEY_CLAIMED page key's word
-  // is already CLAIM (resRequest's winner); a KEY_CLAIMED brick key's page is resident.
+  // is already CLAIM (resMark's winner); a KEY_CLAIMED brick key's page is resident.
   const setClaimPages = k("setClaimPages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setClaimPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) nw:vec3u){
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
@@ -237,7 +243,7 @@ var<workgroup> wN:atomic<u32>;
 }`);
 
   // setClaimBricks: a candidate brick takes an F slot under its page's C slot, once. A KEY_CLAIMED key's child word
-  // is already CLAIM (resRequest's winner). An entering brick's particle support (PSUPPORT) starts empty.
+  // is already CLAIM (resMark's winner). An entering brick's particle support (PSUPPORT) starts empty.
   const setClaimBricks = k("setClaimBricks", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setClaimBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) nw:vec3u){
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
@@ -283,13 +289,16 @@ var<workgroup> wN:atomic<u32>;
   nbAppend(NB_LIST_F_LEAVE,s);
 }`);
 
-  // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (resRequest) leaves.
+  // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (resMark) leaves.
   const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setLeavePages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_C_ALL)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);let r=NB_D_CREC+32u*cs;
   let kept=atomicExchange(&nbSet[NB_S_MARK_C+cs],0u)!=0u;
   if(kept||atomicLoad(&dir[r+NB_REC_C_CHILDREN])!=0u){return;}
+  // A leaving page that held 4h liquid tiles (setMarkPages' LIQUID_TILES, last step) is a reach defect: no source
+  // brick's reach covered liquid (brick-residency.wgsl.ts). FAIL.REACH with its key, never dropped as air.
+  if(atomicLoad(&dir[r+NB_REC_C_LIQUID_TILES])!=0u){nbFail(NB_FAIL_REACH,atomicLoad(&dir[r+NB_REC_KEY]));}
   atomicStore(&dir[NB_D_PAGE+nbPageIndex(nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])))],NB_NONE);
   atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_LEAVING);
   nbPush(NB_H_TOP_C,NB_S_FREE_C,cs);
@@ -381,7 +390,8 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
   // its class word (setMark's; F_LIQ: the bricks with an h-owned liquid vertex) and its active class; a leaving
   // slot's key clears. F_ACT (brick-abi.md §5.5) lists NOW | PREV; at the head (cfg.z = 1) also an entering brick
   // (its first step's part 1 has no class yet), and the word then moves NOW to PREV for this step's setMark. The
-  // boot (cfg.z = 2) has no class yet: every live brick is NOW, so step 1 runs the moved stages on all of F_ALL.
+  // boot (cfg.z = 2) ORs NOW onto every live brick, so step 1 runs the moved stages on all of F_ALL; its ACTIVE tiles
+  // (the boot's class pass, run before the boot's last lists) are kept for step 1's head residency.
   const fLists: [number, string][] = [[LIST.F_LIQ, "LIQUID"], [LIST.F_SURF, "SURFACE"], [LIST.F_PART, "PARTICLES"], [LIST.F_SEAM, "SEAM"], [LIST.F_SOLID, "NEAR_SOLID"], [LIST.F_BODY, "NEAR_BODY"], [LIST.F_COLD, "COLD"], [LIST.F_CHANGED, "CHANGED"]];
   const setLists = k("setLists", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
 @compute @workgroup_size(64) fn setLists(@builtin(global_invocation_id) gid:vec3u){
@@ -395,7 +405,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
         let c=cls&~NB_CLASS_ENTERING;atomicStore(&dir[r+NB_REC_CLASS],c);
         nbAppend(NB_LIST_F_ALL,i);
         var a=atomicLoad(&nbSet[NB_S_ACT+i]);
-        if(cfg.z==2u){a=NB_ACT_NOW;atomicStore(&nbSet[NB_S_ACT+i],a);}
+        if(cfg.z==2u){a|=NB_ACT_NOW;atomicStore(&nbSet[NB_S_ACT+i],a);}
         if((a&(NB_ACT_NOW|NB_ACT_PREV))!=0u||(cfg.z==1u&&(cls&NB_CLASS_ENTERING)!=0u)){nbAppend(NB_LIST_F_ACT,i);}
         if(cfg.z==1u){atomicStore(&nbSet[NB_S_ACT+i],select(0u,NB_ACT_PREV,(a&NB_ACT_NOW)!=0u));}
         ${fLists.map(([j, bit]) => `if((c&NB_CLASS_${bit})!=0u){nbAppend(${j}u,i);}`).join("\n        ")}

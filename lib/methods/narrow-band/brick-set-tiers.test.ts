@@ -8,10 +8,7 @@ import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, REC, brickKeyCoord, 
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
-import { CENSUS } from "./brick-census.wgsl";
-import { recordRadii, residencyOracle } from "./brick-oracle";
-import { RES_STAGES } from "./brick-residency.wgsl";
-import { RESIDENCY_STAGES } from "../uniform/uniform-local-residency";
+import { residencyOracle } from "./brick-oracle";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { bringUpStages } from "./brick-stages";
 import { brickTransferKernels } from "./brick-transfer.wgsl";
@@ -19,6 +16,8 @@ import { brickTransferKernels } from "./brick-transfer.wgsl";
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type V3 = [number, number, number];
 const N = 64;
+/** The engine's dt, h and gravity (BrickEngine.create below), for the residency oracle's flow term. */
+const RING = { dt: 1 / 60, h: 1 / N, gravity: [0, -9.81, 0] as [number, number, number] };
 const key = (b: V3) => ((b[0] & 1023) | ((b[1] & 1023) << 10) | ((b[2] & 1023) << 20)) >>> 0;
 const tileOf = (i: number): V3 => [i & 7, (i >> 3) & 7, i >> 6];
 /** h tiles after the commit: block A (tiles x 0..5, y 4..5, z 0..5) and block B (tiles x 14..15, y 7, z 14): core bricks A x 0..2, y 2, z 0..2 and B (7, 3, 7). */
@@ -48,20 +47,18 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
     }
     const listC = { indirect: 12 * LIST.C_ALL };
     await e.run([{ kernel: brickTransferKernels(L).setCommitMask, dispatch: listC }]);
+    // The class pass of the committed state (part 2's setMark): the head's brick sources are its h-owned tiles.
+    await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMark"));
     // The head up to its lists: census, residency (seed, request, claims, leaves), records, init, lists.
-    const before = await snapshot(e), part1 = e.schedule.part1;
+    const before = await snapshot(e), part1 = e.schedule.part1, cBefore = { phi: await e.read("phi"), vel: await e.read("vel") };
     const head = part1.slice(0, part1.findIndex(p => p.kernel.label === "censusWant"));
     assert.deepEqual(head.slice(-2).map(p => p.kernel.label), ["setLists", "setArgs"]);
     await e.run(head);
-    const s = await snapshot(e), census = await e.read("census");
+    const s = await snapshot(e);
     assert.equal(s.header[H.FAIL], 0, `FAIL ${s.header[H.FAIL]} info ${s.header[H.FAIL_INFO]}`);
-    // ---- The oracle: masks exact, radii the stage margins (US = 0, no particles), the set.
-    const want = residencyOracle(L, before, census, s.set, (cs, r, st) => recordRadii(census, cs, r, st), true);
-    for (const [cs, m] of want.masks) for (let r = 0; r < 8; r++) for (let st = 0; st < RES_STAGES; st++) {
-      const at = CENSUS.STRIDE * cs + CENSUS.RES + 4 * (RES_STAGES * r + st), w = [m[2 * (RES_STAGES * r + st)]!, m[2 * (RES_STAGES * r + st) + 1]!];
-      assert.deepEqual([census[at], census[at + 1]], w, `page slot ${cs} region ${r} stage ${st} mask`);
-      assert.deepEqual(recordRadii(census, cs, r, st), Array(6).fill((w[0]! | w[1]!) !== 0 && st !== 0 ? RESIDENCY_STAGES[st]!.margin : 0));
-    }
+    // ---- The oracle (resMark's local per-axis reach from the ACTIVE bricks, plus the census's band rings): the set and its radius.
+    const want = residencyOracle(L, before, s.set, true, RING, cBefore);
+    assert.equal(s.header[H.RES_RADIUS], want.radius, "RES_RADIUS");
     assert.deepEqual([...s.bricks.keys()].sort((a, b) => a - b), [...want.bricks].sort((a, b) => a - b), "F residency");
     assert.deepEqual([...s.pages.keys()].sort((a, b) => a - b), [...want.pages].sort((a, b) => a - b), "C residency");
     const entered = [...want.bricks].filter(k => !s0.bricks.has(k));
@@ -155,6 +152,7 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
       assert.deepEqual([...m], [...want], `page ${P}: CMASK = WANT (the census's band, unclamped)`);
     }
     // Part 1's head again on the unchanged state: the same decisions, so the transfer lists no change.
+    const cS = { phi: await e.read("phi"), vel: await e.read("vel") };
     await e.run(e.schedule.part1);
     const s2 = await snapshot(e);
     assert.equal(s2.header[H.FAIL], 0, `FAIL ${s2.header[H.FAIL]} info ${s2.header[H.FAIL_INFO]}`);
@@ -163,7 +161,7 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
       assert.deepEqual([...b], [...a], `page ${brickKeyCoord(pk)}: a still column keeps its tiers`);
     }
     // The head's residency replaces the boot's reach set with the residency oracle's (the ring of every band tile kept).
-    const census = await e.read("census"), res = residencyOracle(L, s, census, s2.set, (cs, r, st) => recordRadii(census, cs, r, st), true);
+    const res = residencyOracle(L, s, s2.set, true, RING, cS);
     assert.deepEqual([...s2.bricks.keys()].sort((a, b) => a - b), [...res.bricks].sort((a, b) => a - b), "F residency after the head");
     assert.deepEqual([...s2.pages.keys()].sort((a, b) => a - b), [...res.pages].sort((a, b) => a - b), "C residency after the head");
     console.log(`tiered head residency: boot ${s.bricks.size} F -> ${s2.bricks.size} F, ${s.pages.size} C -> ${s2.pages.size} C`);

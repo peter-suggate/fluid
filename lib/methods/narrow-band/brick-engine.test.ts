@@ -32,10 +32,7 @@ import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, createBrickSolver, nbEngine } from "./brick-method";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
-import { brickField, pressureOracle, recordRadii, residencyOracle } from "./brick-oracle";
-import { CENSUS } from "./brick-census.wgsl";
-import { RES_STAGES } from "./brick-residency.wgsl";
-import { RESIDENCY_STAGES } from "../uniform/uniform-local-residency";
+import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
 import { validateScene, type SceneDescription } from "../../core/model";
 import { createReservoirSeepScene } from "../../core/reservoir-seep-scene";
@@ -190,7 +187,8 @@ function assertConsistent(e: BrickEngine, s: BrickSnapshot, fail = 0) {
   }
   for (const [, cs] of s.pages) {
     const children = [...s.bricks.values()].filter(slot => d[L.dir.frec + 32 * slot + REC.PARENT] === cs).length;
-    assert.ok(children > 0, "a live page has a child");
+    // A page the residency entered whose bricks a full pool refused (FAIL.POOL_F) has none; it leaves at the next head.
+    assert.ok(children > 0 || (fail & FAIL.POOL_F) !== 0, "a live page has a child");
     assert.equal(d[L.dir.crec + 32 * cs + REC.C_CHILDREN], children);
   }
   assert.equal(hd[H.LIVE_F], s.bricks.size); assert.equal(hd[H.TOP_F], L.cap.f - s.bricks.size);
@@ -239,47 +237,36 @@ test("brick engine (GPU): bricks enter and leave as the head's residency oracle 
     e.advance(1);
     s = await snapshot(e);
     assertConsistent(e, s);
-    // Narrower and taller: the next head's census sees the new surface, and residency follows it.
-    writePhi(e, s, sheet(12, 18, 12));
+    // Narrower and taller: the class pass sees the new surface, and the next head's residency follows it (the reach
+    // is 12 cells plus the flow past the source tiles, so x and z bricks 3 and up leave).
+    writePhi(e, s, sheet(4, 18, 4));
+    // The class pass of the written state (part 2's setMark): the next head's sources are its ACTIVE tiles.
+    await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMark"));
     const first = await headMatchesOracle(e, await snapshot(e));
-    assert.ok(first.entered.length > 0 && first.left.length > 0, `entered ${first.entered.length}, left ${first.left.length}`);
+    assert.ok(first.entered.length > 0, `entered ${first.entered.length}`);
     // Entering bricks start as air (setInit).
     const L = e.layout, phiNow = brickField(first.after, asF32(await e.read("phi")), L.base("phi", "F", "PHI"), -1);
     for (const k of first.entered) { const b = brickKeyCoord(k); assert.equal(phiNow([8 * b[0] + 3, 8 * b[1] + 3, 8 * b[2] + 3]), PHI_AIR); }
     // The next head follows the flow the projection left (it is not still: no hysteresis), again as the oracle says.
+    // The wide bricks leave here, not at the first head: the first head's sources include the TRIG heat of the
+    // census before the write (setMark reads the last census's TRIG), which saw the wide sheet.
     const next = await headMatchesOracle(e, first.after);
+    assert.ok(next.left.length > 0, `left ${next.left.length}`);
     console.log(`all-h residency: ${first.after.bricks.size} F (${first.entered.length} entered, ${first.left.length} left), radius ${first.radius} tiles; next ${next.after.bricks.size} F (${next.entered.length} entered, ${next.left.length} left), radius ${next.radius}`);
     e.destroy();
   });
 });
 
 /**
- * One step, with its head's residency checked against the CPU oracle: records (masks exact; radii the stage margin
- * plus at most the global flow's travel in tiles, exactly the margin where the flow is 0 that way; no particles in
- * bring-up), the F and C sets, the churn counts and lists, and RES_RADIUS / RES_CLAIMED_F.
+ * One step, with its head's residency checked against the CPU oracle (resMark's per-source reach from the set before
+ * the head: ACT, PSUPPORT, BOUND_F): the F and C sets, RES_RADIUS, the churn counts and lists, and RES_CLAIMED_F.
  */
 async function headMatchesOracle(e: BrickEngine, before: BrickSnapshot) {
-  const L = e.layout, extreme = [0, 0, 0, 0, 0, 0];
-  // The flow the head's census samples: the completed step's US. Its global extremes bound every region's flow.
-  for (let a = 0; a < 3; a++) {
-    const us = await readChannel(e, "vel", `US${a}`);
-    for (const slot of before.bricks.values()) for (const v of us(slot)) { extreme[a] = Math.max(extreme[a]!, -v); extreme[a + 3] = Math.max(extreme[a + 3]!, v); }
-  }
+  const L = e.layout;
   e.advance(1);
-  const after = await snapshot(e), census = await e.read("census");
+  const after = await snapshot(e);
   assertConsistent(e, after);
-  const want = residencyOracle(L, before, census, after.set, (cs, r, st) => recordRadii(census, cs, r, st), false);
-  let radius = 0;
-  for (const [cs, m] of want.masks) for (let r = 0; r < 8; r++) for (let st = 0; st < RES_STAGES; st++) {
-    const at = CENSUS.STRIDE * cs + CENSUS.RES + 4 * (RES_STAGES * r + st), on = (m[2 * (RES_STAGES * r + st)]! | m[2 * (RES_STAGES * r + st) + 1]!) !== 0;
-    assert.deepEqual([census[at], census[at + 1]], [m[2 * (RES_STAGES * r + st)], m[2 * (RES_STAGES * r + st) + 1]], `page slot ${cs} region ${r} stage ${st} mask`);
-    const margin = on && st !== 0 ? RESIDENCY_STAGES[st]!.margin : 0, got = recordRadii(census, cs, r, st);
-    got.forEach((v, k) => {
-      const most = margin === 0 ? 0 : margin + Math.ceil(Math.fround(extreme[k]! * DT / H_M) / 4);
-      assert.ok(v >= margin && v <= most, `page slot ${cs} region ${r} stage ${st} radius ${k}: ${v} in [${margin}, ${most}]`);
-    });
-    radius = Math.max(radius, ...got);
-  }
+  const want = residencyOracle(L, before, after.set, false, { dt: DT, h: H_M, gravity: [0, -G, 0] }), radius = want.radius;
   assert.equal(after.header[H.RES_RADIUS], radius);
   const keys = (m: Map<number, number>) => new Set(m.keys());
   assert.deepEqual(keys(after.bricks), want.bricks);
@@ -307,6 +294,7 @@ test("brick engine (GPU): FAIL.POOL_F latches when the residency needs more bric
     e.advance(1);
     await e.assertHealthy();
     writePhi(e, await snapshot(e), sheet(20, 18, 20));
+    await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMark"));
     e.advance(1);
     await assert.rejects(e.assertHealthy(), /POOL_F/);
     const s = await snapshot(e);
@@ -419,8 +407,13 @@ test("brick engine (GPU): the app adapter steps, reports, and presents the pool 
     assert.equal(phi(60, 4), far, "no brick there: far phi");
     // Narrower: the bricks the head's residency retires go back to far (those on the z = 8 slice are checked).
     const e = solver.brickEngine, wide = await snapshot(e);
-    writePhi(e, wide, sheet(12, 10.3, 20));
+    writePhi(e, wide, sheet(4, 10.3, 20));
+    // The class pass of the written state (setMark): the next head's sources.
+    await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMark"));
+    // Two steps: the first head's sources still hold the TRIG heat of the census that saw the wide sheet.
     assert.equal(solver.advanceTo(2 * DT, []), true);
+    await solver.awaitFrameCompletion();
+    assert.equal(solver.advanceTo(3 * DT, []), true);
     await solver.awaitFrameCompletion();
     const narrow = await snapshot(e);
     const left = [...wide.bricks.keys()].filter(k => !narrow.bricks.has(k)).map(k => brickKeyCoord(k)).filter(b => b[2] === 1 && 8 * b[1] + 3 < 32);
@@ -430,8 +423,8 @@ test("brick engine (GPU): the app adapter steps, reports, and presents the pool 
       assert.equal(phi(8 * b[0] + 3, 8 * b[1] + 3), far, `brick ${b} left: far phi`);
       assert.equal(vol(8 * b[0] + 3, 8 * b[1] + 3), 0);
     }
-    assert.ok(Math.abs(phi(8, 4) - boxDistance([8, 4, 8], sheet(12, 10.3, 20)) * H_M) < 1e-6);
-    assert.equal(solver.presentations, 3);
+    assert.ok(Math.abs(phi(8, 4) - boxDistance([8, 4, 8], sheet(4, 10.3, 20)) * H_M) < 1e-6);
+    assert.equal(solver.presentations, 4);
     solver.destroy();
   });
 });

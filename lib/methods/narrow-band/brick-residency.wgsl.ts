@@ -1,176 +1,74 @@
 /**
- * The head's residency (brick-abi.md §5.4, lane E): NB-FLIP's local residency rule, ported verbatim on the brick
- * storage. These are the old engine's pageSeed (uniform-mixed-dynamic.ts l.2097-2148) and lrAsk
- * (uniform-local-residency.ts l.140-158; launched at uniform-mixed-dynamic.ts l.2221, committed at
- * webgpu-uniform-reference.ts l.2214).
+ * The head's residency (brick-abi.md §5.4, lane E): a local, per-source, per-axis reach (seep's S2j, the per-axis CFL
+ * activation band: seep-techniques.md §6, progress-lane-s.md 2026-11-14; Bridson 2015 §6.3, Ferstl et al. 2016 §3).
  *
  * Timing is the old frame head's: part 1's head, after the census and before stages.move. It reads the completed
- * step's projected and extended velocity (US), as the old census does when encoded after a completed frame
- * (uniform-mixed-dynamic.ts l.2353-2355; uniform-narrow-band-flip.ts l.2204). Both engines run it.
+ * step's active class (ACT, setMark's, brick-abi.md §5.5), particle support (PSUPPORT, F's pJoin) and velocity bound
+ * (BOUND_F: project's faces and pScatter's particle speeds of the completed step). Both engines run it.
  *
- * Kernels (brickResidencyKernels):
- * - resSeed is pageSeedOf: a workgroup a C page of C_ALL, its 8 regions of 16 cells (4^3 tiles), lanes over the
- *   tiles. Per region and stage it writes a record (two seed-mask words, then the -xyz and +xyz radii in tiles, one
- *   byte an axis, lrRadii) into the page's census scratch (CENSUS.RES).
- *   - The flow is the old envelope's: sampledFlow (SAMPLE_REACH 2.5, shift 0) over the region grown by
- *     departureTravel (H.CENSUS_REACH, the old census[18]; no gravity term, steps 1) plus RESIDENCY_MARGIN_TILES
- *     (5) tiles.
- *   - Particle travel joins stages >= 2 (samples = held && stage >= 2), each stage with its RESIDENCY_STAGES margin.
- * - resRequest is lrAsk over the destinations of the brick storage: F bricks (8 cells, 2^3 tiles) and C pages
- *   (32 cells, 8^3 tiles). A destination is kept when some stage's record meets it (lrStageMeets, verbatim).
- *   - Present: its keep mark is set (MARK_F, MARK_C), checked before the atomicOr.
- *   - Absent: its directory word goes NONE -> CLAIM, and the one winner appends its key with KEY_CLAIMED for
- *     setClaimPages and setClaimBricks.
- *   - cfg.z = 0: pass 0 takes pages first; a brick in an absent page takes the page. cfg.z = 1: pass 1, after
- *     setClaimPages, takes the bricks of the pages that pass 0 entered (and only those).
- *   - Candidates come from each record's own box, so the work scales with the sources and their reach, never with
- *     the lattice.
- * - Leaving follows the old rule: a block no record reaches retires at this commit (idleSteps 1, no hysteresis;
- *   uniform-lattice-address.ts l.931, uniform-page-pool.ts l.1105). setLeave and setLeavePages run after the
- *   claims, at the head.
+ * resMark: a workgroup (64 lanes) a source brick of F_ALL (G1; tiered FC_G1, F_ALL's bricks then C_ALL's pages).
+ * - A brick source has residency tiles (ACT.RES: the ACTIVE tiles less those ACTIVE only by their 4h corners),
+ *   particle support (PSUPPORT word 0) or this head's census trigger (TRIG bits 0..7, censusDecide's, earlier in
+ *   this head); its source box is the vertex box of those tiles. TRIG is the seed reach: pSeed seeds where the
+ *   tile heat FT_T > 0, deep sites in 4h owners too, and FT_T is half the 27-tile heat max (lDilate) with heat 2 on
+ *   this head's triggered tiles (lHeatNow). A tile with heat at the last setMark is ACTIVE, so a seed's 2-cell
+ *   support is within 6 cells of a source box; a tile triggered at this head is not in ACT (the previous head's
+ *   TRIG). Without it a fresh seed in a 4h tile latched pJoin's REACH at the tiered dam's far walls (brick-abi.md
+ *   §5.4). Per axis a and side:
+ *     reach = max(travel, flow) + 4 ACT_DILATION cells,
+ *   where travel is PSUPPORT's particle travel that way (cells, words 1..6) and flow = (BOUND_F + |g| dt) dt / h is
+ *   the reach rule's velocity term (reachSet, brick-abi.md §5.4). The 12-cell margin is F_ACT's dilation, so a brick
+ *   F_ACT may list next step is resident. It keeps every brick the grown box covers and, tiered, every page.
+ * - A page source (tiered, pass 0) is a page with 4h-owned liquid tiles (a C corner φ < 0, setMarkPages' count) at
+ *   the head; its box is those tiles' box grown by flow + 12 cells, the flow's speed the largest |u| on their C plane
+ *   faces (the completed step's projected 4h velocity; the 4h interpolant inside a tile is bounded by its planes). It
+ *   keeps pages only: 4h liquid is C storage, and requesting bricks for it would make the deep 4h interior h storage
+ *   (the tiered dam filled its 4913-brick pool by step 42 that way, against 4820 at the peak for the old rule).
+ * A brick or page no source covers leaves at this commit (setLeave, setLeavePages; no hysteresis, as the old rule).
+ * - cfg.z = 0: pass 0 keeps present bricks (MARK_F) and claims absent bricks of resident pages; a brick in an absent
+ *   page claims the page; tiered, the box's pages are kept or claimed (MARK_C).
+ * - cfg.z = 1: pass 1, after setClaimPages, claims the box's bricks in the pages pass 0 entered (C_ENTER), then zeroes
+ *   the source's PSUPPORT words 0..6.
+ * - RES_RADIUS: the largest reach this head, in tiles (rounded up).
+ * The work scales with the sources and their reach, never with the lattice.
  *
- * Seeds (pageSeedOf, at M2: nothing is authored and there are no sources):
- * - a tile is considered when it is near (classify's near, CENSUS.NEAR), band (WANT) or a sample (PSUPPORT);
- * - ownership: an h tile now (width 1) or band;
- * - transport and pressure: wet (the census's NC_WET) or sample;
- * - surface: crossing (NC_CROSSES, the physical flag) or sample;
- * - particles: sample.
- * The particle support and travel are lane F's DEPB hook (PSUPPORT, pJoin: the old transferRefine prediction,
- * uniform-particle-brick.wgsl.ts l.33-38, 240-262). resSeed reads it and zeroes it.
- *
- * Deviations, all stated:
- * - All-h has no old counterpart. The old engine has no all-h mode: every tile is h by construction there, and a
- *   verbatim width-1 ownership seed would keep every brick. All-h ownership seeds are this census's band tiles
- *   (WANT) alone, and every stage is requested at F granularity (a brick is the h storage).
- * - Tiered: pages are requested at page granularity for every stage (the 4h storage, verbatim). Bricks are
- *   requested for the ownership and particle stages only (the h storage of h tiles and the particle bins).
- *   censusDecide also keeps a band tile's present 27-brick ring (the brick storage's h ring, which censusWant
- *   checks).
- * - Destinations are bricks and pages, not 32^3 blocks. The old blocks keep cells resident beyond the footprints,
- *   and old stages may read or propagate into them (extension sweeps, level-set dilation), while our owner readers
- *   return far or air there. If a dam gate row moves in a way that traces to such a cell, revisit the granularity,
- *   not the gate.
- * - No closure-cap or window failure (UP_FATAL_CLOSURE_CAP, UP_FATAL_EDGE): there is no window to outgrow. A
- *   destination off the brick range is the lattice's wall.
- * - Only resident pages have census words, so only they seed. A sample's support in an absent page is latched by
- *   F's hook (FAIL.REACH).
- * - sampledFlow's rangeKeys scans C_ALL when a box spans over 64 pages: this is the old rule, and its cost grows
- *   with C_ALL for a fast region.
+ * Deviation, stated (lane E, 2026-11-15, coordinator's ruling: storage, residency, lists and kernel shape follow
+ * seep-m1max): the old NB-FLIP residency (pageSeed and lrAsk, uniform-mixed-dynamic.ts l.2097-2148,
+ * uniform-local-residency.ts l.140-158) is retired: its per-stage seed records, the global departureTravel and
+ * sampledFlow envelope and the 5-tile RESIDENCY_MARGIN_TILES. The reach is the source's own (seep S2j), not the
+ * region's envelope. Kept latches: setMark's 1-ring FAIL.REACH (a liquid vertex's ring absent), pScatter's REACH (an
+ * unbinned particle), and setLeavePages' REACH (a leaving page that held 4h liquid tiles).
+ * - All-h: every tile is h, so the h-ownership source is dropped (ACT's rule); the census's WANT does not seed (all-h
+ *   WANT is not committed; censusDecide). Tiered: censusDecide keeps each band tile's present 27-brick ring itself and
+ *   appends its missing bricks as candidates.
+ * - Destinations are bricks and pages; a destination off the brick range is the lattice's wall.
  */
-import { BrickLayout } from "./brick-abi";
+import { ACT_DILATION, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickBinding } from "./brick-kernel";
-import { CENSUS, CENSUS_FORMULAS, CENSUS_HOOKS, CENSUS_OWNER, censusKernel } from "./brick-census.wgsl";
-import { RESIDENCY_STAGES, RESIDENCY_STENCIL_TILES, localResidencyWGSL } from "../uniform/uniform-local-residency";
+import { censusKernel } from "./brick-census.wgsl";
+import { brickOwnerWGSL } from "./brick-owner.wgsl";
 
-/** The stages the head requests (RESIDENCY_STAGES without legacy, which the staged policy never seeds). */
-export const RES_STAGES = 5;
-/** The old RESIDENCY_MARGIN_TILES (uniform-mixed-dynamic.ts l.120). */
-export const RESIDENCY_MARGIN_TILES = RESIDENCY_STENCIL_TILES;
-if (RESIDENCY_STAGES.slice(0, RES_STAGES).map(s => s.name).join() !== "ownership,transport,pressure,surface,particles") throw new Error("Residency: RESIDENCY_STAGES changed");
-/** Census scratch words of a page's residency records: 4 a (region, stage), region-major. */
-export const RES_RECORD_WORDS = 4 * 8 * RES_STAGES;
-if (CENSUS.RES + RES_RECORD_WORDS > CENSUS.STRIDE) throw new Error("Residency: the census stride holds no records");
+/** The reach's margin past the travel, in cells: F_ACT's dilation (brick-abi.md §5.5). */
+export const RES_MARGIN_CELLS = 4 * ACT_DILATION;
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
-const dirRO: BrickBinding = { name: "dir", kind: "ro", type: "array<u32>" };
 const dirRW: BrickBinding = { name: "dir", kind: "rw", type: "array<atomic<u32>>" };
-const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 const phiRO: BrickBinding = { name: "phi", kind: "ro", type: "array<u32>" };
-const censusRW: BrickBinding = { name: "census", kind: "rw", type: "array<u32>" };
-const censusRO: BrickBinding = { name: "census", kind: "ro", type: "array<u32>" };
+const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 
 export function brickResidencyKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
   const tiered = opt.tiered === true;
-  const margins = RESIDENCY_STAGES.slice(0, RES_STAGES).map(s => `${s.margin}.0`).join(",");
   const pages = L.lattice.map(n => Math.ceil((Math.floor(n / 8) + 1) / 4));
-
-  // resSeed: pageSeedOf (l.2097) for the page's 8 regions.
-  const resSeed = censusKernel(L, "resSeed", [CFG, setRW, dirRO, velRO, phiRO, censusRW], CENSUS_OWNER + CENSUS_HOOKS + CENSUS_FORMULAS + localResidencyWGSL + /* wgsl */`
-const RS_STAGES:u32=${RES_STAGES}u;
-const RS_MARGIN_TILES:f32=${RESIDENCY_MARGIN_TILES}.0;
-var<workgroup> rsMask:array<atomic<u32>,${2 * 8 * RES_STAGES}>;
-var<workgroup> rsTravel:array<atomic<u32>,48>;
-var<workgroup> rsFound:atomic<u32>;
-var<workgroup> rsSupport:array<u32,64>;
-var<workgroup> rsGo:u32;
-// departureTravel (l.1763): one step, so no gravity term.
-fn rsDepartureTravel()->f32{return min(bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]))+0.0,1.0e6);}
-@compute @workgroup_size(64) fn resSeed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
-  ncInit();
-  let g=nbGroup(wid);if(lane==0u){rsGo=select(0u,1u,g<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&rsGo)==0u){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);let o=NC_S*cs;
-  for(var j=lane;j<${2 * 8 * RES_STAGES}u;j+=64u){atomicStore(&rsMask[j],0u);}
-  if(lane<48u){atomicStore(&rsTravel[lane],0u);}
-  if(lane==0u){atomicStore(&rsFound,0u);}
-  // The particle support (PSUPPORT), lane j the page's child brick j: its tiles' bits, and its travel joined into its
-  // region's (the old region words: the travel of every support block that meets the region). Read, then zeroed.
-  let fs=nbChild(cs,lane);var support=0u;
-  if(fs<NB_SEAM){
-    let at=NB_S_PSUPPORT+NB_PSUPPORT_WORDS*fs;
-    support=atomicLoad(&nbSet[at])&0xffu;
-    if(support!=0u){
-      let r=((lane>>1u)&1u)|(((lane>>3u)&1u)<<1u)|(((lane>>5u)&1u)<<2u);
-      for(var k=0u;k<6u;k++){let v=atomicLoad(&nbSet[at+1u+k]);if(v!=0u){atomicMax(&rsTravel[6u*r+k],v);}}
-      for(var k=0u;k<7u;k++){atomicStore(&nbSet[at+k],0u);}
-    }
-  }
-  rsSupport[lane]=support;
-  workgroupBarrier();
-  for(var j=0u;j<8u;j++){
-    let i=lane+64u*j;let t=xTileOf(cs,i);
-    if(!nbTileInLattice(t)){continue;}
-    let l=vec3u(i&7u,(i>>3u)&7u,i>>6u);
-    let sample=((rsSupport[(l.x>>1u)|((l.y>>1u)<<2u)|((l.z>>1u)<<4u)]>>((l.x&1u)|((l.y&1u)<<1u)|((l.z&1u)<<2u)))&1u)!=0u;
-    let near=census[o+${CENSUS.NEAR}u+i]!=0u;
-    let band=((atomicLoad(&nbSet[NB_S_WANT+16u*cs+(i>>5u)])>>(i&31u))&1u)!=0u;
-    if(!near&&!band&&!sample){continue;}
-    let fin=ncFin(cs,i);let wet=(fin&NC_WET)!=0u;let crossing=(fin&NC_CROSSES)!=0u;
-    let width1=${tiered ? "nbTileH(cs,i)" : "false"};
-    let seeds=array<bool,${RES_STAGES}>(width1||band,wet||sample,wet||sample,crossing||sample,sample);
-    let r=(l.x>>2u)|((l.y>>2u)<<1u)|((l.z>>2u)<<2u);let q=(l.x&3u)|((l.y&3u)<<2u)|((l.z&3u)<<4u);
-    atomicOr(&rsFound,1u<<r);
-    for(var s=0u;s<RS_STAGES;s++){if(seeds[s]){atomicOr(&rsMask[2u*(RS_STAGES*r+s)+(q>>5u)],1u<<(q&31u));}}
-  }
-  workgroupBarrier();
-  if(lane>=8u){return;}
-  // Lane r: region r's flow and records. The global envelope only locates local extrema; it never dilates seeds.
-  let r=lane;
-  let origin=vec3f(32*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+16*vec3i(i32(r&1u),i32((r>>1u)&1u),i32(r>>2u)));
-  let envelope=rsDepartureTravel()+4.0*RS_MARGIN_TILES;
-  var flow=NcFlow(vec3f(0),vec3f(0));
-  if(((atomicLoad(&rsFound)>>r)&1u)!=0u){flow=ncSampledFlow(origin-vec3f(envelope),origin+vec3f(16.0+envelope),vec3f(0.0));}
-  var pl=vec3f(0);var ph=vec3f(0);
-  for(var a=0u;a<3u;a++){pl[a]=bitcast<f32>(atomicLoad(&rsTravel[6u*r+a]));ph[a]=bitcast<f32>(atomicLoad(&rsTravel[6u*r+3u+a]));}
-  let margins=array<f32,${RES_STAGES}>(${margins});
-  let scale=vec3f(ncDt()/ncH());
-  var radius=0u;
-  for(var stage=0u;stage<RS_STAGES;stage++){
-    let m=vec2u(atomicLoad(&rsMask[2u*(RS_STAGES*r+stage)]),atomicLoad(&rsMask[2u*(RS_STAGES*r+stage)+1u]));
-    var radii=vec2u(0u);
-    if((m.x|m.y)!=0u&&stage!=0u){
-      // Ballistic travel belongs to particle-created fluid, not every air tile in the same region.
-      let samples=stage>=2u;
-      radii=lrRadii(flow.low,flow.high,scale,select(vec3f(0),pl,samples),select(vec3f(0),ph,samples),margins[stage]);
-      let e=max(lrUnpack(radii.x),lrUnpack(radii.y));radius=max(radius,u32(max(e.x,max(e.y,e.z))));
-    }
-    let at=o+${CENSUS.RES}u+4u*(RS_STAGES*r+stage);
-    census[at]=m.x;census[at+1u]=m.y;census[at+2u]=radii.x;census[at+3u]=radii.y;
-  }
-  if(radius!=0u){atomicMax(&nbSet[NB_H_RES_RADIUS],radius);}
-}`);
-
-  // resRequest: lrAsk (l.140) for the page's 8 regions, lanes over each region's candidate destinations.
-  const fLevel = tiered ? [4, 0] : [1, 4, 0, 2, 3];
-  const meets = (stages: number[], low: string, high: string) =>
-    stages.map(s => `(((rqRec[RQ_STAGES*r+${s}u].x|rqRec[RQ_STAGES*r+${s}u].y)!=0u)&&lrStageMeets(rqRec[RQ_STAGES*r+${s}u],${s}u,${low},${high}))`).join("||");
-  const box = (stages: number[], shift: number) => stages.map(s => `
-      {let rec=rqRec[RQ_STAGES*r+${s}u];if((rec.x|rec.y)!=0u){a=min(a,(R-lrUnpack(rec.z))>>vec3u(${shift}u));b=max(b,(R+vec3i(3)+lrUnpack(rec.w))>>vec3u(${shift}u));}}`).join("");
-  const resRequest = censusKernel(L, "resRequest", [CFG, setRW, dirRW, censusRO], localResidencyWGSL + /* wgsl */`
-const NC_S:u32=${CENSUS.STRIDE}u;
-const RQ_STAGES:u32=${RES_STAGES}u;
+  const resMark = censusKernel(L, "resMark", tiered ? [CFG, setRW, dirRW, phiRO, velRO] : [CFG, setRW, dirRW], (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel" }) : "") + /* wgsl */`
 const RQ_PAGES:vec3i=vec3i(${pages.join(",")});
-var<workgroup> rqRec:array<vec4u,${8 * RES_STAGES}>;
-var<workgroup> rqGo:u32;
+const RM_MARGIN:f32=${RES_MARGIN_CELLS}.0;
+var<workgroup> rmLo:vec3i;
+var<workgroup> rmHi:vec3i;
+var<workgroup> rmGo:u32;
+var<workgroup> rmPage:u32;
+var<workgroup> rmTlo:array<atomic<u32>,3>;
+var<workgroup> rmThi:array<atomic<u32>,3>;
+var<workgroup> rmSpeed:atomic<u32>;
 // NONE -> CLAIM by compare-exchange (weak: retried while the word is still NONE). True for the one winner.
 fn rqTake(i:u32)->bool{
   loop{
@@ -218,45 +116,112 @@ fn rqBrick(q:vec3i,rpass:u32){
   if(ps==NB_NONE){if(rpass==0u&&rqTake(pw)){rqAppend(nbKey(4*(q>>vec3u(2u)))|NB_KEY_PAGE,pw);atomicAdd(&nbSet[NB_H_RES_CLAIMED_C],1u);}return;}
   if(ps!=NB_CLAIM){nbFail(NB_FAIL_UNSUPPORTED,nbKey(q));}
 }
-@compute @workgroup_size(64) fn resRequest(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+// A brick source (slot s of F_ALL: ACT.RES tiles | particle support | this head's TRIG, m != 0): the vertex box of those tiles grown
+// per axis and side by max(travel, flow) + RM_MARGIN, as bricks; pass 1 then zeroes the support. Tiered, a page
+// source (pass 0, a page of C_ALL after F_ALL's bricks): the box of its 4h-owned liquid tiles (a C corner φ < 0, as
+// setMarkPages counts them) grown by flow + RM_MARGIN, the flow from the largest |u| on those tiles' C plane faces;
+// it keeps or claims pages only (4h storage). Both raise RES_RADIUS in pass 0.
+fn rmFlow(speed:f32)->f32{
+  let dt=nbRingF(cfg.x,NB_RING_DT);let h=nbRingF(cfg.x,NB_RING_H);
+  let gv=vec3f(nbRingF(cfg.x,NB_RING_GRAVITY),nbRingF(cfg.x,NB_RING_GRAVITY+1u),nbRingF(cfg.x,NB_RING_GRAVITY+2u));
+  // The reach rule's velocity term (reachSet): (bound + |g| dt) dt / h cells.
+  return (speed+length(gv)*dt)*dt/h;
+}
+@compute @workgroup_size(64) fn resMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let g=nbGroup(wid);let rpass=cfg.z;
-  if(lane==0u){rqGo=select(0u,1u,g<nbListCount(NB_LIST_C_ALL)&&(rpass==0u||nbListCount(NB_LIST_C_ENTER)!=0u));}
-  if(workgroupUniformLoad(&rqGo)==0u){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);let o=NC_S*cs;
-  if(lane<${8 * RES_STAGES}u){let at=o+${CENSUS.RES}u+4u*lane;rqRec[lane]=vec4u(census[at],census[at+1u],census[at+2u],census[at+3u]);}
-  workgroupBarrier();
-  let P=8*nbKeyCoord(nbCRec(cs,NB_REC_KEY));
-  for(var r=0u;r<8u;r++){
-    // R: the region's low tile; records are relative to it (lrAsk's origin), destinations as tile boxes.
-    let R=P+4*vec3i(i32(r&1u),i32((r>>1u)&1u),i32(r>>2u));
-    {
-      var a=vec3i(1<<20);var b=vec3i(-(1<<20));${box(fLevel, 1)}
-      a=max(a,vec3i(0));b=min(b,NB_BRICKS-vec3i(1));
-      if(all(a<=b)){
-        let ext=vec3u(b-a+vec3i(1));let n=ext.x*ext.y*ext.z;
-        for(var j=lane;j<n;j+=64u){
-          let q=a+vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));
-          if(rqSettled(q,rpass)){continue;}
-          let low=2*q-R;let high=low+vec3i(1);
-          if(${meets(fLevel, "low", "high")}){rqBrick(q,rpass);}
+  // Kind: 0 nothing, 1 a brick source, 2 a page source.
+  if(lane==0u){
+    var kind=0u;let nF=nbListCount(NB_LIST_F_ALL);
+    if(g<nF){
+      let s=nbListSlot(NB_LIST_F_ALL,g);let at=NB_S_PSUPPORT+NB_PSUPPORT_WORDS*s;
+      let m=((atomicLoad(&nbSet[NB_S_ACT+s])>>10u)&0xffu)|(atomicLoad(&nbSet[at])&0xffu)|(atomicLoad(&nbSet[NB_S_TRIG+s])&0xffu);
+      if(m!=0u){
+        var tlo=vec3i(1);var thi=vec3i(0);
+        for(var t=0u;t<8u;t++){if(((m>>t)&1u)!=0u){let tt=vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));tlo=min(tlo,tt);thi=max(thi,tt);}}
+        let flow=rmFlow(bitcast<f32>(atomicLoad(&nbSet[NB_S_BOUND_F+s])));
+        let o=nbFOrigin(s);var lo=vec3i(0);var hi=vec3i(0);var reach=0.0;
+        for(var a=0u;a<3u;a++){
+          let rl=max(bitcast<f32>(atomicLoad(&nbSet[at+1u+a])),flow)+RM_MARGIN;
+          let rh=max(bitcast<f32>(atomicLoad(&nbSet[at+4u+a])),flow)+RM_MARGIN;
+          lo[a]=i32(floor(f32(o[a]+4*tlo[a])-rl));hi[a]=i32(ceil(f32(o[a]+4*thi[a]+4)+rh));
+          reach=max(reach,max(rl,rh));
         }
+        rmLo=max(lo>>vec3u(3u),vec3i(0));rmHi=min(hi>>vec3u(3u),NB_BRICKS-vec3i(1));
+        kind=1u;
+        if(rpass==0u){atomicMax(&nbSet[NB_H_RES_RADIUS],u32(ceil(reach/4.0)));}
+        else{for(var k=0u;k<7u;k++){atomicStore(&nbSet[at+k],0u);}}
+      }
+      if(rpass==1u&&nbListCount(NB_LIST_C_ENTER)==0u){kind=0u;}
+    }${tiered ? `
+    else if(rpass==0u&&g<nF+nbListCount(NB_LIST_C_ALL)){
+      kind=2u;rmPage=nbListSlot(NB_LIST_C_ALL,g-nF);
+      for(var a=0u;a<3u;a++){atomicStore(&rmTlo[a],8u);atomicStore(&rmThi[a],0u);}
+      atomicStore(&rmSpeed,0u);
+    }` : ""}
+    rmGo=kind;
+  }
+  let kind=workgroupUniformLoad(&rmGo);
+  if(kind==0u){return;}
+  if(kind==1u){
+    let a=rmLo;let b=rmHi;
+    if(all(a<=b)){
+      let ext=vec3u(b-a+vec3i(1));let n=ext.x*ext.y*ext.z;
+      for(var j=lane;j<n;j+=64u){
+        let q=a+vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));
+        if(!rqSettled(q,rpass)){rqBrick(q,rpass);}
       }
     }
-    ${tiered ? `if(rpass==0u){
-      var a=vec3i(1<<20);var b=vec3i(-(1<<20));${box([0, 1, 2, 3, 4], 3)}
-      a=max(a,vec3i(0));b=min(b,RQ_PAGES-vec3i(1));
-      if(all(a<=b)){
-        let ext=vec3u(b-a+vec3i(1));let n=ext.x*ext.y*ext.z;
-        for(var j=lane;j<n;j+=64u){
-          let p=a+vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));
-          if(rqPageSettled(p)){continue;}
-          let low=8*p-R;let high=low+vec3i(7);
-          if(${meets([1, 4, 0, 2, 3], "low", "high")}){rqPage(p);}
-        }
-      }
-    }` : ""}
   }
+  ${tiered ? `if(kind==1u&&rpass==0u){
+    let pa=max(rmLo>>vec3u(2u),vec3i(0));let pb=min(rmHi>>vec3u(2u),RQ_PAGES-vec3i(1));
+    if(all(pa<=pb)){
+      let ext=vec3u(pb-pa+vec3i(1));let n=ext.x*ext.y*ext.z;
+      for(var j=lane;j<n;j+=64u){
+        let p=pa+vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));
+        if(!rqPageSettled(p)){rqPage(p);}
+      }
+    }
+  }
+  if(kind!=2u){return;}
+  // The page source: its 4h-owned liquid tiles' box and their largest C plane face speed.
+  let cs=rmPage;let P=nbKeyCoord(atomicLoad(&dir[NB_D_CREC+32u*cs+NB_REC_KEY]));
+  for(var j=0u;j<8u;j++){
+    let i=lane+64u*j;let t=vec3u(i&7u,(i>>3u)&7u,i>>6u);let T=8*P+vec3i(t);
+    if(!nbTileInLattice(T)||nbTileH(cs,i)){continue;}
+    var mn=NB_PHI_AIR;
+    for(var q=0u;q<8u;q++){mn=min(mn,nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u))));}
+    if(mn>=0.0){continue;}
+    var sp=0.0;
+    for(var a=0u;a<3u;a++){
+      atomicMin(&rmTlo[a],t[a]);atomicMax(&rmThi[a],t[a]);
+      var e=vec3i(0);e[a]=1;sp=max(sp,max(abs(nbCFace(T,a)),abs(nbCFace(T+e,a))));
+    }
+    atomicMax(&rmSpeed,bitcast<u32>(sp));
+  }
+  workgroupBarrier();
+  if(lane==0u){
+    var go=0u;
+    if(atomicLoad(&rmTlo[0])<=atomicLoad(&rmThi[0])){
+      let r=rmFlow(bitcast<f32>(atomicLoad(&rmSpeed)))+RM_MARGIN;
+      var lo=vec3i(0);var hi=vec3i(0);
+      for(var a=0u;a<3u;a++){
+        lo[a]=i32(floor(f32(32*P[a]+4*i32(atomicLoad(&rmTlo[a])))-r));hi[a]=i32(ceil(f32(32*P[a]+4*i32(atomicLoad(&rmThi[a]))+4)+r));
+      }
+      rmLo=max(lo>>vec3u(5u),vec3i(0));rmHi=min(hi>>vec3u(5u),RQ_PAGES-vec3i(1));
+      atomicMax(&nbSet[NB_H_RES_RADIUS],u32(ceil(r/4.0)));
+      go=1u;
+    }
+    rmGo=go;
+  }
+  if(workgroupUniformLoad(&rmGo)==0u){return;}
+  let pa=rmLo;let pb=rmHi;
+  if(all(pa<=pb)){
+    let ext=vec3u(pb-pa+vec3i(1));let n=ext.x*ext.y*ext.z;
+    for(var j=lane;j<n;j+=64u){
+      let p=pa+vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));
+      if(!rqPageSettled(p)){rqPage(p);}
+    }
+  }` : ""}
 }`);
-
-  return { resSeed, resRequest };
+  return { resMark };
 }
