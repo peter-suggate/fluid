@@ -37,13 +37,18 @@ export type EngineBufferName = typeof ENGINE_BUFFERS[number];
 /** The at-most-8 storage buffers a kernel rule (brick-abi.md §6). */
 export const MAX_STORAGE_BINDINGS = 8;
 
+/** WGSL identifiers of engine buffers whose names WGSL reserves (`set`). */
+export const WGSL_NAMES: Readonly<Record<string, string>> = { set: "nbSet" };
+export const wgslName = (name: string) => WGSL_NAMES[name] ?? name;
+
 /** WGSL declarations of a binding list (group 0, binding = index). */
 export function declareBindings(bindings: readonly BrickBinding[]): string {
   return bindings.map((b, i) => {
+    const n = wgslName(b.name);
     switch (b.kind) {
-      case "rw": return `@group(0) @binding(${i}) var<storage,read_write> ${b.name}:${b.type ?? "array<u32>"};`;
-      case "ro": return `@group(0) @binding(${i}) var<storage,read> ${b.name}:${b.type ?? "array<u32>"};`;
-      case "uniform": return `@group(0) @binding(${i}) var<uniform> ${b.name}:${b.type ?? "vec4u"};`;
+      case "rw": return `@group(0) @binding(${i}) var<storage,read_write> ${n}:${b.type ?? "array<u32>"};`;
+      case "ro": return `@group(0) @binding(${i}) var<storage,read> ${n}:${b.type ?? "array<u32>"};`;
+      case "uniform": return `@group(0) @binding(${i}) var<uniform> ${n}:${b.type ?? "vec4u"};`;
     }
   }).join("\n");
 }

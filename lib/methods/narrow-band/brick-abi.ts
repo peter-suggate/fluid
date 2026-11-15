@@ -32,6 +32,17 @@ export const SLOT_MASK = 0x1fffffff;
 /** The window's most pages an axis (keys carry 10 bits an axis). */
 export const WINDOW_MAX_PAGES = 1024;
 
+/** Vertex phi (h) of a brick that enters as air, beyond every band (the old
+ * engine's "past the reach a vertex keeps its sign at six cells"). */
+export const PHI_AIR = 6;
+/** The reach box's stencil margin in cells (brick-abi.md §5.4): with no travel
+ * it gives the design's one-brick ring, and never more than
+ * ceil(bound dt / 8h) + 1 bricks. */
+export const REACH_MARGIN = 7;
+
+/** Bricks an axis that hold the lattice's vertices 0..n (the skirt included). */
+export const bricksPerAxis = (lattice: readonly number[]): [number, number, number] => lattice.map(n => Math.floor(n / 8) + 1) as [number, number, number];
+
 export const RING_SLOTS = 4;
 export const RING_WORDS = 256;
 export const HEADER_WORDS = 256;
@@ -229,6 +240,9 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_FCAP", L.cap.f); c("NB_CCAP", L.cap.c); c("NB_BCAP", L.cap.b); c("NB_KCAP", L.cap.k); c("NB_PCAP", L.cap.particles);
   c("NB_PSTRIDE", L.particleStride); c("NB_FOLD", FOLD);
   lines.push(`const NB_LATTICE:vec3i=vec3i(${L.lattice.join(",")});`);
+  lines.push(`const NB_BRICKS:vec3i=vec3i(${bricksPerAxis(L.lattice).join(",")});`);
+  lines.push(`const NB_PHI_AIR:f32=${PHI_AIR.toFixed(1)};`);
+  lines.push(`const NB_REACH_MARGIN:f32=${REACH_MARGIN.toFixed(1)};`);
   lines.push(`const NB_WINDOW:vec3u=vec3u(${L.window.map(n => u(n)).join(",")});`);
   lines.push(`const NB_WINDOW_BITS:vec3u=vec3u(${L.windowBits.map(n => u(n)).join(",")});`);
   for (const [name, v] of Object.entries(H)) c(`NB_H_${name}`, v);
@@ -269,6 +283,8 @@ fn nbNeighbourOffset(n:u32)->vec3i{return vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9
 fn nbGroup(wid:vec3u)->u32{return wid.x+NB_FOLD*wid.y;}
 // Inside the lattice (the box rule's domain; skirts lie beyond it on a + axis).
 fn nbInLattice(c:vec3i)->bool{return all(c>=vec3i(0))&&all(c<NB_LATTICE);}
+// A brick coordinate that can hold a slot (vertices 0..lattice, the skirt included).
+fn nbBrickInRange(b:vec3i)->bool{return all(b>=vec3i(0))&&all(b<NB_BRICKS);}
 `);
   if (options.dir) {
     const D = options.dir;

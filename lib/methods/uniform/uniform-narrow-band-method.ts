@@ -11,6 +11,7 @@ import { uniformGeometricSolverOptions } from "./uniform-geometric-options";
 import { resolveUniformGeometricValues } from "./uniform-geometric-parameters";
 import { WebGPUUniformReferenceSolver } from "./webgpu-uniform-reference";
 import { uniformNearSettled } from "./uniform-near-settled";
+import { brickEngineRefusal, nbEngine } from "../narrow-band/brick-method";
 
 /** A 4h particle overlap, with either fixed or activity-driven surface coverage. */
 const fixed:MethodParamValues={sharpeningSweeps:0,sharpeningDistance:0,totalSurfaceVolume:"on",surfaceVolumeRounds:2,surfaceDeficitBalancing:"off",volumeDustThreshold:0,orphanDustThreshold:0,phiDrain:"off",detailPolicy:"dynamic",adaptiveSurface:"on",coarseParticleMode:"off",pressureFullCycles:3,pressureVCycles:4,pressureSweeps:6};
@@ -33,6 +34,7 @@ const surfaceAdvectionValues=(value:unknown)=>{const a=narrowBandSurfaceAdvectio
  return {surfaceAdvection:narrowBandSurfaceAdvection(value),phiCubicAdvection:a.cubic?"on":"off",phiFineAdvection:a.fine,phiCoarseAdvection:a.coarse};};
 export const narrowBandFlipValues=(values:MethodParamValues={})=>({
  ...resolveUniformGeometricValues({...narrowBandAdaptiveDetail,...values}),...narrowBandControlValues(values),...fixed,
+ engine:nbEngine(values.engine),
  fineGridPadding:Math.max(0,Math.min(4,Number.isFinite(Number(values.fineGridPadding))?Number(values.fineGridPadding):0)),
  particleTransfer:values.particleTransfer==="apic"?"apic":"flip",
  adaptiveSurface:"on",
@@ -46,6 +48,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 // Derive the renderer lifetime key from this method's own schema; inheriting
 // Uniform Geometric's list misses NB-specific live controls.
 const params:SimulationMethod["params"]=[
+ {kind:"select",key:"engine",label:"Engine",default:"uniform",tier:"coarse",update:"solver",options:[{value:"uniform",label:"Uniform (current)"},{value:"brick",label:"Brick (in development)"}],hint:"Uniform runs the current engine. Brick runs the sparse-brick rebuild (docs/plans/nbflip-structural-2026-11-15.md), which refuses, naming what is missing, any scene it cannot run yet. Restarts the solver."},
  ...narrowBandControlParams,
  {kind:"select",key:"particleTransfer",label:"Particle transfer",default:"flip",tier:"coarse",update:"solver",options:[{value:"flip",label:"FLIP (95%)"},{value:"apic",label:"APIC (experimental)"}],hint:"APIC replaces residual FLIP velocities with quadratic affine transfers, following Sato 2018. Restarts the solver."},
  NARROW_BAND_SURFACE_ADVECTION,
@@ -130,7 +133,7 @@ export const uniformNarrowBandMethod:SimulationMethod={
  runtimeParamKeys:params.filter(p=>p.update==="runtime").map(p=>p.key),
  appDefaults:{particleTransfer:"flip",timeStep:"sixtieth",...narrowBandAdaptiveDetail,...fixed,fineGridPadding:0,coarseParticleMode:"off"},
  normalizeValues:narrowBandFlipValues,
- createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
+ createSolverAsync:(device,scene,quality,values,loads,progress,signal)=>nbEngine(values.engine)==="brick"?Promise.reject(brickEngineRefusal(scene)):WebGPUUniformReferenceSolver.createAsync(device,scene,quality,loads,
   {...uniformGeometricSolverOptions(narrowBandFlipValues(values),scene),narrowBandTransfer:values.particleTransfer==="apic"?"apic":"flip",phiFineAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).fine,phiCoarseAdvection:narrowBandSurfaceAdvectionSettings(values.surfaceAdvection).coarse,narrowBandAdaptiveBudgetPercent:narrowBandControlValues(values).adaptiveBudgetPercent,narrowBandAdaptiveFadeSeconds:narrowBandControlValues(values).adaptiveFadeSeconds,narrowBandSparseParticleLifetime:narrowBandControlValues(values).sparseParticleLifetime,narrowBandSparseNeighbours:narrowBandControlValues(values).sparseNeighbours,narrowBandParticleCellCap:narrowBandControlValues(values).particleCellCap,narrowBandVolumeControlSeconds:narrowBandControlValues(values).volumeControlSeconds,narrowBandFinePadding:narrowBandFlipValues(values).fineGridPadding,narrowBandColdCensus:values.coldCensus==="full"?"full":"replay",narrowBandColdRegions:values.coldRegions==="fine"?"fine":"frozen16h",narrowBandColdFrameSkip:values.coldFrameSkip==="off"?"off":"on",narrowBandNearSettled:uniformNearSettled(values),retainStageDiagnosticsForQA:values.retainStageDiagnosticsForQA===true},progress,signal),
  pipelineGraph:async()=> (await import("./uniform-narrow-band-pipeline")).UNIFORM_NARROW_BAND_PIPELINE,
 };

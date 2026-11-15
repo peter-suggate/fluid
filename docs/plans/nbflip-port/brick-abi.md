@@ -105,11 +105,17 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | `vel` | 6–8 | `US0 US1 US2` | lower face | scratch: u* before projection, extension ping-pong | F, P |
 | `phi` | 0 | `PHI` | vertex | `phiUnion`, `redistSweep` | everyone |
 | `phi` | 1 | `PHI1` | vertex | scratch: φ′ (`phiAdvect`), redistance ping-pong | F |
-| `phi` | 2 | `FLAGS` | cell, u32 | `setLists` (OPEN, OWNER_H), `phiUnion` / `redistInit` (LIQUID, BAND), `p2g` (VALID_*) | everyone |
+| `phi` | 2 | `FLAGS` | cell, u32 | `setInit` at entry (OPEN by the box rule, OWNER_H), `solidStamp` (OPEN), `phiUnion` / `redistInit` (LIQUID, BAND), `p2g` (VALID_*) | everyone |
 | `pres` | 0–9 | `X R Z D Q RHS DIAG K0 K1 K2` | cell; `K_a` the coupling across the lower face along `a` | `operator`, solver | P; `project` |
 | `cut` | 0 | `FRAC` | cell | `solidStamp` | `operator`, F's solid paths |
 | `cut` | 1–3 | `AP0 AP1 AP2` | lower face | `solidStamp` | as above |
 
+- **The `phi` pool is bound as `array<u32>`.** φ words are read as `bitcast<f32>`, so FLAGS
+  words never pass through a float register: a denormal pattern could be flushed.
+- **Entering bricks** are initialised by `setInit`:
+  - vel and pres: 0;
+  - `PHI` and `PHI1`: `PHI_AIR` (6, in h);
+  - FLAGS: OPEN inside the lattice, and OWNER_H.
 - **The `pres` list is lane P's.** P may replace it (more vectors, MG scratch), as long as it stays
   a pool indexed by F and C slots at stride 520. P announces the final list to E before M1 lands.
 - **MG levels above 4h are P's own.** P allocates them sized from `FCAP`, `CCAP` and `BCAP`, keyed
@@ -308,7 +314,7 @@ its `TOP_*` word.
 - At build: `TOP = CAP`, `FREE[i] = CAP - 1 - i`, so the first pops hand out slots 0, 1, 2, …
 - A pop is `atomicSub(TOP, 1)`. A pop that underflows adds 1 back, latches `FAIL.POOL_*`, counts
   `REFUSED_*` and puts the brick's key in `FAIL_INFO`.
-- Pushes happen only at the end of `setUpdate`, after the records are rebuilt, so no slot is
+- Pushes happen only after every pop of the step (`setLeave`, after the claims), so no slot is
   reused in the step that freed it.
 - Page-local slot order (design §2.1, 1.15–1.25x) is M1's measurement, not part of the ABI.
 
@@ -322,23 +328,38 @@ its `TOP_*` word.
 | `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` reads it, then clears it |
 | `BOUND_C` | `CCAP` | the same for C slots (4h faces) |
 
-**The reach rule** (`setMark`). A brick or page within `reach` bricks of a liquid cell or of a
-non-empty bin is kept or entered, where
+**The reach rule** (`setMark`, amended at M1). A brick holding a liquid vertex (φ < 0) or a
+non-empty bin keeps or enters every brick that overlaps its **reach box**. In cells, that box is
 
 ```
-reach = ceil((bound + |g| dt) * dt / (8 h)) + 1        (bricks; bound from BOUND_F)
+[origin + lo - R, origin + hi + R],   R = (bound + |g| dt) * dt / h + REACH_MARGIN
 ```
 
+- `lo` and `hi` bound the brick's liquid vertices. A non-empty bin takes the whole brick.
+- R is real-valued, and the box's ends are floored to bricks. `REACH_MARGIN` is 7 cells.
+- With no travel this is the design's one-brick ring, and it never exceeds the design's
+  `ceil(bound·dt / 8h) + 1` bricks.
 - The `|g| dt` term covers a step of gravitational acceleration.
-- The `+1` is the stencil ring (the design's `ceil(bound·dt / 8h) + 1`).
+- The frozen form `ceil((bound + |g| dt) dt / 8h) + 1` gave two rings at rest, because the
+  ceiling of any travel is at least 1. That is 2.6x a slab's bricks, so M1 replaced it.
 - A particle that still lands outside a resident brick latches `FAIL.REACH`. It is a defect to
   root-cause, never clamped.
+- The cell precision is `NB_REACH_MARGIN` and the brick range is `NB_BRICKS` (`floor(n/8) + 1` an
+  axis, skirts included), both in the prelude.
+- Lane F states the band margin its kernels need, and E sets `REACH_MARGIN` from it.
 
 ### 5.5 Lists and their indirect arguments
 
-Lists live in `set` at `LIST[k]`, each `LIST_CAP[k]` words of slots in slot order (ascending, as
-the arena's `ubaLists`), with the count at `LIST_COUNT[k]` (word `32 + k`). `setLists` rebuilds
-every list each step, after `setUpdate`.
+Lists live in `set` at `LIST[k]`, each `LIST_CAP[k]` words of slots, with the count at
+`LIST_COUNT[k]` (word `32 + k`). `setLists` rebuilds every list each step, after `setUpdate`.
+- **Order (M1):** atomic appends, so no order is promised, as with the arena's `ubaLists`
+  (which appends too).
+- Page-local or slot order is an M1 locality measurement, and no kernel may rely on it.
+- A live slot is one whose record key (word 29) is not `NONE`. Leaving and never-taken slots hold
+  `NONE` there.
+- **M1:** `F_LIQ = F_ALL`. Every live brick lies within the reach of liquid or a particle, so any
+  of them may hold a pressure row by the time pressure runs. M2 narrows `F_LIQ` with the tier
+  criteria.
 
 | k | name | kind | entries |
 |---|---|---|---|
@@ -417,6 +438,16 @@ move (design §2.4) as its own buffers.
   name.
 
 At most 8 storage buffers a kernel. A kernel that needs more splits.
+
+**WGSL names (amended at M1).** WGSL reserves some words the ABI uses:
+- `set`: the host's buffer `set` is declared `nbSet` in WGSL. `declareBindings()` maps it
+  (`WGSL_NAMES` in `brick-kernel.ts`), and a module passes `{ set: { name: "nbSet" } }` to
+  `brickAbiWGSL`.
+- `operator`: a kernel's `entry` may differ from its `label`. P's `operator` kernel has the entry
+  point `nbOperator`.
+- `active` is reserved too, so a lane flag needs another name (E uses `live`).
+
+Tint's errors are the ground truth. Every kernel compiles in M1's GPU test.
 
 **Kernel source.** A lane exports `{ label, entry, code, bindings }` objects, as
 `seep-kernels.ts`'s `KernelSource`, where `code` starts with `brickAbiWGSL(...)` (the constants

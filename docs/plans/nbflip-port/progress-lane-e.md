@@ -72,3 +72,89 @@ Open items:
   cell-precise reach box (brick-abi.md §5.4, amended) is what the table counts.
 - During the letters run the runner reported 3 Metal aborts in other processes. `log show` showed
   none from our runs.
+
+## 2026-11-15 M1: the engine skeleton
+
+**BRING-UP SOLVER.** The pressure slot runs `bringUpCG` (`brick-bringup-cg.ts`), a Jacobi-CG for
+M1's tests only (coordinator ruling, 2026-11-15). No M2 gate and no timing claim runs on it. P's
+MGPCG replaces it at the same slot (brick-abi.md §6.1) before any scene is gated. M1 makes no
+timing claims.
+
+What landed (`lib/methods/narrow-band/`):
+- `brick-set.wgsl.ts`: the brick-set kernels.
+  - `setMark`: the reach box of §5.4, the class bits, and clearing BOUND_F.
+  - `setClaimPages` and `setClaimBricks`: CAS claims, free-stack pops, records, child counts and
+    the tile mask.
+  - `setLeave` and `setLeavePages`: frees, pushed after every pop.
+  - `setRecords`: neighbour words of entering bricks and their neighbours.
+  - `setInit`: entering bricks are air and zero.
+  - `setLists` (atomic appends; F_LIQ = F_ALL in M1) and `setArgs` (the fold rule, live and peak
+    counts).
+  - `bootPhi` and `stepEnd`.
+- `brick-pressure.wgsl.ts`:
+  - `operator`, a pure function of the channels `(cfg, set, dir, vel, phi, pres, cut)` (ruling
+    3). It writes RHS, DIAG and K0..2 per §6.1 and zeroes X off the liquid.
+  - `project`, the ghost-fluid gradient. It raises BOUND_F.
+  - `uGravity`, the bring-up body force (US = U + g dt on open faces with a liquid side). It
+    stands in for F's velocity stage.
+  - The liquid rule and theta are imported verbatim from `uniform-mixed-pressure-surface.wgsl.ts`
+    (Gibou et al. 2002).
+- `brick-engine.ts`, the host:
+  - capacities-only allocation and the CPU boot candidates;
+  - the schedule;
+  - `record()`: 4 ring slots, bind groups and cfg uniforms built once;
+  - one ring write a step, the two-part submit, and the next step encoded ahead;
+  - lagged MAP_READ receipts that latch FAIL on the host;
+  - per-kernel compile times, with shader errors reported with source context.
+- `brick-readback.ts` (snapshots and channels) and `brick-oracle.ts` (the CPU reach oracle, and
+  the Float64 assembly and solve of §6.1). Both are for tests only.
+- `brick-method.ts` and `uniform-narrow-band-method.ts`:
+  - the `engine: "uniform" | "brick"` parameter on NB-FLIP;
+  - unknown engines throw;
+  - "brick" refuses every scene and names what is missing (F's stages, P's bodies, M3's solids,
+    the host adapter).
+- ABI amendments (brick-abi.md):
+  - §5.4, the cell-precise reach box;
+  - §5.3, the push timing;
+  - §5.5, list order, live slots and F_LIQ;
+  - §2.3, setInit and FLAGS, and φ bound as u32;
+  - §6, WGSL names: `set` is `nbSet`, the `operator` kernel's entry is `nbOperator`, and `active`
+    is reserved.
+
+Tests (`brick-engine.test.ts`): 7 CPU and 5 GPU. The full file passes 12/12 on the check slot
+(rc 0, 2.0 s, no shader warnings, no Metal aborts in `log show`).
+- **4x-wider box (CPU).** The direct dispatches are identical for [64,32,64] and [256,32,64], and
+  the set, pools and particles are identical in size. **(GPU)** The same bricks and all 17 list
+  counts. Bytes differ by exactly the directory's page window.
+- **Cold compile.** All 21 kernels build in 135–510 ms each, under the 30 s rule.
+- **Enter and leave against the CPU oracle.** φ is rewritten narrower and taller after a step at
+  rest, on a [64,32,64] lattice.
+  - Entered bricks are exactly brick row 3. Left bricks are exactly x or z brick 3. The resident
+    set equals `brickSetOracle`.
+  - Every record checks out: 27 neighbour words, parent, mask, class, and C child counts. The free
+    stack and the live slots partition the pool. F_ALL, F_LIQ and C_ALL match, and so do
+    N_ENTER and N_LEAVE.
+  - The enter and leave lists hold the right slots. Entered bricks are air. The next step is
+    still.
+- **FAIL_POOL latches.** With f set to the boot count, a taller φ latches POOL_F with REFUSED_F > 0.
+  The set stays consistent and full. The lagged receipt sets `engine.failure`, and `advance()`
+  then throws.
+- **Hydrostatic** (32³, h = 1/32, surface at 10.3 cells, one step from rest).
+  - The Float64 system (141 Jacobi-CG iterations, residual 3e-17) is the analytic profile
+    X = |g| dt (H − y − ½) h to 8.6e-7 relative, which is f32 φ rounding.
+  - GPU X matches it to 1.9e-5 relative. The bring-up CG takes 55 iterations from cold, then
+    1–2 with the warm start.
+  - X is exactly 0 at air. Max |U| after projection is 1.2e-5 m/s, against the 0.16 m/s of
+    g dt it cancels.
+- `npm run check:types`: only the 3 pre-existing lane-n errors. `npm run test:unit`: 2248 tests,
+  0 failed.
+
+For lanes F and P:
+- BOUND_F is raised by `project` (and later `pScatter`) and read by the next `setMark`.
+- F's p2g and uAdvect replace `uGravity` at its place in part 2.
+- `REACH_MARGIN` (7 cells) waits on F's stated band margin.
+
+Not in M1:
+- the scene host, contract and presentation adapters (the refusal names them);
+- C and B rows in `operator` and the seam (P extends them in place);
+- page-local slot order (a locality measurement).
