@@ -1,0 +1,97 @@
+/**
+ * Tier-resolving readers (brick-abi.md §2.5): the owner of a tile, a vertex
+ * and a face, read through the directory and CMASK, so that no kernel reads a
+ * non-owned copy. Include after brickAbiWGSL(...) in a module that declares
+ * `dir`, a `phi` pool (array<u32>) and a `vel` pool (array<f32>) under the
+ * names given.
+ *
+ * - Tiles are 4^3 h, in global tile coordinates t (cell >> 2). A tile in no
+ *   resident page, or outside the lattice, is not h-owned.
+ * - Vertices: NB-FLIP's authority rule, verbatim. A coarse incident tile wins
+ *   (umVertexAuthority, uniform-mixed-vertex-sampling.wgsl.ts l.78). A vertex
+ *   with no 4h-owned incident tile is F's. Every other vertex is its 4h
+ *   tile's interpolant, umVertexFrom4's arithmetic (l.95: the weight
+ *   w.x*w.y*w.z times the corner, zero weights skipped, umVertexSum8's order),
+ *   which at a corner is the C vertex itself. φ is in h units in F and C alike.
+ * - Faces: a lower face with an h-owned cell on either side is an h face,
+ *   stored in F at its upper cell. A face between two 4h-owned tiles on a
+ *   tile plane is the C face of the upper tile. Inside a 4h tile, nbFaceU is
+ *   the linear sample between the tile's two plane faces, with no slopes.
+ *   Formulas that differ (remap, samplers) read the plane faces themselves
+ *   through nbFacePlane.
+ * - The lattice's walls are closed (M2): a face on a wall plane is 0.
+ */
+export interface BrickOwnerNames { readonly phi: string; readonly vel: string }
+
+export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) => /* wgsl */`
+fn nbTileInLattice(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_LATTICE);}
+fn nbTileIndex(t:vec3i)->u32{let q=vec3u(t&vec3i(7));return q.x|(q.y<<3u)|(q.z<<6u);}
+fn nbTileOwnerH(t:vec3i)->bool{
+  if(!nbTileInLattice(t)){return false;}
+  let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}
+  return nbTileH(cs,nbTileIndex(t));
+}
+fn nbCellOwnerH(c:vec3i)->bool{return nbTileOwnerH(c>>vec3u(2u));}
+// The 4h-owned tile that holds vertex v's authority, in umVertexAuthority's order, or (-1,-1,-1) when no incident
+// tile is 4h-owned. Candidate k is tile tA + corner(k) - 1 (umCoarseIncident, the lowest k first: tA the tile
+// of v's cell above); an axis on which v lies inside tA (local != 0) admits only corner 1. A tile outside the
+// lattice is no candidate (the old cell-above walk steps off the solid shell, which gives the same tiles).
+fn nbVertexCoarse(v:vec3i)->vec3i{
+  let tA=v>>vec3u(2u);let inside=(v-4*tA)!=vec3i(0);
+  for(var k=0u;k<8u;k++){
+    let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);
+    if(any(inside&(corner==vec3u(0u)))){continue;}
+    let t=tA+vec3i(corner)-vec3i(1);
+    if(nbTileInLattice(t)&&!nbTileOwnerH(t)){return t;}
+  }
+  return vec3i(-1);
+}
+fn nbVertexOwnerH(v:vec3i)->bool{return nbVertexCoarse(v).x<0;}
+// The C vertex at tile coordinate T (h vertex 4T); PHI_AIR where no page holds it.
+fn nbCVertex(T:vec3i)->f32{
+  if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_PHI_AIR;}
+  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_AIR;}
+  return bitcast<f32>(${n.phi}[NB_PHI_C_PHI+NB_STRIDE*cs+nbTileIndex(T)]);
+}
+fn nbFVertex(v:vec3i)->f32{
+  let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_AIR;}
+  return bitcast<f32>(${n.phi}[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
+}
+fn nbVertexPhi(v:vec3i)->f32{
+  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_AIR;}
+  let T=nbVertexCoarse(v);
+  if(T.x<0){return nbFVertex(v);}
+  let o=4*T;let t=vec3f(v-o)/4.0;var values:array<f32,8>;
+  for(var k=0u;k<8u;k++){
+    let corner=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));let weight=w.x*w.y*w.z;
+    if(weight>0.0){values[k]=weight*nbCVertex(T+vec3i(corner));}
+  }
+  return ((values[0]+values[5])+(values[1]+values[4]))+((values[2]+values[7])+(values[3]+values[6]));
+}
+fn nbCFace(T:vec3i,a:u32)->f32{
+  if(!nbTileInLattice(T)){return 0.0;}
+  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
+  return ${n.vel}[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+nbTileIndex(T)];
+}
+fn nbFFace(c:vec3i,a:u32)->f32{
+  let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}
+  return ${n.vel}[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
+}
+fn nbOnWall(c:vec3i,a:u32)->bool{return c[a]<=0||c[a]>=NB_LATTICE[a];}
+// The stored face on a plane: the lower face of cell c along a, where c[a] is a multiple of 4 or either side is h-owned.
+fn nbFacePlane(c:vec3i,a:u32)->f32{
+  if(nbOnWall(c,a)){return 0.0;}
+  var e=vec3i(0);e[a]=1;
+  if(nbCellOwnerH(c)||nbCellOwnerH(c-e)){return nbFFace(c,a);}
+  return nbCFace(c>>vec3u(2u),a);
+}
+fn nbFaceU(c:vec3i,a:u32)->f32{
+  if(nbOnWall(c,a)){return 0.0;}
+  var e=vec3i(0);e[a]=1;
+  if(nbCellOwnerH(c)||nbCellOwnerH(c-e)){return nbFFace(c,a);}
+  let T=c>>vec3u(2u);let k=c[a]-4*T[a];
+  if(k==0){return nbCFace(T,a);}
+  var cu=c;cu[a]=4*T[a]+4;
+  return mix(nbCFace(T,a),nbFacePlane(cu,a),f32(k)/4.0);
+}
+`;

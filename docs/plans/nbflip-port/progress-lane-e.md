@@ -236,3 +236,26 @@ ruling.
   uniform-mixed-remap.ts), with frozen-state parity.
 - The dam end to end on F's stages and P's MGPCG.
 - Letters' peak re-measured before M4.
+
+## 2026-11-15 — M2 part 2a: the tier ABI (brick-abi.md §2.5)
+
+Coordinator rulings (composite pressure parity, P's review) applied to the layout:
+- §2.5 "Tiers: what is stored where". CMASK is the ownership truth (record word 28 and
+  FLAGS.OWNER_H copy it, written only by setTransfer's commit). Residency: core + 27-ring + every
+  brick the reach box of a non-empty bin overlaps (F). Vertices are coarse-wins, verbatim
+  umVertexAuthority; hanging vertices are umVertexFrom4's interpolant. Faces with an h cell on
+  either side are h faces in F; 4h|4h plane faces are C faces of the upper tile; the h|4h 4h face is
+  derived (umPressureFaceV). New set regions WANT (CMASK_WORDS a C slot), TILE_OCC and TRIG (a word
+  an F slot).
+- pres channels: KU0..2 (seams whose upper side is a 4h row) and PPHI (the authority's rootPhi);
+  FLAGS bits 7–12 reserved for P's active set, 13–15 for E; CREC words 0–26 reserved.
+- §6: operator and project move to P (pressure-operator.wgsl.ts); the active set is an outer loop
+  around the MGPCG.
+- brick-owner.wgsl.ts: nbTileOwnerH, nbVertexCoarse (umCoarseIncident's order), nbVertexPhi,
+  nbFacePlane, nbFaceU. brick-owner.test.ts (GPU) checks them against a CPU oracle on a page with a
+  4h block: owner and φ exact at every probe (corners, hanging vertices, h|4h planes), stored faces
+  exact, interior 4h faces within mix()'s rounding.
+
+Census: the old dam census is resolved (agent report, rule in §3 of that report). Next: setCensus
+(part 1 head, WANT + TRIG from the end state), setMark → residency, setTransfer (TLIST, US→U
+commit, φ in place, slopes via F's nbfRemap*), with frozen-state parity.

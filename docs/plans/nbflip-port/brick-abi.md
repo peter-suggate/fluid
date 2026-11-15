@@ -106,7 +106,9 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | `phi` | 0 | `PHI` | vertex | `phiUnion`, `redistSweep` | everyone |
 | `phi` | 1 | `PHI1` | vertex | scratch: φ′ (`phiAdvect`), redistance ping-pong | F |
 | `phi` | 2 | `FLAGS` | cell, u32 | `setInit` at entry (OPEN by the box rule, OWNER_H), `solidStamp` (OPEN), `phiUnion` / `redistInit` (LIQUID, BAND), `p2g` (VALID_*) | everyone |
-| `pres` | 0–9 | `X R Z D Q RHS DIAG K0 K1 K2` | cell; `K_a` the coupling across the lower face along `a` | `operator`, solver | P; `project` |
+| `pres` | 0–9 | `X R Z D Q RHS DIAG K0 K1 K2` | cell; `K_a` the coupling across the lower face along `a` (on C rows: native–native only) | `operator`, solver | P; `project` |
+| `pres` | 10–12 | `KU0 KU1 KU2` | cell, h rows only (unused in C): the seam coupling V/(2.5h²θ) across the upper face along `a` when the upper neighbour is a 4h row, else 0 (amended at M2, lane P) | `operator` | P |
+| `pres` | 13 | `PPHI` | cell: the pressure authority's centre φ (`rootPhi`, uniform-mixed-pressure-authority.ts), for the liquid test and ghost θ of native and seam rows (amended at M2) | P's setup | P |
 | `cut` | 0 | `FRAC` | cell | `solidStamp` | `operator`, F's solid paths |
 | `cut` | 1–3 | `AP0 AP1 AP2` | lower face | `solidStamp` | as above |
 
@@ -122,6 +124,9 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
   by the engine's slots or keys, and rebuilt per step from the lists. They are not channels here.
 - **A brick with no cut slot** (record word 30 = `NONE`) is fully open: `FRAC` = 1 and every
   aperture is 1, except where the box rule closes a face. It holds no cut channels.
+- **Crossing fractions.** The old native rows' recorded crossing fractions (`nTheta`,
+  `rootTopology`) exist only on cut tiles. A C cell has no cut in M2 (below), so they get storage
+  with M3's cut tiles, not a channel now.
 - **A C cell has no cut.** "4h owners never reach the helpers": promotion keeps liquid one tile
   from cut cells, as today.
 
@@ -134,8 +139,89 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | 2 | `BAND` | within the particle band R of the surface |
 | 3–5 | `VALID0..2` | the lower face along `a` has a known velocity (extension's seed) |
 | 6 | `OWNER_H` | the cell's tile is h-owned in this brick (the record mask's bit, per cell) |
-| 7–15 | reserved, E | |
+| 7–12 | reserved, P: the pressure active set's per-face state (wall, held, closed; 2 bits a lower face), amended at M2 | |
+| 13–15 | reserved, E | |
 | 16–31 | reserved, F | |
+
+### 2.5 Tiers: what is stored where (M2, proposed 2026-11-15)
+
+**Ownership.** A tile is 4³ h. Each tile is h-owned or 4h-owned (§7.1: the 4³ granularity is
+kept exactly).
+- `CMASK` bit `t` of the page's C slot is the truth.
+- The F record's word 28 (bits 0–7) copies the bits of its 2³ tiles.
+- `FLAGS.OWNER_H` copies them per cell.
+- All three are written only by `setTransfer`'s commit, so every stage of a step sees one
+  ownership.
+
+**Residency.**
+- *C (a page).* Resident while any brick of the page holds liquid or particles in reach (§5.4),
+  or any F child lives.
+- *F (a brick).* Resident when any of these holds:
+  - one of its tiles is h-owned (a *core* brick);
+  - it is a 27-neighbour of a core brick (a *ring* brick);
+  - it overlaps the §5.4 reach box of a brick with a non-empty bin (lane F, 2026-11-15). A
+    collapsing column moves about 10 cells a step, more than a ring. BOUND_F is raised by
+    `pScatter`. Bricks entered this way hold 4h tiles until the census says otherwise.
+
+  Liquid vertices' reach boxes keep or enter C pages, and F bricks only through the three rules
+  above.
+  - A ring brick's tiles are all 4h-owned. It exists to hold the interface faces and the
+    vertices of the h tiles beside it, so that every h stencil resolves within the 27-neighbour
+    record.
+
+**Values, per channel layout:**
+- *Cells (`pres`, `FLAGS`, `FRAC`).* An h-owned tile's cells live in its F brick, and a
+  4h-owned tile's single cell lives in the C brick (C local = the tile's index in the page). The
+  h cells of a 4h-owned tile in a core or ring brick hold no state. Nothing reads them, except
+  `setTransfer` as a prolongation target.
+- *Vertices (`PHI`, `PHI1`).* NB-FLIP's authority rule, verbatim (`umVertexAuthority`,
+  uniform-mixed-vertex-sampling.wgsl.ts l.78): **a coarse incident tile wins**.
+  - *h vertices.* A vertex whose incident tiles are all h-owned is stored in the F brick that
+    holds it (the lower-vertex convention), and is the truth. Only h passes write it.
+  - *Corners.* A 4h-owned tile's 8 corners are C vertices (C vertex `v` is h vertex `4v`). Every
+    corner incident to a 4h-owned tile is C's, even when it also bounds h tiles. Only C passes
+    write it. Its F copy is not state, and readers take C.
+  - *Hanging vertices.* Every other vertex incident to a 4h-owned tile hangs: it is the
+    trilinear interpolant of that tile's corners (`umVertexFrom4`, `nbfRemapRefine`), derived and
+    not stored. This includes the non-corner vertices of an h|4h plane. Two 4h tiles that share
+    the vertex give the same value, because their faces share corners.
+  - So no vertex has two writers. The prelude's `nbVertexOwnerH(v)` is true exactly when no
+    incident tile is 4h-owned.
+- *Faces (`U*`, `UP*`, `US*`, `AP*`).*
+  - A face with an h-owned cell on either side is an h face, stored at h in the F brick of its
+    upper cell (the lower-face convention). That brick is a core or ring brick, so it is resident.
+  - A face between two 4h-owned tiles is a 4h face, stored in the C brick of its upper tile.
+  - So at an h|4h interface the 16 h patches are stored, and the 4h tile's own face holds no
+    state: its V-weighted mean (umPressureFaceV) is derived by P's to-pressure transfer (ruling
+    of 2026-11-15).
+
+**Readers resolve the owner.** No kernel reads a non-owned copy. The ABI prelude gains
+`nbTileOwnerH(cell)`, `nbVertexOwnerH(v)`, `nbVertexPhi(v)` and `nbFaceU(c, a)`, which apply the
+rules above through the directory and masks:
+- an h tap in an h-owned tile reads F;
+- a 4h-owned tile reads C, with the interpolant at the vertices.
+
+**The tier change, within a step** (§7, amended):
+1. `setMark` decides each tile's next owner (the NB-FLIP census, verbatim) into `WANT`: 512 bits
+   a C slot, `16 * CCAP` words in `set`. It also marks the bricks that the new h tiles and their
+   ring need (`CAND`, `MARK_F` bit 0). A brick whose tiles change owner gets `MARK_F` bit 1
+   (`CHANGED`). The census reads lane F's tile occupancy, `TILE_OCC` (FCAP words in `set`, bit
+   `j` for the brick's tile `j`). `pScan` overwrites it each step for every brick of F_ALL.
+2. `setUpdate` claims entering bricks and rebuilds records, but does **not** free leaving ones
+   yet. Their data is restricted first.
+3. `setTransfer` runs over `F_CHANGED` and `F_ENTER`, a workgroup a brick, with NB-FLIP's remap
+   verbatim (F's `nbfRemap*`, bitwise to `remapTileCells`, `remapSlope`, `remapSample` and
+   `remapFace`):
+   - *4h → h:* φ is refined onto the tile's 5³ h vertices, the faces are prolonged (the slope
+     tilt on 4h owners), and the pressure is not carried;
+   - *h → 4h:* φ is injected at the corners (`oldumSampleVertex` at a corner is the h value), and
+     each 4h face is the mean of its 16 h samples;
+   - it then commits `CMASK`, word 28 and `OWNER_H` from `WANT`.
+4. The frees run last, after `setTransfer` (a phase of `setLists`). A slot never leaves and
+   enters in the same step, so each pool's measured peak includes one step of churn.
+
+The transfer runs only "within one tile of a width change", as NB-FLIP's `markTile` does. BULK16
+(16h) keeps NB-FLIP's rules and comes with B slots at M3.
 
 ## 3. Directory (T2o)
 
@@ -221,7 +307,7 @@ There is no second structure to disagree with.
 
 | word | content |
 |---|---|
-| 0–26 | neighbour pages: a C slot, `0xA0000000 \| bslot`, or `NONE` |
+| 0–26 | reserved: `NONE` at claim and not maintained in M2. Kernels find neighbour pages through the directory, with a key check (amended at M2) |
 | 27 | the number of F children (`CHILD` entries not `NONE`) |
 | 28 | the number of 4h-owned liquid tiles |
 | 29 | key: the page coordinate, `px \| py<<10 \| pz<<20` |
@@ -428,7 +514,23 @@ Overflow of `PCAP` latches `FAIL.PARTICLES` and counts `P_OVERFLOW`. Retirement 
 merge are F's, at `pScatter`. Lane F owns the compact-position, class and motion streams of the
 move (design §2.4) as its own buffers.
 
+**Bin order and seeds** (lane F, amended at M2):
+- `pCount` zeroes `PCOUNT[q^1]`. `pScan` takes each brick's start by `atomicAdd` on it, after a
+  workgroup scan of its 512 cell counts.
+- So bins are contiguous per brick and cell-sorted inside it, but their order across bricks is
+  not promised. This is not an exclusive scan in F_ALL order.
+- `pSeed` appends after bank `q^1`'s binned records, as per-brick segments, and bumps
+  `PCOUNT[q^1]`. Seeds are not in `BIN_COUNT` until the next rebin. Nothing reads `BIN_COUNT`
+  between `pSeed` and the next part 1.
+
+
 ## 6. Kernels, bindings and the record
+
+**Ownership (amended at M2, coordinator ruling).** `operator` and `project` are lane P's, in
+`pressure-operator.wgsl.ts`. Their entry points (`nbOperator`, `project`), the zero-row rule over
+F_ALL with its `FAIL.LIST` check (§6.1) and the `UNSUPPORTED` cut check are kept. The old
+solve's wall/held/closed active set and its seam heads are ported verbatim, as an outer loop
+around the MGPCG. Its per-face state takes FLAGS bits 7–12 (§2.4).
 
 **Bindings.** Group 0 only. A kernel declares a list of bindings by name, in order, and E's
 `record()` builds its bind groups once at build:

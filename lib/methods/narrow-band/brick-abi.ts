@@ -103,7 +103,7 @@ export const FOLD = 32768;
 export const POOLS = {
   vel: ["U0", "U1", "U2", "UP0", "UP1", "UP2", "US0", "US1", "US2"],
   phi: ["PHI", "PHI1", "FLAGS"],
-  pres: ["X", "R", "Z", "D", "Q", "RHS", "DIAG", "K0", "K1", "K2"],
+  pres: ["X", "R", "Z", "D", "Q", "RHS", "DIAG", "K0", "K1", "K2", "KU0", "KU1", "KU2", "PPHI"],
   cut: ["FRAC", "AP0", "AP1", "AP2"],
 } as const;
 export type PoolName = keyof typeof POOLS;
@@ -153,6 +153,8 @@ export class BrickLayout {
     readonly ring: number; readonly freeF: number; readonly freeC: number; readonly freeB: number; readonly freeK: number;
     readonly markF: number; readonly markC: number; readonly cand: number; readonly boundF: number; readonly boundC: number;
     readonly binStart: number; readonly binCount: number; readonly binCursor: number;
+    /** Tiers (§2.5): the census's wanted h tiles (16 words a C slot), lane F's tile occupancy and the census's trigger bits (a word an F slot, bit j tile j). */
+    readonly want: number; readonly tileOcc: number; readonly trig: number;
     readonly lists: readonly number[]; readonly listCap: readonly number[]; readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -177,12 +179,13 @@ export class BrickLayout {
     const freeF = take(f), freeC = take(c), freeB = take(Math.max(b, 1)), freeK = take(Math.max(k, 1));
     const markF = take(f), markC = take(c), cand = take(f), boundF = take(f), boundC = take(c);
     const binStart = take(f), binCount = take(f), binCursor = take(f);
+    const want = take(CMASK_WORDS * c), tileOcc = take(f), trig = take(f);
     const listCap: number[] = [], lists: number[] = [];
     for (let j = 0; j < LIST_SLOTS; j++) {
       const kind = listKind(j), n = j > 16 ? 0 : kind === "F" ? f : kind === "C" ? c : b;
       listCap.push(n); lists.push(take(Math.max(n, 1)));
     }
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, lists, listCap, words: at };
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, lists, listCap, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -259,6 +262,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_FREE_F", s.freeF); c("NB_S_FREE_C", s.freeC); c("NB_S_FREE_B", s.freeB); c("NB_S_FREE_K", s.freeK);
   c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
+  c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);
