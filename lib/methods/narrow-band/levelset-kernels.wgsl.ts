@@ -29,15 +29,15 @@
  *   classifies every tile as an h tile, where the old engine classified the deep interior at 4h;
  * - the crossing guard's certified travel is the brick's velocity bound over the step, in whole tiles (the
  *   census's spread-reach words replace it);
- * - the deep-air keep (a still tile's φ ≥ 9) is not applied: such vertices are transported;
- * - the released-wall rule (umReleasedWalls) needs the projection's release bits, which lane P's project does
- *   not yet publish.
+ * The deep-air keep (umDeepAirKept, a still tile's φ ≥ 9) and the released-wall rule (umReleasedWalls, the
+ * projection's release bits) are lane E's verbatim ports (levelset-release.wgsl.ts), applied in lAdvected.
  */
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
+import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
 // Only F's own vertices (fgVertexOwned: tiered, a vertex with a 4h-owned incident tile is its tile's interpolant).
@@ -92,7 +92,7 @@ var<workgroup> sFresh:u32;
  }
 }`);
 
-  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell], [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
+  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell], [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL()].join("\n") + LS_SET_WGSL + /* wgsl */`
 fn nbxTraceVelocity(x:vec3f)->vec3f{return fgSampleVel(x,0u,3u);}
 fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return fgHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c540000u);}
@@ -126,6 +126,8 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  let c=lPhi0(v);
  // Kept far air: last step's gate (the air collar dilated a tile) does not reach the vertex's tile.
  if(fgDist(fgTileDist(lCellBelow(v)),1u)>5u&&c>=16.0){return c;}
+ // Kept deep air (umDeepAirKept): a still tile's φ ≥ 9 stays, off the walls of a moving step.
+ if(!(dt>0.0&&lOnWall(v))){let d=nbrDeepAirKept(v,1u,c);if(d>=0.0){return d;}}
  let p=vec3f(v);
  // The foot (umVertexFoot): the vertex's closest point on the zero set, carried rigidly through the trace.
  var foot=p;var shift=vec3f(0.0);var smoothing=0.0;
@@ -183,6 +185,7 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
   }
   if(contact){value=min(value,fgPhiAt(fgHeld(p+travel)));}
  }
+ value=nbrReleasedWalls(p,value);
  return value+nbfMovedSmoothing(smoothing,p,q,1u);
 }
 @compute @workgroup_size(256) fn lAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}

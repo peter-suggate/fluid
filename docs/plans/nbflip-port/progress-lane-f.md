@@ -591,3 +591,40 @@ Physics is unchanged. At step 13 the cached run gives 248.43 J and 180.40 L, aga
 uncached; the difference is within the run-to-run spread from summation order.
 
 Dispatches against all-h: the 7 C_ALL dispatches, plus uCache (one FC_G1 dispatch).
+
+## M2 tiered: lAdvect reads E's deep-air keep and released walls; the first tiered dam-300 (2026-11-15)
+
+lAdvect now applies lane E's two verbatim ports from `levelset-release.wgsl.ts` (acd355ec) inside `lAdvected`:
+- `nbrDeepAirKept`: the deep-air keep, where a still tile's φ is at least 9. It is skipped for a moving wall vertex, as in the old order.
+- `nbrReleasedWalls`: the released-wall rule, from the projection's release bits. It runs after the wall-contact block and before the moved-smoothing term.
+
+Short runs on acd355ec plus this change, composite MGPCG for tiered, `--poolF=4913`, rc 0, no FAIL:
+
+| run | step 15 drift | step 24 drift | step 30 drift | particles at 30 |
+|---|---|---|---|---|
+| tiered (`rel-t`) | -2.48% | -7.08% | – | – |
+| tiered before (`vmax-t`) | – | -7.86% | -7.39% | 877,810 |
+| all-h (`rel-h`) | -4.60% | -8.15% | -7.65% | 763,646 |
+| all-h before (`dam-300c`) | -4.61% | – | -7.51% | 775,733 |
+
+The first tiered dam-300 (`gates/dam-300tf.md`, 9e5d2b14, real census plus the kick) passes every row except D8:
+- D8 is the particle window mean over steps 30–90: 711k against 631k ± 63k, margin 1.27.
+- All-h `dam-300c` gives 665k on the same row.
+- D2 and D7t had failed in dam-300te. That failure came from the scratch sampler, not the engine: it read raw F φ at hanging vertices on h|4h planes. Resolving those vertices through vertex authority (`nbVertexCoarse`) removes it. At step 4, D2 is 114.65 against 114.75.
+
+Max |U| and max |US| per step on liquid faces, against the old engine's `maxSpeed_m_s`, in m/s. Our column is owner-resolved U, with US in brackets:
+
+| step | old | ours |
+|---|---|---|
+| 10 | 3.38 | 4.00 (2.95) |
+| 13 | 7.25 | 12.78 |
+| 14 | 13.87 | 12.04 |
+| 20 | 14.88 | 18.18 (20.17) |
+| 21 | 13.33 | 19.13 |
+| 22 | 16.26 | 16.36 |
+| 26 | 11.26 | 8.93 |
+| 30 | 5.23 | 6.26 |
+
+Over the first 30 steps the old engine peaks at 16.3 and ours at 19.1 (US 20.2), about 1.2 times higher. The maxima are run-up jets: at the far wall at step 13, and in the far corner at steps 20–21. The gap is not large enough to need a kernel attribution.
+
+A dense=0 tiered run latches REACH at step 15: brick (4,5,15), info 0xf01404. Lane E has this as the known census timing gap, which the residency port of the head-time rule closes.
