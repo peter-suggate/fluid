@@ -46,6 +46,12 @@ fn lSetPhi(base:u32,slot:u32,l:u32,value:f32){
  phi[base+NB_STRIDE*slot+l]=bitcast<u32>(value);
 }
 `;
+// The dilation's reach (tiles) and its absent tile: one no F slot holds (lDilate reads its DIL4 word; lDilateC
+// writes it).
+const LD_WGSL = /* wgsl */`
+const R:i32=5;
+fn lFAbsent(i:u32,t:vec3i)->bool{return i==NB_NONE;}
+`;
 const LS_WGSL = /* wgsl */`
 fn lDt()->f32{return nbRingF(cfg.x,NB_RING_DT);}
 fn lH()->vec3f{return vec3f(nbRingF(cfg.x,NB_RING_H));}
@@ -339,9 +345,11 @@ ${stagedHead(0)}
 }`);
 
   // lDilate: cfg.z = the pz (0 x, 1 y, 2 z), cfg.w = the round (1: air seed and occupancy, 2: crossings and
-  // the activity spread). A lane a tile, 8 bricks a workgroup (G8).
-  const lDilate = k("lDilate", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL].join("\n") + /* wgsl */`
-const R:i32=5;
+  // the activity spread). A lane a tile, 8 bricks a workgroup (G8). Tiered, a tile no F slot holds reads its page's
+  // DIL4 word (lDilateC, run before the round's x pass): its sources in the x pass, DA in the y pass, DB in the z
+  // pass, so the distances need no F brick past the owners' margin. Such a tile has no heat (as before: a tile no
+  // slot holds was no source). A tile in no resident page (or outside the lattice) is no source.
+  const lDilate = k("lDilate", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, LD_WGSL].join("\n") + /* wgsl */`
 fn lSource(word:u32,flags:u32,pz:u32,round:u32)->u32{
  if(pz>0u){return word;}
  var d=0xfffu;
@@ -355,6 +363,12 @@ fn lHeatNow(c:vec3i,i:u32,dt:f32)->f32{
  let h=fcLoadF(i+FT_H);
  return max(max(0.0,h-4.0*dt),select(0.0,2.0,fgTileTrig(c)));
 }
+// Tiered, the DIL4 word of tile t (no F slot holds it), or NB_NONE where no page holds it.
+fn lAbsentWord(t:vec3i)->u32{
+ if(!FG_TIERED||!foTileInLattice(t)){return NB_NONE;}
+ let cs=fgTileCSlot(t);if(cs==NB_NONE){return NB_NONE;}
+ return fcLoad(FC_DIL4+512u*cs+foTileIndex(t));
+}
 @compute @workgroup_size(64) fn lDilate(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let e=8u*nbGroup(wid)+(lid>>3u);if(e>=nbListCount(NB_LIST_F_ALL)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,e);let t=lid&7u;
@@ -364,18 +378,20 @@ fn lHeatNow(c:vec3i,i:u32,dt:f32)->f32{
  let mask=select(0xff0u,15u,round==2u);
  let dt=nbRingF(cfg.x,NB_RING_DT);
  var best=0xfffu;var hmax=0.0;
- let span=select(R,1,false);
  for(var off=-R;off<=R;off++){
-  var tq=tc;tq[a]+=off;
-  let i=fgTileAt(4*tq,0u);if(i==NB_NONE||any(tq<vec3i(0))){continue;}
+  var tq=tc;tq[a]+=off;if(any(tq<vec3i(0))){continue;}
+  let i=fgTileAt(4*tq,0u);
   var src=0xfffu;
-  if(pz==0u){src=lSource(0u,fcLoad(i+FT_FLAGS),0u,round);}else{src=fcLoad(i+fromW)&0xfffu;}
+  if(lFAbsent(i,tq)){
+   let w=lAbsentWord(tq);if(w==NB_NONE){continue;}
+   if(pz==0u){src=lSource(0u,w>>24u,0u,round);}else{src=(w>>select(12u,0u,pz==1u))&0xfffu;}
+  }else if(pz==0u){src=lSource(0u,fcLoad(i+FT_FLAGS),0u,round);}else{src=fcLoad(i+fromW)&0xfffu;}
   let ao=u32(abs(off));
   for(var f=0u;f<3u;f++){
    let d=(src>>(4u*f))&15u;if(d==15u){continue;}
    let n=max(d,ao);if(n<((best>>(4u*f))&15u)){best=(best&~(15u<<(4u*f)))|(n<<(4u*f));}
   }
-  if(round==2u&&abs(off)<=1){
+  if(round==2u&&abs(off)<=1&&i!=NB_NONE){
    var hv=0.0;
    if(pz==0u){hv=lHeatNow(4*tq,i,dt);}else{hv=fcLoadF(i+select(FT_HB,FT_HA,pz==1u));}
    hmax=max(hmax,hv);
@@ -392,6 +408,106 @@ fn lHeatNow(c:vec3i,i:u32,dt:f32)->f32{
  fcStore(own+FT_DIST,(old&~mask)|(best&mask));
  if(round==2u){let hn=fcLoadF(own+FT_HN);fcStoreF(own+FT_H,hn);fcStoreF(own+FT_T,max(hn,0.5*hmax));}
 }`);
+
+  // lDilateC (tiered): cfg.w = the round. A workgroup a C page (C_ALL, G1), before the round's lDilate x pass: for
+  // each tile of the page that no F slot holds, its source flags and lDilate's x and y passes (DA, DB), into DIL4.
+  // The sources are staged over the page's 8^3 tiles and 5 more each way in x and y (18 x 18 x 8): an F tile's
+  // flags (lTiles, lClear), and an absent tile's from its eight C corners: air seed where one is at or under 0,
+  // occupied where one is under 0, a crossing where one is at or under 0, one at or over 0 and not all are 0. In a
+  // 4h tile every h vertex is its tile's interpolant (foVertexPhi), a positive-weight combination of those corners
+  // whose sign follows theirs (sums and products of same-signed values do not change sign), and the corners are
+  // h vertices of its cells: so lTiles' cell rule (a corner at or under 0, under 0) and lClear's crossing cells
+  // (low ≤ 0 ≤ high, low < high: a path of cell edges joins the lowest corner to the highest) hold for the tile
+  // exactly when the corner rule does. lClear's clear and lcClear raise only positive values (a value at or under
+  // 0 has a seed incident tile), so no side changes. An absent tile has no sample support (SURFACE_TILE: particles
+  // bin only into F slots). An absent tile that is h-owned latches FAIL.TIER (h tiles live in F slots).
+  const lDilateC = F.tiered ? k("lDilateC", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, LD_WGSL].join("\n") + /* wgsl */`
+// The staged C vertices' sides of 0 (x and y from -5, z from 0, 19 x 19 x 9): a row (y + 19 z) a word, bit x, for
+// side m 0 (φ ≤ 0), 1 (φ < 0), 2 (φ ≥ 0).
+var<workgroup> dV:array<atomic<u32>,513>;
+// The staged sources (18 x 18 x 8 tiles from (-5,-5,0)): a row (y + 18 z) a word, bit x, for field f 0 (crossing),
+// 1 (air seed), 2 (occupied): lDilate's packed fields.
+var<workgroup> dS:array<atomic<u32>,432>;
+// The x pass (lDilate's DA) of the page's x by the staged y and z (8 x 18 x 8).
+var<workgroup> dA:array<u32,1152>;
+var<workgroup> sCount:u32;
+// The eight corner bits of side m of staged tile (x, y, z).
+fn dCorners(m:u32,x:u32,y:u32,z:u32)->u32{
+ var b=0u;
+ for(var k=0u;k<4u;k++){let row=y+(k&1u)+19u*(z+(k>>1u));b|=((atomicLoad(&dV[171u*m+row])>>x)&3u)<<(2u*k);}
+ return b;
+}
+// The corner rule's flags of staged tile (x, y, z).
+fn dCornerFlags(x:u32,y:u32,z:u32)->u32{
+ let le=dCorners(0u,x,y,z);let lt=dCorners(1u,x,y,z);let ge=dCorners(2u,x,y,z);
+ var f=0u;
+ if(le!=0u){f|=FTF_AIR_SEED;}
+ if(lt!=0u){f|=FTF_OCCUPIED;}
+ if(le!=0u&&ge!=0u&&(le&ge)!=255u){f|=FTF_CROSSING;}
+ return f;
+}
+// The source flags of tile t at staged (x, y, z): F's where an F slot holds it (as lDilate reads it, past the
+// lattice's faces too), else its C corners' (above); none outside the lattice or the resident pages.
+fn dSource(t:vec3i,x:u32,y:u32,z:u32)->u32{
+ let i=fgTileAt(4*t,0u);
+ if(!lFAbsent(i,t)){return fcLoad(i+FT_FLAGS);}
+ if(!foTileInLattice(t)||fgTileCSlot(t)==NB_NONE){return 0u;}
+ return dCornerFlags(x,y,z);
+}
+@compute @workgroup_size(256) fn lDilateC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);
+ if(lid==0u){sCount=nbListCount(NB_LIST_C_ALL);}
+ if(g>=workgroupUniformLoad(&sCount)){return;}
+ let slot=nbListSlot(NB_LIST_C_ALL,g);let P=nbCOrigin(slot)>>vec3u(2u);let round=cfg.w;
+ let mask=select(0xff0u,15u,round==2u);
+ for(var i=lid;i<513u;i+=256u){atomicStore(&dV[i],0u);}
+ for(var i=lid;i<432u;i+=256u){atomicStore(&dS[i],0u);}
+ workgroupBarrier();
+ for(var i=lid;i<3249u;i+=256u){
+  let x=i%19u;let y=(i/19u)%19u;let z=i/361u;
+  let value=foCVertex(P+vec3i(i32(x)-5,i32(y)-5,i32(z)));let row=y+19u*z;let bit=1u<<x;
+  if(value<=0.0){atomicOr(&dV[row],bit);}
+  if(value<0.0){atomicOr(&dV[171u+row],bit);}
+  if(value>=0.0){atomicOr(&dV[342u+row],bit);}
+ }
+ workgroupBarrier();
+ for(var i=lid;i<2592u;i+=256u){
+  let x=i%18u;let y=(i/18u)%18u;let z=i/324u;
+  let f=dSource(P+vec3i(i32(x)-5,i32(y)-5,i32(z)),x,y,z);let row=y+18u*z;let bit=1u<<x;
+  if((f&FTF_CROSSING)!=0u){atomicOr(&dS[row],bit);}
+  if((f&FTF_AIR_SEED)!=0u){atomicOr(&dS[144u+row],bit);}
+  if((f&FTF_OCCUPIED)!=0u){atomicOr(&dS[288u+row],bit);}
+ }
+ workgroupBarrier();
+ // The x pass: lDilate's (a source field is 0 at the tile, the nearest within R along x, else 15).
+ for(var i=lid;i<1152u;i+=256u){
+  let x=i%8u;let row=i/8u;var best=0xfffu;
+  for(var f=0u;f<3u;f++){
+   if(((mask>>(4u*f))&15u)==0u){continue;}
+   let bits=atomicLoad(&dS[144u*f+row]);var d=15u;
+   for(var off=-R;off<=R;off++){if(((bits>>u32(i32(x)+5+off))&1u)!=0u){d=min(d,u32(abs(off)));}}
+   best=(best&~(15u<<(4u*f)))|(d<<(4u*f));
+  }
+  dA[i]=best;
+ }
+ workgroupBarrier();
+ // The y pass at the page's absent tiles (lDilate's, over the staged DA), with the x pass and the sources.
+ for(var i=lid;i<512u;i+=256u){
+  let x=i&7u;let y=(i>>3u)&7u;let z=i>>6u;let t=P+vec3i(i32(x),i32(y),i32(z));
+  if(!foTileInLattice(t)||!lFAbsent(fgTileAt(4*t,0u),t)){continue;}
+  if(foTileOwnerH(t)){nbFail(NB_FAIL_TIER,0x4c440001u);}
+  var best=0xfffu;
+  for(var off=-R;off<=R;off++){
+   let src=dA[x+8u*u32(i32(y)+5+off)+144u*z];let ao=u32(abs(off));
+   for(var f=0u;f<3u;f++){
+    let d=(src>>(4u*f))&15u;if(d==15u){continue;}
+    let n=max(d,ao);if(n<((best>>(4u*f))&15u)){best=(best&~(15u<<(4u*f)))|(n<<(4u*f));}
+   }
+  }
+  let flags=dSource(t,x+5u,y+5u,z);
+  fcStore(FC_DIL4+512u*slot+i,(dA[x+8u*(y+5u)+144u*z]&0xfffu)|(best<<12u)|((flags&255u)<<24u));
+ }
+}`) : undefined;
 
   const lClear = k("lClear", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], staged(9) + LS_SET_WGSL + /* wgsl */`
 var<workgroup> wMask:array<atomic<u32>,16>;
@@ -549,5 +665,5 @@ fn dNear(c:vec3i)->u32{
  }
 }`);
 
-  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lClear, lNear, lDistance, lPublish };
+  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish };
 }

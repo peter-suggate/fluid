@@ -8,7 +8,7 @@
  *
  * Schedule:
  * - part 1, move: pMove (a record a lane); rebin: pScan, pScatter, pTiles.
- * - part 2, levelSet: vGauge (the volume control's gauge of the opening φ), lInit, lAdvect, lSplat, lUnion, lTiles, the round-1 dilation (air seed, occupancy), lClear
+ * - part 2, levelSet: vGauge (the volume control's gauge of the opening φ), lInit, lAdvect, lSplat, lUnion, lTiles, the round-1 dilation (air seed, occupancy; tiered, lDilateC then lDilate's three passes), lClear
  *   (clearAir with the crossing cells), the round-2 dilation (crossings, activity), lNear (x, y, z), lDistance,
  *   lPublish, then pSeed (the seeds of this step, after the bins, outside every run).
  * - part 2, velocity: uAdvect (and the gauge's rate into FH.RATE), pDeposit, uViscous (a viscous fluid),
@@ -65,7 +65,8 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // Tiered, the samplers' caches of this step's opening state (after the head's transfer, before pMove; at the kick,
   // after the extension, before the seeding).
   const cache = v.uCache ? [at(v.uCache, both)] : [];
-  const dilate = (round: 1 | 2) => [0, 1, 2].map(pass => at(l.lDilate, all8, pass, round));
+  // Tiered, lDilateC first: the round's sources and x and y passes at the tiles no F slot holds (DIL4).
+  const dilate = (round: 1 | 2) => [...(l.lDilateC ? [at(l.lDilateC, pages, 0, round)] : []), ...[0, 1, 2].map(pass => at(l.lDilate, all8, pass, round))];
   const near = [0, 1, 2].map(pass => at(l.lNear, all, pass));
   const rebin = (z: number) => [at(p.pScan, all, z), at(p.pScatter, records, z), at(p.pTiles, all, z)];
   const analysis = [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...dilate(2), ...near, at(l.lDistance, all)];

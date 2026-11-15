@@ -29,6 +29,9 @@
  *   - LIQ: each cell's liquid phase this step (fgLiquidCell: centre φ under -0.001 of a cell, in the lattice), 16
  *     words a slot (bit l of word l / 32), written by uTransfer (uKick at boot) after the level set's last φ write,
  *     read by the tail's extension (uExt4Seed, uExtend) in place of recomputing each cell's eight corners.
+ *   - Tiered only, DIL4: a word for each tile of a C slot, written by lDilateC for the tiles no F slot holds (the
+ *     4h tiles past the owners' margin): bits 0..11 the dilation's x pass (lDilate's DA), 12..23 its y pass (DB),
+ *     24..31 the tile's source flags (FTF_*) from its eight C corners. lDilate reads it where a tile has no F slot.
  * - `fdep`: p2g's fixed-point deposits, 2 words (momentum i32, weight u32) per face of each axis.
  * - `fpart`, per record of a bank: RANK (2 words: the destination rank of the record and of its split half, or
  *   NONE) and MOVED (a third bank: the move's output, which pScatter files into the new bank).
@@ -57,7 +60,7 @@ export interface FluidLayout {
   /** The stages read through the tier owners and write only owned storage (FG_TIERED; brick-abi.md §2.5). */
   readonly tiered: boolean;
   readonly cells: number;
-  readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly UNIT: number; readonly PHIU: number; readonly HMASK: number; readonly CACHE4: number; readonly LIQ: number; readonly words: number };
+  readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly UNIT: number; readonly PHIU: number; readonly HMASK: number; readonly CACHE4: number; readonly LIQ: number; readonly DIL4: number; readonly words: number };
   readonly fdep: { readonly words: number };
   readonly fpart: { readonly RANK: number; readonly words: number };
   readonly fmoved: { readonly words: number };
@@ -78,7 +81,9 @@ export function fluidLayout(L: BrickLayout, options: { readonly tiered?: boolean
   // Tiered, uCache's resolved copies (the old engine's unit and 4h velocity caches and its vertex field).
   const UNIT = take(tiered ? 3 * cells : 0), PHIU = take(tiered ? cells : 0), HMASK = take(tiered ? 8 * f : 0), CACHE4 = take(tiered ? 3 * 512 * L.cap.c : 0);
   const LIQ = take(16 * f);
-  const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, UNIT, PHIU, HMASK, CACHE4, LIQ, words: Math.max(at, 1) };
+  // Tiered, lDilateC's word for each tile of a C slot that no F slot holds.
+  const DIL4 = take(tiered ? 512 * L.cap.c : 0);
+  const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, UNIT, PHIU, HMASK, CACHE4, LIQ, DIL4, words: Math.max(at, 1) };
   const fpart = { RANK: 0, words: 2 * p };
   return { tiered, cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p }, fext4: { words: tiered ? FX4_WORDS * L.cap.c : 1 } };
 }

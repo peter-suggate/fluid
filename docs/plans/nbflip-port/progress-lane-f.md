@@ -948,3 +948,92 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
 - **Proposed next run:** the old-engine census over the D8 window (90 steps, one check run). It would put the corrected row (ours against the old census) beside the receipt row. The ratio here (receipt/census 1.05 at step 30) suggests that D8's 1.12-1.22 against the receipt becomes about 1.07-1.16.
 - **Tools:** ~/code/me/fluid-scratch/lane-f/tools/{d8-old.mts, rb.sh, rb2.sh} and frozen.mts `--pre-deposit`.
 - **Results:** d8old/{d8-old-30,d8-new-30}.jsonl and logs/rb*-{t,h}.log.
+
+**D8 over the gated window: the old engine's census, 90 steps (2026-11-16).** One check-slot run of the old engine (d8-old.mts, `narrowBandRetireCounting` on), read at the gate's sample steps. Ours is round-s6/dam-300ti.jsonl, the gated tiered run, unchanged. The references are ref-2761350a/dam-ref-{a..e}, the canonical five, as the referee ruled.
+- **Receipt row (D8 as gated, unchanged):** ours against the references' mean receipt count.
+- **Corrected row:** ours against the old engine's census of its live records (readParticleMassCensus) at the same fence. That census counts the records the receipt leaves out (the spill tail and the frame's seeds).
+
+| step | refs mean (receipt) | old receipt | old census | old census / receipt | ours | **receipt row** ours / refs | **corrected row** ours / old census |
+|---|---|---|---|---|---|---|---|
+| 16 | 351,574 | 350,224 | 388,580 | 1.110 | 367,319 | 1.045 | 0.945 |
+| 30 | 794,055 | 805,468 | 848,452 | 1.053 | 884,787 | 1.114 | 1.043 |
+| 45 | 952,090 | 979,559 | 1,007,699 | 1.029 | 1,027,665 | 1.079 | 1.020 |
+| 60 | 585,115 | 583,585 | 615,839 | 1.055 | 664,302 | 1.135 | 1.079 |
+| 75 | 414,090 | 432,914 | 454,727 | 1.050 | 505,880 | 1.222 | 1.112 |
+| 90 | 408,960 | 422,060 | 436,372 | 1.034 | 493,162 | 1.206 | 1.130 |
+| **30-90 mean** | 630,862 | | 672,618 | | 715,159 | **1.134** | **1.063** |
+
+- **This old run counts 2.2% more than the references** on its receipt over steps 30-90 (0.997-1.046 a sample). So its census is a little high for the five.
+- **The census runs 3-11% above the receipt at every sample.** So the receipt row overstates our excess by that much. The measurement difference is on the reference side; ours counts every live record.
+- **Corrected, D8 is 1.063 over the window** against this run's census, 0.63 of the 10% tolerance.
+  - Scaling each reference by this run's census/receipt factor at the step instead gives 1.087 (1.058, 1.049, 1.076, 1.163, 1.166 a sample).
+  - Both rest on one old-engine run.
+- **It is not yet like for like at the end.** Steps 75-90 read 1.11-1.13 corrected. From step 60 we keep more records as the pool settles. That matches the 30-step accounting: we retire less by deep retirement, by cut and merge, and by splits.
+- **The step-9 seed burst** is not settled here; it is below.
+- **Both rows are printed; D8 stays gated on the receipt row** until the referee rules on the correction.
+- **Results:** ~/code/me/fluid-scratch/lane-f/d8old/d8-old-90.jsonl (with -summary.json, run90.log).
+
+**The step-9 seed burst: where the seeds go (2026-11-16).** One 12-step check run of the tiered dam with pSeed's seeds counted by cause (tree-d9, header words 80-118, d8old/d9-12.jsonl). Seeds a step:
+
+| step | 5 | 6 | 7 | 8 | **9** | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|
+| seeds | 9.6k | 7.7k | 32.5k | 15.5k | **53.7k** | 21.4k | 21.9k | 18.3k |
+| in bricks with no binned particle | 2.2k | 3.8k | 21.4k | 8.1k | **37.6k** | 5.6k | 6.2k | 4.0k |
+| uncovered (no particle in the 27 cells) | 6.8k | 5.1k | 28.0k | 11.0k | **49.3k** | 12.3k | 12.6k | 9.4k |
+
+- **At step 9:**
+  - 53.6k of the 53.7k seeds are in h cells.
+  - 51.0k are in cells with n0 = 0.
+  - 49.4k are in tiles at crossing distance 0.
+  - 37.6k are in resident bricks with no binned particle.
+  - None are in bricks entering this step (F_ENTER: 0 at every step past boot).
+- **Where they are:**
+  - By height: y 0-15 (the floor) has 30.8k, and y 96-111 (the column top) has 19.6k.
+  - By max(x, z): 96-111 (the surge front) has 24.1k, and 32-47 has 11.7k.
+  - Step 7's burst is the column top: 26.3k at y 96-111.
+- **What this means:**
+  - The burst is reseeding of liquid φ (after lAdvect and lUnion) at the surface, in cells and whole resident bricks with no particle. It happens at the surge's front on the floor and at the falling column's top.
+  - It is not the residency fill. No brick entering that step takes a seed.
+  - pSeed's site rule is the old engine's (nbfSeedSiteOk, verbatim), and so is the stage order: the move and rebin in part 1, then φ, then pSeed on this step's bins.
+- **Not yet like for like.** The "20-35k" it was set against is the old engine's net growth a step, which is seeds less removals. The old engine has no seed counter (see the D8 accounting above).
+- **The comparison that would settle it:** the old engine's own per-step seed count at steps 7-10 (a counter in its seed kernel, one 12-step run). If the old engine bursts there too, it is physics. If not, compare φ against the particles at the front, which means ours leads.
+- **Results:** ~/code/me/fluid-scratch/lane-f/d8old/d9-12.jsonl (counters in `extra.lane`, word 64 + i, cumulative).
+
+**lDilate past the owners' margin: lDilateC (2026-11-16).** The coordinator's M2 item: lDilate resolves a tile no F slot holds through its owner's C page, so the owner margin can drop from 20 to 9.
+- **The kernel.** lDilateC (tiered only, one workgroup per C_ALL page, before each round's x pass) writes DIL4 (fcell, 512 words per C slot) for each of the page's absent tiles:
+  - its source flags from its eight C corners (bits 24-31);
+  - lDilate's DA (bits 0-11) and DB (bits 12-23), from sources staged over 18 x 18 x 8 tiles.
+- **How lDilate reads it.** lDilate reads an absent tile's sources, DA or DB from DIL4 in place of skipping it. A tile in no resident page, or outside the lattice, is still no source.
+- **Why the corner rule is exact.**
+  - In a 4h tile every h vertex is the corners' interpolant (foVertexPhi), so lTiles' and lClear's cell flags follow the corners' signs.
+  - levelset-kernels.test.ts checks this over 6,010 cases, in f32 with the interpolant's own order.
+  - lClear's clear and lcClear raise only positive values, so no corner changes side.
+  - The one exception is SURFACE_TILE (sample support: particles bin only into F slots). An absent tile has none.
+- **Gates (frozen tiered dam, the analysis sequence lTiles..lDistance as one submit, every rw buffer compared):**
+  - **Against the old code (tree-d0), margin 20:**
+    - step 60 (old60) is bitwise;
+    - step 20 matched bitwise once (old20). On a later frozen state it differed in 4 words (time20) and then 56 (oldL20). Every one is the air-seed field of DIST at a tile 8 or more tiles from any h tile (dh8 or dh99).
+    - These are tiles whose seed sources lie in absent tiles (deep 4h liquid). The old code dropped them; now they count, as an F brick there would count them. set and phi are bitwise in every run.
+  - **Pseudo-absence (the new code against itself):**
+    - In B, every in-lattice F tile with no h tile within r is read as absent.
+    - Its source flags come from the corner rule plus its own SURFACE_TILE seed (keepL).
+    - B equals A bitwise apart from DIL4 at r = 2 and r = 1, at steps 20 and 60. That is 4 runs: keepL2-20, keepL2-60, keepL1-20, keepL1-60.
+    - Without the SURFACE_TILE seed kept (nokeepL2-60), only the air-seed field differs. That is the sample support.
+- **A fix on the way.**
+  - dSource first returned no source for any tile outside the lattice, ahead of the F check. A brick on a lattice face holds tiles past it, and lDilate reads those through F.
+  - It now reads the F flags first. The first pseudo probe also took those tiles as absent; the gates above use the corrected probe.
+- **Timing (timing slot, exclusive, frozen step 20, margin 20, `--time=21`):**
+  - the analysis sequence takes 7.15 ms against 7.04 ms (+0.11 ms);
+  - lDilateC is 0.135 ms for its 2 runs;
+  - lDilate's 6 runs take 0.359 ms against 0.377 ms.
+  - At margin 9, F_ALL shrinks and lDilate with it.
+- **For lane E, at margin 9:**
+  - A 4h F tile carries sample support (SURFACE_TILE from the binned particles). So bricks holding particles, and their deposit support, stay resident.
+  - lcCouple and lcBuildDistance read fgReach1 at 4h F tiles.
+  - FAIL.TIER 0x4c440001 latches if an absent tile is h-owned.
+- **Files:**
+  - lib/methods/narrow-band/levelset-kernels.wgsl.ts (lDilateC, lDilate);
+  - fluid-grid.wgsl.ts (DIL4);
+  - brick-fluid-stages.ts (the placements);
+  - levelset-kernels.test.ts (the corner rule, DIL4's layout and the schedule order).
+- **Tools:** ~/code/me/fluid-scratch/lane-f/tools/{frozen.mts --seq/--seqsub/--inspect/--time, dil-seq.sh, probe-dil*.sh, dil-time.sh}. Logs are in logs/dil/.
