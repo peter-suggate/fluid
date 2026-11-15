@@ -1418,3 +1418,38 @@ Owners and ring grow with the sheet (x1.6 and x2.0 at step 45). Reach grows x15.
    - `shown`, a word a lattice brick;
    - two dispatches a presented frame sized by the lattice's bricks (18x18x18 and 17^3 narrow; 66x18x18 and 65x17x17 wide). Each workgroup exits early off the fluid.
 3. Values only, no sizes: NB_LATTICE (clamps), NB_PHI_FAR = max(lattice) (the far φ), RQ_PAGES (resMark's clamp).
+
+## 2026-11-16: the signed per-axis reach bound (parked, coordinator's ruling (b))
+
+**Correction to the entry above.** The x15 "reach" class overstated what the flow term costs. The attribution's classes overlap: a brick in a source's move box but also inside some other source's margin box counted as reach. A new class, moveOnly, isolates the term's true cost: live bricks that are neither owner nor ring and that no source's margin box with zero move covers. On the wide dam at step 45, moveOnly is 958 of 14115 live F bricks (7%). The rest is the spray cloud itself (F_PART 4277 bricks) with its fixed margins (owner 9, the census's 27-ring). Run-to-run noise on the same code is about ±4%: 13557 and 14115.
+
+**What was built (scratch only, not landed).** ~/code/me/fluid-scratch/lane-e/signed/tree, a git repo on 09135ed0:
+- 8b572ea, signed BOUND_S:
+  - a set region, 6 words an F slot: the largest -u and +u an axis;
+  - projectF raises it (6 workgroup atomics; early exits unchanged); setMark and setClaimBricks clear it;
+  - resMark takes flow = (u_side + max(+-g_a, 0) dt) dt / h for each axis and side, and the page sources the same from their C faces;
+  - the oracle matches; the signed read-by table is in the brick-residency header, with file:line rows;
+  - GPU tests 35/35: brick-engine (the residency oracle), brick-set-tiers, composite-mgpcg "live lists", brick-abi.
+- 51c694d, experiment: pJoin's ballistic PSUPPORT travel made signed, (v + g dt) dt / h an axis and sign, in place of lrParticleTravel's |v| dt / h all six ways.
+
+**Attribution** (tools/attrib2.mts, with the moveOnly and reachTravel splits; runs in signed/*.log):
+
+Wide 512 x 128^2, step 45:
+
+| run | live F | moveOnly | owner | ring | reach | margin |
+|---|---|---|---|---|---|---|
+| base 09135ed0 (aw4b) | 13557 | - | 2944 | 3877 | 6330 | 406 |
+| base 09135ed0 (aw4b2) | 14115 | 958 | 2964 | 3811 | 7003 | 337 |
+| BOUND_S only (aw4s) | 14673 | - | 3034 | 3878 | 7483 | 278 |
+| BOUND_S + signed ballistic (aw4sb2) | 12867 | 47 | 2910 | 3880 | 4321 | 1756 |
+
+- FAIL = 0 in every run.
+- Drift at step 46: -10.44% base, -10.35% signed.
+- Narrow 128^3, BOUND_S only (an1b vs an1s): live F 4394/4463/4580 against 4312/4500/4542 at steps 25/35/45, within ±2%; step 15 was 2614 against 2291.
+
+**Ruling.** Parked:
+- the gain is 5-9% on the wide dam and about 0 narrow, against ±4% noise;
+- it costs 6 words a slot, the atomics in projectF and a parity deviation (NBF_SUPPORT_TRAVEL_WGSL);
+- the latch gates were not run.
+
+The spray cloud's fixed margins are the bigger lever, next.
