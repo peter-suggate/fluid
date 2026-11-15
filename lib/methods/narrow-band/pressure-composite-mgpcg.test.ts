@@ -15,10 +15,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ARGS, BRICK_STRIDE, H, LIST, RING, STATE } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
+import type { BrickPlacement } from "./brick-kernel";
 import { add, coarseTile, compositeFixture, COMPOSITE_N, keyCoord, scale, type V3 } from "./parity/composite-fixture";
 import { CompositePressureModel, type CompositeRows } from "./pressure-composite-model";
 import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
-import { MG_FINE_ORDER, MG_HEADER, mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
+import { MG_FINE_ORDER, MG_GATE, MG_HEADER, mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const asF32 = (u: Uint32Array) => new Float32Array(u.buffer, u.byteOffset, u.length);
@@ -67,10 +68,16 @@ async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: b
   const { e } = fx, solver = e.solver;
   // KF: the engine's kernels with the face cache (rowsF writes pmgF FC, projectF reads it); K the formula's.
   const K = pressureCompositeKernels(e.layout), KF = pressureCompositeKernels(e.layout, {}, { faces: mgLayout(e.layout).FC });
-  await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: KF.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
+  // The live lists first (the engine's operator, pressureRowsList, and their arguments), then the rows over F_ALL
+  // (the live passes are these bit for bit: "composite live lists"), so the solve's own rows and projection placements
+  // (labels operator and project) are left out below.
+  const fAll = { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 }, live = poolMGPCG(e.layout, mg).live;
+  await e.run([...(solver.before ?? []), ...(live ? [{ kernel: live.rowsList, dispatch: fAll }, ...live.args] : []),
+    { kernel: K.tileRoots, dispatch: fAll }, { kernel: KF.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
   const before = await readComposite(e, fx.s.bricks, fx.pages, fx.dir, mg.fineOrder);
-  const run = vcycleOnly ? [...solver.setup, ...solver.slot(0).filter(p => !SOLVE.includes(p.kernel.label))]
-    : [...solver.setup, ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(), ...solver.finish];
+  const setup = solver.setup.filter(p => p.kernel.label !== "operator" && p.kernel.label !== "pmgListArgs"), finish = solver.finish.filter(p => p.kernel.label !== "project");
+  const run = vcycleOnly ? [...setup, ...solver.slot(0).filter(p => !SOLVE.includes(p.kernel.label))]
+    : [...setup, ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(), ...finish];
   await e.run(run);
   const header = await e.read("set", 0, 256);
   assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
@@ -117,6 +124,75 @@ test("composite MGPCG (GPU): the converged X on both tiers is the Float64 PCG's"
     assert.equal(header[H.STATE]! & STATE.PRESSURE_CAP, 0, "converged inside the slots");
     assert.ok(hf[MG_HEADER.RLAST]! <= tol * h * h);
     assert.ok(errF / sc < 1e-3 && errN / sc < 1e-3, `GPU X against Float64: h ${errF / sc}, native ${errN / sc}`);
+    e.destroy();
+  });
+});
+
+test("composite live lists (GPU): the rows, setup, finish and projection over HB / HP leave every buffer the F_ALL path's, bit for bit", GPU, async t => {
+  await withDevice("composite live lists", async device => {
+    const mg: MGPCGOptions = { slots: 6, tolerance: 0, walls: true };
+    const fx = await compositeFixture(device, L => poolMGPCG(L, mg));
+    const { e } = fx, L = e.layout, M = mgLayout(L);
+    const lv = poolMGPCG(L, mg), fa = poolMGPCG(L, { ...mg, live: false }), live = lv.live!;
+    assert.ok(live && !fa.live, "live by default, F_ALL on request");
+    const K = pressureCompositeKernels(L), KF = pressureCompositeKernels(L, {}, { faces: M.FC });
+    const KL = pressureCompositeKernels(L, {}, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN } });
+    const fAll = { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 }, pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };
+    // Garbage in every channel the heads of the F_ALL path zero off the h rows (all but X, the warm starts), in the
+    // L1 and L2 rows, and in the face cache, so a zero row the live path missed shows.
+    let seed = 12345;
+    const junk = (n: number) => { const v = new Float32Array(n); for (let i = 0; i < n; i++) { seed = (seed * 1103515245 + 12345) >>> 0; v[i] = (seed / 2 ** 32) * 8 - 4; } return v; };
+    for (const ch of ["R", "Z", "D", "Q", "RHS", "DIAG", "K0", "K1", "K2", "KU0", "KU1", "KU2", "PPHI", "B"]) e.write("pres", L.base("pres", "F", ch), junk(L.cap.f * BRICK_STRIDE));
+    e.write("pmgF", M.L1, junk(M.STG - M.L1));
+    e.write("pmgF", M.FC, junk(M.HBL - M.FC));
+    e.write("pmgC", M.L2, junk(M.L3 - M.L2));
+    // The garbage breaks the certificates' premise (only P writes those rows): none holds.
+    e.write("pmgTop", M.top.ZS, new Uint32Array(2 * L.cap.f));
+    // The lists' own words (pmgF HBL..; the args HB, HP) are the live path's alone. coarsenTop appends the row bricks
+    // (pmgTop RB, SB) by a workgroup atomic, in an order that varies run to run: compared as sets.
+    const T = M.top, F = L.cap.f;
+    const own = (name: string, i: number) => (name === "pmgF" && i >= M.HBL) || (name === "args" && i >= MG_GATE.HB && i < MG_GATE.ZL + 3)
+      || (name === "pmgTop" && i >= T.ZK && i < T.ZK + 4 * F)
+      || (name === "pmgTop" && ((i >= T.RB && i < T.RB + F) || (i >= T.SB && i < T.SB + 4 * F)));
+    const sets = (w: Uint32Array) => [[T.RB, w[T.RBN]!], [T.SB, w[T.SBN]!]].map(([at, n]) => [...w.subarray(at!, at! + n!)].sort((x, y) => x - y).join());
+    const same = async (label: string, from: Awaited<ReturnType<typeof e.save>>, pathF: BrickPlacement[], pathL: BrickPlacement[]) => {
+      await e.restore(from); await e.run(pathF); const a = await e.save();
+      await e.restore(from); await e.run(pathL); const b = await e.save();
+      const diffs: string[] = [];
+      for (const [name, wa] of a.buffers) {
+        const wb = b.buffers.get(name)!; let n = 0, first = -1;
+        for (let i = 0; i < wa.length; i++) if (wa[i] !== wb[i] && !own(name, i)) { n++; if (first < 0) first = i; }
+        if (n) diffs.push(`${name}: ${n} words (first ${first})`);
+      }
+      assert.deepEqual(sets(b.buffers.get("pmgTop")!), sets(a.buffers.get("pmgTop")!), `${label}: the row bricks`);
+      assert.equal(b.buffers.get("set")![H.FAIL], 0, `${label}: FAIL`);
+      assert.deepEqual(diffs, [], label);
+      return b;
+    };
+    // The rows and the setup from the garbage; then the slots once (the same kernels either way: their row bricks are
+    // RB's, whose append order and so the sums' order vary run to run), and the finish and projection from there.
+    const start = await e.save();
+    const rowsF = [{ kernel: K.tileRoots, dispatch: fAll }, { kernel: KF.rowsF, dispatch: fAll }, { kernel: K.rowsC, dispatch: pages }, ...fa.core.setup];
+    const rowsL = [{ kernel: live.rowsList, dispatch: fAll }, ...live.args, ...live.tileRoots, ...live.rows, { kernel: K.rowsC, dispatch: pages }, ...lv.core.setup];
+    const setup = await same("rows and setup", start, rowsF, rowsL);
+    const zl = setup.buffers.get("args")![MG_GATE.ZL]!;
+    // The next step from there: the bricks off HB hold their certified zero rows, so ZL is empty and the rows are the
+    // F_ALL path's (which writes the zeros again).
+    const step = setup.buffers.get("set")![L.set.ring + RING.STEP]!;
+    await e.restore(setup); e.write("set", L.set.ring + RING.STEP, new Uint32Array([step + 1]));
+    const next = await same("rows and setup, the next step", await e.save(), rowsF, rowsL);
+    assert.equal(next.buffers.get("args")![MG_GATE.ZL], 0, "the next step's ZL");
+    await e.restore(setup);
+    await e.run(Array.from({ length: lv.slots }, (_, k) => lv.slot(k)).flat());
+    const solved = await e.save();
+    const tail = [{ kernel: K.projectC, dispatch: pages }, ...lv.publish];
+    const end = await same("finish and projection", solved, [...fa.core.finish, ...tail, { kernel: KF.projectF, dispatch: fAll }],
+      [...lv.core.finish, ...tail, ...live.project, { kernel: KL.projectRest!, dispatch: fAll }]);
+    const args = end.buffers.get("args")!, header = end.buffers.get("set")!;
+    const hb = args[MG_GATE.HB]!, hp = args[MG_GATE.HP]!, bricks = fx.s.bricks.size;
+    t.diagnostic(`F bricks ${bricks}: HB ${hb}, HP ${hp}, ZL ${zl}; ${header[MG_HEADER.ITERATIONS]} iterations`);
+    assert.ok(hb > 0 && hb < bricks && hp >= hb && hp <= bricks, "the lists split F_ALL");
+    assert.equal(zl, bricks - hb, "uncertified, every brick off HB is zeroed");
     e.destroy();
   });
 });
