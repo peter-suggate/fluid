@@ -660,8 +660,26 @@ d and base-e", and 1.12 against "a and b". The answers to the three questions fo
    - All three reported margins fit one candidate at about 709–710k:
      - (709.7 − 630.8) / 63.1 = 1.25 against the canonical five;
      - (709.1 − 623.3) / 124.8 = 0.69 against the old four;
-     - (709.7 − 638.3) / 63.8 = 1.12 against the **old** set's a and b (634.9, 641.6). Against
-       the canonical a and b (mean 629.2, tol 62.9, the floor) it would be 1.28.
+     - 1.12, which matches lane E's second candidate (701.4k) against the canonical five. It
+       would also match 709.7k against the old set's a and b, (709.7 − 638.3) / 63.8. Lane F
+       should confirm which files and candidate it used: against the canonical a and b (mean
+       629.2k, tol 62.9k, the floor), 709.7k gives 1.28.
+   - **Lane E's two reports** (`~/code/me/fluid-scratch/lane-e/realD/gate/`) confirm this.
+     - `realD-round.md` was run with `--ref=artifacts/nbflip-port/ref`, the whole 33b78ebb set.
+       Its header lists every scene's refs as `…-ref-a, b, c, d` plus `…-base-e`, and the dam's as
+       a, b, d and `dam-base-e`.
+     - So nothing was dropped or swapped. That set has no dam c, and its file
+       `dam-ref-e.jsonl` carries the meta name `dam-base-e`.
+     - `realD-round-default.md` used the default, the canonical five.
+     - The same candidate, dam-300-base at db999a8b (709.1k at 30–90), reads 1.24 against the
+       canonical five and 0.69 against the old set. dam-300-cand at 0be9d9f4 (701.4k) reads 1.12
+       and 0.63.
+   - **Which reference sets the bound.**
+     - In the canonical set the 10% floor sets it. S = 17.3k comes from d (640.1k) and e
+       (622.8k), and 3S = 51.9k is below the floor.
+     - In the old set, 3S sets it: S = 41.6k from b (641.6k) and **d (600.0k)**. Old ref d alone
+       doubles the band.
+     - Neither the canonical c (633.0k) nor base-e (616.5k) is an extreme of its set.
    - A sixth baseline run at 2761350a (base-f) reads 657.9k, margin 0.43. The candidate is
      +12.5% over the canonical mean, about three times the baseline's own repeat.
 3. **D8 stays gated.** It does not become an as-written row.
