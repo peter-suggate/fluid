@@ -18,7 +18,7 @@ import type { BrickEngine } from "./brick-engine";
 import { add, coarseTile, compositeFixture, COMPOSITE_N, keyCoord, scale, type V3 } from "./parity/composite-fixture";
 import { CompositePressureModel, type CompositeRows } from "./pressure-composite-model";
 import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
-import { MG_HEADER, mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
+import { MG_FINE_ORDER, MG_HEADER, mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const asF32 = (u: Uint32Array) => new Float32Array(u.buffer, u.byteOffset, u.length);
@@ -31,7 +31,7 @@ async function withDevice(label: string, run: (device: GPUDevice) => Promise<voi
 }
 
 /** The composite system as the GPU stored it, with each row's channel reader. */
-async function readComposite(e: BrickEngine, bricks: Map<number, number>, pages: number[], dir: Uint32Array) {
+async function readComposite(e: BrickEngine, bricks: Map<number, number>, pages: number[], dir: Uint32Array, fineOrder: "BS" | "BSB" = MG_FINE_ORDER) {
   const L = e.layout;
   const readF = async (ch: string) => new Float32Array((await e.read("pres", L.base("pres", "F", ch), L.cap.f * BRICK_STRIDE)).buffer);
   const readC = async (ch: string) => new Float32Array((await e.read("pres", L.base("pres", "C", ch), L.cap.c * BRICK_STRIDE)).buffer);
@@ -51,7 +51,7 @@ async function readComposite(e: BrickEngine, bricks: Map<number, number>, pages:
     f: { cells, diag: fAt.map(i => F.DIAG![i]!), k: [0, 1, 2].map(a => fAt.map(i => F[`K${a}`]![i]!)), ku: [0, 1, 2].map(a => fAt.map(i => F[`KU${a}`]![i]!)) },
     n: { tiles, diag: cAt.map(i => C.DIAG![i]!), k: [0, 1, 2].map(a => cAt.map(i => C[`K${a}`]![i]!)) },
   };
-  const model = new CompositePressureModel(rows);
+  const model = new CompositePressureModel(rows, { levels: 8, fineSweeps: 3, coarseSweeps: 2, nativeSweeps: 2, fineOrder });
   // A channel as the model's vector (rows in the model's order).
   const vec = (ch: string) => {
     const v = new Float64Array(model.fine.keys.length);
@@ -67,19 +67,19 @@ async function solveComposite(device: GPUDevice, mg: MGPCGOptions, vcycleOnly: b
   const { e } = fx, solver = e.solver;
   const K = pressureCompositeKernels(e.layout);
   await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
-  const before = await readComposite(e, fx.s.bricks, fx.pages, fx.dir);
+  const before = await readComposite(e, fx.s.bricks, fx.pages, fx.dir, mg.fineOrder);
   const run = vcycleOnly ? [...solver.setup, ...solver.slot(0).filter(p => !SOLVE.includes(p.kernel.label))]
     : [...solver.setup, ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(), ...solver.finish];
   await e.run(run);
   const header = await e.read("set", 0, 256);
   assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]?.toString(16)}`);
-  const after = await readComposite(e, fx.s.bricks, fx.pages, fx.dir);
+  const after = await readComposite(e, fx.s.bricks, fx.pages, fx.dir, mg.fineOrder);
   return { e, before, after, header, h: fx.h, fx, K };
 }
 
-test("composite MGPCG (GPU): r0 and one V-cycle on both tiers match the Float64 model's", GPU, async t => {
+for (const fineOrder of ["BS", "BSB"] as const) test(`composite MGPCG (GPU): r0 and one V-cycle on both tiers match the Float64 model's (L0 ${fineOrder})`, GPU, async t => {
   await withDevice("composite mgpcg vcycle", async device => {
-    const { e, before, after, header } = await solveComposite(device, { slots: 1, tolerance: 0 }, true);
+    const { e, before, after, header } = await solveComposite(device, { slots: 1, tolerance: 0, fineOrder }, true);
     const M = before.model, n = M.fine.keys.length;
     const b = before.vec("RHS"), x0 = before.vec("X"), Ax = M.apply(x0), r0 = b.map((v, i) => v - Ax[i]!);
     const R = after.vec("R"), Z = after.vec("Z");

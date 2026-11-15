@@ -32,7 +32,7 @@
  * - The convergence check runs before each V-cycle: max|r| <= tol, with a native row's residual taken
  *   over 64, its band-equivalent (a native row is 64 h rows' worth: RHS -64 h^2 div).
  */
-import { MAX_COARSEST_ROWS, OC, packCell, unpackCell } from "./pressure-model";
+import { FINE_ORDER, MAX_COARSEST_ROWS, OC, finePasses, packCell, unpackCell } from "./pressure-model";
 
 type V3 = [number, number, number];
 export interface CompositeRows {
@@ -165,7 +165,7 @@ export class CompositePressureModel {
   readonly levels: Level[] = [];
   readonly parents: number[][] = [];
   readonly inverse: Float64Array;
-  constructor(rows: CompositeRows, readonly options: { levels: number; fineSweeps: number; coarseSweeps: number; nativeSweeps?: number } = { levels: 8, fineSweeps: 3, coarseSweeps: 2, nativeSweeps: 2 }) {
+  constructor(rows: CompositeRows, readonly options: { levels: number; fineSweeps: number; coarseSweeps: number; nativeSweeps?: number; fineOrder?: "BS" | "BSB" } = { levels: 8, fineSweeps: 3, coarseSweeps: 2, nativeSweeps: 2 }) {
     this.levels.push(compositeLevel0(rows));
     while (this.levels.length < options.levels) { const { C, parent } = coarsen(this.levels.at(-1)!); this.levels.push(C); this.parents.push(parent); }
     if (this.levels.at(-1)!.keys.length > MAX_COARSEST_ROWS) throw new Error(`Composite model: ${this.levels.at(-1)!.keys.length} coarsest rows`);
@@ -182,7 +182,7 @@ export class CompositePressureModel {
     const smooth = (post: boolean) => {
       const native = l < 2 ? rb(o.nativeSweeps ?? 2, post) : undefined;
       if (native && post) nativeGS(L, e, r, native);
-      if (l === 0) for (const off of [[0, 0, 0], [4, 0, 4], [0, 0, 0]]) blockGS(L, e, r, 8, off, rb(o.fineSweeps, post));
+      if (l === 0) for (const off of finePasses(o.fineOrder ?? FINE_ORDER, post)) blockGS(L, e, r, 8, off, rb(o.fineSweeps, post));
       else blockGS(L, e, r, Math.max(2, 8 >> l), [0, 0, 0], rb(o.coarseSweeps, post));
       if (native && !post) nativeGS(L, e, r, native);
     };

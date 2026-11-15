@@ -359,6 +359,12 @@ fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{
   let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,poFacePhi(c,a,sign),volume,true,false,false,1.0,true,false,1.0);
   return PoFace(face,n.wet,native);
 }
+// poBandFace of h cell m on face f where the cell across lies in a liquid 4h-owned tile of a resident page with root
+// φ root (a seam, seen from the native row): across RESIDENT, not band, native, n = (root, wet, liquid), volume 1.
+fn poSeamFace(m:vec3i,own:f32,liquid:bool,f:u32,root:f32)->NpFace{
+  let a=f/2u;let sign=npSign(f);
+  return npBandFace(NP_ACROSS_RESIDENT,own,liquid,1.0,1.0,false,true,NpCell(root,true,true),poFacePhi(m,a,sign),1.0,true,false,false,1.0,true,false,1.0);
+}
 // An h row's seam head on face f (bSeamHead): its tangential neighbours' starts.
 fn poHead(c:vec3i,own:f32,base:f32,f:u32)->f32{
   var usable=0u;var bases:array<f32,6>;
@@ -532,74 +538,97 @@ var<workgroup> poCold:atomic<u32>;
   }
 }`, rowsEntry, ROWS, true);
 
-  // rowsC: a workgroup a page of C_ALL (G1), a lane two tiles. After rowsF, whose stored rows it reads: a seam
+  // rowsC: a workgroup a page of C_ALL (G1), a lane a tile. After rowsF, whose stored rows it reads: a seam
   // subface's h cell m takes its centre φ from PPHI and its head from poHeadB (the h rows' starts in B and centre φ
   // in PPHI), the values rowsF computed, so the subface's coefficient and head are the h row's own, unrecomputed.
+  // The seams are the pass's work (16 subfaces a face, each a band face and a head), so they are spread over the
+  // workgroup: each lane lists its tile's seam faces, then the lanes take the listed faces' subfaces 512 at a time
+  // (32 faces), and each tile's lane adds its faces' 16 sums in subface order. One lane walked its two tiles' seams
+  // alone before (2.4 ms on the tiered dam, the slowest lane's chain).
   const rowsC = k("pressureRowsC", PROJECT_WGSL + /* wgsl */`
-@compute @workgroup_size(256) fn pressureRowsC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
+var<workgroup> rcN:atomic<u32>;var<workgroup> rcCount:u32;
+var<workgroup> rcE:array<u32,3072>;
+var<workgroup> rcR:array<f32,512>;
+var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgroup> rcP:array<f32,512>;
+@compute @workgroup_size(512) fn pressureRowsC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){rcCount=nbListCount(NB_LIST_C_ALL);atomicStore(&rcN,0u);}
+  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&rcCount)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,g);
   let O=nbCOrigin(cs)>>vec3u(2u);let r=cfg.x;let h=nbRingF(r,NB_RING_H);
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
-  for(var j=0u;j<2u;j++){
-    let i=lid+256u*j;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
-    var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var start=0.0;
-    let owned=nbTileInLattice(T)&&!nbTileH(cs,i);
-    var root=0.0;if(owned){root=poRootPhi4(T);}
-    let liquid=owned&&poWet(root,4.0);
-    if(liquid){
-      for(var j=0u;j<8u;j++){poGuardVertex(4*(T+poCorner(j)));}
-      start=poTileStart(T);
-      for(var f=0u;f<6u;f++){
-        let a=f/2u;let side=f&1u;let sign=npSign(f);let e=poUnit(a);let Tn=T+sign*e;
-        let plane=4*select(T,Tn,side==1u);
-        if(!nbTileInLattice(Tn)){
-          // The root's wall slot: fraction 0.5 (the wall face's mean h V), b its forced flux.
-          let fraction=0.5;let u=nbFacePlane(plane,a);let c=4.0*fraction;let lift=f32(sign)*4.0*h*u;
-          div+=f32(sign)*fraction*u;
-          let separated=!(root< -4.0)&&start+lift<0.0;
-          if(!separated){extra+=c*lift;}else{diag+=c;}
-          poSetWall(poFlagsWordC(select(T,Tn,side==1u)),a,separated);
-          continue;
-        }
-        let w=nbPageWord(Tn>>vec3u(3u));
-        if(w>=NB_SEAM&&w!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,w);continue;}
-        let low=select(Tn,T,side==1u);let high=select(T,Tn,side==1u);
-        if(w==NB_NONE){
-          let c=4.0/poNativeTheta(low,high,a);diag+=c;div+=f32(sign)*nbFacePlane(plane,a);continue;
-        }
-        if(nbTileOwnerH(Tn)){
-          // A seam: the 16 h cells of Tn beside the face, each with the band's own face formula.
-          let u=poUnit((a+1u)%3u);let v=poUnit((a+2u)%3u);let g2=f^1u;
-          var layer=4*Tn;if(side==0u){layer[a]+=3;}
-          var sum=0.0;
-          for(var s=0u;s<16u;s++){
-            let m=layer+i32(s&3u)*u+i32(s>>2u)*v;
-            let pm=poPhiF(m);let lm=poWet(pm,1.0);let pf=poBandFace(m,pm,lm,g2);
-            if(pf.face.kind==NP_K_SEAM){
-              diag+=pf.face.coefficient;
-              if(lm){extra-=pf.face.coefficient*poHeadB(m,pm,poBF(m),g2);}
-            }
-            var fm=m;if(side==0u){fm[a]+=1;}
-            sum+=nbFacePlane(fm,a);
-          }
-          div+=f32(sign)*(sum/16.0);
-          continue;
-        }
-        let un=nbFacePlane(plane,a);div+=f32(sign)*un;
-        if(poWet(poRootPhi4(Tn),4.0)){let c=4.0;diag+=c;if(side==0u){kk[a]=c;}}
-        else{diag+=4.0/poNativeTheta(low,high,a);}
+  let i=lid;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
+  var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var start=0.0;
+  let owned=nbTileInLattice(T)&&!nbTileH(cs,i);
+  var root=0.0;if(owned){root=poRootPhi4(T);}
+  rcR[i]=root;
+  let liquid=owned&&poWet(root,4.0);
+  if(liquid){
+    for(var j=0u;j<8u;j++){poGuardVertex(4*(T+poCorner(j)));}
+    start=poTileStart(T);
+    for(var f=0u;f<6u;f++){
+      let a=f/2u;let side=f&1u;let sign=npSign(f);let e=poUnit(a);let Tn=T+sign*e;
+      let plane=4*select(T,Tn,side==1u);
+      if(!nbTileInLattice(Tn)){
+        // The root's wall slot: fraction 0.5 (the wall face's mean h V), b its forced flux.
+        let fraction=0.5;let u=nbFacePlane(plane,a);let c=4.0*fraction;let lift=f32(sign)*4.0*h*u;
+        div+=f32(sign)*fraction*u;
+        let separated=!(root< -4.0)&&start+lift<0.0;
+        if(!separated){extra+=c*lift;}else{diag+=c;}
+        poSetWall(poFlagsWordC(select(T,Tn,side==1u)),a,separated);
+        continue;
+      }
+      let w=nbPageWord(Tn>>vec3u(3u));
+      if(w>=NB_SEAM&&w!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,w);continue;}
+      let low=select(Tn,T,side==1u);let high=select(T,Tn,side==1u);
+      if(w==NB_NONE){
+        let c=4.0/poNativeTheta(low,high,a);diag+=c;div+=f32(sign)*nbFacePlane(plane,a);continue;
+      }
+      // A seam (the 16 h cells of Tn beside the face): listed, summed below.
+      if(nbTileOwnerH(Tn)){rcE[atomicAdd(&rcN,1u)]=(i<<3u)|f;continue;}
+      let un=nbFacePlane(plane,a);div+=f32(sign)*un;
+      if(poWet(poRootPhi4(Tn),4.0)){let c=4.0;diag+=c;if(side==0u){kk[a]=c;}}
+      else{diag+=4.0/poNativeTheta(low,high,a);}
+    }
+  }
+  workgroupBarrier();
+  if(lid==0u){rcCount=atomicLoad(&rcN);}
+  let n=workgroupUniformLoad(&rcCount);
+  // Each listed face's subface s, with the band's own face formula from the h side (poSeamFace: the cell across is
+  // the native row's tile, whose root φ is rcR's).
+  for(var c0=0u;c0<n;c0+=32u){
+    let ent=c0+(lid>>4u);var dc=0.0;var xc=0.0;var pc=0.0;
+    if(ent<n){
+      let wv=rcE[ent];let ti=wv>>3u;let f=wv&7u;let a=f/2u;let side=f&1u;
+      let Ts=O+nbLocalCoord(ti);let Tn=Ts+npSign(f)*poUnit(a);
+      let u=poUnit((a+1u)%3u);let v=poUnit((a+2u)%3u);let g2=f^1u;let sq=lid&15u;
+      var layer=4*Tn;if(side==0u){layer[a]+=3;}
+      let m=layer+i32(sq&3u)*u+i32(sq>>2u)*v;
+      let pm=poPhiF(m);let lm=poWet(pm,1.0);let pf=poSeamFace(m,pm,lm,g2,rcR[ti]);
+      if(pf.kind==NP_K_SEAM){dc=pf.coefficient;if(lm){xc=pf.coefficient*poHeadB(m,pm,poBF(m),g2);}}
+      var fm=m;if(side==0u){fm[a]+=1;}
+      pc=nbFacePlane(fm,a);
+    }
+    rcD[lid]=dc;rcX[lid]=xc;rcP[lid]=pc;
+    workgroupBarrier();
+    // No break or continue: the barrier below stays in uniform control flow.
+    for(var q=0u;q<32u;q++){
+      let e=c0+q;
+      if(e<n&&(rcE[e]>>3u)==i){
+        let wv=rcE[e];var sd=0.0;var sx=0.0;var sp=0.0;
+        for(var sq=0u;sq<16u;sq++){sd+=rcD[16u*q+sq];sx+=rcX[16u*q+sq];sp+=rcP[16u*q+sq];}
+        diag+=sd;extra-=sx;div+=f32(npSign(wv&7u))*(sp/16.0);
       }
     }
-    // X keeps the tile's last pressure (the start) on liquid native rows, and on h tiles for the finish.
-    if(owned&&!liquid){pres[NB_PRES_C_X+at]=0.0;}
-    pres[NB_PRES_C_B+at]=start;
-    pres[NB_PRES_C_RHS+at]=select(0.0,-16.0*h*div+64.0*h*h*rate*capacity+extra,liquid);
-    pres[NB_PRES_C_DIAG+at]=diag;
-    // An h tile's PPHI is tileRoots' held fit, which this pass's seams read across tiles: kept.
-    if(!(nbTileInLattice(T)&&nbTileH(cs,i))){pres[NB_PRES_C_PPHI+at]=root;}
-    pres[NB_PRES_C_K0+at]=kk.x;pres[NB_PRES_C_K1+at]=kk.y;pres[NB_PRES_C_K2+at]=kk.z;
+    workgroupBarrier();
   }
+  // X keeps the tile's last pressure (the start) on liquid native rows, and on h tiles for the finish.
+  if(owned&&!liquid){pres[NB_PRES_C_X+at]=0.0;}
+  pres[NB_PRES_C_B+at]=start;
+  pres[NB_PRES_C_RHS+at]=select(0.0,-16.0*h*div+64.0*h*h*rate*capacity+extra,liquid);
+  pres[NB_PRES_C_DIAG+at]=diag;
+  // An h tile's PPHI is tileRoots' held fit, which this pass's seams read across tiles: kept.
+  if(!(nbTileInLattice(T)&&nbTileH(cs,i))){pres[NB_PRES_C_PPHI+at]=root;}
+  pres[NB_PRES_C_K0+at]=kk.x;pres[NB_PRES_C_K1+at]=kk.y;pres[NB_PRES_C_K2+at]=kk.z;
 }`);
 
   // projectF: a workgroup a brick (G1 of the engine's project list, F_ALL), a lane two cells' lower faces.

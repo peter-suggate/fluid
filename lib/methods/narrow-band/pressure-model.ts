@@ -74,6 +74,9 @@ export interface ModelOptions {
   readonly coarseSweeps?: number;
   /** false: level 0 takes the bricks alone (one covering). */
   readonly staggered?: boolean;
+  /** The staggered passes' order (FINE_ORDER): "BS" bricks then shifted blocks (post: shifted blocks then bricks),
+   * "BSB" the palindrome bricks, shifted blocks, bricks. Both make the V-cycle's post-smoother the pre-smoother's adjoint. */
+  readonly fineOrder?: "BS" | "BSB";
   /** A fixed level count (L0 .. L(levels-1)), as the GPU solver builds it; its coarsest must hold at most
    * `coarsestRows` rows. 0 (the default): the first level with at most `coarsestRows` rows is the coarsest. */
   readonly levels?: number;
@@ -166,13 +169,18 @@ export function denseInverse(L: ModelLevel): Float64Array | null {
 
 const rb = (n: number, rev: boolean) => Array.from({ length: 2 * n }, (_, s) => rev ? 1 - (s & 1) : s & 1);
 const ZERO = [0, 0, 0], SHIFT = [4, 0, 4];
+/** Level 0's Schwarz order by default (ModelOptions.fineOrder; the GPU's MG_FINE_ORDER). */
+export const FINE_ORDER: "BS" | "BSB" = "BSB";
+/** Level 0's staggered passes: the pre-smoother's, and the post-smoother's in reverse (each block's colours reversed). */
+export const finePasses = (order: "BS" | "BSB", post: boolean): readonly (readonly number[])[] =>
+  order === "BSB" ? [ZERO, SHIFT, ZERO] : post ? [SHIFT, ZERO] : [ZERO, SHIFT];
 
 export class PressureModel {
   readonly levels: ModelLevel[];
   readonly inverse: Float64Array;
   readonly options: Required<ModelOptions>;
   constructor(fine: FineRows, options: ModelOptions = {}) {
-    this.options = { coarsestRows: MAX_COARSEST_ROWS, fineSweeps: 3, coarseSweeps: 2, staggered: true, levels: 0, ...options };
+    this.options = { coarsestRows: MAX_COARSEST_ROWS, fineSweeps: 3, coarseSweeps: 2, staggered: true, levels: 0, fineOrder: FINE_ORDER, ...options };
     if (this.options.coarsestRows > MAX_COARSEST_ROWS) throw new Error(`Pressure model: a coarsest level of ${this.options.coarsestRows} rows, over ${MAX_COARSEST_ROWS}`);
     const L0 = makeLevel(0, [...fine.keys]);
     fine.keys.forEach((key, s) => { const i = L0.index.get(key)!; (L0.diag as Float64Array)[i] = fine.diag[s]!; for (let a = 0; a < 3; a++) (L0.k[a] as Float64Array)[i] = fine.k[a]![s]!; });
@@ -197,7 +205,7 @@ export class PressureModel {
     const e = new Float64Array(r.length), o = this.options;
     const smooth = (post: boolean) => {
       if (l === 0) {
-        const passes = o.staggered ? [ZERO, SHIFT, ZERO] : [ZERO];
+        const passes = o.staggered ? finePasses(o.fineOrder, post) : [ZERO];
         for (const off of passes) blockGS(L, e, r, 8, off, rb(o.fineSweeps, post));
       } else blockGS(L, e, r, Math.max(2, 8 >> l), ZERO, rb(o.coarseSweeps, post));
     };

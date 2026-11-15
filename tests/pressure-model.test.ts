@@ -57,8 +57,8 @@ const film = operator([32, 16, 32], (x, y, z) => {
   return y + 0.5 - filmHeights.get(key)!;
 });
 
-test("pressure model: the V-cycle is symmetric positive definite", () => {
-  const m = new PressureModel(film.rows), n = film.rows.keys.length;
+for (const fineOrder of ["BS", "BSB"] as const) test(`pressure model: the V-cycle is symmetric positive definite (L0 ${fineOrder})`, () => {
+  const m = new PressureModel(film.rows, { fineOrder }), n = film.rows.keys.length;
   assert.ok(m.levels.at(-1)!.keys.length <= 64, "coarsest within 64 rows");
   const y = random(n, 11), w = random(n, 23);
   const a = dot(w, m.vcycle(y)), b = dot(y, m.vcycle(w));

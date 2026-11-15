@@ -49,7 +49,7 @@
  * Gates (P's args region, MG_GATE): F at 512 (the row bricks' G1 or 0), C at 515 (C_ALL's
  * G1 or 0), ONE at 518, the walls' WF and WC at 521 and 524, S at 527 (the shifted blocks,
  * pmgTop SB, for L0's S passes: a workgroup a block, listed once a step by pmgCoarsenTop) and FC at
- * 530 (the row bricks then C_ALL's pages: pmgDirection and pmgUpdate run their h and native halves
+ * 530 (C_ALL's pages then the row bricks: pmgDirection and pmgUpdate run their h and native halves
  * in one launch). Header words: MG_HEADER.
  *
  * The tolerance is a divergence bound in 1/s: the solve stops when
@@ -81,7 +81,7 @@
 import { ARGS, BRICK_STRIDE, BrickLayout, LIST, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, type BrickPlacement, declareBindings } from "./brick-kernel";
 import type { PressureSolver } from "./brick-pressure-slot";
-import { OC } from "./pressure-model";
+import { FINE_ORDER, OC } from "./pressure-model";
 import { P_FLAG, P_WALL_C } from "./pressure-composite.wgsl";
 
 const P_WALL0 = P_FLAG.WALL0, WALL_F = P_WALL_C.F.toFixed(1), WALL_C = P_WALL_C.C.toFixed(1);
@@ -119,6 +119,8 @@ export const MG_TOLERANCE = 0.05;
  * is in practice the first slot's iterate.
  */
 export const MG_WALL_DECISIONS = 1, MG_WALL_LOOSE = 1000;
+/** L0's Schwarz passes by default (MGPCGOptions.fineOrder). */
+export const MG_FINE_ORDER: "BS" | "BSB" = FINE_ORDER;
 /** Levels of the hierarchy (L0..L7) and the compact top's row caps. */
 export const MG_LEVELS = 8;
 export const MG_ROWS6 = 512, MG_ROWS7 = 64;
@@ -161,7 +163,14 @@ export function mgLayout(L: BrickLayout) {
   // PDELTA (lane E's region heat reads it; brick-abi.md "PDELTA"): 8 words a C slot, the f32 region pressure change of
   // pmgPressureDelta, Delta(p / rho) in m^2/s^2, +Inf unknown. PH: its history, a tile's p / rho a C slot each step parity.
   const PDELTA = L5 + CH.N * C, PH = PDELTA + 8 * C;
-  return { W0, W1, L1, fWords: L1 + CH.N * 64 * F, L2, L3, L4, L5, PDELTA, PH, cWords: PH + 2 * 512 * C, top: mgTopLayout(C, F) };
+  // SEAM: a native tile's six faces' seam bricks (the F slot holding the h tile's seam layer across face f, as an exact
+  // f32 integer, -1 none), written once a step by pmgCoarsenC and read by every native pass's seam sum.
+  const SEAM = PH + 2 * 512 * C;
+  // STG (pmgF) and QSTG (pmgC): a brick's 27-neighbour stage (pStage: F slots, their pages' C slots, native-tile masks)
+  // and a page's 27 neighbour pages (qStage), as exact f32 integers (-1 none), written once a step by pmgSetupF over
+  // F_ALL and pmgCoarsenC over C_ALL; every slot pass then stages in one load instead of the directory chain.
+  const STG = L1 + CH.N * 64 * F, QSTG = SEAM + 6 * 512 * C;
+  return { W0, W1, L1, STG, fWords: STG + 81 * F, L2, L3, L4, L5, PDELTA, PH, SEAM, QSTG, cWords: QSTG + 27 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -182,6 +191,12 @@ export interface MGPCGOptions {
   readonly tolerance?: number;
   /** Red-black sweeps inside a level 0 Schwarz block (pressure-model.ts fineSweeps). */
   readonly fineSweeps?: number;
+  /**
+   * L0's Schwarz passes (pressure-model.ts fineOrder): "BS" the bricks then the shifted blocks, the adjoint (shifted
+   * blocks, bricks) after the coarse correction, as the seep's pcgUpdate/pcgShiftDown | pcgShiftUp/pcgPrecond; "BSB"
+   * the palindrome bricks, shifted blocks, bricks on both sides.
+   */
+  readonly fineOrder?: "BS" | "BSB";
   /** Red-black sweeps inside a coarse block (pressure-model.ts coarseSweeps). */
   readonly coarseSweeps?: number;
   /** Red-black sweeps of the native rows' own passes at L0 and L1 (pressure-composite-model.ts nativeSweeps). */
@@ -205,7 +220,10 @@ export interface MGPCGOptions {
 }
 
 export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver & { readonly publish: readonly BrickPlacement[] } {
-  const slots = options.slots ?? 8, tol = options.tolerance ?? MG_TOLERANCE;
+  const slots = options.slots ?? 8, tol = options.tolerance ?? MG_TOLERANCE, bsb = (options.fineOrder ?? MG_FINE_ORDER) === "BSB";
+  if (options.fineOrder !== undefined && options.fineOrder !== "BS" && options.fineOrder !== "BSB") throw new Error(`Pool MGPCG: fine order ${String(options.fineOrder)}`);
+  // The h rows' pre-smoothed plane: W0 after BSB's last brick pass (pmgPreU), W1 after BS's shifted pass (pmgPreS).
+  const PRE = bsb ? "P_W0" : "P_W1";
   const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, nativeSweeps = options.nativeSweeps ?? 2, walls = options.walls ?? false;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
   const tolBits = new Uint32Array(new Float32Array([tol]).buffer)[0]!;
@@ -221,6 +239,7 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
     ...Object.entries(T).filter(([n]) => n !== "words").map(([n, v]) => `const T_${n}:u32=${u(v)};`),
     `const P_OC:f32=${OC.toFixed(6)};const P_SOC:f32=${Math.sqrt(OC).toFixed(7)};`,
     `const P_W0:u32=${u(M.W0)};const P_W1:u32=${u(M.W1)};const P_L1:u32=${u(M.L1)};`,
+    `const P_SEAM:u32=${u(M.SEAM)};const P_STG:u32=${u(M.STG)};const P_QSTG:u32=${u(M.QSTG)};`,
     `const P_L2:u32=${u(M.L2)};const P_L3:u32=${u(M.L3)};const P_L4:u32=${u(M.L4)};const P_L5:u32=${u(M.L5)};`,
     `const P_FS2:u32=${u(2 * fineSweeps)};const P_CS2:u32=${u(2 * coarseSweeps)};const P_NS2:u32=${u(2 * nativeSweeps)};const P_SLOTS:u32=${u(slots)};`,
     `const P_ROWS6:u32=${u(MG_ROWS6)};const P_ROWS7:u32=${u(MG_ROWS7)};`,
@@ -237,6 +256,7 @@ fn pL2(ch:u32,s:u32,i:u32)->u32{return P_L2+(ch*NB_CCAP+s)*512u+i;}
 fn pL3(ch:u32,s:u32,i:u32)->u32{return P_L3+(ch*NB_CCAP+s)*64u+i;}
 fn pL4(ch:u32,s:u32,i:u32)->u32{return P_L4+(ch*NB_CCAP+s)*8u+i;}
 fn pL5(ch:u32,s:u32)->u32{return P_L5+ch*NB_CCAP+s;}
+fn pSeamW(f:u32,cs:u32,i:u32)->u32{return P_SEAM+(f*NB_CCAP+cs)*512u+i;}
 `].join("\n");
 
   // Helpers by what they bind (WGSL resolves every function, used or not).
@@ -291,6 +311,17 @@ fn pNatAt(b:vec3i,c:vec3i)->u32{
 }
 `;
   // A page's 27 neighbour pages (C slots), NONE otherwise; self at 13.
+  // The stage cache (P_STG, P_QSTG): written by the setup's staging kernels, read by every later pass of the step.
+  const STAGEK = /* wgsl */`
+fn pStageW(slot:u32,lid:u32){
+  if(lid<27u){let at=P_STG+81u*slot+lid;pmgF[at]=select(f32(pN[lid]),-1.0,pN[lid]==NB_NONE);pmgF[at+27u]=select(f32(pNC[lid]),-1.0,pNC[lid]==NB_NONE);pmgF[at+54u]=f32(pNM[lid]);}
+}
+fn pStageK(slot:u32,lid:u32){
+  if(lid<27u){let at=P_STG+81u*slot+lid;let n=pmgF[at];let c=pmgF[at+27u];pN[lid]=select(u32(n),NB_NONE,n<0.0);pNC[lid]=select(u32(c),NB_NONE,c<0.0);pNM[lid]=u32(pmgF[at+54u]);}
+}`;
+  const CSTAGEK = /* wgsl */`
+fn qStageW(cs:u32,lid:u32){if(lid<27u){pmgC[P_QSTG+27u*cs+lid]=select(f32(qN[lid]),-1.0,qN[lid]==NB_NONE);}}
+fn qStageK(cs:u32,lid:u32){if(lid<27u){let v=pmgC[P_QSTG+27u*cs+lid];qN[lid]=select(u32(v),NB_NONE,v<0.0);}}`;
   const CSTAGE = /* wgsl */`
 var<workgroup> qN:array<u32,27>;
 var<workgroup> wKids:u32;
@@ -302,6 +333,16 @@ fn qPage(p:vec3i,c:vec3i,sh:u32)->u32{let d=(c>>vec3u(sh))-p;if(any(d<vec3i(-1))
 fn pRedAdd(i:u32,v:f32){var old=atomicLoad(&pmgRed[i]);loop{let r=atomicCompareExchangeWeak(&pmgRed[i],old,bitcast<u32>(bitcast<f32>(old)+v));if(r.exchanged){break;}old=r.old_value;}}
 // The 64 slots from word base, summed in slot order (every reader the same value).
 fn pRedSum(base:u32)->f32{var s=0.0;for(var j=0u;j<64u;j++){s+=bitcast<f32>(atomicLoad(&pmgRed[base+j]));}return s;}
+// Both dots' sums (slots 0..63, 64..127) for every lane, in pRedSum's order (the same value as every other reader):
+// the workgroup's lanes load the 128 slots at once (stride n, the workgroup size) where one lane's 128 dependent
+// atomic loads took ~20 us at every workgroup's head. Call from uniform control flow (one barrier).
+var<workgroup> wRS:array<f32,128>;
+fn pRedSums(lid:u32,n:u32)->vec2f{
+  for(var j=lid;j<128u;j+=n){wRS[j]=bitcast<f32>(atomicLoad(&pmgRed[j]));}
+  workgroupBarrier();
+  var a=0.0;var b=0.0;for(var j=0u;j<64u;j++){a+=wRS[j];b+=wRS[64u+j];}
+  return vec2f(a,b);
+}
 `;
   const REDUCE512 = /* wgsl */`
 // Lane 0's sum or max of the workgroup's 512 values (other lanes get 0): 32 lanes fold 16 each, then lane 0 folds the
@@ -362,26 +403,41 @@ fn ${name}(b:vec3i,c:vec3i,s:u32,l:u32)->f32{
   return r;
 }`;
   // Over native row T's seam subfaces m (the 16 h cells of an h tile beside each face): sum ch(m) v(m),
-  // ch the h row's own coupling to T (its K[a] when T is below m, its KU[a] when T is above).
+  // ch the h row's own coupling to T (its K[a] when T is below m, its KU[a] when T is above). The face's seam brick is
+  // pmgC SEAM's (pmgCoarsenC, pSeamBuild), so a pass reads one word a face instead of the directory chain; the 16
+  // couplings and values load unconditionally (independent loads; a zero coupling still adds nothing).
   const seamSum = (name: string, v: (s: string, l: string, m: string) => string) => /* wgsl */`
-fn ${name}(T:vec3i)->f32{
+fn ${name}(T:vec3i,cs:u32,i:u32)->f32{
   var sum=0.0;
   for(var f=0u;f<6u;f++){
-    let a=f/2u;let up=(f&1u)==1u;let e=pUnit(a);let Tn=select(T-e,T+e,up);
-    if(!pTileIn(Tn)){continue;}
-    let cn=pPageSlot(Tn>>vec3u(3u));if(cn==NB_NONE){continue;}
-    if(!nbTileH(cn,nbLocal(Tn))){continue;}
+    let fv=pmgC[pSeamW(f,cs,i)];if(fv<0.0){continue;}
+    let fs=u32(fv);let a=f/2u;let up=(f&1u)==1u;let e=pUnit(a);let Tn=select(T-e,T+e,up);
     var layer=4*Tn;if(!up){layer[a]+=3;}
-    let fs=nbChild(cn,nbBrickLocal(layer>>vec3u(3u)));
-    if(fs>=NB_SEAM){continue;}
     let u=pUnit((a+1u)%3u);let w=pUnit((a+2u)%3u);
     for(var q=0u;q<16u;q++){
       let m=layer+i32(q&3u)*u+i32(q>>2u)*w;let l=nbLocal(m);
-      let ch=select(pKU(a,fs,l),pK(a,fs,l),up);
-      if(ch!=0.0){sum+=ch*(${v("fs", "l", "m")});}
+      let ch=select(pKU(a,fs,l),pK(a,fs,l),up);let vv=${v("fs", "l", "m")};
+      sum+=select(0.0,ch*vv,ch!=0.0);
     }
   }
   return sum;
+}`;
+  // The seam bricks of tile T (in the lattice, not h-owned) into pmgC SEAM: across face f, the F slot of the h tile's
+  // seam layer, else -1 (no tile, no page, a native neighbour, or no F brick).
+  const SEAM_BUILD = /* wgsl */`
+fn pSeamBuild(T:vec3i,cs:u32,i:u32){
+  for(var f=0u;f<6u;f++){
+    let a=f/2u;let up=(f&1u)==1u;let e=pUnit(a);let Tn=select(T-e,T+e,up);
+    var fs=NB_NONE;
+    if(pTileIn(Tn)){
+      let cn=pPageSlot(Tn>>vec3u(3u));
+      if(cn!=NB_NONE&&nbTileH(cn,nbLocal(Tn))){
+        var layer=4*Tn;if(!up){layer[a]+=3;}
+        let c=nbChild(cn,nbBrickLocal(layer>>vec3u(3u)));if(c<NB_SEAM){fs=c;}
+      }
+    }
+    pmgC[pSeamW(f,cs,i)]=select(f32(fs),-1.0,fs==NB_NONE);
+  }
 }`;
   // (A v)(T) at a native row: v native by vn(C slot, tile index), on h rows by vf(slot, local, cell).
   const nativeApply = (name: string, seam: string, vn: (cs: string, i: string) => string, vf: (s: string, l: string, m: string) => string) => seamSum(seam, vf) + /* wgsl */`
@@ -392,7 +448,7 @@ fn ${name}(p:vec3i,cs:u32,i:u32,T:vec3i)->f32{
     let kl=pCK(a,cs,i);if(kl!=0.0){let Tl=T-e;let sl=qPage(p,Tl,3u);if(sl!=NB_NONE){let il=nbLocal(Tl);r-=kl*(${vn("sl", "il")});}}
     let Tu=T+e;let su=qPage(p,Tu,3u);if(su!=NB_NONE){let iu=nbLocal(Tu);let ku=pCK(a,su,iu);if(ku!=0.0){r-=ku*(${vn("su", "iu")});}}
   }
-  return r-${seam}(T);
+  return r-${seam}(T,cs,i);
 }`;
   // Level 0 tiles: a block of 8^3 rows with a one-cell halo, smoothed in place.
   const TILE = /* wgsl */`
@@ -424,22 +480,17 @@ fn pSmooth(row:PRow,c:vec3i,ti:u32,rhs:f32,rev:bool){
 }
 fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier();}
 `;
-  const brickHead = /* wgsl */`
-  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);}
-  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=nbListSlot(NB_LIST_F_ALL,g);pStage(slot,lid);workgroupBarrier();
-  let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A row brick (pmgTop RB): the slot's brick kernels.
   const rowHead = /* wgsl */`
   if(lid==0u){wCount=pmgTop[T_RBN];}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=pmgTop[T_RB+g];pStage(slot,lid);workgroupBarrier();
+  let slot=pmgTop[T_RB+g];pStageK(slot,lid);workgroupBarrier();
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A shifted block (pmgTop SB, SBN of them): the L0 S passes; k picks the block from its owner brick.
   const shiftHead = /* wgsl */`
   if(lid==0u){wCount=pmgTop[T_SBN];}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let e=pmgTop[T_SB+g];let slot=e>>2u;let k=e&3u;pStage(slot,lid);workgroupBarrier();
+  let e=pmgTop[T_SB+g];let slot=e>>2u;let k=e&3u;pStageK(slot,lid);workgroupBarrier();
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A page of C_ALL. "all" keeps every page; "rows" returns when the page has no rows (L5 D 0);
   // "native" when it has no native rows (L5 KU0, the count coarsenC writes).
@@ -448,14 +499,14 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,g);
   ${keep === "all" ? "" : `if(lid==0u){wKids=select(0u,1u,pmgC[pL5(${keep === "rows" ? "CH_D" : "CH_KU"},cs)]>0.0);}if(workgroupUniformLoad(&wKids)==0u){return;}`}
-  qStage(cs,lid);workgroupBarrier();
+  ${keep === "all" ? "qStage" : "qStageK"}(cs,lid);workgroupBarrier();
   let p=nbKeyCoord(nbCRec(cs,NB_REC_KEY));`;
 
   type Part = "pres" | "stage" | "cstage" | "red" | "reduce" | "gate" | "tile";
   const kernel = (label: string, bindings: readonly BrickBinding[], parts: readonly Part[], body: string): BrickKernel => {
     const has = (n: string) => bindings.some(b => b.name === n);
     const abi = brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, ...(has("dir") ? { dir: { name: "dir", atomic: false } } : {}) });
-    const src: Record<Part, string> = { pres: PRES, stage: STAGE, cstage: CSTAGE, red: RED, reduce: REDUCE512, gate: GATE, tile: TILE };
+    const src: Record<Part, string> = { pres: PRES, stage: STAGE + (has("pmgF") ? STAGEK : ""), cstage: CSTAGE + (has("pmgC") ? CSTAGEK : ""), red: RED, reduce: REDUCE512, gate: GATE, tile: TILE };
     const page = parts.includes("stage") || parts.includes("cstage") ? [PAGE, "var<workgroup> wCount:u32;"] : [];
     return { label, entry: label, bindings, code: [abi, declareBindings(bindings), COMMON, ...page, ...parts.map(p => src[p]), body].join("\n") };
   };
@@ -477,35 +528,51 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   }
 }`);
 
-  // r = b - A (x + alpha p), max|r|, and the first brick pass from zero into W0.
-  // setup: alpha = 0, D and Q cleared, and the brick's L1..L3 rows aggregated.
-  const residualKernel = (setup: boolean) => kernel(setup ? "pmgSetupF" : "pmgUpdate", setup ? FBT : [...FBT, redRW], ["pres", "stage", "reduce", "tile", ...(setup ? [] : ["red" as const])],
-    (setup ? fineApply("pApplyR", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`)
-      : `var<private> pAlpha:f32;\nvar<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`,
-        (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`)) + /* wgsl */`
-${setup ? `var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;var<workgroup> wKU:array<vec3f,512>;var<workgroup> w1D:array<f32,64>;var<workgroup> w1K:array<vec3f,64>;var<workgroup> w1KU:array<vec3f,64>;` : ""}
-@compute @workgroup_size(512) fn ${setup ? "pmgSetupF" : "pmgUpdate"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${setup ? brickHead : rowHead}
-  ${setup ? "" : `if(lid==0u){let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);}pAlpha=workgroupUniformLoad(&wAlpha);`}
-  let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
-  let d=pDiag(slot,l);var r=0.0;
+  // setupF (a brick of F_ALL): r = b - A x, max|r|, D and Q cleared, the first brick pass from zero into W0, the brick's
+  // L1 and L2 rows aggregated, and the stage cache (P_STG). A brick without a row and without a coupling (on the tiered
+  // dam ~5 in 6 of F_ALL: the native tiles' bricks) has all of these 0, so it writes its zeros and returns before the
+  // stage, the apply, the pass and the aggregation (bitwise the full path's values: every sum is of zeros).
+  const setupF = kernel("pmgSetupF", FBT, ["pres", "stage", "reduce", "tile"],
+    fineApply("pApplyR", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
+var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;var<workgroup> wKU:array<vec3f,512>;var<workgroup> w1D:array<f32,64>;var<workgroup> w1K:array<vec3f,64>;var<workgroup> w1KU:array<vec3f,64>;
+var<workgroup> wLive:u32;
+@compute @workgroup_size(512) fn pmgSetupF(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);}
+  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
+  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+  let l=lid;let d=pDiag(slot,l);
+  let kl=vec3f(pK(0u,slot,l),pK(1u,slot,l),pK(2u,slot,l));let kh=vec3f(pKU(0u,slot,l),pKU(1u,slot,l),pKU(2u,slot,l));
+  let rows=pMax512(lid,select(0.0,1.0,d>0.0));
+  let links=pMax512(lid,select(0.0,1.0,any(kl!=vec3f(0.0))||any(kh!=vec3f(0.0))));
+  if(lid==0u){pmgTop[T_RBF+slot]=select(0u,1u,rows>0.0);wLive=select(0u,1u,rows>0.0||links>0.0);}
+  let at=NB_STRIDE*slot+l;
+  pres[NB_PRES_F_D+at]=0.0;pres[NB_PRES_F_Q+at]=0.0;
+  let cs=nbFRec(slot,NB_REC_PARENT);
+  if(workgroupUniformLoad(&wLive)==0u){
+    pres[NB_PRES_F_R+at]=0.0;
+    if(lid<64u){pmgF[pL1(CH_D,slot,lid)]=0.0;for(var a=0u;a<3u;a++){pmgF[pL1(CH_K+a,slot,lid)]=0.0;pmgF[pL1(CH_KU+a,slot,lid)]=0.0;}}
+    if(lid<8u){let i2=nbLocal((o>>vec3u(2u))+pC4(lid));pmgC[pL2(CH_D,cs,i2)]=0.0;for(var a=0u;a<3u;a++){pmgC[pL2(CH_K+a,cs,i2)]=0.0;pmgC[pL2(CH_KU+a,cs,i2)]=0.0;}}
+    return;
+  }
+  pStage(slot,lid);workgroupBarrier();
+  pStageW(slot,lid);
+  let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
+  var r=0.0;
   if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l);}
-  pres[NB_PRES_F_R+NB_STRIDE*slot+l]=r;
-  ${setup ? "pres[NB_PRES_F_D+NB_STRIDE*slot+l]=0.0;pres[NB_PRES_F_Q+NB_STRIDE*slot+l]=0.0;" : ""}
+  pres[NB_PRES_F_R+at]=r;
   let rmax=pMax512(lid,abs(r));
   if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}
-  ${setup ? "let rows=pMax512(lid,select(0.0,1.0,d>0.0));if(lid==0u){pmgTop[T_RBF+slot]=select(0u,1u,rows>0.0);}" : ""}
   // The first brick pass of the next V-cycle: from zero, so its halo is zero.
   pTileZero(lid);
   let row=pRow(b,c);
   pSmooth(row,c,ti,r,false);
   if(row.d>0.0){pmgF[P_W0+NB_STRIDE*slot+l]=tp[ti];}
-  ${setup ? /* wgsl */`
   // Galerkin aggregation over 2^3 children, A_c = W^-1 P^T A P W^-1 (W sqrt(OC) on an aggregate,
   // 1 on a native row; the composite model): a child's lower coupling is internal (subtracted twice
   // from D) when its coordinate along a is odd, else it crosses to the parent's lower neighbour, an
   // aggregate (over OC) or a native row (over sqrt(OC)). Upper links (KU) reach native rows only.
   // L2 -> L3 runs in pmgCoarsenC, beside the native rows.
-  wD[l]=max(d,0.0);wK[l]=vec3f(pK(0u,slot,l),pK(1u,slot,l),pK(2u,slot,l));wKU[l]=vec3f(pKU(0u,slot,l),pKU(1u,slot,l),pKU(2u,slot,l));
+  wD[l]=max(d,0.0);wK[l]=kl;wKU[l]=kh;
   workgroupBarrier();
   if(lid<64u){
     let c1=pC1(lid);var D=0.0;var K=vec3f(0.0);var KU=vec3f(0.0);
@@ -519,7 +586,6 @@ ${setup ? `var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;v
     pmgF[pL1(CH_D,slot,lid)]=D;for(var a=0u;a<3u;a++){pmgF[pL1(CH_K+a,slot,lid)]=K[a];pmgF[pL1(CH_KU+a,slot,lid)]=KU[a];}
   }
   workgroupBarrier();
-  let cs=nbFRec(slot,NB_REC_PARENT);
   if(lid<8u){
     let c2=pC4(lid);var D=0.0;var K=vec3f(0.0);var KU=vec3f(0.0);
     for(var m=0u;m<8u;m++){
@@ -531,9 +597,8 @@ ${setup ? `var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;v
     D/=P_OC;KU/=P_SOC;
     let i2=nbLocal(T);
     pmgC[pL2(CH_D,cs,i2)]=D;for(var a=0u;a<3u;a++){pmgC[pL2(CH_K+a,cs,i2)]=K[a];pmgC[pL2(CH_KU+a,cs,i2)]=KU[a];}
-  }` : ""}
+  }
 }`);
-  const setupF = residualKernel(true);
 
   // A live F slot holds the brick of tile T (seen from page p), so setupF (over F_ALL) wrote T's L2 row.
   const LIQUID_TILE = /* wgsl */`
@@ -544,17 +609,19 @@ fn pLiquidTile(p:vec3i,T:vec3i)->bool{
   // Per page, a lane a tile: a native row's setup residual r = b - A x (max |r|/64), D = Q = 0, and its
   // L2 row (DIAG and the native K, or the F2 tile below's KU); an h tile without a liquid F brick is
   // cleared. Then L2 -> L3 -> L4 -> L5, and the page's native row count in L5 KU0.
-  const coarsenC = kernel("pmgCoarsenC", CBP, ["pres", "cstage", "reduce"], LIQUID_TILE +
+  const coarsenC = kernel("pmgCoarsenC", CBP, ["pres", "cstage", "reduce"], LIQUID_TILE + SEAM_BUILD +
     nativeApply("pApplyNX", "pSeamX", (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`, (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`) + /* wgsl */`
 var<workgroup> w2D:array<f32,512>;var<workgroup> w2K:array<vec3f,512>;var<workgroup> wNat:atomic<u32>;
 var<workgroup> w3D:array<f32,64>;var<workgroup> w3K:array<vec3f,64>;var<workgroup> w4D:array<f32,8>;var<workgroup> w4K:array<vec3f,8>;
 @compute @workgroup_size(512) fn pmgCoarsenC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("all")}
+  qStageW(cs,lid);
   if(lid==0u){atomicStore(&wNat,0u);}
   workgroupBarrier();
   let i=lid;let tl=nbLocalCoord(i);let T=8*p+tl;
   var D=0.0;var K=vec3f(0.0);var r=0.0;
   if(pTileIn(T)&&!nbTileH(cs,i)){
     let at=NB_STRIDE*cs+i;
+    pSeamBuild(T,cs,i);
     D=pP(NB_PRES_C_DIAG,cs,i);
     if(D>0.0){
       atomicAdd(&wNat,1u);
@@ -784,7 +851,8 @@ ${hashInsert("hIns7", "hk7", HS7)}
   const preS = fineKernel("pmgPreS", { shift: true, src: "W0", dst: "W1", post: false });
   const preU = fineKernel("pmgPreU", { shift: false, src: "W1", dst: "W0", post: false });
   const postU = fineKernel("pmgPostU", { shift: false, src: "W0", prolong: true, dst: "W1", post: true });
-  const postS = fineKernel("pmgPostS", { shift: true, src: "W1", dst: "W0", post: true });
+  // BS: post-smoothing opens with the shifted pass, from the pre-smoothed W1 plus the prolonged L1 correction.
+  const postS = fineKernel("pmgPostS", { shift: true, src: "W1", prolong: !bsb, dst: "W0", post: true });
   const postZ = fineKernel("pmgPostZ", { shift: false, src: "W0", dst: "Z", post: true, dot: true });
 
   // Red-black passes inside a coarse block. Caller loops; `cur` is the workgroup vector.
@@ -797,7 +865,7 @@ ${hashInsert("hIns7", "hk7", HS7)}
 
   // D0: the level 0 residual restricted to L1 (the native rows at their pass's N0), and L1's pre-smoothing (the
   // brick, zero halo; the native rows carried at 0).
-  const down0 = kernel("pmgDown0", FBT, ["pres", "stage"], fineApply("pApplyW0", (s, l) => `pmgF[P_W0+NB_STRIDE*${s}+${l}]`, (cs, i) => `pmgC[pL2(CH_N0,${cs},${i})]`) + /* wgsl */`
+  const down0 = kernel("pmgDown0", FBT, ["pres", "stage"], fineApply("pApplyW0", (s, l) => `pmgF[${PRE}+NB_STRIDE*${s}+${l}]`, (cs, i) => `pmgC[pL2(CH_N0,${cs},${i})]`) + /* wgsl */`
 var<workgroup> wD:array<f32,512>;var<workgroup> wE:array<f32,64>;
 @compute @workgroup_size(512) fn pmgDown0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${rowHead}
   let l=lid;let c=o+nbLocalCoord(l);
@@ -1150,12 +1218,12 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   let c2l=nbLocalCoord(lid);let T=8*p+c2l;let par=pPar(T);
   let D=pP(NB_PRES_C_DIAG,cs,lid);let row=pTileIn(T)&&!nbTileH(cs,lid)&&D>0.0;`;
   const cN = (ch: string) => (cs: string, i: string) => `pmgC[pL2(${ch},${cs},${i})]`;
-  const w0 = (s: string, l: string) => `pmgF[P_W0+NB_STRIDE*${s}+${l}]`;
+  const w0 = (s: string, l: string) => `pmgF[${PRE}+NB_STRIDE*${s}+${l}]`;
   const e1 = (ch: string, s: string, m: string) => `pmgF[pL1(${ch},${s},pI1(${m}>>vec3u(1u)))]`;
-  // L0 pre (after pmgPreU): from 0, the h rows at their pre-smoothed W0. Writes N0.
+  // L0 pre (after the h rows' last pre pass): from 0, the h rows at their pre-smoothed plane (PRE). Writes N0.
   const nativePre0 = kernel("pmgNativePre0", FB, ["pres", "cstage"], NATIVE + seamSum("pSeamW0", (s, l) => w0(s, l)) + /* wgsl */`
 @compute @workgroup_size(512) fn pmgNativePre0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
-  var rhs=0.0;if(row){rhs=pP(NB_PRES_C_R,cs,lid)+pSeamW0(T);}
+  var rhs=0.0;if(row){rhs=pP(NB_PRES_C_R,cs,lid)+pSeamW0(T,cs,lid);}
   ${nativePass(false, "0.0", () => "0.0")}
   pmgC[pL2(CH_N0,cs,lid)]=v;
 }`);
@@ -1164,7 +1232,7 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   const nativePre1 = kernel("pmgNativePre1", FB, ["pres", "cstage"], NATIVE +
     nativeApply("pApplyN0", "pSeamW0", cN("CH_N0"), (s, l) => w0(s, l)) + seamSum("pSeamE1", (s, l, m) => `${e1("CH_EPRE", s, m)}/P_SOC`) + /* wgsl */`
 @compute @workgroup_size(512) fn pmgNativePre1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
-  var r1=0.0;var rhs=0.0;if(row){r1=pP(NB_PRES_C_R,cs,lid)-pApplyN0(p,cs,lid,T);rhs=r1+pSeamE1(T);}
+  var r1=0.0;var rhs=0.0;if(row){r1=pP(NB_PRES_C_R,cs,lid)-pApplyN0(p,cs,lid,T);rhs=r1+pSeamE1(T,cs,lid);}
   ${nativePass(false, "0.0", () => "0.0")}
   pmgC[pL2(CH_R1,cs,lid)]=r1;pmgC[pL2(CH_N1,cs,lid)]=v;
 }`);
@@ -1172,16 +1240,16 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   const nativePost1 = kernel("pmgNativePost1", FB, ["pres", "cstage"], NATIVE +
     seamSum("pSeamP1", (s, l, m) => `(${e1("CH_EPRE", s, m)}+pmgC[pL2(CH_EPOST,nbFRec(${s},NB_REC_PARENT),nbLocal(${m}>>vec3u(2u)))])/P_SOC`) + /* wgsl */`
 @compute @workgroup_size(512) fn pmgNativePost1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
-  var rhs=0.0;if(row){rhs=pmgC[pL2(CH_R1,cs,lid)]+pSeamP1(T);}
+  var rhs=0.0;if(row){rhs=pmgC[pL2(CH_R1,cs,lid)]+pSeamP1(T,cs,lid);}
   ${nativePass(true, "pmgC[pL2(CH_N1,cs,lid)]+pmgC[pL2(CH_EPOST,cs,lid)]", (c, i) => `pmgC[pL2(CH_N1,${c},${i})]+pmgC[pL2(CH_EPOST,${c},${i})]`)}
   pmgC[pL2(CH_N1P,cs,lid)]=v;
 }`);
-  // L0 post (after pmgUp1): entry N0 + N1P, the h rows at W0 + their L1 EPOST. Writes N0P, the row's z, and r.z into
+  // L0 post (after pmgUp1): entry N0 + N1P, the h rows at PRE + their L1 EPOST. Writes N0P, the row's z, and r.z into
   // the dot's slots.
   const nativePost0 = kernel("pmgNativePost0", [...FB, redRW], ["pres", "cstage", "reduce", "red"], NATIVE +
     seamSum("pSeamP0", (s, l, m) => `${w0(s, l)}+${e1("CH_EPOST", s, m)}`) + /* wgsl */`
 @compute @workgroup_size(512) fn pmgNativePost0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
-  var rhs=0.0;if(row){rhs=pP(NB_PRES_C_R,cs,lid)+pSeamP0(T);}
+  var rhs=0.0;if(row){rhs=pP(NB_PRES_C_R,cs,lid)+pSeamP0(T,cs,lid);}
   ${nativePass(true, "pmgC[pL2(CH_N0,cs,lid)]+pmgC[pL2(CH_N1P,cs,lid)]", (c, i) => `pmgC[pL2(CH_N0,${c},${i})]+pmgC[pL2(CH_N1P,${c},${i})]`)}
   pmgC[pL2(CH_N0P,cs,lid)]=v;
   var dotv=0.0;
@@ -1189,36 +1257,38 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   let sum=pSum512(lid,dotv);if(lid==0u){pRedAdd(g&63u,sum);}
 }`);
 
-  // F | C in one dispatch (MG_GATE.FC: the row bricks, then C_ALL's pages): workgroup g < RBN runs row brick g's h
-  // rows, the rest page g - RBN's native rows (pageHead "native": a page without native rows returns). The halves
-  // are independent (each writes only its own rows and adds to the shared dot slots), so one launch replaces two.
+  // C | F in one dispatch (MG_GATE.FC: C_ALL's pages, then the row bricks): workgroup g < C_ALL's count runs page g's
+  // native rows (a page without native rows returns), the rest row brick g - count's h rows. The halves are
+  // independent (each writes only its own rows and adds to the shared dot slots), so one launch replaces two; the
+  // pages, few and each long (the seam sums), go first so the bricks' waves run beside them rather than after.
   const fusedFC = (label: string, decl: string, fBody: string, cBody: string, tile = false) =>
     kernel(label, [...FBT, redRW], ["pres", "stage", "cstage", "reduce", "red", ...(tile ? ["tile" as const] : [])], decl + /* wgsl */`
 var<workgroup> wCountC:u32;
 fn ${label}F(g:u32,lid:u32){
-  let slot=pmgTop[T_RB+g];pStage(slot,lid);workgroupBarrier();
+  let slot=pmgTop[T_RB+g];pStageK(slot,lid);workgroupBarrier();
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);
 ${fBody}
 }
 fn ${label}C(g:u32,lid:u32){
   let cs=nbListSlot(NB_LIST_C_ALL,g);
   if(lid==0u){wKids=select(0u,1u,pmgC[pL5(CH_KU,cs)]>0.0);}if(workgroupUniformLoad(&wKids)==0u){return;}
-  qStage(cs,lid);workgroupBarrier();
+  qStageK(cs,lid);workgroupBarrier();
   let p=nbKeyCoord(nbCRec(cs,NB_REC_KEY));
 ${cBody}
 }
 @compute @workgroup_size(512) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   if(lid==0u){wCount=pmgTop[T_RBN];wCountC=nbListCount(NB_LIST_C_ALL);}
   let g=nbGroup(wid);let nF=workgroupUniformLoad(&wCount);let nC=workgroupUniformLoad(&wCountC);
-  if(g<nF){${label}F(g,lid);}else if(g<nF+nC){${label}C(g-nF,lid);}
+  if(g<nC){${label}C(g,lid);}else if(g<nC+nF){${label}F(g-nC,lid);}
 }`);
 
   // Direction: x += alpha_(k-1) p (deferred from the last update), p = z + beta p, q = A z + beta q, p.q; the native
   // rows' PCG vectors a page a workgroup, a lane a tile.
   const zN = (cs: string, i: string) => `pres[NB_PRES_C_Z+NB_STRIDE*${cs}+${i}]`, zF = (s: string, l: string) => `pres[NB_PRES_F_Z+NB_STRIDE*${s}+${l}]`;
   const betaHead = /* wgsl */`
+  let rs=pRedSums(lid,512u);
   if(lid==0u){
-    let rz=pRedSum(0u);var beta=0.0;
+    let rz=rs.x;var beta=0.0;
     if(cfg.z>0u){let old=bitcast<f32>(atomicLoad(&nbSet[PH_RZ]));beta=select(0.0,rz/old,old!=0.0);}
     wBeta=beta;wAlphaOld=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));
   }
@@ -1248,7 +1318,8 @@ ${cBody}
 
   // Update: r = b - A (x + alpha p) and max|r| (a native row's over 64); the h rows' first V-cycle pass from zero into W0.
   const alphaHead = /* wgsl */`
-  if(lid==0u){let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);}
+  let rs=pRedSums(lid,512u);
+  if(lid==0u){let rz=rs.x;let pq=rs.y;wAlpha=select(0.0,rz/pq,pq!=0.0);}
   pAlpha=workgroupUniformLoad(&wAlpha);`;
   const xF = (s: string, l: string) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`;
   const xN = (cs: string, i: string) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`;
@@ -1314,7 +1385,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
     atomicStore(&wFlips,0u);
   }
   if(workgroupUniformLoad(&wGo)==0u){return;}
-  pStage(slot,lid);workgroupBarrier();
+  pStageK(slot,lid);workgroupBarrier();
   let alpha=workgroupUniformLoad(&wAlpha);
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let at=NB_STRIDE*slot+l;let h=nbRingF(cfg.x,NB_RING_H);
   var r=pres[NB_PRES_F_R+at];
@@ -1420,8 +1491,9 @@ var<workgroup> wOpen:u32;
 @compute @workgroup_size(64) fn pmgCheck(@builtin(local_invocation_index) lid:u32){
   if(lid==0u){wOpen=atomicLoad(&nbSet[PH_OPEN]);}
   if(workgroupUniformLoad(&wOpen)==0u){return;}
+  let rs=pRedSums(lid,64u);
   if(lid==0u){
-    let rz=pRedSum(0u);let pq=pRedSum(64u);let alpha=select(0.0,rz/pq,pq!=0.0);
+    let rz=rs.x;let pq=rs.y;let alpha=select(0.0,rz/pq,pq!=0.0);
     atomicStore(&nbSet[PH_RZ],bitcast<u32>(rz));atomicStore(&nbSet[PH_ALPHA],bitcast<u32>(alpha));
     // max|r| over the update's rows and, after a wall change, the changed bricks' and pages' new residuals
     // (PH_RMAXW, kept apart so every walls workgroup decides on the update's max). Non-negative floats order as u32.
@@ -1442,8 +1514,11 @@ var<workgroup> wOpen:u32;
   // Finish: the last update's x += alpha p.
   const finish = kernel("pmgFinish", [CFG, setRW, dirRO, presRW], ["pres", "stage"], /* wgsl */`
 var<workgroup> wAlpha:f32;
-@compute @workgroup_size(512) fn pmgFinish(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
-  if(lid==0u){wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));}
+@compute @workgroup_size(512) fn pmgFinish(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  // No neighbour is read: no stage.
+  if(lid==0u){wCount=nbListCount(NB_LIST_F_ALL);wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));}
+  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
+  let slot=nbListSlot(NB_LIST_F_ALL,g);
   let alpha=workgroupUniformLoad(&wAlpha);
   let at=NB_STRIDE*slot+lid;
   if(pDiag(slot,lid)>0.0){pres[NB_PRES_F_X+at]+=alpha*pres[NB_PRES_F_D+at];}
@@ -1519,9 +1594,9 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
       { kernel: coarsenTop, dispatch: { direct: [1, 1, 1] }, w: tolBits },
     ],
     slot: (k: number) => [
-      gS(preS, k), gF(preU, k), gC(nativePre0, k), gF(down0, k), gC(nativePre1, k), gF(down1, k), gC(down1C, k), gC(down2, k), gC(down3, k),
+      gS(preS, k), ...(bsb ? [gF(preU, k)] : []), gC(nativePre0, k), gF(down0, k), gC(nativePre1, k), gF(down1, k), gC(down1C, k), gC(down2, k), gC(down3, k),
       { kernel: top, dispatch: { indirect: MG_GATE.ONE }, z: k },
-      gC(up3, k), gC(up2, k), gC(nativePost1, k), gF(up1, k), gC(nativePost0, k), gF(postU, k), gS(postS, k), gF(postZ, k),
+      gC(up3, k), gC(up2, k), gC(nativePost1, k), gF(up1, k), gC(nativePost0, k), ...(bsb ? [gF(postU, k)] : []), gS(postS, k), gF(postZ, k),
       gFC(direction, k), gFC(update, k),
       ...(walls ? [{ kernel: wallGate, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits } as BrickPlacement,
         { kernel: wallsF, dispatch: { indirect: MG_GATE.WF }, z: k }, { kernel: wallsC, dispatch: { indirect: MG_GATE.WC }, z: k }] : []),

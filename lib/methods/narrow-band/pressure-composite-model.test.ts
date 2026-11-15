@@ -47,8 +47,8 @@ export function syntheticComposite(): CompositeRows {
   return { f: { cells, diag: fd, k: fk, ku: fku }, n: { tiles, diag: nd, k: nk } };
 }
 
-test("composite model: the operator is symmetric and the V-cycle is SPD", () => {
-  const M = new CompositePressureModel(syntheticComposite());
+for (const fineOrder of ["BS", "BSB"] as const) test(`composite model: the operator is symmetric and the V-cycle is SPD (L0 ${fineOrder})`, () => {
+  const M = new CompositePressureModel(syntheticComposite(), { levels: 8, fineSweeps: 3, coarseSweeps: 2, nativeSweeps: 2, fineOrder });
   const n = M.fine.keys.length;
   const u = Float64Array.from({ length: n }, (_, i) => Math.sin(1.3 * i) + 0.2), v = Float64Array.from({ length: n }, (_, i) => Math.cos(0.7 * i) - 0.1);
   const dot = (a: Float64Array, b: Float64Array) => a.reduce((s, x, i) => s + x * b[i]!, 0);
