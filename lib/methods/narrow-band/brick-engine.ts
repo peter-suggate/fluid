@@ -22,6 +22,7 @@ import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule } from "./brick-census.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
+import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
 
 export type Vec3 = readonly [number, number, number];
 /** A box of initial liquid, in cells (vertex coordinates of the lattice). */
@@ -153,6 +154,9 @@ export class BrickEngine {
       ...solver.finish,
       { kernel: pres.project, dispatch: list(LIST.F_LIQ, "G1") },
     ];
+    // The release port's producers (levelset-release.wgsl.ts), where a stage set advects φ: the tile reach words at
+    // the old frame plan's point (part 1, after the head, before move), the wall reach before the surface advect.
+    const release = stages.levelSet.length ? levelSetReleaseSchedule(layout) : { part1: [], part2: [] };
     const part2: BrickPlacement[] = [
       { kernel: set.setMark, dispatch: list(LIST.F_ALL, "G1") },
       ...(tiered ? [{ kernel: set.setMarkPages, dispatch: list(LIST.C_ALL, "G1") }] : []),
@@ -160,6 +164,7 @@ export class BrickEngine {
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
       ...tail, ...lists,
+      ...release.part2,
       ...stages.levelSet,
       ...stages.velocity,
       ...solve,
@@ -187,7 +192,7 @@ export class BrickEngine {
     const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after] : [];
     const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census and remap), then F's move and rebin.
-    return { part1: [...head, ...stages.move, ...stages.rebin], part2, boot };
+    return { part1: [...head, ...release.part1, ...stages.move, ...stages.rebin], part2, boot };
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {

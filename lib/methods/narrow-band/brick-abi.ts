@@ -66,6 +66,10 @@ export const H = {
   /** setCensus's counters (brick-abi.md §5.1; brick-census.wgsl.ts CENSUS_H). */
   CENSUS_CLAMPED: 224, CENSUS_CAND: 225, CENSUS_REACH: 226, CENSUS_CROSSING: 227,
   CENSUS_REQUIRED: 228, CENSUS_BAND: 229, CENSUS_REFINED: 230, CENSUS_TRIGGERED: 231,
+  /** The release port (levelset-release.wgsl.ts; brick-abi.md §5.1), two copies alternating by the ring parity
+   * (cfg.y): the plan's speed (f32 bits, m/s; nrReach), and 6 words each of the face directions' released wall reach
+   * (f32 bits, cells; nrWallReach). */
+  REL_SPEED0: 232, REL_SPEED1: 233, WALL_REACH0: 234, WALL_REACH1: 240,
 } as const;
 
 /** Latched failure bits (H.FAIL), brick-abi.md §8. */
@@ -170,6 +174,10 @@ export class BrickLayout {
     readonly lists: readonly number[]; readonly listCap: readonly number[];
     /** The 4h tiles' far-air gate (16 words a C slot, bit j tile j): written by lcClear, read by the next step's advect (§5.4). */
     readonly airGate: number;
+    /** The release port (§5.4): the tiles' reach words (512 words a C slot each: nrReach's local, the spread's two
+     * halves; the final is reach1), the step they were made for (a word a C slot: ring step + 1), and the released wall
+     * face tiles (384 words a C slot, 64 a face direction). */
+    readonly reach0: number; readonly reach1: number; readonly reachStep: number; readonly wallTile: number;
     readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -205,7 +213,8 @@ export class BrickLayout {
       listCap.push(n); lists.push(take(Math.max(n, 1)));
     }
     const airGate = take(CMASK_WORDS * c);
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, words: at };
+    const reach0 = take(512 * c), reach1 = take(512 * c), reachStep = take(c), wallTile = take(384 * c);
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -288,6 +297,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
+  c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);

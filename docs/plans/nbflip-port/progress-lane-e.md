@@ -448,3 +448,39 @@ liquid vertex with an absent brick in its 1-ring, least slack 7 cells, and no FA
   bounds at the frame head with the extended velocity the next trace samples. The old rule would have covered
   the 7.48 m/s jet (about 27 cells against 20 of travel). The port is a part-1 head bound on max |US|, or F's
   pDelta raising BOUND_F with the post-project |U| (brick-abi.md §5.4 "Open").
+
+## 2026-11-15: kept deep air and the released walls, ported with their producers
+
+Deviations 3 and 4 of levelset-coarse.wgsl.ts are gone. Both exits are verbatim at the old call sites, and
+their inputs are made on the GPU at the old frame's points. The new file is levelset-release.wgsl.ts: the
+readers (prefix `nbr`), the producers, and the schedule. Each formula cites its source file and line.
+- Reach words, per tile. `nrReach` runs on FC_G1, in part 1 after the head and before move, as
+  encodeCertificate does (uniform-mixed-frame.ts 1152). It writes each tile's umPackReach from
+  umSignedFaceExtent over US: an F group for h tiles with a brick, and a C group for 4h tiles and for h tiles
+  whose brick is absent. It also raises the plan speed (REL_SPEED, atomicMax).
+- Spread. `nrSpread` z = 0, 1, 2 runs on C_ALL G1 (uniform-frame-plan-spread.ts 12–33), over the
+  umCertificateRadius of that speed. An AIR page saturates the word and the box contributes 0.
+- Wall reach. `nrWallReach` runs on C_ALL G1, in part 2 before the surface advect (wallReach 1682–1700). It
+  writes each wall face tile's released dt·away/h and the six plane maxima.
+- New ABI. Header words REL_SPEED0/1 (232–233) and WALL_REACH0/1 (234–245). Set regions REACH0/REACH1 and
+  WALL_TILE (512 and 384 words a C slot) and REACH_STEP (a word a C slot). Memory is proportional to the C
+  pool, not the lattice.
+- Parity and claims. The header copies alternate by ring parity, and each producer zeroes the other copy. A
+  slot claimed after part 1 has a stale REACH_STEP, so its tiles read saturated.
+- Release bit. FLAGS bit 8 + a at the lower-face storage, agreed with P and landed in 9e5d2b14. It holds
+  umRelease after project, and P's solver wall state between the rows and project. §2.4 of brick-abi.md gives
+  both meanings.
+- lcAdvect (C). Deep air (umDeepAirKept 1398–1406) runs after far air and is skipped for wall vertices
+  (umAdvectStore). umReleasedWalls (829–870) runs after the contact (umAdvected 1035).
+- F's lAdvect needs the same two calls. The readers are exported for F to include: `levelSetReleaseWGSL()`,
+  `nbrDeepAirKept(v,1u,c)` and `nbrReleasedWalls(p,value)`.
+- Test levelset-release.test.ts passes. It compares everything against Float64 oracles of the old formulas on
+  a frozen tiered state with hashed US blobs and wall U with release bits:
+  - every reach word in both halves, the stamp, the speed, the wall tiles and the plane words;
+  - every other set word unchanged, and vel/phi/dir/fcell untouched;
+  - a GPU probe of the readers over all F and C vertices, covering every path;
+  - lcAdvect before and after the producers, covering kept, raised, unchanged, traced-but-not-kept, and
+    wall vertices left alone.
+  The fixture retires four F bricks under h tiles to cover the absent-brick reduction.
+- GPU suites pass: levelset-coarse, brick-engine, brick-set-tiers, brick-census, brick-transfer and
+  brick-owner. Unit tests pass.

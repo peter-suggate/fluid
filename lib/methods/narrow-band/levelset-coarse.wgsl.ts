@@ -34,11 +34,15 @@
  *    path with the one-step trace and the wall contact ("clip", UM_WALL_CLIP);
  * 2. otherwise COLD hold (umVertexTier COLD: every incident open cell COLD, or none open);
  * 3. kept far air (umFarAirKept: last step's gate bit clear at the vertex's cell's tile, and φ ≥ 16·max h);
- * 4. kept deep air: see deviation 3 (early identity, cheap affine and Euler are not in the reference: deviation 2);
+ * 4. off the wall planes, kept deep air (umKeptAir's deep leg, umDeepAirKept: φ ≥ (6 + 3·4) h = 18, the spread
+ *    reach of the vertex's cell's tile at most 2 tiles on every axis each way, and no released wall tile can raise
+ *    it: umReleasedMayChange). The words come from levelset-release.wgsl.ts (nbrDeepAirKept). The early identity,
+ *    cheap affine and Euler exits are not in the reference (deviation 2);
  * 5. the full path: the foot (|φ| < 2w), the RK3 surface trace through the extended velocity, the departure cell at
  *    its tile's width (C corners in a 4h tile, resolved vertices in an h tile), the limited Catmull-Rom cubic where
- *    |value| < 2w (umCubicAt at width 4 is mode < 4: the coarse default is cubic), the wall contact, plus the
- *    fourth-difference smoothing scaled by umMovedSmoothing.
+ *    |value| < 2w (umCubicAt at width 4 is mode < 4: the coarse default is cubic), the wall contact, the released
+ *    walls (umReleasedWalls, nbrReleasedWalls: after the contact, umAdvected 1035), plus the fourth-difference
+ *    smoothing scaled by umMovedSmoothing.
  *
  * Air seeds, the collar and the gate (lcClear; the far-air gate of the next step's lcAdvect). The old NB_AIR planes
  * (uniform-narrow-band-air.wgsl.ts), one u32 a 4h tile over the live tiles: plane 0 the seeds (nbAirSeed), planes 1-3
@@ -70,11 +74,8 @@
  *    engine has no BULK16 state, and nbCSlotOfPage reads a BULK16 page as absent, so a vertex there would be silently
  *    wrong. lcAdvect therefore fails FAIL.UNSUPPORTED (info 0x4c430003) where B_ALL lists a page or a page word about
  *    the workgroup's page is BULK16.
- * 3. Kept deep air (umDeepAirKept) needs the census's per-tile spread-reach words (5-bit reaches an axis each way)
- *    and the release bits; neither is published in the brick ABI. As lane F's lAdvect states, those vertices are
- *    transported instead.
- * 4. Released walls (umReleasedWalls, umReleasedMayChange) need lane P's projection release bits (wallReach), not yet
- *    published. Not applied, as lane F's lAdvect states.
+ * 3, 4. (No longer deviations: kept deep air and the released walls are ported verbatim, exits 4 and 5, with
+ *    their inputs' producers. See levelset-release.wgsl.ts.)
  * 5. COLD tier: the old 16h region tier maps to the page's C record class bit COLD (setMark, M3; at M2 never set),
  *    i.e. page granularity. umVertexTier and nbVertexCold read it at every incident in-lattice cell of a resident
  *    page.
@@ -109,6 +110,7 @@ import { CFG, type BrickKernel } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
+import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 
 /** Lane F's kernel whose pass each C kernel can fold into (FC_G1 dispatch), in the frame's order. */
 export const LC_FOLD = { lcAdvect: "lAdvect", lcCouple: "lUnion", lcClear: "lClear", lcRetire: "lDistance", lcPublish: "lPublish" } as const;
@@ -337,7 +339,7 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
   lcBase=origin;lcW=width;
   value=nbfCubicLimited(f,origin-vec3i(width)<vec3i(0),origin+vec3i(2*width)>NB_LATTICE);
  }
- value=lcWallContact(p,value,travel,dt,hm);
+ value=nbrReleasedWalls(p,lcWallContact(p,value,travel,dt,hm));
  return value+moved;
 }
 // umFarAirKept's gate word: last step's airGate at tile t (lcStoreGate); clear where no page holds t.
@@ -373,6 +375,9 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
   // Exit 3: kept far air (umFarAirKept: the gate clear at the vertex's cell's tile, φ ≥ 16 max h; umAirSource is
   // the identity, deviation 9).
   if(c>=16.0&&!lcGate(lcCellOf(v)>>vec3u(2u))){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
+  // Exit 4: off the wall planes (umAdvectStore's deep = !wall), kept deep air (umDeepAirKept at width 4; umAirSource
+  // is the identity).
+  if(!(dt>0.0&&lcOnWall(v))){let d=nbrDeepAirKept(v,4u,c);if(d>=0.0){lcSetC(NB_PHI_C_PHI1,slot,l,d);continue;}}
   // Exit 5: the full path.
   lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));
  }
@@ -573,7 +578,7 @@ fn lcPublishPage(slot:u32,live:bool,lid:u32){
 /** The page bodies (fn lc*Page(slot, live, lid)) and what each needs before it, for folding into lane F's passes. */
 export const levelSetCoarseWGSL = {
   common: () => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL].join("\n"),
-  advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, LC_ADVECT_WGSL].join("\n"),
+  advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, levelSetReleaseWGSL(), LC_ADVECT_WGSL].join("\n"),
   couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_COUPLE_WGSL].join("\n"),
   clear: () => [LC_SEEDS_WGSL, LC_CLEAR_WGSL].join("\n"),
   retire: () => [nbfRedistanceWGSL, LC_RETIRE_WGSL].join("\n"),
