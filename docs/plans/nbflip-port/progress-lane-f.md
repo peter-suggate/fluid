@@ -1079,3 +1079,23 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
 - **Reading the table.** uAdvect is down 0.9 ms (7%) in both runs. lAdvect and lUnion moved within run-to-run spread.
 - **Next for the sampler:** a GPU profile of uAdvect, tiered against all h (limiter, occupancy), before any further restructuring of fsFine.
 - **Tools:** ~/code/me/fluid-scratch/lane-f/tools/{samp-attr.sh, ro-gate.sh, samp-v1.sh}, with frozen.mts `--setwords` in per-kernel mode. Logs are in logs/samp/.
+
+**Item 2, the sampler's rare paths: two deferrals, both no gain (not landed).**
+- **Attribution (timing slot, uAdvect alone, frozen tiered dam, step 20; HEAD 11.6-11.9 ms).** These variants change values, so they are timing probes only:
+  - t0 (fsUnit's no-slot fallback returns 0): 10.47 ms;
+  - w1 (no coarse path): 9.60 ms;
+  - w1t0 (both): 7.56 ms.
+  - The fallback is never taken on this state (header counter 85 = 0 over 20 steps). The coarse path is taken on 6.7M samples.
+- **Register limits (uncapped Metal maxTotalThreadsPerThreadgroup):** HEAD 576, t0 640, w1 640, w1t0 704, all h 704.
+- **The lean split (bitwise, slower).** The main uAdvect ran the fine-only sampler and marked faces that needed more; uAdvectRetry traced them with the full sampler.
+  - 19% of faces were retried.
+  - uAdvect alone 9.23 ms + retry 3.78 ms = 13.1 ms in sequence, against 11.6 ms.
+- **The fallback-only hybrid (bitwise on the real state, slower).** uAdvect kept the blended sampler, but a tap with no F slot set a flag (fsUnitAbsent) and the face was marked for uAdvectRetry.
+  - Register limit 640, the same as t0.
+  - Gates: step 20 and step 60 bitwise in sequence; all h bitwise.
+  - Time: uAdvect alone 12.13 ms with per-sample flag checks, and 11.89 ms without them (the failed trace runs on); retry 0.15-0.16 ms (empty).
+  - **t0's gain is not occupancy.** At the same 640 limit, t0 is 10.47 ms and the hybrid 11.89 ms. The win came from the compiler simplifying fsUnit once its fallback branch has no side effect. Any flag or latch in that branch loses it, so a residency-invariant FAIL would lose it too.
+  - **An open fault, moot since the design is dropped.** When every fifth face was forced to retry, about 39.5k vel words differed. The retry path was never exercised on the real state.
+  - Patch: ~/code/me/fluid-scratch/lane-f/patches/hybrid-retry.patch. Tools: tools/{samp-reg.sh, samp-occ.sh, lean-gate.sh, hybrid-gate.sh, hybrid2.sh}. Logs are in logs/samp/.
+- **Reading.** The maxThreads limit is a poor proxy here: at 256 lanes a workgroup, both 576 and 640 admit one workgroup each. The rare paths cost through code size and scheduling, not a thread cap. Deferring them to a second kernel pays a second staging and a second pass, which is more than they cost.
+- **The remaining lever is the coarse blend (w1, -2 ms).** It is taken on real samples, so it cannot be dropped bitwise. Making it cheaper would mean a different representation (e.g. CACHE4 folded into UNIT for the fringe bricks), which is a design question for the coordinator.
