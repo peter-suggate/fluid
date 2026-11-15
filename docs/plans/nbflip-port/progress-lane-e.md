@@ -799,6 +799,14 @@ The scoping went to the coordinator, who ruled on three points:
 
 **M3 question:** measure the cold freeze against seep's BULK pressure-only rows in the deep interior, and decide by time and gates.
 
+**M3 question (restated 2026-11-16, coordinator ruling on d02947dc):** in the old engine, replay and the cold freeze are one mechanism. `UNIFORM_COLD_FREEZE = true` (lib/methods/uniform/uniform-cold-freeze.ts:52). A frozen face keeps its stored F through project (uniform-mixed-pressure-velocity.ts:453-458), and a frozen owner's texels hold through momentum (uniform-mixed-momentum.ts:146). So a frozen region's velocity is bitwise still, and the replay key check passes. That is why the old dam replays 17/17 regions under gravity while ours replays 0/64: the projection residual moves face bits by up to 8.9e-6 m/s.
+
+The M3 decision is therefore one decision with two options, both judged by time and gates on seep and compared against seep's BULK pressure-only rows:
+- (A) freeze plus replay, both verbatim;
+- (B) no freeze and no replay.
+
+A tolerant key with no freeze (new design: a certificate bounding each velocity word's effect on the records) is considered only if both A and B lose. Until M3, replay stays on as gated (d02947dc), and regionDeep's 0.07-0.14 ms is paid where it does not fire.
+
 Build plan, with the old frame's order (heat.encode, then the census, then plan.encodeCertificate on the remapped velocity):
 - **Certificate:** localSpeed after setTransfer at the part-1 head. It runs on the new ownership, so it cannot be a side output of the census.
 - **regionHeat:** C_ALL X8, a workgroup a region (an octant of a C page) and a lane a tile, with tileError computed inline by each lane from the stored tile means.
