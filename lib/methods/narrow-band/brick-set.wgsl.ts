@@ -363,8 +363,9 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
   }
 }`);
 
-  // setArgs: one workgroup. Each list's G1, G8 and G64 under the fold rule,
-  // the FC triples, and the live, churn and peak counters.
+  // setArgs: one workgroup. Each list's G1, G8, G64 and X8 (eight workgroups an entry: setCensus's
+  // C passes, a workgroup a 64-tile slab of a page) under the fold rule, the FC triples, and the
+  // live, churn and peak counters.
   const setArgs = k("setArgs", [CFG, setRW, argsRW], /* wgsl */`
 fn fold(at:u32,n:u32){args[at]=min(n,NB_FOLD);args[at+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[at+2u]=1u;}
 fn count(k:u32)->u32{
@@ -372,7 +373,7 @@ fn count(k:u32)->u32{
   if(n>NB_S_LIST_CAP[k]){nbFail(NB_FAIL_LIST,k);return NB_S_LIST_CAP[k];}
   return n;
 }
-fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold(at+NB_ARGS_G64,(n+63u)/64u);}
+fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold(at+NB_ARGS_G64,(n+63u)/64u);fold(at+NB_ARGS_X8,8u*n);}
 @compute @workgroup_size(64) fn setArgs(@builtin(local_invocation_index) lid:u32){
   if(lid<17u){triple(NB_ARGS_PER_LIST*lid,count(lid));}
   if(lid==17u){

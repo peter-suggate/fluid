@@ -46,6 +46,8 @@ export const KEY_CLAIMED = 0x80000000;
 /** Words an F slot of the particle support (NB_S_PSUPPORT, brick-abi.md §5.4): the support mask of the brick's 8
  * tiles, then six travel maxima (-xyz, +xyz; f32 bits, cells), then a pad. */
 export const PSUPPORT_WORDS = 8;
+/** censusDecide's candidate mask words a C slot (216 bits, the 6^3 bricks about a page). */
+export const CAND_MASK_WORDS = 8;
 
 /** Bricks an axis that hold the lattice's vertices 0..n (the skirt included). */
 export const bricksPerAxis = (lattice: readonly number[]): [number, number, number] => lattice.map(n => Math.floor(n / 8) + 1) as [number, number, number];
@@ -115,8 +117,8 @@ export const LIST_SLOTS = 32;
 export type ListName = keyof typeof LIST;
 const listKind = (k: number): "F" | "C" | "B" => k <= 10 ? "F" : k <= 15 ? "C" : k === 16 ? "B" : "F";
 
-/** Indirect arguments: 12 words a list (G1, G8, G64, pad), then FC_* at 384. Lanes: P from 512, F from 2048. */
-export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+/** Indirect arguments: 12 words a list (G1, G8, G64, X8: eight workgroups an entry), then FC_* at 384. Lanes: P from 512, F from 2048. */
+export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
 /** Workgroups a dimension under the fold rule: x = min(n, FOLD), y = ceil(n / FOLD). */
 export const FOLD = 32768;
 
@@ -188,6 +190,9 @@ export class BrickLayout {
     readonly reach0: number; readonly reach1: number; readonly reachStep: number; readonly wallTile: number;
     /** The particle support (§5.4): PSUPPORT_WORDS an F slot, accumulated by F's pJoin, read and cleared by the head's resSeed. */
     readonly psupport: number;
+    /** censusDecide's candidate bricks a page (CAND_MASK_WORDS a C slot, bit e of the 6^3 bricks about it): set by atomicOr, so
+     * each is listed once a page across the page's eight workgroups; cleared by censusImportance. */
+    readonly candMask: number;
     readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -225,7 +230,8 @@ export class BrickLayout {
     const airGate = take(CMASK_WORDS * c);
     const reach0 = take(512 * c), reach1 = take(512 * c), reachStep = take(c), wallTile = take(384 * c);
     const psupport = take(PSUPPORT_WORDS * f);
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, words: at };
+    const candMask = take(CAND_MASK_WORDS * c);
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -309,7 +315,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);
-  c("NB_S_PSUPPORT", s.psupport); c("NB_PSUPPORT_WORDS", PSUPPORT_WORDS); c("NB_KEY_CLAIMED", KEY_CLAIMED);
+  c("NB_S_PSUPPORT", s.psupport); c("NB_S_CAND_MASK", s.candMask); c("NB_CAND_MASK_WORDS", CAND_MASK_WORDS); c("NB_PSUPPORT_WORDS", PSUPPORT_WORDS); c("NB_KEY_CLAIMED", KEY_CLAIMED);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);

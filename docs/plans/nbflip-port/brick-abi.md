@@ -244,8 +244,9 @@ rules above through the directory and masks:
 
 **Schedule** (`BrickEngine.scheduleFor`, landed 2026-11-15):
 - Part 1 opens with the head. This is `setCensus` (`brickCensusSchedule`: censusBegin, censusFine
-  on F_ALL, then censusCoarse, censusCubes, censusImportance and censusDecide on C_ALL). When
-  tiered, the claims of the census's ring bricks follow, then `censusWant`, then
+  on F_ALL (G1), then censusCoarse, censusCubes (G1), censusImportance and censusDecide on C_ALL; the C passes
+  but censusCubes run on C_ALL's X8, a workgroup a page's 64-tile slab, a lane a tile). When
+  tiered, the claims of the census's ring bricks follow, then `censusWant` (C_ALL, X8), then
   `brickTransferSchedule`, then the churn clear. After the head come F's `move` and `rebin`.
 - A bring-up stage set reads no TRIG. On a lattice that isn't whole pages (P's synthetic blocks) it
   runs without the census, which refuses such lattices. Every scene's fluid lattice is whole pages
@@ -268,7 +269,7 @@ rules above through the directory and masks:
     injection at the corners.
   - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
 - The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 7328 words
-  a C slot (with the near words and the residency records, §5.4).
+  a C slot (with the near words, the moving-shape bits MOV and the residency records, §5.4).
 
 **The tier change, within a step** (§7, amended):
 1. `setCensus` (brick-census.wgsl.ts, landed fb17d41e at the part 1 head; this was planned as part
@@ -522,6 +523,7 @@ its `TOP_*` word.
 | `REACH_STEP` | `CCAP` | the ring step + 1 that the slot's reach words were made for (`nrReach`). A slot claimed after part 1 (setClaimPages in part 2) has no words for this step, and its tiles read saturated, as the spread's AIR. |
 | `WALL_TILE` | `384 * CCAP` | per C slot, 64 words a face direction f (umFaceTile: u + 8v of the tile in the face's plane): a wall face tile's largest released dt·away / h (cells, f32 bits; 0 where none). Written by `nrWallReach` (part 2, before `stages.levelSet`: the old wallReach) for each of the page's wall faces, the box across. umReleasedMayChange reads it. The other faces' words are not written or read. |
 | `PSUPPORT` | `8 * FCAP` | per F slot (`NB_S_PSUPPORT + 8·slot`), the particle support the head's residency reads (§5.4; the old DEPB refine prediction, uniform-particle-brick.wgsl.ts 33–38, 240–262): word 0 bit j = tile j of the brick (tx \| ty<<1 \| tz<<2) is in some live record's support (the 2³ tiles from floor((x − 2)/4)); words 1–3 and 4–6 the −xyz and +xyz travel maxima of those records (f32 bits, cells, `atomicMax`: ballistic \|v\|·dt/h all six ways, coupled max(∓before, 0)·dt/h + NB_SEPARATION_REACH); word 7 pad. F's `pJoin` accumulates it in part 2 for every live record of bank dst (an absent support brick latches `FAIL.REACH`); the head's `resSeed` reads and zeroes it; `setClaimBricks` zeroes a new slot's. |
+| `CAND_MASK` | `8 * CCAP` | per C slot, censusDecide's candidate bricks: bit `e` of the 6³ bricks about the page (from 4·page − 1, `e = x + 6y + 36z`). The X8 slabs `atomicOr` a missing ring brick's bit, and the one that sets it lists the brick in `CAND`, so a page lists each once. Cleared by censusImportance (slab 0) each census. |
 
 **The boot's reach rule** (`bootBricks`, the CPU, M1). The boot's set is every brick that overlaps
 a **reach box** of a brick holding a liquid vertex (φ < 0) of the boot boxes. In cells, that box is
@@ -632,7 +634,7 @@ by the owning lane's gated slots). For list `k`, at word `12 * k`:
 | `12k + 0..2` | `G1` | one a list entry |
 | `12k + 3..5` | `G8` | one per 8 entries |
 | `12k + 6..8` | `G64` | one per 64 entries |
-| `12k + 9..11` | reserved | |
+| `12k + 9..11` | `X8` | eight per entry (setCensus's C passes: a workgroup a 64-tile slab of a page) |
 
 Then `FC_G1`, `FC_G8` and `FC_G64` at words 384–392, and `XFER_G1` (setTransfer's jobs) at 396. Words 512 and up belong to the lanes: P from
 512 (the gated solver slots), F from 2048.

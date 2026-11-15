@@ -589,3 +589,39 @@ because the ported old residency rule keeps 98.6% of the 17^3 window resident. T
 residency policy for this reason: first (a) active lists that exclude reach-only bricks, then (b) per-source
 local reach. The dam pools are re-authored after (b), from the brick engine's peak under the policy that will
 ship. Until then runs pass poolF = 4913.
+
+## 2026-11-15: the census's C passes fill the GPU (X8)
+
+censusCoarse, censusImportance, censusDecide and censusWant ran a workgroup a C page (about 90 on the tiered dam),
+each lane 8 tiles in turn. They now run on C_ALL's new X8 triple (args words 12k + 9..11, eight workgroups an
+entry, filled by setArgs): workgroup r of a page takes its 64-tile slab 64r..64r+63, a lane a tile. Everything
+cross-slab is an integer atomic or a disjoint word: REQ and WANT words 2r, 2r + 1 a slab; TRIG children 8r..8r+7;
+the page's candidate bricks deduplicated through a new set region `CAND_MASK` (8 words a C slot, `atomicOr`'s old
+bit picks the one lane that lists a brick; cleared by censusImportance). Two evaluations are reordered, not changed:
+censusCoarse's depth jobs sample each wide vertex of a slab's deep tiles once (the sample is the vertex's alone),
+and movingShapeNear reads censusImportance's per-tile MOV bits (census words 6608..6623, a page's 512 bits) as bit
+rows instead of FIN and 6 keys a tile. censusCoarse's face parts hold their face job index (u32, 1.5 KB) instead of
+a vec4i (6 KB); the smaller workgroup memory alone took the pass from 0.61 to 0.49 ms.
+
+Exactness: brick-census-x8.test.ts runs the frozen G1 kernels (parity/census-g1-frozen.ts, 5233e246) and the X8
+kernels on the same state and compares the whole census buffer and the whole set buffer word for word (the
+candidate list sorted; CAND_MASK and MOV excluded, the G1 passes have none). Synthetic census scene (31 candidates,
+143 4h deep tiles, 51 MOV tiles) and the old engine's dam census frames 14 and 43 (3287 and 8890 WANT tiles, 634
+and 1408 4h deep tiles), each tiered, tiered at the head (keep marks) and all-h: 0 differing words.
+brick-census, brick-census-dam, brick-engine, brick-set-tiers and brick-abi tests pass unchanged (33/33).
+
+Tiered dam, steps 13-24 (`brick-dam.mts --tiered --solver=composite --steps=24 --profile=13 --poolF=4913`), ms/step:
+
+| kernel | 5233e246 (G1) | X8 |
+|---|---|---|
+| censusCoarse | 1.387 | 0.492 |
+| censusImportance | 1.207 | 0.202 |
+| censusDecide | 1.720 | 0.404 |
+| censusWant | 0.087 | 0.038 |
+| censusCubes (G1, unchanged) | 0.022 | 0.033 |
+| censusFine (unchanged) | 3.004 | 2.982 |
+| C passes | 4.424 | 1.169 |
+| kernel sum | 129.14 | 129.21 |
+
+The kernel sum's non-census rows move by ±0.5 ms a kernel run to run (my three X8 runs summed 126.9, 131.5 and
+129.2 ms); the census rows are the change.

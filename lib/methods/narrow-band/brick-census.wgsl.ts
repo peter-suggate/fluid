@@ -8,12 +8,23 @@
  *
  * Passes (brickCensusSchedule), each the old kernel of the same rule:
  * - censusBegin: the census header words (H 224..231) clear; unsupported state fails.
- * - censusFine: classify (l.2091), a workgroup an F brick, its h tiles one after another, a lane a cell.
- * - censusCoarse: classifyCoarse (l.2175), a workgroup a C page, its 4h tiles 64 at a time, a lane a tile,
- *   with the queued face, error and depth jobs.
- * - censusCubes: boundCubes (l.2625).
- * - censusImportance: importanceTile and publishImportance (l.2342, l.2405), then interfaceBits (l.2534).
- * - censusDecide: decideTile (l.2839), then the residency clamp, WANT and TRIG.
+ * - censusFine: classify (l.2091), a workgroup an F brick (F_ALL, G1), its h tiles one after another, a lane a cell.
+ * - censusCoarse: classifyCoarse (l.2175), eight workgroups a C page (C_ALL, X8): workgroup r takes the page's
+ *   64-tile slab 64r..64r+63 (tile z = r), a lane a tile, with the slab's queued face, error and depth jobs.
+ * - censusCubes: boundCubes (l.2625), a workgroup a C page (G1).
+ * - censusImportance: importanceTile and publishImportance (l.2342, l.2405), then interfaceBits (l.2534), X8 as
+ *   censusCoarse: a slab's required bits are the page's REQ words 2r and 2r + 1.
+ * - censusDecide: decideTile (l.2839), then the residency clamp, WANT and TRIG, X8 as censusCoarse. A page's
+ *   candidate bricks are listed once a page through its CAND_MASK words (set buffer, cleared by censusImportance).
+ * - censusWant (after the head's claims), X8 as censusCoarse.
+ * The C passes ran a workgroup a page, each lane 8 tiles in turn (about 90 workgroups on the tiered dam, 48 us a
+ * page); the slabs are independent (no slab reads another's workgroup words, and every cross-slab result is an
+ * integer atomic or a disjoint word), so the X8 split writes every word the G1 passes wrote, bit for bit
+ * (brick-census-x8.test.ts runs both on the same states). Two evaluations are reordered, not changed:
+ * - censusCoarse's depth jobs sample each wide vertex of a slab's deep tiles once (umDepthSample is the vertex's
+ *   alone, ncDepthAt) and raise every deep tile holding it: the same maximum over each tile's 64 vertices.
+ * - movingShapeNear's tile test ((FIN & want) == want and a moving key speed) is censusImportance's MOV bit, so
+ *   censusDecide reads the box as bit rows (as interfaceIn reads REQ) instead of 7 words a tile.
  *
  * Verbatim: every rule and its arithmetic, with the dam's policy baked (CENSUS_POLICY: the values the old
  * encode wrote for the dam, uniform-mixed-dynamic.ts l.2358). Loads go through the brick storage:
@@ -79,9 +90,11 @@ export const CENSUS_POLICY = {
 /** Scratch words a C slot (the lane buffer `census`): per tile its velocity keys, classify's importance words,
  * the final word 1, its crossing cells and gap; per page its bound cubes and interface bits; per tile its near word
  * (classify's near, uniform-mixed-dynamic.ts l.1277: h-owned, or a 4h corner within 4 tiles' cells of the surface);
- * per page the residency records (brick-residency.wgsl.ts: 4 words a 16-cell region and stage, the old pageSeed's). */
+ * per page the residency records (brick-residency.wgsl.ts: 4 words a 16-cell region and stage, the old pageSeed's);
+ * per page its moving-shape bits (MOV, 16 words as REQ's: bit i, tile i's FIN holds crossing, required and the shape
+ * trigger and its keys' speed is moving, movingShapeNear's tile test; censusImportance's). */
 export const CENSUS = {
-  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, NEAR: 6656, RES: 7168, STRIDE: 7328,
+  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, RES: 7168, STRIDE: 7328,
 } as const;
 /** The lane buffers setCensus binds: `census`, CENSUS.STRIDE words a C slot. */
 export const brickCensusBuffers = (L: BrickLayout): Record<string, number> => ({ census: CENSUS.STRIDE * L.cap.c });
@@ -101,7 +114,7 @@ const headerWGSL = () => Object.entries(CENSUS_H).map(([name, v]) => {
  * h vertex p), ncWidePresent(v) (umWideVertexPresent of wide vertex v), ncCellKind(c) (0 stored, 1 AIR,
  * 2 SOLID), ncCellOwnerH(c), ncFace(q,a) (the old velocity texel), ncObstacleAt(q), ncWallBeyond(p,k),
  * ncTileState(q) (0 stored, 1 AIR, 2 closed), and the scratch readers ncPageSlot(page), ncListCount(),
- * ncListSlot(i), ncSlotPage(s), ncKeys(s,i), ncW1(s,i), ncFin(s,i), ncCross(s,i), ncReq(s,w), ncCube(s,j,c).
+ * ncListSlot(i), ncSlotPage(s), ncKeys(s,i), ncW1(s,i), ncFin(s,i), ncCross(s,i), ncReq(s,w), ncMov(s,w), ncCube(s,j,c).
  */
 export const CENSUS_FORMULAS = /* wgsl */`
 const NC_TOL:f32=${f(CENSUS_POLICY.tolerance)};
@@ -346,9 +359,10 @@ fn ncBoundary(p:vec3i,width:u32,c:NcClass)->NcBoundary{
  }
  return result;
 }
-// umDepthSample (l.1792): lane i of 64 one vertex, every stored cell open.
-fn ncDepthSample(t:vec3i,i:u32)->vec2u{
- let v=t+vec3i(ncCorner(i,4u))-vec3i(1);
+// umDepthSample (l.1792): lane i of 64 one vertex, every stored cell open. The sample is the vertex's alone
+// (ncDepthAt), so censusCoarse takes each vertex of a slab's deep tiles once.
+fn ncDepthSample(t:vec3i,i:u32)->vec2u{return ncDepthAt(t+vec3i(ncCorner(i,4u))-vec3i(1));}
+fn ncDepthAt(v:vec3i)->vec2u{
  if(!ncWidePresent(v)){return vec2u(0u);}
  let value=ncLoadCorner(v*4);
  var low=vec3u(0u);var high=vec3u(0u);
@@ -619,16 +633,29 @@ fn ncKeySpeed(keys:array<u32,6>)->f32{
  }
  return speed;
 }
-// movingShapeNear (l.2823); its box walks the lattice's tiles of the window's (the rest hold no page).
+// movingShapeNear (l.2823); its box walks the lattice's tiles of the window's (the rest hold no page). A tile q != p
+// meets when (FIN & want) == want and its keys' speed is moving: censusImportance's MOV bit of q (ncMovingTile), so
+// the box is read a page's z rows of bits at a time, as interfaceIn reads REQ.
+fn ncMovingTile(fin:u32,keys:array<u32,6>)->bool{
+ let want=NC_CROSSES|NC_REQUIRED|ncTriggerBit(NC_SHAPE);
+ return (fin&want)==want&&ncKeySpeed(keys)>=ncMovingTravel();
+}
 fn ncMovingShapeNear(p:vec3i,keys:array<u32,6>)->bool{
  let reach=clamp(i32(ceil(ncKeySpeed(keys)/4.0)),1,3);
  if(!ncInterfaceAny(p-vec3i(reach),p+vec3i(reach))){return false;}
- let want=NC_CROSSES|NC_REQUIRED|ncTriggerBit(NC_SHAPE);
  let lo=max(p-vec3i(reach),vec3i(0));let hi=min(p+vec3i(reach),ncTileSpan()-vec3i(1));
- for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  let q=vec3i(x,y,z);let s=ncPageSlot(q>>vec3u(3u));if(s==0xffffffffu||all(q==p)){continue;}
-  let i=ncTileLocal(q);
-  if((ncFin(s,i)&want)==want&&ncKeySpeed(ncKeys(s,i))>=ncMovingTravel()){return true;}
+ let pa=lo>>vec3u(3u);let pb=hi>>vec3u(3u);let pl=vec3u(p&vec3i(7));let own=pl.x+8u*(pl.y&3u);
+ for(var qz=pa.z;qz<=pb.z;qz++){for(var qy=pa.y;qy<=pb.y;qy++){for(var qx=pa.x;qx<=pb.x;qx++){
+  let q=vec3i(qx,qy,qz);let s=ncPageSlot(q);if(s==0xffffffffu){continue;}
+  let a=vec3u(max(lo-8*q,vec3i(0)));let b=vec3u(min(hi-8*q,vec3i(7)));
+  let row=((2u<<(b.x-a.x))-1u)<<a.x;var mask=vec2u(0u);
+  for(var y=a.y;y<=b.y;y++){mask[y>>2u]|=row<<(8u*(y&3u));}
+  let home=all(q==(p>>vec3u(3u)));
+  for(var z=a.z;z<=b.z;z++){
+   var m=vec2u(ncMov(s,2u*z),ncMov(s,2u*z+1u))&mask;
+   if(home&&z==pl.z){m[pl.y>>2u]&=~(1u<<own);}
+   if(any(m!=vec2u(0u))){return true;}
+  }
  }}}
  return false;
 }
@@ -718,6 +745,7 @@ fn ncFin(s:u32,i:u32)->u32{return census[NC_S*s+${CENSUS.FIN}u+i];}
 fn ncCross(s:u32,i:u32)->vec2u{let o=NC_S*s+${CENSUS.CROSS}u+2u*i;return vec2u(census[o],census[o+1u]);}
 fn ncGap(s:u32,i:u32)->u32{return census[NC_S*s+${CENSUS.GAP}u+i];}
 fn ncReq(s:u32,w:u32)->u32{return census[NC_S*s+${CENSUS.REQ}u+w];}
+fn ncMov(s:u32,w:u32)->u32{return census[NC_S*s+${CENSUS.MOV}u+w];}
 fn ncCellKind(c:vec3i)->u32{if(!nbInLattice(c)){return 2u;}return select(0u,1u,ncPageSlot(c>>vec3u(5u))==NB_NONE);}
 fn ncTileState(q:vec3i)->u32{if(!nbTileInLattice(q)){return 2u;}return select(0u,1u,ncPageSlot(q>>vec3u(3u))==NB_NONE);}
 fn ncCellOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
@@ -842,7 +870,8 @@ var<workgroup> mixedTile:atomic<u32>;
   if(lane==0u){ncFlush();}
 }`);
 
-  // censusCoarse: classifyCoarse (l.2175), a workgroup a page of C_ALL, its tiles 64 at a time, a lane a tile.
+  // censusCoarse: classifyCoarse (l.2175), eight workgroups a page of C_ALL (X8), workgroup r its tiles 64r..64r+63
+  // (tile z = r), a lane a tile; every workgroup word is the 64-tile slab's, so the slabs run side by side.
   // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER) when tiered,
   // and is air all-h (CMASK all-ones a resident page: no slot reads NB_PHI_FAR), so it stores the identity.
   const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + /* wgsl */`
@@ -854,11 +883,25 @@ var<workgroup> cqDeep:array<u32,64>;
 var<workgroup> cqWorst:array<atomic<u32>,64>;
 var<workgroup> cqCurve:array<atomic<u32>,64>;
 var<workgroup> cqDeepest:array<array<atomic<u32>,2>,64>;
+// The slab's depth vertices (the 11 x 11 x 4 box of its tiles' 4^3 wide vertices, from (-1,-1,-1) of the slab's
+// first tile): each one a deep tile reads is sampled once (cqVertex lists them, cqVertexSeen a bit each) and raises
+// every deep tile holding it.
+var<workgroup> cqIsDeep:array<u32,64>;
+var<workgroup> cqVertexSeen:array<atomic<u32>,16>;
+var<workgroup> cqVertices:atomic<u32>;
+var<workgroup> cqVertex:array<u32,484>;
 var<workgroup> cqBounded:array<u32,64>;
 var<workgroup> cqLow:array<array<atomic<u32>,3>,64>;
 var<workgroup> cqHigh:array<array<atomic<u32>,3>,64>;
 var<workgroup> cqParts:atomic<u32>;
-var<workgroup> cqPart:array<vec4i,384>;
+// A face job j (owner j / 6, axis (j % 6) / 2, sign j & 1) beside an h tile, whose sixteen h patches the parts take;
+// its probe cell, the face job's.
+var<workgroup> cqPart:array<u32,384>;
+fn cqFaceProbe(cs:u32,r:u32,j:u32)->vec3i{
+  let owner=j/6u;let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
+  let origin=4*xTileOf(cs,owner+64u*r);var probe=origin;probe[axis]+=select(-1,4,sign>0);
+  return probe;
+}
 fn cqBound(owner:u32,axis:u32,anchor:vec3i){
   if(ncFaceLow(anchor,axis)){return;}
   let u=ncFace(anchor,axis);
@@ -867,12 +910,14 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
 }
 @compute @workgroup_size(64) fn censusCoarse(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   ncInit();
-  let g=nbGroup(wid);
-  if(lane==0u){wgFlag=select(0u,1u,g<nbListCount(NB_LIST_C_ALL));atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);}
+  let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
+  if(lane==0u){wgFlag=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);}
   if(workgroupUniformLoad(&wgFlag)==0u){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);
-  for(var r=0u;r<8u;r++){
-    if(lane==0u){atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);atomicStore(&cqParts,0u);}
+  let cs=nbListSlot(NB_LIST_C_ALL,e);
+  {
+    if(lane==0u){atomicStore(&cqErrors,0u);atomicStore(&cqDeeps,0u);atomicStore(&cqParts,0u);atomicStore(&cqVertices,0u);}
+    if(lane<16u){atomicStore(&cqVertexSeen[lane],0u);}
+    cqIsDeep[lane]=0u;
     for(var a=0u;a<3u;a++){atomicStore(&cqLow[lane][a],ncOrderKey(3.0e38));atomicStore(&cqHigh[lane][a],ncOrderKey(-3.0e38));}
     cqBounded[lane]=0u;
     atomicStore(&cqWorst[lane],0u);atomicStore(&cqCurve[lane],0u);atomicStore(&cqDeepest[lane][0],0u);atomicStore(&cqDeepest[lane][1],0u);
@@ -887,18 +932,18 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
       classified=true;cqBounded[lane]=1u;
       ncClassifyOwner(t,4u,0u,&c,false);
       if((c.flags&2u)!=0u&&NC_TOL>0.0){cqError[atomicAdd(&cqErrors,1u)]=lane;}
-      if((c.flags&2u)!=0u){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;}
+      if((c.flags&2u)!=0u){cqDeep[atomicAdd(&cqDeeps,1u)]=lane;cqIsDeep[lane]=1u;}
     }
     workgroupBarrier();
     // Face jobs (umFaceFirst, l.691): one patch, or sixteen h patches beside an h tile.
     for(var j=lane;j<6u*64u;j+=64u){
       let owner=j/6u;if(cqBounded[owner]==0u){continue;}
       let axis=(j%6u)/2u;let sign=select(-1,1,(j&1u)!=0u);
-      let origin=4*xTileOf(cs,owner+64u*r);var probe=origin;probe[axis]+=select(-1,4,sign>0);
+      let probe=cqFaceProbe(cs,r,j);
       var nw=0u;if(ncCellKind(probe)==0u){nw=select(4u,1u,ncCellOwnerH(probe));}
       let width=min(4u,select(4u,nw,nw!=0u));let side=4u/width;var anchor=probe;anchor[axis]-=select(0,1,sign>0);
       if(side*side==1u){cqBound(owner,axis,anchor);}
-      else{cqPart[atomicAdd(&cqParts,1u)]=vec4i(anchor,i32(owner|(axis<<8u)|((side*side)<<16u)));}
+      else{cqPart[atomicAdd(&cqParts,1u)]=j;}
     }
     let errors=atomicLoad(&cqErrors);
     for(var j=lane;j<8u*errors;j+=64u){
@@ -906,19 +951,31 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
       let error=ncResolutionError4(xTileOf(cs,owner+64u*r),j%8u);
       atomicMax(&cqWorst[owner],bitcast<u32>(error));atomicMax(&cqCurve[owner],bitcast<u32>(ncCoarseCurve));
     }
+    // Depth jobs (umDepthSample, lane j % 64 of deep tile j / 64): the vertex t + corner - 1 of deep tile t, listed once.
     let deeps=atomicLoad(&cqDeeps);
     for(var j=lane;j<64u*deeps;j+=64u){
-      let owner=cqDeep[j/64u];let d=ncDepthSample(xTileOf(cs,owner+64u*r),j%64u);
-      atomicMax(&cqDeepest[owner][0],d.x);atomicMax(&cqDeepest[owner][1],d.y);
+      let owner=cqDeep[j/64u];let c=ncCorner(j%64u,4u);
+      let v=(owner&7u)+c.x+11u*((owner>>3u)+c.y)+121u*c.z;
+      let bit=1u<<(v&31u);
+      if((atomicOr(&cqVertexSeen[v>>5u],bit)&bit)==0u){cqVertex[atomicAdd(&cqVertices,1u)]=v;}
     }
     workgroupBarrier();
+    let vertices=atomicLoad(&cqVertices);let first=xTileOf(cs,64u*r);
+    for(var j=lane;j<vertices;j+=64u){
+      let v=cqVertex[j];let u=vec3u(v%11u,(v/11u)%11u,v/121u);
+      let d=ncDepthAt(first+vec3i(u)-vec3i(1));
+      // The slab's tiles holding u: x in u.x-3..u.x, y in u.y-3..u.y (its z is the slab's).
+      for(var y=max(i32(u.y)-3,0);y<=min(i32(u.y),7);y++){for(var x=max(i32(u.x)-3,0);x<=min(i32(u.x),7);x++){
+        let owner=u32(x)+8u*u32(y);if(cqIsDeep[owner]==0u){continue;}
+        atomicMax(&cqDeepest[owner][0],d.x);atomicMax(&cqDeepest[owner][1],d.y);
+      }}
+    }
     let parts=atomicLoad(&cqParts);
     for(var j=lane;j<16u*parts;j+=64u){
-      let item=cqPart[j/16u];let word=u32(item.w);let part=j%16u;
-      if(part>=(word>>16u)){continue;}
-      let axis=(word>>8u)&3u;var anchor=item.xyz;
+      let face=cqPart[j/16u];let part=j%16u;
+      let axis=(face%6u)/2u;var anchor=cqFaceProbe(cs,r,face);anchor[axis]-=select(0,1,(face&1u)!=0u);
       anchor[(axis+1u)%3u]+=i32(part%4u);anchor[(axis+2u)%3u]+=i32(part/4u);
-      cqBound(word&255u,axis,anchor);
+      cqBound(face/6u,axis,anchor);
     }
     workgroupBarrier();
     if(classified){
@@ -973,109 +1030,118 @@ var<workgroup> wgGo:u32;
   }
 }`);
 
-  // censusImportance: importanceTile and publishImportance (l.2342, l.2405), 8 tiles a lane; the page's
-  // required bits (interfaceBits, l.2534) by workgroup atomics.
+  // censusImportance: importanceTile and publishImportance (l.2342, l.2405), eight workgroups a page (X8), workgroup r
+  // its tiles 64r..64r+63, a lane a tile; the slab's required bits (interfaceBits, l.2534: the page's words 2r and
+  // 2r + 1) by workgroup atomics. Workgroup 0 clears the page's candidate mask for censusDecide.
   const censusImportance = k("censusImportance", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + /* wgsl */`
-var<workgroup> wgReq:array<atomic<u32>,16>;
+var<workgroup> wgReq:array<atomic<u32>,2>;
+var<workgroup> wgMov:array<atomic<u32>,2>;
 var<workgroup> wgRequired:atomic<u32>;
 var<workgroup> wgGo:u32;
+fn ciTile(cs:u32,i:u32,lane:u32){
+  let o=NC_S*cs;let t=xTileOf(cs,i);
+  if(!nbTileInLattice(t)){return;}
+  let keys=ncKeys(cs,i);let own=vec2u(ncW0(cs,i),ncW1(cs,i));
+  let w1=ncImportance(t,keys,ncGap(cs,i),own).y;
+  census[o+${CENSUS.FIN}u+i]=w1;
+  if(ncMovingTile(w1,keys)){atomicOr(&wgMov[lane>>5u],1u<<(i&31u));}
+  // publishImportance: the crossing cells and gap of a tile seed decide only if it is required.
+  let required=(w1&NC_REQUIRED)!=0u;let crossing=(w1&NC_CROSSES)!=0u;
+  if(!required){
+    if(crossing){census[o+${CENSUS.CROSS}u+2u*i]=0u;census[o+${CENSUS.CROSS}u+2u*i+1u]=0u;census[o+${CENSUS.GAP}u+i]=0xffffffffu;}
+    return;
+  }
+  atomicAdd(&wgRequired,1u);atomicOr(&wgReq[lane>>5u],1u<<(i&31u));
+  if(!crossing){
+    census[o+${CENSUS.CROSS}u+2u*i]=0xffffffffu;census[o+${CENSUS.CROSS}u+2u*i+1u]=0xffffffffu;
+    census[o+${CENSUS.GAP}u+i]=min(u32(ceil(ncTileSpeed(keys))),255u)<<24u;
+  }
+}
 @compute @workgroup_size(64) fn censusImportance(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   ncInit();
-  let g=nbGroup(wid);if(lane==0u){wgGo=select(0u,1u,g<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);let o=NC_S*cs;
-  if(lane<16u){atomicStore(&wgReq[lane],0u);}
+  let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
+  if(lane==0u){wgGo=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,e);let o=NC_S*cs;
+  if(lane<2u){atomicStore(&wgReq[lane],0u);atomicStore(&wgMov[lane],0u);}
   if(lane==0u){atomicStore(&wgRequired,0u);}
+  if(r==0u&&lane<NB_CAND_MASK_WORDS){atomicStore(&nbSet[NB_S_CAND_MASK+NB_CAND_MASK_WORDS*cs+lane],0u);}
   workgroupBarrier();
-  for(var j=0u;j<8u;j++){
-    let i=lane+64u*j;let t=xTileOf(cs,i);
-    if(!nbTileInLattice(t)){continue;}
-    let keys=ncKeys(cs,i);let own=vec2u(ncW0(cs,i),ncW1(cs,i));
-    let w1=ncImportance(t,keys,ncGap(cs,i),own).y;
-    census[o+${CENSUS.FIN}u+i]=w1;
-    // publishImportance: the crossing cells and gap of a tile seed decide only if it is required.
-    let required=(w1&NC_REQUIRED)!=0u;let crossing=(w1&NC_CROSSES)!=0u;
-    if(!required){
-      if(crossing){census[o+${CENSUS.CROSS}u+2u*i]=0u;census[o+${CENSUS.CROSS}u+2u*i+1u]=0u;census[o+${CENSUS.GAP}u+i]=0xffffffffu;}
-      continue;
-    }
-    atomicAdd(&wgRequired,1u);atomicOr(&wgReq[i>>5u],1u<<(i&31u));
-    if(!crossing){
-      census[o+${CENSUS.CROSS}u+2u*i]=0xffffffffu;census[o+${CENSUS.CROSS}u+2u*i+1u]=0xffffffffu;
-      census[o+${CENSUS.GAP}u+i]=min(u32(ceil(ncTileSpeed(keys))),255u)<<24u;
-    }
-  }
+  ciTile(cs,lane+64u*r,lane);
   workgroupBarrier();
-  if(lane<16u){census[o+${CENSUS.REQ}u+lane]=atomicLoad(&wgReq[lane]);}
+  if(lane<2u){census[o+${CENSUS.REQ}u+2u*r+lane]=atomicLoad(&wgReq[lane]);census[o+${CENSUS.MOV}u+2u*r+lane]=atomicLoad(&wgMov[lane]);}
   if(lane==0u){let n=atomicLoad(&wgRequired);if(n!=0u){atomicAdd(&nbSet[NB_H_CENSUS_REQUIRED],n);}}
 }`);
 
-  // censusDecide: decideTile (l.2839) a tile, 8 a lane; then the residency clamp (lane E), WANT and TRIG.
-  // A band tile is h only when its F brick and each in-range 27-neighbour of it are resident; a clamped tile's
-  // missing bricks are appended as candidates, once a page (a bitmask over the 6^3 bricks around it), and it
-  // refines one census late.
+  // censusDecide: decideTile (l.2839), eight workgroups a page (X8), workgroup r its tiles 64r..64r+63, a lane a tile;
+  // then the residency clamp (lane E), WANT (the page's words 2r and 2r + 1) and TRIG (workgroup r's lanes 0..7 the
+  // page's F children 8r..8r+7). A band tile is h only when its F brick and each in-range 27-neighbour of it are
+  // resident; a clamped tile's missing bricks are appended as candidates, once a page (the page's bit of the 6^3
+  // bricks about it in CAND_MASK, whose atomicOr names the one lane that lists it), and it refines one census late.
   const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRO], OWNER + HOOKS + CENSUS_FORMULAS + /* wgsl */`
-var<workgroup> wgWant:array<atomic<u32>,16>;
-var<workgroup> wgCand:array<atomic<u32>,7>;
+var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
 fn ncJoined(t:vec3i)->bool{
   let b=t>>vec3u(1u);let s=nbFSlotOfBrick(b);if(s>=NB_SEAM){return false;}
   let j=u32(t.x&1)|(u32(t.y&1)<<1u)|(u32(t.z&1)<<2u);
   return ((atomicLoad(&nbSet[NB_S_TILE_OCC+s])>>(8u+j))&1u)!=0u;
 }
-var<workgroup> wgGo:u32;
-@compute @workgroup_size(64) fn censusDecide(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
-  ncInit();
-  let g=nbGroup(wid);if(lane==0u){wgGo=select(0u,1u,g<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);
-  if(lane<16u){atomicStore(&wgWant[lane],0u);}
-  if(lane<7u){atomicStore(&wgCand[lane],0u);}
-  if(lane<4u){atomicStore(&wgCount[lane],0u);}
-  workgroupBarrier();
-  let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
-  let base=4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))-vec3i(1);
-  for(var j=0u;j<8u;j++){
-    let i=lane+64u*j;let t=xTileOf(cs,i);
-    if(!nbTileInLattice(t)){continue;}
-    let band=ncDecide(t,ncJoined(t),ncFin(cs,i),ncKeys(cs,i),reach);
-    if(!band){continue;}
-    atomicAdd(&wgCount[0],1u);if(!nbTileH(cs,i)){atomicAdd(&wgCount[1],1u);}
-    let b=t>>vec3u(1u);var clamped=false;
-    for(var n=0u;n<27u;n++){
-      let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
-      let s=nbFSlotOfBrick(nb);
-      // Tiered, at a step's head (cfg.w = 1): the band tile's present ring is kept (the brick storage's h ring, §5.4).
-      if(s<NB_SEAM){if(cfg.z==1u&&cfg.w==1u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
-      clamped=true;
-      if(s==NB_NONE){let l=nb-base;atomicOr(&wgCand[u32(l.x+6*l.y+36*l.z)>>5u],1u<<(u32(l.x+6*l.y+36*l.z)&31u));}
-      else{nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));}
-    }
-    if(clamped){atomicAdd(&wgCount[2],1u);}
-    atomicOr(&wgWant[i>>5u],1u<<(i&31u));
-  }
-  // TRIG: an F child's bit j is its tile j's importance triggers (final word 1 bits 16..21).
-  let fs=nbChild(cs,lane);
-  if(fs<NB_SEAM){
-    let b=vec3u(lane&3u,(lane>>2u)&3u,lane>>4u);var bits=0u;
-    for(var j=0u;j<8u;j++){
-      let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let w1=ncFin(cs,q.x|(q.y<<3u)|(q.z<<6u));
-      bits|=select(0u,1u<<j,((w1>>16u)&63u)!=0u);
-      // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
-      bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
-    }
-    atomicStore(&nbSet[NB_S_TRIG+fs],bits);
-    if((bits&0xffu)!=0u){atomicAdd(&wgCount[3],countOneBits(bits&0xffu));}
-  }
-  workgroupBarrier();
-  if(lane<16u){atomicStore(&nbSet[NB_S_WANT+16u*cs+lane],atomicLoad(&wgWant[lane]));}
-  // cfg.z = 1 (tiered): the clamp's missing bricks become candidates. All-h (cfg.z = 0): WANT is not committed,
-  // so nothing is requested (setMark's reach keeps the all-h set).
-  for(var e=lane;e<216u*cfg.z;e+=64u){
-    if(((atomicLoad(&wgCand[e>>5u])>>(e&31u))&1u)==0u){continue;}
-    let nb=base+vec3i(i32(e%6u),i32((e/6u)%6u),i32(e/36u));let key=nbKey(nb);
+fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
+  let t=xTileOf(cs,i);
+  if(!nbTileInLattice(t)){return;}
+  let band=ncDecide(t,ncJoined(t),ncFin(cs,i),ncKeys(cs,i),reach);
+  if(!band){return;}
+  atomicAdd(&wgCount[0],1u);if(!nbTileH(cs,i)){atomicAdd(&wgCount[1],1u);}
+  let b=t>>vec3u(1u);var clamped=false;
+  for(var n=0u;n<27u;n++){
+    let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
+    let s=nbFSlotOfBrick(nb);
+    // Tiered, at a step's head (cfg.w = 1): the band tile's present ring is kept (the brick storage's h ring, §5.4).
+    if(s<NB_SEAM){if(cfg.z==1u&&cfg.w==1u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
+    clamped=true;
+    if(s!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));continue;}
+    // cfg.z = 1 (tiered): the clamp's missing bricks become candidates, each once a page. All-h (cfg.z = 0): WANT is
+    // not committed, so nothing is requested (setMark's reach keeps the all-h set).
+    if(cfg.z!=1u){continue;}
+    let l=nb-base;let e=u32(l.x+6*l.y+36*l.z);let bit=1u<<(e&31u);
+    if((atomicOr(&nbSet[NB_S_CAND_MASK+NB_CAND_MASK_WORDS*cs+(e>>5u)],bit)&bit)!=0u){continue;}
+    let key=nbKey(nb);
     let a=atomicAdd(&nbSet[NB_H_N_CAND],1u);
     if(a<NB_FCAP){atomicStore(&nbSet[NB_S_CAND+a],key);}else{nbFail(NB_FAIL_LIST,key);}
     atomicAdd(&nbSet[NB_H_CENSUS_CAND],1u);
   }
+  if(clamped){atomicAdd(&wgCount[2],1u);}
+  atomicOr(&wgWant[lane>>5u],1u<<(i&31u));
+}
+var<workgroup> wgGo:u32;
+@compute @workgroup_size(64) fn censusDecide(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  ncInit();
+  let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
+  if(lane==0u){wgGo=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,e);
+  if(lane<2u){atomicStore(&wgWant[lane],0u);}
+  if(lane<4u){atomicStore(&wgCount[lane],0u);}
+  workgroupBarrier();
+  let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
+  let base=4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))-vec3i(1);
+  cdTile(cs,lane+64u*r,lane,reach,base);
+  // TRIG: an F child's bit j is its tile j's importance triggers (final word 1 bits 16..21).
+  let child=8u*r+lane;
+  if(lane<8u){
+    let fs=nbChild(cs,child);
+    if(fs<NB_SEAM){
+      let b=vec3u(child&3u,(child>>2u)&3u,child>>4u);var bits=0u;
+      for(var j=0u;j<8u;j++){
+        let q=2u*b+vec3u(j&1u,(j>>1u)&1u,j>>2u);let w1=ncFin(cs,q.x|(q.y<<3u)|(q.z<<6u));
+        bits|=select(0u,1u<<j,((w1>>16u)&63u)!=0u);
+        // The thin trigger alone (word 1 bit 17: nbActivityThin), bit 8 + j, for F's thin move path.
+        bits|=select(0u,1u<<(8u+j),((w1>>17u)&1u)!=0u);
+      }
+      atomicStore(&nbSet[NB_S_TRIG+fs],bits);
+      if((bits&0xffu)!=0u){atomicAdd(&wgCount[3],countOneBits(bits&0xffu));}
+    }
+  }
+  workgroupBarrier();
+  if(lane<2u){atomicStore(&nbSet[NB_S_WANT+16u*cs+2u*r+lane],atomicLoad(&wgWant[lane]));}
   if(lane==0u){
     let c=vec4u(atomicLoad(&wgCount[0]),atomicLoad(&wgCount[1]),atomicLoad(&wgCount[2]),atomicLoad(&wgCount[3]));
     if(c.x!=0u){atomicAdd(&nbSet[NB_H_CENSUS_BAND],c.x);}
@@ -1087,19 +1153,18 @@ var<workgroup> wgGo:u32;
 
   // censusWant (tiered, after the part 1 head's claims): every WANT bit's brick and in-range 27-neighbours must be
   // resident now. The claims took the candidates censusDecide listed, so a miss means a pool refused (POOL_F/C is
-  // latched): the bit clears and FAIL.TIER latches with the brick, never a silent coarser tier.
+  // latched): the bit clears and FAIL.TIER latches with the brick, never a silent coarser tier. Eight workgroups a page
+  // (X8), workgroup r its tiles 64r..64r+63, a lane a tile.
   const censusWant = k("censusWant", [CFG, setRW, dirRO], /* wgsl */`
 @compute @workgroup_size(64) fn censusWant(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
-  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);
-  for(var j=0u;j<8u;j++){
-    let i=lane+64u*j;let w=NB_S_WANT+16u*cs+(i>>5u);let bit=1u<<(i&31u);
-    if((atomicLoad(&nbSet[w])&bit)==0u){continue;}
-    let b=(8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u)))>>vec3u(1u);
-    for(var n=0u;n<27u;n++){
-      let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
-      if(nbFSlotOfBrick(nb)>=NB_SEAM){atomicAnd(&nbSet[w],~bit);nbFail(NB_FAIL_TIER,nbKey(nb));break;}
-    }
+  let g=nbGroup(wid);let e=g>>3u;if(e>=nbListCount(NB_LIST_C_ALL)){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,e);
+  let i=lane+64u*(g&7u);let w=NB_S_WANT+16u*cs+(i>>5u);let bit=1u<<(i&31u);
+  if((atomicLoad(&nbSet[w])&bit)==0u){return;}
+  let b=(8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u)))>>vec3u(1u);
+  for(var n=0u;n<27u;n++){
+    let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
+    if(nbFSlotOfBrick(nb)>=NB_SEAM){atomicAnd(&nbSet[w],~bit);nbFail(NB_FAIL_TIER,nbKey(nb));break;}
   }
 }`);
 
@@ -1108,17 +1173,19 @@ var<workgroup> wgGo:u32;
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
 /** `keep`: a step's head, where censusDecide's band rings join the residency marks (brick-residency.wgsl.ts); the boot
- * has no leave to consume them. */
+ * has no leave to consume them. censusFine and censusCubes take `list`'s G1 triple; the C passes censusCoarse,
+ * censusImportance and censusDecide take list cAll's X8 triple (eight workgroups a page, censusListArgs). */
 export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false) {
   const c = brickCensusKernels(L, { tiered });
+  const slabs = censusListArgs(cAll, "X8");
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
     { kernel: c.censusFine, dispatch: list(fAll, "G1") },
-    { kernel: c.censusCoarse, dispatch: list(cAll, "G1") },
+    { kernel: c.censusCoarse, dispatch: slabs },
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
-    { kernel: c.censusImportance, dispatch: list(cAll, "G1") },
-    { kernel: c.censusDecide, dispatch: list(cAll, "G1"), z: tiered ? 1 : 0, w: keep ? 1 : 0 },
+    { kernel: c.censusImportance, dispatch: slabs },
+    { kernel: c.censusDecide, dispatch: slabs, z: tiered ? 1 : 0, w: keep ? 1 : 0 },
   ];
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */
-export const censusListArgs = (k: number, g: "G1") => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
+export const censusListArgs = (k: number, g: "G1" | "X8") => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });

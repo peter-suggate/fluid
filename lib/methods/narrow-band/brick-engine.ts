@@ -19,7 +19,7 @@ import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type Bric
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule } from "./brick-census.wgsl";
+import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule, censusListArgs } from "./brick-census.wgsl";
 import { brickResidencyKernels } from "./brick-residency.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
@@ -190,7 +190,7 @@ export class BrickEngine {
     const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
     const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep) : [];
     const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
-    const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: g1(LIST.C_ALL) }] : [];
+    const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
     const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes };
     const res = brickResidencyKernels(layout, { tiered });
