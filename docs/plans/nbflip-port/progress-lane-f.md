@@ -871,3 +871,80 @@ trace kernel sat at 704-832.
   rise slower. It holds at 1.1-1.2x afterwards.
 - The references record only particles, so the T1/T2 tiles, seeds and deletions per step need an instrumented
   old-engine run.
+
+## Read-by for uAdvect, segments per face, and the D8 accounting (2026-11-16)
+
+All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717bc files); tree-d8 is tree-s6 with counters in header words 74-79.
+
+**0. Does anything read uAdvect's departure where P2G sets the face?** Yes, on the dam, so no trace can be skipped bitwise.
+- **The combine** is uTransfer's nbfP2GResolve, a verbatim port of transferPropertiesJob:
+  - `mix(original, momentum/mass, transition)`, with transition = θ · mix(min(1, mass/expected), 1, hot).
+  - Outside the P2G window, near = (0, 0, 1), so transition is 0 and the face keeps its departure.
+- **At transition 1 the departure is still read twice:**
+  - uViscous runs before uTransfer and takes the 7-point Laplacian of the departure UP for every liquid face (nbfViscousLaplacian), the face itself and its six neighbours. The dam is viscous: uViscous is scheduled only when viscosity_Pa_s > 0, and it runs in the profile.
+  - Metal evaluates `mix(x,y,a)` as `x+(y-x)*a`, so even at a = 1 the result depends on x by an ulp.
+- **Counts on the frozen step 20.** These ran uTransfer after a pDeposit of the frozen particles (frozen.mts `--pre-deposit`); the particles are at step end, so the counts are approximate.
+
+  | | tiered | all-h |
+  |---|---|---|
+  | traced faces | 534k | 2.06M |
+  | particle-weighted h faces (mass ≥ 1e-5) | 454k | 352k |
+  | h faces at transition 1 | 114k | 84k |
+
+  - Tiered, no C face carries weight: every C face lies outside the depth window -2..1.5, so every C trace is read.
+- **The most an inviscid scene could skip** is the transition-1 faces, 21% of the tiered traces. That needs three things:
+  - pDeposit and the heat moved ahead of uAdvect;
+  - `select` in place of `mix` at t = 1, a sub-ulp change to a verbatim formula;
+  - the viscous read gone, which holds only when the scene is inviscid.
+
+  This needs a ruling, so it is not done.
+
+**1. Segments per face.**
+- **The multi-segment trace is verbatim.** The rule is the old engine's `momentumTrace: "substep"`: uniform-cached-momentum.wgsl.ts l.111-133. It is the method default (uniform-narrow-band-method.ts l.94), and every canonical reference's meta records "substep".
+- **Histogram on the frozen step 20 (faces):**
+
+  | segments | 1 | 2 | 3 | 4 | 5-6 | 7-8 | 9-16 | >16 |
+  |---|---|---|---|---|---|---|---|---|
+  | tiered (534k) | 0.5% | 0.9% | 4.6% | 17.7% | 37.7% | 29.2% | 9.4% | 0 |
+  | all-h (2.06M) | 3.1% | 17.7% | 32.9% | 23.2% | 16.4% | 4.9% | 1.7% | 0 |
+
+- **It is the whole column, not a few jets.** One segment covers at most one cell, 0.375 m/s at h = 6.25 mm and dt = 1/60. So 5-8 segments is the falling column at 1.9-3 m/s; g·t is 3.3 m/s at step 20. Tiered faces are the h band, which skews fast.
+- Seep's flow is slow (about 1 segment a face).
+- The rule stays.
+
+**D8: what the references count.** The old engine was run once for 30 steps through a scratch copy of nbflip-gate-bench, with its diagnostics-only `narrowBandRetireCounting` on. That flag adds atomics only. Each sample also read the FLIP state words 0-43 and a direct census of the live bank (readParticleMassCensus). Our engine ran 30 steps on tree-d8 with `--pstat`.
+- **The reference row is the old receipt `state[1]`.**
+  - That is `stage.count`, the sorted slabs' live records.
+  - Our run reproduces the references to 0.5%: step 10 reads 194,907 against 195,195, and step 30 reads 789,922 against 794,055.
+  - It leaves out live records outside the sorted slabs (the spill tail and the frame's seeds; seed room counts `state[1] + state[SEEDS_WORD]`).
+  - The old engine's own census of live records at the same fence runs 4-25% higher: step 7 reads 111,971 against 139,561, step 10 194,907 against 217,884, and step 30 789,922 against 829,355.
+  - Step 0 reads 0 in all five references, before the first receipt.
+- **Our `particles` is PCOUNT[bank].**
+  - pScan's filed records plus pSeed's appended seeds.
+  - `--pstat` finds 0 dead records at every step and no spill reserve or tails.
+- **The measurement difference is on the reference side.**
+
+| step | ours / refs (receipt) | ours / old census, records | ours / old census, mass |
+|---|---|---|---|
+| 5 | 1.035 | 0.916 | 0.923 |
+| 7 | 1.220 | 0.976 | 0.991 |
+| 9 | 1.232 | 1.120 | 1.167 |
+| 10 | 1.250 | 1.118 | 1.146 |
+| 13 | 1.129 | 1.051 | 1.089 |
+| 16 (D8c) | 1.045 | 0.953 | 0.977 |
+| 20 | - | 1.045 | 1.068 |
+| 25 | - | 1.060 | 1.090 |
+| 30 | 1.114 | 1.068 | 1.086 |
+
+- **What remains like for like.**
+  - **Step 9 is a seed burst.** We seed 53.6k there against our usual 20-35k, and the record ratio steps from 0.94 to 1.12.
+  - **Steps 14-17 run below the old engine** (0.95).
+  - **From step 18 the ratio climbs to 1.07-1.08 (mass 1.09), and we remove less.** Cumulative to step 30, ours against the old engine:
+    - deep retirement: 131k against 153k;
+    - cell-mass cut and merge: 1.04M against its crowded retirements of 1.13M;
+    - splits: 1.09M against 1.13M.
+  - **Heat expiry:** we retire 1,304 by heat; the old engine's heat word reads 0.
+  - **No seed comparison yet.** The old engine has no seed counter in these words, and a seed count derived by accounting does not close, because the merge and crowded words overlap.
+- **Proposed next run:** the old-engine census over the D8 window (90 steps, one check run). It would put the corrected row (ours against the old census) beside the receipt row. The ratio here (receipt/census 1.05 at step 30) suggests that D8's 1.12-1.22 against the receipt becomes about 1.07-1.16.
+- **Tools:** ~/code/me/fluid-scratch/lane-f/tools/{d8-old.mts, rb.sh, rb2.sh} and frozen.mts `--pre-deposit`.
+- **Results:** d8old/{d8-old-30,d8-new-30}.jsonl and logs/rb*-{t,h}.log.
