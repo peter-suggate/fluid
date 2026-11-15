@@ -73,8 +73,12 @@ const CORNER_LATTICE: Vec3 = [80, 32, 72];
 // A wide thin sheet: more rows at the top levels (L6, L7).
 const WIDE: BrickLiquidBox = { lo: [-8, -8, -8], hi: [200.5, 6.3, 140.2] };
 const WIDE_LATTICE: Vec3 = [256, 32, 160];
+// The sheet's pool from its measured peak (2436 F, 48 C at the boot, lane E 2026-11-16): the all-h owner margin of 20
+// cells (brick-residency.wgsl.ts RES_MARGIN, lDilate's R = 5 tiles; 58844bb0) holds bricks 0-28 in x, 0-3 in y and
+// the 21 in z, 29 x 4 x 21. It was 2400 at the earlier margin of 12.
+const WIDE_F = 2600;
 
-for (const [name, lattice, box, f, c] of [["corner block", CORNER_LATTICE, CORNER, 600, 32], ["wide sheet", WIDE_LATTICE, WIDE, 2400, 96]] as const)
+for (const [name, lattice, box, f, c] of [["corner block", CORNER_LATTICE, CORNER, 600, 32], ["wide sheet", WIDE_LATTICE, WIDE, WIDE_F, 96]] as const)
 test(`pool MGPCG (GPU): one V-cycle matches the Float64 model's (${name})`, GPU, async t => {
   await withDevice("pool mgpcg vcycle", async device => {
     const e = await BrickEngine.create(device, options(lattice, [box], f, c, { slots: 1, tolerance: 0 }));

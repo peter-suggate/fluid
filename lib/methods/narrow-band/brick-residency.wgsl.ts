@@ -26,7 +26,9 @@
  *     l.285-301): 4 + 2 + 1 cells past the particle owners' tiles.
  *   - pTiles' FT_THETA and SURFACE_TILE 4 (P l.285-301: the particle's tile and the neighbour toward its half; a
  *     tile no F slot holds is skipped, so the 4h F tiles about the particles need their bricks).
- *   - uExtend 3 (V l.695-762), the sampler's UNIT taps 3 (fluid-grid l.470-474), the + faces, vertex rows,
+ *   - uExtend 3 (V l.695-762), the sampler's UNIT taps 3 (fluid-grid fsUnit: a tap lies within 3 cells of an h owner
+ *     of the opening tiers; since c2f9bffa uAdvect reads a tap with no F slot as 0, fsUnitAbsent, so this row is a
+ *     correctness bound, not a cost: tell lane F before any change that could thin it), the + faces, vertex rows,
  *     tile-word stencils and setMark's 1-ring 1 (V l.304-831, L l.256-296, 394-398).
  *   - lDilate 20 (R = 5 tiles, separable x, y, z with intermediates DA, DB per brick, L l.346-410) reads through the
  *     C pages tiered: a tile no F slot holds reads its page's DIL4 word (lDilateC, L l.412-511, its sources, DA in
