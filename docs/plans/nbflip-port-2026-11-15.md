@@ -11,7 +11,19 @@
 | Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | done (2026-11-15): root cause a retire with no vertex handoff (stale skirt phi); retire handoff in uniform-page-initialise.ts, 15 of 15 dam runs complete, GATED_STEPS.dam 300; `nbflip-port/progress-lane-d.md` |
 | Phase 2: port lanes P1 (pressure: items 13, 3, 10, 8, 5) and P2 (move, submit, kernel shape: items 1, 2, 4+, 6, 7, 11, 9, 12) | **redirected** (2026-11-15): the user asked for NB-FLIP to be restructured toward seep-m1max's architecture, not tweaked item by item. P2's tweak list is stopped; P1 continues on a seep-structured multigrid. |
 | Lane X: structural redesign of NB-FLIP (`docs/plans/nbflip-structural-2026-11-15.md`) | done (2f29b9d1), approved (§7.1): a new brick engine in `lib/methods/narrow-band/` behind the NB-FLIP id; milestones M0–M6; target about 2.5–2.9x on all four scenes |
-| Structural lanes E (engine core), F (fluid kernels), P (pressure and bodies, continuing P1) | M0 done: ABI frozen (7bc7514e), pools from measured peaks (142ee18e), p1b explained as a wrong-scene run (7371f768, a22d512d), P1 item 13 (5532136b). M1 skeleton done (ac2fce26; 12/12 tests, hydrostatic within 1.9e-5 of Float64). M2 (the dam) in progress. |
+| Structural lanes E (engine core), F (fluid kernels), P (pressure and bodies, continuing P1) | M0 done: ABI frozen (7bc7514e), pools from measured peaks (142ee18e), p1b explained as a wrong-scene run (7371f768, a22d512d), P1 item 13 (5532136b). M1 skeleton done (ac2fce26; 12/12 tests, hydrostatic within 1.9e-5 of Float64). M2 (the dam) in progress. As of 2026-11-15:
+<br>**All-h dam:** runs 300 steps end to end on the brick engine with P's registered composite solver (3eff4de9). Every window and pressure row passes; only D6 and D8c fail (1.10–1.19). The cause is the missing 4h-band extension reach, and the ruling is a verbatim port, no interim all-h extension.
+<br>**Landed:**
+<br>• tier ABI (f2342c86);
+<br>• setTransfer, bitwise against the real old remap (08a59dac);
+<br>• tiered residency (d769d9d0);
+<br>• census, exact against the real old census (fb17d41e, 57cf4869);
+<br>• residency clamp removed (5abc3cc4);
+<br>• boot half kick (5600d180, e6fcbec4);
+<br>• composite rows (99298711);
+<br>• T4 4h corner φ (d3c2b5b4).
+<br>**Open:** F's T1–T3/T5, then flip tiered (critical path); P's active-set probe table and outer loop; L0 occupancy (7.4 vs 1.7 ns/row); E's liquid-beyond-reach residency defect.
+<br>**Timing (all-h, informational):** 69–75 ms fenced against 45.45. |
 | Combined cross-scene round | todo |
 
 ## 1. Goal and contract
