@@ -27,8 +27,6 @@
  * Stated differences from the old engine at this milestone (each a stand-in until its owner lands it):
  * - the activity trigger is the census's (NB_S_TRIG, setCensus at the part 1 head). In the all-h engine the census
  *   classifies every tile as an h tile, where the old engine classified the deep interior at 4h;
- * - the crossing guard's certified travel is the brick's velocity bound over the step, in whole tiles (the
- *   census's spread-reach words replace it);
  * The deep-air keep (umDeepAirKept, a still tile's φ ≥ 9) and the released-wall rule (umReleasedWalls, the
  * projection's release bits) are lane E's verbatim ports (levelset-release.wgsl.ts), applied in lAdvected.
  */
@@ -271,14 +269,21 @@ fn lBinCount(c:vec3i)->u32{
  var end=nbSetWord(NB_S_BIN_START+s)+count;if(l<511u){end=fcLoad(FC_RUN+512u*s+l+1u);}
  return end-start;
 }
+// nbCrossingTravel's word: the spread reach of tile t (lane E's REACH1, nbrTileReach's rule: saturated where no page
+// holds t or the page's words are not this step's, as the old spread reads an AIR tile).
+fn lTileReach(t:vec3i)->u32{
+ let cs=nbCSlotOfPage(t>>vec3u(3u));
+ if(cs==NB_NONE||nbSetWord(NB_S_REACH_STEP+cs)!=nbRing(cfg.x,NB_RING_STEP)+1u){return 0x3fffffffu;}
+ return nbSetWord(NB_S_REACH1+512u*cs+foTileIndex(t))&0x3fffffffu;
+}
 fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
  let advected=lPhi1(v);
  lHome=max(v-vec3i(1),vec3i(0))>>vec3u(2u);
  let theta=nbfCoupleTheta(v-4*lHome,false);
  if(theta<=0.0){return advected;}
  let c=lCellBelow(v);let s=fgSlot(c);
- var travel=0.0;
- if(s!=NB_NONE){let cells=fcLoadF(FC_BOUND+s)*dt/h;if(cells>0.0){travel=4.0*ceil(cells/4.0);}}
+ // bulkDepth's previous-crossings travel (nbCrossingTravel): the spread reach of c's tile.
+ let travel=nbfCrossingTravel(lTileReach(c>>vec3u(2u)));
  var nearest=NB_NONE;if(s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
  let bulk=nbfBulkDepth(advected,vec3f(v),fgReach1(c),nearest!=NB_NONE,vec3f(fgUnpack(nearest)),travel);
  let gather=(fgTileFlags(c)&FTF_SURFACE_TILE)!=0u&&bulk>-2.0&&theta>0.0;

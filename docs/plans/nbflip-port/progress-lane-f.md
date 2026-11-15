@@ -1212,3 +1212,25 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
 - **9f3f417e:** wSwept staged one lane per tile (216 lanes). 5.88 -> 5.48 ms, bitwise.
 - **This commit:** vLiquidOwner's inputs staged once: the 4^3 tiles' 4h bit and centre phase, and the 27 bricks' FC_LIQ words. A coarse cell had re-read its tile's 8 C corners for each of the tile's 64 cells. 5.32 -> 4.23 ms (HEAD and the change in the same run), bitwise. All h: 4.34 against 4.27.
 - **Next in uExtend:** the per-axis seed reads (fgCellCoarse, fgSlot, fgFace, xCode), staged per window cell once for all three axes.
+
+**D8: lUnion's crossing-guard travel, ported verbatim (2026-11-16).**
+- **The bisect.** I cut step 5 (the 5th advance, from the frozen step-4 state) after each level-set pass, at brick 7's +x plane (x = 63, z = 60, y 109-115), next to a coarse brick.
+  - The head, lInit, lAdvect, lcAdvect and lSplat leave it clean: PHI1 -3.36, -2.34, -1.34, -0.34, 0.66.
+  - lUnion writes the exact integers -5, -4, -3, -2 at y 109-112. lPublish keeps the -2.00 at the interface row. x = 62 is untouched.
+  - Only x = 63 is coupled: nbfCoupleTheta at local x = 3 weighs the coarse +x tile 0.25.
+- **The cause.** nbfBulkDepth returns min(φ, -depth), where depth is the distance to the box of last step's nearest crossing cell, a whole-cell distance. The travel should relax it to max(depth - travel - 2, 0). Our travel was a stand-in, 4·ceil(FC_BOUND·dt/h), the brick's record speed bound. That is 0 in a newly-h brick with no records, so the guard clamped φ.
+- **The fix.** The travel is now the old nbCrossingTravel of the tile's spread-reach word, which measureBand copied into the candidate words. That word is lane E's REACH1 at the tile's C slot, saturated where no page holds the tile or REACH_STEP is not this step's (nbrTileReach's rule).
+  - Lane E's lcCouple carried the same stand-in. Its fix lands next, gated together with this one.
+- **The gate (tree-g1: HEAD 259e2e59 + both halves, check slot).**
+  - Both brick wide-dam tests pass. They fail with the C half alone.
+  - dam-300 tiered composite against ref-2761350a: every gate passes except D8, and D8 fails by a narrower margin than before:
+
+| D8, window mean | 30-90 | 105-165 | 180-300 | score |
+|---|---|---|---|---|
+| w2 (before) | 7.176e5 | 4.249e5 | | 1.38 |
+| lUnion alone (tree-u1) | 7.069e5 | 4.227e5 | | 1.21 |
+| both halves (tree-g1) | 6.992e5 | 4.188e5 | 3.859e5 | 1.08 |
+| ref-2761350a | 6.309e5 ± 1.7e4 | 3.838e5 | 3.484e5 | tol 6.31e4 at 30-90 |
+
+  - D8c (particles at step 16) moves from 3.674e5 to 3.206e5, against 3.516e5, and passes.
+  - lUnion alone, frozen tiered step 20, timing slot: 1.24 -> 1.03 ms.
