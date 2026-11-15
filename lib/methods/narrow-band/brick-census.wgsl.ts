@@ -172,6 +172,31 @@ fn ncStageSmoothTile(origin:vec3i,lane:u32){
  }
  workgroupBarrier();
 }
+// umSurfaceDisplacement's corner Laplacian (uniform-mixed-dynamic.ts 907-916): a lane a (corner k, axis a) term, summed in axis order by
+// the corner's lane, so the sum and its rounding are the old loop's; 24 lanes instead of 8 lanes x 3 serial axes.
+var<workgroup> ncLapTerm:array<f32,24>;
+var<workgroup> ncLapUsed:array<u32,24>;
+fn ncCornerLaplacian(t:vec3i,lane:u32,held:array<f32,8>){
+ let h=ncH();
+ if(lane<24u){
+  let k=lane/3u;let a=lane%3u;let kv=ncCorner(k,2u);let centre=held[k];
+  var used=0u;var term=0.0;
+  if(abs(centre)<=2.0*h){
+   var lo=t+vec3i(kv);lo[a]-=1;var hi=t+vec3i(kv);hi[a]+=1;
+   if(ncWidePresent(lo)&&ncWidePresent(hi)){
+    let below=ncLoadCorner(4*lo);let above=ncLoadCorner(4*hi);
+    if(!(abs(below-centre)>6.0*h||abs(above-centre)>6.0*h)){used=1u;term=above-2.0*centre+below;}
+   }
+  }
+  ncLapTerm[lane]=term;ncLapUsed[lane]=used;
+ }
+ workgroupBarrier();
+ if(lane<8u&&abs(held[lane])<=2.0*h){
+  var lap=0.0;
+  for(var a=0u;a<3u;a++){if(ncLapUsed[3u*lane+a]!=0u){lap+=ncLapTerm[3u*lane+a];}}
+  atomicMax(&ncTileCorner,bitcast<u32>(abs(lap)/(12.0*h)));
+ }
+}
 // umMetricCorners (l.1437), every edge open and no corner buried.
 fn ncMetricCorners(lane:u32,c:ptr<function,array<f32,8>>){
  if(lane<8u){atomicStore(&ncCornerMetric[lane],NC_NO_METRIC);}
@@ -218,27 +243,13 @@ fn ncSurfaceDisplacement(t:vec3i,lane:u32)->f32{
  var c:array<f32,8>;var worst=0.0;var along=0.0;var crossings=0u;var curve=0.0;var curves=0u;
  // The tile's corners are its staged raw vertices (4·corner): the same nbVertexPhi read, once a tile, not once a lane.
  for(var k=0u;k<8u;k++){c[k]=ncRawAt(4*vec3i(ncCorner(k,2u)));}
- let held=c;ncMetricCorners(lane,&c);
+ let held=c;ncMetricCorners(lane,&c);ncCornerLaplacian(t,lane,held);
  let low=vec4f(c[0],c[2],c[4],c[6]);let high=vec4f(c[1],c[3],c[5],c[7]);let dx=high-low;
  for(var i=lane;i<125u;i+=64u){
   let v=ncCorner(i,5u);let value=ncTileSmooth[i];
   if(all(v>=vec3u(1u))&&all(v<=vec3u(3u))&&abs(value)<=1.5*h){
    let kappa=ncSmoothCurvature(v,value);
    if(kappa.y>0.0){curve+=kappa.x*(4.0/3.0)*h;curves++;}
-  }
-  if(all(v%4u==vec3u(0u))){
-   let k=v/4u;let centre=held[k.x+2u*k.y+4u*k.z];
-   if(abs(centre)<=2.0*h){
-    var lap=0.0;
-    for(var a=0u;a<3u;a++){
-     var lo=t+vec3i(k);lo[a]-=1;var hi=t+vec3i(k);hi[a]+=1;
-     if(!ncWidePresent(lo)||!ncWidePresent(hi)){continue;}
-     let below=ncLoadCorner(4*lo);let above=ncLoadCorner(4*hi);
-     if(abs(below-centre)>6.0*h||abs(above-centre)>6.0*h){continue;}
-     lap+=above-2.0*centre+below;
-    }
-    atomicMax(&ncTileCorner,bitcast<u32>(abs(lap)/(12.0*h)));
-   }
   }
   for(var a=0u;a<3u;a++){
    if(v[a]>=4u){continue;}

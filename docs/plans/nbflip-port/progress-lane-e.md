@@ -391,3 +391,18 @@ U <- P(U + g dt/2) with gravity alone and no transport. So the reference's first
   the solver and project, then after, before its stepEnd (brick-abi.md §2.5).
 - F supplies the force (US = U + g dt/2) and the particle side.
 - Schedule unit test added. GPU tests: engine and set-tiers pass 18/18. Unit tests: 1829 pass.
+
+## 2026-11-15: the census head's cost (dam, all-h, 24 steps, profiled from step 13, split passes)
+
+censusFine 8.2 ms/step, decide 1.3, coarse 0.9, importance 0.7; about 11 ms in all. Inside censusFine,
+measured by turning each part off in a scratch copy:
+- surface displacement (crossing tiles): 3.2 ms. Of that, the corner Laplacian 1.4, the metric 0.6,
+  the crossings 0.5, the curvature 0.4;
+- depth sampling: 0.15 ms;
+- classifying every tile: about 4.7 ms. Most of these are deep interior tiles, which go 4h under the tiers
+  and are skipped by the real D, so per the coordinator I leave them until tiered timing.
+
+Landed (bitwise: census and dam-census GPU tests pass 5/5):
+- The tile's corners are read from the staged 5³ raw instead of 8 reads a lane: 8.2 to 7.9 ms.
+- The corner Laplacian runs on 24 lanes (corner by axis), summed in axis order by the corner's lane:
+  7.9 to 6.8 ms.
