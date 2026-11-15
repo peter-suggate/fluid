@@ -129,7 +129,8 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
   }
   // A module with vertex φ and no staged ring (FG_RING_WGSL) reads every vertex through its owner.
   const ring = (body.includes("fn fgPhiWord") && !body.includes("fn fgRingAt") ? FG_NO_RING_WGSL : "")
-    + (body.includes("fn fsCacheOf") && !body.includes("fn fsCacheRawStaged") ? "\nfn fsCacheRawStaged(T:vec3i,a:u32)->f32{return fsCacheRaw(T,a);}" : "");
+    + (body.includes("fn fsCacheOf") && !body.includes("fn fsCacheRawStaged") ? "\nfn fsCacheRawStaged(T:vec3i,a:u32)->f32{return fsCacheRaw(T,a);}" : "")
+    + (body.includes("fn fsUnit(") && !body.includes("fn fsUnitAbsent") ? "\nfn fsUnitAbsent(c:vec3i,a:u32)->f32{return fsTapH(c,a,false);}" : "");
   return {
     label, entry, bindings,
     code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }),
@@ -467,10 +468,16 @@ fn fsTapH(c:vec3i,a:u32,raw:bool)->f32{
  if(foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a))){return foSFFace(c,a);}
  return fsTap4(c,a,raw);
 }
-// The h tap from uCache's UNIT (a brick no slot holds resolves it).
+// The h tap from uCache's UNIT; a brick no slot holds takes fsUnitAbsent. Only fsFine reads it, where the fine
+// weight is over 0: p's tile has an F slot and an h owner of the opening tiers (HMASK, the tiers the head's setMark
+// saw) lies within 2 cells, so every tap is within 3 cells of an h owner. Residency keeps the owners' bricks by
+// flow + 9 tiered (lane E's read table: the sampler's UNIT taps, 3), so no tap's brick lacks a slot: 0 hits in
+// uAdvect, lAdvect, lcAdvect, pMove and pSeed over the tiered 300 and the all-h 200 dam (2026-11-16).
+// fsUnitAbsent defaults to the 4h fallback (fsTapH); uAdvect takes 0, which is 1.2 ms of its time (a fallback, or
+// any side effect there, keeps the compiler from simplifying the tap).
 fn fsUnit(c:vec3i,a:u32)->f32{
  if(!fgFaceOpen(c,a)){return 0.0;}
- let s=fgSlot(c);if(s==NB_NONE){return fsTapH(c,a,false);}
+ let s=fgSlot(c);if(s==NB_NONE){return fsUnitAbsent(c,a);}
  return fcLoadF(FC_UNIT+512u*(3u*s+a)+nbLocal(c));
 }
 // The fine interpolant at p.
