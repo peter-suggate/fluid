@@ -1120,7 +1120,7 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
   - lAdvect 3.69 -> 3.72, lcAdvect 1.89 -> 1.85, pMove 6.17 -> 6.04, pSeed 1.65 -> 1.66.
 - **One check run, dam-300 (tiered, composite, poolF 4913).** The baseline is tree-t0k, whose values are bitwise HEAD's. Worst margin a gate, base / w2:
 
-| gate | ref | ref-2761350a |
+| gate | artifacts/nbflip-port/ref (superseded 33b78ebb set, not a gate) | ref-2761350a (canonical, DEFAULT_REF) |
 |---|---|---|
 | D1 | 0.50 / 0.50 | 0.55 / 0.55 |
 | D2 | 0.07 / 0.07 | 0.06 / 0.06 |
@@ -1139,8 +1139,10 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
 | D8 | 0.71 / 0.76 | **1.28 / 1.38 FAIL** |
 
 - **Reading the table.**
-  - Against the canonical ref, every gate passes for both.
-  - D8 at 30-90 against ref-2761350a already failed at HEAD: 7.118e5 particles against 6.309e5, margin 1.28; lane E measured 1.12-1.24 before the margin change. w2 makes it 7.176e5, margin 1.38.
+  - **Correction (coordinator, 2026-11-16).** The canonical set is ref-2761350a alone (nbflip-gates.ts DEFAULT_REF). artifacts/nbflip-port/ref is the superseded 33b78ebb set. Its column is kept only as a record and must not be judged on; an earlier version of this entry, and 88cbf0da's commit message, called it canonical.
+  - On the canonical ref-2761350a every row passes for both except D8.
+  - D8 at 30-90 already failed at HEAD: 7.118e5 particles against 6.309e5, margin 1.28; lane E measured 1.12-1.24 before the margin change. w2 makes it 7.176e5, margin 1.38: +5.8k particles, 0.09 of the tolerance, inside D8's run-to-run spread on identical trees (1.12-1.34).
+  - **Ruling:** w2 is kept provisionally. D8 is the open M2 blocker, and w2 is re-judged there. The receipt-against-census question goes to lane G (note-lane-g-d8-census.md).
 - Tools: tools/{t0-count.sh, t0-gate.sh, w2-gate.sh}; trees tree-t0c, tree-t0, tree-t0k, tree-w2. Logs: logs/t0, logs/w2.
 
 **The staged-tile sampler (go/no-go measurement, frozen tiered step 20, uAdvect's F bricks).**
