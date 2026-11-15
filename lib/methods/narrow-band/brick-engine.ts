@@ -128,7 +128,7 @@ export class BrickEngine {
   /** Every placement of one step and the boot, in order (record()'s input). */
   static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number): BrickStageSchedule {
     const tiered = stages.tiered === true;
-    const set = brickSetKernels(layout, { tiered }), pres = pressureOperatorKernels(layout), f = layout.cap.f, c = layout.cap.c;
+    const set = brickSetKernels(layout, { tiered }), pres = pressureOperatorKernels(layout, { tiered }), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
     // cfg.z = 1 at boot: the boot's bricks enter h-owned (bootPhi writes F); tiered steps enter 4h (§2.5).
