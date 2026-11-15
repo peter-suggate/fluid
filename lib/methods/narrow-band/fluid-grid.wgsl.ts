@@ -21,6 +21,11 @@
  *   - TILE: FT_WORDS words for each of a slot's 8 tiles (FT_* below);
  *   - SLOT: 1 + the key the slot held when F last initialised it (a slot whose record key differs is new);
  *   - BOUND: the slot's velocity bound as pScan saw it (BOUND_F before setMark clears it; m/s, f32 bits).
+ *   - Tiered only, uCache's resolved copies of this step's opening state (no region all h): UNIT, 3 x 512 a slot,
+ *     the h tap of US at each face (F's face where F owns it, else the 4h cache's trilinear: the old unit velocity
+ *     cache); PHIU, the owner-resolved PHI at each vertex (lAdvect's reads); HMASK, a word a tile, bit k the h
+ *     ownership of the tile t + (k % 3, k / 3 % 3, k / 9) - 1 (bit 13 the tile's own); CACHE4, 3 x 512 a C slot, the
+ *     4h cache of US on each tile's lower plane (the old 4h velocity cache).
  * - `fdep`: p2g's fixed-point deposits, 2 words (momentum i32, weight u32) per face of each axis.
  * - `fpart`, per record of a bank: RANK (2 words: the destination rank of the record and of its split half, or
  *   NONE) and MOVED (a third bank: the move's output, which pScatter files into the new bank).
@@ -49,7 +54,7 @@ export interface FluidLayout {
   /** The stages read through the tier owners and write only owned storage (FG_TIERED; brick-abi.md §2.5). */
   readonly tiered: boolean;
   readonly cells: number;
-  readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly words: number };
+  readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly UNIT: number; readonly PHIU: number; readonly HMASK: number; readonly CACHE4: number; readonly words: number };
   readonly fdep: { readonly words: number };
   readonly fpart: { readonly RANK: number; readonly words: number };
   readonly fmoved: { readonly words: number };
@@ -66,9 +71,11 @@ export function fluidLayout(L: BrickLayout, options: { readonly tiered?: boolean
   const take = (n: number) => { const o = at; at += n; return o; };
   const CNT = take(cells), RUN = take(cells), NEAR = take(cells), NEAR2 = take(cells), KEY = take(cells), HOT = take(cells), DEPTH = take(cells);
   const MASK = take(16 * f), TILE = take(8 * FT.WORDS * f), SLOT = take(f), BOUND = take(f);
-  const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, words: at };
-  const fpart = { RANK: 0, words: 2 * p };
   const tiered = options.tiered === true;
+  // Tiered, uCache's resolved copies (the old engine's unit and 4h velocity caches and its vertex field).
+  const UNIT = take(tiered ? 3 * cells : 0), PHIU = take(tiered ? cells : 0), HMASK = take(tiered ? 8 * f : 0), CACHE4 = take(tiered ? 3 * 512 * L.cap.c : 0);
+  const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, UNIT, PHIU, HMASK, CACHE4, words: Math.max(at, 1) };
+  const fpart = { RANK: 0, words: 2 * p };
   return { tiered, cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p }, fext4: { words: tiered ? FX4_WORDS * L.cap.c : 1 } };
 }
 
@@ -297,8 +304,8 @@ fn fsLerp8(v:array<f32,8>,f:vec3f)->f32{
  return (1.0-f.z)*((1.0-f.y)*x0+f.y*x1)+f.z*((1.0-f.y)*x2+f.y*x3);
 }
 fn fsBit(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
-// The 4h cache of tile T's lower plane along a (US).
-fn fsCache(T:vec3i,a:u32)->f32{
+// The 4h cache of tile T's lower plane along a (US), resolved through the owners (uCache's source).
+fn fsCacheRaw(T:vec3i,a:u32)->f32{
  var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
  let t=clamp(T,vec3i(0),hi);let c=4*t;
  if(!fgFaceOpen(c,a)){return 0.0;}
@@ -307,6 +314,15 @@ fn fsCache(T:vec3i,a:u32)->f32{
  for(var y=0;y<4;y++){for(var x=0;x<4;x++){var q=c;q[u]+=x;q[v]+=y;sum+=foSFFace(q,a);}}
  return sum/16.0;
 }
+// The same from uCache's CACHE4 (a page no slot holds reads 0, as the owners' readers do).
+fn fsCache(T:vec3i,a:u32)->f32{
+ var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
+ let t=clamp(T,vec3i(0),hi);
+ if(!fgFaceOpen(4*t,a)){return 0.0;}
+ let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
+ return fcLoadF(FC_CACHE4+512u*(3u*cs+a)+foTileIndex(t));
+}
+fn fsCacheOf(T:vec3i,a:u32,raw:bool)->f32{if(raw){return fsCacheRaw(T,a);}return fsCache(T,a);}
 // The coarse interpolant at p.
 fn fsCoarse(p:vec3f,a:u32)->f32{
  var off=vec3f(0.5);off[a]=0.0;
@@ -315,19 +331,25 @@ fn fsCoarse(p:vec3f,a:u32)->f32{
  return fsLerp8(v,f);
 }
 // The 4h cache's trilinear at the h face (c, a): in eighths of a tile, 2c - 3 across and 2c along.
-fn fsTap4(c:vec3i,a:u32)->f32{
+fn fsTap4(c:vec3i,a:u32,raw:bool)->f32{
  var q8=2*c-vec3i(3);q8[a]=2*c[a];
  let b=q8>>vec3u(3u);let f=vec3f(q8-8*b)/8.0;var t:array<f32,8>;
  for(var k=0u;k<8u;k++){
   let corner=fsBit(k);let w=select(vec3f(1.0)-f,f,corner!=vec3i(0));let weight=w.x*w.y*w.z;
-  if(weight>0.0){t[k]=weight*fsCache(b+corner,a);}
+  if(weight>0.0){t[k]=weight*fsCacheOf(b+corner,a,raw);}
  }
  return ((t[0]+t[5])+(t[1]+t[4]))+((t[2]+t[7])+(t[3]+t[6]));
 }
-fn fsTapH(c:vec3i,a:u32)->f32{
+fn fsTapH(c:vec3i,a:u32,raw:bool)->f32{
  if(!fgFaceOpen(c,a)){return 0.0;}
  if(foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a))){return foSFFace(c,a);}
- return fsTap4(c,a);
+ return fsTap4(c,a,raw);
+}
+// The h tap from uCache's UNIT (a brick no slot holds resolves it).
+fn fsUnit(c:vec3i,a:u32)->f32{
+ if(!fgFaceOpen(c,a)){return 0.0;}
+ let s=fgSlot(c);if(s==NB_NONE){return fsTapH(c,a,false);}
+ return fcLoadF(FC_UNIT+512u*(3u*s+a)+nbLocal(c));
 }
 // The fine interpolant at p.
 fn fsFine(p:vec3f,a:u32)->f32{
@@ -335,24 +357,21 @@ fn fsFine(p:vec3f,a:u32)->f32{
  var hi=vec3f(NB_LATTICE-vec3i(1));hi[a]=f32(NB_LATTICE[a]);
  s=clamp(s,vec3f(0.0),hi);
  let i0=vec3i(floor(s));let f=s-vec3f(i0);
- let low=i0>>vec3u(2u);let high=vec3i(ceil(s))>>vec3u(2u);var fine=true;
- for(var k=0u;k<8u;k++){if(!foTileOwnerH(select(low,high,fsBit(k)!=vec3i(0)))){fine=false;}}
  var v:array<f32,8>;
- for(var k=0u;k<8u;k++){
-  let c=i0+fsBit(k);
-  if(fine){v[k]=select(0.0,foSFFace(c,a),fgFaceOpen(c,a));}else{v[k]=fsTapH(c,a);}
- }
+ for(var k=0u;k<8u;k++){v[k]=fsUnit(i0+fsBit(k),a);}
  return fsLerp8(v,f);
 }
+// A tile's HMASK word (uCache), 0 where no F slot holds it.
+fn fsHMask(t:vec3i)->u32{let c=4*t;let s=fgSlot(c);if(s==NB_NONE){return 0u;}return fcLoad(FC_HMASK+8u*s+fgTileOf(c));}
 fn fsFineWeight(p:vec3f)->f32{
  let q=fgHeld(p);let t=min(vec3i(floor(q)),NB_LATTICE-vec3i(1))>>vec3u(2u);
  if(!fsSupport(t)){return 0.0;}
- if(foTileOwnerH(t)){return 1.0;}
+ let m=fsHMask(t);
+ if((m&(1u<<13u))!=0u){return 1.0;}
  var fine=0.0;
  for(var k=0u;k<27u;k++){
-  if(k==13u){continue;}
+  if((m&(1u<<k))==0u){continue;}
   let n=t+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);
-  if(!foTileOwnerH(n)){continue;}
   let origin=vec3f(n)*4.0;let delta=max(vec3f(0.0),max(origin-q,q-origin-vec3f(4.0)));
   fine=max(fine,max(0.0,1.0-max(delta.x,max(delta.y,delta.z))/2.0));
  }

@@ -59,13 +59,16 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const records: BrickDispatch = { direct: foldArgs(Math.ceil(L.cap.particles / 128)) };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
   const ext4 = tiered ? [at(v.uExt4Seed, pages), at(v.uExt4, pages)] : [];
+  // Tiered, the samplers' caches of this step's opening state (after the head's transfer, before pMove; at the kick,
+  // after the extension, before the seeding).
+  const cache = v.uCache ? [at(v.uCache, both)] : [];
   const dilate = (round: 1 | 2) => [0, 1, 2].map(pass => at(l.lDilate, all8, pass, round));
   const near = [0, 1, 2].map(pass => at(l.lNear, all, pass));
   const rebin = (z: number) => [at(p.pScan, all, z), at(p.pScatter, records, z), at(p.pTiles, all, z)];
   const analysis = [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...dilate(2), ...near, at(l.lDistance, all)];
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
-    move: [at(p.pMove, records)],
+    move: [...cache, at(p.pMove, records)],
     rebin: rebin(0),
     levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"),
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), at(p.pSeed, all)],
@@ -75,7 +78,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the
     // extension and the initial seeding from the kicked, extended U (the old engine seeds in its first frame from
     // the kicked grid), filed into bank 0.
-    kick: { force: [at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), at(p.pSeed, all, 0, 1), at(p.pMove, records, 1), ...rebin(1)] },
+    kick: { force: [at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), ...cache, at(p.pSeed, all, 0, 1), at(p.pMove, records, 1), ...rebin(1)] },
     buffers: { fcell: F.fcell.words, fdep: F.fdep.words, fpart: F.fpart.words, fmoved: F.fmoved.words, ...(tiered ? { fext4: F.fext4.words } : {}) },
   };
   return stages;

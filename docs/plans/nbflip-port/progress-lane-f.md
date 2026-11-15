@@ -559,3 +559,35 @@ pool MGPCG alone does not project C faces):
 - The cost of the tiered sampler. In the profile at steps 11–13, uAdvect takes 176 ms and lAdvect 61 ms;
   pressureRowsC (lane P) takes 543 ms. fgSampleVel resolves every tap through the owners, and the 4h cache of a seam
   plane is a 16-face mean per read. The old engine reads precomputed caches (the unit and 4h velocity textures).
+
+## M2 tiered: the opening caches (uCache), the sampler cost removed (2026-11-15)
+
+The old engine samples through caches it builds once per step from the opening state: the unit velocity
+texture, the 4h velocity texture and the vertex phi. The tiered sampler instead resolved every tap through the
+owners, and read a seam plane's 4h cache as a 16-face mean on each read. `uCache` (FC_G1, one dispatch) builds
+the same caches once per step, after the extension and before pMove and pSeed. It writes to fluid-grid's fcell,
+which is sized only when tiered:
+- C pages: CACHE4, the 4h cache of each face (`fsCacheRaw`: foPCFace, or the mean of the 16 F subfaces).
+- F bricks:
+  - PHIU, the phi each vertex opens with (lAdvect's back-trace reads it through `lPhi0`/`lCorners0`).
+  - HMASK, 27 bits per tile saying which neighbour tiles are h-owned (the sampler's fine weight).
+  - UNIT, the resolved unit tap (`fsTapH`), on near bricks only, where some neighbour tile is h-owned.
+- The readers change as follows:
+  - `fsCache` is a table read.
+  - `fsFine` reads UNIT for all 8 taps.
+  - `fsFineWeight` reads HMASK in place of 27 owner lookups.
+  - lAdvect skips a vertex it does not own.
+
+Profile, steps 11–13, composite MGPCG, `--poolF=4913` (`logs/prof-t2.log`), ms per step:
+
+| kernel | uncached | cached |
+|---|---|---|
+| uAdvect | 176 | 7.2 |
+| lAdvect | 61 | 1.3 |
+| uCache | – | 1.5 |
+| pressureRowsC (P) | 543 | 543 |
+
+Physics is unchanged. At step 13 the cached run gives 248.43 J and 180.40 L, against 248.64 J and 180.36 L
+uncached; the difference is within the run-to-run spread from summation order.
+
+Dispatches against all-h: the 7 C_ALL dispatches, plus uCache (one FC_G1 dispatch).

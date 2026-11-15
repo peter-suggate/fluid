@@ -97,7 +97,18 @@ fn nbxTraceVelocity(x:vec3f)->vec3f{return fgSampleVel(x,0u,3u);}
 fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return fgHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c540000u);}
 var<private> lBase:vec3i;
-fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return fgPhi(lBase+vec3i(i32(x),i32(y),i32(z))-vec3i(1));}
+// PHI at vertex v: tiered, uCache's owner-resolved copy (PHIU, this step's opening PHI, which lAdvect reads before
+// any level-set write); a vertex no slot holds, or all h, fgPhi.
+fn lPhi0(v:vec3i)->f32{
+ if(FG_TIERED){let s=fgSlot(v);if(s!=NB_NONE&&all(v>=vec3i(0))){return fcLoadF(FC_PHIU+512u*s+nbLocal(v));}}
+ return fgPhi(v);
+}
+fn lCorners0(c:vec3i)->array<f32,8>{
+ var v:array<f32,8>;
+ for(var k=0u;k<8u;k++){v[k]=lPhi0(c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
+ return v;
+}
+fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lPhi0(lBase+vec3i(i32(x),i32(y),i32(z))-vec3i(1));}
 ` + nbfPhiAdvectWGSL + /* wgsl */`
 // umWallWithin for the box: within reach cells of a wall plane along the axis.
 fn lWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_LATTICE[a]-reach;}
@@ -112,7 +123,7 @@ fn lCubicAt(v:vec3i)->bool{
  return heat<=1.5;
 }
 fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
- let c=fgPhi(v);
+ let c=lPhi0(v);
  // Kept far air: last step's gate (the air collar dilated a tile) does not reach the vertex's tile.
  if(fgDist(fgTileDist(lCellBelow(v)),1u)>5u&&c>=16.0){return c;}
  let p=vec3f(v);
@@ -122,7 +133,7 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
   var at:array<vec3f,10>;var t:array<f32,10>;
   for(var a=0u;a<3u;a++){let e=vec3f(fgUnit(a));at[2u*a]=fgHeld(p-e);at[2u*a+1u]=fgHeld(p+e);}
   for(var k=0u;k<4u;k++){var q=p;q[select(0u,2u,k>1u)]+=select(-2.0,2.0,(k&1u)!=0u);at[6u+k]=q;}
-  for(var k=0u;k<10u;k++){t[k]=fgPhi(vec3i(at[k]));}
+  for(var k=0u;k<10u;k++){t[k]=lPhi0(vec3i(at[k]));}
   var gr=vec3f(0.0);
   for(var a=0u;a<3u;a++){gr[a]=(t[2u*a+1u]-t[2u*a])/max(at[2u*a+1u][a]-at[2u*a][a],1e-6);}
   let g2=dot(gr,gr);
@@ -153,7 +164,7 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  var travel=traced-foot;var q=traced;
  if(any(shift!=vec3f(0.0))){q=fgHeld(traced+shift);}
  let cell=min(vec3i(floor(q)),NB_LATTICE-vec3i(1));let f=q-vec3f(cell);
- var value=nbfCellTrilinear(fgCorners(cell),f);
+ var value=nbfCellTrilinear(lCorners0(cell),f);
  if(abs(value)<2.0&&lCubicAt(v)){
   lBase=cell;
   let lowHeld=cell-vec3i(1)<vec3i(0);let highHeld=cell+vec3i(2)>NB_LATTICE;
@@ -178,6 +189,8 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  let dt=lDt();let h=lH();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+nbLocalCoord(l);
+  // Tiered, a vertex F does not own is the 4h corners' (lcAdvect): no trace (lSetPhi writes only owned vertices).
+  if(FG_TIERED&&!fgVertexOwned(v)){continue;}
   var value=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
   if(lVertexIn(v)){value=lAdvected(v,dt,h);}
   lSetPhi(NB_PHI_F_PHI1,slot,l,value);

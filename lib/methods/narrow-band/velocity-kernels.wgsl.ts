@@ -276,6 +276,49 @@ ${brickHead}
  }
 }`);
 
+  // uCache (tiered only; the old engine's caches, rebuilt from this step's opening state): a pass over FC_G1 after
+  // the head's transfer (and after the kick's extension), before any sampler. A C page writes CACHE4 (fsCacheRaw at
+  // each of its tiles' planes); an F brick writes HMASK (its tiles' 27 h-ownership bits), PHIU (fgPhi at each
+  // vertex) and, where an h tile lies in its 27 bricks (the only bricks whose taps a nonzero fine weight reads),
+  // UNIT (fsTapH at each face from the resolved caches). The samplers' values are unchanged (the same arithmetic,
+  // read back), and an owner-resolved tap or vertex costs one read.
+  const uCache = F.tiered ? k("uCache", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, V_CADDR_WGSL].join("\n") + /* wgsl */`
+var<workgroup> sSplit:u32;
+var<workgroup> wNear:atomic<u32>;
+var<workgroup> sNear:u32;
+fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);}
+@compute @workgroup_size(256) fn uCache(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);atomicStore(&wNear,0u);}
+ let split=workgroupUniformLoad(&sSplit);let e=nbGroup(wid);
+ if(e>=split){
+  if(e-split<nbListCount(NB_LIST_C_ALL)){
+   let cs=nbListSlot(NB_LIST_C_ALL,e-split);
+   for(var r=0u;r<2u;r++){
+    let j=lid+256u*r;let T=vcTile(cs,j);
+    for(var a=0u;a<3u;a++){fcStoreF(FC_CACHE4+512u*(3u*cs+a)+j,fsCacheRaw(T,a));}
+   }
+  }
+  return;
+ }
+ let slot=nbListSlot(NB_LIST_F_ALL,e);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+ // An h tile in the 27 bricks (8 tiles each, a lane a tile).
+ if(lid<216u){let t=2*(b+ucOffset(lid/8u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32((lid>>2u)&1u));if(foTileOwnerH(t)){atomicOr(&wNear,1u);}}
+ if(lid<8u){
+  let t=(o>>vec3u(2u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));var m=0u;
+  for(var k=0u;k<27u;k++){if(foTileOwnerH(t+ucOffset(k))){m|=1u<<k;}}
+  fcStore(FC_HMASK+8u*slot+lid,m);
+ }
+ workgroupBarrier();
+ if(lid==0u){sNear=atomicLoad(&wNear);}
+ let near=workgroupUniformLoad(&sNear)!=0u;
+ for(var r=0u;r<2u;r++){
+  let l=lid+256u*r;let c=o+nbLocalCoord(l);
+  fcStoreF(FC_PHIU+512u*slot+l,fgPhi(c));
+  if(!near){continue;}
+  for(var a=0u;a<3u;a++){fcStoreF(FC_UNIT+512u*(3u*slot+a)+l,fsTapH(c,a,true));}
+ }
+}`) : undefined;
+
   // pDeposit (transferDeposit): a workgroup a brick, over its bin in the bank the rebin wrote. The faces its
   // records reach: along the axis cells o-1..o+9 (11), across o-1..o+8 (10).
   const pDeposit = k("pDeposit", [CFG, FB.set, FB.dir, FB.phiRO, FB.parts, FB.fdep], [FG_SLOT_WGSL, FG_PHI_WGSL, nbfParticleRecordWGSL, V_WGSL].join("\n") + /* wgsl */`
@@ -818,5 +861,5 @@ fn vGaugePage(slot:u32,lid:u32){
  }
 }`);
 
-  return { uAdvect, pDeposit, uViscous, uTransfer, uKick, uExtend, uExt4Seed, uExt4, vGauge, viscous };
+  return { uAdvect, pDeposit, uViscous, uTransfer, uKick, uExtend, uExt4Seed, uExt4, uCache, vGauge, viscous };
 }
