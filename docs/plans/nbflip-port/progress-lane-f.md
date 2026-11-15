@@ -1174,3 +1174,30 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
   - At step 7 the column top is 8.0k / 26.3k.
 - **So the old engine does not burst.** Ours reseeds liquid φ in particle-free cells at the falling column's top and at the front on the floor. There, in the old engine, either the particles still cover the φ < 0 cells, or φ is no longer liquid.
 - **Next step for the cause:** compare φ against the particle positions at the column top, steps 7-9, in both engines. Either φ lags the particles (lAdvect, lUnion), or the particles leave φ early (pMove, now lane E's).
+
+**The step-9 seed burst, attributed: the column top's h tiles, not φ and not the move (2026-11-16).** Each engine got one 9-10-step check run. Ours ran on HEAD 9f3f417e (tools/brick-dam-l.mts --layers --line), the old one from the main checkout (tools/d9-old-l.mts, tools/old-line.mts: the observer's own owner traversal). Both runs read the column interior (x and z in 8..63) after each step's fence.
+- **φ agrees to 0.1-0.15 cells.** The zero crossing on the centre line x = z = 32 is 4h-owned in both engines:
+
+| step | 7 | 8 | 9 |
+|---|---|---|---|
+| old | 108.19 | 105.38 | 102.25 |
+| ours | 108.33 | 105.50 | 102.35 |
+
+  - The face velocities there agree to 1e-3 (step 9, y 100: -1.2963 against -1.2960).
+  - So φ does not lag. lAdvect and lUnion are not the cause.
+- **The records move alike.** The top records are about 0.3 cells higher in ours from step 6 on (pTop at step 8: 104.41 against 104.12). They fall at the same rate: 3.03 against 2.98 cells at step 8, 3.33 against 3.37 at step 9. So pMove is not the cause.
+- **The h tiles at the column top differ.** Interior cells owned at h, by 4-cell layer:
+
+| step | layer y | old h cells | our h cells |
+|---|---|---|---|
+| 5 | 108, 112 | 320 | 320 |
+| 6 | 108, 112 | 640 | 832 |
+| 7 | 104, 108, 112 | 1984, 1984, 0 | 2048, 2048, 384 |
+| 8 | 100, 104, 108, 112 | 1664, 2560, 1664, 0 | 3136, 4288, 3904, 768 |
+| 9 | 100, 104, 108 | 3200, 3200, 0 | 7936, 7936, 3904 |
+
+  - By step 9 ours owns 2.5x the old engine's h cells at the top.
+  - A shallow site seeds only in an h owner's cell (nbfSeedSiteOk's fineOwner).
+  - The records' own depth at a given layer is 0.1-0.25 cells deeper in ours (y 100 at step 9: -0.94 against -0.69). That depth is read from the h field the extra h tiles carry. Deep sites then seed whatever their cover: step 9, y 100, deep seeds 1.45 against 0.04 per column.
+  - It feeds itself: a step's seeds are the next step's records at the top (y 100 at step 9: 1.60 records against 0.95).
+- **So the burst follows the census's h set at the column top.** That is lane E's residency and census. The tiers match at step 5 and part from step 6. The heat inputs (lHeatNow and FT_T, levelset-kernels) are lane F's and are not ruled out yet; the next check is a TRIG/heat census of the top tiles at steps 5-7, both engines.
