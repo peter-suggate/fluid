@@ -11,7 +11,7 @@
 | Lane D: baseline dam residency-audit failure (6 of 11 fenced 300-step runs stop at steps 178–247); dam gates stop at step 165 until it is fixed | done (2026-11-15): root cause a retire with no vertex handoff (stale skirt phi); retire handoff in uniform-page-initialise.ts, 15 of 15 dam runs complete, GATED_STEPS.dam 300; `nbflip-port/progress-lane-d.md` |
 | Phase 2: port lanes P1 (pressure: items 13, 3, 10, 8, 5) and P2 (move, submit, kernel shape: items 1, 2, 4+, 6, 7, 11, 9, 12) | **redirected** (2026-11-15): the user asked for NB-FLIP to be restructured toward seep-m1max's architecture, not tweaked item by item. P2's tweak list is stopped; P1 continues on a seep-structured multigrid. |
 | Lane X: structural redesign of NB-FLIP (`docs/plans/nbflip-structural-2026-11-15.md`) | done (2f29b9d1), approved (§7.1): a new brick engine in `lib/methods/narrow-band/` behind the NB-FLIP id; milestones M0–M6; target about 2.5–2.9x on all four scenes |
-| Structural lanes E (engine core), F (fluid kernels), P (pressure and bodies, continuing P1) | M0 in progress |
+| Structural lanes E (engine core), F (fluid kernels), P (pressure and bodies, continuing P1) | M0 done: ABI frozen (7bc7514e), pools from measured peaks (142ee18e), p1b explained as a wrong-scene run (7371f768, a22d512d), P1 item 13 (5532136b). M1 skeleton done (ac2fce26; 12/12 tests, hydrostatic within 1.9e-5 of Float64). M2 (the dam) in progress. |
 | Combined cross-scene round | todo |
 
 ## 1. Goal and contract
