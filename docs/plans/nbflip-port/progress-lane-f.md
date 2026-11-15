@@ -1341,3 +1341,96 @@ contraction, not verified). About a third of the samples take the slow path, so 
 **uTransfer knockout (tiered):** 4.48 ms as is; 4.20 without the C pages' body (vcTransferPage, about 0.3); 2.66
 staging and LIQ only (per-face loop skipped). Staging is about 2.4 ms of it (0.64 us an F brick), the per-face
 loop about 1.8. Next: step 3, the staging skeleton and an apron's price.
+
+## 2026-11-16: step 3, the staging skeleton and an apron's price (no-go, not landed)
+
+Frozen dam step 20, timing slot, `--time=6`, no 00000206. Tree tree-ap (45356bb8 plus the measurement aprons: an
+`fapron` buffer and fill kernels at the tail's end). Each staging item is the difference between cumulative
+uniform early returns (`if(cfg.w<9999u){return;}`); the F rows run with the C pages' body removed.
+
+**Tiered velocity skeleton (ms).**
+
+| kernel (full) | launch | window | φ ring | other staging | work | C pages' body |
+|---|---|---|---|---|---|---|
+| uAdvect 8.73 | 0.06 | 0.12 | 1.01 | - | classify 0.80, trace 6.50 | 0.24 |
+| uTransfer 4.57 | 0.08 | 0.08 | 1.02 | centre 0.27, heat 0.68, depth 0.18, LIQ 0.05 | faces 1.83 | 0.38 |
+| uViscous 1.82 | 0.07 | 0.05 | - | wTap 0.55 | faces 0.81 | 0.34 |
+| uExtend 4.18 | 0.08 | 0.22 | - | LIQ words, tiles 0.33; liquid bits 0.44; wV/wD 1.70 | sweeps 1.42 | - |
+
+**φ rings elsewhere (ring part of the kernel's time, ms).**
+
+| kernel | tiered | all-h |
+|---|---|---|
+| lTiles | 0.50 of 0.76 | 0.06 of 0.25 |
+| lClear | 0.44 of 1.10 | 0.06 of 0.71 |
+| lDistance (12^3) | 1.22 of 3.34 | 0.24 of 1.38 |
+| pLiquid | 0.49 of 0.69 | ~0 of 0.16 |
+| pDeposit | 0.33 of 1.37 | 0.06 of 0.93 |
+
+The attribution: the tiered staging floor is owner-resolved φ (foVertexPhi) inside heavy kernels, about 5 ms a step
+against 0.5 all-h, not memory traffic.
+
+**Aprons.** Velocity (3 axes) plus vertex φ: radius 1 16 KB a brick (78.6 MB at 4913 slots), radius 2 27.6 KB (136
+MB). The fill (one light launch over F_ALL) costs 0.86 / 1.33 ms tiered and 0.32 / 0.48 all-h; filled at the tail
+it serves the next step's samplers bitwise (uAdvect, lAdvect, pMove). Flat apron reads in place of the staging:
+uAdvect ring 1.19 -> 0.14, uTransfer ring plus depth 2.31 -> 1.29, uExtend -0.33.
+
+**Trace locality** ("in r": all three 2x2x2 blocks of the sample inside the apron).
+
+| sampler | now | r1 | r2 | r2 all-flat bound | samples | in r1 | in r2 |
+|---|---|---|---|---|---|---|---|
+| uAdvect tiered | 8.73 | 8.58 | 7.83 | 4.33 | 6.70M | 54.5% | 68.7% |
+| uAdvect all-h | 10.48 | 8.28 | 6.29 | 2.52 | 17.25M | 70.9% | 84.7% |
+| lAdvect tiered | 3.34 | 3.17 | 2.90 | 2.42 | 0.94M | 57.9% | 69.6% |
+| lAdvect all-h | 5.48 | 5.21 | 4.73 | 2.69 | 3.49M | 81.9% | 90.2% |
+| pMove tiered | 3.42 | 3.36 | 3.12 | 2.60 | 0.98M | 75.0% | 85.7% |
+| pMove all-h | 2.61 | 2.37 | 2.19 | 1.87 | 0.80M | 75.7% | 86.6% |
+
+r1 and r2 are bitwise (a sample whose blocks leave the apron takes the current path).
+
+**Ruling: not taken.** Tiered net about 2.5-3 ms (6.6 gross less three φ refills inside the level set and the tail
+fill) against a 136 MB buffer; all-h about 4.9. Kept for later: the all-h r2 trace sampler (uAdvect -4.2 ms,
+bitwise). Next: the resolved-φ pass (owner-resolved φ written into F slots' non-owned vertices), go/no-go.
+
+## 2026-11-16: resolved φ in the F slots (measurement: go, not landed)
+
+Tiered, a vertex an F slot holds but does not own (an incident tile is 4h) reads through its owner: foVertexPhi walks
+up to eight candidate tiles, then interpolates eight C vertices. Every ring and every fgPhi pays that again.
+Measurement tree tree-rp (45356bb8 plus the following):
+- **lResolve** writes each F slot's non-owned vertices with the window's owner-resolved fgPhi into the slot's own PHI
+  word (the 512 vertices a slot already stores). It runs 256 lanes a slot over F_ALL, light, as four placements: n0
+  at the move stage's start (after the set update: ownership and the transfer's C writes), n1 after lcCouple, n2
+  after lcClear, n3 after lcPublish (before pSeed). Boot takes n1 after lInit (and n2 in the analysis).
+- **Reads:** fgPhiWord(PHI) and the ring's staging read a vertex an F slot holds as a plain load; any other vertex
+  (no F slot, or past the lattice) keeps the owner path.
+- **Freshness:** a non-owned vertex's value depends on C PHI and the tile ownership only.
+  - C PHI is written by lcCouple, lcClear and lcPublish (lcAdvect and lcRetire write PHI1), and each is followed by
+    a resolve.
+  - Ownership changes only at the set update, followed by n0.
+  - F kernels write PHI only through lSetPhi, which skips non-owned vertices. The set update's writes
+    (setTransferCells xWriteF, setInit, bootPhi) come before n0. setTransferCells writes every vertex it takes over
+    from its old layout, so it never consumes a stale non-owned F word.
+
+Frozen dam step 20, timing slot, quiet GPU (one process), no 00000206. Bitwise: 24 placements checked, 0 bad.
+"Global" is the plain load in every fgPhi read; "ring" is the plain load in ring staging only.
+
+| kernel | base | global | ring only | best saving |
+|---|---|---|---|---|
+| uCache | 1.17 | 0.87 | 1.22 | 0.31 |
+| pLiquid | 0.66 | 0.26 | 0.29 | 0.39 |
+| vGauge | 0.66 | 0.29 | 0.69 | 0.38 |
+| lAdvect | 3.25 | 3.07 | 3.08 | 0.18 |
+| lcAdvect, lUnion | 2.71 | 2.75 | 2.75 | 0 |
+| lTiles | 0.71 | 0.32 | 0.30 | 0.39 |
+| lClear | 1.12 | 0.68 | 0.66 | 0.45 |
+| lDistance | 3.38 | 1.54 | 2.30 | 1.84 |
+| uAdvect | 8.70 | 8.39 | 8.00 | 0.81 (ring only) |
+| pDeposit | 1.41 | 1.05 | 1.01 | 0.44 |
+| uTransfer | 4.48 | 2.99 | 3.73 | 1.48 |
+
+Passes: n0 0.55, n1 0.64, n2 0.54, n3 0.57 ms, 2.30 in all. Net: 6.67 - 2.30 = **4.4 ms a step** tiered (3.9 with
+the global read in uAdvect too). Each pass pays for its own consumers: n0 1.26 against 0.55, n1 0.84 against 0.64,
+n2 1.84 against 0.54, n3 2.73 against 0.57.
+
+Not verified bitwise: pMove and pSeed, whose outputs differ old against old (atomic ranks). An earlier run with a
+concurrent check-slot job agreed in kind but is not quoted. All-h is unchanged (no resolve, FG_TIERED false).
