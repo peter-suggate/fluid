@@ -398,21 +398,28 @@ fn pRedSums(lid:u32,n:u32)->vec2f{
 }
 `;
   const REDUCE512 = /* wgsl */`
-// Lane 0's sum or max of the workgroup's 512 values (other lanes get 0): 32 lanes fold 16 each, then lane 0 folds the
-// 32, two barriers where a halving tree takes ten. A next call writes wRed after this call's second barrier (the 32
-// lanes' reads before it) and wRed2 after its own first one (lane 0's read before it).
-var<workgroup> wRed:array<f32,512>;var<workgroup> wRed2:array<f32,32>;
+// Lane 0's sum of the workgroup's 512 values (other lanes get 0): 64 lanes fold 8 each, 8 lanes fold those 8 each,
+// then lane 0 folds the 8: a chain of 24 loads behind three barriers, where lane 0's fold of 32 behind 32 lanes' of 16
+// (48 loads) held the workgroup resident (a halving tree takes ten barriers). A next call writes wRed after this
+// call's second barrier (the 64 lanes' reads before it), wRed2 after its first and wRed3 after its second.
+var<workgroup> wRed:array<f32,512>;var<workgroup> wRed2:array<f32,64>;var<workgroup> wRed3:array<f32,8>;
 fn pSum512(lid:u32,v:f32)->f32{
   wRed[lid]=v;workgroupBarrier();
-  if(lid<32u){var s=0.0;for(var j=0u;j<16u;j++){s+=wRed[32u*j+lid];}wRed2[lid]=s;}
+  if(lid<64u){var s=0.0;for(var j=0u;j<8u;j++){s+=wRed[64u*j+lid];}wRed2[lid]=s;}
   workgroupBarrier();
-  var r=0.0;if(lid==0u){for(var j=0u;j<32u;j++){r+=wRed2[j];}}return r;
+  if(lid<8u){var s=0.0;for(var j=0u;j<8u;j++){s+=wRed2[8u*j+lid];}wRed3[lid]=s;}
+  workgroupBarrier();
+  var r=0.0;if(lid==0u){for(var j=0u;j<8u;j++){r+=wRed3[j];}}return r;
 }
+// Lane 0's max of the workgroup's 512 values, each >= 0 (other lanes get 0): a workgroup atomic max of the f32 bits
+// (order-preserving for non-negative floats, so the value is the fold's exactly), two barriers and no serial fold
+// (lane 0's fold of 32 behind 32 lanes' of 16 cost setupF 85 of its 455 us on the tiered dam, three calls a brick).
+var<workgroup> wMaxA:atomic<u32>;
 fn pMax512(lid:u32,v:f32)->f32{
-  wRed[lid]=v;workgroupBarrier();
-  if(lid<32u){var s=wRed[lid];for(var j=1u;j<16u;j++){s=max(s,wRed[32u*j+lid]);}wRed2[lid]=s;}
+  if(lid==0u){atomicStore(&wMaxA,0u);}workgroupBarrier();
+  if(v>0.0){atomicMax(&wMaxA,bitcast<u32>(v));}
   workgroupBarrier();
-  var r=0.0;if(lid==0u){r=wRed2[0];for(var j=1u;j<32u;j++){r=max(r,wRed2[j]);}}return r;
+  var r=0.0;if(lid==0u){r=bitcast<f32>(atomicLoad(&wMaxA));}return r;
 }
 `;
   const GATE = /* wgsl */`
