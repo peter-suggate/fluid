@@ -18,7 +18,7 @@ import { poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 /** The composite MGPCG: poolMGPCG with the native rows before its setup and the native projection after its finish. */
 export const compositeMGPCG = (options: MGPCGOptions = {}): PressureSolverFactory => (L): PressureSolver => {
-  const mg = poolMGPCG(L, { ...options, walls: options.walls ?? true }), K = pressureCompositeKernels(L);
+  const { publish, ...mg } = poolMGPCG(L, { ...options, walls: options.walls ?? true }), K = pressureCompositeKernels(L);
   const pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };
   return {
     ...mg,
@@ -26,7 +26,8 @@ export const compositeMGPCG = (options: MGPCGOptions = {}): PressureSolverFactor
     // The h tiles' held fit (root φ) once a step, before the operator's cold starts read it.
     before: [{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }],
     setup: [{ kernel: K.rowsC, dispatch: pages }, ...mg.setup],
-    finish: [...mg.finish, { kernel: K.projectC, dispatch: pages }],
+    // Then the region pressure change (pmgC PDELTA) from the final root values, for E's next region heat.
+    finish: [...mg.finish, { kernel: K.projectC, dispatch: pages }, ...publish],
   };
 };
 

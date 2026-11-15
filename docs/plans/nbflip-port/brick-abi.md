@@ -880,6 +880,23 @@ Each placement is either direct (a fixed workgroup count) or indirect from an `a
   lagged.
 - A solver failure (for example `PIVOT`) latches `FAIL` through `nbFail`.
 
+**The region pressure change (`PDELTA`, 2026-11-15; lane P writes it, E's region heat reads it).** The old engine's
+per-region `pressureDelta` (`uniform-mixed-region-dynamics.ts` `publishPressure`) on the composite's root grid:
+- **Word:** `pmgC[mgLayout(L).PDELTA + 8 cs + r]` (P's buffer `pmgC`, `array<f32>`; `mgLayout` is exported from
+  `pressure-mgpcg.ts`), f32, a C slot's 8 regions, r = (x >> 2) | ((y >> 2) << 1) | ((z >> 2) << 2) of the tile's C
+  local (an octant of the page, the old 16h region).
+- **Units:** Δ(p/ρ) in m²/s² (P's X is p dt/ρ, and P never sees ρ), so the heat's factor is dt²/h², the old
+  dt²/(ρh²) with ρ cancelled.
+- **Value:** a tile's root value v = X/dt with that step's dt (pres C X after `pmgProjectC`: a native row's X, an h
+  tile's mean of its liquid h rows' X, 0 off the liquid), its change dv since the last publish; per axis the larger over
+  the two stored neighbour tiles n (a live C slot's tile inside the lattice) of |dv − dv(n)| · 0.25 (the 4h root
+  spacing), summed over the axes; the region takes the max over its tiles.
+- **Unknown (+Inf, 0x7f800000):** a tile or neighbour without history (no publish at the step before at that C slot
+  for that page: the first publish, a skipped step, a reassigned slot), and a region with no tile in the lattice.
+- **When:** `pmgPressureDelta`, one workgroup a page of `C_ALL`, last in P's `finish` (after `pmgProjectC`), so the
+  next step's part-1 head reads it. Its history is double-buffered by step parity (pmgC `PH`, a tile's v; pmgTop `PHW`,
+  the page key and step + 1 a slot), so one pass reads the previous half and writes its own.
+
 **The bring-up solver (M1 testing only).** `brick-bringup-cg.ts` is a Jacobi-preconditioned CG,
 one iteration per slot, written against this contract, so that M1's tests have a solve:
 - It is labelled as such in its code and in `progress-lane-e.md`.

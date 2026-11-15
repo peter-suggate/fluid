@@ -147,6 +147,8 @@ export function mgTopLayout(C: number, F: number) {
     KEY6: take(r6), PAR6: take(r6), NBR6: take(6 * r6), C6: take(6 * r6), D6: take(r6), B6: take(r6), E6: take(r6), F6: take(r6), P6: take(r6), R6: take(r6), CH6: take(8 * r6),
     KEY7: take(r7), CH7: take(8 * r7), B7: take(r7), E7: take(r7), INV: take(r7 * r7),
     RBN: take(1), RB: take(F), RBF: take(F), SBN: take(1), SB: take(4 * F),
+    /** pmgPressureDelta's history, a C slot each step parity: the page key and step + 1 of its last publish. */
+    PHW: take(4 * C),
   };
   return { ...t, words: at };
 }
@@ -156,7 +158,10 @@ export function mgLayout(L: BrickLayout) {
   const F = L.cap.f, C = L.cap.c;
   const W0 = 0, W1 = BRICK_STRIDE * F, L1 = 2 * BRICK_STRIDE * F;
   const L2 = 0, L3 = L2 + CH.NC * 512 * C, L4 = L3 + CH.N * 64 * C, L5 = L4 + CH.N * 8 * C;
-  return { W0, W1, L1, fWords: L1 + CH.N * 64 * F, L2, L3, L4, L5, cWords: L5 + CH.N * C, top: mgTopLayout(C, F) };
+  // PDELTA (lane E's region heat reads it; brick-abi.md "PDELTA"): 8 words a C slot, the f32 region pressure change of
+  // pmgPressureDelta, Delta(p / rho) in m^2/s^2, +Inf unknown. PH: its history, a tile's p / rho a C slot each step parity.
+  const PDELTA = L5 + CH.N * C, PH = PDELTA + 8 * C;
+  return { W0, W1, L1, fWords: L1 + CH.N * 64 * F, L2, L3, L4, L5, PDELTA, PH, cWords: PH + 2 * 512 * C, top: mgTopLayout(C, F) };
 }
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -199,7 +204,7 @@ export interface MGPCGOptions {
   readonly audit?: boolean;
 }
 
-export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver {
+export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver & { readonly publish: readonly BrickPlacement[] } {
   const slots = options.slots ?? 8, tol = options.tolerance ?? MG_TOLERANCE;
   const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, nativeSweeps = options.nativeSweeps ?? 2, walls = options.walls ?? false;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
@@ -1449,6 +1454,60 @@ var<workgroup> wAlpha:f32;
   const gC = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.C }, z });
   const gFC = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.FC }, z });
   const gS = (kernel: BrickKernel, z: number): BrickPlacement => ({ kernel, dispatch: { indirect: MG_GATE.S }, z });
+  // ---- the region pressure change (lane E's region heat, brick-abi.md "PDELTA") ----------------------------------
+  // The old engine's per-region pressureDelta (uniform-mixed-region-dynamics.ts publishPressure), on the composite's
+  // root grid: a tile's value v = X / dt = p / rho (pres C X after pmgProjectC: a native row's X, an h tile's mean of its
+  // liquid h rows' X, 0 off the liquid) and its change since the last publish dv; per axis the larger over the two
+  // stored neighbours n of |dv - dv(n)| / 4 (the 4h root spacing), summed over the axes; a region (an octant of the
+  // page, r = (x >> 2) | ((y >> 2) << 1) | ((z >> 2) << 2) of the tile's C local) takes the max over its tiles, as f32
+  // bits (non-negative floats order as u32). A tile without history (no publish the step before at this C slot for this
+  // page, its own or a neighbour's) makes its region +Inf: unknown fails hot. A region with no tile in the lattice is
+  // +Inf (not stored). The history is double-buffered by step parity (pmgC PH: v a tile; pmgTop PHW: the page key and step + 1 a slot), so
+  // the pass reads the previous step's half while it writes its own; one workgroup a page writes its 8 words.
+  const pressureDelta = kernel("pmgPressureDelta", [CFG, setRW, dirRO, presRW, cRW, topRW], ["pres", "cstage"], /* wgsl */`
+const P_PDELTA:u32=${u(M.PDELTA)};const P_PH:u32=${u(M.PH)};
+var<workgroup> wReg:array<atomic<u32>,8>;var<workgroup> wIn:array<atomic<u32>,8>;
+fn pHistV(par:u32,cs:u32,i:u32)->u32{return P_PH+(par*NB_CCAP+cs)*512u+i;}
+fn pHistW(par:u32,cs:u32,k:u32)->u32{return T_PHW+(par*NB_CCAP+cs)*2u+k;}
+fn pKnown(par:u32,cs:u32,step:u32)->bool{
+  return pmgTop[pHistW(par,cs,0u)]==nbCRec(cs,NB_REC_KEY)&&pmgTop[pHistW(par,cs,1u)]==step;
+}
+@compute @workgroup_size(512) fn pmgPressureDelta(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("all")}
+  if(lid<8u){atomicStore(&wReg[lid],0u);atomicStore(&wIn[lid],0u);}
+  workgroupBarrier();
+  let step=nbRing(cfg.x,NB_RING_STEP);let dt=nbRingF(cfg.x,NB_RING_DT);
+  let par=step&1u;let prev=1u-par;
+  let lc=nbLocalCoord(lid);let T=8*p+lc;let r=u32((lc.x>>2u)|((lc.y>>2u)<<1u)|((lc.z>>2u)<<2u));
+  let v=pres[NB_PRES_C_X+NB_STRIDE*cs+lid]/dt;
+  if(pTileIn(T)){
+    atomicStore(&wIn[r],1u);
+    // A slot's history is its page's from the step before: the publish writes step + 1 (0 never published).
+    var known=pKnown(prev,cs,step);
+    let dv=v-pmgC[pHistV(prev,cs,lid)];
+    var delta=0.0;
+    for(var a=0u;a<3u;a++){
+      var edge=0.0;
+      for(var sd=0u;sd<2u;sd++){
+        var n=T;if(sd==0u){n[a]-=1;}else{n[a]+=1;}
+        if(!pTileIn(n)){continue;}
+        let ns=qPage(p,n,3u);if(ns==NB_NONE){continue;}
+        let ni=nbLocal(n);
+        known=known&&pKnown(prev,ns,step);
+        let dn=pres[NB_PRES_C_X+NB_STRIDE*ns+ni]/dt-pmgC[pHistV(prev,ns,ni)];
+        edge=max(edge,abs(dv-dn)*0.25);
+      }
+      delta+=edge;
+    }
+    let bits=select(0x7f800000u,bitcast<u32>(delta),known&&delta<=3.4e38);
+    atomicMax(&wReg[r],bits);
+  }
+  workgroupBarrier();
+  // Every reader of this step's half reads the previous step's, so the writes below race with none of them.
+  pmgC[pHistV(par,cs,lid)]=v;
+  if(lid<8u){pmgC[P_PDELTA+8u*cs+lid]=bitcast<f32>(select(0x7f800000u,atomicLoad(&wReg[lid]),atomicLoad(&wIn[lid])!=0u));}
+  if(lid==0u){pmgTop[pHistW(par,cs,0u)]=nbCRec(cs,NB_REC_KEY);pmgTop[pHistW(par,cs,1u)]=step+1u;}
+}`);
+
   return {
     label: "pool MGPCG (lane P)",
     bringUp: false,
@@ -1470,6 +1529,8 @@ var<workgroup> wAlpha:f32;
     ],
     finish: [...(audit && walls ? [{ kernel: wallsFKernel(true), dispatch: list(LIST.F_ALL) }, { kernel: wallsCKernel(true), dispatch: list(LIST.C_ALL) }] : []),
       { kernel: finish, dispatch: list(LIST.F_ALL) }, { kernel: finishC, dispatch: list(LIST.C_ALL) }],
+    // After the composite's native projection (pmgProjectC writes an h tile's C X): compositeMGPCG places it.
+    publish: [{ kernel: pressureDelta, dispatch: list(LIST.C_ALL) }],
     buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 128 },
     receipt: { iterations: MG_HEADER.ITERATIONS, capped: MG_HEADER.CAPPED },
   };

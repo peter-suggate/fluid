@@ -8,15 +8,17 @@
 // - the projection (projectC, then projectF, the engine's project) leaves on every liquid row, h and native,
 //   the divergence the row's residual says (-h sum sign V U + h^2 rate = r, and 16x on a 4h row with its seam
 //   faces' 16 h patches), writes the WARM bit and the h tiles' C X mean.
+// - the region pressure change (pmgPressureDelta, pmgC PDELTA): +Inf without history (the first publish, a skipped
+//   step), else each region's max over its tiles of the old publishPressure's sum over axes of max |dv - dv(n)| / 4.
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, H, LIST, STATE } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, H, LIST, RING, STATE } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
 import { add, coarseTile, compositeFixture, COMPOSITE_N, keyCoord, scale, type V3 } from "./parity/composite-fixture";
 import { CompositePressureModel, type CompositeRows } from "./pressure-composite-model";
 import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
-import { MG_HEADER, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
+import { MG_HEADER, mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const asF32 = (u: Uint32Array) => new Float32Array(u.buffer, u.byteOffset, u.length);
@@ -298,6 +300,64 @@ for (const [slots, exact] of [[40, true], [3, true], [40, false]] as const) test
       assert.ok(tally.wrong + tallyN.wrong < buildWrong, `one re-decision leaves fewer inconsistent faces (${tally.wrong + tallyN.wrong}) than the build alone (${buildWrong})`);
       build.e.destroy();
     }
+    e.destroy();
+  });
+});
+
+// The old engine's publishPressure (uniform-mixed-region-dynamics.ts) on the composite's root values, in Float64 from the
+// GPU's f32 inputs: two publishes a step apart with the root values changed between them, then one after a skipped step.
+test("composite pressure delta (GPU): each region's change as the old publishPressure's, +Inf without history", GPU, async t => {
+  await withDevice("composite pressure delta", async device => {
+    const { e, fx } = await solveComposite(device, { slots: 40, tolerance: 1e-3, walls: true }, false);
+    const L = e.layout, M = mgLayout(L), NT = COMPOSITE_N / 4, INF = 0x7f800000;
+    const publish = poolMGPCG(L, {}).publish;
+    const dt = new Float32Array((await e.read("set", L.set.ring + RING.DT, 1)).buffer)[0]!;
+    const xAt = L.base("pres", "C", "X");
+    const X0 = new Float32Array((await e.read("pres", xAt, L.cap.c * BRICK_STRIDE)).buffer);
+    const at = async (step: number) => { e.write("set", L.set.ring + RING.STEP, new Uint32Array([step])); await e.run(publish); return e.read("pmgC", M.PDELTA, 8 * L.cap.c); };
+    const pageOf = (cs: number) => keyCoord(fx.dir[L.dir.crec + 32 * cs + 29]!);
+    const inLattice = (T: V3) => T.every(v => v >= 0 && v < NT);
+    const regions = (cs: number) => { const o = new Set<number>(); const P = pageOf(cs); for (let i = 0; i < 512; i++) { const T = add(scale(8, P), [i & 7, (i >> 3) & 7, i >> 6]); if (inLattice(T)) o.add(((i & 7) >> 2) | ((((i >> 3) & 7) >> 2) << 1) | (((i >> 6) >> 2) << 2)); } return o; };
+    const first = await at(5);
+    for (const cs of fx.pages) for (let r = 0; r < 8; r++) assert.equal(first[8 * cs + r], INF, `no history: page ${cs} region ${r} +Inf`);
+    // A change of the root values that varies across tiles (so the gradient of the change is not zero).
+    const X1 = Float32Array.from(X0, (x, j) => x + 1e-3 * Math.sin(0.37 * j) * (1 + Math.abs(x)));
+    e.write("pres", xAt, X1);
+    const second = new Float32Array((await at(6)).buffer);
+    const unit = (a: number): V3 => [a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0];
+    const f = (v: number) => Math.fround(v);
+    const dv = (cs: number, i: number) => f(f(X1[BRICK_STRIDE * cs + i]! / dt) - f(X0[BRICK_STRIDE * cs + i]! / dt));
+    let checked = 0, worst = 0, nonzero = 0;
+    for (const cs of fx.pages) {
+      const P = pageOf(cs), want = new Float64Array(8);
+      for (let i = 0; i < 512; i++) {
+        const T = add(scale(8, P), [i & 7, (i >> 3) & 7, i >> 6]); if (!inLattice(T)) continue;
+        const r = ((i & 7) >> 2) | ((((i >> 3) & 7) >> 2) << 1) | (((i >> 6) >> 2) << 2);
+        let delta = 0;
+        for (let a = 0; a < 3; a++) {
+          let edge = 0;
+          for (const sd of [-1, 1]) {
+            const n = add(T, scale(sd, unit(a))); if (!inLattice(n)) continue;
+            const ns = fx.pageSlot([n[0] >> 3, n[1] >> 3, n[2] >> 3] as V3); if (ns === 0xffffffff) continue;
+            edge = Math.max(edge, Math.abs(dv(cs, i) - dv(ns, (n[0] & 7) | ((n[1] & 7) << 3) | ((n[2] & 7) << 6))) * 0.25);
+          }
+          delta += edge;
+        }
+        want[r] = Math.max(want[r]!, delta);
+      }
+      const stored = regions(cs);
+      for (let r = 0; r < 8; r++) {
+        const got = second[8 * cs + r]!;
+        if (!stored.has(r)) { assert.equal(got, Infinity, `page ${cs} region ${r} outside the lattice: +Inf`); continue; }
+        const err = Math.abs(got - want[r]!) / Math.max(want[r]!, 1e-30);
+        worst = Math.max(worst, err); checked++; if (want[r]! > 0) nonzero++;
+        assert.ok(err < 1e-4, `page ${cs} region ${r}: ${got} against ${want[r]}`);
+      }
+    }
+    t.diagnostic(`regions ${checked} (${nonzero} nonzero), worst relative error ${worst.toExponential(2)}, dt ${dt}`);
+    assert.ok(nonzero > 0, "the changed root values give nonzero regions");
+    const skipped = await at(8);
+    for (const cs of fx.pages) for (const r of regions(cs)) assert.equal(skipped[8 * cs + r], INF, `a skipped step: page ${cs} region ${r} +Inf`);
     e.destroy();
   });
 });
