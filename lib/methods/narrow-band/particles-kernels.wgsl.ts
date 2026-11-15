@@ -6,6 +6,7 @@
  * Banks: at step n with parity q = cfg.y, the move reads bank src = q ^ cfg.z and the rebin writes dst = src ^ 1.
  * cfg.z is 1 only in the boot's rebin, which files the boot's seeds (bank 1) into bank 0.
  *
+ * - pLiquid: a workgroup an F_ALL brick: the liquid cells of the opening φ (P_LIQUID), which pMove's pSupported reads.
  * - pMove: a lane a record of bank src. The cell-mass cut and the merge (pre-move runs), G2P (FLIP 0.95), heat,
  *   Heun's third-order trace through the extended field (US), separation and the surface shift (pre-move q and
  *   neighbours), the box clamp, the split verdict. Writes the moved record to fmoved, counts its destination
@@ -31,7 +32,7 @@
 import { ARGS, type BrickLayout } from "./brick-abi";
 import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
 import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
@@ -72,15 +73,6 @@ fn pH()->vec3f{return vec3f(nbRingF(cfg.x,NB_RING_H));}
 fn pGravity()->vec3f{return vec3f(nbRingF(cfg.x,NB_RING_GRAVITY),nbRingF(cfg.x,NB_RING_GRAVITY+1u),nbRingF(cfg.x,NB_RING_GRAVITY+2u));}
 // The goal heat T of the tile holding q (nbMoveHeat; activitySpread's T).
 fn pHeat(q:vec3f)->f32{return fgTileHeat(vec3i(floor(q)));}
-// gridSupported: one of the 8 cells about floor(q - 0.5) with trilinear weight over 1e-6 is liquid.
-fn pSupported(q:vec3f)->bool{
- let g=q-0.5;let base=vec3i(floor(g));let f=g-vec3f(base);
- for(var k=0u;k<8u;k++){
-  let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(vec3f(1.0)-f,f,bit!=vec3u(0));
-  if(w.x*w.y*w.z>1e-6&&fgLiquidCell(base+vec3i(bit))){return true;}
- }
- return false;
-}
 // A point inside the box whose brick a slot holds (umPointPresent).
 fn pPresent(q:vec3f)->bool{
  if(any(q<vec3f(0.0))||any(q>vec3f(NB_LATTICE))){return false;}
@@ -92,10 +84,51 @@ export function particleKernels(L: BrickLayout, F: FluidLayout) {
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
 
+  // pLiquid: a workgroup an F_ALL brick: fgLiquidCell of its 512 cells from the opening φ (the vertex ring of
+  // o..o+8 through the window's owners), into P_LIQUID. pMove's pSupported reads the bits: the same predicate on the
+  // same φ, once a cell instead of eight corners through the owners each of the eight cells a record reads
+  // (tiered dam, frozen step 20: pMove 5.87 -> 4.56 ms with the bits read in place, every moved record bitwise equal).
+  const pLiquid = k("pLiquid", [CFG, FB.set, FB.dir, FB.phiRO], [FG_SLOT_WINDOW_WGSL, FG_PHI_WGSL, FG_RING_WGSL(9)].join("\n") + /* wgsl */`
+var<workgroup> sSlot:u32;
+var<workgroup> wLiquid:array<atomic<u32>,16>;
+@compute @workgroup_size(128) fn pLiquid(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);
+ if(lid==0u){sSlot=select(NB_NONE,nbListSlot(NB_LIST_F_ALL,g),g<nbListCount(NB_LIST_F_ALL));}
+ let slot=workgroupUniformLoad(&sSlot);if(slot==NB_NONE){return;}
+ let o=nbFOrigin(slot);
+ fgWindowStage(o>>vec3u(3u),lid,128u);
+ workgroupBarrier();
+ fgRingStage(o,lid,128u);
+ workgroupBarrier();
+ var bits=0u;
+ for(var k=0u;k<4u;k++){let l=4u*lid+k;if(fgLiquidCell(o+nbLocalCoord(l))){bits|=1u<<(l&31u);}}
+ if(bits!=0u){atomicOr(&wLiquid[lid>>3u],bits);}
+ workgroupBarrier();
+ if(lid<16u){atomicStore(&nbSet[NB_S_P_LIQUID+16u*slot+lid],atomicLoad(&wLiquid[lid]));}
+}`);
+
   // pMove reads the directory: an owner window per 128 records (staged about the first record's brick) measured
   // slower on the dam's frozen state (tiered 7.39 against 6.68 ms), the records of a workgroup reading too few
-  // lookups to repay 243 staged entries.
+  // lookups to repay 243 staged entries. A workgroup a bin item (up to 256 records of one bin) staging its brick's
+  // ring (window, liquid cells, depth vertices, UNIT taps) measured slower too (8.77 against 5.93 ms): the staging
+  // cost 1.96 ms and the items' partial workgroups 1.3 ms, against 2.0 ms of record time saved (lane E, 2026-11-16).
   const pMove = k("pMove", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.partsRO, FB.fcell, FB.fpart, FB.fmoved], [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
+// A liquid cell of the opening φ: pLiquid's bit (fgLiquidCell of the same φ) where an F slot holds the cell, else
+// fgLiquidCell through the owners. Valid in the move only (pLiquid runs before it; the level set rewrites φ).
+fn pLiquidCell(c:vec3i)->bool{
+ if(!nbInLattice(c)){return false;}
+ let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
+ let l=nbLocal(c);return ((atomicLoad(&nbSet[NB_S_P_LIQUID+16u*s+(l>>5u)])>>(l&31u))&1u)!=0u;
+}
+// gridSupported: one of the 8 cells about floor(q - 0.5) with trilinear weight over 1e-6 is liquid.
+fn pSupported(q:vec3f)->bool{
+ let g=q-0.5;let base=vec3i(floor(g));let f=g-vec3f(base);
+ for(var k=0u;k<8u;k++){
+  let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let w=select(vec3f(1.0)-f,f,bit!=vec3u(0));
+  if(w.x*w.y*w.z>1e-6&&pLiquidCell(base+vec3i(bit))){return true;}
+ }
+ return false;
+}
 fn pMergeRun(src:u32,record:Particle,low:u32,high:u32,stride:u32)->Particle{
  var s=nbfMergeStart(record);for(var j=low;j<high;j+=stride){s=nbfMergeAdd(s,parts[pAt(src,j)]);}return nbfMergeFinish(record,s);
 }
@@ -457,5 +490,5 @@ fn pJoinTile(t:vec3i){
  args[${P_ARGS_RECORDS}u]=min(g,NB_FOLD);args[${P_ARGS_RECORDS + 1}u]=max((g+NB_FOLD-1u)/NB_FOLD,1u);args[${P_ARGS_RECORDS + 2}u]=1u;
 }`);
 
-  return { pMove, pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
+  return { pLiquid, pMove, pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
 }

@@ -7,7 +7,7 @@
  * (no migration before the gates: the stage set runs from the gate runners only).
  *
  * Schedule:
- * - part 1, move: pMove (a record a lane); rebin: pScan, pScatter, pTiles.
+ * - part 1, move: pLiquid (the liquid cells of the opening φ, pSupported's), pMove (a record a lane); rebin: pScan, pScatter, pTiles.
  * - part 2, levelSet: vGauge (the volume control's gauge of the opening φ), lInit, lAdvect, lSplat, lUnion, lTiles, the round-1 dilation (air seed, occupancy; tiered, lDilateC then lDilate's three passes), lClear
  *   (clearAir with the crossing cells), the round-2 dilation (crossings, activity), lNear (x, y, z), lDistance,
  *   lPublish, then pSeed (the seeds of this step, after the bins, outside every run).
@@ -72,7 +72,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const analysis = [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...dilate(2), ...near, at(l.lDistance, all)];
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
-    move: [...cache, at(p.pMove, records)],
+    move: [...cache, at(p.pLiquid, all), at(p.pMove, records)],
     rebin: rebin(0),
     levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"),
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), at(p.pSeed, all)],

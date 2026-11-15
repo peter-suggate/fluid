@@ -17,7 +17,7 @@ test("brick ABI: the window is a power of two an axis covering the lattice's pag
 
 test("brick ABI: set and dir regions are disjoint, 64-word aligned, in order", () => {
   const L = dam(), s = L.set;
-  const starts = [s.ring, s.freeF, s.freeC, s.freeB, s.freeK, s.markF, s.markC, s.cand, s.boundF, s.boundC, s.binStart, s.binCount, s.binCursor, ...s.lists];
+  const starts = [s.ring, s.freeF, s.freeC, s.freeB, s.freeK, s.markF, s.markC, s.cand, s.boundF, s.boundC, s.binStart, s.binCount, s.binCursor, s.pLiquid, ...s.lists];
   for (const at of starts) assert.equal(at % 64, 0);
   for (let i = 1; i < starts.length; i++) assert.ok(starts[i]! > starts[i - 1]!, `region ${i} after ${i - 1}`);
   assert.equal(s.ring, 256);

@@ -753,6 +753,7 @@ kernel uses this rule, even when `y` is 1.
 | `BIN_START` | `FCAP` | first record of the F slot's bin in the bank `pScatter` wrote |
 | `BIN_COUNT` | `FCAP` | its records |
 | `BIN_CURSOR` | `FCAP` | `pScatter`'s per-bin append cursor (scratch) |
+| `P_LIQUID` | `16 FCAP` | the move's liquid cells: `pLiquid`'s `fgLiquidCell` of the opening φ, bit `l` of word `l >> 5` cell `l` of the slot's brick; read by `pMove`'s `pSupported` (step-local) |
 
 **Banks.** `parts` holds two banks of `PCAP` records at NB-FLIP's stride: 12 floats (FLIP) or 28
 (APIC), the `Particle` struct of `narrowBandParticleWGSL`, unchanged. At step `n` with parity

@@ -202,6 +202,8 @@ export class BrickLayout {
     readonly ring: number; readonly freeF: number; readonly freeC: number; readonly freeB: number; readonly freeK: number;
     readonly markF: number; readonly markC: number; readonly cand: number; readonly boundF: number; readonly boundC: number;
     readonly binStart: number; readonly binCount: number; readonly binCursor: number;
+    /** The move's liquid cells (pLiquid, 16 words an F slot, bit l cell l: fgLiquidCell of the opening φ). */
+    readonly pLiquid: number;
     /** Tiers (§2.5): the census's wanted h tiles (16 words a C slot), lane F's tile occupancy and the census's trigger bits (a word an F slot, bit j tile j). */
     readonly want: number; readonly tileOcc: number; readonly trig: number;
     /** setTransfer's listed tiles: 2 words an entry (C slot << 9 | tile, flags), cap.t entries. */
@@ -248,6 +250,7 @@ export class BrickLayout {
     const freeF = take(f), freeC = take(c), freeB = take(Math.max(b, 1)), freeK = take(Math.max(k, 1));
     const markF = take(f), markC = take(c), cand = take(f), boundF = take(f), boundC = take(c);
     const binStart = take(f), binCount = take(f), binCursor = take(f);
+    const pLiquid = take(16 * f);
     const want = take(CMASK_WORDS * c), tileOcc = take(f), trig = take(f), tlist = take(2 * t);
     const listCap: number[] = [], lists: number[] = [];
     for (let j = 0; j < LIST_SLOTS; j++) {
@@ -259,7 +262,7 @@ export class BrickLayout {
     const psupport = take(PSUPPORT_WORDS * f);
     const candMask = take(CAND_MASK_WORDS * c);
     const act = take(f);
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, act, words: at };
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, pLiquid, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, candMask, act, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -340,7 +343,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_RING_BASE", s.ring); c("NB_RING_WORDS", RING_WORDS);
   c("NB_S_FREE_F", s.freeF); c("NB_S_FREE_C", s.freeC); c("NB_S_FREE_B", s.freeB); c("NB_S_FREE_K", s.freeK);
   c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);
-  c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
+  c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor); c("NB_S_P_LIQUID", s.pLiquid);
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);
   c("NB_S_PSUPPORT", s.psupport); c("NB_S_CAND_MASK", s.candMask); c("NB_CAND_MASK_WORDS", CAND_MASK_WORDS); c("NB_PSUPPORT_WORDS", PSUPPORT_WORDS); c("NB_KEY_CLAIMED", KEY_CLAIMED);

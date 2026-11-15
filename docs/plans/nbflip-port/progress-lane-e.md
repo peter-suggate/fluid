@@ -1474,3 +1474,57 @@ saved7 counts the live bricks only that change would drop: not owner, not ring, 
 | narrow 45 | 4581 | 11932 / 1688 | 0 |
 
 **Not built.** The bar was 15% of live bricks; the saving is under 1%. The census makes the spray h-owned, so 89% of the wide owner tiles at step 45 are within a tile of an h-owned tile, and the 9 applies to them. The wide residency is the h-owned spray's own 9-cell shell (owner 21%, ring 28%, the margin boxes the rest; moveOnly 819, 6%). The lever there is the spray's tier, the census's WANT, not the residency's margins.
+
+## 2026-11-16: the move, pSupported's liquid cells once a brick (pLiquid)
+
+The move area was 8.24 ms against §6's 1.5 at 327d4280 (tiered dam, steps 18–23; `fluid-scratch/lane-e/move/tm/head-p{1,2}`).
+pMove alone was 5.56 of that. Every figure below is from the timing slot. The frozen numbers come from
+`move/tools/frozen.mts` on the tiered dam, frozen at step 20. Logs are in `move/logs/`.
+
+**Attribution of the old pMove** (frozen; knockouts, each one removed alone; `attr1`/`attr2`, `probe-sep*`):
+- separation 2.1 ms. Of that, the candidate loads are 0.27 (`noCand`: every candidate reads record i). The 8 runs' fgRun lookups are about 0.2. The rest is the loop and its arithmetic, about 53 candidates per coupled record.
+- trace samples 1.3 and the G2P sample 0.45. 97% of samples take the fine interpolant.
+- pSupported 0.6 as a knockout. Read from precomputed bits it saves 1.3 (below).
+- surface shift 0.77, split block 0.36, depth at q 0.25, merge 0.1, heat about 0. The floor, with everything removed, is 0.63.
+- The register cap is 512 threads. Removing the separation and the shift leaves it at 512, and removing the trace lifts it only to 576 (`msl-split/`). Splitting the move by register budget therefore buys no occupancy here.
+
+**Tried and not landed** (the patch is in `move/patches/items-staged.patch`):
+- **Bin items.** pScan lists items of up to 256 records of one bin in BIN_ITEMS. pMove takes one workgroup per item, and pMoveTail moves the seeds past the bins. P_SEEDS/P_SEEN check that every binned record is seen.
+  - Bitwise equal to the old chain (`chain-dev1`).
+  - Slower: pMove 7.35 against 6.02 ms. Records average 184 per 256-record item, so lanes run at 72% fill.
+- **Items plus staging of the brick's ring.** The ring staged was the window, the liquid cells of o-1..o+8, the depth vertices o-1..o+9 and the UNIT taps o-1..o+8.
+  - pMove 8.77 against 5.93 ms. Staging alone costs 1.96 ms (`chain-dev2s`).
+  - Record time saved: liquid 1.43, depth 0.56, UNIT about 0, window 0.1.
+  - It differs from the old chain by one ulp in the depth word, on about a third of records (`chain-dev2n`). The cause is fgDepth's sum being contracted differently by the compiler, not the staged values (the cause was not confirmed by a check).
+  - At about one particle per cell, a 10^3 box restaged for every item does not pay for itself.
+- **Separation loop restructures.** Row-merged runs (S2l), one flattened loop, and both together.
+  - All are bitwise equal (fmoved), and all are slower: 6.07, 6.53 and 6.04 against 5.87 ms (`sep-{a,b,c}`).
+
+**Landed: pLiquid.**
+- One workgroup per F_ALL brick, placed before pMove. It computes fgLiquidCell of the opening φ for the brick's 512 cells, from a 9^3 vertex ring through the window, and stores them in P_LIQUID (16 words an F slot).
+- pSupported reads the bit where a slot holds the cell and fgLiquidCell elsewhere. The bits are valid only within the step's move.
+- **Frozen chain** (uCache, pLiquid, pMove, pScan, pScatter, pTiles against HEAD's; `chain-dev4`):
+  - Bitwise equal: set, fcell, and the bank dst per-cell multiset (85,470 cells, 473,903 records). The old-vs-old control is also the same.
+  - pMove 5.94 → 3.60 ms, pLiquid 0.70 ms; chain 6.45 → 5.87 ms.
+- **Gates** (check slot, dam-300, tiered composite, poolF 4913, judged against ref-2761350a; `move/gate/`):
+  - FAIL word 0 at every sample, for cand and head.
+  - D8 fails at head as well as cand, 1.17 and 1.22. This is the same pre-existing failure as the real-D entry.
+  - Every other gate passes on both:
+
+    | | D1 | D2 | D3 | D4 | D4c | D5c | D5ce | D5k | D5p | D5e | D6 | D7t | D7d | D8c | D8 |
+    |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+    | head | 0.55 | 0.06 | 0.55 | 0.05 | 0.00 | 0.17 | 0.05 | 0.15 | 0.04 | 0.03 | 0.56 | 0.32 | 0.13 | 0.39 | 1.17 F |
+    | cand | 0.55 | 0.06 | 0.38 | 0.06 | 0.00 | 0.17 | 0.05 | 0.23 | 0.06 | 0.06 | 0.56 | 0.32 | 0.13 | 0.34 | 1.22 F |
+
+  - Drift at step 300: head -1.01%, cand -0.99%.
+- **Timing slot** (`brick-dam-floor.mts --tiered --solver=composite --steps=24 --poolF=4913`, steps 18–23; two profiled runs and one unprofiled run per tree; `move/tm/`):
+
+  | | head p1 | head p2 | cand p1 | cand p2 |
+  |---|---|---|---|---|
+  | move area (pLiquid counted in it) | 8.24 | 8.24 | 7.79 | 7.78 |
+  | pMove / pLiquid | 5.56 / – | 5.57 / – | 4.39 / 0.69 | 4.46 / 0.70 |
+  | window kernel sum, mean | 66.1 | 65.7 | 65.3 | 64.9 |
+  | launches/step | 290 | 290 | 291 | 291 |
+
+  - Unprofiled fenced mean: head 66.8, cand 67.6. That is one run each, and the kernel sums do not show the difference.
+  - In the step, pMove gains 1.14 ms against 2.34 frozen. The net move-area gain is 0.45 ms. Most of what remains of pLiquid's 0.70 is bricks with no record within one brick, which pLiquid could skip; that is the next step.
