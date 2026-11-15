@@ -79,12 +79,15 @@ import { ARGS, BRICK_STRIDE, BrickLayout, LIST, brickAbiWGSL } from "./brick-abi
 import { CFG, type BrickBinding, type BrickKernel, type BrickPlacement, declareBindings } from "./brick-kernel";
 import type { PressureSolver } from "./brick-pressure-slot";
 import { OC } from "./pressure-model";
+import { P_FLAG, P_WALL_C } from "./pressure-composite.wgsl";
 
-export const MG_GATE = { F: ARGS.LANE_P, C: ARGS.LANE_P + 3, ONE: ARGS.LANE_P + 6 } as const;
+const P_WALL0 = P_FLAG.WALL0, WALL_F = P_WALL_C.F.toFixed(1), WALL_C = P_WALL_C.C.toFixed(1);
+
+export const MG_GATE = { F: ARGS.LANE_P, C: ARGS.LANE_P + 3, ONE: ARGS.LANE_P + 6, WF: ARGS.LANE_P + 9, WC: ARGS.LANE_P + 12 } as const;
 /** P's header words (set 128..191). */
 export const MG_HEADER = {
   OPEN: 128, RMAX: 129, RZ: 130, ALPHA: 131, ITERATIONS: 132, CAPPED: 133, RMAX0: 134, TOTAL: 135,
-  N5: 136, N6: 137, N7: 138, RLAST: 139,
+  N5: 136, N6: 137, N7: 138, RLAST: 139, FLIPS: 140, WALLS: 141, DECIDES: 142, RMAXW: 143,
 } as const;
 /** Levels of the hierarchy (L0..L7) and the compact top's row caps. */
 export const MG_LEVELS = 8;
@@ -125,6 +128,8 @@ const cRW: BrickBinding = { name: "pmgC", kind: "rw", type: "array<f32>" };
 const topRW: BrickBinding = { name: "pmgTop", kind: "rw", type: "array<u32>" };
 const redRW: BrickBinding = { name: "pmgRed", kind: "rw", type: "array<atomic<u32>>" };
 const argsRW: BrickBinding = { name: "args", kind: "rw", type: "array<u32>" };
+const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
+const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 
 export interface MGPCGOptions {
   /** Encoded slots (PCG iterations) at most a step; brick-abi.md §6.1 says 8. */
@@ -135,11 +140,17 @@ export interface MGPCGOptions {
   readonly fineSweeps?: number;
   /** Red-black sweeps inside a coarse block (pressure-model.ts coarseSweeps). */
   readonly coarseSweeps?: number;
+  /**
+   * The separating walls' outer loop (the composite rows' lattice walls, FLAGS bits 8-10): each converged solve
+   * re-decides every wall face from its iterate and restarts PCG when a state changes. Off for rows without the
+   * wall state (the pool tests' synthetic systems).
+   */
+  readonly walls?: boolean;
 }
 
 export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver {
   const slots = options.slots ?? 8, tol = options.tolerance ?? 1e-3;
-  const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2;
+  const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, walls = options.walls ?? false;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
   const tolBits = new Uint32Array(new Float32Array([tol]).buffer)[0]!;
   const M = mgLayout(L), T = M.top;
@@ -368,6 +379,7 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   if(lid==0u){
     atomicStore(&nbSet[PH_RMAX],0u);atomicStore(&nbSet[PH_ALPHA],0u);atomicStore(&nbSet[PH_RZ],0u);
     atomicStore(&nbSet[PH_ITERATIONS],0u);atomicStore(&nbSet[PH_OPEN],0u);
+    atomicStore(&nbSet[PH_FLIPS],0u);atomicStore(&nbSet[PH_WALLS],0u);atomicStore(&nbSet[PH_DECIDES],0u);atomicStore(&nbSet[PH_RMAXW],0u);
     atomicAnd(&nbSet[NB_H_STATE],~NB_STATE_PRESSURE_CAP);
   }
 }`);
@@ -1055,6 +1067,133 @@ var<workgroup> wAlpha:f32;
   if(pTileIn(T)&&!nbTileH(cs,lid)&&pP(NB_PRES_C_DIAG,cs,lid)>0.0){pres[NB_PRES_C_X+at]+=alpha*pres[NB_PRES_C_D+at];}
 }`);
 
+  // The separating walls' outer loop (Chentanez & Mueller 2012, "A multigrid fluid pressure solver handling
+  // separating solid boundary conditions"; the decision rule is the primal-dual active set of Hintermueller, Ito &
+  // Kunisch 2002, a semismooth Newton step on the wall's ghost max(x + lift, 0)). After a slot's update, when its
+  // max|r| is within tolerance, or at the last slot (a capped solve ends on its final iterate's state, as the old
+  // projection's max(x + lift, 0) at the final x), every lattice wall face of a liquid row is re-decided at the
+  // iterate x + alpha p:
+  // attached when x + lift >= 0, else separated. A face that changes state moves its coupling c between the RHS
+  // (c lift) and the diagonal (c), and its row's residual becomes r + dRHS - dDIAG (x + alpha p): the coupling is
+  // diagonal only, so no other row's residual moves. The state is FLAGS bit 8+a at the face's storage (the cell or
+  // tile itself on plane 0, the skirt cell or tile N/4 on plane N), which the rows' build set. pmgCheck then
+  // restarts PCG (beta 0) when any face changed and the new max|r| (PH_RMAXW) is above tolerance.
+  // Where the old engine differs: it takes max(x + lift, -base) at every residual and smoothing evaluation of the
+  // V-cycles and freezes the state at the Krylov start; here a solve's system is fixed until it converges (a
+  // Krylov method on a fixed SPD matrix), and the state changes only between converged solves. The coarse levels
+  // keep the setup's aggregates of the build's diagonal: the V-cycle stays symmetric positive definite (a symmetric
+  // smoother on the current L0 rows and any SPD coarse correction), so it is still a valid preconditioner.
+  // A changed brick's first V-cycle pass (W0, written by pmgUpdate from r) is recomputed from the new r and rows.
+  // A row's wall side along a (-1 plane 0, +1 plane N, 0 none) on n rows an axis; the tolerance (cfg.w, as pTolR).
+  const wallSign = /* wgsl */`fn pWallFace(c:vec3i,a:u32,n:i32)->i32{if(c[a]==0){return -1;}if(c[a]==n-1){return 1;}return 0;}
+fn pWallTol()->f32{let h=nbRingF(cfg.x,NB_RING_H);return bitcast<f32>(cfg.w)*h*h;}`;
+  const wallsF = kernel("pmgWallsF", [...FB, redRW, phiRW, velRO], ["pres", "stage", "reduce", "tile", "red"], wallSign + /* wgsl */`
+var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u32>;
+@compute @workgroup_size(512) fn pmgWallsF(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  if(lid==0u){wCount=nbListCount(NB_LIST_F_LIQ);}
+  let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
+  let slot=nbListSlot(NB_LIST_F_LIQ,g);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+  if(lid==0u){
+    let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_LATTICE);
+    wGo=select(0u,1u,edge);
+    let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);
+    atomicStore(&wFlips,0u);
+  }
+  if(workgroupUniformLoad(&wGo)==0u){return;}
+  pStage(slot,lid);workgroupBarrier();
+  let alpha=workgroupUniformLoad(&wAlpha);
+  let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let at=NB_STRIDE*slot+l;let h=nbRingF(cfg.x,NB_RING_H);
+  var r=pres[NB_PRES_F_R+at];
+  if(pDiag(slot,l)>0.0){
+    let x=pres[NB_PRES_F_X+at]+alpha*pres[NB_PRES_F_D+at];
+    var dd=0.0;var db=0.0;var flips=0u;
+    for(var a=0u;a<3u;a++){
+      let side=pWallFace(c,a,NB_LATTICE[a]);if(side==0){continue;}
+      var sc=c;if(side>0){sc[a]+=1;}
+      let s=nbFSlotOfCell(sc);if(s>=NB_SEAM){continue;}
+      let w=NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(sc);let bit=${P_WALL0}u<<a;
+      // npLift(f, 1, US, h, 1): the face's forced velocity as a pressure in the slot units.
+      let lift=f32(side)*vel[NB_VEL_F_US0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(sc)]*h;
+      let attached=x+lift>=0.0;
+      if(attached==((phi[w]&bit)!=0u)){
+        if(attached){dd-=${WALL_F};db+=${WALL_F}*lift;}else{dd+=${WALL_F};db-=${WALL_F}*lift;}
+        phi[w]=(phi[w]&~bit)|select(bit,0u,attached);flips++;
+      }
+    }
+    if(flips>0u){
+      pres[NB_PRES_F_DIAG+at]+=dd;pres[NB_PRES_F_RHS+at]+=db;r=r+db-dd*x;pres[NB_PRES_F_R+at]=r;
+      atomicAdd(&wFlips,flips);
+    }
+  }
+  workgroupBarrier();
+  if(lid==0u){let n=atomicLoad(&wFlips);if(n>0u){atomicAdd(&nbSet[PH_FLIPS],n);}wGo=n;}
+  if(workgroupUniformLoad(&wGo)==0u){return;}
+  storageBarrier();
+  let rmax=pMax512(lid,abs(r));
+  if(lid==0u){atomicMax(&nbSet[PH_RMAXW],bitcast<u32>(rmax));}
+  // pmgUpdate's first brick pass, again from the new r and rows.
+  let ti=pTi(lc);
+  pTileZero(lid);
+  let row=pRow(b,c);
+  pSmooth(row,c,ti,r,false);
+  if(row.d>0.0){pmgF[P_W0+at]=tp[ti];}
+}`);
+  // The native rows' walls (rowsC's root wall slot, c = 4 0.5, lift = sign 4h US; N_HELD, rootPhi < -4, never
+  // separates), a page a workgroup, a lane a tile.
+  const wallsC = kernel("pmgWallsC", [...CBP, redRW, phiRW, velRO], ["pres", "cstage", "reduce", "red"], wallSign + /* wgsl */`
+var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u32>;
+@compute @workgroup_size(512) fn pmgWallsC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("native")}
+  if(lid==0u){
+    let edge=any(p==vec3i(0))||any(32*(p+vec3i(1))>=NB_LATTICE);
+    wGo=select(0u,1u,edge);
+    let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);
+    atomicStore(&wFlips,0u);
+  }
+  if(workgroupUniformLoad(&wGo)==0u){return;}
+  let alpha=workgroupUniformLoad(&wAlpha);
+  let T=8*p+nbLocalCoord(lid);let at=NB_STRIDE*cs+lid;let h=nbRingF(cfg.x,NB_RING_H);
+  var r=0.0;
+  if(pTileIn(T)&&!nbTileH(cs,lid)&&pP(NB_PRES_C_DIAG,cs,lid)>0.0){
+    r=pres[NB_PRES_C_R+at];
+    if(!(pres[NB_PRES_C_PPHI+at]< -4.0)){
+      let x=pres[NB_PRES_C_X+at]+alpha*pres[NB_PRES_C_D+at];
+      var dd=0.0;var db=0.0;var flips=0u;
+      for(var a=0u;a<3u;a++){
+        let side=pWallFace(T,a,(NB_LATTICE[a]+3)/4);if(side==0){continue;}
+        var Ts=T;if(side>0){Ts[a]+=1;}
+        let ws=nbCSlotOfPage(Ts>>vec3u(3u));if(ws==NB_NONE){continue;}
+        let w=NB_PHI_C_FLAGS+NB_STRIDE*ws+nbLocal(Ts);let bit=${P_WALL0}u<<a;
+        let lift=f32(side)*4.0*h*vel[NB_VEL_C_US0+NB_STRIDE*(ws+a*NB_CCAP)+nbLocal(Ts)];
+        let attached=x+lift>=0.0;
+        if(attached==((phi[w]&bit)!=0u)){
+          if(attached){dd-=${WALL_C};db+=${WALL_C}*lift;}else{dd+=${WALL_C};db-=${WALL_C}*lift;}
+          phi[w]=(phi[w]&~bit)|select(bit,0u,attached);flips++;
+        }
+      }
+      if(flips>0u){
+        pres[NB_PRES_C_DIAG+at]+=dd;pres[NB_PRES_C_RHS+at]+=db;r=r+db-dd*x;pres[NB_PRES_C_R+at]=r;
+        atomicAdd(&wFlips,flips);
+      }
+    }
+  }
+  workgroupBarrier();
+  if(lid==0u){let n=atomicLoad(&wFlips);if(n>0u){atomicAdd(&nbSet[PH_FLIPS],n);}wGo=n;}
+  if(workgroupUniformLoad(&wGo)==0u){return;}
+  let rmax=pMax512(lid,abs(r)/64.0);
+  if(lid==0u){atomicMax(&nbSet[PH_RMAXW],bitcast<u32>(rmax));}
+}`);
+
+  // The walls' gate (one workgroup, after updateC): WF and WC carry F_LIQ's and C_ALL's G1 when this slot decides
+  // (open, and max|r| within tolerance or the last slot), else 0, so a slot that doesn't decide launches nothing.
+  const wallGate = kernel("pmgWallGate", [CFG, setRW, argsRW], [], wallSign + /* wgsl */`
+@compute @workgroup_size(1) fn pmgWallGate(){
+  let decide=atomicLoad(&nbSet[PH_OPEN])!=0u&&(bitcast<f32>(atomicLoad(&nbSet[PH_RMAX]))<=pWallTol()||cfg.z+1u>=P_SLOTS);
+  if(decide){atomicAdd(&nbSet[PH_DECIDES],1u);}
+  let f=NB_ARGS_PER_LIST*NB_LIST_F_LIQ+NB_ARGS_G1;let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;
+  args[P_GATE_WF]=select(0u,args[f],decide);args[P_GATE_WF+1u]=args[f+1u];args[P_GATE_WF+2u]=1u;
+  args[P_GATE_WC]=select(0u,args[c],decide);args[P_GATE_WC+1u]=args[c+1u];args[P_GATE_WC+2u]=1u;
+}`);
+
   // Check: one workgroup, every slot; a closed slot's writes nothing.
   const check = kernel("pmgCheck", [CFG, setRW, redRW, argsRW], ["red", "gate"], /* wgsl */`
 var<workgroup> wOpen:u32;
@@ -1064,8 +1203,14 @@ var<workgroup> wOpen:u32;
   if(lid==0u){
     let rz=pRedSum(0u);let pq=pRedSum(64u);let alpha=select(0.0,rz/pq,pq!=0.0);
     atomicStore(&nbSet[PH_RZ],bitcast<u32>(rz));atomicStore(&nbSet[PH_ALPHA],bitcast<u32>(alpha));
-    let rmax=atomicExchange(&nbSet[PH_RMAX],0u);atomicStore(&nbSet[PH_RLAST],rmax);
+    // max|r| over the update's rows and, after a wall change, the changed bricks' and pages' new residuals
+    // (PH_RMAXW, kept apart so every walls workgroup decides on the update's max). Non-negative floats order as u32.
+    let rmax=max(atomicExchange(&nbSet[PH_RMAX],0u),atomicExchange(&nbSet[PH_RMAXW],0u));atomicStore(&nbSet[PH_RLAST],rmax);
     atomicAdd(&nbSet[PH_ITERATIONS],1u);atomicAdd(&nbSet[PH_TOTAL],1u);
+    // The walls' outer loop (pmgWallsF/C) changed the system at a converged iterate: PCG restarts from it
+    // (beta 0 at the next slot); alpha stays, since the deferred x += alpha p is the iterate the walls decided at.
+    let flips=atomicExchange(&nbSet[PH_FLIPS],0u);
+    if(flips>0u){atomicStore(&nbSet[PH_RZ],0u);atomicAdd(&nbSet[PH_WALLS],flips);}
     if(bitcast<f32>(rmax)<=pTolR()){pGate(false);}
     else if(cfg.z+1u>=P_SLOTS){atomicOr(&nbSet[NB_H_STATE],NB_STATE_PRESSURE_CAP);atomicAdd(&nbSet[PH_CAPPED],1u);pGate(false);}
     else{pGate(true);}
@@ -1102,6 +1247,8 @@ var<workgroup> wAlpha:f32;
       { kernel: top, dispatch: { indirect: MG_GATE.ONE }, z: k },
       gC(up3, k), gC(up2, k), gF(up1, k), gF(postU, k), gF(postS, k), gF(postZ, k),
       gF(direction, k), gC(directionC, k), gF(update, k), gC(updateC, k),
+      ...(walls ? [{ kernel: wallGate, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits } as BrickPlacement,
+        { kernel: wallsF, dispatch: { indirect: MG_GATE.WF }, z: k }, { kernel: wallsC, dispatch: { indirect: MG_GATE.WC }, z: k }] : []),
       { kernel: check, dispatch: { direct: [1, 1, 1] }, z: k, w: tolBits },
     ],
     finish: [{ kernel: finish, dispatch: list(LIST.F_LIQ) }, { kernel: finishC, dispatch: list(LIST.C_ALL) }],

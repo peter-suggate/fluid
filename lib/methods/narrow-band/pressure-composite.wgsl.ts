@@ -63,18 +63,26 @@ import { PRESSURE_ROWS_WGSL } from "./pressure-rows.wgsl";
 /** The root's far air in cells (UNIFORM_MIXED_ROOT_FAR_CELLS, uniform-mixed-root-owners.ts): RO_FAR. */
 const RO_FAR_CELLS = 16;
 
-/** FLAGS bits of lane P (brick-abi.md §2.4). */
-export const P_FLAG = { WARM: 1 << 7, WALL0: 1 << 8 } as const;
+/**
+ * FLAGS bits of lane P (brick-abi.md §2.4). WALL0 << a is the separating wall on the lower face along a, at the
+ * face's storage (plane 0: the cell or tile itself; plane N: the skirt cell or tile N/4). From the rows to the
+ * solve's finish it is the solver's state (1 = separated), which the build sets and the MGPCG's outer loop
+ * re-decides. After project it is the old umRelease of the face (lane E's released walls): not held, the
+ * projection's wall ghost <= 0, and -sign U dt > 1e-4 width h.
+ */
+export const P_FLAG = { WARM: 1 << 7, WALL0: 1 << 8, WALLS: 7 << 8 } as const;
+/** The separating wall's coupling in the slot units: an h row's K_WALL (npBandFace, V 0.5), a native row's 4·0.5. */
+export const P_WALL_C = { F: 0.5, C: 2 } as const;
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const dirRO: BrickBinding = { name: "dir", kind: "ro", type: "array<u32>" };
 const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
-const phiRO: BrickBinding = { name: "phi", kind: "ro", type: "array<u32>" };
 const presRW: BrickBinding = { name: "pres", kind: "rw", type: "array<f32>" };
 const cutRO: BrickBinding = { name: "cut", kind: "ro", type: "array<f32>" };
 const velRW: BrickBinding = { name: "vel", kind: "rw", type: "array<f32>" };
 const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
-const ROWS = [CFG, setRW, dirRO, velRO, phiRO, presRW, cutRO];
+// The rows write the wall state's FLAGS bits, so phi is read-write in every composite kernel.
+const ROWS = [CFG, setRW, dirRO, velRO, phiRW, presRW, cutRO];
 const PROJECT = [CFG, setRW, dirRO, velRW, phiRW, presRW, cutRO];
 
 /** The shared readers: centre and face φ, root φ, starts, the marched θ and the band face. */
@@ -134,7 +142,14 @@ fn poStage(o:vec3i,lid:u32){
 `;
 
 const COMPOSITE_WGSL = /* wgsl */`
-const PO_WARM:u32=${P_FLAG.WARM}u;
+const PO_WARM:u32=${P_FLAG.WARM}u;const PO_WALL0:u32=${P_FLAG.WALL0}u;const PO_WALLS:u32=${P_FLAG.WALLS}u;
+// The wall state's storage word: h cell c's FLAGS (a cell, or the skirt cell at plane N), tile T's C FLAGS (T
+// up to N/4). A liquid row's wall storage is always resident (the residency dilates the skirt); missing, it
+// latches FAIL.UNSUPPORTED.
+fn poFlagsWordF(c:vec3i)->u32{let s=nbFSlotOfCell(c);if(s>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,0xa0000000u);return NB_NONE;}return NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c);}
+fn poFlagsWordC(T:vec3i)->u32{let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,0xa1000000u);return NB_NONE;}return NB_PHI_C_FLAGS+NB_STRIDE*cs+nbTileIndex(T);}
+// Writes the separated bit of the wall on axis a at FLAGS word w (one writer a word: the face's liquid row).
+fn poSetWall(w:u32,a:u32,separated:bool){if(w==NB_NONE){return;}let bit=PO_WALL0<<a;phi[w]=(phi[w]&~bit)|select(0u,bit,separated);}
 // The root's far air (RO_FAR, uniform-mixed-root-owners.ts): a tile no page stores reads 16 cells, in h.
 const PO_RO_FAR:f32=${RO_FAR_CELLS.toFixed(1)};
 fn poUnit(a:u32)->vec3i{var e=vec3i(0);e[a]=1;return e;}
@@ -314,20 +329,27 @@ fn poHeadB(c:vec3i,own:f32,base:f32,f:u32)->f32{
 }
 // The projected velocity of h cell m's face f (umProject's bFace in the slot units): U = US - sign (c/V) (ghost - X)/h,
 // the ghost by the face's kind: a band row's X, a native row's X plus the seam head, 0 at air, and at a separating
-// wall X + lift while attached in the state the row took (start + lift >= 0), else 0. A Neumann face keeps US and a
-// closed one is 0. From a dry h cell (liquid false) only a seam to a liquid native row moves (the native row's zero
-// ghost); every other face keeps US.
-fn poProjectFace(m:vec3i,own:f32,liquid:bool,f:u32,us:f32,h:f32)->f32{
+// wall X + lift while attached in the solve's final state (separated: the FLAGS bit at the face), else 0. A Neumann
+// face keeps US and a closed one is 0. From a dry h cell (liquid false) only a seam to a liquid native row moves
+// (the native row's zero ghost); every other face keeps US.
+fn poProjectFace(m:vec3i,own:f32,liquid:bool,f:u32,us:f32,h:f32,separated:bool)->f32{
   let a=f/2u;let sign=npSign(f);let face=poBandFace(m,own,liquid,f).face;
   if(face.kind==NP_K_NEUMANN){return us;}
   if(face.kind==NP_K_CLOSED){return 0.0;}
   if(!liquid&&face.kind!=NP_K_SEAM){return us;}
   let x=select(0.0,poXF(m),liquid);let q=m+sign*poUnit(a);
   var ghost=0.0;
-  if(face.kind==NP_K_WALL){let lift=npLift(f,1.0,us,h,1.0);if(poBF(m)+lift>=0.0){ghost=x+lift;}}
+  if(face.kind==NP_K_WALL){let lift=npLift(f,1.0,us,h,1.0);if(!separated){ghost=x+lift;}}
   else if(face.kind==NP_K_BAND){ghost=poXF(q);}
   else if(face.kind==NP_K_SEAM){ghost=poXT(q>>vec3u(2u));if(liquid){ghost+=poHeadB(m,own,poBF(m),f);}}
   return us-f32(sign)*(face.coefficient/face.fraction)*(ghost-x)/h;
+}
+// The old umRelease (uniform-mixed-pressure-velocity.ts) of a lattice wall face with owner width w (1 or 4 cells):
+// not held (the owner's centre or root φ >= -w), the projection's wall ghost (the wall slot's pressure) <= 0, and
+// -sign U dt > 1e-4 w h, sign the face's side of its owner. A dry owner's ghost is 0.
+fn poRelease(phiOwner:f32,ghost:f32,sign:f32,u:f32,w:f32,h:f32)->bool{
+  let dt=nbRingF(cfg.x,NB_RING_DT);
+  return !(phiOwner< -w)&&ghost<=0.0&&-sign*u*dt>1e-4*w*h;
 }
 `;
 
@@ -379,8 +401,10 @@ var<workgroup> poCold:atomic<u32>;
         if(face.kind!=NP_K_CLOSED){div+=f32(sign)*face.fraction*us;}
         if(face.kind==NP_K_NEUMANN||face.kind==NP_K_CLOSED){continue;}
         if(face.kind==NP_K_WALL){
-          let lift=npLift(f,1.0,us,h,1.0);
-          if(start+lift>=0.0){extra+=face.coefficient*lift;}else{diag+=face.coefficient;}
+          // The build's state (pRebase's first measure, start + lift >= 0), stored at the face for the outer loop.
+          let lift=npLift(f,1.0,us,h,1.0);let separated=start+lift<0.0;
+          if(!separated){extra+=face.coefficient*lift;}else{diag+=face.coefficient;}
+          poSetWall(poFlagsWordF(fc),a,separated);
           continue;
         }
         diag+=face.coefficient;
@@ -401,10 +425,10 @@ var<workgroup> poCold:atomic<u32>;
   }
 }`, rowsEntry, ROWS, true);
 
-  // rowsC: a workgroup a page of C_ALL (G1), a lane two tiles. After rowsF: the seam heads read
-  // the h rows' starts from X.
-  const rowsC = k("pressureRowsC", /* wgsl */`
-fn poBase(m:vec3i)->f32{return poXF(m);}
+  // rowsC: a workgroup a page of C_ALL (G1), a lane two tiles. After rowsF, whose stored rows it reads: a seam
+  // subface's h cell m takes its centre φ from PPHI and its head from poHeadB (the h rows' starts in B and centre φ
+  // in PPHI), the values rowsF computed, so the subface's coefficient and head are the h row's own, unrecomputed.
+  const rowsC = k("pressureRowsC", PROJECT_WGSL + /* wgsl */`
 @compute @workgroup_size(256) fn pressureRowsC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,g);
@@ -426,7 +450,9 @@ fn poBase(m:vec3i)->f32{return poXF(m);}
           // The root's wall slot: fraction 0.5 (the wall face's mean h V), b its forced flux.
           let fraction=0.5;let u=nbFacePlane(plane,a);let c=4.0*fraction;let lift=f32(sign)*4.0*h*u;
           div+=f32(sign)*fraction*u;
-          if(root< -4.0||start+lift>=0.0){extra+=c*lift;}else{diag+=c;}
+          let separated=!(root< -4.0)&&start+lift<0.0;
+          if(!separated){extra+=c*lift;}else{diag+=c;}
+          poSetWall(poFlagsWordC(select(T,Tn,side==1u)),a,separated);
           continue;
         }
         let w=nbPageWord(Tn>>vec3u(3u));
@@ -442,10 +468,10 @@ fn poBase(m:vec3i)->f32{return poXF(m);}
           var sum=0.0;
           for(var s=0u;s<16u;s++){
             let m=layer+i32(s&3u)*u+i32(s>>2u)*v;
-            let pm=poCentre(m);let lm=poWet(pm,1.0);let pf=poBandFace(m,pm,lm,g2);
+            let pm=poPhiF(m);let lm=poWet(pm,1.0);let pf=poBandFace(m,pm,lm,g2);
             if(pf.face.kind==NP_K_SEAM){
               diag+=pf.face.coefficient;
-              if(lm){extra-=pf.face.coefficient*poHead(m,pm,poBase(m),g2);}
+              if(lm){extra-=pf.face.coefficient*poHeadB(m,pm,poBF(m),g2);}
             }
             var fm=m;if(side==0u){fm[a]+=1;}
             sum+=nbFacePlane(fm,a);
@@ -487,6 +513,9 @@ var<workgroup> poGo:u32;
       let hc=nbInLattice(c)&&poOwnerH(c);
       var pc=NB_PHI_AIR;if(hc){pc=pres[NB_PRES_F_PPHI+at];}
       let lc=hc&&poWet(pc,1.0);
+      // This cell's FLAGS hold the solver's wall state for its lower faces on the lattice's planes (read here, by
+      // this lane only), and leave with the faces' release bits.
+      let flags=phi[NB_PHI_F_FLAGS+at];var release=0u;
       for(var a=0u;a<3u;a++){
         if(!nbFaceInLattice(c,a)){continue;}
         let n=c-poUnit(a);let hn=nbInLattice(n)&&poOwnerH(n);
@@ -494,15 +523,21 @@ var<workgroup> poGo:u32;
         let fa=NB_STRIDE*(slot+a*NB_FCAP)+l;let us=vel[NB_VEL_F_US0+fa];
         var pn=NB_PHI_AIR;if(hn){pn=poPhiF(n);}
         let ln=hn&&poWet(pn,1.0);
+        let wall=c[a]==0||c[a]==NB_LATTICE[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
         var u=us;
-        if(lc){u=poProjectFace(c,pc,true,2u*a,us,h);}
-        else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h);}
-        else if(hc&&!hn){u=poProjectFace(c,pc,false,2u*a,us,h);}
-        else if(hn&&!hc){u=poProjectFace(n,pn,false,2u*a+1u,us,h);}
+        if(lc){u=poProjectFace(c,pc,true,2u*a,us,h,separated);}
+        else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h,separated);}
+        else if(hc&&!hn){u=poProjectFace(c,pc,false,2u*a,us,h,separated);}
+        else if(hn&&!hc){u=poProjectFace(n,pn,false,2u*a+1u,us,h,separated);}
         vel[NB_VEL_F_U0+fa]=u;speed=max(speed,abs(u));
+        if(wall){
+          // The owner: c on plane 0 (its low face), n on plane N (its high face).
+          let low=c[a]==0;let sign=select(1.0,-1.0,low);let liquid=select(ln,lc,low);let m=select(n,c,low);
+          var ghost=0.0;if(liquid&&!separated){ghost=poXF(m)+sign*us*h;}
+          if(poRelease(select(pn,pc,low),ghost,sign,u,1.0,h)){release|=PO_WALL0<<a;}
+        }
       }
-      let flags=phi[NB_PHI_F_FLAGS+at];
-      phi[NB_PHI_F_FLAGS+at]=(flags&~PO_WARM)|select(0u,PO_WARM,lc&&pres[NB_PRES_F_DIAG+at]>0.0);
+      phi[NB_PHI_F_FLAGS+at]=(flags&~(PO_WARM|PO_WALLS))|select(0u,PO_WARM,lc&&pres[NB_PRES_F_DIAG+at]>0.0)|release;
     }
     atomicMax(&wSpeed,bitcast<u32>(speed));
   }
@@ -532,7 +567,10 @@ fn poNativeX(T:vec3i)->vec2f{
   for(var j=0u;j<2u;j++){
     let i=lid+256u*j;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
     let tIn=nbTileInLattice(T);
+    // This tile's C FLAGS: the solver's wall state for its lower faces on the lattice's planes, then their release.
+    let fw=NB_PHI_C_FLAGS+at;let flags=phi[fw];var release=0u;
     if(tIn&&nbTileH(cs,i)){
+      phi[fw]=flags&~PO_WALLS;
       var sum=0.0;var count=0.0;
       for(var m=0u;m<64u;m++){
         let c=4*T+vec3i(i32(m&3u),i32((m>>2u)&3u),i32(m>>4u));let s=nbFSlotOfCell(c);
@@ -550,6 +588,7 @@ fn poNativeX(T:vec3i)->vec2f{
       if(nbTileInLattice(Lt)&&nbTileOwnerH(Lt)){continue;}
       let fa=NB_STRIDE*(cs+a*NB_CCAP)+i;let us=vel[NB_VEL_C_US0+fa];
       let low=poNativeX(Lt);
+      let wall=T[a]==0||4*T[a]==NB_LATTICE[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
       var u=us;
       if(own.y>0.0&&low.y>0.0){u=us-(own.x-low.x)/(4.0*h);}
       else if(own.y>0.0||low.y>0.0){
@@ -559,13 +598,21 @@ fn poNativeX(T:vec3i)->vec2f{
         if(other==-1.0){
           let mw=nbPageWord(m>>vec3u(3u));let mat=NB_STRIDE*mw+nbTileIndex(m);
           let lift=sign*4.0*h*us;
-          if(pres[NB_PRES_C_PPHI+mat]< -4.0||pres[NB_PRES_C_B+mat]+lift>=0.0){u=us-sign*lift/(4.0*h);}
+          if(pres[NB_PRES_C_PPHI+mat]< -4.0||!separated){u=us-sign*lift/(4.0*h);}
           else{u=us+sign*x/(4.0*h);}
         }
         else{u=us+sign*x/(4.0*h*poNativeTheta(Lt,T,a));}
       }
       vel[NB_VEL_C_U0+fa]=u;
+      if(wall){
+        // The owner, a 4h-owned tile: T on plane 0 (its low face), Lt on plane N (its high face). Held is N_HELD.
+        let atLow=T[a]==0;let m=select(Lt,T,atLow);let mx=select(low,own,atLow);let sign=select(1.0,-1.0,atLow);
+        let mw=nbPageWord(m>>vec3u(3u));let mat=NB_STRIDE*mw+nbTileIndex(m);let root=pres[NB_PRES_C_PPHI+mat];
+        var ghost=0.0;if(mx.y>0.0&&(root< -4.0||!separated)){ghost=mx.x+sign*4.0*h*us;}
+        if(poRelease(root,ghost,sign,u,4.0,h)){release|=PO_WALL0<<a;}
+      }
     }
+    phi[fw]=(flags&~PO_WALLS)|release;
   }
 }`, "pressureProjectC", PROJECT);
 

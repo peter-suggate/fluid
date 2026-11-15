@@ -621,3 +621,77 @@ Means a step, the largest step in brackets.
   Neither binds on the dam or letters.
 - **Item 3 (the seam-head Picard at t = 0):** the seam heads are nonzero on 92–100% of seam subfaces (the earlier
   table). The Picard runs once at t = 0 only, so this table doesn't change its case.
+
+## 2026-11-15 — item 2: the separating walls' outer loop around the MGPCG; rowsC 543 → 0.044 ms on the tiered dam
+
+**The loop** (pressure-mgpcg.ts `walls`, on in compositeMGPCG). It follows Chentanez & Müller 2012 (multigrid with separating
+solid boundaries), and its decision rule is the primal-dual active set of Hintermüller, Ito & Kunisch 2002. That is a
+semismooth Newton step on the wall ghost max(x + lift, 0).
+- **State.** FLAGS bit 8+a sits at the face's ABI storage: the cell or tile itself on plane 0, the skirt cell or tile N/4
+  on plane N. rowsF and rowsC write the build's state (start + lift ≥ 0, as before). The single writer of each word is
+  the face's liquid row.
+- **When it decides.** `pmgWallGate` is one workgroup after updateC. It opens WF and WC (args 521, 524) when the slot is
+  open and either max|r| ≤ tol or the slot is the last. A slot that doesn't decide launches nothing.
+- **What it decides.** `pmgWallsF` (edge bricks) and `pmgWallsC` (edge pages, N_HELD excepted) re-decide every lattice wall
+  face of a liquid row at the iterate x + αp. A face that changes state moves c (F 0.5, C 2) between the RHS (c·lift) and
+  the diagonal. The row's residual becomes r + ΔRHS − ΔDIAG·(x + αp); the coupling is diagonal-only, so no other row
+  moves. A changed brick's first V-cycle pass (W0) is redone from the new r and rows. The new max goes to RMAXW, so every
+  walls workgroup decides on the update's max.
+- **Restart.** pmgCheck takes max(RMAX, RMAXW). On a change it restarts PCG (RZ = 0, so the next β is 0) and keeps α,
+  because the deferred x += αp is the iterate the walls decided at. Header words: FLIPS 140, WALLS 141 (changes this
+  step), DECIDES 142, RMAXW 143.
+- **Where the old rules differ.** The old engine evaluates max(x + lift, −base) at every residual and smoothing of its
+  V-cycles, freezes the state at the Krylov start, and projects with the final x. Here a solve's system stays fixed until
+  it converges (a Krylov method on a fixed SPD matrix), and the state changes only between converged solves, or once at
+  the last slot. So a capped solve still ends on its final iterate's state, as the old projection does.
+- **Preconditioner.** The coarse levels keep the setup's aggregates of the build's diagonal. The V-cycle stays SPD: a
+  symmetric smoother on the current L0 rows plus any SPD coarse correction. So it remains a valid preconditioner.
+- **The projection uses the final state:** projectF (poProjectFace) and projectC read the bit, not B + lift.
+
+**Lane E's release bit (agreed with E).** After projectF and projectC, bits 8–10 at the same storage are the old umRelease:
+- not held (PPHI < −width, with width 1 for F and 4 for C);
+- the projection's wall ghost ≤ 0 (attached: X + lift; separated or dry owner: 0), which is the old "wall-slot pressure ≤ 0";
+- and −sign·U·dt > 1e-4·width·h.
+
+projectF writes bits 8–10 of every cell of its bricks, and projectC writes them for every tile of its pages, with 0 off
+the walls. Between the rows and project the bits are P's solver state, which E doesn't read. The §2.4 row of brick-abi.md
+(E's file) should say both meanings.
+
+**rowsC (lane F's report: 543 ms a step, 4 ms a page on the tiered dam, tripping the macOS watchdog).** Each seam
+subface's head called poStart for its tangential h neighbours: a cold row prolongs 8 tiles' root φ (an h tile's held fit
+is 125 vertices) with the carry. That is 16 subfaces × 4 neighbours a seam face. rowsC now reads what rowsF stored: the
+centre φ from PPHI and the heads through poHeadB (starts from B). These are the same values, and the rows oracle test
+passes unchanged. On the tiered dam (13 steps, --profile=11) rowsC takes **0.044 ms** and the profiled step 57 ms.
+
+**Tests** (GPU, pressure-composite-mgpcg.test.ts):
+- On the composite fixture's cold, frozen state the loop takes 6 decisions and 1458 changes, 553 h and 1 native net of
+  the build, in 32 iterations.
+- The converged X is the Float64 PCG's on the final rows (h 4.3e-7, native 2.5e-7).
+- Complementarity at the end, converged (40 slots) and capped (3 slots): wall state ≠ (X + lift ≥ 0) on 0 of 2141 h faces
+  and 0 of 4 native faces.
+- Projected divergence = residual (h 2.5e-7, native 6.5e-7).
+- The release bits match the CPU umRelease on all 4865 wall faces (1697 released).
+- The rows oracle, pool MGPCG and unit tests pass (1830 / 0). Types are clean apart from the 3 lane-n errors.
+
+**Dam (all-h, 60 steps, trees at 74712f19, check slot, rc 0, no aborts):**
+
+| | median step | p95 | drift @16 | KE @16 | wet floor @16 | wall changes / step (15, 16, 30, 45, 60) |
+|---|---|---|---|---|---|---|
+| base (no loop) | 105.8 ms | 109.9 | −0.0579 | 282.0 J | 15989 | — |
+| walls | 109.4 ms | 115.3 | −0.0576 | 282.3 J | 15969 | 28, 184, 2583, 2901, 403 |
+
+The tiered profile prices the loop at 0.18 ms a step (gate 0.066, wallsF 0.087, wallsC 0.022). The all-h median
+difference is mostly run-to-run noise.
+
+**The dam caps every step: 8 of 8 slots at tol 1e-3, before and after this change.** So the loop decides once a step, at
+the last slot, and never re-solves after a change. The dam's walls are now consistent with its final x, as the old
+engine's are. Restarted solves need slots the dam doesn't have, so the convergence rate is the real gap; that is item 4's
+question.
+
+**Dam gate (all-h, 300 steps, check slot, rc 0; fluid-scratch/lane-p1/gates/dam-w-300.md), against dam-p-300c:**
+- It FAILs on the same two rows. D6 (wet floor cells, 10162 against 10765 at step 8) is unchanged at margin 1.12. D8c
+  (particles at 16) goes 1.16 → 1.26.
+- Every other row passes, e.g. D4c drift at the impact 0.84 → 0.76, D4 0.35 → 0.62, D5p 0.45 → 0.79.
+- Step median 69.5 ms, p95 108 (75.0 / 112 at the older HEAD).
+- The walls' state isn't what holds D6. The wet-floor front is lane E's released-walls port, which now reads the release
+  bits above.
