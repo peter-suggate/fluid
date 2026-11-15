@@ -244,3 +244,101 @@ Composed kernels: an ulp-scale comparison against the old engine is not meaningf
 pressure runs on a 4h interior, so the two engines solve different systems. Each formula stays bitwise in isolation
 (`velocity-formulas.test.ts`, `levelset-formulas.test.ts`, `particles-formulas.test.ts`), and the gates judge the
 composition.
+
+## M2: the transfer cost per item (2026-11-15)
+
+**Volume control is a port, not new physics.** The old frame (`uniform-mixed-frame.ts` 1160-1165) passes
+`control = 1 / volumeControlSeconds` to the gauge's `beginStep` and copies the gauge's rate into the pressure
+authority's parameters. The gauge's `solve` (`uniform-mixed-surface-volume.ts` 490-500) computes the same Kim et al.
+2007 proportional term as `nbfVolumeRate`:
+- the same gain, min(control, 1/(3 dt));
+- the same 1% dead band (`NB_VOLUME_DEAD_BAND` 0.01);
+- the same ±4/s limit (`NB_VOLUME_RATE_LIMIT`);
+- the same divisor, max(filled, budget/2), and the same capture gate.
+
+`velocity-formulas.test.ts` checks `nbfVolumeRate` bitwise against that excerpt. The one difference: the old filled sum
+counts the 4h bulk cells (`svBulkVolume`) as full, while at all-h every cell is measured by its fill.
+
+**Method.**
+- Item counts are means over the profile window (steps 13-60), interpolated from the dam-300a samples. F_ALL holds
+  4,517 bricks (6.94M faces, 2.31M cells); there are 762k particles and about 2.2M traced faces (liquid on either
+  side, about 3 x the 0.72M liquid cells).
+- Times are from the split-pass timestamp profile (`prof-60`, every dispatch in its own pass). The seep figures come
+  from its own split-pass counter profile (lane S, S2o, step 1100: 485.5k + 17.2k traced faces, about 305k particles).
+  Both profiles are inflated by serialisation in the same way.
+- The thread limit is the register limit: maxTotalThreadsPerThreadgroup of the Dawn MSL compiled uncapped
+  (`fluid-scratch/lane-f/tools/msl-stat.sh`, lane S's method). 1024 means no register limit.
+- I did not take hardware-counter occupancy this round.
+
+| kernel | items | ms | ns/item | seep equivalent | threads/group, register limit | workgroup memory |
+|---|---|---|---|---|---|---|
+| uAdvect | 2.2M traced faces (6.94M visited) | 8.64 | 3.9 a traced face (1.25 a face) | velocity trace: 1.3 a traced face, about 1 segment each | 256, 704 | 0 |
+| pMove | 762k particles | 7.12 | 9.3 (separation 5.1, the rest 4.2) | g2p 1.2 + separate 1.0 = 2.2 | 128, 576 | 0 |
+| uTransfer | 6.94M faces | 6.44 | 0.93 | (in seep's velocity pass 1) | 256, 768 | 3.9 KB |
+| uExtend | 6.94M faces x 3 axes' windows | 5.69 | 0.82 | extend.2 + .1: 0.33 ms | 512, 1024 | 13.8 KB |
+
+**Causes and fixes.**
+- **uTransfer: redundant liveness reads. Fixed.**
+  - The cause: every face recomputed fgCentrePhi for its own cell and for the cell below on each axis. That is 32
+    corner φ reads a cell, each through two dependent directory loads.
+  - The fix: the centre φ of cells o-1..o+7 is staged once (729 floats, 2.9 KB, the same sum in the same order), and
+    the deposit words are read and zeroed by one atomicExchange.
+  - Result: 6.44 to 2.57 ms (0.37 ns a face). The register limit is unchanged at 768.
+- **uExtend: the same redundancy, three times over. Fixed.**
+  - The cause: each axis staged 1,728 window cells, and each cell evaluated fgLiquidCell twice (16 corner reads).
+  - The fix: the liquid bits of cells o-3..o+9 (13^3 bits, 69 words) are staged once for all three axes. Slot lookups
+    go through a workgroup window of the 3^3 bricks (`FG_SLOT_WINDOW_WGSL`), which is bit-identical because the
+    directory is read-only in a kernel.
+  - Result: 5.69 to 3.10 ms (0.45 ns a face); the window alone is worth about 0.25 ms of that.
+- **uAdvect: no per-segment defect. Left as is.**
+  - The trace is the old engine's umUnitTrace. A segment is at most a cell of travel, and each one samples all three
+    axes at its start and its midpoint.
+  - The seep's quiet reservoir traces one segment a face. The collapsing dam moves up to about 5 cells a step, so its
+    traced faces take several segments. Per segment the cost is at or below the seep's.
+  - What makes uAdvect large is the count: 2.2M traced faces at h, where the old engine and the seep trace the deep
+    interior at 4h. The tiers fix this; a per-cell change does not.
+  - Tried and rejected (one profile run each):
+
+| variant | ms | register limit |
+|---|---|---|
+| staged centre φ | 10.76 | 640 |
+| slot window and staged centre φ | 9.18 | 640 |
+| slot window alone | 9.65 | — |
+| original | 8.64 | 704 |
+
+- **pMove: the separation is latency-bound per candidate, not occupancy-bound. Left as is.**
+  - Knocking the separation out (scratch only) takes pMove from 7.12 to 3.25 ms, so the separation costs 3.9 ms
+    (5.1 ns a particle).
+  - The split the design asked for, a `pSeparate` kernel at register limit 1024 ahead of a 576-limit pMove, costs
+    4.37 + 3.15 = 7.53 ms against 7.12. The candidate loop runs no faster at full occupancy, and the split repeats the
+    merge.
+  - Not landed. Lane S found the same for the seep's separate (shared tiles and a flattened loop were both slower).
+  - What remains is the candidate count: 8 cells x the particles a cell. The TRIG stand-in over-seeds the whole
+    surface (762k particles against the reference's 146-351k at steps 8-16), so E's census cuts this.
+  - A slot window in pMove (centred on the middle record's brick) was slower: 8.97 ms.
+- **pDeposit:** the slot window made no difference (1.70 ms either way); not landed.
+- **lAdvect:** the slot window made no difference (4.63 against 4.60 without it); not landed.
+
+**Landed** (bit-identical by construction: the same values summed in the same order):
+- `fluid-grid.wgsl.ts`: `FG_SLOT_WINDOW_WGSL`, built on the `fgBrickSlot` and `fgBrickSlotOfDir` split. `FG_SLOT_WGSL`
+  is unchanged in behaviour.
+- `velocity-kernels.wgsl.ts`: the staging in uTransfer and uExtend.
+
+The observables stay within run-to-run spread. For example, at step 165, drift is -1.19% against -1.14% and KE is
+9.258 against 9.261 J.
+
+**Timing slot, 165 steps** (export of 60309e55 plus this patch, `fluid-scratch/lane-f/timing-staging/`):
+
+| | before (7b0df874) | after | 2761350a |
+|---|---|---|---|
+| fenced median | 69.44 ms | **63.81 ms** (p95 75.3) | 45.45 ms |
+| pipelined | 67.32 ms/step | **62.48 ms/step** | 50.61 ms/step |
+| construction | 468 ms | 471 ms | 9,045 ms |
+
+**Open, F:**
+- the remaining gap is the all-h count in uAdvect, MGPCG and the level set, plus the over-seeded particles in pMove;
+- the next items are E's census (TRIG), then the tiers, then the join bits and owner readers.
+
+Note: at steps 30-60 F_ALL holds 4,907-4,913 bricks, the scratch pool's 4,913. No FAIL bit is raised, and a refusal
+would latch FAIL_POOL_F, so nothing was refused. All-h simply makes almost the whole box resident once the splash
+spreads, which is why the per-face kernels' item count is the box.

@@ -99,13 +99,19 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
   };
 }
 
-/** Slot lookup and cell addressing (needs `dir`). */
-export const FG_SLOT_WGSL = /* wgsl */`
+/** The directory's F slot of a brick: two dependent loads (page, then child). */
+const FG_BRICK_SLOT_WGSL = /* wgsl */`
+fn fgBrickSlotOfDir(b:vec3i)->u32{
+ if(!nbBrickInRange(b)){return NB_NONE;}
+ let s=nbFSlotOfBrick(b);return select(NB_NONE,s,s<NB_SEAM);
+}`;
+
+/** Cell addressing (needs `dir` and an fgBrickSlot). */
+const FG_ADDRESS_WGSL = /* wgsl */`
 // The F slot holding cell (or vertex) c, or NB_NONE.
 fn fgSlot(c:vec3i)->u32{
  if(any(c<vec3i(0))){return NB_NONE;}
- let b=c>>vec3u(3u);if(!nbBrickInRange(b)){return NB_NONE;}
- let s=nbFSlotOfBrick(b);return select(NB_NONE,s,s<NB_SEAM);
+ return fgBrickSlot(c>>vec3u(3u));
 }
 fn fgUnit(a:u32)->vec3i{var e=vec3i(0);e[a]=1;return e;}
 // Face a of cell c (its lower face) is open: not on a wall, and its cell row inside the lattice across the axis.
@@ -119,6 +125,26 @@ fn fgTileAt(c:vec3i,w:u32)->u32{let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}r
 fn fgPack(c:vec3i)->u32{return u32(c.x)|(u32(c.y)<<10u)|(u32(c.z)<<20u);}
 fn fgUnpack(k:u32)->vec3i{return vec3i(i32(k&1023u),i32((k>>10u)&1023u),i32(k>>20u));}
 `;
+
+/** Slot lookup and cell addressing (needs `dir`): every lookup reads the directory. */
+export const FG_SLOT_WGSL = [FG_BRICK_SLOT_WGSL, "fn fgBrickSlot(b:vec3i)->u32{return fgBrickSlotOfDir(b);}", FG_ADDRESS_WGSL].join("\n");
+
+/** Slot lookup through a workgroup's window of the 3^3 bricks about one brick (needs `dir`). A lookup inside the
+ * window is one workgroup read in place of the directory's two dependent loads; outside it, the directory. The
+ * slot is the same either way (the directory is read-only in a kernel), so results are bit-identical.
+ * Every lane calls fgWindowStage(centre, lid) with the same centre, then a barrier, before any lookup. */
+export const FG_SLOT_WINDOW_WGSL = [FG_BRICK_SLOT_WGSL, /* wgsl */`
+var<workgroup> fgWinSlot:array<u32,27>;
+var<private> fgWinLow:vec3i;
+fn fgBrickSlot(b:vec3i)->u32{
+ let r=vec3u(b-fgWinLow);
+ if(all(r<vec3u(3u))){return fgWinSlot[r.x+3u*(r.y+3u*r.z)];}
+ return fgBrickSlotOfDir(b);
+}
+fn fgWindowStage(centre:vec3i,lid:u32){
+ fgWinLow=centre-vec3i(1);
+ if(lid<27u){fgWinSlot[lid]=fgBrickSlotOfDir(fgWinLow+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u)));}
+}`, FG_ADDRESS_WGSL].join("\n");
 
 /** fcell reads (needs `fcell`, atomic). */
 export const FG_FCELL_WGSL = /* wgsl */`
