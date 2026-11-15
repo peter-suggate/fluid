@@ -105,7 +105,8 @@ test(`pool MGPCG (GPU): one V-cycle matches the Float64 model's (${name})`, GPU,
 test("pool MGPCG (GPU): a static box is hydrostatic, and X = 0 in the air", GPU, async t => {
   await withDevice("pool mgpcg hydrostatic", async device => {
     const lattice: Vec3 = [32, 32, 32], top = 10.3;
-    const e = await BrickEngine.create(device, options(lattice, [{ lo: [-8, -8, -8], hi: [40, top, 40] }], 200, 8));
+    // The analytic profile to 1e-3 asks for a tighter stop than the default 0.05 1/s (MG_TOLERANCE).
+    const e = await BrickEngine.create(device, options(lattice, [{ lo: [-8, -8, -8], hi: [40, top, 40] }], 200, 8, { tolerance: 1e-3 }));
     e.advance(1);
     const s = await snapshot(e), L = e.layout;
     await e.assertHealthy();

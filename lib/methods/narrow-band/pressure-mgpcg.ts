@@ -88,7 +88,19 @@ export const MG_GATE = { F: ARGS.LANE_P, C: ARGS.LANE_P + 3, ONE: ARGS.LANE_P + 
 export const MG_HEADER = {
   OPEN: 128, RMAX: 129, RZ: 130, ALPHA: 131, ITERATIONS: 132, CAPPED: 133, RMAX0: 134, TOTAL: 135,
   N5: 136, N6: 137, N7: 138, RLAST: 139, FLIPS: 140, WALLS: 141, DECIDES: 142, RMAXW: 143,
+  /** The step's residual history in 1/s (max|r|/h^2): HIST the initial residual, HIST+1+k after slot k (up to 47 slots). */
+  HIST: 144,
 } as const;
+/** Slots the history words cover (144..191). */
+export const MG_HIST_SLOTS = 47;
+/**
+ * The stopping tolerance, 1/s: max|div| <= 0.05 over the rows (a native row's over 64), the seep's
+ * PRESSURE_TOLERANCE and the old engine's h band target (UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL), an
+ * absolute max-norm bound as TallCells' (Chentanez & Mueller 2011). The earlier 1e-3 sat below the float32
+ * PCG's attainable accuracy on the dam (its true residual stalls at 2e-3 - 1e-2 1/s; Greenbaum 1997), so every
+ * dam step ran to the cap.
+ */
+export const MG_TOLERANCE = 0.05;
 /** Levels of the hierarchy (L0..L7) and the compact top's row caps. */
 export const MG_LEVELS = 8;
 export const MG_ROWS6 = 512, MG_ROWS7 = 64;
@@ -149,7 +161,7 @@ export interface MGPCGOptions {
 }
 
 export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver {
-  const slots = options.slots ?? 8, tol = options.tolerance ?? 1e-3;
+  const slots = options.slots ?? 8, tol = options.tolerance ?? MG_TOLERANCE;
   const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, walls = options.walls ?? false;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
   const tolBits = new Uint32Array(new Float32Array([tol]).buffer)[0]!;
@@ -260,6 +272,12 @@ fn pGate(open:bool){
   atomicStore(&nbSet[PH_OPEN],select(0u,1u,open));
 }
 fn pTolR()->f32{let h=nbRingF(cfg.x,NB_RING_H);return bitcast<f32>(cfg.w)*h*h;}
+/** History word k (0 the initial residual, k after slot k-1) in 1/s; the rest of the step's words cleared at k 0. */
+fn pHist(k:u32,rmax:u32){
+  let h=nbRingF(cfg.x,NB_RING_H);
+  if(k==0u){for(var j=1u;j<=${MG_HIST_SLOTS}u;j++){atomicStore(&nbSet[PH_HIST+j],0u);}}
+  if(k<=${MG_HIST_SLOTS}u){atomicStore(&nbSet[PH_HIST+k],bitcast<u32>(bitcast<f32>(rmax)/(h*h)));}
+}
 `;
   // (A v)(c) at a fine row, v given by an expression of (slot, local); a native neighbour's value
   // by nat(C slot, tile index), or 0 when nat is omitted (pre-smoothing: native rows are carried at 0).
@@ -632,7 +650,7 @@ ${hashInsert("hIns7", "hk7", HS7)}
   for(var e=t;e<${MG_ROWS7 * MG_ROWS7}u;e+=1024u){tS(T_INV+e,gA[e]);}
   if(t==0u){
     let rmax=atomicExchange(&nbSet[PH_RMAX],0u);
-    atomicStore(&nbSet[PH_RMAX0],rmax);atomicStore(&nbSet[PH_RLAST],rmax);
+    atomicStore(&nbSet[PH_RMAX0],rmax);atomicStore(&nbSet[PH_RLAST],rmax);pHist(0u,rmax);
     atomicStore(&nbSet[PH_N5],n5);atomicStore(&nbSet[PH_N6],n6);atomicStore(&nbSet[PH_N7],n7);
     pGate(bitcast<f32>(rmax)>pTolR());
   }
@@ -1205,7 +1223,7 @@ var<workgroup> wOpen:u32;
     atomicStore(&nbSet[PH_RZ],bitcast<u32>(rz));atomicStore(&nbSet[PH_ALPHA],bitcast<u32>(alpha));
     // max|r| over the update's rows and, after a wall change, the changed bricks' and pages' new residuals
     // (PH_RMAXW, kept apart so every walls workgroup decides on the update's max). Non-negative floats order as u32.
-    let rmax=max(atomicExchange(&nbSet[PH_RMAX],0u),atomicExchange(&nbSet[PH_RMAXW],0u));atomicStore(&nbSet[PH_RLAST],rmax);
+    let rmax=max(atomicExchange(&nbSet[PH_RMAX],0u),atomicExchange(&nbSet[PH_RMAXW],0u));atomicStore(&nbSet[PH_RLAST],rmax);pHist(cfg.z+1u,rmax);
     atomicAdd(&nbSet[PH_ITERATIONS],1u);atomicAdd(&nbSet[PH_TOTAL],1u);
     // The walls' outer loop (pmgWallsF/C) changed the system at a converged iterate: PCG restarts from it
     // (beta 0 at the next slot); alpha stays, since the deferred x += alpha p is the iterate the walls decided at.
