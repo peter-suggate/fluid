@@ -1378,3 +1378,43 @@ The cross-run floor is 0.97 ms before and 1.27 ms after (means). Letters and see
 - f stays 4913: the all-h peak exactly, and the tiered peak × 1.027.
 - c goes from 192 to 125, which drops 67 page slots no run can use.
 - Gate at the authored pools (no --poolF override; tiered 300): no POOL_F or POOL_C, mean liveF 3032, high-water 4786 F and 125 C.
+
+## 2026-11-16: the 4x-wider dam (memory must scale)
+
+The dam's liquid box in a container 4x wider in x (512 x 128 x 128 cells, whole pages), tiered, lane F's stages, the composite solver, HEAD c6516bce (a HEAD snapshot; the working tree's uncommitted pressure edits excluded). Test-only: `lib/methods/narrow-band/brick-wide-dam.test.ts`. Runs: ~/code/me/fluid-scratch/lane-e/wide/ (n1 and w4b: timing slot, fenced, a header read after every step; an1 and aw4: residency attribution, `tools/attrib.mts`, margins 9/0/6).
+
+**Memory follows the pools.** At the same pools the two lattices allocate 839575184 and 839581328 bytes: the difference is 4 x 1536 words, the directory's page window (8x8x8 to 32x8x8 pages). Every engine, stage and solver buffer is pool-sized.
+
+**Residency, lists and work follow the fluid.** Until the front reaches x = 128 (about step 12) both runs hold the same fluid and the same residency:
+
+| step | liveF narrow / wide | F_ACT | F_LIQ | C_ALL | particles |
+|---|---|---|---|---|---|
+| 1 | 667 / 667 | 667 / 667 | 68 / 68 | 80 / 80 | 71595 / 71595 |
+| 10 | 2243 / 2244 | 1906 / 1899 | 366 / 362 | 96 / 96 | 229157 / 228143 |
+| 15 | 2621 / 2857 | 2316 / 2434 | 550 / 577 | 88 / 93 | 346264 / 365477 |
+| 20 | 3913 / 4125 | 3698 / 3586 | 685 / 812 | 115 / 125 | 487510 / 549029 |
+| 30 | 4531 / 7486 | 4412 / 6868 | 915 / 1292 | 125 / 217 | 894021 / 1241358 |
+| 40 | 4500 / 12764 | 4499 / 11953 | 1234 / 1797 | 125 / 316 | 1030171 / 1867098 |
+
+After it, the narrow dam piles against its wall and the wide sheet keeps spreading. Its liquid footprint (F_LIQ +46% at step 40) and its band (particles +81%: the band follows the surface) are real fluid. At step 40 no brick lies past the fluid's front plus the residency rule's box (fluid to brick x 53, live F to 54, pages to 13 of 16): the empty far end of the box costs nothing.
+
+Step ms follows liveF in both boxes: 14.5-19.1 ms a thousand live F bricks wide, 15.5-21.6 narrow (fenced, timing slot). No term grows with the box.
+
+**The finding: the reach class's flow box is isotropic.** Attribution (live / owner / ring / reach / margin):
+
+| step | narrow | wide |
+|---|---|---|
+| 15 | 2661 / 669 / 978 / 231 / 783 | 2913 / 725 / 1013 / 216 / 959 |
+| 25 | 4288 / 1172 / 1708 / 1039 / 369 | 5596 / 1404 / 1729 / 1772 / 691 |
+| 35 | 4477 / 1392 / 1778 / 840 / 467 | 9550 / 2116 / 2764 / 3761 / 909 |
+| 45 | 4574 / 1869 / 1914 / 458 / 333 | 14216 / 3006 / 3913 / 6957 / 340 |
+
+Owners and ring grow with the sheet (x1.6 and x2.0 at step 45). Reach grows x15. The flow term, (max BOUND_F + g dt) dt / h, is one scalar a brick applied on every axis and both signs: 21.8 cells at step 40 (8 m/s spray at the front). A thin, fast, horizontal sheet is therefore held about 3 bricks deep above and below, as well as ahead. A signed per-axis bound (as PSUPPORT's travel already is for particles) would cover the motion without the vertical thickening. It is the lever if the wide case's memory matters; it changes no physics. Its safety argument (every read and write of the step inside the box) needs its own read-by table first.
+
+**Lattice-sized items (findings):**
+1. The directory's page window: one word a page of a power-of-two window (6 KB more wide). Bounded at M6 by the moving window.
+2. The app's presentation (brick-present.ts; not the engine, and allowed as an interim by structural §2.10):
+   - three r32float 3D textures at the lattice's size (vertexPhi (n+1)^3, volume, openFraction): 25.6 MB narrow, 101 MB wide;
+   - `shown`, a word a lattice brick;
+   - two dispatches a presented frame sized by the lattice's bricks (18x18x18 and 17^3 narrow; 66x18x18 and 65x17x17 wide). Each workgroup exits early off the fluid.
+3. Values only, no sizes: NB_LATTICE (clamps), NB_PHI_FAR = max(lattice) (the far φ), RQ_PAGES (resMark's clamp).
