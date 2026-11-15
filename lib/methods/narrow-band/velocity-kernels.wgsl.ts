@@ -195,9 +195,9 @@ fn vcTransferPage(slot:u32,lid:u32){
  *   FLIP delta as the difference.
  * - uExt4Seed (ufxRestrict4) seeds every face of every C page: a face between two 4h tiles its own pair; else the
  *   mean of the source subfaces (the h faces on its plane, liquid either side at the owners' phase), or of all 16
- *   with none. Closed -1, a source 0, else 1e20 where O has support (umTileSupport bit 2: lane F's occupied tile
- *   distance at most 3; a tile no F slot holds has none of lane F's distances and is supported where it is
- *   occupied, a C corner under 0, a stated mapping), else -1.
+ *   with none. Closed -1, a source 0, else 1e20 where O has support (umTileSupport bit 2: the frame plan's dilation of
+ *   the occupied tiles, lDilate's FT_DIST bit 12; a tile no F slot holds runs its z pass over the kept y-pass
+ *   pairs), else -1.
  * - uExt4 (ufx4): a page with a supported tile sweeps its window of seeds (4h spacing), else its state is its seeds.
  *   ufxPublish4: a C face F writes (vcFace) takes the state's value into US and its delta (value less prior) into
  *   UP; the 16 h subfaces of a 4h owner's face toward an h tile take the swept value where the sweep reached the
@@ -210,10 +210,24 @@ fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{let i=x4At(cs,region,j,a);return
 fn x4Store(cs:u32,region:u32,j:u32,a:u32,s:vec3f){let i=x4At(cs,region,j,a);fext4[i]=s.x;fext4[i+1u]=s.y;fext4[i+2u]=s.z;}
 // The C slot of tile T's page, where a page of the lattice's faces holds it (the vertex-row pages included).
 fn x4Slot(T:vec3i)->u32{if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_NONE;}return fgTileCSlot(T);}
+// umTileSupport bit 1: lDilate's frame-plan dilation (FT_DIST bit 12). A tile no F slot holds runs that
+// dilation's z pass here over the y pass's kept pairs (FT_DB bits 12..13 of an F tile, DIL4 bits 29..30 of an
+// absent one; none where no page holds the tile).
+fn x4Pair(t:vec3i)->u32{
+ let i=fgTileAt(4*t,FT_DB);if(i!=NB_NONE){return (fcLoad(i)>>12u)&3u;}
+ if(!foTileInLattice(t)){return 0u;}
+ let cs=fgTileCSlot(t);if(cs==NB_NONE){return 0u;}
+ return (fcLoad(FC_DIL4+512u*cs+foTileIndex(t))>>29u)&3u;
+}
 fn x4Support(t:vec3i)->bool{
- let i=fgTileAt(4*t,FT_DIST);if(i!=NB_NONE){return fgDist(fcLoad(i),2u)<=3u;}
+ let i=fgTileAt(4*t,FT_DIST);if(i!=NB_NONE){return ((fcLoad(i)>>12u)&1u)!=0u;}
  if(!foTileInLattice(t)){return false;}
- let v=fgTileCorners4(t);var m=v[0];for(var k=1u;k<8u;k++){m=min(m,v[k]);}return m<0.0;
+ for(var off=-3;off<=3;off++){
+  var q=t;q.z+=off;if(q.z<0){continue;}
+  let pair=x4Pair(q);
+  if((select((pair&1u)<<1u,pair,abs(off)<=2)&2u)!=0u){return true;}
+ }
+ return false;
 }
 `;
 
@@ -711,7 +725,7 @@ fn xCode(c:vec3i,a:u32)->u32{
  if(!fgFaceOpen(c,a)){return 3u;}
  let n=c-fgUnit(a);
  if(xLiquid(n)||xLiquid(c)){return 1u;}
- return select(2u,0u,fgDist(fgTileDist(n),2u)<=3u);
+ return select(2u,0u,fgTileSupported(n));
 }
 // The 4h state (value, prior; distance) and its prolongation to h face (c, a), ufxProlong verbatim on the old texel
 // p = c - e_a: linear between the 4h owner's two faces on the axis, constant across; a coarse face weighs in only
@@ -771,7 +785,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   // A lane a tile of the 27 bricks about the brick (216 lanes).
   if(FG_TIERED&&lid<216u){
    let n=lid>>3u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);let tc=2*b+fsBit4(lid&7u);
-   if(foTileOwnerH(tc)&&fgDist(fgTileDist(4*tc),2u)<=3u){atomicOr(&wSwept[n],1u);}
+   if(foTileOwnerH(tc)&&fgTileSupported(4*tc)){atomicOr(&wSwept[n],1u);}
   }
  }
  workgroupBarrier();

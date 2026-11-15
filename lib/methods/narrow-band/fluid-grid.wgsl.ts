@@ -320,6 +320,8 @@ const FG_FCELL_READS_WGSL = /* wgsl */`
 fn fgTileLoad(c:vec3i,w:u32,otherwise:u32)->u32{let i=fgTileAt(c,w);if(i==NB_NONE){return otherwise;}return fcLoad(i);}
 fn fgTileFlags(c:vec3i)->u32{return fgTileLoad(c,FT_FLAGS,0u);}
 fn fgTileDist(c:vec3i)->u32{return fgTileLoad(c,FT_DIST,0xffffffffu);}
+// umTileSupport bit 1 (the extension's support: lDilate's frame-plan dilation, FT_DIST bit 12); none where no slot holds c.
+fn fgTileSupported(c:vec3i)->bool{return ((fgTileLoad(c,FT_DIST,0u)>>12u)&1u)!=0u;}
 // The packed Chebyshev tile distances (4 bits each, 15 for none within reach): 0 crossing, 1 air seed, 2 occupied.
 fn fgDist(word:u32,k:u32)->u32{return (word>>(4u*k))&15u;}
 // The redistance reach bits (old NB_BAND_REACH): bit 1 within 2 tiles of a crossing tile, bit 2 within 3.

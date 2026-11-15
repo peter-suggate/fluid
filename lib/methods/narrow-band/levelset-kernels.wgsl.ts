@@ -36,6 +36,7 @@ import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
+import { CENSUS } from "./brick-census.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
 // Only F's own vertices (fgVertexOwned: tiered, a vertex with a 4h-owned incident tile is its tile's interpolant).
@@ -354,7 +355,25 @@ ${stagedHead(0)}
   // DIL4 word (lDilateC, run before the round's x pass): its sources in the x pass, DA in the y pass, DB in the z
   // pass, so the distances need no F brick past the owners' margin. Such a tile has no heat (as before: a tile no
   // slot holds was no source). A tile in no resident page (or outside the lattice) is no source.
-  const lDilate = k("lDilate", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, LD_WGSL].join("\n") + /* wgsl */`
+  // Tiered, the activity heat is the census's HEAT4 (every tile's, continuous across F's slot entry, as the old
+  // particleHeat is a live tile's); all h, F's own FT_H.
+  const census = { name: "census", kind: "ro", type: "array<u32>" } as const;
+  const LD_HEAT_WGSL = F.tiered ? /* wgsl */`
+const LD_HEAT4:u32=${CENSUS.HEAT4}u;const LD_CS:u32=${CENSUS.STRIDE}u;
+fn lHeat4(c:vec3i)->f32{let t=c>>vec3u(2u);let cs=fgTileCSlot(t);if(cs==NB_NONE){nbFail(NB_FAIL_TIER,0x4c480001u);return 0.0;}return bitcast<f32>(census[LD_CS*cs+LD_HEAT4+foTileIndex(t)]);}
+// The old 27-tile max of the activity heat over the live tiles about tile t (F's or C-only: HEAT4 is every live
+// tile's); a tile no page holds is not live and adds nothing.
+fn lHeat4Max(t:vec3i)->f32{
+ var m=0.0;
+ for(var k=0u;k<27u;k++){
+  let q=t+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);
+  if(!foTileInLattice(q)){continue;}let cs=fgTileCSlot(q);if(cs==NB_NONE){continue;}
+  m=max(m,bitcast<f32>(census[LD_CS*cs+LD_HEAT4+foTileIndex(q)]));
+ }
+ return m;
+}
+` : "fn lHeat4(c:vec3i)->f32{return 0.0;}fn lHeat4Max(t:vec3i)->f32{return 0.0;}";
+  const lDilate = k("lDilate", [CFG, FB.set, FB.dir, FB.fcell, ...(F.tiered ? [census] : [])], [FG_SLOT_WGSL, FG_FCELL_WGSL, LD_WGSL, LD_HEAT_WGSL].join("\n") + /* wgsl */`
 fn lSource(word:u32,flags:u32,pz:u32,round:u32)->u32{
  if(pz>0u){return word;}
  var d=0xfffu;
@@ -365,6 +384,8 @@ fn lSource(word:u32,flags:u32,pz:u32,round:u32)->u32{
 // The census heat this step (activitySpread): the last heat cooled at 4/s, or 2 where the census triggered the
 // tile (NB_S_TRIG, setCensus at the part 1 head). c is a cell of the tile, i its tile word.
 fn lHeatNow(c:vec3i,i:u32,dt:f32)->f32{
+ // Tiered: censusDecide's HEAT4, updated at this head by the same rule on the same TRIG.
+ if(FG_TIERED){return lHeat4(c);}
  let h=fcLoadF(i+FT_H);
  return max(max(0.0,h-4.0*dt),select(0.0,2.0,fgTileTrig(c)));
 }
@@ -383,15 +404,25 @@ fn lAbsentWord(t:vec3i)->u32{
  let mask=select(0xff0u,15u,round==2u);
  let dt=nbRingF(cfg.x,NB_RING_DT);
  var best=0xfffu;var hmax=0.0;
+ // The extension support (umTileSupport, round 1): the frame plan's seed and dilate0..2 (uniform-mixed-frame-plan.ts,
+ // surfaceOnly, fineReach 2, shellReach 1) over the occupied field. Bit 0 within 2 tiles on every axis; bit 1 within
+ // 3, with at most one axis at 3 (each pass adds bit 1 from bit 0 at 3, both bits within 2). sup: this pass's pair.
+ var sup=0u;
  for(var off=-R;off<=R;off++){
   var tq=tc;tq[a]+=off;if(any(tq<vec3i(0))){continue;}
   let i=fgTileAt(4*tq,0u);
-  var src=0xfffu;
+  var src=0xfffu;var sw=0u;
   if(lFAbsent(i,tq)){
    let w=lAbsentWord(tq);if(w==NB_NONE){continue;}
    if(pz==0u){src=lSource(0u,w>>24u,0u,round);}else{src=(w>>select(12u,0u,pz==1u))&0xfffu;}
-  }else if(pz==0u){src=lSource(0u,fcLoad(i+FT_FLAGS),0u,round);}else{src=fcLoad(i+fromW)&0xfffu;}
+   sw=(w>>29u)&3u;
+  }else if(pz==0u){src=lSource(0u,fcLoad(i+FT_FLAGS),0u,round);}else{let w=fcLoad(i+fromW);src=w&0xfffu;sw=(w>>12u)&3u;}
   let ao=u32(abs(off));
+  if(round==1u&&pz>0u&&ao<=3u){
+   // y: the x pass's pair from its occupied distance; z: the y pass's stored pair.
+   var pair=sw;if(pz==1u){let dx=(src>>8u)&15u;pair=select(0u,1u,dx<=2u)|select(0u,2u,dx<=3u);}
+   if(ao<=2u){sup|=pair;}else{sup|=(pair&1u)<<1u;}
+  }
   for(var f=0u;f<3u;f++){
    let d=(src>>(4u*f))&15u;if(d==15u){continue;}
    let n=max(d,ao);if(n<((best>>(4u*f))&15u)){best=(best&~(15u<<(4u*f)))|(n<<(4u*f));}
@@ -405,13 +436,24 @@ fn lAbsentWord(t:vec3i)->u32{
  let own=fgTileWord(slot,t,0u);
  if(pz<2u){
   let to=select(FT_DB,FT_DA,pz==0u);
-  fcStore(own+to,best);
+  // The y pass's support pair at bits 12..13 of DB (round 1's; round 2 keeps it for the tail's x4Support).
+  if(pz==1u){
+   var pair=sup;if(round==2u){pair=(fcLoad(own+to)>>12u)&3u;}
+   fcStore(own+to,best|(pair<<12u));
+  }else{fcStore(own+to,best);}
   if(round==2u){fcStoreF(own+select(FT_HB,FT_HA,pz==0u),hmax);if(pz==0u){fcStoreF(own+FT_HN,lHeatNow(4*tc,own,dt));}}
   return;
  }
  let old=fcLoad(own+FT_DIST);
- fcStore(own+FT_DIST,(old&~mask)|(best&mask));
- if(round==2u){let hn=fcLoadF(own+FT_HN);fcStoreF(own+FT_H,hn);fcStoreF(own+FT_T,max(hn,0.5*hmax));}
+ // FT_DIST bit 12: the support's bit 1 (round 1's, kept by round 2).
+ var bit=old&0x1000u;if(round==1u){bit=select(0u,0x1000u,(sup&2u)!=0u);}
+ fcStore(own+FT_DIST,(old&~(mask|0x1000u))|(best&mask)|bit);
+ if(round==2u){
+  let hn=fcLoadF(own+FT_HN);
+  // Tiered: the max over all 27 live tiles (HEAT4), where the separable passes see F's tiles only.
+  var m=hmax;if(FG_TIERED){m=lHeat4Max(tc);}
+  fcStoreF(own+FT_H,hn);fcStoreF(own+FT_T,max(hn,0.5*m));
+ }
 }`);
 
   // lDilateC (tiered): cfg.w = the round. A workgroup a C page (C_ALL, G1), before the round's lDilate x pass: for
@@ -501,16 +543,21 @@ fn dSource(t:vec3i,x:u32,y:u32,z:u32)->u32{
   let x=i&7u;let y=(i>>3u)&7u;let z=i>>6u;let t=P+vec3i(i32(x),i32(y),i32(z));
   if(!foTileInLattice(t)||!lFAbsent(fgTileAt(4*t,0u),t)){continue;}
   if(foTileOwnerH(t)){nbFail(NB_FAIL_TIER,0x4c440001u);}
-  var best=0xfffu;
+  var best=0xfffu;var sup=0u;
   for(var off=-R;off<=R;off++){
    let src=dA[x+8u*u32(i32(y)+5+off)+144u*z];let ao=u32(abs(off));
+   // lDilate's support pair (round 1), from the x pass's occupied distance.
+   if(ao<=3u){let dx=(src>>8u)&15u;let pair=select(0u,1u,dx<=2u)|select(0u,2u,dx<=3u);if(ao<=2u){sup|=pair;}else{sup|=(pair&1u)<<1u;}}
    for(var f=0u;f<3u;f++){
     let d=(src>>(4u*f))&15u;if(d==15u){continue;}
     let n=max(d,ao);if(n<((best>>(4u*f))&15u)){best=(best&~(15u<<(4u*f)))|(n<<(4u*f));}
    }
   }
   let flags=dSource(t,x+5u,y+5u,z);
-  fcStore(FC_DIL4+512u*slot+i,(dA[x+8u*(y+5u)+144u*z]&0xfffu)|(best<<12u)|((flags&255u)<<24u));
+  let at=FC_DIL4+512u*slot+i;
+  // Bits 29..30: the y pass's support pair, round 1's (round 2 keeps it).
+  var pair=sup;if(round==2u){pair=(fcLoad(at)>>29u)&3u;}
+  fcStore(at,(dA[x+8u*(y+5u)+144u*z]&0xfffu)|(best<<12u)|((flags&31u)<<24u)|(pair<<29u));
  }
 }`) : undefined;
 
