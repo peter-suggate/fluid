@@ -472,7 +472,9 @@ in words from its start. Regions are laid out in this order, each a multiple of 
 | 231 | `CENSUS_TRIGGERED` | tiles with a trigger bit (sum of TRIG bits) |
 | 232, 233 | `REL_SPEED0 REL_SPEED1` | the release port's plan speed (umSupport[4T]): the largest \|US\| face an owner's reach reads, f32 bits (m/s) by `atomicMax`, inf where one is non-finite. `nrReach` reduces into copy `cfg.y` and zeroes the other; `nrSpread` takes its radius from it (umCertificateRadius). |
 | 234–239, 240–245 | `WALL_REACH0`, `WALL_REACH1` | the released walls' reach (umPlaneReach, UM_WALL_REACH): for each face direction f = 2a + upper, the largest dt·away / h (cells, f32 bits by `atomicMax`) of a released wall face tile, 0 where none. `nrWallReach` reduces into copy `cfg.y` (6 words from 234 + 6·cfg.y) and zeroes the other; `lcAdvect` and `lAdvect` read it (levelset-release.wgsl.ts). |
-| 246–255 | reserved, E | |
+| 246 | `RES_RADIUS` | the head's residency (§5.4): the largest region radius this census, in tiles (the old pageSeed's closure radius, `atomicMax`). Cleared by `censusBegin`. |
+| 247, 248 | `RES_CLAIMED_F RES_CLAIMED_C` | the bricks and pages the head's residency request took (NONE → CLAIM) this census. Cleared by `censusBegin`. |
+| 249–255 | reserved, E | |
 
 ### 5.2 Param ring (words 256–1279)
 
@@ -516,13 +518,14 @@ its `TOP_*` word.
 |---|---|---|
 | `MARK_F` | `FCAP` | `setMark`'s keep bits for live F slots: bit 0 keep, bit 1 h-owned wanted (M2); cleared by `setUpdate` |
 | `MARK_C` | `CCAP` | the same for C slots |
-| `CAND` | `CAND_CAP = FCAP` | enter candidates: brick keys (§4.1 word 29). Duplicates allowed; `setUpdate` dedupes by compare-exchange on the directory. Overflow latches `FAIL.LIST`. |
+| `CAND` | `CAND_CAP = FCAP` | enter candidates: brick keys (§4.1 word 29), `NB_KEY_PAGE` (bit 30) for a page key. Duplicates allowed; `setUpdate` dedupes by compare-exchange on the directory. Bit 31 (`KEY_CLAIMED`): the head's residency request already took the key's directory word NONE → CLAIM, so the claim pops without the exchange. Overflow latches `FAIL.LIST`. |
 | `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` reads it, then clears it |
 | `BOUND_C` | `CCAP` | the same for C slots (4h faces) |
 | `AIR_GATE` | `16 * CCAP` | per C slot, 512 bits: bit `t` (the tile's C local) set where the far-air gate holds (umFarAirKept's plane 4: the 3³ about tile `t` meets the collar, the seeds dilated 4 tiles an axis over live tiles). Written by `lcClear` every step, read by the next step's `lcAdvect`: a C vertex with φ ≥ 16 h whose cell's tile has the bit clear keeps φ untraced. Zeroed at `setClaimPages`, like `WANT`. |
 | `REACH0`, `REACH1` | `512 * CCAP` each | per C slot, a word a tile (the tile's C local): the tile's signed reach, umPackReach (5 bits an axis each way, 31 saturated), in tiles. `nrReach` (part 1, after the head, before move: the old frame plan's localSpeed) writes the local word into `REACH0` from the US faces its owners read, F's bricks for h tiles and the page for 4h tiles. `nrSpread`'s three passes (x: 0→1, y: 1→0, z: 0→1) take the separable maximum over ±radius tiles. An AIR tile saturates, the box contributes 0. The final word is `REACH1`, read by umDeepAirKept (`nbrDeepAirKept`). |
 | `REACH_STEP` | `CCAP` | the ring step + 1 that the slot's reach words were made for (`nrReach`). A slot claimed after part 1 (setClaimPages in part 2) has no words for this step, and its tiles read saturated, as the spread's AIR. |
 | `WALL_TILE` | `384 * CCAP` | per C slot, 64 words a face direction f (umFaceTile: u + 8v of the tile in the face's plane): a wall face tile's largest released dt·away / h (cells, f32 bits; 0 where none). Written by `nrWallReach` (part 2, before `stages.levelSet`: the old wallReach) for each of the page's wall faces, the box across. umReleasedMayChange reads it. The other faces' words are not written or read. |
+| `PSUPPORT` | `8 * FCAP` | per F slot (`NB_S_PSUPPORT + 8·slot`), the particle support the head's residency reads (§5.4; the old DEPB refine prediction, uniform-particle-brick.wgsl.ts 33–38, 240–262): word 0 bit j = tile j of the brick (tx \| ty<<1 \| tz<<2) is in some live record's support (the 2³ tiles from floor((x − 2)/4)); words 1–3 and 4–6 the −xyz and +xyz travel maxima of those records (f32 bits, cells, `atomicMax`: ballistic \|v\|·dt/h all six ways, coupled max(∓before, 0)·dt/h + NB_SEPARATION_REACH); word 7 pad. F's `pJoin` accumulates it in part 2 for every live record of bank dst (an absent support brick latches `FAIL.REACH`); the head's `resSeed` reads and zeroes it; `setClaimBricks` zeroes a new slot's. |
 
 **The reach rule** (`setMark`, amended at M1). A brick holding a liquid vertex (φ < 0) or a
 non-empty bin keeps or enters every brick that overlaps its **reach box**. In cells, that box is

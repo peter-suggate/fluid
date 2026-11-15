@@ -41,6 +41,11 @@ export const phiFar = (lattice: readonly number[]) => Math.max(...lattice);
  * it gives the design's one-brick ring, and never more than
  * ceil(bound dt / 8h) + 1 bricks. */
 export const REACH_MARGIN = 7;
+/** A candidate key's flag (bit 31): the residency request already took its directory word NONE -> CLAIM. */
+export const KEY_CLAIMED = 0x80000000;
+/** Words an F slot of the particle support (NB_S_PSUPPORT, brick-abi.md §5.4): the support mask of the brick's 8
+ * tiles, then six travel maxima (-xyz, +xyz; f32 bits, cells), then a pad. */
+export const PSUPPORT_WORDS = 8;
 
 /** Bricks an axis that hold the lattice's vertices 0..n (the skirt included). */
 export const bricksPerAxis = (lattice: readonly number[]): [number, number, number] => lattice.map(n => Math.floor(n / 8) + 1) as [number, number, number];
@@ -70,6 +75,9 @@ export const H = {
    * (cfg.y): the plan's speed (f32 bits, m/s; nrReach), and 6 words each of the face directions' released wall reach
    * (f32 bits, cells; nrWallReach). */
   REL_SPEED0: 232, REL_SPEED1: 233, WALL_REACH0: 234, WALL_REACH1: 240,
+  /** The head's residency (brick-residency.wgsl.ts; brick-abi.md §5.4): the largest region radius this census, in
+   * tiles (the old pageSeed's closure radius), and the bricks and pages its request claimed. */
+  RES_RADIUS: 246, RES_CLAIMED_F: 247, RES_CLAIMED_C: 248,
 } as const;
 
 /** Latched failure bits (H.FAIL), brick-abi.md §8. */
@@ -178,6 +186,8 @@ export class BrickLayout {
      * halves; the final is reach1), the step they were made for (a word a C slot: ring step + 1), and the released wall
      * face tiles (384 words a C slot, 64 a face direction). */
     readonly reach0: number; readonly reach1: number; readonly reachStep: number; readonly wallTile: number;
+    /** The particle support (§5.4): PSUPPORT_WORDS an F slot, accumulated by F's pJoin, read and cleared by the head's resSeed. */
+    readonly psupport: number;
     readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -214,7 +224,8 @@ export class BrickLayout {
     }
     const airGate = take(CMASK_WORDS * c);
     const reach0 = take(512 * c), reach1 = take(512 * c), reachStep = take(c), wallTile = take(384 * c);
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, words: at };
+    const psupport = take(PSUPPORT_WORDS * f);
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, reach0, reach1, reachStep, wallTile, psupport, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -298,6 +309,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);
+  c("NB_S_PSUPPORT", s.psupport); c("NB_PSUPPORT_WORDS", PSUPPORT_WORDS); c("NB_KEY_CLAIMED", KEY_CLAIMED);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);
