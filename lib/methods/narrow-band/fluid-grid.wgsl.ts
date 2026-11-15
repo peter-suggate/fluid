@@ -123,6 +123,8 @@ fn fgTileWord(slot:u32,t:u32,w:u32)->u32{return FC_TILE+FT_WORDS*(8u*slot+t)+w;}
 fn fgCell(slot:u32,c:vec3i)->u32{return 512u*slot+nbLocal(c);}
 // The census's importance trigger (NB_S_TRIG, bit j tile j) of the tile holding cell c; none where no slot holds it.
 fn fgTileTrig(c:vec3i)->bool{let s=fgSlot(c);if(s==NB_NONE){return false;}return ((nbSetWord(NB_S_TRIG+s)>>fgTileOf(c))&1u)!=0u;}
+// The tile's thin trigger alone (TRIG bit 8 + tile, the old census's w1 bit 17).
+fn fgTileThin(c:vec3i)->bool{let s=fgSlot(c);if(s==NB_NONE){return false;}return ((nbSetWord(NB_S_TRIG+s)>>(8u+fgTileOf(c)))&1u)!=0u;}
 // The tile word w of the tile holding cell c (NB_NONE where no slot holds it).
 fn fgTileAt(c:vec3i,w:u32)->u32{let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fgTileWord(s,fgTileOf(c),w);}
 fn fgPack(c:vec3i)->u32{return u32(c.x)|(u32(c.y)<<10u)|(u32(c.z)<<20u);}

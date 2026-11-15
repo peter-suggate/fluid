@@ -20,8 +20,7 @@
  * - pDelta: a lane a record of bank dst: recordDelta (the FLIP delta the next G2P takes).
  * - pDeposit (velocity-kernels) reclassifies the mode bit and deposits.
  *
- * Stand-in, stated: the tile's "thin" bit is false (the census publishes only the OR of its triggers, NB_S_TRIG,
- * which the level set's heat reads).
+ * The tile's "thin" bit is the census's (NB_S_TRIG bit 8 + tile, fgTileThin).
  * Sparse retirement is off (sparseNeighbours 0, as the old method's default).
  */
 import type { BrickLayout } from "./brick-abi";
@@ -155,7 +154,7 @@ fn pFile(i:u32,p:Particle,split:bool){
  p.before=vec4f(pic,p.before.w);
  if(nbfRetireDeep(depth)){return;}
  let ballistic=mode==1.0||!pSupported(q);p.before.w=nbParticleRestate(p,nbParticleAge(p),select(0.0,1.0,ballistic));
- p.position.w=nbfHeatAtG2P(p.position.w,pHeat(q),4.0,dt,ballistic,depth,false);
+ p.position.w=nbfHeatAtG2P(p.position.w,pHeat(q),4.0,dt,ballistic,depth,fgTileThin(pCellOf(q)));
  if(p.position.w<=0.0){return;}
  var end=nbfDrift(q,p.velocity.xyz,pic,mode!=1.0,dt,h);
  if(!ballistic){
