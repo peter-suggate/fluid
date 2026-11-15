@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, RING, SEAM, bricksPerAxis, phiFar } from "./brick-abi";
-import { CENSUS, CENSUS_H, CENSUS_POLICY, brickCensusBuffers, brickCensusSchedule, brickTrigCensusSchedule } from "./brick-census.wgsl";
+import { CENSUS, CENSUS_H, CENSUS_POLICY, REGION_H, RG, brickCensusBuffers, brickCensusSchedule, brickTrigCensusSchedule } from "./brick-census.wgsl";
 
 type V3 = [number, number, number];
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -722,6 +722,59 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       assert.deepEqual([...after.subarray(L.set.markF, L.set.markF + L.cap.f)], [...set.subarray(L.set.markF, L.set.markF + L.cap.f)], "no keep mark");
       assert.equal(after[CENSUS_H.CENSUS_TRIGGERED], want.counters.CENSUS_TRIGGERED);
       assert.equal(after[CENSUS_H.CENSUS_BAND], 0, "no band decision");
+    }
+    // ---- The real D (D != 0): a step head's census (keep, cfg.w = 1) on region tiers. Regions R.x <= 2 COLD, the rest
+    // HOT: the head's deep pass (censusCoarse) makes exactly R.x <= 1 deep (every stored neighbour COLD). Each deep
+    // tile's carried CC_DECIDED bit is the complement of its D = 0 band (decidedPrev = 1 where D = 0 bands none) and its
+    // CC_STATIC bit a pattern: WANT, DEC and STAT must be the oracle's with that D, and the deep count H.HEAT_DEEP.
+    {
+      const RGW = (cs: number, r: number, w: number) => CENSUS.STRIDE * cs + CENSUS.REG + RG.WORDS * r + w;
+      const regionOf = (t: V3): V3 => [t[0] >> 2, t[1] >> 2, t[2] >> 2];
+      const cens = await e.read("census");
+      const before = new Map<number, Uint32Array>();
+      let regions = 0;
+      for (const cs of cAll) {
+        const pk = pageCoord.get(cs)!;
+        for (let r = 0; r < 8; r++) { const R = [2 * pk[0] + (r & 1), 2 * pk[1] + ((r >> 1) & 1), 2 * pk[2] + (r >> 2)]; cens[RGW(cs, r, RG.TIER)] = R[0]! <= 2 ? 0 : 2; regions++; }
+        const dec = new Uint32Array(16), stat = new Uint32Array(16);
+        for (let i = 0; i < 512; i++) {
+          const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]);
+          if (!want.band.get(key(t))) dec[i >> 5] = (dec[i >> 5]! | (1 << (i & 31))) >>> 0;
+          if ((i * 7) % 5 === 0) stat[i >> 5] = (stat[i >> 5]! | (1 << (i & 31))) >>> 0;
+        }
+        cens.set(dec, CENSUS.STRIDE * cs + CENSUS.DEC); cens.set(stat, CENSUS.STRIDE * cs + CENSUS.STAT);
+        before.set(cs, stat);
+      }
+      e.write("census", 0, new Uint32Array(cens));
+      await e.run(brickCensusSchedule(L, k => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 }), LIST.C_ALL, LIST.F_ALL, true, true, true));
+      const after = await e.read("set"), cAfter = await e.read("census");
+      assert.equal(after[H.FAIL], 0, `FAIL ${after[H.FAIL]} info ${after[H.FAIL_INFO]?.toString(16)}`);
+      const deepT = (t: V3) => regionOf(t)[0] <= 1 && 4 * t[1] < N[1];
+      const withDeep = censusOracle(state, { has: deepT, decided: t => !want.band.get(key(t)) });
+      const bad: string[] = [];
+      let deepTiles = 0, kept = 0, prevOne = 0;
+      for (const cs of cAll) {
+        const pk = pageCoord.get(cs)!, o = CENSUS.STRIDE * cs;
+        for (let r = 0; r < 8; r++) { const deep = 2 * pk[0] + (r & 1) <= 1; if (cAfter[RGW(cs, r, RG.DEEP)] !== +deep && bad.length < 20) bad.push(`page ${cs} region ${r} deep ${cAfter[RGW(cs, r, RG.DEEP)]}`); }
+        for (let w = 0; w < 16; w++) {
+          const g = after[L.set.want + CMASK_WORDS * cs + w]!, x = withDeep.want.get(cs)![w]!;
+          if (g !== x && bad.length < 20) bad.push(`page ${cs} WANT word ${w}: ${g.toString(16)} vs ${x.toString(16)}`);
+          if (cAfter[o + CENSUS.DEC + w] !== x && bad.length < 20) bad.push(`page ${cs} DEC word ${w}`);
+        }
+        for (let i = 0; i < 512; i++) {
+          const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]);
+          if (4 * t[1] >= N[1]) continue;
+          const joined = ((occ[snap.bricks.get(key(shr(t, 1)))!] ?? 0) >>> (8 + ((t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2)))) & 1;
+          const deep = deepT(t) && !joined;
+          const statX = deep ? (before.get(cs)![i >> 5]! >>> (i & 31)) & 1 : joined;
+          if (((cAfter[o + CENSUS.STAT + (i >> 5)]! >>> (i & 31)) & 1) !== statX && bad.length < 20) bad.push(`tile ${t} STAT`);
+          if (deep) { deepTiles++; if (withDeep.band.get(key(t)) !== want.band.get(key(t))) kept++; if (!want.band.get(key(t))) prevOne++; }
+        }
+      }
+      assert.equal(after[REGION_H.HEAT_DEEP], regions / 2, "deep regions");
+      assert.deepEqual(bad, [], `${bad.length} mismatches with D != 0`);
+      assert.ok(deepTiles > 100 && kept === deepTiles && prevOne > 50, `deep tiles ${deepTiles}, kept ${kept}, decidedPrev = 1 ${prevOne}`);
+      console.log("setCensus D != 0:", JSON.stringify({ regions, deepTiles, prevOne }));
     }
     // Coverage: the scene reaches every rule the dam's policy runs.
     const fins = [...want.scratch.values()].flatMap(sc => sc.fin);

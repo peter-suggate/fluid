@@ -37,18 +37,18 @@
  *   umDepthSample, umApproach); a page inside it that is not resident is AIR; BULK16 pages do not exist at M2.
  *
  * Deviations, all stated:
- * - Deep COLD is taken as D = 0 (no replay, no CC_DECIDED or CC_STATIC carried between censuses): every
- *   tile is classified and decided every census. brick-census.test.ts checks that the decisions of tiles
- *   that are not deep are the same with D = 0 (they never read D). The dam's real census (brick-census-dam.test.ts,
- *   frames 14 and 43, whole lattice): every deep tile replayed decidedPrev = 0 and D = 0 bands none of them, so
- *   WANT is identical; in the old run's frames 1-150 no deep tile ever had prevBand = 1 (1088 deep tiles at
- *   frame 14, up to 5952). Accepted for M2 (coordinator, 2026-11-15); the real D (decidedPrev and region heat)
- *   lands with the tiers and before M3 (seep's reservoir is mostly deep).
- *   Rulings for it (coordinator, 2026-11-15): no cold freeze (its terms umColdError, umColdTermOf are identically
- *   0: nothing is omitted), and lcAdvect's COLD φ hold stays off; pressureDelta is lane P's per-region max |Δ∇p|
- *   (pmgC PDELTA, +Inf until published: unknown fails HOT); a 4h tile with no F slot keeps its own heat word,
- *   updated in censusDecide by the old rule. M3 question, to be measured, not assumed: the freeze against seep's
- *   BULK pressure-only rows in the deep interior, decided by time and gates.
+ * - Deep COLD (the real D, brick-region-heat.wgsl.ts; tiered only, all-h keeps D = 0): the region heat, spread and
+ *   deep passes run at the head (regionHeat and regionSpread after censusBegin, the deep pass in censusCoarse) and
+ *   again after the claims (certError; the census scheduled alone, `heat` false, keeps D = 0); censusDecide keeps a deep tile's CC_DECIDED and CC_STATIC bits (DEC, STAT) unless
+ *   it is joined, as decideTile (l.2849), and every other tile's bits are its band and its join. Replay is not ported:
+ *   every tile is classified every census, so a deep tile's records are this census's, where the old replay published
+ *   the ones its last classification stored (a deep COLD region's φ, widths and masks are the same; its velocity keys
+ *   are checked, l.2014). The dam's real census (brick-census-dam.test.ts, frames 14 and 43): every deep tile replayed
+ *   decidedPrev = 0. Rulings (coordinator, 2026-11-15): no cold freeze (its terms umColdError, umColdTermOf are
+ *   identically 0: nothing is omitted), and lcAdvect's COLD φ hold stays off; pressureDelta is lane P's per-region
+ *   max |Δ∇p| (pmgC PDELTA, +Inf where not published: unknown fails HOT); a 4h tile with no F slot keeps its own heat
+ *   word (HEAT4, here every tile's), updated in censusDecide by the old rule. M3 question, to be measured, not
+ *   assumed: the freeze against seep's BULK pressure-only rows in the deep interior, decided by time and gates.
  * - No solids at M2: every census open mask is all cells (umCensusOpenCells), so the cut branches
  *   (umPlaneBuriedCorners, buried taps, closed edges) drop, and umObstacleAt is false. A body or solid edit
  *   fails explicitly (NB_FAIL_UNSUPPORTED).
@@ -82,6 +82,15 @@ export const CENSUS_H = {
   /** Band tiles that are 4h now (census[4]). */ CENSUS_REFINED: 230,
   /** Tiles whose importance triggers (TRIG bits). */ CENSUS_TRIGGERED: 231,
 } as const;
+/** The real D's header words (brick-region-heat.wgsl.ts; lane E's 249..255, brick-abi.md §5.1). */
+export const REGION_H = {
+  /** The region heat (brick-region-heat.wgsl.ts): 0 until the first heat ran (that heat forces, the old rh.force). */ HEAT_FORCED: 249,
+  /** coldSurface "still": the liquid's extent along gravity at the last spread, regions (persistent; 0 before any). */ STILL_EXTENT: 250,
+  /** This step's highest and lowest liquid region along gravity (max of 32768 +- the projection). */ STILL_HIGH: 251, STILL_LOW: 252,
+  /** This step's fastest liquid travel, h a step (f32 bits). */ STILL_TRAVEL: 253,
+  /** Deep COLD regions at the head's deep (the census reads them). */ HEAT_DEEP: 254,
+  /** COLD regions at the head's spread. */ HEAT_COLD: 255,
+} as const;
 
 /** The dam's policy, as the old encode wrote it (uniform-mixed-dynamic.ts l.2358; brick-abi.md §2.5). */
 export const CENSUS_POLICY = {
@@ -103,7 +112,20 @@ export const CENSUS_POLICY = {
  * motion (DEF, 4 words: the mean extended face velocity, xyz, and the face span, f32; localSpeed's, PLAN below),
  * which censusFine (h tiles) and censusCoarse (4h tiles) write and censusDecide's deformation reads. */
 export const CENSUS = {
-  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, RES: 7168, DEF: 7328, STRIDE: 9376,
+  KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, RES: 7168, DEF: 7328,
+  TC: 9376, HEAT4: 17568, REG: 18080, DEC: 18336, STAT: 18352, STRIDE: 18368,
+} as const;
+/** The real D's words (brick-region-heat.wgsl.ts), in the census buffer after DEF:
+ * - TC, 16 words a tile: the frame plan's certificate (localSpeed, uniform-mixed-frame-plan.ts l.269), written after
+ *   the transfer: 0..2 the mean extended face velocity (f32), 3 the defect (m/s, -1 dry), 4 the speed, 5 the owner
+ *   width (1 or 4), 6 the span, 7 the normal surface rate, 8 bits (1 the support seed: a liquid vertex; 2 a cell or
+ *   owner whose corners are not all below -(7h + 3 dt speed): tuReaderClass 2), 9..14 the tileVelocity order words;
+ * - HEAT4, a word a tile: the activity heat (f32; the old particleHeat, NB_ACTIVITY_HEAT), every tile's, censusDecide's;
+ * - REG, 32 words a region (RG below), the old region heat state and its certificate's reductions;
+ * - DEC and STAT, 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits, carried between censuses. */
+export const RG = {
+  HEAT: 0, DISP: 1, KEY: 2, PENDING: 3, BITS: 4, HOLDS: 5, STILL: 6, TIER: 7, DEEP: 8, EPOCH: 9, DEEP_EPOCH: 10, STAMP: 11,
+  CKEY: 16, VEL: 17, RATE: 23, ACCEL: 24, ERROR: 25, RELEVANT: 26, CLASS: 27, FINE: 28, WORDS: 32,
 } as const;
 /** The lane buffers setCensus binds: `census`, CENSUS.STRIDE words a C slot. */
 export const brickCensusBuffers = (L: BrickLayout): Record<string, number> => ({ census: CENSUS.STRIDE * L.cap.c });
@@ -111,7 +133,7 @@ export const brickCensusBuffers = (L: BrickLayout): Record<string, number> => ({
 const f = (x: number) => (Number.isInteger(x) ? x.toFixed(1) : String(x));
 
 /** The census header constants, unless brick-abi.ts declares them already. */
-const headerWGSL = () => Object.entries(CENSUS_H).map(([name, v]) => {
+const headerWGSL = () => Object.entries({ ...CENSUS_H, ...REGION_H }).map(([name, v]) => {
   const declared = (H as Record<string, number>)[name];
   if (declared !== undefined && declared !== v) throw new Error(`setCensus: H.${name} is ${declared}, the census uses ${v}`);
   return declared === undefined ? `const NB_H_${name}:u32=${v}u;` : "";
@@ -782,9 +804,50 @@ fn ncFace(q:vec3i,a:u32)->f32{var e=vec3i(0);e[a]=1;return nbFacePlane(q+e,a);}
 fn xTileOf(cs:u32,i:u32)->vec3i{return 8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u));}
 `;
 
+/** The region words (RG) and the old deep pass (uniform-region-heat.ts rhDeep), for a module that binds dir and census
+ * (array<u32>) and set (atomic). A region is the old 16h region: an octant of a C page, r = x | y << 1 | z << 2 of
+ * its 4x4x4 tile block; its coordinate R = 2 page + octant. A region of no resident page in the lattice is not
+ * stored (the old umTileKey of its first tile fails umKeyStored), and every loop over neighbours skips it. */
+const REGION = /* wgsl */`
+${Object.entries(RG).map(([k, v]) => `const RG_${k}:u32=${v}u;`).join("")}
+const RG_REG:u32=${CENSUS.REG}u;const RG_HEAT4:u32=${CENSUS.HEAT4}u;const RG_TC:u32=${CENSUS.TC}u;
+fn rgAt(cs:u32,r:u32)->u32{return ${CENSUS.STRIDE}u*cs+RG_REG+RG_WORDS*r;}
+fn rgCoord(cs:u32,r:u32)->vec3i{return 2*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(r&1u),i32((r>>1u)&1u),i32(r>>2u));}
+// A region inside the lattice. A page beyond it (the reach ring across a closed wall) holds no lattice tile: its
+// regions are none of the heat's (no heat, tier, deep or count), as the old region lattice's.
+fn rgInLattice(R:vec3i)->bool{return all(R>=vec3i(0))&&all(16*R<NB_LATTICE);}
+fn rgOf(R:vec3i)->u32{
+  if(!rgInLattice(R)){return NB_NONE;}
+  let cs=nbCSlotOfPage(R>>vec3u(1u));if(cs==NB_NONE){return NB_NONE;}
+  return rgAt(cs,u32(R.x&1)|(u32(R.y&1)<<1u)|(u32(R.z&1)<<2u));
+}
+// Region r's tile l (x + 4y + 16z of its block) as a page tile index, and a page tile's region.
+fn rgTile(r:u32,l:u32)->u32{return ((l&3u)+4u*(r&1u))|((((l>>2u)&3u)+4u*((r>>1u)&1u))<<3u)|(((l>>4u)+4u*(r>>2u))<<6u);}
+fn rgOfTile(i:u32)->u32{return ((i>>2u)&1u)|(((i>>5u)&1u)<<1u)|(((i>>8u)&1u)<<2u);}
+// The page key a region's words carry, + 1 (0: never written).
+fn rgKey(cs:u32)->u32{return nbCRec(cs,NB_REC_KEY)+1u;}
+// rhDeep: on the tiers as they stand, the region's deep COLD flag (COLD and every stored neighbour COLD), its non-COLD
+// epoch and its deep epoch. count: the head's deep (HEAT_DEEP).
+fn rgDeep(cs:u32,r:u32,count:bool){
+  if(!rgInLattice(rgCoord(cs,r))){return;}
+  let at=rgAt(cs,r);let tier=census[at+RG_TIER];
+  if(tier!=0u){census[at+RG_EPOCH]+=1u;}
+  var cold=tier==0u;let c=rgCoord(cs,r);
+  for(var k=0u;k<27u&&cold;k++){
+    let n=rgOf(c+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1));if(n==NB_NONE){continue;}
+    cold=census[n+RG_TIER]==0u;
+  }
+  census[at+RG_DEEP]=u32(cold);
+  if(!cold){census[at+RG_DEEP_EPOCH]+=1u;}
+  if(cold&&count){atomicAdd(&nbSet[NB_H_HEAT_DEEP],1u);}
+}
+`;
+
 const OWNER = brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" });
 /** The census's storage hooks, owner readers and kernel builder, for the head's residency (brick-residency.wgsl.ts). */
 export const CENSUS_HOOKS = HOOKS, CENSUS_OWNER = OWNER, censusKernel = kernel;
+/** The census formulas' frame plan (PLAN) and the region words (REGION), for the real D (brick-region-heat.wgsl.ts). */
+export const censusPlanWGSL = () => PLAN, CENSUS_REGION = REGION;
 
 /** The tile's words, stored by the one lane that finishes it. */
 const STORE = /* wgsl */`
@@ -896,6 +959,8 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
 @compute @workgroup_size(1) fn censusBegin(){
   for(var w=NB_H_CENSUS_CLAMPED;w<=NB_H_CENSUS_TRIGGERED;w++){atomicStore(&nbSet[w],0u);}
   for(var w=NB_H_RES_RADIUS;w<=NB_H_RES_CLAIMED_C;w++){atomicStore(&nbSet[w],0u);}
+  // The region heat's per-step words (the old encode's clearBuffer of the still words and the tier counts).
+  for(var w=NB_H_STILL_HIGH;w<=NB_H_HEAT_COLD;w++){atomicStore(&nbSet[w],0u);}
   let flags=nbRing(cfg.x,NB_RING_FLAGS)&(NB_RING_FLAG_SOLID_EDIT|NB_RING_FLAG_BODIES);
   if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u){nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
 }`);
@@ -1043,7 +1108,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
   // (tile z = r), a lane a tile; every workgroup word is the 64-tile slab's, so the slabs run side by side.
   // Out-of-lattice tiles store identity keys and zero words; an h tile without its F brick fails (TIER) when tiered,
   // and is air all-h (CMASK all-ones a resident page: no slot reads NB_PHI_FAR), so it stores the identity.
-  const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + /* wgsl */`
+  const censusCoarse = k("censusCoarse", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + REGION + /* wgsl */`
 var<workgroup> wgFlag:u32;
 var<workgroup> cqErrors:atomic<u32>;
 var<workgroup> cqError:array<u32,64>;
@@ -1166,6 +1231,10 @@ fn cqBound(owner:u32,axis:u32,anchor:vec3i){
     workgroupBarrier();
   }
   if(lane==0u){ncFlush();}
+  // The head's deep pass (rhDeep, cfg.w = 1: a tiered step's head with the real D), region r of the page: its own launch in the old
+  // engine; here the spread's barrier before it is the one censusCoarse already follows, and the census's first
+  // reader of the deep flags (censusDecide) follows censusCoarse's barrier.
+  if(lane==0u&&cfg.w==1u){rgDeep(cs,r,true);}
 }`);
 
   // censusCubes: boundCubes (l.2625), a workgroup a page of C_ALL.
@@ -1250,9 +1319,11 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   // page's F children 8r..8r+7). A band tile is h only when its F brick and each in-range 27-neighbour of it are
   // resident; a clamped tile's missing bricks are appended as candidates, once a page (the page's bit of the 6^3
   // bricks about it in CAND_MASK, whose atomicOr names the one lane that lists it), and it refines one census late.
-  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRO], OWNER + HOOKS + CENSUS_FORMULAS + PLAN + /* wgsl */`
+  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + /* wgsl */`
 var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
+var<workgroup> wgDec:array<atomic<u32>,2>;
+var<workgroup> wgStat:array<atomic<u32>,2>;
 fn ncJoined(t:vec3i)->bool{
   let b=t>>vec3u(1u);let s=nbFSlotOfBrick(b);if(s>=NB_SEAM){return false;}
   let j=u32(t.x&1)|(u32(t.y&1)<<1u)|(u32(t.z&1)<<2u);
@@ -1261,15 +1332,34 @@ fn ncJoined(t:vec3i)->bool{
 fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   let t=xTileOf(cs,i);
   if(!nbTileInLattice(t)){return;}
-  let band=ncDecide(t,ncJoined(t),ncFin(cs,i),ncKeys(cs,i),reach);
+  // A tiered step's head with the real D (cfg.z = 1, cfg.w = 3: brick-region-heat.wgsl.ts runs): the activity heat
+  // (the old particleHeat, every live tile's: the last heat cooled at 4/s, 2 where the need rule triggers; F's
+  // lHeatNow on its own tiles, the same words) and the deep keep. Without it (cfg.w = 1) D = 0: no tile is deep.
+  let head=cfg.z==1u&&cfg.w==3u;let o=NC_S*cs;
+  if(head){
+    let trig=ncNeedTriggered(t,cs,i,(ncFin(cs,i)>>16u)&63u);let h=bitcast<f32>(census[o+RG_HEAT4+i]);
+    census[o+RG_HEAT4+i]=bitcast<u32>(max(max(0.0,h-4.0*ncDt()),select(0.0,2.0,trig)));
+  }
+  let joined=ncJoined(t);let word=i>>5u;let bit=1u<<(i&31u);
+  // decideTile (l.2849): a deep COLD tile keeps the last census's decision and its static bit (no sources at M2: a
+  // join still bands it); every other tile clears both, its band sets CC_DECIDED and its join CC_STATIC.
+  var band=false;
+  if(head&&!joined&&census[rgAt(cs,rgOfTile(i))+RG_DEEP]!=0u){
+    band=(census[o+${CENSUS.DEC}u+word]&bit)!=0u;
+    if((census[o+${CENSUS.STAT}u+word]&bit)!=0u){atomicOr(&wgStat[lane>>5u],bit);}
+  }else{
+    band=ncDecide(t,joined,ncFin(cs,i),ncKeys(cs,i),reach);
+    if(joined){atomicOr(&wgStat[lane>>5u],bit);}
+  }
   if(!band){return;}
+  atomicOr(&wgDec[lane>>5u],bit);
   atomicAdd(&wgCount[0],1u);if(!nbTileH(cs,i)){atomicAdd(&wgCount[1],1u);}
   let b=t>>vec3u(1u);var clamped=false;
   for(var n=0u;n<27u;n++){
     let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
     let s=nbFSlotOfBrick(nb);
     // Tiered, at a step's head (cfg.w = 1): the band tile's present ring is kept (the brick storage's h ring, §5.4).
-    if(s<NB_SEAM){if(cfg.z==1u&&cfg.w==1u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
+    if(s<NB_SEAM){if(cfg.z==1u&&(cfg.w&1u)!=0u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
     clamped=true;
     if(s!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbKey(nb));continue;}
     // cfg.z = 1 (tiered): the clamp's missing bricks become candidates, each once a page. All-h (cfg.z = 0): WANT is
@@ -1291,7 +1381,7 @@ var<workgroup> wgGo:u32;
   let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
   if(lane==0u){wgGo=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);
-  if(lane<2u){atomicStore(&wgWant[lane],0u);}
+  if(lane<2u){atomicStore(&wgWant[lane],0u);atomicStore(&wgDec[lane],0u);atomicStore(&wgStat[lane],0u);}
   if(lane<4u){atomicStore(&wgCount[lane],0u);}
   workgroupBarrier();
   let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
@@ -1317,7 +1407,10 @@ var<workgroup> wgGo:u32;
     }
   }
   workgroupBarrier();
-  if(lane<2u&&!trigOnly){atomicStore(&nbSet[NB_S_WANT+16u*cs+2u*r+lane],atomicLoad(&wgWant[lane]));}
+  if(lane<2u&&!trigOnly){
+    atomicStore(&nbSet[NB_S_WANT+16u*cs+2u*r+lane],atomicLoad(&wgWant[lane]));
+    let o=NC_S*cs+2u*r+lane;census[o+${CENSUS.DEC}u]=atomicLoad(&wgDec[lane]);census[o+${CENSUS.STAT}u]=atomicLoad(&wgStat[lane]);
+  }
   if(lane==0u){
     let c=vec4u(atomicLoad(&wgCount[0]),atomicLoad(&wgCount[1]),atomicLoad(&wgCount[2]),atomicLoad(&wgCount[3]));
     if(c.x!=0u){atomicAdd(&nbSet[NB_H_CENSUS_BAND],c.x);}
@@ -1351,16 +1444,19 @@ var<workgroup> wgGo:u32;
 /** `keep`: a step's head, where censusDecide's band rings join the residency marks (brick-residency.wgsl.ts); the boot
  * has no leave to consume them. censusCubes takes `list`'s G1 triple; censusFine takes list fAll's X8 triple (eight
  * workgroups a brick) and the C passes censusCoarse, censusImportance and censusDecide list cAll's (eight a page). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false) {
+/** `heat`: the real D runs (brick-region-heat.wgsl.ts's regionHeat and regionSpread before censusCoarse): the head's
+ * deep pass and decide's deep keep and activity heat. Without it D = 0 (the census alone, as the frozen passes). */
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false) {
   const c = brickCensusKernels(L, { tiered });
   const slabs = censusListArgs(cAll, "X8");
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
     { kernel: c.censusFine, dispatch: censusListArgs(fAll, "X8") },
-    { kernel: c.censusCoarse, dispatch: slabs },
+    // cfg.w = 1 (a tiered step's head with the real D): censusCoarse also runs the head's deep pass (rgDeep).
+    { kernel: c.censusCoarse, dispatch: slabs, w: tiered && keep && heat ? 1 : 0 },
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
     { kernel: c.censusImportance, dispatch: slabs },
-    { kernel: c.censusDecide, dispatch: slabs, z: tiered ? 1 : 0, w: keep ? 1 : 0 },
+    { kernel: c.censusDecide, dispatch: slabs, z: tiered ? 1 : 0, w: keep ? (tiered && heat ? 3 : 1) : 0 },
   ];
 }
 /** The TRIG-only census (the boot's, after the kick, before F's seed): censusBegin through censusImportance as

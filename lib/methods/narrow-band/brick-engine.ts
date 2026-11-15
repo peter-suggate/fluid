@@ -22,6 +22,8 @@ import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule, brickTrigCensusSchedule, censusListArgs } from "./brick-census.wgsl";
 import { brickResidencyKernels } from "./brick-residency.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
+import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
+import { mgLayout } from "./pressure-mgpcg";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
 
@@ -101,6 +103,9 @@ export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "liquid" | "d
   };
   return [...reachSet(o.lattice, candidates.values(), liquid, () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2)].sort((a, b) => a - b);
 }
+
+/** A saved engine state (BrickEngine.save): every buffer's words and the step clock. */
+export interface BrickEngineState { readonly steps: number; readonly time: number; readonly buffers: ReadonlyMap<string, Uint32Array<ArrayBuffer>> }
 
 interface Recorded { readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly dispatch: BrickDispatch }
 
@@ -193,7 +198,13 @@ export class BrickEngine {
     // census there are no residency records, so such a set stays the boot's (stated: no scene runs one).
     const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
     const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep) : [];
-    const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL);
+    // The real D (brick-region-heat.wgsl.ts), tiered only: the heat and spread after censusBegin (the head's deep runs
+    // in censusCoarse), the WARM promotion in setTransferList (cfg.w = 1), the certificate after the transfer. Its
+    // pressureDelta is lane P's PDELTA where the solver publishes it (pmgC), else +Inf.
+    const pdelta = "pmgC" in solver.buffers ? mgLayout(layout).PDELTA : undefined;
+    const heat = tiered && censused ? brickRegionHeatSchedule(layout, { pdelta }) : undefined;
+    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
+    const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL).map(p => (heat && p.kernel.label === "setTransferList" ? { ...p, w: 1 } : p));
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
     const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes };
@@ -207,7 +218,7 @@ export class BrickEngine {
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
     ];
-    const head = censused ? [...census(true), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? transfer : []), churnClear] : [];
+    const head = censused ? [...headCensus(), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? [...transfer, ...(heat?.cert ?? [])] : []), churnClear] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
@@ -419,6 +430,33 @@ export class BrickEngine {
   /** Write words into an engine buffer (tests: perturb a field between steps). */
   write(name: string, offsetWords: number, data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) {
     this.device.queue.writeBuffer(this.buffers.get(name)!, 4 * offsetWords, data);
+  }
+
+  /** The engine's whole state after a fence: every buffer (fields, set, directory, census and its region heat, the
+   * solver's and the stages' buffers) and the step clock. Never on the step cadence (save points, undo, tests). */
+  async save(): Promise<BrickEngineState> {
+    await this.fence();
+    const buffers = new Map<string, Uint32Array<ArrayBuffer>>();
+    for (const name of this.buffers.keys()) buffers.set(name, new Uint32Array(await this.read(name)));
+    return { steps: this.steps, time: this.time, buffers };
+  }
+
+  /** Put a saved state back: every buffer, the clock, and the step encoded ahead for the restored step. A state from
+   * another layout fails explicitly (a missing, extra or resized buffer). */
+  async restore(state: BrickEngineState) {
+    await this.fence();
+    if (state.buffers.size !== this.buffers.size) throw new Error(`Brick engine: restore has ${state.buffers.size} buffers, the engine ${this.buffers.size}`);
+    for (const [name, b] of this.buffers) {
+      const words = state.buffers.get(name);
+      if (!words) throw new Error(`Brick engine: restore lacks buffer ${name}`);
+      if (4 * words.length !== b.size) throw new Error(`Brick engine: restore buffer ${name} has ${words.length} words, the engine ${b.size / 4}`);
+    }
+    for (const [name, b] of this.buffers) this.device.queue.writeBuffer(b, 0, state.buffers.get(name)!);
+    await this.fence();
+    for (const r of this.receipts) if (r.busy && r.buffer.mapState === "unmapped") r.busy = false;
+    this.steps = state.steps; this.time = state.time;
+    this.receipt = undefined; this.failure = undefined;
+    this.encodeAhead();
   }
 
   /** Throws the latched failure, if any, after fencing (tests). */

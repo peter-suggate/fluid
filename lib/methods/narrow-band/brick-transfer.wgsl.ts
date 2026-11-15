@@ -42,6 +42,7 @@ import { ARGS, BrickLayout, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { nbfRemapWGSL } from "./velocity-formulas.wgsl";
+import { CENSUS, RG } from "./brick-census.wgsl";
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const setRO: BrickBinding = { name: "set", kind: "ro", type: "array<u32>" };
@@ -121,7 +122,14 @@ export function brickTransferKernels(L: BrickLayout) {
 
   // setTransferList: eight workgroups a page of C_ALL (X8), workgroup r the page's tiles 64r..64r+63, a lane a tile.
   // markTile verbatim. Entries append by atomicAdd, so their order was never the tiles' (the jobs are independent).
-  const setTransferList = k("setTransferList", [CFG, setRW, dirRO, velRO, phiRO], READERS + /* wgsl */`
+  // A listed tile's region is promoted WARM (the old remap's rhPromoteWarm: its pending word and its tier at least
+  // WARM, the census buffer's region words RG; brick-region-heat.wgsl.ts): every writer writes the same 1.
+  const setTransferList = k("setTransferList", [CFG, setRW, dirRO, velRO, phiRO, { name: "census", kind: "rw", type: "array<u32>" }], READERS + /* wgsl */`
+fn xPromoteWarm(cs:u32,i:u32){
+  let at=${CENSUS.STRIDE}u*cs+${CENSUS.REG}u+${RG.WORDS}u*(((i>>2u)&1u)|(((i>>5u)&1u)<<1u)|(((i>>8u)&1u)<<2u));
+  if(census[at+${RG.PENDING}u]<1u){census[at+${RG.PENDING}u]=1u;}
+  if(census[at+${RG.TIER}u]<1u){census[at+${RG.TIER}u]=1u;}
+}
 @compute @workgroup_size(64) fn setTransferList(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let g=nbGroup(wid);if((g>>3u)>=nbListCount(NB_LIST_C_ALL)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,g>>3u);
@@ -144,6 +152,7 @@ export function brickTransferKernels(L: BrickLayout) {
     let e=atomicAdd(&nbSet[NB_H_N_TLIST],1u);
     if(e<NB_TCAP){atomicStore(&nbSet[NB_S_TLIST+2u*e],(cs<<9u)|i);atomicStore(&nbSet[NB_S_TLIST+2u*e+1u],flags);}
     else{nbFail(NB_FAIL_LIST,0x70000000u|e);}
+    if(cfg.w==1u){xPromoteWarm(cs,i);}
   }
 }`);
 

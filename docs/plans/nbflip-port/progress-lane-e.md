@@ -877,3 +877,76 @@ Per area, win-prof's `rowsWindow` (steps 18–23, ms/step), against design §6's
 | brick set | 3.68 | 36 | 0.6 |
 | floor (same-run GPU idle, xc-att) | 1.0 | – | 1.0 |
 | **total** | 112.2 kernel + 1.0 | 293 | – |
+
+## 2026-11-15: the real D built (task 4, item 3)
+
+The uniform-region heat, spread and deep tiers run on the brick engine (brick-region-heat.wgsl.ts), tiered only, with
+the frame plan's certificate they read. The rules and their arithmetic are the old modules' (035 heat l.1000,
+spread l.1139, deep l.1170; 009 seedJob and dilate0..2; uniform-mixed-frame-plan.ts localSpeed and tileErrorOf).
+The structure is the brick engine's.
+
+Passes (part 1's head; each separate launch names the grid-wide barrier that forces it, in the kernel header):
+- `regionHeat` (C_ALL X8: a workgroup a region, a lane a tile's activity heat, lane 0 the region) after censusBegin;
+  `regionSpread` (C_ALL G8, a lane a region): it reads every neighbour's level;
+- the head's deep runs inside `censusCoarse` (cfg.w = 1), which already follows the spread's barrier;
+- `censusDecide` keeps a deep, unjoined tile's CC_DECIDED and CC_STATIC bits (`DEC`, `STAT`) and updates the
+  activity heat `HEAT4` (one word a tile, every tile, by lHeatNow's rule), with cfg.w = 3;
+- after the transfer: `certCoarse` (C_ALL X8; its workgroups e < |C_ENTER| also take entering page e's claim: HOT
+  promotion of the 4^3 regions about it, its own regions reset as the old free region), `certFine` (F_ALL X8, a
+  workgroup an h tile, 125 vertices staged), `certError` (C_ALL X8: the support closure on a 10^3-tile neighbourhood
+  in workgroup memory, tileErrorOf, the region reductions, then the post-claims deep);
+- `setTransferList` (cfg.w = 1) promotes each listed tile's region WARM.
+
+Rulings applied: no cold freeze (terms identically 0); pressureDelta is lane P's PDELTA (pmgC, `mgLayout(L).PDELTA`,
+wired when the solver has pmgC, +Inf otherwise); HEAT4 for tiles with no F slot. Other deviations, stated in the
+header: force = the first heat (HEAT_FORCED); no bodies or sources; residual floor 0.05; open = every cell; regions
+are the lattice's only (`rgInLattice`: a page beyond the lattice, the reach ring across a closed wall, holds no
+lattice tile and takes no heat, tier, deep or count). The census scheduled alone (`brickCensusSchedule(..., heat
+false)`, the frozen comparisons) keeps D = 0.
+
+Header words 249–255 (`REGION_H`: HEAT_FORCED, STILL_EXTENT, STILL_HIGH/LOW, STILL_TRAVEL, HEAT_DEEP, HEAT_COLD) and
+the census words TC, HEAT4, REG, DEC, STAT (stride 18368) are in brick-abi.md. `BrickEngine.save()` / `restore()`
+take and put back every buffer and the clock, so the heat state persists. A state from another layout fails
+explicitly.
+
+Not built: **replay** (regionList/replay publishing stored records, censusFine/censusCoarse skipping replayed
+regions). Every tile is still classified every census. For a deep region the records are this census's, where the
+old replay published the stored ones. Next steps for it:
+- a per-region replay mode at the head (deep, stamp == deepEpoch + 1, page generation equal);
+- the fresh velocity-key check per region, demoting the whole region on any change (l.1935–2090);
+- censusFine and censusCoarse early-out per tile of a mode-1 region, keeping W0/W1/CROSS/GAP/NEAR/KEYS. DEF must
+  still be fresh, or stored alongside.
+- Then the fixture gate: replaying the old dam's 1088 and 192 tiles at frames 14 and 43 with WANT identical.
+
+Gates (GPU runner, check slot, on a HEAD + lane E tree; rc 0, no 00000206):
+- census oracle with D ≠ 0 (brick-census.test.ts): DEEP per the injected tiers, WANT and DEC equal to
+  `censusOracle` with the deep tiles' `decided`, more than 50 decidedPrev = 1 tiles, STAT carried;
+- the frozen X8 comparisons (brick-census-x8, 3/3) and the dam census and transfer fixtures;
+- brick-region-heat.test.ts:
+  - tiered dam (composite, PDELTA live): 40 steps with no latch, tiers and heat in range, HEAT_COLD at least the
+    tier-0 count, and no deep region beside a non-COLD one;
+  - still reservoir (a box at rest, surface at 40 cells): 64 deep regions (H 64), 128/128 deep decided words kept
+    across a head, and save/restore with the buffers bitwise and 6 steps after restore identical in tier, deep and
+    heat on all 256 regions;
+- engine 20/20, tiers 3/3; unit 1834/0.
+
+Timing slot (fixed brick-dam command, steps 13–24). Both trees are at 08dac85d: `realD/base` HEAD, `realD/tree`
+HEAD + this work (`fluid-scratch/lane-e/realD/prof/{base,realD}.jsonl`). The real D's kernels:
+
+| kernel | ms/step | launches/step | workgroups/step |
+|---|---|---|---|
+| regionHeat | 0.055 | 0.92 | 765 |
+| regionSpread | 0.027 | 0.92 | 12 |
+| certCoarse | 0.175 | 0.92 | 795 |
+| certFine | 0.497 | 0.92 | 43869 |
+| certError | 0.153 | 0.92 | 795 |
+| **sum** | **0.91** | 4.6 | |
+
+Kernel sum 86.7 → 102.8 ms/step; fenced median 115.2 → 128.7. The real D's own kernels are 0.91 of the 16.1. The
+rest is F's stages on a different trajectory:
+- velocity +8.8, level set +3.3, move +1.7, transfer and seeding +1.4;
+- censusFine's F_ALL workgroups are 7% higher (37401 → 40166).
+
+The deep keep acts at the dam's early steps: 48 deep regions at step 10, 2816 tiles, none of them a kept band. None
+are deep at step 20, so the trajectories part there. This is one run each, by the policy. A repeat would separate
+divergence from noise.

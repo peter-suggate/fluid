@@ -279,10 +279,21 @@ rules above through the directory and masks:
     analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
     injection at the corners.
   - A boot remap would also list every tile of the initial liquid, well over TLIST's capacity.
-- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 9376 words
+- The census's scratch is the engine buffer `census`, sized `brickCensusBuffers(L)`: 18368 words
   a C slot (with the near words, the moving-shape bits MOV, the residency records, §5.4, and the
   plan words DEF: 4 a tile, the old frame plan's mean extended face velocity xyz and face span,
   localSpeed's, written by censusFine and censusCoarse and read by censusDecide's deformation).
+  After DEF, the real D's words (brick-region-heat.wgsl.ts, `CENSUS` and `RG` in brick-census.wgsl.ts):
+  - `TC` (9376), 16 words a tile: the certificate the post-transfer `certCoarse` (4h tiles) and `certFine`
+    (h tiles) write: mean xyz, defect (−1 dry), speed, owner width, span, normal surface rate, bits (1 the
+    support seed, 2 a corner set not all below −(7h + 3 dt speed)), the six tileVelocity order words;
+  - `HEAT4` (17568), a word a tile: the activity heat (the old particleHeat), censusDecide's at the head;
+  - `REG` (18080), 32 words a region (an octant of the page, r = x | y << 1 | z << 2 of its 4³ tile block):
+    0 heat, 1 displacement, 2 identity (page key + 1), 3 pending, 4 trigger bits, 5 holds, 6 still sum,
+    7 tier, 8 deep, 9 epoch, 10 deep epoch, 11 stamp; 16 the certificate's page key + 1, 17–22 the region
+    velocity words, 23 normal rate, 24 acceleration, 25 error, 26 relevant count, 27 reader class, 28 fine;
+  - `DEC` (18336) and `STAT` (18352), 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits.
+  setTransferList binds `census` too (the WARM promotion of a listed tile's region, cfg.w = 1).
 
 **The tier change, within a step** (§7, amended):
 1. `setCensus` (brick-census.wgsl.ts, landed fb17d41e at the part 1 head; this was planned as part
@@ -486,7 +497,12 @@ in words from its start. Regions are laid out in this order, each a multiple of 
 | 234–239, 240–245 | `WALL_REACH0`, `WALL_REACH1` | the released walls' reach (umPlaneReach, UM_WALL_REACH): for each face direction f = 2a + upper, the largest dt·away / h (cells, f32 bits by `atomicMax`) of a released wall face tile, 0 where none. `nrWallReach` reduces into copy `cfg.y` (6 words from 234 + 6·cfg.y) and zeroes the other; `lcAdvect` and `lAdvect` read it (levelset-release.wgsl.ts). |
 | 246 | `RES_RADIUS` | the head's residency (§5.4): the largest region radius this census, in tiles (the old pageSeed's closure radius, `atomicMax`). Cleared by `censusBegin`. |
 | 247, 248 | `RES_CLAIMED_F RES_CLAIMED_C` | the bricks and pages the head's residency request took (NONE → CLAIM) this census. Cleared by `censusBegin`. |
-| 249–255 | reserved, E | |
+| 249 | `HEAT_FORCED` | the real D's region heat (brick-region-heat.wgsl.ts): 0 until the first heat ran; that heat forces every region (the old `rh.force`), `regionSpread` sets 1. |
+| 250 | `STILL_EXTENT` | coldSurface "still": the liquid's extent along gravity at the last spread, in regions (persistent, 0 before any), `regionSpread`'s. |
+| 251, 252 | `STILL_HIGH STILL_LOW` | this step's highest and lowest liquid region along gravity, `atomicMax` of 32768 ± the projection (`regionHeat`). Cleared by `censusBegin`. |
+| 253 | `STILL_TRAVEL` | this step's fastest liquid travel, h a step (f32 bits, `atomicMax`, `regionHeat`). Cleared by `censusBegin`. |
+| 254 | `HEAT_DEEP` | deep COLD regions at the head's deep pass (censusCoarse, cfg.w = 1). Cleared by `censusBegin`. |
+| 255 | `HEAT_COLD` | COLD regions at the head's spread. Cleared by `censusBegin`. |
 
 ### 5.2 Param ring (words 256–1279)
 
