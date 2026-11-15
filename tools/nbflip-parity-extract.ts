@@ -27,11 +27,13 @@ export const PARITY_FUNCTIONS: Readonly<Record<string, readonly string[]>> = {
     "nbTraceGradientSteps", "umMovedSmoothing", "umSurfaceTrace",
   ],
   "Uniform_mixed_momentum.wgsl": ["umUnitTrace"],
-  "Uniform_mixed_forces.wgsl": ["umOccupancy", "forcesFineJob"],
+  "Uniform_mixed_forces.wgsl": ["umOccupancy", "forcesFineJob", "umLaplacian", "umForcedVelocityClear"],
   "Uniform_frame_extension.wgsl": ["ufxReached", "ufxSeedCode", "ufxTerm", "ufxCombine", "ufxProlong"],
   "FLIP_delta_record": ["ndSample"],
   "Uniform_mixed_remap_faces": ["remapSlope", "remapSample", "remapFace"],
   "Uniform_mixed_remap_cells": ["d4Sum8", "remapTileCells"],
+  "Uniform_mixed_surface_geometry": ["uvCorner", "tetraOrder", "tetra", "geometricPlaneBoxFraction", "geometricUniformSumPrimitive", "umTetraFill", "umSurfaceTarget"],
+  "Uniform_mixed_surface_volume": ["solve"],
 };
 
 export function wgslFunction(src: string, name: string): string | undefined {

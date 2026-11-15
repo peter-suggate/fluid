@@ -1135,6 +1135,44 @@ fn forcesFineJob(gid:vec3u){
  }
  udStore_output(vec3i(at),vec4f(value,0));
 }
+// ==== umLaplacian (032-Uniform_mixed_forces.wgsl)
+fn umLaplacian(face:UMFace)->f32 {
+ // A width-w face's anchor is its positive cell's last fine texel along the
+ // axis and first transversely: anchor/w is that cell's width-w index.
+ let site=face.anchor/vec3i(i32(face.width));let width=f32(face.width);
+ var home=vec3i(0);
+ if(face.width==4u){let page=max(site,umWallLow()>>vec3u(2u))>>vec3u(3u);home=umCoarseOrigin(umBlockOf(page))-(page<<vec3u(3u));}
+ let center=umViscositySite(site,face.axis,face.width,home);var terms=vec3f(0);
+ for(var axis=0u;axis<3u;axis++){
+  var delta=vec3i(0);delta[axis]=1;
+  terms[axis]=(umViscositySite(site+delta,face.axis,face.width,home)-2.0*center+umViscositySite(site-delta,face.axis,face.width,home))/(UM_H()[axis]*UM_H()[axis]*width*width);
+ }
+ return (terms.x+terms.y)+terms.z;
+}
+// ==== umForcedVelocityClear (032-Uniform_mixed_forces.wgsl)
+fn umForcedVelocityClear(owner:UMOwner,face:UMFace,solidClear:bool,retain:vec3u)->f32 {
+ if(umFaceLow(face.anchor,face.axis)){return umLowForced(face.anchor,face.axis);}
+ var value=0.0;if(face.width==4u){value=udLoad4_advected(vec3i(face.anchor))[face.axis];}else{value=udLoad_advected(vec3i(face.anchor))[face.axis];}let dt=force.hDt.w;
+ if(umForceFaceFrozen(owner,face)){return value;}
+ let occupancy=umOccupancy(owner);let neighborOccupancy=umOccupancy(face.neighbor);
+ // Gravity's component along the face's axis (every direction: a uniform).
+ let g=force.gravity[face.axis];
+ let gravity=g!=0.0&&(occupancy>1e-5||neighborOccupancy>1e-5||umCoarseMass(owner)||umCoarseMass(face.neighbor));
+ let kept=face.sign>0&&retain.x!=0u;
+ if(kept&&retain.x==2u){
+  if(gravity){value+=dt*g;}
+  value+=bitcast<f32>(umForceStore[retain.y+face.axis]);
+ }else{
+  let advected=value;
+  // A retaining region (UNIFORM_FORCE_TIER.retain) drops viscosity within its budget.
+  if(occupancy>0.0&&force.physical.z>0.0&&umViscosityExact(owner)){value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);}
+  if(gravity){value+=dt*g;}
+  value+=umCapillary(owner,face,solidClear);
+  // The kept drive: the evaluation less the advected value and gravity.
+  if(kept){umForceKeep(owner,retain,face.axis,value-advected-select(0.0,dt*g,gravity));}
+ }
+ return umInflow(face,value);
+}
 // ==== ufxReached (022-Uniform_frame_extension.wgsl)
 fn ufxReached(d:f32)->bool{return d>=0.0&&d<5e+19;}
 // ==== ufxSeedCode (022-Uniform_frame_extension.wgsl)
@@ -1277,5 +1315,149 @@ fn remapTileCells(group:vec3u,lane:u32){
   var value=0.0;
   if(refine){value=tileVertices[v];}else{value=oldumSampleVertex(vec3f(p));}
   udStore_phi(vec3i(vec3i(p)),vec4f(value));
+ }
+}
+// ==== uvCorner (030-Uniform_mixed_surface_geometry.wgsl)
+fn uvCorner(k:u32)->vec3i{return vec3i(umCorner(k,2u));}
+// ==== tetraOrder (030-Uniform_mixed_surface_geometry.wgsl)
+fn tetraOrder(a:f32,b:f32)->vec2f{return select(vec2f(a,b),vec2f(b,a),!(a<0.0)&&b<0.0);}
+// ==== tetra (030-Uniform_mixed_surface_geometry.wgsl)
+fn tetra(v:vec4f)->f32{
+ // A zero-valued face has zero measure. Resolve these exact endpoint cases
+ // before ratios: Metal's optimized dynamic division can produce NaN when
+ // zero faces meet negative corners at roundoff scale (~1e-15 metres).
+ if(all(v>=vec4f(0.0))){return 0.0;}
+ if(all(v<=vec4f(0.0))){return 1.0;}
+ // Stable partition, negatives first, by a fixed odd-even transposition
+ // network: s holds the negatives then the outside values in their order,
+ // in registers (no dynamically indexed private arrays).
+ var s=v;var p=tetraOrder(s.x,s.y);s.x=p.x;s.y=p.y;p=tetraOrder(s.z,s.w);s.z=p.x;s.w=p.y;
+ p=tetraOrder(s.y,s.z);s.y=p.x;s.z=p.y;
+ p=tetraOrder(s.x,s.y);s.x=p.x;s.y=p.y;p=tetraOrder(s.z,s.w);s.z=p.x;s.w=p.y;
+ p=tetraOrder(s.y,s.z);s.y=p.x;s.z=p.y;
+ let count=dot(select(vec4u(0u),vec4u(1u),v<vec4f(0.0)),vec4u(1u));
+ if(count==0u){return 0.0;}if(count==4u){return 1.0;}
+ if(count==1u){return (-s.x/(s.y-s.x))*(-s.x/(s.z-s.x))*(-s.x/(s.w-s.x));}
+ if(count==3u){return 1.0-(s.w/(s.w-s.x))*(s.w/(s.w-s.y))*(s.w/(s.w-s.z));}
+ let a=-s.x/(s.z-s.x);let b=-s.x/(s.w-s.x);let c=-s.y/(s.z-s.y);let d=-s.y/(s.w-s.y);
+ return clamp(a*b+b*c*(1.0-a)+c*d*(1.0-b),0.0,1.0);
+}
+// ==== geometricPlaneBoxFraction (030-Uniform_mixed_surface_geometry.wgsl)
+fn geometricPlaneBoxFraction(normal:vec3f,offset:f32,widths:vec3f)->f32{
+  let projected=abs(normal)*widths;
+  let dominant=max(projected.x,max(projected.y,projected.z));
+  if(dominant<=1e-20){return select(0.0,1.0,offset>=0.0);}
+  var spans=vec3f(0.0);var dimensions=0u;
+  for(var axis=0u;axis<3u;axis+=1u){
+    let value=projected[axis]/dominant;
+    if(value>=1e-6){spans[dimensions]=value;dimensions+=1u;}
+  }
+  let total=spans.x+spans.y+spans.z;
+  let shifted=offset/dominant+0.5*total;
+  if(shifted<=0.0){return 0.0;}
+  if(shifted>=total){return 1.0;}
+  // Complement symmetry keeps evaluation in the nearer tail and makes
+  // opposite normals/offsets complementary without two large CDF evaluations.
+  let complement=shifted>0.5*total;
+  let x=select(shifted,total-shifted,complement);
+  var fraction=0.0;
+  if(dimensions==1u){fraction=x/spans.x;}
+  else if(dimensions==2u){
+    // Sort the widths so the middle branch avoids subtracting nearly equal
+    // squares when one projected dimension is much smaller than the other.
+    let a=min(spans.x,spans.y);let b=max(spans.x,spans.y);
+    if(x<a){fraction=0.5*(x/a)*(x/b);}
+    else{fraction=(x-0.5*a)/b;}
+  }else{
+    // Integrate the exact two-dimensional CDF over the third uniform span.
+    // A stable piecewise quadratic/cubic form avoids the ill-conditioned
+    // alternating sum when two projected widths are tiny.
+    let a=min(spans.x,min(spans.y,spans.z));
+    let c=max(spans.x,max(spans.y,spans.z));
+    let b=max(min(spans.x,spans.y),min(max(spans.x,spans.y),spans.z));
+    fraction=(geometricUniformSumPrimitive(x,a,b)
+      -geometricUniformSumPrimitive(x-c,a,b))/c;
+  }
+  // Roundoff guard on the geometric CDF only; no state amount is modified.
+  fraction=clamp(fraction,0.0,1.0);
+  return select(fraction,1.0-fraction,complement);
+}
+// ==== geometricUniformSumPrimitive (030-Uniform_mixed_surface_geometry.wgsl)
+fn geometricUniformSumPrimitive(x:f32,a:f32,b:f32)->f32{
+  if(x<=0.0){return 0.0;}
+  if(x<a){return x*(x/a)*(x/b)/6.0;}
+  if(x<=b){return (0.5*x*(x-a)+a*a/6.0)/b;}
+  if(x<a+b){
+    let tail=a+b-x;
+    return x-0.5*(a+b)+tail*(tail/a)*(tail/b)/6.0;
+  }
+  return x-0.5*(a+b);
+}
+// ==== umTetraFill (030-Uniform_mixed_surface_geometry.wgsl)
+fn umTetraFill(corners:array<f32,8>)->f32{
+  var v=corners;for(var k=0u;k<8u;k++){if(v[k]==0.0){v[k]=-1e-20;}}
+  let even=(tetra(vec4f(v[0],v[1],v[2],v[4]))+tetra(vec4f(v[3],v[1],v[2],v[7]))+tetra(vec4f(v[5],v[1],v[4],v[7]))+tetra(vec4f(v[6],v[2],v[4],v[7])))/6.0+tetra(vec4f(v[1],v[2],v[4],v[7]))/3.0;
+  let odd=(tetra(vec4f(v[1],v[0],v[3],v[5]))+tetra(vec4f(v[2],v[0],v[3],v[6]))+tetra(vec4f(v[4],v[0],v[5],v[6]))+tetra(vec4f(v[7],v[3],v[5],v[6])))/6.0+tetra(vec4f(v[0],v[3],v[5],v[6]))/3.0;
+  return clamp(0.5*(even+odd),0.0,1.0);
+}
+// ==== umSurfaceTarget (030-Uniform_mixed_surface_geometry.wgsl)
+fn umSurfaceTarget(owner:UMOwner,vertices:array<f32,8>)->f32{
+  var samples:array<f32,8>;var centre=0.0;var votes=0.0;var magnitude=0.0;
+  // All eight quarter-cell probes interpolate the same eight vertices.
+  // uvTarget is called only for valid cells, so each probe's clamped base is
+  // exactly id and its fractions are exactly 1/4 or 3/4 in binary FP32.
+  
+  for(var k=0u;k<8u;k++){
+    let f=vec3f(0.25)+0.5*vec3f(uvCorner(k));var weighted:array<f32,8>;
+    for(var j=0u;j<8u;j++){let w=select(vec3f(1)-f,f,uvCorner(j)==vec3i(1));
+      weighted[j]=vertices[j]*w.x*w.y*w.z;}
+    let value=d4Sum8(weighted);
+    samples[k]=value;centre+=0.125*value;
+    magnitude=max(magnitude,abs(value));}
+  var gradient=vec3f(0);
+  for(var k=0u;k<8u;k++){gradient+=(2.0*vec3f(uvCorner(k))-vec3f(1))*samples[k]/2.0;}
+  var residual=0.0;
+  for(var k=0u;k<8u;k++){let sign=2.0*vec3f(uvCorner(k))-vec3f(1);
+    residual=max(residual,abs(samples[k]-(centre+dot(gradient,0.25*sign))));}
+  if(residual>1e-4*(1.0+magnitude)){return umTetraFill(vertices);}
+  return geometricPlaneBoxFraction(gradient,-centre,vec3f(1));
+}
+// ==== solve (029-Uniform_mixed_surface_volume.wgsl)
+fn solve(@builtin(local_invocation_index) l:u32){
+ if(l==0u){svReduceJobs=svJobs();}
+ let count=(workgroupUniformLoad(&svReduceJobs)+63u)/64u;
+ var sum=vec4f(0);for(var i=l;i<count;i+=64u){sum+=loadSum(SV_R()+4u*i);}sums[l]=sum;sumGroup(l);
+ if(l==0u){let bulk=svBulkVolume();sums[0]+=vec4f(bulk,bulk,0.0,0.0);}
+
+ // Volume control (Kim et al. 2007, the proportional term): the divergence
+ // that closes the liquid's gap to its budget over the control time. The
+ // pressure authority asks it of every liquid owner, so the samples and the
+ // surface they rebuild are carried to the budget together.
+ if(gaugeBudget){
+  if(l==0u){let filled=sums[0].x;let gap=budget[0]-filled;budget[6]=filled;budget[7]=budget[0];
+   // The gauge is a step behind what it asks for: closing the gap in under
+   // three steps would overshoot it.
+   let gain=min(budgetParams.w,1.0/(3.0*max(budgetParams.x,1e-6)));
+   let excess=sign(gap)*max(abs(gap)-0.01*budget[0],0.0);
+   budget[8u]=select(0.0,clamp(excess*gain/max(filled,0.5*budget[0]),-4,4),budget[1]>0.0&&budget[0]>0.0);}
+  return;
+ }
+ if(l==0u&&scratch[(SV_S()+3u)]==0.0){
+  let filled=sums[0].x;
+  if(captureBudget){budget[0]=filled;budget[1]=1.0;budget[5]=filled;scratch[(SV_S()+3u)]=1.0;return;}
+  // The captured surface in phi's measure, the one every later probe takes:
+  // the target stays the occupancy capture, and the two sit side by side.
+  if(measureCapture){budget[4]=filled;budget[10u]=filled;scratch[(SV_S()+3u)]=1.0;return;}
+  if(scratch[SV_S()]==0.0){budget[4]=filled;}
+  budget[6]=filled;budget[7]=budget[0];
+  let desired=budget[0];let shift=scratch[SV_S()];let step=scratch[(SV_S()+4u)];
+  let rise=sums[0].y-filled;
+  if(abs(filled-desired)<=max(1e-5,1e-7*abs(desired))||rise*(2.0*umShiftLimit()/step)<=1e-6){scratch[(SV_S()+3u)]=1.0;}
+  else{
+   var low=scratch[(SV_S()+1u)];var high=scratch[(SV_S()+2u)];
+   if(filled<desired){low=shift;}else{high=shift;}
+   scratch[(SV_S()+1u)]=low;scratch[(SV_S()+2u)]=high;scratch[SV_S()]=clamp(shift+(desired-filled)*step/max(rise,1e-30),low,high);
+  }
+  budget[3]=scratch[SV_S()];
  }
 }

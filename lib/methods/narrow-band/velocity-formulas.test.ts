@@ -7,7 +7,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { nbfDeltaWGSL, nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfRemapWGSL, nbfVelocitySupported } from "./velocity-formulas.wgsl";
+import { nbfDeltaWGSL, nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfRemapWGSL, nbfVelocitySupported, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
+import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
+import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 import { oldExcerpt, oldFunction, parityCode, parityGPU, prng, runParity, ulpCompare, withParityDevice, type ParityKernel } from "./parity/harness";
 
 const old = (...names: string[]) => names.map(oldFunction).join("\n");
@@ -259,16 +261,82 @@ fn restriction(i:u32)->f32{var acc=vec2f(0.0);for(var k=0u;k<16u;k++){acc=nbfRem
  put(o,nbfRemapRefine(tileCorners,v));put(o+1u,nbfRemapSlope(value,below,above));put(o+2u,nbfRemapSample(lowFace,highFace,along,width==4u,slopes,across));put(o+3u,restriction(i+40u));`,
 };
 
-const KERNELS = { OLD_DEPOSIT, NEW_DEPOSIT, OLD_RESOLVE, NEW_RESOLVE, OLD_MOMENTUM, NEW_MOMENTUM, OLD_EXTEND, NEW_EXTEND, OLD_DELTA, NEW_DELTA, OLD_REMAP, NEW_REMAP };
+// ---- forces' viscous term: the h Laplacian of a face's seven taps (data: a hash of the site) and the kick.
+// inp a thread: the site (3, 0..31), axis, dt, mu, rho, value; 8 words.
+const VISC_IN = 8, VISC_OUT = 2;
+const VISC_WORLD = /* wgsl */`
+fn tap(site:vec3i,axis:u32)->f32{
+ let c=vec3u(site+vec3i(1));let h=(c.x*73856093u)^(c.y*19349663u)^(c.z*83492791u)^(axis*2654435761u);
+ return (f32(h&65535u)-32767.5)/4096.0;
+}
+`;
+const VISC_HEAD = `let i=${VISC_IN}u*t;let o=${VISC_OUT}u*t;let site=vec3i(vec3u(inp[i]%31u,inp[i+1u]%31u,inp[i+2u]%31u));let axis=inp[i+3u]%3u;
+ let dt=f(i+4u);let mu=f(i+5u);let rho=f(i+6u);var value=f(i+7u);`;
+const OLD_VISC: ParityKernel = {
+  prelude: `${VISC_WORLD}
+struct UMFace{anchor:vec3i,width:u32,axis:u32}
+struct UMForceParams{hDt:vec4f,physical:vec4f}
+var<private> force:UMForceParams;
+fn UM_H()->vec3f{return force.hDt.xyz;}
+fn umWallLow()->vec3i{return vec3i(0);}
+fn umBlockOf(page:vec3i)->u32{return 0u;}
+fn umCoarseOrigin(b:u32)->vec3i{return vec3i(0);}
+fn umViscositySite(site:vec3i,axis:u32,width:u32,home:vec3i)->f32{return tap(site,axis);}
+${old("umLaplacian")}`,
+  body: `${VISC_HEAD}
+ force=UMForceParams(vec4f(0.05,0.04,0.05,dt),vec4f(0.0,rho,mu,0.0));
+ let lap=umLaplacian(UMFace(site,1u,axis));put(o,lap);
+ ${oldExcerpt("umForcedVelocityClear", "value+=dt*(force.physical.z/force.physical.y)*umLaplacian(face);").replace("umLaplacian(face)", "lap")}
+ put(o+1u,value);`,
+};
+const NEW_VISC: ParityKernel = {
+  prelude: `${VISC_WORLD}
+fn nbxViscositySite(site:vec3i,axis:u32)->f32{return tap(site,axis);}
+${nbfViscosityWGSL}`,
+  body: `${VISC_HEAD}
+ let lap=nbfViscousLaplacian(site,axis,vec3f(0.05,0.04,0.05));put(o,lap);
+ put(o+1u,nbfViscousKick(value,dt,mu,rho,lap));`,
+};
+
+// ---- volume control: a cell's occupancy from its 8 vertex φ (umSurfaceTarget), then the gauge's rate (solve's
+// gaugeBudget branch). inp a thread: 8 φ, the budget, captured (0/1), dt, the gain, filled; 13 words.
+const VOLUME_IN = 13, VOLUME_OUT = 2;
+const VOLUME_HEAD = `let i=${VOLUME_IN}u*t;let o=${VOLUME_OUT}u*t;var vertices:array<f32,8>;for(var k=0u;k<8u;k++){vertices[k]=f(i+k);}
+ let dt=f(i+10u);let control=f(i+11u);let filled=f(i+12u);`;
+const OLD_VOLUME: ParityKernel = {
+  prelude: `struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
+var<private> budget:array<f32,11>;var<private> budgetParams:vec4f;
+${old("umCorner", "d4Sum8", "uvCorner", "tetraOrder", "tetra", "geometricPlaneBoxFraction", "geometricUniformSumPrimitive", "umTetraFill", "umSurfaceTarget")}`,
+  body: `${VOLUME_HEAD}
+ put(o,umSurfaceTarget(UMOwner(0u,0u,1u,0u),vertices));
+ budget[0]=f(i+8u);budget[1]=f(i+9u);budgetParams=vec4f(dt,0.0,0.0,control);
+ ${oldExcerpt("solve", "let gap=budget[0]-filled;")}
+ ${oldExcerpt("solve", `let gain=min(budgetParams.w,1.0/(3.0*max(budgetParams.x,1e-6)));
+   let excess=sign(gap)*max(abs(gap)-0.01*budget[0],0.0);
+   budget[8u]=select(0.0,clamp(excess*gain/max(filled,0.5*budget[0]),-4,4),budget[1]>0.0&&budget[0]>0.0);`)}
+ put(o+1u,budget[8u]);`,
+};
+const NEW_VOLUME: ParityKernel = {
+  prelude: `${levelSetFillWGSL}
+${geometricPlaneBoxWGSL}
+${nbfVolumeWGSL}`,
+  body: `${VOLUME_HEAD}
+ put(o,nbfCellFill(vertices));
+ put(o+1u,nbfVolumeRate(filled,f(i+8u),dt,control,f(i+9u)>0.0));`,
+};
+
+const KERNELS = { OLD_DEPOSIT, NEW_DEPOSIT, OLD_RESOLVE, NEW_RESOLVE, OLD_MOMENTUM, NEW_MOMENTUM, OLD_EXTEND, NEW_EXTEND, OLD_DELTA, NEW_DELTA, OLD_REMAP, NEW_REMAP, OLD_VISC, NEW_VISC, OLD_VOLUME, NEW_VOLUME };
 // NBF_PARITY_DUMP=DIR writes every kernel's module there, for offline validation (naga DIR/*.wgsl).
 if (process.env.NBF_PARITY_DUMP) {
   const dir = process.env.NBF_PARITY_DUMP; mkdirSync(dir, { recursive: true });
   for (const [name, kernel] of Object.entries(KERNELS)) writeFileSync(`${dir}/${name}.wgsl`, parityCode(kernel, 64));
 }
 
-test("the brick engine's uAdvect rejects viscosity and surface tension", () => {
+test("the brick engine's forces take a viscosity with free-slip walls and reject surface tension", () => {
   nbfVelocitySupported({ viscosity: 0, surfaceTension: 0 });
-  assert.throws(() => nbfVelocitySupported({ viscosity: 1e-6 }), /viscosity/);
+  nbfVelocitySupported({ viscosity: 1.002e-3 });
+  assert.throws(() => nbfVelocitySupported({ viscosity: 1e-3, noSlip: true }), /no-slip/);
+  assert.throws(() => nbfVelocitySupported({ viscosity: -1 }), /viscosity/);
   assert.throws(() => nbfVelocitySupported({ surfaceTension: 0.07 }), /surface tension/);
 });
 
@@ -373,5 +441,39 @@ test("the remap (φ's refine, the 4h face slope, the h face sample, the 4h face 
       for (let k = 0; k < 16; k++) { inp[o + 40 + k] = t % 7 === 0 ? 0 : rnd() < 0.3 ? 0 : rnd(); inp[o + 56 + k] = (rnd() - 0.5) * 4; }
     }
     await parity(device, "remap", OLD_REMAP, NEW_REMAP, { inp, threads, outWords: REMAP_OUT * threads }, REMAP_OUT);
+  });
+});
+
+test("forces' viscous term (the h Laplacian and the kick) matches the old umLaplacian and umForcedVelocityClear", { skip: !parityGPU }, async () => {
+  await withParityDevice(async device => {
+    const rnd = prng(61), threads = 8192, inp = new Float32Array(VISC_IN * threads), w = words(inp);
+    for (let t = 0; t < threads; t++) {
+      const o = VISC_IN * t;
+      for (let a = 0; a < 3; a++) w[o + a] = Math.floor(rnd() * 31);
+      w[o + 3] = t % 3; inp[o + 4] = rnd() * 0.02; inp[o + 5] = rnd() < 0.2 ? 1.002e-3 : rnd() * 0.1; inp[o + 6] = 500 + rnd() * 1000; inp[o + 7] = (rnd() - 0.5) * 8;
+    }
+    await parity(device, "viscosity", OLD_VISC, NEW_VISC, { inp, threads, outWords: VISC_OUT * threads }, VISC_OUT);
+  });
+});
+
+test("volume control (a cell's occupancy, the gauge's rate) matches the old umSurfaceTarget and the gauge's solve", { skip: !parityGPU }, async () => {
+  await withParityDevice(async device => {
+    const rnd = prng(67), threads = 16384, inp = new Float32Array(VOLUME_IN * threads);
+    for (let t = 0; t < threads; t++) {
+      const o = VOLUME_IN * t, kind = t % 6;
+      // planar (a plane through the cell), random, cut with zeros on the vertices, all inside, all outside, tiny.
+      const n = [rnd() - 0.5, rnd() - 0.5, rnd() - 0.5], d = (rnd() - 0.5) * 1.5;
+      for (let k = 0; k < 8; k++) {
+        const x = [k & 1, (k >> 1) & 1, k >> 2];
+        inp[o + k] = kind === 0 ? n[0]! * x[0]! + n[1]! * x[1]! + n[2]! * x[2]! + d
+          : kind === 1 ? (rnd() - 0.5) * 2 : kind === 2 ? (rnd() < 0.4 ? 0 : rnd() < 0.5 ? -1 : 1)
+          : kind === 3 ? -rnd() : kind === 4 ? rnd() : (rnd() - 0.5) * 1e-12;
+      }
+      const budget = 1000 + rnd() * 1e6, gapShare = (rnd() - 0.5) * 0.2;
+      inp[o + 8] = t % 17 === 0 ? 0 : budget; inp[o + 9] = t % 13 === 0 ? 0 : 1;
+      inp[o + 10] = t % 11 === 0 ? 0 : 1 / 60 + rnd() * 0.05; inp[o + 11] = rnd() < 0.5 ? 10 : rnd() * 40;
+      inp[o + 12] = t % 19 === 0 ? 0 : budget * (1 - gapShare);
+    }
+    await parity(device, "volume", OLD_VOLUME, NEW_VOLUME, { inp, threads, outWords: VOLUME_OUT * threads }, VOLUME_OUT);
   });
 });

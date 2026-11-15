@@ -124,3 +124,51 @@ there (`!umSolidEnabled()||uncut`). The walk goes in with solids at M3. The air 
 
 **Next: M2.** The kernels go against lane E's skeleton (ac2fce26) and brick-abi.md §6: `nbSet`, `nbOperator`, and
 `active` reserved.
+
+## M2: the kernels on the brick engine (2026-11-15, first part)
+
+**What landed.** Lane F's stage set `fluidStages` (`brick-fluid-stages.ts`). It is not registered yet:
+`brickFluidStages` stays undefined until the gates pass.
+- `particles-kernels.wgsl.ts`: pMove, pScan, pScatter, pTiles, pSeed, pDelta.
+- `levelset-kernels.wgsl.ts`: lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lClear, lNear, lDistance,
+  lPublish.
+- `velocity-kernels.wgsl.ts`: uAdvect, pDeposit, uViscous, uTransfer, uExtend, vGauge.
+- `fluid-grid.wgsl.ts`: the shared addressing.
+
+All of it is all-h on E's skeleton, and every formula comes from the `*-formulas.wgsl.ts` modules. naga accepts every
+kernel. The dam runner (scratch: `fluid-scratch/lane-f/tools/brick-dam.mts`) uses fluidStages and P's poolMGPCG.
+
+**Two formulas added since M1, both bitwise against the old text** (`velocity-formulas.test.ts`):
+- The explicit viscosity (`nbfViscousLaplacian`, `nbfViscousKick`; old `umLaplacian`, `umForcedVelocityClear`),
+  on 8,192 threads. The dam is μ = 1.002e-3 Pa s with free-slip walls. No-slip viscosity fails at build.
+- Volume control, on 16,384 threads (planar, random, zero-vertex, inside, outside and roundoff-sized cells):
+  - `nbfCellFill` (old `umSurfaceTarget` and `umTetraFill`): the gauge's occupancy.
+  - `nbfVolumeRate` (old `solve`'s gauge branch): Kim et al. 2007's proportional term.
+  vGauge sums the cell fills of each brick from the brick's 9³ vertices, staged in workgroup memory. Each brick
+  adds its sum with one atomic into a 64-bit fixed-point pair (2^-20 cell), so the atomics' order cannot change
+  the total. There is one pair per step parity, and the boot captures the budget. uAdvect turns the gauge into
+  the rate in `FH.RATE` (header word 64), ahead of the operator.
+
+**The dam on fluidStages + poolMGPCG, all-h** (check slot, `--poolF=4913`):
+- It ran 165 steps with rc 0, no FAIL bits and no Metal aborts. Steps 13+ took about 62–66 ms (n = 132), on a
+  shared GPU, so this is not a timing.
+- Step 15 against the old reference: KE 275 vs 272 J, drift -4.3% vs -3.5%, the profile within a cell or two.
+- The volume loss after that is the missing volume control, not the port. The old engine with
+  `--set=volumeControlSeconds=0` loses -19.3% at step 30 and -30% at step 60. Ours loses -19.7% and -32%.
+  - With control on, the old engine recovers to -0.7% by step 165.
+  - The rate goes live once P's RHS reads it: RHS = −h·(div − rate·h·capacity), as the old
+    `uniform-mixed-pressure-velocity.ts`. I asked P for this through E.
+  - The gauge tracks the observer to 0.1–1% over 60 steps. It runs one step behind, as in the old engine.
+
+**Stated deviations at this milestone (all-h):**
+- No 4h tier: the deep interior is h. So composed state cannot be bitwise with the old mixed engine, whose
+  pressure runs on 4h owners there.
+- The TRIG stand-in is "the tile holds a crossing cell", until E's census.
+- The spread travel is 4·ceil(FC_BOUND·dt/h / 4).
+- There is no deep-air keep and no released-wall rule.
+- The wall faces hold 0, as the old transfer did. They move to `nbFacePlane` with the owner readers.
+
+**Blockers:**
+- E: at all-h the authored f = 3968 runs out (POOL_F at step 20). setMark keeps every liquid brick at h, and the
+  splash claims the whole 17³ lattice. Tiers fix this (`tiered: true` once F reads through `brickOwnerWGSL`).
+- P: the volume RHS term.

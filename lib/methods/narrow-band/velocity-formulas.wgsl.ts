@@ -16,9 +16,12 @@
  *   Sethian 1999's velocity extension).
  * - uDelta: the FLIP delta sampled at a sample from the faces that hold one, the trilinear weights renormalised. */
 
-/** Throws where a scene's physics needs a force the brick engine's uAdvect does not implement. */
-export function nbfVelocitySupported(physics: { readonly viscosity?: number; readonly surfaceTension?: number }): void {
-  if ((physics.viscosity ?? 0) !== 0) throw new Error(`NB-FLIP brick engine: viscosity ${physics.viscosity} is not implemented (inviscid only)`);
+/** Throws where a scene's physics needs a force the brick engine does not implement: surface tension, a negative
+ * or non-finite viscosity, and the no-slip walls of the viscous term (the old engine negates a held tap there). */
+export function nbfVelocitySupported(physics: { readonly viscosity?: number; readonly surfaceTension?: number; readonly noSlip?: boolean }): void {
+  const mu = physics.viscosity ?? 0;
+  if (!(mu >= 0 && Number.isFinite(mu))) throw new Error(`NB-FLIP brick engine: viscosity ${mu} is not a viscosity`);
+  if (mu > 0 && physics.noSlip) throw new Error("NB-FLIP brick engine: viscosity with no-slip walls is not implemented");
   if ((physics.surfaceTension ?? 0) !== 0) throw new Error(`NB-FLIP brick engine: surface tension ${physics.surfaceTension} is not implemented`);
 }
 
@@ -106,6 +109,65 @@ fn nbfOccupancy(phi:f32,hy:f32,width:u32)->f32{if(width==0u){return 0.0;}return 
 // Gravity acts on a +face where either cell holds liquid (or the neighbour is a coarse owner with mass).
 fn nbfGravityFace(occupancy:f32,neighbour:f32,coarseMass:bool)->bool{return occupancy>1e-5||neighbour>1e-5||coarseMass;}
 fn nbfGravityKick(value:f32,dt:f32,g:f32)->f32{return value+dt*g;}
+`;
+
+/** forces: the explicit viscous term (umLaplacian, umForcedVelocityClear), Stam 1999's diffusion taken forward:
+ * u += dt (mu / rho) ∇²u, the 7-point Laplacian of the advected field at h. The kernel defines
+ * nbxViscositySite(site, axis) (the advected axis-a face of old texel site, held in the box). */
+export const nbfViscosityWGSL = /* wgsl */`
+fn nbfViscousLaplacian(site:vec3i,axis:u32,h:vec3f)->f32{
+ let center=nbxViscositySite(site,axis);var terms=vec3f(0);
+ for(var a=0u;a<3u;a++){
+  var delta=vec3i(0);delta[a]=1;
+  terms[a]=(nbxViscositySite(site+delta,axis)-2.0*center+nbxViscositySite(site-delta,axis))/(h[a]*h[a]*1.0*1.0);
+ }
+ return (terms.x+terms.y)+terms.z;
+}
+// The kick of a face whose owner holds liquid (occupancy over 0): dt (mu / rho) times the Laplacian.
+fn nbfViscousKick(value:f32,dt:f32,mu:f32,rho:f32,laplacian:f32)->f32{return value+dt*(mu/rho)*laplacian;}
+`;
+
+/** Volume control (Kim et al. 2007, the proportional term; the old engine's surface volume gauge and solve):
+ * - nbfCellFill: an h cell's occupied fraction from its 8 vertex φ (umSurfaceTarget, an open h owner). The cell's
+ *   trilinear field at its eight quarter probes; a planar field fills by its plane's box fraction, any other by
+ *   the mean of the cube's two five-tetrahedron splits (umTetraFill).
+ * - nbfVolumeRate: the divergence (1/s) that closes the gap between the filled volume and the captured budget
+ *   over the control time, past a dead band of 1% of the budget, the gain held under 1/(3 dt) (the gauge is a
+ *   step behind what it asks for) and the rate within ±4/s. The pressure asks it of every liquid cell.
+ * Needs tetra (lib/core/level-set-fill.wgsl.ts) and geometricPlaneBoxFraction (lib/core/geometric-plane-box.wgsl.ts). */
+export const nbfVolumeWGSL = /* wgsl */`
+fn nbfFillCorner(k:u32)->vec3i{return vec3i(vec3u(k%2u,(k/2u)%2u,k/4u));}
+fn nbfFillSum8(v:array<f32,8>)->f32{return ((v[0]+v[5])+(v[1]+v[4]))+((v[2]+v[7])+(v[3]+v[6]));}
+fn nbfTetraFill(corners:array<f32,8>)->f32{
+  var v=corners;for(var k=0u;k<8u;k++){if(v[k]==0.0){v[k]=-1e-20;}}
+  let even=(tetra(vec4f(v[0],v[1],v[2],v[4]))+tetra(vec4f(v[3],v[1],v[2],v[7]))+tetra(vec4f(v[5],v[1],v[4],v[7]))+tetra(vec4f(v[6],v[2],v[4],v[7])))/6.0+tetra(vec4f(v[1],v[2],v[4],v[7]))/3.0;
+  let odd=(tetra(vec4f(v[1],v[0],v[3],v[5]))+tetra(vec4f(v[2],v[0],v[3],v[6]))+tetra(vec4f(v[4],v[0],v[5],v[6]))+tetra(vec4f(v[7],v[3],v[5],v[6])))/6.0+tetra(vec4f(v[0],v[3],v[5],v[6]))/3.0;
+  return clamp(0.5*(even+odd),0.0,1.0);
+}
+fn nbfCellFill(vertices:array<f32,8>)->f32{
+  var samples:array<f32,8>;var centre=0.0;var magnitude=0.0;
+  for(var k=0u;k<8u;k++){
+    let f=vec3f(0.25)+0.5*vec3f(nbfFillCorner(k));var weighted:array<f32,8>;
+    for(var j=0u;j<8u;j++){let w=select(vec3f(1)-f,f,nbfFillCorner(j)==vec3i(1));
+      weighted[j]=vertices[j]*w.x*w.y*w.z;}
+    let value=nbfFillSum8(weighted);
+    samples[k]=value;centre+=0.125*value;
+    magnitude=max(magnitude,abs(value));}
+  var gradient=vec3f(0);
+  for(var k=0u;k<8u;k++){gradient+=(2.0*vec3f(nbfFillCorner(k))-vec3f(1))*samples[k]/2.0;}
+  var residual=0.0;
+  for(var k=0u;k<8u;k++){let sign=2.0*vec3f(nbfFillCorner(k))-vec3f(1);
+    residual=max(residual,abs(samples[k]-(centre+dot(gradient,0.25*sign))));}
+  if(residual>1e-4*(1.0+magnitude)){return nbfTetraFill(vertices);}
+  return geometricPlaneBoxFraction(gradient,-centre,vec3f(1));
+}
+// filled, budget: cells; dt: s; control: 1/s (1 / the control time); captured: the budget holds a capture.
+fn nbfVolumeRate(filled:f32,budget:f32,dt:f32,control:f32,captured:bool)->f32{
+  let gap=budget-filled;
+  let gain=min(control,1.0/(3.0*max(dt,1e-6)));
+  let excess=sign(gap)*max(abs(gap)-0.01*budget,0.0);
+  return select(0.0,clamp(excess*gain/max(filled,0.5*budget),-4.0,4.0),captured&&budget>0.0);
+}
 `;
 
 /** uExtend: the fast-sweeping update (ufxCombine and its terms) and the 4h prolongation (no accessors). */
