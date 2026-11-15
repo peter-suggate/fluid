@@ -9,9 +9,9 @@
  * and K[a], its lower face to the native row T - e_a. Its seam couplings are its h neighbours' K and
  * KU, so the matrix is symmetric by construction.
  *
- * The hierarchy aggregates by coordinate, as pressure-model.ts does (Braess 1995, OC 1.6):
- * - L0 holds the h rows (smoothed) and the native rows (carried, not smoothed).
- * - L1 holds the 2h aggregates of the h rows (smoothed), and the native rows carried again.
+ * The hierarchy aggregates by coordinate, as pressure-model.ts does (Braess 1995, OC 2):
+ * - L0 holds the h rows (smoothed) and the native rows (carried by the h passes, smoothed by their own pass).
+ * - L1 holds the 2h aggregates of the h rows (smoothed), and the native rows carried again, as at L0.
  * - L2 is the 4h tiles: the h tiles' aggregates and the native rows, smoothed together.
  * - L3 and up aggregate every L2 row by 2^3. The coarsest level is inverted exactly.
  * - Coarse operators are A_c = W^-1 P^T A P W^-1, where P sums by aggregation (identity on a carried
@@ -21,7 +21,14 @@
  * - Smoothers: level 0 runs the staggered block Schwarz over the h rows (bricks, then the blocks
  *   shifted by (4, 0, 4), then the bricks). Levels 1 and up run block red-black Gauss-Seidel in blocks of
  *   side max(2, 8 >> l). Post-smoothing is the adjoint, and carried rows are held at their current
- *   value. So the V-cycle is symmetric positive definite.
+ *   value. At L0 and L1 the carried native rows then get their own pass (nativeGS: block red-black GS in
+ *   2^3-tile blocks, the h rows and other blocks frozen at the pass's entry), after the h passes in
+ *   pre-smoothing and before them, colours reversed, in post-smoothing. This is the composite-grid
+ *   smoother of the fast adaptive composite method (FAC, McCormick & Thomas 1986):
+ *   every composite row is relaxed on its own level before the residual is restricted. Carried unsmoothed,
+ *   a native row's error reached only L2's smoother, a level above its own, and a captured tiered dam
+ *   state took 9-12 PCG iterations to 0.05 1/s where the pass takes 7-8 (lane P item 4a). The pass and its
+ *   adjoint keep the V-cycle symmetric positive definite.
  * - The convergence check runs before each V-cycle: max|r| <= tol, with a native row's residual taken
  *   over 64, its band-equivalent (a native row is 64 h rows' worth: RHS -64 h^2 div).
  */
@@ -138,13 +145,27 @@ function denseInverse(L: Level): Float64Array {
   return A;
 }
 
+/** The native rows' own pass at L0 and L1 (carried by the h passes): block red-black GS in 2^3-tile blocks, the
+ * h rows and the other blocks' native rows frozen at the pass's entry. */
+function nativeGS(L: Level, e: Float64Array, b: Float64Array, colours: readonly number[]) {
+  const frozen = Float64Array.from(e), nat = (i: number) => (L.keys[i]! & 1) === 1;
+  const block = L.coords.map((c, i) => nat(i) ? c.map(v => v >> 1).join(",") : "h");
+  const parity = L.coords.map(c => (c[0] + c[1] + c[2]) & 1);
+  for (const col of colours) for (let i = 0; i < e.length; i++) {
+    if (!nat(i) || parity[i] !== col || !(L.diag[i]! > 0)) continue;
+    let s = b[i]!;
+    for (const [j, w] of L.nbrs[i]!) s += w * (nat(j) && block[j] === block[i] ? e[j]! : frozen[j]!);
+    e[i] = s / L.diag[i]!;
+  }
+}
+
 const rb = (n: number, rev: boolean) => Array.from({ length: 2 * n }, (_, s) => rev ? 1 - (s & 1) : s & 1);
 
 export class CompositePressureModel {
   readonly levels: Level[] = [];
   readonly parents: number[][] = [];
   readonly inverse: Float64Array;
-  constructor(rows: CompositeRows, readonly options: { levels: number; fineSweeps: number; coarseSweeps: number } = { levels: 8, fineSweeps: 3, coarseSweeps: 2 }) {
+  constructor(rows: CompositeRows, readonly options: { levels: number; fineSweeps: number; coarseSweeps: number; nativeSweeps?: number } = { levels: 8, fineSweeps: 3, coarseSweeps: 2, nativeSweeps: 2 }) {
     this.levels.push(compositeLevel0(rows));
     while (this.levels.length < options.levels) { const { C, parent } = coarsen(this.levels.at(-1)!); this.levels.push(C); this.parents.push(parent); }
     if (this.levels.at(-1)!.keys.length > MAX_COARSEST_ROWS) throw new Error(`Composite model: ${this.levels.at(-1)!.keys.length} coarsest rows`);
@@ -159,8 +180,11 @@ export class CompositePressureModel {
     if (l === this.levels.length - 1) { const m = L.keys.length, z = new Float64Array(m); for (let i = 0; i < m; i++) { let s = 0; for (let j = 0; j < m; j++) s += this.inverse[i * m + j]! * r[j]!; z[i] = s; } return z; }
     const e = new Float64Array(r.length), o = this.options;
     const smooth = (post: boolean) => {
+      const native = l < 2 ? rb(o.nativeSweeps ?? 2, post) : undefined;
+      if (native && post) nativeGS(L, e, r, native);
       if (l === 0) for (const off of [[0, 0, 0], [4, 0, 4], [0, 0, 0]]) blockGS(L, e, r, 8, off, rb(o.fineSweeps, post));
       else blockGS(L, e, r, Math.max(2, 8 >> l), [0, 0, 0], rb(o.coarseSweeps, post));
+      if (native && !post) nativeGS(L, e, r, native);
     };
     smooth(false);
     const Ae = apply(L, e), parent = this.parents[l]!, rc = new Float64Array(this.levels[l + 1]!.keys.length);

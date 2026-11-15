@@ -16,8 +16,15 @@
  *   parent), so levels 1-3 live inside an 8^3 brick, level 3 is one row a
  *   brick, and levels 4-7 (16h ... 128h) span bricks and pages.
  * - Coarse operators: Galerkin over piecewise-constant aggregation divided by
- *   an over-correction factor, A_c = P^T A P / OC (Braess 1995, OC 1.6, as
- *   the seep).
+ *   an over-correction factor, A_c = P^T A P / OC (Braess 1995), OC 2. On a
+ *   7-point Laplacian, P^T A P couples two 2^3 aggregates by their 4 shared
+ *   faces, where the rediscretised 2h operator under the same summed
+ *   restriction couples them by 2 (McAdams, Sifakis & Teran 2010 rediscretise):
+ *   OC 2 is the rediscretised operator in the interior, with Galerkin's
+ *   boundary rows. OC 1.6 (the seep's) under-corrects the smoothest error by
+ *   0.8 a level, compounding over seven levels: on a captured dam state it
+ *   took 10-11 PCG iterations to 0.05 1/s where OC 2 takes 6-7 (lane P,
+ *   2026-11-15, docs/plans/nbflip-port/progress-lane-p1.md item 4a).
  * - Coarsest level: solved exactly by Gauss-Jordan (Trottenberg, Oosterlee &
  *   Schuller 2001, sec. 2.5; Golub & Van Loan 2013, sec. 4.2). It is the
  *   first level with at most `coarsestRows` rows, capped at MAX_COARSEST_ROWS.
@@ -40,7 +47,7 @@
  *   r - alpha q drifts, as the arena's GCR(1) did: lane P1's finding, 2026-11-15.
  */
 
-export const OC = 1.6;
+export const OC = 2;
 export const MAX_COARSEST_ROWS = 64;
 const AX: readonly (readonly [number, number, number])[] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 /** A cell coordinate packed into one number (13 bits an axis, offset so -1 packs). */
