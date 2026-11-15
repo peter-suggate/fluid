@@ -196,6 +196,21 @@ export class BrickEngine {
     return engine;
   }
 
+  /** Run placements once, outside the step (tests and tools on a fenced, frozen state); compiles kernels the schedule lacks. */
+  async run(placements: readonly BrickPlacement[]) {
+    for (const k of new Set(placements.map(p => p.kernel))) {
+      if (this.pipelines.has(k)) continue;
+      const module = this.device.createShaderModule({ label: `nb-brick.${k.label}`, code: k.code });
+      const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
+      if (errors.length) throw new Error(`Brick engine: ${k.label} does not compile:\n${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("\n")}`);
+      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.device.createBindGroupLayout({ entries: bindGroupLayoutEntries(k.bindings) })] });
+      this.pipelines.set(k, await this.device.createComputePipelineAsync({ label: `nb-brick.${k.label}`, layout, compute: { module, entryPoint: k.entry } }));
+    }
+    await this.fence();
+    this.device.queue.submit([this.encode(placements.map(p => this.bind(p, 0)), "nb-brick.run")]);
+    await this.fence();
+  }
+
   /** Bytes of every buffer the engine allocated. */
   get bytes(): number { let n = 0; for (const b of this.buffers.values()) n += b.size; return n; }
   get stepsSubmitted(): number { return this.steps; }

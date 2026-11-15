@@ -78,15 +78,16 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
       return f(f(f(v_[0]! + v_[5]!) + f(v_[1]! + v_[4]!)) + f(f(v_[2]! + v_[7]!) + f(v_[3]! + v_[6]!)));
     };
     const cellH = (c: Vec3) => tileH(c.map(x => x >> 2) as Vec3);
-    const cF = (T: Vec3, a: number) => T.every(x => x >= 0 && 4 * x < N) ? Math.fround(cFace(T, a)) : 0;
+    const cF = (T: Vec3, a: number) => T.every(x => x >= 0 && 4 * x < N) ? Math.fround(cFace(T, a)) : 0; // only page 0's C faces are written
     const fF = (c: Vec3, a: number) => cellSlot(s, c) ? Math.fround(fFace(c, a)) : 0;
+    const faceInLattice = (c: Vec3, a: number) => c.every((v, i) => v >= 0 && v < (i === a ? N + 1 : N));
     const plane = (c: Vec3, a: number) => {
-      if (c[a]! <= 0 || c[a]! >= N) return 0;
+      if (!faceInLattice(c, a)) return 0;
       const below = [...c] as Vec3; below[a]! -= 1;
       return cellH(c) || cellH(below) ? fF(c, a) : cF(c.map(x => x >> 2) as Vec3, a);
     };
     const faceU = (c: Vec3, a: number) => {
-      if (c[a]! <= 0 || c[a]! >= N) return 0;
+      if (!faceInLattice(c, a)) return 0;
       const below = [...c] as Vec3; below[a]! -= 1;
       if (cellH(c) || cellH(below)) return fF(c, a);
       const T = c.map(x => x >> 2) as Vec3, k = c[a]! - 4 * T[a]!;
@@ -124,7 +125,7 @@ ${brickOwnerWGSL()}
     const enc = device.createCommandEncoder(); const pass = enc.beginComputePass(); pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(Math.ceil(probes.length / 64)); pass.end();
     enc.copyBufferToBuffer(out, 0, rd, 0, 20 * probes.length); device.queue.submit([enc.finish()]);
     await rd.mapAsync(GPUMapMode.READ); const got = new Float32Array(rd.getMappedRange().slice(0)); rd.unmap();
-    let hanging = 0, corners = 0, hPlane = 0;
+    let hanging = 0, corners = 0, hPlane = 0, walls = 0;
     probes.forEach((v, i) => {
       const T = vertexCoarse(v);
       assert.equal(got[5 * i + 1], T ? 0 : 1, `owner at ${v}`);
@@ -139,9 +140,10 @@ ${brickOwnerWGSL()}
         else assert.equal(got[5 * i + 2 + a], want, `face ${a} at ${v}`);
         const below = [...v] as Vec3; below[a]! -= 1;
         if (cellH(v) !== cellH(below) && v[a]! > 0 && v[a]! < N) hPlane++;
+        if (v[a] === 0 && got[5 * i + 2 + a] !== 0) walls++;
       }
     });
-    assert.ok(hanging > 0 && corners > 0 && hPlane > 0, `hanging ${hanging}, corners ${corners}, interface faces ${hPlane}`);
+    assert.ok(hanging > 0 && corners > 0 && hPlane > 0 && walls > 0, `hanging ${hanging}, corners ${corners}, interface faces ${hPlane}, wall faces ${walls}`);
     for (const b of [pb, out, rd]) b.destroy();
     e.destroy();
   });

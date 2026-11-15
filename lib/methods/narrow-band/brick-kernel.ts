@@ -31,7 +31,7 @@ export interface BrickPlacement {
 }
 
 /** The engine's own buffer names; any other binding name is a lane-owned buffer. */
-export const ENGINE_BUFFERS = ["set", "dir", "args", "vel", "phi", "pres", "cut", "parts"] as const;
+export const ENGINE_BUFFERS = ["set", "dir", "args", "vel", "phi", "pres", "cut", "parts", "xfer"] as const;
 export type EngineBufferName = typeof ENGINE_BUFFERS[number];
 
 /** The at-most-8 storage buffers a kernel rule (brick-abi.md §6). */

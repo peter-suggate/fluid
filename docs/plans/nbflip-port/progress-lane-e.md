@@ -259,3 +259,35 @@ Coordinator rulings (composite pressure parity, P's review) applied to the layou
 Census: the old dam census is resolved (agent report, rule in §3 of that report). Next: setCensus
 (part 1 head, WANT + TRIG from the end state), setMark → residency, setTransfer (TLIST, US→U
 commit, φ in place, slopes via F's nbfRemap*), with frozen-state parity.
+
+## 2026-11-15 — M2 part 2b: setTransfer (brick-transfer.wgsl.ts)
+
+NB-FLIP's remap on the §2.5 storage:
+- `setTransferList` runs markTile and listedFlags verbatim into TLIST.
+- `setTransferFaces` and `setTransferCommit` run remapTileFaces, remapBeside, remapSlope,
+  remapSample and remapFace on U and US (F: US carries the step), with the low-wall rows. They write
+  through an `xfer` scratch, which plays the part of the old second texture.
+- `setTransferCells` runs remapTileCells' vertices in place on PHI. Stored vertices move between F
+  and C when their storage class changes.
+- `setCommitMask` sets CMASK = WANT and the record word 28.
+
+Wall faces hold velocity (lane P: NB-FLIP's walls separate). Planes 0 and N follow the lower-face
+convention, so the skirt cell holds plane N. The owner readers now return them instead of 0.
+
+New in the ABI:
+- capacity `t` (listed tiles; default 2 f) and the `xfer` buffer;
+- header words N_TLIST and N_TLIST_RUN, ARGS.XFER_G1 at 396, FAIL.TIER (bit 11);
+- `BrickEngine.run(placements)` for frozen-state work.
+
+brick-transfer.test.ts (GPU) builds a frozen state: a 4h block on the low wall half-refines, and an h
+block on the upper wall coarsens. It compares the result against a CPU oracle transcribed from the
+old remap:
+- 33 tiles listed, 4845 words written (82 tilted slopes, 45 C corners, 64 C faces, 200 wall faces);
+- every other word of F and C is unchanged bit for bit;
+- CMASK = WANT.
+
+The formulas themselves are F's bitwise nbfRemap* ports. This test checks the assembly, not
+old-kernel-vs-new.
+
+Not yet scheduled in the step. NB-FLIP remaps at the frame head before the move, so the transfer's
+place comes with setCensus (part 1 head).

@@ -56,6 +56,8 @@ export const H = {
   REFUSED_F: 16, REFUSED_C: 17, REFUSED_B: 18, REFUSED_K: 19,
   PCOUNT0: 20, PCOUNT1: 21, P_OVERFLOW: 22, P_UNBINNED: 23,
   N_ENTER_F: 24, N_LEAVE_F: 25, N_ENTER_C: 26, N_LEAVE_C: 27, N_CAND: 28, N_CHANGED: 29,
+  /** setTransfer's listed tiles: appended, then the count its jobs run (brick-abi.md §2.5). */
+  N_TLIST: 30, N_TLIST_RUN: 31,
   LIST_COUNT: 32,
   LANE_F: 64, LANE_P: 128,
   PEAK_F: 192, PEAK_C: 193, PEAK_B: 194, PEAK_K: 195, PEAK_PARTICLES: 196, PEAK_CAND: 197,
@@ -66,6 +68,8 @@ export const FAIL = {
   POOL_F: 1 << 0, POOL_C: 1 << 1, POOL_B: 1 << 2, POOL_K: 1 << 3,
   PARTICLES: 1 << 4, REACH: 1 << 5, LIST: 1 << 6, WINDOW: 1 << 7, UNSUPPORTED: 1 << 8,
   PIVOT: 1 << 9, SEGMENTS: 1 << 10,
+  /** A tier change needs storage no resident brick or page holds (brick-abi.md §2.5). */
+  TIER: 1 << 11,
 } as const;
 export const FAIL_POOL = FAIL.POOL_F | FAIL.POOL_C | FAIL.POOL_B | FAIL.POOL_K;
 /** Reported, non-fatal state bits (H.STATE). */
@@ -95,7 +99,7 @@ export type ListName = keyof typeof LIST;
 const listKind = (k: number): "F" | "C" | "B" => k <= 10 ? "F" : k <= 15 ? "C" : k === 16 ? "B" : "F";
 
 /** Indirect arguments: 12 words a list (G1, G8, G64, pad), then FC_* at 384. Lanes: P from 512, F from 2048. */
-export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, FC_G1: 384, FC_G8: 387, FC_G64: 390, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
 /** Workgroups a dimension under the fold rule: x = min(n, FOLD), y = ceil(n / FOLD). */
 export const FOLD = 32768;
 
@@ -122,6 +126,7 @@ export interface BrickCapacities {
   /** B (BULK16) pages; 0 until M3. */ readonly b: number;
   /** K (cut) bricks. */ readonly k: number;
   /** Particles a bank. */ readonly particles: number;
+  /** setTransfer's listed tiles a step (default 2 f; over it latches FAIL.LIST). */ readonly t?: number;
 }
 
 export interface BrickLayoutOptions extends BrickCapacities {
@@ -143,7 +148,7 @@ export function windowPages(lattice: readonly number[]): [number, number, number
 
 /** The ABI's concrete layout for one scene: every region's word offset and every buffer's size. */
 export class BrickLayout {
-  readonly cap: BrickCapacities;
+  readonly cap: Required<BrickCapacities>;
   readonly lattice: readonly [number, number, number];
   readonly window: readonly [number, number, number];
   readonly windowBits: readonly [number, number, number];
@@ -155,6 +160,8 @@ export class BrickLayout {
     readonly binStart: number; readonly binCount: number; readonly binCursor: number;
     /** Tiers (§2.5): the census's wanted h tiles (16 words a C slot), lane F's tile occupancy and the census's trigger bits (a word an F slot, bit j tile j). */
     readonly want: number; readonly tileOcc: number; readonly trig: number;
+    /** setTransfer's listed tiles: 2 words an entry (C slot << 9 | tile, flags), cap.t entries. */
+    readonly tlist: number;
     readonly lists: readonly number[]; readonly listCap: readonly number[]; readonly words: number;
   };
   /** dir buffer regions (words). */
@@ -162,13 +169,17 @@ export class BrickLayout {
   /** Words of each pool. */
   readonly poolWords: Readonly<Record<PoolName, number>>;
   readonly partsWords: number;
+  /** setTransfer's face scratch: 384 floats a listed tile and face channel (U, US): positive faces, then low-wall rows. */
+  readonly xferWords: number;
 
   constructor(options: BrickLayoutOptions) {
     const { f, c, b, k, particles } = options;
     for (const [name, v] of Object.entries({ f, c, b, k, particles }))
       if (!Number.isInteger(v) || v < (name === "b" || name === "k" ? 0 : 1)) throw new Error(`Brick engine: capacity ${name} = ${v}`);
     if (f >= SLOT_MASK || c >= SLOT_MASK) throw new Error("Brick engine: slot capacity over 2^29");
-    this.cap = { f, c, b, k, particles };
+    const t = options.t ?? 2 * f;
+    if (!Number.isInteger(t) || t < 1) throw new Error(`Brick engine: capacity t = ${t}`);
+    this.cap = { f, c, b, k, particles, t };
     this.lattice = [...options.lattice] as [number, number, number];
     this.window = windowPages(options.lattice);
     this.windowBits = this.window.map(n => Math.log2(n)) as [number, number, number];
@@ -179,13 +190,13 @@ export class BrickLayout {
     const freeF = take(f), freeC = take(c), freeB = take(Math.max(b, 1)), freeK = take(Math.max(k, 1));
     const markF = take(f), markC = take(c), cand = take(f), boundF = take(f), boundC = take(c);
     const binStart = take(f), binCount = take(f), binCursor = take(f);
-    const want = take(CMASK_WORDS * c), tileOcc = take(f), trig = take(f);
+    const want = take(CMASK_WORDS * c), tileOcc = take(f), trig = take(f), tlist = take(2 * t);
     const listCap: number[] = [], lists: number[] = [];
     for (let j = 0; j < LIST_SLOTS; j++) {
       const kind = listKind(j), n = j > 16 ? 0 : kind === "F" ? f : kind === "C" ? c : b;
       listCap.push(n); lists.push(take(Math.max(n, 1)));
     }
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, lists, listCap, words: at };
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -194,6 +205,7 @@ export class BrickLayout {
     const fc = (n: number) => n * BRICK_STRIDE * (f + c);
     this.poolWords = { vel: fc(POOLS.vel.length), phi: fc(POOLS.phi.length), pres: fc(POOLS.pres.length), cut: POOLS.cut.length * BRICK_STRIDE * Math.max(k, 1) };
     this.partsWords = 2 * particles * this.particleStride;
+    this.xferWords = 2 * 384 * t;
   }
 
   /** A channel's first word in its pool (brick-abi.md §2.2). */
@@ -212,7 +224,7 @@ export class BrickLayout {
 
   /** Bytes the engine's core buffers take (set, dir, args, pools, particle banks). */
   get bytes(): number {
-    return 4 * (this.set.words + this.dir.words + ARGS.WORDS + Object.values(this.poolWords).reduce((a, b) => a + b, 0) + this.partsWords);
+    return 4 * (this.set.words + this.dir.words + ARGS.WORDS + Object.values(this.poolWords).reduce((a, b) => a + b, 0) + this.partsWords + this.xferWords);
   }
 }
 
@@ -262,7 +274,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_FREE_F", s.freeF); c("NB_S_FREE_C", s.freeC); c("NB_S_FREE_B", s.freeB); c("NB_S_FREE_K", s.freeK);
   c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
-  c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig);
+  c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);

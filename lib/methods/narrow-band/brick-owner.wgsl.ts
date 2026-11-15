@@ -19,11 +19,31 @@
  *   the linear sample between the tile's two plane faces, with no slopes.
  *   Formulas that differ (remap, samplers) read the plane faces themselves
  *   through nbFacePlane.
- * - The lattice's walls are closed (M2): a face on a wall plane is 0.
+ * - Wall faces (planes 0 and N) hold their velocity (NB-FLIP's walls separate: lane P, 2026-11-15), stored
+ *   by the lower-face convention: plane 0 at cell 0, plane N at the skirt cell (the vertex row), F where
+ *   the in-lattice cell is h-owned, else C at the upper tile (tile N/4 in the vertex-row page). A face
+ *   outside the lattice's faces reads 0.
  */
-export interface BrickOwnerNames { readonly phi: string; readonly vel: string }
+export interface BrickOwnerNames {
+  readonly phi: string; readonly vel: string;
+  /** The functions' prefix (default "nb"): a second ownership's readers in the same module (setTransfer's new one). */
+  readonly prefix?: string;
+  /** The tile predicate fn(cslot, tile) -> bool (default nbTileH, CMASK). */
+  readonly mask?: string;
+  /** The face channel's first word in F and in C (WGSL expressions; default U: NB_VEL_F_U0, NB_VEL_C_U0). */
+  readonly faceF?: string; readonly faceC?: string;
+}
 
-export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) => /* wgsl */`
+const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexCoarse|VertexOwnerH|CVertex|FVertex|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
+
+export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) => {
+  let code = ownerCode(n).replaceAll("NB_VEL_F_U0", n.faceF ?? "NB_VEL_F_U0").replaceAll("NB_VEL_C_U0", n.faceC ?? "NB_VEL_C_U0");
+  if (n.mask) code = code.replaceAll("nbTileH(", `${n.mask}(`);
+  if (n.prefix && n.prefix !== "nb") code = code.replace(OWNER_FUNCTIONS, `${n.prefix}$1`);
+  return code;
+};
+
+const ownerCode = (n: BrickOwnerNames) => /* wgsl */`
 fn nbTileInLattice(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_LATTICE);}
 fn nbTileIndex(t:vec3i)->u32{let q=vec3u(t&vec3i(7));return q.x|(q.y<<3u)|(q.z<<6u);}
 fn nbTileOwnerH(t:vec3i)->bool{
@@ -68,8 +88,9 @@ fn nbVertexPhi(v:vec3i)->f32{
   }
   return ((values[0]+values[5])+(values[1]+values[4]))+((values[2]+values[7])+(values[3]+values[6]));
 }
+// The C face on tile T's lower plane along a (T up to N/4: the upper wall's faces in the vertex-row page).
 fn nbCFace(T:vec3i,a:u32)->f32{
-  if(!nbTileInLattice(T)){return 0.0;}
+  if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return 0.0;}
   let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
   return ${n.vel}[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+nbTileIndex(T)];
 }
@@ -78,15 +99,17 @@ fn nbFFace(c:vec3i,a:u32)->f32{
   return ${n.vel}[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
 }
 fn nbOnWall(c:vec3i,a:u32)->bool{return c[a]<=0||c[a]>=NB_LATTICE[a];}
+// The lower face of c along a is a face of the lattice: planes 0..N along a, cells 0..N-1 across.
+fn nbFaceInLattice(c:vec3i,a:u32)->bool{var hi=NB_LATTICE;hi[a]+=1;return all(c>=vec3i(0))&&all(c<hi);}
 // The stored face on a plane: the lower face of cell c along a, where c[a] is a multiple of 4 or either side is h-owned.
 fn nbFacePlane(c:vec3i,a:u32)->f32{
-  if(nbOnWall(c,a)){return 0.0;}
+  if(!nbFaceInLattice(c,a)){return 0.0;}
   var e=vec3i(0);e[a]=1;
   if(nbCellOwnerH(c)||nbCellOwnerH(c-e)){return nbFFace(c,a);}
   return nbCFace(c>>vec3u(2u),a);
 }
 fn nbFaceU(c:vec3i,a:u32)->f32{
-  if(nbOnWall(c,a)){return 0.0;}
+  if(!nbFaceInLattice(c,a)){return 0.0;}
   var e=vec3i(0);e[a]=1;
   if(nbCellOwnerH(c)||nbCellOwnerH(c-e)){return nbFFace(c,a);}
   let T=c>>vec3u(2u);let k=c[a]-4*T[a];

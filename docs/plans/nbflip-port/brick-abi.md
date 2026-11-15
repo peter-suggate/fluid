@@ -149,7 +149,7 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 kept exactly).
 - `CMASK` bit `t` of the page's C slot is the truth.
 - The F record's word 28 (bits 0–7) copies the bits of its 2³ tiles.
-- `FLAGS.OWNER_H` copies them per cell.
+- `FLAGS.OWNER_H` is not maintained at M2 (`setInit` sets it at entry). Readers take `nbTileOwnerH`.
 - All three are written only by `setTransfer`'s commit, so every stage of a step sees one
   ownership.
 
@@ -187,7 +187,9 @@ kept exactly).
     the vertex give the same value, because their faces share corners.
   - So no vertex has two writers. The prelude's `nbVertexOwnerH(v)` is true exactly when no
     incident tile is 4h-owned.
-- *Faces (`U*`, `UP*`, `US*`, `AP*`).*
+- *Faces (`U*`, `UP*`, `US*`, `AP*`).* NB-FLIP's lattice walls separate (lane P, 2026-11-15), so
+  wall faces hold a velocity. They use the lower-face convention: plane 0 is stored at cell 0, and
+  plane N at the skirt cell (the vertex row), in F or C by the in-lattice cell's owner.
   - A face with an h-owned cell on either side is an h face, stored at h in the F brick of its
     upper cell (the lower-face convention). That brick is a core or ring brick, so it is resident.
   - A face between two 4h-owned tiles is a 4h face, stored in the C brick of its upper tile.
@@ -205,18 +207,36 @@ rules above through the directory and masks:
 1. `setMark` decides each tile's next owner (the NB-FLIP census, verbatim) into `WANT`: 512 bits
    a C slot, `16 * CCAP` words in `set`. It also marks the bricks that the new h tiles and their
    ring need (`CAND`, `MARK_F` bit 0). A brick whose tiles change owner gets `MARK_F` bit 1
-   (`CHANGED`). The census reads lane F's tile occupancy, `TILE_OCC` (FCAP words in `set`, bit
-   `j` for the brick's tile `j`). `pScan` overwrites it each step for every brick of F_ALL.
+   (`CHANGED`). The census reads lane F's `TILE_OCC` (FCAP words in `set`): bits 0–7 the
+   brick's tile `j` holds particles (`pScan`, last step), bits 8–15 a particle join on tile `j`
+   (F's tail sweep, NB-FLIP's join rule: x ± 0.875 cells, the crossing-cell box where the home
+   tile has REACH and φ ≤ 0, swept by dt·before/h, pad 0), bits 16–31 reserved zero. `pScan`
+   rewrites the whole word after the census, so joins clear each step.
 2. `setUpdate` claims entering bricks and rebuilds records, but does **not** free leaving ones
    yet. Their data is restricted first.
-3. `setTransfer` runs over `F_CHANGED` and `F_ENTER`, a workgroup a brick, with NB-FLIP's remap
-   verbatim (F's `nbfRemap*`, bitwise to `remapTileCells`, `remapSlope`, `remapSample` and
-   `remapFace`):
-   - *4h → h:* φ is refined onto the tile's 5³ h vertices, the faces are prolonged (the slope
-     tilt on 4h owners), and the pressure is not carried;
-   - *h → 4h:* φ is injected at the corners (`oldumSampleVertex` at a corner is the h value), and
-     each 4h face is the mean of its 16 h samples;
-   - it then commits `CMASK`, word 28 and `OWNER_H` from `WANT`.
+3. `setTransfer` (brick-transfer.wgsl.ts, landed 2026-11-15) is NB-FLIP's remap verbatim on this
+   storage (F's `nbfRemap*` for the formulas):
+   - `setTransferList` lists tiles with `markTile` and `listedFlags` over the tiles of C_ALL, into
+     `TLIST` (`set.tlist`, 2 words an entry: `cs << 9 | tile`, flags; `cap.t` entries, default
+     2 FCAP, over it `FAIL.LIST`). It counts into `H.N_TLIST`. `setTransferArgs` moves the count
+     to `N_TLIST_RUN` and writes `ARGS.XFER_G1`.
+   - `setTransferFaces` (192 lanes a job, `cfg.z` = U or US; UP is not carried) is
+     `remapTileFaces` with `remapBeside`, `remapSlope`, `remapSample` and `remapFace`, the
+     low-wall rows included. Old faces are read through CMASK, new placement through WANT. Values
+     go to the `xfer` scratch (`2 · 384 · cap.t` floats). `setTransferCommit` then stores them: an h face in F at its upper
+     cell, a 4h face in C at its upper tile. That is the old remap's second texture.
+   - `setTransferCells` handles `remapTileCells`' vertices (surfaceOnly) in place, φ = `PHI`. A
+     vertex the old layout stored keeps its value and moves to its new storage when that
+     changes. A refining tile moves its own corners to F, because their new authority tile may
+     not be listed.
+   - `setCommitMask` sets CMASK = WANT and the F records' word 28 tile bits.
+   - Missing storage for a write latches `FAIL.TIER`.
+   - V (`umPressureFaceV`, M2 without cuts) is 1 between lattice cells and 0.5 into the
+     exterior. The deviations come from the storage: there are no released bits or cut weights
+     until solids land (M3), and a face toward a non-resident (deep-air) page has no storage and
+     reads 0.
+   - It runs as `BrickEngine.run` on a frozen state (brick-transfer.test.ts). Its place in the
+     step comes with the census: NB-FLIP remaps at the frame head, before the particle move.
 4. The frees run last, after `setTransfer` (a phase of `setLists`). A slot never leaves and
    enters in the same step, so each pool's measured peak includes one step of churn.
 
@@ -362,6 +382,7 @@ in words from its start. Regions are laid out in this order, each a multiple of 
 | 24–27 | `N_ENTER_F N_LEAVE_F N_ENTER_C N_LEAVE_C` | this step's churn |
 | 28 | `N_CAND` | this step's enter candidates (append counter) |
 | 29 | `N_CHANGED` | this step's tier-changed F bricks |
+| 30, 31 | `N_TLIST`, `N_TLIST_RUN` | setTransfer's listed tiles: the append count, and the count its jobs run (§2.5) |
 | 32–63 | `LIST_COUNT[k]` | list `k`'s entry count (§5.5) |
 | 64–127 | F's | lane F's counters and receipts |
 | 128–191 | P's | lane P's counters, residuals, cycle records, PCG scalars |
@@ -484,7 +505,7 @@ by the owning lane's gated slots). For list `k`, at word `12 * k`:
 | `12k + 6..8` | `G64` | one per 64 entries |
 | `12k + 9..11` | reserved | |
 
-Then `FC_G1`, `FC_G8` and `FC_G64` at words 384–392. Words 512 and up belong to the lanes: P from
+Then `FC_G1`, `FC_G8` and `FC_G64` at words 384–392, and `XFER_G1` (setTransfer's jobs) at 396. Words 512 and up belong to the lanes: P from
 512 (the gated solver slots), F from 2048.
 
 **The fold rule.** A count `n` of workgroups is written as `x = min(n, 32768)`,
@@ -536,7 +557,7 @@ around the MGPCG. Its per-face state takes FLAGS bits 7–12 (§2.4).
 `record()` builds its bind groups once at build:
 - `cfg`: a 16-byte uniform `vec4u`, baked per dispatch (seep's pattern). `cfg.x` is the ring slot,
   `cfg.y` the parity, `cfg.z` and `cfg.w` the kernel's own.
-- storage: `set`, `dir`, `args`, `vel`, `phi`, `pres`, `cut`, `parts`, and lane-owned buffers by
+- storage: `set`, `dir`, `args`, `vel`, `phi`, `pres`, `cut`, `parts`, `xfer`, and lane-owned buffers by
   name.
 
 At most 8 storage buffers a kernel. A kernel that needs more splits.
@@ -761,7 +782,8 @@ The method (`brick-method.ts`) refuses a scene and names every gap: the scene's 
 | 8 | `UNSUPPORTED` | a kernel met a feature it does not implement |
 | 9 | `PIVOT` | coarsest Gauss–Jordan pivot not positive (P) |
 | 10 | `SEGMENTS` | backtrace segment cap (F) |
-| 11–15 | reserved, E | |
+| 11 | `TIER` | a tier change needs storage no resident brick or page holds (§2.5) |
+| 12–15 | reserved, E | |
 | 16–23 | reserved, F | |
 | 24–31 | reserved, P | |
 
@@ -772,7 +794,7 @@ slot cap, P1 item 13).
 
 ## 9. Scene authoring
 
-`scene.fluid.brickPools`: `{ f, c, b, k, particles }`, the capacities of §2.1 and `PCAP`. They are
+`scene.fluid.brickPools`: `{ f, c, b, k, particles, t? }`, the capacities of §2.1, `PCAP`, and setTransfer's listed tiles a step (`t`, default 2 f). They are
 required for `engine: "brick"`. A scene without them fails explicitly at build, naming the field.
 M0(b) measures each gate scene's peaks and authors them with a margin (its own section of
 `progress-lane-e.md`).
