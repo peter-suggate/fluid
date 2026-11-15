@@ -1,17 +1,21 @@
 // Lane E's T4 kernels (levelset-coarse.wgsl.ts) on a tiered boot: each kernel against a Float64 CPU oracle that
-// reads the GPU's state before it (the chain lcAdvect, lcCouple, lcClear, lcRetire, lcPublish). The state is the
-// column boot's tiers and residency with an analytic φ on every owned vertex, a constant u* on every stored face and
-// hashed lane F tile, cell and vertex words; one page is COLD. Every non-owned φ copy (F copies of C or hanging
-// vertices, C copies no 4h tile owns) holds a NaN payload: no kernel may read it into a result or write it. After each
-// kernel the whole φ pool must equal the state before it except the C vertices the kernel owns, and at the end the
-// velocity pool, fcell, set and dir must be untouched.
+// reads the GPU's state before it (the chain lcClear, lcAdvect, lcCouple, lcClear, lcRetire, lcPublish, lcAdvect: the
+// advects read the far-air gate the clear before them wrote). The state is the column boot's tiers and residency with
+// an analytic φ on every owned vertex, a constant u* on every stored face and hashed lane F tile, cell and vertex
+// words; two pages are COLD. Every non-owned φ copy (F copies of C or hanging vertices, C copies no 4h tile owns)
+// holds a NaN payload: no kernel may read it into a result or write it. After each kernel the whole φ pool must equal
+// the state before it except the C vertices the kernel owns, the set except lcClear's gate words (by the oracle), and
+// at the end the velocity pool, fcell and dir must be untouched. A BULK16 page word then latches lcAdvect's
+// FAIL.UNSUPPORTED. The second fixture commits h tiles inside 4h pages (brick-set-tiers test 1's block A), so some C
+// positions are F's, and runs the same chain.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, H, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
+import { BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
 import { bringUpStages } from "./brick-stages";
+import { brickTransferKernels } from "./brick-transfer.wgsl";
 import { FT, FTF, fluidLayout } from "./fluid-grid.wgsl";
 import { levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 
@@ -71,7 +75,7 @@ class World {
   readonly F: ReturnType<typeof fluidLayout>;
   readonly dt = f32(1 / 60); readonly hm = f32(1 / N);
   phi!: Float32Array; // the phi pool (f32 view)
-  constructor(readonly L: BrickLayout, readonly dir: Uint32Array, readonly set: Uint32Array, readonly fcell: Uint32Array) { this.F = fluidLayout(L, { tiered: true }); }
+  constructor(readonly L: BrickLayout, readonly dir: Uint32Array, public set: Uint32Array, readonly fcell: Uint32Array) { this.F = fluidLayout(L, { tiered: true }); }
   base(kind: "F" | "C", ch: string) { return this.L.base("phi", kind, ch); }
   cslotOfPage(P: V) { const w = this.dir[this.L.dir.page + this.L.pageIndex(P[0], P[1], P[2])]!; return w < SEAM ? w : NONE; }
   fslotOfBrick(b: V) { const cs = this.cslotOfPage(shr(b, 2)); if (cs === NONE) return NONE; return this.dir[this.L.dir.child + 64 * cs + ((b[0] & 3) | ((b[1] & 3) << 2) | ((b[2] & 3) << 4))]!; }
@@ -80,6 +84,12 @@ class World {
   tileH(cs: number, i: number) { return ((this.dir[this.L.dir.cmask + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1; }
   tileOwnerH(t: V) { if (!this.tileInLattice(t)) return false; const cs = this.cslotOfPage(shr(t, 3)); return cs !== NONE && this.tileH(cs, this.tileIndex(t)); }
   cellOwnerH(c: V) { return this.tileOwnerH(shr(c, 2)); }
+  /** lcGate: last step's AIR_GATE bit of tile t (clear where no page holds it). */
+  gate(t: V) {
+    if (!this.tileInLattice(t)) return false;
+    const cs = this.cslotOfPage(shr(t, 3)); if (cs === NONE) return false;
+    const i = this.tileIndex(t); return ((this.set[this.L.set.airGate + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1;
+  }
   vertexCoarse(v: V): V | undefined {
     const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
     for (let k = 0; k < 8; k++) {
@@ -334,28 +344,44 @@ function lanes(W: World, slots: number[]): Lane[] {
   }
   return out;
 }
-/** The page's seed tiles (19^3 about it) and their Chebyshev dilation by reach. */
+/** The page's live tiles and seeds (19^3 about it), the collar (the seeds dilated 4 tiles an axis, x then y then z,
+ * each axis held to the live tiles) and the gate words of its own 512 tiles (a live tile with the collar in its 3^3). */
 function seedsOf(W: World, cs: number) {
   const P = brickKeyCoord(W.dir[W.L.dir.crec + 32 * cs + REC.KEY]!) as V, T0 = sub(mul(P, 8), [6, 6, 6]);
-  const seed = new Uint8Array(19 ** 3), at = (t: V) => { const r = sub(t, T0); return r.every(x => x >= 0 && x < 19) ? r[0] + 19 * (r[1] + 19 * r[2]) : -1; };
+  const n = 19 ** 3, ix = (r: V) => r[0] + 19 * (r[1] + 19 * r[2]), at = (t: V) => { const r = sub(t, T0); return r.every(x => x >= 0 && x < 19) ? ix(r) : -1; };
+  const live = new Uint8Array(n), seed = new Uint8Array(n);
   for (let z = 0; z < 19; z++) for (let y = 0; y < 19; y++) for (let x = 0; x < 19; x++) {
     const t = add(T0, [x, y, z]);
     if (!W.tileInLattice(t)) continue;
     const tcs = W.cslotOfPage(shr(t, 3)); if (tcs === NONE) continue;
+    live[ix([x, y, z])] = 1;
     const flags = W.flags(mul(t, 4));
     let s: boolean;
     if (W.tileH(tcs, W.tileIndex(t))) s = (flags & FTF.AIR_SEED) !== 0;
     else if (flags & FTF.SURFACE_TILE) s = true;
     else { s = false; for (let k = 0; k < 8; k++) if (W.cVertex("PHI", add(t, corner(k))) <= 0) s = true; }
-    if (s) seed[x + 19 * (y + 19 * z)] = 1;
+    if (s) seed[ix([x, y, z])] = 1;
   }
-  const within = (t: V, reach: number) => {
-    const r = sub(t, T0);
-    for (let z = Math.max(0, r[2] - reach); z <= Math.min(18, r[2] + reach); z++) for (let y = Math.max(0, r[1] - reach); y <= Math.min(18, r[1] + reach); y++)
-      for (let x = Math.max(0, r[0] - reach); x <= Math.min(18, r[0] + reach); x++) if (seed[x + 19 * (y + 19 * z)]) return true;
-    return false;
+  const dilate = (src: Uint8Array, a: number) => {
+    const out = new Uint8Array(n);
+    for (let z = 0; z < 19; z++) for (let y = 0; y < 19; y++) for (let x = 0; x < 19; x++) {
+      const r: V = [x, y, z]; if (!live[ix(r)]) continue;
+      for (let o = -4; o <= 4; o++) { const q: V = [...r]; q[a] += o; if (q[a]! >= 0 && q[a]! < 19 && src[ix(q)]) { out[ix(r)] = 1; break; } }
+    }
+    return out;
   };
-  return { seedAt: (t: V) => { const i = at(t); return i >= 0 && seed[i] === 1; }, within };
+  const collar = dilate(dilate(dilate(seed, 0), 1), 2);
+  const gateWords = () => {
+    const w = new Uint32Array(CMASK_WORDS);
+    for (let l = 0; l < 512; l++) {
+      const r: V = [6 + (l & 7), 6 + ((l >> 3) & 7), 6 + (l >> 6)]; if (!live[ix(r)]) continue;
+      let near = false;
+      for (let k = 0; k < 27; k++) if (collar[ix(add(r, [(k % 3) - 1, (Math.floor(k / 3) % 3) - 1, Math.floor(k / 9) - 1]))]) near = true;
+      if (near) w[l >> 5] = (w[l >> 5]! | (1 << (l & 31))) >>> 0;
+    }
+    return w;
+  };
+  return { seedAt: (t: V) => { const i = at(t); return i >= 0 && seed[i] === 1; }, collar: (t: V) => { const i = at(t); return i >= 0 && collar[i] === 1; }, gateWords };
 }
 
 type Tally = Record<string, number>;
@@ -363,14 +389,10 @@ const bump = (t: Tally, k: string) => { t[k] = (t[k] ?? 0) + 1; };
 
 function advectOracle(W: World, slots: number[], tally: Tally, fatal: { n: number }): Map<string, number> {
   const out = new Map<string, number>(), dt = W.dt, hm: V = [W.hm, W.hm, W.hm], w = 4;
-  const seeds = new Map<number, ReturnType<typeof seedsOf>>();
   for (const { cs, l, v } of lanes(W, slots)) {
     const c = W.phi[W.base("C", "PHI") + BRICK_STRIDE * cs + l]!, key = `${cs}:${l}`, wall = v.some((x, a) => x === 0 || x === NL[a]);
     if (W.tierCold(v)) { out.set(key, c); bump(tally, wall ? "wall cold" : "cold hold"); continue; }
-    if (c >= 16) {
-      if (!seeds.has(cs)) seeds.set(cs, seedsOf(W, cs));
-      if (!seeds.get(cs)!.within(shr(W.cellOf(v), 2), 5)) { out.set(key, c); bump(tally, wall ? "wall far air" : "far air"); continue; }
-    }
+    if (c >= 16 && !W.gate(shr(W.cellOf(v), 2))) { out.set(key, c); bump(tally, wall ? "wall far air" : "far air"); continue; }
     bump(tally, wall ? "wall full path" : "full path");
     // lcFullAdvected
     const p: V = [...v];
@@ -484,19 +506,19 @@ function coupleOracle(W: World, slots: number[], tally: Tally): Map<string, numb
   return out;
 }
 
-function clearOracle(W: World, slots: number[], tally: Tally): Map<string, number> {
+/** lcClear: the gate words of every C_ALL page (into setWant) and the raised C vertices. */
+function clearOracle(W: World, slots: number[], tally: Tally, setWant: Map<number, number>): Map<string, number> {
   const out = new Map<string, number>();
   const bySlot = new Map<number, Lane[]>();
   for (const lane of lanes(W, slots)) { if (!bySlot.has(lane.cs)) bySlot.set(lane.cs, []); bySlot.get(lane.cs)!.push(lane); }
-  for (const [cs, ls] of bySlot) {
-    const value = (l: number) => W.phi[W.base("C", "PHI") + BRICK_STRIDE * cs + l]!;
-    if (!ls.some(x => value(x.l) < 16)) continue;
-    const S = seedsOf(W, cs);
-    for (const { l, v } of ls) {
-      const x = value(l);
+  for (const cs of slots) {
+    const S = seedsOf(W, cs), gate = S.gateWords();
+    for (let j = 0; j < CMASK_WORDS; j++) setWant.set(W.L.set.airGate + CMASK_WORDS * cs + j, gate[j]!);
+    for (const { l, v } of bySlot.get(cs) ?? []) {
+      const x = W.phi[W.base("C", "PHI") + BRICK_STRIDE * cs + l]!;
       if (x >= 16) continue;
       let prot = false;
-      for (let k = 0; k < 8; k++) { const t = shr(sub(v, corner(k)), 2); if (x <= 0 ? S.seedAt(t) : S.within(t, 4)) prot = true; }
+      for (let k = 0; k < 8; k++) { const t = shr(sub(v, corner(k)), 2); if (x <= 0 ? S.seedAt(t) : S.collar(t)) prot = true; }
       if (prot) { bump(tally, x <= 0 ? "seed" : "collar"); continue; }
       if (W.vertexCold(v)) { bump(tally, "cold"); continue; }
       out.set(`${cs}:${l}`, Math.max(x, 16)); bump(tally, "raised");
@@ -567,13 +589,27 @@ function retireOracle(W: World, slots: number[], tally: Tally): Map<string, numb
   return out;
 }
 
-test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h corners match the CPU oracle", GPU, async () => {
-  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
-  await withUniformDevice("levelset coarse", async device => {
+interface Fixture {
+  /** The boot's liquid box (high corner). */ hi: V;
+  /** h tiles to commit over the boot's tiers (WANT then setCommitMask), as brick-set-tiers.test.ts test 1. */ want?: (T: V) => boolean;
+  /** Pages made COLD (by key; those resident). */ cold: number[];
+  /** Assert every kernel's paths are covered, and force the BULK16 latch at the end. */ full: boolean;
+}
+async function runFixture(device: GPUDevice, fx: Fixture) {
     const stages = (c: Parameters<typeof bringUpStages>[0]) => ({ ...bringUpStages(c), tiered: true, buffers: { fcell: fluidLayout(c.layout, { tiered: true }).fcell.words } });
     const e = await BrickEngine.create(device, { lattice: NL, h_m: 1 / N, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
-      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [30.3, 40.3, 30.3] }], solver: L => bringUpCG(L), stages });
-    const L = e.layout, s0 = await snapshot(e), F = fluidLayout(L, { tiered: true });
+      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: fx.hi }], solver: L => bringUpCG(L), stages });
+    const L = e.layout, F = fluidLayout(L, { tiered: true });
+    if (fx.want) {
+      const boot = await snapshot(e);
+      for (const cs of boot.pages.values()) {
+        const P = brickKeyCoord(boot.dir[L.dir.crec + 32 * cs + REC.KEY]!) as V, want = new Uint32Array(CMASK_WORDS);
+        for (let i = 0; i < 512; i++) { const T = add(mul(P, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (T.every(x => 4 * x < N) && fx.want(T)) want[i >> 5] = (want[i >> 5]! | (1 << (i & 31))) >>> 0; }
+        e.write("set", L.set.want + CMASK_WORDS * cs, want);
+      }
+      await e.run([{ kernel: brickTransferKernels(L).setCommitMask, dispatch: { indirect: 12 * LIST.C_ALL } }]);
+    }
+    const s0 = await snapshot(e);
     assert.equal(s0.header[H.FAIL], 0);
     const slots = s0.list(LIST.C_ALL);
     assert.equal(slots.length, s0.pages.size, "C_ALL lists every page");
@@ -608,14 +644,14 @@ test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h
       set[L.set.binStart + fs] = start; set[L.set.binCount + fs] = at - start;
     }
     // ---- two COLD pages: (1, 0, 1) on the floor away from the column, (0, 1, 1) in the air above the surface.
-    const dir = new Uint32Array(s0.dir), coldSlots = [brickKey(1, 0, 1), brickKey(0, 1, 1)].map(k => s0.pages.get(k)!);
-    assert.ok(coldSlots.every(cs => cs !== undefined), "the COLD pages are resident");
+    const dir = new Uint32Array(s0.dir), coldSlots = fx.cold.map(k => s0.pages.get(k)).filter(cs => cs !== undefined);
+    if (fx.full) assert.equal(coldSlots.length, fx.cold.length, "the COLD pages are resident");
     for (const cs of coldSlots) dir[L.dir.crec + 32 * cs + REC.CLASS]! |= F_CLASS.COLD;
     // ---- φ: analytic on owned vertices, NaN payloads on every other copy; u* = U on every stored face.
     const phiWords = new Uint32Array(await e.read("phi")), W = new World(L, dir, set, fcell);
     W.phi = new Float32Array(phiWords.buffer);
     const put = (kind: "F" | "C", ch: string, slot: number, l: number, x: number | undefined) => { const i = L.base("phi", kind, ch) + BRICK_STRIDE * slot + l; if (x === undefined) phiWords[i] = POISON; else W.phi[i] = x; };
-    let poisonF = 0, poisonC = 0;
+    let poisonF = 0, poisonC = 0, poisonCIn = 0;
     for (const [bk, fs] of s0.bricks) {
       const b = brickKeyCoord(bk) as V;
       for (let l = 0; l < 512; l++) {
@@ -628,7 +664,7 @@ test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h
       const P = brickKeyCoord(pk) as V;
       for (let l = 0; l < 512; l++) {
         const v = add(mul(P, 32), mul([l & 7, (l >> 3) & 7, l >> 6], 4)), own = W.cOwned(v);
-        if (!own) poisonC++;
+        if (!own) { poisonC++; if (v.every((x, a) => x <= NL[a]!)) poisonCIn++; }
         put("C", "PHI", cs, l, own ? phi0(v) : undefined); put("C", "PHI1", cs, l, own ? phi1(v) : undefined);
       }
     }
@@ -639,17 +675,25 @@ test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h
     }
     e.write("phi", 0, phiWords); e.write("vel", 0, velWords); e.write("fcell", 0, fcell); e.write("set", 0, set); e.write("dir", 0, dir);
     const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL };
-    console.log(`levelset-coarse: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${lanes(W, slots).length} C vertices, COLD pages ${coldSlots.map(cs => brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!).join(",")).join(" ")}; poisoned ${poisonF} F and ${poisonC} C copies`);
+    console.log(`levelset-coarse: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${lanes(W, slots).length} C vertices, COLD pages ${coldSlots.map(cs => brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!).join(",")).join(" ")}; poisoned ${poisonF} F and ${poisonC} C copies (${poisonCIn} of them lattice vertices F owns)`);
 
-    // ---- one kernel: run, then the φ pool differs from before only at the expected C words, by the oracle's values.
-    const step = async (name: keyof typeof kernels, ch: "PHI" | "PHI1", oracle: (W: World, tally: Tally) => Map<string, number>, tol: (x: number) => number) => {
-      const before = new Uint32Array(await e.read("phi"));
-      W.phi = new Float32Array(before.slice().buffer);
-      const tally: Tally = {}, want = oracle(W, tally);
+    // ---- one kernel: run, then the φ pool differs from before only at the expected C words, by the oracle's values,
+    // and the set only at the words the oracle names (lcClear's gate words).
+    const words = (a: Uint32Array, b: Uint32Array) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
+    const step = async (name: keyof typeof kernels, ch: "PHI" | "PHI1", oracle: (W: World, tally: Tally, setWant: Map<number, number>) => Map<string, number>, tol: (x: number) => number) => {
+      const before = new Uint32Array(await e.read("phi")), setBefore = new Uint32Array(await e.read("set"));
+      W.phi = new Float32Array(before.slice().buffer); W.set = setBefore;
+      const tally: Tally = {}, setWant = new Map<number, number>(), want = oracle(W, tally, setWant);
       await e.run([{ kernel: kernels[name], dispatch: listC }]);
-      const after = await e.read("phi"), af = new Float32Array(after.buffer);
-      const header = (await e.read("set", 0, 256));
-      assert.equal(header[H.FAIL], 0, `${name}: FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]}`);
+      const after = await e.read("phi"), af = new Float32Array(after.buffer), setAfter = new Uint32Array(await e.read("set"));
+      assert.equal(setAfter[H.FAIL], 0, `${name}: FAIL ${setAfter[H.FAIL]} info ${setAfter[H.FAIL_INFO]}`);
+      let setBad = 0, gateBits = 0; const setReport: string[] = [];
+      for (let i = 0; i < setAfter.length; i++) {
+        const x = setWant.get(i) ?? setBefore[i]!;
+        if (setWant.has(i)) for (let b = x; b; b &= b - 1) gateBits++;
+        if (setAfter[i] !== x) { setBad++; if (setReport.length < 8) setReport.push(`set word ${i}: ${setBefore[i]} -> gpu ${setAfter[i]} oracle ${x}`); }
+      }
+      assert.equal(setBad, 0, `${name}: set words off the oracle\n${setReport.join("\n")}`);
       const expected = new Map<number, number>();
       for (const [k, x] of want) { const [cs, l] = k.split(":").map(Number) as [number, number]; expected.set(L.base("phi", "C", ch) + BRICK_STRIDE * cs + l, x); }
       let stray = 0, bad = 0, worst = 0; const report: string[] = [];
@@ -660,33 +704,65 @@ test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h
         if (!(err <= tol(x))) { bad++; if (report.length < 8) report.push(`word ${i}: gpu ${af[i]} oracle ${x}`); }
         else worst = Math.max(worst, err);
       }
-      console.log(`${name}: ${want.size} C vertices, worst |err| ${worst.toExponential(2)}; ${JSON.stringify(tally)}`);
+      console.log(`${name}: ${want.size} C vertices${setWant.size ? `, ${gateBits} gate bits` : ""}, worst |err| ${worst.toExponential(2)}; ${JSON.stringify(tally)}`);
       assert.equal(stray, 0, `${name}: writes outside its C vertices\n${report.join("\n")}`);
       assert.equal(bad, 0, `${name}: ${bad} vertices off the oracle\n${report.join("\n")}`);
       return tally;
     };
     const rel = (k: number) => (x: number) => k * Math.max(1, Math.abs(x));
-    const fatal = { n: 0 };
+    const fatal = { n: 0 }, sum = (...ts: Tally[]) => { const o: Tally = {}; for (const t of ts) for (const [k, x] of Object.entries(t)) o[k] = (o[k] ?? 0) + x; return o; };
+    const cover = (name: string, t: Tally, keys: string[]) => { if (fx.full) for (const k of keys) assert.ok((t[k] ?? 0) > 0, `${name} path ${k} covered`); };
+    // The chain: the gate is clear until the first lcClear (zeroed at setClaimPages), which writes it for advect.
+    const tL0 = await step("lcClear", "PHI", (W, t, sw) => clearOracle(W, slots, t, sw), rel(0));
     const tA = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
-    assert.equal(fatal.n, 0);
-    for (const k of ["cold hold", "far air", "full path", "wall full path", "foot", "smoothing", "cubic", "wall contact"]) assert.ok((tA[k] ?? 0) > 0, `advect exit ${k} covered`);
     const tC = await step("lcCouple", "PHI", (W, t) => coupleOracle(W, slots, t), rel(2e-4));
-    for (const k of ["cold", "no heat", "bulk", "union", "union adds", "erasure", "erasure refused"]) assert.ok((tC[k] ?? 0) > 0, `couple path ${k} covered`);
-    const tL = await step("lcClear", "PHI", (W, t) => clearOracle(W, slots, t), rel(0));
-    for (const k of ["raised", "seed", "collar", "cold"]) assert.ok((tL[k] ?? 0) > 0, `clear path ${k} covered`);
+    const tL = await step("lcClear", "PHI", (W, t, sw) => clearOracle(W, slots, t, sw), rel(0));
     const tR = await step("lcRetire", "PHI1", (W, t) => retireOracle(W, slots, t), rel(2e-4));
-    for (const k of ["cold", "no h stencil", "hot", "rebuilt", "crossing cell", "newton", "sentinel"]) assert.ok((tR[k] ?? 0) > 0, `retire path ${k} covered`);
     // lcPublish: PHI takes PHI1 at every C vertex.
     await step("lcPublish", "PHI", W => {
       const m = new Map<string, number>();
       for (const { cs, l } of lanes(W, slots)) m.set(`${cs}:${l}`, W.phi[L.base("phi", "C", "PHI1") + BRICK_STRIDE * cs + l]!);
       return m;
     }, rel(0));
+    // The next step's advect reads the gate the last lcClear wrote.
+    const tA2 = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
+    assert.equal(fatal.n, 0);
+    cover("advect", sum(tA, tA2), ["cold hold", "far air", "full path", "wall full path", "foot", "smoothing", "cubic", "wall contact"]);
+    cover("couple", tC, ["cold", "no heat", "bulk", "union", "union adds", "erasure", "erasure refused"]);
+    cover("clear", sum(tL0, tL), ["raised", "seed", "collar", "cold"]);
+    cover("retire", tR, ["cold", "no h stencil", "hot", "rebuilt", "crossing cell", "newton", "sentinel"]);
     // ---- nothing else moved.
-    const words = (a: Uint32Array, b: Uint32Array) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
     assert.equal(words(await e.read("vel"), velWords), 0, "vel untouched");
     assert.equal(words(await e.read("fcell"), fcell), 0, "fcell untouched");
-    assert.equal(words(await e.read("set"), set), 0, "set untouched");
     assert.equal(words(await e.read("dir"), dir), 0, "dir untouched");
+    if (!fx.full) return { poisonCIn };
+    // ---- the BULK16 latch (deviation 2): a BULK16 page word beside the pages (the skirt page (2, 0, 0)) fails lcAdvect.
+    const skirt = L.dir.page + L.pageIndex(2, 0, 0);
+    assert.equal(dir[skirt], NONE, "the skirt page is absent");
+    e.write("dir", skirt, new Uint32Array([0xa0000000]));
+    await e.run([{ kernel: kernels.lcAdvect, dispatch: listC }]);
+    const header = new Uint32Array(await e.read("set", 0, 256));
+    assert.equal(header[H.FAIL]! & FAIL.UNSUPPORTED, FAIL.UNSUPPORTED, `the BULK16 latch: FAIL ${header[H.FAIL]}`);
+    assert.equal(header[H.FAIL_INFO], 0x4c430003, "the BULK16 latch's info");
+    console.log(`levelset-coarse: BULK16 latch FAIL ${header[H.FAIL]} info 0x${header[H.FAIL_INFO]!.toString(16)}`);
+    return { poisonCIn };
+}
+
+test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h corners match the CPU oracle", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("levelset coarse", async device => {
+    await runFixture(device, { hi: [30.3, 40.3, 30.3], cold: [brickKey(1, 0, 1), brickKey(0, 1, 1)], full: true });
+  });
+});
+
+/** brick-set-tiers.test.ts test 1's block A: h tiles x 0..5, y 4..5, z 0..5, inside 4h pages. Its interior corners
+ * (and those on the x = 0, z = 0 walls) are C positions F owns. */
+const blockA = (T: V) => T[0] <= 5 && T[1] >= 4 && T[1] <= 5 && T[2] <= 5;
+test("levelset-coarse (GPU): mixed ownership (h tiles inside 4h pages): F-owned C copies are never read or written", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("levelset coarse mixed", async device => {
+    const { poisonCIn } = await runFixture(device, { hi: [N + 1, 20.3, N + 1], want: blockA, cold: [brickKey(1, 0, 1)], full: false });
+    // CMASK = WANT: block A's 6 x 6 corners at y = 20 (tile corners x, z 0..5) have no incident 4h tile.
+    assert.equal(poisonCIn, 36, "the F-owned C positions are block A's corners");
   });
 });

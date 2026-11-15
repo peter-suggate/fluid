@@ -511,6 +511,7 @@ its `TOP_*` word.
 | `CAND` | `CAND_CAP = FCAP` | enter candidates: brick keys (§4.1 word 29). Duplicates allowed; `setUpdate` dedupes by compare-exchange on the directory. Overflow latches `FAIL.LIST`. |
 | `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` reads it, then clears it |
 | `BOUND_C` | `CCAP` | the same for C slots (4h faces) |
+| `AIR_GATE` | `16 * CCAP` | per C slot, 512 bits: bit `t` (the tile's C local) set where the far-air gate holds (umFarAirKept's plane 4: the 3³ about tile `t` meets the collar, the seeds dilated 4 tiles an axis over live tiles). Written by `lcClear` every step, read by the next step's `lcAdvect`: a C vertex with φ ≥ 16 h whose cell's tile has the bit clear keeps φ untraced. Zeroed at `setClaimPages`, like `WANT`. |
 
 **The reach rule** (`setMark`, amended at M1). A brick holding a liquid vertex (φ < 0) or a
 non-empty bin keeps or enters every brick that overlaps its **reach box**. In cells, that box is

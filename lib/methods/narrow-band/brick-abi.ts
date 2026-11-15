@@ -167,7 +167,10 @@ export class BrickLayout {
     readonly want: number; readonly tileOcc: number; readonly trig: number;
     /** setTransfer's listed tiles: 2 words an entry (C slot << 9 | tile, flags), cap.t entries. */
     readonly tlist: number;
-    readonly lists: readonly number[]; readonly listCap: readonly number[]; readonly words: number;
+    readonly lists: readonly number[]; readonly listCap: readonly number[];
+    /** The 4h tiles' far-air gate (16 words a C slot, bit j tile j): written by lcClear, read by the next step's advect (§5.4). */
+    readonly airGate: number;
+    readonly words: number;
   };
   /** dir buffer regions (words). */
   readonly dir: { readonly page: number; readonly child: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly words: number };
@@ -201,7 +204,8 @@ export class BrickLayout {
       const kind = listKind(j), n = j > 16 ? 0 : kind === "F" ? f : kind === "C" ? c : b;
       listCap.push(n); lists.push(take(Math.max(n, 1)));
     }
-    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, words: at };
+    const airGate = take(CMASK_WORDS * c);
+    this.set = { ring, freeF, freeC, freeB, freeK, markF, markC, cand, boundF, boundC, binStart, binCount, binCursor, want, tileOcc, trig, tlist, lists, listCap, airGate, words: at };
     const pageWords = this.window[0] * this.window[1] * this.window[2];
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
@@ -283,7 +287,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_S_FREE_F", s.freeF); c("NB_S_FREE_C", s.freeC); c("NB_S_FREE_B", s.freeB); c("NB_S_FREE_K", s.freeK);
   c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor);
-  c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t);
+  c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);

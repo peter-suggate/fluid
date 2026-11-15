@@ -33,23 +33,25 @@
  * 1. a wall-plane vertex (dt > 0, on box plane 0 or N) takes advectWalls: COLD hold, then far air, then the full
  *    path with the one-step trace and the wall contact ("clip", UM_WALL_CLIP);
  * 2. otherwise COLD hold (umVertexTier COLD: every incident open cell COLD, or none open);
- * 3. kept far air (umFarAirKept: no air seed within 5 tiles of the vertex's tile, the air collar dilated a tile as
- *    lane F's lAdvect maps it, and φ ≥ 16·max h);
+ * 3. kept far air (umFarAirKept: last step's gate bit clear at the vertex's cell's tile, and φ ≥ 16·max h);
  * 4. kept deep air, early identity, cheap affine, Euler: see deviations 2 and 3;
  * 5. the full path: the foot (|φ| < 2w), the RK3 surface trace through the extended velocity, the departure cell at
  *    its tile's width (C corners in a 4h tile, resolved vertices in an h tile), the limited Catmull-Rom cubic where
  *    |value| < 2w (umCubicAt at width 4 is mode < 4: the coarse default is cubic), the wall contact, plus the
  *    fourth-difference smoothing scaled by umMovedSmoothing.
  *
- * Air seeds and the collar (lcClear, and the far-air gate of lcAdvect). The old NB_AIR planes cover every live tile.
- * Lane F's tile words (FT_FLAGS, FT_DIST) exist only for tiles inside an F slot, and lane F computes them from F's
- * copies. So a page workgroup stages its own seeds over the 19^3 tiles about its 8^3 (lcStageSeeds), one rule per
- * owner: an h-owned tile is a seed where F's AIR_SEED flag says so; a 4h-owned tile is a seed where a corner (a C
- * vertex) is at or under 0 (lane F's lTiles rule: an open cell with a corner at or under 0), or where F's
- * SURFACE_TILE flag (sample support) is set on it. Tiles outside the lattice or in no resident page are not seeds
- * (air). It then dilates them by Chebyshev tile distance (separable, in workgroup memory): within 5 tiles for the
- * gate, within 4 for the collar (lane F's lClear: air distance ≤ 4). The stage runs only in a workgroup with a vertex
- * that reads it (φ ≥ 16 in lcAdvect, 0 < φ < 16 in lcClear's collar test, φ ≤ 0 in its seed test).
+ * Air seeds, the collar and the gate (lcClear; the far-air gate of the next step's lcAdvect). The old NB_AIR planes
+ * (uniform-narrow-band-air.wgsl.ts), one u32 a 4h tile over the live tiles: plane 0 the seeds (nbAirSeed), planes 1-3
+ * airSpread0..2's separable dilation by NARROW_BAND_AIR_COLLAR_TILES = 4 an axis, each axis computed for live tiles
+ * from stored keys only (so held to the live tiles after every axis), plane 3 the collar, plane 4 airGate (the 3^3
+ * dilation of the collar over live tiles), copied at encode into umFarAirKept's claim words. Live: a tile in the
+ * lattice in a resident page. Lane F's tile words (FT_FLAGS) exist only for tiles inside an F slot, so a page
+ * workgroup stages the seeds of the 19^3 tiles about its 8^3 itself (lcStageSeeds), one rule per owner: an h-owned
+ * tile is a seed where F's AIR_SEED flag says so; a 4h-owned tile is a seed where a corner (a C vertex) is at or under
+ * 0 (lane F's lTiles rule: an open cell with a corner at or under 0), or where F's SURFACE_TILE flag (sample support)
+ * is set on it. It dilates them in workgroup memory, then writes the gate bits of its own 512 tiles to AIR_GATE
+ * (brick-abi.md §5.4; 16 words a C slot, zeroed at setClaimPages), which the next step's lcAdvect reads, as the old
+ * engine reads last step's plane 4.
  *
  * Race freedom. lcAdvect, lcCouple and lcRetire read one channel and write the other. lcClear writes PHI in place:
  * it raises a C vertex only to 16, and only where no incident tile is a seed when φ ≤ 0. Every incident tile of a C
@@ -60,9 +62,14 @@
  * Stated deviations (each a stand-in until its owner lands the input, or a mapping onto the brick's state):
  * 1. Velocity: lane F's fgSampleVel (FG_SAMPLE_WGSL, 52186c51), the old blended h/4h sampler (umUnitSample /
  *    umFastVelocity) of US. No deviation of this file's; F's own statements apply.
- * 2. Early identity, cheap affine and Euler (umEarlyFarAdvected, umCheapAdvected, umEulerAdvected) reject every
- *    vertex in the dam build ("without the 16h surface model evidence these three transports reject every vertex"),
- *    so they are not ported: every such vertex falls through to the full path, as there.
+ * 2. Early identity, cheap affine and Euler (umEarlyFarAdvected, umCheapAdvected, umEulerAdvected) exist only
+ *    with UniformSurfaceWorkControl.surfaceEvidence (uniform-surface-work-control.ts, default false, on only in its
+ *    own test); without it they are stubs returning no result (the resolved dam WGSL), so every vertex takes the
+ *    full path. With it they read the umSurfaceEvidence 16h-region model (8 words a 16^3 h region: coverage over the
+ *    region's 3^3, g, rho, local rho, support and Lipschitz words), which in the brick ABI is BULK16 state (B pages,
+ *    M3). They are not ported (M3). The latch: lcAdvect fails FAIL.UNSUPPORTED (info 0x4c430003) where B_ALL lists a
+ *    page or a page word about the workgroup's page is BULK16, so a live 16h state never silently takes the full
+ *    path (nbCSlotOfPage reads a BULK16 page as absent).
  * 3. Kept deep air (umDeepAirKept) needs the census's per-tile spread-reach words (5-bit reaches an axis each way)
  *    and the release bits; neither is published in the brick ABI. As lane F's lAdvect states, those vertices are
  *    transported instead.
@@ -71,10 +78,10 @@
  * 5. COLD tier: the old 16h region tier maps to the page's C record class bit COLD (setMark, M3; at M2 never set),
  *    i.e. page granularity. umVertexTier and nbVertexCold read it at every incident in-lattice cell of a resident
  *    page.
- * 6. Kept far air's gate is computed this step from the current φ (lcStageSeeds), where the old gate is last step's
- *    NB_AIR words. The seeds' rule reads which side of 0 a corner lies on, which redistance and the air clear never
- *    change, so the two agree except where a sample's support changed. The gate's tile is the vertex's cell (held off
- *    the upper wall), umFarAirKept's umPointCell.
+ * 6. The gate's seeds: the old COLD tile keeps its previous seed (nbAirSeed: last plane 0 OR NB_SURFACE_TILES);
+ *    here a COLD tile's seed is this step's (a second plane would hold it; COLD is never set at M2). Sample support
+ *    is lane F's SURFACE_TILE flag, so a 4h tile outside every F slot has none. The gate's tile is the vertex's cell
+ *    (held off the upper wall), umFarAirKept's umPointCell. Before the first lcClear the gate is clear (zeroed).
  * 7. Couple: heat (FT_THETA, FT_SURF) and splat keys (FC_KEY, FC_HOT) are lane F's words. Where no F slot holds a
  *    tile its heat reads 0 and it counts, as the old engine's air tiles (heat words of every live tile); lane F's
  *    lUnion skips such tiles. Where none holds the vertex its keys read empty (no gather). The crossing guard's
@@ -87,8 +94,9 @@
  *    F's M4. The old state word 15 (a coarse vertex under 16 seen, the next phiResolve's gate) is not kept: nothing
  *    in the brick engine resolves hanging vertices into storage.
  *
- * Unknown features fail: a lattice that is not whole pages latches FAIL.UNSUPPORTED (brick-scene refuses it), and a
- * trace over 128 cells latches FAIL.SEGMENTS (nbfSurfaceTrace's fatal).
+ * Unknown features fail: a lattice that is not whole pages latches FAIL.UNSUPPORTED (0x4c430001; brick-scene refuses
+ * it), BULK16 state in lcAdvect latches FAIL.UNSUPPORTED (0x4c430003, deviation 2), and a trace over 128 cells
+ * latches FAIL.SEGMENTS (0x4c430002, nbfSurfaceTrace's fatal).
  *
  * Dispatch: every kernel is list C_ALL, G1 (a workgroup a page), workgroup size 256 (two rounds of the page's 512
  * C vertices), like lane F's F_ALL G1 kernels. Each one can instead fold into the pass of its lane F twin over the
@@ -172,30 +180,32 @@ const cut = (code: string, from: string, to: string) => {
 };
 const [LC_TRILINEAR_WGSL, LC_PHI_ADVECT_REST_WGSL] = cut(nbfPhiAdvectWGSL, "fn nbfVertexSum8", "fn nbfCatmull");
 
-/** The page's seeds and their dilation (workgroup memory), for the far-air gate and the air collar. */
+/** The page's seeds, the collar and the far-air gate (workgroup memory; uniform-narrow-band-air.wgsl.ts). */
 const LC_SEEDS_WGSL = /* wgsl */`
-// Tiles T0 .. T0+18 an axis (T0 = the page's first tile - 6), their corners T0 .. T0+19.
+// Tiles T0 .. T0+18 an axis (T0 = the page's first tile - 6), their corners T0 .. T0+19. Rows (y, z) of 19 x bits.
 var<workgroup> lcV:array<atomic<u32>,400>;
 var<workgroup> lcS:array<atomic<u32>,361>;
+var<workgroup> lcL:array<atomic<u32>,361>;
 var<workgroup> lcA:array<u32,361>;
 var<workgroup> lcB:array<u32,361>;
-var<workgroup> lcNeed:u32;
 var<private> lcT0:vec3i;
-// Tile t is an air seed (the rule above, per owner).
+// Tile t is stored (umTileLive / umKeyStored): in the lattice, in a resident page.
+fn lcTileLive(t:vec3i)->bool{return nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE;}
+// Tile t is an air seed (nbAirSeed, per owner; the caller has t live).
 fn lcSeed(t:vec3i,x:u32,y:u32,z:u32)->bool{
- if(!nbTileInLattice(t)){return false;}
- let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}
+ let cs=nbCSlotOfPage(t>>vec3u(3u));
  let flags=fgTileFlags(4*t);
  if(nbTileH(cs,nbTileIndex(t))){return (flags&FTF_AIR_SEED)!=0u;}
  if((flags&FTF_SURFACE_TILE)!=0u){return true;}
  let r=atomicLoad(&lcV[y+20u*z])|atomicLoad(&lcV[y+1u+20u*z])|atomicLoad(&lcV[y+20u*(z+1u)])|atomicLoad(&lcV[y+1u+20u*(z+1u)]);
  return ((r>>x)&3u)!=0u;
 }
-// Stage the seeds of the 19^3 tiles about C slot slot, and lcA: the tiles within reach (Chebyshev) of one.
-// Call from uniform control flow; live is the workgroup's (uniform) liveness.
-fn lcStageSeeds(slot:u32,live:bool,lid:u32,reach:i32){
+// Stage the seeds (plane 0) of the 19^3 tiles about C slot slot and the collar (plane 3) in lcA: airSpread0..2's
+// separable dilation by NARROW_BAND_AIR_COLLAR_TILES = 4, each axis's result held to the live tiles (the old
+// planes' sparse-hole semantics: a dilation never crosses an absent page). Call from uniform control flow.
+fn lcStageSeeds(slot:u32,live:bool,lid:u32){
  lcT0=(nbCOrigin(slot)>>vec3u(2u))-vec3i(6);
- for(var i=lid;i<400u;i+=256u){atomicStore(&lcV[i],0u);if(i<361u){atomicStore(&lcS[i],0u);}}
+ for(var i=lid;i<400u;i+=256u){atomicStore(&lcV[i],0u);if(i<361u){atomicStore(&lcS[i],0u);atomicStore(&lcL[i],0u);}}
  workgroupBarrier();
  if(live){
   for(var i=lid;i<8000u;i+=256u){
@@ -206,33 +216,49 @@ fn lcStageSeeds(slot:u32,live:bool,lid:u32,reach:i32){
  workgroupBarrier();
  if(live){
   for(var i=lid;i<6859u;i+=256u){
-   let x=i%19u;let y=(i/19u)%19u;let z=i/361u;
-   if(lcSeed(lcT0+vec3i(i32(x),i32(y),i32(z)),x,y,z)){atomicOr(&lcS[y+19u*z],1u<<x);}
+   let x=i%19u;let y=(i/19u)%19u;let z=i/361u;let t=lcT0+vec3i(i32(x),i32(y),i32(z));
+   if(!lcTileLive(t)){continue;}
+   atomicOr(&lcL[y+19u*z],1u<<x);
+   if(lcSeed(t,x,y,z)){atomicOr(&lcS[y+19u*z],1u<<x);}
   }
  }
  workgroupBarrier();
  for(var i=lid;i<361u;i+=256u){
   let s=atomicLoad(&lcS[i]);var d=s;
-  for(var o=1;o<=reach;o++){d|=(s>>u32(o))|(s<<u32(o));}
-  lcA[i]=d&0x7ffffu;
+  for(var o=1u;o<=4u;o++){d|=(s>>o)|(s<<o);}
+  lcA[i]=d&atomicLoad(&lcL[i]);
  }
  workgroupBarrier();
  for(var i=lid;i<361u;i+=256u){
   let y=i32(i%19u);let z=i32(i/19u);var d=0u;
-  for(var o=-reach;o<=reach;o++){let yy=y+o;if(yy>=0&&yy<19){d|=lcA[u32(yy+19*z)];}}
-  lcB[i]=d;
+  for(var o=-4;o<=4;o++){let yy=y+o;if(yy>=0&&yy<19){d|=lcA[u32(yy+19*z)];}}
+  lcB[i]=d&atomicLoad(&lcL[i]);
  }
  workgroupBarrier();
  for(var i=lid;i<361u;i+=256u){
   let y=i32(i%19u);let z=i32(i/19u);var d=0u;
-  for(var o=-reach;o<=reach;o++){let zz=z+o;if(zz>=0&&zz<19){d|=lcB[u32(y+19*zz)];}}
-  lcA[i]=d;
+  for(var o=-4;o<=4;o++){let zz=z+o;if(zz>=0&&zz<19){d|=lcB[u32(y+19*zz)];}}
+  lcA[i]=d&atomicLoad(&lcL[i]);
  }
  workgroupBarrier();
 }
 fn lcBit(t:vec3i)->vec3u{return vec3u(t-lcT0);}
 fn lcSeedAt(t:vec3i)->bool{let r=lcBit(t);return ((atomicLoad(&lcS[r.y+19u*r.z])>>r.x)&1u)!=0u;}
-fn lcWithin(t:vec3i)->bool{let r=lcBit(t);return ((lcA[r.y+19u*r.z]>>r.x)&1u)!=0u;}
+fn lcCollar(t:vec3i)->bool{let r=lcBit(t);return ((lcA[r.y+19u*r.z]>>r.x)&1u)!=0u;}
+// airGate (plane 4) for the page's 512 tiles: a live tile with the collar in its 3^3. Bit t (the tile's C local)
+// of the slot's 16 AIR_GATE words; the next step's lcAdvect keeps a far marker where it is clear.
+fn lcStoreGate(slot:u32,live:bool,lid:u32){
+ if(!live||lid>=16u){return;}
+ var word=0u;
+ for(var b=0u;b<32u;b++){
+  let l=32u*lid+b;let r=vec3u(l&7u,(l>>3u)&7u,l>>6u)+vec3u(6u);
+  if(((atomicLoad(&lcL[r.y+19u*r.z])>>r.x)&1u)==0u){continue;}
+  var near=0u;
+  for(var dz=0u;dz<3u;dz++){for(var dy=0u;dy<3u;dy++){near|=lcA[r.y+dy-1u+19u*(r.z+dz-1u)];}}
+  if(((near>>(r.x-1u))&7u)!=0u){word|=1u<<b;}
+ }
+ atomicStore(&nbSet[NB_S_AIR_GATE+16u*slot+lid],word);
+}
 `;
 
 const LC_ADVECT_WGSL = /* wgsl */`
@@ -313,33 +339,39 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
  value=lcWallContact(p,value,travel,dt,hm);
  return value+moved;
 }
-// The page body: C slot slot (live: the workgroup's uniform liveness), φ → PHI1 at its C vertices.
-fn lcAdvectPage(slot:u32,live:bool,lid:u32){
- lcCheckLattice(lid);
- let dt=lcDt();let hm=lcHm();
- var o=vec3i(0);if(live){o=nbCOrigin(slot);}
- // Phase 1: which vertices reach the far-air gate (past the COLD hold, φ ≥ 16·max h).
- if(lid==0u){lcNeed=0u;}
- workgroupBarrier();
- var need=0u;
- if(live){
-  for(var r=0u;r<2u;r++){
-   let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
-   if(!lcCOwned(v)||lcTierCold(v)){continue;}
-   if(lcPhiC(NB_PHI_C_PHI,slot,l)>=16.0){need=1u;}
-  }
+// umFarAirKept's gate word: last step's airGate at tile t (lcStoreGate); clear where no page holds t.
+fn lcGate(t:vec3i)->bool{
+ if(!nbTileInLattice(t)){return false;}
+ let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}
+ let i=nbTileIndex(t);return ((nbSetWord(NB_S_AIR_GATE+16u*cs+(i>>5u))>>(i&31u))&1u)!=0u;
+}
+// Deviation 2's latch: a BULK16 page anywhere (B_ALL) or among the page's 27 neighbours is 16h state the early,
+// cheap and Euler transports would read; this port has none of them, so it fails rather than trace past it.
+fn lcCheckBulk(slot:u32,live:bool,lid:u32){
+ if(!live||lid!=0u){return;}
+ var bulk=nbListCount(NB_LIST_B_ALL)!=0u;
+ let P=nbCOrigin(slot)>>vec3u(5u);
+ for(var k=0u;k<27u;k++){
+  let Q=P+nbNeighbourOffset(k);
+  if(any(Q<vec3i(0))||any(32*Q>NB_LATTICE)){continue;}
+  if((nbPageWord(Q)&0xe0000000u)==NB_BULK){bulk=true;}
  }
- if(need!=0u){lcNeed=1u;}
- if(workgroupUniformLoad(&lcNeed)!=0u){lcStageSeeds(slot,live,lid,5);}
+ if(bulk){nbFail(NB_FAIL_UNSUPPORTED,0x4c430003u);}
+}
+// The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. No barrier.
+fn lcAdvectPage(slot:u32,live:bool,lid:u32){
+ lcCheckLattice(lid);lcCheckBulk(slot,live,lid);
  if(!live){return;}
+ let dt=lcDt();let hm=lcHm();let o=nbCOrigin(slot);
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
   if(!lcCOwned(v)){continue;}
   let c=lcPhiC(NB_PHI_C_PHI,slot,l);
   // Exits 1 and 2: the COLD hold (umHoldCold → umStoreCold: the vertex's own φ).
   if(lcTierCold(v)){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
-  // Exit 3: kept far air (umFarAirKept; umAirSource is the identity, deviation 9).
-  if(c>=16.0&&!lcWithin(lcCellOf(v)>>vec3u(2u))){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
+  // Exit 3: kept far air (umFarAirKept: the gate clear at the vertex's cell's tile, φ ≥ 16 max h; umAirSource is
+  // the identity, deviation 9).
+  if(c>=16.0&&!lcGate(lcCellOf(v)>>vec3u(2u))){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
   // Exit 5: the full path.
   lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));
  }
@@ -410,31 +442,22 @@ fn lcCouplePage(slot:u32,live:bool,lid:u32){
 `;
 
 const LC_CLEAR_WGSL = /* wgsl */`
-// nbAirProtected at a C vertex: an incident tile in the seeds (φ ≤ 0) or in the collar (φ > 0).
+// nbAirProtected at a C vertex: an incident tile in the seeds (φ ≤ 0, plane 0) or in the collar (φ > 0, plane 3).
 fn lcProtected(v:vec3i,seed:bool)->bool{
  for(var k=0u;k<8u;k++){
   let t=(v-lcCorner(k))>>vec3u(2u);
-  if(seed){if(lcSeedAt(t)){return true;}}else if(lcWithin(t)){return true;}
+  if(seed){if(lcSeedAt(t)){return true;}}else if(lcCollar(t)){return true;}
  }
  return false;
 }
-// The page body: nbAirStore at the C vertices, in place (race freedom above).
+// The page body: airSeeds, airSpread0..2 and airGate for the page's tiles (the gate words for the next step's
+// lcAdvect), then nbAirStore at its C vertices, in place (race freedom above).
 fn lcClearPage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);
- var o=vec3i(0);if(live){o=nbCOrigin(slot);}
- if(lid==0u){lcNeed=0u;}
- workgroupBarrier();
- var need=0u;
- if(live){
-  for(var r=0u;r<2u;r++){
-   let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
-   if(lcCOwned(v)&&lcPhiC(NB_PHI_C_PHI,slot,l)<16.0){need=1u;}
-  }
- }
- if(need!=0u){lcNeed=1u;}
- if(workgroupUniformLoad(&lcNeed)==0u){return;}
- lcStageSeeds(slot,live,lid,4);
+ lcStageSeeds(slot,live,lid);
+ lcStoreGate(slot,live,lid);
  if(!live){return;}
+ let o=nbCOrigin(slot);
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
   if(!lcCOwned(v)){continue;}
@@ -549,7 +572,7 @@ fn lcPublishPage(slot:u32,live:bool,lid:u32){
 /** The page bodies (fn lc*Page(slot, live, lid)) and what each needs before it, for folding into lane F's passes. */
 export const levelSetCoarseWGSL = {
   common: () => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL].join("\n"),
-  advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, LC_SEEDS_WGSL, LC_ADVECT_WGSL].join("\n"),
+  advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, LC_ADVECT_WGSL].join("\n"),
   couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_COUPLE_WGSL].join("\n"),
   clear: () => [LC_SEEDS_WGSL, LC_CLEAR_WGSL].join("\n"),
   retire: () => [nbfRedistanceWGSL, LC_RETIRE_WGSL].join("\n"),

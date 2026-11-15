@@ -230,6 +230,7 @@ var<workgroup> wHi:array<atomic<u32>,3>;
     // no slot (NB_PHI_FAR, faces 0: air) and C is never an authority. Tiered: CMASK is the bricks' (§2.5).
     for(var j=0u;j<16u;j++){atomicStore(&dir[NB_D_CMASK+16u*cs+j],${tiered ? "0u" : "0xffffffffu"});}
     for(var j=0u;j<16u;j++){atomicStore(&nbSet[NB_S_WANT+16u*cs+j],0u);}
+    for(var j=0u;j<16u;j++){atomicStore(&nbSet[NB_S_AIR_GATE+16u*cs+j],0u);}
     let r=NB_D_CREC+32u*cs;
     for(var j=0u;j<27u;j++){atomicStore(&dir[r+j],NB_NONE);}
     atomicStore(&dir[r+NB_REC_C_CHILDREN],0u);atomicStore(&dir[r+NB_REC_C_LIQUID_TILES],0u);
