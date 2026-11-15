@@ -12,6 +12,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfParticleSupported, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
+import { NBF_SUPPORT_TRAVEL_WGSL } from "./particles-kernels.wgsl";
+import { particleBrickDepositWGSL } from "../uniform/uniform-particle-brick.wgsl";
+import { narrowBandSeparationReach } from "../uniform/uniform-narrow-band-flip";
 import { oldExcerpt, oldFunction, parityCode, parityGPU, prng, runParity, ulpCompare, withParityDevice, type ParityKernel } from "./parity/harness";
 
 const old = (...names: string[]) => names.map(oldFunction).join("\n");
@@ -494,4 +497,13 @@ test("sampling (vertex trilinear, far depth, face lerp, composite blend, fine we
     const r = await parity(device, "sampling", OLD_SAMPLE_KERNEL, NEW_SAMPLE_KERNEL, { inp, threads, outWords: 6 * threads });
     assert.equal(r.differ, 0);
   });
+});
+
+// ---- DEPB's particle support (pJoin's pSupport): the travel is the old deposit's text, with the gate scenes' reach.
+test("particle support: pJoin's travel is particleBrickDepositWGSL's lrParticleTravelConditional, NB_SEPARATION_REACH the old value", () => {
+  const reach = narrowBandSeparationReach("pairs", true, 8);
+  assert.equal(reach, 1);
+  const oldText = particleBrickDepositWGSL(false, { joins: 0, allocation: 0 }, "bins", true, reach, 3);
+  const squash = (t: string) => t.replace(/\s+/g, " ").trim();
+  assert.ok(squash(oldText).includes(squash(NBF_SUPPORT_TRAVEL_WGSL)), "NBF_SUPPORT_TRAVEL_WGSL is not the old deposit's travel text");
 });

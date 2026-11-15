@@ -628,3 +628,23 @@ Max |U| and max |US| per step on liquid faces, against the old engine's `maxSpee
 Over the first 30 steps the old engine peaks at 16.3 and ours at 19.1 (US 20.2), about 1.2 times higher. The maxima are run-up jets: at the far wall at step 13, and in the far corner at steps 20–21. The gap is not large enough to need a kernel attribution.
 
 A dense=0 tiered run latches REACH at step 15: brick (4,5,15), info 0xf01404. Lane E has this as the known census timing gap, which the residency port of the head-time rule closes.
+
+## M2 tiered: DEPB's particle support in pJoin, for E's head residency (2026-11-15)
+
+pJoin now accumulates the old deposit's support words, `pbHalves` and `pbTravel`, into E's NB_S_PSUPPORT region (b895ea8e):
+- It runs for every live record of bank dst: ballistic, deep and seed records included. The hook sits above pJoin's early return.
+- Each record supports the 2^3 tiles from floor((x-2)/4).
+- Per brick slot, word 0 takes the tile bit `tx | ty<<1 | tz<<2`.
+- Words 1..3 and 4..6 take the -/+ travel maxima, as f32 bits with atomicMax. A zero travel is skipped.
+- The travel is `lrParticleTravelConditional` with scale dt/h, plus NB_SEPARATION_REACH = 1.
+- An absent brick inside the lattice latches FAIL.REACH.
+- Atomics are issued only when the loaded word would change.
+- Clearing the words is lane E's job: the census reads and zeroes them.
+
+Test coverage:
+- `particles-formulas.test.ts` checks that the travel text is the old `particleBrickDepositWGSL`'s, and that the reach is `narrowBandSeparationReach("pairs", true, 8)`.
+- On the GPU, the scratch probe `--psupport` (brick-dam.mts) checks every step against a CPU oracle built from bank dst's records, zeroing the words after each check.
+  - Dam, 24 steps, tiered composite and all-h: the masks are exact in every slot at every step.
+  - Every travel word is at least the oracle's bound: |v|·dt/h for a ballistic record, the reach for a coupled one.
+  - No word is set in a slot without a mask, no supported brick is absent, and FAIL stays 0.
+  - On tiered at step 24 there are 662k records (7,017 ballistic) in 1,872 supported slots, and the largest travel is 34.13 cells, equal to the oracle's ballistic |v|·dt/h.

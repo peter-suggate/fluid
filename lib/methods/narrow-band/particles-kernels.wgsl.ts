@@ -28,10 +28,29 @@ import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
-import { nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
+import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
+import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
 
 /** Banks and the destination cell (no reads). */
+/** narrowBandSeparationReach(sampleSeparation, crowdedCells === "merge", 8) (uniform-narrow-band-flip.ts): twice the
+ * heaviest sample's radius cbrt(S)/(2n), 0 without separation; the settings are NBF_PARTICLE_SETTINGS's. */
+const NB_SEPARATION_REACH = NBF_PARTICLE_SETTINGS.sampleSeparation === "pairs" ? 0.5 * Math.cbrt(NBF_PARTICLE_SETTINGS.crowdedCells === "merge" ? 8 : 1) : 0;
+
+/** DEPB's travel (particleBrickDepositWGSL's, verbatim): lrParticleTravel and its coupled shortcut, in cells over the
+ * step for scale dt/h. Exported for the parity check against the old text (particles-formulas.test.ts). */
+export const NBF_SUPPORT_TRAVEL_WGSL = /* wgsl */`
+${particleResidencyTravelWGSL}
+// A coupled sample's move adds its pair separation to the accepted motion:
+// at most NB_SEPARATION_REACH cells along any axis, either sign.
+const NB_SEPARATION_REACH:f32=${NB_SEPARATION_REACH.toFixed(4)};
+// Coupled samples need only accepted motion; avoid their unused velocity norm.
+// Keep ballistic length and scaling together to preserve backend rounding.
+fn lrParticleTravelConditional(velocity:vec3f,accepted:vec3f,ballistic:bool,scale:vec3f)->array<vec3f,2>{
+ if(ballistic){return lrParticleTravel(velocity,accepted,ballistic,scale);}
+ return array<vec3f,2>(max(-accepted,vec3f(0))*scale+NB_SEPARATION_REACH,max(accepted,vec3f(0))*scale+NB_SEPARATION_REACH);
+}`;
+
 const BANK_WGSL = /* wgsl */`
 fn pSrc()->u32{return (cfg.y^cfg.z)&1u;}
 fn pAt(bank:u32,i:u32)->u32{return bank*NB_PCAP+i;}
@@ -372,7 +391,29 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
   // is at or below 0; swept by its grid motion over the step (dt before / h, cells), padding 0
   // (narrowBandFinePadding). Each joined tile with storage gets TILE_OCC bit 8 + tile (the census reads it at the
   // next part 1 head; pScan rewrites the word after it).
+  // DEPB's particle support (the old particleBrickDepositWGSL's pbHalves/pbTravel, verbatim per record): every live
+  // record of bank dst, ballistic, deep (depth below -1) and seeds included, supports the 2^3 tiles from
+  // floor((x - 2)/4) with its travel over the step in cells (lrParticleTravelConditional, scale dt/h): a ballistic
+  // record |velocity| each way, a coupled one its accepted motion (before) each side plus the pair separation's
+  // reach. Each supported tile's brick gets NB_S_PSUPPORT + NB_PSUPPORT_WORDS slot: word 0 bit tx | ty<<1 | tz<<2 (atomicOr),
+  // words 1..3 the -x,-y,-z and 4..6 the +x,+y,+z travel maxima (f32 bits, atomicMax, a 0 travel skipped). An
+  // absent brick inside the lattice latches FAIL.REACH. The census reads and clears the words (lane E).
   const pJoin = k("pJoin", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, nbfParticleRecordWGSL, BANK_WGSL].join("\n") + /* wgsl */`
+${NBF_SUPPORT_TRAVEL_WGSL}
+fn pMaxF(at:u32,v:f32){let b=bitcast<u32>(v);if(v>0.0&&atomicLoad(&nbSet[at])<b){atomicMax(&nbSet[at],b);}}
+fn pSupport(p:Particle){
+ let travel=lrParticleTravelConditional(p.velocity.xyz,p.before.xyz,nbParticleMode(p)==1.0,vec3f(nbRingF(cfg.x,NB_RING_DT))/vec3f(nbRingF(cfg.x,NB_RING_H)));
+ let base=vec3i(floor((p.position.xyz-2.0)/4.0));
+ for(var j=0u;j<8u;j++){
+  let t=base+vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));
+  if(!nbInLattice(4*t)){continue;}
+  let b=t>>vec3u(1u);let s=fgBrickSlot(b);
+  if(s==NB_NONE){nbFail(NB_FAIL_REACH,nbKey(b));continue;}
+  let l=vec3u(t&vec3i(1));let at=NB_S_PSUPPORT+NB_PSUPPORT_WORDS*s;let bit=1u<<(l.x|(l.y<<1u)|(l.z<<2u));
+  if((atomicLoad(&nbSet[at])&bit)==0u){atomicOr(&nbSet[at],bit);}
+  for(var a=0u;a<3u;a++){pMaxF(at+1u+a,travel[0][a]);pMaxF(at+4u+a,travel[1][a]);}
+ }
+}
 fn pJoinTile(t:vec3i){
  let c=4*t;let s=fgSlot(c);if(s==NB_NONE){return;}
  let bit=1u<<(8u+fgTileOf(c));let at=NB_S_TILE_OCC+s;
@@ -383,6 +424,7 @@ fn pJoinTile(t:vec3i){
  let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+bank]),NB_PCAP);
  if(i>=n){return;}
  let p=parts[pAt(bank,i)];if(!nbLive(p)){return;}
+ pSupport(p);
  if(nbParticleMode(p)==1.0||p.velocity.w< -1.0){return;}
  let start=p.position.xyz;let c=vec3i(floor(start));
  let travel=nbRingF(cfg.x,NB_RING_DT)*p.before.xyz/vec3f(nbRingF(cfg.x,NB_RING_H));
