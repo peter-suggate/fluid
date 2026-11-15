@@ -420,6 +420,15 @@ export interface SceneDescription {
      * (uniformTierStart).
      */
     tiers?: { bricks?: number; particlesPerFineCell?: number; fineBlocks?: number | "auto"; start?: "h" | "4h" | "census" };
+    /**
+     * NB-FLIP's brick engine (engine "brick"): the slot pools, from the scene's
+     * measured peaks with a margin (docs/plans/nbflip-port/brick-abi.md §9,
+     * progress-lane-e.md M0(b)). f: h bricks (8^3 cells), c: 4h pages (32^3
+     * cells), b: BULK16 page records, k: cut bricks, particles: a bank's
+     * records. Required for engine "brick". A pool that runs out is the
+     * engine's latched FAIL_POOL, never a reallocation.
+     */
+    brickPools?: { f: number; c: number; b: number; k: number; particles: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -757,6 +766,11 @@ export function validateScene(scene: SceneDescription): string[] {
   if (tiers?.particlesPerFineCell !== undefined && !(tiers.particlesPerFineCell > 0 && tiers.particlesPerFineCell <= 64)) errors.push("fluid.tiers.particlesPerFineCell must be in (0, 64]");
   if (tiers?.fineBlocks !== undefined && tiers.fineBlocks !== "auto" && !(Number.isInteger(tiers.fineBlocks) && tiers.fineBlocks > 0)) errors.push("fluid.tiers.fineBlocks must be a positive integer or \"auto\"");
   if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h" && tiers.start !== "census") errors.push("fluid.tiers.start must be \"h\", \"4h\" or \"census\"");
+  const brickPools = scene.fluid?.brickPools;
+  if (brickPools) for (const key of ["f", "c", "b", "k", "particles"] as const) {
+    const v = brickPools[key], least = key === "b" || key === "k" ? 0 : 1;
+    if (!(Number.isInteger(v) && v >= least)) errors.push(`fluid.brickPools.${key} must be an integer of at least ${least}`);
+  }
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {

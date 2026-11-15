@@ -76,5 +76,10 @@ export function createReservoirSeepScene(cellSize_m = RESERVOIR_SEEP_CELL_M,
   };
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 60;
   scene.surfaceStyle = "smooth";
+  // Brick engine pools (progress-lane-e.md M0(b)): 1200 steps, F ring 1451 and pages 169 (step 1200, slowly rising), BULK16 72, particles 220k.
+  // f and c at 1.5x the peak h-tile ring and page count (rounded up), b at the BULK16
+  // peak plus slack, particles at 1.25-1.5x the old engine's peak bank; k (cut
+  // bricks) is measured when solidStamp lands (M3).
+  scene.fluid.brickPools = { f: 2560, c: 256, b: 128, k: 0, particles: 330_000 };
   return scene;
 }

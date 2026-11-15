@@ -64,5 +64,10 @@ export function createPaddleboatsScene(): SceneDescription {
     environment: { diffuseScale: 1, specularScale: 1, lowerRadianceLinear: [.3, .29, .25], upperRadianceLinear: [.7, .85, 1.05], accentRadianceLinear: [.6, .7, .8] },
     grade: { toneCurve: 'agx', exposure: 1.15, whiteBalance: [1, 1, 1] },
   };
+  // Brick engine pools (progress-lane-e.md M0(b)): 300 steps, F ring 6794 and pages 238 (step 0), particles 316k (step 300).
+  // f and c at 1.5x the peak h-tile ring and page count (rounded up), b at the BULK16
+  // peak plus slack, particles at 1.25-1.5x the old engine's peak bank; k (cut
+  // bricks) is measured when solidStamp lands (M3).
+  scene.fluid.brickPools = { f: 10240, c: 384, b: 16, k: 0, particles: 480_000 };
   return scene;
 }

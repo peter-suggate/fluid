@@ -378,6 +378,11 @@ export const NBFLIP_LETTERS_METHOD_PROFILE = NBFLIP_METHOD_PROFILE;
 export function createNbflipLetters(): SceneDescription {
   const scene = nbflipDomain(NBFLIP_LETTERS_SCENE_ID, NBFLIP_LETTERS_GRID, NBFLIP_LETTERS_CELL_SIZE_M, NBFLIP_LETTERS_FRAMES, NBFLIP_LETTERS_POOL_CELLS);
   scene.fluid.scheduledDrops = nbflipLettersDrops();
+  // Brick engine pools (progress-lane-e.md M0(b)): 240 steps, still rising at the end: F ring 6037, pages 207, particles 978k (step 230); re-measure over the full take before M2 gates it.
+  // f and c at 1.5x the peak h-tile ring and page count (rounded up), b at the BULK16
+  // peak plus slack, particles at 1.25-1.5x the old engine's peak bank; k (cut
+  // bricks) is measured when solidStamp lands (M3).
+  scene.fluid.brickPools = { f: 9088, c: 320, b: 16, k: 0, particles: 1_500_000 };
   return scene;
 }
 

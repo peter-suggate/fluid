@@ -32,3 +32,43 @@ BULK16 page record, NB-FLIP's particle record and the window directory header.
 - `brick-abi.test.ts`: 6 CPU tests of the invariants.
 - The prelude compiles on the GPU (check slot, rc 0): a probe kernel using every accessor builds
   its pipeline in 193 ms. The adapter reports 10 storage buffers a stage and a 4 GiB binding.
+
+## 2026-11-15 M0(b): per-scene peaks and authored pools
+
+Measured on the old engine (check slot, one run a scene, rc 0, `tools/gpu/fluid-gpu-run.sh`). The
+probe is `~/code/me/fluid-scratch/lane-e/peaks.mts`, and its logs are `peaks-<scene>.jsonl`. Each
+step it counts:
+- the h tiles the brick reach rule would hold (the F ring);
+- the tiles holding liquid (the core);
+- the 4h pages over the ring;
+- the BULK16 pages;
+- the particles.
+
+| scene | steps | F ring (step) | F core | liquid ring | C pages | BULK16 | particles (step) |
+|---|---|---|---|---|---|---|---|
+| high-resolution-dam-break | 300 | 2562 (60) | 1146 | 4022 | 122 | 3 | 997,037 (40) |
+| letters | 240 | 6037 (230, still rising) | 2180 | 6991 | 207 | 0 | 977,923 |
+| paddleboats | 300 | 6794 (0) | 3480 | 7399 | 238 | 0 | 316,155 (300) |
+| reservoir-seep | 1200 | 1451 (1200, slowly rising) | 541 | 3951 | 169 | 72 | 219,671 |
+
+Authored `scene.fluid.brickPools` (`lib/core/model.ts`, validated):
+- f and c are 1.5x the peak ring and page counts, rounded up. The seep gets more, because it is
+  still rising at step 1200.
+- b is the BULK16 peak plus slack.
+- particles is 1.25–1.5x the old engine's peak bank.
+- k (cut bricks) stays 0 until `solidStamp` lands (M3), where it is measured.
+
+| scene | f | c | b | k | particles |
+|---|---|---|---|---|---|
+| high-resolution-dam-break | 3968 | 192 | 16 | 0 | 1,250,000 |
+| letters | 9088 | 320 | 16 | 0 | 1,500,000 |
+| paddleboats | 10240 | 384 | 16 | 0 | 480,000 |
+| reservoir-seep | 2560 | 256 | 128 | 0 | 330,000 |
+
+Open items:
+- Letters was still rising at step 240, so it is re-measured over the full take before M2 gates
+  it.
+- The frozen reach formula (two rings at rest) would have needed about 2.6x these F counts. M1's
+  cell-precise reach box (brick-abi.md §5.4, amended) is what the table counts.
+- During the letters run the runner reported 3 Metal aborts in other processes. `log show` showed
+  none from our runs.

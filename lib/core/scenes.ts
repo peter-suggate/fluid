@@ -541,6 +541,11 @@ export function createHighResolutionDamBreakScene(): SceneDescription {
   // at peak (step 48) of 8.9M. Sized at x 1.25 the brick overflow filled the
   // bank at step 51. The h ceiling stays the rule's (4096 bricks).
   scene.fluid.tiers = { ...scene.fluid.tiers, bricks: 4096, particlesPerFineCell: 4 };
+  // Brick engine pools (progress-lane-e.md M0(b)): 300 steps, F ring 2562 (step 60), pages 122, BULK16 3, particles 997k.
+  // f and c at 1.5x the peak h-tile ring and page count (rounded up), b at the BULK16
+  // peak plus slack, particles at 1.25-1.5x the old engine's peak bank; k (cut
+  // bricks) is measured when solidStamp lands (M3).
+  scene.fluid.brickPools = { f: 3968, c: 192, b: 16, k: 0, particles: 1_250_000 };
   return scene;
 }
 
