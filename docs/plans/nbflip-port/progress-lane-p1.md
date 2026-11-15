@@ -374,3 +374,55 @@ Metal clean.
   - The finish kernels: set and clear WARM, and write the tile's C X.
   - Wall-state bits 8–10, for the active-set outer loop.
   - The composite MGPCG.
+
+## 2026-11-15 — the outer loop's shape, from the active-set census; verbatim centre φ and RO_FAR
+
+- **The census** (probe and words committed in e932d604; the table is in that entry above). Its
+  diagnostics compile out when `UniformPressureArena.diagnostics` is off. The table covers all four
+  gate scenes, from short runs: per-state counts, changes since the last step, and the
+  P_CORRECT/N_CORRECT changes per MG cycle. It fixes the outer loop's shape:
+  - **N_CORRECT rebuilds never change anything** on dam, letters or paddleboats. On seep they
+    change 0.22, 0.06 and 0.07 native rows a step on cycles 0, 1 and 2, all N_CLOSED rows, so all
+    solid. On the dam a rebuild never fires.
+  - **P_CORRECT changes** occur only where rows are bounded (bInside), on seep and paddleboats. On
+    paddleboats they run 111, 15, 2.2 and 0.57 a step over cycles 0 to 3: the set is still moving
+    at cycle 3, so a fixed 1–2 outer passes would not converge it. The old engine re-decides the set
+    every MG cycle, and the Krylov layer's feasible step (Polyak 1969; O'Leary 1980) joins and hits
+    a few rows a step after that. Both arise only with solids (cut bricks, which latch UNSUPPORTED
+    now).
+  - **On the dam and letters, the whole active set is the separating wall.** K_WALL binds 1743 and
+    1694 times a step (MG), and N_WALL binds 41 on the dam. The wall/held/closed state changes 9.1
+    and 2.5 times a step. So the M2 solver's set is the walls' halo, max(x + lift, −base), applied
+    each MG cycle as the old one does, with the attached state re-measured at the Krylov start.
+    No separate outer loop of whole MGPCG solves is needed for M2.
+  - The outer loop for bounded rows (P_CORRECT/N_CORRECT, Chentanez & Müller 2012) follows the old
+    per-cycle rule when solids land. The census shows the set does not settle in fewer passes.
+- **The h centre φ is umPressurePhiCell, verbatim.** With no solids it is the old centerPhi texel:
+  gcEvaluate's corner mean, each of the 8 vertices times 1/8, then d4Sum8's pairing
+  (uniform-mixed-surface-geometry.ts). poCentre now uses that order, as does the 4h root's corner
+  mean (poMean8). The closed-cell branch needs the solid open fractions, and a cut brick latches
+  UNSUPPORTED.
+- **RO_FAR, verbatim:** a tile no page stores (off the lattice, or in a non-resident page) has root
+  φ 16 cells, not PHI_AIR's 6.
+- **C slot entry X = 0:** E confirms setInit zeroes every pres channel of an entering C slot.
+  pressure-composite.test.ts now asserts it on every C slot after create. The test passes as
+  before.
+- **Absent vertex reads (with E).**
+  - The old engine's reads of a vertex in an absent page return the field's empty value,
+    fluidLatticeFarPhi(scene). E's readers now return NB_PHI_FAR, the lattice's largest extent in
+    h, which is the same value. Stored air stays PHI_AIR = 6. The composite oracle reads FAR there.
+  - A page's upper-face vertices belong to the next page. Residency (setMarkPages: at least
+    7 cells of reach) keeps such pages resident near liquid, so a liquid row never reads them. The
+    rows now assert it: a liquid row whose own interior corner vertices fall in an absent page
+    latches FAIL.TIER.
+- **The composite MGPCG's Float64 reference** is `pressure-composite-model.ts`.
+  - The h rows are smoothed at L0 and L1. The native rows are carried through L0 and L1 and
+    smoothed with the h tiles' aggregates from L2 up.
+  - The coarse operators are W⁻¹PᵀAPW⁻¹, with W = √OC on aggregated rows and 1 on carried ones.
+    Aggregates keep the pool MGPCG's OC over-correction (Braess 1995); native rows take none. The
+    operator stays SPD.
+  - `pressure-composite-model.test.ts` uses a synthetic mixed system: 10233 h rows and 48 native
+    rows, with seams, walls and ghost faces. The operator is symmetric, the V-cycle is SPD, and
+    PCG reaches 1e-9 in 8 iterations.
+  - The GPU solver follows this design. It is saved in
+    ~/code/me/fluid-scratch/lane-p1/composite-mgpcg-design.txt.

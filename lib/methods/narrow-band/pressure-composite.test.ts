@@ -8,7 +8,7 @@
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, SEAM } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, SEAM, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -18,6 +18,8 @@ import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type V3 = [number, number, number];
 const N = 32;
+/** An absent vertex's φ (NB_PHI_FAR: the lattice's largest extent in h, the old vertex field's empty value). */
+const FAR = phiFar([N, N, N]);
 const add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const unit = (a: number): V3 => [a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0];
 const scale = (s: number, v: V3): V3 => [s * v[0], s * v[1], s * v[2]];
@@ -78,6 +80,9 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
         for (let a = 0; a < 3; a++) C.US[a]![at] = usAt(scale(4, T), a);
       }
     }
+    // An entering C slot starts with X = 0 (setInit zeroes every pres channel of it, brick-abi.md §6.1).
+    const enteredX = new Float32Array((await e.read("pres", L.base("pres", "C", "X"), L.cap.c * BRICK_STRIDE)).buffer);
+    for (const cs of pages) for (let i = 0; i < 512; i++) assert.equal(enteredX[BRICK_STRIDE * cs + i], 0, `C X at entry, slot ${cs}`);
     e.write("phi", L.base("phi", "F", "PHI"), F.PHI); e.write("pres", L.base("pres", "F", "X"), F.X);
     e.write("phi", L.base("phi", "C", "PHI"), C.PHI); e.write("pres", L.base("pres", "C", "X"), C.X);
     for (let a = 0; a < 3; a++) { e.write("vel", L.base("vel", "F", `US${a}`), F.US[a]!); e.write("vel", L.base("vel", "C", `US${a}`), C.US[a]!); }
@@ -94,15 +99,15 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     // ---- The oracle (Float64, on the stored f32 inputs).
     const tileH = (t: V3) => { if (!tileInLattice(t)) return false; const cs = pageSlot(shr(t, 3)); if (cs === NONE) return false; const i = tileIndex(t); return ((dir[L.dir.cmask + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1; };
     const cellH = (c: V3) => tileH(shr(c, 2));
-    const cVertex = (T: V3) => { if (T.some(v => v < 0 || 4 * v > N)) return PHI_AIR; const cs = pageSlot(shr(T, 3)); return cs === NONE ? PHI_AIR : C.PHI[BRICK_STRIDE * cs + tileIndex(T)]!; };
-    const fVertex = (v: V3) => { const sl = fSlot(v); return sl === undefined ? PHI_AIR : F.PHI[BRICK_STRIDE * sl + local(v)]!; };
+    const cVertex = (T: V3) => { if (T.some(v => v < 0 || 4 * v > N)) return FAR; const cs = pageSlot(shr(T, 3)); return cs === NONE ? FAR : C.PHI[BRICK_STRIDE * cs + tileIndex(T)]!; };
+    const fVertex = (v: V3) => { const sl = fSlot(v); return sl === undefined ? FAR : F.PHI[BRICK_STRIDE * sl + local(v)]!; };
     const vertexCoarse = (v: V3): V3 | undefined => {
       const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) { const cc = corner(k); if (cc.some((c, a) => inside[a] && c === 0)) continue; const t = add(add(tA, cc), [-1, -1, -1]); if (tileInLattice(t) && !tileH(t)) return t; }
       return undefined;
     };
     const vertexPhi = (v: V3) => {
-      if (v.some(x => x < 0 || x > N)) return PHI_AIR;
+      if (v.some(x => x < 0 || x > N)) return FAR;
       const T = vertexCoarse(v); if (!T) return fVertex(v);
       const t = v.map((x, a) => (x - 4 * T[a]!) / 4); let sum = 0;
       for (let k = 0; k < 8; k++) { const cc = corner(k), w = cc.map((c, a) => c ? t[a]! : 1 - t[a]!); sum += w[0]! * w[1]! * w[2]! * cVertex(add(T, cc)); }
@@ -125,7 +130,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     };
     const rootPhi4 = (T: V3) => { let sm = 0; for (let j = 0; j < 8; j++) sm += cVertex(add(T, corner(j))) * 0.125; return sm; };
     const rootPhi = (T: V3) => {
-      if (!tileInLattice(T) || pageSlot(shr(T, 3)) === NONE) return PHI_AIR;
+      if (!tileInLattice(T) || pageSlot(shr(T, 3)) === NONE) return 16;
       if (!tileH(T)) return rootPhi4(T);
       let total = 0;
       for (let z = 0; z <= 4; z++) for (let y = 0; y <= 4; y++) for (let x = 0; x <= 4; x++) { const g: V3 = [x, y, z], w = g.map(q => q === 0 || q === 4 ? 0.5 : 1); total += w[0]! * w[1]! * w[2]! * vertexPhi(add(scale(4, T), g)); }

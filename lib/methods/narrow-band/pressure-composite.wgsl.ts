@@ -60,6 +60,9 @@ import { brickCellKernel } from "./brick-pressure.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { PRESSURE_ROWS_WGSL } from "./pressure-rows.wgsl";
 
+/** The root's far air in cells (UNIFORM_MIXED_ROOT_FAR_CELLS, uniform-mixed-root-owners.ts): RO_FAR. */
+const RO_FAR_CELLS = 16;
+
 /** FLAGS bits of lane P (brick-abi.md §2.4). */
 export const P_FLAG = { WARM: 1 << 7, WALL0: 1 << 8 } as const;
 
@@ -73,25 +76,35 @@ const cutRO: BrickBinding = { name: "cut", kind: "ro", type: "array<f32>" };
 /** The shared readers: centre and face φ, root φ, starts, the marched θ and the band face. */
 const COMPOSITE_WGSL = /* wgsl */`
 const PO_WARM:u32=${P_FLAG.WARM}u;
+// The root's far air (RO_FAR, uniform-mixed-root-owners.ts): a tile no page stores reads 16 cells, in h.
+const PO_RO_FAR:f32=${RO_FAR_CELLS.toFixed(1)};
 fn poUnit(a:u32)->vec3i{var e=vec3i(0);e[a]=1;return e;}
 fn poCorner(j:u32)->vec3i{return vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));}
-// An h cell's centre φ (bCentrePhi): the mean of its 8 vertices, hanging ones interpolated.
-fn poCentre(c:vec3i)->f32{var s=0.0;for(var j=0u;j<8u;j++){s+=nbVertexPhi(c+poCorner(j));}return 0.125*s;}
+// The old geometry's corner mean (gcEvaluate: each corner times 1/8, then d4Sum8's pairing).
+fn poMean8(v:array<f32,8>)->f32{var c:array<f32,8>;for(var j=0u;j<8u;j++){c[j]=v[j]*0.125;}return ((c[0]+c[5])+(c[1]+c[4]))+((c[2]+c[7])+(c[3]+c[6]));}
+// An h cell's centre φ: umPressurePhiCell, which with no solids is the cell's centerPhi texel, the
+// geometry's corner mean of its 8 vertices (hanging ones trilinear in the 4h corners). Its closed-cell
+// branch needs solids, and a cut brick latches UNSUPPORTED.
+fn poCentre(c:vec3i)->f32{var v:array<f32,8>;for(var j=0u;j<8u;j++){v[j]=nbVertexPhi(c+poCorner(j));}return poMean8(v);}
 // The φ at the centre of c's face on side sign along a (bFacePhi): the mean of its 4 vertices.
 fn poFacePhi(c:vec3i,a:u32,sign:i32)->f32{
   var o=c;if(sign>0){o[a]+=1;}let u=poUnit((a+1u)%3u);let v=poUnit((a+2u)%3u);
   return 0.25*(((nbVertexPhi(o)+nbVertexPhi(o+u))+nbVertexPhi(o+v))+nbVertexPhi(o+u+v));
 }
 fn poWet(phi:f32,width:f32)->bool{return npWet(phi,width,1.0);}
+// Residency keeps every page within reach of liquid (setMarkPages: at least 7 cells), so a liquid
+// row's own corner vertices are never in an absent page. If one is, the stencil read FAR: FAIL.TIER.
+// Vertices on the lattice's faces (the wall skirt) are not checked.
+fn poGuardVertex(v:vec3i){if(all(v>vec3i(0))&&all(v<NB_LATTICE)){if(nbCSlotOfPage(v>>vec3u(5u))==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(v>>vec3u(5u)));}}}
 fn poPageHeld(p:vec3i)->bool{return any(p<vec3i(0))||any(32*p>=NB_LATTICE);}
 fn poTileOpen(t:vec3i)->bool{return nbTileInLattice(t);}
 // A tile's root φ (umAuthority): a 4h tile's corner mean (d4Sum8 of vertices·0.125); an h tile's
 // held fit, the mean of its 64 h centres (pcHeldFit: weights 1/2 on the tile's faces, /64);
-// PHI_AIR off the lattice or in a non-resident page.
-fn poRootPhi4(T:vec3i)->f32{var s=0.0;for(var j=0u;j<8u;j++){s+=nbCVertex(T+poCorner(j))*0.125;}return s;}
+// RO_FAR off the lattice or in a non-resident page.
+fn poRootPhi4(T:vec3i)->f32{var v:array<f32,8>;for(var j=0u;j<8u;j++){v[j]=nbCVertex(T+poCorner(j));}return poMean8(v);}
 fn poRootPhi(T:vec3i)->f32{
-  if(!nbTileInLattice(T)){return NB_PHI_AIR;}
-  if(nbCSlotOfPage(T>>vec3u(3u))==NB_NONE){return NB_PHI_AIR;}
+  if(!nbTileInLattice(T)){return PO_RO_FAR;}
+  if(nbCSlotOfPage(T>>vec3u(3u))==NB_NONE){return PO_RO_FAR;}
   if(!nbTileOwnerH(T)){return poRootPhi4(T);}
   var total=0.0;
   for(var z=0;z<=4;z++){for(var y=0;y<=4;y++){for(var x=0;x<=4;x++){
@@ -242,6 +255,7 @@ export function pressureCompositeKernels(L: BrickLayout) {
     if(liquid&&!rowed){nbFail(NB_FAIL_LIST,nbFRec(slot,NB_REC_KEY));liquid=false;}
     var start=0.0;
     if(liquid){
+      for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}
       start=poStart(c,own);
       for(var f=0u;f<6u;f++){
         let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;
@@ -288,6 +302,7 @@ fn poBase(m:vec3i)->f32{return poXF(m);}
     var root=0.0;if(owned){root=poRootPhi4(T);}
     let liquid=owned&&poWet(root,4.0);
     if(liquid){
+      for(var j=0u;j<8u;j++){poGuardVertex(4*(T+poCorner(j)));}
       start=poTileStart(T);
       for(var f=0u;f<6u;f++){
         let a=f/2u;let side=f&1u;let sign=npSign(f);let e=poUnit(a);let Tn=T+sign*e;
