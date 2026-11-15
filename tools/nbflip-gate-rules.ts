@@ -53,6 +53,19 @@ export function scalarGate(id: string, observable: string, fl: Floor, unit: stri
   return { id, observable, rule: `|c - ref| <= ${ruleText(fl, unit)}`, rows, pass: rows.every(r => r.pass), informational };
 }
 
+/** §4.6, the user's direction (2026-11-16): an upper bound only. Passes when c - ref <= max(floor, 3S), the same
+ * tolerance as scalarGate's; fewer than the references is never a failure. Margin = excess over the mean / tol. */
+export function upperGate(id: string, observable: string, fl: Floor, unit: string, points: ScalarPoint[], informational = false): Gate {
+  const rows = points.map(p => {
+    const missing = missingRow(p.at, p.refs, p.candidate); if (missing) return missing;
+    const v = p.refs as number[], ref = mean(v), S = spread(v), tol = Math.max(floorOf(fl, ref), 3 * S);
+    if (p.candidate === null || !Number.isFinite(p.candidate)) return { at: p.at, ref, S, candidate: p.candidate, tol, pass: false, margin: Infinity };
+    const over = Math.max(0, p.candidate - ref);
+    return { at: p.at, ref, S, candidate: p.candidate, tol, pass: over <= tol, margin: tol > 0 ? over / tol : over > 0 ? Infinity : 0 };
+  });
+  return { id, observable, rule: `c - ref <= ${ruleText(fl, unit)}`, rows, pass: rows.every(r => r.pass), informational };
+}
+
 /** §4.5 (1), the second ruling: a one-sided drift gate against NB-FLIP's envelope. Passes when
  * |c| <= max_i |ref_i| + floor (S plays no part: a spread that includes a run gaining volume says nothing
  * about how much loss is acceptable). `ref` prints the envelope max_i |ref_i|, `tol` the floor, and the

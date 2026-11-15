@@ -24,7 +24,7 @@ import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from "n
 import { basename, join, resolve } from "node:path";
 import { restoreLostVolume, type SeepJetSlice, type SeepObservation } from "./seep-observables";
 import type { BoxGeometry, BoxObservation } from "./nbflip-observables";
-import { bandDistanceGate, bandScalarGate, binDepths, distanceGate, driftGate, driftMeanGate, l1, mean, normalise, restoreBox, rms, scalarGate,
+import { bandDistanceGate, bandScalarGate, binDepths, distanceGate, driftGate, driftMeanGate, l1, mean, normalise, restoreBox, rms, scalarGate, upperGate,
   type Floor, type Gate, type RestoredBox } from "./nbflip-gate-rules";
 
 type SceneKey = "seep" | "dam" | "letters" | "paddleboats";
@@ -177,6 +177,9 @@ function restored(r: Box, s: BoxObservation) {
 function boxScalar(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, steps: number[], get: Get<number | null>, informational = false) {
   return scalarGate(id, observable, fl, unit, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })), informational);
 }
+function boxUpper(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, steps: number[], get: Get<number | null>) {
+  return upperGate(id, observable, fl, unit, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })));
+}
 function boxDistance(id: string, observable: string, floor: number, unit: string, distance: (a: number[], b: number[]) => number, refs: Box[], c: Box, steps: number[], get: Get<number[]>, informational = false) {
   return distanceGate(id, observable, floor, unit, distance, steps.map(k => ({ at: String(k), refs: refs.map(r => get(boxAt(r, k), r)), candidate: get(boxAt(c, k), c) })), informational);
 }
@@ -204,6 +207,9 @@ const windowMean = (r: Box, steps: number[], get: Get<number>, restore = false) 
 const windowProfile = (r: Box, steps: number[], get: Get<number[]>, restore = false) => { const v = steps.map(k => { const s = boxAt(r, k); return get(restore ? restored(r, s) : s, r); }); return v[0]!.map((_, i) => mean(v.map(p => p[i]!))); };
 function boxWindowScalar(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
   return scalarGate(id, observable, fl, unit, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) })), informational);
+}
+function boxWindowUpper(id: string, observable: string, fl: Floor, unit: string, refs: Box[], c: Box, windows: Windows, get: Get<number>) {
+  return upperGate(id, observable, fl, unit, windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) })));
 }
 function boxWindowDrift(id: string, observable: string, fl: Floor, refs: Box[], c: Box, windows: Windows, get: Get<number>, informational = false) {
   const points = windows.map(([at, steps]) => ({ at, refs: refs.map(r => windowMean(r, steps, get)), candidate: windowMean(c, steps, get) }));
@@ -242,14 +248,18 @@ function damGates(refs: Box[], c: Box): Gate[] {
     // (uniform-particle-slab.wgsl.ts:220), it counts slabSort's filed records (:400) and slabOverflow's re-spilled ones
     // (:264), after the move's retirements and before transfer's seeds (uniform-narrow-band-flip.ts:2155-2157, :2226),
     // and noteReceipt takes it (:2331). A candidate's `particles` must be its live records less this step's seeds.
-    boxScalar("D8c", "particles at 16", { rel: 0.10 }, "", refs, c, [16], s => s.particles),
+    // Upper bounds only (plan §4.6, the user's direction 2026-11-16: the old method has far too many particles in
+    // areas of low interest; fewer is never a failure, quality is D1-D7's). The two-sided rows print as written.
+    boxUpper("D8c", "particles at 16, upper bound", { rel: 0.10 }, "", refs, c, [16], s => s.particles),
+    asWritten(boxScalar("D8c", "particles at 16", { rel: 0.10 }, "", refs, c, [16], s => s.particles)),
     ...boxWindowBand("D3", "back-wall column mean depth (cells), window mean", { rel: 0.05, abs: 2 }, " cells", refs, c, windows, s => s.columnDepth_cells ?? NaN),
     ...boxWindowDrift("D4", "volume drift (fraction of t = 0), window mean", { abs: 0.01 }, refs, c, windows, s => s.drift),
     boxWindowScalar("D5k", "kinetic energy (J), window mean", { rel: 0.10, abs: 2 }, " J", refs, c, windows, s => s.ke_J),
     ...boxWindowBand("D5p", "potential energy (J), window mean", { rel: 0.02 }, " J", refs, c, windows, s => s.pe_J),
     ...boxWindowBand("D5e", "total mechanical energy (J), window mean", { rel: 0.02 }, " J", refs, c, windows, s => s.energy_J),
     ...boxWindowBandDistance("D7d", "surface profile: mean depth per 8-cell x bin, window mean, normalised L1", 0.05, "", l1, refs, c, windows, s => normalise(s.profileDepth_cells)),
-    boxWindowScalar("D8", "particles, window mean", { rel: 0.10 }, "", refs, c, windows, s => s.particles),
+    boxWindowUpper("D8", "particles, window mean, upper bound", { rel: 0.10 }, "", refs, c, windows, s => s.particles),
+    asWritten(boxWindowScalar("D8", "particles, window mean", { rel: 0.10 }, "", refs, c, windows, s => s.particles)),
   ];
 }
 /** The litres the letters have added since t = 0 (the drops landed by sample s). */
@@ -320,6 +330,7 @@ if (timingOnly) {
 const md: string[] = [`# NB-FLIP port gates: ${candidates.map(c => c.name).join(", ")}`, "",
   `Generated ${new Date().toISOString()} by tools/nbflip-gates.ts. References: ${SCENES.map(s => `${s} ${refRuns.filter(r => r.scene === s).map(r => r.name).join(" + ") || "(none)"}`).join("; ")}.`,
   "Each row passes when |candidate - reference mean| <= max(floor, 3S), S the references' spread; distance rows when d <= max(floor, 3S), S the references' largest pairwise d. Margin = |difference| / tolerance (<= 1 passes).",
+  "Amended (plan §4.6, the user's direction 2026-11-16): D8c and D8 are upper bounds only, c - ref <= max(floor, 3S); fewer particles than the references is never a failure, and the two-sided rows print as (as written), not gated.",
   "Amended (plan §4.5): drift rows are one-sided against NB-FLIP's envelope, |c| <= max_i |ref_i| + floor (ref prints max_i |ref_i|, tol the floor; margin = excess / floor), with the first ruling's |c| <= |ref mean| + max(floor, 3S) printed as (first ruling), not gated; volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.", ""];
 const verdicts: Record<string, unknown>[] = [];
 let failed = false;

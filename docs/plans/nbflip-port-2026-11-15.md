@@ -739,6 +739,33 @@ untouched.
 - **Cold freeze.** The old engine with UNIFORM_COLD_FREEZE false reads D8 0.13 and D8c 0.02. The
   freeze is not what separates us on D8.
 
+**D8 and D8c are upper bounds (2026-11-16, the user's direction; ruled by the coordinator, made by lane E).** The
+user: "in general, the old method has WAY too many particles in areas of low interest. we are highly encouraged to be
+more aggressive to remove fine particle tiles."
+- tools/nbflip-gates.ts gates D8c and D8 as `c - ref <= max(10%, 3S)` (upperGate in tools/nbflip-gate-rules.ts).
+  Fewer particles than the references is never a failure. Quality is guarded by D1-D7 and by visuals.
+- The two-sided rows still print, as `(as written)`, and are not gated.
+- The references are unchanged.
+
+**The old engine's air value moves the early count (2026-11-16, lane E; a finding to revisit after M2).**
+- The old vertex field's empty value (webgpu-uniform-reference.ts:803 emptyPhi, and the install's empty at
+  :1411) is uniformLatticeFarPhi: the box's largest extent, so it depends on the box. nbAirStore and lcClear store
+  16 hmax.
+- With both empties at 16 hmax (2761350a otherwise, one dam-300 fenced check run, scored on this set), the old dam
+  reads:
+  - particles at 16: 287.9k against the references' 351.6k (−18%; D8c 1.81 two-sided);
+  - particles at 8 and 12: 145.5k and 234.0k, against 146.5k and 259.0k;
+  - D1's front at step 6: 100 against 96, so D1 sits at its edge (margin 1.00). Ours reads the same.
+  - D8 0.18; every other row passes.
+- **Mechanism:** the foot projection in umAdvected (ours: lcFullAdvected, lAdvect) is offset = −c g/|g|², where
+  g is a ±w difference whose taps include air vertices. So the foot distance scales as 1/(air value). That is
+  verbatim and stays, but an early particle count that moves 18% with a non-physical constant marks a fragile
+  spot.
+- **Ours:** entering and absent vertices take PHI_AIR_C = 16 h (brick-abi.ts), because a box-sized value breaks the
+  4x-wider-box rule (brick-wide-dam.test.ts). The references were not retaken: with D8c an upper bound, the
+  low count passes.
+- Run: ~/code/me/fluid-scratch/lane-e/oldair/g (dam-old16.jsonl, gates-old16.md).
+
 ### 4.7 Step-time baselines at 2761350a
 
 These rounds ran on the timing slot, with baseline 33b78ebb and candidate 2761350a back to back

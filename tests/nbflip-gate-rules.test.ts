@@ -3,11 +3,22 @@
  * oracle (tools/nbflip-observables.ts boxOracle) on pools whose depth is raised by exactly the lost volume. */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bandDistanceGate, bandScalarGate, binDepths, driftGate, driftMeanGate, l1, restoreBox, scalarGate } from "../tools/nbflip-gate-rules";
+import { bandDistanceGate, bandScalarGate, binDepths, driftGate, driftMeanGate, l1, restoreBox, scalarGate, upperGate } from "../tools/nbflip-gate-rules";
 import { boxObservation, boxOracle, type BoxGeometry } from "../tools/nbflip-observables";
 
 const close = (a: number, b: number, eps = 1e-9, what = "") => assert.ok(Math.abs(a - b) <= eps * Math.max(1, Math.abs(b)), `${what}: ${a} vs ${b}`);
 const allClose = (a: readonly number[], b: readonly number[], eps = 1e-9, what = "") => { assert.equal(a.length, b.length, what); a.forEach((v, i) => close(v, b[i]!, eps, `${what}[${i}]`)); };
+
+test("an upper bound passes any count under the references and fails c - ref > max(floor, 3S)", () => {
+  // refs 100 and 104: mean 102, S 4, floor 10% = 10.2 over 3S = 12, so c <= 114.
+  const gate = (c: number) => upperGate("D8", "", { rel: 0.10 }, "", [{ at: "16", refs: [100, 104], candidate: c }]);
+  for (const c of [0, 50, 102, 113.9]) assert.ok(gate(c).pass, `${c} passes`);
+  for (const c of [114.1, 200]) assert.ok(!gate(c).pass, `${c} fails`);
+  close(gate(108).rows[0]!.margin, 0.5); assert.equal(gate(60).rows[0]!.margin, 0);
+  // The two-sided original fails a count well under the references; the bound does not.
+  assert.ok(!scalarGate("D8", "", { rel: 0.10 }, "", [{ at: "16", refs: [100, 104], candidate: 60 }]).pass);
+  assert.ok(!upperGate("D8", "", { rel: 0.10 }, "", [{ at: "16", refs: [100, 104], candidate: null }]).pass);
+});
 
 test("drift is one-sided against NB-FLIP's envelope: |c| <= max |ref_i| + floor", () => {
   // refs -0.010 and -0.012: envelope 0.012, floor 0.001, so |c| <= 0.013 whatever the spread.
