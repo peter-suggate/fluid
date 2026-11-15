@@ -254,6 +254,14 @@ export interface GPUEulerianInfo {
   uniformPressureBandTiles?: number;
   uniformPressureBandCycles?: number;
   uniformPressureBandResidual?: number;
+  /** The band solve's sticky cap record (frame status words 10-13): frames
+   * that ran the cycle cap and ended above target, frames above target with
+   * fewer cycles encoded than the cap, the worst capped final residual, and
+   * the last capped frame. A reported state, not a failure. */
+  uniformPressureCappedFrames?: number;
+  uniformPressureShortFrames?: number;
+  uniformPressureWorstCappedResidual?: number;
+  uniformPressureLastCappedFrame?: number;
   uniformPressureInitialResidual?: number;
   uniformPressureRejectedCycles?: number;
   uniformPressureRecoverySweeps?: number;

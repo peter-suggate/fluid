@@ -38,7 +38,7 @@ function recorded(c:Case,encode:(arena:UniformPressureArena,encoder:GPUCommandEn
   solid:c.solid?{present:true,coarse:{bindGroup:{}},select:(p:GPUComputePipeline)=>p}:undefined,
   super:c.superTail?{index:{count6:0},...c.superTail}:undefined,
   residuals:Array.from({length:c.schedule.cycles},(_,k)=>`pResidual2@${k}`),restricts:Array.from({length:c.schedule.cycles},(_,k)=>`pRestrict0@${k}`),
-  verdict:{pipeline:pipeline("pVerdict"),group:{}},launches:launchesMap,
+  verdict:{pipeline:pipeline("pVerdict"),kick:pipeline("pVerdict"),group:{}},launches:launchesMap,
   workBricks:c.widths.workBricks,workLevel2:c.widths.workLevel2,pageGroups:c.widths.pageGroups,level1Groups:c.widths.level1,
   tileGroups:c.widths.tiles,relaxGroups:c.widths.relax,workBulk:c.bulkCapacity===undefined?1:Math.max(1,Math.min(c.bulkCapacity,1024)),
  });

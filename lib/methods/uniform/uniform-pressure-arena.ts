@@ -11,7 +11,7 @@ import {UNIFORM_COLD_FREEZE,UniformColdFreeze} from "./uniform-cold-freeze";
 import type {UniformColdFrame} from "./uniform-cold-frame";
 import {UNIFORM_REGION_TIER,uniformRegionHeatWGSL} from "./uniform-region-heat";
 import {UNIFORM_ARENA_CLASS,UNIFORM_ARENA_RELEASE_ENTRY,UNIFORM_ARENA_TABLE_ENTRIES,UBA_STRIDE,UniformBrickArena,type UniformArenaChannel} from "./uniform-brick-arena";
-import {UNIFORM_MIXED_FAILURE,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
+import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,uniformMixedFrameStatusWGSL} from "./uniform-mixed-frame-status";
 import {UNIFORM_DETAIL_4H_LOAD} from "../../core/uniform-detail-abi";
 import {UNIFORM_MIXED_ROOT_TILE_WORDS} from "./uniform-mixed-pressure-authority";
 import {UNIFORM_BULK_FLOOR,UNIFORM_BULK_HEADS,UNIFORM_BULK_MEAN,UNIFORM_BULK_TOLERANCE,UNIFORM_BULK_WORDS} from "./uniform-bulk-tier-reference";
@@ -70,6 +70,8 @@ export interface UniformPressureArenaSchedule {
   * 64h (2^3 pages) and 128h (4^3 pages, a row a super-block) and solves the
   * 128h rows in that workgroup; "auto" is "pages" while the pool fits it. */
  tail:"auto"|"pages"|"superblocks";
+ /** Red-black sweeps from zero over the coarsest rows (pTail's 32h, sTail7's 128h). */
+ tailSweeps:number;
  /** The 64h and 128h aggregates' scale, as tailScale: 0.5 (rediscretised)
   * suits full groups but overshoots where a pool's faces leave part groups
   * (a CPU twin diverges on ragged pools); 0.75 contracts on every pool the
@@ -113,12 +115,18 @@ fn pAggregateDiagonal(part:f32,outward:f32,scale:f32)->f32{
  return (part-outward)+scale*outward;
 }
 `;
-export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,tail:"auto",superScale:0.75,nativeSweeps:0,krylov:true};
+export const UNIFORM_PRESSURE_ARENA_SCHEDULE:UniformPressureArenaSchedule={cycles:4,sweeps:3,coarsestSweeps:6,coarseScale:0.5,tailScale:0.75,tailCycles:3,tail:"auto",tailSweeps:32,superScale:0.75,nativeSweeps:0,krylov:true};
 /** bandExit "returns": the band's residual target (1/s, h-equivalent). The
  * band stops at it or at the cycle cap; the strict exit keeps the frame's
  * 1e-4 tolerance. 0.05 1/s is a 2.5 mm/s worst-cell velocity error at h 5 cm;
  * the 4h root accepts up to 5. */
 export const UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL=0.05;
+/** A frame whose band solve ran the cycle cap and ended above its target:
+ * counted in the frame status record's pressure cap words (a reported
+ * state, uniform-mixed-frame-status) and, with this on, latched as cause 2
+ * (pressure did not converge). Off until the solve converges on every gate
+ * scene (docs/plans/nbflip-port/attribution.md §6 item 13). */
+export const UNIFORM_PRESSURE_CAP_FATAL:boolean=false;
 /** The native rows form their own RHS from the simulation's u* (pRhs, ahead
  * of pNative) in place of the root buildRhs's: the all-4h mirror's
  * retirement, step 1 (plan §1.10). Off: the root's rows. */
@@ -166,7 +174,10 @@ const PROJECT_PASS:GPUComputePassDescriptor={label:"Uniform pressure arena proje
  * brick slot << 3 | tile bit, from the rows) and the arena table follow. */
 /** Diagnostics (UniformPressureArena.diagnostics): per measured cycle and row class, the
  * largest residual and the rows past the target, in DIAG_WORDS header words after HEADER. */
-const DIAG_CLASSES=8,DIAG_CYCLES=8,DIAG_WORDS=2*DIAG_CLASSES*DIAG_CYCLES;
+const DIAG_CLASSES=8,DIAG_CYCLES=8;
+/** Diagnostics: then the tail's rows with a positive diagonal (pTail's
+ * count, the most any call saw): 32h, 16h, resident 8h, BULK16 items. */
+const DIAG_ROWS=2*DIAG_CLASSES*DIAG_CYCLES,DIAG_WORDS=DIAG_ROWS+4;
 const HEADER=63,HISTORY_WORD=8,HISTORY=16,INITIAL_WORD=26,VALID_WORD=25,DONE_WORD=24,BRICKS_WORD=3,LEVEL1_WORD=6,LEVEL2_WORD=7;
 /** Header words 27 and 28: the native rows' largest initial and final residual (diagnostics). */
 const NATIVE_INITIAL_WORD=27,NATIVE_FINAL_WORD=28,NATIVE_HISTORY_WORD=29;
@@ -192,7 +203,7 @@ const GEOMETRY_WORD=33;
 const ACTIVE_BIT=1<<27,WARM_BIT=1<<28;
 /** The coarsest rows are one workgroup's: the 32h rows (a page each) of
  * the "pages" tail, the 128h rows (a super-block each) of "superblocks". */
-const TAIL_ROWS=4096,TAIL_LANES=256,TAIL_SWEEPS=32;
+const TAIL_ROWS=4096,TAIL_LANES=256;
 /** pTail's lanes: enough that every page's row stays in a lane's registers
  * (a reloaded row walks its six neighbour records each half sweep). */
 const tailLanes=(blocks:number,limit:number):number=>{let n=TAIL_LANES;while(n<blocks&&2*n<=limit)n*=2;return n;};
@@ -2882,6 +2893,7 @@ var<workgroup> p2Block:u32;
    // branch); a lane keeps its first row in registers and reloads the others.
    tail:header()+poolWGSL+tail+/* wgsl */`
 var<workgroup> sX:array<f32,${TAIL_ROWS+1}>;
+${UniformPressureArena.diagnostics?"var<workgroup> tRows:array<atomic<u32>,4>;":""}
 var<workgroup> tN:u32;
 var<workgroup> tM:u32;
 // The row (staged index + 1, 0: none) across face f of item block's.
@@ -2910,7 +2922,7 @@ fn sRow(block:u32,at:u32,d:f32)->f32{
   let block=tItem(lane,n2);let at=tCell(block,5u,0u);d0=tF(PT_D,at);c0=sColour(block);
   if(d0>0.0){r0=tF(PT_R,at);for(var f=0u;f<6u;f++){n0[f]=sNear(block,f);k0[f]=tF(PT_K+f*PLANE2,at);}}
  }
- for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
+ for(var sweep=0u;sweep<${schedule.tailSweeps}u;sweep++){
   for(var col=0u;col<2u;col++){
    if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
    for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){
@@ -2921,6 +2933,14 @@ fn sRow(block:u32,at:u32,d:f32)->f32{
   }
  }
  for(var e=lane;e<P;e+=${lanesTail}u){let at=tCell(tItem(e,n2),5u,0u);if(tF(PT_D,at)>0.0){tSet(PT_X,at,sX[e+1u]);}}
+${UniformPressureArena.diagnostics?`
+ for(var e=lane;e<P;e+=${lanesTail}u){
+  let item=tItem(e,n2);if(tF(PT_D,tCell(item,5u,0u))>0.0){atomicAdd(&tRows[0],1u);}
+  for(var j=0u;j<8u;j++){if(tF(PT_D,tCell(item,4u,j))>0.0){atomicAdd(&tRows[1],1u);}}
+  if(${BP?"(item&BA)==0u":"true"}){for(var j=0u;j<64u;j++){if(qF(PT_D,UBA_STRIDE*item+j)>0.0){atomicAdd(&tRows[2],1u);}}}else{atomicAdd(&tRows[3],1u);}
+ }
+ workgroupBarrier();
+ if(lane<4u){atomicMax(&state[${HEADER+DIAG_ROWS}u+lane],atomicLoad(&tRows[lane]));}`:""}
 }`,
    // 16h up (a page a group): the 32h correction prolonged into the page's
    // 16h rows and their ring (two deep: the neighbours' rows plus their own
@@ -3522,6 +3542,7 @@ var<workgroup> dN:u32;
     // workgroup's red-black sweeps from zero, as pTail's over the 32h rows.
     tail7:base+/* wgsl */`
 var<workgroup> sX:array<f32,${TAIL_ROWS+1}>;
+${UniformPressureArena.diagnostics?"var<workgroup> tRows:array<atomic<u32>,4>;":""}
 var<workgroup> tN:u32;
 // The row (index + 1, 0: none) across face f of row e.
 fn sNear7(e:u32,f:u32)->u32{let m=sRow7(sKey7(e)+sFace(f));if(m==UB_NONE_ID||qF(S7_D,m)<=0.0){return 0u;}return m+1u;}
@@ -3534,7 +3555,7 @@ fn sRow7Next(e:u32,d:f32)->f32{var off=qF(S7_R,e);for(var f=0u;f<6u;f++){off+=qF
  workgroupBarrier();
  var d0=0.0;var r0=0.0;var k0=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);var n0=array<u32,6>(0u,0u,0u,0u,0u,0u);var c0=0u;
  if(lane<P){d0=qF(S7_D,lane);c0=sParity(sKey7(lane));if(d0>0.0){r0=qF(S7_R,lane);for(var f=0u;f<6u;f++){n0[f]=sNear7(lane,f);k0[f]=qF(S7_K+f*CAP7,lane);}}}
- for(var sweep=0u;sweep<${TAIL_SWEEPS}u;sweep++){
+ for(var sweep=0u;sweep<${schedule.tailSweeps}u;sweep++){
   for(var col=0u;col<2u;col++){
    if(d0>0.0&&c0==col){var off=r0;for(var f=0u;f<6u;f++){off+=k0[f]*sX[n0[f]];}sX[lane+1u]=off/d0;}
    for(var e=lane+${lanesTail}u;e<P;e+=${lanesTail}u){let d=qF(S7_D,e);if(d>0.0&&sParity(sKey7(e))==col){sX[e+1u]=sRow7Next(e,d);}}
@@ -3680,13 +3701,15 @@ fn sProlong6(g:vec3i)->f32{
   this.bindLaunches();
  }
  private readonly pipelineGroups=new Map<string,string>();
- private verdict?:{pipeline:GPUComputePipeline;group:GPUBindGroup};
+ private verdict?:{pipeline:GPUComputePipeline;kick:GPUComputePipeline;group:GPUBindGroup};
  /** The frame's verdict (the old schedule's last gate): the solve's cycle
   * count and residual from the history, a nonfinite residual or a band over
   * capacity latched into the frame status, the 4h projection's gate opened
   * on a healthy record, the acceptance state for the receipt. A solve that
-  * ends above its target is not a failure. */
- private async verdictPipeline():Promise<{pipeline:GPUComputePipeline;group:GPUBindGroup}>{
+  * ends above its target is counted in the status record's pressure cap
+  * words (UNIFORM_MIXED_STATUS.pressureCapped..), a failure only under
+  * UNIFORM_PRESSURE_CAP_FATAL. The kick's re-solves (pCount off) count none. */
+ private async verdictPipeline():Promise<{pipeline:GPUComputePipeline;kick:GPUComputePipeline;group:GPUBindGroup}>{
   const f=this.fields,FAIL=UNIFORM_MIXED_FAILURE;
   const module=this.device.createShaderModule({label:"Uniform pressure arena verdict",code:/* wgsl */`
 struct BandParams {hDt:vec4f,policy:vec4f,solve:vec4f,capacity:vec4u}
@@ -3697,6 +3720,8 @@ ${uniformMixedFrameStatusWGSL(0,1,"read_write")}
 @group(0) @binding(4) var<uniform> params:BandParams;
 const HISTORY:u32=${HISTORY_WORD}u;const VALID:u32=${VALID_WORD}u;const INITIAL:u32=${INITIAL_WORD}u;const INITIAL_BIT:u32=${1<<HISTORY}u;
 const CYCLES:u32=${this.schedule.cycles}u;const CYCLE:u32=4u;const DONE:u32=${DONE_WORD}u;const SUPPORT:u32=${f.root.supportWord}u;
+const S_CAPPED:u32=${UNIFORM_MIXED_STATUS.pressureCapped}u;const S_SHORT:u32=${UNIFORM_MIXED_STATUS.pressureShort}u;const S_WORST:u32=${UNIFORM_MIXED_STATUS.pressureCappedWorst}u;const S_FRAME:u32=${UNIFORM_MIXED_STATUS.pressureCappedFrame}u;
+override pCount:bool=true;
 fn pIndex(i:u32)->u32{return atomicLoad(&state[i]);}
 fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x>0.0&&bitcast<f32>(pIndex(word))<=params.solve.x;}
 @compute @workgroup_size(1) fn pVerdict(){
@@ -3712,7 +3737,18 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
  // reports CYCLES (it needed more than it ran).
  else if(bMet(HISTORY+CYCLES,1u<<CYCLES)){let ran=countOneBits(pIndex(VALID)&((1u<<CYCLES)-1u));if(ran>0u){cycle=ran;}}
  atomicStore(&state[CYCLE],cycle);atomicStore(&state[2],residual);
+ // Above target after the last cycle: the final measure ran (its VALID bit)
+ // and missed. At the cap if every one of the CYCLES cycles measured, else
+ // short of it (the frame encoded fewer slots than the cap).
+ let measured=CYCLES<${HISTORY}u&&(pIndex(VALID)&(1u<<CYCLES))!=0u;
+ let above=cycle==CYCLES&&measured&&params.solve.x>0.0&&bitcast<f32>(pIndex(HISTORY+CYCLES))>params.solve.x;
+ let capped=above&&countOneBits(pIndex(VALID)&((1u<<CYCLES)-1u))==CYCLES;
+ if(pCount&&above&&!umFrameFailed()){
+  if(capped){atomicAdd(&umStatus[S_CAPPED],1u);atomicMax(&umStatus[S_WORST],min(residual,0x7f800000u));atomicStore(&umStatus[S_FRAME],atomicLoad(&umStatus[7]));}
+  else{atomicAdd(&umStatus[S_SHORT],1u);}
+ }
  if(!umFrameFailed()){
+  if(${UNIFORM_PRESSURE_CAP_FATAL}&&pCount&&capped){umLatchFailure(${FAIL.pressureUnconverged}u,residual,CYCLES);}
   if(residual>=0x7f800000u){umLatchFailure(${FAIL.pressureNonfinite}u,residual,0u);}
   if(pIndex(1u)==${STALE_APERTURES}u){umLatchFailure(${FAIL.staleApertures}u,pIndex(0u),0u);}
   else if(pIndex(1u)!=0u){umLatchFailure(${FAIL.bandCapacity}u,pIndex(0u),pIndex(1u));}
@@ -3724,11 +3760,15 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
 }`});
   const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==="error");
   if(errors.length)throw new Error(`Pressure arena verdict: ${errors.map(m=>`${m.lineNum}: ${m.message}`).join("\n")}`);
-  const pipeline=await this.device.createComputePipelineAsync({label:"Uniform pressure arena verdict",layout:"auto",compute:{module,entryPoint:"pVerdict"}});
-  const group=this.device.createBindGroup({label:"Uniform pressure arena verdict",layout:pipeline.getBindGroupLayout(0),entries:[
+  const storage=(binding:number):GPUBindGroupLayoutEntry=>({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:"storage"}});
+  const bindLayout=this.device.createBindGroupLayout({label:"Uniform pressure arena verdict",entries:[storage(0),storage(1),storage(2),storage(3),{binding:4,visibility:GPUShaderStage.COMPUTE,buffer:{type:"uniform"}}]});
+  const layout=this.device.createPipelineLayout({label:"Uniform pressure arena verdict",bindGroupLayouts:[bindLayout]});
+  const [pipeline,kick]=await Promise.all([this.device.createComputePipelineAsync({label:"Uniform pressure arena verdict",layout,compute:{module,entryPoint:"pVerdict"}}),
+   this.device.createComputePipelineAsync({label:"Uniform pressure arena kick verdict",layout,compute:{module,entryPoint:"pVerdict",constants:{pCount:0}}})]);
+  const group=this.device.createBindGroup({label:"Uniform pressure arena verdict",layout:bindLayout,entries:[
    {binding:0,resource:{buffer:this.index}},{binding:1,resource:{buffer:f.status,size:64}},{binding:2,resource:{buffer:f.root.support}},
    {binding:3,resource:{buffer:f.acceptance,size:32}},{binding:4,resource:{buffer:f.params,size:64}}]});
-  return {pipeline,group};
+  return {pipeline,kick,group};
  }
  private bindLaunches():void{
   this.launches.clear();
@@ -3781,20 +3821,20 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   * mm/s from one solve, 1.0 after three re-solves); a falling one has no
   * gradient to find. Once, at t=0. */
  encodeSolve(encoder:GPUCommandEncoder,kick=false):void{
-  this.encodeSolveFrom(encoder,"pInit",kick?"pRebaseK":"pRebase");
+  this.encodeSolveFrom(encoder,"pInit",kick?"pRebaseK":"pRebase",!kick);
   if(!kick)return;
   for(let k=0;k<UNIFORM_PRESSURE_KICK_RESOLVES;k++){
    // The cycle history and the band's level 2 channels start empty, as encodePrepare leaves them.
    encoder.clearBuffer(this.index,4*HISTORY_WORD,4*(GEOMETRY_WORD-HISTORY_WORD));
    const clear=encoder.beginComputePass(PREPARE_PASS);this.clearLevel2(clear);clear.end();
-   this.encodeSolveFrom(encoder,"pInitP","pRebaseP");
+   this.encodeSolveFrom(encoder,"pInitP","pRebaseP",false);
   }
  }
  /** The held blocks' level 2 band channels to zero (level2Clear). */
  private clearLevel2(pass:GPUComputePassEncoder):void{
   this.dispatch(pass,"pClear2",UNIFORM_LIVE_GROUP_GROUPS);
  }
- private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string):void{
+ private encodeSolveFrom(encoder:GPUCommandEncoder,init:string,rebase:string,count:boolean):void{
   // The page launches stride the composite level 2 (every held block).
   const s=this.schedule,pages=Math.min(this.simulation.capacity.address.blocks,this.pageGroups),g=this.level1Groups;
   const W=this.super,BP=!!this.fields.bulkPages;
@@ -3869,7 +3909,7 @@ fn bMet(word:u32,mask:u32)->bool{return (pIndex(VALID)&mask)!=0u&&params.solve.x
   if(W)this.dispatch(pass,"sForget",groupsOf(W.capacity6,64));
   pass.end();
   const verdict=encoder.beginComputePass(VERDICT_PASS);
-  verdict.setPipeline(this.verdict!.pipeline);verdict.setBindGroup(0,this.verdict!.group);verdict.dispatchWorkgroups(1);verdict.end();
+  verdict.setPipeline(count?this.verdict!.pipeline:this.verdict!.kick);verdict.setBindGroup(0,this.verdict!.group);verdict.dispatchWorkgroups(1);verdict.end();
  }
  /** After the 4h projection reaches simulation ownership: the band's faces
   * into the velocity, then leaving slots back to the stack. */

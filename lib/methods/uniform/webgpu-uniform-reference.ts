@@ -3324,6 +3324,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     info.uniformVolumeDustCells=receipt.dustOwners;info.uniformVolumeDustMass_cells=receipt.dustMass_cells;
     info.uniformVolumeOrphanDustCells=receipt.orphanDustOwners;info.uniformVolumeOrphanDustMass_cells=receipt.orphanDustMass_cells;
     info.uniformPressureBandTiles=receipt.bandTiles;info.uniformPressureBandCycles=receipt.bandCycles;info.uniformPressureBandResidual=receipt.bandResidual;
+    const cap=receipt.pressureCap;if(cap){info.uniformPressureCappedFrames=cap.capped;info.uniformPressureShortFrames=cap.short;info.uniformPressureWorstCappedResidual=cap.worstCapped;info.uniformPressureLastCappedFrame=cap.lastCappedFrame;}
     // The detail planner's clock: hysteresis and expiry count accepted frames.
     this.detailAcceptedStep++;
   }

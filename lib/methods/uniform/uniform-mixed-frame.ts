@@ -45,7 +45,7 @@ import {UniformBulkTier} from "./uniform-bulk-tier";
 import { BULK16_STATUS, UniformBulkPages } from "./uniform-bulk-pages";
 import { UniformBulkPageTransfer, type UniformBulkResidencyRecords } from "./uniform-bulk-page-transfer";
 import type {UniformMixedPressureTopology} from "./uniform-mixed-pressure-topology.wgsl";
-import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus} from "./uniform-mixed-frame-status";
+import {UNIFORM_MIXED_FAILURE,UNIFORM_MIXED_STATUS,UNIFORM_MIXED_STATUS_WORDS,describeUniformMixedFrameStatus,uniformPressureCapRecord,type UniformPressureCapRecord} from "./uniform-mixed-frame-status";
 import {planUniformMixedPressureMemory} from "./uniform-mixed-pressure-memory";
 import {UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_BAND_RESIDUAL_TOLERANCE,UNIFORM_PRESSURE_KICK_RESIDUAL_TOLERANCE} from "./pressure-policy";
 import type {GPUTimestampPhase} from "../../core/performance-trace";
@@ -209,7 +209,9 @@ export interface UniformMixedFrameRelayout{
  * at the earliest): a reader that keeps a value past its own reaction copies it. */
 export interface UniformMixedFrameReceipt{cycles:number;encoded:number;residual:number;converged:boolean;dustOwners:number;dustMass_cells:number;orphanDustOwners:number;orphanDustMass_cells:number;
  /** The h band this frame re-solved: tiles, completed cycles, final residual (0 when the band is empty). */
- bandTiles:number;bandCycles:number;bandResidual:number}
+ bandTiles:number;bandCycles:number;bandResidual:number;
+ /** The band solve's sticky cap record (UNIFORM_MIXED_STATUS.pressureCapped..). */
+ pressureCap?:UniformPressureCapRecord}
 /** One receipt ring slot: the frame it holds, that frame's words (copied out
  * of the mapped range, under the views its readers take) and the receipt the
  * host is handed. accept and reject are the map's reactions, bound once.
@@ -1420,7 +1422,7 @@ export class UniformMixedFrame {
    if(!kick){const plan=this.lagged[frame%UNIFORM_MIXED_RECEIPT_RING]!;plan.frame=frame;plan.bandTiles=bandTiles;plan.bandBricks=mapped[25]!;plan.bandLevel1=mapped[28]!;plan.bandLevel2=mapped[29]!;plan.bandCycles=mapped[26]!;plan.work.set(slot.work);plan.listed=mapped[REMAP_WORK_RECEIPT/4]!;for(let w=0;w<UNIFORM_COLD_FRAME_HEAT_WORDS;w++)plan.heat[w]=mapped[HEAT_RECEIPT/4+w]!;plan.heat[UNIFORM_COLD_FRAME_HEAT_WORDS]=slot.flip[0]!;}
    const receipt=slot.receipt;
    receipt.cycles=count;receipt.encoded=slot.encoded;receipt.residual=residual;receipt.dustOwners=mapped[13]!+mapped[18]!;receipt.orphanDustOwners=mapped[18]!;
-   receipt.bandTiles=bandTiles;receipt.bandCycles=mapped[26]!;receipt.bandResidual=bandResidual;
+   receipt.bandTiles=bandTiles;receipt.bandCycles=mapped[26]!;receipt.bandResidual=bandResidual;receipt.pressureCap=uniformPressureCapRecord(slot.status);
    return receipt;
   }catch(error){this.phase="failed";throw new Error(`Uniform mixed ${kick?`kick before frame ${frame+1}`:`frame ${frame}`}: ${error instanceof Error?error.message:String(error)}`,{cause:error});}
  }

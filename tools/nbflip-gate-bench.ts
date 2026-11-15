@@ -185,6 +185,9 @@ const summary = {
   step_ms: mode === "fenced" ? { n: timed.length, median: median(timed), p95: quantile(timed, 0.95), mean: mean(timed), max: timed.length ? Math.max(...timed) : null, thirds,
     warmup: apart("warmup"), sample: apart("sample"), afterSample: apart("afterSample") } : undefined,
   pipelined,
+  // The band solve's cap record (NB-FLIP: frames that ran the cycle cap above target, a reported state).
+  pressureCap: solver?.info.uniformPressureCappedFrames === undefined ? undefined : { capped: solver.info.uniformPressureCappedFrames, short: solver.info.uniformPressureShortFrames,
+    worstCapped: solver.info.uniformPressureWorstCappedResidual, lastCappedFrame: solver.info.uniformPressureLastCappedFrame },
   final: samples.at(-1),
 };
 log(summary);

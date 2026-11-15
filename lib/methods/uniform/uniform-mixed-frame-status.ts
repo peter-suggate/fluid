@@ -10,9 +10,25 @@
  * atomicOr), 6 last accepted frame, 7 the current frame (the host writes it
  * before each advance), 8 the current layout generation (written on the GPU
  * by whoever adopts a layout: the remap's markListed, from the receipt),
- * 9 raw residency audit bits seen by relayout adoption; 10-15 reserved. */
+ * 9 raw residency audit bits seen by relayout adoption; 10-13 the pressure
+ * cap record (below); 14-15 reserved.
+ *
+ * The pressure cap record (the band verdict's, sticky like the rest): 10
+ * frames whose solve ran the cycle cap and ended above its residual target,
+ * 11 frames that ended above target with fewer cycles encoded than the cap
+ * (the encoded slots follow the recent solves: the next frame encodes more),
+ * 12 the largest final residual of a frame counted in 10 (f32 bits), 13 the
+ * last frame counted in 10. A reported state, not a failure: the solve is
+ * still accepted (UNIFORM_PRESSURE_CAP_FATAL makes it cause 2). */
 export const UNIFORM_MIXED_STATUS_WORDS=16;
-export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8,residencyAudit:9} as const;
+export const UNIFORM_MIXED_STATUS={cause:0,frame:1,generation:2,detail:3,causes:5,accepted:6,currentFrame:7,currentGeneration:8,residencyAudit:9,
+ pressureCapped:10,pressureShort:11,pressureCappedWorst:12,pressureCappedFrame:13} as const;
+/** The pressure cap record of a copied status record (words 10-13). */
+export interface UniformPressureCapRecord{capped:number;short:number;worstCapped:number;lastCappedFrame:number}
+export function uniformPressureCapRecord(words:Uint32Array):UniformPressureCapRecord{
+ const S=UNIFORM_MIXED_STATUS;
+ return {capped:words[S.pressureCapped]!,short:words[S.pressureShort]!,worstCapped:new Float32Array(Uint32Array.of(words[S.pressureCappedWorst]!).buffer)[0]!,lastCappedFrame:words[S.pressureCappedFrame]!};
+}
 /** Latched causes. The final pressure schedule gate latches 1-4 (its verdict);
  * 6-9 are for the layout and transport stages; 10 is a stage reading the
  * solid record's apertures before their build; 11 is unresolved geometric
