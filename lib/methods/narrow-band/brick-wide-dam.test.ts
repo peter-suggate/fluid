@@ -63,23 +63,45 @@ test("brick wide dam (GPU): residency and lists follow the fluid, not the box", 
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("brick wide dam", async device => {
     const head = async (e: BrickEngine) => { const h = await e.read("set", 0, 256); assert.equal(h[H.FAIL], 0, `${e.options.label}: FAIL ${h[H.FAIL]} info 0x${h[H.FAIL_INFO]!.toString(16)}`); return h; };
-    // The same fluid while the front is short of x = 128.
-    const early = 10, narrow = await BrickEngine.create(device, damOptions(1));
-    const n: ReturnType<typeof counts>[] = [];
-    try { for (let k = 1; k <= early; k++) { narrow.advance(1); n.push(counts(await head(narrow), k)); } } finally { narrow.destroy(); }
+    // The same fluid while the front is short of x = 128. The engine is not bitwise reproducible run to run: the
+    // boot's pressure solve already differs (pressure-mgpcg.ts pRedAdd adds workgroup partials into 64 bins by float
+    // CAS in arrival order; RHS and DIAG identical, X about 4e-10 apart), and by step 6 one splash particle's speed,
+    // the max BOUND_F, can read 2.08 or 2.67 m/s. The residency's reach is the ceil of that flow, so the same input
+    // holds one more brick plane or not: step 7 liveF 1579 or 1604 (lane E 2026-11-16, ~/code/me/fluid-scratch/lane-e/flaky).
+    // So the fluid (F_LIQ) is compared at every step, and the residency (liveF, F_ACT, C_ALL) against the narrow runs
+    // whose reach input, ceil(flow) of the bound the step starts from, is the wide run's, on at least 7 of the 10 steps.
+    const early = 10, narrowRuns = 3, flowOf = async (e: BrickEngine) => {
+      const s = await snapshot(e), L = e.layout, o = e.options;
+      const bound = Math.max(...[...s.bricks.values()].map(slot => new Float32Array(new Uint32Array([s.set[L.set.boundF + slot]!]).buffer)[0]!));
+      return Math.ceil((bound + Math.hypot(...o.gravity_mps2) * o.dt_s) * o.dt_s / o.h_m);
+    };
+    const n: { m: ReturnType<typeof counts>; flow: number }[][] = Array.from({ length: early }, () => []);
+    for (let r = 0; r < narrowRuns; r++) {
+      const narrow = await BrickEngine.create(device, damOptions(1));
+      try { for (let k = 1; k <= early; k++) { const flow = await flowOf(narrow); narrow.advance(1); n[k - 1]!.push({ m: counts(await head(narrow), k), flow }); } } finally { narrow.destroy(); }
+    }
+    console.log(`wide dam narrow runs, liveF (ceil flow) by step: ${n.map(v => v.map(x => `${x.m.liveF}(${x.flow})`).join("/")).join(" ")}`);
+    const near = (a: number, b: number) => Math.abs(a - b) <= Math.max(2, 0.01 * b);
+    let compared = 0;
     // The wide sheet's measured peak by step 40 (12764 F, 316 C, 1.87M particles), with a margin.
     const wide = await BrickEngine.create(device, damOptions(4, { f: 17000, c: 425, particles: 3_500_000 }));
     try {
       for (let k = 1; k <= 40; k++) {
+        const flow = k <= early ? await flowOf(wide) : 0;
         wide.advance(1);
         const w = counts(await head(wide), k);
         if (k <= early) {
-          const m = n[k - 1]!;
-          for (const key of ["liveF", "fAct", "fLiq", "cAll"] as const) {
-            assert.ok(Math.abs(w[key] - m[key]) <= Math.max(2, 0.01 * m[key]), `step ${k} ${key}: wide ${w[key]} against narrow ${m[key]}`);
-          }
+          const runs = n[k - 1]!, same = runs.filter(x => x.flow === flow);
+          assert.ok(runs.some(x => near(w.fLiq, x.m.fLiq)), `step ${k} fLiq: wide ${w.fLiq} against narrow ${runs.map(x => x.m.fLiq).join("/")}`);
+          if (same.length) {
+            compared++;
+            for (const key of ["liveF", "fAct", "cAll"] as const) {
+              assert.ok(same.some(x => near(w[key], x.m[key])), `step ${k} ${key}: wide ${w[key]} against narrow ${same.map(x => x.m[key]).join("/")} at ceil flow ${flow}`);
+            }
+          } else console.log(`wide dam step ${k}: ceil flow ${flow} against narrow ${runs.map(x => x.flow).join("/")}; residency not compared`);
         }
       }
+      assert.ok(compared >= 7, `the residency compared on ${compared} of ${early} early steps`);
       // No brick far past the fluid: past the furthest brick holding liquid or particles, F reaches no further than
       // the residency rule's box (the flow (max BOUND_F + g dt) dt / h, the owner margin 9 and a brick's rounding),
       // and pages no further than the page sources' flow + 20 and a page's rounding.
