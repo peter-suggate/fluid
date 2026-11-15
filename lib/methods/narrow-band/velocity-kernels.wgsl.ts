@@ -24,7 +24,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfParticleRecordWGSL } from "./particles-formulas.wgsl";
 import { nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
@@ -87,10 +87,9 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   // uAdvect: a workgroup a brick, a lane two cells' three lower faces.
   // Lane 0 of the first brick also turns this step's gauge into the volume control's rate (vGauge ran in the level
   // set stage, before; the operator reads FH_RATE after).
-  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO], [FG_SLOT_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL, nbfVolumeWGSL.slice(nbfVolumeWGSL.indexOf("// filled, budget"))].join("\n") + /* wgsl */`
-fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{
- var v=vec3f(0.0);for(var a=lo;a<hi;a++){v[a]=fgVelAxis(NB_VEL_F_US0,p,a);}return v;
-}
+  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, nbfVolumeWGSL.slice(nbfVolumeWGSL.indexOf("// filled, budget"))].join("\n") + /* wgsl */`
+// The blended h/4h sampler of US (fgSampleVel; all h, fgVelAxis).
+fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return fgSampleVel(p,lo,hi);}
 fn nbxMomentumHeld(p:vec3f)->vec3f{return fgHeld(p);}
 fn nbxTraceCapped(){atomicAdd(&nbSet[FH_TRACE_CAPPED],1u);}
 ` + nbfMomentumWGSL + /* wgsl */`
@@ -107,6 +106,7 @@ fn vLive(c:vec3i)->bool{return nbInLattice(c)&&fgCentrePhi(c)<0.0;}
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
   let live=vLive(c);
   for(var a=0u;a<3u;a++){
+   if(!fgFaceOwned(c,a)){continue;}
    var value=0.0;
    // A closed face holds 0; a face between two dead cells is culled (umCullAir).
    if(fgFaceOpen(c,a)&&(live||vLive(c-fgUnit(a)))){
@@ -230,6 +230,7 @@ fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
   for(var a=0u;a<3u;a++){
    let at=6u*(512u*slot+l)+2u*a;let mom=tDepositWord(at);let weight=tDepositWord(at+1u);
    let iu=vAt(NB_VEL_F_UP0,slot,a,l);
+   if(!fgFaceOwned(c,a)){continue;}
    if(!fgFaceOpen(c,a)){vel[iu]=0.0;vel[vAt(NB_VEL_F_U0,slot,a,l)]=0.0;vel[vAt(NB_VEL_F_US0,slot,a,l)]=0.0;continue;}
    let original=vel[iu];
    var near=vec3f(0.0,0.0,1.0);
@@ -272,6 +273,7 @@ fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
   let occ=nbfOccupancy(select(0.0,vCentre(c),nbInLattice(c))*h.y,h.y,select(0u,1u,nbInLattice(c)));
   for(var a=0u;a<3u;a++){
    let iu=vAt(NB_VEL_F_U0,slot,a,l);
+   if(!fgFaceOwned(c,a)){continue;}
    if(!fgFaceOpen(c,a)){vel[vAt(NB_VEL_F_UP0,slot,a,l)]=0.0;vel[iu]=0.0;vel[vAt(NB_VEL_F_US0,slot,a,l)]=0.0;continue;}
    var value=vel[iu];vel[vAt(NB_VEL_F_UP0,slot,a,l)]=value;
    let n=c-fgUnit(a);
@@ -297,6 +299,7 @@ fn nbxViscositySite(site:vec3i,axis:u32)->f32{
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
   for(var a=0u;a<3u;a++){
+   if(!fgFaceOwned(c,a)){continue;}
    var lap=0.0;if(fgFaceOpen(c,a)){lap=nbfViscousLaplacian(c-fgUnit(a),a,h);}
    vel[vAt(NB_VEL_F_US0,slot,a,l)]=lap;
   }
@@ -362,7 +365,7 @@ fn xCode(c:vec3i,a:u32)->u32{
    var delta=s.v-kept;
    if(ufxReached(s.d)&&s.d>0.0){delta=3e38;}
    if(!fgFaceOpen(c,a)){delta=0.0;}
-   vel[vAt(NB_VEL_F_US0,slot,a,l)]=s.v;vel[iu]=delta;
+   if(fgFaceOwned(c,a)){vel[vAt(NB_VEL_F_US0,slot,a,l)]=s.v;vel[iu]=delta;}
   }
   workgroupBarrier();
  }

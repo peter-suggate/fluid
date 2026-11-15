@@ -449,3 +449,53 @@ integrates.
   cause. The variant is not the old formula, and it races across bricks.
 - **The port:** the 4h band extension, prolonged into the h faces no sweep reached (`ufxProlong`), lands with the
   tiers. The interim alternative is a deeper all-h extension, which would be a stated deviation and needs a ruling.
+
+## M2 tiered, T1 and T2: owner readers, owned writes, the join bits, the blended sampler (2026-11-15)
+
+Ruling (coordinator): take the verbatim route and flip `tiered: true`. The scratch 6-cell extension above is
+evidence only and is not landed. Plan T1–T6 approved: port the old 4h formulas verbatim, but run both tiers in the
+existing passes, adding a kernel only where there is a real dependency barrier. Lane E takes T4, the 4h corner φ, in
+its own file `levelset-coarse.wgsl.ts`.
+
+**T1** (`fluid-grid.wgsl.ts`, the kernels):
+- `fluidLayout(L, { tiered })` emits `FG_TIERED`, and `fluidStagesAt(tiered)` builds both stage sets
+  (`fluidStages` is all h).
+- The tier owners come from brickOwnerWGSL's own text, cut into parts:
+  - `fo*` is the tile part;
+  - φ: `foVertexPhi`, plus `fo1VertexPhi` for PHI1;
+  - faces: `foU*`, `foP*` and `foS*`, one set per channel.
+- Tiered, `fgPhiWord` reads PHI and PHI1 through the vertex authority, and `fgFace` reads `foFaceU`.
+- Writes are gated on ownership:
+  - `lSetPhi` writes only vertices F owns;
+  - the velocity kernels write only faces with an h-owned cell on either side (`fgFaceOwned`);
+  - `pDelta` gives NONE on a face F does not own until the 4h deltas land (T3).
+- `pJoin` (tail, before `pDelta`) sets TILE_OCC bits 8–15 with the old transferRefine join rule. The census reads
+  these bits for the band decision only, not for TRIG.
+- Tiered viscosity fails explicitly, because the 4h Laplacian is not ported.
+
+**T2** `FG_SAMPLE_WGSL`, `fgSampleVel(p, lo, hi)`:
+- It is the old umUnitSample (the cached unit interpolant plus umUnitCoarse). The fine weight is:
+  - 0 without support bit 0 (an occupied tile within 2 tiles);
+  - 1 in an h tile;
+  - otherwise the 26-neighbour blend.
+- A tap is F's face where the face is F-owned, else `umCompiledVelocityTap`'s trilinear of the 4h cache.
+- The 4h cache of a plane is the C face between two 4h tiles, else the mean of its 16 subfaces.
+- It is used by the momentum trace, G2P, the particle trace, the seeds and the surface trace (with its wall probe),
+  and is exported for E's 4h corner advect.
+- Deviations:
+  - a wall plane reads 0 (F's closed-face rule);
+  - support comes from FT_DIST, so a tile with no F slot has weight 0 (every tile next to an h tile is in the
+    census ring).
+
+**All h, unchanged** (16 steps, `fluid-scratch/lane-f/runs/t1id-*`):
+- Tiered off, every new branch is folded away.
+- The engine is not bit-deterministic run to run. Two base runs already differ at step 0 by 1e-10 in KE.
+- T1 stays within the base's own run-to-run spread:
+
+| step | base KE / total L / particles | base rerun | T1 |
+|---|---|---|---|
+| 8 | 121.023 / 182.629 / 201,676 | 121.024 / 182.623 / 201,392 | 121.031 / 182.628 / 201,655 |
+| 16 | 282.006 / 173.342 / 392,228 | 281.849 / 173.415 / 394,204 | 282.640 / 173.405 / 394,738 |
+
+- All 46 kernels (both modes) pass naga validation. The only exception is naga's known false positive on
+  loop-only returns, which Tint accepts.

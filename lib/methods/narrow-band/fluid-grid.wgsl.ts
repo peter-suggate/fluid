@@ -27,6 +27,7 @@
  */
 import { BRICK_CELLS, type BrickLayout, brickAbiWGSL } from "./brick-abi";
 import { type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
+import { brickOwnerWGSL } from "./brick-owner.wgsl";
 
 /** Tile words (FT_*): per 4^3 tile, FT_WORDS words. */
 export const FT = {
@@ -45,6 +46,8 @@ export const FT = {
 export const FTF = { SURFACE_TILE: 1, CROSSING: 2, AIR_SEED: 4, OCCUPIED: 8, OPEN: 16 } as const;
 
 export interface FluidLayout {
+  /** The stages read through the tier owners and write only owned storage (FG_TIERED; brick-abi.md §2.5). */
+  readonly tiered: boolean;
   readonly cells: number;
   readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly words: number };
   readonly fdep: { readonly words: number };
@@ -52,7 +55,7 @@ export interface FluidLayout {
   readonly fmoved: { readonly words: number };
 }
 
-export function fluidLayout(L: BrickLayout): FluidLayout {
+export function fluidLayout(L: BrickLayout, options: { readonly tiered?: boolean } = {}): FluidLayout {
   const f = L.cap.f, cells = f * BRICK_CELLS, p = L.cap.particles;
   let at = 0;
   const take = (n: number) => { const o = at; at += n; return o; };
@@ -60,7 +63,7 @@ export function fluidLayout(L: BrickLayout): FluidLayout {
   const MASK = take(16 * f), TILE = take(8 * FT.WORDS * f), SLOT = take(f), BOUND = take(f);
   const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, words: at };
   const fpart = { RANK: 0, words: 2 * p };
-  return { cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p } };
+  return { tiered: options.tiered === true, cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p } };
 }
 
 /** Bindings lane F's kernels use. */
@@ -83,7 +86,7 @@ const u = (n: number) => `${n >>> 0}u`;
 
 /** Lane F's constants: buffer regions and tile words. */
 export function fluidConstantsWGSL(F: FluidLayout): string {
-  const lines: string[] = [];
+  const lines: string[] = [`const FG_TIERED:bool=${F.tiered};`];
   for (const [k, v] of Object.entries(F.fcell)) if (k !== "words") lines.push(`const FC_${k}:u32=${u(v)};`);
   lines.push(`const FP_RANK:u32=${u(F.fpart.RANK)};`);
   for (const [k, v] of Object.entries(FT)) lines.push(`const FT_${k}:u32=${u(v)};`);
@@ -99,6 +102,23 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
       body.includes("struct Particle") ? "" : "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}", fluidConstantsWGSL(F), declareBindings(bindings), body].join("\n"),
   };
 }
+
+
+/** The tier owners (brick-owner.wgsl.ts), prefix fo: the tile part (no pool), φ (PHI; fo1 the PHI1 copy) and the
+ * faces of each velocity channel (foU, foP, foS: U, UP, US). Every part is cut from brickOwnerWGSL's own text. */
+const FO_ALL = brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "fo" });
+const cutOwner = (code: string, from: string, to?: string) => {
+  const i = code.indexOf(from), j = to === undefined ? code.length : code.indexOf(to);
+  if (i < 0 || j < 0) throw new Error(`fluid-grid: brickOwnerWGSL has no ${i < 0 ? from : to}`);
+  return code.slice(i, j);
+};
+const FO_TILE_WGSL = cutOwner(FO_ALL, "fn foTileInLattice", "fn foCVertex");
+const FO_PHI_PART = cutOwner(FO_ALL, "fn foCVertex", "fn foCFace");
+const FO_PHI_WGSL = FO_PHI_PART + FO_PHI_PART.replace(/\bfo(CVertex|FVertex|VertexPhi)\b/g, "fo1$1")
+  .replace(/\bNB_PHI_F_PHI\b/g, "NB_PHI_F_PHI1").replace(/\bNB_PHI_C_PHI\b/g, "NB_PHI_C_PHI1");
+const foFaces = (prefix: string, ch: string) => cutOwner(brickOwnerWGSL({ phi: "phi", vel: "vel", prefix, faceF: `NB_VEL_F_${ch}0`, faceC: `NB_VEL_C_${ch}0` }), `fn ${prefix}CFace`)
+  .replace(new RegExp(`\\b${prefix}(TileInLattice|TileIndex|TileOwnerH|CellOwnerH)\\b`, "g"), "fo$1");
+const FO_VEL_WGSL = [foFaces("foU", "U"), foFaces("foP", "UP"), foFaces("foS", "US")].join("\n");
 
 /** The directory's F slot of a brick: two dependent loads (page, then child). */
 const FG_BRICK_SLOT_WGSL = /* wgsl */`
@@ -129,6 +149,13 @@ fn fgTileThin(c:vec3i)->bool{let s=fgSlot(c);if(s==NB_NONE){return false;}return
 fn fgTileAt(c:vec3i,w:u32)->u32{let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fgTileWord(s,fgTileOf(c),w);}
 fn fgPack(c:vec3i)->u32{return u32(c.x)|(u32(c.y)<<10u)|(u32(c.z)<<20u);}
 fn fgUnpack(k:u32)->vec3i{return vec3i(i32(k&1023u),i32((k>>10u)&1023u),i32(k>>20u));}
+${FO_TILE_WGSL}
+// Owned storage (brick-abi.md §2.5): what an F kernel may write. All h (FG_TIERED false) every F word is owned. A
+// vertex is F's where no incident tile is 4h-owned (the authority rule); a lower face where either cell beside it
+// is h-owned; a cell where its tile is.
+fn fgVertexOwned(v:vec3i)->bool{return !FG_TIERED||foVertexOwnerH(v);}
+fn fgFaceOwned(c:vec3i,a:u32)->bool{return !FG_TIERED||foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a));}
+fn fgCellOwned(c:vec3i)->bool{return !FG_TIERED||foCellOwnerH(c);}
 `;
 
 /** Slot lookup and cell addressing (needs `dir`): every lookup reads the directory. */
@@ -170,8 +197,11 @@ fn fgTileHeat(c:vec3i)->f32{let i=fgTileAt(c,FT_T);if(i==NB_NONE){return 0.0;}re
 `;
 
 /** Vertex φ (needs `phi`). */
-export const FG_PHI_WGSL = /* wgsl */`
-fn fgPhiWord(base:u32,v:vec3i)->f32{let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_FAR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
+export const FG_PHI_WGSL = FO_PHI_WGSL + /* wgsl */`
+// Tiered: PHI and PHI1 read through the vertex authority (foVertexPhi: F's vertex, or the 4h tile's interpolant).
+fn fgPhiWord(base:u32,v:vec3i)->f32{
+ if(FG_TIERED){if(base==NB_PHI_F_PHI){return foVertexPhi(v);}if(base==NB_PHI_F_PHI1){return fo1VertexPhi(v);}}
+ let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_FAR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
 fn fgPhi(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI,v);}
 // The eight vertex φ of cell c in corner order x + 2y + 4z.
 fn fgCornersOf(base:u32,c:vec3i)->array<f32,8>{
@@ -196,9 +226,11 @@ fn fgPhiAt(p:vec3f)->f32{return fgPhiAtOf(NB_PHI_F_PHI,p);}
 `;
 
 /** Face velocity reads (needs `vel`): base is a channel's first word (NB_VEL_F_U0, _UP0 or _US0). */
-export const FG_VEL_WGSL = /* wgsl */`
+export const FG_VEL_WGSL = FO_VEL_WGSL + /* wgsl */`
+// Tiered: the owner's face (foFaceU: F's h face, or the 4h tile's linear sample between its plane faces).
 fn fgFace(base:u32,c:vec3i,a:u32)->f32{
  if(!fgFaceOpen(c,a)){return 0.0;}
+ if(FG_TIERED){if(base==NB_VEL_F_U0){return foUFaceU(c,a);}if(base==NB_VEL_F_UP0){return foPFaceU(c,a);}if(base==NB_VEL_F_US0){return foSFaceU(c,a);}}
  let s=fgSlot(c);if(s==NB_NONE){return 0.0;}
  return vel[base+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
 }
@@ -217,6 +249,108 @@ fn fgVelAxis(base:u32,p:vec3f,a:u32)->f32{
  return (1.0-f.z)*((1.0-f.y)*x0+f.y*x1)+f.z*((1.0-f.y)*x2+f.y*x3);
 }
 fn fgVel(base:u32,p:vec3f)->vec3f{return vec3f(fgVelAxis(base,p,0u),fgVelAxis(base,p,1u),fgVelAxis(base,p,2u));}
+`;
+
+/**
+ * The momentum sampler (needs `vel`, `fcell`, FG_FCELL_WGSL and FG_VEL_WGSL): the old engine's blended h/4h sample
+ * of the extended velocity US, umUnitSample (uniform-cached-momentum.wgsl.ts l.93) with umUnitWeight, the cached
+ * unit interpolant and umUnitCoarse, which the momentum trace and the surface trace (umFastVelocity) share.
+ * fgSampleVel(p, lo, hi): components lo..hi-1 at p (cells). All h (FG_TIERED false) it is fgVel(US) exactly.
+ * - The fine weight (umUnitWeight, umVelocitySamplingWeightsAt, uniform-mixed-velocity-sampling.wgsl.ts l.290):
+ *   0 where the sample's tile lacks support bit 0 (an occupied tile within fineReach = 2 tiles: the frame plan's
+ *   seed and dilation, FT_DIST's occupied distance); 1 in an h tile; else max over the h tiles of the 26 about it
+ *   of max(0, 1 - d/2), d the Chebyshev distance (cells) from the held point to the h tile's box. A tile with an
+ *   h neighbour lies in an F brick (the census's ring), so a tile no slot holds has weight 0.
+ * - The fine interpolant: the MAC trilinear of h taps (fgVelAxis's clamp and order); a tap is F's face where either
+ *   cell beside it is h-owned, else the 4h cache's trilinear at the face (umCompiledVelocityTap,
+ *   uniform-compiled-velocity-taps.wgsl.ts: eighth-cell fractions, zero weights skipped, umVertexSum8's order).
+ *   Taps all in h tiles (umUnitTaps) read F directly.
+ * - The coarse interpolant (umSampleVelocity4In): the trilinear of the 4h cache on the tile lattice.
+ * - The 4h cache of a tile plane (UniformMixedMomentumCache.cacheTexel): the C face between two 4h tiles, else the
+ *   mean of its 16 F subfaces (y outer, x inner, over 16). Taps past the lattice take the edge tile's (SOLID); a
+ *   wall plane reads 0 (F's closed-face rule); storage absent reads 0 (AIR).
+ */
+export const FG_SAMPLE_WGSL = /* wgsl */`
+fn fsSupport(t:vec3i)->bool{return fgDist(fgTileDist(4*t),2u)<=2u;}
+fn fsLerp8(v:array<f32,8>,f:vec3f)->f32{
+ let x0=(1.0-f.x)*v[0]+f.x*v[1];let x1=(1.0-f.x)*v[2]+f.x*v[3];
+ let x2=(1.0-f.x)*v[4]+f.x*v[5];let x3=(1.0-f.x)*v[6]+f.x*v[7];
+ return (1.0-f.z)*((1.0-f.y)*x0+f.y*x1)+f.z*((1.0-f.y)*x2+f.y*x3);
+}
+fn fsBit(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
+// The 4h cache of tile T's lower plane along a (US).
+fn fsCache(T:vec3i,a:u32)->f32{
+ var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
+ let t=clamp(T,vec3i(0),hi);let c=4*t;
+ if(!fgFaceOpen(c,a)){return 0.0;}
+ if(!foCellOwnerH(c)&&!foCellOwnerH(c-fgUnit(a))){return foSCFace(t,a);}
+ let u=(a+1u)%3u;let v=(a+2u)%3u;var sum=0.0;
+ for(var y=0;y<4;y++){for(var x=0;x<4;x++){var q=c;q[u]+=x;q[v]+=y;sum+=foSFFace(q,a);}}
+ return sum/16.0;
+}
+// The coarse interpolant at p.
+fn fsCoarse(p:vec3f,a:u32)->f32{
+ var off=vec3f(0.5);off[a]=0.0;
+ let q=p/4.0-off;let b=vec3i(floor(q));let f=q-vec3f(b);var v:array<f32,8>;
+ for(var k=0u;k<8u;k++){v[k]=fsCache(b+fsBit(k),a);}
+ return fsLerp8(v,f);
+}
+// The 4h cache's trilinear at the h face (c, a): in eighths of a tile, 2c - 3 across and 2c along.
+fn fsTap4(c:vec3i,a:u32)->f32{
+ var q8=2*c-vec3i(3);q8[a]=2*c[a];
+ let b=q8>>vec3u(3u);let f=vec3f(q8-8*b)/8.0;var t:array<f32,8>;
+ for(var k=0u;k<8u;k++){
+  let corner=fsBit(k);let w=select(vec3f(1.0)-f,f,corner!=vec3i(0));let weight=w.x*w.y*w.z;
+  if(weight>0.0){t[k]=weight*fsCache(b+corner,a);}
+ }
+ return ((t[0]+t[5])+(t[1]+t[4]))+((t[2]+t[7])+(t[3]+t[6]));
+}
+fn fsTapH(c:vec3i,a:u32)->f32{
+ if(!fgFaceOpen(c,a)){return 0.0;}
+ if(foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a))){return foSFFace(c,a);}
+ return fsTap4(c,a);
+}
+// The fine interpolant at p.
+fn fsFine(p:vec3f,a:u32)->f32{
+ var s=p-vec3f(0.5);s[a]=p[a];
+ var hi=vec3f(NB_LATTICE-vec3i(1));hi[a]=f32(NB_LATTICE[a]);
+ s=clamp(s,vec3f(0.0),hi);
+ let i0=vec3i(floor(s));let f=s-vec3f(i0);
+ let low=i0>>vec3u(2u);let high=vec3i(ceil(s))>>vec3u(2u);var fine=true;
+ for(var k=0u;k<8u;k++){if(!foTileOwnerH(select(low,high,fsBit(k)!=vec3i(0)))){fine=false;}}
+ var v:array<f32,8>;
+ for(var k=0u;k<8u;k++){
+  let c=i0+fsBit(k);
+  if(fine){v[k]=select(0.0,foSFFace(c,a),fgFaceOpen(c,a));}else{v[k]=fsTapH(c,a);}
+ }
+ return fsLerp8(v,f);
+}
+fn fsFineWeight(p:vec3f)->f32{
+ let q=fgHeld(p);let t=min(vec3i(floor(q)),NB_LATTICE-vec3i(1))>>vec3u(2u);
+ if(!fsSupport(t)){return 0.0;}
+ if(foTileOwnerH(t)){return 1.0;}
+ var fine=0.0;
+ for(var k=0u;k<27u;k++){
+  if(k==13u){continue;}
+  let n=t+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);
+  if(!foTileOwnerH(n)){continue;}
+  let origin=vec3f(n)*4.0;let delta=max(vec3f(0.0),max(origin-q,q-origin-vec3f(4.0)));
+  fine=max(fine,max(0.0,1.0-max(delta.x,max(delta.y,delta.z))/2.0));
+ }
+ return fine;
+}
+fn fgSampleVel(p:vec3f,lo:u32,hi:u32)->vec3f{
+ var v=vec3f(0.0);
+ if(!FG_TIERED){for(var a=lo;a<hi;a++){v[a]=fgVelAxis(NB_VEL_F_US0,p,a);}return v;}
+ let fine=fsFineWeight(p);let coarse=max(0.0,1.0-fine);
+ for(var a=lo;a<hi;a++){
+  var value=0.0;
+  if(fine>0.0){value+=fine*fsFine(p,a);}
+  if(coarse>0.0){value+=coarse*fsCoarse(p,a);}
+  v[a]=value;
+ }
+ return v;
+}
 `;
 
 /** The particle depth (needs fcell and phi): particleDepthIn. Bank A's trilinear in a reach-1 tile, else φ pushed

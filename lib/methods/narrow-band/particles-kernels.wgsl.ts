@@ -18,6 +18,7 @@
  * - pSeed: a workgroup an F_ALL brick: the reseed (seedCells + seed), or the initial seed at boot (cfg.w = 1).
  *   Appends after the binned records (§5.6 note b).
  * - pDelta: a lane a record of bank dst: recordDelta (the FLIP delta the next G2P takes).
+ * - pJoin: a lane a record of bank dst: the census's join bits (TILE_OCC 8-15, transferRefine's join rule).
  * - pDeposit (velocity-kernels) reclassifies the mode bit and deposits.
  *
  * The tile's "thin" bit is the census's (NB_S_TRIG bit 8 + tile, fgTileThin).
@@ -26,7 +27,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
 
@@ -62,7 +63,7 @@ fn pPresent(q:vec3f)->bool{
 
 export function particleKernels(L: BrickLayout, F: FluidLayout) {
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
-  const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
+  const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
 
   const pMove = k("pMove", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.partsRO, FB.fcell, FB.fpart, FB.fmoved], [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
 fn pMergeRun(src:u32,record:Particle,low:u32,high:u32,stride:u32)->Particle{
@@ -139,7 +140,7 @@ fn pFile(i:u32,p:Particle,split:bool){
  }
  let mode=nbParticleMode(p);let dt=pDt();let h=pH();let m=nbParticleMass(p);
  var pic=vec3f(0.0);var v=p.velocity.xyz;
- if(mode!=1.0){pic=fgVel(NB_VEL_F_US0,q);v=nbfG2P(v,p.before.xyz,pic,false,first,0.95);}
+ if(mode!=1.0){pic=fgSampleVel(q,0u,3u);v=nbfG2P(v,p.before.xyz,pic,false,first,0.95);}
  else{
   v=nbfBallisticKick(v,pGravity(),dt);
   for(var axis=0u;axis<3u;axis++){
@@ -160,8 +161,8 @@ fn pFile(i:u32,p:Particle,split:bool){
  if(!ballistic){
   // Heun's third-order rule on the grid field (not the FLIP velocity).
   let k1=nbfHeunK1(pic,h);let x1=nbfHeunStage1(q,k1,dt);
-  let x2=nbfHeunStage2(q,fgVel(NB_VEL_F_US0,x1),dt,h);
-  end=nbfHeunEnd(q,k1,fgVel(NB_VEL_F_US0,x2),dt,h);
+  let x2=nbfHeunStage2(q,fgSampleVel(x1,0u,3u),dt,h);
+  end=nbfHeunEnd(q,k1,fgSampleVel(x2,0u,3u),dt,h);
   end+=pSurfaceShift(q,pSeparation(src,i,q,m));
  }
  if(!nbfFinite(end,1e30)){pFatal(2u,i);return;}
@@ -302,7 +303,7 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
   let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=fgDepth(site);
   if(!nbfSeedSiteOk(distance,false,initial,d,1.0,uncovered,true)){continue;}
   if(write){
-   let u=fgVel(NB_VEL_F_US0,site);
+   let u=fgSampleVel(site,0u,3u);
    var p=Particle();p.position=vec4f(site,heat);p.velocity=vec4f(u,distance);
    p.before=vec4f(u,nbParticleState(nbSeedFirst(),0.0));p=nbWithMass(p,mass);
    if(at+n<NB_PCAP){parts[pAt(bank,at+n)]=p;}
@@ -343,6 +344,8 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
  if(fgDist(fgTileDist(anchor),2u)>3u){return NB_DELTA_NONE;}
  // The anchor's +face: a high box wall reads 0 (the old engine's wall row), as does a face closed across.
  let c=anchor+fgUnit(axis);if(!fgFaceOpen(c,axis)){return 0.0;}
+ // Tiered: a face F does not own takes none until the 4h deltas land (ndFaceDelta's 4h rows, T3).
+ if(!fgFaceOwned(c,axis)){return NB_DELTA_NONE;}
  let s=fgSlot(c);if(s==NB_NONE){return NB_DELTA_NONE;}
  return vel[NB_VEL_F_UP0+NB_STRIDE*(s+axis*NB_FCAP)+nbLocal(c)];
 }
@@ -357,5 +360,35 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
  p.before=vec4f(nbfDeltaSample(q),p.before.w);parts[pAt(bank,i)]=p;
 }`);
 
-  return { pMove, pScan, pScatter, pTiles, pSeed, pDelta };
+  // pJoin (transferRefine's joins, NB-FLIP's join rule): a lane a live record of bank dst, after pDeposit's mode.
+  // A coupled record (not ballistic, depth at or above -1 cell) joins every tile its box meets: x +/- 0.875 cells, or
+  // the nearest crossing cell (FC_NEAR) where the home tile has REACH (within two tiles of a crossing) and its depth
+  // is at or below 0; swept by its grid motion over the step (dt before / h, cells), padding 0
+  // (narrowBandFinePadding). Each joined tile with storage gets TILE_OCC bit 8 + tile (the census reads it at the
+  // next part 1 head; pScan rewrites the word after it).
+  const pJoin = k("pJoin", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, nbfParticleRecordWGSL, BANK_WGSL].join("\n") + /* wgsl */`
+fn pJoinTile(t:vec3i){
+ let c=4*t;let s=fgSlot(c);if(s==NB_NONE){return;}
+ let bit=1u<<(8u+fgTileOf(c));let at=NB_S_TILE_OCC+s;
+ if((atomicLoad(&nbSet[at])&bit)==0u){atomicOr(&nbSet[at],bit);}
+}
+@compute @workgroup_size(128) fn pJoin(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let bank=pSrc()^1u;let i=nbGroup(wid)*128u+lid;
+ let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+bank]),NB_PCAP);
+ if(i>=n){return;}
+ let p=parts[pAt(bank,i)];if(!nbLive(p)){return;}
+ if(nbParticleMode(p)==1.0||p.velocity.w< -1.0){return;}
+ let start=p.position.xyz;let c=vec3i(floor(start));
+ let travel=nbRingF(cfg.x,NB_RING_DT)*p.before.xyz/vec3f(nbRingF(cfg.x,NB_RING_H));
+ var low=start-0.875;var high=start+0.875;
+ if(fgReach1(c)&&p.velocity.w<=0.0){
+  let s=fgSlot(c);var nearest=NB_NONE;if(s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
+  if(nearest!=NB_NONE){low=vec3f(fgUnpack(nearest));high=low+1.0;}
+ }
+ let lo=clamp(vec3i(floor((low+min(travel,vec3f(0)))/4.0)),vec3i(0),vec3i(2047));
+ let hi=max(lo,clamp(vec3i(floor((high+max(travel,vec3f(0))-1e-5)/4.0)),vec3i(0),vec3i(2047)));
+ for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){pJoinTile(vec3i(x,y,z));}}}
+}`);
+
+  return { pMove, pScan, pScatter, pTiles, pSeed, pDelta, pJoin };
 }

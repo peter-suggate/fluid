@@ -36,11 +36,15 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
-fn lSetPhi(base:u32,slot:u32,l:u32,value:f32){phi[base+NB_STRIDE*slot+l]=bitcast<u32>(value);}
+// Only F's own vertices (fgVertexOwned: tiered, a vertex with a 4h-owned incident tile is its tile's interpolant).
+fn lSetPhi(base:u32,slot:u32,l:u32,value:f32){
+ if(FG_TIERED&&!fgVertexOwned(nbFOrigin(slot)+nbLocalCoord(l))){return;}
+ phi[base+NB_STRIDE*slot+l]=bitcast<u32>(value);
+}
 `;
 const LS_WGSL = /* wgsl */`
 fn lDt()->f32{return nbRingF(cfg.x,NB_RING_DT);}
@@ -88,8 +92,8 @@ var<workgroup> sFresh:u32;
  }
 }`);
 
-  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell], [base, FG_VEL_WGSL, nbfLevelSetConstantsWGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
-fn nbxTraceVelocity(x:vec3f)->vec3f{return fgVel(NB_VEL_F_US0,x);}
+  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell], [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
+fn nbxTraceVelocity(x:vec3f)->vec3f{return fgSampleVel(x,0u,3u);}
 fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return fgHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c540000u);}
 var<private> lBase:vec3i;
@@ -162,7 +166,7 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
    let a=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
    let on=select(v[a]==0,v[a]==NB_LATTICE[a],(k&1u)!=0u);if(!on){continue;}
    var probe=p;probe[a]+=inward;
-   let speed=fgVelAxis(NB_VEL_F_US0,probe,a);
+   let speed=fgSampleVel(probe,a,a+1u)[a];
    if(inward*speed>=-1e-6){continue;}
    contact=true;travel[a]=-dt*speed/h[a];
   }
