@@ -426,3 +426,44 @@ Metal clean.
     PCG reaches 1e-9 in 8 iterations.
   - The GPU solver follows this design. It is saved in
     ~/code/me/fluid-scratch/lane-p1/composite-mgpcg-design.txt.
+
+### 2026-11-15: the composite MGPCG on the GPU (pressure-mgpcg.ts)
+
+- **poolMGPCG now solves the composite rows: h rows in pres F, native 4h rows in pres C.** The
+  all-h solve is unchanged: the pool MGPCG tests give the same V-cycle errors, iteration counts and
+  X as before.
+  - **Native neighbours.** A cell of a 4h-owned tile inside an F brick has DIAG 0. Its F slot is
+    never read for a value. The brick head stages each neighbour brick's native tiles (8 bits) and
+    its page's C slot, and pNatAt reads pres C. This also covers the stale W0 of DIAG = 0 cells.
+  - **The h side.** h rows' apply, pRow and the L0 tile staging read a native neighbour's value:
+    X (+ αD), Z, 0 before the coarse correction, and its L2 EPOST after it. The upper coupling is
+    the row's own KU.
+  - **The hierarchy (the composite model).**
+    - An F1 or F2 link to a native row is its children's sum over √OC. The upper one is in the
+      new L1 and L2 KU channels.
+    - pmgCoarsenC (now a lane a tile) writes the native L2 rows unscaled. A native row's link to an
+      F2 tile below is that tile's L2 KU. pmgCoarsenC also clears h tiles without a liquid F brick,
+      and aggregates L2 → L3 → L4 → L5 (moved from setupF).
+    - pmgDown1C (a page) computes a native row's L2 right side, r + Σ_m ch(m)(e0(m) + e1(m/2)/√OC),
+      from the seams gathered from the h side. It then pre-smooths L2 over all 64 tile blocks of
+      the page. Page kernels skip pages with L5 D = 0. The native kernels skip pages with no
+      native rows (a count in L5 KU0).
+  - **Native PCG vectors.** These run in page kernels beside the brick kernels: the setup residual
+    (in pmgCoarsenC), z = L2 EPOST (in pmgUp2, with r·z), pmgDirectionC, pmgUpdateC and
+    pmgFinishC. Their dots share pmgRed. RMAX counts a native residual over 64.
+- **The GPU against Float64** (`pressure-composite-mgpcg.test.ts`). The test uses the composite
+  rows' frozen mixed-tier state, now shared as `parity/composite-fixture.ts`: 9081 rows, 35 of them
+  native, with all-native and mixed F bricks.
+
+  | check | h rows | native rows |
+  | --- | --- | --- |
+  | r0 vs b − A x0 | 5.8e-8 | 5.8e-8 |
+  | one V-cycle, Z vs model.vcycle | 4.9e-7 | 5.9e-8 |
+  | converged X vs Float64 PCG | 5.4e-7 | 2.8e-7 |
+
+  The converged run took 8 iterations, with r0 3.9 → 4.4e-7 (tolerance 9.8e-7).
+  - The first run had a sign error in the native L2 right side: r − A e has +ch, because A's
+    off-diagonals are −ch. The V-cycle was 10–17% off, and PCG still converged (it is a valid SPD
+    preconditioner). The fixed version matches.
+- **Next:** the finish (WARM, the h tiles' C X mean, dry X = 0), project with seam faces and the
+  Neumann hand-back, the wall outer loop, and registration.
