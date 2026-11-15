@@ -2124,7 +2124,8 @@ ${UniformPressureArena.diagnostics?`    if(!pLast){let free=pCorrectionFree((m&N
      if((m&N_CLOSED)!=0u&&x+base<=0.0){pCensus(29u,1u);if(r<0.0){pCensus(27u,1u);}}
      for(var f=0u;f<6u;f++){if(nKind(m,f)==N_WALL&&x+bitcast<f32>(poolB[PN_L+f*PLANE2+at2])< -base){pCensus(25u,1u);}}}
 `:""}    if(!pLast){poolB[PN_M+at2]=(m&~N_CORRECT)|select(0u,N_CORRECT,pCorrectionFree((m&N_CLOSED)!=0u,x+base,r));}
-    if(pLast&&(m&N_CLOSED)!=0u){
+${UniformPressureArena.diagnostics?`    if(pLast){for(var f=0u;f<6u;f++){if(nKind(m,f)==N_WALL){let g=bitcast<f32>(poolB[PN_L+f*PLANE2+at2]);if((g>=-base)!=(x+g>=-base)){pCensus(38u,1u);}}}}
+`:""}    if(pLast&&(m&N_CLOSED)!=0u){
      if(x+base<0.0){atomicAdd(&state[${KRYLOV_BOUND_WORD}u],1u);}
      if(x+base<=0.0&&r*nScale()*nStopScale()>params.solve.x){atomicAdd(&state[${KRYLOV_SIGN_WORD}u],1u);}
     }
@@ -2233,7 +2234,10 @@ var<workgroup> fSum:array<vec2f,64>;
    }
   }
   if(pActive(kinds)&&bInside(kinds)&&own+base<0.0){atomicAdd(&state[${KRYLOV_BOUND_WORD}u],1u);}
-  fSum[lane]=select(vec2f(0.0),vec2f(base+own,1.0),bLiquid(kinds));
+${UniformPressureArena.diagnostics?`  // The separating wall's state at the solve's end against the build's (the iterate at its start, x = 0).
+  if(pActive(kinds)){for(var f=0u;f<6u;f++){if(bFaceKind(kinds,f)==K_WALL){let g=pLift(at,f);let built=g>=-base;
+   if(!built){pCensus(39u,1u);}if(built!=(own+g>=-base)){pCensus(37u,1u);}}}}
+`:""}  fSum[lane]=select(vec2f(0.0),vec2f(base+own,1.0),bLiquid(kinds));
   workgroupBarrier();
   if(lane==0u){
    var sum=vec2f(0.0);for(var i=0u;i<64u;i++){sum+=fSum[i];}

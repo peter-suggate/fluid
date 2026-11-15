@@ -574,3 +574,50 @@ tools/nbflip-gates.ts against the five ref-2761350a references):
 - The t = 0 seam-head Picard iterations.
 - The engine passing `{ tiered }` to pressureOperatorKernels (E's brick-engine.ts).
 - MGPCG level-0 occupancy.
+
+## 2026-11-15 — the active-set table, with the wall's state at the solve's end against the build
+
+**Probe:** tools/probe-pressure-active-set.ts on the old engine, all four gate scenes, 120 steps each (paddleboats
+with its bodies driven), on the check slot. All runs rc 0 with no Metal aborts. Raw output is in
+fluid-scratch/lane-p1/census2/*.json. Three census words are new, all diagnostics-only:
+- 37: band K_WALL faces whose state at the solve's end (x + lift ≥ −base, pFinal) differs from the build's
+  (lift ≥ −base, the iterate at its start). The build's state is what the composite rows decide today
+  (start + lift ≥ 0).
+- 38: the same for the native N_WALL faces (pResidual2's last measure).
+- 39: band K_WALL faces separated at the build.
+
+Means a step, the largest step in brackets.
+
+| state | seep | dam | letters | paddleboats |
+|---|---|---|---|---|
+| band rows | 1.5k | 113k | 103k | 50k |
+| band K_WALL faces | 188 (369) | 5.9k (14.1k) | 1.9k (5.7k) | 910 (2.0k) |
+| band K_WALL separated at the build | 3.2 (12) | 459 (1743) | 47 (334) | 0.41 (6) |
+| **band K_WALL state at the end ≠ the build's** | **23 (53)** | **441 (1791)** | **51 (412)** | **0.79 (8)** |
+| band K_WALL binds, summed over MG cycles | 63 (172) | 2.0k (8.4k) | 310 (2.1k) | 3.4 (36) |
+| band K_WALL binds at the Krylov start | 22 (53) | 514 (2.2k) | 78 (521) | 0.91 (9) |
+| band wall masks changed since the last step | 0 | 0 | 0 | 0 |
+| native rows | 34k | 9.5k | 18k | 36k |
+| native N_WALL faces | 512 | 67 (158) | 111 (192) | 303 (352) |
+| native N_WALL lift below start (init) | 0 | 12 (74) | 0 | 0 |
+| **native N_WALL state at the end ≠ the build's** | **0** | **9.6 (61)** | **0** | **0** |
+| native N_WALL binds, MG | 0 | 52 (313) | 0 | 0 |
+| native wall/held/closed changes since the last step | 0 | 13 (55) | 2.4 (20) | 0.08 (3) |
+| bounded band rows (bInside) / flips since the last step | 294 / 0 | 0 | 0 | 4.5k / 584 |
+| P_CORRECT changes, cycles 0/1/2/3 | 18.5/5.2/1.7/0.11 | 0 | 0 | 118/15.5/2.0/0.49 |
+| N_CLOSED rows | 373 | 0 | 0 | 0 |
+| N_CORRECT changes, cycles 0/1/2 | 0.24/0.06/0.07 | 0 | 0 | 0 |
+| Krylov joins / hits / restarts | 1.9 / 0.08 / 0.03 | 0 | 0 | 1.1 / 1.6 / 0.49 |
+| MG cycles | 2.5 | 4.0 | 3.0 | 2.9 |
+
+**What it decides:**
+- **Item 2 (the wall re-decision).** The dam does re-decide its walls after the first build: 441 band faces a step
+  (7.5% of its wall faces) and 9.6 native faces end in a different state from the build's. So does every other
+  scene: seep 23, letters 51, paddleboats 0.8. The old engine re-decides with max(x + lift, −base) at every
+  residual and smoother evaluation. The composite rows fix the build's state for the whole solve. So the outer
+  loop is needed on every scene, the dam gate included.
+- **N_CORRECT** (bounded native rows) changes anything only on seep (0.24, 0.06 and 0.07 a step on cycles 0–2).
+  Those are N_CLOSED rows, all solids, which latch UNSUPPORTED today. P_CORRECT needs bodies (seep, paddleboats).
+  Neither binds on the dam or letters.
+- **Item 3 (the seam-head Picard at t = 0):** the seam heads are nonzero on 92–100% of seam subfaces (the earlier
+  table). The Picard runs once at t = 0 only, so this table doesn't change its case.

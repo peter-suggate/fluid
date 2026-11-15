@@ -32,6 +32,7 @@ const NAMES:Record<number,string>={
  24:"mg.band.K_WALL.binds",25:"mg.native.N_WALL.binds",26:"mg.band.closedClamp",27:"mg.native.closedClamp",28:"mg.band.atBound",29:"mg.native.atBound",
  30:"krylov.start.band.frozen",31:"krylov.start.native.frozen",32:"krylov.start.band.K_WALL.binds",33:"krylov.start.native.N_WALL.binds",
  34:"mg.band.cycle0FrozenVsLastFrameFlips",35:"mg.band.rowsEvaluated",
+ 37:"final.band.K_WALL.stateVsBuild",38:"final.native.N_WALL.stateVsBuild",39:"build.band.K_WALL.separated",
 };
 const FLOAT:Record<number,string>={18:"seam.maxAbsHead",36:"seam.maxAbsCoeffTimesHead"};
 for(let c=0;c<8;c++){NAMES[40+c]=`mg.band.frozen.cycle${c}`;NAMES[48+c]=`mg.band.correctChanges.cycle${c}`;NAMES[56+c]=`mg.native.frozen.cycle${c}`;NAMES[64+c]=`mg.native.correctChanges.cycle${c}`;}
