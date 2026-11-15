@@ -18,7 +18,7 @@ import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, b
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
-import { brickPressureKernels } from "./brick-pressure.wgsl";
+import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 
 export type Vec3 = readonly [number, number, number];
@@ -125,7 +125,7 @@ export class BrickEngine {
 
   /** Every placement of one step and the boot, in order (record()'s input). */
   static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number): BrickStageSchedule {
-    const set = brickSetKernels(layout), pres = brickPressureKernels(layout), f = layout.cap.f, c = layout.cap.c;
+    const set = brickSetKernels(layout), pres = pressureOperatorKernels(layout), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
     const update: BrickPlacement[] = [
@@ -210,6 +210,7 @@ export class BrickEngine {
     make("args", ARGS.WORDS, U.INDIRECT);
     for (const pool of ["vel", "phi", "pres", "cut"] as const) make(pool, L.poolWords[pool]);
     make("parts", L.partsWords);
+    make("xfer", L.xferWords);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);

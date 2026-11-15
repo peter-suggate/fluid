@@ -28,6 +28,7 @@ import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
 import { bindGroupLayoutEntries, MAX_STORAGE_BINDINGS } from "./brick-kernel";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
+import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, createBrickSolver, nbEngine } from "./brick-method";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
@@ -70,7 +71,7 @@ test("brick engine: direct dispatches and buffers follow capacities, not the lat
 
 test("brick engine: every kernel binds at most 8 storage buffers, and the layout check refuses a ninth", () => {
   const L = new BrickLayout({ lattice: [64, 64, 64], f: 64, c: 8, b: 0, k: 0, particles: 1024 }), cg = bringUpCG(L);
-  const kernels = [...Object.values(brickSetKernels(L)), ...Object.values(brickPressureKernels(L)),
+  const kernels = [...Object.values(brickSetKernels(L)), ...Object.values(brickPressureKernels(L)), ...Object.values(pressureOperatorKernels(L)),
     ...[...cg.setup, ...cg.slot(0), ...cg.finish].map(p => p.kernel)];
   for (const k of kernels) assert.ok(k.bindings.filter(b => b.kind !== "uniform").length <= MAX_STORAGE_BINDINGS, k.label);
   const nine = Array.from({ length: 9 }, (_, i) => ({ name: `b${i}`, kind: "rw" as const }));
