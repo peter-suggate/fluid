@@ -1,0 +1,70 @@
+{
+ "scene": "high-resolution-dam-break",
+ "step": 22,
+ "window": 64,
+ "lattice": [
+  128,
+  128,
+  128
+ ],
+ "listed": {
+  "total": 2648,
+  "refine": 626,
+  "coarsen": 527,
+  "neighbour": 1495,
+  "window": 412
+ },
+ "sections": {
+  "oldOwner": {
+   "offset": 0,
+   "count": 4096,
+   "type": "u8"
+  },
+  "newOwner": {
+   "offset": 4096,
+   "count": 4096,
+   "type": "u8"
+  },
+  "listed": {
+   "offset": 8192,
+   "count": 824,
+   "type": "u32"
+  },
+  "prePhi": {
+   "offset": 11488,
+   "count": 30395,
+   "type": "f32"
+  },
+  "preU": {
+   "offset": 133068,
+   "count": 98946,
+   "type": "f32"
+  },
+  "preUS": {
+   "offset": 528852,
+   "count": 98946,
+   "type": "f32"
+  },
+  "postPhi": {
+   "offset": 924636,
+   "count": 29201,
+   "type": "f32"
+  },
+  "postU": {
+   "offset": 1041440,
+   "count": 98070,
+   "type": "f32"
+  },
+  "postUS": {
+   "offset": 1433720,
+   "count": 98070,
+   "type": "f32"
+  }
+ },
+ "notes": [
+  "uniform-narrow-band-flip (balanced), dt 0.016666666666666666: frame 22's remap pass 0 (UniformMixedRemap.encodePass), captured by tools/nbflip-remap-capture.ts.",
+  "pre: just before the remap pass (live ownership = old); post: just after the publish pass (live ownership = new).",
+  "U: the velocity field and its low-face walls (negative); US: the scratch velocity, the census extension the remap carries, and its walls (negativeScratch).",
+  "stored locations: pre 30395 vertices and 98946 faces, post 29201 and 98070."
+ ]
+}
