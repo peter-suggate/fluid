@@ -35,7 +35,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 
@@ -66,6 +66,15 @@ export function levelSetKernels(L: BrickLayout, F: FluidLayout) {
   const brickHead = /* wgsl */`
  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_F_ALL)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);`;
+  // The staged bases and head (seep S2c): the owner window (FG_SLOT_WINDOW_WGSL) and the vertex φ ring of n^3 from
+  // o + low (FG_RING_WGSL), staged once a brick before the formulas read them. Workgroup-uniform (sHead).
+  const staged = (n: number) => [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL(n), LS_WGSL, "var<workgroup> sHead:u32;"].join("\n");
+  const stagedHead = (low: number) => /* wgsl */`
+ if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
+ let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
+ let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
+ fgRingStage(o+vec3i(${low}),lid,256u);workgroupBarrier();`;
 
   const lInit = k("lInit", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], base + /* wgsl */`
 var<workgroup> sFresh:u32;
@@ -302,17 +311,15 @@ fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
  }
 }`);
 
-  const lTiles = k("lTiles", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], base + /* wgsl */`
+  const lTiles = k("lTiles", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], staged(9) + /* wgsl */`
 var<workgroup> wSeed:atomic<u32>;
 var<workgroup> wOcc:atomic<u32>;
 var<workgroup> wOpen:atomic<u32>;
 @compute @workgroup_size(256) fn lTiles(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
  if(lid==0u){atomicStore(&wSeed,0u);atomicStore(&wOcc,0u);atomicStore(&wOpen,0u);}
- workgroupBarrier();
- var slot=0u;
+${stagedHead(0)}
+ let live=true;
  if(live){
-  slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
   for(var r=0u;r<2u;r++){
    let c=o+nbLocalCoord(lid+256u*r);if(!nbInLattice(c)){continue;}
    let bit=1u<<fgTileOf(c);atomicOr(&wOpen,bit);
@@ -386,7 +393,7 @@ fn lHeatNow(c:vec3i,i:u32,dt:f32)->f32{
  if(round==2u){let hn=fcLoadF(own+FT_HN);fcStoreF(own+FT_H,hn);fcStoreF(own+FT_T,max(hn,0.5*hmax));}
 }`);
 
-  const lClear = k("lClear", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], base + LS_SET_WGSL + /* wgsl */`
+  const lClear = k("lClear", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], staged(9) + LS_SET_WGSL + /* wgsl */`
 var<workgroup> wMask:array<atomic<u32>,16>;
 var<workgroup> wCross:atomic<u32>;
 // nbAirProtected: an incident tile in the seeds (plane 0) or the collar (air distance ≤ 4, plane 3).
@@ -410,12 +417,10 @@ fn lCleared(v:vec3i,value:f32)->f32{
  return max(value,16.0);
 }
 @compute @workgroup_size(256) fn lClear(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
  if(lid<16u){atomicStore(&wMask[lid],0u);}if(lid==0u){atomicStore(&wCross,0u);}
- workgroupBarrier();
- var slot=0u;
+${stagedHead(0)}
+ let live=true;
  if(live){
-  slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
   for(var r=0u;r<2u;r++){
    let l=lid+256u*r;let c=o+nbLocalCoord(l);
    if(!nbInLattice(c)){continue;}
@@ -425,8 +430,8 @@ fn lCleared(v:vec3i,value:f32)->f32{
   }
  }
  workgroupBarrier();
- if(!live){return;}
- let o=nbFOrigin(slot);
+ // The ring's last read is above: the stores below change PHI.
+ fgRingClose();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+nbLocalCoord(l);
   let old=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);let x=lCleared(v,old);
@@ -472,8 +477,8 @@ fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
  }
 }`);
 
-  const lDistance = k("lDistance", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [base, nbfRedistanceWGSL].join("\n") + /* wgsl */`
-@compute @workgroup_size(256) fn lDistance(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+  const lDistance = k("lDistance", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [staged(12), nbfRedistanceWGSL].join("\n") + /* wgsl */`
+@compute @workgroup_size(256) fn lDistance(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${stagedHead(-2)}
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let p=o+nbLocalCoord(l);
   if(!lVertexIn(p)||!fgReach2(lCellBelow(p))){continue;}

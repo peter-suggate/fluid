@@ -698,3 +698,66 @@ There are 262 dispatches per step against all-h's 244; 182 of them are pmg.
    - Agreed with E: kick = {force, after, seed}, with a census that sets TRIG only between after and seed.
 
 Both are physics rules, so both are ported verbatim, and D8 gets re-gated once E's hash lands.
+
+## Item 1: owner resolution staged once per brick; record passes over the live count (2026-11-15)
+
+Measured on tree-st7 (b9315489 plus these lane F files; the commit carries the same files onto main).
+
+**Record passes.** pMove, pScatter, pDelta and pJoin now dispatch indirect over the live records. pArgs is a one-lane direct kernel (ARGS.LANE_F) placed at the tail after pSeed, and in the kick around the seed rebin. The dam's record workgroups dropped from 8952 a step (the cap) to about 3150.
+
+**Staging.**
+- The owner window (fgSlotWindowWGSL) also stages one bit per window tile: the tile is a 4h authority (foVertexCoarse's tile rule).
+- A vertex whose candidate tiles lie in the window reads its authority from those bits (fgWinVertexPhi). This is foVertexPhi cut from the owners' text, with only the tile rule replaced. A vertex beyond the lattice keeps the owners' FAR.
+- uViscous stages the 375 vpCache taps once, in a brick whose window holds a lattice tile that is not h-owned.
+- Every staging call is followed by a barrier. fluid-staging.test.ts checks every lane F kernel for this, in both modes.
+- Two windows measured slower and were reverted: pMove's (7.39 against 6.68 ms) and uExt4Seed's 6^3 page window (+3.2 ms).
+
+**Frozen equivalence.** Dam step 20, poolF 4913, new kernel against b9315489's on the same state:
+- Bitwise, tiered and all-h: every lane F kernel except the four below.
+- pSeed and pScatter differ from old run against old run as well.
+- pMove (fpart) and uViscous (vel) differ only in FP contraction:
+  - with the window lookups counted against the directory, there are no mismatches;
+  - uViscous with its staging disabled differs from the old kernel in the same 365894 words;
+  - the all-h ±Inf words are taps of 3e38 (NB_DELTA_NONE). The frozen state is after the tail, so UP still holds uExtend's deltas, and old and new round 3e38 - 2·3e38 + 3e38 differently. The schedule rewrites UP in uAdvect before uViscous.
+- uCache first showed a real defect: the fast path read F's vertex beyond the lattice, where the owners return FAR. That is fixed (fgWinCovers requires v <= N).
+- frozen.mts skips pJoin, because the frozen state is after pDelta: `before` holds deltas, so the swept box spans the lattice.
+
+**Profile, timing slot, steps 13–24, ms/step.** Tiered 96.2 against b931's 108.6; all-h 79.0 against 77.9.
+
+| area | tiered | b931 tiered | launches |
+|---|---|---|---|
+| grid velocity | 38.3 | 48.8 | 7 |
+| level set | 16.0 | 19.1 | 21 |
+| layout, census and residency (E) | 12.7 | 12.7 | 35 |
+| pressure solve (P) | 12.7 | 12.4 | 191 |
+| pressure setup and projection (P) | 7.7 | 7.7 | 10 |
+| move | 6.3 | 5.6 | 5 |
+| transfer and seeding | 2.4 | 2.4 | 3 |
+
+**ns/wg, tiered against all-h:**
+- uAdvect: 3700 against 3072
+- uExtend: 2371 against 696
+- uTransfer: 1202 against 585
+- uViscous: 462 against 144
+- pDeposit: 365 against 235
+- lDistance: 1470 against 357
+- lTiles: 197 against 51
+- lClear: 318 against 194
+- lAdvect: 814 against 1165
+- uCache: 507 (tiered only)
+- uExt4Seed: 57.1 µs a page
+
+Tiered is at or below all-h only in lAdvect. In all-h the window and rings cost about 1 ms (uAdvect 12.08 against 11.53, lDistance 1.40 against 1.13).
+
+**Timing, timing slot, 165 steps.**
+- Fenced median: 87.5 against b931's 102.4 ms.
+- Pipelined: 88.5 against 106.1 ms/step.
+- Both st7 runs latched FAIL.REACH, at steps 162 and 165, on bricks (0,0,14) and (1,1,15). st3's fenced run latched at step 74 on (1,0,15). b931's two runs did not.
+- The 300-step gates of st3 and st7, on the check slot, did not latch.
+- Each latch is at the z = 127 wall, which is where lane E's reach gap was seen before. It is still open whether lane F's changes make it more frequent.
+
+**D8, the dam-300 gate on st7.**
+- Every row passes except D8.
+- Against the default references (now dam-ref-a..e): margin 1.25, 7.095e5 against 6.309e5.
+- Against a + b only: margin 1.12, against 6.383e5.
+- D8c passes, at 0.46.

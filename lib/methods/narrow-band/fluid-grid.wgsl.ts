@@ -110,12 +110,41 @@ export function fluidConstantsWGSL(F: FluidLayout): string {
 
 /** A lane F kernel: the ABI prelude (set atomic as nbSet, dir plain), F's constants, its bindings, then the body. */
 export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindings: readonly BrickBinding[], body: string, entry = label): BrickKernel {
+  // A module with vertex φ and no staged ring (FG_RING_WGSL) reads every vertex through its owner.
+  const ring = (body.includes("fn fgPhiWord") && !body.includes("fn fgRingAt") ? FG_NO_RING_WGSL : "")
+    + (body.includes("fn fsCacheOf") && !body.includes("fn fsCacheRawStaged") ? "\nfn fsCacheRawStaged(T:vec3i,a:u32)->f32{return fsCacheRaw(T,a);}" : "");
   return {
     label, entry, bindings,
     code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }),
-      body.includes("struct Particle") ? "" : "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}", fluidConstantsWGSL(F), declareBindings(bindings), body].join("\n"),
+      body.includes("struct Particle") ? "" : "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}", fluidConstantsWGSL(F), declareBindings(bindings), body, ring].join("\n"),
   };
 }
+
+const FG_NO_RING_WGSL = "fn fgRingAt(v:vec3i)->u32{return NB_NONE;}\nfn fgRingPhi(i:u32)->f32{return 0.0;}";
+
+/** A staged ring of vertex φ (seep S2c): the n^3 vertices from `low`, each fgPhi (through its owner, the window's
+ * lookups) once, in workgroup memory; fgPhi inside the ring reads it, outside it the owner. The values are fgPhi's
+ * own, so results are bit-identical while the kernel writes no PHI before its last ring read. Every lane calls
+ * fgRingStage(low, lid, lanes) with the same low (after the window's barrier), then a barrier, before any read.
+ * `store` names the storage (default a ring of its own): "slot(j)=x" and "slot(j)" forms for a kernel that lends
+ * other workgroup memory before its own use of it. */
+export const FG_RING_WGSL = (n: number, store?: { readonly write: (j: string, x: string) => string; readonly read: (j: string) => string }) => /* wgsl */`
+${store ? "" : `var<workgroup> fgRing:array<f32,${n ** 3}>;`}
+var<private> fgRingLow:vec3i;
+var<private> fgRingOn:bool=false;
+fn fgRingAt(v:vec3i)->u32{
+ let r=vec3u(v-fgRingLow);
+ if(fgRingOn&&all(r<vec3u(${n}u))){return r.x+${n}u*(r.y+${n}u*r.z);}
+ return NB_NONE;
+}
+fn fgRingPhi(i:u32)->f32{return ${store ? store.read("i") : "fgRing[i]"};}
+fn fgRingStage(low:vec3i,lid:u32,lanes:u32){
+ fgRingOn=false;fgRingLow=low;
+ for(var j=lid;j<${n ** 3}u;j+=lanes){let x=fgPhi(low+vec3i(i32(j%${n}u),i32((j/${n}u)%${n}u),i32(j/${n * n}u)));${store ? store.write("j", "x") : "fgRing[j]=x"};}
+ fgRingOn=true;
+}
+// The ring's storage is lent back: later reads go to the owners.
+fn fgRingClose(){fgRingOn=false;}`;
 
 
 /** The tier owners (brick-owner.wgsl.ts), prefix fo: the tile part (no pool), φ (PHI; fo1 the PHI1 copy) and the
@@ -126,12 +155,38 @@ const cutOwner = (code: string, from: string, to?: string) => {
   if (i < 0 || j < 0) throw new Error(`fluid-grid: brickOwnerWGSL has no ${i < 0 ? from : to}`);
   return code.slice(i, j);
 };
-const FO_TILE_WGSL = cutOwner(FO_ALL, "fn foTileInLattice", "fn foCVertex");
-const FO_PHI_PART = cutOwner(FO_ALL, "fn foCVertex", "fn foCFace");
+// The owners' directory reads go through fgTileCSlot (a tile's page's C slot), fgTileH (a tile is h-owned) and
+// fgBrickSlot (an F slot), which a brick-centred workgroup serves from its staged window (FG_SLOT_WINDOW_WGSL).
+const ownerReads = (code: string) => code
+  .replace(/nbCSlotOfPage\((\w)>>vec3u\(3u\)\)/g, "fgTileCSlot($1)")
+  .replace(/nbFSlotOfBrick\(v>>vec3u\(3u\)\)/g, "fgBrickSlot(v>>vec3u(3u))")
+  .replace(/nbFSlotOfCell\(c\)/g, "fgBrickSlot(c>>vec3u(3u))");
+const FO_TILE_RAW = ownerReads(cutOwner(FO_ALL, "fn foTileInLattice", "fn foCVertex"));
+const FO_OWNER_H = /fn foTileOwnerH\(t:vec3i\)->bool\{[^]*?\n\}\n/;
+if (!FO_OWNER_H.test(FO_TILE_RAW)) throw new Error("fluid-grid: brickOwnerWGSL's foTileOwnerH changed shape");
+// fgTileHDir is the owners' own foTileOwnerH (renamed); foTileOwnerH reads through fgTileH.
+const FO_TILE_WGSL = FO_TILE_RAW.replace(FO_OWNER_H, m => m.replace("fn foTileOwnerH", "fn fgTileHDir") + "fn foTileOwnerH(t:vec3i)->bool{return fgTileH(t);}\n");
+const FO_PHI_PART = ownerReads(cutOwner(FO_ALL, "fn foCVertex", "fn foCFace"));
 const FO_PHI_WGSL = FO_PHI_PART + FO_PHI_PART.replace(/\bfo(CVertex|FVertex|VertexPhi)\b/g, "fo1$1")
   .replace(/\bNB_PHI_F_PHI\b/g, "NB_PHI_F_PHI1").replace(/\bNB_PHI_C_PHI\b/g, "NB_PHI_C_PHI1");
-const foFaces = (prefix: string, ch: string) => cutOwner(brickOwnerWGSL({ phi: "phi", vel: "vel", prefix, faceF: `NB_VEL_F_${ch}0`, faceC: `NB_VEL_C_${ch}0` }), `fn ${prefix}CFace`)
-  .replace(new RegExp(`\\b${prefix}(TileInLattice|TileIndex|TileOwnerH|CellOwnerH)\\b`, "g"), "fo$1");
+// The window's vertex authority (fgWinVertexCoarse: foVertexCoarse with each candidate tile's rule read from the
+// window's staged bit, fgWinCoarse) and its φ (fgWinVertexPhi; fgWin1VertexPhi the PHI1 copy), cut from the owners'
+// own text: the candidates, their order and the interpolant are the owners'.
+const FO_COARSE_RULE = "if(foTileInLattice(t)&&fgTileCSlot(t)!=NB_NONE&&!foTileOwnerH(t)){return t;}";
+const cutFunction = (code: string, name: string) => {
+  const m = new RegExp(`fn ${name}\\([^]*?\\n\\}\\n`).exec(code);
+  if (!m) throw new Error(`fluid-grid: brickOwnerWGSL has no ${name}`);
+  return m[0];
+};
+const FO_WIN_COARSE = cutFunction(FO_TILE_RAW, "foVertexCoarse");
+if (!FO_WIN_COARSE.includes(FO_COARSE_RULE)) throw new Error("fluid-grid: brickOwnerWGSL's foVertexCoarse tile rule changed shape");
+const FO_WIN_PHI = cutFunction(FO_PHI_PART, "foVertexPhi");
+if (!FO_WIN_PHI.includes("foVertexCoarse(v)")) throw new Error("fluid-grid: brickOwnerWGSL's foVertexPhi changed shape");
+const FG_WIN_VERTEX_WGSL = FO_WIN_COARSE.replace("fn foVertexCoarse", "fn fgWinVertexCoarse").replace(FO_COARSE_RULE, "if(fgWinCoarseBit(fgWinTileAt(t))!=0u){return t;}")
+  + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWinVertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)")
+  + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWin1VertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)").replace(/\bfo(CVertex|FVertex)\b/g, "fo1$1");
+const foFaces = (prefix: string, ch: string) => ownerReads(cutOwner(brickOwnerWGSL({ phi: "phi", vel: "vel", prefix, faceF: `NB_VEL_F_${ch}0`, faceC: `NB_VEL_C_${ch}0` }), `fn ${prefix}CFace`)
+  .replace(new RegExp(`\\b${prefix}(TileInLattice|TileIndex|TileOwnerH|CellOwnerH)\\b`, "g"), "fo$1"));
 const FO_VEL_WGSL = [foFaces("foU", "U"), foFaces("foP", "UP"), foFaces("foS", "US")].join("\n");
 
 /** The directory's F slot of a brick: two dependent loads (page, then child). */
@@ -175,24 +230,65 @@ fn fgCellCoarse(c:vec3i)->bool{return FG_TIERED&&nbInLattice(c)&&!foCellOwnerH(c
 `;
 
 /** Slot lookup and cell addressing (needs `dir`): every lookup reads the directory. */
-export const FG_SLOT_WGSL = [FG_BRICK_SLOT_WGSL, "fn fgBrickSlot(b:vec3i)->u32{return fgBrickSlotOfDir(b);}", FG_ADDRESS_WGSL].join("\n");
+export const FG_SLOT_WGSL = [FG_BRICK_SLOT_WGSL, /* wgsl */`
+fn fgBrickSlot(b:vec3i)->u32{return fgBrickSlotOfDir(b);}
+fn fgTileCSlot(t:vec3i)->u32{return nbCSlotOfPage(t>>vec3u(3u));}
+fn fgTileH(t:vec3i)->bool{return fgTileHDir(t);}
+fn fgWinCovers(v:vec3i)->bool{return false;}
+fn fgWinTileAt(t:vec3i)->u32{return NB_NONE;}
+fn fgWinCoarseBit(i:u32)->u32{return 0u;}`, FG_ADDRESS_WGSL].join("\n");
 
-/** Slot lookup through a workgroup's window of the 3^3 bricks about one brick (needs `dir`). A lookup inside the
- * window is one workgroup read in place of the directory's two dependent loads; outside it, the directory. The
- * slot is the same either way (the directory is read-only in a kernel), so results are bit-identical.
- * Every lane calls fgWindowStage(centre, lid) with the same centre, then a barrier, before any lookup. */
-export const FG_SLOT_WINDOW_WGSL = [FG_BRICK_SLOT_WGSL, /* wgsl */`
-var<workgroup> fgWinSlot:array<u32,27>;
+/** Slot and owner lookup through a workgroup's window of B^3 bricks: their F slots and their (2B)^3 tiles' C slots
+ * and h ownership (the tier owners' every directory read, seep S2c's staged owners). A lookup inside the window is
+ * one workgroup read in place of the directory's dependent loads; outside it, or in a workgroup that staged none (a
+ * C page of an FC pass), the directory. The directory is read-only in a kernel, so results are bit-identical.
+ * Every lane calls fgWindowStageAt(low brick, lid, lanes) (or fgWindowStage(centre, lid, lanes): the 3^3 about
+ * centre) with the same bricks, then a barrier, before any lookup. */
+export const fgSlotWindowWGSL = (B: number) => [FG_BRICK_SLOT_WGSL, /* wgsl */`
+var<workgroup> fgWinSlot:array<u32,${B ** 3}>;
+// A tile's page's C slot (NB_NONE as 0x7fffffff) in bits 0..30, its h ownership in bit 31.
+var<workgroup> fgWinTile:array<u32,${(2 * B) ** 3}>;
 var<private> fgWinLow:vec3i;
+var<private> fgWinOn:bool=false;
+// Bit j set when window tile j is a 4h authority (foVertexCoarse's tile rule; workgroup memory starts zeroed, and a
+// workgroup stages one window).
+var<workgroup> fgWinCoarse:array<atomic<u32>,${Math.ceil((2 * B) ** 3 / 32)}>;
 fn fgBrickSlot(b:vec3i)->u32{
  let r=vec3u(b-fgWinLow);
- if(all(r<vec3u(3u))){return fgWinSlot[r.x+3u*(r.y+3u*r.z)];}
+ if(fgWinOn&&all(r<vec3u(${B}u))){return fgWinSlot[r.x+${B}u*(r.y+${B}u*r.z)];}
  return fgBrickSlotOfDir(b);
 }
-fn fgWindowStage(centre:vec3i,lid:u32){
- fgWinLow=centre-vec3i(1);
- if(lid<27u){fgWinSlot[lid]=fgBrickSlotOfDir(fgWinLow+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u)));}
-}`, FG_ADDRESS_WGSL].join("\n");
+fn fgWinTileAt(t:vec3i)->u32{
+ let r=vec3u(t-2*fgWinLow);
+ if(fgWinOn&&all(r<vec3u(${2 * B}u))){return r.x+${2 * B}u*(r.y+${2 * B}u*r.z);}
+ return NB_NONE;
+}
+fn fgTileCSlot(t:vec3i)->u32{
+ let i=fgWinTileAt(t);if(i==NB_NONE){return nbCSlotOfPage(t>>vec3u(3u));}
+ let w=fgWinTile[i]&0x7fffffffu;return select(w,NB_NONE,w==0x7fffffffu);
+}
+fn fgTileH(t:vec3i)->bool{let i=fgWinTileAt(t);if(i==NB_NONE){return fgTileHDir(t);}return (fgWinTile[i]>>31u)!=0u;}
+fn fgWindowStageAt(low:vec3i,lid:u32,lanes:u32){
+ fgWinOn=false;fgWinLow=low;
+ for(var j=lid;j<${B ** 3}u;j+=lanes){fgWinSlot[j]=fgBrickSlotOfDir(low+vec3i(i32(j%${B}u),i32((j/${B}u)%${B}u),i32(j/${B * B}u)));}
+ for(var j=lid;j<${(2 * B) ** 3}u;j+=lanes){
+  let t=2*low+vec3i(i32(j%${2 * B}u),i32((j/${2 * B}u)%${2 * B}u),i32(j/${4 * B * B}u));
+  let cs=nbCSlotOfPage(t>>vec3u(3u));
+  let h=fgTileHDir(t);
+  fgWinTile[j]=select(cs,0x7fffffffu,cs==NB_NONE)|select(0u,0x80000000u,h);
+  // Tile j is a 4h authority (foVertexCoarse's tile rule).
+  if(foTileInLattice(t)&&cs!=NB_NONE&&!h){atomicOr(&fgWinCoarse[j>>5u],1u<<(j&31u));}
+ }
+ fgWinOn=true;
+}
+fn fgWinCoarseBit(i:u32)->u32{return (atomicLoad(&fgWinCoarse[i>>5u])>>(i&31u))&1u;}
+// Vertex v lies in the lattice (foVertexPhi's FAR test: a brick on a lattice face holds vertices beyond it) and its
+// candidate authority tiles (foVertexCoarse: v>>2 - 1 .. v>>2) in the window: fgWinVertexPhi reads its authority
+// from the staged bits. Read after the barrier that follows the staging.
+fn fgWinCovers(v:vec3i)->bool{return fgWinOn&&all(vec3u(v-8*fgWinLow-vec3i(4))<vec3u(${8 * B - 4}u))&&all(v<=NB_LATTICE);}
+fn fgWindowStage(centre:vec3i,lid:u32,lanes:u32){fgWindowStageAt(centre-vec3i(1),lid,lanes);}`, FG_ADDRESS_WGSL].join("\n");
+/** The 3^3 bricks about a brick. */
+export const FG_SLOT_WINDOW_WGSL = fgSlotWindowWGSL(3);
 
 /** fcell reads (needs `fcell`, atomic). */
 export const FG_FCELL_WGSL = /* wgsl */`
@@ -213,10 +309,11 @@ fn fgTileHeat(c:vec3i)->f32{let i=fgTileAt(c,FT_T);if(i==NB_NONE){return 0.0;}re
 `;
 
 /** Vertex φ (needs `phi`). */
-export const FG_PHI_WGSL = FO_PHI_WGSL + /* wgsl */`
+export const FG_PHI_WGSL = FO_PHI_WGSL + FG_WIN_VERTEX_WGSL + /* wgsl */`
 // Tiered: PHI and PHI1 read through the vertex authority (foVertexPhi: F's vertex, or the 4h tile's interpolant).
 fn fgPhiWord(base:u32,v:vec3i)->f32{
- if(FG_TIERED){if(base==NB_PHI_F_PHI){return foVertexPhi(v);}if(base==NB_PHI_F_PHI1){return fo1VertexPhi(v);}}
+ if(base==NB_PHI_F_PHI){let r=fgRingAt(v);if(r!=NB_NONE){return fgRingPhi(r);}}
+ if(FG_TIERED){let w=fgWinCovers(v);if(base==NB_PHI_F_PHI){if(w){return fgWinVertexPhi(v);}return foVertexPhi(v);}if(base==NB_PHI_F_PHI1){if(w){return fgWin1VertexPhi(v);}return fo1VertexPhi(v);}}
  let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_FAR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
 fn fgPhi(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI,v);}
 // The eight vertex φ of cell c in corner order x + 2y + 4z.
@@ -319,10 +416,10 @@ fn fsCache(T:vec3i,a:u32)->f32{
  var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
  let t=clamp(T,vec3i(0),hi);
  if(!fgFaceOpen(4*t,a)){return 0.0;}
- let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
+ let cs=fgTileCSlot(t);if(cs==NB_NONE){return 0.0;}
  return fcLoadF(FC_CACHE4+512u*(3u*cs+a)+foTileIndex(t));
 }
-fn fsCacheOf(T:vec3i,a:u32,raw:bool)->f32{if(raw){return fsCacheRaw(T,a);}return fsCache(T,a);}
+fn fsCacheOf(T:vec3i,a:u32,raw:bool)->f32{if(raw){return fsCacheRawStaged(T,a);}return fsCache(T,a);}
 // The coarse interpolant at p.
 fn fsCoarse(p:vec3f,a:u32)->f32{
  var off=vec3f(0.5);off[a]=0.0;

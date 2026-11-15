@@ -19,18 +19,26 @@
  *   Appends after the binned records (§5.6 note b).
  * - pDelta: a lane a record of bank dst: recordDelta (the FLIP delta the next G2P takes).
  * - pJoin: a lane a record of bank dst: the census's join bits (TILE_OCC 8-15, transferRefine's join rule).
+ * - pArgs: one lane: the records' indirect arguments (P_ARGS_RECORDS, the fold rule) from PCOUNT[bank], bank
+ *   pSrc() ^ cfg.w. pMove, pScatter, pJoin and pDelta dispatch from it: the work follows the live records, not the
+ *   bank's capacity. The tail's pArgs (cfg.w = 1, after pSeed) serves the tail and the next step's move and
+ *   scatter (no stage writes PCOUNT[that bank] between); the kick's run before its pMove and after its rebin.
  * - pDeposit (velocity-kernels) reclassifies the mode bit and deposits.
  *
  * The tile's "thin" bit is the census's (NB_S_TRIG bit 8 + tile, fgTileThin).
  * Sparse retirement is off (sparseNeighbours 0, as the old method's default).
  */
-import type { BrickLayout } from "./brick-abi";
-import type { BrickKernel } from "./brick-kernel";
+import { ARGS, type BrickLayout } from "./brick-abi";
+import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
 import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
+
+/** The records' indirect arguments, in F's args region (brick-abi.md §5.5): x, y, z by the fold rule. */
+export const P_ARGS_RECORDS = ARGS.LANE_F;
+const ARGS_RW: BrickBinding = { name: "args", kind: "rw", type: "array<u32>" };
 
 /** Banks and the destination cell (no reads). */
 /** narrowBandSeparationReach(sampleSeparation, crowdedCells === "merge", 8) (uniform-narrow-band-flip.ts): twice the
@@ -84,6 +92,9 @@ export function particleKernels(L: BrickLayout, F: FluidLayout) {
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
 
+  // pMove reads the directory: an owner window per 128 records (staged about the first record's brick) measured
+  // slower on the dam's frozen state (tiered 7.39 against 6.68 ms), the records of a workgroup reading too few
+  // lookups to repay 243 staged entries.
   const pMove = k("pMove", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.partsRO, FB.fcell, FB.fpart, FB.fmoved], [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
 fn pMergeRun(src:u32,record:Particle,low:u32,high:u32,stride:u32)->Particle{
  var s=nbfMergeStart(record);for(var j=low;j<high;j+=stride){s=nbfMergeAdd(s,parts[pAt(src,j)]);}return nbfMergeFinish(record,s);
@@ -438,5 +449,13 @@ fn pJoinTile(t:vec3i){
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){pJoinTile(vec3i(x,y,z));}}}
 }`);
 
-  return { pMove, pScan, pScatter, pTiles, pSeed, pDelta, pJoin };
+  // A direct one-lane dispatch: a kernel dispatched from the args buffer may not write it (WebGPU usage scope).
+  const pArgs = k("pArgs", [CFG, FB.set, FB.dir, ARGS_RW], BANK_WGSL + /* wgsl */`
+@compute @workgroup_size(1) fn pArgs(){
+ let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+(pSrc()^(cfg.w&1u))]),NB_PCAP);
+ let g=(n+127u)/128u;
+ args[${P_ARGS_RECORDS}u]=min(g,NB_FOLD);args[${P_ARGS_RECORDS + 1}u]=max((g+NB_FOLD-1u)/NB_FOLD,1u);args[${P_ARGS_RECORDS + 2}u]=1u;
+}`);
+
+  return { pMove, pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
 }

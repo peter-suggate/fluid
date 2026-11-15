@@ -24,7 +24,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfParticleRecordWGSL } from "./particles-formulas.wgsl";
 import { nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
@@ -192,7 +192,7 @@ fn x4At(cs:u32,region:u32,j:u32,a:u32)->u32{return cs*${2 * 512 * 3 * 3}u+region
 fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{let i=x4At(cs,region,j,a);return vec3f(fext4[i],fext4[i+1u],fext4[i+2u]);}
 fn x4Store(cs:u32,region:u32,j:u32,a:u32,s:vec3f){let i=x4At(cs,region,j,a);fext4[i]=s.x;fext4[i+1u]=s.y;fext4[i+2u]=s.z;}
 // The C slot of tile T's page, where a page of the lattice's faces holds it (the vertex-row pages included).
-fn x4Slot(T:vec3i)->u32{if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_NONE;}return nbCSlotOfPage(T>>vec3u(3u));}
+fn x4Slot(T:vec3i)->u32{if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_NONE;}return fgTileCSlot(T);}
 fn x4Support(t:vec3i)->bool{
  let i=fgTileAt(4*t,FT_DIST);if(i!=NB_NONE){return fgDist(fcLoad(i),2u)<=3u;}
  if(!foTileInLattice(t)){return false;}
@@ -218,11 +218,21 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   const brickHead = /* wgsl */`
  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_F_ALL)){return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);`;
+  // The staged head (seep S2c): a C page of an FC pass runs page and returns; an F brick stages its owner window
+  // (FG_SLOT_WINDOW_WGSL) and, with ring, the vertex φ ring from o + ring (FG_RING_WGSL), then barriers. Every
+  // branch is workgroup-uniform (the split by workgroupUniformLoad).
+  const stagedHead = (page: string, ring?: number) => /* wgsl */`
+ if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
+ let split=workgroupUniformLoad(&sSplit);let g=nbGroup(wid);
+ if(g>=split){${page ? `if(FG_TIERED&&g-split<nbListCount(NB_LIST_C_ALL)){${page}(nbListSlot(NB_LIST_C_ALL,g-split),lid);}` : ""}return;}
+ let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();${ring === undefined ? "" : `
+ fgRingStage(o+vec3i(${ring}),lid,256u);workgroupBarrier();`}`;
 
   // uAdvect: a workgroup a brick, a lane two cells' three lower faces.
   // Lane 0 of the first brick also turns this step's gauge into the volume control's rate (vGauge ran in the level
   // set stage, before; the operator reads FH_RATE after).
-  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL].join("\n") + /* wgsl */`
+  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL(10), FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL].join("\n") + /* wgsl */`
 // The blended h/4h sampler of US (fgSampleVel; all h, fgVelAxis).
 fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return fgSampleVel(p,lo,hi);}
 fn nbxMomentumHeld(p:vec3f)->vec3f{return fgHeld(p);}
@@ -247,14 +257,10 @@ fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
  }
 }
 var<workgroup> sSplit:u32;
+fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
 @compute @workgroup_size(256) fn uAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let dt=vDt();let h=vH();
- if(FG_TIERED){
-  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
-  let split=workgroupUniformLoad(&sSplit);let e=nbGroup(wid);
-  if(e>=split){if(e-split<nbListCount(NB_LIST_C_ALL)){vcAdvectPage(nbListSlot(NB_LIST_C_ALL,e-split),lid,dt,h);}return;}
- }
-${brickHead}
+${stagedHead("vcAdvectPageOf", -1)}
  if(g==0u&&lid==0u){
   let filled=vVolume(FH_VOL_SUM+2u*(cfg.y&1u));
   atomicStore(&nbSet[FH_VOL_FILLED],bitcast<u32>(filled));
@@ -282,11 +288,21 @@ ${brickHead}
   // vertex) and, where an h tile lies in its 27 bricks (the only bricks whose taps a nonzero fine weight reads),
   // UNIT (fsTapH at each face from the resolved caches). The samplers' values are unchanged (the same arithmetic,
   // read back), and an owner-resolved tap or vertex costs one read.
-  const uCache = F.tiered ? k("uCache", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, V_CADDR_WGSL].join("\n") + /* wgsl */`
+  const uCache = F.tiered ? k("uCache", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, V_CADDR_WGSL].join("\n") + /* wgsl */`
 var<workgroup> sSplit:u32;
 var<workgroup> wNear:atomic<u32>;
 var<workgroup> sNear:u32;
 fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);}
+// The raw 4h cache (fsCacheRaw) of the tile planes the brick's taps read (tiles 2B-1..2B+2 on every axis, each
+// axis), staged once; fsTap4 reads it there and fsCacheRaw elsewhere.
+var<workgroup> wRaw:array<f32,192>;
+var<private> ucLow:vec3i;
+var<private> ucRawOn:bool=false;
+fn fsCacheRawStaged(T:vec3i,a:u32)->f32{
+ let r=vec3u(T-ucLow);
+ if(ucRawOn&&all(r<vec3u(4u))){return wRaw[64u*a+r.x+4u*(r.y+4u*r.z)];}
+ return fsCacheRaw(T,a);
+}
 @compute @workgroup_size(256) fn uCache(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);atomicStore(&wNear,0u);}
  let split=workgroupUniformLoad(&sSplit);let e=nbGroup(wid);
@@ -301,6 +317,7 @@ fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i
   return;
  }
  let slot=nbListSlot(NB_LIST_F_ALL,e);let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+ fgWindowStage(b,lid,256u);workgroupBarrier();
  // An h tile in the 27 bricks (8 tiles each, a lane a tile).
  if(lid<216u){let t=2*(b+ucOffset(lid/8u))+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32((lid>>2u)&1u));if(foTileOwnerH(t)){atomicOr(&wNear,1u);}}
  if(lid<8u){
@@ -311,6 +328,10 @@ fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i
  workgroupBarrier();
  if(lid==0u){sNear=atomicLoad(&wNear);}
  let near=workgroupUniformLoad(&sNear)!=0u;
+ ucLow=2*b-vec3i(1);
+ if(near&&lid<192u){let j=lid%64u;wRaw[lid]=fsCacheRaw(ucLow+vec3i(i32(j%4u),i32((j/4u)%4u),i32(j/16u)),lid/64u);}
+ workgroupBarrier();
+ ucRawOn=true;
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
   fcStoreF(FC_PHIU+512u*slot+l,fgPhi(c));
@@ -321,7 +342,7 @@ fn ucOffset(k:u32)->vec3i{return vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i
 
   // pDeposit (transferDeposit): a workgroup a brick, over its bin in the bank the rebin wrote. The faces its
   // records reach: along the axis cells o-1..o+9 (11), across o-1..o+8 (10).
-  const pDeposit = k("pDeposit", [CFG, FB.set, FB.dir, FB.phiRO, FB.parts, FB.fdep], [FG_SLOT_WGSL, FG_PHI_WGSL, nbfParticleRecordWGSL, V_WGSL].join("\n") + /* wgsl */`
+  const pDeposit = k("pDeposit", [CFG, FB.set, FB.dir, FB.phiRO, FB.parts, FB.fdep], [FG_SLOT_WINDOW_WGSL, FG_PHI_WGSL, FG_RING_WGSL(11, { write: (j, x) => `atomicStore(&wMom[${j}],bitcast<u32>(${x}))`, read: j => `bitcast<f32>(atomicLoad(&wMom[${j}]))` }), nbfParticleRecordWGSL, V_WGSL].join("\n") + /* wgsl */`
 const PD_WINDOW:u32=1100u;
 var<workgroup> wMom:array<atomic<u32>,3300>;
 var<workgroup> wWeight:array<atomic<u32>,3300>;
@@ -352,14 +373,19 @@ fn pdLiquidAt(c:vec3i)->bool{
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);count=nbSetWord(NB_S_BIN_COUNT+slot);start=nbSetWord(NB_S_BIN_START+slot);pdOrigin=nbFOrigin(slot);}
  if(lid==0u){sCount=count;}
  if(workgroupUniformLoad(&sCount)==0u){return;}
- for(var j=lid;j<3300u;j+=256u){atomicStore(&wMom[j],0u);atomicStore(&wWeight[j],0u);}
  if(lid<32u){atomicStore(&wLiquid[lid],0u);}
+ fgWindowStage(pdOrigin>>vec3u(3u),lid,256u);
  workgroupBarrier();
- // gridLiquidCell over cells o-1..o+8.
+ // The vertex ring of o-1..o+9 (11^3, in wMom before the deposit uses it) for gridLiquidCell over cells o-1..o+8.
+ fgRingStage(pdOrigin-vec3i(1),lid,256u);
+ workgroupBarrier();
  for(var j=lid;j<1000u;j+=256u){
   let c=pdOrigin+vec3i(i32(j%10u),i32((j/10u)%10u),i32(j/100u))-vec3i(1);
   if(fgLiquidCell(c)){atomicOr(&wLiquid[j>>5u],1u<<(j&31u));}
  }
+ workgroupBarrier();
+ fgRingClose();
+ for(var j=lid;j<3300u;j+=256u){atomicStore(&wMom[j],0u);atomicStore(&wWeight[j],0u);}
  workgroupBarrier();
  let bank=(cfg.y^cfg.z^1u)&1u;
  for(var j=lid;j<count;j+=256u){
@@ -385,7 +411,7 @@ fn pdLiquidAt(c:vec3i)->bool{
 
   // uTransfer (transferProperties, then forces): a workgroup a brick, a lane two cells' three lower faces. Stages
   // the 125 tiles about the brick (the 27 about each face's home tile) and its 9^3 depth vertices.
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], base + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;
@@ -407,14 +433,8 @@ fn vOcc(c:vec3i,hy:f32)->f32{
 }
 var<workgroup> sSplit:u32;
 @compute @workgroup_size(256) fn uTransfer(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- if(FG_TIERED){
-  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
-  let split=workgroupUniformLoad(&sSplit);let e=nbGroup(wid);
-  if(e>=split){if(e-split<nbListCount(NB_LIST_C_ALL)){vcTransferPage(nbListSlot(NB_LIST_C_ALL,e-split),lid);}return;}
- }
- let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
- var slot=0u;
- if(live){slot=nbListSlot(NB_LIST_F_ALL,g);tOrigin=nbFOrigin(slot);tLow=(tOrigin>>vec3u(2u))-vec3i(2);}
+${stagedHead("vcTransferPage", -1)}
+ let live=true;tOrigin=o;tLow=(tOrigin>>vec3u(2u))-vec3i(2);
  if(live){
   vCentreStage(tOrigin,lid);
   if(lid<125u){
@@ -435,7 +455,7 @@ var<workgroup> sSplit:u32;
  }
  workgroupBarrier();
  if(!live){return;}
- let o=tOrigin;let dt=vDt();let h=vH();let gravity=vGravity();
+ let dt=vDt();let h=vH();let gravity=vGravity();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
   let occ=vOcc(c,h.y);
@@ -526,7 +546,7 @@ var<workgroup> sSplit:u32;
   // tap is F's face where F owns it, else the 4h cache's trilinear at the face (the resolved h tap, fsTap4's
   // arithmetic on UP); a C page's face (T, a) is the 4h Laplacian at spacing 4h over the 4h cache of UP on the old
   // site O = T - e_a's tile lattice (umTileHeld: held in the box), into C US.
-  const uViscous = k("uViscous", [CFG, FB.set, FB.dir, FB.velRW], [FG_SLOT_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL, V_CADDR_WGSL].join("\n") + /* wgsl */`
+  const uViscous = k("uViscous", [CFG, FB.set, FB.dir, FB.velRW], [FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL, V_CADDR_WGSL].join("\n") + /* wgsl */`
 fn vpBit(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
 // The 4h cache of UP on tile T's lower plane along a (fsCache on UP): the C face between two 4h tiles, else the
 // mean of its 16 F subfaces.
@@ -539,12 +559,20 @@ fn vpCache(T:vec3i,a:u32)->f32{
  for(var y=0;y<4;y++){for(var x=0;x<4;x++){var q=c;q[u]+=x;q[v]+=y;sum+=foPFFace(q,a);}}
  return sum/16.0;
 }
+// A brick near a 4h tile stages vpCache of the tiles its taps read (2B-1..2B+3 on every axis, each axis) once;
+// vpTap4 reads it there and vpCache elsewhere.
+var<workgroup> wCoarse:atomic<u32>;
+var<workgroup> sCoarse:u32;
+var<workgroup> wTap:array<f32,${F.tiered ? 375 : 1}>;
+var<private> vpLow:vec3i;
+var<private> vpOn:bool=false;
+fn vpCacheAt(T:vec3i,a:u32)->f32{let r=vec3u(T-vpLow);if(vpOn&&all(r<vec3u(5u))){return wTap[125u*a+r.x+5u*(r.y+5u*r.z)];}return vpCache(T,a);}
 fn vpTap4(c:vec3i,a:u32)->f32{
  var q8=2*c-vec3i(3);q8[a]=2*c[a];
  let b=q8>>vec3u(3u);let f=vec3f(q8-8*b)/8.0;var t:array<f32,8>;
  for(var k=0u;k<8u;k++){
   let corner=vpBit(k);let w=select(vec3f(1.0)-f,f,corner!=vec3i(0));let weight=w.x*w.y*w.z;
-  if(weight>0.0){t[k]=weight*vpCache(b+corner,a);}
+  if(weight>0.0){t[k]=weight*vpCacheAt(b+corner,a);}
  }
  return ((t[0]+t[5])+(t[1]+t[4]))+((t[2]+t[7])+(t[3]+t[6]));
 }
@@ -576,12 +604,22 @@ fn vcViscousPage(slot:u32,lid:u32){
 }
 var<workgroup> sSplit:u32;
 @compute @workgroup_size(256) fn uViscous(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+${stagedHead("vcViscousPage")}
+ // Tiered, a tap reads a 4h tile's cache only where a face's two cells are both off h, so only a brick whose window
+ // holds a lattice tile off h stages the taps' caches.
  if(FG_TIERED){
-  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
-  let split=workgroupUniformLoad(&sSplit);let e=nbGroup(wid);
-  if(e>=split){if(e-split<nbListCount(NB_LIST_C_ALL)){vcViscousPage(nbListSlot(NB_LIST_C_ALL,e-split),lid);}return;}
+  if(lid==0u){atomicStore(&wCoarse,0u);}
+  workgroupBarrier();
+  if(lid<216u){let t=2*fgWinLow+vec3i(i32(lid%6u),i32((lid/6u)%6u),i32(lid/36u));if(foTileInLattice(t)&&!fgTileH(t)){atomicOr(&wCoarse,1u);}}
+  workgroupBarrier();
+  if(lid==0u){sCoarse=atomicLoad(&wCoarse);}
+  if(workgroupUniformLoad(&sCoarse)!=0u){
+   vpLow=2*(o>>vec3u(3u))-vec3i(1);
+   for(var j=lid;j<375u;j+=256u){let d=j%125u;wTap[j]=vpCache(vpLow+vec3i(i32(d%5u),i32((d/5u)%5u),i32(d/25u)),j/125u);}
+   workgroupBarrier();
+   vpOn=true;
+  }
  }
-${brickHead}
  let h=vH();
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
@@ -596,7 +634,7 @@ ${brickHead}
   // uExtend (the extension pair at h): a workgroup a brick, 512 lanes, one axis at a time over the 12^3 window
   // (cells o-2..o+9). Seeds (ufxSeedCodeOf): 3 a closed face, 1 a source (liquid either side), 2 blocked (the
   // tile of the old texel, the cell below the face, lacks support: occupied distance over 3 tiles), 0 unreached.
-  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
+  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + FG_RING_WGSL(14, { write: (j, x) => `xRingWrite(${j},${x})`, read: j => `xRingRead(${j})` }) + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
 var<workgroup> wV:array<f32,1728>;
 var<workgroup> wD:array<f32,1728>;
 // fgLiquidOwner of cells o-3..o+9 (13^3 bits), staged once for the three axes.
@@ -608,6 +646,9 @@ var<workgroup> wSwept:array<u32,27>;
 var<private> xLow:vec3i;
 var<private> xBase4:vec3i;
 var<private> xBrick:vec3i;
+// The vertex φ ring of o-3..o+10 (14^3) for the liquid bits, in wV and wD before the sweeps use them.
+fn xRingWrite(j:u32,x:f32){if(j<1728u){wV[j]=x;}else{wD[j-1728u]=x;}}
+fn xRingRead(j:u32)->f32{if(j<1728u){return wV[j];}return wD[j-1728u];}
 fn xLiquid(c:vec3i)->bool{let r=c-xLow;let i=u32(r.x+13*(r.y+13*r.z));return ((atomicLoad(&wLiq[i>>5u])>>(i&31u))&1u)!=0u;}
 fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}
 fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}
@@ -653,13 +694,16 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  var slot=0u;var o=vec3i(0);
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
  let h=vH();let l=lid;let c=o+nbLocalCoord(l);
- fgWindowStage(o>>vec3u(3u),lid);xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
+ xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
+ fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();
  if(lid<69u){atomicStore(&wLiq[lid],0u);}
  if(FG_TIERED&&live&&lid<375u){
   let d=lid%125u;let a=lid/125u;let C=xBase4+vec3i(vec3u(d%5u,(d/5u)%5u,d/25u))-vec3i(2);let T=C+fgUnit(a);
   let cs=x4Slot(T);var st=vec3f(0.0,0.0,-1.0);if(cs!=NB_NONE){st=x4Load(cs,1u,foTileIndex(T),a);}
   wS4[lid]=vec4f(st,0.0);
  }
+ workgroupBarrier();
+ fgRingStage(o-vec3i(3),lid,512u);
  workgroupBarrier();
  if(live){
   for(var j=lid;j<2197u;j+=512u){
@@ -675,6 +719,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   }
  }
  workgroupBarrier();
+ fgRingClose();
  for(var a=0u;a<3u;a++){
   if(live){
    for(var r=0u;r<4u;r++){
@@ -705,11 +750,12 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
 }
 fn fsBit4(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}`);
 
-  // uExt4Seed (ufxR's restriction, V_EXT4_WGSL): a workgroup a C page, a lane two tiles' three faces.
+  // uExt4Seed (ufxR's restriction, V_EXT4_WGSL): a workgroup a C page, a lane two tiles' three faces. It reads the
+  // directory: a page's 6^3-brick owner window (1944 staged entries) measured 3.2 ms slower on the dam's frozen state.
   const uExt4Seed = k("uExt4Seed", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fext4], base + V_EXT4_WGSL + /* wgsl */`
 fn x4Seed(T:vec3i,a:u32)->vec3f{
  let e=fgUnit(a);let O=T-e;
- if(!foTileInLattice(O)||nbCSlotOfPage(O>>vec3u(3u))==NB_NONE){return vec3f(0.0,0.0,-1.0);}
+ if(!foTileInLattice(O)||fgTileCSlot(O)==NB_NONE){return vec3f(0.0,0.0,-1.0);}
  var value=vec2f(0.0);var source=false;
  if(!foTileOwnerH(O)&&!foTileOwnerH(T)){value=vec2f(foUCFace(T,a),foPCFace(T,a));source=fgLiquidOwner(4*O)||fgLiquidOwner(4*T);}
  else{
@@ -791,7 +837,7 @@ fn ySeed(T:vec3i,a:u32)->vec3f{
   let s=state[a];x4Store(slot,1u,j,a,s);
   if(vcFace(T,a)){vel[vcAt(NB_VEL_C_US0,slot,a,j)]=s.x;vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=s.x-s.y;continue;}
   let O=T-fgUnit(a);
-  if(!foTileOwnerH(T)||!foTileInLattice(O)||foTileOwnerH(O)||nbCSlotOfPage(O>>vec3u(3u))==NB_NONE){continue;}
+  if(!foTileOwnerH(T)||!foTileInLattice(O)||foTileOwnerH(O)||fgTileCSlot(O)==NB_NONE){continue;}
   // ufxPublish4's seam: the 16 subfaces of O's face toward the h tile T.
   let u=(a+1u)%3u;let v=(a+2u)%3u;let owner=fgLiquidOwner(4*O);let reached=ufxReached(s.z);
   for(var i=0u;i<16u;i++){

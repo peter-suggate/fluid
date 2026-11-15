@@ -13,11 +13,12 @@
  *   lPublish, then pSeed (the seeds of this step, after the bins, outside every run).
  * - part 2, velocity: uAdvect (and the gauge's rate into FH.RATE), pDeposit, uViscous (a viscous fluid),
  *   uTransfer (US for the operator).
- * - part 2, tail (after project): uExtend, pJoin (the census's join bits, before pDelta overwrites `before`), pDelta.
+ * - part 2, tail (after project): uExtend, pArgs (the live records' arguments, after pSeed: the tail's and the next
+ *   step's move and scatter), pJoin (the census's join bits, before pDelta overwrites `before`), pDelta.
  * - boot: the level set's analysis of the boot φ (no transport), then vGauge's capture of the budget.
- * - kick (E's boot slot, after boot): force uKick (US = U + g dt/2); E's operator, solve and project; after: uExtend,
- *   the initial seeding (from the kicked US), then the rebin of the seeds into bank 0 (cfg.z = 1: the move files
- *   each record unchanged).
+ * - kick (E's boot slot, after boot): force uKick (US = U + g dt/2); E's operator, solve and project; after: uExtend
+ *   (and tiered, the caches); E's TRIG-only census of the kicked state; seed: the initial seeding (from the kicked
+ *   US), then the rebin of the seeds into bank 0 (cfg.z = 1: the move files each record unchanged).
  *
  * Tiered (fluidStagesAt(true)): uAdvect, uViscous, uTransfer, uKick and vGauge run over FC_G1 (F_ALL's bricks, then
  * C_ALL's pages), their 4h faces or tiles in the h pass; lane E's 4h corner kernels (levelset-coarse.wgsl.ts) and the
@@ -26,14 +27,14 @@
  * Banks: a step of parity y moves bank y into bank y ^ 1 (part 1); part 2 reads bank y ^ 1. The boot seeds into
  * bank 1 and its rebin (cfg.z = 1) files bank 1 into bank 0, the bank step 0 (parity 0) moves.
  */
-import { ARGS, foldArgs, LIST } from "./brick-abi";
+import { ARGS, LIST } from "./brick-abi";
 import type { BrickDispatch, BrickKernel, BrickPlacement } from "./brick-kernel";
 import type { BrickStages, BrickStagesFactory } from "./brick-stages";
 import { fluidLayout } from "./fluid-grid.wgsl";
 import { levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { nbfParticleSupported } from "./particles-formulas.wgsl";
-import { particleKernels } from "./particles-kernels.wgsl";
+import { P_ARGS_RECORDS, particleKernels } from "./particles-kernels.wgsl";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import { velocityKernels } from "./velocity-kernels.wgsl";
 
@@ -56,8 +57,10 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const both: BrickDispatch = tiered ? { indirect: ARGS.FC_G1 } : all;
   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
   const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: pages, z: 0, w: 0 }] : [];
-  const records: BrickDispatch = { direct: foldArgs(Math.ceil(L.cap.particles / 128)) };
+  // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
+  const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
+  const args = (z: number, w: number) => at(p.pArgs, { direct: [1, 1, 1] }, z, w);
   const ext4 = tiered ? [at(v.uExt4Seed, pages), at(v.uExt4, pages)] : [];
   // Tiered, the samplers' caches of this step's opening state (after the head's transfer, before pMove; at the kick,
   // after the extension, before the seeding).
@@ -73,12 +76,13 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"),
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), at(p.pSeed, all)],
     velocity: [at(v.uAdvect, both), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, both)] : []), at(v.uTransfer, both)],
-    tail: [...ext4, at(v.uExtend, all), at(p.pJoin, records), at(p.pDelta, records)],
+    tail: [...ext4, at(v.uExtend, all), args(0, 1), at(p.pJoin, records), at(p.pDelta, records)],
     boot: [at(l.lInit, all), ...analysis, at(v.vGauge, both, 0, 1)],
     // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the
     // extension and the initial seeding from the kicked, extended U (the old engine seeds in its first frame from
-    // the kicked grid), filed into bank 0.
-    kick: { force: [at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), ...cache, at(p.pSeed, all, 0, 1), at(p.pMove, records, 1), ...rebin(1)] },
+    // the kicked grid), filed into bank 0. The seeding is kick.seed: E's TRIG-only census of the kicked state runs
+    // between after and seed, so the first seeding heats from the triggers of the state it seeds.
+    kick: { force: [at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), ...cache], seed: [at(p.pSeed, all, 0, 1), args(1, 0), at(p.pMove, records, 1), ...rebin(1), args(1, 1)] },
     buffers: { fcell: F.fcell.words, fdep: F.fdep.words, fpart: F.fpart.words, fmoved: F.fmoved.words, ...(tiered ? { fext4: F.fext4.words } : {}) },
   };
   return stages;
