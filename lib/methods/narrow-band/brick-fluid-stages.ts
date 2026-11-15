@@ -14,8 +14,10 @@
  * - part 2, velocity: uAdvect (and the gauge's rate into FH.RATE), pDeposit, uViscous (a viscous fluid),
  *   uTransfer (US for the operator).
  * - part 2, tail (after project): uExtend, pDelta.
- * - boot: the level set's analysis of the boot φ (no transport), the initial seeding, then the rebin of the
- *   seeds into bank 0 (cfg.z = 1: the move files each record unchanged), then vGauge's capture of the budget.
+ * - boot: the level set's analysis of the boot φ (no transport), then vGauge's capture of the budget.
+ * - kick (E's boot slot, after boot): force uKick (US = U + g dt/2); E's operator, solve and project; after: uExtend,
+ *   the initial seeding (from the kicked US), then the rebin of the seeds into bank 0 (cfg.z = 1: the move files
+ *   each record unchanged).
  *
  * Banks: a step of parity y moves bank y into bank y ^ 1 (part 1); part 2 reads bank y ^ 1. The boot seeds into
  * bank 1 and its rebin (cfg.z = 1) files bank 1 into bank 0, the bank step 0 (parity 0) moves.
@@ -55,7 +57,11 @@ export const fluidStages: BrickStagesFactory = context => {
     levelSet: [at(v.vGauge, all), at(l.lInit, all), at(l.lAdvect, all), at(l.lSplat, all), at(l.lUnion, all), ...analysis, at(l.lPublish, all), at(p.pSeed, all)],
     velocity: [at(v.uAdvect, all), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, all)] : []), at(v.uTransfer, all)],
     tail: [at(v.uExtend, all), at(p.pDelta, records)],
-    boot: [at(l.lInit, all), ...analysis, at(p.pSeed, all, 0, 1), at(p.pMove, records, 1), ...rebin(1), at(v.vGauge, all, 0, 1)],
+    boot: [at(l.lInit, all), ...analysis, at(v.vGauge, all, 0, 1)],
+    // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the
+    // extension and the initial seeding from the kicked, extended U (the old engine seeds in its first frame from
+    // the kicked grid), filed into bank 0.
+    kick: { force: [at(v.uKick, all)], after: [at(v.uExtend, all), at(p.pSeed, all, 0, 1), at(p.pMove, records, 1), ...rebin(1)] },
     buffers: { fcell: F.fcell.words, fdep: F.fdep.words, fpart: F.fpart.words, fmoved: F.fmoved.words },
   };
   return stages;

@@ -12,6 +12,7 @@
  *   cannot change the sum), each record's mode reclassified by its support.
  * - uTransfer: per face, the resolved velocity (nbfP2GResolve), kept in UP (the FLIP keep), then gravity:
  *   US = U = the resolved velocity plus g dt on a face with liquid either side. Zeroes fdep.
+ * - uKick (boot only): the projected half kick's force, UP = U, then US = U = U + g dt/2 where uTransfer applies gravity.
  * - (P: operator from US, the solve, project into U.)
  * - uExtend: two Jacobi sweeps of the fast-sweeping update (ufxCombine) in a brick's 12^3 window: US = the
  *   extended field, UP = the FLIP delta (the extended value less the keep; none where the sweep extended the
@@ -254,6 +255,33 @@ fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
  }
 }`);
 
+  // uKick: the boot's projected half kick's force (UniformMixedFrame.kick, webgpu-uniform-reference.ts kickMixedFrame:
+  // an advance of lead dt/2 with gravity alone, no transport, viscosity, capillarity or volume term). Per open face:
+  // UP = U (the keep), then US = U = U + g dt/2 on a face either of whose cells holds liquid (uTransfer's forces
+  // test). A closed face reads 0 in all three.
+  const uKick = k("uKick", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], base + V_CENTRE_WGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + /* wgsl */`
+@compute @workgroup_size(256) fn uKick(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
+ var slot=0u;var o=vec3i(0);
+ if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);vCentreStage(o,lid);}
+ workgroupBarrier();
+ if(!live){return;}
+ let lead=0.5*vDt();let h=vH();let gravity=vGravity();
+ for(var r=0u;r<2u;r++){
+  let l=lid+256u*r;let c=o+nbLocalCoord(l);
+  let occ=nbfOccupancy(select(0.0,vCentre(c),nbInLattice(c))*h.y,h.y,select(0u,1u,nbInLattice(c)));
+  for(var a=0u;a<3u;a++){
+   let iu=vAt(NB_VEL_F_U0,slot,a,l);
+   if(!fgFaceOpen(c,a)){vel[vAt(NB_VEL_F_UP0,slot,a,l)]=0.0;vel[iu]=0.0;vel[vAt(NB_VEL_F_US0,slot,a,l)]=0.0;continue;}
+   var value=vel[iu];vel[vAt(NB_VEL_F_UP0,slot,a,l)]=value;
+   let n=c-fgUnit(a);
+   let occn=nbfOccupancy(select(0.0,vCentre(n),nbInLattice(n))*h.y,h.y,select(0u,1u,nbInLattice(n)));
+   if(nbfGravityFace(occ,occn,false)){value=nbfGravityKick(value,lead,gravity[a]);}
+   vel[vAt(NB_VEL_F_US0,slot,a,l)]=value;vel[iu]=value;
+  }
+ }
+}`);
+
   // uViscous: the Laplacian of the departure (UP) at each open face, into US for uTransfer's kick (umLaplacian:
   // the old texel site = c - e_a, its taps held in the box, free slip).
   const uViscous = k("uViscous", [CFG, FB.set, FB.dir, FB.velRW], [FG_SLOT_WGSL, V_WGSL].join("\n") + /* wgsl */`
@@ -379,5 +407,5 @@ var<workgroup> sCount:u32;
  }
 }`);
 
-  return { uAdvect, pDeposit, uViscous, uTransfer, uExtend, vGauge, viscous };
+  return { uAdvect, pDeposit, uViscous, uTransfer, uKick, uExtend, vGauge, viscous };
 }
