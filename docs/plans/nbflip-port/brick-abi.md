@@ -588,11 +588,19 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
   class's move and its margin (`RES_MARGIN`). Each margin is the largest distance a stage reads past
   the class's tiles (lane E's read table, progress-lane-e.md 2026-11-16, every row with its file and line):
   - *Owners*, `ACT.RES` (bits 10–17: a tile with an h owner (tiered), a φ < 0 vertex or a particle):
-    `flow + 20`. 20 cells is `lDilate`'s reach (R = 5 tiles, separable, its intermediates stored a
-    brick; an absent brick is "no source"), read by the collar (air distance ≤ 4 tiles, `lProtected`)
-    and the kept far air (> 5 tiles, `lAdvected`). Every other stage reads less: `lcRetire` 9, the
-    DEPTH chain through `lDistance` and `lNear` 7, `uExtend` 3, the sampler's UNIT taps 3, the faces,
-    vertex rows, tile-word stencils and `setMark`'s 1-ring 1.
+    bricks by `flow + 9` tiered and `flow + 20` all-h; tiered, pages by `flow + 20`. The bricks' rows:
+    `lcRetire` 9 (it builds only within `lcStencilFine`'s 1 tile of an h-owned tile), the DEPTH chain
+    through `lDistance` and `lNear` 7, `lcCouple` 7 (it reads `fgReach1` and the F words only where θ >
+    0, within a tile of a `FT_THETA` tile, which `pTiles` writes within a tile of a particle's tile),
+    `pTiles`' `FT_THETA` and `SURFACE_TILE` 4 (a 4h F tile about the particles carries their sample
+    support), `uExtend` 3, the sampler's UNIT taps 3, the faces, vertex rows, tile-word stencils and
+    `setMark`'s 1-ring 1. Tiered, `lDilate` (R = 5 tiles, 20 cells) reads through the C pages (lane F,
+    9b7761f7): a tile no F slot holds reads its page's `DIL4` word (`lDilateC`: its sources by the C
+    corner rule, DA, DB), so it sets no brick reach; an h-owned tile with no F slot latches `FAIL.TIER`
+    0x4c440001. All-h has no `DIL4`, so its owners keep `lDilate`'s 20. The pages' row is `lDilate`
+    through C, 20: every source (a φ ≤ 0 corner, or `SURFACE_TILE`) is an h-owned, particle or 4h liquid
+    tile, a tile whose DA or DB is short of R is within 20 cells of a source, and the owners' and the page
+    sources' pages (both `+ 20`) hold every such tile. The full table is in brick-residency.wgsl.ts.
   - *Support*, `PSUPPORT` word 0: `max(travel, flow) + 0`. Every read of the next move is within 1.5
     cells of the moved particle, inside the ±2 support `pJoin` records about it; a shortfall latches
     `pJoin`'s `REACH`.
@@ -620,9 +628,11 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
   velocity term, as `bootBricks`). `H.RES_RADIUS` is the largest class reach of the head, in tiles
   (rounded up).
 - *Requests*: each of a brick source's grown boxes takes every brick it covers and, tiered, every page
-  (page granularity, the same box); a page source's (flow + 16 cells, no particle travel) every page it covers. 16 is
-  `lcAdvect`'s reach past the 4h liquid tiles' box: its band (|φ| < 8) lies within 8 cells of the box and its
-  foot stencil and cubic taps read 8 past that (levelset-coarse.wgsl.ts l.300-303, 333-340).
+  (page granularity, the box below); a page source's (flow + 20 cells, no particle travel) every page it covers. 20 is
+  `lDilate` through C (a 4h liquid tile is a source, above); `lcAdvect`'s 16 is inside it (its band, |φ| < 8,
+  lies within 8 cells of the box and its foot stencil and cubic taps read 8 past that; levelset-coarse.wgsl.ts
+  l.300-303, 333-340). A brick source's owner box takes pages by its own reach (`flow + 20`), its other boxes
+  by the bricks' box.
   - A present destination gets its keep mark (`MARK_F`, `MARK_C`).
   - An absent one's directory word goes NONE → CLAIM, and the one winner appends its key with
     `KEY_CLAIMED`.

@@ -1280,3 +1280,101 @@ Letters and seep do not run on the brick engine yet (brick-scene.ts `BRICK_ENGIN
 ## 2026-11-16: the restore abort
 
 brick-region-heat.test.ts aborted (SIGABRT, no 00000206) in the reservoir test's `restore()`, in Dawn's `BufferBase::UploadData` under `queue.writeBuffer`. The disassembly of dawn.node shows a check there: the upload reservation's size must equal the write's size, or the process aborts. One instrumented run showed which write failed. It was pmgF's, the first buffer whose byte size, 34607172, is not a multiple of 8 or 16. Every buffer written before it was a multiple of 16. `restore()` now writes each buffer as its 16-byte multiple, then the tail. After the fix the file passes 4/4 (save/restore: 256 regions, tier/deep 0 and heat 0 differ; replay unchanged), with no 00000206. pressureDelta needs no fix: lane P stores Δ(p/ρ) (08dac85d), so regionHeat's dt²/h² (brick-region-heat.wgsl.ts:110) is the old dt²/(ρh²) on Δp.
+
+## 2026-11-16: the owner margin 20 -> 9 (lDilate reads through C), and the dam's pools
+
+Lane F's lDilateC (9b7761f7) lets lDilate read a tile no F slot holds from its page's DIL4 word. So lDilate no longer
+sets a brick reach in the tiered engine, and the owners' brick margin falls to the next row of the read table.
+
+**Read table.** File:line is in the brick-residency.wgsl.ts header.
+
+Owners' brick rows (tiered):
+- lcRetire: 9 (C l.537-553). It builds through lcBuildDistance (C l.490-511; fgReach1 and FC_NEAR at the 4h cell) only within lcStencilFine's tile of h. This is the max, so the margin is 9.
+- The DEPTH chain through lDistance and lNear: 7 (L l.575-586).
+- lcCouple: 7 (C l.400-436; F's item 2). It reads fgReach1, FC_NEAR, SURFACE_TILE, FC_KEY and the bin counts only where θ > 0. θ (C l.389-396) is 0 farther than a tile from an FT_THETA tile, and pTiles writes those within a tile of a particle's tile (P l.285-301): 4 + 2 + 1 cells.
+- pTiles' FT_THETA and SURFACE_TILE: 4 (P l.285-301; F's item 1). The 4h F tiles about the particles carry their sample support. The PSUPPORT ±2 support class (margin 0) keeps the deposit support.
+- uExtend 3, UNIT taps 3 (fluid-grid l.470-474), and the 1-cell stencils.
+- lDilate: 20 (L l.346-410). Tiered, it now reads through C: lDilateC (L l.412-511) writes the sources, DA and DB to DIL4, so this row sets no brick reach.
+- F's item 3: an h-owned tile with no F slot latches FAIL.TIER 0x4c440001 (L l.498). An h-owned tile is an owner, so its brick is resident.
+- All-h has no DIL4, so the all-h owners keep 20.
+
+Pages' row (tiered): lDilate through C, 20.
+- Every source (a φ ≤ 0 corner, or SURFACE_TILE) is an h-owned tile, a particle tile or a 4h liquid tile.
+- A tile with DA or DB short of R lies within 20 cells (per axis) of a source.
+- So the owners' pages are grown by flow + 20, and the page sources are raised from 16 to 20 (lcAdvect's 16 is inside).
+- Every such tile is then in a resident page. A tile in no resident page reads as "no source", which is the saturated value it would have anyway.
+
+`RES_MARGIN = { own: { tiered: 9, allH: 20 }, ownPages: 20, support: 0, seed: 6, page: 20 }`. resMark and the oracle each carry an owners' page box apart from the brick box.
+
+**Gates** (on HEAD 7891be87 plus this change, with git-archive trees; lane F's c16bb49b, read-only fcell binds and bitwise by its message, landed after; every run rc 0 with no 00000206):
+- Suites: brick-engine, brick-set-tiers (the residency oracle), census, census-x8, transfer, owner, levelset-release, levelset-coarse, levelset-kernels and region-heat. 41 tests, one fail at first.
+- That fail was region-heat's census replay under gravity, which asserted 0 replayed regions. The page sources' 20 cells now keep page row y = 2 (cells 64-95) above the reservoir (surface at 40, box top 44 + 20.4 > 64).
+  - Its deep regions are still air with no moving key, so they replay: 64, all at region y 5.
+  - 4 "deep" regions that classified with no key moved lay in page (3,2,4) past the lattice (z ≥ 128; rgInLattice false, mode 2).
+  - The test now skips out-of-lattice regions, as regions() does, and asserts that every replayed region lies above the surface. Rerun: 4/4.
+- Tiered 300 (fenced, check slot): no latch (no FAIL.TIER, REACH or POOL). Drift -0.0101 at step 300, against -0.0099 before.
+- All-h 200: no latch. Mean liveF 4556, peak 4913.
+- 165-step fenced and pipelined (timing slot): no latch.
+- Unit: 1842 pass, 0 fail.
+- check:types: the only errors are the committed tools/experiments/lane-n/*.mts imports of a missing scratch tree. They are not this change's.
+
+**Breakdown** (tiered 300; attrib classes; before is HEAD at margin 20/16, after is this commit at 9/20, with --margins as each):
+
+| step | before: live | owner | ring | reach | margin | after: live | owner | ring | reach | margin |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 20 | 4199 | 929 | 1173 | 1364 | 733 | 3845 | 947 | 1304 | 1288 | 306 |
+| 60 | 4907 | 1577 | 2162 | 667 | 501 | 4750 | 1534 | 2077 | 762 | 377 |
+| 150 | 4488 | 772 | 1511 | 332 | 1873 | 3624 | 796 | 1670 | 442 | 716 |
+| 300 | 3832 | 510 | 1155 | 16 | 2151 | 2540 | 526 | 1250 | 13 | 751 |
+
+liveF figures (before, then after):
+
+| | before | after |
+|---|---|---|
+| mean, steps 1-300 | 4224 | 3167 (-25%) |
+| mean, steps 201-300 | 3816 | 2458 (-36%) |
+| peak live | 4913 | 4750 |
+| slot high-water | 4913 | 4780 |
+| churn, (enter + leave)/2 per step | 34.9 | 68.1 |
+
+- The trig and heat classes are 0 in both.
+- The step 60 peak barely moves. The surge then spans the lattice, and its owners and rings alone are 3611 of 4750.
+
+**Timing** (timing slot, tiered dam, before then after):
+
+| | before | after |
+|---|---|---|
+| fenced, 165 steps: median | 65.3 ms | 61.5 ms |
+| fenced, 165 steps: mean | 71.9 ms | 67.1 ms |
+| pipelined, per step | 68.6 ms | 63.7 ms |
+| resMark (2 passes) | 0.18 + 0.13 ms | 0.16 + 0.12 ms |
+| lDilateC (2 rounds) | 0.10 + 0.11 ms | 0.08 + 0.09 ms |
+
+Per area (rowsWindow, steps 18-23, window mean), ms per step:
+
+| area | before | after | §6 budget |
+|---|---|---|---|
+| velocity | 26.38 | 25.08 | 1.6 |
+| level set | 15.31 | 14.53 | 2.0 |
+| pressure solve | 9.69 | 9.40 | 3.0 |
+| move | 8.71 | 8.48 | 1.5 |
+| pressure setup and projection | 5.16 | 4.96 | 1.0 |
+| brick set | 3.54 | 3.45 | 0.6 |
+| transfer and seeding | 3.53 | 3.50 | 1.0 |
+| region D | 0.72 | 0.69 | - |
+| total | 73.0 | 70.1 | ~18 |
+
+The cross-run floor is 0.97 ms before and 1.27 ms after (means). Letters and seep do not run on the brick engine yet, so there is no cross-scene check.
+
+**Pools** (lib/core/scenes.ts, the high-resolution dam):
+
+| run | slot high-water F | live peak | C |
+|---|---|---|---|
+| tiered 300 | 4780 | 4750 | 125 |
+| tiered 300, second run | 4786 | 4754 | 125 |
+| all-h 200 | 4913 | - | 125 |
+
+- The lattice holds 17³ = 4913 bricks and 5³ = 125 pages, so no run can take more.
+- f stays 4913: the all-h peak exactly, and the tiered peak × 1.027.
+- c goes from 192 to 125, which drops 67 page slots no run can use.
+- Gate at the authored pools (no --poolF override; tiered 300): no POOL_F or POOL_C, mean liveF 3032, high-water 4786 F and 125 C.

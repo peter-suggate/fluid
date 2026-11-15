@@ -230,7 +230,7 @@ test("brick engine (GPU): every kernel compiles cold in under 30 s", GPU, async 
 
 test("brick engine (GPU): bricks enter and leave as the head's residency oracle says, and the set stays consistent", GPU, async () => {
   await withDevice("brick enter/leave", async device => {
-    // 128 wide and 64 tall: the owners' 20-cell margin (RES_MARGIN.own) past the sheet reaches brick 5 of 16 in x and
+    // 128 wide and 64 tall: the all-h owners' 20-cell margin (RES_MARGIN.own.allH) past the sheet reaches brick 5 of 16 in x and
     // z and brick 4 of 8 in y, so the residency has room to grow and shrink.
     const lattice: Vec3 = [128, 64, 128], o = options(lattice, [sheet(20, 10.3, 20)], 400, 16);
     const e = await BrickEngine.create(device, o);

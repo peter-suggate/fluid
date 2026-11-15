@@ -72,26 +72,34 @@ export function residencyOracle(L: BrickLayout, before: BrickSnapshot, want: Uin
     const at = L.set.psupport + PSUPPORT_WORDS * slot;
     const act = before.set[L.set.act + slot]!, ps = before.set[at]! & 0xff;
     const flow = f(f(f(asF(before.set[L.set.boundF + slot]!) + f(g * ring.dt)) * ring.dt) / ring.h), o = brickKeyCoord(key).map(v => 8 * v);
-    // The classes: owners (ACT.RES), support (PSUPPORT word 0), seeds (ACT.SEED | this census's TRIG).
-    const classes: [number, (a: number, side: 0 | 1) => number][] = [
-      [(act & ACT.RES) >>> 10, () => f(RES_MARGIN.own + flow)],
-      [ps, (a, side) => f(RES_MARGIN.support + Math.max(asF(before.set[at + 1 + 3 * side + a]!), flow))],
-      [((act & ACT.SEED) >>> 18) | (want[L.set.trig + slot]! & 0xff), () => RES_MARGIN.seed],
+    // The classes: owners (ACT.RES), support (PSUPPORT word 0), seeds (ACT.SEED | this census's TRIG); each with its
+    // brick reach and, tiered, its page reach (the owners' by RES_MARGIN.ownPages, the others' as their bricks').
+    const own = tiered ? RES_MARGIN.own.tiered : RES_MARGIN.own.allH;
+    const classes: [number, (a: number, side: 0 | 1) => number, ((a: number, side: 0 | 1) => number) | null][] = [
+      [(act & ACT.RES) >>> 10, () => f(own + flow), tiered ? () => f(RES_MARGIN.ownPages + flow) : null],
+      [ps, (a, side) => f(RES_MARGIN.support + Math.max(asF(before.set[at + 1 + 3 * side + a]!), flow)), null],
+      [((act & ACT.SEED) >>> 18) | (want[L.set.trig + slot]! & 0xff), () => RES_MARGIN.seed, null],
     ];
-    for (const [m, reach] of classes) {
+    for (const [m, reach, pageReach] of classes) {
       if (m === 0) continue;
       const tlo = [1, 1, 1], thi = [0, 0, 0];
       for (let t = 0; t < 8; t++) if ((m >> t) & 1) for (let a = 0; a < 3; a++) { const v = (t >> a) & 1; tlo[a] = Math.min(tlo[a]!, v); thi[a] = Math.max(thi[a]!, v); }
-      const b0: number[] = [], b1: number[] = [];
-      for (let a = 0; a < 3; a++) {
-        const rl = reach(a, 0), rh = reach(a, 1);
-        const lo = Math.floor(f(o[a]! + 4 * tlo[a]! - rl)), hi = Math.ceil(f(o[a]! + 4 * thi[a]! + 4 + rh));
-        b0.push(Math.max(lo >> 3, 0)); b1.push(Math.min(hi >> 3, nb[a]! - 1));
-        radius = Math.max(radius, Math.ceil(Math.max(rl, rh) / 4));
-      }
+      const box = (r: (a: number, side: 0 | 1) => number) => {
+        const b0: number[] = [], b1: number[] = [];
+        for (let a = 0; a < 3; a++) {
+          const rl = r(a, 0), rh = r(a, 1);
+          const lo = Math.floor(f(o[a]! + 4 * tlo[a]! - rl)), hi = Math.ceil(f(o[a]! + 4 * thi[a]! + 4 + rh));
+          b0.push(Math.max(lo >> 3, 0)); b1.push(Math.min(hi >> 3, nb[a]! - 1));
+          radius = Math.max(radius, Math.ceil(Math.max(rl, rh) / 4));
+        }
+        return [b0, b1] as const;
+      };
+      const [b0, b1] = box(reach);
       for (let z = b0[2]!; z <= b1[2]!; z++) for (let y = b0[1]!; y <= b1[1]!; y++) for (let x = b0[0]!; x <= b1[0]!; x++) bricks.add(brickKey(x, y, z));
-      if (tiered) for (let z = b0[2]! >> 2; z <= Math.min(b1[2]! >> 2, np[2]! - 1); z++) for (let y = b0[1]! >> 2; y <= Math.min(b1[1]! >> 2, np[1]! - 1); y++)
-        for (let x = b0[0]! >> 2; x <= Math.min(b1[0]! >> 2, np[0]! - 1); x++) pages.add(brickKey(x, y, z));
+      if (!tiered) continue;
+      const [p0, p1] = pageReach ? box(pageReach) : [b0, b1];
+      for (let z = p0[2]! >> 2; z <= Math.min(p1[2]! >> 2, np[2]! - 1); z++) for (let y = p0[1]! >> 2; y <= Math.min(p1[1]! >> 2, np[1]! - 1); y++)
+        for (let x = p0[0]! >> 2; x <= Math.min(p1[0]! >> 2, np[0]! - 1); x++) pages.add(brickKey(x, y, z));
     }
   }
   // The page sources (tiered; resMark's pass 0 over C_ALL after F_ALL).

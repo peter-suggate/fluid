@@ -211,6 +211,11 @@ test("census replay (GPU): under gravity a still reservoir's deep regions hold t
     const wantOf = (s: Awaited<ReturnType<typeof snapshot>>) => [...s.pages.values()].sort((a, b) => a - b).map(cs => [...s.set.subarray(e.layout.set.want + 16 * cs, e.layout.set.want + 16 * cs + 16)]);
     const cmask = (cs: number, i: number, dir: Uint32Array) => (dir[e.layout.dir.cmask + 16 * cs + (i >> 5)]! >>> (i & 31)) & 1;
     const A = await runFrom(saved);
+    // A region's coordinate (16-cell units) and whether it holds a lattice tile (regions(): a page past the lattice
+    // holds none, rgInLattice).
+    const keyOf = new Map([...A.s.pages].map(([key, cs]) => [cs, key]));
+    const rgCoord = (cs: number, r: number) => { const key = keyOf.get(cs)!; return [2 * (key & 1023) + (r & 1), 2 * ((key >>> 10) & 1023) + ((r >> 1) & 1), 2 * ((key >>> 20) & 1023) + ((r >> 2) & 1)]; };
+    const inLattice = (cs: number, r: number) => rgCoord(cs, r).every((v, a) => 16 * v < N[a]!);
     const replayed: [number, number][] = [];
     let hTiles = 0, slabs = 0;
     for (const cs of A.s.pages.values()) {
@@ -227,7 +232,7 @@ test("census replay (GPU): under gravity a still reservoir's deep regions hold t
     let deepRegions = 0, stampHeld = 0, keyMoved = 0, moveMax = 0;
     for (const cs of A.s.pages.values()) for (let r = 0; r < 8; r++) {
       const at = reg(cs, r);
-      if (A.census[at + RG.DEEP] !== 1 || A.census[at + RG.MODE] === 1) continue;
+      if (!inLattice(cs, r) || A.census[at + RG.DEEP] !== 1 || A.census[at + RG.MODE] === 1) continue;
       deepRegions++;
       if (census0[at + RG.DEEP] === 1 && census0[at + RG.STAMP] === census0[at + RG.DEEP_EPOCH]! + 1 && A.census[at + RG.DEEP_EPOCH] === census0[at + RG.DEEP_EPOCH]
         && [RG.GEN, RG.OWN, RG.OWN + 1, RG.PAGES].every(w => A.census[at + w] === census0[at + w])) stampHeld++;
@@ -240,8 +245,13 @@ test("census replay (GPU): under gravity a still reservoir's deep regions hold t
     }
     console.log(`census replay, g = ${g}: ${deepRegions} deep regions classify: stamp held ${stampHeld}, a key moved ${keyMoved} (largest move ${moveMax.toExponential(2)} m/s)`);
     if (g) {
-      // The projection's residual moves every interior face's bits each step: every deep region is demoted.
-      assert.ok(deepRegions > 0); assert.equal(stampHeld, deepRegions); assert.equal(keyMoved, deepRegions); assert.equal(replayed.length, 0);
+      // The projection's residual moves every submerged face's bits each step: every deep region in the reservoir is
+      // demoted. The still air the residency keeps above it (the page sources' 20 cells past the 4h liquid,
+      // brick-residency.wgsl.ts) has no moving key, so a deep region there replays: every replayed region lies wholly
+      // above the surface.
+      const surface = setup.liquid[0]!.hi[1]!;
+      assert.ok(deepRegions > 0); assert.equal(stampHeld, deepRegions); assert.equal(keyMoved, deepRegions);
+      for (const [cs, r] of replayed) assert.ok(16 * rgCoord(cs, r)[1]! >= surface, `replayed region ${rgCoord(cs, r)} is below the surface (${surface})`);
       e.destroy(); continue;
     }
     assert.ok(replayed.length > 0, "a still reservoir replays");
