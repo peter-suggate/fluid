@@ -325,6 +325,8 @@ fn pL1(ch:u32,s:u32,i:u32)->u32{return P_L1+(ch*NB_FCAP+s)*64u+i;}
 fn pL2(ch:u32,s:u32,i:u32)->u32{return P_L2+(ch*NB_CCAP+s)*512u+i;}
 fn pL3(ch:u32,s:u32,i:u32)->u32{return P_L3+(ch*NB_CCAP+s)*64u+i;}
 fn pL4(ch:u32,s:u32,i:u32)->u32{return P_L4+(ch*NB_CCAP+s)*8u+i;}
+// L4's spare channel (L4 has no KU): pmgDown3's parts of the page's L4 residual, pmgTopCycle's L5 RHS.
+const CH4R:u32=${u(CH.KU)};
 fn pL5(ch:u32,s:u32)->u32{return P_L5+ch*NB_CCAP+s;}
 `].join("\n");
 
@@ -1233,8 +1235,12 @@ var<workgroup> wR:array<f32,512>;var<workgroup> wE:array<f32,64>;
   if(lid<64u){pmgC[pL3(CH_B,cs,lid)]=b3;pmgC[pL3(CH_EPRE,cs,lid)]=wE[lid];}
 }`);
 
-  // D3 (a page): the L3 residual restricted to L4, and L4's pre-smoothing (the page, zero halo).
-  const down3 = kernel("pmgDown3", CB, ["cstage"], V3 + /* wgsl */`
+  // D3 (a page): the L3 residual restricted to L4, L4's pre-smoothing (the page, zero halo), and the parts of the L4
+  // residual (CH4R) that the top sums into the page's L5 row: at 0 the page's own part (its rows' residuals with the
+  // couplings inside the page, in cell order), and at 1 + 2a + s (s 1 the upper side) the couplings across its face
+  // (a, s) times its E there, which the page across adds. The single-workgroup top then reads 13 words a page, not
+  // the 8 cells' 170-odd scattered loads (fill-the-GPU: the gather moves onto the pages' workgroups).
+  const down3 = kernel("pmgDown3", CB, ["cstage"], V3 + V4 + /* wgsl */`
 var<workgroup> wR:array<f32,64>;var<workgroup> wE:array<f32,8>;
 @compute @workgroup_size(64) fn pmgDown3(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead()}
   let c3=4*p+pC1(lid);let D3=pmgC[pL3(CH_D,cs,lid)];
@@ -1261,6 +1267,23 @@ var<workgroup> wR:array<f32,64>;var<workgroup> wE:array<f32,8>;
   }
   ${coarsePasses(false, "lid<8u&&D>0.0", `var s=b4;for(var a=0u;a<3u;a++){let e=pUnit(a);if(K[a]!=0.0){s+=K[a]*wE[pI4(c4l-e)];}if(KU[a]!=0.0){s+=KU[a]*wE[pI4(c4l+e)];}}wE[lid]=s/D;`)}
   if(lid<8u){pmgC[pL4(CH_B,cs,lid)]=b4;pmgC[pL4(CH_EPRE,cs,lid)]=wE[lid];}
+  if(lid<8u){
+    var r=0.0;
+    if(D>0.0){r=b4-D*wE[lid];for(var a=0u;a<3u;a++){let e=pUnit(a);if(K[a]!=0.0){r+=K[a]*wE[pI4(c4l-e)];}if(KU[a]!=0.0){r+=KU[a]*wE[pI4(c4l+e)];}}}
+    wR[lid]=r;
+    for(var a=0u;a<3u;a++){
+      let e=pUnit(a);var w=0.0;
+      if(c4l[a]==0){w=pmgC[pL4(CH_K+a,cs,lid)];}else{w=pV4(p,2*p+c4l+e,CH_K+a);}
+      wR[8u+3u*lid+a]=w*wE[lid];
+    }
+  }
+  workgroupBarrier();
+  if(lid<7u){
+    var s=0.0;
+    if(lid==0u){for(var k=0u;k<8u;k++){s+=wR[k];}}
+    else{let a=(lid-1u)>>1u;let side=i32((lid-1u)&1u);for(var k=0u;k<8u;k++){if(pC4(k)[a]==side){s+=wR[8u+3u*k+a];}}}
+    pmgC[pL4(CH4R,cs,lid)]=s;
+  }
 }`);
 
   // The compact levels' red-black passes (one workgroup; frozen halo = F array, or 0 when pre). When every row of
@@ -1340,6 +1363,8 @@ ${Object.entries(wvAt).map(([n, v]) => `const V_${n}:u32=${u(v)};`).join("")}
     if (wvAt[n] === undefined) throw new Error(`pmgTopCycle: no workgroup vector ${n}`);
     return `v${fs}(V_${n}+`;
   });
+  // The L4 post-smoothing's cells a lane each, their E in wv's L6 words, when they fit (8 C lanes and words).
+  const l4Cached = wvFits && 8 * C <= 1024 && 8 * C <= 5 * MG_ROWS6;
   const top = kernel("pmgTopCycle", [CFG, setRW, dirRO, cRW, topRW], [], TOPCOMMON + topVectors(/* wgsl */`
 var<workgroup> wN5:u32;var<workgroup> wN6:u32;var<workgroup> wN7:u32;
 fn par5(i:u32)->u32{return pPar(tPage(pmgTop[T_SLOT5+i]));}
@@ -1357,18 +1382,16 @@ fn l4Nbr(cs:u32,k:u32,a:u32,up:bool)->vec2u{
   let n5=workgroupUniformLoad(&wN5);let n6=workgroupUniformLoad(&wN6);let n7=workgroupUniformLoad(&wN7);
 ${topLinks(5, "n5", "par5(i)")}
 ${topLinks(6, "n6", "par6(i)")}
-  // L4 residual summed into each L5 row.
+  // L4's residual into each L5 row: the page's own part and its face neighbours' (pmgDown3's CH4R; a page across
+  // with no rows, IDX5 NONE, has no part this step).
   for(var i=t;i<n5;i+=1024u){
-    let cs=pmgTop[T_SLOT5+i];var sum=0.0;
-    for(var k=0u;k<8u;k++){
-      let D4=pmgC[pL4(CH_D,cs,k)];if(D4<=0.0){continue;}
-      var r=pmgC[pL4(CH_B,cs,k)]-D4*pmgC[pL4(CH_EPRE,cs,k)];
-      for(var a=0u;a<3u;a++){
-        let kl=pmgC[pL4(CH_K+a,cs,k)];
-        if(kl!=0.0){let n=l4Nbr(cs,k,a,false);if(n.x!=NB_NONE){r+=kl*pmgC[pL4(CH_EPRE,n.x,n.y)];}}
-        let u=l4Nbr(cs,k,a,true);if(u.x!=NB_NONE){let ku=pmgC[pL4(CH_K+a,u.x,u.y)];if(ku!=0.0){r+=ku*pmgC[pL4(CH_EPRE,u.x,u.y)];}}
+    let cs=pmgTop[T_SLOT5+i];var sum=pmgC[pL4(CH4R,cs,0u)];
+    for(var a=0u;a<3u;a++){
+      let st=select(select(9u,3u,a==1u),1u,a==0u);
+      for(var s=0u;s<2u;s++){
+        let v=pmgC[P_QSTG+27u*cs+select(13u-st,13u+st,s==1u)];
+        if(v>=0.0){let q=u32(v);if(pmgTop[T_IDX5+q]!=NB_NONE){sum+=pmgC[pL4(CH4R,q,2u+2u*a-s)];}}
       }
-      sum+=r;
     }
     tS(T_B5+i,sum);tS(T_E5+i,0.0);
   }
@@ -1391,6 +1414,39 @@ ${topLinks(6, "n6", "par6(i)")}
   for(var i=t;i<n5;i+=1024u){let e=tF(T_P5+i)+tF(T_E6+pmgTop[T_PAR5+i]);tS(T_E5+i,e);tS(T_F5+i,e);}
   sbwb();
   ${topPasses(5, true, "n5", "par5(i)")}
+${l4Cached ? /* wgsl */`
+  // L4 post-smoothing, a page a block, a lane a cell: the lane keeps its row's couplings and frozen halo (EPRE + the
+  // page across's L5 value) in registers and the page's E in workgroup memory (wv's L6 words, dead by now), so the
+  // passes read no device memory; the sums are the device loop's, term for term.
+  var cD=0.0;var cB=0.0;var cw=array<f32,6>();var cv=array<f32,6>();var cj=array<u32,6>(NB_NONE,NB_NONE,NB_NONE,NB_NONE,NB_NONE,NB_NONE);
+  var cs=0u;var k=0u;
+  if(t<8u*n5){
+    let i=t/8u;k=t%8u;cs=pmgTop[T_SLOT5+i];let e5=tF(T_E5+i);
+    if(k==0u){pmgC[pL5(CH_EPOST,cs)]=e5;}
+    wv[V_B6+t]=pmgC[pL4(CH_EPRE,cs,k)]+e5;
+    cD=pmgC[pL4(CH_D,cs,k)];cB=pmgC[pL4(CH_B,cs,k)];
+    for(var a=0u;a<3u;a++){
+      for(var up=0u;up<2u;up++){
+        let f=2u*a+up;let n=l4Nbr(cs,k,a,up==1u);if(n.x==NB_NONE){continue;}
+        var w4=0.0;if(up==1u){w4=pmgC[pL4(CH_K+a,n.x,n.y)];}else{w4=pmgC[pL4(CH_K+a,cs,k)];}
+        if(w4==0.0){continue;}
+        cw[f]=w4;
+        if(n.x==cs){cj[f]=8u*i+n.y;}else{let jn=pmgTop[T_IDX5+n.x];if(jn!=NB_NONE){cv[f]=pmgC[pL4(CH_EPRE,n.x,n.y)]+tF(T_E5+jn);}}
+      }
+    }
+  }
+  workgroupBarrier();
+  for(var ps=0u;ps<P_CS2;ps++){
+    let colour=1u-(ps&1u);
+    if(cD>0.0&&pPar(pC4(k))==colour){
+      var s=cB;
+      for(var f=0u;f<6u;f++){if(cw[f]==0.0){continue;}var v=cv[f];if(cj[f]!=NB_NONE){v=wv[V_B6+cj[f]];}s+=cw[f]*v;}
+      wv[V_B6+t]=s/cD;
+    }
+    workgroupBarrier();
+  }
+  if(t<8u*n5){pmgC[pL4(CH_EPOST,cs,k)]=wv[V_B6+t];}
+` : `
   // L4 post-smoothing, a page a block: the entry is EPRE + the page's L5 value.
   for(var w=t;w<8u*n5;w+=1024u){let i=w/8u;let k=w%8u;let cs=pmgTop[T_SLOT5+i];pmgC[pL5(CH_EPOST,cs)]=tF(T_E5+i);pmgC[pL4(CH_EPOST,cs,k)]=pmgC[pL4(CH_EPRE,cs,k)]+tF(T_E5+i);}
   sbwb();
@@ -1417,6 +1473,7 @@ ${topLinks(6, "n6", "par6(i)")}
     }
     sbwb();
   }
+`}
 }`));
 
   // U3 (a page): L3 post-smoothing, 16h blocks; the frozen halo is EPRE + the parent's L4 EPOST.

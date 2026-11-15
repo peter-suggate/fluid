@@ -855,3 +855,105 @@ check. Without changing the cycle, the remaining fusions are page kernels that r
 - D1 into D1C (a page computes its bricks' L1 residuals);
 - U3 into U2 (a page also post-smooths the 24 face-adjacent L3 blocks it reads).
 - At about 5.5 µs a launch plus the tail, these are worth about 0.1-0.2 ms a step together.
+
+**Ruled (coordinator, 2026-11-16).** The D1 -> D1C and U3 -> U2 fusions above (about 0.1-0.2 ms a step together) are
+below the large-wins bar: logged as available, not taken.
+
+## 2026-11-16 — pmgTopCycle off the single core's loads; the slot's kernels priced in bytes
+
+**Attribution rig.** The per-dispatch profile cannot price the one-workgroup top: its timestamps tick at about 10.9 µs
+and the same unchanged kernel reads 11-23 µs across runs. Because the top is idempotent (it rebuilds B5 from L4 and
+rewrites only the L4/L5 post values), a scratch build dispatches it 21x in every slot. In an unprofiled timing hold
+(tiered dam, 36 steps, fenced median of steps 18-35 less the samples, n 18), the step then carries 20 x (open slots,
+about 6.9 a step) extra calls, so (step with repeats - step without) / 138 is the top's unprofiled cost per call
+(`runs5/T7`, `T8`, `T10`; scratch tree `tf`, switches TV):
+
+| top, unprofiled, µs a call | |
+|---|---|
+| HEAD 45356bb8 | about 74 (86.5 against 76.2 ms) |
+| L4 residual folded into pmgDown3 | about 63 |
+| + the L4 post cached a lane a cell | about 43-53 (three sessions) |
+| 20 empty 1024-lane dispatches instead of the repeats | about 15-20 a dispatch |
+| the 16 L5/L6 passes doubled | +18, so about 1.1 µs a barriered pass |
+| workgroup 512 instead of 1024 | no change (83.6 against 82.3) |
+| the six link terms written out (constant indices) | no change (82.0 against 81.5): not kept |
+
+- Why: the top is one core's load stream. Before this change, its L4 residual was 94 lanes, each looping over 8 cells
+  and about 20 scattered device loads a cell (about 15 000 loads on one GPU core). Splitting that loop 8 lanes a page
+  inside the same workgroup made it slower (+20 µs profiled): the loads, not the lanes, were the limit. The gather has
+  to leave the single workgroup.
+- Fold: pmgDown3, a workgroup per page, now also writes each page's parts of its L4 residual into L4's spare channel
+  (CH4R = channel 7; L4 has no KU). Part 0 is the page's own sum: its rows' residuals with the couplings inside the
+  page, in cell order. Parts 1 + 2a + s are, for each face, the couplings across it times the page's own E there. The
+  top's L5 RHS is then its page's part 0 plus the face neighbours' facing parts: 13 words a page, from 94 workgroups'
+  work.
+  - The terms are the same; only the f32 summation order changes, and that order is independent of slot.
+  - A neighbour with no rows (IDX5 NONE) adds nothing, since its parts are not written that step.
+- Cached L4 post (8 C <= 1024 lanes and words; the dam's C 125): each lane holds its cell's couplings and frozen halo
+  (EPRE + the L5 value of the page across) in registers, with the page's E in wv's L6 words (dead by then). The four
+  passes then read no device memory. Same terms, same order (bitwise by construction); the device loop stays for
+  larger pools.
+- What is left in the top's 43-53 µs is about 15-20 for the launch and the 1024-lane start, about 18 for the 16 L5/L6
+  barriered passes, and about 10-15 for the links, L7 and the transfers.
+  - It is a chain of about 30 dependent stages over at most 125 rows.
+  - Spreading it across workgroups needs a launch at each stage (about 5.5 µs each), more than a stage costs inside one
+    workgroup. So the rest of the top stays one workgroup.
+  - The remaining lever is fewer stages (structure: coarse sweeps or levels), not more workgroups.
+
+**Gates.**
+- The V-cycle against the Float64 model is unchanged to the printed digits:
+  - composite BS / BSB: |Z - Z64|/|Z| 4.41e-7 / 5.08e-7;
+  - pool corner block / wide sheet: 9.32e-7 / 7.61e-7.
+- Converged X:
+  - composite: h 7.69e-6, native 8.26e-6;
+  - pool corner: 2.13e-6.
+- GPU pressure suite: 21 pass, 0 fail.
+- brick-wide-dam "residency and lists follow the fluid" is bimodal on HEAD itself: step-7 liveF is 1575 or 1604 per
+  run, and it failed 3 of 4 runs of HEAD's tree m2 (`runs5/T6`). It is flaky on the tolerance, not caused by this change.
+- Whole step, unprofiled (the same hold, alternating, n 18 each):
+
+  | | runs (ms) | mean (ms) |
+  |---|---|---|
+  | HEAD | 75.19, 75.97, 76.65 | 75.94 |
+  | this commit | 74.85, 75.94, 76.15 | 75.65 |
+
+  That is -0.3 ms, inside the noise. The rig's -20 to -30 µs a call at about 7 calls is -0.15 to -0.2 ms a step.
+
+**pmgUpdate, pmgDirection and the L0 passes, in bytes.**
+- Bytes are the unique words a call touches:
+  - F channels × 563 row bricks × 520 words × 4 B (1.17 MB a channel);
+  - C channels × 39 pages with native rows (0.08 MB a channel).
+- Times are the profiled F-guess10 table's µs a call (dam steps 13-24).
+- The F channel lists:
+
+  | kernel | reads | writes |
+  |---|---|---|
+  | Update | RHS, X, D, DIAG, K0-2, RKU0-2 | R, W0 |
+  | Direction | DIAG, D, X, Z, Q, K0-2, RKU0-2 | X, D, Q |
+  | an L0 pass | its source plane, R, DIAG, K0-2, RKU0-2 | its target |
+  | Down0 | as an L0 pass, plus a little L1 | L1 B, EPRE |
+
+| kernel | F + C channels | MB a call | µs a call | GB/s | of 400 | workgroups | ns a workgroup |
+|---|---|---|---|---|---|---|---|
+| pmgUpdate | 12 + 9 | 14.8 | 133.3 | 111 | 28% | 657 | 203 |
+| pmgDirection | 14 + 10 | 17.2 | 108.0 | 159 | 40% | 657 | 164 |
+| pmgPostS | 10 | 11.7 | 79.7 | 147 | 37% | 869 | 92 |
+| pmgPreS | 10 | 11.7 | 78.2 | 150 | 37% | 869 | 90 |
+| pmgDown0 | 9.75 | 11.4 | 74.5 | 153 | 38% | 563 | 132 |
+| pmgPostZ | 10 | 11.7 | 67.0 | 175 | 44% | 563 | 119 |
+| pmgPostU | 10.1 | 11.9 | 55.9 | 212 | 53% | 563 | 99 |
+| pmgPreU | 10 | 11.7 | 50.6 | 231 | 58% | 563 | 90 |
+
+- None of these is bandwidth-bound:
+  - The solver's working set (about 15 F channels, pmgF, the C pages: about 20 MB) fits in the M1 Max's 48 MB
+    system-level cache, so a call does not even go to DRAM.
+  - PreS and PreU move the same unique bytes but take 78 against 51 µs, in proportion to their workgroup counts (869
+    against 563). Both cost 90 ns a workgroup. The cost follows workgroups, not bytes: these passes are latency- and
+    occupancy-bound, each workgroup a serial chain.
+- Measured pieces of that chain (profiled, a section duplicated):
+  - In Update, the 6 barriered pSmooth passes are about +16 µs and pRedSums (each workgroup's 128 serial adds) about
+    +12 µs.
+  - In Direction, pRedSums is about +6 µs.
+- So the lever is staging (shorter per-workgroup chains: a two-level pRedSums, fewer barriered passes, or more resident
+  workgroups), not fewer words. Interleaving x, r, d and q, or merging vector reads, would save bytes that are not the
+  limit.
