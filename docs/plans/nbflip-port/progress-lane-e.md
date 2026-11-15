@@ -564,3 +564,28 @@ BOUND_F reach box is gone; no second bound was added. brick-abi.md §2.5 and §5
   - Isotropic 12–14-tile records are ballistic particle travel through PSUPPORT (about 34 cells).
   - Effect: the all-h set at step 23 is 4817 against the baseline's 4775 (+0.9%). Tiered steps 13–15
     hold 2629–3057 against 2249–2430 (+17–30%), and steps 20 onward match (4273 against 4214).
+
+## 2026-11-15: pool peaks, measured on the brick engine (coordinator: author from the brick engine's own peak)
+
+Letters: the take is 193 steps (NBFLIP_LETTERS_FRAMES at 24 Hz). The old-engine probe's 240-step run therefore
+covers the whole take; "still rising" referred to steps past it. Within the take the probe peaks at F ring 5543,
+core 2090 and pages 198 (step 180), and particles 944k (step 160). Those numbers are lower bounds only. The scene
+pools are re-authored from the brick engine's own peak once letters runs on it (M4 gaps).
+
+The dam, measured with the tiered brick engine at 5233e246 (lane F's dam-300th: composite, poolF 4913, rc 0, no FAIL):
+
+| quantity | peak | step |
+|---|---|---|
+| F slots, HIGH_F | 4844 | (high-water) |
+| liveF | 4811 | 60 |
+| pages, HIGH_C | 125 | 30 |
+| B, HIGH_B | 0 | |
+| particles | 1,010,865 | 45 |
+
+The particle peak is inflated by about 1.1x by lane F's D8 excess, which is still being attributed.
+
+The authored f = 3968 latches POOL_F at step 20. The brick engine's F peak is 1.9x the probe's ring (2562),
+because the ported old residency rule keeps 98.6% of the 17^3 window resident. The coordinator has revised the
+residency policy for this reason: first (a) active lists that exclude reach-only bricks, then (b) per-source
+local reach. The dam pools are re-authored after (b), from the brick engine's peak under the policy that will
+ship. Until then runs pass poolF = 4913.
