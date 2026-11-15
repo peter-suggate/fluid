@@ -449,6 +449,100 @@ phases (claim, then records, then frees). Each is one dispatch, and the table ab
 **Two compile rules.** No kernel inlines the solid walk (`phiSolid` and `pSolid` carry it). Every
 module compiles cold in under 30 s (M1's test).
 
+### 6.1 The pressure slot contract (lane P writes against it)
+
+The schedule's pressure stage is `operator`, then the solver, then `project`. `operator` and
+`project` are E's in M1, and P takes them over. The solver is P's. This contract is what sits
+between them. Code: `lib/methods/narrow-band/brick-pressure-slot.ts` (`PressureSolver`).
+
+**Units.** `X = p dt / ρ` in m²/s, where p is the physical pressure (`p = ρ X / dt`). RHS is in
+m²/s. DIAG and K are dimensionless. h is ring word `H` (m).
+
+**Liquid cells.** A cell is liquid when its centre φ < −θ_min, with φ in h and θ_min = 1e-3
+(`uniformMixedPressureLiquidWGSL`, verbatim). In M1 the centre φ is the mean of the cell's 8
+vertex φ. If F later supplies a centre channel, E changes that one helper.
+
+**Inputs.** `operator` writes them on every cell of every `F_LIQ` brick, before the solver's
+first kernel:
+- `operator` is a pure function of the channels. It reads `PHI` and `FLAGS` (OPEN, box rule),
+  `US0..2`, and the cut's `FRAC` and `AP*` (an aperture of 1 where there is no cut). It writes
+  `RHS`, `DIAG`, `K0..2` and `X` (below).
+- Its signature is `(cfg, set, dir, vel, phi, pres, cut)`, and it does not change when P extends
+  it to C and B rows and to the seam.
+- `A_a(c)` is the aperture of c's lower face along a. A face is closed (A = 0) when the box rule
+  or the cut closes it.
+- `K_a(c) ≥ 0` is the coupling across c's lower face along a, so it sits at the **upper** cell of
+  the pair. It is `A_a(c)` when c and `c − e_a` are both liquid, and 0 otherwise. A row's coupling
+  to its upper neighbour along a is therefore `K_a(c + e_a)`, read from that neighbour's brick
+  when it lies in another one.
+- `DIAG(c)` sums over c's six faces: `A` to a liquid neighbour, `A / θ` to an air neighbour, and
+  0 for a closed face. θ is the ghost-fluid crossing `uniformMixedSurfaceThetaWGSL`, clamped to
+  [θ_min, 1/θ_min], verbatim.
+- `RHS(c) = −h Σ_a (A_a(c + e_a) US_a(c + e_a) − A_a(c) US_a(c))`, that is −h² times the
+  discrete divergence of u*.
+- On non-liquid cells, DIAG, K and RHS are 0 and X is 0.
+
+**Sign convention.** The system is `DIAG(c) X(c) − Σ_nbr K X(nbr) = RHS(c)` over the liquid cells,
+with X = 0 at air (the Dirichlet ghost):
+- The matrix is symmetric, with a positive diagonal and off-diagonals of `−K`.
+- It is positive definite when every connected liquid component has a face to air.
+- A sealed component is singular. P handles that case; M1's scenes have a free surface.
+
+**Neighbours across bricks.** These go through the record's neighbour words:
+- An `F` slot is read directly.
+- `NONE` is air. setMark keeps a ring of bricks around liquid, so a liquid cell never borders
+  `NONE`, and if one does, that is `FAIL.REACH`.
+- `SEAM` and `BULK` neighbours, and a C or B row, raise `FAIL.UNSUPPORTED` in M1 (there are no
+  tiers). P extends the contract here.
+
+**Output.** X on the liquid cells of `F_LIQ` bricks, converged to P's tolerance. The solver
+writes nothing outside `pres` and its own buffers, apart from the gates below.
+
+**Warm start.** X as `operator` leaves it, which is:
+- the last step's solution in bricks that stayed live;
+- 0 in entering bricks (`setUpdate` zeroes their channels);
+- 0 in this step's non-liquid cells.
+
+Any starting value is valid. The warm start affects only the iteration count.
+
+**`project`** reads X and the same θ, recomputed from φ:
+- A lower face with a liquid side gets `U = US − (X(c) − X(c − e_a)) / h`, with the air side's X
+  taken as the ghost `X_liq (1 − 1/θ)`.
+- A closed face gets `U = 0`.
+- A face with no liquid side gets `U = US`, which F's extension then overwrites.
+
+**Recording.** A `PressureSolver` declares:
+- `setup`: kernels placed once, after `operator`;
+- `slots`: the number of encoded slots, which `record()` allots. P's MGPCG declares 8 (§6's
+  schedule). The bring-up solver below declares its own count.
+- `slot`: the kernel list of one slot, placed `slots` times with `cfg.z` = the slot index;
+- `finish`: kernels placed once, before `project`.
+
+Each placement is either direct (a fixed workgroup count) or indirect from an `args` word.
+
+**Gates.**
+- Args words 512–2047 are P's, laid out as P chooses. Gated dispatches read their counts there.
+- `setup` opens slot 0 and closes every later slot, by writing 0 workgroups, every step. A gate
+  left from the last step is never trusted.
+- Slot k ends with a direct, one-workgroup `check`. It opens slot k + 1 (copying the list's
+  arguments from words 0–383) or leaves it closed.
+- A closed slot's `check` sees that it was closed (a P header word) and writes nothing.
+- Header words 128–191 are P's: residuals, PCG scalars, cycle counts.
+
+**State.**
+- `setup` clears `STATE.PRESSURE_CAP`.
+- The last open slot's `check` sets it when the residual is above tolerance after the final
+  slot.
+- P also keeps a cumulative count of capped steps in its header, because the host reads receipts
+  lagged.
+- A solver failure (for example `PIVOT`) latches `FAIL` through `nbFail`.
+
+**The bring-up solver (M1 testing only).** `brick-bringup-cg.ts` is a Jacobi-preconditioned CG,
+one iteration per slot, written against this contract, so that M1's tests have a solve:
+- It is labelled as such in its code and in `progress-lane-e.md`.
+- No M2 gate and no timing claim runs on it.
+- P's MGPCG replaces it at the same slot before any scene is gated.
+
 ## 7. The brick-set update in words
 
 1. `setMark` (one lane per tile of `F_ALL`, then `C_ALL`; 64 lanes):
