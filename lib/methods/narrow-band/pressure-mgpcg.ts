@@ -110,17 +110,22 @@ export const MG_HIST_SLOTS = 43;
  */
 export const MG_TOLERANCE = 0.05;
 /**
- * The walls' default policy: the build's decision at the warm start, then one re-decision at a loose tolerance, after
- * which the system is fixed and PCG converges on it. An inexact primal-dual active set (Hintermueller, Ito & Kunisch
- * 2002, the semismooth Newton step taken at an inexact iterate; Chentanez & Mueller 2012 decide between converged
- * solves): each re-decision restarts the Krylov space, and the restarts were the iteration driver. Tiered dam, 30
- * steps, steps 16-30 (lane P, 2026-11-15; tools/probe-pressure-active-set.ts for the old engine): every converged solve
- * deciding, 12.6 its a step and 0% of h wall faces inconsistent with the final x; the build alone, 7.67 its and
- * 15.5%; one re-decision within 10 / 100 / 1000 x tolerance, 9.67 / 8.27 / 7.87 its and 1.5 / 1.6 / 1.5%. The old
- * engine leaves 9-11% of its band wall faces (and up to 36% of native ones) inconsistent. Within 1000 x tolerance
- * is in practice the first slot's iterate.
+ * The walls' default policy: the build's decision at the warm start, a decision at the Jacobi guess (pmgWallsG, before
+ * the setup, so it costs no restart), then one re-decision at the first slot's iterate, after which the system is
+ * fixed and PCG converges on it. An inexact primal-dual active set (Hintermueller, Ito & Kunisch 2002, the semismooth
+ * Newton step taken at an inexact iterate; Chentanez & Mueller 2012 decide between converged solves): each
+ * re-decision restarts the Krylov space, and the restarts were the iteration driver. Tiered dam, 30 steps, steps
+ * 16-30 (lane P, 2026-11-15; tools/probe-pressure-active-set.ts for the old engine), before the guess: every
+ * converged solve deciding, 12.6 its a step and 0% of h wall faces inconsistent with the final x; the build alone,
+ * 7.67 its and 15.5%; one re-decision within 10 / 100 / 1000 x tolerance, 9.67 / 8.27 / 7.87 its and 1.5 / 1.6 /
+ * 1.5%. The old engine leaves 9-11% of its band wall faces (and up to 36% of native ones) inconsistent.
+ * With the guess (24 steps, steps 13-24, the inconsistent share summed over the steps; 2026-11-16): within 1000 x
+ * tolerance, 7.50 its (2 runs) and 1.1-1.5%, as the guess's first slot is within 50 1/s only in calm steps; the
+ * build alone 6.17 its and 12.2%; the guess's decision alone 6.08 and 8.3%; the guess's decision then one at the
+ * first slot (this policy, MG_WALL_LOOSE Infinity) 7.08 and 0.80%; the first slot without the guess's 7.08 (2 runs)
+ * and 1.4-1.5%. Without the guess: 8.00 its with 3 steps capped at 8, and 1.26%.
  */
-export const MG_WALL_DECISIONS = 1, MG_WALL_LOOSE = 1000;
+export const MG_WALL_DECISIONS = 1, MG_WALL_LOOSE = Infinity;
 /** L0's Schwarz passes by default (MGPCGOptions.fineOrder). */
 export const MG_FINE_ORDER: "BS" | "BSB" = FINE_ORDER;
 /** Levels of the hierarchy (L0..L7) and the compact top's row caps. */
@@ -234,8 +239,18 @@ export interface MGPCGOptions {
    * >= 0, as the old engine freezes its state at the Krylov start).
    */
   readonly wallDecisions?: number;
-  /** A re-decision is taken at the first slot whose max|r| is within wallLoose x tolerance (MG_WALL_LOOSE). */
+  /** A re-decision is taken at the first slot whose max|r| is within wallLoose x tolerance (MG_WALL_LOOSE; Infinity, the first slot). */
   readonly wallLoose?: number;
+  /**
+   * The Jacobi guess (default true): before the setup, every h row's start takes one Jacobi step, x0 + D^-1 (b - A x0)
+   * (Saad 2003 §4.1; the seep's pcgGuess). Native rows keep their start.
+   */
+  readonly guess?: boolean;
+  /**
+   * With the guess, the walls and a re-decision left (wallDecisions > 0): the build's wall state is decided again at the
+   * guess, before the setup (pmgWallsG; default true). It does not count as a re-decision.
+   */
+  readonly guessWalls?: boolean;
   /** Count the end's inconsistent wall faces into MG_HEADER.AUDIT (a diagnostic pass in the finish). */
   readonly audit?: boolean;
   /**
@@ -270,11 +285,12 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
   if (options.fineOrder !== undefined && options.fineOrder !== "BS" && options.fineOrder !== "BSB") throw new Error(`Pool MGPCG: fine order ${String(options.fineOrder)}`);
   // The h rows' pre-smoothed plane: W0 after BSB's last brick pass (pmgPreU), W1 after BS's shifted pass (pmgPreS).
   const PRE = bsb ? "P_W0" : "P_W1";
-  const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, nativeSweeps = options.nativeSweeps ?? 2, walls = options.walls ?? false;
+  const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, nativeSweeps = options.nativeSweeps ?? 2, walls = options.walls ?? false, guessOn = options.guess ?? true, guessWalls0 = options.guessWalls ?? true;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
   const tolBits = new Uint32Array(new Float32Array([tol]).buffer)[0]!;
   const wallDecisions = Math.min(options.wallDecisions ?? MG_WALL_DECISIONS, 0xffffffff), wallLoose = options.wallLoose ?? MG_WALL_LOOSE, audit = options.audit ?? false;
-  if (!(wallDecisions >= 0) || !(wallLoose >= 1) || !Number.isFinite(wallLoose)) throw new Error(`Pool MGPCG: walls policy ${wallDecisions}/${wallLoose}`);
+  if (!(wallDecisions >= 0) || !(wallLoose >= 1)) throw new Error(`Pool MGPCG: walls policy ${wallDecisions}/${wallLoose}`);
+  const guessWalls = guessOn && walls && wallDecisions > 0 && guessWalls0;
   const M = mgLayout(L), T = M.top;
   const u = (n: number) => `${n >>> 0}u`;
   const live = options.live ?? mgLive(L);
@@ -646,8 +662,35 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   // L1 and L2 rows aggregated, and the stage cache (P_STG). A brick without a row and without a coupling (on the tiered
   // dam ~5 in 6 of F_ALL: the native tiles' bricks) has all of these 0, so it writes its zeros and returns before the
   // stage, the apply, the pass and the aggregation (bitwise the full path's values: every sum is of zeros).
+  // pmgGuess (a brick of the setup's rows, before setupF): Z = x0 + D^-1 (b - A x0) on the h rows, x0 elsewhere (Saad
+  // 2003 §4.1, the seep's pcgGuess). A row's ghost-fluid diagonal changes with the surface, and a warm row whose
+  // diagonal grew starts with a residual of about D x0: on the tiered dam (steps 16-22) the start's max|r| is 1e5-3e5
+  // 1/s on the surface rows, 1.2e3-1.5e3 after the step, and the composite model took 6.2 PCG iterations from it where
+  // it took 8.0 from x0. Native rows keep x0 (their apply needs the seam list, which coarsenC builds after the setup;
+  // the model's iterations were the same as with them stepped). setupF reads Z for its residual and writes X = Z, and
+  // the stage it would build (pStageW) is this kernel's.
+  const guess = kernel("pmgGuess", FBT, ["pres", "stage"],
+    fineApply("pApplyG", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
+var<workgroup> wGLiveA:atomic<u32>;var<workgroup> wGLive:u32;
+@compute @workgroup_size(512) fn pmgGuess(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  ${fHead("atomicStore(&wGLiveA,0u);")}let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+  let l=lid;let at=NB_STRIDE*slot+l;let d=pDiag(slot,l);
+  // setupF's live test (a row or a coupling): a brick without either is setupF's early return, which reads neither Z
+  // nor the stage, so it writes neither (the F_ALL path then leaves the bricks off HB as the live path does).
+  workgroupBarrier();
+  if(d>0.0||any(vec3f(pK(0u,slot,l),pK(1u,slot,l),pK(2u,slot,l))!=vec3f(0.0))||any(vec3f(pKU(0u,slot,l),pKU(1u,slot,l),pKU(2u,slot,l))!=vec3f(0.0))){atomicOr(&wGLiveA,1u);}
+  workgroupBarrier();
+  if(lid==0u){wGLive=atomicLoad(&wGLiveA);}
+  if(workgroupUniformLoad(&wGLive)==0u){return;}
+  pStage(slot,lid);workgroupBarrier();
+  pStageW(slot,lid);
+  var x=pres[NB_PRES_F_X+at];
+  if(d>0.0){x+=(pP(NB_PRES_F_RHS,slot,l)-pApplyG(b,o+nbLocalCoord(l),slot,l))/d;}
+  pres[NB_PRES_F_Z+at]=x;
+}`);
+  const X0 = guessOn ? "NB_PRES_F_Z" : "NB_PRES_F_X";
   const setupF = kernel("pmgSetupF", FBT, ["pres", "stage", "reduce", "tile"],
-    fineApply("pApplyR", (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
+    fineApply("pApplyR", (s, l) => `pres[${X0}+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
 var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;var<workgroup> wKU:array<vec3f,512>;var<workgroup> w1D:array<f32,64>;var<workgroup> w1K:array<vec3f,64>;var<workgroup> w1KU:array<vec3f,64>;
 var<workgroup> wLive:u32;
 @compute @workgroup_size(512) fn pmgSetupF(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
@@ -666,8 +709,7 @@ var<workgroup> wLive:u32;
     if(lid<8u){let i2=nbLocal((o>>vec3u(2u))+pC4(lid));pmgC[pL2(CH_D,cs,i2)]=0.0;for(var a=0u;a<3u;a++){pmgC[pL2(CH_K+a,cs,i2)]=0.0;pmgC[pL2(CH_KU+a,cs,i2)]=0.0;}}
     return;
   }
-  pStage(slot,lid);workgroupBarrier();
-  pStageW(slot,lid);
+  ${guessOn ? "pStageK(slot,lid);workgroupBarrier();pres[NB_PRES_F_X+at]=pres[NB_PRES_F_Z+at];" : "pStage(slot,lid);workgroupBarrier();\n  pStageW(slot,lid);"}
   let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   {let ku=pRowKU(b,c,slot,l);let ra=P_RKU+3u*NB_STRIDE*slot+l;pmgF[ra]=ku.x;pmgF[ra+NB_STRIDE]=ku.y;pmgF[ra+2u*NB_STRIDE]=ku.z;}
   var r=0.0;
@@ -1628,29 +1670,33 @@ var<workgroup> wAlpha:f32;
   // keep the setup's aggregates of the build's diagonal: the V-cycle stays symmetric positive definite (a symmetric
   // smoother on the current L0 rows and any SPD coarse correction), so it is still a valid preconditioner.
   // A changed brick's first V-cycle pass (W0, written by pmgUpdate from r) is recomputed from the new r and rows.
+  // pmgWallsG (guessAt) takes the same decision at the Jacobi guess, before the setup forms r and the aggregates, so it
+  // restarts nothing.
   // A row's wall side along a (-1 plane 0, +1 plane N, 0 none) on n rows an axis; the tolerance (cfg.w, as pTolR).
   const wallSign = /* wgsl */`fn pWallFace(c:vec3i,a:u32,n:i32)->i32{if(c[a]==0){return -1;}if(c[a]==n-1){return 1;}return 0;}
 fn pWallTol()->f32{let h=nbRingF(cfg.x,NB_RING_H);return bitcast<f32>(cfg.w)*h*h;}`;
   // audit: the finish's diagnostic count at the final iterate x + alpha p (PH_ALPHA), over F_ALL's row bricks; no state changes.
-  const wallsFKernel = (audit: boolean) => kernel(audit ? "pmgAuditF" : "pmgWallsF", [CFG, setRW, dirRO, presRW, fRW, topRW, redRW, phiRW, velRO], /* 8 storage: no pmgC */ ["pres", "stage", "reduce", "tile", "red"], wallSign + /* wgsl */`
+  // guess: the decision at the Jacobi guess (pmgGuess's Z, before setupF, which forms r from the decided rows), over the
+  // setup's rows; it moves the rows' DIAG and RHS only, and counts its flips into PH_WALLS.
+  const wallsFKernel = (audit: boolean, guessAt = false) => kernel(audit ? "pmgAuditF" : guessAt ? "pmgWallsG" : "pmgWallsF", [CFG, setRW, dirRO, presRW, fRW, topRW, redRW, phiRW, velRO], /* 8 storage: no pmgC */ ["pres", "stage", "reduce", "tile", "red"], wallSign + /* wgsl */`
 var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u32>;var<workgroup> wAud:array<atomic<u32>,2>;
-@compute @workgroup_size(512) fn ${audit ? "pmgAuditF" : "pmgWallsF"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){wCount=${audit ? "nbListCount(NB_LIST_F_ALL)" : "pmgTop[T_RBN]"};}
+@compute @workgroup_size(512) fn ${audit ? "pmgAuditF" : guessAt ? "pmgWallsG" : "pmgWallsF"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  ${guessAt ? fHead() : `if(lid==0u){wCount=${audit ? "nbListCount(NB_LIST_F_ALL)" : "pmgTop[T_RBN]"};}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
-  let slot=${audit ? "nbListSlot(NB_LIST_F_ALL,g)" : "pmgTop[T_RB+g]"};let o=nbFOrigin(slot);let b=o>>vec3u(3u);
+  let slot=${audit ? "nbListSlot(NB_LIST_F_ALL,g)" : "pmgTop[T_RB+g]"};`}let o=nbFOrigin(slot);let b=o>>vec3u(3u);
   if(lid==0u){
     let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_LATTICE);
     wGo=select(0u,1u,edge${audit ? "&&pmgTop[T_RBF+slot]!=0u" : ""});
-    ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : "let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);"}
+    ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : guessAt ? "wAlpha=0.0;" : "let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);"}
     atomicStore(&wFlips,0u);
   }
   if(workgroupUniformLoad(&wGo)==0u){return;}
-  pStageK(slot,lid);workgroupBarrier();
+  ${guessAt ? "" : "pStageK(slot,lid);workgroupBarrier();"}
   let alpha=workgroupUniformLoad(&wAlpha);
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let at=NB_STRIDE*slot+l;let h=nbRingF(cfg.x,NB_RING_H);
-  var r=pres[NB_PRES_F_R+at];
+  var r=${guessAt ? "0.0" : "pres[NB_PRES_F_R+at]"};
   if(pDiag(slot,l)>0.0){
-    let x=pres[NB_PRES_F_X+at]+alpha*pres[NB_PRES_F_D+at];
+    let x=${guessAt ? "pres[NB_PRES_F_Z+at]" : "pres[NB_PRES_F_X+at]+alpha*pres[NB_PRES_F_D+at]"};
     var dd=0.0;var db=0.0;var flips=0u;
     for(var a=0u;a<3u;a++){
       let side=pWallFace(c,a,NB_LATTICE[a]);if(side==0){continue;}
@@ -1666,12 +1712,15 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
       }`}
     }
     if(flips>0u){
-      pres[NB_PRES_F_DIAG+at]+=dd;pres[NB_PRES_F_RHS+at]+=db;r=r+db-dd*x;pres[NB_PRES_F_R+at]=r;
+      pres[NB_PRES_F_DIAG+at]+=dd;pres[NB_PRES_F_RHS+at]+=db;${guessAt ? "" : "r=r+db-dd*x;pres[NB_PRES_F_R+at]=r;"}
       atomicAdd(&wFlips,flips);
     }
   }
   workgroupBarrier();
-  ${audit ? "if(lid==0u){atomicAdd(&nbSet[PH_AUDIT],atomicLoad(&wAud[0]));atomicAdd(&nbSet[PH_AUDIT+1u],atomicLoad(&wAud[1]));}" : ""}
+  ${audit ? "if(lid==0u){atomicAdd(&nbSet[PH_AUDIT],atomicLoad(&wAud[0]));atomicAdd(&nbSet[PH_AUDIT+1u],atomicLoad(&wAud[1]));}" : ""}${guessAt ? `
+  if(lid==0u){let n=atomicLoad(&wFlips);if(n>0u){atomicAdd(&nbSet[PH_WALLS],n);}}
+}` : ""}
+${guessAt ? "" : `
   if(lid==0u){let n=atomicLoad(&wFlips);if(n>0u){atomicAdd(&nbSet[PH_FLIPS],n);}wGo=n;}
   if(workgroupUniformLoad(&wGo)==0u){return;}
   storageBarrier();
@@ -1683,7 +1732,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   let row=pRow(b,c);
   pSmooth(row,c,ti,r,false);
   if(row.d>0.0){pmgF[P_W0+at]=tp[ti];}
-}`);
+}`}`);
   const wallsF = wallsFKernel(false);
   // The native rows' walls (rowsC's root wall slot, c = 4 0.5, lift = sign 4h US; N_HELD, rootPhi < -4, never
   // separates), a page a workgroup, a lane a tile.
@@ -1738,7 +1787,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   const wallGate = kernel("pmgWallGate", [CFG, setRW, argsRW, topRW], [], wallSign + /* wgsl */`
 @compute @workgroup_size(1) fn pmgWallGate(){
   let decide=atomicLoad(&nbSet[PH_OPEN])!=0u&&atomicLoad(&nbSet[PH_DECIDES])<${u(wallDecisions)}
-    &&(bitcast<f32>(atomicLoad(&nbSet[PH_RMAX]))<=${wallLoose.toFixed(6)}*pWallTol()||cfg.z+1u>=P_SLOTS);
+    &&(${Number.isFinite(wallLoose) ? `bitcast<f32>(atomicLoad(&nbSet[PH_RMAX]))<=${wallLoose.toFixed(6)}*pWallTol()` : "true"}||cfg.z+1u>=P_SLOTS);
   if(decide){atomicAdd(&nbSet[PH_DECIDES],1u);}
   let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=pmgTop[T_RBN];
   args[P_GATE_WF]=select(0u,min(n,NB_FOLD),decide&&n>0u);args[P_GATE_WF+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[P_GATE_WF+2u]=1u;
@@ -1852,6 +1901,8 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
   const core = {
     setup: [
       { kernel: setupClear, dispatch: { direct: [1, 1, 1] } },
+      ...(guessOn ? [{ kernel: guess, dispatch: fRows }] : []),
+      ...(guessWalls ? [{ kernel: wallsFKernel(false, true), dispatch: fRows }] : []),
       { kernel: setupF, dispatch: fRows },
       { kernel: coarsenC, dispatch: list(LIST.C_ALL) },
       { kernel: coarsenTop, dispatch: { direct: [1, 1, 1] }, w: tolBits },

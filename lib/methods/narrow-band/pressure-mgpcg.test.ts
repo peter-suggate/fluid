@@ -81,7 +81,8 @@ const WIDE_F = 2600;
 for (const [name, lattice, box, f, c] of [["corner block", CORNER_LATTICE, CORNER, 600, 32], ["wide sheet", WIDE_LATTICE, WIDE, WIDE_F, 96]] as const)
 test(`pool MGPCG (GPU): one V-cycle matches the Float64 model's (${name})`, GPU, async t => {
   await withDevice("pool mgpcg vcycle", async device => {
-    const e = await BrickEngine.create(device, options(lattice, [box], f, c, { slots: 1, tolerance: 0 }));
+    // Without the Jacobi guess, so the first step's r0 is its RHS (x0 = 0).
+    const e = await BrickEngine.create(device, options(lattice, [box], f, c, { slots: 1, tolerance: 0, guess: false }));
     e.advance(1);
     const s = await snapshot(e);
     await e.assertHealthy();

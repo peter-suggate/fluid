@@ -695,3 +695,108 @@ question.
 - Step median 69.5 ms, p95 108 (75.0 / 112 at the older HEAD).
 - The walls' state isn't what holds D6. The wet-floor front is lane E's released-walls port, which now reads the release
   bits above.
+
+## 2026-11-16 — the solve's iteration count: the Jacobi guess and the walls decided at it
+
+**No-gos from the rows work (logged, dropped).**
+- rowsF (about 1400 µs over HB, about 850 bricks) does not respond to ILP restructuring. A skip of empty lanes, a
+  hoisted face loop and a restructured stage were each flat or slower, and every added code path costs 2–5%. Its
+  attribution: stage and writes about 550 µs, face loop about 500 (velocity loads 171), heads 60, starts 50,
+  facePhi 57, page words 41.
+  - The two-pass stage took 5 vertex rounds against 3. With the enumeration fixed it was still no win.
+- Folding SetupF into rowsF: no-go. Only Apply (44–57 µs) and RKU (22 µs) would go away. The reductions, the
+  aggregation and the writes would move into rowsF with the fold.
+- WallsF/WallsC's two lane-0 pRedSum calls moved to pRedSums: no gain.
+
+**Attribution.** I dumped the composite rows (h and native: DIAG, K, KU, RHS, X, start B) at steps 16–18, 20 and 22
+of the tiered dam. Then I solved them in the Float64 model (pressure-composite-model.ts, OC overridable in a scratch
+copy) with the walls fixed at the build:
+- **Start.** The warm start's max|r| is 1e5–3e5 1/s, on surface rows whose ghost-fluid diagonal grew (r ≈ D x0).
+  After one Jacobi step it is 1.2e3–1.5e3. The model's PCG took 8.0 iterations from x0 over the six states, 6.5 from
+  x0 + D^-1 r0 on every row, and 6.2 with the step on the h rows only. From 0 it took 7.
+  - What is left is real. 43% of the h rows are new each step: refined (34k) or newly wet. The warm rows' X changes by
+    25–40% a step during the impact (rms dX 0.015 on X 0.05, and successive increments correlate at 0.9).
+  - Linear extrapolation, 2X_n − X_{n−1} on rows warm in both steps, cuts the start's rms error 0.0152 → 0.0102.
+    It is worth about 0.3–0.5 iterations in the model. Parked: rowsF's warm start would need the last step's start,
+    which rowsF overwrites, and its halo reads X.
+- **Residual history.** There is no tail stall. Rows over tolerance after iterations 1–6: 139k, 132k, 112k, 48k, 4.4k,
+  16. Brick-face rows are 58% of them, the same as their share of all rows. The worst rows are interior rows at the
+  impact against the far walls.
+  - The max-norm falls about 5x an iteration. The seep's own model falls 3–10x (seep-techniques.md §2: white-noise
+    5/7/9 its to 1e-2/1e-3/1e-4). So the dam's count is set by the start's 4–7 decades, not by a weak cycle.
+  - The seep's 3.3 cycles are on the seep scene, where the drop from start to tolerance is a few decades.
+- **Smoother and OC (model, from the Jacobi start, its over the six states).**
+
+  | setting | iterations |
+  |---|---|
+  | OC 2 | 6.5 |
+  | OC 2.2 | 6.7 |
+  | OC 2.5 | 7.0 |
+  | OC 1.8 | about 6.7 |
+  | OC 1.6 | about 7.3 |
+  | OC 1.4 | about 9 |
+  | fine sweeps 4 | 6.0 |
+  | fine sweeps 6 | 6.0 |
+  | coarse sweeps 4 | 6.3 |
+  | native sweeps 4 | 6.3 |
+  | BS | 6.7 |
+  | 2 or 3 Jacobi sweeps | 6.3–6.5 |
+
+  - The seep's OC 1.6 is worse here.
+  - Fine sweeps 4 is −0.5 iterations for one more sweep in each of the six L0 passes a slot: not taken.
+- **Walls.** With the guess, the default policy decides within 1000x tolerance. The guess's first slot is often above
+  50 1/s, so the decision moves to slot 2 and its restart costs about 1.3 iterations: 7.50 its, against 6.17 with the
+  build's state alone (24-step dam, steps 13–24, two runs each).
+
+**Change (pressure-mgpcg.ts).**
+- **pmgGuess.** Before setupF, every h row's start takes one Jacobi step, Z = x0 + D^-1 (b − A x0) (Saad 2003 §4.1, the
+  seep's pcgGuess). Native rows keep x0. setupF forms r from Z and writes X = Z. The guess builds the stage cache,
+  which setupF then reads.
+- **pmgWallsG.** The walls' decision is taken again at the guess, before the setup forms r and the aggregates, so it
+  restarts nothing.
+- **Re-decision at the first slot.** The one re-decision is now at the first slot's iterate (MG_WALL_LOOSE Infinity).
+  Before the guess, 1000x tolerance was in practice the first slot's iterate.
+- **Options.** `guess` and `guessWalls` default on. guessWalls runs only with the walls and wallDecisions > 0, so
+  wallDecisions 0 keeps the build's state.
+- **The physics is the same.** Operator, criterion and wall rule are unchanged.
+
+**Iterations and walls** (tiered dam, 24 steps, steps 13–24 mean; "inconsistent" is the share of h wall faces whose
+state differs from X + lift ≥ 0 at the end, summed over steps 13–24):
+
+| policy | its | capped | inconsistent |
+|---|---|---|---|
+| no guess (HEAD) | 8.00 | 3 | 1.26% |
+| guess, decide within 1000x | 7.50 / 7.50 | 0 | 1.13 / 1.48% |
+| guess, decide at the first slot | 7.08 / 7.08 | 0 | 1.46 / 1.40% |
+| guess, decide at the guess and within 1000x | 7.33 | 0 | 0.85% |
+| **guess, decide at the guess and at the first slot (default)** | **7.08** | **0** | **0.80%** |
+| guess, decide at the guess only | 6.08 | 0 | 8.3% |
+| guess, the build's state only | 6.17 | 0 | 12.2% |
+
+- **The 60-step dam** (samples at 15, 30, 45 and 60):
+  - Iterations: 8, 7, 6, 8 → 8, 7, 5, 6.
+  - Capped steps: 3 → 0.
+  - Drift: −0.0268/−0.0669/−0.0296/−0.0598 against −0.0268/−0.0659/−0.0316/−0.0591.
+  - KE at 60: 69.6 → 68.6 J.
+
+**Timing** (one hold, tiered dam, rowsWindow = the fenced median's steps 18–23, per-area mean):
+
+| | HEAD (hd) | guess |
+|---|---|---|
+| iterations, steps 18–23 | 8, 8, 8, 8, 8, 8 | 8, 8, 7, 7, 7, 7 |
+| pressure solve | 9.07 ms | 8.59 ms (Guess 0.087 and WallsG 0.022 included) |
+| setup and projection | 3.99 ms | 3.93 ms (SetupF 339 → 273 µs: the stage moved to Guess) |
+| fenced median, steps 18–23 (n 6) | 75.5 ms | 74.4 ms |
+
+- **What an iteration is worth.** A saved iteration is worth about 0.88 ms, not the open slot's 1.15. A gated, closed
+  slot still costs about 0.28 ms: its roughly 25 empty indirect dispatches.
+  - On this window an iteration saved is worth less than cutting the closed slots' cost. In calm steps of 4–5
+    iterations, 3–4 closed slots cost about 1 ms.
+
+**Tests.**
+- The composite r0 test now builds the guess in the model: |R − r0|/|r0| 5.2e-6.
+- The pool V-cycle tests run with `guess: false`, so their r0 is the RHS.
+- The live-lists test is bit for bit: the guess has setupF's live early-out.
+- Converged X against the Float64 PCG: h 7.7e-6, native 8.3e-6.
+- Walls default policy: 349 of 2141 h faces inconsistent, against the build's 998.
+- GPU pressure suite: 21/0. Unit: 1842/0. Types are clean apart from the 3 lane-n errors.

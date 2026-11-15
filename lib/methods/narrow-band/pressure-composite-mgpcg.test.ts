@@ -89,7 +89,9 @@ for (const fineOrder of ["BS", "BSB"] as const) test(`composite MGPCG (GPU): r0 
   await withDevice("composite mgpcg vcycle", async device => {
     const { e, before, after, header } = await solveComposite(device, { slots: 1, tolerance: 0, fineOrder }, true);
     const M = before.model, n = M.fine.keys.length;
-    const b = before.vec("RHS"), x0 = before.vec("X"), Ax = M.apply(x0), r0 = b.map((v, i) => v - Ax[i]!);
+    // The setup's r0 is at the Jacobi guess (MGPCGOptions.guess): x0 + D^-1 (b - A x0) on the h rows, x0 on the native.
+    const b = before.vec("RHS"), xs = before.vec("X"), As = M.apply(xs);
+    const x0 = xs.map((v, i) => M.isNative(i) ? v : v + (b[i]! - As[i]!) / M.fine.diag[i]!), Ax = M.apply(x0), r0 = b.map((v, i) => v - Ax[i]!);
     const R = after.vec("R"), Z = after.vec("Z");
     const z = M.vcycle(R);
     let rErr = 0, zErrF = 0, zErrN = 0, nNative = 0;
