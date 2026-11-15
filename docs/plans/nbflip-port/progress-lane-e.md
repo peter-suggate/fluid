@@ -789,3 +789,19 @@ Per area (tm-c, 84b98c2b plus this change; kernel sum 100.8 ms, fenced median 12
 | head sum | 5.26 | 4.72 | 4.50 |
 
 - Checks: test:unit 1833 pass 0 fail; check:types shows the 3 lane-n errors only.
+
+## 2026-11-15: the real D, scoped (task 4, item 3)
+
+The scoping went to the coordinator, who ruled on three points:
+1. No cold freeze. Its terms are identically 0, a stated deviation, and lcAdvect's COLD φ hold stays off.
+2. pressureDelta comes from lane P: PDELTA in pmgC, 8 words a C slot, in Pa, computed by the old publishPressure formula after project. regionHeat reads +Inf (HOT) until it lands.
+3. A 4h tile with no F slot gets a heat word, updated in censusDecide by the old rule.
+
+**M3 question:** measure the cold freeze against seep's BULK pressure-only rows in the deep interior, and decide by time and gates.
+
+Build plan, with the old frame's order (heat.encode, then the census, then plan.encodeCertificate on the remapped velocity):
+- **Certificate:** localSpeed after setTransfer at the part-1 head. It runs on the new ownership, so it cannot be a side output of the census.
+- **regionHeat:** C_ALL X8, a workgroup a region (an octant of a C page) and a lane a tile, with tileError computed inline by each lane from the stored tile means.
+- **regionSpread**, then **regionDeep:** a lane a region. Each is separated by a grid-wide barrier: spread reads every region's level, deep reads every region's tier.
+- **regionDeep again** after the claims.
+- **Census:** decide's deep keep of CC_DECIDED and CC_STATIC, regionList and replay, and censusFine/censusCoarse skipping the replayed regions.

@@ -44,6 +44,11 @@
  *   WANT is identical; in the old run's frames 1-150 no deep tile ever had prevBand = 1 (1088 deep tiles at
  *   frame 14, up to 5952). Accepted for M2 (coordinator, 2026-11-15); the real D (decidedPrev and region heat)
  *   lands with the tiers and before M3 (seep's reservoir is mostly deep).
+ *   Rulings for it (coordinator, 2026-11-15): no cold freeze (its terms umColdError, umColdTermOf are identically
+ *   0: nothing is omitted), and lcAdvect's COLD φ hold stays off; pressureDelta is lane P's per-region max |Δ∇p|
+ *   (pmgC PDELTA, +Inf until published: unknown fails HOT); a 4h tile with no F slot keeps its own heat word,
+ *   updated in censusDecide by the old rule. M3 question, to be measured, not assumed: the freeze against seep's
+ *   BULK pressure-only rows in the deep interior, decided by time and gates.
  * - No solids at M2: every census open mask is all cells (umCensusOpenCells), so the cut branches
  *   (umPlaneBuriedCorners, buried taps, closed edges) drop, and umObstacleAt is false. A body or solid edit
  *   fails explicitly (NB_FAIL_UNSUPPORTED).
