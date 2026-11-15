@@ -117,3 +117,67 @@ measure per cycle:
   (thin films at brick faces). The source of the floor is still to be attributed: the wall
   `max(x + lift, -base)` clamp is active on about 25% of wall faces, and the seam and BULK16
   couplings are unchecked.
+
+## 2026-11-15 P1-1 timing (interleaved A/B, timing slot, f72b3ca6 against f72b3ca6 + item 13)
+
+| scene | fenced ms | pipelined ms/step |
+|---|---|---|
+| seep | 34.76 → 34.20 (−1.6%) | 32.23 → 32.05 (−0.5%) |
+| dam | 46.52 → 45.56 (−2.1%) | 49.81 → 50.71 (+1.8%) |
+| letters | 82.40 → 83.25 (+1.0%) | 70.97 → 69.52 (−2.0%) |
+| paddleboats | 48.88 → 47.38 (−3.1%) | 43.71 → 45.74 (+4.7%) |
+
+Mixed signs, inside the noise. That is expected: the change adds no dispatch and touches no iterate. Metal log
+clean. Report: `~/code/me/fluid-scratch/lane-p1/timing/item13/timing.md`.
+
+## 2026-11-15 FINDING: the Krylov recursive residual drifts; replacing it fixes the 2-norm, not the max-norm floor
+
+These are deep runs: target 5e-4 1/s, `bandCycles` 8, dam frames 40–50, letters frames 120–130, check slot,
+Metal clean.
+- **The deep tree's diagnostic.** It compared the recurrence `KR = r − αq` with the true residual at `KX` at the
+  final measure. Mean log10 max|KR| is −0.13 (dam) and −1.24 (letters). The true residual is −2.24 and −2.49.
+  So the GCR(1) dots see a residual one to two decades larger than the real one, and α and β come from a
+  corrupted r.
+- **Residual replacement.** In experiment tree `trees/rr`, kApplyT and kApplyN recompute the true residual at
+  the step's start, every cycle (van der Vorst & Ye 2000, SIAM J. Sci. Comput. 22(3)). They use kStart's
+  formula, including the wall `max(x + lift, −base)` term. A neighbour's start value is `x − z`, because a
+  neighbour outside the live tile list has a stale `P_KX`.
+  - A first version read the neighbours' `P_KX` directly and lost badly: capped dam 38/61 and letters 41/141.
+  - The fix makes it a valid A/B.
+
+| run | dam: log10 max-norm, cycles 1–9 | dam KRYLOV_L2, cycles 1–8 | letters: log10 max-norm, cycles 1–9 | letters KRYLOV_L2 |
+|---|---|---|---|---|
+| today (recursive KR) | 2.15 … −2.17, −2.32, −2.29, −2.24 | 7.34 → 4.84, 4.81, 4.80, 4.80 | 1.74 … −2.41, −2.49, −2.52, −2.49 | 6.81 → 3.80, 3.72, 3.68 |
+| replaced (true r) | 2.15 … −2.14, −2.40, −2.44, −2.45 | 7.37 → 3.62, 3.07, 2.87 | 1.81 … −2.74, −2.80, −2.76, −2.81 | 6.83 → 2.80, 2.38, 2.29 |
+
+- **The 2-norm plateau was the drift.** With the true r, the 2-norm keeps falling by about 0.2–0.5 a cycle.
+- **The max-norm floor barely moves:** about −0.2 to −0.3 log10.
+- **At the default schedule** (target 0.05, 4 cycles, frames 30–90 and 100–240), the capped counts are inside
+  the noise: dam 27/61 against 29/61, letters 19/141 against 15/141.
+- **Decision: not landed.** It costs an extra neighbour read per row per cycle and gains no cap.
+- **The floor is a few rows** (band free-surface rows, class 7) that the 2-norm minimiser does not weight.
+  Driving it down is the smoother's job: the staggered Schwarz of M0(d). GCR on the max-norm would not do it.
+- **For M1's solver:** use the true residual (or a periodic replacement) in the PCG dots. With a nonlinear wall
+  term and the active set, the recurrence is not trustworthy past about 5 cycles.
+
+## 2026-11-15 Lane P (pressure and bodies) from here
+
+- The structural design was approved at 2f29b9d1, and the brick ABI was frozen at 7bc7514e.
+- This lane is now lane P:
+  - **M0(d):** the staggered Schwarz smoother, the exact coarsest solve and the check before the V-cycle, on
+    today's arena, gated on all four scenes.
+  - **M1:** the same kernels on the brick pool.
+  - **M5:** bodies.
+- Header lanes 128–191, lists 24–29 and args from 512 are this lane's. `PRESSURE_CAP` is STATE bit 0;
+  `FAIL_PIVOT` is a failure.
+- **For M0(d), the evidence so far:**
+  - the arena's exact 32h coarsest gains nothing (item 3 finding above);
+  - the convergence floor is band free-surface rows;
+  - the V-cycle contracts by only about 0.43 a cycle.
+  So the smoother comes first.
+- **The candidate smoother.** pRelax's tiles freeze their halo at the last sweep, so a mode across a 4³ tile
+  face relaxes only through the coarse levels. A second pass over tiles shifted by (2, 0, 2) breaks that. That
+  is the seep's staggered partition, at the arena's 4³ tile instead of its 8³ brick. Post-smoothing applies it
+  in reverse order (Smith, Bjørstad & Gropp 1996, ch. 1–2).
+- **Its gate:** the Float64 symmetry oracle and the thin-film test (the seep-smoother.test.ts model), then
+  capped counts on the probe windows.
