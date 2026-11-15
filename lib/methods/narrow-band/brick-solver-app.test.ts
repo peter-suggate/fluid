@@ -13,7 +13,8 @@ import { resolveMethodValues } from "../../core/method-contract";
 import { sceneDocument } from "../../core/scene-definition";
 import { getSceneDefinition } from "../../core/scenes";
 import { canQueuePreparedGPUAdvance, submitNextPreparedGPUAdvance, BROWSER_GPU_THROUGHPUT_DEPTH } from "../../core/webgpu-renderer";
-import { H, brickAbiWGSL } from "./brick-abi";
+import { FAIL, H, brickAbiWGSL } from "./brick-abi";
+import { SimulationFailureError } from "../../core/simulation-failure";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import type { BrickNBFlipSolver } from "./brick-solver";
 import { createBrickSolver } from "./brick-method";
@@ -136,6 +137,35 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
       console.log(`brick presentation at step ${steps}: min q ${minQ} old ${minOld} shown ${minShown}, ${finite} finite of ${count}, FAR_H ${FAR_H}; ${liquid} liquid vertices; the old F-only copy's sign differs at ${oldWrong}; mismatches ${mismatch}`);
       assert.equal(mismatch, 0, `presentation differs from the tier authority at ${mismatch} vertices, first ${first}`);
       assert.ok(liquid > 0, "the dam has liquid vertices");
+    } finally { solver.destroy(); }
+  });
+});
+
+/**
+ * A latched FAIL reaches the app as a SimulationFailureError ("Simulation HALTED", the renderer's terminal status via
+ * stopAfterSimulationFailure), and the solver refuses further steps: never a silent reset to t = 0 or to another
+ * scene, so a halt cannot be confused with a dev-server hot reload.
+ */
+test("brick solver (GPU): a latched FAIL halts the app explicitly and refuses further steps", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("brick solver halt", async device => {
+    const solver = await damSolver(device);
+    try {
+      const e = solver.brickEngine, dt = e.options.dt_s;
+      solver.advanceTo(dt, []); await solver.assertSimulationHealthy();
+      // A kernel's latch, injected: nbFail ORs FAIL and sets FAIL_INFO once; nothing clears them.
+      e.write("set", H.FAIL, new Uint32Array([FAIL.REACH, 0x52454143]));
+      let halted: unknown;
+      for (let i = 2; i <= 12 && !halted; i++) {
+        solver.advanceTo(i * dt, []);
+        try { await solver.assertSimulationHealthy(); } catch (error) { halted = error; }
+      }
+      assert.ok(halted instanceof SimulationFailureError && halted.message.startsWith("Simulation HALTED: BRICK_REACH")
+        && halted.failure.operands[1] === 0x52454143 && solver.info.simulationFailure?.code === "BRICK_REACH",
+        `a latched FAIL is a SimulationFailureError naming it (got ${String(halted)})`);
+      const submitted = solver.info.submittedTime_s ?? 0, step = Math.round(submitted / dt);
+      assert.equal(solver.advanceTo((step + 5) * dt, []), false, "no step after a halt");
+      assert.equal(solver.info.submittedTime_s, submitted, "the clock holds (no reset, no advance)");
     } finally { solver.destroy(); }
   });
 });
