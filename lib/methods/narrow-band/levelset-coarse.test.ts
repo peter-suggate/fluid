@@ -1,0 +1,692 @@
+// Lane E's T4 kernels (levelset-coarse.wgsl.ts) on a tiered boot: each kernel against a Float64 CPU oracle that
+// reads the GPU's state before it (the chain lcAdvect, lcCouple, lcClear, lcRetire, lcPublish). The state is the
+// column boot's tiers and residency with an analytic φ on every owned vertex, a constant u* on every stored face and
+// hashed lane F tile, cell and vertex words; one page is COLD. Every non-owned φ copy (F copies of C or hanging
+// vertices, C copies no 4h tile owns) holds a NaN payload: no kernel may read it into a result or write it. After each
+// kernel the whole φ pool must equal the state before it except the C vertices the kernel owns, and at the end the
+// velocity pool, fcell, set and dir must be untouched.
+import assert from "node:assert/strict";
+import test from "node:test";
+import { BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, H, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
+import { bringUpCG } from "./brick-bringup-cg";
+import { BrickEngine } from "./brick-engine";
+import { snapshot } from "./brick-readback";
+import { bringUpStages } from "./brick-stages";
+import { FT, FTF, fluidLayout } from "./fluid-grid.wgsl";
+import { levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+
+const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
+type V = [number, number, number];
+const N = 64, NL: V = [N, N, N], FAR = phiFar(NL), f32 = Math.fround;
+const POISON = 0x7fc0beef;
+
+test("levelset-coarse: every kernel's module defines each function once and takes the tier owners", () => {
+  const L = new BrickLayout({ lattice: NL, f: 600, c: 40, b: 0, k: 0, particles: 1024 });
+  assert.throws(() => levelSetCoarseKernels(L, fluidLayout(L)), /tiered/);
+  const kernels = levelSetCoarseKernels(L);
+  for (const [name, k] of Object.entries(kernels)) {
+    const fns = [...k.code.matchAll(/\bfn\s+(\w+)\s*\(/g)].map(m => m[1]!);
+    const twice = fns.filter((f, i) => fns.indexOf(f) !== i);
+    assert.deepEqual(twice, [], `${name}: functions defined twice`);
+    assert.ok(fns.includes(name) && k.code.includes("const FG_TIERED:bool=true"), `${name}: entry and FG_TIERED`);
+    assert.ok(k.code.includes("NB_LIST_C_ALL"), `${name}: dispatched over C_ALL`);
+  }
+  assert.ok(kernels.lcAdvect.code.includes("fn fgSampleVel("), "the advect samples lane F's velocity");
+});
+
+// ---- deterministic hashing
+const hash = (...k: number[]) => { let h = 0x9e3779b9; for (const x of k) { h = Math.imul(h ^ (x | 0), 0x85ebca6b); h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16; } return (h >>> 0) / 4294967296; };
+const fbits = (x: number) => { const b = new Float32Array(1); b[0] = x; return new Uint32Array(b.buffer)[0]!; };
+const bitsf = (u: number) => { const b = new Uint32Array(1); b[0] = u; return new Float32Array(b.buffer)[0]!; };
+
+// ---- the analytic fields (cells, h units) and u* (m/s)
+const phi0 = (v: V) => 0.45 * (v[1] - 21.3) + 2.2 * Math.sin(0.19 * v[0] + 0.4) * Math.cos(0.23 * v[2]) + 0.05 * (v[0] - 30);
+const phi1 = (v: V) => phi0(v) + 0.7 * Math.sin(0.31 * v[0] + 0.17 * v[1] + 0.9);
+const U: V = [0.37, -1.13, 0.23];
+
+// ---- small vector helpers
+const add = (a: V, b: V): V => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub = (a: V, b: V): V => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const mul = (a: V, s: number): V => [a[0] * s, a[1] * s, a[2] * s];
+const flo = (a: V): V => [Math.floor(a[0]), Math.floor(a[1]), Math.floor(a[2])];
+const shr = (a: V, n: number): V => [a[0] >> n, a[1] >> n, a[2] >> n];
+const clampV = (a: V, lo: number | V, hi: number | V): V => a.map((x, i) => Math.min(Math.max(x, typeof lo === "number" ? lo : lo[i]!), typeof hi === "number" ? hi : hi[i]!)) as V;
+const unit = (a: number): V => { const e: V = [0, 0, 0]; e[a] = 1; return e; };
+const corner = (k: number): V => [k & 1, (k >> 1) & 1, k >> 2];
+const maxAbs = (a: V) => Math.max(Math.abs(a[0]), Math.abs(a[1]), Math.abs(a[2]));
+const clamp = (x: number, lo: number, hi: number) => Math.min(Math.max(x, lo), hi);
+const mix = (a: number, b: number, t: number) => a * (1 - t) + b * t;
+const sum8 = (v: number[]) => ((v[0]! + v[5]!) + (v[1]! + v[4]!)) + ((v[2]! + v[7]!) + (v[3]! + v[6]!));
+const signBit = (x: number) => x < 0 || Object.is(x, -0);
+const sign = (x: number) => x > 0 ? 1 : x < 0 ? -1 : 0;
+const inLattice = (c: V) => c.every((x, a) => x >= 0 && x < NL[a]!);
+const lerp8 = (v: number[], f: V) => {
+  const x0 = (1 - f[0]) * v[0]! + f[0] * v[1]!, x1 = (1 - f[0]) * v[2]! + f[0] * v[3]!, x2 = (1 - f[0]) * v[4]! + f[0] * v[5]!, x3 = (1 - f[0]) * v[6]! + f[0] * v[7]!;
+  return (1 - f[2]) * ((1 - f[1]) * x0 + f[1] * x1) + f[2] * ((1 - f[1]) * x2 + f[1] * x3);
+};
+const trilinearWeights = (c: number[], t: V) => sum8(c.map((x, k) => { const b = corner(k); return x * (b[0] ? t[0] : 1 - t[0]) * (b[1] ? t[1] : 1 - t[1]) * (b[2] ? t[2] : 1 - t[2]); }));
+
+/** The brick state as the kernels read it: residency and tiers from dir, φ from the pool words, lane F's words. */
+class World {
+  readonly F: ReturnType<typeof fluidLayout>;
+  readonly dt = f32(1 / 60); readonly hm = f32(1 / N);
+  phi!: Float32Array; // the phi pool (f32 view)
+  constructor(readonly L: BrickLayout, readonly dir: Uint32Array, readonly set: Uint32Array, readonly fcell: Uint32Array) { this.F = fluidLayout(L, { tiered: true }); }
+  base(kind: "F" | "C", ch: string) { return this.L.base("phi", kind, ch); }
+  cslotOfPage(P: V) { const w = this.dir[this.L.dir.page + this.L.pageIndex(P[0], P[1], P[2])]!; return w < SEAM ? w : NONE; }
+  fslotOfBrick(b: V) { const cs = this.cslotOfPage(shr(b, 2)); if (cs === NONE) return NONE; return this.dir[this.L.dir.child + 64 * cs + ((b[0] & 3) | ((b[1] & 3) << 2) | ((b[2] & 3) << 4))]!; }
+  tileInLattice(t: V) { return t.every((x, a) => x >= 0 && 4 * x < NL[a]!); }
+  tileIndex(t: V) { return (t[0] & 7) | ((t[1] & 7) << 3) | ((t[2] & 7) << 6); }
+  tileH(cs: number, i: number) { return ((this.dir[this.L.dir.cmask + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1; }
+  tileOwnerH(t: V) { if (!this.tileInLattice(t)) return false; const cs = this.cslotOfPage(shr(t, 3)); return cs !== NONE && this.tileH(cs, this.tileIndex(t)); }
+  cellOwnerH(c: V) { return this.tileOwnerH(shr(c, 2)); }
+  vertexCoarse(v: V): V | undefined {
+    const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
+    for (let k = 0; k < 8; k++) {
+      const b = corner(k);
+      if (b.some((x, a) => inside[a] && x === 0)) continue;
+      const t = sub(add(tA, b), [1, 1, 1]);
+      if (this.tileInLattice(t) && !this.tileOwnerH(t)) return t;
+    }
+    return undefined;
+  }
+  cOwned(v: V) { return v.every((x, a) => x >= 0 && x <= NL[a]!) && this.vertexCoarse(v) !== undefined; }
+  cVertex(ch: string, T: V) {
+    if (T.some((x, a) => x < 0 || 4 * x > NL[a]!)) return FAR;
+    const cs = this.cslotOfPage(shr(T, 3)); if (cs === NONE) return FAR;
+    return this.phi[this.base("C", ch) + BRICK_STRIDE * cs + this.tileIndex(T)]!;
+  }
+  fVertex(ch: string, v: V) {
+    const s = this.fslotOfBrick(shr(v, 3)); if (s >= SEAM) return FAR;
+    return this.phi[this.base("F", ch) + BRICK_STRIDE * s + cellLocal(v[0], v[1], v[2])]!;
+  }
+  vertexPhi(ch: string, v: V) {
+    if (v.some((x, a) => x < 0 || x > NL[a]!)) return FAR;
+    const T = this.vertexCoarse(v);
+    if (T === undefined) return this.fVertex(ch, v);
+    const t = mul(sub(v, mul(T, 4)), 0.25), values: number[] = [];
+    for (let k = 0; k < 8; k++) {
+      const b = corner(k), w = (b[0] ? t[0] : 1 - t[0]) * (b[1] ? t[1] : 1 - t[1]) * (b[2] ? t[2] : 1 - t[2]);
+      values.push(w > 0 ? w * this.cVertex(ch, add(T, b)) : 0);
+    }
+    return sum8(values);
+  }
+  // lane F's words
+  fgSlot(c: V) { if (c.some(x => x < 0)) return NONE; const b = shr(c, 3); if (!b.every((x, a) => x < Math.floor(NL[a]! / 8) + 1)) return NONE; const s = this.fslotOfBrick(b); return s < SEAM ? s : NONE; }
+  fgCell(s: number, c: V) { return 512 * s + cellLocal(c[0], c[1], c[2]); }
+  tileLoad(c: V, w: number, otherwise: number) { const s = this.fgSlot(c); if (s === NONE) return otherwise; const t = ((c[0] >> 2) & 1) | (((c[1] >> 2) & 1) << 1) | (((c[2] >> 2) & 1) << 2); return this.fcell[this.F.fcell.TILE + FT.WORDS * (8 * s + t) + w]!; }
+  flags(c: V) { return this.tileLoad(c, FT.FLAGS, 0); }
+  dist(c: V, k: number) { return (this.tileLoad(c, FT.DIST, 0xffffffff) >>> (4 * k)) & 15; }
+  reach1(c: V) { return this.dist(c, 0) <= 2; }
+  reach2(c: V) { return this.dist(c, 0) <= 3; }
+  binCount(c: V) {
+    if (!inLattice(c)) return 0;
+    const s = this.fgSlot(c); if (s === NONE) return 0;
+    const count = this.set[this.L.set.binCount + s]!; if (count === 0) return 0;
+    const l = cellLocal(c[0], c[1], c[2]), start = this.fcell[this.F.fcell.RUN + 512 * s + l]!;
+    const end = l < 511 ? this.fcell[this.F.fcell.RUN + 512 * s + l + 1]! : this.set[this.L.set.binStart + s]! + count;
+    return (end - start) >>> 0;
+  }
+  // tiers
+  tileCold(t: V) { const cs = this.cslotOfPage(shr(t, 3)); return cs !== NONE && (this.dir[this.L.dir.crec + 32 * cs + REC.CLASS]! & F_CLASS.COLD) !== 0; }
+  cellStored(c: V) { return inLattice(c) && this.cslotOfPage(shr(c, 5)) !== NONE; }
+  tierCold(v: V) { for (let k = 0; k < 8; k++) { const c = sub(v, corner(k)); if (!this.cellStored(c)) continue; if (!this.tileCold(shr(c, 2))) return false; } return true; }
+  vertexCold(v: V) { for (let k = 0; k < 8; k++) { const c = sub(v, corner(k)); if (this.cellStored(c) && this.tileCold(shr(c, 2))) return true; } return false; }
+  // sampling
+  held(p: V) { return clampV(p, 0, N); }
+  cellOf(v: V) { return clampV(v, 0, N - 1); }
+  widthAt(c: V) { return this.cellOwnerH(c) ? 1 : 4; }
+  sample(ch: string, p: V) {
+    const q = this.held(p), cell = this.cellOf(flo(q)), w = this.widthAt(cell), o = mul(flo(mul(cell, 1 / w)), w), t = mul(sub(q, o), 1 / w);
+    const zt = t.map(x => x === 0);
+    if (zt.filter(Boolean).length >= 2) {
+      const a = !zt[0] ? 0 : !zt[1] ? 1 : 2, l0 = this.vertexPhi(ch, o);
+      if (t[a] === 0) return l0;
+      return l0 * (1 - t[a]!) + this.vertexPhi(ch, add(o, mul(unit(a), w))) * t[a]!;
+    }
+    const c: number[] = []; for (let k = 0; k < 8; k++) c.push(this.vertexPhi(ch, add(o, mul(corner(k), w))));
+    return trilinearWeights(c, t);
+  }
+  // lane F's sampler (FG_SAMPLE_WGSL) over US: every stored face holds U.
+  faceOpen(c: V, a: number) { const t: V = [...c]; t[a] = 0; return inLattice(t) && c[a]! > 0 && c[a]! < N; }
+  faceInLattice(c: V, a: number) { const hi: V = [...NL]; hi[a]! += 1; return c.every((x, i) => x >= 0 && x < hi[i]!); }
+  ffaceStored(c: V, a: number) { return this.fslotOfBrick(shr(c, 3)) < SEAM ? f32(U[a]!) : 0; }
+  cface(T: V, a: number) { if (T.some((x, i) => x < 0 || 4 * x > NL[i]!)) return 0; return this.cslotOfPage(shr(T, 3)) === NONE ? 0 : f32(U[a]!); }
+  facePlane(c: V, a: number) { if (!this.faceInLattice(c, a)) return 0; if (this.cellOwnerH(c) || this.cellOwnerH(sub(c, unit(a)))) return this.ffaceStored(c, a); return this.cface(shr(c, 2), a); }
+  faceU(c: V, a: number) {
+    if (!this.faceInLattice(c, a)) return 0;
+    if (this.cellOwnerH(c) || this.cellOwnerH(sub(c, unit(a)))) return this.ffaceStored(c, a);
+    const T = shr(c, 2), k = c[a]! - 4 * T[a]!;
+    if (k === 0) return this.cface(T, a);
+    const cu: V = [...c]; cu[a] = 4 * T[a]! + 4;
+    return mix(this.cface(T, a), this.facePlane(cu, a), k / 4);
+  }
+  fsCache(T: V, a: number) {
+    const hi: V = [N / 4 - 1, N / 4 - 1, N / 4 - 1]; hi[a]! += 1;
+    const t = clampV(T, 0, hi), c = mul(t, 4);
+    if (!this.faceOpen(c, a)) return 0;
+    if (!this.cellOwnerH(c) && !this.cellOwnerH(sub(c, unit(a)))) return this.cface(t, a);
+    const u = (a + 1) % 3, w = (a + 2) % 3; let s = 0;
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) { const q: V = [...c]; q[u]! += x; q[w]! += y; s += this.faceU(q, a); }
+    return s / 16;
+  }
+  fsCoarse(p: V, a: number) {
+    const off: V = [0.5, 0.5, 0.5]; off[a] = 0;
+    const q = sub(mul(p, 0.25), off), b = flo(q), f = sub(q, b), v: number[] = [];
+    for (let k = 0; k < 8; k++) v.push(this.fsCache(add(b, corner(k)), a));
+    return lerp8(v, f);
+  }
+  fsTap4(c: V, a: number) {
+    const q8 = sub(mul(c, 2), [3, 3, 3]); q8[a] = 2 * c[a]!;
+    const b = shr(q8, 3), f = mul(sub(q8, mul(b, 8)), 1 / 8), t: number[] = [];
+    for (let k = 0; k < 8; k++) { const cr = corner(k), w = (cr[0] ? f[0] : 1 - f[0]) * (cr[1] ? f[1] : 1 - f[1]) * (cr[2] ? f[2] : 1 - f[2]); t.push(w > 0 ? w * this.fsCache(add(b, cr), a) : 0); }
+    return sum8(t);
+  }
+  fsTapH(c: V, a: number) { if (!this.faceOpen(c, a)) return 0; if (this.cellOwnerH(c) || this.cellOwnerH(sub(c, unit(a)))) return this.faceU(c, a); return this.fsTap4(c, a); }
+  fsFine(p: V, a: number) {
+    let s = sub(p, [0.5, 0.5, 0.5]); s[a] = p[a]!;
+    const hi: V = [N - 1, N - 1, N - 1]; hi[a] = N; s = clampV(s, 0, hi);
+    const i0 = flo(s), f = sub(s, i0), low = shr(i0, 2), high = shr(s.map(Math.ceil) as V, 2);
+    let fine = true;
+    for (let k = 0; k < 8; k++) { const b = corner(k); if (!this.tileOwnerH(b.map((x, i) => x ? high[i]! : low[i]!) as V)) fine = false; }
+    const v: number[] = [];
+    for (let k = 0; k < 8; k++) { const c = add(i0, corner(k)); v.push(fine ? (this.faceOpen(c, a) ? this.faceU(c, a) : 0) : this.fsTapH(c, a)); }
+    return lerp8(v, f);
+  }
+  fsFineWeight(p: V) {
+    const q = this.held(p), t = shr(flo(q).map(x => Math.min(x, N - 1)) as V, 2);
+    if (this.dist(mul(t, 4), 2) > 2) return 0;
+    if (this.tileOwnerH(t)) return 1;
+    let fine = 0;
+    for (let k = 0; k < 27; k++) {
+      if (k === 13) continue;
+      const n = sub(add(t, [k % 3, Math.floor(k / 3) % 3, Math.floor(k / 9)]), [1, 1, 1]);
+      if (!this.tileOwnerH(n)) continue;
+      const o = mul(n, 4), d = o.map((x, i) => Math.max(0, x - q[i]!, q[i]! - x - 4)) as V;
+      fine = Math.max(fine, Math.max(0, 1 - maxAbs(d) / 2));
+    }
+    return fine;
+  }
+  vel(p: V, lo = 0, hi = 3): V {
+    const v: V = [0, 0, 0], fine = this.fsFineWeight(p), coarse = Math.max(0, 1 - fine);
+    for (let a = lo; a < hi; a++) { let x = 0; if (fine > 0) x += fine * this.fsFine(p, a); if (coarse > 0) x += coarse * this.fsCoarse(p, a); v[a] = x; }
+    return v;
+  }
+}
+
+// ---- the formulas (levelset-formulas.wgsl.ts), in Float64
+function surfaceTrace(W: World, p: V, oneStep: boolean, fatal: { n: number }): V {
+  const dt = W.dt, h = W.hm;
+  let q = p, x = p, steps = 1, i = 0, base = 0, stage = 0, k1: V = [0, 0, 0], k2: V = [0, 0, 0], two = false, travel = 1;
+  for (let n = 0; n < 387; n++) {
+    const k = mul(W.vel(x), 1 / h);
+    if (stage === 0) {
+      if (k.every(c => c === 0)) { const held = W.held(q); if (held.every((c, a) => c === q[a])) return held; }
+      k1 = k;
+      if (i === 0) {
+        steps = Math.max(1, Math.ceil(dt * maxAbs(k1)) >>> 0);
+        if (oneStep) steps = 1;
+        if (steps > 128) { fatal.n++; return p; }
+        travel = steps; steps = Math.floor((travel + 31) / 32); base = -dt / steps;
+      }
+      x = add(q, mul(k1, base)); stage = 1; continue;
+    }
+    if (stage === 1) {
+      k2 = k;
+      const turn = maxAbs(sub(k2, k1));
+      two = steps - i >= 2 && 2 * Math.abs(base) * maxAbs(k1) <= 2.001 && 2 * Math.abs(base) * turn <= 0.125;
+      x = two ? add(q, mul(sub(mul(k2, 2), k1), 2 * base)) : add(q, mul(add(k1, k2), 0.25 * base));
+      stage = 2; continue;
+    }
+    const end = two ? add(q, mul(add(add(k1, mul(k2, 4)), k), base / 3)) : add(q, mul(add(add(k1, k2), mul(k, 4)), base / 6));
+    i += two ? 2 : 1; q = W.held(end);
+    if (i >= steps) break;
+    x = q; stage = 0;
+  }
+  return q;
+}
+const catmull = (t: number) => { const t2 = t * t, t3 = t2 * t; return [2 * t2 - t3 - t, 3 * t3 - 5 * t2 + 2, 4 * t2 - 3 * t3 + t, t3 - t2].map(x => 0.5 * x); };
+const heldWeights = (w: number[], low: boolean, high: boolean) => { const a = low ? w[0]! : 0, b = high ? w[3]! : 0; return [w[0]! - a, w[1]! + 2 * a - b, w[2]! - a + 2 * b, w[3]! - b]; };
+function cubicLimited(f: V, lowHeld: boolean[], highHeld: boolean[], tap: (x: number, y: number, z: number) => number) {
+  const wx = heldWeights(catmull(f[0]), lowHeld[0]!, highHeld[0]!), wy = heldWeights(catmull(f[1]), lowHeld[1]!, highHeld[1]!), wz = heldWeights(catmull(f[2]), lowHeld[2]!, highHeld[2]!);
+  let value = 0, low = 1e30, high = -1e30, zEndLow = 0, zEndHigh = 0;
+  const upper = f.map(x => x >= 0.5);
+  for (let z = 0; z < 4; z++) {
+    let plane = 0, planeLow = 1e30, planeHigh = -1e30, yEndLow = 0, yEndHigh = 0;
+    for (let y = 0; y < 4; y++) {
+      let row = 0, rowLow = 1e30, rowHigh = -1e30, xEnd = 0;
+      for (let x = 0; x < 4; x++) {
+        const s = tap(x, y, z); row += wx[x]! * s;
+        if (x === 1 || x === 2) { rowLow = Math.min(rowLow, s); rowHigh = Math.max(rowHigh, s); } else if ((x === 3) === upper[0]) xEnd = s;
+      }
+      plane += wy[y]! * row; rowLow = Math.min(rowLow, xEnd); rowHigh = Math.max(rowHigh, xEnd);
+      if (y === 1 || y === 2) { planeLow = Math.min(planeLow, rowLow); planeHigh = Math.max(planeHigh, rowHigh); } else if ((y === 3) === upper[1]) { yEndLow = rowLow; yEndHigh = rowHigh; }
+    }
+    value += wz[z]! * plane; planeLow = Math.min(planeLow, yEndLow); planeHigh = Math.max(planeHigh, yEndHigh);
+    if (z === 1 || z === 2) { low = Math.min(low, planeLow); high = Math.max(high, planeHigh); } else if ((z === 3) === upper[2]) { zEndLow = planeLow; zEndHigh = planeHigh; }
+  }
+  low = Math.min(low, zEndLow); high = Math.max(high, zEndHigh);
+  return clamp(value, low, high);
+}
+const SURFACE_RADIUS = 0.875, SEED_DEPTH = 0.8003905296791061;
+const smoothstep = (e0: number, e1: number, x: number) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+function unionParticle(bulk: number, n2: number) {
+  const sphere = Math.sqrt(n2) - SURFACE_RADIUS, shell = Math.sqrt(Math.max(n2 - 0.125, 0)) - SEED_DEPTH;
+  let excess = bulk - clamp(bulk, Math.min(sphere, shell), Math.max(sphere, shell));
+  if (n2 <= 0.25) excess = Math.max(bulk - sphere, 0);
+  const ripple = SURFACE_RADIUS - SEED_DEPTH;
+  return Math.min(bulk + 1, bulk - excess * smoothstep(0.5 * ripple, ripple, Math.abs(excess)));
+}
+function unionBound(particle: number, bulk: number, held: number, open: number, heldLow: V, heldHigh: V, openLow: V, openHigh: V) {
+  if (open === 8) return Math.max(particle, Math.min(bulk, 1 - held / (4 * open)));
+  if (open > 0) {
+    let gap = -1, bound = 1;
+    for (let a = 0; a < 3; a++) {
+      const low = openLow[a]! > 0 ? heldLow[a]! / (8 * openLow[a]!) : 1, high = openHigh[a]! > 0 ? heldHigh[a]! / (8 * openHigh[a]!) : 1;
+      if (Math.abs(low - high) <= gap) continue;
+      gap = Math.abs(low - high); const lowDense = low >= high;
+      const denseOpen = (lowDense ? openLow[a]! : openHigh[a]!) > 0, sparseOpen = (lowDense ? openHigh[a]! : openLow[a]!) > 0;
+      const sparse = sparseOpen ? (lowDense ? high : low) : 0;
+      bound = denseOpen ? 1 - Math.max(low, high) - sparse : -sparse;
+    }
+    return Math.max(particle, Math.min(bulk, bound));
+  }
+  return particle;
+}
+function bulkDepth(phi: number, p: V, reached: boolean, hasNearest: boolean, low: V, travel: number) {
+  if (phi >= 0) return phi;
+  let depth = 8;
+  if (reached) { depth = 5; if (hasNearest) { const d = low.map((l, a) => Math.max(l - p[a]!, p[a]! - (l + 1), 0)); depth = Math.hypot(...d); } }
+  if (travel > 0) depth = Math.max(depth - travel - 2, 0);
+  return Math.min(phi, -depth);
+}
+function trilinear(v: number[], q: V): [number, number, number, number] {
+  const x00 = mix(v[0]!, v[1]!, q[0]), x10 = mix(v[2]!, v[3]!, q[0]), x01 = mix(v[4]!, v[5]!, q[0]), x11 = mix(v[6]!, v[7]!, q[0]);
+  const y0 = mix(x00, x10, q[1]), y1 = mix(x01, x11, q[1]);
+  const dx = mix(mix(v[1]! - v[0]!, v[3]! - v[2]!, q[1]), mix(v[5]! - v[4]!, v[7]! - v[6]!, q[1]), q[2]);
+  return [dx, mix(x10 - x00, x11 - x01, q[2]), y1 - y0, mix(y0, y1, q[2])];
+}
+function cellDistance(q: V, v: number[]) {
+  let low = v[0]!, high = v[0]!;
+  for (let k = 1; k < 8; k++) { low = Math.min(low, v[k]!); high = Math.max(high, v[k]!); }
+  if (low > 0 || high < 0 || low === high) return -1;
+  let distance = Math.hypot(...q) + Math.sqrt(3);
+  for (let a = 0; a < 3; a++) for (let k = 0; k < 8; k++) {
+    const b = 1 << a; if (k & b) continue; const o = k | b;
+    if (v[k]! * v[o]! > 0 || v[k] === v[o]) continue;
+    const t = clamp(v[k]! / (v[k]! - v[o]!), 0, 1), ck = corner(k), co = corner(o);
+    distance = Math.min(distance, Math.hypot(...sub(q, ck.map((x, i) => mix(x, co[i]!, t)) as V)));
+  }
+  let r = clampV(q, 0, 1);
+  for (let i = 0; i < 6; i++) { const f = trilinear(v, r), g2 = f[0] * f[0] + f[1] * f[1] + f[2] * f[2]; if (g2 < 1e-12) break; r = clampV(sub(r, mul([f[0], f[1], f[2]], f[3] / g2)), 0, 1); }
+  if (Math.abs(trilinear(v, r)[3]) < 1e-4) distance = Math.min(distance, Math.hypot(...sub(q, r)));
+  return distance;
+}
+const farSentinel = (x: number, h: number) => Math.abs(x) > 1e-8 && Math.abs(x) < 6 * h ? sign(x) * 6 * h : x;
+
+// ---- the kernels' oracles (levelset-coarse.wgsl.ts), per C vertex
+interface Lane { cs: number; l: number; v: V }
+function lanes(W: World, slots: number[]): Lane[] {
+  const out: Lane[] = [];
+  for (const cs of slots) {
+    const o = mul(brickKeyCoord(W.dir[W.L.dir.crec + 32 * cs + REC.KEY]!) as V, 32);
+    for (let l = 0; l < 512; l++) { const v = add(o, mul([l & 7, (l >> 3) & 7, l >> 6], 4)); if (W.cOwned(v)) out.push({ cs, l, v }); }
+  }
+  return out;
+}
+/** The page's seed tiles (19^3 about it) and their Chebyshev dilation by reach. */
+function seedsOf(W: World, cs: number) {
+  const P = brickKeyCoord(W.dir[W.L.dir.crec + 32 * cs + REC.KEY]!) as V, T0 = sub(mul(P, 8), [6, 6, 6]);
+  const seed = new Uint8Array(19 ** 3), at = (t: V) => { const r = sub(t, T0); return r.every(x => x >= 0 && x < 19) ? r[0] + 19 * (r[1] + 19 * r[2]) : -1; };
+  for (let z = 0; z < 19; z++) for (let y = 0; y < 19; y++) for (let x = 0; x < 19; x++) {
+    const t = add(T0, [x, y, z]);
+    if (!W.tileInLattice(t)) continue;
+    const tcs = W.cslotOfPage(shr(t, 3)); if (tcs === NONE) continue;
+    const flags = W.flags(mul(t, 4));
+    let s: boolean;
+    if (W.tileH(tcs, W.tileIndex(t))) s = (flags & FTF.AIR_SEED) !== 0;
+    else if (flags & FTF.SURFACE_TILE) s = true;
+    else { s = false; for (let k = 0; k < 8; k++) if (W.cVertex("PHI", add(t, corner(k))) <= 0) s = true; }
+    if (s) seed[x + 19 * (y + 19 * z)] = 1;
+  }
+  const within = (t: V, reach: number) => {
+    const r = sub(t, T0);
+    for (let z = Math.max(0, r[2] - reach); z <= Math.min(18, r[2] + reach); z++) for (let y = Math.max(0, r[1] - reach); y <= Math.min(18, r[1] + reach); y++)
+      for (let x = Math.max(0, r[0] - reach); x <= Math.min(18, r[0] + reach); x++) if (seed[x + 19 * (y + 19 * z)]) return true;
+    return false;
+  };
+  return { seedAt: (t: V) => { const i = at(t); return i >= 0 && seed[i] === 1; }, within };
+}
+
+type Tally = Record<string, number>;
+const bump = (t: Tally, k: string) => { t[k] = (t[k] ?? 0) + 1; };
+
+function advectOracle(W: World, slots: number[], tally: Tally, fatal: { n: number }): Map<string, number> {
+  const out = new Map<string, number>(), dt = W.dt, hm: V = [W.hm, W.hm, W.hm], w = 4;
+  const seeds = new Map<number, ReturnType<typeof seedsOf>>();
+  for (const { cs, l, v } of lanes(W, slots)) {
+    const c = W.phi[W.base("C", "PHI") + BRICK_STRIDE * cs + l]!, key = `${cs}:${l}`, wall = v.some((x, a) => x === 0 || x === NL[a]);
+    if (W.tierCold(v)) { out.set(key, c); bump(tally, wall ? "wall cold" : "cold hold"); continue; }
+    if (c >= 16) {
+      if (!seeds.has(cs)) seeds.set(cs, seedsOf(W, cs));
+      if (!seeds.get(cs)!.within(shr(W.cellOf(v), 2), 5)) { out.set(key, c); bump(tally, wall ? "wall far air" : "far air"); continue; }
+    }
+    bump(tally, wall ? "wall full path" : "full path");
+    // lcFullAdvected
+    const p: V = [...v];
+    let foot = p, shift: V = [0, 0, 0], smoothing = 0;
+    if (Math.abs(c) < 2 * w) {
+      const at: V[] = [];
+      for (let a = 0; a < 3; a++) { const e = mul(unit(a), w); at.push(W.held(sub(p, e)), W.held(add(p, e))); }
+      for (let k = 0; k < 4; k++) { const q: V = [...p]; q[k > 1 ? 2 : 0] += (k & 1 ? 2 : -2) * w; at.push(q); }
+      const t = at.map(q => W.vertexPhi("PHI", flo(q)));
+      const g = [0, 1, 2].map(a => (t[2 * a + 1]! - t[2 * a]!) / Math.max(at[2 * a + 1]![a]! - at[2 * a]![a]!, 1e-6)) as V;
+      const g2 = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+      if (g2 >= 1e-6) { let off = mul(g, -c / g2); const reach = Math.hypot(...off); if (reach > 2 * w) off = mul(off, 2 * w / reach); foot = W.held(add(p, off)); shift = sub(p, foot); bump(tally, "foot"); }
+      const eps = Math.min(0.5 * dt, 0.03125);
+      if (eps > 0 && [t[0]!, t[1]!, t[4]!, t[5]!, t[6]!, t[7]!, t[8]!, t[9]!].some(s => signBit(s) !== signBit(c))) {
+        let s = 0, crossing = false;
+        for (const a of [0, 2]) {
+          if (v[a]! < 8 || v[a]! > N - 8) continue;
+          let part = 6 * c, valid = true, different = false;
+          for (let k = 0; k < 4; k++) {
+            const x = t[k > 1 ? 6 + a + k - 2 : 2 * a + k]!, span = k > 1 ? 2 * w : w;
+            if (Math.abs(x - c) > 1.5 * span) valid = false;
+            if (signBit(x) !== signBit(c)) different = true;
+            part += (k > 1 ? 1 : -4) * x;
+          }
+          if (valid) { s += part; crossing ||= different; }
+        }
+        if (crossing) { smoothing = -eps * s; bump(tally, "smoothing"); }
+      }
+    }
+    const end = surfaceTrace(W, foot, wall, fatal), travel = sub(end, foot);
+    let q = end;
+    if (shift.some(x => x !== 0)) q = W.held(add(end, shift));
+    const cell = W.cellOf(flo(q)), width = W.widthAt(cell), origin = mul(flo(mul(cell, 1 / width)), width), f = mul(sub(q, origin), 1 / width);
+    const corners: number[] = []; for (let k = 0; k < 8; k++) corners.push(W.vertexPhi("PHI", add(origin, mul(corner(k), width))));
+    let value = trilinearWeights(corners, f);
+    const moved = smoothing * clamp(2 - 2 * maxAbs(sub(q, p)) / 4, 0, 1);
+    if (Math.abs(value) < 2 * w) {
+      bump(tally, "cubic");
+      value = cubicLimited(f, origin.map(x => x - width < 0), origin.map((x, a) => x + 2 * width > NL[a]!),
+        (x, y, z) => W.vertexPhi("PHI", clampV(add(origin, mul([x - 1, y - 1, z - 1], width)), 0, NL)));
+    }
+    // lcWallContact
+    const tr: V = [...travel]; let contact = false;
+    for (let k = 0; k < 6; k++) {
+      const a = k >> 1, upper = (k & 1) === 1, inward = upper ? -1 : 1;
+      if (!(upper ? p[a] === NL[a] : p[a] === 0)) continue;
+      const probe: V = [...p]; probe[a] += inward * 4;
+      const speed = W.vel(probe, a, a + 1)[a]!;
+      if (inward * speed >= -1e-6) continue;
+      contact = true; tr[a] = -dt * speed / hm[a]!;
+    }
+    if (contact) { const m = W.sample("PHI", W.held(add(p, tr))); if (m < value) bump(tally, "wall contact"); value = Math.min(value, m); }
+    out.set(key, value + moved);
+  }
+  return out;
+}
+
+function heatCorner(W: World, base: V, k: number, surface: boolean): [number, number] {
+  const t = clampV(add(base, corner(k)), 0, N / 4 - 1);
+  const heat = bitsf(W.tileLoad(mul(t, 4), surface ? FT.SURF : FT.THETA, 0));
+  if (surface && heat <= 0 && W.sample("PHI1", add(mul(t, 4), [2, 2, 2])) >= 0) return [heat, 0];
+  return [heat, 1];
+}
+function interpolatedHeat(W: World, p: V, surface: boolean) {
+  const q = sub(mul(p, 0.25), [0.5, 0.5, 0.5]), base = flo(q), f = sub(q, base);
+  let theta = 0, covered = 0;
+  for (let k = 0; k < 8; k++) {
+    const b = corner(k), cr = heatCorner(W, base, k, surface); if (cr[1] <= 0) continue;
+    const weight = (b[0] ? f[0] : 1 - f[0]) * (b[1] ? f[1] : 1 - f[1]) * (b[2] ? f[2] : 1 - f[2]);
+    covered += weight; theta += weight * clamp(cr[0] - (surface ? 1 : 0), 0, 1);
+  }
+  return clamp(theta / Math.max(covered, 1e-20), 0, 1);
+}
+function coupleOracle(W: World, slots: number[], tally: Tally): Map<string, number> {
+  const out = new Map<string, number>(), dt = W.dt, hm = W.hm;
+  for (const { cs, l, v } of lanes(W, slots)) {
+    if (W.vertexCold(v)) { bump(tally, "cold"); continue; }
+    const key = `${cs}:${l}`, q = v, theta = interpolatedHeat(W, q, false), band = W.sample("PHI1", q);
+    if (theta <= 0) { out.set(key, band); bump(tally, "no heat"); continue; }
+    const c = W.cellOf(v), s = W.fgSlot(c);
+    let travel = 0;
+    if (s !== NONE) { const cells = bitsf(W.fcell[W.F.fcell.BOUND + s]!) * dt / hm; if (cells > 0) travel = 4 * Math.ceil(cells / 4); }
+    const reached = W.reach1(c);
+    let nearest = NONE; if (reached && s !== NONE) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!;
+    const bulk = bulkDepth(band, q, reached, nearest !== NONE, [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], travel);
+    if (!((W.flags(c) & FTF.SURFACE_TILE) !== 0 && bulk > -2)) { out.set(key, bulk); bump(tally, "bulk"); continue; }
+    const vs = W.fgSlot(v);
+    let k = 0, hot = 0; if (vs !== NONE) { k = W.fcell[W.F.fcell.KEY + W.fgCell(vs, v)]!; hot = W.fcell[W.F.fcell.HOT + W.fgCell(vs, v)]!; }
+    const n2 = k === 0 ? 4 : bitsf((~k) >>> 0);
+    if (n2 >= 4) { out.set(key, bulk); bump(tally, "no sample"); continue; }
+    let particle = unionParticle(bulk, n2);
+    if (particle < bulk) {
+      let held = 0, open = 0; const hl: V = [0, 0, 0], hh: V = [0, 0, 0], ol: V = [0, 0, 0], oh: V = [0, 0, 0];
+      for (let j = 0; j < 8; j++) {
+        const b = corner(j), cc = sub(add(v, b), [1, 1, 1]);
+        if (!inLattice(cc) || W.fgSlot(cc) === NONE) continue;
+        const n = Math.min(W.binCount(cc), 8); open++; held += n;
+        for (let a = 0; a < 3; a++) if (b[a]) { hh[a] += n; oh[a]++; } else { hl[a] += n; ol[a]++; }
+      }
+      if (held > 0) bump(tally, "bound bins");
+      particle = unionBound(particle, bulk, held, open, hl, hh, ol, oh);
+      bump(tally, "union adds");
+    }
+    let blend = theta;
+    if (particle > bulk) {
+      if (!(hot !== 0 && bitsf((~hot) >>> 0) <= n2)) { out.set(key, bulk); bump(tally, "erasure refused"); continue; }
+      blend = interpolatedHeat(W, q, true); bump(tally, "erasure");
+    }
+    out.set(key, mix(bulk, particle, blend)); bump(tally, "union");
+  }
+  return out;
+}
+
+function clearOracle(W: World, slots: number[], tally: Tally): Map<string, number> {
+  const out = new Map<string, number>();
+  const bySlot = new Map<number, Lane[]>();
+  for (const lane of lanes(W, slots)) { if (!bySlot.has(lane.cs)) bySlot.set(lane.cs, []); bySlot.get(lane.cs)!.push(lane); }
+  for (const [cs, ls] of bySlot) {
+    const value = (l: number) => W.phi[W.base("C", "PHI") + BRICK_STRIDE * cs + l]!;
+    if (!ls.some(x => value(x.l) < 16)) continue;
+    const S = seedsOf(W, cs);
+    for (const { l, v } of ls) {
+      const x = value(l);
+      if (x >= 16) continue;
+      let prot = false;
+      for (let k = 0; k < 8; k++) { const t = shr(sub(v, corner(k)), 2); if (x <= 0 ? S.seedAt(t) : S.within(t, 4)) prot = true; }
+      if (prot) { bump(tally, x <= 0 ? "seed" : "collar"); continue; }
+      if (W.vertexCold(v)) { bump(tally, "cold"); continue; }
+      out.set(`${cs}:${l}`, Math.max(x, 16)); bump(tally, "raised");
+    }
+  }
+  return out;
+}
+
+function retireOracle(W: World, slots: number[], tally: Tally): Map<string, number> {
+  const out = new Map<string, number>();
+  const gradient = (c: V, q: V) => {
+    const width = W.widthAt(c), o = mul(flo(mul(c, 1 / width)), width), f = mul(sub(q, o), 1 / width), v: number[] = [];
+    for (let k = 0; k < 8; k++) v.push(W.vertexPhi("PHI", add(o, mul(corner(k), width))));
+    const t = trilinear(v, f);
+    return { g: [t[0] / width, t[1] / width, t[2] / width] as V, value: trilinearWeights(v, f) };
+  };
+  const build = (v: V, c: V) => {
+    const initial = W.sample("PHI", v);
+    if (Math.abs(initial) <= 1e-8) return initial;
+    let nearest = NONE;
+    if (W.reach1(c)) { const s = W.fgSlot(c); if (s !== NONE) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!; }
+    let distance = Math.max(Math.abs(initial), 5);
+    if (nearest !== NONE) {
+      const base: V = [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], cv: number[] = [];
+      for (let k = 0; k < 8; k++) cv.push(W.vertexPhi("PHI", add(base, corner(k))));
+      const cand = cellDistance(sub(v, base), cv); if (cand >= 0) { distance = cand; bump(tally, "crossing cell"); }
+    }
+    if (Math.abs(initial) < 4.5) {
+      let q: V = [...v], cell = W.cellOf(flo(q));
+      for (let it = 0; it < 5; it++) {
+        const s = gradient(cell, q);
+        if (Math.abs(s.value) < 1e-5) { distance = Math.min(distance, Math.hypot(...sub(q, v))); break; }
+        const g2 = s.g[0] ** 2 + s.g[1] ** 2 + s.g[2] ** 2; if (g2 < 1e-8) break;
+        q = W.held(sub(q, mul(s.g, clamp(s.value / Math.sqrt(g2), -1.5, 1.5) / Math.sqrt(g2)))); cell = W.cellOf(flo(q));
+      }
+      bump(tally, "newton");
+    }
+    return sign(initial) * Math.max(distance, 1e-8);
+  };
+  const closed = (q: V) => { for (let k = 0; k < 8; k++) if (inLattice(sub(q, corner(k)))) return false; return true; };
+  const zeroOpen = (p: V) => { const lo = sub(p.map(Math.ceil) as V, [1, 1, 1]), hi = flo(p); for (let k = 0; k < 8; k++) if (inLattice(corner(k).map((b, a) => b ? hi[a]! : lo[a]!) as V)) return true; return false; };
+  const bound = (v: V, d: number) => {
+    let at = 0, b = Math.abs(d);
+    for (let a = 0; a < 7; a++) {
+      const q: V = [...v]; if (a > 0) q[(a - 1) >> 1] += ((a - 1) & 1) ? -4 : 4;
+      if (q.some(x => x < 0)) continue;
+      if (a > 0 && closed(q)) continue;
+      const n = W.sample("PHI", q);
+      if (a === 0) at = n;
+      else if (at * n < 0) {
+        const t = Math.abs(at) / (Math.abs(at) + Math.abs(n)), axis = (a - 1) >> 1, zero: V = [...v]; zero[axis] = mix(v[axis]!, q[axis]!, t);
+        if (zeroOpen(zero)) b = Math.min(b, 4 * t);
+      }
+    }
+    return d >= 0 ? b : -b;
+  };
+  for (const { cs, l, v } of lanes(W, slots)) {
+    const cur = W.phi[W.base("C", "PHI") + BRICK_STRIDE * cs + l]!, key = `${cs}:${l}`;
+    if (W.vertexCold(v)) { out.set(key, cur); bump(tally, "cold"); continue; }
+    const c = W.cellOf(v), t = shr(c, 2);
+    let fine = false; for (let k = 0; k < 27; k++) if (W.tileOwnerH(sub(add(t, [k % 3, Math.floor(k / 3) % 3, Math.floor(k / 9)]), [1, 1, 1]))) fine = true;
+    let hot = false; const base = sub(shr(v, 2), [1, 1, 1]);
+    for (let k = 0; k < 8; k++) if (bitsf(W.tileLoad(mul(clampV(add(base, corner(k)), 0, N / 4 - 1), 4), FT.SURF, 0)) > 1) hot = true;
+    if (!fine || hot) { out.set(key, cur); bump(tally, fine ? "hot" : "no h stencil"); continue; }
+    if (W.reach2(c)) { out.set(key, bound(v, build(v, c))); bump(tally, "rebuilt"); continue; }
+    const x = farSentinel(cur, 1); out.set(key, x); bump(tally, x !== cur ? "sentinel" : "far kept");
+  }
+  return out;
+}
+
+test("levelset-coarse (GPU): advect, couple, clear, retire and publish of the 4h corners match the CPU oracle", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("levelset coarse", async device => {
+    const stages = (c: Parameters<typeof bringUpStages>[0]) => ({ ...bringUpStages(c), tiered: true, buffers: { fcell: fluidLayout(c.layout, { tiered: true }).fcell.words } });
+    const e = await BrickEngine.create(device, { lattice: NL, h_m: 1 / N, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
+      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [30.3, 40.3, 30.3] }], solver: L => bringUpCG(L), stages });
+    const L = e.layout, s0 = await snapshot(e), F = fluidLayout(L, { tiered: true });
+    assert.equal(s0.header[H.FAIL], 0);
+    const slots = s0.list(LIST.C_ALL);
+    assert.equal(slots.length, s0.pages.size, "C_ALL lists every page");
+    // ---- lane F's words: hashed tile flags, distances and heats; crossing cells; splat keys; bounds; bins.
+    const fcell = new Uint32Array(F.fcell.words), set = new Uint32Array(s0.set);
+    for (const [bk, fs] of s0.bricks) {
+      const b = brickKeyCoord(bk) as V;
+      for (let t = 0; t < 8; t++) {
+        const T = add(mul(b, 2), corner(t)), w = (k: number) => F.fcell.TILE + FT.WORDS * (8 * fs + t) + k, r = (k: number) => hash(T[0], T[1], T[2], k);
+        let flags = 0;
+        if (T[1] <= 6 && r(1) < 0.3) flags |= FTF.SURFACE_TILE;
+        if (T[1] <= 6 && r(2) < 0.3) flags |= FTF.AIR_SEED;
+        fcell[w(FT.FLAGS)] = flags;
+        let dist = 0; for (let k = 0; k < 8; k++) { const x = r(10 + k); dist |= (x < 0.15 ? 15 : Math.floor(x * 5)) << (4 * k); }
+        fcell[w(FT.DIST)] = dist >>> 0;
+        fcell[w(FT.THETA)] = fbits(r(3) < 0.65 ? f32(1.4 * r(4)) : 0);
+        fcell[w(FT.SURF)] = fbits(r(5) < 0.4 ? f32(1.3 * r(6)) : 0);
+      }
+      fcell[F.fcell.BOUND + fs] = fbits(f32(0.2 + 3 * hash(bk, 7)));
+      const start = 4096 * fs; let at = start;
+      for (let l = 0; l < 512; l++) {
+        const c = add(mul(b, 8), [l & 7, (l >> 3) & 7, l >> 6]), r = (k: number) => hash(c[0], c[1], c[2], 100 + k);
+        fcell[F.fcell.RUN + 512 * fs + l] = at; at += Math.floor(r(0) * 11);
+        // The nearest crossing cell: half the cells name the cell of phi0's zero on their column (as lane F's
+        // redistance would), a quarter a hashed cell near them, a quarter none.
+        const zero = Math.floor(21.3 - (2.2 * Math.sin(0.19 * c[0] + 0.4) * Math.cos(0.23 * c[2]) + 0.05 * (c[0] - 30)) / 0.45);
+        const near: V = r(1) < 0.5 ? [c[0], clamp(zero, 0, N - 1), c[2]] : clampV(add(c, [Math.floor(5 * r(2)) - 2, Math.floor(5 * r(3)) - 2, Math.floor(5 * r(4)) - 2]), 0, N - 1);
+        fcell[F.fcell.NEAR + 512 * fs + l] = r(9) < 0.75 ? (near[0] | (near[1] << 10) | (near[2] << 20)) >>> 0 : NONE;
+        if (r(5) < 0.6) fcell[F.fcell.KEY + 512 * fs + l] = (~fbits(f32(4.5 * r(6)))) >>> 0;
+        if (r(7) < 0.5) fcell[F.fcell.HOT + 512 * fs + l] = (~fbits(f32(4 * r(8)))) >>> 0;
+      }
+      set[L.set.binStart + fs] = start; set[L.set.binCount + fs] = at - start;
+    }
+    // ---- two COLD pages: (1, 0, 1) on the floor away from the column, (0, 1, 1) in the air above the surface.
+    const dir = new Uint32Array(s0.dir), coldSlots = [brickKey(1, 0, 1), brickKey(0, 1, 1)].map(k => s0.pages.get(k)!);
+    assert.ok(coldSlots.every(cs => cs !== undefined), "the COLD pages are resident");
+    for (const cs of coldSlots) dir[L.dir.crec + 32 * cs + REC.CLASS]! |= F_CLASS.COLD;
+    // ---- φ: analytic on owned vertices, NaN payloads on every other copy; u* = U on every stored face.
+    const phiWords = new Uint32Array(await e.read("phi")), W = new World(L, dir, set, fcell);
+    W.phi = new Float32Array(phiWords.buffer);
+    const put = (kind: "F" | "C", ch: string, slot: number, l: number, x: number | undefined) => { const i = L.base("phi", kind, ch) + BRICK_STRIDE * slot + l; if (x === undefined) phiWords[i] = POISON; else W.phi[i] = x; };
+    let poisonF = 0, poisonC = 0;
+    for (const [bk, fs] of s0.bricks) {
+      const b = brickKeyCoord(bk) as V;
+      for (let l = 0; l < 512; l++) {
+        const v = add(mul(b, 8), [l & 7, (l >> 3) & 7, l >> 6]), own = v.every((x, a) => x <= NL[a]!) && W.vertexCoarse(v) === undefined;
+        if (!own) poisonF++;
+        put("F", "PHI", fs, l, own ? phi0(v) : undefined); put("F", "PHI1", fs, l, own ? phi1(v) : undefined);
+      }
+    }
+    for (const [pk, cs] of s0.pages) {
+      const P = brickKeyCoord(pk) as V;
+      for (let l = 0; l < 512; l++) {
+        const v = add(mul(P, 32), mul([l & 7, (l >> 3) & 7, l >> 6], 4)), own = W.cOwned(v);
+        if (!own) poisonC++;
+        put("C", "PHI", cs, l, own ? phi0(v) : undefined); put("C", "PHI1", cs, l, own ? phi1(v) : undefined);
+      }
+    }
+    const velWords = new Uint32Array(await e.read("vel")), vel = new Float32Array(velWords.buffer);
+    for (let a = 0; a < 3; a++) for (const kind of ["F", "C"] as const) {
+      const n = (kind === "F" ? L.cap.f : L.cap.c) * BRICK_STRIDE, at = L.base("vel", kind, `US${a}`);
+      vel.fill(f32(U[a]!), at, at + n);
+    }
+    e.write("phi", 0, phiWords); e.write("vel", 0, velWords); e.write("fcell", 0, fcell); e.write("set", 0, set); e.write("dir", 0, dir);
+    const kernels = levelSetCoarseKernels(L, F), listC = { indirect: 12 * LIST.C_ALL };
+    console.log(`levelset-coarse: ${s0.bricks.size} F, ${s0.pages.size} C pages, ${lanes(W, slots).length} C vertices, COLD pages ${coldSlots.map(cs => brickKeyCoord(dir[L.dir.crec + 32 * cs + REC.KEY]!).join(",")).join(" ")}; poisoned ${poisonF} F and ${poisonC} C copies`);
+
+    // ---- one kernel: run, then the φ pool differs from before only at the expected C words, by the oracle's values.
+    const step = async (name: keyof typeof kernels, ch: "PHI" | "PHI1", oracle: (W: World, tally: Tally) => Map<string, number>, tol: (x: number) => number) => {
+      const before = new Uint32Array(await e.read("phi"));
+      W.phi = new Float32Array(before.slice().buffer);
+      const tally: Tally = {}, want = oracle(W, tally);
+      await e.run([{ kernel: kernels[name], dispatch: listC }]);
+      const after = await e.read("phi"), af = new Float32Array(after.buffer);
+      const header = (await e.read("set", 0, 256));
+      assert.equal(header[H.FAIL], 0, `${name}: FAIL ${header[H.FAIL]} info ${header[H.FAIL_INFO]}`);
+      const expected = new Map<number, number>();
+      for (const [k, x] of want) { const [cs, l] = k.split(":").map(Number) as [number, number]; expected.set(L.base("phi", "C", ch) + BRICK_STRIDE * cs + l, x); }
+      let stray = 0, bad = 0, worst = 0; const report: string[] = [];
+      for (let i = 0; i < after.length; i++) {
+        const x = expected.get(i);
+        if (x === undefined) { if (after[i] !== before[i]) { stray++; if (report.length < 8) report.push(`stray write at ${i}: ${before[i]} -> ${after[i]}`); } continue; }
+        const err = Math.abs(af[i]! - x);
+        if (!(err <= tol(x))) { bad++; if (report.length < 8) report.push(`word ${i}: gpu ${af[i]} oracle ${x}`); }
+        else worst = Math.max(worst, err);
+      }
+      console.log(`${name}: ${want.size} C vertices, worst |err| ${worst.toExponential(2)}; ${JSON.stringify(tally)}`);
+      assert.equal(stray, 0, `${name}: writes outside its C vertices\n${report.join("\n")}`);
+      assert.equal(bad, 0, `${name}: ${bad} vertices off the oracle\n${report.join("\n")}`);
+      return tally;
+    };
+    const rel = (k: number) => (x: number) => k * Math.max(1, Math.abs(x));
+    const fatal = { n: 0 };
+    const tA = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
+    assert.equal(fatal.n, 0);
+    for (const k of ["cold hold", "far air", "full path", "wall full path", "foot", "smoothing", "cubic", "wall contact"]) assert.ok((tA[k] ?? 0) > 0, `advect exit ${k} covered`);
+    const tC = await step("lcCouple", "PHI", (W, t) => coupleOracle(W, slots, t), rel(2e-4));
+    for (const k of ["cold", "no heat", "bulk", "union", "union adds", "erasure", "erasure refused"]) assert.ok((tC[k] ?? 0) > 0, `couple path ${k} covered`);
+    const tL = await step("lcClear", "PHI", (W, t) => clearOracle(W, slots, t), rel(0));
+    for (const k of ["raised", "seed", "collar", "cold"]) assert.ok((tL[k] ?? 0) > 0, `clear path ${k} covered`);
+    const tR = await step("lcRetire", "PHI1", (W, t) => retireOracle(W, slots, t), rel(2e-4));
+    for (const k of ["cold", "no h stencil", "hot", "rebuilt", "crossing cell", "newton", "sentinel"]) assert.ok((tR[k] ?? 0) > 0, `retire path ${k} covered`);
+    // lcPublish: PHI takes PHI1 at every C vertex.
+    await step("lcPublish", "PHI", W => {
+      const m = new Map<string, number>();
+      for (const { cs, l } of lanes(W, slots)) m.set(`${cs}:${l}`, W.phi[L.base("phi", "C", "PHI1") + BRICK_STRIDE * cs + l]!);
+      return m;
+    }, rel(0));
+    // ---- nothing else moved.
+    const words = (a: Uint32Array, b: Uint32Array) => { let n = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++; return n; };
+    assert.equal(words(await e.read("vel"), velWords), 0, "vel untouched");
+    assert.equal(words(await e.read("fcell"), fcell), 0, "fcell untouched");
+    assert.equal(words(await e.read("set"), set), 0, "set untouched");
+    assert.equal(words(await e.read("dir"), dir), 0, "dir untouched");
+  });
+});
