@@ -33,7 +33,7 @@ import "../lib/methods";
 import { getMethod } from "../lib/core/method-registry";
 import { resolveMethodValues, type GPUSolverInstance } from "../lib/core/method-contract";
 import { sceneDocument } from "../lib/core/scene-definition";
-import { getSceneDefinition } from "../lib/core/scenes";
+import { findSceneDefinition } from "../lib/core/scenes";
 import { managedGPUDevice, whenGPUCompilationIdle } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
@@ -54,7 +54,10 @@ assert.match(name, /^[A-Za-z0-9._-]+$/);
 const sets = Object.fromEntries(args.filter(a => a.startsWith("--set=")).map(a => { const [k, ...v] = a.slice(6).split(":"); const t = v.join(":"); return [k!, t !== "" && Number.isFinite(Number(t)) ? Number(t) : t === "true" ? true : t === "false" ? false : t]; }));
 
 const method = getMethod(METHOD);
-const definition = getSceneDefinition(sceneId);
+// Exact lookup: getSceneDefinition falls back to the catalogue's first scene on an unknown id, which once ran
+// lane P2's p1b on water-box-dam-break as "letters" (docs/plans/nbflip-port/progress-lane-f.md, M0(c)).
+const definition = findSceneDefinition(sceneId);
+assert.ok(definition, `Unknown scene id: ${sceneId}`);
 const scene = sceneDocument(definition);
 const profile = definition.methodProfile?.methodId === METHOD ? definition.methodProfile : undefined;
 const quality = profile?.quality ?? "balanced";
