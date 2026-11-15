@@ -187,7 +187,6 @@ function assertConsistent(e: BrickEngine, s: BrickSnapshot, fail = 0) {
     assert.equal(d[r + REC.MASK], 0xff | (brickLocal(b[0], b[1], b[2]) << 8));
     const cls = d[r + REC.CLASS]!;
     assert.equal(cls & (F_CLASS.ENTERING | F_CLASS.LEAVING), 0, `brick ${b} class 0x${cls.toString(16)}`);
-    assert.ok(cls & F_CLASS.LIQUID, "M1: F_LIQ = F_ALL");
   }
   for (const [, cs] of s.pages) {
     const children = [...s.bricks.values()].filter(slot => d[L.dir.frec + 32 * slot + REC.PARENT] === cs).length;
@@ -199,7 +198,8 @@ function assertConsistent(e: BrickEngine, s: BrickSnapshot, fail = 0) {
   const free = Array.from(s.set.subarray(L.set.freeF, L.set.freeF + hd[H.TOP_F]!));
   assert.deepEqual([...new Set([...free, ...slots])].sort((a, b) => a - b), Array.from({ length: L.cap.f }, (_, i) => i), "free stack and live slots partition the pool");
   assert.deepEqual(new Set(s.list(LIST.F_ALL)), slots);
-  assert.deepEqual(new Set(s.list(LIST.F_LIQ)), slots);
+  // F_LIQ: the live bricks setMark classed LIQUID (an h-owned φ < 0 vertex).
+  assert.deepEqual(new Set(s.list(LIST.F_LIQ)), new Set([...slots].filter(slot => d[L.dir.frec + 32 * slot + REC.CLASS]! & F_CLASS.LIQUID)));
   assert.deepEqual(new Set(s.list(LIST.C_ALL)), new Set(s.pages.values()));
 }
 

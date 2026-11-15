@@ -392,9 +392,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
       let cls=atomicLoad(&dir[r+NB_REC_CLASS]);
       if((cls&NB_CLASS_LEAVING)!=0u){atomicStore(&dir[r+NB_REC_KEY],NB_NONE);}
       else{
-        // F_LIQ = F_ALL until lane P's row list lands (P then reads no F_LIQ; 2026-11-15): setMark's LIQUID bit is the
-        // real class, ORed here for every live brick meanwhile.
-        let c=(cls&~NB_CLASS_ENTERING)|NB_CLASS_LIQUID;atomicStore(&dir[r+NB_REC_CLASS],c);
+        let c=cls&~NB_CLASS_ENTERING;atomicStore(&dir[r+NB_REC_CLASS],c);
         nbAppend(NB_LIST_F_ALL,i);
         var a=atomicLoad(&nbSet[NB_S_ACT+i]);
         if(cfg.z==2u){a=NB_ACT_NOW;atomicStore(&nbSet[NB_S_ACT+i],a);}

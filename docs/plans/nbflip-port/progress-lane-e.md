@@ -686,3 +686,27 @@ NEAR, DEPTH; reach 5 tiles in lDilate, beyond the 3-tile dilation). Open: whethe
 F_ALL's (a shadow-value trajectory, not poison), before F moves its dispatches.
 Checks: check:types (the 3 lane-n errors), test:unit 1833 pass 0 fail, brick-set, brick-set-tiers and
 brick-engine GPU suites 20/20 (rc 0, no 00000206).
+
+## 2026-11-15 — F_ACT gate passed; F_LIQ is the real class
+
+Gate (a), the complete-state shadow trajectory (tiered dam, 60 steps, rc 0, no 00000206):
+- Method:
+  - The reference runs every kernel on F_ALL.
+  - Per kernel, a control rerun on F_ALL marks the nondeterministic words (pScan, pMove, pSeed, pScatter atomics; particles are compared as canonical multisets).
+  - The variant then runs the moved kernel on F_ACT over the same input.
+  - Every word it writes or leaves must match the reference, except stale words that nothing reads later.
+- Result: depTotal 0 (no kernel read a stale word) and diffTotal 0 (no written word differs).
+- Moved, 15 kernels: uCache, vGauge, lAdvect, lSplat, lUnion, lClear, lNear, lDistance, lPublish, pSeed, uAdvect, pDeposit, uViscous, uTransfer, uExtend.
+- Kept on F_ALL: lInit, pScan, pTiles, lTiles and lDilate.
+  - lDilate's separable Chebyshev transform reaches R = 5 tiles, beyond ACT_DILATION = 3.
+  - When lTiles and lDilate ran on F_ACT, the derived TILE FLAGS/DA/DB/DIST words went stale and were read: a real divergence. Both are light, so they stay.
+- Hand-off: the move patch went to lane F (brick-fluid-stages.ts is lane F's). Lane F applies it after its item-1 round.
+
+On the dam, F_ACT ≈ F_ALL:
+- F_ACT is 557 at step 0, 1838 at step 10, 4105 at step 20 and 4594 at step 30;
+- it equals liveF from about step 28;
+- so on the dam the gain comes from (b), the local residency, not from the lists.
+
+F_LIQ:
+- setLists no longer ORs LIQUID onto every live brick. F_LIQ is setMark's class (an h-owned φ < 0 vertex), since lane P reads no F_LIQ (04298677, b9315489).
+- brick-engine.test.ts checks F_LIQ against the records' LIQUID bit.

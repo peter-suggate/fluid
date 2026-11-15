@@ -244,7 +244,8 @@ rules above through the directory and masks:
 
 **Schedule** (`BrickEngine.scheduleFor`, landed 2026-11-15):
 - Part 1 opens with the head. This is `setCensus` (`brickCensusSchedule`: censusBegin, censusFine
-  on F_ALL (G1), then censusCoarse, censusCubes (G1), censusImportance and censusDecide on C_ALL; the C passes
+  on F_ALL's X8 (a workgroup a brick's tile, a lane a cell, the tile's 5^3 vertices and 240 faces staged once),
+  then censusCoarse, censusCubes (G1), censusImportance and censusDecide on C_ALL; the C passes
   but censusCubes run on C_ALL's X8, a workgroup a page's 64-tile slab, a lane a tile). When
   tiered, the claims of the census's ring bricks follow, then `censusWant` (C_ALL, X8), then
   `brickTransferSchedule`, then the churn clear. After the head come F's `move` and `rebin`.
@@ -297,16 +298,17 @@ rules above through the directory and masks:
    yet. Their data is restricted first.
 3. `setTransfer` (brick-transfer.wgsl.ts, landed 2026-11-15) is NB-FLIP's remap verbatim on this
    storage (F's `nbfRemap*` for the formulas):
-   - `setTransferList` lists tiles with `markTile` and `listedFlags` over the tiles of C_ALL, into
+   - `setTransferList` lists tiles with `markTile` and `listedFlags` over the tiles of C_ALL (X8, a lane a tile), into
      `TLIST` (`set.tlist`, 2 words an entry: `cs << 9 | tile`, flags; `cap.t` entries, default
      2 FCAP, over it `FAIL.LIST`). It counts into `H.N_TLIST`. `setTransferArgs` moves the count
      to `N_TLIST_RUN` and writes `ARGS.XFER_G1`.
-   - `setTransferFaces` (192 lanes a job, `cfg.z` = U or US; UP is not carried) is
+   - `setTransferFaces` (192 lanes a job, channel U then US in the same workgroup; UP is not carried) is
      `remapTileFaces` with `remapBeside`, `remapSlope`, `remapSample` and `remapFace`, the
      low-wall rows included. Old faces are read through CMASK, new placement through WANT. Values
-     go to the `xfer` scratch (`2 · 384 · cap.t` floats). `setTransferCommit` then stores them: an h face in F at its upper
+     go to the `xfer` scratch (`2 · 384 · cap.t` floats). `setTransferCommit` then stores them (both channels): an h face in F at its upper
      cell, a 4h face in C at its upper tile. That is the old remap's second texture.
-   - `setTransferCells` handles `remapTileCells`' vertices (surfaceOnly) in place, φ = `PHI`. A
+   - `setTransferFaces`' lanes 0..63 then take `remapTileCells`' vertices (surfaceOnly) in place, φ = `PHI`
+     (the separate `setTransferCells` pass until 2026-11-15; the face jobs read no φ). A
      vertex the old layout stored keeps its value and moves to its new storage when that
      changes. A refining tile moves its own corners to F, because their new authority tile may
      not be listed.
@@ -392,7 +394,7 @@ There is no second structure to disagree with.
 
 | bit | name | set by | meaning |
 |---|---|---|---|
-| 0 | `LIQUID` | `setLists` | some cell has φ < 0 |
+| 0 | `LIQUID` | `setMark` | an h-owned vertex has φ < 0 (F_LIQ) |
 | 1 | `SURFACE` | `setLists` | some vertex within the band of the surface |
 | 2 | `PARTICLES` | `setLists` | the bin is not empty |
 | 3 | `NEAR_SOLID` | `setLists` | it or a neighbour has a cut slot or a box wall |
@@ -608,13 +610,11 @@ Lists live in `set` at `LIST[k]`, each `LIST_CAP[k]` words of slots, with the co
 - Page-local or slot order is an M1 locality measurement, and no kernel may rely on it.
 - A live slot is one whose record key (word 29) is not `NONE`. Leaving and never-taken slots hold
   `NONE` there.
-- **M1:** `F_LIQ = F_ALL`. Every live brick lies within the reach of liquid or a particle, so any
-  of them may hold a pressure row by the time pressure runs. M2 narrows `F_LIQ` with the tier
-  criteria.
+- **M1 (superseded 2026-11-15):** `F_LIQ = F_ALL`.
 - **(2026-11-15)** `setMark` writes the real `LIQUID` bit: the brick has an h-owned vertex with φ < 0, so it holds
-  pressure rows. Until lane P's row list lands (P then reads no `F_LIQ` and no `LIQUID`), `setLists` still ORs
-  `LIQUID` into every live brick, so `F_LIQ = F_ALL`. `project` runs over `F_ALL` (P's contract: `WARM` and the
-  `WALLS` bits on every F brick).
+  pressure rows; `F_LIQ` lists exactly those bricks (no longer `F_ALL`, since lane P's row list, 04298677: P reads
+  no `F_LIQ` and no `LIQUID`). `project` runs over `F_ALL` (P's contract: `WARM` and the `WALLS` bits on every F
+  brick).
 - **`F_ACT` (2026-11-15, seep-techniques.md §1–6: work follows the active set, not the resident set).** The active
   class is a word an F slot, `ACT` in `set` (brick-abi.ts `ACT`):
   - bits 0–7 (`TILES`, bit j tile j): `setMark`'s ACTIVE tiles this step (part 2's head, after the rebin). A tile is
@@ -669,7 +669,7 @@ by the owning lane's gated slots). For list `k`, at word `12 * k`:
 | `12k + 0..2` | `G1` | one a list entry |
 | `12k + 3..5` | `G8` | one per 8 entries |
 | `12k + 6..8` | `G64` | one per 64 entries |
-| `12k + 9..11` | `X8` | eight per entry (setCensus's C passes: a workgroup a 64-tile slab of a page) |
+| `12k + 9..11` | `X8` | eight per entry (setCensus's C passes and setTransferList: a workgroup a 64-tile slab of a page; censusFine: a workgroup a brick's tile) |
 
 Then `FC_G1`, `FC_G8` and `FC_G64` at words 384–392, `XFER_G1` (setTransfer's jobs) at 396, and `FA_G1`, `FA_G8`
 and `FA_G64` at 400–408 (`F_ACT`'s bricks, then `C_ALL`'s pages: entry `e < count(F_ACT)` is `F_ACT[e]`). A stage or
