@@ -300,3 +300,24 @@ Metal clean.
   - Krylov crosses and rows under their bound at the final measure (0 everywhere).
 
   Nothing is proposed for cutting. Everything else binds on at least one gate scene.
+
+## 2026-11-15 — row formulas ported, at parity with the old arena's resolved text
+
+- `lib/methods/narrow-band/pressure-rows.wgsl.ts` holds the composite system's row formulas as pure
+  WGSL with no addressing, ported verbatim from the old arena: pRows (the band face of every kind,
+  the RHS, the wall lift and halo), bSeamHead, pNative (the root wall slot N_WALL/N_HELD, the native
+  link and ghost, the seam RHS, the first residual with its closed clamp) and pCorrectionFree (the
+  active set). The operator kernel will supply the addressing.
+- `tools/nbflip-pressure-parity-extract.ts` extracts the old functions from lane F's dam capture
+  (frozen-dam-120, commit a22d512d) into `parity/uniform-dam-pressure.wgsl`.
+  `pressure-rows.test.ts` runs old and new side by side on the GPU, using lane F's harness:
+  - The band face, over 8192 random rows reaching every kind and solid branch: bit for bit.
+  - The native wall, ghost, link, seam, first residual, lift and active set, over 8192 rows: bit for bit.
+  - The seam head, over 2048 rows: 180 differ, by at most 1.29 ulp of the sum of the term
+    magnitudes. The head is the sum of two tangential terms, rise/count·offset, and the random bases
+    (±1000) let them cancel to a head far smaller than either, so the relative error on the head
+    reaches 128 ulp. Metal fuses the multiply-add or not depending on the code around it (lane F's
+    finding), so the test bounds each head at 4 ulp of its terms' scale (Higham 2002, §2.6).
+- Next: the composite operator kernel in pressure-operator.wgsl.ts on E's tier ABI (6f319a55:
+  stored wall faces through nbFacePlane; setTransfer to reach a real 4h state), then frozen-state
+  row parity on the dam.
