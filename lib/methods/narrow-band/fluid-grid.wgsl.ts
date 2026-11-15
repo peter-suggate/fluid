@@ -401,10 +401,15 @@ fn fgVel(base:u32,p:vec3f)->vec3f{return vec3f(fgVelAxis(base,p,0u),fgVelAxis(ba
 `;
 
 /**
- * The momentum sampler (needs `vel`, `fcell`, FG_FCELL_WGSL and FG_VEL_WGSL): the old engine's blended h/4h sample
- * of the extended velocity US, umUnitSample (uniform-cached-momentum.wgsl.ts l.93) with umUnitWeight, the cached
- * unit interpolant and umUnitCoarse, which the momentum trace and the surface trace (umFastVelocity) share.
+ * The momentum sampler (needs `vel`, `fcell`, FG_FCELL_WGSL and FG_VEL_WGSL): the old engine's h/4h sample of the
+ * extended velocity US, umUnitSample (uniform-cached-momentum.wgsl.ts l.93) with umUnitWeight, the cached unit
+ * interpolant and umUnitCoarse, which the momentum trace and the surface trace (umFastVelocity) share.
  * fgSampleVel(p, lo, hi): components lo..hi-1 at p (cells). All h (FG_TIERED false) it is fgVel(US) exactly.
+ * Tiered, it takes one interpolant a sample, not the old blend: the fine one where the fine weight is over 0, else
+ * the coarse one. In the fringe (0 < weight < 1) the fine taps away from the h owners are already the 4h cache's
+ * trilinear (fsTapH), so the fine interpolant there is the coarse one up to the 4h cells' kinks. The blend cost
+ * uAdvect 1.5 ms (2026-11-16, 10.31 -> 8.79 ms); the dam's D1-D8 against the canonical refs are unchanged
+ * (lane F's progress log).
  * - The fine weight (umUnitWeight, umVelocitySamplingWeightsAt, uniform-mixed-velocity-sampling.wgsl.ts l.290):
  *   0 where the sample's tile lacks support bit 0 (an occupied tile within fineReach = 2 tiles: the frame plan's
  *   seed and dilation, FT_DIST's occupied distance); 1 in an h tile; else max over the h tiles of the 26 about it
@@ -509,13 +514,8 @@ fn fsFineWeight(p:vec3f)->f32{
 fn fgSampleVel(p:vec3f,lo:u32,hi:u32)->vec3f{
  var v=vec3f(0.0);
  if(!FG_TIERED){for(var a=lo;a<hi;a++){v[a]=fgVelAxis(NB_VEL_F_US0,p,a);}return v;}
- let fine=fsFineWeight(p);let coarse=max(0.0,1.0-fine);
- for(var a=lo;a<hi;a++){
-  var value=0.0;
-  if(fine>0.0){value+=fine*fsFine(p,a);}
-  if(coarse>0.0){value+=coarse*fsCoarse(p,a);}
-  v[a]=value;
- }
+ let fine=fsFineWeight(p)>0.0;
+ for(var a=lo;a<hi;a++){if(fine){v[a]=fsFine(p,a);}else{v[a]=fsCoarse(p,a);}}
  return v;
 }
 `;

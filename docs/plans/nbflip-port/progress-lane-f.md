@@ -1099,3 +1099,58 @@ All runs were on the check slot. The tree was tree-s6 (0be9d9f4 plus the 5f2717b
   - Patch: ~/code/me/fluid-scratch/lane-f/patches/hybrid-retry.patch. Tools: tools/{samp-reg.sh, samp-occ.sh, lean-gate.sh, hybrid-gate.sh, hybrid2.sh}. Logs are in logs/samp/.
 - **Reading.** The maxThreads limit is a poor proxy here: at 256 lanes a workgroup, both 576 and 640 admit one workgroup each. The rare paths cost through code size and scheduling, not a thread cap. Deferring them to a second kernel pays a second staging and a second pass, which is more than they cost.
 - **The remaining lever is the coarse blend (w1, -2 ms).** It is taken on real samples, so it cannot be dropped bitwise. Making it cheaper would mean a different representation (e.g. CACHE4 folded into UNIT for the fringe bricks), which is a design question for the coordinator.
+
+## 2026-11-16: the sampler, by the coordinator's item-2 rulings (t0 landed, w2 landed, staged tiles measured)
+
+**t0: uAdvect's fsUnit drops the 4h fallback (c2f9bffa, bitwise).**
+- **The invariant.** Only fsFine reads fsUnit, and only where the fine weight is over 0. That needs p's tile to have an F slot and an h owner of the opening tiers (HMASK, uCache's: the tiers the head's setMark saw) within 2 cells. So every tap lies within 3 cells of an h owner.
+  - Lane E's read table has this row ("the sampler's UNIT taps", 3), under the owners' tiered margin of flow + 9.
+  - Trace travel does not enter: the condition is local to each sample point.
+- **Gate-only count** (tree-t0c, header 74-78, cumulative): 0 fallback hits in each of uAdvect, lAdvect, lcAdvect, pMove and pSeed, over the tiered 300 and the all-h 200 dam (composite, no latch, rc 0).
+- **Frozen step 20, every placement, tiered and all h:** bitwise. pMove, pSeed and pScatter differ only as they do old against old.
+- **Timing slot.** Dropping the fallback in every kernel: uAdvect 11.22 -> 9.91 and 11.57 -> 10.37 ms, but lAdvect 3.30 -> 3.84 and 3.48 -> 4.04 ms (two runs). So it is per kernel:
+  - fsUnit calls fsUnitAbsent. By default that is fsTapH; uAdvect defines it as 0.
+  - uAdvect 11.78 -> 10.15 ms; lAdvect 3.44 -> 3.38, lcAdvect 1.92 -> 1.84, pSeed 1.83 -> 1.82.
+  - Bitwise: uAdvect, lAdvect and lcAdvect are the same.
+
+**w2: one interpolant a sample (the fine one where the weight is over 0, else the coarse one), not the blend.**
+- **Why it is close.** In the fringe, the fine taps away from the h owners are fsTapH, the 4h cache's trilinear at the face. Trilinear interpolation reproduces a trilinear field, so there the fine interpolant equals the coarse one except across 4h cell kinks.
+- **Timing slot, against t0:**
+  - uAdvect 10.31 -> 8.79 ms;
+  - lAdvect 3.69 -> 3.72, lcAdvect 1.89 -> 1.85, pMove 6.17 -> 6.04, pSeed 1.65 -> 1.66.
+- **One check run, dam-300 (tiered, composite, poolF 4913).** The baseline is tree-t0k, whose values are bitwise HEAD's. Worst margin a gate, base / w2:
+
+| gate | ref | ref-2761350a |
+|---|---|---|
+| D1 | 0.50 / 0.50 | 0.55 / 0.55 |
+| D2 | 0.07 / 0.07 | 0.06 / 0.06 |
+| D3 | 0.38 / 0.27 | 0.50 / 0.45 |
+| D4 | 0.06 / 0.03 | 0.07 / 0.04 |
+| D4c | 0.00 / 0.00 | 0.00 / 0.00 |
+| D5c | 0.17 / 0.17 | 0.17 / 0.17 |
+| D5ce | 0.05 / 0.05 | 0.05 / 0.05 |
+| D5k | 0.26 / 0.29 | 0.16 / 0.38 |
+| D5p | 0.01 / 0.00 | 0.05 / 0.02 |
+| D5e | 0.02 / 0.04 | 0.04 / 0.01 |
+| D6 | 0.56 / 0.56 | 0.56 / 0.56 |
+| D7t | 0.31 / 0.31 | 0.32 / 0.32 |
+| D7d | 0.14 / 0.12 | 0.13 / 0.15 |
+| D8c | 0.45 / 0.40 | 0.43 / 0.38 |
+| D8 | 0.71 / 0.76 | **1.28 / 1.38 FAIL** |
+
+- **Reading the table.**
+  - Against the canonical ref, every gate passes for both.
+  - D8 at 30-90 against ref-2761350a already failed at HEAD: 7.118e5 particles against 6.309e5, margin 1.28; lane E measured 1.12-1.24 before the margin change. w2 makes it 7.176e5, margin 1.38.
+- Tools: tools/{t0-count.sh, t0-gate.sh, w2-gate.sh}; trees tree-t0c, tree-t0, tree-t0k, tree-w2. Logs: logs/t0, logs/w2.
+
+**The staged-tile sampler (go/no-go measurement, frozen tiered step 20, uAdvect's F bricks).**
+- Of 151.3M open fine (UNIT) taps, the share inside the brick plus a halo:
+  - halo 2: 78.1%;
+  - halo 3: 86.7%;
+  - halo 4: 92.6%.
+- Of 12.1M coarse (CACHE4) taps, 87.8% lie in the brick's tiles plus one.
+- **Fit.** 32 KB of workgroup memory holds:
+  - halo 2 (12³ x 3 x 4 B = 20.7 KB), with uAdvect's 6 KB trace list;
+  - not halo 3 (32.9 KB) or halo 4 (48 KB) in f32.
+  - Halo 4 fits only at f16 (24.6 KB), which changes the physics' precision.
+- At halo 2, 22% of the taps still go to global memory, behind a per-tap inside/outside branch. Tools: tools/samp-halo.sh; log: logs/samp/halo.log.
