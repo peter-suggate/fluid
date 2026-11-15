@@ -681,7 +681,7 @@ var<workgroup> wLiq:array<atomic<u32>,69>;
 // Tiered: the 4h state about the brick (ufxStage4: old 4h faces C in base-2..base+2, C's +face the C face C + e_a)
 // and whether each brick of the window has a supported h tile (ufxRH's mode bit 0).
 var<workgroup> wS4:array<vec4f,${F.tiered ? 375 : 1}>;
-var<workgroup> wSwept:array<u32,27>;
+var<workgroup> wSwept:array<atomic<u32>,27>;
 var<private> xLow:vec3i;
 var<private> xBase4:vec3i;
 var<private> xBrick:vec3i;
@@ -724,7 +724,7 @@ fn xFinish(s:Ufx,c:vec3i,a:u32,code:u32,o:f32,swept:bool)->vec2f{
  let far=xProlong(c,a);if(ufxReached(far.d)){return vec2f(far.v.x,far.v.x-far.v.y);}
  return vec2f(s.v,s.v-o);
 }
-fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-xBrick+vec3i(1));return wSwept[r.x+3u*r.y+9u*r.z]!=0u;}
+fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-xBrick+vec3i(1));return atomicLoad(&wSwept[r.x+3u*r.y+9u*r.z])!=0u;}
 @compute @workgroup_size(512) fn uExtend(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
  var slot=0u;var o=vec3i(0);
@@ -733,6 +733,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
  fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();
  if(lid<69u){atomicStore(&wLiq[lid],0u);}
+ if(lid<27u){atomicStore(&wSwept[lid],0u);}
  if(FG_TIERED&&live&&lid<375u){
   let d=lid%125u;let a=lid/125u;let C=xBase4+vec3i(vec3u(d%5u,(d/5u)%5u,d/25u))-vec3i(2);let T=C+fgUnit(a);
   let cs=x4Slot(T);var st=vec3f(0.0,0.0,-1.0);if(cs!=NB_NONE){st=x4Load(cs,1u,foTileIndex(T),a);}
@@ -743,13 +744,10 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   for(var j=lid;j<2197u;j+=512u){
    if(vLiquidOwner(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));}
   }
-  if(FG_TIERED&&lid<27u){
-   let b=xBrick+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u))-vec3i(1);var swept=0u;
-   for(var t=0u;t<8u;t++){
-    let tc=2*b+fsBit4(t);
-    if(foTileOwnerH(tc)&&fgDist(fgTileDist(4*tc),2u)<=3u){swept=1u;}
-   }
-   wSwept[lid]=swept;
+  // A lane a tile of the 27 bricks about the brick (216 lanes).
+  if(FG_TIERED&&lid<216u){
+   let n=lid>>3u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);let tc=2*b+fsBit4(lid&7u);
+   if(foTileOwnerH(tc)&&fgDist(fgTileDist(4*tc),2u)<=3u){atomicOr(&wSwept[n],1u);}
   }
  }
  workgroupBarrier();
