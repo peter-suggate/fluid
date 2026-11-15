@@ -250,6 +250,12 @@ rules above through the directory and masks:
   (no transfer) nor requests bricks (censusDecide's `cfg.z` = 0).
 - The boot runs the census after its lists and before F's boot stages, since F's seeding reads
   TRIG.
+  - After F's boot stages comes the first frame's projected half kick, U ← P(U + g dt/2), when
+    the stages supply `kick`. The order is F's `kick.force` (US = U + g dt/2, gravity alone), the
+    operator, the solver, `project`, then F's `kick.after`. The old host runs this kick before its
+    first frame (webgpu-uniform-reference.ts `kickMixedFrame`; uniform-mixed-frame.ts `kick`), so
+    the stored velocity leads the positions by half a step. Without it, step 1 carries g dt instead
+    of 1.5 g dt (F's D5c finding).
   - A tiered boot then commits with `setCommitMask` alone and runs no remap: `bootPhi` writes one
     analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
     injection at the corners.

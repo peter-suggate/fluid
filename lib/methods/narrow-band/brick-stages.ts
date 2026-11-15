@@ -45,6 +45,14 @@ export interface BrickStages {
   readonly tail: readonly BrickPlacement[];
   /** Once at boot, after E's boot phi and lists. */
   readonly boot: readonly BrickPlacement[];
+  /**
+   * The first frame's projected half kick, U <- P(U + g dt/2), after `boot`. The old engine's host runs it before
+   * its first frame (webgpu-uniform-reference.ts kickMixedFrame, UniformMixedFrame.kick): the stored velocity is
+   * the drift's, half a step ahead of the positions. Gravity alone, no transport, viscosity, capillarity or volume
+   * term. `force` writes US = U + g dt/2; the engine then runs the operator, the solver and `project`; `after`
+   * (F's) runs last, e.g. to give the particles the kicked U. Absent: no kick (E's bring-up tests).
+   */
+  readonly kick?: { readonly force: readonly BrickPlacement[]; readonly after: readonly BrickPlacement[] };
   /** Lane-owned buffers by name, in words. */
   readonly buffers: Readonly<Record<string, number>>;
 }
@@ -64,7 +72,7 @@ export interface BrickStageContext {
 
 export type BrickStagesFactory = (context: BrickStageContext) => BrickStages;
 
-const stageLists = (s: BrickStages) => [...s.move, ...s.rebin, ...s.levelSet, ...s.velocity, ...s.tail, ...s.boot];
+const stageLists = (s: BrickStages) => [...s.move, ...s.rebin, ...s.levelSet, ...s.velocity, ...s.tail, ...s.boot, ...(s.kick?.force ?? []), ...(s.kick?.after ?? [])];
 
 /** Checks a stage set's gated dispatches and buffer names. */
 export function validateBrickStages(s: BrickStages): void {

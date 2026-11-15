@@ -144,6 +144,13 @@ export class BrickEngine {
       { kernel: set.setLists, dispatch: direct(Math.ceil(Math.max(f, c) / 64)) },
       { kernel: set.setArgs, dispatch: direct(1) },
     ];
+    const solve: BrickPlacement[] = [
+      { kernel: pres.operator, dispatch: list(LIST.F_ALL, "G1") },
+      ...solver.setup,
+      ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(),
+      ...solver.finish,
+      { kernel: pres.project, dispatch: list(LIST.F_LIQ, "G1") },
+    ];
     const part2: BrickPlacement[] = [
       { kernel: set.setMark, dispatch: list(LIST.F_ALL, "G1") },
       ...(tiered ? [{ kernel: set.setMarkPages, dispatch: list(LIST.C_ALL, "G1") }] : []),
@@ -153,11 +160,7 @@ export class BrickEngine {
       ...tail, ...lists,
       ...stages.levelSet,
       ...stages.velocity,
-      { kernel: pres.operator, dispatch: list(LIST.F_ALL, "G1") },
-      ...solver.setup,
-      ...Array.from({ length: solver.slots }, (_, k) => solver.slot(k)).flat(),
-      ...solver.finish,
-      { kernel: pres.project, dispatch: list(LIST.F_LIQ, "G1") },
+      ...solve,
       ...stages.tail,
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
@@ -178,7 +181,9 @@ export class BrickEngine {
     const head = tiered ? [...census, ...update(0), ...tail, ...lists, ...want, ...transfer, churnClear] : census;
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
     const bootHead = tiered ? [...census, ...update(0), ...tail, bootPhi, ...lists, ...want, ...commit] : census;
-    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve.
+    const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after] : [];
+    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census and remap), then F's move and rebin.
     return { part1: [...head, ...stages.move, ...stages.rebin], part2, boot };
   }

@@ -426,3 +426,17 @@ test("brick engine (GPU): operator leaves zero rows (K, DIAG, RHS, X) off the li
     e.destroy();
   });
 });
+
+test("brick engine: the boot runs the stages' projected half kick (force, operator, solver, project, after) last", () => {
+  const L = new BrickLayout({ lattice: [64, 64, 64], f: 64, c: 8, b: 0, k: 0, particles: 1024 }), cg = bringUpCG(L);
+  const base = bringUpStages({ layout: L, dt_s: DT, h_m: H_M, gravity_mps2: [0, -G, 0], values: {} });
+  const labels = (s: ReturnType<typeof BrickEngine.scheduleFor>) => s.boot.map(p => p.kernel.label);
+  const plain = labels(BrickEngine.scheduleFor(L, cg, base, 1));
+  assert.ok(!plain.includes("project"), "no kick, no boot projection");
+  const force = base.velocity, after = base.velocity;
+  const kicked = labels(BrickEngine.scheduleFor(L, cg, { ...base, kick: { force, after } }, 1));
+  const solve = ["operator", ...[...cg.setup, ...Array.from({ length: cg.slots }, (_, k) => cg.slot(k)).flat(), ...cg.finish].map(p => p.kernel.label), "project"];
+  const tail = [...force.map(p => p.kernel.label), ...solve, ...after.map(p => p.kernel.label), "stepEnd"];
+  assert.deepEqual(kicked.slice(0, plain.length - 1), plain.slice(0, -1));
+  assert.deepEqual(kicked.slice(plain.length - 1), tail);
+});

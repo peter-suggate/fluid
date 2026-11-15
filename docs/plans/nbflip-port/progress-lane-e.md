@@ -380,3 +380,14 @@ F's two requests (the same commit):
 - TRIG bits 8-15 are each tile's thin trigger alone (word 1 bit 17), beside the OR in bits 0-7
   (brick-abi.md §2.5). The census test's oracle checks both.
 - GPU: census, set-tiers and engine pass 20/20, with 0 Metal aborts. Unit tests: 1828 pass.
+
+## 2026-11-15: the boot's half kick (F's D5c step-1 question)
+
+F measured step-1 KE at 1.887 J, matching a Float64 oracle, against the reference's 4.133 J. The
+old host kicks before its first frame: kickMixedFrame calls frame.kick(p, dt/2), which computes
+U <- P(U + g dt/2) with gravity alone and no transport. So the reference's first step carries
+1.5 g dt (2.25 x 1.887 = 4.25 J).
+- BrickStages gains an optional `kick: { force, after }`. The boot runs force, then the operator,
+  the solver and project, then after, before its stepEnd (brick-abi.md §2.5).
+- F supplies the force (US = U + g dt/2) and the particle side.
+- Schedule unit test added. GPU tests: engine and set-tiers pass 18/18. Unit tests: 1829 pass.
