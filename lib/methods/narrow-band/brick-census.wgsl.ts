@@ -1225,7 +1225,9 @@ var<workgroup> wgGo:u32;
   workgroupBarrier();
   let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
   let base=4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))-vec3i(1);
-  cdTile(cs,lane+64u*r,lane,reach,base);
+  // cfg.z = 2: the TRIG-only census (brickTrigCensusSchedule): no band, WANT, candidate or keep mark.
+  let trigOnly=cfg.z==2u;
+  if(!trigOnly){cdTile(cs,lane+64u*r,lane,reach,base);}
   // TRIG: an F child's bit j is whether its tile j's importance triggers (final word 1 bits 16..21) heat it, the old
   // need rule (nbActivityTriggered, PLAN's ncNeedTriggered).
   let child=8u*r+lane;
@@ -1244,7 +1246,7 @@ var<workgroup> wgGo:u32;
     }
   }
   workgroupBarrier();
-  if(lane<2u){atomicStore(&nbSet[NB_S_WANT+16u*cs+2u*r+lane],atomicLoad(&wgWant[lane]));}
+  if(lane<2u&&!trigOnly){atomicStore(&nbSet[NB_S_WANT+16u*cs+2u*r+lane],atomicLoad(&wgWant[lane]));}
   if(lane==0u){
     let c=vec4u(atomicLoad(&wgCount[0]),atomicLoad(&wgCount[1]),atomicLoad(&wgCount[2]),atomicLoad(&wgCount[3]));
     if(c.x!=0u){atomicAdd(&nbSet[NB_H_CENSUS_BAND],c.x);}
@@ -1289,6 +1291,12 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
     { kernel: c.censusImportance, dispatch: slabs },
     { kernel: c.censusDecide, dispatch: slabs, z: tiered ? 1 : 0, w: keep ? 1 : 0 },
   ];
+}
+/** The TRIG-only census (the boot's, after the kick, before F's seed): censusBegin through censusImportance as
+ * brickCensusSchedule, then censusDecide with cfg.z = 2: TRIG (and CENSUS_TRIGGERED) alone. No band decision, no
+ * WANT word, no candidate, no keep mark. */
+export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true) {
+  return brickCensusSchedule(L, list, cAll, fAll, tiered, false).map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */
 export const censusListArgs = (k: number, g: "G1" | "X8") => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });

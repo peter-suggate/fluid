@@ -655,3 +655,13 @@ extension texels and checks every plan word and TRIG of the 32768 tiles of frame
 thin-alone tiles, 664 heated, 210 no longer heated). brick-census-x8.test.ts keeps comparing every other word
 with the frozen G1 kernels. Tiered dam profile (contended: other GPU processes ran): censusFine 3.10, censusCoarse
 0.60, censusDecide 0.45 ms/step (0.12, 0.11 and 0.05 above the X8 run).
+
+## 2026-11-15 — the boot's TRIG census
+
+BrickStages.kick is { force, after, seed? }. With `seed`, the boot runs force, the solve, after, then a TRIG-only
+census of the kicked state (brickTrigCensusSchedule: censusDecide at cfg.z = 2 skips the band decision, WANT,
+candidates and keep marks; no claims, no transfer), then seed. Without `seed` the boot is unchanged. Tests:
+brick-engine.test.ts (the seeded boot is the unseeded one plus the six census passes and the seed before stepEnd,
+censusDecide at z = 2, no set/res/transfer kernel among them; all-h and tiered), and brick-census.test.ts (on the
+synthetic state the TRIG-only census writes the full census's TRIG words, CENSUS_TRIGGERED, and no WANT word,
+candidate or keep mark).

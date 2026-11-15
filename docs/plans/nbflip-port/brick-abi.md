@@ -269,6 +269,11 @@ rules above through the directory and masks:
     first frame (webgpu-uniform-reference.ts `kickMixedFrame`; uniform-mixed-frame.ts `kick`), so
     the stored velocity leads the positions by half a step. Without it, step 1 carries g dt instead
     of 1.5 g dt (F's D5c finding).
+  - With F's `kick.seed` (optional), the boot then runs a TRIG-only census of the kicked state
+    (`brickTrigCensusSchedule`: censusBegin through censusImportance, then censusDecide with
+    cfg.z = 2, which writes TRIG and CENSUS_TRIGGERED alone: no band, WANT, candidate or keep mark;
+    no claims or transfer), and then `kick.seed`. So the first seeding reads the triggers of the
+    state it seeds. The census header words after the boot are this census's.
   - A tiered boot then commits with `setCommitMask` alone and runs no remap: `bootPhi` writes one
     analytic φ to F and to the entering pages' C vertices, and U = 0. A remap would be the same
     injection at the corners.

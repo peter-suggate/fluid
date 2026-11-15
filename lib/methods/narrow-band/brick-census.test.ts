@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, RING, SEAM, bricksPerAxis, phiFar } from "./brick-abi";
-import { CENSUS, CENSUS_H, CENSUS_POLICY, brickCensusBuffers, brickCensusSchedule } from "./brick-census.wgsl";
+import { CENSUS, CENSUS_H, CENSUS_POLICY, brickCensusBuffers, brickCensusSchedule, brickTrigCensusSchedule } from "./brick-census.wgsl";
 
 type V3 = [number, number, number];
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -708,6 +708,21 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       else check(set[w] === v, `${name} ${set[w]} vs ${v}`);
     }
     assert.deepEqual(mismatch, [], `${mismatch.length} mismatches`);
+    // ---- The boot's TRIG-only census (brickTrigCensusSchedule) on the same state: the same TRIG words, and no WANT,
+    // candidate or keep-mark write (WANT and TRIG poisoned first, the candidate count held).
+    {
+      const wantPoison = new Uint32Array(CMASK_WORDS * L.cap.c).fill(0xa5a5a5a5), trigPoison = new Uint32Array(L.cap.f).fill(0x5a5a5a5a);
+      e.write("set", L.set.want, wantPoison); e.write("set", L.set.trig, trigPoison);
+      await e.run(brickTrigCensusSchedule(L, k => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 })));
+      const after = await e.read("set");
+      assert.equal(after[H.FAIL], 0);
+      assert.deepEqual([...after.subarray(L.set.want, L.set.want + CMASK_WORDS * L.cap.c)], [...wantPoison], "the TRIG-only census writes no WANT word");
+      for (const [fs, bits] of want.trig) assert.equal(after[L.set.trig + fs], bits, `TRIG-only census, slot ${fs}`);
+      assert.equal(after[H.N_CAND], set[H.N_CAND], "no candidate");
+      assert.deepEqual([...after.subarray(L.set.markF, L.set.markF + L.cap.f)], [...set.subarray(L.set.markF, L.set.markF + L.cap.f)], "no keep mark");
+      assert.equal(after[CENSUS_H.CENSUS_TRIGGERED], want.counters.CENSUS_TRIGGERED);
+      assert.equal(after[CENSUS_H.CENSUS_BAND], 0, "no band decision");
+    }
     // Coverage: the scene reaches every rule the dam's policy runs.
     const fins = [...want.scratch.values()].flatMap(sc => sc.fin);
     const has = (b: number) => fins.filter(x => (x & b) !== 0).length;

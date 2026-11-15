@@ -19,7 +19,7 @@ import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type Bric
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule, censusListArgs } from "./brick-census.wgsl";
+import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule, brickTrigCensusSchedule, censusListArgs } from "./brick-census.wgsl";
 import { brickResidencyKernels } from "./brick-residency.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
@@ -206,8 +206,10 @@ export class BrickEngine {
     const head = censused ? [...census(true), ...residency, ...tail, ...lists, ...want, ...(tiered ? transfer : []), churnClear] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists, ...want, ...commit] : census(false);
-    // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve.
-    const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after] : [];
+    // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
+    // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
+    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [];
+    const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after, ...(stages.kick.seed ? [...trigCensus, ...stages.kick.seed] : [])] : [];
     const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists, ...bootHead, ...stages.boot, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census, residency and remap), then the release
     // port's reach words (after every head claim, before move), F's move and rebin.

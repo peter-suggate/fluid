@@ -476,3 +476,23 @@ test("brick engine: the boot runs the stages' projected half kick (force, operat
   assert.deepEqual(kicked.slice(0, plain.length - 1), plain.slice(0, -1));
   assert.deepEqual(kicked.slice(plain.length - 1), tail);
 });
+
+test("brick engine: with the stages' seed, the boot runs a TRIG-only census between the kick's after and the seed", () => {
+  for (const tiered of [false, true]) {
+    const L = new BrickLayout({ lattice: [64, 64, 64], f: 64, c: 8, b: 0, k: 0, particles: 1024 }), cg = bringUpCG(L);
+    const base = { ...bringUpStages({ layout: L, dt_s: DT, h_m: H_M, gravity_mps2: [0, -G, 0], values: {} }), tiered };
+    const force = base.velocity, after = base.tail, seed = base.velocity;
+    const unseeded = BrickEngine.scheduleFor(L, cg, { ...base, kick: { force, after } }, 1).boot;
+    const seeded = BrickEngine.scheduleFor(L, cg, { ...base, kick: { force, after, seed } }, 1).boot;
+    const labels = (b: readonly { kernel: { label: string } }[]) => b.map(p => p.kernel.label);
+    // The seeded boot is the unseeded one with the census and the seed between the kick's after and stepEnd.
+    const census = ["censusBegin", "censusFine", "censusCoarse", "censusCubes", "censusImportance", "censusDecide"];
+    assert.deepEqual(labels(seeded), [...labels(unseeded).slice(0, -1), ...census, ...labels(seed), "stepEnd"], `tiered ${tiered}`);
+    const trig = seeded.slice(unseeded.length - 1, unseeded.length - 1 + census.length);
+    const decide = trig[census.length - 1]!;
+    assert.equal(decide.z, 2, "censusDecide is TRIG-only (cfg.z = 2): no band, WANT, candidates or keep marks");
+    assert.equal(decide.w ?? 0, 0);
+    // No claim, transfer, commit or WANT check between the kick's after and the seed.
+    for (const p of trig) assert.ok(!/^set|^res|^transfer|censusWant/.test(p.kernel.label), p.kernel.label);
+  }
+});
