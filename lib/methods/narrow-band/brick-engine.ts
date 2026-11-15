@@ -457,7 +457,14 @@ export class BrickEngine {
       if (!words) throw new Error(`Brick engine: restore lacks buffer ${name}`);
       if (4 * words.length !== b.size) throw new Error(`Brick engine: restore buffer ${name} has ${words.length} words, the engine ${b.size / 4}`);
     }
-    for (const [name, b] of this.buffers) this.device.queue.writeBuffer(b, 0, state.buffers.get(name)!);
+    // A buffer's bytes in two writes: the 16-byte multiple, then the tail. Dawn (dawn.node, Metal) stages a large
+    // write in a dedicated buffer whose reservation is the size rounded up, checks it against the write's size, and
+    // aborts the process on a mismatch (BufferBase::UploadData): pmgF's 34607172 bytes did.
+    for (const [name, b] of this.buffers) {
+      const words = state.buffers.get(name)!, body = words.length & ~3;
+      if (body > 0) this.device.queue.writeBuffer(b, 0, words, 0, body);
+      if (body < words.length) this.device.queue.writeBuffer(b, 4 * body, words, body, words.length - body);
+    }
     await this.fence();
     for (const r of this.receipts) if (r.busy && r.buffer.mapState === "unmapped") r.busy = false;
     this.steps = state.steps; this.time = state.time;

@@ -1276,3 +1276,7 @@ Per area (rowsWindow, steps 18-23), ms per step:
 | total | 95.4 | 97.0 | ~18 |
 
 Letters and seep do not run on the brick engine yet (brick-scene.ts `BRICK_ENGINE_SCENES = ["high-resolution-dam-break"]`), so this commit has no cross-scene check.
+
+## 2026-11-16: the restore abort
+
+brick-region-heat.test.ts aborted (SIGABRT, no 00000206) in the reservoir test's `restore()`, in Dawn's `BufferBase::UploadData` under `queue.writeBuffer`. The disassembly of dawn.node shows a check there: the upload reservation's size must equal the write's size, or the process aborts. One instrumented run showed which write failed. It was pmgF's, the first buffer whose byte size, 34607172, is not a multiple of 8 or 16. Every buffer written before it was a multiple of 16. `restore()` now writes each buffer as its 16-byte multiple, then the tail. After the fix the file passes 4/4 (save/restore: 256 regions, tier/deep 0 and heat 0 differ; replay unchanged), with no 00000206. pressureDelta needs no fix: lane P stores Δ(p/ρ) (08dac85d), so regionHeat's dt²/h² (brick-region-heat.wgsl.ts:110) is the old dt²/(ρh²) on Δp.
