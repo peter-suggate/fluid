@@ -132,6 +132,9 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 
 ### 2.4 FLAGS bits (cell, u32)
 
+These are the same on F cells and on C cells (a tile). `setInit` writes OPEN, plus OWNER_H on F only.
+Every other bit of an entering slot is 0.
+
 | bit | name | meaning |
 |---|---|---|
 | 0 | `OPEN` | not static solid (box rule and the cut's `FRAC > 0`) |
@@ -139,7 +142,9 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | 2 | `BAND` | within the particle band R of the surface |
 | 3–5 | `VALID0..2` | the lower face along `a` has a known velocity (extension's seed) |
 | 6 | `OWNER_H` | the cell's tile is h-owned in this brick (the record mask's bit, per cell) |
-| 7–12 | reserved, P: the pressure active set's per-face state (wall, held, closed; 2 bits a lower face), amended at M2 | |
+| 7 | `WARM` (P) | the cell held a liquid row of its tier last step (the old pInit/warm rule; P's finish kernels write it) |
+| 8–10 | P: wall state | the separating wall's state on the lower face along `a` (planes 0 and N; plane N at the skirt cell or C tile N/4) |
+| 11–12 | reserved, P | spare |
 | 13–15 | reserved, E | |
 | 16–31 | reserved, F | |
 
@@ -649,8 +654,12 @@ first kernel:
 - `DIAG(c)` sums over c's six faces: `A` to a liquid neighbour, `A / θ` to an air neighbour, and
   0 for a closed face. θ is the ghost-fluid crossing `uniformMixedSurfaceThetaWGSL`, clamped to
   [θ_min, 1/θ_min], verbatim.
-- `RHS(c) = −h Σ_a (A_a(c + e_a) US_a(c + e_a) − A_a(c) US_a(c))`, that is −h² times the
-  discrete divergence of u*.
+- `RHS(c) = −h (Σ_a (A_a(c + e_a) US_a(c + e_a) − A_a(c) US_a(c)) − rate · h · capacity)`. Without
+  the rate term it is −h² times the discrete divergence of u*. (Amended at M2, P 6b06ae15.)
+  - `rate` is NB-FLIP's volume control (Kim et al. 2007, the proportional term), in 1/s, as f32
+    bits in set header word 64 (F's `FH.RATE`). F's `uAdvect` writes it before the operator.
+  - `capacity` is the cell's open fraction, 1 without solids.
+  - This is uniform-mixed-pressure-velocity.ts l.360. Rate 0 is the plain divergence.
 - On non-liquid cells, DIAG, K and RHS are 0 and X is 0.
 - (Amended at M2.) `operator` runs over F_ALL, not F_LIQ, so this holds in every live brick. A
   live brick outside F_LIQ holds zero rows, and a solver that reads a neighbour's `K` or `X`
