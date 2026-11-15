@@ -950,3 +950,52 @@ rest is F's stages on a different trajectory:
 The deep keep acts at the dam's early steps: 48 deep regions at step 10, 2816 tiles, none of them a kept band. None
 are deep at step 20, so the trajectories part there. This is one run each, by the policy. A repeat would separate
 divergence from noise.
+
+## 2026-11-16: the real D gated (0be9d9f4 against db999a8b)
+
+Both trees in `fluid-scratch/lane-e/realD/`: `base2` is db999a8b, `cand` is 0be9d9f4. Runner, rc 0, no 00000206.
+
+Check slot: dam-300 (lane F's brick-dam, tiered, composite, poolF 4913) judged with tools/nbflip-gates.ts
+(`realD/gate/realD-round*.{md,json}`). Worst margin per gate; margin above 1 fails.
+
+| gate | base, ref-2761350a (a–e) | cand, ref-2761350a | base, ref (a, b, d, base-e) | cand, ref |
+|---|---|---|---|---|
+| D1 | 0.55 | 0.55 | 0.50 | 0.50 |
+| D3 | 0.73 | 0.47 | 0.52 | 0.29 |
+| D5k | 0.14 | 0.07 | 0.31 | 0.24 |
+| D6 | 0.56 | 0.56 | 0.56 | 0.56 |
+| D8c | 0.49 | 0.51 | 0.51 | 0.53 |
+| **D8** (30–90) | **1.24 FAIL** (7.091e5 vs 6.309e5) | **1.12 FAIL** (7.014e5) | 0.69 | 0.63 |
+
+Every other gate passes in all four columns. D8 does not worsen with the real D. Against the five references, D8 at
+frames 30–90 fails at db999a8b as well, 1.24 there and 1.12 with the real D. Lane F's st7 failed by the same margin,
+1.25. That failure predates the real D, so no attribution is needed for this commit.
+
+Timing slot, fixed command (`brick-dam-floor.mts --tiered --solver=composite --steps=24 --poolF=4913`), steps
+18–23. Two profiled runs (`--profile=13`, reduced with areas-window.py on rowsWindow) and one unprofiled fenced run
+per commit (`realD/tm/`):
+
+| | base p1 | base p2 | cand p1 | cand p2 |
+|---|---|---|---|---|
+| window kernel sum, mean / median | 96.0 / 97.4 | 96.5 / 97.8 | 96.5 / 97.5 | 94.7 / 96.1 |
+| velocity | 40.95 | 41.80 | 41.18 | 39.71 |
+| level set | 17.23 | 17.28 | 16.94 | 16.93 |
+| pressure solve | 12.97 | 12.70 | 13.04 | 12.60 |
+| pressure setup and projection | 9.08 | 8.84 | 8.88 | 8.89 |
+| move | 8.67 | 8.63 | 8.62 | 8.71 |
+| brick set | 3.69 | 3.70 | 3.67 | 3.59 |
+| transfer and seeding | 3.43 | 3.59 | 3.51 | 3.55 |
+| real D (5 kernels) | – | – | 0.64 | 0.66 |
+| profiled fenced median / mean / p95 | 106.7 / 105.5 / 113.0 | 107.1 / 105.9 / 109.3 | 107.7 / 106.0 / 109.4 | 106.2 / 104.7 / 109.7 |
+| launches/step | 279 | 279 | 284 | 284 |
+
+Unprofiled fenced, steps 18–23 (median / mean / p95): base 95.2 / 94.6 / 99.9, cand 98.9 / 96.2 / 100.8.
+
+Results:
+- The kernel sums across the two runs are base 96.25 ± 0.25 and cand 95.6 ± 0.9. The real D costs its own 0.65 ms and
+  5 launches, and no area grows outside the spread between runs.
+- The unprofiled figure is +1.6 on the mean and +3.7 on the median. That is one run each, on a cost that rises
+  about 2 ms a step over the window (base's thirds 89.0 / 95.1 / 99.7, cand's 90.0 / 98.4 / 100.1), so the median
+  moves with the trajectory. The profiled fenced medians are 106.7 / 107.1 for base and 107.7 / 106.2 for cand. The
+  difference does not reproduce in the kernel sums.
+- The earlier +16 ms (08dac85d, one run each) was trajectory divergence and does not reproduce.
