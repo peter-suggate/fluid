@@ -49,6 +49,15 @@ const NB_SEED_FIRST:u32=0x7f7ffff8u;
 fn nbSeedFirst()->f32{return bitcast<f32>(NB_SEED_FIRST);}
 `;
 
+/** nbfParticleFormulasWGSL with the band bandDepth cells deep (the scene's brickTiers.particleBandDepth): records
+ * retire past it and seeding stops there. A depth outside [2, 4] cells, or not finite, fails. */
+export function nbfParticleFormulasAt(bandDepth: number): string {
+  if (!(Number.isFinite(bandDepth) && bandDepth >= 2 && bandDepth <= 4)) throw new Error(`NB-FLIP brick engine: particle band depth ${String(bandDepth)} is not in [2, 4] cells`);
+  const anchor = "const NB_BAND_DEPTH:f32=3.00;";
+  if (nbfParticleFormulasWGSL.split(anchor).length !== 2) throw new Error("particles: NB_BAND_DEPTH changed shape");
+  return nbfParticleFormulasWGSL.replace(anchor, `const NB_BAND_DEPTH:f32=${bandDepth.toFixed(2)};`);
+}
+
 /** Constants and the pure move formulas. */
 export const nbfParticleFormulasWGSL = /* wgsl */`
 const NB_BAND_DEPTH:f32=3.00;

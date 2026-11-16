@@ -22,7 +22,7 @@ test("box observer (GPU, brick engine): matches the oracle over the pool's cells
   await withUniformDevice("brick observer", async device => {
     const n: Vec3 = [64, 32, 64];
     const setup: BrickSceneSetup = { sceneId: "test", lattice: n, h_m: H_M, dt_s: DT, gravity_mps2: [0, -9.81, 0], density_kg_m3: 1000, viscosity_Pa_s: 0, surfaceTension_N_m: 0,
-      capacities: { f: 400, c: 16, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [20, 10.3, 20] }], origin_m: [0, 0, 0] };
+      capacities: { f: 400, c: 16, b: 0, k: 0, particles: 1024 }, particleBandDepth: 3, liquid: [{ lo: [-1, -1, -1], hi: [20, 10.3, 20] }], origin_m: [0, 0, 0] };
     const solver = await BrickNBFlipSolver.create(device, { setup, stages: bringUpStages, solver: L => bringUpCG(L), values: {}, quality: "balanced", farPhi_m: 2 });
     assert.equal(solver.advanceTo(DT, []), true);
     const e = solver.brickEngine, s = await snapshot(e);

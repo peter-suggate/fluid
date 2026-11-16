@@ -553,6 +553,9 @@ export function createHighResolutionDamBreakScene(): SceneDescription {
   // more: f and c are the lattice's counts, the all-h peak exactly and the tiered peak x 1.027 (a larger margin over
   // 4786 would exceed the lattice and buy nothing). c was 192, 67 pages no run can use.
   scene.fluid.brickPools = { f: 4913, c: 125, b: 16, k: 0, particles: 1_250_000 };
+  // Particles to 2 cells below the surface, not 3 (lane E swing D, 2026-11-16): 20-33% fewer records, the dam's
+  // gates pass, fenced median 39.0 -> 35.6 ms. Deeper liquid is carried by the grid alone.
+  scene.fluid.brickTiers = { particleBandDepth: 2 };
   return scene;
 }
 

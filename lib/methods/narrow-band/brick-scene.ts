@@ -34,6 +34,8 @@ export interface BrickSceneSetup {
   readonly viscosity_Pa_s: number;
   readonly surfaceTension_N_m: number;
   readonly capacities: BrickCapacities;
+  /** The particle band's depth in cells (scene.fluid.brickTiers.particleBandDepth, 3 when absent). */
+  readonly particleBandDepth: number;
   /** Initial liquid in cells; closed-wall faces are continued through the wall. */
   readonly liquid: readonly BrickLiquidBox[];
   /** The lattice's low corner (m) and the container's cells. */
@@ -79,7 +81,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
     gaps,
     setup: {
       sceneId: id, lattice: [n[0]!, n[1]!, n[2]!], h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
-      capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles }, liquid: [box], origin_m: [-0.5 * c.width_m, 0, -0.5 * c.depth_m],
+      capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles }, particleBandDepth: f.brickTiers?.particleBandDepth ?? 3, liquid: [box], origin_m: [-0.5 * c.width_m, 0, -0.5 * c.depth_m],
     },
   };
 }

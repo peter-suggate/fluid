@@ -77,6 +77,8 @@ export interface BrickStageContext {
   readonly values: Readonly<Record<string, unknown>>;
   /** The fluid's constants (scene.fluid); F's forces apply them or refuse the scene. Absent in E's tests. */
   readonly fluid?: { readonly density_kg_m3: number; readonly viscosity_Pa_s: number; readonly surfaceTension_N_m: number };
+  /** The scene's particle settings (BrickSceneSetup.particleBandDepth); absent, the band is 3 cells deep. */
+  readonly particles?: { readonly bandDepth: number };
 }
 
 export type BrickStagesFactory = (context: BrickStageContext) => BrickStages;

@@ -46,6 +46,8 @@ export interface BrickEngineOptions {
   /** The method's resolved values and the fluid's constants, passed to the stage factory. */
   readonly values?: Readonly<Record<string, unknown>>;
   readonly fluid?: { readonly density_kg_m3: number; readonly viscosity_Pa_s: number; readonly surfaceTension_N_m: number };
+  /** The scene's particle settings for the stage factory (brick-stages.ts BrickStageContext.particles). */
+  readonly particles?: { readonly bandDepth: number };
   readonly label?: string;
 }
 
@@ -267,7 +269,7 @@ export class BrickEngine {
     const layout = new BrickLayout({ lattice: options.lattice, ...options.capacities, apic: options.apic });
     const solver = options.solver(layout);
     validatePressureSolver(solver);
-    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid });
+    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles });
     validateBrickStages(stages);
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);

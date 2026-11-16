@@ -157,6 +157,9 @@ test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued thro
   assert.equal(setup.dt_s, 1 / 60);
   assert.equal(setup.h_m, 0.8 / 128);
   assert.deepEqual(setup.capacities, dam.fluid.brickPools);
+  // The dam keeps particles 2 cells deep (scene.fluid.brickTiers); a scene that does not say keeps 3.
+  assert.equal(setup.particleBandDepth, 2);
+  { const plain = sceneDocument(getSceneDefinition("high-resolution-dam-break")); delete (plain.fluid as { brickTiers?: unknown }).brickTiers; assert.equal(brickSceneSetup(plain, { timeStep: "sixtieth" }).setup?.particleBandDepth, 3); }
   // The reservoir's three wall faces drop out (damBreakSignedDistanceAtNode): its box runs past them.
   const box = setup.liquid[0]!, n = 128;
   for (let a = 0; a < 3; a++) assert.ok(box.lo[a]! <= -n, `lo ${a}`);
@@ -406,7 +409,7 @@ async function readSlice(device: GPUDevice, texture: GPUTexture, z: number): Pro
 test("brick engine (GPU): the app adapter steps, reports, and presents the pool (and clears bricks that leave)", GPU, async () => {
   await withDevice("brick adapter", async device => {
     const setup: BrickSceneSetup = { sceneId: "test", lattice: [64, 32, 64], h_m: H_M, dt_s: DT, gravity_mps2: [0, -G, 0], density_kg_m3: 1000, viscosity_Pa_s: 0, surfaceTension_N_m: 0,
-      capacities: { f: 400, c: 16, b: 0, k: 0, particles: 1024 }, liquid: [sheet(20, 10.3, 20)], origin_m: [0, 0, 0] };
+      capacities: { f: 400, c: 16, b: 0, k: 0, particles: 1024 }, particleBandDepth: 3, liquid: [sheet(20, 10.3, 20)], origin_m: [0, 0, 0] };
     const far = 2;
     const solver = await BrickNBFlipSolver.create(device, { setup, stages: bringUpStages, solver: L => bringUpCG(L), values: {}, quality: "balanced", farPhi_m: far });
     assert.equal(solver.advanceTo(0.5 * DT, []), false, "no partial step");

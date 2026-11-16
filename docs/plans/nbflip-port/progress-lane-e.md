@@ -1920,3 +1920,46 @@ Frozen, on 3090d99e: main pSeed 2.62 → 1.65 ms at step 20 and 2.55 → 1.56 ms
   44.13 / 45.03 ms.
 - Profile, steps 18–23: transfer and seeding 6.84 → 5.93 ms; window kernel mean 40.9 → 39.7 ms.
 - test:unit 1871/1871.
+
+## 2026-11-16: swing D, the dam's particle band is 2 cells deep (scene.fluid.brickTiers.particleBandDepth)
+
+**Census** (frozen dam at steps 20 / 100 / 300):
+- Mass per cell by depth is 10–11 from −2.5 to −1, and about 8 from −1 to 0.
+- The merge holds its cap inside the move. The shallow cells (depth ≥ −1) are uncapped, with up to 152 / 125 / 41
+  records; that is closed separately.
+- At step 100 the deep band's merge cuts 168k records to 136k (28k by the cap, 3.9k by mass).
+- Records deeper than −2 make up 20 / 24 / 22% of the total.
+- So the band's depth is the count lever. The mass-8 cap is parked.
+
+**Parameter.** scene.fluid.brickTiers.particleBandDepth is brick-only.
+- It is validated as finite and within [2, 4] cells; the default is 3.
+- It flows through BrickSceneSetup.particleBandDepth to the engine options, then the stage context (particles.bandDepth),
+  then particleKernels.
+- nbfParticleFormulasAt substitutes the anchored `NB_BAND_DEPTH` and throws if the anchor or the depth is unknown.
+- Shader modules are keyed by their code, so the constant is part of the cache key.
+- The high-resolution dam sets 2. The old engine (the method value, still pinned at 3 for the brick engine) and every
+  other scene are unchanged.
+
+**Thin band** (on d4beeabf, NB_BAND_DEPTH 2.0 and 2.5 against 3.0). Both pass dam-300.
+
+| band | D8 particles 30-90 / 105-165 / 180-300 | fenced 165-step median (ms) |
+|---|---|---|
+| 3.0 | 6.54e5 / 4.04e5 / 3.69e5 | 39.00 / 39.24 |
+| 2.5 | 5.64e5 / 3.61e5 / 3.36e5 | 37.67 / 37.01 |
+| 2.0 | 4.39e5 / 3.13e5 / 2.97e5 | 35.75 / 35.53 |
+
+Fenced means are 43.35 / 43.47 ms for 3.0 and 39.11 / 39.11 ms for 2.0.
+
+The 2.0 profile against 3.0 (steps 18–23): move 3.72 → 2.37 ms, transfer and seeding 5.93 → 5.24 ms, window kernel
+mean 39.7 → 37.7 ms.
+
+The pressure solve rose 6.80 → 7.27 ms in that window. It comes from the cycle count, not the fill: step 24 ran 7 cycles
+against 5. Over dam-300 the mean is 5.03 cycles per step against 5.06 (5.29 against 5.43 in 61–165, 4.56 against 4.67
+in 166–300).
+
+Other results at 2.0:
+- Energies: D5k at 30-90 is 43.1 against 46.5 (margin 0.73); D5e is 318.9 against 328.0 (margin 0.78). Extra damping
+  is accepted.
+- Surface roughness / dimples025 at steps 240, 300, 360 and 480: 0.22/11, 0.19/0, 0.25/3, 0.18/10, against 3.0's
+  0.26/6, 0.23/2, 0.22/10, 0.17/3. That is within the noise.
+- The coordinator's visual check (splash at about 2.2 s, sloshing at about 10–11 s) matches band 3.

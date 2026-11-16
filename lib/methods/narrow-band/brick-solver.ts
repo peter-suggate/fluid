@@ -67,6 +67,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       lattice: s.lattice, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid,
       solver: options.solver, stages: options.stages, values: options.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
+      particles: { bandDepth: s.particleBandDepth },
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m);
     const solver = new BrickNBFlipSolver(options, engine, presentation);

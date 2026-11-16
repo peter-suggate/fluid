@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfParticleSupported, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
+import { nbfParticleFormulasAt, nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfParticleSupported, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { NBF_SUPPORT_TRAVEL_WGSL } from "./particles-kernels.wgsl";
 import { particleBrickDepositWGSL } from "../uniform/uniform-particle-brick.wgsl";
 import { narrowBandSeparationReach } from "../uniform/uniform-narrow-band-flip";
@@ -404,6 +404,14 @@ test("the brick engine's particle kernels reject settings they do not implement"
   nbfParticleSupported({ particleTransfer: "flip", crowdedCells: "merge", surfaceSamples: 8 });
   assert.throws(() => nbfParticleSupported({ crowdedCells: "retire" }), /crowdedCells "retire" is not implemented/);
   assert.throws(() => nbfParticleSupported({ surfaceSamples: 64 }), /surfaceSamples "64"/);
+});
+
+test("the particle band's depth is the scene's (brickTiers.particleBandDepth), 3 by default, and an unknown depth fails", () => {
+  assert.equal(nbfParticleFormulasAt(3), nbfParticleFormulasWGSL);
+  const two = nbfParticleFormulasAt(2);
+  assert.ok(two.includes("const NB_BAND_DEPTH:f32=2.00;") && !two.includes("NB_BAND_DEPTH:f32=3.00"));
+  assert.equal(two.replace("NB_BAND_DEPTH:f32=2.00", "NB_BAND_DEPTH:f32=3.00"), nbfParticleFormulasWGSL);
+  for (const bad of [1.5, 4.5, Number.NaN, Number.POSITIVE_INFINITY]) assert.throws(() => nbfParticleFormulasAt(bad), /particle band depth/);
 });
 
 test("the parity fixture holds every old function the formulas port", () => {

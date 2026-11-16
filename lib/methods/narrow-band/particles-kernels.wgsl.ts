@@ -38,7 +38,7 @@ import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
-import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasWGSL, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
+import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasAt, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
 
 /** The records' indirect arguments, in F's args region (brick-abi.md §5.5): x, y, z by the fold rule. */
@@ -92,7 +92,9 @@ const PS_DEPTH_WGSL = (() => {
   return body.replace("fn fgDepth(", "fn psDepth(").replace("if(!fgReach1(c))", "if(!psReach1(c))").replace("fgDepthVertex(c+vec3i(corner))", "psDepthVertex(c+vec3i(corner))");
 })();
 
-export function particleKernels(L: BrickLayout, F: FluidLayout) {
+/** The particle kernels; options.bandDepth the particle band's depth in cells (the scene's, 3 by default). */
+export function particleKernels(L: BrickLayout, F: FluidLayout, options: { readonly bandDepth: number } = { bandDepth: NBF_PARTICLE_SETTINGS.particleBandDepth }) {
+  const nbfParticleFormulasWGSL = nbfParticleFormulasAt(options.bandDepth);
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
 

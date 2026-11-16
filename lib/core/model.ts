@@ -429,6 +429,13 @@ export interface SceneDescription {
      * engine's latched FAIL_POOL, never a reallocation.
      */
     brickPools?: { f: number; c: number; b: number; k: number; particles: number };
+    /**
+     * The brick engine's per-scene tier settings (engine "brick" only; the
+     * uniform engine reads its method values). particleBandDepth: how deep
+     * below the surface, in cells, the h tiles keep particles (records deeper
+     * retire to the grid, and seeding stops there); 3 when absent.
+     */
+    brickTiers?: { particleBandDepth?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -766,6 +773,8 @@ export function validateScene(scene: SceneDescription): string[] {
   if (tiers?.particlesPerFineCell !== undefined && !(tiers.particlesPerFineCell > 0 && tiers.particlesPerFineCell <= 64)) errors.push("fluid.tiers.particlesPerFineCell must be in (0, 64]");
   if (tiers?.fineBlocks !== undefined && tiers.fineBlocks !== "auto" && !(Number.isInteger(tiers.fineBlocks) && tiers.fineBlocks > 0)) errors.push("fluid.tiers.fineBlocks must be a positive integer or \"auto\"");
   if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h" && tiers.start !== "census") errors.push("fluid.tiers.start must be \"h\", \"4h\" or \"census\"");
+  const bandDepth = scene.fluid?.brickTiers?.particleBandDepth;
+  if (bandDepth !== undefined && !(Number.isFinite(bandDepth) && bandDepth >= 2 && bandDepth <= 4)) errors.push("fluid.brickTiers.particleBandDepth must be in [2, 4] cells");
   const brickPools = scene.fluid?.brickPools;
   if (brickPools) for (const key of ["f", "c", "b", "k", "particles"] as const) {
     const v = brickPools[key], least = key === "b" || key === "k" ? 0 : 1;

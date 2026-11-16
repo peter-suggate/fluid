@@ -33,7 +33,7 @@ import type { BrickStages, BrickStagesFactory } from "./brick-stages";
 import { fluidLayout } from "./fluid-grid.wgsl";
 import { LC_ADVECT_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
-import { nbfParticleSupported } from "./particles-formulas.wgsl";
+import { NBF_PARTICLE_SETTINGS, nbfParticleSupported } from "./particles-formulas.wgsl";
 import { P_ARGS_RECORDS, particleKernels } from "./particles-kernels.wgsl";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import { velocityKernels } from "./velocity-kernels.wgsl";
@@ -49,7 +49,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const seconds = context.values.volumeControlSeconds;
   if (typeof seconds !== "number" || !(seconds >= 0)) throw new Error(`NB-FLIP brick engine: volumeControlSeconds ${String(seconds)} is not a control time`);
   const physics = { viscosity_Pa_s: context.fluid?.viscosity_Pa_s ?? 0, density_kg_m3: context.fluid?.density_kg_m3 ?? 1000, volumeControl_1_s: seconds > 0 ? 1 / seconds : 0 };
-  const p = particleKernels(L, F), l = levelSetKernels(L, F), v = velocityKernels(L, F, physics);
+  const p = particleKernels(L, F, { bandDepth: context.particles?.bandDepth ?? NBF_PARTICLE_SETTINGS.particleBandDepth }), l = levelSetKernels(L, F), v = velocityKernels(L, F, physics);
   const list = (k: number, g: "G1" | "G8" | "G64" | "X8"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
   const all = list(LIST.F_ALL, "G1"), all8 = list(LIST.F_ALL, "G8"), pages = list(LIST.C_ALL, "G1");
   // Tiered, a pass over both tiers (the FC list: F_ALL's bricks, then C_ALL's pages, a workgroup each): the kernels
