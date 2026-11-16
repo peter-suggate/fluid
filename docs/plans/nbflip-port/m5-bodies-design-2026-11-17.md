@@ -1,6 +1,7 @@
 # M5 design note: rigid bodies on the brick engine (lane P, 2026-11-17)
 
-Status: **draft for E's review.** Nothing is implemented. Scope is structural plan §2.8 / §4.2 M5 and the rollout
+Status: **E accepted §8 on 2026-11-17** with the changes in §8.1. Implemented so far: the shared body WGSL
+(lib/methods/narrow-band/bodies-shapes.wgsl.ts) and its R6/R7 tests (§10). No kernel yet. Scope is structural plan §2.8 / §4.2 M5 and the rollout
 plan (brick-default-rollout-2026-11-17.md, lane P).
 
 The physics is the old engine's, ported verbatim. All file:line references are to the old uniform tree on main at
@@ -153,6 +154,9 @@ This replaces the old 4h moving-wall path (umCutWord bit 16, uniform-mixed-press
 ring at h it cannot activate. A `NEAR_BODY` brick holding a non-h tile latches `FAIL.UNSUPPORTED`, and never
 falls back silently.
 
+**Pose timing.** setMark in part 2 of step n reads pose n; bodyStamp in part 1 of step n+1 reads pose n+1. The
+margin's `|v|·dt` plus one cell covers that one-step lag.
+
 **Liquid only.** Residency is still driven by liquid and particles. `NEAR_BODY` is a class on resident bricks; a
 body far from liquid costs nothing.
 
@@ -304,6 +308,48 @@ collision and terrain. That is unchanged. The fluid sees scenery through E's sta
 | A7 | E exports `nbStaticCellOpen`, `nbStaticFaceOpen` and `nbStaticSolidAt`, the functions `solidStamp` itself uses | E's M3 solid module |
 | A8 | `FLAGS.OPEN` gains `bodyStamp` as a writer (OPEN only, on its bricks) | §2.4 |
 
+### 8.1 E's verdict (2026-11-17)
+
+All eight accepted, with these changes:
+- **A1.** Every K-slot pop gets `W = 0` from whichever stamp first writes the slot. bodyStamp's clean-up pass (BODY_WAS
+  and not NEAR_BODY) also writes `BMASK = 0`, so couple and F's move skip the brick.
+- **A2.** setMark owns both bits in one read-modify-write: `BODY_WAS := old NEAR_BODY`, then the new NEAR_BODY.
+  setLists does not keep BODY_WAS. Entering bricks: setUpdate's entry path runs the brick-level ball prefilter on
+  ENTERING bricks and pops a K slot, so the same step's stamp covers them (a brick entering inside a body is otherwise
+  open for a step). setMark's body test is gated on ring word 3 bit 1 and gains the `bodies` binding.
+- **A3.** The "bodies present" gate is E's ring word 3 bit 1, not header word 65.
+- **A4.** syncBodies goes into the queue after step n's part 2 and before step n+1's part 1. P checks that a
+  prescribed-motion change never rewrites a dynamic body's integrated pose, lists the brick scenes that need
+  samplePrescribedRigidBody, and measures it at the step-2 gate (a per-step CPU stage: plan a GPU evaluation from the
+  authored parameters for any scene that needs it).
+- **A5.** F_CLASS bit 9 (E) `CUT_STATIC`, set at entry and by solidStamp. A brick holds a K slot while CUT_STATIC,
+  NEAR_BODY or BODY_WAS is set. KCAP: static-cut bricks the fluid can reach plus the measured body-shell peak; an
+  underestimate latches POOL_K.
+- **A6.** The stamp stage goes at the end of the head, after residency, lists(1), `want`, the tiered transfer and the
+  certificate, and before release.part1 (setInit and the transfer write FLAGS; the release port's reach words read
+  OPEN). F_BODY is one list of NEAR_BODY or BODY_WAS.
+- **A7.** `nbStaticCellOpen`, `nbStaticFaceOpen`, `nbStaticSolidAt`, and (accepted by E the same day) two more (the old composite
+  branches on them, bodies-shapes.wgsl.ts `PbStaticHooks`): `nbStaticCellKind(c) -> u32` (0 plain, 1 boundary
+  record, 2 voxel without a record: the FRAC min/product forms and the voxel-wall face) and
+  `nbStaticFaceBoxed(c, axis) -> bool` (umBoundaryTouchesBox at the face's unit box: a body-free voxel-wall face
+  takes the static value when boxed).
+
+### 8.2 The shared module and a Metal miscompile
+
+`bodies-shapes.wgsl.ts` ports, with the pose and cut atlas as storage arrays the kernel names and every query taking
+its candidate mask: the pose queries (§9), `pbCellBodyFraction`, `pbStampCell` / `pbStampFace` /
+`pbStampFaceVelocity` (§2.3, through the static hooks), `pbBodyFaceFraction` and `pbCoupleBody` (§6),
+`pbBodyMarkTile` / `pbBodyBoxTileGap` (§4), `pbRigidContact` (§9) and `pbBodyBoxCandidates` (BMASK).
+
+**The module writes no vector component through a dynamic index.** The verbatim couple loop
+(`var low=id;low[axis]-=1;area[axis]=ff(id)-ff(low)`) gave wrong face areas on Metal in one test kernel while each
+call alone was right (the submerged sphere's impulse: −6.71 N·s against +10.84). The old text compiled in the same
+kernel was also wrong (+1.35). An `array<f32,3>` accumulator was right; a select-built callee with a vec3f accumulator
+was not; a small repro was right. The trigger therefore depends on the kernel. Offsets are now `c · e_axis` (`pbE`,
+exact). The old engine's production couple passes its own hydrostatic test (uniform-rigid-rest, "large floating
+sphere", 2026-11-17), so the old kernel as built is not hit, but the pattern is fragile. Old-WGSL parity cannot see a
+miscompile both texts share, so R6/R7 also hold a Float64 mirror (§10).
+
 ## 9. F's side (F's files: scratch first, F reviews)
 
 P provides `bodies-shapes.wgsl.ts`:
@@ -338,6 +384,7 @@ marked GPU.
 | R4 | save/load/undo | Saving the edited scene, loading it and re-stamping gives channels bitwise equal to the post-edit stamp. Undo gives bitwise the pre-edit stamp. |
 | R5 | unknown kinds | Shape tag 9 and a rounded plate give a `brickSceneSetup` gap. The same codes arriving at runtime (a roster change) latch `FAIL.UNSUPPORTED` on the GPU. A body count above 24 throws. |
 | R6 | oracle parity | `bodyStamp`'s FRAC/AP/W on a frozen state matches the old engine's umCellOpenGeometry / umPressureFaceV / umSolidFaceVelocity (GPU, the old WGSL run as the oracle), for sphere, box, capsule, cylinder, cup, inverted and cut bodies. |
+| R6/R7 (done) | bodies-shapes.test.ts | bitwise against the old WGSL (from its generators) for FRAC/AP/W, all-bodies and per-brick BMASK, pbRigidContact and couple's per-cell words; 0 of 32768 stamp words off a Float64 mirror; submerged sphere impulse −1.06% of ρgV·dt |
 | R7 | couple parity | Exchange words 0–6 and 10 match the old couple on a frozen pressure field (GPU), and the hydrostatic impulse is ρgV dt within 2% for a submerged sphere. |
 
 **Editing policy.** A wet scene's sphere keeps the object tool (cloth-system.test.ts:445), so R2(b) uses an
