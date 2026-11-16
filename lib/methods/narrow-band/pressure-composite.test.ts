@@ -3,7 +3,7 @@
 // mixed-tier state of parity/composite-fixture.ts. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, PHI_AIR_C, phiFar } from "./brick-abi";
+import { ARGS, BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, PHI_AIR_C, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { COMPOSITE_N, add, compositeFixture, keyCoord, scale, shr, type V3 } from "./parity/composite-fixture";
 import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
@@ -24,7 +24,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("pressure composite", async device => {
     const { e, s, L, h, rate, dir, pages, F, C, fFlags, pageSlot, fSlot, enteredX } = await compositeFixture(device, L => bringUpCG(L));
-    for (const cs of pages) for (let i = 0; i < 512; i++) assert.equal(enteredX[BRICK_STRIDE * cs + i], 0, `C X at entry, slot ${cs}`);
+    for (const cs of pages) for (let i = 0; i < BRICK_CELLS; i++) assert.equal(enteredX[BRICK_STRIDE * cs + i], 0, `C X at entry, slot ${cs}`);
     // ---- Run the rows.
     const K = pressureCompositeKernels(L);
     await e.run([{ kernel: K.tileRoots, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsF, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, { kernel: K.rowsC, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }]);
@@ -175,7 +175,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     const fx = await readF("X"), frhs = await readF("RHS"), fdiag = await readF("DIAG"), fk = [await readF("K0"), await readF("K1"), await readF("K2")], fku = [await readF("KU0"), await readF("KU1"), await readF("KU2")];
     for (const [key, slot] of s.bricks) {
       const o = scale(8, keyCoord(key));
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]), at = BRICK_STRIDE * slot + l;
         const owned = inLattice(c) && cellH(c), own = owned ? centre(c) : PHI_AIR, liquid = owned && wet(own, 1);
         let diag = 0, div = 0, extra = 0, st = 0; const kk = [0, 0, 0], ku = [0, 0, 0];
@@ -201,7 +201,7 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     const cx = await readC("X"), crhs = await readC("RHS"), cdiag = await readC("DIAG"), ck = [await readC("K0"), await readC("K1"), await readC("K2")], cpphi = await readC("PPHI");
     for (const cs of pages) {
       const O = scale(8, keyCoord(dir[L.dir.crec + 32 * cs + 29]!));
-      for (let i = 0; i < 512; i++) {
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = add(O, [i & 7, (i >> 3) & 7, i >> 6]), at = BRICK_STRIDE * cs + i;
         const owned = tileInLattice(T) && !tileH(T), root = owned ? rootPhi4(T) : 0, liquid = owned && wet(root, 4);
         let diag = 0, div = 0, extra = 0, st = 0; const kk = [0, 0, 0];

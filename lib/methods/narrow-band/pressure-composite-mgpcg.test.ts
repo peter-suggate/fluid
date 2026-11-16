@@ -13,7 +13,7 @@
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, H, LIST, RING, STATE } from "./brick-abi";
+import { ARGS, BRICK_CELLS, BRICK_STRIDE, H, LIST, RING, STATE } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
 import type { BrickPlacement } from "./brick-kernel";
 import { add, coarseTile, compositeFixture, COMPOSITE_N, keyCoord, scale, type V3 } from "./parity/composite-fixture";
@@ -42,11 +42,11 @@ async function readComposite(e: BrickEngine, bricks: Map<number, number>, pages:
   const cells: V3[] = [], fAt: number[] = [], tiles: V3[] = [], cAt: number[] = [];
   for (const [key, slot] of bricks) {
     const o = scale(8, keyCoord(key));
-    for (let l = 0; l < 512; l++) { const at = BRICK_STRIDE * slot + l; if (F.DIAG![at]! > 0) { cells.push(add(o, [l & 7, (l >> 3) & 7, l >> 6])); fAt.push(at); } }
+    for (let l = 0; l < BRICK_CELLS; l++) { const at = BRICK_STRIDE * slot + l; if (F.DIAG![at]! > 0) { cells.push(add(o, [l & 7, (l >> 3) & 7, l >> 6])); fAt.push(at); } }
   }
   for (const cs of pages) {
     const O = scale(8, keyCoord(dir[L.dir.crec + 32 * cs + 29]!));
-    for (let i = 0; i < 512; i++) { const at = BRICK_STRIDE * cs + i; if (C.DIAG![at]! > 0) { tiles.push(add(O, [i & 7, (i >> 3) & 7, i >> 6])); cAt.push(at); } }
+    for (let i = 0; i < BRICK_CELLS; i++) { const at = BRICK_STRIDE * cs + i; if (C.DIAG![at]! > 0) { tiles.push(add(O, [i & 7, (i >> 3) & 7, i >> 6])); cAt.push(at); } }
   }
   const rows: CompositeRows = {
     f: { cells, diag: fAt.map(i => F.DIAG![i]!), k: [0, 1, 2].map(a => fAt.map(i => F[`K${a}`]![i]!)), ku: [0, 1, 2].map(a => fAt.map(i => F[`KU${a}`]![i]!)) },
@@ -258,7 +258,7 @@ test("composite project (GPU): every liquid row's projected divergence is its re
     let warmBad = 0, meanErr = 0;
     for (const [key, slot] of fx.s.bricks) {
       const o = scale(8, keyCoord(key));
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]), w = BRICK_STRIDE * slot + l;
         const row = inLattice(c) && tileH([c[0] >> 2, c[1] >> 2, c[2] >> 2]) && DIAG[w]! > 0;
         if (((flags[w]! & P_FLAG.WARM) !== 0) !== row) warmBad++;
@@ -352,7 +352,7 @@ for (const [slots, exact] of [[40, true], [3, true], [40, false]] as const) test
     };
     for (const [key, slot] of fx.s.bricks) {
       const o = scale(8, keyCoord(key));
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const at = BRICK_STRIDE * slot + l; if (!(F.DIAG[at]! > 0)) continue;
         const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]);
         for (let a = 0; a < 3; a++) {
@@ -364,7 +364,7 @@ for (const [slots, exact] of [[40, true], [3, true], [40, false]] as const) test
     }
     for (const cs of fx.pages) {
       const O = scale(8, keyCoord(fx.dir[L.dir.crec + 32 * cs + 29]!));
-      for (let i = 0; i < 512; i++) {
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const at = BRICK_STRIDE * cs + i; if (!(C.DIAG[at]! > 0) || C.PPHI[at]! < -4) continue;
         const T = add(O, [i & 7, (i >> 3) & 7, i >> 6]);
         if (T.some(v => v >= NT) || !coarseTile(T)) continue;
@@ -411,7 +411,7 @@ test("composite pressure delta (GPU): each region's change as the old publishPre
     const at = async (step: number) => { e.write("set", L.set.ring + RING.STEP, new Uint32Array([step])); await e.run(publish); return e.read("pmgC", M.PDELTA, 8 * L.cap.c); };
     const pageOf = (cs: number) => keyCoord(fx.dir[L.dir.crec + 32 * cs + 29]!);
     const inLattice = (T: V3) => T.every(v => v >= 0 && v < NT);
-    const regions = (cs: number) => { const o = new Set<number>(); const P = pageOf(cs); for (let i = 0; i < 512; i++) { const T = add(scale(8, P), [i & 7, (i >> 3) & 7, i >> 6]); if (inLattice(T)) o.add(((i & 7) >> 2) | ((((i >> 3) & 7) >> 2) << 1) | (((i >> 6) >> 2) << 2)); } return o; };
+    const regions = (cs: number) => { const o = new Set<number>(); const P = pageOf(cs); for (let i = 0; i < BRICK_CELLS; i++) { const T = add(scale(8, P), [i & 7, (i >> 3) & 7, i >> 6]); if (inLattice(T)) o.add(((i & 7) >> 2) | ((((i >> 3) & 7) >> 2) << 1) | (((i >> 6) >> 2) << 2)); } return o; };
     const first = await at(5);
     for (const cs of fx.pages) for (let r = 0; r < 8; r++) assert.equal(first[8 * cs + r], INF, `no history: page ${cs} region ${r} +Inf`);
     // A change of the root values that varies across tiles (so the gradient of the change is not zero).
@@ -424,7 +424,7 @@ test("composite pressure delta (GPU): each region's change as the old publishPre
     let checked = 0, worst = 0, nonzero = 0;
     for (const cs of fx.pages) {
       const P = pageOf(cs), want = new Float64Array(8);
-      for (let i = 0; i < 512; i++) {
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = add(scale(8, P), [i & 7, (i >> 3) & 7, i >> 6]); if (!inLattice(T)) continue;
         const r = ((i & 7) >> 2) | ((((i >> 3) & 7) >> 2) << 1) | (((i >> 6) >> 2) << 2);
         let delta = 0;

@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BrickLayout, H, PHI_AIR, STATE, brickKeyCoord } from "./brick-abi";
+import { BRICK_CELLS, BrickLayout, H, PHI_AIR, STATE, brickKeyCoord } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3 } from "./brick-engine";
 import { bringUpStages } from "./brick-stages";
 import { validatePressureSolver } from "./brick-pressure-slot";
@@ -57,7 +57,7 @@ async function readSystem(e: BrickEngine, s: BrickSnapshot, lattice: Vec3) {
   const ch = (n: string) => brickField(s, pres, L.base("pres", "F", n), 0);
   const DIAG = ch("DIAG"), K = [ch("K0"), ch("K1"), ch("K2")], RHS = ch("RHS"), X = ch("X"), Z = ch("Z");
   const all: Vec3[] = [];
-  for (const key of s.bricks.keys()) { const b = brickKeyCoord(key); for (let l = 0; l < 512; l++) all.push([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); }
+  for (const key of s.bricks.keys()) { const b = brickKeyCoord(key); for (let l = 0; l < BRICK_CELLS; l++) all.push([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); }
   const rows = all.filter(c => c.every((v, a) => v < lattice[a]!) && DIAG(c) > 0);
   const keys = rows.map(c => packCell(...c));
   const fine = { keys, diag: rows.map(DIAG), k: [0, 1, 2].map(a => rows.map(K[a]!)) as [number[], number[], number[]] };
@@ -120,7 +120,7 @@ test("pool MGPCG (GPU): a static box is hydrostatic, and X = 0 in the air", GPU,
     const us = [0, 1, 2].map(a => brickField(s, vel, L.base("vel", "F", `US${a}`), 0));
     const X = brickField(s, pres, L.base("pres", "F", "X"), 0);
     const cells: Vec3[] = [];
-    for (const key of s.bricks.keys()) { const b = brickKeyCoord(key); for (let l = 0; l < 512; l++) cells.push([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); }
+    for (const key of s.bricks.keys()) { const b = brickKeyCoord(key); for (let l = 0; l < BRICK_CELLS; l++) cells.push([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); }
     const oracle = pressureOracle(lattice, H_M, cells, phi, (a, c) => us[a]!(c));
     let scale = 0, err = 0, analytic = 0, air = 0;
     for (const c of cells) {

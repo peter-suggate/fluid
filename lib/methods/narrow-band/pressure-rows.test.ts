@@ -3,6 +3,7 @@
  * reach every branch. Whole old functions where they are pure; elsewhere verbatim excerpts over stubs that read the
  * thread's inputs (the method of lane F's formula parity, parity/harness.ts). GPU tests skip without
  * WEBGPU_NODE_MODULE. */
+import { BRICK_CELLS, BRICK_STRIDE } from "./brick-abi";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -116,15 +117,15 @@ ${oldFunction("bFaceTheta")}`,
 });
 
 test("pressure rows: the seam head (bSeamHead) to 4 ulp of its terms", { skip: !parityGPU }, async () => {
-  const N = 2048, S = 520, rnd = prng(23);
-  // pool: the kinds plane (slot t's 520 words: the row at its local cell, its 6 neighbours at 512 + g), then the base plane.
+  const N = 2048, S = BRICK_STRIDE, rnd = prng(23);
+  // pool: the kinds plane (slot t's BRICK_STRIDE words: the row at its local cell, its 6 neighbours at BRICK_CELLS + g), then the base plane.
   const pool = new Uint32Array(2 * S * N), inp: number[] = [];
   for (let t = 0; t < N; t++) {
-    const local = Math.floor(rnd() * 512), f = Math.floor(rnd() * 6), at = S * t + local;
+    const local = Math.floor(rnd() * BRICK_CELLS), f = Math.floor(rnd() * 6), at = S * t + local;
     let kinds = rnd() < 0.85 ? 0x80000000 : 0;
     for (let g = 0; g < 6; g++) kinds |= (rnd() < 0.7 ? NP_K.BAND : Math.floor(rnd() * 7)) << (3 * g);
     pool[at] = kinds >>> 0; pool[S * N + at] = f32((rnd() - 0.5) * 2000);
-    for (let g = 0; g < 6; g++) { const m = S * t + 512 + g; pool[m] = rnd() < 0.8 ? 0x80000000 : 0; pool[S * N + m] = f32((rnd() - 0.5) * 2000); }
+    for (let g = 0; g < 6; g++) { const m = S * t + BRICK_CELLS + g; pool[m] = rnd() < 0.8 ? 0x80000000 : 0; pool[S * N + m] = f32((rnd() - 0.5) * 2000); }
     inp.push(at, f);
   }
   const stubs = OLD_CONSTS + /* wgsl */`
@@ -161,7 +162,7 @@ ${oldFunction("bFaceKind")}`;
         if (axis === (f >> 1)) continue;
         let rise = 0, count = 0;
         for (let side = 0; side < 2; side++) {
-          const g = 2 * axis + side, m = S * t + 512 + g;
+          const g = 2 * axis + side, m = S * t + BRICK_CELLS + g;
           if (((kinds >>> (3 * g)) & 7) === NP_K.BAND && (pool[m]! & 0x80000000) !== 0) { rise += Math.abs(pf[S * N + m]! - pf[S * N + at]!); count++; }
         }
         if (count > 0) scale += rise / count * Math.abs((lb[axis]! & 3) - 1.5);

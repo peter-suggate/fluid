@@ -9,7 +9,7 @@
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE } from "./brick-abi";
+import { ARGS, BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE } from "./brick-abi";
 import { COMPOSITE_N, add, coarseTile, compositeFixture, keyCoord, scale, shr, type V3 } from "./parity/composite-fixture";
 import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
 import { mgLayout, poolMGPCG } from "./pressure-mgpcg";
@@ -55,7 +55,7 @@ async function setup(device: GPUDevice) {
   const K = L.cap.k, FRAC = new Float32Array(K * BRICK_STRIDE), AP = [0, 1, 2].map(() => new Float32Array(K * BRICK_STRIDE)), W = [0, 1, 2].map(() => new Float32Array(K * BRICK_STRIDE));
   for (const [key, k] of cut) {
     const o = scale(8, keyCoord(key));
-    for (let l = 0; l < 512; l++) {
+    for (let l = 0; l < BRICK_CELLS; l++) {
       const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]), at = BRICK_STRIDE * k + l;
       FRAC[at] = inLattice(c) ? field(c) : 0;
       for (let a = 0; a < 3; a++) {
@@ -123,7 +123,7 @@ test("pressure cuts (GPU): with no K slot, the cut rows and projection are the c
     assert.deepEqual([...b.flags], [...a.flags]);
     // The face cache: every word but a wall face's, which holds its coupling V (0.5) instead of its ratio (1).
     let walls = 0;
-    for (let s = 0; s < fx.L.cap.f; s++) for (let l = 0; l < 512; l++) {
+    for (let s = 0; s < fx.L.cap.f; s++) for (let l = 0; l < BRICK_CELLS; l++) {
       const kinds = a.fc[BRICK_STRIDE * (7 * s + 6) + l]!;
       assert.equal(b.fc[BRICK_STRIDE * (7 * s + 6) + l], kinds);
       for (let f = 0; f < 6; f++) {
@@ -152,7 +152,7 @@ test("pressure cuts (GPU): the cut rows are the old pRows' solid terms on the cu
     // ---- Rows.
     for (const [key, slot] of s.bricks) {
       const o = scale(8, keyCoord(key));
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]), i = BRICK_STRIDE * slot + l;
         const owned = cellH(c), own = owned ? a.PPHI[i]! : Infinity;
         if (!owned || !wet(own)) { assert.equal(b.DIAG[i], a.DIAG[i], `dry DIAG ${c}`); continue; }
@@ -202,7 +202,7 @@ test("pressure cuts (GPU): the cut rows are the old pRows' solid terms on the cu
     const kindAt = (out: typeof a, c: V3, f: number) => { const sl = cfc(c)!; return ((out.fc[BRICK_STRIDE * (7 * sl + 6) + local(c)]! >>> (4 * f)) & 15) - 1; };
     for (const [key, slot] of s.bricks) {
       const o = scale(8, keyCoord(key));
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const c = add(o, [l & 7, (l >> 3) & 7, l >> 6]), i = BRICK_STRIDE * slot + l;
         for (let ax = 0; ax < 3; ax++) {
           const hiP: V3 = [N, N, N]; hiP[ax]! += 1; if (c.some((v, j) => v < 0 || v >= hiP[j]!)) continue;
@@ -252,7 +252,7 @@ test("pressure cuts (GPU): the composite MGPCG on the cut rows converges with ev
     // The rows' wall faces (rowsF's face cache) before any re-decision moves a state: the audit counts these.
     const fc = new Float32Array((await e.read("pmgF", fx.M.FC, 7 * BRICK_STRIDE * L.cap.f)).buffer);
     let walls = 0;
-    for (const [, slot] of fx.s.bricks) for (let l = 0; l < 512; l++) { const kinds = fc[BRICK_STRIDE * (7 * slot + 6) + l]!; for (let f = 0; f < 6; f++) if (((kinds >>> (4 * f)) & 15) - 1 === NP_K.WALL) walls++; }
+    for (const [, slot] of fx.s.bricks) for (let l = 0; l < BRICK_CELLS; l++) { const kinds = fc[BRICK_STRIDE * (7 * slot + 6) + l]!; for (let f = 0; f < 6; f++) if (((kinds >>> (4 * f)) & 15) - 1 === NP_K.WALL) walls++; }
     await e.run([...Array.from({ length: lv.slots }, (_, k) => lv.slot(k)).flat(), ...lv.core.finish]);
     const header = await e.read("set", 0, 256);
     const { MG_HEADER } = await import("./pressure-mgpcg");

@@ -9,7 +9,7 @@
 // GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BODY_FLAG, BRICK_STRIDE, F_CLASS, FLAG, H, NONE, REC, brickKeyCoord } from "./brick-abi";
+import { BODY_FLAG, BRICK_CELLS, BRICK_STRIDE, FLAG, F_CLASS, H, NONE, REC, brickKeyCoord } from "./brick-abi";
 
 type Vec3 = [number, number, number];
 import { BrickEngine, type BrickEngineOptions } from "./brick-engine";
@@ -82,7 +82,7 @@ test("bodies stage (GPU): the boot's entry path and setMark mark and stamp exact
       assert.notEqual(k, NONE, `NEAR_BODY brick ${key} holds a K slot`);
       assert.equal(new Uint32Array(cut.buffer, 4 * (L.cutBmask + k), 1)[0], 1, "BMASK");
       const b = brickKeyCoord(key);
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const c = [8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)], d = Math.hypot(...c.map((v, i) => (v + 0.5) * H_M - sphere.c[i]!));
         const frac = cut[base("FRAC") + BRICK_STRIDE * k + l]!, open = (phi[L.base("phi", "F", "FLAGS") + BRICK_STRIDE * slot + l]! & FLAG.OPEN) !== 0;
         assert.equal(open, frac > 1e-5, `OPEN at ${c}`);
@@ -118,7 +118,7 @@ test("bodies stage (GPU): a moving sphere's W is its velocity, and the bricks it
     for (const [key, slot] of s.bricks) {
       const k = kslot(slot); if (k === NONE || (cls(slot) & F_CLASS.NEAR_BODY) === 0) continue;
       const b = brickKeyCoord(key);
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const c = [8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)];
         const face = [c[0]! * H_M, (c[1]! + 0.5) * H_M, (c[2]! + 0.5) * H_M];
         if (Math.hypot(...face.map((v, i) => v - a.c[i]!)) + Math.hypot(0.4, 0.4, 0.4) * H_M < a.r) {
@@ -142,7 +142,7 @@ test("bodies stage (GPU): a moving sphere's W is its velocity, and the bricks it
       const k = kslot(slot); assert.notEqual(k, NONE, "BODY_WAS holds its slot");
       // Cleaned at this step's head? No: this step's head ran before setMark saw the jump; the brick was NEAR_BODY
       // there and stamped with the new pose, which no longer reaches it: FRAC 1, W 0 everywhere.
-      for (let l = 0; l < 512; l++) { assert.equal(cut[base("FRAC") + BRICK_STRIDE * k + l], 1); assert.equal(cut[base("W0") + BRICK_STRIDE * k + l], 0); }
+      for (let l = 0; l < BRICK_CELLS; l++) { assert.equal(cut[base("FRAC") + BRICK_STRIDE * k + l], 1); assert.equal(cut[base("W0") + BRICK_STRIDE * k + l], 0); }
     }
     e.advance(1); await e.assertHealthy(); s = await snapshot(e); cut = asF32(await e.read("cut"));
     for (const key of left) {
@@ -187,7 +187,7 @@ test("bodies stage (GPU): a body passing a CUT_STATIC brick leaves solidStamp's 
         const r = L.dir.frec + 32 * slot, cls = s.dir[r + REC.CLASS]!, k = s.dir[r + REC.CUT]!;
         if ((cls & F_CLASS.CUT_STATIC) === 0) continue;
         assert.notEqual(k, NONE);
-        out.set(key, [...CHANNELS.flatMap(ch => Array.from(cut.subarray(L.base("cut", "K", ch) + BRICK_STRIDE * k, L.base("cut", "K", ch) + BRICK_STRIDE * k + 512))), cut[L.cutBmask + k]!]);
+        out.set(key, [...CHANNELS.flatMap(ch => Array.from(cut.subarray(L.base("cut", "K", ch) + BRICK_STRIDE * k, L.base("cut", "K", ch) + BRICK_STRIDE * k + BRICK_CELLS))), cut[L.cutBmask + k]!]);
       }
       return { out, s };
     };
