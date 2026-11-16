@@ -1893,3 +1893,23 @@ fluid-scratch/lane-f/tree-h0.
 - Nothing was deleted.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{hang,dg,rb}.
+
+## 2026-11-17: general initial liquid and the initial velocity (a5b0f97c)
+
+- `brick-initial.ts`: a plain dam-break box or tank-fill slab keeps its closed form (the dam's boot is bitwise
+  unchanged). Every other description (height fields, brick seeds, `initialLiquidVolumes`, box unions) boots from a page
+  table of the old engine's own t = 0 φ (`fluidLatticePagedVertexPhi`, in h), over the liquid's pages grown by one; off
+  the table is far air at the setup's `farPhi` (E's paged max).
+- Exports for E's pool rule: `brickInitialLiquid` → `{liquid | initial, bricks, pages}` (also on `BrickSceneSetup` as
+  `bootBricks`, `bootPages`) and `bootParticleCount` (the boot seeds' upper bound).
+- `brickInitialVelocity`: the scene's initial velocity on the 4h tiles holding liquid or touching one
+  (`uniformInitialLiquidVelocityPages`). bootPhi writes F and C U on the interior faces whose low-side tile is listed.
+  This runs before the stamp stage (A6), which writes only cuts and OPEN flags, so a closed face's velocity is left to
+  the first kick's projection, as in the old engine.
+- Gaps removed: "only the dam-break initial condition (M2)", "an initial liquid velocity (M2)". The predecessor's
+  noSlip plumbing was dropped (lane P's), and its pJoin hunk had landed already (ad371300).
+- Gate (rebased on 4ed039d5): GPU 38/38 (brick-initial, brick-engine, wide-dam, fluid-staging, banks), rc 0, no
+  00000206. Table = `fluidLatticeVertexPhi` at every vertex (torus, standing wave); the dam from a table of its own φ =
+  the boxes' boot by brick and page; the initial velocity on exactly the old engine's faces; the falling torus's step-1
+  seeds carry v0 to 1.2e-8 m/s (spread 3e-8). test:unit 1887 pass / 0 fail; check:types clean but lane N's three.
+- Not yet run: smokes of table scenes on the brick engine. They need pools, which E's pool rule supplies.
