@@ -4,7 +4,7 @@
 // entered in a step start 4h, entering pages start as air, and setMarkPages counts LIQUID_TILES. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, PHI_AIR_C, REC, brickKeyCoord, phiFar } from "./brick-abi";
+import { BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, FLAG, H, LIST, PHI_AIR, PHI_AIR_C, REC, brickKeyCoord, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -36,8 +36,8 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
     // ---- The frozen state: WANT committed (setCommitMask), C φ on every page, U = 0 (setInit).
     const pages0 = new Map<number, number>(s0.pages);
     for (const [pk, cs] of pages0) {
-      const P = brickKeyCoord(pk) as unknown as V3, want = new Uint32Array(CMASK_WORDS), phi = new Float32Array(512);
-      for (let i = 0; i < 512; i++) {
+      const P = brickKeyCoord(pk) as unknown as V3, want = new Uint32Array(CMASK_WORDS), phi = new Float32Array(BRICK_CELLS);
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3;
         if (T.every(v => 4 * v < N) && wantH(T)) want[i >> 5]! |= 1 << (i & 31);
         phi[i] = cPhi(T);
@@ -70,7 +70,7 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
     for (const [pk, cs] of s.pages) {
       const m = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
       const P = brickKeyCoord(pk) as unknown as V3;
-      for (let i = 0; i < 512; i++) {
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3;
         const h = ((m[i >> 5]! >>> (i & 31)) & 1) === 1;
         assert.equal(h, pages0.has(pk) && T.every(v => 4 * v < N) && wantH(T), `CMASK page ${P} tile ${tileOf(i)}`);
@@ -87,7 +87,7 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
       if (!liq.pages.has(pk)) continue;
       const P = brickKeyCoord(pk) as unknown as V3;
       let n = 0;
-      for (let i = 0; i < 512; i++) {
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3;
         if (!T.every(v => 4 * v < N) || wantH(T)) continue;
         let m = PHI_AIR;
@@ -100,10 +100,10 @@ test("tiered brick set (GPU): the head's residency keeps and requests F and C as
     for (const [pk, cs] of s.pages) {
       if (pages0.has(pk)) continue;
       const P = brickKeyCoord(pk) as unknown as V3;
-      const phi = new Float32Array((await e.read("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, 512)).buffer);
-      const flags = await e.read("phi", L.base("phi", "C", "FLAGS") + BRICK_STRIDE * cs, 512);
-      const u = new Float32Array((await e.read("vel", L.base("vel", "C", "US1") + BRICK_STRIDE * cs, 512)).buffer);
-      for (let i = 0; i < 512; i++) {
+      const phi = new Float32Array((await e.read("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, BRICK_CELLS)).buffer);
+      const flags = await e.read("phi", L.base("phi", "C", "FLAGS") + BRICK_STRIDE * cs, BRICK_CELLS);
+      const u = new Float32Array((await e.read("vel", L.base("vel", "C", "US1") + BRICK_STRIDE * cs, BRICK_CELLS)).buffer);
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3;
         assert.equal(phi[i], PHI_AIR_C); assert.equal(u[i], 0);
         assert.equal(flags[i], T.every(v => 4 * v < N) ? FLAG.OPEN : 0);
@@ -125,8 +125,8 @@ test("tiered boot (GPU): the census commits without a remap; a column's edges ar
     let nH = 0, n4 = 0, edgeH = 0, deepH = 0;
     for (const [pk, cs] of s.pages) {
       const P = brickKeyCoord(pk) as unknown as V3, m = s.dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1));
-      const phi = new Float32Array((await e.read("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, 512)).buffer);
-      for (let i = 0; i < 512; i++) {
+      const phi = new Float32Array((await e.read("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, BRICK_CELLS)).buffer);
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const T = tileOf(i).map((t, a) => 8 * P[a]! + t) as V3, c = T.map(v => 4 * v) as V3;
         if (T.every(v => 4 * v <= N)) {
           // bootPhi's C vertex: the box distance at h vertex 4T, as F holds it (uncapped: the old t = 0 φ).

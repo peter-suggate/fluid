@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, K_HOLD, LIST, NONE, PHI_AIR, PHI_AIR_C, POOLS, REC, ARGS, brickAbiWGSL, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
+import { BRICK_CELLS, BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, K_HOLD, LIST, NONE, PHI_AIR, PHI_AIR_C, POOLS, REC, ARGS, brickAbiWGSL, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
@@ -274,8 +274,8 @@ function assertConsistent(e: BrickEngine, s: BrickSnapshot, fail = 0) {
 function writePhi(e: BrickEngine, s: BrickSnapshot, box: BrickLiquidBox) {
   const L = e.layout, phi = L.base("phi", "F", "PHI"), phi1 = L.base("phi", "F", "PHI1");
   for (const [key, slot] of s.bricks) {
-    const b = brickKeyCoord(key), w = new Float32Array(512);
-    for (let l = 0; l < 512; l++) w[l] = Math.min(PHI_AIR, boxDistance([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)], box));
+    const b = brickKeyCoord(key), w = new Float32Array(BRICK_CELLS);
+    for (let l = 0; l < BRICK_CELLS; l++) w[l] = Math.min(PHI_AIR, boxDistance([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)], box));
     e.write("phi", phi + BRICK_STRIDE * slot, w); e.write("phi", phi1 + BRICK_STRIDE * slot, w);
   }
 }
@@ -397,7 +397,7 @@ test("brick engine (GPU): a static box is hydrostatic (Float64 oracle and analyt
     const X = brickField(s, pres, L.base("pres", "F", "X"), 0);
     const U = [0, 1, 2].map(a => brickField(s, vel, L.base("vel", "F", `U${a}`), 0));
     const cells: Vec3[] = [];
-    for (const key of s.bricks.keys()) { const b = brickKeyCoord(key); for (let l = 0; l < 512; l++) cells.push([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); }
+    for (const key of s.bricks.keys()) { const b = brickKeyCoord(key); for (let l = 0; l < BRICK_CELLS; l++) cells.push([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); }
     const oracle = pressureOracle(lattice, H_M, cells, phi, (a, c) => us[a]!(c));
     assert.ok(oracle.X.size === 32 * 10 * 32, `liquid cells ${oracle.X.size}`);
     let scale = 0, err = 0, analytic = 0, air = 0;
@@ -506,7 +506,7 @@ test("brick engine (GPU): operator leaves zero rows (K, DIAG, RHS, X) off the li
     const e = await BrickEngine.create(device, options([32, 32, 32], [sheet(33, 10.3, 33)], 200, 8));
     let s = await snapshot(e);
     // Stale values everywhere, as a reused slot would hold.
-    const junk = new Float32Array(512).fill(7.5);
+    const junk = new Float32Array(BRICK_CELLS).fill(7.5);
     for (const slot of s.bricks.values()) for (const ch of ["X", "RHS", "DIAG", "K0", "K1", "K2"]) e.write("pres", e.layout.base("pres", "F", ch) + BRICK_STRIDE * slot, junk);
     e.advance(1);
     s = await snapshot(e);
@@ -514,7 +514,7 @@ test("brick engine (GPU): operator leaves zero rows (K, DIAG, RHS, X) off the li
     let air = 0, rows = 0;
     for (const [key, slot] of s.bricks) {
       const b = keyOf(key), diag = ch.DIAG!(slot);
-      for (let l = 0; l < 512; l++) {
+      for (let l = 0; l < BRICK_CELLS; l++) {
         const x = 8 * b[0] + (l & 7), y = 8 * b[1] + ((l >> 3) & 7), z = 8 * b[2] + (l >> 6);
         // The last brick row holds the vertices at n (bricksPerAxis); its cells are outside the lattice: no rows.
         const outside = x >= 32 || y >= 32 || z >= 32;
@@ -708,7 +708,7 @@ test("brick engine (GPU, M3 2b): solidStamp cuts exactly the bricks the mask mee
     let cutBricks = 0, faceCut = 0, bad = 0, wallHalf = 0;
     for (const [key, slot] of s.bricks) {
       const b = brickKeyCoord(key), r = L.dir.frec + 32 * slot, ks = s.dir[r + REC.CUT]!, cls = s.dir[r + REC.CLASS]!;
-      const cells = Array.from({ length: 512 }, (_, l) => [8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]);
+      const cells = Array.from({ length: BRICK_CELLS }, (_, l) => [8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]);
       const byCell = cells.some(maskVoxel), want = byCell || cells.some(c => [0, 1, 2].some(a => maskVoxel(down(c, a))));
       assert.equal((cls & F_CLASS.CUT_STATIC) !== 0, want, `brick ${b}`);
       if (!want) { assert.equal(ks, NONE); continue; }

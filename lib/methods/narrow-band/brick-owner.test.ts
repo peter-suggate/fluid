@@ -3,7 +3,7 @@
 // a block of tiles 4h-owned, with known C corners and C faces. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, CMASK_WORDS, PHI_AIR_C, brickAbiWGSL, phiFar } from "./brick-abi";
+import { BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, PHI_AIR_C, brickAbiWGSL, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
@@ -34,7 +34,7 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
     for (let z = 0; z < 8; z++) for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) if (coarse([x, y, z])) { const i = tileIndex([x, y, z]); mask[i >> 5]! &= ~(1 << (i & 31)); }
     e.write("dir", L.dir.cmask + CMASK_WORDS * cs, mask);
     // C corners and C faces, everywhere in the page.
-    const cphi = new Float32Array(512), cu = [0, 1, 2].map(() => new Float32Array(512));
+    const cphi = new Float32Array(BRICK_CELLS), cu = [0, 1, 2].map(() => new Float32Array(BRICK_CELLS));
     for (let z = 0; z < 8; z++) for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
       const i = tileIndex([x, y, z]); cphi[i] = cPhi([x, y, z]); for (let a = 0; a < 3; a++) cu[a]![i] = cFace([x, y, z], a);
     }
@@ -45,8 +45,8 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
     for (const [key, slot] of s.bricks) {
       const b = [key & 1023, (key >>> 10) & 1023, (key >>> 20) & 1023];
       for (let a = 0; a < 3; a++) {
-        const w = new Float32Array(512);
-        for (let l = 0; l < 512; l++) w[l] = fFace([8 * b[0]! + (l & 7), 8 * b[1]! + ((l >> 3) & 7), 8 * b[2]! + (l >> 6)], a);
+        const w = new Float32Array(BRICK_CELLS);
+        for (let l = 0; l < BRICK_CELLS; l++) w[l] = fFace([8 * b[0]! + (l & 7), 8 * b[1]! + ((l >> 3) & 7), 8 * b[2]! + (l >> 6)], a);
         e.write("vel", L.base("vel", "F", `U${a}`) + BRICK_STRIDE * slot, w);
       }
     }
@@ -167,7 +167,7 @@ test("brick owner (GPU): a non-resident page's tile is no vertex authority (all-
     assert.equal(s.pages.get(pageKey([0, 0, 0])), undefined, "page (0,0,0) is not resident");
     assert.ok(s.pages.get(pageKey([1, 0, 0])) !== undefined, "page (1,0,0) is resident");
     // Stale C φ: every resident page's C vertices deep liquid, which no all-h reader may take.
-    for (const cs of s.pages.values()) e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, new Float32Array(512).fill(-5));
+    for (const cs of s.pages.values()) e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, new Float32Array(BRICK_CELLS).fill(-5));
     const fphi = await readChannel(e, "phi", "PHI");
     const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : PHI_AIR_C; };
     const probes: Vec3[] = [];

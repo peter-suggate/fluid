@@ -11,7 +11,7 @@
 // (D = 0) is CPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, RING, SEAM, bricksPerAxis, phiFar } from "./brick-abi";
+import { BRICK_CELLS, ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, RING, SEAM, bricksPerAxis, phiFar } from "./brick-abi";
 import { CENSUS, CENSUS_H, CENSUS_POLICY, REGION_H, RG, brickCensusBuffers, brickCensusSchedule, brickTrigCensusSchedule } from "./brick-census.wgsl";
 
 type V3 = [number, number, number];
@@ -321,7 +321,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const pk = pageOfSlot.get(cs)!;
     const sc: Scratch = { keys: [], w0: [], w1: [], fin: [], cross: [], gap: [], req: new Array(16).fill(0), cubes: [] };
     scratch.set(cs, sc);
-    for (let i = 0; i < 512; i++) {
+    for (let i = 0; i < BRICK_CELLS; i++) {
       const t = tileOf(cs, i, pk);
       const store = (c: Class | undefined, r?: { w0: number; w1: number; gap: number }) => {
         sc.keys[i] = c ? [...c.low, ...c.high] : identityKeys(); sc.w0[i] = r?.w0 ?? 0; sc.w1[i] = r?.w1 ?? 0; sc.fin[i] = sc.w1[i]!;
@@ -439,7 +439,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   let required = 0;
   for (const cs of s.cAll) {
     const sc = scratch.get(cs)!, pk = pageOfSlot.get(cs)!;
-    for (let i = 0; i < 512; i++) {
+    for (let i = 0; i < BRICK_CELLS; i++) {
       const t = tileOf(cs, i, pk); if (!tileInLattice(t)) continue;
       const w0 = sc.w0[i]!; let w1 = sc.w1[i]!;
       const crossing = (w1 & CROSSES) !== 0, wet = (w1 & WET) !== 0;
@@ -573,7 +573,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   const inRange = (b: V3) => b.every((x, a) => x >= 0 && x < brickRange[a]!);
   for (const cs of s.cAll) {
     const sc = scratch.get(cs)!, pk = pageOfSlot.get(cs)!, w = new Uint32Array(CMASK_WORDS), pageCand = new Set<number>();
-    for (let i = 0; i < 512; i++) {
+    for (let i = 0; i < BRICK_CELLS; i++) {
       const t = tileOf(cs, i, pk); if (!tileInLattice(t)) continue;
       const fine = decide(t, sc, i); band.set(key(t), fine);
       if (!fine) continue;
@@ -641,16 +641,16 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     // CMASK: h where hTile holds and the tile's brick is resident; 4h elsewhere.
     for (const cs of cAll) {
       const pk = pageCoord.get(cs)!, m = new Uint32Array(CMASK_WORDS);
-      for (let i = 0; i < 512; i++) { const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (hTile(t) && 4 * t[1] < N[1] && resident(shr(t, 1))) m[i >> 5] = (m[i >> 5]! | (1 << (i & 31))) >>> 0; }
+      for (let i = 0; i < BRICK_CELLS; i++) { const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (hTile(t) && 4 * t[1] < N[1] && resident(shr(t, 1))) m[i >> 5] = (m[i >> 5]! | (1 << (i & 31))) >>> 0; }
       e.write("dir", L.dir.cmask + CMASK_WORDS * cs, m);
-      const cw = (fn: (T: V3) => number) => { const w = new Float32Array(512); for (let i = 0; i < 512; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
+      const cw = (fn: (T: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let i = 0; i < BRICK_CELLS; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
       e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, cw(T => phiOf(scale3(T, 4)) + 0.15 * Math.sin(T[0] + 2 * T[2])));
       for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "C", `US${a}`) + BRICK_STRIDE * cs, cw(T => velOf(scale3(T, 4), a) * 0.9));
     }
     const occ = new Uint32Array(L.cap.f);
     for (const [kb, fs] of snap.bricks) {
       const b: V3 = [kb & 1023, (kb >>> 10) & 1023, (kb >>> 20) & 1023];
-      const fw = (fn: (c: V3) => number) => { const w = new Float32Array(512); for (let l = 0; l < 512; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
+      const fw = (fn: (c: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let l = 0; l < BRICK_CELLS; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
       e.write("phi", L.base("phi", "F", "PHI") + BRICK_STRIDE * fs, fw(phiOf));
       for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "F", `US${a}`) + BRICK_STRIDE * fs, fw(c => velOf(c, a)));
       // Particles on every tile; a join on tile 7 of the bricks at x = 9 (4h there, in the air).
@@ -669,7 +669,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       const budget = 0.02 * H_M / DT, detail = 0.08 * H_M / DT;
       for (const cs of cAll) {
         const k = [...snap.pages].find(([, v]) => v === cs)![0];
-        for (let i = 0; i < 512; i++) {
+        for (let i = 0; i < BRICK_CELLS; i++) {
           const r = (Math.imul(i + 1, 0x9e3779b1) ^ Math.imul(cs + 7, 0x85ebca6b)) >>> 0, u = (r >>> 8) / 2 ** 24, at = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i;
           const width = u < 0.08 ? 0 : u < 0.12 ? -4 : (i & 1) ? 1 : 4;
           defWords[at] = bitsOf(fr(budget * (u < 0.56 ? 0.5 : 2) * (1 + 0.3 * u))); defWords[at + 1] = bitsOf(fr(detail * ((r >>> 4) & 1 ? 0.5 : 2) * (1 + 0.3 * u)));
@@ -681,7 +681,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     }
     // ---- Read the state back as stored, and run the oracle.
     const fRead = async (name: string) => (await readChannel(e, name === "PHI" ? "phi" : "vel", name)) as (slot: number) => Float32Array;
-    const cRead = async (pool: "phi" | "vel", name: string) => { const m = new Map<number, Float32Array>(); for (const cs of snap.pages.values()) m.set(cs, new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * cs, 512)).buffer)); return m; };
+    const cRead = async (pool: "phi" | "vel", name: string) => { const m = new Map<number, Float32Array>(); for (const cs of snap.pages.values()) m.set(cs, new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * cs, BRICK_CELLS)).buffer)); return m; };
     const fPhi = await fRead("PHI"), fU = [await fRead("US0"), await fRead("US1"), await fRead("US2")];
     const cPhi = await cRead("phi", "PHI"), cU = [await cRead("vel", "US0"), await cRead("vel", "US1"), await cRead("vel", "US2")];
     const dir = await e.read("dir");
@@ -711,7 +711,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     let tiles = 0;
     for (const cs of cAll) {
       const sc = want.scratch.get(cs)!, o = CENSUS.STRIDE * cs, pk = pageCoord.get(cs)!;
-      for (let i = 0; i < 512; i++) {
+      for (let i = 0; i < BRICK_CELLS; i++) {
         const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]), at = `page ${cs} tile ${t.join(",")}${state.cmask(cs)[i >> 5]! >>> (i & 31) & 1 ? " h" : " 4h"}`;
         for (let k = 0; k < 6; k++) check(census[o + CENSUS.KEYS + 6 * i + k] === sc.keys[i]![k], `${at} key ${k}: ${census[o + CENSUS.KEYS + 6 * i + k]} vs ${sc.keys[i]![k]}`);
         const gw0 = census[o + CENSUS.W0 + i]!, gw1 = census[o + CENSUS.W1 + i]!, gfin = census[o + CENSUS.FIN + i]!;
@@ -766,7 +766,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
         const pk = pageCoord.get(cs)!;
         for (let r = 0; r < 8; r++) { const R = [2 * pk[0] + (r & 1), 2 * pk[1] + ((r >> 1) & 1), 2 * pk[2] + (r >> 2)]; cens[RGW(cs, r, RG.TIER)] = R[0]! <= 2 ? 0 : 2; regions++; }
         const dec = new Uint32Array(16), stat = new Uint32Array(16);
-        for (let i = 0; i < 512; i++) {
+        for (let i = 0; i < BRICK_CELLS; i++) {
           const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]);
           if (!want.band.get(key(t))) dec[i >> 5] = (dec[i >> 5]! | (1 << (i & 31))) >>> 0;
           if ((i * 7) % 5 === 0) stat[i >> 5] = (stat[i >> 5]! | (1 << (i & 31))) >>> 0;
@@ -799,7 +799,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
           if (cAfter[o + CENSUS.CALM + w] !== calmX >>> 0 && bad.length < 20) bad.push(`page ${cs} CALM word ${w}: ${cAfter[o + CENSUS.CALM + w]!.toString(16)} vs ${(calmX >>> 0).toString(16)}`);
           if (w < 8 && cAfter[o + CENSUS.CALM_KEY + w] !== [...snap.pages].find(([, v]) => v === cs)![0] + 1 && bad.length < 20) bad.push(`page ${cs} CALM_KEY ${w}`);
         }
-        for (let i = 0; i < 512; i++) {
+        for (let i = 0; i < BRICK_CELLS; i++) {
           const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]);
           if (withDeep.demoted.has(key(t)) && ((dir[L.dir.cmask + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1) demotedH++;
           if (4 * t[1] >= N[1]) continue;
@@ -846,14 +846,14 @@ test("setCensus: D = 0 gives the old decisions on every tile that is not deep CO
   const fPhi = new Map<number, Float32Array>(), fU = [0, 1, 2].map(() => new Map<number, Float32Array>());
   for (const [kb, fs] of bricks) {
     const b: V3 = [kb & 1023, (kb >>> 10) & 1023, (kb >>> 20) & 1023];
-    const fw = (fn: (c: V3) => number) => { const w = new Float32Array(512); for (let l = 0; l < 512; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
+    const fw = (fn: (c: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let l = 0; l < BRICK_CELLS; l++) w[l] = fn(add(scale3(b, 8), [l & 7, (l >> 3) & 7, l >> 6])); return w; };
     fPhi.set(fs, fw(phiOf)); for (let a = 0; a < 3; a++) fU[a]!.set(fs, fw(c => velOf(c, a)));
   }
-  const cw = (pk: V3, fn: (T: V3) => number) => { const w = new Float32Array(512); for (let i = 0; i < 512; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
+  const cw = (pk: V3, fn: (T: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let i = 0; i < BRICK_CELLS; i++) w[i] = fn(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])); return w; };
   const masks = new Map<number, Uint32Array>(), cPhi = new Map<number, Float32Array>(), cU = [0, 1, 2].map(() => new Map<number, Float32Array>());
   for (const [k, cs] of pages) {
     const pk: V3 = [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023], m = new Uint32Array(16);
-    for (let i = 0; i < 512; i++) { const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (t[0] < 12 && t[1] < 6 && bricks.has(key(shr(t, 1)))) m[i >> 5] = (m[i >> 5]! | (1 << (i & 31))) >>> 0; }
+    for (let i = 0; i < BRICK_CELLS; i++) { const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]); if (t[0] < 12 && t[1] < 6 && bricks.has(key(shr(t, 1)))) m[i >> 5] = (m[i >> 5]! | (1 << (i & 31))) >>> 0; }
     masks.set(cs, m); cPhi.set(cs, cw(pk, T => phiOf(scale3(T, 4)))); for (let a = 0; a < 3; a++) cU[a]!.set(cs, cw(pk, T => velOf(scale3(T, 4), a)));
   }
   const state: CensusState = {

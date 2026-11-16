@@ -7,7 +7,7 @@
 // and that storage no job writes is untouched. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, phiFar } from "./brick-abi";
+import { BRICK_CELLS, ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { readChannel, snapshot } from "./brick-readback";
@@ -47,7 +47,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
     const boot = (await e.read("dir", L.dir.cmask + CMASK_WORDS * cs, CMASK_WORDS)).slice();
     const bit = (m: Uint32Array, i: number) => ((m[i >> 5]! >>> (i & 31)) & 1) === 1;
     const oldMask = boot.slice(), newMask = boot.slice();
-    for (let i = 0; i < 512; i++) {
+    for (let i = 0; i < BRICK_CELLS; i++) {
       const t: V3 = [i & 7, (i >> 3) & 7, i >> 6];
       if (oldCoarse(t)) oldMask[i >> 5]! &= ~(1 << (i & 31));
       if (newCoarse(t)) newMask[i >> 5]! &= ~(1 << (i & 31)); else if (bit(boot, i)) newMask[i >> 5]! |= 1 << (i & 31);
@@ -55,13 +55,13 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
     e.write("dir", L.dir.cmask + CMASK_WORDS * cs, oldMask);
     e.write("set", L.set.want + CMASK_WORDS * cs, newMask);
     const channels = ["U", "US"] as const;
-    const cWords = (fn: (T: V3) => number) => { const w = new Float32Array(512); for (let i = 0; i < 512; i++) w[i] = fn([i & 7, (i >> 3) & 7, i >> 6]); return w; };
+    const cWords = (fn: (T: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let i = 0; i < BRICK_CELLS; i++) w[i] = fn([i & 7, (i >> 3) & 7, i >> 6]); return w; };
     e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, cWords(cPhi));
     channels.forEach((ch, k) => { for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "C", `${ch}${a}`) + BRICK_STRIDE * cs, cWords(T => cU(k, T, a))); });
     const slotOf = new Map<number, number>(s.bricks);
     for (const [kb, slot] of s.bricks) {
       const b: V3 = [kb & 1023, (kb >>> 10) & 1023, (kb >>> 20) & 1023];
-      const words = (fn: (c: V3) => number) => { const w = new Float32Array(512); for (let l = 0; l < 512; l++) w[l] = fn([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); return w; };
+      const words = (fn: (c: V3) => number) => { const w = new Float32Array(BRICK_CELLS); for (let l = 0; l < BRICK_CELLS; l++) w[l] = fn([8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]); return w; };
       e.write("phi", L.base("phi", "F", "PHI") + BRICK_STRIDE * slot, words(fPhi));
       channels.forEach((ch, k) => { for (let a = 0; a < 3; a++) e.write("vel", L.base("vel", "F", `${ch}${a}`) + BRICK_STRIDE * slot, words(c => fU(k, c, a))); });
     }
@@ -73,7 +73,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
       const pool = name === "PHI" ? "phi" : "vel";
       fStore.set(name, (await readChannel(e, pool, name)) as (slot: number) => Float32Array);
       const pages = new Map<number, Float32Array>();
-      for (const pc of s.pages.values()) pages.set(pc, new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * pc, 512)).buffer));
+      for (const pc of s.pages.values()) pages.set(pc, new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * pc, BRICK_CELLS)).buffer));
       cStore.set(name, pages);
     }
     const fBefore = new Map(fNames.map(n => [n, new Map([...slotOf.values()].map(sl => [sl, fStore.get(n)!(sl).slice()]))]));
@@ -129,7 +129,7 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
     const refined = (t: V3) => stored(t) && tileH(newMask, t) && !tileH(oldMask, t);
     // markTile / listedFlags.
     const entries: { t: V3; flags: number }[] = [];
-    for (let i = 0; i < 512; i++) {
+    for (let i = 0; i < BRICK_CELLS; i++) {
       const t: V3 = [i & 7, (i >> 3) & 7, i >> 6];
       if (!tileInLattice(t)) continue;
       const oH = tileH(oldMask, t), nH = tileH(newMask, t), fine = oH && nH;
@@ -291,15 +291,15 @@ test("setTransfer (GPU): listing, faces, vertices and storage match NB-FLIP's re
       const pool = name === "PHI" ? "phi" : "vel", after = (await readChannel(e, pool, name)) as (slot: number) => Float32Array;
       for (const sl of slotOf.values()) {
         const got = after(sl), was = fBefore.get(name)!.get(sl)!;
-        for (let l = 0; l < 512; l++) {
+        for (let l = 0; l < BRICK_CELLS; l++) {
           const w = fWrites.get(`${name}|${sl}|${l}`);
           if (w === undefined) { if (got[l] !== was[l]) assert.fail(`F ${name} slot ${sl} local ${l} changed: ${was[l]} -> ${got[l]}`); kept++; }
           else { near(got[l]!, w, `F ${name} slot ${sl} local ${l}`); written++; }
         }
       }
       for (const pc of s.pages.values()) {
-        const cAfter = new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * pc, 512)).buffer), cWas = cBefore.get(name)!.get(pc)!;
-        for (let i = 0; i < 512; i++) {
+        const cAfter = new Float32Array((await e.read(pool, L.base(pool, "C", name) + BRICK_STRIDE * pc, BRICK_CELLS)).buffer), cWas = cBefore.get(name)!.get(pc)!;
+        for (let i = 0; i < BRICK_CELLS; i++) {
           const w = cWrites.get(`${name}|${pc}|${i}`);
           if (w === undefined) { if (!Object.is(cAfter[i], cWas[i])) assert.fail(`C ${name} page ${pc} tile ${i} changed: ${cWas[i]} -> ${cAfter[i]}`); }
           else { near(cAfter[i]!, w, `C ${name} page ${pc} tile ${i}`); written++; }

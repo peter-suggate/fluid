@@ -20,7 +20,7 @@
 //   which takes the key afresh, and a restored step replays the same.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BrickLayout, LIST } from "./brick-abi";
+import { BRICK_CELLS, BrickLayout, LIST } from "./brick-abi";
 import { BrickEngine, type BrickEngineState } from "./brick-engine";
 import { CENSUS, REGION_H, RG, brickCensusSchedule } from "./brick-census.wgsl";
 import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
@@ -157,7 +157,7 @@ test("region heat (GPU): the tiered dam runs 40 steps without a latch, every reg
       for (const [id, w] of rs) {
         if (w.deep !== 1) continue;
         const [k, r] = id.split(".").map(Number), cs = s.pages.get(k!)!;
-        for (let i = 0; i < 512; i++) {
+        for (let i = 0; i < BRICK_CELLS; i++) {
           if ((((i >> 2) & 1) | (((i >> 5) & 1) << 1) | (((i >> 8) & 1) << 2)) !== r) continue;
           deepTiles++; if ((census[CENSUS.STRIDE * cs + CENSUS.DEC + (i >> 5)]! >>> (i & 31)) & 1) deepBand++;
         }
