@@ -957,3 +957,117 @@ about 6.9 a step) extra calls, so (step with repeats - step without) / 138 is th
 - So the lever is staging (shorter per-workgroup chains: a two-level pRedSums, fewer barriered passes, or more resident
   workgroups), not fewer words. Interleaving x, r, d and q, or merging vector reads, would save bytes that are not the
   limit.
+
+## 2026-11-16 — occupancy of the per-row kernels; the CG dots summed in a fixed order
+
+**The capture.**
+- xctrace was attached to the tiered dam (HEAD 4fdb5642, 4913-brick pool) using Metal Application, GPU, and Metal GPU
+  Counters.
+- Steps 16-24 were captured, 64 calls of each slot kernel, 64 of 64 intervals clean of other processes' GPU work.
+- The scratch tool's `--split` puts each dispatch in its own compute pass, labelled with its kernel and step and fenced
+  by a 4-byte blit (Dawn otherwise coalesces consecutive passes into one Metal encoder).
+- The split does not distort the step. GPU busy per step, steps 17-23, unsplit capture: 57.5, 57.6, 60.8, 64.1, 65.4,
+  67.8, 70.3 ms. The same steps split: 55.9, 57.6, 62.2, 64.5, 67.9, 68.5, 67.7 ms.
+- Occupancy is the Compute Occupancy counter, the mean over the four partitions.
+- "Plateau" is the p90 over a kernel's 10 µs samples: its steady state, not counting ramp and tail.
+- Resident workgroups a core = occupancy × 3072 threads / 512.
+- Thread caps and threadgroup memory come from the Dawn-generated MSL:
+  - `dump_shaders`, compiled with MTLDevice.makeComputePipelineState: maxTotalThreadsPerThreadgroup.
+  - The dynamic threadgroup struct's size: threadgroup memory.
+
+| kernel | µs a call | occupancy mean / plateau | resident WG a core (plateau) | ALU util p50 | ALU limiter p50 / p90 | TG memory | thread cap |
+|---|---|---|---|---|---|---|---|
+| pmgUpdate | 138.0 | 29.5% / 35.5% | 2.1 | 51% | 58 / 62% | 7.1 KB | 1024 |
+| pmgDirection | 106.6 | 34.2% / 41.6% | 2.5 | 37% | 41 / 46% | 5.5 KB | 1024 |
+| pmgPostS | 78.0 | 45.5% / 60.3% | 3.6 | 65% | 80 / 86% | 4.3 KB | 1024 |
+| pmgDown0 | 77.0 | 43.7% / 60.3% | 3.6 | 38% | 43 / 51% | 2.6 KB | 1024 |
+| pmgPreS | 76.0 | 45.1% / 60.3% | 3.6 | 62% | 77 / 87% | 4.3 KB | 1024 |
+| pmgPostZ | 63.7 | 43.3% / 60.2% | 3.6 | 51% | 63 / 80% | 6.7 KB | 1024 |
+| pmgPostU | 55.8 | 40.6% / 60.2% | 3.6 | 48% | 60 / 84% | 4.3 KB | 1024 |
+| pmgPreU | 49.6 | 43.9% / 68.9% | 4.1 | 41% | 53 / 91% | 4.3 KB | 1024 |
+
+- Every other limiter is low over these kernels:
+  - buffer read 4-13%, buffer write ≤ 1.6%;
+  - threadgroup load 2-14%, threadgroup store ≤ 1.6%;
+  - last-level cache 13-18%, MMU 7-16%.
+- The kernels are not idle silicon waiting on one chain. At their plateau the L0 passes issue ALU work 77-87% of the
+  time, Update 58-62%.
+- Residency is not threadgroup memory: 2.6-7.1 KB a workgroup would let 4-12 fit a core. Nor is it the thread cap, which
+  is 1024 everywhere, so registers allow a full-size threadgroup.
+- The plateaus (2.1, 2.5 and 3.6 workgroups a core) are the per-core register file's limit. Neither Metal nor WebGPU
+  reports the register count, and no lever in WGSL moves it directly.
+
+**What that leaves of the levers.**
+- *Fewer barriered smoothing passes.* The 6 red-black passes are the smoother (P_FS2, 3 sweeps), not the structure.
+  - Inside a pass, half of each SIMD group's lanes sat masked off (the other colour).
+  - Experiment "comp": lanes 0..255 take the colour-0 cells and 256..511 the colour-1 cells (pLaneCell). Each pass's
+    colour is then uniform over a SIMD group, and the other colour's groups skip it instead of issuing it masked. This
+    covers the L0 brick passes and Update.
+  - Hold (below): fx → comp +2.4 and +0.8 ms; fx + PreS 21× → comp + PreS 21× −1.7 and −1.1 ms. No measurable
+    gain: **no-go**, not kept.
+- *Less threadgroup memory or fewer registers.* Threadgroup memory is not the limit. Registers are not reachable from
+  here without the compiler's numbers.
+- *A two-level, fixed-order reduction* (lane E's run-to-run spread, the coordinator's ruling): landed. It is the
+  measured win.
+- An anomaly, recorded for whoever prices these next:
+  - PreS dispatched 21× a slot (it is idempotent) costs +1.6 ms a step over 20 × about 6.9 open slots: about 11 µs a
+    repeat, against 76 µs for the first call in its slot.
+  - The repeats read the same 11.7 MB the first call does. The in-situ cost is therefore the first touch of the data
+    after the slot's other kernels, not the kernel's own work.
+  - This is consistent with the latency-bound picture above, but a byte count of a single kernel will not show it.
+
+**The fixed-order dots.**
+- Before: a workgroup's pSum512 partial was CAS-added into one of 64 float bins (g & 63). Arrival order changed the last
+  bits of alpha and beta from step 0. Every consumer workgroup's head then folded the 128 bins serially (pRedSums), and
+  the check cleared them.
+- Now each producer workgroup writes its partial to its own word of pmgRed (8 + 2(F + C) words):
+  - R_ZF + g for pmgPostZ's row brick g;
+  - R_ZC + g for pmgNativePost0's page g (0 for a page without native rows);
+  - R_Q + g for pmgDirection's workgroup g (0 for a page that returns).
+- pFixed folds the words in index order:
+  - lane j takes j, j + 512, …;
+  - then pSum512 folds the lanes;
+  - it runs once in the C | F entry, in uniform control flow.
+- Every consumer workgroup runs the same fold over the same words, so every reader sees one value. The first row
+  brick's workgroup stores it: R_RZ in Direction, R_PQ in Update.
+- The walls kernels and the check read those two words. Nothing is cleared, since every slot rewrites all of [0, n).
+- No float atomic touches a CG scalar any more. Slot claims and the max-norm stay atomic: the max is exact in any order.
+- A bug the suite caught on the way. The first version stored the fold from workgroup 0, which is a page; a page without
+  native rows returns before the fold, so R_RZ and R_PQ were never written. The pool MGPCG tests (all h) then ran with
+  alpha 0. Fix: pFixedWriter, the first row brick's workgroup.
+
+**Gates (fx = this commit's pressure-mgpcg.ts on 4fdb5642).**
+- GPU pressure suite 21/0.
+- Float64 model V-cycle unchanged: |Z − Z64|/|Z| h 4.41e-7 native 1.54e-7 (L0 BS), h 5.08e-7 native 1.43e-7 (BSB).
+- Converged X: h 7.75e-6 native 8.30e-6, 8 its. HEAD was 7.69e-6 / 8.26e-6, 8 its; it varies run to run.
+- Pool MGPCG corner: 5 its, 2.14e-6. Static box: 4 its.
+- Aborts:
+  - Two earlier suite runs logged Metal command-buffer aborts while other lanes' GPU jobs were resident: invalid, rerun.
+  - The final run had none, and there were no 00000206 entries.
+- Unprofiled hold: tiered dam, 36 steps, fenced median of steps 18-35 (n 18), alternating.
+
+  | run | tm (HEAD) | fx |
+  |---|---|---|
+  | medians, ms | 75.93, 76.01, 78.60, 76.86, 76.72 | 74.25, 74.98, 75.15, 76.67, 75.43 |
+  | mean of medians, ms | 76.83 | 75.30 |
+  | its, steps 18-35 | 123-125 | 119-127 |
+
+  - Adjacent pairs: −1.68, −1.03, −3.45, −0.19, −1.29 ms, every one in fx's favour. Mean **−1.5 ms a step**.
+  - Iterations are unchanged: the same counts within the runs' own spread.
+- The fixed order saves time against the CAS bins rather than costing it. It replaces:
+  - the CAS loops (about 14 workgroups a bin contending at each producer's tail);
+  - every consumer workgroup's 128-load, 128-add serial head;
+  - the check's clear.
+- Run to run (the tiered dam twice on each tree, 10 steps, sampled every step, one pair each):
+  - Neither tree is bitwise reproducible. The step-0 sample's kinetic energy (before the first step, after the boot)
+    already differs, so other order-dependent adds remain upstream of the solve.
+  - The spread is smaller with fx:
+
+    | | tm | fx |
+    |---|---|---|
+    | Δke, step 0 | 8.1e-9 J (1.7e-8 relative) | 5.9e-10 J (1.3e-9 relative) |
+    | Δ total litres, step 1 | 1.1e-6 | 2.1e-7 |
+    | Δ total litres, step 2 | 5.6e-6 | 3.5e-7 |
+
+  - Iterations are identical across the pairs (steps 1-9: 4 4 4 4 5 4 5 6 6).
+  - The D gates' ±0.1-0.2 spread therefore narrows but does not vanish.

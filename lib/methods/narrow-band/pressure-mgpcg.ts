@@ -43,8 +43,9 @@
  *   the arena: lane P1's finding, 2026-11-15. The x update itself is applied
  *   by the next slot's `pmgDirection` (before p changes) or by `pmgFinish`.
  * - q = A z + beta q (= A p), so p never needs a halo in its own pass.
- * - Dot products are float sums over 64 slots by compare-exchange, read in
- *   slot order by every reader, so they all see the same value.
+ * - Dot products are fixed-order sums: each producer workgroup writes its
+ *   partial to its own word and every reader folds the words in index order
+ *   (pFixed), so they all see the same value and no float atomic orders it.
  *
  * Gates (P's args region, MG_GATE): F at 512 (the row bricks' G1 or 0), C at 515 (C_ALL's
  * G1 or 0), ONE at 518, the walls' WF and WC at 521 and 524, S at 527 (the shifted blocks,
@@ -205,7 +206,7 @@ const presRW: BrickBinding = { name: "pres", kind: "rw", type: "array<f32>" };
 const fRW: BrickBinding = { name: "pmgF", kind: "rw", type: "array<f32>" };
 const cRW: BrickBinding = { name: "pmgC", kind: "rw", type: "array<f32>" };
 const topRW: BrickBinding = { name: "pmgTop", kind: "rw", type: "array<u32>" };
-const redRW: BrickBinding = { name: "pmgRed", kind: "rw", type: "array<atomic<u32>>" };
+const redRW: BrickBinding = { name: "pmgRed", kind: "rw", type: "array<f32>" };
 const argsRW: BrickBinding = { name: "args", kind: "rw", type: "array<u32>" };
 const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
 const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
@@ -400,20 +401,26 @@ fn qStage(cs:u32,lid:u32){if(lid<27u){qN[lid]=select(pPageSlot(nbKeyCoord(nbCRec
 // The C slot of the page holding a level cell c (cells a page side = 1 << sh), seen from page p.
 fn qPage(p:vec3i,c:vec3i,sh:u32)->u32{let d=(c>>vec3u(sh))-p;if(any(d<vec3i(-1))||any(d>vec3i(1))){return NB_NONE;}return qN[nbNeighbourIndex(d)];}
 `;
+  // The CG scalars, summed in a fixed order (no float atomics, so the sum is the code's and never the arrivals'): a
+  // producer workgroup g writes its pSum512 partial to its own word (R_ZF + g for pmgPostZ's row brick g, R_ZC + g for
+  // pmgNativePost0's page g, R_Q + g for pmgDirection's workgroup g), and a consumer workgroup folds the words in index
+  // order (pFixed). Every consumer workgroup runs the same fold on the same words, so it reads the same value; its
+  // first row brick's workgroup stores it (pFixedWriter: R_RZ by pmgDirection, R_PQ by pmgUpdate) for the later kernels' reads. Lane E traced the
+  // dam's run-to-run spread to the old CAS adds into 64 bins (alpha and beta moved in the last bits at step 0).
   const RED = /* wgsl */`
-fn pRedAdd(i:u32,v:f32){var old=atomicLoad(&pmgRed[i]);loop{let r=atomicCompareExchangeWeak(&pmgRed[i],old,bitcast<u32>(bitcast<f32>(old)+v));if(r.exchanged){break;}old=r.old_value;}}
-// The 64 slots from word base, summed in slot order (every reader the same value).
-fn pRedSum(base:u32)->f32{var s=0.0;for(var j=0u;j<64u;j++){s+=bitcast<f32>(atomicLoad(&pmgRed[base+j]));}return s;}
-// Both dots' sums (slots 0..63, 64..127) for every lane, in pRedSum's order (the same value as every other reader):
-// the workgroup's lanes load the 128 slots at once (stride n, the workgroup size) where one lane's 128 dependent
-// atomic loads took ~20 us at every workgroup's head. Call from uniform control flow (one barrier).
-var<workgroup> wRS:array<f32,128>;
-fn pRedSums(lid:u32,n:u32)->vec2f{
-  for(var j=lid;j<128u;j+=n){wRS[j]=bitcast<f32>(atomicLoad(&pmgRed[j]));}
-  workgroupBarrier();
-  var a=0.0;var b=0.0;for(var j=0u;j<64u;j++){a+=wRS[j];b+=wRS[64u+j];}
-  return vec2f(a,b);
+const R_RZ:u32=0u;const R_PQ:u32=1u;const R_ZF:u32=8u;const R_ZC:u32=${u(8 + L.cap.f)};const R_Q:u32=${u(8 + L.cap.f + L.cap.c)};
+`;
+  // Every lane: the sum of words base..base+n then base2..base2+n2, lane j folding j, j + 512, ... in order and
+  // pSum512 folding the lanes. A 512-lane workgroup in uniform control flow (four barriers).
+  const FIXED = /* wgsl */`
+var<workgroup> wFix:f32;
+fn pFixed(lid:u32,base:u32,n:u32,base2:u32,n2:u32)->f32{
+  var s=0.0;for(var i=lid;i<n;i+=512u){s+=pmgRed[base+i];}for(var i=lid;i<n2;i+=512u){s+=pmgRed[base2+i];}
+  let t=pSum512(lid,s);if(lid==0u){wFix=t;}return workgroupUniformLoad(&wFix);
 }
+// The workgroup of a C | F launch (pmgDirection, pmgUpdate) that stores the fold: the first row brick's, which always
+// runs it (a page without native rows returns before it); with no row bricks, every page's (the same value).
+fn pFixedWriter(g:u32,nC:u32,nF:u32)->bool{return select(true,g==nC,nF>0u);}
 `;
   const REDUCE512 = /* wgsl */`
 // Lane 0's sum of the workgroup's 512 values (other lanes get 0): 64 lanes fold 8 each, 8 lanes fold those 8 each,
@@ -626,11 +633,11 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A page of C_ALL. "all" keeps every page; "rows" returns when the page has no rows (L5 D 0);
   // "native" when it has no native rows (L5 KU0, the count coarsenC writes).
-  const pageHead = (keep: "all" | "rows" | "native" = "rows") => /* wgsl */`
+  const pageHead = (keep: "all" | "rows" | "native" = "rows", skip = "") => /* wgsl */`
   if(lid==0u){wCount=nbListCount(NB_LIST_C_ALL);}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,g);
-  ${keep === "all" ? "" : `if(lid==0u){wKids=select(0u,1u,pmgC[pL5(${keep === "rows" ? "CH_D" : "CH_KU"},cs)]>0.0);}if(workgroupUniformLoad(&wKids)==0u){return;}`}
+  ${keep === "all" ? "" : `if(lid==0u){wKids=select(0u,1u,pmgC[pL5(${keep === "rows" ? "CH_D" : "CH_KU"},cs)]>0.0);}if(workgroupUniformLoad(&wKids)==0u){${skip}return;}`}
   ${keep === "all" ? "qStage" : "qStageK"}(cs,lid);workgroupBarrier();
   let p=nbKeyCoord(nbCRec(cs,NB_REC_KEY));`;
 
@@ -638,7 +645,7 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   const kernel = (label: string, bindings: readonly BrickBinding[], parts: readonly Part[], body: string): BrickKernel => {
     const has = (n: string) => bindings.some(b => b.name === n);
     const abi = brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, ...(has("dir") ? { dir: { name: "dir", atomic: false } } : {}) });
-    const src: Record<Part, string> = { pres: PRES, stage: STAGE + (has("pmgF") ? STAGEK : ""), cstage: CSTAGE + (has("pmgC") ? CSTAGEK : ""), red: RED, reduce: REDUCE512, gate: GATE, tile: TILE, seam: SEAM };
+    const src: Record<Part, string> = { pres: PRES, stage: STAGE + (has("pmgF") ? STAGEK : ""), cstage: CSTAGE + (has("pmgC") ? CSTAGEK : ""), red: RED + (parts.includes("reduce") ? FIXED : ""), reduce: REDUCE512, gate: GATE, tile: TILE, seam: SEAM };
     const page = parts.includes("stage") || parts.includes("cstage") ? [PAGE, "var<workgroup> wCount:u32;"] : [];
     return { label, entry: label, bindings, code: [abi, declareBindings(bindings), COMMON, ...page, ...parts.map(p => src[p]), body].join("\n") };
   };
@@ -650,7 +657,7 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   // ---- setup ---------------------------------------------------------------
   const setupClear = kernel("pmgSetupClear", [CFG, setRW, redRW], [], /* wgsl */`
 @compute @workgroup_size(128) fn pmgSetupClear(@builtin(local_invocation_index) lid:u32){
-  atomicStore(&pmgRed[lid],0u);
+  if(lid<8u){pmgRed[lid]=0.0;}
   if(lid==0u){
     atomicStore(&nbSet[PH_RMAX],0u);atomicStore(&nbSet[PH_ALPHA],0u);atomicStore(&nbSet[PH_RZ],0u);
     atomicStore(&nbSet[PH_ITERATIONS],0u);atomicStore(&nbSet[PH_OPEN],0u);
@@ -1105,7 +1112,7 @@ ${hashInsert("hIns7", "hk7", HS7)}
     if(row.d>0.0){${write}=tp[ti];${o.dot ? "dotv+=rhs*tp[ti];" : ""}}
     ${o.dst === "Z" ? `else if(s!=NB_NONE){${write}=0.0;}` : ""}
   }
-  ${o.dot ? "let sum=pSum512(lid,dotv);if(lid==0u){pRedAdd(g&63u,sum);}" : ""}
+  ${o.dot ? "let sum=pSum512(lid,dotv);if(lid==0u){pmgRed[R_ZF+g]=sum;}" : ""}
 }`);
   };
   const preS = fineKernel("pmgPreS", { shift: true, src: "W0", dst: "W1", post: false });
@@ -1567,7 +1574,7 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
     workgroupBarrier();
   }
   let v=select(0.0,wN[lid],row);`;
-  const nativeHead = /* wgsl */`${pageHead("native")}
+  const nativeHead = (skip = "") => /* wgsl */`${pageHead("native", skip)}
   let c2l=nbLocalCoord(lid);let T=8*p+c2l;let par=pPar(T);
   let D=pP(NB_PRES_C_DIAG,cs,lid);let row=pTileIn(T)&&!nbTileH(cs,lid)&&D>0.0;let ns=pSeamN(cs,lid);`;
   const cN = (ch: string) => (cs: string, i: string) => `pmgC[pL2(${ch},${cs},${i})]`;
@@ -1575,7 +1582,7 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   const e1 = (ch: string, s: string, m: string) => `pmgF[pL1(${ch},${s},pI1(${m}>>vec3u(1u)))]`;
   // L0 pre (after the h rows' last pre pass): from 0, the h rows at their pre-smoothed plane (PRE). Writes N0.
   const nativePre0 = kernel("pmgNativePre0", FB, ["pres", "cstage", "seam"], NATIVE + seamSum("pSeamW0", (s, l) => w0(s, l)) + /* wgsl */`
-@compute @workgroup_size(512) fn pmgNativePre0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
+@compute @workgroup_size(512) fn pmgNativePre0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead()}
   let sm=pSeamW0(p,cs,lid,ns);
   var rhs=0.0;if(row){rhs=pP(NB_PRES_C_R,cs,lid)+sm;}
   ${nativePass(false, "0.0", () => "0.0")}
@@ -1585,7 +1592,7 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   // h aggregates at their L1 EPRE (the seams over sqrt(OC)). Writes R1 and N1.
   const nativePre1 = kernel("pmgNativePre1", FB, ["pres", "cstage", "seam"], NATIVE +
     nativeApplyFn("pApplyN0", cN("CH_N0")) + seamSum("pSeamPre1", (s, l) => w0(s, l), (s, l, m) => `${e1("CH_EPRE", s, m)}/P_SOC`) + /* wgsl */`
-@compute @workgroup_size(512) fn pmgNativePre1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
+@compute @workgroup_size(512) fn pmgNativePre1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead()}
   let sm=pSeamPre1(p,cs,lid,ns);
   var r1=0.0;var rhs=0.0;if(row){r1=pP(NB_PRES_C_R,cs,lid)-pApplyN0(p,cs,lid,T,sm.x);rhs=r1+sm.y;}
   ${nativePass(false, "0.0", () => "0.0")}
@@ -1594,7 +1601,7 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   // L1 post (after pmgUp2): entry N1 + the row's L2 EPOST, the h aggregates at EPRE + their parent's L2 EPOST. Writes N1P.
   const nativePost1 = kernel("pmgNativePost1", FB, ["pres", "cstage", "seam"], NATIVE +
     seamSum("pSeamP1", (s, l, m) => `(${e1("CH_EPRE", s, m)}+pmgC[pL2(CH_EPOST,nbFRec(${s},NB_REC_PARENT),nbLocal(${m}>>vec3u(2u)))])/P_SOC`) + /* wgsl */`
-@compute @workgroup_size(512) fn pmgNativePost1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
+@compute @workgroup_size(512) fn pmgNativePost1(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead()}
   let sm=pSeamP1(p,cs,lid,ns);
   var rhs=0.0;if(row){rhs=pmgC[pL2(CH_R1,cs,lid)]+sm;}
   ${nativePass(true, "pmgC[pL2(CH_N1,cs,lid)]+pmgC[pL2(CH_EPOST,cs,lid)]", (c, i) => `pmgC[pL2(CH_N1,${c},${i})]+pmgC[pL2(CH_EPOST,${c},${i})]`)}
@@ -1604,21 +1611,23 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   // the dot's slots.
   const nativePost0 = kernel("pmgNativePost0", [...FB, redRW], ["pres", "cstage", "reduce", "red", "seam"], NATIVE +
     seamSum("pSeamP0", (s, l, m) => `${w0(s, l)}+${e1("CH_EPOST", s, m)}`) + /* wgsl */`
-@compute @workgroup_size(512) fn pmgNativePost0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead}
+@compute @workgroup_size(512) fn pmgNativePost0(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${nativeHead("if(lid==0u){pmgRed[R_ZC+g]=0.0;}")}
   let sm=pSeamP0(p,cs,lid,ns);
   var rhs=0.0;if(row){rhs=pP(NB_PRES_C_R,cs,lid)+sm;}
   ${nativePass(true, "pmgC[pL2(CH_N0,cs,lid)]+pmgC[pL2(CH_N1P,cs,lid)]", (c, i) => `pmgC[pL2(CH_N0,${c},${i})]+pmgC[pL2(CH_N1P,${c},${i})]`)}
   pmgC[pL2(CH_N0P,cs,lid)]=v;
   var dotv=0.0;
   if(pTileIn(T)&&!nbTileH(cs,lid)){pres[NB_PRES_C_Z+NB_STRIDE*cs+lid]=v;if(row){dotv=pP(NB_PRES_C_R,cs,lid)*v;}}
-  let sum=pSum512(lid,dotv);if(lid==0u){pRedAdd(g&63u,sum);}
+  let sum=pSum512(lid,dotv);if(lid==0u){pmgRed[R_ZC+g]=sum;}
 }`);
 
   // C | F in one dispatch (MG_GATE.FC: C_ALL's pages, then the row bricks): workgroup g < C_ALL's count runs page g's
   // native rows (a page without native rows returns), the rest row brick g - count's h rows. The halves are
-  // independent (each writes only its own rows and adds to the shared dot slots), so one launch replaces two; the
+  // independent (each writes only its own rows and its own dot partial), so one launch replaces two; the
   // pages, few and each long (the seam sums), go first so the bricks' waves run beside them rather than after.
-  const fusedFC = (label: string, decl: string, fBody: string, cBody: string, tile = false) =>
+  // head: the CG scalar's fold (pFixed), once in the entry in uniform control flow, after a C workgroup without native
+  // rows has returned (skipC, its partial's zero); its F and C halves read the result from private variables.
+  const fusedFC = (label: string, decl: string, head: string, fBody: string, cBody: string, skipC: string, tile = false) =>
     kernel(label, [...FBT, redRW], ["pres", "stage", "cstage", "reduce", "red", "seam", ...(tile ? ["tile" as const] : [])], decl + /* wgsl */`
 var<workgroup> wCountC:u32;
 fn ${label}F(g:u32,lid:u32){
@@ -1628,7 +1637,6 @@ ${fBody}
 }
 fn ${label}C(g:u32,lid:u32){
   let cs=nbListSlot(NB_LIST_C_ALL,g);
-  if(lid==0u){wKids=select(0u,1u,pmgC[pL5(CH_KU,cs)]>0.0);}if(workgroupUniformLoad(&wKids)==0u){return;}
   qStageK(cs,lid);workgroupBarrier();
   let p=nbKeyCoord(nbCRec(cs,NB_REC_KEY));
 ${cBody}
@@ -1636,22 +1644,32 @@ ${cBody}
 @compute @workgroup_size(512) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   if(lid==0u){wCount=pmgTop[T_RBN];wCountC=nbListCount(NB_LIST_C_ALL);}
   let g=nbGroup(wid);let nF=workgroupUniformLoad(&wCount);let nC=workgroupUniformLoad(&wCountC);
-  if(g<nC){${label}C(g,lid);}else if(g<nC+nF){${label}F(g-nC,lid);}
+  if(g>=nC+nF){return;}
+  if(g<nC){
+    if(lid==0u){wKids=select(0u,1u,pmgC[pL5(CH_KU,nbListSlot(NB_LIST_C_ALL,g))]>0.0);}
+    if(workgroupUniformLoad(&wKids)==0u){${skipC}return;}
+  }
+${head}
+  if(g<nC){${label}C(g,lid);}else{${label}F(g-nC,lid);}
 }`);
 
   // Direction: x += alpha_(k-1) p (deferred from the last update), p = z + beta p, q = A z + beta q, p.q; the native
   // rows' PCG vectors a page a workgroup, a lane a tile.
   const zN = (cs: string, i: string) => `pres[NB_PRES_C_Z+NB_STRIDE*${cs}+${i}]`, zF = (s: string, l: string) => `pres[NB_PRES_F_Z+NB_STRIDE*${s}+${l}]`;
+  // r.z over pmgPostZ's row bricks then pmgNativePost0's pages; beta against the last slot's (PH_RZ, the check's).
   const betaHead = /* wgsl */`
-  let rs=pRedSums(lid,512u);
+  let rz=pFixed(lid,R_ZF,nF,R_ZC,nC);
   if(lid==0u){
-    let rz=rs.x;var beta=0.0;
+    var beta=0.0;
     if(cfg.z>0u){let old=bitcast<f32>(atomicLoad(&nbSet[PH_RZ]));beta=select(0.0,rz/old,old!=0.0);}
     wBeta=beta;wAlphaOld=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));
+    if(pFixedWriter(g,nC,nF)){pmgRed[R_RZ]=rz;}
   }
-  let beta=workgroupUniformLoad(&wBeta);let alpha=workgroupUniformLoad(&wAlphaOld);`;
+  pBeta=workgroupUniformLoad(&wBeta);pAlphaOld=workgroupUniformLoad(&wAlphaOld);`;
+  const betaLets = /* wgsl */`
+  let beta=pBeta;let alpha=pAlphaOld;`;
   const direction = fusedFC("pmgDirection",
-    fineApply("pApplyZ", zF, zN) + nativeApply("pApplyNZ", "pSeamZ", zN, zF) + `\nvar<workgroup> wBeta:f32;var<workgroup> wAlphaOld:f32;`, betaHead + /* wgsl */`
+    fineApply("pApplyZ", zF, zN) + nativeApply("pApplyNZ", "pSeamZ", zN, zF) + `\nvar<workgroup> wBeta:f32;var<workgroup> wAlphaOld:f32;var<private> pBeta:f32;var<private> pAlphaOld:f32;`, betaHead, betaLets + /* wgsl */`
   let l=lid;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
   var pq=0.0;
   if(pDiag(slot,l)>0.0){
@@ -1661,7 +1679,7 @@ ${cBody}
     let q=pApplyZ(b,c,slot,l)+beta*pres[NB_PRES_F_Q+at];
     pres[NB_PRES_F_D+at]=dn;pres[NB_PRES_F_Q+at]=q;pq=dn*q;
   }else{pres[NB_PRES_F_D+at]=0.0;pres[NB_PRES_F_Q+at]=0.0;}
-  let sum=pSum512(lid,pq);if(lid==0u){pRedAdd(64u+(g&63u),sum);}`, betaHead + /* wgsl */`
+  let sum=pSum512(lid,pq);if(lid==0u){pmgRed[R_Q+wCountC+g]=sum;}`, betaLets + /* wgsl */`
   let T=8*p+nbLocalCoord(lid);let at=NB_STRIDE*cs+lid;
   let sm=pSeamZ(p,cs,lid,pSeamN(cs,lid));
   var pq=0.0;
@@ -1672,17 +1690,18 @@ ${cBody}
     let q=pApplyNZ(p,cs,lid,T,sm)+beta*pres[NB_PRES_C_Q+at];
     pres[NB_PRES_C_D+at]=dn;pres[NB_PRES_C_Q+at]=q;pq=dn*q;
   }
-  let sum=pSum512(lid,pq);if(lid==0u){pRedAdd(64u+(g&63u),sum);}`);
+  let sum=pSum512(lid,pq);if(lid==0u){pmgRed[R_Q+g]=sum;}`, "if(lid==0u){pmgRed[R_Q+g]=0.0;}");
 
   // Update: r = b - A (x + alpha p) and max|r| (a native row's over 64); the h rows' first V-cycle pass from zero into W0.
+  // p.q over pmgDirection's workgroups; r.z the direction's (R_RZ).
   const alphaHead = /* wgsl */`
-  let rs=pRedSums(lid,512u);
-  if(lid==0u){let rz=rs.x;let pq=rs.y;wAlpha=select(0.0,rz/pq,pq!=0.0);}
+  let pq=pFixed(lid,R_Q,nC+nF,0u,0u);
+  if(lid==0u){let rz=pmgRed[R_RZ];wAlpha=select(0.0,rz/pq,pq!=0.0);if(pFixedWriter(g,nC,nF)){pmgRed[R_PQ]=pq;}}
   pAlpha=workgroupUniformLoad(&wAlpha);`;
   const xF = (s: string, l: string) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`;
   const xN = (cs: string, i: string) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`;
   const update = fusedFC("pmgUpdate",
-    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + nativeApply("pApplyNR", "pSeamR", xN, xF), alphaHead + /* wgsl */`
+    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + nativeApply("pApplyNR", "pSeamR", xN, xF), alphaHead, /* wgsl */`
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   let d=pDiag(slot,l);var r=0.0;
   if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l);}
@@ -1692,7 +1711,7 @@ ${cBody}
   pTileZero(lid);
   let row=pRow(b,c);
   pSmooth(row,c,ti,r,false);
-  if(row.d>0.0){pmgF[P_W0+NB_STRIDE*slot+l]=tp[ti];}`, alphaHead + /* wgsl */`
+  if(row.d>0.0){pmgF[P_W0+NB_STRIDE*slot+l]=tp[ti];}`, /* wgsl */`
   let T=8*p+nbLocalCoord(lid);
   let sm=pSeamR(p,cs,lid,pSeamN(cs,lid));
   var r=0.0;
@@ -1700,7 +1719,7 @@ ${cBody}
     r=pP(NB_PRES_C_RHS,cs,lid)-pApplyNR(p,cs,lid,T,sm);pres[NB_PRES_C_R+NB_STRIDE*cs+lid]=r;
   }
   let rmax=pMax512(lid,abs(r)/64.0);
-  if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}`, true);
+  if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}`, "", true);
   const finishC = kernel("pmgFinishC", CBP, ["pres", "cstage"], /* wgsl */`
 var<workgroup> wAlpha:f32;
 @compute @workgroup_size(512) fn pmgFinishC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("native")}
@@ -1744,7 +1763,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   if(lid==0u){
     let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_LATTICE);
     wGo=select(0u,1u,edge${audit ? "&&pmgTop[T_RBF+slot]!=0u" : ""});
-    ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : guessAt ? "wAlpha=0.0;" : "let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);"}
+    ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : guessAt ? "wAlpha=0.0;" : "let rz=pmgRed[R_RZ];let pq=pmgRed[R_PQ];wAlpha=select(0.0,rz/pq,pq!=0.0);"}
     atomicStore(&wFlips,0u);
   }
   if(workgroupUniformLoad(&wGo)==0u){return;}
@@ -1799,7 +1818,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   if(lid==0u){
     let edge=any(p==vec3i(0))||any(32*(p+vec3i(1))>=NB_LATTICE);
     wGo=select(0u,1u,edge);
-    ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : "let rz=pRedSum(0u);let pq=pRedSum(64u);wAlpha=select(0.0,rz/pq,pq!=0.0);"}
+    ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : "let rz=pmgRed[R_RZ];let pq=pmgRed[R_PQ];wAlpha=select(0.0,rz/pq,pq!=0.0);"}
     atomicStore(&wFlips,0u);
   }
   if(workgroupUniformLoad(&wGo)==0u){return;}
@@ -1857,9 +1876,8 @@ var<workgroup> wOpen:u32;
 @compute @workgroup_size(64) fn pmgCheck(@builtin(local_invocation_index) lid:u32){
   if(lid==0u){wOpen=atomicLoad(&nbSet[PH_OPEN]);}
   if(workgroupUniformLoad(&wOpen)==0u){return;}
-  let rs=pRedSums(lid,64u);
   if(lid==0u){
-    let rz=rs.x;let pq=rs.y;let alpha=select(0.0,rz/pq,pq!=0.0);
+    let rz=pmgRed[R_RZ];let pq=pmgRed[R_PQ];let alpha=select(0.0,rz/pq,pq!=0.0);
     atomicStore(&nbSet[PH_RZ],bitcast<u32>(rz));atomicStore(&nbSet[PH_ALPHA],bitcast<u32>(alpha));
     // max|r| over the update's rows and, after a wall change, the changed bricks' and pages' new residuals
     // (PH_RMAXW, kept apart so every walls workgroup decides on the update's max). Non-negative floats order as u32.
@@ -1873,8 +1891,6 @@ var<workgroup> wOpen:u32;
     else if(cfg.z+1u>=P_SLOTS){atomicOr(&nbSet[NB_H_STATE],NB_STATE_PRESSURE_CAP);atomicAdd(&nbSet[PH_CAPPED],1u);pGate(false);}
     else{pGate(true);}
   }
-  workgroupBarrier();
-  for(var j=lid;j<128u;j+=64u){atomicStore(&pmgRed[j],0u);}
 }`);
 
   // Finish: the last update's x += alpha p.
@@ -1990,7 +2006,7 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
     core,
     // After the composite's native projection (pmgProjectC writes an h tile's C X): compositeMGPCG places it.
     publish: [{ kernel: pressureDelta, dispatch: list(LIST.C_ALL) }],
-    buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 128 },
+    buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 8 + 2 * (L.cap.f + L.cap.c) },
     receipt: { iterations: MG_HEADER.ITERATIONS, capped: MG_HEADER.CAPPED },
   };
 }
