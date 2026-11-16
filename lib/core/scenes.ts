@@ -532,6 +532,8 @@ export function createHighResolutionDamBreakScene(): SceneDescription {
   scene.solidVoxels = solidVoxelEditsForScene(scene);
   scene.sceneId = "high-resolution-dam-break";
   scene.duration_s = 20;
+  // Water only: inviscid, as the other water scenes (the base's 1.002e-3 Pa s was inherited by omission).
+  scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.voxelDomain = {
     ...scene.voxelDomain,
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 8,

@@ -766,6 +766,20 @@ more aggressive to remove fine particle tiles."
   low count passes.
 - Run: ~/code/me/fluid-scratch/lane-e/oldair/g (dam-old16.jsonl, gates-old16.md).
 
+**The dam is inviscid (2026-11-16, the coordinator's ruling; lane F). The references stand.**
+- createHighResolutionDamBreakScene inherited the base scene's water viscosity, 1.002e-3 Pa s
+  (default-scene.json), by omission. The other water scenes set 0, and the port's rule is water only: inviscid, no
+  surface tension. The dam now sets `dynamicViscosity_Pa_s = 0`; no other scene changes. ν dt / h² is about 4e-4 at
+  the dam's h.
+- **Checked on the old engine.** One dam-300 fenced check run at 2761350a with only that change
+  (patches/dam-inviscid-2761350a.patch, export tree-2761350a-v0), scored on this set: **PASS**, every gated row's
+  worst margin at most 0.22, inside the references' own spread (run f's worst was 0.43, LOO's 0.68):
+  - D1 0.05, D2 0.00, D3 0.22, D4 0.07, D4c 0.00, D5c 0.02, D5ce 0.02, D5k 0.10, D5p 0.12, D5e 0.11, D6 0.01,
+    D7t 0.16, D7d 0.08;
+  - D8c 0.04 (3.530e5 against 3.516e5), D8 0.14 (6.396e5 against 6.309e5 at 30-90).
+- So the viscous term was negligible on the dam, and the references at 1.002e-3 stand for the inviscid scene.
+- Run: ~/code/me/fluid-scratch/lane-f/logs/v0 (dam-v0.jsonl, gates-v0.md).
+
 ### 4.7 Step-time baselines at 2761350a
 
 These rounds ran on the timing slot, with baseline 33b78ebb and candidate 2761350a back to back
