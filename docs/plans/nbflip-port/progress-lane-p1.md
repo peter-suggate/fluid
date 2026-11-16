@@ -1169,3 +1169,83 @@ coefficients). V is vectors, reads plus writes.
   - A compact layout keeps 17% of the coefficient words and adds the flag/index work, so at most about 0.5 ms.
   - Per row: at most about 0.55 ns a row a slot, about 4 ns a row a step, at 145k h rows.
 - Below the 1 ms bar: not taken. Nothing changed in the tree. The hack is in the scratch file mf/mf-hack.patch.
+
+**Open, parked (coordinator, 2026-11-16).** The pressure solve is parked. Three structural levers were each priced under
+1 ms a step:
+- the block-local L0 smoother;
+- the matrix-free interior;
+- the dot reductions, already landed.
+
+The iteration count is set by the dam's start distance. One question is left open for later: what holds the
+remaining about 61 µs of PreS's first-touch cost, with no coefficient loads? It is not coefficient bytes (mfuS above).
+The candidates are the 1000-entry tile load with its slot and native lookups, the staged neighbour table, R, the
+source plane and the write. Each would be removed one at a time in the profiled rig.
+
+## 2026-11-16 — "transfer and seeding" and "move" attributed per kernel (measurement only)
+
+**Reconciliation.** The two areas are counted over different kernel sets in E's two profiles.
+- E's earlier rule (areas.py) is `{pDeposit, pSeed}`, 3.4–3.6 ms. Its move is `{uCache, pMove, pScan, pScatter,
+  pTiles, pDelta, pJoin, pArgs}`, and uTransfer sat in velocity.
+- E's r1/areas.mts (the 9.15 / 9.32 ms tables) moved uTransfer (from velocity) and pDelta, pJoin and pTiles (from
+  move) into transfer and seeding. uCache went to velocity, and pLiquid joined move.
+- On E's r12-head profile, the 9.32 ms is uTransfer 4.77 + pSeed 1.92 + pDeposit 1.58 + pDelta 0.59 + pJoin 0.33 +
+  pTiles 0.12. The old pair is 3.51 ms, so nothing grew; the kernels were relabelled.
+- On HEAD 2348147a, uTransfer is 3.23 ms (F 2.77 + C 0.46, split below), against 4.77 in E's r12-head run.
+
+**Method.**
+- Profiled tiered dam on HEAD 2348147a (scratch tree `trees/tr`), 24 steps, `--every=100 --dense=16 --profile=13`.
+- The early window is steps 18–23: 4 runs, mean (min–max). The late window is a 106-step run, `--every=2`, profiled
+  steps 94–105.
+- Scratch flag `splitT`: uTransfer's F bricks and C pages as two dispatches. They are the two independent halves of
+  one dispatch, so the split is the same computation.
+- Records are pMove's lanes (dispatch × 128): about 419k early and 450k late. F_ALL bricks are pSeed's groups: about
+  3514 early and 4066 late.
+- Every kernel here is 100 µs or more a call, except pArgs, whose 11–44 µs is the timestamp tick (about 1 µs of work).
+
+| kernel | what | µs/call, 18–23 | ns/record | µs/brick | µs/call, 94–105 | ns/record |
+|---|---|---|---|---|---|---|
+| pMove | G2P, Heun trace, pair separation, surface shift, merge, split, rank | 4345 (4238–4511) | 10.4 | 1.24 | 4779 | 10.6 |
+| uTransfer, F half | P2G resolve, FLIP keep, gravity, per F brick (staged window, 125 tiles, 9³ depth) | 2772 (2720–2829) | 6.6 | 0.79 | 2922 | 6.5 |
+| pSeed | reseed: a count pass and a write pass over 512 cells a brick | 1925 (1901–1988) | 4.6 | 0.55 | 1557 | 3.5 |
+| pDeposit | P2G scatter into 3300×2 workgroup atomics, per brick | 1273 (1201–1322) | 3.0 | 0.36 | 1180 | 2.6 |
+| pDelta | FLIP delta per record | 584 | 1.4 | 0.17 | 546 | 1.2 |
+| uTransfer, C half | 4h faces: gathers the 4³ cells' records a face | 456 | 1.1 | 0.13 | 344 | 0.8 |
+| pJoin | census join and support bits per record | 320 | 0.8 | 0.09 | 262 | 0.6 |
+| pLiquid | liquid bits per brick | 281 | 0.7 | 0.08 | 431 | 1.0 |
+| pScan | the rebin's per-brick scan | 229 | 0.6 | 0.07 | 246 | 0.6 |
+| pScatter | the rebin's filing | 172 | 0.4 | 0.05 | 164 | 0.4 |
+| pTiles | tile heats | 112 | 0.3 | 0.03 | 104 | 0.2 |
+| sum | | 12.5 ms | | | 12.5 ms | |
+
+E's transfer set is 7.44 ms here and E's move set 5.04 ms.
+
+**Removal pricing.** Same rig, one run each against the four-run baseline. These are timing probes; the numerics
+change where noted.
+
+| probe | kernel | µs/call | Δ |
+|---|---|---|---|
+| pMove without the pair separation (`noSep`) | pMove | 2316 | about −2.07 ms (−47%, about 4.9 ns/record) |
+| pMove without the surface shift (`noShift`) | pMove | 3878 | about −0.47 ms |
+| pSeed's count pass run twice (`seedDup`, exact) | pSeed | 3058 | +1.13 ms: the count pass is about 1.1 of 1.93 ms |
+| uTransfer F without its near-surface theta block (`noNear`) | uTransfer F | 2796 | about 0 |
+| uTransfer F with empty-bin bricks on a copy-only fast path (`uEmpty`, approximate: it skips neighbours' deposits and gravity), 2 pairs | uTransfer F | 2032, 2097 against 2753, 2785 | about −0.70 ms |
+
+**Levers (proposals for F; I made no edits to their files).**
+1. **The pair separation in pMove: up to about 2.1 ms a step (about 4.9 ns a record).**
+   - Each coupled record reads every record of the 2^3 cells about floor(q − 0.5), 48 B a record, for
+     position, liveness and mass.
+   - F has shown that the separation plus surface shift is bitwise the same computed in a pre-move pass (`pBand`,
+     progress-lane-f.md M0(c)). That allows a per-brick pass that stages the brick-plus-halo records' 16 B
+     (xyz plus mass) in threadgroup memory, or at least a 16 B side array written at filing.
+   - Expected about 1 ms. This needs a go/no-go probe: the pressure work showed fewer bytes buys less than
+     proportional time, and E's whole-move staging lost.
+2. **uTransfer's F half on bricks with nothing to transfer: about 0.7 ms a step by the probe.**
+   - Each of about 3500 F_ALL bricks stages a window, a vertex ring, 125 tiles and 729 depth vertices, even
+     where no record deposits.
+   - An exact fast path needs a per-brick flag meaning no deposit weight on any face and no liquid on either
+     side of the brick's faces. pDeposit and FC_LIQ could write it. The path then copies US = U = UP and
+     zeroes fdep.
+3. **Runner-up: pSeed.** Keep the count pass's accepted sites as a per-lane mask, so the write pass only samples
+   velocity. That is at most the write pass's re-tests, about 0.5 ms.
+- With E's R1+R2(b) at −30 to −40% records, the per-record lever scales with records: about 1.3–1.4 ms of
+  separation bound left. The per-brick lever scales with F_ALL bricks.
