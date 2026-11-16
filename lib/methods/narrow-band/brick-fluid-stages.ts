@@ -78,9 +78,10 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const analysis = analysisOf(l.lResolveD ? [at(l.lResolveD, all)] : resolve), bootAnalysis = analysisOf(resolve);
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
-    // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source),
-    // then the source's arguments again, so the head's refined tiles' seeds move and bin this step.
-    move: [...resolve, ...cache, at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2), args(0, 0)] : []), at(p.pMove, records)],
+    // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source).
+    // Then the move's arguments (pArgs w = 0: the source's records, so the head's refined tiles' seeds move and bin
+    // this step), which also empty the destination bank, every move (brick-particle-banks.test.ts).
+    move: [...resolve, ...cache, at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pMove, records)],
     rebin: rebin(0),
     levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve,
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all)],

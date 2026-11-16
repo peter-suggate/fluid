@@ -192,8 +192,7 @@ fn pFile(i:u32,p:Particle,split:bool){
  fpart[FP_RANK+2u*i]=pCount(nbfSplitA(q,m,along),speed);fpart[FP_RANK+2u*i+1u]=pCount(nbfSplitB(q,m,along),speed);
 }
 @compute @workgroup_size(128) fn pMove(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let src=pSrc();let dst=src^1u;let i=nbGroup(wid)*128u+lid;
- if(i==0u){atomicStore(&nbSet[NB_H_PCOUNT0+dst],0u);}
+ let src=pSrc();let i=nbGroup(wid)*128u+lid;
  let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+src]),NB_PCAP);
  if(i>=n){return;}
  fpart[FP_RANK+2u*i]=NB_NONE;fpart[FP_RANK+2u*i+1u]=NB_NONE;
@@ -595,6 +594,12 @@ fn pSupport(p:Particle){
   for(var a=0u;a<3u;a++){pMaxF(at+1u+a,travel[0][a]);pMaxF(at+4u+a,travel[1][a]);}
  }
 }
+// A record's travel past the lattice in one step is a defect upstream (before is pMove's PIC sample or a seed's site
+// sample here, never pDelta's delta, which follows): it latches PARTICLES (code 3 a fresh seed, 4 a moved record; pMove
+// latches 1 and 2) and joins nothing. The join box is the lattice's tiles (to its vertex plane, n / 4: a tile past them
+// holds no slot), so a record's loop never exceeds them: the old 2047-tile window let one record with a sentinel-sized
+// travel (3e38) walk 2048^3 tiles, a dispatch that never drains (the GPU wedge of 2026-11-17).
+fn pJoinFatal(code:u32,i:u32){nbFail(NB_FAIL_PARTICLES,0x80000000u|(code<<24u)|(i&0xffffffu));}
 fn pJoinTile(t:vec3i){
  let c=4*t;let s=fgSlot(c);if(s==NB_NONE){return;}
  let bit=1u<<(8u+fgTileOf(c));let at=NB_S_TILE_OCC+s;
@@ -609,19 +614,25 @@ fn pJoinTile(t:vec3i){
  if(nbParticleMode(p)==1.0||p.velocity.w< -1.0){return;}
  let start=p.position.xyz;let c=vec3i(floor(start));
  let travel=nbRingF(cfg.x,NB_RING_DT)*p.before.xyz/vec3f(nbRingF(cfg.x,NB_RING_H));
+ if(!all(abs(travel)<vec3f(NB_LATTICE))){pJoinFatal(select(4u,3u,bitcast<u32>(nbParticleAge(p))==NB_SEED_FIRST),i);return;}
  var low=start-0.875;var high=start+0.875;
  if(fgReach1(c)&&p.velocity.w<=0.0){
   let s=fgSlot(c);var nearest=NB_NONE;if(s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
   if(nearest!=NB_NONE){low=vec3f(fgUnpack(nearest));high=low+1.0;}
  }
- let lo=clamp(vec3i(floor((low+min(travel,vec3f(0)))/4.0)),vec3i(0),vec3i(2047));
- let hi=max(lo,clamp(vec3i(floor((high+max(travel,vec3f(0))-1e-5)/4.0)),vec3i(0),vec3i(2047)));
+ let lo=clamp(vec3i(floor((low+min(travel,vec3f(0)))/4.0)),vec3i(0),NB_LATTICE/4);
+ let hi=max(lo,clamp(vec3i(floor((high+max(travel,vec3f(0))-1e-5)/4.0)),vec3i(0),NB_LATTICE/4));
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){pJoinTile(vec3i(x,y,z));}}}
 }`);
 
   // A direct one-lane dispatch: a kernel dispatched from the args buffer may not write it (WebGPU usage scope).
+  // cfg.w even, a move's arguments (the source bank's records): it also empties the move's destination bank, which
+  // pScan fills. The reset is here, not in the move's first lane: a move over no records dispatches no workgroup, and
+  // the destination then kept the records of two steps before, their before pDelta's deltas (NB_DELTA_NONE, 3e38),
+  // which pJoin read as a travel (the GPU wedge of 2026-11-17, sparse-cm12-long-dam-break).
   const pArgs = k("pArgs", [CFG, FB.set, FB.dir, ARGS_RW], BANK_WGSL + /* wgsl */`
 @compute @workgroup_size(1) fn pArgs(){
+ if((cfg.w&1u)==0u){atomicStore(&nbSet[NB_H_PCOUNT0+(pSrc()^1u)],0u);}
  let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+(pSrc()^(cfg.w&1u))]),NB_PCAP);
  let g=(n+127u)/128u;
  args[${P_ARGS_RECORDS}u]=min(g,NB_FOLD);args[${P_ARGS_RECORDS + 1}u]=max((g+NB_FOLD-1u)/NB_FOLD,1u);args[${P_ARGS_RECORDS + 2}u]=1u;
