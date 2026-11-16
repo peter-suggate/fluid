@@ -408,7 +408,14 @@ fn fsCacheRawStaged(T:vec3i,a:u32)->f32{
   let l=lid+256u*r;let c=o+nbLocalCoord(l);
   fcStoreF(FC_PHIU+512u*slot+l,fgPhi(c));
   if(!near){continue;}
-  for(var a=0u;a<3u;a++){fcStoreF(FC_UNIT+512u*(3u*slot+a)+l,fsTapH(c,a,true));}
+  for(var a=0u;a<3u;a++){fcStoreF(FC_UNIT+729u*(3u*slot+a)+fsLocal9(nbLocalCoord(l)),fsTapH(c,a,true));}
+ }
+ // The apron (UNIT's faces at 8 on some axis: 81 at x = 8, 72 at y = 8, 64 at z = 8): the +side neighbours' taps.
+ if(near&&lid<217u){
+  var q=vec3i(8,i32(lid%9u),i32(lid/9u));
+  if(lid>=81u){let k=lid-81u;q=vec3i(i32(k%8u),8,i32(k/8u));}
+  if(lid>=153u){let k=lid-153u;q=vec3i(i32(k%8u),i32(k/8u),8);}
+  for(var a=0u;a<3u;a++){fcStoreF(FC_UNIT+729u*(3u*slot+a)+fsLocal9(q),fsTapH(o+q,a,true));}
  }
 }`) : undefined;
 

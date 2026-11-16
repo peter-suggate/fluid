@@ -93,6 +93,35 @@ test("FC_LIQ: every reader runs after its writer, with no φ writer between", ()
   assert.ok(readers >= 12, `${readers} FC_LIQ readers`);
 });
 
+/** fcell.UNIT (fluid-grid.wgsl.ts, brick-abi.md): uCache's resolved h taps of US, a slot's 9^3 with the +side apron.
+ * The sampler reads a stencil's eight taps through its base slot, so every reader must run after the schedule's
+ * uCache and before the next US writer (uTransfer, uExtend, uExt4, uKick): a later reader would take taps of a US
+ * the apron no longer matches. */
+test("FC_UNIT: every reader runs after uCache, with no US writer between", () => {
+  const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
+  type K = { label: string; code: string };
+  const writes = (k: K) => k.code.includes("fcStoreF(FC_UNIT+"), reads = (k: K) => !writes(k) && k.code.includes("FC_UNIT+");
+  const usWriter = (k: K) => /vel\[vc?At\(NB_VEL_[FC]_US0[^\]]*\]\s*=[^=]/.test(k.code);
+  let readers = 0, writers = 0, usWriters = 0;
+  for (const viscosity_Pa_s of [0, 1e-3]) {
+    const stages = fluidStagesAt(true)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
+    const of = (list: unknown) => ((list as { kernel: K }[] | undefined) ?? []).map(p => p.kernel);
+    const kick = stages.kick as Record<string, unknown>;
+    // The kick's seed follows its after (between them only E's TRIG-only census, which writes no US).
+    const schedules = { step: ["move", "rebin", "levelSet", "velocity", "tail"].flatMap(s => of(stages[s])), boot: of(stages.boot), kick: [...of(kick.force), ...of(kick.after), ...of(kick.seed)] };
+    for (const [name, list] of Object.entries(schedules)) {
+      let fresh = false;
+      for (const k of list) {
+        if (writes(k)) { fresh = true; writers++; }
+        if (reads(k)) { readers++; assert.ok(fresh, `${name}: ${k.label} reads FC_UNIT before uCache or after a US writer`); }
+        if (usWriter(k)) { usWriters++; fresh = false; }
+      }
+    }
+  }
+  // uAdvect, lAdvect, lcAdvect, pMove and pSeed (twice) a step; uTransfer and uExtend among the US writers.
+  assert.ok(readers >= 12 && writers >= 2 && usWriters >= 6, `${readers} FC_UNIT readers, ${writers} writers, ${usWriters} US writers`);
+});
+
 /** Resolved φ (fluid-grid.wgsl.ts FG_PHI_WGSL): tiered, a non-owned vertex's PHI word is exact only between the
  * lResolve after the last writer of what it depends on (a C PHI writer, or the set update before a schedule) and
  * the next such writer. Every kernel that reads resolved words (FG_PHI_RESOLVED on, or a staged ring) must run in

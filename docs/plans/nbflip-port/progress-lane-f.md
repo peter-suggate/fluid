@@ -1659,3 +1659,56 @@ Logs: ~/code/me/fluid-scratch/lane-f/logs/zg.
 - *The 9³ UNIT apron (one slot lookup per sampled stencil):* bound about 4.9 / 2.8 / 1.6 ms net at steps 20 / 100 /
   300 across uAdvect, lAdvect, lcAdvect, pMove and pSeed. The coordinator approved it and lane E agreed the ABI.
   It is in its gate.
+
+## 2026-11-16: the FC_UNIT apron lands (swing A, velocity samples)
+
+**Layout.** UNIT is now 3 × 729 words a slot.
+- For each axis it holds the 9³ faces o … o + 8, local x + 9y + 81z: the slot's own 8³ plus, at 8 on an axis, the +side neighbours' faces as an apron.
+- uCache writes all 729 in a near brick: the 217 apron faces a lane each, by the same `fsTapH(c, a, true)` as the brick's own faces.
+- `fsFine` then reads a 2 × 2 × 2 stencil through one `fgSlot` of its base, i0.
+- A base brick with no slot (the lattice's upper face along the axis) takes the per-tap path.
+- The coverage and currency rules sit beside the FC_UNIT entry in brick-abi.md (lane E's three conditions).
+- A new fluid-staging test checks the schedule: every FC_UNIT reader runs after uCache and before the next US writer, on the step, boot and kick schedules.
+- Memory: +12.8 MB at poolF 4913, which scales with poolF.
+
+**Exactness (frozen, za against za with the per-tap path forced, same layout, steps 20, 100 and 300; uCache, uAdvect, lAdvect, lcAdvect, pMove and pSeed).** Audit variants counted, in set words:
+
+| word | what it counts | count |
+|---|---|---|
+| 124 | fast-path taps whose bits differ from the per-tap `fsUnit` | 0 |
+| 120 | apron taps whose brick has no slot | 0 |
+| 121 | base bricks with no HMASK bit in their 8 tiles | 0 |
+| 122 | fallbacks with i0 in the lattice | 0 |
+| 123 | per-tap reads of a neighbour brick whose uCache did not write | 0 |
+
+Every count is 0 at all three steps, so the tap values are bitwise those of the per-tap path. The outputs still differ:
+- uAdvect 68k–136k words, mostly 1–4 ulp, propagated through the trace.
+- lAdvect 1–8 words; lcAdvect 20–74 words.
+- pMove and pSeed: their old-vs-old runs already differ.
+
+The cause is the fast-math codegen of the same interpolation in a different code shape, not a different input.
+
+**Frozen timings (ms, per-tap → apron):**
+
+| step | uAdvect | lAdvect | lcAdvect | pMove | pSeed | uCache fill | net |
+|---|---|---|---|---|---|---|---|
+| 20 | 5.91 → 2.83 | 2.32 → 1.56 | 0.87 → 0.76 | 3.06 → 2.31 | 2.67 → 2.23 | +0.14 | −5.0 |
+| 100 | 2.38 → 1.43 | 2.74 → 1.87 | 1.14 → 1.05 | 3.75 → 2.97 | 2.65 → 2.37 | +0.25 | −2.7 |
+| 300 | 1.10 → 0.79 | 1.42 → 0.94 | 0.98 → 0.90 | 3.39 → 2.72 | 2.01 → 1.80 | +0.17 | −1.6 |
+
+These match the k6 bound (4.9 / 2.8 / 1.6). Max threads are unchanged except pMove, 512 → 576.
+
+**Gate (tree-za against 3090d99e + 71d4acc5):**
+- The wide-dam, velocity-formulas and fluid-staging tests pass (15/15).
+- dam-300 passes every gated row (D8 0.76).
+- Fenced holds, paired zh za za zh, steps 13–165:
+
+| pair | median (ms) | mean (ms) |
+|---|---|---|
+| 1 (holds 1 and 2) | 44.55 → 39.90 | 48.99 → 43.72 |
+| 2 (holds 3 and 4) | 45.27 → 39.41 | 50.50 → 44.30 |
+
+- No abort was logged in the gate's runs.
+- An earlier probe round shared the GPU with another lane's run and logged aborts, so it was discarded and re-run.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{zb,zc}.

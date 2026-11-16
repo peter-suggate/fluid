@@ -1042,6 +1042,17 @@ Each entry is a `BrickPlacement` (`brick-kernel.ts`). The rules:
   an engine buffer.
 - `validateBrickStages` checks both rules at build.
 - F owns header words 64–127 and class bits 16–23.
+- F's `fcell.UNIT` (tiered; `fluid-grid.wgsl.ts`) is 3 × 729 words a slot: for each axis the 9³ faces o … o + 8
+  (local x + 9y + 81z), the slot's 8³ and, at 8 on an axis, the +side neighbours' faces as an apron, so the
+  sampler's `fsFine` reads a 2 × 2 × 2 stencil through its base slot alone. *Writer*: `uCache` only, in the
+  move stage, and only in a near brick (an h tile in its 27 bricks); it writes all 729 there, apron
+  included, by the same `fsTapH(c, a, true)` as the brick's own faces (0 at a closed face).
+  *Coverage*: the fast path reads a slot's apron only as the base brick of a stencil whose fine weight is
+  over 0; such a stencil's base face is within 3 cells of an h owner, so its brick is near and its apron
+  current (the per-tap path read the base brick's own UNIT on the same condition). A base brick with no
+  slot (the lattice's upper face) takes the per-tap path. *Currency*: the readers (`uAdvect`, `lAdvect`,
+  `lcAdvect`, `pMove`, `pSeed`) all run after `uCache` and before the step's first US writer (`uTransfer`);
+  `fluid-staging.test.ts` checks the order against the schedule.
 
 A stage factory receives a `BrickStageContext`:
 - the layout;
