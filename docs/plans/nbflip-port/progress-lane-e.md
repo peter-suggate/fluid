@@ -2075,3 +2075,71 @@ levelset-coarse.wgsl.ts's LC_GROUPS names each kernel's dispatch, and brick-flui
 
 The review doc's tier section records the churn: about 45% of width changes reverse within six steps. That is a
 quality signal as well as a cost one. Hysteresis stays parked.
+
+## 2026-11-17: the pool sizing rule (rollout task 2), measured
+
+**Rule** (for a scene with no authored `brickPools`). `n` is the lattice in cells and `V` the initial liquid's
+cells. `top` is its top in cells. bootF and bootP come from F's `bootBricks` / `bootParticleCount`.
+- Window (the hard cap): `WF = Π(n/8 + 1)`, `WC = Π(n/32 + 1)`.
+- Energy: no liquid rises above twice its initial top, plus a ring.
+  - `EF = floorF · min(n_y/8 + 1, ⌈2·top/8⌉ + 2)`.
+  - `EC = floorC · min(n_y/32 + 1, ⌈2·top/32⌉ + 1)`.
+- Spread:
+  - a film at least 1/16 cell thick over the floor, 4 brick layers: `SF = 4 · min(floorF, ⌈V/4⌉)`;
+  - every liquid brick at least 1/16 full: `LF = ⌈V/32⌉`.
+- **f** = `min(WF, EF, max(SF, LF, ⌈1.25 bootF⌉, 128))`.
+- **c** = `min(WC, EC, f)`.
+- **particles** = `3 · bootP`.
+- **b** = 16 and **k** = 0 (no cuts until M3).
+
+An underestimate latches and is never grown. Checked on figure-9 with f = 1200, c = 40 and particles = 100k:
+- `POOL_F` at step 92, with high = cap;
+- `BRICK_POOL_C` at step 30;
+- `BRICK_PARTICLES` at step 42.
+
+Each one sets `info.simulationFailure` (SimulationFailureError), and the solver refuses every later step.
+
+**Peaks against the rule.** Runs used generous pools, clean e86757ab, 240–900 steps, sampled every 2–5 steps. F, C
+and P are the maxima over every valid run.
+
+| scene | V | f rule | F peak | margin | c rule | C peak | margin | p rule | P peak | margin |
+|---|---|---|---|---|---|---|---|---|---|---|
+| high-resolution dam | 753664 | 4913 (window) | 4913 | 1.00 (cap) | 125 | 125 | 1.00 (cap) | 1.87M | 997k | 1.87 |
+| figure-9 (900 steps) | 245759 | 2601 (window) | 2216 | 1.17 | 75 | 75 | 1.00 (cap) | 720k | 255k | 2.82 |
+| minimal-64 | 94208 | 729 (window) | 726 | 1.00 (cap) | 27 | 27 | cap | 525k | 195k | 2.68 |
+| minimal-32 | 11776 | 125 (window) | 125 | cap | 8 | 8 | cap | 117k | 37k | 3.13 |
+| power-fill-256-6400 (×3) | 6400 | 4356 | 1943 | 2.24 | 162 | 96 | 1.69 | 78.7k | 55.6k | 1.41 |
+| power-fill-256-800 (×3) | 800 | 800 | 538 | 1.49 | 162 | 55 | 2.95 | 17.9k | 9.3k | 1.91 |
+| power-droplet-256 (×3) | 100 | 128 (floor) | 80 | 1.60 | 128 | 8 | 16 | 3828 | 1127 | 3.40 |
+| power-droplet-128 (×3) | 100 | 128 (floor) | 86 | 1.49 | 50 | 10 | 5.0 | 3828 | 1167 | 3.28 |
+| power-droplet-64 | 100 | 128 (floor) | 52 | 2.46 | 18 | 8 | 2.25 | 3828 | 1103 | 3.47 |
+
+- **Run to run, the small scenes' F peak varies by up to ~60%.** power-droplet-128 gave 52 / 56 / 86, power-droplet-256
+  gave 56 / 56 / 80, and power-fill-800 gave 394 / 502 / 538. The arrival-order lists make this nondeterministic. The
+  128-brick floor (8 MB) and the 4-layer film are sized for it. A 3-layer film was already beaten by one droplet run
+  (80 > 75).
+- **Peaks come early.** Every 900-step peak was before step 290: power-fill-6400 at about 250, figure-9 at about 130.
+- **Memory:** the rule asks for 495 / 237 / 223 / 49 / 16 MB, against 412 / 168 / 133 / 36 / 6 MB measured. The window
+  rule would have taken 2.25 GB for a 256³ droplet.
+- **Untested regime.** For a scene whose spread term `LF` lies between the film and energy terms, the rule rests on
+  the 1/16-full brick assumption alone. sparse-cm12-long-dam-break (f = 1280 by `LF`) was meant to test it, but it
+  aborts (next item).
+
+**Aborts (not pool related):**
+- sparse-cm12-long-dam-break: a Metal command-buffer abort at step 9–10, in 2 of 2 runs, alone on the GPU. "Step 10
+  refused", runner rc 77. The lattice is 192×96×32, with generous pools (f = 1625).
+- Intermittent rc 77 in 2 of about 16 other runs (the figure-9 c = 40 check and power-droplet-256), both while 2–3
+  checks shared the GPU (peak 3–4.4 GB each). The same inputs ran clean on other runs.
+- Neither is diagnosed. cm12 blocks enabling that scene.
+
+**Not landed yet:** the rule in brick-scene.ts. Its particle term uses lane F's `bootParticleCount`
+(brick-initial.ts, in F's tree), and it goes in with F's initial-liquid interface. The probe is
+`fluid-scratch/lane-e/r16/tools/peaks-brick.mts`, and the table is `r16/tools/rule2.py`.
+
+**M5 review (lane P, A1–A8).** I accepted all eight and sent the verdict to P. The changes:
+- A2: setMark owns both NEAR_BODY and BODY_WAS. Entering bricks get the body test in setUpdate, which closes a
+  one-step open-inside-a-body hole.
+- A5: a CUT_STATIC class bit (E, bit 9). K slots are kept for CUT_STATIC, NEAR_BODY or BODY_WAS.
+- A6: the stamp stage goes at the end of the head, after the transfer and before the release reach. F_BODY lists
+  NEAR_BODY or BODY_WAS.
+- A4 is conditional: a per-step prescribed-motion upload must be listed and measured.
