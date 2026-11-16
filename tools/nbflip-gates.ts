@@ -10,8 +10,8 @@
  *  - references: every check-slot fenced complete run in --ref (at least two a scene; a file also
  *    named as a candidate is left out). The reference value of an observable is their mean, S
  *    their spread (max - min);
- *  - candidates: every check-slot fenced complete run in --candidate (files or directories),
- *    each judged on its own;
+ *  - candidates: every fenced run in --candidate (files or directories) on the check or the timing
+ *    slot (timing is exclusive, so stricter than check), each judged on its own;
  *  - timing: the latest timing-slot fenced and pipelined run a scene in --ref-timing (baseline)
  *    and --candidate-timing.
  * A gate row passes when |candidate - reference| <= max(floor, 3 S); a profile gate when its
@@ -69,7 +69,7 @@ const refDirs = option("ref").length ? option("ref") : [DEFAULT_REF];
 assert.ok(timingOnly || candidateFiles.size, `usage: nbflip-gates.ts --candidate=PATH [--ref=DIR (default ${DEFAULT_REF})] [--ref-timing=DIR] [--candidate-timing=DIR]`);
 const refRuns = (timingOnly ? [] : filesOf(refDirs)).filter(f => !candidateFiles.has(f)).map(load).filter((r): r is Run => !!r && complete(r));
 const candidates = [...candidateFiles].map(load).filter((r): r is Run => !!r);
-for (const c of candidates) assert.ok(c.mode === "fenced" && c.slot === "check", `Candidate ${c.name} is not a check-slot fenced run`);
+for (const c of candidates) assert.ok(c.mode === "fenced" && (c.slot === "check" || c.slot === "timing"), `Candidate ${c.name} is not a fenced run on the check or timing slot`);
 const sceneFilter = option("scenes").length ? option("scenes") as SceneKey[] : SCENES;
 
 const median = (v: number[]) => { const s = [...v].sort((a, b) => a - b); return s.length % 2 ? s[s.length >> 1]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2; };

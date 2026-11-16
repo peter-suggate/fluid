@@ -2202,8 +2202,8 @@ that overruns latches FAIL.
 - GPU units, serial: 51 of 51 pass. These are brick-static, brick-engine, brick-abi, pressure-mgpcg,
   pressure-composite(-mgpcg), brick-set-tiers and bodies-shapes.
 - dam-300, tiered composite, poolF 4913, judged against ref-2761350a: **Overall PASS**. The run was fenced on the
-  timing slot. Its meta was relabelled `check` for the judge, which asserts the slot; the observations don't depend on
-  it.
+  timing slot. It was judged first with its meta relabelled `check`, then as recorded, after the follow-up commit lets
+  nbflip-gates.ts take timing-slot candidates. Both give PASS.
   - D8 at 30–90 is 4.35e5 (an upper bound), against 6.31e5.
 - Step time, from the same run, steps 13–165: median **34.23 ms**, mean 39.1, against 34.4–34.7 at 20a233bb. No
   regression.
