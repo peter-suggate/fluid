@@ -43,6 +43,11 @@ fn lrParticleTravelConditional(velocity:vec3f,accepted:vec3f,ballistic:bool,scal
 // (residency regions) about it: workgroup words, flushed once a tile.
 const NB_REFINE_JOINS:u32=${refine.joins}u;const NB_REFINE_ALLOCATION:u32=${refine.allocation}u;
 const NB_REFINE_WINDOW:i32=${8 * UNIFORM_PAGE_WINDOW - 1};
+// A travel at or past the lattice's extent (the move's NARROW_BAND_TRACE_REACH, 2048 cells an axis) is a corrupt
+// record, not a motion: nbRefineBox raises the move's fatal for it (state[3] = 1, "trajectory longer than the
+// lattice"; the host stops the run) and joins nothing. Unlatched, a sentinel-sized travel (3e38) swept the whole
+// 2048^3-tile window for one record, a dispatch that never drains (brick engine, 2026-11-17).
+const NB_REFINE_REACH:f32=2048.0;
 // A tile's samples reach 5³ join tiles about it (a 25-bit x+5y slice a z)
 // and, by the half of the tile they sit in along each axis, one of 8 support
 // blocks of 2³ tiles (pbHalves bits, their travel maxima in pbTravel).
@@ -57,6 +62,7 @@ struct NbRefineBox{low:vec3i,high:vec3i}
 fn nbRefineBox(s:Particle,ballistic:bool,home:u32,reach:bool)->NbRefineBox{
  let start=s.position.xyz;let motion=select(s.before.xyz,s.velocity.xyz,ballistic);
  let travel=params.hDt.w*motion/params.hDt.xyz;let c=vec3u(start);
+ if(!all(abs(travel)<vec3f(NB_REFINE_REACH))){atomicStore(&state[3],1u);return NbRefineBox(vec3i(0),vec3i(-1));}
  var low=start-${NARROW_BAND_SURFACE_RADIUS};var high=start+${NARROW_BAND_SURFACE_RADIUS};
  if(reach&&s.velocity.w<=0.0){
   let nearest=atomicLoad(&bins[NB_DEPTH_B+64u*home+((c.x&3u)|((c.y&3u)<<2u)|((c.z&3u)<<4u))]);
