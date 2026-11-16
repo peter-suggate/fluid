@@ -179,6 +179,21 @@ The shallow cells are uncapped (the old depth < −1 gate), and the census shows
   records, 2.1% / 0.8% of the step's records. That is about 0.2 / 0.06 ms at the bound.
 - **Parked**: the cut is small. The mass-8 cap is parked as well.
 
+### The 4h tier's machinery (bound 4.83 ms at step 100; no-go against the 1.5 ms bar)
+
+**Result (lane E, 2026-11-16): no-go.** The brick set, census, transfer and C tier cost 4.33 / 4.83 / 3.94 ms at
+steps 20 / 100 / 300. The C kernels are latency-bound: each fits in one wave, so its time is its slowest lane's
+chain. The exact options price at about 0.6 ms realistic and 0.9 ms upper bound. The full bound is in
+progress-lane-e.md (2026-11-16).
+- **Landed:** lcCouple and lcRetire at X8 (eight 64-lane workgroups a page, a vertex a lane, as lcAdvect). This is
+  bit-identical against the G1 kernels on the frozen dam, and saves 0.34 / 0.33 / 0.39 ms at steps 20 / 100 / 300.
+- **Tier churn is a quality signal as well as a cost one.** About 900–1000 tiles change width a step at step 100,
+  and about 500 at step 300. Of each step's changes, 10–30% reverse the previous step's, and **about 45% reverse
+  within six steps**. A tile that flickers between widths gets resampled each time: its level set, velocity and
+  particles cross a seam twice for no lasting change in resolution.
+- **Hysteresis stays parked.** It deviates from the tier rule. Its direct cost share (the transfer, about 0.35 ms,
+  plus claims and leaves) is under the bar. Revisit it if the flicker shows in surface quality.
+
 ### E. Pressure (bound about 5–7 ms, needs the user's word)
 
 The user said on 2026-11-08 that pressure was not worth optimising further (old engine). Here it is 10 ms of 46. The

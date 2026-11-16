@@ -178,6 +178,8 @@ fn lcSample(f:u32,p:vec3f)->f32{
 }
 fn lcPhiC(base:u32,slot:u32,l:u32)->f32{return bitcast<f32>(phi[base+NB_STRIDE*slot+l]);}
 fn lcSetC(base:u32,slot:u32,l:u32,value:f32){phi[base+NB_STRIDE*slot+l]=bitcast<u32>(value);}
+// The page's z plane a workgroup of the X8 kernels (lcAdvect, lcCouple, lcRetire: eight workgroups a page) takes.
+var<private> lcPart:u32;
 fn lcCheckLattice(lid:u32){if(lid==0u&&any((NB_LATTICE&vec3i(31))!=vec3i(0))){nbFail(NB_FAIL_UNSUPPORTED,0x4c430001u);}}
 `;
 
@@ -383,8 +385,6 @@ fn lcCheckBulk(slot:u32,live:bool,lid:u32){
 }
 // The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. No barrier.
 var<workgroup> sRingLive:u32;
-// The page's z plane this workgroup advects (lcAdvect: eight workgroups a page, X8).
-var<private> lcPart:u32;
 fn lcAdvectPage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);lcCheckBulk(slot,live,lid);
  if(lid==0u){sRingLive=select(0u,1u,live);}
@@ -509,12 +509,13 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
  return nbfUnionBlend(bulk,particle,blend);
 }
 // The page body: PHI1 → PHI at the C vertices that are not COLD (nbStoreReconstructed holds COLD).
+// One C vertex a lane: the page's z plane lcPart (eight workgroups a page, X8), as lcAdvect.
 fn lcCouplePage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);
  if(!live){return;}
  let dt=lcDt();let hm=nbRingF(cfg.x,NB_RING_H);let o=nbCOrigin(slot);
- for(var r=0u;r<2u;r++){
-  let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
+ for(var r=0u;r<1u;r++){
+  let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
   if(!lcCOwned(v)||lcVertexCold(v)){continue;}
   lcSetC(NB_PHI_C_PHI,slot,l,lcCoupled(v,dt,hm));
  }
@@ -628,12 +629,13 @@ fn lcRetired(v:vec3i,cur:f32)->f32{
  if(fgReach2(c)){return lcBoundMetric(v,lcBuildDistance(v,c));}
  return nbfFarSentinel(cur,1.0);
 }
+// One C vertex a lane: the page's z plane lcPart (X8), as lcAdvect.
 fn lcRetirePage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);
  if(!live){return;}
  let o=nbCOrigin(slot);
- for(var r=0u;r<2u;r++){
-  let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
+ for(var r=0u;r<1u;r++){
+  let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
   if(!lcCOwned(v)){continue;}
   lcSetC(NB_PHI_C_PHI1,slot,l,lcRetired(v,lcPhiC(NB_PHI_C_PHI,slot,l)));
  }
@@ -663,12 +665,19 @@ export const levelSetCoarseWGSL = {
 /** lcAdvect's dispatch over C_ALL: eight workgroups an entry (the brick set's X8 arguments). */
 export const LC_ADVECT_GROUPS = "X8" as const;
 
+/** Each C kernel's dispatch over C_ALL. lcAdvect, lcCouple and lcRetire take eight 64-lane workgroups an entry (X8), a
+ * vertex a lane: each runs in one wave, so its time is its slowest lane's chain, and one vertex a lane cuts the
+ * couple's and retire's (lane E, 2026-11-16, frozen dam at step 100: 0.37 -> 0.27 and 0.63 -> 0.40 ms, bit for bit).
+ * lcClear and lcPublish take a 256-lane workgroup an entry (G1). */
+export const LC_GROUPS = { lcAdvect: "X8", lcCouple: "X8", lcRetire: "X8", lcClear: "G1", lcPublish: "G1" } as const;
+
 export interface LevelSetCoarseKernels {
   readonly lcAdvect: BrickKernel; readonly lcCouple: BrickKernel; readonly lcClear: BrickKernel;
   readonly lcRetire: BrickKernel; readonly lcPublish: BrickKernel;
 }
 
-/** The standalone kernels: list C_ALL, G1, workgroup 256; lcAdvect C_ALL X8, workgroup 64. */
+/** The standalone kernels on list C_ALL at LC_GROUPS: X8 with workgroup 64 (lcAdvect, lcCouple, lcRetire), G1 with
+ * workgroup 256 (lcClear, lcPublish). */
 export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayout(L, { tiered: true })): LevelSetCoarseKernels {
   if (!F.tiered) throw new Error("levelset-coarse: the C kernels read through the tier owners; build them with fluidLayout(L, { tiered: true })");
   const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell];
@@ -676,6 +685,13 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
 @compute @workgroup_size(256) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ALL);
  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,g);}
+ ${page}(slot,live,lid);
+}`].join("\n"));
+  // X8: eight workgroups a page, each one z plane of its C vertices (lcPart), a lane a vertex.
+  const k8 = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(), part, /* wgsl */`
+@compute @workgroup_size(64) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ALL);
+ var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,e);}
  ${page}(slot,live,lid);
 }`].join("\n"));
   return {
@@ -686,9 +702,9 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
  var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,e);}
  lcAdvectPage(slot,live,lid);
 }`].join("\n")),
-    lcCouple: k("lcCouple", levelSetCoarseWGSL.couple(), "lcCouplePage"),
+    lcCouple: k8("lcCouple", levelSetCoarseWGSL.couple(), "lcCouplePage"),
     lcClear: k("lcClear", levelSetCoarseWGSL.clear(), "lcClearPage"),
-    lcRetire: k("lcRetire", levelSetCoarseWGSL.retire(), "lcRetirePage"),
+    lcRetire: k8("lcRetire", levelSetCoarseWGSL.retire(), "lcRetirePage"),
     lcPublish: k("lcPublish", levelSetCoarseWGSL.retire(), "lcPublishPage"),
   };
 }

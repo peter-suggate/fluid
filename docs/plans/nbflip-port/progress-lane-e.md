@@ -2052,3 +2052,26 @@ The coordinator ruled that the cap must conserve mass and exempt air and ballist
 
 **Verdict:** no-go at 1.5 ms. Not built. The X8 pair (about 0.2 ms at step 100, 0.4 at step 20, bit-identical) is
 the one measured exact win, should a smaller bar apply.
+
+## 2026-11-16: lcCouple and lcRetire at X8 (landed, exact)
+
+lcCouple and lcRetire now dispatch as lcAdvect does: eight 64-lane workgroups a C_ALL page (X8), one vertex a lane,
+the z plane lcPart. They were one 256-lane workgroup a page with a two-vertex loop (G1). The C kernels are
+latency-bound (each fits in one wave), so halving each lane's chain is the win. lcClear and lcPublish stay at G1.
+levelset-coarse.wgsl.ts's LC_GROUPS names each kernel's dispatch, and brick-fluid-stages.ts places them by it.
+
+**Gate, on a3cfa458:**
+- Frozen dam, the new tree's stages against HEAD's (frozenE, non-engine mode, `--time=8`). Bit-identical in set and
+  phi at steps 20 / 100 / 300 (bad 0, aborts 0).
+
+  | ms | step 20 | step 100 | step 300 |
+  |---|---|---|---|
+  | lcCouple, G1 → X8 | 0.41 → 0.26 | 0.37 → 0.27 | 0.41 → 0.25 |
+  | lcRetire, G1 → X8 | 0.57 → 0.38 | 0.63 → 0.40 | 0.56 → 0.33 |
+  | the pair's saving | 0.34 | 0.33 | 0.39 |
+
+- test:unit 1847 pass, 0 fail. GPU units 84 / 84. check:types: no narrow-band errors (lane-n's 3 only).
+- dam-300 (check slot, aborts 0): PASS. D8 4.32e5 / 3.14e5 / 3.01e5.
+
+The review doc's tier section records the churn: about 45% of width changes reverse within six steps. That is a
+quality signal as well as a cost one. Hysteresis stays parked.

@@ -31,7 +31,7 @@ import { ARGS, LIST } from "./brick-abi";
 import type { BrickDispatch, BrickKernel, BrickPlacement } from "./brick-kernel";
 import type { BrickStages, BrickStagesFactory } from "./brick-stages";
 import { fluidLayout } from "./fluid-grid.wgsl";
-import { LC_ADVECT_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { LC_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { NBF_PARTICLE_SETTINGS, nbfParticleSupported } from "./particles-formulas.wgsl";
 import { P_ARGS_RECORDS, particleKernels } from "./particles-kernels.wgsl";
@@ -56,7 +56,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // that hold a C page body (uAdvect, uTransfer, uKick, vGauge) run their 4h faces or tiles in their h pass.
   const both: BrickDispatch = tiered ? { indirect: ARGS.FC_G1 } : all;
   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
-  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: kernel === "lcAdvect" ? list(LIST.C_ALL, LC_ADVECT_GROUPS) : pages, z: 0, w: 0 }] : [];
+  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: list(LIST.C_ALL, LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
   // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });

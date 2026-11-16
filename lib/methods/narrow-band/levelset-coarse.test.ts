@@ -17,7 +17,7 @@ import { snapshot } from "./brick-readback";
 import { bringUpStages } from "./brick-stages";
 import { brickTransferKernels } from "./brick-transfer.wgsl";
 import { FT, FTF, fluidLayout } from "./fluid-grid.wgsl";
-import { LC_ADVECT_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { LC_ADVECT_GROUPS, LC_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { velocityKernels } from "./velocity-kernels.wgsl";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -737,7 +737,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       const before = new Uint32Array(await e.read("phi")), setBefore = new Uint32Array(await e.read("set"));
       W.phi = new Float32Array(before.slice().buffer); W.set = setBefore;
       const tally: Tally = {}, setWant = new Map<number, number>(), want = oracle(W, tally, setWant);
-      await e.run([{ kernel: kernels[name], dispatch: name === "lcAdvect" ? listX8 : listC }]);
+      await e.run([{ kernel: kernels[name], dispatch: LC_GROUPS[name] === "X8" ? listX8 : listC }]);
       const after = await e.read("phi"), af = new Float32Array(after.buffer), setAfter = new Uint32Array(await e.read("set"));
       assert.equal(setAfter[H.FAIL], 0, `${name}: FAIL ${setAfter[H.FAIL]} info ${setAfter[H.FAIL_INFO]}`);
       let setBad = 0, gateBits = 0; const setReport: string[] = [];
