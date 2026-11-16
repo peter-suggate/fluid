@@ -1618,3 +1618,31 @@ times.
   watchdog fired at 08:25:05.
 - **Suggestion to the coordinator:** run heavy probes in `timing` mode only, as now required, and cap `check` at one
   process while the machine is unstable.
+
+**M5: the all-h hydrostatic peak, parked as a side defect for E (2026-11-17).** Probe: the rigid-hydrostatic tank at
+h = 0.025 (32³, approved for validation), no body, 1–15 steps, `tools/nbflip-rigid-gates.ts --no-bodies` in lane P's
+scratch tree.
+- **Tiered (brickFluidStages, the production set): peak |u| = 0.** That holds at steps 0–3, with no liquid face above
+  0.01 m/s. The dam runs this set.
+- **All-h (fluidStagesAt(false)), reached only through a scratch-only env switch in brick-method.ts:** peak |u| is
+  0.1634 = g·dt from step 1 on, and 0.0817 = g·dt/2 at step 0.
+  - About 450 faces, all of them y-faces in bottom-row bricks (by = 0), in consecutive y pairs. For example, brick
+    (1,0,4) has 52 faces at each of y3 and y4.
+  - US ≈ 0 on those faces (|US| ≤ 0.001), so they are left unprojected (U = US + g·dt with no pressure gradient), not
+    kicked wrong.
+  - The cells' phi FLAGS are **0x40** (OWNER_H without OPEN) and **0xc1** (OPEN | OWNER_H | 0x80), with φ < 0.
+  - Suspicion: all-h cells that hold liquid but are not OPEN, or carry the 0x80 bit, get no pressure row, while F's
+    kick still adds g·dt. That points to the all-h class or bootPhi flag path, not the projection.
+- **Not the cause:** select rewrites of the owner helpers' dynamic writes (nbFaceInLattice `hi[a]+=1`, nbFacePlane and
+  nbFaceU `e[a]=1`, census ncFace) changed nothing. They are not landed, and E's sweep covers those sites.
+- **Who runs all-h stages today, from a grep of main at ae68f6fd:** nothing runs the all-h fluid set.
+  - `fluidStages` / `fluidStagesAt(false)` has no importer outside brick-fluid-stages.ts.
+  - brick-wide-dam, brick-particle-banks, brick-initial and brick-region-heat use `fluidStagesAt(true)`. levelset-coarse,
+    levelset-release and brick-set-tiers pass `tiered: true`.
+  - The all-h *bring-up* set (bringUpStages: uGravity with the projection, no particles) runs in bodies-stage,
+    brick-census-x8, brick-engine, brick-owner, pressure-mgpcg, brick-census-dam, brick-census, brick-transfer,
+    brick-transfer-dam, brick-set-tiers and parity/composite-fixture. Its static boxes test rest through the same
+    operator and projection, which argues against a projection defect.
+  - Conclusion: no current baseline runs the defective path. Revisit it before any test or scene adopts
+    fluidStagesAt(false).
+- **Regression:** the gate tool's no-body tiered hydrostatic run must keep peak |u| < 0.01 on wall faces.
