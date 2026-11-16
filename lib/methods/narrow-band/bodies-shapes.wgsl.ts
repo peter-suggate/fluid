@@ -12,7 +12,7 @@
  * refuses them through pbBodyShapeSupported. */
 import { sceneShapeWgsl } from "../../core/scene-shape";
 import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
-import { solidBoxCutWGSL } from "../../core/solid-cuts";
+import { RIGID_BODY_CUT_ATLAS_WIDTH, solidBoxCutWGSL } from "../../core/solid-cuts";
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 import { SCENE_SHAPE_TABLE } from "../../core/scene-shape";
 
@@ -28,6 +28,25 @@ export interface PbBodySource {
   readonly frame: string;
   /** vec3f: the cell size per axis (m) (the old umSolidParams.cellGravity.xyz and params.hDt.xyz). */
   readonly h: string;
+  /** A WGSL function `(body:u32)` the kernel defines to latch a FAIL (a brick kernel: nbFail(NB_FAIL_UNSUPPORTED, ...)).
+   * The module calls it when a body's cut header is out of range (pbCutHeaderValid), and then applies no cut. */
+  readonly cutFail: string;
+}
+
+/** The most cuts one body may carry: the atlas texels after the per-body headers, three a cut. Every loop over a body's
+ * cuts is bounded by it on the GPU, and pbCheckCutAtlas holds the host to it before an upload. */
+export const PB_MAX_CUTS = Math.floor((RIGID_BODY_CUT_ATLAS_WIDTH - GPU_RIGID_BODY_CAPACITY) / 3);
+
+/** Host check of a packRigidBodyCutAtlas atlas before it is uploaded for `count` bodies: each header names whole cuts
+ * that lie in the atlas past the headers, at most PB_MAX_CUTS of them. Throws on the first bad header. */
+export function pbCheckCutAtlas(atlas: Float32Array, count: number): void {
+  if (!(Number.isInteger(count) && count >= 0 && count <= GPU_RIGID_BODY_CAPACITY)) throw new Error(`bodies-shapes: ${count} bodies exceed the rigid capacity ${GPU_RIGID_BODY_CAPACITY}`);
+  if (atlas.length !== 4 * RIGID_BODY_CUT_ATLAS_WIDTH) throw new Error(`bodies-shapes: the cut atlas holds ${atlas.length / 4} texels, not ${RIGID_BODY_CUT_ATLAS_WIDTH}`);
+  for (let i = 0; i < count; i++) {
+    const first = atlas[4 * i]!, n = atlas[4 * i + 1]!;
+    if (!Number.isInteger(n) || n < 0 || n > PB_MAX_CUTS) throw new Error(`bodies-shapes: body ${i} has ${n} cuts (at most ${PB_MAX_CUTS})`);
+    if (n > 0 && (!Number.isInteger(first) || first < GPU_RIGID_BODY_CAPACITY || first + 3 * n > RIGID_BODY_CUT_ATLAS_WIDTH)) throw new Error(`bodies-shapes: body ${i}'s ${n} cuts at texel ${first} leave the atlas`);
+  }
 }
 
 /** The static solid, as the five functions the kernel defines (E's solidStamp functions, A7). Face functions take the
@@ -88,10 +107,20 @@ fn pbTraceWorld(p:vec3f)->vec3f{let h=${H};let f=${F};return vec3f(f.x+p.x*h.x,f
 fn pbQuatRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn pbBodyLocal(i:u32,world:vec3f)->vec3f{let b=${B}[i];return pbQuatRotate(vec4f(b.orientation.x,-b.orientation.yzw),world-b.positionShape.xyz);}
 fn pbBodyNear(i:u32,world:vec3f,margin:f32)->bool{let b=${B}[i];return b.positionShape.w<0.0||distance(world,b.positionShape.xyz)<=b.dimensions.w+margin;}
-// umApplyBodyCuts (1673-1681): the atlas header texel i is (first texel, cut count); three texels a cut.
+const PB_MAX_CUTS:u32=${PB_MAX_CUTS}u;
+const PB_CUT_ATLAS_WIDTH:u32=${RIGID_BODY_CUT_ATLAS_WIDTH}u;
+// A cut header names whole cuts inside the atlas past the headers, at most PB_MAX_CUTS (pbCheckCutAtlas on the host). The
+// test is on the floats, so a negative or huge count fails before any conversion.
+fn pbCutHeaderValid(header:vec4f)->bool{
+ if(header.y==0.0){return true;}
+ return header.y>0.0&&header.y<=f32(PB_MAX_CUTS)&&header.x>=f32(PB_BODY_CAPACITY)&&header.x+3.0*header.y<=f32(PB_CUT_ATLAS_WIDTH);}
+// umApplyBodyCuts (1673-1681): the atlas header texel i is (first texel, cut count); three texels a cut. An out-of-range
+// header latches the kernel's FAIL and applies no cut; the loop is bounded by PB_MAX_CUTS either way.
 fn pbApplyBodyCuts(i:u32,local:vec3f,distance:f32)->f32{
  let header=${C}[i];var result=distance;
- for(var k=0u;k<u32(header.y);k++){
+ if(!pbCutHeaderValid(header)){${src.cutFail}(i);return result;}
+ let n=min(u32(header.y),PB_MAX_CUTS);
+ for(var k=0u;k<n;k++){
   let at=u32(header.x)+3u*k;let center=${C}[at].xyz;
   let extent=${C}[at+1u].xyz;let q=${C}[at+2u];
   result=max(result,-solidBoxCutDistance(local,center,extent,q));

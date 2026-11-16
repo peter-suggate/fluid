@@ -22,7 +22,8 @@ import { fluidRigidBoundaryWGSL } from "../../core/fluid-rigid-boundary.wgsl";
 import { applySolidBoxCuts, packRigidBodyCutAtlas, solidBoxCutWGSL, type SolidBoxCut } from "../../core/solid-cuts";
 import { quatRotate } from "../uniform/uniform-body-tile-bound";
 import { wgslFunction } from "../../../tools/nbflip-parity-extract";
-import { pbBodyCoupleWGSL, pbBodyShapesWGSL, pbBodyStampWGSL, PB_SUPPORTED_SHAPE_CODES } from "./bodies-shapes.wgsl";
+import { pbBodyCoupleWGSL, pbBodyShapesWGSL, pbBodyStampWGSL, pbCheckCutAtlas, PB_MAX_CUTS, PB_SUPPORTED_SHAPE_CODES } from "./bodies-shapes.wgsl";
+import { RIGID_BODY_CUT_ATLAS_WIDTH } from "../../core/solid-cuts";
 import { parityGPU, prng, runParity, ulpCompare, withParityDevice } from "./parity/harness";
 
 const N = 16;
@@ -119,7 +120,9 @@ function cutsFromStorage2(text: string): string { return text.includes("umSolidB
 
 const NEW_STUBS = /* wgsl */`
 ${WORLD.replace("BODIES_NAME", "pbBodies").replace("CUTS_NAME", "pbCuts").replace("array<UMRigidBody,24>", "array<PBRigidBody,24>")}
-${pbBodyShapesWGSL({ bodies: "pbBodies", count: `${BODIES.length}u`, cuts: "pbCuts", frame: `vec3f(${FRAME.join(",")})`, h: `vec3f(${H})` })}
+${pbBodyShapesWGSL({ bodies: "pbBodies", count: `${BODIES.length}u`, cuts: "pbCuts", frame: `vec3f(${FRAME.join(",")})`, h: `vec3f(${H})`, cutFail: "tCutFail" })}
+// The fixture's cut headers are valid (pbCheckCutAtlas in io()); the cut-header test below checks the latch.
+fn tCutFail(i:u32){}
 ${pbBodyStampWGSL({ solidAt: "tStaticSolidAt", cellOpen: "tStaticCellOpen", cellKind: "tStaticCellKind", faceOpen: "tStaticFaceOpen", faceBoxed: "tStaticFaceBoxed" })}
 ${pbBodyCoupleWGSL}
 // The static world as E's hooks give it: voxels only, no terrain, no boundary record.
@@ -144,8 +147,45 @@ const newStamp = (mask: string) => ({ prelude: NEW_STUBS, body: /* wgsl */`_=pbC
   put(o+2u+a,pbStampFace(c,a,m,frac,pbStampCell(n,mn)));put(o+5u+a,pbStampFaceVelocity(c,a,m));}` });
 
 function io() {
-  return { inp: new Uint32Array(4), aux: voxels(), extra: { 3: records(BODIES), 4: packRigidBodyCutAtlas(BODIES.map(b => ({ cuts: b.cuts }))) } };
+  const atlas = packRigidBodyCutAtlas(BODIES.map(b => ({ cuts: b.cuts })));
+  pbCheckCutAtlas(atlas, BODIES.length);
+  return { inp: new Uint32Array(4), aux: voxels(), extra: { 3: records(BODIES), 4: atlas } };
 }
+
+/** Four cut headers: valid (one cut), none, a count over PB_MAX_CUTS, and cuts running off the atlas end. */
+function badAtlas(): Float32Array {
+  const a = packRigidBodyCutAtlas([{ cuts: BODIES.find(b => b.cuts)!.cuts! }, {}, {}, {}]);
+  a.set([24, 1e6], 8); a.set([RIGID_BODY_CUT_ATLAS_WIDTH - 1, 3], 12);
+  return a;
+}
+
+test("bodies-shapes: the host refuses a cut header the GPU loop could not bound", () => {
+  assert.equal(PB_MAX_CUTS, Math.floor((RIGID_BODY_CUT_ATLAS_WIDTH - 24) / 3));
+  const good = packRigidBodyCutAtlas([{ cuts: BODIES.find(b => b.cuts)!.cuts! }, {}]);
+  pbCheckCutAtlas(good, 2);
+  const bad = badAtlas();
+  pbCheckCutAtlas(bad, 2);
+  assert.throws(() => pbCheckCutAtlas(bad, 3), /body 2 has 1000000 cuts/);
+  const off = Float32Array.from(bad); off.set([0, 0], 8);
+  assert.throws(() => pbCheckCutAtlas(off, 4), /body 3's 3 cuts at texel 2047 leave the atlas/);
+  assert.throws(() => pbCheckCutAtlas(good, 25), /exceed the rigid capacity/);
+});
+
+test("bodies-shapes: an out-of-range cut header latches the kernel's FAIL and applies no cut", { skip: !parityGPU }, async () => {
+  const prelude = /* wgsl */`
+${WORLD.replace("BODIES_NAME", "pbBodies").replace("CUTS_NAME", "pbCuts").replace("array<UMRigidBody,24>", "array<PBRigidBody,24>")}
+${pbBodyShapesWGSL({ bodies: "pbBodies", count: "4u", cuts: "pbCuts", frame: "vec3f(0)", h: "vec3f(1)", cutFail: "tFail" })}
+fn tFail(i:u32){outp[4u+i]=1u;}`;
+  await withParityDevice(async device => {
+    const out = await runParity(device, { prelude, body: "_=pbBodies[0];put(t,pbApplyBodyCuts(t,vec3f(0.05,0.06,0.0),-1.0));" },
+      { inp: new Uint32Array(4), aux: new Uint32Array(4), extra: { 3: records(BODIES), 4: badAtlas() }, threads: 4, outWords: 8 });
+    const d = new Float32Array(out.buffer);
+    assert.deepEqual([...out.subarray(4)], [0, 0, 1, 1], "FAIL latched for the over-count and off-atlas headers only");
+    // The point is the cut box's centre, inside the body (distance -1): the valid cut carves it out to +0.05.
+    assert.ok(Math.abs(d[0]! - 0.05) < 1e-6, `the valid header's cut applies (${d[0]})`);
+    assert.deepEqual([d[1], d[2], d[3]], [-1, -1, -1], "no cut for an empty or refused header");
+  });
+});
 
 test("bodies-shapes: the stamped shape codes are the table's but the rounded plate", () => {
   assert.deepEqual([...PB_SUPPORTED_SHAPE_CODES].sort(), [0, 1, 2, 3, 4]);
