@@ -1738,3 +1738,33 @@ The outputs are the same at all three steps (set, vel, fcell, fdep).
 - No 00000206 abort was logged. The round's count of 1 was the log query matching its own command line.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{ut,us}.
+
+## Vertex owner mask (FC_OWN): parked, net 0.56 ms at step 100
+
+**Prototype (tree-om):**
+- FC_OWN is appended to fcell: 64 words a slot, a 4-bit authority code per vertex. The code is the walk's candidate tile k, or 8 for F's own vertex.
+- lResolveW writes it as the first placement of move, boot, kick.force and kick.seed. It is lResolve plus the code store.
+- The level-set readers (lAdvect, lUnion, lPublish, lResolve, lcAdvect, lcCouple, lcRetire, lcClear, lcPublish) read the code in place of the vertex walk.
+
+**Frozen outputs:** the same at steps 20, 100 and 300, for every kernel.
+
+**Frozen timings (ms, old → new; lResolve is placed 3 times a step, lResolveW is timed against the lResolve it replaces):**
+
+| step | lResolveW | lResolve ×3 | lAdvect | lcAdvect | lUnion | lcCouple | lcClear | lcRetire | lPublish | lcPublish | net |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 20 | 0.62 → 0.70 | 0.74 → 0.43 | 1.54 → 1.50 | 0.80 → 0.76 | 0.80 → 0.58 | 0.68 → 0.50 | 0.30 → 0.15 | 0.62 → 0.78 | 0.53 → 0.49 | 0.08 → 0.01 | −1.4 |
+| 100 | 0.62 → 0.76 | 0.48 → 0.39 | 1.85 → 1.78 | 1.15 → 1.31 | 0.96 → 0.89 | 0.73 → 0.56 | 0.20 → 0.24 | 0.85 → 0.63 | 0.36 → 0.28 | 0.06 → 0.05 | −0.56 |
+| 300 | 0.23 → 0.32 | 0.29 → 0.33 | 0.88 → 0.81 | 0.81 → 0.76 | 0.54 → 0.45 | 0.35 → 0.54 | 0.12 → 0.12 | 0.54 → 0.43 | 0.23 → 0.15 | 0.07 → 0.03 | −0.03 |
+
+The W knockout bound was 2.2 ms at step 100. The mask recovers about a quarter of it:
+- lResolveW still walks every vertex, and pays for the store.
+- The readers' walks were partly hidden behind their φ loads.
+
+**Verdict:** below the 1.2 ms landing bar, so it is parked. dam-300 passed. The levelset-coarse GPU tests failed because they dispatch readers without a writer, and FC_OWN zero decodes as candidate 0.
+
+**A hazard for any revival:** the engine's part 2 runs setMarkPages, which allocates and releases slots and writes CMASK, between rebin and levelSet. So move's codes could be stale for levelSet's readers.
+- levelSet would need its own writer before lAdvect.
+- The empty code would need to mean "walk".
+- A staleness audit (re-walk and count disagreements) would be required before landing.
+
+Patch: ~/code/me/fluid-scratch/lane-f/patches/owner-mask-om.diff. Logs: ~/code/me/fluid-scratch/lane-f/logs/om.
