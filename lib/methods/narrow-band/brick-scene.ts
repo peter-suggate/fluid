@@ -80,6 +80,9 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // bricks would cut a brick and a 4h tile: that needs solidStamp's cut slots.
   const cells = sceneLatticeDimensions(scene), lattice = cells, paged = sceneFluidLatticeDimensions(scene);
   if (cells.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
+  // The census and the C level set run whole 32^3 pages (setCensus, levelset-coarse 0x4c430001). Padding the lattice to
+  // whole pages needs F's and P's walls at the box rule's box instead of the lattice's (M3): until then, refused here.
+  else if (cells.some(n => n % 32 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole pages: padding to 32-cell pages needs F's and P's walls at the box (M3)`);
   const hs = [c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]];
   if (hs.some(h => Math.abs(h - hs[0]!) > 1e-9 * hs[0]!)) gaps.push(`cells are not cubic (${hs.map(h => h.toPrecision(6)).join(", ")} m)`);
   const fixed = uniformFixedStep_s(values.timeStep);

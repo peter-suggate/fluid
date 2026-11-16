@@ -215,6 +215,10 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     const dam64 = brickSceneSetup(sceneDocument(getSceneDefinition("minimal-power-dam-break-64")), { timeStep: "sixtieth" }).setup!;
     const extent = brickInitialExtent({ lattice: dam64.lattice, farPhi: dam64.farPhi, liquid: dam64.liquid, initial: dam64.initial });
     assert.ok(Math.abs(extent.cells - 94208) <= 0.01 * 94208, `extent ${extent.cells} cells`);
+    // A container that is whole bricks but not whole pages is refused at setup (the census and the C level set run
+    // whole 32^3 pages and would throw at creation), until the padding lands.
+    const slab = sceneDocument(getSceneDefinition("ceiling-slab-drop")); enabled.push(slab.sceneId!);
+    assert.match(brickSceneSetup(slab, { timeStep: "sixtieth" }).gaps.join(";"), /24x16x24 cells are not whole pages/);
   } finally { enabled.length = before; }
   // An authored scene keeps its pools exactly (no t unless it says).
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));

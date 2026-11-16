@@ -2423,3 +2423,27 @@ solidStamp now writes the hook itself. Two cells past the box give 0.
 - test:unit: 1889 pass, 0 fail.
 
 **The dam.** No scene binds the mask, so the dam's schedule and kernel text are unchanged.
+
+## 2026-11-17: setup refuses a container that is not whole pages (landed)
+
+**The gap.** brick-scene only checked that a container was whole bricks. A container that was whole bricks but not
+whole 32-cell pages passed setup, and then failed at creation:
+- brickCensusKernels threw "the lattice is not whole pages";
+- levelset-coarse latched 0x4c430001.
+
+This affects 45 of the 69 pools-and-padding batch scenes. Examples are the 16³ ladders, 24×16×24, 32×16×32,
+64×48×64, cm12 figures 2 and 3 at 128×128×8, ocean-seiche, and power-droplet-240.
+
+Setup now refuses them with the gap "not whole pages: padding to 32-cell pages needs F's and P's walls at the box
+(M3)". This was the coordinator's ruling: setup has to refuse what creation would throw on. A CPU regression checks
+ceiling-slab-drop.
+
+**The padding route (approved by the coordinator).** The storage lattice is padded to whole pages, as the old engine
+does, and the box rule closes the cells past the container.
+- The layout and the static hooks get a `box`, which defaults to the lattice so the dam's text stays byte-identical.
+- F's particle clamp and level-set walls, and P's pressure wall faces, switch their wall planes to it.
+- A wall appears exactly once, at the box, with no second wall at the storage edge.
+- The shared regression is a 24×16×24 dam padded to 32³. Its liquid stays inside the box, and its volume matches
+  the unpadded behaviour.
+
+**Gates.** check:types: lane-n's 3 only. test:unit: 1889 pass, 0 fail.
