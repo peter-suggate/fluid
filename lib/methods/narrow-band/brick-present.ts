@@ -30,6 +30,7 @@
  * interim cost the ruling allows, and `shown` (a word a lattice brick) is part
  * of it. The copy is encoded outside the step's submissions.
  */
+import { brickLowerOn, brickModuleCode } from "./brick-lower";
 import { BrickLayout, PHI_AIR, boxWGSL, brickAbiWGSL } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
@@ -141,7 +142,7 @@ export class BrickPresentation {
     if (engine.layout.lattice.some(v => v % 8 !== 0)) throw new Error(`Brick presentation: the lattice ${engine.layout.lattice.join("x")} is not whole bricks`);
     const d = engine.device, B = GPUShaderStage.COMPUTE;
     const compile = async (label: string, code: string) => {
-      const module = d.createShaderModule({ label, code });
+      const module = d.createShaderModule({ label, code: brickModuleCode(label, code, brickLowerOn(engine.options.lowerDynamicWrites)) });
       const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
       if (errors.length) throw new Error(`Brick presentation WGSL (${label}): ${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("; ")}`);
       return module;

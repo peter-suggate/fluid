@@ -14,6 +14,7 @@
  * - Every dispatch is either indirect from a list or sized from a capacity.
  * - Nothing is sized from the lattice.
  */
+import { brickLowerOn, brickModuleCode } from "./brick-lower";
 import { brickDropDue, brickSourceRing, type BrickSources } from "./brick-source";
 import { brickSourceWords } from "./brick-source.wgsl";
 import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
@@ -74,6 +75,9 @@ export interface BrickEngineOptions {
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
+  /** The diagnostic lowering of dynamic vector-component writes (brick-lower.ts), off by default: true lowers and
+   * checks every module before its shader is created. Absent: NB_BRICK_LOWER=1 in the environment turns it on. */
+  readonly lowerDynamicWrites?: boolean;
   /** Lane P's rigid bodies (M5, A2-A6): setMark's body criterion, bodyStamp at the stamp stage, the ring's body header,
    * and the per-step host sync. Absent: no body kernel or binding (the dam's schedule and text). */
   readonly bodies?: BrickBodiesBinding;
@@ -390,15 +394,19 @@ export class BrickEngine {
       const edge = kernels.filter(k => STORAGE_EDGE_WALLS.some(re => re.test(k.code))).map(k => k.label);
       if (edge.length) throw new Error(`Brick engine: the lattice is padded past the box ${layout.box.join("x")}, but ${edge.join(", ")} wall at the storage edge (brickOwnerWGSL's box)`);
     }
+    // The diagnostic lowering switch (brick-lower.ts): on, every module is lowered and checked here, before any shader
+    // is created; off (the default), each is created from its text exactly as written.
+    const lower = brickLowerOn(options.lowerDynamicWrites), lowered = new Map(kernels.map(k => [k.code, brickModuleCode(k.label, k.code, lower)]));
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
     await Promise.all(kernels.map(async k => {
       const t0 = performance.now();
       let module = modules.get(k.code);
       if (!module) {
-        module = device.createShaderModule({ label: `nb-brick.${k.label}`, code: k.code }); modules.set(k.code, module);
+        const code = lowered.get(k.code)!;
+        module = device.createShaderModule({ label: `nb-brick.${k.label}`, code }); modules.set(k.code, module);
         const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
         if (errors.length) {
-          const lines = k.code.split("\n");
+          const lines = code.split("\n");
           throw new Error(`Brick engine: ${k.label} does not compile:\n${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}\n  ${lines[m.lineNum - 1]?.slice(Math.max(0, m.linePos - 80), m.linePos + 80) ?? ""}`).join("\n")}`);
         }
       }
@@ -418,7 +426,7 @@ export class BrickEngine {
   async run(placements: readonly BrickPlacement[]) {
     for (const k of new Set(placements.map(p => p.kernel))) {
       if (this.pipelines.has(k)) continue;
-      const module = this.device.createShaderModule({ label: `nb-brick.${k.label}`, code: k.code });
+      const module = this.device.createShaderModule({ label: `nb-brick.${k.label}`, code: brickModuleCode(k.label, k.code, brickLowerOn(this.options.lowerDynamicWrites)) });
       const errors = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
       if (errors.length) throw new Error(`Brick engine: ${k.label} does not compile:\n${errors.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("\n")}`);
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.device.createBindGroupLayout({ entries: bindGroupLayoutEntries(k.bindings) })] });
