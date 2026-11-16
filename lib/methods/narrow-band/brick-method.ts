@@ -8,8 +8,8 @@
  *   a scene with gaps, naming every gap.
  * The solver's info.nbEngine names the engine that ran, and for the old
  * engine under "auto", the first gap. The gaps are:
- * - the scene's (brick-scene.ts: M2 enables the dam only, without solids,
- *   bodies or sources);
+ * - the scene's (brick-scene.ts: the scenes BRICK_ENGINE_SCENES enables, the
+ *   dam and the first batch, without solids or bodies);
  * - the lanes': F's stages and P's solver register in their own files
  *   (brick-fluid-stages.ts, brick-pressure-solver.ts). The bring-up CG never
  *   registers.

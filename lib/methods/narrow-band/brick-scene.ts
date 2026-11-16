@@ -24,8 +24,16 @@ import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./b
 import { brickSources, type BrickSources } from "./brick-source";
 import { bootPhiAt, type BrickEngineOptions } from "./brick-engine";
 
-/** Scenes the brick engine takes at this milestone (M2: the dam). */
-export const BRICK_ENGINE_SCENES: readonly string[] = ["high-resolution-dam-break"];
+/** Scenes the brick engine takes: M2's dam, and the first enabled batch (lane E, 2026-11-17: 60 steps against the old
+ * engine from a frozen 0a81b19e, each brick |peak| and |final| volume drift within the old engine's worst repeat plus
+ * max(1%, its run noise), a clean smoke; progress-lane-e.md). Named fails stay off until their causes are fixed. */
+export const BRICK_ENGINE_SCENES: readonly string[] = [
+  "high-resolution-dam-break",
+  "minimal-power-dam-break-32", "minimal-power-dam-break-64", "falling-water-torus",
+  "nbflip-analytic-rest", "nbflip-analytic-standing-wave", "nbflip-analytic-dam-break", "nbflip-analytic-mound",
+  "power-droplet-64", "power-droplet-128", "power-fill-256-100",
+  "cm12-figure-5", "cm12-figure-6", "cm12-figure-9", "mass-conserving-figure-9-dam-break", "coarse-first-pool-impact",
+];
 
 export interface BrickSceneSetup {
   readonly sceneId: string;
@@ -62,7 +70,7 @@ export interface BrickSceneSetup {
 export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>): { setup?: BrickSceneSetup; gaps: string[] } {
   const gaps: string[] = [];
   const id = scene.sceneId ?? "(unnamed)";
-  if (!BRICK_ENGINE_SCENES.includes(id)) gaps.push(`scene "${id}" is not enabled on the brick engine (M2 enables ${BRICK_ENGINE_SCENES.join(", ")})`);
+  if (!BRICK_ENGINE_SCENES.includes(id)) gaps.push(`scene "${id}" is not enabled on the brick engine (brick-scene.ts BRICK_ENGINE_SCENES lists the ${BRICK_ENGINE_SCENES.length} it runs)`);
   const c = scene.container, f = scene.fluid;
   if (c.walls === "none" || c.boundary === "free-space") gaps.push("an open world (no container walls) needs the moving window (M6)");
   if (c.shape === "sphere") gaps.push("a spherical container needs static solids (M3)");
