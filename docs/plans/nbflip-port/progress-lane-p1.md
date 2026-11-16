@@ -1588,3 +1588,33 @@ Iterations × slot cost come out 5.35 ms against 5.34. No-go.
 
 A 2 ms win needs about 2 fewer slots or a slot about 35% cheaper. The probes rule out the start and the sweep counts as
 the way to it.
+
+**The morning's GPU restarts, attributed (2026-11-17).** Sources:
+- IOGPUFamily "GPURestartBegin" lines;
+- the per-process Metal errors at each restart;
+- each node pid's first and last log line;
+- scratch file times.
+
+`fluid-gpu-run.sh` keeps no run log, so the commands behind the pids are inferred from the files written at those
+times.
+
+| restart | node pids with Metal errors (log span) | the runs then |
+|---|---|---|
+| 07:15:34, 07:15:36 | 51739 (07:14:40–07:15:36); 53955 (07:15:26–07:15:40); 54354 (from 07:15:34) | lane F's smoke round sm1 (falling-water-torus, `check`); lane E's r15 test-unit |
+| 07:45:00 (aborts, no restart) | 21676, 22311 | lane E `r16/pk`: sparse-cm12-long-dam-break, rc 77; lane F `gi` |
+| 07:47:02 | 27268 (07:46:41–07:47:02); 27497 (from 07:46:44) | lane E `r16/pk1`: sparse-cm12-long-dam-break, its jsonl last written 07:47:02, rc 77; lane F `gi/smoke-nbflip-analytic-standing-wave-1`, invalid with 1 abort |
+| 07:52:40 | 40051 (07:51:41–07:55:22); 43349 (07:52:39–07:52:41) | lane E `r16/pk3`: under-c, rc 77; lane F `gi` probes |
+| 07:55:22 | 40051; 50509 (07:55:19–07:55:24) | lane E `r16/pk4`: pd256-a, rc 77 (pk4.sh runs its checks with `&`); lane F `gi/probe-torus`, invalid with 2 aborts |
+| 08:03:43, 08:04:03 | 69660 (08:03:16–08:04:03); 70686 (08:03:42–08:03:46); 71583 (08:04:02–08:04:04) | 69660 is lane P's pbound dry run (`lane-p/runs/dry.jsonl` written 08:04:04); lane E `r16/ra` (dam-early, dam-own); lane F `gi/probe-torus-keep`, invalid with 2 aborts |
+
+- **The common pattern:** at every restart a second GPU process had started 1–8 s before, while another was mid-run.
+  Every lane E and F run above went through the runner's `check` mode, which admits up to 3 GPU processes at once.
+- **The cm12 restart (07:47:02):** one restart coincides with sparse-cm12-long-dam-break (rc 77), which is now banned.
+- **Lane P's part:** lane P's dry run was mid-run at both 08:03:43 and 08:04:03, with lane E's and F's runs starting
+  on top of it.
+- **What the timestamps cannot settle:** whether one process (cm12, or the old pbound's 853 MB save/restore) hung the
+  GPU on its own, or only concurrency did. Every restart had more than one GPU process in flight.
+- **The 08:24 panic (above)** followed the same pattern: pid 34018 began GPU work at 08:24:39 and WindowServer's
+  watchdog fired at 08:25:05.
+- **Suggestion to the coordinator:** run heavy probes in `timing` mode only, as now required, and cap `check` at one
+  process while the machine is unstable.
