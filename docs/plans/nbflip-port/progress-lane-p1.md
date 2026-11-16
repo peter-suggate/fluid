@@ -1646,3 +1646,14 @@ scratch tree.
   - Conclusion: no current baseline runs the defective path. Revisit it before any test or scene adopts
     fluidStagesAt(false).
 - **Regression:** the gate tool's no-body tiered hydrostatic run must keep peak |u| < 0.01 on wall faces.
+
+**Correction (2026-11-17): the "all-h hydrostatic peak" above was a readback bug in lane P's gate tool, not an engine
+defect.**
+- **The bug:** `tools/nbflip-rigid-gates.ts` indexed F slots at 512 words, but `BRICK_STRIDE` is 520. Every slot past 0
+  was read misaligned by 8·slot words. That produced the flags-0x40 "closed liquid" cells, with counts linear in z, and
+  the g·dt faces.
+- **With the stride fixed:** the only closed liquid cells are SKIRT bricks (outside the lattice) and the body-interior
+  cells of cut bricks.
+- **The remaining g·dt:** it sits on free-surface air faces, which the old filter counted as liquid because one vertex
+  was φ < 0. The gate now measures interior liquid faces only, with both cells liquid by centre φ.
+- **Not affected:** the stage-set survey above stands, but nothing needs revisiting.
