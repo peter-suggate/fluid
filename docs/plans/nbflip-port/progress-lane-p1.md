@@ -1336,3 +1336,63 @@ run. The profile column covers steps 18–23 (`--profile=13`).
 - **Verdict: no-go.** An exact flag cannot reach 0.5 ms.
 
 Neither lever passed its bar, so no gate round was run and nothing was landed. pSeed's runner-up stays parked.
+
+## 2026-11-16: swing C (seep-style redistance): the bound fails at step 300, so no build
+
+This is swing C of speed-of-light-review-2026-11-16.md. The coordinator's rule was to report the bound before any
+full build if the bound fails, and it fails. All runs used frozen states of the tiered dam with poolF 4913 at HEAD
+2d486b3d (tree `trees/hd4`). The tool was frozen-p `--seq`: lTiles..lPublish as one submit, timed as
+min-of-5 of (21 − 1 repeats) / 20. All runs returned rc 0, or rc 1 for the probe's expected NEAR2 DIFF.
+
+**Consumers of each word the family writes.**
+
+| writer | word | consumers | can a φ sweep produce it? |
+|---|---|---|---|
+| lTiles | FT_FLAGS OPEN, AIR_SEED, OCCUPIED | lDilate's sources; FTF_OPEN in uTransfer's and uExtend's heat trilinear; AIR_SEED in lClear and lcClear (levelset-coarse l.208) | no: these are tile flags of the cell corners, not distances |
+| lDilate r1 (+ lDilateC) | FT_DIST air-seed and occupied tile distances (reach 5); support pair (DB bits 12–13, DIST bit 12) | lClear's collar (air distance ≤ 4 tiles = 16 cells); extension support (fsSupport, fgTileSupported: umTileSupport); pDelta's anchor (occupied ≤ 3); lcTileFresh | no: Chebyshev tile distances up to 20 cells, past any ±6 band |
+| lDilate r2 | FT_DIST crossing tile distance → fgReach1 (≤ 2 tiles) and fgReach2 (≤ 3 tiles); FT_HA/HB/HN/H/T activity heat | reach1: fgDepth's fallback, pMassDepth, pSeed, pJoin, lUnion's bulk depth, lcRetire and lcCouple, uTransfer's vcFar, uExtend; reach2: lDistance, lPublish, lcRetire's bound metric; FT_T: pSeed's seed gate and residency (brick-residency l.59–61) | no: the reach is up to 12 cells and the heat is activity, not distance |
+| lClear | φ clearAir (16-cell far marker past the collar, buried negatives outside the seeds); FC_MASK crossing cells; FTF_CROSSING | next step's lAdvect (deep-air keep at φ ≥ 9 reads the 16 markers); lNear and lPublish (FC_MASK); lDilate r2 and lDilateC (FTF_CROSSING) | the crossing mask, yes (it is the cut test); the clear, no: it needs the collar |
+| lNear | FC_NEAR, the nearest crossing cell within ±5 (Euclidean on offsets, ties low) at reach-1 cells | lDistance; next step's lUnion crossing guard (nbfBulkDepth); lcRetire and lcCouple (lcBuildDistance, lcNearKnown); pJoin's join box | only by propagating a nearest-cut index through the sweeps (approximate: Jacobi ties and order differ). That changes the union guard and the C tier's build. |
+| lDistance | FC_DEPTH at reach-2 vertices: the distance to the nearest crossing cells' trilinear zeros; max(\|φ\|, 5) where none is found | fgDepth: pMove's merge, separation gate and surface shift, pSeed's site distance, uTransfer's near-surface face test (depth in −2..1.5), uExtend's wDepth | yes, as an eikonal distance, but only within the sweeps' reach |
+| lPublish | φ ← FC_DEPTH off the interface in reach 2; nbfFarSentinel past it | next step's lAdvect, the velocity and pressure φ reads, the C tier | yes within reach 2. Past it, the sentinel stays. |
+
+So the sweeps could replace only lNear, lDistance and lPublish. They would have to produce:
+- φ off the interface at reach-2 vertices;
+- FC_DEPTH at reach-2 vertices;
+- FC_NEAR at reach-1 cells, by nearest-index propagation, or lNear stays.
+
+lTiles, lDilate(C) and the clear part of lClear carry the old engine's band, activity, support and collar. Residency,
+seeding, extension and the C tier read them. Replacing them would redefine those rules, not redistance.
+
+**The bound.** Cost of a seep-style replacement:
+- The probe was `trees/swC`, lSweep:
+  - one 512-lane workgroup per F_ALL slot, with 10³ vertices staged through the ring;
+  - the cut-corner test (redistInit);
+  - two launches of 8 Jacobi Godunov sweeps.
+- It writes only the NEAR2 scratch. It has no ping-pong buffer between launches, no tier ownership, no FC_DEPTH or
+  sentinel stores and no nearest-index propagation.
+- So it is a lower bound on the real cost.
+
+All figures below are from the same run as the probe (ms):
+
+| step | lNear | lDistance | lPublish | sum | lSweep ×3 (init + 2) | bound with lNear removed | bound with lNear kept |
+|---|---|---|---|---|---|---|---|
+| 100 | 0.769 | 1.691 | 0.247 | 2.707 | 0.495 | **2.21** | **1.44** |
+| 300 | 0.508 | 1.065 | 0.149 | 1.722 | 0.343 | **1.38** | **0.87** |
+
+- A quieter run without the probe had lNear + lDistance + lPublish at 2.27 ms (step 100) and 1.55 ms (step 300).
+  That puts the step-300 bound at about 1.26 ms even with lNear gone.
+- The coordinator's family (lTiles, lDilate(C), lClear, lNear, lDistance, lPublish) is 3.42 / 2.43 ms in the quiet
+  run. Its non-replaceable part is 1.15 / 0.89 ms.
+
+**Verdict: no-go before the build.**
+- The bound fails the 1.5 ms bar at step 300 even in the most favourable case: FC_NEAR dropped, which itself changes
+  the union guard, pJoin and the C tier.
+- With lNear kept, it fails at both steps.
+- The swing's premise (2.8 ms replaceable, a 2-tile reach removed) does not hold. The 2-tile and 3-tile reaches come
+  from lDilate's crossing distance, which reach1 and reach2 consumers across five files read, not from
+  redistance's ±5 walk.
+
+A smaller lever does exist: lDistance alone is 1.0–1.7 ms. Its cost is the per-(vertex, nearest cell) trilinear-zero
+distance with up to 8 candidates per vertex. Making it cheaper while keeping its semantics is a lane F/E item. I did
+not pursue it.
