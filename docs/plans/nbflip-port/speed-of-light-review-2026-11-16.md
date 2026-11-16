@@ -85,6 +85,57 @@ Particles cost about 12 ms for 340–640k records, or about 25 ns a record. §2 
 - **Go/no-go (cheap, from snapshots):** the per-step migration fraction and the per-brick record histogram. Then
   price the fused kernel with §2's staged costs.
 
+**Result (lane E, 2026-11-16): no-go.**
+
+How it was measured:
+- Frozen tiered dam on tree 3090d99e, with no Metal aborts.
+- One pMove ran from each snapshot, and the census was read from the records it moved and filed.
+
+| census | step 20 | step 100 | step 300 |
+|---|---|---|---|
+| live records | 388k | 443k | 374k |
+| records leaving their brick in a step | 0.90 | 0.39 | 0.12 |
+| records leaving their cell in a step | 1.00 | 0.98 | 0.76 |
+| travel in a step (cells): p50 / p99 / max | 6.3 / 10.1 / 19.0 | 1.9 / 5.8 / 8.7 | 0.6 / 1.4 / 5.4 |
+| records travelling at most 2 cells | 0.1% | 58% | 99.4% |
+| records a brick: mean / p99 / max | 629 / 2569 / 6421 | 568 / 2199 / 2932 | 845 / 1968 / 2274 |
+| records a non-empty cell: mean / p99 / max | 6.0 / 32 / 217 | 5.8 / 17 / 155 | 6.1 / 15 / 81 |
+| separation neighbours (the 2³ cells): mean / p99 | 69 / 289 | 53 / 133 | 51 / 95 |
+| records whose deposit stencil leaves their brick | 0.66 | 0.70 | 0.67 |
+| deposit nodes in other bricks | 0.24 | 0.26 | 0.24 |
+| bricks touched over bricks owning | 2.20 | 2.33 | 2.22 |
+
+The bound, using the frozen per-kernel times at steps 20 and 100:
+- **Staged move.** The brick-plus-apron velocity stage misses exactly when the move is expensive. At step 20, 99.9%
+  of records travel more than 2 cells, so the RK3 trace reads through the address chain anyway. Where it does hold,
+  it saves the address chain's 4.2 ns against a staged 2.9 ns a record: at most about 0.5 ms.
+- **Incremental migration.** Records leave their cell 76–100% of steps, and the separation needs cell runs. The most
+  migration can save is the rebin itself: pScan + pScatter + pTiles + pArgs, about 0.36 ms.
+- **Deposit fused into the move.** The deposit tests support on the new φ, and seeds deposit after the level set.
+  Fusing the deposit ahead of the level set is a physics deviation. Without the deviation, the only saving is the
+  record re-read, about 0.1 ms. The deposit's own cost is its liquid staging (0.65 of 1.0 ms), which fusion leaves
+  in place.
+- **pDelta fused with the next G2P** (the same q): about 0.2 ms.
+- **Fusion-only total:** about 0.6–1.0 ms. Even with the standalone staging levers added, the total is about 3 ms,
+  under the 4 ms bar.
+
+Standalone levers, measured with frozen2 in the timing slot:
+
+| lever | step 20 (ms) | step 100 (ms) | exactness | verdict |
+|---|---|---|---|---|
+| Staged separation in pMove: each workgroup stages its records' cells ±1 and their records as (position, mass) in 28 KB of workgroup memory | 3.09 → 7.00 | 3.92 → 8.29 | fmoved bitwise equal | parked: occupancy collapse, agreeing with lane P's sepF–I |
+| Staged pSeed (lever S): see below | main 2.62 → 1.65 | main 2.55 → 1.56 | counts and probe words equal; 1 ULP in site depth | approved; lands on its gate |
+
+Lever S, the staged pSeed:
+- A brick that can seed stages its tile gates, its 4h bits and its 9³ FC_DEPTH vertices once.
+- The count pass returns a site mask, so the write pass no longer re-tests each site.
+- uncovered and seam are evaluated only near the band.
+
+Counters at step 100:
+- pMove: occupancy 18%, ALU 41%, last-level-cache limiter 22%.
+- pSeed: occupancy 16–18%, ALU 25%, read bandwidth 1.7 GB/s, TLB miss rate 24%. pSeed is latency-bound on its
+  dependent lookups, which is the latency lever S removes.
+
 ### C. Seep-style redistance (bound about 2 ms, and removes the 2-tile reach)
 
 Replace lTiles, lDilate, lClear, lNear (±5 walk), lDistance and lPublish (2.8 ms) with the seep's redistInit plus 2
