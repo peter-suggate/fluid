@@ -84,6 +84,14 @@ fn pPresent(q:vec3f)->bool{
 }
 `;
 
+/** fgDepth's text (FG_DEPTH_WGSL) as psDepth, its corner and reach reads through pSeed's stage (lane E). */
+const PS_DEPTH_WGSL = (() => {
+  const at = FG_DEPTH_WGSL.indexOf("fn fgDepth(");
+  const body = FG_DEPTH_WGSL.slice(at, FG_DEPTH_WGSL.indexOf("\n}\n", at) + 3);
+  for (const x of ["if(!fgReach1(c))", "fgDepthVertex(c+vec3i(corner))"]) if (!body.includes(x)) throw new Error(`particles: fgDepth changed shape (${x})`);
+  return body.replace("fn fgDepth(", "fn psDepth(").replace("if(!fgReach1(c))", "if(!psReach1(c))").replace("fgDepthVertex(c+vec3i(corner))", "psDepthVertex(c+vec3i(corner))");
+})();
+
 export function particleKernels(L: BrickLayout, F: FluidLayout) {
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
@@ -382,70 +390,122 @@ fn pUncovered(c:vec3i)->bool{
  for(var k=0u;k<27u;k++){let r=fgRun(c+nbNeighbourOffset(k));if(r.y>r.x){return false;}}
  return true;
 }
-// The seeds of cell c (count only, or write from at): the number seeded.
-fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
- if(!nbInLattice(c)){return 0u;}
- // R1: no seed in a 4h-owned tile (the old seedSite seeds deep sites there too; a stated deviation, the user's
- // aggressive fine-tile retirement): the 4h φ carries a 4h tile's liquid.
- if(!fgCellOwned(c)){return 0u;}
- // The re-entry seed (cfg.w = 2, part 1 after the head's transfer, before pMove; lane E, the coordinator's ruling
- // 2026-11-16): only a tile the head refined, h-owned now and 4h-owned at the last rebin (TILE_OCC bit 16 + tile,
- // pScan's, the bit pMove retires by), so it has records on its first h step, as the old engine's 4h-held records.
- let re=cfg.w==2u&&!write;
- if(cfg.w==2u){let s=fgSlot(c);if(s==NB_NONE||((nbSetWord(NB_S_TILE_OCC+s)>>(16u+fgTileOf(c)))&1u)==0u){return 0u;}}
- // The re-entry seed's gate probe counters (H.REENTRY_CELLS..., the count pass only).
+// The staged seed (lane E, 2026-11-16): the workgroup stages its brick's tile gates (sTileOk: owned, and the
+// re-entry's TILE_OCC bit or the reach and the heat), the 4^3 tiles' 4h bits about it (pSeam's) and the FC_DEPTH
+// of its 9^3 vertices (fgDepth's corners of every centre and site in the brick), once; pSeedCell reads them, the
+// same words through the same arithmetic (psDepth is fgDepth's text, its vertex and reach reads staged). The count
+// pass keeps each cell's accepted sites (a bit a site), so the write pass writes those, not re-deciding them.
+var<workgroup> sTileOk:array<u32,8>;
+var<workgroup> sTileReach:array<u32,8>;
+var<workgroup> sTileHeat:array<f32,8>;
+var<workgroup> sCoarse:array<u32,64>;
+var<workgroup> sDepth:array<f32,729>;
+var<workgroup> sGo:u32;
+var<private> psO:vec3i;
+var<private> psStaged:bool=false;
+fn psIn(c:vec3i)->bool{return all(vec3u(c-psO)<vec3u(8u));}
+fn psReach1(c:vec3i)->bool{if(psStaged&&psIn(c)){return sTileReach[fgTileOf(c)]!=0u;}return fgReach1(c);}
+fn psDepthVertex(v:vec3i)->f32{let r=vec3u(v-psO);if(psStaged&&all(r<vec3u(9u))){return sDepth[r.x+9u*(r.y+9u*r.z)];}return fgDepthVertex(v);}
+` + PS_DEPTH_WGSL + /* wgsl */`
+fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInLattice(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
+fn psSeam(c:vec3i)->bool{
+ for(var k=0u;k<27u;k++){if(psCoarse(c+nbNeighbourOffset(k))){return true;}}
+ return false;
+}
+// A site's depth: the re-entry's φ, else fgDepth's (staged).
+fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site);}return psDepth(site);}
+// The cell's gates and depth: x 1 where the cell may seed (0 none), y the centre depth d, z the heat.
+fn psCellGate(c:vec3i,re:bool)->vec3f{
+ let none=vec3f(0.0);
+ if(!nbInLattice(c)){return none;}
+ // The tile's gates (sTileOk): R1's owned tile; the re-entry's refined tile (TILE_OCC bit 16 + tile), else the reach
+ // and the heat (pHeat(centre) is the tile's T).
+ let t=fgTileOf(c);if(sTileOk[t]==0u){return none;}
  if(re){atomicAdd(&nbSet[NB_H_REENTRY_CELLS],1u);}
- // The re-entry seed fills the tile's band (coordinator 2026-11-16; our mechanism, not the old seedSite's): the
- // last level set's words (FT_DIST's reach, FC_DEPTH, FT_T's heat) were the 4h authority's there (a counter run:
- // 18% of the band cells by φ failed FC_DEPTH's band, 7% the heat, FT_T 0 where R1 retired the records that
- // carried it), so its band and its sites' depth are the φ the head's transfer stored (fgPhiAt: the 4h corners'
- // trilinear), no heat gate (the census refining the tile is the signal), and its records take the need rule's
- // trigger heat (HEAT4's 2), the heat a triggered tile gets.
  let reentry=cfg.w==2u;
- let centre=vec3f(c)+0.5;var heat=2.0;var d=0.0;
- if(reentry){d=fgPhiAt(centre);heat=max(pHeat(centre),2.0);}
- else{
-  if(!fgReach1(c)){return 0u;}
-  heat=pHeat(centre);if(!(heat>0.0)){return 0u;}
-  d=fgDepth(centre);
- }
- if(!nbfSeedCellDepthOk(d)){if(re){atomicAdd(&nbSet[NB_H_REENTRY_NO_DEPTH],1u);}return 0u;}
+ let centre=vec3f(c)+0.5;var heat=sTileHeat[t];var d=0.0;
+ if(reentry){d=fgPhiAt(centre);heat=max(heat,2.0);}
+ else{d=psDepth(centre);}
+ if(!nbfSeedCellDepthOk(d)){if(re){atomicAdd(&nbSet[NB_H_REENTRY_NO_DEPTH],1u);}return none;}
+ return vec3f(1.0,d,heat);
+}
+fn psSalt(initial:bool)->u32{return select(select(nbRing(cfg.x,NB_RING_STEP)+1u,(nbRing(cfg.x,NB_RING_STEP)+1u)^0x80000000u,cfg.w==2u),0u,initial);}
+// The count pass: the accepted sites of cell c, a bit a site index j.
+fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
+ let re=cfg.w==2u;
+ let gate=psCellGate(c,re);if(gate.x==0.0){return 0u;}let d=gate.y;
+ let reentry=cfg.w==2u;
  let goal=nbSeedTarget(d);let mass=nbfSeedMass(d);
- var n0=0u;var held=0.0;var uncovered=true;
+ var n0=0u;var held=0.0;
  if(!initial){
   let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
   held=pCellMass(run,bank);if(held>=8.0){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
-  uncovered=pUncovered(c)||pSeam(c);
  }
- // The re-entry seed's sites are not the step's part 2 sites (a salt of its own).
- let salt=select(select(nbRing(cfg.x,NB_RING_STEP)+1u,(nbRing(cfg.x,NB_RING_STEP)+1u)^0x80000000u,cfg.w==2u),0u,initial);
- // The outer shell (a site above -1 cell) seeds only in an h owner's cell (seedSite: umOwnerAt(c).width == 1).
- let fine=fgCellOwned(c);
- var n=0u;
+ // uncovered (pUncovered || pSeam) only where nbfSeedSiteOk reads it (a shallow site, the reseed); a cell with its
+ // own records has one among its 27 (pUncovered false).
+ var uncovered=true;var known=initial;
+ let salt=psSalt(initial);
+ // The cell's own tile is h-owned (sTileOk): fgCellOwned(c).
+ let fine=true;
+ var mask=0u;
  for(var j=n0;j<goal;j++){
   if(!initial&&held+f32(j-n0)*mass>=8.0){continue;}
-  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=select(fgDepth(site),fgPhiAt(site),reentry);
+  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=psSiteDistance(site,reentry);
+  if(!known&&(distance>-1.0||d>-1.5)){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
   if(!nbfSeedSiteOk(distance,false,initial,d,1.0,uncovered,fine)){continue;}
-  if(write){
-   let u=fgSampleVel(site,0u,3u);
-   var p=Particle();p.position=vec4f(site,heat);p.velocity=vec4f(u,distance);
-   p.before=vec4f(u,nbParticleState(nbSeedFirst(),0.0));p=nbWithMass(p,mass);
-   if(at+n<NB_PCAP){parts[pAt(bank,at+n)]=p;}
-  }
+  mask|=1u<<j;
+ }
+ return mask;
+}
+// The write pass: cell c's accepted sites (mask) from at, in site order.
+fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
+ let reentry=cfg.w==2u;
+ let t=fgTileOf(c);let centre=vec3f(c)+0.5;var heat=sTileHeat[t];var d=0.0;
+ if(reentry){d=fgPhiAt(centre);heat=max(heat,2.0);}else{d=psDepth(centre);}
+ let mass=nbfSeedMass(d);let salt=psSalt(initial);
+ var n=0u;var m=mask;
+ while(m!=0u){
+  let j=firstTrailingBit(m);m&=m-1u;
+  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=psSiteDistance(site,reentry);
+  let u=fgSampleVel(site,0u,3u);
+  var p=Particle();p.position=vec4f(site,heat);p.velocity=vec4f(u,distance);
+  p.before=vec4f(u,nbParticleState(nbSeedFirst(),0.0));p=nbWithMass(p,mass);
+  if(at+n<NB_PCAP){parts[pAt(bank,at+n)]=p;}
   n++;
  }
- return n;
 }
 @compute @workgroup_size(256) fn pSeed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let bank=pSrc()^1u;let initial=cfg.w==1u;let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
  if(lid==0u){atomicStore(&sCount,0u);}
  if(lid<8u){atomicStore(&sTileSeeds[lid],0u);}
+ var o=vec3i(0);var slot=0u;
+ if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
+ psO=o;
+ if(lid<8u){
+  let c=o+4*vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
+  var ok=live&&nbInLattice(c)&&fgCellOwned(c);var reach=0u;var heat=0.0;
+  // The reach (psDepth's, any tile of the brick a site's floor lands in) whatever the tile's owner.
+  if(live&&nbInLattice(c)){reach=select(0u,1u,fgReach1(c));}
+  if(ok){
+   heat=fgTileHeat(c);
+   if(cfg.w==2u){ok=((nbSetWord(NB_S_TILE_OCC+slot)>>(16u+lid))&1u)!=0u;}
+   else{ok=reach!=0u&&heat>0.0;}
+  }
+  sTileOk[lid]=select(0u,1u,ok);sTileReach[lid]=reach;sTileHeat[lid]=heat;
+ }
  workgroupBarrier();
- var o=vec3i(0);var n=0u;
- if(live){
-  o=nbFOrigin(nbListSlot(NB_LIST_F_ALL,g));
+ if(lid==0u){var any=0u;for(var t=0u;t<8u;t++){any|=sTileOk[t];}sGo=any;}
+ let go=workgroupUniformLoad(&sGo)!=0u;
+ // Only a brick with a tile to seed stages its 4h bits and depth vertices (the re-entry reads no FC_DEPTH).
+ if(go){
+  if(lid<64u){let t=(o>>vec3u(2u))-vec3i(1)+vec3i(i32(lid&3u),i32((lid>>2u)&3u),i32(lid>>4u));sCoarse[lid]=select(0u,1u,fgCellCoarse(4*t));}
+  if(cfg.w!=2u){for(var j=lid;j<729u;j+=256u){sDepth[j]=fgDepthVertex(o+vec3i(i32(j%9u),i32((j/9u)%9u),i32(j/81u)));}}
+  workgroupBarrier();psStaged=cfg.w!=2u;
+ }
+ var n=0u;var masks=array<u32,2>(0u,0u);
+ if(go){
   for(var r=0u;r<2u;r++){
-   let c=o+nbLocalCoord(lid+256u*r);let m=pSeedCell(c,bank,initial,false,0u);n+=m;
+   let c=o+nbLocalCoord(lid+256u*r);let mk=pSeedCellMask(c,bank,initial);masks[r]=mk;let m=countOneBits(mk);n+=m;
    if(cfg.w==2u&&m>0u){atomicAdd(&sTileSeeds[fgTileOf(c)],m);}
   }
  }
@@ -453,7 +513,7 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
  workgroupBarrier();
  // The re-entry seed's probe counters (brick-abi.ts H.REENTRY_*): lane t < 8 tile t of the brick.
  if(cfg.w==2u&&live&&lid<8u){
-  let s=nbListSlot(NB_LIST_F_ALL,g);let c=o+4*vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
+  let s=slot;let c=o+4*vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
   if(nbInLattice(c)&&fgCellOwned(c)){
    if(fcLoad(FC_SLOT+s)!=nbFRec(s,NB_REC_KEY)+1u){atomicAdd(&nbSet[NB_H_REENTRY_FRESH],1u);}
    else if(((nbSetWord(NB_S_TILE_OCC+s)>>(16u+lid))&1u)!=0u){
@@ -471,7 +531,7 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
  workgroupBarrier();
  if(n==0u){return;}
  var at=sBase+off;
- for(var r=0u;r<2u;r++){at+=pSeedCell(o+nbLocalCoord(lid+256u*r),bank,initial,true,at);}
+ for(var r=0u;r<2u;r++){if(masks[r]!=0u){pSeedCellWrite(o+nbLocalCoord(lid+256u*r),bank,initial,masks[r],at);at+=countOneBits(masks[r]);}}
 }`);
 
   // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none.

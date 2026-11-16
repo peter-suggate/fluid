@@ -1853,3 +1853,70 @@ Results are exact up to compiler contraction: 1–2 ulp in 964 and 540 φ words.
   fill-the-gpu.
 
 The fgSampleVel fast path (a one-cell + apron on FC_UNIT, 9³) is lane F's. I reviewed the ABI and it rebases on this.
+
+## 2026-11-16: swing B (fused particle pipeline) is a no-go; the staged pSeed (lever S) lands
+
+**The profile baseline.** Steps 18–23, ms a step:
+
+| kernel | ms |
+|---|---|
+| pMove | 3.68 |
+| pSeed (1.83 launches) | 3.02 |
+| uTransfer | 2.12 |
+| pDeposit | 0.79 |
+| pDelta | 0.39 |
+| pJoin | 0.23 |
+| pLiquid | 0.21 |
+| pScan | 0.14 |
+| pScatter | 0.12 |
+| pTiles | 0.08 |
+
+**Knockouts** (frozen2, timing slot, steps 20 / 100):
+- pMove:
+  - 3.66 / 3.96 ms as is;
+  - without the separation 1.85 / 1.91;
+  - without the G2P sample 2.87 / 3.43.
+  - Heun, the merge, depth, heat and split each cost about 0.1–0.4 ms.
+- Main pSeed:
+  - 2.84 / 2.69 ms as is;
+  - without the write pass 1.46 / 1.75;
+  - without the per-site depth 1.32 / 1.03.
+- pDeposit: 0.99 / 1.00 ms, of which the liquid staging is 0.65.
+
+**Counters at step 100:**
+- pMove: occupancy 18%, ALU 41%, LLC limiter 22%.
+- pSeed: occupancy 16–18%, ALU 25%, read bandwidth 1.7 GB/s, TLB miss 24%. It is latency-bound on dependent lookups.
+
+**The census and the bound** are in the speed-of-light review, §4.B, with the table:
+- Records leave their brick 90% / 39% / 12% of steps (steps 20 / 100 / 300) and travel a median 6.3 cells at step 20.
+  The staged move apron therefore misses exactly when the move is expensive.
+- Fusion alone bounds at 0.6–1.0 ms. No-go.
+- Staged separation in pMove (each workgroup stages its records' cells ±1 and their records):
+  - exact, with fmoved bitwise equal;
+  - 3.09 → 7.00 ms at step 20 and 3.92 → 8.29 ms at step 100;
+  - 28 KB of workgroup memory collapses occupancy. Parked.
+
+**Lever S.** Each pSeed brick that has a tile to seed stages its tile gates and reach (8 tiles), its 4h bits (4³ tiles)
+and its 9³ FC_DEPTH vertices once. Nothing is staged in the re-entry launch.
+- psDepth is fgDepth's text with the staged vertex reader, and it throws if fgDepth's text changes shape.
+- The count pass returns a site mask a cell, and the write pass writes only the masked sites, in the same order and
+  at the same offsets.
+- uncovered is evaluated only where nbfSeedSiteOk reads it, and the seam test is evaluated near the band only.
+- Lane F reviewed it and approved.
+
+Exactness:
+- Seed counts and probe words 201–211 are identical. The re-entry seeds' multiset is equal.
+- Main seeds differ only by 1 ulp in velocity.w (the site depth) on about 36% of seeds: the compiler contracts the
+  same expression differently. An old-against-old run is equal.
+
+Frozen, on 3090d99e: main pSeed 2.62 → 1.65 ms at step 20 and 2.55 → 1.56 ms at step 100.
+
+**Gate** (tree d6ff2690 + S, against d6ff2690):
+- Units: 81 of 82 pass. The failure is levelset-release (GPU) "lcAdvect path kept deep air covered". It fails 2 of 3
+  runs on d6ff2690 itself, because the no-words lcAdvect writes a different vertex set each run. Lane F is bisecting
+  it: uCache's FC_UNIT or the staged lcAdvect.
+- dam-300: Overall PASS. D8 at 30-90 6.54e5 against 6.31e5; at 180-300 3.69e5.
+- Fenced 165-step runs, interleaved: medians 38.89 / 39.85 ms against 39.60 / 39.67 ms; means 42.82 / 43.23 against
+  44.13 / 45.03 ms.
+- Profile, steps 18–23: transfer and seeding 6.84 → 5.93 ms; window kernel mean 40.9 → 39.7 ms.
+- test:unit 1871/1871.
