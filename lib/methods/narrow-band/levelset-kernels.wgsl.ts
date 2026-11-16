@@ -56,11 +56,11 @@ const LS_WGSL = /* wgsl */`
 fn lDt()->f32{return nbRingF(cfg.x,NB_RING_DT);}
 fn lH()->vec3f{return vec3f(nbRingF(cfg.x,NB_RING_H));}
 // A vertex the level set stores: inside 0..N on every axis.
-fn lVertexIn(v:vec3i)->bool{return all(v>=vec3i(0))&&all(v<=NB_LATTICE);}
-fn lCellBelow(v:vec3i)->vec3i{return min(v,NB_LATTICE-vec3i(1));}
+fn lVertexIn(v:vec3i)->bool{return all(v>=vec3i(0))&&all(v<=NB_WALL_BOX);}
+fn lCellBelow(v:vec3i)->vec3i{return min(v,NB_WALL_BOX-vec3i(1));}
 fn lPhi1(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI1,v);}
 fn lMaskBit(c:vec3i)->bool{
- if(!nbInLattice(c)){return false;}
+ if(!nbInWallBox(c)){return false;}
  let s=fgSlot(c);if(s==NB_NONE){return false;}
  let l=nbLocal(c);return ((fcLoad(FC_MASK+16u*s+(l>>5u))>>(l&31u))&1u)!=0u;
 }
@@ -126,13 +126,13 @@ fn lCorners0(c:vec3i)->array<f32,8>{
 fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lPhi0(lBase+vec3i(i32(x),i32(y),i32(z))-vec3i(1));}
 ` + nbfPhiAdvectWGSL + /* wgsl */`
 // umWallWithin for the box: within reach cells of a wall plane along the axis.
-fn lWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_LATTICE[a]-reach;}
-fn lOnWall(v:vec3i)->bool{return any(v==vec3i(0))||any(v==NB_LATTICE);}
+fn lWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_WALL_BOX[a]-reach;}
+fn lOnWall(v:vec3i)->bool{return any(v==vec3i(0))||any(v==NB_WALL_BOX);}
 // The surface heat test for the cubic (umCubicAt, surfaceAdvection "balanced" at h): the incident tiles' max.
 fn lCubicAt(v:vec3i)->bool{
  var heat=0.0;
  for(var k=0u;k<8u;k++){
-  let c=v-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));if(!nbInLattice(c)){continue;}
+  let c=v-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));if(!nbInWallBox(c)){continue;}
   let i=fgTileAt(c,FT_SURF);if(i==NB_NONE){continue;}heat=max(heat,fcLoadF(i));
  }
  return heat<=1.5;
@@ -183,11 +183,11 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  let traced=nbfSurfaceTrace(foot,dt,h,wall);
  var travel=traced-foot;var q=traced;
  if(any(shift!=vec3f(0.0))){q=fgHeld(traced+shift);}
- let cell=min(vec3i(floor(q)),NB_LATTICE-vec3i(1));let f=q-vec3f(cell);
+ let cell=min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1));let f=q-vec3f(cell);
  var value=nbfCellTrilinear(lCorners0(cell),f);
  if(abs(value)<2.0&&lCubicAt(v)){
   lBase=cell;
-  let lowHeld=cell-vec3i(1)<vec3i(0);let highHeld=cell+vec3i(2)>NB_LATTICE;
+  let lowHeld=cell-vec3i(1)<vec3i(0);let highHeld=cell+vec3i(2)>NB_WALL_BOX;
   value=nbfCubicLimited(f,lowHeld,highHeld);
  }
  // umWallContact ("clip"): a wall vertex whose inner neighbour flows into the wall takes the departure held at it.
@@ -195,7 +195,7 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
   var contact=false;
   for(var k=0u;k<6u;k++){
    let a=k>>1u;let inward=select(1.0,-1.0,(k&1u)!=0u);
-   let on=select(v[a]==0,v[a]==NB_LATTICE[a],(k&1u)!=0u);if(!on){continue;}
+   let on=select(v[a]==0,v[a]==NB_WALL_BOX[a],(k&1u)!=0u);if(!on){continue;}
    var probe=p;probe[a]+=inward;
    let speed=fgSampleVel(probe,a,a+1u)[a];
    if(inward*speed>=-1e-6){continue;}
@@ -262,7 +262,7 @@ var<private> lHome:vec3i;
 // counts with heat 0 (the old engine's tiles outside the band: nbCoupleHeat reads their zero heat; lcCouple's rule).
 fn nbxCoupleHeat(tile:u32,surface:bool)->f32{
  let t=lHome+vec3i(i32(tile%3u),i32((tile/3u)%3u),i32(tile/9u))-vec3i(1);
- let c=4*t;if(!nbInLattice(c)){return -1.0;}
+ let c=4*t;if(!nbInWallBox(c)){return -1.0;}
  if(!surface){let i=fgTileAt(c,FT_THETA);if(i==NB_NONE){return select(-1.0,0.0,FG_TIERED);}return clamp(fcLoadF(i),0.0,1.0);}
  let i=fgTileAt(c,FT_SURF);
  var own=0.0;if(i!=NB_NONE){own=fcLoadF(i);}else if(!FG_TIERED){return -1.0;}
@@ -308,7 +308,7 @@ fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
   var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
   for(var k=0u;k<8u;k++){
    let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let cc=v+vec3i(bit)-vec3i(1);
-   if(!nbInLattice(cc)||fgSlot(cc)==NB_NONE){continue;}
+   if(!nbInWallBox(cc)||fgSlot(cc)==NB_NONE){continue;}
    let n=min(lBinCount(cc),8u);open++;held+=n;
    let high=bit!=vec3u(0u);
    heldHigh+=select(vec3u(0u),vec3u(n),high);openHigh+=select(vec3u(0u),vec3u(1u),high);
@@ -343,7 +343,7 @@ ${stagedHead(0)}
  let live=true;
  if(live){
   for(var r=0u;r<2u;r++){
-   let c=o+nbLocalCoord(lid+256u*r);if(!nbInLattice(c)){continue;}
+   let c=o+nbLocalCoord(lid+256u*r);if(!nbInWallBox(c)){continue;}
    let bit=1u<<fgTileOf(c);atomicOr(&wOpen,bit);
    let v=fgCorners(c);var low=v[0];for(var k=1u;k<8u;k++){low=min(low,v[k]);}
    if(low<=0.0){atomicOr(&wSeed,bit);}
@@ -604,7 +604,7 @@ ${stagedHead(0)}
  if(live){
   for(var r=0u;r<2u;r++){
    let l=lid+256u*r;let c=o+nbLocalCoord(l);
-   if(!nbInLattice(c)){continue;}
+   if(!nbInWallBox(c)){continue;}
    var low=3e38;var high=-3e38;
    for(var k=0u;k<8u;k++){let v=c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));let x=lCleared(v,fgPhi(v));low=min(low,x);high=max(high,x);}
    if(low<=0.0&&high>=0.0&&low<high){atomicOr(&wMask[l>>5u],1u<<(l&31u));atomicOr(&wCross,1u<<fgTileOf(c));}
@@ -630,13 +630,13 @@ ${stagedHead(0)}
   // cells of reach-1 tiles only (NONE elsewhere). Offsets are packed +8 in bytes. cfg.z is the y and z passes' loop
   // bound and a vector index: its range 0..2 is checked on the host (validateBrickStages), not clamped here.
   const lNearKernel = k("lNear", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, LS_WGSL.split("\n").filter(l => /lMaskBit|^ |^}/.test(l) || l.startsWith("fn lMaskBit")).join("\n")].join("\n") + /* wgsl */`
-fn lWord(region:u32,c:vec3i)->u32{if(!nbInLattice(c)){return NB_NONE;}let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fcLoad(region+fgCell(s,c));}
+fn lWord(region:u32,c:vec3i)->u32{if(!nbInWallBox(c)){return NB_NONE;}let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fcLoad(region+fgCell(s,c));}
 fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
 @compute @workgroup_size(256) fn lNear(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
  let pz=cfg.z;
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let c=o+nbLocalCoord(l);var out=NB_NONE;
-  if(nbInLattice(c)){
+  if(nbInWallBox(c)){
    if(pz==0u){
     for(var d=0;d<=5;d++){
      if(lMaskBit(c-vec3i(d,0,0))){out=u32(8-d);break;}
@@ -671,7 +671,7 @@ var<workgroup> sPairs:u32;
 var<workgroup> wFound:array<atomic<u32>,256>;
 fn dCell(p:vec3i,k:u32)->vec3i{return p-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
 fn dNear(c:vec3i)->u32{
- if(!nbInLattice(c)||!fgReach1(c)){return NB_NONE;}
+ if(!nbInWallBox(c)||!fgReach1(c)){return NB_NONE;}
  let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}
  return fcLoad(FC_NEAR+fgCell(s,c));
 }

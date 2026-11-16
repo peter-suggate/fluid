@@ -69,7 +69,7 @@ fn vCentre(c:vec3i)->f32{let r=c-vCentreLow;return wCentre[u32(r.x+9*(r.y+9*r.z)
 fn vLiquidStore(slot:u32,o:vec3i,lid:u32){
  if(lid>=16u){return;}
  var bits=0u;
- for(var k=0u;k<32u;k++){let c=o+nbLocalCoord(32u*lid+k);if(nbInLattice(c)&&vCentre(c)< -0.001){bits|=1u<<k;}}
+ for(var k=0u;k<32u;k++){let c=o+nbLocalCoord(32u*lid+k);if(nbInWallBox(c)&&vCentre(c)< -0.001){bits|=1u<<k;}}
  fcStore(FC_LIQ+16u*slot+lid,bits);
 }
 `;
@@ -94,7 +94,7 @@ var<workgroup> sRing:u32;
 const V_LIQUID_WGSL = /* wgsl */`
 fn vLiquidOwner(c:vec3i)->bool{
  if(fgCellCoarse(c)){return fgTileCentre4(c>>vec3u(2u))< -0.001;}
- if(!nbInLattice(c)){return false;}
+ if(!nbInWallBox(c)){return false;}
  let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
  let l=nbLocal(c);return ((fcLoad(FC_LIQ+16u*s+(l>>5u))>>(l&31u))&1u)!=0u;
 }
@@ -112,7 +112,7 @@ fn vLiquidOwner(c:vec3i)->bool{
 const V_CADDR_WGSL = /* wgsl */`
 fn vcTile(slot:u32,j:u32)->vec3i{return (nbCOrigin(slot)>>vec3u(2u))+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));}
 fn vcAt(base:u32,slot:u32,a:u32,j:u32)->u32{return base+NB_STRIDE*(slot+a*NB_CCAP)+j;}
-fn vcInLattice(c:vec3i,a:u32)->bool{var hi=NB_LATTICE;hi[a]+=1;return all(c>=vec3i(0))&&all(c<hi);}
+fn vcInLattice(c:vec3i,a:u32)->bool{var hi=NB_WALL_BOX;hi[a]+=1;return all(c>=vec3i(0))&&all(c<hi);}
 fn vcFace(T:vec3i,a:u32)->bool{return vcInLattice(4*T,a)&&!foTileOwnerH(T)&&!foTileOwnerH(T-fgUnit(a));}
 `;
 const V_COARSE_WGSL = V_CADDR_WGSL + /* wgsl */`
@@ -296,7 +296,7 @@ fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x55410000u);}
 fn fsUnitAbsent(c:vec3i,a:u32)->f32{return 0.0;}
 ` + nbfMomentumWGSL + /* wgsl */`
 // umPredictionCellLive at h: the cell holds liquid (centre φ under 0); a cell of a 4h tile, its owner's (vLive4).
-fn vLive(c:vec3i)->bool{if(fgCellCoarse(c)){return vLive4(c>>vec3u(2u));}return nbInLattice(c)&&fgCentrePhi(c)<0.0;}
+fn vLive(c:vec3i)->bool{if(fgCellCoarse(c)){return vLive4(c>>vec3u(2u));}return nbInWallBox(c)&&fgCentrePhi(c)<0.0;}
 // A C page (tiered, FC list): the departure of each whole 4h face (umUnitMomentumValue at width 4: culled where
 // neither owner is live, else the trace from the face's centre, umFaceCenter), into UP.
 // The traced faces of a workgroup (S2p's compaction): a lane marks its faces, culled ones take 0 at once, and the
@@ -531,16 +531,16 @@ var<workgroup> wSeam:array<u32,125>;
 var<workgroup> wOcc4:array<f32,125>;
 fn vSeamStage(t:vec3i,i:u32,hy:f32){
  var bits=0u;var occ=0.0;
- if(FG_TIERED&&nbInLattice(4*t)&&!foTileOwnerH(t)){bits=1u;occ=vOcc4(t,hy);if(vFill4(t)*64.0>0.05){bits=3u;}}
+ if(FG_TIERED&&nbInWallBox(4*t)&&!foTileOwnerH(t)){bits=1u;occ=vOcc4(t,hy);if(vFill4(t)*64.0>0.05){bits=3u;}}
  wSeam[i]=bits;wOcc4[i]=occ;
 }
 // The seam word of cell c: 0 outside the lattice (never coarse).
-fn vSeam(c:vec3i)->u32{if(!nbInLattice(c)){return 0u;}let r=(c>>vec3u(2u))-tLow;return wSeam[u32(r.x+5*(r.y+5*r.z))];}
+fn vSeam(c:vec3i)->u32{if(!nbInWallBox(c)){return 0u;}let r=(c>>vec3u(2u))-tLow;return wSeam[u32(r.x+5*(r.y+5*r.z))];}
 fn vSeamOcc4(c:vec3i)->f32{let r=(c>>vec3u(2u))-tLow;return wOcc4[u32(r.x+5*(r.y+5*r.z))];}
 // umOccupancy of cell c at its owner's width (vCentre: the brick's staged h centres; the seam stage's vOcc4).
 fn vOcc(c:vec3i,hy:f32)->f32{
  if((vSeam(c)&1u)!=0u){return vSeamOcc4(c);}
- return nbfOccupancy(select(0.0,vCentre(c),nbInLattice(c))*hy,hy,select(0u,1u,nbInLattice(c)));
+ return nbfOccupancy(select(0.0,vCentre(c),nbInWallBox(c))*hy,hy,select(0u,1u,nbInWallBox(c)));
 }
 // vCoarseMass from the seam stage.
 fn vCoarseMassS(c:vec3i)->bool{return (vSeam(c)&2u)!=0u;}
@@ -617,7 +617,7 @@ ${stagedHead("vcTransferPage", -1)}
   const uKick = k("uKick", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], base + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + /* wgsl */`
 fn vOcc(c:vec3i,hy:f32)->f32{
  if(fgCellCoarse(c)){return vOcc4(c>>vec3u(2u),hy);}
- return nbfOccupancy(select(0.0,vCentre(c),nbInLattice(c))*hy,hy,select(0u,1u,nbInLattice(c)));
+ return nbfOccupancy(select(0.0,vCentre(c),nbInWallBox(c))*hy,hy,select(0u,1u,nbInWallBox(c)));
 }
 // A C page (tiered): the kick of each whole 4h face, the h rule at the owners' width.
 fn vcKickPage(slot:u32,lid:u32){
@@ -674,7 +674,7 @@ fn vpBit(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
 // The 4h cache of UP on tile T's lower plane along a (fsCache on UP): the C face between two 4h tiles, else the
 // mean of its 16 F subfaces.
 fn vpCache(T:vec3i,a:u32)->f32{
- var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
+ var hi=(NB_WALL_BOX>>vec3u(2u))-vec3i(1);hi[a]+=1;
  let t=clamp(T,vec3i(0),hi);let c=4*t;
  if(!fgFaceOpen(c,a)){return 0.0;}
  if(!foCellOwnerH(c)&&!foCellOwnerH(c-fgUnit(a))){return foPCFace(t,a);}
@@ -700,7 +700,7 @@ fn vpTap4(c:vec3i,a:u32)->f32{
  return ((t[0]+t[5])+(t[1]+t[4]))+((t[2]+t[7])+(t[3]+t[6]));
 }
 fn nbxViscositySite(site:vec3i,axis:u32)->f32{
- let held=clamp(site,vec3i(0),NB_LATTICE-vec3i(1));var c=held;c[axis]+=1;
+ let held=clamp(site,vec3i(0),NB_WALL_BOX-vec3i(1));var c=held;c[axis]+=1;
  if(!fgFaceOpen(c,axis)){return 0.0;}
  if(FG_TIERED){if(fgFaceOwned(c,axis)){return foPFFace(c,axis);}return vpTap4(c,axis);}
  let s=fgSlot(c);if(s==NB_NONE){return 0.0;}
@@ -708,7 +708,7 @@ fn nbxViscositySite(site:vec3i,axis:u32)->f32{
 }
 ` + nbfViscosityWGSL + /* wgsl */`
 // The 4h site (umViscositySite at width 4): the cache of the old texel's tile held in the box, at its +face.
-fn vpSite4(S:vec3i,a:u32)->f32{let t=clamp(S,vec3i(0),(NB_LATTICE>>vec3u(2u))-vec3i(1));return vpCache(t+fgUnit(a),a);}
+fn vpSite4(S:vec3i,a:u32)->f32{let t=clamp(S,vec3i(0),(NB_WALL_BOX>>vec3u(2u))-vec3i(1));return vpCache(t+fgUnit(a),a);}
 fn vcViscousPage(slot:u32,lid:u32){
  let h=vH();
  for(var r=0u;r<2u;r++){
@@ -781,8 +781,8 @@ var<private> xBrick:vec3i;
 // vLiquidOwner from the staged tiles and words (the same tests in the same order).
 fn xLiquidStaged(c:vec3i)->bool{
  let r=vec3u((c>>vec3u(2u))-xBase4+vec3i(1));let t=wTile4[r.x+4u*r.y+16u*r.z];
- if(FG_TIERED&&nbInLattice(c)&&(t&1u)!=0u){return (t&2u)!=0u;}
- if(!nbInLattice(c)){return false;}
+ if(FG_TIERED&&nbInWallBox(c)&&(t&1u)!=0u){return (t&2u)!=0u;}
+ if(!nbInWallBox(c)){return false;}
  let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
  let n=vec3u((c>>vec3u(3u))-xBrick+vec3i(1));let l=nbLocal(c);
  return ((wLiqW[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;
@@ -790,7 +790,7 @@ fn xLiquidStaged(c:vec3i)->bool{
 fn xTileBits(c:vec3i)->u32{let r=vec3u((c>>vec3u(2u))-xBase4+vec3i(1));return wTile4[r.x+4u*r.y+16u*r.z];}
 fn xOwnerH(c:vec3i)->bool{return (xTileBits(c)&8u)!=0u;}
 // fgCellCoarse from the staged tile (bit 0 holds the tile's lattice test and !foTileOwnerH).
-fn xCoarse(c:vec3i)->bool{return FG_TIERED&&nbInLattice(c)&&(xTileBits(c)&1u)!=0u;}
+fn xCoarse(c:vec3i)->bool{return FG_TIERED&&nbInWallBox(c)&&(xTileBits(c)&1u)!=0u;}
 // fgFace(NB_VEL_F_U0, c, a) with foUFaceU's owner test on the staged bits (its coarse interpolation where neither
 // side is h-owned). An open face's cell is in the lattice, so foUFaceInLattice holds.
 fn xFaceU(c:vec3i,a:u32)->f32{
@@ -867,7 +867,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  if(live&&lid>=448u){
   let j=lid-448u;let T=xBase4+vec3i(i32(j&3u),i32((j>>2u)&3u),i32(j>>4u))-vec3i(1);
   var bits=0u;
-  if(FG_TIERED&&nbInLattice(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
+  if(FG_TIERED&&nbInWallBox(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
   if(fgTileSupported(4*T)){bits|=4u;}
   if(FG_TIERED&&foTileOwnerH(T)){bits|=8u;}
   wTile4[j]=bits;
@@ -1100,7 +1100,7 @@ fn vGaugePage(slot:u32,lid:u32){
  var part=0u;
  for(var j=0u;j<8u;j++){
   let c=nbLocalCoord(lid+64u*j);
-  if(!nbInLattice(o+c)||!fgCellOwned(o+c)){continue;}
+  if(!nbInWallBox(o+c)||!fgCellOwned(o+c)){continue;}
   var v:array<f32,8>;var negative=0u;
   for(var k=0u;k<8u;k++){let q=c+nbfFillCorner(k);v[k]=wVertex[u32(q.x+9*q.y+81*q.z)];negative+=select(0u,1u,v[k]<0.0);}
   if(negative==0u){continue;}

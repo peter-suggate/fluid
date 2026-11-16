@@ -68,7 +68,7 @@ fn lrParticleTravelConditional(velocity:vec3f,accepted:vec3f,ballistic:bool,scal
 const BANK_WGSL = /* wgsl */`
 fn pSrc()->u32{return (cfg.y^cfg.z)&1u;}
 fn pAt(bank:u32,i:u32)->u32{return bank*NB_PCAP+i;}
-fn pCellOf(q:vec3f)->vec3i{return clamp(vec3i(floor(q)),vec3i(0),NB_LATTICE-vec3i(1));}
+fn pCellOf(q:vec3f)->vec3i{return clamp(vec3i(floor(q)),vec3i(0),NB_WALL_BOX-vec3i(1));}
 `;
 
 /** The particle prelude: tile heat, grid support, the field. */
@@ -80,8 +80,8 @@ fn pGravity()->vec3f{return vec3f(nbRingF(cfg.x,NB_RING_GRAVITY),nbRingF(cfg.x,N
 fn pHeat(q:vec3f)->f32{return fgTileHeat(vec3i(floor(q)));}
 // A point inside the box whose brick a slot holds (umPointPresent).
 fn pPresent(q:vec3f)->bool{
- if(any(q<vec3f(0.0))||any(q>vec3f(NB_LATTICE))){return false;}
- return fgSlot(min(vec3i(floor(q)),NB_LATTICE-vec3i(1)))!=NB_NONE;
+ if(any(q<vec3f(0.0))||any(q>vec3f(NB_WALL_BOX))){return false;}
+ return fgSlot(min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1)))!=NB_NONE;
 }
 `;
 
@@ -131,7 +131,7 @@ var<workgroup> wLiquid:array<atomic<u32>,16>;
 // A liquid cell of the opening φ: pLiquid's bit (fgLiquidCell of the same φ) where an F slot holds the cell, else
 // fgLiquidCell through the owners. Valid in the move only (pLiquid runs before it; the level set rewrites φ).
 fn pLiquidCell(c:vec3i)->bool{
- if(!nbInLattice(c)){return false;}
+ if(!nbInWallBox(c)){return false;}
  let s=fgSlot(c);if(s==NB_NONE){return fgLiquidCell(c);}
  let l=nbLocal(c);return ((atomicLoad(&nbSet[NB_S_P_LIQUID+16u*s+(l>>5u)])>>(l&31u))&1u)!=0u;
 }
@@ -237,7 +237,7 @@ fn pFile(i:u32,p:Particle,split:bool){
  else{
   v=nbfBallisticKick(v,pGravity(),dt);
   for(var axis=0u;axis<3u;axis++){
-   let ahead=nbfBallisticAhead(q,v,m,axis);let solid=ahead[axis]<0.0||ahead[axis]>f32(NB_LATTICE[axis]);
+   let ahead=nbfBallisticAhead(q,v,m,axis);let solid=ahead[axis]<0.0||ahead[axis]>f32(NB_WALL_BOX[axis]);
    if(nbfBallisticStop(v,axis,solid)){v[axis]=0.0;}
   }
  }
@@ -259,7 +259,7 @@ fn pFile(i:u32,p:Particle,split:bool){
   end+=pSurfaceShift(q,pSeparation(src,i,q,m));
  }
  if(!nbfFinite(end,1e30)){pFatal(2u,i);return;}
- let endpoint=nbfBoxEndpoint(end,vec3f(0.0),vec3f(NB_LATTICE),nbSampleRadius(m));
+ let endpoint=nbfBoxEndpoint(end,vec3f(0.0),vec3f(NB_WALL_BOX),nbSampleRadius(m));
  let reach=abs(endpoint-q);if(!(max(reach.x,max(reach.y,reach.z))<2048.0)){pFatal(1u,i);return;}
  // nbFinish in the fixed box: the clamped endpoint; an axis it moved loses its velocity.
  p.velocity=vec4f(nbfClippedVelocity(p.velocity.xyz,end,endpoint),p.velocity.w);
@@ -411,7 +411,7 @@ fn psIn(c:vec3i)->bool{return all(vec3u(c-psO)<vec3u(8u));}
 fn psReach1(c:vec3i)->bool{if(psStaged&&psIn(c)){return sTileReach[fgTileOf(c)]!=0u;}return fgReach1(c);}
 fn psDepthVertex(v:vec3i)->f32{let r=vec3u(v-psO);if(psStaged&&all(r<vec3u(9u))){return sDepth[r.x+9u*(r.y+9u*r.z)];}return fgDepthVertex(v);}
 ` + PS_DEPTH_WGSL + /* wgsl */`
-fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInLattice(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
+fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInWallBox(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
 fn psSeam(c:vec3i)->bool{
  for(var k=0u;k<27u;k++){if(psCoarse(c+nbNeighbourOffset(k))){return true;}}
  return false;
@@ -421,7 +421,7 @@ fn psSiteDistance(site:vec3f,reentry:bool)->f32{if(reentry){return fgPhiAt(site)
 // The cell's gates and depth: x 1 where the cell may seed (0 none), y the centre depth d, z the heat.
 fn psCellGate(c:vec3i,re:bool)->vec3f{
  let none=vec3f(0.0);
- if(!nbInLattice(c)){return none;}
+ if(!nbInWallBox(c)){return none;}
  // The tile's gates (sTileOk): R1's owned tile; the re-entry's refined tile (TILE_OCC bit 16 + tile), else the reach
  // and the heat (pHeat(centre) is the tile's T).
  let t=fgTileOf(c);if(sTileOk[t]==0u){return none;}
@@ -491,9 +491,9 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  psO=o;
  if(lid<8u){
   let c=o+4*vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
-  var ok=live&&nbInLattice(c)&&fgCellOwned(c);var reach=0u;var heat=0.0;
+  var ok=live&&nbInWallBox(c)&&fgCellOwned(c);var reach=0u;var heat=0.0;
   // The reach (psDepth's, any tile of the brick a site's floor lands in) whatever the tile's owner.
-  if(live&&nbInLattice(c)){reach=select(0u,1u,fgReach1(c));}
+  if(live&&nbInWallBox(c)){reach=select(0u,1u,fgReach1(c));}
   if(ok){
    heat=fgTileHeat(c);
    if(cfg.w==2u){ok=((nbSetWord(NB_S_TILE_OCC+slot)>>(16u+lid))&1u)!=0u;}
@@ -522,7 +522,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  // The re-entry seed's probe counters (brick-abi.ts H.REENTRY_*): lane t < 8 tile t of the brick.
  if(cfg.w==2u&&live&&lid<8u){
   let s=slot;let c=o+4*vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
-  if(nbInLattice(c)&&fgCellOwned(c)){
+  if(nbInWallBox(c)&&fgCellOwned(c)){
    if(fcLoad(FC_SLOT+s)!=nbFRec(s,NB_REC_KEY)+1u){atomicAdd(&nbSet[NB_H_REENTRY_FRESH],1u);}
    else if(((nbSetWord(NB_S_TILE_OCC+s)>>(16u+lid))&1u)!=0u){
     atomicAdd(&nbSet[NB_H_REENTRY_TILES],1u);
@@ -548,7 +548,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
 // NONE where the anchor's tile lacks support (umTileSupport bit 2) or the face is a low wall face.
 fn nbxDelta(axis:u32,r:vec3u)->f32{
  let anchor=vec3i(r)-vec3i(1);
- if(!nbInLattice(anchor)){return NB_DELTA_NONE;}
+ if(!nbInWallBox(anchor)){return NB_DELTA_NONE;}
  if(fgDist(fgTileDist(anchor),2u)>3u){return NB_DELTA_NONE;}
  // The anchor's +face: a high box wall reads 0 (the old engine's wall row), as does a face closed across.
  let c=anchor+fgUnit(axis);if(!fgFaceOpen(c,axis)){return 0.0;}
@@ -593,7 +593,7 @@ fn pSupport(p:Particle){
  let base=vec3i(floor((p.position.xyz-2.0)/4.0));
  for(var j=0u;j<8u;j++){
   let t=base+vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));
-  if(!nbInLattice(4*t)){continue;}
+  if(!nbInWallBox(4*t)){continue;}
   let b=t>>vec3u(1u);let s=fgBrickSlot(b);
   if(s==NB_NONE){nbFail(NB_FAIL_REACH,nbKey(b));continue;}
   let l=vec3u(t&vec3i(1));let at=NB_S_PSUPPORT+NB_PSUPPORT_WORDS*s;let bit=1u<<(l.x|(l.y<<1u)|(l.z<<2u));
@@ -627,8 +627,8 @@ fn pJoinTile(t:vec3i){
   let s=fgSlot(c);var nearest=NB_NONE;if(s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
   if(nearest!=NB_NONE){low=vec3f(fgUnpack(nearest));high=low+1.0;}
  }
- let lo=clamp(vec3i(floor((low+min(travel,vec3f(0)))/4.0)),vec3i(0),NB_LATTICE/4);
- let hi=max(lo,clamp(vec3i(floor((high+max(travel,vec3f(0))-1e-5)/4.0)),vec3i(0),NB_LATTICE/4));
+ let lo=clamp(vec3i(floor((low+min(travel,vec3f(0)))/4.0)),vec3i(0),NB_WALL_BOX/4);
+ let hi=max(lo,clamp(vec3i(floor((high+max(travel,vec3f(0))-1e-5)/4.0)),vec3i(0),NB_WALL_BOX/4));
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){pJoinTile(vec3i(x,y,z));}}}
 }`);
 

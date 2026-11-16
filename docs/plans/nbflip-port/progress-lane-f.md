@@ -2083,3 +2083,35 @@ free-fall defect.
 - The rate's sign in the composite RHS, -h^2 (div/h - rate), matches the old engine's -(div - rate).
 - A fill that gains 20% against a 10/s controller means the controller is not acting there. That is to be read
   directly: FH.RATE and FH_VOL_CAPTURED.
+
+## 2026-11-17: the volume gain localized (three effects, handed to E); the all-h fall; F's walls at the box
+
+**Correction to 7a5000b8.** ref-2761350a (DEFAULT_REF) is the only canonical reference set. That entry's remark that
+the two sets disagree on the dam's D5e is void: the dam passes D5e on ref-2761350a, and `ref` is not used.
+
+**The volume gain on moving liquid: three effects, all in the tiered seam (E's files).** Probe: a ball of r 14.42
+(the letter's volume), diagnostic switches in scratch only.
+
+| effect | where | evidence | handed to E as |
+|---|---|---|---|
+| 1. R2's calm demotion shrinks a convex surface | brick-census R2 | CPU oracle (Float64, r2-oracle.mts): demoting every band tile loses 3.59% at r 14.42, 0.83% at r 30, 0.21% at r 60, 0 on a plane; mean δ −0.17 cells against the curvature estimate −0.18 | a signed volume guard: calm only if \|δ\| ≤ 0.08 cells, δ = (64·fill(corners) − Σ fill(cells)) / max(A, 1). The coordinator ruled no φ shift. With it: step 10 121.42 L (all-h 121.53, before 115.61) |
+| 2. −3.2% on the first moving step | the re-entry seeds' heat (HEAT4's 2) lets nbfErasure remove them | translating at 2 m/s, step 1: 116.83 L; seed off 120.71; erasure off 120.65; heat 1 120.71 (step 12 +0.07%) | heat 1 for the seed's first step (approved: the old engine's support) |
+| 3. +0.4 L/step at rest | psSeam's every-step shallow top-up, a ratchet | rest, R2 off, step 12: 123.30 L; psSeam off 121.23 (+0.04/step, as all-h); the n0 form 121.28 (costs −0.1 L/step translating); lcNearKnown no effect | E prefers the cause: records kept across R1, as the old engine |
+
+Fall, 20 steps: +1.7% as is, +0.7% with heat 1 and the n0 form, +1.0% all-h. KE within 0.6%.
+
+**The all-h fall (r 14, 30 steps).** The old engine holds (122.16 L at step 23, 122.34 at 30); tiered holds (122.60).
+All-h only loses 4.6% from step 23 (116.72 at 30), at 1479–1549 F bricks. Parked: all-h is a diagnostic mode.
+
+**F's walls at the box hook (M3 padding).** Every F kernel resolves the wall tokens (fluidKernel's resolveBox), and
+F's owner instances pass `box: BOX_TOKEN`. On a padded lattice F's wall planes, cell and tile domains and
+held-in-the-box clamps read NB_BOX; storage (the window, the vertex words, fgRun, lResolve, the page lookups) stays
+at NB_LATTICE.
+- Unpadded the text is byte-identical: E's kernel dump, the dam's 113 kernels and all 15 enabled scenes. So no
+  GPU gate: no kernel changes.
+- fluid-walls.test.ts (CPU), 32³ padded around 24×16×24: no F kernel walls at the storage edge except lAdvect's
+  release readers (E's levelset-release, prefix nbr), which E switches.
+- Open with E: a vertex past the box reads its stored air, not FAR (E's owner prelude keeps the vertex FAR at the
+  lattice). Only stencils reaching past a wall see it.
+- Next: the scene plumbing with E (pad to whole pages, box = the container; brickInitialLiquid and the sources on
+  the padded lattice), then E's 24×16×24 → 32³ volume regression.

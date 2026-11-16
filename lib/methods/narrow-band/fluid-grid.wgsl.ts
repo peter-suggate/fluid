@@ -38,7 +38,7 @@
  * - `fpart`, per record of a bank: RANK (2 words: the destination rank of the record and of its split half, or
  *   NONE) and MOVED (a third bank: the move's output, which pScatter files into the new bank).
  */
-import { BRICK_CELLS, type BrickLayout, brickAbiWGSL } from "./brick-abi";
+import { BOX_TOKEN, BRICK_CELLS, type BrickLayout, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 
@@ -143,8 +143,9 @@ export function fluidKernel(L: BrickLayout, F: FluidLayout, label: string, bindi
     + (body.includes("fn fsUnit(") && !body.includes("fn fsUnitAbsent") ? "\nfn fsUnitAbsent(c:vec3i,a:u32)->f32{return fsTapH(c,a,false);}" : "");
   return {
     label, entry, bindings,
-    code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }),
-      body.includes("struct Particle") ? "" : "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}", fluidConstantsWGSL(F), declareBindings(bindings), body, ring].join("\n"),
+    // The box hook (brick-abi.md §2, M3 padding): the walls and the cell domain at the box, the storage at the lattice.
+    code: resolveBox(L, [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }),
+      body.includes("struct Particle") ? "" : "struct Particle{position:vec4f,velocity:vec4f,before:vec4f}", fluidConstantsWGSL(F), declareBindings(bindings), body, ring].join("\n")),
   };
 }
 
@@ -177,7 +178,7 @@ fn fgRingClose(){fgRingOn=false;}`;
 
 /** The tier owners (brick-owner.wgsl.ts), prefix fo: the tile part (no pool), φ (PHI; fo1 the PHI1 copy) and the
  * faces of each velocity channel (foU, foP, foS: U, UP, US). Every part is cut from brickOwnerWGSL's own text. */
-const FO_ALL = brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "fo" });
+const FO_ALL = brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "fo", box: BOX_TOKEN });
 const cutOwner = (code: string, from: string, to?: string) => {
   const i = code.indexOf(from), j = to === undefined ? code.length : code.indexOf(to);
   if (i < 0 || j < 0) throw new Error(`fluid-grid: brickOwnerWGSL has no ${i < 0 ? from : to}`);
@@ -213,7 +214,7 @@ if (!FO_WIN_PHI.includes("foVertexCoarse(v)")) throw new Error("fluid-grid: bric
 const FG_WIN_VERTEX_WGSL = FO_WIN_COARSE.replace("fn foVertexCoarse", "fn fgWinVertexCoarse").replace(FO_COARSE_RULE, "if(fgWinCoarseBit(fgWinTileAt(t))!=0u){return t;}")
   + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWinVertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)")
   + FO_WIN_PHI.replace("fn foVertexPhi", "fn fgWin1VertexPhi").replace("foVertexCoarse(v)", "fgWinVertexCoarse(v)").replace(/\bfo(CVertex|FVertex)\b/g, "fo1$1");
-const foFaces = (prefix: string, ch: string) => ownerReads(cutOwner(brickOwnerWGSL({ phi: "phi", vel: "vel", prefix, faceF: `NB_VEL_F_${ch}0`, faceC: `NB_VEL_C_${ch}0` }), `fn ${prefix}CFace`)
+const foFaces = (prefix: string, ch: string) => ownerReads(cutOwner(brickOwnerWGSL({ phi: "phi", vel: "vel", prefix, faceF: `NB_VEL_F_${ch}0`, faceC: `NB_VEL_C_${ch}0`, box: BOX_TOKEN }), `fn ${prefix}CFace`)
   .replace(new RegExp(`\\b${prefix}(TileInLattice|TileIndex|TileOwnerH|CellOwnerH)\\b`, "g"), "fo$1"));
 const FO_VEL_WGSL = [foFaces("foU", "U"), foFaces("foP", "UP"), foFaces("foS", "US")].join("\n");
 
@@ -233,7 +234,7 @@ fn fgSlot(c:vec3i)->u32{
 }
 fn fgUnit(a:u32)->vec3i{var e=vec3i(0);e[a]=1;return e;}
 // Face a of cell c (its lower face) is open: not on a wall, and its cell row inside the lattice across the axis.
-fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;return nbInLattice(t)&&c[a]>0&&c[a]<NB_LATTICE[a];}
+fn fgFaceOpen(c:vec3i,a:u32)->bool{var t=c;t[a]=0;return nbInWallBox(t)&&c[a]>0&&c[a]<NB_WALL_BOX[a];}
 // A cell's tile within its brick (x + 2y + 4z) and a tile word's index.
 fn fgTileOf(c:vec3i)->u32{return u32(((c.x>>2u)&1)|(((c.y>>2u)&1)<<1u)|(((c.z>>2u)&1)<<2u));}
 fn fgTileWord(slot:u32,t:u32,w:u32)->u32{return FC_TILE+FT_WORDS*(8u*slot+t)+w;}
@@ -254,7 +255,7 @@ fn fgVertexOwned(v:vec3i)->bool{return !FG_TIERED||foVertexOwnerH(v);}
 fn fgFaceOwned(c:vec3i,a:u32)->bool{return !FG_TIERED||foCellOwnerH(c)||foCellOwnerH(c-fgUnit(a));}
 fn fgCellOwned(c:vec3i)->bool{return !FG_TIERED||foCellOwnerH(c);}
 // Tiered: a lattice cell whose tile is 4h-owned (the old engine's cell of a width-4 owner).
-fn fgCellCoarse(c:vec3i)->bool{return FG_TIERED&&nbInLattice(c)&&!foCellOwnerH(c);}
+fn fgCellCoarse(c:vec3i)->bool{return FG_TIERED&&nbInWallBox(c)&&!foCellOwnerH(c);}
 `;
 
 /** Slot lookup and cell addressing (needs `dir`): every lookup reads the directory. */
@@ -380,12 +381,12 @@ fn fgCorners(c:vec3i)->array<f32,8>{return fgCornersOf(NB_PHI_F_PHI,c);}
 // The cell-centre φ: the mean of the eight corners (brick-abi.md §6.1, the operator's rule).
 fn fgCentrePhi(c:vec3i)->f32{let v=fgCorners(c);var s=0.0;for(var k=0u;k<8u;k++){s+=v[k];}return 0.125*s;}
 // A liquid cell (the authority's phase, -0.001 of a cell, uniform-mixed-pressure-surface): centre φ under it.
-fn fgLiquidCell(c:vec3i)->bool{if(!nbInLattice(c)){return false;}return fgCentrePhi(c)< -0.001;}
+fn fgLiquidCell(c:vec3i)->bool{if(!nbInWallBox(c)){return false;}return fgCentrePhi(c)< -0.001;}
 // The point p (cells) held in the box.
-fn fgHeld(p:vec3f)->vec3f{return clamp(p,vec3f(0.0),vec3f(NB_LATTICE));}
+fn fgHeld(p:vec3f)->vec3f{return clamp(p,vec3f(0.0),vec3f(NB_WALL_BOX));}
 // Trilinear φ at p (cells), the cell holding p (held in the box): umSampleVertex.
 fn fgPhiAtOf(base:u32,p:vec3f)->f32{
- let q=fgHeld(p);let c=min(vec3i(floor(q)),NB_LATTICE-vec3i(1));let t=q-vec3f(c);let v=fgCornersOf(base,c);
+ let q=fgHeld(p);let c=min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1));let t=q-vec3f(c);let v=fgCornersOf(base,c);
  let x00=mix(v[0],v[1],t.x);let x10=mix(v[2],v[3],t.x);let x01=mix(v[4],v[5],t.x);let x11=mix(v[6],v[7],t.x);
  return mix(mix(x00,x10,t.y),mix(x01,x11,t.y),t.z);
 }
@@ -421,7 +422,7 @@ fn fgFace(base:u32,c:vec3i,a:u32)->f32{
 // so the sample index is p - 0.5 off the axis, held to the box (0..N along a, 0..N-1 across).
 fn fgVelAxis(base:u32,p:vec3f,a:u32)->f32{
  var s=p-vec3f(0.5);s[a]=p[a];
- var hi=vec3f(NB_LATTICE-vec3i(1));hi[a]=f32(NB_LATTICE[a]);
+ var hi=vec3f(NB_WALL_BOX-vec3i(1));hi[a]=f32(NB_WALL_BOX[a]);
  s=clamp(s,vec3f(0.0),hi);
  let i0=vec3i(floor(s));let f=s-vec3f(i0);
  var v:array<f32,8>;
@@ -468,7 +469,7 @@ fn fsLerp8(v:array<f32,8>,f:vec3f)->f32{
 fn fsBit(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
 // The 4h cache of tile T's lower plane along a (US), resolved through the owners (uCache's source).
 fn fsCacheRaw(T:vec3i,a:u32)->f32{
- var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
+ var hi=(NB_WALL_BOX>>vec3u(2u))-vec3i(1);hi[a]+=1;
  let t=clamp(T,vec3i(0),hi);let c=4*t;
  if(!fgFaceOpen(c,a)){return 0.0;}
  if(!foCellOwnerH(c)&&!foCellOwnerH(c-fgUnit(a))){return foSCFace(t,a);}
@@ -478,7 +479,7 @@ fn fsCacheRaw(T:vec3i,a:u32)->f32{
 }
 // The same from uCache's CACHE4 (a page no slot holds reads 0, as the owners' readers do).
 fn fsCache(T:vec3i,a:u32)->f32{
- var hi=(NB_LATTICE>>vec3u(2u))-vec3i(1);hi[a]+=1;
+ var hi=(NB_WALL_BOX>>vec3u(2u))-vec3i(1);hi[a]+=1;
  let t=clamp(T,vec3i(0),hi);
  if(!fgFaceOpen(4*t,a)){return 0.0;}
  let cs=fgTileCSlot(t);if(cs==NB_NONE){return 0.0;}
@@ -532,7 +533,7 @@ fn fsUnitAudit(i0:vec3i,c:vec3i,a:u32){}
 // lattice's upper face) takes the tap-by-tap path.
 fn fsFine(p:vec3f,a:u32)->f32{
  var s=p-vec3f(0.5);s[a]=p[a];
- var hi=vec3f(NB_LATTICE-vec3i(1));hi[a]=f32(NB_LATTICE[a]);
+ var hi=vec3f(NB_WALL_BOX-vec3i(1));hi[a]=f32(NB_WALL_BOX[a]);
  s=clamp(s,vec3f(0.0),hi);
  let i0=vec3i(floor(s));let f=s-vec3f(i0);
  var v:array<f32,8>;let z=f==vec3f(0.0);
@@ -552,7 +553,7 @@ const FS_REACH:array<u32,9>=array<u32,9>(0x1249249u,0x2492492u,0x4924924u,0x1c0e
 // tiers (HMASK) whose tile box is within 2 cells of p, max(0, 1 - max(delta) / 2) > 0, which is max(delta) < 2,
 // every axis's delta under 2. O(1): the owners within reach are the product of each axis's offsets with delta < 2.
 fn fsFineAny(p:vec3f)->bool{
- let q=fgHeld(p);let t=min(vec3i(floor(q)),NB_LATTICE-vec3i(1))>>vec3u(2u);
+ let q=fgHeld(p);let t=min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1))>>vec3u(2u);
  let m=fsHMask(t);if(m==0u){return false;}
  if(!fsSupport(t)){return false;}
  if((m&(1u<<13u))!=0u){return true;}
