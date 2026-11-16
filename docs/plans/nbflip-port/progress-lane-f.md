@@ -1967,3 +1967,27 @@ This landed alone, ahead of M4, as the coordinator directed.
     (D2 114.75 against 114.78).
 - **The seep** runs on the old engine. It isn't in `BRICK_ENGINE_SCENES`, and its observer is `nbflip-observe.ts`. So
   neither this landing nor M4 changes it, and no re-run is needed.
+
+## 2026-11-17: seven non-brick GPU test files, base against HEAD (coordinator's check)
+
+These are the eight GPU tests that failed when I ran test:unit with `WEBGPU_NODE_MODULE` set. The suite without it
+passes, because it skips them.
+
+**Method.** I ran the seven files once on a frozen archive of 20a233bb (yesterday's base) and once on a frozen
+archive of HEAD 1cc3724e. Both ran in timing mode, one run each, with no 00000206. Logs are in
+`fluid-scratch/lane-f/logs/seven/{b20,hd}.log`.
+
+**Result.** The same eight tests fail on both, with the same messages. The spatula's speed differs only at 3e-7
+relative, which is run-to-run noise. So none of them is today's regression, and none comes from dc5d767f's
+nbRefineBox latch. They are standing failures for the coordinator to assign:
+
+| test | file | failure |
+|---|---|---|
+| stationary spatula preserves hydrostatic rest | churning-tank-scene | step 30: the spatula generated 0.0923 m/s |
+| grid structure stays at the same world position after recentering | grid-overlay-window | GPUPipelineError |
+| reseed sites are independent of the seed list's fill order | nbflip-seed-order | "seedCandidate's salt is the frame index": `params.live.z` listed twice |
+| the super-block tail with BULK16 rows | pressure-super-tail-bulk16 | "w1: the groups hold resident pages too (9 against 9)" |
+| GPU 2048 raster shadows preserve leaf-scale contacts | raster-shadow-contact | a shader compilation message where none is expected |
+| GPU 4096 raster shadows preserve leaf-scale contacts | raster-shadow-contact | a shader compilation message where none is expected |
+| GPU PCSS blocker search | raster-shadow-footprint | GPUPipelineError |
+| face candidate reuse preserves all-roster velocities | uniform-body-query-reuse | GPUPipelineError |
