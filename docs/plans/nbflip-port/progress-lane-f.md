@@ -2041,3 +2041,45 @@ free-fall defect.
 - E's batch lost cm12-figure-9 and coarse-first-pool-impact the same way.
 - `uploadWords` (restore's split: the 16-byte body, then the tail) now carries every engine upload.
 - Regression: `lib/methods/narrow-band/brick-upload.test.ts`.
+
+## 2026-11-17: L3 restored (c90effac); M4 landed (00abc80c)
+
+**L3** (the coordinator's rulings; E approved):
+- L3 is banded to the references restored for their drop loss: KE / 0.942.
+- Why: the pool starts at rest, so the letters' KE is the drops' released PE, and it scales with their mass. NB-FLIP
+  adds 114.21 of each 121.23 L asked (the dense old-engine run's step-3 drop), and the lost litres would have carried
+  the drops' specific energy.
+- Not restored: the old engine's 1.9% velocity lag.
+- A per-run factor from restoreBox's lost_L was considered and rejected: that loss also counts the pool's drift
+  (82 L by step 60, against about 7 L per drop).
+- L5 is an upper bound, as D8 is.
+- Per kilogram of total liquid (the first form) failed at step 60, +11.5%. The pool carries the mass but none of the
+  KE.
+
+**M4, scheduled drops.**
+
+| run | result |
+|---|---|
+| letters-240-k3 (scene enabled for the run) | L1 0.30, L2 0.60, L3 0.58, L5 0.82; **L4 FAIL 1.15 to 1.20**; 64 ms |
+| dam-300-k3 | PASS every row, identical to m2 on the same reference set; drift -0.91%; 30.91 ms |
+| dam-300-u (main HEAD) | 30.75 ms |
+
+- The letters stay out of BRICK_ENGINE_SCENES until L4 passes.
+- L4 is the volume gain: +1.0% against the references' -1.1%.
+- The two reference sets disagree on the dam's D5e. ref-2761350a passes at 0.93; `ref` fails at 1.23, for m2 and
+  k3 alike. That is a reference-set question, not M4.
+- A drop scene without authored brickPools is now a gap (E's note: the pool rule sizes the t = 0 liquid only).
+
+**Next: the brick's volume gain on moving liquid.** The coordinator ruled it a real defect, ahead of the wall switch.
+
+| case | brick | old |
+|---|---|---|
+| lone ball, 24 steps | +1.5% | +0.93% |
+| stair-cube | +9.6% | +6.2% |
+| fill-256-800 | +20.6% | +1.2% |
+| fill-256-6400 | +7.5% | -3.0% |
+
+- E's gauge probe agrees with the presentation, so this is not accounting.
+- The rate's sign in the composite RHS, -h^2 (div/h - rate), matches the old engine's -(div - rate).
+- A fill that gains 20% against a 10/s controller means the controller is not acting there. That is to be read
+  directly: FH.RATE and FH_VOL_CAPTURED.
