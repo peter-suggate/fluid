@@ -289,6 +289,8 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
 fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return fgSampleVel(p,lo,hi);}
 fn nbxMomentumHeld(p:vec3f)->vec3f{return fgHeld(p);}
 fn nbxTraceCapped(){atomicAdd(&nbSet[FH_TRACE_CAPPED],1u);}
+// A trace past UM_TRACE_SEGMENTS + 1 segments (a NaN dt or velocity) latches SEGMENTS ("UA": uAdvect).
+fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x55410000u);}
 // fsUnit's tap no F slot holds: never taken (fsUnit), and 0 rather than the 4h fallback.
 fn fsUnitAbsent(c:vec3i,a:u32)->f32{return 0.0;}
 ` + nbfMomentumWGSL + /* wgsl */`

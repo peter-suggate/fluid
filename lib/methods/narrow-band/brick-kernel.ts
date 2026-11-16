@@ -17,6 +17,9 @@ export interface BrickKernel {
   /** WGSL; starts with brickAbiWGSL(...) and declares its bindings with declareBindings(). */
   readonly code: string;
   readonly bindings: readonly BrickBinding[];
+  /** The cfg.z values the kernel accepts, [lo, hi] inclusive (a pass or axis index that bounds a loop or indexes a
+   * vector); a placement outside them is a configuration error that validateBrickStages throws on. */
+  readonly cfgZ?: readonly [number, number];
 }
 
 /** A dispatch: a fixed workgroup count, or indirect from an `args` word (fold rule, brick-abi.md §5.5). */

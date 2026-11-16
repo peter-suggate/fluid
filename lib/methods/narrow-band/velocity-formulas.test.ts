@@ -148,6 +148,7 @@ const NEW_MOMENTUM: ParityKernel = {
 fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return sampled(p,lo,hi);}
 fn nbxMomentumHeld(p:vec3f)->vec3f{return held(p);}
 fn nbxTraceCapped(){atomicAdd(&claims[1],1u);}
+fn nbxTraceFatal(){atomicAdd(&claims[2],1u);}
 ${nbfMomentumWGSL}`,
   body: `${MOMENTUM_HEAD}
  put(o,nbfMomentumTrace(v3(i),axis,dt,h));
@@ -328,7 +329,20 @@ ${nbfVolumeWGSL}`,
  put(o+1u,nbfVolumeRate(filled,f(i+8u),dt,control,f(i+9u)>0.0));`,
 };
 
-const KERNELS = { OLD_DEPOSIT, NEW_DEPOSIT, OLD_RESOLVE, NEW_RESOLVE, OLD_MOMENTUM, NEW_MOMENTUM, OLD_EXTEND, NEW_EXTEND, OLD_DELTA, NEW_DELTA, OLD_REMAP, NEW_REMAP, OLD_VISC, NEW_VISC, OLD_VOLUME, NEW_VOLUME };
+// The trace's bound: a NaN dt (left NaN, so the cap never lands) used to loop for ever; now it is fatal past
+// UM_TRACE_SEGMENTS + 1 segments and returns 0. A finite dt never reaches it.
+const BOUND_MOMENTUM: ParityKernel = {
+  prelude: `${MOMENTUM_WORLD}
+fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return sampled(p,lo,hi);}
+fn nbxMomentumHeld(p:vec3f)->vec3f{return held(p);}
+fn nbxTraceCapped(){atomicAdd(&claims[1],1u);}
+var<private> fatal:bool;
+fn nbxTraceFatal(){fatal=true;}
+${nbfMomentumWGSL}`,
+  body: `${MOMENTUM_HEAD}
+ fatal=false;put(o,nbfMomentumTrace(v3(i),axis,dt,h));outp[o+1u]=select(0u,1u,fatal);`,
+};
+const KERNELS = { OLD_DEPOSIT, NEW_DEPOSIT, OLD_RESOLVE, NEW_RESOLVE, OLD_MOMENTUM, NEW_MOMENTUM, BOUND_MOMENTUM, OLD_EXTEND, NEW_EXTEND, OLD_DELTA, NEW_DELTA, OLD_REMAP, NEW_REMAP, OLD_VISC, NEW_VISC, OLD_VOLUME, NEW_VOLUME };
 // NBF_PARITY_DUMP=DIR writes every kernel's module there, for offline validation (naga DIR/*.wgsl).
 if (process.env.NBF_PARITY_DUMP) {
   const dir = process.env.NBF_PARITY_DUMP; mkdirSync(dir, { recursive: true });
@@ -396,6 +410,25 @@ test("uAdvect (the momentum trace with its segment cap; occupancy, the gravity f
       inp[o + 10] = (rnd() - 0.5) * 4; inp[o + 11] = -9.81;
     }
     await parity(device, "uAdvect", OLD_MOMENTUM, NEW_MOMENTUM, { inp, threads, outWords: MOMENTUM_OUT * threads, extra: { 3: new Uint32Array(4) } }, MOMENTUM_OUT);
+  });
+});
+
+test("uAdvect's momentum trace is bounded: a NaN dt is fatal after UM_TRACE_SEGMENTS + 1 segments, a finite one never", { skip: !parityGPU }, async () => {
+  await withParityDevice(async device => {
+    const rnd = prng(47), threads = 256, inp = new Float32Array(MOMENTUM_IN * threads), w = words(inp);
+    for (let t = 0; t < threads; t++) {
+      const o = MOMENTUM_IN * t;
+      for (let a = 0; a < 3; a++) inp[o + a] = 2 + rnd() * 28;
+      w[o + 3] = t % 3;
+      inp[o + 4] = t % 2 === 0 ? Number.NaN : t % 4 === 1 ? 3 + rnd() * 6 : (rnd() - 0.5) / 15;
+    }
+    const out = await runParity(device, BOUND_MOMENTUM, { inp, threads, outWords: MOMENTUM_OUT * threads, extra: { 3: new Uint32Array(4) } });
+    const value = new Float32Array(out.buffer);
+    for (let t = 0; t < threads; t++) {
+      const o = MOMENTUM_OUT * t;
+      if (t % 2 === 0) { assert.equal(out[o + 1], 1, `thread ${t}: a NaN dt is fatal`); assert.equal(value[o], 0, `thread ${t}: and returns 0`); }
+      else { assert.equal(out[o + 1], 0, `thread ${t}: a finite dt (${inp[MOMENTUM_IN * t + 4]}) is not`); assert.ok(Number.isFinite(value[o]!)); }
+    }
   });
 });
 

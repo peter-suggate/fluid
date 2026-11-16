@@ -295,7 +295,9 @@ var<workgroup> sOcc:atomic<u32>;
   if(live){
    base=atomicAdd(&nbSet[NB_H_PCOUNT0+dst],total);
    if(base+total>NB_PCAP){atomicAdd(&nbSet[NB_H_P_OVERFLOW],total);nbFail(NB_FAIL_PARTICLES,base+total);}
-   atomicStore(&nbSet[NB_S_BIN_START+slot],base);atomicStore(&nbSet[NB_S_BIN_COUNT+slot],total);
+   // The bin holds only the records the bank holds (pScatter drops a rank at or past NB_PCAP): past an overflow, which
+   // latched above, the readers of BIN_START + BIN_COUNT (pTiles, pDeposit, lSplat, fgRun) stay inside the bank.
+   atomicStore(&nbSet[NB_S_BIN_START+slot],base);atomicStore(&nbSet[NB_S_BIN_COUNT+slot],min(total,NB_PCAP-min(base,NB_PCAP)));
   }
   sBase=base;
  }

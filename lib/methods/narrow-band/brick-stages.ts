@@ -88,6 +88,9 @@ const stageLists = (s: BrickStages) => [...s.move, ...s.rebin, ...s.levelSet, ..
 /** Checks a stage set's gated dispatches and buffer names. */
 export function validateBrickStages(s: BrickStages): void {
   for (const p of stageLists(s)) {
+    const range = p.kernel.cfgZ, z = p.z ?? 0;
+    if (range && !(Number.isInteger(z) && z >= range[0] && z <= range[1]))
+      throw new Error(`Brick engine: ${p.kernel.label} is placed with cfg.z ${z}, outside its range ${range[0]}..${range[1]}`);
     if ("indirect" in p.dispatch) {
       const w = p.dispatch.indirect;
       if (!(w >= 0 && w + 3 <= ARGS_LIST_END) && !(w >= FLUID_ARGS.FIRST && w + 3 <= FLUID_ARGS.END))

@@ -82,12 +82,14 @@ fn nbfP2GResolve(original:f32,momentumWord:u32,weightWord:u32,near:vec3f,thaw:f3
 `;
 
 /** uAdvect: the momentum trace and the forces. The kernel defines nbxMomentumSample(p, lo, hi) (the field's axes
- * lo..hi-1 at p, m/s), nbxMomentumHeld(p) (the walls' hold) and nbxTraceCapped(). */
+ * lo..hi-1 at p, m/s), nbxMomentumHeld(p) (the walls' hold), nbxTraceCapped() and nbxTraceFatal(). */
 export const nbfMomentumWGSL = /* wgsl */`
 const UM_TRACE_SEGMENTS:u32=128u;
 // The face's departure value (umUnitTrace): back along the field over dt from position, by segments of at most a
 // cell of travel at their start velocity, each sampled at its midpoint; past UM_TRACE_SEGMENTS the last segment
-// takes the rest (counted).
+// takes the rest (counted), so a finite trace ends there. One that has not (a NaN dt or velocity: left is NaN, every
+// comparison with it fails and the cap never lands) is fatal (nbxTraceFatal) and returns 0, so the loop is bounded
+// by UM_TRACE_SEGMENTS + 1 segments.
 fn nbfMomentumTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32{
  var at=position;var p=position;var left=abs(dt);let sign=select(-1.0,1.0,dt>=0.0);
  var span=0.0;var segments=0u;var middle=false;var last=left<=1e-7;
@@ -97,6 +99,7 @@ fn nbfMomentumTrace(position:vec3f,axis:u32,dt:f32,h:vec3f)->f32{
   let cells=v/h;
   if(!middle){
    let speed=max(abs(cells.x),max(abs(cells.y),abs(cells.z)));segments++;
+   if(segments>UM_TRACE_SEGMENTS){nbxTraceFatal();return 0.0;}
    span=min(left,1.0/max(speed,1e-30));
    if(segments>=UM_TRACE_SEGMENTS&&span<left){span=left;nbxTraceCapped();}
    at=nbxMomentumHeld(p-0.5*sign*span*cells);middle=true;

@@ -592,12 +592,16 @@ fn fgDepth(p:vec3f)->f32{
 
 /** A cell's run in the bank pScatter wrote (needs set and fcell): [start, end), empty where the slot's bin is. */
 export const FG_RUN_WGSL = /* wgsl */`
+// The run is held to the slot's bin, [BIN_START, min(BIN_START + BIN_COUNT, NB_PCAP)]: the identity when nothing
+// overflowed, and a bound on every run loop (pSeparation, the held-mass scan, pMergeRun, vcTransferFace) when a
+// FC_RUN word is not this rebin's.
 fn fgRun(c:vec3i)->vec2u{
  if(!nbInLattice(c)){return vec2u(0u);}
  let s=fgSlot(c);if(s==NB_NONE){return vec2u(0u);}
  let count=nbSetWord(NB_S_BIN_COUNT+s);if(count==0u){return vec2u(0u);}
- let l=nbLocal(c);let start=fcLoad(FC_RUN+512u*s+l);
- var end=nbSetWord(NB_S_BIN_START+s)+count;if(l<511u){end=fcLoad(FC_RUN+512u*s+l+1u);}
+ let bs=min(nbSetWord(NB_S_BIN_START+s),NB_PCAP);let be=bs+min(count,NB_PCAP-bs);
+ let l=nbLocal(c);let start=clamp(fcLoad(FC_RUN+512u*s+l),bs,be);
+ var end=be;if(l<511u){end=clamp(fcLoad(FC_RUN+512u*s+l+1u),bs,be);}
  return vec2u(start,end);
 }
 `;

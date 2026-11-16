@@ -26,7 +26,7 @@ const N = 64, NL: V = [N, N, N], FAR = phiFar(NL), f32 = Math.fround;
 const POISON = 0x7fc0beef;
 
 test("levelset-coarse: every kernel's module defines each function once and takes the tier owners", () => {
-  const L = new BrickLayout({ lattice: NL, f: 600, c: 40, b: 0, k: 0, particles: 1024 });
+  const L = new BrickLayout({ lattice: NL, f: 600, c: 40, b: 0, k: 0, particles: 8192 });
   assert.throws(() => levelSetCoarseKernels(L, fluidLayout(L)), /tiered/);
   const kernels = levelSetCoarseKernels(L);
   for (const [name, k] of Object.entries(kernels)) {
@@ -636,7 +636,7 @@ interface Fixture {
 async function runFixture(device: GPUDevice, fx: Fixture) {
     const stages = (c: Parameters<typeof bringUpStages>[0]) => ({ ...bringUpStages(c), tiered: true, buffers: { fcell: fluidLayout(c.layout, { tiered: true }).fcell.words } });
     const e = await BrickEngine.create(device, { lattice: NL, h_m: 1 / N, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
-      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: fx.hi }], solver: L => bringUpCG(L), stages });
+      capacities: { f: 600, c: 40, b: 0, k: 0, particles: 8192 }, liquid: [{ lo: [-1, -1, -1], hi: fx.hi }], solver: L => bringUpCG(L), stages });
     const L = e.layout, F = fluidLayout(L, { tiered: true });
     if (fx.want) {
       const boot = await snapshot(e);
@@ -667,7 +667,9 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
         fcell[w(FT.SURF)] = fbits(r(5) < 0.4 ? f32(1.3 * r(6)) : 0);
       }
       fcell[F.fcell.BOUND + fs] = fbits(f32(0.2 + 3 * hash(bk, 7)));
-      const start = 4096 * fs; let at = start;
+      // A slot's runs stay inside the bank, as pScan's are (fgRun holds a run to its bin, the bank's records): the
+      // slots' bins overlap, which no kernel here reads, and end before 2047 + 512 x 10 < 8192.
+      const start = (37 * fs) % 2048; let at = start;
       for (let l = 0; l < 512; l++) {
         const c = add(mul(b, 8), [l & 7, (l >> 3) & 7, l >> 6]), r = (k: number) => hash(c[0], c[1], c[2], 100 + k);
         fcell[F.fcell.RUN + 512 * fs + l] = at; at += Math.floor(r(0) * 11);

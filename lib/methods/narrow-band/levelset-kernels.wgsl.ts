@@ -620,8 +620,9 @@ ${stagedHead(0)}
 
   // lNear: cfg.z = the axis pz. x: the nearest crossing along x within 5 (ties low) into NEAR; y: the least
   // dx^2 + o^2 over o in -5..5 (strict, low o first) into NEAR2; z: likewise into NEAR as a packed cell, for the
-  // cells of reach-1 tiles only (NONE elsewhere). Offsets are packed +8 in bytes.
-  const lNear = k("lNear", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, LS_WGSL.split("\n").filter(l => /lMaskBit|^ |^}/.test(l) || l.startsWith("fn lMaskBit")).join("\n")].join("\n") + /* wgsl */`
+  // cells of reach-1 tiles only (NONE elsewhere). Offsets are packed +8 in bytes. cfg.z is the y and z passes' loop
+  // bound and a vector index: its range 0..2 is checked on the host (validateBrickStages), not clamped here.
+  const lNearKernel = k("lNear", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, LS_WGSL.split("\n").filter(l => /lMaskBit|^ |^}/.test(l) || l.startsWith("fn lMaskBit")).join("\n")].join("\n") + /* wgsl */`
 fn lWord(region:u32,c:vec3i)->u32{if(!nbInLattice(c)){return NB_NONE;}let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fcLoad(region+fgCell(s,c));}
 fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
 @compute @workgroup_size(256) fn lNear(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
@@ -651,6 +652,7 @@ fn lOff(w:u32,k:u32)->i32{return i32((w>>(8u*k))&255u)-8;}
  }
 }`);
 
+  const lNear: BrickKernel = { ...lNearKernel, cfgZ: [0, 2] };
   const lDistance = k("lDistance", [CFG, FB.set, FB.dir, FB.phiRO, FB.fcell], [staged(12), nbfRedistanceWGSL].join("\n") + /* wgsl */`
 // The (vertex, nearest crossing cell) pairs of a half brick (seep S2p's compaction): a lane lists its vertex's
 // distinct cells (lid | k << 8, k the first of the 8 cells about the vertex to name it), the lanes then run the
