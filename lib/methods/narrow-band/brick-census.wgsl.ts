@@ -69,7 +69,8 @@
  *   itself (pageSeed and lrAsk) is brick-residency.wgsl.ts, which reads this census's NEAR, FIN and WANT words.
  * - R2 (lane E, the user's aggressive fine-tile retirement, 2026-11-16): at a tiered head with the real D a band tile
  *   whose last certificate is calm is 4h, joined or not (ncCalm: the 4h model represents the tile's velocity within
- *   the 4h owner's budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H, the certificate's error word).
+ *   the 4h owner's budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H, the certificate's error word). Calm means 4h
+ *   represents both the velocity and the shape: a tile whose FIN carries its shape or thin trigger is never calm.
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BrickLayout, H, LIST, brickAbiWGSL } from "./brick-abi";
@@ -1366,8 +1367,11 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // The hysteresis (coordinator 2026-11-16, "the shortest hysteresis that doesn't flicker"): an h tile (CMASK) is 4h
   // only at its second consecutive calm head (CALM, valid under its workgroup's CALM_KEY); a 4h tile calm now stays 4h.
   // Refining has none: a tile that is not calm bands at once.
+  // Calm means 4h represents both the tile's velocity (ncCalm, the certificate's error) and its shape: a tile whose FIN
+  // carries its shape or thin trigger (the census's own test of whether 4h holds the geometry) is never calm, so R2 never
+  // demotes a surface 4h cannot carry (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17).
   var toCoarse=false;
-  if(band&&head&&ncCalm(t,cs,i)){
+  if(band&&head&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);

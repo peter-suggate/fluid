@@ -61,7 +61,8 @@ export interface CensusResult {
   scratch: Map<number, Scratch>; want: Map<number, Uint32Array>; trig: Map<number, number>; cand: Set<number>;
   /** Thin-alone tiles of F bricks (FIN's criteria exactly the thin bit), and those the need rule heats. */ thinAlone: { tiles: number; heated: number };
   /** tuDeformation's branches on the thin-alone tiles: stale key, width <= 0, valid and heated, valid and not. */ defBranches: Record<"key" | "width" | "heated" | "cool", number>;
-  band: Map<number, boolean>; demoted: Set<number>; calmNow: Set<number>; held: Set<number>; counters: Record<keyof typeof CENSUS_H, number>; failed: number;
+  band: Map<number, boolean>; demoted: Set<number>; calmNow: Set<number>; held: Set<number>;
+  /** Calm band tiles R2's shape guard kept (a shape or thin trigger in FIN). */ shaped: Set<number>; counters: Record<keyof typeof CENSUS_H, number>; failed: number;
 }
 
 /** The oracle. deep: tiles taking the last census's decision (the old deep COLD branch, l.2852), for the D test.
@@ -540,8 +541,12 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
     const e = fromBits(w[1]!); return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
   };
   const demoted = new Set<number>(), calmNow = new Set<number>(), held = new Set<number>();
+  // R2's shape guard: calm means 4h represents both the velocity (calm) and the shape (no shape or thin trigger in FIN).
+  const shaped = new Set<number>();
   const decide = (p: V3, sc: Scratch, i: number) => {
-    const band = decideBand(p, sc, i); if (!(band && head && calm(p))) return band;
+    const band = decideBand(p, sc, i);
+    if (band && head && ((sc.fin[i]! & (trig(0) | trig(1))) >>> 0) !== 0) { if (calm(p)) shaped.add(key(p)); return band; }
+    if (!(band && head && calm(p))) return band;
     calmNow.add(key(p));
     const cs = s.pages.get(pageKey(shr(p, 3)))!;
     if (!tileH(p) || (s.calmPrev?.(cs, tileIndex(p)) ?? false)) { demoted.add(key(p)); return false; }
@@ -594,7 +599,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       trigOut.set(fs, bits >>> 0); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
     }
   }
-  return { scratch, want, trig: trigOut, cand, band, demoted, calmNow, held, counters, failed, thinAlone, defBranches };
+  return { scratch, want, trig: trigOut, cand, band, demoted, calmNow, held, shaped, counters, failed, thinAlone, defBranches };
 }
 
 // ---- The frozen scene: a pool whose surface rolls across h and 4h tiles, a falling drop above it, a run-out
@@ -809,9 +814,10 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       assert.deepEqual(bad, [], `${bad.length} mismatches with D != 0`);
       // The hysteresis's branches: calm h tiles held (not calm before, or under a stale key), calm h tiles demoted at
       // their second calm head, calm 4h tiles demoted at once; and the counters.
-      const hyst = { calm: withDeep.calmNow.size, held: withDeep.held.size, demotedH, demoted4: withDeep.demoted.size - demotedH };
+      const hyst = { calm: withDeep.calmNow.size, held: withDeep.held.size, demotedH, demoted4: withDeep.demoted.size - demotedH, shapeGuarded: withDeep.shaped.size };
       console.log("setCensus hysteresis:", JSON.stringify(hyst));
       assert.ok(hyst.held > 0 && hyst.demotedH > 0 && hyst.demoted4 > 0, JSON.stringify(hyst));
+      // The shape guard's branch is reached on the old dam's census (brick-census-dam.test.ts); here it must agree.
       assert.equal(after[H.CENSUS_CALM_HELD], hyst.held, "CENSUS_CALM_HELD");
       assert.equal(after[H.CENSUS_CALM], withDeep.demoted.size, "CENSUS_CALM");
       assert.ok(deepTiles > 100 && kept === deepTiles && prevOne > 50, `deep tiles ${deepTiles}, kept ${kept}, decidedPrev = 1 ${prevOne}`);

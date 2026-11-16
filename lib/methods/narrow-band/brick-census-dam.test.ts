@@ -347,21 +347,26 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     const calm = (cs: number, l: number) => { const o = S * cs + CENSUS.DEF + 4 * l;
       if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0) || (cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return false;
       const e = f32w(cens[o + 1]!); return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
-    let calmDemoted = 0, calmHeld = 0;
+    // R2's shape guard: calm means 4h represents both the velocity and the shape, so a tile whose FIN (this census's)
+    // carries its shape or thin trigger is never calm.
+    const shaped = (cs: number, l: number) => (rCensus[S * cs + CENSUS.FIN + l]! & (((1 << 16) | (1 << 17)) >>> 0)) !== 0;
+    let calmDemoted = 0, calmHeld = 0, shapeGuarded = 0;
     for (let i = 0; i < n; i++) {
       const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t);
       const want = (rSet[L.set.want + 16 * cs + (l >> 5)]! >>> (l & 31)) & 1;
       // The hysteresis: a calm h tile only at its second calm head (calmPrev), a calm 4h tile at once.
-      const isCalm = fx.decided[i] && calm(cs, l), expected = isCalm && (!hOld(t) || calmPrev(cs, l)) ? 0 : fx.decided[i];
+      const calmRaw = fx.decided[i] && calm(cs, l), isCalm = calmRaw && !shaped(cs, l); if (calmRaw && !isCalm) shapeGuarded++;
+      const expected = isCalm && (!hOld(t) || calmPrev(cs, l)) ? 0 : fx.decided[i];
       if (expected !== fx.decided[i]) calmDemoted++; else if (isCalm) calmHeld++;
       if (want !== expected) { wantWrong++; if (wantMiss.length < 16) wantMiss.push(`${t}${fx.deep[i] ? " deep" : ""}${splitTiles.has(i) ? " split-near" : ""}: ${want} vs ${expected}`); }
       else if (fx.mode[i] === 1) deepWant++;
     }
-    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss, calmDemoted, calmHeld };
+    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss, calmDemoted, calmHeld, shapeGuarded };
     console.log(JSON.stringify({ ...report, replay }, null, 1));
     e.destroy();
     assert.equal(modeWrong, 0, "every region replays as the old engine's did");
     assert.equal(wantWrong, 0, `WANT with replay is the old WANT: ${wantMiss.join("; ")}`);
+    assert.ok(calmDemoted > 0 && shapeGuarded > 0, `R2's branches reached: ${calmDemoted} demoted, ${shapeGuarded} kept by the shape guard`);
     // ---- Verdicts: on the tiles that are not deep COLD, every field exact under one φ choice or the other (or near a split vertex), and the reach.
     for (const [k, v] of hard) assert.equal(v.length, 0, `${k}: ${v.length} non-deep tiles differ under both φ choices, away from a split vertex: ${v.slice(0, 16).map(i => coord(i).join(",")).join("; ")}`);
     for (const r of results) assert.equal(r.counters.reach[0], r.counters.reach[1], `the reach (${r.variant})`);

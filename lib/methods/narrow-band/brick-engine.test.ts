@@ -30,7 +30,7 @@ import { BRICK_SET_HELPERS_WGSL, brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
-import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
+import { BRICK_ENGINE_SCENES, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
@@ -184,6 +184,41 @@ test("brick engine: brickPools must be integers, f/c/particles at least 1", () =
   assert.ok(validateScene(withPools({ f: 0 })).some(e => /brickPools\.f/.test(e)));
   assert.ok(validateScene(withPools({ c: 1.5 })).some(e => /brickPools\.c/.test(e)));
   assert.ok(validateScene(withPools({ k: -1 })).some(e => /brickPools\.k/.test(e)));
+});
+
+test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the measured table, and authored pools win", () => {
+  // The rule's terms, by hand: the window caps a 64^3 lattice at 9^3 F and 3^3 C; a 100-cell droplet takes the floor.
+  assert.deepEqual(brickPoolRule([64, 64, 64], { cells: 100, top: 16 }, 8, 1276), { f: 128, c: 18, b: 16, k: 0, particles: 3828, t: 4096 });
+  assert.deepEqual(brickPoolRule([64, 64, 64], { cells: 94208, top: 32 }, 324, 174856), { f: 729, c: 27, b: 16, k: 0, particles: 524568, t: 4096 });
+  // TCAP: 512 c is exact (a C_ALL tile is listed once a step); 2 f where that is larger than 4096 but under 512 c.
+  assert.equal(brickPoolRule([32, 32, 32], { cells: 961, top: 30 }, 72, 12960).t, 4096);
+  assert.equal(brickPoolRule([16, 16, 16], { cells: 300, top: 8 }, 27, 9632).t, 512);
+  assert.equal(brickPoolRule([256, 256, 256], { cells: 6400, top: 30 }, 48, 26224).t, Math.min(512 * 162, 2 * 4356));
+  // Through brickSceneSetup on the catalog scenes the rule was measured against (progress-lane-e.md, 2026-11-17).
+  const want: Record<string, [number, number, number]> = {
+    "power-droplet-64": [128, 18, 3828], "power-droplet-256": [128, 128, 3828], "power-fill-256-800": [800, 162, 17856], "power-fill-256-6400": [4356, 162, 78672],
+    "minimal-power-dam-break-32": [125, 8, 117096], "minimal-power-dam-break-64": [729, 27, 524568], "mass-conserving-figure-9-dam-break": [2601, 75, 720384],
+  };
+  const enabled = BRICK_ENGINE_SCENES as string[], before = enabled.length;
+  try {
+    for (const [id, [f, c, particles]] of Object.entries(want)) {
+      const scene = sceneDocument(getSceneDefinition(id));
+      assert.equal(scene.fluid.brickPools, undefined, `${id} authors no pools`);
+      enabled.push(scene.sceneId!);
+      const { setup, gaps } = brickSceneSetup(scene, { timeStep: "sixtieth" });
+      assert.deepEqual(gaps, [], id);
+      assert.deepEqual([setup!.capacities.f, setup!.capacities.c, setup!.capacities.particles], [f, c, particles], id);
+      assert.ok(setup!.bootBricks!.length <= f && setup!.bootPages!.length <= c, `${id}: the boot fits its pools`);
+    }
+    // The closed form's volume: the 64^3 dam's box is 94208 cells (the measured table's V); the extent counts liquid
+    // vertices, which a face's vertex row may add to (0.2% here), well inside the rule's margins.
+    const dam64 = brickSceneSetup(sceneDocument(getSceneDefinition("minimal-power-dam-break-64")), { timeStep: "sixtieth" }).setup!;
+    const extent = brickInitialExtent({ lattice: dam64.lattice, farPhi: dam64.farPhi, liquid: dam64.liquid, initial: dam64.initial });
+    assert.ok(Math.abs(extent.cells - 94208) <= 0.01 * 94208, `extent ${extent.cells} cells`);
+  } finally { enabled.length = before; }
+  // An authored scene keeps its pools exactly (no t unless it says).
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
+  assert.deepEqual(brickSceneSetup(dam, { timeStep: "sixtieth" }).setup!.capacities, dam.fluid.brickPools);
 });
 
 /**

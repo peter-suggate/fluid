@@ -2325,3 +2325,84 @@ Step time over steps 13–165, from one paired round:
 - The paired per-step difference has a median of +0.24 ms (139 steps, sampled steps excluded). That is inside
   single-run noise.
 - Both trees sit above the 34.4–34.7 ms reference today, so the absolute level is the machine's.
+
+## 2026-11-17: the pool rule wired into brick-scene.ts, TCAP, and R2's shape guard (landed)
+
+**The pool rule.** A scene with no authored `scene.fluid.brickPools` is now sized by `brickPoolRule`, the rule
+measured above. Its inputs:
+- the lattice;
+- the initial liquid's extent: `brickInitialExtent` counts the liquid cells and the top liquid row from the boot's
+  vertex φ, `bootPhiAt`, which covers both boxes and F's page table;
+- the boot's F bricks;
+- the boot's particles: F's `bootParticleCount`.
+
+The rule never grows a pool. A scene that outruns its pools latches FAIL.POOL. An authored scene keeps its pools
+exactly, so the dam's and the seep's are unchanged.
+
+**TCAP.** t = min(512 c, max(2 f, 4096)).
+- 512 c is exact: setTransfer lists a C_ALL tile at most once a step.
+- 2 f, the layout default, was too small. falling-water-torus listed 251 tiles against 2·125 and latched FAIL LIST
+  0x700000fa.
+- 512 c was rejected as the layout default because the xfer scratch is 3 KB a tile, about 197 MB for the dam. The
+  dam authors its pools, so its t is unchanged.
+
+**R2's shape guard.** This was the coordinator's ruling, 2026-11-17. Calm means 4h represents both the tile's
+velocity and its shape. A band tile whose FIN carries its shape or thin trigger is never calm, so R2 never demotes it.
+
+Before the guard, falling-water-torus lost all of its liquid by step 10. The trace showed the band's h tiles demoting
+at their second calm head while 4h could not hold the torus's tube.
+
+Over 60 steps on falling-water-torus (liquid volume = the cell-fraction sum):
+
+| tree | drift at 60 steps | step median (ms) |
+|---|---|---|
+| R2 as landed | −100% | |
+| R2 off | +6.2% | 6.15 |
+| R2 with the guard | +5.7% | 6.44 |
+
+The old engine's drift on the same scene is the reference for the +5.7%. It follows in the batch entry.
+
+**Tests**
+- brick-engine.test.ts, a CPU test of the rule's terms by hand (window, floor, TCAP) and of the measured table
+  through brickSceneSetup:
+
+  | scene | f | c | particles |
+  |---|---|---|---|
+  | power-droplet-64 | 128 | 18 | 3828 |
+  | power-droplet-256 | 128 | 128 | 3828 |
+  | power-fill-256-800 | 800 | 162 | 17856 |
+  | power-fill-256-6400 | 4356 | 162 | 78672 |
+  | minimal-power-dam-break-32 | 125 | 8 | 117096 |
+  | minimal-power-dam-break-64 | 729 | 27 | 524568 |
+  | mass-conserving-figure-9-dam-break | 2601 | 75 | 720384 |
+
+  The test also checks that the boot fits its pools and that the dam's authored pools are kept.
+- The census oracles take the guard:
+  - brick-census.test.ts: the oracle's `decide`;
+  - brick-census-dam.test.ts: R2's expectation over the old dam's frame-43 census.
+
+  The dam test reaches the guard's branch (3 and 229 calm tiles kept h), and asserts it.
+
+**Gates**
+- check:types: lane-n's 3 only.
+- test:unit: 1889 pass, 0 fail.
+- GPU census units (brick-census, brick-census-dam), timing slot: 5 of 5, rc 0, no 00000206.
+- Paired dam-300 against HEAD a8d2d90e, fenced, timing slot: both judged Overall PASS against ref-2761350a, with the
+  same D-rows on both trees.
+
+  | row | HEAD | guard |
+  |---|---|---|
+  | D1 front | 84 | 84 |
+  | D6 wet floor | 7645 | 7645 |
+  | D4 drift (30–90) | −0.0458 | −0.0463 |
+  | D5k (J) | 42.38 | 42.62 |
+  | D8 particles | 439297 | 449623 |
+
+  Step time over steps 13–165, with the paired per-step difference over 139 steps:
+
+  | tree | median (ms) | mean (ms) |
+  |---|---|---|
+  | HEAD | 35.61 | 40.38 |
+  | guard | 35.29 | 40.02 |
+
+  The paired median difference is +0.10 ms, inside noise. The dam's census text changes only by the guard's AND.
