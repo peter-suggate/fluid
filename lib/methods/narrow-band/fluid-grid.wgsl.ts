@@ -158,7 +158,7 @@ fn fgRingAt(v:vec3i)->u32{
 fn fgRingPhi(i:u32)->f32{return ${store ? store.read("i") : "fgRing[i]"};}
 fn fgRingStage(low:vec3i,lid:u32,lanes:u32){
  fgRingOn=false;fgRingLow=low;
- for(var j=lid;j<${n ** 3}u;j+=lanes){let x=fgPhi(low+vec3i(i32(j%${n}u),i32((j/${n}u)%${n}u),i32(j/${n * n}u)));${store ? store.write("j", "x") : "fgRing[j]=x"};}
+ for(var j=lid;j<${n ** 3}u;j+=lanes){let v=low+vec3i(i32(j%${n}u),i32((j/${n}u)%${n}u),i32(j/${n * n}u));let i=fgPhiResolved(v);var x=0.0;if(i!=NB_NONE){x=bitcast<f32>(phi[i]);}else{x=fgPhi(v);}${store ? store.write("j", "x") : "fgRing[j]=x"};}
  fgRingOn=true;
 }
 // The ring's storage is lent back: later reads go to the owners.
@@ -336,11 +336,27 @@ fn fcLoad(i:u32)->u32{return fcell[i];}
 fn fcLoadF(i:u32)->f32{return bitcast<f32>(fcell[i]);}
 ` + FG_FCELL_READS_WGSL;
 
-/** Vertex φ (needs `phi`). */
+/** Vertex φ (needs `phi`).
+ *
+ * Resolved φ (tiered): an F slot's PHI word holds every vertex of the slot at its owner-resolved value, its own
+ * vertices as F writes them, the others (an incident tile 4h-owned: the tile's interpolant) as lResolve
+ * (levelset-kernels.wgsl.ts) writes them after each writer of what they depend on (C PHI and the tile ownership).
+ * So PHI at a vertex an F slot holds, inside the lattice, is a plain load equal to foVertexPhi's; any other vertex
+ * reads through its owner. FG_PHI_RESOLVED off (FG_PHI_OWNER_WGSL) reads every vertex through its owner outside a
+ * staged ring (lResolve itself; uAdvect, whose ring alone pays). The schedule's rule is checked in
+ * fluid-staging.test.ts: no resolved read between a C PHI writer or the set update and the next lResolve. */
 export const FG_PHI_WGSL = FO_PHI_WGSL + FG_WIN_VERTEX_WGSL + /* wgsl */`
-// Tiered: PHI and PHI1 read through the vertex authority (foVertexPhi: F's vertex, or the 4h tile's interpolant).
+const FG_PHI_RESOLVED:bool=true;
+// The PHI word of vertex v where an F slot holds it inside the lattice (tiered), else NB_NONE.
+fn fgPhiResolved(v:vec3i)->u32{
+ if(FG_TIERED&&all(v>=vec3i(0))&&all(v<=NB_LATTICE)){let s=fgSlot(v);if(s!=NB_NONE){return NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v);}}
+ return NB_NONE;
+}
+// Tiered: PHI and PHI1 read through the vertex authority (foVertexPhi: F's vertex, or the 4h tile's interpolant),
+// PHI at a vertex an F slot holds as its resolved word.
 fn fgPhiWord(base:u32,v:vec3i)->f32{
  if(base==NB_PHI_F_PHI){let r=fgRingAt(v);if(r!=NB_NONE){return fgRingPhi(r);}}
+ if(FG_PHI_RESOLVED&&base==NB_PHI_F_PHI){let i=fgPhiResolved(v);if(i!=NB_NONE){return bitcast<f32>(phi[i]);}}
  if(FG_TIERED){let w=fgWinCovers(v);if(base==NB_PHI_F_PHI){if(w){return fgWinVertexPhi(v);}return foVertexPhi(v);}if(base==NB_PHI_F_PHI1){if(w){return fgWin1VertexPhi(v);}return fo1VertexPhi(v);}}
  let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_FAR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
 fn fgPhi(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI,v);}
@@ -375,6 +391,12 @@ fn fgTileCentre4(t:vec3i)->f32{let v=fgTileCorners4(t);var s=0.0;for(var k=0u;k<
 // A cell's phase at its owner's width: its own (fgLiquidCell) in an h tile, its 4h tile's in a 4h one.
 fn fgLiquidOwner(c:vec3i)->bool{if(fgCellCoarse(c)){return fgTileCentre4(c>>vec3u(2u))< -0.001;}return fgLiquidCell(c);}
 `;
+/** FG_PHI_WGSL with every read outside a staged ring through the owner (FG_PHI_RESOLVED off). */
+export const FG_PHI_OWNER_WGSL = (() => {
+  const from = "const FG_PHI_RESOLVED:bool=true;";
+  if (FG_PHI_WGSL.split(from).length !== 2) throw new Error("fluid-grid: FG_PHI_WGSL has no single FG_PHI_RESOLVED");
+  return FG_PHI_WGSL.replace(from, "const FG_PHI_RESOLVED:bool=false;");
+})();
 
 /** Face velocity reads (needs `vel`): base is a channel's first word (NB_VEL_F_U0, _UP0 or _US0). */
 export const FG_VEL_WGSL = FO_VEL_WGSL + /* wgsl */`

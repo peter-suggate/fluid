@@ -1434,3 +1434,33 @@ n2 1.84 against 0.54, n3 2.73 against 0.57.
 
 Not verified bitwise: pMove and pSeed, whose outputs differ old against old (atomic ranks). An earlier run with a
 concurrent check-slot job agreed in kind but is not quoted. All-h is unchanged (no resolve, FG_TIERED false).
+
+## 2026-11-16: resolved φ landed (go)
+
+Landed as measured, with these changes:
+- **Read selection.** FG_PHI_WGSL plain-loads resolved words (FG_PHI_RESOLVED). FG_PHI_OWNER_WGSL reads through
+  the owner outside a staged ring; lResolve and uAdvect use it, since uAdvect pays only in its ring.
+- **Placements:**
+  - move's head (after the set update), after lcCouple, after lcClear (in the analysis), and after lcPublish
+    (before pSeed);
+  - the boot's head, before lInit;
+  - the kick's force and seed.
+- **Boot fix.** The measurement tree resolved after lInit, so its boot read stale words of fresh slots. HEAD never
+  did: it read through the owner.
+- **n1 kept.** lTiles and lClear can't move after lcClear: lcClear raises far C φ to 16, which changes the
+  non-owned values they read.
+- **Schedule test** (fluid-staging.test.ts): no resolved read between a C PHI writer, or a schedule's start, and
+  the next lResolve. C writers are classified by entry: lcCouple, lcClear and lcPublish write PHI; lcAdvect and
+  lcRetire write PHI1 only. Any other C writer fails the test.
+
+**Gate.** Tree-rr is 32d46e7f plus the change. Runs were on the check slot unless noted.
+- Both wide-dam tests pass.
+- dam-300 on ref-2761350a: every row passes except D8 at 1.23, high (7.082e5 at 30–90). That is the
+  pre-existing range on HEAD-equivalent trees, 1.08–1.24.
+- 60-step probes against tree-hh:
+  - steps 0–1 are identical, and step 2 differs by 3 particles (the atomics);
+  - at step 60, the candidate against HEAD: KE 66.5 against 68.2 J, drift −0.063 against −0.060, particles 644k
+    against 636k.
+- Fenced hold, steps 13–165, timing slot: median 54.59 → 52.03 ms (−2.6). The frozen state's −4.4 is step 20's.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/rr (and logs/ld, the pre-rebase round on 8d298dc8).

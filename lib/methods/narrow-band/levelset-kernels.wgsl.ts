@@ -33,7 +33,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
@@ -717,5 +717,19 @@ fn dNear(c:vec3i)->u32{
  }
 }`);
 
-  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish };
+  // lResolve (tiered): each F slot's non-owned vertices (an incident tile 4h-owned) take their owner-resolved φ, the
+  // window's fgPhi through the owner (FG_PHI_OWNER_WGSL), in the slot's PHI word, so fgPhiWord reads them as plain
+  // loads (fluid-grid.wgsl.ts FG_PHI_WGSL). A non-owned vertex reads only C vertices, which no lane writes here; the
+  // stores follow every lane's reads. Placed after each writer of what the values depend on (brick-fluid-stages.ts).
+  const lResolve = F.tiered ? k("lResolve", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, "var<workgroup> sHead:u32;"].join("\n") + /* wgsl */`
+@compute @workgroup_size(256) fn lResolve(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
+ let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
+ let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
+ var x:array<f32,2>;var w:array<bool,2>;
+ for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
+ for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
+}`) : undefined;
+  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve };
 }

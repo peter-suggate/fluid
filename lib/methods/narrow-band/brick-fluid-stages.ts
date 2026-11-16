@@ -69,21 +69,24 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const dilate = (round: 1 | 2) => [...(l.lDilateC ? [at(l.lDilateC, pages, 0, round)] : []), ...[0, 1, 2].map(pass => at(l.lDilate, all8, pass, round))];
   const near = [0, 1, 2].map(pass => at(l.lNear, all, pass));
   const rebin = (z: number) => [at(p.pScan, all, z), at(p.pScatter, records, z), at(p.pTiles, all, z)];
-  const analysis = [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...dilate(2), ...near, at(l.lDistance, all)];
+  // Tiered, lResolve after each writer of a non-owned vertex's value (fluid-grid.wgsl.ts FG_PHI_WGSL): the set
+  // update (ownership, the transfer's C writes) before each schedule, lcCouple, lcClear and lcPublish (C PHI).
+  const resolve = l.lResolve ? [at(l.lResolve, all)] : [];
+  const analysis = [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...resolve, ...dilate(2), ...near, at(l.lDistance, all)];
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
-    move: [...cache, at(p.pLiquid, all), at(p.pMove, records)],
+    move: [...resolve, ...cache, at(p.pLiquid, all), at(p.pMove, records)],
     rebin: rebin(0),
-    levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"),
-      ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), at(p.pSeed, all)],
+    levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve,
+      ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all)],
     velocity: [at(v.uAdvect, both), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, both)] : []), at(v.uTransfer, both)],
     tail: [...ext4, at(v.uExtend, all), args(0, 1), at(p.pJoin, records), at(p.pDelta, records)],
-    boot: [at(l.lInit, all), ...analysis, at(v.vGauge, both, 0, 1)],
+    boot: [...resolve, at(l.lInit, all), ...analysis, at(v.vGauge, both, 0, 1)],
     // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the
     // extension and the initial seeding from the kicked, extended U (the old engine seeds in its first frame from
     // the kicked grid), filed into bank 0. The seeding is kick.seed: E's TRIG-only census of the kicked state runs
     // between after and seed, so the first seeding heats from the triggers of the state it seeds.
-    kick: { force: [at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), ...cache], seed: [at(p.pSeed, all, 0, 1), args(1, 0), at(p.pMove, records, 1), ...rebin(1), args(1, 1)] },
+    kick: { force: [...resolve, at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), ...cache], seed: [...resolve, at(p.pSeed, all, 0, 1), args(1, 0), at(p.pMove, records, 1), ...rebin(1), args(1, 1)] },
     buffers: { fcell: F.fcell.words, fdep: F.fdep.words, fpart: F.fpart.words, fmoved: F.fmoved.words, ...(tiered ? { fext4: F.fext4.words } : {}) },
   };
   return stages;

@@ -24,7 +24,7 @@
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
-import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
+import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfParticleRecordWGSL } from "./particles-formulas.wgsl";
 import { nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
@@ -266,7 +266,9 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   // uAdvect: a workgroup a brick, a lane two cells' three lower faces.
   // Lane 0 of the first brick also turns this step's gauge into the volume control's rate (vGauge ran in the level
   // set stage, before; the operator reads FH_RATE after).
-  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL(10), FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL].join("\n") + /* wgsl */`
+  // uAdvect reads resolved φ in its ring only (FG_PHI_OWNER_WGSL elsewhere): the plain loads in the trace's reads
+  // cost it more than they save (frozen dam, 2026-11-16).
+  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_RING_WGSL(10), FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL].join("\n") + /* wgsl */`
 // The blended h/4h sampler of US (fgSampleVel; all h, fgVelAxis).
 fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return fgSampleVel(p,lo,hi);}
 fn nbxMomentumHeld(p:vec3f)->vec3f{return fgHeld(p);}

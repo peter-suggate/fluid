@@ -92,3 +92,39 @@ test("FC_LIQ: every reader runs after its writer, with no φ writer between", ()
   // uExtend at every schedule, and tiered uExt4Seed and uExt4.
   assert.ok(readers >= 12, `${readers} FC_LIQ readers`);
 });
+
+/** Resolved φ (fluid-grid.wgsl.ts FG_PHI_WGSL): tiered, a non-owned vertex's PHI word is exact only between the
+ * lResolve after the last writer of what it depends on (a C PHI writer, or the set update before a schedule) and
+ * the next such writer. Every kernel that reads resolved words (FG_PHI_RESOLVED on, or a staged ring) must run in
+ * such a span. */
+test("resolved φ: no resolved read before the schedule's lResolve or after a C PHI write without one", () => {
+  const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
+  type K = { label: string; code: string };
+  const resolved = (k: K) => k.code.includes("const FG_PHI_RESOLVED:bool=true;") || /\bfgRingStage\(/.test(k.code.replace(/fn fgRingStage\(/g, ""));
+  // Lane E's C kernels share one module text, so their writes are classified by entry (levelset-coarse.wgsl.ts):
+  // C PHI by lcCouple, lcClear and lcPublish; PHI1 only by lcAdvect and lcRetire. Any other C writer fails here.
+  const C_PHI = new Set(["lcCouple", "lcClear", "lcPublish"]), C_PHI1 = new Set(["lcAdvect", "lcRetire"]);
+  const writesC = (k: K) => {
+    if (C_PHI.has(k.label)) return true;
+    if (C_PHI1.has(k.label)) return false;
+    assert.ok(!/lcSetC\(/.test(k.code) && !/phi\[NB_PHI_C_PHI1?\+[^\]]*\]\s*=[^=]/.test(k.code), `${k.label} writes C vertices and is not classified`);
+    return false;
+  };
+  let readers = 0, resolves = 0;
+  for (const viscosity_Pa_s of [0, 1e-3]) {
+    const stages = fluidStagesAt(true)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
+    const of = (list: unknown) => ((list as { kernel: K }[] | undefined) ?? []).map(p => p.kernel);
+    const kick = stages.kick as Record<string, unknown>;
+    // Each list starts after a possible set update or census (stale until its lResolve).
+    const schedules = { step: ["move", "rebin", "levelSet", "velocity", "tail"].flatMap(s => of(stages[s])), boot: of(stages.boot), kickForce: [...of(kick.force), ...of(kick.after)], kickSeed: of(kick.seed) };
+    for (const [name, list] of Object.entries(schedules)) {
+      let fresh = false;
+      for (const k of list) {
+        if (k.label === "lResolve") { fresh = true; resolves++; continue; }
+        if (resolved(k)) { readers++; assert.ok(fresh, `${name}: ${k.label} reads resolved φ while a non-owned word may be stale`); }
+        if (writesC(k)) fresh = false;
+      }
+    }
+  }
+  assert.ok(readers >= 20 && resolves >= 8, `${readers} resolved readers, ${resolves} lResolve placements`);
+});
