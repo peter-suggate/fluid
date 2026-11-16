@@ -27,7 +27,7 @@ import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule, brickTrigC
 import { brickResidencyKernels } from "./brick-residency.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
-import { mgLayout } from "./pressure-mgpcg";
+import { mgLayout, pressureKickScaleGroups, pressureKickScaleKernel } from "./pressure-mgpcg";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
 import { brickBodyKernels } from "./bodies-stage.wgsl";
@@ -49,6 +49,10 @@ export const initialPhiPages = (lattice: Vec3): Vec3 => [Math.floor(lattice[0] /
 
 /** The owner readers' walls at the storage edge (brickOwnerWGSL without its box): refused on a padded lattice. */
 const STORAGE_EDGE_WALLS = [/fn \w*OnWall\(c:vec3i,a:u32\)->bool\{return c\[a\]<=0\|\|c\[a\]>=NB_LATTICE\[a\];\}/, /fn \w*FaceInLattice\(c:vec3i,a:u32\)->bool\{var hi=NB_LATTICE;/];
+
+/** The kick's re-solves from its own pressure: the old arena's UNIFORM_PRESSURE_KICK_RESOLVES (uniform-pressure-arena.ts
+ * 138; each re-solve cuts a resting pool's seam error about 3.3x). */
+export const BRICK_KICK_RESOLVES = 23;
 
 export interface BrickEngineOptions {
   readonly lattice: Vec3;
@@ -362,7 +366,14 @@ export class BrickEngine {
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
     const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [];
-    const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...solve, ...stages.kick.after, ...(stages.kick.seed ? [...trigCensus, ...stages.kick.seed] : [])] : [];
+    // The kick has no last frame, so its seam heads (rowsF's poHeadS: the start's tangential slope) start from the
+    // cold prolongation; like the old arena's encodeSolve(kick), it re-solves BRICK_KICK_RESOLVES times from its own
+    // pressure (each solve leaves the rows WARM, so the next starts from X), before F's after reads the projection.
+    const kickSolve: BrickPlacement[] = Array.from({ length: 1 + BRICK_KICK_RESOLVES }, () => solve).flat();
+    // X is in its solve's dt units (U = US - grad X / h; the old arena's pressures are dt-free): the kick solves at
+    // dt/2, so its X doubles (pmgKickScale) before step 1's rows start from it.
+    const kickScale: BrickPlacement[] = [{ kernel: pressureKickScaleKernel(layout), dispatch: { direct: pressureKickScaleGroups(layout) } }];
+    const kick: BrickPlacement[] = stages.kick ? [...stages.kick.force, ...kickSolve, ...kickScale, ...stages.kick.after, ...(stages.kick.seed ? [...trigCensus, ...stages.kick.seed] : [])] : [];
     // The boot's class pass, as part 2's (setMark after F's boot stages, before the kick raises BOUND_F; C_LIQ;
     // setRecords clears the rebuilt counts), then the lists from its classes (cfg.z = 2 ORs NOW onto every live brick
     // and keeps the ACTIVE tiles): step 1's head residency reads them (brick-residency.wgsl.ts), and the kick's lists

@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BRICK_CELLS, BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, K_HOLD, LIST, NONE, PHI_AIR, PHI_AIR_C, POOLS, REC, ARGS, brickAbiWGSL, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
-import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
+import { BRICK_KICK_RESOLVES, BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
 import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
@@ -528,7 +528,7 @@ test("brick engine (GPU): operator leaves zero rows (K, DIAG, RHS, X) off the li
   });
 });
 
-test("brick engine: the boot runs the stages' projected half kick (force, operator, solver, project, after) last", () => {
+test("brick engine: the boot runs the stages' projected half kick (force, 1 + BRICK_KICK_RESOLVES solves, pmgKickScale, after) last", () => {
   const L = new BrickLayout({ lattice: [64, 64, 64], f: 64, c: 8, b: 0, k: 0, particles: 1024 }), cg = bringUpCG(L);
   const base = bringUpStages({ layout: L, dt_s: DT, h_m: H_M, gravity_mps2: [0, -G, 0], values: {} });
   const labels = (s: ReturnType<typeof BrickEngine.scheduleFor>) => s.boot.map(p => p.kernel.label);
@@ -537,7 +537,9 @@ test("brick engine: the boot runs the stages' projected half kick (force, operat
   const force = base.velocity, after = base.velocity;
   const kicked = labels(BrickEngine.scheduleFor(L, cg, { ...base, kick: { force, after } }, 1));
   const solve = ["operator", ...[...cg.setup, ...Array.from({ length: cg.slots }, (_, k) => cg.slot(k)).flat(), ...cg.finish].map(p => p.kernel.label), "project"];
-  const tail = [...force.map(p => p.kernel.label), ...solve, ...after.map(p => p.kernel.label), "stepEnd"];
+  // P's seam fix (4f17012e): the kick re-solves from its own pressure, then doubles X into a step's dt units.
+  const solves = Array.from({ length: 1 + BRICK_KICK_RESOLVES }, () => solve).flat();
+  const tail = [...force.map(p => p.kernel.label), ...solves, "pmgKickScale", ...after.map(p => p.kernel.label), "stepEnd"];
   assert.deepEqual(kicked.slice(0, plain.length - 1), plain.slice(0, -1));
   assert.deepEqual(kicked.slice(plain.length - 1), tail);
 });
