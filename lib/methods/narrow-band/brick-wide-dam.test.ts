@@ -64,45 +64,42 @@ test("brick wide dam (GPU): residency and lists follow the fluid, not the box", 
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("brick wide dam", async device => {
     const head = async (e: BrickEngine) => { const h = await e.read("set", 0, 256); assert.equal(h[H.FAIL], 0, `${e.options.label}: FAIL ${h[H.FAIL]} info 0x${h[H.FAIL_INFO]!.toString(16)}`); return h; };
-    // The same fluid while the front is short of x = 128. The engine is not bitwise reproducible run to run: the
-    // boot's pressure solve already differs (pressure-mgpcg.ts pRedAdd adds workgroup partials into 64 bins by float
-    // CAS in arrival order; RHS and DIAG identical, X about 4e-10 apart), and by step 6 one splash particle's speed,
-    // the max BOUND_F, can read 2.08 or 2.67 m/s. The residency's reach is the ceil of that flow, so the same input
-    // holds one more brick plane or not: step 7 liveF 1579 or 1604 (lane E 2026-11-16, ~/code/me/fluid-scratch/lane-e/flaky).
-    // So the fluid (F_LIQ) is compared at every step, and the residency (liveF, F_ACT, C_ALL) against the narrow runs
-    // whose reach input, ceil(flow) of the bound the step starts from, is the wide run's, on at least 7 of the 10 steps.
-    const early = 10, narrowRuns = 3, flowOf = async (e: BrickEngine) => {
-      const s = await snapshot(e), L = e.layout, o = e.options;
-      const bound = Math.max(...[...s.bricks.values()].map(slot => new Float32Array(new Uint32Array([s.set[L.set.boundF + slot]!]).buffer)[0]!));
-      return Math.ceil((bound + Math.hypot(...o.gravity_mps2) * o.dt_s) * o.dt_s / o.h_m);
-    };
-    const n: { m: ReturnType<typeof counts>; flow: number }[][] = Array.from({ length: early }, () => []);
+    // The same fluid while the front is short of x = 128. The engine is not bitwise reproducible run to run, and need
+    // not be: the set's lists and slots are built by atomic appends in arrival order (setLists, setClaimBricks, pSeed,
+    // pMove, pmgCoarsenTop's row bricks and coarse rows), and every kernel is deterministic on the same input (lane F
+    // 2026-11-16, ~/code/me/fluid-scratch/lane-f/tools/probe-det.mts). Sums folded in list order still move in the last
+    // bits: the CG scalars' fold (pressure-mgpcg.ts R_ZF + g, g a position in pmgCoarsenTop's T_RB list) and the coarse
+    // levels' assembly. The splash is chaotic, so by step 6 one particle's speed, the max BOUND_F, reads 2.08 or 2.67 m/s
+    // and from step 7 the narrow runs' residency spreads past 1% even at the same ceil(flow) (step 9 liveF 1335-1376 at
+    // ceil flow 8, 36 runs). So steps 1-6, identical in every run, compare tightly against the narrow runs; steps 7-10
+    // compare against the band the narrow runs span, widened by max(2, 3%). A leak into the empty far end costs hundreds
+    // of bricks, and the reach asserts at step 40 below hold it.
+    const early = 10, tight = 6, narrowRuns = 5;
+    const n: ReturnType<typeof counts>[][] = Array.from({ length: early }, () => []);
     for (let r = 0; r < narrowRuns; r++) {
       const narrow = await BrickEngine.create(device, damOptions(1));
-      try { for (let k = 1; k <= early; k++) { const flow = await flowOf(narrow); narrow.advance(1); n[k - 1]!.push({ m: counts(await head(narrow), k), flow }); } } finally { narrow.destroy(); }
+      try { for (let k = 1; k <= early; k++) { narrow.advance(1); n[k - 1]!.push(counts(await head(narrow), k)); } } finally { narrow.destroy(); }
     }
-    console.log(`wide dam narrow runs, liveF (ceil flow) by step: ${n.map(v => v.map(x => `${x.m.liveF}(${x.flow})`).join("/")).join(" ")}`);
+    console.log(`wide dam narrow runs, liveF by step: ${n.map(v => v.map(x => x.liveF).join("/")).join(" ")}`);
     const near = (a: number, b: number) => Math.abs(a - b) <= Math.max(2, 0.01 * b);
-    let compared = 0;
+    const inBand = (a: number, xs: number[]) => {
+      const lo = Math.min(...xs), hi = Math.max(...xs), pad = Math.max(2, 0.03 * hi);
+      return a >= lo - pad && a <= hi + pad;
+    };
     // The wide sheet's measured peak by step 40 (12764 F, 316 C, 1.87M particles), with a margin.
     const wide = await BrickEngine.create(device, damOptions(4, { f: 17000, c: 425, particles: 3_500_000 }));
     try {
       for (let k = 1; k <= 40; k++) {
-        const flow = k <= early ? await flowOf(wide) : 0;
         wide.advance(1);
         const w = counts(await head(wide), k);
         if (k <= early) {
-          const runs = n[k - 1]!, same = runs.filter(x => x.flow === flow);
-          assert.ok(runs.some(x => near(w.fLiq, x.m.fLiq)), `step ${k} fLiq: wide ${w.fLiq} against narrow ${runs.map(x => x.m.fLiq).join("/")}`);
-          if (same.length) {
-            compared++;
-            for (const key of ["liveF", "fAct", "cAll"] as const) {
-              assert.ok(same.some(x => near(w[key], x.m[key])), `step ${k} ${key}: wide ${w[key]} against narrow ${same.map(x => x.m[key]).join("/")} at ceil flow ${flow}`);
-            }
-          } else console.log(`wide dam step ${k}: ceil flow ${flow} against narrow ${runs.map(x => x.flow).join("/")}; residency not compared`);
+          const runs = n[k - 1]!;
+          for (const key of ["fLiq", "liveF", "fAct", "cAll"] as const) {
+            const xs = runs.map(x => x[key]);
+            assert.ok(k <= tight ? xs.some(x => near(w[key], x)) : inBand(w[key], xs), `step ${k} ${key}: wide ${w[key]} against narrow ${xs.join("/")}`);
+          }
         }
       }
-      assert.ok(compared >= 7, `the residency compared on ${compared} of ${early} early steps`);
       // No brick far past the fluid: past the furthest brick holding liquid or particles, F reaches no further than
       // the residency rule's box (the flow (max BOUND_F + g dt) dt / h, 9 covering every class's margin past the fluid
       // (R3: the h ring 4, the particles flow + 4, the seeds 6 past a heat tile) and a brick's rounding),
