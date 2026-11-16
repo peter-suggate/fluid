@@ -24,6 +24,7 @@ import { quatRotate } from "../uniform/uniform-body-tile-bound";
 import { wgslFunction } from "../../../tools/nbflip-parity-extract";
 import { pbBodyCoupleWGSL, pbBodyShapesWGSL, pbBodyStampWGSL, pbCheckCutAtlas, PB_MAX_CUTS, PB_SUPPORTED_SHAPE_CODES } from "./bodies-shapes.wgsl";
 import { RIGID_BODY_CUT_ATLAS_WIDTH } from "../../core/solid-cuts";
+import { pbCoupleBrickWGSL, pbStampBrickWGSL, PB_EXCHANGE_WORDS } from "./bodies-kernels.wgsl";
 import { parityGPU, prng, runParity, ulpCompare, withParityDevice } from "./parity/harness";
 
 const N = 16;
@@ -407,5 +408,85 @@ test("bodies-shapes R6/R7: the stamp and couple agree with a Float64 mirror of t
     if (process.env.PB_DEBUG) for (let i = 0; i < stampWant.length; i++) if (Math.abs(stamp[i]! - stampWant[i]!) > 1e-4 * (1 + Math.abs(stampWant[i]!))) { const t = Math.floor(i / STAMP_WORDS); console.log(`cell ${t % N},${Math.floor(t / N) % N},${Math.floor(t / (N * N))} word ${i % STAMP_WORDS} got ${stamp[i]} want ${stampWant[i]}`); }
     assert.ok(s.n <= 4, `stamp: ${s.n} of ${stampWant.length} words differ (first ${s.first}: cell ${Math.floor(s.first / STAMP_WORDS)} word ${s.first % STAMP_WORDS}, got ${stamp[s.first]}, want ${stampWant[s.first]})`);
     assert.ok(c.n <= 4, `couple: ${c.n} of ${coupleWant.length} words differ (first ${c.first}, got ${coupleGot[c.first]}, want ${coupleWant[c.first]})`);
+  });
+});
+
+// ---- bodies-kernels: the per-brick passes over the fixture's 2^3 bricks.
+const BRICKS = (N / 8) ** 3;
+const brickOrigin = (b: string) => `8*vec3i(i32(${b}%${N / 8}u),i32((${b}/${N / 8}u)%${N / 8}u),i32(${b}/${(N / 8) ** 2}u))`;
+const BRICK_STUBS = /* wgsl */`
+var<private> tO:vec3i;
+fn tCellIndex(c:vec3i)->u32{return u32(c.x+${N}*(c.y+${N}*c.z));}
+fn tPutCut(l:u32,ch:u32,v:f32){outp[8u*tCellIndex(tO+pbBrickCell(l))+ch]=bitcast<u32>(v);}
+fn tPutOpen(l:u32,open:bool){outp[8u*tCellIndex(tO+pbBrickCell(l))+7u]=select(0u,1u,open);}
+${pbStampBrickWGSL({ putCut: "tPutCut", putOpen: "tPutOpen" })}`;
+
+test("bodies-kernels: pbStampBrick's FRAC, lower-face AP and W are the old upper-face values of the cell below, bitwise", { skip: !parityGPU }, async () => {
+  await withParityDevice(async device => {
+    const old = new Float32Array((await runParity(device, OLD_STAMP, { ...io(), threads: CELLS, outWords: STAMP_WORDS * CELLS })).buffer);
+    const run = async (mask: string) => new Float32Array((await runParity(device, { prelude: NEW_STUBS + BRICK_STUBS,
+      body: `_=pbCuts[0];_=pbBodies[0];let b=t/128u;tO=${brickOrigin("b")};pbStampBrick(tO,${mask},t%128u,128u);` },
+    { ...io(), threads: 128 * BRICKS, outWords: 8 * CELLS })).buffer);
+    const got = await run("tBrickMask(tO)"), u = new Uint32Array(got.buffer);
+    let differ = 0, faces = 0, first = "";
+    const at = (x: number, y: number, z: number) => x + N * (y + N * z);
+    for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const t = at(x, y, z), want: [number, number][] = [[got[8 * t]!, old[STAMP_WORDS * t + 1]!]];
+      if (u[8 * t + 7] !== (old[STAMP_WORDS * t + 1]! > 1e-5 ? 1 : 0)) { differ++; first ||= `OPEN ${x},${y},${z}`; }
+      for (let a = 0; a < 3; a++) {
+        const q = [x, y, z]; q[a]!--;
+        if (q[a]! < 0) continue;
+        const tq = at(q[0]!, q[1]!, q[2]!); faces++;
+        want.push([got[8 * t + 1 + a]!, old[STAMP_WORDS * tq + 2 + a]!], [got[8 * t + 4 + a]!, old[STAMP_WORDS * tq + 5 + a]!]);
+      }
+      for (const [g, w] of want) if (Math.fround(g) !== Math.fround(w) && !(Number.isNaN(g) && Number.isNaN(w))) { differ++; first ||= `cell ${x},${y},${z}: ${g} vs ${w}`; }
+    }
+    assert.ok(faces > 3 * CELLS * 0.9, `${faces} faces compared`);
+    assert.equal(differ, 0, `${differ} words differ (first ${first})`);
+    // The BODY_WAS clean-up pass (mask 0): the static values, as the hooks give them, and W = 0.
+    const plain = await run("0u"), vox = voxels();
+    let bad = 0;
+    for (let t = 0; t < CELLS; t++) {
+      if (plain[8 * t] !== (vox[t] ? 0 : 1)) bad++;
+      for (let a = 0; a < 3; a++) if (plain[8 * t + 4 + a] !== 0) bad++;
+    }
+    assert.equal(bad, 0, `${bad} static FRAC / W words off the hooks' values`);
+  });
+});
+
+test("bodies-kernels: pbCoupleBrick's exchange is the per-cell couple words' integer sum, bitwise", { skip: !parityGPU }, async () => {
+  const n = BODIES.length, k = coupleKernels(n);
+  k.new.prelude += "\nstruct TCoupleOut{reaction:vec3f,torque:vec3f,wet:i32,near:bool}";
+  await withParityDevice(async device => {
+    const p = pressures();
+    const cells = new Int32Array((await runParity(device, k.new, { ...io(), extra: { ...io().extra, 5: p }, threads: CELLS * n, outWords: COUPLE_WORDS * CELLS * n })).buffer);
+    const f = new Float32Array(cells.buffer);
+    const want = new Int32Array(PB_EXCHANGE_WORDS * 24);
+    const fixed = (x: number) => { const v = Math.fround(Math.fround(x) * 1e6), r = Math.round(v); return (Math.abs(v % 1) === 0.5 && r % 2 !== 0) ? r - 1 : r; };
+    for (let j = 0; j < CELLS * n; j++) {
+      const o = COUPLE_WORDS * j, i = j % n;
+      if (cells[o + 7] !== 1) continue;
+      want[PB_EXCHANGE_WORDS * i + 10] = 1;
+      for (let w = 0; w < 6; w++) want[PB_EXCHANGE_WORDS * i + w]! += fixed(f[o + w]!);
+      want[PB_EXCHANGE_WORDS * i + 6]! += cells[o + 6]!;
+    }
+    const prelude = `${NEW_STUBS}${COUPLE_WORLD}
+@group(0) @binding(6) var<storage,read_write> tX:array<atomic<i32>>;
+var<private> tO:vec3i;
+fn tFrac(l:u32)->f32{return pbStampCell(tO+pbBrickCell(l),tBrickMask(tO));}
+fn tP(c:vec3i,l:u32)->f32{return tCellPressure(c);}
+fn tW(c:vec3i,l:u32)->f32{return tWet(c);}
+${pbStampBrickWGSL({ putCut: "tNoCut", putOpen: "tNoOpen" })}
+fn tNoCut(l:u32,ch:u32,v:f32){}fn tNoOpen(l:u32,o:bool){}
+${pbCoupleBrickWGSL({ frac: "tFrac", pressure: "tP", wet: "tW" }, "tX")}`;
+    // One thread: every brick into the workgroup words, then one flush (the kernel's barriers are between these calls).
+    const body = `_=pbCuts[0];_=pbBodies[0];_=tPressure[0];if(t!=0u){return;}
+ pbCoupleClear(0u,1u);
+ for(var b=0u;b<${BRICKS}u;b++){tO=${brickOrigin("b")};pbCoupleBrick(tO,tBrickMask(tO),0u,1u,${DT});}
+ pbCoupleFlush(pbBodyMaskAll(),0u,1u);
+ for(var w=0u;w<${PB_EXCHANGE_WORDS * 24}u;w++){outp[w]=bitcast<u32>(atomicLoad(&tX[w]));}`;
+    const got = new Int32Array((await runParity(device, { prelude, body }, { ...io(), extra: { ...io().extra, 5: p, 6: new Int32Array(PB_EXCHANGE_WORDS * 24) as never }, threads: 1, outWords: PB_EXCHANGE_WORDS * 24 })).buffer);
+    assert.ok(want.some((v, i) => i % PB_EXCHANGE_WORDS === 1 && v > 0), "a body takes an upward reaction");
+    assert.deepEqual([...got], [...want]);
   });
 });
