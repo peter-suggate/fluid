@@ -786,7 +786,10 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     cover("retire", tR, ["cold", "no h stencil", "hot", "rebuilt", "crossing cell", "newton", "sentinel"]);
     // ---- nothing else moved.
     assert.equal(words(await e.read("vel"), velWords), 0, "vel untouched");
-    assert.equal(words(await e.read("fcell"), fcellCached), 0, "fcell untouched");
+    // Save lcClear's re-resolve stamps (FC_RES's C words: fluid-grid.wgsl.ts), a stamp only on a page it changed.
+    { const fc = await e.read("fcell"), RES = F.fcell.RES;
+      for (let cs = 0; cs < L.cap.c; cs++) if (fc[RES + cs] !== fcellCached[RES + cs]) { assert.ok(slots.includes(cs), `stamp on C slot ${cs}, no fixture page`); fc[RES + cs] = fcellCached[RES + cs]!; }
+      assert.equal(words(fc, fcellCached), 0, "fcell untouched"); }
     assert.equal(words(await e.read("dir"), dir), 0, "dir untouched");
     if (!fx.full) return { poisonCIn };
     // ---- the BULK16 latch (deviation 2): a BULK16 page word beside the pages (the skirt page (2, 0, 0)) fails lcAdvect.

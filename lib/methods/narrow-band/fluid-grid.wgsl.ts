@@ -62,7 +62,7 @@ export interface FluidLayout {
   /** The stages read through the tier owners and write only owned storage (FG_TIERED; brick-abi.md §2.5). */
   readonly tiered: boolean;
   readonly cells: number;
-  readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly UNIT: number; readonly PHIU: number; readonly HMASK: number; readonly CACHE4: number; readonly LIQ: number; readonly DIL4: number; readonly words: number };
+  readonly fcell: { readonly CNT: number; readonly RUN: number; readonly NEAR: number; readonly NEAR2: number; readonly KEY: number; readonly HOT: number; readonly DEPTH: number; readonly MASK: number; readonly TILE: number; readonly SLOT: number; readonly BOUND: number; readonly UNIT: number; readonly PHIU: number; readonly HMASK: number; readonly CACHE4: number; readonly LIQ: number; readonly DIL4: number; readonly RES: number; readonly words: number };
   readonly fdep: { readonly words: number };
   readonly fpart: { readonly RANK: number; readonly words: number };
   readonly fmoved: { readonly words: number };
@@ -88,7 +88,10 @@ export function fluidLayout(L: BrickLayout, options: { readonly tiered?: boolean
   const LIQ = take(16 * f);
   // Tiered, lDilateC's word for each tile of a C slot that no F slot holds.
   const DIL4 = take(tiered ? 512 * L.cap.c : 0);
-  const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, UNIT, PHIU, HMASK, CACHE4, LIQ, DIL4, words: Math.max(at, 1) };
+  // Tiered, the analysis's re-resolve stamps (lResolveD): a C slot's word (FC_RES + cs) where lcClear changed one of
+  // its vertices, an F slot's (FC_RES + NB_CCAP + slot) where lClear changed a non-owned vertex; the step's ring STEP + 1.
+  const RES = take(tiered ? L.cap.c + f : 0);
+  const fcell = { CNT, RUN, NEAR, NEAR2, KEY, HOT, DEPTH, MASK, TILE, SLOT, BOUND, UNIT, PHIU, HMASK, CACHE4, LIQ, DIL4, RES, words: Math.max(at, 1) };
   const fpart = { RANK: 0, words: 2 * p };
   return { tiered, cells, fcell, fdep: { words: 6 * cells }, fpart, fmoved: { words: L.particleStride * p }, fext4: { words: tiered ? FX4_WORDS * L.cap.c : 1 } };
 }

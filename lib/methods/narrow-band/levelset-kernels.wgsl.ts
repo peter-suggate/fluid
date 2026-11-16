@@ -609,7 +609,7 @@ ${stagedHead(0)}
  for(var r=0u;r<2u;r++){
   let l=lid+256u*r;let v=o+nbLocalCoord(l);
   let old=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);let x=lCleared(v,old);
-  if(x!=old){lSetPhi(NB_PHI_F_PHI,slot,l,x);}
+  if(x!=old){lSetPhi(NB_PHI_F_PHI,slot,l,x);if(FG_TIERED&&!fgVertexOwned(v)){fcStore(FC_RES+NB_CCAP+slot,nbRing(cfg.x,NB_RING_STEP)+1u);}}
  }
  if(lid<16u){fcStore(FC_MASK+16u*slot+lid,atomicLoad(&wMask[lid]));}
  if(lid<8u){
@@ -737,5 +737,29 @@ fn dNear(c:vec3i)->u32{
  for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;
-  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve };
+  // lResolveD (tiered): lResolve after the analysis's clear, for the slots whose resolved words the clear can have
+  // changed. Since the resolve before it, only lClear (F PHI) and lcClear (C PHI) write PHI and nothing changes
+  // ownership, so a non-owned vertex's value changes only where lClear rewrote it (its slot's stamp) or lcClear one of
+  // the C vertices it reads (the corners of a tile within one of its own, x in o-4..o+8: the stamps of at most 2^3
+  // pages). Every other slot's words already hold their resolve, and it leaves before the window stage.
+  const lResolveD = F.tiered ? k("lResolveD", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, LS_WGSL, "var<workgroup> sHead:u32;\nvar<workgroup> sAny:atomic<u32>;\nvar<workgroup> sDirty:u32;"].join("\n") + /* wgsl */`
+@compute @workgroup_size(256) fn lResolveD(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ if(lid==0u){sHead=nbListCount(NB_LIST_F_ALL);}
+ let g=nbGroup(wid);if(g>=workgroupUniformLoad(&sHead)){return;}
+ let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
+ let stamp=nbRing(cfg.x,NB_RING_STEP)+1u;
+ if(lid==0u&&fcLoad(FC_RES+NB_CCAP+slot)==stamp){atomicOr(&sAny,1u);}
+ if(lid<8u){
+  let lo=(o-vec3i(4))>>vec3u(5u);let hi=(o+vec3i(8))>>vec3u(5u);let p=lo+vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
+  if(all(p<=hi)&&all(p>=vec3i(0))&&all(32*p<=NB_LATTICE)){let cs=nbPageWord(p);if(cs<NB_SEAM&&fcLoad(FC_RES+cs)==stamp){atomicOr(&sAny,1u);}}
+ }
+ workgroupBarrier();
+ if(lid==0u){sDirty=atomicLoad(&sAny);}
+ if(workgroupUniformLoad(&sDirty)==0u){return;}
+ fgWindowStage(o>>vec3u(3u),lid,256u);workgroupBarrier();
+ var x:array<f32,2>;var w:array<bool,2>;
+ for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
+ for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
+}`) : undefined;
+  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve, lResolveD };
 }

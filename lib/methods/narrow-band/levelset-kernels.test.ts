@@ -74,7 +74,8 @@ test("lDilateC: a 4h tile's corner rule gives lTiles' and lClear's flags over it
 test("lDilateC: each round's runs after its sources' writers and before the round's x pass (tiered only)", () => {
   const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
   assert.equal(fluidLayout(L, { tiered: false }).fcell.LIQ + 16 * 600, fluidLayout(L, { tiered: false }).fcell.DIL4);
-  assert.equal(fluidLayout(L, { tiered: true }).fcell.words - fluidLayout(L, { tiered: true }).fcell.DIL4, 512 * 40);
+  assert.equal(fluidLayout(L, { tiered: true }).fcell.RES - fluidLayout(L, { tiered: true }).fcell.DIL4, 512 * 40);
+  assert.equal(fluidLayout(L, { tiered: true }).fcell.words - fluidLayout(L, { tiered: true }).fcell.RES, 40 + 600);
   for (const tiered of [false, true]) {
     const stages = fluidStagesAt(tiered)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s: 0, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
     type P = { kernel: { label: string; code: string }; z?: number; w?: number };

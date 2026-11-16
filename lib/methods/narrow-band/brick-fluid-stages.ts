@@ -72,7 +72,10 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // Tiered, lResolve after each writer of a non-owned vertex's value (fluid-grid.wgsl.ts FG_PHI_WGSL): the set
   // update (ownership, the transfer's C writes) before each schedule, lcCouple, lcClear and lcPublish (C PHI).
   const resolve = l.lResolve ? [at(l.lResolve, all)] : [];
-  const analysis = [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...resolve, ...dilate(2), ...near, at(l.lDistance, all)];
+  // The step's analysis re-resolves only what its clear changed (lResolveD); boot's follows lInit, which rewrites every
+  // F word, so it resolves every slot.
+  const analysisOf = (after: typeof resolve) => [at(l.lTiles, all), ...dilate(1), at(l.lClear, all), ...coarse("lcClear"), ...after, ...dilate(2), ...near, at(l.lDistance, all)];
+  const analysis = analysisOf(l.lResolveD ? [at(l.lResolveD, all)] : resolve), bootAnalysis = analysisOf(resolve);
   const stages: BrickStages = {
     label: tiered ? "lane F (NB-FLIP tiered)" : "lane F (NB-FLIP all-h)", bringUp: false, tiered,
     // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source),
@@ -83,7 +86,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all)],
     velocity: [at(v.uAdvect, both), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, both)] : []), at(v.uTransfer, both)],
     tail: [...ext4, at(v.uExtend, all), args(0, 1), at(p.pJoin, records), at(p.pDelta, records)],
-    boot: [...resolve, at(l.lInit, all), ...analysis, at(v.vGauge, both, 0, 1)],
+    boot: [...resolve, at(l.lInit, all), ...bootAnalysis, at(v.vGauge, both, 0, 1)],
     // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the
     // extension and the initial seeding from the kicked, extended U (the old engine seeds in its first frame from
     // the kicked grid), filed into bank 0. The seeding is kick.seed: E's TRIG-only census of the kicked state runs

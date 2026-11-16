@@ -1801,3 +1801,40 @@ Patch: ~/code/me/fluid-scratch/lane-f/patches/owner-mask-om.diff. Logs: ~/code/m
 - Combined bound with the two levers taken: about 1.3 ms at step 100.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{ue,p2}.
+
+## lResolve: the analysis re-resolves only what its clear changed (lResolveD, exact)
+
+The probe (tools/probe-ru.mts) measured, for each of the step's four lResolve placements, the share of F_ALL slots whose resolved words actually changed:
+
+| placement | step 20 | step 100 | step 300 |
+|---|---|---|---|
+| P0, move | 15% | 20% | 23% |
+| P1, after lcCouple | 52% | 83% | 95% |
+| P2, after lcClear | 2.3% | 0% | 0% |
+| P3, after lcPublish | 23% | 47% | 58% |
+
+**Why P2 can skip most slots.** Between P1 and P2, only lClear (F PHI) and lcClear (C PHI) write PHI, and nothing changes ownership. A non-owned vertex reads only the C corners of a tile within one of its own, at x in o−4..o+8. So its value can change only in two cases:
+- lClear rewrote it;
+- lcClear changed one of those corners.
+
+**How the stamps work.** FC_RES (new, at the end of fcell) holds stamps, each the step's ring STEP + 1:
+- lcClear stamps its C slot on any vertex it changes;
+- lClear stamps its F slot on any non-owned vertex it rewrites.
+
+lResolveD checks its own slot's stamp and those of at most 2^3 pages. A clean slot returns before the window stage. Boot's analysis follows lInit, which rewrites every F word, so it keeps the full lResolve. fluid-staging.test.ts checks two things: lResolveD follows lcClear, and PHI's only writers since the previous lResolve are lClear and lcClear.
+
+**Gate:** frozen --seq of lTiles..lResolveD against lTiles..lResolve, on tree-p3 against main fc38968a.
+
+| step | sequence before (ms) | after (ms) | change |
+|---|---|---|---|
+| 20 | 1.40 | 1.10 | −0.30 |
+| 100 | 1.38 | 1.12 | −0.26 |
+| 300 | 1.07 | 0.87 | −0.20 |
+
+- phi and set are the same at all three steps. fcell differs only in RES, by the new stamps.
+- The same held on main 73ff551c, before lane E's X8 change: −0.31 / −0.28 / −0.21 ms.
+- GPU tests pass, 40/41. The one failure was brick-wide-dam (step 9 liveF 1394 against 1415). It passed twice on each of HEAD and this tree on repeat, so it is a flake.
+- dam-300 passes against ref-2761350a.
+- No Metal abort.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{p2,p3}.

@@ -147,11 +147,21 @@ test("resolved φ: no resolved read before the schedule's lResolve or after a C 
     // Each list starts after a possible set update or census (stale until its lResolve).
     const schedules = { step: ["move", "rebin", "levelSet", "velocity", "tail"].flatMap(s => of(stages[s])), boot: of(stages.boot), kickForce: [...of(kick.force), ...of(kick.after)], kickSeed: of(kick.seed) };
     for (const [name, list] of Object.entries(schedules)) {
-      let fresh = false;
+      let fresh = false, prev = "", phiWriters: string[] = [];
+      const writesPhi = (k: K) => /phi\[NB_PHI_[FC]_PHI\+[^\]]*\]\s*=[^=]|lSetPhi\(NB_PHI_F_PHI,|lcSetC\(NB_PHI_C_PHI,/.test(k.code);
       for (const k of list) {
-        if (k.label === "lResolve") { fresh = true; resolves++; continue; }
+        // lResolveD re-resolves only what the analysis's clear changed: since the lResolve before it, PHI's only
+        // writers are lClear and lcClear (whose stamps it reads), and it follows lcClear.
+        if (k.label === "lResolveD") {
+          assert.ok(prev === "lcClear", `${name}: lResolveD follows ${prev}, not lcClear`);
+          assert.deepEqual([...new Set(phiWriters)].sort(), ["lClear", "lcClear"], `${name}: PHI writers since the last lResolve: ${phiWriters.join(",")}`);
+          fresh = true; resolves++; prev = k.label; phiWriters = []; continue;
+        }
+        if (k.label === "lResolve") { fresh = true; resolves++; prev = k.label; phiWriters = []; continue; }
+        if (writesPhi(k)) phiWriters.push(k.label);
         if (resolved(k)) { readers++; assert.ok(fresh, `${name}: ${k.label} reads resolved φ while a non-owned word may be stale`); }
         if (writesC(k)) fresh = false;
+        prev = k.label;
       }
     }
   }

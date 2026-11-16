@@ -545,6 +545,8 @@ fn lcClearPage(slot:u32,live:bool,lid:u32){
   let value=lcPhiC(NB_PHI_C_PHI,slot,l);
   if(value>=16.0||lcProtected(v,value<=0.0)||lcVertexCold(v)){continue;}
   lcSetC(NB_PHI_C_PHI,slot,l,max(value,16.0));
+  // lResolveD's stamp: a vertex of this page changed.
+  fcStore(FC_RES+slot,nbRing(cfg.x,NB_RING_STEP)+1u);
  }
 }
 `;
