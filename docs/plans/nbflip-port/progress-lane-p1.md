@@ -1071,3 +1071,44 @@ about 6.9 a step) extra calls, so (step with repeats - step without) / 138 is th
 
   - Iterations are identical across the pairs (steps 1-9: 4 4 4 4 5 4 5 6 6).
   - The D gates' ±0.1-0.2 spread therefore narrows but does not vanish.
+
+## 2026-11-16 — a block-local L0 smoother with Down0 fused: no-go in the Float64 model
+
+**The premise.** The L0 smoother is already block-local in threadgroup memory. Each L0 pass (pmgPreS, pmgPreU,
+pmgPostU, pmgPostS, pmgPostZ) is one launch, with one workgroup per brick or shifted block. A launch loads the 10³ tile
+(the block plus a one-cell halo) once and runs the three red-black sweeps, six `workgroupBarrier` half-sweeps, in `tp`.
+It then writes once. The six barriered passes are inside the workgroup, not global.
+- The order is already the seep's S2m staggered Schwarz, as the palindrome BSB.
+- The first brick pass is already fused into pmgUpdate (and into pmgWalls' restart), from zero.
+
+**What is left of the item:**
+- removing partitions: BS saves pmgPreU and pmgPostU; plain bricks saves all four S/U passes;
+- fusing Down0 into the last pre pass.
+
+The fusion needs the native L0 pass (nativePre0) out of the middle. It now sits between the last h pass and Down0.
+
+**The model** (`cmodel.ts` with the L0 pass order overridable, the six dumped states, the Jacobi start, mean PCG
+iterations to tolerance):
+
+| L0 passes, pre (post is the reverse) | its per state | mean |
+|---|---|---|
+| BSB (the GPU's; baseline) | 7 6 6 6 6 6 | **6.17** |
+| BS, staggered, one pair | 7 7 6 7 7 7 | 6.83 |
+| SB | | 6.83 |
+| BX (shift 4,4,4) | | 6.83 |
+| BS, 4 sweeps | | 6.83 |
+| BS, native additive at L0 (Down0 fusable) | | 6.83 |
+| B, plain Schwarz (bricks only) | 8 8 8 8 8 8 | 8.00 |
+| B, 4 or 6 sweeps | 8 8 8 8 8 8 | 8.00, 8.00 |
+| B, native additive at L0 (Down0 fusable) | 8 9 8 8 8 8 | 8.17 |
+
+- The gate was a mean of at most 6.17 + 0.5 = 6.67 iterations. Every variant fails it.
+  - Staggered BS is +0.67.
+  - Plain Schwarz is +1.83, and more sweeps do not move it. This is the seep's brick-face finding: block smoothers
+    aligned with the bricks, with a frozen halo, leave the cross-face error.
+- In time, at about 0.88 ms an iteration and about 6.9 open slots:
+  - BS saves about 106 µs a slot (PreU 50, PostU 56 in situ), about 0.7 ms a step. It costs about 0.6 ms: net
+    about 0.1 ms at best.
+  - Plain B saves about 260 µs a slot (about 1.8 ms). It costs about 1.6 ms.
+  - Both are below the 1 ms bar even before the gate.
+- Not taken. Nothing changed on the GPU.
