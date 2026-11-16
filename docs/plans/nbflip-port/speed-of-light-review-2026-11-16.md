@@ -142,6 +142,15 @@ Replace lTiles, lDilate, lClear, lNear (±5 walk), lDistance and lPublish (2.8 m
 brick-local sweeps. Redistance is numerical maintenance, not the flow's physics. Its ±5 reach is also what forced
 the two-tile halo that killed lever 1.
 - **Go/no-go:** a scratch swap on frozen states, then the surface metric (rough, dimples025), D rows and drift.
+- **Result (P, 87e777ce): no-go, and the premise was wrong.**
+  - Only lNear, lDistance and lPublish are redistance. lTiles, lDilate and lClear are band, activity and collar
+    bookkeeping that residency, seeding, extension and the C tier read.
+  - The 2- and 3-tile reaches come from lDilate's crossing distance, not from lNear's ±5 walk.
+  - A lower-bound probe (init plus 2 launches of 8 Jacobi Godunov sweeps) against lNear + lDistance + lPublish:
+    - step 100: 2.21 ms with lNear dropped, 1.44 ms with lNear kept;
+    - step 300: 1.38 ms and 0.87 ms.
+  - Under the 1.5 ms bar at step 300, even in the best case.
+  - Residual lever: lDistance alone is 1.0–1.7 ms. It could be cheaper with its semantics unchanged. Not pursued.
 
 ### D. Fewer particles where nobody looks (bound about 2.5 ms per 100k records)
 
