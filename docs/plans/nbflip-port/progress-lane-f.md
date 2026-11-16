@@ -1838,3 +1838,58 @@ lResolveD checks its own slot's stamp and those of at most 2^3 pages. A clean sl
 - No Metal abort.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{p2,p3}.
+
+## 2026-11-17: the GPU wedge (sparse-cm12-long-dam-break), its fix and the loop bounds
+
+Lane F took over after the 08:24 kernel panic. Every GPU run below used `tools/gpu/fluid-gpu-run.sh timing`, one at
+a time, with rc 0 and no 00000206.
+
+**Diagnosis.** cm12-diag.mts ran HEAD plus the pJoin guard for 8 steps. Every placement had its own fenced submit,
+and the bank pJoin reads was read back before each pJoin.
+- At boot, F_LIQ is 0 and C_LIQ is 2, so there are no initial seeds.
+- Step 6's move retired all 132 records.
+- Step 7's move then had an empty source and dispatched no workgroup, so pMove's first-lane reset of the destination
+  count never ran.
+- pJoin read the records of two steps before. Their before held pDelta's deltas, 90 of them NB_DELTA_NONE (3e38).
+- Clamped only to the 2047-tile window, one such record walks 2048^3 tiles: a dispatch that never drains.
+- With the guard in place, the run latched PARTICLES (0x84000080) instead.
+
+**ad371300, the fix.**
+- pArgs empties a move's destination bank at the move's arguments (cfg.w even).
+- pJoin latches a travel at or past the lattice and clamps its box to the lattice's tiles.
+- Regression: brick-particle-banks.test.ts. Its empty-source test fails on HEAD (777) and passes with the fix.
+
+**4b51a0f7, E's audit bounds.**
+- nbfMomentumTrace is fatal past UM_TRACE_SEGMENTS + 1 segments. A NaN dt used to loop for ever.
+- pScan clamps the bin count to the bank.
+- fgRun holds each run to its bin.
+- lNear's cfg.z is checked on the host: a new BrickKernel.cfgZ, read by validateBrickStages.
+- levelset-coarse's fixture had runs past its bank; they are now inside it.
+- Tests: brick-loop-bounds.test.ts, plus the NaN-dt GPU test in velocity-formulas.test.ts.
+
+**dc5d767f, the old engine.** nbRefineBox raises state[3] = 1 for a travel of 2048 cells or more and joins
+nothing. Test: tests/uniform-refine-box.test.ts.
+
+**Dam-300 at 4b51a0f7.** Judged Overall PASS against ref-2761350a.
+
+Step time, fenced, steps 13–165, sampled steps excluded, paired in one round against 7466dcae:
+
+| tree | median (ms) | mean (ms) |
+|---|---|---|
+| 4b51a0f7 | 35.04 | 38.94 |
+| 7466dcae | 35.18 | 38.47 |
+
+- The per-step difference has a median of +0.43 ms, inside single-run noise. The runs differ from step 0, from the
+  atomic order.
+- The coordinator accepted this; no repeat was run.
+
+**sparse-cm12-long, 12 steps, at 4b51a0f7.**
+- No FAIL. pJoin's step-7 bank is empty, and the largest travel is 4.09 cells.
+- The degenerate boot remains and is passed to E: banks are 0 at steps 6–8, then a seed burst from step 9.
+
+**Housekeeping.** While creating tree-h I extracted a git archive over the predecessor's existing
+fluid-scratch/lane-f/tree-h0.
+- Its read-only lib/ and tools/ were left intact, but new files (tests/, app/, docs/ and others) were added to it.
+- Nothing was deleted.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{hang,dg,rb}.
