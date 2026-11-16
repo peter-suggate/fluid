@@ -200,6 +200,21 @@ them. The implementation checks every use before porting it.
 - The cut latches in pressure-composite.wgsl.ts:545/563 and pressure-mgpcg.ts:820 are replaced by the cut handling.
 - C rows still latch on a cut, by the §4 invariant.
 
+**As landed (e4e1e152, behind `opt.cuts`, default off).** The terms above, with these explicit UNSUPPORTED latches
+(info word `tag | brick key`), each with an owner:
+- **0xa2, a liquid row in a static solid cell** (`CUT_STATIC` brick, `FRAC <= 1e-5`): the old inside-solid rows and
+  their complementarity machinery (umCellInsideSolid, 0x40000000 / 0x20000000) are not ported. Owner P, next after
+  A2-A4 and the rigid stage (sooner if E's batch reaches voxel scenes first). Any scene that binds E's static mask
+  with liquid able to enter a voxel cell hits it.
+- **0xa3, a seam face with `A != 1`:** rowsC takes the seam faces at volume 1, so an aperture there would be lost.
+  Only a static obstacle (voxels, a boundary record, terrain) that cuts through the h / 4h seam can produce it:
+  bodies never do, since §4 keeps every body tile and its one-tile ring at h. So the scenes are the static-solid
+  ones whose obstacle meets a coarse tile: tiered scenes with scenery or terrain below or beside coarse water.
+  Owner P with 0xa2 (a cut seam needs rowsC to read the h face's aperture, or E's tiering to keep cut tiles' rings h).
+- **0xa4, a face into an absent brick from a brick with a body candidate** (BMASK != 0): the absent side has no K
+  slot, so its aperture is unknown. §4's h ring makes it unreachable while setMark's margin holds; it latches if not.
+- A cut brick with a lattice tile not h-owned (the §4 invariant broken).
+
 ## 6. couple
 
 **What it is.** A list-indirect launch over `F_BODY` bricks with an h-owned liquid cell.
