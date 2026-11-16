@@ -1913,3 +1913,57 @@ Logs: ~/code/me/fluid-scratch/lane-f/logs/{hang,dg,rb}.
   the boxes' boot by brick and page; the initial velocity on exactly the old engine's faces; the falling torus's step-1
   seeds carry v0 to 1.2e-8 m/s (spread 3e-8). test:unit 1887 pass / 0 fail; check:types clean but lane N's three.
 - Not yet run: smokes of table scenes on the brick engine. They need pools, which E's pool rule supplies.
+
+## 2026-11-17: box observer on both tiers, the live bank's particles, the gauge's group-0 duties (dc195b11, E approved)
+
+This landed alone, ahead of M4, as the coordinator directed.
+
+- **The observer (`tools/nbflip-observe-brick.ts`, E's file, coordinator ruling).** Owners now follow vGauge's split.
+  - An F cell counts only when its tile is h-owned.
+  - A 4h-owned tile counts as one owner of width 4. Its fill uses vFill4's corner rule on nbCVertex. Its face means
+    come from the C face, or from the area mean of the 16 F faces where the tile beside is h-owned. Its walls are at
+    `boxWGSL(L)`.
+  - The dispatch covers cap.f + cap.c workgroups.
+  - Particles come from `readStats`.
+  - Dynamic-index vector writes are replaced with selects (`obsUnit`).
+- **makeInfo.** `brickEngine.particles = min(PCOUNT[STEP & 1], PCAP)`, the live bank (brick-abi.md §5.6).
+- **The controller bug the new regression found (lane F's volume control).** On a wholly 4h scene, group 0 is a C
+  page.
+  - So uAdvect never stored `FH_VOL_FILLED`/`FH_RATE`: the gauge read 0 and the rate went stale.
+  - And vGauge never set the capture flag or cleared the other parity pair.
+  - Both duties now run on `nbGroup(wid) == 0` ahead of the F/C split. With F live, group 0 is the same brick as
+    before.
+- **Regression** (`tests/nbflip-observe-brick.test.ts` test 2, through createBrickSolver). Observed equals the
+  presentation within 1e-3 and the gauge within 1%, and particles equal the live bank's.
+
+  | case | observed | presented | gauge | particles |
+  |---|---|---|---|---|
+  | letters' pool, no drops, all 4h (F 0, C 90) | 1212433.9 | 1212433.9 | 1212434.9 | 0 |
+  | dam, mixed (F 1486, C 96) | 753490.5 | 753374.1 | — | 105,516 |
+
+- **Checks.** test:unit 1865 / 0. GPU brick tests 45 / 45, rc 0, no 00000206. check:types clean.
+- **Dam-300 re-judged with the fixed observer** (`dam-300-m2`, on dc195b11, check slot): PASS, every gated row.
+
+  | row | before (m1) | after (m2) |
+  |---|---|---|
+  | D2 | 0.09 | 0.10 |
+  | D3 | 0.31 | 0.52 |
+  | D4 | 0.09 | 0.06 |
+  | D4c | 0.00 | 0.00 |
+  | D5c | 0.23 | 0.26 |
+  | D5ce | 0.17 | 0.17 |
+  | D5k | 0.87 | 0.76 |
+  | D5p | 0.52 | 0.54 |
+  | D5e | 0.95 | 0.93 |
+  | D6 | 0.11 | 0.11 |
+  | D7t | 0.42 | 0.28 |
+  | D7d | 0.08 | 0.13 |
+
+  - D1 stays at 1.00, and D8c / D8 are upper-bound passes.
+  - Particles at step 16: 162,730 before, 173,975 after.
+  - Drift at step 300: −0.90% before, −0.85% after.
+  - Fenced median: 31.1 ms before, 29.8 ms after.
+  - The dam's 4h tiles were a small share, so the rows barely move. The column heights now read whole 4h tiles
+    (D2 114.75 against 114.78).
+- **The seep** runs on the old engine. It isn't in `BRICK_ENGINE_SCENES`, and its observer is `nbflip-observe.ts`. So
+  neither this landing nor M4 changes it, and no re-run is needed.
