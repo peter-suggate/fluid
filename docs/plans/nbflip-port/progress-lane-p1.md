@@ -1396,3 +1396,73 @@ All figures below are from the same run as the probe (ms):
 A smaller lever does exist: lDistance alone is 1.0–1.7 ms. Its cost is the per-(vertex, nearest cell) trilinear-zero
 distance with up to 8 candidates per vertex. Making it cheaper while keeping its semantics is a lane F/E item. I did
 not pursue it.
+
+## 2026-11-16: the residual lDistance lever: the bound fails, so no build
+
+The lever had to keep lDistance's semantics: FC_DEPTH at reach-2 vertices, the trilinear-zero distance and the same
+candidate set. The bars were at least 0.8 ms at step 100 and at least 0.5 ms at step 300.
+
+**How it was measured.**
+- Frozen states of the tiered dam, poolF 4913, HEAD 2d486b3d (tree `trees/hd4`).
+- frozen-p `--only=lDistance` with `--sub` knockouts, each timed as min-of-5 of (21 − 1 repeats) / 20.
+- The knockouts are cumulative. The DIFFs they report are expected, since these are timing probes.
+- Script: `runs9/ld.sh`.
+
+**Cumulative knockouts (ms).**
+
+| variant | what runs | step 100 | step 300 |
+|---|---|---|---|
+| ~s | head, window and 12³ ring staging, the store (no enumeration, no solve) | 0.55 | 0.36 |
+| ~g | + candidate enumeration: 8 dNear lookups a vertex (fgReach1, slot, FC_NEAR), dedup, a slot check a pair, the pair list; result stored. **This is the floor.** | 0.95 | 0.65 |
+| ~l | + the solve loop's per-pair re-lookup (dNear, unpack) | 1.03 | 0.70 |
+| ~c | + the cell's 8 corners (fgCorners) | 1.22 | 0.85 |
+| full | + the root solve (nbfCellDistance: edge crossings and 6 Newton steps) | 1.44 | 1.02 |
+
+**Where the cost goes** (share of full at steps 100 / 300):
+
+| part | ms | share |
+|---|---|---|
+| staging + head + store | 0.55 / 0.36 | 38% / 35% |
+| enumeration | 0.40 / 0.29 | 28% / 28% |
+| per-pair re-lookup | 0.08 / 0.05 | |
+| corners | 0.19 / 0.15 | 13% / 15% |
+| root solve | 0.22 / 0.17 | 15% / 17% |
+
+**Bound** (full minus the floor): **0.49 ms at step 100, 0.37 ms at step 300.** Both are under the bars.
+
+**Occupancy and thread caps.**
+- Capture: xctrace with Metal GPU Counters on tree `trees/ldG`, which runs a gather-only `lDistanceG`
+  beside lDistance, storing to the NEAR2 scratch.
+- Every dispatch was its own labelled pass. 26 calls each were captured, steps about 100–126, all clean of other
+  processes' GPU work.
+
+| kernel | µs a call | occupancy mean / p90 | ALU / ALU limiter | buffer read / LLC / MMU limiters | thread cap | TG memory |
+|---|---|---|---|---|---|---|
+| lDistance | 1324 | 23.6% / 25.0% | 47.6% / 53.5% | 3.0 / 9.3 / 3.2% | 832 | 17.1 KB |
+| lDistanceG (gather only) | 885 | 23.7% / 25.0% | 44.2% / 48.7% | 3.3 / 9.9 / 4.3% | 1024 | 17.1 KB |
+
+- A 25.0% plateau is 3 resident 256-lane workgroups a core.
+- The thread caps come from the dumped MSL and mslprobe, with Dawn's max_total_threads_per_threadgroup(256)
+  attribute stripped.
+- The 17.1 KB of threadgroup memory is wPair 8 KB, the 12³ ring 6.9 KB, and the window and wFound.
+- Both kernels are latency-bound integer and address work. Read bandwidth is about 3% of peak.
+
+**Occupancy probe (wPair 2048 → 512 words, 11.1 KB; timing only; `runs9/ld2.sh`).**
+- The gather drops to 0.78 / 0.53 ms (−0.17 / −0.12), so its floor is threadgroup-memory bound.
+- The full kernel does not move (1.42 / 0.97). With the root solve it is also capped by registers (832 threads).
+
+So the floor itself can come down. Even taking that lower floor, the bound is 0.66 / 0.45 ms: still under the bars.
+
+**The ideas priced against this.**
+- **Staging the brick's crossing cells (FC_NEAR) once a workgroup** attacks enumeration (0.40 / 0.29). Suppose it
+  were free and the kernel ran at the higher occupancy. Total savings would be about 0.5 / 0.35 ms, because the
+  solve's corners and root (0.41 / 0.32) remain.
+- **Restricting candidates from FC_NEAR** is what the kernel already does. Its candidates are the FC_NEAR of the 8
+  cells about the vertex, deduplicated, so there is no further cut that keeps the same candidate set.
+- **Splitting vertices by class (tier code off the interior path):** the tier code sits in staging and fgPhi. The
+  whole of staging is 0.55 / 0.36 ms, and most of it is needed in any version.
+- **Upper bound for any version that keeps the solve:** full minus staging-only is 0.89 / 0.66 ms. That assumes
+  enumeration and the solve are both free, which the solve cannot be.
+
+**Verdict: no-go before the build.** Nothing was built or landed. The probe trees (`trees/ldG`) and logs
+(`runs9/ld*`, `runs9/xc/`) stay in scratch.
