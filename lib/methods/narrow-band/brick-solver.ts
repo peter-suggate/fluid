@@ -156,7 +156,9 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       allocatedBytes: this.brickEngine.bytes + this.brickPresentation.bytes, quality: this.options.quality,
       uniformPressureCappedFrames: word(this.brickEngine.solver.receipt?.capped),
       brickEngine: { liveF, liveC: header?.[H.LIVE_C] ?? 0, peakF: header?.[H.PEAK_F] ?? 0, pressureCapNow: header ? (header[H.STATE]! & STATE.PRESSURE_CAP) !== 0 : undefined,
-        step: header?.[H.STEP] ?? 0, presentations: this.presentations, lastPresentationMs: this.lastPresentationMs },
+        step: header?.[H.STEP] ?? 0, presentations: this.presentations, lastPresentationMs: this.lastPresentationMs,
+        // After step k the records are bank k & 1's (brick-abi.md §5.6 Banks: step n's rebin writes bank (n & 1) ^ 1).
+        particles: header ? Math.min(header[H.PCOUNT0 + (header[H.STEP]! & 1)]!, this.brickEngine.layout.cap.particles) : 0 },
     };
   }
 

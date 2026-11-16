@@ -1,7 +1,10 @@
-// The box observer on the brick engine (tools/nbflip-observe-brick.ts) against
-// boxOracle (tools/nbflip-observables.ts) over the same pool: phi and face
-// velocities read back from the engine, owners its live h cells. GPU only
-// (WEBGPU_NODE_MODULE).
+// The box observer on the brick engine (tools/nbflip-observe-brick.ts):
+// - all-h, against boxOracle (tools/nbflip-observables.ts) over the same pool: phi and face velocities read back
+//   from the engine, owners its live h cells;
+// - tiered (the letters' pool without its drops, wholly 4h; the dam's collapse, h and 4h), against the app's measure: the observed liquid is the
+//   presentation volume (brick-present.ts, the tier authority's per-cell fill) and the gauge's, and the particle
+//   count is the live bank's. Until 2026-11-17 the observer read F cells only and lost the 4h interior.
+// GPU only (WEBGPU_NODE_MODULE).
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BRICK_STRIDE, PHI_AIR } from "../lib/methods/narrow-band/brick-abi";
@@ -14,6 +17,17 @@ import { bringUpStages } from "../lib/methods/narrow-band/brick-stages";
 import { boxOracle, type BoxGeometry } from "../tools/nbflip-observables";
 import { createNBFlipBoxObserver } from "../tools/nbflip-observe";
 import { withUniformDevice } from "./helpers/uniform-geometric";
+import { H } from "../lib/methods/narrow-band/brick-abi";
+import { BRICK_ENGINE_SCENES, brickSceneSetup } from "../lib/methods/narrow-band/brick-scene";
+import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
+import { FH, VOL_UNIT } from "../lib/methods/narrow-band/velocity-kernels.wgsl";
+import { getMethod } from "../lib/core/method-registry";
+import { resolveMethodValues } from "../lib/core/method-contract";
+import { sceneDocument } from "../lib/core/scene-definition";
+import { getSceneDefinition } from "../lib/core/scenes";
+import { boxGeometry } from "../tools/nbflip-observables";
+import "../lib/methods";
+import type { SceneDescription } from "../lib/core/model";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const H_M = 1 / 32, DT = 1 / 60;
@@ -80,5 +94,57 @@ test("box observer (GPU, brick engine): matches the oracle over the pool's cells
     assert.equal(got.bulkRegions, 0);
     assert.ok(dropped > 0, "some faces lie in bricks that are not resident");
     observer.destroy(); solver.destroy();
+  });
+});
+
+/** A catalog scene through the app's createBrickSolver (the scene gate opened for it), its resolved values and step. */
+function appScene(id: string, edit: (scene: SceneDescription) => SceneDescription = s => s) {
+  const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD), definition = getSceneDefinition(id), scene = edit(sceneDocument(definition));
+  const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
+  const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
+  return { id, scene, quality, values };
+}
+
+test("box observer (GPU, brick engine, tiered): h and 4h owners give the presentation's volume and the live bank's particles", GPU, async () => {
+  const cases = [
+    // The letters' pool alone (no drops): calm, it goes 4h whole within a step (F 0), so every owner is a 4h tile.
+    { ...appScene("nbflip-figure-8-letters", s => ({ ...s, fluid: { ...s.fluid, scheduledDrops: [] } })), steps: 5, mixed: false },
+    // The dam's collapse: h-owned band and front, 4h-owned column interior.
+    { ...appScene("high-resolution-dam-break"), steps: 10, mixed: true },
+  ];
+  await withUniformDevice("brick observer tiered", async device => {
+    for (const { id, scene, quality, values, steps, mixed } of cases) {
+      const enabled = BRICK_ENGINE_SCENES.includes(id);
+      if (!enabled) (BRICK_ENGINE_SCENES as string[]).push(id);
+      try {
+        const solver = await createBrickSolver(device, scene, values, quality as never);
+        const e = solver.brickEngine, dt = brickSceneSetup(scene, values).setup!.dt_s;
+        try {
+          assert.equal(e.stages.tiered, true, `${id} runs tiered`);
+          for (let k = 1; k <= steps; k++) { assert.ok(solver.advanceTo(k * dt + 1e-12, [])); await solver.assertSimulationHealthy(); }
+          const head = await e.read("set", 0, 256), f = new Float32Array(head.buffer);
+          assert.ok(head[H.LIVE_C]! > 0, `${id}: C pages live (${head[H.LIVE_C]})`);
+          if (mixed) assert.ok(head[H.LIVE_F]! > 0, `${id}: F bricks live too (${head[H.LIVE_F]})`);
+          // The presentation volume (cells): its texture's sum.
+          const tex = solver.brickPresentation.volume, [w, hgt, dep] = [tex.width, tex.height, tex.depthOrArrayLayers], bpr = Math.ceil(4 * w / 256) * 256;
+          const buf = device.createBuffer({ size: bpr * hgt * dep, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+          const enc = device.createCommandEncoder(); enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: hgt }, [w, hgt, dep]); device.queue.submit([enc.finish()]);
+          await buf.mapAsync(GPUMapMode.READ); const v = new Float32Array(buf.getMappedRange()); let presented = 0;
+          for (let z = 0; z < dep; z++) for (let y = 0; y < hgt; y++) { const o = (z * hgt + y) * bpr / 4; for (let x = 0; x < w; x++) presented += v[o + x]!; }
+          buf.unmap(); buf.destroy();
+          const g = boxGeometry(scene, id === "high-resolution-dam-break" ? "dam" : "letters"), observer = await createNBFlipBoxObserver(device, solver, scene, g);
+          try {
+            const got = await observer.observe(), budget = head[FH.VOL_BUDGET + 1]! * (2 ** 32 / VOL_UNIT) + head[FH.VOL_BUDGET]! / VOL_UNIT;
+            console.log(`${id} step ${steps}: observed ${got.total.toFixed(1)}, presented ${presented.toFixed(1)}, gauge ${f[FH.VOL_FILLED]!.toFixed(1)}, budget ${budget.toFixed(1)} cells; particles ${got.particles}; F ${head[H.LIVE_F]} C ${head[H.LIVE_C]}`);
+            // The two fills agree where φ is planar inside a 4h tile; the curved band leaves second-order terms.
+            assert.ok(Math.abs(got.total - presented) <= 1e-3 * presented, `${id}: observed ${got.total} against the presentation's ${presented}`);
+            assert.ok(Math.abs(got.total - f[FH.VOL_FILLED]!) <= 1e-2 * budget, `${id}: observed ${got.total} against the gauge ${f[FH.VOL_FILLED]}`);
+            const live = Math.min(head[H.PCOUNT0 + (head[H.STEP]! & 1)]!, e.layout.cap.particles);
+            assert.equal(got.particles, live, `${id}: the observer's particles are the live bank's`);
+            if (mixed) assert.ok(live > 0, `${id}: the band has particles`);
+          } finally { observer.destroy(); }
+        } finally { solver.destroy(); }
+      } finally { if (!enabled) (BRICK_ENGINE_SCENES as string[]).pop(); }
+    }
   });
 });

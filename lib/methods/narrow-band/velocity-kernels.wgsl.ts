@@ -280,8 +280,8 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
  fgRingStage(o+vec3i(${ring}),lid,${lanes}u);workgroupBarrier();`}`;
 
   // uAdvect: a workgroup a brick, a lane two cells' three lower faces.
-  // Lane 0 of the first brick also turns this step's gauge into the volume control's rate (vGauge ran in the level
-  // set stage, before; the operator reads FH_RATE after).
+  // Lane 0 of the first workgroup (an F brick, or a C page when no F brick is live) also turns this step's gauge into
+  // the volume control's rate (vGauge ran in the level set stage, before; the operator reads FH_RATE after).
   // uAdvect reads resolved φ in its ring only (FG_PHI_OWNER_WGSL elsewhere): the plain loads in the trace's reads
   // cost it more than they save (frozen dam, 2026-11-16).
   const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_RING_WGSL(10), FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL].join("\n") + /* wgsl */`
@@ -328,14 +328,15 @@ fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
 ` + V_RING_WGSL + /* wgsl */`
 @compute @workgroup_size(${A_LANES}) fn uAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let dt=vDt();let h=vH();
-${stagedHead("vcAdvectPageOf", -1, A_LANES)}
- if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
- if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}
- if(g==0u&&lid==0u){
+ // The rate, ahead of the split: a wholly 4h scene (no F brick) has no F group 0 and kept a stale rate.
+ if(nbGroup(wid)==0u&&lid==0u){
   let filled=vVolume(FH_VOL_SUM+2u*(cfg.y&1u));
   atomicStore(&nbSet[FH_VOL_FILLED],bitcast<u32>(filled));
   atomicStore(&nbSet[FH_RATE],bitcast<u32>(nbfVolumeRate(filled,vVolume(FH_VOL_BUDGET),dt,V_CONTROL,atomicLoad(&nbSet[FH_VOL_CAPTURED])!=0u)));
  }
+${stagedHead("vcAdvectPageOf", -1, A_LANES)}
+ if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
+ if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}
  for(var r=0u;r<512u/A_LANES;r++){
   let l=lid+A_LANES*r;let c=o+nbLocalCoord(l);
   let live=vLive(c);
@@ -1046,7 +1047,7 @@ fn ySeed(T:vec3i,a:u32)->vec3f{
 
   // vGauge (the old surface volume gauge, measureInitial over the geometry's occupancy): a workgroup a brick sums
   // nbfCellFill over its cells from the brick's 9^3 vertices, staged; one atomic a brick into the step parity's
-  // fixed-point pair (cfg.w = 1: the boot's capture into the budget). The first brick clears the other parity's
+  // fixed-point pair (cfg.w = 1: the boot's capture into the budget). The first workgroup (F brick or C page) clears the other parity's
   // pair, which the last step's rate read and the next step's gauge fills.
   const vGauge = k("vGauge", [CFG, FB.set, FB.dir, FB.phiRO], [FG_SLOT_WGSL, FG_PHI_WGSL, V_WGSL, levelSetFillWGSL, geometricPlaneBoxWGSL, nbfVolumeWGSL.slice(0, nbfVolumeWGSL.indexOf("// filled, budget")), nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")), V_COARSE_WGSL].join("\n") + /* wgsl */`
 var<workgroup> wVertex:array<f32,729>;
@@ -1070,6 +1071,12 @@ fn vGaugePage(slot:u32,lid:u32){
 }
 @compute @workgroup_size(64) fn vGauge(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);
+ // The first workgroup's duties (an F brick, or a C page when no F brick is live; a wholly 4h scene has no F group 0,
+ // and its other pair was never cleared): the boot's capture flag, else the other parity's pair cleared.
+ if(g==0u&&lid==0u){
+  if(cfg.w==1u){atomicStore(&nbSet[FH_VOL_CAPTURED],1u);}
+  else{let other=FH_VOL_SUM+2u*((cfg.y&1u)^1u);atomicStore(&nbSet[other],0u);atomicStore(&nbSet[other+1u],0u);}
+ }
  if(lid==0u){sCount=nbListCount(NB_LIST_F_ALL);atomicStore(&wSum,0u);}
  let split=workgroupUniformLoad(&sCount);
  if(FG_TIERED&&g>=split){if(g-split<nbListCount(NB_LIST_C_ALL)){vGaugePage(nbListSlot(NB_LIST_C_ALL,g-split),lid);}return;}
@@ -1090,12 +1097,7 @@ fn vGaugePage(slot:u32,lid:u32){
  atomicAdd(&wSum,part);
  workgroupBarrier();
  if(lid!=0u){return;}
- let capture=cfg.w==1u;
  vGaugeAdd(atomicLoad(&wSum));
- if(g==0u){
-  if(capture){atomicStore(&nbSet[FH_VOL_CAPTURED],1u);}
-  else{let other=FH_VOL_SUM+2u*((cfg.y&1u)^1u);atomicStore(&nbSet[other],0u);atomicStore(&nbSet[other+1u],0u);}
- }
 }`);
 
   return { uAdvect, pDeposit, uViscous, uTransfer, uKick, uExtend, uExt4Seed, uExt4, uCache, vGauge, viscous };
