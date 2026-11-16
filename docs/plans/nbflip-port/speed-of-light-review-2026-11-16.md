@@ -218,3 +218,46 @@ level set.
 | C | P | frozen-state swap in scratch; F reviews (levelset-kernels.wgsl.ts is F's file) |
 | D | E | after B's census; policy, judged by the surface metric |
 | E | none | waits for the user |
+
+## 7. Measured outcome (2026-11-16, lane F, paired fenced holds)
+
+Setup:
+- High-resolution dam, brick engine, tiered, poolF 4913.
+- Steps 13–165 (153 steps), timing slot, order s0 a4 a4 s0.
+- rc 0 on every run, no Metal aborts.
+
+| pair | median 71d4acc5 → a4cc5147 (ms) | mean (ms) | p95 (ms) |
+|---|---|---|---|
+| 1 | 43.83 → 34.42 | 48.62 → 37.83 | 70.9 → 54.4 |
+| 2 | 43.20 → 34.69 | 48.30 → 37.87 | 73.6 → 53.5 |
+
+Area profile at a4cc5147, steps 18–23 (ms a step):
+
+| area | review §3 | a4cc5147 | change |
+|---|---|---|---|
+| level set | 10.6 | 9.0 | −1.6 |
+| velocity | 10.5 | 8.9 | −1.6 |
+| pressure solve | 7.0 | 6.8 | −0.2 |
+| pressure setup and projection | 3.2 | 3.1 | −0.1 |
+| brick set (incl. cert, region) | 2.7 | 3.3 | +0.6 (not attributed) |
+| transfer, seeding, pLiquid | 7.5 | 2.5 | −5.0 |
+| move | 4.5 | 2.2 | −2.3 |
+
+Landed:
+- d6ff2690: the apron;
+- d4beeabf: lever S;
+- b3b8cc2c: band 2;
+- 2ec1d780: the seam stage;
+- 014f62ba: the C tier at X8;
+- fc38968a: the ring exit;
+- 3ee9ec3d: lResolveD.
+
+No-go on their bounds:
+- B: the fused particle pipeline;
+- C: seep redistance;
+- lDistance;
+- class-specialised kernels;
+- the owner mask;
+- the tier machinery.
+
+Pressure is now the largest area (about 10 ms with setup) and waits on the user.
