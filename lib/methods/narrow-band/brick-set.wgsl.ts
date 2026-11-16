@@ -341,14 +341,15 @@ var<workgroup> wN:atomic<u32>;
       let l=lid+128u*j;let at=NB_STRIDE*s+l;
       ${zero("vel")}
       ${zero("pres")}
-      phi[NB_PHI_F_PHI+at]=bitcast<u32>(NB_PHI_AIR);phi[NB_PHI_F_PHI1+at]=bitcast<u32>(NB_PHI_AIR);
+      phi[NB_PHI_F_PHI+at]=bitcast<u32>(NB_PHI_AIR_C);phi[NB_PHI_F_PHI1+at]=bitcast<u32>(NB_PHI_AIR_C);
       phi[NB_PHI_F_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+nbLocalCoord(l)))|NB_FLAG_OWNER_H;
     }
   }
   // Entering C slots: a cell a tile (C local = tile index), open inside the lattice. φ is NB_PHI_AIR_C (16 max h, the
   // old far-air value and the least AIR an old claim takes; the old claim's own AIR is the box's far φ,
-  // uniform-page-initialise.ts 5-24, which would make the residency depend on the box). F's entering bricks keep
-  // NB_PHI_AIR (lane F's rule).
+  // uniform-page-initialise.ts 5-24, which would make the residency depend on the box). F's entering bricks take it
+  // too: nbAirStore's 16 max h holds at h vertices as at 4h ones (uniform-narrow-band-air.wgsl.ts 261, hDt.xyz the
+  // fine cell size).
   let nC=nbListCount(NB_LIST_C_ENTER);
   for(var e=wid.x;e<nC;e+=nw.x){
     let s=nbListSlot(NB_LIST_C_ENTER,e);let o=nbCOrigin(s);

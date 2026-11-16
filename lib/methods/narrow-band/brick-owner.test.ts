@@ -3,7 +3,7 @@
 // a block of tiles 4h-owned, with known C corners and C faces. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, CMASK_WORDS, brickAbiWGSL, phiFar } from "./brick-abi";
+import { BRICK_STRIDE, CMASK_WORDS, PHI_AIR_C, brickAbiWGSL, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
@@ -53,8 +53,9 @@ test("brick owner (GPU): vertex authority, hanging vertices and faces resolve as
     const fphi = await readChannel(e, "phi", "PHI");
     // The CPU oracle.
     const inLattice = (c: Vec3) => c.every(v => v >= 0 && v < N);
-    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : FAR; };
-    const cVertex = (T: Vec3) => T.some(v => v < 0 || 4 * v > N) || T.some(v => v >= 8) ? FAR : Math.fround(cPhi(T));
+    // A vertex no slot stores reads PHI_AIR_C (16 h, the old stored far air); outside the lattice, FAR.
+    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : PHI_AIR_C; };
+    const cVertex = (T: Vec3) => T.some(v => v < 0 || 4 * v > N) ? FAR : T.some(v => v >= 8) ? PHI_AIR_C : Math.fround(cPhi(T));
     const vertexCoarse = (v: Vec3): Vec3 | undefined => {
       const tA = v.map(x => x >> 2) as Vec3, inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) {
@@ -158,7 +159,7 @@ ${brickOwnerWGSL()}
 test("brick owner (GPU): a non-resident page's tile is no vertex authority (all-h: no stale C)", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   await withUniformDevice("brick owner absent page", async device => {
-    const M = 64, FAR64 = phiFar([M, M, M]);
+    const M = 64;
     const e = await BrickEngine.create(device, { lattice: [M, M, M], h_m: 1 / 64, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
       capacities: { f: 500, c: 32, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [40, -1, -1], hi: [65, 20.3, 65] }], solver: L => bringUpCG(L), stages: bringUpStages });
     const s = await snapshot(e), L = e.layout;
@@ -168,7 +169,7 @@ test("brick owner (GPU): a non-resident page's tile is no vertex authority (all-
     // Stale C φ: every resident page's C vertices deep liquid, which no all-h reader may take.
     for (const cs of s.pages.values()) e.write("phi", L.base("phi", "C", "PHI") + BRICK_STRIDE * cs, new Float32Array(512).fill(-5));
     const fphi = await readChannel(e, "phi", "PHI");
-    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : FAR64; };
+    const fVertex = (v: Vec3) => { const at = cellSlot(s, v); return at ? fphi(at.slot)[at.local]! : PHI_AIR_C; };
     const probes: Vec3[] = [];
     for (let z = 0; z <= 12; z++) for (let y = 0; y <= 12; y++) for (const x of [31, 32, 33]) probes.push([x, y, z]);
     const code = `${brickAbiWGSL(L, { dir: { name: "dir", atomic: false } })}

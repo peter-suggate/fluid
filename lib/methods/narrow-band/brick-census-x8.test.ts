@@ -9,12 +9,16 @@
 // older rule there, so those words are left to brick-census.test.ts's oracle. Two states: brick-census.test.ts's synthetic scene (h and
 // 4h tiles, the clamp and its candidates) and the old engine's dam census at frames 14 and 43 (every page
 // resident). Each runs tiered at the boot, tiered at a step's head (the ring keep marks) and all-h. GPU only.
+// R3 (lane E, the coordinator's ruling 2026-11-16) changed the ring from the 27 bricks about a band tile's brick to
+// the bricks of its 27 tiles (8 bricks, a subset): the ring's words (the candidate list and N_CAND, CENSUS_CLAMPED,
+// CENSUS_CAND, the keep marks MARK_F) are checked against that ring on X8's own WANT (itself frozen-exact), and the
+// keep marks the frozen ring alone set are the set buffer's as given.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
-import { ARGS, BRICK_STRIDE, CAND_MASK_WORDS, CMASK_WORDS, H, LIST, REC, RING, type BrickLayout } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, CAND_MASK_WORDS, CMASK_WORDS, H, LIST, REC, RING, bricksPerAxis, type BrickLayout } from "./brick-abi";
 import { CENSUS, brickCensusSchedule } from "./brick-census.wgsl";
 import type { BrickEngine } from "./brick-engine";
 import { CENSUS as FROZEN, CENSUS_H, brickCensusSchedule as frozenCensusSchedule } from "./parity/census-g1-frozen";
@@ -54,14 +58,48 @@ async function compareSchedules(e: BrickEngine, L: BrickLayout, tiered: boolean,
   const c0 = set0[H.N_CAND]!, cOld = old.set[H.N_CAND]!, cNew = neu.set[H.N_CAND]!;
   const candEnd = L.set.cand + L.cap.f, maskAt = L.set.candMask, maskEnd = maskAt + CAND_MASK_WORDS * L.cap.c;
   // TRIG bits 0..7 (and their count) are the need rule since the frozen passes (brick-census.test.ts checks them); bits 8..15 are compared.
-  const trigAt = L.set.trig, trigEnd = trigAt + L.cap.f;
+  const trigAt = L.set.trig, trigEnd = trigAt + L.cap.f, markAt = L.set.markF, markEnd = markAt + L.cap.f;
+  const ringWords = new Set<number>([H.N_CAND, CENSUS_H.CENSUS_CLAMPED, CENSUS_H.CENSUS_CAND]);
   for (let w = 0; w < old.set.length; w++) {
-    if ((w >= L.set.cand + c0 && w < candEnd) || (w >= maskAt && w < maskEnd) || w === CENSUS_H.CENSUS_TRIGGERED) continue;
+    if ((w >= L.set.cand + c0 && w < candEnd) || (w >= maskAt && w < maskEnd) || w === CENSUS_H.CENSUS_TRIGGERED || ringWords.has(w) || (w >= markAt && w < markEnd)) continue;
     const m = w >= trigAt && w < trigEnd ? 0xffffff00 : 0xffffffff;
     if (((old.set[w]! & m) >>> 0) !== ((neu.set[w]! & m) >>> 0)) note(`set word ${w}: ${old.set[w]!.toString(16)} vs ${neu.set[w]!.toString(16)}`);
   }
   const list = (s: Uint32Array, n: number) => [...s.subarray(L.set.cand + c0, L.set.cand + Math.min(n, L.cap.f))].sort((a, b) => a - b);
-  assert.deepEqual(list(neu.set, cNew), list(old.set, cOld), "the candidate list (sorted)");
+  // The R3 ring on X8's WANT: per page, the missing in-range bricks of its band tiles' rings, each once (tiered); the
+  // present ones keep-marked (tiered, keep); a band tile with a missing one clamped. The frozen ring's (27 bricks
+  // about the tile's brick) present bricks, for the marks only it set.
+  const { snapshot } = await import("./brick-readback");
+  const snap = await snapshot(e), range = bricksPerAxis(L.lattice), inRange = (b: V3) => b.every((v, a) => v >= 0 && v < range[a]!);
+  const expCand: number[] = [], newMarks = new Set<number>(), oldMarks = new Set<number>();
+  let expClamped = 0;
+  for (const [pk, cs] of snap.pages) {
+    const P: V3 = [pk & 1023, (pk >>> 10) & 1023, (pk >>> 20) & 1023], pageCand = new Set<number>();
+    for (let i = 0; i < 512; i++) {
+      if (((neu.set[L.set.want + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 0) continue;
+      const t = add(scale3(P, 8), [i & 7, (i >> 3) & 7, i >> 6]), lo = shr(add(t, [-1, -1, -1]), 1);
+      let clamped = false;
+      for (let n = 0; n < 8; n++) {
+        const nb = add(lo, [n & 1, (n >> 1) & 1, n >> 2]); if (!inRange(nb)) continue;
+        const slot = snap.bricks.get(key(nb));
+        if (slot !== undefined) { if (tiered && keep) newMarks.add(slot); continue; }
+        clamped = true; if (tiered) pageCand.add(key(nb));
+      }
+      if (clamped) expClamped++;
+      const b = shr(t, 1);
+      for (let n = 0; n < 27; n++) { const nb = add(b, [(n % 3) - 1, (Math.floor(n / 3) % 3) - 1, Math.floor(n / 9) - 1]); const slot = inRange(nb) ? snap.bricks.get(key(nb)) : undefined; if (slot !== undefined && tiered && keep) oldMarks.add(slot); }
+    }
+    expCand.push(...pageCand);
+  }
+  assert.deepEqual(list(neu.set, cNew), expCand.sort((a, b) => a - b), "the candidate list (sorted): the R3 ring");
+  assert.equal(cNew - c0, expCand.length, "N_CAND: the R3 ring");
+  assert.equal(neu.set[CENSUS_H.CENSUS_CAND], expCand.length, "CENSUS_CAND: the R3 ring");
+  assert.equal(neu.set[CENSUS_H.CENSUS_CLAMPED], expClamped, "CENSUS_CLAMPED: the R3 ring");
+  for (let s = 0; s < L.cap.f; s++) {
+    const a = old.set[markAt + s]!, b = neu.set[markAt + s]!, given = set0[markAt + s]!;
+    const x = newMarks.has(s) ? a : oldMarks.has(s) && given === 0 ? given : a;
+    if (b !== x) note(`MARK_F ${s}: ${b.toString(16)} vs ${x.toString(16)} (frozen ${a.toString(16)}, given ${given.toString(16)})`);
+  }
   const want = old.set.subarray(L.set.want, L.set.want + CMASK_WORDS * L.cap.c).reduce((n, x) => n + popcount(x), 0);
   const trig = old.set.subarray(L.set.trig, L.set.trig + L.cap.f).reduce((n, x) => n + popcount(x & 0xff), 0);
   const marks = old.set.subarray(L.set.markF, L.set.markF + L.cap.f).reduce((n, x) => n + (x !== 0 ? 1 : 0), 0);

@@ -387,22 +387,27 @@ fn ceMean(T:vec3i)->vec3f{
     let cls=select(0u,select(1u,2u,(bits&2u)!=0u),(support&3u)!=0u);
     // tileErrorOf (l.357).
     let defect=bitcast<f32>(census[o+3u]);let dry=defect==-1.0;
-    var error=select(defect,0.0,dry);let centre=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
+    var error=select(defect,0.0,dry);var error4=error;let centre=vec3f(bitcast<f32>(census[o]),bitcast<f32>(census[o+1u]),bitcast<f32>(census[o+2u]));
     var gradient=0.0;let speed=bitcast<f32>(census[o+4u]);var carried=speed;
     for(var axis=0u;axis<3u;axis++){
       var dd=vec3i(0);dd[axis]=1;let lo=t-dd;let hi=t+dd;
       if(ncTileState(lo)!=0u||ncTileState(hi)!=0u){continue;}
       let below=ceMean(lo);let above=ceMean(hi);
       let second=abs(above-2.0*centre+below)/8.0;if(width==4u&&!dry){error=max(error,second.x+second.y+second.z);}
+      if(!dry){error4=max(error4,second.x+second.y+second.z);}
       let variation=max(abs(above-centre),abs(centre-below));
       carried=max(carried,max(max(abs(below.x),max(abs(below.y),abs(below.z))),max(abs(above.x),max(abs(above.y),abs(above.z)))));
       gradient+=max(variation.x,max(variation.y,variation.z))/(4.0*h);
     }
     if(!(error>=0.0&&error<3.0e38)||!(speed<3.0e38)){error=3.402823e38;}
+    if(!(error4>=0.0&&error4<3.0e38)||!(speed<3.0e38)){error4=3.402823e38;}
     let span=bitcast<f32>(census[o+6u]);
     // The velocity change across one tile (m/s), cleared for a reader of class 0, saturated with the error.
     var deformation=max(4.0*h*gradient,span);
-    if(cls==0u){error=0.0;gradient=0.0;deformation=0.0;}else{gradient=max(gradient,span/h);}
+    if(cls==0u){error=0.0;error4=0.0;gradient=0.0;deformation=0.0;}else{gradient=max(gradient,span/h);}
+    // R2 (lane E, coordinator 2026-11-16): TC word 15, the error this tile would read as a width-4 owner (tileErrorOf's
+    // second difference of the mean velocity, from the same data), so an h tile is calm only by the test it meets as 4h.
+    census[o+15u]=bitcast<u32>(error4);
     if(!(error<3.0e38)||!(deformation<3.0e38)){deformation=3.402823e38;}
     // The packed copy (the old NB_UPDATE_ERRORS): deformation, error, the block word (the page key + 1), the width.
     {let d=NC_S*cs+${CENSUS.DEF}u+4u*i;census[d]=bitcast<u32>(deformation);census[d+1u]=bitcast<u32>(error);census[d+2u]=rgKey(cs);census[d+3u]=bitcast<u32>(f32(width));}

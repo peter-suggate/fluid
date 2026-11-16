@@ -10,7 +10,7 @@
 // positions are F's, and runs the same chain.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, RING, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, brickKey, F_CLASS, FAIL, H, RING, LIST, NONE, REC, SEAM, brickKeyCoord, cellLocal, phiFar, PHI_AIR_C } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { snapshot } from "./brick-readback";
@@ -105,11 +105,11 @@ class World {
   cOwned(v: V) { return v.every((x, a) => x >= 0 && x <= NL[a]!) && this.vertexCoarse(v) !== undefined; }
   cVertex(ch: string, T: V) {
     if (T.some((x, a) => x < 0 || 4 * x > NL[a]!)) return FAR;
-    const cs = this.cslotOfPage(shr(T, 3)); if (cs === NONE) return FAR;
+    const cs = this.cslotOfPage(shr(T, 3)); if (cs === NONE) return PHI_AIR_C; // absent in the lattice: 16 h (airc)
     return this.phi[this.base("C", ch) + BRICK_STRIDE * cs + this.tileIndex(T)]!;
   }
   fVertex(ch: string, v: V) {
-    const s = this.fslotOfBrick(shr(v, 3)); if (s >= SEAM) return FAR;
+    const s = this.fslotOfBrick(shr(v, 3)); if (s >= SEAM) return PHI_AIR_C;
     return this.phi[this.base("F", ch) + BRICK_STRIDE * s + cellLocal(v[0], v[1], v[2])]!;
   }
   vertexPhi(ch: string, v: V) {
@@ -131,6 +131,19 @@ class World {
   dist(c: V, k: number) { return (this.tileLoad(c, FT.DIST, 0xffffffff) >>> (4 * k)) & 15; }
   reach1(c: V) { return this.dist(c, 0) <= 2; }
   reach2(c: V) { return this.dist(c, 0) <= 3; }
+  // Deviation 10 (lcTileFresh, lcNearKnown): lInit's fresh FT_DIST (its low 13 bits all ones, no dilation's), and
+  // lNear's ±5 window about c holding no crossing tile (DIL4's source flags) outside a resident, non-fresh F slot.
+  tileFresh(t: V) { return ((this.tileLoad(mul(t, 4), FT.DIST, 0xffffffff) & 0x1fff) >>> 0) === 0x1fff; }
+  nearKnown(c: V) {
+    const lo = shr(sub(c, [5, 5, 5]), 2), hi = shr(add(c, [5, 5, 5]), 2);
+    for (let z = lo[2]; z <= hi[2]; z++) for (let y = lo[1]; y <= hi[1]; y++) for (let x = lo[0]; x <= hi[0]; x++) {
+      const t: V = [x, y, z]; if (!this.tileInLattice(t)) continue;
+      if (this.fgSlot(mul(t, 4)) !== NONE && !this.tileFresh(t)) continue;
+      const cs = this.cslotOfPage(shr(t, 3)); if (cs === NONE) continue;
+      if (((this.fcell[this.F.fcell.DIL4 + 512 * cs + this.tileIndex(t)]! >>> 24) & FTF.CROSSING) !== 0) return false;
+    }
+    return true;
+  }
   binCount(c: V) {
     if (!inLattice(c)) return 0;
     const s = this.fgSlot(c); if (s === NONE) return 0;
@@ -491,9 +504,13 @@ function coupleOracle(W: World, slots: number[], tally: Tally): Map<string, numb
     const c = W.cellOf(v), s = W.fgSlot(c);
     // particleSurfaceBulk's travel: nbCrossingTravel of the tile's spread reach word (617f9291's lcTileReach).
     const travel = crossingTravel(W.tileReach(shr(c, 2)));
-    const reached = W.reach1(c);
-    let nearest = NONE; if (reached && s !== NONE) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!;
-    const bulk = bulkDepth(band, q, reached, nearest !== NONE, [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], travel);
+    // Deviation 10: the guard's F words only where known, else band.
+    let bulk = band;
+    if (band < 0 && s !== NONE && !W.tileFresh(shr(c, 2)) && W.nearKnown(c)) {
+      const reached = W.reach1(c);
+      let nearest = NONE; if (reached) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!;
+      bulk = bulkDepth(band, q, reached, nearest !== NONE, [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], travel);
+    } else if (band < 0) bump(tally, "guard unknown");
     if (!((W.flags(c) & FTF.SURFACE_TILE) !== 0 && bulk > -2)) { out.set(key, bulk); bump(tally, "bulk"); continue; }
     const vs = W.fgSlot(v);
     let k = 0, hot = 0; if (vs !== NONE) { k = W.fcell[W.F.fcell.KEY + W.fgCell(vs, v)]!; hot = W.fcell[W.F.fcell.HOT + W.fgCell(vs, v)]!; }
@@ -504,8 +521,13 @@ function coupleOracle(W: World, slots: number[], tally: Tally): Map<string, numb
       let held = 0, open = 0; const hl: V = [0, 0, 0], hh: V = [0, 0, 0], ol: V = [0, 0, 0], oh: V = [0, 0, 0];
       for (let j = 0; j < 8; j++) {
         const b = corner(j), cc = sub(add(v, b), [1, 1, 1]);
-        if (!inLattice(cc) || W.fgSlot(cc) === NONE) continue;
-        const n = Math.min(W.binCount(cc), 8); open++; held += n;
+        if (!inLattice(cc)) continue;
+        // R1 (lane E): a 4h-owned cell (fgCellCoarse) counts the 4h authority's fill, its retired records being no
+        // evidence of air: clamp(0.5 - φ, 0, 1) of the advected C φ at the cell centre, as eight records' worth.
+        const coarse = !W.tileOwnerH(shr(cc, 2));
+        if (coarse) bump(tally, "coarse fill");
+        const n = coarse ? Math.round(8 * Math.min(1, Math.max(0, f32(0.5 - W.sample("PHI1", add(cc, [0.5, 0.5, 0.5])))))) : Math.min(W.binCount(cc), 8);
+        open++; held += n;
         for (let a = 0; a < 3; a++) if (b[a]) { hh[a] += n; oh[a]++; } else { hl[a] += n; ol[a]++; }
       }
       if (held > 0) bump(tally, "bound bins");
@@ -555,7 +577,7 @@ function retireOracle(W: World, slots: number[], tally: Tally): Map<string, numb
     const initial = W.sample("PHI", v);
     if (Math.abs(initial) <= 1e-8) return initial;
     let nearest = NONE;
-    if (W.reach1(c)) { const s = W.fgSlot(c); if (s !== NONE) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!; }
+    if (W.reach1(c)) { const s = W.fgSlot(c); if (s !== NONE && W.nearKnown(c)) nearest = W.fcell[W.F.fcell.NEAR + W.fgCell(s, c)]!; }
     let distance = Math.max(Math.abs(initial), 5);
     if (nearest !== NONE) {
       const base: V = [nearest & 1023, (nearest >>> 10) & 1023, nearest >>> 20], cv: number[] = [];
@@ -659,6 +681,14 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
       }
       set[L.set.binStart + fs] = start; set[L.set.binCount + fs] = at - start;
     }
+    // DIL4's source flags (deviation 10's lcNearKnown reads the crossing bit of tiles no F slot holds): a hashed tenth.
+    for (const [pk, cs] of s0.pages) {
+      const P = brickKeyCoord(pk) as V;
+      for (let i = 0; i < 512; i++) {
+        const T = add(mul(P, 8), [i & 7, (i >> 3) & 7, i >> 6]);
+        if (hash(T[0], T[1], T[2], 40) < 0.1) fcell[F.fcell.DIL4 + 512 * cs + i] = (FTF.CROSSING << 24) >>> 0;
+      }
+    }
     // ---- two COLD pages: (1, 0, 1) on the floor away from the column, (0, 1, 1) in the air above the surface.
     const dir = new Uint32Array(s0.dir), coldSlots = fx.cold.map(k => s0.pages.get(k)).filter(cs => cs !== undefined);
     if (fx.full) assert.equal(coldSlots.length, fx.cold.length, "the COLD pages are resident");
@@ -751,7 +781,7 @@ async function runFixture(device: GPUDevice, fx: Fixture) {
     const tA2 = await step("lcAdvect", "PHI1", (W, t) => advectOracle(W, slots, t, fatal), rel(2e-4));
     assert.equal(fatal.n, 0);
     cover("advect", sum(tA, tA2), ["cold hold", "far air", "full path", "wall full path", "foot", "smoothing", "cubic", "wall contact"]);
-    cover("couple", tC, ["cold", "no heat", "bulk", "union", "union adds", "erasure", "erasure refused"]);
+    cover("couple", tC, ["cold", "no heat", "bulk", "union", "union adds", "erasure", "erasure refused", "guard unknown"]);
     cover("clear", sum(tL0, tL), ["raised", "seed", "collar", "cold"]);
     cover("retire", tR, ["cold", "no h stencil", "hot", "rebuilt", "crossing cell", "newton", "sentinel"]);
     // ---- nothing else moved.

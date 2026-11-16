@@ -3,14 +3,15 @@
 // mixed-tier state of parity/composite-fixture.ts. GPU only.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, phiFar } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, CMASK_WORDS, H, LIST, NONE, PHI_AIR, PHI_AIR_C, phiFar } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { COMPOSITE_N, add, compositeFixture, keyCoord, scale, shr, type V3 } from "./parity/composite-fixture";
 import { P_FLAG, pressureCompositeKernels } from "./pressure-composite.wgsl";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const N = COMPOSITE_N;
-/** An absent vertex's φ (NB_PHI_FAR: the lattice's largest extent in h, the old vertex field's empty value). */
+/** A vertex outside the lattice (NB_PHI_FAR: the lattice's largest extent in h, the old vertex field's empty value); one
+ * in the lattice that no slot stores reads PHI_AIR_C (16 h, the old stored far air: brick-owner.wgsl.ts). */
 const FAR = phiFar([N, N, N]);
 const unit = (a: number): V3 => [a === 0 ? 1 : 0, a === 1 ? 1 : 0, a === 2 ? 1 : 0];
 const corner = (j: number): V3 => [j & 1, (j >> 1) & 1, j >> 2];
@@ -35,8 +36,8 @@ test("pressure composite rows (GPU): band, seam, native, wall and start rows as 
     // ---- The oracle (Float64, on the stored f32 inputs).
     const tileH = (t: V3) => { if (!tileInLattice(t)) return false; const cs = pageSlot(shr(t, 3)); if (cs === NONE) return false; const i = tileIndex(t); return ((dir[L.dir.cmask + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1; };
     const cellH = (c: V3) => tileH(shr(c, 2));
-    const cVertex = (T: V3) => { if (T.some(v => v < 0 || 4 * v > N)) return FAR; const cs = pageSlot(shr(T, 3)); return cs === NONE ? FAR : C.PHI[BRICK_STRIDE * cs + tileIndex(T)]!; };
-    const fVertex = (v: V3) => { const sl = fSlot(v); return sl === undefined ? FAR : F.PHI[BRICK_STRIDE * sl + local(v)]!; };
+    const cVertex = (T: V3) => { if (T.some(v => v < 0 || 4 * v > N)) return FAR; const cs = pageSlot(shr(T, 3)); return cs === NONE ? PHI_AIR_C : C.PHI[BRICK_STRIDE * cs + tileIndex(T)]!; };
+    const fVertex = (v: V3) => { const sl = fSlot(v); return sl === undefined ? PHI_AIR_C : F.PHI[BRICK_STRIDE * sl + local(v)]!; };
     const vertexCoarse = (v: V3): V3 | undefined => {
       const tA = shr(v, 2), inside = v.map((x, a) => x - 4 * tA[a]! !== 0);
       for (let k = 0; k < 8; k++) { const cc = corner(k); if (cc.some((c, a) => inside[a] && c === 0)) continue; const t = add(add(tA, cc), [-1, -1, -1]); if (tileInLattice(t) && pageSlot(shr(t, 3)) !== NONE && !tileH(t)) return t; } // a non-resident page's tile is no authority

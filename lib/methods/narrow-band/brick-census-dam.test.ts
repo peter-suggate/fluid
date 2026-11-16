@@ -199,8 +199,11 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
     const defWords = new Uint32Array(await e.read("census"));
     for (let i = 0; i < n; i++) {
       const t = coord(i), k = key(shr(t, 3)), cs = s.pages.get(k)!, at = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * local8(t), c = defCase(i);
-      defWords[at] = bitsOf(planDeformation(t)); defWords[at + 1] = 0; defWords[at + 2] = (c === "key" ? k + 2 : k + 1) >>> 0;
+      // The fixture holds no certificate error word (R2's input): the deformation stands in, so R2 demotes a mix.
+      defWords[at] = bitsOf(planDeformation(t)); defWords[at + 1] = bitsOf(planDeformation(t)); defWords[at + 2] = (c === "key" ? k + 2 : k + 1) >>> 0;
       defWords[at + 3] = bitsOf(c === "width" ? 0 : c === "negative" ? -4 : hOld(t) ? 1 : 4);
+      // TC's wet bit (R2 demotes only a tile its certificate saw liquid in): on a hashed 3/4 of the tiles.
+      defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * local8(t) + 8] = (Math.imul(i + 1, 0x9e3779b1) >>> 29) & 3 ? 1 : 0;
     }
     e.write("census", 0, defWords);
     // The old engine's split vertices (4-aligned h-closure vertices whose base disagrees with the h
@@ -318,6 +321,13 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       cens[o + CENSUS.RCROSS + 2 * l] = fx.cross[2 * i]!; cens[o + CENSUS.RCROSS + 2 * l + 1] = fx.cross[2 * i + 1]!; cens[o + CENSUS.RGAP + l] = fx.gap[i]!;
     }
     for (const cs of s.pages.values()) cens.fill(0, S * cs + CENSUS.STAT, S * cs + CENSUS.STAT + 16);
+    // R2's hysteresis: the last head's CALM bits hashed half a tile, under the page key + 1 (one workgroup in five a
+    // stale key: unknown, not calm).
+    for (const [cs, k] of pageKeys) {
+      for (let w = 0; w < 16; w++) cens[S * cs + CENSUS.CALM + w] = (Math.imul(w + 1, 0x9e3779b1) ^ Math.imul(cs + 3, 0x85ebca6b)) >>> 0;
+      for (let r = 0; r < 8; r++) cens[S * cs + CENSUS.CALM_KEY + r] = ((cs + r) % 5 === 0 ? k + 2 : k + 1) >>> 0;
+    }
+    const calmPrev = (cs: number, l: number) => cens[S * cs + CENSUS.CALM_KEY + (l >> 6)] === pageKeys.get(cs)! + 1 && ((cens[S * cs + CENSUS.CALM + (l >> 5)]! >>> (l & 31)) & 1) === 1;
     e.write("census", 0, cens);
     await e.run(brickCensusSchedule(L, k => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 }), LIST.C_ALL, LIST.F_ALL, true, true, true));
     const rSet = await e.read("set"), rCensus = await e.read("census");
@@ -331,13 +341,23 @@ for (const step of [14, 43]) test(`setCensus (GPU): the old NB-FLIP engine's own
       if (m === 1) replayedRegions++;
       if ((m === 1) !== modeR.has(rKey(R))) modeWrong++;
     }
+    // R2 (lane E, a stated deviation): at a step's head a calm band tile is 4h, dt error / h <= 0.08 (ncCalm) on the
+    // certificate copy this census read (the supplied DEF words); an unknown copy (stale key, width <= 0) is never calm.
+    const f32w = (u: number) => new Float32Array(new Uint32Array([u]).buffer)[0]!;
+    const calm = (cs: number, l: number) => { const o = S * cs + CENSUS.DEF + 4 * l;
+      if (cens[o + 2] !== pageKeys.get(cs)! + 1 || !(f32w(cens[o + 3]!) > 0) || (cens[S * cs + CENSUS.TC + 16 * l + 8]! & 1) === 0) return false;
+      const e = f32w(cens[o + 1]!); return e < 3.402823e38 && fr(fr(fr(meta.dt) * e) / fr(meta.h)) <= fr(0.08); };
+    let calmDemoted = 0, calmHeld = 0;
     for (let i = 0; i < n; i++) {
       const t = coord(i), cs = s.pages.get(key(shr(t, 3)))!, l = local8(t);
       const want = (rSet[L.set.want + 16 * cs + (l >> 5)]! >>> (l & 31)) & 1;
-      if (want !== fx.decided[i]) { wantWrong++; if (wantMiss.length < 16) wantMiss.push(`${t}${fx.deep[i] ? " deep" : ""}${splitTiles.has(i) ? " split-near" : ""}: ${want} vs ${fx.decided[i]}`); }
+      // The hysteresis: a calm h tile only at its second calm head (calmPrev), a calm 4h tile at once.
+      const isCalm = fx.decided[i] && calm(cs, l), expected = isCalm && (!hOld(t) || calmPrev(cs, l)) ? 0 : fx.decided[i];
+      if (expected !== fx.decided[i]) calmDemoted++; else if (isCalm) calmHeld++;
+      if (want !== expected) { wantWrong++; if (wantMiss.length < 16) wantMiss.push(`${t}${fx.deep[i] ? " deep" : ""}${splitTiles.has(i) ? " split-near" : ""}: ${want} vs ${expected}`); }
       else if (fx.mode[i] === 1) deepWant++;
     }
-    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss };
+    const replay = { oldReplayedRegions: modeR.size, oldReplayedTiles: 64 * modeR.size, replayedRegions, modeWrong, replayedTilesWantEqual: deepWant, wantWrong, wantMiss, calmDemoted, calmHeld };
     console.log(JSON.stringify({ ...report, replay }, null, 1));
     e.destroy();
     assert.equal(modeWrong, 0, "every region replays as the old engine's did");

@@ -83,8 +83,15 @@ test("lDilateC: each round's runs after its sources' writers and before the roun
       const at = (label: string, z?: number, w?: number) => list.findIndex(p => p.kernel.label === label && (z === undefined || (p.z ?? 0) === z) && (w === undefined || (p.w ?? 0) === w));
       const readers = list.filter(p => p.kernel.code.includes("FC_DIL4+")).map(p => p.kernel.label);
       if (!tiered) { assert.equal(at("lDilateC"), -1, `${name}: all h runs no lDilateC`); continue; }
-      assert.deepEqual([...new Set(readers)], ["lDilateC", "lDilate"], `${name}: DIL4's writer and reader`);
+      // levelset-coarse deviation 10 (lcNearKnown): lcCouple reads the last step's crossing flags (the dilation its
+      // FT_DIST and FC_NEAR came from), so before round 1; lcRetire and lcPublish's module this step's, after round 2.
+      // (the boot runs neither lcCouple nor lcRetire).
+      const coarse = ["lcCouple", "lcRetire", "lcPublish"].filter(l => at(l) >= 0);
+      assert.deepEqual([...new Set(readers)], ["lcCouple", "lDilateC", "lDilate", "lcRetire", "lcPublish"].filter(l => l.startsWith("lD") || coarse.includes(l)), `${name}: DIL4's writer and readers`);
+      if (name === "levelSet") assert.equal(coarse.length, 3, "levelSet runs lcCouple, lcRetire and lcPublish");
       const c1 = at("lDilateC", 0, 1), c2 = at("lDilateC", 0, 2);
+      if (at("lcCouple") >= 0) assert.ok(at("lcCouple") < c1, `${name}: lcCouple before round 1`);
+      for (const l of ["lcRetire", "lcPublish"]) if (at(l) >= 0) assert.ok(at(l) > at("lDilate", 2, 2), `${name}: ${l} after round 2`);
       assert.ok(at("lTiles") < c1 && c1 < at("lDilate", 0, 1), `${name}: round 1 lDilateC after lTiles, before the x pass`);
       assert.ok(at("lClear") < c2 && at("lcClear") < c2 && c2 < at("lDilate", 0, 2), `${name}: round 2 lDilateC after lClear and lcClear, before the x pass`);
       // Nothing between a round's lDilateC and its last pass writes φ or the tile flags.

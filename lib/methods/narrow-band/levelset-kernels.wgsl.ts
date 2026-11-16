@@ -230,6 +230,9 @@ var<workgroup> sCount:u32;
  for(var j=lid;j<count;j+=256u){
   let p=parts[bank*NB_PCAP+start+j];if(!(p.position.w>0.0)){continue;}
   let q=p.position.xyz;let c=vec3i(floor(q));let hot=p.position.w>1.0;
+  // R1 (lane E): a record in a 4h-owned cell (held through the two-head window, or not yet retired) is not surface
+  // evidence: the 4h tile's φ is the 4h level set's alone, and its records exist only so a quick reversal keeps them.
+  if(fgCellCoarse(c)){continue;}
   for(var k=0u;k<64u;k++){
    let v=c-vec3i(1)+vec3i(i32(k&3u),i32((k>>2u)&3u),i32(k>>4u));let d=q-vec3f(v);let d2=dot(d,d);
    if(!(d2<4.0)){continue;}
@@ -447,6 +450,9 @@ fn lAbsentWord(t:vec3i)->u32{
  let old=fcLoad(own+FT_DIST);
  // FT_DIST bit 12: the support's bit 1 (round 1's, kept by round 2).
  var bit=old&0x1000u;if(round==1u){bit=select(0u,0x1000u,(sup&2u)!=0u);}
+ // Invariant (levelset-coarse lcTileFresh reads it): bit 12 is set only with the occupied distance (bits 8..11, the
+ // same round-1 sources) at most 3, so a dilated word's low 13 bits are never all ones, lInit's fresh word. A new
+ // writer of FT_DIST must keep it (brick-wide-dam.test.ts asserts it).
  fcStore(own+FT_DIST,(old&~(mask|0x1000u))|(best&mask)|bit);
  if(round==2u){
   let hn=fcLoadF(own+FT_HN);

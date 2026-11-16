@@ -1633,3 +1633,57 @@ pressure-mgpcg.ts pRedAdd adds workgroup partials into 64 bins by float CAS in a
 identical; X is about 4e-10 apart). That reaches one splash particle's speed, the max BOUND_F (2.08 or 2.67 m/s at
 step 6), and the residency's ceil of the flow then holds one more brick plane or not (step 7 liveF 1575/1579 or
 1604). The test compares the residency at an equal ceil(flow) of the step's starting bound. pRedAdd is lane P's.
+
+## 2026-11-16: r2 + R3 landed (R1 retirement, R2 calm demotion, R3 h ring), with the 4h-tile surface rules
+
+The user's direction (via the coordinator): the old method has far too many particles in areas of low interest, so be
+aggressive in removing fine particle tiles, with R1 and R2 done together. This lands r2 (airc, R1's two-head
+retirement, R2's calm demotion with hysteresis) and R3 (the h residency ring), rebased on c35cbe65 and gated in
+~/code/me/fluid-scratch/lane-e/r4/g5.
+
+What a 4h tile's surface is ("no particles is not evidence of air"; the coordinator's rulings 2026-11-16):
+- Held records in a 4h-owned cell stamp nothing (lSplat), raise no θ or surface heat (pTiles), and are not merged or
+  mass-cut by pMove's crowding merge. They exist only so that a quick reversal keeps them.
+- lcCouple's union bound counts a 4h-owned cell by the 4h authority's fill, round(8 clamp(0.5 - φ, 0, 1)), of the
+  advected C φ at the cell centre. Skipping the cell instead made C φ depend on the tile's own tier: a limit cycle, 79k
+  reversals within 2 steps over 20-120 against the control's 31k. The fill gives 26k.
+- The mass rules read pMassDepth: tiered and off the h band, the 4h φ rather than fgDepth's push to ±6 cells.
+  - The push made held records at a 4h surface merge as deep. They re-entered heavy and did not split. At step 480,
+    dimple columns held 8.7 records in their top 4 cells against 14.9 in steady columns, at mass 1.3-2.0, and the
+    nearest record was 0.83 cells away against 0.42.
+  - fgDepth itself is unchanged, so every grid reader keeps the push. uTransfer is bitwise HEAD's on frozen states at
+    steps 20 and 100 (lane F's frozen2).
+- R2's calm verdict is tier-invariant: an h tile takes max(its DEF error, the width-4 error from its own data), TC word
+  15 (tileErrorOf's second difference of the mean velocity). A demoted tile is not re-refined by a stricter test.
+- A fifth residency class covers the tiles this head refines from 4h. Their re-entry seeds move at the grid velocity
+  before any ACT.SEED covers them, which was the cause of the REACH latch at 0x601c09.
+
+Gate (tree against HEAD c35cbe65, same round):
+- dam-300 Overall PASS, HEAD PASS too. D4 at 30-90 -0.0438 against -0.0421; D8 at 30-90 6.38e5 against 6.88e5.
+- Fenced timing median, steps 13-165: 43.01 against 48.67 ms. Window kernel mean 46.5 against 53.9 ms.
+- liveF at 300 is 1435 against 2331; particles 337k against 392k.
+- Surface (rough / dimples05 at 240, 360, 480), two runs: 0.2171/6, 0.2191/3, 0.1441/4 and 0.2214/2, 0.2174/2,
+  0.1184/4. The mean dimples05 is 3.5 against HEAD's 1.1 over nine samples (max 4). The coordinator accepted it for
+  this landing, since 3.5 and the unscoped variant's 2.7 are within the noise.
+
+Late-time energy (dam, 600 steps, two runs each against HEAD c35cbe65; ke_J / KE + PE in J). r4's mechanical
+energy is 3-5 J below HEAD at every step in both runs, against HEAD's run-to-run spread of 0.3-0.6 J; volume drift
+accounts for under 1 J. The user's ruling: "extra damping is probably good". It is accepted and not a landing gate.
+
+| step | HEAD a | HEAD b | r4 a | r4 b |
+|---|---|---|---|---|
+| 240 | 21.52 / 279.8 | 21.92 / 280.1 | 19.25 / 274.8 | 20.04 / 276.2 |
+| 360 | 6.37 / 274.1 | 6.12 / 274.7 | 2.44 / 270.7 | 3.65 / 271.3 |
+| 480 | 10.18 / 274.0 | 10.11 / 273.7 | 13.45 / 270.1 | 12.36 / 270.9 |
+| 600 | 9.93 / 270.2 | 9.51 / 269.9 | 3.83 / 267.3 | 5.46 / 267.3 |
+
+Known follow-ups:
+1. Seam-adjacent dimples, and the visible pockmarks (about 8-10 shallow pocks under 0.5 h on the calm surface at
+   about 5.7 s in the coordinator's visual check; none in HEAD at 5.9 or 8.2 s). The next task.
+   The metric's dimples: h tiles with 9-13 of their 26 neighbours at 4h still dimple more often than HEAD. Their
+   columns remain somewhat sparse and heavy (mass 1.15-1.3 at 1-2 cells deep against 1.01 steady).
+2. The unpushed depth for vcTransferFace (the C-page uTransfer face gather). The unscoped fgDepth variant, which
+   included it, averaged 2.7 dimples over nine samples. It needs lane F's check against the old engine's coarse
+   transfer and its own surface runs.
+3. lcCouple costs 0.32 against 0.15 ms (lcNearKnown's ±5 window walk plus the fill sample), and lcRetire 0.62 against
+   0.51 ms. pSeed costs 3.13 against 1.92 ms, from the re-entry seed's second launch.

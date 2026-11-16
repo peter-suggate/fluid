@@ -95,6 +95,13 @@
  * 9. Sources (umSourceuvSourcePhi, nbSourcePhi) are the identity: brick-scene refuses scenes with sources until lane
  *    F's M4. The old state word 15 (a coarse vertex under 16 seen, the next phiResolve's gate) is not kept: nothing
  *    in the brick engine resolves hanging vertices into storage.
+ * 10. The F residency is the h tiles' ring (lane E, R3, the coordinator's ruling 2026-11-16, the user's aggressive
+ *    fine-tile retirement): lcCouple's and lcRetire's F guard words are read only where they are the old engine's
+ *    (lcNearKnown: c's slot resident and not fresh, and no crossing tile of lNear's ±5 window absent from F when lNear
+ *    ran). Elsewhere the C level set stands in: lcCouple's crossing guard keeps band (the nearest crossing's depth is
+ *    |band|), lcBuildDistance takes no F candidate (the projection onto the C zero and lcBoundMetric bound it), and an
+ *    in-lattice bin cell no F slot holds is open with no particles (particles bin only into F slots). Unknown is never
+ *    read as far.
  *
  * Unknown features fail: a lattice that is not whole pages latches FAIL.UNSUPPORTED (0x4c430001; brick-scene refuses
  * it), BULK16 state in lcAdvect latches FAIL.UNSUPPORTED (0x4c430003, deviation 2), and a trace over 128 cells
@@ -384,6 +391,31 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
 }
 `;
 
+const LC_NEAR_KNOWN_WGSL = /* wgsl */`
+// Deviation 10 (lane E, R3, the coordinator's ruling 2026-11-16): the F residency is the h tiles' ring, so lNear's
+// window may hold tiles no F slot held when it ran. FC_NEAR at cell c (lNear: the nearest crossing cell within ±5 a
+// axis, of F slots only) is the old engine's exactly when every crossing tile of that window was in an F slot then.
+// lcNearKnown tests it per tile of the window ((c - 5) >> 2 .. (c + 5) >> 2): a tile whose slot is resident and not
+// fresh is known; any other in-lattice tile of a resident page is a crossing source by its DIL4 word (lDilateC's
+// source flags, bits 24.., FTF_CROSSING: the C corners' crossing rule, which is lTiles' for a 4h tile), and is then
+// unknown. A tile in no resident page is no source (as lDilate reads it). lInit's fresh FT_DIST is all ones; its low
+// 13 bits (the three distances at 15 with the support bit) are no dilation's (lDilate sets the support bit only within
+// 3 tiles of an occupied tile, so its occupied distance is then at most 3), so a fresh slot (claimed at this head,
+// absent when lNear last ran) reads by its DIL4 word too. lcCouple reads the last step's lNear and DIL4 (both run
+// after it): a tile released at this head reads a stale DIL4 word, but it was resident when lNear ran, so a stale
+// crossing bit only makes the test conservative. lcRetire reads this step's (after lNear and the round-2 lDilateC).
+fn lcTileFresh(t:vec3i)->bool{return (fgTileLoad(4*t,FT_DIST,0xffffffffu)&0x1fffu)==0x1fffu;}
+fn lcNearKnown(c:vec3i)->bool{
+ let lo=(c-vec3i(5))>>vec3u(2u);let hi=(c+vec3i(5))>>vec3u(2u);
+ for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
+  let t=vec3i(x,y,z);if(!nbTileInLattice(t)){continue;}
+  if(fgTileAt(4*t,0u)!=NB_NONE&&!lcTileFresh(t)){continue;}
+  let cs=fgTileCSlot(t);if(cs==NB_NONE){continue;}
+  if(((fcLoad(FC_DIL4+512u*cs+nbTileIndex(t))>>24u)&FTF_CROSSING)!=0u){return false;}
+ }}}
+ return true;
+}
+`;
 const LC_COUPLE_WGSL = /* wgsl */`
 // nbInterpolatedHeat's tile k about base (held to the box, umTileNearFromPage; every in-lattice tile is open): its
 // θ heat (FT_THETA) or surface heat (FT_SURF), 0 where no F slot holds it (deviation 7); the surface heat skips a
@@ -412,9 +444,16 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
  let c=lcCellOf(v);let s=fgSlot(c);
  // particleSurfaceBulk's travel: nbCrossingTravel of the tile's candidate word (the spread reach word).
  let travel=nbfCrossingTravel(lcTileReach(c>>vec3u(2u)));
- let reached=fgReach1(c);
- var nearest=NB_NONE;if(reached&&s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
- let bulk=nbfBulkDepth(band,q,reached,nearest!=NB_NONE,vec3f(fgUnpack(nearest)),travel);
+ // Deviation 10: where c's guard words are not known (no F slot, a fresh one, or a crossing of lNear's window no F
+ // slot held: lcNearKnown) the nearest crossing is the C level set's: its depth |band| (at most the distance to the
+ // nearest crossing cell), so the guard keeps band (min(band, -depth) = band for any depth ≤ |band|). Unknown is never
+ // read as far (the old unreached depth 8, or a farther crossing).
+ var bulk=band;
+ if(band<0.0&&s!=NB_NONE&&!lcTileFresh(c>>vec3u(2u))&&lcNearKnown(c)){
+  let reached=fgReach1(c);
+  var nearest=NB_NONE;if(reached){nearest=fcLoad(FC_NEAR+fgCell(s,c));}
+  bulk=nbfBulkDepth(band,q,reached,nearest!=NB_NONE,vec3f(fgUnpack(nearest)),travel);
+ }
  let gather=(fgTileFlags(c)&FTF_SURFACE_TILE)!=0u&&bulk>-2.0&&theta>0.0;
  if(!gather){return bulk;}
  let vs=fgSlot(v);
@@ -426,8 +465,15 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
   var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
   for(var k=0u;k<8u;k++){
    let bit=vec3u(lcCorner(k));let cc=v+vec3i(bit)-vec3i(1);
-   if(!nbInLattice(cc)||fgSlot(cc)==NB_NONE){continue;}
-   let n=min(lcBinCount(cc),8u);open++;held+=n;
+   // A 4h-owned cell counts the 4h authority's fill, not its bin (lane E, the coordinator's rulings 2026-11-16): R1
+   // retires its records, so an empty bin there is not evidence of air, and skipping it made C φ depend on the tile's
+   // own tier (a limit cycle). Its fill is the planar volume fraction of the advected C φ at the cell centre,
+   // clamp(0.5 - φ, 0, 1), as eight records' worth. An h cell no F slot holds is open with no particles.
+   if(!nbInLattice(cc)){continue;}
+   var n=0u;
+   if(fgCellCoarse(cc)){n=u32(round(8.0*clamp(0.5-lcSample(1u,vec3f(cc)+0.5),0.0,1.0)));}
+   else if(fgSlot(cc)!=NB_NONE){n=min(lcBinCount(cc),8u);}
+   open++;held+=n;
    let high=bit!=vec3u(0u);
    heldHigh+=select(vec3u(0u),vec3u(n),high);openHigh+=select(vec3u(0u),vec3u(1u),high);
    heldLow+=select(vec3u(n),vec3u(0u),high);openLow+=select(vec3u(1u),vec3u(0u),high);
@@ -498,7 +544,9 @@ fn lcBuildDistance(v:vec3i,c:vec3i)->f32{
  let initial=lcSample(0u,vec3f(v));var value=initial;
  if(abs(initial)>1e-8){
   var nearest=NB_NONE;
-  if(fgReach1(c)){let s=fgSlot(c);if(s!=NB_NONE){nearest=fcLoad(FC_NEAR+fgCell(s,c));}}
+  // Deviation 10: FC_NEAR only where lNear's window was known (lcNearKnown); else no F candidate, and the C terms
+  // (the projection onto the C zero and lcBoundMetric) bound the distance, as where the reach holds none.
+  if(fgReach1(c)){let s=fgSlot(c);if(s!=NB_NONE&&lcNearKnown(c)){nearest=fcLoad(FC_NEAR+fgCell(s,c));}}
   var distance=max(abs(value),5.0);
   if(nearest!=NB_NONE){
    let base=fgUnpack(nearest);var cv:array<f32,8>;
@@ -586,9 +634,9 @@ fn lcPublishPage(slot:u32,live:bool,lid:u32){
 export const levelSetCoarseWGSL = {
   common: () => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL].join("\n"),
   advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, levelSetReleaseWGSL(), LC_ADVECT_WGSL].join("\n"),
-  couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_COUPLE_WGSL].join("\n"),
+  couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_COUPLE_WGSL].join("\n"),
   clear: () => [LC_SEEDS_WGSL, LC_CLEAR_WGSL].join("\n"),
-  retire: () => [nbfRedistanceWGSL, LC_RETIRE_WGSL].join("\n"),
+  retire: () => [nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_RETIRE_WGSL].join("\n"),
 };
 
 export interface LevelSetCoarseKernels {

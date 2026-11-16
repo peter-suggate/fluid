@@ -20,7 +20,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, LIST, NONE, PHI_AIR, REC, ARGS, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
+import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, LIST, NONE, PHI_AIR, PHI_AIR_C, REC, ARGS, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
@@ -262,9 +262,9 @@ test("brick engine (GPU): bricks enter and leave as the head's residency oracle 
     await e.run(e.schedule.part2.filter(p => p.kernel.label === "setMark"));
     const first = await headMatchesOracle(e, await snapshot(e));
     assert.ok(first.entered.length > 0, `entered ${first.entered.length}`);
-    // Entering bricks start as air (setInit).
+    // Entering bricks start as air (setInit), at PHI_AIR_C (16 h, the old stored far air).
     const L = e.layout, phiNow = brickField(first.after, asF32(await e.read("phi")), L.base("phi", "F", "PHI"), -1);
-    for (const k of first.entered) { const b = brickKeyCoord(k); assert.equal(phiNow([8 * b[0] + 3, 8 * b[1] + 3, 8 * b[2] + 3]), PHI_AIR); }
+    for (const k of first.entered) { const b = brickKeyCoord(k); assert.equal(phiNow([8 * b[0] + 3, 8 * b[1] + 3, 8 * b[2] + 3]), PHI_AIR_C); }
     // The next head follows the flow the projection left (it is not still: no hysteresis), again as the oracle says.
     // The wide bricks leave here, not at the first head: the first head's sources include the TRIG heat of the
     // census before the write (setMark reads the last census's TRIG), which saw the wide sheet.

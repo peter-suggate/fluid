@@ -59,19 +59,24 @@
  * - Dead under the dam's policy and not ported: forwardFine (fastTravel 0) and its travel words, holds,
  *   the budget, reasons, strain and rotation, sources, regions, and the volume-fraction branches (surface
  *   authority). umResolutionError's h-tile branch is dead under shapeDisplacement.
- * - Residency (lane E; storage, not a decision): a band tile whose F brick or an in-range 27-neighbour is not
+ * - Residency (lane E; storage, not a decision): a band tile whose ring (R3: the bricks of its 27 tiles, the
+ *   tile's own and, per axis, the one its outer neighbour tile lies in; it was the 27 bricks about its brick) is not
  *   resident appends the missing bricks as candidates (setMark's append; counted in CENSUS_CLAMPED and
  *   CENSUS_CAND), and WANT keeps the band bit. The part 1 head claims them before the transfer, and
  *   censusWant then checks every WANT bit's ring: a miss (a refused pool) latches FAIL.TIER. So WANT is
  *   exactly the old decision. At a step's head (tiered) the band tile's present ring also gets its keep mark:
  *   the old engine's h storage of a band tile is resident by construction, ours is the ring. The residency rule
  *   itself (pageSeed and lrAsk) is brick-residency.wgsl.ts, which reads this census's NEAR, FIN and WANT words.
+ * - R2 (lane E, the user's aggressive fine-tile retirement, 2026-11-16): at a tiered head with the real D a band tile
+ *   whose last certificate is calm is 4h, joined or not (ncCalm: the 4h model represents the tile's velocity within
+ *   the 4h owner's budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H, the certificate's error word).
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BrickLayout, H, LIST, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
+import { UNIFORM_TILE_UPDATE_BUDGET_H } from "../uniform/uniform-tile-update-error";
 
 /** The census header words (set buffer, brick-abi.md §5.1). */
 export const CENSUS_H = {
@@ -115,7 +120,7 @@ export const CENSUS_POLICY = {
  * and the next step's censusDecide reads (tuDeformation). */
 export const CENSUS = {
   KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, DEF: 7168,
-  TC: 9216, HEAT4: 17408, REG: 17920, DEC: 18176, STAT: 18192, RCROSS: 18208, RGAP: 19232, STRIDE: 19744,
+  TC: 9216, HEAT4: 17408, REG: 17920, DEC: 18176, STAT: 18192, RCROSS: 18208, RGAP: 19232, CALM: 19744, CALM_KEY: 19760, STRIDE: 19768,
 } as const;
 /** The real D's words (brick-region-heat.wgsl.ts), in the census buffer after DEF:
  * - TC, 16 words a tile: the frame plan's certificate (localSpeed, uniform-mixed-frame-plan.ts l.269), written after
@@ -125,6 +130,10 @@ export const CENSUS = {
  * - HEAT4, a word a tile: the activity heat (f32; the old particleHeat, NB_ACTIVITY_HEAT), every tile's, censusDecide's;
  * - REG, 32 words a region (RG below), the old region heat state and its certificate's reductions;
  * - DEC and STAT, 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits, carried between censuses;
+ * - CALM, 16 words a page as WANT, and CALM_KEY, a word a censusDecide workgroup (r: words 2r and 2r + 1): R2's
+ *   hysteresis (lane E, coordinator 2026-11-16). Bit i is whether tile i was a calm band tile (ncCalm) at the last
+ *   tiered head, written at every tiered head only; CALM_KEY r is the page key + 1 its workgroup wrote them under, so a
+ *   reused slot's bits are unknown, and unknown is not calm;
  * - RCROSS and RGAP, as CROSS and GAP: the tile's crossing cells and gap as its classification stored them (the old
  *   CC_RECORD words), before censusImportance edits CROSS and GAP in place. A replayed tile publishes them. */
 export const RG = {
@@ -939,6 +948,30 @@ fn ncNeedTriggered(t:vec3i,s:u32,i:u32,criteria:u32)->bool{
   if((criteria&2u)==0u){return false;}
   return ncDt()*ncDeformation(t,s,i)/ncH()>${UNIFORM_SURFACE_TRANSPORT_ERROR_H};
 }
+// R2 (lane E, the user's aggressive fine-tile retirement; a stated deviation, coordinator's ruling 2026-11-16): a
+// tile is calm where the last certificate's error word (certError's tileErrorOf, brick-region-heat.wgsl.ts: an h
+// tile's tuFineDefect, the largest |u - the trilinear of its 8 corners| over its 64 samples, m/s; a 4h tile's own
+// constant-model defect and second difference) is within the 4h owner's transport budget in a step, dt error / h <=
+// UNIFORM_TILE_UPDATE_BUDGET_H (0.08, the detail budget the old heat charges this word against, uniform-region-heat.ts l.414): velocity 4h represents within its budget
+// needs no h. The budget itself, no safety fraction. Unknown (saturated: no certificate, another page's copy, no
+// owner) is never calm, and neither is an error word certError did not measure: it writes 0 for a dry tile (no liquid
+// sample, TC bit 0 clear) and for a reader of class 0 (outside the support closure, which every wet tile seeds), so
+// a tile is calm only where its TC record (the same certificate) saw liquid.
+fn ncError(t:vec3i,s:u32,i:u32)->f32{
+  if(!nbTileInLattice(t)||s==NB_NONE){return NC_PLAN_MAX;}
+  let o=NC_S*s+${CENSUS.DEF}u+4u*i;
+  if(census[o+2u]!=nbCRec(s,NB_REC_KEY)+1u||bitcast<f32>(census[o+3u])<=0.0){return NC_PLAN_MAX;}
+  return bitcast<f32>(census[o+1u]);
+}
+fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
+  // Tier-invariant (lane E, coordinator 2026-11-16): an h tile reads the error it would read as a 4h owner (TC word 15,
+  // the region heat's width-4 tileErrorOf under the same DEF validity), so a demoted tile is not re-refined by a
+  // stricter test; a 4h tile's DEF error is already the width-4 one.
+  var e=ncError(t,s,i);
+  if(e<NC_PLAN_MAX&&nbTileH(s,i)){e=max(e,bitcast<f32>(census[NC_S*s+${CENSUS.TC}u+16u*i+15u]));}
+  if(!(e<NC_PLAN_MAX)||(census[NC_S*s+${CENSUS.TC}u+16u*i+8u]&1u)==0u){return false;}
+  return ncDt()*e/ncH()<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+}
 `;
 
 export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
@@ -951,6 +984,7 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
   const censusBegin = k("censusBegin", [CFG, setRW], /* wgsl */`
 @compute @workgroup_size(1) fn censusBegin(){
   for(var w=NB_H_CENSUS_CLAMPED;w<=NB_H_CENSUS_TRIGGERED;w++){atomicStore(&nbSet[w],0u);}
+  for(var w=NB_H_CENSUS_CALM;w<=NB_H_REENTRY_FULL;w++){atomicStore(&nbSet[w],0u);}
   for(var w=NB_H_RES_RADIUS;w<=NB_H_RES_CLAIMED_C;w++){atomicStore(&nbSet[w],0u);}
   // The region heat's per-step words (the old encode's clearBuffer of the still words and the tier counts).
   for(var w=NB_H_STILL_HIGH;w<=NB_H_HEAT_COLD;w++){atomicStore(&nbSet[w],0u);}
@@ -1299,6 +1333,7 @@ var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
 var<workgroup> wgDec:array<atomic<u32>,2>;
 var<workgroup> wgStat:array<atomic<u32>,2>;
+var<workgroup> wgCalm:array<atomic<u32>,2>;
 fn ncJoined(t:vec3i)->bool{
   let b=t>>vec3u(1u);let s=nbFSlotOfBrick(b);if(s>=NB_SEAM){return false;}
   let j=u32(t.x&1)|(u32(t.y&1)<<1u)|(u32(t.z&1)<<2u);
@@ -1326,12 +1361,33 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
     band=ncDecide(t,joined,ncFin(cs,i),ncKeys(cs,i),reach);
     if(joined){atomicOr(&wgStat[lane>>5u],bit);}
   }
+  // R2: a calm band tile is 4h (ncCalm), on the certificate's error alone: no keep from a join, heat or the band. Only at a tiered head
+  // with the real D, the census that reads a certificate (the boot's and the kick's read none and stay as written).
+  // The hysteresis (coordinator 2026-11-16, "the shortest hysteresis that doesn't flicker"): an h tile (CMASK) is 4h
+  // only at its second consecutive calm head (CALM, valid under its workgroup's CALM_KEY); a 4h tile calm now stays 4h.
+  // Refining has none: a tile that is not calm bands at once.
+  var toCoarse=false;
+  if(band&&head&&ncCalm(t,cs,i)){
+    atomicOr(&wgCalm[lane>>5u],bit);
+    let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
+    toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);
+    if(!toCoarse){atomicAdd(&nbSet[NB_H_CENSUS_CALM_HELD],1u);}
+  }
+  if(toCoarse){
+    band=false;atomicAdd(&nbSet[NB_H_CENSUS_CALM],1u);
+    let tc=NC_S*cs+${CENSUS.TC}u+16u*i;
+    if(ncDt()*bitcast<f32>(census[tc+4u])/ncH()>${UNIFORM_TILE_UPDATE_BUDGET_H}){atomicAdd(&nbSet[NB_H_CENSUS_CALM_MOVING],1u);}
+    if(ncError(t,cs,i)==0.0){atomicAdd(&nbSet[NB_H_CENSUS_CALM_ZERO],1u);}
+    if((ncFin(cs,i)&NC_CROSSES)!=0u){atomicAdd(&nbSet[NB_H_CENSUS_CALM_CROSSING],1u);}
+  }
   if(!band){return;}
   atomicOr(&wgDec[lane>>5u],bit);
   atomicAdd(&wgCount[0],1u);if(!nbTileH(cs,i)){atomicAdd(&wgCount[1],1u);}
-  let b=t>>vec3u(1u);var clamped=false;
-  for(var n=0u;n<27u;n++){
-    let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
+  // The ring (R3, lane E, coordinator's ruling 2026-11-16): the bricks of the band tile's 27 tiles (two a side per
+  // axis: the tile's own brick and the one its outer neighbour lies in), not the 27 bricks about its brick.
+  let rlo=(t-vec3i(1))>>vec3u(1u);var clamped=false;
+  for(var n=0u;n<8u;n++){
+    let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)){continue;}
     let s=nbFSlotOfBrick(nb);
     // Tiered, at a step's head (cfg.w = 1): the band tile's present ring is kept (the brick storage's h ring, §5.4).
     if(s<NB_SEAM){if(cfg.z==1u&&(cfg.w&1u)!=0u&&atomicLoad(&nbSet[NB_S_MARK_F+s])==0u){atomicOr(&nbSet[NB_S_MARK_F+s],1u);}continue;}
@@ -1356,7 +1412,7 @@ var<workgroup> wgGo:u32;
   let g=nbGroup(wid);let e=g>>3u;let r=g&7u;
   if(lane==0u){wgGo=select(0u,1u,e<nbListCount(NB_LIST_C_ALL));}if(workgroupUniformLoad(&wgGo)==0u){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);
-  if(lane<2u){atomicStore(&wgWant[lane],0u);atomicStore(&wgDec[lane],0u);atomicStore(&wgStat[lane],0u);}
+  if(lane<2u){atomicStore(&wgWant[lane],0u);atomicStore(&wgDec[lane],0u);atomicStore(&wgStat[lane],0u);atomicStore(&wgCalm[lane],0u);}
   if(lane<4u){atomicStore(&wgCount[lane],0u);}
   workgroupBarrier();
   let reach=bitcast<f32>(atomicLoad(&nbSet[NB_H_CENSUS_REACH]));
@@ -1385,6 +1441,11 @@ var<workgroup> wgGo:u32;
   if(lane<2u&&!trigOnly){
     atomicStore(&nbSet[NB_S_WANT+16u*cs+2u*r+lane],atomicLoad(&wgWant[lane]));
     let o=NC_S*cs+2u*r+lane;census[o+${CENSUS.DEC}u]=atomicLoad(&wgDec[lane]);census[o+${CENSUS.STAT}u]=atomicLoad(&wgStat[lane]);
+    // CALM at a tiered head only (cdTile's head): the boot's and the kick's censuses neither read nor clear it.
+    if(cfg.z==1u&&cfg.w==3u){
+      census[o+${CENSUS.CALM}u]=atomicLoad(&wgCalm[lane]);
+      if(lane==0u){census[NC_S*cs+${CENSUS.CALM_KEY}u+r]=nbCRec(cs,NB_REC_KEY)+1u;}
+    }
   }
   if(lane==0u){
     let c=vec4u(atomicLoad(&wgCount[0]),atomicLoad(&wgCount[1]),atomicLoad(&wgCount[2]),atomicLoad(&wgCount[3]));
@@ -1395,7 +1456,7 @@ var<workgroup> wgGo:u32;
   }
 }`);
 
-  // censusWant (tiered, after the part 1 head's claims): every WANT bit's brick and in-range 27-neighbours must be
+  // censusWant (tiered, after the part 1 head's claims): every WANT bit's ring (the bricks of its 27 tiles) must be
   // resident now. The claims took the candidates censusDecide listed, so a miss means a pool refused (POOL_F/C is
   // latched): the bit clears and FAIL.TIER latches with the brick, never a silent coarser tier. Eight workgroups a page
   // (X8), workgroup r its tiles 64r..64r+63, a lane a tile.
@@ -1405,9 +1466,11 @@ var<workgroup> wgGo:u32;
   let cs=nbListSlot(NB_LIST_C_ALL,e);
   let i=lane+64u*(g&7u);let w=NB_S_WANT+16u*cs+(i>>5u);let bit=1u<<(i&31u);
   if((atomicLoad(&nbSet[w])&bit)==0u){return;}
-  let b=(8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u)))>>vec3u(1u);
-  for(var n=0u;n<27u;n++){
-    let nb=b+nbNeighbourOffset(n);if(!nbBrickInRange(nb)){continue;}
+  let t=8*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u));
+  // The ring of the band tile (cdTile's): the bricks of its 27 tiles.
+  let rlo=(t-vec3i(1))>>vec3u(1u);
+  for(var n=0u;n<8u;n++){
+    let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)){continue;}
     if(nbFSlotOfBrick(nb)>=NB_SEAM){atomicAnd(&nbSet[w],~bit);nbFail(NB_FAIL_TIER,nbKey(nb));break;}
   }
 }`);

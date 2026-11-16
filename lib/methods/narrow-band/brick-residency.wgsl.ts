@@ -9,28 +9,37 @@
  * run it.
  *
  * resMark: a workgroup (64 lanes) a source brick of F_ALL (G1; tiered FC_G1, F_ALL's bricks then C_ALL's pages).
- * A brick source has up to three source classes, each a box: the vertex box of the class's tiles grown per axis and
+ * A brick source has up to four source classes, each a box: the vertex box of the class's tiles grown per axis and
  * side by the class's move and its margin (RES_MARGIN), the margin the largest distance a stage reads past the class's
  * tiles (lane E's read table, 2026-11-16, progress-lane-e.md; file:line in the table's rows below, L levelset-kernels,
  * P particles-kernels, F particles-formulas, V velocity-kernels, C levelset-coarse, all .wgsl.ts):
- * - Owners, ACT.RES (an h-owned tile, tiered; a φ < 0 vertex; a particle): bricks by flow + 9 tiered, flow + 20
- *   all-h; tiered, pages by flow + 20. flow = (BOUND_F + |g| dt) dt / h is the reach rule's velocity term (reachSet,
- *   brick-abi.md §5.4), the owner region's move this step. The bricks' rows (an F tile's reads past the owners):
- *   - lcRetire 9 (C l.537-553): it builds (lcBuildDistance, C l.490-511, fgReach1 and FC_NEAR at the 4h cell) only
- *     within lcStencilFine's 1 tile of an h-owned tile, then reads FC_NEAR's cell; the largest of the rows, the
- *     tiered owners' margin.
- *   - The DEPTH chain through lDistance and lNear 7 (lNear's box 5, L l.575-586).
- *   - lcCouple 7 (C l.400-436): it reads fgReach1, FC_NEAR, the tile flags (SURFACE_TILE), FC_KEY and the bin counts
- *     at a vertex only where θ > 0, and θ (nbfInterpolatedHeat over the 8 tiles about the vertex, C l.389-396) is
- *     0 farther than a tile from a FT_THETA tile, which pTiles writes within a tile of a particle's tile (P
- *     l.285-301): 4 + 2 + 1 cells past the particle owners' tiles.
- *   - pTiles' FT_THETA and SURFACE_TILE 4 (P l.285-301: the particle's tile and the neighbour toward its half; a
- *     tile no F slot holds is skipped, so the 4h F tiles about the particles need their bricks).
+ * - Owners, ACT.RES (an h-owned tile, tiered; a φ < 0 vertex; a particle). All-h: bricks by flow + 20. Tiered (R3,
+ *   lane E, the coordinator's ruling 2026-11-16): the h ring, bricks by RES_MARGIN.own.tiered = 4 cells (one tile)
+ *   with no move, half-open (cells lo .. hi - 1: the bricks of the 27 tiles about each), since the h ownership is
+ *   fixed through the step (the head's transfer commits it, after this residency, and the census keeps each band
+ *   tile's same ring); pages by flow + 20. flow = (BOUND_F + |g| dt) dt / h is the reach rule's velocity term
+ *   (reachSet, brick-abi.md §5.4). Tiered, the tiles with particles (any F slot's, owner or not: a tile coarsened at this head keeps its records for this move) (TILE_OCC bits 0..7, pScan's) are a fourth
+ *   class, bricks by flow + RES_MARGIN.particles = flow + 4 (the particles move). The rows (an F tile's reads past
+ *   the owners), tiered:
+ *   - lcRetire 4 (C, lcRetired): it builds (lcBuildDistance: fgReach1 and FC_NEAR at the 4h cell) only within
+ *     lcStencilFine's 1 tile of an h-owned tile; FC_NEAR's cell is an F slot's (lNear finds crossings of F slots
+ *     only). lNear's ±5 window may now hold tiles no F slot held: lcNearKnown (C deviation 10) reads FC_NEAR only
+ *     where every crossing tile of the window was in an F slot (else the C terms bound the distance), so the window
+ *     sets no brick reach.
+ *   - lcCouple 0 (C, lcCoupled): its F reads (fgReach1, FC_NEAR, SURFACE_TILE, FC_KEY, the bin counts) are taken
+ *     only where known (C deviation 10: c's slot resident and not fresh, lNear's window known; an absent bin cell is
+ *     open with no particles, as a present empty one), else the C level set stands in; θ is 0 at a tile no slot
+ *     holds (deviation 7). (It was 7 before R3: the reads at an absent tile read as far.)
+ *   - pTiles' FT_THETA and SURFACE_TILE 4 (P, pTiles: the particle's tile and the neighbour toward its half; a
+ *     tile no F slot holds is skipped): the particle class, flow + 4. The DEPTH reads of a particle (fgDepth at its
+ *     position and sites, about 1.25 cells) and the move's taps (1.5 cells) lie inside it.
  *   - uExtend 3 (V l.695-762), the sampler's UNIT taps 3 (fluid-grid fsUnit: a tap lies within 3 cells of an h owner
  *     of the opening tiers; since c2f9bffa uAdvect reads a tap with no F slot as 0, fsUnitAbsent, so this row is a
  *     correctness bound, not a cost: tell lane F before any change that could thin it), the + faces, vertex rows,
- *     tile-word stencils and setMark's 1-ring 1 (V l.304-831, L l.256-296, 394-398).
- *   - lDilate 20 (R = 5 tiles, separable x, y, z with intermediates DA, DB per brick, L l.346-410) reads through the
+ *     tile-word stencils and setMark's 1-ring 1 (V l.304-831, L l.256-296, 394-398): all within the h ring's 4.
+ *   - pSeed's re-entry seed (P, pSeedCell cfg.w = 2, part 1): the tiles the head refines, inside their census ring
+ *     (the same 27 tiles), and their seeds' first move (flow, under a tile) too.
+   - lDilate 20 (R = 5 tiles, separable x, y, z with intermediates DA, DB per brick, L l.346-410) reads through the
  *     C pages tiered: a tile no F slot holds reads its page's DIL4 word (lDilateC, L l.412-511, its sources, DA in
  *     the y pass, DB in the z pass), so it sets no brick reach. lDilateC latches FAIL.TIER 0x4c440001 at an h-owned
  *     tile with no F slot (L l.498; an h-owned tile is an owner, so its brick is resident). All-h there is no DIL4
@@ -48,7 +57,7 @@
  *   latches pJoin's REACH (it fails explicitly).
  * - Seeds, ACT.SEED (a tile with heat at the last setMark or the previous head's TRIG) and this head's TRIG
  *   (censusDecide's, earlier in this head; not in ACT): + 6, no move. pSeed seeds a cell where FT_T > 0 (P l.320),
- *   deep sites in 4h owners too; FT_T is half the 27-tile max of lHeatNow (L l.394-409), and lHeatNow, the last FT_H
+ *   in h-owned tiles only (R1); FT_T is half the 27-tile max of lHeatNow (L l.394-409), and lHeatNow, the last FT_H
  *   cooled by 4 dt or 2 on this head's TRIG (L l.362-365), is FT_T's only source, so a seed's cell is within a tile (4
  *   cells) of a seed tile; its site lies in the cell (F l.229-235) and its first pJoin, in the same tail before any
  *   move, records the ±2 support about it: 6 cells. Without this head's TRIG a fresh seed in a 4h tile latched
@@ -80,8 +89,8 @@
  * region's envelope. Kept latches: setMark's 1-ring FAIL.REACH (a liquid vertex's ring absent), pScatter's REACH (an
  * unbinned particle), and setLeavePages' REACH (a leaving page that held 4h liquid tiles).
  * - All-h: every tile is h, so the h-ownership source is dropped (ACT's rule); the census's WANT does not seed (all-h
- *   WANT is not committed; censusDecide). Tiered: censusDecide keeps each band tile's present 27-brick ring itself and
- *   appends its missing bricks as candidates.
+ *   WANT is not committed; censusDecide). Tiered: censusDecide keeps each band tile's present ring (R3: the bricks of
+ *   its 27 tiles) itself and appends its missing bricks as candidates.
  * - Destinations are bricks and pages; a destination off the brick range is the lattice's wall.
  */
 import type { BrickLayout } from "./brick-abi";
@@ -91,11 +100,11 @@ import { brickOwnerWGSL } from "./brick-owner.wgsl";
 
 /**
  * Each source class's margin past its move, in cells, the largest distance a stage reads past the class's tiles (the
- * header's table): owners (ACT.RES) past the flow, as bricks (`own`, tiered or all-h) and, tiered, as pages
- * (`ownPages`); support (PSUPPORT) past the travel or the flow; seeds (ACT.SEED and this head's TRIG) with no move;
+ * header's table): owners (ACT.RES) as bricks (`own`: tiered the h ring with no move, all-h past the flow) and,
+ * tiered, as pages past the flow (`ownPages`); tiered, the tiles with particles past the flow (`particles`); support (PSUPPORT) past the travel or the flow; seeds (ACT.SEED and this head's TRIG) with no move;
  * page sources (tiered, 4h-owned liquid) past their flow.
  */
-export const RES_MARGIN = { own: { tiered: 9, allH: 20 }, ownPages: 20, support: 0, seed: 6, page: 20 } as const;
+export const RES_MARGIN = { own: { tiered: 4, allH: 20 }, ownPages: 20, particles: 4, support: 0, seed: 6, page: 20 } as const;
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const dirRW: BrickBinding = { name: "dir", kind: "rw", type: "array<atomic<u32>>" };
@@ -110,13 +119,14 @@ const RQ_PAGES:vec3i=vec3i(${pages.join(",")});
 const RM_OWN:f32=${tiered ? RES_MARGIN.own.tiered : RES_MARGIN.own.allH}.0;
 const RM_OWN_PAGES:f32=${RES_MARGIN.ownPages}.0;
 const RM_SUPPORT:f32=${RES_MARGIN.support}.0;
+const RM_PARTICLES:f32=${RES_MARGIN.particles}.0;
 const RM_SEED:f32=${RES_MARGIN.seed}.0;
 const RM_PAGE:f32=${RES_MARGIN.page}.0;
-var<workgroup> rmLo:array<vec3i,3>;
-var<workgroup> rmHi:array<vec3i,3>;
+var<workgroup> rmLo:array<vec3i,5>;
+var<workgroup> rmHi:array<vec3i,5>;
 var<workgroup> rmN:u32;
-var<workgroup> rmPLo:array<vec3i,3>;
-var<workgroup> rmPHi:array<vec3i,3>;
+var<workgroup> rmPLo:array<vec3i,5>;
+var<workgroup> rmPHi:array<vec3i,5>;
 var<workgroup> rmGo:u32;
 var<workgroup> rmPage:u32;
 var<workgroup> rmTlo:array<atomic<u32>,3>;
@@ -188,22 +198,46 @@ fn rmFlow(speed:f32)->f32{
     if(g<nF){
       let s=nbListSlot(NB_LIST_F_ALL,g);let at=NB_S_PSUPPORT+NB_PSUPPORT_WORDS*s;
       let act=atomicLoad(&nbSet[NB_S_ACT+s]);
-      // The three source classes (c 0 owners ACT.RES, 1 support PSUPPORT word 0, 2 seeds ACT.SEED | this head's TRIG),
+      // The source classes (c 0 owners ACT.RES, 1 support PSUPPORT word 0, 2 seeds ACT.SEED | this head's TRIG, 3 tiered the tiles with particles),
       // a box each, grown by the class's move and its read-by margin (RES_MARGIN, the header's table).
       let mo=(act>>10u)&0xffu;let ms=atomicLoad(&nbSet[at])&0xffu;let md=((act>>18u)&0xffu)|(atomicLoad(&nbSet[NB_S_TRIG+s])&0xffu);
+      // Tiered, class 3: the tiles with particles (any F slot's, owner or not: a tile coarsened at this head keeps its records for this move) (TILE_OCC bits 0..7, pScan's), past their move (R3).
+      let mp=${tiered ? "atomicLoad(&nbSet[NB_S_TILE_OCC+s])&0xffu" : "0u"};
       let flow=rmFlow(bitcast<f32>(atomicLoad(&nbSet[NB_S_BOUND_F+s])));
       let o=nbFOrigin(s);var reach=0.0;var nb=0u;
-      for(var c=0u;c<3u;c++){
-        let m=select(select(md,ms,c==1u),mo,c==0u);
+      // Tiered, class 4: the tiles this head refines from 4h (WANT h, CMASK still 4h: the transfer commits later in the
+      // head). pSeedCell's re-entry seed (cfg.w = 2, part 1) fills their band after this pass and moves the seeds in this
+      // step's move at the post-transfer grid velocity (the trilinear of the C faces), so they are the particle class
+      // past the larger of the slot's flow and the tiles' C face flow (their records, as class 3's, reach pJoin's support).
+      var mr=0u;var sr=0.0;
+      ${tiered ? `{
+        let T0=o>>vec3u(2u);
+        for(var j=0u;j<8u;j++){
+          let T=T0+vec3i(vec3u(j&1u,(j>>1u)&1u,j>>2u));if(!nbTileInLattice(T)){continue;}
+          let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){continue;}let i=nbTileIndex(T);
+          if(((atomicLoad(&nbSet[NB_S_WANT+16u*cs+(i>>5u)])>>(i&31u))&1u)==0u||nbTileH(cs,i)){continue;}
+          mr|=1u<<j;
+          for(var a=0u;a<3u;a++){var e=vec3i(0);e[a]=1;sr=max(sr,max(abs(nbCFace(T,a)),abs(nbCFace(T+e,a))));}
+        }
+      }` : ""}
+      let flowR=max(flow,rmFlow(sr));
+      for(var c=0u;c<5u;c++){
+        let m=select(select(select(select(md,ms,c==1u),mo,c==0u),mp,c==3u),mr,c==4u);
         if(m==0u){continue;}
         var tlo=vec3i(1);var thi=vec3i(0);
         for(var t=0u;t<8u;t++){if(((m>>t)&1u)!=0u){let tt=vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));tlo=min(tlo,tt);thi=max(thi,tt);}}
         var lo=vec3i(0);var hi=vec3i(0);var pLo=vec3i(0);var pHi=vec3i(0);
         for(var a=0u;a<3u;a++){
-          var rl=RM_OWN+flow;var rh=rl;
+          // Owners: tiered, the h ring, one tile and no move (R3: the h ownership is fixed through the step; the rows
+          // are the h-anchored reads, the header's table), half-open; all-h, flow + RM_OWN.
+          var rl=${tiered ? "RM_OWN" : "RM_OWN+flow"};var rh=rl;
+          if(c==3u){rl=RM_PARTICLES+flow;rh=rl;}
+          if(c==4u){rl=RM_PARTICLES+flowR;rh=rl;}
           if(c==1u){rl=RM_SUPPORT+max(bitcast<f32>(atomicLoad(&nbSet[at+1u+a])),flow);rh=RM_SUPPORT+max(bitcast<f32>(atomicLoad(&nbSet[at+4u+a])),flow);}
           if(c==2u){rl=RM_SEED;rh=RM_SEED;}
           lo[a]=i32(floor(f32(o[a]+4*tlo[a])-rl));hi[a]=i32(ceil(f32(o[a]+4*thi[a]+4)+rh));
+          // Tiered owners' cells are [lo, hi): the last brick is the one holding cell hi - 1.
+          ${tiered ? "if(c==0u){hi[a]=hi[a]-1;}" : ""}
           reach=max(reach,max(rl,rh));
           // Tiered, the pages: the owners' by flow + RM_OWN_PAGES (lDilate's reach through the C pages), the others' as
           // their bricks'.

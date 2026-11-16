@@ -25,6 +25,7 @@ import { H, LIST, brickKeyCoord, type BrickCapacities } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions } from "./brick-engine";
 import { brickSceneSetup } from "./brick-scene";
 import { fluidStagesAt } from "./brick-fluid-stages";
+import { FT, fluidLayout } from "./fluid-grid.wgsl";
 import { compositeMGPCG } from "./brick-pressure-solver";
 import { snapshot } from "./brick-readback";
 import "../index";
@@ -103,7 +104,8 @@ test("brick wide dam (GPU): residency and lists follow the fluid, not the box", 
       }
       assert.ok(compared >= 7, `the residency compared on ${compared} of ${early} early steps`);
       // No brick far past the fluid: past the furthest brick holding liquid or particles, F reaches no further than
-      // the residency rule's box (the flow (max BOUND_F + g dt) dt / h, the owner margin 9 and a brick's rounding),
+      // the residency rule's box (the flow (max BOUND_F + g dt) dt / h, 9 covering every class's margin past the fluid
+      // (R3: the h ring 4, the particles flow + 4, the seeds 6 past a heat tile) and a brick's rounding),
       // and pages no further than the page sources' flow + 20 and a page's rounding.
       const s = await snapshot(wide), slotKey = new Map([...s.bricks].map(([key, slot]) => [slot, key])), L = wide.layout, o = wide.options;
       const xOf = (slots: number[]) => Math.max(...slots.map(slot => brickKeyCoord(slotKey.get(slot)!)[0]));
@@ -116,6 +118,12 @@ test("brick wide dam (GPU): residency and lists follow the fluid, not the box", 
         + `(of ${Math.floor(o.lattice[0] / 8) + 1} bricks, ${o.lattice[0] / 32} pages); flow ${flow.toFixed(1)} cells`);
       assert.ok(8 * liveX <= 8 * (fluidX + 1) + Math.ceil(flow) + 9 + 8, `live F bricks reach x ${liveX}, the fluid ${fluidX} (flow ${flow})`);
       assert.ok(32 * pagesX <= 8 * (fluidX + 1) + Math.ceil(flow) + 20 + 32, `pages reach x page ${pagesX}, the fluid brick ${fluidX} (flow ${flow})`);
+      // levelset-coarse's lcTileFresh: no dilated FT_DIST has its low 13 bits all ones (lInit's fresh word; lDilate
+      // sets the support bit 12 only with an occupied distance of at most 3), so the sentinel names a fresh slot only.
+      const F = fluidLayout(L, { tiered: true }), fcell = new Uint32Array(await wide.read("fcell"));
+      let sentinel = 0;
+      for (const slot of s.list(LIST.F_ALL)) for (let t = 0; t < 8; t++) if ((fcell[F.fcell.TILE + FT.WORDS * (8 * slot + t) + FT.DIST]! & 0x1fff) === 0x1fff) sentinel++;
+      assert.equal(sentinel, 0, "a dilated FT_DIST never reads lInit's fresh sentinel");
     } finally { wide.destroy(); }
   });
 });

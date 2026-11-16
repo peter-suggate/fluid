@@ -32,11 +32,11 @@ export const SLOT_MASK = 0x1fffffff;
 /** The window's most pages an axis (keys carry 10 bits an axis). */
 export const WINDOW_MAX_PAGES = 1024;
 
-/** Vertex phi (h) of an F brick that enters as air, beyond every band (the old
- * engine's "past the reach a vertex keeps its sign at six cells"). Entering C
- * pages take PHI_AIR_C, and the boot the uncapped analytic distance (bootPhi). */
+/** Vertex phi (h) of stored air within the redistance reach (the old engine's "past the reach a vertex keeps its
+ * sign at six cells"). Entering F bricks and C pages take PHI_AIR_C, and the boot the uncapped analytic distance
+ * (bootPhi). */
 export const PHI_AIR = 6;
-/** Vertex phi (h) of a C page that enters as air: the old far-air value, nbAirStore's 16 max h (which lcClear also
+/** Vertex phi (h) of an F brick or C page that enters as air: the old far-air value, nbAirStore's 16 max h (which lcClear also
  * writes) and the least AIR an old page claim takes (UniformPageInitialiseOptions.near, 16 MAX_H). The old claim's AIR
  * itself is the field's empty value, the box's far φ; this one does not depend on the box (the 4x-wider dam). */
 export const PHI_AIR_C = 16;
@@ -77,6 +77,19 @@ export const H = {
   LIST_COUNT: 32,
   LANE_F: 64, LANE_P: 128,
   PEAK_F: 192, PEAK_C: 193, PEAK_B: 194, PEAK_K: 195, PEAK_PARTICLES: 196, PEAK_CAND: 197,
+  /** R2's band tiles made 4h this census (brick-census.wgsl.ts ncCalm; a counter, read by probes). */
+  CENSUS_CALM: 198,
+  /** Of CENSUS_CALM (probe counters): moving (dt |u| / h over the budget, TC's speed), a zero error word, crossing. */
+  CENSUS_CALM_MOVING: 199, CENSUS_CALM_ZERO: 200, CENSUS_CALM_CROSSING: 201,
+  /** The re-entry seed's probe counters (particles-kernels.wgsl.ts pSeed cfg.w = 2; zeroed with CENSUS_CALM at
+   * censusBegin): tiles h now and 4h at the last rebin, those of them seeded none, h tiles in a brick fresh at this
+   * head (no last rebin, no re-entry seed), and the records written. */
+  REENTRY_TILES: 202, REENTRY_EMPTY: 203, REENTRY_FRESH: 204, REENTRY_SEEDS: 205,
+  /** R2's hysteresis (probe counter, zeroed with CENSUS_CALM): calm h tiles kept h, not calm at the last head. */
+  CENSUS_CALM_HELD: 206,
+  /** The re-entry seed's gates (probe counters, zeroed with CENSUS_CALM): cells of re-entering tiles, and those
+   * outside the band by the stored φ, or already holding their goal or mass. */
+  REENTRY_CELLS: 207, REENTRY_NO_DEPTH: 210, REENTRY_FULL: 211,
   /** setCensus's counters (brick-abi.md §5.1; brick-census.wgsl.ts CENSUS_H). */
   CENSUS_CLAMPED: 224, CENSUS_CAND: 225, CENSUS_REACH: 226, CENSUS_CROSSING: 227,
   CENSUS_REQUIRED: 228, CENSUS_BAND: 229, CENSUS_REFINED: 230, CENSUS_TRIGGERED: 231,

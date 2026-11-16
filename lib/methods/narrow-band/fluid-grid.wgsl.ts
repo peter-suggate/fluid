@@ -4,9 +4,10 @@
  *
  * Box rule, in the ABI's units (cells, φ in h, m/s):
  * - A cell or vertex outside the bricks a slot can hold (any coordinate below 0, or past the skirt) has no slot.
- * - A brick no slot holds is air (§2.3: a non-resident brick is air outside the reach): φ reads NB_PHI_FAR (the old
- *   vertex field's empty value, the lattice's largest extent in h; brick-abi.md §2.3), the particle depth reads
- *   NB_PHI_AIR, and a face reads 0.
+ * - A brick no slot holds is air (§2.3: a non-resident brick is air outside the reach): φ reads NB_PHI_AIR_C (16 h,
+ *   the old stored far air, as an entering brick holds it; a stated deviation from the old vertex field's empty value,
+ *   the box's largest extent, which a read interpolating through an absent vertex would carry into the physics and
+ *   make it depend on the box), the particle depth reads NB_PHI_AIR, and a face reads 0.
  * - A face on a box wall (index 0 or N along its axis) or outside the lattice across it is closed and reads 0.
  *   Readers never clamp an index into the box.
  *
@@ -358,7 +359,7 @@ fn fgPhiWord(base:u32,v:vec3i)->f32{
  if(base==NB_PHI_F_PHI){let r=fgRingAt(v);if(r!=NB_NONE){return fgRingPhi(r);}}
  if(FG_PHI_RESOLVED&&base==NB_PHI_F_PHI){let i=fgPhiResolved(v);if(i!=NB_NONE){return bitcast<f32>(phi[i]);}}
  if(FG_TIERED){let w=fgWinCovers(v);if(base==NB_PHI_F_PHI){if(w){return fgWinVertexPhi(v);}return foVertexPhi(v);}if(base==NB_PHI_F_PHI1){if(w){return fgWin1VertexPhi(v);}return fo1VertexPhi(v);}}
- let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_FAR;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
+ let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR_C;}return bitcast<f32>(phi[base+NB_STRIDE*s+nbLocal(v)]);}
 fn fgPhi(v:vec3i)->f32{return fgPhiWord(NB_PHI_F_PHI,v);}
 // The eight vertex φ of cell c in corner order x + 2y + 4z.
 fn fgCornersOf(base:u32,c:vec3i)->array<f32,8>{
@@ -503,8 +504,9 @@ fn fsTapH(c:vec3i,a:u32,raw:bool)->f32{
 // The h tap from uCache's UNIT; a brick no slot holds takes fsUnitAbsent. Only fsFine reads it, where the fine
 // weight is over 0: p's tile has an F slot and an h owner of the opening tiers (HMASK, the tiers the head's setMark
 // saw) lies within 2 cells, so every tap is within 3 cells of an h owner. Residency keeps the owners' bricks by
-// flow + 9 tiered (lane E's read table: the sampler's UNIT taps, 3), so no tap's brick lacks a slot: 0 hits in
-// uAdvect, lAdvect, lcAdvect, pMove and pSeed over the tiered 300 and the all-h 200 dam (2026-11-16).
+// the h ring tiered (R3: the 27 tiles about each, 4 cells; lane E's read table: the sampler's UNIT taps, 3), so no
+// tap's brick lacks a slot (under the earlier flow + 9: 0 hits in uAdvect, lAdvect, lcAdvect, pMove and pSeed over the
+// tiered 300 and the all-h 200 dam, 2026-11-16).
 // fsUnitAbsent defaults to the 4h fallback (fsTapH); uAdvect takes 0, which is 1.2 ms of its time (a fallback, or
 // any side effect there, keeps the compiler from simplifying the tap).
 fn fsUnit(c:vec3i,a:u32)->f32{

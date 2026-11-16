@@ -176,7 +176,7 @@ stale C vertices: lane P's phantom 4h liquid, 296 wet tiles on the dam, 2026-11-
   `C_LIQ`; it keeps nothing. A non-resident page reads as AIR (P's V rule).
 - *F (a brick).* Resident when the head's residency (§5.4) keeps it:
   - tiered, the ownership records (an h tile now, or a band tile) and the particle records, at F
-    granularity, plus the 27-brick ring of every band tile (censusDecide: present ring bricks get
+    granularity, plus the ring of every band tile (R3: the bricks of its 27 tiles; censusDecide: present ring bricks get
     their keep mark at a step's head, absent ones become candidates);
   - all-h, every stage's records at F granularity (the brick is the h storage).
   Bricks entered at a tiered head hold 4h tiles until the census and transfer say otherwise.
@@ -191,7 +191,7 @@ stale C vertices: lane P's phantom 4h liquid, 296 wet tiles on the dam, 2026-11-
     candidates): the old page block stores its 33^3 vertices, high planes included, so those vertices hold the
     distance from t = 0. Stated difference: the old engine retires such a page's interior at the next head (its
     vertices read the far φ) while the brick residency keeps the page it claims at step 1.
-  - The census keeps WANT as the old decision. A band tile whose brick or in-range 27-neighbour is
+  - The census keeps WANT as the old decision. A band tile whose ring (the bricks of its 27 tiles) is
     not resident lists the missing bricks as candidates. The part 1 head claims them right away
     (claims, records, init, lists), before the transfer. `censusWant` then checks every WANT bit's
     ring. A miss, which can only be a refused pool, latches FAIL.TIER and never yields a silently
@@ -298,7 +298,10 @@ rules above through the directory and masks:
   After DEF, the real D's words (brick-region-heat.wgsl.ts, `CENSUS` and `RG` in brick-census.wgsl.ts):
   - `TC` (9216), 16 words a tile: the certificate the post-transfer `certCoarse` (4h tiles) and `certFine`
     (h tiles) write: mean xyz, defect (−1 dry), speed, owner width, span, normal surface rate, bits (1 the
-    support seed, 2 a corner set not all below −(7h + 3 dt speed)), the six tileVelocity order words;
+    support seed, 2 a corner set not all below −(7h + 3 dt speed)), the six tileVelocity order words, and
+    15 the error the tile would read as a width-4 owner (`tileErrorOf`'s second difference of the mean
+    velocity from the same data; R2, lane E, 2026-11-16): `ncCalm` takes it for an h tile, so an h tile is
+    calm only by the test it meets once 4h (the census input is tier-invariant, no demote/re-refine cycle);
   - `HEAT4` (17408), a word a tile: the activity heat (the old particleHeat), censusDecide's at the head;
   - `REG` (17920), 32 words a region (an octant of the page, r = x | y << 1 | z << 2 of its 4³ tile block):
     0 heat, 1 displacement, 2 identity (page key + 1), 3 pending, 4 trigger bits, 5 holds, 6 still sum,
@@ -310,7 +313,13 @@ rules above through the directory and masks:
   - `DEC` (18176) and `STAT` (18192), 16 words a page as WANT: the old CC_DECIDED and CC_STATIC bits;
   - `RCROSS` (18208, 2 a tile) and `RGAP` (19232, 1 a tile): the crossing cells and gap as classification
     stored them, before censusImportance edits CROSS and GAP in place (the old CC_RECORD words); a
-    replayed tile publishes them.
+    replayed tile publishes them;
+  - `CALM` (19744), 16 words a page as WANT, and `CALM_KEY` (19760), a word a censusDecide workgroup:
+    R2's hysteresis (lane E, the coordinator's ruling of 2026-11-16). Bit i is whether tile i was a calm
+    band tile at the last tiered head, and `CALM_KEY` r is the page key + 1 that workgroup r (words 2r and
+    2r + 1) wrote them under. A calm band tile that is h (CMASK) is 4h only when it was calm at the last
+    head too, under a valid key; a calm 4h tile stays 4h; refining has no delay. Written at tiered heads
+    only (stride 19768).
   setTransferList binds `census` too (the WARM promotion of a listed tile's region, cfg.w = 1).
 
 **The tier change, within a step** (§7, amended):
@@ -321,7 +330,10 @@ rules above through the directory and masks:
    (`CHANGED`). The census reads lane F's `TILE_OCC` (FCAP words in `set`): bits 0–7 the
    brick's tile `j` holds particles (`pScan`, last step), bits 8–15 a particle join on tile `j`
    (F's tail sweep, NB-FLIP's join rule: x ± 0.875 cells, the crossing-cell box where the home
-   tile has REACH and φ ≤ 0, swept by dt·before/h, pad 0), bits 16–31 reserved zero. `pScan`
+   tile has REACH and φ ≤ 0, swept by dt·before/h, pad 0), bits 16–23 (tiered) tile `j` 4h-owned at
+   `pScan`'s rebin, bits 24–31 (tiered) bits 16–23 of the rebin before (R1, with the census
+   hysteresis's two-head window: `pMove` retires a record whose tile was 4h-owned at both rebins and
+   is 4h-owned at this head, so a tile back to h within two heads keeps its records). `pScan`
    rewrites the whole word after the census, so joins clear each step.
 2. `setUpdate` claims entering bricks and rebuilds records, but does **not** free leaving ones
    yet. Their data is restricted first.
@@ -596,18 +608,23 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
   `project`'s face maximum only: `setMark` clears `pCount`'s particle speeds before `project` raises it).
   Every head claim lands before `nrReach`. The boot runs `setMark`
   once after F's boot stages (before the kick), so step 1's head has its ACTIVE tiles.
-- *Brick sources* (`resMark`, a workgroup a brick of F_ALL, G1; tiered FC_G1): up to three source
+- *Brick sources* (`resMark`, a workgroup a brick of F_ALL, G1; tiered FC_G1): up to five source
   classes a brick, each a box: the vertex box of the class's tiles, grown per axis and side by the
   class's move and its margin (`RES_MARGIN`). Each margin is the largest distance a stage reads past
   the class's tiles (lane E's read table, progress-lane-e.md 2026-11-16, every row with its file and line):
   - *Owners*, `ACT.RES` (bits 10–17: a tile with an h owner (tiered), a φ < 0 vertex or a particle):
-    bricks by `flow + 9` tiered and `flow + 20` all-h; tiered, pages by `flow + 20`. The bricks' rows:
-    `lcRetire` 9 (it builds only within `lcStencilFine`'s 1 tile of an h-owned tile), the DEPTH chain
-    through `lDistance` and `lNear` 7, `lcCouple` 7 (it reads `fgReach1` and the F words only where θ >
-    0, within a tile of a `FT_THETA` tile, which `pTiles` writes within a tile of a particle's tile),
-    `pTiles`' `FT_THETA` and `SURFACE_TILE` 4 (a 4h F tile about the particles carries their sample
-    support), `uExtend` 3, the sampler's UNIT taps 3, the faces, vertex rows, tile-word stencils and
-    `setMark`'s 1-ring 1. Tiered, `lDilate` (R = 5 tiles, 20 cells) reads through the C pages (lane F,
+    bricks by `flow + 20` all-h. Tiered (R3, lane E, the coordinator's ruling 2026-11-16): the h ring,
+    the bricks of the 27 tiles about each owner tile (`RES_MARGIN.own.tiered` 4, no move: the h ownership
+    is fixed through the step), and a fourth class, the tiles with particles (any F slot's, owner or not: a tile coarsened at this head keeps its records for this move) (`TILE_OCC` bits 0–7), by
+    `flow + 4`, and a fifth, the tiles this head refines from 4h (WANT h, CMASK 4h: their re-entry
+    seeds move at the grid velocity before any `ACT.SEED` covers them), by 4 + max(flow, the flow of
+    their C faces' speed); pages by `flow + 20`. The bricks' rows: `lcRetire` 4 (it builds only within
+    `lcStencilFine`'s 1 tile of an h-owned tile; lNear's ±5 window is read only where every crossing tile
+    in it was in an F slot, `lcNearKnown`, levelset-coarse deviation 10), `lcCouple` 0 (its F reads only
+    where known, deviation 10, else the C level set), `pTiles`' `FT_THETA` and `SURFACE_TILE` 4 past the
+    particles (the particle class), `uExtend` 3, the sampler's UNIT taps 3, the faces, vertex rows,
+    tile-word stencils and `setMark`'s 1-ring 1. Before R3 the owners kept `flow + 9` (`lcRetire` 9,
+    `lcCouple` 7: they read an absent tile as far). Tiered, `lDilate` (R = 5 tiles, 20 cells) reads through the C pages (lane F,
     9b7761f7): a tile no F slot holds reads its page's `DIL4` word (`lDilateC`: its sources by the C
     corner rule, DA, DB), so it sets no brick reach; an h-owned tile with no F slot latches `FAIL.TIER`
     0x4c440001. All-h has no `DIL4`, so its owners keep `lDilate`'s 20. The pages' row is `lDilate`
@@ -619,8 +636,9 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
     `pJoin`'s `REACH`.
   - *Seeds*, `ACT.SEED` (bits 18–25: a tile with heat at the last `setMark` or the previous head's
     `TRIG`) and this head's `TRIG` (`censusDecide`'s, before `resMark`, not yet in `ACT`): `+ 6`, no
-    move. `pSeed` seeds a cell whose tile has `FT_T > 0`, deep sites in 4h owners too (seedSite
-    restricts only the outer shell to h owners). `FT_T` is half the 27-tile max of `lHeatNow`, the
+    move. `pSeed` seeds a cell whose tile has `FT_T > 0`, tiered in h-owned tiles only (R1, a stated
+    deviation: the old seedSite seeds deep sites in 4h owners too, restricting only the outer
+    shell to h owners; the boot's seed, cfg.w = 1, too: a tile 4h at the boot starts with no records). `FT_T` is half the 27-tile max of `lHeatNow`, the
     last `FT_H` cooled by 4 dt or 2 on this head's `TRIG`, its only source. So a seed's cell is within
     a tile (4 cells) of a seed tile, its site is in the cell, and its first `pJoin`, before any move,
     records the ±2 support about it: 6 cells.
@@ -661,7 +679,7 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
   per-stage seed records (the census's old RES section was dropped), the global departureTravel and sampledFlow
   envelope, and the 5-tile RESIDENCY_MARGIN_TILES. The reach is each source's own. All-h: the census's
   `WANT` does not seed (all-h WANT is not committed). Tiered: `censusDecide` keeps each band tile's
-  present 27-brick ring and lists its missing bricks, as before.
+  present ring (R3: the bricks of its 27 tiles, was the 27 bricks about its brick) and lists its missing bricks.
 - The checks stay: a particle that lands outside a resident brick (`pScatter`, `pJoin`'s support)
   and a liquid vertex whose 1-ring is not resident (`setMark`'s scan of the φ < 0 vertices on its
   brick's faces against the neighbour words, part 2 after the move) latch `FAIL.REACH` with the
@@ -790,6 +808,30 @@ move (design §2.4) as its own buffers.
 - `pSeed` appends after bank `q^1`'s binned records, as per-brick segments, and bumps
   `PCOUNT[q^1]`. Seeds are not in `BIN_COUNT` until the next rebin. Nothing reads `BIN_COUNT`
   between `pSeed` and the next part 1.
+- Tiered, the re-entry seed (`pSeed` with `cfg.w = 2`, `cfg.z = 1`; R3, the coordinator's ruling
+  2026-11-16): in part 1 after the head's transfer and the sampler caches, before `pMove`, the same
+  seeding at the cells of the tiles the head refined (h-owned now, 4h at the last rebin: `TILE_OCC`
+  bit 16 + tile, the bit `pMove` retires by), appended to part 1's source bank (`pSrc ^ 1` at
+  `cfg.z = 1`), then `pArgs` (`cfg.z = 0`, `cfg.w = 0`) re-counts the source. So a refined tile has
+  records on its first h step (they move and bin with the rest), as the old engine's 4h-held records
+  did; its sites take a salt of their own (step + 1 with bit 31 set). It fills the tile's band: the
+  band test and the sites' depth are the φ the head's transfer stored (the last level set's FC_DEPTH,
+  FT_DIST and FT_T were the 4h authority's there), with no heat gate and the need rule's trigger heat
+  (2) for its records; the goal and mass counts and the runs (records still held: the two-head
+  retirement) are as the step's seeding. A tile whose brick entered at this head (fresh, no
+  `TILE_OCC` bits) gets none, and is seeded at the step's end as before.
+- Tiered, a 4h tile's surface is the 4h level set's alone ("no particles is not evidence of air"; lane E,
+  the coordinator's rulings 2026-11-16). A record held in a 4h-owned cell (the two-head window) stamps
+  no φ key (`lSplat`), no θ or surface heat (`pTiles`), and is not merged or mass-cut by `pMove`'s
+  crowding merge (its depth is not the h band's); it exists only so a quick reversal keeps it.
+  `lcCouple`'s union bound counts a 4h-owned cell by the 4h authority's fill, round(8 clamp(0.5 − φ,
+  0, 1)) of the advected C φ at the cell centre, not by its bin (skipping the cell made C φ depend on
+  the tile's own tier: a limit cycle). The mass rules (`pMove`'s crowding merge, its cell-mass cut and
+  the split) read `pMassDepth`: off the h band (`fgReach1` false) the 4h authority's φ (`fgPhiAt`), not
+  `fgDepth`'s push to ±6 cells, so a cell at a 4h surface is not deep (the push merged held records heavy
+  and kept re-entered ones from splitting: sparse heavy records and dimples next to the seam). `fgDepth`
+  itself, and so every grid reader (`vcTransferFace` included) and the other particle readers, keeps the
+  push; all-h is unchanged.
 
 
 ## 6. Kernels, bindings and the record

@@ -12,8 +12,10 @@
  *   with no 4h-owned incident tile is F's. Every other vertex is its 4h
  *   tile's interpolant, umVertexFrom4's arithmetic (l.95: the weight
  *   w.x*w.y*w.z times the corner, zero weights skipped, umVertexSum8's order),
- *   which at a corner is the C vertex itself. φ is in h units in F and C alike. A vertex no slot stores (or
- *   outside the lattice) reads NB_PHI_FAR, the old vertex field's empty value (fluidLatticeFarPhi in h).
+ *   which at a corner is the C vertex itself. φ is in h units in F and C alike. A vertex outside the lattice reads
+ *   NB_PHI_FAR, the old vertex field's empty value (fluidLatticeFarPhi in h). A vertex no slot stores reads
+ *   NB_PHI_AIR_C (16 h, the old stored far air): the old empty value is the box's far φ, and the foot projection's
+ *   taps (lcFullAdvected, lAdvect: offset -c g/|g|^2) would make the flow depend on the box. Stated deviation.
  * - Faces: a lower face with an h-owned cell on either side is an h face,
  *   stored in F at its upper cell. A face between two 4h-owned tiles on a
  *   tile plane is the C face of the upper tile. Inside a 4h tile, nbFaceU is
@@ -57,7 +59,7 @@ fn nbCellOwnerH(c:vec3i)->bool{return nbTileOwnerH(c>>vec3u(2u));}
 // tile is 4h-owned. Candidate k is tile tA + corner(k) - 1 (umCoarseIncident, the lowest k first: tA the tile
 // of v's cell above); an axis on which v lies inside tA (local != 0) admits only corner 1. A tile outside the
 // lattice is no candidate (the old cell-above walk steps off the solid shell, which gives the same tiles). Nor is a
-// tile of a non-resident page: no slot stores its corners, so it is air (NB_PHI_FAR), never an authority. Taking it
+// tile of a non-resident page: no slot stores its corners, so it is air (NB_PHI_AIR_C), never an authority. Taking it
 // as 4h made a vertex on an absent page's upper face the interpolant of the next page's C corners, which all-h hold
 // bootPhi's stale analytic φ: lane P's absent-page guard hits on the all-h dam (2026-11-15, a cell at (63,63,62)
 // read -1.58 against F's 67).
@@ -72,14 +74,15 @@ fn nbVertexCoarse(v:vec3i)->vec3i{
   return vec3i(-1);
 }
 fn nbVertexOwnerH(v:vec3i)->bool{return nbVertexCoarse(v).x<0;}
-// The C vertex at tile coordinate T (h vertex 4T); NB_PHI_FAR where no page holds it (the old empty value).
+// The C vertex at tile coordinate T (h vertex 4T): NB_PHI_FAR outside the lattice; NB_PHI_AIR_C (16 h, the old stored
+// far air, box-independent) where no page holds it.
 fn nbCVertex(T:vec3i)->f32{
   if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return NB_PHI_FAR;}
-  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_FAR;}
+  let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_AIR_C;}
   return bitcast<f32>(${n.phi}[NB_PHI_C_PHI+NB_STRIDE*cs+nbTileIndex(T)]);
 }
 fn nbFVertex(v:vec3i)->f32{
-  let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_FAR;}
+  let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_AIR_C;}
   return bitcast<f32>(${n.phi}[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
 }
 fn nbVertexPhi(v:vec3i)->f32{

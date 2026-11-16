@@ -6,7 +6,8 @@
  * - `vertexPhi` (r32float, lattice + 1 an axis, metres): phi at vertices,
  *   read through the tier authority (brick-owner.wgsl.ts nbVertexPhi): F where
  *   no incident tile is 4h-owned, else the 4h tile's interpolant of its C
- *   corners. Where no page holds a vertex it is the scene's far value.
+ *   corners. Where no page holds a vertex, or the vertex holds air at or past PHI_AIR_C (an absent slot's value,
+ *   brick-owner.wgsl.ts, and an entering slot's), it is the scene's far value.
  * - `volume` (r32float, lattice): each cell's liquid fraction, the
  *   six-tetrahedron fill of its eight corner phi (level-set-fill.wgsl.ts).
  * - `openFraction` (r32float, lattice): 1, as M2 has no cut cells.
@@ -70,7 +71,7 @@ var<workgroup> presentState:u32;
     let v=8*b+nbLocalCoord(lid+64u*j);
     if(any(v>NB_LATTICE)){continue;}
     var p=params.far_m;
-    if(held){let q=nbVertexPhi(v);if(q<NB_PHI_FAR){p=q*params.h_m;}}
+    if(held){let q=nbVertexPhi(v);if(q<NB_PHI_AIR_C){p=q*params.h_m;}}
     textureStore(vertexPhi,v,vec4f(p,0.0,0.0,0.0));
   }
 }`;

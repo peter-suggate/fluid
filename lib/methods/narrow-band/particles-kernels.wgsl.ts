@@ -9,15 +9,19 @@
  * - pLiquid: a workgroup an F_ALL brick: the liquid cells of the opening φ (P_LIQUID), which pMove's pSupported reads.
  * - pMove: a lane a record of bank src. The cell-mass cut and the merge (pre-move runs), G2P (FLIP 0.95), heat,
  *   Heun's third-order trace through the extended field (US), separation and the surface shift (pre-move q and
- *   neighbours), the box clamp, the split verdict. Writes the moved record to fmoved, counts its destination
+ *   neighbours), the box clamp, the split verdict. Tiered, R1: a record in a tile 4h-owned at the last rebin and at
+ *   this head retires (one 4h step). Writes the moved record to fmoved, counts its destination
  *   cell(s) (the rank, by atomicAdd), raises BOUND_F.
  * - pScan: a workgroup an F_ALL brick. Scans the 512 cell counts, takes the brick's start by atomicAdd on
- *   PCOUNT[dst] (§5.6 note a), writes BIN_START/COUNT, the cell runs and TILE_OCC; zeroes the counts.
+ *   PCOUNT[dst] (§5.6 note a), writes BIN_START/COUNT, the cell runs and TILE_OCC (bits 16..23 tiered: the tiles
+ *   4h-owned at this rebin); zeroes the counts.
  * - pScatter: a lane a record: files the moved record (and its split half) at its cell run plus rank.
  * - pTiles: a workgroup an F_ALL brick: the sort's tile heats (old slabSort's per-tile pass): SURFACE_HEAT, and
  *   THETA and the surface-tile flag over each sample's 2^3 support tiles.
  * - pSeed: a workgroup an F_ALL brick: the reseed (seedCells + seed), or the initial seed at boot (cfg.w = 1).
- *   Appends after the binned records (§5.6 note b).
+ *   Appends after the binned records (§5.6 note b). Tiered, R1: no seed in a 4h-owned tile. Tiered, the re-entry
+ *   seed (cfg.w = 2, part 1 after the head's transfer, before pMove, into the source bank): the same seeding at the
+ *   cells of the tiles the head refined (h now, 4h at the last rebin), so they deposit on their first h step.
  * - pDelta: a lane a record of bank dst: recordDelta (the FLIP delta the next G2P takes).
  * - pJoin: a lane a record of bank dst: the census's join bits (TILE_OCC 8-15, transferRefine's join rule).
  * - pArgs: one lane: the records' indirect arguments (P_ARGS_RECORDS, the fold rule) from PCOUNT[bank], bank
@@ -129,6 +133,11 @@ fn pSupported(q:vec3f)->bool{
  }
  return false;
 }
+// The mass rules' depth (lane E, coordinator 2026-11-16): the crowding merge, its cell-mass cut and the split read
+// it. Tiered, off the h band it is the 4h authority's φ (fgPhiAt), not fgDepth's push to six cells (nbfFarDepth): a
+// cell at a 4h surface is not deep (the push merged held records heavy and kept re-entered ones from splitting:
+// sparse heavy records and dimples by the seam). Every other fgDepth reader, the grid's included, keeps the push.
+fn pMassDepth(p:vec3f)->f32{if(FG_TIERED&&!fgReach1(vec3i(floor(p)))){return fgPhiAt(p);}return fgDepth(p);}
 fn pMergeRun(src:u32,record:Particle,low:u32,high:u32,stride:u32)->Particle{
  var s=nbfMergeStart(record);for(var j=low;j<high;j+=stride){s=nbfMergeAdd(s,parts[pAt(src,j)]);}return nbfMergeFinish(record,s);
 }
@@ -182,13 +191,24 @@ fn pFile(i:u32,p:Particle,split:bool){
  if(!nbLive(p)){return;}
  if(cfg.z==1u){pFile(i,p,false);return;}
  var q=p.position.xyz;
+ // R1: a record whose tile was 4h-owned at the last two rebins (TILE_OCC bits 16 and 24 + tile, pScan) and is
+ // 4h-owned at this head retires: its tile has had two 4h steps (the 4h transfer gathered it), and the 4h φ, not the
+ // records, carries the tile's liquid. The two heads are the census hysteresis's window (coordinator 2026-11-16): a
+ // tile that returns to h within them keeps its records, as the old engine's; one that returns later is re-entry
+ // seeded (pSeedCell, cfg.w = 2) at the grid velocity.
+ if(FG_TIERED){
+  let c=pCellOf(q);let s=fgSlot(c);
+  if(s!=NB_NONE&&fgCellCoarse(c)){let occ=nbSetWord(NB_S_TILE_OCC+s);if(((occ>>(16u+fgTileOf(c)))&(occ>>(24u+fgTileOf(c)))&1u)!=0u){return;}}
+ }
  let first=bitcast<u32>(nbParticleAge(p))==NB_SEED_FIRST;
  if(first){p.before.w=nbParticleRestate(p,0.0,nbParticleMode(p));}
- // crowdedCells "merge" with the cell-mass cut (Ferstl et al. 2016 §3.3), on the pre-move runs.
- {
+ // crowdedCells "merge" with the cell-mass cut (Ferstl et al. 2016 §3.3), on the pre-move runs. Not in a 4h-owned
+ // cell (lane E): its depth is not known there (fgDepth's -6 off the h band is the deep interior's, not a held
+ // record's surface), and a held record is kept as it is for a quick reversal; merged there it re-enters heavy.
+ if(!fgCellCoarse(vec3i(floor(q)))){
   let run=fgRun(vec3i(floor(q)));
   if(i>=run.x&&i<run.y){
-   let start=run.x;let deep=fgDepth(floor(q)+0.5);let cap=nbfCellCap(deep,20.0);
+   let start=run.x;let deep=pMassDepth(floor(q)+0.5);let cap=nbfCellCap(deep,20.0);
    var end=run.y;
    if(deep< -1.0){
     var held=0.0;
@@ -238,7 +258,7 @@ fn pFile(i:u32,p:Particle,split:bool){
  var split=false;
  {
   let run=fgRun(pCellOf(endpoint));
-  let seeded=nbSeedTarget(fgDepth(floor(endpoint)+0.5));
+  let seeded=nbSeedTarget(pMassDepth(floor(endpoint)+0.5));
   if(nbfSplitWanted(m,ballistic,20.0,run.y-run.x,seeded)){
    let along=nbfSplitAlong(endpoint);split=pPresent(nbfSplitA(endpoint,m,along))&&pPresent(nbfSplitB(endpoint,m,along));
   }
@@ -271,6 +291,11 @@ var<workgroup> sOcc:atomic<u32>;
   sBase=base;
  }
  if(own>0u){let l=2u*lid;let c=nbLocalCoord(select(l+1u,l,c0>0u));atomicOr(&sOcc,1u<<fgTileOf(c));}
+ // R1 (lane E, the user's aggressive fine-tile retirement): TILE_OCC bits 16..23, tile j 4h-owned at this rebin
+ // (CMASK as this step's head committed it). pMove retires a record whose tile is 4h at the next head too.
+ if(live&&lid<8u){let c=nbFOrigin(slot)+4*vec3i(vec3u(lid&1u,(lid>>1u)&1u,lid>>2u));if(fgCellCoarse(c)){atomicOr(&sOcc,1u<<(16u+lid));}}
+ // Bits 24..31: bits 16..23 of the last rebin (the slot's word before this store; a fresh slot's is 0, setAlloc's).
+ if(live&&lid==0u){atomicOr(&sOcc,((nbSetWord(NB_S_TILE_OCC+slot)>>16u)&0xffu)<<24u);}
  workgroupBarrier();
  if(!live){return;}
  let start=sBase+scan[lid]-own;
@@ -316,6 +341,8 @@ var<workgroup> wSurf:array<atomic<u32>,8>;
   for(var j=lid;j<count;j+=256u){
    let p=parts[pAt(dst,start+j)];if(!nbLive(p)){continue;}
    let c=pCellOf(p.position.xyz);let w=bitcast<u32>(p.position.w);let t=c>>vec3u(2u);
+   // R1 (lane E): a record held in a 4h-owned cell raises no θ or surface heat (lSplat's rule: not surface evidence).
+   if(fgCellCoarse(c)){continue;}
    atomicMax(&wSurf[fgTileOf(c)],w);
    let other=t+select(vec3i(-1),vec3i(1),(c&vec3i(3))>=vec3i(2));
    for(var k=0u;k<8u;k++){
@@ -341,6 +368,7 @@ var<workgroup> wSurf:array<atomic<u32>,8>;
   const pSeed = k("pSeed", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell], [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
 var<workgroup> sCount:atomic<u32>;
 var<workgroup> sBase:u32;
+var<workgroup> sTileSeeds:array<atomic<u32>,8>;
 fn pCellMass(run:vec2u,bank:u32)->f32{var m=0.0;for(var j=run.x;j<run.y;j++){let o=parts[pAt(bank,j)];if(nbLive(o)){m+=nbParticleMass(o);}}return m;}
 fn pUncovered(c:vec3i)->bool{
  for(var k=0u;k<27u;k++){let r=fgRun(c+nbNeighbourOffset(k));if(r.y>r.x){return false;}}
@@ -349,23 +377,46 @@ fn pUncovered(c:vec3i)->bool{
 // The seeds of cell c (count only, or write from at): the number seeded.
 fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
  if(!nbInLattice(c)){return 0u;}
- if(!fgReach1(c)){return 0u;}
- let centre=vec3f(c)+0.5;let heat=pHeat(centre);if(!(heat>0.0)){return 0u;}
- let d=fgDepth(centre);if(!nbfSeedCellDepthOk(d)){return 0u;}
+ // R1: no seed in a 4h-owned tile (the old seedSite seeds deep sites there too; a stated deviation, the user's
+ // aggressive fine-tile retirement): the 4h φ carries a 4h tile's liquid.
+ if(!fgCellOwned(c)){return 0u;}
+ // The re-entry seed (cfg.w = 2, part 1 after the head's transfer, before pMove; lane E, the coordinator's ruling
+ // 2026-11-16): only a tile the head refined, h-owned now and 4h-owned at the last rebin (TILE_OCC bit 16 + tile,
+ // pScan's, the bit pMove retires by), so it has records on its first h step, as the old engine's 4h-held records.
+ let re=cfg.w==2u&&!write;
+ if(cfg.w==2u){let s=fgSlot(c);if(s==NB_NONE||((nbSetWord(NB_S_TILE_OCC+s)>>(16u+fgTileOf(c)))&1u)==0u){return 0u;}}
+ // The re-entry seed's gate probe counters (H.REENTRY_CELLS..., the count pass only).
+ if(re){atomicAdd(&nbSet[NB_H_REENTRY_CELLS],1u);}
+ // The re-entry seed fills the tile's band (coordinator 2026-11-16; our mechanism, not the old seedSite's): the
+ // last level set's words (FT_DIST's reach, FC_DEPTH, FT_T's heat) were the 4h authority's there (a counter run:
+ // 18% of the band cells by φ failed FC_DEPTH's band, 7% the heat, FT_T 0 where R1 retired the records that
+ // carried it), so its band and its sites' depth are the φ the head's transfer stored (fgPhiAt: the 4h corners'
+ // trilinear), no heat gate (the census refining the tile is the signal), and its records take the need rule's
+ // trigger heat (HEAT4's 2), the heat a triggered tile gets.
+ let reentry=cfg.w==2u;
+ let centre=vec3f(c)+0.5;var heat=2.0;var d=0.0;
+ if(reentry){d=fgPhiAt(centre);heat=max(pHeat(centre),2.0);}
+ else{
+  if(!fgReach1(c)){return 0u;}
+  heat=pHeat(centre);if(!(heat>0.0)){return 0u;}
+  d=fgDepth(centre);
+ }
+ if(!nbfSeedCellDepthOk(d)){if(re){atomicAdd(&nbSet[NB_H_REENTRY_NO_DEPTH],1u);}return 0u;}
  let goal=nbSeedTarget(d);let mass=nbfSeedMass(d);
  var n0=0u;var held=0.0;var uncovered=true;
  if(!initial){
-  let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){return 0u;}
-  held=pCellMass(run,bank);if(held>=8.0){return 0u;}
+  let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
+  held=pCellMass(run,bank);if(held>=8.0){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
   uncovered=pUncovered(c);
  }
- let salt=select(nbRing(cfg.x,NB_RING_STEP)+1u,0u,initial);
+ // The re-entry seed's sites are not the step's part 2 sites (a salt of its own).
+ let salt=select(select(nbRing(cfg.x,NB_RING_STEP)+1u,(nbRing(cfg.x,NB_RING_STEP)+1u)^0x80000000u,cfg.w==2u),0u,initial);
  // The outer shell (a site above -1 cell) seeds only in an h owner's cell (seedSite: umOwnerAt(c).width == 1).
  let fine=fgCellOwned(c);
  var n=0u;
  for(var j=n0;j<goal;j++){
   if(!initial&&held+f32(j-n0)*mass>=8.0){continue;}
-  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=fgDepth(site);
+  let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=select(fgDepth(site),fgPhiAt(site),reentry);
   if(!nbfSeedSiteOk(distance,false,initial,d,1.0,uncovered,fine)){continue;}
   if(write){
    let u=fgSampleVel(site,0u,3u);
@@ -380,14 +431,30 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
 @compute @workgroup_size(256) fn pSeed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let bank=pSrc()^1u;let initial=cfg.w==1u;let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
  if(lid==0u){atomicStore(&sCount,0u);}
+ if(lid<8u){atomicStore(&sTileSeeds[lid],0u);}
  workgroupBarrier();
  var o=vec3i(0);var n=0u;
  if(live){
   o=nbFOrigin(nbListSlot(NB_LIST_F_ALL,g));
-  for(var r=0u;r<2u;r++){n+=pSeedCell(o+nbLocalCoord(lid+256u*r),bank,initial,false,0u);}
+  for(var r=0u;r<2u;r++){
+   let c=o+nbLocalCoord(lid+256u*r);let m=pSeedCell(c,bank,initial,false,0u);n+=m;
+   if(cfg.w==2u&&m>0u){atomicAdd(&sTileSeeds[fgTileOf(c)],m);}
+  }
  }
  var off=0u;if(n>0u){off=atomicAdd(&sCount,n);}
  workgroupBarrier();
+ // The re-entry seed's probe counters (brick-abi.ts H.REENTRY_*): lane t < 8 tile t of the brick.
+ if(cfg.w==2u&&live&&lid<8u){
+  let s=nbListSlot(NB_LIST_F_ALL,g);let c=o+4*vec3i(i32(lid&1u),i32((lid>>1u)&1u),i32(lid>>2u));
+  if(nbInLattice(c)&&fgCellOwned(c)){
+   if(fcLoad(FC_SLOT+s)!=nbFRec(s,NB_REC_KEY)+1u){atomicAdd(&nbSet[NB_H_REENTRY_FRESH],1u);}
+   else if(((nbSetWord(NB_S_TILE_OCC+s)>>(16u+lid))&1u)!=0u){
+    atomicAdd(&nbSet[NB_H_REENTRY_TILES],1u);
+    if(atomicLoad(&sTileSeeds[lid])==0u){atomicAdd(&nbSet[NB_H_REENTRY_EMPTY],1u);}
+   }
+  }
+ }
+ if(cfg.w==2u&&lid==0u){let total=atomicLoad(&sCount);if(total>0u){atomicAdd(&nbSet[NB_H_REENTRY_SEEDS],total);}}
  if(lid==0u){
   let total=atomicLoad(&sCount);var base=0u;
   if(total>0u){base=atomicAdd(&nbSet[NB_H_PCOUNT0+bank],total);if(base+total>NB_PCAP){atomicAdd(&nbSet[NB_H_P_OVERFLOW],total);nbFail(NB_FAIL_PARTICLES,base+total);}}

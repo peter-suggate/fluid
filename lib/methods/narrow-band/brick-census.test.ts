@@ -48,6 +48,10 @@ export interface CensusState {
   /** C_ALL in list order. */ readonly cAll: readonly number[];
   /** The census buffer's DEF words of tile i of C slot cs (the certificate's packed copy); absent: 0 (none written). */
   readonly def?: (cs: number, i: number) => readonly number[];
+  /** The last certificate's TC record saw liquid in tile i of C slot cs (bit 0 of TC word 8; R2 reads it); absent: dry. */
+  readonly wet?: (cs: number, i: number) => boolean;
+  /** R2's hysteresis: tile i of C slot cs was calm at the last tiered head (CALM under a valid CALM_KEY); absent: not. */
+  readonly calmPrev?: (cs: number, i: number) => boolean;
 }
 interface Class { low: number[]; high: number[]; gap: number[]; reach: number[]; flags: number; error: number; crossing: [number, number]; deep: [number, number] }
 const emptyClass = (): Class => ({ low: [0xffffffff, 0xffffffff, 0xffffffff], high: [0, 0, 0], gap: [15, 15, 15, 15, 15, 15], reach: [15, 15, 15, 15, 15, 15], flags: 0, error: 0, crossing: [0, 0], deep: [0, 0] });
@@ -57,11 +61,14 @@ export interface CensusResult {
   scratch: Map<number, Scratch>; want: Map<number, Uint32Array>; trig: Map<number, number>; cand: Set<number>;
   /** Thin-alone tiles of F bricks (FIN's criteria exactly the thin bit), and those the need rule heats. */ thinAlone: { tiles: number; heated: number };
   /** tuDeformation's branches on the thin-alone tiles: stale key, width <= 0, valid and heated, valid and not. */ defBranches: Record<"key" | "width" | "heated" | "cool", number>;
-  band: Map<number, boolean>; counters: Record<keyof typeof CENSUS_H, number>; failed: number;
+  band: Map<number, boolean>; demoted: Set<number>; calmNow: Set<number>; held: Set<number>; counters: Record<keyof typeof CENSUS_H, number>; failed: number;
 }
 
-/** The oracle. deep: tiles taking the last census's decision (the old deep COLD branch, l.2852), for the D test. */
-export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; decided: (t: V3) => boolean }): CensusResult {
+/** The oracle. deep: tiles taking the last census's decision (the old deep COLD branch, l.2852), for the D test.
+ * head: a tiered step head with the real D, where R2 (lane E, a stated deviation) makes a calm band tile 4h:
+ * dt error / h <= 0.08 on the supplied DEF words' error (ncCalm; an unknown copy is never calm), an h tile only at its
+ * second consecutive calm head (calmPrev; the hysteresis), a 4h tile at once. */
+export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; decided: (t: V3) => boolean }, head = false): CensusResult {
   const { N, h, dt } = s;
   const pageKey = (q: V3) => key(q);
   const pageIn = (q: V3) => q.every((v, a) => v >= 0 && 32 * v < N[a]!);
@@ -526,7 +533,21 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
   };
   const joinedOf = (t: V3) => { const fs = fSlot(shr(t, 1)); if (fs === undefined) return false; const j = (t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2); return ((s.tileOcc(fs) >>> (8 + j)) & 1) === 1; };
   const far = Math.ceil(fr(fr(fr(Math.min(reachMax, 1e6) + 0.5) + fr(1e-3)) / 4)) + 2;
+  const calm = (p: V3) => {
+    const cs = tileInLattice(p) ? s.pages.get(pageKey(shr(p, 3))) : undefined; if (cs === undefined) return false;
+    const w = s.def ? s.def(cs, tileIndex(p)) : [0, 0, 0, 0];
+    if (w[2] !== slotKey.get(cs)! + 1 || !(fromBits(w[3]!) > 0) || !(s.wet?.(cs, tileIndex(p)) ?? false)) return false;
+    const e = fromBits(w[1]!); return e < PLAN_MAX && fr(fr(dt * e) / h) <= fr(0.08);
+  };
+  const demoted = new Set<number>(), calmNow = new Set<number>(), held = new Set<number>();
   const decide = (p: V3, sc: Scratch, i: number) => {
+    const band = decideBand(p, sc, i); if (!(band && head && calm(p))) return band;
+    calmNow.add(key(p));
+    const cs = s.pages.get(pageKey(shr(p, 3)))!;
+    if (!tileH(p) || (s.calmPrev?.(cs, tileIndex(p)) ?? false)) { demoted.add(key(p)); return false; }
+    held.add(key(p)); return true;
+  };
+  const decideBand = (p: V3, sc: Scratch, i: number) => {
     const joined = joinedOf(p), fin = sc.fin[i]!, keys = sc.keys[i]!;
     if (deep?.has(p) && !joined) return deep.decided(p);
     if (!joined && !((fin & CROSSES) !== 0 || movingShapeNear(p, keys))) return false;
@@ -552,8 +573,9 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       const fine = decide(t, sc, i); band.set(key(t), fine);
       if (!fine) continue;
       counters.CENSUS_BAND++; if (!tileH(t)) counters.CENSUS_REFINED++;
-      const b = shr(t, 1); let clamped = false;
-      for (let n = 0; n < 27; n++) { const nb = add(b, [(n % 3) - 1, (Math.floor(n / 3) % 3) - 1, Math.floor(n / 9) - 1]); if (!inRange(nb) || fSlot(nb) !== undefined) continue; clamped = true; pageCand.add(key(nb)); }
+      // The ring (R3): the bricks of the tile's 27 tiles, two a side per axis.
+      const b = shr(add(t, [-1, -1, -1]), 1); let clamped = false;
+      for (let n = 0; n < 8; n++) { const nb = add(b, [n & 1, (n >> 1) & 1, n >> 2]); if (!inRange(nb) || fSlot(nb) !== undefined) continue; clamped = true; pageCand.add(key(nb)); }
       if (clamped) counters.CENSUS_CLAMPED++;
       w[i >> 5] = (w[i >> 5]! | (1 << (i & 31))) >>> 0;
     }
@@ -572,7 +594,7 @@ export function censusOracle(s: CensusState, deep?: { has: (t: V3) => boolean; d
       trigOut.set(fs, bits >>> 0); counters.CENSUS_TRIGGERED += [...Array(8).keys()].filter(j => (bits >> j) & 1).length;
     }
   }
-  return { scratch, want, trig: trigOut, cand, band, counters, failed, thinAlone, defBranches };
+  return { scratch, want, trig: trigOut, cand, band, demoted, calmNow, held, counters, failed, thinAlone, defBranches };
 }
 
 // ---- The frozen scene: a pool whose surface rolls across h and 4h tiles, a falling drop above it, a run-out
@@ -635,17 +657,19 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
     e.write("set", L.set.ring + RING.FLAGS, new Uint32Array([0]));
     // ---- The last certificate's packed copy (DEF: deformation, error, page key + 1, width as f32), which no
     // certificate wrote here: hashed per tile, a stale key (key + 2), width 0, width -4, else a valid deformation a
-    // factor 2 either side of the thin budget (dt deformation / h = 0.02), clear of f32 rounding at the threshold.
+    // factor 2 either side of the thin budget (dt deformation / h = 0.02), clear of f32 rounding at the threshold, and
+    // an error a factor 2 either side of R2's detail budget (dt error / h = 0.08) on an independent hash bit.
     const defWords = new Uint32Array(await e.read("census"));
     {
-      const budget = 0.02 * H_M / DT;
+      const budget = 0.02 * H_M / DT, detail = 0.08 * H_M / DT;
       for (const cs of cAll) {
         const k = [...snap.pages].find(([, v]) => v === cs)![0];
         for (let i = 0; i < 512; i++) {
           const r = (Math.imul(i + 1, 0x9e3779b1) ^ Math.imul(cs + 7, 0x85ebca6b)) >>> 0, u = (r >>> 8) / 2 ** 24, at = CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i;
           const width = u < 0.08 ? 0 : u < 0.12 ? -4 : (i & 1) ? 1 : 4;
-          defWords[at] = bitsOf(fr(budget * (u < 0.56 ? 0.5 : 2) * (1 + 0.3 * u))); defWords[at + 1] = bitsOf(fr(0.01 * u));
+          defWords[at] = bitsOf(fr(budget * (u < 0.56 ? 0.5 : 2) * (1 + 0.3 * u))); defWords[at + 1] = bitsOf(fr(detail * ((r >>> 4) & 1 ? 0.5 : 2) * (1 + 0.3 * u)));
           defWords[at + 2] = (u >= 0.12 && u < 0.2 ? k + 2 : k + 1) >>> 0; defWords[at + 3] = bitsOf(width);
+          defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 8] = (r >>> 5) & 3 ? 1 : 0; // TC's wet bit: 3/4 wet
         }
       }
       e.write("census", 0, defWords);
@@ -661,6 +685,7 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
       cmask: cs => dir.subarray(L.dir.cmask + CMASK_WORDS * cs, L.dir.cmask + CMASK_WORDS * (cs + 1)),
       fPhi, cPhi: cs => cPhi.get(cs)!, fU: (a, fs) => fU[a]!(fs), cU: (a, cs) => cU[a]!.get(cs)!, tileOcc: fs => occ[fs]!, cAll,
       def: (cs, i) => [...defWords.subarray(CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i, CENSUS.STRIDE * cs + CENSUS.DEF + 4 * i + 4)],
+      wet: (cs, i) => (defWords[CENSUS.STRIDE * cs + CENSUS.TC + 16 * i + 8]! & 1) === 1,
     };
     const want = censusOracle(state);
     assert.equal(want.failed, 0);
@@ -743,15 +768,21 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
         }
         cens.set(dec, CENSUS.STRIDE * cs + CENSUS.DEC); cens.set(stat, CENSUS.STRIDE * cs + CENSUS.STAT);
         before.set(cs, stat);
+        // The hysteresis's CALM bits, hashed half a tile, under the page key + 1 but in one workgroup of five (key + 2: a
+        // reused slot's, unknown, not calm).
+        const k = [...snap.pages].find(([, v]) => v === cs)![0];
+        for (let w = 0; w < 16; w++) cens[CENSUS.STRIDE * cs + CENSUS.CALM + w] = Math.imul(w + 1, 0x9e3779b1) ^ Math.imul(cs + 3, 0x85ebca6b);
+        for (let r = 0; r < 8; r++) cens[CENSUS.STRIDE * cs + CENSUS.CALM_KEY + r] = ((cs + r) % 5 === 0 ? k + 2 : k + 1) >>> 0;
       }
       e.write("census", 0, new Uint32Array(cens));
       await e.run(brickCensusSchedule(L, k => ({ indirect: ARGS.PER_LIST * k + ARGS.G1 }), LIST.C_ALL, LIST.F_ALL, true, true, true));
       const after = await e.read("set"), cAfter = await e.read("census");
       assert.equal(after[H.FAIL], 0, `FAIL ${after[H.FAIL]} info ${after[H.FAIL_INFO]?.toString(16)}`);
       const deepT = (t: V3) => regionOf(t)[0] <= 1 && 4 * t[1] < N[1];
-      const withDeep = censusOracle(state, { has: deepT, decided: t => !want.band.get(key(t)) });
+      const calmPrev = (cs: number, i: number) => cens[CENSUS.STRIDE * cs + CENSUS.CALM_KEY + (i >> 6)] === [...snap.pages].find(([, v]) => v === cs)![0] + 1 && ((cens[CENSUS.STRIDE * cs + CENSUS.CALM + (i >> 5)]! >>> (i & 31)) & 1) === 1;
+      const withDeep = censusOracle({ ...state, calmPrev }, { has: deepT, decided: t => !want.band.get(key(t)) }, true);
       const bad: string[] = [];
-      let deepTiles = 0, kept = 0, prevOne = 0;
+      let deepTiles = 0, kept = 0, prevOne = 0, demotedH = 0;
       for (const cs of cAll) {
         const pk = pageCoord.get(cs)!, o = CENSUS.STRIDE * cs;
         for (let r = 0; r < 8; r++) { const deep = 2 * pk[0] + (r & 1) <= 1; if (cAfter[RGW(cs, r, RG.DEEP)] !== +deep && bad.length < 20) bad.push(`page ${cs} region ${r} deep ${cAfter[RGW(cs, r, RG.DEEP)]}`); }
@@ -759,19 +790,30 @@ test("setCensus (GPU): classification, importance, the band, the clamp, WANT and
           const g = after[L.set.want + CMASK_WORDS * cs + w]!, x = withDeep.want.get(cs)![w]!;
           if (g !== x && bad.length < 20) bad.push(`page ${cs} WANT word ${w}: ${g.toString(16)} vs ${x.toString(16)}`);
           if (cAfter[o + CENSUS.DEC + w] !== x && bad.length < 20) bad.push(`page ${cs} DEC word ${w}`);
+          let calmX = 0; for (let b = 0; b < 32; b++) { const i = 32 * w + b; if (withDeep.calmNow.has(key(add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6])))) calmX |= 1 << b; }
+          if (cAfter[o + CENSUS.CALM + w] !== calmX >>> 0 && bad.length < 20) bad.push(`page ${cs} CALM word ${w}: ${cAfter[o + CENSUS.CALM + w]!.toString(16)} vs ${(calmX >>> 0).toString(16)}`);
+          if (w < 8 && cAfter[o + CENSUS.CALM_KEY + w] !== [...snap.pages].find(([, v]) => v === cs)![0] + 1 && bad.length < 20) bad.push(`page ${cs} CALM_KEY ${w}`);
         }
         for (let i = 0; i < 512; i++) {
           const t = add(scale3(pk, 8), [i & 7, (i >> 3) & 7, i >> 6]);
+          if (withDeep.demoted.has(key(t)) && ((dir[L.dir.cmask + CMASK_WORDS * cs + (i >> 5)]! >>> (i & 31)) & 1) === 1) demotedH++;
           if (4 * t[1] >= N[1]) continue;
           const joined = ((occ[snap.bricks.get(key(shr(t, 1)))!] ?? 0) >>> (8 + ((t[0] & 1) | ((t[1] & 1) << 1) | ((t[2] & 1) << 2)))) & 1;
           const deep = deepT(t) && !joined;
           const statX = deep ? (before.get(cs)![i >> 5]! >>> (i & 31)) & 1 : joined;
           if (((cAfter[o + CENSUS.STAT + (i >> 5)]! >>> (i & 31)) & 1) !== statX && bad.length < 20) bad.push(`tile ${t} STAT`);
-          if (deep) { deepTiles++; if (withDeep.band.get(key(t)) !== want.band.get(key(t))) kept++; if (!want.band.get(key(t))) prevOne++; }
+          if (deep) { deepTiles++; if (withDeep.band.get(key(t)) !== want.band.get(key(t)) || withDeep.demoted.has(key(t))) kept++; if (!want.band.get(key(t))) prevOne++; }
         }
       }
       assert.equal(after[REGION_H.HEAT_DEEP], regions / 2, "deep regions");
       assert.deepEqual(bad, [], `${bad.length} mismatches with D != 0`);
+      // The hysteresis's branches: calm h tiles held (not calm before, or under a stale key), calm h tiles demoted at
+      // their second calm head, calm 4h tiles demoted at once; and the counters.
+      const hyst = { calm: withDeep.calmNow.size, held: withDeep.held.size, demotedH, demoted4: withDeep.demoted.size - demotedH };
+      console.log("setCensus hysteresis:", JSON.stringify(hyst));
+      assert.ok(hyst.held > 0 && hyst.demotedH > 0 && hyst.demoted4 > 0, JSON.stringify(hyst));
+      assert.equal(after[H.CENSUS_CALM_HELD], hyst.held, "CENSUS_CALM_HELD");
+      assert.equal(after[H.CENSUS_CALM], withDeep.demoted.size, "CENSUS_CALM");
       assert.ok(deepTiles > 100 && kept === deepTiles && prevOne > 50, `deep tiles ${deepTiles}, kept ${kept}, decidedPrev = 1 ${prevOne}`);
       console.log("setCensus D != 0:", JSON.stringify({ regions, deepTiles, prevOne }));
     }

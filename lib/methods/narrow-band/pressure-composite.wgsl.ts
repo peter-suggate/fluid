@@ -150,7 +150,7 @@ fn poVertexS(v:vec3i,o:vec3i)->f32{
     if(poSK[poIndex(t-T0+vec3i(2),5)]!=0u){T=t;break;}
   }
   if(T.x<0){
-    let s=poSB[poIndex((v>>vec3u(3u))-(o>>vec3u(3u))+vec3i(1),3)];if(s>=NB_SEAM){return NB_PHI_FAR;}
+    let s=poSB[poIndex((v>>vec3u(3u))-(o>>vec3u(3u))+vec3i(1),3)];if(s>=NB_SEAM){return NB_PHI_AIR_C;}
     return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
   }
   let t=vec3f(v-4*T)/4.0;var values:array<f32,8>;
