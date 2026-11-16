@@ -27,12 +27,12 @@ import { mgLayout, mgLive, poolMGPCG } from "./pressure-mgpcg";
  * (mgLive) the MGPCG itself places rowsF over HB and projectF over HP (pressure-mgpcg.ts), so `operator` is the lean
  * pressureRowsList over F_ALL (the lists and the zero rows off them) and `project` pressureProjectRest (the FLAGS of
  * the bricks off HP). */
-export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly faces?: boolean } = {}) {
+export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly faces?: boolean; readonly cuts?: boolean } = {}) {
   if (opt.faces && mgLive(L)) {
-    const M = mgLayout(L), live = poolMGPCG(L).live!;
-    const K = pressureCompositeKernels(L, {}, { tiered: opt.tiered, faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN } });
+    const M = mgLayout(L), live = poolMGPCG(L, { cuts: opt.cuts }).live!;
+    const K = pressureCompositeKernels(L, {}, { tiered: opt.tiered, faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN }, cuts: opt.cuts });
     return { operator: live.rowsList, project: K.projectRest! };
   }
-  const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { tiered: opt.tiered, faces: opt.faces ? mgLayout(L).FC : undefined });
+  const K = pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { tiered: opt.tiered, faces: opt.faces ? mgLayout(L).FC : undefined, cuts: opt.cuts });
   return { operator: K.rowsF, project: K.projectF };
 }

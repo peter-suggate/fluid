@@ -84,6 +84,7 @@ import { CFG, type BrickBinding, type BrickKernel, type BrickPlacement, declareB
 import type { PressureSolver } from "./brick-pressure-slot";
 import { FINE_ORDER, OC } from "./pressure-model";
 import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { NP_K } from "./pressure-rows.wgsl";
 
 const P_WALL0 = P_FLAG.WALL0, WALL_F = P_WALL_C.F.toFixed(1), WALL_C = P_WALL_C.C.toFixed(1);
 
@@ -259,6 +260,12 @@ export interface MGPCGOptions {
    * with a face cache with pressureOperatorKernels' live operator and project, so false is for tests (the F_ALL path).
    */
   readonly live?: boolean;
+  /**
+   * The cuts (default off; M5 design §5): the h rows read the K slots' FRAC / AP / W (pressure-composite.wgsl.ts), and
+   * the walls' re-decision takes a wall face's coupling (its aperture V) and kind from the face cache, skipping a
+   * closed one. Off, every kernel's text is the cut-free solver's.
+   */
+  readonly cuts?: boolean;
 }
 
 /**
@@ -289,7 +296,7 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
   const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, nativeSweeps = options.nativeSweeps ?? 2, walls = options.walls ?? false, guessOn = options.guess ?? true, guessWalls0 = options.guessWalls ?? true;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
   const tolBits = new Uint32Array(new Float32Array([tol]).buffer)[0]!;
-  const wallDecisions = Math.min(options.wallDecisions ?? MG_WALL_DECISIONS, 0xffffffff), wallLoose = options.wallLoose ?? MG_WALL_LOOSE, audit = options.audit ?? false;
+  const wallDecisions = Math.min(options.wallDecisions ?? MG_WALL_DECISIONS, 0xffffffff), wallLoose = options.wallLoose ?? MG_WALL_LOOSE, audit = options.audit ?? false, cuts = options.cuts === true;
   if (!(wallDecisions >= 0) || !(wallLoose >= 1)) throw new Error(`Pool MGPCG: walls policy ${wallDecisions}/${wallLoose}`);
   const guessWalls = guessOn && walls && wallDecisions > 0 && guessWalls0;
   const M = mgLayout(L), T = M.top;
@@ -310,7 +317,7 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
     `const P_W0:u32=${u(M.W0)};const P_W1:u32=${u(M.W1)};const P_L1:u32=${u(M.L1)};`,
     `const P_SEAMT:u32=${u(M.SEAMT)};const P_SEAML:u32=${u(M.SEAML)};const P_SEAMF:u32=${u(M.SEAMF)};const P_SEAMN:u32=${u(M.SEAMN)};`,
     `const P_STG:u32=${u(M.STG)};const P_RKU:u32=${u(M.RKU)};const P_QSTG:u32=${u(M.QSTG)};`,
-    `const P_HBL:u32=${u(M.HBL)};const P_HPL:u32=${u(M.HPL)};const P_ZLL:u32=${u(M.ZLL)};const P_RLL:u32=${u(M.RLL)};const P_RLN:u32=${u(M.RLN)};`,
+    `${cuts ? `const P_FC:u32=${u(M.FC)};` : ""}const P_HBL:u32=${u(M.HBL)};const P_HPL:u32=${u(M.HPL)};const P_ZLL:u32=${u(M.ZLL)};const P_RLL:u32=${u(M.RLL)};const P_RLN:u32=${u(M.RLN)};`,
     `const P_L2:u32=${u(M.L2)};const P_L3:u32=${u(M.L3)};const P_L4:u32=${u(M.L4)};const P_L5:u32=${u(M.L5)};`,
     `const P_FS2:u32=${u(2 * fineSweeps)};const P_CS2:u32=${u(2 * coarseSweeps)};const P_NS2:u32=${u(2 * nativeSweeps)};const P_SLOTS:u32=${u(slots)};`,
     `const P_ROWS6:u32=${u(MG_ROWS6)};const P_ROWS7:u32=${u(MG_ROWS7)};`,
@@ -856,7 +863,7 @@ fn pOwnerT(t:vec3i)->bool{
 }`);
   // The h rows' kernels over the lists (labels "operator" and "project", the F_ALL path's areas): rowsF and
   // tileRoots on HB, projectF on HP.
-  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN } }) : undefined;
+  const KL = live ? pressureCompositeKernels(L, { rowsF: ["operator", "nbOperator"], projectF: ["project", "project"] }, { faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN }, cuts }) : undefined;
 
   // A live F slot holds the brick of tile T (seen from page p), so setupF (over F_ALL) wrote T's L2 row.
   const LIQUID_TILE = /* wgsl */`
@@ -1778,7 +1785,12 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
     let x=${guessAt ? "pres[NB_PRES_F_Z+at]" : "pres[NB_PRES_F_X+at]+alpha*pres[NB_PRES_F_D+at]"};
     var dd=0.0;var db=0.0;var flips=0u;
     for(var a=0u;a<3u;a++){
-      let side=pWallFace(c,a,NB_LATTICE[a]);if(side==0){continue;}
+      let side=pWallFace(c,a,NB_LATTICE[a]);if(side==0){continue;}${cuts ? `
+      // The cuts: the face's kind and coupling from rowsF's face cache (a wall face's word is its V); a closed one
+      // (A <= 1e-6) has no state.
+      let fk=2u*a+select(0u,1u,side>0);
+      if(((u32(pmgF[P_FC+NB_STRIDE*(7u*slot+6u)+l])>>(4u*fk))&15u)!=${NP_K.WALL + 1}u){continue;}
+      let wc=pmgF[P_FC+NB_STRIDE*(7u*slot+fk)+l];` : ""}
       var sc=c;if(side>0){sc[a]+=1;}
       let s=nbFSlotOfCell(sc);if(s>=NB_SEAM){continue;}
       let w=NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(sc);let bit=${P_WALL0}u<<a;
@@ -1786,7 +1798,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
       let lift=f32(side)*vel[NB_VEL_F_US0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(sc)]*h;
       let attached=x+lift>=0.0;
       ${audit ? "atomicAdd(&wAud[1],1u);if(attached==((phi[w]&bit)!=0u)){atomicAdd(&wAud[0],1u);}" : `if(attached==((phi[w]&bit)!=0u)){
-        if(attached){dd-=${WALL_F};db+=${WALL_F}*lift;}else{dd+=${WALL_F};db-=${WALL_F}*lift;}
+        if(attached){dd-=${cuts ? "wc" : WALL_F};db+=${cuts ? "wc" : WALL_F}*lift;}else{dd+=${cuts ? "wc" : WALL_F};db-=${cuts ? "wc" : WALL_F}*lift;}
         phi[w]=(phi[w]&~bit)|select(bit,0u,attached);flips++;
       }`}
     }

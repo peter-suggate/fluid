@@ -213,7 +213,28 @@ fn poStageLight(o:vec3i,lid:u32){
 }
 `;
 
-const COMPOSITE_WGSL = /* wgsl */`
+/** The cuts' readers (M5 design §5; brick-abi.md §2.3 with A1): a cell's open fraction FRAC, a lower face's aperture
+ * AP and moving-wall velocity W from its brick's K slot. A brick without a slot is open (FRAC 1, AP 1, W 0), a cell
+ * outside the lattice solid (FRAC 0, as pbStampCell's out-of-box voxel), and a lattice wall face is
+ * 0.5 (FRAC low + FRAC high) (umPressureFaceV, pbStampFace): stored at plane 0, formed here at plane N, where no
+ * brick holds the face. */
+const CUTS_WGSL = /* wgsl */`
+fn poCutK(c:vec3i)->u32{if(!nbInLattice(c)){return NB_NONE;}let s=poSlotOfCell(c);if(s>=NB_SEAM){return NB_NONE;}return nbFRec(s,NB_REC_CUT);}
+fn poFrac(c:vec3i)->f32{if(!nbInLattice(c)){return 0.0;}let k=poCutK(c);if(k==NB_NONE){return 1.0;}return cut[NB_CUT_FRAC+NB_STRIDE*k+nbLocal(c)];}
+fn poCutAP(a:u32)->u32{return select(select(NB_CUT_AP2,NB_CUT_AP1,a==1u),NB_CUT_AP0,a==0u);}
+fn poCutW(a:u32)->u32{return select(select(NB_CUT_W2,NB_CUT_W1,a==1u),NB_CUT_W0,a==0u);}
+// The lower face of c along a (c may lie on the lattice's plane N, one past its last cell).
+fn poFaceAP(c:vec3i,a:u32)->f32{
+  let low=c-poUnit(a);
+  if(!nbInLattice(c)){return 0.5*(poFrac(low)+0.0);}
+  let k=poCutK(c);if(k==NB_NONE){return select(0.5,1.0,nbInLattice(low));}
+  return cut[poCutAP(a)+NB_STRIDE*k+nbLocal(c)];
+}
+fn poFaceW(c:vec3i,a:u32)->f32{let k=poCutK(c);if(k==NB_NONE){return 0.0;}return cut[poCutW(a)+NB_STRIDE*k+nbLocal(c)];}
+fn poCutBmask(k:u32)->u32{if(k==NB_NONE){return 0u;}return bitcast<u32>(cut[NB_CUT_BMASK+k]);}
+`;
+
+const compositeWGSL = (cuts: boolean) => /* wgsl */`
 const PO_WARM:u32=${P_FLAG.WARM}u;const PO_WALL0:u32=${P_FLAG.WALL0}u;const PO_WALLS:u32=${P_FLAG.WALLS}u;
 // The wall state's storage word: h cell c's FLAGS (a cell, or the skirt cell at plane N), tile T's C FLAGS (T
 // up to N/4). A liquid row's wall storage is always resident (the residency dilates the skirt); missing, it
@@ -367,13 +388,17 @@ fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{
     if(!band){let root=poRootPhi(q>>vec3u(2u));native=poWet(root,4.0);if(native){n=NpCell(root,true,true);}}
     if(!native){let p=poCentre(q);let wet=poWet(p,1.0);n=NpCell(p,wet,wet);}
   }
-  let volume=select(0.5,1.0,nbInLattice(q));
+${cuts ? `  // The cuts (§5): the face's aperture, AP of its upper cell's lower face, and both cells' open fractions; the
+  // solid flags as the old rows take them (shut = FRAC <= 1e-5, umCellIsOpen), never inside (latched in rowsF).
+  let volume=poFaceAP(select(c,q,sign>0),a);let open=poFrac(c);var qOpen=1.0;if(across==NP_ACROSS_RESIDENT){qOpen=poFrac(q);}
+  var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}
+  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,false,open<=1e-5,false,open,qOpen>1e-5,false,qOpen);` : `  let volume=select(0.5,1.0,nbInLattice(q));
   // The face φ enters only the marched θ of a wet-dry face (npBandFace with solidClear): the other faces skip its
   // four vertices.
   var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}
-  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,true,false,false,1.0,true,false,1.0);
+  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,true,false,false,1.0,true,false,1.0);`}
   return PoFace(face,n.wet,native);
-}
+}${cuts ? CUTS_WGSL : ""}
 // poBandFace of h cell m on face f where the cell across lies in a liquid 4h-owned tile of a resident page with root
 // φ root (a seam, seen from the native row): across RESIDENT, not band, native, n = (root, wet, liquid), volume 1.
 fn poSeamFace(m:vec3i,own:f32,liquid:bool,f:u32,root:f32)->NpFace{
@@ -446,12 +471,17 @@ fn poRelease(phiOwner:f32,ghost:f32,sign:f32,u:f32,w:f32,h:f32)->bool{
 }
 `;
 
-const headerWGSL = (L: BrickLayout, staged = false, tiered = true) => `const PO_TIERED:bool=${tiered};\n` + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + COMPOSITE_WGSL;
+const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
 
 /** The composite kernels. rowsF's label and entry are the engine's operator's when pressure-operator.wgsl.ts builds it.
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */
-export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number } } = {}) {
+export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [string, string]; projectF?: [string, string] } = {}, opt: { readonly tiered?: boolean; readonly faces?: number; readonly live?: { readonly hb: number; readonly hp: number; readonly rl: number; readonly rln: number }; readonly cuts?: boolean } = {}) {
   const tiered = opt.tiered !== false;
+  // The cuts (opt.cuts, default off; M5 design §5): rowsF and projectF read the K slots' FRAC / AP / W (static and
+  // body), so a brick with a cut no longer latches FAIL.UNSUPPORTED there. Off, their text is the cut-free rows'.
+  // They need the face cache: the walls' re-decision (pmgWallsF) takes a wall face's coupling from it.
+  const cuts = opt.cuts === true;
+  if (cuts && opt.faces === undefined) throw new Error("Pressure composite: the cuts need the face cache (pmgF)");
   // The face cache (opt.faces: its pmgF word, mgLayout(L).FC; lane P's own buffer, bound by the MGPCG solvers): rowsF
   // stores each liquid h row's six band faces (coefficient / fraction, and its kind + 1 in 4 bits a face of a seventh
   // word as an exact f32 integer), and projectF reads them on every face with a liquid h side instead of recomputing
@@ -471,7 +501,7 @@ export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [strin
   const head = (list: "hb" | "hp", go: string, fill = "") => live === undefined
     ? `let g=nbGroup(wid);if(lid==0u){${fill}${go}=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&${go})==0u){return;}\n  let slot=nbListSlot(NB_LIST_F_ALL,g);`
     : `let g=nbGroup(wid);${fill ? `if(lid==0u){${fill}}` : ""}\n  let slot=u32(pmgF[${list === "hb" ? "PO_HBL" : "PO_HPL"}+g]);`;
-  const k = (label: string, body: string, entry = label, bindings: readonly BrickBinding[] = ROWS, staged = false) => brickCellKernel(L, label, bindings, headerWGSL(L, staged, tiered) + body, entry);
+  const k = (label: string, body: string, entry = label, bindings: readonly BrickBinding[] = ROWS, staged = false, cut = false) => brickCellKernel(L, label, bindings, headerWGSL(L, staged, tiered, cut) + body, entry);
   const [rowsLabel, rowsEntry] = names.rowsF ?? ["pressureRowsF", "pressureRowsF"];
   const [projectLabel, projectEntry] = names.projectF ?? ["pressureProjectF", "pressureProjectF"];
 
@@ -560,7 +590,11 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   workgroupBarrier();
   if(lid==0u){poGo=atomicLoad(&poCold);}
   poTiles(lid,workgroupUniformLoad(&poGo)!=0u);
-  if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
+  ${cuts ? `// A cut brick's rows are all h (bodies: §4's h ring; the native rows never read a cut): a lattice tile of it that
+  // is not h-owned latches.
+  let kslot=nbFRec(slot,NB_REC_CUT);
+  if(kslot!=NB_NONE&&lid<8u){let T=(nbFOrigin(slot)>>vec3u(2u))+poCorner(lid);if(nbTileInLattice(T)&&!nbTileOwnerH(T)){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}}
+  let bmask=poCutBmask(kslot);let staticCut=(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u;` : "if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}"}
   let o=nbFOrigin(slot);let r=cfg.x;let h=nbRingF(r,NB_RING_H);
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
   // The starts first (a lane its cell's, lanes 0..383 a face halo cell's), so that the seam heads read them staged.
@@ -582,13 +616,26 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var ku=vec3f(0.0);
     ${faces === undefined ? "" : "var kinds=0u;"}
     if(liquid){
-      for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}
+      for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}${cuts ? `
+      // The row's capacity (bHeadCapacity, the old head capacity: its own FRAC on all six faces). A liquid row in a
+      // static solid cell is the old rows' inside row (the complementarity rows), not ported: it latches.
+      let capacity=poFrac(c);
+      if(staticCut&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}` : ""}
       for(var f=0u;f<6u;f++){
-        let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;${faces === undefined ? "" : `
+        let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;${faces === undefined ? "" : cuts ? `
+        // A wall face's cache word is its coupling (V, the walls' re-decision reads it; its ratio is 1), a closed
+        // face's 0.
+        kinds|=(face.kind+1u)<<(4u*f);if(face.kind!=NP_K_SEAM){pmgF[poFcAt(slot,f,l)]=select(select(face.coefficient/face.fraction,face.coefficient,face.kind==NP_K_WALL),0.0,face.kind==NP_K_CLOSED);}` : `
         kinds|=(face.kind+1u)<<(4u*f);if(face.kind!=NP_K_SEAM){pmgF[poFcAt(slot,f,l)]=face.coefficient/face.fraction;}`}
         var fc=c;if(sign>0){fc[a]+=1;}
         let us=poFacePlane(fc,a);
-        if(face.kind!=NP_K_CLOSED){div+=f32(sign)*face.fraction*us;}
+        if(face.kind!=NP_K_CLOSED){div+=f32(sign)*face.fraction*us;}${cuts ? `
+        // The moving wall (pRows 1618): sign (cap - A) W on every face but a wall or air face; W is 0 off bodies.
+        if(face.kind!=NP_K_WALL&&face.kind!=NP_K_OPEN){div+=f32(sign)*(capacity-face.fraction)*poFaceW(fc,a);}
+        // The native rows (rowsC) take a seam at volume 1, and the faces into an absent brick are open: a cut there
+        // would be one-sided, so it latches.
+        if(pf.native&&face.fraction!=1.0){nbFail(NB_FAIL_UNSUPPORTED,0xa3000000u|nbFRec(slot,NB_REC_KEY));}
+        if(bmask!=0u&&sign>0&&nbInLattice(fc)&&poSlotOfCell(fc)>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,0xa4000000u|nbFRec(slot,NB_REC_KEY));}` : ""}
         if(face.kind==NP_K_NEUMANN||face.kind==NP_K_CLOSED){continue;}
         if(face.kind==NP_K_WALL){
           // The build's state (pRebase's first measure, start + lift >= 0), stored at the face for the outer loop.
@@ -609,13 +656,13 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     // Every cell's X is its start, 0 off the liquid rows (the slot contract's zero rows, cells of 4h-owned tiles and
     // the skirt included: they hold no state, and a refined tile's rows start cold).
     pres[NB_PRES_F_B+at]=start;pres[NB_PRES_F_X+at]=start;
-    pres[NB_PRES_F_RHS+at]=select(0.0,-h*div+h*h*rate*capacity+extra,liquid);
+    pres[NB_PRES_F_RHS+at]=select(0.0,-h*div+h*h*rate*${cuts ? "poFrac(c)" : "capacity"}+extra,liquid);
     pres[NB_PRES_F_DIAG+at]=diag;pres[NB_PRES_F_PPHI+at]=select(0.0,own,owned);
     pres[NB_PRES_F_K0+at]=kk.x;pres[NB_PRES_F_K1+at]=kk.y;pres[NB_PRES_F_K2+at]=kk.z;
     pres[NB_PRES_F_KU0+at]=ku.x;pres[NB_PRES_F_KU1+at]=ku.y;pres[NB_PRES_F_KU2+at]=ku.z;${faces === undefined ? "" : `
     pmgF[poFcAt(slot,6u,l)]=f32(kinds);`}
   }
-}`, rowsEntry, rowsB, true);
+}`, rowsEntry, rowsB, true, cuts);
 
   // rowsC: a workgroup a page of C_ALL (G1), a lane a tile. After rowsF, whose stored rows it reads: a seam
   // subface's h cell m takes its centre φ from PPHI and its head from poHeadB (the h rows' starts in B and centre φ
@@ -773,18 +820,24 @@ var<workgroup> poGo:u32;
         let wall=c[a]==0||c[a]==NB_LATTICE[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
         var u=us;${faces === undefined ? `
         if(lc){u=poProjectFace(c,pc,true,2u*a,us,h,separated);}
-        else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h,separated);}` : `
+        else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h,separated);}` : `${cuts ? `
+        // The cuts: the face's aperture and moving-wall velocity (this brick's lower face), and its closure: a liquid
+        // side's kind, else A <= 1e-6. A closed face moves with the solid (bFace 3217: U = W).
+        let ap=poFaceAP(c,a);let wv=poFaceW(c,a);var closed=ap<=1e-6;` : ""}
         if(lc){
-          let kind=((u32(pmgF[poFcAt(slot,6u,l)])>>(8u*a))&15u)-1u;let word=pmgF[poFcAt(slot,2u*a,l)];
+          let kind=((u32(pmgF[poFcAt(slot,6u,l)])>>(8u*a))&15u)-1u;${cuts ? "var" : "let"} word=pmgF[poFcAt(slot,2u*a,l)];${cuts ? `closed=kind==NP_K_CLOSED;
+          if(kind==NP_K_WALL){word=1.0;}` : ""}
           u=poProjectFaceK(c,pc,true,2u*a,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
         else if(ln){
           let sn=poSlotOfCell(n);let lnl=nbLocal(n);
-          let kind=((u32(pmgF[poFcAt(sn,6u,lnl)])>>(8u*a+4u))&15u)-1u;let word=pmgF[poFcAt(sn,2u*a+1u,lnl)];
+          let kind=((u32(pmgF[poFcAt(sn,6u,lnl)])>>(8u*a+4u))&15u)-1u;${cuts ? "var" : "let"} word=pmgF[poFcAt(sn,2u*a+1u,lnl)];${cuts ? `closed=kind==NP_K_CLOSED;
+          if(kind==NP_K_WALL){word=1.0;}` : ""}
           u=poProjectFaceK(n,pn,true,2u*a+1u,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
         else if(hc&&!hn){u=poProjectDry(c,pc,2u*a,us,h,separated,n);}
-        else if(hn&&!hc){u=poProjectDry(n,pn,2u*a+1u,us,h,separated,c);}`}
+        else if(hn&&!hc){u=poProjectDry(n,pn,2u*a+1u,us,h,separated,c);}${cuts ? `
+        if(closed){u=wv;}` : ""}`}
 ${faces === undefined ? `
         else if(hc&&!hn){u=poProjectFace(c,pc,false,2u*a,us,h,separated);}
         else if(hn&&!hc){u=poProjectFace(n,pn,false,2u*a+1u,us,h,separated);}` : ""}
@@ -793,8 +846,17 @@ ${faces === undefined ? `
           // The owner: c on plane 0 (its low face), n on plane N (its high face).
           let low=c[a]==0;let sign=select(1.0,-1.0,low);let liquid=select(ln,lc,low);let m=select(n,c,low);
           var ghost=0.0;if(liquid&&!separated){ghost=poXF(m)+sign*us*h;}
-          if(poRelease(select(pn,pc,low),ghost,sign,u,1.0,h)){release|=PO_WALL0<<a;}
-        }
+          if(poRelease(select(pn,pc,low),ghost,sign,u,1.0,h)${cuts ? "&&poFrac(m)>1e-5&&ap>1e-6" : ""}){release|=PO_WALL0<<a;}
+        }${cuts ? `
+        // A solid face (bReleased 3359-3367): between an open and a shut cell, from the band row below it, released
+        // when the shut side's pressure is <= 0 and the fluid leaves the solid, -+(U - W) dt > 1e-4 h.
+        else if(hn){
+          let openN=poFrac(n)>1e-5;
+          if(openN!=(poFrac(c)>1e-5)&&ap>1e-6){
+            var pressure=0.0;if(select(ln,lc,openN)){pressure=poXF(select(n,c,openN));}
+            if(pressure<=0.0&&select(1.0,-1.0,openN)*(u-wv)*nbRingF(cfg.x,NB_RING_DT)>1e-4*h){release|=PO_WALL0<<a;}
+          }
+        }` : ""}
       }
       phi[NB_PHI_F_FLAGS+at]=(flags&~(PO_WARM|PO_WALLS))|select(0u,PO_WARM,lc&&pres[NB_PRES_F_DIAG+at]>0.0)|release;
     }
@@ -802,7 +864,7 @@ ${faces === undefined ? `
   }
   workgroupBarrier();
   if(lid==0u){atomicMax(&nbSet[NB_S_BOUND_F+slot],atomicLoad(&wSpeed));}
-}`, projectEntry, projectB, true);
+}`, projectEntry, projectB, true, cuts);
 
   // projectC: a workgroup a page of C_ALL (G1), a lane two tiles, after the solve's finish.
   // - An h tile's C X becomes the mean X of its liquid h rows (083's band-tile mean): the tile's start next step.

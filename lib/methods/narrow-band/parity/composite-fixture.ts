@@ -25,10 +25,11 @@ const phiAt = (v: V3) => v[1] - 11.3 + 0.08 * v[0] - 0.05 * v[2] + 0.4 * Math.si
 const usAt = (c: V3, a: number) => 0.6 * Math.sin(0.37 * c[0] + 0.9 * a) - 0.4 * Math.cos(0.29 * c[1] - 0.21 * c[2] + a) + 0.3 * (hash(c, a) - 0.5);
 const xAt = (c: V3) => 0.004 * (11.3 - c[1]) + 0.01 * (hash(c, 7) - 0.5);
 
-export async function compositeFixture(device: GPUDevice, solver: PressureSolverFactory) {
+/** opt.k: the K (cut) slots, for the cut rows' tests (default 0, no cut pool). */
+export async function compositeFixture(device: GPUDevice, solver: PressureSolverFactory, opt: { readonly k?: number } = {}) {
   const N = COMPOSITE_N, h = 1 / 32, rate = 0.07;
   const e = await BrickEngine.create(device, { lattice: [N, N, N], h_m: h, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0],
-    capacities: { f: 200, c: 8, b: 0, k: 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [33, 18.3, 33] }], solver, stages: bringUpStages });
+    capacities: { f: 200, c: 8, b: 0, k: opt.k ?? 0, particles: 1024 }, liquid: [{ lo: [-1, -1, -1], hi: [33, 18.3, 33] }], solver, stages: bringUpStages });
   const s = await snapshot(e), L = e.layout;
   const dir = s.dir.slice();
   const pageSlot = (p: V3) => {
