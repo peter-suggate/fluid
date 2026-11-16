@@ -74,6 +74,22 @@ fn vLiquidStore(slot:u32,o:vec3i,lid:u32){
 `;
 /** fgLiquidOwner from FC_LIQ (this step's, uTransfer's; needs FG_PHI_WGSL and FG_FCELL_WGSL): a cell of a 4h tile
  * its tile's phase, an h cell its bit, a cell no slot holds its corners (fgLiquidCell). */
+const V_RING_WGSL = /* wgsl */`
+// A ring brick (tiered): no face of the brick at o is F's (fgFaceOwned: an h-owned cell either side), since none of
+// its eight tiles and none of the tiles below its three lower planes is h-owned. Its F faces are never read (the
+// readers take the 4h interpolation where neither side is h-owned), so the velocity kernels do no face work there.
+fn vRingBrick(o:vec3i)->bool{
+ if(!FG_TIERED){return false;}
+ let t0=o>>vec3u(2u);
+ for(var k=0u;k<8u;k++){if(foTileOwnerH(t0+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return false;}}
+ for(var a=0u;a<3u;a++){for(var k=0u;k<4u;k++){
+  var t=t0;let u=(a+1u)%3u;let w=(a+2u)%3u;t[a]-=1;t[u]+=i32(k&1u);t[w]+=i32(k>>1u);
+  if(foTileOwnerH(t)){return false;}
+ }}
+ return true;
+}
+var<workgroup> sRing:u32;
+`;
 const V_LIQUID_WGSL = /* wgsl */`
 fn vLiquidOwner(c:vec3i)->bool{
  if(fgCellCoarse(c)){return fgTileCentre4(c>>vec3u(2u))< -0.001;}
@@ -307,9 +323,12 @@ fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
 }
 var<workgroup> sSplit:u32;
 fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
+` + V_RING_WGSL + /* wgsl */`
 @compute @workgroup_size(${A_LANES}) fn uAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let dt=vDt();let h=vH();
 ${stagedHead("vcAdvectPageOf", -1, A_LANES)}
+ if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
+ if(workgroupUniformLoad(&sRing)!=0u&&g!=0u){return;}
  if(g==0u&&lid==0u){
   let filled=vVolume(FH_VOL_SUM+2u*(cfg.y&1u));
   atomicStore(&nbSet[FH_VOL_FILLED],bitcast<u32>(filled));
@@ -479,6 +498,7 @@ var<private> tOrigin:vec3i;
 fn nbxTransferDepth(v:vec3u)->f32{let r=vec3i(v)-tOrigin;return wDepth[u32(r.x+9*(r.y+9*r.z))];}
 ` + nbfP2GWGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + nbfViscosityWGSL.slice(nbfViscosityWGSL.indexOf("// The kick")) + /* wgsl */`
 fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
+` + V_RING_WGSL + /* wgsl */`
 // umOccupancy of cell c at its owner's width (vCentre: the brick's staged h centres).
 fn vOcc(c:vec3i,hy:f32)->f32{
  if(fgCellCoarse(c)){return vOcc4(c>>vec3u(2u),hy);}
@@ -488,6 +508,13 @@ var<workgroup> sSplit:u32;
 @compute @workgroup_size(256) fn uTransfer(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
 ${stagedHead("vcTransferPage", -1)}
  let live=true;tOrigin=o;tLow=(tOrigin>>vec3u(2u))-vec3i(2);
+ // A ring brick only clears its deposit (and stores its FC_LIQ words).
+ if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
+ if(workgroupUniformLoad(&sRing)!=0u){
+  vCentreStage(tOrigin,lid);workgroupBarrier();vLiquidStore(slot,o,lid);
+  for(var j=lid;j<3072u;j+=256u){_=tDepositWord(6u*512u*slot+j);}
+  return;
+ }
  if(live){
   vCentreStage(tOrigin,lid);
   if(lid<125u){
@@ -689,7 +716,7 @@ ${stagedHead("vcViscousPage")}
   // uExtend (the extension pair at h): a workgroup a brick, 512 lanes, one axis at a time over the 12^3 window
   // (cells o-2..o+9). Seeds (ufxSeedCodeOf): 3 a closed face, 1 a source (liquid either side), 2 blocked (the
   // tile of the old texel, the cell below the face, lacks support: occupied distance over 3 tiles), 0 unreached.
-  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + V_LIQUID_WGSL + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
+  const uExtend = k("uExtend", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, ...(F.tiered ? [FB.fext4] : [])], windowBase + V_LIQUID_WGSL + V_RING_WGSL + nbfExtensionWGSL + (F.tiered ? V_EXT4_WGSL : "fn x4Slot(T:vec3i)->u32{return NB_NONE;}fn x4Load(cs:u32,region:u32,j:u32,a:u32)->vec3f{return vec3f(0.0,0.0,-1.0);}") + /* wgsl */`
 var<workgroup> wV:array<f32,1728>;
 var<workgroup> wD:array<f32,1728>;
 // fgLiquidOwner of cells o-3..o+9 (13^3 bits, from FC_LIQ: vLiquidOwner), staged once for the three axes.
@@ -778,9 +805,12 @@ fn xSeed(q:vec3i,a:u32)->Ufx{
 }
 fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-xBrick+vec3i(1));return atomicLoad(&wSwept[r.x+3u*r.y+9u*r.z])!=0u;}
 @compute @workgroup_size(512) fn uExtend(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
+ let g=nbGroup(wid);var live=g<nbListCount(NB_LIST_F_ALL);
  var slot=0u;var o=vec3i(0);
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
+ // A ring brick writes no face (the finish writes F's faces only): it stages nothing and sweeps nothing.
+ if(lid==0u){sRing=select(0u,1u,live&&vRingBrick(o));}
+ if(workgroupUniformLoad(&sRing)!=0u){live=false;}
  let h=vH();let l=lid;let c=o+nbLocalCoord(l);
  xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
  fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();

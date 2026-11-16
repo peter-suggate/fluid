@@ -1614,3 +1614,48 @@ step 100, so it is not pursued, and pDeposit stays after uAdvect.
 - The gate ran on c35cbe65; lane E's 06d4ca89 landed meanwhile and does not touch these files.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{yb,yt,yf}.
+
+## 2026-11-16: the ring-brick skip (velocity area lever 2) lands
+
+**Ring bricks.** A ring brick (tiered) owns no F face: none of its eight tiles, and none of the twelve tiles below
+its three lower planes, is h-owned. The readers take the 4h interpolation wherever neither side of a face is
+h-owned, so nothing ever reads those F faces (`vRingBrick`, velocity-kernels.wgsl.ts). On a ring brick:
+- uAdvect returns after its head, keeping the group-0 work;
+- uTransfer stores the brick's FC_LIQ words (uExtend stages its neighbours' FC_LIQ) and clears its deposit, then returns;
+- uExtend stages nothing and sweeps nothing; the flag is workgroup-uniform, so the barriers stay uniform.
+
+All-h never takes the skip.
+
+**Frozen, against 31630b18 (bitwise "same" over uAdvect, uTransfer with pDeposit before it, and uExtend, at
+tiered steps 20, 100 and 300 and at all-h step 20):**
+
+| step | uAdvect (ms) | uTransfer (ms) | uExtend (ms) | total saved (ms) |
+|---|---|---|---|---|
+| 20 | 5.84 → 5.77 | 2.70 → 2.29 | 2.84 → 2.19 | 1.13 |
+| 100 | 2.40 → 2.30 | 2.50 → 2.23 | 2.84 → 2.42 | 0.79 |
+
+**Gate (tree-zg against 31630b18):**
+- The wide-dam, velocity-formulas and fluid-staging tests pass (14/14).
+- dam-300 passes every gated row, D8 included (0.87).
+- Fenced holds, paired h8 zg zg h8, steps 13–165:
+
+| pair | median (ms) | mean (ms) |
+|---|---|---|
+| 1 (holds 1 and 2) | 45.39 → 44.54 | 50.30 → 49.18 |
+| 2 (holds 3 and 4) | 45.55 → 44.07 | 50.19 → 48.66 |
+
+- No 00000206 abort was logged.
+- Lane E's 3090d99e (lcAdvect's C ring) landed during the gate. It does not touch velocity-kernels.wgsl.ts.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/zg.
+
+**Velocity area: the levers priced.** These are from an xctrace profile at step 100, with lever 1 bounds from knockouts:
+- *Split uAdvect into F-only and C-only:* no-go. The F-only variant stays at 704 max threads, and the C pages cost only
+  0.07–0.37 ms inside the fused kernel.
+- *Exact per-stencil fast path with a fallback:* slower. About a third of the stencils cross a brick, so the SIMD groups
+  diverge.
+- *Rolled tap loops, a slot table per sample, and a 128-lane uAdvect:* all slower, by 0.6–2.7 ms.
+- *A slot lookup confined to the window:* not exact, because traces leave the window.
+- *The 9³ UNIT apron (one slot lookup per sampled stencil):* bound about 4.9 / 2.8 / 1.6 ms net at steps 20 / 100 /
+  300 across uAdvect, lAdvect, lcAdvect, pMove and pSeed. The coordinator approved it and lane E agreed the ABI.
+  It is in its gate.
