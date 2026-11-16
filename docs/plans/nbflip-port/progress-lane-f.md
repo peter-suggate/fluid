@@ -1464,3 +1464,36 @@ Landed as measured, with these changes:
 - Fenced hold, steps 13–165, timing slot: median 54.59 → 52.03 ms (−2.6). The frozen state's −4.4 is step 20's.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/rr (and logs/ld, the pre-rebase round on 8d298dc8).
+
+## 2026-11-16: inviscid dam landed (31311324), and uTransfer re-measured (B is moot)
+
+**Fenced hold**, steps 13–165, timing slot. HEAD is 07f5bf3b (tree-h4); the candidate adds the dam at viscosity 0
+(tree-v4). The median falls from 52.11 to 48.83 ms (−3.3). The thirds are 73.6/52.3/43.2 against
+70.8/49.2/42.9.
+
+**uTransfer re-measured** on the inviscid dam, with resolved φ, at frozen step 20 (timing slot). The full kernel
+takes 3.29 ms. Cumulative knockouts:
+
+| part | ms |
+|---|---|
+| launch | 0.10 |
+| window | 0.07 |
+| ring | 0.30 |
+| centre | 0.30 |
+| depth | 0.15 |
+| liquid | 0.07 |
+| F faces | 1.86 |
+| C pages | 0.44 |
+
+All staging together is about 0.75 ms, which is under the 1 ms bar. Inviscid, the Laplacian taps that B removes
+are not read at all. B is not built.
+
+**Same round, other kernels:**
+
+| kernel | ms |
+|---|---|
+| uExtend | 4.44 (next, item 3) |
+| uAdvect | 8.14 |
+| uCache | 0.87 |
+
+The baselines were checked bitwise. No 00000206 abort was logged. Logs: logs/v4 and logs/bt.
