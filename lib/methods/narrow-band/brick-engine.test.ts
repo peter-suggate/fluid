@@ -694,7 +694,7 @@ test("brick engine (GPU, M3 2b): solidStamp cuts exactly the bricks the mask mee
     const e = await BrickEngine.create(device, { ...o, capacities: { ...o.capacities, k: 64 }, staticMask: { words: mask.words, walls } });
     const L = e.layout, s = await snapshot(e), cut = asF32(await e.read("cut")), phi = await e.read("phi");
     assert.equal(s.header[H.FAIL], 0);
-    let cutBricks = 0, faceCut = 0, bad = 0;
+    let cutBricks = 0, faceCut = 0, bad = 0, wallHalf = 0;
     for (const [key, slot] of s.bricks) {
       const b = brickKeyCoord(key), r = L.dir.frec + 32 * slot, ks = s.dir[r + REC.CUT]!, cls = s.dir[r + REC.CLASS]!;
       const cells = Array.from({ length: 512 }, (_, l) => [8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]);
@@ -705,7 +705,9 @@ test("brick engine (GPU, M3 2b): solidStamp cuts exactly the bricks the mask mee
       assert.ok(ks < 64);
       cells.forEach((c, l) => {
         const at = BRICK_STRIDE * ks + l;
-        const want = [m.cellOpen(c), ...[0, 1, 2].map(a => inBox(down(c, a)) && inBox(c) ? m.faceOpen(down(c, a), a) : 0), 0, 0, 0];
+        // At a box wall the face is the old shell voxel's, 0.5 FRAC of the cell inside (the hook's own).
+        const want = [m.cellOpen(c), ...[0, 1, 2].map(a => m.faceOpen(down(c, a), a)), 0, 0, 0];
+        for (let a = 0; a < 3; a++) if (!inBox(down(c, a)) && want[1 + a] === 0.5) wallHalf++;
         const have = ["FRAC", "AP0", "AP1", "AP2", "W0", "W1", "W2"].map(ch => cut[L.base("cut", "K", ch) + at]!);
         const open = (phi[L.base("phi", "F", "FLAGS") + BRICK_STRIDE * slot + l]! & 1) !== 0;
         if (want.some((v, j) => Math.fround(v) !== have[j]) || open !== (want[0]! > 0)) { if (bad++ < 3) console.error(b, c, want, have, open); }
@@ -713,7 +715,7 @@ test("brick engine (GPU, M3 2b): solidStamp cuts exactly the bricks the mask mee
       assert.equal(new Uint32Array(cut.buffer)[L.cutBmask + ks], 0);
     }
     assert.equal(bad, 0);
-    assert.ok(cutBricks >= 4 && faceCut >= 1, `${cutBricks} cut bricks, ${faceCut} cut by a face alone`);
+    assert.ok(cutBricks >= 4 && faceCut >= 1 && wallHalf > 0, `${cutBricks} cut bricks, ${faceCut} cut by a face alone, ${wallHalf} wall faces at 0.5`);
     assert.equal(s.header[H.LIVE_K], cutBricks);
     e.destroy();
   });

@@ -2406,3 +2406,20 @@ The old engine's drift on the same scene is the reference for the +5.7%. It foll
   | guard | 35.29 | 40.02 |
 
   The paired median difference is +0.10 ms, inside noise. The dam's census text changes only by the guard's AND.
+
+## 2026-11-17: solidStamp's box-wall face is the old shell voxel's (lane P's A2–A4 review; landed)
+
+**The fix.** solidStamp wrote AP = 0 on a box-wall face, because both sides had to be in the box. With the mask
+bound, nbStaticFaceOpen already returns the old engine's shell-voxel face at a wall: 0.5 (open(−1) + open(0)), that
+is 0.5 FRAC of the cell inside. That value agrees with:
+- the cut-free rows' K_WALL fraction 0.5;
+- P's pbStampFace.
+
+solidStamp now writes the hook itself. Two cells past the box give 0.
+
+**Tests.** The GPU solidStamp test's mirror is the hook's own face. The test asserts that some wall faces read 0.5.
+- GPU solidStamp and static tests: 8 of 8, rc 0, no 00000206.
+- check:types: lane-n's 3 only.
+- test:unit: 1889 pass, 0 fail.
+
+**The dam.** No scene binds the mask, so the dam's schedule and kernel text are unchanged.

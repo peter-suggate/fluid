@@ -8,8 +8,10 @@
  *   rule's faces (§2.3), and a stamped brick keeps the same box faces, so the two conventions agree at every wall;
  * - a NEAR_BODY brick is P's (A5: bodyStamp writes its static and body cuts together); solidStamp skips it;
  * - a cut brick takes a K slot (nbKTake: POOL_K and an uncut brick when the pool is exhausted), is CUT_STATIC, and
- *   gets the whole slot: FRAC = nbStaticCellOpen, AP_a = nbStaticFaceOpen of the face below (0 where a side is past the
- *   box: the box rule's), W = 0 and BMASK = 0 (A1: the first stamp to write a fresh slot writes all of it);
+ *   gets the whole slot: FRAC = nbStaticCellOpen, AP_a = nbStaticFaceOpen of the face below, W = 0 and BMASK = 0 (A1:
+ *   the first stamp to write a fresh slot writes all of it). At a box wall nbStaticFaceOpen is the old engine's shell
+ *   voxel face, 0.5 (open(-1) + open(0)) = 0.5 FRAC of the cell inside: the cut-free rows' K_WALL fraction 0.5 and
+ *   P's pbStampFace agree with it (lane P's review, 2026-11-17); two cells past the box give 0;
  * - FLAGS.OPEN clears on every cell whose FRAC is 0 (setInit set it by the box rule).
  *
  * A live edit (ring flag SOLID_EDIT) restamps F_ALL from the updated mask: next, with the edit path (M3 stage 2c).
@@ -76,7 +78,7 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     cut[NB_CUT_FRAC+at]=frac;
     for(var a=0u;a<3u;a++){
       let b=c-nbStaticAxis(a);
-      var ap=0.0;if(nbStaticInBox(b)&&nbStaticInBox(c)){ap=nbStaticFaceOpen(b,a);}
+      let ap=nbStaticFaceOpen(b,a);
       // Constant channel bases (no dynamic index into a channel table).
       if(a==0u){cut[NB_CUT_AP0+at]=ap;cut[NB_CUT_W0+at]=0.0;}else if(a==1u){cut[NB_CUT_AP1+at]=ap;cut[NB_CUT_W1+at]=0.0;}else{cut[NB_CUT_AP2+at]=ap;cut[NB_CUT_W2+at]=0.0;}
     }
