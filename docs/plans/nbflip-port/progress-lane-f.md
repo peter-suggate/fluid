@@ -1768,3 +1768,36 @@ The W knockout bound was 2.2 ms at step 100. The mask recovers about a quarter o
 - A staleness audit (re-walk and count disagreements) would be required before landing.
 
 Patch: ~/code/me/fluid-scratch/lane-f/patches/owner-mask-om.diff. Logs: ~/code/me/fluid-scratch/lane-f/logs/om.
+
+## uExtend: a ring brick leaves before the window stage (exact)
+
+**Bounds** (on main 73ff551c; logs/ue, tools/probe-ru.mts):
+- Half of uExtend's workgroups are ring bricks: 1277 of 2532 at step 100, 1799 of 2841 at step 20. Each one staged the brick window and walked every barrier, then wrote nothing.
+- The iteration count is fixed: 3 axes, each a seed fill of the 12^3 window, one inset sweep and one finish sweep.
+- The finish writes 41% of a non-ring brick's 3 × 512 faces.
+
+**Attribution at step 100 (2.20 ms):**
+- Window stage and launch alone: 0.45 ms. Staging in all: 0.88 ms.
+- Doubled seeds: +0.72 ms. Each brick re-seeds its window per axis, 3.4 times its own faces.
+- Owner and tile tests: +0.31 ms. Sweeps: +0.27 ms. xCode: +0.18 ms.
+
+**The change:** a ring brick, or a workgroup past the list, now returns before fgWindowStage.
+
+| step | before (ms) | after (ms) | change |
+|---|---|---|---|
+| 20 | 2.22 | 2.02 | −0.20 |
+| 100 | 2.25 | 2.15 | −0.10 |
+| 300 | 1.54 | 1.51 | −0.03 |
+
+**Gate:**
+- Frozen outputs are the same at steps 20, 100 and 300 (set, vel, fext4).
+- Tests pass, 41/41: wide-dam, velocity-formulas, fluid-staging, levelset-*, brick-engine.
+- dam-300 passes against ref-2761350a.
+- No Metal abort.
+
+**Parked (option 3):** the seed cache, plus a P0 dirty list for lResolve.
+- The seed cache seeds each brick's own faces once and loads the window from the 27 bricks. Its bound is about 0.5 ms at step 100, less the loads.
+- lResolve's move placement changes 15–23% of slots, so a dirty list bounds at about 0.33 ms at step 100.
+- Combined bound with the two levers taken: about 1.3 ms at step 100.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{ue,p2}.

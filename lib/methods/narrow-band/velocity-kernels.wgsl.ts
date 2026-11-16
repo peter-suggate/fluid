@@ -833,9 +833,10 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  let g=nbGroup(wid);var live=g<nbListCount(NB_LIST_F_ALL);
  var slot=0u;var o=vec3i(0);
  if(live){slot=nbListSlot(NB_LIST_F_ALL,g);o=nbFOrigin(slot);}
- // A ring brick writes no face (the finish writes F's faces only): it stages nothing and sweeps nothing.
- if(lid==0u){sRing=select(0u,1u,live&&vRingBrick(o));}
- if(workgroupUniformLoad(&sRing)!=0u){live=false;}
+ // A ring brick writes no face (the finish writes F's faces only), and a workgroup past the list holds no brick:
+ // neither stages the window nor sweeps, so it leaves before the window stage.
+ if(lid==0u){sRing=select(0u,1u,!live||vRingBrick(o));}
+ if(workgroupUniformLoad(&sRing)!=0u){return;}
  let h=vH();let l=lid;let c=o+nbLocalCoord(l);
  xLow=o-vec3i(3);xBase4=o>>vec3u(2u);xBrick=o>>vec3u(3u);
  fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();
