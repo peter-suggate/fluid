@@ -1712,3 +1712,29 @@ These match the k6 bound (4.9 / 2.8 / 1.6). Max threads are unchanged except pMo
 - An earlier probe round shared the GPU with another lane's run and logged aborts, so it was discarded and re-run.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{zb,zc}.
+
+## uTransfer seam stage (exact)
+
+uTransfer's coarse-seam questions are now answered once per 4h tile and workgroup, not once per tap. The stage block (`lid<125u`) writes, per tile of the 5^3 window:
+- the coarse bit: tiered, the tile is in the lattice and is not a 4h owner (`foTileOwnerH`);
+- the coarse-mass bit: `vFill4(t)*64 > 0.05`;
+- its `vOcc4`.
+
+vOcc and the F gravity line's coarse-mass test read the staged bits. The values are the same expressions, so the outputs are bitwise identical. uKick and vcTransferPage are unchanged.
+
+**Frozen uTransfer (ms, `--pre-deposit-both`, so both sides include pDeposit; against main 427b3a79's own new timing):**
+
+| step | before | after | change |
+|---|---|---|---|
+| 20 | 3.129 | 2.946 | −0.18 |
+| 100 | 3.082 | 2.812 | −0.27 |
+| 300 | 2.409 | 2.077 | −0.33 |
+
+The outputs are the same at all three steps (set, vel, fcell, fdep).
+
+**Gate (tree-us against tree-u0):**
+- The wide-dam, velocity-formulas and fluid-staging tests pass (15/15).
+- dam-300 passes against ref-2761350a, Overall PASS (D8 0.64).
+- No 00000206 abort was logged. The round's count of 1 was the log query matching its own command line.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{ut,us}.

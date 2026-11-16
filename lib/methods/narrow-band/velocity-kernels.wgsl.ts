@@ -506,11 +506,28 @@ fn nbxTransferDepth(v:vec3u)->f32{let r=vec3i(v)-tOrigin;return wDepth[u32(r.x+9
 ` + nbfP2GWGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + nbfViscosityWGSL.slice(nbfViscosityWGSL.indexOf("// The kick")) + /* wgsl */`
 fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
 ` + V_RING_WGSL + /* wgsl */`
-// umOccupancy of cell c at its owner's width (vCentre: the brick's staged h centres).
+// The seam stage: per tile t of the 5^3 about the brick (tLow), bit 0 the tile's half of fgCellCoarse (tiered, not
+// h-owned, its low cell in the lattice), bit 1 vCoarseMass's fill test, and vOcc4 where bit 0. A cell c is coarse
+// where its tile's bit 0 is set and c is in the lattice (fgCellCoarse: a tile whose low cell lies outside has no cell
+// inside). A face's cells c and c - e_a lie in tiles t0-1..t0+1, so the per-face seam tests read the stage,
+// evaluated once a tile rather than once a face.
+var<workgroup> wSeam:array<u32,125>;
+var<workgroup> wOcc4:array<f32,125>;
+fn vSeamStage(t:vec3i,i:u32,hy:f32){
+ var bits=0u;var occ=0.0;
+ if(FG_TIERED&&nbInLattice(4*t)&&!foTileOwnerH(t)){bits=1u;occ=vOcc4(t,hy);if(vFill4(t)*64.0>0.05){bits=3u;}}
+ wSeam[i]=bits;wOcc4[i]=occ;
+}
+// The seam word of cell c: 0 outside the lattice (never coarse).
+fn vSeam(c:vec3i)->u32{if(!nbInLattice(c)){return 0u;}let r=(c>>vec3u(2u))-tLow;return wSeam[u32(r.x+5*(r.y+5*r.z))];}
+fn vSeamOcc4(c:vec3i)->f32{let r=(c>>vec3u(2u))-tLow;return wOcc4[u32(r.x+5*(r.y+5*r.z))];}
+// umOccupancy of cell c at its owner's width (vCentre: the brick's staged h centres; the seam stage's vOcc4).
 fn vOcc(c:vec3i,hy:f32)->f32{
- if(fgCellCoarse(c)){return vOcc4(c>>vec3u(2u),hy);}
+ if((vSeam(c)&1u)!=0u){return vSeamOcc4(c);}
  return nbfOccupancy(select(0.0,vCentre(c),nbInLattice(c))*hy,hy,select(0u,1u,nbInLattice(c)));
 }
+// vCoarseMass from the seam stage.
+fn vCoarseMassS(c:vec3i)->bool{return (vSeam(c)&2u)!=0u;}
 var<workgroup> sSplit:u32;
 @compute @workgroup_size(256) fn uTransfer(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
 ${stagedHead("vcTransferPage", -1)}
@@ -534,6 +551,7 @@ ${stagedHead("vcTransferPage", -1)}
     if(!(own<=0.0&&fgPhi(c+vec3i(2))>=0.0)){hot=clamp(own-1.0,0.0,1.0);}
    }
    wHeat[lid]=heat;wHot[lid]=hot;
+   vSeamStage(t,lid,vH().y);
   }
   for(var j=lid;j<729u;j+=256u){
    let v=tOrigin+vec3i(i32(j%9u),i32((j/9u)%9u),i32(j/81u));let s=fgSlot(v);
@@ -570,7 +588,7 @@ ${stagedHead("vcTransferPage", -1)}
    var value=resolved;
    // The viscous term (uViscous left the departure's Laplacian in US) where the old texel's cell, c - e_a, holds liquid.
    if(V_VISCOUS&&occn>0.0){value=nbfViscousKick(value,dt,V_MU,V_RHO,vel[vAt(NB_VEL_F_US0,slot,a,l)]);}
-   if(nbfGravityFace(occ,occn,vCoarseMass(n)||vCoarseMass(c))){value=nbfGravityKick(value,dt,gravity[a]);}
+   if(nbfGravityFace(occ,occn,vCoarseMassS(n)||vCoarseMassS(c))){value=nbfGravityKick(value,dt,gravity[a]);}
    vel[vAt(NB_VEL_F_US0,slot,a,l)]=value;vel[vAt(NB_VEL_F_U0,slot,a,l)]=value;
   }
  }
