@@ -191,6 +191,19 @@ export interface BrickEngineState { readonly steps: number; readonly time: numbe
 
 interface Recorded { readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly dispatch: BrickDispatch }
 
+/**
+ * Every upload of the engine's words, as two writes: the 16-byte multiple, then the tail. Dawn (dawn.node, Metal)
+ * stages a large write (over its 4 MB ring) in a dedicated buffer whose reservation is the size rounded up, checks it
+ * against the write's size, and aborts the process on a mismatch (BufferBase::UploadData). pmgF's 34607172 bytes did
+ * in restore. So did boot tables (2026-11-17): a ball over the letters' pool (23986916 bytes), cm12-figure-9 (7471340)
+ * and coarse-first-pool-impact (11927924). A lone write of 4 MB + 4 bytes aborts, 1 MB + 4 and 4 MB do not.
+ */
+export function uploadWords(queue: GPUQueue, buffer: GPUBuffer, offsetBytes: number, data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) {
+  const body = data.length & ~3;
+  if (body > 0) queue.writeBuffer(buffer, offsetBytes, data, 0, body);
+  if (body < data.length) queue.writeBuffer(buffer, offsetBytes + 4 * body, data, body, data.length - body);
+}
+
 export class BrickEngine {
   readonly layout: BrickLayout;
   readonly solver: PressureSolver;
@@ -420,7 +433,7 @@ export class BrickEngine {
     const bodies = this.options.bodies;
     if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); }
     const mask = this.options.staticMask;
-    if (mask) d.queue.writeBuffer(make("solid", mask.words.length), 0, mask.words.buffer, mask.words.byteOffset, mask.words.byteLength);
+    if (mask) uploadWords(d.queue, make("solid", mask.words.length), 0, mask.words as Uint32Array<ArrayBuffer>);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || name === "bodies" || name === "bodyCuts" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
@@ -434,17 +447,17 @@ export class BrickEngine {
     else this.options.liquid.forEach((b, i) => boxes.set([...b.lo, ...b.hi], 6 * i));
     if (v) { boxes.set(v.velocity, head); words[head + 3] = v.tiles.length; words.set(v.tiles, head + 4); }
     words[boxes.length - 1] = v ? head : NONE;
-    const boot = make("boot", boxes.length); d.queue.writeBuffer(boot, 0, boxes);
+    uploadWords(d.queue, make("boot", boxes.length), 0, boxes);
     // The set buffer: free stacks full (FREE[i] = CAP - 1 - i), the initial candidates.
     const s = new Uint32Array(L.set.words), cap = L.cap;
     s[H.TOP_F] = cap.f; s[H.TOP_C] = cap.c; s[H.TOP_B] = cap.b; s[H.TOP_K] = cap.k;
     const fill = (at: number, n: number) => { for (let i = 0; i < n; i++) s[at + i] = n - 1 - i; };
     fill(L.set.freeF, cap.f); fill(L.set.freeC, cap.c); fill(L.set.freeB, cap.b); fill(L.set.freeK, cap.k);
     s.set(initial, L.set.cand); s[H.N_CAND] = initial.length;
-    d.queue.writeBuffer(set, 0, s);
+    uploadWords(d.queue, set, 0, s);
     // The directory: every page, child and record word NONE, the tile masks clear.
     const w = new Uint32Array(L.dir.words).fill(NONE); w.fill(0, L.dir.cmask);
-    d.queue.writeBuffer(dir, 0, w);
+    uploadWords(d.queue, dir, 0, w);
     for (let i = 0; i < RECEIPTS; i++) this.receipts.push({ buffer: d.createBuffer({ label: `nb-brick.receipt${i}`, size: 4 * 256, usage: U.MAP_READ | U.COPY_DST }), busy: false });
   }
 
@@ -578,7 +591,7 @@ export class BrickEngine {
 
   /** Write words into an engine buffer (tests: perturb a field between steps). */
   write(name: string, offsetWords: number, data: Uint32Array<ArrayBuffer> | Float32Array<ArrayBuffer>) {
-    this.device.queue.writeBuffer(this.buffers.get(name)!, 4 * offsetWords, data);
+    uploadWords(this.device.queue, this.buffers.get(name)!, 4 * offsetWords, data);
   }
 
   /** The engine's whole state after a fence: every buffer (fields, set, directory, census and its region heat, the
@@ -600,14 +613,8 @@ export class BrickEngine {
       if (!words) throw new Error(`Brick engine: restore lacks buffer ${name}`);
       if (4 * words.length !== b.size) throw new Error(`Brick engine: restore buffer ${name} has ${words.length} words, the engine ${b.size / 4}`);
     }
-    // A buffer's bytes in two writes: the 16-byte multiple, then the tail. Dawn (dawn.node, Metal) stages a large
-    // write in a dedicated buffer whose reservation is the size rounded up, checks it against the write's size, and
-    // aborts the process on a mismatch (BufferBase::UploadData): pmgF's 34607172 bytes did.
-    for (const [name, b] of this.buffers) {
-      const words = state.buffers.get(name)!, body = words.length & ~3;
-      if (body > 0) this.device.queue.writeBuffer(b, 0, words, 0, body);
-      if (body < words.length) this.device.queue.writeBuffer(b, 4 * body, words, body, words.length - body);
-    }
+    // A buffer's bytes through uploadWords (Dawn's large-write abort).
+    for (const [name, b] of this.buffers) uploadWords(this.device.queue, b, 0, state.buffers.get(name)!);
     await this.fence();
     for (const r of this.receipts) if (r.busy && r.buffer.mapState === "unmapped") r.busy = false;
     this.steps = state.steps; this.time = state.time;
