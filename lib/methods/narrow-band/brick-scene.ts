@@ -18,6 +18,7 @@ import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/
 import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
 import type { BrickCapacities } from "./brick-abi";
+import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import type { BrickLiquidBox, Vec3 } from "./brick-engine";
 
 /** Scenes the brick engine takes at this milestone (M2: the dam). */
@@ -25,8 +26,11 @@ export const BRICK_ENGINE_SCENES: readonly string[] = ["high-resolution-dam-brea
 
 export interface BrickSceneSetup {
   readonly sceneId: string;
-  /** Cells an axis (whole pages). */
+  /** Cells an axis: the container's own (whole bricks). The storage rounds up to pages behind it; the cells past the
+   * container are the box rule's wall (brick-static.wgsl.ts), as the old engine's voxel shell and padding close them. */
   readonly lattice: Vec3;
+  /** NB_PHI_FAR in h: the old engine's far φ, its page-rounded lattice's largest extent (fluidLatticeFarPhi); the lattice's own when absent. */
+  readonly farPhi?: number;
   readonly h_m: number;
   readonly dt_s: number;
   readonly gravity_mps2: Vec3;
@@ -58,8 +62,15 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const v0 = f.initialVelocity_m_s;
   if (v0 && (v0.x !== 0 || v0.y !== 0 || v0.z !== 0)) gaps.push("an initial liquid velocity is not supported (M2)");
   if (!f.brickPools) gaps.push("scene.fluid.brickPools is not authored (brick-abi.md §9)");
-  const cells = sceneLatticeDimensions(scene), lattice = sceneFluidLatticeDimensions(scene);
-  if (cells.some((n, a) => n !== lattice[a])) gaps.push(`the container's ${cells.join("x")} cells are not whole pages (${lattice.join("x")}): padding needs static solids (M3)`);
+  // F's stages refuse the forces they do not implement (velocity-formulas nbfVelocitySupported): a gap here, so "auto"
+  // never selects a scene whose stages would throw at creation.
+  try { nbfVelocitySupported({ viscosity: f.dynamicViscosity_Pa_s, surfaceTension: f.surfaceTension_N_m, noSlip: false }); }
+  catch (e) { gaps.push(`${(e as Error).message.replace(/^NB-FLIP brick engine: /, "")} (F)`); }
+  // Padding (M3 stage 1): the lattice is the container's cells, and the box rule closes the cells past it, as the old
+  // engine's shell does (its padding lies behind the shell, so no liquid reaches it). A container that is not whole
+  // bricks would cut a brick and a 4h tile: that needs solidStamp's cut slots.
+  const cells = sceneLatticeDimensions(scene), lattice = cells, paged = sceneFluidLatticeDimensions(scene);
+  if (cells.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
   const hs = [c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]];
   if (hs.some(h => Math.abs(h - hs[0]!) > 1e-9 * hs[0]!)) gaps.push(`cells are not cubic (${hs.map(h => h.toPrecision(6)).join(", ")} m)`);
   const fixed = uniformFixedStep_s(values.timeStep);
@@ -80,7 +91,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   return {
     gaps,
     setup: {
-      sceneId: id, lattice: [n[0]!, n[1]!, n[2]!], h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
+      sceneId: id, lattice: [n[0]!, n[1]!, n[2]!], farPhi: Math.max(...paged), h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
       capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles }, particleBandDepth: f.brickTiers?.particleBandDepth ?? 3, liquid: [box], origin_m: [-0.5 * c.width_m, 0, -0.5 * c.depth_m],
     },
   };

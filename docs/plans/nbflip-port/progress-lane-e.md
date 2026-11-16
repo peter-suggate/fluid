@@ -2143,3 +2143,67 @@ and P are the maxima over every valid run.
 - A6: the stamp stage goes at the end of the head, after the transfer and before the release reach. F_BODY lists
   NEAR_BODY or BODY_WAS.
 - A4 is conditional: a per-step prescribed-motion upload must be listed and measured.
+
+## 2026-11-17: M3 stage 1 (padding by the box rule, the five static hooks) and the GPU bound guard (landed)
+
+This lane E agent replaces the one lost to the 08:24 kernel panic. It reviewed the unlanded stage 1 work in main and
+finished it.
+
+**Stage 1**
+- brick-static.wgsl.ts holds the five hooks lane P's PbStaticHooks call: `nbStaticCellOpen`, `nbStaticFaceOpen`,
+  `nbStaticSolidAt`, `nbStaticCellKind` and `nbStaticFaceBoxed`. Here the static solid is the box rule, with an open
+  top as air.
+- brick-static.test.ts holds the Float64 mirror and a GPU check of the WGSL against it, bit for bit: every cell of the
+  box grown by 2 (30 above), plus random world points, with both tops.
+- No vector component is written through a dynamic index.
+- The lattice is now the container's own cells, and the storage rounds up to pages behind it. `farPhi` keeps
+  NB_PHI_FAR at the old engine's page-rounded extent. A container that is not whole bricks is a gap, because it needs
+  solidStamp's cuts.
+- F's unimplemented forces (nbfVelocitySupported) are now a `brickSceneSetup` gap, so `auto` never picks a scene whose
+  stages would throw at creation.
+- No scene is enabled yet: BRICK_ENGINE_SCENES is still the dam, and the dam is whole pages, so its lattice and far φ
+  are unchanged.
+
+**The bound guard** (after the panic). Every indirect dispatch is listed below with its writer and bound. A writer
+that overruns latches FAIL.
+- `setArgs` (brick-set): lists 0–17 G1/G8/G64/X8, FC_*, FA_*. Bound: each count is min(count, LIST_CAP[k]) and latches
+  LIST. Already so.
+- `setTransferArgs`: XFER_G1. Bound: min(n, TCAP), and the append latches LIST. Already so.
+- `pArgs` (F, P_ARGS_RECORDS at 2048): (min(PCOUNT, PCAP)+127)/128. The appends latch PARTICLES. Already so.
+- P's gates in pressure-mgpcg.ts (new bounds):
+  - P_GATE_F and WF are min(T_RBN, FCAP);
+  - P_GATE_S is min(T_SBN, 4 FCAP);
+  - P_GATE_FC is their sum with the capped C_ALL;
+  - P_GATE_C, WC and ONE copy capped list args;
+  - pmgListArgs HB/HP/ZL/RL are min(count, FCAP), latch LIST (info 0x5k......), under the fold rule. They were
+    written raw, unfolded.
+  - rowsList's list writes are guarded to FCAP.
+- Loops bounded by buffer words in P's kernels (new):
+  - every `wCount = T_RBN / T_SBN` head is min'd to FCAP / 4 FCAP;
+  - pSeamN is ≤ 3072, its region;
+  - pmgTopCycle's PH_N5/N6/N7 are ≤ CCAP / P_ROWS6 / P_ROWS7.
+- bootPhi's host box count is held to the boot binding's boxes.
+- An audit of every data-bounded loop (664 loops) left these to their owners:
+  - **F:**
+    - pJoin (F's fix, the panic);
+    - nbfMomentumTrace's loop{}, which never exits on a NaN dt or a NaN span;
+    - pScan stores BIN_COUNT unclamped on overflow (pTiles, pDeposit, lSplat);
+    - fgRun's FC_RUN ends;
+    - lNear's cfg.z.
+  - **P:** pbApplyBodyCuts `k<header.y`.
+  - **E's own loops:**
+    - The census, residency and release boxes are bounded by window or lattice clamps.
+    - setClaim* and the list loops are bounded by caps.
+    - nbClaim/rqTake CAS loops retry only on a spurious weak-CAS failure.
+
+**Gates** (main, timing slot throughout, one run at a time, rc 0, no 00000206)
+- check:types: lane-n's 3 only.
+- test:unit: 1875 pass, 0 fail.
+- GPU units, serial: 51 of 51 pass. These are brick-static, brick-engine, brick-abi, pressure-mgpcg,
+  pressure-composite(-mgpcg), brick-set-tiers and bodies-shapes.
+- dam-300, tiered composite, poolF 4913, judged against ref-2761350a: **Overall PASS**. The run was fenced on the
+  timing slot. Its meta was relabelled `check` for the judge, which asserts the slot; the observations don't depend on
+  it.
+  - D8 at 30–90 is 4.35e5 (an upper bound), against 6.31e5.
+- Step time, from the same run, steps 13–165: median **34.23 ms**, mean 39.1, against 34.4–34.7 at 20a233bb. No
+  regression.

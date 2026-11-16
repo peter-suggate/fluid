@@ -369,13 +369,15 @@ var<workgroup> wN:atomic<u32>;
   const bootPhi = k("bootPhi", [CFG, setRO, dirRO, phiRW, bootRO], /* wgsl */`
 fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
 @compute @workgroup_size(128) fn bootPhi(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32,@builtin(num_workgroups) nw:vec3u){
+  // The box count is the host's, held to the boot binding's boxes (the engine's loop bound, 2026-11-17).
+  let nBoxes=min(cfg.z,arrayLength(&boot)/6u);
   let n=nbListCount(NB_LIST_F_ENTER);
   for(var e=wid.x;e<n;e+=nw.x){
     let s=nbListSlot(NB_LIST_F_ENTER,e);let o=nbFOrigin(s);
     for(var j=0u;j<4u;j++){
       let l=lid+128u*j;let p=vec3f(o+nbLocalCoord(l));
       var d=NB_PHI_FAR;
-      for(var i=0u;i<cfg.z;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
+      for(var i=0u;i<nBoxes;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
       phi[NB_PHI_F_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_F_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
     }
   }
@@ -387,7 +389,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
     for(var j=0u;j<4u;j++){
       let l=lid+128u*j;let p=vec3f(o+4*nbLocalCoord(l));
       var d=NB_PHI_FAR;
-      for(var i=0u;i<cfg.z;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
+      for(var i=0u;i<nBoxes;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
       phi[NB_PHI_C_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_C_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
     }
   }

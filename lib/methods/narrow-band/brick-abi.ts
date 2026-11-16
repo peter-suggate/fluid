@@ -198,6 +198,9 @@ export interface BrickLayoutOptions extends BrickCapacities {
   readonly lattice: readonly [number, number, number];
   /** APIC records (28 floats) instead of FLIP's 12. */
   readonly apic?: boolean;
+  /** NB_PHI_FAR in h, where it is not the lattice's largest extent: a padded container's lattice is its own cells,
+   * and the old engine's far φ is its page-rounded lattice's (fluidLatticeFarPhi; brick-scene.ts). */
+  readonly farPhi?: number;
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -214,6 +217,8 @@ export function windowPages(lattice: readonly number[]): [number, number, number
 export class BrickLayout {
   readonly cap: Required<BrickCapacities>;
   readonly lattice: readonly [number, number, number];
+  /** NB_PHI_FAR in h (BrickLayoutOptions.farPhi). */
+  readonly farPhi: number;
   readonly window: readonly [number, number, number];
   readonly windowBits: readonly [number, number, number];
   readonly particleStride: number;
@@ -261,6 +266,7 @@ export class BrickLayout {
     if (!Number.isInteger(t) || t < 1) throw new Error(`Brick engine: capacity t = ${t}`);
     this.cap = { f, c, b, k, particles, t };
     this.lattice = [...options.lattice] as [number, number, number];
+    this.farPhi = options.farPhi ?? phiFar(options.lattice);
     this.window = windowPages(options.lattice);
     this.windowBits = this.window.map(n => Math.log2(n)) as [number, number, number];
     this.particleStride = options.apic ? 28 : 12;
@@ -346,7 +352,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_PHI_AIR_C:f32=${PHI_AIR_C.toFixed(1)};`);
   // φ (h) where nothing is stored: the old vertex field's empty value, fluidLatticeFarPhi (the lattice's largest
   // extent; lib/core/initial-liquid-lattice.ts), in h. Stored air is NB_PHI_AIR on F, NB_PHI_AIR_C on C (setInit).
-  lines.push(`const NB_PHI_FAR:f32=${phiFar(L.lattice).toFixed(1)};`);
+  lines.push(`const NB_PHI_FAR:f32=${L.farPhi.toFixed(1)};`);
   lines.push(`const NB_REACH_MARGIN:f32=${REACH_MARGIN.toFixed(1)};`);
   c("NB_KEY_PAGE", KEY_PAGE);
   lines.push(`const NB_WINDOW:vec3u=vec3u(${L.window.map(n => u(n)).join(",")});`);

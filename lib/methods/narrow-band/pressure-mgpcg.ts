@@ -450,10 +450,10 @@ fn pMax512(lid:u32,v:f32)->f32{
   const GATE = /* wgsl */`
 // The F gate runs the row bricks (pmgTop RB, RBN of them) under the fold rule.
 fn pGate(open:bool){
-  let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=pmgTop[T_RBN];
+  let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=min(pmgTop[T_RBN],NB_FCAP);
   args[P_GATE_F]=select(0u,min(n,NB_FOLD),open&&n>0u);args[P_GATE_F+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[P_GATE_F+2u]=1u;
   args[P_GATE_C]=select(0u,args[c],open);args[P_GATE_C+1u]=args[c+1u];args[P_GATE_C+2u]=1u;
-  let m=pmgTop[T_SBN];let fc=n+nbListCount(NB_LIST_C_ALL);
+  let m=min(pmgTop[T_SBN],4u*NB_FCAP);let fc=n+nbListCount(NB_LIST_C_ALL);
   args[P_GATE_FC]=select(0u,min(fc,NB_FOLD),open&&fc>0u);args[P_GATE_FC+1u]=max(1u,(fc+NB_FOLD-1u)/NB_FOLD);args[P_GATE_FC+2u]=1u;
   args[P_GATE_S]=select(0u,min(m,NB_FOLD),open&&m>0u);args[P_GATE_S+1u]=max(1u,(m+NB_FOLD-1u)/NB_FOLD);args[P_GATE_S+2u]=1u;
   args[P_GATE_ONE]=select(0u,1u,open);args[P_GATE_ONE+1u]=1u;args[P_GATE_ONE+2u]=1u;
@@ -523,7 +523,7 @@ fn ${name}(b:vec3i,c:vec3i,s:u32,l:u32)->f32{
   const SEAM = /* wgsl */`
 var<workgroup> wSV:array<f32,512>;var<workgroup> wSF:array<f32,32>;var<workgroup> wSV2:array<vec2f,512>;var<workgroup> wSF2:array<vec2f,32>;
 var<workgroup> wSN:u32;
-fn pSeamN(cs:u32,lid:u32)->u32{if(lid==0u){wSN=u32(pmgC[P_SEAMN+cs]);}return workgroupUniformLoad(&wSN);}`;
+fn pSeamN(cs:u32,lid:u32)->u32{if(lid==0u){wSN=min(u32(pmgC[P_SEAMN+cs]),3072u);}return workgroupUniformLoad(&wSN);}`;
   const seamSum = (name: string, v: (s: string, l: string, m: string) => string, v2?: (s: string, l: string, m: string) => string) => {
     const ty = v2 ? "vec2f" : "f32", zero = `${ty}(0.0)`, ws = v2 ? "wSV2" : "wSV", wf = v2 ? "wSF2" : "wSF";
     const val = v2 ? `vec2f(${v("fs", "l", "m")},${v2("fs", "l", "m")})` : `(${v("fs", "l", "m")})`;
@@ -621,13 +621,13 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
 `;
   // A row brick (pmgTop RB): the slot's brick kernels.
   const rowHead = /* wgsl */`
-  if(lid==0u){wCount=pmgTop[T_RBN];}
+  if(lid==0u){wCount=min(pmgTop[T_RBN],NB_FCAP);}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let slot=pmgTop[T_RB+g];pStageK(slot,lid);workgroupBarrier();
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
   // A shifted block (pmgTop SB, SBN of them): the L0 S passes; k picks the block from its owner brick.
   const shiftHead = /* wgsl */`
-  if(lid==0u){wCount=pmgTop[T_SBN];}
+  if(lid==0u){wCount=min(pmgTop[T_SBN],4u*NB_FCAP);}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let e=pmgTop[T_SB+g];let slot=e>>2u;let k=e&3u;pStageK(slot,lid);workgroupBarrier();
   let o=nbFOrigin(slot);let b=o>>vec3u(3u);`;
@@ -788,9 +788,12 @@ var<workgroup> wLive:u32;
   const listArgs = kernel("pmgListArgs", [CFG, setRW, fRW, argsRW, topA], [], /* wgsl */`
 @compute @workgroup_size(1) fn pmgListArgs(){
   for(var k=0u;k<4u;k++){
-    let n=atomicLoad(&pmgTop[T_HBN+k]);atomicStore(&pmgTop[T_HBN+k],0u);
+    // Each list holds at most F_ALL's bricks (NB_FCAP words): a larger count is a fault, latched, and the dispatch is
+    // held to the list (the engine's indirect bound, lane E, 2026-11-17).
+    var n=atomicLoad(&pmgTop[T_HBN+k]);atomicStore(&pmgTop[T_HBN+k],0u);
+    if(n>NB_FCAP){nbFail(NB_FAIL_LIST,0x50000000u|(k<<24u)|min(n,0xffffffu));n=NB_FCAP;}
     if(k==3u){pmgF[P_RLN]=f32(n);continue;}
-    let a=P_GATE_HB+3u*k;args[a]=n;args[a+1u]=1u;args[a+2u]=1u;
+    let a=P_GATE_HB+3u*k;args[a]=min(n,NB_FOLD);args[a+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[a+2u]=1u;
   }
 }`);
   const rowsList = kernel("pressureRowsList", [CFG, setRW, dirRO, fRW, topA], [], /* wgsl */`
@@ -833,7 +836,7 @@ fn pOwnerT(t:vec3i)->bool{
   if(lid<4u){wB[lid]=atomicAdd(&pmgTop[T_HBN+lid],atomicLoad(&wN[lid]));}
   workgroupBarrier();
   var lists=array<u32,4>(P_HBL,P_HPL,P_ZLL,P_RLL);
-  for(var k=0u;k<4u;k++){if(((bits>>k)&1u)!=0u){pmgF[lists[k]+wB[k]+at[k]]=f32(slot);}}
+  for(var k=0u;k<4u;k++){if(((bits>>k)&1u)!=0u&&wB[k]+at[k]<NB_FCAP){pmgF[lists[k]+wB[k]+at[k]]=f32(slot);}}
 }`);
   // pressureRowsZero: a workgroup a brick of ZL (setup, before the rows): the zero rows off HB.
   const rowsZero = kernel("pressureRowsZero", [CFG, setRW, dirRO, presRW, fRW, cRW], [], /* wgsl */`
@@ -1385,7 +1388,7 @@ fn l4Nbr(cs:u32,k:u32,a:u32,up:bool)->vec2u{
   return vec2u(select(u32(v),NB_NONE,v<0.0),pI4(d));
 }
 @compute @workgroup_size(1024) fn pmgTopCycle(@builtin(local_invocation_index) t:u32){
-  if(t==0u){wN5=atomicLoad(&nbSet[PH_N5]);wN6=atomicLoad(&nbSet[PH_N6]);wN7=atomicLoad(&nbSet[PH_N7]);}
+  if(t==0u){wN5=min(atomicLoad(&nbSet[PH_N5]),NB_CCAP);wN6=min(atomicLoad(&nbSet[PH_N6]),P_ROWS6);wN7=min(atomicLoad(&nbSet[PH_N7]),P_ROWS7);}
   let n5=workgroupUniformLoad(&wN5);let n6=workgroupUniformLoad(&wN6);let n7=workgroupUniformLoad(&wN7);
 ${topLinks(5, "n5", "par5(i)")}
 ${topLinks(6, "n6", "par6(i)")}
@@ -1642,7 +1645,7 @@ fn ${label}C(g:u32,lid:u32){
 ${cBody}
 }
 @compute @workgroup_size(512) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){wCount=pmgTop[T_RBN];wCountC=nbListCount(NB_LIST_C_ALL);}
+  if(lid==0u){wCount=min(pmgTop[T_RBN],NB_FCAP);wCountC=nbListCount(NB_LIST_C_ALL);}
   let g=nbGroup(wid);let nF=workgroupUniformLoad(&wCount);let nC=workgroupUniformLoad(&wCountC);
   if(g>=nC+nF){return;}
   if(g<nC){
@@ -1757,7 +1760,7 @@ fn pWallTol()->f32{let h=nbRingF(cfg.x,NB_RING_H);return bitcast<f32>(cfg.w)*h*h
   const wallsFKernel = (audit: boolean, guessAt = false) => kernel(audit ? "pmgAuditF" : guessAt ? "pmgWallsG" : "pmgWallsF", [CFG, setRW, dirRO, presRW, fRW, topRW, redRW, phiRW, velRO], /* 8 storage: no pmgC */ ["pres", "stage", "reduce", "tile", "red"], wallSign + /* wgsl */`
 var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u32>;var<workgroup> wAud:array<atomic<u32>,2>;
 @compute @workgroup_size(512) fn ${audit ? "pmgAuditF" : guessAt ? "pmgWallsG" : "pmgWallsF"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  ${guessAt ? fHead() : `if(lid==0u){wCount=${audit ? "nbListCount(NB_LIST_F_ALL)" : "pmgTop[T_RBN]"};}
+  ${guessAt ? fHead() : `if(lid==0u){wCount=${audit ? "nbListCount(NB_LIST_F_ALL)" : "min(pmgTop[T_RBN],NB_FCAP)"};}
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let slot=${audit ? "nbListSlot(NB_LIST_F_ALL,g)" : "pmgTop[T_RB+g]"};`}let o=nbFOrigin(slot);let b=o>>vec3u(3u);
   if(lid==0u){
@@ -1865,7 +1868,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   let decide=atomicLoad(&nbSet[PH_OPEN])!=0u&&atomicLoad(&nbSet[PH_DECIDES])<${u(wallDecisions)}
     &&(${Number.isFinite(wallLoose) ? `bitcast<f32>(atomicLoad(&nbSet[PH_RMAX]))<=${wallLoose.toFixed(6)}*pWallTol()` : "true"}||cfg.z+1u>=P_SLOTS);
   if(decide){atomicAdd(&nbSet[PH_DECIDES],1u);}
-  let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=pmgTop[T_RBN];
+  let c=NB_ARGS_PER_LIST*NB_LIST_C_ALL+NB_ARGS_G1;let n=min(pmgTop[T_RBN],NB_FCAP);
   args[P_GATE_WF]=select(0u,min(n,NB_FOLD),decide&&n>0u);args[P_GATE_WF+1u]=max(1u,(n+NB_FOLD-1u)/NB_FOLD);args[P_GATE_WF+2u]=1u;
   args[P_GATE_WC]=select(0u,args[c],decide);args[P_GATE_WC+1u]=args[c+1u];args[P_GATE_WC+2u]=1u;
 }`);

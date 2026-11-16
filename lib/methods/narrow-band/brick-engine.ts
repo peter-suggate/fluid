@@ -33,6 +33,8 @@ export interface BrickLiquidBox { readonly lo: Vec3; readonly hi: Vec3 }
 
 export interface BrickEngineOptions {
   readonly lattice: Vec3;
+  /** NB_PHI_FAR in h when it is not the lattice's largest extent (BrickLayoutOptions.farPhi). */
+  readonly farPhi?: number;
   readonly h_m: number;
   readonly dt_s: number;
   readonly gravity_mps2: Vec3;
@@ -266,7 +268,7 @@ export class BrickEngine {
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
-    const layout = new BrickLayout({ lattice: options.lattice, ...options.capacities, apic: options.apic });
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...options.capacities, apic: options.apic });
     const solver = options.solver(layout);
     validatePressureSolver(solver);
     const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles });
