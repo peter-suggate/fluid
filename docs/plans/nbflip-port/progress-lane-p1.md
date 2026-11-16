@@ -1466,3 +1466,125 @@ So the floor itself can come down. Even taking that lower floor, the bound is 0.
 
 **Verdict: no-go before the build.** Nothing was built or landed. The probe trees (`trees/ldG`) and logs
 (`runs9/ld*`, `runs9/xc/`) stay in scratch.
+
+## 2026-11-17 — lane P (successor after the kernel panic): the pressure bound, items 1–4
+
+The tool is ~/code/me/fluid-scratch/lane-p/tools/pbound2.mts: `high-resolution-dam-break`, brick engine, the default
+compositeMGPCG. It differs from pbound.mts:
+- It freezes on the GPU only the buffers part 2 writes from the solve onward: 555 MB of the engine's 853.
+- It replays the step's own recorded placements. There is no save()/restore and no timestamp query by default.
+- Timing is CPU wall time: (min of 5 × T(k) − min of 5 × T(1)) / (k − 1) over k back-to-back [restore; solve] in one
+  submit, less the restore's own cost.
+
+Logs are in `lane-p/runs/p2-{a,b,c,d}.log` and `.jsonl`; dumps are in `lane-p/dumps/s{20,100,300}`.
+Every run went through `fluid-gpu-run.sh timing`: rc 0, no 00000206, peak GPU memory at most 3.7 GB.
+
+**Item 1: the stalls are gone, with no cause left in the tool.** At step 20 I ran 7 solves, each in its own submit:
+
+| | wall (ms) | pass timestamps (ms) |
+|---|---|---|
+| no timestamps | 9.9–13.4 | — |
+| with timestamps | 9.9–16.6 | 8.6–11.8 |
+| with an e.save() (853 MB) held in-process | 9.7–10.3 | 8.6–8.9, after a first 17 |
+
+The differencing is stable: x8 repeats agree to 1–2%, and restore costs 2.9–3.2 ms. Neither held saved state nor
+memory pressure reproduces the 15–1800 ms stalls. The machine logged GPU hangs and restarts at 07:15, 07:47, 08:03 and
+08:04, before the 08:24 panic. pbound-1's figures were taken on that degraded GPU, and the old tool's save/restore and
+timestamped pass were the likely triggers. pbound2 has neither.
+
+**Where the solve's time goes** (frozen; ms):
+
+| step | its | solve | setup | rowsF (operator) | per open slot | finish + closed slots |
+|---|---|---|---|---|---|---|
+| 20 | 6 | 8.98 | 2.69 | 1.48 | 0.6–1.3 (noisy, k 4) | 0.88 |
+| 60 | 6 | 11.27 | 3.33 | 2.04 | 1.12–1.19 | 0.97 |
+| 100 | 6 | 8.96 | 2.55 | 1.60 | 0.87–0.98 | 0.83 |
+| 300 | 4 | 6.53 | 2.29 | 1.33 | 0.81–0.89 | 0.75 |
+
+- A closed slot (24 launches that early-exit) costs 0.07–0.11 ms, so a slot's 0.9–1.2 ms is work, not launch floor.
+- Slot 1 by kernel at step 60 (ms): pmgDirection 0.187, pmgPreS 0.141, pmgPostS 0.101, pmgUpdate 0.098, pmgPostZ 0.094,
+  pmgNativePre1 0.086, pmgDown3 0.085; 14 others 0.0–0.06 each; sum 1.21.
+- The receipts' mean iterations over steps 1–300 is 5.22 (steps 1–60: 5.82).
+
+**Item 2 (probe 1): the warm start is not worse than a cold one in iterations.** Rows over 0.05/1/10/100 1/s after
+the guess (g), the warm x0 (w), and cold (c), by class:
+
+| step | class | rows | g | w | c |
+|---|---|---|---|---|---|
+| 20 | native | 9108 | 6862/1394/396/54 | 6862/1409/395/54 | 9106/3724/257/0 |
+| 20 | h cold-start (refined or newly wet) | 29170 | 29111/27991/20192/4203 | 29135/28548/23904/8210 | 29110/28044/19442/1862 |
+| 20 | h seam | 11223 | 11141/9507/2442/54 | | 11206/10963/8390/354 |
+| 20 | h interior | 72556 | 71788/60266/32948/8436 | 71788/59334/32434/11641 | 72415/69754/33925/1579 |
+| 100 | native | 10273 | 1600/86/12/1 | | 9163/1240/1/0 |
+| 100 | h cold-start | 24801 | 24506/20255/8071/76 | | 24303/15915/3196/10 |
+| 100 | h ghost, DIAG changed | 9093 | 9080/8775/6515/1386 (max 664) | 9090/8986/7943/3566 (max 1.5e5) | 8980/6677/1343/20 |
+| 100 | h interior | 34670 | 33391/22040/9191/355 | | 33307/13053/1159/4 |
+| 300 | h ghost, DIAG changed | 10884 | 10826/9783/3499/2 | 10868/10490/7222/962 | 10529/5052/61/0 |
+
+(The step-20 ghost class was misread, a tool bug fixed before steps 100 and 300. Full tables are in the logs.)
+- The spikes over 100 after the guess sit on the cold-started rows (interpolated from 4h), the moving surface's ghost
+  rows, and the impact interior. The 4h seam holds few of them.
+- **Float64 model** (lane-p1 cmodel.ts on the step-20 dump; the V-cycle matched the GPU to 5e-7 in the earlier gate):
+
+  | start | iterations (fractional) |
+  |---|---|
+  | guess | 4.89 |
+  | cold | 5.90 |
+  | x0 | 6.40 |
+  | Jacobi on every row | 5.09 |
+  | reset rows where \|r0\| > \|b\| (55,821 rows) | 5.01 |
+  | reset cold-start + changed-DIAG ghost rows (34,768) | 4.92 |
+  | reset changed-DIAG ghost rows with \|r0\| > \|b\| (12,122) | 4.91 |
+  | 2 extra local Jacobi sweeps on rows over 10 1/s and their neighbours | 4.90 |
+  | 4 extra local Jacobi sweeps | 4.86 |
+
+  The best hybrid gains 0.03 iterations, about 0.03 ms. No-go.
+- GPU at the frozen states (`cold` = guess:false):
+
+  | step | guess | cold |
+  |---|---|---|
+  | 100 | 6 its, 8.96 ms | 7 its, 9.70 ms |
+  | 300 | 4 its, 6.53 ms | 6 its, 7.96 ms |
+
+  The large max-norm after the guess is not what sets the count.
+- The GPU took 6 its at step 20 where the model takes 5. Its history departs at slot 1 (113 against the model's 60),
+  where the walls are re-decided and PCG restarts (the model keeps the walls fixed). Wall variants on the GPU:
+
+  | variant | step 100 | step 300 |
+  |---|---|---|
+  | wallDecisions 0 | 5 its, 8.04 ms | 5 its, 7.22 ms |
+  | wallLoose 1000 | 6 its | 4 its |
+
+  wallDecisions 0 is one iteration better at step 100 and one worse at step 300. No wall policy clears the bar.
+
+**Item 3 (probe 2): fineSweeps 2, coarseSweeps 1.** Per open slot it costs 0.845 against 0.92 ms at step 100, and
+0.774 against 0.870 at step 300 (−8 to −11%).
+
+| | baseline | f2c1 |
+|---|---|---|
+| step 100 | 6 its, 8.96 ms | 7 its, 9.29 ms |
+| step 300 | 4 its, 6.53 ms | 6 its, 7.66 ms |
+| mean over a 60-step dam | 5.82 its | 6.32 its (+0.50) |
+
+Iterations × slot cost come out 5.35 ms against 5.34. No-go.
+
+**Item 4: rowsF (operator) attribution.**
+
+| step | bricks launched | bricks with h rows (HB) | same row set as the step before | same DIAG/K/KU | same RHS too |
+|---|---|---|---|---|---|
+| 20 | 682 | 483 | 18 | 9 | 0 |
+| 100 | 844 | 472 | 15 | 5 | 0 |
+| 300 | 492 | 403 | 17 | 5 | 0 |
+
+- The empty early-exit workgroups (162–372) are cheap: 372 bricks × about 34 ns is about 13 µs.
+- Almost every row changes every step, so skipping unchanged rows saves nothing. rowsF's cost is the per-row face
+  work. The earlier ILP and restructure attempts were flat (11-16 notes above).
+
+**Verdict at the checkpoint.** None of the four probes gives ≥2 ms at step 100. The best is the hybrid start at about
+0.03 ms; f2c1 and the cold start lose; the wall policy is ±1 iteration by state. The solve at step 100 is 8.96 ms:
+- setup 2.55, of it rowsF 1.60;
+- 6 slots × about 0.92;
+- finish 0.83.
+
+A 2 ms win needs about 2 fewer slots or a slot about 35% cheaper. The probes rule out the start and the sweep counts as
+the way to it.
