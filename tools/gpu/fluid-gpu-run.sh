@@ -1,7 +1,7 @@
 #!/bin/bash
 # Shared GPU runner for the fluid repo's agents.
 #   fluid-gpu-run.sh check  <cmd...>   correctness-only run (hashes, fatals, analytic scoring):
-#                                       up to 3 at once, never alongside an exclusive (timing) run
+#                                       one at a time by default (FLUID_GPU_CHECK_SLOTS, up to 3), never alongside a timing run
 #   fluid-gpu-run.sh gate   <cmd...>   merge-gate check: like check, but ordinary checks wait while a gate is queued
 #   fluid-gpu-run.sh timing <cmd...>   timing run: exclusive. Takes fluid-gpu.lock and all 3 check slots.
 # FLUID_GPU_LOCK_DIR overrides the lock directory; every agent on the machine must use the same one.
@@ -64,6 +64,16 @@ timing_waiting() {
   done
   return $live
 }
+# Check slots admitted at once (2026-11-17): the GPU hung and restarted 7 times one morning, each
+# time 1-8 s after a second check started beside a running one, and the last hang panicked the
+# Mac (WindowServer watchdog). So checks and gates run one at a time unless the caller sets
+# FLUID_GPU_CHECK_SLOTS=2 or 3. A timing run still takes all three slots.
+CHECK_SLOTS=${FLUID_GPU_CHECK_SLOTS:-1}
+case "$CHECK_SLOTS" in 1|2|3) ;; *) echo "fluid-gpu-run: FLUID_GPU_CHECK_SLOTS must be 1, 2 or 3" >&2; exit 2 ;; esac
+# Run log: one line a launch (time, pid, mode, cwd, command), so a GPU hang can be attributed.
+# It lives outside /private/tmp, which a reboot (the usual end of a hang) wipes.
+RUNLOG=${FLUID_GPU_RUN_LOG:-$HOME/Library/Logs/fluid-gpu-runs.log}
+printf '%s pid=%s mode=%s cwd=%s cmd=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$mode" "$PWD" "$*" >> "$RUNLOG" 2>/dev/null || true
 case "$mode" in
   timing)
     while aged_waiter; do sleep 5; done
@@ -91,6 +101,8 @@ case "$mode" in
       slots="1 2 3"
       if [ "$mode" = check ] && ls "$GATE".* >/dev/null 2>&1; then slots="3"; fi
       if [ "$mode" = gate ] && ls "$CHECKWAIT".* >/dev/null 2>&1; then slots="1 2"; fi
+      # One slot (the default): every check and gate queues on slot 1; two: slots 1-2.
+      if [ "$CHECK_SLOTS" = 1 ]; then slots="1"; elif [ "$CHECK_SLOTS" = 2 ]; then slots="1 2"; fi
       for i in $slots; do
         [ "$mode" = check ] && rm -f "$CHECKWAIT.$$"
         # -t 0: take slot i only if free. A timing run holds all three slots, so a slot
