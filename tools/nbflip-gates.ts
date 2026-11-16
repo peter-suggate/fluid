@@ -262,6 +262,9 @@ function damGates(refs: Box[], c: Box): Gate[] {
     asWritten(boxWindowScalar("D8", "particles, window mean", { rel: 0.10 }, "", refs, c, windows, s => s.particles)),
   ];
 }
+/** The fraction of a drop's asked volume NB-FLIP adds: the letters' first drop (step 3 of the dense old-engine run,
+ * fluid-scratch/lane-f/logs/m4/letters-30d-old.jsonl) observes 114.21 L of the 121.23 L asked. The brick adds 120.78 L. */
+const NB_DROP_ADDED = 114.21 / 121.23;
 /** The litres the letters have added since t = 0 (the drops landed by sample s). */
 const dropped = (r: Box, s: BoxObservation) => s.expected_L - boxAt(r, 0).expected_L;
 function lettersGates(refs: Box[], c: Box): Gate[] {
@@ -269,9 +272,17 @@ function lettersGates(refs: Box[], c: Box): Gate[] {
   return [
     ...boxDrift("L1", "volume drift against the t = 0 pool plus the drops (fraction)", { abs: 0.005 }, refs, c, checks, s => s.drift),
     ...boxBandDistance("L2", `shape: mean depth per 16 x 16-cell (x, z) bin, RMS (cells; ${f(mean(refs.map(r => dropped(r, boxAt(r, 240)))), 0)} L dropped by 240)`, 1, " cells", rms, refs, c, shape, (s, r) => binDepth(r, s.bins_L)),
-    boxScalar("L3", "kinetic energy (J)", { rel: 0.10 }, " J", refs, c, energy, s => s.ke_J),
+    // L3, restored (the coordinator's rulings, 2026-11-17): the kinetic energy against [refs, refs restored], the
+    // restored reference's KE over NB_DROP_ADDED. Derivation: the pool starts at rest, so every joule of KE in the
+    // letters is a drop's PE released, and a drop's KE scales with its mass. NB-FLIP adds NB_DROP_ADDED of each drop's
+    // asked volume, and the litres it loses would have fallen with the rest, carrying the drops' specific energy; so
+    // KE_restored = KE / NB_DROP_ADDED. NB-FLIP's velocity lag (1.9% under free fall) is not restored: that is judged
+    // against the reference, and the band holds it.
+    ...boxBand("L3", "kinetic energy (J)", { rel: 0.10 }, " J", refs, c, energy, s => s.ke_J / ("restoration" in s ? NB_DROP_ADDED : 1)),
     ...boxBand("L4", "liquid centroid height (cells)", { abs: 0.25 }, " cells", refs, c, energy, s => s.centroid?.[1] ?? null),
-    boxScalar("L5", "particles", { rel: 0.10 }, "", refs, c, energy, s => s.particles),
+    // L5 is an upper bound, as D8 is (plan §4.6; the coordinator's ruling 2026-11-17): fewer particles never fails.
+    boxUpper("L5", "particles, upper bound", { rel: 0.10 }, "", refs, c, energy, s => s.particles),
+    asWritten(boxScalar("L5", "particles", { rel: 0.10 }, "", refs, c, energy, s => s.particles)),
     boxScalar("Ln", "NB-FLIP's own volume drift (readStats)", { abs: 0.005 }, "", refs, c, checks, s => (s.extra?.nbDrift as number | undefined) ?? null, true),
   ];
 }
@@ -330,6 +341,7 @@ if (timingOnly) {
 const md: string[] = [`# NB-FLIP port gates: ${candidates.map(c => c.name).join(", ")}`, "",
   `Generated ${new Date().toISOString()} by tools/nbflip-gates.ts. References: ${SCENES.map(s => `${s} ${refRuns.filter(r => r.scene === s).map(r => r.name).join(" + ") || "(none)"}`).join("; ")}.`,
   "Each row passes when |candidate - reference mean| <= max(floor, 3S), S the references' spread; distance rows when d <= max(floor, 3S), S the references' largest pairwise d. Margin = |difference| / tolerance (<= 1 passes).",
+  "Amended (the coordinator's rulings 2026-11-17): L3 is banded to the references restored for their drop loss, as L2 and L4 are. The pool starts at rest, so the letters' KE is the drops' released PE and scales with their mass; NB-FLIP adds 94.2% of each drop (114.21 of 121.23 L), and the lost litres would have carried the drops' specific energy, so the restored KE is KE / 0.942. Its velocity lag is not restored. L5 is an upper bound, as D8 is.",
   "Amended (plan §4.6, the user's direction 2026-11-16): D8c and D8 are upper bounds only, c - ref <= max(floor, 3S); fewer particles than the references is never a failure, and the two-sided rows print as (as written), not gated.",
   "Amended (plan §4.5): drift rows are one-sided against NB-FLIP's envelope, |c| <= max_i |ref_i| + floor (ref prints max_i |ref_i|, tol the floor; margin = excess / floor), with the first ruling's |c| <= |ref mean| + max(floor, 3S) printed as (first ruling), not gated; volume-coupled rows pass anywhere between the reference band and the band of the references with their own measured loss restored (margin = the best d / tol along that segment; distance rows print d to the reference mean and, in brackets, to the restored mean). Rows marked (as written) are §4's originals, printed and not gated.", ""];
 const verdicts: Record<string, unknown>[] = [];
