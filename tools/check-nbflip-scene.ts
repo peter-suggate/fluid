@@ -23,7 +23,7 @@ const definition=getSceneDefinition(option("scene")??"high-resolution-dam-break"
 const scene=structuredClone(sceneDocument(definition)),quality=definition.methodProfile?.quality??"balanced";
 const budget=option("adaptive-budget");
 if(budget!==undefined)assert.ok(Number(budget)>=0&&Number(budget)<=100);
-const values=resolveMethodValues(method,quality,{...method.appDefaults,...definition.methodProfile?.overrides,...(budget===undefined?{}:{adaptiveBudgetPercent:Number(budget)})});
+const values=resolveMethodValues(method,quality,{...method.appDefaults,...definition.methodProfile?.overrides,...(budget===undefined?{}:{adaptiveBudgetPercent:Number(budget)}),engine:"uniform"}); // the old engine's internals
 const dt=method.effectiveStep_s?.(scene,values)??scene.numerics.fixedDt_s,steps=Math.round(scene.duration_s/dt);
 assert.ok(Math.abs(steps*dt-scene.duration_s)<1e-8,"authored duration must be a whole number of solver steps");
 paceDawnEventPolling();

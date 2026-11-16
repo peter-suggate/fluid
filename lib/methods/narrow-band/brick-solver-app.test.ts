@@ -13,7 +13,7 @@ import { resolveMethodValues } from "../../core/method-contract";
 import { sceneDocument } from "../../core/scene-definition";
 import { getSceneDefinition } from "../../core/scenes";
 import { canQueuePreparedGPUAdvance, submitNextPreparedGPUAdvance, BROWSER_GPU_THROUGHPUT_DEPTH } from "../../core/webgpu-renderer";
-import { FAIL, H, brickAbiWGSL } from "./brick-abi";
+import { FAIL, H, PHI_AIR_C, brickAbiWGSL } from "./brick-abi";
 import { SimulationFailureError } from "../../core/simulation-failure";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import type { BrickNBFlipSolver } from "./brick-solver";
@@ -126,9 +126,10 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel" })}
       const rowFloats = rowBytes / 4;
       for (let z = 0; z < V[2]!; z++) for (let y = 0; y < V[1]!; y++) for (let x = 0; x < V[0]!; x++) {
         const i = x + V[0]! * (y + V[1]! * z), q = want[2 * i]!, old = want[2 * i + 1]!;
-        const expect = q < FAR_H - 1e-3 ? Math.fround(q * h) : Math.fround(farM);
+        // The band's 4h air value (PHI_AIR_C) and anything past it show as far (brick-present.ts, since 06d4ca89).
+        const expect = q < PHI_AIR_C ? Math.fround(q * h) : Math.fround(farM);
         const got = shown[x + rowFloats * (y + V[1]! * z)]!;
-        if (got !== expect && !(got === Math.fround(farM) && q >= FAR_H - 1e-3)) { if (!mismatch) first = `(${x},${y},${z}) shown ${got} want ${expect} (q ${q})`; mismatch++; }
+        if (got !== expect) { if (!mismatch) first = `(${x},${y},${z}) shown ${got} want ${expect} (q ${q})`; mismatch++; }
         if (q < 0) liquid++;
         minQ = Math.min(minQ, q); minOld = Math.min(minOld, old); minShown = Math.min(minShown, got); if (q < FAR_H - 1e-3) finite++;
         if ((q < 0) !== (old < 0)) oldWrong++;
@@ -167,5 +168,44 @@ test("brick solver (GPU): a latched FAIL halts the app explicitly and refuses fu
       assert.equal(solver.advanceTo((step + 5) * dt, []), false, "no step after a halt");
       assert.equal(solver.info.submittedTime_s, submitted, "the clock holds (no reset, no advance)");
     } finally { solver.destroy(); }
+  });
+});
+
+/**
+ * The default engine, "auto", through the method's own createSolverAsync: the dam (no gaps) runs the brick engine and
+ * a scene with gaps (the water-box dam: no authored pools, a container of part pages) runs the old engine, each
+ * named in info.nbEngine, and each advances ten frames through the app's ledger with no latched failure.
+ */
+test("brick solver (GPU): auto, the default engine, runs the dam on brick and a gap scene on uniform", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD);
+  await withUniformDevice("brick solver auto", async device => {
+    for (const [sceneId, ran] of [["high-resolution-dam-break", "brick"], ["water-box-dam-break", "uniform"]] as const) {
+      const definition = getSceneDefinition(sceneId), scene = sceneDocument(definition), profile = definition.methodProfile;
+      const quality = profile?.methodId === METHOD ? profile.quality : "balanced";
+      const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}) });
+      assert.equal(values.engine, "auto", `${sceneId}: the default engine`);
+      const solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {});
+      try {
+        assert.equal(solver.info.nbEngine?.ran, ran, `${sceneId}: ${JSON.stringify(solver.info.nbEngine)}`);
+        assert.equal("brickEngine" in solver, ran === "brick", `${sceneId}: the solver is the ${ran} engine's`);
+        if (ran === "uniform") assert.match(solver.info.nbEngine!.gap ?? "", /not enabled on the brick engine/);
+        await solver.waitForSimulationReady?.();
+        let pending = 0, accounted = 0;
+        for (let frame = 1; frame <= 10; frame++) {
+          if (canQueuePreparedGPUAdvance(pending, BROWSER_GPU_THROUGHPUT_DEPTH)) {
+            const { submittedTime } = submitNextPreparedGPUAdvance(solver, frame * 2 / 60, []);
+            if (submittedTime > accounted) { accounted = submittedTime; pending++; }
+          }
+          const done = device.queue.onSubmittedWorkDone();
+          await done; await solver.awaitFrameCompletion?.(); await solver.assertSimulationHealthy?.(done);
+          solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, accounted); pending = 0;
+        }
+        console.log(`auto ${sceneId}: ${JSON.stringify(solver.info.nbEngine)}, t ${solver.info.completedTime_s?.toFixed(4)}`);
+        assert.ok((solver.info.completedTime_s ?? 0) > 0, `${sceneId}: t leaves 0`);
+        assert.equal(solver.info.simulationFailure, undefined, `${sceneId}: no latched failure`);
+        assert.equal(solver.info.nbEngine?.ran, ran, `${sceneId}: the status survives the steps`);
+      } finally { solver.destroy(); }
+    }
   });
 });

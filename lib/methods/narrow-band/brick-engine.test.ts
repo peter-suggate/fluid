@@ -29,7 +29,7 @@ import { bindGroupLayoutEntries, MAX_STORAGE_BINDINGS } from "./brick-kernel";
 import { brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine } from "./brick-method";
+import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
@@ -38,6 +38,8 @@ import { validateScene, type SceneDescription } from "../../core/model";
 import { createReservoirSeepScene } from "../../core/reservoir-seep-scene";
 import { getSceneDefinition } from "../../core/scenes";
 import { sceneDocument } from "../../core/scene-definition";
+import { resolveMethodValues } from "../../core/method-contract";
+import { uniformNarrowBandMethod } from "../uniform/uniform-narrow-band-method";
 import { damBreakSignedDistanceAtNode } from "../../core/initial-fluid";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
@@ -128,7 +130,9 @@ test("brick engine: a pressure solver's indirect words must be the lists' or P's
 });
 
 test("brick engine: the engine switch refuses unknown engines, and every scene but the dam", async () => {
-  assert.equal(nbEngine(undefined), "uniform");
+  assert.equal(nbEngine(undefined), "auto");
+  assert.equal(nbEngine("auto"), "auto");
+  assert.equal(nbEngine("uniform"), "uniform");
   assert.equal(nbEngine("brick"), "brick");
   assert.throws(() => nbEngine("bricks"), /unknown engine "bricks"/);
   const seep = createReservoirSeepScene();
@@ -510,4 +514,29 @@ test("brick engine: with the stages' seed, the boot runs a TRIG-only census betw
     // No claim, transfer, commit or WANT check between the kick's after and the seed.
     for (const p of trig) assert.ok(!/^set|^res|^transfer|censusWant/.test(p.kernel.label), p.kernel.label);
   }
+});
+
+test("brick engine: auto (the default) takes brick exactly where the scene has no gaps, and says why not", () => {
+  const method = uniformNarrowBandMethod;
+  assert.equal(method.params.find(p => p.key === "engine")?.default, "auto");
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), seep = createReservoirSeepScene();
+  const defaults = resolveMethodValues(method, "balanced", { ...method.appDefaults, timeStep: "sixtieth" });
+  assert.equal(defaults.engine, "auto");
+  // The dam has no gaps (the lanes' registrations included): auto runs brick.
+  assert.deepEqual(brickEngineGaps(dam, defaults), []);
+  assert.deepEqual(nbEngineChoice(dam, defaults), { requested: "auto", ran: "brick" });
+  assert.equal(nbEngineStatusText(nbEngineChoice(dam, defaults)), "Brick (auto)");
+  // A scene with gaps runs uniform, and the status names the first gap and the count of the rest.
+  const gaps = brickEngineGaps(seep, defaults), s = nbEngineChoice(seep, defaults);
+  assert.ok(gaps.length > 1);
+  assert.deepEqual(s, { requested: "auto", ran: "uniform", gap: gaps[0], gaps: gaps.length });
+  assert.equal(nbEngineStatusText(s), `Uniform (auto: ${gaps[0]}; ${gaps.length - 1} more)`);
+  // Explicit engines keep their behaviour: uniform always, brick always (createBrickSolver refuses a gap scene).
+  for (const scene of [dam, seep]) {
+    assert.deepEqual(nbEngineChoice(scene, { ...defaults, engine: "uniform" }), { requested: "uniform", ran: "uniform" });
+    assert.deepEqual(nbEngineChoice(scene, { ...defaults, engine: "brick" }), { requested: "brick", ran: "brick" });
+  }
+  assert.equal(nbEngineStatusText({ requested: "uniform", ran: "uniform" }), "Uniform");
+  assert.equal(nbEngineStatusText({ requested: "brick", ran: "brick" }), "Brick");
+  assert.throws(() => nbEngineChoice(dam, { ...defaults, engine: "bricks" }), /unknown engine "bricks"/);
 });

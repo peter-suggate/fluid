@@ -14,6 +14,9 @@ export interface GPUFieldLocation {
   z: number;
 }
 
+/** NB-FLIP's engine choice (brick-method.ts nbEngineChoice). */
+export interface NBEngineStatus { readonly requested: "auto" | "uniform" | "brick"; readonly ran: "uniform" | "brick"; readonly gap?: string; readonly gaps?: number }
+
 export interface GPUEulerianInfo {
   /** Narrow-band FLIP: the accepted detail plan (policy, requested/admitted, support, residency). */
   uniformDetail?: SolverDetailDiagnostics;
@@ -121,6 +124,8 @@ export interface GPUEulerianInfo {
    * Reporting is asynchronous and never feeds simulation state. */
   gpuValidationError?: string;
   quality: GPUQuality;
+  /** NB-FLIP's engine: the one requested, the one that ran, and for the old engine under "auto", the scene's first brick gap. */
+  nbEngine?: NBEngineStatus;
   /** NB-FLIP's brick engine (engine "brick"): the newest receipt's set counts and the presentation copies. */
   brickEngine?: { liveF: number; liveC: number; peakF: number; pressureCapNow?: boolean; step: number; presentations: number; lastPresentationMs?: number; particles?: number };
   volumeCellSum?: number;

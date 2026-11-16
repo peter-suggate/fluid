@@ -1,11 +1,13 @@
 /**
  * NB-FLIP's engine switch (lane E). The narrow-band-flip method id takes
- * `engine: "uniform" | "brick"`:
- * - "uniform" (the default) runs the old engine;
- * - "brick" runs the brick engine in lib/methods/narrow-band/.
- *
- * A scene the brick engine cannot run fails explicitly, naming every gap,
- * and its user runs it on engine "uniform". The gaps are:
+ * `engine: "auto" | "uniform" | "brick"`:
+ * - "auto" (the default, the user's direction 2026-11-17) runs the brick
+ *   engine where the scene has no gaps, and the old engine otherwise;
+ * - "uniform" runs the old engine;
+ * - "brick" runs the brick engine in lib/methods/narrow-band/, and refuses
+ *   a scene with gaps, naming every gap.
+ * The solver's info.nbEngine names the engine that ran, and for the old
+ * engine under "auto", the first gap. The gaps are:
  * - the scene's (brick-scene.ts: M2 enables the dam only, without solids,
  *   bodies or sources);
  * - the lanes': F's stages and P's solver register in their own files
@@ -22,13 +24,14 @@ import type { PressureSolverFactory } from "./brick-pressure-slot";
 import { brickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import type { BrickStagesFactory } from "./brick-stages";
+import type { NBEngineStatus } from "../../core/webgpu-eulerian";
 
-export const NB_ENGINES = ["uniform", "brick"] as const;
+export const NB_ENGINES = ["auto", "uniform", "brick"] as const;
 export type NBEngine = typeof NB_ENGINES[number];
 
 export const nbEngine = (value: unknown): NBEngine => {
-  if (value === undefined || value === "uniform") return "uniform";
-  if (value === "brick") return "brick";
+  if (value === undefined || value === "auto") return "auto";
+  if (value === "uniform" || value === "brick") return value;
   throw new Error(`NB-FLIP: unknown engine ${JSON.stringify(value)} (expected ${NB_ENGINES.join(" or ")})`);
 };
 
@@ -50,6 +53,19 @@ export function brickEngineRefusal(scene: SceneDescription, values: Readonly<Rec
   const gaps = brickEngineGaps(scene, values);
   return new Error(`NB-FLIP brick engine cannot run scene "${scene.sceneId ?? "(unnamed)"}": ${gaps.join("; ")}. Run it with engine "uniform".`);
 }
+
+/** The engine a scene runs on: "auto" takes brick exactly when the scene has no gaps. */
+export function nbEngineChoice(scene: SceneDescription, values: Readonly<Record<string, unknown>> = {}): NBEngineStatus {
+  const requested = nbEngine(values.engine);
+  if (requested !== "auto") return { requested, ran: requested };
+  const gaps = brickEngineGaps(scene, values);
+  return gaps.length ? { requested, ran: "uniform", gap: gaps[0], gaps: gaps.length } : { requested, ran: "brick" };
+}
+
+/** The status line: the engine that ran, and why "auto" did not take brick. */
+export const nbEngineStatusText = (s: NBEngineStatus) =>
+  s.ran === "brick" ? `Brick${s.requested === "auto" ? " (auto)" : ""}`
+    : `Uniform${s.requested === "auto" ? ` (auto: ${s.gap}${(s.gaps ?? 1) > 1 ? `; ${s.gaps! - 1} more` : ""})` : ""}`;
 
 /** The app's brick solver for a scene, or the explicit refusal. */
 export async function createBrickSolver(device: GPUDevice, scene: SceneDescription, values: Readonly<Record<string, unknown>>, quality: GPUQuality): Promise<BrickNBFlipSolver> {

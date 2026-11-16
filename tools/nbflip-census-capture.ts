@@ -56,7 +56,7 @@ const method = getMethod(METHOD), definition = getSceneDefinition(SCENE);
 const scene = sceneDocument(definition);
 const profile = definition.methodProfile?.methodId === METHOD ? definition.methodProfile : undefined;
 const quality = profile?.quality ?? "balanced";
-const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...profile?.overrides });
+const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...profile?.overrides, engine: "uniform" }); // the old engine (auto would run brick on the dam)
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 paceDawnEventPolling();
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href);

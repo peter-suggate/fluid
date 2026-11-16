@@ -8,6 +8,7 @@ import { UniformDetailLines, UniformDetailStatus } from "../../../components/Uni
 import { NumberInput, Stepper } from "../../../components/ui";
 import { useSession } from "../../core/session/session-context";
 import { simulation } from "../../core/simulation/controller";
+import { nbEngineStatusText } from "../../methods/narrow-band/brick-method";
 import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../../core/simulation-step";
 import { useSafeBrowserGPUBringup } from "../../core/use-safe-browser-gpu-bringup";
 import { simulationFeature } from "./definition";
@@ -92,6 +93,8 @@ export function SimulationMoreLines() {
       {info && <RailReadout label="Grid" testId="grid-readout"
         value={`${info.nx}×${info.ny}×${info.nz} · ${(info.allocatedBytes / 1073741824).toFixed(2)} GiB`}
         hint={`${info.cellCount.toLocaleString()} ${cpuPhysics ? "active sparse cells" : "samples"} · ${(info.allocatedBytes / 1048576).toFixed(1)} MiB allocated`} />}
+      {info?.nbEngine && <RailReadout label="Engine" testId="engine-readout" value={nbEngineStatusText(info.nbEngine)}
+        hint={info.nbEngine.gap ? `The brick engine cannot run this scene yet: ${info.nbEngine.gap}` : "The NB-FLIP engine running this scene."} />}
       {backend && <RailChoice label={backend.label} value={String(values[backend.key])} testId="physics-backend-control"
         options={backend.options.map((option) => ({ ...option }))} onChange={(value) => setParam(backend.key, value)} />}
       {cpuPhysics && method.params.filter((spec) => CPU_PARAM_KEYS.has(spec.key)).map((spec) => spec.kind === "select"

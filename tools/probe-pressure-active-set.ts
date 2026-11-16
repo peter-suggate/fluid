@@ -45,7 +45,7 @@ const raw=await adapter.requestDevice({requiredFeatures:[...(adapter.features.ha
 const device=managedGPUDevice(raw,{requireWorkerRealm:false});
 const definition=getSceneDefinition(sceneId),profile=definition.methodProfile?.methodId===method.id?definition.methodProfile:undefined,quality=profile?.quality??"balanced";
 const scene=structuredClone(sceneDocument(definition));
-const values=resolveMethodValues(method,quality,{...method.appDefaults,...profile?.overrides});
+const values=resolveMethodValues(method,quality,{...method.appDefaults,...profile?.overrides,engine:"uniform"}); // the old engine
 const dt=method.effectiveStep_s?.(scene,values)??scene.numerics.fixedDt_s;
 const solver=await method.createSolverAsync!(device,scene,quality,values,undefined,()=>{}) as any;
 const bodies=sceneId==="paddleboats"?mooredMotorBodies(scene,dt):undefined;
