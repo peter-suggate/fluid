@@ -277,8 +277,21 @@ fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return lcHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c430002u);}
 var<private> lcBase:vec3i;
 var<private> lcW:i32;
+// The staged C ring (lane E, 2026-11-16): lcAdvect's workgroup (one z plane of a C page, LC_ADVECT_GROUPS) stages
+// the resolved φ (nbVertexPhi) at the C lattice vertices 4T about its plane, T from lcRingLow over 13 x 13 x 5 (two
+// vertices of halo each way), before its traces read them. lcPhiTap reads a C lattice vertex inside the ring from it
+// and any other vertex through nbVertexPhi. The kernel writes only PHI1, so the staged values are the reads the taps
+// would make. Half of lcAdvect was the cubic's 64 owner-resolved taps (nbVertexCoarse's 8 tiles each); the ring
+// resolves each vertex once a workgroup. Off (lcRingOn) in a kernel that staged none.
+var<workgroup> lcRing:array<f32,845>;
+var<private> lcRingLow:vec3i;
+var<private> lcRingOn:bool=false;
+fn lcPhiTap(v:vec3i)->f32{
+ if(lcRingOn&&all((v&vec3i(3))==vec3i(0))){let r=vec3u((v>>vec3u(2u))-lcRingLow);if(all(r<vec3u(13u,13u,5u))){return lcRing[r.x+13u*(r.y+13u*r.z)];}}
+ return nbVertexPhi(v);
+}
 // umCubicPhi's taps: the departure cell's width-aligned vertices, held to the box (umVertexNearFromPage).
-fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return nbVertexPhi(clamp(lcBase+(vec3i(i32(x),i32(y),i32(z))-vec3i(1))*lcW,vec3i(0),NB_LATTICE));}
+fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lcPhiTap(clamp(lcBase+(vec3i(i32(x),i32(y),i32(z))-vec3i(1))*lcW,vec3i(0),NB_LATTICE));}
 fn lcOnWall(v:vec3i)->bool{return any(v==vec3i(0))||any(v==NB_LATTICE);}
 // umWallWithin in the box: a wall plane within reach of v along a.
 fn lcWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_LATTICE[a]-reach;}
@@ -306,7 +319,7 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
   var at:array<vec3f,10>;var t:array<f32,10>;
   for(var a=0u;a<3u;a++){let e=w*vec3f(lcUnit(a));at[2u*a]=lcHeld(p-e);at[2u*a+1u]=lcHeld(p+e);}
   for(var k=0u;k<4u;k++){var q=p;q[select(0u,2u,k>1u)]+=select(-2.0,2.0,(k&1u)!=0u)*w;at[6u+k]=q;}
-  for(var k=0u;k<10u;k++){t[k]=nbVertexPhi(vec3i(floor(at[k])));}
+  for(var k=0u;k<10u;k++){t[k]=lcPhiTap(vec3i(floor(at[k])));}
   var g=vec3f(0.0);
   for(var a=0u;a<3u;a++){g[a]=(t[2u*a+1u]-t[2u*a])/max(at[2u*a+1u][a]-at[2u*a][a],1e-6);}
   let g2=dot(g,g);
@@ -338,7 +351,7 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
  if(any(shift!=vec3f(0.0))){q=lcHeld(end+shift);}
  // umVertexCell(q): the cell's tile width; C corners in a 4h tile, resolved vertices in an h tile.
  let cell=lcCellOf(vec3i(floor(q)));let width=lcWidthAt(cell);let origin=(cell/width)*width;let f=(q-vec3f(origin))/f32(width);
- var corners:array<f32,8>;for(var k=0u;k<8u;k++){corners[k]=nbVertexPhi(origin+width*lcCorner(k));}
+ var corners:array<f32,8>;for(var k=0u;k<8u;k++){corners[k]=lcPhiTap(origin+width*lcCorner(k));}
  var value=nbfCellTrilinear(corners,f);
  let moved=nbfMovedSmoothing(smoothing,p,q,4u);
  // umCubicAt(vertex, 4): mode < 4, the coarse default (cubic); |value| < 2 widths of the vertex.
@@ -369,12 +382,20 @@ fn lcCheckBulk(slot:u32,live:bool,lid:u32){
  if(bulk){nbFail(NB_FAIL_UNSUPPORTED,0x4c430003u);}
 }
 // The page body: C slot slot (live: the workgroup's liveness), φ → PHI1 at its C vertices. No barrier.
+var<workgroup> sRingLive:u32;
+// The page's z plane this workgroup advects (lcAdvect: eight workgroups a page, X8).
+var<private> lcPart:u32;
 fn lcAdvectPage(slot:u32,live:bool,lid:u32){
  lcCheckLattice(lid);lcCheckBulk(slot,live,lid);
- if(!live){return;}
+ if(lid==0u){sRingLive=select(0u,1u,live);}
+ if(workgroupUniformLoad(&sRingLive)==0u){return;}
  let dt=lcDt();let hm=lcHm();let o=nbCOrigin(slot);
- for(var r=0u;r<2u;r++){
-  let l=lid+256u*r;let v=o+4*nbLocalCoord(l);
+ lcRingLow=(o>>vec3u(2u))+vec3i(-2,-2,i32(lcPart)-2);
+ for(var j=lid;j<845u;j+=64u){lcRing[j]=nbVertexPhi(4*(lcRingLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u))));}
+ workgroupBarrier();lcRingOn=true;
+ // One C vertex a lane, the plane's 64 (a single pass: its continues are the exits).
+ for(var r=0u;r<1u;r++){
+  let l=lid+64u*lcPart;let v=o+4*nbLocalCoord(l);
   if(!lcCOwned(v)){continue;}
   let c=lcPhiC(NB_PHI_C_PHI,slot,l);
   // Exits 1 and 2: the COLD hold (umHoldCold → umStoreCold: the vertex's own φ).
@@ -639,12 +660,15 @@ export const levelSetCoarseWGSL = {
   retire: () => [nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_RETIRE_WGSL].join("\n"),
 };
 
+/** lcAdvect's dispatch over C_ALL: eight workgroups an entry (the brick set's X8 arguments). */
+export const LC_ADVECT_GROUPS = "X8" as const;
+
 export interface LevelSetCoarseKernels {
   readonly lcAdvect: BrickKernel; readonly lcCouple: BrickKernel; readonly lcClear: BrickKernel;
   readonly lcRetire: BrickKernel; readonly lcPublish: BrickKernel;
 }
 
-/** The standalone kernels: list C_ALL, G1, workgroup 256. */
+/** The standalone kernels: list C_ALL, G1, workgroup 256; lcAdvect C_ALL X8, workgroup 64. */
 export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayout(L, { tiered: true })): LevelSetCoarseKernels {
   if (!F.tiered) throw new Error("levelset-coarse: the C kernels read through the tier owners; build them with fluidLayout(L, { tiered: true })");
   const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell];
@@ -655,7 +679,13 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
  ${page}(slot,live,lid);
 }`].join("\n"));
   return {
-    lcAdvect: k("lcAdvect", levelSetCoarseWGSL.advect(), "lcAdvectPage"),
+    // lcAdvect: eight workgroups a page (LC_ADVECT_GROUPS), each one z plane of its C vertices, a lane a vertex.
+    lcAdvect: fluidKernel(L, F, "lcAdvect", bindings, [levelSetCoarseWGSL.common(), levelSetCoarseWGSL.advect(), /* wgsl */`
+@compute @workgroup_size(64) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+ let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ALL);
+ var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,e);}
+ lcAdvectPage(slot,live,lid);
+}`].join("\n")),
     lcCouple: k("lcCouple", levelSetCoarseWGSL.couple(), "lcCouplePage"),
     lcClear: k("lcClear", levelSetCoarseWGSL.clear(), "lcClearPage"),
     lcRetire: k("lcRetire", levelSetCoarseWGSL.retire(), "lcRetirePage"),

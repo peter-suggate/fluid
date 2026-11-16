@@ -1767,3 +1767,89 @@ still pays the staging, so the estimate is about 0.7-1.1 ms. The risk is a per-k
 a silent stale word at the halo edge.
 
 The lever is parked at 2% of the step, in favour of the particle-defined φ go/no-go (scratch, the user's call).
+
+## 2026-11-16: speed of light for the level set's advects (profile, the far skip, the staged C ring)
+
+**The far-vertex skip** (lAdvect leaves owned vertices with |old φ| > 3 untraced) is worth about nothing, so it is
+parked. Frozen lAdvect, full against skip: step 100 2.64 → 2.43 ms, step 300 1.44 → 1.41 ms.
+
+What redistance overwrites: lDistance and lPublish rewrite every vertex that is not an interface vertex.
+- In reach2 the value is sign(φ) times the distance to the nearest crossing among the dNear cells, which does not
+  depend on |φ|. The exception is the fallback sign·max(|φ|, 5) when no crossing is found.
+- Outside reach2 it is nbfFarSentinel(old).
+
+A far vertex's advected value therefore matters only through its sign, whether it becomes a crossing corner, and the
+min in lUnion. The skip is exact only when |old φ| > the step's maximum travel + √3. A fixed 3 is not provable:
+flowMax is 6.45 cells/step at step 300 and 22 at step 60.
+
+**Hardware counters.** r8/kloop.mts loops one kernel on the frozen step-300 state. xctrace attaches with Metal System
+Trace and Metal GPU Counters for 2 s; counters are averaged over busy samples (occupancy > 0.5%).
+
+| | lAdvect | lDistance | lcAdvect |
+|---|---|---|---|
+| frozen ms | 1.42 | 1.01 | 1.56 |
+| compute occupancy, mean (p50) | 13.3% (15.6) | 23.2% (25.0) | 6.7% (5.7) |
+| ALU utilisation / F32 utilisation | 35.7 / 1.1 | 48.0 / 7.7 | 18.1 / 1.1 |
+| ALU limiter | 37.7 | 54.3 | 18.7 |
+| buffer read limiter | 3.7 | 3.0 | 1.5 |
+| LLC limiter | 11.0 | 8.9 | 7.3 |
+| read bandwidth, GB/s | 2.35 | 8.1 | 1.0 |
+| MMU TLB miss rate | 30% | 22% | 19% |
+
+Bandwidth is about 1% of the roofline. The ALU is busy almost entirely with integer and address work (F32 about 1% in
+both advects).
+
+**Lane use is not the cause.**
+- At step 300, 21% of lAdvect's SIMD groups have an owned lane (5232 of 24448), and those groups are 89% full.
+- Packing owned vertices first in the workgroup is bit-identical, but slower: lAdvect 1.42 → 1.92 ms, lcAdvect
+  1.63 → 1.69 ms (step 300). It breaks tap locality within a SIMD group.
+- A compacted owned-vertex list is therefore no lever.
+
+**Where the time goes** (frozen step 300, one part removed or made free at a time):
+
+| change | lAdvect, ms | lcAdvect, ms |
+|---|---|---|
+| none | 1.38 | 1.53 |
+| lane body empty | 0.18 | 0.06 |
+| no trace | 0.67 | 1.29 |
+| free velocity taps | −0.74 | −0.22 |
+| no cubic | 1.13 | 0.78 |
+| free cubic taps | −0.20 | −0.61 |
+| no foot stencil | −0.06 | −0.17 |
+
+- In lAdvect, about 54% is the trace's velocity taps (fgSampleVel's owner and face resolution per tap). That sampler
+  is lane F's, and the fast path went to F.
+- In lcAdvect, about half is the cubic's 64 nbVertexPhi taps. Each one is nbVertexCoarse's 8-tile owner test plus a
+  page lookup.
+
+**The owner window is bit-identical to the directory.** lAdvect, staged with the 3³ owner window, gave φ different by
+1 ulp (92% of 13843 words; at most a few ulp in small |φ|) and ran slower (1.38 → 1.77 ms). A direct check on frozen
+states at steps 100 and 300 found the window and the directory paths identical. Every lAdvect workgroup compared:
+- fgWinVertexCoarse and fgWinVertexPhi at its 20³ covered vertices;
+- fgTileCSlot and fgTileH at 216 tiles;
+- fgBrickSlot at 27 bricks;
+- fgSampleVel at 8000 points.
+
+The φ difference is the compiler contracting differently once the lookup code changes.
+
+**The staged C ring.** lcAdvect now runs eight workgroups a page (C_ALL X8), each one z plane of the page's C
+vertices with a lane a vertex. Each workgroup stages the resolved φ of the C lattice vertices about its plane
+(13 x 13 x 5, two vertices of halo each way) once. The foot stencil, the departure corners and the cubic read
+through lcPhiTap, which falls back to nbVertexPhi outside the ring.
+
+Results are exact up to compiler contraction: 1–2 ulp in 964 and 540 φ words. Frozen lcAdvect:
+
+| | step 100, ms | step 300, ms |
+|---|---|---|
+| HEAD | 1.82 | 1.91 |
+| ring, X8 | 1.15 | 0.88 |
+| ring, one workgroup a page (15³ ring) | 1.29 | 1.06 |
+
+**Gate** (against HEAD 31630b18):
+- Units: 65 of 65 pass. dam-300 judge PASS.
+- Fenced 165-step medians, interleaved: 43.89 / 44.36 ms against HEAD's 45.38 / 44.47 ms (−0.8 ms mean).
+- Profile, steps 18–23: lcAdvect 1.04 → 0.74 ms. The other areas are within run noise.
+- lcAdvect was 6.7% occupancy at 198 workgroups. Its dispatch is now 8 × 64-lane workgroups a page, which follows
+  fill-the-gpu.
+
+The fgSampleVel fast path (a one-cell + apron on FC_UNIT, 9³) is lane F's. I reviewed the ABI and it rebases on this.

@@ -31,7 +31,7 @@ import { ARGS, LIST } from "./brick-abi";
 import type { BrickDispatch, BrickKernel, BrickPlacement } from "./brick-kernel";
 import type { BrickStages, BrickStagesFactory } from "./brick-stages";
 import { fluidLayout } from "./fluid-grid.wgsl";
-import { levelSetCoarseKernels } from "./levelset-coarse.wgsl";
+import { LC_ADVECT_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { nbfParticleSupported } from "./particles-formulas.wgsl";
 import { P_ARGS_RECORDS, particleKernels } from "./particles-kernels.wgsl";
@@ -50,13 +50,13 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   if (typeof seconds !== "number" || !(seconds >= 0)) throw new Error(`NB-FLIP brick engine: volumeControlSeconds ${String(seconds)} is not a control time`);
   const physics = { viscosity_Pa_s: context.fluid?.viscosity_Pa_s ?? 0, density_kg_m3: context.fluid?.density_kg_m3 ?? 1000, volumeControl_1_s: seconds > 0 ? 1 / seconds : 0 };
   const p = particleKernels(L, F), l = levelSetKernels(L, F), v = velocityKernels(L, F, physics);
-  const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
+  const list = (k: number, g: "G1" | "G8" | "G64" | "X8"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
   const all = list(LIST.F_ALL, "G1"), all8 = list(LIST.F_ALL, "G8"), pages = list(LIST.C_ALL, "G1");
   // Tiered, a pass over both tiers (the FC list: F_ALL's bricks, then C_ALL's pages, a workgroup each): the kernels
   // that hold a C page body (uAdvect, uTransfer, uKick, vGauge) run their 4h faces or tiles in their h pass.
   const both: BrickDispatch = tiered ? { indirect: ARGS.FC_G1 } : all;
   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
-  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: pages, z: 0, w: 0 }] : [];
+  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: kernel === "lcAdvect" ? list(LIST.C_ALL, LC_ADVECT_GROUPS) : pages, z: 0, w: 0 }] : [];
   // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
