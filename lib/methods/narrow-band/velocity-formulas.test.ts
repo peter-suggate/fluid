@@ -76,6 +76,9 @@ fn resolve(original:vec4f,momenta:vec3u,weights:vec3u,properties:array<vec3f,3>,
    let momentum=f32(bitcast<i32>(momenta[axis]))/PB_MOMENTUM;
    let near=properties[axis];let transition=near.x*mix(min(1.0,mass/near.z),1.0,near.y);
    value[axis]=mix(original[axis],momentum/mass+thaw[axis],transition);`)}
+  // The resolve's one departure from the old: a face the deposit takes whole (transition 1) is the deposit exactly
+  // (the old mix(a, b, 1) rounds as a + (b - a)).
+  if(transition==1.0){value[axis]=momentum/mass+thaw[axis];}
  }
  return value;
 }`,

@@ -1558,3 +1558,59 @@ attributed to classification is not in the vLive lookups or in the list atomics.
 - No 00000206 abort was logged.
 
 Logs: ~/code/me/fluid-scratch/lane-f/logs/{fx,fy,fz,xg}.
+
+## 2026-11-16: uExtend skips the sweep of an axis with no source in its window; nbfP2GResolve selects the deposit at t = 1; the overwritten-trace skip dropped
+
+**uExtend's pre-seed skip (exact).** wReach collects whether the window can seed a source: bit a is set by a reached
+4h state of axis a in wS4 (xProlong's only finite seeds), bit 3 by any liquid cell in wLiq (xCode's code 1). An axis
+with neither seeds only unreached (1e20) and blocked (−1) faces, and ufxCombine of unreached neighbours keeps old, so
+the sweep is the identity: the seed loop, the inset sweep and its write-back are skipped (the barriers stay), and the
+finish takes the face's own seed (xSeed).
+
+**nbfP2GResolve's select.** A face the deposit takes whole (transition 1) returns the deposit exactly, instead of
+mix(original, deposit, 1). On the frozen dam it is bitwise to HEAD at steps 20 and 100: Metal's mix already returned
+the deposit at all 113k (step 20) and 139k (step 100) such faces. The p2g resolve parity test carries the select on the
+old side.
+
+**The overwritten-trace skip: no-go.** uAdvect skipped the trace of an inviscid face that the deposit (pDeposit moved
+first) takes whole. The dependencies allowed the move:
+- uAdvect reads the deposit's weights, which pDeposit writes; pDeposit writes nothing else uAdvect reads (fdep and
+  parts[i].before.w);
+- uAdvect writes UP0 and the set words FH_VOL_FILLED, FH_RATE and FH_TRACE_CAPPED; pDeposit reads none of them.
+
+It was bitwise against the select alone (tiered steps 20 and 100, all-h step 20), but slower. Frozen velocity stage
+(pDeposit + uAdvect + uTransfer, ms):
+
+| variant | step 20 | step 100 |
+|---|---|---|
+| HEAD | 11.1–11.3 | 7.3–7.5 |
+| near inputs loaded per face | 12.2–12.5 | 8.0–8.2 |
+| near inputs staged like uTransfer | 12.4–12.8 | — |
+| pDeposit first, skip compiled out | 11.16–11.19 | — |
+| the fdep load only | neutral | — |
+
+With nothing taken, uAdvect with the skip's code ran 9.0 ms against 6.7: the code inflates the trace even where it
+never runs (register pressure). A separate taken-mask pass would net at best about 0.5 ms at step 20 and nothing at
+step 100, so it is not pursued, and pDeposit stays after uAdvect.
+
+**Frozen, uExtend against HEAD (bitwise at tiered steps 20 and 100 and all-h step 20):**
+
+| step | uExtend (ms) |
+|---|---|
+| 20 | 4.37 → 3.64 |
+| 100 | 4.73 → 3.66 |
+
+**Gate (tree-yf against c35cbe65):**
+- The wide-dam and velocity-formulas tests pass (10/10; the p2g resolve parity 0 words differ).
+- dam-300 fails only D8, at 1.34 (HEAD 1.39–1.49).
+- Fenced holds, paired c6 yf yf c6, steps 13–165:
+
+| pair | median (ms) | mean (ms) | paired per-step median / mean |
+|---|---|---|---|
+| 1 | 46.98 → 47.31 | 52.42 → 52.02 | −0.42 / −0.47 |
+| 2 | 49.32 → 48.66 | 53.99 → 52.72 | −0.99 / −1.57 |
+
+- No 00000206 abort was logged.
+- The gate ran on c35cbe65; lane E's 06d4ca89 landed meanwhile and does not touch these files.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{yb,yt,yf}.

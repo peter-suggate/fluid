@@ -698,6 +698,10 @@ var<workgroup> wLiq:array<atomic<u32>,69>;
 // and whether each brick of the window has a supported h tile (ufxRH's mode bit 0).
 var<workgroup> wS4:array<vec4f,${F.tiered ? 375 : 1}>;
 var<workgroup> wSwept:array<atomic<u32>,27>;
+// Whether the window can seed a source: bit a, a reached 4h state of axis a staged (xProlong's only finite seeds);
+// bit 3, a liquid cell in wLiq (xCode's code 1). An axis with neither seeds no reached face, and a sweep over
+// unreached and blocked seeds changes none (ufxCombine of unreached neighbours keeps old): its sweep is skipped.
+var<workgroup> wReach:atomic<u32>;
 // vLiquidOwner's inputs, staged once: the 4^3 tiles about the window (tiles xBase4-1..xBase4+2; bit 0 4h-owned,
 // bit 1 its tile centre φ under -0.001) and the FC_LIQ words of the 27 bricks about the brick (16 a brick). The same
 // tiles' bit 2 is fgTileSupported (xCode's) and bit 3 foTileOwnerH, for the seeds and the finish.
@@ -766,6 +770,12 @@ fn xFinish(s:Ufx,c:vec3i,a:u32,code:u32,o:f32,swept:bool)->vec2f{
  let far=xProlong(c,a);if(ufxReached(far.d)){return vec2f(far.v.x,far.v.x-far.v.y);}
  return vec2f(s.v,s.v-o);
 }
+// A face's seed (the seed loop's): the 4h band prolonged where the old texel is 4h; else F's own seed.
+fn xSeed(q:vec3i,a:u32)->Ufx{
+ if(xCoarse(q-fgUnit(a))){let f=xProlong(q,a);return Ufx(f.v.x,f.d);}
+ if(fgSlot(q)!=NB_NONE){return Ufx(xFaceU(q,a),ufxSeedCode(xCode(q,a)));}
+ return Ufx(0.0,-1.0);
+}
 fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-xBrick+vec3i(1));return atomicLoad(&wSwept[r.x+3u*r.y+9u*r.z])!=0u;}
 @compute @workgroup_size(512) fn uExtend(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
@@ -776,6 +786,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  fgWindowStage(o>>vec3u(3u),lid,512u);workgroupBarrier();
  if(lid<69u){atomicStore(&wLiq[lid],0u);}
  if(lid<27u){atomicStore(&wSwept[lid],0u);}
+ if(lid==0u){atomicStore(&wReach,0u);}
  if(live&&lid<432u){
   let n=lid>>4u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
   let s=fgBrickSlot(b);var w=0u;if(s!=NB_NONE){w=fcLoad(FC_LIQ+16u*s+(lid&15u));}
@@ -796,9 +807,13 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
  }
  workgroupBarrier();
  if(live){
+  var wet=false;
   for(var j=lid;j<2197u;j+=512u){
-   if(xLiquidStaged(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));}
+   if(xLiquidStaged(xLow+vec3i(i32(j%13u),i32((j/13u)%13u),i32(j/169u)))){atomicOr(&wLiq[j>>5u],1u<<(j&31u));wet=true;}
   }
+  var reach=select(0u,8u,wet);
+  if(FG_TIERED&&lid<375u&&ufxReached(wS4[lid].z)){reach|=1u<<(lid/125u);}
+  if(reach!=0u){atomicOr(&wReach,reach);}
   // A lane a tile of the 27 bricks about the brick (216 lanes).
   if(FG_TIERED&&lid<216u){
    let n=lid>>3u;let b=xBrick+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);let tc=2*b+fsBit4(lid&7u);
@@ -806,26 +821,28 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   }
  }
  workgroupBarrier();
+ let reach=atomicLoad(&wReach);
  for(var a=0u;a<3u;a++){
-  if(live){
+  // No source seeded (wReach): every face keeps its seed, the finish takes its own.
+  let sweep=(reach&(8u|(1u<<a)))!=0u;
+  if(live&&sweep){
    for(var r=0u;r<4u;r++){
     let k=lid+512u*r;if(k>=1728u){continue;}
-    let q=o+xCell(k);var s=Ufx(0.0,-1.0);
     // The old texel q - e_a in a 4h tile: the 4h band prolonged (ufxH's kind 2); else F's own seed.
-    if(xCoarse(q-fgUnit(a))){let f=xProlong(q,a);s=Ufx(f.v.x,f.d);}
-    else if(fgSlot(q)!=NB_NONE){s=Ufx(xFaceU(q,a),ufxSeedCode(xCode(q,a)));}
+    let s=xSeed(o+xCell(k),a);
     wV[k]=s.v;wD[k]=s.d;
    }
   }
   workgroupBarrier();
   var held:array<Ufx,2>;
-  if(live){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){held[r]=xSweepAt(xInset(k),h);}}}
+  if(live&&sweep){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){held[r]=xSweepAt(xInset(k),h);}}}
   workgroupBarrier();
-  if(live){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){let i=xAt(xInset(k));wV[i]=held[r].v;wD[i]=held[r].d;}}}
+  if(live&&sweep){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){let i=xAt(xInset(k));wV[i]=held[r].v;wD[i]=held[r].d;}}}
   workgroupBarrier();
   // F writes the faces whose old texel (the cell below) is h-owned; a 4h owner's subfaces are uExt4's.
   if(live&&(!FG_TIERED||xOwnerH(c)||xOwnerH(c-fgUnit(a)))&&!xCoarse(c-fgUnit(a))){
-   let s=xSweepAt(nbLocalCoord(l),h);
+   var s=Ufx(0.0,-1.0);
+   if(sweep){s=xSweepAt(nbLocalCoord(l),h);}else{s=xSeed(c,a);}
    let iu=vAt(NB_VEL_F_UP0,slot,a,l);
    var out=xFinish(s,c,a,xCode(c,a),vel[iu],xSwept(c-fgUnit(a)));
    if(!fgFaceOpen(c,a)){out.y=0.0;}

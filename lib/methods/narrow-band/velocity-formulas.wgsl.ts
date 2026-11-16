@@ -75,7 +75,9 @@ fn nbfP2GResolve(original:f32,momentumWord:u32,weightWord:u32,near:vec3f,thaw:f3
  if(mass<1e-5){return original;}
  let momentum=f32(bitcast<i32>(momentumWord))/PB_MOMENTUM;
  let transition=near.x*mix(min(1.0,mass/near.z),1.0,near.y);
- return mix(original,momentum/mass+thaw,transition);
+ // A face the deposit takes whole (transition 1) is the deposit's value exactly (mix(a, b, 1) rounds as a + (b - a)).
+ let deposit=momentum/mass+thaw;
+ return select(mix(original,deposit,transition),deposit,transition==1.0);
 }
 `;
 
