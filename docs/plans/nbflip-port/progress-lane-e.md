@@ -1729,3 +1729,41 @@ held the dimples at +9% particles; it was not gated.
 
 Residual: the sub-0.5 h seam dimples, dimples025 mean 6.1 against HEAD's 2.25. The remaining pocks' columns are not
 short of records (top layers 4-7).
+
+## 2026-11-16: step floor, lever 1 (ring bricks out of the fine level set), priced and parked
+
+The level set is 10.7 ms a step (37d57ff4, profile steps 13-36) against the 2.0 ms budget of the structural plan's
+§6. In all, 59% of F bricks are ring bricks with no h-owned tile, and the fine level-set passes are dispatched per F
+brick.
+
+**The bound.** A frozen-state replay (frozen2 --time=8, state from the correct tree) had bricks without an h-owned
+tile return at once. A/A noise is about ±0.03 ms per kernel. Full minus skip, in ms:
+
+| kernel | step 100 | step 300 |
+|---|---|---|
+| lResolve (×4) | 0.74 | 0.50 |
+| lDistance | 0.51 | 0.42 |
+| lNear (3 passes) | 0.31 | 0.18 |
+| lUnion | 0.28 | 0.20 |
+| lClear | 0.21 | 0.20 |
+| lTiles | 0.14 | 0.10 |
+| lPublish | 0.08 | 0.09 |
+| lSplat, lDilate, lInit, lAdvect | ~0 | ~0 |
+| total | 2.3 | 1.7 |
+
+lAdvect already skips non-owned vertices per lane, so ring bricks cost it nothing. uExtend's ring share (1.21 ms at
+step 100, 0.72 ms at step 300) went to lane F.
+
+**The halo census.** These are non-h-brick tiles near an h tile:
+
+| step | within 1 tile | within 2 tiles | bricks, 1-tile halo | bricks, 2-tile halo |
+|---|---|---|---|---|
+| 100 | 22% | 62% | 45% | 81% |
+| 300 | 26% | 72% | 52% | 93% |
+
+lNear's ±5-cell walk needs the crossing words two tiles out. A split halo would run the producers (lTiles, lClear,
+lResolve) on two tiles and the consumers (lNear, lDistance, lUnion, lPublish) on one. Tile masking in a launched brick
+still pays the staging, so the estimate is about 0.7-1.1 ms. The risk is a per-kernel reach invariant, where a miss is
+a silent stale word at the halo edge.
+
+The lever is parked at 2% of the step, in favour of the particle-defined φ go/no-go (scratch, the user's call).
