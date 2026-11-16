@@ -1497,3 +1497,64 @@ are not read at all. B is not built.
 | uCache | 0.87 |
 
 The baselines were checked bitwise. No 00000206 abort was logged. Logs: logs/v4 and logs/bt.
+
+## 2026-11-16: uExtend's staged tile bits and uAdvect's exact sampler switch landed; lever 1 dropped
+
+**uExtend.** The 5³ tiles' supported (bit 2) and owner (bit 3) bits are staged once in wTile4, beside the coarse
+bits. xCode, the seeds' coarse test, xFaceU's owner test and the finish read the staged words.
+
+**The tiered sampler (fluid-grid, fgSampleVel), two exact changes:**
+- **The fine switch in O(1).** The fine weight is only ever tested for being over 0, so fsFineAny replaces
+  fsFineWeight. It reads HMASK first, then the support, then bit 13. Otherwise it forms a 27-bit reach mask: the AND
+  over axes of the offsets whose delta is under 2, using the loop's own float expressions. It then tests that mask
+  against HMASK.
+- **The zero-weight pair skip.** In fsFine and fsCoarse, a trilinear corner beyond an axis whose fraction is 0 is
+  not read: at a face centre, 1 tap of 8 on the face's own axis and 4 of 8 on the others. The result equals the
+  old one up to the sign of a zero sum.
+- The same sampler runs in uAdvect, lAdvect, lcAdvect, pMove and pSeed.
+
+**Lever 1 (the hoisted classification) is dropped.** Both forms were bitwise and neither saved time. The 0.95 ms
+attributed to classification is not in the vLive lookups or in the list atomics.
+
+| lever 1 form | step 100 (ms) | step 20 (ms) |
+|---|---|---|
+| vLive bits staged in workgroup memory (729 a brick) | 3.87 against 3.43 | flat |
+| one list atomic a lane instead of one a face | 3.446 against 3.426 | 8.39 against 8.25 |
+
+**Lever 2 measured on HEAD (uAdvect at frozen steps 100 and 20; base about 3.45 and 7.8–8.0 ms):**
+
+| variant | kind | step 100 (ms) | step 20 (ms) |
+|---|---|---|---|
+| early-exit loop (k1) | exact | 3.28 | 7.64 |
+| k1 + pair skip | exact | 2.79 | 7.08 |
+| support check dropped | knockout | 3.15 | 7.27 |
+| HMASK != 0 only | knockout | 3.10 | 6.77 |
+| O(1) switch, support first, + pair skip (e1) | exact | 2.89 | 6.65 |
+| O(1) switch, HMASK first, + pair skip (e2, landed) | exact | 2.96 | 6.66 |
+
+- The support-dropped knockout stayed bitwise at both steps but has no proof of exactness, so it is left out.
+
+**Frozen, the landed batch against HEAD (tiered steps 20 and 100; all-h step 20):**
+- uAdvect, uExtend, lAdvect and lcAdvect are bitwise at all three.
+- pMove and pSeed differ only as the base differs from itself (their atomic ranks).
+
+| kernel | tiered step 20 (ms) | tiered step 100 (ms) | all-h step 20 (ms) |
+|---|---|---|---|
+| uAdvect | 6.88 against 8.16 | 2.79 against 3.41 | 10.81 against 10.98 |
+| uExtend | 4.32 against 4.50 | 4.42 against 4.64 | 4.06 against 4.25 |
+
+**Gate (tree-xb against tree-h5 = 42567020):**
+- Both wide-dam tests pass.
+- dam-300 fails only D8, the particle upper bound, at margin 1.31 in the 30–90 window. The earlier trees ran
+  1.09–1.23, and the grid kernels here are bitwise, so the difference comes from the atomics.
+- Fenced hold, steps 13–165, timing slot:
+  - median 48.97 → 49.54 ms (+0.57);
+  - mean 54.33 → 53.44;
+  - p95 78.4 → 75.9;
+  - thirds 70.1/49.3/43.6 → 69.5/49.6/41.2;
+  - paired per-step difference: median −0.95 ms, mean −1.32.
+- The median sits on the steep part of the curve, and the candidate's trajectory carries more particles (498k
+  against 476k at step 90, from the atomics). The paired per-step difference agrees with the frozen saving.
+- No 00000206 abort was logged.
+
+Logs: ~/code/me/fluid-scratch/lane-f/logs/{fx,fy,fz,xg}.

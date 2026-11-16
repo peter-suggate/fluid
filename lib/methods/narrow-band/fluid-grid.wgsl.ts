@@ -475,11 +475,14 @@ fn fsCache(T:vec3i,a:u32)->f32{
  return fcLoadF(FC_CACHE4+512u*(3u*cs+a)+foTileIndex(t));
 }
 fn fsCacheOf(T:vec3i,a:u32,raw:bool)->f32{if(raw){return fsCacheRawStaged(T,a);}return fsCache(T,a);}
+// Corner k of a trilinear has weight 0 where it lies on the far side of an axis whose fraction is 0: its tap is not
+// read. fsLerp8 then adds 0 * 0 where it added 0 * v (v finite), equal up to the sign of a zero sum.
+fn fsZeroWeight(z:vec3<bool>,k:u32)->bool{return any(z&(fsBit(k)==vec3i(1)));}
 // The coarse interpolant at p.
 fn fsCoarse(p:vec3f,a:u32)->f32{
  var off=vec3f(0.5);off[a]=0.0;
- let q=p/4.0-off;let b=vec3i(floor(q));let f=q-vec3f(b);var v:array<f32,8>;
- for(var k=0u;k<8u;k++){v[k]=fsCache(b+fsBit(k),a);}
+ let q=p/4.0-off;let b=vec3i(floor(q));let f=q-vec3f(b);var v:array<f32,8>;let z=f==vec3f(0.0);
+ for(var k=0u;k<8u;k++){if(fsZeroWeight(z,k)){v[k]=0.0;continue;}v[k]=fsCache(b+fsBit(k),a);}
  return fsLerp8(v,f);
 }
 // The 4h cache's trilinear at the h face (c, a): in eighths of a tile, 2c - 3 across and 2c along.
@@ -515,30 +518,37 @@ fn fsFine(p:vec3f,a:u32)->f32{
  var hi=vec3f(NB_LATTICE-vec3i(1));hi[a]=f32(NB_LATTICE[a]);
  s=clamp(s,vec3f(0.0),hi);
  let i0=vec3i(floor(s));let f=s-vec3f(i0);
- var v:array<f32,8>;
- for(var k=0u;k<8u;k++){v[k]=fsUnit(i0+fsBit(k),a);}
+ var v:array<f32,8>;let z=f==vec3f(0.0);
+ for(var k=0u;k<8u;k++){if(fsZeroWeight(z,k)){v[k]=0.0;continue;}v[k]=fsUnit(i0+fsBit(k),a);}
  return fsLerp8(v,f);
 }
 // A tile's HMASK word (uCache), 0 where no F slot holds it.
 fn fsHMask(t:vec3i)->u32{let c=4*t;let s=fgSlot(c);if(s==NB_NONE){return 0u;}return fcLoad(FC_HMASK+8u*s+fgTileOf(c));}
-fn fsFineWeight(p:vec3f)->f32{
+// The offsets k (x, y, z = k % 3, (k / 3) % 3, k / 9, each d + 1) with d on axis j: FS_REACH[3j + d + 1].
+const FS_REACH:array<u32,9>=array<u32,9>(0x1249249u,0x2492492u,0x4924924u,0x1c0e07u,0xe07038u,0x70381c0u,0x1ffu,0x3fe00u,0x7fc0000u);
+// The fine weight is over 0 (the tiered sampler's switch): p's tile has the support and an h owner n of the opening
+// tiers (HMASK) whose tile box is within 2 cells of p, max(0, 1 - max(delta) / 2) > 0, which is max(delta) < 2,
+// every axis's delta under 2. O(1): the owners within reach are the product of each axis's offsets with delta < 2.
+fn fsFineAny(p:vec3f)->bool{
  let q=fgHeld(p);let t=min(vec3i(floor(q)),NB_LATTICE-vec3i(1))>>vec3u(2u);
- if(!fsSupport(t)){return 0.0;}
- let m=fsHMask(t);
- if((m&(1u<<13u))!=0u){return 1.0;}
- var fine=0.0;
- for(var k=0u;k<27u;k++){
-  if((m&(1u<<k))==0u){continue;}
-  let n=t+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1);
-  let origin=vec3f(n)*4.0;let delta=max(vec3f(0.0),max(origin-q,q-origin-vec3f(4.0)));
-  fine=max(fine,max(0.0,1.0-max(delta.x,max(delta.y,delta.z))/2.0));
+ let m=fsHMask(t);if(m==0u){return false;}
+ if(!fsSupport(t)){return false;}
+ if((m&(1u<<13u))!=0u){return true;}
+ var reach=0x7ffffffu;
+ for(var j=0u;j<3u;j++){
+  var r=0u;
+  for(var d=-1;d<=1;d++){
+   let origin=f32(t[j]+d)*4.0;let delta=max(0.0,max(origin-q[j],q[j]-origin-4.0));
+   if(delta<2.0){r|=FS_REACH[3u*j+u32(d+1)];}
+  }
+  reach&=r;
  }
- return fine;
+ return (m&reach)!=0u;
 }
 fn fgSampleVel(p:vec3f,lo:u32,hi:u32)->vec3f{
  var v=vec3f(0.0);
  if(!FG_TIERED){for(var a=lo;a<hi;a++){v[a]=fgVelAxis(NB_VEL_F_US0,p,a);}return v;}
- let fine=fsFineWeight(p)>0.0;
+ let fine=fsFineAny(p);
  for(var a=lo;a<hi;a++){if(fine){v[a]=fsFine(p,a);}else{v[a]=fsCoarse(p,a);}}
  return v;
 }

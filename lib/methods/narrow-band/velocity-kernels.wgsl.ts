@@ -699,7 +699,8 @@ var<workgroup> wLiq:array<atomic<u32>,69>;
 var<workgroup> wS4:array<vec4f,${F.tiered ? 375 : 1}>;
 var<workgroup> wSwept:array<atomic<u32>,27>;
 // vLiquidOwner's inputs, staged once: the 4^3 tiles about the window (tiles xBase4-1..xBase4+2; bit 0 4h-owned,
-// bit 1 its tile centre φ under -0.001) and the FC_LIQ words of the 27 bricks about the brick (16 a brick).
+// bit 1 its tile centre φ under -0.001) and the FC_LIQ words of the 27 bricks about the brick (16 a brick). The same
+// tiles' bit 2 is fgTileSupported (xCode's) and bit 3 foTileOwnerH, for the seeds and the finish.
 var<workgroup> wTile4:array<u32,64>;
 var<workgroup> wLiqW:array<u32,432>;
 var<private> xLow:vec3i;
@@ -714,6 +715,18 @@ fn xLiquidStaged(c:vec3i)->bool{
  let n=vec3u((c>>vec3u(3u))-xBrick+vec3i(1));let l=nbLocal(c);
  return ((wLiqW[16u*(n.x+3u*n.y+9u*n.z)+(l>>5u)]>>(l&31u))&1u)!=0u;
 }
+fn xTileBits(c:vec3i)->u32{let r=vec3u((c>>vec3u(2u))-xBase4+vec3i(1));return wTile4[r.x+4u*r.y+16u*r.z];}
+fn xOwnerH(c:vec3i)->bool{return (xTileBits(c)&8u)!=0u;}
+// fgCellCoarse from the staged tile (bit 0 holds the tile's lattice test and !foTileOwnerH).
+fn xCoarse(c:vec3i)->bool{return FG_TIERED&&nbInLattice(c)&&(xTileBits(c)&1u)!=0u;}
+// fgFace(NB_VEL_F_U0, c, a) with foUFaceU's owner test on the staged bits (its coarse interpolation where neither
+// side is h-owned). An open face's cell is in the lattice, so foUFaceInLattice holds.
+fn xFaceU(c:vec3i,a:u32)->f32{
+ if(!fgFaceOpen(c,a)){return 0.0;}
+ if(!FG_TIERED){return fgFace(NB_VEL_F_U0,c,a);}
+ if(xOwnerH(c)||xOwnerH(c-fgUnit(a))){let s=fgBrickSlot(c>>vec3u(3u));if(s>=NB_SEAM){return 0.0;}return vel[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];}
+ return foUFaceU(c,a);
+}
 fn xLiquid(c:vec3i)->bool{let r=c-xLow;let i=u32(r.x+13*(r.y+13*r.z));return ((atomicLoad(&wLiq[i>>5u])>>(i&31u))&1u)!=0u;}
 fn xCell(k:u32)->vec3i{return vec3i(vec3u(k%12u,(k/12u)%12u,k/144u))-vec3i(2);}
 fn xInset(j:u32)->vec3i{return vec3i(vec3u(j%10u,(j/10u)%10u,j/100u))-vec3i(1);}
@@ -727,7 +740,7 @@ fn xCode(c:vec3i,a:u32)->u32{
  if(!fgFaceOpen(c,a)){return 3u;}
  let n=c-fgUnit(a);
  if(xLiquid(n)||xLiquid(c)){return 1u;}
- return select(2u,0u,fgTileSupported(n));
+ return select(2u,0u,(xTileBits(n)&4u)!=0u);
 }
 // The 4h state (value, prior; distance) and its prolongation to h face (c, a), ufxProlong verbatim on the old texel
 // p = c - e_a: linear between the 4h owner's two faces on the axis, constant across; a coarse face weighs in only
@@ -768,10 +781,12 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   let s=fgBrickSlot(b);var w=0u;if(s!=NB_NONE){w=fcLoad(FC_LIQ+16u*s+(lid&15u));}
   wLiqW[lid]=w;
  }
- if(FG_TIERED&&live&&lid>=448u){
+ if(live&&lid>=448u){
   let j=lid-448u;let T=xBase4+vec3i(i32(j&3u),i32((j>>2u)&3u),i32(j>>4u))-vec3i(1);
   var bits=0u;
-  if(nbInLattice(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
+  if(FG_TIERED&&nbInLattice(4*T)&&!foTileOwnerH(T)){bits=1u;if(fgTileCentre4(T)< -0.001){bits=3u;}}
+  if(fgTileSupported(4*T)){bits|=4u;}
+  if(FG_TIERED&&foTileOwnerH(T)){bits|=8u;}
   wTile4[j]=bits;
  }
  if(FG_TIERED&&live&&lid<375u){
@@ -797,8 +812,8 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
     let k=lid+512u*r;if(k>=1728u){continue;}
     let q=o+xCell(k);var s=Ufx(0.0,-1.0);
     // The old texel q - e_a in a 4h tile: the 4h band prolonged (ufxH's kind 2); else F's own seed.
-    if(fgCellCoarse(q-fgUnit(a))){let f=xProlong(q,a);s=Ufx(f.v.x,f.d);}
-    else if(fgSlot(q)!=NB_NONE){s=Ufx(fgFace(NB_VEL_F_U0,q,a),ufxSeedCode(xCode(q,a)));}
+    if(xCoarse(q-fgUnit(a))){let f=xProlong(q,a);s=Ufx(f.v.x,f.d);}
+    else if(fgSlot(q)!=NB_NONE){s=Ufx(xFaceU(q,a),ufxSeedCode(xCode(q,a)));}
     wV[k]=s.v;wD[k]=s.d;
    }
   }
@@ -809,7 +824,7 @@ fn xSwept(n:vec3i)->bool{if(!FG_TIERED){return true;}let r=vec3u((n>>vec3u(3u))-
   if(live){for(var r=0u;r<2u;r++){let k=lid+512u*r;if(k<1000u){let i=xAt(xInset(k));wV[i]=held[r].v;wD[i]=held[r].d;}}}
   workgroupBarrier();
   // F writes the faces whose old texel (the cell below) is h-owned; a 4h owner's subfaces are uExt4's.
-  if(live&&fgFaceOwned(c,a)&&!fgCellCoarse(c-fgUnit(a))){
+  if(live&&(!FG_TIERED||xOwnerH(c)||xOwnerH(c-fgUnit(a)))&&!xCoarse(c-fgUnit(a))){
    let s=xSweepAt(nbLocalCoord(l),h);
    let iu=vAt(NB_VEL_F_UP0,slot,a,l);
    var out=xFinish(s,c,a,xCode(c,a),vel[iu],xSwept(c-fgUnit(a)));
