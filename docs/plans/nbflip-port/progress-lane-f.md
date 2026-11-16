@@ -1991,3 +1991,53 @@ nbRefineBox latch. They are standing failures for the coordinator to assign:
 | GPU 4096 raster shadows preserve leaf-scale contacts | raster-shadow-contact | a shader compilation message where none is expected |
 | GPU PCSS blocker search | raster-shadow-footprint | GPUPipelineError |
 | face candidate reuse preserves all-roster velocities | uniform-body-query-reuse | GPUPipelineError |
+
+## 2026-11-17: the letters' free-fall "KE gain" is accounting, not dynamics; Dawn's upload abort (9e6b9295)
+
+**Probe.** `fluid-scratch/lane-f/tools/ff.mts` runs the letters' scene with a ball of the first letter's volume
+(121.2 L, r = 14.42 cells) at the letter's centre (y = 115.2 cells). It runs either as initial liquid (boot) or as
+the source's drop (step 3), on the brick engine (tree-k, M4) or the old engine. It runs 24 to 30 steps and reads
+the box observer each step. Logs are in `fluid-scratch/lane-f/logs/ff/`.
+
+**With the pool**, steps 0 to 24 from release (the boot ball):
+
+| engine | ΔKE | −ΔPE | ratio |
+|---|---|---|---|
+| brick | 993.6 J | 866.6 J | 1.147 |
+| old | 958.8 J | 910.9 J | 1.053 |
+
+- The brick drop variant (steps 3 to 27) gives 1.132, so the gain is not source-specific.
+- U and US agree at every step's end: KE from US is within 1 J of KE from U. So the level set's trace (fgSampleVel
+  reads US) sees the current velocity.
+
+**The lone ball** (no pool) settles it:
+
+| | centroid fall | KE per kg | volume, step 0 to 24 |
+|---|---|---|---|
+| ideal | 36.87 cells (0.785 m) | 8.016 J | — |
+| brick | 36.79 cells | 8.010 J (exact) | 120.74 → 122.55 L (+1.5%) |
+| old | 36.88 cells | 7.862 J (−1.9%) | 121.01 → 122.14 L (+0.93%) |
+
+- The ideal is free fall with the boot's half kick: the velocity is (n + 1/2) g dt, and the fall is exactly g t²/2.
+- So the brick engine's free fall is exact. In the pool runs, the lower −ΔPE is the volume the falling liquid gains
+  (brick +3.6 L, old +1.2 L), most of it high up at about 2 m: roughly 47 J of PE. That skews ΔKE/−ΔPE.
+
+**For L3 (the letters' KE against the references).** The +12% is mostly in the references:
+- The old engine loses 5.8% of each drop's mass when it adds it (114.2 L of an asked 121.3 L). The brick adds
+  121.0 L.
+- Its velocity runs 1.9% under free fall, so its KE per kg is 3.8% low.
+
+Together that is about +10% of the +12%, and the rest is the brick's larger volume growth on moving liquid. L3 should
+be read with this in mind.
+
+**Still open.** The brick's volume grows faster on a translating ball than the old engine's: +1.5% against +0.93% in
+24 steps, starting 0.22% lower. That's the drift row's business, judged against the old engine's trajectory, and not a
+free-fall defect.
+
+**The upload abort, landed as 9e6b9295 (E approved).**
+- The boot ball first died at creation: SIGABRT in Dawn's `BufferBase::UploadData`, on the 23986916-byte boot table.
+- On a fresh device, a lone writeBuffer past the 4 MB ring at a size that is not a 16-byte multiple aborts the
+  process. 1 MB + 4 and 4 MB write; 4 MB + 4, 4 MB + 12, 8 MB + 4 and 16 MB + 4 abort.
+- E's batch lost cm12-figure-9 and coarse-first-pool-impact the same way.
+- `uploadWords` (restore's split: the 16-byte body, then the tail) now carries every engine upload.
+- Regression: `lib/methods/narrow-band/brick-upload.test.ts`.
