@@ -1987,3 +1987,68 @@ The coordinator ruled that the cap must conserve mass and exempt air and ballist
 - No ballistic record sits in a −1..0 cell over the cut.
 - Parked: the cut is small. The record cap stays as it was. Every record weighs at least 1, so a record cap of 20 never
   bound behind the 16-mass cut; only the depth ≤ −1.5 cap of 6 acts, as before.
+
+## 2026-11-16: the tier machinery's bound (brick set, census, transfer and the C tier) is a no-go against the 1.5 ms bar
+
+**What was measured, on d0f35ebc:**
+- Per-dispatch profiles at steps 18–23, 98–103 and 298–303, in r13/tim r13-prof-*.
+- Frozen per-kernel timing, with exit-class histograms and knockouts, at steps 20, 100 and 300. The tool is
+  fluid-scratch/lane-e/r13/tools/frozenE.mts with `--engine` (the head kernels too), `--subfile`, `--hist` and
+  `--flips`.
+
+**Profile:** the machinery is 4.33 / 4.83 / 3.94 ms at steps 20 / 100 / 300. Step 100, by kernel (ms):
+
+| kernel | ms |
+|---|---|
+| censusFine | 0.91 |
+| lcAdvect | 0.86 |
+| lcRetire | 0.52 |
+| lcCouple | 0.35 |
+| certFine | 0.24 |
+| setTransferFaces | 0.22 |
+| censusDecide | 0.21 |
+| censusCoarse | 0.21 |
+| resMark | 0.16 |
+| censusImportance, nrReach, certCoarse, certError, setMark | 0.11 each |
+| the rest | ≤ 0.08 each |
+
+**Lanes with work at step 100:**
+- censusFine: 17.1k workgroups launched; 4.1k tiles are h-owned (24%).
+- C tier: 103 pages, 52.7k vertex lanes.
+  - lcAdvect: 25.8k not C-owned, 6.1k kept far air, and 26.5k on the full path (6.5k at |φ| < 8, 10.4k liquid at
+    φ ≤ −8, 9.0k air).
+  - lcRetire: 3.9k build a distance and 2.6k are hot; 25.6k are not stencil-fine.
+  - lcCouple: 5.1k need the bulk depth or the gather; 27k have θ ≤ 0.
+
+**The C kernels are latency-bound:**
+- Each one fits in one wave (about 100 workgroups, or 820 for lcAdvect), so a kernel's time is its slowest lane's chain.
+- Holding the 10k deep-liquid lcAdvect vertices (φ ≤ −8, a deviation) saves 0.15 ms at step 20 and nothing at
+  steps 100 and 300: the other lanes of each workgroup still trace.
+- Knockouts at step 100 (upper bounds):
+  - lcAdvect: the trace is 0.25 ms and the released walls 0.1.
+  - lcRetire: lcNearKnown's 64-tile window is 0.13 ms, and the build's remaining 0.3.
+  - lcCouple: lcNearKnown is 0.03 ms.
+  - censusFine: ncMetricCorners + ncCornerLaplacian (lanes < 24) is 0.24 ms, ncSmoothTile 0.1, and the depth
+    sample 0.13.
+  - Empty workgroups: all of censusFine's are 0.06 ms, and certFine's 0.06.
+
+**Exact options, priced at step 100:**
+- **lcRetire and lcCouple at X8**: eight 64-lane workgroups a page, one vertex a lane, as lcAdvect. Measured and
+  bit-identical:
+  - lcRetire 0.56 → 0.42 ms (0.63 → 0.39 at step 20, 0.53 → 0.34 at step 300);
+  - lcCouple 0.35 → 0.27 ms (0.37 → 0.23, 0.41 → 0.25).
+- A per-plane staged lcNearKnown: ≤ 0.16 ms.
+- censusFine's lane-subset phases spread over the workgroup: ≤ 0.34 ms, realistically about half.
+- An h-tile list in place of F_ALL X8 for censusFine and certFine: ≤ 0.12 ms.
+- lcAdvect's trace and walls: ≤ 0.35 ms, divergence-bound, with no cheap restructure found.
+- Realistic total about 0.6 ms; the upper bounds sum to about 0.9 ms. Both are under the 1.5 ms bar.
+
+**Tier churn (not exact):**
+- About 900–1000 tiles change width a step at step 100 (471 refine, 557 coarsen), and about 500 at step 300. Each
+  change brings its neighbour entries: the list holds 2.7k / 1.7k entries.
+- 10–30% of each step's changes reverse the previous step's, and about 45% reverse a change within six steps.
+- Hysteresis is a tier-rule deviation. Its direct share is the transfer (about 0.35 ms) plus claims and leaves, so it
+  is under the bar too.
+
+**Verdict:** no-go at 1.5 ms. Not built. The X8 pair (about 0.2 ms at step 100, 0.4 at step 20, bit-identical) is
+the one measured exact win, should a smaller bar apply.
