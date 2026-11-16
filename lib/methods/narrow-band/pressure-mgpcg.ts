@@ -288,6 +288,25 @@ export interface MGPCGLive {
   readonly rowsList: BrickKernel;
 }
 
+/** The kick's pressure in a step's dt units (boot only, after the kick's solves): X is in its solve's dt units
+ * (U = US - grad X / h), and the kick solves at dt/2 (the old host's kickMixedFrame), so step 1's warm starts (poStart's
+ * X, poTileStartR's C X) and its seam heads read twice the kick's X: the old arena's starts are dt-free pressures. Every
+ * F and C X word of the pools, zero rows staying zero; a lane a word. */
+export function pressureKickScaleKernel(L: BrickLayout): BrickKernel {
+  const f = L.cap.f * BRICK_STRIDE, c = L.cap.c * BRICK_STRIDE;
+  return { label: "pmgKickScale", entry: "pmgKickScale", bindings: [CFG, setRW, presRW], code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true } }), declareBindings([CFG, setRW, presRW]), /* wgsl */`
+@compute @workgroup_size(256) fn pmgKickScale(@builtin(global_invocation_id) id:vec3u){
+  let i=id.x;
+  if(i<${f}u){pres[NB_PRES_F_X+i]*=2.0;}
+  else if(i<${f + c}u){pres[NB_PRES_C_X+i-${f}u]*=2.0;}
+}`].join("\n") };
+}
+export const pressureKickScaleGroups = (L: BrickLayout): [number, number, number] => {
+  const g = Math.ceil((L.cap.f + L.cap.c) * BRICK_STRIDE / 256);
+  if (g > 65535) throw new Error(`pmgKickScale: ${g} workgroups`);
+  return [g, 1, 1];
+};
+
 export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureSolver & { readonly publish: readonly BrickPlacement[]; readonly live?: MGPCGLive; readonly core: { readonly setup: readonly BrickPlacement[]; readonly finish: readonly BrickPlacement[] } } {
   const slots = options.slots ?? 8, tol = options.tolerance ?? MG_TOLERANCE, bsb = (options.fineOrder ?? MG_FINE_ORDER) === "BSB";
   if (options.fineOrder !== undefined && options.fineOrder !== "BS" && options.fineOrder !== "BSB") throw new Error(`Pool MGPCG: fine order ${String(options.fineOrder)}`);

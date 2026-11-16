@@ -1657,3 +1657,63 @@ defect.**
 - **The remaining g·dt:** it sits on free-surface air faces, which the old filter counted as liquid because one vertex
   was φ < 0. The gate now measures interior liquid faces only, with both cells liquid by centre φ.
 - **Not affected:** the stage-set survey above stands, but nothing needs revisiting.
+
+## 2026-11-17 — still-water seam currents: two start defects (kick re-solves, the kick's dt units)
+
+**Finding.** Tiered rigid-hydrostatic at h = 0.025 with its held sphere (15 steps) had peak |U| 0.086 m/s on interior
+liquid faces. The old engine, measured the same way as uniform-rigid-rest (every velocity texel), reads 6.0e-6, 2.2e-5
+and 6.2e-5 at steps 1, 5 and 15 with the body, and 3e-6 to 6e-6 without it.
+- **Where:** the fast faces are h/4h seams far from the body, not cut faces.
+- **The vacuous regression:** the earlier no-body run had no seam in the liquid at all, because the deep liquid goes 4h.
+
+**Cause.** Both engines difference a seam over 2.5h (npBandFace's 1/(2.5h²), the old arena's l.1607). Both take its
+tangential head from the start's slope (bSeamHead / poHeadS). The brick engine's start was wrong twice. This was
+measured with the gate tool's SEAM_DUMP, which reports per seam face the 4h X plus the cached head minus the h row's X,
+in cell heads (g·dt·h).
+1. **The boot kick starts cold.** Its start is the cold prolongation: start − X was −3.6 cells and the heads were 0.
+   The old arena re-solves the kick 23 times from its own pressure (UNIFORM_PRESSURE_KICK_RESOLVES).
+2. **The first advance starts from half the pressure.** Brick X is in its solve's dt units (U = US − grad X / h); the
+   old arena's are dt-free, because its RHS divides by dt. The kick solves at dt/2, so the first advance's heads came
+   out exactly half (0.75 against 1.5 cells). They injected 0.044 m/s, which persists as a divergence-free current.
+
+**Fix** (verbatim plus a units fix):
+- **BRICK_KICK_RESOLVES = 23:** the engine repeats the kick's solve 23 more times (E's file, patch).
+- **pmgKickScale:** a boot-only pass after the kick's solves doubles every F and C X (pressure-mgpcg.ts).
+- **A rejected first try:** a ring START_SCALE applied when the next step's rows read their starts. rowsF writes X = start
+  in place while neighbour bricks read that X as their halo starts. That race is harmless at scale 1, but at scale 2 the
+  result depended on dispatch order (0.045 m/s on a rerun).
+- **Boot cost:** +35 ms once on the dam (submit-to-done 71.4 → 106.0 ms).
+
+**After** (hydrostatic + body, h = 0.025, 15 steps; two runs, identical per step):
+- **Peak |U|:** at most 1.9e-3, from 0.086.
+- **Seams:** every seam within 0.005–0.033 cell heads of balance, from 0.66.
+- **Volume drift:** 1.3e-5.
+- **Impulse/dt ÷ ρgV:** 0.988–0.990.
+
+**The residual is the solve's stopping tolerance.** MG_TOLERANCE is max|div| ≤ 0.05 1/s, about tol·h ≈ 1.25e-3 m/s a
+face. FLIP carries it from step to step: the peak grows about 3e-4 a step until a solve iterates, giving a saw-tooth
+between 4e-4 and 1.9e-3.
+- **Information only:** at tolerance 0.005 (a scratch diagnostic, not proposed) the peak is at most 1.5e-4, with
+  step-0 7.4e-6 and drift 6e-8. That is the old engine's level.
+- **Ruling:** the tolerance stays at 0.05 ("same tolerance").
+
+**Regression:** tests/brick-seam-rest.test.ts, the scene above. It lands with the body stack, since it needs the
+engine's bodies.
+- **Seams present:** at least 256 seam faces on liquid h rows every step (512 measured).
+- **Seam balance:** every seam within 0.05 cell heads of its at-rest value.
+- **Every liquid face:** peak |U| ≤ 2·MG_TOLERANCE·h over every face of every liquid h row and between liquid native
+  rows.
+
+**Dam-300 A/B/A/B** (same scratch tree, fixes off by env against on; tiered composite, poolF 4913, timing slot; judged
+on ref-2761350a, D5e 30–90 ref 327.95 ± tol 11.65):
+
+| run | overall | D5e 30–90 (J) | margin | D3 | D5k | D5p | D4 | step median (ms) |
+|---|---|---|---|---|---|---|---|---|
+| before | PASS | 319.38 | 0.736 | 0.20 | 0.76 | 0.38 | 0.08 | 29.03 |
+| before-2 | PASS | 317.54 | 0.894 | 0.16 | 0.81 | 0.50 | 0.11 | 30.46 |
+| after | FAIL | 316.15 | 1.013 | 0.44 | 0.87 | 0.58 | 0.16 | 30.47 |
+| after-2 | PASS | 317.17 | 0.925 | 0.36 | 0.87 | 0.50 | 0.08 | 29.58 |
+
+- **Run-to-run spread:** the befores alone differ by 1.84 J on D5e, so the brick dam is not run-to-run deterministic.
+- **Pass:** the second after passes, which meets the coordinator's landing rule.
+- **Not systematic:** the befores did not stay put, so the fixes were not separated.
