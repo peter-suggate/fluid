@@ -1112,3 +1112,60 @@ iterations to tolerance):
   - Plain B saves about 260 µs a slot (about 1.8 ms). It costs about 1.6 ms.
   - Both are below the 1 ms bar even before the gate.
 - Not taken. Nothing changed on the GPU.
+
+## 2026-11-16 — a matrix-free interior for the L0 rows: measured, no-go
+
+**The idea.** On the dam, most L0 rows are interior liquid rows. Their DIAG is 6 and every coupling is 1. A flag word
+plus full coefficients only for the other rows would shrink what each per-row kernel reloads.
+
+**Interior share** (the six dumped states, steps 16–18, 20 and 22, not 18–23).
+- "Interior" means DIAG 6, all six couplings 1, every upper neighbour an h row, and no native coupling.
+  DIAG = 6 coincides exactly with this test on the dam.
+
+  | | per dump |
+  |---|---|
+  | interior rows | 62.5–65.2% |
+  | boundary rows | 35–37.5% (81–85 a brick) |
+  | rows a brick | 222–241 of 512 lanes |
+  | all-interior bricks | none (0 of 525–715) |
+  | 128-byte lines (32 lanes) with no boundary row, skippable by flags | 37–41% |
+  | coefficient words in a compact layout (packed flag bits + 7 a boundary row) | 16–17% of now |
+
+**First-touch words per launch, per brick (512 lanes).** C is coefficients (DIAG, K×3, RKU×3, and Down0's L1
+coefficients). V is vectors, reads plus writes.
+
+| kernel | C | V | C share |
+|---|---|---|---|
+| PreS, PreU, PostU, PostS, PostZ (each) | 3584 | 1536 (R, src, dst) | 70% |
+| Update | 3584 | 2560 (RHS, X, D; R, W0) | 58% |
+| Down0 | 2496 | 1152 | 68% |
+| Direction | 2048 | 3584 (D, X, Z, Q; X, D, Q) | 36% |
+| a slot | 26048 | 14976 | 63% |
+
+- Per row a slot (about 233 rows a brick): about 447 B of coefficients and about 257 B of vectors.
+
+**Timing.** Profiled tiered dam, 24 steps, per-kernel means over steps 13–23 at about 7.33 slots.
+- **The scratch hack mf.** DIAG is read as the flag. A row with DIAG 6 takes constant couplings, a boundary row loads
+  them, and an air lane loads nothing. It is in pRow (the five fine kernels and Update's brick pass) and in both forms
+  of fineApply (Update, Down0, Direction).
+  - It is exact on the dam: the GPU pressure suite gives 21/0, with converged X h 7.67e-6 and native 8.30e-6.
+  - Three alternating pairs, µs a call:
+
+    | | Update | Direction | Down0 | PreS | PreU | PostU | PostS | PostZ | L0 kernels, ms a step |
+    |---|---|---|---|---|---|---|---|---|---|
+    | base | 141.0 | 117.2 | 73.2 | 72.7 | 51.4 | 51.9 | 77.0 | 62.1 | 4.74 |
+    | mf | 144.5 | 117.2 | 73.5 | 71.0 | 50.4 | 56.6 | 74.0 | 63.1 | 4.77 |
+
+  - No gain. The hack skips about a third of the coefficient lines, and the boundary lanes' coefficient loads now
+    wait on DIAG.
+- **The bound mfuS.** PreS only, every row's couplings constant, so only DIAG of 7 is loaded. This removes about 60% of
+  PreS's unique words. The numerics are wrong, but iterations were the same within 1 at two steps.
+  - Two pairs: PreS 73.7, 72.2 → 60.3, 61.8 µs a call, about −12 µs (−16%).
+  - Removing 60% of the bytes buys 16% of the time. The first-touch cost (about 73 µs against about 11 repeated) is
+    mostly not coefficient bytes.
+- **Projection.**
+  - If every L0 kernel's coefficients were free (the bound, about −12 µs for each fine kernel and similar for
+    Update, Down0 and Direction): at most about 80 µs a slot, about 0.6 ms a step.
+  - A compact layout keeps 17% of the coefficient words and adds the flag/index work, so at most about 0.5 ms.
+  - Per row: at most about 0.55 ns a row a slot, about 4 ns a row a step, at 145k h rows.
+- Below the 1 ms bar: not taken. Nothing changed in the tree. The hack is in the scratch file mf/mf-hack.patch.
