@@ -13,6 +13,7 @@ import { BrickLayout, LIST, POOLS, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import type { BrickStages } from "./brick-stages";
+import { BODIES_RO, BODY_CUTS_RO, PB_BRICK_MARK_WGSL, pbBrickBodiesWGSL, type BrickBodiesFrame } from "./bodies-binding.wgsl";
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
 const setRO: BrickBinding = { name: "set", kind: "ro", type: "array<u32>" };
@@ -92,6 +93,9 @@ export interface BrickSetOptions {
   readonly tiered?: boolean;
   /** The stage set's tile heat (BrickStages.activity): setMark's heat criterion of the ACTIVE tiles. */
   readonly activity?: BrickStages["activity"];
+  /** The scene's rigid bodies (lane P, A2/A3): setMark binds `bodies` and `bodyCuts` and marks NEAR_BODY by
+   * pbBodyMarkTile, gated on the ring's BODIES flag. Absent: no body test (the dam's kernel text). */
+  readonly bodies?: BrickBodiesFrame;
 }
 
 export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
@@ -108,8 +112,9 @@ export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
   // corners' (the tier authority's interpolant, whose minimum over the tile is a corner's).
   const act = opt.activity;
   const heat = act ? act.heat.map(w => `${act.buffer}[${act.tile}u+${act.words}u*(8u*slot+t)+${w}u]!=0u`).join("||") : "false";
-  const markBindings: BrickBinding[] = [CFG, setRW, dirRW, phiRO, ...(tiered ? [velRO] : []), ...(act ? [{ name: act.buffer, kind: "ro", type: "array<u32>" } as BrickBinding] : [])];
-  const setMark = k("setMark", markBindings, (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel" }) : "") + /* wgsl */`
+  const bodies = opt.bodies;
+  const markBindings: BrickBinding[] = [CFG, setRW, dirRW, phiRO, ...(tiered ? [velRO] : []), ...(act ? [{ name: act.buffer, kind: "ro", type: "array<u32>" } as BrickBinding] : []), ...(bodies ? [BODIES_RO, BODY_CUTS_RO] : [])];
+  const setMark = k("setMark", markBindings, (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel" }) : "") + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + "\nvar<workgroup> wBody:atomic<u32>;" : "") + /* wgsl */`
 var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
 var<workgroup> wTiles:atomic<u32>;
@@ -117,7 +122,7 @@ var<workgroup> wRes:atomic<u32>;
 var<workgroup> wSeed:atomic<u32>;
 var<workgroup> wNb:array<u32,27>;
 @compute @workgroup_size(64) fn setMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);atomicStore(&wRes,0u);atomicStore(&wSeed,0u);}
+  if(lid==0u){atomicStore(&wNeg,0u);atomicStore(&wPos,0u);atomicStore(&wTiles,0u);atomicStore(&wRes,0u);atomicStore(&wSeed,0u);${bodies ? "atomicStore(&wBody,0u);" : ""}}
   let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_F_ALL);
   var slot=0u;if(live){slot=nbListSlot(NB_LIST_F_ALL,g);}
   // The brick's 27 neighbour words (F record words 0-26), for the residency check below.
@@ -165,7 +170,9 @@ var<workgroup> wNb:array<u32,27>;
         let T=(o>>vec3u(2u))+vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));
         for(var q=0u;q<8u;q++){if(nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)))<0.0){on=1u;}}
       }` : ""}
-      if(on!=0u){wet|=1u<<t;}
+      if(on!=0u){wet|=1u<<t;}${bodies ? `
+      // A2 (§4): the body criterion of tile t; a marked tile is h-owned${tiered ? " (tiered: a 4h tile latches, 0xb3)" : ""}.
+      if(pbBrickMarkTile(o,t)){atomicOr(&wBody,1u<<t);${tiered ? "if(((tiles>>t)&1u)==0u){nbFail(NB_FAIL_UNSUPPORTED,0xb3000000u|atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_KEY]));}" : ""}}` : ""}
     }
     if(wet!=0u){atomicOr(&wTiles,wet);}
   }
@@ -194,7 +201,10 @@ var<workgroup> wNb:array<u32,27>;
   // ACT.RES (bits 10..17) and ACT.SEED (bits 18..25): the residency's brick sources.
   atomicOr(&nbSet[NB_S_ACT+slot],m|(atomicLoad(&wRes)<<10u)|(atomicLoad(&wSeed)<<18u));
   // CUT_STATIC (A5) is the stamp's, kept across the class pass: the brick holds its K slot while it is cut.
-  var cls=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS])&NB_CLASS_CUT_STATIC;
+  ${bodies ? `// A2: one read-modify-write of both body bits: BODY_WAS is the old NEAR_BODY, then the new NEAR_BODY.
+  let old=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS]);var cls=old&NB_CLASS_CUT_STATIC;
+  if((old&NB_CLASS_NEAR_BODY)!=0u){cls|=NB_CLASS_BODY_WAS;}
+  if(atomicLoad(&wBody)!=0u){cls|=NB_CLASS_NEAR_BODY;}` : "var cls=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS])&NB_CLASS_CUT_STATIC;"}
   if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
   if(nbSetWord(NB_S_BIN_COUNT+slot)>0u){cls|=NB_CLASS_PARTICLES;}

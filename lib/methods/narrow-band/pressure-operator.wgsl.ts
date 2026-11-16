@@ -27,7 +27,9 @@ import { mgLayout, mgLive, poolMGPCG } from "./pressure-mgpcg";
  * (mgLive) the MGPCG itself places rowsF over HB and projectF over HP (pressure-mgpcg.ts), so `operator` is the lean
  * pressureRowsList over F_ALL (the lists and the zero rows off them) and `project` pressureProjectRest (the FLAGS of
  * the bricks off HP). */
-export function pressureOperatorKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly faces?: boolean; readonly cuts?: boolean } = {}) {
+export function pressureOperatorKernels(L: BrickLayout, options: { readonly tiered?: boolean; readonly faces?: boolean; readonly cuts?: boolean } = {}) {
+  // The cuts follow the K pool where the face cache is (a scene with K slots reads them; with none, the text is the dam's).
+  const opt = { ...options, cuts: options.cuts ?? (options.faces === true && L.cap.k > 0) };
   if (opt.faces && mgLive(L)) {
     const M = mgLayout(L), live = poolMGPCG(L, { cuts: opt.cuts }).live!;
     const K = pressureCompositeKernels(L, {}, { tiered: opt.tiered, faces: M.FC, live: { hb: M.HBL, hp: M.HPL, rl: M.RLL, rln: M.RLN }, cuts: opt.cuts });

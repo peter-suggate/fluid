@@ -989,8 +989,11 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
   for(var w=NB_H_RES_RADIUS;w<=NB_H_RES_CLAIMED_C;w++){atomicStore(&nbSet[w],0u);}
   // The region heat's per-step words (the old encode's clearBuffer of the still words and the tier counts).
   for(var w=NB_H_STILL_HIGH;w<=NB_H_HEAT_COLD;w++){atomicStore(&nbSet[w],0u);}
-  let flags=nbRing(cfg.x,NB_RING_FLAGS)&(NB_RING_FLAG_SOLID_EDIT|NB_RING_FLAG_BODIES);
-  if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u){nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
+  // Bodies and K slots (A2-A4, E's ruling 2026-11-17): all-h, the census's tiers are fixed, so neither changes a
+  // decision. Tiered, both latch until the census has a body need rule (a NEAR_BODY tile and its ring stay h); LIVE_K
+  // counts static K too, narrowed to body K with the census's static (NEAR_SOLID) rule (E).
+  let flags=nbRing(cfg.x,NB_RING_FLAGS)&(NB_RING_FLAG_SOLID_EDIT${tiered ? "|NB_RING_FLAG_BODIES" : ""});
+  if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u${tiered ? "||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u" : ""}){nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
 }`);
 
   // censusFine: classify (l.2091), eight workgroups an F brick of F_ALL (X8), workgroup j its tile j (ncCorner(j, 2))

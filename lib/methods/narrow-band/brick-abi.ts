@@ -184,11 +184,17 @@ export const POOLS = {
 } as const;
 export type PoolName = keyof typeof POOLS;
 
-/** Param ring slot words (brick-abi.md §5.2). */
+/** Param ring slot words (brick-abi.md §5.2). Words 64-191 are the rigid bodies' header (A3, m5-bodies-design §7.2):
+ * the poses themselves are the rigid state buffer, bound read-only as `bodies` (BrickBodiesBinding). BODY_COUNT u32
+ * (the present bodies, at most the rigid capacity), BODY_FLAGS u32 (BODY_FLAG), BODY_HORIZON f32 (the stamp horizon,
+ * dt s), BODY_CELL f32 (the cell volume, m^3), BODY_GEN u32 (the roster generation: bumped when the roster or a body's
+ * shape changes); 69-191 spare (P). FLAGS bit BODIES is the "bodies present" gate (BODY_COUNT > 0). */
 export const RING = {
   STEP: 0, DT: 1, TIME: 2, FLAGS: 3, GRAVITY: 4, H: 7,
-  VOLUME: 8, SOURCES: 16, BODIES: 64, BODY_WORDS: 16, BODY_RECORDS: 8, EDITS: 192, EDIT_COUNT: 222,
+  VOLUME: 8, SOURCES: 16, BODY_COUNT: 64, BODY_FLAGS: 65, BODY_HORIZON: 66, BODY_CELL: 67, BODY_GEN: 68, EDITS: 192, EDIT_COUNT: 222,
 } as const;
+/** RING.BODY_FLAGS bits: the rigid coupling runs, a body has cuts, a body is inverted (its solid outside its shape). */
+export const BODY_FLAG = { COUPLING: 1, CUTS: 2, INVERTED: 4 } as const;
 export const RING_FLAG = { SOLID_EDIT: 1, BODIES: 2 } as const;
 
 /** Per-scene capacities (scene.fluid.brickPools). */
@@ -379,6 +385,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   for (const [name, v] of Object.entries(ARGS)) c(`NB_ARGS_${name}`, v);
   for (const [name, v] of Object.entries(RING)) c(`NB_RING_${name}`, v);
   for (const [name, v] of Object.entries(RING_FLAG)) c(`NB_RING_FLAG_${name}`, v);
+  for (const [name, v] of Object.entries(BODY_FLAG)) c(`NB_BODY_FLAG_${name}`, v);
   c("NB_RING_BASE", s.ring); c("NB_RING_WORDS", RING_WORDS);
   c("NB_S_FREE_F", s.freeF); c("NB_S_FREE_C", s.freeC); c("NB_S_FREE_B", s.freeB); c("NB_S_FREE_K", s.freeK);
   c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);

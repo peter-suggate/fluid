@@ -296,7 +296,7 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
   const fineSweeps = options.fineSweeps ?? 3, coarseSweeps = options.coarseSweeps ?? 2, nativeSweeps = options.nativeSweeps ?? 2, walls = options.walls ?? false, guessOn = options.guess ?? true, guessWalls0 = options.guessWalls ?? true;
   if (!Number.isInteger(slots) || slots < 1) throw new Error(`Pool MGPCG: ${slots} slots`);
   const tolBits = new Uint32Array(new Float32Array([tol]).buffer)[0]!;
-  const wallDecisions = Math.min(options.wallDecisions ?? MG_WALL_DECISIONS, 0xffffffff), wallLoose = options.wallLoose ?? MG_WALL_LOOSE, audit = options.audit ?? false, cuts = options.cuts === true;
+  const wallDecisions = Math.min(options.wallDecisions ?? MG_WALL_DECISIONS, 0xffffffff), wallLoose = options.wallLoose ?? MG_WALL_LOOSE, audit = options.audit ?? false, cuts = options.cuts ?? L.cap.k > 0;
   if (!(wallDecisions >= 0) || !(wallLoose >= 1)) throw new Error(`Pool MGPCG: walls policy ${wallDecisions}/${wallLoose}`);
   const guessWalls = guessOn && walls && wallDecisions > 0 && guessWalls0;
   const M = mgLayout(L), T = M.top;

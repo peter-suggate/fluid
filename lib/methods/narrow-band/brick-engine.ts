@@ -15,7 +15,7 @@
  * - Nothing is sized from the lattice.
  */
 import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
-import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
+import { ARGS, BODY_FLAG, BrickLayout, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
@@ -27,6 +27,9 @@ import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
 import { mgLayout } from "./pressure-mgpcg";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
+import { brickBodyKernels } from "./bodies-stage.wgsl";
+import type { BrickBodiesBinding, BrickBodiesHeader } from "./bodies-binding.wgsl";
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 
 export type Vec3 = readonly [number, number, number];
 /** A box of initial liquid, in cells (vertex coordinates of the lattice). */
@@ -60,6 +63,9 @@ export interface BrickEngineOptions {
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
+  /** Lane P's rigid bodies (M5, A2-A6): setMark's body criterion, bodyStamp at the stamp stage, the ring's body header,
+   * and the per-step host sync. Absent: no body kernel or binding (the dam's schedule and text). */
+  readonly bodies?: BrickBodiesBinding;
   /** The pressure solver at the slot (brick-abi.md §6.1). */
   readonly solver: PressureSolverFactory;
   /** F's stages (brick-abi.md §6.2; brick-stages.ts). */
@@ -187,6 +193,11 @@ export class BrickEngine {
   /** Pipeline compile times (ms), by kernel label, from this engine's creation. */
   readonly compileMs: Readonly<Record<string, number>>;
   private readonly buffers = new Map<string, GPUBuffer>();
+  /** Buffers the engine binds but does not own (lane P's `bodies` and `bodyCuts`, the rigid system's): never saved,
+   * restored or destroyed here. */
+  private readonly external = new Map<string, GPUBuffer>();
+  /** The ring's body header of the step being written (A3), from BrickBodiesBinding.sync. */
+  private bodyHeader?: BrickBodiesHeader;
   private readonly cfgs = new Map<string, GPUBuffer>();
   private readonly recorded: { part1: Recorded[]; part2: Recorded[] }[] = [];
   private readonly receipts: { buffer: GPUBuffer; busy: boolean }[] = [];
@@ -203,11 +214,12 @@ export class BrickEngine {
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop">): BrickStageSchedule {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
-    const set = brickSetKernels(layout, { tiered, activity: stages.activity }), pres = pressureOperatorKernels(layout, { faces: "pmgF" in solver.buffers }), f = layout.cap.f, c = layout.cap.c;
+    const frame = bodies ? { frame_m: bodies.frame_m, h_m: bodies.h_m } : undefined;
+    const set = brickSetKernels(layout, { tiered, activity: stages.activity, ...(frame ? { bodies: frame } : {}) }), pres = pressureOperatorKernels(layout, { faces: "pmgF" in solver.buffers }), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
     // cfg.z = 1 at boot: the boot's bricks enter h-owned (bootPhi writes F); tiered steps enter 4h (§2.5).
@@ -298,7 +310,11 @@ export class BrickEngine {
     ];
     // The stamp stage (A6): E's solidStamp (M3), then the stage set's (P's bodyStamp, M5), then the K slots go back
     // (A5: after every pop of the step). With no K pool and no stamp it is empty: the dam's schedule is unchanged.
-    const stamp: BrickPlacement[] = [...(mask ? [{ kernel: brickSolidStampKernels(layout, mask).solidStamp, dispatch: list(LIST.F_ENTER, "G1") }] : []), ...(stages.stamp ?? []), ...(layout.cap.k > 0 ? [
+    // P's bodyStamp (A2, A6): the entering bricks a body reaches (cfg.z = 1, after solidStamp), then F_BODY (cfg.z = 0).
+    const body = bodies ? brickBodyKernels(layout, frame!, { openTop: mask ? mask.walls.policy === 2 : bodies.openTop, ...(mask ? { mask } : {}) }).bodyStamp : undefined;
+    if (bodies && layout.cap.k === 0) throw new Error("Brick engine: rigid bodies need K slots (scene.fluid.brickPools.k)");
+    const bodyStamp: BrickPlacement[] = body ? [{ kernel: body, dispatch: list(LIST.F_ENTER, "G1"), z: 1 }, { kernel: body, dispatch: list(LIST.F_BODY, "G1"), z: 0 }] : [];
+    const stamp: BrickPlacement[] = [...(mask ? [{ kernel: brickSolidStampKernels(layout, mask).solidStamp, dispatch: list(LIST.F_ENTER, "G1") }] : []), ...bodyStamp, ...(stages.stamp ?? []), ...(layout.cap.k > 0 ? [
       { kernel: set.setKRelease, dispatch: list(LIST.F_ALL, "G64"), z: 0 },
       { kernel: set.setKRelease, dispatch: list(LIST.F_LEAVE, "G64"), z: 1 },
     ] : [])];
@@ -329,7 +345,7 @@ export class BrickEngine {
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask);
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
@@ -387,10 +403,12 @@ export class BrickEngine {
     make("parts", L.partsWords);
     make("xfer", L.xferWords);
     make("census", brickCensusBuffers(L).census);
+    const bodies = this.options.bodies;
+    if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); }
     const mask = this.options.staticMask;
     if (mask) d.queue.writeBuffer(make("solid", mask.words.length), 0, mask.words.buffer, mask.words.byteOffset, mask.words.byteLength);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
-      if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
+      if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || name === "bodies" || name === "bodyCuts" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
     }
     const t = this.options.initial;
@@ -430,7 +448,7 @@ export class BrickEngine {
     const pipeline = this.pipelines.get(p.kernel)!;
     const entries = p.kernel.bindings.map((b, i): GPUBindGroupEntry => {
       if (b.name === "cfg") return { binding: i, resource: { buffer: this.cfg(slot, slot & 1, p.z ?? 0, p.w ?? 0) } };
-      const buffer = this.buffers.get(b.name);
+      const buffer = this.buffers.get(b.name) ?? this.external.get(b.name);
       if (!buffer) throw new Error(`Brick engine: ${p.kernel.label} binds unknown buffer ${b.name}`);
       return { binding: i, resource: { buffer } };
     });
@@ -462,11 +480,20 @@ export class BrickEngine {
     const o = this.options, buf = new ArrayBuffer(4 * RING_WORDS), u = new Uint32Array(buf), f = new Float32Array(buf);
     u[RING.STEP] = step; f[RING.DT] = o.dt_s; f[RING.TIME] = this.time; u[RING.FLAGS] = 0;
     f.set(o.gravity_mps2, RING.GRAVITY); f[RING.H] = o.h_m;
+    // A3: the body header; FLAGS.BODIES (E's gate) while any body is present.
+    const b = this.bodyHeader;
+    if (b) {
+      if (!(Number.isInteger(b.count) && b.count >= 0 && b.count <= GPU_RIGID_BODY_CAPACITY)) throw new Error(`Brick engine: ${b.count} rigid bodies (at most ${GPU_RIGID_BODY_CAPACITY}, the rigid capacity)`);
+      if ((b.flags & ~(BODY_FLAG.COUPLING | BODY_FLAG.CUTS | BODY_FLAG.INVERTED)) !== 0) throw new Error(`Brick engine: unknown body flags ${b.flags}`);
+      if (b.count > 0) u[RING.FLAGS] |= RING_FLAG.BODIES;
+      u[RING.BODY_COUNT] = b.count; u[RING.BODY_FLAGS] = b.flags; f[RING.BODY_HORIZON] = o.dt_s; f[RING.BODY_CELL] = o.h_m ** 3; u[RING.BODY_GEN] = b.generation >>> 0;
+    }
     return buf;
   }
 
   private boot() {
     const rec = this.schedule.boot.map(p => this.bind(p, 0));
+    this.bodyHeader = this.options.bodies?.sync(0);
     this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * this.layout.set.ring, this.ringWords(0));
     this.device.queue.submit([this.encode(rec, "nb-brick.boot")]);
     // The page table is boot-only (its size follows the initial liquid's pages): released once the boot is queued
@@ -491,6 +518,8 @@ export class BrickEngine {
     for (let i = 0; i < steps; i++) {
       if (this.failure) throw new Error(this.failure);
       const a = this.ahead!, slot = a.step % RING_SLOTS;
+      // A4: the host's body sync, queued after the last step's part 2 and before this step's part 1.
+      if (this.options.bodies) this.bodyHeader = this.options.bodies.sync(a.step);
       this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * (this.layout.set.ring + RING_WORDS * slot), this.ringWords(a.step));
       this.device.queue.submit([a.part1]);
       this.device.queue.submit([a.part2]);

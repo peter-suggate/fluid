@@ -556,7 +556,12 @@ Slot layout (f32 unless marked):
 | 7 | E | h (m) |
 | 8–15 | F | volume control: target volume, the secant state's inputs, the rate limit |
 | 16–63 | F | sources: drops (spheres, disks, letters) and the inflow plug |
-| 64–191 | P | bodies: 8 records of 16 words (pose, velocity, swept bound) |
+| 64 | P | `BODY_COUNT` (u32): the bodies present, at most the rigid capacity (24) |
+| 65 | P | `BODY_FLAGS` (u32, `BODY_FLAG`): bit 0 `COUPLING` (the rigid coupling runs), bit 1 `CUTS` (a body has body-local cuts), bit 2 `INVERTED` (a body's solid is outside its shape) |
+| 66 | P | `BODY_HORIZON`: the stamp horizon (dt, s) |
+| 67 | P | `BODY_CELL`: the cell volume (m³) |
+| 68 | P | `BODY_GEN` (u32): the roster generation, bumped when the roster or a body's shape changes |
+| 69–191 | P | spare. The poses are not in the ring: kernels read the rigid state buffer itself, bound read-only as `bodies` (24 records of 128 B, webgpu-rigid-body.ts), and the body-local cut atlas as `bodyCuts` (M5 design §7.2, A3). Bit 1 of word 3 is set while `BODY_COUNT > 0` |
 | 192–223 | E | solid edits: up to 7 dirty tile boxes (lo xyz, hi xyz as i32, then a count at 222) |
 | 224–255 | reserved | |
 
