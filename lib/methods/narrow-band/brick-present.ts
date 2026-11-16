@@ -30,7 +30,7 @@
  * interim cost the ruling allows, and `shown` (a word a lattice brick) is part
  * of it. The copy is encoded outside the step's submissions.
  */
-import { BrickLayout, PHI_AIR, brickAbiWGSL } from "./brick-abi";
+import { BrickLayout, PHI_AIR, boxWGSL, brickAbiWGSL } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
@@ -58,7 +58,7 @@ fn presentNear(b:vec3i)->bool{
 }
 `;
 
-const WGSL_VERTICES = (L: BrickLayout) => COMMON(L) + brickOwnerWGSL({ phi: "phi", vel: "vel" }) + /* wgsl */`
+const WGSL_VERTICES = (L: BrickLayout) => COMMON(L) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
 @group(0) @binding(6) var vertexPhi:texture_storage_3d<r32float,write>;
 var<workgroup> presentState:u32;
 @compute @workgroup_size(64) fn presentVertices(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){

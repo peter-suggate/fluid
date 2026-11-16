@@ -70,3 +70,32 @@ test("brick ABI: capacities are validated", () => {
   assert.throws(() => new BrickLayout({ lattice: [64, 64, 64], f: 0, c: 1, b: 0, k: 0, particles: 1 }), /capacity f/);
   assert.throws(() => new BrickLayout({ lattice: [64, 64, 64], f: 1.5, c: 1, b: 0, k: 0, particles: 1 }), /capacity f/);
 });
+
+test("brick ABI: the box hook (M3 padding): walls at the box, an unpadded text unchanged, my kernels resolved", async () => {
+  const { BOX_TOKEN, boxPadded, boxWGSL, resolveBox } = await import("./brick-abi");
+  const { brickSetKernels } = await import("./brick-set.wgsl");
+  const { brickCensusKernels } = await import("./brick-census.wgsl");
+  const { brickTransferKernels } = await import("./brick-transfer.wgsl");
+  const L = dam(), P = new BrickLayout({ lattice: [32, 32, 32], box: [24, 16, 24], f: 125, c: 8, b: 0, k: 0, particles: 1024 });
+  assert.deepEqual(L.box, L.lattice); assert.equal(boxPadded(L), false); assert.equal(boxWGSL(L), "NB_LATTICE");
+  assert.deepEqual(P.box, [24, 16, 24]); assert.equal(boxPadded(P), true); assert.equal(boxWGSL(P), "NB_BOX");
+  assert.throws(() => new BrickLayout({ lattice: [32, 32, 32], box: [24, 40, 24], f: 1, c: 1, b: 0, k: 0, particles: 1 }), /box 24x40x24 is not inside the lattice/);
+  // Unpadded: no NB_BOX in the prelude, and the token resolves to the text it replaced.
+  assert.ok(!brickAbiWGSL(L).includes("NB_BOX"));
+  assert.equal(resolveBox(L, `${BOX_TOKEN}[a] nbInWallBox(c)`), "NB_LATTICE[a] nbInLattice(c)");
+  assert.match(brickAbiWGSL(P), /const NB_BOX:vec3i=vec3i\(24,16,24\);\nfn nbInBox\(c:vec3i\)->bool/);
+  assert.equal(resolveBox(P, `${BOX_TOKEN}[a] nbInWallBox(c)`), "NB_BOX[a] nbInBox(c)");
+  // My kernels on the padded layout: every token resolved; the owner walls, setInit's OPEN, the boot's inner faces,
+  // the transfer's wall faces and the census's cell kind read the box.
+  const kernels = ([...Object.values(brickSetKernels(P, { tiered: true })), ...Object.values(brickCensusKernels(P)), ...Object.values(brickTransferKernels(P))] as unknown[])
+    .filter((k): k is { label: string; code: string } => typeof (k as { code?: unknown })?.code === "string");
+  assert.ok(kernels.length > 10);
+  for (const k of kernels) {
+    assert.ok(!k.code.includes(BOX_TOKEN) && !k.code.includes("nbInWallBox("), `${k.label}: token unresolved`);
+    assert.ok(!/OnWall\(c:vec3i,a:u32\)->bool\{return c\[a\]<=0\|\|c\[a\]>=NB_LATTICE\[a\];\}/.test(k.code), `${k.label}: an owner wall at the storage edge`);
+  }
+  const code = (label: string) => kernels.find(k => k.label === label)!.code;
+  assert.match(code("setInit"), /NB_FLAG_OPEN,nbInBox\(o\+nbLocalCoord\(l\)\)\)/);
+  assert.match(code("censusFine"), /fn ncCellKind\(c:vec3i\)->u32\{if\(!nbInBox\(c\)\)/);
+  assert.match(code("setTransferFaces"), /let wall=c\[a\]\+1==NB_BOX\[a\];/);
+});

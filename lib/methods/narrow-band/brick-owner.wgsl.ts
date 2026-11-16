@@ -35,12 +35,15 @@ export interface BrickOwnerNames {
   readonly mask?: string;
   /** The face channel's first word in F and in C (WGSL expressions; default U: NB_VEL_F_U0, NB_VEL_C_U0). */
   readonly faceF?: string; readonly faceC?: string;
+  /** The walls' WGSL vec3i (brick-abi.ts boxWGSL(L)): nbOnWall's planes and the faces nbFaceInLattice admits, so a
+   * face past the box reads 0 and the wall is at the box once. Default NB_LATTICE (an unpadded scene's text). */
+  readonly box?: string;
 }
 
 const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexCoarse|VertexOwnerH|CVertex|FVertex|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
 
 export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) => {
-  let code = ownerCode(n).replaceAll("NB_VEL_F_U0", n.faceF ?? "NB_VEL_F_U0").replaceAll("NB_VEL_C_U0", n.faceC ?? "NB_VEL_C_U0");
+  let code = ownerCode(n).replaceAll("NB_WALL_BOX", n.box ?? "NB_LATTICE").replaceAll("NB_VEL_F_U0", n.faceF ?? "NB_VEL_F_U0").replaceAll("NB_VEL_C_U0", n.faceC ?? "NB_VEL_C_U0");
   if (n.mask) code = code.replaceAll("nbTileH(", `${n.mask}(`);
   if (n.prefix && n.prefix !== "nb") code = code.replace(OWNER_FUNCTIONS, `${n.prefix}$1`);
   return code;
@@ -106,9 +109,9 @@ fn nbFFace(c:vec3i,a:u32)->f32{
   let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}
   return ${n.vel}[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)];
 }
-fn nbOnWall(c:vec3i,a:u32)->bool{return c[a]<=0||c[a]>=NB_LATTICE[a];}
+fn nbOnWall(c:vec3i,a:u32)->bool{return c[a]<=0||c[a]>=NB_WALL_BOX[a];}
 // The lower face of c along a is a face of the lattice: planes 0..N along a, cells 0..N-1 across.
-fn nbFaceInLattice(c:vec3i,a:u32)->bool{var hi=NB_LATTICE;hi[a]+=1;return all(c>=vec3i(0))&&all(c<hi);}
+fn nbFaceInLattice(c:vec3i,a:u32)->bool{var hi=NB_WALL_BOX;hi[a]+=1;return all(c>=vec3i(0))&&all(c<hi);}
 // The stored face on a plane: the lower face of cell c along a, where c[a] is a multiple of 4 or either side is h-owned.
 fn nbFacePlane(c:vec3i,a:u32)->f32{
   if(!nbFaceInLattice(c,a)){return 0.0;}

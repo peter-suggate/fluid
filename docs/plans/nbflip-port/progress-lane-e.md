@@ -2447,3 +2447,37 @@ does, and the box rule closes the cells past the container.
   the unpadded behaviour.
 
 **Gates.** check:types: lane-n's 3 only. test:unit: 1889 pass, 0 fail.
+
+## 2026-11-17: the box hook for padding to whole pages (landed; F's and P's walls to follow)
+
+**What the hook is.** The design is in brick-abi.md §2 (the box rule). `BrickLayout.box` holds the container's
+cells and defaults to the lattice. A kernel reaches the box through one of these:
+- `boxWGSL(L)`;
+- the `NB_WALL_BOX` and `nbInWallBox` tokens, resolved by the builder's `resolveBox`;
+- `brickOwnerWGSL({ box })`.
+
+**My sites, switched to the box:**
+- the owner readers' walls (nbOnWall, nbFaceInLattice), in the census, set, transfer, residency and presentation
+  kernels;
+- setInit's FLAGS.OPEN, on F and on C;
+- the boot velocity's inner faces;
+- the transfer's wall faces (xV's 0.5, xFaceWidth, sFaceWidth);
+- the census's cell kind;
+- solidStamp's static hooks.
+
+**The engine guard.** BrickEngine.create refuses:
+- an unresolved token;
+- on a padded lattice, an owner reader whose walls are still at the storage edge.
+
+On a padded dam layout the guard names 25 kernels of F and P, and none of mine. F's other wall planes (the particle
+clamp, umWallWithin) are not owner readers, so the guard does not see them. The shared regression covers them.
+
+**The regression to come.** A 24×16×24 dam padded to 32³: its liquid stays inside the box, and its volume matches
+the unpadded run. Until F and P switch, brick-scene keeps the "not whole pages" gap.
+
+**Text and tests**
+- The dam's 113 kernels (boot, part 1, part 2; P's dump) are byte-identical to b66537fb.
+- brick-abi.test.ts, a CPU test: the hook's names and resolution; my padded kernels are all resolved and read the
+  box (setInit, censusFine, setTransferFaces); a box outside the lattice throws.
+- check:types: lane-n's 3 only.
+- test:unit: 1889 pass, 0 fail (before the new test).

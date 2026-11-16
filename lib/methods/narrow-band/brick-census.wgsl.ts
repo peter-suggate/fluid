@@ -73,7 +73,7 @@
  *   represents both the velocity and the shape: a tile whose FIN carries its shape or thin trigger is never calm.
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
-import { ARGS, BrickLayout, H, LIST, brickAbiWGSL } from "./brick-abi";
+import { ARGS, BOX_TOKEN, BrickLayout, H, LIST, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
@@ -755,7 +755,7 @@ const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[]
     declareBindings(bindings),
     body,
   ].join("\n");
-  return { label, entry: label, code, bindings };
+  return { label, entry: label, code: resolveBox(L, code), bindings };
 };
 
 /** The hooks on the brick storage (CENSUS_FORMULAS' contract), for a module that binds dir, phi, vel and census. */
@@ -792,7 +792,7 @@ fn ncCross(s:u32,i:u32)->vec2u{let o=NC_S*s+${CENSUS.CROSS}u+2u*i;return vec2u(c
 fn ncGap(s:u32,i:u32)->u32{return census[NC_S*s+${CENSUS.GAP}u+i];}
 fn ncReq(s:u32,w:u32)->u32{return census[NC_S*s+${CENSUS.REQ}u+w];}
 fn ncMov(s:u32,w:u32)->u32{return census[NC_S*s+${CENSUS.MOV}u+w];}
-fn ncCellKind(c:vec3i)->u32{if(!nbInLattice(c)){return 2u;}return select(0u,1u,ncPageSlot(c>>vec3u(5u))==NB_NONE);}
+fn ncCellKind(c:vec3i)->u32{if(!nbInWallBox(c)){return 2u;}return select(0u,1u,ncPageSlot(c>>vec3u(5u))==NB_NONE);}
 fn ncTileState(q:vec3i)->u32{if(!nbTileInLattice(q)){return 2u;}return select(0u,1u,ncPageSlot(q>>vec3u(3u))==NB_NONE);}
 fn ncCellOwnerH(c:vec3i)->bool{return nbCellOwnerH(c);}
 fn ncObstacleAt(q:vec3i)->bool{return false;}
@@ -858,7 +858,7 @@ fn rgDeep(cs:u32,r:u32,count:bool){
 }
 `;
 
-const OWNER = brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" });
+const OWNER = brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN });
 /** The census's storage hooks, owner readers and kernel builder, for the head's residency (brick-residency.wgsl.ts). */
 export const CENSUS_HOOKS = HOOKS, CENSUS_OWNER = OWNER, censusKernel = kernel;
 /** The census formulas' frame plan (PLAN) and the region words (REGION), for the real D (brick-region-heat.wgsl.ts). */

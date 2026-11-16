@@ -215,6 +215,9 @@ export interface BrickLayoutOptions extends BrickCapacities {
   /** NB_PHI_FAR in h, where it is not the lattice's largest extent: a padded container's lattice is its own cells,
    * and the old engine's far φ is its page-rounded lattice's (fluidLatticeFarPhi; brick-scene.ts). */
   readonly farPhi?: number;
+  /** The container's cells, where the box rule's walls are (brick-static.wgsl.ts), when the lattice is padded past it
+   * to whole pages (the old engine's padding, behind its shell). Absent: the lattice itself (every current scene). */
+  readonly box?: readonly [number, number, number];
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -227,12 +230,29 @@ export function windowPages(lattice: readonly number[]): [number, number, number
   return w;
 }
 
+/** Whether the lattice is padded past the box (BrickLayoutOptions.box). */
+export const boxPadded = (L: Pick<BrickLayout, "lattice" | "box">) => L.box.some((n, a) => n !== L.lattice[a]);
+/**
+ * The box hook (M3 padding): the WGSL vec3i of the box rule's walls, for a kernel that puts a wall plane at the
+ * domain's high faces. It is "NB_LATTICE" where the box is the lattice, so an unpadded scene's text is byte-identical,
+ * and "NB_BOX" (brickAbiWGSL emits it) where the lattice is padded to whole pages. A wall is at the box exactly once:
+ * a kernel that reads this for its walls has none at the storage edge as well. Its low faces are 0 either way.
+ */
+export const boxWGSL = (L: Pick<BrickLayout, "lattice" | "box">) => boxPadded(L) ? "NB_BOX" : "NB_LATTICE";
+/** The token a module-level WGSL string writes for the walls (brickOwnerWGSL({ box: BOX_TOKEN }), a kernel's own wall
+ * planes); a kernel builder resolves it with its layout (resolveBox). An unresolved token fails at engine creation. */
+export const BOX_TOKEN = "NB_WALL_BOX";
+export const resolveBox = (L: Pick<BrickLayout, "lattice" | "box">, code: string) =>
+  code.replaceAll(BOX_TOKEN, boxWGSL(L)).replaceAll("nbInWallBox(", boxPadded(L) ? "nbInBox(" : "nbInLattice(");
+
 /** The ABI's concrete layout for one scene: every region's word offset and every buffer's size. */
 export class BrickLayout {
   readonly cap: Required<BrickCapacities>;
   readonly lattice: readonly [number, number, number];
   /** NB_PHI_FAR in h (BrickLayoutOptions.farPhi). */
   readonly farPhi: number;
+  /** The box rule's box (BrickLayoutOptions.box): the walls. The lattice is storage; a wall is at the box, once. */
+  readonly box: readonly [number, number, number];
   readonly window: readonly [number, number, number];
   readonly windowBits: readonly [number, number, number];
   readonly particleStride: number;
@@ -281,6 +301,8 @@ export class BrickLayout {
     this.cap = { f, c, b, k, particles, t };
     this.lattice = [...options.lattice] as [number, number, number];
     this.farPhi = options.farPhi ?? phiFar(options.lattice);
+    this.box = [...(options.box ?? options.lattice)] as [number, number, number];
+    if (this.box.some((n, a) => !Number.isInteger(n) || n < 1 || n > this.lattice[a]!)) throw new Error(`Brick engine: box ${this.box.join("x")} is not inside the lattice ${this.lattice.join("x")}`);
     this.window = windowPages(options.lattice);
     this.windowBits = this.window.map(n => Math.log2(n)) as [number, number, number];
     this.particleStride = options.apic ? 28 : 12;
@@ -365,6 +387,8 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   c("NB_PSTRIDE", L.particleStride); c("NB_FOLD", FOLD);
   lines.push(`const NB_LATTICE:vec3i=vec3i(${L.lattice.join(",")});`);
   lines.push(`const NB_BRICKS:vec3i=vec3i(${bricksPerAxis(L.lattice).join(",")});`);
+  // The box (the walls) only where it is not the lattice: an unpadded scene's text is unchanged (boxWGSL names it).
+  if (boxPadded(L)) lines.push(`const NB_BOX:vec3i=vec3i(${L.box.join(",")});\nfn nbInBox(c:vec3i)->bool{return all(c>=vec3i(0))&&all(c<NB_BOX);}`);
   lines.push(`const NB_PHI_AIR:f32=${PHI_AIR.toFixed(1)};`);
   lines.push(`const NB_PHI_AIR_C:f32=${PHI_AIR_C.toFixed(1)};`);
   // φ (h) where nothing is stored: the old vertex field's empty value, fluidLatticeFarPhi (the lattice's largest

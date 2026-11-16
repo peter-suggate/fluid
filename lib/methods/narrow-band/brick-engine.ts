@@ -15,7 +15,7 @@
  * - Nothing is sized from the lattice.
  */
 import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
-import { ARGS, BODY_FLAG, BrickLayout, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
+import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
@@ -44,8 +44,14 @@ export interface BrickInitialPhi { readonly pages: readonly number[]; readonly p
 /** The page grid of BrickInitialPhi: pages an axis, the high vertex plane included. */
 export const initialPhiPages = (lattice: Vec3): Vec3 => [Math.floor(lattice[0] / 32) + 1, Math.floor(lattice[1] / 32) + 1, Math.floor(lattice[2] / 32) + 1];
 
+/** The owner readers' walls at the storage edge (brickOwnerWGSL without its box): refused on a padded lattice. */
+const STORAGE_EDGE_WALLS = [/fn \w*OnWall\(c:vec3i,a:u32\)->bool\{return c\[a\]<=0\|\|c\[a\]>=NB_LATTICE\[a\];\}/, /fn \w*FaceInLattice\(c:vec3i,a:u32\)->bool\{var hi=NB_LATTICE;/];
+
 export interface BrickEngineOptions {
   readonly lattice: Vec3;
+  /** The container's cells (the box rule's walls) when the lattice is padded past them to whole pages
+   * (BrickLayoutOptions.box). Absent: the lattice. */
+  readonly box?: Vec3;
   /** NB_PHI_FAR in h when it is not the lattice's largest extent (BrickLayoutOptions.farPhi). */
   readonly farPhi?: number;
   readonly h_m: number;
@@ -337,7 +343,7 @@ export class BrickEngine {
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...options.capacities, apic: options.apic });
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...options.capacities, apic: options.apic });
     const solver = options.solver(layout);
     validatePressureSolver(solver);
     const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles });
@@ -348,6 +354,14 @@ export class BrickEngine {
     const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
+    // The box hook (M3 padding): every wall token resolved by its builder, and, where the lattice is padded past the
+    // box, no owner reader still walling at the storage edge (a wall at the box exactly once).
+    const unresolved = kernels.filter(k => k.code.includes(BOX_TOKEN) || k.code.includes("nbInWallBox(")).map(k => k.label);
+    if (unresolved.length) throw new Error(`Brick engine: ${unresolved.join(", ")} leave the wall token unresolved (resolveBox)`);
+    if (boxPadded(layout)) {
+      const edge = kernels.filter(k => STORAGE_EDGE_WALLS.some(re => re.test(k.code))).map(k => k.label);
+      if (edge.length) throw new Error(`Brick engine: the lattice is padded past the box ${layout.box.join("x")}, but ${edge.join(", ")} wall at the storage edge (brickOwnerWGSL's box)`);
+    }
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
     await Promise.all(kernels.map(async k => {
       const t0 = performance.now();

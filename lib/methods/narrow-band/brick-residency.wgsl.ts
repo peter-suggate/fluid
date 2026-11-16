@@ -93,7 +93,7 @@
  *   its 27 tiles) itself and appends its missing bricks as candidates.
  * - Destinations are bricks and pages; a destination off the brick range is the lattice's wall.
  */
-import type { BrickLayout } from "./brick-abi";
+import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickBinding } from "./brick-kernel";
 import { censusKernel } from "./brick-census.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
@@ -114,7 +114,7 @@ const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 export function brickResidencyKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
   const tiered = opt.tiered === true;
   const pages = L.lattice.map(n => Math.ceil((Math.floor(n / 8) + 1) / 4));
-  const resMark = censusKernel(L, "resMark", tiered ? [CFG, setRW, dirRW, phiRO, velRO] : [CFG, setRW, dirRW], (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel" }) : "") + /* wgsl */`
+  const resMark = censusKernel(L, "resMark", tiered ? [CFG, setRW, dirRW, phiRO, velRO] : [CFG, setRW, dirRW], (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel", box: BOX_TOKEN }) : "") + /* wgsl */`
 const RQ_PAGES:vec3i=vec3i(${pages.join(",")});
 const RM_OWN:f32=${tiered ? RES_MARGIN.own.tiered : RES_MARGIN.own.allH}.0;
 const RM_OWN_PAGES:f32=${RES_MARGIN.ownPages}.0;

@@ -38,7 +38,7 @@
  * 2026-11-15: US carries the step, U is read at step end); UP is not
  * carried. φ is PHI.
  */
-import { ARGS, BrickLayout, brickAbiWGSL } from "./brick-abi";
+import { ARGS, BOX_TOKEN, BrickLayout, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { nbfRemapWGSL } from "./velocity-formulas.wgsl";
@@ -64,7 +64,7 @@ const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[]
     declareBindings(bindings),
     body,
   ].join("\n");
-  return { label, entry: label, code, bindings };
+  return { label, entry: label, code: resolveBox(L, code), bindings };
 };
 
 /** Readers of both ownerships: nb* (CMASK, now) and nbNew* (WANT, next), on face channel cfg.z (U or US). */
@@ -72,8 +72,8 @@ const READERS = /* wgsl */`
 fn nbWantH(cs:u32,t:u32)->bool{return ((nbSetWord(NB_S_WANT+16u*cs+(t>>5u))>>(t&31u))&1u)!=0u;}
 fn xFaceF()->u32{return select(NB_VEL_F_U0,NB_VEL_F_US0,cfg.z==1u);}
 fn xFaceC()->u32{return select(NB_VEL_C_U0,NB_VEL_C_US0,cfg.z==1u);}
-${brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "xFaceF()", faceC: "xFaceC()" })}
-${brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "xFaceF()", faceC: "xFaceC()", prefix: "nbNew", mask: "nbWantH" })}
+${brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "xFaceF()", faceC: "xFaceC()", box: BOX_TOKEN })}
+${brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "xFaceF()", faceC: "xFaceC()", prefix: "nbNew", mask: "nbWantH", box: BOX_TOKEN })}
 const XL_CHANGED:u32=0x80000000u;
 const XL_REFINED:u32=0x40000000u;
 const XL_VERTICES:u32=0x04000000u;
@@ -88,7 +88,7 @@ fn xPresent(c:vec3i)->bool{return nbInLattice(c)&&nbCSlotOfPage(c>>vec3u(5u))!=N
 // umPressureFaceV of the face above cell c on axis a, M2 (no cuts; uniform-mixed-solid.wgsl.ts l.1909): 1 between
 // open cells (an AIR page, resident or not, is open space), 0.5 into the lattice's exterior (a SOLID page: half
 // the open fraction of the cell this side), so a wall face never passes remapBeside's V >= 1.
-fn xV(c:vec3i,a:u32)->f32{var e=vec3i(0);e[a]=1;return select(0.5,1.0,nbInLattice(c)&&nbInLattice(c+e));}
+fn xV(c:vec3i,a:u32)->f32{var e=vec3i(0);e[a]=1;return select(0.5,1.0,nbInWallBox(c)&&nbInWallBox(c+e));}
 fn xCorner4(l:u32)->vec3i{return vec3i(i32(l&3u),i32((l>>2u)&3u),i32(l>>4u));}
 `;
 
@@ -107,7 +107,7 @@ fn xTexel(flags:u32,local:vec3i)->bool{
 // resident. On the upper wall the face has no neighbour and takes its owner's width.
 fn xFaceWidth(c:vec3i,a:u32)->u32{
   var e=vec3i(0);e[a]=1;
-  let wall=c[a]+1==NB_LATTICE[a];
+  let wall=c[a]+1==NB_WALL_BOX[a];
   if(!wall&&!xPresent(c+e)){return 0u;}
   if(nbNewCellOwnerH(c)){return 1u;}
   let local=c-4*(c>>vec3u(2u));if(local[a]!=3){return 0u;}
@@ -307,7 +307,7 @@ fn xSample(p:vec3i,plane:i32,axis:u32,faces:vec4f)->vec2f{
 // xFaceWidth on the staged neighbourhood.
 fn sFaceWidth(c:vec3i,a:u32)->u32{
   var e=vec3i(0);e[a]=1;
-  let wall=c[a]+1==NB_LATTICE[a];
+  let wall=c[a]+1==NB_WALL_BOX[a];
   if(!wall&&!sPresent(c+e)){return 0u;}
   if(sNewCellH(c)){return 1u;}
   let local=c-4*(c>>vec3u(2u));if(local[a]!=3){return 0u;}

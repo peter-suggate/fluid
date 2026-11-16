@@ -37,7 +37,7 @@ export function brickSolidStampKernels(L: BrickLayout, mask: Pick<BrickStaticMas
     { name: "cut", kind: "rw", type: "array<f32>" },
     { name: "solid", kind: "ro", type: "array<u32>" },
   ];
-  const statics = brickStaticWGSL({ box: L.lattice, openTop: mask.walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls: mask.walls } });
+  const statics = brickStaticWGSL({ box: L.box, openTop: mask.walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls: mask.walls } });
   const code = [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: true } }), declareBindings(bindings), BRICK_SET_HELPERS_WGSL, statics, /* wgsl */`
 var<workgroup> wCut:atomic<u32>;
 var<workgroup> wSlot:u32;

@@ -9,7 +9,7 @@
  * do not return early: work is gated by an `live` flag so every barrier
  * stays in uniform control flow.
  */
-import { BrickLayout, LIST, POOLS, brickAbiWGSL } from "./brick-abi";
+import { BOX_TOKEN, BrickLayout, LIST, POOLS, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import type { BrickStages } from "./brick-stages";
@@ -39,7 +39,7 @@ const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[]
     declareBindings(bindings),
     body,
   ].join("\n");
-  return { label, entry: label, code, bindings, ...(cfgZ ? { cfgZ } : {}) };
+  return { label, entry: label, code: resolveBox(L, code), bindings, ...(cfgZ ? { cfgZ } : {}) };
 };
 
 /** Free-stack pop and push, list append, and the directory claim (setUpdate's helpers). */
@@ -114,7 +114,7 @@ export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
   const heat = act ? act.heat.map(w => `${act.buffer}[${act.tile}u+${act.words}u*(8u*slot+t)+${w}u]!=0u`).join("||") : "false";
   const bodies = opt.bodies;
   const markBindings: BrickBinding[] = [CFG, setRW, dirRW, phiRO, ...(tiered ? [velRO] : []), ...(act ? [{ name: act.buffer, kind: "ro", type: "array<u32>" } as BrickBinding] : []), ...(bodies ? [BODIES_RO, BODY_CUTS_RO] : [])];
-  const setMark = k("setMark", markBindings, (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel" }) : "") + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + "\nvar<workgroup> wBody:atomic<u32>;" : "") + /* wgsl */`
+  const setMark = k("setMark", markBindings, (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel", box: BOX_TOKEN }) : "") + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + "\nvar<workgroup> wBody:atomic<u32>;" : "") + /* wgsl */`
 var<workgroup> wNeg:atomic<u32>;
 var<workgroup> wPos:atomic<u32>;
 var<workgroup> wTiles:atomic<u32>;
@@ -216,7 +216,7 @@ var<workgroup> wNb:array<u32,27>;
   // setMarkPages (tiered only): one workgroup a page of C_ALL (G1), a lane 8 tiles. The count of its 4h-owned tiles
   // with a liquid corner (a C vertex phi < 0) is the C record's LIQUID_TILES (C_LIQ). It keeps and requests nothing
   // (the head's residency does).
-  const setMarkPages = k("setMarkPages", [CFG, setRW, dirRW, phiRO, velRO], brickOwnerWGSL({ phi: "phi", vel: "vel" }) + /* wgsl */`
+  const setMarkPages = k("setMarkPages", [CFG, setRW, dirRW, phiRO, velRO], brickOwnerWGSL({ phi: "phi", vel: "vel", box: BOX_TOKEN }) + /* wgsl */`
 var<workgroup> wN:atomic<u32>;
 @compute @workgroup_size(64) fn setMarkPages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   if(lid==0u){atomicStore(&wN,0u);}
@@ -366,7 +366,7 @@ var<workgroup> wN:atomic<u32>;
       ${zero("vel")}
       ${zero("pres")}
       phi[NB_PHI_F_PHI+at]=bitcast<u32>(NB_PHI_AIR_C);phi[NB_PHI_F_PHI1+at]=bitcast<u32>(NB_PHI_AIR_C);
-      phi[NB_PHI_F_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+nbLocalCoord(l)))|NB_FLAG_OWNER_H;
+      phi[NB_PHI_F_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInWallBox(o+nbLocalCoord(l)))|NB_FLAG_OWNER_H;
     }
   }
   // Entering C slots: a cell a tile (C local = tile index), open inside the lattice. φ is NB_PHI_AIR_C (16 max h, the
@@ -382,7 +382,7 @@ var<workgroup> wN:atomic<u32>;
       ${zeroC("vel")}
       ${zeroC("pres")}
       phi[NB_PHI_C_PHI+at]=bitcast<u32>(NB_PHI_AIR_C);phi[NB_PHI_C_PHI1+at]=bitcast<u32>(NB_PHI_AIR_C);
-      phi[NB_PHI_C_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInLattice(o+4*nbLocalCoord(l)));
+      phi[NB_PHI_C_FLAGS+at]=select(0u,NB_FLAG_OPEN,nbInWallBox(o+4*nbLocalCoord(l)));
     }
   }
 }`);
@@ -422,7 +422,7 @@ fn bootVelTile(t:vec3i,w:u32)->bool{
   return lo<m&&bootWord(w+4u+lo)==key;
 }
 // The face of cell c along a (c - e_a to c) is inside the lattice.
-fn bootInnerFace(c:vec3i,a:u32)->bool{return all(c>=vec3i(0))&&all(c<NB_LATTICE)&&c[a]>=1;}
+fn bootInnerFace(c:vec3i,a:u32)->bool{return all(c>=vec3i(0))&&all(c<NB_WALL_BOX)&&c[a]>=1;}
 fn bootAt(v:vec3i,nBoxes:u32)->f32{
   if(cfg.w==1u){return bootTable(v);}
   let p=vec3f(v);var d=NB_PHI_FAR;

@@ -55,6 +55,23 @@ brick's coordinate is `cell >> 3`, a page's `cell >> 5`, a tile's `cell >> 2`.
 container top is open (`container.top == "open"`: above `N_y` is air). Readers apply the box rule
 from coordinates *before* the directory lookup, so no lookup sees a negative coordinate.
 
+**The box hook (M3 padding).** `N` is the box, `BrickLayout.box`: the container's cells. It defaults to the lattice.
+A container that is not whole 32-cell pages pads the lattice past the box to whole pages on the high faces. The
+census and the C level set need whole pages; the old engine pads the same way, behind its shell. The pools follow
+the fluid, so the padding costs no memory.
+
+How kernels reach the box:
+- `boxWGSL(L)` names the walls' vec3i: `NB_LATTICE` when the box is the lattice (an unpadded scene's text is
+  byte-identical), and `NB_BOX` when padded. `brickAbiWGSL` emits `NB_BOX` and `nbInBox` only when padded.
+- Module-level WGSL writes the token `NB_WALL_BOX` (`BOX_TOKEN`) for a wall plane and `nbInWallBox(c)` for an
+  in-box test. The kernel's builder resolves both with `resolveBox(L, code)`.
+- `brickOwnerWGSL({ box })` places nbOnWall's planes and nbFaceInLattice's faces at the box, so a face past the box
+  reads 0.
+
+**A wall is at the box exactly once,** with no second wall at the storage edge. BrickEngine.create refuses:
+- an unresolved token;
+- on a padded lattice, an owner reader whose walls are still at `NB_LATTICE`.
+
 **Units** (as NB-FLIP stores them, so ported formulas are verbatim):
 - positions: h cells in the window frame (cell `i` spans `[i, i+1)`);
 - level set φ: h cells, negative in liquid;
