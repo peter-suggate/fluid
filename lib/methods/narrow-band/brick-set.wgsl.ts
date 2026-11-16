@@ -31,18 +31,20 @@ export const REBUILT_LISTS: readonly number[] = Object.values(LIST).filter(k => 
 /** Workgroups of the grid-stride candidate and churn kernels: enough to fill the GPU, bounded by the pool. */
 export const churnGroups = (cap: number, lanes: number) => Math.max(1, Math.min(256, Math.ceil(cap / lanes)));
 
-const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[], body: string): BrickKernel => {
+const kernel = (L: BrickLayout, label: string, bindings: readonly BrickBinding[], body: string, cfgZ?: readonly [number, number]): BrickKernel => {
   const set = bindings.find(b => b.name === "set"), dir = bindings.find(b => b.name === "dir");
   const code = [
     brickAbiWGSL(L, { ...(set ? { set: { name: "nbSet", atomic: set.kind === "rw" } } : {}), ...(dir ? { dir: { name: "dir", atomic: dir.kind === "rw" } } : {}) }),
     declareBindings(bindings),
     body,
   ].join("\n");
-  return { label, entry: label, code, bindings };
+  return { label, entry: label, code, bindings, ...(cfgZ ? { cfgZ } : {}) };
 };
 
 /** Free-stack pop and push, list append, and the directory claim (setUpdate's helpers). */
-const SET_HELPERS = /* wgsl */`
+/** The set's helpers (nbAppend, nbPop, nbPush, nbKTake, nbClaim, nbTileMask) for a kernel that binds `set` and `dir`
+ * read-write as atomics: E's, and P's stamps (nbKTake, A5). */
+export const BRICK_SET_HELPERS_WGSL = /* wgsl */`
 fn nbAppend(k:u32,slot:u32){
   let e=atomicAdd(&nbSet[NB_H_LIST_COUNT+k],1u);
   if(e<NB_S_LIST_CAP[k]){atomicStore(&nbSet[NB_S_LIST[k]+e],slot);}else{nbFail(NB_FAIL_LIST,k);}
@@ -54,6 +56,17 @@ fn nbPop(top:u32,free:u32,cap:u32,high:u32,refused:u32,fail:u32,key:u32)->u32{
   let s=atomicLoad(&nbSet[free+t-1u]);atomicMax(&nbSet[high],s+1u);return s;
 }
 fn nbPush(top:u32,free:u32,slot:u32){let t=atomicAdd(&nbSet[top],1u);atomicStore(&nbSet[free+t],slot);}
+// A5: F slot fs's K slot, popped the first time a stamp asks (record word CUT, NONE until then). NONE when the pool is
+// exhausted: the pop latched FAIL.POOL_K with the brick's key, and the brick stays uncut (never grown at run time).
+// One caller a brick a dispatch (a stamp's lane 0); the caller sets its class bit (CUT_STATIC, or P's NEAR_BODY) in the
+// same dispatch, and the first stamp to write a fresh slot writes all of it (W = 0, A1). Slots go back in setKRelease,
+// after every stamp of the step.
+fn nbKTake(fs:u32)->u32{
+  let r=NB_D_FREC+32u*fs;let held=atomicLoad(&dir[r+NB_REC_CUT]);if(held!=NB_NONE){return held;}
+  let ks=nbPop(NB_H_TOP_K,NB_S_FREE_K,NB_KCAP,NB_H_HIGH_K,NB_H_REFUSED_K,NB_FAIL_POOL_K,atomicLoad(&dir[r+NB_REC_KEY]));
+  if(ks!=NB_NONE){atomicStore(&dir[r+NB_REC_CUT],ks);}
+  return ks;
+}
 // NONE -> CLAIM by compare-exchange (weak: retried while the word is still NONE). True for the one winner.
 fn nbClaim(i:u32)->bool{
   loop{
@@ -82,7 +95,7 @@ export interface BrickSetOptions {
 }
 
 export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
-  const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
+  const k = (label: string, bindings: readonly BrickBinding[], body: string, cfgZ?: readonly [number, number]) => kernel(L, label, bindings, body, cfgZ);
   const tiered = opt.tiered === true;
 
   // setMark: one workgroup a brick of F_ALL (G1), in part 2 after F's move and rebin. It writes:
@@ -180,7 +193,8 @@ var<workgroup> wNb:array<u32,27>;
   if(!live||lid!=0u){return;}
   // ACT.RES (bits 10..17) and ACT.SEED (bits 18..25): the residency's brick sources.
   atomicOr(&nbSet[NB_S_ACT+slot],m|(atomicLoad(&wRes)<<10u)|(atomicLoad(&wSeed)<<18u));
-  var cls=0u;
+  // CUT_STATIC (A5) is the stamp's, kept across the class pass: the brick holds its K slot while it is cut.
+  var cls=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS])&NB_CLASS_CUT_STATIC;
   if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
   if(nbSetWord(NB_S_BIN_COUNT+slot)>0u){cls|=NB_CLASS_PARTICLES;}
@@ -217,7 +231,7 @@ var<workgroup> wN:atomic<u32>;
 
   // setClaimPages: a candidate's page takes a C slot (NONE -> CLAIM -> cslot), once. A KEY_CLAIMED page key's word
   // is already CLAIM (resMark's winner); a KEY_CLAIMED brick key's page is resident.
-  const setClaimPages = k("setClaimPages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
+  const setClaimPages = k("setClaimPages", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn setClaimPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) nw:vec3u){
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
   for(var e=gid.x;e<n;e+=64u*nw.x){
@@ -246,7 +260,7 @@ var<workgroup> wN:atomic<u32>;
 
   // setClaimBricks: a candidate brick takes an F slot under its page's C slot, once. A KEY_CLAIMED key's child word
   // is already CLAIM (resMark's winner). An entering brick's particle support (PSUPPORT) starts empty.
-  const setClaimBricks = k("setClaimBricks", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
+  const setClaimBricks = k("setClaimBricks", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn setClaimBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) nw:vec3u){
   let n=min(atomicLoad(&nbSet[NB_H_N_CAND]),NB_FCAP);
   for(var e=gid.x;e<n;e+=64u*nw.x){
@@ -277,7 +291,7 @@ var<workgroup> wN:atomic<u32>;
   // setLeave: a live F slot of last step's F_ALL without a keep bit leaves (G64:
   // a thread an entry). Its directory word clears and its slot goes back on the
   // stack after every pop of the step. Every mark clears for the next step.
-  const setLeave = k("setLeave", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
+  const setLeave = k("setLeave", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn setLeave(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_F_ALL)){return;}
   let s=nbListSlot(NB_LIST_F_ALL,e);
@@ -292,7 +306,7 @@ var<workgroup> wN:atomic<u32>;
 }`);
 
   // setLeavePages: a live page of last step's C_ALL with no F child left and no keep mark (resMark) leaves.
-  const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
+  const setLeavePages = k("setLeavePages", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn setLeavePages(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_C_ALL)){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);let r=NB_D_CREC+32u*cs;
@@ -401,8 +415,9 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
   // (its first step's part 1 has no class yet), and the word then moves NOW to PREV for this step's setMark. The
   // boot (cfg.z = 2) ORs NOW onto every live brick, so step 1 runs the moved stages on all of F_ALL; its ACTIVE tiles
   // (the boot's class pass, run before the boot's last lists) are kept for step 1's head residency.
-  const fLists: [number, string][] = [[LIST.F_LIQ, "LIQUID"], [LIST.F_SURF, "SURFACE"], [LIST.F_PART, "PARTICLES"], [LIST.F_SEAM, "SEAM"], [LIST.F_SOLID, "NEAR_SOLID"], [LIST.F_BODY, "NEAR_BODY"], [LIST.F_COLD, "COLD"], [LIST.F_CHANGED, "CHANGED"]];
-  const setLists = k("setLists", [CFG, setRW, dirRW], SET_HELPERS + /* wgsl */`
+  // F_BODY (A6) is one list of NEAR_BODY or BODY_WAS: bodyStamp's bricks and its clean-up pass's.
+  const fLists: [number, string][] = [[LIST.F_LIQ, "NB_CLASS_LIQUID"], [LIST.F_SURF, "NB_CLASS_SURFACE"], [LIST.F_PART, "NB_CLASS_PARTICLES"], [LIST.F_SEAM, "NB_CLASS_SEAM"], [LIST.F_SOLID, "NB_CLASS_NEAR_SOLID"], [LIST.F_BODY, "(NB_CLASS_NEAR_BODY|NB_CLASS_BODY_WAS)"], [LIST.F_COLD, "NB_CLASS_COLD"], [LIST.F_CHANGED, "NB_CLASS_CHANGED"]];
+  const setLists = k("setLists", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn setLists(@builtin(global_invocation_id) gid:vec3u){
   let i=gid.x;
   if(i<min(atomicLoad(&nbSet[NB_H_HIGH_F]),NB_FCAP)){
@@ -417,7 +432,7 @@ fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);re
         if(cfg.z==2u){a|=NB_ACT_NOW;atomicStore(&nbSet[NB_S_ACT+i],a);}
         if((a&(NB_ACT_NOW|NB_ACT_PREV))!=0u||(cfg.z==1u&&(cls&NB_CLASS_ENTERING)!=0u)){nbAppend(NB_LIST_F_ACT,i);}
         if(cfg.z==1u){atomicStore(&nbSet[NB_S_ACT+i],select(0u,NB_ACT_PREV,(a&NB_ACT_NOW)!=0u));}
-        ${fLists.map(([j, bit]) => `if((c&NB_CLASS_${bit})!=0u){nbAppend(${j}u,i);}`).join("\n        ")}
+        ${fLists.map(([j, bit]) => `if((c&${bit})!=0u){nbAppend(${j}u,i);}`).join("\n        ")}
       }
     }
   }
@@ -455,6 +470,8 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
     fold(NB_ARGS_FC_G1,nF+nC);fold(NB_ARGS_FC_G8,(nF+nC+7u)/8u);fold(NB_ARGS_FC_G64,(nF+nC+63u)/64u);
     atomicStore(&nbSet[NB_H_LIVE_F],nF);atomicStore(&nbSet[NB_H_LIVE_C],nC);
     atomicMax(&nbSet[NB_H_PEAK_F],nF);atomicMax(&nbSet[NB_H_PEAK_C],nC);
+    // K slots held (A5): the census refuses cuts (UNSUPPORTED) until the operator and F's solid paths read them.
+    let nK=NB_KCAP-min(atomicLoad(&nbSet[NB_H_TOP_K]),NB_KCAP);atomicStore(&nbSet[NB_H_LIVE_K],nK);atomicMax(&nbSet[NB_H_PEAK_K],nK);
     // cfg.z = 1 (part 2): no churn (the head's counts stay for the receipt).
     if(cfg.z==0u){
       atomicStore(&nbSet[NB_H_N_ENTER_F],count(NB_LIST_F_ENTER));atomicStore(&nbSet[NB_H_N_LEAVE_F],count(NB_LIST_F_LEAVE));
@@ -474,6 +491,20 @@ fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold
   atomicStore(&nbSet[NB_H_LIST_COUNT+NB_LIST_C_ENTER],0u);atomicStore(&nbSet[NB_H_LIST_COUNT+NB_LIST_C_LEAVE],0u);
 }`);
 
-  return { setMark, setMarkPages, setClaimPages, setClaimBricks, setLeave, setLeavePages, setRecords, setInit, bootPhi, setLists, setArgs, stepEnd };
+  // setKRelease (A5): a thread an entry, after every stamp of the step (the stamp stage, A6), so no K slot is reused in
+  // the step that freed it. cfg.z = 0 over F_ALL: a brick that holds a slot with no K_HOLD bit gives it back. cfg.z = 1
+  // over F_LEAVE: a leaving brick gives back its slot (its record stays readable: its F slot is not reused this step).
+  const setKRelease = k("setKRelease", [CFG, setRW, dirRW], BRICK_SET_HELPERS_WGSL + /* wgsl */`
+@compute @workgroup_size(64) fn setKRelease(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let list=select(NB_LIST_F_ALL,NB_LIST_F_LEAVE,cfg.z==1u);
+  let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(list)){return;}
+  let s=nbListSlot(list,e);let r=NB_D_FREC+32u*s;let ks=atomicLoad(&dir[r+NB_REC_CUT]);
+  if(ks==NB_NONE){return;}
+  if(cfg.z==0u&&(atomicLoad(&dir[r+NB_REC_CLASS])&NB_CLASS_K_HOLD)!=0u){return;}
+  atomicStore(&dir[r+NB_REC_CUT],NB_NONE);
+  nbPush(NB_H_TOP_K,NB_S_FREE_K,ks);
+}`, [0, 1]);
+
+  return { setMark, setMarkPages, setClaimPages, setClaimBricks, setLeave, setLeavePages, setRecords, setInit, bootPhi, setLists, setArgs, setKRelease, stepEnd };
 }
 

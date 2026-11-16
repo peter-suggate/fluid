@@ -71,7 +71,7 @@ from coordinates *before* the directory lookup, so no lookup sees a negative coo
 | F | an F brick | `FCAP` | `F_FREE` |
 | C | a resident page | `CCAP` | `C_FREE` |
 | B | a BULK16 page | `BCAP` (0 until M3) | `B_FREE` |
-| K (cut) | an F brick with a static-solid cut | `KCAP` | `K_FREE` |
+| K (cut) | an F brick with a static-solid cut or a body near it (`K_HOLD`: CUT_STATIC, NEAR_BODY or BODY_WAS; A5) | `KCAP` | `K_FREE` |
 
 Capacities come from `scene.fluid.brickPools` (§9), set from the M0(b) measured peaks. There is no
 runtime growth. A pop from an empty stack latches the kind's `FAIL.POOL_*` bit (§8), counts the
@@ -94,7 +94,8 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
   The arena measured 2.5x slower staging at 512. Words 512..519 of each slot are padding: never
   read, never written.
 - **F and C share a pool's channel list.** The C region holds the same channels at 4h.
-- The cut pool has a K region only: `BASE[cut][K][ch] = ch * KCAP * 520`.
+- The cut pool has a K region only: `BASE[cut][K][ch] = ch * KCAP * 520`, then one `BMASK` word a K slot at
+  `7 * KCAP * 520` (`NB_CUT_BMASK`, A1: P's candidate-body mask). The pool is `7 * KCAP * 520 + KCAP` words.
 
 ### 2.3 Channels (v1)
 
@@ -112,6 +113,7 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | `pres` | 14 | `B` | cell: the row's start (pInit/P_BASE), for the seam heads in `project` (amended at M2, lane P) | `operator`, P's setup | P |
 | `cut` | 0 | `FRAC` | cell | `solidStamp` | `operator`, F's solid paths |
 | `cut` | 1–3 | `AP0 AP1 AP2` | lower face | `solidStamp` | as above |
+| `cut` | 4–6 | `W0 W1 W2` | lower face: a body's face velocity (A1) | `bodyStamp` (P); 0 from whichever stamp first writes a fresh slot | the operator's RHS, F's solid paths |
 
 - **The `phi` pool is bound as `array<u32>`.** φ words are read as `bitcast<f32>`, so FLAGS
   words never pass through a float register: a denormal pattern could be flushed.
@@ -445,9 +447,11 @@ There is no second structure to disagree with.
 | 6 | `SKIRT` | `setUpdate` | origin at or beyond `N` on some axis (vertex storage only) |
 | 7 | `COLD` | `setMark` (M3) | in a frozen region |
 | 8 | `CHANGED` | `setMark` | a tile's tier changes this step (`setTransfer`'s input) |
-| 9–15 | reserved, E | | |
+| 9 | `CUT_STATIC` | `solidStamp` (E, A5) | its cells meet a static solid; kept by `setMark`; the brick holds a K slot |
+| 10–15 | reserved, E | | |
 | 16–23 | reserved, F | | |
-| 24–29 | reserved, P | | |
+| 24 | `BODY_WAS` | `setMark` (P, A2) | NEAR_BODY last step: bodyStamp's clean-up pass |
+| 25–29 | reserved, P | | |
 | 30 | `ENTERING` | `setUpdate` | entered this step; its channels are not yet initialised |
 | 31 | `LEAVING` | `setUpdate` | leaves this step; its slot returns at the end of `setUpdate` |
 
@@ -569,6 +573,11 @@ its `TOP_*` word.
 - Pushes happen only after every pop of the step (`setLeave`, after the claims), so no slot is
   reused in the step that freed it.
 - Page-local slot order (design §2.1, 1.15–1.25x) is M1's measurement, not part of the ABI.
+- **K slots (A5).** A stamp takes one with `nbKTake(fs)` (brick-set.wgsl.ts `BRICK_SET_HELPERS_WGSL`): the record's
+  word 30 if set, else a pop (POOL_K on underflow; the brick stays uncut). `setKRelease` gives them back after every
+  stamp of the step: over F_ALL a slot whose brick has no `K_HOLD` bit, over F_LEAVE every slot. `setArgs` writes
+  `LIVE_K` and `PEAK_K`; the census latches UNSUPPORTED while `LIVE_K` is nonzero, until the operator and F's solid
+  paths read cuts.
 
 ### 5.4 Marks, candidates and bounds
 
@@ -876,7 +885,7 @@ indirect argument that can be zero.
 
 | part | stage | kernels (owner) |
 |---|---|---|
-| 1 | head | `bodyStamp` (P, bodies only), `solidStamp` (E, gated by ring flag bit 0); the census, the residency (`resMark` ×2, the claims, `setLeave`, `setLeavePages`, records, init, lists; §5.4) and, tiered, `censusWant` and the transfer (E) |
+| 1 | head | the census, the residency (`resMark` ×2, the claims, `setLeave`, `setLeavePages`, records, init, lists; §5.4) and, tiered, `censusWant` and the transfer (E); then the stamp stage (A6): `solidStamp` (E), the stage set's `stamp` (P's `bodyStamp` and clean-up), `setKRelease` ×2 (E, with a K pool); then the churn lists clear |
 | 1 | move | `pTrace`, `pBand`, `pSolid` (F) |
 | 1 | rebin | `pCount`, `pScan`, `pScatter` (F) |
 | 2 | brick set | `setMark` (class words, the 1-ring check), `setMarkPages` (tiered, `LIQUID_TILES`), `setLists` (E) |

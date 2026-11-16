@@ -14,6 +14,7 @@
  * - Every dispatch is either indirect from a list or sized from a capacity.
  * - Nothing is sized from the lattice.
  */
+import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, type BrickCapacities } from "./brick-abi";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
@@ -41,6 +42,9 @@ export interface BrickEngineOptions {
   readonly capacities: BrickCapacities;
   readonly apic?: boolean;
   readonly liquid: readonly BrickLiquidBox[];
+  /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
+   * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
+  readonly staticMask?: BrickStaticMaskBinding;
   /** The pressure solver at the slot (brick-abi.md §6.1). */
   readonly solver: PressureSolverFactory;
   /** F's stages (brick-abi.md §6.2; brick-stages.ts). */
@@ -156,7 +160,7 @@ export class BrickEngine {
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">): BrickStageSchedule {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
@@ -249,7 +253,13 @@ export class BrickEngine {
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
     ];
-    const head = censused ? [...headCensus(), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate), churnClear] : [];
+    // The stamp stage (A6): E's solidStamp (M3), then the stage set's (P's bodyStamp, M5), then the K slots go back
+    // (A5: after every pop of the step). With no K pool and no stamp it is empty: the dam's schedule is unchanged.
+    const stamp: BrickPlacement[] = [...(mask ? [{ kernel: brickSolidStampKernels(layout, mask).solidStamp, dispatch: list(LIST.F_ENTER, "G1") }] : []), ...(stages.stamp ?? []), ...(layout.cap.k > 0 ? [
+      { kernel: set.setKRelease, dispatch: list(LIST.F_ALL, "G64"), z: 0 },
+      { kernel: set.setKRelease, dispatch: list(LIST.F_LEAVE, "G64"), z: 1 },
+    ] : [])];
+    const head = censused ? [...headCensus(), ...residency, ...tail, ...lists(1), ...want, ...(tiered ? [...transfer, ...(heat?.cert ?? [])] : certificate), ...stamp, churnClear] : [];
     const commit = transfer.filter(p => p.kernel.label === "setCommitMask");
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
@@ -261,7 +271,7 @@ export class BrickEngine {
     // and keeps the ACTIVE tiles): step 1's head residency reads them (brick-residency.wgsl.ts), and the kick's lists
     // (F_LIQ) are the boot state's.
     const bootMark: BrickPlacement[] = [...part2.slice(0, part2.findIndex(p => p.kernel === set.setLists)), ...lists(2)];
-    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists(2), ...bootHead, ...stages.boot, ...bootMark, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
+    const boot: BrickPlacement[] = [...update(1), ...tail, bootPhi, ...lists(2), ...bootHead, ...stamp, ...stages.boot, ...bootMark, ...kick, { kernel: set.stepEnd, dispatch: direct(1), z: 1 }];
     // Part 1: the head (P's bodyStamp, E's solidStamp: M3 and M5; the census, residency and remap), then the release
     // port's reach words (after every head claim, before move), F's move and rebin.
     return { part1: [...head, ...release.part1, ...stages.move, ...stages.rebin], part2, boot };
@@ -275,7 +285,7 @@ export class BrickEngine {
     validateBrickStages(stages);
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.liquid.length);
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.liquid.length, options.staticMask);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
@@ -333,6 +343,8 @@ export class BrickEngine {
     make("parts", L.partsWords);
     make("xfer", L.xferWords);
     make("census", brickCensusBuffers(L).census);
+    const mask = this.options.staticMask;
+    if (mask) d.queue.writeBuffer(make("solid", mask.words.length), 0, mask.words.buffer, mask.words.byteOffset, mask.words.byteLength);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);

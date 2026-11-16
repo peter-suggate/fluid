@@ -46,6 +46,13 @@ export interface BrickStages {
   /** Once at boot, after E's boot phi and lists. */
   readonly boot: readonly BrickPlacement[];
   /**
+   * The stamp stage (A6, m5-bodies-design-2026-11-17.md §8.1), after E's solidStamp: P's bodyStamp and its clean-up
+   * pass. The engine places it at the end of the part 1 head (after the residency, lists(1), want, the tiered transfer
+   * and the certificate; before the churn lists clear and the release port) and once at boot after the boot's lists,
+   * then E's setKRelease (A5). F_ENTER and F_BODY are valid there. Absent: no body stage.
+   */
+  readonly stamp?: readonly BrickPlacement[];
+  /**
    * The first frame's projected half kick, U <- P(U + g dt/2), after `boot`. The old engine's host runs it before
    * its first frame (webgpu-uniform-reference.ts kickMixedFrame, UniformMixedFrame.kick): the stored velocity is
    * the drift's, half a step ahead of the positions. Gravity alone, no transport, viscosity, capillarity or volume
@@ -83,7 +90,7 @@ export interface BrickStageContext {
 
 export type BrickStagesFactory = (context: BrickStageContext) => BrickStages;
 
-const stageLists = (s: BrickStages) => [...s.move, ...s.rebin, ...s.levelSet, ...s.velocity, ...s.tail, ...s.boot, ...(s.kick?.force ?? []), ...(s.kick?.after ?? []), ...(s.kick?.seed ?? [])];
+const stageLists = (s: BrickStages) => [...s.move, ...s.rebin, ...s.levelSet, ...s.velocity, ...s.tail, ...s.boot, ...(s.stamp ?? []), ...(s.kick?.force ?? []), ...(s.kick?.after ?? []), ...(s.kick?.seed ?? [])];
 
 /** Checks a stage set's gated dispatches and buffer names. */
 export function validateBrickStages(s: BrickStages): void {

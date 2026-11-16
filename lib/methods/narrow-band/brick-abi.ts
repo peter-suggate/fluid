@@ -118,8 +118,14 @@ export const STATE = { PRESSURE_CAP: 1 } as const;
 export const F_CLASS = {
   LIQUID: 1 << 0, SURFACE: 1 << 1, PARTICLES: 1 << 2, NEAR_SOLID: 1 << 3, NEAR_BODY: 1 << 4,
   SEAM: 1 << 5, SKIRT: 1 << 6, COLD: 1 << 7, CHANGED: 1 << 8,
+  /** E (A5): the brick's cells meet a static solid; set by solidStamp, and the brick holds a K slot. */
+  CUT_STATIC: 1 << 9,
+  /** P (A2): NEAR_BODY last step, kept one step so the clean-up pass clears the body's cut. */
+  BODY_WAS: 1 << 24,
   ENTERING: 1 << 30, LEAVING: 2 ** 31,
 } as const;
+/** A5: a brick holds a K slot while any of these is set (setKRelease returns it otherwise). */
+export const K_HOLD = F_CLASS.CUT_STATIC | F_CLASS.NEAR_BODY | F_CLASS.BODY_WAS;
 /** Record words (F and C). */
 export const REC = { SELF: 13, PARENT: 27, MASK: 28, KEY: 29, CUT: 30, CLASS: 31, C_CHILDREN: 27, C_LIQUID_TILES: 28 } as const;
 
@@ -172,7 +178,9 @@ export const POOLS = {
   vel: ["U0", "U1", "U2", "UP0", "UP1", "UP2", "US0", "US1", "US2"],
   phi: ["PHI", "PHI1", "FLAGS"],
   pres: ["X", "R", "Z", "D", "Q", "RHS", "DIAG", "K0", "K1", "K2", "KU0", "KU1", "KU2", "PPHI", "B"],
-  cut: ["FRAC", "AP0", "AP1", "AP2"],
+  /** K-indexed: the open fraction and lower-face apertures (static and body), the body's face velocities W (A1), then
+   * one BMASK word a K slot after the channels (cutBmask). */
+  cut: ["FRAC", "AP0", "AP1", "AP2", "W0", "W1", "W2"],
 } as const;
 export type PoolName = keyof typeof POOLS;
 
@@ -295,10 +303,13 @@ export class BrickLayout {
     const page = dtake(pageWords), child = dtake(CHILD_WORDS * c), frec = dtake(RECORD_WORDS * f), crec = dtake(RECORD_WORDS * c), cmask = dtake(CMASK_WORDS * c);
     this.dir = { page, child, frec, crec, cmask, words: d };
     const fc = (n: number) => n * BRICK_STRIDE * (f + c);
-    this.poolWords = { vel: fc(POOLS.vel.length), phi: fc(POOLS.phi.length), pres: fc(POOLS.pres.length), cut: POOLS.cut.length * BRICK_STRIDE * Math.max(k, 1) };
+    this.poolWords = { vel: fc(POOLS.vel.length), phi: fc(POOLS.phi.length), pres: fc(POOLS.pres.length), cut: POOLS.cut.length * BRICK_STRIDE * Math.max(k, 1) + Math.max(k, 1) };
     this.partsWords = 2 * particles * this.particleStride;
     this.xferWords = 2 * 384 * t;
   }
+
+  /** The cut pool's BMASK region (A1): one word a K slot, after the channels. */
+  get cutBmask(): number { return POOLS.cut.length * this.cap.k * BRICK_STRIDE; }
 
   /** A channel's first word in its pool (brick-abi.md §2.2). */
   base(pool: PoolName, kind: "F" | "C" | "K", channel: string): number {
@@ -361,6 +372,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   for (const [name, v] of Object.entries(FAIL)) c(`NB_FAIL_${name}`, v);
   for (const [name, v] of Object.entries(STATE)) c(`NB_STATE_${name}`, v);
   for (const [name, v] of Object.entries(F_CLASS)) c(`NB_CLASS_${name}`, v);
+  c("NB_CLASS_K_HOLD", K_HOLD); c("NB_CUT_BMASK", L.cutBmask);
   for (const [name, v] of Object.entries(REC)) c(`NB_REC_${name}`, v);
   for (const [name, v] of Object.entries(FLAG)) c(`NB_FLAG_${name}`, v);
   for (const [name, v] of Object.entries(LIST)) c(`NB_LIST_${name}`, v);

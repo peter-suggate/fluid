@@ -2262,3 +2262,66 @@ engine and P and F consume it.
 - brick-static on the GPU: 6 of 6 pass (timing slot, rc 0, no 00000206).
 - No engine kernel compiles these hooks yet (only P's tests do), so the dam's step is unchanged and the dam was not
   re-run.
+
+## 2026-11-17: ABI A1/A5/A6 for P's bodyStamp, and solidStamp (M3 stage 2b)
+
+These are the shapes m5-bodies-design-2026-11-17.md §8.1 fixes. brick-abi.md is amended to match.
+
+**A1, the cut pool:** FRAC, AP0–2 and W0–2 per K slot, then one BMASK word per K slot at 7·KCAP·520 (NB_CUT_BMASK).
+The pool is 7·KCAP·520 + KCAP words.
+
+**A5, K slots:**
+- F_CLASS bit 9 CUT_STATIC is E's: the stamp sets it, and setMark keeps it across the class pass. Bit 24 BODY_WAS is P's.
+- K_HOLD (NB_CLASS_K_HOLD) is CUT_STATIC | NEAR_BODY | BODY_WAS.
+- nbKTake(fs) is in the exported BRICK_SET_HELPERS_WGSL. It returns the brick's held slot (REC.CUT), or pops one.
+  On underflow it latches POOL_K and returns NONE.
+- setKRelease (cfgZ 0/1) runs after every stamp of the step:
+  - over F_ALL, it pushes a slot whose brick holds no K_HOLD bit;
+  - over F_LEAVE, it pushes every held slot.
+  - It clears REC.CUT before each push.
+- setArgs keeps LIVE_K and PEAK_K. The census's UNSUPPORTED latch while LIVE_K ≠ 0 stays, as intended, until the
+  operator and F's solid paths read cuts.
+- F_BODY lists NEAR_BODY | BODY_WAS.
+
+**A6, the stamp stage:** BrickStages.stamp (P's bodyStamp) runs after solidStamp, then the two setKRelease passes.
+In the head it sits after the tiered transfer and the certificate, before churnClear; at boot, after bootHead. With
+k = 0 and no mask the stage is empty, so the dam's schedule is unchanged. Only setMark, setArgs and setLists'
+F_BODY test changed in the dam's kernels.
+
+**solidStamp:** BrickEngineOptions.staticMask binds brickStaticMask's words as `solid`. Each F_ENTER brick gets one
+workgroup, and solidStamp skips NEAR_BODY bricks (P's):
+- A brick is cut when one of its cells, or the lower neighbour of a cell along an axis, is an in-box mask voxel.
+- A cut brick takes a K slot and becomes CUT_STATIC. It gets FRAC = cellOpen and AP_a = faceOpen (0 at the box
+  faces, the box rule's), with W and BMASK 0.
+- FLAGS.OPEN clears on every closed cell.
+
+No scene binds the mask yet. The voxel gap stays until the consumers read cuts.
+
+**Tests**
+- CPU, brick-engine.test.ts:
+  - the A1/A5 ABI: offsets and words;
+  - the A6 schedule: no placement at k = 0. Otherwise the order is stamp, setKRelease, setKRelease:1, then stepEnd,
+    and at boot the stamp follows bootPhi and the census.
+- GPU, the K lifecycle (A5): a test stamp takes a slot once per brick, POOL_K latches past KCAP, and setKRelease
+  returns the slots.
+- GPU, solidStamp on [64,32,64] with three patches: a box, an ellipsoid across two bricks, and a column that cuts a
+  brick by its faces alone. CUT_STATIC lands exactly on the expected bricks, FRAC/AP/W equal the hooks' mirror,
+  FLAGS.OPEN and BMASK are correct, and LIVE_K equals the cut count.
+
+**Gates**
+- check:types: lane-n's 3 only.
+- test:unit: 1885 pass, 0 fail.
+- GPU units, serial, in the timing slot: 66 of 66 pass, rc 0, no 00000206. The set is brick-static, brick-engine,
+  brick-census, brick-abi, the three pressure suites, brick-set-tiers and bodies-shapes.
+- Dam-300, fenced, timing slot: judged Overall PASS against ref-2761350a.
+
+Step time over steps 13–165, from one paired round:
+
+| tree | median (ms) | mean (ms) |
+|---|---|---|
+| HEAD 14b1ecc1 | 35.26 | 40.62 |
+| HEAD + this diff only | 35.35 | 40.35 |
+
+- The paired per-step difference has a median of +0.24 ms (139 steps, sampled steps excluded). That is inside
+  single-run noise.
+- Both trees sit above the 34.4–34.7 ms reference today, so the absolute level is the machine's.

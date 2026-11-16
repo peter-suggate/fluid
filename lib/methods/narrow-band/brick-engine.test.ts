@@ -20,13 +20,13 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, LIST, NONE, PHI_AIR, PHI_AIR_C, REC, ARGS, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
+import { BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, K_HOLD, LIST, NONE, PHI_AIR, PHI_AIR_C, POOLS, REC, ARGS, brickAbiWGSL, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
 import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
-import { bindGroupLayoutEntries, MAX_STORAGE_BINDINGS } from "./brick-kernel";
-import { brickSetKernels } from "./brick-set.wgsl";
+import { bindGroupLayoutEntries, declareBindings, MAX_STORAGE_BINDINGS, type BrickBinding, type BrickKernel, type BrickPlacement } from "./brick-kernel";
+import { BRICK_SET_HELPERS_WGSL, brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
@@ -539,4 +539,147 @@ test("brick engine: auto (the default) takes brick exactly where the scene has n
   assert.equal(nbEngineStatusText({ requested: "uniform", ran: "uniform" }), "Uniform");
   assert.equal(nbEngineStatusText({ requested: "brick", ran: "brick" }), "Brick");
   assert.throws(() => nbEngineChoice(dam, { ...defaults, engine: "bricks" }), /unknown engine "bricks"/);
+});
+
+// ---- A1, A5, A6 (m5-bodies-design-2026-11-17.md §8.1): the cut pool's channels, the K slots and the stamp stage. ----
+
+test("brick ABI (A1, A5): the cut pool holds FRAC, AP0-2, W0-2 a K slot and one BMASK word a slot after them", () => {
+  const L = new BrickLayout({ lattice: [64, 32, 64], f: 100, c: 8, b: 0, k: 40, particles: 1024 });
+  assert.deepEqual([...POOLS.cut], ["FRAC", "AP0", "AP1", "AP2", "W0", "W1", "W2"]);
+  assert.equal(L.base("cut", "K", "W2"), 6 * 40 * BRICK_STRIDE);
+  assert.equal(L.cutBmask, 7 * 40 * BRICK_STRIDE);
+  assert.equal(L.poolWords.cut, 7 * 40 * BRICK_STRIDE + 40);
+  assert.equal(K_HOLD, F_CLASS.CUT_STATIC | F_CLASS.NEAR_BODY | F_CLASS.BODY_WAS);
+  const bits = Object.values(F_CLASS);
+  assert.equal(new Set(bits).size, bits.length, "class bits are distinct");
+  assert.equal(F_CLASS.CUT_STATIC, 1 << 9); assert.equal(F_CLASS.BODY_WAS, 1 << 24);
+});
+
+/** A stand-in stamp (tests only): an entering brick with an even x coordinate takes a K slot and is CUT_STATIC. */
+function testStamp(L: BrickLayout): BrickPlacement {
+  const bindings: BrickBinding[] = [{ name: "cfg", kind: "uniform" }, { name: "set", kind: "rw", type: "array<atomic<u32>>" }, { name: "dir", kind: "rw", type: "array<atomic<u32>>" }];
+  const kernel: BrickKernel = { label: "testStamp", entry: "testStamp", bindings, code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: true } }), declareBindings(bindings), BRICK_SET_HELPERS_WGSL, /* wgsl */`
+@compute @workgroup_size(64) fn testStamp(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let e=64u*nbGroup(wid)+lid;if(e>=nbListCount(NB_LIST_F_ENTER)){return;}
+  let s=nbListSlot(NB_LIST_F_ENTER,e);let r=NB_D_FREC+32u*s;
+  if((nbKeyCoord(atomicLoad(&dir[r+NB_REC_KEY])).x&1)!=0){return;}
+  if(nbKTake(s)!=NB_NONE){atomicOr(&dir[r+NB_REC_CLASS],NB_CLASS_CUT_STATIC);}
+}`].join("\n") };
+  return { kernel, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ENTER + ARGS.G64 } };
+}
+
+test("brick engine (A6): the stamp stage closes the head and follows the boot's census; no K pool and no stamp, no change", () => {
+  const L0 = new BrickLayout({ lattice: [64, 32, 64], f: 100, c: 8, b: 0, k: 0, particles: 1024 });
+  const base = (L: BrickLayout) => bringUpStages({ layout: L, dt_s: DT, h_m: H_M, gravity_mps2: [0, -G, 0], values: {} });
+  const s0 = BrickEngine.scheduleFor(L0, bringUpCG(L0), base(L0), 1);
+  assert.ok(![...s0.boot, ...s0.part1, ...s0.part2].some(p => p.kernel.label === "setKRelease"), "k = 0 (the dam): no release");
+  const L = new BrickLayout({ lattice: [64, 32, 64], f: 100, c: 8, b: 0, k: 40, particles: 1024 }), stamp = testStamp(L);
+  const s = BrickEngine.scheduleFor(L, bringUpCG(L), { ...base(L), stamp: [stamp] }, 1);
+  const labels = (ps: readonly BrickPlacement[]) => ps.map(p => `${p.kernel.label}${p.z ? `:${p.z}` : ""}`);
+  const p1 = labels(s.part1), at = p1.indexOf("testStamp");
+  assert.deepEqual(p1.slice(at, at + 4), ["testStamp", "setKRelease", "setKRelease:1", "stepEnd:1"], "stamp, the releases, then the churn lists clear");
+  assert.ok(p1.lastIndexOf("setArgs") < at, "after the head's lists");
+  assert.ok(!labels(s.part2).includes("testStamp"));
+  const b = labels(s.boot), bs = b.indexOf("testStamp");
+  assert.ok(bs > b.indexOf("bootPhi") && bs > b.lastIndexOf("censusBegin"), "boot: after the boot phi, its lists and its census");
+  assert.equal(b[bs + 1], "setKRelease");
+});
+
+test("brick engine (GPU, A5): K slots are taken once a brick, refused past KCAP (POOL_K), and given back after the stamps", GPU, async () => {
+  await withDevice("brick K slots", async device => {
+    const lattice: Vec3 = [64, 32, 64], liquid = [sheet(20, 10.3, 20)];
+    const make = async (k: number) => {
+      const o = options(lattice, liquid, 200, 16);
+      return BrickEngine.create(device, { ...o, capacities: { ...o.capacities, k }, stages: x => ({ ...bringUpStages(x), stamp: [testStamp(x.layout)] }) });
+    };
+    const even = bootBricks(options(lattice, liquid, 200, 16)).filter(key => (brickKeyCoord(key)[0] & 1) === 0);
+    const K = even.length + 5, e = await make(K), L = e.layout;
+    let s = await snapshot(e);
+    const rec = (slot: number, w: number) => s.dir[L.dir.frec + 32 * slot + w]!;
+    assert.equal(s.header[H.FAIL], 0);
+    const held = new Map<number, number>();
+    for (const [key, slot] of s.bricks) {
+      const isEven = (brickKeyCoord(key)[0] & 1) === 0, ks = rec(slot, REC.CUT), cls = rec(slot, REC.CLASS);
+      assert.equal((cls & F_CLASS.CUT_STATIC) !== 0, isEven, `brick ${brickKeyCoord(key)} class 0x${cls.toString(16)} (kept by the class pass)`);
+      if (isEven) { assert.ok(ks < K); held.set(slot, ks); } else assert.equal(ks, NONE);
+    }
+    assert.equal(held.size, even.length);
+    assert.equal(s.header[H.LIVE_K], even.length); assert.equal(s.header[H.TOP_K], K - even.length); assert.equal(s.header[H.PEAK_K], even.length);
+    const free = () => Array.from(s.set.subarray(L.set.freeK, L.set.freeK + s.header[H.TOP_K]!));
+    assert.deepEqual([...free(), ...held.values()].sort((a, b) => a - b), Array.from({ length: K }, (_, i) => i), "free stack and held slots partition K");
+    // F_ALL: a brick with no K_HOLD bit gives its slot back; the others keep theirs.
+    const slots = [...held.keys()], cleared = slots.slice(0, 2), leaving = slots.slice(2, 5);
+    for (const slot of cleared) e.write("dir", L.dir.frec + 32 * slot + REC.CLASS, new Uint32Array([0]));
+    const set = brickSetKernels(L);
+    await e.run([{ kernel: set.setArgs, dispatch: { direct: [1, 1, 1] }, z: 1 }, { kernel: set.setKRelease, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G64 }, z: 0 }]);
+    s = await snapshot(e);
+    for (const slot of cleared) assert.equal(rec(slot, REC.CUT), NONE);
+    for (const slot of slots.slice(2)) assert.equal(rec(slot, REC.CUT), held.get(slot));
+    assert.equal(s.header[H.TOP_K], K - even.length + 2);
+    // F_LEAVE: a leaving brick gives its slot back whatever its class.
+    e.write("set", L.set.lists[LIST.F_LEAVE]!, new Uint32Array(leaving));
+    e.write("set", H.LIST_COUNT + LIST.F_LEAVE, new Uint32Array([leaving.length]));
+    await e.run([{ kernel: set.setArgs, dispatch: { direct: [1, 1, 1] }, z: 1 }, { kernel: set.setKRelease, dispatch: { indirect: ARGS.PER_LIST * LIST.F_LEAVE + ARGS.G64 }, z: 1 }]);
+    s = await snapshot(e);
+    for (const slot of leaving) assert.equal(rec(slot, REC.CUT), NONE);
+    assert.equal(s.header[H.TOP_K], K - even.length + 5);
+    assert.deepEqual([...free(), ...slots.slice(5).map(x => held.get(x)!)].sort((a, b) => a - b), Array.from({ length: K }, (_, i) => i));
+    e.destroy();
+    // Past KCAP: the pop is refused, POOL_K latches with the key, and exactly KCAP bricks are cut.
+    const small = await make(even.length - 3);
+    const t = await snapshot(small);
+    assert.equal(t.header[H.FAIL]! & FAIL.POOL_K, FAIL.POOL_K);
+    assert.equal(t.header[H.REFUSED_K], 3); assert.equal(t.header[H.TOP_K], 0);
+    assert.equal([...t.bricks.values()].filter(slot => (t.dir[small.layout.dir.frec + 32 * slot + REC.CLASS]! & F_CLASS.CUT_STATIC) !== 0).length, even.length - 3);
+    small.destroy();
+  });
+});
+
+test("brick engine (GPU, M3 2b): solidStamp cuts exactly the bricks the mask meets, with the hooks' FRAC and apertures", GPU, async () => {
+  const { SolidOccupancyMask, solidOccupancyMaskVoxel } = await import("../../core/solid-occupancy-mask");
+  const { createSolidWorld } = await import("../../core/solid-world");
+  const { brickStaticMaskWalls, brickStaticMirror } = await import("./brick-static.wgsl");
+  const lattice: Vec3 = [64, 32, 64], liquid = [sheet(20, 10.3, 20)];
+  // A box in brick 1, a round fill across bricks 2 and 3 (partial coverage), and a column at x = 15 whose voxels
+  // sit below brick 2's lower x faces only (brick 2 is cut by its faces, not its cells).
+  const walls = brickStaticMaskWalls(lattice, false);
+  const mask = new SolidOccupancyMask({ walls, tileKeys: 0, slots: 64, separateTerrain: true });
+  mask.update(createSolidWorld([
+    { operation: "fill", minimum: [10, 0, 10], maximumExclusive: [14, 5, 14] },
+    { operation: "fill", kind: "ellipsoid", minimum: [20, 2, 4], maximumExclusive: [27, 9, 11] },
+    { operation: "fill", minimum: [15, 0, 30], maximumExclusive: [16, 3, 33] },
+  ]));
+  mask.seal(mask.slotsHeld);
+  const m = brickStaticMirror({ box: lattice, openTop: false, frame: [0, 0, 0], h: [1, 1, 1], mask: mask.words });
+  const inBox = (c: readonly number[]) => c.every((v, a) => v >= 0 && v < lattice[a]!);
+  const maskVoxel = (c: readonly number[]) => inBox(c) && solidOccupancyMaskVoxel(mask.words, c[0]!, c[1]!, c[2]!);
+  const down = (c: readonly number[], a: number) => c.map((v, k) => v - (k === a ? 1 : 0));
+  await withDevice("brick solidStamp", async device => {
+    const o = options(lattice, liquid, 200, 16);
+    const e = await BrickEngine.create(device, { ...o, capacities: { ...o.capacities, k: 64 }, staticMask: { words: mask.words, walls } });
+    const L = e.layout, s = await snapshot(e), cut = asF32(await e.read("cut")), phi = await e.read("phi");
+    assert.equal(s.header[H.FAIL], 0);
+    let cutBricks = 0, faceCut = 0, bad = 0;
+    for (const [key, slot] of s.bricks) {
+      const b = brickKeyCoord(key), r = L.dir.frec + 32 * slot, ks = s.dir[r + REC.CUT]!, cls = s.dir[r + REC.CLASS]!;
+      const cells = Array.from({ length: 512 }, (_, l) => [8 * b[0] + (l & 7), 8 * b[1] + ((l >> 3) & 7), 8 * b[2] + (l >> 6)]);
+      const byCell = cells.some(maskVoxel), want = byCell || cells.some(c => [0, 1, 2].some(a => maskVoxel(down(c, a))));
+      assert.equal((cls & F_CLASS.CUT_STATIC) !== 0, want, `brick ${b}`);
+      if (!want) { assert.equal(ks, NONE); continue; }
+      cutBricks++; if (!byCell) faceCut++;
+      assert.ok(ks < 64);
+      cells.forEach((c, l) => {
+        const at = BRICK_STRIDE * ks + l;
+        const want = [m.cellOpen(c), ...[0, 1, 2].map(a => inBox(down(c, a)) && inBox(c) ? m.faceOpen(down(c, a), a) : 0), 0, 0, 0];
+        const have = ["FRAC", "AP0", "AP1", "AP2", "W0", "W1", "W2"].map(ch => cut[L.base("cut", "K", ch) + at]!);
+        const open = (phi[L.base("phi", "F", "FLAGS") + BRICK_STRIDE * slot + l]! & 1) !== 0;
+        if (want.some((v, j) => Math.fround(v) !== have[j]) || open !== (want[0]! > 0)) { if (bad++ < 3) console.error(b, c, want, have, open); }
+      });
+      assert.equal(new Uint32Array(cut.buffer)[L.cutBmask + ks], 0);
+    }
+    assert.equal(bad, 0);
+    assert.ok(cutBricks >= 4 && faceCut >= 1, `${cutBricks} cut bricks, ${faceCut} cut by a face alone`);
+    assert.equal(s.header[H.LIVE_K], cutBricks);
+    e.destroy();
+  });
 });
