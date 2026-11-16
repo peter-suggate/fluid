@@ -18,9 +18,9 @@ import { sceneDocument } from "../../core/scene-definition";
 import { getSceneDefinition } from "../../core/scenes";
 import { fluidLatticeCellVolumes, fluidLatticeVertexPhi } from "../../core/initial-liquid-lattice";
 import { uniformInitialLiquidVelocity } from "../uniform/uniform-volume-initial";
-import { sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
+import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { BrickEngine, bootBricks, bootPhiAt, initialPhiPages, type BrickEngineOptions, type BrickInitialPhi, type Vec3 } from "./brick-engine";
-import { brickSceneSetup } from "./brick-scene";
+import { BRICK_ENGINE_SCENES, brickSceneSetup } from "./brick-scene";
 import { bootParticleCount, brickInitialLiquid, brickInitialPhi, brickInitialVelocity, closedFormLiquid } from "./brick-initial";
 import type { BrickStagesFactory } from "./brick-stages";
 import { fluidStagesAt } from "./brick-fluid-stages";
@@ -226,4 +226,26 @@ test("brick initial (GPU): the first seeds carry the initial velocity", GPU, asy
     assert.ok(sa <= 1e-4 && sb <= 1e-4, `the seeds move as one body: spread ${sa} moving, ${sb} at rest`);
     assert.ok(d <= 1e-4, `the moving seeds carry v0 to ${d} m/s`);
   });
+});
+
+test("brick initial: a moving liquid in a container that is not whole pages boots on the container's lattice", () => {
+  // The old engine's paged volumes cover its fluid box (the container's cells padded to whole pages past the high
+  // faces); the initial velocity's tiles are the container's (E's catalog sweep, 2026-11-17: these three threw).
+  const method = getMethod(METHOD);
+  for (const id of ["gentle-moving-blob", "geometric-uniform-translation", "coarse-surface-translation"]) {
+    const scene = sceneOf(id), lattice = sceneLatticeDimensions(scene) as unknown as Vec3;
+    assert.ok(sceneFluidLatticeDimensions(scene).some((n, a) => n !== lattice[a]), `${id}: the fluid box is padded`);
+    const v = brickInitialVelocity(scene, lattice)!, T = lattice.map(n => n >> 2);
+    assert.ok(v && v.tiles.length > 0, `${id}: the liquid moves`);
+    assert.ok(v.tiles.every(k => k >= 0 && k < T[0]! * T[1]! * T[2]!), `${id}: every tile is the container's`);
+    const values = resolveMethodValues(method, "balanced", { ...method.appDefaults, engine: "brick" });
+    // Past the catalog gate (as brickEngineGaps's sweep runs it): the setup reaches the initial liquid.
+    const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(id);
+    if (!had) enabled.push(id);
+    try {
+      const r = brickSceneSetup(scene, values);
+      assert.ok(r.setup || r.gaps.length > 0, `${id}: a setup or gaps`);
+      if (r.setup) assert.deepEqual(r.setup.initialVelocity, v, `${id}: the setup's initial velocity`);
+    } finally { if (!had) enabled.splice(enabled.indexOf(id), 1); }
+  }
 });

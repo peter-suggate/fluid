@@ -138,13 +138,17 @@ export function brickInitialVelocity(scene: SceneDescription, lattice: Vec3): Br
   const v = scene.fluid.initialVelocity_m_s;
   if (!v || (v.x === 0 && v.y === 0 && v.z === 0)) return undefined;
   if (![v.x, v.y, v.z].every(Number.isFinite)) throw new Error(`Initial liquid velocity must be finite: ${JSON.stringify(v)}`);
+  // The paged volumes cover the old engine's fluid box (sceneFluidLatticeDimensions: the container's cells padded to
+  // whole pages), from the container's cell 0; its liquid lies in the container's cells, the brick engine's lattice.
+  const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+  if (cells.some((n, a) => n !== lattice[a])) throw new Error(`Brick engine: the initial velocity needs the container's lattice (${cells.join("x")} cells, the engine's ${lattice.join("x")})`);
   const { volume } = fluidLatticePagedCellVolumes(scene, 32), [px, py] = volume.pages, T = lattice.map(n => n >> 2);
-  if (volume.cells.some((n, a) => n !== lattice[a])) throw new Error(`Brick engine: the initial velocity needs the container's lattice (${volume.cells.join("x")}, the engine's ${lattice.join("x")})`);
   const wet = new Set<number>();
   for (const [key, page] of volume.at) {
     const o = [32 * (key % px), 32 * (Math.floor(key / px) % py), 32 * Math.floor(key / (px * py))];
     for (let i = 0; i < 32768; i++) if (page[i]! > 0) {
       const t = [(o[0]! + (i & 31)) >> 2, (o[1]! + ((i >> 5) & 31)) >> 2, (o[2]! + (i >> 10)) >> 2];
+      if (t.some((x, a) => x >= T[a]!)) throw new Error(`Brick engine: initial liquid in the padding past the container's ${lattice.join("x")} cells (tile ${t.join(",")})`);
       wet.add(t[0]! + T[0]! * (t[1]! + T[1]! * t[2]!));
     }
   }
