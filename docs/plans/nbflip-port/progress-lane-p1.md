@@ -1249,3 +1249,90 @@ change where noted.
    velocity. That is at most the write pass's re-tests, about 0.5 ms.
 - With E's R1+R2(b) at −30 to −40% records, the per-record lever scales with records: about 1.3–1.4 ms of
   separation bound left. The per-brick lever scales with F_ALL bricks.
+
+## 2026-11-16: the two move/transfer levers, both no-go at their bars
+
+The bars were set by the coordinator. Lever 1 needed at least 0.8 ms a step with the move bitwise on frozen state. Lever 2
+needed at least 0.5 ms with an exact path. All the trees were built in scratch
+(`fluid-scratch/lane-p1/trees/`), none was landed, and F's files are unchanged on main. All runs used the
+tiered dam with poolF 4913. The runs returned rc 0, or rc 1 where the tool reported a DIFF; the Metal log shows
+no 00000206.
+
+**The separation is verbatim.** pSeparation is the old engine's nbSeparation:
+- it walks the 2^3 cells about floor(q − 0.5) in x, then y, then z order, and each run in filing order;
+- it skips itself and records with w ≤ 0, and takes mass (before.w&7)+1;
+- the update is d += mj/(m+mj)(reach − l)x/l with reach = ri + rj, far = (ri + 0.5)², and n += 1; the result is d/max(n,1);
+- it applies only when coupled, and feeds the surface shift.
+
+F's frozen parity row 73 is bitwise against nbSeparation. No change is needed.
+
+**Where the separation's cost is.** Frozen pMove at step 20 (sep tree), median of 21:
+- 3.45 ms with the separation;
+- 3.07 ms with the run lookups but no inner loop;
+- 2.28 ms with no separation;
+- 3.44 ms with the loads but no arithmetic.
+
+So in pMove the 8 fgRun lookups a record cost about 0.8 ms, the loop's loads about 0.4 ms, and the arithmetic about 0.
+
+**Lever 1: pMove's pair separation (frozen fmoved bitwise, with unfiled records' don't-care slots masked).**
+
+Frozen columns are frozen pMove with its pre-passes, median of 21. "HEAD" is the HEAD tree's pMove timed in the same
+run. The profile column covers steps 18–23 (`--profile=13`).
+
+| tree | form | frozen s20 / s100 (ms) | HEAD s20 / s100 | profile pMove(+pBand) µs | bitwise |
+|---|---|---|---|---|---|
+| sepA | 16 B side array (xyz + mass, 0 = dead) written at pPlace into fmoved's tail; the separation reads it | 3.44 / 3.47 | 3.55 / 3.59 | 4194, 4074 (pScatter +25) | yes |
+| sep | pBand pre-pass writes separation + surface shift | — | — | 1922+1890, 1999+1879 | no (1-ulp FMA) |
+| sepD | pBand pre-pass writes the separation only; pMove keeps pSurfaceShift inline | 3.25 / 3.33 | 3.54 / 3.67 | 1354+2403, 1376+2414 (pScatter +44) | yes |
+| sepF | sepD with pBand a workgroup per F slot: 10³ runs staged in threadgroup memory | 4.07 | 3.57 | — | yes |
+| sepG | sepF at 256 lanes | 3.79 | 3.52 | — | yes |
+| sepH | sepG with the staging done twice (staging costs about 0.1 ms) | 3.89 | 3.54 | — | yes |
+| sepI | pBand per 256 records; the mid record's brick is staged and other bricks read fgRun | 3.53 / 3.50 | 3.53 / 3.57 | — | yes |
+| sepE | sepD with cached bin lookups (x pairs merged) | slower | | | yes |
+
+- **Profile against HEAD.** HEAD's pMove was 4369/4304 µs (Q1/Q3) and pScatter 153/186. sepD's pBand + pMove is
+  about 0.55–0.6 ms below HEAD's pMove. After pScatter's +0.04 it is about −0.5 ms a step.
+  - The side array alone (sepA) is about −0.26 ms.
+- **Unprofiled hold.** 36 steps, step_ms over steps 18–35 (n = 18), fenced. Two runs each, interleaved:
+
+  | tree | median (ms) | mean (ms) |
+  |---|---|---|
+  | HEAD | 65.64, 66.51 | 64.21, 65.83 |
+  | sepA | 66.31, 65.77 | 64.37, 63.80 |
+  | sepD | 66.57, 66.51 | 63.84, 64.12 |
+
+  Hold noise (about ±1 ms) hides a 0.5 ms change.
+- **Threadgroup staging loses (sepF–sepI).**
+  - The staging itself is cheap, about 0.1 ms.
+  - A workgroup per brick serialises the dense bricks (up to about 4k records on 128 lanes).
+  - The chunked form (sepI) still loses about 0.25 ms to sepD. My reading, which I have not measured: in the split
+    pass the per-record fgRun reads mostly hit the cache, so staging has little left to save.
+  - Records average about 120 a brick against 10³ staged cells, which is about 8 lookups a record either way.
+- **Verdict: no-go at the 0.8 ms bar.** The best exact form is sepD, about −0.5 ms a step by profile and bitwise
+  at frozen steps 20 and 100. The patches are kept for F:
+  - `fluid-scratch/lane-p1/runs8/sepD.patch`;
+  - `sepA.patch`, the side array alone;
+  - `sepI.patch`, the staging.
+
+  sepD needs fmoved retyped to array<vec4f>, which puts pMove at 8 storage buffers, the limit.
+
+**Lever 2: uTransfer's exact empty-brick path.**
+- The exactness rule:
+  - nbfP2GResolve returns the original value where the face mass is under 1e-5, so the tiles and depth (`near`) are
+    unused on weightless faces.
+  - Gravity applies wherever occupancy is over 1e-5, which is centre φ under about 2h.
+  - So deep liquid bricks with no records still need gravity, and "no weight" alone is not a sufficient flag.
+- **The exact path** (`runs8/utransfer-exact-noweight.patch`):
+  - fdep is exchanged early into the workgroup;
+  - tile and depth staging is skipped when no face of the workgroup has weight;
+  - `near` is gated per face.
+
+  It is bitwise at frozen steps 20 and 100, but 4.52 against 4.39 and 4.33 against 4.21 ms: slower.
+- **Bounds (frozen step 20):**
+  - skipping tile and depth staging in every brick: about 0;
+  - skipping ring, centre and tiles in every brick: −0.6 ms, with 100% of bricks skipped;
+  - the inexact airP probe (previous step's FC_LIQ zero and no weight): 4.25 against 4.33, −0.08.
+- The earlier 0.7 ms `uEmpty` probe skipped gravity in deep liquid bricks.
+- **Verdict: no-go.** An exact flag cannot reach 0.5 ms.
+
+Neither lever passed its bar, so no gate round was run and nothing was landed. pSeed's runner-up stays parked.
