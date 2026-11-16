@@ -103,8 +103,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const sources = brickSources(scene, { lattice: [n[0]!, n[1]!, n[2]!], h_m: hs[0]!, origin_m, dt_s: dt! });
   // Pools: the scene's authored brickPools, else the sizing rule (brickPoolRule) from the boot. Either way they are fixed:
   // an overrun latches FAIL.POOL / PARTICLES and is never grown.
-  const p = f.brickPools ?? brickPoolRule([n[0]!, n[1]!, n[2]!], brickInitialExtent({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial }),
-    start.bricks.length, bootParticleCount({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
+  const extent = brickInitialExtent({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial });
+  const p = f.brickPools ?? brickPoolRule([n[0]!, n[1]!, n[2]!], extent, Math.max(start.bricks.length, extent.resident), bootParticleCount({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
   return {
     gaps,
     setup: {
@@ -118,25 +118,36 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
 
 /** The initial liquid's volume in cells (vertices with φ < 0 inside the container) and its top (one past the highest
  * such vertex's y), from the boot's own φ (bootPhiAt: the closed form or the page table). A brick whose centre φ is
- * past its half-diagonal (√3·4 < 7 cells) is wholly in or out and counts without its cells. */
-export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial">): { cells: number; top: number } {
-  const at = bootPhiAt(o), n = o.lattice;
+ * past its half-diagonal (√3·4 < 7 cells) is wholly in or out and counts without its cells.
+ * `resident` is the boot's residency: the liquid bricks dilated by two bricks a side (Chebyshev), within the window.
+ * The engine's first residency is that set (the h ring's tiles, the particle and seed classes: ≤ 16 cells past a
+ * liquid tile; the free fall's step-1 F box, 210 bricks, is exactly it), where the boot's own brick list (100) is not. */
+export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; resident: number } {
+  const at = bootPhiAt(o), n = o.lattice, nb = n.map(v => Math.floor(v / 8) + 1), liquid: [number, number, number][] = [];
   let cells = 0, top = 0;
   for (let bz = 0; 8 * bz < n[2]; bz++) for (let by = 0; 8 * by < n[1]; by++) for (let bx = 0; 8 * bx < n[0]; bx++) {
     const lo = [8 * bx, 8 * by, 8 * bz], hi = lo.map((v, a) => Math.min(v + 8, n[a]!)), centre = at([lo[0]! + 4, lo[1]! + 4, lo[2]! + 4]);
     if (centre >= 7) continue;
-    if (centre <= -7 && hi.every((v, a) => v - lo[a]! === 8)) { cells += 512; top = Math.max(top, hi[1]!); continue; }
+    if (centre <= -7 && hi.every((v, a) => v - lo[a]! === 8)) { cells += 512; top = Math.max(top, hi[1]!); liquid.push([bx, by, bz]); continue; }
+    let wet = false;
     for (let z = lo[2]!; z < hi[2]!; z++) for (let y = lo[1]!; y < hi[1]!; y++) for (let x = lo[0]!; x < hi[0]!; x++) {
-      if (at([x, y, z]) < 0) { cells++; top = Math.max(top, y + 1); }
+      if (at([x, y, z]) < 0) { cells++; top = Math.max(top, y + 1); wet = true; }
     }
+    if (wet) liquid.push([bx, by, bz]);
   }
-  return { cells, top };
+  const resident = new Set<number>();
+  for (const [bx, by, bz] of liquid) for (let dz = -2; dz <= 2; dz++) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const x = bx + dx, y = by + dy, z = bz + dz;
+    if (x >= 0 && y >= 0 && z >= 0 && x < nb[0]! && y < nb[1]! && z < nb[2]!) resident.add(x + nb[0]! * (y + nb[1]! * z));
+  }
+  return { cells, top, resident: resident.size };
 }
 
 /**
  * The pool sizing rule (progress-lane-e.md, 2026-11-17, measured against nine scenes' peaks) for a scene with no
  * authored brickPools. n is the lattice in cells; the liquid's cells V and top come from the boot; bootF is the boot's F
- * bricks and bootP the boot seeds' bound (bootParticleCount).
+ * residency (brickInitialExtent's `resident`, at least the boot's brick list) and bootP the boot seeds' bound
+ * (bootParticleCount).
  * - The window is the hard cap: WF = Π(n/8 + 1), WC = Π(n/32 + 1).
  * - Energy: no liquid rises past twice its initial top plus a ring: EF = floorF·min(n_y/8 + 1, ⌈2 top/8⌉ + 2),
  *   EC = floorC·min(n_y/32 + 1, ⌈2 top/32⌉ + 1), floor* the window's x·z.

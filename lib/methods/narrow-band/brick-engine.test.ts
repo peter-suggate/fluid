@@ -198,6 +198,9 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
   const want: Record<string, [number, number, number]> = {
     "power-droplet-64": [128, 18, 3828], "power-droplet-256": [128, 128, 3828], "power-fill-256-800": [800, 162, 17856], "power-fill-256-6400": [4356, 162, 78672],
     "minimal-power-dam-break-32": [125, 8, 117096], "minimal-power-dam-break-64": [729, 27, 524568], "mass-conserving-figure-9-dam-break": [2601, 75, 720384],
+    // The boot's residency (D2, the liquid bricks dilated by two): the free fall's 100 boot bricks are 210 resident at
+    // step 1 (its measured F box), so 1.25 * 210; the tilted block's 125 are 245.
+    "nbflip-analytic-free-fall": [263, 18, 150528], "nbflip-analytic-tilted-free-fall": [307, 18, 150528],
   };
   const enabled = BRICK_ENGINE_SCENES as string[], before = enabled.length;
   try {
@@ -215,6 +218,10 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     const dam64 = brickSceneSetup(sceneDocument(getSceneDefinition("minimal-power-dam-break-64")), { timeStep: "sixtieth" }).setup!;
     const extent = brickInitialExtent({ lattice: dam64.lattice, farPhi: dam64.farPhi, liquid: dam64.liquid, initial: dam64.initial });
     assert.ok(Math.abs(extent.cells - 94208) <= 0.01 * 94208, `extent ${extent.cells} cells`);
+    // D2: the free fall's liquid bricks dilated by two fill bricks x 1..6, y 2..8, z 0..4 of its 9 x 9 x 5 window
+    // (6 * 7 * 5 = 210), the F box its engine holds at step 1.
+    const fall = brickSceneSetup(sceneDocument(getSceneDefinition("nbflip-analytic-free-fall")), { timeStep: "sixtieth" }).setup!;
+    assert.equal(brickInitialExtent({ lattice: fall.lattice, farPhi: fall.farPhi, liquid: fall.liquid, initial: fall.initial }).resident, 210);
     // A container that is whole bricks but not whole pages is refused at setup (the census and the C level set run
     // whole 32^3 pages and would throw at creation), until the padding lands.
     const slab = sceneDocument(getSceneDefinition("ceiling-slab-drop")); enabled.push(slab.sceneId!);
