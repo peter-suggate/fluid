@@ -1687,3 +1687,45 @@ Known follow-ups:
    transfer and its own surface runs.
 3. lcCouple costs 0.32 against 0.15 ms (lcNearKnown's ±5 window walk plus the fill sample), and lcRetire 0.62 against
    0.51 ms. pSeed costs 3.13 against 1.92 ms, from the re-entry seed's second launch.
+
+## 2026-11-16: the seam seed (the visible pockmarks)
+
+The visual check of 06d4ca89 found about 8-10 shallow pocks (under 0.5 h) on the calm surface at about 5.7 s. The
+surface probe now counts dimples025 (local minima deeper than 0.25 h below their 8 neighbours' mean).
+
+Attribution (single runs; dimples05 / dimples025 at 240, 300, 342, 360, 400, 480):
+
+| tree | 240 | 300 | 342 | 360 | 400 | 480 |
+|---|---|---|---|---|---|---|
+| 06d4ca89 | 3/14 | 0/7 | 7/23 | 4/19 | 4/21 | 9/17 |
+| HEAD c35cbe65 | 2/7 | 0/2 | 0/0 | 0/2 | 2/3 | 0/4 |
+| R1 off, calm demotion on | 3/9 | 0/2 | 0/2 | 2/11 | 0/1 | 3/6 |
+| lcCouple's fill in lUnion's bound | 0/16 | 1/7 | 9/24 | 6/22 | 4/34 | 5/15 |
+
+- The pocks sit in h tiles at h|4h seams: 60-85% on a tile's x or z face, with 9-14 of 26 neighbours 4h (2-9 on
+  HEAD). Their columns are short of records: top layers 1.6, 1.9, 4.5, 2.9 against 0.5, 6.1, 5.9, 4.6 in steady
+  columns at 342, and the nearest record below the surface 0.60 against 0.29.
+- R1, not calm demotion, causes them: with R1 off they are HEAD-like at the same liveF. The fine union's bound is not
+  the cause (the fill did not help).
+- The mechanism is inflow: on HEAD the 4h side's records advect back across the seam; after R1 none arrive, and a
+  sparse but not empty seam cell never reseeds above -1 (that needs all 27 neighbours empty).
+
+The fix (`pSeam`, particles-kernels.wgsl.ts): an h cell with a 4h-owned cell among its 27 reseeds as an uncovered
+one, to `nbSeedTarget` under the 8-mass cap; the 4h side's empty bins are unknown, not air.
+
+Calm phase (342, 360, 400, 480), two runs each:
+
+| | 06d4ca89 | seam seed | inflow-only seam | HEAD c35cbe65 |
+|---|---|---|---|---|
+| dimples025 mean | 21.9 | 6.1 | 7.0 | 2.25 |
+| dimples05 mean | 6.25 | 2.4 | 2.9 | 0.5 |
+| particles at 165 / 300 | 370k / 337k | 404k / 381k | 401k / 366k | 390k / 392k |
+
+Gate against 06d4ca89: units 59/0; dam-300 + judge PASS; re-entry KE ratio 1.49, flicker 2.88 per tile per 100
+steps; fenced median 44.84 against 45.20 ms (-0.8%); window kernel mean 47.3 against 47.4 ms. Particles are +13% at
+300 (still below c35cbe65's 392k): the coordinator's +5% bar was a cost proxy, and the cost did not show, so the plain
+seam seed landed. The inflow-only variant (seam only where u at the cell centre points from a 4h neighbour into it)
+held the dimples at +9% particles; it was not gated.
+
+Residual: the sub-0.5 h seam dimples, dimples025 mean 6.1 against HEAD's 2.25. The remaining pocks' columns are not
+short of records (top layers 4-7).

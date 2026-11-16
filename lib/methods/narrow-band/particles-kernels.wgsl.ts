@@ -370,6 +370,14 @@ var<workgroup> sCount:atomic<u32>;
 var<workgroup> sBase:u32;
 var<workgroup> sTileSeeds:array<atomic<u32>,8>;
 fn pCellMass(run:vec2u,bank:u32)->f32{var m=0.0;for(var j=run.x;j<run.y;j++){let o=parts[pAt(bank,j)];if(nbLive(o)){m+=nbParticleMass(o);}}return m;}
+// A seam cell: a 4h-owned cell among c's 27 (lane E, the pockmarks 2026-11-16). R1 retires a 4h cell's records, so
+// the records the old engine's 4h side advected back across the seam never arrive: its empty bins are unknown, not
+// air, and the seam's h cell reseeds as an uncovered one (to nbSeedTarget, under the 8-mass cap). Without it the
+// seam's h cells thinned (top layers 1.6-1.9 records against 6 in steady columns) and dimpled under 0.5 h.
+fn pSeam(c:vec3i)->bool{
+ for(var k=0u;k<27u;k++){if(fgCellCoarse(c+nbNeighbourOffset(k))){return true;}}
+ return false;
+}
 fn pUncovered(c:vec3i)->bool{
  for(var k=0u;k<27u;k++){let r=fgRun(c+nbNeighbourOffset(k));if(r.y>r.x){return false;}}
  return true;
@@ -407,7 +415,7 @@ fn pSeedCell(c:vec3i,bank:u32,initial:bool,write:bool,at:u32)->u32{
  if(!initial){
   let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
   held=pCellMass(run,bank);if(held>=8.0){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
-  uncovered=pUncovered(c);
+  uncovered=pUncovered(c)||pSeam(c);
  }
  // The re-entry seed's sites are not the step's part 2 sites (a salt of its own).
  let salt=select(select(nbRing(cfg.x,NB_RING_STEP)+1u,(nbRing(cfg.x,NB_RING_STEP)+1u)^0x80000000u,cfg.w==2u),0u,initial);

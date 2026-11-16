@@ -831,7 +831,9 @@ move (design §2.4) as its own buffers.
   `fgDepth`'s push to ±6 cells, so a cell at a 4h surface is not deep (the push merged held records heavy
   and kept re-entered ones from splitting: sparse heavy records and dimples next to the seam). `fgDepth`
   itself, and so every grid reader (`vcTransferFace` included) and the other particle readers, keeps the
-  push; all-h is unchanged.
+  push; all-h is unchanged. `pSeed` reseeds an h cell with a 4h-owned cell among its 27 (a seam cell) as an
+  uncovered one, to `nbSeedTarget` under the 8-mass cap: the records the 4h side would have advected back
+  across the seam are unknown, not air (without it the seam's h cells thinned and pockmarked under 0.5 h).
 
 
 ## 6. Kernels, bindings and the record
