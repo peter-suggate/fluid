@@ -1963,3 +1963,27 @@ Other results at 2.0:
 - Surface roughness / dimples025 at steps 240, 300, 360 and 480: 0.22/11, 0.19/0, 0.25/3, 0.18/10, against 3.0's
   0.26/6, 0.23/2, 0.22/10, 0.17/3. That is within the noise.
 - The coordinator's visual check (splash at about 2.2 s, sloshing at about 10–11 s) matches band 3.
+
+## 2026-11-16: the shallow-cell cap is parked (its cut is small)
+
+The first draft extended pMove's held-mass cut (NB_CELL_MASS, 2n) to every h cell. Lane F reviewed it: the cut drops
+records past 16 mass, it does not merge them, and the extension now reaches air and ballistic records.
+
+The drop census (r12/cen.out) counts records past the cut per step, by the cell's depth band, with the ballistic
+records apart:
+
+| tree | step | below −1 | −1..0 | above 0 (ballistic) |
+|---|---|---|---|---|
+| band 2 + cap | 20 | 2533 | 3429 | 414 (90) |
+| band 2 + cap | 100 | 1607 | 597 | 10 (0) |
+| band 2 | 20 | 4134 | 9345 of 85.9k | 642 (216) |
+| band 2 | 100 | 2223 | 2434 of 133.6k | 341 (18) |
+
+The coordinator ruled that the cap must conserve mass and exempt air and ballistic records.
+- A fold of the excess into the kept records, the crowding merge's way, at depth −1..0 in liquid-mode cells, would
+  remove at most the band-2 tree's excess stock.
+- That is 9.3k / 2.4k records, or 2.1% / 0.8% of the step's records: about 0.2 / 0.06 ms at swing D's bound of
+  2.5 ms per 100k records.
+- No ballistic record sits in a −1..0 cell over the cut.
+- Parked: the cut is small. The record cap stays as it was. Every record weighs at least 1, so a record cap of 20 never
+  bound behind the 16-mass cut; only the depth ≤ −1.5 cap of 6 acts, as before.

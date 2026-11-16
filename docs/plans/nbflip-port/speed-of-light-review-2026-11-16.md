@@ -158,6 +158,27 @@ At about 25 ns a record, particle count is step time. Keep particles only within
 sheets and splash, and seed fewer per cell in calm h tiles.
 - **Go/no-go:** the surface metric, D rows and a visual check.
 
+**Result (lane E, 2026-11-16): go, landed as b3b8cc2c.** The dam's particle band is 2 cells deep, through the scene
+field scene.fluid.brickTiers.particleBandDepth (default 3).
+- D8 is 20–33% lower: 4.35e5 / 3.12e5 / 3.01e5 against 6.54e5 / 4.04e5 / 3.69e5.
+- Fenced medians are 35.6 ms against 39.1 ms (−3.5 ms, about 1.6 ms per 100k records).
+- dam-300 passes, the surface metric is within the noise, and the visual check matches.
+
+| census (frozen dam, h cells) | step 20 | step 100 |
+|---|---|---|
+| mass per cell, depth −2.5..−1 / −1..0 | 10–11 / about 8 | 10–11 / about 8 |
+| max records in a shallow cell (band 3) | 152 | 125 |
+| records deeper than −2 (band 3) | 20% | 24% |
+| band 2, depth −1..0: records past the 2n cut (of all in the band) | 9.3k (of 86k) | 2.4k (of 134k) |
+| band 2, depth above 0: records past the 2n cut, ballistic | 642, 216 | 341, 18 |
+
+The shallow cells are uncapped (the old depth < −1 gate), and the census shows the uncapped hole is small.
+- Extending the 2n cut to every cell drops 414 / 10 air records a step (90 / 0 ballistic). That is mass the step
+  would lose, so a dropping cap is ruled out.
+- A mass-conserving fold at depth −1..0 in liquid-mode cells would remove at most the excess stock: 9.3k / 2.4k
+  records, 2.1% / 0.8% of the step's records. That is about 0.2 / 0.06 ms at the bound.
+- **Parked**: the cut is small. The mass-8 cap is parked as well.
+
 ### E. Pressure (bound about 5–7 ms, needs the user's word)
 
 The user said on 2026-11-08 that pressure was not worth optimising further (old engine). Here it is 10 ms of 46. The
