@@ -113,6 +113,8 @@ export const FB = {
   fpart: { name: "fpart", kind: "rw", type: "array<u32>" },
   fmoved: { name: "fmoved", kind: "rw", type: "array<Particle>" },
   fext4: { name: "fext4", kind: "rw", type: "array<f32>" },
+  /** The sources' static record (brick-source.wgsl.ts BRICK_SOURCE_BINDING: the drops' extrusion edges). */
+  src: { name: "src", kind: "ro", type: "array<f32>" },
 } as const satisfies Record<string, BrickBinding>;
 
 const u = (n: number) => `${n >>> 0}u`;

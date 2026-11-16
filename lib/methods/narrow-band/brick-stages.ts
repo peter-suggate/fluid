@@ -19,6 +19,7 @@
  * - A bring-up stage set (`bringUp: true`) is for E's tests only. The method
  *   refuses every scene on it (brick-method.ts).
  */
+import type { BrickSources } from "./brick-source";
 import { ARGS, ARGS_LIST_END, type BrickLayout } from "./brick-abi";
 import { ENGINE_BUFFERS, type BrickPlacement } from "./brick-kernel";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
@@ -86,6 +87,8 @@ export interface BrickStageContext {
   readonly fluid?: { readonly density_kg_m3: number; readonly viscosity_Pa_s: number; readonly surfaceTension_N_m: number };
   /** The scene's particle settings (BrickSceneSetup.particleBandDepth); absent, the band is 3 cells deep. */
   readonly particles?: { readonly bandDepth: number };
+  /** The scene's scheduled drops in source form (brick-source.ts); absent, no sources. */
+  readonly sources?: BrickSources;
 }
 
 export type BrickStagesFactory = (context: BrickStageContext) => BrickStages;

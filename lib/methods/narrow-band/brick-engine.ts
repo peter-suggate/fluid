@@ -14,6 +14,8 @@
  * - Every dispatch is either indirect from a list or sized from a capacity.
  * - Nothing is sized from the lattice.
  */
+import { brickDropDue, brickSourceRing, type BrickSources } from "./brick-source";
+import { brickSourceWords } from "./brick-source.wgsl";
 import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
@@ -66,6 +68,9 @@ export interface BrickEngineOptions {
   /** The liquid's initial velocity (m/s) on the faces of `tiles` (4h tile keys t.x + T.x (t.y + T.y t.z), T = lattice / 4,
    * ascending: the tiles holding liquid or touching one; brick-initial.ts brickInitialVelocity). Absent: at rest. */
   readonly initialVelocity?: { readonly velocity: Vec3; readonly tiles: readonly number[] };
+  /** The scene's scheduled drops in source form (brick-source.ts, lane F's stages read them); the boot's set holds the
+   * first step's drop box. Absent: no sources. */
+  readonly sources?: BrickSources;
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
@@ -135,7 +140,7 @@ export function bootPhiAt(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "li
 }
 
 /** The initial bricks: the reach set of the initial liquid's vertices (boxes or table), at rest. */
-export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2">): number[] {
+export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2" | "sources">): number[] {
   if (o.initial && o.liquid.length) throw new Error("Brick engine: the initial liquid is boxes or a table, not both");
   const nb = bricksPerAxis(o.lattice), f32 = (b: BrickLiquidBox): BrickLiquidBox => ({ lo: o.lattice.map((_, a) => Math.fround(b.lo[a]!)) as unknown as Vec3, hi: o.lattice.map((_, a) => Math.fround(b.hi[a]!)) as unknown as Vec3 });
   const boxes = o.liquid.map(f32), candidates = new Map<number, Vec3>(), at = bootPhiAt(o);
@@ -164,7 +169,15 @@ export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "l
     }
     return hi[0]! < 0 ? undefined : { lo: lo as unknown as Vec3, hi: hi as unknown as Vec3 };
   };
-  return [...reachSet(o.lattice, candidates.values(), liquid, () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2)].sort((a, b) => a - b);
+  const set = new Set(reachSet(o.lattice, candidates.values(), liquid, () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2));
+  // The first step's drop (brick-source.ts): its box's bricks are resident before that step's census, as the step
+  // before a later drop's head claims them (resSource; the old kick's commit stored the first drop's pages).
+  const first = o.sources ? brickDropDue(o.sources, 0, o.dt_s) : -1;
+  if (first >= 0) {
+    const [lo, hi] = o.sources!.drops[first]!.box;
+    for (let z = lo[2] >> 3; z <= (hi[2] - 1) >> 3; z++) for (let y = lo[1] >> 3; y <= (hi[1] - 1) >> 3; y++) for (let x = lo[0] >> 3; x <= (hi[0] - 1) >> 3; x++) set.add(brickKey(x, y, z));
+  }
+  return [...set].sort((a, b) => a - b);
 }
 
 /**
@@ -233,7 +246,7 @@ export class BrickEngine {
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop">): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop">, sources = false): BrickStageSchedule {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
@@ -321,8 +334,10 @@ export class BrickEngine {
     const residency: BrickPlacement[] = [
       // Tiered, pass 0 also runs the page sources: a workgroup a page of C_ALL after F_ALL's bricks (FC_G1).
       { kernel: res.resMark, dispatch: tiered ? { indirect: ARGS.FC_G1 } : g1(LIST.F_ALL), z: 0 },
+      ...(sources ? [{ kernel: res.resSource, dispatch: direct(8), z: 0 }] : []),
       { kernel: set.setClaimPages, dispatch: direct(churnGroups(f, 64)) },
       { kernel: res.resMark, dispatch: g1(LIST.F_ALL), z: 1 },
+      ...(sources ? [{ kernel: res.resSource, dispatch: direct(8), z: 1 }] : []),
       { kernel: set.setClaimBricks, dispatch: direct(churnGroups(f, 64)), z: 0 },
       { kernel: set.setLeave, dispatch: list(LIST.F_ALL, "G64") },
       { kernel: set.setLeavePages, dispatch: list(LIST.C_ALL, "G64") },
@@ -359,12 +374,12 @@ export class BrickEngine {
     const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...options.capacities, apic: options.apic });
     const solver = options.solver(layout);
     validatePressureSolver(solver);
-    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles });
+    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources });
     validateBrickStages(stages);
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies);
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies, options.sources !== undefined);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     // The box hook (M3 padding): every wall token resolved by its builder, and, where the lattice is padded past the
@@ -434,6 +449,10 @@ export class BrickEngine {
     if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); }
     const mask = this.options.staticMask;
     if (mask) uploadWords(d.queue, make("solid", mask.words.length), 0, mask.words as Uint32Array<ArrayBuffer>);
+    // The sources' static record (brick-source.ts): every drop's extrusion edges, once; a stub with no sources.
+    const edges = this.options.sources?.edges;
+    const src = make("src", brickSourceWords(edges ? edges.length / 4 : 0));
+    if (edges?.length) uploadWords(d.queue, src, 0, edges);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || name === "bodies" || name === "bodyCuts" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
@@ -515,6 +534,8 @@ export class BrickEngine {
       if (b.count > 0) u[RING.FLAGS] |= RING_FLAG.BODIES;
       u[RING.BODY_COUNT] = b.count; u[RING.BODY_FLAGS] = b.flags; f[RING.BODY_HORIZON] = o.dt_s; f[RING.BODY_CELL] = o.h_m ** 3; u[RING.BODY_GEN] = b.generation >>> 0;
     }
+    // F's source words (brick-source.ts): this step's drop, its added cells, and the drop boxes the head claims.
+    if (o.sources) brickSourceRing(o.sources, this.time, u, f);
     return buf;
   }
 

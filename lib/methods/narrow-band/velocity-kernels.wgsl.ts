@@ -21,6 +21,7 @@
  * Stated differences from the old engine at this milestone: all h (no 4h band to prolong from, so a face the h
  * sweep extends takes no delta, as the old engine did where the 4h band did not reach); no cold freeze or thaw.
  */
+import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
@@ -284,7 +285,7 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   // the volume control's rate (vGauge ran in the level set stage, before; the operator reads FH_RATE after).
   // uAdvect reads resolved φ in its ring only (FG_PHI_OWNER_WGSL elsewhere): the plain loads in the trace's reads
   // cost it more than they save (frozen dam, 2026-11-16).
-  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_RING_WGSL(10), FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL].join("\n") + /* wgsl */`
+  const uAdvect = k("uAdvect", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.src], [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_RING_WGSL(10), FG_VEL_WGSL, FG_SAMPLE_WGSL, V_WGSL, physicsWGSL, fill, nbfVolumeWGSL, V_COARSE_WGSL, BRICK_SOURCE_WGSL].join("\n") + /* wgsl */`
 // The blended h/4h sampler of US (fgSampleVel; all h, fgVelAxis).
 fn nbxMomentumSample(p:vec3f,lo:u32,hi:u32)->vec3f{return fgSampleVel(p,lo,hi);}
 fn nbxMomentumHeld(p:vec3f)->vec3f{return fgHeld(p);}
@@ -310,7 +311,8 @@ fn vcAdvectPage(slot:u32,lid:u32,dt:f32,h:vec3f){
   let j=lid+A_LANES*r;let T=vcTile(slot,j);let live=vLive4(T);
   for(var a=0u;a<3u;a++){
    if(!vcFace(T,a)){continue;}
-   if(fgFaceOpen(4*T,a)&&(live||vLive4(T-fgUnit(a)))){vTraceAdd(j|(a<<9u));continue;}
+   var centre=vec3f(4*T)+vec3f(2.0);centre[a]=f32(4*T[a]);
+   if(fgFaceOpen(4*T,a)&&(live||vLive4(T-fgUnit(a)))&&!nbDropFace(centre,4.0)){vTraceAdd(j|(a<<9u));continue;}
    vel[vcAt(NB_VEL_C_UP0,slot,a,j)]=0.0;
   }
  }
@@ -333,6 +335,15 @@ fn vcAdvectPageOf(slot:u32,lid:u32){vcAdvectPage(slot,lid,vDt(),vH());}
   let filled=vVolume(FH_VOL_SUM+2u*(cfg.y&1u));
   atomicStore(&nbSet[FH_VOL_FILLED],bitcast<u32>(filled));
   atomicStore(&nbSet[FH_RATE],bitcast<u32>(nbfVolumeRate(filled,vVolume(FH_VOL_BUDGET),dt,V_CONTROL,atomicLoad(&nbSet[FH_VOL_CAPTURED])!=0u)));
+  // This step's drop joins the budget after the step's rate (beginStep's updateBudget, after the gauge it rates): the
+  // fixed point's high word takes whole 4096-cell units (2^32 / VOL_UNIT), the low word the rest, with its carry.
+  let added=nbSourceAdded();
+  if(added>0.0){
+   let units=floor(added/${2 ** 32 / VOL_UNIT}.0);let low=u32(round((added-units*${2 ** 32 / VOL_UNIT}.0)*V_VOL_UNIT));
+   let lo=atomicLoad(&nbSet[FH_VOL_BUDGET]);let sum=lo+low;
+   atomicStore(&nbSet[FH_VOL_BUDGET],sum);
+   atomicStore(&nbSet[FH_VOL_BUDGET+1u],atomicLoad(&nbSet[FH_VOL_BUDGET+1u])+u32(units)+select(0u,1u,sum<lo));
+  }
  }
 ${stagedHead("vcAdvectPageOf", -1, A_LANES)}
  if(lid==0u){sRing=select(0u,1u,vRingBrick(o));}
@@ -342,8 +353,10 @@ ${stagedHead("vcAdvectPageOf", -1, A_LANES)}
   let live=vLive(c);
   for(var a=0u;a<3u;a++){
    if(!fgFaceOwned(c,a)){continue;}
-   // A closed face holds 0; a face between two dead cells is culled (umCullAir); the rest are traced from the list.
-   if(fgFaceOpen(c,a)&&(live||vLive(c-fgUnit(a)))){vTraceAdd(l|(a<<9u));continue;}
+   // A closed face holds 0; a face between two dead cells is culled (umCullAir); a face within its width of this
+   // step's drop holds 0, the drop's liquid arriving at rest (umDropFace); the rest are traced from the list.
+   var centre=vec3f(c)+vec3f(0.5);centre[a]=f32(c[a]);
+   if(fgFaceOpen(c,a)&&(live||vLive(c-fgUnit(a)))&&!nbDropFace(centre,1.0)){vTraceAdd(l|(a<<9u));continue;}
    vel[vAt(NB_VEL_F_UP0,slot,a,l)]=0.0;
   }
  }

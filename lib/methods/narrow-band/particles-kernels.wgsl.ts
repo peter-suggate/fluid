@@ -33,6 +33,7 @@
  * The tile's "thin" bit is the census's (NB_S_TRIG bit 8 + tile, fgTileThin).
  * Sparse retirement is off (sparseNeighbours 0, as the old method's default).
  */
+import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { ARGS, type BrickLayout } from "./brick-abi";
 import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
@@ -376,7 +377,7 @@ var<workgroup> wSurf:array<atomic<u32>,8>;
 }`);
 
   // pSeed: cfg.w = 1 at boot (seedInitial: salt 0, every site j < goal, no coverage or mass tests).
-  const pSeed = k("pSeed", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell], [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
+  const pSeed = k("pSeed", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src], [common, nbfSeedFormulasWGSL, BRICK_SOURCE_WGSL].join("\n") + /* wgsl */`
 var<workgroup> sCount:atomic<u32>;
 var<workgroup> sBase:u32;
 var<workgroup> sTileSeeds:array<atomic<u32>,8>;
@@ -455,7 +456,11 @@ fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
   if(!initial&&held+f32(j-n0)*mass>=8.0){continue;}
   let k=nbSeedSiteIndex(j,d);let site=nbfSeedPoint(vec3u(c),k,salt);let distance=psSiteDistance(site,reentry);
   if(!known&&(distance>-1.0||d>-1.5)){uncovered=(n0==0u&&pUncovered(c))||psSeam(c);known=true;}
-  if(!nbfSeedSiteOk(distance,false,initial,d,1.0,uncovered,fine)){continue;}
+  // seedSite's source test (nbSourcePhi(q, 1)): a site in this step's drop is exempt from the inner-band rule, so a
+  // drop gets its whole band (Ferstl et al. 2016 §3.2: liquid made from a description). The old engine seeds after
+  // the union (transfer): part 2's seed; part 1's re-entry (cfg.w = 2) runs before this step's drop is in φ.
+  let sourcePhi=select(1.0,nbSourcePhi(site,1.0),cfg.w!=2u);
+  if(!nbfSeedSiteOk(distance,false,initial,d,sourcePhi,uncovered,fine)){continue;}
   mask|=1u<<j;
  }
  return mask;

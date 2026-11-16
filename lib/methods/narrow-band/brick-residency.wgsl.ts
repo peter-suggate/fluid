@@ -97,6 +97,7 @@ import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickBinding } from "./brick-kernel";
 import { censusKernel } from "./brick-census.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import { BRICK_SOURCE_RING_WGSL } from "./brick-source.wgsl";
 
 /**
  * Each source class's margin past its move, in cells, the largest distance a stage reads past the class's tiles (the
@@ -113,25 +114,8 @@ const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 
 export function brickResidencyKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
   const tiered = opt.tiered === true;
-  const pages = L.lattice.map(n => Math.ceil((Math.floor(n / 8) + 1) / 4));
-  const resMark = censusKernel(L, "resMark", tiered ? [CFG, setRW, dirRW, phiRO, velRO] : [CFG, setRW, dirRW], (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel", box: BOX_TOKEN }) : "") + /* wgsl */`
-const RQ_PAGES:vec3i=vec3i(${pages.join(",")});
-const RM_OWN:f32=${tiered ? RES_MARGIN.own.tiered : RES_MARGIN.own.allH}.0;
-const RM_OWN_PAGES:f32=${RES_MARGIN.ownPages}.0;
-const RM_SUPPORT:f32=${RES_MARGIN.support}.0;
-const RM_PARTICLES:f32=${RES_MARGIN.particles}.0;
-const RM_SEED:f32=${RES_MARGIN.seed}.0;
-const RM_PAGE:f32=${RES_MARGIN.page}.0;
-var<workgroup> rmLo:array<vec3i,5>;
-var<workgroup> rmHi:array<vec3i,5>;
-var<workgroup> rmN:u32;
-var<workgroup> rmPLo:array<vec3i,5>;
-var<workgroup> rmPHi:array<vec3i,5>;
-var<workgroup> rmGo:u32;
-var<workgroup> rmPage:u32;
-var<workgroup> rmTlo:array<atomic<u32>,3>;
-var<workgroup> rmThi:array<atomic<u32>,3>;
-var<workgroup> rmSpeed:atomic<u32>;
+  // The claim helpers resMark and resSource share.
+  const RQ_WGSL = /* wgsl */`
 // NONE -> CLAIM by compare-exchange (weak: retried while the word is still NONE). True for the one winner.
 fn rqTake(i:u32)->bool{
   loop{
@@ -179,7 +163,27 @@ fn rqBrick(q:vec3i,rpass:u32){
   if(ps==NB_NONE){if(rpass==0u&&rqTake(pw)){rqAppend(nbKey(4*(q>>vec3u(2u)))|NB_KEY_PAGE,pw);atomicAdd(&nbSet[NB_H_RES_CLAIMED_C],1u);}return;}
   if(ps!=NB_CLAIM){nbFail(NB_FAIL_UNSUPPORTED,nbKey(q));}
 }
-// A brick source (slot s of F_ALL with ACT.RES, particle support, ACT.SEED or this head's TRIG): a box a class, its tiles'
+`;
+  const pages = L.lattice.map(n => Math.ceil((Math.floor(n / 8) + 1) / 4));
+  const resMark = censusKernel(L, "resMark", tiered ? [CFG, setRW, dirRW, phiRO, velRO] : [CFG, setRW, dirRW], (tiered ? brickOwnerWGSL({ phi: "phi", vel: "vel", box: BOX_TOKEN }) : "") + /* wgsl */`
+const RQ_PAGES:vec3i=vec3i(${pages.join(",")});
+const RM_OWN:f32=${tiered ? RES_MARGIN.own.tiered : RES_MARGIN.own.allH}.0;
+const RM_OWN_PAGES:f32=${RES_MARGIN.ownPages}.0;
+const RM_SUPPORT:f32=${RES_MARGIN.support}.0;
+const RM_PARTICLES:f32=${RES_MARGIN.particles}.0;
+const RM_SEED:f32=${RES_MARGIN.seed}.0;
+const RM_PAGE:f32=${RES_MARGIN.page}.0;
+var<workgroup> rmLo:array<vec3i,5>;
+var<workgroup> rmHi:array<vec3i,5>;
+var<workgroup> rmN:u32;
+var<workgroup> rmPLo:array<vec3i,5>;
+var<workgroup> rmPHi:array<vec3i,5>;
+var<workgroup> rmGo:u32;
+var<workgroup> rmPage:u32;
+var<workgroup> rmTlo:array<atomic<u32>,3>;
+var<workgroup> rmThi:array<atomic<u32>,3>;
+var<workgroup> rmSpeed:atomic<u32>;
+${RQ_WGSL}// A brick source (slot s of F_ALL with ACT.RES, particle support, ACT.SEED or this head's TRIG): a box a class, its tiles'
 // vertex box grown per axis and side by the class's move and margin, as bricks; pass 1 then zeroes the support. Tiered, a page
 // source (pass 0, a page of C_ALL after F_ALL's bricks): the box of its 4h-owned liquid tiles (a C corner φ < 0, as
 // setMarkPages counts them) grown by flow + RM_PAGE, the flow from the largest |u| on those tiles' C plane faces;
@@ -329,5 +333,31 @@ fn rmFlow(speed:f32)->f32{
     }
   }` : ""}
 }`);
-  return { resMark };
+  // resSource (lane F, M4; brick-source.ts): the ring's drop boxes (this step's drop and the next step's, each its
+  // bounding box grown by the pin margin: requestDropPages and uniformPagePoolDropAhead) as one more brick source,
+  // after resMark's pass (cfg.z the pass): their bricks kept or claimed as resMark's boxes are, tiered also their
+  // pages in pass 0. The census of the drop's own step then finds its tiles resident (a drop of the first step: the
+  // boot's set holds its box, BrickEngineOptions.bootBoxes). A workgroup strides the bricks of both boxes.
+  const resSource = censusKernel(L, "resSource", [CFG, setRW, dirRW], BRICK_SOURCE_RING_WGSL + RQ_WGSL + /* wgsl */`
+@compute @workgroup_size(64) fn resSource(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) nw:vec3u){
+  let rpass=cfg.z;
+  for(var k=0u;k<2u;k++){
+    let box=nbSourceBox(k);if(!all(box[0]<box[1])){continue;}
+    let a=box[0]>>vec3u(3u);let b=(box[1]-vec3i(1))>>vec3u(3u);
+    let ext=vec3u(b-a+vec3i(1));let n=ext.x*ext.y*ext.z;
+    for(var j=wid.x*64u+lane;j<n;j+=64u*nw.x){
+      let q=a+vec3i(vec3u(j%ext.x,(j/ext.x)%ext.y,j/(ext.x*ext.y)));
+      if(!rqSettled(q,rpass)){rqBrick(q,rpass);}
+    }${tiered ? `
+    if(rpass==0u){
+      let pa=a>>vec3u(2u);let pb=b>>vec3u(2u);
+      let pe=vec3u(pb-pa+vec3i(1));let m=pe.x*pe.y*pe.z;
+      for(var j=wid.x*64u+lane;j<m;j+=64u*nw.x){
+        let p=pa+vec3i(vec3u(j%pe.x,(j/pe.x)%pe.y,j/(pe.x*pe.y)));
+        if(!rqPageSettled(p)){rqPage(p);}
+      }
+    }` : ""}
+  }
+}`);
+  return { resMark, resSource };
 }

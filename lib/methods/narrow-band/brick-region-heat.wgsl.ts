@@ -35,8 +35,8 @@
  *   (the old dt^2 / (rho h^2) on Delta p). Without P's composite solver it is +Inf: every relevant region fails HOT.
  * - The residual floor is the brick solver's tolerance, 0.05 1/s (the old band's min(target, 0.05)).
  * - The host force (rh.force: an invalidation or a generation change) is the first heat after boot (HEAT_FORCED = 0);
- *   scene edits and bodies fail at M2 (censusBegin), sources are not ported (no M2 scene has one): triggers 8 and 16
- *   never fire.
+ *   scene edits and bodies fail at M2 (censusBegin): trigger 8 never fires. Trigger 16 is this step's drop (lane F's
+ *   M4, brick-source.wgsl.ts nbSourceRegion); inflow is not ported.
  * - The activity heat (the old particleHeat) is one word a tile, every tile's (HEAT4), updated in censusDecide by
  *   the old rule (lHeatNow's: max(max(0, H - 4 dt), 2 where the need rule triggers)); on tiles with an F slot it is the
  *   same rule on the same TRIG as F's FT_H, which restarts when F initialises a slot, where HEAT4 continues.
@@ -47,6 +47,7 @@
  * - Regions are the lattice's (rgInLattice): a page beyond it (the reach ring across a closed wall) holds no lattice
  *   tile, and its regions take no heat, spread, deep or count, as the old region lattice had none there.
  */
+import { BRICK_SOURCE_BINDING, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { ARGS, BrickLayout, LIST } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel } from "./brick-kernel";
 import { CENSUS, CENSUS_FORMULAS, CENSUS_HOOKS, CENSUS_OWNER, CENSUS_REGION, censusKernel, censusPlanWGSL } from "./brick-census.wgsl";
@@ -74,7 +75,7 @@ export function brickRegionHeatKernels(L: BrickLayout, opt: RegionHeatOptions = 
 
   // heat (l.1000): a workgroup a region, a lane a tile (the activity heat's max), lane 0 the region.
   const pd = opt.pdelta;
-  const regionHeat = k("regionHeat", /* wgsl */`
+  const regionHeat = k("regionHeat", BRICK_SOURCE_WGSL + /* wgsl */`
 const RH_UNKNOWN:f32=3.0e38;
 const RH_MAX:f32=3.402823e38;
 const RH_ONE_FRAME:u32=0x227u;
@@ -127,6 +128,8 @@ var<workgroup> hFine:atomic<u32>;
   if(census[at+RG_KEY]!=key){trigger|=2u;}
   census[at+RG_KEY]=key;
   {let pending=census[at+RG_PENDING];if(pending>=2u){trigger|=4u;}else if(pending!=0u){trigger|=256u;}census[at+RG_PENDING]=0u;}
+  // A region this step's drop reaches (l.377, lane F's M4): its centre within the region's half diagonal and a tile.
+  if(nbSourceRegion(rgCoord(cs,r))){trigger|=16u;}
   // A region that ran non-COLD last step was refreshed then.
   let refreshed=census[at+RG_TIER]!=0u;
   var displacement=rhF(at+RG_DISP);if(refreshed){displacement=0.0;}
@@ -173,7 +176,7 @@ var<workgroup> hFine:atomic<u32>;
   if(relevant==0u&&(trigger&24u)==0u){value=0.0;}
   census[at+RG_HEAT]=bitcast<u32>(value);census[at+RG_DISP]=bitcast<u32>(displacement);
   census[at+RG_BITS]=trigger|select(0u,4096u,relevant!=0u)|select(0u,8192u,submerged)|select(0u,16384u,fine);
-}`, pd === undefined ? [] : [pmgRO]);
+}`, pd === undefined ? [BRICK_SOURCE_BINDING] : [pmgRO, BRICK_SOURCE_BINDING]);
 
   // spread (l.1139): a lane a region, eight pages a workgroup (G8: lane = 8 page + region).
   const regionSpread = k("regionSpread", /* wgsl */`

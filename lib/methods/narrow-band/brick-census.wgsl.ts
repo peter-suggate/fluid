@@ -76,6 +76,7 @@
 import { ARGS, BOX_TOKEN, BrickLayout, H, LIST, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import { BRICK_SOURCE_BINDING, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
 import { UNIFORM_TILE_UPDATE_BUDGET_H } from "../uniform/uniform-tile-update-error";
 
@@ -1288,7 +1289,7 @@ var<workgroup> wgGo:u32;
   // censusImportance: importanceTile and publishImportance (l.2342, l.2405), eight workgroups a page (X8), workgroup r
   // its tiles 64r..64r+63, a lane a tile; the slab's required bits (interfaceBits, l.2534: the page's words 2r and
   // 2r + 1) by workgroup atomics. Workgroup 0 clears the page's candidate mask for censusDecide.
-  const censusImportance = k("censusImportance", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + /* wgsl */`
+  const censusImportance = k("censusImportance", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING], BRICK_SOURCE_WGSL + OWNER + HOOKS + CENSUS_FORMULAS + /* wgsl */`
 var<workgroup> wgReq:array<atomic<u32>,2>;
 var<workgroup> wgMov:array<atomic<u32>,2>;
 var<workgroup> wgRequired:atomic<u32>;
@@ -1297,7 +1298,10 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   let o=NC_S*cs;let t=xTileOf(cs,i);
   if(!nbTileInLattice(t)){return;}
   let keys=ncKeys(cs,i);let own=vec2u(ncW0(cs,i),ncW1(cs,i));
-  let w1=ncImportance(t,keys,ncGap(cs,i),own).y;
+  var w1=ncImportance(t,keys,ncGap(cs,i),own).y;
+  // A source tile's triggers clear (importanceTile l.1711: a scheduled drop authors its tiles; lane F's M4): with them
+  // the required bit, which is theirs.
+  if(((w1>>16u)&63u)!=0u&&nbSourceTile(t)){w1&=~((63u<<16u)|NC_REQUIRED);}
   census[o+${CENSUS.FIN}u+i]=w1;
   if(ncMovingTile(w1,keys)){atomicOr(&wgMov[lane>>5u],1u<<(i&31u));}
   // publishImportance: the crossing cells and gap of a tile seed decide only if it is required.
@@ -1332,7 +1336,7 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   // page's F children 8r..8r+7). A band tile is h only when its F brick and each in-range 27-neighbour of it are
   // resident; a clamped tile's missing bricks are appended as candidates, once a page (the page's bit of the 6^3
   // bricks about it in CAND_MASK, whose atomicOr names the one lane that lists it), and it refines one census late.
-  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + /* wgsl */`
+  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING], BRICK_SOURCE_WGSL + OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + /* wgsl */`
 var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
 var<workgroup> wgDec:array<atomic<u32>,2>;
@@ -1354,9 +1358,12 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
     let trig=ncNeedTriggered(t,cs,i,(ncFin(cs,i)>>16u)&63u);let h=bitcast<f32>(census[o+RG_HEAT4+i]);
     census[o+RG_HEAT4+i]=bitcast<u32>(max(max(0.0,h-4.0*ncDt()),select(0.0,2.0,trig)));
   }
-  let joined=ncJoined(t);let word=i>>5u;let bit=1u<<(i&31u);
-  // decideTile (l.2849): a deep COLD tile keeps the last census's decision and its static bit (no sources at M2: a
-  // join still bands it); every other tile clears both, its band sets CC_DECIDED and its join CC_STATIC.
+  // decideTile (l.1934, l.1956; lane F's M4): a tile this step's drop can fill is joined (REASON.source): it bands and
+  // is static whatever its surface, deep COLD or not.
+  let source=!ncJoined(t)&&nbSourceTile(t);
+  let joined=ncJoined(t)||source;let word=i>>5u;let bit=1u<<(i&31u);
+  // decideTile (l.2849): a deep COLD tile keeps the last census's decision and its static bit (a join or a source
+  // still bands it); every other tile clears both, its band sets CC_DECIDED and its join CC_STATIC.
   var band=false;
   if(head&&!joined&&census[rgAt(cs,rgOfTile(i))+RG_DEEP]!=0u){
     band=(census[o+${CENSUS.DEC}u+word]&bit)!=0u;
@@ -1374,7 +1381,8 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // carries its shape or thin trigger (the census's own test of whether 4h holds the geometry) is never calm, so R2 never
   // demotes a surface 4h cannot carry (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17).
   var toCoarse=false;
-  if(band&&head&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)){
+  // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4).
+  if(band&&head&&!source&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);

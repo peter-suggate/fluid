@@ -1,0 +1,141 @@
+/**
+ * LANE F OWNS THIS FILE. The brick engine's liquid sources (M4): scheduled drops (spheres, disks, letters), host side.
+ *
+ * The old engine (webgpu-uniform-reference.ts) adds a drop on the one step whose interval (start, end] holds its time
+ * (scheduledDrop; more than one due in a step throws), in source form (uniformScheduledDrop: a ball, a disk, or an
+ * extrusion behind its bounding ball), and joins its analytic volume to the budget on that step (beginStep's
+ * updateBudget). Its pages are asked for on the step before and on its own (requestDropPages,
+ * uniformPagePoolDropAhead: the bounding box grown by UNIFORM_PAGE_POOL_PIN_MARGIN = 4 cells), so the census of its
+ * own step finds its tiles resident.
+ *
+ * Here everything is in cells (the lattice's coordinates: cell c spans c .. c + 1, a vertex is an integer point; the
+ * cells are cubic, so a distance in h is the old engine's in metres over h):
+ * - every drop's extrusion edges (a.xy, b.xy) go once, at build, into F's `src` buffer (BrickStages.init);
+ * - the ring's SOURCE words (brick-abi.md §5.2, F's 16-63) hold this step's drop and two cell boxes: this step's drop
+ *   and the next step's, each grown by the pin margin, which the head's residency claims (brick-source.wgsl.ts);
+ * - the ring's VOLUME word 8 holds the cells this step adds (its drop's analytic volume over h^3), which uAdvect adds
+ *   to the budget after the step's gauge, as beginStep does.
+ */
+import type { SceneDescription } from "../../core/model";
+import { LIQUID_EXTRUSION_MAX_EDGES, liquidExtrusionBounds, liquidExtrusionEdges, liquidExtrusionVolume_m3 } from "../../core/liquid-extrusion";
+import type { Vec3 } from "./brick-engine";
+
+/** The ring words of the sources (brick-abi.md §5.2: F's VOLUME 8-15 and SOURCES 16-63). */
+export const SRC_RING = {
+  /** f32: the cells this step adds (its drop's volume / h^3). */
+  ADDED: 8,
+  /** u32: this step's drop: 0 none, 1 ball, 2 disk (a cylinder along z), 3 extrusion. */
+  KIND: 16,
+  /** f32 x3: the drop's centre (cells); an extrusion's bounding ball sits on its mid-plane. */
+  CENTRE: 17,
+  /** f32: the ball's (or bounding ball's, or disk's) radius (cells). */
+  RADIUS: 20,
+  /** f32: a disk's half height (cells). */
+  HALF_HEIGHT: 21,
+  /** u32: an extrusion's first edge in `src` and its edge count. */
+  EDGE_START: 22, EDGE_COUNT: 23,
+  /** f32: an extrusion's outward offset, half depth and edge radius (cells). */
+  OFFSET: 24, HALF_DEPTH: 25, EDGE_RADIUS: 26,
+  /** i32 x6 each: a cell box lo (inclusive) xyz, hi (exclusive) xyz: this step's drop's and the next step's. */
+  BOX: 27, AHEAD: 33,
+  /** u32: bit 0 BOX holds a drop, bit 1 AHEAD does. */
+  BOXES: 39,
+} as const;
+/** The cells a drop's box is grown by each way (UNIFORM_PAGE_POOL_PIN_MARGIN). */
+export const SRC_PIN_MARGIN = 4;
+
+/** A drop in source form, in cells. */
+export interface BrickDrop {
+  readonly time_s: number;
+  readonly kind: 1 | 2 | 3;
+  readonly centre: Vec3;
+  readonly radius: number;
+  readonly halfHeight: number;
+  readonly edgeStart: number;
+  readonly edgeCount: number;
+  readonly offset: number;
+  readonly halfDepth: number;
+  readonly edgeRadius: number;
+  /** The volume the source asks for (cells): what joins the budget. */
+  readonly volume: number;
+  /** Its bounding box grown by SRC_PIN_MARGIN, held to the lattice: lo inclusive, hi exclusive (cells). */
+  readonly box: readonly [Vec3, Vec3];
+}
+
+export interface BrickSources {
+  readonly drops: readonly BrickDrop[];
+  /** Every extrusion's edges, a.xy b.xy in cells, in drop order (F's `src` buffer). */
+  readonly edges: Float32Array<ArrayBuffer>;
+  /** The scene's step (s): the longest step the solver takes, for the drop ahead. */
+  readonly dt_s: number;
+}
+
+/** The scene's scheduled drops in source form (uniformScheduledDrop), in the lattice's cells. */
+export function brickSources(scene: SceneDescription, o: { lattice: Vec3; h_m: number; origin_m: Vec3; dt_s: number }): BrickSources | undefined {
+  const schedule = scene.fluid.scheduledDrops;
+  if (!schedule?.length) return undefined;
+  const h = o.h_m, cell = (p: { x: number; y: number; z: number }): Vec3 => [(p.x - o.origin_m[0]) / h, (p.y - o.origin_m[1]) / h, (p.z - o.origin_m[2]) / h];
+  const edges: number[] = [], drops: BrickDrop[] = [];
+  for (const { time_s, volume } of schedule) {
+    if (!(time_s > 0)) throw new Error(`Brick engine: a scheduled drop at ${time_s} s (liquid at t = 0 is an initial liquid volume)`);
+    let d: Omit<BrickDrop, "box">;
+    if (volume.shape === "sphere") {
+      d = { time_s, kind: 1, centre: cell(volume.center_m), radius: volume.radius_m / h, halfHeight: 0, edgeStart: 0, edgeCount: 0, offset: 0, halfDepth: 0, edgeRadius: 0, volume: (4 / 3) * Math.PI * volume.radius_m ** 3 / h ** 3 };
+    } else if (volume.shape === "extrusion") {
+      const outline = liquidExtrusionEdges(volume), count = outline.length / 4;
+      if (count > LIQUID_EXTRUSION_MAX_EDGES) throw new Error(`Brick engine: an extrusion has ${count} outline edges, over the ${LIQUID_EXTRUSION_MAX_EDGES} a drop holds`);
+      const { min_m, max_m } = liquidExtrusionBounds(volume), centre_m = { x: 0.5 * (min_m.x + max_m.x), y: 0.5 * (min_m.y + max_m.y), z: volume.centerZ_m };
+      let reach = 0;
+      for (let i = 0; i < outline.length; i += 4) reach = Math.max(reach, Math.hypot(outline[i]! - centre_m.x, outline[i + 1]! - centre_m.y));
+      const start = edges.length / 4;
+      for (let i = 0; i < outline.length; i += 2) edges.push((outline[i]! - o.origin_m[0]) / h, (outline[i + 1]! - o.origin_m[1]) / h);
+      d = {
+        time_s, kind: 3, centre: cell(centre_m), radius: Math.hypot(reach + volume.offset_m, volume.halfDepth_m) / h, halfHeight: 0,
+        edgeStart: start, edgeCount: count, offset: volume.offset_m / h, halfDepth: volume.halfDepth_m / h, edgeRadius: volume.edgeRadius_m / h,
+        // uniformScheduledDrop's measure: the outline sampled at a quarter cell.
+        volume: liquidExtrusionVolume_m3(volume, 0.25 * h) / h ** 3,
+      };
+    } else {
+      throw new Error(`Brick engine: a scheduled drop of shape "${(volume as { shape: string }).shape}" is not supported`);
+    }
+    // requestDropPages: r = max(radius, halfHeight) about the centre, grown by the pin margin, held to the lattice.
+    const r = Math.max(d.radius, d.halfHeight);
+    const lo = d.centre.map((c, a) => Math.min(Math.max(Math.floor(c - r) - SRC_PIN_MARGIN, 0), o.lattice[a]!)) as unknown as Vec3;
+    const hi = d.centre.map((c, a) => Math.min(Math.max(Math.ceil(c + r) + SRC_PIN_MARGIN, 0), o.lattice[a]!)) as unknown as Vec3;
+    drops.push({ ...d, box: [lo, hi] });
+  }
+  return { drops, edges: Float32Array.from(edges), dt_s: o.dt_s };
+}
+
+/** The drop the step (start, end] adds (scheduledDrop: the same slack both ends tiles the clock), or -1. */
+export function brickDropDue(s: BrickSources, start_s: number, end_s: number): number {
+  const slack = 1e-6 * (end_s - start_s);
+  let due = 0, first = -1;
+  s.drops.forEach((d, i) => { if (d.time_s > start_s + slack && d.time_s <= end_s + slack && !due++) first = i; });
+  if (due > 1) throw new Error(`Brick engine: ${due} scheduled drops fall in the step ending at ${end_s} s (the first at ${s.drops[first]!.time_s} s); a step adds one drop, so space them at least a step apart`);
+  return first;
+}
+
+/** Fill the ring's source words for the step starting at `start_s` (F's words only; the rest are the engine's). */
+export function brickSourceRing(s: BrickSources, start_s: number, u: Uint32Array, f: Float32Array) {
+  const i32 = new Int32Array(u.buffer, u.byteOffset, u.length);
+  const dt = s.dt_s, now = brickDropDue(s, start_s, start_s + dt), ahead = brickDropDue(s, start_s + dt, start_s + 2 * dt);
+  for (let k = SRC_RING.KIND; k <= SRC_RING.BOXES; k++) u[k] = 0;
+  f[SRC_RING.ADDED] = 0;
+  let boxes = 0;
+  if (now >= 0) {
+    const d = s.drops[now]!;
+    u[SRC_RING.KIND] = d.kind; f.set(d.centre, SRC_RING.CENTRE); f[SRC_RING.RADIUS] = d.radius; f[SRC_RING.HALF_HEIGHT] = d.halfHeight;
+    u[SRC_RING.EDGE_START] = d.edgeStart; u[SRC_RING.EDGE_COUNT] = d.edgeCount;
+    f[SRC_RING.OFFSET] = d.offset; f[SRC_RING.HALF_DEPTH] = d.halfDepth; f[SRC_RING.EDGE_RADIUS] = d.edgeRadius;
+    f[SRC_RING.ADDED] = d.volume;
+    i32.set([...d.box[0], ...d.box[1]], SRC_RING.BOX); boxes |= 1;
+  }
+  if (ahead >= 0) { const d = s.drops[ahead]!; i32.set([...d.box[0], ...d.box[1]], SRC_RING.AHEAD); boxes |= 2; }
+  u[SRC_RING.BOXES] = boxes;
+}
+
+/** The F bricks (keys) of a cell box: every brick it touches (the boot's set takes the first step's drop). */
+export function brickBoxBricks(box: readonly [Vec3, Vec3]): [Vec3, Vec3] {
+  return [box[0].map(v => Math.floor(v / 8)) as unknown as Vec3, box[1].map(v => Math.ceil(v / 8)) as unknown as Vec3];
+}

@@ -8,7 +8,7 @@
  *   engine closes) of whole pages, cubic cells;
  * - any initial liquid (brick-initial.ts: the closed form or the old engine's t = 0 φ as a page table), at rest
  *   or with the scene's initial velocity;
- * - no other solids, bodies or sources.
+ * - scheduled drops (lane F's sources, brick-source.ts); no other solids, bodies or an inflow.
  * Density, viscosity and surface tension pass to lane F's stages, which
  * apply the forces (as the old engine's forces kernel) or refuse them.
  * Anything else is a gap, and the method runs the scene on the old engine.
@@ -21,6 +21,7 @@ import type { BrickCapacities } from "./brick-abi";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import type { BrickInitialPhi, BrickLiquidBox, Vec3 } from "./brick-engine";
 import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
+import { brickSources, type BrickSources } from "./brick-source";
 import { bootPhiAt, type BrickEngineOptions } from "./brick-engine";
 
 /** Scenes the brick engine takes at this milestone (M2: the dam). */
@@ -53,6 +54,8 @@ export interface BrickSceneSetup {
   readonly initialVelocity?: { readonly velocity: Vec3; readonly tiles: readonly number[] };
   /** The lattice's low corner (m) and the container's cells. */
   readonly origin_m: Vec3;
+  /** The scheduled drops in source form (brick-source.ts brickSources); absent: none. */
+  readonly sources?: BrickSources;
 }
 
 /** The scene's setup, or every reason the brick engine cannot run it. */
@@ -70,7 +73,10 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (scene.terrain) gaps.push("terrain needs the static solid's ground field (M3)");
   if (scene.solidBoundary && scene.solidBoundary.collision !== "voxels") gaps.push("a procedural boundary sampled as a field needs boundary records (M3)");
   if ((scene.rigidBodies?.length ?? 0) > 0) gaps.push("rigid bodies need lane P's bodies (M5)");
-  if (f.inflow || (f.scheduledDrops?.length ?? 0) > 0) gaps.push("sources need lane F's sources (M4)");
+  // Scheduled drops are lane F's sources (brick-source.ts); an inflow is not ported yet.
+  if (f.inflow) gaps.push("an inflow needs lane F's inflow source (M4)");
+  // The pool rule sizes from the t = 0 liquid alone: a drop scene would latch POOL_F or PARTICLES as its drops land.
+  if (f.scheduledDrops?.length && !f.brickPools) gaps.push("scheduled drops need authored brickPools (the pool rule sizes the t = 0 liquid only)");
   // F's stages refuse the forces they do not implement (velocity-formulas nbfVelocitySupported): a gap here, so "auto"
   // never selects a scene whose stages would throw at creation.
   try { nbfVelocitySupported({ viscosity: f.dynamicViscosity_Pa_s, surfaceTension: f.surfaceTension_N_m, noSlip: false }); }
@@ -93,6 +99,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // description is the old engine's own t = 0 φ as a page table.
   const n = lattice, g = f.gravity_m_s2, farPhi = Math.max(...paged), band = f.brickTiers?.particleBandDepth ?? 3;
   const start = brickInitialLiquid(scene, { lattice: [n[0]!, n[1]!, n[2]!], farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z] });
+  const origin_m: Vec3 = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
+  const sources = brickSources(scene, { lattice: [n[0]!, n[1]!, n[2]!], h_m: hs[0]!, origin_m, dt_s: dt! });
   // Pools: the scene's authored brickPools, else the sizing rule (brickPoolRule) from the boot. Either way they are fixed:
   // an overrun latches FAIL.POOL / PARTICLES and is never grown.
   const p = f.brickPools ?? brickPoolRule([n[0]!, n[1]!, n[2]!], brickInitialExtent({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial }),
@@ -102,7 +110,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
     setup: {
       sceneId: id, lattice: [n[0]!, n[1]!, n[2]!], farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
       capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
-      liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, [n[0]!, n[1]!, n[2]!]), bootBricks: start.bricks, bootPages: start.pages, origin_m: [-0.5 * c.width_m, 0, -0.5 * c.depth_m],
+      liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, [n[0]!, n[1]!, n[2]!]), bootBricks: start.bricks, bootPages: start.pages, origin_m,
+      ...(sources ? { sources } : {}),
     },
   };
 }

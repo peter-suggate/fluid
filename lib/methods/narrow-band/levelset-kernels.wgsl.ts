@@ -37,6 +37,7 @@ import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RI
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
+import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
 // Only F's own vertices (fgVertexOwned: tiered, a vertex with a 4h-owned incident tile is its tile's interpolant).
@@ -106,7 +107,7 @@ var<workgroup> sFresh:u32;
  }
 }`);
 
-  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell], [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL()].join("\n") + LS_SET_WGSL + /* wgsl */`
+  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src], [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL(), BRICK_SOURCE_WGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
 fn nbxTraceVelocity(x:vec3f)->vec3f{return fgSampleVel(x,0u,3u);}
 fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return fgHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c540000u);}
@@ -138,11 +139,14 @@ fn lCubicAt(v:vec3i)->bool{
 }
 fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
  let c=lPhi0(v);
- // Kept far air: last step's gate (the air collar dilated a tile) does not reach the vertex's tile.
- if(fgDist(fgTileDist(lCellBelow(v)),1u)>5u&&c>=16.0){return c;}
- // Kept deep air (umDeepAirKept): a still tile's φ ≥ 9 stays, off the walls of a moving step.
- if(!(dt>0.0&&lOnWall(v))){let d=nbrDeepAirKept(v,1u,c);if(d>=0.0){return d;}}
  let p=vec3f(v);
+ // A vertex this step's drop changes is no kept air (umAirSource: the shortcut defers to the trace, whose value
+ // takes the source).
+ let sourced=nbSourcePhi(p,c)!=c;
+ // Kept far air: last step's gate (the air collar dilated a tile) does not reach the vertex's tile.
+ if(!sourced&&fgDist(fgTileDist(lCellBelow(v)),1u)>5u&&c>=16.0){return c;}
+ // Kept deep air (umDeepAirKept): a still tile's φ ≥ 9 stays, off the walls of a moving step.
+ if(!sourced&&!(dt>0.0&&lOnWall(v))){let d=nbrDeepAirKept(v,1u,c);if(d>=0.0){return d;}}
  // The foot (umVertexFoot): the vertex's closest point on the zero set, carried rigidly through the trace.
  var foot=p;var shift=vec3f(0.0);var smoothing=0.0;
  if(abs(c)<2.0){
@@ -200,7 +204,8 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
   if(contact){value=min(value,fgPhiAt(fgHeld(p+travel)));}
  }
  value=nbrReleasedWalls(p,value);
- return value+nbfMovedSmoothing(smoothing,p,q,1u);
+ // The source writes the level set after advection (umAdvected: the union with this step's drop, then the smoothing).
+ return nbSourcePhi(p,value)+nbfMovedSmoothing(smoothing,p,q,1u);
 }
 @compute @workgroup_size(256) fn lAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
  let dt=lDt();let h=lH();
@@ -250,7 +255,7 @@ var<workgroup> sCount:u32;
  }
 }`);
 
-  const lUnion = k("lUnion", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell], [base, nbfLevelSetConstantsWGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
+  const lUnion = k("lUnion", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell, FB.src], [base, nbfLevelSetConstantsWGSL, BRICK_SOURCE_WGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
 var<private> lHome:vec3i;
 // The 3^3 tile stage about the vertex's tile (nbCoupleHeat): θ heat, or the surface heat less one; -1 where it
 // does not count (no slot, outside the box, or a dry tile for the surface heat). Tiered, a tile no F slot holds
@@ -295,7 +300,9 @@ fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
  let vs=fgSlot(v);
  var key=0u;var hot=0u;if(vs!=NB_NONE){key=fcLoad(FC_KEY+fgCell(vs,v));hot=fcLoad(FC_HOT+fgCell(vs,v));}
  let nearest2=nbfNearestFromKey(key);
- if(nbfUnionEmpty(nearest2)){return bulk;}
+ // A gathered vertex's union takes this step's drop (particleSurfaceFinish: nbSourcePhi on each of its returns).
+ let pv=vec3f(v);
+ if(nbfUnionEmpty(nearest2)){return nbSourcePhi(pv,bulk);}
  var particle=nbfUnionParticle(bulk,nearest2);
  if(particle<bulk){
   var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
@@ -311,10 +318,10 @@ fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
  }
  var blend=theta;
  if(particle>bulk){
-  if(!nbfErasure(hot,nearest2)){return bulk;}
+  if(!nbfErasure(hot,nearest2)){return nbSourcePhi(pv,bulk);}
   blend=nbfCoupleTheta(v-4*lHome,true);
  }
- return nbfUnionBlend(bulk,particle,blend);
+ return nbSourcePhi(pv,nbfUnionBlend(bulk,particle,blend));
 }
 @compute @workgroup_size(256) fn lUnion(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
  let dt=lDt();let h=nbRingF(cfg.x,NB_RING_H);

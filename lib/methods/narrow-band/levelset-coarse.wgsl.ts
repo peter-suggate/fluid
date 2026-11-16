@@ -92,8 +92,9 @@
  *    SOLID page lies across, here the box), so it does not depend on which owner lists the corner. nbVertexClosed is
  *    false at every lattice vertex (no embedded solids); nbMetricZeroOpen holds for every point of the box. For the
  *    same reason no cubic tap is buried, so umCubicPhi's trilinear fallback (nbfCubicWeighted) never applies.
- * 9. Sources (umSourceuvSourcePhi, nbSourcePhi) are the identity: brick-scene refuses scenes with sources until lane
- *    F's M4. The old state word 15 (a coarse vertex under 16 seen, the next phiResolve's gate) is not kept: nothing
+ * 9. Sources (umSourceuvSourcePhi, nbSourcePhi): this step's scheduled drop (lane F's M4, brick-source.wgsl.ts):
+ *    umAdvected's union before the smoothing, umAirSource's veto of the kept-air exits, and particleSurfaceFinish's
+ *    union on a gathered vertex. Inflow is not ported (brick-scene refuses it). The old state word 15 (a coarse vertex under 16 seen, the next phiResolve's gate) is not kept: nothing
  *    in the brick engine resolves hanging vertices into storage.
  * 10. The F residency is the h tiles' ring (lane E, R3, the coordinator's ruling 2026-11-16, the user's aggressive
  *    fine-tile retirement): lcCouple's and lcRetire's F guard words are read only where they are the old engine's
@@ -118,6 +119,7 @@ import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
 import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL } from "./levelset-formulas.wgsl";
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
+import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 
 /** Lane F's kernel whose pass each C kernel can fold into (FC_G1 dispatch), in the frame's order. */
 export const LC_FOLD = { lcAdvect: "lAdvect", lcCouple: "lUnion", lcClear: "lClear", lcRetire: "lDistance", lcPublish: "lPublish" } as const;
@@ -362,7 +364,8 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
   value=nbfCubicLimited(f,origin-vec3i(width)<vec3i(0),origin+vec3i(2*width)>NB_LATTICE);
  }
  value=nbrReleasedWalls(p,lcWallContact(p,value,travel,dt,hm));
- return value+moved;
+ // umAdvected: the source's union after the advection, then the smoothing (deviation 9).
+ return nbSourcePhi(p,value)+moved;
 }
 // umFarAirKept's gate word: last step's airGate at tile t (lcStoreGate); clear where no page holds t.
 fn lcGate(t:vec3i)->bool{
@@ -400,12 +403,12 @@ fn lcAdvectPage(slot:u32,live:bool,lid:u32){
   let c=lcPhiC(NB_PHI_C_PHI,slot,l);
   // Exits 1 and 2: the COLD hold (umHoldCold → umStoreCold: the vertex's own φ).
   if(lcTierCold(v)){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
-  // Exit 3: kept far air (umFarAirKept: the gate clear at the vertex's cell's tile, φ ≥ 16 max h; umAirSource is
-  // the identity, deviation 9).
-  if(c>=16.0&&!lcGate(lcCellOf(v)>>vec3u(2u))){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
-  // Exit 4: off the wall planes (umAdvectStore's deep = !wall), kept deep air (umDeepAirKept at width 4; umAirSource
-  // is the identity).
-  if(!(dt>0.0&&lcOnWall(v))){let d=nbrDeepAirKept(v,4u,c);if(d>=0.0){lcSetC(NB_PHI_C_PHI1,slot,l,d);continue;}}
+  // umAirSource (deviation 9): a vertex this step's drop changes keeps no air; it takes the full path.
+  let sourced=nbSourcePhi(vec3f(v),c)!=c;
+  // Exit 3: kept far air (umFarAirKept: the gate clear at the vertex's cell's tile, φ ≥ 16 max h).
+  if(!sourced&&c>=16.0&&!lcGate(lcCellOf(v)>>vec3u(2u))){lcSetC(NB_PHI_C_PHI1,slot,l,c);continue;}
+  // Exit 4: off the wall planes (umAdvectStore's deep = !wall), kept deep air (umDeepAirKept at width 4).
+  if(!sourced&&!(dt>0.0&&lcOnWall(v))){let d=nbrDeepAirKept(v,4u,c);if(d>=0.0){lcSetC(NB_PHI_C_PHI1,slot,l,d);continue;}}
   // Exit 5: the full path.
   lcSetC(NB_PHI_C_PHI1,slot,l,lcFullAdvected(v,c,dt,hm));
  }
@@ -480,7 +483,8 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
  let vs=fgSlot(v);
  var key=0u;var hot=0u;if(vs!=NB_NONE){key=fcLoad(FC_KEY+fgCell(vs,v));hot=fcLoad(FC_HOT+fgCell(vs,v));}
  let nearest2=nbfNearestFromKey(key);
- if(nbfUnionEmpty(nearest2)){return bulk;}
+ // particleSurfaceFinish: a gathered vertex's every return takes this step's drop (deviation 9).
+ if(nbfUnionEmpty(nearest2)){return nbSourcePhi(q,bulk);}
  var particle=nbfUnionParticle(bulk,nearest2);
  if(particle<bulk){
   var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
@@ -503,10 +507,10 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
  }
  var blend=theta;
  if(particle>bulk){
-  if(!nbfErasure(hot,nearest2)){return bulk;}
+  if(!nbfErasure(hot,nearest2)){return nbSourcePhi(q,bulk);}
   blend=nbfInterpolatedHeat(q,true);
  }
- return nbfUnionBlend(bulk,particle,blend);
+ return nbSourcePhi(q,nbfUnionBlend(bulk,particle,blend));
 }
 // The page body: PHI1 → PHI at the C vertices that are not COLD (nbStoreReconstructed holds COLD).
 // One C vertex a lane: the page's z plane lcPart (eight workgroups a page, X8), as lcAdvect.
@@ -657,7 +661,7 @@ fn lcPublishPage(slot:u32,live:bool,lid:u32){
 
 /** The page bodies (fn lc*Page(slot, live, lid)) and what each needs before it, for folding into lane F's passes. */
 export const levelSetCoarseWGSL = {
-  common: () => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL].join("\n"),
+  common: () => [FG_SLOT_WGSL, FG_FCELL_WGSL, ownersWGSL(), LC_TRILINEAR_WGSL, LC_COMMON_WGSL, BRICK_SOURCE_WGSL].join("\n"),
   advect: () => [LC_VELOCITY_WGSL, nbfLevelSetConstantsWGSL, LC_PHI_ADVECT_REST_WGSL, levelSetReleaseWGSL(), LC_ADVECT_WGSL].join("\n"),
   couple: () => [FG_RUN_WGSL, nbfLevelSetConstantsWGSL, nbfPhiUnionWGSL, nbfRedistanceWGSL, LC_NEAR_KNOWN_WGSL, LC_COUPLE_WGSL].join("\n"),
   clear: () => [LC_SEEDS_WGSL, LC_CLEAR_WGSL].join("\n"),
@@ -682,7 +686,7 @@ export interface LevelSetCoarseKernels {
  * workgroup 256 (lcClear, lcPublish). */
 export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayout(L, { tiered: true })): LevelSetCoarseKernels {
   if (!F.tiered) throw new Error("levelset-coarse: the C kernels read through the tier owners; build them with fluidLayout(L, { tiered: true })");
-  const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell];
+  const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
   const k = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(), part, /* wgsl */`
 @compute @workgroup_size(256) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ALL);
