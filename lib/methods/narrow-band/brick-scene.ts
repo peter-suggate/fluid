@@ -56,6 +56,10 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (c.shape === "sphere") gaps.push("a spherical container needs static solids (M3)");
   if (c.top !== "closed") gaps.push("an open top needs an air boundary above the lattice (M3)");
   if (solidVoxelEditsForScene(scene).length > 0) gaps.push("solid voxels beyond the container shell need solidStamp (M3)");
+  // The static hooks read the voxel mask (brick-static.wgsl.ts); a ground field or a procedural boundary sampled as a
+  // field (umUnitBoxOpen's terrain, umBoundaryTouchesBox) is not read yet, so it must not run as open water.
+  if (scene.terrain) gaps.push("terrain needs the static solid's ground field (M3)");
+  if (scene.solidBoundary && scene.solidBoundary.collision !== "voxels") gaps.push("a procedural boundary sampled as a field needs boundary records (M3)");
   if ((scene.rigidBodies?.length ?? 0) > 0) gaps.push("rigid bodies need lane P's bodies (M5)");
   if (f.inflow || (f.scheduledDrops?.length ?? 0) > 0) gaps.push("sources need lane F's sources (M4)");
   if (f.initialCondition !== "dam-break" || f.initialLiquidVolumes?.length || f.initialBrickSeeds_m?.length) gaps.push("only the dam-break initial condition is supported (M2)");

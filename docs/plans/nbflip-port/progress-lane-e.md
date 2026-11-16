@@ -2207,3 +2207,58 @@ that overruns latches FAIL.
   - D8 at 30–90 is 4.35e5 (an upper bound), against 6.31e5.
 - Step time, from the same run, steps 13–165: median **34.23 ms**, mean 39.1, against 34.4–34.7 at 20a233bb. No
   regression.
+
+## 2026-11-17: M3 stage 2a, the static voxel source behind the five hooks, with the AGENTS.md regressions (landed)
+
+**The source.** The hooks now read the static voxels from the shared geometry path's own image, the
+SolidOccupancyMask.
+- `brickStaticMask(scene)` builds the mask exactly as the old engine does (webgpu-uniform-reference.ts):
+  - solidWorldForFluidLattice, with terrain kept separate;
+  - half-solid for a procedural solid that collides as voxels;
+  - walls by the tank's rule (policy 1, or 2 under an open top), so the shell sits in wall pages and holds no slot;
+  - sealed at the pages partly solid now, as many again, plus 64.
+- It returns undefined when no cell of the box is solid, so the scene gets no binding and no memory.
+- The seep: 16 slots, a 2.4 MiB image (the 2 MiB fixed tables plus one 4 KB unit per partly solid page), built in
+  30 ms.
+- `brickStaticWGSL({..., mask: {buffer, walls}})` reads the mask through solidOccupancyMaskWGSL's fixed reader, after
+  the box rule. A cell outside the box never reads the mask.
+- With the mask, the semantics are umCellOpenGeometry and umPressureFaceV for a voxel with no record:
+  - VOXEL cells have open fraction 0;
+  - a face with one VOXEL side is 0.5·(open + open), so 0.5 beside a voxel or a box wall and 0 between two;
+  - any other face is 1.
+- Without the mask, stage 1's box faces (0) stay. P's pbStampFace never reads either value at a wall face.
+- The mirror reads the same words through solidOccupancyMaskVoxel.
+- There is no copy of the geometry. An edit is the mask's `update`, which names the cells it moved.
+
+**New gaps** (brickSceneSetup). The hooks do not read these yet, so they must not run as open water:
+- terrain: 15 catalog scenes;
+- a procedural boundary sampled as a field (`collision` not "voxels"): 9 catalog scenes.
+
+The dam still has no gaps. The "solid voxels beyond the shell" gap stays until solidStamp binds the mask in the
+engine and P and F consume it.
+
+**The AGENTS.md regressions** (brick-static.test.ts, on the seep):
+- **Hit testing:** the mask equals voxelReaderForScene (the editor's pick reader) on every cell of the
+  512×256×64 box. pickSolidVoxel along +x meets the wall at the first cell the hooks call VOXEL, and solidAt agrees,
+  at three heights including the hole's edge.
+- **Local edit:** an ellipsoid clear through the wall's face plus a box fill in the floor, via sceneWithSolidStroke.
+  - The edited scene keeps every base patch, in order.
+  - The rebuilt mask equals the edited reader on every cell.
+  - The incremental `update` equals the rebuild on every cell.
+  - The moved cells are exactly the cells `update` names (each once), all within the edit boxes.
+  - Around the edits, a cell's kind and open fraction change only where its bit moved, and a face only where one of
+    its two cells moved.
+- **Untouched fidelity:** no cell outside the edits changes, checked on every cell of the box.
+- **Save/load:** a JSON round trip builds a bitwise-identical image.
+- **Undo:** the live mask returns to the base on every cell, and gives its slots back.
+- **Unknown kinds:** an unknown patch kind throws (`Unknown solid patch kind`). Terrain and a field-sampled boundary
+  are named gaps.
+- **GPU:** the WGSL with the mask matches the mirror bit for bit on about 60k cells (the hole, the edits, and random
+  cells in and past the box) plus world points, on both the base and the edited mask.
+
+**Gates**
+- check:types: lane-n's 3 only.
+- test:unit: 1882 pass, 0 fail.
+- brick-static on the GPU: 6 of 6 pass (timing slot, rc 0, no 00000206).
+- No engine kernel compiles these hooks yet (only P's tests do), so the dam's step is unchanged and the dam was not
+  re-run.
