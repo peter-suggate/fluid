@@ -377,34 +377,73 @@ var<workgroup> wN:atomic<u32>;
   }
 }`);
 
-  // bootPhi: the initial liquid's signed distance (in h) on the entering bricks.
-  // boot holds cfg.z boxes of 6 floats (lo xyz, hi xyz, in cells); the union is the min. Uncapped, as the old engine's
-  // t = 0 φ (initialLiquidVertexPhi: the analytic distance, its empty value the lattice's far φ, NB_PHI_FAR).
-  const bootPhi = k("bootPhi", [CFG, setRO, dirRO, phiRW, bootRO], /* wgsl */`
+  // bootPhi: the initial liquid's signed distance (in h) on the entering bricks, from one of two sources:
+  // - cfg.w = 0, the closed form: boot holds cfg.z boxes of 6 floats (lo xyz, hi xyz, in cells); the union is the min.
+  //   Uncapped, as the old engine's t = 0 φ (initialLiquidVertexPhi: the analytic distance, its empty value the
+  //   lattice's far φ, NB_PHI_FAR).
+  // - cfg.w = 1, the page table (brick-initial.ts, any liquid description): boot holds the page count n, n page keys
+  //   (p.x + P.x (p.y + P.y p.z), P = NB_LATTICE / 32 + 1, ascending) and n pages of 32^3 vertex φ (in h, x fastest),
+  //   the old engine's own t = 0 φ (fluidLatticePagedVertexPhi). A vertex of a page the table lacks is far air
+  //   (NB_PHI_FAR), as the old engine's unstored pages are.
+  // The boot buffer's last word is the start w of the initial velocity block (NB_NONE: the liquid starts at rest):
+  // boot[w..w+2] the velocity (m/s), boot[w+3] the tile count m, then m tile keys (t.x + T.x (t.y + T.y t.z), T =
+  // NB_LATTICE / 4, ascending): the 4h tiles that hold liquid or touch one (uniformInitialLiquidVelocityPages). Face a
+  // of cell c (U at index c: the face between c - e_a and c) takes the velocity where c - e_a is in such a tile and
+  // the face lies inside the lattice (no wall face); F's at an h face, C's at a 4h face, the rest stay zero (setInit's).
+  // Every search is a bisection over a count held to the binding (log2 steps); the box loop is held to its boxes.
+  const bootPhi = k("bootPhi", [CFG, setRO, dirRO, phiRW, bootRO, velRW], /* wgsl */`
 fn sdBox(p:vec3f,lo:vec3f,hi:vec3f)->f32{let q=abs(p-0.5*(lo+hi))-0.5*(hi-lo);return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
+fn bootWord(i:u32)->u32{return bitcast<u32>(boot[i]);}
+fn bootUnit(a:u32)->vec3i{var e=vec3i(0);e[a]=1;return e;}
+fn bootTable(v:vec3i)->f32{
+  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}
+  let P=vec3u(NB_LATTICE)/32u+1u;let p=vec3u(v)>>vec3u(5u);let key=p.x+P.x*(p.y+P.y*p.z);
+  let n=min(bootWord(0u),arrayLength(&boot)/32769u);var lo=0u;var hi=n;
+  while(lo<hi){let m=(lo+hi)/2u;if(bootWord(1u+m)<key){lo=m+1u;}else{hi=m;}}
+  if(lo>=n||bootWord(1u+lo)!=key){return NB_PHI_FAR;}
+  let l=vec3u(v)&vec3u(31u);return boot[1u+n+32768u*lo+l.x+32u*(l.y+32u*l.z)];
+}
+fn bootVelAt()->u32{return bootWord(arrayLength(&boot)-1u);}
+// Whether 4h tile t is one of the initial velocity's tiles (w: bootVelAt()).
+fn bootVelTile(t:vec3i,w:u32)->bool{
+  let T=NB_LATTICE/4;if(any(t<vec3i(0))||any(t>=T)){return false;}
+  let key=u32(t.x+T.x*(t.y+T.y*t.z));let m=min(bootWord(w+3u),arrayLength(&boot)-min(w+4u,arrayLength(&boot)));var lo=0u;var hi=m;
+  while(lo<hi){let mid=(lo+hi)/2u;if(bootWord(w+4u+mid)<key){lo=mid+1u;}else{hi=mid;}}
+  return lo<m&&bootWord(w+4u+lo)==key;
+}
+// The face of cell c along a (c - e_a to c) is inside the lattice.
+fn bootInnerFace(c:vec3i,a:u32)->bool{return all(c>=vec3i(0))&&all(c<NB_LATTICE)&&c[a]>=1;}
+fn bootAt(v:vec3i,nBoxes:u32)->f32{
+  if(cfg.w==1u){return bootTable(v);}
+  let p=vec3f(v);var d=NB_PHI_FAR;
+  for(var i=0u;i<nBoxes;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
+  return d;
+}
 @compute @workgroup_size(128) fn bootPhi(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32,@builtin(num_workgroups) nw:vec3u){
   // The box count is the host's, held to the boot binding's boxes (the engine's loop bound, 2026-11-17).
-  let nBoxes=min(cfg.z,arrayLength(&boot)/6u);
+  let nBoxes=min(cfg.z,arrayLength(&boot)/6u);let w=bootVelAt();
   let n=nbListCount(NB_LIST_F_ENTER);
   for(var e=wid.x;e<n;e+=nw.x){
     let s=nbListSlot(NB_LIST_F_ENTER,e);let o=nbFOrigin(s);
     for(var j=0u;j<4u;j++){
-      let l=lid+128u*j;let p=vec3f(o+nbLocalCoord(l));
-      var d=NB_PHI_FAR;
-      for(var i=0u;i<nBoxes;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
+      let l=lid+128u*j;let c=o+nbLocalCoord(l);let d=bootAt(c,nBoxes);
       phi[NB_PHI_F_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_F_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
+      if(w!=NB_NONE){
+        for(var a=0u;a<3u;a++){if(bootInnerFace(c,a)&&bootVelTile((c-bootUnit(a))>>vec3u(2u),w)){vel[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+l]=boot[w+a];}}
+      }
     }
   }
   // The entering pages' C vertices (h vertex 4T), the same distance: a tiered boot commits the census's tiers
-  // without a remap (U = 0, and F and C hold one analytic φ, which is the remap's injection at a corner).
+  // without a remap (F and C hold one φ, which is the remap's injection at a corner; U the same velocity).
   let nC=nbListCount(NB_LIST_C_ENTER);
   for(var e=wid.x;e<nC;e+=nw.x){
     let s=nbListSlot(NB_LIST_C_ENTER,e);let o=nbCOrigin(s);
     for(var j=0u;j<4u;j++){
-      let l=lid+128u*j;let p=vec3f(o+4*nbLocalCoord(l));
-      var d=NB_PHI_FAR;
-      for(var i=0u;i<nBoxes;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
+      let l=lid+128u*j;let T=(o>>vec3u(2u))+nbLocalCoord(l);let d=bootAt(4*T,nBoxes);
       phi[NB_PHI_C_PHI+NB_STRIDE*s+l]=bitcast<u32>(d);phi[NB_PHI_C_PHI1+NB_STRIDE*s+l]=bitcast<u32>(d);
+      if(w!=NB_NONE){
+        for(var a=0u;a<3u;a++){if(bootInnerFace(4*T,a)&&bootVelTile(T-bootUnit(a),w)){vel[NB_VEL_C_U0+NB_STRIDE*(s+a*NB_CCAP)+l]=boot[w+a];}}
+      }
     }
   }
 }`);

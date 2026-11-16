@@ -15,7 +15,7 @@
  * - Nothing is sized from the lattice.
  */
 import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
-import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, type BrickCapacities } from "./brick-abi";
+import { ARGS, BrickLayout, FAIL, H, LIST, NONE, RING, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
@@ -31,6 +31,15 @@ import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
 export type Vec3 = readonly [number, number, number];
 /** A box of initial liquid, in cells (vertex coordinates of the lattice). */
 export interface BrickLiquidBox { readonly lo: Vec3; readonly hi: Vec3 }
+/**
+ * The initial liquid as a page table of vertex φ (brick-initial.ts brickInitialPhi: the old engine's own t = 0 φ,
+ * for any liquid description): `pages` the page keys p.x + P.x (p.y + P.y p.z) (P = lattice / 32 + 1 an axis),
+ * ascending, and `phi` 32^3 vertex values (in h, x fastest) a page in that order. A vertex of a page the table
+ * lacks is far air (phiFar), as the old engine's unstored pages are.
+ */
+export interface BrickInitialPhi { readonly pages: readonly number[]; readonly phi: Float32Array }
+/** The page grid of BrickInitialPhi: pages an axis, the high vertex plane included. */
+export const initialPhiPages = (lattice: Vec3): Vec3 => [Math.floor(lattice[0] / 32) + 1, Math.floor(lattice[1] / 32) + 1, Math.floor(lattice[2] / 32) + 1];
 
 export interface BrickEngineOptions {
   readonly lattice: Vec3;
@@ -41,7 +50,13 @@ export interface BrickEngineOptions {
   readonly gravity_mps2: Vec3;
   readonly capacities: BrickCapacities;
   readonly apic?: boolean;
+  /** The initial liquid in closed form (boxes; their union) ... */
   readonly liquid: readonly BrickLiquidBox[];
+  /** ... or, when given, as a page table (`liquid` then empty): any liquid description (brick-initial.ts). */
+  readonly initial?: BrickInitialPhi;
+  /** The liquid's initial velocity (m/s) on the faces of `tiles` (4h tile keys t.x + T.x (t.y + T.y t.z), T = lattice / 4,
+   * ascending: the tiles holding liquid or touching one; brick-initial.ts brickInitialVelocity). Absent: at rest. */
+  readonly initialVelocity?: { readonly velocity: Vec3; readonly tiles: readonly number[] };
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
@@ -91,10 +106,38 @@ export function reachSet(lattice: Vec3, bricks: Iterable<Vec3>, liquid: (b: Vec3
   return out;
 }
 
-/** The initial bricks: the reach set of the boxes' liquid vertices, at rest. */
-export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "liquid" | "dt_s" | "h_m" | "gravity_mps2">): number[] {
+/** The boot's vertex φ (in h) as bootPhi reads it: the table's (far air off it) or the boxes' union. */
+export function bootPhiAt(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial">): (v: Vec3) => number {
+  const far = o.farPhi ?? phiFar(o.lattice);
+  if (o.initial) {
+    const P = initialPhiPages(o.lattice), index = new Map(o.initial.pages.map((k, i) => [k, i])), phi = o.initial.phi;
+    return v => {
+      if (v.some((x, a) => x < 0 || x > o.lattice[a]!)) return far;
+      const i = index.get((v[0] >> 5) + P[0] * ((v[1] >> 5) + P[1] * (v[2] >> 5)));
+      return i === undefined ? far : phi[32768 * i + (v[0] & 31) + 32 * ((v[1] & 31) + 32 * (v[2] & 31))]!;
+    };
+  }
+  const f32 = (b: BrickLiquidBox): BrickLiquidBox => ({ lo: o.lattice.map((_, a) => Math.fround(b.lo[a]!)) as unknown as Vec3, hi: o.lattice.map((_, a) => Math.fround(b.hi[a]!)) as unknown as Vec3 });
+  const boxes = o.liquid.map(f32);
+  return v => Math.min(far, ...boxes.map(box => boxDistance(v, box)));
+}
+
+/** The initial bricks: the reach set of the initial liquid's vertices (boxes or table), at rest. */
+export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2">): number[] {
+  if (o.initial && o.liquid.length) throw new Error("Brick engine: the initial liquid is boxes or a table, not both");
   const nb = bricksPerAxis(o.lattice), f32 = (b: BrickLiquidBox): BrickLiquidBox => ({ lo: o.lattice.map((_, a) => Math.fround(b.lo[a]!)) as unknown as Vec3, hi: o.lattice.map((_, a) => Math.fround(b.hi[a]!)) as unknown as Vec3 });
-  const boxes = o.liquid.map(f32), candidates = new Map<number, Vec3>();
+  const boxes = o.liquid.map(f32), candidates = new Map<number, Vec3>(), at = bootPhiAt(o);
+  if (o.initial) {
+    // Every brick of the table's pages (a page holds 4^3 bricks); off the table no vertex is liquid.
+    const P = initialPhiPages(o.lattice);
+    for (const k of o.initial.pages) {
+      const p = [k % P[0], Math.floor(k / P[0]) % P[1], Math.floor(k / (P[0] * P[1]))];
+      for (let j = 0; j < 64; j++) {
+        const b = [4 * p[0]! + (j & 3), 4 * p[1]! + ((j >> 2) & 3), 4 * p[2]! + (j >> 4)];
+        if (b.every((v, a) => v < nb[a]!)) candidates.set(brickKey(b[0]!, b[1]!, b[2]!), b as unknown as Vec3);
+      }
+    }
+  }
   for (const box of boxes) {
     const lo = [0, 1, 2].map(a => Math.max(Math.floor(box.lo[a]! / 8) - 1, 0)), hi = [0, 1, 2].map(a => Math.min(Math.floor(box.hi[a]! / 8) + 1, nb[a]! - 1));
     for (let z = lo[2]!; z <= hi[2]!; z++) for (let y = lo[1]!; y <= hi[1]!; y++) for (let x = lo[0]!; x <= hi[0]!; x++) candidates.set(brickKey(x, y, z), [x, y, z]);
@@ -104,7 +147,7 @@ export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "liquid" | "d
     for (let l = 0; l < 512; l++) {
       const c = [l & 7, (l >> 3) & 7, l >> 6], v = [0, 1, 2].map(a => 8 * b[a]! + c[a]!) as unknown as Vec3;
       if (v.some((x, a) => x > o.lattice[a]!)) continue;
-      const d = Math.min(PHI_AIR, ...boxes.map(box => boxDistance(v, box)));
+      const d = Math.min(PHI_AIR, at(v));
       if (Math.fround(d) < 0) { lo = lo.map((m, a) => Math.min(m, c[a]!)); hi = hi.map((m, a) => Math.max(m, c[a]!)); }
     }
     return hi[0]! < 0 ? undefined : { lo: lo as unknown as Vec3, hi: hi as unknown as Vec3 };
@@ -242,7 +285,7 @@ export class BrickEngine {
     const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL).map(p => (heat && p.kernel.label === "setTransferList" ? { ...p, w: 1 } : p));
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
-    const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: boxes };
+    const bootPhi: BrickPlacement = { kernel: set.bootPhi, dispatch: direct(churnGroups(f, 1)), z: Math.max(boxes, 0), w: boxes < 0 ? 1 : 0 };
     const res = brickResidencyKernels(layout, { tiered });
     const residency: BrickPlacement[] = [
       // Tiered, pass 0 also runs the page sources: a workgroup a page of C_ALL after F_ALL's bricks (FC_G1).
@@ -285,7 +328,8 @@ export class BrickEngine {
     validateBrickStages(stages);
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.liquid.length, options.staticMask);
+    // boxes < 0 names the page table (bootPhi cfg.w = 1).
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
@@ -349,8 +393,15 @@ export class BrickEngine {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
     }
-    const boxes = new Float32Array(Math.max(6 * this.options.liquid.length, 4));
-    this.options.liquid.forEach((b, i) => boxes.set([...b.lo, ...b.hi], 6 * i));
+    const t = this.options.initial;
+    if (t && t.phi.length !== 32768 * t.pages.length) throw new Error(`Brick engine: the initial φ table holds ${t.phi.length} values for ${t.pages.length} pages`);
+    // The liquid (boxes or the table), then the initial velocity block, then its start (NONE: at rest).
+    const v = this.options.initialVelocity, head = t ? 1 + t.pages.length + t.phi.length : Math.max(6 * this.options.liquid.length, 4);
+    const boxes = new Float32Array(head + (v ? 4 + v.tiles.length : 0) + 1), words = new Uint32Array(boxes.buffer);
+    if (t) { words.set([t.pages.length, ...t.pages]); boxes.set(t.phi, 1 + t.pages.length); }
+    else this.options.liquid.forEach((b, i) => boxes.set([...b.lo, ...b.hi], 6 * i));
+    if (v) { boxes.set(v.velocity, head); words[head + 3] = v.tiles.length; words.set(v.tiles, head + 4); }
+    words[boxes.length - 1] = v ? head : NONE;
     const boot = make("boot", boxes.length); d.queue.writeBuffer(boot, 0, boxes);
     // The set buffer: free stacks full (FREE[i] = CAP - 1 - i), the initial candidates.
     const s = new Uint32Array(L.set.words), cap = L.cap;
@@ -418,6 +469,13 @@ export class BrickEngine {
     const rec = this.schedule.boot.map(p => this.bind(p, 0));
     this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * this.layout.set.ring, this.ringWords(0));
     this.device.queue.submit([this.encode(rec, "nb-brick.boot")]);
+    // The page table is boot-only (its size follows the initial liquid's pages): released once the boot is queued
+    // (destroy waits for the queued work), a 4-word stub in its place for save and restore.
+    if (this.options.initial || this.options.initialVelocity) {
+      const table = this.buffers.get("boot")!;
+      this.buffers.set("boot", this.device.createBuffer({ label: "nb-brick.boot", size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST }));
+      table.destroy();
+    }
   }
 
   private encodeAhead() {
