@@ -7,7 +7,9 @@
  * read-only, uploaded on change after pbCheckCutAtlas. The ring's words 64-68 are the header (RING.BODY_*); FLAGS bit
  * BODIES gates every body test (A3: E's ring word 3 bit 1).
  *
- * bodyStamp: a workgroup a brick (G1), 128 lanes.
+ * bodyStamp: a workgroup a brick (G1), 512 lanes, a cell a lane (2026-11-17: at 128 lanes it was 0.50-0.59 ms a step
+ *   on the rigid hydrostatic and sink at h = 0.025, at 512 0.20-0.26 ms, the words bitwise the same; few bricks are
+ *   stamped, so the brick's latency is the stage's).
  * - cfg.z = 0, over F_BODY (NEAR_BODY | BODY_WAS): a NEAR_BODY brick's BMASK is the bodies whose bounding sphere,
  *   dilated by length(2h), one cell and the swept reach (|v| + |w| r) dt, meets the brick's box (pbBrickCandidates);
  *   a BODY_WAS-only brick is the clean-up pass, BMASK 0: the static values and W = 0 (bitwise the static hooks').
@@ -72,7 +74,7 @@ fn bsOpen(l:u32,open:bool){let f=NB_PHI_F_FLAGS+NB_STRIDE*bsSlot+l;phi[f]=select
 ${pbStampBrickWGSL({ putCut: "bsPut", putOpen: "bsOpen" })}
 ${PB_BRICK_CANDIDATES_WGSL}
 var<workgroup> wHead:vec4u;
-@compute @workgroup_size(128) fn bodyStamp(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+@compute @workgroup_size(512) fn bodyStamp(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   // Lane 0 decides the brick and takes its slot (one nbKTake caller a brick); x stamped, y F slot, z K slot, w BMASK.
   if(lid==0u){
     var head=vec4u(0u,0u,NB_NONE,0u);
@@ -97,7 +99,7 @@ var<workgroup> wHead:vec4u;
   if(head.x==0u){return;}
   bsSlot=head.y;bsK=head.z;
   if(lid==0u){cut[NB_CUT_BMASK+bsK]=bitcast<f32>(head.w);}
-  pbStampBrick(nbFOrigin(head.y),head.w,lid,128u);
+  pbStampBrick(nbFOrigin(head.y),head.w,lid,512u);
 }`].join("\n");
   return { bodyStamp: { label: "bodyStamp", entry: "bodyStamp", code, bindings, cfgZ: [0, 1] } };
 }
