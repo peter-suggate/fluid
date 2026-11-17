@@ -26,6 +26,7 @@
  *       [--pcg-iterations n] [--forcing-max eta]  inexact-solve experiments (reported in the restored settings)
  *       [--newton-iterations n]   the restored document's Newton cap (fixed-state comparisons: 1 or 2 iterations from one state)
  */
+import { CLOTH_PROJECT_LANES } from '../lib/cloth/gpu-newton-wgsl';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { clothExecutionSettings } from '../lib/cloth/execution-settings';
@@ -394,7 +395,7 @@ async function replay(tick: number): Promise<{ kernel: string; us: number }[]> {
   // A PCG iteration: pcgStep, and with compiled records pcgStepOverflow after it (the patches the pool could not hold).
   const pcg = linKernels.length ? 'pcgStep+pcgStepOverflow' : 'pcgStep';
   const plan: [string, number, number][] = [['nwFaces', S.threads(S.T), 0], ['nwGradient', W, 0], ...linPair, [pcg, Wp, 0], [pcg, Wp, 1],
-    [pcg, Wp, 2], ...(linKernels.length ? [['pcgStep', Wp, 2], ['pcgStepOverflow', Wp, 2]] as [string, number, number][] : []), ['nwProject', W, 0], ['nwTrial', W, 0], ['nwChoose', 1, 0], ['nwApply', W, 0]];
+    [pcg, Wp, 2], ...(linKernels.length ? [['pcgStep', Wp, 2], ['pcgStepOverflow', Wp, 2]] as [string, number, number][] : []), ['nwProject', S.threads(CLOTH_PROJECT_LANES * S.N), 0], ['nwTrial', W, 0], ['nwChoose', 1, 0], ['nwApply', W, 0]];
   const set = device.createQuerySet({ type: 'timestamp', count: 2 * plan.length });
   const encoder = device.createCommandEncoder({ label: 'bench replay' });
   device.queue.writeBuffer(ctl.buffer, ctl.offset, new Float32Array(4));

@@ -26,7 +26,7 @@ import { CLOTH_MG_KERNELS, withClothMultigrid } from './multigrid';
 import { writeBufferChunked } from '../methods/uniform/uniform-chunked-upload';
 import type { ClothIntegrator, ClothNewtonSettings, ClothSolverStateData, ClothVector } from './types';
 import { CLOTH_INITIAL_GUESS, type ClothInitialGuess, type ClothSolverModel } from './oracle';
-import { clothNewtonSegmentCount, CLOTH_CONTACT_LIN_RECORDS, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, CLOTH_CONTACT_LIN_ARGS, type ClothContactLinLayout, type ClothPCGLayout } from './gpu-newton-wgsl';
+import { clothNewtonSegmentCount, CLOTH_PROJECT_LANES, CLOTH_CONTACT_LIN_RECORDS, CLOTH_NEWTON_SEGMENTS, CLOTH_NEWTON_TRIAL_RECORDS, CLOTH_PCG_PARTIALS, CLOTH_PCG_SCALARS, CLOTH_CONTACT_LIN_ARGS, type ClothContactLinLayout, type ClothPCGLayout } from './gpu-newton-wgsl';
 import {
   CLOTH_BINDING, CLOTH_DISPATCH_STRIDE, CLOTH_SCRIPT_KIND, CLOTH_SEGMENT_ALIGN, CLOTH_SLOT, CLOTH_STATE, CLOTH_STATE_SEGMENTS, CLOTH_STATUS,
   CLOTH_STATUS_RING_BASE, CLOTH_STATUS_RING_SLOTS, CLOTH_STATUS_WORD, CLOTH_STATUS_SLOT_WORDS, CLOTH_STATUS_WORDS, CLOTH_WORKGROUP, clothSolverWGSL,
@@ -748,7 +748,7 @@ export class ClothGPUSolver {
         if (this.tables.pcg.contactLin) this.run(pass, 'pcgStepOverflow', this.tables.pcg.patches, i);
       }
       this.hooks.filter?.(pass);
-      if (this.options.contact) this.run(pass, 'nwProject', W);
+      if (this.options.contact) this.run(pass, 'nwProject', this.threads(CLOTH_PROJECT_LANES * this.N));
       if(this.options.lazyLineSearch){this.run(pass,'nwTrialHead',W);this.run(pass,'nwTrialHeadGate',1);this.run(pass,'nwTrialTail',W);}
       else this.run(pass, 'nwTrial', W);
       // Trust-region iterations (newton.trustRegion 'hybrid'): s.H s of the projected step for the model's decrease.

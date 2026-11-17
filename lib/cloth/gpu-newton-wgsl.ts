@@ -53,6 +53,8 @@ import { CLOTH_LINE_SEARCH } from './oracle';
 export const CLOTH_NEWTON_SEGMENTS = { g: 0, r0: 1, r1: 2, w0: 3, w1: 4, s0: 5, s1: 6, d: 7, p: 8, m0: 9, m1: 10, moves: 11 } as const;
 /** Line-search trials per Newton iteration: steps 1, 1/2, ..., 2^-(TRIALS-1). */
 export const CLOTH_NEWTON_TRIALS = 8;
+/** nwProject's lanes a vertex: one a trial. */
+export const CLOTH_PROJECT_LANES = CLOTH_NEWTON_TRIALS;
 /** With contact, after the trial moves: the active set's normals (3 segments) and projector (2), then the inverse of
  * the vertex's 3x3 diagonal block H_vv before the active-set projection (2: the metric of the contact projection). */
 export const CLOTH_NEWTON_ACTIVE = { normals: CLOTH_NEWTON_SEGMENTS.moves + CLOTH_NEWTON_TRIALS, projector: CLOTH_NEWTON_SEGMENTS.moves + CLOTH_NEWTON_TRIALS + 3, inverse: CLOTH_NEWTON_SEGMENTS.moves + CLOTH_NEWTON_TRIALS + 5 } as const;
@@ -787,15 +789,18 @@ ${pcgStepWGSL('pcgStepOverflow', 'overflow')}` : ''}
 
 ${contact ? `// The projected arc (contact): after the filter hook fixes the round's certificates, each trial's move
 // delta_k(v) = Pi_v(x_v + 2^-k d_v) - x_v of vertex v, Pi_v onto v's certified set. Where Pi keeps the trial point the
-// move is exactly 2^-k d_v; pinned vertices (d = 0) stay put.
-@compute @workgroup_size(${workgroup}) fn nwProject(@builtin(global_invocation_id) id: vec3u) {
-  let v = id.x;
+// move is exactly 2^-k d_v; pinned vertices (d = 0) stay put. One lane a trial (CLOTH_NEWTON_TRIALS lanes a vertex,
+// nwProject's dispatch CLOTH_PROJECT_LANES N): the trials are independent, and the serial loop over them left the
+// pass a thread per vertex waiting on its slowest neighbour's eight projections (4.0 ms of a 150^2 iteration).
+@compute @workgroup_size(${workgroup}) fn nwProject(@builtin(local_invocation_index) lane: u32, @builtin(workgroup_id) wg: vec3u, @builtin(num_workgroups) nwg: vec3u) {
+  let id = wgIndex(wg, nwg) * ${workgroup}u + lane;
+  let v = id / ${CLOTH_NEWTON_TRIALS}u; let k = id % ${CLOTH_NEWTON_TRIALS}u;
   if (v >= P.n.x || nw[nwControl()].x != 0.0) { return; }
   let x = pos(v); let d = nwD(v);
   if (nwPinned(v)) { return; }
   let hasActive = nw[nseg(NW_PROJ + 1u, v)].w > 0.0;
   if (all(d == vec3f(0.0)) && !hasActive) { return; }
-  var alpha = 1.0; var cut = false;
+  let alpha = ldexp(1.0, -i32(k)); var cut = false;
   // The done rule's travel test (w = 1) runs only on a trial that could end Newton: alpha |d_v| <= tol h~ (nwChoose's
   // small step needs alpha max_v |d_v| <= tol h~), so it is exact wherever done is decided and costs nothing far from it.
   // Re-detection's arming reads the same test without the gate, at the accepted trial alone (nwAccept).
@@ -805,16 +810,14 @@ ${contact ? `// The projected arc (contact): after the filter hook fixes the rou
   // the solid and arm no new round), as on a vertex its active normals hold whole (d = P d = 0). Such a vertex is
   // marked as cut (w = 1); its stored moves are exactly alpha d.
   let tolMove = bitcast<f32>(P.newton3.w) * hEff(); let dl = length(d); let gv = nw[nseg(${S.g}u, v)].xyz;
-  for (var k = 0u; k < ${CLOTH_NEWTON_TRIALS}u; k++) {
-    var m = alpha * d; var held = 0.0;
-    let y = x + m; let q = ogcProjectTrial(v, x, y, alpha);
-    if (any(q != y)) {
-      m = q - x; cut = true;
-      if (alpha * dl <= tolMove && nwTravelHeld(v, x, y, alpha, gv)) { held = 1.0; }
-    } else if (hasActive && alpha * dl <= tolMove && nwTravelHeld(v, x, y, alpha, gv)) { held = 1.0; cut = true; }
-    nw[nseg(${S.moves}u + k, v)] = vec4f(m, held);
-    alpha *= 0.5;
-  }
+  var m = alpha * d; var held = 0.0;
+  let y = x + m; let q = ogcProjectTrial(v, x, y, alpha);
+  if (any(q != y)) {
+    m = q - x; cut = true;
+    if (alpha * dl <= tolMove && nwTravelHeld(v, x, y, alpha, gv)) { held = 1.0; }
+  } else if (hasActive && alpha * dl <= tolMove && nwTravelHeld(v, x, y, alpha, gv)) { held = 1.0; cut = true; }
+  nw[nseg(${S.moves}u + k, v)] = vec4f(m, held);
+  // Any trial cut marks the vertex (its lanes write the same record; d itself is unchanged).
   if (cut) { nw[nseg(${S.d}u, v)] = vec4f(d, 1.0); }
 }
 ` : ''}
