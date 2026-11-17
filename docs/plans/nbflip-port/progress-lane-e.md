@@ -2899,3 +2899,12 @@ scene's kernel text is byte-identical (r19/dump.mts on the dam, minimal-dam, sta
   become asserts.
   The static-need test (r32, with the support fix) passes, as do bodies-stage (4/4) and solidStamp's GPU test.
 - test:unit 2463 tests, 1920 pass, 0 fail; check:types clean apart from lane-n's three.
+
+## 2026-11-17 — the walk tests' contacts are asserts (after P's 84b5ecb3)
+
+- With P's 0xa2 fix (b) landed, brick-solid-walk.test.ts no longer stops on a contact 0xa2. Every step must be FAIL-free.
+- GPU (frozen at 84b5ecb3, rc 0, 0 aborts), 6/6 pass:
+  - shelf: 30 steps, peak 5381 records in NEAR_SOLID bricks, 4410 buried vertices dry;
+  - ledge: 40 steps, peak 1726 records resting on the block's top, 66375 buried vertices checked;
+  - column: 30 steps, peak 11475 records in NEAR_SOLID bricks, none in the column;
+  - 15 m/s blob across the ring: 8 steps, none in the block, 115320 buried vertices checked.

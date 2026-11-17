@@ -89,8 +89,7 @@ test("brick solid walk: setMark keeps NEAR_SOLID, solidStamp marks it", () => {
 //    liquid does not meet a solid: its NEAR_SOLID bricks' records are walked without a hit.
 // 2. The ledge: a blob (x, z 8..16, y 30..38) falls onto a block (x, z 4..20, y 0..12) and spreads over it. Its records
 //    hit the block's top and stop at it.
-// Until P's 0xa2 fix (a static cell with capacity <= 1e-5 is never a row) lands, a contact may latch 0xa2 in the
-// operator; the ledge reports it as P's and stops there.
+// The contacts run with P's 0xa2 fix (84b5ecb3: a static solid cell is no pressure row): every step must hold, no latch.
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 type V3 = [number, number, number];
 async function tankRun(t: { diagnostic(s: string): void }, label: string, solids: { lo: V3; hi: V3 }[], liquid: { lo: V3; hi: V3 }[], steps: number, contact: boolean, resting = contact, velocity?: { x: number; y: number; z: number }) {
@@ -134,7 +133,6 @@ async function tankRun(t: { diagnostic(s: string): void }, label: string, solids
       for (let step = 1; step <= steps; step++) {
         e.advance(1);
         const s = await snapshot(e), fail = s.header[H.FAIL]!, info = s.header[H.FAIL_INFO]!;
-        if (contact && fail !== 0 && (info >>> 24) === 0xa2) { t.diagnostic(`step ${step}: 0xa2 (info 0x${info.toString(16)}), P's fix (b) pending; stopping`); break; }
         assert.equal(fail, 0, `step ${step}: FAIL ${fail} info 0x${info.toString(16)}`);
         const near = new Set<number>();
         for (const [key, slot] of s.bricks) if ((s.dir[L.dir.frec + 32 * slot + REC.CLASS]! & F_CLASS.NEAR_SOLID) !== 0) near.add(key);
@@ -180,14 +178,15 @@ test("brick solid walk (GPU): a blob falls onto a ledge and its records stop at 
 });
 
 // 3. The column (P's 0xa2 gate): a column from the floor through the surface (x, z 8..16, y 0..24) stands in the
-// still tank. Its faces meet the liquid from the first step: until P's fix (b) a contact row may latch 0xa2.
+// still tank. Its faces meet the liquid from the first step; its low faces sit on a brick face (P's 0xa5 case: the
+// static need's support).
 test("brick solid walk (GPU): a column standing through a still tank keeps its records out, 30 steps", GPU, async t => {
   await tankRun(t, "solid walk column", [{ lo: [8, 0, 8], hi: [16, 24, 16] }], [{ lo: [0, 0, 0], hi: [32, 17, 32] }], 30, true, false);
 });
 
 // 4. The hand-off: a blob thrown at 15 m/s (10 cells a step) from bricks 16 or more cells clear of a block, into it.
 // Its records and level-set traces leave the ring outside the NEAR_SOLID bricks: pMove and lAdvect leave them to pSolid
-// and phiSolid (PS_FAR, PS_PHI_FAR), so none crosses into the block (a contact: 0xa2 may stop it until P's (b)).
+// and phiSolid (PS_FAR, PS_PHI_FAR), so none crosses into the block.
 test("brick solid walk (GPU): a blob thrown across the ring at 15 m/s is walked, none in the block, 8 steps", GPU, async t => {
   await tankRun(t, "solid walk ring", [{ lo: [16, 0, 0], hi: [32, 32, 32] }], [{ lo: [0, 8, 12], hi: [6, 14, 20] }], 8, true, false, { x: 15, y: 0, z: 0 });
 });
