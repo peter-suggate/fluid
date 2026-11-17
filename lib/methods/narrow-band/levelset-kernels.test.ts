@@ -119,3 +119,27 @@ test("fcell binds read-only, with plain loads, in every kernel that writes none 
     for (const label of ["uAdvect", "lAdvect", "uExtend", "pSeed"]) assert.equal(kernels.get(label)?.bindings.find(x => x.name === "fcell")?.kind, "ro", `${label} (tiered ${tiered})`);
   }
 });
+
+// The union's cell-count bound (narrowBandWallBoundWGSL) counts only present, open cells: !umCellPresent(c) ||
+// !nbParticleCellOpen(c) skips the rest. Read as an open cell holding no records, a closed floor cell put a
+// one-layer floor film's vertices at φ >= 0, the film never became liquid and its records stayed ballistic (the
+// trough's -15%, 2026-11-17). Both unions (lUnion; lcUnion where tiered) skip a resident cell with FLAGS.OPEN
+// clear (solidStamp: a static voxel; a body's stamp), as they skip the cells past the wall box.
+test("the union bound skips closed cells as the old bound's nbParticleCellOpen", () => {
+  const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
+  for (const tiered of [false, true]) {
+    const stages = fluidStagesAt(tiered)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s: 0, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
+    type K = { label: string; code: string };
+    const kernels: K[] = [];
+    const walk = (x: unknown): void => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === "object") { const k = (x as { kernel?: K }).kernel; if (k) kernels.push(k); else Object.values(x).forEach(walk); } };
+    walk(stages);
+    const unions = kernels.filter(k => k.code.includes("nbfUnionBound(particle,bulk,held,open,"));
+    assert.ok(unions.length >= 1, `a union kernel (tiered ${tiered})`);
+    for (const k of unions) {
+      const loop = k.code.slice(k.code.indexOf("var held=0u;var open=0u;"), k.code.indexOf("particle=nbfUnionBound("));
+      assert.match(loop, /if\(!nbIn(Box|Lattice)\(cc\)\)\{continue;\}/, `${k.label}: the wall box (tiered ${tiered})`);
+      assert.match(loop, /\(phi\[NB_PHI_F_FLAGS\+NB_STRIDE\*cs\+nbLocal\(cc\)\]&NB_FLAG_OPEN\)==0u\)\{continue;\}/, `${k.label}: a closed cell (tiered ${tiered})`);
+      assert.ok(loop.indexOf("NB_FLAG_OPEN") < loop.indexOf("open++"), `${k.label}: skipped before it counts (tiered ${tiered})`);
+    }
+  }
+});

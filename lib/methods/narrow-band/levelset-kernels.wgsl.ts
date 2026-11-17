@@ -316,7 +316,10 @@ fn lUnionAt(v:vec3i,dt:f32,h:f32)->f32{
   var held=0u;var open=0u;var heldLow=vec3u(0u);var heldHigh=vec3u(0u);var openLow=vec3u(0u);var openHigh=vec3u(0u);
   for(var k=0u;k<8u;k++){
    let bit=vec3u(k&1u,(k>>1u)&1u,k>>2u);let cc=v+vec3i(bit)-vec3i(1);
-   if(!nbInWallBox(cc)||fgSlot(cc)==NB_NONE){continue;}
+   // umCellPresent and nbParticleCellOpen (the old bound's cells): a closed cell (solidStamp, a body: FLAGS.OPEN
+   // clear) is no open cell, so the bound reads a floor or wall as the old engine does.
+   if(!nbInWallBox(cc)){continue;}let cs=fgSlot(cc);
+   if(cs==NB_NONE||(phi[NB_PHI_F_FLAGS+NB_STRIDE*cs+nbLocal(cc)]&NB_FLAG_OPEN)==0u){continue;}
    let n=min(lBinCount(cc),8u);open++;held+=n;
    let high=bit!=vec3u(0u);
    heldHigh+=select(vec3u(0u),vec3u(n),high);openHigh+=select(vec3u(0u),vec3u(1u),high);

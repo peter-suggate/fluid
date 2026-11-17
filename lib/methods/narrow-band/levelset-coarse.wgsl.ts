@@ -497,8 +497,10 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
    // A 4h-owned cell counts the 4h authority's fill, not its bin (lane E, the coordinator's rulings 2026-11-16): R1
    // retires its records, so an empty bin there is not evidence of air, and skipping it made C φ depend on the tile's
    // own tier (a limit cycle). Its fill is the planar volume fraction of the advected C φ at the cell centre,
-   // clamp(0.5 - φ, 0, 1), as eight records' worth. An h cell no F slot holds is open with no particles.
+   // clamp(0.5 - φ, 0, 1), as eight records' worth. An h cell no F slot holds is open with no particles; a resident
+   // closed (solid) cell is not counted, as the old bound's nbParticleCellOpen.
    if(!nbInWallBox(cc)){continue;}
+   let cs=fgSlot(cc);if(cs!=NB_NONE&&(phi[NB_PHI_F_FLAGS+NB_STRIDE*cs+nbLocal(cc)]&NB_FLAG_OPEN)==0u){continue;}
    var n=0u;
    if(fgCellCoarse(cc)){n=u32(round(8.0*clamp(0.5-lcSample(1u,vec3f(cc)+0.5),0.0,1.0)));}
    else if(fgSlot(cc)!=NB_NONE){n=min(lcBinCount(cc),8u);}
