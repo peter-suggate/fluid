@@ -215,3 +215,14 @@ test("bodies stage (GPU): a body passing a CUT_STATIC brick leaves solidStamp's 
     run.destroy(); ref.destroy();
   });
 });
+
+test("bodies stage: bodyStamp's static hooks see the container's box on a padded lattice (L.box, as solidStamp's)", async () => {
+  const { BrickLayout } = await import("./brick-abi"), { brickBodyKernels } = await import("./bodies-stage.wgsl");
+  const frame = { frame_m: [0, 0, 0] as Vec3, h_m: H_M };
+  for (const [box, top] of [[[16, 16, 16], false], [[24, 16, 24], true], [undefined, false]] as const) {
+    const L = new BrickLayout({ lattice: [32, 32, 32], ...(box ? { box } : {}), f: 125, c: 8, b: 16, k: 8, particles: 1024 });
+    const code = brickBodyKernels(L, frame, { openTop: top }).bodyStamp.code, b = box ?? [32, 32, 32];
+    assert.ok(code.includes(`const NB_STATIC_BOX:vec3i=vec3i(${b.join(",")});`), `box ${b}: the hooks' box`);
+    assert.ok(code.includes(`const NB_STATIC_OPEN_TOP:bool=${top};`));
+  }
+});

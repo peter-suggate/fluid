@@ -58,8 +58,9 @@ export function brickBodyKernels(L: BrickLayout, frame: BrickBodiesFrame, static
   ];
   const h = pbWgslVec3([frame.h_m, frame.h_m, frame.h_m]);
   // The hooks in world metres (solidStamp's own run in cells: frame 0, h 1; nbStaticSolidAt is the only one that
-  // takes a world point, and the body queries ask it in metres).
-  const hooks = brickStaticWGSL({ box: L.lattice, openTop: statics.openTop, frame: pbWgslVec3(frame.frame_m), h, ...(statics.mask ? { mask: { buffer: "solid", walls: statics.mask.walls } } : {}) });
+  // takes a world point, and the body queries ask it in metres). The box is the container's (L.box, as solidStamp's):
+  // on a padded lattice the cells past it are wall, not open (unpadded, L.box is the lattice and the text the same).
+  const hooks = brickStaticWGSL({ box: L.box, openTop: statics.openTop, frame: pbWgslVec3(frame.frame_m), h, ...(statics.mask ? { mask: { buffer: "solid", walls: statics.mask.walls } } : {}) });
   const code = [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: true } }), declareBindings(bindings), BRICK_SET_HELPERS_WGSL, hooks,
     pbBrickBodiesWGSL(frame), pbBodyStampWGSL(), /* wgsl */`
 var<private> bsSlot:u32;
