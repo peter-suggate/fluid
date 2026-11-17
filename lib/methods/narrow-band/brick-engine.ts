@@ -312,7 +312,7 @@ export class BrickEngine {
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
     const frame = bodies ? { frame_m: bodies.frame_m, h_m: bodies.h_m } : undefined;
-    const set = brickSetKernels(layout, { tiered, activity: stages.activity, ...(frame ? { bodies: frame } : {}) }), pres = pressureOperatorKernels(layout, { faces: "pmgF" in solver.buffers }), f = layout.cap.f, c = layout.cap.c;
+    const set = brickSetKernels(layout, { tiered, activity: stages.activity, ...(frame ? { bodies: frame } : {}), ...(mask ? { statics: true } : {}) }), pres = pressureOperatorKernels(layout, { faces: "pmgF" in solver.buffers }), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
     // cfg.z = 1 at boot: the boot's bricks enter h-owned (bootPhi writes F); tiered steps enter 4h (§2.5).
@@ -442,9 +442,9 @@ export class BrickEngine {
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
     const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...options.capacities, apic: options.apic });
-    const solver = options.solver(layout);
+    const solver = options.solver(layout, options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {});
     validatePressureSolver(solver);
-    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources });
+    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources, ...(options.staticMask ? { statics: true } : {}) });
     validateBrickStages(stages);
     // The boot's candidates (an f-long list): tiered, bootTieredSet's bricks and page-only keys; all-h, bootBricks.
     const boot = stages.tiered === true ? bootTieredSet(options) : { bricks: bootBricks(options), pages: [] };

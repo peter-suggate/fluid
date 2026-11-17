@@ -12,12 +12,15 @@
  *
  * **Here, brick-granular**, because the composite operator needs every tile of a cut brick (a K slot, solidStamp)
  * at h (pressure-composite.wgsl.ts).
- * - A brick is cut by solidStamp's own test, read from the static mask so that it holds before the brick is resident
- *   or stamped: one of its cells is a mask voxel, or a mask voxel lies below one of its lower faces.
- * - A cut brick is active when it is wet or holds a band tile. Wet means its F record is LIQUID or PARTICLES (setMark),
- *   or one of its 4h-owned tiles has a C corner with φ < 0. A band tile is a WANT bit that censusDecide wrote.
- * - A cut brick that is active, or that neighbours an active cut brick (its 26 neighbours: each holds a tile within
- *   one tile of the active brick's), takes every one of its 8 tiles into WANT, with cdTile's ring.
+ * - A brick is supported when one of its tiles is: a mask voxel lies within a cell of the tile (umSolidTile: the tile's
+ *   cells and the one-cell shell about it), read from the static mask so that it holds before the brick is resident
+ *   or stamped. Every brick solidStamp cuts is supported (its cut cells are inside the shell), and so is a brick whose
+ *   upper face a solid lies just beyond: its liquid tiles there must be h, as the old engine's are, or a native 4h
+ *   row would face the solid's h cells (P's 0xa5, lane P 2026-11-17).
+ * - A supported brick is active when it is wet or holds a band tile. Wet means its F record is LIQUID or PARTICLES
+ *   (setMark), or one of its 4h-owned tiles has a C corner with φ < 0. A band tile is a WANT bit that censusDecide wrote.
+ * - A supported brick that is active, or that neighbours an active supported brick (its 26 neighbours: each holds a
+ *   tile within one tile of the active brick's), takes every one of its 8 tiles into WANT, with cdTile's ring.
  *
  * The brick granularity is coarser than the old tile rule, and it never decides a tile 4h that the old rule bands.
  * The rule writes neither DEC nor STAT, the deep keep's words, so a promotion is never kept by itself: a cut brick
@@ -25,7 +28,7 @@
  *
  * **Two passes after censusDecide**, each X8 over C_ALL (eight workgroups a page, a workgroup 8 of its 64 bricks, a
  * lane a tile):
- * - censusStaticActive writes the page's cut and active bits (`need`: 4 words a C slot);
+ * - censusStaticActive writes the page's supported and active bits (`need`: 4 words a C slot);
  * - censusStaticPromote reads them.
  *
  * **Scheduling.** Emitted only with the static mask, and tiered only, at a census with cfg.z = 1; never the TRIG-only
@@ -37,7 +40,7 @@ import { censusKernel } from "./brick-census.wgsl";
 import { brickStaticWGSL } from "./brick-static.wgsl";
 import type { SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 
-/** The `need` buffer's words for a layout: 4 a C slot (cut bits 0-1, active bits 2-3), then the promoted count. */
+/** The `need` buffer's words for a layout: 4 a C slot (supported bits 0-1, active bits 2-3), then the promoted count. */
 export const brickStaticNeedWords = (L: BrickLayout) => 4 * L.cap.c + 4;
 
 const setRW: BrickBinding = { name: "set", kind: "rw", type: "array<atomic<u32>>" };
@@ -61,23 +64,17 @@ fn sdCVertex(T:vec3i)->f32{
 fn sdTileIndex(T:vec3i)->u32{let q=vec3u(T&vec3i(7));return q.x|(q.y<<3u)|(q.z<<6u);}
 fn sdBrickOf(cs:u32,k:u32)->vec3i{return 4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(k&3u),i32((k>>2u)&3u),i32(k>>4u));}
 fn sdTileOf(b:vec3i,j:u32)->vec3i{return 2*b+vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));}
-// solidStamp's cut (nbStampMaskVoxel: a mask voxel in the box, never the box rule), over tile T of brick b: its 64
-// cells, and below the brick's lower faces the cells the tile's face cells look down on. An empty mask page answers
-// for all of its cells.
+// umSolidTile over tile T: a mask voxel (nbStampMaskVoxel's: in the box, never the box rule) among the 6^3 cells of
+// the tile and its one-cell shell. The shell spans at most two mask pages (32 cells) an axis: when its eight corners'
+// pages are empty, so are all of its cells.
 fn sdVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
 fn sdPageEmpty(c:vec3i)->bool{return (nbStaticMaskPage(c)&0xffffu)==0u;}
-fn sdCutTile(b:vec3i,T:vec3i)->bool{
-  let o=4*T;
-  if(!sdPageEmpty(o)){for(var l=0u;l<64u;l++){if(sdVoxel(o+vec3i(i32(l&3u),i32((l>>2u)&3u),i32(l>>4u)))){return true;}}}
-  for(var a=0u;a<3u;a++){
-    let e=nbStaticAxis(a);
-    if(dot(o,e)!=dot(8*b,e)||sdPageEmpty(o-e)){continue;}
-    for(var l=0u;l<16u;l++){
-      let u=vec3i(i32(l&3u),i32(l>>2u),0);
-      let d=select(select(vec3i(u.x,u.y,0),vec3i(u.x,0,u.y),a==1u),vec3i(0,u.x,u.y),a==0u);
-      if(sdVoxel(o+d-e)){return true;}
-    }
-  }
+fn sdSupportTile(T:vec3i)->bool{
+  let lo=4*T-vec3i(1);
+  var empty=true;
+  for(var q=0u;q<8u;q++){empty=empty&&sdPageEmpty(lo+5*vec3i(i32(q&1u),i32((q>>1u)&1u),i32(q>>2u)));}
+  if(empty){return false;}
+  for(var l=0u;l<216u;l++){if(sdVoxel(lo+vec3i(i32(l%6u),i32((l/6u)%6u),i32(l/36u)))){return true;}}
   return false;
 }
 fn sdBit(cs:u32,w:u32,k:u32)->bool{return ((atomicLoad(&staticNeed[4u*cs+w+(k>>5u)])>>(k&31u))&1u)!=0u;}
@@ -93,7 +90,7 @@ var<workgroup> sdActive:atomic<u32>;
   if(workgroupUniformLoad(&sdGo)==0u){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);let n=lane>>3u;let k=8u*r+n;let j=lane&7u;
   let b=sdBrickOf(cs,k);let T=sdTileOf(b,j);let i=sdTileIndex(T);
-  if(nbBrickInRange(b)&&sdCutTile(b,T)){
+  if(nbBrickInRange(b)&&sdSupportTile(T)){
     atomicOr(&sdCut,1u<<n);
     var act=((atomicLoad(&nbSet[NB_S_WANT+16u*cs+(i>>5u)])>>(i&31u))&1u)!=0u;
     let fs=nbChild(cs,k);
@@ -110,7 +107,8 @@ var<workgroup> sdActive:atomic<u32>;
   }
 }`);
 
-  // Pass 2: a cut brick that is active, or beside an active cut brick, takes its tiles into WANT with cdTile's ring.
+  // Pass 2: a supported brick that is active, or beside an active supported brick, takes its tiles into WANT with
+  // cdTile's ring.
   const censusStaticPromote = censusKernel(L, "censusStaticPromote", [CFG, setRW, dirRO, phiRO, solidRO, needRW], `${common}
 // cdTile's ring (R3): the bricks of tile t's 27 tiles. Resident: kept (MARK_F, at a head); missing: a candidate, once
 // a page (cfg.z = 1, the census's CAND_MASK).

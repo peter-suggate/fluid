@@ -96,11 +96,15 @@ export interface BrickSetOptions {
   /** The scene's rigid bodies (lane P, A2/A3): setMark binds `bodies` and `bodyCuts` and marks NEAR_BODY by
    * pbBodyMarkTile, gated on the ring's BODIES flag. Absent: no body test (the dam's kernel text). */
   readonly bodies?: BrickBodiesFrame;
+  /** The scene binds a static voxel mask (lane E, brick-solid-walk.wgsl.ts): setMark keeps solidStamp's NEAR_SOLID
+   * with CUT_STATIC. Absent: the dam's kernel text. */
+  readonly statics?: boolean;
 }
 
 export function brickSetKernels(L: BrickLayout, opt: BrickSetOptions = {}) {
   const k = (label: string, bindings: readonly BrickBinding[], body: string, cfgZ?: readonly [number, number]) => kernel(L, label, bindings, body, cfgZ);
   const tiered = opt.tiered === true;
+  const statics = opt.statics === true, kept = statics ? "(NB_CLASS_CUT_STATIC|NB_CLASS_NEAR_SOLID)" : "NB_CLASS_CUT_STATIC";
 
   // setMark: one workgroup a brick of F_ALL (G1), in part 2 after F's move and rebin. It writes:
   // - the brick's class word: LIQUID (an h-owned φ < 0 vertex: the brick holds pressure rows), SURFACE, PARTICLES, SKIRT;
@@ -209,11 +213,12 @@ var<workgroup> wNb:array<u32,27>;
   if(!live||lid!=0u){return;}
   // ACT.RES (bits 10..17) and ACT.SEED (bits 18..25): the residency's brick sources.
   atomicOr(&nbSet[NB_S_ACT+slot],m|(atomicLoad(&wRes)<<10u)|(atomicLoad(&wSeed)<<18u));
-  // CUT_STATIC (A5) is the stamp's, kept across the class pass: the brick holds its K slot while it is cut.
+  // CUT_STATIC (A5) is the stamp's, kept across the class pass: the brick holds its K slot while it is cut.${statics ? `
+  // With statics, so is NEAR_SOLID (solidStamp's: pSolid and phiSolid move the brick, brick-solid-walk.wgsl.ts).` : ""}
   ${bodies ? `// A2: one read-modify-write of both body bits: BODY_WAS is the old NEAR_BODY, then the new NEAR_BODY.
-  let old=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS]);var cls=old&NB_CLASS_CUT_STATIC;
+  let old=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS]);var cls=old&${kept};
   if((old&NB_CLASS_NEAR_BODY)!=0u){cls|=NB_CLASS_BODY_WAS;}
-  if(atomicLoad(&wBody)!=0u){cls|=NB_CLASS_NEAR_BODY;}` : "var cls=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS])&NB_CLASS_CUT_STATIC;"}
+  if(atomicLoad(&wBody)!=0u){cls|=NB_CLASS_NEAR_BODY;}` : `var cls=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS])&${kept};`}
   if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}${L.openTop ? `
   if(atomicLoad(&wNeg)>0u&&o.y+8>=NB_LATTICE.y){nbFail(NB_FAIL_REACH,0x80000000u|nbKey(o>>vec3u(3u)));}` : ""}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}

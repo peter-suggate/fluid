@@ -458,7 +458,7 @@ There is no second structure to disagree with.
 | 0 | `LIQUID` | `setMark` | an h-owned vertex has φ < 0 (F_LIQ) |
 | 1 | `SURFACE` | `setLists` | some vertex within the band of the surface |
 | 2 | `PARTICLES` | `setLists` | the bin is not empty |
-| 3 | `NEAR_SOLID` | `setLists` | it or a neighbour has a cut slot or a box wall |
+| 3 | `NEAR_SOLID` | `solidStamp` (kept by `setMark`) | a static mask voxel lies within 8 cells of the brick on every axis (it or one of its 26 neighbours holds one); pMove skips its records and lAdvect its vertices, which pSolid and phiSolid move with the solid walk (brick-solid-walk.wgsl.ts). The box walls are the walk's too but need no class: nbfBoxEndpoint clips to them |
 | 4 | `NEAR_BODY` | `bodyStamp` (P) | within the swept reach of a body |
 | 5 | `SEAM` | `setLists` | a tile not h-owned, or a neighbour word that is a seam |
 | 6 | `SKIRT` | `setUpdate` | origin at or beyond `N` on some axis (vertex storage only) |

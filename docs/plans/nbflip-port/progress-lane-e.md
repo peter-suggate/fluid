@@ -2856,3 +2856,46 @@ The four post-sym8 scenes under the batch rule (bar = old worst + max(1%, old sp
   steps, F 1349, final -77.27, no latch, 14.7 ms median.
 - fill-6400 gains +4.6% by step 60 where the old engine ends at -3.0%: F's moving-liquid volume gain, named, off.
 - test:unit 1916/0; check:types clean but lane-n's three.
+
+## 2026-11-17 — M3 stage 3: pSolid and phiSolid (the static solid in the move and the level set)
+
+New lane E file: lib/methods/narrow-band/brick-solid-walk.wgsl.ts. It ports the old engine's voxel rules verbatim:
+nbFinish's stride walk (uniform-narrow-band-flip.ts 1497-1567), umSlideWalk mode 2 with umWalk's end, umVertexBuried,
+nbParticleBlocked and seedSite's blocked test. Every kernel is exact-once text transforms of F's own pMove, pSeed and
+lAdvect, so the physics stays F's text. All of it is gated on `statics` (the scene binds a static mask). Every other
+scene's kernel text is byte-identical (r19/dump.mts on the dam, minimal-dam, stair-cube and fill-800).
+- **NEAR_SOLID**: solidStamp sets it on an entering brick when a mask voxel lies within 8 cells
+  (BRICK_SOLID_RING: its 24^3 neighbourhood). setMark keeps it with CUT_STATIC. brick-abi.md's class row is updated.
+- **Particles**:
+  - pMove skips a NEAR_SOLID brick's records.
+  - A record elsewhere whose reach plus radius is 8 cells or more is marked PS_FAR in its rank word. pMove's own l.209
+    has already written NONE there, and nothing reads ranks before pSolid.
+  - pSolid runs after pMove over the same records dispatch and bindings, and takes exactly those records. It applies
+    the start's retirement, the walk from the start to the boxed endpoint (an axis stops at the face, inset by the
+    radius; a stop moving down y lands, so vy = 0) and the split's blocked halves.
+  - There is no queue because pMove already uses the ABI's 8 storage buffers. The device itself requests the
+    adapter's limit (10 here).
+- **Seeding**: pSeed refuses a site in a closed cell.
+- **Level set**:
+  - lAdvect skips NEAR_SOLID bricks.
+  - A trace elsewhere that leaves the ring is left to phiSolid: its PHI1 word is set to PS_PHI_FAR (a NaN no φ takes).
+  - phiSolid runs over F_ALL after lAdvect. It covers every vertex of a NEAR_SOLID brick, and elsewhere only the
+    marked vertices. It applies the walked trace and keeps a buried vertex's stored value.
+  - An earlier version latched 0x5e/0x5d past the ring instead. P's high-resolution dam-obstacle (h 0.00625, a front
+    of about 9 cells a step) and the seep's jet (about 12-14 cells a step at h 5 mm) both exceed 8, so the hand-off
+    replaced the latch.
+- **Static need fix (P's 0xa5)**: a brick is now supported when a mask voxel lies within a cell of one of its tiles
+  (umSolidTile's 6^3 shell), not only when solidStamp cuts it. A brick whose upper face has solid just past it now
+  promotes its wet tiles to h, as the old engine does.
+- Reviewed by F: rank-word reuse, the PHI1 marker, and that nothing between lAdvect and phiSolid reads PHI1.
+- The scenes do not bind the mask yet. That needs the voxel gates, starting with the AGENTS.md edit set.
+- GPU (frozen-r33 = 71d9b278 plus this change, one timing run each, rc 0, 0 aborts; brick-solid-walk.test.ts):
+  - shelf tank: 30 steps clean, a peak of 5388 records walked in NEAR_SOLID bricks, none in a closed cell, and all
+    4410 buried vertices dry;
+  - ledge: 364 records rest on the block's top, then 0xa2 at step 19;
+  - column through the still tank: 0xa2 at step 2;
+  - blob thrown at 15 m/s from outside the ring: walked, none in the block, then 0xa2 at step 2 when it meets the block.
+  P's fix (b) runs the ledge 40 steps clean in P's tree. The contact tests stop on 0xa2 until (b) lands, and then
+  become asserts.
+  The static-need test (r32, with the support fix) passes, as do bodies-stage (4/4) and solidStamp's GPU test.
+- test:unit 2463 tests, 1920 pass, 0 fail; check:types clean apart from lane-n's three.

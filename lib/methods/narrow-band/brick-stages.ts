@@ -89,6 +89,9 @@ export interface BrickStageContext {
   readonly particles?: { readonly bandDepth: number };
   /** The scene's scheduled drops in source form (brick-source.ts); absent, no sources. */
   readonly sources?: BrickSources;
+  /** The scene binds a static voxel mask (brick-static.wgsl.ts): F's set adds lane E's pSolid and phiSolid
+   * (brick-solid-walk.wgsl.ts). */
+  readonly statics?: boolean;
 }
 
 export type BrickStagesFactory = (context: BrickStageContext) => BrickStages;

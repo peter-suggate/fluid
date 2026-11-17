@@ -49,7 +49,9 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   const seconds = context.values.volumeControlSeconds;
   if (typeof seconds !== "number" || !(seconds >= 0)) throw new Error(`NB-FLIP brick engine: volumeControlSeconds ${String(seconds)} is not a control time`);
   const physics = { viscosity_Pa_s: context.fluid?.viscosity_Pa_s ?? 0, density_kg_m3: context.fluid?.density_kg_m3 ?? 1000, volumeControl_1_s: seconds > 0 ? 1 / seconds : 0 };
-  const p = particleKernels(L, F, { bandDepth: context.particles?.bandDepth ?? NBF_PARTICLE_SETTINGS.particleBandDepth }), l = levelSetKernels(L, F), v = velocityKernels(L, F, physics);
+  // Statics (lane E): the scene binds a static voxel mask, so pSolid and phiSolid run (brick-solid-walk.wgsl.ts).
+  const statics = context.statics === true;
+  const p = particleKernels(L, F, { bandDepth: context.particles?.bandDepth ?? NBF_PARTICLE_SETTINGS.particleBandDepth, statics }), l = levelSetKernels(L, F, { statics }), v = velocityKernels(L, F, physics);
   const list = (k: number, g: "G1" | "G8" | "G64" | "X8"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
   const all = list(LIST.F_ALL, "G1"), all8 = list(LIST.F_ALL, "G8"), pages = list(LIST.C_ALL, "G1");
   // Tiered, a pass over both tiers (the FC list: F_ALL's bricks, then C_ALL's pages, a workgroup each): the kernels
@@ -81,9 +83,9 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     // Tiered, the re-entry seed (pSeed cfg.w = 2) into the source bank (z = 1: pSrc ^ 1 at z = 1 is part 1's source).
     // Then the move's arguments (pArgs w = 0: the source's records, so the head's refined tiles' seeds move and bin
     // this step), which also empty the destination bank, every move (brick-particle-banks.test.ts).
-    move: [...resolve, ...cache, at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pMove, records)],
+    move: [...resolve, ...cache, at(p.pLiquid, all), ...(tiered ? [at(p.pSeed, all, 1, 2)] : []), args(0, 0), at(p.pMove, records), ...(p.pSolid ? [at(p.pSolid, records)] : [])],
     rebin: rebin(0),
-    levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve,
+    levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...(l.phiSolid ? [at(l.phiSolid, all)] : []), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve,
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all)],
     velocity: [at(v.uAdvect, both), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, both)] : []), at(v.uTransfer, both)],
     tail: [...ext4, at(v.uExtend, all), args(0, 1), at(p.pJoin, records), at(p.pDelta, records)],

@@ -41,6 +41,7 @@ import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGS
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
 import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasAt, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
+import { BRICK_SOLID_CELL_WGSL, BRICK_SOLID_PARTICLE_WGSL, brickMoveDeferWGSL, brickPSolidWGSL, brickSeedBlockedWGSL } from "./brick-solid-walk.wgsl";
 
 /** The records' indirect arguments, in F's args region (brick-abi.md §5.5): x, y, z by the fold rule. */
 export const P_ARGS_RECORDS = ARGS.LANE_F;
@@ -93,8 +94,10 @@ const PS_DEPTH_WGSL = (() => {
   return body.replace("fn fgDepth(", "fn psDepth(").replace("if(!fgReach1(c))", "if(!psReach1(c))").replace("fgDepthVertex(c+vec3i(corner))", "psDepthVertex(c+vec3i(corner))");
 })();
 
-/** The particle kernels; options.bandDepth the particle band's depth in cells (the scene's, 3 by default). */
-export function particleKernels(L: BrickLayout, F: FluidLayout, options: { readonly bandDepth: number } = { bandDepth: NBF_PARTICLE_SETTINGS.particleBandDepth }) {
+/** The particle kernels; options.bandDepth the particle band's depth in cells (the scene's, 3 by default);
+ * options.statics the scene's static voxel mask is bound (lane E's pSolid and the seeding's blocked test). */
+export function particleKernels(L: BrickLayout, F: FluidLayout, options: { readonly bandDepth: number; readonly statics?: boolean } = { bandDepth: NBF_PARTICLE_SETTINGS.particleBandDepth }) {
+  const statics = options.statics === true;
   const nbfParticleFormulasWGSL = nbfParticleFormulasAt(options.bandDepth);
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
@@ -127,7 +130,8 @@ var<workgroup> wLiquid:array<atomic<u32>,16>;
   // lookups to repay 243 staged entries. A workgroup a bin item (up to 256 records of one bin) staging its brick's
   // ring (window, liquid cells, depth vertices, UNIT taps) measured slower too (8.77 against 5.93 ms): the staging
   // cost 1.96 ms and the items' partial workgroups 1.3 ms, against 2.0 ms of record time saved (lane E, 2026-11-16).
-  const pMove = k("pMove", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.partsRO, FB.fcell, FB.fpart, FB.fmoved], [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
+  const pMoveBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.partsRO, FB.fcell, FB.fpart, FB.fmoved];
+  const pMoveCode = [common, nbfSeedFormulasWGSL].join("\n") + /* wgsl */`
 // A liquid cell of the opening φ: pLiquid's bit (fgLiquidCell of the same φ) where an F slot holds the cell, else
 // fgLiquidCell through the owners. Valid in the move only (pLiquid runs before it; the level set rewrites φ).
 fn pLiquidCell(c:vec3i)->bool{
@@ -280,7 +284,11 @@ fn pFile(i:u32,p:Particle,split:bool){
   }
  }
  pFile(i,p,split);
-}`);
+}`;
+  // Statics (lane E, brick-solid-walk.wgsl.ts): pMove defers a NEAR_SOLID brick's records to pSolid, which moves them
+  // with pMove's text and the solid walk.
+  const pMove = k("pMove", pMoveBindings, statics ? BRICK_SOLID_PARTICLE_WGSL + brickMoveDeferWGSL(pMoveCode) : pMoveCode);
+  const pSolid = statics ? k("pSolid", pMoveBindings, BRICK_SOLID_PARTICLE_WGSL + brickPSolidWGSL(pMoveCode)) : undefined;
 
   const pScan = k("pScan", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, BANK_WGSL].join("\n") + /* wgsl */`
 var<workgroup> scan:array<u32,256>;
@@ -385,7 +393,7 @@ var<workgroup> wSurf:array<atomic<u32>,8>;
 }`);
 
   // pSeed: cfg.w = 1 at boot (seedInitial: salt 0, every site j < goal, no coverage or mass tests).
-  const pSeed = k("pSeed", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src], [common, nbfSeedFormulasWGSL, BRICK_SOURCE_WGSL].join("\n") + /* wgsl */`
+  const pSeedCode = [common, nbfSeedFormulasWGSL, BRICK_SOURCE_WGSL].join("\n") + /* wgsl */`
 var<workgroup> sCount:atomic<u32>;
 var<workgroup> sBase:u32;
 var<workgroup> sTileSeeds:array<atomic<u32>,8>;
@@ -549,7 +557,9 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  if(n==0u){return;}
  var at=sBase+off;
  for(var r=0u;r<2u;r++){if(masks[r]!=0u){pSeedCellWrite(o+nbLocalCoord(lid+256u*r),bank,initial,masks[r],at);at+=countOneBits(masks[r]);}}
-}`);
+}`;
+  // Statics (lane E): seedSite's nbParticleBlocked refuses a site in a closed cell.
+  const pSeed = k("pSeed", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src], statics ? BRICK_SOLID_CELL_WGSL + brickSeedBlockedWGSL(pSeedCode) : pSeedCode);
 
   // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none.
   const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
@@ -654,5 +664,5 @@ fn pJoinTile(t:vec3i){
  args[${P_ARGS_RECORDS}u]=min(g,NB_FOLD);args[${P_ARGS_RECORDS + 1}u]=max((g+NB_FOLD-1u)/NB_FOLD,1u);args[${P_ARGS_RECORDS + 2}u]=1u;
 }`);
 
-  return { pLiquid, pMove, pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
+  return { pLiquid, pMove, ...(pSolid ? { pSolid } : {}), pScan, pScatter, pTiles, pSeed, pDelta, pJoin, pArgs };
 }

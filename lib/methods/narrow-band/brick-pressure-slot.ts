@@ -26,6 +26,7 @@
 import type { BrickLayout } from "./brick-abi";
 import { ARGS, ARGS_LIST_END } from "./brick-abi";
 import type { BrickPlacement } from "./brick-kernel";
+import type { BrickBodiesFrame } from "./bodies-binding.wgsl";
 
 /** P's args region (brick-abi.md §5.5). */
 export const PRESSURE_ARGS = { FIRST: ARGS.LANE_P, END: ARGS.LANE_F } as const;
@@ -51,7 +52,10 @@ export interface PressureSolver {
   readonly receipt?: { readonly iterations?: number; readonly capped?: number };
 }
 
-export type PressureSolverFactory = (layout: BrickLayout) => PressureSolver;
+/** What the engine tells a solver of the scene beyond the layout: the rigid bodies' frame when the scene binds bodies
+ * (lane P's monolithic coupling, MGPCGOptions.bodies, 2026-11-17). */
+export interface PressureSolverContext { readonly bodies?: BrickBodiesFrame }
+export type PressureSolverFactory = (layout: BrickLayout, context?: PressureSolverContext) => PressureSolver;
 
 /** Checks that a solver's gated dispatches stay in its args region. */
 export function validatePressureSolver(s: PressureSolver): void {

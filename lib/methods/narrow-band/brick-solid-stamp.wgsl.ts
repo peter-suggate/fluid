@@ -13,6 +13,8 @@
  *   voxel face, 0.5 (open(-1) + open(0)) = 0.5 FRAC of the cell inside: the cut-free rows' K_WALL fraction 0.5 and
  *   P's pbStampFace agree with it (lane P's review, 2026-11-17); two cells past the box give 0;
  * - FLAGS.OPEN clears on every cell whose FRAC is 0 (setInit set it by the box rule).
+ * - NEAR_SOLID (brick-solid-walk.wgsl.ts, every entering brick, a body brick's too): a mask voxel within
+ *   BRICK_SOLID_RING cells of the brick on every axis; setMark keeps it while the brick is resident.
  *
  * A live edit (ring flag SOLID_EDIT) restamps F_ALL from the updated mask: next, with the edit path (M3 stage 2c).
  */
@@ -20,6 +22,7 @@ import { brickAbiWGSL, type BrickLayout } from "./brick-abi";
 import { declareBindings, type BrickBinding, type BrickKernel } from "./brick-kernel";
 import { BRICK_SET_HELPERS_WGSL } from "./brick-set.wgsl";
 import { brickStaticWGSL } from "./brick-static.wgsl";
+import { BRICK_SOLID_RING as BRICK_SOLID_RING_CELLS } from "./brick-solid-walk.wgsl";
 import type { SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 
 /** The static mask the engine binds as `solid` (brickStaticMask's words and walls; brick-engine.ts). */
@@ -40,6 +43,7 @@ export function brickSolidStampKernels(L: BrickLayout, mask: Pick<BrickStaticMas
   const statics = brickStaticWGSL({ box: L.box, openTop: mask.walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls: mask.walls } });
   const code = [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: true } }), declareBindings(bindings), BRICK_SET_HELPERS_WGSL, statics, /* wgsl */`
 var<workgroup> wCut:atomic<u32>;
+var<workgroup> wNear:atomic<u32>;
 var<workgroup> wSlot:u32;
 var<workgroup> wHead:vec4u;
 // Whether the box rule alone closes cell c (outside the box): the mask's voxels are the cut, the box is not.
@@ -50,13 +54,23 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let e=nbGroup(wid);var h=vec4u(0u);
     if(e<nbListCount(NB_LIST_F_ENTER)){
       let s=nbListSlot(NB_LIST_F_ENTER,e);let r=NB_D_FREC+32u*s;
-      h=vec4u(select(1u,0u,(atomicLoad(&dir[r+NB_REC_CLASS])&NB_CLASS_NEAR_BODY)!=0u),s,atomicLoad(&dir[r+NB_REC_KEY]),0u);
+      h=vec4u(1u,s,atomicLoad(&dir[r+NB_REC_KEY]),select(0u,1u,(atomicLoad(&dir[r+NB_REC_CLASS])&NB_CLASS_NEAR_BODY)!=0u));
     }
-    wHead=h;atomicStore(&wCut,0u);
+    wHead=h;atomicStore(&wCut,0u);atomicStore(&wNear,0u);
   }
   let h=workgroupUniformLoad(&wHead);
   if(h.x==0u){return;}
   let s=h.y;let r=NB_D_FREC+32u*s;let o=8*nbKeyCoord(h.z);
+  // NEAR_SOLID (brick-solid-walk.wgsl.ts): a mask voxel among the 24^3 cells of the brick and its 26 neighbours, a
+  // body brick's too (pSolid and phiSolid move every brick a record or a trace can reach a voxel from).
+  for(var l=lid;l<${(3 * BRICK_SOLID_RING_CELLS) ** 3}u;l+=64u){
+    let c=o-vec3i(${BRICK_SOLID_RING_CELLS})+vec3i(i32(l%${3 * BRICK_SOLID_RING_CELLS}u),i32((l/${3 * BRICK_SOLID_RING_CELLS}u)%${3 * BRICK_SOLID_RING_CELLS}u),i32(l/${(3 * BRICK_SOLID_RING_CELLS) ** 2}u));
+    if(nbStampMaskVoxel(c)){atomicOr(&wNear,1u);break;}
+  }
+  workgroupBarrier();
+  if(lid==0u&&atomicLoad(&wNear)!=0u){atomicOr(&dir[r+NB_REC_CLASS],NB_CLASS_NEAR_SOLID);}
+  // A NEAR_BODY brick's cuts are P's bodyStamp's (A5).
+  if(h.w!=0u){return;}
   for(var l=lid;l<512u;l+=64u){
     let c=o+nbLocalCoord(l);
     var cut=nbStampMaskVoxel(c);

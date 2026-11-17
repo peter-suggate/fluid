@@ -38,6 +38,7 @@ import { nbfLevelSetConstantsWGSL, nbfPhiAdvectWGSL, nbfPhiUnionWGSL, nbfRedista
 import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
 import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { BRICK_SOLID_LEVEL_SET_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL } from "./brick-solid-walk.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
 // Only F's own vertices (fgVertexOwned: tiered, a vertex with a 4h-owned incident tile is its tile's interpolant).
@@ -66,7 +67,9 @@ fn lMaskBit(c:vec3i)->bool{
 }
 `;
 
-export function levelSetKernels(L: BrickLayout, F: FluidLayout) {
+/** The level-set kernels; options.statics the scene's static voxel mask is bound (lane E's phiSolid). */
+export function levelSetKernels(L: BrickLayout, F: FluidLayout, options: { readonly statics?: boolean } = {}) {
+  const statics = options.statics === true;
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const base = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, LS_WGSL].join("\n");
   const brickHead = /* wgsl */`
@@ -107,7 +110,8 @@ var<workgroup> sFresh:u32;
  }
 }`);
 
-  const lAdvect = k("lAdvect", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src], [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL(), BRICK_SOURCE_WGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
+  const lAdvectBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
+  const lAdvectCode = [base, FG_VEL_WGSL, FG_SAMPLE_WGSL, nbfLevelSetConstantsWGSL, levelSetReleaseWGSL(), BRICK_SOURCE_WGSL].join("\n") + LS_SET_WGSL + /* wgsl */`
 fn nbxTraceVelocity(x:vec3f)->vec3f{return fgSampleVel(x,0u,3u);}
 fn nbxPointFrom(q:vec3f,x:vec3f)->vec3f{return fgHeld(x);}
 fn nbxTraceFatal(){nbFail(NB_FAIL_SEGMENTS,0x4c540000u);}
@@ -217,7 +221,11 @@ fn lAdvected(v:vec3i,dt:f32,h:vec3f)->f32{
   if(lVertexIn(v)){value=lAdvected(v,dt,h);}
   lSetPhi(NB_PHI_F_PHI1,slot,l,value);
  }
-}`);
+}`;
+  // Statics (lane E, brick-solid-walk.wgsl.ts): lAdvect skips the NEAR_SOLID bricks, which phiSolid advects with
+  // lAdvect's text, the trace walked and a buried vertex kept.
+  const lAdvect = k("lAdvect", lAdvectBindings, statics ? BRICK_SOLID_LEVEL_SET_WGSL + brickLevelSetDeferWGSL(lAdvectCode) : lAdvectCode);
+  const phiSolid = statics ? k("phiSolid", lAdvectBindings, BRICK_SOLID_LEVEL_SET_WGSL + brickPhiSolidWGSL(lAdvectCode)) : undefined;
 
   const lSplat = k("lSplat", [CFG, FB.set, FB.dir, FB.partsRO, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL].join("\n") + nbfPhiUnionWGSL.replace(/[\s\S]*?(fn nbfNearestKey)/, "$1").replace(/fn nbfErasure[\s\S]*/, "") + /* wgsl */`
 var<workgroup> wKey:array<atomic<u32>,1331>;
@@ -770,5 +778,5 @@ fn dNear(c:vec3i)->u32{
  for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;
-  return { lInit, lAdvect, lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve, lResolveD };
+  return { lInit, lAdvect, ...(phiSolid ? { phiSolid } : {}), lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve, lResolveD };
 }
