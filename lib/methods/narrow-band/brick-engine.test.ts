@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BRICK_CELLS, BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, K_HOLD, LIST, NONE, PHI_AIR, PHI_AIR_C, POOLS, REC, ARGS, brickAbiWGSL, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
-import { BRICK_KICK_RESOLVES, BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, boxDistance, reachSet } from "./brick-engine";
+import { BRICK_KICK_RESOLVES, BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, bootPhiAt, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
 import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
@@ -103,6 +103,25 @@ test("brick engine: the boot bricks are the reach set of the boxes' liquid verti
   assert.ok(keys.every(k => brickKeyCoord(k)[1] <= 2));
   assert.equal(boxDistance([16, 10, 16], sheet(33, 10.3, 33)) < 0, true);
   assert.equal(boxDistance([16, 11, 16], sheet(33, 10.3, 33)) > 0, true);
+});
+
+test("brick engine: on a padded lattice the boot's φ past the box is far (no liquid φ in the padding)", () => {
+  // The closed form's faces run on through the walls (a sheet to 33 in a 24 x 16 x 24 box, stored on 32^3): a vertex
+  // on the box plane keeps its distance, one past it reads far, as nbVertexPhi reads past an unpadded lattice.
+  const box: Vec3 = [24, 16, 24], o = { ...options([32, 32, 32], [sheet(33, 10.3, 33)], 200, 8), box }, at = bootPhiAt(o);
+  const far = bootPhiAt({ ...o, liquid: [] })([5, 5, 5]);
+  assert.ok(at([24, 5, 24]) < 0 && at([5, 5, 5]) < 0);
+  for (const v of [[25, 5, 5], [5, 5, 25], [31, 5, 31], [5, 17, 5]] as Vec3[]) assert.equal(at(v), far, `${v}`);
+  // Unpadded (no box, or the box the lattice) the closed form runs on to the lattice's edge, unchanged.
+  assert.ok(bootPhiAt(options([32, 32, 32], [sheet(33, 10.3, 33)], 200, 8))([31, 5, 31]) < 0);
+  assert.ok(bootPhiAt({ ...o, box: [32, 32, 32] })([31, 5, 31]) < 0);
+  // The padded boot bricks: none wholly past the box (brick 3's low plane is the box plane x, z = 24).
+  assert.ok(bootBricks(o).every(k => brickKeyCoord(k)[0] <= 3 && brickKeyCoord(k)[2] <= 3));
+  // bootPhi emits the far line only on a padded layout, so an unpadded scene's text is unchanged.
+  const code = (L: BrickLayout) => brickSetKernels(L).bootPhi.code;
+  const padded = code(new BrickLayout({ lattice: [32, 32, 32], box, f: 64, c: 1, b: 0, k: 0, particles: 1024 }));
+  const plain = code(new BrickLayout({ lattice: [32, 32, 32], f: 64, c: 1, b: 0, k: 0, particles: 1024 }));
+  assert.ok(padded.includes("if(any(v>NB_BOX)){return NB_PHI_FAR;}") && !plain.includes("return NB_PHI_FAR;}\n  let p=vec3f(v)") && !plain.includes("v>NB_LATTICE)){return NB_PHI_FAR;}\n  let p"));
 });
 
 test("brick engine: a tiered boot also claims the pages holding its pages' high corner planes", () => {

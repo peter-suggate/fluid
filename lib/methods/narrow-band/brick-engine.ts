@@ -134,8 +134,8 @@ export function reachSet(lattice: Vec3, bricks: Iterable<Vec3>, liquid: (b: Vec3
   return out;
 }
 
-/** The boot's vertex φ (in h) as bootPhi reads it: the table's (far air off it) or the boxes' union. */
-export function bootPhiAt(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial">): (v: Vec3) => number {
+/** The boot's vertex φ (in h) as bootPhi reads it: the table's (far air off it) or the boxes' union, far past the box. */
+export function bootPhiAt(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">): (v: Vec3) => number {
   const far = o.farPhi ?? phiFar(o.lattice);
   if (o.initial) {
     const P = initialPhiPages(o.lattice), index = new Map(o.initial.pages.map((k, i) => [k, i])), phi = o.initial.phi;
@@ -146,12 +146,12 @@ export function bootPhiAt(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "li
     };
   }
   const f32 = (b: BrickLiquidBox): BrickLiquidBox => ({ lo: o.lattice.map((_, a) => Math.fround(b.lo[a]!)) as unknown as Vec3, hi: o.lattice.map((_, a) => Math.fround(b.hi[a]!)) as unknown as Vec3 });
-  const boxes = o.liquid.map(f32);
-  return v => Math.min(far, ...boxes.map(box => boxDistance(v, box)));
+  const boxes = o.liquid.map(f32), wall = o.box ?? o.lattice;
+  return v => v.some((x, a) => x > wall[a]!) ? far : Math.min(far, ...boxes.map(box => boxDistance(v, box)));
 }
 
 /** The initial bricks: the reach set of the initial liquid's vertices (boxes or table), at rest. */
-export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2" | "sources">): number[] {
+export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2" | "sources">): number[] {
   if (o.initial && o.liquid.length) throw new Error("Brick engine: the initial liquid is boxes or a table, not both");
   const nb = bricksPerAxis(o.lattice), f32 = (b: BrickLiquidBox): BrickLiquidBox => ({ lo: o.lattice.map((_, a) => Math.fround(b.lo[a]!)) as unknown as Vec3, hi: o.lattice.map((_, a) => Math.fround(b.hi[a]!)) as unknown as Vec3 });
   const boxes = o.liquid.map(f32), candidates = new Map<number, Vec3>(), at = bootPhiAt(o);

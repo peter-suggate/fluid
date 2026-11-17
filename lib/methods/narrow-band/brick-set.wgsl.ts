@@ -9,7 +9,7 @@
  * do not return early: work is gated by an `live` flag so every barrier
  * stays in uniform control flow.
  */
-import { BOX_TOKEN, BrickLayout, LIST, POOLS, brickAbiWGSL, resolveBox } from "./brick-abi";
+import { BOX_TOKEN, BrickLayout, LIST, POOLS, boxPadded, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import type { BrickStages } from "./brick-stages";
@@ -389,6 +389,8 @@ var<workgroup> wN:atomic<u32>;
 
   // bootPhi: the initial liquid's signed distance (in h) on the entering bricks, from one of two sources:
   // - cfg.w = 0, the closed form: boot holds cfg.z boxes of 6 floats (lo xyz, hi xyz, in cells); the union is the min.
+  //   On a padded lattice a vertex past the box is NB_PHI_FAR, as nbVertexPhi reads it past an unpadded lattice (the
+  //   boxes' faces run on through the walls; F's 7771b658): no liquid φ is stored in the padding.
   //   Uncapped, as the old engine's t = 0 φ (initialLiquidVertexPhi: the analytic distance, its empty value the
   //   lattice's far φ, NB_PHI_FAR).
   // - cfg.w = 1, the page table (brick-initial.ts, any liquid description): boot holds the page count n, n page keys
@@ -424,7 +426,8 @@ fn bootVelTile(t:vec3i,w:u32)->bool{
 // The face of cell c along a (c - e_a to c) is inside the lattice.
 fn bootInnerFace(c:vec3i,a:u32)->bool{return all(c>=vec3i(0))&&all(c<NB_WALL_BOX)&&c[a]>=1;}
 fn bootAt(v:vec3i,nBoxes:u32)->f32{
-  if(cfg.w==1u){return bootTable(v);}
+  if(cfg.w==1u){return bootTable(v);}${boxPadded(L) ? `
+  if(any(v>NB_WALL_BOX)){return NB_PHI_FAR;}` : ""}
   let p=vec3f(v);var d=NB_PHI_FAR;
   for(var i=0u;i<nBoxes;i++){d=min(d,sdBox(p,vec3f(boot[6u*i],boot[6u*i+1u],boot[6u*i+2u]),vec3f(boot[6u*i+3u],boot[6u*i+4u],boot[6u*i+5u])));}
   return d;
