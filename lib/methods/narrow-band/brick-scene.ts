@@ -140,17 +140,17 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
  * `resident` is the boot's residency: the liquid bricks dilated by two bricks a side (Chebyshev), within the window.
  * The engine's first residency is that set (the h ring's tiles, the particle and seed classes: ≤ 16 cells past a
  * liquid tile; the free fall's step-1 F box, 210 bricks, is exactly it), where the boot's own brick list (100) is not. */
-export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; resident: number } {
+export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; drop: number; resident: number } {
   // Over the container's cells (the box: a padded lattice's cells past it are wall).
   const at = bootPhiAt(o), n = o.box ?? o.lattice, nb = n.map(v => Math.floor(v / 8) + 1), liquid: [number, number, number][] = [];
-  let cells = 0, top = 0;
+  let cells = 0, top = 0, bot = Infinity;
   for (let bz = 0; 8 * bz < n[2]; bz++) for (let by = 0; 8 * by < n[1]; by++) for (let bx = 0; 8 * bx < n[0]; bx++) {
     const lo = [8 * bx, 8 * by, 8 * bz], hi = lo.map((v, a) => Math.min(v + 8, n[a]!)), centre = at([lo[0]! + 4, lo[1]! + 4, lo[2]! + 4]);
     if (centre >= 7) continue;
-    if (centre <= -7 && hi.every((v, a) => v - lo[a]! === 8)) { cells += 512; top = Math.max(top, hi[1]!); liquid.push([bx, by, bz]); continue; }
+    if (centre <= -7 && hi.every((v, a) => v - lo[a]! === 8)) { cells += 512; top = Math.max(top, hi[1]!); bot = Math.min(bot, lo[1]!); liquid.push([bx, by, bz]); continue; }
     let wet = false;
     for (let z = lo[2]!; z < hi[2]!; z++) for (let y = lo[1]!; y < hi[1]!; y++) for (let x = lo[0]!; x < hi[0]!; x++) {
-      if (at([x, y, z]) < 0) { cells++; top = Math.max(top, y + 1); wet = true; }
+      if (at([x, y, z]) < 0) { cells++; top = Math.max(top, y + 1); bot = Math.min(bot, y); wet = true; }
     }
     if (wet) liquid.push([bx, by, bz]);
   }
@@ -159,7 +159,9 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
     const x = bx + dx, y = by + dy, z = bz + dz;
     if (x >= 0 && y >= 0 && z >= 0 && x < nb[0]! && y < nb[1]! && z < nb[2]!) resident.add(x + nb[0]! * (y + nb[1]! * z));
   }
-  return { cells, top, resident: resident.size };
+  // The drop: the liquid's lowest cell above its rest depth (its cells spread over the box's floor), in cells.
+  const drop = cells > 0 ? bot - cells / (n[0]! * n[2]!) : 0;
+  return { cells, top, drop, resident: resident.size };
 }
 
 /**
@@ -172,19 +174,36 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
  *   EC = floorC·min(n_y/32 + 1, ⌈2 top/32⌉ + 1), floor* the window's x·z.
  * - Spread: a film 1/16 cell thick over the floor, four brick layers deep (SF = 4 min(floorF, ⌈V/4⌉)); every liquid
  *   brick at least 1/16 full (LF = ⌈V/32⌉); the boot's bricks with a quarter's margin; 128 bricks at least.
- * - f = min(WF, EF, max(SF, LF, ⌈1.25 bootF⌉, 128)); c = min(WC, EC, f); particles = 3 bootP (at least one bank's
- *   1024); b = 16; k = 0 (no static cut is bound yet: solidStamp's KCAP rule comes with the first mask scene).
+ * - Splash (lane E, 2026-11-17; EMPIRICAL, fitted to five measured peaks, not derived): a scene whose liquid starts
+ *   two bricks or more above its rest depth (drop ≥ 16 cells, brickInitialExtent) splashes over the floor on impact.
+ *   SPF = 10·min(floorF, ⌈1.5 V/64⌉): eight brick layers with the quarter's margin, over the floor or, for a small
+ *   liquid, the area V covers as a film 2/3 cell thick. Its particles: 10 V, the seed target (8 a cell) with the
+ *   margin, since nearly every splashing cell is band. The peaks (160 steps, no latch; progress-lane-e.md):
+ *     scene        floorF  peakF  layers  SPF (after caps)  peak particles  10 V
+ *     cm12-fig-7     289   2437    8.4   2890 (1.19x)       0.29M      0.33M
+ *     cm12-fig-7-256 1089  8948    8.2   10890 (1.22x)      2.05M      2.68M
+ *     stair-cube     625   2600    -     3670 (1.41x)       0.15M      0.16M
+ *     free fall       45    289    6.4   405 = WF (1.40x)
+ *     tilted fall     45    238    5.3   405 = WF (1.70x)
+ *   The layers do not grow with the drop in cells (fig-7 at 128 and 256: drop 69 and 137 cells, 8.3 layers both), so
+ *   the drop is only the trigger. Stair is the weakest point: the only V-limited case, which sets the 1.5. A splash
+ *   past the fit latches FAIL.POOL / PARTICLES explicitly; pools never grow.
+ * - f = min(WF, EF, max(SF, LF, ⌈1.25 bootF⌉, 128, SPF)); c = min(WC, EC, f); particles = max(3 bootP, 1024, the
+ *   splash's 10 V); b = 16; k = 0 (no static cut is bound yet: solidStamp's KCAP rule comes with the first mask
+ *   scene).
  * - t (setTransfer's listed tiles a step) = min(512 c, max(2 f, 4096)): setTransfer lists a tile of a C_ALL page at
  *   most once a step, so 512 c is exact; the layout's 2 f default (the dam's) under-counts a small f whose 4h tiles
  *   change (falling-water-torus listed 251 > 2·125 at step 3). Its xfer scratch is 3 KB a tile, so 4096 is 12.6 MB.
  */
-export function brickPoolRule(n: Vec3, liquid: { cells: number; top: number }, bootF: number, bootP: number): BrickCapacities {
+export const BRICK_SPLASH_DROP = 16;
+export function brickPoolRule(n: Vec3, liquid: { cells: number; top: number; drop: number }, bootF: number, bootP: number): BrickCapacities {
   const nb = n.map(v => Math.floor(v / 8)), np = n.map(v => Math.floor(v / 32));
   const floorF = (nb[0]! + 1) * (nb[2]! + 1), floorC = (np[0]! + 1) * (np[2]! + 1);
   const WF = floorF * (nb[1]! + 1), WC = floorC * (np[1]! + 1);
   const EF = floorF * Math.min(nb[1]! + 1, Math.ceil(2 * liquid.top / 8) + 2), EC = floorC * Math.min(np[1]! + 1, Math.ceil(2 * liquid.top / 32) + 1);
   const V = liquid.cells, SF = 4 * Math.min(floorF, Math.ceil(V / 4)), LF = Math.ceil(V / 32);
-  const f = Math.min(WF, EF, Math.max(SF, LF, Math.ceil(1.25 * bootF), 128));
+  const splash = liquid.drop >= BRICK_SPLASH_DROP, SPF = splash ? 10 * Math.min(floorF, Math.ceil(1.5 * V / 64)) : 0, SPP = splash ? Math.ceil(10 * V) : 0;
+  const f = Math.min(WF, EF, Math.max(SF, LF, Math.ceil(1.25 * bootF), 128, SPF));
   const c = Math.min(WC, EC, f);
-  return { f, c, b: 16, k: 0, particles: Math.max(3 * bootP, 1024), t: Math.min(512 * c, Math.max(2 * f, 4096)) };
+  return { f, c, b: 16, k: 0, particles: Math.max(3 * bootP, 1024, SPP), t: Math.min(512 * c, Math.max(2 * f, 4096)) };
 }

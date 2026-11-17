@@ -40,11 +40,35 @@ So every scene that becomes enabled moves to the brick engine by default, and no
 - **Enabling:** a scene joins `BRICK_ENGINE_SCENES` only after:
   - a smoke run on the brick engine, with no FAIL latch and no Metal abort;
   - the scene's own gates, where references exist (lane G's tools; seep G1–G8, letters L1–L5, paddleboats P1–P4).
+- **Volume (the batch rule, coordinator 2026-11-17):**
+  - Run 60 steps against the old engine. The brick's |peak| and |final| volume drift must be no worse than
+    `bar = old worst + max(1%, old spread)`. The old worst and the old spread (max − min) come from the old engine's
+    repeats.
+  - For nondeterministic scenes, the brick's **mean over its repeats** is judged against the bar, and the brick's
+    spread is reported beside it. The brick's spread never widens the bar: a noisier candidate does not get a looser
+    gate.
+  - **Splash scenes** (an impact inside the 60 steps, such as cm12-figure-7): the peak is judged as above. The final
+    is judged at a settled step past the impact window, at 120 steps, from one old run and two brick repeats.
 - **Pools:**
   - Sized per scene from measured peaks ("no runtime pool growth").
   - For scenes without an authored `brickPools`, E defines one deterministic sizing rule from the scene, such as the
     initial liquid's bricks and the lattice, with a stated margin.
   - A pool that would overflow latches FAIL.POOL and is never grown at run time.
+  - **The splash term (E, 2026-11-17) is empirical.** It is fitted to five measured peaks, not derived. It applies to
+    a scene whose liquid starts 16 cells or more above its rest depth: f ≥ 10·min(floorF, ⌈1.5 V/64⌉), meaning eight
+    brick layers with the 1.25 margin, and particles ≥ 10 V.
+
+    | scene | peak F | SPF after caps | margin |
+    |---|---|---|---|
+    | cm12-figure-7 | 2437 | 2890 | 1.19x |
+    | cm12-figure-7-256 | 8948 | 10890 | 1.22x |
+    | nbflip-stair-cube | 2600 | 3670 | 1.41x |
+    | free fall | 289 | 405 (WF) | 1.40x |
+    | tilted free fall | 238 | 405 (WF) | 1.70x |
+
+    Stair is the weakest point: it is the only V-limited fit, and it sets the 1.5. FAIL.POOL remains the safety net.
+    The term changes 10 catalog scenes, none of them enabled (the commit's audit). hero-garden-hose-x10 would be
+    3.2 GB, so it must author its pools from a measured peak before it is enabled.
 - **Unknown kinds fail explicitly.** A scene feature the brick engine doesn't handle stays a named gap.
 - **Fixed scenes:** the dam's −10 ms must hold. Re-gate the dam at each milestone.
 

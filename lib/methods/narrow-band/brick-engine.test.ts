@@ -30,7 +30,7 @@ import { BRICK_SET_HELPERS_WGSL, brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
-import { BRICK_ENGINE_SCENES, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
+import { BRICK_ENGINE_SCENES, BRICK_SPLASH_DROP, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
@@ -207,19 +207,28 @@ test("brick engine: brickPools must be integers, f/c/particles at least 1", () =
 
 test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the measured table, and authored pools win", () => {
   // The rule's terms, by hand: the window caps a 64^3 lattice at 9^3 F and 3^3 C; a 100-cell droplet takes the floor.
-  assert.deepEqual(brickPoolRule([64, 64, 64], { cells: 100, top: 16 }, 8, 1276), { f: 128, c: 18, b: 16, k: 0, particles: 3828, t: 4096 });
-  assert.deepEqual(brickPoolRule([64, 64, 64], { cells: 94208, top: 32 }, 324, 174856), { f: 729, c: 27, b: 16, k: 0, particles: 524568, t: 4096 });
+  assert.deepEqual(brickPoolRule([64, 64, 64], { cells: 100, top: 16, drop: 0 }, 8, 1276), { f: 128, c: 18, b: 16, k: 0, particles: 3828, t: 4096 });
+  assert.deepEqual(brickPoolRule([64, 64, 64], { cells: 94208, top: 32, drop: 0 }, 324, 174856), { f: 729, c: 27, b: 16, k: 0, particles: 524568, t: 4096 });
   // TCAP: 512 c is exact (a C_ALL tile is listed once a step); 2 f where that is larger than 4096 but under 512 c.
-  assert.equal(brickPoolRule([32, 32, 32], { cells: 961, top: 30 }, 72, 12960).t, 4096);
-  assert.equal(brickPoolRule([16, 16, 16], { cells: 300, top: 8 }, 27, 9632).t, 512);
-  assert.equal(brickPoolRule([256, 256, 256], { cells: 6400, top: 30 }, 48, 26224).t, Math.min(512 * 162, 2 * 4356));
+  assert.equal(brickPoolRule([32, 32, 32], { cells: 961, top: 30, drop: 0 }, 72, 12960).t, 4096);
+  assert.equal(brickPoolRule([16, 16, 16], { cells: 300, top: 8, drop: 0 }, 27, 9632).t, 512);
+  assert.equal(brickPoolRule([256, 256, 256], { cells: 6400, top: 30, drop: 0 }, 48, 26224).t, Math.min(512 * 162, 2 * 4356));
+  // The splash term (drop >= BRICK_SPLASH_DROP): 10 min(floorF, ceil(1.5 V/64)) bricks and 10 V particles. Below the
+  // trigger nothing changes; a small liquid's film area (10 x 10 bricks) stays under the spread term SF while its
+  // particles take 10 V; a large liquid takes eight layers of the floor with the margin.
+  const pool = { cells: 6400, top: 30 };
+  assert.deepEqual(brickPoolRule([256, 256, 256], { ...pool, drop: 15.9 }, 48, 26224), brickPoolRule([256, 256, 256], { ...pool, drop: 0 }, 48, 26224));
+  assert.deepEqual([brickPoolRule([256, 256, 256], { cells: 400, top: 30, drop: BRICK_SPLASH_DROP }, 8, 1276)].map(p => [p.f, p.particles])[0], [400, 4000]);
+  assert.deepEqual([brickPoolRule([128, 128, 128], { cells: 33375, top: 128, drop: 69 }, 900, 1000)].map(p => [p.f, p.particles])[0], [2890, 333750]);
   // Through brickSceneSetup on the catalog scenes the rule was measured against (progress-lane-e.md, 2026-11-17).
   const want: Record<string, [number, number, number]> = {
     "power-droplet-64": [128, 18, 3828], "power-droplet-256": [128, 128, 3828], "power-fill-256-800": [800, 162, 17856], "power-fill-256-6400": [4356, 162, 78672],
     "minimal-power-dam-break-32": [125, 8, 117096], "minimal-power-dam-break-64": [729, 27, 524568], "mass-conserving-figure-9-dam-break": [2601, 75, 720384],
-    // The boot's residency (D2, the liquid bricks dilated by two): the free fall's 100 boot bricks are 210 resident at
-    // step 1 (its measured F box), so 1.25 * 210; the tilted block's 125 are 245.
-    "nbflip-analytic-free-fall": [263, 18, 150528], "nbflip-analytic-tilted-free-fall": [307, 18, 150528],
+    // The splash term (drop >= 16 cells; empirical, fitted to five measured peaks): the free falls take their window
+    // (WF 405; they peaked at 289 and 238 F, so without it 1.25 * the boot's 210 and 245 resident latched POOL_F);
+    // cm12-figure-7 takes eight layers of its 289-brick floor with the margin (peak 2437), its particles 3 bootP > 10 V.
+    "nbflip-analytic-free-fall": [405, 18, 150528], "nbflip-analytic-tilted-free-fall": [405, 18, 150528],
+    "cm12-figure-7": [2890, 125, 377568], "cm12-figure-7-256": [10890, 729, 2677350],
   };
   const enabled = BRICK_ENGINE_SCENES as string[], before = enabled.length;
   try {
