@@ -21,13 +21,13 @@
  * Stated differences from the old engine at this milestone: all h (no 4h band to prolong from, so a face the h
  * sweep extends takes no delta, as the old engine did where the 4h band did not reach); no cold freeze or thaw.
  */
-import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { BRICK_SOURCE_RING_WGSL, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import type { BrickLayout } from "./brick-abi";
 import type { BrickKernel } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_OWNER_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_SLOT_WINDOW_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel } from "./fluid-grid.wgsl";
 import { nbfParticleRecordWGSL } from "./particles-formulas.wgsl";
-import { nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
+import { nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfTensionWGSL, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 
@@ -90,6 +90,32 @@ fn vRingBrick(o:vec3i)->bool{
  return true;
 }
 var<workgroup> sRing:u32;
+`;
+/** Surface tension's owners (nbfTensionWGSL's hooks; needs FG_PHI_WGSL and V_COARSE_WGSL): the old engine's owner
+ * widths. A cell's owner is h where its tile is h-owned (all h: where an F slot holds it), 4h where its page is
+ * resident and its tile is not h-owned, and none outside the box or in a non-resident page (the old absent tile,
+ * umFace's width 0). Every read goes through the authority (fgCorners, fgTileCorners4, fgCentrePhi), so the
+ * curvature's reach past the brick's staged ranges reads the same values. */
+const V_TENSION_WGSL = /* wgsl */`
+fn nbxTensionWidth(c:vec3i)->u32{
+ if(!nbInWallBox(c)){return 0u;}
+ if(!FG_TIERED){return select(0u,1u,fgSlot(c)!=NB_NONE);}
+ if(foCellOwnerH(c)){return 1u;}
+ return select(0u,4u,nbCSlotOfPage((c>>vec3u(2u))>>vec3u(3u))!=NB_NONE);
+}
+fn nbxTensionCorners(o:vec3i,w:u32)->array<f32,8>{if(w==4u){return fgTileCorners4(o>>vec3u(2u));}return fgCorners(o);}
+fn nbxTensionOcc(c:vec3i,w:u32)->f32{let hy=vH().y;if(w==4u){return vOcc4(c>>vec3u(2u),hy);}return nbfOccupancy(fgCentrePhi(c)*hy,hy,1u);}
+// A closed owner (umOwnerClosed), from the cells' FLAGS.OPEN (solidStamp and bodyStamp clear it where FRAC is 0; the
+// particle walk's closed-cell test reads the same): an h cell whose OPEN is clear, a 4h tile none of whose 64 cells is
+// OPEN. A cell no F slot holds reads open, as the walk's does. Without statics no cell inside the box is closed.
+fn nbxTensionCellOpen(s:u32,c:vec3i)->bool{return (phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)]&NB_FLAG_OPEN)!=0u;}
+fn nbxTensionClosed(o:vec3i,w:u32)->bool{
+ if(!V_STATICS){return false;}
+ let s=fgSlot(o);if(s==NB_NONE){return false;}
+ if(w==1u){return !nbxTensionCellOpen(s,o);}
+ for(var k=0;k<64;k++){if(nbxTensionCellOpen(s,o+vec3i(k&3,(k>>2)&3,k>>4))){return false;}}
+ return true;
+}
 `;
 const V_LIQUID_WGSL = /* wgsl */`
 fn vLiquidOwner(c:vec3i)->bool{
@@ -180,6 +206,13 @@ fn vcTransferFace(T:vec3i,a:u32,original:f32,bank:u32)->f32{
  let blend=vcHeat(q,false)*mix(min(1.0,total/nbfP2GExpected(depth)),1.0,vcHeat(q,true));
  return mix(original,momentum/total,blend);
 }
+// umInflow at a 4h face (T, a): the old +face of the owner below, its texels 4T - e_a + i e_u + j e_v.
+fn vcInflowForced(T:vec3i,a:u32,forced:f32)->f32{
+ let u=select(select(vec3i(1,0,0),vec3i(0,1,0),a==0u),vec3i(1,0,0),a==1u);let v=select(select(vec3i(0,1,0),vec3i(0,0,1),a==0u),vec3i(0,0,1),a==1u);
+ let base=4*T-fgUnit(a);var sum=0.0;
+ for(var j=0;j<4;j++){for(var i=0;i<4;i++){sum+=nbInflowForced(base+i*u+j*v,a,forced);}}
+ return sum/16.0;
+}
 fn vcTransferPage(slot:u32,lid:u32){
  let dt=vDt();let h=vH();let gravity=vGravity();let bank=(cfg.y^cfg.z^1u)&1u;
  for(var r=0u;r<2u;r++){
@@ -199,6 +232,10 @@ fn vcTransferPage(slot:u32,lid:u32){
    let occO=vOcc4(O,h.y);
    if(V_VISCOUS&&occO>0.0){value=nbfViscousKick(value,dt,V_MU,V_RHO,vel[vcAt(NB_VEL_C_US0,slot,a,j)]);}
    if(nbfGravityFace(occO,occ,vCoarseMass(4*O)||vCoarseMass(4*T))){value=nbfGravityKick(value,dt,gravity[a]);kick|=NB_FLAG_KICK0<<a;}
+   // Surface tension (umCapillary) on the 4h face between O and T.
+   if(V_TENSION){value+=nbfCapillary(4*O,4*T,a,occO,occ,h.y,dt,V_SIGMA,V_RHO);}
+   // The nozzle (umInflow): the swept source velocity averaged over the face's 16 fine texels, the cells below it.
+   if(nbInflowOn()){value=vcInflowForced(T,a,value);}
    vel[vcAt(NB_VEL_C_US0,slot,a,j)]=value;vel[vcAt(NB_VEL_C_U0,slot,a,j)]=value;
   }
   let fw=NB_PHI_C_FLAGS+NB_STRIDE*slot+j;phi[fw]=(phi[fw]&~(7u*NB_FLAG_KICK0))|kick;
@@ -251,9 +288,10 @@ fn x4Support(t:vec3i)->bool{
 }
 `;
 
-/** The fluid's constants the forces apply: dynamic viscosity (Pa s; 0 inviscid) and density (kg/m^3); the volume
- * control's gain (1/s, 1 / the control time; 0 or absent for none). */
-export interface VelocityPhysics { readonly viscosity_Pa_s: number; readonly density_kg_m3: number; readonly volumeControl_1_s?: number }
+/** The fluid's constants the forces apply: dynamic viscosity (Pa s; 0 inviscid), density (kg/m^3) and surface
+ * tension (N/m; 0 or absent for none); the volume control's gain (1/s, 1 / the control time; 0 or absent for none). */
+/** statics: the scene binds a static voxel mask (closed owners exist: the capillarity reads them). */
+export interface VelocityPhysics { readonly viscosity_Pa_s: number; readonly density_kg_m3: number; readonly surfaceTension_N_m?: number; readonly statics?: boolean; readonly volumeControl_1_s?: number }
 
 /** An f32 literal that rounds to x's f32 (9 significant digits round-trip). */
 const f32Bits = (x: number) => `${Math.fround(x).toPrecision(9)}f`;
@@ -262,7 +300,9 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const viscous = physics.viscosity_Pa_s > 0, control = physics.volumeControl_1_s ?? 0;
   if (!(control >= 0 && Number.isFinite(control))) throw new Error(`NB-FLIP brick engine: volume control gain ${control} 1/s is not a gain`);
-  const physicsWGSL = `const V_VISCOUS:bool=${viscous};const V_MU:f32=${f32Bits(physics.viscosity_Pa_s)};const V_RHO:f32=${f32Bits(physics.density_kg_m3)};const V_CONTROL:f32=${f32Bits(control)};`;
+  const sigma = physics.surfaceTension_N_m ?? 0;
+  if (!(sigma >= 0 && Number.isFinite(sigma))) throw new Error(`NB-FLIP brick engine: surface tension ${sigma} N/m is not a surface tension`);
+  const physicsWGSL = `const V_VISCOUS:bool=${viscous};const V_MU:f32=${f32Bits(physics.viscosity_Pa_s)};const V_RHO:f32=${f32Bits(physics.density_kg_m3)};const V_CONTROL:f32=${f32Bits(control)};const V_TENSION:bool=${sigma > 0};const V_STATICS:bool=${physics.statics === true};const V_SIGMA:f32=${f32Bits(sigma)};`;
   const base = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL].join("\n");
   const windowBase = [FG_SLOT_WINDOW_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, V_WGSL, physicsWGSL].join("\n");
   const fill = [levelSetFillWGSL, geometricPlaneBoxWGSL].join("\n");
@@ -509,7 +549,7 @@ fn pdLiquidAt(c:vec3i)->bool{
 
   // uTransfer (transferProperties, then forces): a workgroup a brick, a lane two cells' three lower faces. Stages
   // the 125 tiles about the brick (the 27 about each face's home tile) and its 9^3 depth vertices.
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + BRICK_SOURCE_RING_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;
@@ -522,7 +562,7 @@ fn nbxTransferHeat(tile:u32)->vec2f{
 }
 var<private> tOrigin:vec3i;
 fn nbxTransferDepth(v:vec3u)->f32{let r=vec3i(v)-tOrigin;return wDepth[u32(r.x+9*(r.y+9*r.z))];}
-` + nbfP2GWGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + nbfViscosityWGSL.slice(nbfViscosityWGSL.indexOf("// The kick")) + /* wgsl */`
+` + nbfP2GWGSL + nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")) + nbfViscosityWGSL.slice(nbfViscosityWGSL.indexOf("// The kick")) + nbfTensionWGSL + V_TENSION_WGSL + /* wgsl */`
 fn tDepositWord(at:u32)->u32{return atomicExchange(&fdep[at],0u);}
 ` + V_RING_WGSL + /* wgsl */`
 // The seam stage: per tile t of the 5^3 about the brick (tLow), bit 0 the tile's half of fgCellCoarse (tiered, not
@@ -608,6 +648,10 @@ ${stagedHead("vcTransferPage", -1)}
    // The viscous term (uViscous left the departure's Laplacian in US) where the old texel's cell, c - e_a, holds liquid.
    if(V_VISCOUS&&occn>0.0){value=nbfViscousKick(value,dt,V_MU,V_RHO,vel[vAt(NB_VEL_F_US0,slot,a,l)]);}
    if(nbfGravityFace(occ,occn,vCoarseMassS(n)||vCoarseMassS(c))){value=nbfGravityKick(value,dt,gravity[a]);}
+   // Surface tension (umCapillary) on the face between n and c.
+   if(V_TENSION){value+=nbfCapillary(n,c,a,occn,occ,h.y,dt,V_SIGMA,V_RHO);}
+   // The nozzle (umInflow): the swept source velocity of the face's texel, the cell below it.
+   if(nbInflowOn()){value=nbInflowForced(n,a,value);}
    vel[vAt(NB_VEL_F_US0,slot,a,l)]=value;vel[vAt(NB_VEL_F_U0,slot,a,l)]=value;
   }
  }

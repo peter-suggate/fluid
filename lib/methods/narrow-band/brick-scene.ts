@@ -8,7 +8,7 @@
  *   engine closes) of whole pages, cubic cells;
  * - any initial liquid (brick-initial.ts: the closed form or the old engine's t = 0 φ as a page table), at rest
  *   or with the scene's initial velocity;
- * - scheduled drops (lane F's sources, brick-source.ts); no other solids, bodies or an inflow.
+ * - scheduled drops and an inflow (lane F's sources, brick-source.ts); no other solids or bodies.
  * Density, viscosity and surface tension pass to lane F's stages, which
  * apply the forces (as the old engine's forces kernel) or refuse them.
  * Anything else is a gap, and the method runs the scene on the old engine.
@@ -24,6 +24,7 @@ import { BRICK_STATIC_EDIT_K, brickStaticCutBricks, brickStaticMask } from "./br
 import type { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
 import { brickSources, type BrickSources } from "./brick-source";
+import { integratedInflowVolume } from "../../core/inflow-boundary";
 import { BRICK_BOOT_BAND, bootPhiAt, type BrickEngineOptions } from "./brick-engine";
 
 /** Scenes the brick engine takes: M2's dam, and the first enabled batch (lane E, 2026-11-17: 60 steps against the old
@@ -124,10 +125,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (scene.solidBoundary && scene.solidBoundary.collision !== "voxels") gaps.push("a procedural boundary sampled as a field needs boundary records (M3)");
   // Rigid bodies (lane P, M5: bodies-host.ts): the body stages need K slots, and the host's own refusals.
   gaps.push(...brickRigidBodyGaps(scene));
-  // Scheduled drops are lane F's sources (brick-source.ts); an inflow is not ported yet.
-  if (f.inflow) gaps.push("an inflow needs lane F's inflow source (M4)");
-  // The pool rule sizes from the t = 0 liquid alone: a drop scene would latch POOL_F or PARTICLES as its drops land.
-  if (f.scheduledDrops?.length && !f.brickPools) gaps.push("scheduled drops need authored brickPools (the pool rule sizes the t = 0 liquid only)");
+  // Scheduled drops and the inflow are lane F's sources (brick-source.ts, M4); the pool rule covers their volume and the
+  // drops' band particles (brickSourcesExtent, brickDropParticles).
   // F's stages refuse the forces they do not implement (velocity-formulas nbfVelocitySupported): a gap here, so "auto"
   // never selects a scene whose stages would throw at creation.
   try { nbfVelocitySupported({ viscosity: f.dynamicViscosity_Pa_s, surfaceTension: f.surfaceTension_N_m, noSlip: false }); }
@@ -163,9 +162,9 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const sources = brickSources(scene, { lattice: L, ...inBox, h_m: hs[0]!, origin_m, dt_s: dt! });
   // Pools: the scene's authored brickPools, else the sizing rule (brickPoolRule) from the boot. Either way they are fixed:
   // an overrun latches FAIL.POOL / PARTICLES and is never grown.
-  const extent = brickInitialExtent({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial });
+  const extent = brickSourcesExtent(brickInitialExtent({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }), sources, B ?? L);
   // The boot's candidates (its F bricks and page-only keys) fill an f-long list (BrickEngine.create).
-  const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length + start.pages.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
+  const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length + start.pages.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band) + brickDropParticles(sources, band));
   // The body stages take a K slot a body brick (A5): a scene with bodies authors brickPools.k from its NEAR_BODY peak.
   if ((scene.rigidBodies?.length ?? 0) > 0 && !(p.k > 0)) return { gaps: [...gaps, "rigid bodies need K slots: author brickPools.k from the NEAR_BODY peak"] };
   // The mask: the old engine's own voxel image (solidWorldForFluidLattice), on every scene, so a first voxel stroke is a
@@ -185,6 +184,40 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
       staticMask, ...(staticMask.empty ? { staticsDeferred: true as const } : {}),
     },
   };
+}
+
+/** The scheduled drops' band particles, every drop at once (an upper bound: a landed drop's records retire into the
+ * pool's band): bootParticleCount's 8 a cell over a drop's band, the lesser of its volume and its area (a sphere's of
+ * that volume) times the band depth plus one. */
+export function brickDropParticles(sources: BrickSources | undefined, bandDepth: number): number {
+  let n = 0;
+  for (const d of sources?.drops ?? []) n += 8 * Math.min(d.volume, 4 * Math.PI * (3 * d.volume / (4 * Math.PI)) ** (2 / 3) * (bandDepth + 1));
+  return Math.ceil(n);
+}
+
+/** The pool rule's liquid with the sources' (lane F, M4; the old bulk16 rule's initial + scheduled drops + inflow,
+ * uniform reference bulkSlotCapacity): each drop's volume and the nozzle's integrated volume over its schedule join
+ * the cells and the liquid that can spread (both arrive above the rest depth), the top reaches the highest drop's and
+ * the nozzle's, and the drop is the highest of a drop's lowest cell and the nozzle over the final rest depth (a source
+ * falling two bricks or more splashes: brickPoolRule's splash, on the liquid that falls). */
+export function brickSourcesExtent<E extends { cells: number; top: number; drop: number; free: number }>(e: E, sources: BrickSources | undefined, box: Vec3): E & { splash?: number } {
+  if (!sources) return e;
+  const n = sources.inflow, inflow = n ? integratedInflowVolume(n.inflow, n.inflow.start_s, n.inflow.end_s) / n.h_m ** 3 : 0;
+  const added = inflow + sources.drops.reduce((sum, d) => sum + d.volume, 0);
+  const cells = e.cells + added, rest = cells / (box[0] * box[2]);
+  // The splash's liquid is what falls BRICK_SPLASH_DROP or more: the initial liquid's (all of it, or none) and each
+  // source's own, not the pool a source falls into.
+  let top = e.top, drop = e.drop, splash = e.drop >= BRICK_SPLASH_DROP ? e.cells : 0;
+  if (n) {
+    const nozzle = n.outlet[1] + n.radius, fall = nozzle - rest;
+    top = Math.max(top, Math.ceil(nozzle)); drop = Math.max(drop, fall); if (fall >= BRICK_SPLASH_DROP) splash += inflow;
+  }
+  for (const d of sources.drops) {
+    // requestDropPages' reach: max(radius, halfHeight) about the centre.
+    const r = Math.max(d.radius, d.halfHeight), fall = d.centre[1] - r - rest;
+    top = Math.max(top, Math.ceil(d.centre[1] + r)); drop = Math.max(drop, fall); if (fall >= BRICK_SPLASH_DROP) splash += d.volume;
+  }
+  return { ...e, cells, free: e.free + added, top, drop, splash };
 }
 
 /** The initial liquid's volume in cells (vertices with φ < 0 inside the container) and its top (one past the highest
@@ -261,20 +294,21 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
  *   the drop is only the trigger. Stair is the weakest point: the only V-limited case, which sets the 1.5. A splash
  *   past the fit latches FAIL.POOL / PARTICLES explicitly; pools never grow.
  * - f = min(WF, EF, max(SF, LF, ⌈1.25 bootF⌉, 128, SPF)); c = min(WC, EC, f); particles = max(3 bootP, 1024, the
- *   splash's 10 V); b = 16; k = 0 (no static cut is bound yet: solidStamp's KCAP rule comes with the first mask
+ *   splash's 10 S, S the liquid that falls: V, or with sources brickSourcesExtent's); b = 16; k = 0 (no static cut is bound yet: solidStamp's KCAP rule comes with the first mask
  *   scene).
  * - t (setTransfer's listed tiles a step) = min(512 c, max(2 f, 4096)): setTransfer lists a tile of a C_ALL page at
  *   most once a step, so 512 c is exact; the layout's 2 f default (the dam's) under-counts a small f whose 4h tiles
  *   change (falling-water-torus listed 251 > 2·125 at step 3). Its xfer scratch is 3 KB a tile, so 4096 is 12.6 MB.
  */
 export const BRICK_SPLASH_DROP = 16;
-export function brickPoolRule(n: Vec3, liquid: { cells: number; top: number; drop: number; free?: number }, bootF: number, bootP: number): BrickCapacities {
+export function brickPoolRule(n: Vec3, liquid: { cells: number; top: number; drop: number; free?: number; splash?: number }, bootF: number, bootP: number): BrickCapacities {
   const nb = n.map(v => Math.floor(v / 8)), np = n.map(v => Math.floor(v / 32));
   const floorF = (nb[0]! + 1) * (nb[2]! + 1), floorC = (np[0]! + 1) * (np[2]! + 1);
   const WF = floorF * (nb[1]! + 1), WC = floorC * (np[1]! + 1);
   const EF = floorF * Math.min(nb[1]! + 1, Math.ceil(2 * liquid.top / 8) + 2), EC = floorC * Math.min(np[1]! + 1, Math.ceil(2 * liquid.top / 32) + 1);
   const V = liquid.cells, SF = 4 * Math.min(floorF, Math.ceil(V / 4)), LF = Math.ceil((liquid.free ?? V) / 32);
-  const splash = liquid.drop >= BRICK_SPLASH_DROP, SPF = splash ? 10 * Math.min(floorF, Math.ceil(1.5 * V / 64)) : 0, SPP = splash ? Math.ceil(10 * V) : 0;
+  // The splash's liquid: V, or with sources the liquid that falls (brickSourcesExtent's splash).
+  const S = liquid.splash ?? V, splash = liquid.drop >= BRICK_SPLASH_DROP, SPF = splash ? 10 * Math.min(floorF, Math.ceil(1.5 * S / 64)) : 0, SPP = splash ? Math.ceil(10 * S) : 0;
   const f = Math.min(WF, EF, Math.max(SF, LF, Math.ceil(1.25 * bootF), 128, SPF));
   const c = Math.min(WC, EC, f);
   return { f, c, b: 16, k: 0, particles: Math.max(3 * bootP, 1024, SPP), t: Math.min(512 * c, Math.max(2 * f, 4096)) };

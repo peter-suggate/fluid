@@ -2238,3 +2238,66 @@ volume on bulk-rest-tank is stale (786432: the top band layer only); its drift i
 Tools: tools/profile-brick-scene.ts, a catalog scene on the brick through createBrickSolver (step median, the split-pass
 kernel profile, the volume); tools/profile-probe-xctrace.ts --probe= records it; tools/gpu-kernel-timer.ts labels each
 split pass `<pass>|<pipeline>`, so a Metal System Trace names every dispatch.
+
+## 2026-11-17 — M4 inflow, surface tension (with closed owners) and scheduled-drop pools
+
+The brick engine now takes an inflow, a surface tension (tension beside static solids included) and scheduled drops
+without authored brickPools. Each is ported verbatim from the old engine, and its kernels are checked against the old
+engine's own WGSL.
+
+**Inflow (M4).**
+- The nozzle is the old inflow-boundary.ts / uniform-source.wgsl.ts. Its step words are strength, sweep, continues and
+  inflowNeedsFine. nbInflowPhi carries uvSourcePhi's plug, nbInflowForced is applyInflowSweptVelocity in the forces and
+  nbInflowProjected is applyInflowVelocity in pressure-composite's projectF.
+- The inflow's flow joins ADDED, and the plug's box is in the boot's set (brickBootSourceBoxes).
+- The pool rule covers the integrated inflow volume and the nozzle's fall (brickSourcesExtent).
+- GPU parity (brick-source.test.ts): 3 × 8192 cells, |φ brick − old| ≤ 1.1e-5 cells off the back cap's plane; forced
+  and projected values exact. The 727 cells on the back cap's plane are left out, because both engines' φ steps there
+  (a knife edge).
+
+**Surface tension.**
+- umCapillary, umCurvature and umReconstructPressureSlope, verbatim: the kick is dt σ/ρ · ½(κ_owner + κ_neighbour) ·
+  the occupancy gradient, with the coarse slope's correction on an unequal face.
+- Closed owners (umOwnerClosed, read from the cells' FLAGS.OPEN). A closed owner has no kick. Curvature skips a closed
+  first part. A closed neighbour lends the slope the owner's own pressure. A 4h tile is closed only when all 64 of its
+  cells are.
+  - Known difference: a fully solid 4h tile in a brick with no F slot reads open, as the particle walk's does.
+- GPU parity (velocity-formulas.test.ts) against the old forces' WGSL at widths 1 and 4: 16384 faces (331 unequal, 1322
+  beside a closed cell, 10031 with a kick). Worst relative differences: kick 5.7e-5 (scaled by a thousandth of the
+  largest kick at least, where the two curvatures nearly cancel), curvature 2.0e-5, slope 2e-6, occupancy 1.2e-7.
+- 2/R oracle: mean curvature·R h/2 of 0.9937 (R 5) and 0.9999 (R 8).
+
+**Scheduled-drop pools.**
+- The extent adds the drops' volume.
+- The splash term's 10 S now takes S as the liquid that falls BRICK_SPLASH_DROP or more (the drops' or the nozzle's), not
+  the pool they fall into.
+- brickDropParticles adds the drops' band particles.
+- The letters without their authored brickPools: rule pools f 5610, c 315, 5.01M particles. The take (193 steps) peaks
+  at F 5025, C 207, P 939k, with no FAIL, at 57.7 ms.
+
+**Gates (brick against the old engine, the box observer).**
+
+| scene | brick | old engine |
+|---|---|---|
+| cm12-figure-1 (60 steps) | 64.5 ms | 74.7 ms; volume within 0.1% |
+| water-box-dam-break (σ 0.072, 120 steps) | 12.8 ms | 22.4 ms; similar volume and centroid curves |
+| water-box-dam-break, zero g, σ 20 | 8.1 ms | 17.5 ms; both hold the volume to 3% |
+| water-box-dam-break, σ 20 with a static block (closed owners) | −1.8% volume, 7.9 ms | +3.7% volume, 12.2 ms; centroid at 120 (11.2, 2.5) against (11.7, 2.6) |
+| uniform-trough-hose-fill (120 steps), the volume gate | −15% at 120 (−18.6% at 100), 10.2 ms | +14% (its particle volume +45%; its own φ measure −11%), 19.3 ms |
+| nbflip-ramp-flat, on volume against the integrated inflow | −13% at 120, 9.1 ms | −65% |
+
+- Ramp-flat's reference: the old engine's own stats (readStats) give target = integrated inflow, outflow 0, its drift −0.69
+  at step 120 and its particle volume −32%. The observer's −65% agrees with them, so the shortfall is the old engine's
+  loss on the thin sheet, not the observer's. Its sheet stalls at x ≈ 18 where the brick's reaches 47. Ramp-flat is
+  scored brick-against-old on shape and against the integrated inflow on volume.
+- Open: the trough's brick deficit, opposite to the old engine's gain, grows once the jet lands (k 40–100). It is not
+  yet diagnosed. The trough is not in BRICK_ENGINE_SCENES.
+- GPU tests on a4ce134b + this batch: 64/0 (source, solid-edit, static, walk, engine, velocity formulas). test:unit
+  1928/0.
+
+**Timer audit.**
+- C's no-presentation tank rows (7.5 ms, peak 2.81 GB) were rc 3 runs ("Cannot allocate sample buffer", the timer
+  defect fixed in fab4b516). They are withdrawn.
+- A's tank rows were valid but counted 10 timer-split steps in the median. scratch prof-f now times only timer-off steps.
+  Re-runs with the timer off: below.
+- Gate scripts treat any nonzero rc or a gpuError as an invalid run.

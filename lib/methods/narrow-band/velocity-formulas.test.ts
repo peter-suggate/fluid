@@ -7,10 +7,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { nbfDeltaWGSL, nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfRemapWGSL, nbfVelocitySupported, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
+import { nbfDeltaWGSL, nbfExtensionWGSL, nbfMomentumWGSL, nbfP2GWGSL, nbfRemapWGSL, nbfTensionWGSL, nbfVelocitySupported, nbfViscosityWGSL, nbfVolumeWGSL } from "./velocity-formulas.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
-import { oldExcerpt, oldFunction, parityCode, parityGPU, prng, runParity, ulpCompare, withParityDevice, type ParityKernel } from "./parity/harness";
+import { oldExcerpt, oldFunction, oldFunctionIn, parityCode, parityGPU, prng, runParity, ulpCompare, withParityDevice, type ParityKernel } from "./parity/harness";
 
 const old = (...names: string[]) => names.map(oldFunction).join("\n");
 const words = (f: Float32Array) => new Uint32Array(f.buffer, f.byteOffset, f.length);
@@ -349,12 +349,14 @@ if (process.env.NBF_PARITY_DUMP) {
   for (const [name, kernel] of Object.entries(KERNELS)) writeFileSync(`${dir}/${name}.wgsl`, parityCode(kernel, 64));
 }
 
-test("the brick engine's forces take a viscosity with free-slip walls and reject surface tension", () => {
+test("the brick engine's forces take a viscosity with free-slip walls and a surface tension", () => {
   nbfVelocitySupported({ viscosity: 0, surfaceTension: 0 });
   nbfVelocitySupported({ viscosity: 1.002e-3 });
+  nbfVelocitySupported({ surfaceTension: 0.072 });
   assert.throws(() => nbfVelocitySupported({ viscosity: 1e-3, noSlip: true }), /no-slip/);
   assert.throws(() => nbfVelocitySupported({ viscosity: -1 }), /viscosity/);
-  assert.throws(() => nbfVelocitySupported({ surfaceTension: 0.07 }), /surface tension/);
+  assert.throws(() => nbfVelocitySupported({ surfaceTension: -0.07 }), /surface tension/);
+  assert.throws(() => nbfVelocitySupported({ surfaceTension: Number.NaN }), /surface tension/);
 });
 
 async function parity(device: GPUDevice, label: string, oldKernel: ParityKernel, newKernel: ParityKernel, io: Parameters<typeof runParity>[2], out: number): Promise<void> {
@@ -511,5 +513,174 @@ test("volume control (a cell's occupancy, the gauge's rate) matches the old umSu
       inp[o + 12] = t % 19 === 0 ? 0 : budget * (1 - gapShare);
     }
     await parity(device, "volume", OLD_VOLUME, NEW_VOLUME, { inp, threads, outWords: VOLUME_OUT * threads }, VOLUME_OUT);
+  });
+});
+
+// ---- surface tension (umCapillary at owner widths 1 and 4). A synthetic owner layout both sides read: 8^3 tiles (a
+// 32^3 lattice), 4h at tile x >= 4 except an h island (5, 3, 3), absent (no owner) at tile z = 7, x < 2 and outside.
+// Closed (solid) cells: a floor two cells deep under the h region and one tile deep under the 4h (closed 4h tiles),
+// a wall x = 8, 9 at z >= 26 (h cells, clear of the 2 / R ball), and one cell row y = 4 in the 4h tile (6, 1, 5), which stays open.
+// Vertex φ is a sphere's distance (cells; the old reads metres, h times it), the same values through both sides'
+// readers. The old functions compile whole from the capture (parity/uniform-tension.wgsl) on stubbed owners and
+// faces (umFace: a +face of an h owner, of a 4h owner toward a 4h one, or one of the 16 parts toward a finer tile).
+const TENSION_WORLD = /* wgsl */`
+var<private> twCentre:vec3f;var<private> twR:f32;
+fn twW(t:vec3i)->u32{
+ if(any(t<vec3i(0))||any(t>=vec3i(8))){return 0u;}
+ if(t.z==7&&t.x<2){return 0u;}
+ if(all(t==vec3i(5,3,3))){return 1u;}
+ return select(1u,4u,t.x>=4);
+}
+fn twPhi(v:vec3i)->f32{return length(vec3f(v)-twCentre)-twR;}
+fn twClosed(p:vec3i)->bool{
+ if(p.x<16&&p.y<2){return true;}
+ if(p.x>=16&&p.y<4){return true;}
+ if((p.x==8||p.x==9)&&p.z>=26){return true;}
+ return all((p>>vec3u(2u))==vec3i(6,1,5))&&p.y==4;
+}
+fn twTileClosed(o:vec3i)->bool{for(var k=0;k<64;k++){if(!twClosed(o+vec3i(k&3,(k>>2)&3,k>>4))){return false;}}return true;}
+fn twUnit(a:u32)->vec3i{return vec3i(select(0,1,a==0u),select(0,1,a==1u),select(0,1,a==2u));}
+fn twCorner(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
+`;
+const TENSION_IN = 12, TENSION_OUT = 6;
+const TENSION_HEAD = `let i=${TENSION_IN}u*t;let n=bitcast<vec3i>(vec3u(inp[i],inp[i+1u],inp[i+2u]));let a=inp[i+3u];
+ twCentre=v3(i+4u);twR=f(i+7u);let h=f(i+8u);let dt=f(i+9u);let sigma=f(i+10u);let rho=f(i+11u);let c=n+twUnit(a);`;
+const OLD_TENSION: ParityKernel = {
+  prelude: `${TENSION_WORLD}
+struct UMOwner {tile:u32,lane:u32,width:u32,index:u32}
+struct UMFace {neighbor:UMOwner,anchor:vec3i,width:u32,count:u32,axis:u32,sign:i32,}
+struct TwForce{hDt:vec4f,physical:vec4f}
+var<private> force:TwForce;
+fn UM_H()->vec3f{return vec3f(force.hDt.y);}
+const umForceCached:bool=false;const umCachedGeometry:bool=false;
+var<private> normals:array<vec4f,1>;var<private> retained:array<f32,4>;
+fn umRetainedIndex(owner:UMOwner)->u32{return 0xffffffffu;}
+fn udLoad_centerPhi(p:vec3i)->vec4f{return vec4f(0);}
+fn udLoad4_centerPhi(p:vec3i)->vec4f{return vec4f(0);}
+fn umSolidEnabled()->bool{return true;}
+fn umCellIsOpen(p:vec3i)->bool{return !twClosed(p);}
+fn umTileOpen(tile:u32)->f32{let o=4*vec3i(umTileCoord(tile));var n=0.0;for(var k=0;k<64;k++){if(!twClosed(o+vec3i(k&3,(k>>2)&3,k>>4))){n+=1.0;}}return n/64.0;}
+fn twTile(t:vec3i)->u32{return u32(t.x+8*(t.y+8*t.z));}
+fn umTileCoord(tile:u32)->vec3u{return vec3u(tile%8u,(tile/8u)%8u,tile/64u);}
+${oldFunction("umCorner")}
+fn twOwner(c:vec3i)->UMOwner{
+ let t=c>>vec3u(2u);let w=twW(t);
+ if(w==0u){return UMOwner(0u,0u,0u,0u);}
+ if(w==4u){return UMOwner(twTile(t),0u,4u,0u);}
+ let l=vec3u(c-4*t);return UMOwner(twTile(t),l.x+4u*l.y+16u*l.z,1u,0u);
+}
+fn umFace(owner:UMOwner,axis:u32,sign:i32,part:u32)->UMFace{
+ let o=vec3i(umOrigin(owner));let w=i32(owner.width);let e=twUnit(axis);let u=twUnit((axis+1u)%3u);let v=twUnit((axis+2u)%3u);
+ let first=select(o-e,o+w*e,sign>0);let nw=twOwner(first).width;
+ if(nw!=0u&&nw<owner.width){
+  let cell=first+i32(part%4u)*u+i32(part/4u)*v;
+  return UMFace(twOwner(cell),select(cell,cell-e,sign>0),1u,16u,axis,sign);
+ }
+ return UMFace(twOwner(first),select(o-e,o+(w-1)*e,sign>0),select(owner.width,min(owner.width,nw),nw!=0u),1u,axis,sign);
+}
+fn umTileStencil(tile:u32)->vec2u{
+ let t=vec3i(umTileCoord(tile));var hi=0u;var lo=4u;
+ for(var k=0u;k<27u;k++){let w=twW(t+vec3i(i32(k%3u),i32((k/3u)%3u),i32(k/9u))-vec3i(1));if(w!=0u){hi=max(hi,w);lo=min(lo,w);}}
+ return vec2u(hi<<27u,lo<<27u);
+}
+fn umVertexValue(p:vec3u)->f32{return force.hDt.y*twPhi(vec3i(p));}
+fn umSampleVertex(p:vec3f)->f32{
+ let o=twOwner(vec3i(floor(p)));let t=(p-vec3f(umOrigin(o)))/f32(o.width);var s=0.0;
+ for(var k=0u;k<8u;k++){let corner=umCorner(k,2u);let w=select(vec3f(1)-t,t,corner!=vec3u(0));s+=w.x*w.y*w.z*umVertexValue(umOrigin(o)+corner*o.width);}
+ return s;
+}
+${["umOrigin", "umFaceCenter", "umOwnerClosed", "umCellPhi", "umOccupancy", "umNormalRaw", "umNormal", "umCurvature", "umForceCurvature", "umPressure", "umPressureSlope", "umForceSample", "umReconstructSample", "umReconstructNeeds", "umReconstructPressureSlope", "umPressureFaceCorrection", "umReconstructedPressureGradient", "umCapillary"].map(n => oldFunctionIn("uniform-tension", n)).join("\n")}`,
+  body: `${TENSION_HEAD}
+ force.hDt=vec4f(h,h,h,dt);force.physical=vec4f(0.0,rho,0.0,sigma);
+ let owner=twOwner(n);let next=twOwner(c);let o=vec3i(umOrigin(owner));let u=twUnit((a+1u)%3u);let v=twUnit((a+2u)%3u);
+ var part=0u;if(owner.width==4u&&next.width==1u){let r=c-o;part=u32(dot(r,u)+4*dot(r,v));}
+ put(${TENSION_OUT}u*t,umCapillary(owner,umFace(owner,a,1,part),false));
+ put(${TENSION_OUT}u*t+1u,umCurvature(owner));
+ var slope=vec3f(0);if(owner.width==4u){slope=umReconstructPressureSlope(owner);}put3(${TENSION_OUT}u*t+2u,slope);
+ put(${TENSION_OUT}u*t+5u,umOccupancy(owner));`,
+};
+const NEW_TENSION: ParityKernel = {
+  prelude: `${TENSION_WORLD}
+fn nbxTensionWidth(c:vec3i)->u32{return twW(c>>vec3u(2u));}
+fn nbxTensionClosed(o:vec3i,w:u32)->bool{if(w==4u){return twTileClosed(o);}return twClosed(o);}
+fn nbxTensionCorners(o:vec3i,w:u32)->array<f32,8>{var v:array<f32,8>;for(var k=0u;k<8u;k++){v[k]=twPhi(o+twCorner(k)*i32(w));}return v;}
+fn nbxTensionOcc(c:vec3i,w:u32)->f32{
+ if(w==0u){return 0.0;}
+ let v=nbxTensionCorners(nbfTensionOrigin(c,w),w);var s=0.0;for(var k=0u;k<8u;k++){s+=0.125*v[k];}
+ return clamp(0.5-s/(4.0*f32(w)),0.0,1.0);
+}
+${nbfTensionWGSL}`,
+  body: `${TENSION_HEAD}
+ let wn=nbxTensionWidth(n);let wc=nbxTensionWidth(c);
+ var lo=n;var hi=c;if(wn==4u&&wc==4u){lo=nbfTensionOrigin(n,4u);hi=nbfTensionOrigin(c,4u);}
+ put(${TENSION_OUT}u*t,nbfCapillary(lo,hi,a,nbxTensionOcc(n,wn),nbxTensionOcc(c,wc),h,dt,sigma,rho));
+ put(${TENSION_OUT}u*t+1u,nbfTensionCurvature(nbfTensionOrigin(n,wn),wn,h));
+ var slope=vec3f(0);if(wn==4u){slope=nbfTensionSlope(nbfTensionOrigin(n,4u),h);}put3(${TENSION_OUT}u*t+2u,slope);
+ put(${TENSION_OUT}u*t+5u,nbxTensionOcc(n,wn));`,
+};
+/** Cell c is closed in the synthetic layout (as twClosed). */
+const twClosed = (p: number[]) => (p[0]! < 16 && p[1]! < 2) || (p[0]! >= 16 && p[1]! < 4) || ((p[0] === 8 || p[0] === 9) && p[2]! >= 26)
+  || (p.every((x, k) => Math.floor(x / 4) === [6, 1, 5][k]) && p[1] === 4);
+/** The owner width of cell c in the synthetic layout (as twW). */
+const twW = (c: number[]) => { const t = c.map(x => Math.floor(x / 4)); if (t.some(x => x < 0 || x >= 8)) return 0; if (t[2] === 7 && t[0]! < 2) return 0; if (t[0] === 5 && t[1] === 3 && t[2] === 3) return 1; return t[0]! >= 4 ? 4 : 1; };
+
+test("forces' surface tension (normal, curvature, coarse slope, the capillary kick) matches the old umCapillary at widths 1 and 4", { skip: !parityGPU }, async () => {
+  await withParityDevice(async device => {
+    const rnd = prng(72), threads = 16384, inp = new Float32Array(TENSION_IN * threads), w = words(inp);
+    let seams = 0, beside = 0;
+    for (let t = 0; t < threads; t++) {
+      const o = TENSION_IN * t, a = t % 3, R = 3 + rnd() * 9, centre = [6 + rnd() * 20, 6 + rnd() * 20, 6 + rnd() * 20];
+      // A cell near the sphere's surface (most faces carry a gradient) that has an owner (the kernels visit owners
+      // only), its face on a tile plane where its owner is 4h.
+      let n: number[];
+      do n = centre.map(x => Math.floor(x + (rnd() * 2 - 1) * (R + 3))); while (twW(n) === 0);
+      if (twW(n) === 4) n[a] = 4 * Math.floor(n[a]! / 4) + 3;
+      const c = n.map((x, k) => x + (k === a ? 1 : 0));
+      if (twW(n) !== twW(c) && twW(n) && twW(c)) seams++;
+      if ([n, c].some(q => [-1, 0, 1].some(d => [0, 1, 2].some(k => twClosed(q.map((x, j) => x + (j === k ? d : 0))))))) beside++;
+      for (let k = 0; k < 3; k++) w[o + k] = n[k]! >>> 0;
+      w[o + 3] = a; inp.set(centre, o + 4); inp[o + 7] = R;
+      inp[o + 8] = 0.005 + rnd() * 0.05; inp[o + 9] = 1 / 60; inp[o + 10] = rnd() < 0.5 ? 0.072 : rnd(); inp[o + 11] = 500 + rnd() * 1000;
+    }
+    const io = { inp, threads, outWords: TENSION_OUT * threads };
+    const a = new Float32Array((await runParity(device, OLD_TENSION, io)).buffer), b = new Float32Array((await runParity(device, NEW_TENSION, io)).buffer);
+    // The sums visit a finer side's 16 owners in the same order, but the old divides φ in metres by 4 h w where the
+    // brick divides cells by 4 w: the normals agree to rounding, not to the bit.
+    // A kick is the two owners' curvature sum times the gradient: where the curvatures nearly cancel, their rounding
+    // (2e-5 of a curvature) is a larger share of the kick, so a kick's difference is scaled by the largest kick's
+    // thousandth at least.
+    let kickMax = 0;
+    for (let t = 0; t < threads; t++) kickMax = Math.max(kickMax, Math.abs(a[TENSION_OUT * t]!));
+    const worst = new Array<number>(TENSION_OUT).fill(0), kicks = { nonzero: 0, seam: 0 };
+    let worstKick = "";
+    for (let t = 0; t < threads; t++) for (let k = 0; k < TENSION_OUT; k++) {
+      const x = a[TENSION_OUT * t + k]!, y = b[TENSION_OUT * t + k]!, scale = k === 0 ? Math.max(1e-3 * kickMax, Math.abs(x), 1e-12) : Math.max(1, Math.abs(x));
+      assert.ok(Number.isFinite(x) === Number.isFinite(y), `thread ${t} output ${k}: old ${x} brick ${y}`);
+      if (k === 0 && Math.abs(x - y) / scale > worst[0]!) worstKick = `thread ${t}: old ${x} brick ${y} (largest ${kickMax})`;
+      worst[k] = Math.max(worst[k]!, Math.abs(x - y) / scale);
+      if (k === 0 && x !== 0) { kicks.nonzero++; if (twW(Array.from(w.subarray(TENSION_IN * t, TENSION_IN * t + 3), q => q | 0)) === 4) kicks.seam++; }
+    }
+    console.log(`parity tension: ${threads} faces (${seams} unequal, ${beside} beside a closed cell, ${kicks.nonzero} with a kick, ${kicks.seam} from a 4h owner); worst relative difference by output (kick, curvature, slope xyz, occupancy) ${worst.map(x => x.toExponential(2)).join(" ")}; worst kick ${worstKick}`);
+    assert.ok(kicks.nonzero > threads / 4 && seams > 250 && beside > 500, `the samples reach the surface (${kicks.nonzero}), the seams (${seams}) and the solids (${beside})`);
+    for (const [k, x] of worst.entries()) assert.ok(x <= 2e-4, `output ${k}: relative difference ${x}`);
+  });
+});
+
+test("surface tension's curvature is a sphere's 2 / R on its surface cells (an all-h ball, R = 5 and 8 cells)", { skip: !parityGPU }, async () => {
+  await withParityDevice(async device => {
+    for (const R of [5, 8]) {
+      const centre = [8.3, 16.2, 15.7], h = 0.01, cells: number[][] = [];
+      for (let z = 0; z < 32; z++) for (let y = 0; y < 32; y++) for (let x = 0; x < 16; x++) {
+        const d = Math.hypot(x + 0.5 - centre[0]!, y + 0.5 - centre[1]!, z + 0.5 - centre[2]!) - R;
+        if (Math.abs(d) < 0.5 && x >= 1 && x <= 14) cells.push([x, y, z]);
+      }
+      const threads = cells.length, inp = new Float32Array(TENSION_IN * threads), w = words(inp);
+      cells.forEach((c, t) => { const o = TENSION_IN * t; for (let k = 0; k < 3; k++) w[o + k] = c[k]! >>> 0; w[o + 3] = 0; inp.set(centre, o + 4); inp[o + 7] = R; inp[o + 8] = h; inp[o + 9] = 1 / 60; inp[o + 10] = 0.072; inp[o + 11] = 1000; });
+      const b = new Float32Array((await runParity(device, NEW_TENSION, { inp, threads, outWords: TENSION_OUT * threads })).buffer);
+      let sum = 0, lo = Infinity, hi = -Infinity;
+      for (let t = 0; t < threads; t++) { const r = b[TENSION_OUT * t + 1]! * h * R / 2; sum += r; lo = Math.min(lo, r); hi = Math.max(hi, r); }
+      console.log(`tension: R ${R} cells, ${threads} surface cells, curvature R h / 2: mean ${(sum / threads).toFixed(4)} range ${lo.toFixed(3)}..${hi.toFixed(3)}`);
+      assert.ok(Math.abs(sum / threads - 1) < 0.05, `R ${R}: mean curvature ${sum / threads} of 2 / R`);
+    }
   });
 });

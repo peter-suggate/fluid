@@ -10,19 +10,21 @@
  *   its depth expects (narrowBandExpectedMassWGSL), and fully where the surface heat holds it.
  * - uAdvect: the semi-Lagrangian momentum trace (Stam 1999) by midpoint segments of at most one cell of travel.
  * - forces: gravity on a face either of whose cells holds liquid (occupancy, the smoothed Heaviside of φ over two
- *   cells). The gate scenes are inviscid and have no surface tension; a scene with either fails at build.
+ *   cells); viscosity (nbfViscosityWGSL); surface tension (nbfTensionWGSL: umCapillary, the continuum surface force
+ *   of Brackbill et al. 1992 on the occupancy).
  * - uExtend: fast sweeping (Zhao 2005) of the velocity outward from the liquid, the eikonal update over the three
  *   axes' upwind minima (Sethian 1999 §6) and the value as the upwind faces' weighted mean (Adalsteinsson and
  *   Sethian 1999's velocity extension).
  * - uDelta: the FLIP delta sampled at a sample from the faces that hold one, the trilinear weights renormalised. */
 
-/** Throws where a scene's physics needs a force the brick engine does not implement: surface tension, a negative
- * or non-finite viscosity, and the no-slip walls of the viscous term (the old engine negates a held tap there). */
+/** Throws where a scene's physics needs a force the brick engine does not implement: a negative or non-finite
+ * viscosity or surface tension, and the no-slip walls of the viscous term (the old engine negates a held tap there).
+ * Surface tension beside static solids runs: the capillarity reads closed owners (nbxTensionClosed). */
 export function nbfVelocitySupported(physics: { readonly viscosity?: number; readonly surfaceTension?: number; readonly noSlip?: boolean }): void {
-  const mu = physics.viscosity ?? 0;
+  const mu = physics.viscosity ?? 0, sigma = physics.surfaceTension ?? 0;
   if (!(mu >= 0 && Number.isFinite(mu))) throw new Error(`NB-FLIP brick engine: viscosity ${mu} is not a viscosity`);
   if (mu > 0 && physics.noSlip) throw new Error("NB-FLIP brick engine: viscosity with no-slip walls is not implemented");
-  if ((physics.surfaceTension ?? 0) !== 0) throw new Error(`NB-FLIP brick engine: surface tension ${physics.surfaceTension} is not implemented`);
+  if (!(sigma >= 0 && Number.isFinite(sigma))) throw new Error(`NB-FLIP brick engine: surface tension ${sigma} is not a surface tension`);
 }
 
 /** p2g: the deposit and its resolve. The kernel defines nbxDeposit(axis, node, momentum, weight) (adds a node's
@@ -287,4 +289,122 @@ fn nbfRemapSample(lowFace:f32,highFace:f32,t:f32,coarse:bool,slopes:vec4f,across
 // The restriction's sum (value, weight) and its mean.
 fn nbfRemapFaceAdd(acc:vec2f,w:f32,sample:f32)->vec2f{var value=acc.x;var weight=acc.y;value+=w*sample;weight+=w;return vec2f(value,weight);}
 fn nbfRemapFaceMean(acc:vec2f)->f32{var value=acc.x;if(acc.y>0.0){value/=acc.y;}return value;}
+`;
+
+/** Surface tension (umCapillary, uniform-mixed-forces.ts, verbatim at the old engine's owner widths 1 and 4): a
+ * face's kick is dt (sigma / rho) times the mean of its two owners' curvatures times the reconstructed occupancy
+ * gradient across it (umReconstructedPressureGradient: the occupancy difference over the owners' mean width, plus,
+ * on an unequal face, the coarse owner's slope at the face centre). A face with no gradient takes no kick, so deep
+ * liquid and open air cost no curvature.
+ * - The normal (umNormalRaw): minus the eight-corner φ gradient over 4 w, normalised (floor 1e-6). φ in cells: the
+ *   old metres over h, the same ratio.
+ * - The curvature (umCurvature): minus the divergence of the normals, each axis the signed difference of the side
+ *   neighbours' normal component (averaged over a finer side's 16 owners) less the owner's, over the summed half
+ *   widths. An absent side (no owner: outside the box, a non-resident page) is left out.
+ * - The coarse slope (umReconstructPressureSlope, the forces' sample: a neighbour's occupancy): a 4h owner beside a
+ *   finer one; each axis the sides' signed differences over their half widths, or with both sides absent the
+ *   tangential variation across finer faces (thin domains).
+ * - Closed owners (umOwnerClosed: a solid h cell, a 4h tile with no open cell): a face either of whose owners is
+ *   closed takes no kick; the curvature leaves out a closed side (a finer side's first owner decides, the old's
+ *   part 0); the slope samples a closed neighbour as the owner's own occupancy (umReconstructSample).
+ * The kernel defines nbxTensionWidth(c) (the owner width of cell c: 1, 4 or 0 for none), nbxTensionCorners(o, w)
+ * (the eight vertex φ of the owner at origin o, cells, corner order), nbxTensionOcc(c, w) (the occupancy of the
+ * owner of cell c at its width) and nbxTensionClosed(o, w) (the owner at origin o is closed). h in metres; the kick
+ * in m/s. */
+export const nbfTensionWGSL = /* wgsl */`
+fn nbfAxisUnit(a:u32)->vec3i{return vec3i(select(0,1,a==0u),select(0,1,a==1u),select(0,1,a==2u));}
+fn nbfTensionNormalOf(v:array<f32,8>,width:u32)->vec3f{
+ var gradient=vec3f(0);
+ for(var k=0u;k<8u;k++){
+  let corner=vec3f(f32(k&1u),f32((k>>1u)&1u),f32(k>>2u));
+  gradient-=(2.0*corner-vec3f(1))*v[k]/(4.0*f32(width));
+ }
+ return gradient/max(length(gradient),1e-6);
+}
+// The owner of cell c at width w (1 or 4): its origin.
+fn nbfTensionOrigin(c:vec3i,w:u32)->vec3i{if(w==4u){return 4*(c>>vec3u(2u));}return c;}
+fn nbfTensionNormal(o:vec3i,w:u32)->vec3f{return nbfTensionNormalOf(nbxTensionCorners(o,w),w);}
+// The owner of cell c (width w, not 0) is closed (umOwnerClosed): a solid h cell, or a 4h tile with no open cell.
+fn nbfTensionClosed(c:vec3i,w:u32)->bool{return nbxTensionClosed(nbfTensionOrigin(c,w),w);}
+// umReconstructSample: a neighbour's occupancy, or the owner's own p where the neighbour is closed.
+fn nbfTensionSample(c:vec3i,w:u32,p:f32)->f32{if(nbfTensionClosed(c,w)){return p;}return nbxTensionOcc(c,w);}
+fn nbfTensionCurvature(o:vec3i,w:u32,h:f32)->f32{
+ let center=nbfTensionNormal(o,w);var divergence=array<f32,3>(0.0,0.0,0.0);
+ for(var axis=0u;axis<3u;axis++){
+  let e=nbfAxisUnit(axis);let u=nbfAxisUnit((axis+1u)%3u);let t=nbfAxisUnit((axis+2u)%3u);
+  var delta=0.0;var span=0.0;
+  for(var side=0u;side<2u;side++){
+   let sign=select(-1.0,1.0,side==1u);let first=select(o-e,o+i32(w)*e,side==1u);let wn=nbxTensionWidth(first);
+   // An absent or closed side is skipped (a finer side's first part decides, as the old's umFace part 0).
+   if(wn==0u||nbfTensionClosed(first,wn)){continue;}
+   var average=0.0;
+   if(wn<w){
+    for(var j=0;j<4;j++){for(var i=0;i<4;i++){average+=nbfTensionNormal(first+i*u+j*t,1u)[axis];}}
+    average/=16.0;
+   }else{average=nbfTensionNormal(nbfTensionOrigin(first,wn),wn)[axis];}
+   delta+=sign*(average-center[axis]);
+   span+=0.5*f32(w+wn)*h;
+  }
+  if(span>0.0){divergence[axis]=delta/span;}
+ }
+ return -((divergence[0]+divergence[2])+divergence[1]);
+}
+// The slope of the 4h owner at origin o (its occupancy's gradient, 1/m), zero with no finer face neighbour.
+fn nbfTensionSlope(o:vec3i,h:f32)->vec3f{
+ var needed=false;
+ for(var axis=0u;axis<3u;axis++){
+  let e=nbfAxisUnit(axis);
+  needed=needed||nbxTensionWidth(o-e)==1u||nbxTensionWidth(o+4*e)==1u;
+ }
+ if(!needed){return vec3f(0.0);}
+ let p=nbxTensionOcc(o,4u);var gradient=array<f32,3>(0.0,0.0,0.0);
+ let center=vec3f(o)+vec3f(2.0);
+ for(var axis=0u;axis<3u;axis++){
+  let e=nbfAxisUnit(axis);let u=nbfAxisUnit((axis+1u)%3u);let t=nbfAxisUnit((axis+2u)%3u);
+  var numerator=0.0;var span=0.0;
+  for(var side=0u;side<2u;side++){
+   let sign=select(-1.0,1.0,side==1u);let first=select(o-e,o+4*e,side==1u);let wn=nbxTensionWidth(first);
+   if(wn==0u){continue;}
+   var average=0.0;
+   if(wn==1u){for(var j=0;j<4;j++){for(var i=0;i<4;i++){average+=nbfTensionSample(first+i*u+j*t,1u,p);}}average/=16.0;}
+   else{average=nbfTensionSample(first,wn,p);}
+   numerator+=sign*(average-p);
+   span+=0.5*f32(4u+wn)*h;
+  }
+  if(span==0.0){
+   // Thin domains: the tangential variation across finer-face quadrants.
+   for(var normal=0u;normal<3u;normal++){
+    let n=nbfAxisUnit(normal);let nu=nbfAxisUnit((normal+1u)%3u);let nt=nbfAxisUnit((normal+2u)%3u);
+    for(var side=0u;side<2u;side++){
+     let first=select(o-n,o+4*n,side==1u);if(nbxTensionWidth(first)!=1u){continue;}
+     for(var j=0;j<4;j++){for(var i=0;i<4;i++){
+      let neighbor=first+i*nu+j*nt;
+      let delta=(f32(neighbor[axis])+0.5-center[axis])*h;
+      numerator+=delta*(nbfTensionSample(neighbor,1u,p)-p);span+=delta*delta;
+     }}
+    }
+   }
+  }
+  if(span>0.0){gradient[axis]=numerator/span;}
+ }
+ return vec3f(gradient[0],gradient[1],gradient[2]);
+}
+// The capillary kick of the face between n (below) and c = n + e_a, their occupancies given.
+fn nbfCapillary(n:vec3i,c:vec3i,a:u32,occn:f32,occc:f32,h:f32,dt:f32,sigma:f32,rho:f32)->f32{
+ let wn=nbxTensionWidth(n);let wc=nbxTensionWidth(c);
+ if(!(sigma>0.0)||wn==0u||wc==0u||nbfTensionClosed(n,wn)||nbfTensionClosed(c,wc)){return 0.0;}
+ let span=0.5*f32(wn+wc)*h;
+ var gradient=(occc-occn)/span;
+ if(wn!=wc){
+  // The coarser side owns the slope; the face centre is the finer face's (its plane, its cell's tangent centre).
+  let fine=select(n,c,wc==1u);let coarse=nbfTensionOrigin(select(c,n,wn==4u),4u);let along=vec3f(nbfAxisUnit(a));
+  let centre=vec3f(fine)+0.5*(vec3f(1.0)-along)+along*f32(c[a]-fine[a]);
+  let offset=(centre-vec3f(coarse)-vec3f(2.0))*h*(vec3f(1.0)-along);
+  var correction=dot(nbfTensionSlope(coarse,h),offset);if(wn>wc){correction=-correction;}
+  gradient+=correction/span;
+ }
+ if(gradient==0.0){return 0.0;}
+ let curvature=nbfTensionCurvature(nbfTensionOrigin(n,wn),wn,h)+nbfTensionCurvature(nbfTensionOrigin(c,wc),wc,h);
+ return dt*(sigma/rho)*0.5*curvature*gradient;
+}
 `;

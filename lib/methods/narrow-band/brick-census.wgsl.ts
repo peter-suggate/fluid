@@ -1351,9 +1351,10 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   if(!nbTileInLattice(t)){return;}
   let keys=ncKeys(cs,i);let own=vec2u(ncW0(cs,i),ncW1(cs,i));
   var w1=ncImportance(t,keys,ncGap(cs,i),own).y;
-  // A source tile's triggers clear (importanceTile l.1711: a scheduled drop authors its tiles; lane F's M4): with them
-  // the required bit, which is theirs.
-  if(((w1>>16u)&63u)!=0u&&nbSourceTile(t)){w1&=~((63u<<16u)|NC_REQUIRED);}
+  // A source tile's triggers clear (importanceTile l.1711: a resolved source authors its tiles again each step; lane
+  // F's M4): with them the required bit, which is theirs. An unresolved inflow (inflowNeedsFine) keeps its criteria,
+  // so thin moving liquid can also heat and seed particles.
+  if(((w1>>16u)&63u)!=0u&&!nbInflowNeedsFine()&&nbSourceTile(t)){w1&=~((63u<<16u)|NC_REQUIRED);}
   census[o+${CENSUS.FIN}u+i]=w1;
   if(ncMovingTile(w1,keys)){atomicOr(&wgMov[lane>>5u],1u<<(i&31u));}
   // publishImportance: the crossing cells and gap of a tile seed decide only if it is required.
@@ -1438,7 +1439,9 @@ fn cdBodyHeld(t:vec3i)->bool{
   }
   // decideTile (l.1934, l.1956; lane F's M4): a tile this step's drop can fill is joined (REASON.source): it bands and
   // is static whatever its surface, deep COLD or not.
-  let source=!ncJoined(t)&&nbSourceTile(t);
+  // The nozzle's tiles band as the old "unresolved" sources rule's (umSourceBand: 65536 and inflowNeedsFine); a drop's
+  // always (the port's drop rule).
+  let source=!ncJoined(t)&&(nbDropOn()||nbInflowNeedsFine())&&nbSourceTile(t);
   let joined=ncJoined(t)||source;let word=i>>5u;let bit=1u<<(i&31u);
   // decideTile (l.2849): a deep COLD tile keeps the last census's decision and its static bit (a join or a source
   // still bands it); every other tile clears both, its band sets CC_DECIDED and its join CC_STATIC.

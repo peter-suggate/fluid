@@ -48,7 +48,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // Volume control (Kim et al. 2007): the method's control time; 0 turns it off.
   const seconds = context.values.volumeControlSeconds;
   if (typeof seconds !== "number" || !(seconds >= 0)) throw new Error(`NB-FLIP brick engine: volumeControlSeconds ${String(seconds)} is not a control time`);
-  const physics = { viscosity_Pa_s: context.fluid?.viscosity_Pa_s ?? 0, density_kg_m3: context.fluid?.density_kg_m3 ?? 1000, volumeControl_1_s: seconds > 0 ? 1 / seconds : 0 };
+  const physics = { viscosity_Pa_s: context.fluid?.viscosity_Pa_s ?? 0, density_kg_m3: context.fluid?.density_kg_m3 ?? 1000, surfaceTension_N_m: context.fluid?.surfaceTension_N_m ?? 0, statics: context.statics === true, volumeControl_1_s: seconds > 0 ? 1 / seconds : 0 };
   // Statics (lane E): the scene binds a static voxel mask, so pSolid and phiSolid run (brick-solid-walk.wgsl.ts).
   const statics = context.statics === true;
   const p = particleKernels(L, F, { bandDepth: context.particles?.bandDepth ?? NBF_PARTICLE_SETTINGS.particleBandDepth, statics }), l = levelSetKernels(L, F, { statics }), v = velocityKernels(L, F, physics);

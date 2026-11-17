@@ -60,6 +60,7 @@ import { brickCellKernel } from "./brick-pressure.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { CENSUS, RG } from "./brick-census.wgsl";
 import { PRESSURE_ROWS_WGSL } from "./pressure-rows.wgsl";
+import { BRICK_SOURCE_RING_WGSL } from "./brick-source.wgsl";
 
 /** The root's far air in cells (UNIFORM_MIXED_ROOT_FAR_CELLS, uniform-mixed-root-owners.ts): RO_FAR. */
 const RO_FAR_CELLS = 16;
@@ -832,7 +833,7 @@ fn poProjectDry(m:vec3i,own:f32,f:u32,us:f32,h:f32,separated:bool,q:vec3i)->f32{
   return poProjectFace(m,own,false,f,us,h,separated);
 }
 `;
-  const projectF = k(projectLabel, FC + LIVE + PROJECT_WGSL + DRY + /* wgsl */`
+  const projectF = k(projectLabel, FC + LIVE + PROJECT_WGSL + DRY + BRICK_SOURCE_RING_WGSL + /* wgsl */`
 var<workgroup> wSpeed:atomic<u32>;
 var<workgroup> poGo:u32;
 @compute @workgroup_size(256) fn ${projectEntry}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
@@ -898,6 +899,9 @@ var<workgroup> poGo:u32;
 ${faces === undefined ? `
         else if(hc&&!hn){u=poProjectFace(c,pc,false,2u*a,us,h,separated);}
         else if(hn&&!hc){u=poProjectFace(n,pn,false,2u*a+1u,us,h,separated);}` : ""}
+        // The nozzle (umProjectWithSource): applyInflowVelocity of the face's texel, the cell below it; a box-low face
+        // is not the nozzle's.
+        if(nbInflowOn()&&c[a]!=0){u=nbInflowProjected(n,a,u);}
         vel[NB_VEL_F_U0+fa]=u;speed=max(speed,abs(u));
         if(wall){
           // The owner: c on plane 0 (its low face), n on plane N (its high face).
@@ -930,7 +934,7 @@ ${faces === undefined ? `
   //   the separating wall in the state the rows took (attached when start + lift >= 0, or N_HELD), and
   //   a face with no liquid side U = US. In the slot units a native face's coupling c gives
   //   U = US - sign c/(16 h V) (ghost - X), so 4V/(16hV) = 1/(4h).
-  const projectC = k("pressureProjectC", PROJECT_WGSL + /* wgsl */`
+  const projectC = k("pressureProjectC", PROJECT_WGSL + BRICK_SOURCE_RING_WGSL + /* wgsl */`
 fn poNativeX(T:vec3i)->vec2f{
   if(!nbTileInWallBox(T)){return vec2f(0.0,-1.0);}
   let w=nbPageWord(T>>vec3u(3u));if(w==NB_NONE||w>=NB_SEAM){return vec2f(0.0,-2.0);}
@@ -953,6 +957,13 @@ var<workgroup> pcStill:u32;
   if(!still){return;}
   workgroupBarrier();
   if(lid<8u){census[${CENSUS.STRIDE}u*cs+${CENSUS.REG}u+${RG.WORDS}u*lid+${RG.FROZEN}u]=atomicLoad(&pcFrozen[lid]);}
+}
+// umProjectWithSource at a 4h face (T, a): the old +face of the owner below, its texels 4T - e_a + i e_u + j e_v.
+fn pcInflowProjected(T:vec3i,a:u32,value:f32)->f32{
+  let u=select(select(vec3i(1,0,0),vec3i(0,1,0),a==0u),vec3i(1,0,0),a==1u);let v=select(select(vec3i(0,1,0),vec3i(0,0,1),a==0u),vec3i(0,0,1),a==1u);
+  let base=4*T-poUnit(a);var sum=0.0;
+  for(var j=0;j<4;j++){for(var i=0;i<4;i++){sum+=nbInflowProjected(base+i*u+j*v,a,value);}}
+  return sum/16.0;
 }
 fn pcProjectPage(cs:u32,lid:u32,still:bool){
   let O=nbCOrigin(cs)>>vec3u(2u);let h=nbRingF(cfg.x,NB_RING_H);
@@ -999,6 +1010,8 @@ fn pcProjectPage(cs:u32,lid:u32,still:bool){
       // A still page's discarded correction: its liquid faces' only (a face with no liquid side is the extension's, not
       // the projection's, so its kick is no correction).
       if(still){if(own.y>0.0||low.y>0.0){atomicMax(&pcFrozen[((i>>2u)&1u)|(((i>>5u)&1u)<<1u)|(((i>>8u)&1u)<<2u)],bitcast<u32>(abs(u-held)));}continue;}
+      // The nozzle (umProjectWithSource): applyInflowVelocity averaged over the 4h face's 16 texels, the cells below it.
+      if(nbInflowOn()&&T[a]!=0){u=pcInflowProjected(T,a,u);}
       vel[NB_VEL_C_U0+fa]=u;
       if(wall){
         // The owner, a 4h-owned tile: T on plane 0 (its low face), Lt on plane N (its high face). Held is N_HELD.

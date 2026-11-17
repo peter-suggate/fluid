@@ -10,16 +10,19 @@ import { requiredFluidDeviceLimits } from "../../../core/webgpu-device-limits";
 
 export const parityGPU = !!process.env.WEBGPU_NODE_MODULE;
 
-const FIXTURE = resolve(import.meta.dirname, "uniform-dam.wgsl");
-let fixture: Map<string, string> | undefined;
-/** The old engine's resolved function `name`, from the fixture. */
-export function oldFunction(name: string): string {
+const fixtures = new Map<string, Map<string, string>>();
+/** The old engine's resolved function `name`, from the dam's fixture (parity/uniform-dam.wgsl). */
+export function oldFunction(name: string): string { return oldFunctionIn("uniform-dam", name); }
+/** The old engine's resolved function `name` from fixture `file` ("uniform-tension": the capillarity's, resolved for
+ * water-box-dam-break). */
+export function oldFunctionIn(file: string, name: string): string {
+  let fixture = fixtures.get(file);
   if (!fixture) {
-    fixture = new Map();
-    const parts = readFileSync(FIXTURE, "utf8").split(/^\/\/ ==== /m).slice(1);
+    fixture = new Map(); fixtures.set(file, fixture);
+    const parts = readFileSync(resolve(import.meta.dirname, `${file}.wgsl`), "utf8").split(/^\/\/ ==== /m).slice(1);
     for (const part of parts) { const name = /^(\w+)/.exec(part)![1]!; fixture.set(name, part.slice(part.indexOf("\n") + 1).trimEnd()); }
   }
-  return fixture.get(name) ?? assert.fail(`parity fixture has no ${name}`);
+  return fixture.get(name) ?? assert.fail(`parity fixture ${file} has no ${name}`);
 }
 /** An excerpt of the old function `name`, checked to occur in it verbatim (whitespace runs compared as one). */
 export function oldExcerpt(name: string, excerpt: string): string {

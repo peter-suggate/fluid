@@ -337,11 +337,12 @@ fn rmFlow(speed:f32)->f32{
   // bounding box grown by the pin margin: requestDropPages and uniformPagePoolDropAhead) as one more brick source,
   // after resMark's pass (cfg.z the pass): their bricks kept or claimed as resMark's boxes are, tiered also their
   // pages in pass 0. The census of the drop's own step then finds its tiles resident (a drop of the first step: the
-  // boot's set holds its box, BrickEngineOptions.bootBoxes). A workgroup strides the bricks of both boxes.
+  // boot's set holds its box, BrickEngineOptions.bootBoxes). The nozzle's plug box (k = 2) is claimed every step, as
+  // the old pool pins its pages (uniformPageSources). A workgroup strides the bricks of every box.
   const resSource = censusKernel(L, "resSource", [CFG, setRW, dirRW], BRICK_SOURCE_RING_WGSL + RQ_WGSL + /* wgsl */`
 @compute @workgroup_size(64) fn resSource(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32,@builtin(num_workgroups) nw:vec3u){
   let rpass=cfg.z;
-  for(var k=0u;k<2u;k++){
+  for(var k=0u;k<3u;k++){
     let box=nbSourceBox(k);if(!all(box[0]<box[1])){continue;}
     let a=box[0]>>vec3u(3u);let b=(box[1]-vec3i(1))>>vec3u(3u);
     let ext=vec3u(b-a+vec3i(1));let n=ext.x*ext.y*ext.z;
