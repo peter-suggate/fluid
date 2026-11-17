@@ -2718,3 +2718,6 @@ max(1%, old spread).
 
 - **fig-7-256's old reference fails before 120 steps.** Its own page pool exhausts at frame 79. With 318 blocks it
   still exhausts at frame 84.
+- **fig-7-256's old reference at the full box** (514 blocks; old-smoke --page-blocks is a test-only setting): final
+  −10.29%, peak −26.24%, V1 240k of 268k, step median 96 ms. The bar is 11.29, and the brick's +2.05 passes. The
+  coordinator enabled the scene and asked for it to be re-judged after sym8.

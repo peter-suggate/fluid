@@ -36,6 +36,9 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   "cm12-figure-5", "cm12-figure-6", "cm12-figure-9", "mass-conserving-figure-9-dam-break", "coarse-first-pool-impact",
   // A splash scene (lane E r23, 2026-11-17, the batch rule's splash clause), on the pool rule's splash term.
   "nbflip-analytic-tilted-free-fall",
+  // Splash (r23): it gains +2.05% at 120 steps, where the old engine loses 10.3% (on the full box's page pool; its
+  // authored pool exhausts at frame 79). Re-judged after F's sym8 lands, which is expected to remove the gain.
+  "cm12-figure-7-256",
 ];
 
 export interface BrickSceneSetup {
