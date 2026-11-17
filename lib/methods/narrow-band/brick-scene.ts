@@ -34,6 +34,8 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   "nbflip-analytic-rest", "nbflip-analytic-standing-wave", "nbflip-analytic-dam-break", "nbflip-analytic-mound",
   "power-droplet-64", "power-droplet-128", "power-fill-256-100",
   "cm12-figure-5", "cm12-figure-6", "cm12-figure-9", "mass-conserving-figure-9-dam-break", "coarse-first-pool-impact",
+  // A splash scene (lane E r23, 2026-11-17, the batch rule's splash clause), on the pool rule's splash term.
+  "nbflip-analytic-tilted-free-fall",
 ];
 
 export interface BrickSceneSetup {

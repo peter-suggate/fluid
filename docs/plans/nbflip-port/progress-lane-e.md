@@ -2638,3 +2638,83 @@ patch over a missing cause. The coordinator approved A.
 - dam-300, paired A B A B, nbflip-gates against ref-2761350a: A passes both rounds. HEAD's second round failed D5e,
   the energy window, at 315.9 against 328.0 ± 11.7, so that is HEAD's run noise. Step medians: HEAD 30.87 and 30.41 ms,
   A 31.18 and 31.32 ms. The paired per-step difference medians are +0.04 and +0.10 ms.
+
+## 2026-11-17 (r22): body rule, splash term, padded runs
+
+**8dce41bf.** P's census body rule and the engine's body wiring, landed as P wrote them.
+- Kernel texts are identical to 0b021a46 for all 16 enabled scenes.
+- brick-engine, solver-app, bodies-stage and seam-rest: 33/33.
+
+**c8797626, the pool rule's splash term.**
+- **What it is.** A scene whose liquid starts at least 16 cells above its rest depth takes
+  f ≥ 10·min(floorF, ⌈1.5 V/64⌉), which is eight brick layers with the 1.25 margin, and particles ≥ 10 V.
+- **It is empirical.** The term is fitted to five measured peaks (the table is in brick-scene.ts and the rollout
+  doc §3). Stair is the weakest point: it is the only V-limited fit, and it sets the 1.5.
+- **The audit covers all 142 catalog scenes.**
+  - 10 change, none of them enabled.
+  - hero-garden-hose-x10 would take 3.2 GB of core buffers. It stays gapped and must author its pools.
+  - No pool is more than 2x its measured need. The worst is the tilted fall's 1.70x, at its window.
+
+**84db4da5, padded runs.**
+- **The C level set walls at the box.** Both lc owner instances take BOX_TOKEN. The lc functions' holds, wall
+  planes and cell and tile domains read the box, through a new nbTileInWallBox token.
+- **The presentation closes cells past the box** (volume 0, openFraction 0). Before this, the padded boot showed
+  18.6 cells of volume past the box, interpolated from the box-plane vertex row.
+- **P's gap patch** lets whole-brick containers set up padded.
+- **The regression is tests/brick-padded-dam.test.ts:** a mirror-symmetric slab in 24x16x24 padded to 32^3, 30
+  steps.
+  - No row and no volume past the box.
+  - Up to 1671 box faces, all WALL, and no stray walls.
+  - The mirror is at most 6.5e-4 beyond the boot's own 5.2e-3.
+  - The drift matches the same slab unpadded (+6.2% against +5.9% at peak), so it is F's floor-sheet gain, not the
+    padding.
+- **The boot is asymmetric.** brickInitialPhi, the old engine's t = 0 φ of a box volume, gives the slab's low-x face
+  column 276 cells against 288 at the high-x face.
+- **Open.** F's box observer (tools/nbflip-observe-brick.ts) refuses a padded engine, so padded volume gates wait on
+  it.
+
+**Old-engine references await every step.** r18/old-smoke.mts calls advanceTo and then awaitFrameCompletion each step.
+The brick solver's advanceTo encodes exactly one step a call, or refuses.
+
+**Parked: lcRetire (P's attribution, 2026-11-17).**
+- **The cost.** lcRetire costs about 0.4 ms a step on every tiered scene: 0.42 ms on the 128^3 dam at step 20 and
+  0.46 ms on a one-page tank.
+- **Where it goes.** The whole cost is the build path's dependent-load chain, one vertex a lane: lcNearKnown's walk
+  over 4^3 tiles, the 5-step Newton's 8 corner reads per iteration, the bound's 7 samples, and nbfCellDistance.
+- **Two bitwise fixes, if it is picked up** (judge them by hashing PHI1):
+  1. Reuse Newton's corners while it stays in one cell.
+  2. Stage lcNearKnown's per-tile flag as workgroup bits, one plane plus its halo.
+- **Expected gain:** 0.2–0.25 ms, under 1% of the dam.
+
+## 2026-11-17 (r23): the splash finals on the rule's pools
+
+The tree is frozen at 84db4da5. All runs used the timing slot, every one returned rc 0 with no 00000206, and no run
+latched. The 60-step peak is judged from the same curves. "Brick" is the mean of two runs; the bar is old worst +
+max(1%, old spread).
+
+| scene | peak at 60: old (2 runs) | bar | brick | final at 120: old | bar | brick | result |
+|---|---|---|---|---|---|---|---|
+| free fall | −24.55, −23.85 | 25.55 | −24.85, −24.94 (24.90) | −0.05, 0.18 | 1.18 | 1.43, 1.54 (1.49) | final FAIL |
+| tilted free fall | −26.23, −27.69 | 29.15 | −26.58, −27.00 (26.79) | 1.60, 1.54 | 2.60 | 2.25, 2.81 (2.53) | PASS, enabled |
+| cm12-figure-7-256 | rs1 (60 steps) | 10.47 | −9.30, −9.20 (9.25) | see below | | 1.84, 2.26 (2.05) | peak PASS |
+
+- **The dip at step 20.** The −24% at step 20 is the impact frame in both engines, and it is the same measure in each.
+- **Peak F** stayed under the pool in every run:
+
+  | scene | peak F | pool f |
+  |---|---|---|
+  | free fall | 297 | 405 |
+  | tilted free fall | 218–222 | 405 |
+  | fig-7-256 | 8872–9263 | 10890 |
+
+  fig-7-256's margin is 1.18x. The runs took 2193 MB with the presentation included.
+- **Step medians:**
+
+  | scene | brick | old |
+  |---|---|---|
+  | free fall | 8.5 ms | 15.4 ms |
+  | tilted free fall | 8.6 ms | 15.0 ms |
+  | fig-7-256 | 66.9 ms | |
+
+- **fig-7-256's old reference fails before 120 steps.** Its own page pool exhausts at frame 79. With 318 blocks it
+  still exhausts at frame 84.
