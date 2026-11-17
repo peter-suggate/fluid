@@ -79,7 +79,7 @@
  * - A native row's z is its L2 EPOST. Its PCG vectors (X R Z D Q) are pres C's,
  *   run by page kernels beside the brick kernels; their dots share pmgRed.
  */
-import { ARGS, BRICK_STRIDE, BrickLayout, FOLD, LIST, brickAbiWGSL } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, BrickLayout, FOLD, F_CLASS, LIST, brickAbiWGSL } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, type BrickPlacement, declareBindings } from "./brick-kernel";
 import type { PressureSolver } from "./brick-pressure-slot";
 import { FINE_ORDER, OC } from "./pressure-model";
@@ -845,7 +845,9 @@ fn pOwnerT(t:vec3i)->bool{
     let same=atomicLoad(&pmgTop[T_ZK+slot])==key&&atomicLoad(&pmgTop[T_ZC+slot])==cs;
     atomicStore(&pmgTop[T_ZK+slot],key);atomicStore(&pmgTop[T_ZC+slot],cs);
     if((bits&1u)==0u){
-      if(nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,key);}
+      ${cuts ? `// A brick of 4h tiles only: a body's latches (§4 keeps a body's tiles h). A static cut's may stay at 4h (lane E's
+      // static rule leaves dry cut bricks there); a liquid native row in one latches in rowsC.
+      if(nbFRec(slot,NB_REC_CUT)!=NB_NONE&&(nbFRec(slot,NB_REC_CLASS)&(${F_CLASS.NEAR_BODY | F_CLASS.BODY_WAS}u))!=0u){nbFail(NB_FAIL_UNSUPPORTED,key);}` : "if(nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,key);}"}
       atomicStore(&pmgTop[T_RBF+slot],0u);
       if(!(same&&atomicLoad(&pmgTop[T_ZS+slot])==step+1u)){bits|=4u;}
       atomicStore(&pmgTop[T_ZS+slot],step+2u);

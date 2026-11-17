@@ -14,11 +14,13 @@
 import { ARGS, LIST } from "./brick-abi";
 import type { PressureSolver, PressureSolverFactory } from "./brick-pressure-slot";
 import { pressureCompositeKernels } from "./pressure-composite.wgsl";
-import { poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
+import { mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
 
 /** The composite MGPCG: poolMGPCG with the native rows before its setup and the native projection after its finish. */
 export const compositeMGPCG = (options: MGPCGOptions = {}): PressureSolverFactory => (L): PressureSolver => {
-  const { publish, live, core, ...mg } = poolMGPCG(L, { ...options, walls: options.walls ?? true }), K = pressureCompositeKernels(L);
+  // The cuts follow the K pool, as the MGPCG's (rowsC latches a liquid native row in a cut brick).
+  const cuts = options.cuts ?? L.cap.k > 0;
+  const { publish, live, core, ...mg } = poolMGPCG(L, { ...options, cuts, walls: options.walls ?? true }), K = pressureCompositeKernels(L, {}, { cuts, faces: cuts ? mgLayout(L).FC : undefined });
   const pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };
   // The live lists (pressure-mgpcg.ts mgLive): the engine's operator is the lists' pass, so the h tiles' held fit and
   // the h rows run over HB at the setup's head, before the native rows, and the h faces' projection over HP closes the

@@ -591,7 +591,9 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   workgroupBarrier();
   if(lid==0u){poGo=atomicLoad(&poCold);atomicStore(&poCold,0u);}
   if(workgroupUniformLoad(&poGo)==0u){
-    if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}
+    ${cuts ? `// A cut brick of 4h tiles only latches when it is a body's (§4 keeps a body's tiles h). A static cut's 4h tile
+    // is dry (lane E's static rule leaves dry cut bricks at 4h) or latches in rowsC (a liquid native row there).
+    if(lid==0u&&poCutBmask(nbFRec(slot,NB_REC_CUT))!=0u){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}` : "if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}"}
     for(var j=0u;j<1u;j++){
       let at=NB_STRIDE*slot+lid+512u*j;
       pres[NB_PRES_F_B+at]=0.0;pres[NB_PRES_F_X+at]=0.0;pres[NB_PRES_F_RHS+at]=0.0;pres[NB_PRES_F_DIAG+at]=0.0;pres[NB_PRES_F_PPHI+at]=0.0;
@@ -609,11 +611,12 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   workgroupBarrier();
   if(lid==0u){poGo=atomicLoad(&poCold);}
   poTiles(lid,workgroupUniformLoad(&poGo)!=0u);
-  ${cuts ? `// A cut brick's rows are all h (bodies: §4's h ring; the native rows never read a cut): a lattice tile of it that
-  // is not h-owned latches.
-  let kslot=nbFRec(slot,NB_REC_CUT);
-  if(kslot!=NB_NONE&&lid<8u){let T=(nbFOrigin(slot)>>vec3u(2u))+poCorner(lid);if(nbTileInLattice(T)&&!nbTileOwnerH(T)){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}}
-  let bmask=poCutBmask(kslot);let staticCut=(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u;` : "if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}"}
+  ${cuts ? `// A cut brick's liquid rows are all h (the native rows never read a cut). A body's brick has every tile h (§4's h
+  // ring): a lattice tile of it that is not h-owned latches. A static cut's 4h tile may stay (lane E's static rule,
+  // the old solidPromote, leaves dry cut bricks at 4h); a liquid native row in one latches in rowsC.
+  let kslot=nbFRec(slot,NB_REC_CUT);let bmask=poCutBmask(kslot);
+  if(bmask!=0u&&lid<8u){let T=(nbFOrigin(slot)>>vec3u(2u))+poCorner(lid);if(nbTileInLattice(T)&&!nbTileOwnerH(T)){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}}
+  let staticCut=(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u;` : "if(lid==0u&&nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(slot,NB_REC_KEY));}"}
   let o=nbFOrigin(slot);let r=cfg.x;let h=nbRingF(r,NB_RING_H);
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
   // The starts first (a lane its cell's, lanes 0..383 a face halo cell's), so that the seam heads read them staged.
@@ -707,6 +710,9 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
   var root=0.0;if(owned){root=poRootPhi4(T);}
   rcR[i]=root;
   let liquid=owned&&poWet(root,4.0);
+  ${cuts ? `// A liquid native row in a cut brick (a static cut's tile left at 4h) would not read the cut: the old band
+  // certificate's failure, a latch.
+  if(liquid){let fs=nbFSlotOfBrick(T>>vec3u(1u));if(fs<NB_SEAM){if(nbFRec(fs,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(fs,NB_REC_KEY));}}}` : ""}
   var seams=0u;
   if(liquid){
     for(var j=0u;j<8u;j++){poGuardVertex(4*(T+poCorner(j)));}
