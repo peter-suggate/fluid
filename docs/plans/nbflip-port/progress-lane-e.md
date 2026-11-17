@@ -2908,3 +2908,17 @@ scene's kernel text is byte-identical (r19/dump.mts on the dam, minimal-dam, sta
   - ledge: 40 steps, peak 1726 records resting on the block's top, 66375 buried vertices checked;
   - column: 30 steps, peak 11475 records in NEAR_SOLID bricks, none in the column;
   - 15 m/s blob across the ring: 8 steps, none in the block, 115320 buried vertices checked.
+
+## 2026-11-17 — scene wiring of the static voxels (the gap kept)
+
+- BrickSceneSetup.staticMask is the scene's own SolidOccupancyMask (brickStaticMask: the old engine's image, its own
+  walls). brick-solver passes it to BrickEngine.create. Absent when no cell of the box is solid.
+- The solid-voxel gap stays by default ("... need the live-edit regressions (M3)") until the AGENTS.md edit regressions
+  land. BrickSceneTest.staticVoxels (createBrickSolver's test argument, test and diagnostic only) lifts it for the voxel
+  gates. It replaces lane P's scratch PB_STATIC env switch. Under it, the seep's only gap is BRICK_ENGINE_SCENES.
+- The gate bench builds solvers through uniform-narrow-band-method.ts (not E's), so the voxel gates use an E driver
+  calling createBrickSolver.
+- Tests: brick-static.test.ts (the gap, the bound image equal to brickStaticMask's, no binding without voxels);
+  brick-solver-app.test.ts GPU: the 128^3 dam against P's block (x 96..108, y 0..24, z 40..88, k 512), 30 steps
+  through createBrickSolver, FAIL 0 (rc 0, 0 aborts; the app file's 5/5 pass).
+- test:unit 2465 tests, 1922 pass, 0 fail; check:types clean apart from lane-n's three.

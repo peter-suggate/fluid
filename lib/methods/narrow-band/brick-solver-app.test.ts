@@ -209,3 +209,35 @@ test("brick solver (GPU): auto, the default engine, runs the dam on brick and a 
     }
   });
 });
+
+/**
+ * Static voxels through the app's path (lane E, M3): the dam with a block on its floor (P's 0xa2 obstacle, x 96..108,
+ * y 0..24, z 40..88; its x = 108 face cuts bricks, so the pools carry K slots for the cuts) runs past the live-edit gap
+ * under the gate runs' test flag (BrickSceneTest.staticVoxels). The scene's own mask reaches the engine, and the front
+ * meets the block's face with no latch.
+ */
+test("brick solver (GPU): the dam against a voxel block, the scene's mask bound through createBrickSolver", GPU, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  const { sceneWithSolidStroke } = await import("../../core/solid-world");
+  const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD);
+  const definition = getSceneDefinition("high-resolution-dam-break"), dam = sceneDocument(definition);
+  const scene = sceneWithSolidStroke(dam, [{ operation: "fill", minimum: [96, 0, 40], maximumExclusive: [108, 24, 88], materialId: 1 }]);
+  scene.fluid.brickPools = { ...scene.fluid.brickPools!, k: 512 };
+  const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
+  const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" }) as Record<string, unknown>;
+  await assert.rejects(createBrickSolver(new Proxy({}, { get() { throw new Error("no device use before the gap check"); } }) as GPUDevice, scene, values, quality), /live-edit regressions/);
+  await withUniformDevice("brick solver statics", async device => {
+    const solver = await createBrickSolver(device, scene, values, quality, { staticVoxels: true });
+    try {
+      const e = solver.brickEngine, dt = e.options.dt_s, steps = 30;
+      assert.ok(e.options.staticMask, "the scene's mask is bound");
+      for (let i = 1; i <= steps; i++) { solver.advanceTo(i * dt, []); if (i % 10 === 0) await solver.assertSimulationHealthy(); }
+      await solver.awaitFrameCompletion();
+      const header = await e.read("set", 0, 4);
+      const stats = await solver.readStats();
+      console.log(`brick statics app: ${steps} steps, engine step ${stats.brickEngine?.step}, liveF ${stats.brickEngine?.liveF}, FAIL ${header[H.FAIL]}`);
+      assert.equal(header[H.FAIL], 0, `FAIL ${header[H.FAIL]} info 0x${header[H.FAIL_INFO]!.toString(16)}`);
+      assert.equal(stats.brickEngine?.step, steps);
+    } finally { solver.destroy(); }
+  });
+});

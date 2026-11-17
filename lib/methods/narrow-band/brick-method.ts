@@ -21,7 +21,7 @@ import { BrickLayout } from "./brick-abi";
 import { brickFluidStages } from "./brick-fluid-stages";
 import { brickPressureSolver } from "./brick-pressure-solver";
 import type { PressureSolverFactory } from "./brick-pressure-slot";
-import { brickSceneSetup } from "./brick-scene";
+import { brickSceneSetup, type BrickSceneTest } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import type { BrickStagesFactory } from "./brick-stages";
 import type { NBEngineStatus } from "../../core/webgpu-eulerian";
@@ -69,10 +69,11 @@ export const nbEngineStatusText = (s: NBEngineStatus) =>
     : `Uniform${s.requested === "auto" ? ` (auto: ${s.gap}${(s.gaps ?? 1) > 1 ? `; ${s.gaps! - 1} more` : ""})` : ""}`;
 
 /** The app's brick solver for a scene, or the explicit refusal. */
-/** `test` is test and diagnostic only (BrickSolverOptions.censusHold); no scene passes it. */
-export async function createBrickSolver(device: GPUDevice, scene: SceneDescription, values: Readonly<Record<string, unknown>>, quality: GPUQuality, test: { readonly censusHold?: BrickCensusHold } = {}): Promise<BrickNBFlipSolver> {
-  const { setup, gaps } = brickSceneSetup(scene, values), lanes = brickEngineLanes();
-  if (!setup || gaps.length || lanes.length || !brickFluidStages || !brickPressureSolver) throw brickEngineRefusal(scene, values);
+/** `test` is test and diagnostic only (BrickSolverOptions.censusHold, BrickSceneTest.staticVoxels); no scene passes it. */
+export async function createBrickSolver(device: GPUDevice, scene: SceneDescription, values: Readonly<Record<string, unknown>>, quality: GPUQuality, test: { readonly censusHold?: BrickCensusHold } & BrickSceneTest = {}): Promise<BrickNBFlipSolver> {
+  const sceneTest = test.staticVoxels ? { staticVoxels: true as const } : {};
+  const { setup, gaps } = brickSceneSetup(scene, values, sceneTest), lanes = brickEngineLanes();
+  if (!setup || gaps.length || lanes.length || !brickFluidStages || !brickPressureSolver) throw new Error(`NB-FLIP brick engine cannot run scene "${scene.sceneId ?? "(unnamed)"}": ${[...gaps, ...lanes].join("; ")}. Run it with engine "uniform".`);
   const stages = brickFluidStages, solver = brickPressureSolver;
   const probe = solver(new BrickLayout({ lattice: setup.lattice, farPhi: setup.farPhi, ...setup.capacities }));
   if (probe.bringUp) throw new Error("NB-FLIP brick engine: the registered pressure solver is the bring-up CG, which no scene may run (coordinator ruling, 2026-11-15)");

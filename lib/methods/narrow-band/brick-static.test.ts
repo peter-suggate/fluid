@@ -14,6 +14,8 @@ import { voxelReaderForScene } from "../../core/voxel-editor/voxel-reader";
 import { pickSolidVoxel } from "../../core/editor-solid-voxel";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import type { SceneDescription } from "../../core/model";
+import { getSceneDefinition } from "../../core/scenes";
+import { sceneDocument } from "../../core/scene-definition";
 
 const BOX = [12, 8, 4] as const, FRAME = [0.1, -0.2, 0.3] as const, H = [0.05, 0.05, 0.05] as const;
 
@@ -178,6 +180,25 @@ test("statics 2a: save/load is bitwise, undo restores every cell, unknown kinds 
   assert.match(gaps({ ...plain, terrain: {} as SceneDescription["terrain"] }), /terrain needs/);
   assert.match(gaps({ ...plain, solidBoundary: {} as SceneDescription["solidBoundary"] }), /procedural boundary sampled as a field/);
   assert.doesNotMatch(gaps({ ...plain, solidBoundary: { collision: "voxels" } as SceneDescription["solidBoundary"] }), /procedural boundary/);
+});
+
+test("statics: the scene's voxels reach the engine's setup only past the live-edit gap (test.staticVoxels)", () => {
+  // An enabled scene (the dam) with a block on its floor: by default a gap, no setup. Under the gate runs' test flag the
+  // setup carries the scene's own mask (its words and walls, the image the old engine builds), and the dam alone binds none.
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
+  const block = sceneWithSolidStroke(dam, [{ operation: "fill", minimum: [96, 0, 40], maximumExclusive: [108, 24, 88], materialId: 2 }]);
+  const values = { timeStep: "sixtieth" };
+  const refused = brickSceneSetup(block, values);
+  assert.equal(refused.setup, undefined);
+  assert.match(refused.gaps.join(" | "), /solid voxels beyond the container shell need the live-edit regressions/);
+  const run = brickSceneSetup(block, values, { staticVoxels: true });
+  assert.deepEqual(run.gaps, []);
+  const mask = run.setup!.staticMask!, want = brickStaticMask(block)!;
+  assert.deepEqual(mask.walls, want.walls);
+  assert.deepEqual(Array.from(mask.words), Array.from(want.words));
+  assert.equal(solidOccupancyMaskVoxel(mask.words, 100, 10, 60), true, "a block cell is solid in the bound image");
+  assert.equal(solidOccupancyMaskVoxel(mask.words, 80, 10, 60), false, "a cell off the block is open");
+  assert.equal(brickSceneSetup(dam, values, { staticVoxels: true }).setup!.staticMask, undefined, "no voxels, no binding");
 });
 
 test("statics 2a: WGSL with the mask against the mirror, base and edited", { skip: !parityGPU }, async () => {
