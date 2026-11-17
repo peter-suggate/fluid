@@ -98,14 +98,17 @@ export const MG_GATE = { F: ARGS.LANE_P, C: ARGS.LANE_P + 3, ONE: ARGS.LANE_P + 
 export const MG_HEADER = {
   OPEN: 128, RMAX: 129, RZ: 130, ALPHA: 131, ITERATIONS: 132, CAPPED: 133, RMAX0: 134, TOTAL: 135,
   N5: 136, N6: 137, N7: 138, RLAST: 139, FLIPS: 140, WALLS: 141, DECIDES: 142, RMAXW: 143,
-  /** The step's residual history in 1/s (max|r|/h^2): HIST the initial residual, HIST+1+k after slot k (up to 43 slots). */
+  /** The step's residual history in 1/s (max|r|/h^2): HIST the initial residual, HIST+1+k after slot k (up to 42 slots). */
   HIST: 144,
+  /** The native rows' stop scale (f32, tol / nBound; the old root's nStopScale): the native rows' initial max|r| during
+   * the setup (pmgCoarsenC's reduction), then the scale pmgCoarsenTop's gate writes for the slots. */
+  NSCALE: 187,
   /** MGPCGOptions.audit: the solve's end against its wall state, 4 words: h wall faces whose state is not their final
    * ghost's complementarity (x + lift >= 0 attached), h wall faces, the same two for native rows. */
   AUDIT: 188,
 } as const;
-/** Slots the history words cover (144..187). */
-export const MG_HIST_SLOTS = 43;
+/** Slots the history words cover (144..186). */
+export const MG_HIST_SLOTS = 42;
 /**
  * The stopping tolerance, 1/s: max|div| <= 0.05 over the rows (a native row's over 64), the seep's
  * PRESSURE_TOLERANCE and the old engine's h band target (UNIFORM_PRESSURE_ARENA_RETURNS_RESIDUAL), an
@@ -626,6 +629,22 @@ fn ${name}(p:vec3i,cs:u32,i:u32,T:vec3i,sm:f32)->f32{
   return r-sm;
 }`;
   const nativeApply = (name: string, seam: string, vn: (cs: string, i: string) => string, vf: (s: string, l: string, m: string) => string) => seamSum(seam, vf) + nativeApplyFn(name, vn);
+  // A native row's A x in face-difference form, the old engine's (uniform-pressure-arena.ts pNative: rhs += c (x_n -
+  // start)): (D - sum k) x_i + sum k (x_i - x_n), the seam's faces in the same form. x is the total pressure, so
+  // D x - sum k x_n cancels the hydrostatic part in f32 and leaves eps |D| |x| of noise in every residual (at rest
+  // 1e-3 1/s band-eq on the 1 cm tank, ten times the native floor nBound reaches for); a face difference is the
+  // neighbour step, exact to eps of itself. The seam sum carries (sum ch (x_f - x_i), sum ch).
+  const nativeApplyDiff = (name: string, seam: string, vn: (cs: string, i: string) => string, vf: (s: string, l: string, m: string) => string) =>
+    seamSum(seam, (s, l, m) => `(${vf(s, l, m)})-(${vn("cs", "(ent>>3u)")})`, () => "1.0") + /* wgsl */`
+fn ${name}(p:vec3i,cs:u32,i:u32,T:vec3i,sm:vec2f)->f32{
+  let xi=${vn("cs", "i")};var ks=sm.y;var r=0.0;
+  for(var a=0u;a<3u;a++){
+    let e=pUnit(a);
+    let kl=pCK(a,cs,i);if(kl!=0.0){let Tl=T-e;let sl=qPage(p,Tl,3u);if(sl!=NB_NONE){let il=nbLocal(Tl);r+=kl*(xi-(${vn("sl", "il")}));ks+=kl;}}
+    let Tu=T+e;let su=qPage(p,Tu,3u);if(su!=NB_NONE){let iu=nbLocal(Tu);let ku=pCK(a,su,iu);if(ku!=0.0){r+=ku*(xi-(${vn("su", "iu")}));ks+=ku;}}
+  }
+  return (pP(NB_PRES_C_DIAG,cs,i)-ks)*xi+r-sm.x;
+}`;
   // Level 0 tiles: a block of 8^3 rows with a one-cell halo, smoothed in place.
   const TILE = /* wgsl */`
 var<workgroup> tp:array<f32,1000>;
@@ -886,7 +905,7 @@ var<workgroup> mbG:array<f32,6>;var<workgroup> mbCount:u32;${init ? "" : "var<wo
   if(lid==0u){
     atomicStore(&nbSet[PH_RMAX],0u);atomicStore(&nbSet[PH_ALPHA],0u);atomicStore(&nbSet[PH_RZ],0u);
     atomicStore(&nbSet[PH_ITERATIONS],0u);atomicStore(&nbSet[PH_OPEN],0u);
-    atomicStore(&nbSet[PH_FLIPS],0u);atomicStore(&nbSet[PH_WALLS],0u);atomicStore(&nbSet[PH_DECIDES],0u);atomicStore(&nbSet[PH_RMAXW],0u);
+    atomicStore(&nbSet[PH_FLIPS],0u);atomicStore(&nbSet[PH_WALLS],0u);atomicStore(&nbSet[PH_DECIDES],0u);atomicStore(&nbSet[PH_RMAXW],0u);atomicStore(&nbSet[PH_NSCALE],0u);
     for(var j=0u;j<4u;j++){atomicStore(&nbSet[PH_AUDIT+j],0u);}
     atomicAnd(&nbSet[NB_H_STATE],~NB_STATE_PRESSURE_CAP);
   }
@@ -1095,7 +1114,7 @@ fn pLiquidTile(p:vec3i,T:vec3i)->bool{
   // L2 row (DIAG and the native K, or the F2 tile below's KU); an h tile without a liquid F brick is
   // cleared. Then L2 -> L3 -> L4 -> L5, and the page's native row count in L5 KU0.
   const coarsenC = kernel("pmgCoarsenC", CBP, ["pres", "cstage", "reduce", "seam"], LIQUID_TILE + SEAM_BUILD +
-    nativeApply("pApplyNX", "pSeamX", (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`, (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`) + /* wgsl */`
+    nativeApplyDiff("pApplyNX", "pSeamX", (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`, (s, l) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]`) + /* wgsl */`
 var<workgroup> w2D:array<f32,512>;var<workgroup> w2K:array<vec3f,512>;var<workgroup> wNat:atomic<u32>;
 var<workgroup> w3D:array<f32,64>;var<workgroup> w3K:array<vec3f,64>;var<workgroup> w4D:array<f32,8>;var<workgroup> w4K:array<vec3f,8>;
 @compute @workgroup_size(512) fn pmgCoarsenC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("all")}
@@ -1136,7 +1155,7 @@ var<workgroup> w3D:array<f32,64>;var<workgroup> w3K:array<vec3f,64>;var<workgrou
   else{pmgC[pL2(CH_D,cs,i)]=0.0;for(var a=0u;a<3u;a++){pmgC[pL2(CH_K+a,cs,i)]=0.0;}}
   w2D[i]=max(D,0.0);w2K[i]=K;
   let rmax=pMax512(lid,abs(r)/64.0);
-  if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}
+  if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));atomicMax(&nbSet[PH_NSCALE],bitcast<u32>(rmax));}
   if(lid<64u){
     let c3=pC1(lid);var D3=0.0;var K3=vec3f(0.0);
     for(var m=0u;m<8u;m++){let q=2*c3+pC4(m);let k=nbLocal(q);D3+=w2D[k];for(var a=0u;a<3u;a++){let w=w2K[k][a];if((q[a]&1)==1){D3-=2.0*w;}else{K3[a]+=w;}}}
@@ -1311,7 +1330,14 @@ ${hashInsert("hIns7", "hk7", HS7)}
     let rmax=atomicExchange(&nbSet[PH_RMAX],0u);
     atomicStore(&nbSet[PH_RMAX0],rmax);atomicStore(&nbSet[PH_RLAST],rmax);pHist(0u,rmax);
     atomicStore(&nbSet[PH_N5],n5);atomicStore(&nbSet[PH_N6],n6);atomicStore(&nbSet[PH_N7],n7);
-    pGate(bitcast<f32>(rmax)>pTolR());
+    // The native rows' bound (the old root's nBound, uniform-pressure-arena.ts): the tolerance, or a tenth of their
+    // initial max|r| down to the floor nFloor (1e-4 1/s, band-equivalent), whichever is smaller. The slots count a
+    // native row's residual times tol / nBound (nStopScale), so one threshold stops both; a native start above the
+    // floor always runs (it is met only at a tenth of itself), so the stored pressure's imbalance cannot accumulate
+    // under the tolerance at rest (the old tank's natives sit at f32 round-off).
+    let tolR=pTolR();let hh=nbRingF(cfg.x,NB_RING_H);let floorR=1e-4*hh*hh;let nr=bitcast<f32>(atomicLoad(&nbSet[PH_NSCALE]));
+    let nb=min(tolR,max(0.1*nr,floorR));atomicStore(&nbSet[PH_NSCALE],bitcast<u32>(select(1.0,tolR/nb,nb>0.0&&nb<tolR)));
+    pGate(bitcast<f32>(rmax)>tolR||nr>floorR);
   }
 }`);
 
@@ -1931,7 +1957,7 @@ ${head}
   const xF = (s: string, l: string) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`;
   const xN = (cs: string, i: string) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`;
   const update = fusedFC("pmgUpdate",
-    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + nativeApply("pApplyNR", "pSeamR", xN, xF) + MB, alphaHead, /* wgsl */`
+    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + MB, alphaHead, /* wgsl */`
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   let d=pDiag(slot,l);var r=0.0;
   if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l)${bodies ? "-mbApply(mbBrick(slot),l,c,MB_WX,pAlpha,MB_WD)" : ""};}
@@ -1943,12 +1969,15 @@ ${head}
   pSmooth(row,c,ti,r,false);
   if(row.d>0.0){pmgF[P_W0+NB_STRIDE*slot+l]=tp[ti];}`, /* wgsl */`
   let T=8*p+nbLocalCoord(lid);
-  let sm=pSeamR(p,cs,lid,pSeamN(cs,lid));
+  // A native row solves for its correction from the step's start (the old engine's pNative: PN_X 0, the start in
+  // PN_B): its residual is the start's, formed once in face-difference form (pmgCoarsenC), less alpha A d (Q). Recomputing
+  // b - A x from the total pressure reads the f32 quantisation of x (ulp(x) D, 1e-4 1/s band-eq on the 1 cm tank's
+  // 2.5 m column), the floor nBound asks the natives to reach.
   var r=0.0;
   if(pTileIn(T)&&!nbTileH(cs,lid)&&pP(NB_PRES_C_DIAG,cs,lid)>0.0){
-    r=pP(NB_PRES_C_RHS,cs,lid)-pApplyNR(p,cs,lid,T,sm);pres[NB_PRES_C_R+NB_STRIDE*cs+lid]=r;
+    let at=NB_STRIDE*cs+lid;r=pres[NB_PRES_C_R+at]-pAlpha*pres[NB_PRES_C_Q+at];pres[NB_PRES_C_R+at]=r;
   }
-  let rmax=pMax512(lid,abs(r)/64.0);
+  let rmax=pMax512(lid,abs(r)/64.0*bitcast<f32>(atomicLoad(&nbSet[PH_NSCALE])));
   if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}`, "", true);
   const finishC = kernel("pmgFinishC", CBP, ["pres", "cstage"], /* wgsl */`
 var<workgroup> wAlpha:f32;
@@ -2087,7 +2116,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   ${audit ? "if(lid==0u){atomicAdd(&nbSet[PH_AUDIT+2u],atomicLoad(&wAud[0]));atomicAdd(&nbSet[PH_AUDIT+3u],atomicLoad(&wAud[1]));}" : ""}
   if(lid==0u){let n=atomicLoad(&wFlips);if(n>0u){atomicAdd(&nbSet[PH_FLIPS],n);}wGo=n;}
   if(workgroupUniformLoad(&wGo)==0u){return;}
-  let rmax=pMax512(lid,abs(r)/64.0);
+  let rmax=pMax512(lid,abs(r)/64.0*bitcast<f32>(atomicLoad(&nbSet[PH_NSCALE])));
   if(lid==0u){atomicMax(&nbSet[PH_RMAXW],bitcast<u32>(rmax));}
 }`);
 
