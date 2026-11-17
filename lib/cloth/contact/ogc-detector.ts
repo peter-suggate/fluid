@@ -934,7 +934,9 @@ export class OgcContactDetector {
    */
   get stepHooks() {
     return {
-      afterFrame: (pass: GPUComputePassEncoder) => { this.encodeStepBegin(pass); this.encodeDetection(pass); this.encodeTruncate(pass); },
+      afterFrame: (pass: GPUComputePassEncoder, split?: (pass: GPUComputePassEncoder) => GPUComputePassEncoder) => {
+        this.encodeStepBegin(pass); pass = this.encodeDetection(pass, true, split); this.encodeTruncate(pass); return pass;
+      },
       afterIteration: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); this.encodeDecide(pass); this.encodeDetection(pass, false); },
       // The solver's two-level correction moves every vertex at once: truncate that move too.
       afterCoarse: (pass: GPUComputePassEncoder) => { this.encodeTruncate(pass); },
@@ -1129,7 +1131,8 @@ export class OgcContactDetector {
    * last had a conflict). The step's mandatory round (after encodeStepBegin) needs the
    * mandatory count of redos; a later round (after encodeDecide) passes false.
    */
-  encodeDetection(pass: GPUComputePassEncoder, mandatory = true) {
+  /** With `split` (ClothGPUSolver.encodeStep's), the mandatory chain's redo slots are submitted in chunks of 16. */
+  encodeDetection(pass: GPUComputePassEncoder, mandatory = true, split?: (pass: GPUComputePassEncoder) => GPUComputePassEncoder): GPUComputePassEncoder {
     for (const name of this.roundKernels) this.runIndirect(pass, name);
     // The mandatory round's least-shift redos and fail-safe (OGC_REDO_WGSL), with a moving solid its
     // impact zones too (redoCap, as the kernel counts it). A later round predicts 0 about the
@@ -1137,10 +1140,12 @@ export class OgcContactDetector {
     // can conflict, and its one redo (unlevelled) cannot; a conflict there fails as heldConflict.
     const slots = !mandatory ? 1 : this.bodyField ? (this.config.mandatoryRedoCap ?? OGC_REDO_MANDATORY) : OGC_REDO_ROUNDS + 1;
     for (let k = 0; k < slots; k++) {
+      if (split && k % 16 === 0) pass = split(pass);
       this.run(pass, "redo", 1);
       for (const name of this.roundKernels) this.runIndirect(pass, name);
     }
     this.run(pass, "redoLast", 1);
+    return pass;
   }
   /** One kernel of a detection round, indirectly, or the redo decision (profiling only). */
   encodeRoundKernel(pass: GPUComputePassEncoder, name: RoundKernel | "redo") {

@@ -55,8 +55,9 @@ export interface ClothSolverContact {
  * compute pass. They never advance time: C2's detection and truncation
  * rounds run here, between iterations of the one step. */
 export interface ClothStepHooks {
-  /** After the step frame (inertia target and initial guess are in place), before Newton iteration 1. */
-  afterFrame?(pass: GPUComputePassEncoder): void;
+  /** After the step frame (inertia target and initial guess are in place), before Newton iteration 1. With `split`
+   * (encodeStep's), a long hook may cut its encoding the same way; it returns the pass it ended in. */
+  afterFrame?(pass: GPUComputePassEncoder, split?: (pass: GPUComputePassEncoder) => GPUComputePassEncoder): GPUComputePassEncoder | void;
   /** After the last Newton iteration, before the diagnostics and the step's end. */
   beforeFinish?(pass: GPUComputePassEncoder): void;
   /** After the PCG solve wrote the direction d (`newtonDirection`), before the line search; C2 writes the filter's alpha here. */
@@ -709,16 +710,24 @@ export class ClothGPUSolver {
     this.run(pass, 'mgFinish', this.threads(this.N));
   }
 
-  encodeStep(pass: GPUComputePassEncoder): void {
+  /**
+   * Encode one step into `pass`. With `split`, the step is cut at its stage boundaries (after the frame and its
+   * mandatory contact round, then after each Newton iteration but the last): split ends the pass, submits what came
+   * before and returns the pass to continue in, so the GPU runs a chunk while the next is encoded (the CPU's encode
+   * was ~22 ms of a 200 ms 150^2 step, the GPU idle). The same dispatches in the same order. Returns the pass the
+   * step ended in.
+   */
+  encodeStep(pass: GPUComputePassEncoder, split?: (pass: GPUComputePassEncoder) => GPUComputePassEncoder): GPUComputePassEncoder {
     const limited = this.tables.strainLimited, o = this.newton, W = this.threads(this.N);
     if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', W); this.grabAnchorsPending = false; }
     if (this.restarts) this.run(pass, 'restartScan', W);
     this.run(pass, 'beginStep', 1);
     if (limited || this.tables.damped) this.run(pass, 'frameElements', this.threads(Math.max(limited ? this.E : 0, this.tables.damped ? this.T : 0)));
     this.run(pass, 'frame', W);
-    this.hooks.afterFrame?.(pass);
+    pass = this.hooks.afterFrame?.(pass, split) ?? pass;
     this.run(pass, 'nwBeginStep', 1);
     for (let n = 0; n < o.iterations; n++) {
+      if (split) pass = split(pass);
       this.run(pass, 'nwFaces', this.threads(this.T));
       this.run(pass, 'nwGradient', W);
       // The contact linearization at this iterate, compiled for every product of the iteration (pcgStep, nwModel).
@@ -759,6 +768,7 @@ export class ClothGPUSolver {
     this.hooks.stepEnd?.(pass);
     if (this.restarts) this.run(pass, 'onsetScan', W);
     this.run(pass, 'finishStep', W);
+    return pass;
   }
 
   /** Newton-PCG control records (harness reads; never a step path): done flag, PCG done, last step, Newton iterations

@@ -400,12 +400,21 @@ export class ClothSystem {
       }
       // The moving solid's poses at this frame's step boundaries, uploaded before the frame's commands run.
       if (e.body) e.contact.setBodyPoses(clothBodyPoses(e.body, e.origin, this.entryTime(e), owed, CLOTH_SCENE_STEP_S));
-      // One pass per frame: the detector's frame statistics restart, then the steps (its hooks run inside each).
+      // The frame's passes: the detector's frame statistics restart, then the steps (its hooks run inside each).
       // A timed frame splits the pass at each stage change (ClothStagePasses), so each stage carries its own timestamps.
-      const pass = timer ? new ClothStagePasses(encoder).pass : encoder.beginComputePass({ label: 'Cloth step' });
+      // Untimed, the frame is submitted in chunks at the steps' stage boundaries (ClothGPUSolver.encodeStep's split):
+      // the GPU runs one while the next is encoded. Every chunk's queue writes (setBodyPoses, above) precede it as before.
+      let chunk = timer ? encoder : this.device.createCommandEncoder({ label: 'Cloth step chunk' });
+      let pass = timer ? new ClothStagePasses(encoder).pass : chunk.beginComputePass({ label: 'Cloth step' });
+      const split = timer ? undefined : (p: GPUComputePassEncoder) => {
+        p.end(); this.device.queue.submit([chunk.finish()]);
+        chunk = this.device.createCommandEncoder({ label: 'Cloth step chunk' });
+        return chunk.beginComputePass({ label: 'Cloth step' });
+      };
       e.contact.encodeFrameBegin(pass);
-      for (let s = 0; s < owed; s++) e.solver.encodeStep(pass);
+      for (let s = 0; s < owed; s++) pass = e.solver.encodeStep(pass, split);
       pass.end();
+      if (!timer) this.device.queue.submit([chunk.finish()]);
       e.steps += owed; e.sinceStatus += owed; stepped = true; steps += owed; timed.push(e);
       if (e.sinceStatus >= this.statusInterval && e.mirror.encodeStatus(encoder)) { e.sinceStatus = 0; watched.push(e); }
     }
