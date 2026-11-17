@@ -83,7 +83,7 @@ import { ARGS, BRICK_STRIDE, BrickLayout, FOLD, LIST, brickAbiWGSL } from "./bri
 import { CFG, type BrickBinding, type BrickKernel, type BrickPlacement, declareBindings } from "./brick-kernel";
 import type { PressureSolver } from "./brick-pressure-slot";
 import { FINE_ORDER, OC } from "./pressure-model";
-import { P_FLAG, P_WALL_C, pressureCompositeKernels } from "./pressure-composite.wgsl";
+import { P_FLAG, P_WALL_C, pressureCompositeKernels, pressureResolveBox } from "./pressure-composite.wgsl";
 import { NP_K } from "./pressure-rows.wgsl";
 
 const P_WALL0 = P_FLAG.WALL0, WALL_F = P_WALL_C.F.toFixed(1), WALL_C = P_WALL_C.C.toFixed(1);
@@ -374,7 +374,7 @@ fn pP(ch:u32,s:u32,l:u32)->f32{return pres[ch+NB_STRIDE*s+l];}
     if(nbCRec(cs,NB_REC_KEY)!=nbKey(p)){return NB_NONE;}
     return cs;
   }
-  fn pTileIn(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_LATTICE);}
+  fn pTileIn(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_WALL_BOX);}
   // The C slot of tile t when it is 4h-owned (a native tile of a resident page), or NONE.
   fn pNativeTile(t:vec3i)->u32{
     if(!pTileIn(t)){return NB_NONE;}
@@ -672,7 +672,7 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
     const abi = brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, ...(has("dir") ? { dir: { name: "dir", atomic: false } } : {}) });
     const src: Record<Part, string> = { pres: PRES, stage: STAGE + (has("pmgF") ? STAGEK : ""), cstage: CSTAGE + (has("pmgC") ? CSTAGEK : ""), red: RED + (parts.includes("reduce") ? FIXED : ""), reduce: REDUCE512, gate: GATE, tile: TILE, seam: SEAM };
     const page = parts.includes("stage") || parts.includes("cstage") ? [PAGE, "var<workgroup> wCount:u32;"] : [];
-    return { label, entry: label, bindings, code: [abi, declareBindings(bindings), COMMON, ...page, ...parts.map(p => src[p]), body].join("\n") };
+    return { label, entry: label, bindings, code: pressureResolveBox(L, [abi, declareBindings(bindings), COMMON, ...page, ...parts.map(p => src[p]), body].join("\n")) };
   };
   const FB = [CFG, setRW, dirRO, presRW, fRW, cRW]; // brick kernels
   const FBT = [...FB, topRW]; // brick kernels over the row bricks
@@ -1789,7 +1789,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   let g=nbGroup(wid);if(g>=workgroupUniformLoad(&wCount)){return;}
   let slot=${audit ? "nbListSlot(NB_LIST_F_ALL,g)" : "pmgTop[T_RB+g]"};`}let o=nbFOrigin(slot);let b=o>>vec3u(3u);
   if(lid==0u){
-    let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_LATTICE);
+    let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_WALL_BOX);
     wGo=select(0u,1u,edge${audit ? "&&pmgTop[T_RBF+slot]!=0u" : ""});
     ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : guessAt ? "wAlpha=0.0;" : "let rz=pmgRed[R_RZ];let pq=pmgRed[R_PQ];wAlpha=select(0.0,rz/pq,pq!=0.0);"}
     atomicStore(&wFlips,0u);
@@ -1803,7 +1803,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
     let x=${guessAt ? "pres[NB_PRES_F_Z+at]" : "pres[NB_PRES_F_X+at]+alpha*pres[NB_PRES_F_D+at]"};
     var dd=0.0;var db=0.0;var flips=0u;
     for(var a=0u;a<3u;a++){
-      let side=pWallFace(c,a,NB_LATTICE[a]);if(side==0){continue;}${cuts ? `
+      let side=pWallFace(c,a,NB_WALL_BOX[a]);if(side==0){continue;}${cuts ? `
       // The cuts: the face's kind and coupling from rowsF's face cache (a wall face's word is its V); a closed one
       // (A <= 1e-6) has no state.
       let fk=2u*a+select(0u,1u,side>0);
@@ -1849,7 +1849,7 @@ ${guessAt ? "" : `
 var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u32>;var<workgroup> wAud:array<atomic<u32>,2>;
 @compute @workgroup_size(512) fn ${audit ? "pmgAuditC" : "pmgWallsC"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${pageHead("native")}
   if(lid==0u){
-    let edge=any(p==vec3i(0))||any(32*(p+vec3i(1))>=NB_LATTICE);
+    let edge=any(p==vec3i(0))||any(32*(p+vec3i(1))>=NB_WALL_BOX);
     wGo=select(0u,1u,edge);
     ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : "let rz=pmgRed[R_RZ];let pq=pmgRed[R_PQ];wAlpha=select(0.0,rz/pq,pq!=0.0);"}
     atomicStore(&wFlips,0u);
@@ -1864,7 +1864,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
       let x=pres[NB_PRES_C_X+at]+alpha*pres[NB_PRES_C_D+at];
       var dd=0.0;var db=0.0;var flips=0u;
       for(var a=0u;a<3u;a++){
-        let side=pWallFace(T,a,(NB_LATTICE[a]+3)/4);if(side==0){continue;}
+        let side=pWallFace(T,a,(NB_WALL_BOX[a]+3)/4);if(side==0){continue;}
         var Ts=T;if(side>0){Ts[a]+=1;}
         let ws=nbCSlotOfPage(Ts>>vec3u(3u));if(ws==NB_NONE){continue;}
         let w=NB_PHI_C_FLAGS+NB_STRIDE*ws+nbLocal(Ts);let bit=${P_WALL0}u<<a;

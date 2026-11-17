@@ -53,7 +53,7 @@
  * Unported pieces latch FAIL.UNSUPPORTED when they would activate: a cut brick, or a BULK16
  * page across a face. There are no solids, so bounded rows (bInside, N_CLOSED) never arise.
  */
-import type { BrickLayout } from "./brick-abi";
+import { BOX_TOKEN, boxPadded, type BrickLayout, resolveBox } from "./brick-abi";
 import type { BrickBinding } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { brickCellKernel } from "./brick-pressure.wgsl";
@@ -219,15 +219,15 @@ fn poStageLight(o:vec3i,lid:u32){
  * 0.5 (FRAC low + FRAC high) (umPressureFaceV, pbStampFace): stored at plane 0, formed here at plane N, where no
  * brick holds the face. */
 const CUTS_WGSL = /* wgsl */`
-fn poCutK(c:vec3i)->u32{if(!nbInLattice(c)){return NB_NONE;}let s=poSlotOfCell(c);if(s>=NB_SEAM){return NB_NONE;}return nbFRec(s,NB_REC_CUT);}
-fn poFrac(c:vec3i)->f32{if(!nbInLattice(c)){return 0.0;}let k=poCutK(c);if(k==NB_NONE){return 1.0;}return cut[NB_CUT_FRAC+NB_STRIDE*k+nbLocal(c)];}
+fn poCutK(c:vec3i)->u32{if(!nbInWallBox(c)){return NB_NONE;}let s=poSlotOfCell(c);if(s>=NB_SEAM){return NB_NONE;}return nbFRec(s,NB_REC_CUT);}
+fn poFrac(c:vec3i)->f32{if(!nbInWallBox(c)){return 0.0;}let k=poCutK(c);if(k==NB_NONE){return 1.0;}return cut[NB_CUT_FRAC+NB_STRIDE*k+nbLocal(c)];}
 fn poCutAP(a:u32)->u32{return select(select(NB_CUT_AP2,NB_CUT_AP1,a==1u),NB_CUT_AP0,a==0u);}
 fn poCutW(a:u32)->u32{return select(select(NB_CUT_W2,NB_CUT_W1,a==1u),NB_CUT_W0,a==0u);}
 // The lower face of c along a (c may lie on the lattice's plane N, one past its last cell).
 fn poFaceAP(c:vec3i,a:u32)->f32{
   let low=c-poUnit(a);
-  if(!nbInLattice(c)){return 0.5*(poFrac(low)+0.0);}
-  let k=poCutK(c);if(k==NB_NONE){return select(0.5,1.0,nbInLattice(low));}
+  if(!nbInWallBox(c)){return 0.5*(poFrac(low)+0.0);}
+  let k=poCutK(c);if(k==NB_NONE){return select(0.5,1.0,nbInWallBox(low));}
   return cut[poCutAP(a)+NB_STRIDE*k+nbLocal(c)];
 }
 fn poFaceW(c:vec3i,a:u32)->f32{let k=poCutK(c);if(k==NB_NONE){return 0.0;}return cut[poCutW(a)+NB_STRIDE*k+nbLocal(c)];}
@@ -265,7 +265,7 @@ fn poWet(phi:f32,width:f32)->bool{return npWet(phi,width,1.0);}
 // Vertices on the lattice's faces (the wall skirt) are not checked.
 fn poGuardVertexG(v:vec3i){if(PO_TIERED&&all(v>vec3i(0))&&all(v<NB_LATTICE)){if(nbCSlotOfPage(v>>vec3u(5u))==NB_NONE){nbFail(NB_FAIL_TIER,nbKey(v>>vec3u(5u)));}}}
 fn poPageHeld(p:vec3i)->bool{return any(p<vec3i(0))||any(32*p>=NB_LATTICE);}
-fn poTileOpen(t:vec3i)->bool{return nbTileInLattice(t);}
+fn poTileOpen(t:vec3i)->bool{return nbTileInWallBox(t);}
 // A tile's root φ (umAuthority): a 4h tile's corner mean (d4Sum8 of vertices·0.125); an h tile's
 // held fit, the mean of its 64 h centres (pcHeldFit: weights 1/2 on the tile's faces, /64);
 // RO_FAR off the lattice or in a non-resident page.
@@ -371,7 +371,7 @@ fn poNativeTheta(t:vec3i,n:vec3i,a:u32)->f32{
 }
 // What lies across an in-lattice cell's page: resident, or air (BULK16 latches UNSUPPORTED).
 fn poAcross(q:vec3i)->u32{
-  if(!nbInLattice(q)){return NP_ACROSS_WALL;}
+  if(!nbInWallBox(q)){return NP_ACROSS_WALL;}
   let w=nbPageWord(q>>vec3u(5u));
   if(w==NB_NONE){return NP_ACROSS_AIR;}
   if(w>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,w);return NP_ACROSS_WALL;}
@@ -392,7 +392,7 @@ ${cuts ? `  // The cuts (§5): the face's aperture, AP of its upper cell's lower
   // solid flags as the old rows take them (shut = FRAC <= 1e-5, umCellIsOpen), never inside (latched in rowsF).
   let volume=poFaceAP(select(c,q,sign>0),a);let open=poFrac(c);var qOpen=1.0;if(across==NP_ACROSS_RESIDENT){qOpen=poFrac(q);}
   var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}
-  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,false,open<=1e-5,false,open,qOpen>1e-5,false,qOpen);` : `  let volume=select(0.5,1.0,nbInLattice(q));
+  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,false,open<=1e-5,false,open,qOpen>1e-5,false,qOpen);` : `  let volume=select(0.5,1.0,nbInWallBox(q));
   // The face φ enters only the marched θ of a wet-dry face (npBandFace with solidClear): the other faces skip its
   // four vertices.
   var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}
@@ -424,7 +424,7 @@ fn poHeadB(c:vec3i,own:f32,base:f32,f:u32)->f32{
     if(g/2u==f/2u){continue;}
     let m=c+npSign(g)*poUnit(g/2u);
     // poPhiF and poBF of m, loaded together (one round of loads, not a chain a neighbour).
-    if(nbInLattice(m)&&poOwnerH(m)){
+    if(nbInWallBox(m)&&poOwnerH(m)){
       let s=poSlotOfCell(m);
       if(s<NB_SEAM){let at=NB_STRIDE*s+nbLocal(m);let pm=pres[NB_PRES_F_PPHI+at];let bm=pres[NB_PRES_F_B+at];if(poWet(pm,1.0)){usable|=1u<<g;bases[g]=bm;}}
     }
@@ -471,7 +471,26 @@ fn poRelease(phiOwner:f32,ghost:f32,sign:f32,u:f32,w:f32,h:f32)->bool{
 }
 `;
 
-const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
+/**
+ * The walls at the box (M3 padding; brick-abi.ts BOX_TOKEN): on a lattice padded past the container, the rows see the
+ * box as their lattice. A cell or tile past it is no row and lies across a WALL face (poAcross, the native rows' wall
+ * slot), the wall planes (the separated state, its release) are the box's, a cut reads it solid, and the owners'
+ * nbOnWall / nbFaceInLattice / nbFacePlane are the box's (brickOwnerWGSL's box). The storage reads keep the lattice:
+ * the staged vertex φ and authorities (nbVertexPhi's), the residency guards, the page clamps and the starts' slots.
+ * Unpadded, every token resolves to the lattice's own name, so the text is byte-identical.
+ */
+export const PO_TILE_BOX_TOKEN = "nbTileInWallBox(";
+export function pressureResolveBox(L: Pick<BrickLayout, "lattice" | "box">, code: string, tiered = true): string {
+  const padded = boxPadded(L);
+  // A native row is a whole 4h tile: a box plane inside a tile has no row form (no partial native row; refused).
+  if (padded && tiered && L.box.some(n => n % 4 !== 0)) throw new Error(`Pressure: the walls at the box ${L.box.join("x")} need whole 4h tiles (each axis a multiple of 4) on a tiered lattice`);
+  const tile = padded ? "fn poTileInBox(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_BOX);}\n" : "";
+  const out = resolveBox(L, (code.includes(PO_TILE_BOX_TOKEN) ? tile : "") + code.replaceAll(PO_TILE_BOX_TOKEN, padded ? "poTileInBox(" : "nbTileInLattice("));
+  if (out.includes(BOX_TOKEN) || out.includes("WallBox(")) throw new Error("Pressure: a wall token is unresolved");
+  return out;
+}
+
+const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
 
 /** The composite kernels. rowsF's label and entry are the engine's operator's when pressure-operator.wgsl.ts builds it.
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */
@@ -501,7 +520,7 @@ export function pressureCompositeKernels(L: BrickLayout, names: { rowsF?: [strin
   const head = (list: "hb" | "hp", go: string, fill = "") => live === undefined
     ? `let g=nbGroup(wid);if(lid==0u){${fill}${go}=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}if(workgroupUniformLoad(&${go})==0u){return;}\n  let slot=nbListSlot(NB_LIST_F_ALL,g);`
     : `let g=nbGroup(wid);${fill ? `if(lid==0u){${fill}}` : ""}\n  let slot=u32(pmgF[${list === "hb" ? "PO_HBL" : "PO_HPL"}+g]);`;
-  const k = (label: string, body: string, entry = label, bindings: readonly BrickBinding[] = ROWS, staged = false, cut = false) => brickCellKernel(L, label, bindings, headerWGSL(L, staged, tiered, cut) + body, entry);
+  const k = (label: string, body: string, entry = label, bindings: readonly BrickBinding[] = ROWS, staged = false, cut = false) => brickCellKernel(L, label, bindings, pressureResolveBox(L, headerWGSL(L, staged, tiered, cut) + body, tiered), entry);
   const [rowsLabel, rowsEntry] = names.rowsF ?? ["pressureRowsF", "pressureRowsF"];
   const [projectLabel, projectEntry] = names.projectF ?? ["pressureProjectF", "pressureProjectF"];
 
@@ -555,7 +574,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     var rise=0.0;var count=0.0;
     for(var side=0u;side<2u;side++){
       let g=2u*axis+side;let m=c+npSign(g)*poUnit(axis);
-      if(nbInLattice(m)&&poOwnerH(m)){if(poWet(poCentre(m),1.0)){rise+=f32(npSign(g))*(poSH[poIndex(m-poSO+vec3i(1),10)]-base);count+=1.0;}}
+      if(nbInWallBox(m)&&poOwnerH(m)){if(poWet(poCentre(m),1.0)){rise+=f32(npSign(g))*(poSH[poIndex(m-poSO+vec3i(1),10)]-base);count+=1.0;}}
     }
     if(count>0.0){head+=rise/count*(f32(lb[axis]&3u)-1.5);}
   }
@@ -585,7 +604,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
 `}  poStage(nbFOrigin(slot),lid,512u);
   for(var j=0u;j<1u;j++){
     let c=nbFOrigin(slot)+nbLocalCoord(lid+512u*j);
-    if(nbInLattice(c)&&poOwnerH(c)){if(poWet(poCentre(c),1.0)&&(poFlagsF(c)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
+    if(nbInWallBox(c)&&poOwnerH(c)){if(poWet(poCentre(c),1.0)&&(poFlagsF(c)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
   }
   workgroupBarrier();
   if(lid==0u){poGo=atomicLoad(&poCold);}
@@ -599,7 +618,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
   // The starts first (a lane its cell's, lanes 0..383 a face halo cell's), so that the seam heads read them staged.
   let l=lid;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
-  let owned=nbInLattice(c)&&poOwnerH(c);
+  let owned=nbInWallBox(c)&&poOwnerH(c);
   var own=NB_PHI_AIR;if(owned){own=poCentre(c);}
   let liquid=owned&&poWet(own,1.0);
   var start=0.0;if(liquid){start=poStart(c,own);}
@@ -608,7 +627,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     let side=lid/64u;let a=side/2u;let k=lid%64u;var d=vec3i(0);
     d[(a+1u)%3u]=i32(k%8u)+1;d[(a+2u)%3u]=i32(k/8u)+1;d[a]=select(0,9,(side&1u)==1u);
     let m=o-vec3i(1)+d;var sm=0.0;
-    if(nbInLattice(m)&&poOwnerH(m)){let pm=poCentre(m);if(poWet(pm,1.0)){sm=poStart(m,pm);}}
+    if(nbInWallBox(m)&&poOwnerH(m)){let pm=poCentre(m);if(poWet(pm,1.0)){sm=poStart(m,pm);}}
     poSH[poIndex(d,10)]=sm;
   }
   workgroupBarrier();
@@ -684,7 +703,7 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
   let rate=bitcast<f32>(atomicLoad(&nbSet[NB_H_LANE_F]));let capacity=1.0;
   let i=lid;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
   var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var start=0.0;
-  let owned=nbTileInLattice(T)&&!nbTileH(cs,i);
+  let owned=nbTileInWallBox(T)&&!nbTileH(cs,i);
   var root=0.0;if(owned){root=poRootPhi4(T);}
   rcR[i]=root;
   let liquid=owned&&poWet(root,4.0);
@@ -695,7 +714,7 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
     for(var f=0u;f<6u;f++){
       let a=f/2u;let side=f&1u;let sign=npSign(f);let e=poUnit(a);let Tn=T+sign*e;
       let plane=4*select(T,Tn,side==1u);
-      if(!nbTileInLattice(Tn)){
+      if(!nbTileInWallBox(Tn)){
         // The root's wall slot: fraction 0.5 (the wall face's mean h V), b its forced flux.
         let fraction=0.5;let u=nbFacePlane(plane,a);let c=4.0*fraction;let lift=f32(sign)*4.0*h*u;
         div+=f32(sign)*fraction*u;
@@ -804,7 +823,7 @@ var<workgroup> poGo:u32;
     let h=nbRingF(cfg.x,NB_RING_H);
     for(var j=0u;j<2u;j++){
       let l=lid+256u*j;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
-      let hc=nbInLattice(c)&&poOwnerH(c);
+      let hc=nbInWallBox(c)&&poOwnerH(c);
       var pc=NB_PHI_AIR;if(hc){pc=pres[NB_PRES_F_PPHI+at];}
       let lc=hc&&poWet(pc,1.0);
       // This cell's FLAGS hold the solver's wall state for its lower faces on the lattice's planes (read here, by
@@ -812,12 +831,12 @@ var<workgroup> poGo:u32;
       let flags=phi[NB_PHI_F_FLAGS+at];var release=0u;
       for(var a=0u;a<3u;a++){
         if(!nbFaceInLattice(c,a)){continue;}
-        let n=c-poUnit(a);let hn=nbInLattice(n)&&poOwnerH(n);
+        let n=c-poUnit(a);let hn=nbInWallBox(n)&&poOwnerH(n);
         if(!hc&&!hn){continue;}
         let fa=NB_STRIDE*(slot+a*NB_FCAP)+l;let us=vel[NB_VEL_F_US0+fa];
         var pn=NB_PHI_AIR;if(hn){pn=poPhiF(n);}
         let ln=hn&&poWet(pn,1.0);
-        let wall=c[a]==0||c[a]==NB_LATTICE[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
+        let wall=c[a]==0||c[a]==NB_WALL_BOX[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
         var u=us;${faces === undefined ? `
         if(lc){u=poProjectFace(c,pc,true,2u*a,us,h,separated);}
         else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h,separated);}` : `${cuts ? `
@@ -875,7 +894,7 @@ ${faces === undefined ? `
   //   U = US - sign c/(16 h V) (ghost - X), so 4V/(16hV) = 1/(4h).
   const projectC = k("pressureProjectC", PROJECT_WGSL + /* wgsl */`
 fn poNativeX(T:vec3i)->vec2f{
-  if(!nbTileInLattice(T)){return vec2f(0.0,-1.0);}
+  if(!nbTileInWallBox(T)){return vec2f(0.0,-1.0);}
   let w=nbPageWord(T>>vec3u(3u));if(w==NB_NONE||w>=NB_SEAM){return vec2f(0.0,-2.0);}
   let i=nbTileIndex(T);if(nbTileH(w,i)){return vec2f(0.0,-3.0);}
   let at=NB_STRIDE*w+i;
@@ -887,7 +906,7 @@ fn poNativeX(T:vec3i)->vec2f{
   let O=nbCOrigin(cs)>>vec3u(2u);let h=nbRingF(cfg.x,NB_RING_H);
   for(var j=0u;j<2u;j++){
     let i=lid+256u*j;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
-    let tIn=nbTileInLattice(T);
+    let tIn=nbTileInWallBox(T);
     // This tile's C FLAGS: the solver's wall state for its lower faces on the lattice's planes, then their release.
     let fw=NB_PHI_C_FLAGS+at;let flags=phi[fw];var release=0u;
     if(tIn&&nbTileH(cs,i)){
@@ -909,7 +928,7 @@ fn poNativeX(T:vec3i)->vec2f{
       if(nbTileInLattice(Lt)&&nbTileOwnerH(Lt)){continue;}
       let fa=NB_STRIDE*(cs+a*NB_CCAP)+i;let us=vel[NB_VEL_C_US0+fa];
       let low=poNativeX(Lt);
-      let wall=T[a]==0||4*T[a]==NB_LATTICE[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
+      let wall=T[a]==0||4*T[a]==NB_WALL_BOX[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
       var u=us;
       if(own.y>0.0&&low.y>0.0){u=us-(own.x-low.x)/(4.0*h);}
       else if(own.y>0.0||low.y>0.0){
