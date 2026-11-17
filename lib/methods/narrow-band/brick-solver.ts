@@ -64,7 +64,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   static async create(device: GPUDevice, options: BrickSolverOptions): Promise<BrickNBFlipSolver> {
     const s = options.setup;
     const engine = await BrickEngine.create(device, {
-      lattice: s.lattice, farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}),
+      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}),
       solver: options.solver, stages: options.stages, values: options.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },

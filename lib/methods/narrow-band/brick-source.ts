@@ -70,8 +70,9 @@ export interface BrickSources {
   readonly dt_s: number;
 }
 
-/** The scene's scheduled drops in source form (uniformScheduledDrop), in the lattice's cells. */
-export function brickSources(scene: SceneDescription, o: { lattice: Vec3; h_m: number; origin_m: Vec3; dt_s: number }): BrickSources | undefined {
+/** The scene's scheduled drops in source form (uniformScheduledDrop), in the lattice's cells. `box` is the container's
+ * cells, the lattice's or the box a padded lattice closes (BrickEngineOptions.box): a drop box is held to it. */
+export function brickSources(scene: SceneDescription, o: { lattice: Vec3; box?: Vec3; h_m: number; origin_m: Vec3; dt_s: number }): BrickSources | undefined {
   const schedule = scene.fluid.scheduledDrops;
   if (!schedule?.length) return undefined;
   const h = o.h_m, cell = (p: { x: number; y: number; z: number }): Vec3 => [(p.x - o.origin_m[0]) / h, (p.y - o.origin_m[1]) / h, (p.z - o.origin_m[2]) / h];
@@ -98,10 +99,10 @@ export function brickSources(scene: SceneDescription, o: { lattice: Vec3; h_m: n
     } else {
       throw new Error(`Brick engine: a scheduled drop of shape "${(volume as { shape: string }).shape}" is not supported`);
     }
-    // requestDropPages: r = max(radius, halfHeight) about the centre, grown by the pin margin, held to the lattice.
-    const r = Math.max(d.radius, d.halfHeight);
-    const lo = d.centre.map((c, a) => Math.min(Math.max(Math.floor(c - r) - SRC_PIN_MARGIN, 0), o.lattice[a]!)) as unknown as Vec3;
-    const hi = d.centre.map((c, a) => Math.min(Math.max(Math.ceil(c + r) + SRC_PIN_MARGIN, 0), o.lattice[a]!)) as unknown as Vec3;
+    // requestDropPages: r = max(radius, halfHeight) about the centre, grown by the pin margin, held to the container.
+    const r = Math.max(d.radius, d.halfHeight), box = o.box ?? o.lattice;
+    const lo = d.centre.map((c, a) => Math.min(Math.max(Math.floor(c - r) - SRC_PIN_MARGIN, 0), box[a]!)) as unknown as Vec3;
+    const hi = d.centre.map((c, a) => Math.min(Math.max(Math.ceil(c + r) + SRC_PIN_MARGIN, 0), box[a]!)) as unknown as Vec3;
     drops.push({ ...d, box: [lo, hi] });
   }
   return { drops, edges: Float32Array.from(edges), dt_s: o.dt_s };

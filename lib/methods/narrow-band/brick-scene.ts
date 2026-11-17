@@ -37,9 +37,12 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
 
 export interface BrickSceneSetup {
   readonly sceneId: string;
-  /** Cells an axis: the container's own (whole bricks). The storage rounds up to pages behind it; the cells past the
-   * container are the box rule's wall (brick-static.wgsl.ts), as the old engine's voxel shell and padding close them. */
+  /** Cells an axis: the container's cells rounded up to whole pages (sceneFluidLatticeDimensions, the old engine's
+   * fluid box). Where that pads past the container, `box` is the container's cells, and the cells past it are the box
+   * rule's wall (brick-abi.md §2), as the old engine's voxel shell and padding close them. */
   readonly lattice: Vec3;
+  /** The container's cells (whole bricks) where the lattice is padded past them; absent: the lattice. */
+  readonly box?: Vec3;
   /** NB_PHI_FAR in h: the old engine's far φ, its page-rounded lattice's largest extent (fluidLatticeFarPhi); the lattice's own when absent. */
   readonly farPhi?: number;
   readonly h_m: number;
@@ -89,14 +92,16 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // never selects a scene whose stages would throw at creation.
   try { nbfVelocitySupported({ viscosity: f.dynamicViscosity_Pa_s, surfaceTension: f.surfaceTension_N_m, noSlip: false }); }
   catch (e) { gaps.push(`${(e as Error).message.replace(/^NB-FLIP brick engine: /, "")} (F)`); }
-  // Padding (M3 stage 1): the lattice is the container's cells, and the box rule closes the cells past it, as the old
-  // engine's shell does (its padding lies behind the shell, so no liquid reaches it). A container that is not whole
-  // bricks would cut a brick and a 4h tile: that needs solidStamp's cut slots.
-  const cells = sceneLatticeDimensions(scene), lattice = cells, paged = sceneFluidLatticeDimensions(scene);
+  // Padding (M3): the census and the C level set run whole 32^3 pages (setCensus, levelset-coarse 0x4c430001), so the
+  // lattice is the container's cells rounded up to whole pages (the old engine's fluid box), and the box rule closes
+  // the cells past the container at the box (brick-abi.md §2), as the old engine's shell does (its padding lies behind
+  // the shell, so no liquid reaches it). A container that is not whole bricks would cut a brick and a 4h tile: that
+  // needs solidStamp's cut slots.
+  const cells = sceneLatticeDimensions(scene), paged = sceneFluidLatticeDimensions(scene);
+  const padded = cells.some((n, a) => n !== paged[a]), lattice = paged, box = padded ? cells : undefined;
   if (cells.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
-  // The census and the C level set run whole 32^3 pages (setCensus, levelset-coarse 0x4c430001). Padding the lattice to
-  // whole pages needs F's and P's walls at the box rule's box instead of the lattice's (M3): until then, refused here.
-  else if (cells.some(n => n % 32 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole pages: padding to 32-cell pages needs F's and P's walls at the box (M3)`);
+  // F's walls are at the box (512e7a9f); P's pressure walls are not yet.
+  else if (padded) gaps.push(`the container's ${cells.join("x")} cells are not whole pages: padding to 32-cell pages needs P's walls at the box (M3)`);
   const hs = [c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]];
   if (hs.some(h => Math.abs(h - hs[0]!) > 1e-9 * hs[0]!)) gaps.push(`cells are not cubic (${hs.map(h => h.toPrecision(6)).join(", ")} m)`);
   const fixed = uniformFixedStep_s(values.timeStep);
@@ -106,19 +111,20 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // The initial liquid (brick-initial.ts): a dam-break box or a tank-fill slab keeps its closed form; any other
   // description is the old engine's own t = 0 φ as a page table.
   const n = lattice, g = f.gravity_m_s2, farPhi = Math.max(...paged), band = f.brickTiers?.particleBandDepth ?? 3;
-  const start = brickInitialLiquid(scene, { lattice: [n[0]!, n[1]!, n[2]!], farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z] });
+  const L: Vec3 = [n[0]!, n[1]!, n[2]!], B: Vec3 | undefined = box ? [box[0]!, box[1]!, box[2]!] : undefined, inBox = B ? { box: B } : {};
+  const start = brickInitialLiquid(scene, { lattice: L, ...inBox, farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z] });
   const origin_m: Vec3 = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
-  const sources = brickSources(scene, { lattice: [n[0]!, n[1]!, n[2]!], h_m: hs[0]!, origin_m, dt_s: dt! });
+  const sources = brickSources(scene, { lattice: L, ...inBox, h_m: hs[0]!, origin_m, dt_s: dt! });
   // Pools: the scene's authored brickPools, else the sizing rule (brickPoolRule) from the boot. Either way they are fixed:
   // an overrun latches FAIL.POOL / PARTICLES and is never grown.
-  const extent = brickInitialExtent({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial });
-  const p = f.brickPools ?? brickPoolRule([n[0]!, n[1]!, n[2]!], extent, Math.max(start.bricks.length, extent.resident), bootParticleCount({ lattice: [n[0]!, n[1]!, n[2]!], farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
+  const extent = brickInitialExtent({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial });
+  const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
   return {
     gaps,
     setup: {
-      sceneId: id, lattice: [n[0]!, n[1]!, n[2]!], farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
+      sceneId: id, lattice: L, ...inBox, farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
       capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
-      liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, [n[0]!, n[1]!, n[2]!]), bootBricks: start.bricks, bootPages: start.pages, origin_m,
+      liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, L, B), bootBricks: start.bricks, bootPages: start.pages, origin_m,
       ...(sources ? { sources } : {}),
     },
   };
@@ -130,8 +136,9 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
  * `resident` is the boot's residency: the liquid bricks dilated by two bricks a side (Chebyshev), within the window.
  * The engine's first residency is that set (the h ring's tiles, the particle and seed classes: ≤ 16 cells past a
  * liquid tile; the free fall's step-1 F box, 210 bricks, is exactly it), where the boot's own brick list (100) is not. */
-export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; resident: number } {
-  const at = bootPhiAt(o), n = o.lattice, nb = n.map(v => Math.floor(v / 8) + 1), liquid: [number, number, number][] = [];
+export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; resident: number } {
+  // Over the container's cells (the box: a padded lattice's cells past it are wall).
+  const at = bootPhiAt(o), n = o.box ?? o.lattice, nb = n.map(v => Math.floor(v / 8) + 1), liquid: [number, number, number][] = [];
   let cells = 0, top = 0;
   for (let bz = 0; 8 * bz < n[2]; bz++) for (let by = 0; 8 * by < n[1]; by++) for (let bx = 0; 8 * bx < n[0]; bx++) {
     const lo = [8 * bx, 8 * by, 8 * bz], hi = lo.map((v, a) => Math.min(v + 8, n[a]!)), centre = at([lo[0]! + 4, lo[1]! + 4, lo[2]! + 4]);

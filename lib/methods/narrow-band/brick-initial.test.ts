@@ -228,16 +228,21 @@ test("brick initial (GPU): the first seeds carry the initial velocity", GPU, asy
   });
 });
 
-test("brick initial: a moving liquid in a container that is not whole pages boots on the container's lattice", () => {
+test("brick initial: a moving liquid in a container that is not whole pages boots on the padded lattice, in the box", () => {
   // The old engine's paged volumes cover its fluid box (the container's cells padded to whole pages past the high
-  // faces); the initial velocity's tiles are the container's (E's catalog sweep, 2026-11-17: these three threw).
+  // faces); the initial velocity's tiles are the container's (E's catalog sweep, 2026-11-17: these three threw), keyed
+  // on the padded lattice's tiles (bootPhi's bootVelTile, T = NB_LATTICE / 4).
   const method = getMethod(METHOD);
   for (const id of ["gentle-moving-blob", "geometric-uniform-translation", "coarse-surface-translation"]) {
-    const scene = sceneOf(id), lattice = sceneLatticeDimensions(scene) as unknown as Vec3;
-    assert.ok(sceneFluidLatticeDimensions(scene).some((n, a) => n !== lattice[a]), `${id}: the fluid box is padded`);
-    const v = brickInitialVelocity(scene, lattice)!, T = lattice.map(n => n >> 2);
+    const scene = sceneOf(id), box = sceneLatticeDimensions(scene) as unknown as Vec3, lattice = sceneFluidLatticeDimensions(scene) as unknown as Vec3;
+    assert.ok(lattice.some((n, a) => n !== box[a]), `${id}: the fluid box is padded`);
+    const v = brickInitialVelocity(scene, lattice, box)!, T = lattice.map(n => n >> 2), B = box.map(n => n >> 2);
     assert.ok(v && v.tiles.length > 0, `${id}: the liquid moves`);
-    assert.ok(v.tiles.every(k => k >= 0 && k < T[0]! * T[1]! * T[2]!), `${id}: every tile is the container's`);
+    const tile = (k: number) => [k % T[0]!, Math.floor(k / T[0]!) % T[1]!, Math.floor(k / (T[0]! * T[1]!))];
+    assert.ok(v.tiles.every(k => tile(k).every((t, a) => t >= 0 && t < B[a]!)), `${id}: every tile is the container's`);
+    // The same tiles as the container's own keys (T = box / 4), re-keyed.
+    const own = brickInitialVelocity(scene, box)!, rekey = (k: number) => { const t = [k % B[0]!, Math.floor(k / B[0]!) % B[1]!, Math.floor(k / (B[0]! * B[1]!))]; return t[0]! + T[0]! * (t[1]! + T[1]! * t[2]!); };
+    assert.deepEqual(v.tiles, own.tiles.map(rekey).sort((a, b) => a - b), `${id}: the container's tiles`);
     const values = resolveMethodValues(method, "balanced", { ...method.appDefaults, engine: "brick" });
     // Past the catalog gate (as brickEngineGaps's sweep runs it): the setup reaches the initial liquid.
     const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(id);
@@ -247,5 +252,49 @@ test("brick initial: a moving liquid in a container that is not whole pages boot
       assert.ok(r.setup || r.gaps.length > 0, `${id}: a setup or gaps`);
       if (r.setup) assert.deepEqual(r.setup.initialVelocity, v, `${id}: the setup's initial velocity`);
     } finally { if (!had) enabled.splice(enabled.indexOf(id), 1); }
+  }
+});
+
+test("brick initial: on a padded lattice the table is the old engine's φ inside the box and far air past it", () => {
+  // The lattice is the container's cells rounded up to whole pages (brick-scene, M3 padding), the box the container's.
+  // Inside the box the table is the old engine's own t = 0 φ (fluidLatticeVertexPhi over its fluid box); past it far
+  // air, as the old engine's padding (its fill) and a vertex past an unpadded lattice (NB_PHI_FAR) read. The boot's seeds count the box's cells only.
+  for (const id of ["gentle-moving-blob"]) {
+    const scene = sceneOf(id), box = sceneLatticeDimensions(scene) as unknown as Vec3, lattice = sceneFluidLatticeDimensions(scene) as unknown as Vec3;
+    assert.ok(lattice.some((n, a) => n !== box[a]) && !closedFormLiquid(scene), `${id}: padded, a table`);
+    const h = scene.container.width_m / box[0], far = Math.max(...lattice);
+    const t = brickInitialPhi(scene, lattice, h, far, box), full = fluidLatticeVertexPhi(scene), P = initialPhiPages(lattice);
+    let inside = 0, off = 0, past = 0, notFar = 0;
+    t.pages.forEach((k, i) => {
+      const p = [k % P[0], Math.floor(k / P[0]) % P[1], Math.floor(k / (P[0] * P[1]))];
+      for (let l = 0; l < 32768; l++) {
+        const v = [32 * p[0]! + (l & 31), 32 * p[1]! + ((l >> 5) & 31), 32 * p[2]! + (l >> 10)], value = t.phi[32768 * i + l]!;
+        if (v.some((x, a) => x > box[a]!)) { past++; if (value !== far) notFar++; continue; }
+        inside++;
+        if (value !== Math.fround(full[v[0]! + (lattice[0] + 1) * (v[1]! + (lattice[1] + 1) * v[2]!)]! / h)) off++;
+      }
+    });
+    assert.ok(inside > 0 && past > 0, `${id}: vertices both sides of the box`);
+    assert.equal(off, 0, `${id}: ${off} of ${inside} box vertices differ from fluidLatticeVertexPhi`);
+    assert.equal(notFar, 0, `${id}: ${notFar} of ${past} vertices past the box are not far air`);
+    // The boot's bricks hold the container's liquid; its seed bound counts the box's cells alone.
+    const o = { lattice, box, farPhi: far, h_m: h, dt_s: scene.numerics.fixedDt_s ?? 1 / 60, gravity_mps2: [0, -9.81, 0] as Vec3 };
+    const start = brickInitialLiquid(scene, o);
+    assert.ok(start.bricks.length > 0, `${id}: boot bricks`);
+    assert.ok(start.bricks.every(k => [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023].every((b, a) => 8 * b <= box[a]!)), `${id}: no boot brick wholly past the box`);
+    const seeds = bootParticleCount({ ...o, liquid: start.liquid, initial: start.initial }, start.bricks, 3);
+    assert.ok(seeds > 0 && seeds <= bootParticleCount({ lattice, farPhi: far, liquid: start.liquid, initial: start.initial }, start.bricks, 3), `${id}: the box's seeds`);
+  }
+});
+
+test("brick initial: on a padded lattice the closed form is the container's box, as unpadded", () => {
+  // The dam's or tank's box is a fraction of the container's cells (the box), not of the padded lattice; its walls'
+  // faces run on through them as before. Past the box, bootPhi's far air is the boot's (lane E, bootAt).
+  for (const id of ["geometric-uniform-translation", "coarse-surface-translation"]) {
+    const scene = sceneOf(id), box = sceneLatticeDimensions(scene) as unknown as Vec3, lattice = sceneFluidLatticeDimensions(scene) as unknown as Vec3;
+    assert.ok(lattice.some((n, a) => n !== box[a]) && closedFormLiquid(scene), `${id}: padded, a closed form`);
+    const h = scene.container.width_m / box[0], o = { h_m: h, dt_s: 1 / 60, gravity_mps2: [0, -9.81, 0] as Vec3 };
+    const padded = brickInitialLiquid(scene, { ...o, lattice, box }), own = brickInitialLiquid(scene, { ...o, lattice: box });
+    assert.deepEqual(padded.liquid, own.liquid, `${id}: the container's box`);
   }
 });
