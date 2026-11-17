@@ -1,0 +1,50 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { clothExecutionSettings } from '../lib/cloth/execution-settings';
+import { validateClothDocument } from '../lib/cloth/topology';
+import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
+
+test('live cloth defaults enable validated optimizations, while reference runs and explicit opt-out retain original defaults', () => {
+  const live=clothExecutionSettings({},true),reference=clothExecutionSettings();
+  assert.equal(live.vertexEvaluation,'packet');assert.equal(live.vertexStage,true);assert.equal(live.vertexStagePacket,true);assert.equal(live.lazyLineSearch,true);assert.equal(live.conflictWitnesses,true);assert.equal(live.solidWitnesses,true);
+  assert.equal(live.macroCacheCapacity,64);assert.equal(live.contactEntryCapacity,256);assert.equal(live.mandatoryRedoCap,64);
+  assert.equal(clothExecutionSettings({contactSolidCandidateReuse:false},true).macroCacheCapacity,undefined);
+  assert.equal(clothExecutionSettings({contactBroadphase:'grid'},true).macroCacheCapacity,undefined);
+  assert.equal(clothExecutionSettings({contactConflictReuse:'off'},true).conflictWitnesses,false);
+  assert.equal(reference.macroCacheCapacity,undefined);assert.equal(reference.contactEntryCapacity,undefined);assert.equal(reference.mandatoryRedoCap,undefined);
+  assert.equal(clothExecutionSettings({newton:{iterations:8,pcgIterations:200,trustRegion:'hybrid'}},true).lazyLineSearch,false);
+  assert.equal(clothExecutionSettings({contactEdgeEvaluation:'directed'},true).vertexStage,false);
+  assert.equal(live.edgeEvaluation,'packet');assert.equal(live.edgeStagePacket,true);assert.equal(live.edgeStageBlockSize,4);assert.equal(live.edgeStageCapacity,1_000_000);
+  assert.equal(reference.edgeStagePacket,false);assert.equal(reference.edgeStageCapacity,undefined);
+  assert.equal(clothExecutionSettings({contactBroadphase:'grid'},true).edgeEvaluation,'directed');
+  assert.equal(live.contactBroadphase,'bvh');assert.equal(live.separationCulling,true);
+  assert.equal(live.newton.forcingMax,undefined);assert.equal(live.newton.contactLinearization,'factorized');
+  assert.equal(reference.contactBroadphase,'grid');assert.equal(reference.separationCulling,false);
+  assert.equal(reference.newton.forcingMax,undefined);assert.equal(reference.newton.contactLinearization,undefined);
+  assert.deepEqual(clothExecutionSettings({optimizations:false},true),reference);
+});
+
+test('cloth experiment choices survive document serialization and invalid choices fail explicitly', () => {
+  const document=bridson2002RotatingSphere({nodesAcross:4}).cloth;
+  const settings={...document.solver,optimizations:true,contactBroadphase:'cached-grid' as const,contactSolidCandidateReuse:false,contactConflictReuse:'off' as const,contactSeparationCulling:false,multigrid:true,contactEdgeEvaluation:'pruned' as const,contactBvhLeafSize:2 as const};
+  const saved=JSON.parse(JSON.stringify({...document,solver:settings}));
+  assert.deepEqual(validateClothDocument(saved),[]);
+  assert.deepEqual(saved.solver,settings);
+  const restored=clothExecutionSettings(saved.solver,true);
+  assert.equal(restored.contactBroadphase,'grid');assert.ok(restored.candidateCache);assert.equal(restored.multigrid,true);assert.equal(restored.separationCulling,false);
+  assert.equal(restored.uniqueEdgePairs,true); assert.equal(restored.bvhEdgePruning,false); assert.equal(restored.bvhLeafSize,2);
+  assert.equal(clothExecutionSettings({...settings,contactBroadphase:'bvh'},true).bvhEdgePruning,true);
+  const off=clothExecutionSettings({...settings,optimizations:false},true);
+  assert.equal(clothExecutionSettings({contactEdgeEvaluation:'staged'},true).edgeStageCapacity,1_000_000);
+  assert.equal(clothExecutionSettings({contactEdgeEvaluation:'staged',optimizations:false},true).edgeStageCapacity,undefined);
+  assert.equal(clothExecutionSettings({contactEdgeEvaluation:'staged',contactBroadphase:'grid'},true).edgeStageCapacity,undefined);
+  assert.equal(off.uniqueEdgePairs,false); assert.equal(off.bvhEdgePruning,false); assert.equal(off.bvhLeafSize,4);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,contactEdgeEvaluation:'invalid'}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,contactVertexEvaluation:'invalid'}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,contactConflictReuse:'invalid'}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,contactSolidCandidateReuse:'yes'}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,lazyLineSearch:'yes'}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,contactBvhLeafSize:3}}).length);
+  assert.ok(validateClothDocument({...saved,solver:{...settings,contactBroadphase:'unknown'}}).some(e=>e.includes('broadphase')));
+  assert.ok(validateClothDocument({...saved,solver:{...settings,multigrid:'yes'}}).some(e=>e.includes('boolean')));
+});

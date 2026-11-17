@@ -123,6 +123,15 @@ export function validateClothDocument(document: ClothDocument): string[] {
   }
   const solver = document.solver;
   if (solver) {
+    for (const key of ['optimizations','contactSeparationCulling','contactSolidCandidateReuse','multigrid'] as const)
+      if (solver[key] !== undefined && typeof solver[key] !== 'boolean') errors.push(`Cloth ${key} must be boolean`);
+    if (solver.contactBroadphase !== undefined && !['grid','bvh','cached-grid'].includes(solver.contactBroadphase)) errors.push(`Unknown cloth broadphase ${String(solver.contactBroadphase)}`);
+    if(solver.contactVertexEvaluation !== undefined && !['direct','staged','packet'].includes(solver.contactVertexEvaluation)) errors.push('Unknown cloth vertex evaluation');
+    if(solver.contactConflictReuse !== undefined && !['off','cloth','all'].includes(solver.contactConflictReuse)) errors.push('Unknown cloth conflict reuse');
+    if(solver.lazyLineSearch !== undefined && typeof solver.lazyLineSearch !== 'boolean') errors.push('Cloth lazyLineSearch must be boolean');
+    if (solver.contactEdgeEvaluation !== undefined && !['directed','unique','pruned','staged','packet'].includes(solver.contactEdgeEvaluation)) errors.push('Unknown cloth edge evaluation');
+    if (solver.contactBvhLeafSize !== undefined && ![2,4,8,16].includes(solver.contactBvhLeafSize)) errors.push('Invalid cloth BVH leaf size');
+    if (solver.optimizations !== false && solver.multigrid && solver.newton?.trustRegion === 'hybrid') errors.push('Cloth multigrid does not support hybrid trust region');
     if (solver.integrator !== undefined && solver.integrator !== "implicit-euler" && solver.integrator !== "bdf2") errors.push(`Unsupported cloth integrator ${String(solver.integrator)}`);
     if (solver.newton !== undefined) {
       const n = solver.newton;

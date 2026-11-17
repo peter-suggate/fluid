@@ -1,3 +1,4 @@
+import { clothMultigridWGSL, type ClothMGLayout } from './multigrid';
 /**
  * WGSL of the Newton-PCG cloth step (appended to the solver module, which supplies the element helpers). One implicit
  * step per call, no substeps: Newton iterations on the step's objective G (BDF2 inertia, membrane, Bergou bending,
@@ -66,6 +67,7 @@ export const CLOTH_PCG_SCALARS = 3;
 
 /** The compiled PCG layout the shaders are specialised to (gpu-solver.ts, compileClothPCGPatches). */
 export interface ClothPCGLayout {
+  readonly multigrid?: ClothMGLayout;
   /** Workgroup-memory vertices a patch stages (its 256 rows, then its halo). */
   readonly shared: number;
   /** Largest blocks per row and bending entries per row over the patches. */
@@ -125,7 +127,8 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   // scalars, the rows of patches whose records all fit, through them alone) and 'overflow' (pcgStepOverflow, dispatched
   // after it: the rows of the other patches, matrix-free). Keeping the matrix-free product out of the compiled kernel
   // keeps its registers out too (one never-taken fallback branch cost 35 us an iteration at 150^2).
-  const pcgStepWGSL = (name: string, variant: 'single' | 'compiled' | 'overflow') => {
+  const mg = pcg.multigrid;
+  const pcgStepWGSL = (name: string, variant: 'single' | 'compiled' | 'overflow', phase: 'whole' | 'prepare' | 'product' = mg ? 'product' : 'whole') => {
     const hv = variant === 'compiled' ? 'nwLinRecordsHv(v)' : variant === 'overflow' ? 'ogcVertexContactHvLanes(v, 0u, 1u)' : contactHv;
     // The overflow kernel's patch: with the indirect count, its workgroups are the last nwg.x patches (from the first marked one).
     const patch = variant === 'overflow' && lin?.overflow === 'indirect' ? 'P.newton3.y - nwg.x + wg.x' : 'wgIndex(wg, nwg)';
@@ -139,7 +142,7 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   if (!pcgLinOverflow(lane, ${patch})) { return; }` : ''}
   let i = R.range.z; let p = ${patch}; let lead = ${variant === 'overflow' ? 'false' : 'p == 0u && lane == 0u'};
   var alpha = 0.0; var beta = 0.0;
-  if (i > 0u) {
+${phase === 'product' ? '' : `  if (i > 0u) {
     // Sums of the partials of iterations i - 1 and i - 2, and the scalars (gamma_0, alpha_{i-2}), uniform.
     var a = vec4f(0.0);
     for (var k = lane; k < P.newton3.y; k += PCG_PATCH) {
@@ -194,7 +197,7 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
       nw[pcgScalar(1u + (i - 1u) % 2u)] = vec4f(select(alpha, -1.0, edge), dd, dp, pp); nw[nwControl() + 1u].w += 1.0;
       nw[nwTrustNorm()] = vec4f(dd + alpha * (2.0 * dp + alpha * pp), select(0.0, 1.0, edge), 0.0, 0.0);
     }
-  } else if (lead) { nw[nwTrustNorm()] = vec4f(0.0); }${variant === 'compiled' ? `
+  } else if (lead) { nw[nwTrustNorm()] = vec4f(0.0); }`}${variant === 'compiled' ? `
   // A patch with a row the pool could not hold: its rows are pcgStepOverflow's (this dispatch's scalars above are the lead's).
   if (pcgLinOverflow(lane, p)) { return; }` : ''}
   pcgI = i; pcgAlpha = alpha; pcgBeta = beta;
@@ -204,13 +207,14 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   pcgPatchIndex = p;
   let own = lane < rows; let v = select(0u, pcgRowVertex(p * PCG_PATCH + lane), own);
   var r = vec3f(0.0); var u = vec3f(0.0);
-  if (own) {
+${phase === 'product' ? `  if (own) { r = nw[nseg(${S.r0}u + i % 2u, v)].xyz; u = nw[MG_U+v].xyz; }
+` : `  if (own) {
     let M0 = nw[nseg(${S.m0}u, v)]; let M1 = nw[nseg(${S.m1}u, v)];
     if (i == 0u) { r = nw[nseg(${S.r0}u, v)].xyz; } else {
       let o = (i + 1u) % 2u;
       let rOld = nw[nseg(${S.r0}u + o, v)].xyz;
       let sv = nw[nseg(${S.w0}u + o, v)].xyz + beta * nw[nseg(${S.s0}u + i % 2u, v)].xyz;
-      let pv = nwPrecondition(M0, M1, rOld) + beta * nw[nseg(${S.p}u, v)].xyz;
+      let pv = ${mg ? 'nw[MG_U + v].xyz' : 'nwPrecondition(M0, M1, rOld)'} + beta * nw[nseg(${S.p}u, v)].xyz;
       r = rOld - alpha * sv;
       nw[nseg(${S.p}u, v)] = vec4f(pv, 0.0);
       nw[nseg(${S.d}u, v)] = vec4f(nw[nseg(${S.d}u, v)].xyz + alpha * pv, 0.0);
@@ -219,6 +223,8 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
     }
     u = nwPrecondition(M0, M1, r);
   }
+`}
+${phase === 'prepare' ? `}` : `
   pcgStage(lane, u);
   for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, pcgUGlobal(topo[halo + h])); }${variant === 'compiled' && lin?.staged ? `
   linStageKeys(lane, p);` : ''}
@@ -232,7 +238,7 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   }
   ${reduce(`vec4f(dot(r, u), dot(w, u), select(0.0, dot(r, r), i == 0u), select(0.0, f32(own && nw[nseg(${S.g}u, v)].w > 1.0), i == 0u))`)}
   if (lane == 0u) { nw[pcgPartial(i % 3u, p)] = total; }
-}`;
+}`}`;
   };
   return /* wgsl */`
 @group(0) @binding(${binding}) var<storage, read_write> nw: array<vec4f>;
@@ -642,10 +648,10 @@ fn pcgMr(j: u32, r: vec3f) -> vec3f { return nwPrecondition(nw[nseg(${S.m0}u, j)
 // s_{i-1} with s_{i-1} = w_{i-1} + beta s_{i-2}.
 fn pcgUGlobal(j: u32) -> vec3f {
   if (pcgSrc == 1u) { return nwMove(j, 0u, 1.0); }
-  if (pcgI == 0u) { return pcgMr(j, nw[nseg(${S.r0}u, j)].xyz); }
+  ${mg ? 'return nw[MG_U+j].xyz;' : `if (pcgI == 0u) { return pcgMr(j, nw[nseg(${S.r0}u, j)].xyz); }
   let o = (pcgI + 1u) % 2u;
   let sv = nw[nseg(${S.w0}u + o, j)].xyz + pcgBeta * nw[nseg(${S.s0}u + pcgI % 2u, j)].xyz;
-  return pcgMr(j, nw[nseg(${S.r0}u + o, j)].xyz - pcgAlpha * sv);
+  return pcgMr(j, nw[nseg(${S.r0}u + o, j)].xyz - pcgAlpha * sv);`}
 }
 // u at a column of a one-patch problem (pcgSolve): no halo, so every column is a staged row.
 fn pcgULocal(c: u32) -> vec3f { return vec3f(pcgUx[c], pcgUy[c], pcgUz[c]); }
@@ -677,6 +683,7 @@ fn pcgRowProduct(lane: u32, K1: u32, K2: u32, blocks: u32, bends: u32) -> vec3f 
   return w;
 }
 ${lin ? clothContactLinWGSL(lin) : ''}
+${mg ? clothMultigridWGSL(mg, contact) + pcgStepWGSL('pcgPrepare', 'single', 'prepare') : ''}
 ${pcgStepWGSL('pcgStep', lin ? 'compiled' : 'single')}${lin ? `
 
 // The rows of patches the compiled records could not hold (pcgStep, 'overflow'): the same iteration, matrix-free.

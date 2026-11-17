@@ -9,6 +9,7 @@ import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
 import { performEditorAction } from "../lib/core/editor-action-runtime";
 import { sceneDocumentVerbs } from "../lib/core/editor-scene-document";
 import { getMethod, registeredSimulationMethods } from "../lib/core/method-registry";
+import { resolvedMethodValues } from "../lib/core/stores/method-store";
 import { Select } from "./ui";
 import { simulation } from "../lib/core/simulation/controller";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
@@ -120,26 +121,53 @@ function TankRow() {
  * this scene; a method that declares `scenes` is listed but disabled elsewhere. */
 function SolverRow() {
   const session = useSession();
-  const methodId = session.method(state => state.methodId);
+  const methodState = session.method();
+  const { methodId } = methodState;
+  const values = resolvedMethodValues(methodState);
   const sceneId = session.scene(state => state.scene.sceneId) ?? "";
   const method = getMethod(methodId);
   const methods = registeredSimulationMethods();
+  // Engine variants share a method id (and its saved parameters), but belong
+  // beside the other solvers so comparing them needs only this selector.
+  const options = methods.flatMap<{
+    value: string; label: string; disabled: boolean; hint: string;
+    methodId: string; engine?: string;
+  }>((candidate) => {
+    const runs = !candidate.scenes || candidate.scenes.includes(sceneId);
+    const hint = runs ? candidate.description : `${candidate.description} Runs only ${candidate.scenes!.join(", ")}.`;
+    const engine = candidate.params.find(spec => spec.key === "engine" && spec.kind === "select");
+    if (engine?.kind === "select") return engine.options.map(option => ({
+      value: `${candidate.id}:${option.value}`,
+      label: `${candidate.shortLabel} · ${option.label}`,
+      disabled: !runs,
+      hint,
+      methodId: candidate.id,
+      engine: option.value,
+    }));
+    return [{ value: candidate.id, label: candidate.shortLabel, disabled: !runs, hint,
+      methodId: candidate.id, engine: undefined }];
+  });
+  const selected = options.find(option => option.methodId === methodId
+    && (option.engine === undefined || option.engine === values.engine));
   return <ToolstripRow
     icon={<Sigma width={14} height={14} strokeWidth={1.7} aria-hidden />}
     name="Fluid solver"
     hint={method.description}
     testId="scene-solver-row"
-    after={methods.length > 1
+    after={options.length > 1
       ? <Select<string>
         ariaLabel="Fluid solver"
         testId="scene-solver-select"
-        value={methodId}
-        options={methods.map((candidate) => {
-          const runs = !candidate.scenes || candidate.scenes.includes(sceneId);
-          return { value: candidate.id, label: candidate.shortLabel, disabled: !runs,
-            hint: runs ? candidate.description : `${candidate.description} Runs only ${candidate.scenes!.join(", ")}.` };
-        })}
-        onChange={(id) => simulation.setMethod(id, session.id)}
+        value={selected?.value ?? methodId}
+        options={options}
+        onChange={(id) => {
+          const option = options.find(candidate => candidate.value === id);
+          if (!option) return;
+          // Set the inactive method's engine before switching to it, so the
+          // switch starts the requested engine with a single reset.
+          if (option.engine !== undefined) simulation.setMethodParam(option.methodId, "engine", option.engine, session.id);
+          simulation.setMethod(option.methodId, session.id);
+        }}
       />
       : <span className="toolstrip-name">{method.shortLabel}</span>}
   />;

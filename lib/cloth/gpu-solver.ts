@@ -1,3 +1,5 @@
+import { withLazyClothLineSearch } from './lazy-line-search';
+import { CLOTH_MG_KERNELS, withClothMultigrid } from './multigrid';
 /**
  * GPU cloth solver: one implicit step per `encodeStep`, at the scene dt, by Newton-PCG on the step's objective
  * (gpu-newton-wgsl.ts; caps and tolerances in `newton`). There are no substeps. Every per-step stage runs on the GPU
@@ -69,6 +71,11 @@ export interface ClothStepHooks {
 }
 
 export interface ClothGPUSolverOptions {
+  readonly lazyLineSearch?: 1 | 2;
+  /** Experimental aggregation V-cycle preconditioner. */
+  readonly multigrid?: boolean;
+  readonly multigridAggregateSize?: number;
+  readonly multigridFusedRows?: number;
   /** World position of the cloth-local origin. */
   readonly origin_m: ClothVector;
   readonly dt_s: number;
@@ -470,7 +477,7 @@ const CONTACT_LIN_KERNELS = ['nwLinCount', 'nwLinBuild'] as const;
 const CONTACT_LIN_PCG_KERNELS = ['pcgStepOverflow'] as const;
 /** With contact: the BDF2 restart's scans of C2's contact state. */
 const RESTART_KERNELS = ['restartScan', 'onsetScan'] as const;
-type Kernel = 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number] | typeof CONTACT_LIN_KERNELS[number] | typeof CONTACT_LIN_PCG_KERNELS[number];
+type Kernel = 'nwTrialHead' | 'nwTrialTail' | 'nwTrialHeadGate' | typeof CLOTH_MG_KERNELS[number] | 'grabBegin' | 'beginStep' | 'frameElements' | 'frame' | 'diagnose' | 'reduceDiagnostics' | 'finishStep' | typeof NEWTON_KERNELS[number] | typeof RESTART_KERNELS[number] | typeof CONTACT_NEWTON_KERNELS[number] | typeof CONTACT_LIN_KERNELS[number] | typeof CONTACT_LIN_PCG_KERNELS[number];
 const KERNELS: readonly Kernel[] = ['grabBegin', 'beginStep', 'frameElements', 'frame', 'diagnose', 'reduceDiagnostics', 'finishStep', ...NEWTON_KERNELS];
 
 export class ClothGPUSolver {
@@ -509,7 +516,10 @@ export class ClothGPUSolver {
     this.newton = { ...CLOTH_NEWTON_DEFAULTS, ...o };
     if (!(this.newton.pcgTolerance >= 0 && this.newton.residualTolerance >= 0 && this.newton.velocityTolerance_m_s >= 0)) throw new Error('Cloth Newton tolerances must be non-negative');
     if (!(this.newton.forcingMax >= 0 && this.newton.forcingMax < 1)) throw new Error(`Cloth Newton forcingMax must be in [0, 1), got ${this.newton.forcingMax}`);
+    if(this.options.lazyLineSearch && this.newton.trustRegion !== 'off') throw new Error('Lazy line search requires ordinary Armijo mode');
+    if(this.options.lazyLineSearch !== undefined && ![1,2].includes(this.options.lazyLineSearch)) throw new Error('Unknown lazy line search prefix');
     if (this.newton.trustRegion !== 'off' && this.newton.trustRegion !== 'hybrid') throw new Error(`Unknown cloth Newton trustRegion ${String(this.newton.trustRegion)}`);
+    if (options.multigrid && this.newton.trustRegion === 'hybrid') throw new Error('Cloth multigrid requires the PSD line-search operator; hybrid trust region is unsupported');
     if (this.newton.activeSet !== 'on' && this.newton.activeSet !== 'off') throw new Error(`Unknown cloth Newton activeSet ${String(this.newton.activeSet)}`);
     if (this.newton.contactLinearization !== 'off' && this.newton.contactLinearization !== 'factorized' && this.newton.contactLinearization !== 'blocks')
       throw new Error(`Unknown cloth Newton contactLinearization ${String(this.newton.contactLinearization)}`);
@@ -523,7 +533,8 @@ export class ClothGPUSolver {
     if (device.limits.maxStorageBuffersPerShaderStage < need)
       throw new Error(`Cloth solver needs ${need} storage buffers per stage; the device grants ${device.limits.maxStorageBuffersPerShaderStage}`);
     this.diagnostics = !!options.diagnostics; this.hooks = options.hooks ?? {};
-    this.tables = packClothGPUTables(model, options.origin_m, options, options.solverState?.time_s ?? 0, device.limits.maxComputeWorkgroupStorageSize);
+    const packed = packClothGPUTables(model, options.origin_m, options, options.solverState?.time_s ?? 0, device.limits.maxComputeWorkgroupStorageSize);
+    this.tables = options.multigrid ? withClothMultigrid(packed, model, options.multigridAggregateSize, options.multigridFusedRows) : packed;
     const label = options.label ?? 'Cloth', storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const make = (name: string, bytes: number, usage = storage) => device.createBuffer({ label: `${label} ${name}`, size: Math.max(256, align(bytes, 256)), usage });
     this.positions = make('positions', 16 * this.tables.stride);
@@ -547,7 +558,7 @@ export class ClothGPUSolver {
       F[18] = this.newton.forcingMax ** 2;
     }
     // One dispatch record per PCG dispatch i = 0 .. pcgIterations: (0, N, i, 0).
-    const dispatches = this.newton.pcgIterations + 1;
+    const dispatches = Math.max(this.newton.pcgIterations + 1, 2 * (this.tables.pcg.multigrid?.levels.length ?? 0) + 1);
     this.dispatch = make('dispatch records', CLOTH_DISPATCH_STRIDE * dispatches, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     writeBufferChunked(device.queue, this.topo, 0, this.tables.topo);
     writeBufferChunked(device.queue, this.rest, 0, this.tables.rest);
@@ -607,7 +618,8 @@ export class ClothGPUSolver {
       ...(contact ? [buffer(B.contact, contact.buffer), buffer(B.contactState, contact.state)] : [])] });
     // The PCG reductions take two subgroupAdds where the device has subgroups of at least 16 lanes (256 / 16 partials).
     const subgroups = d.features.has('subgroups') && (d.adapterInfo?.subgroupMinSize ?? 0) >= 16;
-    const module = d.createShaderModule({ label: 'Cloth solver', code: clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies }) });
+    const baseSource = clothSolverWGSL({ contactBlock: contact?.wgsl, pcg: this.tables.pcg, subgroups, trustRegion: this.newton.trustRegion === 'hybrid', activeSet: this.newton.activeSet === 'on', verifies: !!contact?.verifies });
+    const module = d.createShaderModule({label:'Cloth solver',code:this.options.lazyLineSearch ? withLazyClothLineSearch(baseSource,this.options.lazyLineSearch) : baseSource});
     const pipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [layout] });
     // The indirect overflow: group 1 (the linearization's) holds pcgStepOverflow's dispatch
     // count, bound by nwLinCount and nwLinBuild alone; pcgStepOverflow keeps the group-0 layout, so the args, its
@@ -618,9 +630,12 @@ export class ClothGPUSolver {
       linLayout = d.createPipelineLayout({ bindGroupLayouts: [layout, group1] });
       this.linArgsGroup = d.createBindGroup({ label: 'Cloth contact linearization args', layout: group1, entries: [buffer(CLOTH_CONTACT_LIN_ARGS.binding, this.linArgs)] });
     }
-    const kernels: readonly Kernel[] = [...KERNELS, ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? [...CONTACT_LIN_KERNELS, ...CONTACT_LIN_PCG_KERNELS] : [])];
+    const kernels: readonly Kernel[] = [...KERNELS, ...(this.options.lazyLineSearch ? ['nwTrialHead','nwTrialHeadGate','nwTrialTail'] as const : []), ...(this.tables.pcg.multigrid ? CLOTH_MG_KERNELS : []), ...(contact ? [...RESTART_KERNELS, ...CONTACT_NEWTON_KERNELS] : []), ...(this.tables.pcg.contactLin ? [...CONTACT_LIN_KERNELS, ...CONTACT_LIN_PCG_KERNELS] : [])];
     const lin = new Set<Kernel>(CONTACT_LIN_KERNELS);
-    const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: lin.has(entryPoint) ? linLayout : pipelineLayout, compute: { module, entryPoint } })));
+    const built = await Promise.all(kernels.map(entryPoint => d.createComputePipelineAsync({ label: `Cloth ${entryPoint}`, layout: lin.has(entryPoint) ? linLayout : pipelineLayout, compute: { module, entryPoint } }).catch(async error => {
+      const info = await module.getCompilationInfo();
+      throw new Error(`Cloth ${entryPoint}: ${info.messages.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("\n") || String(error)}`);
+    })));
     this.pipelines = Object.fromEntries(kernels.map((n, i) => [n, built[i]!])) as Record<Kernel, GPUComputePipeline>;
   }
 
@@ -680,6 +695,19 @@ export class ClothGPUSolver {
   }
 
   /** Encode exactly one implicit step of length dt into `pass`. */
+  private encodeMultigrid(pass: GPUComputePassEncoder, iteration: number) {
+    const { levels, fusedLevel } = this.tables.pcg.multigrid!;
+    this.run(pass, 'mgInit', this.threads(this.N), iteration);
+    const smooth = (l: number) => {
+      this.run(pass, 'mgSmooth', this.threads(levels[l]!.n), 2*l);
+      this.run(pass, 'mgSmooth', this.threads(levels[l]!.n), 2*l+1);
+    };
+    for (let l = 0; l < fusedLevel; l++) { smooth(l); this.run(pass, 'mgRestrict', this.threads(levels[l+1]!.n), l); }
+    this.run(pass, 'mgCoarseCycle', 1);
+    for (let l = fusedLevel - 1; l >= 0; l--) { this.run(pass, 'mgProlong', this.threads(levels[l]!.n), l); smooth(l); }
+    this.run(pass, 'mgFinish', this.threads(this.N));
+  }
+
   encodeStep(pass: GPUComputePassEncoder): void {
     const limited = this.tables.strainLimited, o = this.newton, W = this.threads(this.N);
     if (this.grabAnchorsPending) { this.run(pass, 'grabBegin', W); this.grabAnchorsPending = false; }
@@ -694,17 +722,25 @@ export class ClothGPUSolver {
       this.run(pass, 'nwGradient', W);
       // The contact linearization at this iterate, compiled for every product of the iteration (pcgStep, nwModel).
       if (this.tables.pcg.contactLin) for (const name of CONTACT_LIN_KERNELS) this.run(pass, name, this.tables.pcg.patches);
+      const mg = this.tables.pcg.multigrid;
+      if (mg) {
+        this.run(pass, 'mgAssemble', this.threads(mg.levels[0]!.blocks));
+        for (let l = 1; l < mg.levels.length; l++) this.run(pass, 'mgCoarsen', this.threads(mg.levels[l]!.blocks), l);
+        for (let l = 0; l < mg.levels.length; l++) this.run(pass, 'mgScale', this.threads(mg.levels[l]!.n), l);
+      }
       // PCG: dispatch 0 starts the solve, dispatch i >= 1 takes iteration i (one dispatch each, Chronopoulos-Gear).
       // One patch (every vertex a row of one workgroup): the whole solve in one dispatch, its stop a loop break.
-      if (this.tables.pcg.patches === 1) this.run(pass, 'pcgSolve', 1, o.pcgIterations);
+      if (this.tables.pcg.patches === 1 && !mg) this.run(pass, 'pcgSolve', 1, o.pcgIterations);
       else for (let i = 0; i <= o.pcgIterations; i++) {
+        if (mg) { this.run(pass, 'pcgPrepare', this.tables.pcg.patches, i); this.encodeMultigrid(pass, i); }
         this.run(pass, 'pcgStep', this.tables.pcg.patches, i);
         // With compiled records: the same iteration's rows of the patches they could not hold (matrix-free).
         if (this.tables.pcg.contactLin) this.run(pass, 'pcgStepOverflow', this.tables.pcg.patches, i);
       }
       this.hooks.filter?.(pass);
       if (this.options.contact) this.run(pass, 'nwProject', W);
-      this.run(pass, 'nwTrial', W);
+      if(this.options.lazyLineSearch){this.run(pass,'nwTrialHead',W);this.run(pass,'nwTrialHeadGate',1);this.run(pass,'nwTrialTail',W);}
+      else this.run(pass, 'nwTrial', W);
       // Trust-region iterations (newton.trustRegion 'hybrid'): s.H s of the projected step for the model's decrease.
       if (o.trustRegion === 'hybrid') this.run(pass, 'nwModel', this.tables.pcg.patches);
       this.run(pass, 'nwChoose', 1);
@@ -732,6 +768,13 @@ export class ClothGPUSolver {
    * full line-search steps, trust-region iterations, of them rejected, the last ratio rho), the last direction (control
    * + 5: its squared preconditioner norm, whether its solve ended on the boundary) and the last trust-region iteration's
    * model (control + 6: g.s, s.H s, contact's share of s.H s, the energy change at s). */
+  /** Execution-only counts, outside timed submissions. */
+  async readLineSearchWork(): Promise<{heads:number;tails:number}|undefined> {
+    if(!this.options.lazyLineSearch)return undefined;
+    const at=this.tables.newtonRecords-CLOTH_SEGMENT_ALIGN+7;
+    const data=new Float32Array(await this.readRange(this.newtonWork,16*at,16));
+    return {heads:data[1]!,tails:data[2]!};
+  }
   async readNewtonControl(): Promise<Float32Array> {
     const L = this.tables.newtonRecords - CLOTH_SEGMENT_ALIGN;
     const out = new Float32Array(await this.readRange(this.newtonWork, 16 * L, 112));

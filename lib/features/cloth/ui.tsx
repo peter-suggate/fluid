@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { formatPipelineDuration, pipelineCostFigure } from "../../../components/PipelineCost";
-import { RailChoice, RailLine, RailRange, RailReadout, RailRule } from "../../../components/rail";
+import { RailChoice, RailLine, RailRange, RailReadout, RailRule, RailSelect } from "../../../components/rail";
 import { Stepper } from "../../../components/ui";
+import { clothExecutionSettings } from "../../cloth/execution-settings";
 import { CLOTH_NEWTON_SCENE_DEFAULTS } from "../../cloth/newton-defaults";
 import { CLOTH_STAGES, type ClothPerformanceSample, type ClothStageId } from "../../cloth/stage-timing";
-import type { ClothDocument, ClothNewtonSettings } from "../../cloth/types";
+import type { ClothDocument, ClothNewtonSettings, ClothSolverSettings } from "../../cloth/types";
 import { useSession } from "../../core/session/session-context";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { clothFeature } from "./definition";
@@ -150,17 +151,68 @@ export function ClothSettingsLines() {
   const patchScene = session.scene((state) => state.patchScene);
   const facts = session.diagnostics((state) => state.gpuInfo?.clothPerformance?.documents);
   if (!cloth?.length) return null;
+  const patchSolver = (document: ClothDocument, patch: Partial<ClothSolverSettings>) => {
+    patchScene({ cloth: cloth.map(d => d.id === document.id ? { ...d, solver: { ...d.solver, ...patch } } : d) });
+  };
   const patchNewton = (document: ClothDocument, patch: Partial<ClothNewtonSettings>) => {
     const newton = { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton, ...patch };
     patchScene({ cloth: cloth.map(d => d.id === document.id ? { ...d, solver: { ...d.solver, newton } } : d) });
   };
   return <>
     {cloth.map(document => {
-      const newton = { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton };
+      const execution = clothExecutionSettings(document.solver, true);
+      const newton = execution.newton;
       const fact = facts?.find(f => f.id === document.id);
       const name = cloth.length > 1 ? `Solver · ${document.id}` : "Solver";
       return <div key={document.id} data-testid={`cloth-settings-${document.id}`}>
         <RailRule label={name} />
+        <RailChoice label="Optimizations" value={execution.enabled ? "on" : "off"}
+          hint="Validated live performance improvements. Off restores baseline defaults; your explicit solver tuning is retained."
+          options={[{value:"on",label:"On"},{value:"off",label:"Off"}]}
+          onChange={v => patchSolver(document,{optimizations:v === "on"})} />
+        <RailChoice label="Collision search" value={execution.broadphase} disabled={!execution.enabled}
+          hint="All modes retain exact contact checks. BVH refits a hierarchy; Cached grid reuses candidate lists."
+          options={[{value:"bvh",label:"BVH"},{value:"grid",label:"Grid"},{value:"cached-grid",label:"Cached"}]}
+          onChange={contactBroadphase => patchSolver(document,{contactBroadphase})} />
+        <RailSelect label="Edge evaluation" value={execution.edgeEvaluation} disabled={!execution.enabled}
+          hint="Packet shares BVH traversal across nearby edges, then computes exact contacts. Devices without subgroup support use Staged. All choices retain both contact records."
+          options={[{value:"directed",label:"Both"},{value:"unique",label:"Once"},{value:"pruned",label:"Pruned"},{value:"staged",label:"Staged"},{value:"packet",label:"Packet"}]}
+          onChange={contactEdgeEvaluation => patchSolver(document,{contactEdgeEvaluation,...((contactEdgeEvaluation === "staged" || contactEdgeEvaluation === "packet") ? {contactBroadphase:"bvh" as const} : {})})} />
+        <RailSelect label="Vertex queries" value={execution.vertexEvaluation} disabled={!execution.enabled || !execution.edgeStageCapacity}
+          hint="Staged separates vertex–triangle search from exact contact calculations. Packet shares traversal across nearby vertices. Requires staged edge evaluation; devices without subgroup support use Staged."
+          options={[{value:"direct",label:"Direct"},{value:"staged",label:"Staged"},{value:"packet",label:"Packet"}]}
+          onChange={contactVertexEvaluation=>patchSolver(document,{contactVertexEvaluation})}/>
+        <RailChoice label="Energy evaluation" value={execution.lazyLineSearch ? "lazy" : "eager"} disabled={!execution.enabled || newton.trustRegion === "hybrid"}
+          hint="Lazy evaluates the full-step energy first and evaluates the remaining line-search choices only if needed. The acceptance rule and projections are unchanged."
+          options={[{value:"lazy",label:"Lazy"},{value:"eager",label:"Eager"}]}
+          onChange={v=>patchSolver(document,{lazyLineSearch:v === "lazy"})}/>
+        <RailSelect label="Conflict preflight" value={execution.conflictReuse} disabled={!execution.enabled}
+          hint="Recheck known conflicts before allocating contacts for an attempt that must retry. All includes solids. The accepted retry still runs complete contact and capacity checks."
+          options={[{value:"off",label:"Off"},{value:"cloth",label:"Cloth"},{value:"all",label:"All"}]}
+          onChange={contactConflictReuse=>patchSolver(document,{contactConflictReuse})}/>
+        <RailChoice label="Reuse solid candidates" value={execution.solidCandidateReuse ? "on" : "off"} disabled={!execution.enabled || execution.broadphase !== "bvh"}
+          hint="Reuse possible solid–cloth pairs during collision rescue. Every contact is rechecked; escaping bounds or a full cache restores the complete search."
+          options={[{value:"on",label:"On"},{value:"off",label:"Off"}]}
+          onChange={v=>patchSolver(document,{contactSolidCandidateReuse:v === "on"})}/>
+        <RailChoice label="BVH leaf faces" value={String(execution.bvhLeafSize)} disabled={!execution.enabled || execution.broadphase !== "bvh"}
+          hint="Faces per leaf; changes traversal cost without changing contact coverage."
+          options={[2,4,8,16].map(n=>({value:String(n),label:String(n)}))}
+          onChange={n => patchSolver(document,{contactBvhLeafSize:Number(n) as 2|4|8|16})} />
+        <RailChoice label="Separation culling" value={execution.separationCulling ? "on" : "off"} disabled={!execution.enabled}
+          hint="Skip exact distance tests only when swept support bounds prove the pair stays separated."
+          options={[{value:"on",label:"On"},{value:"off",label:"Off"}]}
+          onChange={v => patchSolver(document,{contactSeparationCulling:v === "on"})} />
+        <RailChoice label="Preconditioner" value={execution.multigrid ? "multigrid" : "diagonal"} disabled={!execution.enabled || newton.trustRegion === "hybrid"}
+          hint="Multigrid is experimental; compare its total cost and convergence against the diagonal preconditioner."
+          options={[{value:"diagonal",label:"Diagonal"},{value:"multigrid",label:"Multigrid"}]}
+          onChange={v => patchSolver(document,{multigrid:v === "multigrid"})} />
+        <RailLine label="Inexact solve" hint="Adaptive inner-solve tolerance ceiling; zero uses the fixed PCG tolerance.">
+          <Stepper value={newton.forcingMax ?? 0} min={0} max={0.9} step={0.1} digits={1} ariaLabel="Cloth inexact solve ceiling"
+            onChange={forcingMax => patchNewton(document,{forcingMax})} />
+        </RailLine>
+        <RailChoice label="Contact products" value={newton.contactLinearization ?? "off"}
+          options={[{value:"off",label:"Direct"},{value:"factorized",label:"Cached"},{value:"blocks",label:"Blocks"}]}
+          onChange={contactLinearization => patchNewton(document,{contactLinearization})} />
         <RailLine label="Newton its" hint="Newton iterations per step (cap). Each one re-assembles, solves and line-searches.">
           <Stepper value={newton.iterations} min={1} max={32} step={1} digits={0} ariaLabel="Cloth Newton iterations"
             decreaseHint="One Newton iteration fewer" increaseHint="One Newton iteration more"
@@ -178,7 +230,7 @@ export function ClothSettingsLines() {
         <RailChoice<"off" | "hybrid"> label="Trust region" value={newton.trustRegion ?? "off"}
           hint="'hybrid': the line search until two consecutive full steps, then Steihaug-Toint trust-region iterations for the rest of the step."
           options={[{ value: "off", label: "Off" }, { value: "hybrid", label: "Hybrid" }]}
-          onChange={trustRegion => patchNewton(document, { trustRegion })} />
+          onChange={trustRegion => patchSolver(document, { multigrid: trustRegion === "hybrid" ? false : document.solver?.multigrid, newton: { ...CLOTH_NEWTON_SCENE_DEFAULTS, ...document.solver?.newton, trustRegion } })} />
         <RailReadout label="Integrator" value={(document.solver?.integrator ?? "bdf2").toUpperCase()} />
         {fact && <RailReadout label="Mesh" value={`${fact.vertices.toLocaleString()} v · ${fact.triangles.toLocaleString()} t`}
           hint={`${fact.vertices} vertices, ${fact.triangles} triangles, ${fact.edges} edges; contact radius ${(fact.contactRadius_m * 1000).toFixed(2)} mm.`} />}

@@ -1,3 +1,4 @@
+import type { OgcCandidateCacheOptions } from './contact/candidate-cache-wgsl';
 /**
  * Scene contact for the cloth system: lane C2's OGC detector attached to each
  * document's Tier A solver. It sees the cloth itself (self contact) and the
@@ -213,14 +214,14 @@ function meshOf(model: ClothSolverModel, origin: ClothVector): { mesh: OgcMeshTo
  * the field.
  */
 export async function createClothSceneContact(device: GPUDevice, model: ClothSolverModel, document: ClothDocument, origin: ClothVector,
-  field: ClothSolidField, dt_s: number, gravity_m_s2: readonly [number, number, number], bodyField?: ClothSolidField, newton = false, locality?: string): Promise<OgcContactDetector> {
+  field: ClothSolidField, dt_s: number, gravity_m_s2: readonly [number, number, number], bodyField?: ClothSolidField, newton = false, locality?: string, candidateCache?: OgcCandidateCacheOptions, separationCulling?: boolean, broadphase?: "grid" | "bvh", bvhLeafSize?: number, uniqueEdgePairs?: boolean, bvhEdgePruning?: boolean, edgeStageCapacity?: number, edgeStageWorkgroupSize?: 32 | 64 | 128 | 256, edgeStageBlockSize?: 1 | 4 | 16, edgeStagePacket?: boolean, conflictWitnesses?: boolean, vertexStage?: boolean, vertexStagePacket?: boolean, conflictWitnessSolids?: boolean, contactEntryCapacity?: number, mandatoryRedoCap?: number, macroCacheCapacity?: number, macroSpecialize?: boolean, bvhVerify?: boolean, macroWholeStep?: boolean, macroSampleGeometry?: boolean, datPathEarlyExit?: boolean, pairGeometryBuckets?: number, pairDecisions?: boolean, prediction: 'target' | 'guess' = 'target'): Promise<OgcContactDetector> {
   const r = clothContactRadius(document), { mesh, rest } = meshOf(model, origin), C = CLOTH_SCENE_CONTACT;
   const { vertexCount: N, faceCount: T, edgeCount: E } = model.topology;
   const edge = buildOgcTopology(mesh, rest).layout.maxEdgeLength;
   const config: OgcContactConfig = {
     r, kc: clothContactStiffness(document).kc_N_m, mu: document.solver?.selfFriction ?? 0, epsV: C.epsV_m_s, dt: dt_s, gravity: gravity_m_s2,
-    rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction: 'target',
-    contactCapacity: C.contactCapacity, pairCapacity: C.pairSlotsPerVertex * N, gridCapacity: C.gridEntriesPerPrimitive * (N + T + E),
+    rqBase: C.rqBase_m, rqMax: C.rqMax_m, envelopeScale: C.envelopeScale, prediction,
+    pairDecisions, pairGeometryBuckets, datPathEarlyExit, macroSampleGeometry, macroWholeStep, bvhVerify, macroSpecialize, macroCacheCapacity, mandatoryRedoCap, contactCapacity: contactEntryCapacity ?? C.contactCapacity, pairCapacity: C.pairSlotsPerVertex * N, gridCapacity: C.gridEntriesPerPrimitive * (N + T + E),
     bucketCount: C.bucketCount, roundCap: Math.max(C.roundCap, document.solver?.newton?.iterations ?? 0), solidCapacityWords: field.words.length, newton,
     // E12 (iii): the envelope capped at gamma_r times the smallest rest altitude, so a vertex's records are its approaches.
     envelopeMeshCap: true,
@@ -234,6 +235,7 @@ export async function createClothSceneContact(device: GPUDevice, model: ClothSol
     solidSampleCapacity: sampleCapacity(field, r, edge),
     // The query kernels' locality switch (the system's option; default OGC_LOCALITY_DEFAULT).
     ...(locality !== undefined ? { locality } : {}),
+    ...(candidateCache ? { candidateCache } : {}), separationCulling, broadphase, bvhLeafSize, uniqueEdgePairs, bvhEdgePruning, edgeStageCapacity, edgeStageWorkgroupSize, edgeStageBlockSize, edgeStagePacket, conflictWitnesses, vertexStage, vertexStagePacket, conflictWitnessSolids,
     ...(bodyField ? { body: { capacityWords: bodyField.words.length, sampleCapacity: sampleCapacity(bodyField, r, edge),
       poseCapacity: CLOTH_BODY_POSES_PER_FRAME } } : {}),
   };

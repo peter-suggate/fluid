@@ -1,3 +1,8 @@
+import { pairGeometryBoundsBodyWGSL, pairGeometryQueryWGSL, type OgcPairGeometryCache } from './pair-geometry-cache';
+import { macroBoundsBodyWGSL, macroCandidateQueryWGSL, macroSampleGeometryWGSL } from './macro-cache';
+import { ogcBVHPacketVertices, ogcBVHPacketEdges, ogcBVHQuery, ogcBVHRefit, type OgcBVHLayout } from './bvh';
+import { CLOTH_SEPARATION_CULL_WGSL } from './separation-culling-wgsl';
+import { candidateCacheCommon, candidateCachePass, candidateCacheDeclaration, CANDIDATE_CACHE_QUERY, type OgcCandidateCacheLayout } from './candidate-cache-wgsl';
 /**
  * Detection kernels of the OGC detector. Every kernel declares only the
  * bindings it uses, so each pipeline's auto layout is exactly its binding set.
@@ -98,7 +103,7 @@ struct OgcParams {
   fixedWord: u32, segWord: u32, recWord: u32, recCap: u32,
   recCountOff: u32, newton: u32, levelWord: u32, levelOn: u32,
   targetOff: u32, rqTop: f32, SF: u32, bodyFacetBase: u32,
-  SFB: u32, facetCap: u32, pad11: u32, pad12: u32,
+  SFB: u32, facetCap: u32, mandatoryRedoCap: u32, pad12: u32,
 }
 `;
 
@@ -113,7 +118,7 @@ export const OGC_PARAM = {
   bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62, facetBase: 63,
   edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67, solidDevOff: 68, bodyDevOff: 69, scaleOff: 70, originOff: 71,
   fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76, newton: 77, levelWord: 78, levelOn: 79, targetOff: 80, rqTop: 81,
-  SF: 82, bodyFacetBase: 83, SFB: 84, facetCap: 85,
+  SF: 82, bodyFacetBase: 83, SFB: 84, facetCap: 85, mandatoryRedoCap: 86,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -206,7 +211,7 @@ fn anchored(i: u32) -> vec3<f32> { return xdet[i].xyz + predOf(i); }
  */
 
 const REDO_CAP_FN = /* wgsl */`
-fn redoCap() -> u32 { return select(${OGC_REDO_ROUNDS + 1}u, ${OGC_REDO_MANDATORY}u, P.bodyBase != 0u); }
+fn redoCap() -> u32 { return select(${OGC_REDO_ROUNDS + 1}u, select(${OGC_REDO_MANDATORY}u, P.mandatoryRedoCap, P.mandatoryRedoCap != 0u), P.bodyBase != 0u); }
 // The fail-safe: every prediction held (and, with a moving solid, its impact zones carried).
 fn failSafeRound() -> bool { return atomicLoad(&counters[OGC_FORCE_HELD]) > ${OGC_REDO_ROUNDS}u; }
 `;
@@ -1741,7 +1746,119 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
  */
 export const OGC_QUERY_ROLES = ["queryVertex", "queryEdge", "querySample"] as const;
 export type OgcQueryRole = (typeof OGC_QUERY_ROLES)[number];
-export function ogcQueryWGSL(role: OgcQueryRole, L: OgcLocalityFlags = parseOgcLocality("off")): string {
+/** Shared arithmetic for the original and staged edge-query paths. */
+function vertexNarrowPhase(memo=false): string { return /* wgsl */`
+      let a = xd(tri.x); let b = xd(tri.y); let cc = xd(tri.z);
+      let cl = ${memo ? "memoTriangle(v,t,x,a,b,cc)" : "ogcClosestTriangle(x, a, b, cc)"};
+      let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
+      let d = length(x - cp);
+      dmin = min(dmin, d);
+      if (planar) {
+        if (datPairVT(x, d, v, tri, a, b, cc, rv)) { pairVT(v, tri, x, cp); out.dat++; }
+      } else {
+        atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
+      }
+      if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+      else if (d < P.r && vfAccept(v, x, t, tri, cl.feature)) {
+        let lambda = -ogcActivation(d, P.r, P.kc).y;
+        let ent = vec4<u32>(v, t | (cl.feature << 28u), bitcast<u32>(lambda), 0u);
+        pushEntry(v, ent);
+        if (cl.feature < 3u) { pushEntry(tri[cl.feature], ent); }
+        else if (cl.feature < OGC_FACE) { let li = cl.feature - 3u; pushEntry(tri[li], ent); pushEntry(tri[(li + 1u) % 3u], ent); }
+        else { pushEntry(tri.x, ent); pushEntry(tri.y, ent); pushEntry(tri.z, ent); }
+        out.pairs++;
+      }
+`; }
+function edgeNarrowPhase(uniqueEdgePairs: boolean): string { return /* wgsl */`
+        let q0 = xd(r2.x); let q1 = xd(r2.y);
+        // Canonical order, so both edges' threads compute bitwise the same pair.
+        var st: vec3<f32>;
+        if (e < e2) { st = ogcSegmentSegment(p0, p1, q0, q1); }
+        else { let w = ogcSegmentSegment(q0, q1, p0, p1); st = vec3<f32>(w.y, w.x, w.z); }
+        dmin = min(dmin, st.z);
+        if (planar && e < e2 && datPairEE(er, r2, st.z, p0, p1, q0, q1, re, max(envOf(r2.x), envOf(r2.y)))) {
+          pairEE(er, r2, p0 + st.x * (p1 - p0), q0 + st.y * (q1 - q0));
+          out.dat++;
+        }
+        if (!(st.z > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
+        else if (st.z < P.r && st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0) {
+          let lambda = -ogcActivation(st.z, P.r, P.kc).y;
+          let ent = vec4<u32>(e, e2 | OGC_EE_BIT, bitcast<u32>(lambda), pack2x16unorm(st.xy));
+          pushEntry(er.x, ent); pushEntry(er.y, ent);
+          ${uniqueEdgePairs ? `if (planar) {
+            let reverse = vec4u(e2, e | OGC_EE_BIT, bitcast<u32>(lambda), pack2x16unorm(st.yx));
+            pushEntry(r2.x, reverse); pushEntry(r2.y, reverse); out.pairs++;
+          }` : ''}
+          out.pairs++;
+        }
+`; }
+function ogcConflictTail(witnessMode?: "capture" | "probe", witnessSolids=false):string {
+  if(witnessMode === "probe")return `atomicStore(&counters[OGC_WITNESS_HIT],1u);atomicStore(&counters[OGC_CONFLICTS],1u);return pl;`;
+  return /* wgsl */`
+  ${witnessMode === "capture" ? "let conflictIndex = atomicAdd(&counters[OGC_CONFLICTS], 1u);" : "atomicAdd(&counters[OGC_CONFLICTS], 1u);"}
+  // A levelled re-detection's conflict redoes its round unlevelled (OGC_REDO_WGSL).
+  if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) {
+    ${witnessMode === "capture" ? (witnessSolids ? `if(all(ids<vec4u(P.N+P.S+P.SB))){
+      let cloth=all(ids<vec4u(P.N));
+      let reservation=atomicAdd(&counters[select(OGC_WITNESS_SOLID_CAPTURE,OGC_WITNESS_CLOTH_CAPTURE,cloth)],1u);
+      if(reservation<32u){
+        let slot=reservation+select(32u,0u,cloth);
+        let saved=select(ids,vec4u(ids.x|OGC_EE_BIT,ids.yzw),nA==2u);
+        for(var k=0u;k<4u;k++){atomicStore(&counters[OGC_WITNESS_POOL+4u*slot+k],saved[k]);}
+        atomicMax(&counters[OGC_WITNESS_COUNT],slot+1u);
+      }
+    }` : `if(conflictIndex<64u && all(ids<vec4u(P.N))){
+      let saved=select(ids,vec4u(ids.x|OGC_EE_BIT,ids.yzw),nA==2u);
+      for(var k=0u;k<4u;k++){atomicStore(&counters[OGC_WITNESS_POOL+4u*conflictIndex+k],saved[k]);}
+      atomicMax(&counters[OGC_WITNESS_COUNT],conflictIndex+1u);
+    }`) : ""}
+
+    var solid = false;
+    for (var k = 0u; k < 4u; k++) { if (ids[k] >= P.N) { solid = true; } }
+    atomicAdd(&counters[OGC_F_LEVEL_CONFLICTS + cause], select(1u, 65537u, solid));
+    return pl;
+  }
+  let redone = atomicLoad(&counters[OGC_FORCE_HELD]);
+  if (!failSafeRound()) { leastShift(ids, nA, pl, sg); return pl; }
+  // The fail-safe (redone past the least-shift redos): its cloth is held, or with a moving
+  // solid in the pair (its sample, or cloth already carried with it: bits 2 and 6), carried
+  // rigidly with the solid: an impact zone, which the next redo grows. Cloth that only touched
+  // the solid (bit 4) is held like any other: a held vertex the solid reaches is still pushed by
+  // its bound, and carrying every touched vertex's cloth pairs grew the curtain's zone over the
+  // pile on the floor (10k vertices, heldConflict at tick 126). A static sample's pair cannot be
+  // carried; it conflicts again until the last redo fails.
+  var carry = false;
+  if (P.bodyBase != 0u) {
+    var stat = false;
+    for (var k = 0u; k < 4u; k++) {
+      let i = ids[k];
+      if (i >= P.N + P.S && i < P.N + P.S + P.SB) { carry = true; }
+      else if (i >= P.N) { stat = true; }
+      else if ((atomicLoad(&work[P.heldOff + i]) & 68u) != 0u) { carry = true; }
+    }
+    carry = carry && !stat;
+  }
+  let mark = select(9u, 13u, carry);
+  var progress = false;
+  for (var k = 0u; k < 4u; k++) {
+    if (ids[k] < P.N) {
+      let old = atomicOr(&work[P.heldOff + ids[k]], mark);
+      if (carry && (old & 4u) == 0u) { atomicAdd(&counters[OGC_STEP_ZONE], 1u); atomicAdd(&counters[OGC_F_ZONE_VERTICES], 1u); }
+      if ((old & mark) != mark) { progress = true; }
+    }
+  }
+  if (progress) { atomicAdd(&counters[OGC_REDO_PROGRESS], 1u); }
+  // A conflict that marks nothing new, or one in the last round redone, is the step's
+  // failure (OGC_REDO_WGSL, OGC_REDO_LAST_WGSL).
+  if (!progress || redone == redoCap() || P.bodyBase == 0u) {
+    recordHeldConflict(select(ids, vec4<u32>(ids.x | OGC_EE_BIT, ids.yzw), nA == 2u));
+  }
+  return pl;
+`;
+}
+export function ogcQueryWGSL(role: OgcQueryRole, L: OgcLocalityFlags = parseOgcLocality("off"), cache?: OgcCandidateCacheLayout, separationCulling = false, bvh?: OgcBVHLayout, uniqueEdgePairs = false, edgeStage?: "collect" | "consume", witnessMode?: "capture" | "probe", witnessSolids=false): string {
+  const cursor = !!(cache || bvh);
+  const packet = edgeStage === "collect" && (role === "queryEdge" ? !!bvh?.edgeStagePacket : role === "queryVertex" && !!bvh?.vertexStagePacket);
   // The locality switch (OGC_LOCALITY_PARTS): off, every fragment below is the baseline's own text.
   const vertexFns = L.geometry ? LOC_GEO_FNS : triBoxFns(false) + "\nfn xd(i: u32) -> vec3<f32> { return xdet[i].xyz; }\n";
   const pairFns = L.geometry ? bodyPairFns(LOC_BODY_ACCESS_FNS) : BODY_PAIR_FNS;
@@ -1749,14 +1866,25 @@ export function ogcQueryWGSL(role: OgcQueryRole, L: OgcLocalityFlags = parseOgcL
   const faceMask = L.topology ? "let fr = faceRec(t); let te = fr.flags;" : "let te = topo[P.triEdgesOff + 4u * t + 3u];";
   const lo = role === "queryVertex" ? "0u" : role === "queryEdge" ? "P.N" : "P.N + P.E";
   const hi = role === "queryVertex" ? "P.N" : role === "queryEdge" ? "P.N + P.E" : "P.N + P.E + P.S + P.SB + P.SE + P.SEB + P.SF + P.SFB";
-  return header(ogcQueryBindings(L).filter(b => b < 24)) + (L.topology ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS + LOC_ORDER_FNS : "") + CELL_FNS + GRID_READ_FNS + vertexFns + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+  return (packet ? "enable subgroups;\n" : "") + header(ogcQueryBindings(L).filter(b => b < 24 && (!cursor || b !== 7))) + (L.topology ? DECL_LOC : "") + (L.geometry ? DECL_GEO : "") + LEVEL_FNS + SHIFT_CONSTS + TOPO_FNS + (L.topology ? LOC_TOPO_FNS + LOC_ORDER_FNS : "") + CELL_FNS + (bvh ? "" : cache ? GRID_READ_FNS.replaceAll("grid[", "cache.grid[") : GRID_READ_FNS) + vertexFns + (bvh ? (role === "querySample" && bvh.macroCache ? macroCandidateQueryWGSL(bvh) : ogcBVHQuery(bvh, bvh.pruneOwnedEdges && role === "queryEdge")) : cache ? candidateCacheCommon(cache) + CANDIDATE_CACHE_QUERY : "") + pairFns + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 
+${bvh?.pairGeometry ? pairGeometryQueryWGSL(bvh.pairGeometry) : ""}
 // ---- DAT division pairs: every non-adjacent pair whose swept boxes meet and that is
 // within the larger of the two primitives' envelopes (a face's or an edge's is its
 // vertices' widest) plus the pair's prediction spread, the largest difference of a
 // vertex's prediction on one side from one on the other. Two primitives left out
 // close by at most their two caps plus that spread over the round.
-const PAIR_BLOCK = ${PAIR_BLOCK}u;
+${edgeStage === "collect" ? `
+var<private> stageBase:u32;var<private> stageLeft:u32;
+fn stageEdge(e:u32,e2:u32){
+  if(stageLeft==0u){stageBase=atomicAdd(&counters[OGC_EDGE_STAGE_COUNT],${bvh!.edgeStageBlockSize ?? 1}u);stageLeft=${bvh!.edgeStageBlockSize ?? 1}u;}
+  let slot=stageBase+${bvh!.edgeStageBlockSize ?? 1}u-stageLeft;stageLeft--;
+  if(slot<${bvh!.edgeStageCapacity}u){bvh.data[${bvh!.words.length}u+2u*slot]=e;bvh.data[${bvh!.words.length}u+2u*slot+1u]=e2;}
+  else{atomicStore(&counters[OGC_EDGE_STAGE_OVERFLOW],1u);}
+}
+fn closeStage(){while(stageLeft>0u){stageEdge(OGC_NONE,OGC_NONE);}}
+` : ""}
+const PAIR_BLOCK = ${edgeStage === "consume" ? 1 : PAIR_BLOCK}u;
 var<private> pairBase: u32 = 0u;
 var<private> pairLeft: u32 = 0u;
 fn writePair(slot: u32, ids: vec4<u32>, pl: vec4<f32>, real: bool) {
@@ -1764,9 +1892,10 @@ fn writePair(slot: u32, ids: vec4<u32>, pl: vec4<f32>, real: bool) {
   else if (real) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_PAIR_OVERFLOW); }
 }
 fn pushPair(ids: vec4<u32>, pl: vec4<f32>) {
+${witnessMode === "probe" ? "" : `
   if (pairLeft == 0u) { pairBase = atomicAdd(&counters[OGC_PAIR_SLOTS], PAIR_BLOCK); pairLeft = PAIR_BLOCK; }
   writePair(pairBase + PAIR_BLOCK - pairLeft, ids, pl, true);
-  pairLeft -= 1u;
+  pairLeft -= 1u;`}
 }
 fn closePairs() {
   while (pairLeft > 0u) { writePair(pairBase + PAIR_BLOCK - pairLeft, vec4<u32>(OGC_NONE, 0u, 0u, 0u), vec4<f32>(0.0), false); pairLeft -= 1u; }
@@ -1826,50 +1955,7 @@ fn resolvePlane(ids: vec4<u32>, nA: u32, pl: vec4<f32>) -> vec4<f32> {
   if (!conflict) { return pl; }
   let alt = predictedAxis(ids, nA, sg);
   if (alt.w > 0.0) { return alt; }
-  atomicAdd(&counters[OGC_CONFLICTS], 1u);
-  // A levelled re-detection's conflict redoes its round unlevelled (OGC_REDO_WGSL).
-  if (atomicLoad(&counters[OGC_ROUNDS]) != 0u && levelled()) {
-    var solid = false;
-    for (var k = 0u; k < 4u; k++) { if (ids[k] >= P.N) { solid = true; } }
-    atomicAdd(&counters[OGC_F_LEVEL_CONFLICTS + cause], select(1u, 65537u, solid));
-    return pl;
-  }
-  let redone = atomicLoad(&counters[OGC_FORCE_HELD]);
-  if (!failSafeRound()) { leastShift(ids, nA, pl, sg); return pl; }
-  // The fail-safe (redone past the least-shift redos): its cloth is held, or with a moving
-  // solid in the pair (its sample, or cloth already carried with it: bits 2 and 6), carried
-  // rigidly with the solid: an impact zone, which the next redo grows. Cloth that only touched
-  // the solid (bit 4) is held like any other: a held vertex the solid reaches is still pushed by
-  // its bound, and carrying every touched vertex's cloth pairs grew the curtain's zone over the
-  // pile on the floor (10k vertices, heldConflict at tick 126). A static sample's pair cannot be
-  // carried; it conflicts again until the last redo fails.
-  var carry = false;
-  if (P.bodyBase != 0u) {
-    var stat = false;
-    for (var k = 0u; k < 4u; k++) {
-      let i = ids[k];
-      if (i >= P.N + P.S && i < P.N + P.S + P.SB) { carry = true; }
-      else if (i >= P.N) { stat = true; }
-      else if ((atomicLoad(&work[P.heldOff + i]) & 68u) != 0u) { carry = true; }
-    }
-    carry = carry && !stat;
-  }
-  let mark = select(9u, 13u, carry);
-  var progress = false;
-  for (var k = 0u; k < 4u; k++) {
-    if (ids[k] < P.N) {
-      let old = atomicOr(&work[P.heldOff + ids[k]], mark);
-      if (carry && (old & 4u) == 0u) { atomicAdd(&counters[OGC_STEP_ZONE], 1u); atomicAdd(&counters[OGC_F_ZONE_VERTICES], 1u); }
-      if ((old & mark) != mark) { progress = true; }
-    }
-  }
-  if (progress) { atomicAdd(&counters[OGC_REDO_PROGRESS], 1u); }
-  // A conflict that marks nothing new, or one in the last round redone, is the step's
-  // failure (OGC_REDO_WGSL, OGC_REDO_LAST_WGSL).
-  if (!progress || redone == redoCap() || P.bodyBase == 0u) {
-    recordHeldConflict(select(ids, vec4<u32>(ids.x | OGC_EE_BIT, ids.yzw), nA == 2u));
-  }
-  return pl;
+${ogcConflictTail(witnessMode,witnessSolids)}
 }
 // The least shift of a conflicting pair: its cloth's predictions move back along straight paths
 // towards an anchor c, Y(t) = X + c + t (w - c), only as far as the pair needs: c = a_v (moving
@@ -2046,6 +2132,9 @@ fn datPathVT(x: vec3<f32>, v: u32, tri: vec3<u32>, a: vec3<f32>, b: vec3<f32>, c
     let t = f32(k) / f32(K);
     let dk = datPointTri(x + t * wv, a + t * w0, b + t * w1, c + t * w2);
     lo = min(lo, 0.5 * (prev + dk));
+    ${bvh?.datPathEarlyExit ? `// Only the final threshold predicate consumes this lower bound. Once any
+    // interval fails it, further samples cannot restore separation: min only falls.
+    if (lo - L / (2.0 * f32(K)) <= thr) { return lo - L / (2.0 * f32(K)); }` : ""}
     prev = dk;
   }
   return lo - L / (2.0 * f32(K));
@@ -2059,12 +2148,15 @@ fn datPathEE(ep: vec4<u32>, eq: vec4<u32>, p0: vec3<f32>, p1: vec3<f32>, q0: vec
     let t = f32(k) / f32(K);
     let dk = datSegSeg(p0 + t * wp0, p1 + t * wp1, q0 + t * wq0, q1 + t * wq1);
     lo = min(lo, 0.5 * (prev + dk));
+    ${bvh?.datPathEarlyExit ? `// Only the final threshold predicate consumes this lower bound. Once any
+    // interval fails it, further samples cannot restore separation: min only falls.
+    if (lo - L / (2.0 * f32(K)) <= thr) { return lo - L / (2.0 * f32(K)); }` : ""}
     prev = dk;
   }
   return lo - L / (2.0 * f32(K));
 }
 // Whether v and face tri (at X: x; a, b, c) need a DAT pair: (i), then (ii) (a NaN keeps the pair).
-fn datPairVT(x: vec3<f32>, d: f32, v: u32, tri: vec3<u32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, rv: f32) -> bool {
+fn ${bvh?.pairGeometry?.decisions ? "datPairVTUncached" : "datPairVT"}(x: vec3<f32>, d: f32, v: u32, tri: vec3<u32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, rv: f32) -> bool {
   let L = spreadVT(v, tri);
   let wmax = max(absMax(predOf(v)), max(absMax(predOf(tri.x)), max(absMax(predOf(tri.y)), absMax(predOf(tri.z)))));
   let st = pathStray(v) + max(pathStray(tri.x), max(pathStray(tri.y), pathStray(tri.z)));
@@ -2072,6 +2164,10 @@ fn datPairVT(x: vec3<f32>, d: f32, v: u32, tri: vec3<u32>, a: vec3<f32>, b: vec3
   if (d > thr + L) { return false; }
   return !(datPathVT(x, v, tri, a, b, c, L, thr) > thr);
 }
+${bvh?.pairGeometry?.decisions ? `fn datPairVT(x:vec3f,d:f32,v:u32,tri:vec3u,a:vec3f,b:vec3f,c:vec3f,rv:f32)->bool {
+ let cached=pairDecisionLoad(vec4u(v,tri));if(cached!=0u){return (cached&1u)!=0u;}
+ return pairDecisionStore(datPairVTUncached(x,d,v,tri,a,b,c,rv));
+}` : ""}
 fn datPairEE(er: vec4<u32>, r2: vec4<u32>, d: f32, p0: vec3<f32>, p1: vec3<f32>, q0: vec3<f32>, q1: vec3<f32>, re: f32, re2: f32) -> bool {
   let L = spreadEE(er, r2);
   let wmax = max(max(absMax(predOf(er.x)), absMax(predOf(er.y))), max(absMax(predOf(r2.x)), absMax(predOf(r2.y))));
@@ -2136,19 +2232,25 @@ fn vfAccept(v: u32, x: vec3<f32>, t: u32, tri: vec3<u32>, feature: u32) -> bool 
   return true;
 }
 
-struct RoleOut { candidates: u32, pairs: u32, dat: u32, scanned: u32, collisions: u32, rejected: u32 }
+${separationCulling ? CLOTH_SEPARATION_CULL_WGSL : ""}
+struct RoleOut { candidates: u32, pairs: u32, dat: u32, scanned: u32, collisions: u32, rejected: u32, separated: u32, nodes: u32, faceTests: u32 }
 
 fn vertexFacet(v: u32) -> RoleOut {
-  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u);
+  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
   let planar = P.mode == OGC_PLANAR;
   let x = xd(v);
   let rv = envOf(v);
   let x1 = x + predOf(v);
   // Its swept box grown by its own envelope (local swept bounds, triBox).
   let q = OgcBox(min(x, x1) - vec3<f32>(rv), max(x, x1) + vec3<f32>(rv));
-  let inv = invCell();
-  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   var dmin = 3.4e38;
+${cursor ? `  var cursor = candidateFaces(q, v);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+      let tri = ${faceTri};
+      if (hasVertex(tri, v)) { continue; }
+` : `  let inv = invCell();
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
     let key = cellKey(c); let h = cellHash(c);
@@ -2161,33 +2263,17 @@ fn vertexFacet(v: u32) -> RoleOut {
       if (hasVertex(tri, v)) { continue; }
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
+`}      ${separationCulling ? 'if (planar && separatedClothPair(vec4u(v,tri),1u)) { out.separated++; continue; }' : ''}
       out.candidates++;
-      let a = xd(tri.x); let b = xd(tri.y); let cc = xd(tri.z);
-      let cl = ogcClosestTriangle(x, a, b, cc);
-      let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
-      let d = length(x - cp);
-      dmin = min(dmin, d);
-      if (planar) {
-        if (datPairVT(x, d, v, tri, a, b, cc, rv)) { pairVT(v, tri, x, cp); out.dat++; }
-      } else {
-        atomicMin(&work[P.dminTOff + t], bitcast<u32>(d));
-      }
-      if (!(d > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
-      else if (d < P.r && vfAccept(v, x, t, tri, cl.feature)) {
-        let lambda = -ogcActivation(d, P.r, P.kc).y;
-        let ent = vec4<u32>(v, t | (cl.feature << 28u), bitcast<u32>(lambda), 0u);
-        pushEntry(v, ent);
-        if (cl.feature < 3u) { pushEntry(tri[cl.feature], ent); }
-        else if (cl.feature < OGC_FACE) { let li = cl.feature - 3u; pushEntry(tri[li], ent); pushEntry(tri[(li + 1u) % 3u], ent); }
-        else { pushEntry(tri.x, ent); pushEntry(tri.y, ent); pushEntry(tri.z, ent); }
-        out.pairs++;
-      }
-    }
-  } } }
+      ${edgeStage === "collect" && role === "queryVertex" ? "stageEdge(v,t);continue;" : vertexNarrowPhase(!!bvh?.pairGeometry)}
+${cursor ? `  }
+  out.scanned += cursor.scanned; out.collisions += cursor.collisions; out.rejected += cursor.rejected;${bvh ? "out.nodes += cursor.nodes; out.faceTests += cursor.faceTests;" : ""}` : `    }
+  } } }`}
   atomicStore(&work[v], bitcast<u32>(dmin));
   return out;
 }
 
+${role === "querySample" && bvh?.macroCache?.geometry ? macroSampleGeometryWGSL(bvh) : ""}
 // A surface sample i (index N + s) against the cloth's faces: the faces' grid boxes
 // carry their predictions and their own envelopes, so the sample's bare swept box (a
 // point for a static sample; to its exact predicted end for the moving solid's; its
@@ -2195,13 +2281,17 @@ fn vertexFacet(v: u32) -> RoleOut {
 // vertices only (the sample is not solved for) and carry mu lambda with mu the solid's
 // at the sample (x_det.w); w = 1 marks them. The DAT pair puts the sample first, as a vertex.
 fn sampleFacet(i: u32) -> RoleOut {
-  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u);
+  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
   let planar = P.mode == OGC_PLANAR;
   let xs = xdet[i];
   let x = xs.xyz;
   let x1 = x + predOf(i);
   let q = OgcBox(min(x, x1), max(x, x1));
-  let inv = invCell();
+${cursor ? `  var cursor = candidateFaces(q, i + P.E);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+    let tri = ${faceTri};
+` : `  let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
   let c = vec3<i32>(cx, cy, cz);
@@ -2214,11 +2304,13 @@ fn sampleFacet(i: u32) -> RoleOut {
     if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
     let t = entryFace(j);
     let tri = ${faceTri};
-    out.candidates++;
+`}    out.candidates++;
     let a = xd(tri.x); let b = xd(tri.y); let cc = xd(tri.z);
-    let cl = ogcClosestTriangle(x, a, b, cc);
+    ${role === "querySample" && bvh?.macroCache?.geometry ? `let cl = sampleClosest(&cursor,x,a,b,cc);
     let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
-    let d = length(x - cp);
+    let d = length(x - cp);` : `let cl = ogcClosestTriangle(x, a, b, cc);
+    let cp = cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc;
+    let d = length(x - cp);`}
     if (planar) {
       if (d <= triEnv(tri) + spreadVT(i, tri)) { pairVT(i, tri, x, cp); out.dat++; }
     } else {
@@ -2235,8 +2327,9 @@ fn sampleFacet(i: u32) -> RoleOut {
       else { pushSampleEntry(tri.x, ent, mark); pushSampleEntry(tri.y, ent, mark); pushSampleEntry(tri.z, ent, mark); }
       out.pairs++;
     }
-  }
-  } } }
+${cursor ? `  }
+  out.scanned += cursor.scanned; out.collisions += cursor.collisions; out.rejected += cursor.rejected;${bvh ? "out.nodes += cursor.nodes; out.faceTests += cursor.faceTests;" : ""}` : `  }
+  } } }`}
   return out;
 }
 
@@ -2244,16 +2337,19 @@ fn sampleFacet(i: u32) -> RoleOut {
 // once. A pair whose closest points are inside both edges is an edge-edge contact; the
 // endpoint cases are vertex-edge contacts, which Algorithm 1 already holds.
 fn edgeEdge(e: u32) -> RoleOut {
-  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u);
+  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
   let planar = P.mode == OGC_PLANAR;
   let er = edgeRec(e);
   let p0 = xd(er.x); let p1 = xd(er.y);
   let re = max(envOf(er.x), envOf(er.y));
   let p01 = p0 + predOf(er.x); let p11 = p1 + predOf(er.y);
   let q = OgcBox(min(min(p0, p1), min(p01, p11)) - vec3<f32>(re), max(max(p0, p1), max(p01, p11)) + vec3<f32>(re));
-  let inv = invCell();
-  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   var dmin = 3.4e38;
+${cursor ? `  var cursor = candidateFaces(q, P.N + e);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+` : `  let inv = invCell();
+  let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
     let key = cellKey(c); let h = cellHash(c);
@@ -2264,32 +2360,19 @@ fn edgeEdge(e: u32) -> RoleOut {
       let t = entryFace(j);
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
-      ${faceMask}
+`}      ${faceMask}
       for (var k = 0u; k < 3u; k++) {
         if ((te & (1u << k)) == 0u) { continue; }
         ${L.topology ? "let e2 = fr.e[k]; let r2 = faceEdge(fr, k);" : "let e2 = topo[P.triEdgesOff + 4u * t + k];\n        let r2 = edgeRec(e2);"}
         if (r2.x == er.x || r2.x == er.y || r2.y == er.x || r2.y == er.y) { continue; }
+        ${uniqueEdgePairs ? 'if (planar && e2 < e) { continue; }' : ''}
+        ${separationCulling ? 'if (planar && separatedClothPair(vec4u(er.xy,r2.xy),2u)) { out.separated++; continue; }' : ''}
         out.candidates++;
-        let q0 = xd(r2.x); let q1 = xd(r2.y);
-        // Canonical order, so both edges' threads compute bitwise the same pair.
-        var st: vec3<f32>;
-        if (e < e2) { st = ogcSegmentSegment(p0, p1, q0, q1); }
-        else { let w = ogcSegmentSegment(q0, q1, p0, p1); st = vec3<f32>(w.y, w.x, w.z); }
-        dmin = min(dmin, st.z);
-        if (planar && e < e2 && datPairEE(er, r2, st.z, p0, p1, q0, q1, re, max(envOf(r2.x), envOf(r2.y)))) {
-          pairEE(er, r2, p0 + st.x * (p1 - p0), q0 + st.y * (q1 - q0));
-          out.dat++;
-        }
-        if (!(st.z > 0.0)) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_COINCIDENT); }
-        else if (st.z < P.r && st.x > 0.0 && st.x < 1.0 && st.y > 0.0 && st.y < 1.0) {
-          let lambda = -ogcActivation(st.z, P.r, P.kc).y;
-          let ent = vec4<u32>(e, e2 | OGC_EE_BIT, bitcast<u32>(lambda), pack2x16unorm(st.xy));
-          pushEntry(er.x, ent); pushEntry(er.y, ent);
-          out.pairs++;
-        }
+        ${edgeStage === "collect" ? 'stageEdge(e,e2);continue;' : edgeNarrowPhase(uniqueEdgePairs)}
       }
-    }
-  } } }
+${cursor ? `  }
+  out.scanned += cursor.scanned; out.collisions += cursor.collisions; out.rejected += cursor.rejected;${bvh ? "out.nodes += cursor.nodes; out.faceTests += cursor.faceTests;" : ""}` : `    }
+  } } }`}
   atomicStore(&work[P.dminEOff + e], bitcast<u32>(dmin));
   return out;
 }
@@ -2306,14 +2389,17 @@ fn hullEdgeAt(k: u32) -> vec2<u32> {
   return vec2<u32>(atomicLoad(&contacts[w]), atomicLoad(&contacts[w + 1u])) + vec2<u32>(off);
 }
 fn hullEdge(k: u32) -> RoleOut {
-  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u);
+  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
   if (P.mode != OGC_PLANAR) { return out; }
   let hv = hullEdgeAt(k);
   let hr = vec4<u32>(hv, 0u, 0u);
   let p0 = xd(hv.x); let p1 = xd(hv.y);
   let p01 = p0 + predOf(hv.x); let p11 = p1 + predOf(hv.y);
   let q = OgcBox(min(min(p0, p1), min(p01, p11)), max(max(p0, p1), max(p01, p11)));
-  let inv = invCell();
+${cursor ? `  var cursor = candidateFaces(q, P.N + P.E + P.S + P.SB + k);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+` : `  let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
@@ -2325,7 +2411,7 @@ fn hullEdge(k: u32) -> RoleOut {
       let t = entryFace(j);
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
-      ${faceMask}
+`}      ${faceMask}
       for (var m = 0u; m < 3u; m++) {
         if ((te & (1u << m)) == 0u) { continue; }
         let r2 = ${L.topology ? "faceEdge(fr, m)" : "edgeRec(topo[P.triEdgesOff + 4u * t + m])"};
@@ -2337,8 +2423,9 @@ fn hullEdge(k: u32) -> RoleOut {
           out.dat++;
         }
       }
-    }
-  } } }
+${cursor ? `  }
+  out.scanned += cursor.scanned; out.collisions += cursor.collisions; out.rejected += cursor.rejected;${bvh ? "out.nodes += cursor.nodes; out.faceTests += cursor.faceTests;" : ""}` : `    }
+  } } }`}
   return out;
 }
 
@@ -2361,7 +2448,7 @@ fn hullFacetAt(k: u32) -> vec4<u32> {
   return vec4<u32>(atomicLoad(&contacts[b]) + off, atomicLoad(&contacts[b + 1u]) + off, atomicLoad(&contacts[b + 2u]) + off, slot);
 }
 fn hullFacet(k: u32) -> RoleOut {
-  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u);
+  var out = RoleOut(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
   let planar = P.mode == OGC_PLANAR;
   let hf = hullFacetAt(k);
   let ids = hf.xyz;
@@ -2370,7 +2457,11 @@ fn hullFacet(k: u32) -> RoleOut {
   let q = OgcBox(min(min(min(a, b), cc), min(min(a1, b1), c1)), max(max(max(a, b), cc), max(max(a1, b1), c1)));
   let mu = vec3<f32>(xdet[ids.x].w, xdet[ids.y].w, xdet[ids.z].w);
   let mark = select(0u, 16u, k >= P.SF);
-  let inv = invCell();
+${cursor ? `  var cursor = candidateFaces(q, P.N + P.E + P.S + P.SB + P.SE + P.SEB + k);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+      ${L.topology ? "let fr = faceRec(t); let tri = fr.v;" : "let tri = triVerts(t);"}
+` : `  let inv = invCell();
   let c0 = cellOf(q.lo, inv); let cE = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= cE.z; cz++) { for (var cy = c0.y; cy <= cE.y; cy++) { for (var cx = c0.x; cx <= cE.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
@@ -2383,7 +2474,7 @@ fn hullFacet(k: u32) -> RoleOut {
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { out.rejected++; continue; }
       let t = entryFace(j);
       ${L.topology ? "let fr = faceRec(t); let tri = fr.v;" : "let tri = triVerts(t);"}
-      for (var m = 0u; m < 3u; m++) {
+`}      for (var m = 0u; m < 3u; m++) {
         let v = tri[m];
         if (${L.topology ? "(fr.flags & (64u << m)) == 0u" : "topo[P.vtListOff + topo[P.vtOffOff + v]] != t"}) { continue; }
         out.candidates++;
@@ -2403,12 +2494,33 @@ fn hullFacet(k: u32) -> RoleOut {
           out.pairs++;
         }
       }
-    }
-  } } }
+${cursor ? `  }
+  out.scanned += cursor.scanned; out.collisions += cursor.collisions; out.rejected += cursor.rejected;${bvh ? "out.nodes += cursor.nodes; out.faceTests += cursor.faceTests;" : ""}` : `    }
+  } } }`}
   return out;
 }
 
+${packet ? (role === "queryVertex" ? ogcBVHPacketVertices : ogcBVHPacketEdges)(bvh!,L.topology,separationCulling) : ""}
+${edgeStage === "consume" ? `
+fn stagedVertexPair(v:u32,t:u32)->RoleOut {
+  var out=RoleOut(0u,0u,0u,0u,0u,0u,0u,0u,0u);
+  let planar=P.mode==OGC_PLANAR;let x=xd(v);let rv=envOf(v);let tri=triVerts(t);var dmin=3.4e38;
+  ${vertexNarrowPhase(!!bvh?.pairGeometry)}
+  return out;
+}
+fn stagedEdgePair(e:u32,e2:u32)->RoleOut {
+  var out=RoleOut(0u,0u,0u,0u,0u,0u,0u,0u,0u);
+  let planar=P.mode==OGC_PLANAR;
+  let er=edgeRec(e);let r2=edgeRec(e2);
+  let p0=xd(er.x);let p1=xd(er.y);let re=max(envOf(er.x),envOf(er.y));
+  var dmin=3.4e38;
+  ${edgeNarrowPhase(true)}
+  return out;
+}
+` : ""}
 var<workgroup> wgCand: atomic<u32>;
+${bvh ? "var<workgroup> wgBvhNodes: atomic<u32>; var<workgroup> wgBvhFaces: atomic<u32>;" : ""}
+${separationCulling ? "var<workgroup> wgSeparated: atomic<u32>;" : ""}
 var<workgroup> wgVf: atomic<u32>;
 var<workgroup> wgEe: atomic<u32>;
 var<workgroup> wgDat: atomic<u32>;
@@ -2419,12 +2531,33 @@ var<workgroup> wgColl: atomic<u32>;
 var<workgroup> wgRej: atomic<u32>;
 var<workgroup> wgScanMax: atomic<u32>;
 fn tally(o: RoleOut) {
+  ${bvh ? "atomicAdd(&wgBvhNodes,o.nodes); atomicAdd(&wgBvhFaces,o.faceTests);" : ""}
+  ${separationCulling ? "atomicAdd(&wgSeparated,o.separated);" : ""}
   atomicAdd(&wgCand, o.candidates); atomicAdd(&wgDat, o.dat);
   atomicAdd(&wgScan, o.scanned); atomicAdd(&wgColl, o.collisions); atomicAdd(&wgRej, o.rejected); atomicMax(&wgScanMax, o.scanned);
 }
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>) {
-  let roleLo = ${lo}; let roleHi = ${hi};
+@compute @workgroup_size(${edgeStage === "consume" ? bvh!.edgeStageWorkgroupSize ?? 64 : 64})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_index) li: u32, @builtin(workgroup_id) wg: vec3<u32>${packet ? ", @builtin(subgroup_invocation_id) lane:u32" : ""}) {
+  ${bvh?.pairGeometry && role === "queryVertex" ? `// Round validity is uniform and immutable throughout this query dispatch.
+  if(li==0u){pairMemoRound=atomicLoad(&counters[OGC_FORCE_HELD])+1u;pairMemoEnabled=select(0u,1u,atomicLoad(&counters[OGC_ROUNDS])==0u && atomicLoad(&work[${bvh.pairGeometry.base}u])==0u);}
+  workgroupBarrier();` : ""}
+  ${edgeStage === "consume" ? `if(gid.x<atomicLoad(&counters[OGC_EDGE_STAGE_COUNT])){
+    let base=${bvh!.words.length}u+2u*gid.x;
+    if(bvh.data[base]!=OGC_NONE){
+      let o=${role === "queryVertex" ? "stagedVertexPair" : "stagedEdgePair"}(bvh.data[base],bvh.data[base+1u]);
+      tally(o);atomicAdd(&${role === "queryVertex" ? "wgVf" : "wgEe"},o.pairs);
+    }
+  }` : packet ? `
+  ${role === "queryVertex" ? `if(64u*wg.x>=P.N){return;}
+  let valid=gid.x<P.N;var v=0u;
+  if(valid){v=${L.topology ? 'querySlot(gid.x)' : 'gid.x'};}
+  tally(packetVertices(v,valid,lane));` : `if(64u*wg.x+64u<=P.N || 64u*wg.x>=P.N+P.E){return;}
+  let valid=gid.x>=P.N && gid.x<P.N+P.E;var e=0u;
+  if(valid){e=${L.topology ? 'querySlot(gid.x)' : 'gid.x'}-P.N;}
+  tally(packetEdges(e,valid,lane));`}
+
+  atomicAdd(&wgPacketLoads,packetLoads);
+  ` : `  let roleLo = ${lo}; let roleHi = ${hi};
   if (64u * wg.x + 64u <= roleLo || 64u * wg.x >= roleHi) { return; }
   ${L.topology ? `let s = gid.x;
   if (s >= roleLo && s < roleHi) {
@@ -2443,10 +2576,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
       let o = hullFacet(i - P.N - P.E - P.S - P.SB - P.SE - P.SEB);
       tally(o); atomicAdd(&wgHf, o.pairs);
     }`}
-  }
+  }`}
+
+  ${edgeStage === "collect" ? "closeStage();" : ""}
   closePairs();
   workgroupBarrier();
   if (li == 0u) {
+    ${role === "querySample" && bvh?.macroCache?.geometry ? "atomicAdd(&counters[1126u],atomicLoad(&wgGeometryHits));atomicAdd(&counters[1127u],atomicLoad(&wgGeometryMisses));" : ""}
+    ${role === "querySample" && bvh?.macroCache ? "atomicAdd(&counters[1121u],atomicLoad(&wgMacroBuilds));atomicAdd(&counters[1122u],atomicLoad(&wgMacroHits));atomicAdd(&counters[1123u],atomicLoad(&wgMacroOverflows));" : ""}
+    ${packet ? "atomicAdd(&counters[OGC_F_PACKET_NODE_LOADS],atomicLoad(&wgPacketLoads));" : ""}
+    ${separationCulling ? "atomicAdd(&counters[OGC_F_SEPARATION_REJECTED],atomicLoad(&wgSeparated));" : ""}
+    ${bvh ? "atomicAdd(&counters[OGC_F_BVH_NODES],atomicLoad(&wgBvhNodes)); atomicAdd(&counters[OGC_F_BVH_FACE_TESTS],atomicLoad(&wgBvhFaces));" : ""}
+    ${bvh?.pairGeometry?.decisions && role === "queryVertex" ? "atomicAdd(&counters[1131u],atomicLoad(&wgPairDecisionHits));atomicAdd(&counters[1132u],atomicLoad(&wgPairDecisionMisses));" : ""}
+    ${bvh?.pairGeometry && role === "queryVertex" ? "atomicAdd(&counters[1128u],atomicLoad(&wgPairGeometryHits));atomicAdd(&counters[1129u],atomicLoad(&wgPairGeometryMisses));atomicAdd(&counters[1130u],atomicLoad(&wgPairGeometryCollisions));" : ""}
     atomicAdd(&counters[OGC_F_CANDIDATES], atomicLoad(&wgCand));
     atomicAdd(&counters[OGC_F_VF_PAIRS], atomicLoad(&wgVf));
     atomicAdd(&counters[OGC_F_EE_PAIRS], atomicLoad(&wgEe));
@@ -2458,6 +2600,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
     atomicAdd(&counters[OGC_F_BOX_REJECTED], atomicLoad(&wgRej));
     atomicMax(&counters[OGC_F_SCAN_MAX], atomicLoad(&wgScanMax));
   }
+}
+`;
+}
+
+/** Stage overflow discards the entire queue and runs the original complete edge query. */
+export function ogcEdgeStageControlWGSL(capacity:number, reset:boolean, workgroupSize=64):string {
+  return header([0,9,10])+/* wgsl */`
+@compute @workgroup_size(1) fn main(){
+  ${reset ? 'atomicStore(&counters[OGC_EDGE_STAGE_COUNT],0u);atomicStore(&counters[OGC_EDGE_STAGE_OVERFLOW],0u);' : `
+  let n=atomicLoad(&counters[OGC_EDGE_STAGE_COUNT]);let overflow=n>${capacity}u || atomicLoad(&counters[OGC_EDGE_STAGE_OVERFLOW])!=0u;
+  args[27]=select((n+${workgroupSize-1}u)/${workgroupSize}u,0u,overflow);args[28]=1u;args[29]=1u;
+  args[30]=select(0u,args[21],overflow);args[31]=1u;args[32]=1u;
+  if(overflow){atomicAdd(&counters[OGC_F_EDGE_STAGE_OVERFLOW],1u);}
+  `}
 }
 `;
 }
@@ -2505,7 +2661,8 @@ fn main() {
  * primitive's box grown by r. A vertex found outside its own swept box grown by its envelope (the hash does not cover
  * it) counts as missing (frameUncovered), so the decision re-detects about it. Hull edges have DAT pairs only: none.
  */
-export const OGC_VERIFY_WGSL = header([0, 1, 2, 4, 5, 7, 8, 9, 14]) + TOPO_FNS + CELL_FNS + GRID_READ_FNS + triBoxFns(false) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
+export function ogcVerifyWGSL(bvh?: OgcBVHLayout): string {
+return header([0, 1, 2, 4, 5, ...(!bvh ? [7] : []), 8, 9, 14]) + TOPO_FNS + CELL_FNS + (bvh ? ogcBVHQuery(bvh, false) : GRID_READ_FNS) + triBoxFns(false) + SOLID_ACCESS + OGC_SOLID_WGSL + /* wgsl */`
 // The iterate: a cloth vertex's position, a sample's predicted end.
 fn cur(i: u32) -> vec3<f32> { if (i < P.N) { return pos[i].xyz; } return anchored(i); }
 fn ldEnt(u: u32, k: u32) -> vec4<u32> {
@@ -2574,7 +2731,12 @@ fn pointFaces(p: u32, v: u32) -> u32 {
   var missing = 0u;
   let x = cur(p);
   let q = OgcBox(x - vec3<f32>(P.r), x + vec3<f32>(P.r));
-  let inv = invCell();
+${bvh ? `  var cursor = candidateFaces(q, 0u);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+      let tri = triVerts(t);
+      if (v != OGC_NONE && hasVertex(tri, v)) { continue; }
+` : `  let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
@@ -2587,6 +2749,7 @@ fn pointFaces(p: u32, v: u32) -> u32 {
       if (v != OGC_NONE && hasVertex(tri, v)) { continue; }
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+`}
       let a = cur(tri.x); let b = cur(tri.y); let cc = cur(tri.z);
       let cl = ogcClosestTriangle(x, a, b, cc);
       let d = length(x - (cl.bary.x * a + cl.bary.y * b + cl.bary.z * cc));
@@ -2595,8 +2758,7 @@ fn pointFaces(p: u32, v: u32) -> u32 {
       var ok = false;
       if (v != OGC_NONE) { ok = hasFeatureEntry(v, v, 0u, f); } else { ok = hasFeatureEntry(f.x, p, 1u, f); }
       if (!ok) { missing++; }
-    }
-  } } }
+${bvh ? "  }" : "    }\n  } } }"}
   return missing;
 }
 // Algorithm 2 at the iterate: interior edge-edge pairs within r, each counted from its lower edge.
@@ -2605,7 +2767,10 @@ fn edgeEdges(e: u32) -> u32 {
   let er = edgeRec(e);
   let p0 = cur(er.x); let p1 = cur(er.y);
   let q = OgcBox(min(p0, p1) - vec3<f32>(P.r), max(p0, p1) + vec3<f32>(P.r));
-  let inv = invCell();
+${bvh ? `  var cursor = candidateFaces(q, 0u);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+` : `  let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
@@ -2616,6 +2781,7 @@ fn edgeEdges(e: u32) -> u32 {
       let t = entryFace(j);
       let box = entryBox(j);
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
+`}
       let te = topo[P.triEdgesOff + 4u * t + 3u];
       for (var k = 0u; k < 3u; k++) {
         if ((te & (1u << k)) == 0u) { continue; }
@@ -2632,8 +2798,7 @@ fn edgeEdges(e: u32) -> u32 {
         }
         if (!ok) { missing++; }
       }
-    }
-  } } }
+${bvh ? "  }" : "    }\n  } } }"}
   return missing;
 }
 // A hull facet of the samples (hullFacetAt's slot k) against the cloth vertices its r-box reaches, each from its owner face.
@@ -2644,7 +2809,11 @@ fn facetVertices(k: u32) -> u32 {
   let ids = vec3<u32>(atomicLoad(&contacts[b]), atomicLoad(&contacts[b + 1u]), atomicLoad(&contacts[b + 2u])) + vec3<u32>(off);
   let a = cur(ids.x); let bb = cur(ids.y); let cc = cur(ids.z);
   let q = OgcBox(min(min(a, bb), cc) - vec3<f32>(P.r), max(max(a, bb), cc) + vec3<f32>(P.r));
-  let inv = invCell();
+${bvh ? `  var cursor = candidateFaces(q, 0u);
+  loop {
+    let t = candidateFaceNext(&cursor); if (t == OGC_NONE) { break; }
+      let tri = triVerts(t);
+` : `  let inv = invCell();
   let c0 = cellOf(q.lo, inv); let c1 = cellOf(q.hi, inv);
   for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
     let c = vec3<i32>(cx, cy, cz);
@@ -2656,6 +2825,7 @@ fn facetVertices(k: u32) -> u32 {
       if (!boxesOverlap(q, box) || any(cellOf(max(q.lo, box.lo), inv) != c)) { continue; }
       let t = entryFace(j);
       let tri = triVerts(t);
+`}
       for (var m = 0u; m < 3u; m++) {
         let v = tri[m];
         if (topo[P.vtListOff + topo[P.vtOffOff + v]] != t) { continue; }
@@ -2672,8 +2842,7 @@ fn facetVertices(k: u32) -> u32 {
         }
         if (!ok) { missing++; }
       }
-    }
-  } } }
+${bvh ? "  }" : "    }\n  } } }"}
   return missing;
 }
 // A cloth vertex outside its round box (its swept box X -> X + w grown by its envelope): the grid does not cover it.
@@ -2707,6 +2876,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   }
 }
 `;
+
+}
+/** Compatibility reference: grid verification remains available for A/B checks. */
+export const OGC_VERIFY_WGSL = ogcVerifyWGSL();
 
 /**
  * The per-vertex displacement cap in x_det.w. Isotropic: OGC's
@@ -3002,3 +3175,149 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&work[P.heldOff + v], (old & ~768u) | (s << 8u));
 }
 `;
+
+/** Cache metadata passes use the same face bounds as grid insertion. */
+export function ogcCandidateCacheWGSL(kind: "reset" | "begin" | "check", options: OgcCandidateCacheLayout): string {
+  if (kind === "reset") return candidateCachePass(kind, options.gridWords, options.buckets);
+  if (kind === "begin") return candidateCacheDeclaration(options.gridWords, options.buckets) + candidateCachePass(kind, options.gridWords, options.buckets);
+  const base = header([0, 1, 4, 5, 9, 14]) + TOPO_FNS + CELL_FNS + triBoxFns(false);
+  return base + candidateCacheCommon(options) + candidateCachePass(kind, options.gridWords, options.buckets);
+}
+
+export function ogcBVHRefitWGSL(bvh: OgcBVHLayout, level: number): string {
+  return header([0, 1, 4, 5, 9, 10, 14]) + TOPO_FNS + CELL_FNS + triBoxFns(false) + ogcBVHRefit(bvh,level);
+}
+
+/** Replay current geometry only; captured endpoint order is the ownership provenance. */
+export function ogcWitnessProbeWGSL(L:OgcLocalityFlags,separationCulling:boolean):string {
+  const full=ogcQueryWGSL('queryVertex',L,undefined,separationCulling,undefined,false,undefined,'probe');
+  return full.slice(0,full.indexOf('@compute'))+DECL[10]+/* wgsl */`
+fn witnessEdgeBox(a:u32,b:u32)->OgcBox {
+  let p=xd(a);let q=xd(b);let p1=p+predOf(a);let q1=q+predOf(b);
+  let radius=max(envOf(a),envOf(b));
+  return OgcBox(min(min(p,q),min(p1,q1))-vec3f(radius),max(max(p,q),max(p1,q1))+vec3f(radius));
+}
+fn witnessFaceBox(v:vec3u)->OgcBox {
+  let a=xd(v.x);let b=xd(v.y);let c=xd(v.z);
+  let a1=a+predOf(v.x);let b1=b+predOf(v.y);let c1=c+predOf(v.z);
+  let radius=triEnv(v);
+  return OgcBox(min(min(a,min(b,c)),min(a1,min(b1,c1)))-vec3f(radius),max(max(a,max(b,c)),max(a1,max(b1,c1)))+vec3f(radius));
+}
+var<workgroup> witnessEnabled:u32;
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){
+    atomicStore(&counters[OGC_WITNESS_HIT],0u);
+    witnessEnabled=select(0u,1u,args[0]!=0u && P.mode==OGC_PLANAR && atomicLoad(&counters[OGC_ROUNDS])!=0u && levelled() && atomicLoad(&counters[OGC_FORCE_HELD])==0u);
+  }
+  if(workgroupUniformLoad(&witnessEnabled)==0u){return;}
+  storageBarrier(); // Publish the storage hit reset before any lane can report a conflict.
+  if(lane>=min(64u,atomicLoad(&counters[OGC_WITNESS_COUNT]))){return;}
+  let at=OGC_WITNESS_POOL+4u*lane;
+  var ids=vec4u(atomicLoad(&counters[at]),atomicLoad(&counters[at+1u]),atomicLoad(&counters[at+2u]),atomicLoad(&counters[at+3u]));
+  let edges=(ids.x&OGC_EE_BIT)!=0u;ids.x&=0x7fffffffu;
+  if(any(ids>=vec4u(P.N)) || ids.x==ids.y || ids.x==ids.z || ids.x==ids.w || ids.y==ids.z || ids.y==ids.w || ids.z==ids.w){return;}
+  atomicAdd(&counters[OGC_F_WITNESS_TESTS],1u);
+  ${separationCulling ? 'if(separatedClothPair(ids,select(1u,2u,edges))){return;}' : ''}
+  if(edges){
+    // This edge box is contained in its owner face's full swept box; requiring
+    // its overlap can miss a useful witness but cannot invent an admitted pair.
+    if(!boxesOverlap(witnessEdgeBox(ids.x,ids.y),witnessEdgeBox(ids.z,ids.w))){return;}
+    let er=vec4u(ids.xy,0u,0u);let r2=vec4u(ids.zw,0u,0u);
+    let p0=xd(ids.x);let p1=xd(ids.y);let q0=xd(ids.z);let q1=xd(ids.w);
+    let st=ogcSegmentSegment(p0,p1,q0,q1);
+    if(datPairEE(er,r2,st.z,p0,p1,q0,q1,max(envOf(ids.x),envOf(ids.y)),max(envOf(ids.z),envOf(ids.w)))){
+      pairEE(er,r2,p0+st.x*(p1-p0),q0+st.y*(q1-q0));
+    }
+  }else{
+    let x=xd(ids.x);let x1=x+predOf(ids.x);let radius=envOf(ids.x);
+    if(!boxesOverlap(OgcBox(min(x,x1)-vec3f(radius),max(x,x1)+vec3f(radius)),witnessFaceBox(ids.yzw))){return;}
+    let a=xd(ids.y);let b=xd(ids.z);let c=xd(ids.w);
+    let cl=ogcClosestTriangle(x,a,b,c);let cp=cl.bary.x*a+cl.bary.y*b+cl.bary.z*c;
+    if(datPairVT(x,length(x-cp),ids.x,ids.yzw,a,b,c,radius)){pairVT(ids.x,ids.yzw,x,cp);}
+  }
+}
+`;
+}
+export const OGC_WITNESS_GATE_WGSL=header([9,10])+/* wgsl */`
+@compute @workgroup_size(1) fn main(){
+  if(atomicLoad(&counters[OGC_WITNESS_HIT])==0u){return;}
+  // Keep bound (slot8), then the existing redo. Prep/geometry/cell already ran.
+  // Zero prep too: the refitted BVH's direct dispatches use it as their gate.
+  for(var slot=0u;slot<8u;slot++){args[3u*slot]=0u;}
+  atomicAdd(&counters[OGC_F_WITNESS_SKIPS],1u);
+}
+`;
+
+/** Solid witnesses retain their original role's admission rule and endpoint ordering. */
+export function ogcSolidWitnessProbeWGSL(L:OgcLocalityFlags,separationCulling:boolean):string {
+  const full=ogcQueryWGSL('queryVertex',L,undefined,separationCulling,undefined,false,undefined,'probe',true);
+  return full.slice(0,full.indexOf('@compute'))+DECL[10]+/* wgsl */`
+fn witnessPointBox(v:u32,cloth:bool)->OgcBox {
+  let a=xd(v);let b=a+predOf(v);var radius=0.0;if(cloth){radius=envOf(v);}
+  return OgcBox(min(a,b)-vec3f(radius),max(a,b)+vec3f(radius));
+}
+fn witnessEdgeBox(a:u32,b:u32,cloth:bool)->OgcBox {
+  let p=witnessPointBox(a,false);let q=witnessPointBox(b,false);
+  var radius=0.0;if(cloth){radius=max(envOf(a),envOf(b));}
+  return OgcBox(min(p.lo,q.lo)-vec3f(radius),max(p.hi,q.hi)+vec3f(radius));
+}
+fn witnessFaceBox(v:vec3u,cloth:bool)->OgcBox {
+  let a=witnessPointBox(v.x,false);let b=witnessPointBox(v.y,false);let c=witnessPointBox(v.z,false);
+  var radius=0.0;if(cloth){radius=triEnv(v);}
+  return OgcBox(min(a.lo,min(b.lo,c.lo))-vec3f(radius),max(a.hi,max(b.hi,c.hi))+vec3f(radius));
+}
+fn witnessReplay(lane:u32){
+  if(lane>=min(64u,atomicLoad(&counters[OGC_WITNESS_COUNT]))){return;}
+  let at=OGC_WITNESS_POOL+4u*lane;
+  var ids=vec4u(atomicLoad(&counters[at]),atomicLoad(&counters[at+1u]),atomicLoad(&counters[at+2u]),atomicLoad(&counters[at+3u]));
+  let edges=(ids.x&OGC_EE_BIT)!=0u;ids.x&=0x7fffffffu;
+  if(any(ids>=vec4u(P.N+P.S+P.SB)) || ids.x==ids.y || ids.x==ids.z || ids.x==ids.w || ids.y==ids.z || ids.y==ids.w || ids.z==ids.w){return;}
+  let cloth=all(ids<vec4u(P.N));
+  atomicAdd(&counters[OGC_F_WITNESS_TESTS],1u);
+  ${separationCulling ? 'if(cloth){if(separatedClothPair(ids,select(1u,2u,edges))){return;}}' : ''}
+  if(edges){
+    if(any(ids.xy>=vec2u(P.N)) || (!cloth && any(ids.zw<vec2u(P.N)))){return;}
+    if(!boxesOverlap(witnessEdgeBox(ids.x,ids.y,true),witnessEdgeBox(ids.z,ids.w,cloth))){return;}
+    let er=vec4u(ids.xy,0u,0u);let r2=vec4u(ids.zw,0u,0u);
+    let p0=xd(ids.x);let p1=xd(ids.y);let q0=xd(ids.z);let q1=xd(ids.w);
+    let st=ogcSegmentSegment(p0,p1,q0,q1);var admitted=false;
+    if(cloth){admitted=datPairEE(er,r2,st.z,p0,p1,q0,q1,max(envOf(ids.x),envOf(ids.y)),max(envOf(ids.z),envOf(ids.w)));}
+    else{admitted=st.z<=max(envOf(ids.x),envOf(ids.y))+spreadEE(er,r2);}
+    if(admitted){pairEE(er,r2,p0+st.x*(p1-p0),q0+st.y*(q1-q0));}
+  }else{
+    let clothPoint=ids.x<P.N;let clothFace=all(ids.yzw<vec3u(P.N));
+    if(!cloth && !(clothPoint && all(ids.yzw>=vec3u(P.N))) && !(!clothPoint && clothFace)){return;}
+    if(!boxesOverlap(witnessPointBox(ids.x,clothPoint),witnessFaceBox(ids.yzw,clothFace))){return;}
+    let x=xd(ids.x);let a=xd(ids.y);let b=xd(ids.z);let c=xd(ids.w);
+    let cl=ogcClosestTriangle(x,a,b,c);let cp=cl.bary.x*a+cl.bary.y*b+cl.bary.z*c;
+    let d=length(x-cp);var admitted=false;
+    if(cloth){admitted=datPairVT(x,d,ids.x,ids.yzw,a,b,c,envOf(ids.x));}
+    else if(clothPoint){admitted=d<=envOf(ids.x)+spreadVT(ids.x,ids.yzw);}
+    else{admitted=d<=triEnv(ids.yzw)+spreadVT(ids.x,ids.yzw);}
+    if(admitted){pairVT(ids.x,ids.yzw,x,cp);}
+  }
+}
+var<workgroup> witnessEnabled:u32;
+@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) lane:u32){
+  if(lane==0u){
+    atomicStore(&counters[OGC_WITNESS_HIT],0u);
+    atomicStore(&counters[OGC_WITNESS_CLOTH_CAPTURE],0u);atomicStore(&counters[OGC_WITNESS_SOLID_CAPTURE],0u);
+    witnessEnabled=select(0u,1u,args[0]!=0u && P.mode==OGC_PLANAR && atomicLoad(&counters[OGC_ROUNDS])!=0u && levelled() && atomicLoad(&counters[OGC_FORCE_HELD])==0u);
+  }
+  if(workgroupUniformLoad(&witnessEnabled)==0u){return;}
+  storageBarrier(); // Publish the storage hit reset before any lane can report a conflict.
+  witnessReplay(lane);
+  storageBarrier();
+  if(lane==0u && atomicLoad(&counters[OGC_WITNESS_HIT])!=0u){
+    for(var slot=0u;slot<8u;slot++){args[3u*slot]=0u;}
+    atomicAdd(&counters[OGC_F_WITNESS_SKIPS],1u);
+  }
+}
+`;
+}
+
+export function ogcMacroBoundsWGSL(bvh:OgcBVHLayout):string {
+ return header([0,4,5,8,9,10,14])+CELL_FNS+PRED_FNS+SOLID_ACCESS+OGC_SOLID_WGSL+macroBoundsBodyWGSL(bvh);
+}
+
+export function ogcPairGeometryBoundsWGSL(m:OgcPairGeometryCache,localGeometry=false):string {return header([0,4,5,9,10,...(m.decisions ? [14] : [])])+pairGeometryBoundsBodyWGSL(m,localGeometry);}

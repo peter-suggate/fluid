@@ -1,3 +1,5 @@
+import { clothExecutionSettings } from './execution-settings';
+import type { OgcCandidateCacheOptions } from './contact/candidate-cache-wgsl';
 /**
  * The scene's cloth system: every `SceneDescription.cloth` document runs in
  * its own Tier A `ClothGPUSolver`, one implicit step of `CLOTH_SCENE_STEP_S`
@@ -37,7 +39,7 @@ import { ClothGPUSolver, type ClothContactLinAB, type ClothGPUState } from './gp
 import { CLOTH_BINDING, CLOTH_STATUS, CLOTH_STATUS_WORDS } from './gpu-solver-wgsl';
 import { OgcContactDetector, type OgcCarriedState } from './contact/ogc-detector';
 import type { ClothSolidField } from './contact/solid-field';
-import { buildClothSolverModel } from './oracle';
+import { buildClothSolverModel, type ClothInitialGuess } from './oracle';
 import type { ClothRenderSource } from './render';
 import { CLOTH_BODY_POSES_PER_FRAME, CLOTH_CONTACT_FAILING, CLOTH_CONTACT_STATUS_OFFSET, buildClothBodyField, buildClothSceneField, clothBodyPoses, clothContactFieldKey,
   clothContactRadius, clothSceneMovingSolids, createClothSceneContact } from './scene-contact';
@@ -74,9 +76,9 @@ function ogcCarriedState(data: ClothContactStateData, origin: ClothVector, verte
   return { reference: Float32Array.from(data.reference, (q, i) => (i & 3) === 3 ? q : q - origin[i & 3]!), held: Uint32Array.from(data.held) };
 }
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
-/** A document's content apart from its Newton-PCG settings (the Cloth card's tuning knobs). */
-const documentKeyBesidesNewton = (document: ClothDocument) =>
-  clothDocumentsKey([{ ...document, solver: { ...document.solver, newton: undefined } }]);
+/** A document's content apart from its execution settings (the Cloth card's tuning knobs). */
+const documentKeyBesidesTuning = (document: ClothDocument) =>
+  clothDocumentsKey([{ ...document, solver: { ...document.solver, newton: undefined, optimizations: undefined, contactBroadphase: undefined, contactVertexEvaluation: undefined, contactConflictReuse: undefined, lazyLineSearch: undefined, contactEdgeEvaluation: undefined, contactBvhLeafSize: undefined, contactSeparationCulling: undefined, multigrid: undefined } }]);
 
 /** Asynchronous copy of the status words and, on request, the full dynamic state (pose, BDF2 history, duals, clock); one map in flight. */
 class PoseMirror {
@@ -154,6 +156,8 @@ interface Entry {
 
 export interface ClothSystemOptions {
   readonly label?: string;
+  /** Apply the live viewport optimization defaults; reference harnesses leave this false. */
+  readonly liveOptimizations?: boolean;
   /** Steps between status-word reads; default `CLOTH_STATUS_INTERVAL_STEPS`. */
   readonly statusInterval?: number;
   /**
@@ -161,6 +165,44 @@ export interface ClothSystemOptions {
    * OGC_LOCALITY_DEFAULT "topology+geometry"; "off" is the A/B baseline). An unknown value fails when the detector is built.
    */
   readonly contactLocality?: string;
+  /** Experimental per-step candidate reuse. */
+  readonly contactCandidateCache?: OgcCandidateCacheOptions;
+  readonly multigrid?: boolean;
+  readonly multigridAggregateSize?: number;
+  readonly multigridFusedRows?: number;
+  readonly contactSeparationCulling?: boolean;
+  readonly contactBroadphase?: "grid" | "bvh";
+  readonly contactBvhLeafSize?: number;
+  readonly contactUniqueEdgePairs?: boolean;
+  readonly contactBvhEdgePruning?: boolean;
+  readonly contactEdgeStageCapacity?: number;
+  readonly contactEdgeStageWorkgroupSize?: 32 | 64 | 128 | 256;
+  readonly contactEdgeStageBlockSize?: 1 | 4 | 16;
+  readonly contactEdgeStagePacket?: boolean;
+  readonly contactConflictWitnesses?: boolean;
+  readonly contactConflictWitnessSolids?: boolean;
+  /** Contact list storage only; never truncates an overflowing list silently. */
+  readonly contactEntryCapacity?: number;
+  readonly contactMandatoryRedoCap?: number;
+  readonly contactMacroCacheCapacity?: number;
+  readonly contactMacroSpecialize?: boolean;
+  readonly contactBvhVerify?: boolean;
+  readonly contactMacroWholeStep?: boolean;
+  readonly contactMacroSampleGeometry?: boolean;
+  readonly contactDatPathEarlyExit?: boolean;
+  readonly contactPairGeometryBuckets?: number;
+  readonly contactPairDecisions?: boolean;
+  readonly contactVertexStage?: boolean;
+  readonly contactVertexStagePacket?: boolean;
+  readonly lazyLineSearch?: 1 | 2;
+  /** Newton's starting iterate (ClothGPUSolverOptions.initialGuess); default 'inertial'. */
+  readonly initialGuess?: ClothInitialGuess;
+  /**
+   * The contact DAT's prediction: the inertial target ("target", default) or the solver's guess ("guess"). Not a live
+   * default: with the adaptive guess the rotating sphere's whole run (ticks 20-231) was no faster and ended with 80 edges
+   * past the strain limit (max 15.7%) against 1 (10.3%), though single steps from a checkpoint looked better.
+   */
+  readonly contactPrediction?: 'target' | 'guess';
   /** Benchmark A/B only: the compiled contact linearization's pieces (ClothGPUSolverOptions.contactLinearizationAB). */
   readonly contactLinearizationAB?: ClothContactLinAB;
 }
@@ -267,16 +309,39 @@ export class ClothSystem {
       bodyField = this.bodyFields.get(key) ?? buildClothBodyField(this.scene, body, r);
       this.bodyFields.set(key, bodyField);
     }
-    const newton = settings.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS;
-    const contact = await createClothSceneContact(this.device, model, document, origin, field, CLOTH_SCENE_STEP_S, gravity, bodyField, true, this.options.contactLocality);
+    const execution = clothExecutionSettings(settings, this.options.liveOptimizations);
+    const newton = execution.newton;
+    const candidateCache = this.options.contactCandidateCache ?? (this.options.contactBroadphase === undefined ? execution.candidateCache : undefined);
+    const useExecutionEdges = this.options.contactBroadphase === undefined && !candidateCache && this.options.contactUniqueEdgePairs !== false;
+    const stageCapacity = this.options.contactEdgeStageCapacity ?? (useExecutionEdges ? execution.edgeStageCapacity : undefined);
+    const packet = this.options.contactEdgeStagePacket ?? (useExecutionEdges && !!stageCapacity && execution.edgeStagePacket && this.device.features.has('subgroups'));
+    const vertexStage=this.options.contactVertexStage ?? (useExecutionEdges && !!stageCapacity && execution.vertexStage);
+    const vertexPacket=this.options.contactVertexStagePacket ?? (vertexStage && execution.vertexStagePacket && this.device.features.has('subgroups'));
+    const witnesses=this.options.contactConflictWitnesses ?? execution.conflictWitnesses;
+    const solidWitnesses=this.options.contactConflictWitnessSolids ?? (witnesses && execution.solidWitnesses);
+    const prediction = this.options.contactPrediction ?? 'target';
+    const contact = await createClothSceneContact(this.device, model, document, origin, field,
+      CLOTH_SCENE_STEP_S, gravity, bodyField, true, this.options.contactLocality, candidateCache,
+      this.options.contactSeparationCulling ?? execution.separationCulling,
+      this.options.contactBroadphase ?? (candidateCache ? 'grid' : execution.contactBroadphase),
+      this.options.contactBvhLeafSize ?? execution.bvhLeafSize,
+      this.options.contactUniqueEdgePairs ?? execution.uniqueEdgePairs,
+      this.options.contactBvhEdgePruning ?? (useExecutionEdges ? execution.bvhEdgePruning : false),
+      stageCapacity, this.options.contactEdgeStageWorkgroupSize,
+      this.options.contactEdgeStageBlockSize ?? (packet ? execution.edgeStageBlockSize : 1), packet, witnesses, vertexStage, vertexPacket, solidWitnesses,
+      this.options.contactEntryCapacity ?? execution.contactEntryCapacity,
+      this.options.contactMandatoryRedoCap ?? execution.mandatoryRedoCap,
+      this.options.contactMacroCacheCapacity ?? (this.options.contactBroadphase === undefined && !candidateCache ? execution.macroCacheCapacity : undefined),
+      this.options.contactMacroSpecialize, this.options.contactBvhVerify, this.options.contactMacroWholeStep, this.options.contactMacroSampleGeometry, this.options.contactDatPathEarlyExit, this.options.contactPairGeometryBuckets, this.options.contactPairDecisions, prediction);
+
     const hooks = contact.stepHooks;
     let solver: ClothGPUSolver;
     try {
       solver = await ClothGPUSolver.create(this.device, model, {
         origin_m: origin, dt_s: CLOTH_SCENE_STEP_S, gravity_m_s2: gravity,
-        integrator: settings.integrator ?? 'bdf2', newton,
+        lazyLineSearch: this.options.lazyLineSearch ?? (execution.lazyLineSearch ? 1 : undefined), integrator: settings.integrator ?? 'bdf2', newton, multigrid: this.options.multigrid ?? execution.multigrid, multigridAggregateSize: this.options.multigridAggregateSize, multigridFusedRows: this.options.multigridFusedRows,
         // Newton starts at the inertial target y, the centre of contact's "target" certificates (free cloth needs no cut).
-        initialGuess: 'inertial',
+        initialGuess: this.options.initialGuess ?? 'inertial',
         positions_m: start?.positions_m ?? data.initialPositions_m, velocities_m_s: start ? start.velocities_m_s : data.initialVelocities_m_s,
         solverState: start ? start.solverState : data.solverState, label,
         // Contact pairs are global terms of H and g, the filter bounds each direction, re-detection runs between iterations.
@@ -284,7 +349,7 @@ export class ClothSystem {
         hooks: { afterFrame: hooks.afterFrame, filter: hooks.filter, afterNewtonStep: hooks.afterNewtonStep, stepEnd: hooks.stepEnd },
         ...(this.options.contactLinearizationAB ? { contactLinearizationAB: this.options.contactLinearizationAB } : {}),
       });
-      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, target: solver.inertialTarget, direction: solver.newtonDirection, control: solver.newtonControl });
+      contact.bind({ positions: solver.positions, velocities: solver.velocities, stepStart: solver.stepStart, ...(prediction === 'target' ? { target: solver.inertialTarget } : {}), direction: solver.newtonDirection, control: solver.newtonControl });
       contact.setSolidField(field);
       if (bodyField) contact.setBodyField(bodyField);
       // The detector continues from the state carried with the pose (an undo, a load, a moving solid's edit).
@@ -367,7 +432,7 @@ export class ClothSystem {
 
   /** What a document runs with, and (from its Newton control record) how its last step converged. */
   private facts(e: Entry, control?: Float32Array): ClothDocumentFacts {
-    const newton = e.document.solver?.newton ?? CLOTH_NEWTON_SCENE_DEFAULTS;
+    const newton = clothExecutionSettings(e.document.solver, this.options.liveOptimizations).newton;
     const convergence: ClothConvergence | undefined = control && {
       newtonIterations: control[3]!, pcgIterations: control[7]!,
       residual: control[6]! > 0 ? Math.sqrt(control[5]! / control[6]!) : NaN, alpha: control[2]!,
@@ -470,8 +535,8 @@ export class ClothSystem {
       const live = this.entries.get(document.id), key = this.entryKey(document);
       if (this.building.get(document.id)?.key === key || (!this.building.has(document.id) && live?.key === key)) continue;
       // An edit of the moving solid alone, or of the Newton-PCG settings alone, carries on from the live pose.
-      const solidOnly = !!live && !this.building.has(document.id) && (live.documentKey === clothDocumentsKey([document])
-        || documentKeyBesidesNewton(live.document) === documentKeyBesidesNewton(document));
+      const solidOnly = !!live && (live.documentKey === clothDocumentsKey([document])
+        || documentKeyBesidesTuning(live.document) === documentKeyBesidesTuning(document));
       const topologyRevision = solidOnly ? live.topologyRevision
         : Math.max(sceneClothSurface(scene, document.id)?.topologyRevision ?? 0, live ? live.topologyRevision + 1 : 0);
       // `building` is set below, before any await, so no step is encoded between the edit and the pose read.
@@ -620,7 +685,7 @@ export function withClothSystem(base: GPUSolverInstance, cloth: ClothSystem, flu
 /** Build the cloth system for a scene and compose it onto the scene's solver. */
 export async function composeSceneCloth(device: GPUDevice, scene: SceneDescription, base: GPUSolverInstance, fluid: boolean): Promise<GPUSolverInstance> {
   let cloth: ClothSystem;
-  try { cloth = await ClothSystem.create(device, scene); }
+  try { cloth = await ClothSystem.create(device, scene, { liveOptimizations: true }); }
   catch (error) { base.destroy(); throw error; }
   return withClothSystem(base, cloth, fluid);
 }

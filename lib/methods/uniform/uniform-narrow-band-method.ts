@@ -48,7 +48,7 @@ export const narrowBandFlipValues=(values:MethodParamValues={})=>({
 // Derive the renderer lifetime key from this method's own schema; inheriting
 // Uniform Geometric's list misses NB-specific live controls.
 const params:SimulationMethod["params"]=[
- {kind:"select",key:"engine",label:"Engine",default:"auto",tier:"coarse",update:"solver",options:[{value:"auto",label:"Auto (brick where it can)"},{value:"uniform",label:"Uniform (old)"},{value:"brick",label:"Brick"}],hint:"Auto runs the sparse-brick engine (docs/plans/nbflip-port/brick-default-rollout-2026-11-17.md) on every scene it can run, and the old uniform engine on the rest; the engine readout names which ran and why. Uniform always runs the old engine. Brick refuses, naming what is missing, any scene it cannot run yet. Restarts the solver."},
+ {kind:"select",key:"engine",label:"Engine",default:"auto",tier:"coarse",update:"solver",dedicated:true,options:[{value:"auto",label:"Auto (brick where it can)"},{value:"uniform",label:"Uniform (old)"},{value:"brick",label:"Brick"}],hint:"Auto runs the sparse-brick engine (docs/plans/nbflip-port/brick-default-rollout-2026-11-17.md) on every scene it can run, and the old uniform engine on the rest; the engine readout names which ran and why. Uniform always runs the old engine. Brick refuses, naming what is missing, any scene it cannot run yet. Restarts the solver."},
  ...narrowBandControlParams,
  {kind:"select",key:"particleTransfer",label:"Particle transfer",default:"flip",tier:"coarse",update:"solver",options:[{value:"flip",label:"FLIP (95%)"},{value:"apic",label:"APIC (experimental)"}],hint:"APIC replaces residual FLIP velocities with quadratic affine transfers, following Sato 2018. Restarts the solver."},
  NARROW_BAND_SURFACE_ADVECTION,

@@ -21,7 +21,7 @@ import { createProcessRetainedDawnGPU } from "../lib/harness/node-dawn-provider"
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { OgcContactDetector, type OgcBodyPose, type OgcContactConfig } from "../lib/cloth/contact/ogc-detector";
 import { buildOgcEdges } from "../lib/cloth/contact/ogc-topology";
-import { OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
+import { OGC_COUNTER, OGC_STATUS } from "../lib/cloth/contact/ogc-wgsl";
 import { buildClothSolidField, sampleClothSolidField, type ClothSolidField } from "../lib/cloth/contact/solid-field";
 import { clothGridData } from "../lib/cloth/grid";
 import { prepareClothTopology } from "../lib/cloth/topology";
@@ -619,3 +619,32 @@ test("GPU moving plate 3r over a sheet on the floor: the gap is wider than the c
     solver.destroy(); det.destroy();
   });
 });
+
+
+test('solid witness pools and mandatory candidates expire on either field replacement, including moving-ID rebasing', {skip:!gpu}, async()=>withDevice(async device=>{
+  const field=plateField();
+  const smaller=buildClothSolidField({parts:[{kind:'sdf',sdf:boxSdf([-0.02,-0.03,-0.01],[0.02,0.03,0.01]),lo:[-0.02,-0.03,-0.01],hi:[0.02,0.03,0.01],mu:0.4}],lo:[-0.13,-0.13,-0.11],hi:[0.13,0.13,0.11],cell:0.005,band:0.09});
+  const mesh=sheet(4,4,0.01),N=mesh.x.length,{triangles,edges}=topologyOf(mesh);
+  const positions=storage(device,vec4s(mesh.x)),velocities=storage(device,vec4s(mesh.x.map(()=>[0,0,0])));
+  const capacityWords=Math.max(field.words.length,smaller.words.length);
+  const det=await OgcContactDetector.create(device,{vertexCount:N,triangles,edges},vec4s(mesh.x),{
+    ...baseConfig(N),solidCapacityWords:capacityWords,solidSampleCapacity:4096,
+    body:{capacityWords,sampleCapacity:4096,poseCapacity:4},conflictWitnesses:true,conflictWitnessSolids:true,broadphase:'bvh',macroCacheCapacity:8,
+  },{positions,velocities});
+  assert.ok(det.bvhLayout?.macroCache);
+  const seed=()=>{
+    device.queue.writeBuffer(det.counters,4*OGC_COUNTER.witnessCount,new Uint32Array(258).fill(1));
+    device.queue.writeBuffer(det.counters,4*OGC_COUNTER.macroInvalid,new Uint32Array([0]));
+  };
+  const cleared=async()=>{
+    const words=new Uint32Array(await readBuffer(device,det.counters));
+    assert.ok(words.subarray(OGC_COUNTER.witnessCount,OGC_COUNTER.witnessPool+256).every(v=>v===0));
+    assert.equal(words[OGC_COUNTER.macroInvalid],1,'field replacement invalidates cached candidate geometry even at the same count');
+  };
+  try{
+    for(const replacement of [field,smaller,field]){
+      seed();det.setBodyField(replacement);await cleared();
+      seed();det.setSolidField(replacement);await cleared();
+    }
+  }finally{det.destroy();positions.destroy();velocities.destroy();}
+}));

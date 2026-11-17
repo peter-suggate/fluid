@@ -14,6 +14,8 @@
  *
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js tools/gpu/fluid-gpu-run.sh timing \
  *     node --import tsx tools/benchmark-cloth-sphere.ts [--nodes 150] [--ticks 2,5,35,120] [--steps 10] [--profile 1] [--json out.json]
+ *       [--tiny]  16x16 H_vv sphere, tick 20, three measured steps, no split profiling
+ *       [--candidate-skin metres] [--candidate-faces n]  conservative per-step candidate cache (off by default)
  *       [--locality off|topology+geometry]   the detector's locality switch (OgcContactConfig.locality; default the detector's)
  *       [--lin off|factorized|blocks] [--lin-records n]  newton.contactLinearization on the restored document (default:
  *         the document's own, off) and its pool (vec4 records per vertex); the run then also reports the compiled
@@ -21,9 +23,13 @@
  *       [--lin-overflow grid|indirect] [--lin-partners global|staged] [--lin-slots n]  the compiled modes' pieces
  *         against their baselines (ClothSystemOptions.contactLinearizationAB, the A/B knob; default the modes' own:
  *         indirect, staged, 256)
+ *       [--pcg-iterations n] [--forcing-max eta]  inexact-solve experiments (reported in the restored settings)
  *       [--newton-iterations n]   the restored document's Newton cap (fixed-state comparisons: 1 or 2 iterations from one state)
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { clothExecutionSettings } from '../lib/cloth/execution-settings';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -37,23 +43,44 @@ import { bridson2002SceneDescription } from '../lib/cloth/scenes/bridson-2002/sc
 import type { ClothDocument } from '../lib/cloth/types';
 import type { ClothContactLinAB, ClothGPUSolver } from '../lib/cloth/gpu-solver';
 import { OgcContactDetector } from '../lib/cloth/contact/ogc-detector';
+import { OGC_COUNTER, OGC_COUNTER_WORDS } from '../lib/cloth/contact/ogc-wgsl';
+import { CLOTH_MG_KERNELS } from '../lib/cloth/multigrid';
 import { CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 
 const args = process.argv.slice(2);
 const opt = (name: string, fallback: string) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1]! : fallback; };
-const NODES = Number(opt('nodes', '150')), TICKS = opt('ticks', '2,5,35,120').split(',').map(Number);
-const STEPS = Number(opt('steps', '10')), PROFILE_STEPS = Number(opt('profile', '1')), JSON_OUT = opt('json', '');
+const TINY = args.includes('--tiny');
+const NODES = Number(opt('nodes', TINY ? '16' : '150')), TICKS = opt('ticks', TINY ? '20' : '2,5,35,120').split(',').map(Number);
+const STEPS = Number(opt('steps', TINY ? '3' : '10')), PROFILE_STEPS = Number(opt('profile', TINY ? '0' : '1')), JSON_OUT = opt('json', '');
 const REBUILD = args.includes('--rebuild');
+const WARM_WINDOWS=Number(opt('warmup-windows','0'));
+const WARM_STEPS=Number(opt('warmup-steps','3'));
+if(!Number.isInteger(WARM_WINDOWS)||WARM_WINDOWS<0||!Number.isInteger(WARM_STEPS)||WARM_STEPS<1)throw new Error('Invalid warmup window settings');
+/** Optional full positions, read outside the timed interval, for trajectory comparisons. */
+const POSES = opt('poses', ''), POSE_HASHES = opt('pose-hashes','');
+const poseHashes: {tick:number;sha256:string}[]=[];
+const poses: { tick: number; positions_m: number[] }[] = [];
 /** The detector's locality switch for the timed, profiled and replayed systems (states are built with the detector's default). */
 const LOCALITY = opt('locality', OgcContactDetector.defaultLocality);
 const CACHE = opt('cache', join(homedir(), 'code/me/fluid-scratch/cloth-bench'));
 /** A dispatch at or under this GPU time is an early exit (measured: ~1-2 us for an exiting per-vertex dispatch). */
-const REPLAY = Number(opt('replay', '64'));
+const REPLAY = Number(opt('replay', TINY ? '0' : '64'));
 /** newton.contactLinearization for the run ('' keeps the document's), and its pool. */
 const LIN = opt('lin', ''), LIN_RECORDS = opt('lin-records', ''), NEWTON_ITERATIONS = opt('newton-iterations', '');
+const PCG_ITERATIONS = opt('pcg-iterations', ''), FORCING = opt('forcing-max', ''), PROJECTION = opt('projection', '');
+if (PROJECTION && PROJECTION !== 'off' && PROJECTION !== 'hvv') throw new Error('Unknown projection metric');
 const LIN_AB = Object.fromEntries(([['overflow', opt('lin-overflow', '')], ['partners', opt('lin-partners', '')], ['stageSlots', opt('lin-slots', '')]] as const)
   .filter(([, v]) => v !== '').map(([k, v]) => [k, k === 'stageSlots' ? Number(v) : v])) as ClothContactLinAB;
-const SYSTEM = { statusInterval: 1, contactLocality: LOCALITY, ...(Object.keys(LIN_AB).length ? { contactLinearizationAB: LIN_AB } : {}) };
+const cacheSkin = Number(opt('candidate-skin', '0'));
+const contactCandidateCache = cacheSkin ? { skin_m: cacheSkin, facesPerQuery: Number(opt('candidate-faces', '64')) } : undefined;
+const SYSTEM = { contactPairDecisions:args.includes("--pair-decisions"), contactPairGeometryBuckets: args.includes("--pair-geometry-buckets") ? Number(opt("pair-geometry-buckets","1048576")) : undefined, contactDatPathEarlyExit: args.includes("--dat-path-early-exit"), contactMacroSampleGeometry: args.includes("--macro-sample-geometry"), contactMacroWholeStep: args.includes("--macro-whole-step"), contactBvhVerify: args.includes("--bvh-verify"), contactMacroSpecialize: !args.includes('--macro-unspecialized'), contactMacroCacheCapacity: args.includes('--macro-cache-capacity') ? Number(opt('macro-cache-capacity','64')) : undefined, contactMandatoryRedoCap: args.includes('--mandatory-redo-cap') ? Number(opt('mandatory-redo-cap','32')) : undefined, contactEntryCapacity: args.includes('--contact-entry-capacity') ? Number(opt('contact-entry-capacity','83')) : undefined, contactVertexStage: args.includes('--vertex-stage') || args.includes('--vertex-stage-packet'), contactVertexStagePacket: args.includes('--vertex-stage-packet'), lazyLineSearch: args.includes('--lazy-line-search') ? Number(opt('lazy-line-search','1')) as 1|2 : undefined, contactConflictWitnesses: args.includes('--conflict-witnesses') || args.includes('--solid-witnesses'), contactConflictWitnessSolids: args.includes('--solid-witnesses'), contactEdgeStagePacket: args.includes('--edge-stage-packet'), contactEdgeStageBlockSize: Number(opt('edge-stage-block','1')) as 1|4|16, contactEdgeStageWorkgroupSize: Number(opt('edge-stage-wg','64')) as 32|64|128|256, contactEdgeStageCapacity: args.includes('--edge-stage-capacity') ? Number(opt('edge-stage-capacity','0')) : undefined, contactBvhEdgePruning: args.includes('--bvh-edge-pruning'), contactUniqueEdgePairs: args.includes('--unique-edge-pairs'), contactBvhLeafSize: Number(opt('bvh-leaf-size','4')), contactBroadphase: opt('broadphase','grid') as 'grid' | 'bvh', contactSeparationCulling: args.includes('--separation-culling'), multigrid: args.includes('--multigrid'), multigridAggregateSize: Number(opt('mg-aggregate','4')), multigridFusedRows: Number(opt('mg-fused-rows','256')), contactCandidateCache, statusInterval: 1, contactLocality: LOCALITY, ...(Object.keys(LIN_AB).length ? { contactLinearizationAB: LIN_AB } : {}) };
+
+/** --live: the viewport's configuration (ClothSystemOptions.liveOptimizations) in place of the flags above;
+ * --initial-guess previous|adaptive|inertial sets Newton's starting iterate (default the system's). */
+const GUESS = opt('initial-guess', '');
+const LIVE = args.includes('--live') ? { statusInterval: 1, liveOptimizations: true } : undefined;
+const SYSTEM_RUN = { ...(LIVE ?? SYSTEM), ...(GUESS ? { initialGuess: GUESS as 'previous' } : {}) };
+if (SYSTEM.multigrid && REPLAY > 0) throw new Error('Multigrid requires --replay 0: isolated PCG replay omits its V-cycle');
 
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href);
 Object.assign(globalThis, dawn.globals);
@@ -77,6 +104,22 @@ class Timestamps {
   mode: 'off' | 'span' | 'split' = 'off';
   records: Stamp[] = [];
   private sets: GPUQuerySet[] = [];
+  traceContact?: GPUBuffer;
+  private traceRows: {label:string;buffer:GPUBuffer}[]=[];
+  private traceSnapshot(encoder:GPUCommandEncoder,label:string){
+    if(!this.traceContact)return;
+    const buffer=this.device.createBuffer({size:4*OGC_COUNTER_WORDS,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    encoder.copyBufferToBuffer(this.traceContact,0,buffer,0,4*OGC_COUNTER_WORDS);
+    this.traceRows.push({label,buffer});
+  }
+  async collectContactTrace(){
+    const out=[];
+    for(const {label,buffer} of this.traceRows){
+      await buffer.mapAsync(GPUMapMode.READ);const words=new Uint32Array(buffer.getMappedRange().slice(0));buffer.destroy();
+      out.push({label,...Object.fromEntries(Object.entries(OGC_COUNTER).map(([key,i])=>[key,words[i]]))});
+    }
+    this.traceRows=[];return out;
+  }
   private next = 0;
   private indirectLog: GPUBuffer;
   private indirectCount = 0;
@@ -125,6 +168,8 @@ class Timestamps {
         control = this.controlCount++;
         encoder.copyBufferToBuffer(this.control.buffer, this.control.offset, this.controlLog, 16 * control, 16);
       }
+      const trace=this.traceContact && (pipeline?.label==='ogc redo'||pipeline?.label==='ogc redoLast');
+      if(trace)this.traceSnapshot(encoder,pipeline!.label+' before');
       const p = this.pair();
       this.records.push({ label: pipeline?.label ?? '?', set: p.set, slot: p.slot, control, ...extra });
       const pass = encoder.beginComputePass({ label: d?.label, timestampWrites: p.writes });
@@ -132,6 +177,7 @@ class Timestamps {
       for (const [i, [g, offsets]] of groups) pass.setBindGroup(i, g, offsets);
       dispatch(pass);
       pass.end();
+      if(trace)this.traceSnapshot(encoder,pipeline!.label+' after');
     };
     return {
       label: d?.label ?? '',
@@ -189,8 +235,9 @@ const stamps = new Timestamps(device);
 
 const source = bridson2002RotatingSphere({ nodesAcross: NODES });
 const baseScene = bridson2002SceneDescription(source);
+if (TINY) baseScene.cloth = baseScene.cloth!.map(d => ({ ...d, solver: { ...d.solver!, contactProjectionMetric: 'hvv' } }));
 const documentId = baseScene.cloth![0]!.id;
-const statePath = (tick: number) => join(CACHE, `sphere-${NODES}-tick${tick}.json`);
+const statePath = (tick: number) => join(CACHE, `sphere-${NODES}${TINY ? "-hvv" : ""}-tick${tick}.json`);
 const plain = (_k: string, v: unknown) => ArrayBuffer.isView(v) && !(v instanceof DataView) ? Array.from(v as unknown as ArrayLike<number>) : v;
 
 async function buildStates(): Promise<void> {
@@ -214,8 +261,8 @@ function restored(tick: number): SceneDescription {
   if (saved.nodes !== NODES || saved.tick !== tick) throw new Error(`${statePath(tick)} is not the ${NODES}-node state at tick ${tick}`);
   const scene = cloneScene(baseScene);
   const d = saved.document, newton = d.solver?.newton ?? baseScene.cloth![0]!.solver!.newton!;
-  scene.cloth = [LIN || LIN_RECORDS || NEWTON_ITERATIONS ? { ...d, solver: { ...d.solver, newton: { ...newton, ...(LIN ? { contactLinearization: LIN as 'off' } : {}), ...(LIN_RECORDS ? { contactLinearizationRecords: Number(LIN_RECORDS) } : {}),
-    ...(NEWTON_ITERATIONS ? { iterations: Number(NEWTON_ITERATIONS) } : {}) } } } : d];
+  scene.cloth = [LIN || LIN_RECORDS || NEWTON_ITERATIONS || PCG_ITERATIONS || FORCING || PROJECTION ? { ...d, solver: { ...d.solver, ...(PROJECTION ? { contactProjectionMetric: PROJECTION as 'off' | 'hvv' } : {}), newton: { ...newton, ...(LIN ? { contactLinearization: LIN as 'off' } : {}), ...(LIN_RECORDS ? { contactLinearizationRecords: Number(LIN_RECORDS) } : {}),
+    ...(NEWTON_ITERATIONS ? { iterations: Number(NEWTON_ITERATIONS) } : {}), ...(PCG_ITERATIONS ? { pcgIterations: Number(PCG_ITERATIONS) } : {}), ...(FORCING ? { forcingMax: Number(FORCING) } : {}) } } } : d];
   return scene;
 }
 
@@ -234,8 +281,9 @@ async function stepOnce(cloth: ClothSystem): Promise<number> {
   return performance.now() - t;
 }
 
-interface StepReport { ms: number; spanMs: number; newton: number; pcg: number; /** |g|^2 at the step's first and last Newton iteration, the last accepted step length. */ g2: [number, number]; alpha: number; lin?: Awaited<ReturnType<ClothGPUSolver['readContactLinearization']>>; counters: Awaited<ReturnType<NonNullable<ReturnType<ClothSystem['contactFor']>>['readCounters']>> }
+interface StepReport { lineSearchWork?: Awaited<ReturnType<ClothGPUSolver['readLineSearchWork']>>; candidateCache?: Awaited<ReturnType<NonNullable<ReturnType<ClothSystem['contactFor']>>['readCandidateCacheCounters']>>; ms: number; spanMs: number; newton: number; pcg: number; /** |g|^2 at the step's first and last Newton iteration, the last accepted step length. */ g2: [number, number]; alpha: number; lin?: Awaited<ReturnType<ClothGPUSolver['readContactLinearization']>>; counters: Awaited<ReturnType<NonNullable<ReturnType<ClothSystem['contactFor']>>['readCounters']>> }
 interface ProfileReport {
+  newtonControls: number[][];
   steps: number; dispatches: number; worked: number; newtonWorked: number; pcgWorked: number; sumMs: number;
   groups: { group: string; dispatches: number; worked: number; ms: number }[];
 }
@@ -245,28 +293,65 @@ type SolverInternals = { newtonWork: GPUBuffer; tables: { newtonRecords: number;
 const internals = (solver: ClothGPUSolver) => solver as unknown as SolverInternals;
 const controlOf = (solver: ClothGPUSolver) => ({ buffer: internals(solver).newtonWork, offset: 16 * (internals(solver).tables.newtonRecords - CLOTH_SEGMENT_ALIGN) });
 /** Solver kernels that exit on Newton done (control.x); pcgStep also on PCG done (control.y). */
-const NEWTON_GATED = new Set(['nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild', 'pcgStep', 'pcgStepOverflow', 'nwProject', 'nwTrial', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
-const PCG_GATED = new Set(['pcgStep', 'pcgStepOverflow']);
+const NEWTON_GATED = new Set([...CLOTH_MG_KERNELS, 'nwFaces', 'nwGradient', 'nwLinCount', 'nwLinBuild', 'pcgStep', 'pcgStepOverflow', 'nwProject', 'nwTrial', 'nwTrialHead', 'nwTrialHeadGate', 'nwTrialTail', 'nwChoose', 'nwApply', 'nwEdgeDuals']);
+const PCG_GATED = new Set([...CLOTH_MG_KERNELS, 'pcgStep', 'pcgStepOverflow']);
 
+const hashBytes=(data:string|Uint8Array)=>createHash('sha256').update(data).digest('hex');
+function clothSourceHash(){return hashBytes(readdirSync('lib/cloth',{recursive:true}).filter((f):f is string=>typeof f==='string' && f.endsWith('.ts')).sort().map(f=>f+'\n'+readFileSync(join('lib/cloth',f),'utf8')).join('\n')+'\n'+readFileSync('tools/benchmark-cloth-sphere.ts','utf8'));}
+const sourceBefore=clothSourceHash();
+function gpuMemoryBytes():number|null {
+  try{return Number(execFileSync('/usr/sbin/ioreg',['-r','-d','1','-c','IOAccelerator'],{encoding:'utf8'}).match(/"In use system memory"=(\d+)/)?.[1] ?? NaN)||null;}catch{return null;}
+}
+const memoryObservations:{tick:number;phase:string;gpuSystemBytes:number|null;rss:number}[]=[];
+function recordMemory(tick:number,phase:string){memoryObservations.push({tick,phase,gpuSystemBytes:gpuMemoryBytes(),rss:process.memoryUsage().rss});}
+async function warmCheckpoint(tick:number){
+  recordMemory(tick,'before-warmup');
+  for(let w=0;w<WARM_WINDOWS;w++){
+    const warm=await ClothSystem.create(device,restored(tick),SYSTEM_RUN);
+    try{for(let s=0;s<WARM_STEPS;s++){await stepOnce(warm);if(warm.failure)throw new Error(warm.failure.message);}}
+    finally{warm.destroy();}
+    await device.queue.onSubmittedWorkDone();
+  }
+  recordMemory(tick,'before-measurement');
+}
 async function timed(tick: number): Promise<StepReport[]> {
-  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
+  const scene=restored(tick);
+  const cloth = await ClothSystem.create(device, scene, SYSTEM_RUN);
   const solver = cloth.solverFor(documentId)!, contact = cloth.contactFor(documentId)!;
   const out: StepReport[] = [];
   for (let s = 0; s < STEPS; s++) {
-    stamps.mode = 'span';
+    const tracing=tick+s+1===Number(opt('trace-tick','-1'));
+    stamps.traceContact=tracing ? contact.counters : undefined;
+    stamps.mode = tracing ? 'split' : 'span';
     const ms = await stepOnce(cloth);
     stamps.mode = 'off';
     const spans = await stamps.collect();
+    if(tracing){writeFileSync(JSON_OUT+'.trace.json',JSON.stringify(await stamps.collectContactTrace(),null,1));stamps.traceContact=undefined;}
     const control = await solver.readNewtonControl(), counters = await contact.readCounters();
-    if (cloth.failure) throw new Error(`tick ${tick}+${s + 1}: ${cloth.failure.message}`);
-    out.push({ ms, spanMs: spans.reduce((a, r) => a + r.ns, 0) / 1e6, newton: control[3]!, pcg: control[7]!, g2: [control[4]!, control[5]!], alpha: control[2]!, lin: await solver.readContactLinearization(), counters });
+    if (cloth.failure) {
+      const failure={complete:false,tick:tick+s+1,failure:cloth.failure.message,counters,validSteps:out,poses:poseHashes};
+      if(JSON_OUT)writeFileSync(JSON_OUT+'.failure.json',JSON.stringify(failure));
+      throw new Error(`tick ${tick}+${s + 1}: ${cloth.failure.message}; peakContacts=${counters.peakContacts}, pairMax=${counters.pairMax}`);
+    }
+    if(tick+s+1===Number(opt('save-tick','-1'))){
+      await cloth.capture([cloth.time_s]);publishSceneClothSurfaces(scene,cloth.surfaces);
+      const document=snapshotSceneClothPose(scene).cloth!.find(d=>d.id===documentId)!;
+      const path=statePath(tick+s+1);if(existsSync(path))throw new Error('Refusing to overwrite checkpoint '+path);
+      writeFileSync(path,JSON.stringify({nodes:NODES,tick:tick+s+1,document},plain));console.log('Saved valid checkpoint '+path);
+    }
+    if (POSES || POSE_HASHES) {
+      const positions=await solver.readPositions();
+      if(POSES)poses.push({tick:tick+s+1,positions_m:Array.from(positions)});
+      if(POSE_HASHES)poseHashes.push({tick:tick+s+1,sha256:createHash('sha256').update(new Uint8Array(positions.buffer,positions.byteOffset,positions.byteLength)).digest('hex')});
+    }
+    out.push({ lineSearchWork: await solver.readLineSearchWork(), ms, spanMs: spans.reduce((a, r) => a + r.ns, 0) / 1e6, newton: control[3]!, pcg: control[7]!, g2: [control[4]!, control[5]!], alpha: control[2]!, lin: await solver.readContactLinearization(), candidateCache: await contact.readCandidateCacheCounters(), counters });
   }
   cloth.destroy();
   return out;
 }
 
 async function profile(tick: number): Promise<ProfileReport> {
-  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
+  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM_RUN);
   stamps.control = controlOf(cloth.solverFor(documentId)!);
   stamps.mode = 'split';
   for (let s = 0; s < PROFILE_STEPS; s++) await stepOnce(cloth);
@@ -291,6 +376,7 @@ async function profile(tick: number): Promise<ProfileReport> {
     ns += r.ns; groups.set(g, e);
   });
   return {
+    newtonControls: rows.flatMap((r,k)=>r.record.label==='Cloth nwChoose' ? [Array.from(rows[k+1]?.control ?? r.control!)] : []),
     steps: PROFILE_STEPS, dispatches: rows.length, worked, newtonWorked, pcgWorked: pcgWorked - newtonWorked, sumMs: ns / 1e6,
     groups: [...groups].map(([group, e]) => ({ group, dispatches: e.dispatches, worked: e.worked, ms: e.ns / 1e6 })).sort((a, b) => b.ms - a.ms),
   };
@@ -299,7 +385,7 @@ async function profile(tick: number): Promise<ProfileReport> {
 /** Exact cost of one working dispatch of each hot solver kernel: after a step, Newton is re-armed and each kernel is
  * dispatched REPLAY times in one timestamped pass (the timestamp clock is 65.5 us coarse; this resolves it). */
 async function replay(tick: number): Promise<{ kernel: string; us: number }[]> {
-  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM);
+  const cloth = await ClothSystem.create(device, restored(tick), SYSTEM_RUN);
   await stepOnce(cloth);
   const solver = cloth.solverFor(documentId)!, S = internals(solver), W = S.threads(S.N), ctl = controlOf(solver), Wp = S.tables.pcg.patches;
   const linKernels: [string, number, number][] = S.tables.pcg.contactLin ? [['nwLinCount', Wp, 0], ['nwLinBuild', Wp, 0]] : [];
@@ -341,9 +427,10 @@ const median = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return
 
 await buildStates();
 const vertices = baseScene.cloth![0]!.geometry.data.restPositions_m.length / 3;
-console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(baseScene.cloth![0]!.solver?.newton)}, locality ${LOCALITY}${LIN ? `, contactLinearization ${LIN}` : ''}${Object.keys(LIN_AB).length ? `, A/B ${JSON.stringify(LIN_AB)}` : ''}`);
+console.log(`rotating sphere ${NODES}^2 (${vertices} vertices), Newton ${JSON.stringify(restored(TICKS[0]!).cloth![0]!.solver?.newton)}, locality ${LOCALITY}${LIN ? `, contactLinearization ${LIN}` : ''}${Object.keys(LIN_AB).length ? `, A/B ${JSON.stringify(LIN_AB)}` : ''}`);
 const report: Record<string, unknown>[] = [];
 for (const tick of TICKS) {
+  await warmCheckpoint(tick);
   const steps = await timed(tick), prof = PROFILE_STEPS > 0 ? await profile(tick) : undefined;
   const costs = REPLAY > 0 ? await replay(tick) : [];
   const c = steps.map(s => s.counters);
@@ -356,6 +443,7 @@ for (const tick of TICKS) {
   if (lin) console.log(`  contact linearization '${lin.mode}' (last Newton iteration of the last step): ${lin.rows} rows, ${lin.items} items, ${lin.usedRecords} records used (${lin.usedBytes} B) of ${lin.poolRecords} (${lin.poolBytes} B), demand ${lin.demandRecords}; rows left matrix-free ${lin.fallbackRows} (patches through pcgStepOverflow ${lin.fallbackPatches}${lin.overflowWorkgroups !== undefined ? `, indirect workgroups ${lin.overflowWorkgroups}` : ''})`);
   console.log(`  detector per step: candidates ${c.map(x => x.candidates).join(' ')}; pairs (vf+ee) ${c.map(x => x.vfPairs + x.eePairs).join(' ')}; `
     + `rounds (detections+redetections) ${c.map(x => x.detections + x.redetections).join(' ')}; solid contacts ${c.map(x => x.solidContacts).join(' ')}; held ${c.map(x => x.held).join(' ')}; held for plane-record overflow (sum/max) ${c.map(x => `${x.planeRecordHeld}/${x.planeRecordHeldMax}`).join(' ')}; plane-record peak ${c.map(x => x.framePeakPlaneRecords).join(' ')}; status ${c.map(x => x.status).join(' ')}`);
+  if (contactCandidateCache) console.log(`  candidate cache per step: ${steps.map(s => JSON.stringify(s.candidateCache)).join(" ")}`);
   if (prof) {
     console.log(`  profile (${prof.steps} step, split passes): ${prof.dispatches} dispatches queued, ${prof.worked} did work; `
       + `Newton iterations with work ${prof.newtonWorked}, PCG iterations with work ${prof.pcgWorked}; split sum ${prof.sumMs.toFixed(2)} ms (65.5 us clock)`);
@@ -366,6 +454,17 @@ for (const tick of TICKS) {
   report.push({ tick, steps, profile: prof, replay: costs });
 }
 await device.queue.onSubmittedWorkDone();
-if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify({ nodes: NODES, vertices, locality: LOCALITY, report }, null, 1));
+const physics=Object.fromEntries(TICKS.map(tick=>{
+  const scene=restored(tick);
+  return [tick,{stateSha256:hashBytes(readFileSync(statePath(tick))),physicsSha256:hashBytes(JSON.stringify({scene,dt:CLOTH_SCENE_STEP_S,effectiveNewton:clothExecutionSettings(scene.cloth![0]!.solver).newton},plain))}];
+}));
+if(errors.length){device.destroy();throw new Error(`${errors.length} WebGPU errors; refusing to publish benchmark evidence`);}
+const sourceSha256=clothSourceHash();
+if(sourceSha256!==sourceBefore)throw new Error('Cloth sources changed during this benchmark; results are not eligible for promotion');
+const provenance={physics,sourceSha256,revision:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),backend:process.env.FLUID_WEBGPU_BACKEND ?? 'metal',adapter:{vendor:adapter.info.vendor,architecture:adapter.info.architecture,device:adapter.info.device,description:adapter.info.description},warmupWindows:WARM_WINDOWS,warmupSteps:WARM_STEPS,repeatId:opt('repeat-id',''),memoryObservations};
+if (JSON_OUT) writeFileSync(JSON_OUT, JSON.stringify({ provenance, nodes: NODES, vertices, locality: LOCALITY, contactEntryCapacity: SYSTEM.contactEntryCapacity, mandatoryRedoCap: SYSTEM.contactMandatoryRedoCap, pairDecisions:SYSTEM.contactPairDecisions, pairGeometryBuckets:SYSTEM.contactPairGeometryBuckets, datPathEarlyExit:SYSTEM.contactDatPathEarlyExit, macroSampleGeometry:SYSTEM.contactMacroSampleGeometry, macroWholeStep:SYSTEM.contactMacroWholeStep, bvhVerify:SYSTEM.contactBvhVerify, macroCacheCapacity:SYSTEM.contactMacroCacheCapacity, macroSpecialize:SYSTEM.contactMacroSpecialize, newton: restored(TICKS[0]!).cloth![0]!.solver?.newton, multigrid: SYSTEM.multigrid, multigridAggregateSize: SYSTEM.multigridAggregateSize, multigridFusedRows: SYSTEM.multigridFusedRows, separationCulling: SYSTEM.contactSeparationCulling, broadphase: SYSTEM.contactBroadphase, bvhLeafSize: SYSTEM.contactBvhLeafSize, uniqueEdgePairs: SYSTEM.contactUniqueEdgePairs, bvhEdgePruning: SYSTEM.contactBvhEdgePruning, edgeStageCapacity: SYSTEM.contactEdgeStageCapacity, edgeStageWorkgroupSize: SYSTEM.contactEdgeStageWorkgroupSize, edgeStageBlockSize: SYSTEM.contactEdgeStageBlockSize, edgeStagePacket: SYSTEM.contactEdgeStagePacket, conflictWitnesses: SYSTEM.contactConflictWitnesses, solidWitnesses: SYSTEM.contactConflictWitnessSolids, vertexStage: SYSTEM.contactVertexStage, vertexStagePacket: SYSTEM.contactVertexStagePacket, lazyLineSearch: SYSTEM.lazyLineSearch, candidateCache: contactCandidateCache, report }, null, 1));
 if (errors.length) { console.error(`${errors.length} WebGPU errors`); process.exitCode = 1; }
 device.destroy();
+
+if (POSES) writeFileSync(POSES, JSON.stringify({ nodes: NODES, poses }));
+if (POSE_HASHES) writeFileSync(POSE_HASHES, JSON.stringify({nodes:NODES,poses:poseHashes},null,1));

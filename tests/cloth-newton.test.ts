@@ -13,7 +13,8 @@ import { clothGridData } from '../lib/cloth/grid';
 import { prepareClothTopology } from '../lib/cloth/topology';
 import type { ClothMaterial } from '../lib/cloth/types';
 import { buildClothSolverModel, clothOracleStep, createClothOracleState, type ClothStepOptions } from '../lib/cloth/oracle';
-import { ClothGPUSolver } from '../lib/cloth/gpu-solver';
+import { ClothGPUSolver, CLOTH_PARAM_NEWTON } from '../lib/cloth/gpu-solver';
+import { CLOTH_SEGMENT_ALIGN } from '../lib/cloth/gpu-solver-wgsl';
 import { buildClothCoarseSpace, ClothCoarseCorrection } from '../lib/cloth/oracle-coarse';
 
 const gpu = !!process.env.WEBGPU_NODE_MODULE;
@@ -102,4 +103,43 @@ test('the Newton method refuses unknown methods and bad caps', { skip: !gpu }, a
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base } as never), /needs integer caps/);
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton: { iterations: 2, pcgIterations: 0 } }), /needs integer caps/);
   await assert.rejects(ClothGPUSolver.create(device, model, { ...base, newton: { iterations: 2.5, pcgIterations: 4 } }), /needs integer caps/);
+}));
+
+
+test('lazy energy prefix gate preserves Armijo selection, rejection, and completed-Newton state', {skip:!gpu}, async()=>withDevice(async device=>{
+  for(const prefix of [1,2] as const){
+    const solver=await ClothGPUSolver.create(device,setup(4),{...base,lazyLineSearch:prefix,newton:{iterations:2,pcgIterations:8}});
+    const internal=solver as unknown as {newtonWork:GPUBuffer;run(pass:GPUComputePassEncoder,name:string,groups:number):void};
+    const params=solver.tables.params,partial=params[CLOTH_PARAM_NEWTON+1]!,groups=params[CLOTH_PARAM_NEWTON+2]!;
+    const control=solver.tables.newtonRecords-CLOTH_SEGMENT_ALIGN;
+    const dispatch=(name:string)=>{const e=device.createCommandEncoder(),pass=e.beginComputePass();internal.run(pass,name,1);pass.end();device.queue.submit([e.finish()]);};
+    const write=(energies:number[],slopes:number[],limit=8,done=0)=>{
+      const data=new Float32Array(10*groups*4);
+      for(let k=0;k<limit;k++){
+        data[4*(Math.floor(k/4)*groups)+k%4]=energies[k]!;
+        data[4*((4+Math.floor(k/4))*groups)+k%4]=slopes[k]!;
+      }
+      data[4*6*groups+1]=1;data[4*6*groups+3]=2;
+      device.queue.writeBuffer(internal.newtonWork,16*partial,data);
+      device.queue.writeBuffer(internal.newtonWork,16*control,new Float32Array([done,0,0,0]));
+    };
+    try{
+      for(const first of [0,1,3,7,8]){
+        const energies=Array.from({length:8},(_,i)=>i===first?-1:1),slopes=Array(8).fill(-1);
+        write(energies,slopes);dispatch('nwChoose');const reference=await solver.readNewtonControl();
+        const oldCounts=await solver.readLineSearchWork();
+        write(energies,slopes,prefix);dispatch('nwTrialHeadGate');
+        const counts=await solver.readLineSearchWork();assert.ok(counts);
+        assert.equal(counts.heads,oldCounts!.heads+1);assert.equal(counts.tails,oldCounts!.tails+Number(first>=prefix));
+        // The real tail runs the complete original ladder; here supply its exact partials.
+        if(first>=prefix)write(energies,slopes);
+        dispatch('nwChoose');assert.deepEqual(await solver.readNewtonControl(),reference,`prefix ${prefix}, first passing level ${first}`);
+      }
+      const before=await solver.readLineSearchWork();
+      // Finish after an accepted prefix. The next inactive gate must not replay it or count another iteration.
+      write(Array(8).fill(-1),Array(8).fill(-1),prefix,1);dispatch('nwTrialHeadGate');dispatch('nwChoose');
+      assert.deepEqual(await solver.readLineSearchWork(),before);
+      assert.equal((await solver.readNewtonControl())[0],1);
+    }finally{solver.destroy();}
+  }
 }));

@@ -1,3 +1,10 @@
+import { pairGeometryLayout, pairGeometryResetWGSL } from './pair-geometry-cache';
+import { ogcPairGeometryBoundsWGSL } from './ogc-detector-wgsl';
+import { macroCacheLayout, macroCacheResetWGSL } from './macro-cache';
+import { ogcMacroBoundsWGSL } from './ogc-detector-wgsl';
+import { buildOgcBVH, type OgcBVHLayout } from './bvh';
+import { ogcBVHRefitWGSL } from './ogc-detector-wgsl';
+import { candidateCacheWords, type OgcCandidateCacheLayout, type OgcCandidateCacheOptions } from './candidate-cache-wgsl';
 /**
  * GPU OGC self-contact detector for triangle cloth (Chen et al. 2025).
  *
@@ -38,8 +45,8 @@ import { OGC_FACE_RECORD_WORDS, buildOgcFaceRecords, buildOgcQueryOrder } from "
 import { OGC_LOCALITY_DEFAULT, OGC_LOC_GEOMETRY_WGSL, ogcQueryBindings, parseOgcLocality, type OgcLocalityFlags } from "./ogc-detector-wgsl";
 import {
   OGC_APPLY_WGSL, OGC_ARGS_WORDS, OGC_BOUND_WGSL, OGC_CELL_WGSL, ogcDecideWGSL, OGC_INTERSECT_WGSL, OGC_PARAM,
-  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
-  ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL, ogcVerifyArgsWGSL, OGC_VERIFY_WGSL,
+  OGC_PARAM_WORDS, ogcPlanesWGSL, OGC_FILTER_WGSL, OGC_FILTER_ALLOC_WGSL, OGC_FILTER_BEGIN_WGSL, OGC_CONTACT_STATE_WGSL, OGC_PREP_WGSL, OGC_QUERY_ROLES, OGC_REDO_LAST_WGSL, OGC_REDO_MANDATORY, OGC_REDO_ROUNDS, OGC_SHIFT_WORDS, ogcQueryWGSL, ogcCandidateCacheWGSL, OGC_REDO_WGSL, OGC_STEP_BEGIN_WGSL,
+  ogcSolidWitnessProbeWGSL, ogcWitnessProbeWGSL, OGC_WITNESS_GATE_WGSL, ogcEdgeStageControlWGSL, ogcFrameBeginWGSL, ogcGridCountWGSL, ogcGridInsertWGSL, ogcScanWGSL, ogcVerifyArgsWGSL, ogcVerifyWGSL,
 } from "./ogc-detector-wgsl";
 import {
   OGC_COUNTER, OGC_COUNTER_WORDS, OGC_FRAME_COUNTERS, OGC_ROUND_LOG, OGC_ROUND_LOG_WORDS, OGC_POSE_WORDS, OGC_LEVEL_VEC4S, OGC_PROJECT_RECORD, OGC_STATUS, OGC_TRUNCATION, ogcVertexBlockWGSL,
@@ -50,6 +57,29 @@ import { SOLID_HEADER_WORDS, SOLID_SAMPLE_WORDS, clothSolidSampleEdges, clothSol
 import { OGC_NONE } from "./ogc-topology";
 
 export interface OgcContactConfig {
+  /** Experimental conservative broad-phase reuse; omitted keeps full searches. */
+  candidateCache?: OgcCandidateCacheOptions;
+  /** Conservative swept separating-axis rejection before exact cloth-cloth distances. */
+  separationCulling?: boolean;
+  broadphase?: "grid" | "bvh";
+  /** Use the detection BVH for verification; omit unused planar detection grids. */
+  bvhVerify?: boolean;
+  /** Hardware tuning only: does not change the admitted face set. */
+  bvhLeafSize?: number;
+  /** Experimental: evaluate planar edge pairs once, writing both directed contact records. */
+  uniqueEdgePairs?: boolean;
+  /** Prune BVH subtrees containing no higher-ID owned edge; requires uniqueEdgePairs. */
+  bvhEdgePruning?: boolean;
+  /** Experimental compact edge candidate queue; overflow reruns the complete query. */
+  edgeStageCapacity?: number;
+  edgeStageWorkgroupSize?: 32 | 64 | 128 | 256;
+  edgeStageBlockSize?: 1 | 4 | 16;
+  edgeStagePacket?: boolean;
+  /** Recheck previous actual conflicts before attempting a levelled full search. */
+  conflictWitnesses?: boolean;
+  conflictWitnessSolids?: boolean;
+  vertexStage?: boolean;
+  vertexStagePacket?: boolean;
   /** Offset radius: the physical cloth thickness (m). */
   r: number;
   /** Contact stiffness k_c of the activation (N/m). */
@@ -84,6 +114,16 @@ export interface OgcContactConfig {
   separationEps?: number;
   /** Authored capacities: entries per vertex list, DAT pair slots, grid entries, hash buckets (power of two). */
   contactCapacity: number;
+  /** Rescue completion budget; never weakens separation or accepts unresolved conflicts. */
+  mandatoryRedoCap?: number;
+  macroCacheCapacity?: number;
+  macroSpecialize?: boolean;
+  /** Reuse face IDs across Newton redetections while all current endpoints remain contained. */
+  macroWholeStep?: boolean;
+  macroSampleGeometry?: boolean;
+  datPathEarlyExit?: boolean;
+  pairGeometryBuckets?: number;
+  pairDecisions?: boolean;
   pairCapacity: number;
   gridCapacity: number;
   bucketCount: number;
@@ -336,6 +376,12 @@ export interface OgcFrameCounters {
   /** Broad phase over the frame's rounds: bucket entries scanned, rejected for another cell's key (hash collisions),
    * rejected by box (or owned by another cell), and the longest single query's scan. */
   scanned: number; collisions: number; boxRejected: number; scanMax: number;
+  separationRejected: number;
+  pairDecisionHits:number; pairDecisionMisses:number;
+  pairGeometryHits:number; pairGeometryMisses:number; pairGeometryCollisions:number;
+  geometryHits:number; geometryMisses:number;
+  macroBuilds:number; macroHits:number; macroOverflows:number; macroEscapes:number;
+  bvhNodes: number; bvhFaceTests: number; edgeStageOverflows: number; packetNodeLoads: number; witnessSkips: number; witnessTests: number;
   /** Plane records the frame's line-search filters asked for, summed (each read at every trial of the ladder). */
   planeRecordsTotal: number;
   /** Levelled re-detection over the frame: its rounds, and those a conflict sent back unlevelled (w = 0). */
@@ -360,8 +406,8 @@ const DISPATCH = { prep: 0, cell: 1, count: 2, scan1: 3, scan2: 4, scan3: 5, ins
 /** The detection round's kernels in dispatch order (for profiling). */
 export const OGC_ROUND_KERNELS = Object.keys(DISPATCH) as (keyof typeof DISPATCH)[];
 /** The locality switch's round pass and the indirect slot it shares (prep's). */
-const LOC_DISPATCH = { locGeometry: DISPATCH.prep } as const;
-type RoundKernel = keyof typeof DISPATCH | keyof typeof LOC_DISPATCH;
+const LOC_DISPATCH = { locGeometry: DISPATCH.prep, cacheBegin: DISPATCH.cell, cacheCheck: DISPATCH.count } as const;
+type RoundKernel = "pairGeometryBounds" | "querySampleCached" | "macroBounds" | "vertexStageConsume" | "vertexStageFallback" | "witnessProbe" | "witnessGate" | "edgeStageReset" | "edgeStageArgs" | "edgeStageConsume" | "edgeStageFallback" | keyof typeof DISPATCH | keyof typeof LOC_DISPATCH | `bvh${number}` | "bvhTop";
 /** Hull edges the contact buffer holds per authored surface sample (a sample's fan holds a few neighbours past it). */
 export const OGC_HULL_EDGES_PER_SAMPLE = 8;
 /**
@@ -407,6 +453,8 @@ export class OgcContactDetector {
   readonly locality: OgcLocalityFlags;
   readonly locBuffer?: GPUBuffer;
   readonly geoBuffer?: GPUBuffer;
+  readonly candidateLayout?: OgcCandidateCacheLayout;
+  readonly bvhLayout?: OgcBVHLayout;
   /** Bytes the locality switch adds: [face records, round geometry records, query order]. */
   readonly localityBytes: readonly [number, number, number];
   /** The detection round's kernels in dispatch order under the locality switch (OGC_ROUND_KERNELS when off). */
@@ -435,7 +483,7 @@ export class OgcContactDetector {
     const gammaP = config.gammaP ?? 0.45, gammaE = config.gammaE ?? 0.01;
     if (!(gammaP > 0 && gammaP < 0.5)) throw new Error("OGC: gamma_p must lie in (0, 0.5)");
     if (!(config.r > 0 && config.rqBase >= config.r && config.rqMax >= config.rqBase)) throw new Error("OGC: need 0 < r <= rqBase <= rqMax");
-    if (!(config.contactCapacity > 0 && config.pairCapacity > 0 && config.gridCapacity > 0 && config.roundCap >= 0)) throw new Error("OGC: capacities must be authored");
+    if (!(Number.isSafeInteger(config.contactCapacity) && config.contactCapacity > 0 && config.pairCapacity > 0 && config.gridCapacity > 0 && config.roundCap >= 0)) throw new Error("OGC: capacities must be authored");
     const mode = config.truncation ?? "planar";
     if (!(mode in OGC_TRUNCATION)) throw new Error(`OGC: unknown truncation "${String(mode)}"`);
     this.mode = mode;
@@ -467,6 +515,7 @@ export class OgcContactDetector {
     const mk = (label: string, bytes: number, u = usage) => device.createBuffer({ label: `ogc ${label}`, size: Math.max(16, Math.ceil(bytes / 16) * 16), usage: u });
     this.params = mk("params", 4 * OGC_PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.topo = mk("topology", 4 * topology.words.length);
+    if(config.mandatoryRedoCap !== undefined && (!Number.isSafeInteger(config.mandatoryRedoCap) || config.mandatoryRedoCap < OGC_REDO_MANDATORY || config.mandatoryRedoCap > 256)) throw new Error('Mandatory rescue budget must be an integer from32 to256');
     const sampleCap = config.solidSampleCapacity ?? 0;
     if (!(Number.isSafeInteger(sampleCap) && sampleCap >= 0)) throw new Error("OGC: solidSampleCapacity must be a whole number");
     this.solidSampleCapacity = sampleCap;
@@ -481,13 +530,51 @@ export class OgcContactDetector {
     this.bodySampleCapacity = bodySampleCap;
     this.det = mk("x_det", 16 * (N + sampleCap + bodySampleCap));
     this.pred = mk("predictions", 32 * N + 16 * bodySampleCap);
-    this.work = mk("work", 4 * ((body ? 28 : 16) * N + OGC_SHIFT_WORDS * N + T + E + (config.newton ? 5 * N : 0)));
+    const workWords=(body ? 28 : 16)*N+OGC_SHIFT_WORDS*N+T+E+(config.newton ? 5*N : 0);
+    if(config.pairGeometryBuckets!==undefined && config.broadphase!=='bvh')throw new Error('Pair geometry reuse requires BVH');
+    if(config.pairDecisions && config.pairGeometryBuckets===undefined)throw new Error("Pair decisions require a geometry cache");
+    const pairGeometry=config.pairGeometryBuckets===undefined ? undefined : pairGeometryLayout(workWords,N,config.pairGeometryBuckets,config.pairDecisions);
+    if(4*(workWords+(pairGeometry?.words??0))>device.limits.maxStorageBufferBindingSize)throw new Error('Pair geometry work exceeds storage binding limit');
+    this.work = mk("work",4*(workWords+(pairGeometry?.words??0)));
     this.counts = mk("grid counts", 4 * H);
     const local1Off = 0, sums1Off = H, local2Off = H + B1, sums2Off = H + 2 * B1, local3Off = H + 2 * B1 + B2, sums3Off = H + 2 * B1 + 2 * B2;
     // Entries of 8 words: face, cell key, the face's round box (wgsl GRID_READ_FNS).
     const entriesOff = Math.ceil((sums3Off + 1) / 8) * 8;
     if (4 * (entriesOff + 8 * config.gridCapacity) > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: gridCapacity exceeds one storage binding");
-    this.grid = mk("grid", 4 * (entriesOff + 8 * config.gridCapacity));
+    const gridWords = entriesOff + 8 * config.gridCapacity;
+    let cacheWords = 0;
+    if (config.broadphase && config.broadphase !== 'grid' && config.broadphase !== 'bvh') throw new Error('Unknown cloth broadphase');
+    if (config.bvhEdgePruning && !config.uniqueEdgePairs) throw new Error('BVH edge pruning requires unique edge pairs');
+    if(config.edgeStagePacket && (!config.edgeStageCapacity || !device.features.has('subgroups'))) throw new Error('Packet staging requires a staged queue and GPU subgroup support');
+    if(config.conflictWitnessSolids && !config.conflictWitnesses) throw new Error('Solid witnesses require conflict witnesses');
+    if(config.vertexStagePacket && (!config.vertexStage || !device.features.has('subgroups'))) throw new Error('Vertex packets require staged queries and subgroups');
+    if(config.vertexStage && (!config.edgeStageCapacity || (config.truncation ?? 'planar') !== 'planar')) throw new Error('Vertex staging requires planar edge staging');
+    if(config.edgeStageBlockSize !== undefined && ![1,4,16].includes(config.edgeStageBlockSize)) throw new Error('Unknown staged edge allocation block size');
+    if(config.edgeStageWorkgroupSize !== undefined && ![32,64,128,256].includes(config.edgeStageWorkgroupSize)) throw new Error('Unknown staged edge workgroup size');
+    if (config.edgeStageCapacity !== undefined && (!Number.isSafeInteger(config.edgeStageCapacity) || config.edgeStageCapacity < 1 || config.edgeStageCapacity > (config.edgeStageWorkgroupSize ?? 64) * 65535 || config.broadphase !== 'bvh' || !config.uniqueEdgePairs || (config.truncation ?? 'planar') !== 'planar')) throw new Error('Edge staging requires planar BVH, unique edge pairs, and a positive capacity');
+    if(config.macroSampleGeometry && config.macroCacheCapacity === undefined)throw new Error("Geometry reuse requires a candidate cache capacity");
+    if(config.macroWholeStep && config.macroCacheCapacity === undefined)throw new Error('Whole-step reuse requires a candidate cache capacity');
+    if(config.macroCacheCapacity !== undefined && config.broadphase !== 'bvh')throw new Error('Mandatory candidate cache requires BVH');
+    if (config.broadphase === 'bvh') {
+      if (config.candidateCache) throw new Error('BVH and per-query candidate cache cannot be combined');
+      if (!restPositions) throw new Error('BVH requires topology build positions');
+      this.bvhLayout = { pairGeometry, datPathEarlyExit:config.datPathEarlyExit, ...buildOgcBVH(topology, restPositions, gridWords, config.bvhLeafSize, config.bvhEdgePruning), edgeStageCapacity: config.edgeStageCapacity, edgeStageWorkgroupSize: config.edgeStageWorkgroupSize, edgeStageBlockSize: config.edgeStageBlockSize, edgeStagePacket: config.edgeStagePacket, vertexStagePacket: config.vertexStagePacket };
+      cacheWords = this.bvhLayout.words.length + 2 * (config.edgeStageCapacity ?? 0);
+      if(config.macroCacheCapacity !== undefined){
+        const queries=(sampleCap+bodySampleCap)*(1+OGC_HULL_EDGES_PER_SAMPLE+OGC_HULL_FACETS_PER_SAMPLE);
+        if(queries){const macroCache=macroCacheLayout(cacheWords,N+sampleCap+bodySampleCap,queries,this.bvhLayout.nodes,T,config.macroCacheCapacity,config.macroWholeStep,config.macroSampleGeometry ? sampleCap+bodySampleCap : 0);
+        this.bvhLayout={...this.bvhLayout,macroCache};cacheWords+=macroCache.words;}
+      }
+      if (4*(gridWords+cacheWords)>device.limits.maxStorageBufferBindingSize) throw new Error('Cloth BVH exceeds storage binding limit');
+    }
+    if (config.candidateCache) {
+      const queries = N + E + (sampleCap + bodySampleCap) * (1 + OGC_HULL_EDGES_PER_SAMPLE + OGC_HULL_FACETS_PER_SAMPLE);
+      cacheWords = candidateCacheWords(T, queries, config.candidateCache, H);
+      this.candidateLayout = { ...config.candidateCache, gridWords, buckets: H };
+      if (4 * (gridWords + cacheWords) > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: grid plus candidate cache exceeds one storage binding");
+    }
+    this.grid = mk("grid", 4 * (gridWords + cacheWords));
+    if (this.bvhLayout) writeBufferChunked(device.queue, this.grid, 4*gridWords, this.bvhLayout.words);
     // The header (vec4 0..3), the start and end poses (4..11), the hull facets' header (12), then the counts.
     const countsBase = 13, entriesBase = 13 + Math.ceil(N / 4);
     const solidWords = config.solidCapacityWords ?? 0;
@@ -526,7 +613,7 @@ export class OgcContactDetector {
     if (this.contacts.size > device.limits.maxStorageBufferBindingSize) throw new Error("OGC: the contact buffer exceeds one storage binding");
     this.pairs = mk("dat pairs", 32 * config.pairCapacity);
     this.counters = mk("counters", 4 * OGC_COUNTER_WORDS);
-    this.args = mk("args", 4 * OGC_ARGS_WORDS, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
+    this.args = mk("args", 4 * (OGC_ARGS_WORDS + (config.edgeStageCapacity ? 6 : 0)), GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.planesArgs = mk("planes args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.verifyArgs = mk("verify args", 12, GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC);
     this.alpha = mk("filter alpha", config.newton ? 4 * (N + 1) : 4);
@@ -542,8 +629,19 @@ export class OgcContactDetector {
       if (N + E) writeBufferChunked(device.queue, this.locBuffer, this.localityBytes[0], buildOgcQueryOrder(topology, restPositions));
     }
     if (loc.geometry) this.geoBuffer = mk("round geometry", this.localityBytes[1]);
-    this.roundKernels = OGC_ROUND_KERNELS.flatMap((name): RoundKernel[] => name === "prep" && loc.geometry ? [name, "locGeometry"] : [name]);
+    if (config.bvhVerify && (!this.bvhLayout || mode !== "planar")) throw new Error("BVH verification requires planar BVH detection");
+    this.roundKernels = OGC_ROUND_KERNELS.flatMap((name): RoundKernel[] => {
+      if (config.bvhVerify && ["count", "scan1", "scan2", "scan3"].includes(name)) return [];
+      if (name === "cell" && config.conflictWitnesses) return config.conflictWitnessSolids ? [name,"witnessProbe"] : [name,"witnessProbe","witnessGate"];
+      if(name === "querySample" && this.bvhLayout?.macroCache && config.macroSpecialize !== false)return [name,"querySampleCached"];
+      if (name === "queryVertex" && config.vertexStage) return ["edgeStageReset",name,"edgeStageArgs","vertexStageConsume","vertexStageFallback"];
+      if (name === "queryEdge" && config.edgeStageCapacity) return ["edgeStageReset",name,"edgeStageArgs","edgeStageConsume","edgeStageFallback"];
+      if (name === "insert" && this.bvhLayout) return [...(config.bvhVerify ? [] : [name]), ...this.bvhLayout.levels.map((_,i): RoundKernel => `bvh${i}`).filter((_,i)=>i>this.bvhLayout!.fusedTop).reverse(), ...(this.bvhLayout.levels.length ? ["bvhTop" as const] : [])];
+      if (name !== "prep") return [name];
+      return [name, ...(pairGeometry ? ["pairGeometryBounds" as const] : []), ...(this.bvhLayout?.macroCache ? ["macroBounds" as const] : []), ...(loc.geometry ? ["locGeometry" as const] : []), ...(config.candidateCache ? ["cacheBegin", "cacheCheck"] as const : [])];
+    });
     const w = this.paramWords, f = new Float32Array(w.buffer), P = OGC_PARAM;
+    w[P.mandatoryRedoCap] = config.mandatoryRedoCap ?? OGC_REDO_MANDATORY;
     w[P.N] = N; w[P.T] = T; w[P.E] = E; w[P.H] = H;
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
     w[P.exceedThreshold] = Math.max(1, Math.ceil(gammaE * N));
@@ -630,6 +728,9 @@ export class OgcContactDetector {
    * for the envelope, as setSolidField does.
    */
   setBodyField(field: ClothSolidField) {
+    // Either replacement can change hull connectivity and rebase moving-sample IDs.
+    if(this.bvhLayout?.macroCache)this.device.queue.writeBuffer(this.counters,4*OGC_COUNTER.macroInvalid,new Uint32Array([1]));
+    if(this.config.conflictWitnessSolids) this.device.queue.writeBuffer(this.counters,4*OGC_COUNTER.witnessCount,new Uint32Array(258));
     const body = this.config.body;
     if (!body) throw new Error("OGC: the detector was built without a moving solid (config.body)");
     if (field.words.length > body.capacityWords)
@@ -748,6 +849,9 @@ export class OgcContactDetector {
    * r + 1.5 L_max rqMax from where a vertex's round can reach.
    */
   setSolidField(field: ClothSolidField) {
+    // Either replacement can change hull connectivity and rebase moving-sample IDs.
+    if(this.bvhLayout?.macroCache)this.device.queue.writeBuffer(this.counters,4*OGC_COUNTER.macroInvalid,new Uint32Array([1]));
+    if(this.config.conflictWitnessSolids) this.device.queue.writeBuffer(this.counters,4*OGC_COUNTER.witnessCount,new Uint32Array(258));
     if (!this.solidBase) throw new Error("OGC: the detector was built without solidCapacityWords");
     if (field.words.length > this.solidCapacityWords)
       throw new Error(`OGC: the solid field needs ${field.words.length} words, the scene authored ${this.solidCapacityWords}`);
@@ -857,7 +961,7 @@ export class OgcContactDetector {
         ["filter", OGC_FILTER_WGSL, [0, 2, 4, 5, 8, 9, 14, 15, 16]],
         ["verifyArgs", ogcVerifyArgsWGSL(false), [0, 9, 19, 20]],
         ["verifyArgsLast", ogcVerifyArgsWGSL(true), [0, 9, 19, 20]],
-        ["verify", OGC_VERIFY_WGSL, [0, 1, 2, 4, 5, 7, 8, 9, 14]],
+        ["verify", ogcVerifyWGSL(this.config.bvhVerify ? this.bvhLayout : undefined), [0, 1, 2, 4, 5, 7, 8, 9, 14]],
       ] as [string, string, number[]][] : []),
       ["apply", OGC_APPLY_WGSL, [0, 2, 4, 5, 8, 9, 14]],
       ["contactState", OGC_CONTACT_STATE_WGSL, [0, 1, 2, 5, 8, 13, 18]],
@@ -868,13 +972,72 @@ export class OgcContactDetector {
     ];
     // The locality switch: the query roles' variants and its round pass (off: the specs above, untouched).
     const loc = this.locality;
-    if (loc.topology || loc.geometry) {
-      for (const spec of specs) if ((OGC_QUERY_ROLES as readonly string[]).includes(spec[0])) { spec[1] = ogcQueryWGSL(spec[0] as (typeof OGC_QUERY_ROLES)[number], loc); spec[2] = ogcQueryBindings(loc); }
+    if (loc.topology || loc.geometry || this.config.separationCulling || this.config.uniqueEdgePairs || this.config.conflictWitnesses) {
+      for (const spec of specs) if ((OGC_QUERY_ROLES as readonly string[]).includes(spec[0])) { spec[1] = ogcQueryWGSL(spec[0] as (typeof OGC_QUERY_ROLES)[number], loc, undefined, this.config.separationCulling, undefined, this.config.uniqueEdgePairs, undefined, this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids); spec[2] = ogcQueryBindings(loc); }
       if (loc.geometry) specs.push(["locGeometry", OGC_LOC_GEOMETRY_WGSL, [0, 4, 5, 14, 25]]);
+    }
+    if (this.candidateLayout) {
+      const cache = this.candidateLayout;
+      for (const spec of specs) if ((OGC_QUERY_ROLES as readonly string[]).includes(spec[0])) {
+        spec[1] = ogcQueryWGSL(spec[0] as (typeof OGC_QUERY_ROLES)[number], loc, cache, this.config.separationCulling, undefined, this.config.uniqueEdgePairs, undefined, this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids);
+        spec[2] = ogcQueryBindings(loc);
+      }
+      specs.push(["cacheReset", ogcCandidateCacheWGSL("reset", cache), [7]],
+        ["cacheBegin", ogcCandidateCacheWGSL("begin", cache), [7]],
+        ["cacheCheck", ogcCandidateCacheWGSL("check", cache), [0, 1, 4, 5, 7, 14]]);
+    }
+    if (this.bvhLayout) {
+      const bvh=this.bvhLayout;
+      if(bvh.pairGeometry)specs.push(["pairGeometryReset",pairGeometryResetWGSL(bvh.pairGeometry),[5]],["pairGeometryBounds",ogcPairGeometryBoundsWGSL(bvh.pairGeometry,this.locality.geometry),[0,4,5,9,10,...(bvh.pairGeometry.decisions ? [14] : [])]]);
+      if(bvh.macroCache)specs.push(["macroBounds",ogcMacroBoundsWGSL(bvh),[0,4,5,7,8,9,10,14]], ["macroReset",macroCacheResetWGSL(bvh),[7,9]]);
+      for (const spec of specs) if ((OGC_QUERY_ROLES as readonly string[]).includes(spec[0])) {
+        spec[1]=ogcQueryWGSL(spec[0] as (typeof OGC_QUERY_ROLES)[number],loc,undefined,this.config.separationCulling,bvh,this.config.uniqueEdgePairs,undefined,this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids);
+        spec[2]=ogcQueryBindings(loc);
+      }
+      if(bvh.macroCache && this.config.macroSpecialize !== false){
+        const sample=specs.find(s=>s[0]==="querySample")!;
+        const gate=(source:string,cached:boolean)=>{
+          const marker="  if (64u * wg.x + 64u <= roleLo || 64u * wg.x >= roleHi) { return; }";
+          if(!source.includes(marker))throw new Error('Missing query-role guard');
+          return "var<workgroup> macroChoice:u32;\n"+source.replace(marker,marker+`
+  if(li==0u){macroChoice=select(0u,1u,${this.config.macroWholeStep ? "" : "atomicLoad(&counters[OGC_ROUNDS])==0u && "}atomicLoad(&counters[1120u])==0u);}
+  let useCache=workgroupUniformLoad(&macroChoice);
+  if(useCache${cached ? '==' : '!='}0u){return;}
+`);
+        };
+        specs.push(["querySampleCached",gate(sample[1],true),sample[2]]);
+        sample[1]=gate(ogcQueryWGSL('querySample',loc,undefined,this.config.separationCulling,{...bvh,macroCache:undefined},this.config.uniqueEdgePairs,undefined,this.config.conflictWitnesses ? 'capture' : undefined,this.config.conflictWitnessSolids),false);
+      }
+      bvh.levels.forEach((_,level)=>{if(level>bvh.fusedTop)specs.push([`bvh${level}`,ogcBVHRefitWGSL(bvh,level),[0,1,4,5,7,...(bvh.macroCache ? [9] : []),10,14]]);});
+      if(bvh.levels.length)specs.push(["bvhTop",ogcBVHRefitWGSL(bvh,-1),[0,1,4,5,7,...(bvh.macroCache ? [9] : []),10,14]]);
+    }
+    if(this.config.edgeStageCapacity){
+      const capacity=this.config.edgeStageCapacity,bvh=this.bvhLayout!;
+      const query=specs.find(s=>s[0]==="queryEdge")!;
+      specs.push(["edgeStageFallback",query[1],query[2]]);
+      query[1]=ogcQueryWGSL("queryEdge",loc,undefined,this.config.separationCulling,bvh,true,"collect",this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids);
+      query[2]=ogcQueryBindings(loc).filter(b=>b!==8 && (!loc.geometry || (b!==4 && b!==14)));
+      specs.push(["edgeStageConsume",ogcQueryWGSL("queryEdge",loc,undefined,this.config.separationCulling,bvh,true,"consume",this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids),ogcQueryBindings(loc).filter(b=>b!==24)],
+        ["edgeStageReset",ogcEdgeStageControlWGSL(capacity,true),[9]],
+        ["edgeStageArgs",ogcEdgeStageControlWGSL(capacity,false,this.config.edgeStageWorkgroupSize),[9,10]]);
+    }
+    if(this.config.vertexStage){
+      const bvh=this.bvhLayout!,query=specs.find(s=>s[0]==="queryVertex")!;
+      specs.push(["vertexStageFallback",query[1],query[2]]);
+      query[1]=ogcQueryWGSL("queryVertex",loc,undefined,this.config.separationCulling,bvh,true,"collect",this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids);
+      query[2]=ogcQueryBindings(loc).filter(b=>b!==8 && (!loc.topology || b!==1) && (!loc.geometry || (b!==4 && b!==14)));
+      specs.push(["vertexStageConsume",ogcQueryWGSL("queryVertex",loc,undefined,this.config.separationCulling,bvh,true,"consume",this.config.conflictWitnesses ? "capture" : undefined,this.config.conflictWitnessSolids),ogcQueryBindings(loc).filter(b=>b!==24)]);
+    }
+    if(this.config.conflictWitnesses){
+      specs.push(["witnessProbe",(this.config.conflictWitnessSolids ? ogcSolidWitnessProbeWGSL : ogcWitnessProbeWGSL)(loc,!!this.config.separationCulling),[0,4,8,9,10,14,...(loc.geometry?[25]:[5])]],
+        ["witnessGate",OGC_WITNESS_GATE_WGSL,[9,10]]);
     }
     await Promise.all(specs.map(async ([name, code, bindings, override]) => {
       const module = this.device.createShaderModule({ label: `ogc ${name}`, code });
-      const pipeline = await this.device.createComputePipelineAsync({ label: `ogc ${name}`, layout: "auto", compute: { module, entryPoint: "main" } });
+      const pipeline = await this.device.createComputePipelineAsync({ label: `ogc ${name}`, layout: "auto", compute: { module, entryPoint: "main" } }).catch(async error => {
+        const info = await module.getCompilationInfo();
+        throw new Error(`ogc ${name}: ${info.messages.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("\n") || String(error)}`);
+      });
       this.kernels.set(name, { pipeline, bindings, override });
     }));
   }
@@ -922,8 +1085,19 @@ export class OgcContactDetector {
     pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroups(workgroups);
   }
   private runIndirect(pass: GPUComputePassEncoder, name: RoundKernel) {
+    if(name==='querySampleCached'){const k=this.kernel(name);pass.setPipeline(k.pipeline);pass.setBindGroup(0,k.bindGroup);pass.dispatchWorkgroupsIndirect(this.args,84);return;}
+    if(name==='pairGeometryBounds'){this.run(pass,name,Math.ceil(this.N/WG));return;}
+    if(name==='macroBounds'){this.run(pass,name,Math.ceil(this.bvhLayout!.macroCache!.vertices/WG));return;}
+    if(name==='witnessProbe'||name==='witnessGate'){this.run(pass,name,1);return;}
+    if(name==='edgeStageReset'||name==='edgeStageArgs'){this.run(pass,name,1);return;}
+    if(name==='edgeStageConsume'||name==='edgeStageFallback'||name==='vertexStageConsume'||name==='vertexStageFallback'){
+      const k=this.kernel(name);pass.setPipeline(k.pipeline);pass.setBindGroup(0,k.bindGroup);
+      pass.dispatchWorkgroupsIndirect(this.args,(name==='edgeStageConsume'||name==='vertexStageConsume')?108:120);return;
+    }
+    if (name === 'bvhTop') { this.run(pass,name,1); return; }
+    if (name.startsWith('bvh')) { this.run(pass,name,Math.ceil(this.bvhLayout!.levels[Number(name.slice(3))]!.count/WG)); return; }
     const k = this.kernel(name);
-    pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.args, 12 * { ...DISPATCH, ...LOC_DISPATCH }[name]);
+    pass.setPipeline(k.pipeline); pass.setBindGroup(0, k.bindGroup); pass.dispatchWorkgroupsIndirect(this.args, 12 * { ...DISPATCH, ...LOC_DISPATCH }[name as keyof typeof DISPATCH | keyof typeof LOC_DISPATCH]);
   }
 
   /** Reset the per-frame statistics (status and peaks persist). */
@@ -933,7 +1107,12 @@ export class OgcContactDetector {
     this.run(pass, "frameBegin", 1);
   }
   /** Start of a step: arm the mandatory detection round. */
-  encodeStepBegin(pass: GPUComputePassEncoder) { this.run(pass, "stepBegin", 1); }
+  encodeStepBegin(pass: GPUComputePassEncoder) {
+    if(this.bvhLayout?.pairGeometry)this.run(pass,"pairGeometryReset",Math.ceil(this.bvhLayout.pairGeometry.buckets/WG));
+    if(this.bvhLayout?.macroCache)this.run(pass,"macroReset",Math.ceil(this.bvhLayout.macroCache.queries/WG));
+    if (this.candidateLayout) this.run(pass, "cacheReset", 1);
+    this.run(pass, "stepBegin", 1);
+  }
   /**
    * One detection round, dispatched indirectly: zero workgroups unless armed;
    * then the redo decisions, each with the round again (zero workgroups unless the
@@ -946,7 +1125,7 @@ export class OgcContactDetector {
     // impact zones too (redoCap, as the kernel counts it). A later round predicts 0 about the
     // iterate, the moving solid at rest at its end pose (a_v = 0 exactly): only its levelled form
     // can conflict, and its one redo (unlevelled) cannot; a conflict there fails as heldConflict.
-    const slots = !mandatory ? 1 : this.bodyField ? OGC_REDO_MANDATORY : OGC_REDO_ROUNDS + 1;
+    const slots = !mandatory ? 1 : this.bodyField ? (this.config.mandatoryRedoCap ?? OGC_REDO_MANDATORY) : OGC_REDO_ROUNDS + 1;
     for (let k = 0; k < slots; k++) {
       this.run(pass, "redo", 1);
       for (const name of this.roundKernels) this.runIndirect(pass, name);
@@ -1101,6 +1280,11 @@ export class OgcContactDetector {
       levelConflicts: [u[C.frameLevelConflicts]!, u[C.frameLevelConflicts + 1]!],
       maxPrediction: fl[C.frameMaxPrediction]!, maxDirection: fl[C.frameMaxDirection]!,
       planeRecordHeld: u[C.framePlaneRecordHeld]!, planeRecordHeldMax: u[C.framePlaneRecordHeldMax]!,
+      pairDecisionHits:u[C.framePairDecisionHits]!,pairDecisionMisses:u[C.framePairDecisionMisses]!,
+      pairGeometryHits:u[C.framePairGeometryHits]!,pairGeometryMisses:u[C.framePairGeometryMisses]!,pairGeometryCollisions:u[C.framePairGeometryCollisions]!,
+      geometryHits:u[C.frameGeometryHits]!,geometryMisses:u[C.frameGeometryMisses]!,
+      macroBuilds:u[C.frameMacroBuilds]!,macroHits:u[C.frameMacroHits]!,macroOverflows:u[C.frameMacroOverflows]!,macroEscapes:u[C.frameMacroEscapes]!,
+      separationRejected: u[C.frameSeparationRejected]!, bvhNodes: u[C.frameBvhNodes]!, bvhFaceTests: u[C.frameBvhFaceTests]!, edgeStageOverflows: u[C.frameEdgeStageOverflow]!, packetNodeLoads: u[C.framePacketNodeLoads]!, witnessSkips: u[C.frameWitnessSkips]!, witnessTests: u[C.frameWitnessTests]!,
       scanned: u[C.frameScanned]!, collisions: u[C.frameCollisions]!, boxRejected: u[C.frameBoxRejected]!, scanMax: u[C.frameScanMax]!,
       planeRecordsTotal: u[C.framePlaneRecordsTotal]!,
       levelled: u[C.frameLevelled]!, levelFallback: u[C.frameLevelFallback]!,
@@ -1141,6 +1325,20 @@ export class OgcContactDetector {
     const counts = raw.map(c => Math.min(c, K));
     const entries = new Uint32Array(await this.readBuffer(this.contacts, 16 * header[3]!, 16 * N * K));
     return { header, counts, entries };
+  }
+  /** Last step's cache work; readback for tests/profiling only. */
+  async readCandidateCacheCounters() {
+    if (!this.candidateLayout) return undefined;
+    const h = new Uint32Array(await this.readBuffer(this.grid, 4 * this.candidateLayout.gridWords, 32));
+    return { epoch: h[0]!, builds: h[2]!, hits: h[3]!, overflows: h[4]!, buildScans: h[5]!, resets: h[6]!, fallbacks: h[7]!, bytes: this.grid.size - 4 * this.candidateLayout.gridWords };
+  }
+  /** Harness-only inspection of the last staged candidate queue; never used by the live step. */
+  async readEdgeStageCandidates(): Promise<{overflow:boolean; entries:Uint32Array} | undefined> {
+    const b=this.bvhLayout;if(!b?.edgeStageCapacity)return undefined;
+    const h=new Uint32Array(await this.readBuffer(this.counters,4*OGC_COUNTER.edgeStageCount,12));
+    const overflow=h[2]!==0 || h[0]!>b.edgeStageCapacity;
+    const n=Math.min(h[0]!,b.edgeStageCapacity);
+    return {overflow,entries:new Uint32Array(n ? await this.readBuffer(this.grid,4*(b.gridWords+b.words.length),8*n) : new ArrayBuffer(0))};
   }
   private async readBuffer(src: GPUBuffer, offset: number, size: number): Promise<ArrayBuffer> {
     const read = this.device.createBuffer({ size: Math.ceil(size / 16) * 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });

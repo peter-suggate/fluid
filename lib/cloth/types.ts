@@ -142,6 +142,18 @@ export interface ClothNewtonSettings {
  * advance, at the frame/fluid dt: there is no substepping of any kind; the
  * Newton and PCG caps are the only budget. */
 export interface ClothSolverSettings {
+  /** Validated live optimizations (viewport default on). False restores the original defaults. */
+  readonly optimizations?: boolean;
+  readonly contactBroadphase?: 'grid' | 'bvh' | 'cached-grid';
+  readonly contactVertexEvaluation?: 'direct' | 'staged' | 'packet';
+  readonly contactConflictReuse?: 'off' | 'cloth' | 'all';
+  /** Conservative solid face candidates reused during mandatory collision rescue. */
+  readonly contactSolidCandidateReuse?: boolean;
+  readonly lazyLineSearch?: boolean;
+  readonly contactEdgeEvaluation?: 'directed' | 'unique' | 'pruned' | 'staged' | 'packet';
+  readonly contactBvhLeafSize?: 2 | 4 | 8 | 16;
+  readonly contactSeparationCulling?: boolean;
+  readonly multigrid?: boolean;
   /** BDF2 by default: implicit Euler visibly damps a swing at 1/60 s. */
   readonly integrator?: ClothIntegrator;
   /** Newton-PCG caps and tolerances (default CLOTH_NEWTON_SCENE_DEFAULTS in system.ts). */
