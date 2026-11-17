@@ -7,7 +7,7 @@ import { bridson2002RotatingSphere } from '../lib/cloth/scenes/bridson-2002';
 test('live cloth defaults enable validated optimizations, while reference runs and explicit opt-out retain original defaults', () => {
   const live=clothExecutionSettings({},true),reference=clothExecutionSettings();
   assert.equal(live.vertexEvaluation,'packet');assert.equal(live.vertexStage,true);assert.equal(live.vertexStagePacket,true);assert.equal(live.lazyLineSearch,true);assert.equal(live.conflictWitnesses,true);assert.equal(live.solidWitnesses,true);
-  assert.equal(live.macroCacheCapacity,64);assert.equal(live.contactEntryCapacity,256);assert.equal(live.mandatoryRedoCap,64);
+  assert.equal(live.macroCacheCapacity,64);assert.equal(live.contactEntryCapacity,256);assert.equal(live.mandatoryRedoCap,64);assert.equal(live.failSafeMemory,7);assert.equal(clothExecutionSettings().failSafeMemory,undefined);
   assert.equal(clothExecutionSettings({contactSolidCandidateReuse:false},true).macroCacheCapacity,undefined);
   assert.equal(clothExecutionSettings({contactBroadphase:'grid'},true).macroCacheCapacity,undefined);
   assert.equal(clothExecutionSettings({contactConflictReuse:'off'},true).conflictWitnesses,false);

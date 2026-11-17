@@ -56,6 +56,8 @@ export interface ClothContactStateData {
   readonly reference: readonly number[];
   /** Per vertex: the held flags (bit 0: held in the step that wrote it). */
   readonly held: readonly number[];
+  /** The detector's fail-safe memory: steps left that start held (absent: 0). */
+  readonly heldStart?: number;
 }
 
 export interface ClothTopologyData {

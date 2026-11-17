@@ -93,7 +93,8 @@ export function clothTopologyErrors(data: ClothTopologyData, materials: readonly
     if (!(s.previousStep_s >= 0)) errors.push("Cloth solver state needs a non-negative previous step");
     if (!(s.time_s >= 0)) errors.push("Cloth solver state needs a non-negative clock");
     if (s.contact && (s.contact.reference.length !== 4 * n || s.contact.held.length !== n || !s.contact.reference.every(Number.isFinite)
-      || !s.contact.held.every(h => Number.isInteger(h) && h >= 0))) errors.push("Cloth contact state must hold a finite reference and rho per vertex and integer held flags");
+      || !s.contact.held.every(h => Number.isInteger(h) && h >= 0)
+      || (s.contact.heldStart !== undefined && !(Number.isSafeInteger(s.contact.heldStart) && s.contact.heldStart >= 0)))) errors.push("Cloth contact state must hold a finite reference and rho per vertex, integer held flags and a non-negative integer heldStart");
   }
   return errors;
 }

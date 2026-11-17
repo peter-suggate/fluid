@@ -103,7 +103,7 @@ struct OgcParams {
   fixedWord: u32, segWord: u32, recWord: u32, recCap: u32,
   recCountOff: u32, newton: u32, levelWord: u32, levelOn: u32,
   targetOff: u32, rqTop: f32, SF: u32, bodyFacetBase: u32,
-  SFB: u32, facetCap: u32, mandatoryRedoCap: u32, pad12: u32,
+  SFB: u32, facetCap: u32, mandatoryRedoCap: u32, failSafeMemory: u32,
 }
 `;
 
@@ -118,7 +118,7 @@ export const OGC_PARAM = {
   bodyBase: 58, bodyOff: 59, SB: 60, wgPrep: 61, bodyReach: 62, facetBase: 63,
   edgeBase: 64, SE: 65, bodyEdgeBase: 66, SEB: 67, solidDevOff: 68, bodyDevOff: 69, scaleOff: 70, originOff: 71,
   fixedWord: 72, segWord: 73, recWord: 74, recCap: 75, recCountOff: 76, newton: 77, levelWord: 78, levelOn: 79, targetOff: 80, rqTop: 81,
-  SF: 82, bodyFacetBase: 83, SFB: 84, facetCap: 85, mandatoryRedoCap: 86,
+  SF: 82, bodyFacetBase: 83, SFB: 84, facetCap: 85, mandatoryRedoCap: 86, failSafeMemory: 87,
 } as const;
 
 const DECL: Record<number, string> = {
@@ -213,7 +213,7 @@ fn anchored(i: u32) -> vec3<f32> { return xdet[i].xyz + predOf(i); }
 const REDO_CAP_FN = /* wgsl */`
 fn redoCap() -> u32 { return select(${OGC_REDO_ROUNDS + 1}u, select(${OGC_REDO_MANDATORY}u, P.mandatoryRedoCap, P.mandatoryRedoCap != 0u), P.bodyBase != 0u); }
 // The fail-safe: every prediction held (and, with a moving solid, its impact zones carried).
-fn failSafeRound() -> bool { return atomicLoad(&counters[OGC_FORCE_HELD]) > ${OGC_REDO_ROUNDS}u; }
+fn failSafeRound() -> bool { return atomicLoad(&counters[OGC_FORCE_HELD]) > ${OGC_REDO_ROUNDS}u || (atomicLoad(&counters[OGC_ROUNDS]) == 0u && atomicLoad(&counters[OGC_HELD_NOW]) != 0u); }
 `;
 const BODY_ACCESS_FNS = /* wgsl */`
 fn withSolid(i: u32) -> bool { return (atomicLoad(&work[P.heldOff + i]) & 64u) != 0u; }
@@ -648,7 +648,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation
   // A redone round repeats its round's detection with its conflicts' predictions shifted (least
   // shift) or, in the fail-safe, every prediction held; only the first measures.
   let fresh = mandatory && redone == 0u;
-  let failSafe = redone > ${OGC_REDO_ROUNDS}u;
+  let failSafe = redone > ${OGC_REDO_ROUNDS}u || (mandatory && atomicLoad(&counters[OGC_HELD_NOW]) != 0u);
   if (v == 0u) { atomicStore(&counters[OGC_PAIR_SLOTS], 0u); atomicStore(&counters[OGC_CONFLICTS], 0u); }
   wgCube[li] = 0.0;
   if (v >= P.N && v < P.N + P.SB) {
@@ -971,6 +971,10 @@ fn main() {
   atomicStore(&counters[OGC_EXCEED], 0u);
   atomicStore(&counters[OGC_FORCE_HELD], 0u);
   atomicStore(&counters[OGC_STEP_ZONE], 0u);
+  // Fail-safe memory: this step's mandatory round starts as the fail-safe while steps are left.
+  let heldLeft = atomicLoad(&counters[OGC_HELD_START]);
+  atomicStore(&counters[OGC_HELD_NOW], select(0u, 1u, heldLeft != 0u));
+  if (heldLeft != 0u) { atomicStore(&counters[OGC_HELD_START], heldLeft - 1u); atomicAdd(&counters[OGC_F_HELD_STARTS], 1u); }
   // The mandatory round is unlevelled (its anchor X + w, u = 0), and no Newton iteration has run yet.
   if (P.levelWord != 0u) { for (var i = 0u; i < 8u; i++) { atomicStore(&contacts[P.levelWord + i], 0u); } }
   atomicAdd(&counters[OGC_F_STEPS], 1u);
@@ -1112,7 +1116,10 @@ fn main() {
     return;
   }
   atomicAdd(&counters[OGC_F_CONFLICTS], c);
-  let redone = atomicLoad(&counters[OGC_FORCE_HELD]);
+  var redone = atomicLoad(&counters[OGC_FORCE_HELD]);
+  let mandatoryRound = atomicLoad(&counters[OGC_ROUNDS]) == 0u;
+  // A step started as the fail-safe (fail-safe memory) continues as one: impact zones, or a held conflict.
+  if (mandatoryRound && redone == 0u && atomicLoad(&counters[OGC_HELD_NOW]) != 0u) { redone = ${OGC_REDO_ROUNDS + 1}u; }
   var next = 0u;
   if (redone < ${OGC_REDO_ROUNDS}u && progress != 0u) { next = redone + 1u; }
   else if (redone <= ${OGC_REDO_ROUNDS}u) { next = ${OGC_REDO_ROUNDS + 1}u; }
@@ -1120,6 +1127,10 @@ fn main() {
   if (next != 0u) {
     atomicStore(&counters[OGC_FORCE_HELD], next);
     if (next > ${OGC_REDO_ROUNDS}u) { atomicOr(&counters[OGC_STATUS_WORD], OGC_ST_FAIL_SAFE); }
+    // Least shift ended in the fail-safe: the next steps start there (their least shift would end there too).
+    if (mandatoryRound && next == ${OGC_REDO_ROUNDS + 1}u && redone <= ${OGC_REDO_ROUNDS}u) {
+      atomicStore(&counters[OGC_HELD_START], P.failSafeMemory); atomicAdd(&counters[OGC_F_FAILSAFE_ENTRIES], 1u);
+    }
     atomicAdd(&counters[OGC_F_REDOS], 1u);
     atomicAdd(&counters[OGC_F_DETECTIONS], 1u);
     writeArgs(true);

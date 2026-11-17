@@ -116,6 +116,12 @@ export interface OgcContactConfig {
   contactCapacity: number;
   /** Rescue completion budget; never weakens separation or accepts unresolved conflicts. */
   mandatoryRedoCap?: number;
+  /**
+   * Fail-safe memory (default 0, off): after a mandatory round's least-shift redos end in the fail-safe, this many
+   * following steps start their mandatory round as the fail-safe (every prediction held, impact zones as usual), the
+   * round those redos would end in, without them. Every (k+1)th step tries least shift again.
+   */
+  failSafeMemory?: number;
   macroCacheCapacity?: number;
   macroSpecialize?: boolean;
   /** Reuse face IDs across Newton redetections while all current endpoints remain contained. */
@@ -266,6 +272,8 @@ export interface OgcCarriedState {
   readonly reference: Float32Array;
   /** Per vertex: the held flags (bit 0: held in the step that wrote it; bit 1: held in it). */
   readonly held: Uint32Array;
+  /** Fail-safe memory: the steps left that start held (OgcContactConfig.failSafeMemory; absent: 0). */
+  readonly heldStart?: number;
 }
 
 export interface OgcBodyPose {
@@ -381,7 +389,7 @@ export interface OgcFrameCounters {
   pairGeometryHits:number; pairGeometryMisses:number; pairGeometryCollisions:number;
   geometryHits:number; geometryMisses:number;
   macroBuilds:number; macroHits:number; macroOverflows:number; macroEscapes:number;
-  bvhNodes: number; bvhFaceTests: number; edgeStageOverflows: number; packetNodeLoads: number; witnessSkips: number; witnessTests: number;
+  bvhNodes: number; bvhFaceTests: number; edgeStageOverflows: number; packetNodeLoads: number; witnessSkips: number; witnessTests: number; heldStarts: number; failSafeEntries: number;
   /** Plane records the frame's line-search filters asked for, summed (each read at every trial of the ladder). */
   planeRecordsTotal: number;
   /** Levelled re-detection over the frame: its rounds, and those a conflict sent back unlevelled (w = 0). */
@@ -515,6 +523,7 @@ export class OgcContactDetector {
     const mk = (label: string, bytes: number, u = usage) => device.createBuffer({ label: `ogc ${label}`, size: Math.max(16, Math.ceil(bytes / 16) * 16), usage: u });
     this.params = mk("params", 4 * OGC_PARAM_WORDS, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.topo = mk("topology", 4 * topology.words.length);
+    if(config.failSafeMemory !== undefined && (!Number.isSafeInteger(config.failSafeMemory) || config.failSafeMemory < 0 || config.failSafeMemory > 1024)) throw new Error('OGC: fail-safe memory must be an integer from 0 to 1024 steps');
     if(config.mandatoryRedoCap !== undefined && (!Number.isSafeInteger(config.mandatoryRedoCap) || config.mandatoryRedoCap < OGC_REDO_MANDATORY || config.mandatoryRedoCap > 256)) throw new Error('Mandatory rescue budget must be an integer from32 to256');
     const sampleCap = config.solidSampleCapacity ?? 0;
     if (!(Number.isSafeInteger(sampleCap) && sampleCap >= 0)) throw new Error("OGC: solidSampleCapacity must be a whole number");
@@ -642,6 +651,7 @@ export class OgcContactDetector {
     });
     const w = this.paramWords, f = new Float32Array(w.buffer), P = OGC_PARAM;
     w[P.mandatoryRedoCap] = config.mandatoryRedoCap ?? OGC_REDO_MANDATORY;
+    w[P.failSafeMemory] = config.failSafeMemory ?? 0;
     w[P.N] = N; w[P.T] = T; w[P.E] = E; w[P.H] = H;
     w[P.gridCap] = config.gridCapacity; w[P.contactCap] = config.contactCapacity; w[P.roundCap] = config.roundCap;
     w[P.exceedThreshold] = Math.max(1, Math.ceil(gammaE * N));
@@ -1284,7 +1294,7 @@ export class OgcContactDetector {
       pairGeometryHits:u[C.framePairGeometryHits]!,pairGeometryMisses:u[C.framePairGeometryMisses]!,pairGeometryCollisions:u[C.framePairGeometryCollisions]!,
       geometryHits:u[C.frameGeometryHits]!,geometryMisses:u[C.frameGeometryMisses]!,
       macroBuilds:u[C.frameMacroBuilds]!,macroHits:u[C.frameMacroHits]!,macroOverflows:u[C.frameMacroOverflows]!,macroEscapes:u[C.frameMacroEscapes]!,
-      separationRejected: u[C.frameSeparationRejected]!, bvhNodes: u[C.frameBvhNodes]!, bvhFaceTests: u[C.frameBvhFaceTests]!, edgeStageOverflows: u[C.frameEdgeStageOverflow]!, packetNodeLoads: u[C.framePacketNodeLoads]!, witnessSkips: u[C.frameWitnessSkips]!, witnessTests: u[C.frameWitnessTests]!,
+      separationRejected: u[C.frameSeparationRejected]!, bvhNodes: u[C.frameBvhNodes]!, bvhFaceTests: u[C.frameBvhFaceTests]!, edgeStageOverflows: u[C.frameEdgeStageOverflow]!, packetNodeLoads: u[C.framePacketNodeLoads]!, witnessSkips: u[C.frameWitnessSkips]!, witnessTests: u[C.frameWitnessTests]!, heldStarts: u[C.frameHeldStarts]!, failSafeEntries: u[C.frameFailSafeEntries]!,
       scanned: u[C.frameScanned]!, collisions: u[C.frameCollisions]!, boxRejected: u[C.frameBoxRejected]!, scanMax: u[C.frameScanMax]!,
       planeRecordsTotal: u[C.framePlaneRecordsTotal]!,
       levelled: u[C.frameLevelled]!, levelFallback: u[C.frameLevelFallback]!,
@@ -1374,13 +1384,14 @@ export class OgcContactDetector {
    * rebuilt by every step.
    */
   async readCarriedState(): Promise<OgcCarriedState> {
-    const N = this.N, size = [16 * N, 4 * N], src: [GPUBuffer, number][] = [[this.pred, 16 * N], [this.work, 4 * (7 * N + this.T + this.E)]];
+    const N = this.N, size = [16 * N, 4 * N, 4], src: [GPUBuffer, number][] = [[this.pred, 16 * N], [this.work, 4 * (7 * N + this.T + this.E)], [this.counters, 4 * OGC_COUNTER.heldStart]];
     const reads = size.map(s => this.device.createBuffer({ size: s, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }));
     const enc = this.device.createCommandEncoder();
     src.forEach(([b, off], i) => enc.copyBufferToBuffer(b, off, reads[i]!, 0, size[i]!));
     this.device.queue.submit([enc.finish()]);
     const out = await Promise.all(reads.map(async b => { await b.mapAsync(GPUMapMode.READ); const a = b.getMappedRange().slice(0); b.destroy(); return a; }));
-    return { reference: new Float32Array(out[0]!), held: new Uint32Array(out[1]!) };
+    const heldStart = new Uint32Array(out[2]!)[0]!;
+    return { reference: new Float32Array(out[0]!), held: new Uint32Array(out[1]!), ...(heldStart ? { heldStart } : {}) };
   }
 
   /** Restore the state readCarriedState returned (for this detector's vertex count), or, with none, the state before any step. */
@@ -1393,6 +1404,7 @@ export class OgcContactDetector {
     const held = state?.held ?? new Uint32Array(N);
     writeBufferChunked(this.device.queue, this.work, 4 * (7 * N + this.T + this.E), held);
     writeBufferChunked(this.device.queue, this.contactState, 0, held.map(f => (f >> 8) & 3));
+    this.device.queue.writeBuffer(this.counters, 4 * OGC_COUNTER.heldStart, new Uint32Array([state?.heldStart ?? 0]));
   }
 
   /** Explain a status word. */

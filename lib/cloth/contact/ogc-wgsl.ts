@@ -145,14 +145,21 @@ export const OGC_COUNTER = {
   frameWitnessSkips: 1116, frameWitnessTests: 1117,
   witnessClothCapture: 1118, witnessSolidCapture: 1119,
   framePairDecisionHits:1131, framePairDecisionMisses:1132,
+  /**
+   * Fail-safe memory: the steps left whose mandatory round starts as the fail-safe (heldStart, set when a mandatory
+   * round's least-shift redos end in it), and whether this step's did (heldNow, at the step's begin).
+   */
+  heldStart:1133, heldNow:1134,
+  /** The frame's steps whose mandatory round started as the fail-safe (fail-safe memory), and whose least shift ended there. */
+  frameHeldStarts:1135, frameFailSafeEntries:1136,
   framePairGeometryHits:1128, framePairGeometryMisses:1129, framePairGeometryCollisions:1130,
   macroGeometryInvalid:1125, frameGeometryHits:1126, frameGeometryMisses:1127,
   macroInvalid:1120,frameMacroBuilds:1121,frameMacroHits:1122,frameMacroOverflows:1123,frameMacroEscapes:1124,
 } as const;
 export const OGC_ROUND_LOG = 64;
 export const OGC_ROUND_LOG_WORDS = 12;
-export const OGC_COUNTER_WORDS = OGC_COUNTER.framePairDecisionMisses + 1;
-export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 83, 852, 853, 855, 857, 1116, 1117,1121,1122,1123,1124,1126,1127,1128,1129,1130,1131,1132];
+export const OGC_COUNTER_WORDS = OGC_COUNTER.frameFailSafeEntries + 1;
+export const OGC_FRAME_COUNTERS: readonly number[] = [8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 25, 26, 27, 28, 29, 30, 33, 34, 35, 37, 40, 41, 46, 47, 52, 55, 56, 57, 58, 59, 60, 62, 63, 64, 65, 66, 67, 68, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 83, 852, 853, 855, 857, 1116, 1117,1121,1122,1123,1124,1126,1127,1128,1129,1130,1131,1132,1135,1136];
 /** vec4 words of a vertex's fixed certificate record for ogcProject: the cap, (origin, q, D) per solid, then (w, 0). */
 export const OGC_PROJECT_RECORD = 8;
 /**
@@ -273,6 +280,10 @@ const OGC_F_SOLID_CONTACTS = ${OGC_COUNTER.frameSolidContacts}u;
 const OGC_F_SOLID_CUT = ${OGC_COUNTER.frameSolidCut}u;
 const OGC_CONFLICTS = ${OGC_COUNTER.conflicts}u;
 const OGC_FORCE_HELD = ${OGC_COUNTER.forceHeld}u;
+const OGC_HELD_START = ${OGC_COUNTER.heldStart}u;
+const OGC_HELD_NOW = ${OGC_COUNTER.heldNow}u;
+const OGC_F_HELD_STARTS = ${OGC_COUNTER.frameHeldStarts}u;
+const OGC_F_FAILSAFE_ENTRIES = ${OGC_COUNTER.frameFailSafeEntries}u;
 const OGC_F_CONFLICTS = ${OGC_COUNTER.frameConflicts}u;
 const OGC_F_REDOS = ${OGC_COUNTER.frameRedos}u;
 const OGC_F_HELD = ${OGC_COUNTER.frameHeld}u;

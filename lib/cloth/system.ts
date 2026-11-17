@@ -66,14 +66,14 @@ let systemGenerations = 0, renderRevisions = 0;
 /** The detector's carried state in world metres, as a pose's solver state saves it. */
 function clothContactStateData(state: OgcCarriedState, origin: ClothVector): ClothContactStateData {
   const reference = Array.from(state.reference, (q, i) => (i & 3) === 3 ? q : q + origin[i & 3]!);
-  return { reference, held: Array.from(state.held) };
+  return { reference, held: Array.from(state.held), ...(state.heldStart ? { heldStart: state.heldStart } : {}) };
 }
 
 /** A saved carried state in the detector's cloth frame at `origin`; one for another vertex count fails explicitly. */
 function ogcCarriedState(data: ClothContactStateData, origin: ClothVector, vertexCount: number): OgcCarriedState {
   if (data.reference.length !== 4 * vertexCount || data.held.length !== vertexCount)
     throw new Error(`Cloth contact state covers ${data.held.length} vertices, the document has ${vertexCount}`);
-  return { reference: Float32Array.from(data.reference, (q, i) => (i & 3) === 3 ? q : q - origin[i & 3]!), held: Uint32Array.from(data.held) };
+  return { reference: Float32Array.from(data.reference, (q, i) => (i & 3) === 3 ? q : q - origin[i & 3]!), held: Uint32Array.from(data.held), ...(data.heldStart ? { heldStart: data.heldStart } : {}) };
 }
 const align = (n: number, a: number) => Math.ceil(n / a) * a;
 /** A document's content apart from its execution settings (the Cloth card's tuning knobs). */
@@ -202,7 +202,9 @@ export interface ClothSystemOptions {
    * default: with the adaptive guess the rotating sphere's whole run (ticks 20-231) was no faster and ended with 80 edges
    * past the strain limit (max 15.7%) against 1 (10.3%), though single steps from a checkpoint looked better.
    */
-  readonly contactPrediction?: 'target' | 'guess';
+  readonly contactPrediction?: 'target' | 'guess' | 'none';
+  /** OgcContactConfig.failSafeMemory (steps); default from clothExecutionSettings (7 live, 0 reference). */
+  readonly contactFailSafeMemory?: number;
   /** Benchmark A/B only: the compiled contact linearization's pieces (ClothGPUSolverOptions.contactLinearizationAB). */
   readonly contactLinearizationAB?: ClothContactLinAB;
 }
@@ -332,7 +334,8 @@ export class ClothSystem {
       this.options.contactEntryCapacity ?? execution.contactEntryCapacity,
       this.options.contactMandatoryRedoCap ?? execution.mandatoryRedoCap,
       this.options.contactMacroCacheCapacity ?? (this.options.contactBroadphase === undefined && !candidateCache ? execution.macroCacheCapacity : undefined),
-      this.options.contactMacroSpecialize, this.options.contactBvhVerify, this.options.contactMacroWholeStep, this.options.contactMacroSampleGeometry, this.options.contactDatPathEarlyExit, this.options.contactPairGeometryBuckets, this.options.contactPairDecisions, prediction);
+      this.options.contactMacroSpecialize, this.options.contactBvhVerify, this.options.contactMacroWholeStep, this.options.contactMacroSampleGeometry, this.options.contactDatPathEarlyExit, this.options.contactPairGeometryBuckets, this.options.contactPairDecisions, prediction,
+      this.options.contactFailSafeMemory ?? execution.failSafeMemory);
 
     const hooks = contact.stepHooks;
     let solver: ClothGPUSolver;
