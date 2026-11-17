@@ -4,7 +4,7 @@
  * seep (the seep itself runs through tools/seep-bench.ts --method=nbflip).
  *
  * node --import tsx tools/nbflip-gate-bench.ts --scene=dam|letters|paddleboats
- *   [--steps=N] [--every=N] [--dense=N] [--mode=fenced|pipelined] [--slot=check|timing]
+ *   [--steps=N] [--every=N] [--dense=N] [--mode=fenced|pipelined] [--slot=check|timing] [--roster=moored|app]
  *   [--out=artifacts/nbflip-port/runs] [--name=NAME] [--from=13] [--no-nb-stats] [--set=key=value ...]
  *
  * Scene defaults (steps, every, dense):
@@ -12,7 +12,8 @@
  *    to 16 (the front reaches the far wall by about step 12) and then every 15 steps;
  *  - letters (nbflip-figure-8-letters): 240 steps (all nine drops land by step 203), every 30;
  *  - paddleboats: 300 steps, every 30, hulls moored and wheels driven at their authored
- *    one-third throttle (tools/moored-motor-bodies.ts, as the paddleboats plan's probes).
+ *    one-third throttle (tools/moored-motor-bodies.ts, as the paddleboats plan's probes); --roster=app offers the
+ *    app's initial roster instead (the GPU owns the hulls, its motors drive the wheels: the realtime number).
  * Every scene runs at its methodProfile over the method's app defaults (dt 1/60), as the app does.
  *
  * fenced: each step is advanceTo + awaitFrameCompletion on the wall clock. Sample steps
@@ -41,7 +42,7 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { managedGPUDevice, whenGPUCompilationIdle } from "../lib/core/gpu-compilation-manager";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
-import type { RigidBodyState } from "../lib/core/rigid-body";
+import { initializeRigidBodies, type RigidBodyState } from "../lib/core/rigid-body";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
 import { mooredMotorBodies } from "./moored-motor-bodies";
 import { BOX_SCENES, boxGeometry, boxObservation, damColumn, expectedCells, scheduledDropVolumes, type BoxObservation, type BoxSceneKey } from "./nbflip-observables";
@@ -55,7 +56,7 @@ export const NBFLIP_GATE_DEFAULTS: Record<BoxSceneKey, { steps: number; every: n
 };
 
 const args = process.argv.slice(2);
-for (const a of args) assert.ok(/^(--(?:scene|steps|every|dense|out|name|mode|from|slot|set)=.+|--no-nb-stats)$/.test(a), `Unknown option: ${a}`);
+for (const a of args) assert.ok(/^(--(?:scene|steps|every|dense|out|name|mode|from|slot|set|roster)=.+|--no-nb-stats)$/.test(a), `Unknown option: ${a}`);
 const option = (key: string) => args.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const sceneKey = option("scene") as BoxSceneKey | undefined;
 assert.ok(sceneKey && sceneKey in BOX_SCENES, `--scene=${Object.keys(BOX_SCENES).join("|")}`);
@@ -66,6 +67,8 @@ const steps = Number(option("steps") ?? defaults.steps), every = Number(option("
 assert.ok(Number.isInteger(steps) && steps > 0 && Number.isInteger(every) && every > 0 && Number.isInteger(dense) && dense >= 0 && Number.isInteger(from) && from >= 1);
 const nbStats = !args.includes("--no-nb-stats");
 const slot = option("slot") ?? "check";
+const roster = option("roster") ?? "moored";
+assert.ok(roster === "moored" || roster === "app", "--roster=moored|app");
 assert.ok(slot === "check" || slot === "timing", "--slot=check|timing (the fluid-gpu-run.sh mode this run holds)");
 const sets = Object.fromEntries(args.filter(a => a.startsWith("--set=")).map(a => {
   const [key, ...value] = a.slice(6).split("="); const text = value.join("=");
@@ -96,7 +99,7 @@ const dam = sceneKey === "dam" ? (() => { const c = damColumn(scene); return { w
 const isSample = (step: number) => step === 0 || step <= dense || step % every === 0 || step === steps;
 let commit = "unknown"; try { commit = execSync("git rev-parse --short HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch { /* an export */ }
 let dirty = false; try { dirty = execSync("git status --porcelain -- lib tools", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().length > 0; } catch { /* an export */ }
-log({ kind: "meta", name, method: METHOD, scene: sceneKey, sceneId, mode, slot, steps, every, dense, from, nbStats, sets, quality, dt, values, geometry, dam, drops,
+log({ kind: "meta", name, method: METHOD, scene: sceneKey, sceneId, mode, slot, roster, steps, every, dense, from, nbStats, sets, quality, dt, values, geometry, dam, drops,
   date: new Date().toISOString(), cwd: process.cwd(), host: { cpu: cpus()[0]?.model, platform: platform(), release: release(), node: process.version, commit, dirtyLibOrTools: dirty } });
 
 paceDawnEventPolling();
@@ -118,7 +121,11 @@ let solver: GPUSolverInstance | undefined, observer: BoxObserver | undefined, fa
 const walls: { step: number; ms: number; kind: "timed" | "warmup" | "sample" | "afterSample" }[] = [];
 let construction: Record<string, number> = {}, pipelined: Record<string, number> | undefined, stepReached = 0;
 const samples: BoxObservation[] = [];
-const bodies: (t: number) => RigidBodyState[] = sceneKey === "paddleboats" ? mooredMotorBodies(scene, dt) : () => [];
+// --roster=moored (default): the probes' roster, the hulls held and the wheels driven from the CPU each step, so the
+// rigid system re-signs and re-uploads every body every step (about 0.75 ms CPU for paddleboats' 18). --roster=app:
+// the app's, the initial roster offered unchanged every step, so the GPU owns the hulls and its motors drive the wheels.
+const appRoster = roster === "app" ? initializeRigidBodies(scene.rigidBodies) : [];
+const bodies: (t: number) => RigidBodyState[] = sceneKey !== "paddleboats" ? () => [] : roster === "app" ? () => appRoster : mooredMotorBodies(scene, dt);
 try {
   const began = performance.now();
   solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {});
