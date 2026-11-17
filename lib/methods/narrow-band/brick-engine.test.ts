@@ -222,8 +222,9 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
   assert.deepEqual([brickPoolRule([128, 128, 128], { cells: 33375, top: 128, drop: 69 }, 900, 1000)].map(p => [p.f, p.particles])[0], [2890, 333750]);
   // Through brickSceneSetup on the catalog scenes the rule was measured against (progress-lane-e.md, 2026-11-17).
   const want: Record<string, [number, number, number]> = {
-    // The enabled droplets and the 100-cell fill author their pools (scenes.ts: their film outgrows the rule's spread).
-    "power-droplet-256": [128, 128, 3828], "power-fill-256-800": [800, 162, 17856], "power-fill-256-6400": [4356, 162, 78672],
+    // The enabled droplets and the 100- and 800-cell fills author their pools (scenes.ts: their film outgrows the rule's
+    // spread).
+    "power-droplet-256": [128, 128, 3828], "power-fill-256-6400": [4356, 162, 78672],
     "minimal-power-dam-break-32": [125, 8, 117096], "minimal-power-dam-break-64": [729, 27, 524568], "mass-conserving-figure-9-dam-break": [2601, 75, 720384],
     // The splash term (drop >= 16 cells; empirical, fitted to five measured peaks): the free falls take their window
     // (WF 405; they peaked at 289 and 238 F, so without it 1.25 * the boot's 210 and 245 resident latched POOL_F);

@@ -37,12 +37,19 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   // ends at -90.7% against the old engine's -40.1% (|peak| 90.7 against 78.0). Its sub-resolution film loses particles
   // (747 -> 441 by step 280, under 4 a wet brick) where the old engine's film reaches the walls and thickens again.
   "power-droplet-64", "power-fill-256-100",
+  // The 800-cell fill (r29): 4.01 / -2.39 at 60 steps against the bar's 9.67 / 2.67; over 300 steps on its authored
+  // pools the film loses -77.4% where the old engine loses -87.4%. power-fill-256-6400 is off: +4.64 / +4.28 at 60
+  // steps (two runs) against the bar's 4.01 (old -3.01 / -2.97), the moving-liquid volume gain (F's named open fail).
+  "power-fill-256-800",
   "cm12-figure-5", "cm12-figure-6", "cm12-figure-9", "mass-conserving-figure-9-dam-break", "coarse-first-pool-impact",
   // A splash scene (lane E r23, 2026-11-17, the batch rule's splash clause), on the pool rule's splash term.
   "nbflip-analytic-tilted-free-fall",
   // Re-judged after F's sym8 (r26, the splash clause: 2 brick / 2 old): peak -24.86 / -24.95 at 60 steps and final
   // -0.63 / -0.81 at 120, against the bar's 25.55 / 1.18; the long run (300 steps) F 316/405, no latch.
   "nbflip-analytic-free-fall",
+  // A splash scene (r29): peak 5.51 / 5.73 at 60 steps and final -5.56 / -6.26 at 120, against the bar's 7.29 / 18.43
+  // (old 6.28 / 6.29 and 15.85 / 17.14); the long run (480 steps) F 2545/3670, no latch.
+  "nbflip-stair-cube",
   // Splash (r23): it gains +2.05% at 120 steps, where the old engine loses 10.3% (on the full box's page pool; its
   // authored pool exhausts at frame 79). Re-judged after F's sym8 lands, which is expected to remove the gain.
   "cm12-figure-7-256",

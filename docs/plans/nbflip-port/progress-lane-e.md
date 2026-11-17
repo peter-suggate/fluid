@@ -2837,3 +2837,22 @@ every tile of a cut brick at h.
     loss is the cause to chase; the scene keeps its authored pools.
 - In both engines, a tension-free drop spreading into a film below resolution is the method's limit.
 - smoke2 (scratch) now passes initializeRigidBodies' roster for body scenes, so the long run covers them by default.
+
+## 2026-11-17 — part B: stair-cube and fill-800 on; fill-6400 and figure-7 named fails (r29, r30)
+
+The four post-sym8 scenes under the batch rule (bar = old worst + max(1%, old spread)) plus the long no-latch run:
+
+| scene | judged at | brick peak / final | old peak / final | bar | long run | verdict |
+|---|---|---|---|---|---|---|
+| nbflip-stair-cube (splash) | 60 / 120 | 5.51, 5.73 / -5.56, -6.26 | 6.28, 6.29 / 15.85, 17.14 | 7.29 / 18.43 | 480 steps, F 2545/3670, clean | on |
+| power-fill-256-800 | 60 | 4.01 / -2.39 | 8.60, 8.67 / 1.37, 1.67 | 9.67 / 2.67 | 300 steps on authored pools, F 1349/2049, clean | on, pools authored |
+| power-fill-256-6400 | 60 | 4.64, 4.28 (b1, the long run's step 60) | -3.01, -2.97 | 4.01 | 300 steps, clean, \|peak\| 8.87 | off: the moving-liquid gain |
+| cm12-figure-7 (splash) | 60 / 120 | 5.88 / -4.19, -4.15 | -8.21, -8.18 / 1.39, 1.47 | final 2.47 | 360 steps, F 2370/2890, clean | named fail (final) |
+
+- fill-800's long run on the rule's pools latched POOL_F at frame 187 (F 800): its film covers the floor's 32 x 32
+  bricks by step 260 (the film probe with f 4096: F 1366 at step 300, still growing slowly, C 59, particles 5874).
+  Against the old engine over 300 steps (--page-blocks=128): brick -77.4%, old -87.4% (old peak +67.0 at step 115).
+  The brick is no worse, so it authors f 2049 (1.5x the peak), c and particles the rule's; re-run on those pools: 300
+  steps, F 1349, final -77.27, no latch, 14.7 ms median.
+- fill-6400 gains +4.6% by step 60 where the old engine ends at -3.0%: F's moving-liquid volume gain, named, off.
+- test:unit 1916/0; check:types clean but lane-n's three.

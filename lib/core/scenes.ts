@@ -331,6 +331,10 @@ export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDe
   // (createPowerDropletScene), and the rule's F (128) latched POOL_F near step 100. Measured over 300 steps with pools
   // to spare: F 452 (still spreading), C 24, particles 741. f at 1.5x the peak; c and particles the rule's (t the layout's 2 f).
   if (liquidCells === 100) scene.fluid.brickPools = { f: 678, c: 128, b: 16, k: 0, particles: 3828 };
+  // The 800-cell fill's film (lane E r29): the rule's F (800) latched POOL_F at frame 187. Over 300 steps with pools to
+  // spare it covers the floor's 32 x 32 bricks by step 260: F 1366 (still growing slowly), C 59, particles 5874. f at
+  // 1.5x the peak; c and particles the rule's.
+  if (liquidCells === 800) scene.fluid.brickPools = { f: 2049, c: 162, b: 16, k: 0, particles: 17856 };
   return scene;
 }
 
