@@ -57,6 +57,22 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   "cm12-figure-7-256",
   // The rigid coupling oracles (lane P, M5; 16^3 padded to 32^3), on their authored pools.
   "rigid-hydrostatic", "rigid-float", "rigid-sink",
+  // The closed-cell batch (2026-11-18, 9593bdcc): two 60-step repeats each within the old engine's bar, then the long
+  // run at the authored length (at least 300 steps) on the pool rule's pools with no latch. Held off: letters (+10.7%
+  // at 482 steps, the old engine's long run pending), power-droplet-128 (its film, above), and the long runs' POOL_F
+  // latches (uniform-trough-dam-break, cm12-figure-3, power-droplet-240/256: their pools are measured next).
+  "interactive-playground", "ocean-seiche", "cm12-figure-2", "nbflip-figure-10-dam",
+  "nbflip-figure-4-oscillating-surface", "nbflip-simple-breaking-dam", "nbflip-ramp-basin", "nbflip-analytic-rest-step",
+  "thin-droplet-ladder", "thin-sheet-ladder",
+  // Listed by sceneId, as the setup checks it: deep-water-ab, hydrostatic-power-two-level, hydrostatic-power-large-offset.
+  "deep-water-grid-comparison",
+  "coarse-surface-translation", "coarse-surface-free-fall", "coarse-surface-free-fall-rerung",
+  "coarse-surface-standing-wave", "coarse-surface-standing-wave-live",
+  "stationary-bowl", "stationary-bowl-2x", "tiny-hydrostatic-two-level", "large-hydrostatic-offset",
+  "deep-power-hydrostatic", "power-hybrid-deep-ocean", "bulk-rest-tank",
+  "sparse-cm12-ladder-empty-16", "sparse-cm12-ladder-full-16", "sparse-cm12-ladder-planar-interface-16",
+  "minimal-power-dam-break", "coarse-first-pool-impact-half", "coarse-first-pool-impact-quarter",
+  "sparse-geometric-ritter-dam-break", "symmetric-expansion", "sparse-cm12-symmetric-expansion",
 ];
 
 /** The air an open top keeps above the container's pages, in cells: one page. */
