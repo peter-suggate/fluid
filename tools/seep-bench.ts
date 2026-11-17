@@ -4,6 +4,9 @@
  * node --import tsx tools/seep-bench.ts --method=nbflip|seep [--steps=1200] [--every=60]
  *   [--out=artifacts/seep-rewrite/runs] [--name=NAME] [--mode=fenced|pipelined] [--from=13] [--nb-stats]
  *   [--slot=check|timing]   (the fluid-gpu-run.sh mode; seep-compare takes speed from timing runs only)
+ *   [--engine=auto|brick|uniform]   (nbflip only: the engine option; the default is the app's, auto)
+ *   [--prof=FROM:COUNT]   (attribution only: the kernel timer, tools/gpu-kernel-timer.ts, over steps FROM..FROM+COUNT-1;
+ *                          it splits every dispatch into its own pass, so the run is no step time: check slot only)
  *   [--audit=0,120,300,600] (fenced only: at these sample steps also dump every owner at x >= wall.low and log
  *                            an `audit` row: wall zone split open/solid, jet slices; tools/seep-audit-cells.ts)
  *
@@ -47,16 +50,19 @@ import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
 import type { SeepObservationSource } from "../lib/methods/seep/seep-observation";
 import { GPUMemoryProfile } from "./gpu-memory-profile";
+import { gpuKernelTimer } from "./gpu-kernel-timer";
 import { seepGeometry, seepObservation, type SeepObservation } from "./seep-observables";
 import { createNBFlipZoneObserver, type ZoneObserver } from "./seep-observe-nbflip";
 import { createSeepZoneObserver } from "./seep-observe-seep";
+import { createBrickZoneObserver } from "./seep-observe-brick";
+import type { BrickNBFlipSolver } from "../lib/methods/narrow-band/brick-solver";
 import { auditCells, createNBFlipCellDump, createSeepCellDump, type CellDump } from "./seep-audit-cells";
 
 export const SEEP_BENCH_METHODS = { nbflip: "uniform-narrow-band-flip", seep: "seep-m1max" } as const;
 const SCENE_ID = "reservoir-seep";
 
 const args = process.argv.slice(2);
-for (const a of args) assert.ok(/^(--(?:method|steps|every|out|name|mode|from|slot|audit)=.+|--nb-stats)$/.test(a), `Unknown option: ${a}`);
+for (const a of args) assert.ok(/^(--(?:method|steps|every|out|name|mode|from|slot|audit|engine|prof)=.+|--nb-stats)$/.test(a), `Unknown option: ${a}`);
 const option = (key: string) => args.find(a => a.startsWith(`--${key}=`))?.slice(key.length + 3);
 const methodKey = option("method") as keyof typeof SEEP_BENCH_METHODS | undefined;
 assert.ok(methodKey && methodKey in SEEP_BENCH_METHODS, "--method=nbflip|seep");
@@ -72,6 +78,10 @@ assert.ok(slot === "check" || slot === "timing", "--slot=check|timing (the fluid
 const auditSteps = new Set((option("audit") ?? "").split(",").filter(Boolean).map(Number));
 for (const a of auditSteps) assert.ok(Number.isInteger(a) && a >= 0 && a <= steps && (a % every === 0 || a === steps), `--audit step ${a} must be a sample step`);
 assert.ok(!auditSteps.size || mode === "fenced", "--audit needs --mode=fenced");
+const profWindow = option("prof")?.split(":").map(Number);
+assert.ok(!profWindow || (profWindow.length === 2 && profWindow.every(v => Number.isInteger(v) && v >= 1) && profWindow[0]! + profWindow[1]! - 1 <= steps),
+  "--prof=FROM:COUNT, a window of steps inside the run");
+assert.ok(!profWindow || (mode === "fenced" && slot === "check"), "--prof splits every dispatch into its own pass: a fenced check-slot run, never a step time");
 const out = resolve(option("out") ?? "artifacts/seep-rewrite/runs");
 const name = option("name") ?? `${methodKey}-${mode}-${steps}`;
 assert.match(name, /^[A-Za-z0-9._-]+$/);
@@ -87,13 +97,15 @@ const definition = getSceneDefinition(SCENE_ID);
 const scene = sceneDocument(definition);
 const profile = definition.methodProfile;
 const quality = profile?.methodId === methodId ? profile.quality : "balanced";
-const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === methodId ? profile.overrides : {}) });
+const engine = option("engine");
+assert.ok(!engine || (methodKey === "nbflip" && ["auto", "brick", "uniform"].includes(engine)), "--engine=auto|brick|uniform (nbflip only)");
+const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === methodId ? profile.overrides : {}), ...(engine ? { engine } : {}) });
 const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s;
 assert.ok(steps * dt <= scene.duration_s + 1e-9, "Stay within the authored take");
 const geometry = seepGeometry(scene);
 let commit = "unknown"; try { commit = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim(); } catch { /* not a checkout */ }
 let dirty = false; try { dirty = execSync("git status --porcelain -- lib tools", { encoding: "utf8" }).trim().length > 0; } catch { /* not a checkout */ }
-log({ kind: "meta", name, method: methodId, methodKey, mode, slot, steps, every, from, nbStats, scene: SCENE_ID, quality, dt, values, geometry,
+log({ kind: "meta", name, method: methodId, methodKey, mode, slot, steps, every, from, nbStats, prof: profWindow, scene: SCENE_ID, quality, dt, values, geometry,
   date: new Date().toISOString(), host: { cpu: cpus()[0]?.model, platform: platform(), release: release(), node: process.version, commit, dirtyLibOrTools: dirty } });
 
 paceDawnEventPolling();
@@ -103,7 +115,8 @@ const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requ
 assert.ok(adapter, "No WebGPU adapter");
 const raw = await adapter.requestDevice({ requiredFeatures: (["subgroups", "float32-filterable"] as const).filter(f => adapter.features.has(f)), requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
 const memory = new GPUMemoryProfile(raw);
-const device = managedGPUDevice(memory.device, { requireWorkerRealm: false });
+const timer = profWindow ? gpuKernelTimer(memory.device) : undefined;
+const device = managedGPUDevice(timer?.device ?? memory.device, { requireWorkerRealm: false });
 const errors: string[] = [];
 device.addEventListener("uncapturederror", e => { e.preventDefault(); errors.push(e.error.message); console.error(e.error.message); });
 
@@ -122,8 +135,11 @@ try {
   await solver.waitForSimulationReady?.();
   await whenGPUCompilationIdle();
   construction = { construction_ms, compileIdle_ms: performance.now() - began, allocatedBytes: memory.allocatedBytes, peakBytes: memory.snapshot().peakBytes };
-  log({ kind: "constructed", ...construction, grid: solver.fluidDomain?.dimensions });
-  observer = methodKey === "nbflip" ? await createNBFlipZoneObserver(device, solver, scene) : await (async () => {
+  log({ kind: "constructed", ...construction, grid: solver.fluidDomain?.dimensions, nbEngine: (solver.info as { nbEngine?: unknown } | undefined)?.nbEngine });
+  // The brick engine (BrickNBFlipSolver: brickEngine) has its own observer over its pools; the old engine's reads the mixed frame.
+  const brick = (solver as unknown as { brickEngine?: unknown }).brickEngine ? solver as unknown as BrickNBFlipSolver : undefined;
+  assert.ok(!brick || !auditSteps.size, "--audit dumps the old engine's owners; the brick engine has no cell dump");
+  observer = brick ? await createBrickZoneObserver(device, brick, geometry) : methodKey === "nbflip" ? await createNBFlipZoneObserver(device, solver, scene) : await (async () => {
     const source = (solver as unknown as { observation?: SeepObservationSource }).observation;
     if (!source) throw new Error("The Seep solver publishes no `observation` (SeepObservationSource)");
     return createSeepZoneObserver(device, source, geometry);
@@ -153,9 +169,17 @@ try {
   if (mode === "fenced") {
     for (let step = 1; step <= steps; step++) {
       stepReached = step;
+      if (timer && profWindow && step === profWindow[0]) timer.enabled = true;
       const start = performance.now();
       await admit(step); await fence();
       const ms = performance.now() - start;
+      if (timer && profWindow && step === profWindow[0]! + profWindow[1]! - 1) {
+        timer.enabled = false;
+        const { byLabel, dispatches, untimed } = await timer.collect();
+        const n = profWindow[1]!, total = [...byLabel.values()].reduce((a, b) => a + b, 0);
+        log({ kind: "prof", from: profWindow[0], steps: n, dispatchesPerStep: dispatches / n, untimed, gpuMsPerStep: total / n,
+          byLabel: Object.fromEntries([...byLabel].sort((a, b) => b[1] - a[1]).map(([l, v]) => [l, +(v / n).toFixed(4)])) });
+      }
       if (s.info.simulationPipelineError) throw new Error(String(s.info.simulationPipelineError));
       const isSample = step % every === 0 || step === steps;
       walls.push({ step, ms, kind: step < from ? "warmup" : isSample ? "sample" : step > 1 && (step - 1) % every === 0 ? "afterSample" : "timed" });
