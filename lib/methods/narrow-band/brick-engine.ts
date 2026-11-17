@@ -19,6 +19,7 @@ import { brickDropDue, brickSourceRing, type BrickSources } from "./brick-source
 import { brickSourceWords } from "./brick-source.wgsl";
 import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
+import { brickStaticNeedWords } from "./brick-static-need.wgsl";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
@@ -327,7 +328,7 @@ export class BrickEngine {
     // census, which needs whole pages (every scene's fluid lattice is, sceneFluidBox) and refuses others. With no
     // census there are no residency records, so such a set stays the boot's (stated: no scene runs one).
     const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
-    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep, false, censusHold, frame) : [];
+    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep, false, censusHold, frame, mask?.walls) : [];
     // The real D (brick-region-heat.wgsl.ts), tiered only: the heat and spread after censusBegin (the head's deep runs
     // in censusCoarse), the WARM promotion in setTransferList (cfg.w = 1), the certificate after the transfer. Its
     // pressureDelta is lane P's PDELTA where the solver publishes it (pmgC), else +Inf.
@@ -340,7 +341,7 @@ export class BrickEngine {
       { kernel: k.certFine, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 } },
       { kernel: k.certError, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.X8 }, w: 1 },
     ]; })() : [];
-    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined, censusHold, frame) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
+    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined, censusHold, frame, mask?.walls) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
     const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL).map(p => (heat && p.kernel.label === "setTransferList" ? { ...p, w: 1 } : p));
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
@@ -372,7 +373,7 @@ export class BrickEngine {
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
-    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, censusHold, frame) : [];
+    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, censusHold, frame, mask?.walls) : [];
     // The kick has no last frame, so its seam heads (rowsF's poHeadS: the start's tangential slope) start from the
     // cold prolongation; like the old arena's encodeSolve(kick), it re-solves BRICK_KICK_RESOLVES times from its own
     // pressure (each solve leaves the rows WARM, so the next starts from X), before F's after reads the projection.
@@ -475,6 +476,8 @@ export class BrickEngine {
     if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); this.external.set("bodyExchange", bodies.exchange); }
     const mask = this.options.staticMask;
     if (mask) uploadWords(d.queue, make("solid", mask.words.length), 0, mask.words as Uint32Array<ArrayBuffer>);
+    // The census's static need rule (brick-static-need.wgsl.ts): the cut and active bits, tiered only.
+    if (mask && this.stages.tiered === true) make("staticNeed", brickStaticNeedWords(L));
     // The sources' static record (brick-source.ts): every drop's extrusion edges, once; a stub with no sources.
     const edges = this.options.sources?.edges;
     const src = make("src", brickSourceWords(edges ? edges.length / 4 : 0));

@@ -2796,3 +2796,28 @@ assumes a film 1/16 cell thick, and this one is about 1/46.
 power-droplet-64 f 243, power-droplet-128 f 627, power-fill-256-100 f 678. Their c and particles are the rule's, and t
 is the layout's 2 f. The pool rule's comment records why: a tension-free small liquid's spread is time-bound, not
 closed-form. The rule's table test drops power-droplet-64.
+
+## 2026-11-17 — the census's static need rule (M3), on P's 29d53bbc
+
+**The rule** (brick-static-need.wgsl.ts, after censusDecide, tiered with the static mask only). It is the old engine's
+static promotion (uniform-mixed-dynamic.ts solidActive / solidPromote), made brick-granular because the operator needs
+every tile of a cut brick at h.
+- censusStaticActive: X8 over C_ALL, a lane a tile. A brick is cut when a mask voxel is in its cells or just below its
+  lower faces (solidStamp's rule). It is active when one of its tiles holds decide's frozen WANT, its F record is
+  LIQUID or PARTICLES, or one of its 4h tiles has a C corner below 0. The bits go to the page's word in `staticNeed`.
+- censusStaticPromote: a cut brick that is active, or one of whose 26 neighbours is a cut, active brick, takes all 8 of
+  its tiles into WANT, with cdTile's ring (MARK_F at a head, candidates, the clamp counter). It writes no DEC/STAT, so
+  there is no ratchet. `staticNeed[4 C]` counts the tiles it promotes.
+- With the rule, the census drops its static-K latches: censusBegin's LIVE_K and censusFine's 0x63000004. The
+  TRIG-only boot census drops them too (a boot's cut K slots are the rule's) and promotes nothing.
+- A body's K slot is still held by P's body rule. A dry cut tile at 4h is allowed by P's narrowing (29d53bbc).
+
+**Tests.**
+- CPU: the kernels and the dropped latches follow the mask, tiered; the schedule order is decide, active, promote; the
+  TRIG census has neither pass; without the mask the text is unchanged.
+- GPU: a still tank (liquid y < 17) under a shelf at y 19..23 and a dry block at y 40..48. Over 30 steps: no latch,
+  every wet cut brick fully h, 15-16 tiles promoted a step, and the dry block's cut bricks never resident (so never
+  promoted). Without the rule this setup latched 0x63000000 at the boot.
+- A column standing in the water latched 0xa2 (P's operator: a liquid row in a static solid cell) within one step.
+  That is the next work, phiSolid and pSolid; the regression keeps the solids out of the liquid until then.
+- The 21 enabled scenes' schedule kernels are identical (none has a mask). test:unit 1891/0.

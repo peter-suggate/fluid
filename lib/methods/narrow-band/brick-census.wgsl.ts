@@ -85,6 +85,8 @@ import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 import { BODIES_RO, BODY_CUTS_RO, PB_BRICK_CANDIDATES_WGSL, PB_BRICK_MARK_WGSL, pbBrickBodiesWGSL, type BrickBodiesFrame } from "./bodies-binding.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
 import { UNIFORM_TILE_UPDATE_BUDGET_H } from "../uniform/uniform-tile-update-error";
+import { brickStaticNeedKernels } from "./brick-static-need.wgsl";
+import type { SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 
 /** The census header words (set buffer, brick-abi.md §5.1). */
 export const CENSUS_H = {
@@ -992,8 +994,10 @@ fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
  * tank's deep liquid: its seams). No scene sets it; absent, the census's text is unchanged (the dam's hashes). */
 export interface BrickCensusHold { readonly lo: readonly [number, number, number]; readonly hi: readonly [number, number, number] }
 
-export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold; readonly bodies?: BrickBodiesFrame } = {}) {
-  const tiered = opt.tiered ?? true, hold = opt.hold, bodies = opt.bodies;
+/** `statics`: the static mask's walls (brick-static-need.wgsl.ts's need rule runs; tiered, a static K slot is the
+ * rule's, not a latch). */
+export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold; readonly bodies?: BrickBodiesFrame; readonly statics?: SolidOccupancyMaskWalls } = {}) {
+  const tiered = opt.tiered ?? true, hold = opt.hold, bodies = opt.bodies, statics = opt.statics !== undefined;
   if (hold && hold.lo.some((v, a) => !Number.isInteger(v) || !Number.isInteger(hold.hi[a]) || v < 0 || v >= hold.hi[a]! || hold.hi[a]! > L.lattice[a]! / 4)) throw new Error(`setCensus: the hold [${hold.lo.join(",")}] .. [${hold.hi.join(",")}] is not a non-empty box of whole tiles in the lattice`);
   if (L.lattice.some(n => n % 32 !== 0)) throw new Error(`setCensus: the lattice ${L.lattice.join("x")} is not whole pages (32 cells an axis)`);
   // BULK16 (B slots) is M3: a pool may be authored, but a live B slot fails on the GPU (censusBegin, LIVE_B).
@@ -1016,7 +1020,7 @@ ${bodies ? `  // Bodies and K slots (A2-A4, E's ruling 2026-11-17; the body rule
   // decision. Tiered, both latch until the census has a body need rule (a NEAR_BODY tile and its ring stay h); LIVE_K
   // counts static K too, narrowed to body K with the census's static (NEAR_SOLID) rule (E).
   let flags=nbRing(cfg.x,NB_RING_FLAGS)&(NB_RING_FLAG_SOLID_EDIT${tiered ? "|NB_RING_FLAG_BODIES" : ""});
-  if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u${tiered ? "||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u" : ""})`}{nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
+  ${statics ? "// With the static mask, a live K slot is a static cut's, which the static need rule (censusStaticPromote) keeps h.\n  " : ""}if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u${tiered && !statics ? "||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u" : ""})`}{nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
 }`);
 
   // censusFine: classify (l.2091), eight workgroups an F brick of F_ALL (X8), workgroup j its tile j (ncCorner(j, 2))
@@ -1112,7 +1116,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     wgFlag=0u;atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);
     if(entry<nbListCount(NB_LIST_F_ALL)){
       ${bodies ? `let fs=nbListSlot(NB_LIST_F_ALL,entry);
-      ${tiered ? `// A static cut brick, tiered: no static need rule yet (censusBegin's note), info 0x63000004.
+      ${tiered && !statics ? `// A static cut brick, tiered: no static need rule yet (censusBegin's note), info 0x63000004.
       if(j==0u&&(nbFRec(fs,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u){nbFail(NB_FAIL_UNSUPPORTED,0x63000004u);}
       ` : ""}let t=2*nbKeyCoord(nbFRec(fs,NB_REC_KEY))+vec3i(ncCorner(j,2u));` : "let t=2*nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY))+vec3i(ncCorner(j,2u));"}
       wgFlag=select(0u,1u,nbTileOwnerH(t));
@@ -1682,7 +1686,7 @@ fn rpMoved4(cs:u32,i:u32)->bool{
   if(lane==0u){ncFlush();}
 }`);
 
-  return { censusBegin, regionDeep, censusFine, censusCoarse, censusCubes, censusImportance, censusDecide, censusWant };
+  return { censusBegin, regionDeep, censusFine, censusCoarse, censusCubes, censusImportance, censusDecide, censusWant, ...(opt.statics && tiered ? brickStaticNeedKernels(L, opt.statics) : {}) };
 }
 
 /** setCensus's placements, in order (lane E schedules them before setTransfer). */
@@ -1691,8 +1695,8 @@ fn rpMoved4(cs:u32,i:u32)->bool{
  * workgroups a brick) and the C passes censusCoarse, censusImportance and censusDecide list cAll's (eight a page). */
 /** `heat`: the real D runs (brick-region-heat.wgsl.ts's regionHeat and regionSpread before censusCoarse): the head's
  * deep pass and decide's deep keep and activity heat. Without it D = 0 (the census alone, as the frozen passes). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold, bodies?: BrickBodiesFrame) {
-  const c = brickCensusKernels(L, { tiered, ...(hold ? { hold } : {}), ...(bodies ? { bodies } : {}) });
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold, bodies?: BrickBodiesFrame, statics?: SolidOccupancyMaskWalls) {
+  const c = brickCensusKernels(L, { tiered, ...(hold ? { hold } : {}), ...(bodies ? { bodies } : {}), ...(statics ? { statics } : {}) });
   const slabs = censusListArgs(cAll, "X8"), replay = tiered && keep && heat;
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
@@ -1704,13 +1708,21 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
     { kernel: c.censusCubes, dispatch: list(cAll, "G1") },
     { kernel: c.censusImportance, dispatch: slabs },
     { kernel: c.censusDecide, dispatch: slabs, z: tiered ? 1 : 0, w: keep ? (tiered && heat ? 3 : 1) : 0 },
+    // The static need rule (brick-static-need.wgsl.ts), after decide's frozen WANT: cut and active, then the promotion.
+    ...(c.censusStaticActive && c.censusStaticPromote ? [
+      { kernel: c.censusStaticActive, dispatch: slabs, z: 1 },
+      { kernel: c.censusStaticPromote, dispatch: slabs, z: 1, w: keep ? 1 : 0 },
+    ] : []),
   ];
 }
 /** The TRIG-only census (the boot's, after the kick, before F's seed): censusBegin through censusImportance as
  * brickCensusSchedule, then censusDecide with cfg.z = 2: TRIG (and CENSUS_TRIGGERED) alone. No band decision, no
  * WANT word, no candidate, no keep mark. */
-export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold, bodies?: BrickBodiesFrame) {
-  return brickCensusSchedule(L, list, cAll, fAll, tiered, false, false, hold, bodies).map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
+export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold, bodies?: BrickBodiesFrame, statics?: SolidOccupancyMaskWalls) {
+  // With statics the census's text drops its static-K latches (a boot's cut K slots are the rule's), but the TRIG-only
+  // census decides no band, so it promotes none: the need rule's two passes are left out.
+  return brickCensusSchedule(L, list, cAll, fAll, tiered, false, false, hold, bodies, statics).filter(p => !p.kernel.label.startsWith("censusStatic"))
+    .map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */
 export const censusListArgs = (k: number, g: "G1" | "X8") => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
