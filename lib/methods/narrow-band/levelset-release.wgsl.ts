@@ -73,7 +73,7 @@
  * axis. nrWallReach is C_ALL G1, a lane per face tile, 384 a page. The readers add no barrier. The six plane words
  * are read where used: uniform loads, not staged (lcAdvect holds no barrier).
  */
-import { ARGS, type BrickLayout, brickAbiWGSL, LIST } from "./brick-abi";
+import { ARGS, BOX_TOKEN, type BrickLayout, brickAbiWGSL, LIST, resolveBox } from "./brick-abi";
 import { type BrickBinding, type BrickKernel, type BrickPlacement, CFG, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 
@@ -89,7 +89,9 @@ export const NR_INFO = {
  * and `vel` (f32) and `phi` (u32) bindings. Self-contained: every name is nbr-prefixed, and the tier owners come in
  * as their own nbr copy over U.
  */
-export const levelSetReleaseWGSL = () => [brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "nbr" }), NR_READERS_WGSL].join("\n");
+/** The readers' walls are at the box (M3 padding, BOX_TOKEN): nbrPageKind's solid pages past it, the held tile of
+ * nbrDeepAirKept and nrSpread's last tile; an unpadded scene's text is byte-identical. */
+export const levelSetReleaseWGSL = () => [brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "nbr", box: BOX_TOKEN }), NR_READERS_WGSL].join("\n");
 
 const NR_READERS_WGSL = /* wgsl */`
 const NBR_STORED:u32=0u;const NBR_AIR:u32=1u;const NBR_SOLID:u32=2u;
@@ -97,7 +99,7 @@ fn nbrDt()->f32{return nbRingF(cfg.x,NB_RING_DT);}
 fn nbrHm()->f32{return nbRingF(cfg.x,NB_RING_H);}
 // umPageKind of page q in the box (q in pages).
 fn nbrPageKind(q:vec3i)->u32{
- if(any(q<vec3i(0))||any(32*q>=NB_LATTICE)){return NBR_SOLID;}
+ if(any(q<vec3i(0))||any(32*q>=NB_WALL_BOX)){return NBR_SOLID;}
  let w=nbPageWord(q);
  if(w<NB_SEAM){return NBR_STORED;}
  if(w!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,${NR_INFO.PAGE_KIND}u);}
@@ -208,7 +210,7 @@ fn nbrReleasedMayChange(p:vec3f,value:f32)->bool{
 // deep air of a still tile and no released wall can raise it, else -1 (traced). umAirSource is the identity.
 fn nbrDeepAirKept(v:vec3i,width:u32,value:f32)->f32{
  if(!(value>=6.0+3.0*f32(width))){return -1.0;}
- let t=clamp(v,vec3i(0),NB_LATTICE-vec3i(1))>>vec3u(2u);
+ let t=clamp(v,vec3i(0),NB_WALL_BOX-vec3i(1))>>vec3u(2u);
  if(any(nbrReachMax(nbrTileReach(t))>vec3u(2u))||nbrReleasedMayChange(vec3f(v),value)){return -1.0;}
  return value;
 }
@@ -217,7 +219,7 @@ fn nbrDeepAirKept(v:vec3i,width:u32,value:f32)->f32{
 /** The producers' shared code: the readers (page kinds, wall owners) and the US owners (nrs prefix). */
 const NR_PRODUCER_WGSL = () => [
   levelSetReleaseWGSL(),
-  brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "nrs", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0" }), /* wgsl */`
+  brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "nrs", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN }), /* wgsl */`
 const NR_SATURATED:u32=31u;
 // umReach and umPackReach (uniform-mixed-frame-plan.ts 149-153).
 fn nrReachOf(travel:f32)->u32{
@@ -344,7 +346,7 @@ const NR_SPREAD_WGSL = /* wgsl */`
  let cs=nbListSlot(NB_LIST_C_ALL,g);let axis=cfg.z;
  let src=select(NB_S_REACH0,NB_S_REACH1,axis==1u);let dst=select(NB_S_REACH1,NB_S_REACH0,axis==1u);
  let reach=i32(min(nrRadius(bitcast<f32>(nbSetWord(NB_H_REL_SPEED0+cfg.y))),0x7fffffffu>>2u));
- let last=(NB_LATTICE[axis]>>2u)-1;
+ let last=(NB_WALL_BOX[axis]>>2u)-1;
  let O=nbCOrigin(cs)>>vec3u(2u);
  for(var r=0u;r<2u;r++){
   let j=lid+256u*r;let p=O+nbLocalCoord(j);
@@ -400,7 +402,7 @@ const NR_BINDINGS: readonly BrickBinding[] = [CFG, { name: "set", kind: "rw", ty
 export function levelSetReleaseKernels(L: BrickLayout): LevelSetReleaseKernels {
   const k = (label: string, body: string): BrickKernel => ({
     label, entry: label, bindings: NR_BINDINGS,
-    code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }), declareBindings(NR_BINDINGS), NR_PRODUCER_WGSL(), body].join("\n"),
+    code: resolveBox(L, [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }), declareBindings(NR_BINDINGS), NR_PRODUCER_WGSL(), body].join("\n")),
   });
   return { nrReach: k("nrReach", NR_REACH_WGSL), nrSpread: k("nrSpread", NR_SPREAD_WGSL), nrWallReach: k("nrWallReach", NR_WALL_WGSL) };
 }
