@@ -13,7 +13,7 @@
  * - its velocity is, an axis, the mean of its two faces. For an h cell
  *   these are its F faces. For a 4h tile a face plane is its C face, or,
  *   where the tile beside is h-owned, the area mean of the 16 F faces on
- *   that plane (the old observer's patch mean). Faces at the lattice walls
+ *   that plane (the old observer's patch mean). Faces at the box's walls
  *   are closed (0). An h face in a brick that is not resident (beyond the
  *   band) drops out, and the cell takes the other face.
  *
@@ -25,7 +25,7 @@
  * Until 2026-11-17 the observer read F cells only, so a tiered scene's 4h
  * interior was missing (the letters' calm pool: drift -97% at step 30 while
  * the gauge held the budget to 0.1%). */
-import { boxWGSL, brickAbiWGSL } from "../lib/methods/narrow-band/brick-abi";
+import { BOX_TOKEN, boxWGSL, brickAbiWGSL, resolveBox } from "../lib/methods/narrow-band/brick-abi";
 import { brickOwnerWGSL } from "../lib/methods/narrow-band/brick-owner.wgsl";
 import type { BrickNBFlipSolver } from "../lib/methods/narrow-band/brick-solver";
 import { levelSetFillWGSL } from "../lib/core/level-set-fill.wgsl";
@@ -33,10 +33,12 @@ import { boxObserverWGSL, boxWords, decodeBoxWords, type BoxGeometry } from "./n
 import type { BoxObserver } from "./nbflip-observe";
 
 export async function createBrickBoxObserver(device: GPUDevice, solver: BrickNBFlipSolver, g: BoxGeometry): Promise<BoxObserver> {
-  const e = solver.brickEngine, L = e.layout, n = L.lattice;
-  if (g.nx !== n[0] || g.ny !== n[1] || g.nz !== n[2]) throw new Error(`Brick box observer: the box ${g.nx}x${g.ny}x${g.nz} is not the engine's lattice ${n.join("x")}`);
+  // The measure is over the box (layout.box: the container's cells). A padded lattice's cells past it hold no liquid and
+  // are not read; its walls are at the box (brick-abi.ts resolveBox).
+  const e = solver.brickEngine, L = e.layout, n = L.box;
+  if (g.nx !== n[0] || g.ny !== n[1] || g.nz !== n[2]) throw new Error(`Brick box observer: the box ${g.nx}x${g.ny}x${g.nz} is not the engine's box ${n.join("x")}`);
   const WORDS = boxWords(g);
-  const code = /* wgsl */`
+  const code = resolveBox(L, /* wgsl */`
 ${brickAbiWGSL(L, { set: { name: "nbSet", atomic: false }, dir: { name: "dir", atomic: false } })}
 @group(0) @binding(0) var<storage,read> nbSet:array<u32>;
 @group(0) @binding(1) var<storage,read> dir:array<u32>;
@@ -48,14 +50,14 @@ ${brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) })}
 ${levelSetFillWGSL}
 ${boxObserverWGSL(g, 64)}
 fn vertexAt(v:vec3i)->f32{
-  if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_AIR;}
+  if(any(v<vec3i(0))||any(v>${BOX_TOKEN})){return NB_PHI_AIR;}
   let s=nbFSlotOfBrick(v>>vec3u(3u));
   if(s>=NB_SEAM){return NB_PHI_AIR;}
   return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
 }
 // The lower face of c along a, and whether it is stored (the walls are closed and stored as 0).
 fn faceAt(c:vec3i,a:u32)->vec2f{
-  if(any(c<vec3i(0))||any(c>=NB_LATTICE)){return vec2f(0.0,1.0);}
+  if(any(c<vec3i(0))||any(c>=${BOX_TOKEN})){return vec2f(0.0,1.0);}
   let s=nbFSlotOfCell(c);
   if(s>=NB_SEAM){return vec2f(0.0,0.0);}
   return vec2f(vel[NB_VEL_F_U0+NB_STRIDE*(s+a*NB_FCAP)+nbLocal(c)],1.0);
@@ -90,7 +92,7 @@ fn tilePlane(T:vec3i,a:u32,up:i32)->f32{
       let o=nbCOrigin(cs)>>vec3u(2u);
       for(var j=0u;j<8u;j++){
         let i=lane+64u*j;let T=o+vec3i(i32(i&7u),i32((i>>3u)&7u),i32(i>>6u));
-        if(!nbTileInLattice(T)||nbTileOwnerH(T)){continue;}
+        if(!nbTileInWallBox(T)||nbTileOwnerH(T)){continue;}
         var k8:array<f32,8>;
         for(var k=0u;k<8u;k++){k8[k]=nbCVertex(T+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
         let liquid=ownerLiquid(k8,4.0);
@@ -107,7 +109,7 @@ fn tilePlane(T:vec3i,a:u32,up:i32)->f32{
     let o=8*nbKeyCoord(key);
     for(var j=0u;j<8u;j++){
       let c=o+nbLocalCoord(lane+64u*j);
-      if(!nbInLattice(c)||(OBS_TIERED&&!nbCellOwnerH(c))){continue;}
+      if(!nbInWallBox(c)||(OBS_TIERED&&!nbCellOwnerH(c))){continue;}
       var k8:array<f32,8>;
       for(var k=0u;k<8u;k++){k8[k]=vertexAt(c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
       let liquid=ownerLiquid(k8,1.0);
@@ -122,7 +124,7 @@ fn tilePlane(T:vec3i,a:u32,up:i32)->f32{
     }
   }
   boxEnd(lane);
-}`;
+}`);
   const module = device.createShaderModule({ label: "Box observer (brick engine)", code });
   const messages = (await module.getCompilationInfo()).messages.filter(m => m.type === "error");
   if (messages.length) throw new Error(`Brick box observer WGSL: ${messages.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join("; ")}`);
