@@ -404,7 +404,7 @@ export class BrickEngine {
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     // The box hook (M3 padding): every wall token resolved by its builder, and, where the lattice is padded past the
     // box, no owner reader still walling at the storage edge (a wall at the box exactly once).
-    const unresolved = kernels.filter(k => k.code.includes(BOX_TOKEN) || k.code.includes("nbInWallBox(")).map(k => k.label);
+    const unresolved = kernels.filter(k => k.code.includes(BOX_TOKEN) || k.code.includes("InWallBox(")).map(k => k.label);
     if (unresolved.length) throw new Error(`Brick engine: ${unresolved.join(", ")} leave the wall token unresolved (resolveBox)`);
     if (boxPadded(layout)) {
       const edge = kernels.filter(k => STORAGE_EDGE_WALLS.some(re => re.test(k.code))).map(k => k.label);

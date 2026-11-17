@@ -102,8 +102,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const cells = sceneLatticeDimensions(scene), paged = sceneFluidLatticeDimensions(scene);
   const padded = cells.some((n, a) => n !== paged[a]), lattice = paged, box = padded ? cells : undefined;
   if (cells.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
-  // F's walls are at the box (512e7a9f); P's pressure walls are not yet.
-  else if (padded) gaps.push(`the container's ${cells.join("x")} cells are not whole pages: padding to 32-cell pages needs P's walls at the box (M3)`);
+  // Padded to whole pages: F's walls (512e7a9f), the release readers' (7b9e12e7) and P's pressure walls (fecb32a9)
+  // are at the box.
   const hs = [c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]];
   if (hs.some(h => Math.abs(h - hs[0]!) > 1e-9 * hs[0]!)) gaps.push(`cells are not cubic (${hs.map(h => h.toPrecision(6)).join(", ")} m)`);
   const fixed = uniformFixedStep_s(values.timeStep);

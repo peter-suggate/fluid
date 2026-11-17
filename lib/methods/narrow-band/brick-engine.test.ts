@@ -250,10 +250,13 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     // (6 * 7 * 5 = 210), the F box its engine holds at step 1.
     const fall = brickSceneSetup(sceneDocument(getSceneDefinition("nbflip-analytic-free-fall")), { timeStep: "sixtieth" }).setup!;
     assert.equal(brickInitialExtent({ lattice: fall.lattice, farPhi: fall.farPhi, liquid: fall.liquid, initial: fall.initial }).resident, 210);
-    // A container that is whole bricks but not whole pages is refused at setup (the census and the C level set run
-    // whole 32^3 pages and would throw at creation), until the padding lands.
+    // A container that is whole bricks but not whole pages is padded (M3): the lattice is whole 32^3 pages and the
+    // box is the container's cells, where every wall is (F's, the release readers', P's pressure rows, the C level
+    // set's and the presentation's; tests/brick-padded-dam.test.ts).
     const slab = sceneDocument(getSceneDefinition("ceiling-slab-drop")); enabled.push(slab.sceneId!);
-    assert.match(brickSceneSetup(slab, { timeStep: "sixtieth" }).gaps.join(";"), /24x16x24 cells are not whole pages/);
+    const padded = brickSceneSetup(slab, { timeStep: "sixtieth" });
+    assert.deepEqual(padded.gaps, []);
+    assert.deepEqual([padded.setup!.lattice, padded.setup!.box], [[32, 32, 32], [24, 16, 24]]);
   } finally { enabled.length = before; }
   // An authored scene keeps its pools exactly (no t unless it says).
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));

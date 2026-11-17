@@ -243,7 +243,8 @@ export const boxWGSL = (L: Pick<BrickLayout, "lattice" | "box">) => boxPadded(L)
  * planes); a kernel builder resolves it with its layout (resolveBox). An unresolved token fails at engine creation. */
 export const BOX_TOKEN = "NB_WALL_BOX";
 export const resolveBox = (L: Pick<BrickLayout, "lattice" | "box">, code: string) =>
-  code.replaceAll(BOX_TOKEN, boxWGSL(L)).replaceAll("nbInWallBox(", boxPadded(L) ? "nbInBox(" : "nbInLattice(");
+  code.replaceAll(BOX_TOKEN, boxWGSL(L)).replaceAll("nbInWallBox(", boxPadded(L) ? "nbInBox(" : "nbInLattice(")
+    .replaceAll("nbTileInWallBox(", boxPadded(L) ? "nbTileInBox(" : "nbTileInLattice(");
 
 /** The ABI's concrete layout for one scene: every region's word offset and every buffer's size. */
 export class BrickLayout {
@@ -388,7 +389,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_LATTICE:vec3i=vec3i(${L.lattice.join(",")});`);
   lines.push(`const NB_BRICKS:vec3i=vec3i(${bricksPerAxis(L.lattice).join(",")});`);
   // The box (the walls) only where it is not the lattice: an unpadded scene's text is unchanged (boxWGSL names it).
-  if (boxPadded(L)) lines.push(`const NB_BOX:vec3i=vec3i(${L.box.join(",")});\nfn nbInBox(c:vec3i)->bool{return all(c>=vec3i(0))&&all(c<NB_BOX);}`);
+  if (boxPadded(L)) lines.push(`const NB_BOX:vec3i=vec3i(${L.box.join(",")});\nfn nbInBox(c:vec3i)->bool{return all(c>=vec3i(0))&&all(c<NB_BOX);}\nfn nbTileInBox(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_BOX);}`);
   lines.push(`const NB_PHI_AIR:f32=${PHI_AIR.toFixed(1)};`);
   lines.push(`const NB_PHI_AIR_C:f32=${PHI_AIR_C.toFixed(1)};`);
   // φ (h) where nothing is stored: the old vertex field's empty value, fluidLatticeFarPhi (the lattice's largest

@@ -113,7 +113,7 @@
  * FC list (FC_G1: F_ALL then C_ALL; LC_FOLD): the twin's F-side and this C-side read and write disjoint words. The
  * page bodies take the page and a uniform live flag, and every barrier they hold is under uniform control.
  */
-import type { BrickLayout } from "./brick-abi";
+import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickKernel } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { FB, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RUN_WGSL, FG_SAMPLE_WGSL, FG_SLOT_WGSL, FG_VEL_WGSL, type FluidLayout, fluidKernel, fluidLayout } from "./fluid-grid.wgsl";
@@ -128,10 +128,14 @@ export const LC_FOLD = { lcAdvect: "lAdvect", lcCouple: "lUnion", lcClear: "lCle
  * with what it needs of lane F's φ part (fgHeld). */
 const LC_VELOCITY_WGSL = [FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL].join("\n");
 
-/** The owner prelude twice: nb* over PHI (the current field), lc1* over PHI1 (the scratch). Lane F's are fo*. */
+/** The owner prelude twice: nb* over PHI (the current field), lc1* over PHI1 (the scratch). Lane F's are fo*. Both
+ * wall at the box (M3 padding, BOX_TOKEN; fluidKernel resolves it), as the C kernels' own walls, holds and domains do:
+ * lcVertexIn, lcHeld, lcCellOf, lcTileHeld, the wall planes (lcOnWall, lcWallWithin, lcWallContact, the cubic's
+ * limits and taps), and the cell and tile domains (nbInWallBox, nbTileInWallBox). Storage stays at NB_LATTICE: the
+ * whole-pages latch (lcCheckLattice) and the page lookups (lcCheckBulk). A vertex past the box keeps its stored air. */
 const ownersWGSL = () => [
-  brickOwnerWGSL({ phi: "phi", vel: "vel" }),
-  brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "lc1" }).replace(/NB_PHI_([CF])_PHI\b/g, "NB_PHI_$1_PHI1"),
+  brickOwnerWGSL({ phi: "phi", vel: "vel", box: BOX_TOKEN }),
+  brickOwnerWGSL({ phi: "phi", vel: "vel", prefix: "lc1", box: BOX_TOKEN }).replace(/NB_PHI_([CF])_PHI\b/g, "NB_PHI_$1_PHI1"),
 ].join("\n");
 
 const LC_COMMON_WGSL = /* wgsl */`
@@ -140,17 +144,17 @@ fn lcDt()->f32{return nbRingF(cfg.x,NB_RING_DT);}
 fn lcHm()->vec3f{return vec3f(nbRingF(cfg.x,NB_RING_H));}
 fn lcUnit(a:u32)->vec3i{var e=vec3i(0);e[a]=1;return e;}
 fn lcCorner(k:u32)->vec3i{return vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));}
-fn lcVertexIn(v:vec3i)->bool{return all(v>=vec3i(0))&&all(v<=NB_LATTICE);}
+fn lcVertexIn(v:vec3i)->bool{return all(v>=vec3i(0))&&all(v<=NB_WALL_BOX);}
 // umPointFrom / umPointFromPage in the box: a point held to the lattice's walls.
-fn lcHeld(p:vec3f)->vec3f{return clamp(p,vec3f(0.0),vec3f(NB_LATTICE));}
+fn lcHeld(p:vec3f)->vec3f{return clamp(p,vec3f(0.0),vec3f(NB_WALL_BOX));}
 // A vertex's cell held off the upper wall (umPointCell, umCellNearFromPage, umOpenPointCell in the box).
-fn lcCellOf(v:vec3i)->vec3i{return clamp(v,vec3i(0),NB_LATTICE-vec3i(1));}
-fn lcTileHeld(t:vec3i)->vec3i{return clamp(t,vec3i(0),(NB_LATTICE>>vec3u(2u))-vec3i(1));}
+fn lcCellOf(v:vec3i)->vec3i{return clamp(v,vec3i(0),NB_WALL_BOX-vec3i(1));}
+fn lcTileHeld(t:vec3i)->vec3i{return clamp(t,vec3i(0),(NB_WALL_BOX>>vec3u(2u))-vec3i(1));}
 // A C vertex: some in-lattice tile incident to it is 4h-owned (its writer).
 fn lcCOwned(v:vec3i)->bool{return lcVertexIn(v)&&nbVertexCoarse(v).x>=0;}
 // Deviation 5: tile t's page is resident and COLD.
 fn lcTileCold(t:vec3i)->bool{let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}return (nbCRec(cs,NB_REC_CLASS)&NB_CLASS_COLD)!=0u;}
-fn lcCellStored(c:vec3i)->bool{return nbInLattice(c)&&nbCSlotOfPage(c>>vec3u(5u))!=NB_NONE;}
+fn lcCellStored(c:vec3i)->bool{return nbInWallBox(c)&&nbCSlotOfPage(c>>vec3u(5u))!=NB_NONE;}
 // umVertexTier == COLD: every incident stored open cell is COLD, or none is (buried: φ there is not state).
 fn lcTierCold(v:vec3i)->bool{
  for(var k=0u;k<8u;k++){let c=v-lcCorner(k);if(!lcCellStored(c)){continue;}if(!lcTileCold(c>>vec3u(2u))){return false;}}
@@ -204,7 +208,7 @@ var<workgroup> lcA:array<u32,361>;
 var<workgroup> lcB:array<u32,361>;
 var<private> lcT0:vec3i;
 // Tile t is stored (umTileLive / umKeyStored): in the lattice, in a resident page.
-fn lcTileLive(t:vec3i)->bool{return nbTileInLattice(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE;}
+fn lcTileLive(t:vec3i)->bool{return nbTileInWallBox(t)&&nbCSlotOfPage(t>>vec3u(3u))!=NB_NONE;}
 // Tile t is an air seed (nbAirSeed, per owner; the caller has t live).
 fn lcSeed(t:vec3i,x:u32,y:u32,z:u32)->bool{
  let cs=nbCSlotOfPage(t>>vec3u(3u));
@@ -295,10 +299,10 @@ fn lcPhiTap(v:vec3i)->f32{
  return nbVertexPhi(v);
 }
 // umCubicPhi's taps: the departure cell's width-aligned vertices, held to the box (umVertexNearFromPage).
-fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lcPhiTap(clamp(lcBase+(vec3i(i32(x),i32(y),i32(z))-vec3i(1))*lcW,vec3i(0),NB_LATTICE));}
-fn lcOnWall(v:vec3i)->bool{return any(v==vec3i(0))||any(v==NB_LATTICE);}
+fn nbxCubicTap(x:u32,y:u32,z:u32)->f32{return lcPhiTap(clamp(lcBase+(vec3i(i32(x),i32(y),i32(z))-vec3i(1))*lcW,vec3i(0),NB_WALL_BOX));}
+fn lcOnWall(v:vec3i)->bool{return any(v==vec3i(0))||any(v==NB_WALL_BOX);}
 // umWallWithin in the box: a wall plane within reach of v along a.
-fn lcWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_LATTICE[a]-reach;}
+fn lcWallWithin(v:vec3i,a:u32,reach:i32)->bool{return v[a]<reach||v[a]>NB_WALL_BOX[a]-reach;}
 // umWallContact ("clip"): each wall plane through p whose inner probe (a width in) flows into the wall moves the
 // departure along that axis by the probe's travel; the vertex takes the lesser of its value and the held departure.
 fn lcWallContact(p:vec3f,value:f32,travelIn:vec3f,dt:f32,hm:vec3f)->f32{
@@ -306,7 +310,7 @@ fn lcWallContact(p:vec3f,value:f32,travelIn:vec3f,dt:f32,hm:vec3f)->f32{
  var travel=travelIn;var contact=false;
  for(var k=0u;k<6u;k++){
   let a=k>>1u;let upper=(k&1u)!=0u;let inward=select(1.0,-1.0,upper);
-  let on=select(p[a]==0.0,p[a]==f32(NB_LATTICE[a]),upper);if(!on){continue;}
+  let on=select(p[a]==0.0,p[a]==f32(NB_WALL_BOX[a]),upper);if(!on){continue;}
   var probe=p;probe[a]+=inward*4.0;
   let speed=fgSampleVel(probe,a,a+1u)[a];
   if(inward*speed>=-1e-6){continue;}
@@ -361,7 +365,7 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
  // umCubicAt(vertex, 4): mode < 4, the coarse default (cubic); |value| < 2 widths of the vertex.
  if(abs(value)<2.0*w){
   lcBase=origin;lcW=width;
-  value=nbfCubicLimited(f,origin-vec3i(width)<vec3i(0),origin+vec3i(2*width)>NB_LATTICE);
+  value=nbfCubicLimited(f,origin-vec3i(width)<vec3i(0),origin+vec3i(2*width)>NB_WALL_BOX);
  }
  value=nbrReleasedWalls(p,lcWallContact(p,value,travel,dt,hm));
  // umAdvected: the source's union after the advection, then the smoothing (deviation 9).
@@ -369,7 +373,7 @@ fn lcFullAdvected(v:vec3i,c:f32,dt:f32,hm:vec3f)->f32{
 }
 // umFarAirKept's gate word: last step's airGate at tile t (lcStoreGate); clear where no page holds t.
 fn lcGate(t:vec3i)->bool{
- if(!nbTileInLattice(t)){return false;}
+ if(!nbTileInWallBox(t)){return false;}
  let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}
  let i=nbTileIndex(t);return ((nbSetWord(NB_S_AIR_GATE+16u*cs+(i>>5u))>>(i&31u))&1u)!=0u;
 }
@@ -432,7 +436,7 @@ fn lcTileFresh(t:vec3i)->bool{return (fgTileLoad(4*t,FT_DIST,0xffffffffu)&0x1fff
 fn lcNearKnown(c:vec3i)->bool{
  let lo=(c-vec3i(5))>>vec3u(2u);let hi=(c+vec3i(5))>>vec3u(2u);
  for(var z=lo.z;z<=hi.z;z++){for(var y=lo.y;y<=hi.y;y++){for(var x=lo.x;x<=hi.x;x++){
-  let t=vec3i(x,y,z);if(!nbTileInLattice(t)){continue;}
+  let t=vec3i(x,y,z);if(!nbTileInWallBox(t)){continue;}
   if(fgTileAt(4*t,0u)!=NB_NONE&&!lcTileFresh(t)){continue;}
   let cs=fgTileCSlot(t);if(cs==NB_NONE){continue;}
   if(((fcLoad(FC_DIL4+512u*cs+nbTileIndex(t))>>24u)&FTF_CROSSING)!=0u){return false;}
@@ -494,7 +498,7 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
    // retires its records, so an empty bin there is not evidence of air, and skipping it made C φ depend on the tile's
    // own tier (a limit cycle). Its fill is the planar volume fraction of the advected C φ at the cell centre,
    // clamp(0.5 - φ, 0, 1), as eight records' worth. An h cell no F slot holds is open with no particles.
-   if(!nbInLattice(cc)){continue;}
+   if(!nbInWallBox(cc)){continue;}
    var n=0u;
    if(fgCellCoarse(cc)){n=u32(round(8.0*clamp(0.5-lcSample(1u,vec3f(cc)+0.5),0.0,1.0)));}
    else if(fgSlot(cc)!=NB_NONE){n=min(lcBinCount(cc),8u);}
@@ -594,10 +598,10 @@ fn lcBuildDistance(v:vec3i,c:vec3i)->f32{
  return value;
 }
 // nbVertexClosed: no in-lattice cell incident to q (deviation 8: the only closed vertices are off the lattice).
-fn lcClosed(q:vec3i)->bool{for(var k=0u;k<8u;k++){if(nbInLattice(q-lcCorner(k))){return false;}}return true;}
+fn lcClosed(q:vec3i)->bool{for(var k=0u;k<8u;k++){if(nbInWallBox(q-lcCorner(k))){return false;}}return true;}
 fn lcZeroOpen(p:vec3f)->bool{
  let low=vec3i(ceil(p))-vec3i(1);let high=vec3i(floor(p));
- for(var k=0u;k<8u;k++){if(nbInLattice(select(low,high,lcCorner(k)!=vec3i(0)))){return true;}}
+ for(var k=0u;k<8u;k++){if(nbInWallBox(select(low,high,lcCorner(k)!=vec3i(0)))){return true;}}
  return false;
 }
 // nbBoundCoarseMetric: |d| no farther than the represented zero on each of the six 4h lattice edges.

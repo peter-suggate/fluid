@@ -10,7 +10,11 @@
  *   brick-owner.wgsl.ts, and an entering slot's), it is the scene's far value.
  * - `volume` (r32float, lattice): each cell's liquid fraction, the
  *   six-tetrahedron fill of its eight corner phi (level-set-fill.wgsl.ts).
- * - `openFraction` (r32float, lattice): 1, as M2 has no cut cells.
+ * - `openFraction` (r32float, lattice): 1, as M2 has no cut cells; on a
+ *   padded lattice (M3), 0 past the box, whose cells are wall.
+ * On a padded lattice a cell past the box holds no liquid (`volume` 0 there),
+ * as the old engine's cells behind its shell hold none; its vertices keep
+ * their stored air (the vertex row on the box's planes is the wall's).
  *
  * Two passes, one workgroup a lattice brick (8^3 cells):
  * - `presentVertices` writes the brick's vertices, plus the vertex row past the
@@ -31,7 +35,7 @@
  * of it. The copy is encoded outside the step's submissions.
  */
 import { brickLowerOn, brickModuleCode } from "./brick-lower";
-import { BrickLayout, PHI_AIR, boxWGSL, brickAbiWGSL } from "./brick-abi";
+import { BrickLayout, PHI_AIR, boxPadded, boxWGSL, brickAbiWGSL } from "./brick-abi";
 import type { BrickEngine } from "./brick-engine";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
@@ -90,7 +94,7 @@ var<workgroup> presentState:u32;
   for(var j=0u;j<8u;j++){
     let v=8*b+nbLocalCoord(lid+64u*j);
     var f=0.0;
-    if(held){
+    if(${boxPadded(L) ? "held&&nbInBox(v)" : "held"}){
       var c:array<f32,8>;var lo=1e30;var hi=-1e30;
       for(var k=0u;k<8u;k++){c[k]=textureLoad(vertexPhi,v+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),0).x;lo=min(lo,c[k]);hi=max(hi,c[k]);}
       if(hi<0.0){f=1.0;}else if(lo<0.0){f=fill(c);}
@@ -121,6 +125,13 @@ export class BrickPresentation {
       for (let z = 0; z < size[2]!; z++) d.queue.writeTexture({ texture: t, origin: [0, 0, z] }, slab, { bytesPerRow: 4 * size[0]!, rowsPerImage: size[1]! }, [size[0]!, size[1]!, 1]);
     };
     fillSlabs(this.vertexPhi, n.map(v => v + 1), far_m); fillSlabs(this.openFraction, n, 1);
+    // Padded (M3): the cells past the box are wall, closed.
+    const box = engine.layout.box;
+    if (boxPadded(engine.layout)) for (let z = 0; z < n[2]!; z++) {
+      const slab = new Float32Array(n[0]! * n[1]!);
+      if (z < box[2]!) for (let y = 0; y < box[1]!; y++) slab.fill(1, y * n[0]!, y * n[0]! + box[0]!);
+      d.queue.writeTexture({ texture: this.openFraction, origin: [0, 0, z] }, slab, { bytesPerRow: 4 * n[0]!, rowsPerImage: n[1]! }, [n[0]!, n[1]!, 1]);
+    }
     const bricks = bricksPerAxis(engine.layout).reduce((a, b) => a * b, 1);
     this.shown = d.createBuffer({ label: "nb-brick.present.shown", size: 4 * bricks, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.params = d.createBuffer({ label: "nb-brick.present.params", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });

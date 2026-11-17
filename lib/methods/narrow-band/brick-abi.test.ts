@@ -82,9 +82,10 @@ test("brick ABI: the box hook (M3 padding): walls at the box, an unpadded text u
   assert.throws(() => new BrickLayout({ lattice: [32, 32, 32], box: [24, 40, 24], f: 1, c: 1, b: 0, k: 0, particles: 1 }), /box 24x40x24 is not inside the lattice/);
   // Unpadded: no NB_BOX in the prelude, and the token resolves to the text it replaced.
   assert.ok(!brickAbiWGSL(L).includes("NB_BOX"));
-  assert.equal(resolveBox(L, `${BOX_TOKEN}[a] nbInWallBox(c)`), "NB_LATTICE[a] nbInLattice(c)");
+  assert.equal(resolveBox(L, `${BOX_TOKEN}[a] nbInWallBox(c) nbTileInWallBox(t)`), "NB_LATTICE[a] nbInLattice(c) nbTileInLattice(t)");
   assert.match(brickAbiWGSL(P), /const NB_BOX:vec3i=vec3i\(24,16,24\);\nfn nbInBox\(c:vec3i\)->bool/);
-  assert.equal(resolveBox(P, `${BOX_TOKEN}[a] nbInWallBox(c)`), "NB_BOX[a] nbInBox(c)");
+  assert.equal(resolveBox(P, `${BOX_TOKEN}[a] nbInWallBox(c) nbTileInWallBox(t)`), "NB_BOX[a] nbInBox(c) nbTileInBox(t)");
+  assert.match(brickAbiWGSL(P), /\nfn nbTileInBox\(t:vec3i\)->bool\{return all\(t>=vec3i\(0\)\)&&all\(4\*t<NB_BOX\);\}/);
   // My kernels on the padded layout: every token resolved; the owner walls, setInit's OPEN, the boot's inner faces,
   // the transfer's wall faces and the census's cell kind read the box.
   const kernels = ([...Object.values(brickSetKernels(P, { tiered: true })), ...Object.values(brickCensusKernels(P)), ...Object.values(brickTransferKernels(P))] as unknown[])
@@ -98,4 +99,23 @@ test("brick ABI: the box hook (M3 padding): walls at the box, an unpadded text u
   assert.match(code("setInit"), /NB_FLAG_OPEN,nbInBox\(o\+nbLocalCoord\(l\)\)\)/);
   assert.match(code("censusFine"), /fn ncCellKind\(c:vec3i\)->u32\{if\(!nbInBox\(c\)\)/);
   assert.match(code("setTransferFaces"), /let wall=c\[a\]\+1==NB_BOX\[a\];/);
+  // The C level set (levelset-coarse, lc*): both owner instances and the kernels' own walls, holds and domains read
+  // the box (the padded tank's creation guard named lcClear, lcAdvect, lcCouple, lcRetire and lcPublish); storage
+  // (the whole-pages latch, the page lookups) stays at the lattice.
+  const { levelSetCoarseKernels } = await import("./levelset-coarse.wgsl");
+  const lc = Object.values(levelSetCoarseKernels(P)), lcUnpadded = Object.values(levelSetCoarseKernels(L));
+  assert.equal(lc.length, 5);
+  for (const k of lc) {
+    assert.ok(!k.code.includes(BOX_TOKEN) && !k.code.includes("InWallBox("), `${k.label}: token unresolved`);
+    assert.ok(!/OnWall\(c:vec3i,a:u32\)->bool\{return c\[a\]<=0\|\|c\[a\]>=NB_LATTICE\[a\];\}/.test(k.code), `${k.label}: an owner wall at the storage edge`);
+    assert.match(k.code, /fn lcCheckLattice\(lid:u32\)\{if\(lid==0u&&any\(\(NB_LATTICE&vec3i\(31\)\)/, k.label);
+    // In the C kernels' own text (not the lc1 owner's), only the lattice's storage reads remain at NB_LATTICE.
+    const own = k.code.split("\n").filter((l: string) => /^fn lc(?!1)/.test(l) && /NB_LATTICE/.test(l)).map((l: string) => l.slice(0, l.indexOf("(")));
+    assert.deepEqual(own, ["fn lcCheckLattice"], k.label);
+  }
+  const all = lc.map(k => k.code).join("\n");
+  assert.match(all, /fn lcOnWall\(v:vec3i\)->bool\{return any\(v==vec3i\(0\)\)\|\|any\(v==NB_BOX\);\}/);
+  assert.match(all, /fn lcTileLive\(t:vec3i\)->bool\{return nbTileInBox\(t\)/);
+  assert.match(all, /fn lcClosed\(q:vec3i\)->bool\{for\(var k=0u;k<8u;k\+\+\)\{if\(nbInBox\(/);
+  for (const k of lcUnpadded) assert.ok(!k.code.includes("NB_BOX") && !k.code.includes("nbTileInBox"), `${k.label}: unpadded names the box`);
 });
