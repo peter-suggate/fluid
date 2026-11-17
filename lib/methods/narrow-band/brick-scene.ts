@@ -19,6 +19,7 @@ import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
 import type { BrickCapacities } from "./brick-abi";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
+import { brickRigidBodyGaps } from "./bodies-host";
 import type { BrickInitialPhi, BrickLiquidBox, Vec3 } from "./brick-engine";
 import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
 import { brickSources, type BrickSources } from "./brick-source";
@@ -83,7 +84,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // field (umUnitBoxOpen's terrain, umBoundaryTouchesBox) is not read yet, so it must not run as open water.
   if (scene.terrain) gaps.push("terrain needs the static solid's ground field (M3)");
   if (scene.solidBoundary && scene.solidBoundary.collision !== "voxels") gaps.push("a procedural boundary sampled as a field needs boundary records (M3)");
-  if ((scene.rigidBodies?.length ?? 0) > 0) gaps.push("rigid bodies need lane P's bodies (M5)");
+  // Rigid bodies (lane P, M5: bodies-host.ts): the body stages need K slots, and the host's own refusals.
+  gaps.push(...brickRigidBodyGaps(scene));
   // Scheduled drops are lane F's sources (brick-source.ts); an inflow is not ported yet.
   if (f.inflow) gaps.push("an inflow needs lane F's inflow source (M4)");
   // The pool rule sizes from the t = 0 liquid alone: a drop scene would latch POOL_F or PARTICLES as its drops land.
@@ -119,6 +121,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // an overrun latches FAIL.POOL / PARTICLES and is never grown.
   const extent = brickInitialExtent({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial });
   const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
+  // The body stages take a K slot a body brick (A5): a scene with bodies authors brickPools.k from its NEAR_BODY peak.
+  if ((scene.rigidBodies?.length ?? 0) > 0 && !(p.k > 0)) return { gaps: [...gaps, "rigid bodies need K slots: author brickPools.k from the NEAR_BODY peak"] };
   return {
     gaps,
     setup: {

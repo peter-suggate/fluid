@@ -76,5 +76,5 @@ export async function createBrickSolver(device: GPUDevice, scene: SceneDescripti
   const stages = brickFluidStages, solver = brickPressureSolver;
   const probe = solver(new BrickLayout({ lattice: setup.lattice, farPhi: setup.farPhi, ...setup.capacities }));
   if (probe.bringUp) throw new Error("NB-FLIP brick engine: the registered pressure solver is the bring-up CG, which no scene may run (coordinator ruling, 2026-11-15)");
-  return BrickNBFlipSolver.create(device, { setup, stages, solver, values, quality, farPhi_m: fluidLatticeFarPhi(scene), ...(test.censusHold ? { censusHold: test.censusHold } : {}) });
+  return BrickNBFlipSolver.create(device, { setup, stages, solver, values, quality, farPhi_m: fluidLatticeFarPhi(scene), ...(test.censusHold ? { censusHold: test.censusHold } : {}), rigid: scene });
 }

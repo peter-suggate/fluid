@@ -30,6 +30,9 @@ import { BrickPresentation } from "./brick-present";
 import type { BrickSceneSetup } from "./brick-scene";
 import type { PressureSolverFactory } from "./brick-pressure-slot";
 import type { BrickStagesFactory } from "./brick-stages";
+import type { SceneDescription } from "../../core/model";
+import type { GPURigidBodyPick, GPURigidBodyPose } from "../../core/webgpu-rigid-body";
+import { BrickRigidBodies } from "./bodies-host";
 
 export interface BrickSolverOptions {
   readonly setup: BrickSceneSetup;
@@ -43,11 +46,15 @@ export interface BrickSolverOptions {
   readonly present?: boolean;
   /** Test and diagnostic only: the engine's census hold (BrickEngineOptions.censusHold). */
   readonly censusHold?: BrickCensusHold;
+  /** The scene whose rigid bodies the solver hosts (lane P, M5: bodies-host.ts); absent, or no bodies: none. */
+  readonly rigid?: SceneDescription;
 }
 
 export class BrickNBFlipSolver implements GPUSolverInstance {
   readonly brickEngine: BrickEngine;
   readonly brickPresentation: BrickPresentation;
+  /** Lane P's rigid bodies (M5), when the scene has any. */
+  readonly rigidBodies?: BrickRigidBodies;
   readonly fluidDomain: GPUSolverInstance["fluidDomain"];
   readonly denseLevelSetVolumeSource: DenseLevelSetVolumeConsumerSource;
   private presentEnabled: boolean;
@@ -56,8 +63,9 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   lastPresentationMs?: number;
   info: GPUEulerianInfo;
 
-  private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation) {
+  private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation, rigid?: BrickRigidBodies) {
     this.brickEngine = engine; this.brickPresentation = presentation; this.presentEnabled = options.present ?? true;
+    if (rigid) this.rigidBodies = rigid;
     const s = options.setup, h = s.h_m;
     this.fluidDomain = { origin_m: s.origin_m, cellSize_m: [h, h, h], dimensions: s.lattice };
     this.denseLevelSetVolumeSource = { vertexPhi: presentation.vertexPhi, contourVertexPhi: true, openFraction: presentation.openFraction, cellSize_m: [h, h, h] };
@@ -66,14 +74,18 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
 
   static async create(device: GPUDevice, options: BrickSolverOptions): Promise<BrickNBFlipSolver> {
     const s = options.setup;
+    const rigid = options.rigid?.rigidBodies?.length
+      ? await BrickRigidBodies.create(device, options.rigid, { frame_m: s.origin_m, h_m: s.h_m, dt_s: s.dt_s, density_kg_m3: s.density_kg_m3, coupling: options.values.rigidCoupling !== "off" })
+      : undefined;
     const engine = await BrickEngine.create(device, {
       lattice: s.lattice, ...(s.box ? { box: s.box } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), ...(options.censusHold ? { censusHold: options.censusHold } : {}),
       solver: options.solver, stages: options.stages, values: options.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },
+      ...(rigid ? { bodies: rigid } : {}),
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m);
-    const solver = new BrickNBFlipSolver(options, engine, presentation);
+    const solver = new BrickNBFlipSolver(options, engine, presentation, rigid);
     solver.present();
     return solver;
   }
@@ -97,10 +109,11 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   }
 
   /** One step toward `time_s` a call (the app's ledger asks again while the clock owes more). */
-  advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
+  advanceTo(time_s: number, bodies: RigidBodyState[]): boolean {
     if (this.info.simulationFailure) return false;
     const dt = this.options.setup.dt_s, submitted = this.info.submittedTime_s ?? 0;
     if (time_s + 1e-9 < submitted + dt) return false;
+    this.rigidBodies?.offer(bodies);
     try { this.brickEngine.advance(1); } catch (error) {
       // A latched FAIL (lagged receipt) refuses further steps: report it, never step on.
       this.refresh({ simulationFailure: this.failure(error instanceof Error ? error.message : String(error)) });
@@ -165,5 +178,14 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     };
   }
 
-  destroy() { this.brickPresentation.destroy(); this.brickEngine.destroy(); }
+  // The rigid contract (method-contract.ts), the shared system's.
+  get rigidRenderBuffer(): GPUBuffer | undefined { return this.rigidBodies?.renderBuffer; }
+  get rigidMotionBuffer(): GPUBuffer | undefined { return this.rigidBodies?.motionBuffer; }
+  /** The roster for the next step's sync (the old host's syncRigidBodies; prescribed bodies are sampled there). */
+  syncRigidBodies(bodies: readonly RigidBodyState[]): void { this.rigidBodies?.offer(bodies); }
+  setSelectedRigidBody(index: number): void { this.rigidBodies?.system.setSelectedIndex(index); }
+  pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]): Promise<GPURigidBodyPick | undefined> { return this.rigidBodies ? this.rigidBodies.system.pick(origin, direction) : Promise.resolve(undefined); }
+  readRigidBodyPoses(): Promise<GPURigidBodyPose[] | undefined> { return this.rigidBodies ? this.rigidBodies.readPoses() : Promise.resolve(undefined); }
+
+  destroy() { this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); }
 }

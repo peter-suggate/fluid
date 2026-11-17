@@ -30,7 +30,7 @@ import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
 import { mgLayout, pressureKickScaleGroups, pressureKickScaleKernel } from "./pressure-mgpcg";
 import { type BrickStages, type BrickStagesFactory, validateBrickStages } from "./brick-stages";
 import { levelSetReleaseSchedule } from "./levelset-release.wgsl";
-import { brickBodyKernels } from "./bodies-stage.wgsl";
+import { brickBodyCoupleKernel, brickBodyKernels } from "./bodies-stage.wgsl";
 import type { BrickBodiesBinding, BrickBodiesHeader } from "./bodies-binding.wgsl";
 import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 
@@ -236,7 +236,7 @@ export class BrickEngine {
   /** Pipeline compile times (ms), by kernel label, from this engine's creation. */
   readonly compileMs: Readonly<Record<string, number>>;
   private readonly buffers = new Map<string, GPUBuffer>();
-  /** Buffers the engine binds but does not own (lane P's `bodies` and `bodyCuts`, the rigid system's): never saved,
+  /** Buffers the engine binds but does not own (lane P's `bodies`, `bodyCuts` and `bodyExchange`, the rigid system's): never saved,
    * restored or destroyed here. */
   private readonly external = new Map<string, GPUBuffer>();
   /** The ring's body header of the step being written (A3), from BrickBodiesBinding.sync. */
@@ -257,7 +257,7 @@ export class BrickEngine {
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop">, sources = false, censusHold?: BrickCensusHold): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop" | "density_kg_m3">, sources = false, censusHold?: BrickCensusHold): BrickStageSchedule {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
@@ -305,6 +305,8 @@ export class BrickEngine {
       ...stages.velocity,
       ...solve,
       ...stages.tail,
+      // P's couple (M5 §6, §7.1): after F's tail, X final; the rigid integrator follows in its own command buffer.
+      ...(bodies ? [{ kernel: brickBodyCoupleKernel(layout, frame!, bodies), dispatch: list(LIST.F_BODY, "G1") }] : []),
       { kernel: set.stepEnd, dispatch: direct(1), z: 0 },
     ];
     // Part 1's head (brick-abi.md §2.5, §5.4), on the completed step's lists and state, in both engines:
@@ -323,7 +325,7 @@ export class BrickEngine {
     // census, which needs whole pages (every scene's fluid lattice is, sceneFluidBox) and refuses others. With no
     // census there are no residency records, so such a set stays the boot's (stated: no scene runs one).
     const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
-    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep, false, censusHold) : [];
+    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep, false, censusHold, frame) : [];
     // The real D (brick-region-heat.wgsl.ts), tiered only: the heat and spread after censusBegin (the head's deep runs
     // in censusCoarse), the WARM promotion in setTransferList (cfg.w = 1), the certificate after the transfer. Its
     // pressureDelta is lane P's PDELTA where the solver publishes it (pmgC), else +Inf.
@@ -336,7 +338,7 @@ export class BrickEngine {
       { kernel: k.certFine, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 } },
       { kernel: k.certError, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.X8 }, w: 1 },
     ]; })() : [];
-    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined, censusHold) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
+    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined, censusHold, frame) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
     const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL).map(p => (heat && p.kernel.label === "setTransferList" ? { ...p, w: 1 } : p));
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
@@ -368,7 +370,7 @@ export class BrickEngine {
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
-    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, censusHold) : [];
+    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, censusHold, frame) : [];
     // The kick has no last frame, so its seam heads (rowsF's poHeadS: the start's tangential slope) start from the
     // cold prolongation; like the old arena's encodeSolve(kick), it re-solves BRICK_KICK_RESOLVES times from its own
     // pressure (each solve leaves the rows WARM, so the next starts from X), before F's after reads the projection.
@@ -468,7 +470,7 @@ export class BrickEngine {
     make("xfer", L.xferWords);
     make("census", brickCensusBuffers(L).census);
     const bodies = this.options.bodies;
-    if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); }
+    if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); this.external.set("bodyExchange", bodies.exchange); }
     const mask = this.options.staticMask;
     if (mask) uploadWords(d.queue, make("solid", mask.words.length), 0, mask.words as Uint32Array<ArrayBuffer>);
     // The sources' static record (brick-source.ts): every drop's extrusion edges, once; a stub with no sources.
@@ -476,7 +478,7 @@ export class BrickEngine {
     const src = make("src", brickSourceWords(edges ? edges.length / 4 : 0));
     if (edges?.length) uploadWords(d.queue, src, 0, edges);
     for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
-      if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || name === "bodies" || name === "bodyCuts" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
+      if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || name === "bodies" || name === "bodyCuts" || name === "bodyExchange" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
     }
     const t = this.options.initial;
@@ -563,7 +565,7 @@ export class BrickEngine {
 
   private boot() {
     const rec = this.schedule.boot.map(p => this.bind(p, 0));
-    this.bodyHeader = this.options.bodies?.sync(0);
+    this.bodyHeader = this.options.bodies?.sync(-1);
     this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * this.layout.set.ring, this.ringWords(0));
     this.device.queue.submit([this.encode(rec, "nb-brick.boot")]);
     // The page table is boot-only (its size follows the initial liquid's pages): released once the boot is queued
@@ -592,7 +594,10 @@ export class BrickEngine {
       if (this.options.bodies) this.bodyHeader = this.options.bodies.sync(a.step);
       this.device.queue.writeBuffer(this.buffers.get("set")!, 4 * (this.layout.set.ring + RING_WORDS * slot), this.ringWords(a.step));
       this.device.queue.submit([a.part1]);
-      this.device.queue.submit([a.part2]);
+      // §7.1: the rigid integrator after part 2's couple, in the same submit (the host's buffer, encoded now so it
+      // reads this step's roster; undefined with the coupling off).
+      const rigid = this.options.bodies?.integrate(a.step);
+      this.device.queue.submit(rigid ? [a.part2, rigid] : [a.part2]);
       if (a.receipt >= 0) this.collect(a.receipt, a.step);
       this.steps++; this.time += this.options.dt_s;
       this.encodeAhead();

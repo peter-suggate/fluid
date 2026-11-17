@@ -82,6 +82,7 @@ import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./bri
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { BRICK_SOURCE_BINDING, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
+import { BODIES_RO, BODY_CUTS_RO, PB_BRICK_CANDIDATES_WGSL, PB_BRICK_MARK_WGSL, pbBrickBodiesWGSL, type BrickBodiesFrame } from "./bodies-binding.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
 import { UNIFORM_TILE_UPDATE_BUDGET_H } from "../uniform/uniform-tile-update-error";
 
@@ -991,8 +992,8 @@ fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
  * tank's deep liquid: its seams). No scene sets it; absent, the census's text is unchanged (the dam's hashes). */
 export interface BrickCensusHold { readonly lo: readonly [number, number, number]; readonly hi: readonly [number, number, number] }
 
-export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold } = {}) {
-  const tiered = opt.tiered ?? true, hold = opt.hold;
+export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold; readonly bodies?: BrickBodiesFrame } = {}) {
+  const tiered = opt.tiered ?? true, hold = opt.hold, bodies = opt.bodies;
   if (hold && hold.lo.some((v, a) => !Number.isInteger(v) || !Number.isInteger(hold.hi[a]) || v < 0 || v >= hold.hi[a]! || hold.hi[a]! > L.lattice[a]! / 4)) throw new Error(`setCensus: the hold [${hold.lo.join(",")}] .. [${hold.hi.join(",")}] is not a non-empty box of whole tiles in the lattice`);
   if (L.lattice.some(n => n % 32 !== 0)) throw new Error(`setCensus: the lattice ${L.lattice.join("x")} is not whole pages (32 cells an axis)`);
   // BULK16 (B slots) is M3: a pool may be authored, but a live B slot fails on the GPU (censusBegin, LIVE_B).
@@ -1006,11 +1007,16 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
   for(var w=NB_H_RES_RADIUS;w<=NB_H_RES_CLAIMED_C;w++){atomicStore(&nbSet[w],0u);}
   // The region heat's per-step words (the old encode's clearBuffer of the still words and the tier counts).
   for(var w=NB_H_STILL_HIGH;w<=NB_H_HEAT_COLD;w++){atomicStore(&nbSet[w],0u);}
-  // Bodies and K slots (A2-A4, E's ruling 2026-11-17): all-h, the census's tiers are fixed, so neither changes a
+${bodies ? `  // Bodies and K slots (A2-A4, E's ruling 2026-11-17; the body rule, lane P M5): all-h, the census's tiers are fixed,
+  // so neither changes a decision. Tiered, the body rule holds a NEAR_BODY brick's tiles and their one-tile ring h
+  // (censusDecide's cdBodyHeld), so bodies and their K slots run; a static cut brick (CUT_STATIC) still latches, in
+  // censusFine, until the census has its static (NEAR_SOLID) rule (E).
+  let flags=nbRing(cfg.x,NB_RING_FLAGS)&NB_RING_FLAG_SOLID_EDIT;
+  if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u)` : `  // Bodies and K slots (A2-A4, E's ruling 2026-11-17): all-h, the census's tiers are fixed, so neither changes a
   // decision. Tiered, both latch until the census has a body need rule (a NEAR_BODY tile and its ring stay h); LIVE_K
   // counts static K too, narrowed to body K with the census's static (NEAR_SOLID) rule (E).
   let flags=nbRing(cfg.x,NB_RING_FLAGS)&(NB_RING_FLAG_SOLID_EDIT${tiered ? "|NB_RING_FLAG_BODIES" : ""});
-  if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u${tiered ? "||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u" : ""}){nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
+  if(flags!=0u||atomicLoad(&nbSet[NB_H_LIVE_B])!=0u${tiered ? "||atomicLoad(&nbSet[NB_H_LIVE_K])!=0u" : ""})`}{nbFail(NB_FAIL_UNSUPPORTED,0x63000000u|flags);}
 }`);
 
   // censusFine: classify (l.2091), eight workgroups an F brick of F_ALL (X8), workgroup j its tile j (ncCorner(j, 2))
@@ -1105,7 +1111,10 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
   if(lane==0u){
     wgFlag=0u;atomicStore(&wgReach,0u);atomicStore(&wgCrossing,0u);
     if(entry<nbListCount(NB_LIST_F_ALL)){
-      let t=2*nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY))+vec3i(ncCorner(j,2u));
+      ${bodies ? `let fs=nbListSlot(NB_LIST_F_ALL,entry);
+      ${tiered ? `// A static cut brick, tiered: no static need rule yet (censusBegin's note), info 0x63000004.
+      if(j==0u&&(nbFRec(fs,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u){nbFail(NB_FAIL_UNSUPPORTED,0x63000004u);}
+      ` : ""}let t=2*nbKeyCoord(nbFRec(fs,NB_REC_KEY))+vec3i(ncCorner(j,2u));` : "let t=2*nbKeyCoord(nbFRec(nbListSlot(NB_LIST_F_ALL,entry),NB_REC_KEY))+vec3i(ncCorner(j,2u));"}
       wgFlag=select(0u,1u,nbTileOwnerH(t));
       // A replayed region's tile (regionDeep, cfg.w = 1) keeps its stored words.
       if(wgFlag!=0u&&cfg.w==1u&&census[rgAt(nbCSlotOfPage(t>>vec3u(3u)),rgOfTile(nbTileIndex(t)))+RG_MODE]==1u){wgFlag=0u;}
@@ -1373,7 +1382,7 @@ fn ciTile(cs:u32,i:u32,lane:u32){
   // page's F children 8r..8r+7). A band tile is h only when its F brick and each in-range 27-neighbour of it are
   // resident; a clamped tile's missing bricks are appended as candidates, once a page (the page's bit of the 6^3
   // bricks about it in CAND_MASK, whose atomicOr names the one lane that lists it), and it refines one census late.
-  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING], BRICK_SOURCE_WGSL + OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + /* wgsl */`
+  const censusDecide = k("censusDecide", [CFG, setRW, dirRO, velRO, phiRO, censusRW, BRICK_SOURCE_BINDING, ...(bodies ? [BODIES_RO, BODY_CUTS_RO] : [])], BRICK_SOURCE_WGSL + OWNER + HOOKS + CENSUS_FORMULAS + PLAN + REGION + (bodies ? pbBrickBodiesWGSL(bodies) + PB_BRICK_MARK_WGSL + PB_BRICK_CANDIDATES_WGSL : "") + /* wgsl */`
 var<workgroup> wgWant:array<atomic<u32>,2>;
 var<workgroup> wgCount:array<atomic<u32>,4>;
 var<workgroup> wgDec:array<atomic<u32>,2>;
@@ -1386,6 +1395,30 @@ fn ncJoined(t:vec3i)->bool{
 }
 ${hold ? `// The test hold (BrickCensusHold): band, and not calm, whatever the rules decide.
 fn cdHeld(t:vec3i)->bool{return all(t>=vec3i(${hold.lo.join(",")}))&&all(t<vec3i(${hold.hi.join(",")}));}
+` : ""}${bodies ? `// The body rule (lane P, M5; coordinator 2026-11-17): a NEAR_BODY tile and its ring stay h. Every tile of a brick
+// the head's bodyStamp gives a K slot is h (pressure-composite latches a cut brick with a tile that is not), and every
+// tile setMark marks (its 0xb3 latches one that is not); each, with its one-tile ring, is band and never calm. The
+// stamp's bricks: F_BODY at the head (NEAR_BODY | BODY_WAS, part 2's class of the completed step) and the bricks the
+// stamp's own test (pbBrickCandidates) takes, at the boot's census as at every head's: the census reads the ring slot's
+// bodies itself. A tile is held when one of the bricks of its 27 tiles is such a brick, or one of the 27 is marked
+// (pbBrickMarkTile). The one-tile ring is the travel margin of a body that moves less than 4h before the next census.
+fn cdBodyHeld(t:vec3i)->bool{
+  if(!pbBrickBodiesOn()){return false;}
+  let rlo=(t-vec3i(1))>>vec3u(1u);
+  for(var n=0u;n<8u;n++){
+    let nb=rlo+vec3i(i32(n&1u),i32((n>>1u)&1u),i32(n>>2u));if(!nbBrickInRange(nb)){continue;}
+    let s=nbFSlotOfBrick(nb);
+    if(s<NB_SEAM&&(nbFRec(s,NB_REC_CLASS)&(NB_CLASS_NEAR_BODY|NB_CLASS_BODY_WAS))!=0u){return true;}
+    if(nbInLattice(8*nb)&&pbBrickCandidates(8*nb)!=0u){return true;}
+  }
+  for(var n=0u;n<27u;n++){
+    let q=t+vec3i(i32(n%3u),i32((n/3u)%3u),i32(n/9u))-vec3i(1);
+    if(!nbTileInLattice(q)){continue;}
+    let tl=vec3u(q&vec3i(1));
+    if(pbBrickMarkTile(8*(q>>vec3u(1u)),tl.x|(tl.y<<1u)|(tl.z<<2u))){return true;}
+  }
+  return false;
+}
 ` : ""}fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   let t=xTileOf(cs,i);
   if(!nbTileInLattice(t)){return;}
@@ -1429,7 +1462,7 @@ fn cdHeld(t:vec3i)->bool{return all(t>=vec3i(${hold.lo.join(",")}))&&all(t<vec3i
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);
     if(!toCoarse){atomicAdd(&nbSet[NB_H_CENSUS_CALM_HELD],1u);}
   }
-${hold ? "  if(cdHeld(t)){band=true;toCoarse=false;}\n" : ""}  if(toCoarse){
+${hold ? "  if(cdHeld(t)){band=true;toCoarse=false;}\n" : ""}${bodies ? "  // The body rule (cdBodyHeld): band, and not calm, whatever the rules above decided.\n  if(cdBodyHeld(t)){band=true;toCoarse=false;}\n" : ""}  if(toCoarse){
     band=false;atomicAdd(&nbSet[NB_H_CENSUS_CALM],1u);
     let tc=NC_S*cs+${CENSUS.TC}u+16u*i;
     if(ncDt()*bitcast<f32>(census[tc+4u])/ncH()>${UNIFORM_TILE_UPDATE_BUDGET_H}){atomicAdd(&nbSet[NB_H_CENSUS_CALM_MOVING],1u);}
@@ -1658,8 +1691,8 @@ fn rpMoved4(cs:u32,i:u32)->bool{
  * workgroups a brick) and the C passes censusCoarse, censusImportance and censusDecide list cAll's (eight a page). */
 /** `heat`: the real D runs (brick-region-heat.wgsl.ts's regionHeat and regionSpread before censusCoarse): the head's
  * deep pass and decide's deep keep and activity heat. Without it D = 0 (the census alone, as the frozen passes). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold) {
-  const c = brickCensusKernels(L, { tiered, ...(hold ? { hold } : {}) });
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold, bodies?: BrickBodiesFrame) {
+  const c = brickCensusKernels(L, { tiered, ...(hold ? { hold } : {}), ...(bodies ? { bodies } : {}) });
   const slabs = censusListArgs(cAll, "X8"), replay = tiered && keep && heat;
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
@@ -1676,8 +1709,8 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
 /** The TRIG-only census (the boot's, after the kick, before F's seed): censusBegin through censusImportance as
  * brickCensusSchedule, then censusDecide with cfg.z = 2: TRIG (and CENSUS_TRIGGERED) alone. No band decision, no
  * WANT word, no candidate, no keep mark. */
-export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold) {
-  return brickCensusSchedule(L, list, cAll, fAll, tiered, false, false, hold).map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
+export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold, bodies?: BrickBodiesFrame) {
+  return brickCensusSchedule(L, list, cAll, fAll, tiered, false, false, hold, bodies).map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */
 export const censusListArgs = (k: number, g: "G1" | "X8") => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
