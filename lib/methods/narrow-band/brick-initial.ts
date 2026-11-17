@@ -50,10 +50,15 @@ function closedFormBox(scene: SceneDescription, box: Vec3): BrickLiquidBox {
 /** The old engine's t = 0 φ (fluidLatticePagedVertexPhi, metres) on the brick engine's pages, in h. `box` is the
  * container's cells: the lattice, or the box a lattice padded to whole pages closes (BrickEngineOptions.box). A vertex
  * past the box is far air, as a vertex past an unpadded lattice reads (NB_PHI_FAR): the old engine's wall
- * continuation there is behind its shell, and no brick vertex past the box is the container's. */
+ * continuation there is behind its shell, and no brick vertex past the box is the container's.
+ * Under an open top the box's y is the lattice's (brick-scene.ts BRICK_OPEN_TOP_HEADROOM): the container's own y is
+ * the scene's, and above it the old φ is read up to the old engine's whole pages (its AIR column holds the same
+ * distance), past them far air. */
 export function brickInitialPhi(scene: SceneDescription, lattice: Vec3, h_m: number, farPhi = phiFar(lattice), box: Vec3 = lattice): BrickInitialPhi {
-  const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
-  if (cells.some((v, a) => v !== box[a])) throw new Error(`Brick engine: the initial φ table needs the container's cells (${cells.join("x")} cells, the engine's box ${box.join("x")})`);
+  const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER), open = scene.container.top === "open";
+  const container = containerCells(scene, box);
+  if (cells.some((v, a) => v !== container[a])) throw new Error(`Brick engine: the initial φ table needs the container's cells (${cells.join("x")} cells, the engine's box ${box.join("x")})`);
+  const cut = open ? [box[0], 32 * Math.ceil(cells[1]! / 32), box[2]] : box;
   if (box.some((v, a) => v > lattice[a]!)) throw new Error(`Brick engine: the box ${box.join("x")} is outside the lattice ${lattice.join("x")}`);
   const P = initialPhiPages(lattice), far = farPhi;
   // The liquid's pages, grown by one page an axis.
@@ -81,7 +86,7 @@ export function brickInitialPhi(scene: SceneDescription, lattice: Vec3, h_m: num
     const p = [k % P[0], Math.floor(k / P[0]) % P[1], Math.floor(k / (P[0] * P[1]))];
     for (let l = 0; l < 32768; l++) {
       const v = [32 * p[0]! + (l & 31), 32 * p[1]! + ((l >> 5) & 31), 32 * p[2]! + (l >> 10)];
-      if (v.some((x, a) => x > box[a]!)) { phi[32768 * i + l] = far; continue; }
+      if (v.some((x, a) => x > cut[a]!)) { phi[32768 * i + l] = far; continue; }
       const q = v.map(qOf), page = old.at.get(q[0]! + Q[0]! * (q[1]! + Q[1]! * q[2]!));
       if (!page) throw new Error(`Brick engine: the initial φ page ${q.join(",")} was not sampled`);
       const w = v.map((x, a) => x - 32 * q[a]!);
@@ -102,9 +107,15 @@ export interface BrickInitialLiquid {
 }
 
 /** The scene's initial liquid for the engine, and the boot's bricks and pages. */
+/** The container's cells from the engine's box: the box itself, but under an open top, whose box rises to the lattice's
+ * top (BRICK_OPEN_TOP_HEADROOM), the scene's own height in cells. */
+function containerCells(scene: SceneDescription, box: Vec3): Vec3 {
+  return scene.container.top === "open" ? [box[0], sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER)[1], box[2]] : box;
+}
+
 export function brickInitialLiquid(scene: SceneDescription, o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "h_m" | "dt_s" | "gravity_mps2">): BrickInitialLiquid {
   const box = o.box ?? o.lattice;
-  const form = closedFormLiquid(scene) ? { liquid: [closedFormBox(scene, box)] } : { liquid: [], initial: brickInitialPhi(scene, o.lattice, o.h_m, o.farPhi, box) };
+  const form = closedFormLiquid(scene) ? { liquid: [closedFormBox(scene, containerCells(scene, box))] } : { liquid: [], initial: brickInitialPhi(scene, o.lattice, o.h_m, o.farPhi, box) };
   const bricks = bootBricks({ ...o, ...form });
   return { ...form, bricks, pages: bootCornerPages(o.lattice, bricks) };
 }
@@ -148,7 +159,7 @@ export function brickInitialVelocity(scene: SceneDescription, lattice: Vec3, box
   // The paged volumes cover the old engine's fluid box (sceneFluidLatticeDimensions: the container's cells padded to
   // whole pages), from the container's cell 0; its liquid lies in the container's cells, the brick engine's lattice.
   const cells = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
-  if (cells.some((n, a) => n !== box[a])) throw new Error(`Brick engine: the initial velocity needs the container's cells (${cells.join("x")} cells, the engine's box ${box.join("x")})`);
+  if (cells.some((n, a) => n !== containerCells(scene, box)[a])) throw new Error(`Brick engine: the initial velocity needs the container's cells (${cells.join("x")} cells, the engine's box ${box.join("x")})`);
   const { volume } = fluidLatticePagedCellVolumes(scene, 32), [px, py] = volume.pages, T = lattice.map(n => n >> 2), B = box.map(n => n >> 2);
   const wet = new Set<number>();
   for (const [key, page] of volume.at) {

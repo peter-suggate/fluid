@@ -43,14 +43,21 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   "rigid-hydrostatic", "rigid-float", "rigid-sink",
 ];
 
+/** The air an open top keeps above the container's pages, in cells: one page. */
+export const BRICK_OPEN_TOP_HEADROOM = 32;
+
 export interface BrickSceneSetup {
   readonly sceneId: string;
   /** Cells an axis: the container's cells rounded up to whole pages (sceneFluidLatticeDimensions, the old engine's
    * fluid box). Where that pads past the container, `box` is the container's cells, and the cells past it are the box
    * rule's wall (brick-abi.md §2), as the old engine's voxel shell and padding close them. */
   readonly lattice: Vec3;
-  /** The container's cells (whole bricks) where the lattice is padded past them; absent: the lattice. */
+  /** The container's cells (whole bricks) where the lattice is padded past them; absent: the lattice. Under an open top
+   * its y is the lattice's: the headroom above the container is in the box (BRICK_OPEN_TOP_HEADROOM). */
   readonly box?: Vec3;
+  /** An open top (container.top "open"): the lattice holds BRICK_OPEN_TOP_HEADROOM cells of air above the container,
+   * and liquid that reaches its top brick layer latches (brick-set.wgsl.ts setMark, FAIL.REACH info bit 31). */
+  readonly openTop?: true;
   /** NB_PHI_FAR in h: the old engine's far φ, its page-rounded lattice's largest extent (fluidLatticeFarPhi); the lattice's own when absent. */
   readonly farPhi?: number;
   readonly h_m: number;
@@ -85,7 +92,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const c = scene.container, f = scene.fluid;
   if (c.walls === "none" || c.boundary === "free-space") gaps.push("an open world (no container walls) needs the moving window (M6)");
   if (c.shape === "sphere") gaps.push("a spherical container needs static solids (M3)");
-  if (c.top !== "closed") gaps.push("an open top needs an air boundary above the lattice (M3)");
+  const openTop = c.top === "open";
+  if (c.top !== "closed" && !openTop) gaps.push(`container.top "${c.top}" is not a brick engine top (closed or open)`);
   if (solidVoxelEditsForScene(scene).length > 0) gaps.push("solid voxels beyond the container shell need solidStamp (M3)");
   // The static hooks read the voxel mask (brick-static.wgsl.ts); a ground field or a procedural boundary sampled as a
   // field (umUnitBoxOpen's terrain, umBoundaryTouchesBox) is not read yet, so it must not run as open water.
@@ -106,9 +114,15 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // the cells past the container at the box (brick-abi.md §2), as the old engine's shell does (its padding lies behind
   // the shell, so no liquid reaches it). A container that is not whole bricks would cut a brick and a 4h tile: that
   // needs solidStamp's cut slots.
-  const cells = sceneLatticeDimensions(scene), paged = sceneFluidLatticeDimensions(scene);
-  const padded = cells.some((n, a) => n !== paged[a]), lattice = paged, box = padded ? cells : undefined;
-  if (cells.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
+  // An open top (M3): the old engine's frame holds AIR pages above the box, and its x and z walls rise to the frame's
+  // top. Here the lattice holds BRICK_OPEN_TOP_HEADROOM cells (a page) more above the container's pages, in the box:
+  // the air there is the free surface's (p = 0), the walls rise with it, and the lattice's top is a lid that liquid
+  // never meets, because liquid in its top brick layer latches first (the old engine's page-edge fatal, explicit).
+  const cells = sceneLatticeDimensions(scene), old = sceneFluidLatticeDimensions(scene);
+  const paged: Vec3 = openTop ? [old[0]!, old[1]! + BRICK_OPEN_TOP_HEADROOM, old[2]!] : [old[0]!, old[1]!, old[2]!];
+  const walls: Vec3 = openTop ? [cells[0]!, paged[1], cells[2]!] : [cells[0]!, cells[1]!, cells[2]!];
+  const padded = walls.some((n, a) => n !== paged[a]), lattice = paged, box = padded ? walls : undefined;
+  if (walls.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
   // Padded to whole pages: F's walls (512e7a9f), the release readers' (7b9e12e7) and P's pressure walls (fecb32a9)
   // are at the box.
   const hs = [c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]];
@@ -119,7 +133,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (gaps.length) return { gaps };
   // The initial liquid (brick-initial.ts): a dam-break box or a tank-fill slab keeps its closed form; any other
   // description is the old engine's own t = 0 φ as a page table.
-  const n = lattice, g = f.gravity_m_s2, farPhi = Math.max(...paged), band = f.brickTiers?.particleBandDepth ?? 3;
+  const n = lattice, g = f.gravity_m_s2, farPhi = Math.max(...old), band = f.brickTiers?.particleBandDepth ?? 3;
   const L: Vec3 = [n[0]!, n[1]!, n[2]!], B: Vec3 | undefined = box ? [box[0]!, box[1]!, box[2]!] : undefined, inBox = B ? { box: B } : {};
   const start = brickInitialLiquid(scene, { lattice: L, ...inBox, farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z] });
   const origin_m: Vec3 = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
@@ -133,7 +147,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   return {
     gaps,
     setup: {
-      sceneId: id, lattice: L, ...inBox, farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
+      sceneId: id, lattice: L, ...inBox, ...(openTop ? { openTop: true as const } : {}), farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
       capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
       liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, L, B), bootBricks: start.bricks, bootPages: start.pages, origin_m,
       ...(sources ? { sources } : {}),

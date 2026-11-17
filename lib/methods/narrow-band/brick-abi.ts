@@ -218,6 +218,9 @@ export interface BrickLayoutOptions extends BrickCapacities {
   /** The container's cells, where the box rule's walls are (brick-static.wgsl.ts), when the lattice is padded past it
    * to whole pages (the old engine's padding, behind its shell). Absent: the lattice itself (every current scene). */
   readonly box?: readonly [number, number, number];
+  /** An open top (brick-scene.ts BRICK_OPEN_TOP_HEADROOM): the box's y is the lattice's, its top brick layer is the
+   * headroom's last, and liquid there latches (setMark). Absent: closed. */
+  readonly openTop?: boolean;
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -254,6 +257,8 @@ export class BrickLayout {
   readonly farPhi: number;
   /** The box rule's box (BrickLayoutOptions.box): the walls. The lattice is storage; a wall is at the box, once. */
   readonly box: readonly [number, number, number];
+  /** BrickLayoutOptions.openTop. */
+  readonly openTop: boolean;
   readonly window: readonly [number, number, number];
   readonly windowBits: readonly [number, number, number];
   readonly particleStride: number;
@@ -303,6 +308,8 @@ export class BrickLayout {
     this.lattice = [...options.lattice] as [number, number, number];
     this.farPhi = options.farPhi ?? phiFar(options.lattice);
     this.box = [...(options.box ?? options.lattice)] as [number, number, number];
+    this.openTop = options.openTop === true;
+    if (this.openTop && this.box[1] !== this.lattice[1]) throw new Error(`Brick engine: an open top's box ${this.box.join("x")} holds the lattice's height ${this.lattice[1]}`);
     if (this.box.some((n, a) => !Number.isInteger(n) || n < 1 || n > this.lattice[a]!)) throw new Error(`Brick engine: box ${this.box.join("x")} is not inside the lattice ${this.lattice.join("x")}`);
     this.window = windowPages(options.lattice);
     this.windowBits = this.window.map(n => Math.log2(n)) as [number, number, number];

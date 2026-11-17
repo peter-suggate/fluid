@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BRICK_CELLS, BRICK_STRIDE, BrickLayout, F_CLASS, FAIL, H, KEY_PAGE, K_HOLD, LIST, NONE, PHI_AIR, PHI_AIR_C, POOLS, REC, ARGS, brickAbiWGSL, brickKey, brickKeyCoord, brickLocal, neighbourIndex } from "./brick-abi";
-import { BRICK_KICK_RESOLVES, BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, bootPhiAt, boxDistance, reachSet } from "./brick-engine";
+import { BRICK_KICK_RESOLVES, BrickEngine, type BrickEngineOptions, type BrickLiquidBox, type Vec3, bootBricks, describeFail, bootCornerPages, bootPhiAt, boxDistance, reachSet } from "./brick-engine";
 import { CG_HEADER, bringUpCG } from "./brick-bringup-cg";
 import { bringUpStages } from "./brick-stages";
 import { PRESSURE_ARGS, validatePressureSolver } from "./brick-pressure-slot";
@@ -30,7 +30,7 @@ import { BRICK_SET_HELPERS_WGSL, brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
-import { BRICK_ENGINE_SCENES, BRICK_SPLASH_DROP, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
+import { BRICK_ENGINE_SCENES, BRICK_OPEN_TOP_HEADROOM, BRICK_SPLASH_DROP, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
@@ -192,7 +192,7 @@ test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued thro
   }
   assert.ok(bootBricks(setup).length <= setup.capacities.f);
   // An unenabled scene, and a dam with a body, are refused with their gaps.
-  assert.match(brickSceneSetup(createReservoirSeepScene(), {}).gaps.join(";"), /open top/);
+  assert.match(brickSceneSetup(createReservoirSeepScene(), {}).gaps.join(";"), /solid voxels/);
   assert.match(brickSceneSetup({ ...dam, rigidBodies: [{} as never] }, { timeStep: "sixtieth" }).gaps.join(";"), /rigid bodies/);
 });
 
@@ -257,6 +257,22 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     const padded = brickSceneSetup(slab, { timeStep: "sixtieth" });
     assert.deepEqual(padded.gaps, []);
     assert.deepEqual([padded.setup!.lattice, padded.setup!.box], [[32, 32, 32], [24, 16, 24]]);
+    // An open top (M3): BRICK_OPEN_TOP_HEADROOM cells of air above the container's pages, in the box, so the x and z
+    // walls rise to the lattice's top and nothing is a wall at the container's own top. The old engine's far φ stays.
+    const tank = sceneDocument(getSceneDefinition("bulk-rest-tank")); enabled.push(tank.sceneId!);
+    const open = brickSceneSetup(tank, { timeStep: "sixtieth" });
+    assert.deepEqual(open.gaps, []);
+    assert.deepEqual([open.setup!.lattice, open.setup!.box, open.setup!.openTop, open.setup!.farPhi], [[256, 288 + BRICK_OPEN_TOP_HEADROOM, 128], undefined, true, 288]);
+    // Its closed form keeps the slab's top face (no wall continuation through an open top), at the container's height.
+    const boats = structuredClone(sceneDocument(getSceneDefinition("paddleboats"))); boats.rigidBodies = []; enabled.push(boats.sceneId!);
+    const slabTop = brickSceneSetup(boats, { timeStep: "sixtieth" });
+    assert.deepEqual(slabTop.gaps, []);
+    assert.deepEqual([slabTop.setup!.lattice, slabTop.setup!.openTop], [[512, 32 + BRICK_OPEN_TOP_HEADROOM, 192], true]);
+    assert.equal(slabTop.setup!.liquid.length, 1);
+    assert.equal(slabTop.setup!.liquid[0]!.hi[1], 0.75 * 32, "the slab's top is its fill, not run on through a lid");
+    // A top the engine does not know fails explicitly.
+    const odd = structuredClone(tank); (odd.container as { top: string }).top = "vented";
+    assert.ok(brickSceneSetup(odd, { timeStep: "sixtieth" }).gaps.some(g => g.includes('container.top "vented"')));
   } finally { enabled.length = before; }
   // An authored scene keeps its pools exactly (no t unless it says).
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
@@ -763,4 +779,17 @@ test("brick engine (GPU, M3 2b): solidStamp cuts exactly the bricks the mask mee
     assert.equal(s.header[H.LIVE_K], cutBricks);
     e.destroy();
   });
+});
+
+test("brick engine: an open top's latch is setMark's alone, and its failure names the headroom", () => {
+  const base = { lattice: [32, 64, 32] as const, f: 64, c: 8, b: 16, k: 0, particles: 1024 };
+  for (const tiered of [false, true]) {
+    const closed = brickSetKernels(new BrickLayout(base), { tiered }).setMark.code, open = brickSetKernels(new BrickLayout({ ...base, openTop: true }), { tiered }).setMark.code;
+    assert.ok(!closed.includes("0x80000000u|nbKey"), "a closed top's setMark has no latch (its text unchanged)");
+    assert.equal(open.split("nbFail(NB_FAIL_REACH,0x80000000u|nbKey(o>>vec3u(3u)))").length - 1, 2, "the particle/4h-corner latch and the h-vertex latch");
+    assert.equal(open.split("nbCVertex(T+").length - closed.split("nbCVertex(T+").length, tiered ? 1 : 0, "tiered, the latch reads the 4h corners");
+  }
+  assert.throws(() => new BrickLayout({ ...base, box: [32, 32, 32], openTop: true }), /open top's box/);
+  assert.match(describeFail(FAIL.REACH, (0x80000000 | (3 | (7 << 10) | (2 << 20))) >>> 0), /open top's last brick layer \(brick 3,7,2\)/);
+  assert.doesNotMatch(describeFail(FAIL.REACH, 3 | (7 << 10)), /open top/);
 });

@@ -174,7 +174,16 @@ var<workgroup> wNb:array<u32,27>;
       // A2 (§4): the body criterion of tile t; a marked tile is h-owned${tiered ? " (tiered: a 4h tile latches, 0xb3)" : ""}.
       if(pbBrickMarkTile(o,t)){atomicOr(&wBody,1u<<t);${tiered ? "if(((tiles>>t)&1u)==0u){nbFail(NB_FAIL_UNSUPPORTED,0xb3000000u|atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_KEY]));}" : ""}}` : ""}
     }
-    if(wet!=0u){atomicOr(&wTiles,wet);}
+    if(wet!=0u){atomicOr(&wTiles,wet);}${L.openTop ? `
+    // The open top (brick-scene.ts BRICK_OPEN_TOP_HEADROOM): the lattice's top is a lid the old engine does not have,
+    // so liquid in its last brick layer latches FAIL.REACH (info bit 31 + the brick's key) before it can meet it: a
+    // tile with particles${tiered ? " or a liquid 4h corner" : ""} here, and below, an h vertex with φ < 0.
+    if(lid<8u&&o.y+8>=NB_LATTICE.y){
+      let t=lid;var top=((nbSetWord(NB_S_TILE_OCC+slot)>>t)&1u)!=0u;${tiered ? `
+      let T=(o>>vec3u(2u))+vec3i(vec3u(t&1u,(t>>1u)&1u,t>>2u));
+      for(var q=0u;q<8u;q++){if(nbCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)))<0.0){top=true;}}` : ""}
+      if(top){nbFail(NB_FAIL_REACH,0x80000000u|nbKey(o>>vec3u(3u)));}
+    }` : ""}
   }
   workgroupBarrier();
   let m=atomicLoad(&wTiles);
@@ -205,7 +214,8 @@ var<workgroup> wNb:array<u32,27>;
   let old=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS]);var cls=old&NB_CLASS_CUT_STATIC;
   if((old&NB_CLASS_NEAR_BODY)!=0u){cls|=NB_CLASS_BODY_WAS;}
   if(atomicLoad(&wBody)!=0u){cls|=NB_CLASS_NEAR_BODY;}` : "var cls=atomicLoad(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS])&NB_CLASS_CUT_STATIC;"}
-  if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}
+  if(atomicLoad(&wNeg)>0u){cls|=NB_CLASS_LIQUID;}${L.openTop ? `
+  if(atomicLoad(&wNeg)>0u&&o.y+8>=NB_LATTICE.y){nbFail(NB_FAIL_REACH,0x80000000u|nbKey(o>>vec3u(3u)));}` : ""}
   if(atomicLoad(&wNeg)>0u&&atomicLoad(&wPos)!=0u){cls|=NB_CLASS_SURFACE;}
   if(nbSetWord(NB_S_BIN_COUNT+slot)>0u){cls|=NB_CLASS_PARTICLES;}
   if(any(o>=NB_LATTICE)){cls|=NB_CLASS_SKIRT;}

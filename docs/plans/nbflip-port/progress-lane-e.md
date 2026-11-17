@@ -2721,3 +2721,42 @@ max(1%, old spread).
 - **fig-7-256's old reference at the full box** (514 blocks; old-smoke --page-blocks is a test-only setting): final
   −10.29%, peak −26.24%, V1 240k of 268k, step median 96 ms. The bar is 11.29, and the brick's +2.05 passes. The
   coordinator enabled the scene and asked for it to be re-judged after sym8.
+
+## 2026-11-17: the open top (M3; r24)
+
+**The rule.** The old engine keeps AIR pages above an open box, and its x and z walls rise to its frame's top. Liquid
+that reaches the frame's top is its page-edge fatal.
+
+The brick engine does the same with fixed storage:
+- brickSceneSetup gives an open top a lattice of `[Nx, whole(Ny) + BRICK_OPEN_TOP_HEADROOM, Nz]`, where the headroom
+  is 32 cells (one page).
+- The box's y is the lattice's, so every wall consumer (F's, P's, the census, the C level set, the presentation)
+  already has the x/z walls rising to the lattice's top. Nothing is a wall at Ny.
+- The air above Ny is in the box: it is free surface, with p = 0.
+- The lattice's top is a lid the old engine doesn't have. setMark (layout.openTop) latches FAIL.REACH with info bit 31
+  plus the brick's key when the last brick layer holds an h vertex with φ < 0, a particle tile, or, tiered, a liquid
+  4h corner. describeFail names the headroom, so the lid is never met silently.
+- farPhi stays the old engine's, from whole(Ny).
+- Initial liquid: the closed form and brickInitialPhi read the container's own height (`containerCells`).
+  - The closed form's slab keeps its top face, with no continuation through a lid.
+  - The φ table reads the old φ up to whole(Ny), the old engine's AIR column, and is far air above that.
+- An unknown `container.top` is a named gap.
+
+**What it unblocks.** It removes the open-top gap from 18 scenes.
+- bulk-rest-tank now has no gaps.
+- paddleboats and churning-tank are left with P's K-slot pools.
+- The seep and the troughs are left with the static voxels.
+
+**Tests.**
+- CPU (brick-engine.test.ts):
+  - bulk-rest-tank sets up at 256x320x128 with openTop and farPhi 288;
+  - paddleboats' slab top is 24;
+  - an unknown top is refused;
+  - a closed top's setMark has no latch text, and an open one has both latches (tiered: the 4h corners);
+  - a layout whose open-top box is short of the lattice throws;
+  - describeFail decodes the key.
+- GPU (tests/brick-open-top.test.ts): a 32x16x32 open-top dam in a 32x64x32 lattice. Its run-up must stand above
+  y = 16, with no liquid in the last layer and no latch. A blob thrown up at 8 m/s must latch REACH, naming the open
+  top.
+- The enabled scenes' kernel text (P's kernel-hashes.mts, 16 scenes) is identical: the latch is only emitted when the
+  top is open.

@@ -59,6 +59,8 @@ export interface BrickEngineOptions {
   /** The container's cells (the box rule's walls) when the lattice is padded past them to whole pages
    * (BrickLayoutOptions.box). Absent: the lattice. */
   readonly box?: Vec3;
+  /** An open top: the lattice's headroom above the container (BrickLayoutOptions.openTop). */
+  readonly openTop?: boolean;
   /** NB_PHI_FAR in h when it is not the lattice's largest extent (BrickLayoutOptions.farPhi). */
   readonly farPhi?: number;
   readonly h_m: number;
@@ -105,7 +107,7 @@ export interface BrickStageSchedule { readonly part1: readonly BrickPlacement[];
 const RECEIPTS = 4;
 const FAIL_NAMES = Object.entries(FAIL);
 export const describeFail = (bits: number, info: number) =>
-  `Brick engine failure ${FAIL_NAMES.filter(([, b]) => (bits & b) !== 0).map(([n]) => n).join("|") || `0x${bits.toString(16)}`} (info 0x${(info >>> 0).toString(16)})`;
+  `Brick engine failure ${FAIL_NAMES.filter(([, b]) => (bits & b) !== 0).map(([n]) => n).join("|") || `0x${bits.toString(16)}`} (info 0x${(info >>> 0).toString(16)})${(bits & FAIL.REACH) !== 0 && (info >>> 31) === 1 ? `: liquid reached the open top's last brick layer (brick ${[0, 10, 20].map(s => (info >>> s) & 1023).join(",")}); the headroom (BRICK_OPEN_TOP_HEADROOM) is not enough for this scene` : ""}`;
 
 /** The signed distance (h) of a box at vertex p, as bootPhi computes it. */
 export function boxDistance(p: Vec3, b: BrickLiquidBox): number {
@@ -391,7 +393,7 @@ export class BrickEngine {
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...options.capacities, apic: options.apic });
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...options.capacities, apic: options.apic });
     const solver = options.solver(layout);
     validatePressureSolver(solver);
     const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources });
