@@ -74,9 +74,28 @@ test("a failed readback releases every pending timing resource", async () => {
   }
   raw.failMapping();
   await assert.rejects(timer.collect(), /mapping failed/);
-  assert.equal(raw.queries.length, 2);
+  assert.equal(raw.queries.length, 1, "the two encoders share one query set");
   assert.ok(raw.queries.every(query => query.destroyed));
   const readbacks = raw.buffers.filter(buffer => buffer.label === "kernel timer read" || buffer.label === "kernel timer resolve");
   assert.equal(readbacks.length, 4);
   assert.ok(readbacks.every(buffer => buffer.destroyed));
+});
+
+test("encoders share query sets in order, a new one only when full, and collect releases them", async () => {
+  const raw = fakeDevice();
+  const timer = gpuKernelTimer(raw.device); timer.enabled = true;
+  // 3000 encoders of one dispatch: 6000 timestamps, two sets of 4096 (one a encoder held them all to collect).
+  for (let i = 0; i < 3000; i++) {
+    const encoder = timer.device.createCommandEncoder();
+    const pass = encoder.beginComputePass({ label: "p" });
+    pass.dispatchWorkgroups(1); pass.end(); encoder.finish();
+  }
+  assert.equal(raw.queries.length, 2);
+  const timed = await timer.collect();
+  assert.equal(timed.dispatches, 3000);
+  assert.ok(Math.abs(timed.byLabel.get("p / pipeline")! - 3000) < 1e-6, "each pair read at its own index (1 ms each)");
+  assert.ok(raw.queries.every(query => query.destroyed));
+  const encoder = timer.device.createCommandEncoder(), pass = encoder.beginComputePass();
+  pass.dispatchWorkgroups(1); pass.end(); encoder.finish();
+  assert.equal(raw.queries.length, 3, "after collect a fresh set");
 });
