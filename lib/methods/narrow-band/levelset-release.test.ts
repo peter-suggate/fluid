@@ -13,7 +13,7 @@
 //   the before value.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, H, LIST, NONE, REC, RING, RING_WORDS, SEAM, brickAbiWGSL, brickKeyCoord } from "./brick-abi";
+import { ARGS, BRICK_STRIDE, BrickLayout, CMASK_WORDS, H, LIST, NONE, REC, RING, RING_WORDS, SEAM, brickAbiWGSL, brickKeyCoord, resolveBox } from "./brick-abi";
 import { bringUpCG } from "./brick-bringup-cg";
 import { BrickEngine } from "./brick-engine";
 import { type BrickBinding, CFG, declareBindings } from "./brick-kernel";
@@ -292,7 +292,8 @@ const PROBE_BINDINGS: readonly BrickBinding[] = [CFG, { name: "set", kind: "rw",
   { name: "vel", kind: "rw", type: "array<f32>" }, { name: "phi", kind: "rw", type: "array<u32>" }];
 const probeKernel = (L: BrickLayout) => ({
   label: "nrProbe", entry: "nrProbe", bindings: PROBE_BINDINGS,
-  code: [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }), declareBindings(PROBE_BINDINGS), levelSetReleaseWGSL(), /* wgsl */`
+  // The release readers' walls are the box tokens (7b9e12e7), which the engine's builder resolves; so does the probe.
+  code: resolveBox(L, [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }), declareBindings(PROBE_BINDINGS), levelSetReleaseWGSL(), /* wgsl */`
 @compute @workgroup_size(256) fn nrProbe(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);let nF=nbListCount(NB_LIST_F_ALL);
  if(g<nF){
@@ -311,7 +312,7 @@ const probeKernel = (L: BrickLayout) => ({
   let at=NB_STRIDE*cs+l;let x=bitcast<f32>(phi[NB_PHI_C_PHI+at]);
   phi[NB_PHI_C_PHI1+at]=bitcast<u32>(nbrDeepAirKept(v,4u,x));vel[NB_VEL_C_UP0+at]=nbrReleasedWalls(vec3f(v),x);
  }
-}`].join("\n"),
+}`].join("\n")),
 });
 
 test("levelset-release: the readers are self-contained and the schedule places the producers", () => {
