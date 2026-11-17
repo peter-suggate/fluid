@@ -184,6 +184,8 @@ fn vcTransferPage(slot:u32,lid:u32){
  let dt=vDt();let h=vH();let gravity=vGravity();let bank=(cfg.y^cfg.z^1u)&1u;
  for(var r=0u;r<2u;r++){
   let j=lid+256u*r;let T=vcTile(slot,j);let occ=vOcc4(T,h.y);
+  // Still-tank A: the gravity rule of each lower face (FLAG.KICK0 << a), which a STILL page's held face keeps.
+  var kick=0u;
   for(var a=0u;a<3u;a++){
    if(!vcFace(T,a)){continue;}
    let iu=vcAt(NB_VEL_C_UP0,slot,a,j);
@@ -196,9 +198,10 @@ fn vcTransferPage(slot:u32,lid:u32){
    // The viscous term (uViscous left the departure's 4h Laplacian in C US) where the old owner O holds liquid.
    let occO=vOcc4(O,h.y);
    if(V_VISCOUS&&occO>0.0){value=nbfViscousKick(value,dt,V_MU,V_RHO,vel[vcAt(NB_VEL_C_US0,slot,a,j)]);}
-   if(nbfGravityFace(occO,occ,vCoarseMass(4*O)||vCoarseMass(4*T))){value=nbfGravityKick(value,dt,gravity[a]);}
+   if(nbfGravityFace(occO,occ,vCoarseMass(4*O)||vCoarseMass(4*T))){value=nbfGravityKick(value,dt,gravity[a]);kick|=NB_FLAG_KICK0<<a;}
    vel[vcAt(NB_VEL_C_US0,slot,a,j)]=value;vel[vcAt(NB_VEL_C_U0,slot,a,j)]=value;
   }
+  let fw=NB_PHI_C_FLAGS+NB_STRIDE*slot+j;phi[fw]=(phi[fw]&~(7u*NB_FLAG_KICK0))|kick;
  }
 }
 `;
@@ -275,7 +278,7 @@ export function velocityKernels(L: BrickLayout, F: FluidLayout, physics: Velocit
   const stagedHead = (page: string, ring?: number, lanes = 256) => /* wgsl */`
  if(lid==0u){sSplit=nbListCount(NB_LIST_F_ALL);}
  let split=workgroupUniformLoad(&sSplit);let g=nbGroup(wid);
- if(g>=split){${page ? `if(FG_TIERED){if(lid==0u){sSplit=nbListCount(NB_LIST_C_ALL);}if(g-split<workgroupUniformLoad(&sSplit)){${page}(nbListSlot(NB_LIST_C_ALL,g-split),lid);}}` : ""}return;}
+ if(g>=split){${page ? `if(FG_TIERED){if(lid==0u){sSplit=nbListCount(NB_LIST_C_ACT);}if(g-split<workgroupUniformLoad(&sSplit)){${page}(nbListSlot(NB_LIST_C_ACT,g-split),lid);}}` : ""}return;}
  let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
  fgWindowStage(o>>vec3u(3u),lid,${lanes}u);workgroupBarrier();${ring === undefined ? "" : `
  fgRingStage(o+vec3i(${ring}),lid,${lanes}u);workgroupBarrier();`}`;
@@ -506,7 +509,7 @@ fn pdLiquidAt(c:vec3i)->bool{
 
   // uTransfer (transferProperties, then forces): a workgroup a brick, a lane two cells' three lower faces. Stages
   // the 125 tiles about the brick (the 27 about each face's home tile) and its 9^3 depth vertices.
-  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRO, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
+  const uTransfer = k("uTransfer", [CFG, FB.set, FB.dir, FB.velRW, FB.phiRW, FB.fcell, FB.fdep, ...(F.tiered ? [FB.partsRO] : [])], windowBase + FG_RING_WGSL(10) + V_CENTRE_WGSL + fill + nbfVolumeWGSL + V_COARSE_WGSL + (F.tiered ? [FG_RUN_WGSL, FG_DEPTH_WGSL, nbfParticleRecordWGSL, V_TRANSFER4_WGSL].join("\n") : "fn vcTransferPage(slot:u32,lid:u32){}") + /* wgsl */`
 var<workgroup> wHeat:array<f32,125>;
 var<workgroup> wHot:array<f32,125>;
 var<workgroup> wDepth:array<f32,729>;
@@ -946,9 +949,9 @@ var<workgroup> wSubLiquid:array<u32,256>;
 var<workgroup> sCount:u32;
 @compute @workgroup_size(256) fn uExt4Seed(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);
- if(lid==0u){sCount=nbListCount(NB_LIST_C_ALL);}
+ if(lid==0u){sCount=nbListCount(NB_LIST_C_ACT);}
  if(g>=workgroupUniformLoad(&sCount)){return;}
- let slot=nbListSlot(NB_LIST_C_ALL,g);let P=nbCOrigin(slot)>>vec3u(2u);
+ let slot=nbListSlot(NB_LIST_C_ACT,g);let P=nbCOrigin(slot)>>vec3u(2u);
  for(var r=0u;r<2u;r++){
   let j=lid+256u*r;let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));
   for(var a=0u;a<3u;a++){
@@ -1011,9 +1014,9 @@ fn ySeed(T:vec3i,a:u32)->vec3f{
 }
 @compute @workgroup_size(512) fn uExt4(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
  let g=nbGroup(wid);
- if(lid==0u){sCount=nbListCount(NB_LIST_C_ALL);atomicStore(&wFlag,0u);}
+ if(lid==0u){sCount=nbListCount(NB_LIST_C_ACT);atomicStore(&wFlag,0u);}
  if(g>=workgroupUniformLoad(&sCount)){return;}
- let slot=nbListSlot(NB_LIST_C_ALL,g);let P=nbCOrigin(slot)>>vec3u(2u);yPage=P>>vec3u(3u);
+ let slot=nbListSlot(NB_LIST_C_ACT,g);let P=nbCOrigin(slot)>>vec3u(2u);yPage=P>>vec3u(3u);
  let j=lid;let T=P+vec3i(i32(j&7u),i32((j>>3u)&7u),i32(j>>6u));let h4=4.0*vH();
  if(lid<27u){
   let pg=yPage+vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u))-vec3i(1);

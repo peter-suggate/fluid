@@ -2191,3 +2191,50 @@ depth (⌈free/32⌉), and bootF = max(boot bricks + pages, resident).
 
 - Profiling note: the shared tools/gpu-kernel-timer.ts is accurate, within 1–8% on direct and indirect dispatches. An
   earlier 18× under-report was my scratch copy's divisor.
+
+## 2026-11-17 — still-tank item A landed (still pages, the old COLD freeze verbatim)
+
+A still page (COLD from regionStill, not entering, no F children) holds its faces and φ, as the old engine's COLD freeze
+does:
+- The pressure keeps it in the solve, with its faces read as F + g·dt on KICK faces (poForcedC). The projection writes
+  nothing there; it measures the discarded correction |u − held| on liquid faces into RG_FROZEN, which is regionHeat's
+  frozen term.
+- RH_STILL is "nothing triggered" (the coldSurface test, 256 ulps a step and 0.01 h, at the surface; the freeze budget
+  where submerged). regionStill sets COLD when every region of the page's 3^3 is tier 0 and still and none has F
+  children. setLists builds C_ACT = C_ALL minus STILL; the level set, the velocity heads and the extension run C_ACT.
+- The census and certificate skip exactly on HELD pages (STILL now and at the last setLists: nothing wrote their faces
+  or φ since the last certificate). certCoarse skips a tile when its eight boundary pages are HELD or absent; certError
+  skips a region when its eight box pages are, still running rgDeep. Checked exact: no held-tile word changed over 70
+  steps, transitions included.
+- NB_BRICK_STILL=0 turns A off (the A/B gates).
+
+Gates (HEAD 2ed03c30 + A against HEAD, at today's pressure):
+- bulk-rest-tank, 120 steps: 7.99 → 5.86 ms without the presentation, 10.52 → 8.49 ms with it; 1301 MB both (old engine
+  4.05 ms, 1.01 GB). Volume (presented run only; see the audit below): −425 cells of 8.13M (−5.2e-5) against base's
+  +271, with a −0.01% dip every 20 steps as pages freeze and wake.
+- The remaining gap is P's resting residual (initial residual 0.016–0.09 1/s at rest against the old engine's round-off):
+  its surface noise retriggers the coldSurface sum every 5–10 steps, so about 135 of 405 pages stay live.
+- Smokes (batch 1 at 60, the splash scenes at 120, the long scenes at 160): rc 0, no aborts. Rigid hydrostatic, float and
+  sink: same trajectories and volumes as base. Dam-300 paired against base: all four PASS; paired step diffs +0.10 and
+  −0.25 ms (medians 30.79 / 30.72 against 31.27 / 31.10).
+- GPU unit tests 41/41; npm run test:unit 1897/0.
+- The CPU oracle (brick-region-heat.test.ts, "still pages"), on the reservoir with and without gravity, 16 steps each: a
+  region is RH_STILL exactly when nothing triggered it; a still surface region's omission is within 256 ulps over the
+  head and its sum within 0.01 h; a COLD page's 27 neighbours' regions are all still, and COLD matches regionStill's rule
+  wherever no neighbour's tier or children changed after it; STILL, HELD and C_ACT exactly. Under gravity the
+  reservoir's surface stays live (the resting residual), so the at-rest case is the one with still pages (800 STILL and
+  HELD).
+- Wake test (parked by the coordinator before the A-on box-observer run): a 16-cell drop 20 cells over the still tank.
+  On the presentation volume, A against A off (two runs: the noise floor) agree on the splash and volume, and the far
+  still pages' C pressure differs by 2.7e-4 of its scale (noise 4.2e-5). The far field's mean height lags: at step 45,
+  +0.111 cells for A against +0.213 for A off, which reconverges by step 120; the old engine (box observer) has +0.169.
+  The still pages' held velocity carries no flow until they wake.
+
+Volume audit (the coordinator's): with the presentation off the presentation volume texture stays at t = 0, so a drift
+from it reads 0. Only prof-f's --nopresent rows (C's and A's tank "-np" rows) read it so; no landed figure came from
+them. tools/profile-brick-scene.ts (below) reports "unmeasured" there. Separately, the old-engine smoke's t = 0
+volume on bulk-rest-tank is stale (786432: the top band layer only); its drift is right, its curve was not.
+
+Tools: tools/profile-brick-scene.ts, a catalog scene on the brick through createBrickSolver (step median, the split-pass
+kernel profile, the volume); tools/profile-probe-xctrace.ts --probe= records it; tools/gpu-kernel-timer.ts labels each
+split pass `<pass>|<pipeline>`, so a Metal System Trace names every dispatch.

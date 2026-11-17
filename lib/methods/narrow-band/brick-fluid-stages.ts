@@ -57,18 +57,20 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
   // Tiered, a pass over both tiers (the FC list: F_ALL's bricks, then C_ALL's pages, a workgroup each): the kernels
   // that hold a C page body (uAdvect, uTransfer, uKick, vGauge) run their 4h faces or tiles in their h pass.
   const both: BrickDispatch = tiered ? { indirect: ARGS.FC_G1 } : all;
+  // Still-tank A: the passes that skip the STILL pages (F_ALL's bricks, then C_ACT's pages; C_ACT's pages).
+  const bothAct: BrickDispatch = tiered ? { indirect: ARGS.FCA_G1 } : all, pagesAct = list(LIST.C_ACT, "G1");
   const c = tiered ? levelSetCoarseKernels(L, F) : undefined;
-  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: list(LIST.C_ALL, LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
+  const coarse = (kernel: keyof NonNullable<typeof c>): BrickPlacement[] => c ? [{ kernel: c[kernel], dispatch: list(LIST.C_ACT, LC_GROUPS[kernel]), z: 0, w: 0 }] : [];
   // The record passes run over the live records (pArgs's arguments), not the bank's capacity.
   const records: BrickDispatch = { indirect: P_ARGS_RECORDS };
   const at = (kernel: BrickKernel, dispatch: BrickDispatch, z = 0, w = 0): BrickPlacement => ({ kernel, dispatch, z, w });
   const args = (z: number, w: number) => at(p.pArgs, { direct: [1, 1, 1] }, z, w);
-  const ext4 = tiered ? [at(v.uExt4Seed, pages), at(v.uExt4, pages)] : [];
+  const ext4 = tiered ? [at(v.uExt4Seed, pagesAct), at(v.uExt4, pagesAct)] : [];
   // Tiered, the samplers' caches of this step's opening state (after the head's transfer, before pMove; at the kick,
   // after the extension, before the seeding).
   const cache = v.uCache ? [at(v.uCache, both)] : [];
   // Tiered, lDilateC first: the round's sources and x and y passes at the tiles no F slot holds (DIL4).
-  const dilate = (round: 1 | 2) => [...(l.lDilateC ? [at(l.lDilateC, pages, 0, round)] : []), ...[0, 1, 2].map(pass => at(l.lDilate, all8, pass, round))];
+  const dilate = (round: 1 | 2) => [...(l.lDilateC ? [at(l.lDilateC, pagesAct, 0, round)] : []), ...[0, 1, 2].map(pass => at(l.lDilate, all8, pass, round))];
   const near = [0, 1, 2].map(pass => at(l.lNear, all, pass));
   const rebin = (z: number) => [at(p.pScan, all, z), at(p.pScatter, records, z), at(p.pTiles, all, z)];
   // Tiered, lResolve after each writer of a non-owned vertex's value (fluid-grid.wgsl.ts FG_PHI_WGSL): the set
@@ -87,7 +89,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     rebin: rebin(0),
     levelSet: [at(v.vGauge, both), at(l.lInit, all), at(l.lAdvect, all), ...(l.phiSolid ? [at(l.phiSolid, all)] : []), ...coarse("lcAdvect"), at(l.lSplat, all), at(l.lUnion, all), ...coarse("lcCouple"), ...resolve,
       ...analysis, ...coarse("lcRetire"), at(l.lPublish, all), ...coarse("lcPublish"), ...resolve, at(p.pSeed, all)],
-    velocity: [at(v.uAdvect, both), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, both)] : []), at(v.uTransfer, both)],
+    velocity: [at(v.uAdvect, bothAct), at(v.pDeposit, all), ...(v.viscous ? [at(v.uViscous, bothAct)] : []), at(v.uTransfer, bothAct)],
     tail: [...ext4, at(v.uExtend, all), args(0, 1), at(p.pJoin, records), at(p.pDelta, records)],
     boot: [...resolve, at(l.lInit, all), ...bootAnalysis, at(v.vGauge, both, 0, 1)],
     // The old host's projected half kick (kickMixedFrame: U <- P(U + g dt/2) before the first frame), then the

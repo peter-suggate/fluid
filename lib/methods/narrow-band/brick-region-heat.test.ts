@@ -18,12 +18,19 @@
 //   (censusFine and censusCoarse skip their workgroups) with their stored words standing, a fresh classification of
 //   the same state has the same keys and WANT, a stored key moved (an h tile's, a 4h tile's) demotes its region,
 //   which takes the key afresh, and a restored step replays the same.
+// - still pages (still-tank A) on the reservoir, a Float64 CPU oracle each step: a region is still (RH_STILL) exactly
+//   when nothing triggers it; a still free-surface region's omission this step is within 256 ulps of the hydrostatic
+//   balance's f32 round-off over the head and its sum within 0.01 h (the old coldSurface "still" budget); a COLD
+//   page's 3^3 regions are all still, and a page is COLD exactly when no page of its 3^3 has an F child or a
+//   resident in-lattice region that is not tier 0 and still, except where a neighbour's tier or children changed
+//   after regionStill (the claims only promote, so tier 0 at the end was tier 0 there); STILL is COLD on a page with
+//   no child that is not entering, HELD STILL now and the step before; C_ACT is C_ALL without the STILL pages.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BRICK_CELLS, BrickLayout, LIST } from "./brick-abi";
+import { BRICK_CELLS, BrickLayout, F_CLASS, H, LIST, REC } from "./brick-abi";
 import { BrickEngine, type BrickEngineState } from "./brick-engine";
 import { CENSUS, REGION_H, RG, brickCensusSchedule } from "./brick-census.wgsl";
-import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
+import { BRICK_STILL, REGION_HEAT, RG_STILL_BIT, brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
 import { fluidStagesAt } from "./brick-fluid-stages";
 import { compositeMGPCG } from "./brick-pressure-solver";
 import { brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
@@ -41,7 +48,7 @@ test("region heat: without P's PDELTA the heat binds no pmgC; the head and certi
   const { setup } = damSetup();
   const L = new BrickLayout({ lattice: setup.lattice, ...setup.capacities });
   const s = brickRegionHeatSchedule(L, {});
-  assert.deepEqual(s.head.map(p => p.kernel.label), ["regionHeat", "regionSpread"]);
+  assert.deepEqual(s.head.map(p => p.kernel.label), ["regionHeat", "regionSpread", ...(BRICK_STILL ? ["regionStill"] : [])]);
   assert.deepEqual(s.cert.map(p => p.kernel.label), ["certCoarse", "certFine", "certError"]);
   assert.ok(!s.kernels.regionHeat.bindings.some(b => b.name === "pmgC"));
   const g1 = (k: number) => ({ indirect: k });
@@ -338,6 +345,96 @@ test("census replay (GPU): under gravity a still reservoir's deep regions hold t
         for (let k = 0; k < n; k++) assert.equal(C.census[o + w + n * i + k], A.census[o + w + n * i + k]);
     }
     assert.deepEqual(wantOf(C.s), wantOf(A.s));
+    e.destroy();
+   }
+  });
+});
+
+test("still pages (GPU): the reservoir's region still bits, the coldSurface still budget, COLD, STILL, HELD and C_ACT against a Float64 oracle", { skip: GPU.skip || !BRICK_STILL }, async () => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  await withUniformDevice("still pages reservoir", async device => {
+   // Under gravity the budget is exercised (still surface regions within it, the live ones over it); without it the
+   // velocity is exactly at rest and the reservoir's pages go COLD, STILL and HELD.
+   for (const g of [9.81, 0]) {
+    const { setup: dam, values } = damSetup();
+    const N = dam.lattice;
+    const setup: BrickSceneSetup = { ...dam, gravity_mps2: g ? dam.gravity_mps2 : [0, 0, 0], liquid: [{ lo: [-8, -8, -8], hi: [N[0] + 8, 40, N[2] + 8] }] };
+    const e = await engineFor(device, setup, values);
+    e.advance(40); await e.assertHealthy();
+    const L = e.layout, S = CENSUS.STRIDE, reg = (cs: number, r: number) => S * cs + CENSUS.REG + RG.WORDS * r;
+    const dt = setup.dt_s, h = setup.h_m, gl = Math.hypot(...setup.gravity_mps2);
+    const stillStep = REGION_HEAT.stillRoundoff * 2 ** -23 * dt * dt * gl / h;
+    const read = async () => { await e.fence(); return { set: await e.read("set"), dir: await e.read("dir"), census: await e.read("census") }; };
+    let prev = await read();
+    const tally = { steps: 0, regions: 0, still: 0, surfaceStill: 0, maxOmitted: 0, budget: 0, cold: 0, stillPages: 0, held: 0, pages: 0, explained: 0, entered: 0 };
+    for (let step = 0; step < 16; step++) {
+      e.advance(1);
+      const cur = await read();
+      const classOf = (cs: number) => cur.dir[L.dir.crec + 32 * cs + REC.CLASS]!, childrenOf = (cs: number) => cur.dir[L.dir.crec + 32 * cs + REC.C_CHILDREN]!;
+      const pages = new Map<string, number>();
+      const all = Array.from(cur.set.subarray(L.set.lists[LIST.C_ALL]!, L.set.lists[LIST.C_ALL]! + cur.set[H.LIST_COUNT + LIST.C_ALL]!));
+      const act = new Set(Array.from(cur.set.subarray(L.set.lists[LIST.C_ACT]!, L.set.lists[LIST.C_ACT]! + cur.set[H.LIST_COUNT + LIST.C_ACT]!)));
+      const coord = (cs: number) => { const k = cur.dir[L.dir.crec + 32 * cs + REC.KEY]!; return [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023]; };
+      for (const cs of all) pages.set(coord(cs).join(","), cs);
+      // A page that entered after the head's regionHeat (not resident the step before) has no region words this step.
+      const before = new Set(Array.from(prev.set.subarray(L.set.lists[LIST.C_ALL]!, L.set.lists[LIST.C_ALL]! + prev.set[H.LIST_COUNT + LIST.C_ALL]!)).map(cs => prev.dir[L.dir.crec + 32 * cs + REC.KEY]!));
+      const inLattice = (R: number[]) => R.every((v, a) => v >= 0 && 16 * v < N[a]!);
+      // The head extent this step's regionHeat read: the last spread's, from the step before.
+      const head = 16 * Math.max(1, prev.set[REGION_H.STILL_EXTENT]!);
+      for (const cs of all) {
+        const P = coord(cs);
+        if (!before.has(cur.dir[L.dir.crec + 32 * cs + REC.KEY]!)) { tally.entered++; continue; }
+        for (let r = 0; r < 8; r++) {
+          const R = [2 * P[0]! + (r & 1), 2 * P[1]! + ((r >> 1) & 1), 2 * P[2]! + (r >> 2)];
+          if (!inLattice(R)) continue;
+          const at = reg(cs, r), bits = cur.census[at + RG.BITS]!, trigger = bits & 0xfff;
+          tally.regions++;
+          assert.equal((bits & RG_STILL_BIT) !== 0, trigger === 0, `region ${R}: RH_STILL is "nothing triggered" (bits ${bits.toString(16)})`);
+          if (trigger !== 0) continue;
+          tally.still++;
+          if ((bits & 4096) === 0 || (bits & 8192) !== 0) continue;
+          // A still free-surface region: the coldSurface "still" budget held (else bit 64 had triggered it).
+          const sum = f32(cur.census[at + RG.STILL]!), before = f32(prev.census[at + RG.STILL]!), omitted = sum - before;
+          tally.surfaceStill++; tally.maxOmitted = Math.max(tally.maxOmitted, omitted); tally.budget = stillStep * head;
+          assert.ok(sum <= REGION_HEAT.stillH, `region ${R}: still sum ${sum} within ${REGION_HEAT.stillH} h`);
+          assert.ok(omitted <= stillStep * head + 4 * Math.abs(sum) * 2 ** -23 + 1e-12, `region ${R}: omission ${omitted} within ${stillStep * head}`);
+        }
+      }
+      for (const cs of all) {
+        const P = coord(cs);
+        let warm = false, unstill = false, moved = false;
+        for (let k = 0; k < 27; k++) {
+          const q = [P[0]! + (k % 3) - 1, P[1]! + (Math.floor(k / 3) % 3) - 1, P[2]! + Math.floor(k / 9) - 1];
+          if (q.some((v, a) => v < 0 || 32 * v > N[a]!)) continue;
+          const qs = pages.get(q.join(","));
+          if (qs === undefined) continue;
+          if (childrenOf(qs) !== 0) warm = true;
+          if (childrenOf(qs) !== prev.dir[L.dir.crec + 32 * qs + REC.C_CHILDREN]) moved = true;
+          for (let r = 0; r < 8; r++) {
+            const R = [2 * q[0]! + (r & 1), 2 * q[1]! + ((r >> 1) & 1), 2 * q[2]! + (r >> 2)];
+            if (!inLattice(R)) continue;
+            const at = reg(qs, r);
+            if ((cur.census[at + RG.BITS]! & RG_STILL_BIT) === 0) unstill = true;
+            if (cur.census[at + RG.TIER] !== 0) { warm = true; moved = true; }
+          }
+        }
+        warm ||= unstill;
+        const cls = classOf(cs), cold = (cls & F_CLASS.COLD) !== 0, still = (cls & F_CLASS.STILL) !== 0;
+        const wasStill = (prev.dir[L.dir.crec + 32 * cs + REC.CLASS]! & F_CLASS.STILL) !== 0;
+        tally.pages++; if (cold) tally.cold++; if (still) tally.stillPages++; if (cls & F_CLASS.HELD) tally.held++;
+        if (cold) assert.ok(!unstill, `page ${P}: a COLD page's 3^3 regions are all still`);
+        if (cold === warm) { tally.explained++; assert.ok(moved, `page ${P}: COLD is regionStill's rule (COLD ${cold})`); }
+        assert.equal(still, cold && (cls & F_CLASS.ENTERING) === 0 && childrenOf(cs) === 0, `page ${P}: STILL`);
+        assert.equal((cls & F_CLASS.HELD) !== 0, still && wasStill, `page ${P}: HELD is STILL now and the step before`);
+        assert.equal(act.has(cs), !still, `page ${P}: C_ACT is C_ALL without the STILL pages`);
+      }
+      tally.steps++;
+      prev = cur;
+    }
+    console.log(`still pages reservoir, g = ${g}: ${JSON.stringify(tally)}`);
+    if (g) assert.ok(tally.surfaceStill > 0, "under gravity still surface regions are within the budget");
+    else assert.ok(tally.stillPages > 0 && tally.held > 0, "at rest the reservoir's pages are STILL and HELD");
+    await e.assertHealthy();
     e.destroy();
    }
   });

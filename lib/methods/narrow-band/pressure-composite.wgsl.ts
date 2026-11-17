@@ -58,6 +58,7 @@ import type { BrickBinding } from "./brick-kernel";
 import { CFG } from "./brick-kernel";
 import { brickCellKernel } from "./brick-pressure.wgsl";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
+import { CENSUS, RG } from "./brick-census.wgsl";
 import { PRESSURE_ROWS_WGSL } from "./pressure-rows.wgsl";
 
 /** The root's far air in cells (UNIFORM_MIXED_ROOT_FAR_CELLS, uniform-mixed-root-owners.ts): RO_FAR. */
@@ -85,6 +86,8 @@ const phiRW: BrickBinding = { name: "phi", kind: "rw", type: "array<u32>" };
 const ROWS = [CFG, setRW, dirRO, velRO, phiRW, presRW, cutRO];
 const PROJECT = [CFG, setRW, dirRO, velRW, phiRW, presRW, cutRO];
 const FACES: BrickBinding = { name: "pmgF", kind: "rw", type: "array<f32>" };
+// Still-tank A: projectC stores a STILL page's discarded correction in the census's region words (RG FROZEN).
+const CENSUS_RW: BrickBinding = { name: "census", kind: "rw", type: "array<u32>" };
 
 /** The shared readers: centre and face φ, root φ, starts, the marched θ and the band face. */
 // The readers' sources: poVertex (nbVertexPhi), poCentre (poCentreG) and poOwnerH (nbCellOwnerH). rowsF stages
@@ -502,7 +505,15 @@ export function pressureResolveBox(L: Pick<BrickLayout, "lattice" | "box">, code
   return out;
 }
 
-const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
+// Still-tank A: a STILL page's held face, as the solve reads it, is the old COLD freeze's u* = F + g dt (umColdForced:
+// F the held face, g dt where its last transfer's gravity rule held, FLAG.KICK0; nbfGravityKick's value + dt g).
+const FORCED_C_WGSL = /* wgsl */`
+fn poForcedC(cs:u32,i:u32,a:u32,raw:f32)->f32{
+  if((nbCRec(cs,NB_REC_CLASS)&NB_CLASS_STILL)==0u||(phi[NB_PHI_C_FLAGS+NB_STRIDE*cs+i]&(NB_FLAG_KICK0<<a))==0u){return raw;}
+  return raw+nbRingF(cfg.x,NB_RING_DT)*nbRingF(cfg.x,NB_RING_GRAVITY+a);
+}
+`;
+const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + (tiered ? FORCED_C_WGSL : "") + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN, ...(tiered ? { forcedC: "poForcedC" } : {}) }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
 
 /** The composite kernels. rowsF's label and entry are the engine's operator's when pressure-operator.wgsl.ts builds it.
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */
@@ -927,9 +938,23 @@ fn poNativeX(T:vec3i)->vec2f{
   let at=NB_STRIDE*w+i;
   return vec2f(pres[NB_PRES_C_X+at],select(0.0,1.0,pres[NB_PRES_C_DIAG+at]>0.0&&poWet(pres[NB_PRES_C_PPHI+at],4.0)));
 }
+// Still-tank A: a STILL page's projection writes no velocity and no wall release (its faces and FLAGS hold, the old
+// COLD freeze's): it stores each region's largest discarded correction |projected - F| (umColdCorrect's), in m/s,
+// for the next region heat's frozen term (census RG FROZEN).
+var<workgroup> pcFrozen:array<atomic<u32>,8>;
+var<workgroup> pcStill:u32;
 @compute @workgroup_size(256) fn pressureProjectC(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
-  let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_C_ALL)){return;}
-  let cs=nbListSlot(NB_LIST_C_ALL,g);
+  if(lid==0u){pcStill=0u;}
+  if(lid<8u){atomicStore(&pcFrozen[lid],0u);}
+  let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ALL);
+  var cs=0u;if(live){cs=nbListSlot(NB_LIST_C_ALL,g);if(lid==0u){pcStill=select(0u,1u,(nbCRec(cs,NB_REC_CLASS)&NB_CLASS_STILL)!=0u);}}
+  let still=workgroupUniformLoad(&pcStill)!=0u;
+  if(live){pcProjectPage(cs,lid,still);}
+  if(!still){return;}
+  workgroupBarrier();
+  if(lid<8u){census[${CENSUS.STRIDE}u*cs+${CENSUS.REG}u+${RG.WORDS}u*lid+${RG.FROZEN}u]=atomicLoad(&pcFrozen[lid]);}
+}
+fn pcProjectPage(cs:u32,lid:u32,still:bool){
   let O=nbCOrigin(cs)>>vec3u(2u);let h=nbRingF(cfg.x,NB_RING_H);
   for(var j=0u;j<2u;j++){
     let i=lid+256u*j;let T=O+nbLocalCoord(i);let at=NB_STRIDE*cs+i;
@@ -937,6 +962,7 @@ fn poNativeX(T:vec3i)->vec2f{
     // This tile's C FLAGS: the solver's wall state for its lower faces on the lattice's planes, then their release.
     let fw=NB_PHI_C_FLAGS+at;let flags=phi[fw];var release=0u;
     if(tIn&&nbTileH(cs,i)){
+      if(still){continue;}
       phi[fw]=flags&~PO_WALLS;
       var sum=0.0;var count=0.0;
       for(var m=0u;m<64u;m++){
@@ -953,7 +979,7 @@ fn poNativeX(T:vec3i)->vec2f{
       if(!nbFaceInLattice(4*T,a)){continue;}
       let e=poUnit(a);let Lt=T-e;
       if(nbTileInLattice(Lt)&&nbTileOwnerH(Lt)){continue;}
-      let fa=NB_STRIDE*(cs+a*NB_CCAP)+i;let us=vel[NB_VEL_C_US0+fa];
+      let fa=NB_STRIDE*(cs+a*NB_CCAP)+i;let held=vel[NB_VEL_C_US0+fa];let us=poForcedC(cs,i,a,held);
       let low=poNativeX(Lt);
       let wall=T[a]==0||4*T[a]==NB_WALL_BOX[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
       var u=us;
@@ -970,6 +996,9 @@ fn poNativeX(T:vec3i)->vec2f{
         }
         else{u=us+sign*x/(4.0*h*poNativeTheta(Lt,T,a));}
       }
+      // A still page's discarded correction: its liquid faces' only (a face with no liquid side is the extension's, not
+      // the projection's, so its kick is no correction).
+      if(still){if(own.y>0.0||low.y>0.0){atomicMax(&pcFrozen[((i>>2u)&1u)|(((i>>5u)&1u)<<1u)|(((i>>8u)&1u)<<2u)],bitcast<u32>(abs(u-held)));}continue;}
       vel[NB_VEL_C_U0+fa]=u;
       if(wall){
         // The owner, a 4h-owned tile: T on plane 0 (its low face), Lt on plane N (its high face). Held is N_HELD.
@@ -979,9 +1008,9 @@ fn poNativeX(T:vec3i)->vec2f{
         if(poRelease(root,ghost,sign,u,4.0,h)){release|=PO_WALL0<<a;}
       }
     }
-    phi[fw]=(flags&~PO_WALLS)|release;
+    if(!still){phi[fw]=(flags&~PO_WALLS)|release;}
   }
-}`, "pressureProjectC", PROJECT);
+}`, "pressureProjectC", [...PROJECT, CENSUS_RW]);
 
   // projectRest (opt.live: the engine's project, F_ALL G1, after the solve's finish placed projectF over HP): a brick
   // off HP (no h-owned tile in it or across its lower faces) stores no h face, so only its cells' FLAGS change, WARM

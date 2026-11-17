@@ -154,6 +154,8 @@ export const CENSUS = {
 export const RG = {
   HEAT: 0, DISP: 1, KEY: 2, PENDING: 3, BITS: 4, HOLDS: 5, STILL: 6, TIER: 7, DEEP: 8, EPOCH: 9, DEEP_EPOCH: 10, STAMP: 11,
   MODE: 12, GEN: 13, OWN: 14, CKEY: 16, VEL: 17, RATE: 23, ACCEL: 24, ERROR: 25, RELEVANT: 26, CLASS: 27, FINE: 28, PAGES: 29,
+  /** Still-tank A: pressureProjectC's largest discarded correction (f32 m/s) of a STILL page's region, last step. */
+  FROZEN: 30,
   WORDS: 32,
 } as const;
 /** The lane buffers setCensus binds: `census`, CENSUS.STRIDE words a C slot. */

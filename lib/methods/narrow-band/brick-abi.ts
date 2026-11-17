@@ -120,6 +120,12 @@ export const F_CLASS = {
   SEAM: 1 << 5, SKIRT: 1 << 6, COLD: 1 << 7, CHANGED: 1 << 8,
   /** E (A5): the brick's cells meet a static solid; set by solidStamp, and the brick holds a K slot. */
   CUT_STATIC: 1 << 9,
+  /** Still-tank A (a C record): setLists' still page, COLD (regionStill's) with no F child and not entering. It is off
+   * C_ACT: its level set, velocity and census hold, and the solve reads its faces as F + g dt (FLAG.KICK0). */
+  STILL: 1 << 10,
+  /** Still-tank A: STILL at this setLists and the one before (head k: part 2 of step k - 1, whose writes it gated), so
+   * nothing has written the page's faces or φ since the last certificate: certCoarse and certError keep its words. */
+  HELD: 1 << 11,
   /** P (A2): NEAR_BODY last step, kept one step so the clean-up pass clears the body's cut. */
   BODY_WAS: 1 << 24,
   ENTERING: 1 << 30, LEAVING: 2 ** 31,
@@ -130,7 +136,9 @@ export const K_HOLD = F_CLASS.CUT_STATIC | F_CLASS.NEAR_BODY | F_CLASS.BODY_WAS;
 export const REC = { SELF: 13, PARENT: 27, MASK: 28, KEY: 29, CUT: 30, CLASS: 31, C_CHILDREN: 27, C_LIQUID_TILES: 28 } as const;
 
 /** FLAGS channel bits (cell, u32). */
-export const FLAG = { OPEN: 1, LIQUID: 2, BAND: 4, VALID0: 8, VALID1: 16, VALID2: 32, OWNER_H: 64 } as const;
+/** KICK0 << a (C FLAGS, still-tank A): uTransfer's gravity rule held on the tile's lower face along a at its last
+ * transfer (nbfGravityFace), which the solve applies to a STILL page's held face (u* = F + g dt). */
+export const FLAG = { OPEN: 1, LIQUID: 2, BAND: 4, VALID0: 8, VALID1: 16, VALID2: 32, OWNER_H: 64, KICK0: 1 << 12 } as const;
 
 /** Lists (brick-abi.md §5.5): index, kind. */
 export const LIST = {
@@ -140,18 +148,24 @@ export const LIST = {
   B_ALL: 16,
   /** The active F bricks (brick-abi.md §5.5): F_ACT(t) ∪ F_ACT(t - 1), the dilated active class (ACT below). */
   F_ACT: 17,
+  /** The active C pages (still-tank A, lane F): C_ALL less the still pages (a C record whose class holds COLD,
+   * regionStill's, with no F child and not entering). The still pages' per-page work (the level set, the velocity's
+   * advection, transfer and extension, the census and the certificate) runs over this list; the solve, the gravity and
+   * the projection still span C_ALL (the old COLD freeze: the root pressure spans frozen regions). */
+  C_ACT: 18,
 } as const;
 export const LIST_SLOTS = 32;
 export type ListName = keyof typeof LIST;
-const listKind = (k: number): "F" | "C" | "B" => k <= 10 ? "F" : k <= 15 ? "C" : k === 16 ? "B" : "F";
-/** The last list index with entries (F_ACT); list slots above it have capacity 0. */
-const LAST_LIST = 17;
+const listKind = (k: number): "F" | "C" | "B" => k <= 10 ? "F" : k <= 15 ? "C" : k === 16 ? "B" : k === 18 ? "C" : "F";
+/** The last list index with entries (C_ACT); list slots above it have capacity 0. */
+const LAST_LIST = 18;
 
 /** Indirect arguments: 12 words a list (G1, G8, G64, X8: eight workgroups an entry), then FC_* at 384 (F_ALL's bricks, then
- * C_ALL's pages) and FA_* at 400 (F_ACT's bricks, then C_ALL's pages). Lanes: P from 512, F from 2048. */
-export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
-/** The end of the list arguments a stage may dispatch from, below the lanes' regions (FA_G64's last word + 1). */
-export const ARGS_LIST_END = ARGS.FA_G64 + 3;
+ * C_ALL's pages), FA_* at 400 (F_ACT's bricks, then C_ALL's pages) and FCA_* at 412 (F_ALL's bricks, then C_ACT's
+ * pages). Lanes: P from 512, F from 2048. */
+export const ARGS = { PER_LIST: 12, G1: 0, G8: 3, G64: 6, X8: 9, FC_G1: 384, FC_G8: 387, FC_G64: 390, XFER_G1: 396, FA_G1: 400, FA_G8: 403, FA_G64: 406, FCA_G1: 412, FCA_G8: 415, FCA_G64: 418, LANE_P: 512, LANE_F: 2048, WORDS: 4096 } as const;
+/** The end of the list arguments a stage may dispatch from, below the lanes' regions (FCA_G64's last word + 1). */
+export const ARGS_LIST_END = ARGS.FCA_G64 + 3;
 
 /**
  * The active class (brick-abi.md §5.5), a word an F slot (set region ACT):

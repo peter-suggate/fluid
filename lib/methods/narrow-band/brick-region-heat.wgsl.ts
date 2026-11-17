@@ -59,6 +59,12 @@ const velRO: BrickBinding = { name: "vel", kind: "ro", type: "array<f32>" };
 const phiRO: BrickBinding = { name: "phi", kind: "ro", type: "array<u32>" };
 const censusRW: BrickBinding = { name: "census", kind: "rw", type: "array<u32>" };
 const pmgRO: BrickBinding = { name: "pmgC", kind: "ro", type: "array<f32>" };
+const dirRW: BrickBinding = { name: "dir", kind: "rw", type: "array<atomic<u32>>" };
+/** RG.BITS' still bit (still-tank A): regionHeat's, a region nothing triggered whose still test held. */
+export const RG_STILL_BIT = 32768;
+/** Still-tank A on (default). NB_BRICK_STILL=0 (the A/B gates) leaves regionStill out: no page is STILL, so C_ACT is
+ * C_ALL and every pass runs as before. */
+export const BRICK_STILL = !(typeof process !== "undefined" && process.env?.NB_BRICK_STILL === "0");
 
 /** The heat's constants (uniform-region-heat.ts): the fade (2 / 0.5 s), the freeze budgets, the still words. */
 export const REGION_HEAT = { fadeSeconds: 0.5, residual: 0.05, stillRoundoff: 256, stillH: 0.01, holdFrames: 2 } as const;
@@ -84,6 +90,7 @@ const RH_HELD_HOT:u32=0x26u;
 const RH_HELD_WARM:u32=0x1c0u;
 const RH_HOLD_FRAMES:u32=${REGION_HEAT.holdFrames}u;
 const RH_RESIDUAL:f32=${REGION_HEAT.residual};
+const RH_STILL:u32=${RG_STILL_BIT}u;
 fn rhFreezeBudget(submerged:bool,fine:bool)->f32{return select(select(0.08,0.02,fine),0.08,submerged);}
 fn rhSpeed(word:u32)->f32{
   if(word==0u){return 0.0;}if(word==0xffffffffu){return 3.402823e38;}
@@ -133,8 +140,13 @@ var<workgroup> hFine:atomic<u32>;
   // A region that ran non-COLD last step was refreshed then.
   let refreshed=census[at+RG_TIER]!=0u;
   var displacement=rhF(at+RG_DISP);if(refreshed){displacement=0.0;}
-  // No freeze: the discarded correction is identically 0.
-  let discarded=0.0;
+  // Still-tank A: a region nothing triggered is still (RH_STILL), the old COLD freeze's: the coldSurface test
+  // (256 ulps a step, 0.01 h since the last trigger) at the surface, the freeze budget on the displacement (its frozen
+  // term the discarded correction below) where submerged. regionStill freezes a page whose 3^3 pages' regions are all
+  // COLD and still.
+  // Still-tank A: the discarded correction of the region's last projection as a STILL page (pressureProjectC; 0 where
+  // it was live), read once.
+  let discarded=rhF(at+RG_FROZEN);census[at+RG_FROZEN]=0u;
   var speed=0.0;if(valid){for(var k=0u;k<6u;k++){speed=max(speed,rhSpeed(census[at+RG_VEL+k]));}}
   var detail=2.0;
   if(!(error<RH_UNKNOWN)){trigger|=32u;}else{detail=dt*error*hInverse/0.08;if(detail>1.0){trigger|=2048u;}}
@@ -175,7 +187,7 @@ var<workgroup> hFine:atomic<u32>;
   value=max(value,bitcast<f32>(atomicLoad(&hParticle)));
   if(relevant==0u&&(trigger&24u)==0u){value=0.0;}
   census[at+RG_HEAT]=bitcast<u32>(value);census[at+RG_DISP]=bitcast<u32>(displacement);
-  census[at+RG_BITS]=trigger|select(0u,4096u,relevant!=0u)|select(0u,8192u,submerged)|select(0u,16384u,fine);
+  census[at+RG_BITS]=trigger|select(0u,4096u,relevant!=0u)|select(0u,8192u,submerged)|select(0u,16384u,fine)|select(0u,RH_STILL,trigger==0u);
 }`, pd === undefined ? [BRICK_SOURCE_BINDING] : [pmgRO, BRICK_SOURCE_BINDING]);
 
   // spread (l.1139): a lane a region, eight pages a workgroup (G8: lane = 8 page + region).
@@ -212,8 +224,46 @@ fn rhLevel(at:u32)->f32{
   if(tier==0u){atomicAdd(&nbSet[NB_H_HEAT_COLD],1u);}
 }`);
 
+  // regionStill (still-tank A): a workgroup a page of C_ALL, after the spread. The page is still where every region
+  // of the 3^3 pages about it (its own eight among them; an absent page or a region beyond the lattice holds none) is
+  // COLD (RG_TIER 0) and still (RH_STILL: nothing triggered, the still test held) and none of those pages has an F
+  // child: the C record's COLD class bit, which setLists turns into STILL (off C_ACT) on a page with no F child that
+  // is not entering.
+  const regionStill = censusKernel(L, "regionStill", [CFG, setRW, dirRW, velRO, phiRO, censusRW], SHARED + /* wgsl */`
+var<workgroup> wgGo:u32;
+var<workgroup> wgWarm:atomic<u32>;
+@compute @workgroup_size(64) fn regionStill(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
+  let g=nbGroup(wid);
+  if(lane==0u){wgGo=select(0u,1u,g<nbListCount(NB_LIST_C_ALL));atomicStore(&wgWarm,0u);}
+  if(workgroupUniformLoad(&wgGo)==0u){return;}
+  let cs=nbListSlot(NB_LIST_C_ALL,g);let P=nbKeyCoord(nbCRec(cs,NB_REC_KEY));
+  if(lane<27u){
+    let q=P+nbNeighbourOffset(lane);
+    // A page with an F child (its h bricks, their particles and seams) in the 27 keeps the page live.
+    if(all(q>=vec3i(0))&&all(32*q<=NB_LATTICE)){let qs=nbCSlotOfPage(q);if(qs!=NB_NONE&&nbCRec(qs,NB_REC_C_CHILDREN)!=0u){atomicStore(&wgWarm,1u);}}
+    for(var r=0u;r<8u;r++){
+      let at=rgOf(2*q+vec3i(i32(r&1u),i32((r>>1u)&1u),i32(r>>2u)));if(at==NB_NONE){continue;}
+      if(census[at+RG_TIER]!=0u||(census[at+RG_BITS]&${RG_STILL_BIT}u)==0u){atomicStore(&wgWarm,1u);}
+    }
+  }
+  workgroupBarrier();
+  if(lane==0u){
+    let w=NB_D_CREC+32u*cs+NB_REC_CLASS;
+    if(atomicLoad(&wgWarm)==0u){atomicOr(&dir[w],NB_CLASS_COLD);}else{atomicAnd(&dir[w],~NB_CLASS_COLD);}
+  }
+}`);
+
+  // Still-tank A: page P's certificate inputs (its faces and its φ) are unchanged since the last certificate (HELD),
+  // or absent (no resident page there, or none in the lattice: nothing to read; an entering one is not HELD).
+  const STILL_PAGE = /* wgsl */`
+fn rhPageHeld(P:vec3i)->bool{
+  if(any(P<vec3i(0))||any(32*P>NB_LATTICE)){return true;}
+  let s=nbCSlotOfPage(P);if(s==NB_NONE){return true;}
+  return (nbCRec(s,NB_REC_CLASS)&NB_CLASS_HELD)!=0u;
+}
+`;
   // certCoarse: localSpeed of a region's 4h tiles (a lane a tile), and entering page e's claim (C_ENTER).
-  const TC = /* wgsl */`
+  const TC = STILL_PAGE + /* wgsl */`
 fn tcStore(cs:u32,i:u32,average:vec3f,defect:f32,speed:f32,width:u32,span:f32,rate:f32,bits:u32,hi:vec3u,lo:vec3u){
   let o=NC_S*cs+RG_TC+16u*i;
   census[o]=bitcast<u32>(average.x);census[o+1u]=bitcast<u32>(average.y);census[o+2u]=bitcast<u32>(average.z);
@@ -249,7 +299,7 @@ var<workgroup> wgGo:u32;
       let at=rgOf(R);
       if(at!=NB_NONE){
         if(all((R>>vec3u(1u))==p)){
-          census[at+RG_HEAT]=0u;census[at+RG_DISP]=0u;census[at+RG_KEY]=0u;census[at+RG_BITS]=0u;census[at+RG_HOLDS]=0u;
+          census[at+RG_HEAT]=0u;census[at+RG_DISP]=0u;census[at+RG_KEY]=0u;census[at+RG_BITS]=0u;census[at+RG_HOLDS]=0u;census[at+RG_FROZEN]=0u;
           census[at+RG_STILL]=0u;census[at+RG_DEEP]=0u;
         }
         census[at+RG_PENDING]=2u;census[at+RG_TIER]=2u;
@@ -259,6 +309,10 @@ var<workgroup> wgGo:u32;
   let cs=nbListSlot(NB_LIST_C_ALL,e);
   let i=rgTile(r,lane);let t=xTileOf(cs,i);
   if(!nbTileInLattice(t)||nbTileH(cs,i)){return;}
+  // Still-tank A: a tile reads its faces and corners from the tiles t + {0,1}^3. Where every page of them is held
+  // (a STILL page's φ and faces), its words stand, exactly (the old COLD region's replay).
+  {var held=true;for(var k=0u;k<8u&&held;k++){held=rhPageHeld((t+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))>>vec3u(3u));}
+   if(held){return;}}
   // localSpeed (l.283) of the tile's one 4h owner, umLoadCorner8 its corners.
   let origin=4*t;let h=ncH();
   var mean=vec3f(0.0);var hi=vec3u(0u);var lo=vec3u(0u);var boundary=false;var fastest=0u;
@@ -333,7 +387,7 @@ ${uniformTileFineDefectWGSL}
 
   // certError: the support closure (seed: a liquid vertex, TC bit 1; dilate0..2: within 2 tiles both bits, the shell
   // at 3 bit 1 only, on stored intermediates), tileErrorOf, the region's reductions, then the deep pass after the claims.
-  const certError = k("certError", /* wgsl */`
+  const certError = k("certError", STILL_PAGE + /* wgsl */`
 var<workgroup> wgGo:u32;
 // The region's 10^3 tile neighbourhood (from 4R - 3): bits 0..1 the seed flags, bit 2 stored (a resident page's tile
 // in the lattice: umKeyStored); then the x pass on 4 x 10 x 10, the y pass on 4 x 4 x 10.
@@ -358,6 +412,16 @@ fn ceMean(T:vec3i)->vec3f{
   if(lane<6u){atomicStore(&eVel[lane],0u);}
   if(workgroupUniformLoad(&wgGo)==0u){return;}
   let cs=nbListSlot(NB_LIST_C_ALL,e);
+  // Still-tank A: the region's words read the tiles of its 10^3 box from 4R - 3 and their faces (to 4R + 7): the 2^3
+  // pages about its octant's corner. Where all are held, every tile word it reads stands (certCoarse kept them), so
+  // its words stand too; only the second deep pass runs (the claims may have promoted a neighbour).
+  if(lane==0u){
+    var held=cfg.w!=1u;let R=rgCoord(cs,r);
+    for(var k=0u;k<8u&&held;k++){let lo=(4*R-vec3i(3))>>vec3u(3u);let hi=(4*R+vec3i(7))>>vec3u(3u);
+      held=rhPageHeld(select(lo,hi,vec3<bool>((k&1u)!=0u,(k&2u)!=0u,(k&4u)!=0u)));}
+    wgGo=select(1u,2u,held);
+  }
+  if(workgroupUniformLoad(&wgGo)==2u){if(lane==0u){rgDeep(cs,r,false);}return;}
   let origin=4*rgCoord(cs,r)-vec3i(3);
   for(var k=lane;k<1000u;k+=64u){
     let T=origin+vec3i(i32(k%10u),i32((k/10u)%10u),i32(k/100u));var w=0u;
@@ -434,7 +498,7 @@ fn ceMean(T:vec3i)->vec3f{
   }
 }`);
 
-  return { regionHeat, regionSpread, certCoarse, certFine, certError };
+  return { regionHeat, regionSpread, regionStill, certCoarse, certFine, certError };
 }
 
 /** The real D's placements: `head` after censusBegin (the census's own passes follow), `cert` after the transfer
@@ -447,6 +511,7 @@ export function brickRegionHeatSchedule(L: BrickLayout, opt: RegionHeatOptions =
     head: [
       { kernel: h.regionHeat, dispatch: x8(LIST.C_ALL) },
       { kernel: h.regionSpread, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G8 } },
+      ...(BRICK_STILL ? [{ kernel: h.regionStill, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 } }] : []),
     ],
     cert: [
       { kernel: h.certCoarse, dispatch: x8(LIST.C_ALL) },

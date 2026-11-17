@@ -152,8 +152,8 @@ fn lcCellOf(v:vec3i)->vec3i{return clamp(v,vec3i(0),NB_WALL_BOX-vec3i(1));}
 fn lcTileHeld(t:vec3i)->vec3i{return clamp(t,vec3i(0),(NB_WALL_BOX>>vec3u(2u))-vec3i(1));}
 // A C vertex: some in-lattice tile incident to it is 4h-owned (its writer).
 fn lcCOwned(v:vec3i)->bool{return lcVertexIn(v)&&nbVertexCoarse(v).x>=0;}
-// Deviation 5: tile t's page is resident and COLD.
-fn lcTileCold(t:vec3i)->bool{let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}return (nbCRec(cs,NB_REC_CLASS)&NB_CLASS_COLD)!=0u;}
+// Deviation 5: tile t's page is resident and still (still-tank A: setLists' STILL, regionStill's COLD page).
+fn lcTileCold(t:vec3i)->bool{let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}return (nbCRec(cs,NB_REC_CLASS)&NB_CLASS_STILL)!=0u;}
 fn lcCellStored(c:vec3i)->bool{return nbInWallBox(c)&&nbCSlotOfPage(c>>vec3u(5u))!=NB_NONE;}
 // umVertexTier == COLD: every incident stored open cell is COLD, or none is (buried: φ there is not state).
 fn lcTierCold(v:vec3i)->bool{
@@ -693,23 +693,23 @@ export function levelSetCoarseKernels(L: BrickLayout, F: FluidLayout = fluidLayo
   const bindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRW, FB.fcell, FB.src];
   const k = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(), part, /* wgsl */`
 @compute @workgroup_size(256) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ALL);
- var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,g);}
+ let g=nbGroup(wid);let live=g<nbListCount(NB_LIST_C_ACT);
+ var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,g);}
  ${page}(slot,live,lid);
 }`].join("\n"));
   // X8: eight workgroups a page, each one z plane of its C vertices (lcPart), a lane a vertex.
   const k8 = (label: string, part: string, page: string) => fluidKernel(L, F, label, bindings, [levelSetCoarseWGSL.common(), part, /* wgsl */`
 @compute @workgroup_size(64) fn ${label}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ALL);
- var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,e);}
+ let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);
+ var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}
  ${page}(slot,live,lid);
 }`].join("\n"));
   return {
     // lcAdvect: eight workgroups a page (LC_ADVECT_GROUPS), each one z plane of its C vertices, a lane a vertex.
     lcAdvect: fluidKernel(L, F, "lcAdvect", bindings, [levelSetCoarseWGSL.common(), levelSetCoarseWGSL.advect(), /* wgsl */`
 @compute @workgroup_size(64) fn lcAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
- let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ALL);
- var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ALL,e);}
+ let g=nbGroup(wid);let e=g>>3u;lcPart=g&7u;let live=e<nbListCount(NB_LIST_C_ACT);
+ var slot=0u;if(live){slot=nbListSlot(NB_LIST_C_ACT,e);}
  lcAdvectPage(slot,live,lid);
 }`].join("\n")),
     lcCouple: k8("lcCouple", levelSetCoarseWGSL.couple(), "lcCouplePage"),

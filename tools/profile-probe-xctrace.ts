@@ -1,12 +1,17 @@
 /**
- * Frame structure of a probe-reservoir-bulk run, observed from outside the
+ * Frame structure of a probe run (probe-reservoir-bulk by default), observed from outside the
  * process with Instruments' Metal System Trace (the gpu-frame-profile
  * skill's clean regime): GPU busy and idle gaps per advance, the largest GPU
  * tasks, and where the process's CPU time goes. No counters, no in-process
  * probes: pass the probe no --kernels or --dispatches.
  *
  *   node --import tsx tools/profile-probe-xctrace.ts --out=DIR [--record-only|--report-only]
- *     [--anchor=LABEL] -- <probe-reservoir-bulk arguments>
+ *     [--anchor=LABEL] [--probe=tools/profile-brick-scene.ts] -- <the probe's arguments>
+ *
+ * --probe picks the recorded probe (default tools/probe-reservoir-bulk.ts, the old engine). The brick engine's
+ * tools/profile-brick-scene.ts runs a catalog scene; its --profSteps steps from --profAt are split a pass a dispatch
+ * (tools/gpu-kernel-timer.ts), each labelled `<pass>|<pipeline>`, so the trace names every dispatch of those steps
+ * (they run slow: a pass a dispatch). --profSteps=0 records it in the clean regime.
  *
  * Record under tools/gpu/fluid-gpu-run.sh timing (--record-only); the report
  * (export and reduction) needs no GPU. Following the skill's traps: the whole
@@ -28,6 +33,7 @@ const own = split < 0 ? process.argv.slice(2) : process.argv.slice(2, split);
 const probeArguments = split < 0 ? [] : process.argv.slice(split + 1);
 const flag = (name: string) => own.find(a => a.startsWith(`--${name}=`))?.slice(name.length + 3);
 const out = resolve(flag("out") ?? "artifacts/xctrace-probe");
+const probe = flag("probe") ?? "tools/probe-reservoir-bulk.ts";
 const trace = `${out}/probe.trace`;
 const recordOnly = own.includes("--record-only"), reportOnly = own.includes("--report-only");
 mkdirSync(out, { recursive: true });
@@ -51,7 +57,7 @@ if (!reportOnly) {
   };
   await run(["xcrun", "xctrace", "record", "--template", "Metal System Trace", "--output", trace, "--no-prompt", "--target-stdout", "-",
     ...Object.entries(environment).flatMap(([k, v]) => ["--env", `${k}=${v}`]),
-    "--launch", "--", process.execPath, "--import", "tsx", "tools/probe-reservoir-bulk.ts", ...probeArguments], `${out}/traced.log`);
+    "--launch", "--", process.execPath, "--import", "tsx", probe, ...probeArguments], `${out}/traced.log`);
   writeFileSync(`${out}/probe-arguments.json`, `${JSON.stringify(probeArguments)}\n`);
   console.log(`recorded ${trace}`);
 }

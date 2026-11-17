@@ -38,6 +38,9 @@ export interface BrickOwnerNames {
   /** The walls' WGSL vec3i (brick-abi.ts boxWGSL(L)): nbOnWall's planes and the faces nbFaceInLattice admits, so a
    * face past the box reads 0 and the wall is at the box once. Default NB_LATTICE (an unpadded scene's text). */
   readonly box?: string;
+  /** A WGSL fn(cslot, tile, axis, raw) -> f32 that nbCFace returns in place of the stored C face (the solve's
+   * still-tank A forcing of a STILL page's held face); default the stored face. */
+  readonly forcedC?: string;
 }
 
 const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexCoarse|VertexOwnerH|CVertex|FVertex|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
@@ -103,7 +106,7 @@ fn nbVertexPhi(v:vec3i)->f32{
 fn nbCFace(T:vec3i,a:u32)->f32{
   if(any(T<vec3i(0))||any(4*T>NB_LATTICE)){return 0.0;}
   let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return 0.0;}
-  return ${n.vel}[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+nbTileIndex(T)];
+  ${n.forcedC ? `let i=nbTileIndex(T);return ${n.forcedC}(cs,i,a,${n.vel}[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+i]);` : `return ${n.vel}[NB_VEL_C_U0+NB_STRIDE*(cs+a*NB_CCAP)+nbTileIndex(T)];`}
 }
 fn nbFFace(c:vec3i,a:u32)->f32{
   let s=nbFSlotOfCell(c);if(s>=NB_SEAM){return 0.0;}

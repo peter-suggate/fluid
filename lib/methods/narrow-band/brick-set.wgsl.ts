@@ -509,9 +509,14 @@ fn bootAt(v:vec3i,nBoxes:u32)->f32{
       let cls=atomicLoad(&dir[r+NB_REC_CLASS]);
       if((cls&NB_CLASS_LEAVING)!=0u){atomicStore(&dir[r+NB_REC_KEY],NB_NONE);}
       else{
-        atomicStore(&dir[r+NB_REC_CLASS],cls&~NB_CLASS_ENTERING);
+        let children=atomicLoad(&dir[r+NB_REC_C_CHILDREN]);
+        // Still-tank A: STILL is regionStill's COLD on a page with no F child that is not entering; C_ACT the rest.
+        let still=(cls&NB_CLASS_COLD)!=0u&&(cls&NB_CLASS_ENTERING)==0u&&children==0u;
+        let held=still&&(cls&NB_CLASS_STILL)!=0u;
+        atomicStore(&dir[r+NB_REC_CLASS],(cls&~(NB_CLASS_ENTERING|NB_CLASS_STILL|NB_CLASS_HELD))|select(0u,NB_CLASS_STILL,still)|select(0u,NB_CLASS_HELD,held));
         nbAppend(NB_LIST_C_ALL,i);
-        if(atomicLoad(&dir[r+NB_REC_C_CHILDREN])!=0u){nbAppend(NB_LIST_C_SEAM,i);}
+        if(!still){nbAppend(NB_LIST_C_ACT,i);}
+        if(children!=0u){nbAppend(NB_LIST_C_SEAM,i);}
         if(atomicLoad(&dir[r+NB_REC_C_LIQUID_TILES])!=0u){nbAppend(NB_LIST_C_LIQ,i);}
       }
     }
@@ -530,9 +535,11 @@ fn count(k:u32)->u32{
 }
 fn triple(at:u32,n:u32){fold(at+NB_ARGS_G1,n);fold(at+NB_ARGS_G8,(n+7u)/8u);fold(at+NB_ARGS_G64,(n+63u)/64u);fold(at+NB_ARGS_X8,8u*n);}
 @compute @workgroup_size(64) fn setArgs(@builtin(local_invocation_index) lid:u32){
-  if(lid<=NB_LIST_F_ACT){triple(NB_ARGS_PER_LIST*lid,count(lid));}
-  if(lid==NB_LIST_F_ACT+2u){let nA=count(NB_LIST_F_ACT)+count(NB_LIST_C_ALL);fold(NB_ARGS_FA_G1,nA);fold(NB_ARGS_FA_G8,(nA+7u)/8u);fold(NB_ARGS_FA_G64,(nA+63u)/64u);}
-  if(lid==NB_LIST_F_ACT+1u){
+  if(lid<=NB_LIST_C_ACT){triple(NB_ARGS_PER_LIST*lid,count(lid));}
+  if(lid==NB_LIST_C_ACT+2u){let nA=count(NB_LIST_F_ACT)+count(NB_LIST_C_ALL);fold(NB_ARGS_FA_G1,nA);fold(NB_ARGS_FA_G8,(nA+7u)/8u);fold(NB_ARGS_FA_G64,(nA+63u)/64u);}
+  // FCA: at least one workgroup, uAdvect's group 0 sets the volume control's rate (every page still, no F brick).
+  if(lid==NB_LIST_C_ACT+3u){let nA=count(NB_LIST_F_ALL)+count(NB_LIST_C_ACT);fold(NB_ARGS_FCA_G1,max(nA,1u));fold(NB_ARGS_FCA_G8,(nA+7u)/8u);fold(NB_ARGS_FCA_G64,(nA+63u)/64u);}
+  if(lid==NB_LIST_C_ACT+1u){
     let nF=count(NB_LIST_F_ALL);let nC=count(NB_LIST_C_ALL);
     fold(NB_ARGS_FC_G1,nF+nC);fold(NB_ARGS_FC_G8,(nF+nC+7u)/8u);fold(NB_ARGS_FC_G64,(nF+nC+63u)/64u);
     atomicStore(&nbSet[NB_H_LIVE_F],nF);atomicStore(&nbSet[NB_H_LIVE_C],nC);

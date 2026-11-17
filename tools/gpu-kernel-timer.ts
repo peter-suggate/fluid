@@ -31,12 +31,13 @@ export function gpuKernelTimer(device: GPUDevice): GPUKernelTimer {
   const wrapEncoder = (encoder: GPUCommandEncoder): GPUCommandEncoder => {
     let querySet: GPUQuerySet | undefined;
     const labels: string[] = [];
-    const open = (descriptor: GPUComputePassDescriptor | undefined): GPUComputePassEncoder => {
+    // A split pass is labelled `<pass label>|<pipeline label>`, so a Metal System Trace of the run names each dispatch.
+    const open = (descriptor: GPUComputePassDescriptor | undefined, name?: string): GPUComputePassEncoder => {
       if (2 * labels.length + 2 > QUERIES) { untimed++; return encoder.beginComputePass(descriptor); }
       querySet ??= device.createQuerySet({ type: "timestamp", count: QUERIES });
       const i = labels.length; labels.push(`${descriptor?.label ?? "pass"} / (no dispatch)`);
       encoder.copyBufferToBuffer(breakSource, 0, breakTarget, 0, 4);
-      return encoder.beginComputePass({ ...descriptor, timestampWrites: { querySet, beginningOfPassWriteIndex: 2 * i, endOfPassWriteIndex: 2 * i + 1 } });
+      return encoder.beginComputePass({ ...descriptor, ...(name ? { label: `${descriptor?.label ?? "pass"}|${name}` } : {}), timestampWrites: { querySet, beginningOfPassWriteIndex: 2 * i, endOfPassWriteIndex: 2 * i + 1 } });
     };
     const beginComputePass = (descriptor?: GPUComputePassDescriptor): GPUComputePassEncoder => {
       // Replaying these query indices on each split overwrites the caller's
@@ -47,7 +48,7 @@ export function gpuKernelTimer(device: GPUDevice): GPUKernelTimer {
       const groups = new Map<number, unknown[]>();
       const dispatch = (run: () => void) => {
         if (dispatched) {
-          current.end(); current = open(descriptor); index = labels.length - 1;
+          current.end(); current = open(descriptor, (pipeline && names.get(pipeline)) ?? pipeline?.label); index = labels.length - 1;
           if (pipeline) current.setPipeline(pipeline);
           for (const [, args] of groups) (current.setBindGroup as (...a: unknown[]) => void)(...args);
         }
