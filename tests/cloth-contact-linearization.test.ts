@@ -78,13 +78,18 @@ test("newton.contactLinearization: 'off' is the module and the layout as they we
     // Headers, patch totals and the pool follow the PCG scalars; the control block is still the last CLOTH_SEGMENT_ALIGN records.
     assert.ok(L.head >= off.newtonRecords - CLOTH_SEGMENT_ALIGN && L.patch >= L.head + N && L.pool >= L.patch + on.pcg.patches);
     assert.ok(on.newtonRecords - CLOTH_SEGMENT_ALIGN >= L.pool + L.records);
+    // 'factorized' adds pcgStep's entry products (a vec4 an entry), after the pool and still before the control block.
+    if (mode === "factorized") assert.ok(L.contrib! >= L.pool + L.records && on.newtonRecords - CLOTH_SEGMENT_ALIGN >= L.contrib! + Math.ceil(L.records / 6));
+    else assert.equal(L.contrib, undefined);
     assert.deepEqual({ ...on, params: 0, topo: 0, newtonRecords: 0, pcg: { ...on.pcg, contactLin: undefined } }, { ...off, params: 0, topo: 0, newtonRecords: 0, pcg: { ...off.pcg, contactLin: undefined } });
     const wgslOff = clothNewtonWGSL(CLOTH_BINDING.newton, 64, true, off.pcg), wgslOn = clothNewtonWGSL(CLOTH_BINDING.newton, 64, true, on.pcg);
     assert.doesNotMatch(wgslOff, /nwLin|LIN_/);
     assert.match(wgslOn, /fn nwLinCount\(/); assert.match(wgslOn, /fn nwLinBuild\(/);
     // The three products (pcgStep, pcgSolve, nwModel) go through the records. pcgStep's has no matrix-free branch: the
     // patches holding a row the pool could not hold are pcgStepOverflow's; pcgSolve and nwModel keep a per-row fallback.
-    assert.equal(wgslOn.split("nwLinRecordsHv(v)").length - 1, 1);
+    // pcgStep's: 'factorized' through the patch's entry products (linPatchEntries, then each row's sum), 'blocks' row by row.
+    assert.equal(wgslOn.split(mode === "factorized" ? "nwLinContribHv(v)" : "nwLinRecordsHv(v)").length - 1, 1);
+    assert.equal(wgslOn.split("linPatchEntries(lane, p);").length - 1, mode === "factorized" ? 1 : 0);
     assert.equal(wgslOn.split("nwLinHv(v)").length - 1, 2);
     assert.equal(wgslOn.split("ogcVertexContactHvLanes(v, 0u, 1u)").length - 1, 2);
     assert.match(wgslOn, /fn pcgStepOverflow\(/); assert.doesNotMatch(wgslOff, /pcgStepOverflow|pcgLinOverflow/);

@@ -94,6 +94,13 @@ export interface ClothContactLinLayout {
   /** Staged partners (the compiled modes' own; absent only through ClothGPUSolverOptions.contactLinearizationAB): the
    * patches' slot keys (vertex + 1, 0 empty; four a vec4 record, slots / 4 records a patch) and the slots a patch. */
   readonly staged?: { readonly keys: number; readonly slots: number };
+  /**
+   * 'factorized' only: one vec4 an entry (records / 6), pcgStep's entry products. A patch's lanes take its entries in
+   * turn (balanced, independent loads), then each row sums its own in entry order: the row-serial loop's terms (every
+   * row within 1e-5 of it, the rounding the compiler's), without a patch waiting on its row with the most entries (that
+   * loop was 47 of pcgStep's 78 us at 150^2; now 16).
+   */
+  readonly contrib?: number;
 }
 /** The linearization's indirect overflow dispatch: group 1 belongs to it. */
 export const CLOTH_CONTACT_LIN_ARGS = { group: 1, binding: 0 } as const;
@@ -129,7 +136,8 @@ export function clothNewtonWGSL(binding: number, workgroup: number, contact: boo
   // keeps its registers out too (one never-taken fallback branch cost 35 us an iteration at 150^2).
   const mg = pcg.multigrid;
   const pcgStepWGSL = (name: string, variant: 'single' | 'compiled' | 'overflow', phase: 'whole' | 'prepare' | 'product' = mg ? 'product' : 'whole') => {
-    const hv = variant === 'compiled' ? 'nwLinRecordsHv(v)' : variant === 'overflow' ? 'ogcVertexContactHvLanes(v, 0u, 1u)' : contactHv;
+    const itemized = variant === 'compiled' && lin?.contrib !== undefined;
+    const hv = itemized ? 'nwLinContribHv(v)' : variant === 'compiled' ? 'nwLinRecordsHv(v)' : variant === 'overflow' ? 'ogcVertexContactHvLanes(v, 0u, 1u)' : contactHv;
     // The overflow kernel's patch: with the indirect count, its workgroups are the last nwg.x patches (from the first marked one).
     const patch = variant === 'overflow' && lin?.overflow === 'indirect' ? 'P.newton3.y - nwg.x + wg.x' : 'wgIndex(wg, nwg)';
     return `// PCG dispatch i (R.range.z, from 0). i = 0: u_0 = M^-1 r_0, w_0 = H u_0 and the partials (r.u, w.u, |g|^2). i >= 1:
@@ -228,7 +236,9 @@ ${phase === 'prepare' ? `}` : `
   pcgStage(lane, u);
   for (var h = lane; h < haloN; h += PCG_PATCH) { pcgStage(PCG_PATCH + h, pcgUGlobal(topo[halo + h])); }${variant === 'compiled' && lin?.staged ? `
   linStageKeys(lane, p);` : ''}
-  workgroupBarrier();
+  workgroupBarrier();${itemized ? `
+  linPatchEntries(lane, p);
+  storageBarrier();` : ''}
   var w = vec3f(0.0);
   if (own) {
     w = pcgRowProduct(lane, K1, K2, blocks, bends);
@@ -1152,7 +1162,8 @@ const LIN_HEAD = ${lin.head}u;
 const LIN_PATCH = ${lin.patch}u;
 const LIN_POOL = ${lin.pool}u;
 const LIN_RECORDS = ${lin.records}u;
-// No record index: a finite f32 pattern (the headers live in a vec4f buffer).
+${lin.contrib !== undefined ? `const LIN_CONTRIB = ${lin.contrib}u;
+` : ''}// No record index: a finite f32 pattern (the headers live in a vec4f buffer).
 const LIN_NONE = 0x7f000000u;
 var<workgroup> linScan: array<u32, PCG_PATCH>;${indirect ? `
 // pcgStepOverflow's indirect dispatch (workgroups, 1, 1): nwLinCount resets it, nwLinBuild's patch that crosses the
@@ -1222,17 +1233,32 @@ fn pcgLinOverflow(lane: u32, p: u32) -> bool {
   if (lane == 0u) { linOver = bitcast<u32>(nw[LIN_PATCH + p].y); }
   return workgroupUniformLoad(&linOver) == LIN_NONE;
 }
+${factorized ? `// One entry's product from its 6 records at b.
+fn linEntry(b: u32) -> vec3f {
+  let ids = bitcast<vec4u>(nw[b]); let wc = nw[b + 1u]; let wl = nw[b + 2u];
+  var q = vec3f(0.0); var ql = vec3f(0.0);
+  for (var k = 0u; k < 4u; k++) {
+    if (wc[k] != 0.0 || wl[k] != 0.0) { let p = ${u}(ids[k]); q += wc[k] * p; ql += wl[k] * p; }
+  }
+  let m0 = nw[b + 3u]; let m1 = nw[b + 4u]; let m2 = nw[b + 5u];
+  return linSym(m0.xyz, vec3f(m0.w, m1.x, m1.y), q) + linSym(vec3f(m1.z, m1.w, m2.x), m2.yzw, ql);
+}${lin.contrib !== undefined ? `
+// Patch p's entry products, its lanes in turn (pcgStep, after its staging barrier); a barrier publishes them.
+fn linPatchEntries(lane: u32, p: u32) {
+  let t = bitcast<vec4u>(nw[LIN_PATCH + p]);
+  for (var e = lane; e < t.x / 6u; e += PCG_PATCH) { nw[LIN_CONTRIB + t.z / 6u + e] = vec4f(linEntry(LIN_POOL + t.z + 6u * e), 0.0); }
+}
+// Row v's sum of its entries' products (linPatchEntries), in entry order.
+fn nwLinContribHv(v: u32) -> vec3f {
+  let h = bitcast<vec4u>(nw[LIN_HEAD + v]); let c = LIN_CONTRIB + (h.x - LIN_POOL) / 6u;
+  var out = vec3f(0.0);
+  for (var i = 0u; i < h.y; i++) { out += nw[c + i].xyz; }
+  return out;
+}` : ''}` : ''}
 fn nwLinRecords(h: vec4u) -> vec3f {
   var out = vec3f(0.0);
   for (var i = 0u; i < h.y; i++) {
-    ${factorized ? `let b = h.x + 6u * i;
-    let ids = bitcast<vec4u>(nw[b]); let wc = nw[b + 1u]; let wl = nw[b + 2u];
-    var q = vec3f(0.0); var ql = vec3f(0.0);
-    for (var k = 0u; k < 4u; k++) {
-      if (wc[k] != 0.0 || wl[k] != 0.0) { let p = ${u}(ids[k]); q += wc[k] * p; ql += wl[k] * p; }
-    }
-    let m0 = nw[b + 3u]; let m1 = nw[b + 4u]; let m2 = nw[b + 5u];
-    out += linSym(m0.xyz, vec3f(m0.w, m1.x, m1.y), q) + linSym(vec3f(m1.z, m1.w, m2.x), m2.yzw, ql);` : `let b = h.x + 2u * i;
+    ${factorized ? `out += linEntry(h.x + 6u * i);` : `let b = h.x + 2u * i;
     let r0 = nw[b]; let r1 = nw[b + 1u];
     out += linSym(r0.xyz, r1.xyz, ${u}(bitcast<u32>(r0.w)));`}
   }
@@ -1315,7 +1341,8 @@ fn linBuildRow(lane: u32, p: u32, rows: u32, patchBase: u32) {
   // The patch's mark (rows take records in prefix order: one does not fit iff the patch's last does not).
   if (lane == 0u) {
     let total = bitcast<u32>(nw[LIN_PATCH + p].x);
-    nw[LIN_PATCH + p].y = bitcast<f32>(select(0u, LIN_NONE, total > 0u && patchBase + total > LIN_RECORDS));${indirect ? `
+    nw[LIN_PATCH + p].y = bitcast<f32>(select(0u, LIN_NONE, total > 0u && patchBase + total > LIN_RECORDS));
+    nw[LIN_PATCH + p].z = bitcast<f32>(patchBase);${indirect ? `
     // The patch that crosses the pool's end is the first marked one: pcgStepOverflow takes it and every later patch.
     if (total > 0u && patchBase <= LIN_RECORDS && patchBase + total > LIN_RECORDS) { linArgs[0] = P.newton3.y - p; }` : ''}
   }

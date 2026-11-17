@@ -454,8 +454,9 @@ export function packClothGPUTables(model: ClothSolverModel, origin: ClothVector,
   const linHead = align(pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN), linPatch = linHead + stride;
   const linKeys = linPatch + pcg.patches, linPool = align(linKeys + (staged ? pcg.patches * linSlots / 4 : 0), CLOTH_SEGMENT_ALIGN);
   const contactLin: ClothContactLinLayout | undefined = linMode === 'off' ? undefined : { mode: linMode, head: linHead, patch: linPatch, pool: linPool, records: linPerVertex * N,
-    overflow: linOverflow, ...(staged ? { staged: { keys: linKeys, slots: linSlots } } : {}) };
-  const newtonControl = align(contactLin ? linPool + contactLin.records : pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN);
+    overflow: linOverflow, ...(staged ? { staged: { keys: linKeys, slots: linSlots } } : {}),
+    ...(linMode === 'factorized' ? { contrib: align(linPool + linPerVertex * N, CLOTH_SEGMENT_ALIGN) } : {}) };
+  const newtonControl = align(contactLin ? (contactLin.contrib !== undefined ? contactLin.contrib + Math.ceil(contactLin.records / 6) : linPool + contactLin.records) : pcgScalars + CLOTH_PCG_SCALARS, CLOTH_SEGMENT_ALIGN);
   // The patch table's relative offsets become absolute: halo and columns (topo words), blocks and bending entries (nw records).
   for (let p = 0; p < pcg.patches; p++) {
     const w = topoBase[10]! + CLOTH_PCG_PATCH_WORDS * p;
