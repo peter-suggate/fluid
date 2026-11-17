@@ -411,6 +411,11 @@ export function createCm12Figure3(): SceneDescription {
     disk(scene, [28, 96], 6),
     disk(scene, [48, 108], 4),
   ];
+  // Brick engine pools (2026-11-18): the balls' splashes spread the pool's surface, so the rule's F (460) latched POOL_F
+  // at frame 79 of the authored 360 steps. Measured over 360 steps with pools to spare: F 683, C 50, particles 43421,
+  // no K. f at 1.5x the peak exceeds the lattice's 16 x 16 x 4 = 1024 bricks, so f is the lattice's count; c and
+  // particles the rule's.
+  scene.fluid.brickPools = { f: 1024, c: 50, b: 16, k: 0, particles: 168192 };
   return scene;
 }
 

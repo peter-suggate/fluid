@@ -997,6 +997,10 @@ export function createDeepPowerHydrostaticScene(): SceneDescription {
 const POWER_DROPLET_BRICK_POOLS: Partial<Record<PowerDropletEdgeCells, { f: number; c: number; b: number; k: number; particles: number }>> = {
   64: { f: 243, c: 18, b: 16, k: 0, particles: 3828 },
   128: { f: 627, c: 50, b: 16, k: 0, particles: 3828 },
+  // 2026-11-18: the rule's F (128) latched POOL_F within 300 steps. With pools to spare over 300 steps: F 452 / 425
+  // (still spreading), C 25 / 22, particles 752 / 753. f at 1.5x the peak; c and particles the rule's.
+  240: { f: 678, c: 128, b: 16, k: 0, particles: 3828 },
+  256: { f: 638, c: 128, b: 16, k: 0, particles: 3828 },
 };
 
 export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): SceneDescription {

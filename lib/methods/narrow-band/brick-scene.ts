@@ -58,9 +58,9 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   // The rigid coupling oracles (lane P, M5; 16^3 padded to 32^3), on their authored pools.
   "rigid-hydrostatic", "rigid-float", "rigid-sink",
   // The closed-cell batch (2026-11-18, 9593bdcc): two 60-step repeats each within the old engine's bar, then the long
-  // run at the authored length (at least 300 steps) on the pool rule's pools with no latch. Held off: letters (+10.7%
-  // at 482 steps, the old engine's long run pending), power-droplet-128 (its film, above), and the long runs' POOL_F
-  // latches (uniform-trough-dam-break, cm12-figure-3, power-droplet-240/256: their pools are measured next).
+  // run at the authored length (at least 300 steps) on the pool rule's pools with no latch. Held off: power-droplet-128
+  // (its film, above), and the long runs' POOL_F latches: uniform-trough-dam-break (on spare pools it latches REACH at
+  // the open top's headroom).
   "interactive-playground", "ocean-seiche", "cm12-figure-2", "nbflip-figure-10-dam",
   "nbflip-figure-4-oscillating-surface", "nbflip-simple-breaking-dam", "nbflip-ramp-basin", "nbflip-analytic-rest-step",
   "thin-droplet-ladder", "thin-sheet-ladder",
@@ -73,6 +73,13 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   "sparse-cm12-ladder-empty-16", "sparse-cm12-ladder-full-16", "sparse-cm12-ladder-planar-interface-16",
   "minimal-power-dam-break", "coarse-first-pool-impact-half", "coarse-first-pool-impact-quarter",
   "sparse-geometric-ritter-dam-break", "symmetric-expansion", "sparse-cm12-symmetric-expansion",
+  // Letters at its authored 482 steps: +10.78% peak / +10.71% final against the old engine's +9.86% (its run's own
+  // gain), inside the bar's 10.86; F 5064 / 9088, no latch. cm12-figure-3 on its authored pools (cm12-paper-scenes.ts).
+  "nbflip-figure-8-letters", "cm12-figure-3",
+  // The 100-cell droplets at 240^3 and 256^3 on their authored pools (scenes.ts POWER_DROPLET_BRICK_POOLS): -92.1% and
+  // -90.7% at 300 steps, the sub-resolution film the 64^3 droplet loses too; the old engine exhausts its page pool at
+  // frame 129 on both.
+  "power-droplet-240", "power-droplet-256",
 ];
 
 /** The air an open top keeps above the container's pages, in cells: one page. */

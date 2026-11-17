@@ -239,6 +239,9 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
   try {
     for (const [id, [f, c, particles]] of Object.entries(want)) {
       const scene = sceneDocument(getSceneDefinition(id));
+      // power-droplet-256 authors its pools since 2026-11-18 (the rule's F latched within 300 steps); the rule is
+      // still the one measured against it, so it is checked with the authored pools removed.
+      if (id === "power-droplet-256") { assert.ok(scene.fluid.brickPools, `${id} authors its pools`); delete scene.fluid.brickPools; }
       assert.equal(scene.fluid.brickPools, undefined, `${id} authors no pools`);
       enabled.push(scene.sceneId!);
       const { setup, gaps } = brickSceneSetup(scene, { timeStep: "sixtieth" });
