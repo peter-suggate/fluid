@@ -986,8 +986,14 @@ fn ncCalm(t:vec3i,s:u32,i:u32)->bool{
 }
 `;
 
-export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean } = {}) {
-  const tiered = opt.tiered ?? true;
+/** A test and diagnostic hold (lane P, coordinator 2026-11-17): the 4h tiles [lo, hi) (tile coordinates, the lattice's
+ * cells / 4) are band and never calm at every census, so a test can force an h region where no rule would (a still
+ * tank's deep liquid: its seams). No scene sets it; absent, the census's text is unchanged (the dam's hashes). */
+export interface BrickCensusHold { readonly lo: readonly [number, number, number]; readonly hi: readonly [number, number, number] }
+
+export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold } = {}) {
+  const tiered = opt.tiered ?? true, hold = opt.hold;
+  if (hold && hold.lo.some((v, a) => !Number.isInteger(v) || !Number.isInteger(hold.hi[a]) || v < 0 || v >= hold.hi[a]! || hold.hi[a]! > L.lattice[a]! / 4)) throw new Error(`setCensus: the hold [${hold.lo.join(",")}] .. [${hold.hi.join(",")}] is not a non-empty box of whole tiles in the lattice`);
   if (L.lattice.some(n => n % 32 !== 0)) throw new Error(`setCensus: the lattice ${L.lattice.join("x")} is not whole pages (32 cells an axis)`);
   // BULK16 (B slots) is M3: a pool may be authored, but a live B slot fails on the GPU (censusBegin, LIVE_B).
   const k = (label: string, bindings: readonly BrickBinding[], body: string) => kernel(L, label, bindings, body);
@@ -1378,7 +1384,9 @@ fn ncJoined(t:vec3i)->bool{
   let j=u32(t.x&1)|(u32(t.y&1)<<1u)|(u32(t.z&1)<<2u);
   return ((atomicLoad(&nbSet[NB_S_TILE_OCC+s])>>(8u+j))&1u)!=0u;
 }
-fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
+${hold ? `// The test hold (BrickCensusHold): band, and not calm, whatever the rules decide.
+fn cdHeld(t:vec3i)->bool{return all(t>=vec3i(${hold.lo.join(",")}))&&all(t<vec3i(${hold.hi.join(",")}));}
+` : ""}fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   let t=xTileOf(cs,i);
   if(!nbTileInLattice(t)){return;}
   // A tiered step's head with the real D (cfg.z = 1, cfg.w = 3: brick-region-heat.wgsl.ts runs): the activity heat
@@ -1421,7 +1429,7 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);
     if(!toCoarse){atomicAdd(&nbSet[NB_H_CENSUS_CALM_HELD],1u);}
   }
-  if(toCoarse){
+${hold ? "  if(cdHeld(t)){band=true;toCoarse=false;}\n" : ""}  if(toCoarse){
     band=false;atomicAdd(&nbSet[NB_H_CENSUS_CALM],1u);
     let tc=NC_S*cs+${CENSUS.TC}u+16u*i;
     if(ncDt()*bitcast<f32>(census[tc+4u])/ncH()>${UNIFORM_TILE_UPDATE_BUDGET_H}){atomicAdd(&nbSet[NB_H_CENSUS_CALM_MOVING],1u);}
@@ -1650,8 +1658,8 @@ fn rpMoved4(cs:u32,i:u32)->bool{
  * workgroups a brick) and the C passes censusCoarse, censusImportance and censusDecide list cAll's (eight a page). */
 /** `heat`: the real D runs (brick-region-heat.wgsl.ts's regionHeat and regionSpread before censusCoarse): the head's
  * deep pass and decide's deep keep and activity heat. Without it D = 0 (the census alone, as the frozen passes). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false) {
-  const c = brickCensusKernels(L, { tiered });
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold) {
+  const c = brickCensusKernels(L, { tiered, ...(hold ? { hold } : {}) });
   const slabs = censusListArgs(cAll, "X8"), replay = tiered && keep && heat;
   return [
     { kernel: c.censusBegin, dispatch: { direct: [1, 1, 1] as const } },
@@ -1668,8 +1676,8 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
 /** The TRIG-only census (the boot's, after the kick, before F's seed): censusBegin through censusImportance as
  * brickCensusSchedule, then censusDecide with cfg.z = 2: TRIG (and CENSUS_TRIGGERED) alone. No band decision, no
  * WANT word, no candidate, no keep mark. */
-export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true) {
-  return brickCensusSchedule(L, list, cAll, fAll, tiered, false).map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
+export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold) {
+  return brickCensusSchedule(L, list, cAll, fAll, tiered, false, false, hold).map(p => (p.kernel.label === "censusDecide" ? { ...p, z: 2, w: 0 } : p));
 }
 /** The indirect word of list k's triple g (as brick-engine.ts places it). */
 export const censusListArgs = (k: number, g: "G1" | "X8") => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });

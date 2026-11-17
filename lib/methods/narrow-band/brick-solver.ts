@@ -25,6 +25,7 @@ import type { RigidBodyState } from "../../core/rigid-body";
 import { FAIL, H, STATE } from "./brick-abi";
 import { SimulationFailureError, type SimulationFailure } from "../../core/simulation-failure";
 import { BrickEngine } from "./brick-engine";
+import type { BrickCensusHold } from "./brick-census.wgsl";
 import { BrickPresentation } from "./brick-present";
 import type { BrickSceneSetup } from "./brick-scene";
 import type { PressureSolverFactory } from "./brick-pressure-slot";
@@ -40,6 +41,8 @@ export interface BrickSolverOptions {
   readonly farPhi_m: number;
   /** Encode the presentation copy after each advance (default true; benches may turn it off). */
   readonly present?: boolean;
+  /** Test and diagnostic only: the engine's census hold (BrickEngineOptions.censusHold). */
+  readonly censusHold?: BrickCensusHold;
 }
 
 export class BrickNBFlipSolver implements GPUSolverInstance {
@@ -64,7 +67,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   static async create(device: GPUDevice, options: BrickSolverOptions): Promise<BrickNBFlipSolver> {
     const s = options.setup;
     const engine = await BrickEngine.create(device, {
-      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}),
+      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), ...(options.censusHold ? { censusHold: options.censusHold } : {}),
       solver: options.solver, stages: options.stages, values: options.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },

@@ -23,7 +23,7 @@ import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type Bric
 import { type PressureSolver, type PressureSolverFactory, validatePressureSolver } from "./brick-pressure-slot";
 import { brickSetKernels, churnGroups } from "./brick-set.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
-import { brickCensusBuffers, brickCensusKernels, brickCensusSchedule, brickTrigCensusSchedule, censusListArgs } from "./brick-census.wgsl";
+import { type BrickCensusHold, brickCensusBuffers, brickCensusKernels, brickCensusSchedule, brickTrigCensusSchedule, censusListArgs } from "./brick-census.wgsl";
 import { brickResidencyKernels } from "./brick-residency.wgsl";
 import { brickTransferSchedule } from "./brick-transfer.wgsl";
 import { brickRegionHeatSchedule } from "./brick-region-heat.wgsl";
@@ -85,6 +85,9 @@ export interface BrickEngineOptions {
   /** Lane P's rigid bodies (M5, A2-A6): setMark's body criterion, bodyStamp at the stamp stage, the ring's body header,
    * and the per-step host sync. Absent: no body kernel or binding (the dam's schedule and text). */
   readonly bodies?: BrickBodiesBinding;
+  /** Test and diagnostic only (brick-census.wgsl.ts BrickCensusHold): 4h tiles every census bands and never calms, to
+   * force an h region (tests/brick-seam-rest.test.ts). No scene sets it; absent, the schedule's text is unchanged. */
+  readonly censusHold?: BrickCensusHold;
   /** The pressure solver at the slot (brick-abi.md §6.1). */
   readonly solver: PressureSolverFactory;
   /** F's stages (brick-abi.md §6.2; brick-stages.ts). */
@@ -254,7 +257,7 @@ export class BrickEngine {
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop">, sources = false): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop">, sources = false, censusHold?: BrickCensusHold): BrickStageSchedule {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
@@ -320,7 +323,7 @@ export class BrickEngine {
     // census, which needs whole pages (every scene's fluid lattice is, sceneFluidBox) and refuses others. With no
     // census there are no residency records, so such a set stays the boot's (stated: no scene runs one).
     const censused = layout.lattice.every(n => n % 32 === 0) || tiered || !stages.bringUp;
-    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep) : [];
+    const census = (keep: boolean) => censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, keep, false, censusHold) : [];
     // The real D (brick-region-heat.wgsl.ts), tiered only: the heat and spread after censusBegin (the head's deep runs
     // in censusCoarse), the WARM promotion in setTransferList (cfg.w = 1), the certificate after the transfer. Its
     // pressureDelta is lane P's PDELTA where the solver publishes it (pmgC), else +Inf.
@@ -333,7 +336,7 @@ export class BrickEngine {
       { kernel: k.certFine, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.X8 } },
       { kernel: k.certError, dispatch: { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.X8 }, w: 1 },
     ]; })() : [];
-    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
+    const headCensus = (): BrickPlacement[] => { const c = censused ? brickCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, true, heat !== undefined, censusHold) : []; return heat ? [c[0]!, ...heat.head, ...c.slice(1)] : c; };
     const transfer = brickTransferSchedule(layout, g1, LIST.C_ALL).map(p => (heat && p.kernel.label === "setTransferList" ? { ...p, w: 1 } : p));
     const want: BrickPlacement[] = tiered ? [{ kernel: brickCensusKernels(layout).censusWant, dispatch: censusListArgs(LIST.C_ALL, "X8") }] : [];
     const churnClear: BrickPlacement = { kernel: set.stepEnd, dispatch: direct(1), z: 1 };
@@ -365,7 +368,7 @@ export class BrickEngine {
     const bootHead = tiered ? [...census(false), ...update(0), ...tail, bootPhi, ...lists(2), ...want, ...commit] : census(false);
     // The first frame's projected half kick (BrickStages.kick, the old host's kickMixedFrame): F's force, the solve,
     // F's after; with F's seed, a TRIG-only census of the kicked state (brickTrigCensusSchedule), then the seed.
-    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered) : [];
+    const trigCensus = censused ? brickTrigCensusSchedule(layout, g1, LIST.C_ALL, LIST.F_ALL, tiered, censusHold) : [];
     // The kick has no last frame, so its seam heads (rowsF's poHeadS: the start's tangential slope) start from the
     // cold prolongation; like the old arena's encodeSolve(kick), it re-solves BRICK_KICK_RESOLVES times from its own
     // pressure (each solve leaves the rows WARM, so the next starts from X), before F's after reads the projection.
@@ -394,7 +397,7 @@ export class BrickEngine {
     const initial = bootBricks(options);
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies, options.sources !== undefined);
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies, options.sources !== undefined, options.censusHold);
     // One pipeline a kernel, compiled concurrently; each module once.
     const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
     // The box hook (M3 padding): every wall token resolved by its builder, and, where the lattice is padded past the

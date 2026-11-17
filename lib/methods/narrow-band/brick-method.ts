@@ -25,6 +25,7 @@ import { brickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import type { BrickStagesFactory } from "./brick-stages";
 import type { NBEngineStatus } from "../../core/webgpu-eulerian";
+import type { BrickCensusHold } from "./brick-census.wgsl";
 
 export const NB_ENGINES = ["auto", "uniform", "brick"] as const;
 export type NBEngine = typeof NB_ENGINES[number];
@@ -68,11 +69,12 @@ export const nbEngineStatusText = (s: NBEngineStatus) =>
     : `Uniform${s.requested === "auto" ? ` (auto: ${s.gap}${(s.gaps ?? 1) > 1 ? `; ${s.gaps! - 1} more` : ""})` : ""}`;
 
 /** The app's brick solver for a scene, or the explicit refusal. */
-export async function createBrickSolver(device: GPUDevice, scene: SceneDescription, values: Readonly<Record<string, unknown>>, quality: GPUQuality): Promise<BrickNBFlipSolver> {
+/** `test` is test and diagnostic only (BrickSolverOptions.censusHold); no scene passes it. */
+export async function createBrickSolver(device: GPUDevice, scene: SceneDescription, values: Readonly<Record<string, unknown>>, quality: GPUQuality, test: { readonly censusHold?: BrickCensusHold } = {}): Promise<BrickNBFlipSolver> {
   const { setup, gaps } = brickSceneSetup(scene, values), lanes = brickEngineLanes();
   if (!setup || gaps.length || lanes.length || !brickFluidStages || !brickPressureSolver) throw brickEngineRefusal(scene, values);
   const stages = brickFluidStages, solver = brickPressureSolver;
   const probe = solver(new BrickLayout({ lattice: setup.lattice, farPhi: setup.farPhi, ...setup.capacities }));
   if (probe.bringUp) throw new Error("NB-FLIP brick engine: the registered pressure solver is the bring-up CG, which no scene may run (coordinator ruling, 2026-11-15)");
-  return BrickNBFlipSolver.create(device, { setup, stages, solver, values, quality, farPhi_m: fluidLatticeFarPhi(scene) });
+  return BrickNBFlipSolver.create(device, { setup, stages, solver, values, quality, farPhi_m: fluidLatticeFarPhi(scene), ...(test.censusHold ? { censusHold: test.censusHold } : {}) });
 }
