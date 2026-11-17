@@ -2165,3 +2165,29 @@ on the 60-step pool.
 **Side observation (parked).** The still tank at fill t 4 (power-fill-256-800 with --fill=4, control 0) seeds 168k records
 in its first 10 steps, then retires them (24k at step 30), in both trees. The t 8 tank holds none. That is the boot's
 calm census.
+
+## 2026-11-17 — still-tank item C landed (71d9b278, landed by lane E)
+
+The tiered boot classifies before it allocates. It claims h bricks only within BRICK_BOOT_BAND = 16 cells of the surface,
+and deeper liquid boots as page-only keys (bootTieredSet). The pool rule's LF covers only the liquid above its rest
+depth (⌈free/32⌉), and bootF = max(boot bricks + pages, resident).
+- Tank: engine 3626 → 1301 MB; peak GPU 5.40 → 2.81 GB (no presentation) and 5.32 → 2.32 GB (with it). The step trace is
+  identical (F 0 from step 1) and the step medians are unchanged (7.5 / 10.6 ms). The old engine peaks at 1.01 GB at
+  3.7–4.1 ms, so the rest of the gap is the GPU boot decision (pools follow the steady state), after A.
+- Gates: every enabled smoke rc 0 with no aborts; rigid hydrostatic, float and sink rc 0; GPU unit tests 34/0. The dam-300
+  paired with e001d490: round 1 both pass; round 2 both miss D5e by the same noise. Step medians 30.68 / 30.70 ms
+  against base's 30.72 / 31.27.
+- Long no-latch runs at E's r27 lengths, highF/peakF against the new f (final drift, r27's in brackets):
+
+  | scene | highF/peakF vs f | final drift (r27) |
+  |---|---|---|
+  | rest 300 | 180/180 vs 282 | −0.12% (−0.12) |
+  | standing-wave 300 | 200/200 vs 319 | −0.38% (−0.38) |
+  | analytic dam 300 | 254/251 vs 384 | +1.56% (+1.54) |
+  | mound 300 | 278/272 vs 338 | +1.33% (+1.27) |
+  | fig-5 360 | 2255/2234 vs 2366 | +1.70% (+1.82) |
+  | fig-6 360 | 1551/1535 vs 1845 | +2.65% (+2.82) |
+  | pool-impact 300 | 2086/2058 vs 3003 | +1.22% (+1.23) |
+
+- Profiling note: the shared tools/gpu-kernel-timer.ts is accurate, within 1–8% on direct and indirect dispatches. An
+  earlier 18× under-report was my scratch copy's divisor.
