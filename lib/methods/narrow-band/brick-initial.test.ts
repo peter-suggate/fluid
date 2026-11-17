@@ -19,7 +19,7 @@ import { getSceneDefinition } from "../../core/scenes";
 import { fluidLatticeCellVolumes, fluidLatticeVertexPhi } from "../../core/initial-liquid-lattice";
 import { uniformInitialLiquidVelocity } from "../uniform/uniform-volume-initial";
 import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
-import { BrickEngine, bootBricks, bootPhiAt, initialPhiPages, type BrickEngineOptions, type BrickInitialPhi, type Vec3 } from "./brick-engine";
+import { BrickEngine, bootBricks, bootPhiAt, bootTieredSet, initialPhiPages, type BrickEngineOptions, type BrickInitialPhi, type Vec3 } from "./brick-engine";
 import { BRICK_ENGINE_SCENES, brickSceneSetup } from "./brick-scene";
 import { bootParticleCount, brickInitialLiquid, brickInitialPhi, brickInitialVelocity, closedFormLiquid } from "./brick-initial";
 import type { BrickStagesFactory } from "./brick-stages";
@@ -69,8 +69,10 @@ test("brick initial: the dam keeps its closed form; a table of its own values bo
   const closed = brickInitialLiquid(scene, o);
   assert.equal(closed.initial, undefined);
   assert.equal(closed.liquid.length, 1);
-  const table = tableOf(o.lattice, closed.liquid, closed.bricks);
-  assert.deepEqual(bootBricks({ ...o, liquid: [], initial: table }), closed.bricks);
+  const all = bootBricks({ ...o, liquid: closed.liquid }), table = tableOf(o.lattice, closed.liquid, all);
+  assert.deepEqual(bootBricks({ ...o, liquid: [], initial: table }), all);
+  // The tiered boot (bootTieredSet): the same bricks and page-only candidates from either form.
+  assert.deepEqual(bootTieredSet({ ...o, liquid: [], initial: table }), { bricks: closed.bricks, pages: closed.pages });
 });
 
 /** The closed form's own vertex φ (bootPhiAt) as a table over the boot bricks' pages, grown by one page. */
@@ -150,7 +152,7 @@ function sceneOptions(id: string, v0?: { x: number; y: number; z: number }, stag
   const o = { lattice, h_m, dt_s: scene.numerics.fixedDt_s ?? 1 / 60, gravity_mps2: [g.x, g.y, g.z] as Vec3 }, band = scene.fluid.brickTiers?.particleBandDepth ?? 3;
   const start = brickInitialLiquid(scene, o), seeds = bootParticleCount({ lattice, liquid: start.liquid, initial: start.initial }, start.bricks, band);
   const fPages = new Set(start.bricks.map(k => [k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023].map(v => v >> 2).join(","))).size;
-  const p = scene.fluid.brickPools ?? { f: 3 * start.bricks.length + 64, c: start.pages.length + 3 * fPages + 8, b: 16, k: 0, particles: Math.max(3 * seeds, 65536) };
+  const p = scene.fluid.brickPools ?? { f: 3 * start.bricks.length + start.pages.length + 64, c: start.pages.length + 3 * fPages + 8, b: 16, k: 0, particles: Math.max(3 * seeds, 65536) };
   return {
     ...o, capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles }, liquid: start.liquid, initial: start.initial,
     initialVelocity: brickInitialVelocity(scene, lattice), solver: compositeMGPCG(), stages, values, particles: { bandDepth: band },

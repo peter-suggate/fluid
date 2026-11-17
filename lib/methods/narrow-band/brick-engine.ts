@@ -153,8 +153,19 @@ export function bootPhiAt(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPh
   return v => v.some((x, a) => x > wall[a]!) ? far : Math.min(far, ...boxes.map(box => boxDistance(v, box)));
 }
 
-/** The initial bricks: the reach set of the initial liquid's vertices (boxes or table), at rest. */
-export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2" | "sources">): number[] {
+/**
+ * The tiered boot's band, in cells (lane F, the still-tank item C, 2026-11-17): only the liquid vertices within it of
+ * the surface (φ > −BRICK_BOOT_BAND) source the tiered boot's F bricks; the liquid deeper than it boots in C pages
+ * (bootTieredSet). It is the reach of the engine's first residency past a liquid tile (brickInitialExtent's two-brick
+ * ring: the h ring's tiles, the particle and seed classes, ≤ 16 cells). A brick the boot's census wants past it (a
+ * body's or a static cut's ring, a trigger deeper than the band) is the census's candidate, claimed by the boot's head
+ * (bootHead's update), as at every step's head.
+ */
+export const BRICK_BOOT_BAND = 16;
+
+/** Each candidate brick's box of liquid vertices (local coordinates), all of them and those within `band` of the
+ * surface (φ > −band), with the candidate bricks: the boxes or table's bricks and a brick about each box. */
+function bootLiquidBoxes(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">, band: number) {
   if (o.initial && o.liquid.length) throw new Error("Brick engine: the initial liquid is boxes or a table, not both");
   const nb = bricksPerAxis(o.lattice), f32 = (b: BrickLiquidBox): BrickLiquidBox => ({ lo: o.lattice.map((_, a) => Math.fround(b.lo[a]!)) as unknown as Vec3, hi: o.lattice.map((_, a) => Math.fround(b.hi[a]!)) as unknown as Vec3 });
   const boxes = o.liquid.map(f32), candidates = new Map<number, Vec3>(), at = bootPhiAt(o);
@@ -173,25 +184,61 @@ export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "box" | "farP
     const lo = [0, 1, 2].map(a => Math.max(Math.floor(box.lo[a]! / 8) - 1, 0)), hi = [0, 1, 2].map(a => Math.min(Math.floor(box.hi[a]! / 8) + 1, nb[a]! - 1));
     for (let z = lo[2]!; z <= hi[2]!; z++) for (let y = lo[1]!; y <= hi[1]!; y++) for (let x = lo[0]!; x <= hi[0]!; x++) candidates.set(brickKey(x, y, z), [x, y, z]);
   }
-  const liquid = (b: Vec3) => {
-    let lo = [8, 8, 8], hi = [-1, -1, -1];
+  type Box = { lo: Vec3; hi: Vec3 } | undefined;
+  const all = new Map<number, Box>(), near = new Map<number, Box>();
+  for (const [k, b] of candidates) {
+    let lo = [8, 8, 8], hi = [-1, -1, -1], nlo = [8, 8, 8], nhi = [-1, -1, -1];
     for (let l = 0; l < 512; l++) {
       const c = [l & 7, (l >> 3) & 7, l >> 6], v = [0, 1, 2].map(a => 8 * b[a]! + c[a]!) as unknown as Vec3;
       if (v.some((x, a) => x > o.lattice[a]!)) continue;
-      const d = Math.min(PHI_AIR, at(v));
-      if (Math.fround(d) < 0) { lo = lo.map((m, a) => Math.min(m, c[a]!)); hi = hi.map((m, a) => Math.max(m, c[a]!)); }
+      const d = Math.fround(Math.min(PHI_AIR, at(v)));
+      if (d < 0) {
+        lo = lo.map((m, a) => Math.min(m, c[a]!)); hi = hi.map((m, a) => Math.max(m, c[a]!));
+        if (d > -band) { nlo = nlo.map((m, a) => Math.min(m, c[a]!)); nhi = nhi.map((m, a) => Math.max(m, c[a]!)); }
+      }
     }
-    return hi[0]! < 0 ? undefined : { lo: lo as unknown as Vec3, hi: hi as unknown as Vec3 };
-  };
-  const set = new Set(reachSet(o.lattice, candidates.values(), liquid, () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2));
-  // The first step's drop (brick-source.ts): its box's bricks are resident before that step's census, as the step
-  // before a later drop's head claims them (resSource; the old kick's commit stored the first drop's pages).
-  const first = o.sources ? brickDropDue(o.sources, 0, o.dt_s) : -1;
-  if (first >= 0) {
-    const [lo, hi] = o.sources!.drops[first]!.box;
-    for (let z = lo[2] >> 3; z <= (hi[2] - 1) >> 3; z++) for (let y = lo[1] >> 3; y <= (hi[1] - 1) >> 3; y++) for (let x = lo[0] >> 3; x <= (hi[0] - 1) >> 3; x++) set.add(brickKey(x, y, z));
+    all.set(k, hi[0]! < 0 ? undefined : { lo: lo as unknown as Vec3, hi: hi as unknown as Vec3 });
+    near.set(k, nhi[0]! < 0 ? undefined : { lo: nlo as unknown as Vec3, hi: nhi as unknown as Vec3 });
   }
+  return { candidates, all, near };
+}
+
+/** The first step's drop (brick-source.ts): its box's bricks are resident before that step's census, as the step
+ * before a later drop's head claims them (resSource; the old kick's commit stored the first drop's pages). */
+function addFirstDrop(o: Pick<BrickEngineOptions, "dt_s" | "sources">, set: Set<number>) {
+  const first = o.sources ? brickDropDue(o.sources, 0, o.dt_s) : -1;
+  if (first < 0) return;
+  const [lo, hi] = o.sources!.drops[first]!.box;
+  for (let z = lo[2] >> 3; z <= (hi[2] - 1) >> 3; z++) for (let y = lo[1] >> 3; y <= (hi[1] - 1) >> 3; y++) for (let x = lo[0] >> 3; x <= (hi[0] - 1) >> 3; x++) set.add(brickKey(x, y, z));
+}
+
+/** The initial bricks: the reach set of the initial liquid's vertices (boxes or table), at rest (the all-h boot). */
+export function bootBricks(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2" | "sources">): number[] {
+  const { candidates, all } = bootLiquidBoxes(o, 0);
+  const set = new Set(reachSet(o.lattice, candidates.values(), b => all.get(brickKey(b[0], b[1], b[2])), () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2));
+  addFirstDrop(o, set);
   return [...set].sort((a, b) => a - b);
+}
+
+/**
+ * The tiered boot's candidates (lane F, the still-tank item C, 2026-11-17): the boot classifies before it allocates.
+ * - bricks: the reach set of the liquid vertices within BRICK_BOOT_BAND of the surface (and the first drop's), the F
+ *   bricks the boot claims h-owned. The all-h boot's set (bootBricks) also holds every deeper liquid brick, which the
+ *   first head's census and residency then retire whole (bulk-rest-tank: 17952 F bricks at the boot, 0 from step 1).
+ * - pages: page-only candidates (KEY_PAGE): every page of bootBricks' set that holds none of these bricks (the deep
+ *   liquid, in C from t = 0: bootPhi writes the same analytic φ to C, at rest or the initial velocity), then the
+ *   corner pages of all of them (bootCornerPages). So the boot's C pages are the all-h boot's, and only its F differs.
+ */
+export function bootTieredSet(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial" | "dt_s" | "h_m" | "gravity_mps2" | "sources">): { bricks: number[]; pages: number[] } {
+  const { candidates, all, near } = bootLiquidBoxes(o, BRICK_BOOT_BAND);
+  const reach = (boxes: typeof all) => new Set(reachSet(o.lattice, candidates.values(), b => boxes.get(brickKey(b[0], b[1], b[2])), () => 0, () => false, o.dt_s, o.h_m, o.gravity_mps2));
+  const full = reach(all), band = reach(near);
+  addFirstDrop(o, full); addFirstDrop(o, band);
+  const bricks = [...band].sort((a, b) => a - b);
+  const pageOf = (k: number) => brickKey(...([k & 1023, (k >>> 10) & 1023, (k >>> 20) & 1023].map(v => v >> 2) as [number, number, number]));
+  const held = new Set(bricks.map(pageOf)), own = [...new Set([...full].map(pageOf))];
+  const deep = own.filter(p => !held.has(p)).map(p => (brickKey(4 * (p & 1023), 4 * ((p >>> 10) & 1023), 4 * ((p >>> 20) & 1023)) | KEY_PAGE) >>> 0);
+  return { bricks, pages: [...deep, ...bootCornerPages(o.lattice, [...full])].sort((a, b) => a - b) };
 }
 
 /**
@@ -399,8 +446,11 @@ export class BrickEngine {
     validatePressureSolver(solver);
     const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources });
     validateBrickStages(stages);
-    const initial = bootBricks(options);
+    // The boot's candidates (an f-long list): tiered, bootTieredSet's bricks and page-only keys; all-h, bootBricks.
+    const boot = stages.tiered === true ? bootTieredSet(options) : { bricks: bootBricks(options), pages: [] };
+    const initial = boot.bricks;
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
+    if (initial.length + boot.pages.length > layout.cap.f) throw new Error(`Brick engine: the boot's ${initial.length} bricks and ${boot.pages.length} page-only candidates overrun its candidate list (scene.fluid.brickPools.f = ${layout.cap.f})`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
     const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies, options.sources !== undefined, options.censusHold);
     // One pipeline a kernel, compiled concurrently; each module once.
@@ -434,7 +484,7 @@ export class BrickEngine {
       compileMs[k.label] = performance.now() - t0;
     }));
     const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
-    engine.allocate(stages.tiered === true ? [...initial, ...bootCornerPages(options.lattice, initial)] : initial);
+    engine.allocate([...initial, ...boot.pages]);
     engine.record();
     engine.boot();
     engine.encodeAhead();

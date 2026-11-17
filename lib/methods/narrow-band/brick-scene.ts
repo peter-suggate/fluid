@@ -23,7 +23,7 @@ import { brickRigidBodyGaps } from "./bodies-host";
 import type { BrickInitialPhi, BrickLiquidBox, Vec3 } from "./brick-engine";
 import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
 import { brickSources, type BrickSources } from "./brick-source";
-import { bootPhiAt, type BrickEngineOptions } from "./brick-engine";
+import { BRICK_BOOT_BAND, bootPhiAt, type BrickEngineOptions } from "./brick-engine";
 
 /** Scenes the brick engine takes: M2's dam, and the first enabled batch (lane E, 2026-11-17: 60 steps against the old
  * engine from a frozen 0a81b19e, each brick |peak| and |final| volume drift within the old engine's worst repeat plus
@@ -155,7 +155,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // Pools: the scene's authored brickPools, else the sizing rule (brickPoolRule) from the boot. Either way they are fixed:
   // an overrun latches FAIL.POOL / PARTICLES and is never grown.
   const extent = brickInitialExtent({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial });
-  const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
+  // The boot's candidates (its F bricks and page-only keys) fill an f-long list (BrickEngine.create).
+  const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length + start.pages.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
   // The body stages take a K slot a body brick (A5): a scene with bodies authors brickPools.k from its NEAR_BODY peak.
   if ((scene.rigidBodies?.length ?? 0) > 0 && !(p.k > 0)) return { gaps: [...gaps, "rigid bodies need K slots: author brickPools.k from the NEAR_BODY peak"] };
   return {
@@ -172,22 +173,34 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
 /** The initial liquid's volume in cells (vertices with φ < 0 inside the container) and its top (one past the highest
  * such vertex's y), from the boot's own φ (bootPhiAt: the closed form or the page table). A brick whose centre φ is
  * past its half-diagonal (√3·4 < 7 cells) is wholly in or out and counts without its cells.
- * `resident` is the boot's residency: the liquid bricks dilated by two bricks a side (Chebyshev), within the window.
- * The engine's first residency is that set (the h ring's tiles, the particle and seed classes: ≤ 16 cells past a
- * liquid tile; the free fall's step-1 F box, 210 bricks, is exactly it), where the boot's own brick list (100) is not. */
-export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; drop: number; resident: number } {
+ * `resident` is the tiered boot's first residency: the liquid bricks within BRICK_BOOT_BAND of the surface (a vertex
+ * with φ > −band; bootTieredSet's sources) dilated by two bricks a side (Chebyshev), within the window. The engine's
+ * first residency is that set (the h ring's tiles, the particle and seed classes: ≤ 16 cells past a liquid tile; the
+ * free fall's step-1 F box, 210 bricks, is exactly it), where the boot's own brick list (100) is not. The deeper
+ * liquid is C from the boot (lane F, the still-tank item C, 2026-11-17).
+ * `free` is the liquid above its rest depth (cells whose centre lies above V / floor cells): the liquid with
+ * potential energy to spend, the only liquid that can spread (brickPoolRule's LF).
+ */
+export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "liquid" | "initial">): { cells: number; top: number; drop: number; resident: number; free: number } {
   // Over the container's cells (the box: a padded lattice's cells past it are wall).
   const at = bootPhiAt(o), n = o.box ?? o.lattice, nb = n.map(v => Math.floor(v / 8) + 1), liquid: [number, number, number][] = [];
+  const rows = new Float64Array(n[1]!);
   let cells = 0, top = 0, bot = Infinity;
   for (let bz = 0; 8 * bz < n[2]; bz++) for (let by = 0; 8 * by < n[1]; by++) for (let bx = 0; 8 * bx < n[0]; bx++) {
     const lo = [8 * bx, 8 * by, 8 * bz], hi = lo.map((v, a) => Math.min(v + 8, n[a]!)), centre = at([lo[0]! + 4, lo[1]! + 4, lo[2]! + 4]);
     if (centre >= 7) continue;
-    if (centre <= -7 && hi.every((v, a) => v - lo[a]! === 8)) { cells += 512; top = Math.max(top, hi[1]!); bot = Math.min(bot, lo[1]!); liquid.push([bx, by, bz]); continue; }
-    let wet = false;
-    for (let z = lo[2]!; z < hi[2]!; z++) for (let y = lo[1]!; y < hi[1]!; y++) for (let x = lo[0]!; x < hi[0]!; x++) {
-      if (at([x, y, z]) < 0) { cells++; top = Math.max(top, y + 1); bot = Math.min(bot, y); wet = true; }
+    if (centre <= -7 && hi.every((v, a) => v - lo[a]! === 8)) {
+      cells += 512; top = Math.max(top, hi[1]!); bot = Math.min(bot, lo[1]!); for (let y = lo[1]!; y < hi[1]!; y++) rows[y] += 64;
+      // Wholly liquid: within the band where its centre is (the half-diagonal past −band reaches φ > −band).
+      if (centre > -BRICK_BOOT_BAND - 7) liquid.push([bx, by, bz]);
+      continue;
     }
-    if (wet) liquid.push([bx, by, bz]);
+    let wet = false, near = false;
+    for (let z = lo[2]!; z < hi[2]!; z++) for (let y = lo[1]!; y < hi[1]!; y++) for (let x = lo[0]!; x < hi[0]!; x++) {
+      const d = at([x, y, z]);
+      if (d < 0) { cells++; rows[y]++; top = Math.max(top, y + 1); bot = Math.min(bot, y); wet = true; if (d > -BRICK_BOOT_BAND) near = true; }
+    }
+    if (wet && near) liquid.push([bx, by, bz]);
   }
   const resident = new Set<number>();
   for (const [bx, by, bz] of liquid) for (let dz = -2; dz <= 2; dz++) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
@@ -195,20 +208,24 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
     if (x >= 0 && y >= 0 && z >= 0 && x < nb[0]! && y < nb[1]! && z < nb[2]!) resident.add(x + nb[0]! * (y + nb[1]! * z));
   }
   // The drop: the liquid's lowest cell above its rest depth (its cells spread over the box's floor), in cells.
-  const drop = cells > 0 ? bot - cells / (n[0]! * n[2]!) : 0;
-  return { cells, top, drop, resident: resident.size };
+  const rest = cells / (n[0]! * n[2]!), drop = cells > 0 ? bot - rest : 0;
+  let free = 0;
+  for (let y = 0; y < n[1]!; y++) if (y + 0.5 > rest) free += rows[y]!;
+  return { cells, top, drop, resident: resident.size, free };
 }
 
 /**
  * The pool sizing rule (progress-lane-e.md, 2026-11-17, measured against nine scenes' peaks) for a scene with no
- * authored brickPools. n is the lattice in cells; the liquid's cells V and top come from the boot; bootF is the boot's F
- * residency (brickInitialExtent's `resident`, at least the boot's brick list) and bootP the boot seeds' bound
- * (bootParticleCount).
+ * authored brickPools. n is the lattice in cells; the liquid's cells V, top, drop and free come from the boot; bootF is
+ * the boot's F residency (brickInitialExtent's `resident`, at least the tiered boot's candidates: its bricks and
+ * page-only keys, bootTieredSet) and bootP the boot seeds' bound (bootParticleCount).
  * - The window is the hard cap: WF = Π(n/8 + 1), WC = Π(n/32 + 1).
  * - Energy: no liquid rises past twice its initial top plus a ring: EF = floorF·min(n_y/8 + 1, ⌈2 top/8⌉ + 2),
  *   EC = floorC·min(n_y/32 + 1, ⌈2 top/32⌉ + 1), floor* the window's x·z.
- * - Spread: a film 1/16 cell thick over the floor, four brick layers deep (SF = 4 min(floorF, ⌈V/4⌉)); every liquid
- *   brick at least 1/16 full (LF = ⌈V/32⌉); the boot's bricks with a quarter's margin; 128 bricks at least.
+ * - Spread: a film 1/16 cell thick over the floor, four brick layers deep (SF = 4 min(floorF, ⌈V/4⌉)); every brick
+ *   of the liquid that can spread at least 1/16 full (LF = ⌈free/32⌉, free the liquid above its rest depth: tiered, the
+ *   liquid below it stays C unless the liquid above reaches it, and a still tank has none; lane F, the still-tank item
+ *   C, 2026-11-17; free = V where absent); the boot's candidates with a quarter's margin; 128 bricks at least.
  *   A small liquid with no tension thins past 1/16 cell as it spreads (the 100-cell droplets: F 162 / 418 / 452 at
  *   64^3 / 128^3 / 256^3 by step 300, every brick a wet floor brick or its ring; the rule's 128 latched POOL_F near
  *   step 100). The spread is time-bound, not closed-form, so such a scene authors brickPools from its long run.
@@ -234,12 +251,12 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
  *   change (falling-water-torus listed 251 > 2·125 at step 3). Its xfer scratch is 3 KB a tile, so 4096 is 12.6 MB.
  */
 export const BRICK_SPLASH_DROP = 16;
-export function brickPoolRule(n: Vec3, liquid: { cells: number; top: number; drop: number }, bootF: number, bootP: number): BrickCapacities {
+export function brickPoolRule(n: Vec3, liquid: { cells: number; top: number; drop: number; free?: number }, bootF: number, bootP: number): BrickCapacities {
   const nb = n.map(v => Math.floor(v / 8)), np = n.map(v => Math.floor(v / 32));
   const floorF = (nb[0]! + 1) * (nb[2]! + 1), floorC = (np[0]! + 1) * (np[2]! + 1);
   const WF = floorF * (nb[1]! + 1), WC = floorC * (np[1]! + 1);
   const EF = floorF * Math.min(nb[1]! + 1, Math.ceil(2 * liquid.top / 8) + 2), EC = floorC * Math.min(np[1]! + 1, Math.ceil(2 * liquid.top / 32) + 1);
-  const V = liquid.cells, SF = 4 * Math.min(floorF, Math.ceil(V / 4)), LF = Math.ceil(V / 32);
+  const V = liquid.cells, SF = 4 * Math.min(floorF, Math.ceil(V / 4)), LF = Math.ceil((liquid.free ?? V) / 32);
   const splash = liquid.drop >= BRICK_SPLASH_DROP, SPF = splash ? 10 * Math.min(floorF, Math.ceil(1.5 * V / 64)) : 0, SPP = splash ? Math.ceil(10 * V) : 0;
   const f = Math.min(WF, EF, Math.max(SF, LF, Math.ceil(1.25 * bootF), 128, SPF));
   const c = Math.min(WC, EC, f);

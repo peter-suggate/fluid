@@ -21,7 +21,7 @@ import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { sceneHasTerrain } from "../../core/terrain";
 import { proceduralSolidField } from "../../core/procedural-solid";
 import { phiFar } from "./brick-abi";
-import { type BrickEngineOptions, type BrickInitialPhi, type BrickLiquidBox, type Vec3, bootBricks, bootCornerPages, bootPhiAt, initialPhiPages } from "./brick-engine";
+import { type BrickEngineOptions, type BrickInitialPhi, type BrickLiquidBox, type Vec3, bootPhiAt, bootTieredSet, initialPhiPages } from "./brick-engine";
 
 /** Whether the scene's t = 0 liquid is the closed form: a plain dam-break box or tank-fill slab (fillFraction > 0),
  * nothing else, and no closed cell (voxels, terrain, a procedural solid) to bury a vertex. */
@@ -100,9 +100,10 @@ export interface BrickInitialLiquid {
   /** The closed form (empty with `initial`). */
   readonly liquid: readonly BrickLiquidBox[];
   readonly initial?: BrickInitialPhi;
-  /** The boot's F bricks (bootBricks: the reach set of the liquid's vertices, at rest), ascending keys. */
+  /** The tiered boot's F bricks (bootTieredSet: the reach set of the liquid vertices within BRICK_BOOT_BAND of the
+   * surface, at rest), ascending keys. */
   readonly bricks: readonly number[];
-  /** Tiered, the boot's page-only candidates besides its bricks' pages (bootCornerPages). */
+  /** The tiered boot's page-only candidates (bootTieredSet: the deep liquid's pages and the corner pages). */
   readonly pages: readonly number[];
 }
 
@@ -116,8 +117,7 @@ function containerCells(scene: SceneDescription, box: Vec3): Vec3 {
 export function brickInitialLiquid(scene: SceneDescription, o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi" | "h_m" | "dt_s" | "gravity_mps2">): BrickInitialLiquid {
   const box = o.box ?? o.lattice;
   const form = closedFormLiquid(scene) ? { liquid: [closedFormBox(scene, containerCells(scene, box))] } : { liquid: [], initial: brickInitialPhi(scene, o.lattice, o.h_m, o.farPhi, box) };
-  const bricks = bootBricks({ ...o, ...form });
-  return { ...form, bricks, pages: bootCornerPages(o.lattice, bricks) };
+  return { ...form, ...bootTieredSet({ ...o, ...form }) };
 }
 
 /**
