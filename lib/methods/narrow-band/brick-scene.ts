@@ -195,6 +195,9 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
  *   EC = floorC·min(n_y/32 + 1, ⌈2 top/32⌉ + 1), floor* the window's x·z.
  * - Spread: a film 1/16 cell thick over the floor, four brick layers deep (SF = 4 min(floorF, ⌈V/4⌉)); every liquid
  *   brick at least 1/16 full (LF = ⌈V/32⌉); the boot's bricks with a quarter's margin; 128 bricks at least.
+ *   A small liquid with no tension thins past 1/16 cell as it spreads (the 100-cell droplets: F 162 / 418 / 452 at
+ *   64^3 / 128^3 / 256^3 by step 300, every brick a wet floor brick or its ring; the rule's 128 latched POOL_F near
+ *   step 100). The spread is time-bound, not closed-form, so such a scene authors brickPools from its long run.
  * - Splash (lane E, 2026-11-17; EMPIRICAL, fitted to five measured peaks, not derived): a scene whose liquid starts
  *   two bricks or more above its rest depth (drop ≥ 16 cells, brickInitialExtent) splashes over the floor on impact.
  *   SPF = 10·min(floorF, ⌈1.5 V/64⌉): eight brick layers with the quarter's margin, over the floor or, for a small

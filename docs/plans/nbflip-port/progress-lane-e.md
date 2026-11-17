@@ -2760,3 +2760,39 @@ The brick engine does the same with fixed storage:
   top.
 - The enabled scenes' kernel text (P's kernel-hashes.mts, 16 scenes) is identical: the latch is only emitted when the
   top is open.
+
+## 2026-11-17 — the long no-latch run (r27), the droplets' film, and their authored pools
+
+**The rule** (main, 2026-11-17): every batch now includes a long no-latch run, each enabled scene for max(authored, 300)
+steps on its own pools. r27 ran the 21 enabled scenes on frozen e001d490 (rigid scenes with their roster on 29d53bbc),
+timing slot, rc and 00000206 checked after each run: none invalid.
+
+**Result.** 18 of 21 ran clean. The three 100-cell scenes latched POOL_F on the rule's f = 128: power-droplet-64 at
+frame 103, power-droplet-128 and power-fill-256-100 at frame 99.
+- Peaks against pools, for the clean runs: high-resolution-dam-break (1200 steps) F 4110/4913, C 125/125 (the window);
+  cm12-figure-5 2196/4913; -6 1591/2943; -7-256 8398/10890; -9 2391/2601 with C 75/75 (the window);
+  mass-conserving-figure-9 2215/2601; coarse-first-pool-impact 2042/3757 with C 95/100; the analytic set 180-280/360-405;
+  the 32^3 / 64^3 dams and the torus at their windows (125, 729, 125). Particles at most 59% of a pool.
+- The rigid scenes (smoke2 with initializeRigidBodies' roster; the bare smoke latched LIST|UNSUPPORTED at frame 0 for
+  want of the roster): hydrostatic and float F 27/41, K 8/12, drift 0 / +0.14%; sink F 36/54, K 12/18, particles
+  5430/8669, final +1.01%.
+
+**The droplets' F growth is a real film, not a residency leak.** A probe (pool f 1024-2048, every 10 steps) split the
+resident bricks by class and adjacency:
+- Every wet brick (LIQUID, SURFACE or PARTICLES) is on the floor layer (brick y = 0), from step 10 to 300.
+- Every other resident brick is within one brick of a wet one; the orphans are 0, with at most 8 for a step (the keep's
+  linger).
+- At 64^3 the wet footprint grows from 2x2 bricks to the whole 8x8 floor by step 90-150, and F plateaus at 162 (63 wet
+  plus their ring) from step 150. At 128^3 and 256^3 it is still spreading at step 300: 16x16 and 20x17 bricks, F 418
+  and 452.
+- The particles stay about 740 while the footprint grows, so the film thins to 12 a brick (0.2 a cell) at 64^3. At 128^3
+  and 256^3 they fall to about 440-480 by step 300, and the φ volume to -87% / -90%.
+- The old engine shows the same film at 64^3: +50% at step 55, then -77% at step 300 (its φ measure). The brick engine
+  is at -19%.
+So the inviscid, tension-free droplet spreads over the floor as both engines model it. The pool rule's spread term
+assumes a film 1/16 cell thick, and this one is about 1/46.
+
+**Fix.** The three scenes author brickPools at 1.5x the measured peak (P's convention for the rigid scenes):
+power-droplet-64 f 243, power-droplet-128 f 627, power-fill-256-100 f 678. Their c and particles are the rule's, and t
+is the layout's 2 f. The pool rule's comment records why: a tension-free small liquid's spread is time-bound, not
+closed-form. The rule's table test drops power-droplet-64.

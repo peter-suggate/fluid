@@ -327,6 +327,10 @@ export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDe
   scene.fluid.surfaceTension_N_m = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
   scene.solidVoxels = [...solidVoxelShellForScene(scene), ...scene.solidVoxels];
+  // Brick engine pools (lane E, 2026-11-17): the 100-cell fill spreads into a film as the droplets do
+  // (createPowerDropletScene), and the rule's F (128) latched POOL_F near step 100. Measured over 300 steps with pools
+  // to spare: F 452 (still spreading), C 24, particles 741. f at 1.5x the peak; c and particles the rule's (t the layout's 2 f).
+  if (liquidCells === 100) scene.fluid.brickPools = { f: 678, c: 128, b: 16, k: 0, particles: 3828 };
   return scene;
 }
 
@@ -985,6 +989,12 @@ export function createDeepPowerHydrostaticScene(): SceneDescription {
 }
 
 
+/** The brick engine's measured pools of the enabled droplets (createPowerDropletScene). */
+const POWER_DROPLET_BRICK_POOLS: Partial<Record<PowerDropletEdgeCells, { f: number; c: number; b: number; k: number; particles: number }>> = {
+  64: { f: 243, c: 18, b: 16, k: 0, particles: 3828 },
+  128: { f: 627, c: 50, b: 16, k: 0, particles: 3828 },
+};
+
 export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): SceneDescription {
   const scene = sceneBody();
   scene.sceneId = `power-droplet-${edgeCells}`;
@@ -1012,6 +1022,13 @@ export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): Scene
   delete scene.fluid.inflow;
   scene.fluid.surfaceTension_N_m = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
+  // Brick engine pools (lane E, 2026-11-17): the droplet spreads, with no tension, into a film over the floor that thins
+  // past the pool rule's 1/16 cell, so the rule's F (128) latched POOL_F near step 100. Measured over 300 steps (5x the
+  // authored second at the brick engine's 1/60) with pools to spare: F 162 at 64^3 (the whole floor, 64 wet bricks and
+  // their ring, from step 150) and 418 at 128^3 (still spreading at step 300); C 9 / 21, particles 747. f at 1.5x the
+  // peak; c and particles the rule's (t the layout's 2 f).
+  const pools = POWER_DROPLET_BRICK_POOLS[edgeCells];
+  if (pools) scene.fluid.brickPools = { ...pools };
   return scene;
 }
 
