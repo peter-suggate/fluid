@@ -2821,3 +2821,19 @@ every tile of a cut brick at h.
 - A column standing in the water latched 0xa2 (P's operator: a liquid row in a static solid cell) within one step.
   That is the next work, phiSolid and pSolid; the regression keeps the solids out of the liquid until then.
 - The 21 enabled scenes' schedule kernels are identical (none has a mask). test:unit 1891/0.
+
+## 2026-11-17 — free fall on, power-droplet-128 off (r26 A, r29)
+
+- **nbflip-analytic-free-fall is enabled.** Re-judged after sym8 (r26, the splash clause, 2 brick / 2 old): peak
+  -24.86 / -24.95 at 60 steps and final -0.63 / -0.81 at 120, against the bar's 25.55 / 1.18. Its long run (r29,
+  300 steps): F 316/405, no latch.
+- **The 100-cell films at 300 steps against the old engine** (r29; old-smoke with --page-blocks=64, because its own pool
+  exhausts at frame 129 on both scenes, a reference only):
+  - power-fill-256-100: brick final -90.5%, old -92.9% (old |peak| 93.1). The brick is no worse, so it stays on.
+  - power-droplet-64: brick -14% (authored pools), old -77%. It stays on.
+  - power-droplet-128: brick -90.7% (|peak| 90.7), old -40.1% (|peak| 78.0 at step 180, then the old film reaches the
+    walls and thickens again). The brick is clearly worse, so it is off. Its film loses particles: 747 at step 100,
+    441 by step 280, under 4 a wet brick. At 64^3 they stay about 720 because the film meets the walls by step 150. The
+    loss is the cause to chase; the scene keeps its authored pools.
+- In both engines, a tension-free drop spreading into a film below resolution is the method's limit.
+- smoke2 (scratch) now passes initializeRigidBodies' roster for body scenes, so the long run covers them by default.
