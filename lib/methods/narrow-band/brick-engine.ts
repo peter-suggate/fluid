@@ -17,7 +17,7 @@
 import { brickLowerOn, brickModuleCode } from "./brick-lower";
 import { brickDropDue, brickSourceRing, type BrickSources } from "./brick-source";
 import { brickSourceWords } from "./brick-source.wgsl";
-import { brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
+import { BRICK_SOLID_EDIT_WORDS, brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
 import { brickStaticNeedWords } from "./brick-static-need.wgsl";
 import { bindGroupLayoutEntries, type BrickDispatch, type BrickKernel, type BrickPlacement, ENGINE_BUFFERS } from "./brick-kernel";
@@ -295,6 +295,8 @@ export class BrickEngine {
   private readonly recorded: { part1: Recorded[]; part2: Recorded[] }[] = [];
   private readonly receipts: { buffer: GPUBuffer; busy: boolean }[] = [];
   private ahead?: { step: number; part1: GPUCommandBuffer; part2: GPUCommandBuffer; receipt: number };
+  /** The live edit's solidRestamp (static mask only). */
+  private restamp?: BrickKernel;
   private steps = 0;
   private time = 0;
   /** The newest receipt (the set buffer's control header) and the step it closed. */
@@ -453,8 +455,10 @@ export class BrickEngine {
     if (initial.length + boot.pages.length > layout.cap.f) throw new Error(`Brick engine: the boot's ${initial.length} bricks and ${boot.pages.length} page-only candidates overrun its candidate list (scene.fluid.brickPools.f = ${layout.cap.f})`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
     const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies, options.sources !== undefined, options.censusHold);
+    // The live edit's restamp (M3 stage 2c, restampStatics), outside the schedule, compiled with it: no first-edit hitch.
+    const restamp = options.staticMask ? brickSolidStampKernels(layout, options.staticMask).solidRestamp : undefined;
     // One pipeline a kernel, compiled concurrently; each module once.
-    const kernels = [...new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel))];
+    const kernels = [...new Set([...[...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel), ...(restamp ? [restamp] : [])])];
     // The box hook (M3 padding): every wall token resolved by its builder, and, where the lattice is padded past the
     // box, no owner reader still walling at the storage edge (a wall at the box exactly once).
     const unresolved = kernels.filter(k => k.code.includes(BOX_TOKEN) || k.code.includes("InWallBox(")).map(k => k.label);
@@ -484,6 +488,7 @@ export class BrickEngine {
       compileMs[k.label] = performance.now() - t0;
     }));
     const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
+    engine.restamp = restamp;
     engine.allocate([...initial, ...boot.pages]);
     engine.record();
     engine.boot();
@@ -506,6 +511,27 @@ export class BrickEngine {
     await this.fence();
   }
 
+  /**
+   * A live voxel edit (M3 stage 2c; BrickNBFlipSolver.applySceneUniforms), queued between two steps: the mask image's
+   * rewritten word ranges into `solid`, then solidRestamp over the F_ALL bricks the edit's changed cells [lo, hi) reach,
+   * then setKRelease (cfg.z = 0 over F_ALL) for the slots of bricks the edit left uncut. The image is the one the engine
+   * was built with (sealed: its size never changes); a range past it fails explicitly.
+   */
+  restampStatics(words: Uint32Array, ranges: readonly { readonly firstWord: number; readonly wordCount: number }[], lo: Vec3, hi: Vec3) {
+    const restamp = this.restamp, solid = this.buffers.get("solid"), edit = this.buffers.get("solidEdit");
+    if (!restamp || !solid || !edit) throw new Error("Brick engine: no static mask to edit (built without static voxels)");
+    if (this.failure) throw new Error(this.failure);
+    if (4 * words.length !== solid.size) throw new Error(`Brick engine: the edited mask holds ${words.length} words, the bound image ${solid.size / 4}`);
+    for (const r of ranges) {
+      if (!(Number.isInteger(r.firstWord) && Number.isInteger(r.wordCount) && r.firstWord >= 0 && r.wordCount > 0 && r.firstWord + r.wordCount <= words.length)) throw new Error(`Brick engine: mask range ${r.firstWord}+${r.wordCount} is outside the image`);
+      uploadWords(this.device.queue, solid, 4 * r.firstWord, words.subarray(r.firstWord, r.firstWord + r.wordCount) as Uint32Array<ArrayBuffer>);
+    }
+    uploadWords(this.device.queue, edit, 0, new Uint32Array(new Int32Array([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], 0, 0]).buffer));
+    const release = [...this.schedule.part1, ...this.schedule.part2].find(p => p.kernel.label === "setKRelease" && (p.z ?? 0) === 0);
+    const placements: BrickPlacement[] = [{ kernel: restamp, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, ...(release ? [release] : [])];
+    this.device.queue.submit([this.encode(placements.map(p => this.bind(p, 0)), "nb-brick.solidRestamp")]);
+  }
+
   /** Bytes of every buffer the engine allocated. */
   get bytes(): number { let n = 0; for (const b of this.buffers.values()) n += b.size; return n; }
   get stepsSubmitted(): number { return this.steps; }
@@ -526,6 +552,8 @@ export class BrickEngine {
     if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); this.external.set("bodyExchange", bodies.exchange); }
     const mask = this.options.staticMask;
     if (mask) uploadWords(d.queue, make("solid", mask.words.length), 0, mask.words as Uint32Array<ArrayBuffer>);
+    // The live edit's changed cells (solidRestamp's `solidEdit`).
+    if (mask) make("solidEdit", BRICK_SOLID_EDIT_WORDS);
     // The census's static need rule (brick-static-need.wgsl.ts): the cut and active bits, tiered only.
     if (mask && this.stages.tiered === true) make("staticNeed", brickStaticNeedWords(L));
     // The sources' static record (brick-source.ts): every drop's extrusion edges, once; a stub with no sources.

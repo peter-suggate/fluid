@@ -356,8 +356,10 @@ export interface GPUSolverInstance {
    * viscosity, surface tension, gravity, and method-owned refinement bounds.
    * Solvers read these from the retained scene or a compact policy buffer, so
    * adopting a new scene is a uniform update rather than a rebuild.
+   * `false`: this solver cannot adopt this difference live, nothing changed,
+   * and the renderer rebuilds (the brick engine takes voxel strokes alone).
    */
-  applySceneUniforms?(scene: SceneDescription): void;
+  applySceneUniforms?(scene: SceneDescription): void | false;
   /** Preflight live voxel edits without mutating or waiting on the GPU. */
   validateLiveSolidEdit?(scene: SceneDescription): void;
   /** Publish edited refinement bounds without advancing simulation time. */

@@ -123,13 +123,13 @@ BASE[pool][C][ch] = NCH[pool] * FCAP * 520 + ch * CCAP * 520
 | `vel` | 6–8 | `US0 US1 US2` | lower face | scratch: u* before projection, extension ping-pong | F, P |
 | `phi` | 0 | `PHI` | vertex | `phiUnion`, `redistSweep` | everyone |
 | `phi` | 1 | `PHI1` | vertex | scratch: φ′ (`phiAdvect`), redistance ping-pong | F |
-| `phi` | 2 | `FLAGS` | cell, u32 | `setInit` at entry (OPEN by the box rule, OWNER_H), `solidStamp` (OPEN), `phiUnion` / `redistInit` (LIQUID, BAND), `p2g` (VALID_*) | everyone |
+| `phi` | 2 | `FLAGS` | cell, u32 | `setInit` at entry (OPEN by the box rule, OWNER_H), `solidStamp` and a live edit's `solidRestamp` (OPEN), `phiUnion` / `redistInit` (LIQUID, BAND), `p2g` (VALID_*) | everyone |
 | `pres` | 0–9 | `X R Z D Q RHS DIAG K0 K1 K2` | cell; `K_a` the coupling across the lower face along `a` (on C rows: native–native only) | `operator`, solver | P; `project` |
 | `pres` | 10–12 | `KU0 KU1 KU2` | cell, h rows only (unused in C): the seam coupling V/(2.5h²θ) across the upper face along `a` when the upper neighbour is a 4h row, else 0 (amended at M2, lane P) | `operator` | P |
 | `pres` | 13 | `PPHI` | cell: the pressure authority's centre φ (`rootPhi`, uniform-mixed-pressure-authority.ts), for the liquid test and ghost θ of native and seam rows (amended at M2) | P's setup | P |
 | `pres` | 14 | `B` | cell: the row's start (pInit/P_BASE), for the seam heads in `project` (amended at M2, lane P) | `operator`, P's setup | P |
-| `cut` | 0 | `FRAC` | cell | `solidStamp` | `operator`, F's solid paths |
-| `cut` | 1–3 | `AP0 AP1 AP2` | lower face | `solidStamp` | as above |
+| `cut` | 0 | `FRAC` | cell | `solidStamp`, `solidRestamp` | `operator`, F's solid paths |
+| `cut` | 1–3 | `AP0 AP1 AP2` | lower face | `solidStamp`, `solidRestamp` | as above |
 | `cut` | 4–6 | `W0 W1 W2` | lower face: a body's face velocity (A1) | `bodyStamp` (P); 0 from whichever stamp first writes a fresh slot | the operator's RHS, F's solid paths |
 
 - **The `phi` pool is bound as `array<u32>`.** φ words are read as `bitcast<f32>`, so FLAGS
@@ -458,13 +458,13 @@ There is no second structure to disagree with.
 | 0 | `LIQUID` | `setMark` | an h-owned vertex has φ < 0 (F_LIQ) |
 | 1 | `SURFACE` | `setLists` | some vertex within the band of the surface |
 | 2 | `PARTICLES` | `setLists` | the bin is not empty |
-| 3 | `NEAR_SOLID` | `solidStamp` (kept by `setMark`) | a static mask voxel lies within 8 cells of the brick on every axis (it or one of its 26 neighbours holds one); pMove skips its records and lAdvect its vertices, which pSolid and phiSolid move with the solid walk (brick-solid-walk.wgsl.ts). The box walls are the walk's too but need no class: nbfBoxEndpoint clips to them |
+| 3 | `NEAR_SOLID` | `solidStamp`, `solidRestamp` (kept by `setMark`) | a static mask voxel lies within 8 cells of the brick on every axis (it or one of its 26 neighbours holds one); pMove skips its records and lAdvect its vertices, which pSolid and phiSolid move with the solid walk (brick-solid-walk.wgsl.ts). The box walls are the walk's too but need no class: nbfBoxEndpoint clips to them |
 | 4 | `NEAR_BODY` | `bodyStamp` (P) | within the swept reach of a body |
 | 5 | `SEAM` | `setLists` | a tile not h-owned, or a neighbour word that is a seam |
 | 6 | `SKIRT` | `setUpdate` | origin at or beyond `N` on some axis (vertex storage only) |
 | 7 | `COLD` | `setMark` (M3) | in a frozen region |
 | 8 | `CHANGED` | `setMark` | a tile's tier changes this step (`setTransfer`'s input) |
-| 9 | `CUT_STATIC` | `solidStamp` (E, A5) | its cells meet a static solid; kept by `setMark`; the brick holds a K slot |
+| 9 | `CUT_STATIC` | `solidStamp` (E, A5), `solidRestamp` | its cells meet a static solid; kept by `setMark`; the brick holds a K slot |
 | 10–15 | reserved, E | | |
 | 16–23 | reserved, F | | |
 | 24 | `BODY_WAS` | `setMark` (P, A2) | NEAR_BODY last step: bodyStamp's clean-up pass |
@@ -568,7 +568,7 @@ Slot layout (f32 unless marked):
 | 0 | E | step `n` (u32) |
 | 1 | E | dt (s) |
 | 2 | E | time at the step's start (s) |
-| 3 | E | flags (u32): bit 0 solid edit pending (gates `solidStamp`), bit 1 bodies present |
+| 3 | E | flags (u32): bit 0 unused (a live voxel edit is its own submit between steps, `solidRestamp` then `setKRelease`, not a flag; brick-solid-stamp.wgsl.ts), bit 1 bodies present |
 | 4–6 | E | gravity (m/s²) |
 | 7 | E | h (m) |
 | 8–15 | F | volume control: target volume, the secant state's inputs, the rate limit |

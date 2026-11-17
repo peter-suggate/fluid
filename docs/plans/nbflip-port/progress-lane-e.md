@@ -2922,3 +2922,53 @@ scene's kernel text is byte-identical (r19/dump.mts on the dam, minimal-dam, sta
   brick-solver-app.test.ts GPU: the 128^3 dam against P's block (x 96..108, y 0..24, z 40..88, k 512), 30 steps
   through createBrickSolver, FAIL 0 (rc 0, 0 aborts; the app file's 5/5 pass).
 - test:unit 2465 tests, 1922 pass, 0 fail; check:types clean apart from lane-n's three.
+
+## 2026-11-17 — live voxel edits (the AGENTS.md regressions); the solid-voxel gap lifted
+
+- A voxel stroke on a running brick scene is taken in place:
+  - BrickNBFlipSolver.validateLiveSolidEdit preflights it. It throws, and nothing changes, when the engine has halted,
+    when the scene was built with no static voxels, when anything other than the solid voxels differs
+    (sceneDiffersInSolidsAlone), or when the voxels do not compose (an unknown patch kind fails in
+    solidWorldForFluidLattice).
+  - applySceneUniforms folds the world into the scene's SolidOccupancyMask and uploads only the dirty word ranges.
+    It then submits solidRestamp and setKRelease on their own, between steps.
+  - A difference beyond the voxels returns false. The renderer rebuilds in that case (method-contract
+    applySceneUniforms: void | false; webgpu-renderer's per-frame adoption and acceptLiveSolidEdit honour it).
+  - A mask refusal (its slots are sealed at 2 held + 64) latches an explicit simulation failure, as the old engine
+    refuses at apply.
+- solidRestamp (brick-solid-stamp.wgsl.ts) runs one workgroup per F_ALL brick, and only on bricks within ring 8 of
+  the changed cells:
+  - it rewrites NEAR_SOLID from the new mask;
+  - for each cell it rewrites OPEN, and the cut (FRAC, AP0..2, BMASK 0, W 0) from the static rule;
+  - it takes a K slot for a newly cut brick, and gives back the slot of a brick left uncut (setKRelease in the same
+    submit; pops and pushes never share a dispatch);
+  - it leaves NEAR_BODY and BODY_WAS bricks to bodyStamp.
+  Pressure reads the cuts live, and the census's static need recomputes from the mask, so nothing else is cached.
+- An edit inside a 4h (C) region is cut at the next step's head: the census's static need rule promotes the supported
+  tiles to h, and solidStamp cuts the bricks entering F, before that step's physics.
+- The gap "solid voxels beyond the container shell need the live-edit regressions (M3)" and BrickSceneTest.staticVoxels
+  are gone. The seep's only gap is now BRICK_ENGINE_SCENES. The voxel scenes still need enabling, in batches, each
+  with a smoke run.
+- brick-solid-edit.test.ts (GPU, the 64^3 dam with P's block; pools f 729, c 27, k 160, the rule's dam64 sizes; an
+  earlier c 8 latched POOL_C at frame 0):
+  - fill B [8,0,8)-[20,10,20), deep in the column:
+    - the engine's image equals the editor's reader at every cell (hit testing);
+    - the velocity pool keeps every bit, and residency is unchanged;
+    - φ words change only in the FLAGS of in-reach bricks (locality);
+    - classes and cuts of out-of-reach bricks are untouched;
+  - undo: the φ pool bitwise, the K slots, and the mask's slots all back;
+  - redo: the fill's state again;
+  - one step: 1440 of 1440 fill cells resident, closed, FRAC 0, CUT_STATIC;
+  - clear C: its bricks uncut, their slots freed, every cell OPEN;
+  - refill: closes every fill cell at once, retaking the slots; then the clear again;
+  - refusals: an unknown kind and a gravity change; the state is unchanged;
+  - save/load: a JSON round trip gives the same image and agrees with the restamp on 129 bricks;
+  - every step of the run is FAIL-free, with no live record in a closed cell.
+  test:unit 1923 pass, 0 fail (the auto test takes the seep in a sphere for its multi-gap case); check:types
+  clean apart from lane-n. GPU (rc 0, 0 aborts): the edit file passes 2/2, the app file 5/5 (its statics test now runs on the default path),
+  and the walk file 6/6.
+- Known limits, flagged:
+  - A brick scene built without voxels (no mask, no static stages) refuses a first stroke with "reset the scene"; the
+    old engine always holds a mask. Making that live means binding the static stages to every scene, which needs a
+    step-time price first.
+  - lib/cloth/system.ts:668 (not E's file) forwards applySceneUniforms but drops its false.

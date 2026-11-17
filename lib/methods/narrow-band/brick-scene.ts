@@ -15,7 +15,6 @@
  */
 import type { SceneDescription } from "../../core/model";
 import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
-import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
 import type { BrickCapacities } from "./brick-abi";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
@@ -104,14 +103,8 @@ export interface BrickSceneSetup {
   readonly staticMask?: SolidOccupancyMask;
 }
 
-/** Test and diagnostic only; no scene or app path passes it. `staticVoxels` lifts the solid-voxel gap, so the voxel gates
- * (the voxel still tank, the dam against an obstacle, the seep) run before the AGENTS.md edit regressions land. */
-export interface BrickSceneTest {
-  readonly staticVoxels?: true;
-}
-
 /** The scene's setup, or every reason the brick engine cannot run it. */
-export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>, test: BrickSceneTest = {}): { setup?: BrickSceneSetup; gaps: string[] } {
+export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>, ): { setup?: BrickSceneSetup; gaps: string[] } {
   const gaps: string[] = [];
   const id = scene.sceneId ?? "(unnamed)";
   if (!BRICK_ENGINE_SCENES.includes(id)) gaps.push(`scene "${id}" is not enabled on the brick engine (brick-scene.ts BRICK_ENGINE_SCENES lists the ${BRICK_ENGINE_SCENES.length} it runs)`);
@@ -120,9 +113,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (c.shape === "sphere") gaps.push("a spherical container needs static solids (M3)");
   const openTop = c.top === "open";
   if (c.top !== "closed" && !openTop) gaps.push(`container.top "${c.top}" is not a brick engine top (closed or open)`);
-  // The engine reads the voxels (solidStamp, the static need, pSolid, phiSolid: M3 stages 1-3); live editing them is not
-  // wired yet, so a scene with voxels stays a gap until the AGENTS.md edit regressions land.
-  if (!test.staticVoxels && solidVoxelEditsForScene(scene).length > 0) gaps.push("solid voxels beyond the container shell need the live-edit regressions (M3)");
+  // The engine reads the voxels (solidStamp, the static need, pSolid, phiSolid: M3 stages 1-3) and takes a live edit in
+  // place (BrickNBFlipSolver.applySceneUniforms, solidRestamp; brick-solid-edit.test.ts holds the AGENTS.md regressions).
   // The static hooks read the voxel mask (brick-static.wgsl.ts); a ground field or a procedural boundary sampled as a
   // field (umUnitBoxOpen's terrain, umBoundaryTouchesBox) is not read yet, so it must not run as open water.
   if (scene.terrain) gaps.push("terrain needs the static solid's ground field (M3)");

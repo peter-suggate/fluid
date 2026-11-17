@@ -212,8 +212,8 @@ test("brick solver (GPU): auto, the default engine, runs the dam on brick and a 
 
 /**
  * Static voxels through the app's path (lane E, M3): the dam with a block on its floor (P's 0xa2 obstacle, x 96..108,
- * y 0..24, z 40..88; its x = 108 face cuts bricks, so the pools carry K slots for the cuts) runs past the live-edit gap
- * under the gate runs' test flag (BrickSceneTest.staticVoxels). The scene's own mask reaches the engine, and the front
+ * y 0..24, z 40..88; its x = 108 face cuts bricks, so the pools carry K slots for the cuts) runs through the app's
+ * createBrickSolver. The scene's own mask reaches the engine, and the front
  * meets the block's face with no latch.
  */
 test("brick solver (GPU): the dam against a voxel block, the scene's mask bound through createBrickSolver", GPU, async () => {
@@ -225,9 +225,8 @@ test("brick solver (GPU): the dam against a voxel block, the scene's mask bound 
   scene.fluid.brickPools = { ...scene.fluid.brickPools!, k: 512 };
   const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
   const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" }) as Record<string, unknown>;
-  await assert.rejects(createBrickSolver(new Proxy({}, { get() { throw new Error("no device use before the gap check"); } }) as GPUDevice, scene, values, quality), /live-edit regressions/);
   await withUniformDevice("brick solver statics", async device => {
-    const solver = await createBrickSolver(device, scene, values, quality, { staticVoxels: true });
+    const solver = await createBrickSolver(device, scene, values, quality);
     try {
       const e = solver.brickEngine, dt = e.options.dt_s, steps = 30;
       assert.ok(e.options.staticMask, "the scene's mask is bound");

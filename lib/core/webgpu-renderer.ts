@@ -2235,7 +2235,7 @@ export class FluidLabRenderer {
     this.validateLiveSolidEdit(scene);
     const solver = this.gpuFluid, display = this.svoSceneSidecar ?? solver;
     if (planSceneRuntime(scene).fluidSolver) {
-      solver!.applySceneUniforms!(scene);
+      if (solver!.applySceneUniforms!(scene) === false) throw new Error("This fluid solver cannot take this voxel edit live; reset the scene to apply it.");
       this.appliedSceneUniformKey = gpuSceneUniformKey(scene);
     } else if (display === solver && !solver?.applySceneUniforms) {
       // The renderer-owned source is staged below; the next frame's adoption of
@@ -2549,11 +2549,11 @@ export class FluidLabRenderer {
     // retain the attached solver and let advanceTo() reject backward work.
     // Scene scalars are absent from the rebuild key, so they are adopted here
     // instead. A method without applySceneUniforms would otherwise ignore the
-    // edit outright, so it falls back to the rebuild it used to take.
+    // edit outright, so it falls back to the rebuild it used to take, as does
+    // a solver that answers false (it cannot adopt this difference live).
     const sceneUniformKey = gpuSceneUniformKey(scene);
     if (sceneUniformKey !== this.appliedSceneUniformKey) {
-      if (this.gpuFluid.applySceneUniforms) {
-        this.gpuFluid.applySceneUniforms(scene);
+      if (this.gpuFluid.applySceneUniforms && this.gpuFluid.applySceneUniforms(scene) !== false) {
         this.refreshEditedTopology(this.gpuFluid);
         this.appliedSceneUniformKey = sceneUniformKey;
       } else if (!planSceneRuntime(scene).fluidSolver) {

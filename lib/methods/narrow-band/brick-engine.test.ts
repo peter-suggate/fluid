@@ -192,7 +192,7 @@ test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued thro
   }
   assert.ok(bootBricks(setup).length <= setup.capacities.f);
   // An unenabled scene, and a dam with a body, are refused with their gaps.
-  assert.match(brickSceneSetup(createReservoirSeepScene(), {}).gaps.join(";"), /solid voxels/);
+  assert.match(brickSceneSetup(createReservoirSeepScene(), {}).gaps.join(";"), /not enabled on the brick engine/);
   assert.match(brickSceneSetup({ ...dam, rigidBodies: [{} as never] }, { timeStep: "sixtieth" }).gaps.join(";"), /rigid bodies/);
 });
 
@@ -616,7 +616,9 @@ test("brick engine: with the stages' seed, the boot runs a TRIG-only census betw
 test("brick engine: auto (the default) takes brick exactly where the scene has no gaps, and says why not", () => {
   const method = uniformNarrowBandMethod;
   assert.equal(method.params.find(p => p.key === "engine")?.default, "auto");
-  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), seep = createReservoirSeepScene();
+  // The seep in a spherical container: not enabled, and the sphere (two gaps, until both land).
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), seep0 = createReservoirSeepScene();
+  const seep = { ...seep0, container: { ...seep0.container, shape: "sphere" as const } };
   const defaults = resolveMethodValues(method, "balanced", { ...method.appDefaults, timeStep: "sixtieth" });
   assert.equal(defaults.engine, "auto");
   // The dam has no gaps (the lanes' registrations included): auto runs brick.

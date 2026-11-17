@@ -16,6 +16,13 @@
  *   FAIL as a SimulationFailureError, which the app shows and stops on.
  * - Observers read `brickEngine` and `brickPresentation` after a fence
  *   (tools/nbflip-observe-brick.ts).
+ * - Live voxel edits (M3 stage 2c): a scene that differs from the running one
+ *   in its solid voxels alone is taken in place. The setup's own mask folds
+ *   the edit (the same SolidWorld the editor's hit test reads), its rewritten
+ *   words go up, and the engine restamps the bricks the changed cells reach
+ *   (BrickEngine.restampStatics) between two steps. Any other scene change is
+ *   refused here (applySceneUniforms answers false), and the renderer rebuilds,
+ *   as it did before this solver adopted anything live.
  */
 import type { GPUSolverInstance } from "../../core/method-contract";
 import type { GPUQuality } from "../../core/gpu-quality";
@@ -33,6 +40,7 @@ import type { BrickStagesFactory } from "./brick-stages";
 import type { SceneDescription } from "../../core/model";
 import type { GPURigidBodyPick, GPURigidBodyPose } from "../../core/webgpu-rigid-body";
 import { BrickRigidBodies } from "./bodies-host";
+import { solidWorldForFluidLattice } from "../../core/solid-world";
 
 export interface BrickSolverOptions {
   readonly setup: BrickSceneSetup;
@@ -50,6 +58,19 @@ export interface BrickSolverOptions {
   readonly rigid?: SceneDescription;
 }
 
+/** Whether `scene` differs from `running` in its solid voxels alone (each other field the same object, or the same
+ * content: a document store may rebuild a field it did not change). */
+export function sceneDiffersInSolidsAlone(scene: SceneDescription, running: SceneDescription): boolean {
+  const fields = Object.keys(scene) as (keyof SceneDescription)[];
+  if (fields.length !== Object.keys(running).length) return false;
+  for (const field of fields) {
+    if (field === "solidVoxels") continue;
+    if (!Object.hasOwn(running, field)) return false;
+    if (scene[field] !== running[field] && JSON.stringify(scene[field]) !== JSON.stringify(running[field])) return false;
+  }
+  return true;
+}
+
 export class BrickNBFlipSolver implements GPUSolverInstance {
   readonly brickEngine: BrickEngine;
   readonly brickPresentation: BrickPresentation;
@@ -62,10 +83,13 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   presentations = 0;
   lastPresentationMs?: number;
   info: GPUEulerianInfo;
+  /** The document the running state follows: the scene it was built from, then each live voxel edit taken. */
+  private scene?: SceneDescription;
 
   private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation, rigid?: BrickRigidBodies) {
     this.brickEngine = engine; this.brickPresentation = presentation; this.presentEnabled = options.present ?? true;
     if (rigid) this.rigidBodies = rigid;
+    if (options.rigid) this.scene = options.rigid;
     const s = options.setup, h = s.h_m;
     this.fluidDomain = { origin_m: s.origin_m, cellSize_m: [h, h, h], dimensions: s.lattice };
     this.denseLevelSetVolumeSource = { vertexPhi: presentation.vertexPhi, contourVertexPhi: true, openFraction: presentation.openFraction, cellSize_m: [h, h, h] };
@@ -177,6 +201,48 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
         // After step k the records are bank k & 1's (brick-abi.md §5.6 Banks: step n's rebin writes bank (n & 1) ^ 1).
         particles: header ? Math.min(header[H.PCOUNT0 + (header[H.STEP]! & 1)]!, this.brickEngine.layout.cap.particles) : 0 },
     };
+  }
+
+  /**
+   * Preflight a live voxel edit without changing anything: the solver is running, it holds a static mask, the scene
+   * differs from the running one in its solid voxels alone, and its voxels compose (an unknown patch kind or a region
+   * the mask does not read fails here, explicitly). The mask's slot budget is answered by the fold itself, as the old
+   * engine's is: an edit past it latches a failure in applySceneUniforms.
+   */
+  validateLiveSolidEdit(scene: SceneDescription): void {
+    if (this.info.simulationFailure) throw new Error("The brick engine has halted; reset the scene.");
+    if (!this.options.setup.staticMask || !this.scene) throw new Error("This scene was built on the brick engine without static voxels; reset the scene to apply a voxel edit.");
+    if (!sceneDiffersInSolidsAlone(scene, this.scene)) throw new Error("The brick engine takes a voxel stroke live only when nothing else in the scene changes; reset the scene to apply this edit.");
+    solidWorldForFluidLattice(scene);
+  }
+
+  /**
+   * Adopt `scene` live, or answer false and leave everything as it was: the renderer then rebuilds. Taken live: a scene
+   * whose solid voxels alone differ (validateLiveSolidEdit). The mask folds the edit; a fold the mask refuses (its slots,
+   * sealed at construction, all held) poisons the mask, so it latches a simulation failure and throws.
+   */
+  applySceneUniforms(scene: SceneDescription): void | false {
+    if (scene === this.scene) return;
+    const mask = this.options.setup.staticMask;
+    if (!mask || !this.scene || this.info.simulationFailure || !sceneDiffersInSolidsAlone(scene, this.scene)) return false;
+    const world = solidWorldForFluidLattice(scene);
+    const lo: [number, number, number] = [Infinity, Infinity, Infinity], hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    let ranges: ReturnType<typeof mask.update>;
+    try {
+      ranges = mask.update(world, (x, y, z) => {
+        lo[0] = Math.min(lo[0], x); lo[1] = Math.min(lo[1], y); lo[2] = Math.min(lo[2], z);
+        hi[0] = Math.max(hi[0], x + 1); hi[1] = Math.max(hi[1], y + 1); hi[2] = Math.max(hi[2], z + 1);
+      });
+    } catch (error) {
+      const message = `live voxel edit refused: ${error instanceof Error ? error.message : String(error)}`;
+      this.refresh({ simulationFailure: this.failure(message) });
+      throw error;
+    }
+    this.scene = scene;
+    this.rigidBodies?.system.setScene(scene);
+    // A paint or a fill over solid moves no bit: nothing to upload or restamp.
+    if (!ranges || !(hi[0] > lo[0])) return;
+    this.brickEngine.restampStatics(mask.words, ranges, lo, hi);
   }
 
   // The rigid contract (method-contract.ts), the shared system's.
