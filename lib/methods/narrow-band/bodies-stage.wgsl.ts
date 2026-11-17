@@ -18,16 +18,24 @@
  * the stamp writes the whole slot: BMASK, FRAC, AP0-2, W0-2 (A1), and FLAGS.OPEN (A8) on its cells.
  * Latches (FAIL.UNSUPPORTED, info tag | value): 0xb1 a candidate body's shape tag is not stamped (a rounded plate or
  * an unknown tag; info the body); 0xb2 a body's cut header is out of range (info the body); 0xb3 (setMark, tiered) a
- * marked tile is not h-owned (info the brick key). */
+ * marked tile is not h-owned (info the brick key).
+ *
+ * bodyCouple (§6, brickBodyCoupleKernel): part 2, after F's tail (X final), over F_BODY: a workgroup a brick whose K slot
+ * the head stamped with BMASK != 0 (every such brick is NEAR_BODY or BODY_WAS at part 2's setMark, so F_BODY holds
+ * it). The pressure is the old couple's p = X rho / dt (the slot contract's X = p dt / rho), 0 where the stamp's
+ * FRAC <= 1e-5 (pbCoupleBrick) and off the liquid rows (X is 0 there); the wet weight is pbOwnerWet of the cell's 8
+ * corner phi. The words go into the rigid exchange (`bodyExchange`, the rigid system's, GPU_RIGID_EXCHANGE_WORDS a
+ * body), which the host clears after the integrator reads it (BrickBodiesBinding.integrate). Gated on the ring's
+ * BODIES flag and BODY_FLAG.COUPLING. */
 import type { BrickLayout } from "./brick-abi";
 import type { BrickBinding, BrickKernel } from "./brick-kernel";
 import { brickAbiWGSL } from "./brick-abi";
 import { CFG, declareBindings } from "./brick-kernel";
 import { BRICK_SET_HELPERS_WGSL } from "./brick-set.wgsl";
 import { brickStaticWGSL } from "./brick-static.wgsl";
-import { pbBodyStampWGSL } from "./bodies-shapes.wgsl";
-import { BODIES_RO, BODY_CUTS_RO, pbBrickBodiesWGSL, pbWgslVec3, type BrickBodiesFrame } from "./bodies-binding.wgsl";
-import { pbStampBrickWGSL } from "./bodies-kernels.wgsl";
+import { pbBodyCoupleWGSL, pbBodyStampWGSL } from "./bodies-shapes.wgsl";
+import { BODIES_RO, BODY_CUTS_RO, pbBrickBodiesWGSL, pbWgslVec3, type BrickBodiesFrame, PB_BRICK_CANDIDATES_WGSL } from "./bodies-binding.wgsl";
+import { pbCoupleBrickWGSL, pbStampBrickWGSL } from "./bodies-kernels.wgsl";
 import type { SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 
 /** The static solid the stamp reads (E's hooks, A7): the box rule and, when the scene binds it, the voxel mask. */
@@ -62,18 +70,7 @@ fn bsPut(l:u32,ch:u32,v:f32){
 }
 fn bsOpen(l:u32,open:bool){let f=NB_PHI_F_FLAGS+NB_STRIDE*bsSlot+l;phi[f]=select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open);}
 ${pbStampBrickWGSL({ putCut: "bsPut", putOpen: "bsOpen" })}
-// The brick's BMASK (§3): pbBodyBoxCandidates with each body's own reach, length(2h) + one cell + its swept reach
-// (|v| + |w| r) horizon: the mark's margin, so every body setMark marked the brick for is a candidate.
-fn pbBrickCandidates(o:vec3i)->u32{
- let h=pbH();let lo=pbWorldCell(o)-0.5*h;let hi=lo+8.0*h;let cell=max(h.x,max(h.y,h.z));let dt=pbBrickHorizon();
- var mask=0u;
- for(var i=0u;i<pbBodyCount();i++){
-  let b=bodies[i];let c=b.positionShape.xyz;let radius=max(b.dimensions.w,0.0);
-  let reach=length(2.0*h)+cell+(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*radius)*dt;
-  if(b.positionShape.w<0.0||distance(clamp(c,lo,hi),c)<=radius+reach){mask|=1u<<i;}
- }
- return mask;
-}
+${PB_BRICK_CANDIDATES_WGSL}
 var<workgroup> wHead:vec4u;
 @compute @workgroup_size(128) fn bodyStamp(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   // Lane 0 decides the brick and takes its slot (one nbKTake caller a brick); x stamped, y F slot, z K slot, w BMASK.
@@ -103,4 +100,72 @@ var<workgroup> wHead:vec4u;
   pbStampBrick(nbFOrigin(head.y),head.w,lid,128u);
 }`].join("\n");
   return { bodyStamp: { label: "bodyStamp", entry: "bodyStamp", code, bindings, cfgZ: [0, 1] } };
+}
+
+/** The fluid numbers couple needs: the density (p = X rho / dt). */
+export interface BrickBodyFluid { readonly density_kg_m3: number }
+
+/** The rigid exchange binding (the rigid system's buffer: GPU_RIGID_EXCHANGE_WORDS i32 a body, atomics). */
+export const BODY_EXCHANGE_RW: BrickBinding = { name: "bodyExchange", kind: "rw", type: "array<atomic<i32>>" };
+
+export function brickBodyCoupleKernel(L: BrickLayout, frame: BrickBodiesFrame, fluid: BrickBodyFluid): BrickKernel {
+  if (!(Number.isFinite(fluid.density_kg_m3) && fluid.density_kg_m3 > 0)) throw new Error(`bodyCouple: density ${fluid.density_kg_m3} is not a fluid density`);
+  const bindings: BrickBinding[] = [
+    CFG,
+    { name: "set", kind: "rw", type: "array<atomic<u32>>" },
+    { name: "dir", kind: "ro", type: "array<u32>" },
+    { name: "phi", kind: "ro", type: "array<u32>" },
+    { name: "cut", kind: "ro", type: "array<f32>" },
+    { name: "pres", kind: "ro", type: "array<f32>" },
+    BODIES_RO, BODY_CUTS_RO, BODY_EXCHANGE_RW,
+  ];
+  const rho = Math.fround(fluid.density_kg_m3).toPrecision(9);
+  const code = [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: false } }), declareBindings(bindings),
+    pbBrickBodiesWGSL(frame), pbBodyCoupleWGSL, /* wgsl */`
+const BC_RHO:f32=${/[.e]/.test(rho) ? rho : `${rho}.0`};
+var<private> bcS:u32;
+var<private> bcK:u32;
+var<private> bcScale:f32;
+fn bcFrac(l:u32)->f32{return cut[NB_CUT_FRAC+NB_STRIDE*bcK+l];}
+fn bcPressure(c:vec3i,l:u32)->f32{return pres[NB_PRES_F_X+NB_STRIDE*bcS+l]*bcScale;}
+// A vertex's phi (h) as nbVertexPhi reads an h-owned vertex (every vertex of a body brick's cells is: §4 keeps the
+// body tiles and their one-tile ring h, and setMark latches 0xb3 otherwise): NB_PHI_FAR outside the lattice's
+// vertices, NB_PHI_AIR_C where no F slot holds it.
+fn bcVertex(v:vec3i)->f32{
+ if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}
+ let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_AIR_C;}
+ return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
+}
+// umBodyOwnerWet's corner sum, in umCorner's order.
+fn bcWet(c:vec3i,l:u32)->f32{
+ var sum=0.0;
+ for(var k=0u;k<8u;k++){sum+=bcVertex(c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)));}
+ return pbOwnerWet(sum);
+}
+// pbStampBrickWGSL's cell of a brick lane (pbCoupleBrick reads it; this kernel has no stamp).
+fn pbBrickCell(l:u32)->vec3i{return vec3i(i32(l&7u),i32((l>>3u)&7u),i32(l>>6u));}
+${pbCoupleBrickWGSL({ frac: "bcFrac", pressure: "bcPressure", wet: "bcWet" }, "bodyExchange")}
+var<workgroup> bcHead:vec4u;
+@compute @workgroup_size(128) fn bodyCouple(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  // Lane 0: x coupled, y F slot, z K slot, w BMASK (the head's stamp).
+  if(lid==0u){
+    var head=vec4u(0u,0u,NB_NONE,0u);
+    let e=nbGroup(wid);
+    let on=pbBrickBodiesOn()&&(nbRing(cfg.x,NB_RING_BODY_FLAGS)&NB_BODY_FLAG_COUPLING)!=0u;
+    if(on&&e<nbListCount(NB_LIST_F_BODY)){
+      let s=nbListSlot(NB_LIST_F_BODY,e);let k=nbFRec(s,NB_REC_CUT);
+      if(k!=NB_NONE){let mask=bitcast<u32>(cut[NB_CUT_BMASK+k]);if(mask!=0u){head=vec4u(1u,s,k,mask);}}
+    }
+    bcHead=head;
+  }
+  pbCoupleClear(lid,128u);
+  let head=workgroupUniformLoad(&bcHead);
+  if(head.x==0u){return;}
+  bcS=head.y;bcK=head.z;
+  let dt=nbRingF(cfg.x,NB_RING_DT);bcScale=BC_RHO/dt;
+  pbCoupleBrick(nbFOrigin(head.y),head.w,lid,128u,dt);
+  workgroupBarrier();
+  pbCoupleFlush(head.w,lid,128u);
+}`].join("\n");
+  return { label: "bodyCouple", entry: "bodyCouple", code, bindings };
 }

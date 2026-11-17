@@ -62,10 +62,37 @@ export interface BrickBodiesBinding extends BrickBodiesFrame {
   readonly bodies: GPUBuffer;
   /** The body-local cut atlas (packRigidBodyCutAtlas), written only after pbCheckCutAtlas. */
   readonly cuts: GPUBuffer;
-  /** A4: called before step `step`'s ring write, after step `step - 1`'s part 2 is queued (and once before the boot,
-   * step 0): syncBodies (prescribed motion, roster changes; only on change) into the state buffer through the queue,
-   * so the step's part 1 sees it. Returns the step's header. Idempotent for a step: the engine calls sync(0) before
-   * the boot and again before step 0's part 1, and the second call must change nothing (syncBodies's
-   * unchangedSinceSync holds it). */
+  /** The rigid exchange (the rigid system's): couple's words, GPU_RIGID_EXCHANGE_WORDS i32 a body. Zero before each
+   * step's couple: the host clears it after the integrator reads it (integrate), and it starts zeroed. */
+  readonly exchange: GPUBuffer;
+  /** The fluid density (kg/m^3): couple's p = X rho / dt. */
+  readonly density_kg_m3: number;
+  /** A4: the roster into the rigid state buffer through the queue (prescribed motion, roster changes; syncBodies
+   * writes only on a change), so that the step's part 1 sees it; returns the step's header. Called once with
+   * step -1 before the boot (the t = 0 roster, as the old host's construction syncs it), then before each step's
+   * ring write, after step `step - 1`'s part 2 and integrator are queued: the roster sampled at the step's end,
+   * (step + 1) dt, as the old advance samples it. Once a step. */
   sync(step: number): BrickBodiesHeader;
+  /** §7.1: step `step`'s rigid integration, submitted with its part 2 (after couple): rigidSystem.encode's tables and
+   * integrate, then the exchange's clear. Undefined when the coupling is off (the old host's uncoupled bodies: no
+   * couple and no integration). */
+  integrate(step: number): GPUCommandBuffer | undefined;
 }
+
+/** The stamp's brick candidates (bodyStamp's BMASK, §3): the bodies whose bounding sphere, dilated by length(2h), one
+ * cell and the swept reach (|v| + |w| r) horizon, meets the box of the brick at cell origin o. The census's body rule
+ * reads the same test, so every brick the stamp gives a K slot is held h. Needs pbBrickBodiesWGSL and `bodies`. */
+export const PB_BRICK_CANDIDATES_WGSL = /* wgsl */`
+// The brick's BMASK (§3): pbBodyBoxCandidates with each body's own reach, length(2h) + one cell + its swept reach
+// (|v| + |w| r) horizon: the mark's margin, so every body setMark marked the brick for is a candidate.
+fn pbBrickCandidates(o:vec3i)->u32{
+ let h=pbH();let lo=pbWorldCell(o)-0.5*h;let hi=lo+8.0*h;let cell=max(h.x,max(h.y,h.z));let dt=pbBrickHorizon();
+ var mask=0u;
+ for(var i=0u;i<pbBodyCount();i++){
+  let b=bodies[i];let c=b.positionShape.xyz;let radius=max(b.dimensions.w,0.0);
+  let reach=length(2.0*h)+cell+(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*radius)*dt;
+  if(b.positionShape.w<0.0||distance(clamp(c,lo,hi),c)<=radius+reach){mask|=1u<<i;}
+ }
+ return mask;
+}
+`;

@@ -19,6 +19,7 @@ import { snapshot } from "./brick-readback";
 import { SCENE_SHAPE_TABLE } from "../../core/scene-shape";
 import { RIGID_BODY_CUT_ATLAS_WIDTH } from "../../core/solid-cuts";
 import { GPU_RIGID_STATE_BYTES } from "../../core/webgpu-rigid-body";
+import { GPU_RIGID_EXCHANGE_BYTES } from "../../core/webgpu-eulerian";
 
 const GPU = { skip: !process.env.WEBGPU_NODE_MODULE };
 const H_M = 1 / 32, DT = 1 / 60, G = 9.81, N = 32;
@@ -32,18 +33,19 @@ function record(s: Sphere): number[] {
 async function engine(device: GPUDevice, sphere: Sphere, staticMask?: BrickEngineOptions["staticMask"], count = 1) {
   const bodies = device.createBuffer({ size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   const cuts = device.createBuffer({ size: 16 * RIGID_BODY_CUT_ATLAS_WIDTH, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  const exchange = device.createBuffer({ size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   let pose: Sphere | undefined = sphere; const syncs: number[] = [];
   const o: BrickEngineOptions = {
     lattice: [N, N, N], h_m: H_M, dt_s: DT, gravity_mps2: [0, -G, 0], capacities: { f: 128, c: 8, b: 0, k: 96, particles: 1024 },
     liquid: [{ lo: [-1, -1, -1], hi: [N + 1, 16.3, N + 1] }], solver: compositeMGPCG(), stages: bringUpStages,
     ...(staticMask ? { staticMask } : {}),
     bodies: {
-      frame_m: [0, 0, 0], h_m: H_M, openTop: false, bodies, cuts,
+      frame_m: [0, 0, 0], h_m: H_M, openTop: false, bodies, cuts, exchange, density_kg_m3: 1000, integrate: () => undefined,
       sync(step) { syncs.push(step); if (pose) { device.queue.writeBuffer(bodies, 0, new Float32Array(record(pose))); pose = undefined; } return { count, flags: BODY_FLAG.COUPLING, generation: 1 }; },
     },
   };
   const e = await BrickEngine.create(device, o);
-  return { e, move(s: Sphere) { pose = s; }, syncs, destroy() { e.destroy(); bodies.destroy(); cuts.destroy(); } };
+  return { e, move(s: Sphere) { pose = s; }, syncs, destroy() { e.destroy(); bodies.destroy(); cuts.destroy(); exchange.destroy(); } };
 }
 
 /** The CPU criterion: the bricks with a tile pbBodyMarkTile marks for a sphere (horizon dt). */
