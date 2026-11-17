@@ -10,17 +10,28 @@
  * project (the h faces). The separating walls' outer loop (MGPCGOptions.walls)
  * is on: the composite rows keep the wall state in FLAGS bits 8-10. The bring-up CG (brick-bringup-cg.ts) is for E's
  * tests only and never registers here (coordinator ruling, 2026-11-15).
+ * With the scene's bodies (the factory's context), the rigid coupling is monolithic in the solve (MGPCGOptions.bodies:
+ * the dynamic bodies' rows in A', coordinator ruling 2026-11-17, the brick engine only).
  */
 import { ARGS, LIST } from "./brick-abi";
 import type { PressureSolver, PressureSolverFactory } from "./brick-pressure-slot";
 import { pressureCompositeKernels } from "./pressure-composite.wgsl";
 import { mgLayout, poolMGPCG, type MGPCGOptions } from "./pressure-mgpcg";
+import type { BrickBodiesFrame } from "./bodies-binding.wgsl";
+import type { BrickLayout } from "./brick-abi";
+
+/** What the engine tells a solver of the scene beyond the layout: the rigid bodies' frame when the scene binds bodies. */
+export interface BrickPressureContext { readonly bodies?: BrickBodiesFrame }
+/** A solver factory that takes the engine's context (assignable to PressureSolverFactory). */
+export type BrickPressureFactory = (L: BrickLayout, context?: BrickPressureContext) => PressureSolver;
 
 /** The composite MGPCG: poolMGPCG with the native rows before its setup and the native projection after its finish. */
-export const compositeMGPCG = (options: MGPCGOptions = {}): PressureSolverFactory => (L): PressureSolver => {
+/** monolithic (default true): the context's bodies implicit in the solve; false keeps the explicit couple (comparisons). */
+export const compositeMGPCG = (options: MGPCGOptions & { readonly monolithic?: boolean } = {}): BrickPressureFactory => (L, context): PressureSolver => {
   // The cuts follow the K pool, as the MGPCG's (rowsC latches a liquid native row in a cut brick).
   const cuts = options.cuts ?? L.cap.k > 0;
-  const { publish, live, core, ...mg } = poolMGPCG(L, { ...options, cuts, walls: options.walls ?? true }), K = pressureCompositeKernels(L, {}, { cuts, faces: cuts ? mgLayout(L).FC : undefined });
+  const { monolithic = true, ...rest } = options, bodies = rest.bodies ?? (monolithic ? context?.bodies : undefined);
+  const { publish, live, core, ...mg } = poolMGPCG(L, { ...rest, cuts, walls: rest.walls ?? true, ...(bodies ? { bodies } : {}) }), K = pressureCompositeKernels(L, {}, { cuts, faces: cuts ? mgLayout(L).FC : undefined });
   const pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };
   // The live lists (pressure-mgpcg.ts mgLive): the engine's operator is the lists' pass, so the h tiles' held fit and
   // the h rows run over HB at the setup's head, before the native rows, and the h faces' projection over HP closes the

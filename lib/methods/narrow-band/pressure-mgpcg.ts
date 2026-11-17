@@ -85,6 +85,9 @@ import type { PressureSolver } from "./brick-pressure-slot";
 import { FINE_ORDER, OC } from "./pressure-model";
 import { P_FLAG, P_WALL_C, pressureCompositeKernels, pressureResolveBox } from "./pressure-composite.wgsl";
 import { NP_K } from "./pressure-rows.wgsl";
+import { BODIES_RO, BODY_CUTS_RO, pbBrickBodiesWGSL, type BrickBodiesFrame } from "./bodies-binding.wgsl";
+import { pbBodyCoupleWGSL } from "./bodies-shapes.wgsl";
+import { GPU_RIGID_BODY_CAPACITY } from "../../core/rigid-capacity";
 
 const P_WALL0 = P_FLAG.WALL0, WALL_F = P_WALL_C.F.toFixed(1), WALL_C = P_WALL_C.C.toFixed(1);
 
@@ -266,6 +269,21 @@ export interface MGPCGOptions {
    * closed one. Off, every kernel's text is the cut-free solver's.
    */
   readonly cuts?: boolean;
+  /**
+   * The monolithic rigid coupling (lane P, 2026-11-17; Batty, Bertails & Bridson 2007, "A fast variational framework
+   * for accurate solid-fluid coupling", the rigid bodies' rows): the scene's bodies' frame, or off. The explicit
+   * coupling (couple's impulse rho J^T X from a solve that saw the bodies at V_n) has the added-mass mode
+   * lambda = -m_a / m, unstable for a light flat hull at any dt (the paddleboat's -1.55 a step). On, every dynamic body
+   * (material.z 1, inverseMassInertia.x > 0) is implicit in the solve: A' = A + (1/h) J M~ J^T, J's row j_c =
+   * [a_c; (r_c - X) x a_c] couple's face areas a_c (pbCoupleBody, a liquid row with FRAC > 1e-5), M~ =
+   * diag(imi.x I, R diag(imi.yzw) R^T) the integrator's (rigidKicked: dV = imi.x / rho I, dL = I, w = I^-1 L), and the
+   * RHS's V_n becomes V* = V_n + g dt (RHS -= (1/h) j_c.(g dt, 0)). Couple's impulse from the final X then gives the
+   * integrator V_n+1 = V* + M^-1 rho J^T X, the velocity the solve's divergence assumed. The multigrid stays on A (a
+   * valid SPD preconditioner of A'), and the rank-6-a-body term costs one J^T y reduction a slot (pmgBodyZ, pmgBodyFold).
+   * Fixed, held and motor-attached bodies stay explicit (the stamp's W). Needs the cuts (a body brick's K slot).
+   * Undefined, every kernel's text is the solver's without bodies.
+   */
+  readonly bodies?: BrickBodiesFrame;
 }
 
 /**
@@ -320,6 +338,9 @@ export function poolMGPCG(L: BrickLayout, options: MGPCGOptions = {}): PressureS
   const M = mgLayout(L), T = M.top;
   const u = (n: number) => `${n >>> 0}u`;
   const live = options.live ?? mgLive(L);
+  const bodies = options.bodies;
+  if (bodies && !cuts) throw new Error("Pool MGPCG: the monolithic rigid coupling needs the cuts (a body brick's K slot)");
+  if (bodies && !(bodies.h_m > 0)) throw new Error(`Pool MGPCG: body frame h ${bodies.h_m}`);
   if (live && !mgLive(L)) throw new Error(`Pool MGPCG: live lists with ${L.cap.f} F slots (fold ${FOLD})`);
   // A brick kernel's head over F_ALL, or (live) over HB's exact arguments: no count test.
   const fHead = (wcount = "") => live
@@ -679,6 +700,185 @@ fn pTileZero(lid:u32){for(var t=lid;t<1000u;t+=512u){tp[t]=0.0;}workgroupBarrier
   const CB = [CFG, setRW, dirRO, cRW]; // page kernels
   const CBP = [CFG, setRW, dirRO, presRW, cRW]; // page kernels on the native rows
 
+  // ---- the monolithic rigid coupling (MGPCGOptions.bodies) -------------------------------------------------------------
+  // pmgB (u32 words, floats as bits): MB_Q a body's arm origin Q (pbWorldCell(c) - X = h c + Q, couple's arm); MB_W its
+  // W = M~ J^T y vectors (Wz this slot's z, Wx the iterate x, Wd the direction d; linear then angular); MB_MK a K slot's
+  // marker (step + 1 when its brick holds a dynamic body's rows this step: pmgBodyJ's); MB_P a K slot's J^T z partials
+  // (6 a body); MB_J a K slot's cells, 2 words a cell, each a body's face areas a_c / h^2 in quarters (pbBodyFaceFraction
+  // is a multiple of 0.25, so the word is exact) and body + 1 (0 none). The words a_c, Q and M~ are fixed in a step, so
+  // B = (1/h) J M~ J^T is one symmetric operator for every product the solve takes.
+  const NB = GPU_RIGID_BODY_CAPACITY, KCAP = L.cap.k;
+  const MB_W = 4 * NB, MB_MK = MB_W + 18 * NB, MB_P = MB_MK + KCAP, MB_J = MB_P + 6 * NB * KCAP, MB_WORDS = MB_J + 1024 * KCAP;
+  const bRW: BrickBinding = { name: "pmgB", kind: "rw", type: "array<u32>" };
+  const cutRO: BrickBinding = { name: "cut", kind: "ro", type: "array<f32>" };
+  const MB_B = bodies ? [bRW] : [];
+  const MB = bodies ? /* wgsl */`
+const MB_N:u32=${u(NB)};const MB_Q:u32=0u;const MB_W:u32=${u(MB_W)};const MB_MK:u32=${u(MB_MK)};const MB_P:u32=${u(MB_P)};const MB_J:u32=${u(MB_J)};
+const MB_WZ:u32=0u;const MB_WX:u32=6u;const MB_WD:u32=12u;
+fn mbF(i:u32)->f32{return bitcast<f32>(pmgB[i]);}
+fn mbV(i:u32)->vec3f{return vec3f(mbF(i),mbF(i+1u),mbF(i+2u));}
+// Brick slot's K slot when it holds this step's body rows (pmgBodyJ's marker), else NONE.
+fn mbBrick(slot:u32)->u32{
+  let k=nbFRec(slot,NB_REC_CUT);if(k==NB_NONE){return NB_NONE;}
+  return select(NB_NONE,k,pmgB[MB_MK+k]==nbRing(cfg.x,NB_RING_STEP)+1u);
+}
+fn mbArea(w:u32)->vec3f{return vec3f(f32(i32(w&15u)-4),f32(i32((w>>4u)&15u)-4),f32(i32((w>>8u)&15u)-4))*0.25;}
+fn mbWord(k:u32,l:u32,t:u32)->u32{return pmgB[MB_J+2u*(512u*k+l)+t];}
+// (B y)_c: (1/h) sum over cell (k, l)'s bodies of j_c . (W_o + alpha W_o2) (o2 = o: W_o alone); 0 off the body rows.
+fn mbApply(k:u32,l:u32,c:vec3i,o:u32,alpha:f32,o2:u32)->f32{
+  if(k==NB_NONE){return 0.0;}
+  let h=nbRingF(cfg.x,NB_RING_H);var s=0.0;
+  for(var t=0u;t<2u;t++){
+    let w=mbWord(k,l,t);let ib=(w>>12u)&31u;if(ib==0u){continue;}
+    let i=ib-1u;let a=mbArea(w)*(h*h);let arm=h*vec3f(c)+mbV(MB_Q+4u*i);let base=MB_W+18u*i;
+    var lin=mbV(base+o);var ang=mbV(base+o+3u);
+    if(o2!=o){lin+=alpha*mbV(base+o2);ang+=alpha*mbV(base+o2+3u);}
+    s+=dot(a,lin)+dot(cross(arm,a),ang);
+  }
+  return s/h;
+}
+// Lanes 0-5: the workgroup's sums of (lin, ang) in a fixed order (pSum512's tree, six at once); other lanes 0. A
+// 512-lane workgroup in uniform control flow (three barriers); a next call's writes follow this call's reads.
+var<workgroup> mbS6:array<f32,3072>;var<workgroup> mbS2:array<f32,384>;var<workgroup> mbS3:array<f32,48>;
+fn mbSum6(lid:u32,lin:vec3f,ang:vec3f)->f32{
+  mbS6[lid]=lin.x;mbS6[512u+lid]=lin.y;mbS6[1024u+lid]=lin.z;mbS6[1536u+lid]=ang.x;mbS6[2048u+lid]=ang.y;mbS6[2560u+lid]=ang.z;
+  workgroupBarrier();
+  if(lid<384u){let cc=lid/64u;let j=lid%64u;var s=0.0;for(var m=0u;m<8u;m++){s+=mbS6[512u*cc+64u*m+j];}mbS2[lid]=s;}
+  workgroupBarrier();
+  if(lid<48u){let cc=lid/8u;let j=lid%8u;var s=0.0;for(var m=0u;m<8u;m++){s+=mbS2[64u*cc+8u*m+j];}mbS3[lid]=s;}
+  workgroupBarrier();
+  var r=0.0;if(lid<6u){for(var m=0u;m<8u;m++){r+=mbS3[8u*lid+m];}}
+  return r;
+}
+` : "";
+  // The body kernels' rigid state: the bodies' poses (pbBrickBodiesWGSL: the ring's gate, couple's shape queries).
+  const mbBodies = bodies ? pbBrickBodiesWGSL(bodies) + "\n" + /* wgsl */`
+// A dynamic body with mass: the integrator's (rigidIsDynamic; a held or fixed body integrates nothing).
+fn mbImplicit(i:u32)->bool{let b=bodies[i];return b.material.z>0.5&&b.material.z<1.5&&b.inverseMassInertia.x>0.0;}
+// The solve's bodies: the ring's gate with the coupling on, past the boot (the kick has no couple; step 0 is the boot's ring).
+fn mbOn()->bool{return pbBrickBodiesOn()&&(nbRing(cfg.x,NB_RING_BODY_FLAGS)&NB_BODY_FLAG_COUPLING)!=0u&&nbRing(cfg.x,NB_RING_STEP)>0u;}
+` : "";
+  // pmgBodyJ (the setup's head, after the rows; F_BODY, a workgroup a brick, as couple): a body brick's (K slot,
+  // BMASK != 0) cells' face areas against its dynamic bodies, the RHS's V* (RHS -= dt h (a_c / h^2) . g) and the K
+  // slot's marker; workgroup 0 writes the bodies' arm origins. A third dynamic body at one cell latches (0xb4).
+  const bodyJ = bodies && kernel("pmgBodyJ", [CFG, setRW, dirRO, presRW, cutRO, BODIES_RO, BODY_CUTS_RO, bRW], [], MB + mbBodies + pbBodyCoupleWGSL + /* wgsl */`
+var<workgroup> mbHead:vec4u;var<workgroup> mbAny:atomic<u32>;
+@compute @workgroup_size(512) fn pmgBodyJ(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let e=nbGroup(wid);
+  if(lid==0u){
+    var head=vec4u(0u,0u,NB_NONE,0u);
+    if(mbOn()&&e<nbListCount(NB_LIST_F_BODY)){
+      let s=nbListSlot(NB_LIST_F_BODY,e);let k=nbFRec(s,NB_REC_CUT);
+      if(k!=NB_NONE){
+        let mask=bitcast<u32>(cut[NB_CUT_BMASK+k])&pbBodyMaskAll();var dyn=0u;
+        var rem=mask;while(rem!=0u){let i=firstTrailingBit(rem);rem&=rem-1u;if(mbImplicit(i)){dyn|=1u<<i;}}
+        head=vec4u(1u,s,k,dyn);
+      }
+    }
+    mbHead=head;atomicStore(&mbAny,0u);
+  }
+  if(e==0u&&lid<pbBodyCount()){let q=pbWorldCell(vec3i(0))-pbBodyPositionOf(lid);pmgB[MB_Q+4u*lid]=bitcast<u32>(q.x);pmgB[MB_Q+4u*lid+1u]=bitcast<u32>(q.y);pmgB[MB_Q+4u*lid+2u]=bitcast<u32>(q.z);}
+  let head=workgroupUniformLoad(&mbHead);
+  if(head.x==0u){return;}
+  let s=head.y;let k=head.z;let c=nbFOrigin(s)+nbLocalCoord(lid);let at=NB_STRIDE*s+lid;
+  var w0=0u;var w1=0u;var n=0u;var dRhs=0.0;
+  if(head.w!=0u&&pres[NB_PRES_F_DIAG+at]>0.0&&cut[NB_CUT_FRAC+NB_STRIDE*k+lid]>1e-5){
+    let h=nbRingF(cfg.x,NB_RING_H);let dt=nbRingF(cfg.x,NB_RING_DT);
+    let g=vec3f(nbRingF(cfg.x,NB_RING_GRAVITY),nbRingF(cfg.x,NB_RING_GRAVITY+1u),nbRingF(cfg.x,NB_RING_GRAVITY+2u));
+    var rem=head.w;
+    while(rem!=0u){
+      let i=firstTrailingBit(rem);rem&=rem-1u;
+      let r=pbCoupleBody(i,c,1.0,0.0,1.0);if(!r.near){continue;}
+      let q=vec3i(round(r.reaction*(4.0/(h*h))));
+      if(all(q==vec3i(0))){continue;}
+      let word=u32(q.x+4)|(u32(q.y+4)<<4u)|(u32(q.z+4)<<8u)|((i+1u)<<12u);
+      if(n==0u){w0=word;}else if(n==1u){w1=word;}else{nbFail(NB_FAIL_UNSUPPORTED,0xb4000000u|nbFRec(s,NB_REC_KEY));}
+      n+=1u;dRhs-=dt*h*dot(0.25*vec3f(q),g);
+    }
+  }
+  pmgB[MB_J+2u*(512u*k+lid)]=w0;pmgB[MB_J+2u*(512u*k+lid)+1u]=w1;
+  if(w0!=0u){atomicOr(&mbAny,1u);}
+  if(dRhs!=0.0){pres[NB_PRES_F_RHS+at]+=dRhs;}
+  workgroupBarrier();
+  if(lid==0u){pmgB[MB_MK+k]=select(0u,nbRing(cfg.x,NB_RING_STEP)+1u,atomicLoad(&mbAny)!=0u);}
+}`);
+  // pmgBodyZ (F_BODY): a marked brick's J^T y partials (y = pres F Z: the guess in the setup, a slot's z after
+  // pmgPostZ), 6 a body, into its K slot's MB_P words (0 for a body without rows there). open: a slot's (PH_OPEN).
+  const bodyZKernel = (open: boolean) => bodies && kernel(open ? "pmgBodyZ" : "pmgBodyZ0", [CFG, setRW, dirRO, presRW, bRW], [], MB + /* wgsl */`
+var<workgroup> mbHead2:vec2u;var<workgroup> mbMaskA:atomic<u32>;var<workgroup> mbMask:u32;var<workgroup> mbCount:u32;
+@compute @workgroup_size(512) fn ${open ? "pmgBodyZ" : "pmgBodyZ0"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let e=nbGroup(wid);
+  if(lid==0u){
+    var k=NB_NONE;var s=0u;
+    if(${open ? "atomicLoad(&nbSet[PH_OPEN])!=0u&&" : ""}e<nbListCount(NB_LIST_F_BODY)){s=nbListSlot(NB_LIST_F_BODY,e);k=mbBrick(s);}
+    mbHead2=vec2u(k,s);atomicStore(&mbMaskA,0u);
+  }
+  let hd=workgroupUniformLoad(&mbHead2);let k=hd.x;
+  if(k==NB_NONE){return;}
+  let s=hd.y;let c=nbFOrigin(s)+nbLocalCoord(lid);let y=pres[NB_PRES_F_Z+NB_STRIDE*s+lid];let h=nbRingF(cfg.x,NB_RING_H);
+  let w0=mbWord(k,lid,0u);let w1=mbWord(k,lid,1u);let i0=(w0>>12u)&31u;let i1=(w1>>12u)&31u;
+  if(i0!=0u){atomicOr(&mbMaskA,1u<<(i0-1u));}
+  if(i1!=0u){atomicOr(&mbMaskA,1u<<(i1-1u));}
+  let a0=mbArea(w0)*(h*h*y);let a1=mbArea(w1)*(h*h*y);
+  let t0=select(vec3f(0.0),cross(h*vec3f(c)+mbV(MB_Q+4u*(max(i0,1u)-1u)),a0),i0!=0u);
+  let t1=select(vec3f(0.0),cross(h*vec3f(c)+mbV(MB_Q+4u*(max(i1,1u)-1u)),a1),i1!=0u);
+  workgroupBarrier();
+  if(lid==0u){mbMask=atomicLoad(&mbMaskA);mbCount=min(nbRing(cfg.x,NB_RING_BODY_COUNT),MB_N);}
+  let mask=workgroupUniformLoad(&mbMask);
+  let n=workgroupUniformLoad(&mbCount);
+  for(var i=0u;i<n;i++){
+    let base=MB_P+6u*(MB_N*k+i);
+    if(((mask>>i)&1u)==0u){if(lid<6u){pmgB[base+lid]=0u;}continue;}
+    var lin=vec3f(0.0);var ang=vec3f(0.0);
+    if(i0==i+1u){lin+=a0;ang+=t0;}
+    if(i1==i+1u){lin+=a1;ang+=t1;}
+    let v=mbSum6(lid,lin,ang);
+    if(lid<6u){pmgB[base+lid]=bitcast<u32>(v);}
+  }
+}`);
+  // pmgBodyFold (a workgroup a body): J^T y over F_BODY's marked bricks in list order, then W = M~ J^T y. The setup's
+  // (init): Wx from the guess, Wz = Wd = 0. A slot's: Wz; x += alpha_old d and d = z + beta d (pmgDirection's, beta
+  // from the same fold of r.z and PH_RZ) carried on the W vectors, so pmgDirection and pmgUpdate take B z and
+  // B (x + alpha d) without another reduction.
+  const bodyFoldKernel = (init: boolean) => bodies && kernel(init ? "pmgBodyFold0" : "pmgBodyFold", [CFG, setRW, dirRO, topRW, redRW, bRW, BODIES_RO, BODY_CUTS_RO], init ? [] : ["red", "reduce"], MB + mbBodies + /* wgsl */`
+var<workgroup> mbG:array<f32,6>;var<workgroup> mbCount:u32;${init ? "" : "var<workgroup> wOpenB:u32;var<workgroup> wNF:u32;var<workgroup> wNC:u32;"}
+@compute @workgroup_size(512) fn ${init ? "pmgBodyFold0" : "pmgBodyFold"}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
+  let i=wid.x;${init ? "" : `
+  if(lid==0u){wOpenB=atomicLoad(&nbSet[PH_OPEN]);wNF=min(pmgTop[T_RBN],NB_FCAP);wNC=nbListCount(NB_LIST_C_ALL);}
+  if(workgroupUniformLoad(&wOpenB)==0u){return;}
+  let rz=pFixed(lid,R_ZF,workgroupUniformLoad(&wNF),R_ZC,workgroupUniformLoad(&wNC));`}
+  if(lid==0u){mbCount=pbBodyCount();}
+  if(i>=workgroupUniformLoad(&mbCount)){return;}
+  let n=nbListCount(NB_LIST_F_BODY);
+  var lin=vec3f(0.0);var ang=vec3f(0.0);
+  for(var e=lid;e<n;e+=512u){let k=mbBrick(nbListSlot(NB_LIST_F_BODY,e));if(k!=NB_NONE){let b=MB_P+6u*(MB_N*k+i);lin+=mbV(b);ang+=mbV(b+3u);}}
+  let v=mbSum6(lid,lin,ang);
+  if(lid<6u){mbG[lid]=v;}
+  workgroupBarrier();
+  if(lid==0u){
+    var wl=vec3f(0.0);var wa=vec3f(0.0);
+    if(mbImplicit(i)){
+      let b=bodies[i];let q=b.orientation;
+      wl=b.inverseMassInertia.x*vec3f(mbG[0],mbG[1],mbG[2]);
+      wa=pbQuatRotate(q,b.inverseMassInertia.yzw*pbQuatRotate(vec4f(q.x,-q.yzw),vec3f(mbG[3],mbG[4],mbG[5])));
+    }
+    let base=MB_W+18u*i;${init ? `
+    for(var j=0u;j<18u;j++){pmgB[base+j]=0u;}
+    pmgB[base+MB_WX]=bitcast<u32>(wl.x);pmgB[base+MB_WX+1u]=bitcast<u32>(wl.y);pmgB[base+MB_WX+2u]=bitcast<u32>(wl.z);
+    pmgB[base+MB_WX+3u]=bitcast<u32>(wa.x);pmgB[base+MB_WX+4u]=bitcast<u32>(wa.y);pmgB[base+MB_WX+5u]=bitcast<u32>(wa.z);` : `
+    var beta=0.0;
+    if(cfg.z>0u){let old=bitcast<f32>(atomicLoad(&nbSet[PH_RZ]));beta=select(0.0,rz/old,old!=0.0);}
+    let alpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));
+    var wz=array<f32,6>(wl.x,wl.y,wl.z,wa.x,wa.y,wa.z);
+    for(var j=0u;j<6u;j++){
+      let d=mbF(base+MB_WD+j);
+      pmgB[base+MB_WZ+j]=bitcast<u32>(wz[j]);
+      pmgB[base+MB_WX+j]=bitcast<u32>(mbF(base+MB_WX+j)+alpha*d);
+      pmgB[base+MB_WD+j]=bitcast<u32>(wz[j]+beta*d);
+    }`}
+  }
+}`);
+
   // ---- setup ---------------------------------------------------------------
   const setupClear = kernel("pmgSetupClear", [CFG, setRW, redRW], [], /* wgsl */`
 @compute @workgroup_size(128) fn pmgSetupClear(@builtin(local_invocation_index) lid:u32){
@@ -723,8 +923,8 @@ var<workgroup> wGLiveA:atomic<u32>;var<workgroup> wGLive:u32;
   pres[NB_PRES_F_Z+at]=x;
 }`);
   const X0 = guessOn ? "NB_PRES_F_Z" : "NB_PRES_F_X";
-  const setupF = kernel("pmgSetupF", FBT, ["pres", "stage", "reduce", "tile"],
-    fineApply("pApplyR", (s, l) => `pres[${X0}+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`) + /* wgsl */`
+  const setupF = kernel("pmgSetupF", [...FBT, ...MB_B], ["pres", "stage", "reduce", "tile"],
+    fineApply("pApplyR", (s, l) => `pres[${X0}+NB_STRIDE*${s}+${l}]`, (cs, i) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]`) + MB + /* wgsl */`
 var<workgroup> wD:array<f32,512>;var<workgroup> wK:array<vec3f,512>;var<workgroup> wKU:array<vec3f,512>;var<workgroup> w1D:array<f32,64>;var<workgroup> w1K:array<vec3f,64>;var<workgroup> w1KU:array<vec3f,64>;
 var<workgroup> wLive:u32;
 @compute @workgroup_size(512) fn pmgSetupF(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
@@ -747,7 +947,7 @@ var<workgroup> wLive:u32;
   let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   {let ku=pRowKU(b,c,slot,l);let ra=P_RKU+3u*NB_STRIDE*slot+l;pmgF[ra]=ku.x;pmgF[ra+NB_STRIDE]=ku.y;pmgF[ra+2u*NB_STRIDE]=ku.z;}
   var r=0.0;
-  if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l);}
+  if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l)${bodies ? "-mbApply(mbBrick(slot),l,c,MB_WX,0.0,MB_WX)" : ""};}
   pres[NB_PRES_F_R+at]=r;
   let rmax=pMax512(lid,abs(r));
   if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}
@@ -1658,7 +1858,7 @@ fn pNatQ(p:vec3i,T:vec3i)->u32{if(!pTileIn(T)){return NB_NONE;}let s=qPage(p,T,3
   // head: the CG scalar's fold (pFixed), once in the entry in uniform control flow, after a C workgroup without native
   // rows has returned (skipC, its partial's zero); its F and C halves read the result from private variables.
   const fusedFC = (label: string, decl: string, head: string, fBody: string, cBody: string, skipC: string, tile = false) =>
-    kernel(label, [...FBT, redRW], ["pres", "stage", "cstage", "reduce", "red", "seam", ...(tile ? ["tile" as const] : [])], decl + /* wgsl */`
+    kernel(label, [...FBT, redRW, ...MB_B], ["pres", "stage", "cstage", "reduce", "red", "seam", ...(tile ? ["tile" as const] : [])], decl + /* wgsl */`
 var<workgroup> wCountC:u32;
 fn ${label}F(g:u32,lid:u32){
   let slot=pmgTop[T_RB+g];pStageK(slot,lid);workgroupBarrier();
@@ -1699,14 +1899,14 @@ ${head}
   const betaLets = /* wgsl */`
   let beta=pBeta;let alpha=pAlphaOld;`;
   const direction = fusedFC("pmgDirection",
-    fineApply("pApplyZ", zF, zN) + nativeApply("pApplyNZ", "pSeamZ", zN, zF) + `\nvar<workgroup> wBeta:f32;var<workgroup> wAlphaOld:f32;var<private> pBeta:f32;var<private> pAlphaOld:f32;`, betaHead, betaLets + /* wgsl */`
+    fineApply("pApplyZ", zF, zN) + nativeApply("pApplyNZ", "pSeamZ", zN, zF) + MB + `\nvar<workgroup> wBeta:f32;var<workgroup> wAlphaOld:f32;var<private> pBeta:f32;var<private> pAlphaOld:f32;`, betaHead, betaLets + /* wgsl */`
   let l=lid;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
   var pq=0.0;
   if(pDiag(slot,l)>0.0){
     let dOld=pres[NB_PRES_F_D+at];
     pres[NB_PRES_F_X+at]+=alpha*dOld;
     let dn=pres[NB_PRES_F_Z+at]+beta*dOld;
-    let q=pApplyZ(b,c,slot,l)+beta*pres[NB_PRES_F_Q+at];
+    let q=pApplyZ(b,c,slot,l)+beta*pres[NB_PRES_F_Q+at]${bodies ? "+mbApply(mbBrick(slot),l,c,MB_WZ,0.0,MB_WZ)" : ""};
     pres[NB_PRES_F_D+at]=dn;pres[NB_PRES_F_Q+at]=q;pq=dn*q;
   }else{pres[NB_PRES_F_D+at]=0.0;pres[NB_PRES_F_Q+at]=0.0;}
   let sum=pSum512(lid,pq);if(lid==0u){pmgRed[R_Q+wCountC+g]=sum;}`, betaLets + /* wgsl */`
@@ -1731,10 +1931,10 @@ ${head}
   const xF = (s: string, l: string) => `pres[NB_PRES_F_X+NB_STRIDE*${s}+${l}]+pAlpha*pres[NB_PRES_F_D+NB_STRIDE*${s}+${l}]`;
   const xN = (cs: string, i: string) => `pres[NB_PRES_C_X+NB_STRIDE*${cs}+${i}]+pAlpha*pres[NB_PRES_C_D+NB_STRIDE*${cs}+${i}]`;
   const update = fusedFC("pmgUpdate",
-    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + nativeApply("pApplyNR", "pSeamR", xN, xF), alphaHead, /* wgsl */`
+    `var<private> pAlpha:f32;var<workgroup> wAlpha:f32;\n` + fineApply("pApplyR", xF, xN, true) + nativeApply("pApplyNR", "pSeamR", xN, xF) + MB, alphaHead, /* wgsl */`
   let l=lid;let lc=nbLocalCoord(l);let c=o+lc;let ti=pTi(lc);
   let d=pDiag(slot,l);var r=0.0;
-  if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l);}
+  if(d>0.0){r=pP(NB_PRES_F_RHS,slot,l)-pApplyR(b,c,slot,l)${bodies ? "-mbApply(mbBrick(slot),l,c,MB_WX,pAlpha,MB_WD)" : ""};}
   pres[NB_PRES_F_R+NB_STRIDE*slot+l]=r;
   let rmax=pMax512(lid,abs(r));
   if(lid==0u){atomicMax(&nbSet[PH_RMAX],bitcast<u32>(rmax));}
@@ -1999,6 +2199,7 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
 }`);
 
   const hb = { indirect: MG_GATE.HB }, fRows = live ? hb : list(LIST.F_ALL);
+  const bodyZ0 = bodyZKernel(false), bodyZ = bodyZKernel(true), bodyFold0 = bodyFoldKernel(true), bodyFold = bodyFoldKernel(false);
   const lv: MGPCGLive | undefined = KL && {
     args: [{ kernel: listArgs, dispatch: { direct: [1, 1, 1] } }, { kernel: rowsZero, dispatch: { indirect: MG_GATE.ZL } }],
     tileRoots: [{ kernel: KL.tileRoots, dispatch: hb }],
@@ -2009,8 +2210,11 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
   const core = {
     setup: [
       { kernel: setupClear, dispatch: { direct: [1, 1, 1] } },
+      // The bodies' rows and the RHS's V* before the guess reads the RHS; J^T of the guess before setupF's r.
+      ...(bodyJ ? [{ kernel: bodyJ, dispatch: list(LIST.F_BODY) }] : []),
       ...(guessOn ? [{ kernel: guess, dispatch: fRows }] : []),
       ...(guessWalls ? [{ kernel: wallsFKernel(false, true), dispatch: fRows }] : []),
+      ...(bodyZ0 && bodyFold0 ? [{ kernel: bodyZ0, dispatch: list(LIST.F_BODY) }, { kernel: bodyFold0, dispatch: { direct: [NB, 1, 1] as [number, number, number] } }] : []),
       { kernel: setupF, dispatch: fRows },
       { kernel: coarsenC, dispatch: list(LIST.C_ALL) },
       { kernel: coarsenTop, dispatch: { direct: [1, 1, 1] }, w: tolBits },
@@ -2029,6 +2233,7 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
       gS(preS, k), ...(bsb ? [gF(preU, k)] : []), gC(nativePre0, k), gF(down0, k), gC(nativePre1, k), gF(down1, k), gC(down1C, k), gC(down2, k), gC(down3, k),
       { kernel: top, dispatch: { indirect: MG_GATE.ONE }, z: k },
       gC(up3, k), gC(up2, k), gC(nativePost1, k), gF(up1, k), gC(nativePost0, k), ...(bsb ? [gF(postU, k)] : []), gS(postS, k), gF(postZ, k),
+      ...(bodyZ && bodyFold ? [{ kernel: bodyZ, dispatch: list(LIST.F_BODY), z: k }, { kernel: bodyFold, dispatch: { direct: [NB, 1, 1] as [number, number, number] }, z: k }] : []),
       gFC(direction, k), gFC(update, k),
       // A slot that can never decide encodes no walls: with wallLoose Infinity, slot k decides exactly when k < wallDecisions
       // (every open slot before it decided; a closed slot k closes every later one).
@@ -2041,7 +2246,7 @@ fn pKnown(par:u32,cs:u32,step:u32)->bool{
     core,
     // After the composite's native projection (pmgProjectC writes an h tile's C X): compositeMGPCG places it.
     publish: [{ kernel: pressureDelta, dispatch: list(LIST.C_ALL) }],
-    buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 8 + 2 * (L.cap.f + L.cap.c) },
+    buffers: { pmgF: M.fWords, pmgC: M.cWords, pmgTop: T.words, pmgRed: 8 + 2 * (L.cap.f + L.cap.c), ...(bodies ? { pmgB: MB_WORDS } : {}) },
     receipt: { iterations: MG_HEADER.ITERATIONS, capped: MG_HEADER.CAPPED },
   };
 }
