@@ -1106,7 +1106,7 @@ fn ySeed(T:vec3i,a:u32)->vec3f{
 }`);
 
   // vGauge (the old surface volume gauge, measureInitial over the geometry's occupancy): a workgroup a brick sums
-  // nbfCellFill over its cells from the brick's 9^3 vertices, staged; one atomic a brick into the step parity's
+  // nbfCellFill over its open cells (FLAGS.OPEN) from the brick's 9^3 vertices, staged; one atomic a brick into the step parity's
   // fixed-point pair (cfg.w = 1: the boot's capture into the budget). The first workgroup (F brick or C page) clears the other parity's
   // pair, which the last step's rate read and the next step's gauge fills.
   const vGauge = k("vGauge", [CFG, FB.set, FB.dir, FB.phiRO], [FG_SLOT_WGSL, FG_PHI_WGSL, V_WGSL, levelSetFillWGSL, geometricPlaneBoxWGSL, nbfVolumeWGSL.slice(0, nbfVolumeWGSL.indexOf("// filled, budget")), nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")), V_COARSE_WGSL].join("\n") + /* wgsl */`
@@ -1151,6 +1151,9 @@ fn vGaugePage(slot:u32,lid:u32){
   var v:array<f32,8>;var negative=0u;
   for(var k=0u;k<8u;k++){let q=c+nbfFillCorner(k);v[k]=wVertex[u32(q.x+9*q.y+81*q.z)];negative+=select(0u,1u,v[k]<0.0);}
   if(negative==0u){continue;}
+  // A closed cell (FLAGS.OPEN clear: solidStamp's mask voxel, a body's interior) holds no liquid, as the old gauge's
+  // cells weigh by their open capacity: the static level set extends phi into the solid, which is no volume.
+  if((phi[NB_PHI_F_FLAGS+NB_STRIDE*slot+lid+64u*j]&NB_FLAG_OPEN)==0u){continue;}
   let f=select(nbfCellFill(v),1.0,negative==8u);
   part+=u32(round(f*V_VOL_UNIT));
  }

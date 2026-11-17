@@ -9,7 +9,8 @@
  *   corners. Where no page holds a vertex, or the vertex holds air at or past PHI_AIR_C (an absent slot's value,
  *   brick-owner.wgsl.ts, and an entering slot's), it is the scene's far value.
  * - `volume` (r32float, lattice): each cell's liquid fraction, the
- *   six-tetrahedron fill of its eight corner phi (level-set-fill.wgsl.ts).
+ *   six-tetrahedron fill of its eight corner phi (level-set-fill.wgsl.ts); 0 in a
+ *   closed F cell (FLAGS.OPEN clear), as the gauge.
  * - `openFraction` (r32float, lattice): 1, as M2 has no cut cells; on a
  *   padded lattice (M3), 0 past the box, whose cells are wall.
  * On a padded lattice a cell past the box holds no liquid (`volume` 0 there),
@@ -81,7 +82,8 @@ var<workgroup> presentState:u32;
   }
 }`;
 
-const WGSL_VOLUME = (L: BrickLayout) => COMMON(L) + levelSetFillWGSL + /* wgsl */`
+/** presentVolume's WGSL (exported for its text test). */
+export const WGSL_VOLUME = (L: BrickLayout) => COMMON(L) + levelSetFillWGSL + /* wgsl */`
 @group(0) @binding(6) var vertexPhi:texture_3d<f32>;
 @group(0) @binding(7) var volume:texture_storage_3d<r32float,write>;
 var<workgroup> presentState:u32;
@@ -98,6 +100,9 @@ var<workgroup> presentState:u32;
       var c:array<f32,8>;var lo=1e30;var hi=-1e30;
       for(var k=0u;k<8u;k++){c[k]=textureLoad(vertexPhi,v+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)),0).x;lo=min(lo,c[k]);hi=max(hi,c[k]);}
       if(hi<0.0){f=1.0;}else if(lo<0.0){f=fill(c);}
+      // A closed F cell (FLAGS.OPEN clear: a static mask voxel, a body) holds no liquid, as the gauge (vGauge).
+      let fs=nbFSlotOfBrick(b);
+      if(f>0.0&&fs<NB_SEAM&&(phi[NB_PHI_F_FLAGS+NB_STRIDE*fs+nbLocal(v)]&NB_FLAG_OPEN)==0u){f=0.0;}
     }
     textureStore(volume,v,vec4f(f,0.0,0.0,0.0));
   }

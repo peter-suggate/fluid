@@ -143,3 +143,19 @@ test("the union bound skips closed cells as the old bound's nbParticleCellOpen",
     }
   }
 });
+
+test("the redistance's crossings are open cells outside body bricks (arenaCross: umCellOpen > 1e-5)", () => {
+  const L = new BrickLayout({ lattice: [128, 128, 128], f: 600, c: 40, b: 0, k: 0, particles: 1 << 16 });
+  for (const tiered of [false, true]) {
+    const stages = fluidStagesAt(tiered)({ layout: L, values: { volumeControlSeconds: 0 }, fluid: { viscosity_Pa_s: 0, density_kg_m3: 1000, surfaceTension_N_m: 0 } } as never) as unknown as Record<string, unknown>;
+    type K = { label: string; code: string };
+    const kernels: K[] = [];
+    const walk = (x: unknown): void => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === "object") { const k = (x as { kernel?: K }).kernel; if (k) kernels.push(k); else Object.values(x).forEach(walk); } };
+    walk(stages);
+    const clear = kernels.find(k => k.label === "lClear");
+    assert.ok(clear, `lClear (tiered ${tiered})`);
+    assert.match(clear.code, /if\(low<=0\.0&&high>=0\.0&&low<high&&\(bodyBrick\|\|\(phi\[NB_PHI_F_FLAGS\+NB_STRIDE\*slot\+l\]&NB_FLAG_OPEN\)!=0u\)\)\{atomicOr\(&wMask/, `lClear: an open crossing (tiered ${tiered})`);
+    // A body brick keeps its closed cells as crossings (umVertexBuried, the exclusion's partner, is not ported).
+    assert.match(clear.code, /let bodyBrick=\(nbFRec\(slot,NB_REC_CLASS\)&\(NB_CLASS_NEAR_BODY\|NB_CLASS_BODY_WAS\)\)!=0u;/, `lClear: the body brick rule (tiered ${tiered})`);
+  }
+});

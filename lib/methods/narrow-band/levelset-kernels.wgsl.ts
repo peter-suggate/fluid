@@ -612,13 +612,21 @@ fn lCleared(v:vec3i,value:f32)->f32{
  if(lid<16u){atomicStore(&wMask[lid],0u);}if(lid==0u){atomicStore(&wCross,0u);}
 ${stagedHead(0)}
  let live=true;
+ // A body brick (NEAR_BODY, BODY_WAS: bodyStamp's FLAGS) keeps its closed cells as crossings. The old exclusion
+ // pairs with umVertexBuried (a buried vertex is no redistance sample), which is not ported (it gained 4 L in a second
+ // at the seep's wall), and without it a body's interior, whose phi is the redistance's own (no static extension),
+ // reseeds: rigid-float took 2035 records at frame 3 against its 1024 pool.
+ let bodyBrick=(nbFRec(slot,NB_REC_CLASS)&(NB_CLASS_NEAR_BODY|NB_CLASS_BODY_WAS))!=0u;
  if(live){
   for(var r=0u;r<2u;r++){
    let l=lid+256u*r;let c=o+nbLocalCoord(l);
    if(!nbInWallBox(c)){continue;}
    var low=3e38;var high=-3e38;
    for(var k=0u;k<8u;k++){let v=c+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));let x=lCleared(v,fgPhi(v));low=min(low,x);high=max(high,x);}
-   if(low<=0.0&&high>=0.0&&low<high){atomicOr(&wMask[l>>5u],1u<<(l&31u));atomicOr(&wCross,1u<<fgTileOf(c));}
+   // arenaCross: exact zero belongs to either incident cell; flat plateaus and walls do not. A closed cell
+   // (FLAGS.OPEN clear) is no crossing (umCellOpen > 1e-5): its corners past the wall hold an air marker, and as a
+   // crossing it put a surface along every wall of a tank, its liquid vertices redistanced to it.
+   if(low<=0.0&&high>=0.0&&low<high&&(bodyBrick||(phi[NB_PHI_F_FLAGS+NB_STRIDE*slot+l]&NB_FLAG_OPEN)!=0u)){atomicOr(&wMask[l>>5u],1u<<(l&31u));atomicOr(&wCross,1u<<fgTileOf(c));}
   }
  }
  workgroupBarrier();
