@@ -39,6 +39,8 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   // Splash (r23): it gains +2.05% at 120 steps, where the old engine loses 10.3% (on the full box's page pool; its
   // authored pool exhausts at frame 79). Re-judged after F's sym8 lands, which is expected to remove the gain.
   "cm12-figure-7-256",
+  // The rigid coupling oracles (lane P, M5; 16^3 padded to 32^3), on their authored pools.
+  "rigid-hydrostatic", "rigid-float", "rigid-sink",
 ];
 
 export interface BrickSceneSetup {

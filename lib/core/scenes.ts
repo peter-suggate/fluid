@@ -1151,6 +1151,12 @@ export function createRigidCouplingOracleScene(id: RigidCouplingOracleSceneId): 
     restitution: 0.05, friction: 0.3,
     motion: id === "rigid-hydrostatic" ? "static" : "dynamic",
   }];
+  // Brick engine pools (lane P, 2026-11-17): 16^3 padded to 32^3 (5^3 bricks, 2^3 pages with the vertex row). Measured
+  // at the scene's own length with pools to spare, two runs each (identical peaks): F 27 / 27 / 36 (hydrostatic, float,
+  // sink), C 8 (every page), K 8 / 8 / 12, B 0, particles 0 / 0 / 5779 (the sink's splash; read after each step). f, k
+  // and the sink's particles at 1.5x the peak, c the lattice's 8, b the rule's 16, the still scenes' particles the
+  // rule's floor 1024.
+  scene.fluid.brickPools = id === "rigid-sink" ? { f: 54, c: 8, b: 16, k: 18, particles: 8669 } : { f: 41, c: 8, b: 16, k: 12, particles: 1024 };
   return scene;
 }
 
