@@ -1167,6 +1167,20 @@ required for `engine: "brick"`. A scene without them fails explicitly at build, 
 M0(b) measures each gate scene's peaks and authors them with a margin (its own section of
 `progress-lane-e.md`).
 
+K (lane E, 2026-11-17): brickSceneSetup takes `k` as at least the bricks the scene's voxels cut
+(`brickStaticCutBricks`, solidStamp's rule cell for cell) plus `BRICK_STATIC_EDIT_K` (64) for live
+edits, at most `f`. An authored `k` above that stands.
+
+**Deferred statics.** Every brick scene binds a static mask (`brickStaticMask(scene, { always: true })`).
+When the mask is empty at the build (`staticsDeferred`), the boot and every step run the plain schedule:
+no `solidStamp`, `pSolid`, `phiSolid`, static need or `setKRelease`, and pressure has no cuts. That is
+the voxel-free schedule; its kernel text differs only in the K pool's prelude constants. The statics
+schedule and a solver with cuts are compiled beside it, sharing every kernel of the same text. The
+first `restampStatics` takes them (`armStatics`: the ring slots are recorded again, and the step encoded
+ahead is encoded again). From then on the scene runs as a voxel scene, so a first stroke is a live edit
+and never a rebuild. A live edit is preflighted on a clone of the mask (its sealed slots and child
+tables) and against the K pool (the bricks the new world cuts), so a refused stroke changes nothing.
+
 ## 10. What M1 implements
 
 M1 implements:

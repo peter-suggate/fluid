@@ -53,8 +53,9 @@ export interface PressureSolver {
 }
 
 /** What the engine tells a solver of the scene beyond the layout: the rigid bodies' frame when the scene binds bodies
- * (lane P's monolithic coupling, MGPCGOptions.bodies, 2026-11-17). */
-export interface PressureSolverContext { readonly bodies?: BrickBodiesFrame }
+ * (lane P's monolithic coupling, MGPCGOptions.bodies, 2026-11-17); `cuts` false when no stamp of this schedule can
+ * take a K slot (the plain schedule of a deferred statics engine: the dam's operator), absent to follow the K pool. */
+export interface PressureSolverContext { readonly bodies?: BrickBodiesFrame; readonly cuts?: boolean }
 export type PressureSolverFactory = (layout: BrickLayout, context?: PressureSolverContext) => PressureSolver;
 
 /** Checks that a solver's gated dispatches stay in its args region. */

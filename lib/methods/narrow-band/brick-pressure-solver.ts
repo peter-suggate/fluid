@@ -21,15 +21,16 @@ import type { BrickBodiesFrame } from "./bodies-binding.wgsl";
 import type { BrickLayout } from "./brick-abi";
 
 /** What the engine tells a solver of the scene beyond the layout: the rigid bodies' frame when the scene binds bodies. */
-export interface BrickPressureContext { readonly bodies?: BrickBodiesFrame }
+export interface BrickPressureContext { readonly bodies?: BrickBodiesFrame; readonly cuts?: boolean }
 /** A solver factory that takes the engine's context (assignable to PressureSolverFactory). */
 export type BrickPressureFactory = (L: BrickLayout, context?: BrickPressureContext) => PressureSolver;
 
 /** The composite MGPCG: poolMGPCG with the native rows before its setup and the native projection after its finish. */
 /** monolithic (default true): the context's bodies implicit in the solve; false keeps the explicit couple (comparisons). */
 export const compositeMGPCG = (options: MGPCGOptions & { readonly monolithic?: boolean } = {}): BrickPressureFactory => (L, context): PressureSolver => {
-  // The cuts follow the K pool, as the MGPCG's (rowsC latches a liquid native row in a cut brick).
-  const cuts = options.cuts ?? L.cap.k > 0;
+  // The cuts follow the K pool, as the MGPCG's (rowsC latches a liquid native row in a cut brick), unless the engine
+  // says no stamp of this schedule takes a K slot (lane E, deferred statics: context.cuts false).
+  const cuts = options.cuts ?? context?.cuts ?? L.cap.k > 0;
   const { monolithic = true, ...rest } = options, bodies = rest.bodies ?? (monolithic ? context?.bodies : undefined);
   const { publish, live, core, ...mg } = poolMGPCG(L, { ...rest, cuts, walls: rest.walls ?? true, ...(bodies ? { bodies } : {}) }), K = pressureCompositeKernels(L, {}, { cuts, faces: cuts ? mgLayout(L).FC : undefined });
   const pages = { indirect: ARGS.PER_LIST * LIST.C_ALL + ARGS.G1 };

@@ -2972,3 +2972,44 @@ scene's kernel text is byte-identical (r19/dump.mts on the dam, minimal-dam, sta
     old engine always holds a mask. Making that live means binding the static stages to every scene, which needs a
     step-time price first.
   - lib/cloth/system.ts:668 (not E's file) forwards applySceneUniforms but drops its false.
+
+## 2026-11-17 — every scene takes a first voxel stroke live (deferred statics); the live preflight
+
+- The coordinator's follow-ups to f6875668:
+  1. The full test:unit on HEAD f6875668 (a frozen tree): 1923 pass, 0 fail.
+  2. The first stroke on a voxel-free scene.
+  3. Mask-slot exhaustion in the preflight.
+- Every brick scene now binds a mask (`brickStaticMask(scene, { always: true })`).
+- K is at least the bricks the voxels cut plus 64 (BRICK_STATIC_EDIT_K), at most f; an authored k above that stands.
+  brickStaticCutBricks counts solidStamp's rule cell for cell (CPU test against brute force: P's block, wholly solid
+  pages, a single cell, a slab on a brick face).
+- An empty mask defers the static stages (BrickEngineOptions.staticsDeferred):
+  - The boot and the steps run the plain schedule: no solidStamp, pSolid, phiSolid, static need or setKRelease, and
+    pressure has no cuts (PressureSolverContext.cuts false; lane P's factory takes it as `options.cuts ?? context.cuts`).
+  - On the dam this is the K-free schedule, placement for placement. Its kernel text differs only in the K pool's
+    prelude constants (NB_KCAP, NB_CUT_*) (CPU test).
+  - The statics schedule and a cuts-on solver are compiled beside it, and every kernel of the same text is shared.
+  - The first restampStatics arms them (armStatics: the ring slots are recorded again, and the step encoded ahead is
+    encoded again with its receipt given back). The scene then runs as a voxel scene for good.
+- Why this and not empty-list dispatches: the static mask also changes the text of pMove, pSeed, lAdvect, setMark and
+  the census, and pSolid runs over every record. Bound always, each would cost the dam a launch or more a step. The
+  deferred plain schedule costs nothing, with the same first-stroke result.
+- The preflight (validateLiveSolidEdit):
+  - a trial fold on a clone of the mask (SolidOccupancyMask.clone: the sealed slots and the child tables), refused with
+    the mask's own reason;
+  - the bricks the new world cuts against cap.k.
+  A refused stroke changes nothing and the run goes on (CPU test: a clone's trial past one sealed slot throws, and the
+  mask keeps its image and takes a world within its slot).
+- The dam's price (high-resolution-dam-break, 60 steps, timing mode, A/B/A/B; HEAD f6875668 against the edits):
+  - median 4.12 ms against 4.14 and 4.11 ms; HEAD's first run, 7.2 ms, was cold;
+  - 879 against 882 MB (the mask's tables and 64 K slots);
+  - fail 0, the same volume curve.
+  The profiler's kernel timer fails to allocate its query set in both trees (rc 3, gpuError); the step times are wall
+  time.
+- test:unit (frozen-r38, every edit): 2473 tests, 1926 pass, 0 fail; check:types clean apart from lane-n.
+- GPU (frozen-r38, 0 aborts): 53 of 55 pass; the two failures were CPU asserts in the same files, since fixed.
+  - The edit file's new test: a voxel-free dam64 (k 64) runs plain. A stroke past the K pool is refused at the
+    preflight. The first fill is taken live and arms the statics. The image is the editor's reader, and the velocity
+    pool keeps every bit. After one step 1440 of 1440 fill cells are resident and closed, using 8 of 64 K slots. Ten
+    more steps are FAIL-free, with no live record in a closed cell.
+  - The two failures were brick-engine.test's authored-pool asserts, which now expect k from the rule.

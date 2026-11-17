@@ -82,6 +82,10 @@ export interface BrickEngineOptions {
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
+  /** With staticMask: no cell is solid at the build, so the boot and every step run the plain schedule (the dam's
+   * stages, operator and pressure: no static stage, no K slot work), and the statics schedule is compiled beside it and
+   * taken at the first restampStatics (a first voxel stroke is a live edit like any other, never a rebuild). */
+  readonly staticsDeferred?: boolean;
   /** The diagnostic lowering of dynamic vector-component writes (brick-lower.ts), off by default: true lowers and
    * checks every module before its shader is created. Absent: NB_BRICK_LOWER=1 in the environment turns it on. */
   readonly lowerDynamicWrites?: boolean;
@@ -280,9 +284,15 @@ export function uploadWords(queue: GPUQueue, buffer: GPUBuffer, offsetBytes: num
 
 export class BrickEngine {
   readonly layout: BrickLayout;
-  readonly solver: PressureSolver;
-  readonly stages: BrickStages;
-  readonly schedule: BrickStageSchedule;
+  get solver(): PressureSolver { return this.solverNow; }
+  private solverNow: PressureSolver;
+  get stages(): BrickStages { return this.stagesNow; }
+  get schedule(): BrickStageSchedule { return this.scheduleNow; }
+  private stagesNow: BrickStages;
+  private scheduleNow: BrickStageSchedule;
+  /** A deferred statics engine's statics stages and schedule, until the first restampStatics takes them. */
+  private armed?: { stages: BrickStages; schedule: BrickStageSchedule; solver: PressureSolver };
+  private armedBuffers?: [string, number][];
   /** Pipeline compile times (ms), by kernel label, from this engine's creation. */
   readonly compileMs: Readonly<Record<string, number>>;
   private readonly buffers = new Map<string, GPUBuffer>();
@@ -305,16 +315,16 @@ export class BrickEngine {
 
   private constructor(readonly device: GPUDevice, readonly options: BrickEngineOptions, layout: BrickLayout, solver: PressureSolver, stages: BrickStages,
     schedule: BrickStageSchedule, private readonly pipelines: Map<BrickKernel, GPUComputePipeline>, compileMs: Record<string, number>) {
-    this.layout = layout; this.solver = solver; this.stages = stages; this.schedule = schedule; this.compileMs = compileMs;
+    this.layout = layout; this.solverNow = solver; this.stagesNow = stages; this.scheduleNow = schedule; this.compileMs = compileMs;
   }
 
   /** Every placement of one step and the boot, in order (record()'s input). */
-  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop" | "density_kg_m3">, sources = false, censusHold?: BrickCensusHold): BrickStageSchedule {
+  static scheduleFor(layout: BrickLayout, solver: PressureSolver, stages: BrickStages, boxes: number, mask?: Pick<BrickStaticMaskBinding, "walls">, bodies?: Pick<BrickBodiesBinding, "frame_m" | "h_m" | "openTop" | "density_kg_m3">, sources = false, censusHold?: BrickCensusHold, kSlots = layout.cap.k > 0): BrickStageSchedule {
     const tiered = stages.tiered === true;
     // P's absent-page guard (FAIL.TIER) stays on in both engines: all-h, an absent page is air only because residency
     // keeps it 8 cells from liquid, so a liquid row with a corner there is a residency defect, never air to read.
     const frame = bodies ? { frame_m: bodies.frame_m, h_m: bodies.h_m } : undefined;
-    const set = brickSetKernels(layout, { tiered, activity: stages.activity, ...(frame ? { bodies: frame } : {}), ...(mask ? { statics: true } : {}) }), pres = pressureOperatorKernels(layout, { faces: "pmgF" in solver.buffers }), f = layout.cap.f, c = layout.cap.c;
+    const set = brickSetKernels(layout, { tiered, activity: stages.activity, ...(frame ? { bodies: frame } : {}), ...(mask ? { statics: true } : {}) }), pres = pressureOperatorKernels(layout, { faces: "pmgF" in solver.buffers, ...(kSlots ? {} : { cuts: false }) }), f = layout.cap.f, c = layout.cap.c;
     const list = (k: number, g: "G1" | "G8" | "G64"): BrickDispatch => ({ indirect: ARGS.PER_LIST * k + ARGS[g] });
     const direct = (n: number): BrickDispatch => ({ direct: [n, 1, 1] });
     // cfg.z = 1 at boot: the boot's bricks enter h-owned (bootPhi writes F); tiered steps enter 4h (§2.5).
@@ -411,9 +421,9 @@ export class BrickEngine {
     // (A5: after every pop of the step). With no K pool and no stamp it is empty: the dam's schedule is unchanged.
     // P's bodyStamp (A2, A6): the entering bricks a body reaches (cfg.z = 1, after solidStamp), then F_BODY (cfg.z = 0).
     const body = bodies ? brickBodyKernels(layout, frame!, { openTop: mask ? mask.walls.policy === 2 : bodies.openTop, ...(mask ? { mask } : {}) }).bodyStamp : undefined;
-    if (bodies && layout.cap.k === 0) throw new Error("Brick engine: rigid bodies need K slots (scene.fluid.brickPools.k)");
+    if (bodies && (layout.cap.k === 0 || !kSlots)) throw new Error("Brick engine: rigid bodies need K slots (scene.fluid.brickPools.k)");
     const bodyStamp: BrickPlacement[] = body ? [{ kernel: body, dispatch: list(LIST.F_ENTER, "G1"), z: 1 }, { kernel: body, dispatch: list(LIST.F_BODY, "G1"), z: 0 }] : [];
-    const stamp: BrickPlacement[] = [...(mask ? [{ kernel: brickSolidStampKernels(layout, mask).solidStamp, dispatch: list(LIST.F_ENTER, "G1") }] : []), ...bodyStamp, ...(stages.stamp ?? []), ...(layout.cap.k > 0 ? [
+    const stamp: BrickPlacement[] = [...(mask ? [{ kernel: brickSolidStampKernels(layout, mask).solidStamp, dispatch: list(LIST.F_ENTER, "G1") }] : []), ...bodyStamp, ...(stages.stamp ?? []), ...(kSlots && layout.cap.k > 0 ? [
       { kernel: set.setKRelease, dispatch: list(LIST.F_ALL, "G64"), z: 0 },
       { kernel: set.setKRelease, dispatch: list(LIST.F_LEAVE, "G64"), z: 1 },
     ] : [])];
@@ -444,9 +454,15 @@ export class BrickEngine {
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
     const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...options.capacities, apic: options.apic });
-    const solver = options.solver(layout, options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {});
+    // Deferred statics (an empty mask): the plain variant runs (no static stage, and no K slot work unless bodies take
+    // slots), and the statics variant is compiled beside it for the first live edit (armStatics).
+    const mask = options.staticMask, deferred = mask !== undefined && options.staticsDeferred === true;
+    const kPlain = layout.cap.k > 0 && (!deferred || options.bodies !== undefined);
+    const solverFor = (cuts?: false) => options.solver(layout, { ...(options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {}), ...(cuts === false ? { cuts } : {}) });
+    const solver = solverFor(kPlain || !deferred ? undefined : false);
     validatePressureSolver(solver);
-    const stages = options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources, ...(options.staticMask ? { statics: true } : {}) });
+    const stagesFor = (statics: boolean) => options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources, ...(statics ? { statics: true } : {}) });
+    const stages = stagesFor(mask !== undefined && !deferred);
     validateBrickStages(stages);
     // The boot's candidates (an f-long list): tiered, bootTieredSet's bricks and page-only keys; all-h, bootBricks.
     const boot = stages.tiered === true ? bootTieredSet(options) : { bricks: bootBricks(options), pages: [] };
@@ -454,11 +470,25 @@ export class BrickEngine {
     if (initial.length > layout.cap.f) throw new Error(`Brick engine: the initial liquid needs ${initial.length} F bricks, over scene.fluid.brickPools.f = ${layout.cap.f}`);
     if (initial.length + boot.pages.length > layout.cap.f) throw new Error(`Brick engine: the boot's ${initial.length} bricks and ${boot.pages.length} page-only candidates overrun its candidate list (scene.fluid.brickPools.f = ${layout.cap.f})`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, options.initial ? -1 : options.liquid.length, options.staticMask, options.bodies, options.sources !== undefined, options.censusHold);
+    const boxes = options.initial ? -1 : options.liquid.length;
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, boxes, deferred ? undefined : mask, options.bodies, options.sources !== undefined, options.censusHold, kPlain);
+    // The statics variant of a deferred engine: its own stages and a solver with the cuts, over the same buffers (the
+    // boot is the plain one's; only part 1 and part 2 are ever recorded from it).
+    let armed: { stages: BrickStages; schedule: BrickStageSchedule; solver: PressureSolver } | undefined;
+    if (deferred) {
+      const s2 = stagesFor(true), p2 = solverFor();
+      validateBrickStages(s2); validatePressureSolver(p2);
+      const statics = BrickEngine.scheduleFor(layout, p2, s2, boxes, mask, options.bodies, options.sources !== undefined, options.censusHold);
+      // A kernel the variants share in text (label, entry, bindings, code) is the plain one's: one pipeline, compiled once.
+      const text = (k: BrickKernel) => `${k.label}\n${k.entry}\n${JSON.stringify(k.bindings)}\n${k.code}`;
+      const plainKernels = new Map([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => [text(p.kernel), p.kernel]));
+      const share = (ps: readonly BrickPlacement[]) => ps.map(p => { const k = plainKernels.get(text(p.kernel)); return k ? { ...p, kernel: k } : p; });
+      armed = { stages: s2, solver: p2, schedule: { ...statics, part1: share(statics.part1), part2: share(statics.part2) } };
+    }
     // The live edit's restamp (M3 stage 2c, restampStatics), outside the schedule, compiled with it: no first-edit hitch.
-    const restamp = options.staticMask ? brickSolidStampKernels(layout, options.staticMask).solidRestamp : undefined;
+    const restamp = mask ? brickSolidStampKernels(layout, mask).solidRestamp : undefined;
     // One pipeline a kernel, compiled concurrently; each module once.
-    const kernels = [...new Set([...[...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel), ...(restamp ? [restamp] : [])])];
+    const kernels = [...new Set([...[...schedule.boot, ...schedule.part1, ...schedule.part2, ...(armed ? [...armed.schedule.part1, ...armed.schedule.part2] : [])].map(p => p.kernel), ...(restamp ? [restamp] : [])])];
     // The box hook (M3 padding): every wall token resolved by its builder, and, where the lattice is padded past the
     // box, no owner reader still walling at the storage edge (a wall at the box exactly once).
     const unresolved = kernels.filter(k => k.code.includes(BOX_TOKEN) || k.code.includes("InWallBox(")).map(k => k.label);
@@ -489,6 +519,7 @@ export class BrickEngine {
     }));
     const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
     engine.restamp = restamp;
+    if (armed) { engine.armed = armed; engine.armedBuffers = [...Object.entries(armed.solver.buffers), ...Object.entries(armed.stages.buffers)]; }
     engine.allocate([...initial, ...boot.pages]);
     engine.record();
     engine.boot();
@@ -521,6 +552,7 @@ export class BrickEngine {
     const restamp = this.restamp, solid = this.buffers.get("solid"), edit = this.buffers.get("solidEdit");
     if (!restamp || !solid || !edit) throw new Error("Brick engine: no static mask to edit (built without static voxels)");
     if (this.failure) throw new Error(this.failure);
+    this.armStatics();
     if (4 * words.length !== solid.size) throw new Error(`Brick engine: the edited mask holds ${words.length} words, the bound image ${solid.size / 4}`);
     for (const r of ranges) {
       if (!(Number.isInteger(r.firstWord) && Number.isInteger(r.wordCount) && r.firstWord >= 0 && r.wordCount > 0 && r.firstWord + r.wordCount <= words.length)) throw new Error(`Brick engine: mask range ${r.firstWord}+${r.wordCount} is outside the image`);
@@ -530,6 +562,27 @@ export class BrickEngine {
     const release = [...this.schedule.part1, ...this.schedule.part2].find(p => p.kernel.label === "setKRelease" && (p.z ?? 0) === 0);
     const placements: BrickPlacement[] = [{ kernel: restamp, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, ...(release ? [release] : [])];
     this.device.queue.submit([this.encode(placements.map(p => this.bind(p, 0)), "nb-brick.solidRestamp")]);
+  }
+
+  /** Whether the statics schedule runs (always with a mask built solid; a deferred engine after its first edit). */
+  get staticsArmed(): boolean { return this.options.staticMask !== undefined && this.armed === undefined; }
+
+  /**
+   * A deferred engine takes its statics variant, between two steps: from the next step every ring slot records the
+   * statics schedule and solver. The step encoded ahead (not yet submitted) is dropped and encoded again, its receipt
+   * given back first. Once armed it stays armed: an edit back to no solid keeps the static stages, which read an
+   * empty mask exactly.
+   */
+  private armStatics() {
+    const a = this.armed;
+    if (!a) return;
+    this.armed = undefined;
+    this.stagesNow = a.stages; this.scheduleNow = a.schedule; this.solverNow = a.solver;
+    this.recorded.length = 0;
+    this.record();
+    const ahead = this.ahead;
+    if (ahead && ahead.receipt >= 0) this.receipts[ahead.receipt]!.busy = false;
+    this.encodeAhead();
   }
 
   /** Bytes of every buffer the engine allocated. */
@@ -560,9 +613,17 @@ export class BrickEngine {
     const edges = this.options.sources?.edges;
     const src = make("src", brickSourceWords(edges ? edges.length / 4 : 0));
     if (edges?.length) uploadWords(d.queue, src, 0, edges);
-    for (const [name, words] of [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)]) {
+    const lane = [...Object.entries(this.solver.buffers), ...Object.entries(this.stages.buffers)];
+    for (const [name, words] of lane) {
       if ((ENGINE_BUFFERS as readonly string[]).includes(name) || name === "boot" || name === "bodies" || name === "bodyCuts" || name === "bodyExchange" || this.buffers.has(name)) throw new Error(`Brick engine: lane buffer ${name} shadows another buffer`);
       make(name, words);
+    }
+    // A deferred engine's statics variant binds the same buffers; one it adds is allocated now, and one it sizes
+    // differently fails here, at the build.
+    if (this.armedBuffers) for (const [name, words] of this.armedBuffers) {
+      const have = this.buffers.get(name);
+      if (!have) { make(name, words); continue; }
+      if (have.size !== 4 * Math.max(words, 4)) throw new Error(`Brick engine: the statics variant sizes lane buffer ${name} at ${words} words, the plain ${have.size / 4}`);
     }
     const t = this.options.initial;
     if (t && t.phi.length !== 32768 * t.pages.length) throw new Error(`Brick engine: the initial φ table holds ${t.phi.length} values for ${t.pages.length} pages`);

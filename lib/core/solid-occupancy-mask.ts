@@ -312,6 +312,18 @@ export class SolidOccupancyMask {
   /** The mask was made from this world: an update to it changes no bit. */
   describes(world: SolidWorld): boolean { return this.world === world; }
 
+  /**
+   * An independent copy: its image, free list, pages and child tables are its own, so a trial update on it (a live
+   * edit's preflight) refuses exactly when this mask's would, and leaves this mask as it was.
+   */
+  clone(): SolidOccupancyMask {
+    const copy = Object.create(SolidOccupancyMask.prototype) as SolidOccupancyMask;
+    return Object.assign(copy, this, {
+      image: this.image.slice(), freed: [...this.freed], occupied: new Set(this.occupied), children: new Map(this.children),
+      page: new Uint32Array(SOLID_MASK_UNIT_WORDS), dirty: { ...this.dirty },
+    });
+  }
+
   /** No cell off the wall is solid. */
   get empty(): boolean { return this.occupied.size === 0; }
 

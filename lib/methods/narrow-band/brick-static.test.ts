@@ -4,7 +4,7 @@
  * WEBGPU_NODE_MODULE). */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { brickStaticMask, brickStaticMirror, brickStaticWGSL, NB_STATIC } from "./brick-static.wgsl";
+import { BRICK_STATIC_EDIT_K, brickStaticCutBricks, brickStaticMask, brickStaticMirror, brickStaticWGSL, NB_STATIC } from "./brick-static.wgsl";
 import { brickSceneSetup } from "./brick-scene";
 import { parityGPU, prng, runParity, withParityDevice } from "./parity/harness";
 import { createReservoirSeepScene } from "../../core/reservoir-seep-scene";
@@ -195,7 +195,69 @@ test("statics: the scene's voxels reach the engine's setup", () => {
   assert.deepEqual(Array.from(mask.words), Array.from(want.words));
   assert.equal(solidOccupancyMaskVoxel(mask.words, 100, 10, 60), true, "a block cell is solid in the bound image");
   assert.equal(solidOccupancyMaskVoxel(mask.words, 80, 10, 60), false, "a cell off the block is open");
-  assert.equal(brickSceneSetup(dam, values).setup!.staticMask, undefined, "no voxels, no binding");
+  const plain = brickSceneSetup(dam, values).setup!;
+  assert.ok(plain.staticMask?.empty && plain.staticsDeferred, "no voxels: an empty mask, its static stages deferred");
+  assert.equal(run.setup!.staticsDeferred, undefined, "voxels: the static stages from the boot");
+  // K: the bricks the voxels cut and the edit headroom, at most f.
+  assert.equal(plain.capacities.k, Math.min(plain.capacities.f, BRICK_STATIC_EDIT_K));
+  assert.equal(run.setup!.capacities.k, Math.max(block.fluid.brickPools?.k ?? 0, Math.min(run.setup!.capacities.f, brickStaticCutBricks(mask) + BRICK_STATIC_EDIT_K)));
+});
+
+test("statics: the bricks a mask cuts are solidStamp's, cell for cell", () => {
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
+  const strokes: SolidWorldVoxelPatch[][] = [
+    [{ operation: "fill", minimum: [96, 0, 40], maximumExclusive: [108, 24, 88], materialId: 2 }],
+    // Page-aligned (wholly solid pages), one cell, and a slab on a brick face.
+    [{ operation: "fill", minimum: [32, 0, 32], maximumExclusive: [64, 32, 64], materialId: 2 }, { operation: "fill", minimum: [7, 7, 7], maximumExclusive: [8, 8, 8], materialId: 2 },
+      { operation: "fill", minimum: [70, 40, 0], maximumExclusive: [80, 41, 127], materialId: 2 }],
+  ];
+  for (const stroke of strokes) {
+    const scene = sceneWithSolidStroke(dam, stroke), mask = brickStaticMask(scene)!, [nx, ny, nz] = sceneLatticeDimensions(scene, Number.MAX_SAFE_INTEGER);
+    const solid = (x: number, y: number, z: number) => x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz && solidOccupancyMaskVoxel(mask.words, x, y, z);
+    const want = new Set<number>();
+    for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+      if (!solid(x, y, z)) continue;
+      const b = [x >> 3, y >> 3, z >> 3];
+      want.add(b[0]! + 4096 * (b[1]! + 4096 * b[2]!));
+      // The brick past this cell's upper face on each axis reads it as its c - axis cell.
+      if ((x & 7) === 7) want.add(b[0]! + 1 + 4096 * (b[1]! + 4096 * b[2]!));
+      if ((y & 7) === 7) want.add(b[0]! + 4096 * (b[1]! + 1 + 4096 * b[2]!));
+      if ((z & 7) === 7) want.add(b[0]! + 4096 * (b[1]! + 4096 * (b[2]! + 1)));
+    }
+    assert.equal(brickStaticCutBricks(mask), want.size, `${JSON.stringify(stroke)}`);
+  }
+});
+
+test("statics: deferred, the dam's plain schedule is its K-free one but for the K pool's constants; armed, the static stages join", async () => {
+  const { BrickEngine } = await import("./brick-engine");
+  const { BrickLayout } = await import("./brick-abi");
+  const stagesFactory = (await import("./brick-fluid-stages")).brickFluidStages!, solverFactory = (await import("./brick-pressure-solver")).brickPressureSolver!;
+  const { getMethod } = await import("../../core/method-registry");
+  const { resolveMethodValues } = await import("../../core/method-contract");
+  await import("../index");
+  const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD), definition = getSceneDefinition("high-resolution-dam-break");
+  const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
+  const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
+  const setup = brickSceneSetup(sceneDocument(definition), values).setup!;
+  assert.ok(setup.staticsDeferred && setup.capacities.k > 0);
+  const layout = (k: number) => new BrickLayout({ lattice: setup.lattice, farPhi: setup.farPhi, ...setup.capacities, k });
+  const stagesOf = (L: InstanceType<typeof BrickLayout>, statics: boolean) => stagesFactory({ layout: L, dt_s: setup.dt_s, h_m: setup.h_m, gravity_mps2: setup.gravity_mps2, values,
+    fluid: { density_kg_m3: setup.density_kg_m3, viscosity_Pa_s: setup.viscosity_Pa_s, surfaceTension_N_m: setup.surfaceTension_N_m }, ...(statics ? { statics: true } : {}) });
+  const boxes = setup.initial ? -1 : setup.liquid.length;
+  const L0 = layout(0), LK = layout(setup.capacities.k), mask = { words: setup.staticMask!.words, walls: setup.staticMask!.walls };
+  const before = BrickEngine.scheduleFor(L0, solverFactory(L0), stagesOf(L0, false), boxes);
+  const plain = BrickEngine.scheduleFor(LK, solverFactory(LK, { cuts: false }), stagesOf(LK, false), boxes, undefined, undefined, false, undefined, false);
+  // The K pool's prelude constants: NB_KCAP and the cut pool's channel bases (K-indexed), nothing else.
+  const kcap = (code: string) => code.replace(/const NB_(KCAP|CUT_[A-Z0-9]+):u32=[0-9]+u;/g, "");
+  for (const part of ["boot", "part1", "part2"] as const) {
+    const a = before[part], b = plain[part];
+    assert.deepEqual(b.map(p => [p.kernel.label, JSON.stringify(p.dispatch), p.z ?? 0, p.w ?? 0]), a.map(p => [p.kernel.label, JSON.stringify(p.dispatch), p.z ?? 0, p.w ?? 0]), `${part}: the same placements`);
+    const differ = b.filter((p, i) => kcap(p.kernel.code) !== kcap(a[i]!.kernel.code)).map(p => p.kernel.label);
+    assert.deepEqual(differ, [], `${part}: every kernel's text but NB_KCAP`);
+  }
+  const armed = BrickEngine.scheduleFor(LK, solverFactory(LK), stagesOf(LK, true), boxes, mask);
+  const labels = new Set([...armed.part1, ...armed.part2].map(p => p.kernel.label));
+  for (const label of ["solidStamp", "pSolid", "phiSolid", "setKRelease", "censusStaticActive", "censusStaticPromote"]) assert.ok(labels.has(label), `armed: ${label}`);
 });
 
 test("statics 2a: WGSL with the mask against the mirror, base and edited", { skip: !parityGPU }, async () => {
@@ -232,4 +294,25 @@ test("statics 2a: WGSL with the mask against the mirror, base and edited", { ski
       assert.equal(bad, 0, `${bad} of ${n} differ`);
     }
   });
+});
+
+test("statics: a trial fold on a clone refuses past the sealed slots and leaves the mask unpoisoned (the live preflight)", async () => {
+  const { SolidOccupancyMask } = await import("../../core/solid-occupancy-mask");
+  const { brickStaticMaskWalls } = await import("./brick-static.wgsl");
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
+  const world = (strokes: SolidWorldVoxelPatch[]) => solidWorldForFluidLattice(sceneWithSolidStroke(dam, strokes));
+  // One partly solid 32^3 page, then two.
+  const one = world([{ operation: "fill", minimum: [2, 0, 2], maximumExclusive: [6, 4, 6], materialId: 2 }]);
+  const two = world([{ operation: "fill", minimum: [2, 0, 2], maximumExclusive: [6, 4, 6], materialId: 2 }, { operation: "fill", minimum: [70, 0, 70], maximumExclusive: [74, 4, 74], materialId: 2 }]);
+  const moved = world([{ operation: "fill", minimum: [70, 0, 70], maximumExclusive: [74, 4, 74], materialId: 2 }]);
+  const mask = new SolidOccupancyMask({ walls: brickStaticMaskWalls([128, 128, 128], false), tileKeys: 0, slots: 8, separateTerrain: true });
+  mask.update(one); mask.seal(1);
+  const words = Array.from(mask.words);
+  assert.throws(() => mask.clone().update(two), /page slots/);
+  assert.deepEqual(Array.from(mask.words), words, "the trial leaves the image");
+  // The mask itself still takes a world within its slot.
+  assert.ok(mask.update(moved));
+  assert.equal(mask.slotsHeld, 1);
+  assert.equal(solidOccupancyMaskVoxel(mask.words, 71, 1, 71), true);
+  assert.equal(solidOccupancyMaskVoxel(mask.words, 3, 1, 3), false);
 });

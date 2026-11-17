@@ -20,7 +20,7 @@ import type { BrickCapacities } from "./brick-abi";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import { brickRigidBodyGaps } from "./bodies-host";
 import type { BrickInitialPhi, BrickLiquidBox, Vec3 } from "./brick-engine";
-import { brickStaticMask } from "./brick-static.wgsl";
+import { BRICK_STATIC_EDIT_K, brickStaticCutBricks, brickStaticMask } from "./brick-static.wgsl";
 import type { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
 import { brickSources, type BrickSources } from "./brick-source";
@@ -98,9 +98,12 @@ export interface BrickSceneSetup {
   /** The scheduled drops in source form (brick-source.ts brickSources); absent: none. */
   readonly sources?: BrickSources;
   /** The scene's static voxels beyond the container shell (brick-static.wgsl.ts brickStaticMask), bound to the engine's
-   * static hooks (BrickEngineOptions.staticMask: solidStamp, the static need, pSolid, phiSolid); absent: the box rule
-   * alone. The mask itself, so a live edit restamps the same image. */
+   * static hooks (BrickEngineOptions.staticMask: solidStamp, the static need, pSolid, phiSolid). brickSceneSetup binds
+   * one on every scene, empty when no cell is solid; absent only in a hand-built setup (the box rule alone). The mask
+   * itself, so a live edit restamps the same image. */
   readonly staticMask?: SolidOccupancyMask;
+  /** The mask is empty at the build: the engine runs the plain schedule until the first live edit (BrickEngineOptions). */
+  readonly staticsDeferred?: true;
 }
 
 /** The scene's setup, or every reason the brick engine cannot run it. */
@@ -165,16 +168,21 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length + start.pages.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band));
   // The body stages take a K slot a body brick (A5): a scene with bodies authors brickPools.k from its NEAR_BODY peak.
   if ((scene.rigidBodies?.length ?? 0) > 0 && !(p.k > 0)) return { gaps: [...gaps, "rigid bodies need K slots: author brickPools.k from the NEAR_BODY peak"] };
-  // The mask: the old engine's own voxel image (solidWorldForFluidLattice), undefined when no cell of the box is solid.
-  const staticMask = brickStaticMask(scene);
+  // The mask: the old engine's own voxel image (solidWorldForFluidLattice), on every scene, so a first voxel stroke is a
+  // live edit like any other. Empty at the build, the engine defers its static stages to that first edit
+  // (BrickEngineOptions.staticsDeferred): the scene runs the plain schedule until then.
+  const staticMask = brickStaticMask(scene, { always: true })!;
+  // K: the bricks the voxels cut now (each may be resident and stamped) and BRICK_STATIC_EDIT_K for live edits, at most
+  // one a F slot; an authored k above it stands (lane P's body peaks).
+  const k = Math.max(p.k, Math.min(p.f, brickStaticCutBricks(staticMask) + BRICK_STATIC_EDIT_K));
   return {
     gaps,
     setup: {
       sceneId: id, lattice: L, ...inBox, ...(openTop ? { openTop: true as const } : {}), farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
-      capacities: { f: p.f, c: p.c, b: p.b, k: p.k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
+      capacities: { f: p.f, c: p.c, b: p.b, k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
       liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, L, B), bootBricks: start.bricks, bootPages: start.pages, origin_m,
       ...(sources ? { sources } : {}),
-      ...(staticMask ? { staticMask } : {}),
+      staticMask, ...(staticMask.empty ? { staticsDeferred: true as const } : {}),
     },
   };
 }

@@ -35,6 +35,7 @@ import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
 import { validateScene, type SceneDescription } from "../../core/model";
+import { BRICK_STATIC_EDIT_K } from "./brick-static.wgsl";
 import { createReservoirSeepScene } from "../../core/reservoir-seep-scene";
 import { getSceneDefinition } from "../../core/scenes";
 import { sceneDocument } from "../../core/scene-definition";
@@ -179,7 +180,9 @@ test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued thro
   assert.deepEqual(setup.lattice, [128, 128, 128]);
   assert.equal(setup.dt_s, 1 / 60);
   assert.equal(setup.h_m, 0.8 / 128);
-  assert.deepEqual(setup.capacities, dam.fluid.brickPools);
+  // The authored pools, but K: at least the edit headroom (BRICK_STATIC_EDIT_K, the dam has no voxels), at most f.
+  const authored = dam.fluid.brickPools!;
+  assert.deepEqual(setup.capacities, { ...authored, k: Math.max(authored.k, Math.min(authored.f, BRICK_STATIC_EDIT_K)) });
   // The dam keeps particles 2 cells deep (scene.fluid.brickTiers); a scene that does not say keeps 3.
   assert.equal(setup.particleBandDepth, 2);
   { const plain = sceneDocument(getSceneDefinition("high-resolution-dam-break")); delete (plain.fluid as { brickTiers?: unknown }).brickTiers; assert.equal(brickSceneSetup(plain, { timeStep: "sixtieth" }).setup?.particleBandDepth, 3); }
@@ -276,9 +279,9 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     const odd = structuredClone(tank); (odd.container as { top: string }).top = "vented";
     assert.ok(brickSceneSetup(odd, { timeStep: "sixtieth" }).gaps.some(g => g.includes('container.top "vented"')));
   } finally { enabled.length = before; }
-  // An authored scene keeps its pools exactly (no t unless it says).
-  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break"));
-  assert.deepEqual(brickSceneSetup(dam, { timeStep: "sixtieth" }).setup!.capacities, dam.fluid.brickPools);
+  // An authored scene keeps its pools exactly (no t unless it says), K at least the edit headroom.
+  const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), authored = dam.fluid.brickPools!;
+  assert.deepEqual(brickSceneSetup(dam, { timeStep: "sixtieth" }).setup!.capacities, { ...authored, k: Math.max(authored.k, Math.min(authored.f, BRICK_STATIC_EDIT_K)) });
 });
 
 /**

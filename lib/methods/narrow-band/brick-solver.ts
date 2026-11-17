@@ -41,6 +41,7 @@ import type { SceneDescription } from "../../core/model";
 import type { GPURigidBodyPick, GPURigidBodyPose } from "../../core/webgpu-rigid-body";
 import { BrickRigidBodies } from "./bodies-host";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
+import { brickStaticCutBricks } from "./brick-static.wgsl";
 
 export interface BrickSolverOptions {
   readonly setup: BrickSceneSetup;
@@ -107,7 +108,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },
       ...(rigid ? { bodies: rigid } : {}),
-      ...(s.staticMask ? { staticMask: s.staticMask } : {}),
+      ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}),
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m);
     const solver = new BrickNBFlipSolver(options, engine, presentation, rigid);
@@ -206,20 +207,28 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   /**
    * Preflight a live voxel edit without changing anything: the solver is running, it holds a static mask, the scene
    * differs from the running one in its solid voxels alone, and its voxels compose (an unknown patch kind or a region
-   * the mask does not read fails here, explicitly). The mask's slot budget is answered by the fold itself, as the old
-   * engine's is: an edit past it latches a failure in applySceneUniforms.
+   * the mask does not read fails here, explicitly), and it fits what the engine was built with: a trial fold on a copy
+   * of the mask (its sealed page slots and child tables) and the bricks it cuts against the K pool. A refused edit
+   * changes nothing; the run goes on.
    */
   validateLiveSolidEdit(scene: SceneDescription): void {
     if (this.info.simulationFailure) throw new Error("The brick engine has halted; reset the scene.");
-    if (!this.options.setup.staticMask || !this.scene) throw new Error("This scene was built on the brick engine without static voxels; reset the scene to apply a voxel edit.");
+    const mask = this.options.setup.staticMask;
+    if (!mask || !this.scene) throw new Error("This brick engine was built with no static mask (a hand-built setup); reset the scene to apply a voxel edit.");
     if (!sceneDiffersInSolidsAlone(scene, this.scene)) throw new Error("The brick engine takes a voxel stroke live only when nothing else in the scene changes; reset the scene to apply this edit.");
-    solidWorldForFluidLattice(scene);
+    const world = solidWorldForFluidLattice(scene), trial = mask.clone();
+    try { trial.update(world); } catch (error) {
+      throw new Error(`This voxel edit needs more of the solid mask than the brick engine was built with (${error instanceof Error ? error.message : String(error)}); reset the scene to apply it.`);
+    }
+    const cut = brickStaticCutBricks(trial), k = this.brickEngine.layout.cap.k;
+    if (cut > k) throw new Error(`This voxel edit cuts ${cut} bricks, over the ${k} K slots the brick engine was built with; reset the scene to apply it.`);
   }
 
   /**
    * Adopt `scene` live, or answer false and leave everything as it was: the renderer then rebuilds. Taken live: a scene
    * whose solid voxels alone differ (validateLiveSolidEdit). The mask folds the edit; a fold the mask refuses (its slots,
-   * sealed at construction, all held) poisons the mask, so it latches a simulation failure and throws.
+   * sealed at construction, all held: the preflight refuses it first) poisons the mask, so it latches a simulation
+   * failure and throws.
    */
   applySceneUniforms(scene: SceneDescription): void | false {
     if (scene === this.scene) return;

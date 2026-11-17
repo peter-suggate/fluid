@@ -36,7 +36,7 @@
 
 export const NB_STATIC = { PLAIN: 0, BOUNDARY: 1, VOXEL: 2 } as const;
 
-import { SOLID_MASK_FULL, SOLID_MASK_TABLE_WORDS, SOLID_MASK_UNIT_WORDS, SolidOccupancyMask, solidOccupancyMaskVoxel, solidOccupancyMaskWGSL, type SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
+import { SOLID_MASK_FULL, SOLID_MASK_PAGE_CELLS, SOLID_MASK_TABLE_WORDS, SOLID_MASK_UNIT_WORDS, SolidOccupancyMask, solidOccupancyMaskVoxel, solidOccupancyMaskWGSL, type SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
 import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { sceneFluidLatticeDimensions } from "../../core/scene-lattice-dimensions";
@@ -58,19 +58,55 @@ export function brickStaticMaskWalls(paged: readonly number[], openTop: boolean)
  * (the box rule alone: no binding, no memory). Built as the old engine builds its own (webgpu-uniform-reference.ts):
  * solidWorldForFluidLattice, terrain separate, a procedural solid with voxel collision taken from half solid. Its
  * units are the two fixed tables (2 MB) and one 4 KB unit a partly solid page: memory follows the solid surface.
- * Slots: the pages partly solid now, as many again and 64 for edits. An edit past them is refused by the mask, loudly.
+ * Slots: the pages partly solid now, as many again and 64 for edits. An edit past them is refused by the mask, loudly
+ * (and first by the live preflight, BrickNBFlipSolver.validateLiveSolidEdit, on a clone).
+ * `always` (brickSceneSetup): a mask even with no solid cell (sealed at 64 slots, no world folded), so a scene's first
+ * voxel stroke is a live edit; the engine defers its static stages until then (BrickEngineOptions.staticsDeferred).
  */
-export function brickStaticMask(scene: SceneDescription): SolidOccupancyMask | undefined {
-  if (solidVoxelEditsForScene(scene).length === 0) return undefined;
+export function brickStaticMask(scene: SceneDescription, options: { readonly always?: boolean } = {}): SolidOccupancyMask | undefined {
+  const voxels = solidVoxelEditsForScene(scene).length > 0;
+  if (!voxels && !options.always) return undefined;
   const openTop = scene.container.top === "open";
   const walls = brickStaticMaskWalls(sceneFluidLatticeDimensions(scene), openTop), [x, y, z] = walls.pages;
   const firstSlot = Math.ceil(SOLID_MASK_TABLE_WORDS / SOLID_MASK_UNIT_WORDS);
   const mask = new SolidOccupancyMask({ walls, tileKeys: 0, slots: Math.max(0, Math.min(SOLID_MASK_FULL - firstSlot, x * y * z + (openTop ? x * z : 0))),
     separateTerrain: true, halfSolid: scene.solidBoundary?.collision === "voxels" });
-  mask.update(solidWorldForFluidLattice(scene));
-  if (mask.empty) return undefined;
+  // With no voxels the mask folds no world: the first live stroke is its first fold, which makes its child tables.
+  if (voxels) mask.update(solidWorldForFluidLattice(scene));
+  if (mask.empty && !options.always) return undefined;
   mask.seal(Math.min(mask.layout.slots, 2 * mask.slotsHeld + 64));
   return mask;
+}
+
+/** K slots a scene keeps for live edits beyond the bricks its voxels cut at the build (BRICK_STATIC_EDIT_K). */
+export const BRICK_STATIC_EDIT_K = 64;
+
+/**
+ * The bricks a mask cuts (solidStamp's rule): a brick holding a solid cell, or one whose cell just past its lower face
+ * on an axis is solid. Read cell-exactly from each solid 32^3 page's rows (a wholly solid page: its 64 bricks and the
+ * bricks past its upper faces). A brick wholly inside a solid counts, though it is resident only when promoted.
+ */
+export function brickStaticCutBricks(mask: Pick<SolidOccupancyMask, "eachSolidPage" | "words">): number {
+  const bricks = new Set<number>(), add = (x: number, y: number, z: number) => bricks.add(x + 4096 * (y + 4096 * z));
+  const words = mask.words, P = SOLID_MASK_PAGE_CELLS;
+  mask.eachSolidPage((px, py, pz, word) => {
+    const code = word & 0xffff;
+    for (let z = 0; z < P; z++) for (let y = 0; y < P; y++) {
+      const bits = code === SOLID_MASK_FULL ? 0xffffffff : words[(code << 10) + y + P * z]! >>> 0;
+      if (!bits) continue;
+      const by = (P * py + y) >> 3, bz = (P * pz + z) >> 3;
+      for (let b = 0; b < 4; b++) {
+        const byte = (bits >>> (8 * b)) & 0xff;
+        if (!byte) continue;
+        const bx = 4 * px + b;
+        add(bx, by, bz);
+        if (byte & 0x80) add(bx + 1, by, bz);
+        if ((y & 7) === 7) add(bx, by + 1, bz);
+        if ((z & 7) === 7) add(bx, by, bz + 1);
+      }
+    }
+  });
+  return bricks.size;
 }
 
 export interface BrickStaticSource {

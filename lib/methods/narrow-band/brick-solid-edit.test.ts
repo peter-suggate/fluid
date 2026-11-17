@@ -254,3 +254,101 @@ test("brick solid edit (GPU): fill, undo, redo, clear and reload on the running 
     } finally { solver.destroy(); loaded?.destroy(); }
   });
 });
+
+/**
+ * The first voxel stroke on a scene built with none (the interactive scenes on auto): the engine runs the plain
+ * schedule until it (BrickEngineOptions.staticsDeferred), and the stroke is a live edit like any other. Then it arms
+ * the statics schedule, uploads the mask, and the next step's census and solidStamp close the fill. A stroke past the
+ * K pool is refused at the preflight, and nothing changes.
+ */
+test("brick solid edit (GPU): the first stroke on a voxel-free dam arms the static stages live", GPU, async t => {
+  const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
+  const { getMethod } = await import("../../core/method-registry");
+  const { resolveMethodValues } = await import("../../core/method-contract");
+  const { sceneDocument } = await import("../../core/scene-definition");
+  const { getSceneDefinition } = await import("../../core/scenes");
+  const { sceneWithSolidStroke } = await import("../../core/solid-world");
+  const { solidOccupancyMaskVoxel } = await import("../../core/solid-occupancy-mask");
+  const { voxelReaderForScene } = await import("../../core/voxel-editor/voxel-reader");
+  const { BRICK_STRIDE, F_CLASS, FLAG, H, NONE, REC, brickKeyCoord } = await import("./brick-abi");
+  const { snapshot } = await import("./brick-readback");
+  const { createBrickSolver } = await import("./brick-method");
+  const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD), definition = getSceneDefinition("minimal-power-dam-break-64");
+  const scene0 = sceneDocument(definition);
+  scene0.fluid.brickPools = { f: 729, c: 27, b: 16, k: 0, particles: 600000 };
+  scene0.duration_s = 3;
+  const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
+  const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" }) as Record<string, unknown>;
+  const B = { lo: [8, 0, 8] as V3, hi: [20, 10, 20] as V3 }, N = [64, 64, 64];
+  const filled = sceneWithSolidStroke(scene0, [{ operation: "fill", minimum: B.lo, maximumExclusive: B.hi, materialId: 2 }]);
+  const huge = sceneWithSolidStroke(scene0, [{ operation: "fill", minimum: [0, 0, 0], maximumExclusive: [64, 40, 64], materialId: 2 }]);
+  const inBox = (c: readonly number[]) => c.every((v, a) => v >= B.lo[a]! && v < B.hi[a]!);
+  await withUniformDevice("brick first stroke", async device => {
+    const solver = await createBrickSolver(device, scene0, values, quality);
+    try {
+      const e = solver.brickEngine, L = e.layout, dt = e.options.dt_s, P = L.cap.particles, S = L.particleStride;
+      const run = async (from: number, k: number, label: string) => {
+        for (let step = from + 1; step <= from + k; step++) {
+          assert.ok(solver.advanceTo(step * dt, []), `${label}: step ${step} admitted`);
+          await solver.assertSimulationHealthy();
+          const snap = await snapshot(e), words = await e.read("solid");
+          const parts = new Float32Array((await e.read("parts")).buffer), bank = snap.header[H.STEP]! & 1, count = Math.min(snap.header[bank ? H.PCOUNT1 : H.PCOUNT0]!, P);
+          let inside = 0;
+          for (let i = 0; i < count; i++) {
+            const r = S * (bank * P + i); if (!(parts[r + 3]! > 0)) continue;
+            const c = [0, 1, 2].map(a => Math.floor(parts[r + a]!));
+            if (c.every((v, a) => v >= 0 && v < N[a]!) && solidOccupancyMaskVoxel(words, c[0]!, c[1]!, c[2]!)) inside++;
+          }
+          assert.equal(inside, 0, `${label}: step ${step}: ${inside} live records in closed cells`);
+          assert.equal(snap.header[H.FAIL], 0, `${label}: step ${step}: FAIL`);
+        }
+      };
+      assert.equal(e.options.staticsDeferred, true, "built deferred");
+      assert.equal(e.staticsArmed, false);
+      assert.equal(L.cap.k, 64, "K: the edit headroom");
+      const plainLabels = new Set([...e.schedule.part1, ...e.schedule.part2].map(p => p.kernel.label));
+      for (const label of ["solidStamp", "pSolid", "phiSolid", "setKRelease"]) assert.ok(!plainLabels.has(label), `plain: no ${label}`);
+      await run(0, 3, "before");
+      const vel0 = await e.read("vel");
+
+      // Past the K pool: refused at the preflight, nothing changes.
+      assert.throws(() => solver.validateLiveSolidEdit(huge), /K slots/);
+      assert.equal(e.staticsArmed, false, "a refused stroke arms nothing");
+
+      // The first stroke: live, armed.
+      solver.validateLiveSolidEdit(filled);
+      assert.notEqual(solver.applySceneUniforms(filled), false, "the first stroke is taken live");
+      assert.equal(e.staticsArmed, true);
+      const armedLabels = new Set([...e.schedule.part1, ...e.schedule.part2].map(p => p.kernel.label));
+      for (const label of ["solidStamp", "pSolid", "phiSolid", "setKRelease"]) assert.ok(armedLabels.has(label), `armed: ${label}`);
+      const words = await e.read("solid"), reader = voxelReaderForScene(filled);
+      let bad = 0, solid = 0;
+      for (let z = 0; z < 64; z++) for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) {
+        const want = reader.solid([x, y, z]); if (want) solid++;
+        if (want !== solidOccupancyMaskVoxel(words, x, y, z)) bad++;
+      }
+      assert.equal(bad, 0, "the engine's image is the editor's reader"); assert.equal(solid, 1440);
+      assert.ok(Buffer.from((await e.read("vel")).buffer).equals(Buffer.from(vel0.buffer)), "the edit keeps every velocity bit");
+
+      // The next step: every fill cell resident, closed, FRAC 0, in a CUT_STATIC brick.
+      await run(3, 1, "the step after the stroke");
+      const snap = await snapshot(e), phi = await e.read("phi"), cut = new Float32Array((await e.read("cut")).buffer);
+      const flags = L.base("phi", "F", "FLAGS"), frac = L.base("cut", "K", "FRAC");
+      let closed = 0;
+      for (const [key, slot] of snap.bricks) {
+        const o = brickKeyCoord(key).map(v => 8 * v), r = L.dir.frec + 32 * slot, ks = snap.dir[r + REC.CUT]!, cls = snap.dir[r + REC.CLASS]!;
+        for (let l = 0; l < 512; l++) {
+          const c = [o[0]! + (l & 7), o[1]! + ((l >> 3) & 7), o[2]! + (l >> 6)];
+          if (!inBox(c)) continue;
+          closed++;
+          assert.equal(phi[flags + BRICK_STRIDE * slot + l]! & FLAG.OPEN, 0, `cell ${c} closed`);
+          assert.ok(cls & F_CLASS.CUT_STATIC, `brick ${o} CUT_STATIC`); assert.notEqual(ks, NONE);
+          assert.equal(cut[frac + BRICK_STRIDE * ks + l], 0, `cell ${c} FRAC 0`);
+        }
+      }
+      t.diagnostic(`first stroke: ${closed} of 1440 fill cells resident and closed after a step, K free ${snap.header[H.TOP_K]} of ${L.cap.k}`);
+      assert.equal(closed, 1440);
+      await run(4, 10, "after the first stroke");
+    } finally { solver.destroy(); }
+  });
+});
