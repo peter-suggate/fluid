@@ -91,6 +91,8 @@ export const SPHERE = {
   frustumZ: P(0.65, "m", "physbam", "test 13 cut_pyramid frame t.z = 0.65"),
   frustumFriction: P(0.1, "1", "physbam", "test 13: cut_pyramid friction 0.1"),
   duration: P(213 / 24, "s", "video", "cloth1.avi: 213 frames at 24 fps"),
+  pcgIterations: P(100, "iterations", "assumption",
+    "measured 2026-11-18 at 150^2: Newton caps every step on the truncation floor, so PCG past ~50 changes nothing; caps 200/100/50 drift alike from cap 800 (ticks 120-160 rms 2-12 mm, 20-95 35-55 mm: rounding chaos), same spin and strain; 25 drifts 36 mm and over-strains, 12 as forcingMax 0.5. 100: 4x the first loss, 17-22% faster than 200"),
   planeRecords: P(1000, "records/vertex", "assumption",
     "interim: demand bug, C2, to be removed with the relative-motion test; measured peak 911 per vertex as the sheet lands on the sphere (t = 0.333 s), on 8b58f374"),
 } as const;
