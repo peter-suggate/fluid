@@ -232,6 +232,17 @@ fn poFaceAP(c:vec3i,a:u32)->f32{
 }
 fn poFaceW(c:vec3i,a:u32)->f32{let k=poCutK(c);if(k==NB_NONE){return 0.0;}return cut[poCutW(a)+NB_STRIDE*k+nbLocal(c)];}
 fn poCutBmask(k:u32)->u32{if(k==NB_NONE){return 0u;}return bitcast<u32>(cut[NB_CUT_BMASK+k]);}
+// A static solid cell (lane E's 0xa2 hand-off, the coordinator's option (b), 2026-11-17): a resident cell of a static
+// cut brick with no body (BMASK 0) whose open fraction is <= 1e-5 (umCellIsOpen's shut). It is never a row: the
+// pressure sees it as the box's shell, so its faces to the liquid are separating walls (poAcross), re-decided as the
+// box walls are (pmgWalls*). A body's brick keeps the 0xa2 latch: its shut cells may be the body's.
+fn poStaticShut(q:vec3i)->bool{
+  let k=poCutK(q);if(k==NB_NONE){return false;}
+  if((nbFRec(poSlotOfCell(q),NB_REC_CLASS)&NB_CLASS_CUT_STATIC)==0u||poCutBmask(k)!=0u){return false;}
+  return cut[NB_CUT_FRAC+NB_STRIDE*k+nbLocal(q)]<=1e-5;
+}
+// The pressure's liquid test of an h cell with centre φ p: wet, and not a static solid cell.
+fn poRowWet(c:vec3i,p:f32)->bool{return poWet(p,1.0)&&!poStaticShut(c);}
 `;
 
 const compositeWGSL = (cuts: boolean) => /* wgsl */`
@@ -374,7 +385,8 @@ fn poAcross(q:vec3i)->u32{
   if(!nbInWallBox(q)){return NP_ACROSS_WALL;}
   let w=nbPageWord(q>>vec3u(5u));
   if(w==NB_NONE){return NP_ACROSS_AIR;}
-  if(w>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,w);return NP_ACROSS_WALL;}
+  if(w>=NB_SEAM){nbFail(NB_FAIL_UNSUPPORTED,w);return NP_ACROSS_WALL;}${cuts ? `
+  if(poStaticShut(q)){return NP_ACROSS_WALL;}` : ""}
   return NP_ACROSS_RESIDENT;
 }
 // The band face of h cell c (own φ, liquid) on face f (pRows' S path, no solids).
@@ -574,7 +586,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     var rise=0.0;var count=0.0;
     for(var side=0u;side<2u;side++){
       let g=2u*axis+side;let m=c+npSign(g)*poUnit(axis);
-      if(nbInWallBox(m)&&poOwnerH(m)){if(poWet(poCentre(m),1.0)){rise+=f32(npSign(g))*(poSH[poIndex(m-poSO+vec3i(1),10)]-base);count+=1.0;}}
+      if(nbInWallBox(m)&&poOwnerH(m)){if(${cuts ? "poRowWet(m,poCentre(m))" : "poWet(poCentre(m),1.0)"}){rise+=f32(npSign(g))*(poSH[poIndex(m-poSO+vec3i(1),10)]-base);count+=1.0;}}
     }
     if(count>0.0){head+=rise/count*(f32(lb[axis]&3u)-1.5);}
   }
@@ -606,7 +618,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
 `}  poStage(nbFOrigin(slot),lid,512u);
   for(var j=0u;j<1u;j++){
     let c=nbFOrigin(slot)+nbLocalCoord(lid+512u*j);
-    if(nbInWallBox(c)&&poOwnerH(c)){if(poWet(poCentre(c),1.0)&&(poFlagsF(c)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
+    if(nbInWallBox(c)&&poOwnerH(c)){if(${cuts ? "poRowWet(c,poCentre(c))" : "poWet(poCentre(c),1.0)"}&&(poFlagsF(c)&PO_WARM)==0u){atomicOr(&poCold,1u);}}
   }
   workgroupBarrier();
   if(lid==0u){poGo=atomicLoad(&poCold);}
@@ -623,24 +635,32 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
   let l=lid;let c=o+nbLocalCoord(l);let at=NB_STRIDE*slot+l;
   let owned=nbInWallBox(c)&&poOwnerH(c);
   var own=NB_PHI_AIR;if(owned){own=poCentre(c);}
-  let liquid=owned&&poWet(own,1.0);
+  let liquid=owned&&${cuts ? "poRowWet(c,own)" : "poWet(own,1.0)"};
   var start=0.0;if(liquid){start=poStart(c,own);}
   poSH[poIndex(nbLocalCoord(l)+vec3i(1),10)]=start;
   if(lid<384u){
     let side=lid/64u;let a=side/2u;let k=lid%64u;var d=vec3i(0);
     d[(a+1u)%3u]=i32(k%8u)+1;d[(a+2u)%3u]=i32(k/8u)+1;d[a]=select(0,9,(side&1u)==1u);
     let m=o-vec3i(1)+d;var sm=0.0;
-    if(nbInWallBox(m)&&poOwnerH(m)){let pm=poCentre(m);if(poWet(pm,1.0)){sm=poStart(m,pm);}}
+    if(nbInWallBox(m)&&poOwnerH(m)){let pm=poCentre(m);if(${cuts ? "poRowWet(m,pm)" : "poWet(pm,1.0)"}){sm=poStart(m,pm);}}
     poSH[poIndex(d,10)]=sm;
   }
   workgroupBarrier();
   {
     var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var ku=vec3f(0.0);
     ${faces === undefined ? "" : "var kinds=0u;"}
-    if(liquid){
+    ${cuts ? `// A static solid cell under liquid φ beside a liquid native row: rowsC's seam would read it as air (no row, PPHI
+    // air), so it latches (lane E's static rule keeps a wet cut brick's neighbours h).
+    if(owned&&!liquid&&poWet(own,1.0)&&poStaticShut(c)){
+      for(var f=0u;f<6u;f++){
+        let q=c+npSign(f)*poUnit(f/2u);
+        if(nbInWallBox(q)&&!poOwnerH(q)&&nbPageWord(q>>vec3u(5u))<NB_SEAM&&poWet(poRootPhi(q>>vec3u(2u)),4.0)){nbFail(NB_FAIL_UNSUPPORTED,0xa5000000u|nbFRec(slot,NB_REC_KEY));}
+      }
+    }
+    ` : ""}if(liquid){
       for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}${cuts ? `
-      // The row's capacity (bHeadCapacity, the old head capacity: its own FRAC on all six faces). A liquid row in a
-      // static solid cell is the old rows' inside row (the complementarity rows), not ported: it latches.
+      // The row's capacity (bHeadCapacity, the old head capacity: its own FRAC on all six faces). A static solid cell
+      // is no row (poRowWet, option (b)); a shut cell of a static cut brick with a body (BMASK != 0) still latches.
       let capacity=poFrac(c);
       if(staticCut&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}` : ""}
       for(var f=0u;f<6u;f++){
@@ -679,7 +699,7 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     // the skirt included: they hold no state, and a refined tile's rows start cold).
     pres[NB_PRES_F_B+at]=start;pres[NB_PRES_F_X+at]=start;
     pres[NB_PRES_F_RHS+at]=select(0.0,-h*div+h*h*rate*${cuts ? "poFrac(c)" : "capacity"}+extra,liquid);
-    pres[NB_PRES_F_DIAG+at]=diag;pres[NB_PRES_F_PPHI+at]=select(0.0,own,owned);
+    pres[NB_PRES_F_DIAG+at]=diag;pres[NB_PRES_F_PPHI+at]=select(0.0,${cuts ? "select(own,NB_PHI_AIR,poStaticShut(c))" : "own"},owned);
     pres[NB_PRES_F_K0+at]=kk.x;pres[NB_PRES_F_K1+at]=kk.y;pres[NB_PRES_F_K2+at]=kk.z;
     pres[NB_PRES_F_KU0+at]=ku.x;pres[NB_PRES_F_KU1+at]=ku.y;pres[NB_PRES_F_KU2+at]=ku.z;${faces === undefined ? "" : `
     pmgF[poFcAt(slot,6u,l)]=f32(kinds);`}
@@ -842,7 +862,7 @@ var<workgroup> poGo:u32;
         let fa=NB_STRIDE*(slot+a*NB_FCAP)+l;let us=vel[NB_VEL_F_US0+fa];
         var pn=NB_PHI_AIR;if(hn){pn=poPhiF(n);}
         let ln=hn&&poWet(pn,1.0);
-        let wall=c[a]==0||c[a]==NB_WALL_BOX[a];let separated=wall&&(flags&(PO_WALL0<<a))!=0u;
+        let wall=c[a]==0||c[a]==NB_WALL_BOX[a];${cuts && faces !== undefined ? "var" : "let"} separated=wall&&(flags&(PO_WALL0<<a))!=0u;
         var u=us;${faces === undefined ? `
         if(lc){u=poProjectFace(c,pc,true,2u*a,us,h,separated);}
         else if(ln){u=poProjectFace(n,pn,true,2u*a+1u,us,h,separated);}` : `${cuts ? `
@@ -851,13 +871,14 @@ var<workgroup> poGo:u32;
         let ap=poFaceAP(c,a);let wv=poFaceW(c,a);var closed=ap<=1e-6;` : ""}
         if(lc){
           let kind=((u32(pmgF[poFcAt(slot,6u,l)])>>(8u*a))&15u)-1u;${cuts ? "var" : "let"} word=pmgF[poFcAt(slot,2u*a,l)];${cuts ? `closed=kind==NP_K_CLOSED;
-          if(kind==NP_K_WALL){word=1.0;}` : ""}
+          // A wall face's state is the solve's (FLAGS at the face), a static solid's face (option (b)) as the box's.
+          if(kind==NP_K_WALL){word=1.0;separated=(flags&(PO_WALL0<<a))!=0u;}` : ""}
           u=poProjectFaceK(c,pc,true,2u*a,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
         else if(ln){
           let sn=poSlotOfCell(n);let lnl=nbLocal(n);
           let kind=((u32(pmgF[poFcAt(sn,6u,lnl)])>>(8u*a+4u))&15u)-1u;${cuts ? "var" : "let"} word=pmgF[poFcAt(sn,2u*a+1u,lnl)];${cuts ? `closed=kind==NP_K_CLOSED;
-          if(kind==NP_K_WALL){word=1.0;}` : ""}
+          if(kind==NP_K_WALL){word=1.0;separated=(flags&(PO_WALL0<<a))!=0u;}` : ""}
           u=poProjectFaceK(n,pn,true,2u*a+1u,us,h,separated,kind,select(word,poSeamRatio(),kind==NP_K_SEAM),select(0.0,word,kind==NP_K_SEAM));
         }
         else if(hc&&!hn){u=poProjectDry(c,pc,2u*a,us,h,separated,n);}

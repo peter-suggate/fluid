@@ -1992,7 +1992,7 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   let slot=${audit ? "nbListSlot(NB_LIST_F_ALL,g)" : "pmgTop[T_RB+g]"};`}let o=nbFOrigin(slot);let b=o>>vec3u(3u);
   if(lid==0u){
     let edge=any(o==vec3i(0))||any(o+vec3i(8)>=NB_WALL_BOX);
-    wGo=select(0u,1u,edge${audit ? "&&pmgTop[T_RBF+slot]!=0u" : ""});
+    wGo=select(0u,1u,${cuts ? "(edge||(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u)" : "edge"}${audit ? "&&pmgTop[T_RBF+slot]!=0u" : ""});
     ${audit ? "wAlpha=bitcast<f32>(atomicLoad(&nbSet[PH_ALPHA]));atomicStore(&wAud[0],0u);atomicStore(&wAud[1],0u);" : guessAt ? "wAlpha=0.0;" : "let rz=pmgRed[R_RZ];let pq=pmgRed[R_PQ];wAlpha=select(0.0,rz/pq,pq!=0.0);"}
     atomicStore(&wFlips,0u);
   }
@@ -2004,12 +2004,12 @@ var<workgroup> wGo:u32;var<workgroup> wAlpha:f32;var<workgroup> wFlips:atomic<u3
   if(pDiag(slot,l)>0.0){
     let x=${guessAt ? "pres[NB_PRES_F_Z+at]" : "pres[NB_PRES_F_X+at]+alpha*pres[NB_PRES_F_D+at]"};
     var dd=0.0;var db=0.0;var flips=0u;
-    for(var a=0u;a<3u;a++){
-      let side=pWallFace(c,a,NB_WALL_BOX[a]);if(side==0){continue;}${cuts ? `
-      // The cuts: the face's kind and coupling from rowsF's face cache (a wall face's word is its V); a closed one
-      // (A <= 1e-6) has no state.
-      let fk=2u*a+select(0u,1u,side>0);
-      if(((u32(pmgF[P_FC+NB_STRIDE*(7u*slot+6u)+l])>>(4u*fk))&15u)!=${NP_K.WALL + 1}u){continue;}
+    ${cuts ? `// The cuts: every face of the row, the box's and a static solid's (option (b): the static cut bricks), by its
+    // kind and coupling from rowsF's face cache (a wall face's word is its V); a closed one (A <= 1e-6) has no state.
+    for(var fk=0u;fk<6u;fk++){
+      let a=fk/2u;let side=select(-1,1,(fk&1u)==1u);
+      if(` : `for(var a=0u;a<3u;a++){
+      let side=pWallFace(c,a,NB_WALL_BOX[a]);if(side==0){continue;}`}${cuts ? `((u32(pmgF[P_FC+NB_STRIDE*(7u*slot+6u)+l])>>(4u*fk))&15u)!=${NP_K.WALL + 1}u){continue;}
       let wc=pmgF[P_FC+NB_STRIDE*(7u*slot+fk)+l];` : ""}
       var sc=c;if(side>0){sc[a]+=1;}
       let s=nbFSlotOfCell(sc);if(s>=NB_SEAM){continue;}

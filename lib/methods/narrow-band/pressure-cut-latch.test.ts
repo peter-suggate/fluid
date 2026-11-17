@@ -6,6 +6,10 @@
  *   4h tile may stay (the old solidPromote leaves dry cut bricks at 4h); a liquid native row in a cut brick latches in
  *   rowsC (the native rows never read a cut: the old band certificate's failure).
  * - Without cuts, any cut brick latches, as before, and rowsC has no such check.
+ * - 0xa2's option (b) (the coordinator's ruling, 2026-11-17): a static solid cell (poStaticShut: a static cut brick
+ *   with no body, FRAC <= 1e-5) is never a row, its PPHI is air, and its faces are walls (poAcross); the rows, the
+ *   projection and the walls' outer loop take them as the box walls. A body's brick keeps 0xa2; a static solid cell
+ *   under liquid beside a native row latches 0xa5. Without cuts none of it is emitted.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -32,4 +36,17 @@ test("pressure cut latch: a cut brick's 4h tile latches only for a body; a liqui
   const off = codes(0);
   assert.ok(off.includes("if(nbFRec(slot,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,key);}"), "without cuts any cut brick latches");
   assert.ok(!off.includes("if(liquid){let fs=nbFSlotOfBrick(T>>vec3u(1u));"), "without cuts rowsC is unchanged");
+});
+
+test("pressure cut latch: a static solid cell is no row; its faces are separating walls (0xa2 option (b))", () => {
+  const on = codes(8), off = codes(0);
+  assert.ok(on.includes("fn poStaticShut(q:vec3i)->bool{"), "poStaticShut");
+  assert.ok(on.includes("if(poStaticShut(q)){return NP_ACROSS_WALL;}"), "poAcross: a static solid cell is a wall");
+  assert.ok(on.includes("let liquid=owned&&poRowWet(c,own);"), "rowsF: no row in a static solid cell");
+  assert.ok(on.includes("pres[NB_PRES_F_PPHI+at]=select(0.0,select(own,NB_PHI_AIR,poStaticShut(c)),owned);"), "rowsF: its PPHI is air");
+  assert.ok(on.includes("if(staticCut&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}"), "a body's static cut keeps 0xa2");
+  assert.ok(on.includes("0xa5000000u|nbFRec(slot,NB_REC_KEY)"), "0xa5: a static solid cell beside a liquid native row");
+  assert.ok(on.includes("if(kind==NP_K_WALL){word=1.0;separated=(flags&(PO_WALL0<<a))!=0u;}"), "projectF: a wall face's state");
+  assert.ok(on.includes("wGo=select(0u,1u,(edge||(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u));"), "pmgWallsF: the static cut bricks");
+  for (const t of ["poStaticShut", "poRowWet", "0xa5000000u"]) assert.ok(!off.includes(t), `without cuts: no ${t}`);
 });

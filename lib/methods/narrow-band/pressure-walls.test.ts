@@ -48,7 +48,10 @@ test("pressure walls: on a padded lattice the rows' walls and domain are at the 
     const rows = [...ks.entries()].find(([, c]) => c.includes("let owned=nbInBox(c)&&poOwnerH(c);"));
     assert.ok(rows, "the h rows' domain is the box");
     assert.ok([...ks.values()].some(c => c.includes("let owned=poTileInBox(T)&&!nbTileH(cs,i);") && c.includes("if(!poTileInBox(Tn)){")), "the native rows' domain and wall slot are the box's");
-    assert.match(code("pmgWallsF"), /let side=pWallFace\(c,a,NB_BOX\[a\]\);/);
+    // With cuts the walls loop takes every face whose cached kind is a wall (the box's and a static solid's, 0xa2's
+    // option (b)); without, the box planes' (pWallFace).
+    if (k === 0) assert.match(code("pmgWallsF"), /let side=pWallFace\(c,a,NB_BOX\[a\]\);/);
+    else assert.ok(code("pmgWallsF").includes("for(var fk=0u;fk<6u;fk++){") && code("pmgWallsF").includes("wGo=select(0u,1u,(edge||(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u));"), "pmgWallsF: every wall face of a static cut brick");
     assert.match(code("pmgWallsF"), /let edge=any\(o==vec3i\(0\)\)\|\|any\(o\+vec3i\(8\)>=NB_BOX\);/);
     assert.match(code("pmgWallsC"), /let side=pWallFace\(T,a,\(NB_BOX\[a\]\+3\)\/4\);/);
     assert.ok([...ks.values()].some(c => c.includes("let wall=c[a]==0||c[a]==NB_BOX[a];")), "the h faces' wall planes");
