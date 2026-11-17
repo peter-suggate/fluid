@@ -70,13 +70,18 @@
  * - R2 (lane E, the user's aggressive fine-tile retirement, 2026-11-16): at a tiered head with the real D a band tile
  *   whose last certificate is calm is 4h, joined or not (ncCalm: the 4h model represents the tile's velocity within
  *   the 4h owner's budget, dt error / h <= UNIFORM_TILE_UPDATE_BUDGET_H, the certificate's error word). Calm means 4h
- *   represents both the velocity and the shape: a tile whose FIN carries its shape or thin trigger is never calm.
+ *   represents both the velocity and the shape: a tile whose FIN carries its shape or thin trigger is never calm,
+ *   and an h tile is calm only where demoting it moves its surface by at most the same budget on average,
+ *   |V_4h − V_h| ≤ UNIFORM_TILE_UPDATE_BUDGET_H · max(A, 1) (VOL; the coordinator's ruling 2026-11-17, lane F's
+ *   criterion and Float64 oracle: a plane gives 0, a ball of radius r about −(16/12)(2/r) cells, so a curved calm
+ *   surface 4h would shrink stays h; the probe's ball, r 14.42, lost 4.3% in 10 steps at rest without it).
  * - Counters: the old census words that feed no decision are not kept; the kept ones are H.CENSUS_*.
  */
 import { ARGS, BOX_TOKEN, BrickLayout, H, LIST, brickAbiWGSL, resolveBox } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel, declareBindings } from "./brick-kernel";
 import { brickOwnerWGSL } from "./brick-owner.wgsl";
 import { BRICK_SOURCE_BINDING, BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
+import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
 import { UNIFORM_TILE_UPDATE_BUDGET_H } from "../uniform/uniform-tile-update-error";
 
@@ -122,7 +127,7 @@ export const CENSUS_POLICY = {
  * and the next step's censusDecide reads (tuDeformation). */
 export const CENSUS = {
   KEYS: 0, CUBES: 3072, W0: 3520, W1: 4032, FIN: 4544, CROSS: 5056, GAP: 6080, REQ: 6592, MOV: 6608, NEAR: 6656, DEF: 7168,
-  TC: 9216, HEAT4: 17408, REG: 17920, DEC: 18176, STAT: 18192, RCROSS: 18208, RGAP: 19232, CALM: 19744, CALM_KEY: 19760, STRIDE: 19768,
+  TC: 9216, HEAT4: 17408, REG: 17920, DEC: 18176, STAT: 18192, RCROSS: 18208, RGAP: 19232, CALM: 19744, CALM_KEY: 19760, VOL: 19768, STRIDE: 20280,
 } as const;
 /** The real D's words (brick-region-heat.wgsl.ts), in the census buffer after DEF:
  * - TC, 16 words a tile: the frame plan's certificate (localSpeed, uniform-mixed-frame-plan.ts l.269), written after
@@ -136,6 +141,11 @@ export const CENSUS = {
  *   hysteresis (lane E, coordinator 2026-11-16). Bit i is whether tile i was a calm band tile (ncCalm) at the last
  *   tiered head, written at every tiered head only; CALM_KEY r is the page key + 1 its workgroup wrote them under, so a
  *   reused slot's bits are unknown, and unknown is not calm;
+ * - VOL, a word a tile (f32): R2's volume test (lane E, the coordinator's ruling 2026-11-17), censusFine's for an
+ *   h-owned tile at every tiered census: δ = (V_4h − V_h) / max(A, 1) cells, V_h the six-tetrahedron fill of the
+ *   tile's 64 cells (level-set-fill.wgsl.ts), V_4h = 64 · the fill of its 8 corners (what demotion keeps), A its cells
+ *   whose centre φ (the mean of their 8 vertices) is under half a cell (the smeared-delta area, cells²); 0 for a tile
+ *   with no crossing cell. Read only where the tile is h-owned (a 4h tile's word is stale);
  * - RCROSS and RGAP, as CROSS and GAP: the tile's crossing cells and gap as its classification stored them (the old
  *   CC_RECORD words), before censusImportance edits CROSS and GAP in place. A replayed tile publishes them. */
 export const RG = {
@@ -999,7 +1009,7 @@ export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: bool
 
   // censusFine: classify (l.2091), eight workgroups an F brick of F_ALL (X8), workgroup j its tile j (ncCorner(j, 2))
   // when h-owned, a lane a cell. Every workgroup word is the tile's; the brick's tiles run side by side.
-  const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + REGION + /* wgsl */`
+  const censusFine = k("censusFine", [CFG, setRW, dirRO, velRO, phiRO, censusRW], OWNER + HOOKS + CENSUS_FORMULAS + STORE + PLAN + REGION + levelSetFillWGSL + /* wgsl */`
 var<workgroup> wgFlag:u32;
 var<workgroup> tileCrossing:array<atomic<u32>,2>;
 var<workgroup> tileLow:array<atomic<u32>,3>;
@@ -1009,6 +1019,24 @@ var<workgroup> tileReach:array<atomic<u32>,6>;
 var<workgroup> tileError:atomic<u32>;
 var<workgroup> tileDeep:array<atomic<u32>,2>;
 var<workgroup> mixedTile:atomic<u32>;
+// R2's volume test (VOL): the tile's 64 cell fills (fixed point, 2^-20 of a cell) and its smeared-delta area.
+var<workgroup> cfVolH:atomic<u32>;
+var<workgroup> cfArea:atomic<u32>;
+// Every lane, its cell: the six-tetrahedron fill of its 8 staged vertices, and whether its centre φ (their mean) is
+// within half a cell of the surface.
+fn cfVolumeCell(lane:u32){
+  let l=ncCorner(lane,4u);var v:array<f32,8>;var m=0.0;
+  for(var k=0u;k<8u;k++){let q=l+ncCorner(k,2u);v[k]=ncTileRaw[q.x+5u*q.y+25u*q.z];m+=v[k];}
+  atomicAdd(&cfVolH,u32(round(fill(v)*1048576.0)));
+  if(abs(0.125*m)<0.5*ncH()){atomicAdd(&cfArea,1u);}
+}
+// Lane 0, after the cells: δ = (V_4h − V_h) / max(A, 1), V_4h = 64 · the fill of the tile's 8 corners.
+fn cfVolumeShift()->f32{
+  var c:array<f32,8>;
+  for(var k=0u;k<8u;k++){let q=4u*ncCorner(k,2u);c[k]=ncTileRaw[q.x+5u*q.y+25u*q.z];}
+  let vh=f32(atomicLoad(&cfVolH))/1048576.0;
+  return (64.0*fill(c)-vh)/max(f32(atomicLoad(&cfArea)),1.0);
+}
 // The tile's faces (US), staged once: axis a, plane p (0..4, 4t[a] + p), and the cell across (u = a + 1, v = a + 2):
 // 80a + 16p + 4v + u. Every face a cell of the tile reads (its low face, plane p, and its high face, plane p + 1).
 var<workgroup> cfFaces:array<f32,240>;
@@ -1084,7 +1112,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     if(lane==0u){
       atomicStore(&mixedTile,0u);for(var q=0u;q<2u;q++){atomicStore(&tileCrossing[q],0u);atomicStore(&tileDeep[q],0u);}
       for(var a=0u;a<3u;a++){atomicStore(&tileLow[a],0xffffffffu);atomicStore(&tileHigh[a],0u);atomicStore(&tileGap[a],15u);atomicStore(&tileGap[3u+a],15u);atomicStore(&tileReach[a],15u);atomicStore(&tileReach[3u+a],15u);}
-      atomicStore(&tileError,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);
+      atomicStore(&tileError,0u);atomicStore(&cfVolH,0u);atomicStore(&cfArea,0u);atomicStore(&ncTileSigned,0);atomicStore(&ncTileCrossings,0u);atomicStore(&ncTileCurve,0);atomicStore(&ncTileCurves,0u);atomicStore(&ncTileCorner,0u);
     }
     cfStage(t,lane);
     workgroupBarrier();
@@ -1097,7 +1125,9 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
     }
     workgroupBarrier();
     if(lane==0u){wgFlag=atomicLoad(&mixedTile);}
-    let shaping=(workgroupUniformLoad(&wgFlag)&2u)!=0u&&NC_TOL>0.0;
+    let crossing=(workgroupUniformLoad(&wgFlag)&2u)!=0u;
+    let shaping=crossing&&NC_TOL>0.0;
+    ${tiered ? "if(crossing){cfVolumeCell(lane);}" : ""}
     if(shaping){atomicMax(&tileError,bitcast<u32>(ncSurfaceDisplacement(t,lane)));}
     if((atomicLoad(&mixedTile)&2u)!=0u){let deep=ncDepthSample(t,lane);for(var q=0u;q<2u;q++){atomicMax(&tileDeep[q],deep[q]);}}
     workgroupBarrier();
@@ -1111,6 +1141,7 @@ fn cfClassify(t:vec3i,lane:u32,c:ptr<function,NcClass>){
       c.deep=vec2u(atomicLoad(&tileDeep[0]),atomicLoad(&tileDeep[1]));
       let r=ncFinishTile(t,1u,c);
       ncStoreClass(nbCSlotOfPage(t>>vec3u(3u)),nbTileIndex(t),c,r,1u);
+      ${tiered ? `census[NC_S*nbCSlotOfPage(t>>vec3u(3u))+${CENSUS.VOL}u+nbTileIndex(t)]=bitcast<u32>(select(0.0,cfVolumeShift(),crossing));` : ""}
       atomicMax(&wgReach,r.reach);if((c.flags&2u)!=0u){atomicAdd(&wgCrossing,1u);}
     }
   }
@@ -1382,7 +1413,9 @@ fn cdTile(cs:u32,i:u32,lane:u32,reach:f32,base:vec3i){
   // demotes a surface 4h cannot carry (falling-water-torus lost all its liquid by step 10 without this, 2026-11-17).
   var toCoarse=false;
   // A source tile is not calm: the drop's liquid arrives this step, after the certificate (lane F's M4).
-  if(band&&head&&!source&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&ncCalm(t,cs,i)){
+  // And an h tile is calm only where demotion keeps its volume within the budget (VOL, censusFine's δ this census).
+  let kept=!nbTileH(cs,i)||abs(bitcast<f32>(census[o+${CENSUS.VOL}u+i]))<=${UNIFORM_TILE_UPDATE_BUDGET_H};
+  if(band&&head&&!source&&(ncFin(cs,i)&(ncTriggerBit(NC_SHAPE)|ncTriggerBit(NC_THIN_K)))==0u&&kept&&ncCalm(t,cs,i)){
     atomicOr(&wgCalm[lane>>5u],bit);
     let known=census[o+${CENSUS.CALM_KEY}u+(i>>6u)]==nbCRec(cs,NB_REC_KEY)+1u;
     toCoarse=!nbTileH(cs,i)||(known&&(census[o+${CENSUS.CALM}u+word]&bit)!=0u);

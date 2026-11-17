@@ -2481,3 +2481,160 @@ the unpadded run. Until F and P switch, brick-scene keeps the "not whole pages" 
   box (setInit, censusFine, setTransferFaces); a box outside the lattice throws.
 - check:types: lane-n's 3 only.
 - test:unit: 1889 pass, 0 fail (before the new test).
+
+## 2026-11-17: the dynamic-write lowering as a diagnostic switch (8f1c47eb), the D2 pool term (a3fed883), BRICK_CELLS (0a81b19e)
+
+**The pass** (brick-lower.ts). It is a diagnostic switch, off by default: NB_BRICK_LOWER=1 or the engine option
+lowerDynamicWrites. Off, every module is created from its text exactly as written: the dam's 113 kernel hashes are
+identical to a3fed883. On, at every brick compile point (BrickEngine.create before any module is made,
+BrickEngine.run, BrickPresentation.create), each module's dynamic vector-component writes are lowered:
+- `v[i] op= x` becomes `v=select(v,v op vecN(x),nbDynAxisN(u32(i)))`, for + - * / % & | ^ << >>;
+- `v[i]=x` becomes `v=select(v,vecN(x),...)`, and `v[i]++` / `v[i]--` add or subtract vecN(1).
+
+select is componentwise, so the result is exact. N comes from the target's nearest visible declaration:
+- the declaration can be a local, a parameter (in the header only, never a call's argument) or a pointer's pointee;
+- it can be a struct field, walked from the base's struct, or a constructor or a called function's return type;
+- closed blocks and other functions' locals are not visible.
+
+Arrays, atomics, buffers and literal indices are left alone. A wrong width is a WGSL type error at creation, never
+a silent change. Two cases stop creation outright:
+- brickLowerChecked throws, naming the kernel, if a write survives the lowering;
+- the lowering throws on a field whose struct it cannot name.
+
+The old engine is out of scope (it goes at M6).
+
+**Go/no-go** (Metal; bodies-shapes' couple, the hydrostatic sphere, r 0.2). P's verbatim loop,
+`var low=id;low[axis]-=1; area[axis]=...`, was run three ways: as written, lowered, and in the module's select form.
+All three give 10.8421 N·s against ρgV·dt = 10.9579 (−1.06%, inside the 2% gate). The −6.71 miscompile does not
+reproduce on today's driver, so the miscompile may have been a symptom of that morning's GPU hangs. Runs:
+fluid-scratch/lane-e/r20/gonogo3.log. The test is sweep-tree's gonogo-lowering.test.ts, which is scratch and not
+landed.
+
+**Exact and explicit.**
+- brick-lower.test.ts (CPU) covers a corpus of every width (vec2/3/4) and operator, `=`, `++`, `--`, and widths from
+  initialisers, copies, parameters, calls and fields. It also covers:
+  - arrays, atomics, storage and workgroup buffers, literal indices and comparisons, all left byte for byte;
+  - right-hand sides with brackets and calls, and a for-header update;
+  - the axis masks;
+  - the guard;
+  - the dam's whole schedule.
+- The scanner on the dam's schedule (113 modules): **1269 dynamic writes before, 0 after** (1267 at 062ae58b; M4 added
+  two). The test reports the count on every run, with no upper limit.
+- The first GPU suite found one bad width. ncRangeKeys' `var keys=ncIdentityKeys()` returns array<u32,6>, and the
+  lowering took it as a vec3. It failed at creation, as designed (censusFine, 40 tests). The fix was to read a called
+  function's return type.
+
+**GPU units with the pass on** (sweep2 = 062ae58b + the pass + D2, timing slot, serial): brick-*.test.ts and
+bodies-stage, **85 / 85**, rc 0, no 00000206. These include the census oracles:
+- setCensus against the old engine's dam census, frames 14 and 43;
+- X8 bit-exact against G1;
+- the synthetic census.
+
+**Cost, and the ruling.** Creation: 0.7 s of CPU for the dam's 113 modules (memoised module scope and structs).
+Step: dam-300 paired A B A B against 062ae58b (tiered composite, poolF 4913), all four Overall PASS. Summary medians:
+HEAD 29.81 / 28.91 ms, lowered 30.29 / 30.33 ms; per-step medians from the cpu rows: 31.00 / 29.98 against
+30.90 / 31.28 ms. That is **+0.6 to 0.95 ms a step**, over the 0.3 ms bar. A kernel profile of steps 13–24 puts
++0.51 ms on the kernel sum, spread thinly: at most 0.07 ms in any one (pMove, pSeed, censusFine, pmgNativePost1,
+censusCoarse, ...). The coordinator ruled for a switch, not a default or an exemption list: step time first, and
+the miscompile doesn't reproduce. The dynamic-write rule for new code is now guidance, not a requirement. P's
+module and solidStamp keep their select forms. With NB_BRICK_LOWER=1 on main, brick-engine, brick-census and
+brick-source gave 32 / 32 on the GPU.
+
+**The D2 pool term** (approved: fix the rule, not the scene). bootF = max(boot brick list, |D2|), where D2 is the
+liquid bricks' Chebyshev dilation by two within the window. That is the engine's first residency: the free fall's
+step-1 F box, x 1..6, y 2..8, z 0..4, is 210 bricks, exactly D2.
+- Only the analytic falls change:
+  - free fall: 225 → 263;
+  - tilted fall: 225 → 307;
+  - translation: D2 is 180, so f stays 225.
+- The nine measured scenes keep their pools. brick-engine.test.ts asserts both falls and free fall's |D2| = 210.
+- Tilted free fall now passes its pools, highF 238 of 307.
+- Free fall gets past step 11 but latches POOL_F at frame 36, after impact. With f = 405 (the window) its peak is
+  **289 resident at step 42**: the splash covers the whole floor window (bricks 0..8 × 0..8 × 0..4), 6.4 brick
+  layers. The rule's spread term counts a four-layer film (SF = 180). So free fall stays a named fail: a falling
+  block's splash peak is over the rule. A splash term from the scene's energy is being measured (below), not landed.
+
+**Batch status** (the coordinator's batch rule, 60 steps against the old engine; tables in r18):
+- **Pass (12):** minimal-32, torus, rest, standing-wave, analytic dam-break, mound, droplet-64, dam-64, cm12-fig-5,
+  cm12-fig-6, droplet-128, fill-256-100.
+- **Named fails:**
+  - free fall: POOL_F after impact (above).
+  - translation: POOL_F|TIER at frame 42.
+  - figure-9-dam-break: peak −6.54% at step 5, against −1.2%. At 1cc3724e, with F's dc195b11 wholly-4h controller fix,
+    the first 20 steps are −0.02 … +0.58% and the gauge agrees. So the old failure was the controller bug; it needs a
+    60-step re-smoke.
+  - cm12-figure-9 and coarse-first-pool-impact: rc 134, Dawn's UploadData abort on boot tables of 7471340 and
+    11927924 bytes. A lone 7471340-byte write aborts and a 16-byte multiple does not. F's uploadWords (9e6b9295) fixes
+    it; they need a re-smoke.
+  - stair-cube (+9.62% against +6.16%), fill-256-800 (+20.61% against +1.17%) and fill-256-6400 (+7.53% against
+    −3.02%): the gauge agrees with the presentation, and the budget stays 0. It is a real volume gain on moving
+    liquid. The coordinator gave the chase to F, after M4.
+  - cm12-fig-7 and fig-7-256: repeat runs of each engine are owed, to set the tolerance.
+
+**BRICK_CELLS** (P's layout rule). The six brick test files read BRICK_CELLS from brick-abi: no literal 512 brick lengths
+are left (the TCAP rule's 512 c and a t capacity of 512 are not layout). On the GPU, 37 / 37.
+
+## 2026-11-17: batch 1 enabled (20e1e2e4), P's kick seam fix (1a0c8c24)
+
+**Batch 1.** The 12 that passed, plus mass-conserving-figure-9-dam-break, cm12-figure-9 and coarse-first-pool-impact
+(their re-smokes after F's controller fix dc195b11 and uploadWords 9e6b9295), were re-smoked from a frozen tree of
+0a81b19e against the old engine (60 steps, two old repeats where noise needs it). All 15 pass the batch rule: brick
+|peak| and |final| no worse than the old engine's worst repeat + max(1%, its run noise), with a clean smoke (rc 0,
+no 00000206, no latch). They are BRICK_ENGINE_SCENES now; the table is in 20e1e2e4's message and in
+fluid-scratch/lane-e/r22/batch1-table.md. Every brick step median is under the old engine's (3.3 to 29.8 ms
+against 8.9 to 41.5 ms). The gap message names the list (`not enabled on the brick engine`).
+
+**P's kick seam fix** (P's patch as written): the boot's projected half kick runs 1 + BRICK_KICK_RESOLVES (23) solves
+from its own pressure (the old arena's encodeSolve(kick)), then pmgKickScale doubles X into a step's dt units before
+F's after. The kick-schedule test expects it. GPU 28 / 28.
+
+## 2026-11-17: R2's volume guard, the re-entry seed at heat 1, and why psSeam stays
+
+**R2's volume guard** (F's criterion, the coordinator's ruling: guard, don't conserve at demotion). censusFine writes
+δ for every crossing h tile into CENSUS.VOL (a word a tile, f32):
+- δ = (64·fill(the tile's 8 corners) − Σ₆₄ fill(each cell's 8 vertices)) / max(A, 1), with the six-tetrahedron fill
+  (lib/core/level-set-fill.wgsl.ts) and A the cells whose 8-vertex mean |φ| < 0.5h; a tile with no crossing writes 0;
+- the cell sum is a fixed-point atomic (2^20), so it does not depend on lane order;
+- censusDecide's calm demotion of a band h tile now also needs |δ| ≤ UNIFORM_TILE_UPDATE_BUDGET_H (0.08): a tile
+  whose 4h corner fill would move its liquid by more than the band's update budget stays h.
+
+The GPU census matches the Float64 oracle (brick-census.test.ts's setCensus) on all 215 h tiles of the synthetic
+scene: worst |error| 9.5e-7, δ from −4.19 to +0.33, 42 tiles over the budget. The test asserts δ is exercised off
+zero, so a planar scene cannot pass it vacuously.
+
+**The re-entry seed at heat 1** (effect 2, approved as a verbatim port): pSeed's re-entry (cfg.w = 2) seeds at heat
+1, the old engine's support without erasure, not max(heat, 2). HEAT4's 2 is unchanged.
+
+**psSeam is needed, not a stand-in** (effect 3). The coordinator asked for the cause: keep the records across R1's
+retirement as the old engine does, or show why the seam reseed is needed. I tried both, and the narrow patch, on F's
+lone-ball probes (ff.mts --variant=boot --nopool=1; L at rest s30, translating at 2 m/s s12, falling s20; particles at
+rest, s30). Every row has the guard and heat 1:
+
+| variant | rest | translating | falling | particles |
+|---|---|---|---|---|
+| A: psSeam as HEAD | 122.24 | 120.79 | 122.88 | 19.8k |
+| B: R1 keeps the seam ring's records (4h tiles with an h tile among their 26), psSeam reverted | 118.98 | 118.96 | 121.53 | 37.4k |
+| C: the narrow patch, uncovered = n0 == 0 && (pUncovered ‖ psSeam) | 119.10 | 119.64 | 121.67 | 19.1k |
+| D: B's seam ring and psSeam | 122.49 | 120.99 | 122.96 | 45.7k |
+
+References: HEAD at rest 116.57; all-h rest 122.32, translating 121.75; the old engine translating 122.05, falling
+122.03.
+
+Keeping the old engine's records at the seam does not bring the seam's h cells back (B loses 3.3 L at rest against A,
+and doubles the particles). So the missing inflow across the seam is not the whole cause. The seam's h cells must
+reseed even when a record is among their 27 (C, which requires none, loses as much as B). D adds only 0.25 L over A,
+for 2.3x the particles. So psSeam stays as HEAD has it: it is the rule the brick engine's retirement needs, not a
+patch over a missing cause. The coordinator approved A.
+
+**The gate set** (frozen trees: 1a0c8c24 against 1a0c8c24 + the guard + heat 1; timing slot; every run rc 0, no
+00000206):
+- the probes, HEAD against A: rest s30 116.27 → 122.58 L, translating s12 119.66 → 120.81, falling s20 122.79 →
+  122.86;
+- against r18's references, 60 steps, final %. These are the named moving-liquid fails F owns, and the set leaves
+  them where they were:
+  - stair-cube: 9.62 → 9.66, against the old engine's 6.16;
+  - fill-256-800: 20.61 → 19.48, against 1.17;
+  - fill-256-6400: 7.53 → 7.42, against −3.02;
+- dam-300, paired A B A B, nbflip-gates against ref-2761350a: A passes both rounds. HEAD's second round failed D5e,
+  the energy window, at 315.9 against 328.0 ± 11.7, so that is HEAD's run noise. Step medians: HEAD 30.87 and 30.41 ms,
+  A 31.18 and 31.32 ms. The paired per-step difference medians are +0.04 and +0.10 ms.

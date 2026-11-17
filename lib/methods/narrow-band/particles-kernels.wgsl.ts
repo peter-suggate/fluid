@@ -423,12 +423,13 @@ fn psCellGate(c:vec3i,re:bool)->vec3f{
  let none=vec3f(0.0);
  if(!nbInWallBox(c)){return none;}
  // The tile's gates (sTileOk): R1's owned tile; the re-entry's refined tile (TILE_OCC bit 16 + tile), else the reach
- // and the heat (pHeat(centre) is the tile's T).
+ // and the heat (pHeat(centre) is the tile's T). The re-entry seeds at heat 1 (lane E, 2026-11-17: the old engine's
+ // support without erasure, verbatim), not raised to HEAT4's 2.
  let t=fgTileOf(c);if(sTileOk[t]==0u){return none;}
  if(re){atomicAdd(&nbSet[NB_H_REENTRY_CELLS],1u);}
  let reentry=cfg.w==2u;
  let centre=vec3f(c)+0.5;var heat=sTileHeat[t];var d=0.0;
- if(reentry){d=fgPhiAt(centre);heat=max(heat,2.0);}
+ if(reentry){d=fgPhiAt(centre);heat=1.0;}
  else{d=psDepth(centre);}
  if(!nbfSeedCellDepthOk(d)){if(re){atomicAdd(&nbSet[NB_H_REENTRY_NO_DEPTH],1u);}return none;}
  return vec3f(1.0,d,heat);
@@ -469,7 +470,7 @@ fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
 fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  let reentry=cfg.w==2u;
  let t=fgTileOf(c);let centre=vec3f(c)+0.5;var heat=sTileHeat[t];var d=0.0;
- if(reentry){d=fgPhiAt(centre);heat=max(heat,2.0);}else{d=psDepth(centre);}
+ if(reentry){d=fgPhiAt(centre);heat=1.0;}else{d=psDepth(centre);}
  let mass=nbfSeedMass(d);let salt=psSalt(initial);
  var n=0u;var m=mask;
  while(m!=0u){
