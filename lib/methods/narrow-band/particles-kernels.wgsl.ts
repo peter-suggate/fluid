@@ -295,6 +295,8 @@ var<workgroup> sOcc:atomic<u32>;
   let total=scan[255];var base=0u;
   if(live){
    base=atomicAdd(&nbSet[NB_H_PCOUNT0+dst],total);
+   // H.PEAK_PARTICLES: the bank's high-water at the append (the count the pool is checked against), for pool authoring.
+   atomicMax(&nbSet[NB_H_PEAK_PARTICLES],base+total);
    if(base+total>NB_PCAP){atomicAdd(&nbSet[NB_H_P_OVERFLOW],total);nbFail(NB_FAIL_PARTICLES,base+total);}
    // The bin holds only the records the bank holds (pScatter drops a rank at or past NB_PCAP): past an overflow, which
    // latched above, the readers of BIN_START + BIN_COUNT (pTiles, pDeposit, lSplat, fgRun) stay inside the bank.
@@ -534,7 +536,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  if(cfg.w==2u&&lid==0u){let total=atomicLoad(&sCount);if(total>0u){atomicAdd(&nbSet[NB_H_REENTRY_SEEDS],total);}}
  if(lid==0u){
   let total=atomicLoad(&sCount);var base=0u;
-  if(total>0u){base=atomicAdd(&nbSet[NB_H_PCOUNT0+bank],total);if(base+total>NB_PCAP){atomicAdd(&nbSet[NB_H_P_OVERFLOW],total);nbFail(NB_FAIL_PARTICLES,base+total);}}
+  if(total>0u){base=atomicAdd(&nbSet[NB_H_PCOUNT0+bank],total);atomicMax(&nbSet[NB_H_PEAK_PARTICLES],base+total);if(base+total>NB_PCAP){atomicAdd(&nbSet[NB_H_P_OVERFLOW],total);nbFail(NB_FAIL_PARTICLES,base+total);}}
   sBase=base;
  }
  workgroupBarrier();
