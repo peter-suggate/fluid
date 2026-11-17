@@ -10,12 +10,14 @@
  * - integrate(n): rigidSystem.encode(encoder, dt, h^3, 1, h) (tables, then integrate), then the exchange's clear, so
  *   the next couple starts from zero. Off (the old host's uncoupled bodies) when the coupling is off.
  * - Explicit refusals: more than GPU_RIGID_BODY_CAPACITY bodies, a rounded plate (the brick stamp has no plate), a cut
- *   atlas pbCheckCutAtlas rejects; terrain and motor assemblies (the old host's terrain texture and procedural
- *   collision source, which the brick engine does not have yet): brickRigidBodyGaps names them to the scene adapter.
+ *   atlas pbCheckCutAtlas rejects; terrain, and motor assemblies with static voxels (the old host's terrain texture
+ *   and procedural collision source, which the brick engine does not have yet): brickRigidBodyGaps names them to the
+ *   scene adapter. Motor assemblies in a tank with no static voxel contact the container planes (the shell).
  *   The terrain binding is one zero texel, as the old host's for a scene with no terrain.
  * - Save/load/undo: the rigid state is the system's (stateBuffer), not the engine's; save() and restore() copy it. */
 import type { SceneDescription, RigidBodyDescription } from "../../core/model";
 import { sceneHasTerrain } from "../../core/terrain";
+import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { WebGPURigidBodySystem, GPU_RIGID_STATE_BYTES } from "../../core/webgpu-rigid-body";
 import { GPU_RIGID_EXCHANGE_BYTES } from "../../core/webgpu-eulerian";
@@ -42,8 +44,13 @@ export function brickRigidBodyGaps(scene: SceneDescription): string[] {
   if (bodies.length === 0) return gaps;
   if (bodies.length > GPU_RIGID_BODY_CAPACITY) gaps.push(`${bodies.length} rigid bodies exceed the rigid capacity ${GPU_RIGID_BODY_CAPACITY}`);
   if (sceneHasTerrain(scene)) gaps.push("rigid contact with terrain needs the brick engine's terrain source (the old host's terrain texture)");
+  // Motor assemblies: the old host gives them the fluid's solid mask and the tank's shell as their solid
+  // (rigidAssemblySolidWGSL). With no static voxel, that mask is empty and the shell is the container's walls and floor
+  // (and lid, when closed): the rigid system's container planes, which solve an assembly piece by piece the same way
+  // (staticPlaneContact -> assemblyPlaneContact). With static voxels, the mask must be bound as the rigid system's
+  // procedural source, and it is not yet.
   const motor = bodies.find(b => b.motorAttachment !== undefined);
-  if (motor) gaps.push(`rigid body ${motor.id}: motor assemblies contact the solid mask through the old host's procedural source, not wired here (M5 step 3)`);
+  if (motor && solidVoxelEditsForScene(scene).length > 0) gaps.push(`rigid body ${motor.id}: motor assemblies contact the static voxels through the old host's procedural source, not wired here (M5 step 3)`);
   const plate = bodies.find(b => b.shape === "rounded-plate");
   if (plate) gaps.push(`rigid body ${plate.id}: a rounded plate has no brick stamp`);
   return gaps;
