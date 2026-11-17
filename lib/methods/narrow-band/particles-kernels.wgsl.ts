@@ -149,6 +149,12 @@ fn pSupported(q:vec3f)->bool{
 // cell at a 4h surface is not deep (the push merged held records heavy and kept re-entered ones from splitting:
 // sparse heavy records and dimples by the seam). Every other fgDepth reader, the grid's included, keeps the push.
 fn pMassDepth(p:vec3f)->f32{if(FG_TIERED&&!fgReach1(vec3i(floor(p)))){return fgPhiAt(p);}return fgDepth(p);}
+// The cell-mass cut's bound (Ferstl et al. 2016 §3.3, as mass). In the refill's deep class (centre depth <= -1.5,
+// where pSeedCellMask seeds graded records up to one cell's mass, 8) the cut is at that same 8, so the refill and the
+// cut agree. With the cut at NB_CELL_MASS (16) there the band was one-sided: a moving interior's shuffle left some
+// cells under 8 (refilled) and some over 8 (kept), and the mean mass ratcheted up, +25% at rest in fill-256-800 and
+// +15% in fill-256-6400 (lane F, 2026-11-17; CPU oracle: +45% against 0.00%). Shallower cells keep 16.
+fn pCellMassBound(deep:f32)->f32{return select(NB_CELL_MASS,8.0,deep<= -1.5);}
 fn pMergeRun(src:u32,record:Particle,low:u32,high:u32,stride:u32)->Particle{
  var s=nbfMergeStart(record);for(var j=low;j<high;j+=stride){s=nbfMergeAdd(s,parts[pAt(src,j)]);}return nbfMergeFinish(record,s);
 }
@@ -221,8 +227,8 @@ fn pFile(i:u32,p:Particle,split:bool){
    let start=run.x;let deep=pMassDepth(floor(q)+0.5);let cap=nbfCellCap(deep,20.0);
    var end=run.y;
    if(deep< -1.0){
-    var held=0.0;
-    for(var j=start;j<run.y;j++){let o=parts[pAt(src,j)];if(!nbLive(o)){continue;}let m=nbParticleMass(o);if(held>0.0&&held+m>NB_CELL_MASS){end=j;break;}held+=m;}
+    var held=0.0;let bound=pCellMassBound(deep);
+    for(var j=start;j<run.y;j++){let o=parts[pAt(src,j)];if(!nbLive(o)){continue;}let m=nbParticleMass(o);if(held>0.0&&held+m>bound){end=j;break;}held+=m;}
     if(i>=end){return;}
    }
    if(deep< -1.0&&end-start>cap){

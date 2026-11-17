@@ -2115,3 +2115,53 @@ at NB_LATTICE.
   lattice). Only stencils reaching past a wall see it.
 - Next: the scene plumbing with E (pad to whole pages, box = the container; brickInitialLiquid and the sources on
   the padded lattice), then E's 24×16×24 → 32³ volume regression.
+
+## 2026-11-17 (later): the padding plumbing, the observer at the box, and the moving-liquid volume ratchet (sym8)
+
+**The padding plumbing (7771b658) and the observer (ff563656).** The scene plumbing pads a container's lattice to whole
+pages with box = the container's cells. tools/nbflip-observe-brick.ts then threw on any padded engine (the box against
+the lattice). It now measures over layout.box: cells and 4h tiles past the box are not read, and its vertex domain and
+closed faces are at the box (resolveBox). On E's padded slab (24x16x24 in 32^3) and its unpadded control, the observer
+equals the presentation to 0.1 cell at steps 5..30. Both read about 8% low at step 0 (2112 / 2292, 2816 / 3056), a
+boot-state read, so drift baselines start at step 1 (P's padded tank does).
+
+**H.PEAK_PARTICLES (2caf27ca, P's patch).** Word 196 was never written, so pool authoring read 0 particles. The two
+appends to NB_H_PCOUNT0 take an atomicMax of the bank's count; P's tests/brick-peak-counters.test.ts is the regression.
+
+**The fill-256-800 gain: the cause.** Controller off, fill-800's volume rises to +29% (tiered) where the old engine
+falls to -12%. At rest (step 90) every record sits at the floor clamp (y 0.250), and the film is 0.24 cells thick.
+- Σm/8 (the records' mass) is 1005 cells against a liquid of 800; the union's thickness follows it (lUnion's
+  nbfUnionBound, min(n, 8)/8 a cell). The at-rest controller cannot remove particle mass: its divergence only presses
+  the records into the clamp.
+- The mass comes from pSeed's deep refill: deep seeds into occupied cells add 441 cells of mass, about 298 were needed.
+  Deep seeding off: the peak 108 L, then the volume erodes to 70 L.
+- The same signature in fill-6400 (Σm/8 8015 against a gauge of 7338), stair (18628 / 17878) and fig-7 (38135 / 33860).
+- The root: a one-sided band. In the refill's deep class (centre depth <= -1.5) pSeed raises a cell below 8 to 8,
+  but pMove's cut (Ferstl 2016 §3.3) trimmed only past NB_CELL_MASS = 16. Under a moving interior's shuffle the mean
+  mass ratchets up. CPU oracle (tools/seed-oracle.mts, a shuffled 16^3 block, 40 steps): the old rule +45%, a
+  neighbourhood refill +4.7%, the cut at 8 (sym8) 0.00%.
+
+**sym8 (landed after E's review).** pCellMassBound(deep) = select(NB_CELL_MASS, 8, deep <= -1.5) is the cut's bound;
+nothing else changes. The gate tables are in its commit message. In short: fill-800 at rest -7% (old -13% at 90),
+fill-6400 +3.8% (old -11.5%), stair +4.3% (old +5.4%), fig-7 -3.7%, fig-7-256 -0.8%, free fall -1.1% at 120.
+Particles 16-26% fewer. KE peaks and the dam's D5 energy unchanged. The 15-scene re-smoke and the rigid oracles pass.
+The paired dam is inside noise (diff medians +0.90 / -0.76 / -0.17 ms). The still sheets are bit-identical.
+- E's notes: the cut-refill 2-cycle on a cell whose held is odd (a seed, then a retire) keeps the band two-sided, which
+  is why the drift is 0. Its cost is about 380 cuts a step on fill-6400's 50k records; in a still tank (t 4, 30 steps)
+  3976 cuts against 184k seeds. The cut's depth (pMassDepth, before the move) and the refill's (psDepth, after the
+  level set) differ: only cells crossing -1.5 within a step see the old one-sided band, for one step.
+- Rejected: a deep refill by mass (ignoring the record count) and an exact-to-8 remainder record; within noise, the
+  first with more churn.
+
+**The droplets after sym8 (open, not a sym8 effect).** power-droplet-64, -128 and fill-100 move from +14% to -10..-12% at
+60 steps. The records keep their mass (752 of mass 1 throughout), but by step 40 the 100-cell drop is a floor film of one
+record a column, all at the floor clamp (y 0.25, vy 0). The level set loses that sub-cell film. The controller, at its
++4/s limit by step 90, cannot thicken it: its divergence spreads the pinned film sideways (566 -> 657 columns over steps
+60-90). That is the one-line answer on the floor clamp: at KE ~ 0 the clamp holds y, and the controller's divergence
+goes into the film's lateral spread. Brick before sym8 and the old engine erode the same way once the film forms (-39%,
+-42% from their peaks by step 100). sym8 removes only the early ratchet gain. Both trees latch POOL_F at frame 103 of 120
+on the 60-step pool.
+
+**Side observation (parked).** The still tank at fill t 4 (power-fill-256-800 with --fill=4, control 0) seeds 168k records
+in its first 10 steps, then retires them (24k at step 30), in both trees. The t 8 tank holds none. That is the boot's
+calm census.
