@@ -51,6 +51,8 @@ const out: Record<string, unknown> = { id, steps };
 const t0 = performance.now();
 try {
   const solver = await createBrickSolver(device, scene, values as Record<string, unknown>, quality);
+  // The live-edit pipelines compile in the background after creation: let them land before any step is timed.
+  await solver.waitForSimulationReady();
   const e = solver.brickEngine, dt = e.options.dt_s;
   const presented = !args.includes("--nopresent");
   if (!presented) {

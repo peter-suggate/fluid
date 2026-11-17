@@ -15,7 +15,7 @@
  * - Nothing is sized from the lattice.
  */
 import { brickLowerOn, brickModuleCode } from "./brick-lower";
-import { brickDropDue, brickSourceRing, type BrickSources } from "./brick-source";
+import { brickBootSourceBoxes, brickSourceRing, type BrickSources } from "./brick-source";
 import { brickSourceWords } from "./brick-source.wgsl";
 import { BRICK_SOLID_EDIT_WORDS, brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
@@ -207,13 +207,15 @@ function bootLiquidBoxes(o: Pick<BrickEngineOptions, "lattice" | "box" | "farPhi
   return { candidates, all, near };
 }
 
-/** The first step's drop (brick-source.ts): its box's bricks are resident before that step's census, as the step
- * before a later drop's head claims them (resSource; the old kick's commit stored the first drop's pages). */
+/** The first step's drop and the nozzle's plug box (brick-source.ts brickBootSourceBoxes): their bricks are resident
+ * before the first step's census, as the step before a later drop's head claims them and every step's head claims the
+ * plug's (resSource; the old kick's commit stored the first drop's pages, and its pool pins the plug's). */
 function addFirstDrop(o: Pick<BrickEngineOptions, "dt_s" | "sources">, set: Set<number>) {
-  const first = o.sources ? brickDropDue(o.sources, 0, o.dt_s) : -1;
-  if (first < 0) return;
-  const [lo, hi] = o.sources!.drops[first]!.box;
-  for (let z = lo[2] >> 3; z <= (hi[2] - 1) >> 3; z++) for (let y = lo[1] >> 3; y <= (hi[1] - 1) >> 3; y++) for (let x = lo[0] >> 3; x <= (hi[0] - 1) >> 3; x++) set.add(brickKey(x, y, z));
+  if (!o.sources) return;
+  for (const [lo, hi] of brickBootSourceBoxes(o.sources, o.dt_s)) {
+    if (!lo.every((v, a) => v < hi[a]!)) continue;
+    for (let z = lo[2] >> 3; z <= (hi[2] - 1) >> 3; z++) for (let y = lo[1] >> 3; y <= (hi[1] - 1) >> 3; y++) for (let x = lo[0] >> 3; x <= (hi[0] - 1) >> 3; x++) set.add(brickKey(x, y, z));
+  }
 }
 
 /** The initial bricks: the reach set of the initial liquid's vertices (boxes or table), at rest (the all-h boot). */
@@ -307,6 +309,17 @@ export class BrickEngine {
   private ahead?: { step: number; part1: GPUCommandBuffer; part2: GPUCommandBuffer; receipt: number };
   /** The live edit's solidRestamp (static mask only). */
   private restamp?: BrickKernel;
+  /**
+   * The edit-only pipelines (solidRestamp, and a deferred engine's statics variant) compile in the background after
+   * create returns, so a scene starts on its own schedule alone. `editsReady` settles when they have (never rejects);
+   * `editsError` names a compile failure. A stroke before then is held (`editHeld`): its words are uploaded, and the
+   * restamp and arming run when the pipelines land. No step is taken while an edit is held.
+   */
+  editsReady: Promise<void> = Promise.resolve();
+  editsCompiled = true;
+  editsError?: string;
+  private held?: { lo: Vec3; hi: Vec3 };
+  private destroyed = false;
   private steps = 0;
   private time = 0;
   /** The newest receipt (the set buffer's control header) and the step it closed. */
@@ -501,7 +514,7 @@ export class BrickEngine {
     // is created; off (the default), each is created from its text exactly as written.
     const lower = brickLowerOn(options.lowerDynamicWrites), lowered = new Map(kernels.map(k => [k.code, brickModuleCode(k.label, k.code, lower)]));
     const modules = new Map<string, GPUShaderModule>(), pipelines = new Map<BrickKernel, GPUComputePipeline>(), compileMs: Record<string, number> = {};
-    await Promise.all(kernels.map(async k => {
+    const compile = async (k: BrickKernel) => {
       const t0 = performance.now();
       let module = modules.get(k.code);
       if (!module) {
@@ -516,7 +529,12 @@ export class BrickEngine {
       const layout_ = device.createPipelineLayout({ bindGroupLayouts: [device.createBindGroupLayout({ entries: bindGroupLayoutEntries(k.bindings) })] });
       pipelines.set(k, await device.createComputePipelineAsync({ label: `nb-brick.${k.label}`, layout: layout_, compute: { module, entryPoint: k.entry } }));
       compileMs[k.label] = performance.now() - t0;
-    }));
+    };
+    // The running schedule's kernels before create returns; the edit-only ones (solidRestamp, the statics variant's own)
+    // after, in the background, so they neither delay the first frame nor compete with it for the compiler.
+    const running = new Set([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => p.kernel));
+    await Promise.all(kernels.filter(k => running.has(k)).map(compile));
+    const editOnly = kernels.filter(k => !running.has(k));
     const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
     engine.restamp = restamp;
     if (armed) { engine.armed = armed; engine.armedBuffers = [...Object.entries(armed.solver.buffers), ...Object.entries(armed.stages.buffers)]; }
@@ -524,6 +542,14 @@ export class BrickEngine {
     engine.record();
     engine.boot();
     engine.encodeAhead();
+    if (editOnly.length) {
+      engine.editsCompiled = false;
+      engine.editsReady = Promise.all(editOnly.map(compile)).then(() => { engine.editsCompiled = true; engine.takeHeld(); }, (error: unknown) => {
+        engine.editsError = `the live-edit pipelines did not compile: ${error instanceof Error ? error.message : String(error)}`;
+        // A held stroke can never be taken: the engine refuses further steps (advance throws the latched failure).
+        if (engine.held) { engine.held = undefined; engine.failure ??= `Brick engine: ${engine.editsError}`; }
+      });
+    }
     return engine;
   }
 
@@ -552,12 +578,37 @@ export class BrickEngine {
     const restamp = this.restamp, solid = this.buffers.get("solid"), edit = this.buffers.get("solidEdit");
     if (!restamp || !solid || !edit) throw new Error("Brick engine: no static mask to edit (built without static voxels)");
     if (this.failure) throw new Error(this.failure);
-    this.armStatics();
+    if (this.editsError) throw new Error(`Brick engine: ${this.editsError}`);
     if (4 * words.length !== solid.size) throw new Error(`Brick engine: the edited mask holds ${words.length} words, the bound image ${solid.size / 4}`);
     for (const r of ranges) {
       if (!(Number.isInteger(r.firstWord) && Number.isInteger(r.wordCount) && r.firstWord >= 0 && r.wordCount > 0 && r.firstWord + r.wordCount <= words.length)) throw new Error(`Brick engine: mask range ${r.firstWord}+${r.wordCount} is outside the image`);
       uploadWords(this.device.queue, solid, 4 * r.firstWord, words.subarray(r.firstWord, r.firstWord + r.wordCount) as Uint32Array<ArrayBuffer>);
     }
+    // Before the edit pipelines land, the stroke is held: the words are in, no step runs (advance refuses) until the
+    // restamp, and the restamp takes the union of the held strokes' boxes when they land (it restamps from the mask, so
+    // a larger box gives the same result).
+    if (!this.editsCompiled) {
+      const h = this.held;
+      this.held = h ? { lo: [Math.min(h.lo[0], lo[0]), Math.min(h.lo[1], lo[1]), Math.min(h.lo[2], lo[2])], hi: [Math.max(h.hi[0], hi[0]), Math.max(h.hi[1], hi[1]), Math.max(h.hi[2], hi[2])] } : { lo: [...lo], hi: [...hi] };
+      return;
+    }
+    this.submitRestamp(restamp, edit, lo, hi);
+  }
+
+  /** Whether a stroke waits on the edit pipelines (no step is taken until they land). */
+  get editHeld(): boolean { return this.held !== undefined; }
+
+  /** The held stroke, once the edit pipelines have landed (between two steps: a promise callback). */
+  private takeHeld() {
+    const h = this.held;
+    if (!h || this.destroyed) return;
+    this.held = undefined;
+    if (this.failure) return;
+    this.submitRestamp(this.restamp!, this.buffers.get("solidEdit")!, h.lo, h.hi);
+  }
+
+  private submitRestamp(restamp: BrickKernel, edit: GPUBuffer, lo: Vec3, hi: Vec3) {
+    this.armStatics();
     uploadWords(this.device.queue, edit, 0, new Uint32Array(new Int32Array([lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], 0, 0]).buffer));
     const release = [...this.schedule.part1, ...this.schedule.part2].find(p => p.kernel.label === "setKRelease" && (p.z ?? 0) === 0);
     const placements: BrickPlacement[] = [{ kernel: restamp, dispatch: { indirect: ARGS.PER_LIST * LIST.F_ALL + ARGS.G1 } }, ...(release ? [release] : [])];
@@ -731,6 +782,8 @@ export class BrickEngine {
 
   /** Submit `steps` steps: per step one ring write, part 1, part 2, then the next step encoded ahead. */
   advance(steps = 1) {
+    // A held stroke (editHeld) is not in the solid yet: a step now would run on a mask without its cuts.
+    if (this.held) throw new Error("Brick engine: a live voxel edit waits on its pipelines (editHeld); await editsReady before stepping");
     for (let i = 0; i < steps; i++) {
       if (this.failure) throw new Error(this.failure);
       const a = this.ahead!, slot = a.step % RING_SLOTS;
@@ -822,6 +875,7 @@ export class BrickEngine {
   }
 
   destroy() {
+    this.destroyed = true;
     for (const b of this.buffers.values()) b.destroy();
     for (const b of this.cfgs.values()) b.destroy();
     for (const r of this.receipts) r.buffer.destroy();

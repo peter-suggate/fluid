@@ -1181,6 +1181,15 @@ ahead is encoded again). From then on the scene runs as a voxel scene, so a firs
 and never a rebuild. A live edit is preflighted on a clone of the mask (its sealed slots and child
 tables) and against the K pool (the bricks the new world cuts), so a refused stroke changes nothing.
 
+**Live-edit pipelines in the background.** Create compiles the running schedule's kernels only. The
+edit-only kernels (`solidRestamp`, and a deferred engine's statics-only kernels) compile after create
+returns (`editsReady`), so they neither delay the first frame nor compete with it for the compiler. A
+stroke before they land is held (`editHeld`): its mask words are uploaded, `simulationReady` is false
+(the app holds the clock), `advanceTo` admits no step, and the engine refuses to advance. When they land,
+the union of the held strokes' boxes is restamped and the statics armed, between two steps. A compile
+failure is `editsError`: a stroke then throws, a held stroke latches a failure, and
+`waitForSimulationReady` (which harnesses await before timing a step) throws.
+
 ## 10. What M1 implements
 
 M1 implements:

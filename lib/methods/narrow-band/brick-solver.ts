@@ -118,7 +118,14 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
 
   get volumeTexture(): GPUTexture { return this.brickPresentation.volume; }
   get surfaceFieldTexture(): GPUTexture { return this.brickPresentation.volume; }
-  get simulationReady(): boolean { return true; }
+  /** False only while a voxel stroke waits on the live-edit pipelines (BrickEngine.editHeld): the app holds the clock. */
+  get simulationReady(): boolean { return !this.brickEngine.editHeld; }
+
+  /** The live-edit pipelines, compiled in the background after creation (harnesses await them before timing a step). */
+  async waitForSimulationReady(): Promise<void> {
+    await this.brickEngine.editsReady;
+    if (this.brickEngine.editsError) throw new Error(`Brick engine: ${this.brickEngine.editsError}`);
+  }
   get framePending(): boolean { return false; }
   get presentationPending(): boolean { return false; }
 
@@ -139,6 +146,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     if (this.info.simulationFailure) return false;
     const dt = this.options.setup.dt_s, submitted = this.info.submittedTime_s ?? 0;
     if (time_s + 1e-9 < submitted + dt) return false;
+    // A held stroke: no step until its pipelines land (simulationReady is false; the app does not ask).
+    if (this.brickEngine.editHeld) return false;
     this.rigidBodies?.offer(bodies);
     try { this.brickEngine.advance(1); } catch (error) {
       // A latched FAIL (lagged receipt) refuses further steps: report it, never step on.

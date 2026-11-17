@@ -3013,3 +3013,59 @@ scene's kernel text is byte-identical (r19/dump.mts on the dam, minimal-dam, sta
     pool keeps every bit. After one step 1440 of 1440 fill cells are resident and closed, using 8 of 64 K slots. Ten
     more steps are FAIL-free, with no live record in a closed cell.
   - The two failures were brick-engine.test's authored-pool asserts, which now expect k from the rule.
+
+## 2026-11-17: the kernel timer's leak (fab4b516), the dam's numbers, and the live-edit pipelines in the background
+
+**The profiler's rc 3, a leak (fab4b516).** `gpuKernelTimer` made a 4096-query timestamp set for every command
+encoder and held each one until `collect()`. With the timer on from step 21, a few steps of encoders exhausted
+Metal's counter sample buffers ("Error creating query set: Cannot allocate sample buffer"). After that every
+encoder was invalid, so the GPU did no work and the run timed empty steps.
+- In the r37/r38 dam probes the volume, live F and particle counts freeze from step 30 to 60 (693020 / 3123 /
+  569658). In the fixed run they keep moving (717751, 727571, 714354).
+- **The 4.1 ms dam median and the a4ce134b "dam unchanged" A/B are withdrawn.** Both were mostly empty steps.
+- The fix: timestamp pairs come from a few shared query sets, handed out in order, with a new set only when one is
+  full. Each encoder resolves its own range in each set, and collect destroys the sets. The test covers 3000
+  encoders on two sets, each pair read at its own index.
+- prof.mts (scratch) also timed steps with the timer on, and split passes inflate them (57 ms). It now times steps
+  only with the timer off; `--prof` turns the timer on, and the median then covers steps 8–20 only.
+- Batch scripts now treat any nonzero rc, or a GPU error in the output, as an invalid run (the coordinator's rule).
+
+**The dam's numbers, reconciled.** Both figures are the app path at f 4913 with presentation on. They differ in
+the window.
+
+| figure | tool | steps timed | pools | median |
+|---|---|---|---|---|
+| E, clean (r40) | prof.mts: createBrickSolver, fenced each step, timer off | 8–60 (the collapse) | k 64 (a4ce134b rule) | 51.1 / 51.1 ms (f6875668), 50.4 / 51.1 ms (a4ce134b + r40) |
+| F / P dam-300 | nbflip-gate-bench, fenced, check slot | 13–300 | k 0 | 32.2 ms (thirds 45.0 / 32.3 / 29.2) |
+
+The collapse (steps 8–60) is the dam's heaviest stretch, and the gate bench's first third averages 45 ms. On the
+same window a4ce134b leaves the dam unchanged (50.4–51.1 against 51.1 ms). The volume curves agree (final −5.1 to
+−5.4%, peak −8.4 to −8.7%), FAIL is 0, and memory is 879 → 882 MB (the K headroom).
+
+**Build cost, and the live-edit pipelines in the background.** Deferred statics compile the statics variant
+beside the plain one: modules go 117 → 168 and pipelines 129 → 180 on the dam, and 118 → 169 / 130 → 181 on
+interactive-pool.
+- Metal's shader cache makes build time bimodal. A miss is 15–22 s and a hit 0.8–3 s. The r39 "cold" builds were
+  not cold: the per-run nonce was a WGSL comment, which Tint drops, so the MSL and the cache key were unchanged.
+- In r39 the cache hits grew with the extra pipelines: interactive-pool 845 → 1211 ms (+43%), and the dam
+  1534 → 6151 ms. That is over the coordinator's 20%.
+- So create now compiles only the running schedule's kernels. The edit-only ones (`solidRestamp`, and a deferred
+  engine's statics-only kernels) compile in the background after create returns (`editsReady`).
+- A stroke before they land is held (`editHeld`). Its words are uploaded, `simulationReady` is false (the app's
+  existing "compiling in the background" hold), `advanceTo` admits no step, and the engine refuses to step. When
+  the pipelines land, the union of the held boxes is restamped and the statics armed.
+- `waitForSimulationReady` awaits them and throws on a compile failure. The gate benches already call it;
+  prof.mts and tools/profile-brick-scene.ts now do too.
+- The first-stroke GPU test holds the solidRestamp pipeline behind a gate on a wrapped device, so the held path
+  runs every time: the clock stops, no step, the engine refuses, then it arms on release.
+- The r40 build A/B was contaminated by a CPU unit suite of mine running alongside, with builds of 1.6–48 s on both
+  trees. r42 repeated it with nothing of mine alongside. Metal's cache still missed in nearly every run: the summed
+  per-pipeline compile time was 196–323 s on both trees.
+  - Dam create: f6875668 took 18.7 / 7.3 / 18.0 s; a4ce134b plus the background edit pipelines took 20.7 / 22.3 / 20.6 s.
+  - The edit-only pipelines land 55 ms after create returns.
+  - Frame 1 fell from 85–93 ms to 41–43 ms, because the first step no longer waits on the statics schedule.
+  - Wall build time is decided by cache hits, not by the pipeline count. No growth past noise was found.
+- GPU tests on r42 (HEAD b2222cad plus this batch): 64 pass, 0 fail. The deterministic held first stroke passes:
+  1440 of 1440 fill cells resident and closed after a step, K free 56 of 64. test:unit: 1929 pass, 0 fail.
+- The r42 run's abort guard stopped on a false positive. `mds_stores` (Spotlight) printed the hex 0x17f000002065,
+  which contains "00000206". The guard now needs 00000206 not followed by another hex digit, and skips mds_stores.

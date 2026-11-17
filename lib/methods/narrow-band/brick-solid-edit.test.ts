@@ -151,6 +151,8 @@ test("brick solid edit (GPU): fill, undo, redo, clear and reload on the running 
     const solver = await createBrickSolver(device, scene0, values, quality);
     let loaded: Solver | undefined;
     try {
+      // The live-edit pipelines compile in the background after creation (a stroke before them is held: the first-stroke test).
+      await solver.waitForSimulationReady();
       const e = solver.brickEngine, mask = solver.brickEngine.options.staticMask!, held0 = (mask as unknown as { slotsHeld: number }).slotsHeld;
       const phiBase = e.layout.base("phi", "F", "FLAGS");
       await run(solver, 0, 3, "before");
@@ -283,7 +285,15 @@ test("brick solid edit (GPU): the first stroke on a voxel-free dam arms the stat
   const filled = sceneWithSolidStroke(scene0, [{ operation: "fill", minimum: B.lo, maximumExclusive: B.hi, materialId: 2 }]);
   const huge = sceneWithSolidStroke(scene0, [{ operation: "fill", minimum: [0, 0, 0], maximumExclusive: [64, 40, 64], materialId: 2 }]);
   const inBox = (c: readonly number[]) => c.every((v, a) => v >= B.lo[a]! && v < B.hi[a]!);
-  await withUniformDevice("brick first stroke", async device => {
+  await withUniformDevice("brick first stroke", async raw => {
+    // The live-edit pipelines compile in the background after creation. The solidRestamp pipeline (edit-only on every
+    // mask scene) is held here until the stroke is in, so the held path runs every time.
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const device = new Proxy(raw, { get(target, key) {
+      if (key === "createComputePipelineAsync") return async (d: GPUComputePipelineDescriptor) => { if (d.label === "nb-brick.solidRestamp") await gate; return target.createComputePipelineAsync(d); };
+      const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+    } }) as GPUDevice;
     const solver = await createBrickSolver(device, scene0, values, quality);
     try {
       const e = solver.brickEngine, L = e.layout, dt = e.options.dt_s, P = L.cap.particles, S = L.particleStride;
@@ -315,9 +325,20 @@ test("brick solid edit (GPU): the first stroke on a voxel-free dam arms the stat
       assert.throws(() => solver.validateLiveSolidEdit(huge), /K slots/);
       assert.equal(e.staticsArmed, false, "a refused stroke arms nothing");
 
-      // The first stroke: live, armed.
+      // The first stroke: live, armed. Before the live-edit pipelines land it is held: the app's clock stops
+      // (simulationReady false), no step is admitted (nor by the engine), and it arms and restamps when they land.
       solver.validateLiveSolidEdit(filled);
+      assert.equal(e.editsCompiled, false, "the solidRestamp pipeline is held");
       assert.notEqual(solver.applySceneUniforms(filled), false, "the first stroke is taken live");
+      assert.equal(e.editHeld, true);
+      assert.equal(solver.simulationReady, false, "held: the clock stops");
+      assert.equal(e.staticsArmed, false, "held: not armed before the pipelines land");
+      assert.equal(solver.advanceTo(4 * dt, []), false, "held: no step");
+      assert.ok(Math.abs(solver.info.submittedTime_s! - 3 * dt) < 1e-9, "held: the clock stays at step 3");
+      assert.throws(() => e.advance(1), /editHeld/, "held: the engine refuses to step");
+      release();
+      await solver.waitForSimulationReady();
+      assert.equal(e.editHeld, false); assert.equal(solver.simulationReady, true);
       assert.equal(e.staticsArmed, true);
       const armedLabels = new Set([...e.schedule.part1, ...e.schedule.part2].map(p => p.kernel.label));
       for (const label of ["solidStamp", "pSolid", "phiSolid", "setKRelease"]) assert.ok(armedLabels.has(label), `armed: ${label}`);
@@ -349,6 +370,6 @@ test("brick solid edit (GPU): the first stroke on a voxel-free dam arms the stat
       t.diagnostic(`first stroke: ${closed} of 1440 fill cells resident and closed after a step, K free ${snap.header[H.TOP_K]} of ${L.cap.k}`);
       assert.equal(closed, 1440);
       await run(4, 10, "after the first stroke");
-    } finally { solver.destroy(); }
+    } finally { release(); solver.destroy(); }
   });
 });
