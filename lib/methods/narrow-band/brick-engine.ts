@@ -120,7 +120,7 @@ export interface BrickStageSchedule { readonly part1: readonly BrickPlacement[];
 const RECEIPTS = 4;
 const FAIL_NAMES = Object.entries(FAIL);
 export const describeFail = (bits: number, info: number) =>
-  `Brick engine failure ${FAIL_NAMES.filter(([, b]) => (bits & b) !== 0).map(([n]) => n).join("|") || `0x${bits.toString(16)}`} (info 0x${(info >>> 0).toString(16)})${(bits & FAIL.REACH) !== 0 && (info >>> 31) === 1 ? `: liquid reached the open top's last brick layer (brick ${[0, 10, 20].map(s => (info >>> s) & 1023).join(",")}); the headroom (BRICK_OPEN_TOP_HEADROOM) is not enough for this scene` : ""}`;
+  `Brick engine failure ${FAIL_NAMES.filter(([, b]) => (bits & b) !== 0).map(([n]) => n).join("|") || `0x${bits.toString(16)}`} (info 0x${(info >>> 0).toString(16)})${(bits & FAIL.REACH) !== 0 && (info >>> 31) === 1 ? `: liquid reached the open top's last brick layer (brick ${[0, 10, 20].map(s => (info >>> s) & 1023).join(",")}); the headroom (fluid.brickTiers.openTopHeadroom, one page by default) is not enough for this scene` : ""}`;
 
 /** The signed distance (h) of a box at vertex p, as bootPhi computes it. */
 export function boxDistance(p: Vec3, b: BrickLiquidBox): number {

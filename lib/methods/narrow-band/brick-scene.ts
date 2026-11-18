@@ -116,7 +116,9 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // the air there is the free surface's (p = 0), the walls rise with it, and the lattice's top is a lid that liquid
   // never meets, because liquid in its top brick layer latches first (the old engine's page-edge fatal, explicit).
   const cells = sceneLatticeDimensions(scene), old = sceneFluidLatticeDimensions(scene);
-  const paged: Vec3 = openTop ? [old[0]!, old[1]! + BRICK_OPEN_TOP_HEADROOM, old[2]!] : [old[0]!, old[1]!, old[2]!];
+  // A scene whose splash rises past the page authors more (fluid.brickTiers.openTopHeadroom, whole pages).
+  const headroom = f.brickTiers?.openTopHeadroom ?? BRICK_OPEN_TOP_HEADROOM;
+  const paged: Vec3 = openTop ? [old[0]!, old[1]! + headroom, old[2]!] : [old[0]!, old[1]!, old[2]!];
   const walls: Vec3 = openTop ? [cells[0]!, paged[1], cells[2]!] : [cells[0]!, cells[1]!, cells[2]!];
   // A container that is not whole bricks (2026-11-18): the box rule closes whole bricks, so the engine's box is the
   // container's cells rounded up to bricks, and the cells between the container and that box are the static mask's

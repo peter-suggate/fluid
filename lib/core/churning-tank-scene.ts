@@ -45,5 +45,10 @@ export function createChurningTankScene(): SceneDescription {
     position_m: prescribedOrbitPosition(bladeMotion, 0), prescribedMotion: bladeMotion,
   });
   scene.surfaceStyle = "smooth";
+  // Brick engine (2026-11-18): the paddles throw spray past one page over the open rim (FAIL.REACH at frame 591 with
+  // 32 cells), so three pages of headroom (no REACH over the authored 20 s; 64 has the same page window). Pools 1.5x
+  // that run's peaks (F 1367, C 66, particles 222396, K 104), c capped at the window (96).
+  scene.fluid.brickTiers = { ...scene.fluid.brickTiers, openTopHeadroom: 96 };
+  scene.fluid.brickPools = { f: 2051, c: 96, b: 16, k: 156, particles: 333594 };
   return scene;
 }

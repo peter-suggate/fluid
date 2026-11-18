@@ -198,6 +198,9 @@ export function createNbflipWaterSlidePreview(): SceneDescription {
   // Storage starts at the stream's pages and follows the water. The water reaches every one of the drum's 5x3x5 = 75
   // pages, so the pool holds them all: 80 blocks of 4.90 MiB (two are the AIR and SOLID sentinels).
   scene.fluid.pagePool = { blocks: 80 };
+  // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 20 s (F 3690, C 143, particles 396057, K 2482), c
+  // capped at the window (144). The rule's f 4410 is past by step 1200.
+  scene.fluid.brickPools = { f: 5535, c: 144, b: 16, k: 3723, particles: 594086 };
   return scene;
 }
 
@@ -462,6 +465,9 @@ export function createNbflipWaterSlideLongPreview(): SceneDescription {
   // Storage starts at the stream's pages and follows the water along the course: 200 blocks of 4.90 MiB hold
   // every one of the box's 16x3x4 = 192 pages (two are the AIR and SOLID sentinels).
   scene.fluid.pagePool = { blocks: 200 };
+  // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 30 s (F 6939, C 271, particles 467600, K 3899), c
+  // capped at the window (340).
+  scene.fluid.brickPools = { f: 10409, c: 340, b: 16, k: 5849, particles: 701400 };
   return scene;
 }
 

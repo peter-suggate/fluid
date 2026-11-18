@@ -434,8 +434,12 @@ export interface SceneDescription {
      * uniform engine reads its method values). particleBandDepth: how deep
      * below the surface, in cells, the h tiles keep particles (records deeper
      * retire to the grid, and seeding stops there); 3 when absent.
+     * openTopHeadroom: under an open top, the air the brick lattice keeps
+     * above the container, in cells (whole 32-cell pages; one page when
+     * absent). Liquid that reaches its top brick layer latches FAIL.REACH, so
+     * a scene whose splash rises past one page authors it from its long run.
      */
-    brickTiers?: { particleBandDepth?: number };
+    brickTiers?: { particleBandDepth?: number; openTopHeadroom?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -775,6 +779,8 @@ export function validateScene(scene: SceneDescription): string[] {
   if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h" && tiers.start !== "census") errors.push("fluid.tiers.start must be \"h\", \"4h\" or \"census\"");
   const bandDepth = scene.fluid?.brickTiers?.particleBandDepth;
   if (bandDepth !== undefined && !(Number.isFinite(bandDepth) && bandDepth >= 2 && bandDepth <= 4)) errors.push("fluid.brickTiers.particleBandDepth must be in [2, 4] cells");
+  const headroom = scene.fluid?.brickTiers?.openTopHeadroom;
+  if (headroom !== undefined && !(Number.isInteger(headroom) && headroom >= 32 && headroom % 32 === 0)) errors.push("fluid.brickTiers.openTopHeadroom must be whole 32-cell pages, at least one");
   const brickPools = scene.fluid?.brickPools;
   if (brickPools) for (const key of ["f", "c", "b", "k", "particles"] as const) {
     const v = brickPools[key], least = key === "b" || key === "k" ? 0 : 1;

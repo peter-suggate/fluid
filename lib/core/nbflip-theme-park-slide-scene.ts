@@ -185,6 +185,8 @@ export function createNbflipThemeParkSlide(): SceneDescription {
       upperRadianceLinear: [.78, .78, .78], accentRadianceLinear: [.65, .65, .65] },
     grade: { toneCurve: "aces", exposure: .85, whiteBalance: [1, 1, 1] },
   };
+  // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 45 s (F 14145, C 648, particles 558248, K 4353).
+  scene.fluid.brickPools = { f: 21218, c: 972, b: 16, k: 6530, particles: 837372 };
   return scene;
 }
 

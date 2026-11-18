@@ -1970,7 +1970,13 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     environment: "garden",
     containerShell: "authored",
     presentationMode: "full-scene",
-    build: createHeroGardenBlenderScene,
+    build: () => {
+      const scene = createHeroGardenBlenderScene();
+      // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 20 s (F 8925, C 210, particles 451462, K 2768),
+      // f and c capped at the window (8925, 210: the peaks are the window). The rule's c 210 latched POOL_C at frame 1.
+      scene.fluid.brickPools = { f: 8925, c: 210, b: 16, k: 4152, particles: 677193 };
+      return scene;
+    },
     buildAt: createHeroGardenBlenderScene,
     camera: heroGardenBlenderCamera,
   }),
@@ -2037,6 +2043,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       const scene = applyGardenPool(createPaperScenario("hose-tank"), { fillFraction: 0.08 });
       scene.sceneId = "garden-pond-hose-fill";
       if (scene.fluid.inflow) scene.fluid.inflow.end_s = 30;
+      // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 15 s (F 991, C 49, particles 140350, K 395), c
+      // capped at the window (60). The rule's 61584 particles latched PARTICLES at frame 122.
+      scene.fluid.brickPools = { f: 1487, c: 60, b: 16, k: 593, particles: 210525 };
       return scene;
     },
     camera: gardenCamera,
