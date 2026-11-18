@@ -107,7 +107,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       ? await BrickRigidBodies.create(device, options.rigid, { frame_m: s.origin_m, h_m: s.h_m, dt_s: s.dt_s, density_kg_m3: s.density_kg_m3, coupling: options.values.rigidCoupling !== "off", ...(s.terrain ? { terrain: s.terrain } : {}), ...(s.boundary ? { boundary: s.boundary } : {}) })
       : undefined;
     const engine = await BrickEngine.create(device, {
-      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), ...(s.openTop ? { openTop: true } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), ...(options.censusHold ? { censusHold: options.censusHold } : {}),
+      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), ...(s.openTop ? { openTop: true } : {}), ...(s.openSides ? { openSides: true } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), ...(options.censusHold ? { censusHold: options.censusHold } : {}),
       solver: options.solver, stages: options.stages, values: options.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },
@@ -229,6 +229,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     const mask = this.options.setup.staticMask;
     if (!mask || !this.scene) throw new Error("This brick engine was built with no static mask (a hand-built setup); reset the scene to apply a voxel edit.");
     if (!sceneDiffersInSolidsAlone(scene, this.scene)) throw new Error("The brick engine takes a voxel stroke live only when nothing else in the scene changes; reset the scene to apply this edit.");
+    // An open world's mask is its widened box scene's (brick-scene.ts brickOpenWorldSetup), and an open world takes no voxels.
+    if (this.options.setup.openSides) throw new Error("An open world (container.walls \"none\") takes no solid voxels; the brick engine refuses the edit.");
     const world = solidWorldForFluidLattice(scene), trial = mask.clone();
     try { trial.update(world); } catch (error) {
       throw new Error(`This voxel edit needs more of the solid mask than the brick engine was built with (${error instanceof Error ? error.message : String(error)}); reset the scene to apply it.`);
@@ -252,6 +254,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     if (scene === this.scene) return;
     const mask = this.options.setup.staticMask;
     if (!mask || !this.scene || this.info.simulationFailure || !sceneDiffersInSolidsAlone(scene, this.scene)) return false;
+    // An open world's mask is its widened box scene's: never folded live (the rebuild refuses the voxels, validateScene).
+    if (this.options.setup.openSides) return false;
     // A sculpt cut of the ground: the rebuild takes it (the brick engine refuses it, brickSceneSetup's gap).
     if (this.options.setup.terrain && (scene.solidVoxels ?? []).some(p => p.operation === "clear" && p.affectsScenery === true)) return false;
     const world = solidWorldForFluidLattice(scene);

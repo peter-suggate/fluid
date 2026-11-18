@@ -438,8 +438,12 @@ export interface SceneDescription {
      * above the container, in cells (whole 32-cell pages; one page when
      * absent). Liquid that reaches its top brick layer latches FAIL.REACH, so
      * a scene whose splash rises past one page authors it from its long run.
+     * openWorldMargin: an open world's (container.walls "none") air beside
+     * its box on x and z, in 32-cell pages a side (BRICK_OPEN_WORLD_MARGIN
+     * when absent). Liquid that reaches the margin's outer brick layer
+     * latches FAIL.REACH: a scene whose liquid spreads farther authors it.
      */
-    brickTiers?: { particleBandDepth?: number; openTopHeadroom?: number };
+    brickTiers?: { particleBandDepth?: number; openTopHeadroom?: number; openWorldMargin?: number };
     /** Sparse CM12: time-keyed region edits on the running simulation, without reseeding. */
     refinementKeyframes?: { time_s: number; regions: FluidRefinementRegion[] }[];
   };
@@ -779,6 +783,8 @@ export function validateScene(scene: SceneDescription): string[] {
   if (tiers?.start !== undefined && tiers.start !== "h" && tiers.start !== "4h" && tiers.start !== "census") errors.push("fluid.tiers.start must be \"h\", \"4h\" or \"census\"");
   const bandDepth = scene.fluid?.brickTiers?.particleBandDepth;
   if (bandDepth !== undefined && !(Number.isFinite(bandDepth) && bandDepth >= 2 && bandDepth <= 4)) errors.push("fluid.brickTiers.particleBandDepth must be in [2, 4] cells");
+  const margin = scene.fluid?.brickTiers?.openWorldMargin;
+  if (margin !== undefined && !(Number.isInteger(margin) && margin >= 1 && margin <= 64)) errors.push("fluid.brickTiers.openWorldMargin must be whole pages in [1, 64]");
   const headroom = scene.fluid?.brickTiers?.openTopHeadroom;
   if (headroom !== undefined && !(Number.isInteger(headroom) && headroom >= 32 && headroom % 32 === 0)) errors.push("fluid.brickTiers.openTopHeadroom must be whole 32-cell pages, at least one");
   const brickPools = scene.fluid?.brickPools;

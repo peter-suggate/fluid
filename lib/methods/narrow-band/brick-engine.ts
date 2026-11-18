@@ -63,6 +63,8 @@ export interface BrickEngineOptions {
   readonly box?: Vec3;
   /** An open top: the lattice's headroom above the container (BrickLayoutOptions.openTop). */
   readonly openTop?: boolean;
+  /** An open world's sides: the margin beside its box (BrickLayoutOptions.openSides). */
+  readonly openSides?: boolean;
   /** NB_PHI_FAR in h when it is not the lattice's largest extent (BrickLayoutOptions.farPhi). */
   readonly farPhi?: number;
   readonly h_m: number;
@@ -120,7 +122,7 @@ export interface BrickStageSchedule { readonly part1: readonly BrickPlacement[];
 const RECEIPTS = 4;
 const FAIL_NAMES = Object.entries(FAIL);
 export const describeFail = (bits: number, info: number) =>
-  `Brick engine failure ${FAIL_NAMES.filter(([, b]) => (bits & b) !== 0).map(([n]) => n).join("|") || `0x${bits.toString(16)}`} (info 0x${(info >>> 0).toString(16)})${(bits & FAIL.REACH) !== 0 && (info >>> 31) === 1 ? `: liquid reached the open top's last brick layer (brick ${[0, 10, 20].map(s => (info >>> s) & 1023).join(",")}); the headroom (fluid.brickTiers.openTopHeadroom, one page by default) is not enough for this scene` : ""}`;
+  `Brick engine failure ${FAIL_NAMES.filter(([, b]) => (bits & b) !== 0).map(([n]) => n).join("|") || `0x${bits.toString(16)}`} (info 0x${(info >>> 0).toString(16)})${(bits & FAIL.REACH) !== 0 && (info >>> 31) === 1 ? `: liquid reached an open world's side or the open top's last brick layer (brick ${[0, 10, 20].map(s => (info >>> s) & 1023).join(",")}); the margin (fluid.brickTiers.openWorldMargin) or the headroom (fluid.brickTiers.openTopHeadroom, one page by default) is not enough for this scene` : ""}`;
 
 /** The signed distance (h) of a box at vertex p, as bootPhi computes it. */
 export function boxDistance(p: Vec3, b: BrickLiquidBox): number {
@@ -487,7 +489,7 @@ export class BrickEngine {
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...options.capacities, apic: options.apic });
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic });
     // Deferred statics (an empty mask): the plain variant runs (no static stage, and no K slot work unless bodies take
     // slots), and the statics variant is compiled beside it for the first live edit (armStatics).
     const mask = brickStaticBinding(options), deferred = mask !== undefined && options.staticsDeferred === true;

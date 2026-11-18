@@ -22,6 +22,14 @@ import { cellPoint, nbflipDomain } from "./nbflip-paper-scenes";
  * Coarse cells keep the flood inside the budget: a column `COLUMN` cells
  * tall spreads about 2 sqrt(g COLUMN / h) t cells in t seconds, so a
  * quarter-metre cell holds two seconds of it to a few pages on each side.
+ *
+ * The brick engine runs the box widened by `BRICK_MARGIN` pages a side
+ * (fluid.brickTiers.openWorldMargin): the front runs about 12.5 m/s, so the
+ * six seconds reach about 80 m from the column's centre, inside ten pages.
+ * Its pools are 1.5x the peaks of the 360-step runs with generous pools
+ * (2026-11-18, flat ground and slope: F 6635 / 6203, C 277 / 297,
+ * particles 289329 / 268694); the old engine's page pool is exhausted at
+ * frame 295 on flat ground.
  */
 export const NBFLIP_OPEN_GROUND_SCENE_ID = "nbflip-open-ground";
 export const NBFLIP_OPEN_GROUND_FACES_SCENE_ID = "nbflip-open-ground-faces";
@@ -40,6 +48,8 @@ export const NBFLIP_OPEN_GROUND_SECONDS = 6;
 /** The page pool's budget. */
 export const NBFLIP_OPEN_GROUND_MEMORY_MIB = 1792;
 /** The slope variant's incline: one wide mound, centred off to -x, whose flank the column stands on. */
+/** The brick engine's open-world margin, in 32-cell pages a side. */
+export const NBFLIP_OPEN_GROUND_BRICK_MARGIN = 10;
 export const NBFLIP_OPEN_GROUND_SLOPE = { center_m: { x: -48, z: 0 }, radius_m: { x: 60, z: 60 }, amount_m: 6, flat: 0 } as const;
 
 export type NbflipOpenGroundVariant = "column" | "faces" | "slope";
@@ -62,6 +72,8 @@ export function createNbflipOpenGround(stepHz = NBFLIP_OPEN_GROUND_STEP_HZ, vari
     scene.terrain = { baseHeight_m: 0, features: [{ kind: "mound", center_m: { ...s.center_m }, radius_m: { ...s.radius_m }, amount_m: s.amount_m, flat: s.flat }] };
   }
   scene.fluid.pagePool = { memory_MiB: NBFLIP_OPEN_GROUND_MEMORY_MIB };
+  scene.fluid.brickTiers = { ...scene.fluid.brickTiers, openWorldMargin: NBFLIP_OPEN_GROUND_BRICK_MARGIN };
+  scene.fluid.brickPools = { f: 9953, c: 446, b: 16, k: 64, particles: 433994, t: 19906 };
   return scene;
 }
 

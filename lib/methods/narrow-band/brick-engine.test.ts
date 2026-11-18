@@ -155,7 +155,7 @@ test("brick engine: the engine switch refuses unknown engines, and names a gap s
   assert.equal(nbEngine("uniform"), "uniform");
   assert.equal(nbEngine("brick"), "brick");
   assert.throws(() => nbEngine("bricks"), /unknown engine "bricks"/);
-  // No scene list (2026-11-18): the seep runs; the seep in an open world is refused for the moving window (M6).
+  // No scene list (2026-11-18): the seep runs; the seep in an open world (its voxels) is refused with the box's gap.
   const seep0 = createReservoirSeepScene(), seep = { ...seep0, container: { ...seep0.container, walls: "none" as const } };
   assert.ok(seep.fluid?.brickPools, "seep authors brickPools");
   assert.deepEqual(brickEngineGaps(seep0, { timeStep: "sixtieth" }), [], "the seep has no gaps");
@@ -196,7 +196,7 @@ test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued thro
     assert.ok(Math.abs(boxDistance([x, y, z], box) - want) < 1e-6 * n, `phi at ${[x, y, z]}: ${boxDistance([x, y, z], box)} against ${want}`);
   }
   assert.ok(bootBricks(setup).length <= setup.capacities.f);
-  // An open world is refused with its gap; a body scene without authored K slots takes one a F brick (k = f).
+  // An open world the box cannot hold (the seep's voxels) is refused with its gap; a body scene without authored K slots takes one a F brick (k = f).
   const seep = createReservoirSeepScene();
   assert.match(brickSceneSetup({ ...seep, container: { ...seep.container, walls: "none" } }, { timeStep: "sixtieth" }).gaps.join(";"), /open world/);
   const boats = sceneDocument(getSceneDefinition("paddleboats")), { brickPools: _pools, ...boatFluid } = boats.fluid;
@@ -642,7 +642,7 @@ test("brick engine: with the stages' seed, the boot runs a TRIG-only census betw
 test("brick engine: auto (the default) takes brick exactly where the scene has no gaps, and says why not", () => {
   const method = uniformNarrowBandMethod;
   assert.equal(method.params.find(p => p.key === "engine")?.default, "auto");
-  // The seep in an open world: the open world's gap (M6).
+  // The seep in an open world: the box's gap (an open world takes no voxels).
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), seep0 = createReservoirSeepScene();
   const seep = { ...seep0, container: { ...seep0.container, walls: "none" as const } };
   const defaults = resolveMethodValues(method, "balanced", { ...method.appDefaults, timeStep: "sixtieth" });

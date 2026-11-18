@@ -181,8 +181,7 @@ export function sceneFluidBoxScene<T extends SceneDescription>(scene: T): T {
   if (scene.solidVoxels.length > 0) throw new Error("An open world (container.walls \"none\") takes no solid voxels");
   const frame = sceneFluidFrame(scene), box = sceneFluidBox(scene, Number.MAX_SAFE_INTEGER), c = scene.container;
   const extent = [0, 1, 2].map(a => box.cells[a]! * frame.cellSize_m[a]!);
-  const dx = frame.container_m[0] + box.low[0] * frame.cellSize_m[0] + 0.5 * extent[0]!;
-  const dz = frame.container_m[2] + box.low[2] * frame.cellSize_m[2] + 0.5 * extent[2]!;
+  const [dx, dz] = sceneFluidBoxShift(scene);
   const move = (p: { x: number; y: number; z: number }) => ({ ...p, x: p.x - dx, z: p.z - dz });
   const volumes = (scene.fluid.initialLiquidVolumes ?? []).map(v => v.shape === "box"
     ? { ...v, min_m: move(v.min_m), max_m: move(v.max_m) } : { ...v, center_m: move(v.center_m) });
@@ -194,6 +193,15 @@ export function sceneFluidBoxScene<T extends SceneDescription>(scene: T): T {
   return moved;
 }
 const boxScenes = new WeakMap<SceneDescription, SceneDescription>();
+
+/** An open world's box centre in the scene's x and z (m): sceneFluidBoxScene translates the scene by minus this, so a
+ * point of the box scene lies at itself plus this in the scene. A container with walls: [0, 0]. */
+export function sceneFluidBoxShift(scene: FluidBoxScene): readonly [number, number] {
+  if (scene.container.walls !== "none") return [0, 0];
+  const frame = sceneFluidFrame(scene), box = sceneFluidBox(scene, Number.MAX_SAFE_INTEGER);
+  const half = (a: 0 | 2) => 0.5 * box.cells[a]! * frame.cellSize_m[a]!;
+  return [frame.container_m[0] + box.low[0] * frame.cellSize_m[0] + half(0), frame.container_m[2] + box.low[2] * frame.cellSize_m[2] + half(2)];
+}
 
 /** A world coordinate on one axis in lattice cells (unfloored). */
 export function fluidFrameCell(frame: SceneFluidFrame, axis: number, world_m: number): number {

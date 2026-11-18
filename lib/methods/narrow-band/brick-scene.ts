@@ -16,7 +16,7 @@
 import { brickTerrainColumns, type BrickTerrainColumns } from "./brick-terrain.wgsl";
 import { brickBoundaryImage } from "./brick-boundary.wgsl";
 import type { SceneDescription } from "../../core/model";
-import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
+import { sceneFluidBoxScene, sceneFluidBoxShift, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
 import type { BrickCapacities } from "./brick-abi";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
@@ -31,6 +31,8 @@ import { BRICK_BOOT_BAND, bootPhiAt, type BrickEngineOptions } from "./brick-eng
 
 /** The air an open top keeps above the container's pages, in cells: one page. */
 export const BRICK_OPEN_TOP_HEADROOM = 32;
+/** The air an open world keeps beside its box on x and z, in pages a side (fluid.brickTiers.openWorldMargin). */
+export const BRICK_OPEN_WORLD_MARGIN = 4;
 
 export interface BrickSceneSetup {
   readonly sceneId: string;
@@ -45,6 +47,10 @@ export interface BrickSceneSetup {
   /** An open top (container.top "open"): the lattice holds BRICK_OPEN_TOP_HEADROOM cells of air above the container,
    * and liquid that reaches its top brick layer latches (brick-set.wgsl.ts setMark, FAIL.REACH info bit 31). */
   readonly openTop?: true;
+  /** An open world (container.walls "none"): the lattice is the old engine's box (sceneFluidBoxScene) and the margin's
+   * air beside it on x and z (BRICK_OPEN_WORLD_MARGIN pages a side), and liquid that reaches its outer x or z brick
+   * layer latches as the open top's does: the lattice's sides are walls the old engine's window does not have. */
+  readonly openSides?: true;
   /** NB_PHI_FAR in h: the old engine's far φ, its page-rounded lattice's largest extent (fluidLatticeFarPhi); the lattice's own when absent. */
   readonly farPhi?: number;
   readonly h_m: number;
@@ -83,11 +89,12 @@ export interface BrickSceneSetup {
 }
 
 /** The scene's setup, or every reason the brick engine cannot run it. */
-export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>, ): { setup?: BrickSceneSetup; gaps: string[] } {
+export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>, open?: { readonly farPhi: number }): { setup?: BrickSceneSetup; gaps: string[] } {
+  if (scene.container.walls === "none" && scene.container.boundary !== "free-space") return brickOpenWorldSetup(scene, values);
   const gaps: string[] = [];
   const id = scene.sceneId ?? "(unnamed)";
   const c = scene.container, f = scene.fluid;
-  if (c.walls === "none" || c.boundary === "free-space") gaps.push("an open world (no container walls) needs the moving window (M6)");
+  if (c.boundary === "free-space") gaps.push("a free-space boundary (no floor) needs the moving window (M6)");
   // A spherical container is its shell's voxels (brickStaticMask), as the old engine's mask holds them.
   const openTop = c.top === "open";
   if (c.top !== "closed" && !openTop) gaps.push(`container.top "${c.top}" is not a brick engine top (closed or open)`);
@@ -139,7 +146,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (gaps.length) return { gaps };
   // The initial liquid (brick-initial.ts): a dam-break box or a tank-fill slab keeps its closed form; any other
   // description is the old engine's own t = 0 φ as a page table.
-  const n = lattice, g = f.gravity_m_s2, farPhi = Math.max(...old), band = f.brickTiers?.particleBandDepth ?? 3;
+  const n = lattice, g = f.gravity_m_s2, farPhi = open?.farPhi ?? Math.max(...old), band = f.brickTiers?.particleBandDepth ?? 3;
   const L: Vec3 = [n[0]!, n[1]!, n[2]!], B: Vec3 | undefined = container ? [container[0]!, container[1]!, container[2]!] : undefined, inBox = B ? { box: B } : {};
   const start = brickInitialLiquid(scene, { lattice: L, ...inBox, farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z] });
   const origin_m: Vec3 = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
@@ -174,6 +181,35 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
       staticMask, ...(staticMask.empty && !terrain && !boundary ? { staticsDeferred: true as const } : {}), ...(terrain ? { terrain } : {}), ...(boundary ? { boundary } : {}),
     },
   };
+}
+
+/**
+ * An open world (container.walls "none"; validateScene: analytic terrain alone, no voxels, procedural boundary or
+ * sources). The old engine runs it in its page window, the box (sceneFluidBox: the initial liquid and a margin, whole
+ * pages) on the window's floor and the window's air about it, its ground the analytic terrain wherever the liquid goes
+ * (uniform-open-world-terrain.ts). Here the lattice is the old engine's box scene (sceneFluidBoxScene: the scene
+ * translated so the box is its container) widened by the margin's pages a side on x and z, its walls the box rule's at
+ * the lattice's sides, the floor at the box's (the window's), and the terrain the box scene's analytic ground over the
+ * widened columns. Liquid that reaches the margin's outer brick layer latches FAIL.REACH (openSides), so it never
+ * meets a side wall the old window does not have. The lattice's low corner is the box scene's, back in the scene's
+ * frame (origin_m plus sceneFluidBoxShift).
+ * Bodies are refused here (their poses are the scene's, not the box scene's).
+ */
+function brickOpenWorldSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>): { setup?: BrickSceneSetup; gaps: string[] } {
+  if ((scene.rigidBodies?.length ?? 0) > 0) return { gaps: ["an open world's rigid bodies are not mapped to its box"] };
+  // The box scene refuses what an open world does not take (voxels, sources, a procedural boundary): its gap, explicit.
+  let box: SceneDescription;
+  try { box = sceneFluidBoxScene(scene); } catch (e) { return { gaps: [`an open world the box cannot hold: ${(e as Error).message}`] }; }
+  const c = box.container, cells = sceneLatticeDimensions(box);
+  const m = scene.fluid.brickTiers?.openWorldMargin ?? BRICK_OPEN_WORLD_MARGIN, h = [c.width_m / cells[0], c.depth_m / cells[2]];
+  const { walls: _open, ...walled } = c;
+  const wide: SceneDescription = { ...box, container: { ...walled, width_m: c.width_m + 64 * m * h[0]!, depth_m: c.depth_m + 64 * m * h[1]! } };
+  // The far φ is the old engine's, its box's largest extent (fluidLatticeFarPhi), not the widened lattice's.
+  const farPhi = Math.max(...sceneFluidLatticeDimensions(box, Number.MAX_SAFE_INTEGER));
+  const inner = brickSceneSetup(wide, values, { farPhi });
+  if (!inner.setup) return inner;
+  const [dx, dz] = sceneFluidBoxShift(scene), o = inner.setup.origin_m;
+  return { gaps: inner.gaps, setup: { ...inner.setup, sceneId: scene.sceneId ?? inner.setup.sceneId, openSides: true, origin_m: [o[0] + dx, o[1], o[2] + dz] } };
 }
 
 /** The scheduled drops' band particles, every drop at once (an upper bound: a landed drop's records retire into the

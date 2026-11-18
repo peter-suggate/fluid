@@ -235,6 +235,9 @@ export interface BrickLayoutOptions extends BrickCapacities {
   /** An open top (brick-scene.ts BRICK_OPEN_TOP_HEADROOM): the box's y is the lattice's, its top brick layer is the
    * headroom's last, and liquid there latches (setMark). Absent: closed. */
   readonly openTop?: boolean;
+  /** An open world (brick-scene.ts BRICK_OPEN_WORLD_MARGIN): the lattice's x and z sides are the margin's, its outer
+   * brick layers are the margin's last, and liquid there latches (setMark). Absent: the sides are the scene's walls. */
+  readonly openSides?: boolean;
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -273,6 +276,8 @@ export class BrickLayout {
   readonly box: readonly [number, number, number];
   /** BrickLayoutOptions.openTop. */
   readonly openTop: boolean;
+  /** BrickLayoutOptions.openSides. */
+  readonly openSides: boolean;
   readonly window: readonly [number, number, number];
   readonly windowBits: readonly [number, number, number];
   readonly particleStride: number;
@@ -323,6 +328,8 @@ export class BrickLayout {
     this.farPhi = options.farPhi ?? phiFar(options.lattice);
     this.box = [...(options.box ?? options.lattice)] as [number, number, number];
     this.openTop = options.openTop === true;
+    this.openSides = options.openSides === true;
+    if (this.openSides && this.box.some((n, a) => a !== 1 && n !== this.lattice[a])) throw new Error(`Brick engine: an open world's box ${this.box.join("x")} holds the lattice's sides ${this.lattice.join("x")}`);
     if (this.openTop && this.box[1] !== this.lattice[1]) throw new Error(`Brick engine: an open top's box ${this.box.join("x")} holds the lattice's height ${this.lattice[1]}`);
     if (this.box.some((n, a) => !Number.isInteger(n) || n < 1 || n > this.lattice[a]!)) throw new Error(`Brick engine: box ${this.box.join("x")} is not inside the lattice ${this.lattice.join("x")}`);
     this.window = windowPages(options.lattice);
