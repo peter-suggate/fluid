@@ -428,7 +428,7 @@ export interface SceneDescription {
      * records. Required for engine "brick". A pool that runs out is the
      * engine's latched FAIL_POOL, never a reallocation.
      */
-    brickPools?: { f: number; c: number; b: number; k: number; particles: number };
+    brickPools?: { f: number; c: number; b: number; k: number; particles: number; /** setTransfer's listed tiles (default 2 f). */ t?: number };
     /**
      * The brick engine's per-scene tier settings (engine "brick" only; the
      * uniform engine reads its method values). particleBandDepth: how deep
@@ -780,6 +780,7 @@ export function validateScene(scene: SceneDescription): string[] {
     const v = brickPools[key], least = key === "b" || key === "k" ? 0 : 1;
     if (!(Number.isInteger(v) && v >= least)) errors.push(`fluid.brickPools.${key} must be an integer of at least ${least}`);
   }
+  if (brickPools?.t !== undefined && !(Number.isInteger(brickPools.t) && brickPools.t >= 1)) errors.push("fluid.brickPools.t must be an integer of at least 1");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {

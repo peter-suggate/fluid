@@ -92,6 +92,13 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   // batch rule; large-power-dam-break's splash peaks at +27% at step 75 and ends at -1.6% at 300.
   "bounded-pool-transfer", "large-power-hydrostatic", "large-power-dam-break",
   "sparse-cm12-ladder-frontier-create", "sparse-cm12-ladder-frontier-advance", "sparse-cm12-ladder-retire-reuse",
+  // Terrain (2026-11-18, the same rule): alpine-lake-sunrise -0.6 / -0.9% at 60 / 600 (old +3.2 / +2.5 at 60);
+  // tall-cells-hillside-dam-break +0.9% at 60, +2.6% at 600 (old -13.3% at 60); tokyo-rain +2.4% at 60 (old +1.7), its
+  // gauge +1.8% over the rain's budget at 1440 (the presentation counts terrain-cut cells whole: +14%).
+  "alpine-lake-sunrise", "tall-cells-hillside-dam-break", "tokyo-rain",
+  // Static bodies in mixed bricks (STATIC_SHUT), source-fed, judged on the budget: the sphere jet +1.5% over it at 60
+  // (old +0.8), the hose tank -0.5% (old -0.3); clean 900-step runs; K authored at 1.5x the run's peak.
+  "paper-figure-6-jet-past-sphere", "paper-figure-3-hose-filled-tank",
 ];
 
 /** The air an open top keeps above the container's pages, in cells: one page. */

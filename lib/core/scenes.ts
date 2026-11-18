@@ -2047,7 +2047,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Paper figures",
     environment: "conservatory",
     presentationMode: "full-scene",
-    build: () => createPaperScenario("hose-tank"),
+    // Brick engine pools (2026-11-18): the rule's, k at 1.5x the run's live-K peak (64 over 900 steps;
+    // the static cut bound, 521, sizes the pool above it).
+    build: () => { const scene = createPaperScenario("hose-tank"); scene.fluid.brickPools = { f: 729, c: 27, b: 16, k: 96, particles: 215040, t: 4096 }; return scene; },
     camera: paperCamera,
   }),
   defineScene({
@@ -2068,7 +2070,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Paper figures",
     environment: "night-lab",
     presentationMode: "full-scene",
-    build: () => createPaperScenario("sphere-jet"),
+    // Brick engine pools (2026-11-18): the rule's, k at 1.5x the run's live-K peak (142 over 900 steps;
+    // the static cut bound, 616, sizes the pool above it).
+    build: () => { const scene = createPaperScenario("sphere-jet"); scene.fluid.brickPools = { f: 729, c: 27, b: 16, k: 213, particles: 172800, t: 4096 }; return scene; },
     camera: paperCamera,
   }),
   // Chentanez & Muller 2012, every figure that is a simulation. Figure 4 is a
