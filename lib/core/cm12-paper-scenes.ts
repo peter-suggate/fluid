@@ -543,6 +543,8 @@ export function createCm12Figure11(): SceneDescription {
     obstacle(2, [-0.5 * c.width_m + 0.3, 2.4, -1.4], speed_m_s),
     obstacle(3, [-0.5 * c.width_m + 0.6, 1.6, 1.5], speed_m_s),
   ];
+  // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 6 s (F 7768, C 220, particles 2159434, K 1494).
+  scene.fluid.brickPools = { f: 11652, c: 330, b: 16, k: 2241, particles: 3239151 };
   return scene;
 }
 

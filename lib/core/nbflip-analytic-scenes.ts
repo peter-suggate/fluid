@@ -125,6 +125,8 @@ export function createNbflipAnalyticScene(name: NbflipAnalyticCase): SceneDescri
     scene.fluid.initialVelocity_m_s = { ...ballistic.velocity };
     scene.fluid.initialLiquidVolumes = [liquidSlab(ballistic.block[0], ballistic.block[1])];
   }
+  // Brick engine pools (2026-11-18), 1.5x the peaks of its 20 frames (F 405, C 18, particles 45787, no K).
+  if (name === "translation") scene.fluid.brickPools = { f: 608, c: 27, b: 16, k: 0, particles: 68681 };
   if (name === "standing-wave") {
     const L = grid[0] * h;
     scene.fluid.initialHeightField = { kind: "cosine", baseHeight_m: pool * h, amplitude_m: NBFLIP_ANALYTIC_WAVE_AMPLITUDE_M,

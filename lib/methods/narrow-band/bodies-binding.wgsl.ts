@@ -79,19 +79,27 @@ export interface BrickBodiesBinding extends BrickBodiesFrame {
   integrate(step: number): GPUCommandBuffer | undefined;
 }
 
-/** The stamp's brick candidates (bodyStamp's BMASK, §3): the bodies whose bounding sphere, dilated by length(2h), one
- * cell and the swept reach (|v| + |w| r) horizon, meets the box of the brick at cell origin o. The census's body rule
- * reads the same test, so every brick the stamp gives a K slot is held h. Needs pbBrickBodiesWGSL and `bodies`. */
+/** The stamp's brick candidates (bodyStamp's BMASK, §3): the bodies within reach of the brick at cell origin o, the
+ * reach length(2h), one cell and the swept reach (|v| + |w| r) horizon: their bounding sphere meets the brick's box,
+ * and their own distance (pbBodyDistance, the mark's test) at the brick's middle, less its half-diagonal, is within the
+ * reach. The census's body rule reads the same test, so every brick the stamp gives a K slot is held h. Needs
+ * pbBrickBodiesWGSL and `bodies`. */
 export const PB_BRICK_CANDIDATES_WGSL = /* wgsl */`
 // The brick's BMASK (§3): pbBodyBoxCandidates with each body's own reach, length(2h) + one cell + its swept reach
-// (|v| + |w| r) horizon: the mark's margin, so every body setMark marked the brick for is a candidate.
+// (|v| + |w| r) horizon: the mark's margin, so every body setMark marked the brick for is a candidate (a marked tile's
+// middle lies within length(2h) of the brick's, so its distance less its own half-diagonal is at least the brick's
+// less length(4h)). The sphere alone took a long body's whole sphere: beach's wave piston, a 1 x 4 x 24 m box, a
+// 12.2 m sphere and 2705 dry bricks NEAR_BODY at its boot, their K slots and the h hold (2026-11-18).
 fn pbBrickCandidates(o:vec3i)->u32{
  let h=pbH();let lo=pbWorldCell(o)-0.5*h;let hi=lo+8.0*h;let cell=max(h.x,max(h.y,h.z));let dt=pbBrickHorizon();
+ let middle=0.5*(lo+hi);let half=length(4.0*h);
  var mask=0u;
  for(var i=0u;i<pbBodyCount();i++){
   let b=bodies[i];let c=b.positionShape.xyz;let radius=max(b.dimensions.w,0.0);
   let reach=length(2.0*h)+cell+(length(b.linearVelocity.xyz)+length(b.angularVelocity.xyz)*radius)*dt;
-  if(b.positionShape.w<0.0||distance(clamp(c,lo,hi),c)<=radius+reach){mask|=1u<<i;}
+  if(b.positionShape.w<0.0){mask|=1u<<i;continue;}
+  if(distance(clamp(c,lo,hi),c)>radius+reach){continue;}
+  if(pbBodyDistance(i,middle)-half<=reach){mask|=1u<<i;}
  }
  return mask;
 }

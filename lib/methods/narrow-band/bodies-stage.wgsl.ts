@@ -13,8 +13,9 @@
  * - cfg.z = 0, over F_BODY (NEAR_BODY | BODY_WAS): a NEAR_BODY brick's BMASK is the bodies whose bounding sphere,
  *   dilated by length(2h), one cell and the swept reach (|v| + |w| r) dt, meets the brick's box (pbBrickCandidates);
  *   a BODY_WAS-only brick is the clean-up pass, BMASK 0: the static values and W = 0 (bitwise the static hooks').
- * - cfg.z = 1, over F_ENTER (A2's entry path): an entering brick whose BMASK is not 0 becomes NEAR_BODY and is stamped
- *   in the same step, so no brick enters open inside a body. It runs after solidStamp, so the brick's CUT_STATIC (and
+ * - cfg.z = 1, over F_ENTER (A2's entry path): an entering brick with an h tile whose BMASK is not 0 becomes NEAR_BODY
+ *   and is stamped in the same step, so no brick enters open inside a body. One with no h tile (part 2's claims start
+ *   4h) waits for the census to hold it h; a tile of it the body marks latches 0xb3 at setMark, never open inside. It runs after solidStamp, so the brick's CUT_STATIC (and
  *   with it the K slot's hold once the body leaves) is solidStamp's own.
  * Each stamped brick takes its K slot (nbKTake, A5: POOL_K latched and the brick left uncut when the pool is out), and
  * the stamp writes the whole slot: BMASK, FRAC, AP0-2, W0-2 (A1), and FLAGS.OPEN (A8) on its cells.
@@ -84,8 +85,13 @@ var<workgroup> wHead:vec4u;
       let s=nbListSlot(list,e);let r=NB_D_FREC+32u*s;let cls=atomicLoad(&dir[r+NB_REC_CLASS]);
       var go=false;var mask=0u;
       if(entry){
-        // A skirt brick (no cell in the lattice) is never a body brick (pbBrickMarkTile's rule).
-        if((cls&NB_CLASS_NEAR_BODY)==0u&&nbInLattice(nbFOrigin(s))){mask=pbBrickCandidates(nbFOrigin(s));go=mask!=0u;}
+        // A skirt brick (no cell in the lattice) is never a body brick (pbBrickMarkTile's rule). Nor is a brick with no
+        // h tile (REC.MASK): one part 2 claimed starts 4h (setClaimBricks), after the census that would hold it h, and
+        // a body brick's tiles are h (the pressure latches one that is not). The census holds it h from its next head
+        // (cdBodyHeld), and a tile the body marks before then latches 0xb3 in setMark. Backyard's board bricks under the
+        // resting ball entered so and latched UNSUPPORTED at frame 1 (2026-11-18).
+        let hTiles=(atomicLoad(&dir[r+NB_REC_MASK])&0xffu)!=0u;
+        if((cls&NB_CLASS_NEAR_BODY)==0u&&hTiles&&nbInLattice(nbFOrigin(s))){mask=pbBrickCandidates(nbFOrigin(s));go=mask!=0u;}
         if(go){atomicOr(&dir[r+NB_REC_CLASS],NB_CLASS_NEAR_BODY);}
       }else{
         go=(cls&(NB_CLASS_NEAR_BODY|NB_CLASS_BODY_WAS))!=0u;

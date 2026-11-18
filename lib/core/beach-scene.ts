@@ -116,6 +116,8 @@ export function createBeachScene(): SceneDescription {
       accentRadianceLinear: [.20, .30, .42] },
     grade: { toneCurve: "agx", exposure: 1, whiteBalance: [1, 1, 1] },
   };
+  // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 16 s (F 4137, C 140, particles 989457, K 2172).
+  scene.fluid.brickPools = { f: 6206, c: 210, b: 16, k: 3258, particles: 1_484_186 };
   return scene;
 }
 

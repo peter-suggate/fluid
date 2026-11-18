@@ -1316,6 +1316,8 @@ export function createGardenPondScene(): SceneDescription {
     },
     stone(1, beach.x - 0.18, beach.z - 0.1), stone(2, beach.x + 0.08, beach.z + 0.04), stone(3, beach.x + 0.34, beach.z + 0.16)
   ];
+  // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 20 s (F 998, C 56, particles 88904, K 388).
+  scene.fluid.brickPools = { f: 1497, c: 84, b: 16, k: 582, particles: 133356 };
   return scene;
 }
 
@@ -1611,9 +1613,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       const scene = createReservoirSeepScene(0.01, { widthScale: 7.875, depthScale: 2 });
       scene.sceneId = "reservoir-seep-vast";
       delete scene.fluid.pagePool;
-      // The seep's brick pools are its 512-wide tank's (c 336 latched POOL_C at the vast boot, 2026-11-18): the
-      // brick engine's rule sizes the widened lattice's.
-      delete scene.fluid.brickPools;
+      // The seep's brick pools are its 512-wide tank's (c 336 latched POOL_C at the vast boot, 2026-11-18). These
+      // are 1.5x the peaks of the authored 20 s (F 5058, C 537, particles 220542, K 390); the rule's took 7.5 GB.
+      scene.fluid.brickPools = { f: 7587, c: 806, b: 16, k: 585, particles: 330_813 };
       return scene;
     },
     camera: { distance_m: 16, target_m: { x: 0, y: 0.55, z: 0 }, azimuth_rad: 0.22, elevation_rad: 0.32 },
@@ -1680,6 +1682,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       scene.container.top = "closed";
       for (const body of scene.rigidBodies) body.position_m.y = 0.6;
       scene.fluid.initialCondition = "tank-fill";
+      // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 20 s (F 94, C 8, particles 8337, K 18).
+      scene.fluid.brickPools = { f: 141, c: 12, b: 16, k: 27, particles: 12506 };
       return scene;
     },
     variants: {
@@ -1907,6 +1911,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: () => {
       const scene = createHeroGardenHoseFillingScene();
       scene.fluid.pagePool = { blocks: 44 };
+      // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 20 s (F 3549, C 96, particles 115757, K 816):
+      // the rule's pools (f 2457, c 72) latched POOL_C at frame 293.
+      scene.fluid.brickPools = { f: 5324, c: 144, b: 16, k: 1224, particles: 173636 };
       return scene;
     },
     // The one route to this scene at another lattice, and the reason it is a
@@ -2001,6 +2008,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       const scene = applyGardenPool(createPaperScenario("dam-break-boxes"), { fillFraction: 0.16 });
       scene.sceneId = "garden-pond-dam-break";
       scene.fluid.initialBrickSeeds_m = [{ ...GARDEN_DAM_BRICK_SEED_M }];
+      // Brick engine pools (2026-11-18), 1.5x the peaks of the authored 15 s (F 905, C 40, particles 2389, K 387).
+      scene.fluid.brickPools = { f: 1358, c: 60, b: 16, k: 581, particles: 3584 };
       return scene;
     },
     camera: gardenCamera,
