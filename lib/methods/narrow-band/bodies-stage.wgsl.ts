@@ -109,8 +109,11 @@ var<workgroup> wHead:vec4u;
   pbStampBrick(nbFOrigin(head.y),head.w,lid,512u);
   // FLAGS.STATIC_SHUT (brick-abi.md §2.4): the cell's static open fraction alone, so the pressure tells a static solid
   // cell from a body's (poStaticShut). The lane's own cell, as pbStampBrick's FLAGS.OPEN.
+  // FLAGS.INSIDE: the centre in a static solid or a body of BMASK (umCellInsideSolid), the pressure's θ rule.
   {let c=nbFOrigin(head.y)+nbLocalCoord(lid);let f=NB_PHI_F_FLAGS+NB_STRIDE*bsSlot+lid;
-   phi[f]=select(phi[f]&~NB_FLAG_STATIC_SHUT,phi[f]|NB_FLAG_STATIC_SHUT,nbStaticCellOpen(c)<=1e-5);}
+   phi[f]=select(phi[f]&~NB_FLAG_STATIC_SHUT,phi[f]|NB_FLAG_STATIC_SHUT,nbStaticCellOpen(c)<=1e-5);
+   let world=pbWorldCell(c);let inside=nbStaticSolidAt(world)||pbBodyAtCandidates(world,head.w)>=0;
+   phi[f]=select(phi[f]&~NB_FLAG_INSIDE,phi[f]|NB_FLAG_INSIDE,inside);}
 }`].join("\n");
   return { bodyStamp: { label: "bodyStamp", entry: "bodyStamp", code, bindings, cfgZ: [0, 1] } };
 }

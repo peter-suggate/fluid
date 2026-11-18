@@ -170,6 +170,8 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;
     if(!nbStampOpen(frac)){phi[f]=phi[f]&~NB_FLAG_OPEN;}
     if(frac<=1e-5){phi[f]=phi[f]|NB_FLAG_STATIC_SHUT;}
+    // FLAGS.INSIDE: the cell's centre in the static solid (umCellInsideSolid), the pressure's θ rule (npBandFace).
+    if(nbStaticSolidAt(vec3f(c)+0.5)){phi[f]=phi[f]|NB_FLAG_INSIDE;}
   }
 }`].join("\n");
   return { solidStamp: { label: "solidStamp", entry: "solidStamp", code, bindings }, solidRestamp: solidRestampKernel(L, statics, bindings, terrain, field) };
@@ -220,8 +222,8 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     if(cut){atomicOr(&wCut,1u);}
     // FLAGS.OPEN: the box rule (setInit) and not a mask voxel${terrain ? ", nor a cell the ground closes (umCellIsOpen)" : ""}.
     let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;let open=nbInWallBox(c)&&${field ? "select(!nbStampMaskVoxel(c),nbStampOpen(nbStaticCellOpen(c)),nbStampFieldCell(c))" : "!nbStampMaskVoxel(c)"}${terrain ? "&&(!terrainMaybe||nbStampOpen(nbStaticCellOpen(c)))" : ""};
-    // STATIC_SHUT is the K slot's (below): cleared here, set with the slot's FRAC.
-    phi[f]=select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open)&~NB_FLAG_STATIC_SHUT;
+    // STATIC_SHUT and INSIDE are the K slot's (below): cleared here, set with the slot's FRAC.
+    phi[f]=select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open)&~(NB_FLAG_STATIC_SHUT|NB_FLAG_INSIDE);
   }
   workgroupBarrier();
   if(lid==0u){
@@ -237,7 +239,9 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let c=o+nbLocalCoord(l);let at=NB_STRIDE*ks+l;
     let frac=nbStaticCellOpen(c);
     cut[NB_CUT_FRAC+at]=frac;
-    if(frac<=1e-5){let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;phi[f]=phi[f]|NB_FLAG_STATIC_SHUT;}
+    let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;
+    if(frac<=1e-5){phi[f]=phi[f]|NB_FLAG_STATIC_SHUT;}
+    if(nbStaticSolidAt(vec3f(c)+0.5)){phi[f]=phi[f]|NB_FLAG_INSIDE;}
     for(var a=0u;a<3u;a++){
       let ap=nbStaticFaceOpen(c-nbStaticAxis(a),a);
       if(a==0u){cut[NB_CUT_AP0+at]=ap;cut[NB_CUT_W0+at]=0.0;}else if(a==1u){cut[NB_CUT_AP1+at]=ap;cut[NB_CUT_W1+at]=0.0;}else{cut[NB_CUT_AP2+at]=ap;cut[NB_CUT_W2+at]=0.0;}

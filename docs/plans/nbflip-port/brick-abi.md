@@ -168,7 +168,8 @@ Every other bit of an entering slot is 0.
 | 8–10 | P: wall state / release | bit 8 + a, on the lower face along `a`'s storage (planes 0 and N; plane N at the skirt cell or C tile N/4). Between the rows (`rowsF`/`rowsC`) and `project`: the separating walls' solver state (1 = separated). After `projectF`/`projectC` (P, 9e5d2b14): umRelease (uniform-mixed-pressure-velocity.ts 485–492), `!held && ghost <= 0 && -sign·U·dt > 1e-4·width·h`; read by E's release port (`nrWallReach`, `nrReleasedWalls`; levelset-release.wgsl.ts) before the next pressure stage, never during it |
 | 11–12 | reserved, P | spare |
 | 13 | `STATIC_SHUT` (E, F cells only: C tiles hold KICK0..2 in bits 12–14) | a cut brick's cell whose static open fraction (voxels, the ground, the box) is <= 1e-5: a static solid cell (umCellIsOpen's shut). `solidStamp`, `solidRestamp` and `bodyStamp` write it with the K slot; the pressure's `poStaticShut` reads it, so a shut cell of a brick that also holds a body is told from the body's (2026-11-18) |
-| 14–15 | reserved, E | |
+| 14 | `INSIDE` (E, F cells only) | a cut brick's cell whose centre lies in a static solid (the field's sign or a voxel, the ground) or a body of the brick's BMASK: umCellInsideSolid. `solidStamp`, `solidRestamp` and `bodyStamp` write it with STATIC_SHUT; the pressure's `poInside` reads it for npBandFace's θ rule (a wet-dry face between two inside cells, both open < 0.1, takes θ = 1). 2026-11-18: without it, terrain slivers (FRAC 0.002) put θ 0.001-0.04 on such faces, 20-90 m/s spikes. |
+| 15 | reserved, E | |
 | 16–31 | reserved, F | |
 
 ### 2.5 Tiers: what is stored where (M2, proposed 2026-11-15)

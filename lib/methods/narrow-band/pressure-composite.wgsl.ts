@@ -248,6 +248,8 @@ fn poStaticShut(q:vec3i)->bool{
 }
 // The pressure's liquid test of an h cell with centre φ p: wet, and not a static solid cell.
 fn poRowWet(c:vec3i,p:f32)->bool{return poWet(p,1.0)&&!poStaticShut(c);}
+// umCellInsideSolid of an h cell (FLAGS.INSIDE: a cut brick's stamps; 0 in a brick with no K slot, a C tile or past the box).
+fn poInside(q:vec3i)->bool{if(poCutK(q)==NB_NONE){return false;}return (poFlagsF(q)&NB_FLAG_INSIDE)!=0u;}
 `;
 
 const compositeWGSL = (cuts: boolean) => /* wgsl */`
@@ -406,10 +408,13 @@ fn poBandFace(c:vec3i,own:f32,liquid:bool,f:u32)->PoFace{
     if(!native){let p=poCentre(q);let wet=poWet(p,1.0);n=NpCell(p,wet,wet);}
   }
 ${cuts ? `  // The cuts (§5): the face's aperture, AP of its upper cell's lower face, and both cells' open fractions; the
-  // solid flags as the old rows take them (shut = FRAC <= 1e-5, umCellIsOpen), never inside (latched in rowsF).
+  // solid flags as the old rows take them: shut = FRAC <= 1e-5 (umCellIsOpen), inside = FLAGS.INSIDE (the stamps'
+  // umCellInsideSolid), read only where npBandFace's θ rule can take it (a wet-dry face, both open fractions < 0.1).
   let volume=poFaceAP(select(c,q,sign>0),a);let open=poFrac(c);var qOpen=1.0;if(across==NP_ACROSS_RESIDENT){qOpen=poFrac(q);}
   var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}
-  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,false,open<=1e-5,false,open,qOpen>1e-5,false,qOpen);` : `  let volume=select(0.5,1.0,nbInWallBox(q));
+  var inside=false;var qInside=false;
+  if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet&&open<0.1&&qOpen<0.1){inside=poInside(c);qInside=poInside(q);}
+  let face=npBandFace(across,own,liquid,1.0,1.0,band,native,n,fp,volume,false,open<=1e-5,inside,open,qOpen>1e-5,qInside,qOpen);` : `  let volume=select(0.5,1.0,nbInWallBox(q));
   // The face φ enters only the marched θ of a wet-dry face (npBandFace with solidClear): the other faces skip its
   // four vertices.
   var fp=0.0;if(across==NP_ACROSS_RESIDENT&&liquid!=n.wet){fp=poFacePhi(c,a,sign);}

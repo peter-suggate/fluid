@@ -138,7 +138,7 @@ export const REC = { SELF: 13, PARENT: 27, MASK: 28, KEY: 29, CUT: 30, CLASS: 31
 /** FLAGS channel bits (cell, u32). */
 /** KICK0 << a (C FLAGS, still-tank A): uTransfer's gravity rule held on the tile's lower face along a at its last
  * transfer (nbfGravityFace), which the solve applies to a STILL page's held face (u* = F + g dt). */
-export const FLAG = { OPEN: 1, LIQUID: 2, BAND: 4, VALID0: 8, VALID1: 16, VALID2: 32, OWNER_H: 64, KICK0: 1 << 12, STATIC_SHUT: 1 << 13 } as const;
+export const FLAG = { OPEN: 1, LIQUID: 2, BAND: 4, VALID0: 8, VALID1: 16, VALID2: 32, OWNER_H: 64, KICK0: 1 << 12, STATIC_SHUT: 1 << 13, INSIDE: 1 << 14 } as const;
 
 /** Lists (brick-abi.md §5.5): index, kind. */
 export const LIST = {
