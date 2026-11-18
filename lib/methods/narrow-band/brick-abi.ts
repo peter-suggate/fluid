@@ -327,6 +327,8 @@ export class BrickLayout {
     if (this.box.some((n, a) => !Number.isInteger(n) || n < 1 || n > this.lattice[a]!)) throw new Error(`Brick engine: box ${this.box.join("x")} is not inside the lattice ${this.lattice.join("x")}`);
     this.window = windowPages(options.lattice);
     this.windowBits = this.window.map(n => Math.log2(n)) as [number, number, number];
+    // fgPack (fluid-grid.wgsl.ts) packs a cell's coordinates in one word, each axis its window's cell bits.
+    if (this.windowBits.reduce((a, b) => a + b, 0) + 15 > 32) throw new Error(`Brick engine: a window of ${this.window.join("x")} pages packs a cell in more than 32 bits (fgPack)`);
     this.particleStride = options.apic ? 28 : 12;
     let at = HEADER_WORDS;
     const take = (n: number) => { const o = at; at += align64(n); return o; };

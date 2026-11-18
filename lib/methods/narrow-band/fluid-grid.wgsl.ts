@@ -245,8 +245,11 @@ fn fgTileTrig(c:vec3i)->bool{let s=fgSlot(c);if(s==NB_NONE){return false;}return
 fn fgTileThin(c:vec3i)->bool{let s=fgSlot(c);if(s==NB_NONE){return false;}return ((nbSetWord(NB_S_TRIG+s)>>(8u+fgTileOf(c)))&1u)!=0u;}
 // The tile word w of the tile holding cell c (NB_NONE where no slot holds it).
 fn fgTileAt(c:vec3i,w:u32)->u32{let s=fgSlot(c);if(s==NB_NONE){return NB_NONE;}return fgTileWord(s,fgTileOf(c),w);}
-fn fgPack(c:vec3i)->u32{return u32(c.x)|(u32(c.y)<<10u)|(u32(c.z)<<20u);}
-fn fgUnpack(k:u32)->vec3i{return vec3i(i32(k&1023u),i32((k>>10u)&1023u),i32(k>>20u));}
+// A cell in one word: each axis takes its window's cell bits (NB_WINDOW_BITS + 5, a page 32 cells), which the layout
+// keeps within 32 (BrickLayout). Ten bits an axis wrapped a lattice past 1024 cells (reservoir-seep-vast's 2016: the
+// seep's jet past x = 1024 read its nearest surface cell 1024 cells back, 2026-11-18).
+fn fgPack(c:vec3i)->u32{let b=NB_WINDOW_BITS+vec3u(5u);return u32(c.x)|(u32(c.y)<<b.x)|(u32(c.z)<<(b.x+b.y));}
+fn fgUnpack(k:u32)->vec3i{let b=NB_WINDOW_BITS+vec3u(5u);return vec3i(i32(k&((1u<<b.x)-1u)),i32((k>>b.x)&((1u<<b.y)-1u)),i32(k>>(b.x+b.y)));}
 ${FO_TILE_WGSL}
 // Owned storage (brick-abi.md §2.5): what an F kernel may write. All h (FG_TIERED false) every F word is owned. A
 // vertex is F's where no incident tile is 4h-owned (the authority rule); a lower face where either cell beside it

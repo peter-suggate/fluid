@@ -15,6 +15,17 @@ test("brick ABI: the window is a power of two an axis covering the lattice's pag
   assert.throws(() => windowPages([40000, 8, 8]), /over 1024/);
 });
 
+test("brick ABI: a cell packs in the window's bits (fgPack), past 1024 cells an axis, and a window past 32 bits throws", () => {
+  // reservoir-seep-vast: 2016 x 160 x 64 cells, a 64 x 8 x 4 page window, 11 + 15 bits.
+  const vast = new BrickLayout({ lattice: [2016, 160, 64], f: 128, c: 16, b: 0, k: 0, particles: 1024 });
+  assert.deepEqual(vast.windowBits, [6, 3, 2]);
+  const bits = vast.windowBits.map(b => b + 5), pack = (c: number[]) => (c[0]! | (c[1]! << bits[0]!) | (c[2]! << (bits[0]! + bits[1]!))) >>> 0;
+  const unpack = (k: number) => [k & ((1 << bits[0]!) - 1), (k >>> bits[0]!) & ((1 << bits[1]!) - 1), k >>> (bits[0]! + bits[1]!)];
+  for (const c of [[0, 0, 0], [1023, 5, 7], [1024, 5, 7], [2015, 159, 63], [2023, 167, 71]]) assert.deepEqual(unpack(pack(c)), c);
+  assert.match(brickAbiWGSL(vast), /NB_WINDOW_BITS:vec3u=vec3u\(6u,3u,2u\)/);
+  assert.throws(() => new BrickLayout({ lattice: [8192, 8192, 64], f: 128, c: 16, b: 0, k: 0, particles: 1024 }), /more than 32 bits/);
+});
+
 test("brick ABI: set and dir regions are disjoint, 64-word aligned, in order", () => {
   const L = dam(), s = L.set;
   const starts = [s.ring, s.freeF, s.freeC, s.freeB, s.freeK, s.markF, s.markC, s.cand, s.boundF, s.boundC, s.binStart, s.binCount, s.binCursor, s.pLiquid, ...s.lists];
