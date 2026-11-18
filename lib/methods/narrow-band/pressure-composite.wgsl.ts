@@ -237,13 +237,14 @@ fn poFaceAP(c:vec3i,a:u32)->f32{
 fn poFaceW(c:vec3i,a:u32)->f32{let k=poCutK(c);if(k==NB_NONE){return 0.0;}return cut[poCutW(a)+NB_STRIDE*k+nbLocal(c)];}
 fn poCutBmask(k:u32)->u32{if(k==NB_NONE){return 0u;}return bitcast<u32>(cut[NB_CUT_BMASK+k]);}
 // A static solid cell (lane E's 0xa2 hand-off, the coordinator's option (b), 2026-11-17): a resident cell of a static
-// cut brick with no body (BMASK 0) whose open fraction is <= 1e-5 (umCellIsOpen's shut). It is never a row: the
-// pressure sees it as the box's shell, so its faces to the liquid are separating walls (poAcross), re-decided as the
-// box walls are (pmgWalls*). A body's brick keeps the 0xa2 latch: its shut cells may be the body's.
+// cut brick whose static open fraction is <= 1e-5 (umCellIsOpen's shut; FLAGS.STATIC_SHUT, the stamps'). It is never
+// a row: the pressure sees it as the box's shell, so its faces to the liquid are separating walls (poAcross),
+// re-decided as the box walls are (pmgWalls*). With no body (BMASK 0) the bit is the slot's FRAC <= 1e-5 (the test
+// before 2026-11-18); with a body it tells the static cells from the body's, which stay the body's rows.
 fn poStaticShut(q:vec3i)->bool{
   let k=poCutK(q);if(k==NB_NONE){return false;}
-  if((nbFRec(poSlotOfCell(q),NB_REC_CLASS)&NB_CLASS_CUT_STATIC)==0u||poCutBmask(k)!=0u){return false;}
-  return cut[NB_CUT_FRAC+NB_STRIDE*k+nbLocal(q)]<=1e-5;
+  if((nbFRec(poSlotOfCell(q),NB_REC_CLASS)&NB_CLASS_CUT_STATIC)==0u){return false;}
+  return (poFlagsF(q)&NB_FLAG_STATIC_SHUT)!=0u;
 }
 // The pressure's liquid test of an h cell with centre φ p: wet, and not a static solid cell.
 fn poRowWet(c:vec3i,p:f32)->bool{return poWet(p,1.0)&&!poStaticShut(c);}
@@ -672,9 +673,10 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     ` : ""}if(liquid){
       for(var j=0u;j<8u;j++){poGuardVertex(c+poCorner(j));}${cuts ? `
       // The row's capacity (bHeadCapacity, the old head capacity: its own FRAC on all six faces). A static solid cell
-      // is no row (poRowWet, option (b)); a shut cell of a static cut brick with a body (BMASK != 0) still latches.
+      // is no row (poRowWet, option (b)); a shut cell of a brick with a body is the body's (a body brick's row, as in a
+      // brick with no static cut). With no body a shut row is a static one poRowWet missed: it latches.
       let capacity=poFrac(c);
-      if(staticCut&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}` : ""}
+      if(staticCut&&bmask==0u&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}` : ""}
       for(var f=0u;f<6u;f++){
         let a=f/2u;let sign=npSign(f);let pf=poBandFace(c,own,true,f);let face=pf.face;${faces === undefined ? "" : cuts ? `
         // A wall face's cache word is its coupling (V, the walls' re-decision reads it; its ratio is 1), a closed

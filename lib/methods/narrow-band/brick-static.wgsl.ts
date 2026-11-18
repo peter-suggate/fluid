@@ -41,6 +41,12 @@ import { solidWorldForFluidLattice } from "../../core/solid-world";
 import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { sceneFluidLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import type { SceneDescription } from "../../core/model";
+import { brickTerrainCutBricks, brickTerrainMirror, brickTerrainWGSL, type BrickTerrainColumns } from "./brick-terrain.wgsl";
+
+/** The mask's walls, and where the terrain's columns ride in the same buffer after the mask's words (brick-terrain.wgsl.ts):
+ * every static consumer (solidStamp, the static need, pSolid, pSeed, the body stage) takes the walls, so the terrain
+ * reaches each with them. */
+export type BrickStaticWalls = SolidOccupancyMaskWalls & { readonly terrain?: { readonly base: number; readonly columns: readonly [number, number] } };
 
 const MASK_CELL = 32;
 
@@ -63,8 +69,9 @@ export function brickStaticMaskWalls(paged: readonly number[], openTop: boolean)
  * `always` (brickSceneSetup): a mask even with no solid cell (sealed at 64 slots, no world folded), so a scene's first
  * voxel stroke is a live edit; the engine defers its static stages until then (BrickEngineOptions.staticsDeferred).
  */
-export function brickStaticMask(scene: SceneDescription, options: { readonly always?: boolean } = {}): SolidOccupancyMask | undefined {
-  const voxels = solidVoxelEditsForScene(scene).length > 0;
+export function brickStaticMask(scene: SceneDescription, options: { readonly always?: boolean; readonly padding?: boolean } = {}): SolidOccupancyMask | undefined {
+  // `padding`: the container is not whole bricks, so the lattice's padding inside the engine's box is solid voxels.
+  const voxels = solidVoxelEditsForScene(scene).length > 0 || options.padding === true;
   if (!voxels && !options.always) return undefined;
   const openTop = scene.container.top === "open";
   const walls = brickStaticMaskWalls(sceneFluidLatticeDimensions(scene), openTop), [x, y, z] = walls.pages;
@@ -86,8 +93,9 @@ export const BRICK_STATIC_EDIT_K = 64;
  * on an axis is solid. Read cell-exactly from each solid 32^3 page's rows (a wholly solid page: its 64 bricks and the
  * bricks past its upper faces). A brick wholly inside a solid counts, though it is resident only when promoted.
  */
-export function brickStaticCutBricks(mask: Pick<SolidOccupancyMask, "eachSolidPage" | "words">): number {
+export function brickStaticCutBricks(mask: Pick<SolidOccupancyMask, "eachSolidPage" | "words">, ground?: { readonly terrain: BrickTerrainColumns; readonly box: readonly number[] }): number {
   const bricks = new Set<number>(), add = (x: number, y: number, z: number) => bricks.add(x + 4096 * (y + 4096 * z));
+  if (ground) brickTerrainCutBricks(ground.terrain, ground.box, add);
   const words = mask.words, P = SOLID_MASK_PAGE_CELLS;
   mask.eachSolidPage((px, py, pz, word) => {
     const code = word & 0xffff;
@@ -118,12 +126,13 @@ export interface BrickStaticSource {
   readonly frame: string;
   /** vec3f WGSL expression: the cell size per axis (m). */
   readonly h: string;
-  /** The voxel mask (brickStaticMask): its array<u32> binding's name and its walls. Absent, the box rule alone. */
-  readonly mask?: { readonly buffer: string; readonly walls: SolidOccupancyMaskWalls };
+  /** The voxel mask (brickStaticMask): its array<u32> binding's name and its walls (with the terrain's columns, when the
+   * scene has terrain: they follow the mask's words in the same binding). Absent, the box rule alone. */
+  readonly mask?: { readonly buffer: string; readonly walls: BrickStaticWalls };
 }
 
 export function brickStaticWGSL(src: BrickStaticSource): string {
-  const [x, y, z] = src.box;
+  const [x, y, z] = src.box, terrain = src.mask?.walls.terrain;
   for (const n of src.box) if (!Number.isInteger(n) || n < 1) throw new Error(`Brick engine statics: box ${src.box.join("x")}`);
   return /* wgsl */`
 const NB_STATIC_PLAIN:u32=${NB_STATIC.PLAIN}u;const NB_STATIC_BOUNDARY:u32=${NB_STATIC.BOUNDARY}u;const NB_STATIC_VOXEL:u32=${NB_STATIC.VOXEL}u;
@@ -136,17 +145,24 @@ fn nbStaticInBox(c:vec3i)->bool{
  return side&&(c.y<NB_STATIC_BOX.y||NB_STATIC_OPEN_TOP);
 }
 ${src.mask ? maskWGSL(src.mask) : `fn nbStaticVoxel(c:vec3i)->bool{return !nbStaticInBox(c);}`}
+${terrain ? brickTerrainWGSL({ buffer: src.mask!.buffer, base: terrain.base, columns: terrain.columns }) : ""}
+const NB_STATIC_TERRAIN:bool=${terrain !== undefined};
 fn nbStaticCellKind(c:vec3i)->u32{return select(NB_STATIC_PLAIN,NB_STATIC_VOXEL,nbStaticVoxel(c));}
-fn nbStaticCellOpen(c:vec3i)->f32{return select(1.0,0.0,nbStaticVoxel(c));}
+${terrain ? `// umCellOpenGeometry with no body or record: a voxel 0, else the unit box's terrain lane (umUnitBoxOpen).
+fn nbStaticCellOpen(c:vec3i)->f32{
+ if(nbStaticVoxel(c)){return 0.0;}
+ let terrain=1.0-nbTerrainBoxOpen(vec3f(c)+0.5,vec3f(1));
+ return clamp(1.0-terrain,0.0,1.0);
+}` : `fn nbStaticCellOpen(c:vec3i)->f32{return select(1.0,0.0,nbStaticVoxel(c));}`}
 ${src.mask ? `fn nbStaticFaceOpen(c:vec3i,axis:u32)->f32{
  let n=c+nbStaticAxis(axis);let a=nbStaticVoxel(c);let b=nbStaticVoxel(n);
- if(a||b){return 0.5*(select(1.0,0.0,a)+select(1.0,0.0,b));}
- return 1.0;
+ if(a||b){return 0.5*(nbStaticCellOpen(c)+nbStaticCellOpen(n));}
+ ${terrain ? "// umPressureFaceV with no body: the unit box about the face centre (umUnitBoxOpen's terrain lane).\n return nbTerrainBoxOpen(vec3f(c)+0.5+0.5*vec3f(nbStaticAxis(axis)),vec3f(1));" : "return 1.0;"}
 }` : `fn nbStaticFaceOpen(c:vec3i,axis:u32)->f32{return select(0.0,1.0,nbStaticInBox(c)&&nbStaticInBox(c+nbStaticAxis(axis)));}`}
 fn nbStaticFaceBoxed(c:vec3i,axis:u32)->bool{return false;}
 fn nbStaticSolidAt(world:vec3f)->bool{
  let q=(world-(${src.frame}))/(${src.h});
- return nbStaticVoxel(vec3i(floor(q)));
+ return nbStaticVoxel(vec3i(floor(q)))${terrain ? "||nbTerrainSolid(q)" : ""};
 }
 `;
 }
@@ -160,21 +176,25 @@ fn nbStaticVoxel(c:vec3i)->bool{if(!nbStaticInBox(c)){return true;}return nbStat
 
 /** The Float64 mirror (the test oracle): the same five functions on the host. `frame` and `h` are numbers here; `mask`
  * is the image's words, read by the shared CPU reader (solidOccupancyMaskVoxel). */
-export function brickStaticMirror(src: { box: readonly [number, number, number]; openTop: boolean; frame: readonly [number, number, number]; h: readonly [number, number, number]; mask?: ArrayLike<number> }) {
-  const [X, Y, Z] = src.box, mask = src.mask;
+export function brickStaticMirror(src: { box: readonly [number, number, number]; openTop: boolean; frame: readonly [number, number, number]; h: readonly [number, number, number]; mask?: ArrayLike<number>; terrain?: BrickTerrainColumns }) {
+  const [X, Y, Z] = src.box, mask = src.mask, ground = src.terrain ? brickTerrainMirror(src.terrain) : undefined;
   const inBox = (c: readonly number[]) => c[0]! >= 0 && c[1]! >= 0 && c[2]! >= 0 && c[0]! < X && c[2]! < Z && (c[1]! < Y || src.openTop);
   const voxel = (c: readonly number[]) => !inBox(c) || (mask !== undefined && solidOccupancyMaskVoxel(mask, c[0]!, c[1]!, c[2]!));
   const step = (c: readonly number[], axis: number) => c.map((v, a) => v + (a === axis ? 1 : 0));
-  const open = (c: readonly number[]) => voxel(c) ? 0 : 1;
+  const open = (c: readonly number[]) => voxel(c) ? 0 : ground ? Math.min(1, Math.max(0, ground.boxOpen(c.map(v => v + 0.5), [1, 1, 1]))) : 1;
   return {
     cellKind: (c: readonly number[]) => voxel(c) ? NB_STATIC.VOXEL : NB_STATIC.PLAIN,
     cellOpen: open,
     faceOpen: (c: readonly number[], axis: number) => {
       const n = step(c, axis);
       if (mask === undefined) return inBox(c) && inBox(n) ? 1 : 0;
-      return voxel(c) || voxel(n) ? 0.5 * (open(c) + open(n)) : 1;
+      if (voxel(c) || voxel(n)) return 0.5 * (open(c) + open(n));
+      return ground ? ground.boxOpen(c.map((v, a) => v + 0.5 + (a === axis ? 0.5 : 0)), [1, 1, 1]) : 1;
     },
     faceBoxed: (_c: readonly number[], _axis: number) => false,
-    solidAt: (w: readonly number[]) => voxel(w.map((v, a) => Math.floor(Math.fround(Math.fround(v - src.frame[a]!) / src.h[a]!)))),
+    solidAt: (w: readonly number[]) => {
+      const q = w.map((v, a) => Math.fround(Math.fround(v - src.frame[a]!) / src.h[a]!));
+      return voxel(q.map(Math.floor)) || (ground !== undefined && ground.solid(q));
+    },
   };
 }

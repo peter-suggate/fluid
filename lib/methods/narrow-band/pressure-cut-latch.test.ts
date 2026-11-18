@@ -44,7 +44,10 @@ test("pressure cut latch: a static solid cell is no row; its faces are separatin
   assert.ok(on.includes("if(poStaticShut(q)){return NP_ACROSS_WALL;}"), "poAcross: a static solid cell is a wall");
   assert.ok(on.includes("let liquid=owned&&poRowWet(c,own);"), "rowsF: no row in a static solid cell");
   assert.ok(on.includes("pres[NB_PRES_F_PPHI+at]=select(0.0,select(own,NB_PHI_AIR,poStaticShut(c)),owned);"), "rowsF: its PPHI is air");
-  assert.ok(on.includes("if(staticCut&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}"), "a body's static cut keeps 0xa2");
+  // The stamps' FLAGS.STATIC_SHUT tells a static solid cell from a body's: a shut row with a body is the body's; with
+  // none it is a static cell poRowWet missed, and latches.
+  assert.ok(on.includes("return (poFlagsF(q)&NB_FLAG_STATIC_SHUT)!=0u;"), "poStaticShut reads the stamps' bit");
+  assert.ok(on.includes("if(staticCut&&bmask==0u&&capacity<=1e-5){nbFail(NB_FAIL_UNSUPPORTED,0xa2000000u|nbFRec(slot,NB_REC_KEY));}"), "0xa2: a shut row with no body");
   assert.ok(on.includes("0xa5000000u|nbFRec(slot,NB_REC_KEY)"), "0xa5: a static solid cell beside a liquid native row");
   assert.ok(on.includes("if(kind==NP_K_WALL){word=1.0;separated=(flags&(PO_WALL0<<a))!=0u;}"), "projectF: a wall face's state");
   assert.ok(on.includes("wGo=select(0u,1u,(edge||(nbFRec(slot,NB_REC_CLASS)&NB_CLASS_CUT_STATIC)!=0u));"), "pmgWallsF: the static cut bricks");

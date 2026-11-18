@@ -77,8 +77,8 @@ test("brick engine: every kernel binds at most 8 storage buffers, and the layout
   const kernels = [...Object.values(brickSetKernels(L)), ...Object.values(brickPressureKernels(L)), ...Object.values(pressureOperatorKernels(L)),
     ...[...cg.setup, ...cg.slot(0), ...cg.finish].map(p => p.kernel)];
   for (const k of kernels) assert.ok(k.bindings.filter(b => b.kind !== "uniform").length <= MAX_STORAGE_BINDINGS, k.label);
-  const nine = Array.from({ length: 9 }, (_, i) => ({ name: `b${i}`, kind: "rw" as const }));
-  assert.throws(() => bindGroupLayoutEntries(nine), /9 storage buffers/);
+  const ten = Array.from({ length: 10 }, (_, i) => ({ name: `b${i}`, kind: "rw" as const }));
+  assert.throws(() => bindGroupLayoutEntries(ten), /10 storage buffers/);
 });
 
 test("brick engine: the boot's reach rule keeps a one-brick ring at rest and widens with the velocity bound", () => {
@@ -265,6 +265,22 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     const padded = brickSceneSetup(slab, { timeStep: "sixtieth" });
     assert.deepEqual(padded.gaps, []);
     assert.deepEqual([padded.setup!.lattice, padded.setup!.box], [[32, 32, 32], [24, 16, 24]]);
+    // A container that is not whole bricks (64 x 20 x 64): the box is its cells rounded up to bricks (64 x 24 x 64), the
+    // cells between are the static mask's padding voxels (the old engine's solidWorldForFluidLattice), and the initial
+    // liquid and pools read the container's own cells.
+    const big = sceneDocument(getSceneDefinition("large-power-hydrostatic")); enabled.push(big.sceneId!);
+    const cut = brickSceneSetup(big, { timeStep: "sixtieth" });
+    assert.deepEqual(cut.gaps, []);
+    assert.deepEqual([cut.setup!.lattice, cut.setup!.box], [[64, 32, 64], [64, 24, 64]]);
+    const m = cut.setup!.staticMask!;
+    assert.equal(cut.setup!.staticsDeferred, undefined, "the padding is a static solid at the build");
+    for (const [x, z] of [[0, 0], [31, 17], [63, 63]] as const) {
+      for (let y = 0; y < 20; y++) assert.equal(m.solid(x, y, z), false, `container cell ${x},${y},${z} open`);
+      for (let y = 20; y < 24; y++) assert.equal(m.solid(x, y, z), true, `padding cell ${x},${y},${z} solid`);
+    }
+    // Its 1.6 x 0.05 x 1.6 m dam (32 x 1 x 32 cells), run on through the low walls.
+    assert.deepEqual(cut.setup!.liquid, [{ lo: [-128, -128, -128], hi: [32, 1, 32] }]);
+    assert.ok(cut.setup!.capacities.k >= 8 * 8, "K holds the padding's cut bricks");
     // An open top (M3): BRICK_OPEN_TOP_HEADROOM cells of air above the container's pages, in the box, so the x and z
     // walls rise to the lattice's top and nothing is a wall at the container's own top. The old engine's far φ stays.
     const tank = sceneDocument(getSceneDefinition("bulk-rest-tank")); enabled.push(tank.sceneId!);

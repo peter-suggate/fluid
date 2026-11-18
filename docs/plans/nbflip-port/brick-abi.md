@@ -167,7 +167,8 @@ Every other bit of an entering slot is 0.
 | 7 | `WARM` (P) | the cell held a liquid row of its tier last step (the old pInit/warm rule; P's finish kernels write it) |
 | 8–10 | P: wall state / release | bit 8 + a, on the lower face along `a`'s storage (planes 0 and N; plane N at the skirt cell or C tile N/4). Between the rows (`rowsF`/`rowsC`) and `project`: the separating walls' solver state (1 = separated). After `projectF`/`projectC` (P, 9e5d2b14): umRelease (uniform-mixed-pressure-velocity.ts 485–492), `!held && ghost <= 0 && -sign·U·dt > 1e-4·width·h`; read by E's release port (`nrWallReach`, `nrReleasedWalls`; levelset-release.wgsl.ts) before the next pressure stage, never during it |
 | 11–12 | reserved, P | spare |
-| 13–15 | reserved, E | |
+| 13 | `STATIC_SHUT` (E, F cells only: C tiles hold KICK0..2 in bits 12–14) | a cut brick's cell whose static open fraction (voxels, the ground, the box) is <= 1e-5: a static solid cell (umCellIsOpen's shut). `solidStamp`, `solidRestamp` and `bodyStamp` write it with the K slot; the pressure's `poStaticShut` reads it, so a shut cell of a brick that also holds a body is told from the body's (2026-11-18) |
+| 14–15 | reserved, E | |
 | 16–31 | reserved, F | |
 
 ### 2.5 Tiers: what is stored where (M2, proposed 2026-11-15)
@@ -882,7 +883,9 @@ around the MGPCG. Its per-face state takes FLAGS bits 7–12 (§2.4).
 - storage: `set`, `dir`, `args`, `vel`, `phi`, `pres`, `cut`, `parts`, `xfer`, and lane-owned buffers by
   name.
 
-At most 8 storage buffers a kernel. A kernel that needs more splits.
+At most 9 storage buffers a kernel (8 until 2026-11-18; the app already needs 9 a stage for the old
+engine's sparse band, `requiredFluidDeviceLimits`, and the terrain pSolid binds pMove's 8 and the ground). A kernel
+that needs more splits.
 
 **WGSL names (amended at M1).** WGSL reserves some words the ABI uses:
 - `set`: the host's buffer `set` is declared `nbSet` in WGSL. `declareBindings()` maps it

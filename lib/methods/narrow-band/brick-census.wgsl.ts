@@ -86,7 +86,7 @@ import { BODIES_RO, BODY_CUTS_RO, PB_BRICK_CANDIDATES_WGSL, PB_BRICK_MARK_WGSL, 
 import { UNIFORM_SURFACE_TRANSPORT_ERROR_H } from "../uniform/uniform-surface-transport.wgsl";
 import { UNIFORM_TILE_UPDATE_BUDGET_H } from "../uniform/uniform-tile-update-error";
 import { brickStaticNeedKernels } from "./brick-static-need.wgsl";
-import type { SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
+import type { BrickStaticWalls } from "./brick-static.wgsl";
 
 /** The census header words (set buffer, brick-abi.md §5.1). */
 export const CENSUS_H = {
@@ -998,7 +998,7 @@ export interface BrickCensusHold { readonly lo: readonly [number, number, number
 
 /** `statics`: the static mask's walls (brick-static-need.wgsl.ts's need rule runs; tiered, a static K slot is the
  * rule's, not a latch). */
-export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold; readonly bodies?: BrickBodiesFrame; readonly statics?: SolidOccupancyMaskWalls } = {}) {
+export function brickCensusKernels(L: BrickLayout, opt: { readonly tiered?: boolean; readonly hold?: BrickCensusHold; readonly bodies?: BrickBodiesFrame; readonly statics?: BrickStaticWalls } = {}) {
   const tiered = opt.tiered ?? true, hold = opt.hold, bodies = opt.bodies, statics = opt.statics !== undefined;
   if (hold && hold.lo.some((v, a) => !Number.isInteger(v) || !Number.isInteger(hold.hi[a]) || v < 0 || v >= hold.hi[a]! || hold.hi[a]! > L.lattice[a]! / 4)) throw new Error(`setCensus: the hold [${hold.lo.join(",")}] .. [${hold.hi.join(",")}] is not a non-empty box of whole tiles in the lattice`);
   if (L.lattice.some(n => n % 32 !== 0)) throw new Error(`setCensus: the lattice ${L.lattice.join("x")} is not whole pages (32 cells an axis)`);
@@ -1700,7 +1700,7 @@ fn rpMoved4(cs:u32,i:u32)->bool{
  * workgroups a brick) and the C passes censusCoarse, censusImportance and censusDecide list cAll's (eight a page). */
 /** `heat`: the real D runs (brick-region-heat.wgsl.ts's regionHeat and regionSpread before censusCoarse): the head's
  * deep pass and decide's deep keep and activity heat. Without it D = 0 (the census alone, as the frozen passes). */
-export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold, bodies?: BrickBodiesFrame, statics?: SolidOccupancyMaskWalls) {
+export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, keep = false, heat = false, hold?: BrickCensusHold, bodies?: BrickBodiesFrame, statics?: BrickStaticWalls) {
   const c = brickCensusKernels(L, { tiered, ...(hold ? { hold } : {}), ...(bodies ? { bodies } : {}), ...(statics ? { statics } : {}) });
   const slabs = censusListArgs(cAll, "X8"), replay = tiered && keep && heat;
   return [
@@ -1723,7 +1723,7 @@ export function brickCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") =
 /** The TRIG-only census (the boot's, after the kick, before F's seed): censusBegin through censusImportance as
  * brickCensusSchedule, then censusDecide with cfg.z = 2: TRIG (and CENSUS_TRIGGERED) alone. No band decision, no
  * WANT word, no candidate, no keep mark. */
-export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold, bodies?: BrickBodiesFrame, statics?: SolidOccupancyMaskWalls) {
+export function brickTrigCensusSchedule(L: BrickLayout, list: (k: number, g: "G1") => { indirect: number }, cAll: number = LIST.C_ALL, fAll: number = LIST.F_ALL, tiered = true, hold?: BrickCensusHold, bodies?: BrickBodiesFrame, statics?: BrickStaticWalls) {
   // With statics the census's text drops its static-K latches (a boot's cut K slots are the rule's), but the TRIG-only
   // census decides no band, so it promotes none: the need rule's two passes are left out.
   return brickCensusSchedule(L, list, cAll, fAll, tiered, false, false, hold, bodies, statics).filter(p => !p.kernel.label.startsWith("censusStatic"))

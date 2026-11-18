@@ -10,13 +10,18 @@
  * - integrate(n): rigidSystem.encode(encoder, dt, h^3, 1, h) (tables, then integrate), then the exchange's clear, so
  *   the next couple starts from zero. Off (the old host's uncoupled bodies) when the coupling is off.
  * - Explicit refusals: more than GPU_RIGID_BODY_CAPACITY bodies, a rounded plate (the brick stamp has no plate), a cut
- *   atlas pbCheckCutAtlas rejects; terrain, and motor assemblies with static voxels (the old host's terrain texture
- *   and procedural collision source, which the brick engine does not have yet): brickRigidBodyGaps names them to the
- *   scene adapter. Motor assemblies in a tank with no static voxel contact the container planes (the shell).
- *   The terrain binding is one zero texel, as the old host's for a scene with no terrain.
+ *   atlas pbCheckCutAtlas rejects; motor assemblies with static voxels or terrain (the old host's procedural collision
+ *   source, which the brick engine does not have yet): brickRigidBodyGaps names them to the scene adapter. Motor
+ *   assemblies in a tank with no static voxel contact the container planes (the shell).
+ * - Terrain: the old host's texture, the ground's columns in cells (brickTerrainColumns, the same bake), so the
+ *   integrator's terrainPlane contact is the old one's. The old host attaches its sculpt source too, so its contact is
+ *   editedTerrainContact; with no sculpt cut (a sculpted ground is the scene adapter's gap) that is staticSurfaceContact
+ *   at the centre distance n.x - w, the same penetration as staticPlaneContact's to rounding. A scene with no terrain
+ *   binds one zero texel, as the old host's.
  * - Save/load/undo: the rigid state is the system's (stateBuffer), not the engine's; save() and restore() copy it. */
 import type { SceneDescription, RigidBodyDescription } from "../../core/model";
 import { sceneHasTerrain } from "../../core/terrain";
+import type { BrickTerrainColumns } from "./brick-terrain.wgsl";
 import { solidVoxelEditsForScene } from "../../core/scene-lattice";
 import { initializeRigidBodies, type RigidBodyState } from "../../core/rigid-body";
 import { WebGPURigidBodySystem, GPU_RIGID_STATE_BYTES } from "../../core/webgpu-rigid-body";
@@ -36,6 +41,8 @@ export interface BrickRigidBodiesOptions {
   readonly density_kg_m3: number;
   /** The method's rigidCoupling value (default on): off runs neither couple nor the integrator. */
   readonly coupling?: boolean;
+  /** The ground's columns (BrickSceneSetup.terrain): required when the scene has terrain (sceneHasTerrain). */
+  readonly terrain?: BrickTerrainColumns;
 }
 
 /** Why a scene's bodies cannot run on the brick engine's body stages (empty when they can). */
@@ -43,13 +50,15 @@ export function brickRigidBodyGaps(scene: SceneDescription): string[] {
   const gaps: string[] = [], bodies = scene.rigidBodies ?? [];
   if (bodies.length === 0) return gaps;
   if (bodies.length > GPU_RIGID_BODY_CAPACITY) gaps.push(`${bodies.length} rigid bodies exceed the rigid capacity ${GPU_RIGID_BODY_CAPACITY}`);
-  if (sceneHasTerrain(scene)) gaps.push("rigid contact with terrain needs the brick engine's terrain source (the old host's terrain texture)");
   // Motor assemblies: the old host gives them the fluid's solid mask and the tank's shell as their solid
   // (rigidAssemblySolidWGSL). With no static voxel, that mask is empty and the shell is the container's walls and floor
   // (and lid, when closed): the rigid system's container planes, which solve an assembly piece by piece the same way
   // (staticPlaneContact -> assemblyPlaneContact). With static voxels, the mask must be bound as the rigid system's
   // procedural source, and it is not yet.
   const motor = bodies.find(b => b.motorAttachment !== undefined);
+  // With terrain, the old host's assembly solid drops its floor for the ground (rigidAssemblySolidLayout floor:
+  // !terrainContact): an assembly then contacts the ground through the same procedural source.
+  if (motor && sceneHasTerrain(scene)) gaps.push(`rigid body ${motor.id}: motor assemblies contact the ground through the old host's procedural source, not wired here (M5 step 3)`);
   if (motor && solidVoxelEditsForScene(scene).length > 0) gaps.push(`rigid body ${motor.id}: motor assemblies contact the static voxels through the old host's procedural source, not wired here (M5 step 3)`);
   const plate = bodies.find(b => b.shape === "rounded-plate");
   if (plate) gaps.push(`rigid body ${plate.id}: a rounded plate has no brick stamp`);
@@ -90,10 +99,14 @@ export class BrickRigidBodies implements BrickBodiesBinding {
     this.coupling = options.coupling !== false;
     this.exchange = device.createBuffer({ label: "nb-brick.rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.cuts = device.createBuffer({ label: "nb-brick.body cuts", size: 16 * RIGID_BODY_CUT_ATLAS_WIDTH, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // The old host's construction, less the terrain texture and the procedural (sculpt) collision source: the scene
-    // adapter refuses scenes that need them.
-    this.terrain = device.createTexture({ label: "nb-brick.rigid terrain (none)", size: [1, 1], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    this.system = new WebGPURigidBodySystem(device, scene, this.exchange, this.terrain, [1, 1]);
+    // The old host's construction, less the procedural (sculpt) collision source: the scene adapter refuses scenes that
+    // need it.
+    const ground = sceneHasTerrain(scene) ? options.terrain : undefined;
+    if (sceneHasTerrain(scene) && !ground) throw new Error("Brick rigid bodies: the scene has terrain; pass its columns (BrickSceneSetup.terrain)");
+    const [nx, nz] = ground?.columns ?? [1, 1];
+    this.terrain = device.createTexture({ label: ground ? "nb-brick.rigid terrain" : "nb-brick.rigid terrain (none)", size: [nx, nz], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    if (ground) device.queue.writeTexture({ texture: this.terrain }, Float32Array.from(ground.heights), { bytesPerRow: 4 * nx, rowsPerImage: nz }, [nx, nz]);
+    this.system = new WebGPURigidBodySystem(device, scene, this.exchange, this.terrain, [nx, nz]);
     this.roster = initializeRigidBodies(scene.rigidBodies ?? []);
   }
 

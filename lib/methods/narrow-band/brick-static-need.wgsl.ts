@@ -18,7 +18,10 @@
  *   upper face a solid lies just beyond: its liquid tiles there must be h, as the old engine's are, or a native 4h
  *   row would face the solid's h cells (P's 0xa5, lane P 2026-11-17).
  * - A supported brick is active when it is wet or holds a band tile. Wet means its F record is LIQUID or PARTICLES
- *   (setMark), or one of its 4h-owned tiles has a C corner with φ < 0. A band tile is a WANT bit that censusDecide wrote.
+ *   (setMark), one of its h-owned tiles has an F vertex with φ < 0, or one of its 4h-owned tiles has a C corner with
+ *   φ < 0. A band tile is a WANT bit that censusDecide wrote. The F vertices matter at the boot: its census runs before
+ *   the boot's setMark, on all-h boot bricks, so a cut brick under the band (a lake's ground) is wet by its φ alone,
+ *   and without them the boot's commit takes its tiles 4h (pressure's 0xa3 and rowsC latches, 2026-11-18).
  * - A supported brick that is active, or that neighbours an active supported brick (its 26 neighbours: each holds a
  *   tile within one tile of the active brick's), takes every one of its 8 tiles into WANT, with cdTile's ring.
  *
@@ -37,8 +40,7 @@
 import { BOX_TOKEN, type BrickLayout } from "./brick-abi";
 import { CFG, type BrickBinding, type BrickKernel } from "./brick-kernel";
 import { censusKernel } from "./brick-census.wgsl";
-import { brickStaticWGSL } from "./brick-static.wgsl";
-import type { SolidOccupancyMaskWalls } from "../../core/solid-occupancy-mask";
+import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
 /** The `need` buffer's words for a layout: 4 a C slot (supported bits 0-1, active bits 2-3), then the promoted count. */
 export const brickStaticNeedWords = (L: BrickLayout) => 4 * L.cap.c + 4;
@@ -49,7 +51,7 @@ const phiRO: BrickBinding = { name: "phi", kind: "ro", type: "array<u32>" };
 const solidRO: BrickBinding = { name: "solid", kind: "ro", type: "array<u32>" };
 const needRW: BrickBinding = { name: "staticNeed", kind: "rw", type: "array<atomic<u32>>" };
 
-export function brickStaticNeedKernels(L: BrickLayout, walls: SolidOccupancyMaskWalls): { censusStaticActive: BrickKernel; censusStaticPromote: BrickKernel } {
+export function brickStaticNeedKernels(L: BrickLayout, walls: BrickStaticWalls): { censusStaticActive: BrickKernel; censusStaticPromote: BrickKernel } {
   const statics = brickStaticWGSL({ box: L.box, openTop: walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls } });
   // Shared: a workgroup's page and bricks, a lane's brick and tile (nbChild's local order: x | y << 2 | z << 4).
   const common = /* wgsl */`
@@ -61,6 +63,13 @@ fn sdCVertex(T:vec3i)->f32{
   let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_AIR_C;}
   return bitcast<f32>(phi[NB_PHI_C_PHI+NB_STRIDE*cs+sdTileIndex(T)]);
 }
+// F vertex v's φ (nbFVertex) where an F slot holds it; NB_PHI_AIR_C elsewhere, and on the lattice's high planes (no
+// brick stores them: a wet cell there has a wet corner below).
+fn sdFVertex(v:vec3i)->f32{
+  if(any(v>=NB_LATTICE)){return NB_PHI_AIR_C;}
+  let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_AIR_C;}
+  return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
+}
 fn sdTileIndex(T:vec3i)->u32{let q=vec3u(T&vec3i(7));return q.x|(q.y<<3u)|(q.z<<6u);}
 fn sdBrickOf(cs:u32,k:u32)->vec3i{return 4*nbKeyCoord(nbCRec(cs,NB_REC_KEY))+vec3i(i32(k&3u),i32((k>>2u)&3u),i32(k>>4u));}
 fn sdTileOf(b:vec3i,j:u32)->vec3i{return 2*b+vec3i(i32(j&1u),i32((j>>1u)&1u),i32(j>>2u));}
@@ -69,8 +78,17 @@ fn sdTileOf(b:vec3i,j:u32)->vec3i{return 2*b+vec3i(i32(j&1u),i32((j>>1u)&1u),i32
 // pages are empty, so are all of its cells.
 fn sdVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
 fn sdPageEmpty(c:vec3i)->bool{return (nbStaticMaskPage(c)&0xffffu)==0u;}
+${walls.terrain ? `// The ground's cut cells (uniformMixedSolidTiles: a cell of the columns below its column's height) in the shell: a
+// column of the shell's whose height passes its lowest cell in the box.
+fn sdTerrainTile(T:vec3i)->bool{
+  let lo=4*T-vec3i(1);let a=max(lo.xz,vec2i(0));let b=min(lo.xz+vec2i(5),NB_TERRAIN_COLUMNS-1);let y=f32(max(lo.y,0));
+  if(lo.y+5<0){return false;}
+  for(var z=a.y;z<=b.y;z++){for(var x=a.x;x<=b.x;x++){if(y<nbTerrainHeight(x,z)){return true;}}}
+  return false;
+}` : ""}
 fn sdSupportTile(T:vec3i)->bool{
   let lo=4*T-vec3i(1);
+  ${walls.terrain ? "if(sdTerrainTile(T)){return true;}" : ""}
   var empty=true;
   for(var q=0u;q<8u;q++){empty=empty&&sdPageEmpty(lo+5*vec3i(i32(q&1u),i32((q>>1u)&1u),i32(q>>2u)));}
   if(empty){return false;}
@@ -96,6 +114,7 @@ var<workgroup> sdActive:atomic<u32>;
     let fs=nbChild(cs,k);
     if(fs<NB_SEAM&&(nbFRec(fs,NB_REC_CLASS)&(NB_CLASS_LIQUID|NB_CLASS_PARTICLES))!=0u){act=true;}
     if(!nbTileH(cs,i)){for(var q=0u;q<8u;q++){if(sdCVertex(T+vec3i(vec3u(q&1u,(q>>1u)&1u,q>>2u)))<0.0){act=true;}}}
+    else{for(var q=0u;q<125u&&!act;q++){if(sdFVertex(4*T+vec3i(i32(q%5u),i32((q/5u)%5u),i32(q/25u)))<0.0){act=true;}}}
     if(act){atomicOr(&sdActive,1u<<n);}
   }
   workgroupBarrier();

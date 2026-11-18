@@ -19,6 +19,7 @@
  * - A bring-up stage set (`bringUp: true`) is for E's tests only. The method
  *   refuses every scene on it (brick-method.ts).
  */
+import type { BrickStaticWalls } from "./brick-static.wgsl";
 import type { BrickSources } from "./brick-source";
 import { ARGS, ARGS_LIST_END, type BrickLayout } from "./brick-abi";
 import { ENGINE_BUFFERS, type BrickPlacement } from "./brick-kernel";
@@ -92,6 +93,9 @@ export interface BrickStageContext {
   /** The scene binds a static voxel mask (brick-static.wgsl.ts): F's set adds lane E's pSolid and phiSolid
    * (brick-solid-walk.wgsl.ts). */
   readonly statics?: boolean;
+  /** With statics: the mask's walls and the terrain's columns in the same binding (brick-static.wgsl.ts
+   * BrickStaticWalls). With terrain, pSolid and pSeed bind the static buffer (brick-terrain.wgsl.ts). */
+  readonly staticWalls?: BrickStaticWalls;
 }
 
 export type BrickStagesFactory = (context: BrickStageContext) => BrickStages;

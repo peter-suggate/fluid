@@ -5,6 +5,9 @@
 //
 // GPU: a still tank (32 x 64 x 32 cells, tiered, liquid y < 17) under two solid blocks over x, z 8..16: a shelf at
 // y 19..23, just over the surface, whose cut bricks hold the surface band; and a block at y 40..48, dry and far above it.
+// Then a deep tank (liquid y < 48) over a block on its floor (y 0..4, x, z 20..28), 44 cells under the surface: the
+// boot's census runs before its setMark, so that brick is wet by its F vertices alone (alpine-lake's ground and
+// sphere-jet's padded corner, 2026-11-18: their tiles went 4h at the boot's commit and the kick's solve latched).
 // Neither meets the liquid: a liquid row in a static solid cell latches 0xa2 in the operator until phiSolid and pSolid
 // keep liquid out of solid cells (E, next). 30 steps (under the 60-step probe). Each step must hold:
 // - no FAIL latch (before the rule, the census latched any tiered static cut, 0x63000000 / 0x63000004);
@@ -58,9 +61,10 @@ test("brick static need: the rule's kernels and the census's static latches foll
 
 /** The still tank with the shelf and the block: the engine's options built directly (the scene's voxel gap aside: this is the rule's
  * own regression, ahead of pSolid and phiSolid). The old engine's t = 0 φ excludes the solids (brickInitialPhi). */
-function shelfTank(): { options: BrickEngineOptions; surface: number; solids: { lo: Vec3; hi: Vec3 }[] } {
+const SHELF_SOLIDS = [{ lo: [8, 19, 8] as Vec3, hi: [16, 23, 16] as Vec3 }, { lo: [8, 40, 8] as Vec3, hi: [16, 48, 16] as Vec3 }];
+function shelfTank(surface = 17, solids = SHELF_SOLIDS): { options: BrickEngineOptions; surface: number; solids: { lo: Vec3; hi: Vec3 }[] } {
   const definition = getSceneDefinition("minimal-power-dam-break-32"), base = structuredClone(sceneDocument(definition)), scene = structuredClone(base);
-  const h = 0.025, surface = 17, solids = [{ lo: [8, 19, 8] as Vec3, hi: [16, 23, 16] as Vec3 }, { lo: [8, 40, 8] as Vec3, hi: [16, 48, 16] as Vec3 }];
+  const h = 0.025;
   scene.container = { ...scene.container, width_m: 32 * h, height_m: 64 * h, depth_m: 32 * h, fillFraction: 0 };
   scene.voxelDomain.finestCellSize_m = h; scene.solidVoxels = solidVoxelsOnMovedLattice(base, scene);
   scene.solidVoxels = [...scene.solidVoxels, ...solids.map(b => ({ operation: "fill" as const, minimum: [b.lo[0], b.lo[1], b.lo[2]] as [number, number, number], maximumExclusive: [b.hi[0], b.hi[1], b.hi[2]] as [number, number, number] }))];
@@ -77,7 +81,7 @@ function shelfTank(): { options: BrickEngineOptions; surface: number; solids: { 
   return {
     surface, solids,
     options: {
-      ...o, farPhi: 64, capacities: { f: 4 * 8 * 4 * 4, c: 2 * 2 * 1 * 4, b: 16, k: 64, particles: Math.max(3 * seeds, 65536) }, liquid: start.liquid, initial: start.initial,
+      ...o, farPhi: 64, capacities: { f: 4 * 8 * 4 * 4, c: 2 * 2 * 2 * 4, b: 16, k: 64, particles: Math.max(3 * seeds, 65536) }, liquid: start.liquid, initial: start.initial,
       initialVelocity: brickInitialVelocity(scene, lattice), solver: compositeMGPCG(), stages: fluidStagesAt(true), values, particles: { bandDepth: band },
       fluid: { density_kg_m3: scene.fluid.density_kg_m3, viscosity_Pa_s: scene.fluid.dynamicViscosity_Pa_s, surfaceTension_N_m: scene.fluid.surfaceTension_N_m },
       staticMask: { words: mask.words, walls: brickStaticMaskWalls(lattice, false) }, label: "static-need shelf",
@@ -85,9 +89,10 @@ function shelfTank(): { options: BrickEngineOptions; surface: number; solids: { 
   };
 }
 
-test("brick static need (GPU): a still tank under a solid shelf keeps its wet cut bricks h and a dry block's 4h, no latch, 30 steps", GPU, async t => {
+for (const [name, surface, solids] of [["a still tank under a solid shelf", 17, SHELF_SOLIDS], ["a deep tank over a floor block", 48, [{ lo: [20, 0, 20] as Vec3, hi: [28, 4, 28] as Vec3 }]]] as const)
+test(`brick static need (GPU): ${name} keeps its wet cut bricks h from the boot and a dry block's 4h, no latch, 30 steps`, GPU, async t => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
-  const { options, surface, solids } = shelfTank();
+  const { options } = shelfTank(surface, [...solids]);
   await withUniformDevice("brick static need", async device => {
     const e = await BrickEngine.create(device, options), L = e.layout;
     { const s0 = await snapshot(e); assert.equal(s0.header[H.FAIL], 0, `boot: FAIL ${s0.header[H.FAIL]} info ${s0.header[H.FAIL_INFO]?.toString(16)}`); t.diagnostic(`boot: ${s0.bricks.size} F bricks, live K ${s0.header[H.LIVE_K]}`); }
@@ -101,8 +106,8 @@ test("brick static need (GPU): a still tank under a solid shelf keeps its wet cu
     };
     let promotedEver = 0, wetCutChecked = 0;
     try {
-      for (let step = 1; step <= 30; step++) {
-        e.advance(1);
+      for (let step = 0; step <= 30; step++) {
+        if (step > 0) e.advance(1);
         const s = await snapshot(e), need = await e.read("staticNeed");
         assert.equal(s.header[H.FAIL], 0, `step ${step}: FAIL ${s.header[H.FAIL]} info ${s.header[H.FAIL_INFO]?.toString(16)}, live K ${s.header[H.LIVE_K]}, promoted ${need[4 * L.cap.c]}`);
         const promoted = need[4 * L.cap.c]!; promotedEver = Math.max(promotedEver, promoted);

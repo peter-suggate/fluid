@@ -14,6 +14,7 @@
  * - Every dispatch is either indirect from a list or sized from a capacity.
  * - Nothing is sized from the lattice.
  */
+import { brickTerrainWords, type BrickTerrainColumns } from "./brick-terrain.wgsl";
 import { brickLowerOn, brickModuleCode } from "./brick-lower";
 import { brickBootSourceBoxes, brickSourceRing, type BrickSources } from "./brick-source";
 import { brickSourceWords } from "./brick-source.wgsl";
@@ -86,6 +87,9 @@ export interface BrickEngineOptions {
    * stages, operator and pressure: no static stage, no K slot work), and the statics schedule is compiled beside it and
    * taken at the first restampStatics (a first voxel stroke is a live edit like any other, never a rebuild). */
   readonly staticsDeferred?: boolean;
+  /** The terrain's columns (brick-terrain.wgsl.ts brickTerrainColumns), with staticMask: they follow the mask's words
+   * in `solid`, and every static hook reads the ground with the voxels. Never deferred: the ground is solid at the build. */
+  readonly terrain?: BrickTerrainColumns;
   /** The diagnostic lowering of dynamic vector-component writes (brick-lower.ts), off by default: true lowers and
    * checks every module before its shader is created. Absent: NB_BRICK_LOWER=1 in the environment turns it on. */
   readonly lowerDynamicWrites?: boolean;
@@ -284,6 +288,16 @@ export function uploadWords(queue: GPUQueue, buffer: GPUBuffer, offsetBytes: num
   if (body < data.length) queue.writeBuffer(buffer, offsetBytes + 4 * body, data, body, data.length - body);
 }
 
+/** The static binding the kernels are built from: the mask's words and walls, the terrain's columns in the walls
+ * (BrickStaticWalls: they follow the mask's words in `solid`). Terrain without a mask, or deferred, fails explicitly. */
+function brickStaticBinding(o: Pick<BrickEngineOptions, "staticMask" | "terrain" | "staticsDeferred">): BrickStaticMaskBinding | undefined {
+  const m = o.staticMask;
+  if (o.terrain && !m) throw new Error("Brick engine: terrain needs the static mask (its columns follow the mask's words in the static binding)");
+  if (o.terrain && o.staticsDeferred) throw new Error("Brick engine: a scene with terrain is solid at the build; its statics cannot be deferred");
+  if (!m || !o.terrain) return m;
+  return { words: m.words, walls: { ...m.walls, terrain: { base: m.words.length, columns: o.terrain.columns } } };
+}
+
 export class BrickEngine {
   readonly layout: BrickLayout;
   get solver(): PressureSolver { return this.solverNow; }
@@ -469,12 +483,12 @@ export class BrickEngine {
     const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...options.capacities, apic: options.apic });
     // Deferred statics (an empty mask): the plain variant runs (no static stage, and no K slot work unless bodies take
     // slots), and the statics variant is compiled beside it for the first live edit (armStatics).
-    const mask = options.staticMask, deferred = mask !== undefined && options.staticsDeferred === true;
+    const mask = brickStaticBinding(options), deferred = mask !== undefined && options.staticsDeferred === true;
     const kPlain = layout.cap.k > 0 && (!deferred || options.bodies !== undefined);
     const solverFor = (cuts?: false) => options.solver(layout, { ...(options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {}), ...(cuts === false ? { cuts } : {}) });
     const solver = solverFor(kPlain || !deferred ? undefined : false);
     validatePressureSolver(solver);
-    const stagesFor = (statics: boolean) => options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources, ...(statics ? { statics: true } : {}) });
+    const stagesFor = (statics: boolean) => options.stages({ layout, dt_s: options.dt_s, h_m: options.h_m, gravity_mps2: options.gravity_mps2, values: options.values ?? {}, fluid: options.fluid, particles: options.particles, sources: options.sources, ...(statics ? { statics: true, ...(mask ? { staticWalls: mask.walls } : {}) } : {}) });
     const stages = stagesFor(mask !== undefined && !deferred);
     validateBrickStages(stages);
     // The boot's candidates (an f-long list): tiered, bootTieredSet's bricks and page-only keys; all-h, bootBricks.
@@ -579,7 +593,8 @@ export class BrickEngine {
     if (!restamp || !solid || !edit) throw new Error("Brick engine: no static mask to edit (built without static voxels)");
     if (this.failure) throw new Error(this.failure);
     if (this.editsError) throw new Error(`Brick engine: ${this.editsError}`);
-    if (4 * words.length !== solid.size) throw new Error(`Brick engine: the edited mask holds ${words.length} words, the bound image ${solid.size / 4}`);
+    const ground = this.options.terrain ? this.options.terrain.heights.length : 0;
+    if (4 * (words.length + ground) !== solid.size) throw new Error(`Brick engine: the edited mask holds ${words.length} words and the terrain ${ground}, the bound image ${solid.size / 4}`);
     for (const r of ranges) {
       if (!(Number.isInteger(r.firstWord) && Number.isInteger(r.wordCount) && r.firstWord >= 0 && r.wordCount > 0 && r.firstWord + r.wordCount <= words.length)) throw new Error(`Brick engine: mask range ${r.firstWord}+${r.wordCount} is outside the image`);
       uploadWords(this.device.queue, solid, 4 * r.firstWord, words.subarray(r.firstWord, r.firstWord + r.wordCount) as Uint32Array<ArrayBuffer>);
@@ -655,7 +670,13 @@ export class BrickEngine {
     const bodies = this.options.bodies;
     if (bodies) { this.external.set("bodies", bodies.bodies); this.external.set("bodyCuts", bodies.cuts); this.external.set("bodyExchange", bodies.exchange); }
     const mask = this.options.staticMask;
-    if (mask) uploadWords(d.queue, make("solid", mask.words.length), 0, mask.words as Uint32Array<ArrayBuffer>);
+    // The terrain's columns follow the mask's words (brick-terrain.wgsl.ts: BrickStaticWalls.terrain.base).
+    const ground = this.options.terrain ? brickTerrainWords(this.options.terrain) : undefined;
+    if (mask) {
+      const solid = make("solid", mask.words.length + (ground?.length ?? 0));
+      uploadWords(d.queue, solid, 0, mask.words as Uint32Array<ArrayBuffer>);
+      if (ground) uploadWords(d.queue, solid, 4 * mask.words.length, ground as Uint32Array<ArrayBuffer>);
+    }
     // The live edit's changed cells (solidRestamp's `solidEdit`).
     if (mask) make("solidEdit", BRICK_SOLID_EDIT_WORDS);
     // The census's static need rule (brick-static-need.wgsl.ts): the cut and active bits, tiered only.

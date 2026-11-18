@@ -1106,10 +1106,11 @@ fn ySeed(T:vec3i,a:u32)->vec3f{
 }`);
 
   // vGauge (the old surface volume gauge, measureInitial over the geometry's occupancy): a workgroup a brick sums
-  // nbfCellFill over its open cells (FLAGS.OPEN) from the brick's 9^3 vertices, staged; one atomic a brick into the step parity's
+  // nbfCellFill times the cell's open capacity (FRAC of its K slot, 1 in an uncut brick) over its open cells
+  // (FLAGS.OPEN) from the brick's 9^3 vertices, staged; one atomic a brick into the step parity's
   // fixed-point pair (cfg.w = 1: the boot's capture into the budget). The first workgroup (F brick or C page) clears the other parity's
   // pair, which the last step's rate read and the next step's gauge fills.
-  const vGauge = k("vGauge", [CFG, FB.set, FB.dir, FB.phiRO], [FG_SLOT_WGSL, FG_PHI_WGSL, V_WGSL, levelSetFillWGSL, geometricPlaneBoxWGSL, nbfVolumeWGSL.slice(0, nbfVolumeWGSL.indexOf("// filled, budget")), nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")), V_COARSE_WGSL].join("\n") + /* wgsl */`
+  const vGauge = k("vGauge", [CFG, FB.set, FB.dir, FB.phiRO, { name: "cut", kind: "ro", type: "array<f32>" }], [FG_SLOT_WGSL, FG_PHI_WGSL, V_WGSL, levelSetFillWGSL, geometricPlaneBoxWGSL, nbfVolumeWGSL.slice(0, nbfVolumeWGSL.indexOf("// filled, budget")), nbfMomentumWGSL.slice(nbfMomentumWGSL.indexOf("// A cell's occupancy")), V_COARSE_WGSL].join("\n") + /* wgsl */`
 var<workgroup> wVertex:array<f32,729>;
 var<workgroup> wSum:atomic<u32>;
 var<workgroup> sCount:u32;
@@ -1141,7 +1142,7 @@ fn vGaugePage(slot:u32,lid:u32){
  let split=workgroupUniformLoad(&sCount);
  if(FG_TIERED&&g>=split){if(g-split<nbListCount(NB_LIST_C_ALL)){vGaugePage(nbListSlot(NB_LIST_C_ALL,g-split),lid);}return;}
  if(g>=split){return;}
- let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);
+ let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);let kslot=nbFRec(slot,NB_REC_CUT);
  for(var i=lid;i<729u;i+=64u){wVertex[i]=fgPhi(o+vec3i(i32(i%9u),i32((i/9u)%9u),i32(i/81u)));}
  workgroupBarrier();
  var part=0u;
@@ -1151,10 +1152,12 @@ fn vGaugePage(slot:u32,lid:u32){
   var v:array<f32,8>;var negative=0u;
   for(var k=0u;k<8u;k++){let q=c+nbfFillCorner(k);v[k]=wVertex[u32(q.x+9*q.y+81*q.z)];negative+=select(0u,1u,v[k]<0.0);}
   if(negative==0u){continue;}
-  // A closed cell (FLAGS.OPEN clear: solidStamp's mask voxel, a body's interior) holds no liquid, as the old gauge's
-  // cells weigh by their open capacity: the static level set extends phi into the solid, which is no volume.
+  // The old gauge's h owner holds fill times its capacity (umCapacity: umCellOpen, the static and body open fraction
+  // merged, as the K slot's FRAC): the static level set extends phi into the solid, which is no volume. A closed cell
+  // (FLAGS.OPEN clear: solidStamp's mask voxel, a body's interior) holds none.
   if((phi[NB_PHI_F_FLAGS+NB_STRIDE*slot+lid+64u*j]&NB_FLAG_OPEN)==0u){continue;}
-  let f=select(nbfCellFill(v),1.0,negative==8u);
+  let open=select(cut[NB_CUT_FRAC+NB_STRIDE*kslot+lid+64u*j],1.0,kslot==NB_NONE);
+  let f=select(nbfCellFill(v),1.0,negative==8u)*open;
   part+=u32(round(f*V_VOL_UNIT));
  }
  atomicAdd(&wSum,part);

@@ -13,6 +13,7 @@
  * apply the forces (as the old engine's forces kernel) or refuse them.
  * Anything else is a gap, and the method runs the scene on the old engine.
  */
+import { brickTerrainColumns, type BrickTerrainColumns } from "./brick-terrain.wgsl";
 import type { SceneDescription } from "../../core/model";
 import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
@@ -80,6 +81,17 @@ export const BRICK_ENGINE_SCENES: readonly string[] = [
   // -90.7% at 300 steps, the sub-resolution film the 64^3 droplet loses too; the old engine exhausts its page pool at
   // frame 129 on both.
   "power-droplet-240", "power-droplet-256",
+  // The batch of 2026-11-18 (two 60-step brick runs within the old engine's bar, then the long run at the authored
+  // length with no latch). Source-fed scenes start dry, so they are judged on the analytic budget: the brick holds
+  // +4..9% at 60 steps where the old engine loses 26-66% (its film), and cm12-figure-1 -1.3% at 360. The old engine
+  // cannot run nbflip-figure-7-pour (its page pool). The cloth scenes hold no water.
+  "uniform-trough-hose-fill", "twin-dam-collision", "cm12-figure-1", "nbflip-figure-7-pour", "nbflip-water-slide-theme-park",
+  "nbflip-ramp-channel", "nbflip-ramp-staircase", "nbflip-ramp-flat",
+  "cloth-analytic-free-fall", "cloth-analytic-hanging-curtain", "cloth-analytic-swinging-sheet", "cloth-analytic-peirce-cantilever",
+  // Padded containers (the lattice's page rounding past the container closed by padding voxels, 2026-11-18): the same
+  // batch rule; large-power-dam-break's splash peaks at +27% at step 75 and ends at -1.6% at 300.
+  "bounded-pool-transfer", "large-power-hydrostatic", "large-power-dam-break",
+  "sparse-cm12-ladder-frontier-create", "sparse-cm12-ladder-frontier-advance", "sparse-cm12-ladder-retire-reuse",
 ];
 
 /** The air an open top keeps above the container's pages, in cells: one page. */
@@ -91,8 +103,9 @@ export interface BrickSceneSetup {
    * fluid box). Where that pads past the container, `box` is the container's cells, and the cells past it are the box
    * rule's wall (brick-abi.md §2), as the old engine's voxel shell and padding close them. */
   readonly lattice: Vec3;
-  /** The container's cells (whole bricks) where the lattice is padded past them; absent: the lattice. Under an open top
-   * its y is the lattice's: the headroom above the container is in the box (BRICK_OPEN_TOP_HEADROOM). */
+  /** The box rule's walls where the lattice is padded past them; absent: the lattice. The container's cells rounded up
+   * to whole bricks: where that passes the container, the cells between are the static mask's padding voxels. Under an
+   * open top its y is the lattice's: the headroom above the container is in the box (BRICK_OPEN_TOP_HEADROOM). */
   readonly box?: Vec3;
   /** An open top (container.top "open"): the lattice holds BRICK_OPEN_TOP_HEADROOM cells of air above the container,
    * and liquid that reaches its top brick layer latches (brick-set.wgsl.ts setMark, FAIL.REACH info bit 31). */
@@ -128,6 +141,8 @@ export interface BrickSceneSetup {
   readonly staticMask?: SolidOccupancyMask;
   /** The mask is empty at the build: the engine runs the plain schedule until the first live edit (BrickEngineOptions). */
   readonly staticsDeferred?: true;
+  /** The ground's columns (brick-terrain.wgsl.ts brickTerrainColumns), bound after the mask's words. */
+  readonly terrain?: BrickTerrainColumns;
 }
 
 /** The scene's setup, or every reason the brick engine cannot run it. */
@@ -142,9 +157,11 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   if (c.top !== "closed" && !openTop) gaps.push(`container.top "${c.top}" is not a brick engine top (closed or open)`);
   // The engine reads the voxels (solidStamp, the static need, pSolid, phiSolid: M3 stages 1-3) and takes a live edit in
   // place (BrickNBFlipSolver.applySceneUniforms, solidRestamp; brick-solid-edit.test.ts holds the AGENTS.md regressions).
-  // The static hooks read the voxel mask (brick-static.wgsl.ts); a ground field or a procedural boundary sampled as a
-  // field (umUnitBoxOpen's terrain, umBoundaryTouchesBox) is not read yet, so it must not run as open water.
-  if (scene.terrain) gaps.push("terrain needs the static solid's ground field (M3)");
+  // The static hooks read the voxel mask and the ground (brick-static.wgsl.ts, brick-terrain.wgsl.ts: the old engine's
+  // heightfield, its cell and face fractions, the particles' contact). A sculpt cut of the ground (collisionSculptSample)
+  // and a procedural boundary sampled as a field (umBoundaryTouchesBox) are not read yet, so they must not run as open
+  // water.
+  if (scene.terrain && (scene.solidVoxels ?? []).some(p => p.operation === "clear" && p.affectsScenery === true)) gaps.push("a sculpted terrain needs the ground's sculpt field (collisionSculptSample)");
   if (scene.solidBoundary && scene.solidBoundary.collision !== "voxels") gaps.push("a procedural boundary sampled as a field needs boundary records (M3)");
   // Rigid bodies (lane P, M5: bodies-host.ts): the body stages need K slots, and the host's own refusals.
   gaps.push(...brickRigidBodyGaps(scene));
@@ -157,8 +174,8 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // Padding (M3): the census and the C level set run whole 32^3 pages (setCensus, levelset-coarse 0x4c430001), so the
   // lattice is the container's cells rounded up to whole pages (the old engine's fluid box), and the box rule closes
   // the cells past the container at the box (brick-abi.md §2), as the old engine's shell does (its padding lies behind
-  // the shell, so no liquid reaches it). A container that is not whole bricks would cut a brick and a 4h tile: that
-  // needs solidStamp's cut slots.
+  // the shell, so no liquid reaches it). A container that is not whole bricks cuts a brick and a 4h tile: its padding
+  // inside the box is solidStamp's (below).
   // An open top (M3): the old engine's frame holds AIR pages above the box, and its x and z walls rise to the frame's
   // top. Here the lattice holds BRICK_OPEN_TOP_HEADROOM cells (a page) more above the container's pages, in the box:
   // the air there is the free surface's (p = 0), the walls rise with it, and the lattice's top is a lid that liquid
@@ -166,8 +183,15 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const cells = sceneLatticeDimensions(scene), old = sceneFluidLatticeDimensions(scene);
   const paged: Vec3 = openTop ? [old[0]!, old[1]! + BRICK_OPEN_TOP_HEADROOM, old[2]!] : [old[0]!, old[1]!, old[2]!];
   const walls: Vec3 = openTop ? [cells[0]!, paged[1], cells[2]!] : [cells[0]!, cells[1]!, cells[2]!];
-  const padded = walls.some((n, a) => n !== paged[a]), lattice = paged, box = padded ? walls : undefined;
-  if (walls.some(n => n % 8 !== 0)) gaps.push(`the container's ${cells.join("x")} cells are not whole bricks: padding inside a brick needs solidStamp's cuts (M3)`);
+  // A container that is not whole bricks (2026-11-18): the box rule closes whole bricks, so the engine's box is the
+  // container's cells rounded up to bricks, and the cells between the container and that box are the static mask's
+  // (solidWorldForFluidLattice fills the lattice's padding, the old engine's own image): solidStamp closes and cuts
+  // them, as the old engine's padding voxels close its cells past the container. The initial liquid, the sources and
+  // the pool rule read the container's own cells (`container`).
+  const bricked = walls.map((n, a) => Math.min(paged[a]!, 8 * Math.ceil(n / 8))) as unknown as Vec3;
+  const padInBrick = walls.some((n, a) => n !== bricked[a]);
+  const padded = bricked.some((n, a) => n !== paged[a]), lattice = paged, box = padded ? bricked : undefined;
+  const container = walls.some((n, a) => n !== paged[a]) ? walls : undefined;
   // Padded to whole pages: F's walls (512e7a9f), the release readers' (7b9e12e7) and P's pressure walls (fecb32a9)
   // are at the box.
   const hs = [c.width_m / cells[0], c.height_m / cells[1], c.depth_m / cells[2]];
@@ -179,7 +203,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // The initial liquid (brick-initial.ts): a dam-break box or a tank-fill slab keeps its closed form; any other
   // description is the old engine's own t = 0 φ as a page table.
   const n = lattice, g = f.gravity_m_s2, farPhi = Math.max(...old), band = f.brickTiers?.particleBandDepth ?? 3;
-  const L: Vec3 = [n[0]!, n[1]!, n[2]!], B: Vec3 | undefined = box ? [box[0]!, box[1]!, box[2]!] : undefined, inBox = B ? { box: B } : {};
+  const L: Vec3 = [n[0]!, n[1]!, n[2]!], B: Vec3 | undefined = container ? [container[0]!, container[1]!, container[2]!] : undefined, inBox = B ? { box: B } : {};
   const start = brickInitialLiquid(scene, { lattice: L, ...inBox, farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z] });
   const origin_m: Vec3 = [-0.5 * c.width_m, 0, -0.5 * c.depth_m];
   const sources = brickSources(scene, { lattice: L, ...inBox, h_m: hs[0]!, origin_m, dt_s: dt! });
@@ -193,18 +217,21 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // The mask: the old engine's own voxel image (solidWorldForFluidLattice), on every scene, so a first voxel stroke is a
   // live edit like any other. Empty at the build, the engine defers its static stages to that first edit
   // (BrickEngineOptions.staticsDeferred): the scene runs the plain schedule until then.
-  const staticMask = brickStaticMask(scene, { always: true })!;
-  // K: the bricks the voxels cut now (each may be resident and stamped) and BRICK_STATIC_EDIT_K for live edits, at most
-  // one a F slot; an authored k above it stands (lane P's body peaks).
-  const k = Math.max(p.k, Math.min(p.f, brickStaticCutBricks(staticMask) + BRICK_STATIC_EDIT_K));
+  const staticMask = brickStaticMask(scene, { always: true, padding: padInBrick })!;
+  // The ground (brick-terrain.wgsl.ts): the old engine's columns over the container's, solid at the build (never deferred).
+  const terrain = brickTerrainColumns(scene);
+  if (terrain && (terrain.columns[0] !== walls[0] || terrain.columns[1] !== walls[2])) return { gaps: [...gaps, `the terrain's ${terrain.columns.join("x")} columns are not the container's ${walls[0]}x${walls[2]}`] };
+  // K: the bricks the voxels and the ground cut now (each may be resident and stamped) and BRICK_STATIC_EDIT_K for live
+  // edits, at most one a F slot; an authored k above it stands (lane P's body peaks).
+  const k = Math.max(p.k, Math.min(p.f, brickStaticCutBricks(staticMask, terrain ? { terrain, box: box ?? L } : undefined) + BRICK_STATIC_EDIT_K));
   return {
     gaps,
     setup: {
-      sceneId: id, lattice: L, ...inBox, ...(openTop ? { openTop: true as const } : {}), farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
+      sceneId: id, lattice: L, ...(box ? { box: [box[0]!, box[1]!, box[2]!] as Vec3 } : {}), ...(openTop ? { openTop: true as const } : {}), farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
       capacities: { f: p.f, c: p.c, b: p.b, k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
       liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, L, B), bootBricks: start.bricks, bootPages: start.pages, origin_m,
       ...(sources ? { sources } : {}),
-      staticMask, ...(staticMask.empty ? { staticsDeferred: true as const } : {}),
+      staticMask, ...(staticMask.empty && !terrain ? { staticsDeferred: true as const } : {}), ...(terrain ? { terrain } : {}),
     },
   };
 }

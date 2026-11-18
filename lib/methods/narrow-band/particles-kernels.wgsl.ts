@@ -41,7 +41,8 @@ import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGS
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
 import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasAt, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
-import { BRICK_SOLID_CELL_WGSL, BRICK_SOLID_PARTICLE_WGSL, brickMoveDeferWGSL, brickPSolidWGSL, brickSeedBlockedWGSL } from "./brick-solid-walk.wgsl";
+import { BRICK_SOLID_CELL_WGSL, BRICK_SOLID_PARTICLE_TERRAIN_WGSL, BRICK_SOLID_PARTICLE_WGSL, brickMoveDeferWGSL, brickPSolidWGSL, brickSeedBlockedWGSL, brickSolidCellWGSL } from "./brick-solid-walk.wgsl";
+import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
 /** The records' indirect arguments, in F's args region (brick-abi.md §5.5): x, y, z by the fold rule. */
 export const P_ARGS_RECORDS = ARGS.LANE_F;
@@ -96,8 +97,13 @@ const PS_DEPTH_WGSL = (() => {
 
 /** The particle kernels; options.bandDepth the particle band's depth in cells (the scene's, 3 by default);
  * options.statics the scene's static voxel mask is bound (lane E's pSolid and the seeding's blocked test). */
-export function particleKernels(L: BrickLayout, F: FluidLayout, options: { readonly bandDepth: number; readonly statics?: boolean } = { bandDepth: NBF_PARTICLE_SETTINGS.particleBandDepth }) {
+export function particleKernels(L: BrickLayout, F: FluidLayout, options: { readonly bandDepth: number; readonly statics?: boolean; readonly staticWalls?: BrickStaticWalls } = { bandDepth: NBF_PARTICLE_SETTINGS.particleBandDepth }) {
   const statics = options.statics === true;
+  // With terrain (brick-terrain.wgsl.ts), pSolid and pSeed bind the static buffer and read the hooks: the walk's voxel
+  // test and the ground's contact, the blocked test's point under the ground.
+  const walls = statics ? options.staticWalls : undefined;
+  const ground = walls?.terrain ? brickStaticWGSL({ box: L.box, openTop: walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls } }) : undefined;
+  const solidRO: BrickBinding = { name: "solid", kind: "ro", type: "array<u32>" };
   const nbfParticleFormulasWGSL = nbfParticleFormulasAt(options.bandDepth);
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const common = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_VEL_WGSL, FG_SAMPLE_WGSL, FG_DEPTH_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, nbfParticleFormulasWGSL, BANK_WGSL, PARTICLE_WGSL].join("\n");
@@ -288,7 +294,7 @@ fn pFile(i:u32,p:Particle,split:bool){
   // Statics (lane E, brick-solid-walk.wgsl.ts): pMove defers a NEAR_SOLID brick's records to pSolid, which moves them
   // with pMove's text and the solid walk.
   const pMove = k("pMove", pMoveBindings, statics ? BRICK_SOLID_PARTICLE_WGSL + brickMoveDeferWGSL(pMoveCode) : pMoveCode);
-  const pSolid = statics ? k("pSolid", pMoveBindings, BRICK_SOLID_PARTICLE_WGSL + brickPSolidWGSL(pMoveCode)) : undefined;
+  const pSolid = statics ? k("pSolid", ground ? [...pMoveBindings, solidRO] : pMoveBindings, (ground ? ground + BRICK_SOLID_PARTICLE_TERRAIN_WGSL : BRICK_SOLID_PARTICLE_WGSL) + brickPSolidWGSL(pMoveCode)) : undefined;
 
   const pScan = k("pScan", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, BANK_WGSL].join("\n") + /* wgsl */`
 var<workgroup> scan:array<u32,256>;
@@ -559,7 +565,8 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
  for(var r=0u;r<2u;r++){if(masks[r]!=0u){pSeedCellWrite(o+nbLocalCoord(lid+256u*r),bank,initial,masks[r],at);at+=countOneBits(masks[r]);}}
 }`;
   // Statics (lane E): seedSite's nbParticleBlocked refuses a site in a closed cell.
-  const pSeed = k("pSeed", [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src], statics ? BRICK_SOLID_CELL_WGSL + brickSeedBlockedWGSL(pSeedCode) : pSeedCode);
+  const seedBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src];
+  const pSeed = k("pSeed", ground ? [...seedBindings, solidRO] : seedBindings, statics ? (ground ? ground + brickSolidCellWGSL(true) : BRICK_SOLID_CELL_WGSL) + brickSeedBlockedWGSL(pSeedCode) : pSeedCode);
 
   // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none.
   const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`

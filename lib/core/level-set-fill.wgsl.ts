@@ -8,6 +8,13 @@ fn tetra(v:vec4f)->f32{
  // zero faces meet negative corners at roundoff scale (~1e-15 metres).
  if(all(v>=vec4f(0.0))){return 0.0;}
  if(all(v<=vec4f(0.0))){return 1.0;}
+ // The measure is scale-free, so take ratios of corners at unit scale. At roundoff scale (all four within ~1e-15 m,
+ // the zero face on a vertex plane) Metal's fast math folds a product of ratios into one division whose numerator
+ // and denominator are subnormal, flushed to 0: 0/0 (alpine and tall-cells' boot frames, 2026-11-18).
+ let w=abs(v);
+ return tetraUnit(v/max(max(w.x,w.y),max(w.z,w.w)));
+}
+fn tetraUnit(v:vec4f)->f32{
  // Stable partition, negatives first, by a fixed odd-even transposition
  // network: s holds the negatives then the outside values in their order,
  // in registers (no dynamically indexed private arrays).

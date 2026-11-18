@@ -100,7 +100,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   static async create(device: GPUDevice, options: BrickSolverOptions): Promise<BrickNBFlipSolver> {
     const s = options.setup;
     const rigid = options.rigid?.rigidBodies?.length
-      ? await BrickRigidBodies.create(device, options.rigid, { frame_m: s.origin_m, h_m: s.h_m, dt_s: s.dt_s, density_kg_m3: s.density_kg_m3, coupling: options.values.rigidCoupling !== "off" })
+      ? await BrickRigidBodies.create(device, options.rigid, { frame_m: s.origin_m, h_m: s.h_m, dt_s: s.dt_s, density_kg_m3: s.density_kg_m3, coupling: options.values.rigidCoupling !== "off", ...(s.terrain ? { terrain: s.terrain } : {}) })
       : undefined;
     const engine = await BrickEngine.create(device, {
       lattice: s.lattice, ...(s.box ? { box: s.box } : {}), ...(s.openTop ? { openTop: true } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), ...(options.censusHold ? { censusHold: options.censusHold } : {}),
@@ -108,7 +108,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },
       ...(rigid ? { bodies: rigid } : {}),
-      ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}),
+      ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}), ...(s.terrain ? { terrain: s.terrain } : {}),
     });
     const presentation = await BrickPresentation.create(engine, options.farPhi_m);
     const solver = new BrickNBFlipSolver(options, engine, presentation, rigid);
@@ -229,7 +229,10 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     try { trial.update(world); } catch (error) {
       throw new Error(`This voxel edit needs more of the solid mask than the brick engine was built with (${error instanceof Error ? error.message : String(error)}); reset the scene to apply it.`);
     }
-    const cut = brickStaticCutBricks(trial), k = this.brickEngine.layout.cap.k;
+    // A sculpt cut of the ground is not read by the brick engine (brick-terrain.wgsl.ts): refused, never run as open ground.
+    if (this.options.setup.terrain && (scene.solidVoxels ?? []).some(p => p.operation === "clear" && p.affectsScenery === true)) throw new Error("The brick engine does not read a sculpt cut of the terrain; reset the scene to rebuild it on the uniform engine.");
+    const s = this.options.setup;
+    const cut = brickStaticCutBricks(trial, s.terrain ? { terrain: s.terrain, box: s.box ?? s.lattice } : undefined), k = this.brickEngine.layout.cap.k;
     if (cut > k) throw new Error(`This voxel edit cuts ${cut} bricks, over the ${k} K slots the brick engine was built with; reset the scene to apply it.`);
   }
 
@@ -243,6 +246,8 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     if (scene === this.scene) return;
     const mask = this.options.setup.staticMask;
     if (!mask || !this.scene || this.info.simulationFailure || !sceneDiffersInSolidsAlone(scene, this.scene)) return false;
+    // A sculpt cut of the ground: the rebuild takes it (the brick engine refuses it, brickSceneSetup's gap).
+    if (this.options.setup.terrain && (scene.solidVoxels ?? []).some(p => p.operation === "clear" && p.affectsScenery === true)) return false;
     const world = solidWorldForFluidLattice(scene);
     const lo: [number, number, number] = [Infinity, Infinity, Infinity], hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
     let ranges: ReturnType<typeof mask.update>;

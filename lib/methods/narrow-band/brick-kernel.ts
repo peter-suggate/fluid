@@ -37,8 +37,10 @@ export interface BrickPlacement {
 export const ENGINE_BUFFERS = ["set", "dir", "args", "vel", "phi", "pres", "cut", "parts", "xfer", "census", "solid", "src"] as const;
 export type EngineBufferName = typeof ENGINE_BUFFERS[number];
 
-/** The at-most-8 storage buffers a kernel rule (brick-abi.md §6). */
-export const MAX_STORAGE_BINDINGS = 8;
+/** The at-most-9 storage buffers a kernel rule (brick-abi.md §6): the app already needs 9 a stage (the old engine's
+ * sparse band, requiredFluidDeviceLimits), so the brick engine's terrain pSolid (pMove's 8 and the ground) adds no
+ * device requirement. A kernel that needs more splits. */
+export const MAX_STORAGE_BINDINGS = 9;
 
 /** WGSL identifiers of engine buffers whose names WGSL reserves (`set`). */
 export const WGSL_NAMES: Readonly<Record<string, string>> = { set: "nbSet" };

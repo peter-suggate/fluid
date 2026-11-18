@@ -42,8 +42,19 @@
 /** NEAR_SOLID's reach (cells): a brick within this many cells of a mask voxel, on every axis. */
 export const BRICK_SOLID_RING = 8;
 
-/** The closed-cell test and the NEAR_SOLID class (pMove, pSolid, pSeed, lAdvect and phiSolid). */
-export const BRICK_SOLID_CELL_WGSL = /* wgsl */`
+/** The closed-cell test and the NEAR_SOLID class (pMove, pSolid, pSeed, lAdvect and phiSolid). `terrain`: the kernel
+ * binds the static hooks with the ground (brick-static.wgsl.ts, brick-terrain.wgsl.ts), and a particle's blocked test is
+ * nbParticleBlocked's with terrain: the voxel of its cell, or the ground at the point. */
+export function brickSolidCellWGSL(terrain: boolean): string {
+  return BRICK_SOLID_CELL_COMMON_WGSL + (terrain ? /* wgsl */`
+// nbParticleBlocked with terrain (no record, no body): umSolidVoxel of the point's cell, or under the ground.
+fn psBlocked(q:vec3f)->bool{return nbStaticVoxel(vec3i(floor(q)))||nbTerrainSolid(q);}
+` : /* wgsl */`
+// nbParticleBlocked with voxels alone (umSolidVoxel of the point's cell).
+fn psBlocked(q:vec3f)->bool{return psClosed(vec3i(floor(q)));}
+`);
+}
+const BRICK_SOLID_CELL_COMMON_WGSL = /* wgsl */`
 // A closed cell: outside the box, or FLAGS.OPEN clear in its F slot (solidStamp: FRAC 0). A cell no F slot holds
 // reads open.
 fn psClosed(c:vec3i)->bool{
@@ -51,12 +62,11 @@ fn psClosed(c:vec3i)->bool{
  let s=fgSlot(c);if(s==NB_NONE){return false;}
  return (phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)]&NB_FLAG_OPEN)==0u;
 }
-// nbParticleBlocked with voxels alone (umSolidVoxel of the point's cell).
-fn psBlocked(q:vec3f)->bool{return psClosed(vec3i(floor(q)));}
 fn psNearSolid(s:u32)->bool{return s!=NB_NONE&&(nbFRec(s,NB_REC_CLASS)&NB_CLASS_NEAR_SOLID)!=0u;}
 fn psUnit(a:u32)->vec3f{return vec3f(select(0.0,1.0,a==0u),select(0.0,1.0,a==1u),select(0.0,1.0,a==2u));}
 fn psAxis(a:u32)->vec3<bool>{return vec3<bool>(a==0u,a==1u,a==2u);}
 `;
+export const BRICK_SOLID_CELL_WGSL = brickSolidCellWGSL(false);
 /** A rank word pMove leaves for pSolid: a record outside the NEAR_SOLID bricks that travels the ring or more. */
 const PS_FAR_WGSL = "const PS_FAR:u32=0xfffffffeu;\n";
 
@@ -85,6 +95,40 @@ fn psWalk(start:vec3f,endpoint:vec3f,inset:f32,velocity:ptr<function,vec4f>)->ve
   }
  }
  var v=(*velocity).xyz*keep;if(landed){v.y=0.0;}
+ *velocity=vec4f(v,(*velocity).w);
+ return q;
+}
+`;
+
+/** The particle walk with terrain (nbFinish with umSolidHasTerrain, no record or body): an axis stops on a voxel alone
+ * (nbVoxelBlocked: the mask's, or past the box), its velocity lost at once but for a landing; after each stride's three
+ * axes the ground's contact (nbTerrainContact) moves the sample unless that crosses a voxel, and its velocity is the
+ * contact's on the axes no wall stopped. A landing then loses vy (umBedSlope is the mask's lane: 0 in these scenes). */
+export const BRICK_SOLID_PARTICLE_TERRAIN_WGSL = brickSolidCellWGSL(true) + PS_FAR_WGSL + /* wgsl */`
+fn psWalk(start:vec3f,endpoint:vec3f,inset:f32,velocity:ptr<function,vec4f>)->vec3f{
+ let travel=endpoint-start;
+ let walk=clamp(u32(ceil(2.0*max(abs(travel.x),max(abs(travel.y),abs(travel.z))))),1u,4096u);
+ let stride=travel/f32(walk);
+ var q=start;var landed=false;var free=vec3f(1.0);var v=(*velocity).xyz;
+ for(var j=1u;j<=walk;j++){
+  let strideStart=q;
+  for(var a=0u;a<3u;a++){
+   let s=stride[a];let e=psUnit(a);
+   var point=q+s*e;
+   let lead=point+sign(s)*inset*e;
+   if(nbStaticVoxel(vec3i(floor(lead)))){
+    let face=floor(lead[a])+select(1.0,0.0,s>0.0);
+    point=select(point,vec3f(face-sign(s)*inset),psAxis(a));
+    if(a==1u&&s<0.0){landed=true;}else{v=select(v,vec3f(0.0),psAxis(a));free=select(free,vec3f(0.0),psAxis(a));}
+   }
+   q=point;
+  }
+  let contact=nbTerrainContact(strideStart,q,v,inset);
+  // A normal correction must not cross an authored voxel.
+  if(!nbStaticVoxel(vec3i(floor(contact.position)))){q=contact.position;}
+  v=contact.velocity*free;
+ }
+ if(landed){v.y=0.0;}
  *velocity=vec4f(v,(*velocity).w);
  return q;
 }
@@ -184,9 +228,9 @@ export function brickPSolidWGSL(body: string): string {
  // nbParticleBlocked: a record that starts in a closed cell retires.
  if(psBlocked(q)){return;}`, "pMove");
   t = once(t, PMOVE_BOXED, PMOVE_BOXED.replace("let endpoint=", "let boxed=").replace("abs(endpoint-q)", "abs(boxed-q)"), "pMove");
-  t = once(t, PMOVE_CLIP, ` p.velocity=vec4f(nbfClippedVelocity(p.velocity.xyz,end,boxed),p.velocity.w);
- // nbFinish's walk from the start to the boxed endpoint.
- let endpoint=psWalk(q,boxed,nbSampleRadius(m),&p.velocity);`, "pMove");
+  t = once(t, PMOVE_CLIP, ` // nbFinish's walk from the start to the boxed endpoint, then its clip: an axis the box moved loses its velocity.
+ let endpoint=psWalk(q,boxed,nbSampleRadius(m),&p.velocity);
+ p.velocity=vec4f(nbfClippedVelocity(p.velocity.xyz,end,boxed),p.velocity.w);`, "pMove");
   t = once(t, PMOVE_SPLIT, PMOVE_SPLIT.replace(";", "&&!psBlocked(nbfSplitA(endpoint,m,along))&&!psBlocked(nbfSplitB(endpoint,m,along));"), "pMove");
   return t;
 }
