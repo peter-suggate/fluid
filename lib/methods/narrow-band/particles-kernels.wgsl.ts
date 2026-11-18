@@ -411,12 +411,13 @@ fn pCellMass(run:vec2u,bank:u32)->f32{var m=0.0;for(var j=run.x;j<run.y;j++){let
 // records, so the records the old engine's 4h side advected back across the seam (its band seed's overlap on 4h
 // owners, seedCells) never arrive: the empty bins of a 4h cell with liquid are unknown, not air, and the seam's h cell
 // reseeds as an uncovered one (to nbSeedTarget, under the 8-mass cap). Without it the seam's h cells thinned (top
-// layers 1.6-1.9 records against 6 in steady columns) and dimpled under 0.5 h. Only a 4h cell holding liquid counts,
-// by lcCoupled's measure (its fill clamp(0.5 - φ, 0, 1) at the centre, the advected C φ, above 0): the old overlap
-// seeds liquid, so a 4h air cell's empty bins are air in both engines. Counting it reseeded a shallow pool's surface
-// row under the 4h air tiles above as uncovered every step: the union lowered the C vertices there, the row read
-// fuller and reseeded again (interactive-pool at 3.2-3.8 cells deep: +4..15% volume, then -40% when its surface tiles
-// demoted, 2026-11-18).
+// layers 1.6-1.9 records against 6 in steady columns) and dimpled under 0.5 h. Only a 4h cell the old overlap would
+// seed counts: seedCells' depth gate (particleDepth at the centre ≤ 0.9; here psDepth, the same fgDepth), so a 4h air
+// cell's empty bins are air in both engines. Counting every 4h cell reseeded a shallow pool's surface row under the 4h
+// air tiles above as uncovered every step: the union lowered the C vertices there, the row read fuller and reseeded
+// again (interactive-pool at 3.2-3.8 cells deep: +4..15% volume, then -40% when its surface tiles demoted). A tighter
+// gate (the C φ < 0.5 at the centre) starved the seam the other way (power-fill-256-800 final -3.0..-3.4% against the
+// depth gate's -2.1..-2.5%; 2026-11-18).
 fn pUncovered(c:vec3i)->bool{
  for(var k=0u;k<27u;k++){let r=fgRun(c+nbNeighbourOffset(k));if(r.y>r.x){return false;}}
  return true;
@@ -440,7 +441,7 @@ fn psDepthVertex(v:vec3i)->f32{let r=vec3u(v-psO);if(psStaged&&all(r<vec3u(9u)))
 ` + PS_DEPTH_WGSL + /* wgsl */`
 fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInWallBox(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
 fn psSeam(c:vec3i)->bool{
- for(var k=0u;k<27u;k++){let n=c+nbNeighbourOffset(k);if(psCoarse(n)&&fgPhiAt(vec3f(n)+0.5)<0.5){return true;}}
+ for(var k=0u;k<27u;k++){let n=c+nbNeighbourOffset(k);if(psCoarse(n)&&psDepth(vec3f(n)+0.5)<=0.9){return true;}}
  return false;
 }
 // A site's depth: the re-entry's φ, else fgDepth's (staged).
