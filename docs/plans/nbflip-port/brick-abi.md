@@ -610,7 +610,7 @@ its `TOP_*` word.
 | `MARK_F` | `FCAP` | the head's keep bits for live F slots (`resMark`, and tiered `censusDecide`'s band rings): bit 0 keep; consumed (exchanged to 0) by the head's `setLeave` |
 | `MARK_C` | `CCAP` | the same for C slots |
 | `CAND` | `CAND_CAP = FCAP` | enter candidates: brick keys (§4.1 word 29), `NB_KEY_PAGE` (bit 30) for a page key. Duplicates allowed; `setUpdate` dedupes by compare-exchange on the directory. Bit 31 (`KEY_CLAIMED`): the head's residency request already took the key's directory word NONE → CLAIM, so the claim pops without the exchange. Overflow latches `FAIL.LIST`. |
-| `BOUND_F` | `FCAP` | the brick's velocity bound, f32 bits by `atomicMax` (non-negative f32 orders as u32): `project` (grid faces) and `pScatter` (particle speeds) raise it; `setMark` clears it. The head's `resMark` reads it (the completed step's bound). |
+| `BOUND_F` | `6 * FCAP` | the brick's signed per-axis velocity bound (`BOUND_WORDS` = 6 a slot, 2026-11-19), f32 bits by `atomicMax` (non-negative f32 orders as u32): word a the largest max(−u_a, 0), word 3 + a the largest max(u_a, 0). `project` (grid faces) and `pScatter` (particle velocities, and their before) raise it; `setMark` and `setClaimBricks` clear it. The head's `resMark` reads it (the completed step's bound), a side's word for that side. |
 | `BOUND_C` | `CCAP` | the same for C slots (4h faces) |
 | `ACT` | `FCAP` | the active class (§5.5, brick-abi.ts `ACT`): bits 0–7 this step's ACTIVE tiles, bit 8 `NOW` (F_ACT(t)), bit 9 `PREV` (F_ACT(t − 1)). `setMark` raises the tiles and, by `atomicOr`, `NOW` on every resident brick within 3 tiles of one; the head's `setLists` moves `NOW` to `PREV`; `setClaimBricks` zeroes it. |
 | `AIR_GATE` | `16 * CCAP` | per C slot, 512 bits: bit `t` (the tile's C local) set where the far-air gate holds (umFarAirKept's plane 4: the 3³ about tile `t` meets the collar, the seeds dilated 4 tiles an axis over live tiles). Written by `lcClear` every step, read by the next step's `lcAdvect`: a C vertex with φ ≥ 16 h whose cell's tile has the bit clear keeps φ untraced. Zeroed at `setClaimPages`, like `WANT`. |
@@ -688,8 +688,10 @@ Ferstl et al. 2016 §3), by the coordinator's ruling that residency follows seep
   liquid is C storage. Requesting bricks for it made the deep 4h interior h storage (the tiered dam
   filled its 4913-brick pool by step 42, 2026-11-15).
 - *Reach*, per axis a and side, in cells: the class's move plus its margin, where travel is
-  `PSUPPORT`'s particle travel that way and `flow = (BOUND_F + |g| dt) dt / h` (the reach rule's
-  velocity term, as `bootBricks`). `H.RES_RADIUS` is the largest class reach of the head, in tiles
+  `PSUPPORT`'s particle travel that way and the flow that way, `(BOUND_F_side + max(±g_a, 0) dt) dt / h`
+  (the reach rule's velocity term, as `bootBricks`, per axis and side as the old localSpeed's signed reach,
+  umSignedFaceExtent; 2026-11-19: an isotropic flow grew every side by the brick's fastest face, and a cut
+  sliver's step-1 face, 14 m/s at aperture 0.02, claimed 19k bricks on hero-garden-hose-x10). `H.RES_RADIUS` is the largest class reach of the head, in tiles
   (rounded up).
 - *Requests*: each of a brick source's grown boxes takes every brick it covers and, tiered, every page
   (page granularity, the box below); a page source's (flow + 20 cells, no particle travel) every page it covers. 20 is

@@ -197,15 +197,17 @@ fn pSurfaceShift(q:vec3f,d:vec3f)->vec3f{
 }
 fn pFatal(code:u32,i:u32){nbFail(NB_FAIL_PARTICLES,0x80000000u|(code<<24u)|(i&0xffffffu));}
 // One destination: the rank in its cell's count, or NONE (an unbinned record latches FAIL.REACH, a defect).
-fn pCount(q:vec3f,speed:f32)->u32{
- let c=pCellOf(q);let s=fgSlot(c);
+// The bound's six words (BOUND_F): bound[a] the largest -v_a, bound[3 + a] the largest v_a.
+fn pCount(q:vec3f,speed:array<f32,6>)->u32{
+ var bound=speed;let c=pCellOf(q);let s=fgSlot(c);
  if(s==NB_NONE){atomicAdd(&nbSet[NB_H_P_UNBINNED],1u);nbFail(NB_FAIL_REACH,nbKey(c>>vec3u(3u)));return NB_NONE;}
- atomicMax(&nbSet[NB_S_BOUND_F+s],bitcast<u32>(speed));
+ for(var k=0u;k<6u;k++){if(bound[k]!=0.0){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*s+k],bitcast<u32>(bound[k]));}}
  return atomicAdd(&fcell[FC_CNT+fgCell(s,c)],1u);
 }
 fn pFile(i:u32,p:Particle,split:bool){
  fmoved[i]=p;
- let speed=max(length(p.velocity.xyz),length(p.before.xyz));
+ let hi=max(max(p.velocity.xyz,p.before.xyz),vec3f(0.0));let lo=max(max(-p.velocity.xyz,-p.before.xyz),vec3f(0.0));
+ let speed=array<f32,6>(lo.x,lo.y,lo.z,hi.x,hi.y,hi.z);
  let q=p.position.xyz;
  if(!split){fpart[FP_RANK+2u*i]=pCount(q,speed);return;}
  let m=nbParticleMass(p);let along=nbfSplitAlong(q);
@@ -337,7 +339,7 @@ var<workgroup> sOcc:atomic<u32>;
  if(!live){return;}
  let start=sBase+scan[lid]-own;
  fcStore(FC_RUN+512u*slot+2u*lid,start);fcStore(FC_RUN+512u*slot+2u*lid+1u,start+c0);
- if(lid==0u){atomicStore(&nbSet[NB_S_TILE_OCC+slot],atomicLoad(&sOcc));fcStore(FC_BOUND+slot,nbSetWord(NB_S_BOUND_F+slot));}
+ if(lid==0u){atomicStore(&nbSet[NB_S_TILE_OCC+slot],atomicLoad(&sOcc));var bound=0u;for(var k=0u;k<6u;k++){bound=max(bound,nbSetWord(NB_S_BOUND_F+NB_BOUND_WORDS*slot+k));}fcStore(FC_BOUND+slot,bound);}
  // The sort's tile heats start over (pTiles raises them).
  if(lid<8u){fcStore(fgTileWord(slot,lid,FT_THETA),0u);fcStore(fgTileWord(slot,lid,FT_SURF),0u);atomicAnd(&fcell[fgTileWord(slot,lid,FT_FLAGS)],~FTF_SURFACE_TILE);}
 }`);

@@ -229,7 +229,7 @@ var<workgroup> wNb:array<u32,27>;
   if(nbSetWord(NB_S_BIN_COUNT+slot)>0u){cls|=NB_CLASS_PARTICLES;}
   if(any(o>=NB_LATTICE)){cls|=NB_CLASS_SKIRT;}
   atomicStore(&dir[NB_D_FREC+32u*slot+NB_REC_CLASS],cls);
-  atomicStore(&nbSet[NB_S_BOUND_F+slot],0u);
+  for(var k=0u;k<NB_BOUND_WORDS;k++){atomicStore(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+k],0u);}
 }`);
 
   // setMarkPages (tiered only): one workgroup a page of C_ALL (G1), a lane 8 tiles. The count of its 4h-owned tiles
@@ -308,7 +308,7 @@ var<workgroup> wN:atomic<u32>;
     atomicStore(&dir[r+NB_REC_KEY],key&~NB_KEY_CLAIMED);atomicStore(&dir[r+NB_REC_CUT],NB_NONE);
     for(var j=0u;j<NB_PSUPPORT_WORDS;j++){atomicStore(&nbSet[NB_S_PSUPPORT+NB_PSUPPORT_WORDS*fs+j],0u);}
     atomicStore(&dir[r+NB_REC_CLASS],NB_CLASS_ENTERING|select(0u,NB_CLASS_SKIRT,any(8*b>=NB_LATTICE)));
-    atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);atomicStore(&nbSet[NB_S_BOUND_F+fs],0u);atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
+    atomicStore(&nbSet[NB_S_BIN_COUNT+fs],0u);for(var k=0u;k<NB_BOUND_WORDS;k++){atomicStore(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*fs+k],0u);}atomicStore(&nbSet[NB_S_MARK_F+fs],0u);
     atomicStore(&nbSet[NB_S_TILE_OCC+fs],0u);atomicStore(&nbSet[NB_S_TRIG+fs],0u);atomicStore(&nbSet[NB_S_ACT+fs],0u);
     atomicAdd(&dir[NB_D_CREC+32u*cs+NB_REC_C_CHILDREN],1u);
     if(${tiered ? "h" : "false"}){nbTileMask(cs,bl,true);}

@@ -842,10 +842,12 @@ fn poProjectDry(m:vec3i,own:f32,f:u32,us:f32,h:f32,separated:bool,q:vec3i)->f32{
 `;
   const projectF = k(projectLabel, FC + LIVE + PROJECT_WGSL + DRY + BRICK_SOURCE_RING_WGSL + /* wgsl */`
 var<workgroup> wSpeed:atomic<u32>;
+// The brick's signed per-axis bound (BOUND_F's six words: a the largest -u_a, 3 + a the largest u_a).
+var<workgroup> wBound:array<atomic<u32>,6>;
 var<workgroup> poGo:u32;
 @compute @workgroup_size(256) fn ${projectEntry}(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
   ${live === undefined ? `  let g=nbGroup(wid);
-  if(lid==0u){atomicStore(&wSpeed,0u);poGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}
+  if(lid==0u){atomicStore(&wSpeed,0u);for(var k=0u;k<6u;k++){atomicStore(&wBound[k],0u);}poGo=select(0u,1u,g<nbListCount(NB_LIST_F_ALL));}
   if(workgroupUniformLoad(&poGo)==0u){return;}
   let slot=nbListSlot(NB_LIST_F_ALL,g);
   let o=nbFOrigin(slot);
@@ -854,16 +856,16 @@ var<workgroup> poGo:u32;
   // not own), without staging the brick's phi.
   if(lid<27u){if(nbTileOwnerH((o>>vec3u(2u))-vec3i(1)+poCoord(lid,3u))){atomicOr(&wSpeed,1u);}}
   workgroupBarrier();
-  if(lid==0u){poGo=atomicLoad(&wSpeed);atomicStore(&wSpeed,0u);}
+  if(lid==0u){poGo=atomicLoad(&wSpeed);atomicStore(&wSpeed,0u);for(var k=0u;k<6u;k++){atomicStore(&wBound[k],0u);}}
   if(workgroupUniformLoad(&poGo)==0u){
     for(var j=0u;j<2u;j++){let at=NB_STRIDE*slot+lid+256u*j;phi[NB_PHI_F_FLAGS+at]&=~(PO_WARM|PO_WALLS);}
     return;
   }
-` : `${head("hp", "poGo", "atomicStore(&wSpeed,0u);")}
+` : `${head("hp", "poGo", "atomicStore(&wSpeed,0u);for(var k=0u;k<6u;k++){atomicStore(&wBound[k],0u);}")}
   let o=nbFOrigin(slot);
   workgroupBarrier();
 `}  ${faces === undefined ? "poStage(o,lid,256u);" : "poStageLight(o,lid);"}
-  var speed=0.0;
+  var bound=array<f32,6>(0.0,0.0,0.0,0.0,0.0,0.0);
   {
     let h=nbRingF(cfg.x,NB_RING_H);
     for(var j=0u;j<2u;j++){
@@ -909,7 +911,7 @@ ${faces === undefined ? `
         // The nozzle (umProjectWithSource): applyInflowVelocity of the face's texel, the cell below it; a box-low face
         // is not the nozzle's.
         if(nbInflowOn()&&c[a]!=0){u=nbInflowProjected(n,a,u);}
-        vel[NB_VEL_F_U0+fa]=u;speed=max(speed,abs(u));
+        vel[NB_VEL_F_U0+fa]=u;bound[a]=max(bound[a],-u);bound[3u+a]=max(bound[3u+a],u);
         if(wall){
           // The owner: c on plane 0 (its low face), n on plane N (its high face).
           let low=c[a]==0;let sign=select(1.0,-1.0,low);let liquid=select(ln,lc,low);let m=select(n,c,low);
@@ -928,10 +930,11 @@ ${faces === undefined ? `
       }
       phi[NB_PHI_F_FLAGS+at]=(flags&~(PO_WARM|PO_WALLS))|select(0u,PO_WARM,lc&&pres[NB_PRES_F_DIAG+at]>0.0)|release;
     }
-    atomicMax(&wSpeed,bitcast<u32>(speed));
+    // A side no face moved toward stays 0, and a lane below the workgroup's word so far takes no atomic.
+    for(var k=0u;k<6u;k++){let w=bitcast<u32>(bound[k]);if(w>atomicLoad(&wBound[k])){atomicMax(&wBound[k],w);}}
   }
   workgroupBarrier();
-  if(lid==0u){atomicMax(&nbSet[NB_S_BOUND_F+slot],atomicLoad(&wSpeed));}
+  if(lid<6u){atomicMax(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*slot+lid],atomicLoad(&wBound[lid]));}
 }`, projectEntry, projectB, true, cuts);
 
   // projectC: a workgroup a page of C_ALL (G1), a lane two tiles, after the solve's finish.

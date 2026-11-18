@@ -21,7 +21,7 @@ import { getMethod } from "../../core/method-registry";
 import { resolveMethodValues } from "../../core/method-contract";
 import { sceneDocument } from "../../core/scene-definition";
 import { getSceneDefinition } from "../../core/scenes";
-import { H, LIST, brickKeyCoord, type BrickCapacities } from "./brick-abi";
+import { BOUND_WORDS, H, LIST, brickKeyCoord, type BrickCapacities } from "./brick-abi";
 import { BrickEngine, type BrickEngineOptions } from "./brick-engine";
 import { brickSceneSetup } from "./brick-scene";
 import { fluidStagesAt } from "./brick-fluid-stages";
@@ -107,7 +107,8 @@ test("brick wide dam (GPU): residency and lists follow the fluid, not the box", 
       const fluidX = Math.max(xOf(s.list(LIST.F_LIQ)), xOf(s.list(LIST.F_PART)));
       const liveX = Math.max(...[...s.bricks.keys()].map(key => brickKeyCoord(key)[0]));
       const pagesX = Math.max(...[...s.pages.keys()].map(key => brickKeyCoord(key)[0]));
-      const bound = Math.max(...[...s.bricks.values()].map(slot => new Float32Array(new Uint32Array([s.set[L.set.boundF + slot]!]).buffer)[0]!));
+      // BOUND_F holds six signed per-axis words a slot: their largest, with |g|, bounds every side's flow and the pages'.
+      const bound = Math.max(...[...s.bricks.values()].flatMap(slot => [...new Float32Array(new Uint32Array(s.set.slice(L.set.boundF + BOUND_WORDS * slot, L.set.boundF + BOUND_WORDS * (slot + 1))).buffer)]));
       const flow = (bound + Math.hypot(...o.gravity_mps2) * o.dt_s) * o.dt_s / o.h_m;
       console.log(`wide dam step 40: ${JSON.stringify(counts(s.header, 40))}; fluid to brick x ${fluidX}, live F to ${liveX}, pages to ${pagesX} `
         + `(of ${Math.floor(o.lattice[0] / 8) + 1} bricks, ${o.lattice[0] / 32} pages); flow ${flow.toFixed(1)} cells`);

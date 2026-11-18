@@ -4,7 +4,7 @@
  *
  * Timing is the old frame head's: part 1's head, after the census and before stages.move. It reads the completed
  * step's active class (ACT, setMark's, brick-abi.md §5.5), particle support (PSUPPORT, F's pJoin) and velocity bound
- * (BOUND_F: at the head, project's face maximum of the completed step; setMark clears pCount's particle speeds,
+ * (BOUND_F: at the head, project's signed per-axis face maxima of the completed step, six words a slot; setMark clears pCount's particle speeds,
  * brick-set.wgsl.ts setMark's last store, before project raises it, pressure-composite.wgsl.ts project). Both engines
  * run it.
  *
@@ -17,8 +17,11 @@
  *   lane E, the coordinator's ruling 2026-11-16): the h ring, bricks by RES_MARGIN.own.tiered = 4 cells (one tile)
  *   with no move, half-open (cells lo .. hi - 1: the bricks of the 27 tiles about each), since the h ownership is
  *   fixed through the step (the head's transfer commits it, after this residency, and the census keeps each band
- *   tile's same ring); pages by flow + 20. flow = (BOUND_F + |g| dt) dt / h is the reach rule's velocity term
- *   (reachSet, brick-abi.md §5.4). Tiered, the tiles with particles (any F slot's, owner or not: a tile coarsened at this head keeps its records for this move) (TILE_OCC bits 0..7, pScan's) are a fourth
+ *   tile's same ring); pages by flow + 20. flow is the reach rule's velocity term (reachSet, brick-abi.md §5.4), per axis and side
+ *   (2026-11-19, the old localSpeed's signed per-axis reach, umSignedFaceExtent): a box's low side along a grows by
+ *   (BOUND_F's -a word + max(-g_a, 0) dt) dt / h, its high side by the +a word and max(g_a, 0). An isotropic flow
+ *   grew a box on all six sides by the brick's fastest face: a cut sliver's 14 m/s face (θ 0.03 at aperture 0.02)
+ *   claimed 9 bricks every way about each shore brick (hero-garden-hose-x10, 19k F bricks at step 2). Tiered, the tiles with particles (any F slot's, owner or not: a tile coarsened at this head keeps its records for this move) (TILE_OCC bits 0..7, pScan's) are a fourth
  *   class, bricks by flow + RES_MARGIN.particles = flow + 4 (the particles move). The rows (an F tile's reads past
  *   the owners), tiered:
  *   - lcRetire 4 (C, lcRetired): it builds (lcBuildDistance: fgReach1 and FC_NEAR at the 4h cell) only within
@@ -194,6 +197,13 @@ fn rmFlow(speed:f32)->f32{
   // The reach rule's velocity term (reachSet): (bound + |g| dt) dt / h cells.
   return (speed+length(gv)*dt)*dt/h;
 }
+// A brick source's flow toward one side (side 0 the axis' low side, 1 its high side): BOUND_F's word for that side and
+// gravity's component that way, (bound + max(±g_a, 0) dt) dt / h cells (the old localSpeed's signed per-axis reach).
+fn rmFlowSide(s:u32,a:u32,side:u32)->f32{
+  let dt=nbRingF(cfg.x,NB_RING_DT);let h=nbRingF(cfg.x,NB_RING_H);
+  let ga=nbRingF(cfg.x,NB_RING_GRAVITY+a);let gs=max(select(-ga,ga,side==1u),0.0);
+  return (bitcast<f32>(atomicLoad(&nbSet[NB_S_BOUND_F+NB_BOUND_WORDS*s+3u*side+a]))+gs*dt)*dt/h;
+}
 @compute @workgroup_size(64) fn resMark(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lane:u32){
   let g=nbGroup(wid);let rpass=cfg.z;
   // Kind: 0 nothing, 1 a brick source, 2 a page source.
@@ -207,7 +217,6 @@ fn rmFlow(speed:f32)->f32{
       let mo=(act>>10u)&0xffu;let ms=atomicLoad(&nbSet[at])&0xffu;let md=((act>>18u)&0xffu)|(atomicLoad(&nbSet[NB_S_TRIG+s])&0xffu);
       // Tiered, class 3: the tiles with particles (any F slot's, owner or not: a tile coarsened at this head keeps its records for this move) (TILE_OCC bits 0..7, pScan's), past their move (R3).
       let mp=${tiered ? "atomicLoad(&nbSet[NB_S_TILE_OCC+s])&0xffu" : "0u"};
-      let flow=rmFlow(bitcast<f32>(atomicLoad(&nbSet[NB_S_BOUND_F+s])));
       let o=nbFOrigin(s);var reach=0.0;var nb=0u;
       // Tiered, class 4: the tiles this head refines from 4h (WANT h, CMASK still 4h: the transfer commits later in the
       // head). pSeedCell's re-entry seed (cfg.w = 2, part 1) fills their band after this pass and moves the seeds in this
@@ -224,7 +233,7 @@ fn rmFlow(speed:f32)->f32{
           for(var a=0u;a<3u;a++){var e=vec3i(0);e[a]=1;sr=max(sr,max(abs(nbCFace(T,a)),abs(nbCFace(T+e,a))));}
         }
       }` : ""}
-      let flowR=max(flow,rmFlow(sr));
+      let flowC=rmFlow(sr);
       for(var c=0u;c<5u;c++){
         let m=select(select(select(select(md,ms,c==1u),mo,c==0u),mp,c==3u),mr,c==4u);
         if(m==0u){continue;}
@@ -234,10 +243,11 @@ fn rmFlow(speed:f32)->f32{
         for(var a=0u;a<3u;a++){
           // Owners: tiered, the h ring, one tile and no move (R3: the h ownership is fixed through the step; the rows
           // are the h-anchored reads, the header's table), half-open; all-h, flow + RM_OWN.
-          var rl=${tiered ? "RM_OWN" : "RM_OWN+flow"};var rh=rl;
-          if(c==3u){rl=RM_PARTICLES+flow;rh=rl;}
-          if(c==4u){rl=RM_PARTICLES+flowR;rh=rl;}
-          if(c==1u){rl=RM_SUPPORT+max(bitcast<f32>(atomicLoad(&nbSet[at+1u+a])),flow);rh=RM_SUPPORT+max(bitcast<f32>(atomicLoad(&nbSet[at+4u+a])),flow);}
+          let fl=rmFlowSide(s,a,0u);let fh=rmFlowSide(s,a,1u);
+          var rl=${tiered ? "RM_OWN" : "RM_OWN+fl"};var rh=${tiered ? "RM_OWN" : "RM_OWN+fh"};
+          if(c==3u){rl=RM_PARTICLES+fl;rh=RM_PARTICLES+fh;}
+          if(c==4u){rl=RM_PARTICLES+max(fl,flowC);rh=RM_PARTICLES+max(fh,flowC);}
+          if(c==1u){rl=RM_SUPPORT+max(bitcast<f32>(atomicLoad(&nbSet[at+1u+a])),fl);rh=RM_SUPPORT+max(bitcast<f32>(atomicLoad(&nbSet[at+4u+a])),fh);}
           if(c==2u){rl=RM_SEED;rh=RM_SEED;}
           lo[a]=i32(floor(f32(o[a]+4*tlo[a])-rl));hi[a]=i32(ceil(f32(o[a]+4*thi[a]+4)+rh));
           // Tiered owners' cells are [lo, hi): the last brick is the one holding cell hi - 1.
@@ -246,7 +256,7 @@ fn rmFlow(speed:f32)->f32{
           // Tiered, the pages: the owners' by flow + RM_OWN_PAGES (lDilate's reach through the C pages), the others' as
           // their bricks'.
           pLo[a]=lo[a];pHi[a]=hi[a];
-          ${tiered ? `if(c==0u){let rp=RM_OWN_PAGES+flow;pLo[a]=i32(floor(f32(o[a]+4*tlo[a])-rp));pHi[a]=i32(ceil(f32(o[a]+4*thi[a]+4)+rp));reach=max(reach,rp);}` : ""}
+          ${tiered ? `if(c==0u){let pl=RM_OWN_PAGES+fl;let ph=RM_OWN_PAGES+fh;pLo[a]=i32(floor(f32(o[a]+4*tlo[a])-pl));pHi[a]=i32(ceil(f32(o[a]+4*thi[a]+4)+ph));reach=max(reach,max(pl,ph));}` : ""}
         }
         rmLo[nb]=max(lo>>vec3u(3u),vec3i(0));rmHi[nb]=min(hi>>vec3u(3u),NB_BRICKS-vec3i(1));
         rmPLo[nb]=max(pLo>>vec3u(3u),vec3i(0));rmPHi[nb]=min(pHi>>vec3u(3u),NB_BRICKS-vec3i(1));nb++;

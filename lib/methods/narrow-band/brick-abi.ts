@@ -53,6 +53,11 @@ export const KEY_PAGE = 0x40000000;
 /** Words an F slot of the particle support (NB_S_PSUPPORT, brick-abi.md §5.4): the support mask of the brick's 8
  * tiles, then six travel maxima (-xyz, +xyz; f32 bits, cells), then a pad. */
 export const PSUPPORT_WORDS = 8;
+/** Words an F slot of the velocity bound (NB_S_BOUND_F, brick-abi.md §5.4): per axis and side, the largest speed toward
+ * that side (f32 bits, m/s, atomicMax): word a the largest max(-u_a, 0), word 3 + a the largest max(u_a, 0). The head's
+ * residency grows each side of a source box by its own side's bound (the old localSpeed's signed per-axis reach,
+ * umSignedFaceExtent; seep's per-axis CFL band, S2j). */
+export const BOUND_WORDS = 6;
 /** censusDecide's candidate mask words a C slot (216 bits, the 6^3 bricks about a page). */
 export const CAND_MASK_WORDS = 8;
 
@@ -284,6 +289,7 @@ export class BrickLayout {
   /** set buffer regions (words). */
   readonly set: {
     readonly ring: number; readonly freeF: number; readonly freeC: number; readonly freeB: number; readonly freeK: number;
+    /** boundF: BOUND_WORDS an F slot (the signed per-axis velocity bound); boundC: a word a C slot. */
     readonly markF: number; readonly markC: number; readonly cand: number; readonly boundF: number; readonly boundC: number;
     readonly binStart: number; readonly binCount: number; readonly binCursor: number;
     /** The move's liquid cells (pLiquid, 16 words an F slot, bit l cell l: fgLiquidCell of the opening φ). */
@@ -341,7 +347,7 @@ export class BrickLayout {
     const take = (n: number) => { const o = at; at += align64(n); return o; };
     const ring = take(RING_SLOTS * RING_WORDS);
     const freeF = take(f), freeC = take(c), freeB = take(Math.max(b, 1)), freeK = take(Math.max(k, 1));
-    const markF = take(f), markC = take(c), cand = take(f), boundF = take(f), boundC = take(c);
+    const markF = take(f), markC = take(c), cand = take(f), boundF = take(BOUND_WORDS * f), boundC = take(c);
     const binStart = take(f), binCount = take(f), binCursor = take(f);
     const pLiquid = take(16 * f);
     const want = take(CMASK_WORDS * c), tileOcc = take(f), trig = take(f), tlist = take(2 * t);
@@ -443,7 +449,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   for (const [name, v] of Object.entries(BODY_FLAG)) c(`NB_BODY_FLAG_${name}`, v);
   c("NB_RING_BASE", s.ring); c("NB_RING_WORDS", RING_WORDS);
   c("NB_S_FREE_F", s.freeF); c("NB_S_FREE_C", s.freeC); c("NB_S_FREE_B", s.freeB); c("NB_S_FREE_K", s.freeK);
-  c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_S_BOUND_C", s.boundC);
+  c("NB_S_MARK_F", s.markF); c("NB_S_MARK_C", s.markC); c("NB_S_CAND", s.cand); c("NB_S_BOUND_F", s.boundF); c("NB_BOUND_WORDS", BOUND_WORDS); c("NB_S_BOUND_C", s.boundC);
   c("NB_S_BIN_START", s.binStart); c("NB_S_BIN_COUNT", s.binCount); c("NB_S_BIN_CURSOR", s.binCursor); c("NB_S_P_LIQUID", s.pLiquid);
   c("NB_S_WANT", s.want); c("NB_S_TILE_OCC", s.tileOcc); c("NB_S_TRIG", s.trig); c("NB_S_TLIST", s.tlist); c("NB_TCAP", L.cap.t); c("NB_S_AIR_GATE", s.airGate);
   c("NB_S_REACH0", s.reach0); c("NB_S_REACH1", s.reach1); c("NB_S_REACH_STEP", s.reachStep); c("NB_S_WALL_TILE", s.wallTile);

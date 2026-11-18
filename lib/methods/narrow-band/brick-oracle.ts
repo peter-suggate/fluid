@@ -8,7 +8,7 @@
  *   assembled in Float64 from the GPU's phi and u*, and solved to round-off by
  *   Jacobi-preconditioned CG.
  */
-import { ACT, BRICK_STRIDE, CMASK_WORDS, PHI_AIR, PSUPPORT_WORDS, type BrickLayout, brickKey, brickKeyCoord, bricksPerAxis, cellLocal } from "./brick-abi";
+import { ACT, BOUND_WORDS, BRICK_STRIDE, CMASK_WORDS, PHI_AIR, PSUPPORT_WORDS, type BrickLayout, brickKey, brickKeyCoord, bricksPerAxis, cellLocal } from "./brick-abi";
 import { reachSet, type Vec3 } from "./brick-engine";
 import type { BrickSnapshot } from "./brick-readback";
 import { RES_MARGIN } from "./brick-residency.wgsl";
@@ -56,7 +56,7 @@ export interface ResidencyOracle {
  * is the set the head starts from (its F_ALL, ACT, PSUPPORT and BOUND_F words, CMASK and pages); `want` the set buffer
  * after the head (this census's WANT and TRIG words, for censusDecide's tiered band rings). A source brick (ACT.RES
  * tiles, PSUPPORT word 0 or this census's TRIG bits 0..7) keeps every brick, and tiered every page, of its tiles' vertex box grown per axis and side by
- * max(travel, (bound + |g| dt) dt / h) + 4 ACT_DILATION cells; every kept brick keeps its page. Tiered, a page source
+ * max(travel, (bound + max(±g_a, 0) dt) dt / h) + 4 ACT_DILATION cells (bound BOUND_F's word for that axis and side); every kept brick keeps its page. Tiered, a page source
  * (a page with 4h-owned liquid tiles, a C corner φ < 0, in `c`'s C φ) keeps the pages of those tiles' box grown by
  * (speed + |g| dt) dt / h + 4 ACT_DILATION cells, the speed the largest |u| on their C plane faces (`c`'s C velocity).
  */
@@ -79,7 +79,9 @@ export function residencyOracle(L: BrickLayout, before: BrickSnapshot, want: Uin
   for (const [key, slot] of before.bricks) {
     const at = L.set.psupport + PSUPPORT_WORDS * slot;
     const act = before.set[L.set.act + slot]!, ps = before.set[at]! & 0xff;
-    const flow = f(f(f(asF(before.set[L.set.boundF + slot]!) + f(g * ring.dt)) * ring.dt) / ring.h), o = brickKeyCoord(key).map(v => 8 * v);
+    // The flow toward each side (rmFlowSide): BOUND_F's word for the side, gravity's component that way.
+    const flow = (a: number, side: 0 | 1) => f(f(f(asF(before.set[L.set.boundF + BOUND_WORDS * slot + 3 * side + a]!) + f(Math.max(side ? ring.gravity[a]! : -ring.gravity[a]!, 0) * ring.dt)) * ring.dt) / ring.h);
+    const o = brickKeyCoord(key).map(v => 8 * v);
     // The classes: owners (ACT.RES), support (PSUPPORT word 0), seeds (ACT.SEED | this census's TRIG); each with its
     // brick reach and, tiered, its page reach (the owners' by RES_MARGIN.ownPages, the others' as their bricks').
     const own = tiered ? RES_MARGIN.own.tiered : RES_MARGIN.own.allH;
@@ -97,15 +99,15 @@ export function residencyOracle(L: BrickLayout, before: BrickSnapshot, want: Uin
       reMask |= 1 << j;
       for (let a = 0; a < 3; a++) { const up = [...T]; up[a]! += 1; reSpeed = Math.max(reSpeed, Math.abs(cFace4(T, a)), Math.abs(cFace4(up, a))); }
     }
-    const flowR = Math.max(flow, f(f(f(reSpeed + f(g * ring.dt)) * ring.dt) / ring.h));
+    const flowC = f(f(f(reSpeed + f(g * ring.dt)) * ring.dt) / ring.h);
     // Tiered (R3): the owners' bricks are their tile ring (RES_MARGIN.own.tiered, no move, half-open), and the
     // tiles with particles (TILE_OCC bits 0..7) are a fourth class, RES_MARGIN.particles + flow.
     const classes: [number, (a: number, side: 0 | 1) => number, ((a: number, side: 0 | 1) => number) | null, boolean][] = [
-      [(act & ACT.RES) >>> 10, () => tiered ? own : f(own + flow), tiered ? () => f(RES_MARGIN.ownPages + flow) : null, tiered],
-      [ps, (a, side) => f(RES_MARGIN.support + Math.max(asF(before.set[at + 1 + 3 * side + a]!), flow)), null, false],
+      [(act & ACT.RES) >>> 10, (a, side) => tiered ? own : f(own + flow(a, side)), tiered ? (a, side) => f(RES_MARGIN.ownPages + flow(a, side)) : null, tiered],
+      [ps, (a, side) => f(RES_MARGIN.support + Math.max(asF(before.set[at + 1 + 3 * side + a]!), flow(a, side))), null, false],
       [((act & ACT.SEED) >>> 18) | (want[L.set.trig + slot]! & 0xff), () => RES_MARGIN.seed, null, false],
-      [tiered ? before.set[L.set.tileOcc + slot]! & 0xff : 0, () => f(RES_MARGIN.particles + flow), null, false],
-      [reMask, () => f(RES_MARGIN.particles + flowR), null, false],
+      [tiered ? before.set[L.set.tileOcc + slot]! & 0xff : 0, (a, side) => f(RES_MARGIN.particles + flow(a, side)), null, false],
+      [reMask, (a, side) => f(RES_MARGIN.particles + Math.max(flow(a, side), flowC)), null, false],
     ];
     for (const [m, reach, pageReach, halfOpen] of classes) {
       if (m === 0) continue;
