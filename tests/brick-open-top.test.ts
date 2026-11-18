@@ -18,7 +18,7 @@ import { solidVoxelsOnMovedLattice } from "../lib/core/scene-lattice";
 import type { SceneDescription } from "../lib/core/model";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
-import { BRICK_ENGINE_SCENES, BRICK_OPEN_TOP_HEADROOM } from "../lib/methods/narrow-band/brick-scene";
+import { BRICK_OPEN_TOP_HEADROOM } from "../lib/methods/narrow-band/brick-scene";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
 const H_M = 0.025, DRIFT = Number(process.env.OPEN_TOP_DRIFT ?? 0.1);
@@ -38,9 +38,7 @@ function openTopScene(liquid: { lo: [number, number, number]; hi: [number, numbe
 }
 
 async function solverFor(device: GPUDevice, s: ReturnType<typeof openTopScene>) {
-  const enabled = BRICK_ENGINE_SCENES as string[], id = s.scene.sceneId!, had = enabled.includes(id);
-  if (!had) enabled.push(id);
-  return createBrickSolver(device, s.scene, s.values, s.quality).finally(() => { if (!had) enabled.splice(enabled.indexOf(id), 1); });
+  return createBrickSolver(device, s.scene, s.values, s.quality);
 }
 
 // The presentation's volume fractions: the total, the liquid above the container's top, and in the lattice's last

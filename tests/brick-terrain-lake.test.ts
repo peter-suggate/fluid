@@ -11,7 +11,6 @@ import { getSceneDefinition } from "../lib/core/scenes";
 import { resolveMethodValues } from "../lib/core/method-contract";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import { H } from "../lib/methods/narrow-band/brick-abi";
 import { snapshot } from "../lib/methods/narrow-band/brick-readback";
 import { withUniformDevice } from "./helpers/uniform-geometric";
@@ -22,9 +21,7 @@ test("brick engine: a lake on terrain (alpine-lake-sunrise) boots and steps with
     const profile = definition.methodProfile, quality = profile?.methodId === method.id ? profile.quality : "balanced";
     const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === method.id ? profile.overrides : {}), engine: "brick" });
     const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s!;
-    const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(scene.sceneId!);
-    if (!had) enabled.push(scene.sceneId!);
-    const solver = await createBrickSolver(device, scene, values, quality).finally(() => { if (!had) enabled.splice(enabled.indexOf(scene.sceneId!), 1); });
+    const solver = await createBrickSolver(device, scene, values, quality);
     const e = solver.brickEngine;
     try {
       const s0 = await snapshot(e);

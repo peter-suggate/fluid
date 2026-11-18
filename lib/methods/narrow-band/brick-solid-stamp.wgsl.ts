@@ -47,8 +47,12 @@ export const BRICK_SOLID_EDIT_WORDS = 8;
 
 /** The terrain's part of the stamp (brick-terrain.wgsl.ts; none without terrain): the ground's reach over a brick's
  * columns, a workgroup reduction (every lane calls it, in uniform control flow), and the cut a cell takes from it. */
-function stampTerrainWGSL(terrain: boolean): string {
-  return terrain ? /* wgsl */`
+function stampTerrainWGSL(terrain: boolean, field: boolean): string {
+  const open = terrain || field ? /* wgsl */`
+// FLAGS.OPEN: umCellIsOpen's umCellOpen > 1e-5.
+fn nbStampOpen(frac:f32)->bool{return frac>1e-5;}` : /* wgsl */`
+fn nbStampOpen(frac:f32)->bool{return frac!=0.0;}`;
+  return open + (terrain ? /* wgsl */`
 var<workgroup> wTop:array<f32,64>;
 var<workgroup> wBottom:array<f32,64>;
 // The highest the ground reaches over the cells [lo, hi] of x and z: their columns and one more each side (a cell's
@@ -75,10 +79,17 @@ fn nbStampTerrainCut(c:vec3i)->bool{
     if(nbStaticInBox(b)&&!nbStaticVoxel(b)&&nbTerrainBoxOpen(vec3f(b)+0.5+0.5*vec3f(nbStaticAxis(a)),vec3f(1))<1.0){return true;}
   }
   return false;
+}` : "") + (field ? /* wgsl */`
+// The procedural boundary (brick-boundary.wgsl.ts): whether the image holds brick b or a brick about it (the ring's
+// reach, NEAR_SOLID), and whether a cell is a record cell in the box. A record touches a face's unit box exactly when
+// it is one of the face's two cells (umBoundaryTouchesBox's octant samples stay in them), so the cut rule is the
+// mask's with record cells beside the voxels.
+fn nbStampFieldNear(o:vec3i,lid:u32)->bool{
+  if(lid>=27u){return false;}
+  let d=vec3i(i32(lid%3u),i32((lid/3u)%3u),i32(lid/9u))-vec3i(1);
+  return nbBoundaryBrick((o>>vec3u(3u))+d)!=0u;
 }
-// FLAGS.OPEN: umCellIsOpen's umCellOpen > 1e-5.
-fn nbStampOpen(frac:f32)->bool{return frac>1e-5;}` : /* wgsl */`
-fn nbStampOpen(frac:f32)->bool{return frac!=0.0;}`;
+fn nbStampFieldCell(c:vec3i)->bool{return nbBoundaryRecord(c)!=0u;}` : "");
 }
 
 export function brickSolidStampKernels(L: BrickLayout, mask: Pick<BrickStaticMaskBinding, "walls">): { solidStamp: BrickKernel; solidRestamp: BrickKernel } {
@@ -90,8 +101,8 @@ export function brickSolidStampKernels(L: BrickLayout, mask: Pick<BrickStaticMas
     { name: "cut", kind: "rw", type: "array<f32>" },
     { name: "solid", kind: "ro", type: "array<u32>" },
   ];
-  const terrain = mask.walls.terrain !== undefined;
-  const statics = brickStaticWGSL({ box: L.box, openTop: mask.walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls: mask.walls } }) + stampTerrainWGSL(terrain);
+  const terrain = mask.walls.terrain !== undefined, field = mask.walls.boundary !== undefined;
+  const statics = brickStaticWGSL({ box: L.box, openTop: mask.walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls: mask.walls } }) + stampTerrainWGSL(terrain, field);
   const code = [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: true } }), declareBindings(bindings), BRICK_SET_HELPERS_WGSL, statics, /* wgsl */`
 var<workgroup> wCut:atomic<u32>;
 var<workgroup> wNear:atomic<u32>;
@@ -118,6 +129,7 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let c=o-vec3i(${BRICK_SOLID_RING_CELLS})+vec3i(i32(l%${3 * BRICK_SOLID_RING_CELLS}u),i32((l/${3 * BRICK_SOLID_RING_CELLS}u)%${3 * BRICK_SOLID_RING_CELLS}u),i32(l/${(3 * BRICK_SOLID_RING_CELLS) ** 2}u));
     if(nbStampMaskVoxel(c)){atomicOr(&wNear,1u);break;}
   }
+  ${field ? "if(nbStampFieldNear(o,lid)){atomicOr(&wNear,1u);}" : ""}
   ${terrain ? `// The ground within the ring: its reach over the ring's columns rises past the ring's floor.
   if(nbStampTerrainReach(o.xz-vec2i(${BRICK_SOLID_RING_CELLS}),o.xz+vec2i(${7 + BRICK_SOLID_RING_CELLS}),lid)>f32(o.y-${BRICK_SOLID_RING_CELLS})&&lid==0u){atomicOr(&wNear,1u);}
   // The ground may cut the brick: its reach over the brick's cells and the cells below their lower faces rises past
@@ -131,6 +143,7 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let c=o+nbLocalCoord(l);
     var cut=nbStampMaskVoxel(c);
     for(var a=0u;a<3u;a++){cut=cut||nbStampMaskVoxel(c-nbStaticAxis(a));}
+    ${field ? "if(!cut){cut=nbStampFieldCell(c);for(var a=0u;a<3u;a++){cut=cut||nbStampFieldCell(c-nbStaticAxis(a));}}" : ""}
     ${terrain ? "if(!cut&&terrainMaybe){cut=nbStampTerrainCut(c);}" : ""}
     if(cut){atomicOr(&wCut,1u);}
   }
@@ -159,10 +172,10 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     if(frac<=1e-5){phi[f]=phi[f]|NB_FLAG_STATIC_SHUT;}
   }
 }`].join("\n");
-  return { solidStamp: { label: "solidStamp", entry: "solidStamp", code, bindings }, solidRestamp: solidRestampKernel(L, statics, bindings, terrain) };
+  return { solidStamp: { label: "solidStamp", entry: "solidStamp", code, bindings }, solidRestamp: solidRestampKernel(L, statics, bindings, terrain, field) };
 }
 
-function solidRestampKernel(L: BrickLayout, statics: string, stamp: readonly BrickBinding[], terrain: boolean): BrickKernel {
+function solidRestampKernel(L: BrickLayout, statics: string, stamp: readonly BrickBinding[], terrain: boolean, field: boolean): BrickKernel {
   const bindings: BrickBinding[] = [...stamp, { name: "solidEdit", kind: "ro", type: "array<i32>" }];
   const R = BRICK_SOLID_RING_CELLS, N = 3 * R;
   const code = [brickAbiWGSL(L, { set: { name: "nbSet", atomic: true }, dir: { name: "dir", atomic: true } }), declareBindings(bindings), BRICK_SET_HELPERS_WGSL, statics, /* wgsl */`
@@ -189,6 +202,7 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let c=o-vec3i(${R})+vec3i(i32(l%${N}u),i32((l/${N}u)%${N}u),i32(l/${N * N}u));
     if(nbStampMaskVoxel(c)){atomicOr(&wNear,1u);break;}
   }
+  ${field ? "if(nbStampFieldNear(o,lid)){atomicOr(&wNear,1u);}" : ""}
   ${terrain ? `if(nbStampTerrainReach(o.xz-vec2i(${R}),o.xz+vec2i(${7 + R}),lid)>f32(o.y-${R})&&lid==0u){atomicOr(&wNear,1u);}
   let terrainMaybe=nbStampTerrainReach(o.xz-vec2i(1),o.xz+vec2i(7),lid)>f32(o.y)-0.5;` : ""}
   workgroupBarrier();
@@ -201,10 +215,11 @@ fn nbStampMaskVoxel(c:vec3i)->bool{return nbStaticInBox(c)&&nbStaticVoxel(c);}
     let c=o+nbLocalCoord(l);
     var cut=nbStampMaskVoxel(c);
     for(var a=0u;a<3u;a++){cut=cut||nbStampMaskVoxel(c-nbStaticAxis(a));}
+    ${field ? "if(!cut){cut=nbStampFieldCell(c);for(var a=0u;a<3u;a++){cut=cut||nbStampFieldCell(c-nbStaticAxis(a));}}" : ""}
     ${terrain ? "if(!cut&&terrainMaybe){cut=nbStampTerrainCut(c);}" : ""}
     if(cut){atomicOr(&wCut,1u);}
     // FLAGS.OPEN: the box rule (setInit) and not a mask voxel${terrain ? ", nor a cell the ground closes (umCellIsOpen)" : ""}.
-    let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;let open=nbInWallBox(c)&&!nbStampMaskVoxel(c)${terrain ? "&&(!terrainMaybe||nbStampOpen(nbStaticCellOpen(c)))" : ""};
+    let f=NB_PHI_F_FLAGS+NB_STRIDE*s+l;let open=nbInWallBox(c)&&${field ? "select(!nbStampMaskVoxel(c),nbStampOpen(nbStaticCellOpen(c)),nbStampFieldCell(c))" : "!nbStampMaskVoxel(c)"}${terrain ? "&&(!terrainMaybe||nbStampOpen(nbStaticCellOpen(c)))" : ""};
     // STATIC_SHUT is the K slot's (below): cleared here, set with the slot's FRAC.
     phi[f]=select(phi[f]&~NB_FLAG_OPEN,phi[f]|NB_FLAG_OPEN,open)&~NB_FLAG_STATIC_SHUT;
   }

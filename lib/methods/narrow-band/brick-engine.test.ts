@@ -30,7 +30,7 @@ import { BRICK_SET_HELPERS_WGSL, brickSetKernels } from "./brick-set.wgsl";
 import { brickPressureKernels } from "./brick-pressure.wgsl";
 import { pressureOperatorKernels } from "./pressure-operator.wgsl";
 import { brickEngineGaps, brickEngineLanes, brickEngineRefusal, nbEngine, nbEngineChoice, nbEngineStatusText } from "./brick-method";
-import { BRICK_ENGINE_SCENES, BRICK_OPEN_TOP_HEADROOM, BRICK_SPLASH_DROP, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
+import { BRICK_OPEN_TOP_HEADROOM, BRICK_SPLASH_DROP, brickInitialExtent, brickPoolRule, brickSceneSetup, type BrickSceneSetup } from "./brick-scene";
 import { BrickNBFlipSolver } from "./brick-solver";
 import { brickField, pressureOracle, residencyOracle } from "./brick-oracle";
 import { keyOf, readChannel, snapshot, type BrickSnapshot } from "./brick-readback";
@@ -149,16 +149,18 @@ test("brick engine: a pressure solver's indirect words must be the lists' or P's
   validatePressureSolver({ ...cg, setup: [{ kernel, dispatch: { indirect: PRESSURE_ARGS.FIRST } }] });
 });
 
-test("brick engine: the engine switch refuses unknown engines, and every scene but the dam", async () => {
+test("brick engine: the engine switch refuses unknown engines, and names a gap scene's gaps", async () => {
   assert.equal(nbEngine(undefined), "auto");
   assert.equal(nbEngine("auto"), "auto");
   assert.equal(nbEngine("uniform"), "uniform");
   assert.equal(nbEngine("brick"), "brick");
   assert.throws(() => nbEngine("bricks"), /unknown engine "bricks"/);
-  const seep = createReservoirSeepScene();
+  // No scene list (2026-11-18): the seep runs; the seep in an open world is refused for the moving window (M6).
+  const seep0 = createReservoirSeepScene(), seep = { ...seep0, container: { ...seep0.container, walls: "none" as const } };
   assert.ok(seep.fluid?.brickPools, "seep authors brickPools");
+  assert.deepEqual(brickEngineGaps(seep0, { timeStep: "sixtieth" }), [], "the seep has no gaps");
   const refusal = brickEngineRefusal(seep, { timeStep: "sixtieth" });
-  assert.match(refusal.message, /not enabled on the brick engine/);
+  assert.match(refusal.message, /open world/);
   // Each lane's line is there exactly while its registration is missing (F registers the tiered set, P compositeMGPCG).
   assert.equal(/lane F's stages/.test(refusal.message), brickEngineLanes().some(l => /lane F/.test(l)));
   // Lane P's line is there exactly while P's solver is unregistered (it registers compositeMGPCG at M2).
@@ -194,9 +196,13 @@ test("brick engine: the dam's scene setup (128^3, 1/60 s, its box continued thro
     assert.ok(Math.abs(boxDistance([x, y, z], box) - want) < 1e-6 * n, `phi at ${[x, y, z]}: ${boxDistance([x, y, z], box)} against ${want}`);
   }
   assert.ok(bootBricks(setup).length <= setup.capacities.f);
-  // An unenabled scene, and a dam with a body, are refused with their gaps.
-  assert.match(brickSceneSetup(createReservoirSeepScene(), {}).gaps.join(";"), /not enabled on the brick engine/);
-  assert.match(brickSceneSetup({ ...dam, rigidBodies: [{} as never] }, { timeStep: "sixtieth" }).gaps.join(";"), /rigid bodies/);
+  // An open world is refused with its gap; a body scene without authored K slots takes one a F brick (k = f).
+  const seep = createReservoirSeepScene();
+  assert.match(brickSceneSetup({ ...seep, container: { ...seep.container, walls: "none" } }, { timeStep: "sixtieth" }).gaps.join(";"), /open world/);
+  const boats = sceneDocument(getSceneDefinition("paddleboats")), { brickPools: _pools, ...boatFluid } = boats.fluid;
+  const ruled = brickSceneSetup({ ...boats, fluid: boatFluid }, { timeStep: "sixtieth" });
+  assert.deepEqual(ruled.gaps, []);
+  assert.equal(ruled.setup!.capacities.k, ruled.setup!.capacities.f);
 });
 
 test("brick engine: brickPools must be integers, f/c/particles at least 1", () => {
@@ -235,15 +241,13 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     "nbflip-analytic-free-fall": [405, 18, 150528], "nbflip-analytic-tilted-free-fall": [405, 18, 150528],
     "cm12-figure-7": [2890, 125, 377568], "cm12-figure-7-256": [10890, 729, 2677350],
   };
-  const enabled = BRICK_ENGINE_SCENES as string[], before = enabled.length;
-  try {
+  {
     for (const [id, [f, c, particles]] of Object.entries(want)) {
       const scene = sceneDocument(getSceneDefinition(id));
       // power-droplet-256 authors its pools since 2026-11-18 (the rule's F latched within 300 steps); the rule is
       // still the one measured against it, so it is checked with the authored pools removed.
       if (id === "power-droplet-256") { assert.ok(scene.fluid.brickPools, `${id} authors its pools`); delete scene.fluid.brickPools; }
       assert.equal(scene.fluid.brickPools, undefined, `${id} authors no pools`);
-      enabled.push(scene.sceneId!);
       const { setup, gaps } = brickSceneSetup(scene, { timeStep: "sixtieth" });
       assert.deepEqual(gaps, [], id);
       assert.deepEqual([setup!.capacities.f, setup!.capacities.c, setup!.capacities.particles], [f, c, particles], id);
@@ -261,14 +265,14 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     // A container that is whole bricks but not whole pages is padded (M3): the lattice is whole 32^3 pages and the
     // box is the container's cells, where every wall is (F's, the release readers', P's pressure rows, the C level
     // set's and the presentation's; tests/brick-padded-dam.test.ts).
-    const slab = sceneDocument(getSceneDefinition("ceiling-slab-drop")); enabled.push(slab.sceneId!);
+    const slab = sceneDocument(getSceneDefinition("ceiling-slab-drop"));
     const padded = brickSceneSetup(slab, { timeStep: "sixtieth" });
     assert.deepEqual(padded.gaps, []);
     assert.deepEqual([padded.setup!.lattice, padded.setup!.box], [[32, 32, 32], [24, 16, 24]]);
     // A container that is not whole bricks (64 x 20 x 64): the box is its cells rounded up to bricks (64 x 24 x 64), the
     // cells between are the static mask's padding voxels (the old engine's solidWorldForFluidLattice), and the initial
     // liquid and pools read the container's own cells.
-    const big = sceneDocument(getSceneDefinition("large-power-hydrostatic")); enabled.push(big.sceneId!);
+    const big = sceneDocument(getSceneDefinition("large-power-hydrostatic"));
     const cut = brickSceneSetup(big, { timeStep: "sixtieth" });
     assert.deepEqual(cut.gaps, []);
     assert.deepEqual([cut.setup!.lattice, cut.setup!.box], [[64, 32, 64], [64, 24, 64]]);
@@ -283,12 +287,12 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     assert.ok(cut.setup!.capacities.k >= 8 * 8, "K holds the padding's cut bricks");
     // An open top (M3): BRICK_OPEN_TOP_HEADROOM cells of air above the container's pages, in the box, so the x and z
     // walls rise to the lattice's top and nothing is a wall at the container's own top. The old engine's far φ stays.
-    const tank = sceneDocument(getSceneDefinition("bulk-rest-tank")); enabled.push(tank.sceneId!);
+    const tank = sceneDocument(getSceneDefinition("bulk-rest-tank"));
     const open = brickSceneSetup(tank, { timeStep: "sixtieth" });
     assert.deepEqual(open.gaps, []);
     assert.deepEqual([open.setup!.lattice, open.setup!.box, open.setup!.openTop, open.setup!.farPhi], [[256, 288 + BRICK_OPEN_TOP_HEADROOM, 128], undefined, true, 288]);
     // Its closed form keeps the slab's top face (no wall continuation through an open top), at the container's height.
-    const boats = structuredClone(sceneDocument(getSceneDefinition("paddleboats"))); boats.rigidBodies = []; enabled.push(boats.sceneId!);
+    const boats = structuredClone(sceneDocument(getSceneDefinition("paddleboats"))); boats.rigidBodies = [];
     const slabTop = brickSceneSetup(boats, { timeStep: "sixtieth" });
     assert.deepEqual(slabTop.gaps, []);
     assert.deepEqual([slabTop.setup!.lattice, slabTop.setup!.openTop], [[512, 32 + BRICK_OPEN_TOP_HEADROOM, 192], true]);
@@ -297,7 +301,7 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     // A top the engine does not know fails explicitly.
     const odd = structuredClone(tank); (odd.container as { top: string }).top = "vented";
     assert.ok(brickSceneSetup(odd, { timeStep: "sixtieth" }).gaps.some(g => g.includes('container.top "vented"')));
-  } finally { enabled.length = before; }
+  }
   // An authored scene keeps its pools exactly (no t unless it says), K at least the edit headroom.
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), authored = dam.fluid.brickPools!;
   assert.deepEqual(brickSceneSetup(dam, { timeStep: "sixtieth" }).setup!.capacities, { ...authored, k: Math.max(authored.k, Math.min(authored.f, BRICK_STATIC_EDIT_K)) });
@@ -638,9 +642,9 @@ test("brick engine: with the stages' seed, the boot runs a TRIG-only census betw
 test("brick engine: auto (the default) takes brick exactly where the scene has no gaps, and says why not", () => {
   const method = uniformNarrowBandMethod;
   assert.equal(method.params.find(p => p.key === "engine")?.default, "auto");
-  // The seep in a spherical container: not enabled, and the sphere (two gaps, until both land).
+  // The seep in an open world: the open world's gap (M6).
   const dam = sceneDocument(getSceneDefinition("high-resolution-dam-break")), seep0 = createReservoirSeepScene();
-  const seep = { ...seep0, container: { ...seep0.container, shape: "sphere" as const } };
+  const seep = { ...seep0, container: { ...seep0.container, walls: "none" as const } };
   const defaults = resolveMethodValues(method, "balanced", { ...method.appDefaults, timeStep: "sixtieth" });
   assert.equal(defaults.engine, "auto");
   // The dam has no gaps (the lanes' registrations included): auto runs brick.
@@ -649,9 +653,10 @@ test("brick engine: auto (the default) takes brick exactly where the scene has n
   assert.equal(nbEngineStatusText(nbEngineChoice(dam, defaults)), "Brick (auto)");
   // A scene with gaps runs uniform, and the status names the first gap and the count of the rest.
   const gaps = brickEngineGaps(seep, defaults), s = nbEngineChoice(seep, defaults);
-  assert.ok(gaps.length > 1);
+  assert.ok(gaps.length >= 1);
   assert.deepEqual(s, { requested: "auto", ran: "uniform", gap: gaps[0], gaps: gaps.length });
-  assert.equal(nbEngineStatusText(s), `Uniform (auto: ${gaps[0]}; ${gaps.length - 1} more)`);
+  assert.equal(nbEngineStatusText(s), `Uniform (auto: ${gaps[0]}${gaps.length > 1 ? `; ${gaps.length - 1} more` : ""})`);
+  assert.equal(nbEngineStatusText({ requested: "auto", ran: "uniform", gap: "a", gaps: 3 }), "Uniform (auto: a; 2 more)");
   // Explicit engines keep their behaviour: uniform always, brick always (createBrickSolver refuses a gap scene).
   for (const scene of [dam, seep]) {
     assert.deepEqual(nbEngineChoice(scene, { ...defaults, engine: "uniform" }), { requested: "uniform", ran: "uniform" });

@@ -20,7 +20,7 @@ import { fluidLatticeCellVolumes, fluidLatticeVertexPhi } from "../../core/initi
 import { uniformInitialLiquidVelocity } from "../uniform/uniform-volume-initial";
 import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { BrickEngine, bootBricks, bootPhiAt, bootTieredSet, initialPhiPages, type BrickEngineOptions, type BrickInitialPhi, type Vec3 } from "./brick-engine";
-import { BRICK_ENGINE_SCENES, brickSceneSetup } from "./brick-scene";
+import { brickSceneSetup } from "./brick-scene";
 import { bootParticleCount, brickInitialLiquid, brickInitialPhi, brickInitialVelocity, closedFormLiquid } from "./brick-initial";
 import type { BrickStagesFactory } from "./brick-stages";
 import { fluidStagesAt } from "./brick-fluid-stages";
@@ -246,14 +246,10 @@ test("brick initial: a moving liquid in a container that is not whole pages boot
     const own = brickInitialVelocity(scene, box)!, rekey = (k: number) => { const t = [k % B[0]!, Math.floor(k / B[0]!) % B[1]!, Math.floor(k / (B[0]! * B[1]!))]; return t[0]! + T[0]! * (t[1]! + T[1]! * t[2]!); };
     assert.deepEqual(v.tiles, own.tiles.map(rekey).sort((a, b) => a - b), `${id}: the container's tiles`);
     const values = resolveMethodValues(method, "balanced", { ...method.appDefaults, engine: "brick" });
-    // Past the catalog gate (as brickEngineGaps's sweep runs it): the setup reaches the initial liquid.
-    const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(id);
-    if (!had) enabled.push(id);
-    try {
-      const r = brickSceneSetup(scene, values);
-      assert.ok(r.setup || r.gaps.length > 0, `${id}: a setup or gaps`);
-      if (r.setup) assert.deepEqual(r.setup.initialVelocity, v, `${id}: the setup's initial velocity`);
-    } finally { if (!had) enabled.splice(enabled.indexOf(id), 1); }
+    // The setup reaches the initial liquid.
+    const r = brickSceneSetup(scene, values);
+    assert.ok(r.setup || r.gaps.length > 0, `${id}: a setup or gaps`);
+    if (r.setup) assert.deepEqual(r.setup.initialVelocity, v, `${id}: the setup's initial velocity`);
   }
 });
 

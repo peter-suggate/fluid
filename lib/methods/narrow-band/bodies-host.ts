@@ -43,6 +43,9 @@ export interface BrickRigidBodiesOptions {
   readonly coupling?: boolean;
   /** The ground's columns (BrickSceneSetup.terrain): required when the scene has terrain (sceneHasTerrain). */
   readonly terrain?: BrickTerrainColumns;
+  /** The procedural boundary's image (BrickSceneSetup.boundary): the bodies contact the field as the old host's
+   * procedural collision source (proceduralContact over the same packed words). */
+  readonly boundary?: Uint32Array<ArrayBuffer>;
 }
 
 /** Why a scene's bodies cannot run on the brick engine's body stages (empty when they can). */
@@ -76,6 +79,8 @@ export class BrickRigidBodies implements BrickBodiesBinding {
   /** The rigid system's terrain binding: one zero texel (a scene with no terrain reads every column at zero, as the old
    * host's 1x1 texture; the integrator's terrain flag is off, sceneHasTerrain). */
   private readonly terrain: GPUTexture;
+  /** The boundary's image for proceduralContact: word 0 the image's base (1), then the image (a live edit rewrites it). */
+  private readonly boundary?: GPUBuffer;
   get bodies(): GPUBuffer { return this.system.stateBuffer; }
   /** Optional: a buffer (COPY_DST, at least GPU_RIGID_EXCHANGE_BYTES) the exchange is copied into each step before the
    * integrator, for observers (tools/nbflip-rigid-gates.ts). Never set on the app's path. */
@@ -107,6 +112,15 @@ export class BrickRigidBodies implements BrickBodiesBinding {
     this.terrain = device.createTexture({ label: ground ? "nb-brick.rigid terrain" : "nb-brick.rigid terrain (none)", size: [nx, nz], format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     if (ground) device.queue.writeTexture({ texture: this.terrain }, Float32Array.from(ground.heights), { bytesPerRow: 4 * nx, rowsPerImage: nz }, [nx, nz]);
     this.system = new WebGPURigidBodySystem(device, scene, this.exchange, this.terrain, [nx, nz]);
+    // The old host's procedural collision source (its sculpt field aside: a sculpted ground is the adapter's gap), read
+    // from a buffer of its own: [base, image...], the image in the field's lattice (the container's cells, its corner
+    // the frame's).
+    if (options.boundary) {
+      this.boundary = device.createBuffer({ label: "nb-brick.rigid boundary", size: 4 * (1 + options.boundary.length), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(this.boundary, 0, new Uint32Array([1]));
+      device.queue.writeBuffer(this.boundary, 4, options.boundary);
+      this.system.setProceduralCollisionSource({ buffer: this.boundary, pointerWord: 0, origin_m: options.frame_m, cellSize_m: [options.h_m, options.h_m, options.h_m] });
+    }
     this.roster = initializeRigidBodies(scene.rigidBodies ?? []);
   }
 
@@ -183,5 +197,11 @@ export class BrickRigidBodies implements BrickBodiesBinding {
     this.device.queue.writeBuffer(this.exchange, 0, new Uint32Array(GPU_RIGID_EXCHANGE_BYTES / 4));
   }
 
-  destroy() { this.system.destroy(); this.exchange.destroy(); this.cuts.destroy(); this.terrain.destroy(); }
+  /** A live edit's boundary image (the same bricks; its validity words moved). */
+  updateBoundary(image: Uint32Array<ArrayBuffer>) {
+    if (!this.boundary || this.boundary.size !== 4 * (1 + image.length)) throw new Error("Brick rigid bodies: the boundary image changed size (or none was attached)");
+    this.device.queue.writeBuffer(this.boundary, 4, image);
+  }
+
+  destroy() { this.system.destroy(); this.exchange.destroy(); this.cuts.destroy(); this.terrain.destroy(); this.boundary?.destroy(); }
 }

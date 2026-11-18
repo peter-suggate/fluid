@@ -41,7 +41,7 @@ import { FB, FG_DEPTH_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, FG_RING_WGSL, FG_RUN_WGS
 import { particleResidencyTravelWGSL } from "../uniform/uniform-local-residency";
 import { NBF_PARTICLE_SETTINGS, nbfParticleFormulasAt, nbfParticleRecordWGSL, nbfSeedFormulasWGSL } from "./particles-formulas.wgsl";
 import { nbfDeltaWGSL } from "./velocity-formulas.wgsl";
-import { BRICK_SOLID_CELL_WGSL, BRICK_SOLID_PARTICLE_TERRAIN_WGSL, BRICK_SOLID_PARTICLE_WGSL, brickMoveDeferWGSL, brickPSolidWGSL, brickSeedBlockedWGSL, brickSolidCellWGSL } from "./brick-solid-walk.wgsl";
+import { BRICK_SOLID_CELL_WGSL, BRICK_SOLID_PARTICLE_TERRAIN_WGSL, BRICK_SOLID_PARTICLE_WGSL, brickMoveDeferWGSL, brickPSolidWGSL, brickSeedBlockedWGSL, brickSolidCellWGSL, brickSolidCellFieldWGSL, brickSolidParticleFieldWGSL } from "./brick-solid-walk.wgsl";
 import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
 /** The records' indirect arguments, in F's args region (brick-abi.md §5.5): x, y, z by the fold rule. */
@@ -102,7 +102,10 @@ export function particleKernels(L: BrickLayout, F: FluidLayout, options: { reado
   // With terrain (brick-terrain.wgsl.ts), pSolid and pSeed bind the static buffer and read the hooks: the walk's voxel
   // test and the ground's contact, the blocked test's point under the ground.
   const walls = statics ? options.staticWalls : undefined;
-  const ground = walls?.terrain ? brickStaticWGSL({ box: L.box, openTop: walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls } }) : undefined;
+  // With the procedural boundary (brick-boundary.wgsl.ts) likewise: the walk's voxel test with records, the field's
+  // contact, and the blocked test's sign in a record cell.
+  const field = walls?.boundary !== undefined;
+  const ground = walls?.terrain || field ? brickStaticWGSL({ box: L.box, openTop: walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls } }) : undefined;
   const solidRO: BrickBinding = { name: "solid", kind: "ro", type: "array<u32>" };
   const nbfParticleFormulasWGSL = nbfParticleFormulasAt(options.bandDepth);
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
@@ -294,7 +297,7 @@ fn pFile(i:u32,p:Particle,split:bool){
   // Statics (lane E, brick-solid-walk.wgsl.ts): pMove defers a NEAR_SOLID brick's records to pSolid, which moves them
   // with pMove's text and the solid walk.
   const pMove = k("pMove", pMoveBindings, statics ? BRICK_SOLID_PARTICLE_WGSL + brickMoveDeferWGSL(pMoveCode) : pMoveCode);
-  const pSolid = statics ? k("pSolid", ground ? [...pMoveBindings, solidRO] : pMoveBindings, (ground ? ground + BRICK_SOLID_PARTICLE_TERRAIN_WGSL : BRICK_SOLID_PARTICLE_WGSL) + brickPSolidWGSL(pMoveCode)) : undefined;
+  const pSolid = statics ? k("pSolid", ground ? [...pMoveBindings, solidRO] : pMoveBindings, (ground ? ground + (field ? brickSolidParticleFieldWGSL(walls?.terrain !== undefined) : BRICK_SOLID_PARTICLE_TERRAIN_WGSL) : BRICK_SOLID_PARTICLE_WGSL) + brickPSolidWGSL(pMoveCode)) : undefined;
 
   const pScan = k("pScan", [CFG, FB.set, FB.dir, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, BANK_WGSL].join("\n") + /* wgsl */`
 var<workgroup> scan:array<u32,256>;
@@ -404,20 +407,22 @@ var<workgroup> sCount:atomic<u32>;
 var<workgroup> sBase:u32;
 var<workgroup> sTileSeeds:array<atomic<u32>,8>;
 fn pCellMass(run:vec2u,bank:u32)->f32{var m=0.0;for(var j=run.x;j<run.y;j++){let o=parts[pAt(bank,j)];if(nbLive(o)){m+=nbParticleMass(o);}}return m;}
-// A seam cell: a 4h-owned cell among c's 27 (lane E, the pockmarks 2026-11-16). R1 retires a 4h cell's records, so
-// the records the old engine's 4h side advected back across the seam never arrive: its empty bins are unknown, not
-// air, and the seam's h cell reseeds as an uncovered one (to nbSeedTarget, under the 8-mass cap). Without it the
-// seam's h cells thinned (top layers 1.6-1.9 records against 6 in steady columns) and dimpled under 0.5 h.
-fn pSeam(c:vec3i)->bool{
- for(var k=0u;k<27u;k++){if(fgCellCoarse(c+nbNeighbourOffset(k))){return true;}}
- return false;
-}
+// A seam cell: a liquid 4h-owned cell among c's 27 (lane E, the pockmarks 2026-11-16). R1 retires a 4h cell's
+// records, so the records the old engine's 4h side advected back across the seam (its band seed's overlap on 4h
+// owners, seedCells) never arrive: the empty bins of a 4h cell with liquid are unknown, not air, and the seam's h cell
+// reseeds as an uncovered one (to nbSeedTarget, under the 8-mass cap). Without it the seam's h cells thinned (top
+// layers 1.6-1.9 records against 6 in steady columns) and dimpled under 0.5 h. Only a 4h cell holding liquid counts,
+// by lcCoupled's measure (its fill clamp(0.5 - φ, 0, 1) at the centre, the advected C φ, above 0): the old overlap
+// seeds liquid, so a 4h air cell's empty bins are air in both engines. Counting it reseeded a shallow pool's surface
+// row under the 4h air tiles above as uncovered every step: the union lowered the C vertices there, the row read
+// fuller and reseeded again (interactive-pool at 3.2-3.8 cells deep: +4..15% volume, then -40% when its surface tiles
+// demoted, 2026-11-18).
 fn pUncovered(c:vec3i)->bool{
  for(var k=0u;k<27u;k++){let r=fgRun(c+nbNeighbourOffset(k));if(r.y>r.x){return false;}}
  return true;
 }
 // The staged seed (lane E, 2026-11-16): the workgroup stages its brick's tile gates (sTileOk: owned, and the
-// re-entry's TILE_OCC bit or the reach and the heat), the 4^3 tiles' 4h bits about it (pSeam's) and the FC_DEPTH
+// re-entry's TILE_OCC bit or the reach and the heat), the 4^3 tiles' 4h bits about it (psSeam's) and the FC_DEPTH
 // of its 9^3 vertices (fgDepth's corners of every centre and site in the brick), once; pSeedCell reads them, the
 // same words through the same arithmetic (psDepth is fgDepth's text, its vertex and reach reads staged). The count
 // pass keeps each cell's accepted sites (a bit a site), so the write pass writes those, not re-deciding them.
@@ -435,7 +440,7 @@ fn psDepthVertex(v:vec3i)->f32{let r=vec3u(v-psO);if(psStaged&&all(r<vec3u(9u)))
 ` + PS_DEPTH_WGSL + /* wgsl */`
 fn psCoarse(c:vec3i)->bool{let t=vec3u((c>>vec3u(2u))-((psO>>vec3u(2u))-vec3i(1)));if(all(t<vec3u(4u))){return nbInWallBox(c)&&sCoarse[t.x+4u*(t.y+4u*t.z)]!=0u;}return fgCellCoarse(c);}
 fn psSeam(c:vec3i)->bool{
- for(var k=0u;k<27u;k++){if(psCoarse(c+nbNeighbourOffset(k))){return true;}}
+ for(var k=0u;k<27u;k++){let n=c+nbNeighbourOffset(k);if(psCoarse(n)&&fgPhiAt(vec3f(n)+0.5)<0.5){return true;}}
  return false;
 }
 // A site's depth: the re-entry's φ, else fgDepth's (staged).
@@ -468,7 +473,7 @@ fn pSeedCellMask(c:vec3i,bank:u32,initial:bool)->u32{
   let run=fgRun(c);n0=run.y-run.x;if(n0>=goal){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
   held=pCellMass(run,bank);if(held>=8.0){if(re){atomicAdd(&nbSet[NB_H_REENTRY_FULL],1u);}return 0u;}
  }
- // uncovered (pUncovered || pSeam) only where nbfSeedSiteOk reads it (a shallow site, the reseed); a cell with its
+ // uncovered (pUncovered || psSeam) only where nbfSeedSiteOk reads it (a shallow site, the reseed); a cell with its
  // own records has one among its 27 (pUncovered false).
  var uncovered=true;var known=initial;
  let salt=psSalt(initial);
@@ -566,7 +571,7 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
 }`;
   // Statics (lane E): seedSite's nbParticleBlocked refuses a site in a closed cell.
   const seedBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src];
-  const pSeed = k("pSeed", ground ? [...seedBindings, solidRO] : seedBindings, statics ? (ground ? ground + brickSolidCellWGSL(true) : BRICK_SOLID_CELL_WGSL) + brickSeedBlockedWGSL(pSeedCode) : pSeedCode);
+  const pSeed = k("pSeed", ground ? [...seedBindings, solidRO] : seedBindings, statics ? (ground ? ground + (field ? brickSolidCellFieldWGSL(walls?.terrain !== undefined) : brickSolidCellWGSL(true)) : BRICK_SOLID_CELL_WGSL) + brickSeedBlockedWGSL(pSeedCode) : pSeedCode);
 
   // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none.
   const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`

@@ -20,7 +20,6 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { solidVoxelsOnMovedLattice } from "../lib/core/scene-lattice";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import type { BrickCensusHold } from "../lib/methods/narrow-band/brick-census.wgsl";
 import { boxGeometry } from "../tools/nbflip-observables";
 import { createNBFlipBoxObserver } from "../tools/nbflip-observe";
@@ -43,9 +42,7 @@ for (const run of RUNS) {
       const profile = definition.methodProfile, quality = profile?.methodId === method.id ? profile.quality : "balanced";
       const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === method.id ? profile.overrides : {}), engine: "brick" });
       const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s!;
-      const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(scene.sceneId!);
-      if (!had) enabled.push(scene.sceneId!);
-      const solver = await createBrickSolver(device, scene, values, quality, run.hold ? { censusHold: run.hold } : {}).finally(() => { if (!had) enabled.splice(enabled.indexOf(scene.sceneId!), 1); });
+      const solver = await createBrickSolver(device, scene, values, quality, run.hold ? { censusHold: run.hold } : {});
       let observer: Awaited<ReturnType<typeof createNBFlipBoxObserver>> | undefined;
       try {
         const e = solver.brickEngine;

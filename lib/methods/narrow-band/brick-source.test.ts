@@ -28,7 +28,7 @@ import { createInflowGridBoundary, inflowBoundaryWGSL } from "../../core/inflow-
 import { uniformSourcePhiWGSL } from "../uniform/uniform-source.wgsl";
 import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
-import { BRICK_ENGINE_SCENES, BRICK_SPLASH_DROP, brickDropParticles, brickInitialExtent, brickSceneSetup, brickSourcesExtent } from "./brick-scene";
+import { BRICK_SPLASH_DROP, brickDropParticles, brickInitialExtent, brickSceneSetup, brickSourcesExtent } from "./brick-scene";
 import { fluidStagesAt } from "./brick-fluid-stages";
 import { compositeMGPCG } from "./brick-pressure-solver";
 import { snapshot } from "./brick-readback";
@@ -46,12 +46,9 @@ function lettersSources(): { scene: SceneDescription; s: BrickSources; lattice: 
   const definition = getSceneDefinition(LETTERS), scene = sceneDocument(definition), method = getMethod(METHOD);
   const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
   const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
-  (BRICK_ENGINE_SCENES as string[]).push(LETTERS);
-  try {
-    const { setup, gaps } = brickSceneSetup(scene, values);
-    assert.deepEqual(gaps, [], "the letters run on the brick engine but for the scene gate");
-    return { scene, s: setup!.sources!, lattice: setup!.lattice, h: setup!.h_m, origin: setup!.origin_m };
-  } finally { (BRICK_ENGINE_SCENES as string[]).pop(); }
+  const { setup, gaps } = brickSceneSetup(scene, values);
+  assert.deepEqual(gaps, [], "the letters run on the brick engine");
+  return { scene, s: setup!.sources!, lattice: setup!.lattice, h: setup!.h_m, origin: setup!.origin_m };
 }
 
 test("brick sources: the letters' drops in source form, one a step; the boot holds a first step's drop", () => {
@@ -92,22 +89,19 @@ test("brick sources: the pool rule covers the scheduled drops (the letters witho
   const definition = getSceneDefinition(LETTERS), method = getMethod(METHOD), profile = definition.methodProfile;
   const values = resolveMethodValues(method, profile?.methodId === METHOD ? profile.quality : "balanced", { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
   const { brickPools: _, ...fluid } = scene.fluid, ruled = { ...scene, fluid };
-  (BRICK_ENGINE_SCENES as string[]).push(LETTERS);
-  try {
-    const { setup, gaps } = brickSceneSetup(ruled, values);
-    assert.deepEqual(gaps, [], "a drop scene without authored pools has no gap");
-    // The extent: the drops' volume joins the t = 0 liquid's; the letters fall from over two bricks, so the splash is
-    // theirs (the drops' volume), not the pool's.
-    const h_m = setup!.h_m, g = scene.fluid.gravity_m_s2;
-    const start = brickInitialLiquid(scene, { lattice, h_m, dt_s: s.dt_s, gravity_mps2: [g.x, g.y, g.z] });
-    const e0 = brickInitialExtent({ lattice, liquid: start.liquid, initial: start.initial }), e = brickSourcesExtent(e0, s, lattice);
-    const dropped = s.drops.reduce((n, d) => n + d.volume, 0);
-    assert.ok(Math.abs(e.cells - e0.cells - dropped) < 1e-6 * e.cells, "the drops' cells join the liquid");
-    assert.ok(e.drop >= BRICK_SPLASH_DROP && e0.drop < BRICK_SPLASH_DROP, "the letters splash, the pool does not");
-    assert.ok(Math.abs(e.splash! - dropped) < 1e-6 * dropped, "the splash is the drops' liquid");
-    assert.ok(setup!.capacities.particles >= Math.ceil(10 * dropped), "the particle pool holds the splash");
-    assert.ok(brickDropParticles(s, 2) > 0 && brickDropParticles(undefined, 2) === 0);
-  } finally { (BRICK_ENGINE_SCENES as string[]).pop(); }
+  const { setup, gaps } = brickSceneSetup(ruled, values);
+  assert.deepEqual(gaps, [], "a drop scene without authored pools has no gap");
+  // The extent: the drops' volume joins the t = 0 liquid's; the letters fall from over two bricks, so the splash is
+  // theirs (the drops' volume), not the pool's.
+  const h_m = setup!.h_m, g = scene.fluid.gravity_m_s2;
+  const start = brickInitialLiquid(scene, { lattice, h_m, dt_s: s.dt_s, gravity_mps2: [g.x, g.y, g.z] });
+  const e0 = brickInitialExtent({ lattice, liquid: start.liquid, initial: start.initial }), e = brickSourcesExtent(e0, s, lattice);
+  const dropped = s.drops.reduce((n, d) => n + d.volume, 0);
+  assert.ok(Math.abs(e.cells - e0.cells - dropped) < 1e-6 * e.cells, "the drops' cells join the liquid");
+  assert.ok(e.drop >= BRICK_SPLASH_DROP && e0.drop < BRICK_SPLASH_DROP, "the letters splash, the pool does not");
+  assert.ok(Math.abs(e.splash! - dropped) < 1e-6 * dropped, "the splash is the drops' liquid");
+  assert.ok(setup!.capacities.particles >= Math.ceil(10 * dropped), "the particle pool holds the splash");
+  assert.ok(brickDropParticles(s, 2) > 0 && brickDropParticles(undefined, 2) === 0);
 });
 
 test("brick sources: two drops in one step throw; a drop at t = 0 or an unknown shape is refused", () => {
@@ -243,13 +237,9 @@ function jetSources(): { scene: SceneDescription; s: BrickSources; lattice: Vec3
   const id = "cm12-figure-1", definition = getSceneDefinition(id), scene = sceneDocument(definition), method = getMethod(METHOD);
   const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
   const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
-  const listed = BRICK_ENGINE_SCENES.includes(id);
-  if (!listed) (BRICK_ENGINE_SCENES as string[]).push(id);
-  try {
-    const { setup, gaps } = brickSceneSetup(scene, values);
-    assert.deepEqual(gaps.filter(g => !g.includes("is not enabled")), [], "the jet runs on the brick engine");
-    return { scene, s: setup!.sources!, lattice: setup!.lattice, h: setup!.h_m, origin: setup!.origin_m };
-  } finally { if (!listed) (BRICK_ENGINE_SCENES as string[]).pop(); }
+  const { setup, gaps } = brickSceneSetup(scene, values);
+  assert.deepEqual(gaps, [], "the jet runs on the brick engine");
+  return { scene, s: setup!.sources!, lattice: setup!.lattice, h: setup!.h_m, origin: setup!.origin_m };
 }
 
 test("brick sources: the nozzle in source form, its step words, its flow in ADDED and its plug box in the boot", () => {

@@ -17,7 +17,6 @@ import { initializeRigidBodies } from "../lib/core/rigid-body";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import type { BrickNBFlipSolver } from "../lib/methods/narrow-band/brick-solver";
 import { H } from "../lib/methods/narrow-band/brick-abi";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
 const STEPS = 16;
@@ -30,9 +29,7 @@ test("brick engine: the peak counters bound every step's pools, particles includ
     const profile = definition.methodProfile, quality = profile?.methodId === method.id ? profile.quality : "balanced";
     const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === method.id ? profile.overrides : {}), engine: "brick" });
     const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s!;
-    const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(scene.sceneId!);
-    if (!had) enabled.push(scene.sceneId!);
-    const solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {}).finally(() => { if (!had) enabled.splice(enabled.indexOf(scene.sceneId!), 1); });
+    const solver = await method.createSolverAsync!(device, scene, quality, values, undefined, () => {});
     try {
       await solver.waitForSimulationReady?.();
       const e = (solver as unknown as BrickNBFlipSolver).brickEngine, roster = initializeRigidBodies(scene.rigidBodies);

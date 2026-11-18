@@ -31,7 +31,6 @@ import type { BrickNBFlipSolver } from "../lib/methods/narrow-band/brick-solver"
 import { MG_HEADER, mgLayout } from "../lib/methods/narrow-band/pressure-mgpcg";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
 import { GPUCompilationManager } from "../lib/core/gpu-compilation-manager";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import { BRICK_CELLS, BRICK_STRIDE, RECORD_WORDS, H, LIST, REC } from "../lib/methods/narrow-band/brick-abi";
 import { boxGeometry } from "./nbflip-observables";
 import { createNBFlipBoxObserver } from "./nbflip-observe";
@@ -119,11 +118,7 @@ try {
   // --profile: per-dispatch GPU time (gpuKernelTimer) over steps 5..N, by pipeline label; the split serialises
   // dispatches, so the sums run above the clean step (attribution only, not a timing claim).
   const timer = args.includes("--profile") ? gpuKernelTimer(device) : undefined;
-  // The rigid scenes are not in BRICK_ENGINE_SCENES until their pools and the padded walls land: the tool admits the
-  // scene it gates for the solver's creation only (as tests/brick-seam-rest.test.ts does).
-  const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(sceneId);
-  if (!had) enabled.push(sceneId);
-  solver = await method.createSolverAsync!(timer?.device ?? device, scene, quality, values, undefined, () => {}).finally(() => { if (!had) enabled.splice(enabled.indexOf(sceneId), 1); });
+  solver = await method.createSolverAsync!(timer?.device ?? device, scene, quality, values, undefined, () => {});
   await solver.waitForSimulationReady?.();
   const brick = engine === "brick" ? solver as unknown as BrickNBFlipSolver : undefined;
   assert.ok(!brick || noBodies || brick.rigidBodies, "the brick engine hosts the scene's bodies");

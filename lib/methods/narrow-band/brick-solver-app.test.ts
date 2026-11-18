@@ -173,14 +173,14 @@ test("brick solver (GPU): a latched FAIL halts the app explicitly and refuses fu
 
 /**
  * The default engine, "auto", through the method's own createSolverAsync: the dam (no gaps) runs the brick engine and
- * a scene with gaps (the water-box dam: no authored pools, a container of part pages) runs the old engine, each
+ * a scene with gaps (an open world: the moving window, M6) runs the old engine, each
  * named in info.nbEngine, and each advances ten frames through the app's ledger with no latched failure.
  */
 test("brick solver (GPU): auto, the default engine, runs the dam on brick and a gap scene on uniform", GPU, async () => {
   const { withUniformDevice } = await import("../../../tests/helpers/uniform-geometric");
   const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD);
   await withUniformDevice("brick solver auto", async device => {
-    for (const [sceneId, ran] of [["high-resolution-dam-break", "brick"], ["water-box-dam-break", "uniform"]] as const) {
+    for (const [sceneId, ran] of [["high-resolution-dam-break", "brick"], ["nbflip-open-ground", "uniform"]] as const) {
       const definition = getSceneDefinition(sceneId), scene = sceneDocument(definition), profile = definition.methodProfile;
       const quality = profile?.methodId === METHOD ? profile.quality : "balanced";
       const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}) });
@@ -189,7 +189,7 @@ test("brick solver (GPU): auto, the default engine, runs the dam on brick and a 
       try {
         assert.equal(solver.info.nbEngine?.ran, ran, `${sceneId}: ${JSON.stringify(solver.info.nbEngine)}`);
         assert.equal("brickEngine" in solver, ran === "brick", `${sceneId}: the solver is the ${ran} engine's`);
-        if (ran === "uniform") assert.match(solver.info.nbEngine!.gap ?? "", /not enabled on the brick engine/);
+        if (ran === "uniform") assert.match(solver.info.nbEngine!.gap ?? "", /open world/);
         await solver.waitForSimulationReady?.();
         let pending = 0, accounted = 0;
         for (let frame = 1; frame <= 10; frame++) {

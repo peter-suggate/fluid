@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { uploadWords } from "./brick-engine";
-import { BRICK_ENGINE_SCENES, brickSceneSetup } from "./brick-scene";
+import { brickSceneSetup } from "./brick-scene";
 import { createBrickSolver } from "./brick-method";
 import { getMethod } from "../../core/method-registry";
 import { resolveMethodValues } from "../../core/method-contract";
@@ -52,8 +52,6 @@ test("brick uploads (GPU): a ball over the letters' pool as initial liquid boots
   const scene: SceneDescription = { ...base, fluid: { ...base.fluid, scheduledDrops: [], initialLiquidVolumes: [{ shape: "sphere", center_m: { x: 0, y: 115.2 * h, z: 0 }, radius_m: 14.42 * h }] } };
   const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
   const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
-  const enabled = BRICK_ENGINE_SCENES.includes(id);
-  if (!enabled) (BRICK_ENGINE_SCENES as string[]).push(id);
   try {
     const setup = brickSceneSetup(scene, values).setup!, t = setup.initial!;
     const words = 1 + t.pages.length + t.phi.length + (setup.initialVelocity ? 4 + setup.initialVelocity.tiles.length : 0) + 1;
@@ -65,6 +63,5 @@ test("brick uploads (GPU): a ball over the letters' pool as initial liquid boots
       } finally { solver.destroy(); }
     });
   } finally {
-    if (!enabled) (BRICK_ENGINE_SCENES as string[]).splice(BRICK_ENGINE_SCENES.indexOf(id), 1);
   }
 });

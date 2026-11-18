@@ -24,7 +24,6 @@ import { solidVoxelsOnMovedLattice } from "../lib/core/scene-lattice";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
 import type { BrickNBFlipSolver } from "../lib/methods/narrow-band/brick-solver";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import { BRICK_CELLS, BRICK_STRIDE, CMASK_WORDS, H, LIST, RECORD_WORDS, REC, SEAM } from "../lib/methods/narrow-band/brick-abi";
 import { MG_TOLERANCE, mgLayout } from "../lib/methods/narrow-band/pressure-mgpcg";
 import { NP_K } from "../lib/methods/narrow-band/pressure-rows.wgsl";
@@ -41,9 +40,7 @@ test("brick engine: a still tiered tank's h / 4h seams hold still water (rigid-h
     const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === method.id ? profile.overrides : {}), engine: "brick" });
     const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s!;
     const g = Math.hypot(scene.fluid.gravity_m_s2.x, scene.fluid.gravity_m_s2.y, scene.fluid.gravity_m_s2.z), unit = g * dt * H_M;
-    const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(scene.sceneId!);
-    if (!had) enabled.push(scene.sceneId!);
-    const solver = await createBrickSolver(device, scene, values, quality, { censusHold: HOLD }).finally(() => { if (!had) enabled.splice(enabled.indexOf(scene.sceneId!), 1); });
+    const solver = await createBrickSolver(device, scene, values, quality, { censusHold: HOLD });
     try {
       const e = solver.brickEngine, L = e.layout, M = mgLayout(L);
       assert.ok(L.lattice.every(n => n <= 32), "one page: page 0's word is the C slot");

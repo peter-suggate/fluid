@@ -86,9 +86,19 @@ fn sdTerrainTile(T:vec3i)->bool{
   for(var z=a.y;z<=b.y;z++){for(var x=a.x;x<=b.x;x++){if(y<nbTerrainHeight(x,z)){return true;}}}
   return false;
 }` : ""}
+${walls.boundary ? `// The procedural boundary's record cells (umSolidTile's field cells) in the shell: the shell's bricks (at most two an
+// axis) first, then its cells where the image holds one.
+fn sdFieldTile(T:vec3i)->bool{
+  let lo=4*T-vec3i(1);let a=lo>>vec3u(3u);let b=(lo+vec3i(5))>>vec3u(3u);var held=false;
+  for(var q=0u;q<8u;q++){let k=select(a,b,vec3u(q&1u,(q>>1u)&1u,q>>2u)!=vec3u(0u));held=held||nbBoundaryBrick(k)!=0u;}
+  if(!held){return false;}
+  for(var l=0u;l<216u;l++){if(nbBoundaryRecord(lo+vec3i(i32(l%6u),i32((l/6u)%6u),i32(l/36u)))!=0u){return true;}}
+  return false;
+}` : ""}
 fn sdSupportTile(T:vec3i)->bool{
   let lo=4*T-vec3i(1);
   ${walls.terrain ? "if(sdTerrainTile(T)){return true;}" : ""}
+  ${walls.boundary ? "if(sdFieldTile(T)){return true;}" : ""}
   var empty=true;
   for(var q=0u;q<8u;q++){empty=empty&&sdPageEmpty(lo+5*vec3i(i32(q&1u),i32((q>>1u)&1u),i32(q>>2u)));}
   if(empty){return false;}

@@ -22,7 +22,6 @@ import { resolveMethodValues } from "../lib/core/method-contract";
 import { solidVoxelsOnMovedLattice } from "../lib/core/scene-lattice";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import { paddedPressure } from "./brick-padded-pressure";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
@@ -37,9 +36,7 @@ test("brick engine: a padded dam (24x16x24 in 32^3) keeps its walls at the box: 
     const profile = definition.methodProfile, quality = profile?.methodId === method.id ? profile.quality : "balanced";
     const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === method.id ? profile.overrides : {}), engine: "brick" });
     const dt = method.effectiveStep_s?.(scene, values) ?? scene.numerics.fixedDt_s!;
-    const enabled = BRICK_ENGINE_SCENES as string[], had = enabled.includes(scene.sceneId!);
-    if (!had) enabled.push(scene.sceneId!);
-    const solver = await createBrickSolver(device, scene, values, quality).finally(() => { if (!had) enabled.splice(enabled.indexOf(scene.sceneId!), 1); });
+    const solver = await createBrickSolver(device, scene, values, quality);
     const e = solver.brickEngine;
     // The presentation's volume fractions over the lattice, as column sums along x and the volume past the box.
     const columns = async () => {

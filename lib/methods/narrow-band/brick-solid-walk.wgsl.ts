@@ -134,6 +134,57 @@ fn psWalk(start:vec3f,endpoint:vec3f,inset:f32,velocity:ptr<function,vec4f>)->ve
 }
 `;
 
+/** The closed-cell test with the procedural boundary (brick-boundary.wgsl.ts) and maybe terrain: nbParticleBlocked's
+ * record lane (the field's sign in a record cell, else the voxel), or the ground at the point. */
+export function brickSolidCellFieldWGSL(terrain: boolean): string {
+  return BRICK_SOLID_CELL_COMMON_WGSL + /* wgsl */`
+// nbParticleBlocked with a record (no body): the field's sign in a record cell, else umSolidVoxel${terrain ? ", or under the ground" : ""}.
+fn psBlocked(q:vec3f)->bool{return nbBoundaryBlocked(q)${terrain ? "||nbTerrainSolid(q)" : ""};}
+`;
+}
+
+/** The particle walk with the procedural boundary (nbFinish with records), and the ground when \`terrain\`: an axis
+ * stops on a voxel with no record (nbVoxelBlocked) or a body's closed cell (FLAGS.OPEN, as the plain walk's psClosed),
+ * its velocity lost at once but for a landing; after each
+ * stride's three axes the field's contact (nbProceduralContact) from the stride's start moves the sample unless that
+ * ends on a voxel, its velocity the contact's on the axes no wall stopped; then the ground's, as the terrain walk's.
+ * A landing then loses vy (umBedSlope is the mask's lane: 0 in these scenes). */
+export function brickSolidParticleFieldWGSL(terrain: boolean): string {
+  return brickSolidCellFieldWGSL(terrain) + PS_FAR_WGSL + /* wgsl */`
+fn psWalk(start:vec3f,endpoint:vec3f,inset:f32,velocity:ptr<function,vec4f>)->vec3f{
+ let travel=endpoint-start;
+ let walk=clamp(u32(ceil(2.0*max(abs(travel.x),max(abs(travel.y),abs(travel.z))))),1u,4096u);
+ let stride=travel/f32(walk);
+ var q=start;var landed=false;var free=vec3f(1.0);var v=(*velocity).xyz;
+ for(var j=1u;j<=walk;j++){
+  let strideStart=q;
+  for(var a=0u;a<3u;a++){
+   let s=stride[a];let e=psUnit(a);
+   var point=q+s*e;
+   let lead=point+sign(s)*inset*e;
+   // nbVoxelBlocked, or a cell its F slot closes that is no record cell (a body's: bodyStamp's FLAGS.OPEN).
+   let cl=vec3i(floor(lead));
+   if(nbVoxelBlocked(lead)||(psClosed(cl)&&nbBoundaryRecord(cl)==0u)){
+    let face=floor(lead[a])+select(1.0,0.0,s>0.0);
+    point=select(point,vec3f(face-sign(s)*inset),psAxis(a));
+    if(a==1u&&s<0.0){landed=true;}else{v=select(v,vec3f(0.0),psAxis(a));free=select(free,vec3f(0.0),psAxis(a));}
+   }
+   q=point;
+  }
+  let field=nbProceduralContact(strideStart,q,v,inset);
+  if(!nbVoxelBlocked(field.position)){q=field.position;v=field.velocity*free;}
+  ${terrain ? `let contact=nbTerrainContact(strideStart,q,v,inset);
+  // A normal correction must not cross an authored voxel.
+  if(!nbVoxelBlocked(contact.position)){q=contact.position;}
+  v=contact.velocity*free;` : ""}
+ }
+ if(landed){v.y=0.0;}
+ *velocity=vec4f(v,(*velocity).w);
+ return q;
+}
+`;
+}
+
 /** The level set's walk (umSlideWalk mode 2, then umWalk's end) and burial (umVertexBuried). */
 export const BRICK_SOLID_LEVEL_SET_WGSL = BRICK_SOLID_CELL_WGSL + /* wgsl */`
 // A PHI1 word lAdvect leaves for phiSolid (a NaN no φ takes: the trace is finite): a vertex outside the NEAR_SOLID

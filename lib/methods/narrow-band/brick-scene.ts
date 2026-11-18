@@ -14,6 +14,7 @@
  * Anything else is a gap, and the method runs the scene on the old engine.
  */
 import { brickTerrainColumns, type BrickTerrainColumns } from "./brick-terrain.wgsl";
+import { brickBoundaryImage } from "./brick-boundary.wgsl";
 import type { SceneDescription } from "../../core/model";
 import { sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
@@ -27,79 +28,6 @@ import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./b
 import { brickSources, type BrickSources } from "./brick-source";
 import { integratedInflowVolume } from "../../core/inflow-boundary";
 import { BRICK_BOOT_BAND, bootPhiAt, type BrickEngineOptions } from "./brick-engine";
-
-/** Scenes the brick engine takes: M2's dam, and the first enabled batch (lane E, 2026-11-17: 60 steps against the old
- * engine from a frozen 0a81b19e, each brick |peak| and |final| volume drift within the old engine's worst repeat plus
- * max(1%, its run noise), a clean smoke; progress-lane-e.md). Named fails stay off until their causes are fixed. */
-export const BRICK_ENGINE_SCENES: readonly string[] = [
-  "high-resolution-dam-break",
-  "minimal-power-dam-break-32", "minimal-power-dam-break-64", "falling-water-torus",
-  "nbflip-analytic-rest", "nbflip-analytic-standing-wave", "nbflip-analytic-dam-break", "nbflip-analytic-mound",
-  // The 100-cell droplets (lane E r29, 300 steps on their authored pools): both engines lose the tension-free film below
-  // resolution (64^3: brick -14%, old -77%; fill-256-100: brick -90.5%, old -92.9%). power-droplet-128 is off: the brick
-  // ends at -90.7% against the old engine's -40.1% (|peak| 90.7 against 78.0). Its sub-resolution film loses particles
-  // (747 -> 441 by step 280, under 4 a wet brick) where the old engine's film reaches the walls and thickens again.
-  "power-droplet-64", "power-fill-256-100",
-  // The 800-cell fill (r29): 4.01 / -2.39 at 60 steps against the bar's 9.67 / 2.67; over 300 steps on its authored
-  // pools the film loses -77.4% where the old engine loses -87.4%. power-fill-256-6400 is off: +4.64 / +4.28 at 60
-  // steps (two runs) against the bar's 4.01 (old -3.01 / -2.97), the moving-liquid volume gain (F's named open fail).
-  "power-fill-256-800",
-  "cm12-figure-5", "cm12-figure-6", "cm12-figure-9", "mass-conserving-figure-9-dam-break", "coarse-first-pool-impact",
-  // A splash scene (lane E r23, 2026-11-17, the batch rule's splash clause), on the pool rule's splash term.
-  "nbflip-analytic-tilted-free-fall",
-  // Re-judged after F's sym8 (r26, the splash clause: 2 brick / 2 old): peak -24.86 / -24.95 at 60 steps and final
-  // -0.63 / -0.81 at 120, against the bar's 25.55 / 1.18; the long run (300 steps) F 316/405, no latch.
-  "nbflip-analytic-free-fall",
-  // A splash scene (r29): peak 5.51 / 5.73 at 60 steps and final -5.56 / -6.26 at 120, against the bar's 7.29 / 18.43
-  // (old 6.28 / 6.29 and 15.85 / 17.14); the long run (480 steps) F 2545/3670, no latch.
-  "nbflip-stair-cube",
-  // Splash (r23): it gains +2.05% at 120 steps, where the old engine loses 10.3% (on the full box's page pool; its
-  // authored pool exhausts at frame 79). Re-judged after F's sym8 lands, which is expected to remove the gain.
-  "cm12-figure-7-256",
-  // The rigid coupling oracles (lane P, M5; 16^3 padded to 32^3), on their authored pools.
-  "rigid-hydrostatic", "rigid-float", "rigid-sink",
-  // The closed-cell batch (2026-11-18, 9593bdcc): two 60-step repeats each within the old engine's bar, then the long
-  // run at the authored length (at least 300 steps) on the pool rule's pools with no latch. Held off: power-droplet-128
-  // (its film, above), and the long runs' POOL_F latches: uniform-trough-dam-break (on spare pools it latches REACH at
-  // the open top's headroom).
-  "interactive-playground", "ocean-seiche", "cm12-figure-2", "nbflip-figure-10-dam",
-  "nbflip-figure-4-oscillating-surface", "nbflip-simple-breaking-dam", "nbflip-ramp-basin", "nbflip-analytic-rest-step",
-  "thin-droplet-ladder", "thin-sheet-ladder",
-  // Listed by sceneId, as the setup checks it: deep-water-ab, hydrostatic-power-two-level, hydrostatic-power-large-offset.
-  "deep-water-grid-comparison",
-  "coarse-surface-translation", "coarse-surface-free-fall", "coarse-surface-free-fall-rerung",
-  "coarse-surface-standing-wave", "coarse-surface-standing-wave-live",
-  "stationary-bowl", "stationary-bowl-2x", "tiny-hydrostatic-two-level", "large-hydrostatic-offset",
-  "deep-power-hydrostatic", "power-hybrid-deep-ocean", "bulk-rest-tank",
-  "sparse-cm12-ladder-empty-16", "sparse-cm12-ladder-full-16", "sparse-cm12-ladder-planar-interface-16",
-  "minimal-power-dam-break", "coarse-first-pool-impact-half", "coarse-first-pool-impact-quarter",
-  "sparse-geometric-ritter-dam-break", "symmetric-expansion", "sparse-cm12-symmetric-expansion",
-  // Letters at its authored 482 steps: +10.78% peak / +10.71% final against the old engine's +9.86% (its run's own
-  // gain), inside the bar's 10.86; F 5064 / 9088, no latch. cm12-figure-3 on its authored pools (cm12-paper-scenes.ts).
-  "nbflip-figure-8-letters", "cm12-figure-3",
-  // The 100-cell droplets at 240^3 and 256^3 on their authored pools (scenes.ts POWER_DROPLET_BRICK_POOLS): -92.1% and
-  // -90.7% at 300 steps, the sub-resolution film the 64^3 droplet loses too; the old engine exhausts its page pool at
-  // frame 129 on both.
-  "power-droplet-240", "power-droplet-256",
-  // The batch of 2026-11-18 (two 60-step brick runs within the old engine's bar, then the long run at the authored
-  // length with no latch). Source-fed scenes start dry, so they are judged on the analytic budget: the brick holds
-  // +4..9% at 60 steps where the old engine loses 26-66% (its film), and cm12-figure-1 -1.3% at 360. The old engine
-  // cannot run nbflip-figure-7-pour (its page pool). The cloth scenes hold no water.
-  "uniform-trough-hose-fill", "twin-dam-collision", "cm12-figure-1", "nbflip-figure-7-pour", "nbflip-water-slide-theme-park",
-  "nbflip-ramp-channel", "nbflip-ramp-staircase", "nbflip-ramp-flat",
-  "cloth-analytic-free-fall", "cloth-analytic-hanging-curtain", "cloth-analytic-swinging-sheet", "cloth-analytic-peirce-cantilever",
-  // Padded containers (the lattice's page rounding past the container closed by padding voxels, 2026-11-18): the same
-  // batch rule; large-power-dam-break's splash peaks at +27% at step 75 and ends at -1.6% at 300.
-  "bounded-pool-transfer", "large-power-hydrostatic", "large-power-dam-break",
-  "sparse-cm12-ladder-frontier-create", "sparse-cm12-ladder-frontier-advance", "sparse-cm12-ladder-retire-reuse",
-  // Terrain (2026-11-18, the same rule): alpine-lake-sunrise -0.6 / -0.9% at 60 / 600 (old +3.2 / +2.5 at 60);
-  // tall-cells-hillside-dam-break +0.9% at 60, +2.6% at 600 (old -13.3% at 60); tokyo-rain +2.4% at 60 (old +1.7), its
-  // gauge +1.8% over the rain's budget at 1440 (the presentation counts terrain-cut cells whole: +14%).
-  "alpine-lake-sunrise", "tall-cells-hillside-dam-break", "tokyo-rain",
-  // Static bodies in mixed bricks (STATIC_SHUT), source-fed, judged on the budget: the sphere jet +1.5% over it at 60
-  // (old +0.8), the hose tank -0.5% (old -0.3); clean 900-step runs; K authored at 1.5x the run's peak.
-  "paper-figure-6-jet-past-sphere", "paper-figure-3-hose-filled-tank",
-];
 
 /** The air an open top keeps above the container's pages, in cells: one page. */
 export const BRICK_OPEN_TOP_HEADROOM = 32;
@@ -150,26 +78,26 @@ export interface BrickSceneSetup {
   readonly staticsDeferred?: true;
   /** The ground's columns (brick-terrain.wgsl.ts brickTerrainColumns), bound after the mask's words. */
   readonly terrain?: BrickTerrainColumns;
+  /** The procedural boundary's image (brick-boundary.wgsl.ts brickBoundaryImage), bound after the terrain's columns. */
+  readonly boundary?: Uint32Array<ArrayBuffer>;
 }
 
 /** The scene's setup, or every reason the brick engine cannot run it. */
 export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record<string, unknown>>, ): { setup?: BrickSceneSetup; gaps: string[] } {
   const gaps: string[] = [];
   const id = scene.sceneId ?? "(unnamed)";
-  if (!BRICK_ENGINE_SCENES.includes(id)) gaps.push(`scene "${id}" is not enabled on the brick engine (brick-scene.ts BRICK_ENGINE_SCENES lists the ${BRICK_ENGINE_SCENES.length} it runs)`);
   const c = scene.container, f = scene.fluid;
   if (c.walls === "none" || c.boundary === "free-space") gaps.push("an open world (no container walls) needs the moving window (M6)");
-  if (c.shape === "sphere") gaps.push("a spherical container needs static solids (M3)");
+  // A spherical container is its shell's voxels (brickStaticMask), as the old engine's mask holds them.
   const openTop = c.top === "open";
   if (c.top !== "closed" && !openTop) gaps.push(`container.top "${c.top}" is not a brick engine top (closed or open)`);
   // The engine reads the voxels (solidStamp, the static need, pSolid, phiSolid: M3 stages 1-3) and takes a live edit in
   // place (BrickNBFlipSolver.applySceneUniforms, solidRestamp; brick-solid-edit.test.ts holds the AGENTS.md regressions).
   // The static hooks read the voxel mask and the ground (brick-static.wgsl.ts, brick-terrain.wgsl.ts: the old engine's
-  // heightfield, its cell and face fractions, the particles' contact). A sculpt cut of the ground (collisionSculptSample)
-  // and a procedural boundary sampled as a field (umBoundaryTouchesBox) are not read yet, so they must not run as open
-  // water.
+  // heightfield, its cell and face fractions, the particles' contact) and a procedural boundary sampled as a field
+  // (brick-boundary.wgsl.ts: the old engine's records, umBoundaryTouchesBox's faces, nbProceduralContact). A sculpt cut
+  // of the ground (collisionSculptSample) is not read yet, so it must not run as open ground.
   if (scene.terrain && (scene.solidVoxels ?? []).some(p => p.operation === "clear" && p.affectsScenery === true)) gaps.push("a sculpted terrain needs the ground's sculpt field (collisionSculptSample)");
-  if (scene.solidBoundary && scene.solidBoundary.collision !== "voxels") gaps.push("a procedural boundary sampled as a field needs boundary records (M3)");
   // Rigid bodies (lane P, M5: bodies-host.ts): the body stages need K slots, and the host's own refusals.
   gaps.push(...brickRigidBodyGaps(scene));
   // Scheduled drops and the inflow are lane F's sources (brick-source.ts, M4); the pool rule covers their volume and the
@@ -219,8 +147,9 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   const extent = brickSourcesExtent(brickInitialExtent({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }), sources, B ?? L);
   // The boot's candidates (its F bricks and page-only keys) fill an f-long list (BrickEngine.create).
   const p = f.brickPools ?? brickPoolRule(L, extent, Math.max(start.bricks.length + start.pages.length, extent.resident), bootParticleCount({ lattice: L, ...inBox, farPhi, liquid: start.liquid, initial: start.initial }, start.bricks, band) + brickDropParticles(sources, band));
-  // The body stages take a K slot a body brick (A5): a scene with bodies authors brickPools.k from its NEAR_BODY peak.
-  if ((scene.rigidBodies?.length ?? 0) > 0 && !(p.k > 0)) return { gaps: [...gaps, "rigid bodies need K slots: author brickPools.k from the NEAR_BODY peak"] };
+  // The body stages take a K slot a body brick (A5). A scene with bodies authors brickPools.k from its NEAR_BODY peak;
+  // one that does not yet may cut every F brick (k = f), so it runs (2026-11-18: every scene on the brick engine).
+  const bodyK = (scene.rigidBodies?.length ?? 0) > 0 && !(p.k > 0) ? p.f : 0;
   // The mask: the old engine's own voxel image (solidWorldForFluidLattice), on every scene, so a first voxel stroke is a
   // live edit like any other. Empty at the build, the engine defers its static stages to that first edit
   // (BrickEngineOptions.staticsDeferred): the scene runs the plain schedule until then.
@@ -228,9 +157,11 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
   // The ground (brick-terrain.wgsl.ts): the old engine's columns over the container's, solid at the build (never deferred).
   const terrain = brickTerrainColumns(scene);
   if (terrain && (terrain.columns[0] !== walls[0] || terrain.columns[1] !== walls[2])) return { gaps: [...gaps, `the terrain's ${terrain.columns.join("x")} columns are not the container's ${walls[0]}x${walls[2]}`] };
-  // K: the bricks the voxels and the ground cut now (each may be resident and stamped) and BRICK_STATIC_EDIT_K for live
+  // The procedural boundary (brick-boundary.wgsl.ts): the old engine's image, solid at the build (never deferred).
+  const boundary = brickBoundaryImage(scene);
+  // K: the bricks the voxels, the ground and the boundary cut now (each may be resident and stamped) and BRICK_STATIC_EDIT_K for live
   // edits, at most one a F slot; an authored k above it stands (lane P's body peaks).
-  const k = Math.max(p.k, Math.min(p.f, brickStaticCutBricks(staticMask, terrain ? { terrain, box: box ?? L } : undefined) + BRICK_STATIC_EDIT_K));
+  const k = Math.max(p.k, bodyK, Math.min(p.f, brickStaticCutBricks(staticMask, terrain || boundary ? { ...(terrain ? { terrain } : {}), ...(boundary ? { boundary } : {}), box: box ?? L } : undefined) + BRICK_STATIC_EDIT_K));
   return {
     gaps,
     setup: {
@@ -238,7 +169,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
       capacities: { f: p.f, c: p.c, b: p.b, k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
       liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, L, B), bootBricks: start.bricks, bootPages: start.pages, origin_m,
       ...(sources ? { sources } : {}),
-      staticMask, ...(staticMask.empty && !terrain ? { staticsDeferred: true as const } : {}), ...(terrain ? { terrain } : {}),
+      staticMask, ...(staticMask.empty && !terrain && !boundary ? { staticsDeferred: true as const } : {}), ...(terrain ? { terrain } : {}), ...(boundary ? { boundary } : {}),
     },
   };
 }

@@ -1611,6 +1611,9 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       const scene = createReservoirSeepScene(0.01, { widthScale: 7.875, depthScale: 2 });
       scene.sceneId = "reservoir-seep-vast";
       delete scene.fluid.pagePool;
+      // The seep's brick pools are its 512-wide tank's (c 336 latched POOL_C at the vast boot, 2026-11-18): the
+      // brick engine's rule sizes the widened lattice's.
+      delete scene.fluid.brickPools;
       return scene;
     },
     camera: { distance_m: 16, target_m: { x: 0, y: 0.55, z: 0 }, azimuth_rad: 0.22, elevation_rad: 0.32 },

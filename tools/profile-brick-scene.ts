@@ -24,7 +24,6 @@ import { sceneDocument } from "../lib/core/scene-definition";
 import { getSceneDefinition } from "../lib/core/scenes";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { createProcessRetainedDawnGPU, paceDawnEventPolling } from "../lib/harness/node-dawn-provider";
-import { BRICK_ENGINE_SCENES } from "../lib/methods/narrow-band/brick-scene";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
 import { H } from "../lib/methods/narrow-band/brick-abi";
 import { gpuKernelTimer } from "./gpu-kernel-timer";
@@ -36,7 +35,6 @@ const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD), definitio
 const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
 const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
 // A probe may run a scene the brick does not yet list (the still tank): the list is the app's enable switch.
-if (!BRICK_ENGINE_SCENES.includes(scene.sceneId ?? id)) (BRICK_ENGINE_SCENES as string[]).push(scene.sceneId ?? id);
 paceDawnEventPolling();
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href);
 Object.assign(globalThis, dawn.globals);

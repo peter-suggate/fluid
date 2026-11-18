@@ -175,12 +175,12 @@ test("statics 2a: save/load is bitwise, undo restores every cell, unknown kinds 
   // A scene without voxels beyond the shell binds no mask.
   const plain = { ...seep, solidVoxels: [] } as SceneDescription;
   assert.equal(brickStaticMask(plain), undefined);
-  // Solids the hooks do not read stay named gaps: a sculpted ground (the ground itself is read: brick-terrain.test.ts),
-  // and a procedural boundary sampled as a field.
+  // A solid the hooks do not read stays a named gap: a sculpted ground (the ground itself is read: brick-terrain.test.ts;
+  // the procedural boundary too: brick-boundary.test.ts).
   const gaps = (s: SceneDescription) => brickSceneSetup(s, {}).gaps.join(" | ");
   assert.match(gaps({ ...plain, terrain: {} as SceneDescription["terrain"], solidVoxels: [{ operation: "clear", minimum: [1, 1, 1], maximumExclusive: [2, 2, 2], affectsScenery: true }] as SceneDescription["solidVoxels"] }), /sculpted terrain needs/);
-  assert.match(gaps({ ...plain, solidBoundary: {} as SceneDescription["solidBoundary"] }), /procedural boundary sampled as a field/);
-  assert.doesNotMatch(gaps({ ...plain, solidBoundary: { collision: "voxels" } as SceneDescription["solidBoundary"] }), /procedural boundary/);
+  // A malformed boundary is not a gap the engine skips: it fails explicitly.
+  assert.throws(() => gaps({ ...plain, solidBoundary: {} as SceneDescription["solidBoundary"] }), /Invalid procedural solid boundary/);
 });
 
 test("statics: the scene's voxels reach the engine's setup", () => {

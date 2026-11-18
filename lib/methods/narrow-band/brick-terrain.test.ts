@@ -6,7 +6,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { brickTerrainColumns, brickTerrainCutBricks, brickTerrainMirror, brickTerrainWGSL, planeBoxFraction, type BrickTerrainColumns } from "./brick-terrain.wgsl";
 import { brickStaticMask, brickStaticMirror, brickStaticWGSL } from "./brick-static.wgsl";
-import { BRICK_ENGINE_SCENES, brickSceneSetup } from "./brick-scene";
+import { brickSceneSetup } from "./brick-scene";
 import { parityGPU, prng, runParity, withParityDevice } from "./parity/harness";
 import { uniformTerrainSamplingWGSL } from "../uniform/uniform-terrain-sampling.wgsl";
 import { geometricPlaneBoxWGSL } from "../../core/geometric-plane-box.wgsl";
@@ -82,17 +82,14 @@ test("terrain: the stamp's cut bound holds every brick with a cut cell or lower 
 
 test("terrain: the setup binds the ground, never defers it, and refuses a sculpt cut explicitly", () => {
   const scene = sceneOf(SLOPE);
-  (BRICK_ENGINE_SCENES as string[]).push(scene.sceneId!);
-  try {
-    const r = brickSceneSetup(scene, { volumeControlSeconds: 0 });
-    assert.deepEqual(r.gaps, []);
-    assert.ok(r.setup?.terrain && r.setup.staticsDeferred === undefined);
-    assert.ok(r.setup.capacities.k >= 64);
-    const sculpted: SceneDescription = { ...scene, solidVoxels: [...scene.solidVoxels, { operation: "clear", kind: "ellipsoid", minimum: [10, 4, 10], maximumExclusive: [14, 8, 14], affectsScenery: true } as never] };
-    const g = brickSceneSetup(sculpted, { volumeControlSeconds: 0 });
-    assert.equal(g.setup, undefined);
-    assert.ok(g.gaps.some(s => s.includes("sculpt")), g.gaps.join(" | "));
-  } finally { (BRICK_ENGINE_SCENES as string[]).pop(); }
+  const r = brickSceneSetup(scene, { volumeControlSeconds: 0 });
+  assert.deepEqual(r.gaps, []);
+  assert.ok(r.setup?.terrain && r.setup.staticsDeferred === undefined);
+  assert.ok(r.setup.capacities.k >= 64);
+  const sculpted: SceneDescription = { ...scene, solidVoxels: [...scene.solidVoxels, { operation: "clear", kind: "ellipsoid", minimum: [10, 4, 10], maximumExclusive: [14, 8, 14], affectsScenery: true } as never] };
+  const g = brickSceneSetup(sculpted, { volumeControlSeconds: 0 });
+  assert.equal(g.setup, undefined);
+  assert.ok(g.gaps.some(s => s.includes("sculpt")), g.gaps.join(" | "));
 });
 
 // ---- GPU ----
