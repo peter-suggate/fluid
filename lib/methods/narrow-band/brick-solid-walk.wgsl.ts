@@ -202,10 +202,10 @@ fn psOpenAt(q:vec3f)->bool{
  return false;
 }
 struct PsSlideWalk{end:vec3f,previous:vec3f,closed:bool}
-// umSlideWalk mode 2: the slide's probes (each axis the start lies on a face of and moves along: ahead, then behind
-// only where ahead is closed; an open behind pins the axis), then every half-cell step to the end, stopping at the
-// first closed one.
-fn psSlideWalk(p:vec3f,destination:vec3f)->PsSlideWalk{
+// umSlideWalk: the slide's probes (each axis the start lies on a face of and moves along: ahead, then behind only
+// where ahead is closed; an open behind pins the axis), then by mode: 1 the slid end, 2 every half-cell step to the
+// end (umWalk), stopping at the first closed one.
+fn psSlideWalk(p:vec3f,destination:vec3f,mode:u32)->PsSlideWalk{
  var end=destination;var axes=0u;var count=0u;
  for(var axis=0u;axis<3u;axis++){
   if(p[axis]==floor(p[axis])&&destination[axis]!=p[axis]){axes|=axis<<(2u*count);count++;}
@@ -220,9 +220,9 @@ fn psSlideWalk(p:vec3f,destination:vec3f)->PsSlideWalk{
    x=select(p+step,p-step,behind);
   }else{
    // Bounded (lane E's loop audit): the trace ends in the box (fgHeld), so 2 x its span is under 2 x 1024 x sqrt 3.
-   if(j==probes){steps=clamp(u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))),1u,4096u);}
+   if(j==probes){steps=select(1u,clamp(u32(ceil(2.0*max(abs(end.x-p.x),max(abs(end.y-p.y),abs(end.z-p.z))))),1u,4096u),mode==2u);}
    let s=j-probes+1u;if(s>steps){break;}
-   x=mix(p,end,f32(s)/f32(steps));
+   if(mode==2u){x=mix(p,end,f32(s)/f32(steps));}
   }
   let open=psOpenAt(x);
   if(sliding){if(!behind){aheadClosed=!open;}else if(open){end=select(end,p,psAxis(axis));}}
@@ -232,13 +232,57 @@ fn psSlideWalk(p:vec3f,destination:vec3f)->PsSlideWalk{
 }
 // umWalk's point: the last open step where the walk closed, else the slid end.
 fn psWalkPhi(p:vec3f,destination:vec3f)->vec3f{
- let walk=psSlideWalk(p,destination);
+ let walk=psSlideWalk(p,destination,2u);
  return select(walk.end,walk.previous,walk.closed);
 }
 // umVertexBuried at h: none of vertex v's eight cells is open.
 fn psBuried(v:vec3i)->bool{
  for(var k=0u;k<8u;k++){if(!psClosed(v-vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u)))){return false;}}
  return true;
+}
+// umOpenPointCell: the point's cell, else, for a point on a face whose cell ahead is closed and behind open (the
+// slide's probes toward +1/4), the cell behind on that axis, else the point's cell.
+fn psOpenPointCell(q:vec3f)->vec3i{
+ let base=vec3i(floor(q));if(!psClosed(base)){return base;}
+ var cell=base;
+ for(var a=0u;a<3u;a++){
+  if(q[a]!=floor(q[a])){continue;}
+  if(psOpenAt(q+0.25*psUnit(a))){continue;}
+  if(psOpenAt(q-0.25*psUnit(a))){cell[a]-=1;}
+ }
+ if(!psClosed(cell)){return cell;}
+ return base;
+}
+// umSurfaceSmoothing's closed bits on axis a (umSmoothOpen at a lattice vertex: not buried): its four taps open.
+fn psSmoothOpen(v:vec3i,a:u32)->bool{let e=fgUnit(a);return !psBuried(v-e)&&!psBuried(v+e)&&!psBuried(v-2*e)&&!psBuried(v+2*e);}
+// umCubicPhi's buried test: a tap with a nonzero weight (nbfCubicWeighted) that is buried returns the cell's trilinear
+// value. As the old engine's tile masks: the 5^3 cells under the taps (cell-2..cell+2) are read once from the (at most)
+// eight bricks holding them into five layers of 25 closed bits (x + 5y); a tap's cells are bits 0x63 at x + 5y of its
+// two layers, so a layer pair tests its sixteen taps at once against the weighted ones.
+fn psCubicBuried(cell:vec3i,f:vec3f,lowHeld:vec3<bool>,highHeld:vec3<bool>)->bool{
+ let lo=cell-vec3i(2);let b0=lo>>vec3u(3u);
+ var slots:array<u32,8>;
+ for(var k=0u;k<8u;k++){let b=b0+vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));slots[k]=select(NB_NONE,fgBrickSlot(b),all(b>=vec3i(0)));}
+ var layer=array<u32,5>(0u,0u,0u,0u,0u);var seen=0u;
+ for(var z=0u;z<5u;z++){
+  for(var i=0u;i<25u;i++){
+   let c=lo+vec3i(i32(i%5u),i32(i/5u),i32(z));let r=vec3u((c>>vec3u(3u))-b0);let s=slots[r.x+2u*r.y+4u*r.z];
+   var closed=!nbInWallBox(c);
+   if(!closed&&s!=NB_NONE){closed=(phi[NB_PHI_F_FLAGS+NB_STRIDE*s+nbLocal(c)]&NB_FLAG_OPEN)==0u;}
+   if(closed){layer[z]|=1u<<i;}
+  }
+  seen|=layer[z];
+ }
+ if(seen==0u){return false;}
+ let wx=nbfHeldWeights(nbfCatmull(f.x),lowHeld.x,highHeld.x);let wy=nbfHeldWeights(nbfCatmull(f.y),lowHeld.y,highHeld.y);let wz=nbfHeldWeights(nbfCatmull(f.z),lowHeld.z,highHeld.z);
+ for(var z=0u;z<4u;z++){
+  let d=layer[z]&layer[z+1u];let buried=d&(d>>1u)&(d>>5u)&(d>>6u);
+  if(buried==0u||wz[z]==0.0){continue;}
+  var weighted=0u;
+  for(var y=0u;y<4u;y++){for(var x=0u;x<4u;x++){if(wx[x]*wy[y]!=0.0){weighted|=1u<<(x+5u*y);}}}
+  if((weighted&buried)!=0u){return true;}
+ }
+ return false;
 }
 `;
 
@@ -295,6 +339,11 @@ const LADVECT_HEAD = "fn lAdvect(@builtin(workgroup_id) wid:vec3u,@builtin(local
 const LIST_HEAD = " let g=nbGroup(wid);if(g>=nbListCount(NB_LIST_F_ALL)){return;}\n let slot=nbListSlot(NB_LIST_F_ALL,g);let o=nbFOrigin(slot);";
 const LADVECT_TRACE = "let traced=nbfSurfaceTrace(foot,dt,h,wall);";
 const LADVECT_VERTEX = "if(lVertexIn(v)){value=lAdvected(v,dt,h);}";
+const LADVECT_FOOT_TAPS = "for(var a=0u;a<3u;a++){let e=vec3f(fgUnit(a));at[2u*a]=fgHeld(p-e);at[2u*a+1u]=fgHeld(p+e);}";
+const LADVECT_FOOT = "foot=fgHeld(p+offset);shift=p-foot;}";
+const LADVECT_SMOOTH_AXIS = "var part=6.0*c;var valid=true;var different=0u;";
+const LADVECT_CELL = "let cell=min(vec3i(floor(q)),NB_WALL_BOX-vec3i(1));let f=q-vec3f(cell);";
+const LADVECT_CUBIC = "value=nbfCubicLimited(f,lowHeld,highHeld);";
 
 /** lAdvect's text with statics: phiSolid advects the NEAR_SOLID bricks. Elsewhere the walk is proven empty only for
  * a trace that stays inside the ring of its vertex (the foot and the end): lAdvect leaves a vertex whose trace leaves
@@ -318,7 +367,19 @@ export function brickPhiSolidWGSL(body: string): string {
   const at = body.indexOf(LADVECT_HEAD);
   if (at < 0) throw new Error("brick solid walk: lAdvect changed shape (its entry)");
   let head = body.slice(0, at), entry = body.slice(at);
+  // umVertexFoot with solids: a stencil tap whose quarter step is closed is the vertex (a one-sided difference); the
+  // foot slides (umSlideWalk mode 1) and a closed one is dropped; an axis of the smoothing with a buried tap is no
+  // distance (umSurfaceSmoothing's closed bits).
+  head = once(head, LADVECT_FOOT_TAPS, LADVECT_FOOT_TAPS.replace("at[2u*a+1u]=fgHeld(p+e);}", "at[2u*a+1u]=fgHeld(p+e);if(!psOpenAt(p-0.25*vec3f(e))){at[2u*a]=p;}if(!psOpenAt(p+0.25*vec3f(e))){at[2u*a+1u]=p;}}"), "lAdvect");
+  head = once(head, LADVECT_FOOT, "let slid=psSlideWalk(p,fgHeld(p+offset),1u);if(!slid.closed){foot=slid.end;shift=p-foot;}}", "lAdvect");
+  head = once(head, LADVECT_SMOOTH_AXIS, LADVECT_SMOOTH_AXIS.replace("var valid=true;", "var valid=psSmoothOpen(v,a);"), "lAdvect");
+  // umAdvected with solids: the sample is umVertexCell's open point cell, and a buried weighted cubic tap keeps the
+  // trilinear value. Stated difference: the trace is walked from the foot (umTrace), not the old umWalk(p, end) from
+  // the vertex to the shifted end. That walk measured +3.5 ms a step on reservoir-seep (300 steps: 46.3 ms against
+  // 42.7, the volume curve 1.03% against 0.69%, peak particles 377k against 298k; 2026-11-19).
   head = once(head, LADVECT_TRACE, "let traced=psWalkPhi(foot,nbfSurfaceTrace(foot,dt,h,wall));", "lAdvect");
+  head = once(head, LADVECT_CELL, LADVECT_CELL.replace("vec3i(floor(q))", "psOpenPointCell(q)"), "lAdvect");
+  head = once(head, LADVECT_CUBIC, `if(!psCubicBuried(cell,f,lowHeld,highHeld)){${LADVECT_CUBIC}}`, "lAdvect");
   entry = once(entry, LADVECT_HEAD, LADVECT_HEAD.replace("fn lAdvect(", "fn phiSolid("), "lAdvect");
   entry = once(entry, LIST_HEAD, `${LIST_HEAD}
  let near=psNearSolid(slot);`, "lAdvect");

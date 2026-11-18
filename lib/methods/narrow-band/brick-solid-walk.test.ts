@@ -63,7 +63,16 @@ test("brick solid walk: pSolid and phiSolid join F's stage set only with statics
     assert.ok(a.includes(">=8.0){psFar=true;return 0.0;}") && a.includes("if(psFar){phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]=PS_PHI_FAR;continue;}"), "lAdvect leaves a trace that leaves the ring to phiSolid");
     assert.ok(p.includes("if(!near&&phi[NB_PHI_F_PHI1+NB_STRIDE*slot+l]!=PS_PHI_FAR){continue;}") && !p.includes("psFar=true"), "phiSolid takes the far vertices and walks them");
     assert.match(p, /fn phiSolid\(/); assert.match(p, /let near=psNearSolid\(slot\);/);
+    // The old solid rules of umVertexFoot and umAdvected (2026-11-19): the open point cell, the buried cubic taps'
+    // trilinear, the foot's closed taps and slide, the smoothing's bits; the trace walked from the foot.
     assert.match(p, /let traced=psWalkPhi\(foot,nbfSurfaceTrace\(foot,dt,h,wall\)\);/);
+    assert.ok(!p.includes("q=psWalkPhi(p,q);"), "no walk from the vertex (seep +3.5 ms)");
+    assert.match(p, /let cell=min\(psOpenPointCell\(q\),NB_\w+-vec3i\(1\)\);/, "umVertexCell's open point cell");
+    assert.ok(p.includes("if(!psCubicBuried(cell,f,lowHeld,highHeld)){value=nbfCubicLimited(f,lowHeld,highHeld);}"), "a buried weighted tap keeps the trilinear");
+    assert.ok(p.includes("if(!psOpenAt(p-0.25*vec3f(e))){at[2u*a]=p;}if(!psOpenAt(p+0.25*vec3f(e))){at[2u*a+1u]=p;}"), "the foot's closed taps");
+    assert.ok(p.includes("let slid=psSlideWalk(p,fgHeld(p+offset),1u);if(!slid.closed){foot=slid.end;shift=p-foot;}"), "the foot's slide");
+    assert.ok(p.includes("var valid=psSmoothOpen(v,a);"), "the smoothing's closed bits");
+    assert.ok(!a.includes("if(!psCubicBuried(") && /let cell=min\(vec3i\(floor\(q\)\),NB_\w+-vec3i\(1\)\);/.test(a), "lAdvect's own bricks keep the solid-free text");
     assert.match(p, /if\(lVertexIn\(v\)&&!psBuried\(v\)\)\{value=lAdvected\(v,dt,h\);\}/);
     assert.doesNotMatch(p, /psNearSolid\(slot\)\)\{return;\}/, "phiSolid advects its bricks");
   }
