@@ -25,6 +25,10 @@
  *   as it did before this solver adopted anything live.
  */
 import type { GPUSolverInstance } from "../../core/method-contract";
+import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay";
+import { narrowBandSiteAxis, type NarrowBandSurfaceSamples } from "../uniform/uniform-narrow-band-sites";
+import { NBF_PARTICLE_SETTINGS } from "./particles-formulas.wgsl";
+import { P_ENERGY_BUFFER } from "./particles-kernels.wgsl";
 import type { GPUQuality } from "../../core/gpu-quality";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
 import type { DenseLevelSetVolumeConsumerSource } from "../../core/levelset-consumer-abi";
@@ -89,6 +93,10 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   private scene?: SceneDescription;
   /** The procedural boundary's image the engine holds (a live edit moves its validity words). */
   private boundary?: Uint32Array<ArrayBuffer>;
+  /** The particle layer's frame (ParticleFrame: lattice cells, h, the lattice corner in world metres), written once. */
+  private readonly particleFrame: GPUBuffer;
+  /** The particle source of each bank (a record a bank: the source is rebuilt by no frame). */
+  private readonly particleBanks: readonly [GPUFluidParticleSource, GPUFluidParticleSource];
 
   private constructor(private readonly options: BrickSolverOptions, engine: BrickEngine, presentation: BrickPresentation, rigid?: BrickRigidBodies) {
     this.brickEngine = engine; this.brickPresentation = presentation; this.presentEnabled = options.present ?? true;
@@ -99,7 +107,34 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     this.fluidDomain = { origin_m: s.origin_m, cellSize_m: [h, h, h], dimensions: s.lattice };
     this.denseLevelSetVolumeSource = { vertexPhi: presentation.vertexPhi, contourVertexPhi: true, openFraction: presentation.openFraction, cellSize_m: [h, h, h] };
     this.info = { ...this.makeInfo(), submittedTime_s: 0, completedTime_s: 0, encodedSteps: 0 };
+    const device = engine.device, o = s.origin_m;
+    this.particleFrame = device.createBuffer({ label: "nb-brick.particleFrame", size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.particleFrame, 0, new Float32Array([...s.lattice, 0, h, h, h, 0, o[0], o[1], o[2], 0]));
+    this.particleBanks = [0, 1].map(bank => this.particleBankSource(bank)) as [GPUFluidParticleSource, GPUFluidParticleSource];
   }
+
+  /**
+   * The particle layer's records of `bank` (brick-abi.md §5.6 Banks): `parts` holds both banks at NB-FLIP's record
+   * (positions in h cells from the lattice corner, velocity in 4..6, the depth in 7, the grid's velocity in 8..10 until
+   * pDelta, the mode in the sign of 11), bank b from record b * PCAP, PCOUNT[b] live. pDelta overwrites 8..10 with the
+   * FLIP delta, so Motion reads the energy it stored first (P_ENERGY, indexed in the bank). Eight surface samples a
+   * cell (NBF_PARTICLE_SETTINGS), so a sphere is a little under a quarter cell in radius, as the old engine's.
+   */
+  private particleBankSource(bank: number): GPUFluidParticleSource {
+    const e = this.brickEngine, L = e.layout, h = this.options.setup.h_m;
+    if (L.particleStride !== 12) throw new Error(`Brick engine: the particle layer reads FLIP records (12 floats), not ${L.particleStride}`);
+    return {
+      buffer: e.buffer("parts"), strideFloats: L.particleStride, capacity: L.cap.particles, firstRecord: bank * L.cap.particles,
+      positionScale_m: [h, h, h], frame: { buffer: this.particleFrame, size: 48 },
+      radius_m: 0.22 * h * 2 / narrowBandSiteAxis(NBF_PARTICLE_SETTINGS.surfaceSamples as NarrowBandSurfaceSamples),
+      liveCount: { buffer: e.buffer("set"), byteOffset: 4 * (H.PCOUNT0 + bank) }, motionEnergy: e.buffer(P_ENERGY_BUFFER),
+      grid: { velocityFloat: 8, depthFloat: 7, ballisticFloat: 11, ballisticSignBit: true, surfaceDepth: 2 },
+    };
+  }
+
+  /** The completed step's records: step n's rebin files bank (n & 1) ^ 1, so after `stepsSubmitted` steps the queue's
+   * last step left them in bank stepsSubmitted & 1 (the boot's seeds are bank 0's). The renderer reads this every frame. */
+  get particleSource(): GPUFluidParticleSource { return this.particleBanks[this.brickEngine.stepsSubmitted & 1]!; }
 
   static async create(device: GPUDevice, options: BrickSolverOptions): Promise<BrickNBFlipSolver> {
     const s = options.setup;
@@ -299,5 +334,5 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]): Promise<GPURigidBodyPick | undefined> { return this.rigidBodies ? this.rigidBodies.system.pick(origin, direction) : Promise.resolve(undefined); }
   readRigidBodyPoses(): Promise<GPURigidBodyPose[] | undefined> { return this.rigidBodies ? this.rigidBodies.readPoses() : Promise.resolve(undefined); }
 
-  destroy() { this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); }
+  destroy() { this.brickPresentation.destroy(); this.brickEngine.destroy(); this.rigidBodies?.destroy(); this.particleFrame.destroy(); }
 }

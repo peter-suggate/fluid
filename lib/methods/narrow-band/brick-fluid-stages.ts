@@ -34,7 +34,7 @@ import { fluidLayout } from "./fluid-grid.wgsl";
 import { LC_GROUPS, levelSetCoarseKernels } from "./levelset-coarse.wgsl";
 import { levelSetKernels } from "./levelset-kernels.wgsl";
 import { NBF_PARTICLE_SETTINGS, nbfParticleSupported } from "./particles-formulas.wgsl";
-import { P_ARGS_RECORDS, particleKernels } from "./particles-kernels.wgsl";
+import { P_ARGS_RECORDS, P_ENERGY_BUFFER, particleKernels } from "./particles-kernels.wgsl";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import { velocityKernels } from "./velocity-kernels.wgsl";
 
@@ -97,7 +97,7 @@ export const fluidStagesAt = (tiered: boolean): BrickStagesFactory => context =>
     // the kicked grid), filed into bank 0. The seeding is kick.seed: E's TRIG-only census of the kicked state runs
     // between after and seed, so the first seeding heats from the triggers of the state it seeds.
     kick: { force: [...resolve, at(v.uKick, both)], after: [...ext4, at(v.uExtend, all), ...cache], seed: [...resolve, at(p.pSeed, all, 0, 1), args(1, 0), at(p.pMove, records, 1), ...rebin(1), args(1, 1)] },
-    buffers: { fcell: F.fcell.words, fdep: F.fdep.words, fpart: F.fpart.words, fmoved: F.fmoved.words, ...(tiered ? { fext4: F.fext4.words } : {}) },
+    buffers: { fcell: F.fcell.words, fdep: F.fdep.words, fpart: F.fpart.words, fmoved: F.fmoved.words, [P_ENERGY_BUFFER]: L.cap.particles, ...(tiered ? { fext4: F.fext4.words } : {}) },
   };
   return stages;
 };

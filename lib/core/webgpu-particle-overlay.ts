@@ -71,8 +71,15 @@ export interface GPUFluidParticleSource {
    * Solvers that reuse their grid-velocity scratch publish this before reuse. */
   readonly motionEnergy?: GPUBuffer;
   readonly strideFloats: number;
-  /** Records the buffer holds. The draw never reads past it. */
+  /** Records the buffer holds from `firstRecord`. The draw never reads past it. */
   readonly capacity: number;
+  /**
+   * The record the live prefix starts at, for a solver that keeps several banks
+   * in one buffer and flips between them each step. Absent: zero. `liveCount`
+   * and `motionEnergy` count and index from it. Only the Speed and Motion
+   * overlay reads it: the Fine and Water consumers draw nothing for such a source.
+   */
+  readonly firstRecord?: number;
   /** Metres per position unit. Positions are tank-local with a corner origin. */
   readonly positionScale_m: readonly [number, number, number];
   /** Live solver prefix: dimensions, cell size, then GPU-owned world origin. */
@@ -100,7 +107,7 @@ export interface GPUFluidParticleSource {
   };
 }
 
-export const PARTICLE_OVERLAY_UNIFORM_BYTES = 176;
+export const PARTICLE_OVERLAY_UNIFORM_BYTES = 192;
 /** Sphere radii a Motion sample's footprint spans; the shader says why. */
 const PARTICLE_MOTION_REACH = 3;
 /** The Motion view's sum: summed by the blend, so a float format that blends. */
@@ -177,6 +184,8 @@ struct ParticleOverlayUniforms {
   // Float offsets into a record: x the grid's velocity, y depth, z the ballistic
   // flag; w the depth a sample counts to in full, zero where records keep none
   grid:vec4u,
+  // x the record the live prefix starts at (GPUFluidParticleSource.firstRecord)
+  bank:vec4u,
 }
 `;
 
@@ -243,7 +252,7 @@ fn particleAgitation(at:u32,velocity:vec3f)->f32 {
     // sample counts less the deeper it sits.
     var energy=0.0;
     if (overlay.records.w!=0u) {
-      energy=motionEnergy[at/overlay.records.x];
+      energy=motionEnergy[at/overlay.records.x-overlay.bank.x];
     } else {
       let mean=vec3f(particles[at+overlay.grid.x],particles[at+overlay.grid.x+1u],particles[at+overlay.grid.x+2u]);
       let fluctuation=velocity-mean;
@@ -293,7 +302,7 @@ fn waterInterfaceDistance(positions:texture_2d<f32>,pixel:vec2i)->f32 {
   // A collapsed quad: a retired record, one past the buffer, or a hidden sphere.
   output.position=vec4f(0.0,0.0,0.0,1.0);
   if (instance>=overlay.records.y) { return output; }
-  let at=overlay.records.x*instance;
+  let at=overlay.records.x*(instance+overlay.bank.x);
   if (!(particles[at+3u]>0.0)) { return output; }
   let spray=overlay.records.z==2u;
   // The fine skin encloses it: it is drawn as liquid, not as a droplet.
@@ -693,6 +702,7 @@ export class ParticleOverlay {
     const motion = frame.view === "motion" || spray !== undefined, grid = source.grid;
     u.set([source.strideFloats, source.capacity, spray ? 2 : frame.view === "motion" ? 1 : 0, source.motionEnergy ? 1 : 0], 36);
     u.set(grid ? [grid.velocityFloat, grid.depthFloat, grid.ballisticFloat+(grid.ballisticSignBit?0x80000000:0), grid.surfaceDepth] : [0, 0, 0, 0], 40);
+    u.set([source.firstRecord ?? 0, 0, 0, 0], 44);
     this.device.queue.writeBuffer(this.uniforms!, 0, this.uniformData);
     if (source.liveCount) {
       encoder.copyBufferToBuffer(source.liveCount.buffer, source.liveCount.byteOffset, this.indirect!, 4, 4);

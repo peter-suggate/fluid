@@ -22,7 +22,8 @@
  *   Appends after the binned records (§5.6 note b). Tiered, R1: no seed in a 4h-owned tile. Tiered, the re-entry
  *   seed (cfg.w = 2, part 1 after the head's transfer, before pMove, into the source bank): the same seeding at the
  *   cells of the tiles the head refined (h now, 4h at the last rebin), so they deposit on their first h step.
- * - pDelta: a lane a record of bank dst: recordDelta (the FLIP delta the next G2P takes).
+ * - pDelta: a lane a record of bank dst: the display's Motion energy (pEnergy), then recordDelta (the FLIP delta the
+ *   next G2P takes).
  * - pJoin: a lane a record of bank dst: the census's join bits (TILE_OCC 8-15, transferRefine's join rule).
  * - pArgs: one lane: the records' indirect arguments (P_ARGS_RECORDS, the fold rule) from PCOUNT[bank], bank
  *   pSrc() ^ cfg.w. pMove, pScatter, pJoin and pDelta dispatch from it: the work follows the live records, not the
@@ -47,6 +48,10 @@ import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 /** The records' indirect arguments, in F's args region (brick-abi.md §5.5): x, y, z by the fold rule. */
 export const P_ARGS_RECORDS = ARGS.LANE_F;
 const ARGS_RW: BrickBinding = { name: "args", kind: "rw", type: "array<u32>" };
+/** The display's Motion energy (m^2/s^2), a float a record of the bank pDelta files: lane F's stage buffer `pEnergy`,
+ * NB_PCAP words (brick-fluid-stages.ts). Rendering reads it; no stage does. */
+export const P_ENERGY_BUFFER = "pEnergy";
+const P_ENERGY_RW: BrickBinding = { name: P_ENERGY_BUFFER, kind: "rw", type: "array<f32>" };
 
 /** Banks and the destination cell (no reads). */
 /** narrowBandSeparationReach(sampleSeparation, crowdedCells === "merge", 8) (uniform-narrow-band-flip.ts): twice the
@@ -576,8 +581,11 @@ fn pSeedCellWrite(c:vec3i,bank:u32,initial:bool,mask:u32,at:u32){
   const seedBindings = [CFG, FB.set, FB.dir, FB.velRO, FB.phiRO, FB.parts, FB.fcell, FB.src];
   const pSeed = k("pSeed", ground ? [...seedBindings, solidRO] : seedBindings, statics ? (ground ? ground + (field ? brickSolidCellFieldWGSL(walls?.terrain !== undefined) : brickSolidCellWGSL(true)) : BRICK_SOLID_CELL_WGSL) + brickSeedBlockedWGSL(pSeedCode) : pSeedCode);
 
-  // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none.
-  const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
+  // pDelta (recordDelta): the FLIP delta at each filed, coupled record of bank dst; seeds take none. First, while
+  // before.xyz still holds the record's grid velocity (pMove's PIC sample, a seed's site sample), the display's
+  // Motion energy |velocity - before|^2 into P_ENERGY at the record's bank index (GPUFluidParticleSource.motionEnergy,
+  // the old engine's GPUFluidParticleMotion capture fused here: a store a live record, no pass of its own).
+  const pDelta = k("pDelta", [CFG, FB.set, FB.dir, FB.velRO, FB.parts, FB.fcell, P_ENERGY_RW], [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_VEL_WGSL, FG_RUN_WGSL, nbfParticleRecordWGSL, BANK_WGSL, nbfDeltaWGSL].join("\n") + /* wgsl */`
 // The delta of face axis a at window index r: the +face of old anchor cell r - 1, the ABI face of cell r - 1 + e_a.
 // NONE where the anchor's tile lacks support (umTileSupport bit 2) or the face is a low wall face.
 fn nbxDelta(axis:u32,r:vec3u)->f32{
@@ -600,6 +608,7 @@ fn nbxDelta(axis:u32,r:vec3u)->f32{
  let n=min(atomicLoad(&nbSet[NB_H_PCOUNT0+bank]),NB_PCAP);
  if(i>=n){return;}
  var p=parts[pAt(bank,i)];if(!nbLive(p)){return;}
+ let motion=p.velocity.xyz-p.before.xyz;pEnergy[i]=dot(motion,motion);
  let q=p.position.xyz;let run=fgRun(vec3i(floor(q)));
  if(i<run.x||i>=run.y){p.before=vec4f(vec3f(NB_DELTA_NONE),p.before.w);parts[pAt(bank,i)]=p;return;}
  if(nbParticleMode(p)==1.0){return;}

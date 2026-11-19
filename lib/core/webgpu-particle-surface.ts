@@ -740,6 +740,8 @@ export class ParticleSurface {
   /** Rebuilds the skin from the source's live particles, unless nothing it reads has changed. */
   encode(encoder: GPUCommandEncoder, source: GPUFluidParticleSource, frame: ParticleSurfaceFrame): boolean {
     if (!this.ready || source.capacity === 0) return false;
+    // A banked source (firstRecord) is the Speed and Motion overlay's alone: this pass reads records from zero.
+    if (source.firstRecord !== undefined) return false;
     const { settings } = frame;
     const built = this.built;
     if (built[0] === frame.revision && built[1] === settings.greed && built[2] === settings.smoothing

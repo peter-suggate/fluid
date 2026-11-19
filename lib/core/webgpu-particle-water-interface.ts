@@ -352,6 +352,8 @@ export class ParticleWaterInterface {
     this.drawable = false;
     const source = this.source;
     if (!source || !this.sphereLayout || !this.spherePipeline || !this.smoothPipeline || source.capacity === 0 || width <= 0 || height <= 0) return false;
+    // A banked source (firstRecord) is the Speed and Motion overlay's alone: this pass reads records from zero.
+    if (source.firstRecord !== undefined) return false;
     const radius = source.radius_m * PARTICLE_WATER_RADIUS_SCALE;
     const u = new Uint32Array(this.data), f = new Float32Array(this.data);
     u.set([source.strideFloats, source.capacity, source.grid?.depthFloat ?? 0, source.grid ? 1 : 0], 0);
