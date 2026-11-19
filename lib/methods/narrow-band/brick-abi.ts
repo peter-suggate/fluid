@@ -243,6 +243,9 @@ export interface BrickLayoutOptions extends BrickCapacities {
   /** An open world (brick-scene.ts BRICK_OPEN_WORLD_MARGIN): the lattice's x and z sides are the margin's, its outer
    * brick layers are the margin's last, and liquid there latches (setMark). Absent: the sides are the scene's walls. */
   readonly openSides?: boolean;
+  /** The static mask's tiles (brick-static-tiles.ts): two bit planes in dir, closed and inexact, a bit a lattice tile.
+   * A closed tile is the box rule's solid (resolveBox). Absent: the box rule alone (the text unchanged). */
+  readonly staticTiles?: boolean;
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -267,9 +270,14 @@ export const boxWGSL = (L: Pick<BrickLayout, "lattice" | "box">) => boxPadded(L)
 /** The token a module-level WGSL string writes for the walls (brickOwnerWGSL({ box: BOX_TOKEN }), a kernel's own wall
  * planes); a kernel builder resolves it with its layout (resolveBox). An unresolved token fails at engine creation. */
 export const BOX_TOKEN = "NB_WALL_BOX";
-export const resolveBox = (L: Pick<BrickLayout, "lattice" | "box">, code: string) =>
+// With the static tiles (BrickLayout.staticTiles) a closed tile is a wall to the 4h tier: its tile test
+// (nbTileInWallBox) and its cell test (nbInWallC: a cell read for its 4h tile's data) read it (nbTileInWallS,
+// nbInWallS). The full-resolution tier's cell test (nbInWallBox) keeps the box: its cells see the voxels through the
+// mask. Without the static tiles nbInWallC is nbInWallBox.
+export const resolveBox = (L: Pick<BrickLayout, "lattice" | "box"> & { readonly staticTiles?: boolean }, code: string) =>
   code.replaceAll(BOX_TOKEN, boxWGSL(L)).replaceAll("nbInWallBox(", boxPadded(L) ? "nbInBox(" : "nbInLattice(")
-    .replaceAll("nbTileInWallBox(", boxPadded(L) ? "nbTileInBox(" : "nbTileInLattice(");
+    .replaceAll("nbInWallC(", L.staticTiles ? "nbInWallS(" : boxPadded(L) ? "nbInBox(" : "nbInLattice(")
+    .replaceAll("nbTileInWallBox(", L.staticTiles ? "nbTileInWallS(" : boxPadded(L) ? "nbTileInBox(" : "nbTileInLattice(");
 
 /** The ABI's concrete layout for one scene: every region's word offset and every buffer's size. */
 export class BrickLayout {
@@ -279,6 +287,7 @@ export class BrickLayout {
   readonly farPhi: number;
   /** The box rule's box (BrickLayoutOptions.box): the walls. The lattice is storage; a wall is at the box, once. */
   readonly box: readonly [number, number, number];
+  readonly staticTiles: boolean;
   /** BrickLayoutOptions.openTop. */
   readonly openTop: boolean;
   /** BrickLayoutOptions.openSides. */
@@ -315,7 +324,7 @@ export class BrickLayout {
     readonly words: number;
   };
   /** dir buffer regions (words). */
-  readonly dir: { readonly page: number; readonly child: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly words: number };
+  readonly dir: { readonly page: number; readonly child: number; readonly frec: number; readonly crec: number; readonly cmask: number; readonly closed: number; readonly inexact: number; readonly words: number };
   /** Words of each pool. */
   readonly poolWords: Readonly<Record<PoolName, number>>;
   readonly partsWords: number;
@@ -333,6 +342,7 @@ export class BrickLayout {
     this.lattice = [...options.lattice] as [number, number, number];
     this.farPhi = options.farPhi ?? phiFar(options.lattice);
     this.box = [...(options.box ?? options.lattice)] as [number, number, number];
+    this.staticTiles = options.staticTiles === true;
     this.openTop = options.openTop === true;
     this.openSides = options.openSides === true;
     if (this.openSides && this.box.some((n, a) => a !== 1 && n !== this.lattice[a])) throw new Error(`Brick engine: an open world's box ${this.box.join("x")} holds the lattice's sides ${this.lattice.join("x")}`);
@@ -366,7 +376,10 @@ export class BrickLayout {
     let d = 0;
     const dtake = (n: number) => { const o = d; d += align64(n); return o; };
     const page = dtake(pageWords), child = dtake(CHILD_WORDS * c), frec = dtake(RECORD_WORDS * f), crec = dtake(RECORD_WORDS * c), cmask = dtake(CMASK_WORDS * c);
-    this.dir = { page, child, frec, crec, cmask, words: d };
+    // The static tiles' two planes (closed, then inexact), each a bit a lattice tile.
+    const plane = Math.ceil(this.lattice.reduce((a, n) => a * Math.ceil(n / 4), 1) / 32);
+    const closed = this.staticTiles ? dtake(2 * plane) : 0;
+    this.dir = { page, child, frec, crec, cmask, closed, inexact: closed + (this.staticTiles ? plane : 0), words: d };
     const fc = (n: number) => n * BRICK_STRIDE * (f + c);
     this.poolWords = { vel: fc(POOLS.vel.length), phi: fc(POOLS.phi.length), pres: fc(POOLS.pres.length), cut: POOLS.cut.length * BRICK_STRIDE * Math.max(k, 1) + Math.max(k, 1) };
     this.partsWords = 2 * particles * this.particleStride;
@@ -458,6 +471,7 @@ export function brickAbiWGSL(layout: BrickLayout, options: BrickAbiWGSLOptions =
   lines.push(`const NB_S_LIST=array<u32,${LIST_SLOTS}>(${s.lists.map(u).join(",")});`);
   lines.push(`const NB_S_LIST_CAP=array<u32,${LIST_SLOTS}>(${s.listCap.map(u).join(",")});`);
   c("NB_D_PAGE", d.page); c("NB_D_CHILD", d.child); c("NB_D_FREC", d.frec); c("NB_D_CREC", d.crec); c("NB_D_CMASK", d.cmask);
+  if (L.staticTiles) { c("NB_D_CLOSED", d.closed); c("NB_D_INEXACT", d.inexact); }
   for (const pool of Object.keys(POOLS) as PoolName[]) {
     for (const ch of POOLS[pool]) {
       if (pool === "cut") c(`NB_${pool.toUpperCase()}_${ch}`, L.base(pool, "K", ch));
@@ -497,7 +511,16 @@ fn nbCRec(slot:u32,k:u32)->u32{return ${ld(D, "NB_D_CREC+32u*slot+k")};}
 fn nbFOrigin(slot:u32)->vec3i{return 8*nbKeyCoord(nbFRec(slot,NB_REC_KEY));}
 fn nbCOrigin(slot:u32)->vec3i{return 32*nbKeyCoord(nbCRec(slot,NB_REC_KEY));}
 // Tile t (C local) of C slot cslot is h-owned.
-fn nbTileH(cslot:u32,t:u32)->bool{return ((${ld(D, "NB_D_CMASK+16u*cslot+(t>>5u)")}>>(t&31u))&1u)!=0u;}
+fn nbTileH(cslot:u32,t:u32)->bool{return ((${ld(D, "NB_D_CMASK+16u*cslot+(t>>5u)")}>>(t&31u))&1u)!=0u;}${L.staticTiles ? `
+// The static tiles (brick-static-tiles.ts): bit i = t.x + T.x (t.y + T.y t.z) of a plane. Callers pass a lattice tile.
+const NB_TILES:vec3i=(NB_LATTICE+vec3i(3))/4;
+fn nbStaticTileBit(plane:u32,t:vec3i)->bool{let i=u32(t.x+NB_TILES.x*(t.y+NB_TILES.y*t.z));return ((${ld(D, "plane+(i>>5u)")}>>(i&31u))&1u)!=0u;}
+// A closed tile (every cell a mask voxel): the box rule's solid.
+fn nbTileClosed(t:vec3i)->bool{return nbStaticTileBit(NB_D_CLOSED,t);}
+// An inexact tile near the voxels: the static need's support.
+fn nbTileInexact(t:vec3i)->bool{return nbStaticTileBit(NB_D_INEXACT,t);}
+fn nbInWallS(c:vec3i)->bool{return all(c>=vec3i(0))&&all(c<${boxWGSL(L)})&&!nbTileClosed(c>>vec3u(2u));}
+fn nbTileInWallS(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<${boxWGSL(L)})&&!nbTileClosed(t);}` : ""}
 `);
   }
   if (options.set) {

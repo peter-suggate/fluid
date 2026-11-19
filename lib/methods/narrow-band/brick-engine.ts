@@ -14,6 +14,7 @@
  * - Every dispatch is either indirect from a list or sized from a capacity.
  * - Nothing is sized from the lattice.
  */
+import { brickStaticTiles, brickStaticTilesEdit, type BrickStaticTiles } from "./brick-static-tiles";
 import { brickTerrainWords, type BrickTerrainColumns } from "./brick-terrain.wgsl";
 import { brickLowerOn, brickModuleCode } from "./brick-lower";
 import { brickBootSourceBoxes, brickSourceRing, type BrickSources } from "./brick-source";
@@ -342,6 +343,8 @@ export class BrickEngine {
   editsCompiled = true;
   editsError?: string;
   private held?: { lo: Vec3; hi: Vec3 };
+  /** The static tiles (brick-static-tiles.ts) the layout binds, kept for a live edit's recompute. */
+  private staticTiles?: BrickStaticTiles;
   private destroyed = false;
   private steps = 0;
   private time = 0;
@@ -489,7 +492,14 @@ export class BrickEngine {
   }
 
   static async create(device: GPUDevice, options: BrickEngineOptions): Promise<BrickEngine> {
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic });
+    // The static tiles (brick-static-tiles.ts), with a static mask at the build that closes a tile: a closed tile is
+    // the box rule's solid and the static need promotes the inexact tiles only. With none closed the bits buy nothing
+    // the brick rule lacks and the box tests would pay a read, so the plain text runs (as a deferred mask's, after its
+    // first edit too). NB_BRICK_STATIC_TILES=0 leaves them out (the A/B gates).
+    const tiles = options.staticMask && !options.staticsDeferred && brickEnv("NB_BRICK_STATIC_TILES") !== "0"
+      ? brickStaticTiles(options.lattice, options.box ?? options.lattice, options.staticMask.words) : undefined;
+    const staticTiles = tiles && tiles.closed > 0 ? tiles : undefined;
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic, ...(staticTiles ? { staticTiles: true } : {}) });
     // Deferred statics (an empty mask): the plain variant runs (no static stage, and no K slot work unless bodies take
     // slots), and the statics variant is compiled beside it for the first live edit (armStatics).
     const mask = brickStaticBinding(options), deferred = mask !== undefined && options.staticsDeferred === true;
@@ -560,6 +570,7 @@ export class BrickEngine {
     const editOnly = kernels.filter(k => !running.has(k));
     const engine = new BrickEngine(device, options, layout, solver, stages, schedule, pipelines, compileMs);
     engine.restamp = restamp;
+    if (staticTiles) engine.staticTiles = staticTiles;
     if (armed) { engine.armed = armed; engine.armedBuffers = [...Object.entries(armed.solver.buffers), ...Object.entries(armed.stages.buffers)]; }
     engine.allocate([...initial, ...boot.pages]);
     engine.record();
@@ -610,6 +621,15 @@ export class BrickEngine {
     for (const r of ranges) {
       if (!(Number.isInteger(r.firstWord) && Number.isInteger(r.wordCount) && r.firstWord >= 0 && r.wordCount > 0 && r.firstWord + r.wordCount <= words.length)) throw new Error(`Brick engine: mask range ${r.firstWord}+${r.wordCount} is outside the image`);
       uploadWords(this.device.queue, solid, 4 * r.firstWord, words.subarray(r.firstWord, r.firstWord + r.wordCount) as Uint32Array<ArrayBuffer>);
+    }
+    // The static tiles the edit's cells can reach (an engine built without them keeps the brick rule: still correct).
+    const st = this.staticTiles;
+    if (st) {
+      const touched = brickStaticTilesEdit(st, this.options.box ?? this.options.lattice, words, lo, hi);
+      if (touched.last >= 0) {
+        const dir = this.buffers.get("dir")!;
+        for (const plane of [0, 1]) uploadWords(this.device.queue, dir, 4 * (this.layout.dir.closed + plane * st.words + touched.first), st.bits.subarray(plane * st.words + touched.first, plane * st.words + touched.last + 1) as Uint32Array<ArrayBuffer>);
+      }
     }
     // Before the edit pipelines land, the stroke is held: the words are in, no step runs (advance refuses) until the
     // restamp, and the restamp takes the union of the held strokes' boxes when they land (it restamps from the mask, so
@@ -730,6 +750,7 @@ export class BrickEngine {
     uploadWords(d.queue, set, 0, s);
     // The directory: every page, child and record word NONE, the tile masks clear.
     const w = new Uint32Array(L.dir.words).fill(NONE); w.fill(0, L.dir.cmask);
+    if (this.staticTiles) w.set(this.staticTiles.bits, L.dir.closed);
     uploadWords(d.queue, dir, 0, w);
     for (let i = 0; i < RECEIPTS; i++) this.receipts.push({ buffer: d.createBuffer({ label: `nb-brick.receipt${i}`, size: 4 * 256, usage: U.MAP_READ | U.COPY_DST }), busy: false });
   }
@@ -916,3 +937,6 @@ export class BrickEngine {
     for (const r of this.receipts) r.buffer.destroy();
   }
 }
+
+/** An environment switch (the A/B gates), absent outside node. */
+function brickEnv(name: string): string | undefined { return typeof process !== "undefined" ? process.env?.[name] : undefined; }

@@ -154,7 +154,7 @@ fn lcTileHeld(t:vec3i)->vec3i{return clamp(t,vec3i(0),(NB_WALL_BOX>>vec3u(2u))-v
 fn lcCOwned(v:vec3i)->bool{return lcVertexIn(v)&&nbVertexCoarse(v).x>=0;}
 // Deviation 5: tile t's page is resident and still (still-tank A: setLists' STILL, regionStill's COLD page).
 fn lcTileCold(t:vec3i)->bool{let cs=nbCSlotOfPage(t>>vec3u(3u));if(cs==NB_NONE){return false;}return (nbCRec(cs,NB_REC_CLASS)&NB_CLASS_STILL)!=0u;}
-fn lcCellStored(c:vec3i)->bool{return nbInWallBox(c)&&nbCSlotOfPage(c>>vec3u(5u))!=NB_NONE;}
+fn lcCellStored(c:vec3i)->bool{return nbInWallC(c)&&nbCSlotOfPage(c>>vec3u(5u))!=NB_NONE;}
 // umVertexTier == COLD: every incident stored open cell is COLD, or none is (buried: φ there is not state).
 fn lcTierCold(v:vec3i)->bool{
  for(var k=0u;k<8u;k++){let c=v-lcCorner(k);if(!lcCellStored(c)){continue;}if(!lcTileCold(c>>vec3u(2u))){return false;}}
@@ -499,7 +499,7 @@ fn lcCoupled(v:vec3i,dt:f32,hm:f32)->f32{
    // own tier (a limit cycle). Its fill is the planar volume fraction of the advected C φ at the cell centre,
    // clamp(0.5 - φ, 0, 1), as eight records' worth. An h cell no F slot holds is open with no particles; a resident
    // closed (solid) cell is not counted, as the old bound's nbParticleCellOpen.
-   if(!nbInWallBox(cc)){continue;}
+   if(!nbInWallC(cc)){continue;}
    let cs=fgSlot(cc);if(cs!=NB_NONE&&(phi[NB_PHI_F_FLAGS+NB_STRIDE*cs+nbLocal(cc)]&NB_FLAG_OPEN)==0u){continue;}
    var n=0u;
    if(fgCellCoarse(cc)){n=u32(round(8.0*clamp(0.5-lcSample(1u,vec3f(cc)+0.5),0.0,1.0)));}
@@ -600,10 +600,10 @@ fn lcBuildDistance(v:vec3i,c:vec3i)->f32{
  return value;
 }
 // nbVertexClosed: no in-lattice cell incident to q (deviation 8: the only closed vertices are off the lattice).
-fn lcClosed(q:vec3i)->bool{for(var k=0u;k<8u;k++){if(nbInWallBox(q-lcCorner(k))){return false;}}return true;}
+fn lcClosed(q:vec3i)->bool{for(var k=0u;k<8u;k++){if(nbInWallC(q-lcCorner(k))){return false;}}return true;}
 fn lcZeroOpen(p:vec3f)->bool{
  let low=vec3i(ceil(p))-vec3i(1);let high=vec3i(floor(p));
- for(var k=0u;k<8u;k++){if(nbInWallBox(select(low,high,lcCorner(k)!=vec3i(0)))){return true;}}
+ for(var k=0u;k<8u;k++){if(nbInWallC(select(low,high,lcCorner(k)!=vec3i(0)))){return true;}}
  return false;
 }
 // nbBoundCoarseMetric: |d| no farther than the represented zero on each of the six 4h lattice edges.

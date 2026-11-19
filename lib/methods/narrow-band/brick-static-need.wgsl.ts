@@ -99,11 +99,12 @@ fn sdSupportTile(T:vec3i)->bool{
   let lo=4*T-vec3i(1);
   ${walls.terrain ? "if(sdTerrainTile(T)){return true;}" : ""}
   ${walls.boundary ? "if(sdFieldTile(T)){return true;}" : ""}
-  var empty=true;
+  ${L.staticTiles ? `// The static tiles (brick-static-tiles.ts): a voxel in the shell and not exact.
+  return nbTileInexact(T);` : `var empty=true;
   for(var q=0u;q<8u;q++){empty=empty&&sdPageEmpty(lo+5*vec3i(i32(q&1u),i32((q>>1u)&1u),i32(q>>2u)));}
   if(empty){return false;}
   for(var l=0u;l<216u;l++){if(sdVoxel(lo+vec3i(i32(l%6u),i32((l/6u)%6u),i32(l/36u)))){return true;}}
-  return false;
+  return false;`}
 }
 fn sdBit(cs:u32,w:u32,k:u32)->bool{return ((atomicLoad(&staticNeed[4u*cs+w+(k>>5u)])>>(k&31u))&1u)!=0u;}
 `;

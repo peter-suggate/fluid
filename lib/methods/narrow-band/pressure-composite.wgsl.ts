@@ -502,12 +502,12 @@ fn poRelease(phiOwner:f32,ghost:f32,sign:f32,u:f32,w:f32,h:f32)->bool{
  * Unpadded, every token resolves to the lattice's own name, so the text is byte-identical.
  */
 export const PO_TILE_BOX_TOKEN = "nbTileInWallBox(";
-export function pressureResolveBox(L: Pick<BrickLayout, "lattice" | "box">, code: string, tiered = true): string {
+export function pressureResolveBox(L: Pick<BrickLayout, "lattice" | "box"> & { readonly staticTiles?: boolean }, code: string, tiered = true): string {
   const padded = boxPadded(L);
   // A native row is a whole 4h tile: a box plane inside a tile has no row form (no partial native row; refused).
   if (padded && tiered && L.box.some(n => n % 4 !== 0)) throw new Error(`Pressure: the walls at the box ${L.box.join("x")} need whole 4h tiles (each axis a multiple of 4) on a tiered lattice`);
   const tile = padded ? "fn poTileInBox(t:vec3i)->bool{return all(t>=vec3i(0))&&all(4*t<NB_BOX);}\n" : "";
-  const out = resolveBox(L, (code.includes(PO_TILE_BOX_TOKEN) ? tile : "") + code.replaceAll(PO_TILE_BOX_TOKEN, padded ? "poTileInBox(" : "nbTileInLattice("));
+  const out = resolveBox(L, (code.includes(PO_TILE_BOX_TOKEN) ? tile : "") + code.replaceAll(PO_TILE_BOX_TOKEN, L.staticTiles ? "nbTileInWallS(" : padded ? "poTileInBox(" : "nbTileInLattice("));
   if (out.includes(BOX_TOKEN) || out.includes("WallBox(")) throw new Error("Pressure: a wall token is unresolved");
   return out;
 }
@@ -668,11 +668,11 @@ fn poHeadS(c:vec3i,own:f32,base:f32,f:u32)->f32{
     var diag=0.0;var div=0.0;var extra=0.0;var kk=vec3f(0.0);var ku=vec3f(0.0);
     ${faces === undefined ? "" : "var kinds=0u;"}
     ${cuts ? `// A static solid cell under liquid φ beside a liquid native row: rowsC's seam would read it as air (no row, PPHI
-    // air), so it latches (lane E's static rule keeps a wet cut brick's neighbours h).
-    if(owned&&!liquid&&poWet(own,1.0)&&poStaticShut(c)){
+    // air), so it latches (lane E's static rule keeps a wet cut brick's neighbours h).${L.staticTiles ? " A closed static tile's cell is a\n    // wall to rowsC (nbInWallC), as is a neighbour in one." : ""}
+    if(owned&&!liquid&&poWet(own,1.0)&&poStaticShut(c)${L.staticTiles ? "&&nbInWallC(c)" : ""}){
       for(var f=0u;f<6u;f++){
         let q=c+npSign(f)*poUnit(f/2u);
-        if(nbInWallBox(q)&&!poOwnerH(q)&&nbPageWord(q>>vec3u(5u))<NB_SEAM&&poWet(poRootPhi(q>>vec3u(2u)),4.0)){nbFail(NB_FAIL_UNSUPPORTED,0xa5000000u|nbFRec(slot,NB_REC_KEY));}
+        if(nbInWallC(q)&&!poOwnerH(q)&&nbPageWord(q>>vec3u(5u))<NB_SEAM&&poWet(poRootPhi(q>>vec3u(2u)),4.0)){nbFail(NB_FAIL_UNSUPPORTED,0xa5000000u|nbFRec(slot,NB_REC_KEY));}
       }
     }
     ` : ""}if(liquid){
@@ -751,7 +751,7 @@ var<workgroup> rcD:array<f32,512>;var<workgroup> rcX:array<f32,512>;var<workgrou
   let liquid=owned&&poWet(root,4.0);
   ${cuts ? `// A liquid native row in a cut brick (a static cut's tile left at 4h) would not read the cut: the old band
   // certificate's failure, a latch.
-  if(liquid){let fs=nbFSlotOfBrick(T>>vec3u(1u));if(fs<NB_SEAM){if(nbFRec(fs,NB_REC_CUT)!=NB_NONE){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(fs,NB_REC_KEY));}}}` : ""}
+${L.staticTiles ? "  // With the static tiles an exact tile of a cut brick is a 4h row (its closed neighbours are walls): only an inexact\n  // one, or one in a body's brick, latches.\n" : ""}  if(liquid){let fs=nbFSlotOfBrick(T>>vec3u(1u));if(fs<NB_SEAM){if(nbFRec(fs,NB_REC_CUT)!=NB_NONE${L.staticTiles ? "&&(nbTileInexact(T)||(nbFRec(fs,NB_REC_CLASS)&NB_CLASS_NEAR_BODY)!=0u)" : ""}){nbFail(NB_FAIL_UNSUPPORTED,nbFRec(fs,NB_REC_KEY));}}}` : ""}
   var seams=0u;
   if(liquid){
     for(var j=0u;j<8u;j++){poGuardVertex(4*(T+poCorner(j)));}
