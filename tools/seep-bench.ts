@@ -79,7 +79,7 @@ const auditSteps = new Set((option("audit") ?? "").split(",").filter(Boolean).ma
 for (const a of auditSteps) assert.ok(Number.isInteger(a) && a >= 0 && a <= steps && (a % every === 0 || a === steps), `--audit step ${a} must be a sample step`);
 assert.ok(!auditSteps.size || mode === "fenced", "--audit needs --mode=fenced");
 const profWindow = option("prof")?.split(":").map(Number);
-assert.ok(!profWindow || (profWindow.length === 2 && profWindow.every(v => Number.isInteger(v) && v >= 1) && profWindow[0]! + profWindow[1]! - 1 <= steps),
+assert.ok(!profWindow || (profWindow.length === 2 && profWindow.every(v => Number.isInteger(v) && v >= 1) && profWindow[0]! >= 2 && profWindow[0]! + profWindow[1]! - 1 <= steps),
   "--prof=FROM:COUNT, a window of steps inside the run");
 assert.ok(!profWindow || (mode === "fenced" && slot === "check"), "--prof splits every dispatch into its own pass: a fenced check-slot run, never a step time");
 const out = resolve(option("out") ?? "artifacts/seep-rewrite/runs");
@@ -113,8 +113,9 @@ const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolv
 Object.assign(globalThis, dawn.globals);
 const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter();
 assert.ok(adapter, "No WebGPU adapter");
-const raw = await adapter.requestDevice({ requiredFeatures: (["subgroups", "float32-filterable"] as const).filter(f => adapter.features.has(f)), requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
+const raw = await adapter.requestDevice({ requiredFeatures: (["subgroups", "float32-filterable", ...(profWindow ? ["timestamp-query"] as const : [])] as const).filter(f => adapter.features.has(f)), requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
 const memory = new GPUMemoryProfile(raw);
+assert.ok(!profWindow || raw.features.has("timestamp-query"), "--prof needs the adapter's timestamp-query feature");
 const timer = profWindow ? gpuKernelTimer(memory.device) : undefined;
 const device = managedGPUDevice(timer?.device ?? memory.device, { requireWorkerRealm: false });
 const errors: string[] = [];
@@ -160,7 +161,7 @@ try {
   const admit = async (step: number) => {
     // A full receipt ring (framePending) defers admission: yield to Dawn's event loop, as the app's next frame would.
     while (!s.advanceTo(step * dt, [])) {
-      if (!s.framePending) throw new Error(`Step ${step} refused with no frame pending`);
+      if (!s.framePending) { const why = s.info.simulationFailure; throw new Error(`Step ${step} refused with no frame pending${why ? `: ${String((why as { message?: unknown }).message ?? JSON.stringify(why)).slice(0, 600)}` : ""}`); }
       await new Promise<void>(r => setImmediate(r));
     }
   };
@@ -169,12 +170,15 @@ try {
   if (mode === "fenced") {
     for (let step = 1; step <= steps; step++) {
       stepReached = step;
-      if (timer && profWindow && step === profWindow[0]) timer.enabled = true;
+      // The timer wraps the encoders made while it is on. A solver that encodes a step ahead (the brick engine's
+      // encodeAhead) makes step k's encoder during step k - 1, so the window opens one step early and closes before its
+      // last step: COUNT steps' encoders either way, and none wrapped is still unsubmitted when collect frees its buffers.
+      if (timer && profWindow && step === profWindow[0]! - 1) timer.enabled = true;
+      if (timer && profWindow && step === profWindow[0]! + profWindow[1]! - 1) timer.enabled = false;
       const start = performance.now();
       await admit(step); await fence();
       const ms = performance.now() - start;
       if (timer && profWindow && step === profWindow[0]! + profWindow[1]! - 1) {
-        timer.enabled = false;
         const { byLabel, dispatches, untimed } = await timer.collect();
         const n = profWindow[1]!, total = [...byLabel.values()].reduce((a, b) => a + b, 0);
         log({ kind: "prof", from: profWindow[0], steps: n, dispatchesPerStep: dispatches / n, untimed, gpuMsPerStep: total / n,
