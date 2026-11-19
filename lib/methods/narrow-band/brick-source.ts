@@ -152,14 +152,39 @@ export function brickSources(scene: SceneDescription, o: { lattice: Vec3; box?: 
     } else {
       throw new Error(`Brick engine: a scheduled drop of shape "${(volume as { shape: string }).shape}" is not supported`);
     }
-    // requestDropPages: r = max(radius, halfHeight) about the centre, grown by the pin margin, held to the container.
-    const r = Math.max(d.radius, d.halfHeight), box = o.box ?? o.lattice;
-    const lo = d.centre.map((c, a) => Math.min(Math.max(Math.floor(c - r) - SRC_PIN_MARGIN, 0), box[a]!)) as unknown as Vec3;
-    const hi = d.centre.map((c, a) => Math.min(Math.max(Math.ceil(c + r) + SRC_PIN_MARGIN, 0), box[a]!)) as unknown as Vec3;
-    drops.push({ ...d, box: [lo, hi] });
+    drops.push({ ...d, box: brickDropBox(d, o.box ?? o.lattice) });
   }
   const inflow = scene.fluid.inflow ? brickInflow(scene, scene.fluid.inflow, o) : undefined;
   return { drops, ...(inflow ? { inflow } : {}), edges: Float32Array.from(edges), dt_s: o.dt_s };
+}
+
+/** requestDropPages: r = max(radius, halfHeight) about the centre, grown by the pin margin, held to `box`. */
+function brickDropBox(d: Pick<BrickDrop, "centre" | "radius" | "halfHeight">, box: Vec3): [Vec3, Vec3] {
+  const r = Math.max(d.radius, d.halfHeight);
+  const lo = d.centre.map((c, a) => Math.min(Math.max(Math.floor(c - r) - SRC_PIN_MARGIN, 0), box[a]!)) as unknown as Vec3;
+  const hi = d.centre.map((c, a) => Math.min(Math.max(Math.ceil(c + r) + SRC_PIN_MARGIN, 0), box[a]!)) as unknown as Vec3;
+  return [lo, hi];
+}
+
+/** No scheduled drop and no nozzle: the sources a live drop joins (brickLiveDrop). */
+export const brickNoSources = (dt_s: number): BrickSources => ({ drops: [], edges: new Float32Array(0), dt_s });
+
+/**
+ * A ball dropped into the running scene (InjectedLiquidBall: the old engine's injectLiquidBall, uniformInjectedDrop),
+ * in source form, due on the step ending at `time_s`: a ball, or a disk (a cylinder along z, the 2D case's liquid)
+ * when it has a half height. Its volume joins the budget on that step, as a scheduled drop's.
+ */
+export function brickLiveDrop(ball: { readonly centre_m: { readonly x: number; readonly y: number; readonly z: number }; readonly radius_m: number; readonly halfHeight_m?: number }, time_s: number,
+  o: { lattice: Vec3; box?: Vec3; h_m: number; origin_m: Vec3 }): BrickDrop {
+  const h = o.h_m, r = ball.radius_m / h, c = ball.centre_m;
+  if (!(r > 0) || !Number.isFinite(r)) throw new Error(`Brick engine: a live drop's radius ${ball.radius_m} m`);
+  const centre: Vec3 = [(c.x - o.origin_m[0]) / h, (c.y - o.origin_m[1]) / h, (c.z - o.origin_m[2]) / h];
+  if (centre.some(v => !Number.isFinite(v))) throw new Error(`Brick engine: a live drop's centre (${c.x}, ${c.y}, ${c.z}) m`);
+  const disk = ball.halfHeight_m !== undefined, halfHeight = disk ? ball.halfHeight_m! / h : 0;
+  if (disk && !(halfHeight > 0)) throw new Error(`Brick engine: a live disk's half height ${ball.halfHeight_m} m`);
+  const d = { time_s, kind: (disk ? 2 : 1) as 1 | 2, centre, radius: r, halfHeight, edgeStart: 0, edgeCount: 0, offset: 0, halfDepth: 0, edgeRadius: 0,
+    volume: disk ? Math.PI * r * r * 2 * halfHeight : (4 / 3) * Math.PI * r ** 3 };
+  return { ...d, box: brickDropBox(d, o.box ?? o.lattice) };
 }
 
 /** The nozzle in source form (createInflowGridBoundary over the container's cells; its face held to the lattice as

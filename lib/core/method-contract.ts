@@ -313,9 +313,11 @@ export interface GPUSolverInstance {
    * Add a ball of liquid to the running field, without re-seeding.
    *
    * Optional: a method that does not implement it simply keeps taking the
-   * re-seed, so dropping a ball still works — it just costs the run.
+   * re-seed, so dropping a ball still works — it just costs the run. A solver
+   * that cannot take this ball now (fixed pools it may overrun) returns false,
+   * having changed nothing, and the caller re-seeds as for a method without it.
    */
-  injectLiquidBall?(ball: InjectedLiquidBall): void;
+  injectLiquidBall?(ball: InjectedLiquidBall): void | boolean;
   editFluid?(edit: LiveFluidEdit): Promise<LiveFluidEditResult>;
   /**
    * Stage the latest authoritative scene revision for GPU consumers.

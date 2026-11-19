@@ -17,7 +17,7 @@
 import { brickStaticTiles, brickStaticTilesEdit, type BrickStaticTiles } from "./brick-static-tiles";
 import { brickTerrainWords, type BrickTerrainColumns } from "./brick-terrain.wgsl";
 import { brickLowerOn, brickModuleCode } from "./brick-lower";
-import { brickBootSourceBoxes, brickSourceRing, type BrickSources } from "./brick-source";
+import { brickBootSourceBoxes, brickDropDue, brickNoSources, brickSourceRing, type BrickDrop, type BrickSources } from "./brick-source";
 import { brickSourceWords } from "./brick-source.wgsl";
 import { BRICK_SOLID_EDIT_WORDS, brickSolidStampKernels, type BrickStaticMaskBinding } from "./brick-solid-stamp.wgsl";
 import { ARGS, BODY_FLAG, BOX_TOKEN, BrickLayout, boxPadded, FAIL, H, LIST, NONE, RING, RING_FLAG, RING_SLOTS, RING_WORDS, bricksPerAxis, brickKey, KEY_PAGE, PHI_AIR, REACH_MARGIN, phiFar, type BrickCapacities } from "./brick-abi";
@@ -83,6 +83,9 @@ export interface BrickEngineOptions {
   /** The scene's scheduled drops in source form (brick-source.ts, lane F's stages read them); the boot's set holds the
    * first step's drop box. Absent: no sources. */
   readonly sources?: BrickSources;
+  /** Drops queued while the scene runs (queueDrop: a ball dropped into it, injectLiquidBall). The drop boxes' claim
+   * (resSource) is scheduled as with `sources`: 8 workgroups a residency pass that skip an empty box. */
+  readonly liveDrops?: boolean;
   /** The static voxel mask (brick-static.wgsl.ts brickStaticMask: its words and walls), bound as `solid` and stamped
    * by solidStamp (M3). Absent: the box rule alone, no binding, no stamp. */
   readonly staticMask?: BrickStaticMaskBinding;
@@ -331,6 +334,8 @@ export class BrickEngine {
   private readonly recorded: { part1: Recorded[]; part2: Recorded[] }[] = [];
   private readonly receipts: { buffer: GPUBuffer; busy: boolean }[] = [];
   private ahead?: { step: number; part1: GPUCommandBuffer; part2: GPUCommandBuffer; receipt: number };
+  /** Live drops not yet added (queueDrop), each due on its step: the ring's words are written as a step is submitted. */
+  private live: BrickDrop[] = [];
   /** The live edit's solidRestamp (static mask only). */
   private restamp?: BrickKernel;
   /**
@@ -517,14 +522,14 @@ export class BrickEngine {
     if (initial.length + boot.pages.length > layout.cap.f) throw new Error(`Brick engine: the boot's ${initial.length} bricks and ${boot.pages.length} page-only candidates overrun its candidate list (scene.fluid.brickPools.f = ${layout.cap.f})`);
     // boxes < 0 names the page table (bootPhi cfg.w = 1).
     const boxes = options.initial ? -1 : options.liquid.length;
-    const schedule = BrickEngine.scheduleFor(layout, solver, stages, boxes, deferred ? undefined : mask, options.bodies, options.sources !== undefined, options.censusHold, kPlain);
+    const schedule = BrickEngine.scheduleFor(layout, solver, stages, boxes, deferred ? undefined : mask, options.bodies, options.sources !== undefined || options.liveDrops === true, options.censusHold, kPlain);
     // The statics variant of a deferred engine: its own stages and a solver with the cuts, over the same buffers (the
     // boot is the plain one's; only part 1 and part 2 are ever recorded from it).
     let armed: { stages: BrickStages; schedule: BrickStageSchedule; solver: PressureSolver } | undefined;
     if (deferred) {
       const s2 = stagesFor(true), p2 = solverFor();
       validateBrickStages(s2); validatePressureSolver(p2);
-      const statics = BrickEngine.scheduleFor(layout, p2, s2, boxes, mask, options.bodies, options.sources !== undefined, options.censusHold);
+      const statics = BrickEngine.scheduleFor(layout, p2, s2, boxes, mask, options.bodies, options.sources !== undefined || options.liveDrops === true, options.censusHold);
       // A kernel the variants share in text (label, entry, bindings, code) is the plain one's: one pipeline, compiled once.
       const text = (k: BrickKernel) => `${k.label}\n${k.entry}\n${JSON.stringify(k.bindings)}\n${k.code}`;
       const plainKernels = new Map([...schedule.boot, ...schedule.part1, ...schedule.part2].map(p => [text(p.kernel), p.kernel]));
@@ -810,9 +815,39 @@ export class BrickEngine {
       u[RING.BODY_COUNT] = b.count; u[RING.BODY_FLAGS] = b.flags; f[RING.BODY_HORIZON] = o.dt_s; f[RING.BODY_CELL] = o.h_m ** 3; u[RING.BODY_GEN] = b.generation >>> 0;
     }
     // F's source words (brick-source.ts): this step's drop, its added cells, and the drop boxes the head claims.
-    if (o.sources) brickSourceRing(o.sources, this.time, u, f);
+    const sources = this.ringSources();
+    if (sources) brickSourceRing(sources, this.time, u, f);
     return buf;
   }
+
+  /** The scheduled drops with the live ones. */
+  private ringSources(): BrickSources | undefined {
+    const o = this.options;
+    if (!this.live.length) return o.sources;
+    const s = o.sources ?? brickNoSources(o.dt_s);
+    return { ...s, drops: [...s.drops, ...this.live] };
+  }
+
+  /** The end time of the first step, from the next one submitted, that adds no drop (a step adds one: brickDropDue):
+   * a live drop due then is added by that step, its box claimed by that step's head (resSource), so the census of its
+   * own step finds its tiles resident. With none due, the next step: the ball is in the field one step on. */
+  nextDropTime(): number {
+    const dt = this.options.dt_s, s = this.ringSources();
+    for (let k = 1; ; k++) { const end = this.time + k * dt; if (!s || brickDropDue(s, end - dt, end) < 0) return end; }
+  }
+
+  /** Queue a drop (brickLiveDrop) due at nextDropTime(). Pools are fixed: the caller checks the drop fits. */
+  queueDrop(d: BrickDrop) {
+    if (!this.options.liveDrops) throw new Error("Brick engine: live drops are off (BrickEngineOptions.liveDrops)");
+    if (!(d.time_s > this.time)) throw new Error(`Brick engine: a live drop due at ${d.time_s} s, at or before the clock's ${this.time} s`);
+    this.live.push(d);
+    // One drop a step (brickDropDue throws on two): a collision fails here, at the call, not at a later submit.
+    try { brickDropDue(this.ringSources()!, d.time_s - this.options.dt_s, d.time_s); }
+    catch (e) { this.live.pop(); throw e; }
+  }
+
+  /** Live drops queued and not yet added. */
+  get pendingDrops(): number { return this.live.length; }
 
   private boot() {
     const rec = this.schedule.boot.map(p => this.bind(p, 0));
@@ -853,6 +888,7 @@ export class BrickEngine {
       this.device.queue.submit(rigid ? [a.part2, rigid] : [a.part2]);
       if (a.receipt >= 0) this.collect(a.receipt, a.step);
       this.steps++; this.time += this.options.dt_s;
+      if (this.live.length) { const slack = 1e-6 * this.options.dt_s; this.live = this.live.filter(d => d.time_s > this.time + slack); }
       this.encodeAhead();
     }
   }
@@ -919,7 +955,7 @@ export class BrickEngine {
     await this.fence();
     for (const r of this.receipts) if (r.busy && r.buffer.mapState === "unmapped") r.busy = false;
     this.steps = state.steps; this.time = state.time;
-    this.receipt = undefined; this.failure = undefined;
+    this.receipt = undefined; this.failure = undefined; this.live = [];
     this.encodeAhead();
   }
 

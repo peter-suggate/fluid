@@ -18,14 +18,14 @@ import { brickBoundaryImage } from "./brick-boundary.wgsl";
 import type { SceneDescription } from "../../core/model";
 import { sceneFluidBoxScene, sceneFluidBoxShift, sceneFluidLatticeDimensions, sceneLatticeDimensions } from "../../core/scene-lattice-dimensions";
 import { uniformFixedStep_s } from "../uniform/uniform-paper";
-import type { BrickCapacities } from "./brick-abi";
+import { H, type BrickCapacities } from "./brick-abi";
 import { nbfVelocitySupported } from "./velocity-formulas.wgsl";
 import { brickRigidBodyGaps } from "./bodies-host";
 import type { BrickInitialPhi, BrickLiquidBox, Vec3 } from "./brick-engine";
 import { BRICK_STATIC_EDIT_K, brickStaticCutBricks, brickStaticMask } from "./brick-static.wgsl";
 import type { SolidOccupancyMask } from "../../core/solid-occupancy-mask";
 import { bootParticleCount, brickInitialLiquid, brickInitialVelocity } from "./brick-initial";
-import { brickSources, type BrickSources } from "./brick-source";
+import { brickBoxBricks, brickSources, type BrickDrop, type BrickSources } from "./brick-source";
 import { integratedInflowVolume } from "../../core/inflow-boundary";
 import { BRICK_BOOT_BAND, bootPhiAt, type BrickEngineOptions } from "./brick-engine";
 
@@ -223,6 +223,32 @@ export function brickDropParticles(sources: BrickSources | undefined, bandDepth:
   let n = 0;
   for (const d of sources?.drops ?? []) n += 8 * Math.min(d.volume, 4 * Math.PI * (3 * d.volume / (4 * Math.PI)) ** (2 / 3) * (bandDepth + 1));
   return Math.ceil(n);
+}
+
+/**
+ * Why the fixed pools cannot take a live drop now (undefined: they can). The pools never grow, and an overrun latches
+ * FAIL and halts the run, so a drop that may not fit is refused before anything is queued; the app then re-seeds the
+ * scene with the ball, whose pools the pool rule sizes. From the newest receipt (`header`, the live counts at its step):
+ * - F: the drop's box claims every brick it touches (resSource);
+ * - C, tiered: and every page of those bricks;
+ * - particles: the drop's band samples (brickDropParticles' rule), against the bank's live records.
+ * A claim takes a slot only where the brick or page is not resident, and the receipt does not say which are: the new
+ * ones are at most the box's and at most the window's not yet live (`windowPages`, 64 bricks a page), so a full
+ * window (a small scene, every page resident) takes any ball. No receipt yet: refused (the counts are unknown).
+ */
+export function brickDropRefusal(d: BrickDrop, header: Uint32Array | undefined, cap: Pick<BrickCapacities, "f" | "c" | "particles">, tiered: boolean, bandDepth: number, windowPages: readonly number[]): string | undefined {
+  if (!header) return "the brick engine has no step receipt yet";
+  const [lo, hi] = brickBoxBricks(d.box), bricks = [0, 1, 2].map(a => Math.max(0, hi[a]! - lo[a]!)), window = windowPages[0]! * windowPages[1]! * windowPages[2]!;
+  const liveF = header[H.LIVE_F]!, needF = Math.min(bricks[0]! * bricks[1]! * bricks[2]!, Math.max(0, 64 * window - liveF));
+  if (liveF + needF > cap.f) return `the drop's ${needF} bricks do not fit the F pool (${liveF} of ${cap.f} live)`;
+  if (tiered) {
+    const pages = [0, 1, 2].map(a => hi[a]! > lo[a]! ? ((hi[a]! - 1) >> 2) - (lo[a]! >> 2) + 1 : 0), liveC = header[H.LIVE_C]!;
+    const needC = Math.min(pages[0]! * pages[1]! * pages[2]!, Math.max(0, window - liveC));
+    if (liveC + needC > cap.c) return `the drop's ${needC} pages do not fit the C pool (${liveC} of ${cap.c} live)`;
+  }
+  const records = Math.max(header[H.PCOUNT0]!, header[H.PCOUNT1]!), needP = brickDropParticles({ drops: [d], edges: new Float32Array(0), dt_s: 0 }, bandDepth);
+  if (records + needP > cap.particles) return `the drop's ~${needP} particles do not fit the particle pool (${records} of ${cap.particles} live)`;
+  return undefined;
 }
 
 /** The pool rule's liquid with the sources' (lane F, M4; the old bulk16 rule's initial + scheduled drops + inflow,

@@ -24,7 +24,10 @@
  *   refused here (applySceneUniforms answers false), and the renderer rebuilds,
  *   as it did before this solver adopted anything live.
  */
-import type { GPUSolverInstance } from "../../core/method-contract";
+import type { GPUSolverInstance, InjectedLiquidBall } from "../../core/method-contract";
+import { liveFluidEditRefusal, type LiveFluidEdit, type LiveFluidEditResult } from "../../core/live-fluid-edit";
+import { brickLiveDrop } from "./brick-source";
+import { brickDropRefusal } from "./brick-scene";
 import type { GPUFluidParticleSource } from "../../core/webgpu-particle-overlay";
 import { narrowBandSiteAxis, type NarrowBandSurfaceSamples } from "../uniform/uniform-narrow-band-sites";
 import { NBF_PARTICLE_SETTINGS } from "./particles-formulas.wgsl";
@@ -142,7 +145,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       ? await BrickRigidBodies.create(device, options.rigid, { frame_m: s.origin_m, h_m: s.h_m, dt_s: s.dt_s, density_kg_m3: s.density_kg_m3, coupling: options.values.rigidCoupling !== "off", ...(s.terrain ? { terrain: s.terrain } : {}), ...(s.boundary ? { boundary: s.boundary } : {}) })
       : undefined;
     const engine = await BrickEngine.create(device, {
-      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), ...(s.openTop ? { openTop: true } : {}), ...(s.openSides ? { openSides: true } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), ...(options.censusHold ? { censusHold: options.censusHold } : {}),
+      lattice: s.lattice, ...(s.box ? { box: s.box } : {}), ...(s.openTop ? { openTop: true } : {}), ...(s.openSides ? { openSides: true } : {}), farPhi: s.farPhi, h_m: s.h_m, dt_s: s.dt_s, gravity_mps2: s.gravity_mps2, capacities: s.capacities, liquid: s.liquid, initial: s.initial, initialVelocity: s.initialVelocity, ...(s.sources ? { sources: s.sources } : {}), liveDrops: true, ...(options.censusHold ? { censusHold: options.censusHold } : {}),
       solver: options.solver, stages: options.stages, values: options.values, label: s.sceneId,
       fluid: { density_kg_m3: s.density_kg_m3, viscosity_Pa_s: s.viscosity_Pa_s, surfaceTension_N_m: s.surfaceTension_N_m },
       particles: { bandDepth: s.particleBandDepth },
@@ -156,6 +159,39 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
   }
 
   get volumeTexture(): GPUTexture { return this.brickPresentation.volume; }
+
+  /**
+   * A ball (or a 2D case's disk) dropped into the running scene, with no re-seed: a live drop (brick-source.ts
+   * brickLiveDrop) the next submitted step adds, as a scheduled drop is added (its box claimed by that step's head, its
+   * volume joining the budget). False when the fixed pools may not take it (brickDropRefusal): the app then re-seeds
+   * the scene with the ball, whose pools the pool rule sizes.
+   */
+  injectLiquidBall(ball: InjectedLiquidBall): boolean {
+    return this.liveDropRefusal(ball) === undefined;
+  }
+
+  /** The editor's water shapes, as far as a drop reaches (the old engine's editFluid): a ball, added. */
+  async editFluid(edit: LiveFluidEdit): Promise<LiveFluidEditResult> {
+    if (edit.operation !== "add" || edit.shape !== "ball") return { accepted: false, reason: "The brick engine adds water as balls only." };
+    const s = this.options.setup, cells = s.presentCells ?? s.lattice;
+    const refusal = liveFluidEditRefusal(edit, { origin_m: s.origin_m, cellSize_m: [s.h_m, s.h_m, s.h_m], dimensions: cells });
+    if (refusal) return { accepted: false, reason: refusal };
+    const reason = this.liveDropRefusal({ centre_m: edit.center_m, radius_m: edit.radius_m });
+    return reason === undefined ? { accepted: true } : { accepted: false, reason: `The ball does not fit this run's pools (${reason}); drop it while paused to re-seed.` };
+  }
+
+  /** Queue the drop, or say why not (nothing is queued then). */
+  private liveDropRefusal(ball: InjectedLiquidBall): string | undefined {
+    if (!(ball.radius_m > 0)) return "a ball needs a positive radius";
+    const e = this.brickEngine, s = this.options.setup;
+    if (e.failure) return "the run has failed";
+    const drop = brickLiveDrop(ball, e.nextDropTime(), { lattice: s.lattice, ...(s.box ? { box: s.box } : {}), h_m: s.h_m, origin_m: s.origin_m });
+    if (drop.box[0].some((v, a) => v >= drop.box[1][a]!)) return "the ball lies outside the fluid box";
+    const reason = brickDropRefusal(drop, e.receipt?.header, e.layout.cap, e.stages.tiered === true, s.particleBandDepth, e.layout.window);
+    if (reason !== undefined) return reason;
+    e.queueDrop(drop);
+    return undefined;
+  }
   get surfaceFieldTexture(): GPUTexture { return this.brickPresentation.volume; }
   /** False only while a voxel stroke waits on the live-edit pipelines (BrickEngine.editHeld): the app holds the clock. */
   get simulationReady(): boolean { return !this.brickEngine.editHeld; }

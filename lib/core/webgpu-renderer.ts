@@ -1879,7 +1879,7 @@ export class FluidLabRenderer {
     if (!this.lifecycle.open
       || !this.sparseDeviceReady(this.gpuFluid)
       || !this.gpuFluid?.injectLiquidBall) return false;
-    this.gpuFluid.injectLiquidBall(ball);
+    if (this.gpuFluid.injectLiquidBall(ball) === false) return false;
     // Injection is a source publication, but not a solver step, so
     // `info.encodedSteps` does not change. Explicitly retire the retained mesh
     // and wake a paused presentation; the queue orders the next extraction
