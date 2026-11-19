@@ -19,6 +19,7 @@ import type { SceneDescription } from "../lib/core/model";
 import { uniformNarrowBandMethod as method } from "../lib/methods/uniform/uniform-narrow-band-method";
 import { createBrickSolver } from "../lib/methods/narrow-band/brick-method";
 import { BRICK_OPEN_TOP_HEADROOM } from "../lib/methods/narrow-band/brick-scene";
+import { BrickPresentation } from "../lib/methods/narrow-band/brick-present";
 import { withUniformDevice } from "./helpers/uniform-geometric";
 
 const H_M = 0.025, DRIFT = Number(process.env.OPEN_TOP_DRIFT ?? 0.1);
@@ -41,11 +42,17 @@ async function solverFor(device: GPUDevice, s: ReturnType<typeof openTopScene>) 
   return createBrickSolver(device, s.scene, s.values, s.quality);
 }
 
-// The presentation's volume fractions: the total, the liquid above the container's top, and in the lattice's last
-// brick layer.
+// The volume fractions over the whole lattice: the total, the liquid above the container's top, and in the lattice's
+// last brick layer. The solver's own presentation spans the container (the renderer's extent), so the headroom is read
+// through a presentation of the lattice, made once a solver.
+const lattices = new WeakMap<object, BrickPresentation>();
 async function volumes(device: GPUDevice, solver: Awaited<ReturnType<typeof createBrickSolver>>, top: number) {
-  await solver.brickEngine.fence();
-  const tex = solver.brickPresentation.volume, [w, hgt, dep] = [tex.width, tex.height, tex.depthOrArrayLayers], bpr = Math.ceil(4 * w / 256) * 256;
+  const e = solver.brickEngine;
+  let full = lattices.get(solver);
+  if (!full) { full = await BrickPresentation.create(e, (solver as unknown as { options: { farPhi_m: number } }).options.farPhi_m); lattices.set(solver, full); }
+  await e.fence();
+  const encoder = device.createCommandEncoder(); full.encode(encoder); device.queue.submit([encoder.finish()]);
+  const tex = full.volume, [w, hgt, dep] = [tex.width, tex.height, tex.depthOrArrayLayers], bpr = Math.ceil(4 * w / 256) * 256;
   const buf = device.createBuffer({ size: bpr * hgt * dep, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const enc = device.createCommandEncoder(); enc.copyTextureToBuffer({ texture: tex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: hgt }, [w, hgt, dep]); device.queue.submit([enc.finish()]);
   await buf.mapAsync(GPUMapMode.READ); const f = new Float32Array(buf.getMappedRange().slice(0)); buf.unmap(); buf.destroy();
@@ -70,7 +77,10 @@ test("brick engine: an open top's run-up climbs past the container's top into th
       assert.deepEqual([...e.layout.box], [...e.layout.lattice], "the box rises to the lattice's top");
       assert.equal(e.layout.openTop, true);
       const v0 = await volumes(device, solver, 16);
-      assert.deepEqual(v0.dims, [32, 64, 32], "the presentation covers the lattice");
+      assert.deepEqual(v0.dims, [32, 64, 32], "the lattice's presentation covers the headroom");
+      const shown = solver.brickPresentation.volume;
+      assert.deepEqual([shown.width, shown.height, shown.depthOrArrayLayers], [32, 16, 32], "the renderer's presentation spans the container");
+      assert.deepEqual(solver.info.tankCells, [32, 16, 32]);
       assert.ok(Math.abs(v0.total - 8 * 15 * 32) <= 0.02 * 8 * 15 * 32, `the column's volume ${v0.total}`);
       let above = 0, peak = 0, at = 0;
       for (let step = 1; step <= 40; step++) {
@@ -85,7 +95,7 @@ test("brick engine: an open top's run-up climbs past the container's top into th
       }
       t.diagnostic(`peak volume above the container's top ${above.toFixed(2)} cells at step ${at}; the highest wet cell row ${peak}`);
       assert.ok(above > 1, `the run-up stands above the container's top (${above} cells): no lid at y = 16`);
-    } finally { solver.destroy(); }
+    } finally { lattices.get(solver)?.destroy(); solver.destroy(); }
   }, ["subgroups"]);
 });
 
@@ -109,6 +119,6 @@ test("brick engine: liquid thrown into an open top's last brick layer latches FA
       t.diagnostic(`step ${step}: ${failure.message}`);
       assert.match(failure.message, /REACH/);
       assert.match(failure.message, /open top/);
-    } finally { solver.destroy(); }
+    } finally { lattices.get(solver)?.destroy(); solver.destroy(); }
   }, ["subgroups"]);
 });

@@ -73,6 +73,9 @@ export interface BrickSceneSetup {
   readonly initialVelocity?: { readonly velocity: Vec3; readonly tiles: readonly number[] };
   /** The lattice's low corner (m) and the container's cells. */
   readonly origin_m: Vec3;
+  /** The cells the renderer is handed (brick-present.ts), from the lattice's corner: the container's, where the lattice
+   * pads past it (the dense surface spans the scene's container with tankCells cells). Absent: the lattice. */
+  readonly presentCells?: Vec3;
   /** The scheduled drops in source form (brick-source.ts brickSources); absent: none. */
   readonly sources?: BrickSources;
   /** The scene's static voxels beyond the container shell (brick-static.wgsl.ts brickStaticMask), bound to the engine's
@@ -177,6 +180,7 @@ export function brickSceneSetup(scene: SceneDescription, values: Readonly<Record
       sceneId: id, lattice: L, ...(box ? { box: [box[0]!, box[1]!, box[2]!] as Vec3 } : {}), ...(openTop ? { openTop: true as const } : {}), farPhi, h_m: hs[0]!, dt_s: dt!, gravity_mps2: [g.x, g.y, g.z], density_kg_m3: f.density_kg_m3, viscosity_Pa_s: f.dynamicViscosity_Pa_s, surfaceTension_N_m: f.surfaceTension_N_m,
       capacities: { f: p.f, c: p.c, b: p.b, k, particles: p.particles, ...("t" in p && p.t !== undefined ? { t: p.t } : {}) }, particleBandDepth: band,
       liquid: start.liquid, initial: start.initial, initialVelocity: brickInitialVelocity(scene, L, B), bootBricks: start.bricks, bootPages: start.pages, origin_m,
+      ...(cells.some((v, a) => v !== L[a]) ? { presentCells: [cells[0]!, cells[1]!, cells[2]!] as Vec3 } : {}),
       ...(sources ? { sources } : {}),
       staticMask, ...(staticMask.empty && !terrain && !boundary ? { staticsDeferred: true as const } : {}), ...(terrain ? { terrain } : {}), ...(boundary ? { boundary } : {}),
     },

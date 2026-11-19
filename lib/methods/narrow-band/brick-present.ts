@@ -13,6 +13,14 @@
  *   closed F cell (FLAGS.OPEN clear), as the gauge.
  * - `openFraction` (r32float, lattice): 1, as M2 has no cut cells; on a
  *   padded lattice (M3), 0 past the box, whose cells are wall.
+ * The textures span the presented cells (`cells`, BrickSolverSetup.presentCells:
+ * the container's), not the padded lattice. The renderer's dense surface maps its
+ * grid (tankCells) onto the scene's container and reads container / tankCells as
+ * the cell size, as the old engine reports (tankCells: its container's cells).
+ * Until 2026-11-19 they spanned the lattice, so a padded lattice drew the water
+ * squashed toward the floor by container / lattice (reservoir-seep: 256 / 288 in y,
+ * the jet 7 cells under its particles). An open top's headroom past the container
+ * is not presented (the dense renderer draws the container alone).
  * On a padded lattice a cell past the box holds no liquid (`volume` 0 there),
  * as the old engine's cells behind its shell hold none; its vertices keep
  * their stored air (the vertex row on the box's planes is the wall's).
@@ -43,10 +51,16 @@ import { levelSetFillWGSL } from "../../core/level-set-fill.wgsl";
 
 const bricksPerAxis = (L: BrickLayout) => L.lattice.map(n => n >> 3) as unknown as readonly [number, number, number];
 
-const COMMON = (L: BrickLayout) => /* wgsl */`
+/** Workgroups an axis: presentVertices covers vertices 0..cells, presentVolume cells 0..cells-1 (one a brick). */
+const coverVertices = (cells: readonly number[]) => cells.map(n => Math.ceil((n + 1) / 8));
+const coverCells = (cells: readonly number[]) => cells.map(n => Math.ceil(n / 8));
+
+const COMMON = (L: BrickLayout, cells: readonly number[]) => /* wgsl */`
 ${brickAbiWGSL(L, { set: { name: "nbSet", atomic: false }, dir: { name: "dir", atomic: false } })}
 struct PresentParams { far_m:f32, h_m:f32, pad0:f32, pad1:f32 }
 const NB_PRESENT_BRICKS:vec3i=vec3i(${bricksPerAxis(L).join(",")});
+// The presented cells (the textures' extent: cells, and cells + 1 vertices).
+const NB_PRESENT_CELLS:vec3i=vec3i(${cells.join(",")});
 @group(0) @binding(0) var<uniform> params:PresentParams;
 @group(0) @binding(1) var<storage,read> nbSet:array<u32>;
 @group(0) @binding(2) var<storage,read> dir:array<u32>;
@@ -64,7 +78,7 @@ fn presentNear(b:vec3i)->bool{
 }
 `;
 
-const WGSL_VERTICES = (L: BrickLayout) => COMMON(L) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
+const WGSL_VERTICES = (L: BrickLayout, cells: readonly number[]) => COMMON(L, cells) + brickOwnerWGSL({ phi: "phi", vel: "vel", box: boxWGSL(L) }) + /* wgsl */`
 @group(0) @binding(6) var vertexPhi:texture_storage_3d<r32float,write>;
 var<workgroup> presentState:u32;
 @compute @workgroup_size(64) fn presentVertices(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){
@@ -75,7 +89,7 @@ var<workgroup> presentState:u32;
   if(state==0u){return;}
   for(var j=0u;j<8u;j++){
     let v=8*b+nbLocalCoord(lid+64u*j);
-    if(any(v>NB_LATTICE)){continue;}
+    if(any(v>NB_PRESENT_CELLS)){continue;}
     var p=params.far_m;
     if(held){let q=nbVertexPhi(v);if(q<NB_PHI_AIR_C){p=q*params.h_m;}}
     textureStore(vertexPhi,v,vec4f(p,0.0,0.0,0.0));
@@ -83,7 +97,7 @@ var<workgroup> presentState:u32;
 }`;
 
 /** presentVolume's WGSL (exported for its text test). */
-export const WGSL_VOLUME = (L: BrickLayout) => COMMON(L) + levelSetFillWGSL + /* wgsl */`
+export const WGSL_VOLUME = (L: BrickLayout, cells: readonly number[] = L.lattice) => COMMON(L, cells) + levelSetFillWGSL + /* wgsl */`
 @group(0) @binding(6) var vertexPhi:texture_3d<f32>;
 @group(0) @binding(7) var volume:texture_storage_3d<r32float,write>;
 var<workgroup> presentState:u32;
@@ -95,6 +109,7 @@ var<workgroup> presentState:u32;
   if(state==0u){return;}
   for(var j=0u;j<8u;j++){
     let v=8*b+nbLocalCoord(lid+64u*j);
+    if(any(v>=NB_PRESENT_CELLS)){continue;}
     var f=0.0;
     if(${boxPadded(L) ? "held&&nbInBox(v)" : "held"}){
       var c:array<f32,8>;var lo=1e30;var hi=-1e30;
@@ -120,8 +135,8 @@ export class BrickPresentation {
   /** Bytes of the textures and buffers (the interim cost). */
   readonly bytes: number;
 
-  private constructor(private readonly engine: BrickEngine, far_m: number, layouts: readonly [GPUBindGroupLayout, GPUBindGroupLayout], pipelines: readonly [GPUComputePipeline, GPUComputePipeline]) {
-    const d = engine.device, n = engine.layout.lattice, U = GPUTextureUsage;
+  private constructor(private readonly engine: BrickEngine, far_m: number, private readonly cells: readonly number[], layouts: readonly [GPUBindGroupLayout, GPUBindGroupLayout], pipelines: readonly [GPUComputePipeline, GPUComputePipeline]) {
+    const d = engine.device, n = cells, U = GPUTextureUsage;
     const tex = (label: string, size: readonly number[]) => d.createTexture({ label: `nb-brick.present.${label}`, dimension: "3d", format: "r32float", size: [...size], usage: U.TEXTURE_BINDING | U.STORAGE_BINDING | U.COPY_DST | U.COPY_SRC });
     this.vertexPhi = tex("vertexPhi", n.map(v => v + 1)); this.volume = tex("volume", n); this.openFraction = tex("openFraction", n);
     // Once: far phi everywhere, the open fraction 1 (slab by slab, one slab's staging).
@@ -134,7 +149,7 @@ export class BrickPresentation {
     const box = engine.layout.box;
     if (boxPadded(engine.layout)) for (let z = 0; z < n[2]!; z++) {
       const slab = new Float32Array(n[0]! * n[1]!);
-      if (z < box[2]!) for (let y = 0; y < box[1]!; y++) slab.fill(1, y * n[0]!, y * n[0]! + box[0]!);
+      if (z < box[2]!) for (let y = 0; y < Math.min(box[1]!, n[1]!); y++) slab.fill(1, y * n[0]!, y * n[0]! + Math.min(box[0]!, n[0]!));
       d.queue.writeTexture({ texture: this.openFraction, origin: [0, 0, z] }, slab, { bytesPerRow: 4 * n[0]!, rowsPerImage: n[1]! }, [n[0]!, n[1]!, 1]);
     }
     const bricks = bricksPerAxis(engine.layout).reduce((a, b) => a * b, 1);
@@ -153,9 +168,11 @@ export class BrickPresentation {
     this.bytes = 4 * (texels(n.map(v => v + 1)) + 2 * texels(n) + bricks) + 16;
   }
 
-  static async create(engine: BrickEngine, far_m: number): Promise<BrickPresentation> {
+  /** `cells`: the presented cells from the lattice's corner (default the lattice), at most the lattice an axis. */
+  static async create(engine: BrickEngine, far_m: number, cells: readonly number[] = engine.layout.lattice): Promise<BrickPresentation> {
     if (!(far_m >= PHI_AIR * engine.options.h_m)) throw new Error(`Brick presentation: far phi ${far_m} m must be at least the band's air value`);
     if (engine.layout.lattice.some(v => v % 8 !== 0)) throw new Error(`Brick presentation: the lattice ${engine.layout.lattice.join("x")} is not whole bricks`);
+    if (cells.length !== 3 || cells.some((n, a) => !Number.isInteger(n) || n < 1 || n > engine.layout.lattice[a]!)) throw new Error(`Brick presentation: the presented cells ${cells.join("x")} are not within the lattice ${engine.layout.lattice.join("x")}`);
     const d = engine.device, B = GPUShaderStage.COMPUTE;
     const compile = async (label: string, code: string) => {
       const module = d.createShaderModule({ label, code: brickModuleCode(label, code, brickLowerOn(engine.options.lowerDynamicWrites)) });
@@ -172,18 +189,19 @@ export class BrickPresentation {
     const layouts = [
       d.createBindGroupLayout({ label: "nb-brick.presentVertices", entries: [...shared, storage(6)] }),
       d.createBindGroupLayout({ label: "nb-brick.presentVolume", entries: [...shared, { binding: 6, visibility: B, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } }, storage(7)] })] as const;
-    const [vertices, volume] = await Promise.all([compile("nb-brick.presentVertices", WGSL_VERTICES(engine.layout)), compile("nb-brick.presentVolume", WGSL_VOLUME(engine.layout))]);
+    const [vertices, volume] = await Promise.all([compile("nb-brick.presentVertices", WGSL_VERTICES(engine.layout, cells)), compile("nb-brick.presentVolume", WGSL_VOLUME(engine.layout, cells))]);
     const pipelines = await Promise.all([
       d.createComputePipelineAsync({ label: "nb-brick.presentVertices", layout: d.createPipelineLayout({ bindGroupLayouts: [layouts[0]] }), compute: { module: vertices, entryPoint: "presentVertices" } }),
       d.createComputePipelineAsync({ label: "nb-brick.presentVolume", layout: d.createPipelineLayout({ bindGroupLayouts: [layouts[1]] }), compute: { module: volume, entryPoint: "presentVolume" } })]);
-    return new BrickPresentation(engine, far_m, layouts, [pipelines[0]!, pipelines[1]!]);
+    return new BrickPresentation(engine, far_m, cells, layouts, [pipelines[0]!, pipelines[1]!]);
   }
 
-  /** Encode the copy: the vertices (one extra brick layer for the upper vertex row), then the cells. */
+  /** Encode the copy: the vertices (on the lattice, one extra brick layer for the upper vertex row), then the cells,
+   * a workgroup a brick over the presented cells. */
   encode(encoder: GPUCommandEncoder) {
-    const [x, y, z] = bricksPerAxis(this.engine.layout), pass = encoder.beginComputePass({ label: "nb-brick.present" });
-    pass.setPipeline(this.pipelines[0]); pass.setBindGroup(0, this.groups[0]); pass.dispatchWorkgroups(x + 1, y + 1, z + 1);
-    pass.setPipeline(this.pipelines[1]); pass.setBindGroup(0, this.groups[1]); pass.dispatchWorkgroups(x, y, z);
+    const [vx, vy, vz] = coverVertices(this.cells), [x, y, z] = coverCells(this.cells), pass = encoder.beginComputePass({ label: "nb-brick.present" });
+    pass.setPipeline(this.pipelines[0]); pass.setBindGroup(0, this.groups[0]); pass.dispatchWorkgroups(vx!, vy!, vz!);
+    pass.setPipeline(this.pipelines[1]); pass.setBindGroup(0, this.groups[1]); pass.dispatchWorkgroups(x!, y!, z!);
     pass.end();
   }
 

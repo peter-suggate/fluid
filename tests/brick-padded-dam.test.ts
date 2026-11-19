@@ -55,7 +55,8 @@ test("brick engine: a padded dam (24x16x24 in 32^3) keeps its walls at the box: 
     try {
       assert.deepEqual([...e.layout.lattice], [32, 32, 32]); assert.deepEqual([...e.layout.box], [24, 16, 24]);
       const c0 = await columns();
-      assert.deepEqual(c0.dims, [32, 32, 32], "the presentation covers the lattice");
+      assert.deepEqual(c0.dims, [24, 16, 24], "the presentation spans the container (the renderer's tankCells), not the lattice");
+      assert.deepEqual(solver.info.tankCells, [24, 16, 24]);
       t.diagnostic(`step 0: V ${c0.total.toFixed(1)}, past the box ${c0.past}, columns ${[...c0.col].map(v => v.toFixed(0)).join(" ")}`);
       assert.equal(c0.past, 0, "the boot puts no liquid past the box");
       assert.ok(Math.abs(c0.total - 8 * 12 * 24) <= 0.02 * 8 * 12 * 24, `the slab's volume ${c0.total}`);

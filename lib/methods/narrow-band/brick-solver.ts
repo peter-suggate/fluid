@@ -149,7 +149,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
       ...(rigid ? { bodies: rigid } : {}),
       ...(s.staticMask ? { staticMask: s.staticMask } : {}), ...(s.staticsDeferred ? { staticsDeferred: true } : {}), ...(s.terrain ? { terrain: s.terrain } : {}), ...(s.boundary ? { boundary: s.boundary } : {}),
     });
-    const presentation = await BrickPresentation.create(engine, options.farPhi_m);
+    const presentation = await BrickPresentation.create(engine, options.farPhi_m, options.setup.presentCells);
     const solver = new BrickNBFlipSolver(options, engine, presentation, rigid);
     solver.present();
     return solver;
@@ -240,7 +240,7 @@ export class BrickNBFlipSolver implements GPUSolverInstance {
     const liveF = header?.[H.LIVE_F] ?? 0, stored = 512 * liveF;
     const word = (at?: number) => at === undefined || !header ? undefined : header[at];
     return {
-      nx, ny, nz, storedNy: ny, cellCount: stored, equivalentUniformCells: cells, compressionRatio: stored > 0 ? cells / stored : 0,
+      nx, ny, nz, ...(s.presentCells ? { tankCells: s.presentCells } : {}), storedNy: ny, cellCount: stored, equivalentUniformCells: cells, compressionRatio: stored > 0 ? cells / stored : 0,
       regularLayers: 0, maximumNeighborDelta: 0, gridKind: "uniform", cellSize_m: s.h_m,
       pressureIterations: word(this.brickEngine.solver.receipt?.iterations) ?? 0,
       allocatedBytes: this.brickEngine.bytes + this.brickPresentation.bytes, quality: this.options.quality,
