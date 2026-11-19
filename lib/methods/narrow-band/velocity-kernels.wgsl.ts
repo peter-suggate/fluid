@@ -65,11 +65,17 @@ fn vCentreStage(o:vec3i,lid:u32){
 }
 // Cell c of the staged range (o-1..o+7 on every axis).
 fn vCentre(c:vec3i)->f32{let r=c-vCentreLow;return wCentre[u32(r.x+9*(r.y+9*r.z))];}
-// FC_LIQ of the brick at o (slot): fgLiquidCell of its cells from the staged centres (after the staging's barrier).
+// FC_LIQ of the brick at o (slot): fgLiquidCell of its cells from the staged centres (after the staging's barrier),
+// open cells only. FC_LIQ is the extension's phase (umPhase): a closed cell (FLAGS.OPEN clear: solidStamp, bodyStamp)
+// owns no phase, so its faces are never sources. As a source, a face between closed cells is a zero that every
+// velocity sample within half a cell of the wall blends in (a jet leaving a voxel throat lost a third of its speed).
 fn vLiquidStore(slot:u32,o:vec3i,lid:u32){
  if(lid>=16u){return;}
  var bits=0u;
- for(var k=0u;k<32u;k++){let c=o+nbLocalCoord(32u*lid+k);if(nbInWallBox(c)&&vCentre(c)< -0.001){bits|=1u<<k;}}
+ for(var k=0u;k<32u;k++){
+  let l=32u*lid+k;let c=o+nbLocalCoord(l);
+  if(nbInWallBox(c)&&vCentre(c)< -0.001&&(phi[NB_PHI_F_FLAGS+NB_STRIDE*slot+l]&NB_FLAG_OPEN)!=0u){bits|=1u<<k;}
+ }
  fcStore(FC_LIQ+16u*slot+lid,bits);
 }
 `;
