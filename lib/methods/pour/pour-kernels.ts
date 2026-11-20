@@ -1775,11 +1775,12 @@ fn foldMaxB(l: u32) -> f32 {
   return s;
 }
 var<workgroup> tp: array<f32, 1000>;
-/** Fine block Gauss-Seidel on the staged brick tile tp (rhs per thread), 3 red-black sweeps (6 colour passes; 2 took
- *  0.5 more cycles a step, a net loss); black-first when rev. */
+/** Fine block Gauss-Seidel on the staged brick tile tp (rhs per thread): one red-black sweep (2 colour passes),
+ *  black-first when rev. At unit coarse weight 3 sweeps beat 2; with MG_OMEGA 1.4 one sweep a pass is cheapest
+ *  (steps 301-325, pressure ms a step: 3 sweeps 8.06, 2 7.65, 1 7.40; 2026-11-21). */
 fn fineSmooth(c: vec3i, ti: u32, diag: f32, m: u32, rhs: f32, rev: bool) {
   let red = (u32(c.x + c.y + c.z)) & 1u;
-  for (var s = 0u; s < 6u; s++) {
+  for (var s = 0u; s < 2u; s++) {
     let colour = select(s & 1u, 1u - (s & 1u), rev);
     if (diag > 0.0 && red == colour) {
       var sum = rhs;
