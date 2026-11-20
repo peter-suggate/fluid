@@ -47,8 +47,12 @@ export interface PourDiagnostics {
 
 interface Dispatch { readonly label: string; readonly pipeline: GPUComputePipeline; readonly group: GPUBindGroup; readonly direct?: readonly [number, number?]; readonly indirect?: number }
 
-/** Dispatches in a step's first submitted command buffer (see buildStep). */
-const SUBMIT_PREFIX = 4;
+/** Where a step's dispatch list is cut into separately submitted command buffers (see buildStep). Dawn translates
+ *  a command buffer into Metal at its submit: with one cut at 4 the GPU idled through the translation of the other
+ *  246 dispatches, and every step paid it. Four cuts (after the surface prefix, then through the PCG cycles, about 7
+ *  of which run) overlap translation with execution: worst 25-step window (301-325, fenced) 18.2 to 16.6 ms; nine
+ *  cuts did no better (17.0). */
+const SUBMIT_CUTS = [4, 30, 80, 140];
 
 export class PourSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
@@ -285,11 +289,13 @@ export class PourSolver implements GPUSolverInstance {
     this.stepIndex++;
   }
 
-  /** A step's command buffers depend only on its parity; split after SUBMIT_PREFIX dispatches so the GPU starts
-   *  the prefix while the rest is translated (seep-solver.ts buildStep). */
+  /** A step's command buffers depend only on its parity; split at SUBMIT_CUTS so the GPU runs each part while
+   *  Dawn translates the next one at its submit (seep-solver.ts buildStep). */
   private buildStep(parity: number): GPUCommandBuffer[] {
     const list = this.steps[parity & 1];
-    return [list.slice(0, SUBMIT_PREFIX), list.slice(SUBMIT_PREFIX)].map(part => {
+    const parts: Dispatch[][] = []; let at = 0;
+    for (const c of [...SUBMIT_CUTS, list.length]) { parts.push(list.slice(at, c)); at = c; }
+    return parts.map(part => {
       const encoder = this.device.createCommandEncoder({ label: "pour.step" });
       const pass = encoder.beginComputePass({ label: "pour.step" });
       for (const x of part) this.encode(pass, x);
