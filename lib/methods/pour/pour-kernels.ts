@@ -2256,6 +2256,8 @@ fn gate(k: u32, nAct: u32, go: bool) {
  * C_k: the V(2,2)-cycle on levels 4..6, one workgroup, launched directly: it returns at once
  * unless P_k left iteration k open (C_CONV still 0).
  */
+/** Threads of the coarse solve's workgroup (L4_CELLS / COARSE_TPG level-4 cells each, at least L5_CELLS). */
+const COARSE_TPG = 512;
 export const coarseSolveKernel = kernel("pour.coarseSolve", [coarseRW, bricksRO, ctrlRO], /* wgsl */ `
 ${COARSE_COMMON}
 fn colourOf(c: vec3i) -> u32 { return (u32(c.x + c.y + c.z)) & 1u; }
@@ -2288,31 +2290,42 @@ fn offS(l: u32, c: vec3i, o: vec4f, m: vec3f) -> f32 {
   return s;
 }
 const SW4: u32 = 2u; const SW5: u32 = 2u;
+/** Threads of the workgroup, and level-4 cells a thread (cells t + TPG j). */
+const TPG: u32 = ${COARSE_TPG}u; const PER: u32 = ${L4_CELLS / COARSE_TPG}u;
 var<workgroup> sConv: u32;
-@compute @workgroup_size(${L4_CELLS}) fn main(@builtin(local_invocation_index) t: u32) {
+@compute @workgroup_size(${COARSE_TPG}) fn main(@builtin(local_invocation_index) t: u32) {
   if (t == 0u) { sConv = ctrl[C_CONV]; }
   if (workgroupUniformLoad(&sConv) != 0u) { return; }
-  // Levels 4..6 (${L4_CELLS + L5_CELLS + COARSEST_CELLS} cells) live in workgroup memory for the whole V-cycle, one
-  // level-4 cell a thread: each sweep is one workgroup barrier, not a device-memory fence. Each thread keeps its
+  // Levels 4..6 (${L4_CELLS + L5_CELLS + COARSEST_CELLS} cells) live in workgroup memory for the whole V-cycle, PER
+  // level-4 cells a thread: each sweep is one workgroup barrier, not a device-memory fence. Each thread keeps its
   // cells' couplings (+ and -), rhs and pre-smoothed values in registers. Level 3 is block-smoothed across the GPU
-  // by D3 / U3.
-  let c4 = cellOfLevel(4u, t);
-  let o4 = cop(4u, c4); let m4 = minusC(4u, c4);
-  let b4 = coarse[CB + L4O + t];
+  // by D3 / U3. Within a colour the red-black updates are independent, so the cells' assignment to threads does
+  // not change a result.
+  var c4: array<vec3i, PER>; var o4: array<vec4f, PER>; var m4: array<vec3f, PER>; var b4: array<f32, PER>;
+  var ep4: array<f32, PER>;
+  for (var j = 0u; j < PER; j++) {
+    let q = t + TPG * j;
+    c4[j] = cellOfLevel(4u, q); o4[j] = cop(4u, c4[j]); m4[j] = minusC(4u, c4[j]); b4[j] = coarse[CB + L4O + q];
+    sE[q] = 0.0;
+  }
   let has5 = t < ${L5_CELLS}u; let has6 = t < NC6;
   let c5 = cellOfLevel(5u, min(t, ${L5_CELLS - 1}u)); let c6 = cellOfLevel(6u, min(t, NC6 - 1u));
   var o5 = vec4f(0.0); var m5 = vec3f(0.0);
   if (has5) { o5 = cop(5u, c5); m5 = minusC(5u, c5); }
-  sE[t] = 0.0;
-  if (t < ${L5_CELLS + COARSEST_CELLS}u) { sE[S5 + t] = 0.0; }
+  for (var j = t; j < ${L5_CELLS + COARSEST_CELLS}u; j += TPG) { sE[S5 + j] = 0.0; }
   workgroupBarrier();
   // Down, level 4: pre-smooth from zero (red first), restrict the residual.
   for (var s = 0u; s < SW4; s++) {
-    if (colourOf(c4) == (s & 1u) && o4.x > 0.0) { sE[t] = (b4 + offS(4u, c4, o4, m4)) / o4.x; }
+    for (var j = 0u; j < PER; j++) {
+      if (colourOf(c4[j]) == (s & 1u) && o4[j].x > 0.0) { sE[t + TPG * j] = (b4[j] + offS(4u, c4[j], o4[j], m4[j])) / o4[j].x; }
+    }
     workgroupBarrier();
   }
-  let ep4 = sE[t];
-  sR[t] = select(0.0, b4 - (o4.x * ep4 - offS(4u, c4, o4, m4)), o4.x > 0.0);
+  for (var j = 0u; j < PER; j++) {
+    let q = t + TPG * j;
+    ep4[j] = sE[q];
+    sR[q] = select(0.0, b4[j] - (o4[j].x * ep4[j] - offS(4u, c4[j], o4[j], m4[j])), o4[j].x > 0.0);
+  }
   workgroupBarrier();
   var b5 = 0.0;
   if (has5) { for (var q = 0u; q < 8u; q++) { b5 += sR[sIdx(4u, 2 * c5 + octI(q))]; } }
@@ -2343,13 +2356,17 @@ var<workgroup> sConv: u32;
     if (has5 && colourOf(c5) == 1u - (s & 1u) && o5.x > 0.0) { sE[S5 + t] = (b5 + offS(5u, c5, o5, m5)) / o5.x; }
     workgroupBarrier();
   }
-  sE[t] = select(0.0, ep4 + ${MG_OMEGA} * sE[sIdx(5u, c4 / 2)], o4.x > 0.0);
+  for (var j = 0u; j < PER; j++) {
+    sE[t + TPG * j] = select(0.0, ep4[j] + ${MG_OMEGA} * sE[sIdx(5u, c4[j] / 2)], o4[j].x > 0.0);
+  }
   workgroupBarrier();
   for (var s = 0u; s < SW4; s++) {
-    if (colourOf(c4) == 1u - (s & 1u) && o4.x > 0.0) { sE[t] = (b4 + offS(4u, c4, o4, m4)) / o4.x; }
+    for (var j = 0u; j < PER; j++) {
+      if (colourOf(c4[j]) == 1u - (s & 1u) && o4[j].x > 0.0) { sE[t + TPG * j] = (b4[j] + offS(4u, c4[j], o4[j], m4[j])) / o4[j].x; }
+    }
     workgroupBarrier();
   }
-  coarse[CE + L4O + t] = sE[t];
+  for (var j = 0u; j < PER; j++) { coarse[CE + L4O + t + TPG * j] = sE[t + TPG * j]; }
 }
 `);
 
