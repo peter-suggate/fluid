@@ -37,6 +37,11 @@ const phisRW: BindingSpec = { name: "phis", kind: "rw", type: "array<f32>" };
 const phisRO: BindingSpec = { name: "phis", kind: "ro", type: "array<f32>" };
 const velRW: BindingSpec = { name: "vel", kind: "rw", type: "array<f32>" };
 const velRO: BindingSpec = { name: "vel", kind: "ro", type: "array<f32>" };
+/** U, component a, as a 2D-array texture (layers along z) one zero texel wider at both ends along a (texel c + e_a holds
+ *  face c): the samplers' gathers clamp to an edge, which is then the wall's zero along a and the clamp tangentially. */
+const uTexRO: BindingSpec[] = [0, 1, 2].map(a => ({ name: `ut${a}`, kind: "layers" }));
+const uTexW: BindingSpec[] = [0, 1, 2].map(a => ({ name: `ut${a}w`, kind: "layersW" }));
+const uSmp: BindingSpec = { name: "uSmp", kind: "sampler" };
 const opRW: BindingSpec = { name: "op", kind: "rw", type: "array<f32>" };
 const opRO: BindingSpec = { name: "op", kind: "ro", type: "array<f32>" };
 const bitsRW: BindingSpec = { name: "bits", kind: "rw", type: "array<u32>" };
@@ -414,9 +419,9 @@ fn moveParticle(x: ptr<function, vec3f>, v: ptr<function, vec3f>, k1: vec3f) {
 //    Ferstl 2016 §3.3). A seed sits at its octant's centre, jittered, with the grid velocity there; it is appended
 //    to the source pool, so the scan and scatter sort it with the census. cfg.a = parity (src pool).
 // ---------------------------------------------------------------------------
-const seedKernel = (n: PourInflow) => kernel("pour.seed", [ctrlRW, bricksRO, partsRW, pcellRW, pgridRW, phisRO, velRO, cfgU], /* wgsl */ `
+const seedKernel = (n: PourInflow) => kernel("pour.seed", [ctrlRW, bricksRO, partsRW, pcellRW, pgridRW, phisRO, velRO, cfgU, ...uTexRO, uSmp], /* wgsl */ `
 ${phiSampler("phiT", "phis", "PHIT_OFF")}
-${velocitySampler("velU", "vel", "U_OFF")}
+${textureVelocitySampler("velU")}
 ${inflowWGSL(n, false)}
 // pUncovered: no particle in the 27 cells about c (the census's counts).
 fn uncovered(c: vec3i) -> bool {
@@ -607,9 +612,9 @@ ${phiSampler("phi", "phis", "PHI_OFF")}
 //    surfaceTraceSubsteps "off"), monotone Catmull-Rom tricubic, then the union
 //    with the nozzle's plug (the brick engine's nbSourcePhi after advection). phi -> phiT.
 // ---------------------------------------------------------------------------
-const advectPhiKernel = (n: PourInflow) => kernel("pour.advectPhi", [ctrlRW, bricksRO, phisRW, velRO], /* wgsl */ `
+const advectPhiKernel = (n: PourInflow) => kernel("pour.advectPhi", [ctrlRW, bricksRO, phisRW, velRO, ...uTexRO, uSmp], /* wgsl */ `
 ${phiSampler("phi", "phis", "PHI_OFF")}
-${velocitySampler("velU", "vel", "U_OFF")}
+${textureVelocitySampler("velU")}
 ${inflowWGSL(n, false)}
 fn heldF(x: vec3f) -> vec3f { return clamp(x, vec3f(0.0), vec3f(f32(NX - 1), f32(NY - 1), f32(NZ - 1))); }
 fn heldI(v: vec3i) -> vec3i { return clamp(v, vec3i(0), vec3i(NX - 1, NY - 1, NZ - 1)); }
@@ -1177,6 +1182,44 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
 //     the brick's minimum phi for the next classification.
 // ---------------------------------------------------------------------------
 /** The fine face backtrace and its gravity, shared by velocityBulk (interface faces) and velocityTrace. */
+/** velU (velocitySampler over U) from the U textures: two gathers (the 2 x 2 corners at z and z + 1) a component
+ *  where velU loads eight faces, mixed in velUComp's order (bit-identical). */
+function textureVelocitySampler(name: string): string {
+  const comp = (a: number, w: number, h: number, layers: number) => /* wgsl */ `
+fn ${name}C${a}(p: vec3f) -> f32 {
+  let q = p - vec3f(0.5) + 0.5 * vec3f(unitAxis(${a}u));
+  let t = q - floor(q);
+  let tc = vec3i(floor(q)) + unitAxis(${a}u);
+  let uv = (vec2f(tc.xy) + vec2f(1.0)) * vec2f(${1 / w}, ${1 / h});
+  let g0 = textureGather(0, ut${a}, uSmp, uv, clamp(tc.z, 0, ${layers - 1}));
+  let g1 = textureGather(0, ut${a}, uSmp, uv, clamp(tc.z + 1, 0, ${layers - 1}));
+  let x00 = mix(g0.w, g0.z, t.x); let x10 = mix(g0.x, g0.y, t.x);
+  let x01 = mix(g1.w, g1.z, t.x); let x11 = mix(g1.x, g1.y, t.x);
+  return mix(mix(x00, x10, t.y), mix(x01, x11, t.y), t.z);
+}`;
+  return comp(0, NX + 2, NY, NZ) + comp(1, NX, NY + 2, NZ) + comp(2, NX, NY, NZ + 2) + /* wgsl */ `
+fn ${name}Face(a: u32, c: vec3i) -> f32 {
+  if (c[a] < 0 || c[a] >= dimOf(a)) { return 0.0; }
+  return vel[U_OFF + a * N + cidx(clampV(c))];
+}
+fn ${name}Comp(a: u32, p: vec3f) -> f32 {
+  switch a { case 0u: { return ${name}C0(p); } case 1u: { return ${name}C1(p); } default: { return ${name}C2(p); } }
+}
+fn ${name}(p: vec3f) -> vec3f { return vec3f(${name}C0(p), ${name}C1(p), ${name}C2(p)); }
+`;
+}
+/** Publishes U into the U textures: the active bricks once U is final (after the extension; cfg.a = 0) and the bricks
+ *  that left the active set once clear has zeroed theirs (cfg.a = 1). Every other brick's U is zero, as is its texel. */
+export const publishUKernel = kernel("pour.publishU", [bricksRO, velRO, cfgU, ...uTexW], /* wgsl */ `
+@compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
+  let b = bricks[select(B_LACT, B_LCLEAR, cfg.a == 1u) + wg.x];
+  let c = brickCoord(b) * 8 + localCoord(l);
+  let i = (b << 9u) | l;
+  textureStore(ut0w, vec2i(c.x + 1, c.y), c.z, vec4f(vel[U_OFF + i], 0.0, 0.0, 0.0));
+  textureStore(ut1w, vec2i(c.x, c.y + 1), c.z, vec4f(vel[U_OFF + N + i], 0.0, 0.0, 0.0));
+  textureStore(ut2w, c.xy, c.z + 1, vec4f(vel[U_OFF + 2u * N + i], 0.0, 0.0, 0.0));
+}
+`);
 const FACE_SL_WGSL = /* wgsl */ `
 /** Semi-Lagrangian RK2 backtrace (segments of at most one cell) of the fine face (a, c) through the fine velocity
  *  (velU: velocitySampler over U); slSegs keeps the unclamped segment count. RK2 midpoint segments, one velocity
@@ -1223,12 +1266,12 @@ fn gravityOn(a: u32, c: vec3i) -> f32 {
 /** The brick engine's volume gauge cell rule (nbfCellFill) and its rate (nbfVolumeRate), verbatim. */
 const VOLUME_FILL_WGSL = nbfVolumeWGSL.slice(0, nbfVolumeWGSL.indexOf("// filled, budget"));
 const VOLUME_RATE_WGSL = `const V_CONTROL: f32 = ${1 / VOLUME_CONTROL_S};\n` + nbfVolumeWGSL.slice(nbfVolumeWGSL.indexOf("// filled, budget"));
-const velocityKernel = (n: PourInflow) => kernel("pour.velocity", [ctrlRW, bricksRW, phisRW, velRW, accRW, volW, bitsRW], /* wgsl */ `
+const velocityKernel = (n: PourInflow) => kernel("pour.velocity", [ctrlRW, bricksRW, phisRW, velRW, accRW, volW, bitsRW, ...uTexRO, uSmp], /* wgsl */ `
 ${inflowWGSL(n, true)}
 ${levelSetFillWGSL}
 ${geometricPlaneBoxWGSL}
 ${VOLUME_FILL_WGSL}
-${velocitySampler("velU", "vel", "U_OFF")}
+${textureVelocitySampler("velU")}
 ${bulkWGSL(true)}
 ${FACE_SL_WGSL}
 // vGauge: the step's filled volume (nbfCellFill over the open cells; a DEEP brick's open cells are whole), a
@@ -1363,8 +1406,8 @@ var<workgroup> sFar: u32;
 //      traces run, and every warp runs full. Same values (each face's trace and
 //      store are independent of the others).
 // ---------------------------------------------------------------------------
-export const velocityTraceKernel = kernel("pour.velocityTrace", [ctrlRW, bricksRW, velRW, bitsRO, phisRO], /* wgsl */ `
-${velocitySampler("velU", "vel", "U_OFF")}
+export const velocityTraceKernel = kernel("pour.velocityTrace", [ctrlRW, bricksRW, velRW, bitsRO, phisRO, ...uTexRO, uSmp], /* wgsl */ `
+${textureVelocitySampler("velU")}
 ${bulkWGSL(true)}
 ${FACE_SL_WGSL}
 var<workgroup> sFaces: array<u32, 192>;
@@ -2819,10 +2862,10 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
 //     list counters, advances the step counter and publishes the next step's
 //     inflow words (row s - 1 of the schedule for step s; off past its end).
 // ---------------------------------------------------------------------------
-const g2pKernel = (n: PourInflow) => kernel("pour.g2p", [ctrlRW, bricksRW, partsRW, velRO, cfgU, argsRW, phisRO, bitsRO, pgridRO], /* wgsl */ `
+const g2pKernel = (n: PourInflow) => kernel("pour.g2p", [ctrlRW, bricksRW, partsRW, velRO, cfgU, argsRW, phisRO, bitsRO, pgridRO, ...uTexRO, uSmp], /* wgsl */ `
 const IN_STEPS: u32 = ${n.steps}u;
 const IN_FLOW: f32 = ${n.flow};
-${velocitySampler("velU", "vel", "U_OFF")}
+${textureVelocitySampler("velU")}
 ${SUPPORT_WGSL}
 // The FLIP delta of face (a, c), U - US less this step's gravity (US carries it), where the projection set the
 // face; elsewhere (extended, solid-interior or far-air faces, whose US is no velocity of the field) only the body
@@ -3018,7 +3061,7 @@ export function pourKernels(n: PourInflow) {
     classify: classifyKernel(n), clear: clearKernel, advectPhi: advectPhiKernel(n), count: countKernel, seed: seedKernel(n),
     scan: scanKernel, scatter: scatterKernel, separate: separateKernel, splat: splatKernel, combine: combineKernel(n), massFit: massFitKernel(n),
     redistInit: redistInitKernel, redistSweep: redistSweepKernel, p2g: p2gKernel, velocity: velocityKernel(n),
-    velocityTrace: velocityTraceKernel, operator: operatorKernel, coarsenBrick: coarsenBrickKernel, coarsenTop: coarsenTopKernel,
+    velocityTrace: velocityTraceKernel, publishU: publishUKernel, operator: operatorKernel, coarsenBrick: coarsenBrickKernel, coarsenTop: coarsenTopKernel,
     pcgShiftDown: pcgShiftDownKernel, pcgShiftUp: pcgShiftUpKernel, pcgGuess: pcgGuessKernel, pcgUpdate: pcgUpdateKernel,
     mgDown0: mgDown0Kernel, mgDown1: mgDown1Kernel, mgDown3: mgDown3Kernel, mgRestrict3: mgRestrict3Kernel, pcgCheck: pcgCheckKernel,
     coarseSolve: coarseSolveKernel, mgUp3: mgUp3Kernel, mgUp2: mgUp2Kernel, mgUp1: mgUp1Kernel, pcgPrecond: pcgPrecondKernel,

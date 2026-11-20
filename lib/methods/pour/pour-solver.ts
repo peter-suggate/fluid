@@ -53,6 +53,8 @@ const SUBMIT_PREFIX = 4;
 export class PourSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
+  private readonly uTextures: GPUTexture[];
+  private readonly uSampler: GPUSampler;
   readonly surfaceFieldTexture: GPUTexture;
   readonly framePending = false;
   private readonly buffers: Record<string, GPUBuffer> = {};
@@ -98,8 +100,12 @@ export class PourSolver implements GPUSolverInstance {
     this.readback = device.createBuffer({ label: "pour.readback", size: BRICKS * 4 + C.WORDS * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const tex = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC;
     this.volumeTexture = device.createTexture({ label: "pour.fill", size: [NX, NY, NZ], dimension: "3d", format: "r32float", usage: tex });
+    this.uTextures = [[NX + 2, NY, NZ], [NX, NY + 2, NZ], [NX, NY, NZ + 2]].map((size, a) =>
+      device.createTexture({ label: `pour.u${a}`, size, dimension: "2d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING }));
+    this.uSampler = device.createSampler({ label: "pour.uSampler", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.surfaceFieldTexture = device.createTexture({ label: "pour.surface", size: [NX + 1, NY + 1, NZ + 1], dimension: "3d", format: "r32float", usage: tex });
-    const allocatedBytes = Object.values(this.buffers).reduce((s, b) => s + b.size, 0) + 4 * (NX * NY * NZ + (NX + 1) * (NY + 1) * (NZ + 1));
+    const allocatedBytes = Object.values(this.buffers).reduce((s, b) => s + b.size, 0) + 4 * (NX * NY * NZ + (NX + 1) * (NY + 1) * (NZ + 1))
+      + 4 * ((NX + 2) * NY * NZ + NX * (NY + 2) * NZ + NX * NY * (NZ + 2));
     this.info = {
       nx: NX, ny: NY, nz: NZ, storedNy: NY, cellCount: CELLS, equivalentUniformCells: CELLS, compressionRatio: 1,
       regularLayers: 0, maximumNeighborDelta: 0, gridKind: "uniform", cellSize_m: CELL_M, pressureIterations: MAX_CYCLES,
@@ -162,6 +168,8 @@ export class PourSolver implements GPUSolverInstance {
         }
         return { binding, resource: { buffer: u } };
       }
+      if (spec.kind === "layers" || spec.kind === "layersW") return { binding, resource: this.uTextures[Number(spec.name[2])]!.createView({ dimension: "2d-array" }) };
+      if (spec.kind === "sampler") return { binding, resource: this.uSampler };
       if (spec.kind === "volume") return { binding, resource: (spec.name === "surf" ? this.surfaceFieldTexture : this.volumeTexture).createView() };
       const buffer = this.buffers[spec.name];
       if (!buffer) throw new Error(`pour: no buffer ${spec.name}`);
@@ -204,6 +212,7 @@ export class PourSolver implements GPUSolverInstance {
       const list: Dispatch[] = [
         d(K.classify, p, { direct: [Math.ceil(BRICKS / 64)] }),
         d(K.clear, undefined, { indirect: W(C.ARG_CLEAR) }),
+        d(K.publishU, [1, 0, 0, 0], { indirect: W(C.ARG_CLEAR) }, "pour.publishU.clear"),
         d(K.advectPhi, undefined, { indirect: W(C.ARG_SURF) }),
         d(K.count, p, { direct: [capGroups] }),
         d(K.seed, p, { indirect: W(C.ARG_PART) }),
@@ -251,6 +260,7 @@ export class PourSolver implements GPUSolverInstance {
         d(K.project, undefined, { indirect: W(C.ARG_ACTB) }),
         d(K.extend, [0, 6 * N, 0, 3], { indirect: W(C.ARG_SURF) }, "pour.extend.1"),
         d(K.extend, [6 * N, 0, 3, 0], { indirect: W(C.ARG_SURF) }, "pour.extend.2"),
+        d(K.publishU, [0, 0, 0, 0], { indirect: W(C.ARG_ACTIVE) }),
         d(K.g2p, p, { direct: [capGroups] }),
       );
       this.steps[parity] = list;

@@ -325,7 +325,7 @@ fn ${name}Cubic(p: vec3f) -> f32 {
 `;
 }
 
-export type BindingKind = "rw" | "ro" | "uniform" | "volume";
+export type BindingKind = "rw" | "ro" | "uniform" | "volume" | "layers" | "layersW" | "sampler";
 export interface BindingSpec { readonly name: string; readonly kind: BindingKind; readonly type?: string }
 
 /** WGSL declarations for a binding list (group 0, binding = index). */
@@ -336,6 +336,9 @@ export function declare(bindings: readonly BindingSpec[]): string {
       case "ro": return `@group(0) @binding(${i}) var<storage, read> ${b.name}: ${b.type};`;
       case "uniform": return `@group(0) @binding(${i}) var<uniform> ${b.name}: ${b.type};`;
       case "volume": return `@group(0) @binding(${i}) var ${b.name}: texture_storage_3d<r32float, write>;`;
+      case "layers": return `@group(0) @binding(${i}) var ${b.name}: texture_2d_array<f32>;`;
+      case "layersW": return `@group(0) @binding(${i}) var ${b.name}: texture_storage_2d_array<r32float, write>;`;
+      case "sampler": return `@group(0) @binding(${i}) var ${b.name}: sampler;`;
     }
   }).join("\n");
 }
@@ -348,6 +351,9 @@ export function bindGroupLayoutEntries(bindings: readonly BindingSpec[]): GPUBin
       case "ro": return { ...base, buffer: { type: "read-only-storage" } };
       case "uniform": return { ...base, buffer: { type: "uniform" } };
       case "volume": return { ...base, storageTexture: { access: "write-only", format: "r32float", viewDimension: "3d" } };
+      case "layers": return { ...base, texture: { sampleType: "unfilterable-float", viewDimension: "2d-array" } };
+      case "layersW": return { ...base, storageTexture: { access: "write-only", format: "r32float", viewDimension: "2d-array" } };
+      case "sampler": return { ...base, sampler: { type: "non-filtering" } };
     }
   });
 }
