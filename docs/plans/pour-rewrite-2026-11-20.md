@@ -25,7 +25,7 @@ A faster but divergent solver is not done; nor is a matching but slower one.
 | P0 harness (`tools/pour-bench.ts`) and brick reference runs (two, for the spread) | done 2026-11-20: `artifacts/pour-rewrite/runs/brick-ref-{a,b}` (625 steps, every 25) |
 | P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-21: run `pour-p1-seed` passes 17 of 19. Fails G1 @100 (drift −6.25% against a limit of 6.15) and G2 pool @325 (66.2 against 69.6, tolerance 2.3; the bore is 0.7% low and its surface flatter just after the inflow stops). Ported since `pour-p1-vc2`: the mass rules (retire, merge, split); the buried vertex hold and smoothing guard (wall interiors are air); the seed's first move taking the grid's velocity (nbSeedFirst: plug seeds had kept the stale zero, the stream's first liquid fell off the nozzle's lip, landed short of the far wall and ran up it, and the film spilt over the rim: outside 17165 at 625, now 3163); the extension closing every face not between two open cells. MAX_CYCLES 16. Median 21.2 ms |
 | P2 at most 16.7 ms median, gates held | **met 2026-11-21** (HEAD 33569b6a). Timing slot, fenced (`pour-p2j-timing`): median 14.09 ms, p95 15.99, worst 25-step window 16.11 (301–325), worst single step 16.87; pipelined (`pour-p2j-timing-pipe`) 12.65 ms a step. Check slot (`pour-p2j`): median 13.91, worst window 16.18; gates 18 of 19 (G2 pool @325 fails as in P1; G1 @100 drift sits on its tolerance edge, passing or failing by run-to-run noise). Landed: P2a weighted coarse corrections (10 cycles a step to 6); P2b one red-black sweep a fine smoothing pass; P2c the brick engine's support rule in P2G and G2P; P2d the active set as the liquid's reach (median 18.1 to 16.2); P2e velocityTrace's face-centre sample from 9 loads; P2f coarseSolve as 512 threads (0.865 to 0.22 ms); P2g the velocity samplers gather from U textures (velocityTrace 2.26 to 0.80, advectPhi 1.51 to 0.60, G2P 1.08 to 0.73); P2h the step in five submits (Dawn translates at submit: worst window 18.2 to 16.6); P2i the extension in one 12 KB tile, skipping bricks it cannot change (1.29 to 0.88); P2j plain reads for single-owner accumulators, fill's whole-cell answers (velocity 1.19 to 1.04). See §5.1 |
-| P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | **table done 2026-11-21** (§5.2); the direct transfers measured there gain at most 0.13 ms each on brick; the brick tuning needs counter attribution next (§5.2) |
+| P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | **table and attribution done 2026-11-21** (§5.2, §5.3): the direct transfers gain at most 0.13 ms each; brick's heavy kernels are register-bound (caps 384–832, occupancy 10–24% against pour's 30–57%), elasticity about 0.6 |
 
 ## 1. The scene (lib/core/nbflip-paper-scenes.ts, createNbflipPour)
 
@@ -252,6 +252,62 @@ profiler (`tools/profile-mini-dam-xctrace.ts --counters`) pointed at the pour sc
 between a common cause (register pressure capping occupancy, divergence) and per-path costs. For
 per-path costs the remedy is lean variants for bricks the general paths cannot touch, exact by
 construction.
+
+### 5.3 P3: counter attribution, brick against pour-m1max (2026-11-21)
+
+Instruments' Metal GPU Counters were attached for 2 s inside a kernel-timer window, a pass a dispatch, so
+each Metal encoder is one kernel. Register caps come from compiling each kernel's Dawn MSL through Metal with
+the size attribute stripped (`maxTotalThreadsPerThreadgroup`: under 1024 means register-bound). The probes are in
+`~/code/me/fluid-scratch/brick-tune/`:
+
+- `counters.mts` and `ctrtab.py`: the counter capture and its table;
+- `splitmsl.py`, `psoinfo.swift` and `regcap.sh`: the register caps, plus an offline loop that takes an edited
+  WGSL file to its cap in seconds.
+
+**The common cause is registers.** Brick's heavy kernels are register-bound. Their occupancy matches the cap
+almost exactly (resident threads a core of 3072):
+
+| kernel | ms | workgroup | register cap | occupancy % | pour counterpart: occupancy % |
+|---|---|---|---|---|---|
+| uExtend | 4.45 | 512 | 640 | 20.1 | extend 56 |
+| nbOperator | 4.25 | 512 | **384** (spills at 512) | 15.6 | operator 49 |
+| uTransfer | 3.64 | 256 | 576 | 15.6 | |
+| uAdvect | 3.64 | 256 | 704 | 20.1 | velocity 34 |
+| pSeed | 3.28 | 256 | 576 | 16.0 | seed 24 |
+| project | 3.00 | 256 | 448 | 13.9 | project 56 |
+| pMove | 2.74 | 128 | 576 | 18.4 | g2p 28 |
+| censusFine | 2.44 | 64 | 640 | 19.6 | |
+| lDistance | 2.20 | 256 | 832 | 24.1 | redistSweep 57 |
+| lcAdvect / lAdvect | 1.34 / 0.97 | 64 / 256 | 448 / 384 | 9.9 / 11.3 | advectPhi 31 |
+
+These 13 kernels (cap under 1024) take about 37 ms a step. Brick kernels at cap 1024 (lResolve, lNear, the
+pmg* cycle) reach 30–50%, as pour's do. In every one, ALU sits at 1.2–1.7 times occupancy, as pour's does. So
+brick's 4–5x per element is about 2x from residency and about 2x from instructions: the general paths (owners,
+tiers, cuts, seams, walls) execute on every element.
+
+**What the caps respond to.** Robustness lengths are not the cause: fixed-size storage arrays leave nbOperator
+at 384. The peaks are the general paths:
+
+- nbOperator: the cold start (poStart's 4h prolongation and carry) sets the peak, 384 against 512 without it;
+  the six-face band loop is next (640 without both).
+- uExtend: the seed, its coarse face interpolation foUFaceU, sets the peak (640 against 768 without it; the
+  whole seed costs 832).
+
+A branch does not lower a kernel's allocation, so the remedy is fission.
+
+**Elasticity, measured.** A warm-only operator (inexact, for timing only) took nbOperator from 4.25 to 3.53 ms
+(cap 384 to 512). The exact fission came next: tileRoots marks the cells that may be cold rows, a new
+operatorStart writes their starts into B, and nbOperator reads them. It passes the live-against-F_ALL test
+bit for bit, and nbOperator falls to 3.29 ms. But operatorStart costs 0.72 ms, so the net is only about -0.2 ms.
+
+On the pour, cold rows are a common path, not a rare one: the moving surface leaves new wet cells in most
+surface bricks every step. The precursor must also stage the full window: poStageLight's unstaged
+reads differ from poStage's at some vertex, and rowsF reads the staged values. The change was not landed (patch
+`operator-start-split.patch`).
+
+Occupancy elasticity is about 0.6: +33% resident threads gave -17% to -23%. A register diet across the 13
+kernels is therefore worth perhaps 4–6 ms of 69, kernel by kernel, each an exact fission, and only where the
+split-off path is rare in every scene. The other 2x, instructions a cell, is the generality itself.
 
 ## 6. Process
 
