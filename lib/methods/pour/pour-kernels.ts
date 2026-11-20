@@ -1057,13 +1057,37 @@ fn eik(a0: f32, b0: f32, c0: f32) -> f32 {
 }
 `);
 
+/** The brick engine's support rules (fluid-grid fgLiquidCell, particles-kernels pSupported, velocity-kernels
+ *  pDeposit): a liquid cell is open with its centre phi (the mean of its 8 vertices) under -0.001 of a cell; a
+ *  record is supported when one of the 8 cells about floor(x - 0.5) of trilinear weight over 1e-6 is liquid. P2G and
+ *  G2P read the same level set (this step's, after redistance), so they agree on every record. */
+const SUPPORT_WGSL = /* wgsl */ `
+fn liquidCell(c: vec3i) -> bool {
+  if (!cellOpen(c)) { return false; }
+  var sum = 0.0;
+  for (var k = 0u; k < 8u; k++) { sum += phis[PHI_OFF + cidx(clampV(c + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u))))]; }
+  return 0.125 * sum < -0.001;
+}
+fn gridSupported(x: vec3f) -> bool {
+  let g = x - vec3f(0.5); let b = vec3i(floor(g)); let f = g - vec3f(b);
+  for (var k = 0u; k < 8u; k++) {
+    let bit = vec3u(k & 1u, (k >> 1u) & 1u, k >> 2u);
+    let w = select(vec3f(1.0) - f, f, bit != vec3u(0u));
+    if (w.x * w.y * w.z > 1e-6 && liquidCell(b + vec3i(bit))) { return true; }
+  }
+  return false;
+}
+`;
 // ---------------------------------------------------------------------------
 // 11. P2G (Ferstl 2016 §3.1): quadratic B-spline splat of the sorted band
 //     particles of one brick into workgroup fixed-point accumulators, then one
 //     global atomic per touched face. cfg.a = parity (sorted pool = dst).
 // ---------------------------------------------------------------------------
-export const p2gKernel = kernel("pour.p2g", [bricksRO, partsRO, accRW, cfgU], /* wgsl */ `
+export const p2gKernel = kernel("pour.p2g", [bricksRO, partsRO, accRW, cfgU, phisRO], /* wgsl */ `
+${SUPPORT_WGSL}
 var<workgroup> sMom: array<atomic<i32>, 3300>;
+// The liquid cells o - 1 .. o + 8 about the brick (pdLiquidAt's window), a bit each.
+var<workgroup> sLiq: array<atomic<u32>, 32>;
 var<workgroup> sW: array<atomic<i32>, 3300>;
 fn regionDims(a: u32) -> vec3i { return vec3i(10) + unitAxis(a); }
 fn regionIndex(a: u32, q: vec3i) -> u32 {
@@ -1077,6 +1101,11 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
   let start = bricks[B_PSTART + b];
   let o = brickCoord(b) * 8;
   for (var t = l; t < 3300u; t += 256u) { atomicStore(&sMom[t], 0); atomicStore(&sW[t], 0); }
+  if (l < 32u) { atomicStore(&sLiq[l], 0u); }
+  workgroupBarrier();
+  for (var j = l; j < 1000u; j += 256u) {
+    if (liquidCell(o - vec3i(1) + vec3i(i32(j % 10u), i32((j / 10u) % 10u), i32(j / 100u)))) { atomicOr(&sLiq[j >> 5u], 1u << (j & 31u)); }
+  }
   workgroupBarrier();
   let base = (1u - cfg.a) * CAP * 2u;
   // Lane l of SIMD group l / 32 takes every eighth particle: lanes of one group sit in different cells, so
@@ -1084,6 +1113,19 @@ fn bspline(f: f32) -> vec3f { return vec3f(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (
   let tl = (l & 31u) * 8u + (l >> 5u);
   for (var k = start + tl; k < start + num; k += 256u) {
     let rp = parts[base + k]; let xp = rp.xyz; let vp = parts[base + CAP + k].xyz; let mp = rp.w;
+    // pDeposit: only supported records deposit (an unsupported one is ballistic at G2P and sees no grid).
+    var held = false;
+    let g = xp - vec3f(0.5); let bq = vec3i(floor(g)); let fq = g - vec3f(bq);
+    for (var kk = 0u; kk < 8u; kk++) {
+      let bit = vec3u(kk & 1u, (kk >> 1u) & 1u, kk >> 2u);
+      let wq = select(vec3f(1.0) - fq, fq, bit != vec3u(0u));
+      let r = bq + vec3i(bit) - o + vec3i(1);
+      if (wq.x * wq.y * wq.z > 1e-6 && all(r >= vec3i(0)) && all(r < vec3i(10))) {
+        let ri = u32(r.x + 10 * (r.y + 10 * r.z));
+        held = held || ((atomicLoad(&sLiq[ri >> 5u]) >> (ri & 31u)) & 1u) != 0u;
+      }
+    }
+    if (!held) { continue; }
     for (var a = 0u; a < 3u; a++) {
       let q = xp - vec3f(0.5) + 0.5 * vec3f(unitAxis(a));
       let bi = vec3i(floor(q - vec3f(0.5)));
@@ -2721,6 +2763,7 @@ const g2pKernel = (n: PourInflow) => kernel("pour.g2p", [ctrlRW, bricksRW, parts
 const IN_STEPS: u32 = ${n.steps}u;
 const IN_FLOW: f32 = ${n.flow};
 ${velocitySampler("velU", "vel", "U_OFF")}
+${SUPPORT_WGSL}
 // The FLIP delta of face (a, c), U - US less this step's gravity (US carries it), where the projection set the
 // face; elsewhere (extended, solid-interior or far-air faces, whose US is no velocity of the field) only the body
 // force. Taking U - US there read an extended U against a zero US: a particle a quarter cell from the glass's
@@ -2831,12 +2874,7 @@ fn markBrick(x: vec3f, v: vec3f) {
   // Bridson 2015 §7.6.2; the reference's "ballistic" samples); the extended
   // grid velocity there is no force, and following it left splash particles
   // hovering against the walls.
-  let bv = vec3i(floor(x - vec3f(0.5)));
-  var supported = false;
-  for (var k = 0u; k < 8u; k++) {
-    let c = bv + vec3i(i32(k & 1u), i32((k >> 1u) & 1u), i32(k >> 2u));
-    if (cellOpen(c) && phis[PHIC_OFF + cidx(c)] < 0.0) { supported = true; }
-  }
+  let supported = gridSupported(x);
   if (supported) {
     let un = velU(x);
     v = select(FLIP * (v + flipDelta(x)) + (1.0 - FLIP) * un, un, first);
@@ -2850,8 +2888,11 @@ fn markBrick(x: vec3f, v: vec3f) {
   }
   // The separation shift, walked as a move (it never crosses the glass, but a shift into it would be pushed out
   // along the shortest axis).
-  var vs = v;
-  x = moveEnd(x, x + parts[sb + i].xyz, &vs);
+  // Not for a ballistic record (the brick engine's pSurfaceShift is inside its !ballistic branch).
+  if (supported) {
+    var vs = v;
+    x = moveEnd(x, x + parts[sb + i].xyz, &vs);
+  }
   // The split (nbFinish): the endpoint cell's pre-move run against its seed target.
   if (m > 1.0 && supported) {
     let ec = vec3i(floor(x));
