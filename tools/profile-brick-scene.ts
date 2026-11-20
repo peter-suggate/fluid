@@ -32,6 +32,8 @@ const args = process.argv.slice(2), opt = (k: string) => args.find(a => a.starts
 const id = opt("scene"), steps = Number(opt("steps") ?? 60);
 if (!id) throw new Error("--scene=<catalog id> is required");
 const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD), definition = getSceneDefinition(id), scene = sceneDocument(definition);
+// --band=N: a probe of the particle band's depth (scene.fluid.brickTiers.particleBandDepth), not a scene change.
+if (opt("band") !== undefined && scene.fluid) scene.fluid.brickTiers = { ...scene.fluid.brickTiers, particleBandDepth: Number(opt("band")) };
 const profile = definition.methodProfile, quality = profile?.methodId === METHOD ? profile.quality : "balanced";
 const values = resolveMethodValues(method, quality, { ...method.appDefaults, ...(profile?.methodId === METHOD ? profile.overrides : {}), engine: "brick" });
 // A probe may run a scene the brick does not yet list (the still tank): the list is the app's enable switch.
@@ -70,9 +72,18 @@ try {
   };
   const v0 = presented ? await volume() : NaN; if (presented) out.V0 = Math.round(v0);
   const ms: number[] = [], all: [number, number][] = [], curve: number[] = [], trace: number[][] = [];
-  const profSteps = Number(opt("profSteps") ?? 2), profAt = Number(opt("profAt") ?? Math.max(1, steps - profSteps + 1));
+  const profSteps = Number(opt("profSteps") ?? 2), profAts = (opt("profAt") ?? String(Math.max(1, steps - profSteps + 1))).split(",").map(Number), profAt = profAts[profAts.length - 1]!;
   let timedSteps = 0;
+  // Earlier --profAt windows (a list): each window's per-kernel profile and the set's counts at its first step.
+  const windows: Record<string, unknown>[] = [];
   for (let k = 1; k <= steps; k++) {
+    const early = profAts.slice(0, -1).find(w => k === w + profSteps);
+    if (early !== undefined) {
+      timer.enabled = false; const pr = await timer.collect(), h = await e.read("set", 0, 256), ag = new Map<string, number>();
+      for (const [l, v] of pr.byLabel) { const kk = l.replace(/step\d+\./, ""); ag.set(kk, (ag.get(kk) ?? 0) + v); }
+      windows.push({ at: early, liveF: h[H.LIVE_F], fLiq: h[H.LIST_COUNT + 1], particles: h[H.PCOUNT0], total: +([...pr.byLabel.values()].reduce((a, b) => a + b, 0) / profSteps).toFixed(2), prof: [...ag].sort((x, y) => y[1] - x[1]).map(([l, v]) => [l, +(v / profSteps).toFixed(3)]) });
+    }
+    if (profAts.slice(0, -1).some(w => k >= w && k < w + profSteps)) { timer.enabled = true; solver.advanceTo(k * dt + 1e-12, []); await e.fence(); await solver.assertSimulationHealthy(); continue; }
     timer.enabled = k >= profAt && k < profAt + profSteps; if (timer.enabled) timedSteps++;
     const a = performance.now();
     if (!solver.advanceTo(k * dt + 1e-12, [])) { out.refused = k; break; }
@@ -93,6 +104,8 @@ try {
   for (const [l, v] of prof.byLabel) { const k = l.replace(/step\d+\./, ""); agg.set(k, (agg.get(k) ?? 0) + v); }
   out.prof = [...agg].sort((x, y) => y[1] - x[1]).slice(0, Number(opt("top") ?? 40)).map(([l, v]) => [l, +(v / Math.max(1, timedSteps)).toFixed(3)]);
   out.profTotal = +([...prof.byLabel.values()].reduce((a, b) => a + b, 0) / Math.max(1, timedSteps)).toFixed(2);
+  const h0 = await e.read("set", 0, 256);
+  if (windows.length) out.windows = [...windows, { at: profAt, liveF: h0[H.LIVE_F], fLiq: h0[H.LIST_COUNT + 1], particles: h0[H.PCOUNT0], total: out.profTotal, prof: out.prof }];
   out.trace = trace; out.traceColumns = "k LIVE_F LIVE_C C_ALL C_ACT";
   const h = await e.read("set", 0, 256);
   Object.assign(out, { fail: h[H.FAIL], highF: h[H.HIGH_F], highC: h[H.HIGH_C], peakF: h[H.PEAK_F], peakC: h[H.PEAK_C], peakP: h[H.PEAK_PARTICLES] });
