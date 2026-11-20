@@ -163,6 +163,9 @@ const THETA_MIN: f32 = ${f(THETA_MIN)};
 const FLIP: f32 = ${f(FLIP_RATIO)};
 const MAXSEG: f32 = ${f(MAX_SEGMENTS)};
 const CLASS_DEAD: u32 = 1u; const CLASS_DEEP: u32 = 2u; const CLASS_BULK: u32 = 16u;
+/** B_FLAGS: bit 0 the brick is active (classify rewrites the word each step). Set by project: FLAG_KNOWN, every open
+ *  face projected; FLAG_ANY0, some face known. Set by the first extension pass: FLAG_ANY1, some face known after it. */
+const FLAG_KNOWN: u32 = 2u; const FLAG_ANY0: u32 = 4u; const FLAG_ANY1: u32 = 8u;
 const NBULK: u32 = ${NBULK}u; const BULK_WG: u32 = ${BULK_WG}u;
 const B_LBULK: u32 = ${B.LIST_BULK * BRICKS}u; const B_LSHADOW: u32 = ${B.LIST_SHADOW * BRICKS}u;
 const NCL: u32 = ${COARSE_LATTICE}u; const BU_OFF: u32 = 0u; const BUS_OFF: u32 = ${3 * COARSE_LATTICE}u;

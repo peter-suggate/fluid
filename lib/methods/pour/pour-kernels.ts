@@ -2695,9 +2695,13 @@ ${bulkWGSL(false)}
 // 16. Projection: U = Us - grad P on liquid faces (ghost-fluid gradient at
 //     liquid/air faces); other faces become unknown (zero) for extension.
 // ---------------------------------------------------------------------------
-const projectKernel = (n: PourInflow) => kernel("pour.project", [bricksRO, phisRO, velRW, presRO, bitsRW, bulkRW], /* wgsl */ `
-${bulkWGSL(false)}
-${inflowWGSL(n, false)}
+const projectKernel = (n: PourInflow) => kernel("pour.project", [bricksRW, phisRO, velRW, presRO, bitsRW, bulkRW], /* wgsl */ `
+${bulkWGSL(true)}
+${inflowWGSL(n, true)}
+// Set when one of the brick's open faces is left unknown (the extension's work).
+var<workgroup> sUnknown: atomic<u32>;
+// Set when one of its faces is known (projected, or the nozzle's).
+var<workgroup> sAnyKnown: atomic<u32>;
 /** Pressure of fine cell f for an interface face: its own when liquid, the atmosphere's (0) in air. */
 fn pFine(f: vec3i) -> f32 { let fi = cidx(f); return select(0.0, pres[fi], phis[PHIC_OFF + fi] < 0.0); }
 /** BULK coarse cell j: its coarse low faces (between two BULK cells, over 4 cells) and the fine interface faces stored in it (over 2.5). */
@@ -2727,7 +2731,7 @@ fn bulkProject(j: u32) {
     if (j < NBULK * 8u) { bulkProject(j); }
     return;
   }
-  let b = bricks[B_LACT + wg.x - BULK_WG];
+  let b = atomicLoad(&bricks[B_LACT + wg.x - BULK_WG]);
   let c = brickCoord(b) * 8 + localCoord(l);
   let i = (b << 9u) | l;
   let po = 0u;
@@ -2762,10 +2766,18 @@ fn bulkProject(j: u32) {
       if (inVelocityCell(q)) { u = inProjected(q, a, u); known |= 1u << a; }
     }
     vel[U_OFF + a * N + i] = u;
+    if (faceOpen(c, a) && ((known >> a) & 1u) == 0u) { atomicOr(&sUnknown, 1u); }
   }
+  if (known != 0u) { atomicOr(&sAnyKnown, 1u); }
   // Bits 6..8 keep the projection's own known faces past the extension (which rewrites 0..5): G2P's FLIP
   // delta is taken only where this step projected a value.
   bits[KNOWN_OFF + i] = known | (known << 6u);
+  // FLAG_KNOWN: every open face of the brick projected. The extension leaves such a brick as it is (relax keeps
+  // known values; closed faces stay zero), so it skips the brick and reads it as a DEEP neighbour, from U.
+  workgroupBarrier();
+  if (l == 0u) {
+    atomicOr(&bricks[B_FLAGS + b], select(0u, FLAG_KNOWN, atomicLoad(&sUnknown) == 0u) | select(0u, FLAG_ANY0, atomicLoad(&sAnyKnown) != 0u));
+  }
 }
 `);
 
@@ -2776,14 +2788,14 @@ fn bulkProject(j: u32) {
 //     cfg.a = in velocity offset, cfg.b = out offset, cfg.c = in known shift,
 //     cfg.d = out known shift. DEEP neighbours (never extended) are read from U.
 // ---------------------------------------------------------------------------
-export const extendKernel = kernel("pour.extend", [bricksRO, velRW, bitsRW, cfgU], /* wgsl */ `
-// The three components' tiles side by side (3 x 1000), ping-pong A/B, one barrier a sweep for all
-// three. A face's state rides in its value: UNK (not yet known) and SHUT (closed, never a source)
-// are sentinels no velocity takes; any other value is known.
+export const extendKernel = kernel("pour.extend", [bricksRW, velRW, bitsRW, cfgU], /* wgsl */ `
+// The three components' tiles side by side (3 x 1000) in one array, Jacobi with the new values in registers:
+// 12 KB of workgroup memory, against 24 KB as A/B ping-pong tiles (1.14 to 0.88 ms a step, steps 301-325).
+// A face's state rides in its value: UNK (not yet known) and SHUT (closed, never a source) are sentinels
+// no velocity takes; any other value is known.
 const UNK: f32 = -3.0e38;
 const SHUT: f32 = 3.0e38;
 var<workgroup> vA: array<f32, 3000>;
-var<workgroup> vB: array<f32, 3000>;
 var<workgroup> sKnown: atomic<u32>;
 var<workgroup> sKnownU: u32;
 fn isKnown(v: f32) -> bool { return v > UNK && v < SHUT; }
@@ -2795,8 +2807,29 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
   for (var q = 0u; q < 6u; q++) { let w = (*src)[nb[q]]; if (isKnown(w)) { sum += w; n += 1.0; } }
   return select(UNK, sum / max(n, 1.0), n > 0.0);
 }
+var<workgroup> sSkip: u32;
+var<workgroup> sSource: atomic<u32>;
+var<workgroup> sOut: atomic<u32>;
 @compute @workgroup_size(512) fn main(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_index) l: u32) {
-  let b = bricks[B_LSURF + wg.x];
+  let b = atomicLoad(&bricks[B_LSURF + wg.x]);
+  let first = cfg.d != 0u;
+  // A pass changes nothing in a brick whose tile holds no known face: its outputs would be zero with their known
+  // bits clear, as they are (projection zeroed U off its known faces and cleared bits 3..5). Its tile lies in its
+  // 3^3 bricks: known faces there are FLAG_ANY0 (projected) or, in the second pass, FLAG_ANY1 (the first pass's
+  // output); a FLAG_KNOWN or DEEP brick is read from U, whole. Nor does a pass change a FLAG_KNOWN brick.
+  if (l < 27u) {
+    let n = brickCoord(b) + vec3i(i32(l % 3u) - 1, i32((l / 3u) % 3u) - 1, i32(l / 9u) - 1);
+    if (brickInBox(n)) {
+      let nb = brickIdOf(n);
+      let f = atomicLoad(&bricks[B_FLAGS + nb]);
+      if ((f & (select(FLAG_ANY1, FLAG_ANY0, first) | FLAG_KNOWN)) != 0u || (atomicLoad(&bricks[B_CLASS + nb]) & CLASS_DEEP) != 0u) {
+        atomicOr(&sSource, 1u);
+      }
+    }
+  }
+  workgroupBarrier();
+  if (l == 0u) { sSkip = select(0u, 1u, (atomicLoad(&bricks[B_FLAGS + b]) & FLAG_KNOWN) != 0u || atomicLoad(&sSource) == 0u); }
+  if (workgroupUniformLoad(&sSkip) != 0u) { return; }
   let o = brickCoord(b) * 8;
   let lc = localCoord(l);
   let i = (b << 9u) | l;
@@ -2810,7 +2843,8 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
     let inside = inBox(q);
     if (inside) {
       qi = cidx(q);
-      deep = (bricks[B_CLASS + brickOfCell(q)] & CLASS_DEEP) != 0u;
+      let qb = brickOfCell(q);
+      deep = (atomicLoad(&bricks[B_CLASS + qb]) & CLASS_DEEP) != 0u || (atomicLoad(&bricks[B_FLAGS + qb]) & FLAG_KNOWN) != 0u;
       info = bits[KNOWN_OFF + qi];
     }
     for (var a = 0u; a < 3u; a++) {
@@ -2824,10 +2858,9 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
         anyKnown = anyKnown || k == 1u;
         anyUnknown = anyUnknown || k == 0u;
       }
-      // Both ping-pong tiles take the load: the sweeps write only the brick's own faces, so the halo each
-      // reads must hold the neighbours' values (a zero-initialised halo in B read as known zeros, and every
-      // second sweep pulled the extension back toward rest: it reached two cells ahead of a falling front).
-      vA[a * 1000u + t] = v; vB[a * 1000u + t] = v;
+      // The halo must hold the neighbours' values: the sweeps write only the brick's own faces (a zero-initialised
+      // halo read as known zeros pulled the extension back toward rest: it reached two cells ahead of a falling front).
+      vA[a * 1000u + t] = v;
     }
   }
   if (anyKnown) { atomicOr(&sKnown, 1u); }
@@ -2837,10 +2870,11 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
   // Without a known face in the tile, or without an unknown one (relax keeps every known or
   // closed value), the sweeps change nothing.
   let sweeps = select(0u, 8u, workgroupUniformLoad(&sKnownU) == 3u);
-  for (var s = 0u; s < sweeps; s += 2u) {
-    for (var a = 0u; a < 3u; a++) { vB[a * 1000u + ti] = relax(&vA, a * 1000u + ti); }
+  // Jacobi sweeps in one tile: each thread's three new values wait in registers for the barrier.
+  for (var s = 0u; s < sweeps; s++) {
+    let n0 = relax(&vA, ti); let n1 = relax(&vA, 1000u + ti); let n2 = relax(&vA, 2000u + ti);
     workgroupBarrier();
-    for (var a = 0u; a < 3u; a++) { vA[a * 1000u + ti] = relax(&vB, a * 1000u + ti); }
+    vA[ti] = n0; vA[1000u + ti] = n1; vA[2000u + ti] = n2;
     workgroupBarrier();
   }
   var outBits = 0u;
@@ -2852,6 +2886,9 @@ fn relax(src: ptr<workgroup, array<f32, 3000>>, k: u32) -> f32 {
   }
   let keep = bits[KNOWN_OFF + i] & ~(7u << cfg.d);
   bits[KNOWN_OFF + i] = keep | outBits;
+  if (first && outBits != 0u) { atomicOr(&sOut, 1u); }
+  workgroupBarrier();
+  if (first && l == 0u && atomicLoad(&sOut) != 0u) { atomicOr(&bricks[B_FLAGS + b], FLAG_ANY1); }
 }
 `);
 
