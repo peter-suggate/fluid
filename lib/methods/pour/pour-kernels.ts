@@ -1705,6 +1705,13 @@ var<workgroup> sInv: array<f32, ${COARSEST_CELLS * COARSEST_CELLS}>;
 //     Dots are float sums in 64 slots per set (compare-exchange), two sets by
 //     iteration parity; C_k saves rho_(k-1) and clears set k&1.
 // ---------------------------------------------------------------------------
+/** The coarse-correction weight of every prolongation in the V-cycle (over-correction: Braess 1995, Towards algebraic
+ *  multigrid for elliptic problems of second order; Vanek, Mandel & Brezina 1996 sec. 2). Piecewise-constant
+ *  aggregation makes each Galerkin coarse operator twice as stiff to smooth error as a rediscretised one (a 2x2x2
+ *  aggregate's stencil is (3, -1/2) against (3/2, -1/4)), so an unweighted correction falls short. The cycle stays
+ *  symmetric for any weight and positive definite below 2. Over steps 301-325 of the pour: 1.0 took 10 cycles a
+ *  step, 1.2 7.4, 1.3 6.7, 1.4 6.2, 1.5 6.4, 1.6 6.8, 1.7 7.6 (2026-11-21); the whole run at 1.4 at most 9. */
+const MG_OMEGA = "1.4";
 const PCG_WGSL = /* wgsl */ `
 const X_OFF: u32 = 0u; const R_OFF: u32 = N; const Z_OFF: u32 = 2u * N; const PP_OFF: u32 = 3u * N; const Q_OFF: u32 = 4u * N; const Z1_OFF: u32 = 5u * N;
 fn redSlot(rs: u32, which: u32) -> u32 { return C_RED + rs * 192u + which * 64u; }
@@ -1937,7 +1944,7 @@ ${bulkWGSL(false)}
     var v = 0.0;
     if (inBox(c) && !cellBulk(c)) {
       let ci = cidx(c);
-      if (op[DIAG_OFF + ci] > 0.0) { v = ${post ? "pres[Z_OFF + ci] + coarse[CE + lidx(1u, c / 2)]" : "pres[Z1_OFF + ci]"}; }
+      if (op[DIAG_OFF + ci] > 0.0) { v = ${post ? `pres[Z_OFF + ci] + ${MG_OMEGA} * coarse[CE + lidx(1u, c / 2)]` : "pres[Z1_OFF + ci]"}; }
     }
     tp[t] = v;
   }
@@ -2244,13 +2251,13 @@ var<workgroup> sConv: u32;
   }
   workgroupBarrier();
   // Up: prolong (piecewise constant) onto the pre-smoothed values, post-smooth black first.
-  if (has5) { sE[S5 + t] = select(0.0, ep5 + sE[sIdx(6u, c5 / 2)], o5.x > 0.0); }
+  if (has5) { sE[S5 + t] = select(0.0, ep5 + ${MG_OMEGA} * sE[sIdx(6u, c5 / 2)], o5.x > 0.0); }
   workgroupBarrier();
   for (var s = 0u; s < SW5; s++) {
     if (has5 && colourOf(c5) == 1u - (s & 1u) && o5.x > 0.0) { sE[S5 + t] = (b5 + offS(5u, c5, o5, m5)) / o5.x; }
     workgroupBarrier();
   }
-  sE[t] = select(0.0, ep4 + sE[sIdx(5u, c4 / 2)], o4.x > 0.0);
+  sE[t] = select(0.0, ep4 + ${MG_OMEGA} * sE[sIdx(5u, c4 / 2)], o4.x > 0.0);
   workgroupBarrier();
   for (var s = 0u; s < SW4; s++) {
     if (colourOf(c4) == 1u - (s & 1u) && o4.x > 0.0) { sE[t] = (b4 + offS(4u, c4, o4, m4)) / o4.x; }
@@ -2358,7 +2365,7 @@ ${L3_BLOCK_WGSL}
   for (var j = t; j < 512u; j += 64u) {
     let c = blockOrigin(wg.x, j / 64u, n) + bhalo3(j % 64u);
     var e = 0.0;
-    if (linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)] + coarse[CE + lidx(4u, c / 2)]; }
+    if (linBox(3u, c) && cop3(c).x > 0.0) { e = coarse[CEP + lidx(3u, c)] + ${MG_OMEGA} * coarse[CE + lidx(4u, c / 2)]; }
     tb3[j] = e;
   }
   workgroupBarrier();
@@ -2391,7 +2398,7 @@ var<workgroup> sN: u32;
     var e = 0.0;
     if (linBox(2u, c)) {
       let g = lidx(2u, c);
-      if (coarse[COP + 4u * g] > 0.0) { e = coarse[CEP + g] + coarse[CE + lidx(3u, c / 2)]; }
+      if (coarse[COP + 4u * g] > 0.0) { e = coarse[CEP + g] + ${MG_OMEGA} * coarse[CE + lidx(3u, c / 2)]; }
     }
     tb2[j] = e;
   }
@@ -2419,7 +2426,7 @@ ${blockWGSL(L)}
     var e = 0.0;
     if (linBox(${L}u, c)) {
       let g = lidx(${L}u, c);
-      if (coarse[COP + 4u * g] > 0.0) { e = coarse[CEP + g] + coarse[CE + lidx(${L + 1}u, c / 2)]; }
+      if (coarse[COP + 4u * g] > 0.0) { e = coarse[CEP + g] + ${MG_OMEGA} * coarse[CE + lidx(${L + 1}u, c / 2)]; }
     }
     tb${L}[j] = e;
   }
