@@ -68,7 +68,9 @@ log({ kind: "meta", name, method: methodId, methodKey, mode, slot, steps, every,
 paceDawnEventPolling();
 const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE ?? resolve("node_modules/webgpu/index.js")).href);
 Object.assign(globalThis, dawn.globals);
-const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal"]).requestAdapter();
+// FLUID_WEBGPU_DAWN_FEATURES (e.g. skip_validation) is a diagnostic: the gates and the timing gate run validated, as a browser does.
+const adapter = await createProcessRetainedDawnGPU(dawn, ["backend=metal",
+  ...(process.env.FLUID_WEBGPU_DAWN_FEATURES ? [`enable-dawn-features=${process.env.FLUID_WEBGPU_DAWN_FEATURES}`] : [])]).requestAdapter();
 assert.ok(adapter, "No WebGPU adapter");
 const raw = await adapter.requestDevice({ requiredFeatures: (["subgroups", "float32-filterable", ...(profWindow ? ["timestamp-query"] as const : [])] as const).filter(f => adapter.features.has(f)), requiredLimits: requiredFluidDeviceLimits(adapter.limits) });
 const memory = new GPUMemoryProfile(raw);

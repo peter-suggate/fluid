@@ -24,7 +24,7 @@ A faster but divergent solver is not done; nor is a matching but slower one.
 |---|---|
 | P0 harness (`tools/pour-bench.ts`) and brick reference runs (two, for the spread) | done 2026-11-20: `artifacts/pour-rewrite/runs/brick-ref-{a,b}` (625 steps, every 25) |
 | P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-21: run `pour-p1-seed` passes 17 of 19. Fails G1 @100 (drift −6.25% against a limit of 6.15) and G2 pool @325 (66.2 against 69.6, tolerance 2.3; the bore is 0.7% low and its surface flatter just after the inflow stops). Ported since `pour-p1-vc2`: the mass rules (retire, merge, split); the buried vertex hold and smoothing guard (wall interiors are air); the seed's first move taking the grid's velocity (nbSeedFirst: plug seeds had kept the stale zero, the stream's first liquid fell off the nozzle's lip, landed short of the far wall and ran up it, and the film spilt over the rim: outside 17165 at 625, now 3163); the extension closing every face not between two open cells. MAX_CYCLES 16. Median 21.2 ms |
-| P2 at most 16.7 ms median, gates held | open |
+| P2 at most 16.7 ms median, gates held | median met 2026-11-21; worst window open. Run `pour-p2e` (HEAD 6f246aec, check slot, fenced): median 15.81 ms, p95 19.04, worst 25-step window 19.19 (301–325; steps 126–350 all sit above 16.7). Gates unchanged at 17 of 19 (G1 @100 drift, G2 pool @325, as in P1). Landed: P2a weighted coarse corrections (10 cycles a step to 6); P2b one red-black sweep a fine smoothing pass; P2c the brick engine's support rule in P2G and G2P; P2d the active set as the liquid's reach (rule B, dead-trace filter, splat and operator confined to active bricks; median 18.1 to 16.2); P2e velocityTrace's face-centre sample from 9 loads (bit-identical, -0.17 ms); P2f coarseSolve as 512 threads with two level-4 cells each (0.865 to 0.22 ms a step: the 1024-thread layout cost about 12 µs a red-black sweep). See §5.1 for what was measured and ruled out |
 | P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | open |
 
 ## 1. The scene (lib/core/nbflip-paper-scenes.ts, createNbflipPour)
@@ -153,6 +153,45 @@ back to back. Pass: clean median ≤ 16.7 ms, the worst 25-step window median �
 (the brick engine's is steps 176–200 at 79 ms), and pipelined ≤ 16.7 ms. Stretch ≤ 12 ms.
 Report p95, per-stage kernel time (the stage table of §0 P3), construction time and
 memory.
+
+### 5.1 P2 findings (2026-11-21, worst window 276–325 unless noted)
+
+- **Kernel time** (kernel timer, steps 301–325, after P2f): velocityTrace 2.2 ms, advectPhi 1.6, extend 1.3,
+  velocity 1.2, g2p 1.1, p2g 1.1, redistSweep 1.0, separate 0.75, seed and splat 0.6 each. The pressure takes
+  6.6 ms in all: about 0.9 ms a cycle over about 7 cycles, and each fine pass is bandwidth-bound at about 0.1 ms
+  a cycle. Per cycle the residual falls 8 → 1 → 0.1 quickly. Cycles 3–7 then reduce it only 2–5 times each. The
+  late maxima lie along the inner glass wall (r ≈ 50, the floor corners) and under the impact (r ≈ 32); none
+  lies in the film outside the glass.
+- **The film outside the glass is about 2.3 ms of the worst window.** A diagnostic-only run that killed every
+  particle outside the glass (not landable: it deletes volume) took the 276–300 and 301–325 windows from 19.0 and
+  19.5 to 16.9 and 17.2. In the full run, V_outside is 1702 cells at step 325 and about 24% of the active
+  bricks lie outside the glass. Brick (tiered) holds about 1 cell there, because its outside is at 4h, which
+  cannot carry a sheet. Brick at all-h (`BrickNBFlipSolver` without tiers) spills too: V_outside 2.6 / 39 / 85
+  and 29 / 390 / 938 particles at steps 150 / 200 / 300, against pour's 21 / 172 / 1553 and
+  543 / 3001 / 10963 particles.
+  - **The growth is the same in both.** Particle counts outside grow about 20 times from step 150 to 300 in
+    each. The mechanism: band seeding of a spreading sub-cell sheet's uncovered cells adds more mass than the
+    sheet holds, and the union then keeps that mass.
+  - **Heat does not stop it.** Every brick particle outside the glass is at heat 2 (triggered), as is the
+    falling stream (heat 1–2, so theta = 1). Porting the activity heat would not dry the outside.
+  - **The spill differs:** pour spills about 10 times more. Pour's falling head follows free fall: its
+    level-set front reaches y ≈ 113 at step 30, as free fall does. Brick's lags by about 15 cells at step 30
+    and about 55 at step 46. Pour's floor sheet therefore reaches the far wall about 15 steps earlier and with
+    about 10 times the particles. Both methods throw corner jets up the wall at about twice the impact speed:
+    about 20 cells a step, against 9.4 at impact. Pour's climb reaches the rim in every sector by step 90.
+  - The spill is not a pour defect relative to the reference physics, so no verbatim port removes it.
+- **Ruled out or worse:**
+  - staging velocityTrace's halo (slower);
+  - a 4h composite for the deep pool (93k of 578k liquid cells are core-deep at step 300, and they are not
+    calm);
+  - AGGREGATION_OC (1.6 is best; 1.4 and 1.8 are worse);
+  - 8 block sweeps at the coarse levels (no fewer cycles);
+  - no level 4/5 sweeps (10.3 cycles, against 6.6);
+  - an extrapolated warm start, 2x_n − x_(n−1) (7–8 cycles, against 6–7);
+  - a 128- or 256-thread coarseSolve (0.72 and 0.32 ms, against 0.22 at 512);
+  - folding pcgCheck into pcgUpdate (WGSL has no cross-workgroup acquire/release).
+- **Dawn validation** of the indirect dispatches costs 0.4–1 ms a step (`FLUID_WEBGPU_DAWN_FEATURES=skip_validation`
+  in `tools/pour-bench.ts`). The gates and timing run validated, as a browser does.
 
 ## 6. Process
 
