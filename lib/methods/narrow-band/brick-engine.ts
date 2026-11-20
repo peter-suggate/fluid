@@ -504,10 +504,12 @@ export class BrickEngine {
     const tiles = options.staticMask && !options.staticsDeferred && brickEnv("NB_BRICK_STATIC_TILES") !== "0"
       ? brickStaticTiles(options.lattice, options.box ?? options.lattice, options.staticMask.words) : undefined;
     const staticTiles = tiles && tiles.closed > 0 ? tiles : undefined;
-    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic, ...(staticTiles ? { staticTiles: true } : {}) });
     // Deferred statics (an empty mask): the plain variant runs (no static stage, and no K slot work unless bodies take
     // slots), and the statics variant is compiled beside it for the first live edit (armStatics).
     const mask = brickStaticBinding(options), deferred = mask !== undefined && options.staticsDeferred === true;
+    // The wall view (BrickLayout.wallView): terrain or a procedural boundary, which a deferred (empty) mask has not.
+    const wallView = mask !== undefined && !deferred && (mask.walls.terrain !== undefined || mask.walls.boundary !== undefined);
+    const layout = new BrickLayout({ lattice: options.lattice, farPhi: options.farPhi, ...(options.box ? { box: options.box } : {}), ...(options.openTop ? { openTop: true } : {}), ...(options.openSides ? { openSides: true } : {}), ...options.capacities, apic: options.apic, ...(staticTiles ? { staticTiles: true } : {}), ...(wallView ? { wallView: true } : {}) });
     const kPlain = layout.cap.k > 0 && (!deferred || options.bodies !== undefined);
     const solverFor = (cuts?: false) => options.solver(layout, { ...(options.bodies ? { bodies: { frame_m: options.bodies.frame_m, h_m: options.bodies.h_m } } : {}), ...(cuts === false ? { cuts } : {}) });
     const solver = solverFor(kPlain || !deferred ? undefined : false);

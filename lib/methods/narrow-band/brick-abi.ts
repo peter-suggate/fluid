@@ -246,6 +246,11 @@ export interface BrickLayoutOptions extends BrickCapacities {
   /** The static mask's tiles (brick-static-tiles.ts): two bit planes in dir, closed and inexact, a bit a lattice tile.
    * A closed tile is the box rule's solid (resolveBox). Absent: the box rule alone (the text unchanged). */
   readonly staticTiles?: boolean;
+  /** The grid's wall view: the scene's statics have terrain or a procedural boundary, so lWall
+   * (levelset-kernels.wgsl.ts) runs, and between it and the next step's advection the PHI channel's PHI1 of a NEAR_SOLID
+   * F brick holds the liquid continued through the walls' contact layer, which the pressure reads in place of PHI
+   * (brickOwnerWGSL view). Absent: PHI1 is the level set's scratch alone (the text unchanged). */
+  readonly wallView?: boolean;
 }
 
 const align64 = (n: number) => Math.ceil(n / 64) * 64;
@@ -288,6 +293,8 @@ export class BrickLayout {
   /** The box rule's box (BrickLayoutOptions.box): the walls. The lattice is storage; a wall is at the box, once. */
   readonly box: readonly [number, number, number];
   readonly staticTiles: boolean;
+  /** BrickLayoutOptions.wallView. */
+  readonly wallView: boolean;
   /** BrickLayoutOptions.openTop. */
   readonly openTop: boolean;
   /** BrickLayoutOptions.openSides. */
@@ -343,6 +350,7 @@ export class BrickLayout {
     this.farPhi = options.farPhi ?? phiFar(options.lattice);
     this.box = [...(options.box ?? options.lattice)] as [number, number, number];
     this.staticTiles = options.staticTiles === true;
+    this.wallView = options.wallView === true;
     this.openTop = options.openTop === true;
     this.openSides = options.openSides === true;
     if (this.openSides && this.box.some((n, a) => a !== 1 && n !== this.lattice[a])) throw new Error(`Brick engine: an open world's box ${this.box.join("x")} holds the lattice's sides ${this.lattice.join("x")}`);

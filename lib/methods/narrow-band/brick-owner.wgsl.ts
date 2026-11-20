@@ -41,9 +41,13 @@ export interface BrickOwnerNames {
   /** A WGSL fn(cslot, tile, axis, raw) -> f32 that nbCFace returns in place of the stored C face (the solve's
    * still-tank A forcing of a STILL page's held face); default the stored face. */
   readonly forcedC?: string;
+  /** The grid's wall view (BrickLayout.wallView): an F vertex of a NEAR_SOLID brick reads PHI1, which lWall
+   * (levelset-kernels.wgsl.ts) fills each step with the liquid continued through the walls' contact layer. Default
+   * PHI everywhere: the level set itself. */
+  readonly view?: boolean;
 }
 
-const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexCoarse|VertexOwnerH|CVertex|FVertex|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
+const OWNER_FUNCTIONS = /\bnb(TileInLattice|TileIndex|TileOwnerH|CellOwnerH|VertexCoarse|VertexOwnerH|CVertex|FVertex|FPhiBase|VertexPhi|CFace|FFace|OnWall|FaceInLattice|FacePlane|FaceU)\b/g;
 
 export const brickOwnerWGSL = (n: BrickOwnerNames = { phi: "phi", vel: "vel" }) => {
   let code = ownerCode(n).replaceAll("NB_WALL_BOX", n.box ?? "NB_LATTICE").replaceAll("NB_VEL_F_U0", n.faceF ?? "NB_VEL_F_U0").replaceAll("NB_VEL_C_U0", n.faceC ?? "NB_VEL_C_U0");
@@ -87,9 +91,10 @@ fn nbCVertex(T:vec3i)->f32{
   let cs=nbCSlotOfPage(T>>vec3u(3u));if(cs==NB_NONE){return NB_PHI_AIR_C;}
   return bitcast<f32>(${n.phi}[NB_PHI_C_PHI+NB_STRIDE*cs+nbTileIndex(T)]);
 }
+${n.view ? "fn nbFPhiBase(s:u32)->u32{return select(NB_PHI_F_PHI,NB_PHI_F_PHI1,(nbFRec(s,NB_REC_CLASS)&NB_CLASS_NEAR_SOLID)!=0u);}" : "fn nbFPhiBase(s:u32)->u32{return NB_PHI_F_PHI;}"}
 fn nbFVertex(v:vec3i)->f32{
   let s=nbFSlotOfBrick(v>>vec3u(3u));if(s>=NB_SEAM){return NB_PHI_AIR_C;}
-  return bitcast<f32>(${n.phi}[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
+  return bitcast<f32>(${n.phi}[nbFPhiBase(s)+NB_STRIDE*s+nbLocal(v)]);
 }
 fn nbVertexPhi(v:vec3i)->f32{
   if(any(v<vec3i(0))||any(v>NB_LATTICE)){return NB_PHI_FAR;}

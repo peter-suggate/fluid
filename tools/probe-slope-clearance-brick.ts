@@ -14,7 +14,8 @@ import { resolve } from "node:path";
 import { getMethod } from "../lib/core/method-registry";
 import "../lib/methods/index";
 import { resolveMethodValues } from "../lib/core/method-contract";
-import { NBFLIP_RAMP_LENGTH } from "../lib/core/nbflip-ramp-scene";
+import { NBFLIP_RAMP_CELL_SIZE_M, NBFLIP_RAMP_GRID, NBFLIP_RAMP_LENGTH } from "../lib/core/nbflip-ramp-scene";
+import { bakeProceduralSolid } from "../lib/core/procedural-solid";
 import { NBFLIP_METHOD_PROFILE } from "../lib/core/nbflip-paper-scenes";
 import { createNbflipSlopeClearance, nbflipSlopeClearanceBed } from "../lib/core/nbflip-slope-clearance-scene";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
@@ -26,6 +27,11 @@ const args = process.argv.slice(2), opt = (k: string) => args.find(a => a.starts
 const hz = Number(opt("hz") ?? 60), every = Number(opt("every") ?? hz / 2);
 const scene = createNbflipSlopeClearance(hz), steps = Number(opt("steps") ?? Math.round(scene.duration_s * hz));
 const pools = opt("pools"); if (pools) scene.fluid.brickPools = JSON.parse(pools);
+// --boundary=procedural: the same bed as the sampled procedural boundary (bakeProceduralSolid), not the heightfield.
+if (opt("boundary") === "procedural") {
+  delete scene.terrain;
+  Object.assign(scene, bakeProceduralSolid(NBFLIP_RAMP_GRID, [NBFLIP_RAMP_CELL_SIZE_M, NBFLIP_RAMP_CELL_SIZE_M, NBFLIP_RAMP_CELL_SIZE_M], ([x, y]) => y - nbflipSlopeClearanceBed(x)));
+}
 const METHOD = "uniform-narrow-band-flip", method = getMethod(METHOD), profile = NBFLIP_METHOD_PROFILE;
 const values = resolveMethodValues(method, profile.quality, { ...method.appDefaults, ...profile.overrides, engine: "brick",
   ...JSON.parse(opt("values") ?? "{}") });

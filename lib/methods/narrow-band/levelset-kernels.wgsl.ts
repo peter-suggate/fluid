@@ -39,6 +39,7 @@ import { levelSetReleaseWGSL } from "./levelset-release.wgsl";
 import { CENSUS } from "./brick-census.wgsl";
 import { BRICK_SOURCE_WGSL } from "./brick-source.wgsl";
 import { BRICK_SOLID_LEVEL_SET_WGSL, brickLevelSetDeferWGSL, brickPhiSolidWGSL } from "./brick-solid-walk.wgsl";
+import { brickStaticWGSL, type BrickStaticWalls } from "./brick-static.wgsl";
 
 const LS_SET_WGSL = /* wgsl */`
 // Only F's own vertices (fgVertexOwned: tiered, a vertex with a 4h-owned incident tile is its tile's interpolant).
@@ -67,8 +68,9 @@ fn lMaskBit(c:vec3i)->bool{
 }
 `;
 
-/** The level-set kernels; options.statics the scene's static voxel mask is bound (lane E's phiSolid). */
-export function levelSetKernels(L: BrickLayout, F: FluidLayout, options: { readonly statics?: boolean } = {}) {
+/** The level-set kernels; options.statics the scene's static voxel mask is bound (lane E's phiSolid), and
+ * options.staticWalls its terrain and procedural boundary, when it has either (lWall). */
+export function levelSetKernels(L: BrickLayout, F: FluidLayout, options: { readonly statics?: boolean; readonly staticWalls?: BrickStaticWalls } = {}) {
   const statics = options.statics === true;
   const k = (label: string, bindings: Parameters<typeof fluidKernel>[3], body: string): BrickKernel => fluidKernel(L, F, label, bindings, body);
   const base = [FG_SLOT_WGSL, FG_FCELL_WGSL, FG_PHI_WGSL, LS_WGSL].join("\n");
@@ -789,5 +791,66 @@ fn dNear(c:vec3i)->u32{
  for(var r=0u;r<2u;r++){let v=o+nbLocalCoord(lid+256u*r);w[r]=all(v<=NB_LATTICE)&&!fgVertexOwned(v);if(w[r]){x[r]=fgPhi(v);}}
  for(var r=0u;r<2u;r++){if(w[r]){phi[NB_PHI_F_PHI+NB_STRIDE*slot+lid+256u*r]=bitcast<u32>(x[r]);}}
 }`) : undefined;
-  return { lInit, lAdvect, ...(phiSolid ? { phiSolid } : {}), lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve, lResolveD };
+  // lWall (BrickLayout.wallView: a scene with terrain or a procedural boundary): the grid's view of the liquid at the
+  // walls, PHI1 of every NEAR_SOLID brick, which the pressure reads in place of PHI there (brickOwnerWGSL view); the
+  // level set, the seeding, the gauge and the presentation keep PHI.
+  //
+  // Why (probed on the slope clearance's 1:16 incline, a 1-cell sheet, tools/probe-incline-film.ts, 2026-11-20): a
+  // particle stops one sample radius off a wall (psWalk's inset, nbSampleRadius), so the splat's surface only touches
+  // the wall between samples, and a vertex inside the solid keeps a stale (air) value. A cut cell whose centre lies in
+  // or at the wall then read air: a ghost free surface under the film, which lost its hydrostatic support. Gravity
+  // pulled the film into the bed (-0.25 to -0.4 m/s at the cut cells' upper faces) and its downhill pressure gradient
+  // was gone, so the sheet's speed waved against the staircase of cut cells (0.3 to 0.93 m/s, period 16) and gained
+  // 0.0 to 0.1 m/s in 1 s against g sin(θ) = 0.61; ballistic samples on the same bed, which see no grid, slid at
+  // nearly g sin(θ). The water slide's film after its jet held at 0.17 m/s this way.
+  //
+  // The view (Bridson 2015 §8.1 extrapolates φ into solids, constant along the normal; Batty, Bertails & Bridson 2007):
+  // the liquid's φ at the contact layer, LW_CONTACT (a unit sample's radius) off the wall along its normal, the
+  // trilinear over the foot cell's vertices at least LW_CONTACT out (renormalised). A vertex in the layer or inside
+  // the wall (within LW_DEPTH) takes the lesser of it and PHI: the view is never drier than PHI (a buried vertex can
+  // hold this step's splat, which the foot cell's open vertices miss). Elsewhere, and where the foot cell has no such
+  // vertex, the view is PHI. Written every step
+  // from this step's PHI (after the seeding), so it holds nothing over: a bed the liquid leaves reads dry.
+  const walls = statics ? options.staticWalls : undefined;
+  if (L.wallView && !(walls?.terrain || walls?.boundary)) throw new Error("levelSetKernels: the layout's wall view needs the statics' terrain or procedural boundary (lWall)");
+  const lWall = L.wallView && walls && (walls.terrain || walls.boundary) ? k("lWall", [CFG, FB.set, FB.dir, FB.phiRW, FB.fcell, { name: "solid", kind: "ro", type: "array<u32>" }],
+    brickStaticWGSL({ box: L.box, openTop: walls.policy === 2, frame: "vec3f(0.0)", h: "vec3f(1.0)", mask: { buffer: "solid", walls } }) + base + LS_SET_WGSL + /* wgsl */`
+const LW_DEPTH:f32=2.0;
+const LW_CONTACT:f32=0.25;
+// The wall's signed distance at p (cells, positive outside) and its outward unit normal: the least of the terrain's
+// and the field's. A field cell with no record reads none (a voxel or open: the field's ±1e6).
+fn lwWall(p:vec3f)->vec4f{
+ var best=vec4f(0.0,1.0,0.0,1e6);
+ ${walls.terrain ? `{let t=nbTerrainBoundary(p);let g=length(t.xyz);if(g>1e-6&&t.w/g<best.w){best=vec4f(t.xyz/g,t.w/g);}}` : ""}
+ ${walls.boundary ? `{let b=nbBoundarySample(p);let g=length(b.xyz);if(abs(b.w)<1e5&&g>1e-6&&b.w/g<best.w){best=vec4f(b.xyz/g,b.w/g);}}` : ""}
+ return best;
+}
+// A vertex's published φ: its slot's word (lResolve has resolved a non-owned one), air where no slot holds it.
+fn lwPhi(v:vec3i)->f32{let s=fgSlot(v);if(s==NB_NONE){return NB_PHI_AIR_C;}return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);}
+// The view at vertex v (its own φ own).
+fn lwView(v:vec3i,own:f32)->f32{
+ let wall=lwWall(vec3f(v));
+ if(!(wall.w<LW_CONTACT&&wall.w>-LW_DEPTH)){return own;}
+ let foot=clamp(vec3f(v)+(LW_CONTACT-wall.w)*wall.xyz,vec3f(0.0),vec3f(NB_WALL_BOX));
+ let c=min(vec3i(floor(foot)),NB_WALL_BOX-vec3i(1));let f=foot-vec3f(c);
+ var sum=0.0;var total=0.0;
+ for(var k=0u;k<8u;k++){
+  let bit=vec3i(i32(k&1u),i32((k>>1u)&1u),i32(k>>2u));let u=c+bit;
+  if(lwWall(vec3f(u)).w<LW_CONTACT){continue;}
+  let w3=select(vec3f(1.0)-f,f,bit!=vec3i(0));let w=w3.x*w3.y*w3.z;
+  sum+=w*lwPhi(u);total+=w;
+ }
+ if(total<=1e-3){return own;}
+ return min(own,sum/total);
+}
+@compute @workgroup_size(256) fn lWall(@builtin(workgroup_id) wid:vec3u,@builtin(local_invocation_index) lid:u32){${brickHead}
+ if((nbFRec(slot,NB_REC_CLASS)&NB_CLASS_NEAR_SOLID)==0u){return;}
+ for(var r=0u;r<2u;r++){
+  let l=lid+256u*r;let v=o+nbLocalCoord(l);
+  let own=bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*slot+l]);
+  var view=own;if(lVertexIn(v)){view=lwView(v,own);}
+  lSetPhi(NB_PHI_F_PHI1,slot,l,view);
+ }
+}`) : undefined;
+  return { lInit, lAdvect, ...(phiSolid ? { phiSolid } : {}), lSplat, lUnion, lTiles, lDilate, lDilateC, lClear, lNear, lDistance, lPublish, lResolve, lResolveD, ...(lWall ? { lWall } : {}) };
 }

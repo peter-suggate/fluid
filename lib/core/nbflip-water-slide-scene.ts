@@ -76,6 +76,18 @@ export function nbflipSlideCentreline(angle: number): readonly [x: number, z: nu
   return [AXIS[0] + radius(angle) * Math.sin(angle), AXIS[1] - radius(angle) * Math.cos(angle)];
 }
 
+/** The centreline angle of the turn a point (lattice x, z) lies in: 0 at the source, NBFLIP_SLIDE_END_RAD at the stop wall. */
+export function nbflipSlideAngleAt(x: number, z: number): number {
+  const dx = x - AXIS[0], dz = z - AXIS[1], bearing = (Math.atan2(dx, -dz) + TURN) % TURN;
+  return bearing + TURN * Math.round((START_RADIUS - Math.hypot(dx, dz)) / PITCH - bearing / TURN);
+}
+
+/** The continuous floor's height under the centreline at angle a, and the centreline's radius there (cells): the
+ * procedural solid's (nbflipSlideSolid). */
+export function nbflipSlideFloorAt(a: number): readonly [floor: number, radius: number] {
+  return [TOP - FALL * Math.min(1, Math.max(0, a) / (NBFLIP_SLIDE_END_RAD - HOOD / END_RADIUS)), radius(a)];
+}
+
 /**
  * The drum under one column of cells: the height of its solid, and whether the
  * hood's lid hangs over it.

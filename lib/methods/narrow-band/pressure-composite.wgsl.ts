@@ -155,7 +155,7 @@ fn poVertexS(v:vec3i,o:vec3i)->f32{
   }
   if(T.x<0){
     let s=poSB[poIndex((v>>vec3u(3u))-(o>>vec3u(3u))+vec3i(1),3)];if(s>=NB_SEAM){return NB_PHI_AIR_C;}
-    return bitcast<f32>(phi[NB_PHI_F_PHI+NB_STRIDE*s+nbLocal(v)]);
+    return bitcast<f32>(phi[nbFPhiBase(s)+NB_STRIDE*s+nbLocal(v)]);
   }
   let t=vec3f(v-4*T)/4.0;var values:array<f32,8>;
   for(var k=0u;k<8u;k++){
@@ -520,7 +520,7 @@ fn poForcedC(cs:u32,i:u32,a:u32,raw:f32)->f32{
   return raw+nbRingF(cfg.x,NB_RING_DT)*nbRingF(cfg.x,NB_RING_GRAVITY+a);
 }
 `;
-const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + (tiered ? FORCED_C_WGSL : "") + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN, ...(tiered ? { forcedC: "poForcedC" } : {}) }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
+const headerWGSL = (L: BrickLayout, staged = false, tiered = true, cuts = false) => `const PO_TIERED:bool=${tiered};\n` + (tiered ? FORCED_C_WGSL : "") + brickOwnerWGSL({ phi: "phi", vel: "vel", faceF: "NB_VEL_F_US0", faceC: "NB_VEL_C_US0", box: BOX_TOKEN, ...(tiered ? { forcedC: "poForcedC" } : {}), ...(L.wallView ? { view: true } : {}) }) + PRESSURE_ROWS_WGSL + (staged ? STAGE_BRICK : STAGE_DIRECT) + compositeWGSL(cuts);
 
 /** The composite kernels. rowsF's label and entry are the engine's operator's when pressure-operator.wgsl.ts builds it.
  * `tiered: false` (the all-h engine) drops the absent-page guard: all-h, an absent page is air (brick-abi.md §2.5). */

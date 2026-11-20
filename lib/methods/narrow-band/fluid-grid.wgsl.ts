@@ -196,7 +196,7 @@ if (!FO_OWNER_H.test(FO_TILE_RAW)) throw new Error("fluid-grid: brickOwnerWGSL's
 // fgTileHDir is the owners' own foTileOwnerH (renamed); foTileOwnerH reads through fgTileH.
 const FO_TILE_WGSL = FO_TILE_RAW.replace(FO_OWNER_H, m => m.replace("fn foTileOwnerH", "fn fgTileHDir") + "fn foTileOwnerH(t:vec3i)->bool{return fgTileH(t);}\n");
 const FO_PHI_PART = ownerReads(cutOwner(FO_ALL, "fn foCVertex", "fn foCFace"));
-const FO_PHI_WGSL = FO_PHI_PART + FO_PHI_PART.replace(/\bfo(CVertex|FVertex|VertexPhi)\b/g, "fo1$1")
+const FO_PHI_WGSL = FO_PHI_PART + FO_PHI_PART.replace(/\bfo(CVertex|FVertex|FPhiBase|VertexPhi)\b/g, "fo1$1")
   .replace(/\bNB_PHI_F_PHI\b/g, "NB_PHI_F_PHI1").replace(/\bNB_PHI_C_PHI\b/g, "NB_PHI_C_PHI1");
 // The window's vertex authority (fgWinVertexCoarse: foVertexCoarse with each candidate tile's rule read from the
 // window's staged bit, fgWinCoarse) and its φ (fgWinVertexPhi; fgWin1VertexPhi the PHI1 copy), cut from the owners'
