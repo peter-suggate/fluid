@@ -277,8 +277,8 @@ export function brickSourcesExtent<E extends { cells: number; top: number; drop:
   return { ...e, cells, free: e.free + added, top, drop, splash };
 }
 
-/** The initial liquid's volume in cells (vertices with φ < 0 inside the container) and its top (one past the highest
- * such vertex's y), from the boot's own φ (bootPhiAt: the closed form or the page table). A brick whose centre φ is
+/** The initial liquid's volume in cells (each cell's six-tetrahedron fill of its corner φ, inside the container) and its
+ * top (one past the highest liquid cell's y), from the boot's own φ (bootPhiAt: the closed form or the page table). A brick whose centre φ is
  * past its half-diagonal (√3·4 < 7 cells) is wholly in or out and counts without its cells.
  * `resident` is the tiered boot's first residency: the liquid bricks within BRICK_BOOT_BAND of the surface (a vertex
  * with φ > −band; bootTieredSet's sources) dilated by two bricks a side (Chebyshev), within the window. The engine's
@@ -302,10 +302,19 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
       if (centre > -BRICK_BOOT_BAND - 7) liquid.push([bx, by, bz]);
       continue;
     }
+    // A cell's liquid is the six-tetrahedron fill of its eight corner φ (level-set-fill.wgsl.ts, the gauge's measure).
+    // Until 2026-11-20 a liquid vertex counted as a cell, so a box missed its face vertices' row: the slope clearance's
+    // 8 x 6 x 8 release counted 245 cells of 384, and its F pool (SF) latched POOL_F at step 56 against a peak of 287.
+    const span = hi.map((v, a) => v - lo[a]! + 1), corner = new Float64Array(span[0]! * span[1]! * span[2]!);
+    for (let z = 0; z < span[2]!; z++) for (let y = 0; y < span[1]!; y++) for (let x = 0; x < span[0]!; x++) corner[x + span[0]! * (y + span[1]! * z)] = at([lo[0]! + x, lo[1]! + y, lo[2]! + z]);
     let wet = false, near = false;
+    const v8 = new Float64Array(8);
     for (let z = lo[2]!; z < hi[2]!; z++) for (let y = lo[1]!; y < hi[1]!; y++) for (let x = lo[0]!; x < hi[0]!; x++) {
-      const d = at([x, y, z]);
-      if (d < 0) { cells++; rows[y]++; top = Math.max(top, y + 1); bot = Math.min(bot, y); wet = true; if (d > -BRICK_BOOT_BAND) near = true; }
+      const d = corner[x - lo[0]! + span[0]! * (y - lo[1]! + span[1]! * (z - lo[2]!))]!;
+      if (d < 0 && d > -BRICK_BOOT_BAND) near = true;
+      for (let k = 0; k < 8; k++) v8[k] = corner[x - lo[0]! + (k & 1) + span[0]! * (y - lo[1]! + ((k >> 1) & 1) + span[1]! * (z - lo[2]! + ((k >> 2) & 1)))]!;
+      const fill = cellFill(v8);
+      if (fill > 0) { cells += fill; rows[y] += fill; top = Math.max(top, y + 1); bot = Math.min(bot, y); wet = true; }
     }
     if (wet && near) liquid.push([bx, by, bz]);
   }
@@ -319,6 +328,24 @@ export function brickInitialExtent(o: Pick<BrickEngineOptions, "lattice" | "box"
   let free = 0;
   for (let y = 0; y < n[1]!; y++) if (y + 0.5 > rest) free += rows[y]!;
   return { cells, top, drop, resident: resident.size, free };
+}
+
+/** A tetrahedron's liquid fraction from its four corner φ (level-set-fill.wgsl.ts tetra, in f64). */
+function tetraFill(a: number, b: number, c: number, d: number): number {
+  const v = [a, b, c, d], neg = v.filter(x => x < 0).sort((p, q) => p - q), pos = v.filter(x => !(x < 0));
+  if (neg.length === 0) return 0;
+  if (pos.length === 0) return 1;
+  const s = [...neg, ...pos];
+  if (neg.length === 1) return (-s[0]! / (s[1]! - s[0]!)) * (-s[0]! / (s[2]! - s[0]!)) * (-s[0]! / (s[3]! - s[0]!));
+  if (neg.length === 3) return 1 - (s[3]! / (s[3]! - s[0]!)) * (s[3]! / (s[3]! - s[1]!)) * (s[3]! / (s[3]! - s[2]!));
+  const p = -s[0]! / (s[2]! - s[0]!), q = -s[0]! / (s[3]! - s[0]!), r = -s[1]! / (s[2]! - s[1]!), t = -s[1]! / (s[3]! - s[1]!);
+  return Math.min(1, Math.max(0, p * q + q * r * (1 - p) + r * t * (1 - q)));
+}
+
+/** A cell's liquid fraction from its eight corner φ (bit 0 x, 1 y, 2 z): level-set-fill.wgsl.ts fill, in f64. */
+export function cellFill(v: ArrayLike<number>): number {
+  return (tetraFill(v[0]!, v[1]!, v[3]!, v[7]!) + tetraFill(v[0]!, v[1]!, v[5]!, v[7]!) + tetraFill(v[0]!, v[2]!, v[3]!, v[7]!)
+    + tetraFill(v[0]!, v[2]!, v[6]!, v[7]!) + tetraFill(v[0]!, v[4]!, v[5]!, v[7]!) + tetraFill(v[0]!, v[4]!, v[6]!, v[7]!)) / 6;
 }
 
 /**

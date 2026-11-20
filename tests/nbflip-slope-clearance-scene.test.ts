@@ -43,8 +43,7 @@ test("the release starts less than a cell above the continuous slope and retains
   }
   const seeded = initialLiquidCellVolumes(scene, NBFLIP_RAMP_GRID, true);
   assert.equal(seeded.initial, NBFLIP_SLOPE_CLEARANCE_INITIAL_CELLS);
-  // Even all the release in the pit occupies less than one cell of depth;
-  // its resting pool cannot back up onto the lowest ramp tread.
+  // All the release resting in the pit stays below the ramp's foot (11 cells): it cannot back up onto the slope.
   const poolDepth = seeded.initial / ((nx - NBFLIP_SLOPE_CLEARANCE_PIT_START) * nz);
   assert.ok(2 + poolDepth < 11);
 });

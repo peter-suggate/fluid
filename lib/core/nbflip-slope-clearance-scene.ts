@@ -6,10 +6,15 @@ import {
 } from "./nbflip-ramp-scene";
 
 export const NBFLIP_SLOPE_CLEARANCE_SCENE_ID = "nbflip-slope-clearance";
-/** A 16 × 12 × 16 cm body released just above the incline, clear of the walls. */
-export const NBFLIP_SLOPE_CLEARANCE_MIN = [4, 17, 12] as const;
-export const NBFLIP_SLOPE_CLEARANCE_MAX = [12, 23, 20] as const;
-export const NBFLIP_SLOPE_CLEARANCE_INITIAL_CELLS = 8 * 6 * 8;
+/**
+ * A 28 × 20 × 48 cm body released just above the incline, clear of the walls. Until 2026-11-20 it was 16 × 12 × 16 cm
+ * (384 cells): spread over the 96 × 32-cell slope it was a sheet 0.12 cells (2.4 mm) thick, which the 2 cm level set
+ * cannot draw (the brick engine's particles carried it; its surface showed flecks and half the volume at 1 s). This
+ * body spreads about a cell deep, and still rests under 4 cells deep in the pit.
+ */
+export const NBFLIP_SLOPE_CLEARANCE_MIN = [2, 17, 4] as const;
+export const NBFLIP_SLOPE_CLEARANCE_MAX = [16, 27, 28] as const;
+export const NBFLIP_SLOPE_CLEARANCE_INITIAL_CELLS = 14 * 10 * 24;
 export const NBFLIP_SLOPE_CLEARANCE_SECONDS = 6;
 export const NBFLIP_SLOPE_CLEARANCE_RUN = 16;
 /** A short, continuous spill apron joins the incline to the lower catch basin. */
@@ -25,7 +30,7 @@ export function nbflipSlopeClearanceBed(x: number): number {
 /**
  * Reference transit for a frictionless parcel released at the body's uphill
  * edge on the corresponding smooth incline: s = L / cos(theta), a = g sin(theta).
- * About 2.45 s. This is a scale estimate, not an exact free-surface solution;
+ * About 2.48 s. This is a scale estimate, not an exact free-surface solution;
  * six seconds allows spreading and a drainage tail. No residue is the target
  * for this free-slip, zero-surface-tension model, not a real wetting surface.
  */

@@ -2277,7 +2277,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: NBFLIP_SLOPE_CLEARANCE_SCENE_ID,
     name: "NB-FLIP · Slope clearance",
-    blurb: "A small 3.072 L body is released from rest just above a continuous 1:16 incline and drains into a lower catch basin. Target: the entire slope dry within 6 simulated seconds, with the water retained below. A simple test of bed gradients and lingering residue; 128×32×32 cells at 2 cm.",
+    blurb: "A 26.9 L body is released from rest just above a continuous 1:16 incline and drains into a lower catch basin. Target: the entire slope dry within 6 simulated seconds, with the water retained below. A simple test of bed gradients and lingering residue; 128×32×32 cells at 2 cm.",
     audience: "validation",
     shelf: "Thin liquid",
     environment: "stage",

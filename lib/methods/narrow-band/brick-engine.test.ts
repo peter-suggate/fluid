@@ -239,7 +239,7 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
     // (WF 405; they peaked at 289 and 238 F, so without it 1.25 * the boot's 210 and 245 resident latched POOL_F);
     // cm12-figure-7 takes eight layers of its 289-brick floor with the margin (peak 2437), its particles 3 bootP > 10 V.
     "nbflip-analytic-free-fall": [405, 18, 150528], "nbflip-analytic-tilted-free-fall": [405, 18, 150528],
-    "cm12-figure-7": [2890, 125, 377568], "cm12-figure-7-256": [10890, 729, 2677350],
+    "cm12-figure-7": [2890, 125, 377568], "cm12-figure-7-256": [10890, 729, 2679989],
   };
   {
     for (const [id, [f, c, particles]] of Object.entries(want)) {
@@ -254,10 +254,21 @@ test("brick engine: the pool sizing rule (unauthored brickPools) reproduces the 
       assert.ok(setup!.bootBricks!.length <= f && setup!.bootPages!.length <= c, `${id}: the boot fits its pools`);
     }
     // The closed form's volume: the 64^3 dam's box is 94208 cells (the measured table's V); the extent counts liquid
-    // vertices, which a face's vertex row may add to (0.2% here), well inside the rule's margins.
+    // cells' fill of their corner φ, which a face's wall-continued row may add to, well inside the rule's margins.
     const dam64 = brickSceneSetup(sceneDocument(getSceneDefinition("minimal-power-dam-break-64")), { timeStep: "sixtieth" }).setup!;
     const extent = brickInitialExtent({ lattice: dam64.lattice, farPhi: dam64.farPhi, liquid: dam64.liquid, initial: dam64.initial });
     assert.ok(Math.abs(extent.cells - 94208) <= 0.01 * 94208, `extent ${extent.cells} cells`);
+    // A small free box counts its boundary cells (2026-11-20): an 8 x 6 x 8 box is the gauge's 364 cells (the fill of
+    // its cells' corner φ), not its 7 x 5 x 7 = 245 liquid vertices. The slope clearance's former release was that box,
+    // and the spread term SF took 248 F from 245 cells: POOL_F latched at step 56 against the 287 its run peaked at.
+    const small = brickInitialExtent({ lattice: [128, 32, 32], liquid: [{ lo: [4, 17, 12], hi: [12, 23, 20] }] });
+    assert.ok(Math.abs(small.cells - 364) < 1, `extent ${small.cells} cells`);
+    assert.ok(brickPoolRule([128, 32, 32], small, small.resident, 0).f >= 1.15 * 287);
+    // The slope clearance itself: its extent is its gauge's t = 0 volume, and F holds its 360-step peak of 322
+    // (tools/probe-slope-clearance-brick.ts) with a margin.
+    const slope = brickSceneSetup(sceneDocument(getSceneDefinition("nbflip-slope-clearance")), { timeStep: "sixtieth" }).setup!;
+    assert.ok(Math.abs(brickInitialExtent({ lattice: slope.lattice, farPhi: slope.farPhi, liquid: slope.liquid, initial: slope.initial }).cells - 3314) < 1);
+    assert.ok(slope.capacities.f >= 1.15 * 322, `slope clearance F ${slope.capacities.f}`);
     // D2: the free fall's liquid bricks dilated by two fill bricks x 1..6, y 2..8, z 0..4 of its 9 x 9 x 5 window
     // (6 * 7 * 5 = 210), the F box its engine holds at step 1.
     const fall = brickSceneSetup(sceneDocument(getSceneDefinition("nbflip-analytic-free-fall")), { timeStep: "sixtieth" }).setup!;
