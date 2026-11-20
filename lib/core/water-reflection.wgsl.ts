@@ -152,7 +152,23 @@ fn waterReflectionSample(origin:vec3f,direction:vec3f,cellSize:f32)->vec4f{
   if(screenSpaceReflections==0u){return vec4f(environment,0); }
   let hit=waterReflectionHit(origin,direction,cellSize);
   if(hit.w<=0.0){return vec4f(environment,0);}
-  return vec4f(mix(environment,waterReflectionColor(hit.xy),hit.w),hit.z);
+  // Reconstruct radiance at the subpixel hit. Only neighbours on the same
+  // receiver contribute, so a moving reflection cannot drag sky across a leaf.
+  let size=max(u.viewport.xy,vec2f(1));
+  let pixel=project(origin+direction*hit.z)*size-.5;
+  let fraction=fract(pixel);
+  let receiver=waterReflectionDepth(hit.xy);
+  let tolerance=max(.02*cellSize,.001*receiver)+2.0*receiver*cameraTanHalfFov()/size.y;
+  var color=vec3f(0);var total=0.0;
+  for(var y=0;y<2;y++){for(var x=0;x<2;x++){
+    let uv=(clamp(floor(pixel)+vec2f(f32(x),f32(y)),vec2f(0),size-1.0)+.5)/size;
+    let delta=abs(waterReflectionDepth(uv)-receiver);
+    let weight=select(1.0-fraction.x,fraction.x,x==1)*select(1.0-fraction.y,fraction.y,y==1)
+      *(1.0-smoothstep(tolerance,2.0*tolerance,delta));
+    color+=weight*waterReflectionColor(uv);total+=weight;
+  }}
+  if(total>1e-5){color/=total;}else{color=waterReflectionColor(hit.xy);}
+  return vec4f(mix(environment,color,hit.w),hit.z);
 }
 `; }
 

@@ -23,3 +23,34 @@ fn safePositionSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{
   return vec4f(sampled.rgb/sampled.a,sampled.a);
 }
 `;
+
+/** Intersect the refracted ray with a tangent plane from the captured exit
+ * surface. Reproject and verify the intersection against the captured world
+ * position, since a plane alone can extend beyond its actual sheet. */
+export const waterRayExitWGSL = /* wgsl */ `
+struct WaterRayExit { point:vec3f, distance:f32, normal:vec3f, uv:vec2f, solid:f32 }
+fn waterRayExit(positions:texture_2d<f32>,normals:texture_2d<f32>,entryUV:vec2f,
+    origin:vec3f,direction:vec3f,cell:f32)->WaterRayExit{
+  var uv=entryUV;
+  let miss=WaterRayExit(origin,0.0,vec3f(0),entryUV,0.0);
+  for(var i=0u;i<4u;i++){
+    let back=safePositionSample(positions,uv);
+    let shading=safeInterfaceSample(normals,uv);
+    if(back.a<.5||dot(shading.xyz,shading.xyz)<1e-8){break;}
+    let normal=normalize(shading.xyz);
+    let travel=dot(back.xyz-origin,direction);
+    let onRay=origin+travel*direction;
+    let tolerance=max(.002,.04*cell);
+    if(travel>1e-4&&distance(back.xyz,onRay)<=tolerance){
+      return WaterRayExit(onRay,travel,normal,uv,clamp(shading.a/back.a-1.0,0.0,1.0));
+    }
+    let incidence=dot(normal,direction);
+    if(abs(incidence)<1e-4){break;}
+    let planeTravel=dot(normal,back.xyz-origin)/incidence;
+    if(!(planeTravel>1e-4)){break;}
+    uv=project(origin+direction*planeTravel);
+    if(!waterInterfaceUVValid(uv)){break;}
+  }
+  return miss;
+}
+`;

@@ -67,7 +67,7 @@ export function createBackyardPoolPartyScene(cellSize_m = POOL_PARTY_CELL_M): Sc
     initialCondition: "tank-fill", initialVelocity_m_s: { x: 0, y: 0, z: 0 },
     initialLiquidVolumes: [{ shape: "box", min_m: { x: -4, y: 0.2, z: -2 },
       max_m: { x: 4, y: POOL_PARTY_WATERLINE_M, z: 2 } }],
-    optics: { indexOfRefraction: 1.333, absorption_mInv: [.47, .095, .046], roughness: .064, windRippleSlope: .042, causticStrength: .48 },
+    optics: { indexOfRefraction: 1.333, absorption_mInv: [.47, .095, .046], roughness: .085, windRippleSlope: .003, causticStrength: .25 },
   };
   // Basin bounds in metres from the domain's lower X/Z corner. The four
   // deck slabs surround an empty cavity, never a decorative floor over water.
@@ -98,7 +98,7 @@ export function createBackyardPoolPartyScene(cellSize_m = POOL_PARTY_CELL_M): Sc
       position_m: { x: board.position.x + release.x, y: board.position.y + release.y, z: 0 },
       orientation: { w: 1, x: 0, y: 0, z: 0 }, ...structuredClone(atRest) },
   ];
-  scene.scenery = backyardPoolPartyScenery();
+  scene.scenery = backyardPoolPartyScenery(cellSize_m);
   // These match the eleven stainless treads authored in Blender. The narrow
   // ladder uses a climb assist; the board and treads remain physical solids.
   for (let i = 1; i <= 11; i++) {

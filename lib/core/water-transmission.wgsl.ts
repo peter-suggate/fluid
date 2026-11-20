@@ -23,17 +23,14 @@ fn waterVerifiedLiquidInterval(front:vec3f,direction:vec3f,distance:f32,cell:f32
 /** Optional world-space opaque transmission requests and bounded liquid proof.
  * No screen-edge colour is used as a substitute for an offscreen receiver. */
 export const waterTransmissionWGSL = /* wgsl */ `
-fn waterTransmissionRequest(positions:texture_2d<f32>,normals:texture_2d<f32>,backs:texture_2d<f32>,uv:vec2f)->vec4f{
+fn waterTransmissionRequest(positions:texture_2d<f32>,normals:texture_2d<f32>,backs:texture_2d<f32>,backNormals:texture_2d<f32>,uv:vec2f)->vec4f{
   let front=safePositionSample(positions,uv);if(front.a<.5){return vec4f(0);}
   let ro=u.cameraPosition.xyz;let incoming=normalize(front.xyz-ro);let cell=min(u.container.x/u.gridInfo.x,min(u.container.y/u.gridInfo.y,u.container.z/u.gridInfo.z));
   if(resolvedDrySceneDepth(safeSample(sceneTexture,uv).a)+max(.0015,.18*cell)<length(front.xyz-ro)){return vec4f(0);}
   let packedNormal=safeInterfaceSample(normals,uv);if(dot(packedNormal.xyz,packedNormal.xyz)<1e-12){return vec4f(0);}
   var normal=normalize(packedNormal.xyz);if(dot(normal,incoming)>0.0){normal=-normal;}
   let direction=refract(incoming,normal,1.0/waterIndexOfRefraction());if(dot(direction,direction)<.5){return vec4f(0);}
-  let forward=normalize(u.cameraTarget.xyz-ro);var exitUV=uv;
-  for(var i=0;i<3;i+=1){let back=safePositionSample(backs,exitUV);if(back.a<.5){break;}
-    let travel=max(0.0,dot(back.xyz-front.xyz,forward)/max(dot(direction,forward),.001));exitUV=project(front.xyz+direction*travel);}
-  let back=safePositionSample(backs,exitUV);if(back.a>=.5&&length(back.xyz-front.xyz)>=1e-4){return vec4f(0);}
+  if(waterRayExit(backs,backNormals,uv,front.xyz,direction,cell).distance>0.0){return vec4f(0);}
   return vec4f(direction,1);
 }
 ${waterVerifiedLiquidIntervalWGSL}
@@ -51,7 +48,7 @@ fn waterVerifyTransmission(radiance:texture_2d_array<f32>,positions:texture_2d<f
 }
 @fragment fn transmissionRequestMain(input:VOut)->ReflectionOut{
   let uv=vec2f(input.uv.x,1.0-input.uv.y);
-  return ReflectionOut(waterTransmissionRequest(frontPosition,frontNormal,backPosition,uv),waterTransmissionRequest(rearFrontPosition,rearFrontNormal,rearBackPosition,uv));
+  return ReflectionOut(waterTransmissionRequest(frontPosition,frontNormal,backPosition,backNormal,uv),waterTransmissionRequest(rearFrontPosition,rearFrontNormal,rearBackPosition,rearBackNormal,uv));
 }
 @fragment fn transmissionVerifyMain(input:VOut)->ReflectionOut{
   // Each entry point owns its private sampler state. Without this, the mixed

@@ -31,7 +31,13 @@ test("water reflection intersects actual depth at distance, skips foreground dis
       @group(0) @binding(0) var<storage,read_write> results:array<vec4f>;
       @group(0) @binding(2) var<storage,read> rays:array<vec4f>;
       @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u){
-        if(id.x<4u){results[id.x]=waterReflectionHit(rays[id.x*2u].xyz,normalize(rays[id.x*2u+1u].xyz),.1);}
+        if(id.x<4u){
+          let origin=rays[id.x*2u].xyz;let direction=normalize(rays[id.x*2u+1u].xyz);
+          let hit=waterReflectionHit(origin,direction,.1);
+          results[id.x]=hit;
+          let radiance=waterReflectionSample(origin,direction,.1);
+          results[4u+id.x]=vec4f(radiance.xy,project(origin+direction*hit.z));
+        }
       }` });
     assert.deepEqual((await module.getCompilationInfo()).messages.filter(message => message.type === "error"), []);
     const pipeline = await device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "main" } });
@@ -39,19 +45,25 @@ test("water reflection intersects actual depth at distance, skips foreground dis
     const rays=device.createBuffer({size:128,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
     device.queue.writeBuffer(uniforms,0,new Float32Array([0,0,0,0,0,0,1,0,16,16,16,0,1000,700,1,1]));
     device.queue.writeBuffer(rays,0,new Float32Array([0,0,2,0,.3,.4,1,0, 0,0,2,0,2,.1,.1,0, 0,0,2,0,0,0,1,0, 0,0,12,0,.3,.4,-1,0]));
-    const output = device.createBuffer({ size: 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
-    const read = device.createBuffer({ size: 64, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const output = device.createBuffer({ size: 128, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+    const read = device.createBuffer({ size: 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     try {
       const encoder = device.createCommandEncoder(), pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: output } },{binding:1,resource:{buffer:uniforms}},{binding:2,resource:{buffer:rays}}] }));
-      pass.dispatchWorkgroups(4); pass.end(); encoder.copyBufferToBuffer(output, 0, read, 0, 64);
+      pass.dispatchWorkgroups(4); pass.end(); encoder.copyBufferToBuffer(output, 0, read, 0, 128);
       device.queue.submit([encoder.finish()]); await read.mapAsync(GPUMapMode.READ);
       const values = new Float32Array(read.getMappedRange()).slice(); read.unmap();
       assert.ok(Math.abs(values[0]! - .62) < .002, `unexpected reflection samples ${JSON.stringify([...values])}`);
       assert.ok(Math.abs(values[1]! - .34) < .002);
       assert.ok(Math.abs(values[2]! - 8 * Math.sqrt(1.25)) < .03, "hit the plane eight metres ahead, not a fixed near-water sample");
       assert.ok(values[3]! > .99);
+      // On a continuous colour ramp, radiance follows the projected intersection
+      // within the hit pixel as the ray moves.
+      for (const offset of [16, 28]) {
+        assert.ok(Math.abs(values[offset]! - values[offset + 2]!) < 1e-5);
+        assert.ok(Math.abs(values[offset + 1]! - values[offset + 3]!) < 1e-5);
+      }
       assert.equal(values[7], 0, "offscreen reflection must fall back to the environment");
       assert.equal(values[11], 0, "sky depth is not geometry");
       assert.ok(Math.abs(values[12]!-.53)<.002&&Math.abs(values[13]!-.46)<.002,"camera-facing ray retains its viewport-clipped hit");

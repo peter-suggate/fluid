@@ -23,18 +23,22 @@ function imported(id: string, asset: string, anchor: Point, angle = 0): SceneryN
     material: cream };
 }
 
-export function backyardPoolPartyScenery(): SceneryGraph {
+export function backyardPoolPartyScenery(cellSize_m: number): SceneryGraph {
   const nodes: SceneryNode[] = [{ kind: "room-shell", id: "shell", materialModel: "room", faces: [], floor: cream, wall: cream, ceiling: cream }];
   // An inset concrete bed and the plaster inside the basin are editable
   // scenery. The paving, coping and mosaics supply its exposed finish.
   const plaster = material([.51, .63, .61], "architectural");
   const mortar = material([.32, .30, .25], "architectural");
-  nodes.push(box("pool/plaster-floor", [0, .1, 0], [4, .1, 2], plaster));
+  // Put the plaster finish on the wet side of the structural slab. Coincident
+  // mortar, plaster and voxel faces fought for depth in the refracted image.
+  const finish = .012;
+  const floorTop = Math.round(.2 / cellSize_m) * cellSize_m + finish;
+  nodes.push(box("pool/plaster-floor", [0, floorTop / 2, 0], [4, floorTop / 2, 2], plaster));
   for (const side of [-1, 1]) {
     nodes.push(box(`pool/plaster-end/${side}`, [side * 6, .93, 0], [2, .93, 6], mortar),
       box(`pool/plaster-side/${side}`, [0, .93, side * 4], [4, .93, 2], mortar),
-      box(`pool/finish-end/${side}`, [side * 4.04, .935, 0], [.04, .735, 2], plaster),
-      box(`pool/finish-side/${side}`, [0, .935, side * 2.04], [4, .735, .04], plaster));
+      box(`pool/finish-end/${side}`, [side * (4 - finish / 2), .935, 0], [finish / 2, .735, 2], plaster),
+      box(`pool/finish-side/${side}`, [0, .935, side * (2 - finish / 2)], [4 - finish, .735, finish / 2], plaster));
   }
   // Shared honed stone field: eased edges, mineral pores, UV roughness and
   // source shading normals. Quarter-turns break up the sediment repetition.

@@ -72,6 +72,29 @@ test("pool party is discoverable with a smooth voxel board and real water settin
   }
 });
 
+test("pool plaster is visible ahead of its structural backing at both grid resolutions", () => {
+  for (const id of ["backyard-pool-party", "backyard-pool-party-fine"] as const) {
+    const scene = sceneDocument(getSceneDefinition(id));
+    const box = (name: string) => {
+      const node = scene.scenery?.nodes.find(node => node.id === name);
+      assert.ok(node?.kind === "box" && node.place?.position);
+      return { center: node.place.position, half: node.halfSize };
+    };
+    const floor = box("pool/plaster-floor");
+    const cell = scene.voxelDomain.finestCellSize_m;
+    const collisionFloor = Math.round(.2 / cell) * cell;
+    assert.ok(floor.center.y + floor.half.y > collisionFloor + .001);
+    for (const sign of [-1, 1]) {
+      for (const [part, axis] of [["end", "x"], ["side", "z"]] as const) {
+        const plaster = box(`pool/finish-${part}/${sign}`);
+        const mortar = box(`pool/plaster-${part}/${sign}`);
+        const inside = sign * plaster.center[axis] - plaster.half[axis];
+        assert.ok(inside < sign * mortar.center[axis] - mortar.half[axis] - .001);
+      }
+    }
+  }
+});
+
 test("GPU ball rolls from rest on the voxelized board and reaches the pool", { skip: !process.env.WEBGPU_NODE_MODULE }, async () => {
   await withUniformDevice("pool party voxel board", async device => {
     const scene = createBackyardPoolPartyScene();

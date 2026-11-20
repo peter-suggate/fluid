@@ -5,7 +5,7 @@ import { GPU_RIGID_BODY_CAPACITY } from "./rigid-capacity";
 import { WATER_INTERFACE_DEPTH, waterInterfaceDepthWGSL } from "./water-interface-depth";
 import { HdrLensBloom, DEFAULT_LENS_BLOOM_OPTIONS, resolveLensBloomOptions, type LensBloomOptions } from "./webgpu-lens-bloom";
 import { waterTransmissionWGSL } from "./water-transmission.wgsl";
-import { waterInterfaceSamplingWGSL } from "./water-interface-sampling.wgsl";
+import { waterInterfaceSamplingWGSL, waterRayExitWGSL } from "./water-interface-sampling.wgsl";
 import { waterSolidContactWGSL } from "./water-solid-contact";
 import { waterDielectricInterfaceWGSL } from "./water-dielectric-interface";
 import { SKY_CAPTURE_BYTES, SKY_CAPTURE_FIELD, skyCaptureWords } from "./photographic-sky";
@@ -824,7 +824,9 @@ fn crossing(ia:u32, ib:u32, a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3
     if(contact){solidValues=cornerSolid;}
   }else{ends=vec2f(surfaceHaloClearance(vec3i(a)),surfaceHaloClearance(vec3i(b)));}
   let lattice = surfaceContactLattice(a, b, t, cubeScale, ends);
-  if(contact){return SurfaceVertex(vec4f(latticeWorld(lattice,dims),1),vec4f(surfaceNormal(lattice,cubeBase,cubeScale,&solidValues,dims),0));}
+  // Position w is positive for the level set. Two identifies a boundary
+  // clipped by the solid field, independently of camera depth or illumination.
+  if(contact){return SurfaceVertex(vec4f(latticeWorld(lattice,dims),2),vec4f(surfaceNormal(lattice,cubeBase,cubeScale,&solidValues,dims),0));}
   return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0),
     vec4f(uniformPhiNormal(lattice,surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims)), 0.0));
 }
@@ -1598,11 +1600,12 @@ struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, cont
 struct SurfaceVertex { position:vec4f, normal:vec4f }
 override interfaceCoverageExpansionPixels:f32=0.0;
 override peelBehindFirstExit:f32=0.0;
+override encodeBackContact:bool=false;
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage,read> vertices: array<SurfaceVertex>;
 @group(1) @binding(0) var firstBackPosition:texture_2d<f32>;
 ${cameraApertureShaderLibrary("u")}
-struct Out { @builtin(position) clip:vec4f, @location(0) world:vec3f, @location(1) normal:vec3f, @location(2) film:f32 }
+struct Out { @builtin(position) clip:vec4f, @location(0) world:vec3f, @location(1) normal:vec3f, @location(2) film:f32, @location(3) solid:f32 }
 fn project(world:vec3f)->vec4f {
   let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
   let right=cameraRightDirection(forward); let up=normalize(cross(right,forward));
@@ -1613,7 +1616,7 @@ fn project(world:vec3f)->vec4f {
   return vec4f(ndc*depth,WATER_INTERFACE_NEAR_M,depth);
 }
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
-  let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);o.film=v.normal.w;
+  let v=vertices[index]; var o:Out; o.clip=project(v.position.xyz);o.world=v.position.xyz;o.normal=normalize(v.normal.xyz);o.film=v.normal.w;o.solid=clamp(v.position.w-1.0,0.0,1.0);
   // The fine particle skin (w <= 0) is pushed back -w metres along its view
   // ray: it covers the same pixels, and the level set wins wherever the skin
   // stands less than that in front of it. The stored position stays true.
@@ -1664,10 +1667,9 @@ struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
     let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
     if(candidateDepth<=firstExitDepth+max(.0005,.04*cellSize)){discard;}
   }
-  // Store the continuous wall-film thickness in normal alpha. RGB is
-  // premultiplied by the same value so filtered coverage recovery still
-  // returns a unit normal. Position alpha remains ordinary coverage.
-  let encodedFilm=1.0+max(input.film,0.0);
+  // Front alpha carries wall film, back alpha carries solid contact. Keep
+  // normal RGB premultiplied so coverage recovery preserves its direction.
+  let encodedFilm=1.0+select(max(input.film,0.0),input.solid,encodeBackContact);
   var o:SurfaceOut;o.position=vec4f(input.world,1.0);o.normal=vec4f(optical*encodedFilm,encodedFilm);return o;
 }
 `;
@@ -1946,6 +1948,7 @@ fn safeInterfaceSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{
   if(sampled.a<=1e-4){return vec4f(0.0);}
   return vec4f(sampled.rgb/sampled.a,sampled.a);
 }
+${waterRayExitWGSL}
 fn recoveredWallFilm(positionSample:vec4f,normalSample:vec4f)->f32{
   return max(0.0,normalSample.a/max(positionSample.a,1e-4)-1.0);
 }
@@ -2075,7 +2078,7 @@ fn causticModulation(textureUV:vec2f)->vec3f{
 // only bounded proximity or a verified refracted-ray hit proves contact.
 fn backSolidNormalGap(back:vec3f,exitN:vec3f,exitUV:vec2f)->f32{
   if(!waterInterfaceUVValid(exitUV)){return 1e20;}
-  let dry=resolvedDrySceneDepth(safeSample(sceneTexture,exitUV).a);if(dry>60000.0){return 1e20;}
+  let dry=waterReflectionDepth(exitUV);if(dry>60000.0){return 1e20;}
   let ray=back-u.cameraPosition.xyz;let backDistance=length(ray);
   return (dry-backDistance)*abs(dot(ray/max(backDistance,1e-6),exitN));
 }
@@ -2087,10 +2090,21 @@ fn backSolidNormalGap(back:vec3f,exitN:vec3f,exitUV:vec2f)->f32{
 // refused like a march that leaves the screen or never crosses.
 fn solidTerminatedHit(origin:vec3f,direction:vec3f,reach:f32)->vec4f{
   let ro=u.cameraPosition.xyz;let step=reach/8.0;var lo=0.0;var hi=-1.0;var overshoot=0.0;
-  for(var i=1;i<=8;i+=1){let t=step*f32(i);let p=origin+direction*t;let uv=project(p);if(any(uv<vec2f(0.0))||any(uv>vec2f(1.0))){break;}let behind=length(p-ro)-resolvedDrySceneDepth(safeSample(sceneTexture,uv).a);if(behind>=0.0){hi=t;overshoot=behind;break;}lo=t;}
+  for(var i=1;i<=8;i+=1){let t=step*f32(i);let p=origin+direction*t;let uv=project(p);if(any(uv<vec2f(0.0))||any(uv>vec2f(1.0))){break;}let behind=length(p-ro)-waterReflectionDepth(uv);if(behind>=0.0){hi=t;overshoot=behind;break;}lo=t;}
   if(hi<0.0){return vec4f(0.0);}
-  for(var i=0;i<4;i+=1){let mid=.5*(lo+hi);let p=origin+direction*mid;let behind=length(p-ro)-resolvedDrySceneDepth(safeSample(sceneTexture,project(p)).a);if(behind>=0.0){hi=mid;overshoot=behind;}else{lo=mid;}}
+  for(var i=0;i<4;i+=1){let mid=.5*(lo+hi);let p=origin+direction*mid;let behind=length(p-ro)-waterReflectionDepth(project(p));if(behind>=0.0){hi=mid;overshoot=behind;}else{lo=mid;}}
   return vec4f(project(origin+direction*hi),hi,select(0.0,1.0,overshoot<=step));
+}
+// A solid-clipped exit already has a world-space endpoint and optical path.
+// If a foreground surface hides that endpoint, keep the visible submerged
+// receiver as the colour fallback. Never replace its thickness with an
+// intersection against the silhouette of the coping.
+fn submergedReceiver(exit:WaterRayExit,entryUV:vec2f,cell:f32)->vec3f{
+  let mismatch=abs(waterReflectionDepth(exit.uv)-length(exit.point-u.cameraPosition.xyz));
+  let visible=1.0-smoothstep(.5*cell,1.5*cell,mismatch);
+  let fallback=safeSample(sceneTexture,entryUV).rgb*causticModulation(entryUV);
+  if(visible<=0.0){return fallback;}
+  return mix(fallback,safeSample(sceneTexture,exit.uv).rgb*causticModulation(exit.uv),visible);
 }
 // The first depth-tested pair describes only the nearest connected water
 // interval. A breaking sheet can leave another interval behind it, so the
@@ -2146,6 +2160,14 @@ fn reflectionForInterface(positions:texture_2d<f32>,normals:texture_2d<f32>,uv:v
   let uv=vec2f(input.uv.x,1.0-input.uv.y);
   return ReflectionOut(reflectionForInterface(frontPosition,frontNormal,uv),reflectionForInterface(rearFrontPosition,rearFrontNormal,uv));
 }
+fn refractedBackground(uv:vec2f,outgoing:vec3f)->vec3f{
+  let toEdge=min(uv,1.0-uv)*vec2f(textureDimensions(sceneTexture));
+  let coverage=smoothstep(0.0,2.0,min(toEdge.x,toEdge.y));
+  if(coverage<=0.0){return waterEnvironmentRadiance(outgoing);}
+  let dry=safeSample(sceneTexture,uv).rgb*causticModulation(uv);
+  if(coverage>=1.0){return dry;}
+  return mix(waterEnvironmentRadiance(outgoing),dry,coverage);
+}
 fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let rd=cameraRay(textureUV);
   let front=safePositionSample(rearFrontPosition,textureUV);if(front.a<.5){return dryColor;}
@@ -2155,26 +2177,28 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let frontNormalSample=safeInterfaceSample(rearFrontNormal,textureUV);let filmDensity=recoveredWallFilm(front,frontNormalSample);
   var n=normalize(frontNormalSample.xyz);if(dot(n,rd)>0.0){n=-n;}
   var inside=refract(rd,n,1.0/waterIndexOfRefraction());if(length(inside)<1e-5){inside=reflect(rd,n);}
-  var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
-  for(var iteration=0;iteration<3;iteration+=1){back=safePositionSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backNormalSample=safeInterfaceSample(rearBackNormal,exitUV);let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(backNormalSample.xyz);}
-  let refinedBack=safePositionSample(rearBackPosition,exitUV);let refinedBackNormal=safeInterfaceSample(rearBackNormal,exitUV);
+  let exit=waterRayExit(rearBackPosition,rearBackNormal,textureUV,front.xyz,inside,cellSize);
+  let exitUV=exit.uv;
   let worldAt=clamp(vec2i(textureUV*vec2f(textureDimensions(rearReflections))),vec2i(0),vec2i(textureDimensions(rearReflections))-1);
-  let worldTransmission=textureLoad(rearReflections,worldAt,1,0);let useWorldTransmission=refinedBack.a<.5&&worldTransmission.a>0.0;
-  if(refinedBack.a<.5){if(!useWorldTransmission){return dryColor;}back=vec4f(front.xyz+inside*worldTransmission.a,1);exitN=inside;}
-  else{back=refinedBack;exitN=normalize(refinedBackNormal.xyz);}
-  var thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
+  let worldTransmission=textureLoad(rearReflections,worldAt,1,0);
+  let useWorldTransmission=exit.distance<=0.0&&worldTransmission.a>0.0;
+  if(exit.distance<=0.0&&!useWorldTransmission){return dryColor;}
+  let back=vec4f(select(exit.point,front.xyz+inside*worldTransmission.a,useWorldTransmission),1);
+  var exitN=select(exit.normal,inside,useWorldTransmission);
+  var thickness=select(exit.distance,worldTransmission.a,useWorldTransmission);
   let thinBoundaryFilm=filmDensity>1e-4;
   var outgoing=inside;var transmitted=dryColor;
   // A basin contact ends the light at the refined solid (backSolidNormalGap).
   // Fail-safe when the march finds no surface: the unrefracted pixel, i.e.
   // dryColor, over its own dry depth, bounded by the march reach.
   let contactGap=backSolidNormalGap(back.xyz,exitN,exitUV);let contactReach=1.5*thickness+4.0*cellSize;var contactHit=vec4f(0.0);
-  if(contactGap<=1.25*cellSize){contactHit=solidTerminatedHit(front.xyz,inside,contactReach);}
-  if(verifiedWaterSolidContact(contactGap,cellSize,contactHit.w>.5)){if(contactHit.w>.5){thickness=contactHit.z;transmitted=safeSample(sceneTexture,contactHit.xy).rgb*causticModulation(contactHit.xy);}else{thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,contactReach);}}
+  if(exit.solid<.5&&contactGap<=1.25*cellSize){contactHit=solidTerminatedHit(front.xyz,inside,contactReach);}
+  if(exit.solid>=.5){transmitted=submergedReceiver(exit,textureUV,cellSize);}
+  else if(verifiedWaterSolidContact(contactGap,cellSize,contactHit.w>.5)){if(contactHit.w>.5){thickness=contactHit.z;transmitted=safeSample(sceneTexture,contactHit.xy).rgb*causticModulation(contactHit.xy);}else{thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,contactReach);}}
   else{if(dot(exitN,inside)<0.0){exitN=-exitN;}
   let internalReflection=reflect(inside,-exitN);let exitReflectance=dielectricInterfaceReflectance(dot(inside,exitN),waterIndexOfRefraction());
   outgoing=refract(inside,-exitN,waterIndexOfRefraction());if(length(outgoing)<1e-5){outgoing=internalReflection;}
-  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
+  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));transmitted=refractedBackground(backgroundUV,outgoing);
   // Internal reflected radiance uses the distant environment approximation.
   // Partition at this exit, then absorb the path already travelled through
   // water. A binary TIR tint after entrance Fresnel broke both continuity and
@@ -2240,17 +2264,23 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{if(linearHdrOutput>.5){return vec4f(colo
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(scene.rgb,ndc);}}
   if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(scene.rgb,ndc);}
   if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/waterIndexOfRefraction();var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
-  var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
-  for(var iteration=0;iteration<3;iteration+=1){back=safePositionSample(backPosition,exitUV);if(back.a<.5){break;}let backNormalSample=safeInterfaceSample(backNormal,exitUV);let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(backNormalSample.xyz);}
-  let refinedBack=safePositionSample(backPosition,exitUV);let refinedBackNormal=safeInterfaceSample(backNormal,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(refinedBackNormal.xyz);}else{back=vec4f(0);}
-  var exitPoint=back.xyz;var thickness=length(exitPoint-front.xyz);var meshExitValid=back.a>=.5&&thickness>=1e-4;
+  let exit=waterRayExit(backPosition,backNormal,textureUV,front.xyz,inside,cellSize);
+  let exitUV=exit.uv;let back=vec4f(exit.point,1);
+  var exitPoint=exit.point;var exitN=exit.normal;var thickness=exit.distance;
+  let meshExitValid=exit.distance>0.0;
   let thinBoundaryFilm=filmDensity>1e-4;
   let innerStep=max(.0005,cellSize*.08);let innerOrigin=front.xyz+inside*innerStep;let rigidExit=nearestRigid(innerOrigin,inside);var opaqueSolidExit=false;
   if(rigidExit.t<1e19&&(!meshExitValid||rigidExit.t+innerStep<thickness)){opaqueSolidExit=true;exitPoint=innerOrigin+inside*rigidExit.t;thickness=length(exitPoint-front.xyz);}
   else if(!meshExitValid){
-    // No analytic container fallback: the dry SVO owns solid depth. A missing
-    // water back face is conservatively limited to one fluid cell.
-    thickness=max(.002,cellSize);exitPoint=innerOrigin+inside*thickness;exitN=-inside;
+    // The refracted ray can pass behind the near coping. Use only the
+    // visible camera interval for attenuation; no off-ray exit normal or
+    // edge-clamped background colour can be inferred from this observation.
+    let cameraBack=textureLoad(backPosition,pixelCoord,0);
+    let visibleDry=resolvedDrySceneDepth(scene.a);
+    var endDepth=frontDepth+cellSize;
+    if(cameraBack.a>=.5){endDepth=length(cameraBack.xyz/cameraBack.a-ro);}
+    thickness=max(.002,min(endDepth,visibleDry)-frontDepth);
+    exitPoint=front.xyz+inside*thickness;exitN=inside;
   }
   var outgoing=inside;var internalReflection=inside;var exitReflectance=0.0;var backgroundUV=project(exitPoint);var transmittedScene=vec3f(0.0);
   // A liquid/basin back face (backSolidNormalGap) is not refracted out: the
@@ -2260,19 +2290,23 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{if(linearHdrOutput>.5){return vec4f(colo
   // screen or never crosses: the unrefracted pixel's colour over its own dry
   // depth, bounded by the march reach.
   var contactGap=1e20;let contactReach=1.5*thickness+4.0*cellSize;var contactHit=vec4f(0.0);
-  if(!opaqueSolidExit&&meshExitValid){contactGap=backSolidNormalGap(back.xyz,exitN,exitUV);if(contactGap<=1.25*cellSize){contactHit=solidTerminatedHit(front.xyz,inside,contactReach);}}
-  if(verifiedWaterSolidContact(contactGap,cellSize,contactHit.w>.5)){
+  if(!opaqueSolidExit&&meshExitValid&&exit.solid<.5){contactGap=backSolidNormalGap(back.xyz,exitN,exitUV);if(contactGap<=1.25*cellSize){contactHit=solidTerminatedHit(front.xyz,inside,contactReach);}}
+  if(!opaqueSolidExit&&exit.solid>=.5){
+    transmittedScene=submergedReceiver(exit,textureUV,cellSize);
+  }else if(verifiedWaterSolidContact(contactGap,cellSize,contactHit.w>.5)){
     if(contactHit.w>.5){backgroundUV=contactHit.xy;thickness=contactHit.z;}else{backgroundUV=textureUV;thickness=clamp(resolvedDrySceneDepth(scene.a)-frontDepth,1e-4,contactReach);}
     transmittedScene=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
+  }else if(!opaqueSolidExit&&!meshExitValid){
+    transmittedScene=scene.rgb*causticModulation(textureUV);
   }else{
-  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}
+  if(!opaqueSolidExit&&meshExitValid){if(dot(exitN,inside)<0.0){exitN=-exitN;}
   internalReflection=reflect(inside,-exitN);exitReflectance=dielectricInterfaceReflectance(dot(inside,exitN),waterIndexOfRefraction());
   outgoing=refract(inside,-exitN,waterIndexOfRefraction());if(length(outgoing)<1e-5){outgoing=internalReflection;}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
   // The modulation goes on the *dry* term rather than on what comes back:
   // where a rear water interval exists it shades its own receiver and applies
   // its own caustic, and multiplying that result again would count the floor's
   // concentration twice through two layers of water.
-  transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));
+  transmittedScene=compositeRearWater(backgroundUV,refractedBackground(backgroundUV,outgoing));
   transmittedScene=mix(transmittedScene,waterEnvironmentRadiance(internalReflection),exitReflectance);}
   // Absorption is the scene's, not the renderer's: the same clean-water rate
   // that turns a metre of water blue leaves a hand's breadth colourless.
@@ -2781,7 +2815,7 @@ export class RasterWaterPipeline {
     const causticPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.causticLayout] });
     const surfaceDescriptor = (label: string, cullMode: GPUCullMode, coverageExpansionPixels = 0, peel = false): GPURenderPipelineDescriptor => ({
       label, layout: surfacePipelineLayout, vertex: { module: surface, entryPoint: "surfaceVertex", constants: { interfaceCoverageExpansionPixels: coverageExpansionPixels } },
-      fragment: { module: surface, entryPoint: "surfaceFragment", constants: { peelBehindFirstExit: peel ? 1 : 0 }, targets: [{ format: "rgba32float" }, { format: "rgba16float" }] },
+      fragment: { module: surface, entryPoint: "surfaceFragment", constants: { peelBehindFirstExit: peel ? 1 : 0, encodeBackContact: cullMode === WATER_INTERFACE_CULL_MODES.back ? 1 : 0 }, targets: [{ format: "rgba32float" }, { format: "rgba16float" }] },
       primitive: { topology: "triangle-list", frontFace: "ccw", cullMode },
       depthStencil: { format: WATER_INTERFACE_DEPTH.format, depthWriteEnabled: true, depthCompare: WATER_INTERFACE_DEPTH.compare }
     });
@@ -2796,7 +2830,7 @@ export class RasterWaterPipeline {
     const reflectionPipelineLayout=this.device.createPipelineLayout({bindGroupLayouts:[this.reflectionLayout]});
     this.transmissionRequestLayout=this.device.createBindGroupLayout({label:"Water transmission request inputs",entries:[
       {binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
-      ...[1,3,11].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float" as const}})),
+      ...[1,3,5,11,13].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"float" as const}})),
       ...[2,4,10,12].map(binding=>({binding,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:"unfilterable-float" as const}})),
       {binding:6,visibility:GPUShaderStage.FRAGMENT,sampler:{type:"filtering"}},
       {binding:15,visibility:GPUShaderStage.FRAGMENT,buffer:{type:"uniform"}},
@@ -3752,8 +3786,8 @@ export class RasterWaterPipeline {
           let requests=this.transmissionRequestBindGroups.get(sceneView);
           if(!requests){requests=this.device.createBindGroup({layout:this.transmissionRequestLayout,entries:[
             {binding:0,resource:{buffer:this.uniformBuffer}},{binding:1,resource:sceneView},
-            {binding:2,resource:this.frontPosition.createView()},{binding:3,resource:this.frontNormal.createView()},{binding:4,resource:this.backPosition.createView()},
-            {binding:10,resource:this.rearFrontPosition.createView()},{binding:11,resource:this.rearFrontNormal.createView()},{binding:12,resource:this.rearBackPosition.createView()},
+            {binding:2,resource:this.frontPosition.createView()},{binding:3,resource:this.frontNormal.createView()},{binding:4,resource:this.backPosition.createView()},{binding:5,resource:this.backNormal.createView()},
+            {binding:10,resource:this.rearFrontPosition.createView()},{binding:11,resource:this.rearFrontNormal.createView()},{binding:12,resource:this.rearBackPosition.createView()},{binding:13,resource:this.rearBackNormal.createView()},
             {binding:6,resource:this.sampler!},{binding:15,resource:{buffer:this.waterSceneOpticsBuffer!}},
           ]});this.transmissionRequestBindGroups.set(sceneView,requests);}
           const layer=(texture:GPUTexture)=>texture.createView({dimension:"2d",baseArrayLayer:1,arrayLayerCount:1});
