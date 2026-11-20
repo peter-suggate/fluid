@@ -24,7 +24,7 @@ A faster but divergent solver is not done; nor is a matching but slower one.
 |---|---|
 | P0 harness (`tools/pour-bench.ts`) and brick reference runs (two, for the spread) | done 2026-11-20: `artifacts/pour-rewrite/runs/brick-ref-{a,b}` (625 steps, every 25) |
 | P1 correct uniform-h solver (`lib/methods/pour/`, method `pour-m1max`), gates G1–G7 | in progress 2026-11-21: run `pour-p1-seed` passes 17 of 19. Fails G1 @100 (drift −6.25% against a limit of 6.15) and G2 pool @325 (66.2 against 69.6, tolerance 2.3; the bore is 0.7% low and its surface flatter just after the inflow stops). Ported since `pour-p1-vc2`: the mass rules (retire, merge, split); the buried vertex hold and smoothing guard (wall interiors are air); the seed's first move taking the grid's velocity (nbSeedFirst: plug seeds had kept the stale zero, the stream's first liquid fell off the nozzle's lip, landed short of the far wall and ran up it, and the film spilt over the rim: outside 17165 at 625, now 3163); the extension closing every face not between two open cells. MAX_CYCLES 16. Median 21.2 ms |
-| P2 at most 16.7 ms median, gates held | median met 2026-11-21; worst window open. Run `pour-p2e` (HEAD 6f246aec, check slot, fenced): median 15.81 ms, p95 19.04, worst 25-step window 19.19 (301–325; steps 126–350 all sit above 16.7). Gates unchanged at 17 of 19 (G1 @100 drift, G2 pool @325, as in P1). Landed: P2a weighted coarse corrections (10 cycles a step to 6); P2b one red-black sweep a fine smoothing pass; P2c the brick engine's support rule in P2G and G2P; P2d the active set as the liquid's reach (rule B, dead-trace filter, splat and operator confined to active bricks; median 18.1 to 16.2); P2e velocityTrace's face-centre sample from 9 loads (bit-identical, -0.17 ms); P2f coarseSolve as 512 threads with two level-4 cells each (0.865 to 0.22 ms a step: the 1024-thread layout cost about 12 µs a red-black sweep). See §5.1 for what was measured and ruled out |
+| P2 at most 16.7 ms median, gates held | **met 2026-11-21** (HEAD 33569b6a). Timing slot, fenced (`pour-p2j-timing`): median 14.09 ms, p95 15.99, worst 25-step window 16.11 (301–325), worst single step 16.87; pipelined (`pour-p2j-timing-pipe`) 12.65 ms a step. Check slot (`pour-p2j`): median 13.91, worst window 16.18; gates 18 of 19 (G2 pool @325 fails as in P1; G1 @100 drift sits on its tolerance edge, passing or failing by run-to-run noise). Landed: P2a weighted coarse corrections (10 cycles a step to 6); P2b one red-black sweep a fine smoothing pass; P2c the brick engine's support rule in P2G and G2P; P2d the active set as the liquid's reach (median 18.1 to 16.2); P2e velocityTrace's face-centre sample from 9 loads; P2f coarseSolve as 512 threads (0.865 to 0.22 ms); P2g the velocity samplers gather from U textures (velocityTrace 2.26 to 0.80, advectPhi 1.51 to 0.60, G2P 1.08 to 0.73); P2h the step in five submits (Dawn translates at submit: worst window 18.2 to 16.6); P2i the extension in one 12 KB tile, skipping bricks it cannot change (1.29 to 0.88); P2j plain reads for single-owner accumulators, fill's whole-cell answers (velocity 1.19 to 1.04). See §5.1 |
 | P3 per-stage comparison table, brick against pour-m1max on the pour (feeds the brick tuning) | open |
 
 ## 1. The scene (lib/core/nbflip-paper-scenes.ts, createNbflipPour)
@@ -192,6 +192,16 @@ memory.
   - folding pcgCheck into pcgUpdate (WGSL has no cross-workgroup acquire/release).
 - **Dawn validation** of the indirect dispatches costs 0.4–1 ms a step (`FLUID_WEBGPU_DAWN_FEATURES=skip_validation`
   in `tools/pour-bench.ts`). The gates and timing run validated, as a browser does.
+
+- **After P2g–P2j, ruled out or worse:** P2G at 512 threads (1.03 to 1.22 ms: more shared-atomic contention);
+  P2G one component at a time in 8.8 KB (1.06: atomic-bound, not occupancy-bound); a 10-cycle cap on the
+  recorded PCG tail (no change: idle cycles' empty dispatches are cheap); nine submits (17.0 against 16.6 for
+  five); hardware-filtered U (r32float trilinear filtering is off by up to 5.4e-3 on values in [-1, 1]; the
+  gathers are exact).
+- **For the brick tuning (P3), in order of measured gain here:** gathers from per-component U textures for
+  every trilinear U sample (2.7 ms a step); several submits a step instead of one (1.4 ms fenced); the coarse
+  solve's thread layout (0.65 ms); extension tiles at 12 KB and skipping bricks with nothing to extend (0.4 ms);
+  RMW-free reads of single-owner accumulators (0.13 ms); whole-cell fill answers (0.06 ms).
 
 ## 6. Process
 
